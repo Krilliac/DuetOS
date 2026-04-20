@@ -50,4 +50,10 @@ u32 TaskbarTabAt(u32 x, u32 y);
 /// click on the taskbar at all?" branch.
 bool TaskbarContains(u32 x, u32 y);
 
+/// Bounds of the START anchor rectangle. Callers use this both
+/// for hit-testing (click on START) and for anchoring a popup
+/// (start menu opens from START's upper edge). Writes to any
+/// non-null out pointer; all four may be null to skip.
+void TaskbarStartBounds(u32* x, u32* y, u32* w, u32* h);
+
 } // namespace customos::drivers::video

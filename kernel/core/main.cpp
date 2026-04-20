@@ -18,6 +18,7 @@
 #include "../drivers/video/console.h"
 #include "../drivers/video/cursor.h"
 #include "../drivers/video/framebuffer.h"
+#include "../drivers/video/menu.h"
 #include "../drivers/video/taskbar.h"
 #include "../drivers/video/widget.h"
 #include "../fs/ramfs.h"
@@ -195,6 +196,17 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
         const customos::u32 tb_y = (fb_info.height > tb_h) ? fb_info.height - tb_h : 0;
         customos::drivers::video::TaskbarInit(tb_y, tb_h, 0x00202838, 0x00FFFFFF, 0x00406090);
     }
+
+    // Start menu items. action_id is a caller-owned enumeration
+    // the mouse reader switches on — zero is reserved for
+    // "no item hit," so first id starts at 1.
+    static const customos::drivers::video::MenuItem start_items[] = {
+        {"ABOUT CUSTOMOS", 1},
+        {"CYCLE WINDOWS", 2},
+        {"LIST WINDOWS", 3},
+        {"PING CONSOLE", 4},
+    };
+    customos::drivers::video::MenuInit(start_items, 4);
 
     customos::drivers::video::ConsoleInit(16, 400, 0x0080F088, 0x00181028);
     customos::drivers::video::ConsoleWriteln("CUSTOMOS BOOT LOG");
@@ -482,13 +494,85 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
             const bool release_edge = !left_down && prev_left;
             prev_left = left_down;
 
-            // Priority for press edges:
-            //   0. Taskbar tab → raise the tab's window even if
-            //      it's buried behind others.
-            //   1. Close-box on topmost window → close it.
-            //   2. Title bar → raise + begin drag.
-            //   3. Any other part of the window → raise only.
-            if (press_edge && !drag.active &&
+            // Priority for press edges (highest first):
+            //   0a. Menu open + click on item → fire action, close.
+            //   0b. Menu open + click outside → close.
+            //   1.  Click on START → open/close menu.
+            //   2.  Taskbar tab → raise tab's window.
+            //   3.  Close-box on topmost window → close it.
+            //   4.  Title bar → raise + begin drag.
+            //   5.  Any other part of a window → raise only.
+            bool menu_handled = false;
+            if (press_edge && customos::drivers::video::MenuIsOpen())
+            {
+                const customos::u32 action = customos::drivers::video::MenuItemAt(cx, cy);
+                if (action != 0)
+                {
+                    // Dispatch action. Pure demo actions — wire
+                    // into real functionality as each feature
+                    // becomes available.
+                    switch (action)
+                    {
+                    case 1: // ABOUT CUSTOMOS
+                        customos::drivers::video::ConsoleWriteln("");
+                        customos::drivers::video::ConsoleWriteln(
+                            "-> CUSTOMOS v0 — WINDOWED DESKTOP SHELL");
+                        customos::drivers::video::ConsoleWriteln(
+                            "   KEYBOARD + MOUSE + FRAMEBUFFER ALL LIVE");
+                        break;
+                    case 2: // CYCLE WINDOWS
+                        customos::drivers::video::WindowCycleActive();
+                        customos::drivers::video::ConsoleWriteln("-> CYCLED ACTIVE WINDOW");
+                        break;
+                    case 3: // LIST WINDOWS
+                        customos::drivers::video::ConsoleWriteln("-> REGISTERED WINDOWS:");
+                        for (customos::u32 h = 0;
+                             h < customos::drivers::video::WindowRegistryCount(); ++h)
+                        {
+                            if (customos::drivers::video::WindowIsAlive(h))
+                            {
+                                const char* title = customos::drivers::video::WindowTitle(h);
+                                customos::drivers::video::ConsoleWrite("   ");
+                                customos::drivers::video::ConsoleWriteln(
+                                    (title != nullptr) ? title : "(UNNAMED)");
+                            }
+                        }
+                        break;
+                    case 4: // PING CONSOLE
+                        customos::drivers::video::ConsoleWriteln("-> PONG");
+                        break;
+                    }
+                    SerialWrite("[ui] menu fire action=");
+                    SerialWriteHex(action);
+                    SerialWrite("\n");
+                }
+                customos::drivers::video::MenuClose();
+                menu_handled = true;
+            }
+
+            // START button press opens (or closes) the menu.
+            if (press_edge && !menu_handled && !drag.active)
+            {
+                customos::u32 sx = 0, sy = 0, sw = 0, sh = 0;
+                customos::drivers::video::TaskbarStartBounds(&sx, &sy, &sw, &sh);
+                if (cx >= sx && cx < sx + sw && cy >= sy && cy < sy + sh)
+                {
+                    if (customos::drivers::video::MenuIsOpen())
+                    {
+                        customos::drivers::video::MenuClose();
+                    }
+                    else
+                    {
+                        const customos::u32 mh = customos::drivers::video::MenuPanelHeight();
+                        const customos::u32 my = (sy > mh) ? sy - mh : 0;
+                        customos::drivers::video::MenuOpen(sx, my);
+                        SerialWrite("[ui] menu open\n");
+                    }
+                    menu_handled = true;
+                }
+            }
+
+            if (press_edge && !menu_handled && !drag.active &&
                 customos::drivers::video::TaskbarContains(cx, cy))
             {
                 const customos::u32 tab_hit = customos::drivers::video::TaskbarTabAt(cx, cy);
@@ -502,7 +586,16 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                     customos::drivers::video::DesktopCompose(kDesktopTealLocal,
                                                              "WELCOME TO CUSTOMOS   BOOT OK");
                     customos::drivers::video::CursorShow();
+                    menu_handled = true; // taskbar ate the click
                 }
+            }
+
+            if (press_edge && menu_handled)
+            {
+                customos::drivers::video::CursorHide();
+                customos::drivers::video::DesktopCompose(kDesktopTealLocal,
+                                                         "WELCOME TO CUSTOMOS   BOOT OK");
+                customos::drivers::video::CursorShow();
             }
             else if (press_edge && !drag.active)
             {

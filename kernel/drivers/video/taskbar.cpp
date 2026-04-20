@@ -102,8 +102,8 @@ void TaskbarRedraw()
 
     const u32 text_y = TextRowY();
 
-    // "START"-style anchor on the left. No click action yet — it's
-    // a visual cue that this is a taskbar, not just a coloured band.
+    // "START" anchor on the left. Clicking it opens the start
+    // menu via the mouse reader's TaskbarStartBounds hit-test.
     constexpr u32 start_w = 88;
     FramebufferFillRect(4, g_y + 4, start_w, g_h - 8, g_accent);
     FramebufferDrawRect(4, g_y + 4, start_w, g_h - 8, 0x00101828, 1);
@@ -216,6 +216,26 @@ bool TaskbarContains(u32 x, u32 y)
     }
     (void)x;
     return y >= g_y && y < g_y + g_h;
+}
+
+void TaskbarStartBounds(u32* x_out, u32* y_out, u32* w_out, u32* h_out)
+{
+    // Keep these in lock-step with TaskbarRedraw's START block:
+    // an update there must update these constants too. Small
+    // static layout, so a centralised constant would be over-
+    // engineering at v0 scale.
+    constexpr u32 start_x = 4;
+    constexpr u32 start_w = 88;
+    const u32 start_y = g_y + 4;
+    const u32 start_h = (g_h > 8) ? g_h - 8 : g_h;
+    if (x_out)
+        *x_out = start_x;
+    if (y_out)
+        *y_out = start_y;
+    if (w_out)
+        *w_out = start_w;
+    if (h_out)
+        *h_out = start_h;
 }
 
 } // namespace customos::drivers::video

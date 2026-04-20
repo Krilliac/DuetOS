@@ -5,6 +5,7 @@
 #include "console.h"
 #include "cursor.h"
 #include "framebuffer.h"
+#include "menu.h"
 #include "taskbar.h"
 
 namespace customos::drivers::video
@@ -519,14 +520,16 @@ void DesktopCompose(u32 desktop_rgb, const char* banner)
             PaintButton(g_widgets[i]);
         }
     }
-    // Taskbar is painted last so it always sits on top — matches
-    // every desktop OS. The banner, if supplied, renders on the
-    // desktop only in regions the taskbar doesn't cover.
+    // Taskbar is painted next-to-last so it always sits on top
+    // of windows + widgets. The menu (if open) goes last so it
+    // covers the taskbar's START button when anchored there.
+    // Banner renders on the desktop behind all of this.
     if (banner != nullptr)
     {
         FramebufferDrawString(16, 8, banner, 0x00FFFFFF, desktop_rgb);
     }
     TaskbarRedraw();
+    MenuRedraw();
 }
 
 u32 WidgetRouteMouse(u32 cursor_x, u32 cursor_y, u8 button_mask)
