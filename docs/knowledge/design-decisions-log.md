@@ -607,6 +607,123 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 055 — Mouse cursor overlay on the framebuffer
+
+- **Scope:** `kernel/drivers/video/cursor.{h,cpp}` — new module:
+  `CursorInit(desktop_rgb)` paints background + draws initial
+  sprite at screen centre; `CursorMove(dx, dy)` erases old rect,
+  clamps new position, redraws; `CursorPosition` accessor for
+  future hit-testing. `kernel/core/main.cpp` — mouse reader thread
+  now calls `CursorMove` on every packet.
+- **Decision:** Render the cursor as a 12x20 diagonal-right-edge
+  rectangle (arrow-ish without a bitmap mask), erase-then-redraw
+  on every move, no per-pixel save/restore. v0's desktop is a
+  solid dark-teal fill, so "restore background" is just
+  "overpaint with the desktop colour" — a mask / alpha / dirty-
+  rect path isn't worth the complexity until a compositor wants
+  to overlap real windows under the cursor.
+- **Why:** First visible interactive UI element. Ties together
+  three prior slices (Multiboot2 FB parse, FB driver, PS/2 mouse
+  IRQ 12) into one end-to-end chain you can SEE: physical mouse
+  motion → IOAPIC → 8042 aux → packet decode → task queue →
+  cursor move → pixel store. Previously every link was serial-
+  log verification only; this closes the loop visually.
+- **Rules out / defers:** Shaped-mask arrow sprite (needs per-
+  pixel save/restore — premature without a compositor). Hardware
+  cursor plane (Intel / AMD / NVIDIA cursor MMIO paths; land
+  with each vendor's GPU driver). Per-display cursor (multi-
+  monitor, far future). Cursor hide-on-inactive (no focus model
+  yet). Double-click timing (needs a timer-wheel). Click-drag
+  selection (needs widgets to drag-select).
+- **Revisit when:** First compositor draws overlapping windows
+  (forces pixel save/restore or a hardware cursor). Multi-display
+  lands. Widget toolkit wants an API for cursor shape changes
+  (I-beam, resize, hourglass).
+- **Related tracks:** Track 8 (Graphics), Track 9 (Windowing —
+  cursor is the root primitive of every pointer event).
+
+---
+
+## 054 — PS/2 mouse v0 (IRQ 12, 3-byte standard protocol)
+
+- **Scope:** `kernel/drivers/input/ps2mouse.{h,cpp}` — new driver.
+  `kernel/drivers/input/ps2kbd.cpp` — IRQ handler grows an aux-bit
+  filter so mouse bytes don't get misread as scan codes.
+- **Decision:** Second end-to-end IRQ-driven input device on the
+  8042 aux channel. Re-enables the aux port the keyboard init
+  disabled, runs port-2 self-test, sends the mouse `SetDefaults`
+  (0xF6) + `EnableReporting` (0xF4), routes ISA IRQ 12 via the
+  IOAPIC. Packet assembly happens in the IRQ handler; task-side
+  reader consumes pre-decoded `MousePacket`s with `dx`, `dy`
+  (screen-space: +y = down), and button bitmask. Sync-byte
+  check on byte 0 (bit 3 = always 1) catches and recovers from
+  mid-stream desync. Overflow bits saturate to ±255 rather than
+  dropping the whole packet — button-state updates matter more
+  than one-frame movement accuracy.
+- **Why:** Pointer input is the prerequisite for any GUI. Landing
+  it now (before a compositor) gives the mouse cursor overlay
+  and any future widget hit-test a working event source from
+  day one. Soft-failing on machines without a PS/2 aux line
+  (most laptops) keeps boot clean there — USB HID will eventually
+  be primary on real hardware.
+- **Rules out / defers:** Wheel / 5-button IntelliMouse extension
+  (needs sample-rate handshake + 4-byte packets). Absolute-
+  coordinate tablets (USB HID path). Sample-rate override
+  (accepting firmware default, typically 100 Hz). Coalescing
+  consecutive small-delta packets (compositor can do it).
+- **Revisit when:** USB HID stack lands (primary on real hardware
+  — PS/2 becomes legacy fallback). First compositor needs
+  absolute coordinates or high-frequency sampling. Wheel-scroll
+  support becomes necessary.
+- **Related tracks:** Track 6 (Drivers — input), Track 9
+  (Windowing — pointer event source).
+
+---
+
+## 053 — Linear framebuffer v0 (Multiboot2 tag 8 → MapMmio → pixels)
+
+- **Scope:** `kernel/arch/x86_64/boot.S` — Multiboot2 header grows
+  framebuffer request tag (type 5, optional). `kernel/mm/multiboot2.h`
+  — adds `kMultibootTagFramebuffer = 8` + `MultibootFramebufferTag`
+  struct + framebuffer-type constants.
+  `kernel/drivers/video/framebuffer.{h,cpp}` — new driver:
+  `FramebufferInit`, `FramebufferClear`, `FramebufferPutPixel`,
+  `FramebufferFillRect`, `FramebufferSelfTest`.
+- **Decision:** First direct-to-pixel output path. Parses GRUB's
+  framebuffer tag, validates direct-RGB + 32-bpp + sane pitch,
+  MapMmios the surface into the kernel MMIO arena. Soft-fails
+  cleanly when the loader doesn't provide a tag or the mode is
+  unsupported — `Available()` stays false, boot continues on
+  serial. Self-test draws black background + four corner
+  swatches (R/G/B/W) + a framing rectangle so channel order
+  and full-surface coverage are visually confirmable in one
+  glance.
+- **Why:** Every GUI element (desktop, windows, cursor, fonts)
+  starts with pixels. Landing a clean FB abstraction now means
+  the compositor, splash screen, panic display, and kernel
+  console all build on one layer. Cache-disabled MMIO is the
+  right v0 posture — write-combining needs PAT programming we
+  don't have yet, and at 1024x768x32 @ 60 Hz the bandwidth is
+  well under any PCIe budget.
+- **Rules out / defers:** 24-bpp packed (different pixel-store
+  inner loop). 15/16-bpp (channel packing). Non-classic colour
+  masks (need the variable-length colour-info trailer). Back
+  buffer / double buffering (compositor owns that). Write-
+  combining via PAT. Dirty-rect tracking. Hardware cursor
+  planes. EFI GOP (UEFI direct boot path, future).
+- **Revisit when:** First real machine reports an unsupported
+  depth or non-standard colour masks. Compositor lands and
+  demands a back-buffer API. Performance profile shows MMIO
+  stores dominating the draw path (PAT + WC is the fix).
+  Intel / AMD / NVIDIA GPU drivers arrive (vendor-specific
+  modeset + accelerated blit replace this path for their
+  panels).
+- **Related tracks:** Track 8 (Graphics Foundation — first
+  slice), Track 2 (Platform — firmware handoff grows a new
+  class of info beyond ACPI).
+
+---
+
 ## 052 — Writable-bit pre-check in `CopyToUser`
 
 - **Scope:** `kernel/mm/paging.cpp` — `PagePresentAndUser` grows a
