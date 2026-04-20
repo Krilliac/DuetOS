@@ -356,6 +356,22 @@ void FreeFrame(PhysAddr frame)
         return; // Freeing a null pointer is a no-op, matches convention.
     }
     const u64 index = frame >> kPageSizeLog2;
+
+    // Double-free detection (Class A in runtime-recovery-strategy.md).
+    // Silently marking an already-free frame "free" would let the bit
+    // stay set for a real allocation that happened after the first
+    // free, corrupting the bitmap's view of reality. Halt loudly so
+    // the guilty caller is visible in the panic banner rather than
+    // manifesting later as a surprise double-allocation.
+    //
+    // Out-of-range indices already return "used" from BitmapIsUsed
+    // by default, so they bypass this check — reserved memory past
+    // the bitmap coverage is never actually freed.
+    if (index < g_bitmap_frames && !BitmapIsUsed(index))
+    {
+        core::PanicWithValue("mm/frame_allocator", "FreeFrame on already-free frame (double-free?)", frame);
+    }
+
     BitmapMarkFree(index);
     if (index < g_next_hint)
     {
@@ -414,7 +430,18 @@ void FreeContiguousFrames(PhysAddr base, u64 count)
     const u64 first = base >> kPageSizeLog2;
     for (u64 i = 0; i < count; ++i)
     {
-        BitmapMarkFree(first + i);
+        const u64 idx = first + i;
+        if (idx < g_bitmap_frames && !BitmapIsUsed(idx))
+        {
+            // Same double-free logic as FreeFrame. A run is treated
+            // as "in use" iff every frame in it is in use; freeing a
+            // run where any frame is already free means someone else
+            // released part of it already — bitmap state is no longer
+            // consistent with what the caller thought it owned.
+            core::PanicWithValue("mm/frame_allocator", "FreeContiguousFrames: frame already free in run",
+                                 idx << kPageSizeLog2);
+        }
+        BitmapMarkFree(idx);
     }
     if (first < g_next_hint)
     {

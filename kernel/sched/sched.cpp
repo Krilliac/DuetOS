@@ -36,6 +36,15 @@ using arch::SerialWriteHex;
 
 constexpr u64 kKernelStackBytes = 16 * 1024; // 16 KiB per task — plenty for v0
 
+// Canary planted at the lowest 8 bytes of every task's kernel stack.
+// Stack grows DOWN, so the canary sits at the EDGE of overflow: if
+// the task's deepest push ever reaches into [stack_base, stack_base+8)
+// the canary gets scribbled and the reaper notices on task exit. This
+// doesn't catch overflow the instant it happens (no #PF without guard
+// pages) but turns "mysterious heap corruption" into a named panic
+// with the task's identity attached.
+constexpr u64 kStackCanary = 0xC0DEB0B0CAFED00DULL;
+
 constinit Task* g_run_head = nullptr;   // next to run
 constinit Task* g_run_tail = nullptr;   // append here
 constinit Task* g_sleep_head = nullptr; // sorted by wake_tick (ascending)
@@ -182,6 +191,12 @@ Task* SchedCreate(TaskEntry entry, void* arg, const char* name)
     {
         PanicSched("KMalloc failed for kernel stack");
     }
+
+    // Plant the canary at the low edge of the stack BEFORE priming
+    // the entry frame at the top. No part of the stack primer reaches
+    // down this far, so writing the canary here is never redundant
+    // with the per-task context the trampoline reads.
+    *reinterpret_cast<u64*>(stack) = kStackCanary;
 
     t->id = g_next_task_id++;
     t->state = TaskState::Ready;
@@ -431,9 +446,18 @@ namespace
         arch::Sti();
 
         // Stack_base can be nullptr for the boot task (task 0); defensive
-        // null-check even though task 0 should never exit.
+        // null-check even though task 0 should never exit. Every other
+        // task got a canary planted at stack_base in SchedCreate —
+        // verify before freeing so stack overflow surfaces as a named
+        // panic here instead of as downstream heap-magic corruption
+        // later.
         if (dead->stack_base != nullptr)
         {
+            const u64 canary = *reinterpret_cast<const u64*>(dead->stack_base);
+            if (canary != kStackCanary)
+            {
+                core::PanicWithValue("sched/reaper", "stack canary corrupted (task overflow?)", canary);
+            }
             mm::KFree(dead->stack_base);
         }
         mm::KFree(dead);
