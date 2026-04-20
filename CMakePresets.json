@@ -1,0 +1,46 @@
+{
+    "version": 6,
+    "cmakeMinimumRequired": {
+        "major": 3,
+        "minor": 25,
+        "patch": 0
+    },
+    "configurePresets": [
+        {
+            "name": "x86_64-base",
+            "hidden": true,
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/${presetName}",
+            "toolchainFile": "${sourceDir}/cmake/toolchains/x86_64-kernel.cmake",
+            "cacheVariables": {
+                "CUSTOMOS_ARCH": "x86_64"
+            }
+        },
+        {
+            "name": "x86_64-debug",
+            "displayName": "x86_64 kernel + userland, debug",
+            "inherits": "x86_64-base",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug"
+            }
+        },
+        {
+            "name": "x86_64-release",
+            "displayName": "x86_64 kernel + userland, release",
+            "inherits": "x86_64-base",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "x86_64-debug",
+            "configurePreset": "x86_64-debug"
+        },
+        {
+            "name": "x86_64-release",
+            "configurePreset": "x86_64-release"
+        }
+    ]
+}
