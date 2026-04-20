@@ -129,6 +129,19 @@ struct WaitQueue
 /// must hold interrupts disabled across the enqueue → Schedule pair.
 void WaitQueueBlock(WaitQueue* wq);
 
+/// Block the current task on `wq` with a tick-based timeout. Returns
+/// when either (a) another task or IRQ handler calls
+/// WaitQueueWake{One,All}, or (b) `ticks` timer ticks have elapsed.
+/// Same interrupt contract as WaitQueueBlock. A `ticks == 0` value
+/// behaves like SchedYield — no actual block.
+///
+/// Return value: true if woken by an explicit wake, false if woken
+/// by the timer. Callers that can resynthesise the answer from their
+/// guarded condition can ignore it; callers that need to distinguish
+/// "I got the event I was waiting for" from "I gave up" (I/O retry
+/// paths, driver command-completion waits) use it to branch.
+bool WaitQueueBlockTimeout(WaitQueue* wq, u64 ticks);
+
 /// Wake the single longest-waiting task on `wq` (FIFO). No-op on empty
 /// queue. Callable from IRQ context; caller holds interrupts disabled.
 /// Returns the Task* that was woken, or nullptr if the queue was empty.

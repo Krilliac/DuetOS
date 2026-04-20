@@ -23,9 +23,33 @@ struct Task
     u64 rsp;        // saved stack pointer (0 while running)
     u8* stack_base; // lowest address of the kernel stack
     u64 stack_size;
-    u64 wake_tick; // valid only while state == Sleeping
+    // Deadline for Sleeping and timed-Blocked tasks — 0 for every
+    // other state, and reset to 0 by the wake path so a task that
+    // comes back Ready has a clean slate.
+    u64 wake_tick;
     const char* name;
-    Task* next; // runqueue link (intrusive)
+    // `next` threads the runqueue, a WaitQueue, or the zombie list —
+    // mutually exclusive; at most one of those is the task's home
+    // at any given moment.
+    Task* next;
+    // `sleep_next` is a SEPARATE intrusive link used only for the
+    // sleep queue. Kept out of `next` so a task can be parked on
+    // BOTH a wait queue (via `next`) and the sleep queue (via
+    // `sleep_next`) simultaneously — that's how
+    // WaitQueueBlockTimeout implements "wake me on event OR on
+    // timer, whichever comes first."
+    Task* sleep_next;
+    // Back-pointer to the WaitQueue a Blocked task is currently on
+    // (nullptr otherwise). Lets OnTimerTick unlink a timed-waiter
+    // from its wait queue when the timeout path wakes it first.
+    WaitQueue* waiting_on;
+    // Transient flag set by the timer path when a timed wait
+    // expires, cleared by the wait-queue path when an explicit
+    // wake pre-empts the timeout. Read by WaitQueueBlockTimeout
+    // the moment Schedule() resumes the waiter — the value after
+    // that is undefined, since the slot is reused on the next
+    // wait.
+    bool wake_by_timeout;
 };
 
 namespace
@@ -144,21 +168,78 @@ Task* RunqueuePop()
 
 void SleepqueueInsert(Task* t)
 {
-    t->next = nullptr;
+    t->sleep_next = nullptr;
     if (g_sleep_head == nullptr || t->wake_tick < g_sleep_head->wake_tick)
     {
-        t->next = g_sleep_head;
+        t->sleep_next = g_sleep_head;
         g_sleep_head = t;
         return;
     }
 
     Task* it = g_sleep_head;
-    while (it->next != nullptr && it->next->wake_tick <= t->wake_tick)
+    while (it->sleep_next != nullptr && it->sleep_next->wake_tick <= t->wake_tick)
+    {
+        it = it->sleep_next;
+    }
+    t->sleep_next = it->sleep_next;
+    it->sleep_next = t;
+}
+
+// Remove a task from the sleep queue. Used when an explicit wake
+// beats the timer path for a timed waiter. Linear walk — fine for
+// the sleep queue sizes we expect; becomes a hotspot only if
+// thousands of timed waits are outstanding at once.
+void SleepqueueRemove(Task* t)
+{
+    if (g_sleep_head == t)
+    {
+        g_sleep_head = t->sleep_next;
+        t->sleep_next = nullptr;
+        return;
+    }
+
+    Task* it = g_sleep_head;
+    while (it != nullptr && it->sleep_next != t)
+    {
+        it = it->sleep_next;
+    }
+    if (it != nullptr)
+    {
+        it->sleep_next = t->sleep_next;
+    }
+    t->sleep_next = nullptr;
+}
+
+// Remove a task from a specific wait queue. Used when a timeout
+// fires for a timed waiter and needs to detach from its wait
+// queue before going onto the runqueue.
+void WaitQueueUnlink(WaitQueue* wq, Task* t)
+{
+    if (wq->head == t)
+    {
+        wq->head = t->next;
+        if (wq->head == nullptr)
+        {
+            wq->tail = nullptr;
+        }
+        t->next = nullptr;
+        return;
+    }
+
+    Task* it = wq->head;
+    while (it != nullptr && it->next != t)
     {
         it = it->next;
     }
-    t->next = it->next;
-    it->next = t;
+    if (it != nullptr)
+    {
+        it->next = t->next;
+        if (wq->tail == t)
+        {
+            wq->tail = it;
+        }
+    }
+    t->next = nullptr;
 }
 
 // Wrap-safe tick deadline compare. Works as long as nobody sleeps for more
@@ -196,6 +277,9 @@ void SchedInit()
     boot_task->wake_tick = 0;
     boot_task->name = "kboot";
     boot_task->next = nullptr;
+    boot_task->sleep_next = nullptr;
+    boot_task->waiting_on = nullptr;
+    boot_task->wake_by_timeout = false;
 
     Current() = boot_task;
     g_tasks_created = 1;
@@ -234,6 +318,9 @@ Task* SchedCreate(TaskEntry entry, void* arg, const char* name)
     t->wake_tick = 0;
     t->name = name;
     t->next = nullptr;
+    t->sleep_next = nullptr;
+    t->waiting_on = nullptr;
+    t->wake_by_timeout = false;
 
     // Build the initial stack. ContextSwitch pops r15, r14, r13, r12,
     // rbp, rbx and then rets. So from bottom to top of the pre-planted
@@ -418,11 +505,29 @@ void OnTimerTick(u64 now_ticks)
         while (g_sleep_head != nullptr && TickReached(now_ticks, g_sleep_head->wake_tick))
         {
             Task* woken = g_sleep_head;
-            g_sleep_head = woken->next;
-            woken->next = nullptr;
-            woken->state = TaskState::Ready;
-            RunqueuePush(woken);
+            g_sleep_head = woken->sleep_next;
+            woken->sleep_next = nullptr;
             --g_tasks_sleeping;
+
+            // If the task was on a wait queue with a timeout, the
+            // timer won the race — detach from the wait queue and
+            // flag the wake as a timeout so WaitQueueBlockTimeout
+            // reports `false` to its caller. Plain Sleeping tasks
+            // have waiting_on == nullptr and pass through untouched.
+            if (woken->state == TaskState::Blocked)
+            {
+                WaitQueue* wq = woken->waiting_on;
+                KASSERT(wq != nullptr, "sched", "Blocked task without waiting_on");
+                WaitQueueUnlink(wq, woken);
+                woken->waiting_on = nullptr;
+                woken->wake_by_timeout = true;
+                --g_tasks_blocked;
+            }
+
+            woken->wake_tick = 0;
+            woken->state = TaskState::Ready;
+            woken->next = nullptr;
+            RunqueuePush(woken);
             woke_any = true;
         }
     }
@@ -593,6 +698,8 @@ void WaitQueueBlock(WaitQueue* wq)
         Task* t = Current();
         t->state = TaskState::Blocked;
         t->next = nullptr;
+        t->waiting_on = wq;
+        t->wake_by_timeout = false;
         if (wq->tail == nullptr)
         {
             wq->head = wq->tail = t;
@@ -608,6 +715,58 @@ void WaitQueueBlock(WaitQueue* wq)
     Schedule();
     // Woken. Our state was flipped back to Running by Schedule() + the
     // waker pushed us onto the runqueue before we got here.
+}
+
+bool WaitQueueBlockTimeout(WaitQueue* wq, u64 ticks)
+{
+    KASSERT(wq != nullptr, "sched", "WaitQueueBlockTimeout null queue");
+
+    // Zero ticks: no wait at all — yield and declare it a timeout.
+    // Callers should not rely on this as a "cheap test" — use
+    // WaitQueueWakeOne's return value to poke the queue cheaply.
+    if (ticks == 0)
+    {
+        SchedYield();
+        return false;
+    }
+
+    {
+        sync::SpinLockGuard guard(g_sched_lock);
+        Task* t = Current();
+        t->state = TaskState::Blocked;
+        t->next = nullptr;
+        t->wake_tick = g_tick_now + ticks;
+        t->waiting_on = wq;
+        t->wake_by_timeout = false;
+
+        // Enqueue on the wait queue (FIFO, same as WaitQueueBlock).
+        if (wq->tail == nullptr)
+        {
+            wq->head = wq->tail = t;
+        }
+        else
+        {
+            wq->tail->next = t;
+            wq->tail = t;
+        }
+        ++g_tasks_blocked;
+
+        // Enqueue on the sleep queue so the timer path can fire
+        // if nobody wakes us first. Both lists hold the same
+        // Task* — the two wake paths race, and whichever wins
+        // unlinks the loser.
+        SleepqueueInsert(t);
+        ++g_tasks_sleeping;
+    }
+
+    Schedule();
+
+    // Woken by one of two paths. `wake_by_timeout` was written by
+    // whichever path fired first (OnTimerTick sets true,
+    // WaitQueueWakeOne clears false). Read once here — the field
+    // is reused on the next wait.
+    const bool timed_out = Current()->wake_by_timeout;
+    return !timed_out;
 }
 
 Task* WaitQueueWakeOne(WaitQueue* wq)
@@ -628,6 +787,21 @@ Task* WaitQueueWakeOne(WaitQueue* wq)
             wq->tail = nullptr;
         }
         t->next = nullptr;
+
+        // If this was a timed wait, also unlink from the sleep
+        // queue so the timer path doesn't later try to wake an
+        // already-Ready task. `wake_tick != 0` is the signal:
+        // WaitQueueBlock leaves wake_tick at 0, WaitQueueBlock-
+        // Timeout sets it to the deadline. Plain Sleeping tasks
+        // never reach this path — they're not on any wait queue.
+        if (t->wake_tick != 0)
+        {
+            SleepqueueRemove(t);
+            --g_tasks_sleeping;
+        }
+        t->waiting_on = nullptr;
+        t->wake_tick = 0;
+        t->wake_by_timeout = false;
         t->state = TaskState::Ready;
         RunqueuePush(t);
         --g_tasks_blocked;
