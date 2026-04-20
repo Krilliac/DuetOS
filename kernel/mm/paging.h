@@ -118,4 +118,32 @@ PagingStats PagingStatsRead();
 /// to COM1 and panics on inconsistency. Boot-time use only.
 void PagingSelfTest();
 
+/*
+ * User-pointer copy helpers.
+ *
+ * Every kernel read/write through a user-supplied pointer goes through
+ * CopyFromUser / CopyToUser. They validate that the pointer lies inside
+ * the canonical low half, reject overflow / boundary-crossing lengths,
+ * and — when SMAP is active — gate the actual byte-by-byte copy with
+ * stac / clac so the CPU's SMAP check lets through the user access
+ * only inside this one helper.
+ *
+ * Return true on success, false if the pointer is rejected. `len == 0`
+ * is a trivial no-op that returns true. Zero-byte buffers aren't an
+ * error and neither is a null kernel_dst / kernel_src when len == 0.
+ *
+ * v0 does NOT catch #PF during the copy: a user pointer that's in
+ * range but unmapped (or mapped but pages unreachable) faults and the
+ * kernel's trap dispatcher halts. Proper #PF recovery via a fault-
+ * fixup table lands with the first syscall that can legitimately
+ * trigger it.
+ *
+ * Context: kernel. Must NOT be called from interrupt context while the
+ * current task isn't the one whose address space the user pointer lives
+ * in (today there's only one address space, so that's trivially true;
+ * the constraint lands with per-process page tables).
+ */
+bool CopyFromUser(void* kernel_dst, const void* user_src, u64 len);
+bool CopyToUser(void* user_dst, const void* kernel_src, u64 len);
+
 } // namespace customos::mm

@@ -103,6 +103,13 @@ void OnTimerTick(u64 now_ticks);
 /// Pointer to the currently-executing task. Never null after SchedInit.
 Task* CurrentTask();
 
+/// Opaque identity of the currently-executing task. Monotonically
+/// assigned at SchedCreate and never reused — the boot task is 0, then
+/// 1, 2, 3, … in creation order. Used by SYS_GETPID and any future
+/// diagnostic that wants to name a task without exposing the Task*
+/// itself. Returns ~0 if called before SchedInit.
+u64 CurrentTaskId();
+
 /// Top (high address) of the current task's kernel stack. Returns 0 for
 /// the boot task (it never had a scheduler-managed kernel stack — it
 /// runs on the boot.S stack, which is irrelevant for ring-3 RSP0

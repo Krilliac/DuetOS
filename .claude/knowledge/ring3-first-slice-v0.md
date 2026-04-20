@@ -95,15 +95,86 @@ The ring-3 smoke payload now ends with `xor eax,eax; xor edi,edi;
 int 0x80`, so the task exits cleanly after a few pauses instead
 of looping forever. The reaper KFrees its stack + Task struct.
 
-## Deliberately deferred (post-syscall slice)
+## Follow-up slices 046..048 — ABI fills in
+
+- **SMEP + SMAP** (entry #046) land in `PagingInit` (CPUID-gated
+  CR4 bits) alongside `mm::CopyFromUser` / `mm::CopyToUser`.
+  Copy helpers validate the user pointer against the canonical
+  low-half boundary (`0x00007FFF_FFFFFFFF`), reject
+  overflow/boundary-crossing lengths, and bracket the actual
+  byte copy with `stac` / `clac` when SMAP is active. Every
+  kernel-side read/write of a user pointer goes through these —
+  no other kernel path dereferences a user pointer directly.
+- **SYS_GETPID = 1** returns `sched::CurrentTaskId()` — the
+  first syscall that exercises the return-value half of the
+  ABI. The dispatcher writes `frame->rax`; isr_common's
+  pop-all + iretq delivers it to ring 3.
+- **SYS_WRITE = 2** (entry #047) takes rdi=fd, rsi=buf, rdx=len.
+  fd=1 (stdout) → COM1; anything else → -1. 256-byte
+  kernel-stack bounce buffer via `mm::CopyFromUser`; short
+  writes are allowed. NUL bytes inside the user buffer are
+  forwarded faithfully.
+- **Scheduler-owned TSS.RSP0** (entry #048): `Schedule()` now
+  publishes the incoming task's kernel-stack top to the BSP's
+  TSS on every switch-in, so multi-ring-3-task correctness is
+  the scheduler's job instead of each user task's own
+  responsibility. Manual `TssSetRsp0` call in
+  `Ring3SmokeMain` kept as belt-and-braces.
+
+## Updated ring-3 smoke payload
+
+The payload grew from 13 → 33 bytes:
+
+```
+user_entry:                  ; at 0x40000000
+    pause                    ; give the timer a tick
+    pause
+    mov eax, 2               ; SYS_WRITE
+    mov edi, 1               ; fd = stdout
+    mov esi, 0x40000080      ; msg ptr (fixed offset in page)
+    mov edx, <msg_len>
+    int 0x80
+    xor eax, eax             ; SYS_EXIT
+    xor edi, edi             ; rc = 0
+    int 0x80
+    hlt                      ; unreachable
+
+msg: "Hello from ring 3!\n"  ; at 0x40000080
+```
+
+The complete user→kernel round-trip now looks like:
+
+```
+[ring3] smoke task starting
+[ring3] user rip=0x40000000 user rsp=0x40011000 rsp0=<...>
+[core/ring3] entering user mode at rip = 0x40000000
+Hello from ring 3!
+[sys] exit rc = 0
+[sched/reaper] reaped task id = N
+```
+
+## Deliberately deferred (next batch after this)
 
 - SYSCALL / SYSRET (STAR / LSTAR / SFMASK MSR path) — `int 0x80`
   is ~30× slower but correct; migrate once a consumer cares.
-- copy_from_user / copy_to_user behind SMAP — needed as soon as
-  any syscall takes a pointer argument.
+- `__copy_user_fault_fixup` — return `false` from the copy
+  helpers on #PF instead of halting the kernel. Needed the
+  moment a user pointer can legitimately be in-range but
+  unmapped.
 - Per-process address space: single global PML4 still. Any user
-  task sees the same user code/stack pages. One-and-done is fine
-  while we only have one ring-3 task.
+  task sees the same user code/stack pages — so a second
+  ring-3 task needs either distinct VAs (simple patch to
+  `Ring3SmokeMain`, but doesn't reclaim on exit) or per-process
+  CR3 (a much larger slice).
+- `UnmapPage` sweep on ring-3 task exit — the user pages at
+  0x40000000 / 0x40010000 are leaked when the ring-3 smoke
+  task exits. No symptom today (kernel keeps running) but a
+  second task or a restart would collide.
+- Second ring-3 task — needs distinct VAs or proper exit
+  cleanup first.
+- Per-CPU TSS / per-AP RSP0 — the current `arch::TssSetRsp0`
+  writes the BSP's TSS only; SMP join will need a per-CPU
+  wrapper.
 - FPU/SSE user state: kernel is built `-mno-sse
   -mgeneral-regs-only`; user code that touches xmm registers
   will take #UD, which is the correct signal that this layer

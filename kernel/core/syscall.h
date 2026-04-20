@@ -34,6 +34,8 @@ namespace customos::core
 enum SyscallNumber : u64
 {
     SYS_EXIT = 0,
+    SYS_GETPID = 1,
+    SYS_WRITE = 2,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit

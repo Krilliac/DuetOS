@@ -607,6 +607,167 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 048 — Scheduler publishes TSS.RSP0 on every switch-in
+
+- **Scope:** `kernel/sched/sched.cpp` — `Schedule()` now calls
+  `arch::TssSetRsp0(next->stack_base + next->stack_size)` right
+  before `ContextSwitch`, for every task with a non-null
+  `stack_base`. Include reorg in `kernel/sched/sched.cpp` +
+  comment in `kernel/core/ring3_smoke.cpp` downgrading the manual
+  TssSetRsp0 call there to belt-and-braces.
+- **Decision:** Make "TSS.RSP0 always reflects the current task's
+  kernel-stack top" an invariant the scheduler owns, not an
+  invariant individual ring-3 tasks have to remember. On every
+  context switch INTO a task with its own managed kernel stack
+  (everyone except the boot task), publish the top of that stack
+  to the BSP's TSS. The boot task is skipped because its
+  `stack_base` is nullptr and it never runs in ring 3, so RSP0 is
+  never consulted while it's `Current()`.
+- **Why:** Entry #044 explicitly deferred this wiring with
+  "single ring-3 task in v0 — TSS.rsp0 is set once and stays
+  valid." That's true for exactly one user-mode-capable task;
+  as soon as two coexist, the second task's trap frames would
+  land on the first task's kernel stack and overwrite it. The
+  correctness question doesn't depend on a SECOND task existing
+  today — the invariant must hold BEFORE that lands, or the first
+  second-task bug would be indistinguishable from "a trap frame
+  mysteriously corrupts adjacent kernel memory." Cheap to do
+  now, expensive to add later under pressure.
+- **Rules out / defers:** Per-CPU TSS + per-AP RSP0 management
+  (today's `arch::TssSetRsp0` writes the BSP's TSS; APs need
+  their own TSS + their own TssSetRsp0 that indexes by
+  `cpu::CurrentCpu()`). Lazy RSP0 update (skipping the write
+  for ring-0-only tasks) — the two or three extra stores per
+  context switch are negligible, and gating on "is this task
+  ring-3 capable" adds a Task field we don't have yet.
+- **Revisit when:** SMP scheduler join — per-CPU TSS lands. A
+  dedicated "does this task enter ring 3?" flag becomes
+  ergonomic to add (replaces the `stack_base != nullptr` proxy).
+- **Related tracks:** Track 2 (SMP — per-CPU TSS), Track 4
+  (Process model — per-task kernel stack is the central invariant
+  of user-mode transitions).
+
+---
+
+## 047 — First pointer-arg syscall: SYS_write(fd, buf, len)
+
+- **Scope:** `kernel/core/syscall.{h,cpp}` — `SYS_WRITE = 2`,
+  `DoWrite` helper, `kSyscallWriteMax = 256` bounce buffer cap.
+  Ring-3 payload update in `kernel/core/ring3_smoke.cpp` (now
+  calls SYS_WRITE with "Hello from ring 3!\n" before SYS_EXIT).
+- **Decision:** First syscall that consumes a pointer argument.
+  Calling convention: rdi = fd, rsi = buf, rdx = len. Only fd=1
+  (stdout) is recognised in v0 — anything else returns -1. The
+  kernel allocates a 256-byte bounce buffer on its stack, copies
+  up to `min(len, 256)` bytes from userspace via
+  `mm::CopyFromUser` (which SMAP-gates the read), and emits the
+  bytes one-at-a-time to COM1. Returns the byte count actually
+  written (possibly truncated — standard POSIX-ish short-write
+  semantics). Truncation is not an error; the caller loops if
+  they care. NUL bytes inside the user buffer are forwarded
+  faithfully to COM1 (via a 2-char `{b, '\0'}` scratch buffer)
+  so the ABI doesn't quietly lose embedded nulls.
+- **Why:** The exit syscall in #045 deliberately dodged the
+  return-value half of the ABI (SchedExit never returns). This
+  one exercises a pointer-arg path and completes the round-trip
+  invariants: user passes a pointer, kernel validates + SMAPs +
+  copies into a bounce buffer, kernel acts on a kernel-owned
+  copy (no TOCTOU), kernel writes rax back, iretq delivers the
+  count. A fixed 256-byte cap keeps this syscall on-stack
+  without making it unbounded in kernel memory. "stdout only"
+  is deliberate — introducing anything that looks like an fd
+  table before VFS lands would be speculative machinery.
+- **Rules out / defers:** File descriptor table (v0 has exactly
+  one well-known fd: stdout=1). writev / iovec support —
+  no consumer. Real short-write semantics with EINTR / partial
+  progress — no signals yet. Async I/O — neither the infrastructure
+  nor a consumer exists. An fd=2 (stderr) split, or any other
+  well-known fd — stdout is the only sink COM1 cares about for
+  now. Non-COM1 destinations (e.g. a framebuffer tty) — the
+  whole tty layer is a later track. Line-buffered vs
+  unbuffered write semantics — unbuffered is the right default
+  for a serial console with no scroll-back concerns.
+- **Revisit when:** First fd table lands — SYS_WRITE grows a
+  dispatch per fd instead of its hard-coded fd==1 check.
+  First bug caused by a user pointer that's in-range but
+  unmapped — land `__copy_user_fault_fixup` so
+  `CopyFromUser` returns false instead of #PF'ing the kernel.
+  First consumer that writes > 256 bytes — either grow the
+  bounce buffer (cost: kernel-stack budget) or move to a
+  per-task scratch buffer allocated at SchedCreate time.
+- **Related tracks:** Track 4 (Process — first consumer of the
+  write syscall is the init / shell when they land),
+  Track 5 (Filesystem — SYS_WRITE becomes a thin dispatch once
+  VFS arrives), Track 13 (Security — SMAP is the first real
+  hardware-enforced boundary on user-pointer trust).
+
+---
+
+## 046 — SMEP + SMAP + mm::CopyFromUser / CopyToUser
+
+- **Scope:** `kernel/mm/paging.{h,cpp}` — CPUID-gated CR4 flips
+  (`EnableKernelProtectionBits`, called from `PagingInit`) plus
+  two public helpers (`CopyFromUser`, `CopyToUser`) that
+  validate the user pointer's range and SMAP-gate the copy
+  with stac / clac when the feature is on.
+- **Decision:** Enable both kernel-protection bits as early as
+  possible in the boot path — inside `PagingInit`, right after
+  EFER.NXE. SMEP (CR4 bit 20) makes kernel-mode execution of
+  any page with `U/S=1` #PF; SMAP (CR4 bit 21) makes kernel-mode
+  DATA access to a user page #PF unless RFLAGS.AC is set.
+  Both are gated on CPUID.7.0.EBX bits 7 (SMEP) and 20 (SMAP);
+  older CPUs stay in the pre-protection posture without
+  breaking the boot. Every user-pointer read/write the kernel
+  does now goes through `mm::CopyFromUser` or `mm::CopyToUser`
+  which:
+    1. reject pointers outside the canonical low half
+       (kUserMax = 0x00007FFF_FFFFFFFF — everything above is
+       the non-canonical hole or kernel space),
+    2. reject lengths that would overflow or cross into the
+       high half,
+    3. issue `stac` before the byte-by-byte copy and `clac`
+       after, so the CPU's SMAP check grants kernel access to
+       user memory only inside this one helper. Any other
+       kernel code path that dereferences a user pointer
+       still #PFs.
+- **Why:** Enables the first pointer-arg syscall (SYS_WRITE, #047)
+  safely. Without SMAP, a kernel bug that dereferences a user
+  pointer anywhere (not just inside the copy helper) still
+  works at the hardware level, which is how several
+  high-profile Linux exploits (e.g. the wait4 pointer-confusion
+  class) historically escalated. With SMAP, those same bugs
+  degrade to a clean #PF in the kernel — the trap dispatcher
+  records the violation and halts, which is infinitely
+  preferable to silent exploitation. SMEP closes the
+  complementary "spray shellcode into a user page, trick the
+  kernel into jumping there" class of exploits. Both bits are
+  present on any x86_64 CPU from 2014 onwards; not landing them
+  now would be choosing weaker defaults for no gain. Landing
+  them with the copy helpers avoids the "enable SMAP, then
+  immediately crash on the first user-pointer touch because
+  we forgot stac" debugging round.
+- **Rules out / defers:** Fault-recovery table for the copy
+  loops (`__copy_user_fault_fixup` — one entry per copy, lets
+  an in-range-but-unmapped user pointer return `false` instead
+  of #PF-halting the kernel). CET (shadow stack / IBT) — a
+  separate CR4 bit set with its own CPUID gate; lands as its
+  own slice. `mm::StrlenUser` and friends — no consumer yet.
+  Per-CPU SMAP state management on context switch — AC is
+  cleared by the hardware on iretq to a lower privilege, so
+  preemption during a stac'd copy is safe without extra work.
+- **Revisit when:** First syscall whose user pointer can
+  legitimately fault (e.g. a read from a just-mmap'd file
+  that's lazily populated) — land the fault-fixup table then.
+  SMP bring-up — SMAP is per-CPU; each AP needs its CR4 bits
+  set in its startup path. CET lands — touches the same CR4
+  register, may need coordinated write.
+- **Related tracks:** Track 3 (MM — the copy API is an MM
+  concern), Track 13 (Security — SMEP/SMAP are hardware
+  enforcement of the W^X + trust-boundary posture the
+  malware-hard-stop plan relies on).
+
+---
+
 ## 045 — First syscall gate: int 0x80 (DPL=3) + SYS_exit
 
 - **Scope:** `kernel/arch/x86_64/exceptions.S` (new `ISR_NOERR 128`

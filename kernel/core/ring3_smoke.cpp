@@ -28,27 +28,38 @@
  * stack sits 64 KiB above so there's obvious headroom between the two
  * regions if the payload ever grows.
  *
- * Payload exercises two independent things in order:
+ * Payload exercises the full user→kernel ABI in order:
  *
- *     user_entry:
- *         pause                 ; F3 90 ─┐
- *         pause                 ; F3 90  │ Four `pause` iterations give
- *         pause                 ; F3 90  │ the 100 Hz timer a few ticks'
- *         pause                 ; F3 90 ─┘ worth of chance to preempt us
- *                                          at least once while ring-3.
- *         xor eax, eax          ; 31 C0    rax = 0 (SYS_EXIT)
- *         xor edi, edi          ; 31 FF    rdi = 0 (exit code)
- *         int 0x80              ; CD 80    trap into the kernel syscall gate
- *         hlt                   ; F4       unreachable — a syscall return
- *                                          here would be a bug
+ *     user_entry:                  ; at 0x40000000
+ *         pause                    ; F3 90   give the timer a tick
+ *         pause                    ; F3 90
+ *         mov eax, 2               ; B8 02 00 00 00   rax = SYS_WRITE
+ *         mov edi, 1               ; BF 01 00 00 00   rdi = 1 (stdout)
+ *         mov esi, 0x40000080      ; BE 80 00 00 40   rsi = msg ptr
+ *         mov edx, <msg_len>       ; BA nn 00 00 00   rdx = length
+ *         int 0x80                 ; CD 80
+ *         xor eax, eax             ; 31 C0   rax = 0 (SYS_EXIT)
+ *         xor edi, edi             ; 31 FF   rdi = 0 (exit code)
+ *         int 0x80                 ; CD 80
+ *         hlt                      ; F4      unreachable
  *
- * 13 bytes. No privileged instructions on the happy path: all four
- * pauses are ring-3-legal, `int 0x80` is explicitly what the DPL=3
- * gate allows, and the trailing `hlt` only executes if the syscall
- * returns (which SYS_EXIT promises never to). If the gate were
- * misconfigured (DPL=0) the `int 0x80` would #GP on delivery, which
- * is the clean failure mode we want — the trap dispatcher prints
- * a record rather than a silent misbehaviour.
+ *     msg:                         ; at 0x40000080
+ *         "Hello from ring 3!\n"   ; 19 bytes
+ *
+ * Wiring the string at a fixed offset (0x80 = 128 bytes into the
+ * code page) keeps the immediates in the instruction stream
+ * constant — without that, a `lea rsi, [rip+N]` would pin the
+ * string's address to the instruction's position, turning every
+ * future code tweak into a chase through the encoding. 128 bytes
+ * is well past the 24-byte instruction block; the gap between
+ * them is zeroed at install time so a mis-jump lands on `add
+ * [rax], al` (`00 00`) forever and is harmless.
+ *
+ * The pause/pause prefix gives the 100 Hz timer at least one chance
+ * to preempt us while we're genuinely in ring 3 — the evidence that
+ * the scheduler handles a user-mode-interrupted context correctly.
+ * Everything after the prefix is a linear walk through SYS_WRITE →
+ * SYS_EXIT, with no control flow back to user mode.
  */
 
 namespace customos::core
@@ -61,21 +72,38 @@ constexpr u64 kUserCodeVirt = 0x0000000040000000ULL;
 constexpr u64 kUserStackVirt = 0x0000000040010000ULL;
 constexpr u64 kUserStackTop = kUserStackVirt + mm::kPageSize;
 
-// 13-byte user payload: four pauses (so the timer gets a chance to
-// preempt us in ring 3 at least once), then SYS_EXIT via int 0x80.
-// Emitted as raw bytes rather than a .S file so the user-mode VA
-// layout, the bytes, and the "hands-off: this runs in ring 3"
-// context all stay in one place.
-constexpr u8 kUserPayload[] = {
-    0xF3, 0x90, // pause
-    0xF3, 0x90, // pause
-    0xF3, 0x90, // pause
-    0xF3, 0x90, // pause
-    0x31, 0xC0, // xor eax, eax  -> rax = 0  (SYS_EXIT)
-    0x31, 0xFF, // xor edi, edi  -> rdi = 0  (exit code)
-    0xCD, 0x80, // int 0x80
-    0xF4,       // hlt (unreachable)
+// Fixed offset of the "Hello from ring 3!\n" string inside the user
+// code page. Encoded as the low-32 immediate in the user's
+// `mov esi, 0x40000080` instruction below; changing this value
+// requires updating BOTH the constant AND the instruction byte
+// at the same time (the test below enforces that they match).
+constexpr u64 kUserMessageOffset = 0x80;
+
+constexpr char kUserMessage[] = "Hello from ring 3!\n";
+// sizeof includes the trailing NUL; the user syscall passes
+// sizeof - 1 so the NUL isn't written to COM1.
+constexpr u64 kUserMessageLen = sizeof(kUserMessage) - 1;
+
+// 24-byte user code: pause x2, SYS_WRITE(1, 0x40000080, len),
+// SYS_EXIT(0), hlt. Emitted as raw bytes rather than a .S file so
+// the user-mode VA layout, the bytes, and the "hands-off: this
+// runs in ring 3" context all stay in one place.
+// clang-format off
+constexpr u8 kUserCodeBytes[] = {
+    0xF3, 0x90,                                                       // pause
+    0xF3, 0x90,                                                       // pause
+    0xB8, 0x02, 0x00, 0x00, 0x00,                                     // mov eax, 2         (SYS_WRITE)
+    0xBF, 0x01, 0x00, 0x00, 0x00,                                     // mov edi, 1         (fd=1)
+    0xBE, 0x80, 0x00, 0x00, 0x40,                                     // mov esi, 0x40000080 (msg ptr)
+    0xBA, static_cast<u8>(kUserMessageLen), 0x00, 0x00, 0x00,         // mov edx, len
+    0xCD, 0x80,                                                       // int 0x80
+    0x31, 0xC0,                                                       // xor eax, eax       (SYS_EXIT)
+    0x31, 0xFF,                                                       // xor edi, edi       (rc=0)
+    0xCD, 0x80,                                                       // int 0x80
+    0xF4,                                                             // hlt (unreachable)
 };
+// clang-format on
+static_assert(sizeof(kUserCodeBytes) <= kUserMessageOffset, "user code runs into the fixed message offset");
 
 [[noreturn]] void Ring3SmokeMain(void*)
 {
@@ -98,10 +126,26 @@ constexpr u8 kUserPayload[] = {
     // frame through the higher-half direct map. Doing the write
     // before the user-mode install order lets us verify byte values
     // before any ring-3 entry is even possible.
+    //
+    // Layout inside the page:
+    //   [0 .. sizeof(kUserCodeBytes)]   : instructions
+    //   [sizeof(..) .. kUserMessageOffset) : zero-fill (so mis-jumps
+    //                                        land on `add [rax], al`
+    //                                        == harmless)
+    //   [kUserMessageOffset .. +N)      : the "Hello…\n" bytes
+    //   [rest of page]                  : zero-fill
     auto* code_direct = static_cast<u8*>(PhysToVirt(code_frame));
-    for (u64 i = 0; i < sizeof(kUserPayload); ++i)
+    for (u64 i = 0; i < mm::kPageSize; ++i)
     {
-        code_direct[i] = kUserPayload[i];
+        code_direct[i] = 0;
+    }
+    for (u64 i = 0; i < sizeof(kUserCodeBytes); ++i)
+    {
+        code_direct[i] = kUserCodeBytes[i];
+    }
+    for (u64 i = 0; i < kUserMessageLen; ++i)
+    {
+        code_direct[kUserMessageOffset + i] = static_cast<u8>(kUserMessage[i]);
     }
 
     // kPagePresent + kPageUser only — no kPageWritable (W^X for user
@@ -119,7 +163,14 @@ constexpr u8 kUserPayload[] = {
     MapPage(kUserStackVirt, stack_frame, kPagePresent | kPageWritable | kPageUser | kPageNoExecute);
 
     // ---- 3) Publish kernel stack top to the TSS so user→kernel traps land. -
-
+    //
+    // Belt-and-braces: the scheduler's switch-in path already updated
+    // TSS.RSP0 on the way into this task, so the value is correct by
+    // the time we reach here. Writing it again here is harmless (same
+    // value) and documents the invariant at the exact point the next
+    // iretq will consume it. If the scheduler ever stops owning this
+    // invariant, the manual write below keeps this task working while
+    // the breakage is investigated.
     const u64 kstack_top = sched::SchedCurrentKernelStackTop();
     if (kstack_top == 0)
     {

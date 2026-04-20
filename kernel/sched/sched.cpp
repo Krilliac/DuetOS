@@ -1,6 +1,7 @@
 #include "sched.h"
 
 #include "../arch/x86_64/cpu.h"
+#include "../arch/x86_64/gdt.h"
 #include "../arch/x86_64/serial.h"
 #include "../core/klog.h"
 #include "../core/panic.h"
@@ -441,6 +442,28 @@ void Schedule()
         ++g_context_switches;
     }
 
+    // Publish `next`'s kernel-stack top to the BSP's TSS.RSP0 slot.
+    // RSP0 is the stack the CPU auto-switches to on a user→kernel
+    // privilege transition; without this update every subsequent
+    // ring-3 interrupt would land on whichever task happened to set
+    // it last — fine for a single ring-3 task (the old contract)
+    // but wrong as soon as two user-mode tasks coexist, because the
+    // second task's stack frames could overwrite the first task's
+    // in-flight trap frame.
+    //
+    // Tasks with stack_base == nullptr are the boot task (and the
+    // boot task alone); it runs exclusively in ring 0, so RSP0 is
+    // never consulted while it's `Current()`. Skipping the update
+    // for it keeps the boot path from needing a fake RSP0. On SMP,
+    // each AP will update its own TSS via its own per-CPU slot —
+    // this path is BSP-only today and will need a per-CPU wrapper
+    // on AP scheduler join.
+    if (next->stack_base != nullptr)
+    {
+        const u64 rsp0 = reinterpret_cast<u64>(next->stack_base) + next->stack_size;
+        arch::TssSetRsp0(rsp0);
+    }
+
     ContextSwitch(&prev->rsp, next->rsp);
     // When we return here, `prev` is running again (it may have been
     // scheduled out and back in an arbitrary number of times).
@@ -600,6 +623,16 @@ void OnTimerTick(u64 now_ticks)
 Task* CurrentTask()
 {
     return Current();
+}
+
+u64 CurrentTaskId()
+{
+    Task* self = Current();
+    if (self == nullptr)
+    {
+        return ~0ULL;
+    }
+    return self->id;
 }
 
 u64 SchedCurrentKernelStackTop()

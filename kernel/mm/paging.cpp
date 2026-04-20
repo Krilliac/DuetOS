@@ -69,6 +69,76 @@ inline void WriteMsr(u32 msr, u64 value)
     asm volatile("wrmsr" : : "c"(msr), "a"(lo), "d"(hi));
 }
 
+// CPUID.7.0 feature bits consulted by the SMEP / SMAP gate below.
+// Bit positions per Intel SDM Vol. 2A "CPUID — CPU Identification".
+constexpr u32 kCpuidLeaf7Ebx_Smep = 1U << 7;
+constexpr u32 kCpuidLeaf7Ebx_Smap = 1U << 20;
+
+// CR4 enable bits for the two kernel-protection features.
+constexpr u64 kCr4_Smep = 1ULL << 20;
+constexpr u64 kCr4_Smap = 1ULL << 21;
+
+inline void ReadCpuidLeaf7_0(u32& ebx_out)
+{
+    u32 eax = 7, ebx = 0, ecx = 0, edx = 0;
+    asm volatile("cpuid" : "+a"(eax), "+c"(ecx), "=b"(ebx), "=d"(edx));
+    ebx_out = ebx;
+}
+
+inline u64 ReadCr4()
+{
+    u64 v;
+    asm volatile("mov %%cr4, %0" : "=r"(v));
+    return v;
+}
+
+inline void WriteCr4(u64 v)
+{
+    asm volatile("mov %0, %%cr4" : : "r"(v) : "memory");
+}
+
+bool g_smap_enabled = false;
+
+// Flip on SMEP (bit 20) and SMAP (bit 21) in CR4 if CPUID reports them.
+// SMEP: kernel-mode code fetch from a user page #PFs — kills an entire
+// class of "spray user shellcode, pivot to it via a ret-to-user bug"
+// exploits. SMAP: kernel-mode data access to a user page #PFs UNLESS
+// AC (RFLAGS.AC) is set via the stac instruction — forces every
+// kernel→user touch to go through an explicit, auditable helper. The
+// cost is ~nothing (both are 1-cycle CR4 flips + whatever stac/clac
+// the copy helpers add). Both are present on any Intel CPU from
+// Broadwell (2014) and any AMD CPU from Zen+ onwards; on older
+// hardware we just stay in the pre-protection posture.
+void EnableKernelProtectionBits()
+{
+    u32 leaf7_ebx = 0;
+    ReadCpuidLeaf7_0(leaf7_ebx);
+
+    u64 cr4 = ReadCr4();
+    const u64 before = cr4;
+
+    if ((leaf7_ebx & kCpuidLeaf7Ebx_Smep) != 0)
+    {
+        cr4 |= kCr4_Smep;
+    }
+    if ((leaf7_ebx & kCpuidLeaf7Ebx_Smap) != 0)
+    {
+        cr4 |= kCr4_Smap;
+        g_smap_enabled = true;
+    }
+
+    if (cr4 != before)
+    {
+        WriteCr4(cr4);
+    }
+
+    SerialWrite("[mm] CR4 protection bits: SMEP=");
+    SerialWrite((cr4 & kCr4_Smep) ? "on" : "off");
+    SerialWrite(" SMAP=");
+    SerialWrite((cr4 & kCr4_Smap) ? "on" : "off");
+    SerialWrite("\n");
+}
+
 // Allocate a fresh page-table frame, zero it via the direct map, and return
 // a virtual pointer into that frame. The physical address is recoverable
 // from the entry stored by callers.
@@ -172,11 +242,114 @@ void PagingInit()
     g_mappings_installed = 0;
     g_mappings_removed = 0;
 
+    EnableKernelProtectionBits();
+
     SerialWrite("[mm] paging adopted boot PML4: cr3_phys=");
     SerialWriteHex(pml4_phys);
     SerialWrite(" pml4_virt=");
     SerialWriteHex(reinterpret_cast<u64>(g_pml4));
     SerialWrite("\n");
+}
+
+// ---------------------------------------------------------------------------
+// User-pointer copy helpers
+//
+// Every kernel read/write through a user-supplied pointer goes through
+// these. They:
+//
+//   1. Reject pointers outside the canonical low half (anything with the
+//      top bits set belongs to kernel space — a syscall passing such a
+//      pointer is either malicious or broken, either way the answer is
+//      "no").
+//   2. Reject len == 0 as success (no-op copy) and any length that wraps
+//      around or crosses the low/high-half boundary.
+//   3. Gate the actual byte-by-byte copy with stac / clac when SMAP is
+//      active, so the CPU's SMAP check lets through the user access only
+//      inside this helper. A bug that tries to dereference user memory
+//      anywhere else still #PFs.
+//
+// v0 intentionally does NOT catch #PF during the copy. If the user
+// pointer is mapped but the target page is gone mid-copy, the trap
+// dispatcher halts — exactly as it does today for any other kernel #PF.
+// The proper fix is a __copy_user_fault_fixup table (one entry pointing
+// at a "return false" label per copy loop); landing that alongside the
+// first syscall that can legitimately trigger a page fault is the next
+// natural slice.
+// ---------------------------------------------------------------------------
+
+bool IsUserAddressRange(u64 addr, u64 len)
+{
+    // Canonical low half ends at 0x00007FFF_FFFFFFFF on x86_64. Anything
+    // above that is kernel (canonical high half) or the non-canonical
+    // hole between them. We're strict on both ends: a user pointer must
+    // fit, AND `addr + len` must not overflow OR cross the boundary.
+    constexpr u64 kUserMax = 0x00007FFFFFFFFFFFULL;
+    if (len == 0)
+    {
+        return true; // zero-byte copy is trivially valid
+    }
+    if (addr > kUserMax)
+    {
+        return false;
+    }
+    // Overflow check before computing addr + len.
+    if (len > kUserMax)
+    {
+        return false;
+    }
+    if (addr + (len - 1) > kUserMax)
+    {
+        return false;
+    }
+    return true;
+}
+
+bool CopyFromUser(void* kernel_dst, const void* user_src, u64 len)
+{
+    if (!IsUserAddressRange(reinterpret_cast<u64>(user_src), len))
+    {
+        return false;
+    }
+    auto* dst = static_cast<u8*>(kernel_dst);
+    const auto* src = static_cast<const u8*>(user_src);
+
+    if (g_smap_enabled)
+    {
+        asm volatile("stac" ::: "cc");
+    }
+    for (u64 i = 0; i < len; ++i)
+    {
+        dst[i] = src[i];
+    }
+    if (g_smap_enabled)
+    {
+        asm volatile("clac" ::: "cc");
+    }
+    return true;
+}
+
+bool CopyToUser(void* user_dst, const void* kernel_src, u64 len)
+{
+    if (!IsUserAddressRange(reinterpret_cast<u64>(user_dst), len))
+    {
+        return false;
+    }
+    auto* dst = static_cast<u8*>(user_dst);
+    const auto* src = static_cast<const u8*>(kernel_src);
+
+    if (g_smap_enabled)
+    {
+        asm volatile("stac" ::: "cc");
+    }
+    for (u64 i = 0; i < len; ++i)
+    {
+        dst[i] = src[i];
+    }
+    if (g_smap_enabled)
+    {
+        asm volatile("clac" ::: "cc");
+    }
+    return true;
 }
 
 void MapPage(uptr virt, PhysAddr phys, u64 flags)
