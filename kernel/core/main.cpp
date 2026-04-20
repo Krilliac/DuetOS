@@ -13,6 +13,7 @@
 #include "../drivers/input/ps2kbd.h"
 #include "../mm/frame_allocator.h"
 #include "../sync/spinlock.h"
+#include "heartbeat.h"
 #include "klog.h"
 #include "../mm/kheap.h"
 #include "../mm/paging.h"
@@ -111,6 +112,8 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
 
     SerialWrite("[boot] Bringing up APs.\n");
     SmpStartAps();
+
+    customos::core::StartHeartbeatThread();
 
     // Keyboard reader thread: blocks on Ps2KeyboardRead, prints each
     // scan code. First real end-to-end test of the IRQ path: ACPI →
