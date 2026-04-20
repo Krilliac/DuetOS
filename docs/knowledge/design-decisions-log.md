@@ -381,7 +381,7 @@ get an inline "superseded by <commit>" note and stay.
 
 - **Scope:** `kernel/sync/spinlock.{h,cpp}`,
   `kernel/cpu/percpu.{h,cpp}`, wire-up in `kernel_main`
-- **Commit:** _(filled at commit)_
+- **Commit:** `ebd1102`
 - **Decision:** Land two primitives without yet refactoring the
   scheduler: (1) a test-and-set spinlock with IF save/restore +
   owner-CPU tracking + RAII guard, (2) a `PerCpu` struct addressed
