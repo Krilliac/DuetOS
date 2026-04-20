@@ -12,6 +12,7 @@
 #include "../cpu/percpu.h"
 #include "../drivers/input/ps2kbd.h"
 #include "../drivers/pci/pci.h"
+#include "../drivers/storage/ahci.h"
 #include "../mm/frame_allocator.h"
 #include "../sync/spinlock.h"
 #include "heartbeat.h"
@@ -113,6 +114,9 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
 
     SerialWrite("[boot] Enumerating PCI bus.\n");
     customos::drivers::pci::PciEnumerate();
+
+    SerialWrite("[boot] Discovering AHCI controller.\n");
+    customos::drivers::storage::AhciInit();
 
     // Keyboard reader thread: blocks on Ps2KeyboardRead, prints each
     // scan code. First real end-to-end test of the IRQ path: ACPI →
