@@ -75,6 +75,19 @@ inline u64 ReadCr3()
     return value;
 }
 
+/// Load CR3 with a new PML4 physical address. Implicitly flushes every
+/// non-global TLB entry on the executing CPU. The "memory" clobber tells
+/// the compiler not to reorder loads/stores across the switch — the
+/// caller has just changed which page tables are authoritative.
+///
+/// Invariant: bits 0..11 of `pml4_phys` MUST be zero (4 KiB-aligned PML4
+/// frame). The low 12 bits of CR3 are PCID / cache-control flags; we
+/// don't use PCIDs in v0, so callers pass a clean physical address.
+inline void WriteCr3(u64 pml4_phys)
+{
+    asm volatile("mov %0, %%cr3" : : "r"(pml4_phys) : "memory");
+}
+
 inline u64 ReadCr4()
 {
     u64 value;

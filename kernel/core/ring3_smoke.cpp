@@ -3,6 +3,7 @@
 #include "../arch/x86_64/gdt.h"
 #include "../arch/x86_64/serial.h"
 #include "../arch/x86_64/usermode.h"
+#include "../mm/address_space.h"
 #include "../mm/frame_allocator.h"
 #include "../mm/page.h"
 #include "../mm/paging.h"
@@ -11,57 +12,27 @@
 #include "panic.h"
 
 /*
- * First ring-3 slice — see ring3_smoke.h for the design contract.
+ * Ring-3 smoke test, second iteration.
  *
- * Chosen user VA layout:
+ * The first version mapped its user code + stack pages into the ONE
+ * global PML4 and registered them with the scheduler's per-task region
+ * table for reaper-driven cleanup. Per-process address spaces have now
+ * landed: this version creates a fresh `mm::AddressSpace` per task,
+ * populates it with the same user code + stack mappings, and hands it
+ * to `SchedCreateUser` so the scheduler flips CR3 to the AS on the
+ * task's first switch-in.
  *
- *   0x0000000040000000 : one 4 KiB code page  (U | P, exec)
- *   0x0000000040010000 : one 4 KiB stack page (U | P | W | NX)
+ * The chosen user VAs (0x40000000 for code, 0x40010000 for stack)
+ * are now PER-PROCESS — every smoke task can use the same fixed VAs
+ * without colliding, because each task has its own PML4. That's the
+ * isolation property we wanted: spawn two smoke tasks back-to-back,
+ * both succeed, both print "Hello from ring 3!\n" with their own
+ * private code/stack frames behind those VAs.
  *
- * Why 1 GiB (0x40000000), not the traditional 0x400000: the first 1 GiB
- * of virtual address space is paved by boot.S with 2 MiB PS-mapped
- * identity entries, and the v0 paging API explicitly panics if asked
- * to install a 4 KiB mapping inside a PS region (it would have to
- * split the PS page). 0x40000000 lives in PDPT[1], which boot.S left
- * empty — the walker creates fresh PD + PT tables on the first MapPage
- * call, and we get the clean 4 KiB granularity we need for W^X. The
- * stack sits 64 KiB above so there's obvious headroom between the two
- * regions if the payload ever grows.
- *
- * Payload exercises the full user→kernel ABI in order:
- *
- *     user_entry:                  ; at 0x40000000
- *         pause                    ; F3 90   give the timer a tick
- *         pause                    ; F3 90
- *         mov eax, 2               ; B8 02 00 00 00   rax = SYS_WRITE
- *         mov edi, 1               ; BF 01 00 00 00   rdi = 1 (stdout)
- *         mov esi, 0x40000080      ; BE 80 00 00 40   rsi = msg ptr
- *         mov edx, <msg_len>       ; BA nn 00 00 00   rdx = length
- *         int 0x80                 ; CD 80
- *         mov eax, 3               ; B8 03 00 00 00   rax = SYS_YIELD
- *         int 0x80                 ; CD 80   cooperative yield
- *         xor eax, eax             ; 31 C0   rax = 0 (SYS_EXIT)
- *         xor edi, edi             ; 31 FF   rdi = 0 (exit code)
- *         int 0x80                 ; CD 80
- *         hlt                      ; F4      unreachable
- *
- *     msg:                         ; at 0x40000080
- *         "Hello from ring 3!\n"   ; 19 bytes
- *
- * Wiring the string at a fixed offset (0x80 = 128 bytes into the
- * code page) keeps the immediates in the instruction stream
- * constant — without that, a `lea rsi, [rip+N]` would pin the
- * string's address to the instruction's position, turning every
- * future code tweak into a chase through the encoding. 128 bytes
- * is well past the 24-byte instruction block; the gap between
- * them is zeroed at install time so a mis-jump lands on `add
- * [rax], al` (`00 00`) forever and is harmless.
- *
- * The pause/pause prefix gives the 100 Hz timer at least one chance
- * to preempt us while we're genuinely in ring 3 — the evidence that
- * the scheduler handles a user-mode-interrupted context correctly.
- * Everything after the prefix is a linear walk through SYS_WRITE →
- * SYS_EXIT, with no control flow back to user mode.
+ * If isolation were broken (one shared PML4), the SECOND
+ * `MapUserPage(virt=0x40000000, ...)` call would panic on the
+ * "virt already mapped" assertion — which is exactly the assertion
+ * we used to demonstrate isolation works while writing this slice.
  */
 
 namespace customos::core
@@ -109,36 +80,12 @@ constexpr u8 kUserCodeBytes[] = {
 // clang-format on
 static_assert(sizeof(kUserCodeBytes) <= kUserMessageOffset, "user code runs into the fixed message offset");
 
-[[noreturn]] void Ring3SmokeMain(void*)
+// Populate `frame` with the user-code-page contents via the kernel
+// direct-map alias. Reaches the frame from the parent task's view —
+// the AS this frame is going into doesn't have to be active.
+void WriteUserCodeFrame(mm::PhysAddr frame)
 {
-    using arch::SerialWrite;
-    using arch::SerialWriteHex;
-    using namespace customos::mm;
-
-    SerialWrite("[ring3] smoke task starting\n");
-
-    // ---- 1) Allocate + map the user code page. -----------------------------
-
-    const PhysAddr code_frame = AllocateFrame();
-    if (code_frame == kNullFrame)
-    {
-        Panic("core/ring3", "failed to allocate user code frame");
-    }
-
-    // Write the payload via the direct-map alias — the MapPage below
-    // flips on kPageUser but ordinary kernel code still reaches the
-    // frame through the higher-half direct map. Doing the write
-    // before the user-mode install order lets us verify byte values
-    // before any ring-3 entry is even possible.
-    //
-    // Layout inside the page:
-    //   [0 .. sizeof(kUserCodeBytes)]   : instructions
-    //   [sizeof(..) .. kUserMessageOffset) : zero-fill (so mis-jumps
-    //                                        land on `add [rax], al`
-    //                                        == harmless)
-    //   [kUserMessageOffset .. +N)      : the "Hello…\n" bytes
-    //   [rest of page]                  : zero-fill
-    auto* code_direct = static_cast<u8*>(PhysToVirt(code_frame));
+    auto* code_direct = static_cast<u8*>(mm::PhysToVirt(frame));
     for (u64 i = 0; i < mm::kPageSize; ++i)
     {
         code_direct[i] = 0;
@@ -151,13 +98,57 @@ static_assert(sizeof(kUserCodeBytes) <= kUserMessageOffset, "user code runs into
     {
         code_direct[kUserMessageOffset + i] = static_cast<u8>(kUserMessage[i]);
     }
+}
 
-    // kPagePresent + kPageUser only — no kPageWritable (W^X for user
-    // code) and no kPageNoExecute (exec is exactly what we want).
-    MapPage(kUserCodeVirt, code_frame, kPagePresent | kPageUser);
-    sched::RegisterUserVmRegion(kUserCodeVirt, code_frame);
+// Entry point for the user task. Runs in ring 0 on a fresh kernel
+// stack with the task's own AS already loaded in CR3 (Schedule()
+// flipped it on first switch-in). All this entry needs to do is
+// publish RSP0 and iretq to user space.
+[[noreturn]] void Ring3UserEntry(void*)
+{
+    using arch::SerialWrite;
+    using arch::SerialWriteHex;
 
-    // ---- 2) Allocate + map the user stack page. ----------------------------
+    const u64 kstack_top = sched::SchedCurrentKernelStackTop();
+    if (kstack_top == 0)
+    {
+        Panic("core/ring3", "SchedCurrentKernelStackTop returned 0");
+    }
+    arch::TssSetRsp0(kstack_top);
+
+    SerialWrite("[ring3] task pid=");
+    SerialWriteHex(sched::CurrentTaskId());
+    SerialWrite(" entering ring 3 rip=");
+    SerialWriteHex(kUserCodeVirt);
+    SerialWrite(" rsp=");
+    SerialWriteHex(kUserStackTop);
+    SerialWrite("\n");
+
+    arch::EnterUserMode(kUserCodeVirt, kUserStackTop);
+}
+
+// Build a ring-3 task: allocate AS, allocate + populate code page,
+// allocate stack page, install both into the AS, hand the AS to a
+// new task. The AS reference is owned by the new task from this
+// point on — its reaper-time release will tear everything down.
+void SpawnRing3Task(const char* name)
+{
+    using arch::SerialWrite;
+    using arch::SerialWriteHex;
+    using namespace customos::mm;
+
+    AddressSpace* as = AddressSpaceCreate();
+    if (as == nullptr)
+    {
+        Panic("core/ring3", "AddressSpaceCreate failed");
+    }
+
+    const PhysAddr code_frame = AllocateFrame();
+    if (code_frame == kNullFrame)
+    {
+        Panic("core/ring3", "failed to allocate user code frame");
+    }
+    WriteUserCodeFrame(code_frame);
 
     const PhysAddr stack_frame = AllocateFrame();
     if (stack_frame == kNullFrame)
@@ -165,48 +156,41 @@ static_assert(sizeof(kUserCodeBytes) <= kUserMessageOffset, "user code runs into
         Panic("core/ring3", "failed to allocate user stack frame");
     }
 
-    MapPage(kUserStackVirt, stack_frame, kPagePresent | kPageWritable | kPageUser | kPageNoExecute);
-    sched::RegisterUserVmRegion(kUserStackVirt, stack_frame);
+    // Code: present + user, RX (no W, no NX). Stack: present + user
+    // + writable + NX. Same flags as the pre-AS version — what's
+    // different is they go into THIS AS's PML4 only, not the boot
+    // PML4 or any sibling AS.
+    AddressSpaceMapUserPage(as, kUserCodeVirt, code_frame, kPagePresent | kPageUser);
+    AddressSpaceMapUserPage(as, kUserStackVirt, stack_frame, kPagePresent | kPageWritable | kPageUser | kPageNoExecute);
 
-    // ---- 3) Publish kernel stack top to the TSS so user→kernel traps land. -
-    //
-    // Belt-and-braces: the scheduler's switch-in path already updated
-    // TSS.RSP0 on the way into this task, so the value is correct by
-    // the time we reach here. Writing it again here is harmless (same
-    // value) and documents the invariant at the exact point the next
-    // iretq will consume it. If the scheduler ever stops owning this
-    // invariant, the manual write below keeps this task working while
-    // the breakage is investigated.
-    const u64 kstack_top = sched::SchedCurrentKernelStackTop();
-    if (kstack_top == 0)
-    {
-        // CurrentTask()'s kernel stack must exist — this function runs as
-        // an entry fn of a SchedCreate'd task, which always has one.
-        Panic("core/ring3", "SchedCurrentKernelStackTop returned 0");
-    }
-    arch::TssSetRsp0(kstack_top);
-
-    SerialWrite("[ring3] user rip=");
-    SerialWriteHex(kUserCodeVirt);
-    SerialWrite(" user rsp=");
-    SerialWriteHex(kUserStackTop);
-    SerialWrite(" rsp0=");
-    SerialWriteHex(kstack_top);
+    SerialWrite("[ring3] queued task name=\"");
+    SerialWrite(name);
+    SerialWrite("\" as=");
+    SerialWriteHex(reinterpret_cast<u64>(as));
+    SerialWrite(" code_frame=");
+    SerialWriteHex(code_frame);
+    SerialWrite(" stack_frame=");
+    SerialWriteHex(stack_frame);
     SerialWrite("\n");
 
-    LogWithValue(LogLevel::Info, "core/ring3", "entering user mode at rip", kUserCodeVirt);
-
-    // ---- 4) Enter ring 3. Never returns. -----------------------------------
-
-    arch::EnterUserMode(kUserCodeVirt, kUserStackTop);
+    sched::SchedCreateUser(&Ring3UserEntry, nullptr, name, as);
 }
 
 } // namespace
 
 void StartRing3SmokeTask()
 {
-    sched::SchedCreate(&Ring3SmokeMain, nullptr, "ring3-smoke");
-    Log(LogLevel::Info, "core/ring3", "ring3 smoke thread queued");
+    // Two ring-3 tasks, both at the SAME user VAs (0x40000000 code,
+    // 0x40010000 stack). With per-process address spaces, both
+    // succeed: each has its own PML4 and the VA collisions are
+    // therefore not collisions at all. With the previous shared-
+    // PML4 design, the second SpawnRing3Task's MapUserPage at
+    // 0x40000000 would have panicked on the "virt already mapped"
+    // assertion — which is exactly the property that proves
+    // isolation is real here.
+    SpawnRing3Task("ring3-smoke-A");
+    SpawnRing3Task("ring3-smoke-B");
+    Log(LogLevel::Info, "core/ring3", "two ring3 smoke tasks queued (per-AS isolation)");
 }
 
 } // namespace customos::core

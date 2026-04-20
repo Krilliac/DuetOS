@@ -158,17 +158,25 @@ u64* AllocateTable()
     return table;
 }
 
-// Walk to (or create) the PT for `virt`, returning a pointer to the PTE
-// slot. `create` controls whether missing intermediate tables are allocated
-// or treated as "no mapping" (returns nullptr).
-u64* WalkToPte(uptr virt, bool create)
+// Walk to (or create) the PT for `virt` inside the page-table tree
+// rooted at `pml4`, returning a pointer to the PTE slot. `create`
+// controls whether missing intermediate tables are allocated or
+// treated as "no mapping" (returns nullptr).
+//
+// The pml4 argument is what makes per-process address spaces possible:
+// the kernel can install a user mapping into AS X's tables while a
+// task on AS Y is the active one — no CR3 flip required to populate.
+// The kernel-half mappings inside `pml4` must alias the boot PML4's
+// kernel-half entries (AddressSpaceCreate enforces this by copying
+// indices 256..511 verbatim).
+u64* WalkToPte(u64* pml4, uptr virt, bool create)
 {
     const u64 i4 = IndexPml4(virt);
     const u64 i3 = IndexPdpt(virt);
     const u64 i2 = IndexPd(virt);
     const u64 i1 = IndexPt(virt);
 
-    u64& pml4_entry = g_pml4[i4];
+    u64& pml4_entry = pml4[i4];
     if ((pml4_entry & kPagePresent) == 0)
     {
         if (!create)
@@ -307,13 +315,25 @@ bool IsUserAddressRange(u64 addr, u64 len)
 namespace
 {
 
-// Page-table walk helper: returns true iff the 4 KiB page containing
-// `virt` is present AND user-accessible. Missing intermediate tables
-// (PDPT / PD / PT not allocated) are treated as "not mapped" —
-// identical result to a PTE with Present=0.
-bool PagePresentAndUser(u64 virt)
+// Active PML4 = whatever CR3 currently points at. Used by the user-
+// pointer validators so that a syscall coming out of process X reads
+// X's tables, not some other process's. Reading CR3 once per syscall
+// is cheap (a single instruction); caching it in per-CPU buys nothing
+// because the syscall path already crossed at least one cacheline of
+// per-CPU state on entry.
+u64* ActivePml4()
 {
-    u64* pte = WalkToPte(virt, /*create=*/false);
+    const u64 cr3 = arch::ReadCr3();
+    return static_cast<u64*>(PhysToVirt(cr3 & kAddrMask));
+}
+
+// Page-table walk helper: returns true iff the 4 KiB page containing
+// `virt` is present AND user-accessible in the ACTIVE address space.
+// Missing intermediate tables (PDPT / PD / PT not allocated) are
+// treated as "not mapped" — identical result to a PTE with Present=0.
+bool PagePresentAndUser(u64* pml4, u64 virt)
+{
+    u64* pte = WalkToPte(pml4, virt, /*create=*/false);
     if (pte == nullptr)
     {
         return false;
@@ -322,26 +342,30 @@ bool PagePresentAndUser(u64 virt)
     return (*pte & kNeed) == kNeed;
 }
 
-// Walks every 4 KiB page covered by [addr, addr+len) and returns
-// true only if all of them are present with the user bit set.
-// Single-address-space today (no concurrent unmap under our feet),
-// so the check-then-copy window is race-free on UP and still race-
-// free on SMP because no AP runs user code yet. Revisit when either
-// (a) per-process page tables land (another CPU could unmap mid-
-// copy), or (b) demand paging lands (a kernel-legal user page can
-// start out NOT-present). Then move to a proper #PF fault-fixup
-// table in the trap dispatcher.
+// Walks every 4 KiB page covered by [addr, addr+len) in the ACTIVE
+// PML4 and returns true only if all of them are present with the
+// user bit set. The "active PML4" anchor is what makes per-process
+// isolation work: a syscall handler running on behalf of process X
+// reads X's tables, so it cannot accidentally validate a pointer
+// against process Y's mappings.
+//
+// Per-process tables now exist (Commit: per-process PML4) so an
+// unmap from another CPU's task COULD race a copy in-flight on
+// this CPU — but no AP runs user code today, so the window is
+// still empty in practice. Revisit when SMP scheduler join lands
+// alongside a __copy_user_fault_fixup table in the trap dispatcher.
 bool IsUserRangeAccessible(u64 addr, u64 len)
 {
     if (len == 0)
     {
         return true;
     }
+    u64* pml4 = ActivePml4();
     const u64 start = addr & ~kPageMask;
     const u64 end = (addr + len - 1) & ~kPageMask;
     for (u64 p = start; p <= end; p += kPageSize)
     {
-        if (!PagePresentAndUser(p))
+        if (!PagePresentAndUser(pml4, p))
         {
             return false;
         }
@@ -420,7 +444,7 @@ void MapPage(uptr virt, PhysAddr phys, u64 flags)
         PanicPaging("MapPage: unaligned physical address", phys);
     }
 
-    u64* pte = WalkToPte(virt, /*create=*/true);
+    u64* pte = WalkToPte(g_pml4, virt, /*create=*/true);
     if (*pte & kPagePresent)
     {
         PanicPaging("MapPage: virtual address already mapped", virt);
@@ -438,7 +462,7 @@ void UnmapPage(uptr virt)
         PanicPaging("UnmapPage: unaligned virtual address", virt);
     }
 
-    u64* pte = WalkToPte(virt, /*create=*/false);
+    u64* pte = WalkToPte(g_pml4, virt, /*create=*/false);
     if (pte == nullptr || (*pte & kPagePresent) == 0)
     {
         return; // not mapped — silent no-op
@@ -492,6 +516,16 @@ void UnmapMmio(void* virt, u64 bytes)
     {
         UnmapPage(base_virt + i * kPageSize);
     }
+}
+
+u64* BootPml4Virt()
+{
+    return g_pml4;
+}
+
+PhysAddr BootPml4Phys()
+{
+    return VirtToPhys(g_pml4);
 }
 
 PagingStats PagingStatsRead()

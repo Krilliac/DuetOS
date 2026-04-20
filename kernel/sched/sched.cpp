@@ -7,6 +7,7 @@
 #include "../core/panic.h"
 #include "../core/recovery.h"
 #include "../cpu/percpu.h"
+#include "../mm/address_space.h"
 #include "../mm/frame_allocator.h"
 #include "../mm/kheap.h"
 #include "../mm/paging.h"
@@ -59,16 +60,19 @@ struct Task
     // / real-time class would need a mutable field.
     TaskPriority priority;
 
-    // User-VM regions this task owns. Registered via
-    // RegisterUserVmRegion (usually from the task's entry function
-    // right after it maps its user-accessible pages). Reaped by
-    // the dead-task reaper: each entry turns into an UnmapPage +
-    // FreeFrame before the Task struct itself is KFreed. Size
-    // bounded at kMaxUserVmRegionsPerTask — hitting the cap
-    // panics, which is the "a consumer I didn't know about wants
-    // more user pages" signal.
-    u8 user_region_count;
-    UserVmRegion user_regions[kMaxUserVmRegionsPerTask];
+    // Per-process address space. nullptr means "kernel AS" (the
+    // boot PML4) — used by every kernel-only thread (workers,
+    // reaper, idle, keyboard reader, etc.). A non-null AS means
+    // this task owns one reference on it: the reaper drops that
+    // reference on task death, and if it was the last, the AS
+    // destructor walks the region table, frees the backing user
+    // frames, and tears down the user-half page tables.
+    //
+    // Schedule() publishes task->as to CR3 on every switch-in via
+    // AddressSpaceActivate. Same-AS switches (kernel→kernel) hit
+    // the fast-path and do not touch CR3 — no TLB flush paid for
+    // a scheduler decision that doesn't change the address space.
+    mm::AddressSpace* as;
 };
 
 namespace
@@ -322,7 +326,7 @@ void SchedInit()
     boot_task->waiting_on = nullptr;
     boot_task->wake_by_timeout = false;
     boot_task->priority = TaskPriority::Normal;
-    boot_task->user_region_count = 0;
+    boot_task->as = nullptr; // kernel AS — boot PML4
 
     Current() = boot_task;
     g_tasks_created = 1;
@@ -331,7 +335,13 @@ void SchedInit()
     SerialWrite("[sched] online; task 0 is \"kboot\"\n");
 }
 
-Task* SchedCreate(TaskEntry entry, void* arg, const char* name, TaskPriority priority)
+namespace
+{
+
+// Shared body for SchedCreate / SchedCreateUser. The only difference
+// between the two callers is the task's address space — kernel-only
+// tasks pass nullptr; ring-3-bound tasks pass a freshly-created AS.
+Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPriority priority, mm::AddressSpace* as)
 {
     KASSERT(entry != nullptr, "sched", "SchedCreate null entry fn");
     KASSERT(name != nullptr, "sched", "SchedCreate null name");
@@ -365,7 +375,7 @@ Task* SchedCreate(TaskEntry entry, void* arg, const char* name, TaskPriority pri
     t->waiting_on = nullptr;
     t->wake_by_timeout = false;
     t->priority = priority;
-    t->user_region_count = 0;
+    t->as = as;
 
     // Build the initial stack. ContextSwitch pops r15, r14, r13, r12,
     // rbp, rbx and then rets. So from bottom to top of the pre-planted
@@ -412,9 +422,24 @@ Task* SchedCreate(TaskEntry entry, void* arg, const char* name, TaskPriority pri
     SerialWrite(name);
     SerialWrite("\" rsp=");
     SerialWriteHex(t->rsp);
+    SerialWrite(" as=");
+    SerialWriteHex(reinterpret_cast<u64>(as));
     SerialWrite("\n");
 
     return t;
+}
+
+} // namespace
+
+Task* SchedCreate(TaskEntry entry, void* arg, const char* name, TaskPriority priority)
+{
+    return SchedCreateInternal(entry, arg, name, priority, /*as=*/nullptr);
+}
+
+Task* SchedCreateUser(TaskEntry entry, void* arg, const char* name, mm::AddressSpace* as)
+{
+    KASSERT(as != nullptr, "sched", "SchedCreateUser without AS");
+    return SchedCreateInternal(entry, arg, name, TaskPriority::Normal, as);
 }
 
 void Schedule()
@@ -478,6 +503,23 @@ void Schedule()
         const u64 rsp0 = reinterpret_cast<u64>(next->stack_base) + next->stack_size;
         arch::TssSetRsp0(rsp0);
     }
+
+    // Activate the next task's address space. nullptr means "kernel
+    // AS" (the boot PML4 — every kernel-only task uses it). The
+    // call is a no-op when next->as already matches this CPU's
+    // current AS, so the common kernel→kernel switch pays no CR3
+    // write and no TLB flush. Switching INTO a user task or BACK
+    // to a kernel-only task across user-task boundaries is the
+    // only path that actually writes CR3.
+    //
+    // Critical: must happen BEFORE ContextSwitch. The next task's
+    // first instruction after ContextSwitch may be in user space
+    // (via the iretq inside arch::EnterUserMode at the trampoline
+    // tail) or it may dereference its own user-half pointers via
+    // the kernel-side direct map (PhysToVirt — kernel half — is
+    // always valid, but a user pointer in next->rsp's frame would
+    // read stale TLB entries from prev's AS without the flip).
+    mm::AddressSpaceActivate(next->as);
 
     ContextSwitch(&prev->rsp, next->rsp);
     // When we return here, `prev` is running again (it may have been
@@ -650,23 +692,6 @@ u64 CurrentTaskId()
     return self->id;
 }
 
-void RegisterUserVmRegion(u64 vaddr, u64 frame)
-{
-    Task* self = Current();
-    if (self == nullptr)
-    {
-        PanicSched("RegisterUserVmRegion with no current task");
-    }
-    if (self->user_region_count >= kMaxUserVmRegionsPerTask)
-    {
-        PanicSched("RegisterUserVmRegion: per-task cap exceeded");
-    }
-    // No sched_lock — a task only registers its own regions from its
-    // own context; there's no contender to race against.
-    self->user_regions[self->user_region_count] = UserVmRegion{vaddr, frame};
-    ++self->user_region_count;
-}
-
 u64 SchedCurrentKernelStackTop()
 {
     Task* self = Current();
@@ -741,21 +766,21 @@ namespace
             drained = dead->next;
             dead->next = nullptr;
 
-            // Reclaim every user-VM region the task registered via
-            // RegisterUserVmRegion — unmap the page from the global
-            // PML4 AND return the backing frame to the physical
-            // allocator. Must happen BEFORE the Task struct itself
-            // is freed (we read the region table out of it). Doing
-            // this in the reaper (not SchedExit) keeps the unmap +
-            // FreeFrame off the dying task's own stack, same
-            // argument as the stack KFree.
-            for (u8 i = 0; i < dead->user_region_count; ++i)
-            {
-                const UserVmRegion region = dead->user_regions[i];
-                mm::UnmapPage(region.vaddr);
-                mm::FreeFrame(region.frame);
-            }
-            dead->user_region_count = 0;
+            // Drop the task's address-space reference. If this was
+            // the last task on that AS (the v0 case — one Task per
+            // AS), AddressSpaceRelease walks the region table to
+            // return every backing user frame, walks the user-half
+            // page tables to free intermediate PDPT/PD/PT pages,
+            // and frees the PML4 frame. Tasks with as == nullptr
+            // are kernel-only and the call is a no-op.
+            //
+            // Must happen BEFORE freeing the Task struct (we read
+            // dead->as out of it) and AFTER the dying task is off-
+            // CPU (which it is by construction — SchedExit only
+            // enqueues to the zombie list once Schedule() has
+            // switched away).
+            mm::AddressSpaceRelease(dead->as);
+            dead->as = nullptr;
 
             // Stack_base can be nullptr for the boot task (task 0);
             // defensive null-check even though task 0 should never

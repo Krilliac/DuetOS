@@ -71,6 +71,19 @@ inline constexpr u64 kMmioArenaBytes = 512ULL * 1024 * 1024;
 /// honoured, and prime internal bookkeeping. Panics on failure.
 void PagingInit();
 
+/// Boot PML4 — installed by boot.S and adopted by PagingInit. Exposed
+/// for `mm::AddressSpace` so it can copy the kernel-half PML4 entries
+/// (indices 256..511) into every newly-created per-process PML4. The
+/// kernel half is shared across every address space by sharing the
+/// PDPT pages those entries point at, so changes deep in the kernel
+/// page-table tree (new MMIO mapping, heap growth) propagate to every
+/// process automatically — no shootdown needed. The constraint is
+/// that nobody installs a brand-new top-level PML4 entry on the
+/// kernel half AFTER the first AddressSpace has been created; today
+/// nothing does (MMIO arena and direct map both live in PML4[511]).
+u64* BootPml4Virt();
+PhysAddr BootPml4Phys();
+
 /// Install a 4 KiB mapping at `virt` for the given physical frame and
 /// flags. `kPagePresent` is implied — callers should still pass it for
 /// clarity. Allocates intermediate page tables on demand.

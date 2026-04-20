@@ -2,6 +2,11 @@
 
 #include "../core/types.h"
 
+namespace customos::mm
+{
+struct AddressSpace; // forward decl; defined in kernel/mm/address_space.h
+}
+
 /*
  * CustomOS kernel scheduler — v0.
  *
@@ -59,6 +64,21 @@ void SchedInit();
 /// TaskPriority::Idle for per-CPU idle tasks (ones that should only
 /// run when no Normal task is Ready).
 Task* SchedCreate(TaskEntry entry, void* arg, const char* name, TaskPriority priority = TaskPriority::Normal);
+
+/// Spawn a new task with a private address space. The AS becomes the
+/// task's CR3 on its first switch-in, and the reaper drops the AS
+/// reference when the task dies — if this task was the last holder,
+/// the AS is destroyed (page tables freed, backing frames returned).
+///
+/// The AS must come from `mm::AddressSpaceCreate`. Map any user code
+/// + stack pages into it via `mm::AddressSpaceMapUserPage` BEFORE
+/// calling SchedCreateUser; the task's entry function sees those
+/// mappings already installed when it calls `arch::EnterUserMode`.
+///
+/// `entry` runs in ring 0 on a fresh kernel stack (same as
+/// SchedCreate); it's expected to set TSS.RSP0 and call
+/// arch::EnterUserMode to drop to ring 3.
+Task* SchedCreateUser(TaskEntry entry, void* arg, const char* name, mm::AddressSpace* as);
 
 /// Voluntary yield. Pushes current task to the tail of the runqueue and
 /// switches to the head (if any other task is ready).
@@ -119,32 +139,21 @@ u64 CurrentTaskId();
 u64 SchedCurrentKernelStackTop();
 
 /*
- * Per-task user-VM bookkeeping.
+ * Per-task user-VM bookkeeping has moved into `mm::AddressSpace`.
  *
- * A ring-3-capable task registers every user-accessible page it maps
- * (code page, stack page, and — eventually — heap/shared pages). When
- * the task exits (SchedExit / SYS_EXIT), the reaper walks the list and
- * calls `mm::UnmapPage(vaddr) + mm::FreeFrame(frame)` for each, so
- * nothing leaks across task boundaries.
+ * Rationale: with per-process page tables, the unit that owns user
+ * pages is the address space, not the task. Multiple tasks of the
+ * same process (future thread support) share an AS and therefore
+ * share its mappings; freeing user pages only when the LAST task
+ * dies is the only correct semantics. The reaper now releases the
+ * AS reference on task death; the AS itself is responsible for
+ * walking its region table and returning frames at refcount-zero.
  *
- * v0 keeps the list on-Task-struct at a fixed size (4 entries), so
- * registration is allocation-free and the reaper's access pattern is
- * tight. The bound grows once a consumer needs more than code + stack
- * + a heap + a shared page — none exist today.
- *
- * `RegisterUserVmRegion` is called from the registering task's own
- * entry function (so it targets `Current()` unambiguously). Calling it
- * more than `kMaxUserVmRegionsPerTask` times panics.
+ * Code that used to call `sched::RegisterUserVmRegion(virt, frame)`
+ * after a `mm::MapPage` should now call
+ * `mm::AddressSpaceMapUserPage(as, virt, frame, flags)` — one call
+ * that both installs the mapping AND records ownership.
  */
-inline constexpr u64 kMaxUserVmRegionsPerTask = 4;
-
-struct UserVmRegion
-{
-    u64 vaddr; // start of a 4 KiB user page
-    u64 frame; // PhysAddr returned by mm::AllocateFrame
-};
-
-void RegisterUserVmRegion(u64 vaddr, u64 frame);
 
 /// Diagnostics — cheap snapshots.
 struct SchedStats

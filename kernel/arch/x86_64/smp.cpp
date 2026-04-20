@@ -276,6 +276,7 @@ u64 SmpStartAps()
         ap_pcpu->cpu_id = cpu_id;
         ap_pcpu->lapic_id = rec.apic_id;
         ap_pcpu->current_task = nullptr;
+        ap_pcpu->current_as = nullptr; // boot PML4 — APs come up on the kernel AS
         ap_pcpu->need_resched = false;
         g_ap_percpus[cpu_id] = ap_pcpu;
 
