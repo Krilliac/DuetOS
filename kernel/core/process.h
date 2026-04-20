@@ -145,8 +145,27 @@ struct Process
     // the base.
     u64 user_code_va;
     u64 user_stack_va; // stack base; top = user_stack_va + kPageSize
+
+    // CPU-tick budget. tick_budget is a hard cap; ticks_used is
+    // incremented by the timer IRQ for every tick this process's
+    // task(s) were currently-running. When ticks_used >= tick_budget,
+    // the scheduler marks the task Dead on its next re-enqueue
+    // (see sched.cpp) and the reaper drops the Process reference.
+    //
+    // Sandbox profile gets a tight budget (long enough for normal
+    // work but short enough that a spin-loop is caught in seconds).
+    // Trusted profile gets effectively unlimited — the value is
+    // stored and checked, but set so high the check never fires in
+    // practice.
+    u64 tick_budget;
+    u64 ticks_used;
+
     u64 refcount;
 };
+
+// Canonical tick budgets. Timer runs at 100 Hz, so 1000 ticks ≈ 10 s.
+inline constexpr u64 kTickBudgetSandbox = 1000;          // 10 seconds at 100 Hz
+inline constexpr u64 kTickBudgetTrusted = 1ULL << 40;    // ~12 decades at 100 Hz = effectively unlimited
 
 /// Allocate a Process and take ownership of `as`. Does NOT bump
 /// `as`'s refcount — ProcessCreate assumes the caller hands over
@@ -156,7 +175,7 @@ struct Process
 /// fs::RamfsTrustedRoot() / fs::RamfsSandboxRoot() based on the
 /// process's trust level. Returns nullptr on kheap failure.
 Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, const fs::RamfsNode* root, u64 user_code_va,
-                       u64 user_stack_va);
+                       u64 user_stack_va, u64 tick_budget);
 
 /// Bump refcount. Use when a second holder appears (a future thread
 /// spawn that shares the process, a borrow into a non-owning table).

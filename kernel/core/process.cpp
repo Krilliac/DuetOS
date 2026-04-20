@@ -22,11 +22,12 @@ constinit u64 g_live_processes = 0;
 } // namespace
 
 Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, const fs::RamfsNode* root, u64 user_code_va,
-                       u64 user_stack_va)
+                       u64 user_stack_va, u64 tick_budget)
 {
     KASSERT(name != nullptr, "core/process", "ProcessCreate null name");
     KASSERT(as != nullptr, "core/process", "ProcessCreate null as");
     KASSERT(root != nullptr, "core/process", "ProcessCreate null root");
+    KASSERT(tick_budget > 0, "core/process", "ProcessCreate zero tick_budget");
 
     auto* p = static_cast<Process*>(mm::KMalloc(sizeof(Process)));
     if (p == nullptr)
@@ -41,6 +42,8 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     p->root = root;
     p->user_code_va = user_code_va;
     p->user_stack_va = user_stack_va;
+    p->tick_budget = tick_budget;
+    p->ticks_used = 0;
     p->refcount = 1;
 
     ++g_live_processes;

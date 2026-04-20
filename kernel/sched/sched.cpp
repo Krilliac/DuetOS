@@ -82,6 +82,14 @@ struct Task
     // SchedCreateUser; the reaper ProcessReleases it on death.
     // Used by CurrentProcess() for cap lookup.
     core::Process* process;
+
+    // Flag set by OnTimerTick when the owning process's tick
+    // budget has been exhausted. Checked by Schedule() on each
+    // re-enqueue; when set, the task is diverted to the zombie
+    // list instead of being put back on the runqueue, and the
+    // reaper tears it down normally. Irrelevant for kernel-only
+    // tasks (process == nullptr — they never have budgets).
+    bool tick_exhausted;
 };
 
 namespace
@@ -303,6 +311,13 @@ bool TickReached(u64 now, u64 deadline)
     return static_cast<i64>(now - deadline) >= 0;
 }
 
+// Forward decl — defined in the wait-queue block further down.
+// Schedule() needs it for the tick-budget kill path (it already
+// holds g_sched_lock and can't call the non-_Locked variant that
+// would re-acquire). Must be extern-linkage inside this anon
+// namespace; the definition below has the same linkage.
+Task* WaitQueueWakeOneLocked(WaitQueue* wq);
+
 // Defined in context_switch.S. The first `ret` out of ContextSwitch for a
 // freshly-created task lands here. Reads the entry function and argument
 // from the callee-saved registers the SchedCreate stack primer planted
@@ -335,8 +350,9 @@ void SchedInit()
     boot_task->waiting_on = nullptr;
     boot_task->wake_by_timeout = false;
     boot_task->priority = TaskPriority::Normal;
-    boot_task->as = nullptr;      // kernel AS — boot PML4
-    boot_task->process = nullptr; // kernel-only — no owning process
+    boot_task->as = nullptr;           // kernel AS — boot PML4
+    boot_task->process = nullptr;      // kernel-only — no owning process
+    boot_task->tick_exhausted = false; // kernel tasks never hit a budget
 
     Current() = boot_task;
     g_tasks_created = 1;
@@ -387,6 +403,7 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
     t->priority = priority;
     t->as = as;
     t->process = nullptr; // populated by SchedCreateUser for user tasks
+    t->tick_exhausted = false;
 
     // Build the initial stack. ContextSwitch pops r15, r14, r13, r12,
     // rbp, rbx and then rets. So from bottom to top of the pre-planted
@@ -500,8 +517,35 @@ void Schedule()
         prev = Current();
         if (prev->state == TaskState::Running)
         {
-            prev->state = TaskState::Ready;
-            RunqueuePush(prev);
+            if (prev->tick_exhausted)
+            {
+                SerialWrite("[sched] tick-exhausted kill: id=");
+                SerialWriteHex(prev->id);
+                SerialWrite(" name=\"");
+                SerialWrite(prev->name);
+                SerialWrite("\"\n");
+                // CPU-tick budget ran out (flagged by OnTimerTick). Treat
+                // identically to SchedExit but inline — we're already
+                // inside Schedule()'s locked section, calling SchedExit
+                // here would re-enter the lock and fight the state
+                // machine. Transition Running → Dead, push to zombies,
+                // wake the reaper.
+                prev->state = TaskState::Dead;
+                ++g_tasks_exited;
+                --g_tasks_live;
+                prev->next = g_zombies;
+                g_zombies = prev;
+                // Wake the reaper; it's blocked on g_reaper_wq and
+                // noticing a new zombie needs a wake. WaitQueueWakeOne
+                // itself acquires g_sched_lock — but we already hold
+                // it. Use the _Locked variant to avoid recursive lock.
+                WaitQueueWakeOneLocked(&g_reaper_wq);
+            }
+            else
+            {
+                prev->state = TaskState::Ready;
+                RunqueuePush(prev);
+            }
         }
         // Dead tasks are NOT re-enqueued; their Task struct + stack live on
         // until the reaper reclaims them.
@@ -666,6 +710,42 @@ bool TakeNeedResched()
 void OnTimerTick(u64 now_ticks)
 {
     g_tick_now = now_ticks;
+
+    // Tick-budget accounting for the currently-running task's
+    // process. Every tick this task is Running counts against
+    // its process's CPU-time budget. When the budget is exhausted,
+    // flag the task to be terminated at next resched — we do NOT
+    // call SchedExit here (this is IRQ context; Schedule() would
+    // switch away before LAPIC EOI, leaving the in-service bit
+    // stuck). The flag is read by Schedule() which converts a
+    // budget-exhausted task into a Dead one on re-enqueue.
+    //
+    // Kernel-only tasks (process == nullptr) don't have a budget
+    // — they're trusted runtime threads (reaper, idle, workers).
+    // Tick-budget accounting for the currently-running task's process.
+    // Every tick the task was Running counts against its process's CPU
+    // budget. When exhausted, flag the task — Schedule() reads the flag
+    // and converts a budget-burned task into a Dead one on next resched
+    // (we deliberately don't call SchedExit here; this is IRQ context
+    // and SchedExit ends in a Schedule that would switch-away before
+    // LAPIC EOI, leaving the in-service bit stuck).
+    //
+    // Kernel-only tasks (process == nullptr) don't have budgets —
+    // they're trusted runtime threads (reaper, idle, workers).
+    Task* cur = Current();
+    if (cur != nullptr && cur->process != nullptr)
+    {
+        core::Process* proc = cur->process;
+        ++proc->ticks_used;
+        if (proc->ticks_used >= proc->tick_budget && !cur->tick_exhausted)
+        {
+            cur->tick_exhausted = true;
+            arch::SerialWrite("[sched] tick budget exhausted pid=");
+            arch::SerialWriteHex(proc->pid);
+            arch::SerialWrite("\n");
+            NeedResched() = true;
+        }
+    }
 
     bool woke_any = false;
     {

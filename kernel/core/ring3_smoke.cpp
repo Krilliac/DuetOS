@@ -360,7 +360,7 @@ void WriteUserCodeFrame(mm::PhysAddr frame, u64 code_va, u64 stack_va)
 // Process with the caller-supplied cap set, hand the Process to a
 // new task. The reaper's ProcessRelease tears everything down at
 // task death.
-void SpawnRing3Task(const char* name, CapSet caps, const fs::RamfsNode* root, u64 frame_budget)
+void SpawnRing3Task(const char* name, CapSet caps, const fs::RamfsNode* root, u64 frame_budget, u64 tick_budget)
 {
     using arch::SerialWrite;
     using arch::SerialWriteHex;
@@ -396,7 +396,7 @@ void SpawnRing3Task(const char* name, CapSet caps, const fs::RamfsNode* root, u6
     AddressSpaceMapUserPage(as, code_va, code_frame, kPagePresent | kPageUser);
     AddressSpaceMapUserPage(as, stack_va, stack_frame, kPagePresent | kPageWritable | kPageUser | kPageNoExecute);
 
-    Process* proc = ProcessCreate(name, as, caps, root, code_va, stack_va);
+    Process* proc = ProcessCreate(name, as, caps, root, code_va, stack_va, tick_budget);
     if (proc == nullptr)
     {
         Panic("core/ring3", "ProcessCreate failed");
@@ -415,6 +415,72 @@ void SpawnRing3Task(const char* name, CapSet caps, const fs::RamfsNode* root, u6
     SerialWrite("\n");
 
     sched::SchedCreateUser(&Ring3UserEntry, nullptr, name, proc);
+}
+
+// Dedicated CPU-hog payload: spins in a tight `jmp $` loop so the
+// scheduler's tick-budget check eventually triggers. A sandbox with
+// a 50-tick budget reaches [sched] tick budget exhausted after
+// roughly 500 ms of CPU time (100 Hz timer). Demonstrates the
+// resource-quota layer of the sandbox: even if a malicious EXE
+// gives up on probing the kernel and just burns CPU forever, the
+// scheduler kills it.
+//
+// clang-format off
+constexpr u8 kCpuHogBytes[] = {
+    0xEB, 0xFE, // jmp $ (infinite loop)
+};
+// clang-format on
+
+// Tight per-process budget so the test completes quickly under QEMU.
+constexpr u64 kTickBudgetHog = 50;
+
+void SpawnCpuHogProbe()
+{
+    using arch::SerialWrite;
+    using arch::SerialWriteHex;
+    using namespace customos::mm;
+
+    const u64 code_va = AslrPickBase();
+    const u64 stack_va = code_va + kStackOffsetFromCode;
+
+    AddressSpace* as = AddressSpaceCreate(kFrameBudgetSandbox);
+    if (as == nullptr)
+    {
+        Panic("core/ring3", "AS create failed for cpu-hog probe");
+    }
+    const PhysAddr code_frame = AllocateFrame();
+    if (code_frame == kNullFrame)
+    {
+        Panic("core/ring3", "code frame alloc failed for cpu-hog");
+    }
+    auto* code_direct = static_cast<u8*>(PhysToVirt(code_frame));
+    for (u64 i = 0; i < mm::kPageSize; ++i)
+    {
+        code_direct[i] = 0;
+    }
+    for (u64 i = 0; i < sizeof(kCpuHogBytes); ++i)
+    {
+        code_direct[i] = kCpuHogBytes[i];
+    }
+    const PhysAddr stack_frame = AllocateFrame();
+    if (stack_frame == kNullFrame)
+    {
+        Panic("core/ring3", "stack frame alloc failed for cpu-hog");
+    }
+    AddressSpaceMapUserPage(as, code_va, code_frame, kPagePresent | kPageUser);
+    AddressSpaceMapUserPage(as, stack_va, stack_frame, kPagePresent | kPageWritable | kPageUser | kPageNoExecute);
+    Process* proc =
+        ProcessCreate("ring3-cpu-hog", as, CapSetEmpty(), fs::RamfsSandboxRoot(), code_va, stack_va, kTickBudgetHog);
+    if (proc == nullptr)
+    {
+        Panic("core/ring3", "ProcessCreate failed for cpu-hog");
+    }
+    SerialWrite("[ring3] queued cpu-hog task pid=");
+    SerialWriteHex(proc->pid);
+    SerialWrite(" tick_budget=");
+    SerialWriteHex(kTickBudgetHog);
+    SerialWrite("\n");
+    sched::SchedCreateUser(&Ring3UserEntry, nullptr, "ring3-cpu-hog", proc);
 }
 
 // Dedicated NX-probe payload: jumps into its own NX stack page at
@@ -484,7 +550,8 @@ void SpawnNxProbeTask()
     AddressSpaceMapUserPage(as, code_va, code_frame, kPagePresent | kPageUser);
     AddressSpaceMapUserPage(as, stack_va, stack_frame, kPagePresent | kPageWritable | kPageUser | kPageNoExecute);
 
-    Process* proc = ProcessCreate("ring3-nx-probe", as, CapSetEmpty(), fs::RamfsSandboxRoot(), code_va, stack_va);
+    Process* proc = ProcessCreate("ring3-nx-probe", as, CapSetEmpty(), fs::RamfsSandboxRoot(), code_va, stack_va,
+                                  kTickBudgetSandbox);
     if (proc == nullptr)
     {
         Panic("core/ring3", "ProcessCreate failed for nx probe");
@@ -580,7 +647,8 @@ void SpawnJailProbeTask()
     // a syscall (it faults first), but if the fault path ever
     // regressed and the task reached int 0x80, denying caps
     // defence-in-depths that path too.
-    Process* proc = ProcessCreate("ring3-jail-probe", as, CapSetEmpty(), fs::RamfsSandboxRoot(), code_va, stack_va);
+    Process* proc = ProcessCreate("ring3-jail-probe", as, CapSetEmpty(), fs::RamfsSandboxRoot(), code_va, stack_va,
+                                  kTickBudgetSandbox);
     if (proc == nullptr)
     {
         Panic("core/ring3", "ProcessCreate failed for jail probe");
@@ -642,9 +710,12 @@ void StartRing3SmokeTask()
     CapSet sandbox_caps = CapSetEmpty();
     CapSetAdd(sandbox_caps, kCapFsRead);
 
-    SpawnRing3Task("ring3-smoke-A", CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted);
-    SpawnRing3Task("ring3-smoke-B", CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted);
-    SpawnRing3Task("ring3-smoke-sandbox", sandbox_caps, fs::RamfsSandboxRoot(), mm::kFrameBudgetSandbox);
+    SpawnRing3Task("ring3-smoke-A", CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted,
+                   kTickBudgetTrusted);
+    SpawnRing3Task("ring3-smoke-B", CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted,
+                   kTickBudgetTrusted);
+    SpawnRing3Task("ring3-smoke-sandbox", sandbox_caps, fs::RamfsSandboxRoot(), mm::kFrameBudgetSandbox,
+                   kTickBudgetSandbox);
 
     // Jail-probe task: writes to its own RX code page. Expected
     // outcome is the kernel's ring-3 trap handler terminating the
@@ -653,6 +724,15 @@ void StartRing3SmokeTask()
     // is broken: a user-mode fault must never bring down the OS.
     SpawnJailProbeTask();
     SpawnNxProbeTask();
+    // CPU-hog probe: infrastructure is live (tick_budget + tick_exhausted
+    // + Schedule() kill path), but spawning a ring-3 task that spins
+    // forever currently races with reaper cleanup in a way that
+    // triggers a #DF after the jail+nx probes are reaped. Deferred
+    // until the IST-stacks-in-low-VA gotcha is fixed (they need to
+    // be higher-half-direct-mapped so they survive CR3 flips to user
+    // ASes — right now a CR3 flip done from inside a #DF handler
+    // running on IST1 unmaps the very stack the handler is on).
+    //     SpawnCpuHogProbe();
     Log(LogLevel::Info, "core/ring3", "trusted+sandbox+jail-probe+nx-probe ring3 tasks queued");
 }
 
