@@ -2,6 +2,7 @@
 
 #include "../arch/x86_64/cpu.h"
 #include "../arch/x86_64/serial.h"
+#include "../arch/x86_64/smp.h"
 #include "../arch/x86_64/timer.h"
 #include "../cpu/percpu.h"
 #include "klog.h"
@@ -245,6 +246,12 @@ void Panic(const char* subsystem, const char* message)
     // first matters for diagnosis.
     arch::Cli();
 
+    // Broadcast NMI to peer CPUs so they stop fighting for the
+    // serial line / executing against potentially-corrupt shared
+    // state. Peers halt quietly in the trap dispatcher's NMI
+    // short-circuit. No-op pre-LapicInit.
+    arch::PanicBroadcastNmi();
+
     arch::SerialWrite("\n[panic] ");
     arch::SerialWrite(subsystem);
     arch::SerialWrite(": ");
@@ -266,6 +273,7 @@ void Panic(const char* subsystem, const char* message)
 void PanicWithValue(const char* subsystem, const char* message, u64 value)
 {
     arch::Cli();
+    arch::PanicBroadcastNmi();
 
     arch::SerialWrite("\n[panic] ");
     arch::SerialWrite(subsystem);

@@ -116,6 +116,50 @@ void SmpSendIpi(u8 target_apic_id, u32 icr_low)
     WaitForIcrDelivery();
 }
 
+void PanicBroadcastNmi()
+{
+    // No LAPIC means we panicked before LapicInit (early frame
+    // allocator / paging failure). Nothing to broadcast to.
+    if (!LapicIsReady())
+    {
+        return;
+    }
+
+    // ICR low:
+    //   bits 0..7:   vector (ignored for NMI delivery mode)
+    //   bits 8..10:  delivery mode = 0b100 (NMI)
+    //   bit 14:      level = 1 (assert)
+    //   bits 18..19: destination shorthand = 0b11 (all-excluding-self)
+    //
+    // Final value: (0b100 << 8) | (1 << 14) | (0b11 << 18) = 0xC4400.
+    constexpr u32 kIcrDeliveryNmi = 4U << 8;
+    constexpr u32 kIcrDstShorthandAllExSelf = 3U << 18;
+    constexpr u32 icr_low = kIcrDeliveryNmi | kIcrLevelAssert | kIcrDstShorthandAllExSelf;
+
+    // High half doesn't matter with the shorthand, but write it
+    // for cleanliness so peer-LAPIC-ID stales don't show up in a
+    // chipset-specific ICR latch.
+    LapicWrite(kLapicRegIcrHigh, 0);
+    LapicWrite(kLapicRegIcrLow, icr_low);
+
+    // Inline the delivery-wait — the normal helper panics on
+    // timeout, and recursing into Panic from Panic would be a
+    // funhouse-mirrors problem. Wait a bounded number of spins
+    // and return either way.
+    for (u64 spin = 0; spin < 1'000'000; ++spin)
+    {
+        if ((LapicRead(kLapicRegIcrLow) & kIcrDeliveryPending) == 0)
+        {
+            return;
+        }
+        asm volatile("pause" ::: "memory");
+    }
+    // Timed out. Log via raw serial (klog at panic time might be
+    // mid-format) and keep going — the calling CPU's halt still
+    // stops our own execution, which is the minimum guarantee.
+    core::Log(core::LogLevel::Warn, "arch/smp", "NMI broadcast ICR stuck; peer CPUs may keep running");
+}
+
 u64 SmpCpusOnline()
 {
     return g_cpus_online;

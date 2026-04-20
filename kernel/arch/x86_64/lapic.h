@@ -51,4 +51,9 @@ void LapicEoi();
 u32 LapicRead(u64 reg_offset);
 void LapicWrite(u64 reg_offset, u32 value);
 
+/// True once LapicInit has mapped the MMIO window and enabled the
+/// APIC. Useful for paths that may run early in boot (notably the
+/// panic path) and need to avoid poking an un-mapped LAPIC window.
+bool LapicIsReady();
+
 } // namespace customos::arch

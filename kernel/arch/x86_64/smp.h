@@ -60,4 +60,18 @@ u64 SmpCpusOnline();
 /// wake-up) share the same ICR dance rather than reimplementing it.
 void SmpSendIpi(u8 target_apic_id, u32 icr_low);
 
+/// Broadcast an NMI to every CPU except the calling one. Used by
+/// the panic path to halt peer CPUs before dumping diagnostics so
+/// they can't keep executing against potentially-corrupt shared
+/// state while we're writing the crash banner. Uses the "all
+/// excluding self" destination shorthand so no per-CPU loop is
+/// needed. Safe to call even on single-CPU systems — the shorthand
+/// simply matches zero targets.
+///
+/// Blocks until delivery-status clears, but will not panic on
+/// timeout (see PanicBroadcastNmi's own comment): the panic path
+/// is already committed to halting; tolerating a stuck IPI is
+/// better than recursing into another panic.
+void PanicBroadcastNmi();
+
 } // namespace customos::arch
