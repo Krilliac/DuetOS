@@ -25,6 +25,7 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     core/klog.cpp
     core/main.cpp
     core/panic.cpp
+    core/reboot.cpp
     core/recovery.cpp
     core/symbols.cpp
     acpi/acpi.cpp
