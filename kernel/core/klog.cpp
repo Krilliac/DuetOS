@@ -1,6 +1,8 @@
 #include "klog.h"
 
+#include "../arch/x86_64/hpet.h"
 #include "../arch/x86_64/serial.h"
+#include "../arch/x86_64/timer.h"
 
 namespace customos::core
 {
@@ -74,6 +76,31 @@ inline bool LevelEnabled(LogLevel level)
     return static_cast<u8>(level) >= effective;
 }
 
+// Timestamp source preference:
+//   1. HPET main counter (sub-microsecond precision; unit is
+//      HpetPeriodFemtoseconds()).
+//   2. Scheduler tick counter (100 Hz; unit is 10 ms).
+// The readable format is intentionally left as raw hex — a printf-
+// free kernel isn't going to do decimal-with-microsecond-field. The
+// unit is implied by which source fired (reader can cross-reference
+// the "[acpi] hpet=..." boot log line).
+inline u64 Timestamp()
+{
+    const u64 hpet = arch::HpetReadCounter();
+    if (hpet != 0)
+    {
+        return hpet;
+    }
+    return arch::TimerTicks();
+}
+
+inline void WriteTimestampPrefix()
+{
+    arch::SerialWrite("[ts=");
+    arch::SerialWriteHex(Timestamp());
+    arch::SerialWrite("] ");
+}
+
 } // namespace
 
 void SetLogThreshold(LogLevel level)
@@ -92,6 +119,7 @@ void Log(LogLevel level, const char* subsystem, const char* message)
     {
         return;
     }
+    WriteTimestampPrefix();
     arch::SerialWrite(LevelTag(level));
     arch::SerialWrite(subsystem);
     arch::SerialWrite(" : ");
@@ -107,6 +135,7 @@ void LogWithValue(LogLevel level, const char* subsystem, const char* message, u6
     {
         return;
     }
+    WriteTimestampPrefix();
     arch::SerialWrite(LevelTag(level));
     arch::SerialWrite(subsystem);
     arch::SerialWrite(" : ");
