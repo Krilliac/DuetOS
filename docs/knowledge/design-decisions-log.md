@@ -607,6 +607,71 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 084 — Per-window content drawers + Task Manager window
+
+- **Scope:** `kernel/drivers/video/widget.{h,cpp}` — new
+  `WindowContentFn` type, `WindowSetContentDraw`, and a
+  content-invoke step at the end of each window's entry in
+  `WindowDrawAllOrdered`. `kernel/core/main.cpp` — registers
+  a "TASK MANAGER" window and installs a drawer that prints
+  seven live rows (uptime, context switches, task counts,
+  memory frames).
+- **Decision:** Content drawers are optional per-window
+  function pointers plus a void* cookie, invoked with the
+  pre-computed client rect. The drawer runs inside the
+  compositor lock (via the normal compose path) so it can
+  safely read any GUI-adjacent state. No clipping yet — the
+  drawer is trusted to stay inside the rect.
+- **Why:** Closes the "windows are static images" observation.
+  Every live-data panel (task manager, log viewer, network
+  monitor, device list) fits this shape. Landing the hook
+  now means the next dozen such windows cost one small
+  function each.
+- **Rules out / defers:** Per-window repaint cadence
+  (ui-ticker recomposes at 1 Hz and that's fine for v0).
+  Clip rects enforced by the compositor. Partial redraw.
+  Content-drawer-only repaint without recomposing the whole
+  window stack.
+- **Revisit when:** First window needs to repaint at a
+  different cadence (e.g. 60 Hz animation). Damage-rect
+  compositor lands. Clipping matters.
+- **Related tracks:** Track 9 (Windowing — widget + content
+  hook), Track 7 (Userland — shell complement).
+
+---
+
+## 083 — Writable /tmp tier (tmpfs) + touch / rm / echo redirect
+
+- **Scope:** `kernel/fs/tmpfs.{h,cpp}` — new 16-slot flat
+  writable tier with 32-byte names and 512-byte content
+  buffers in .bss. `kernel/core/shell.cpp` — `ls` / `cat` /
+  Tab completion route /tmp paths through tmpfs; new
+  `touch` / `rm` commands; `echo ... > /tmp/name` redirect.
+- **Decision:** The first writable tier is deliberately
+  primitive — flat namespace, static-size slots, no heap —
+  so it unblocks shell feel (`echo hi > /tmp/note; cat
+  /tmp/note`) without prejudging the real VFS write-path
+  API. Every later tier (on-disk FS, network mount) plugs
+  into the VFS instead. Paths outside /tmp stay read-only,
+  shell refuses writes with a clear "ONLY /tmp/<NAME>" msg.
+- **Why:** Direct answer to "I want a terminal that feels
+  like Linux/macOS" — without writable files the shell is
+  a read-only REPL. tmpfs is the cheapest concrete storage
+  that lets the classic "echo > file && cat file" pipeline
+  actually work end-to-end.
+- **Rules out / defers:** Subdirectories inside /tmp.
+  Appending (>> redirect). Moving / renaming. Permissions.
+  Mount abstraction. Heap allocation (all storage is .bss).
+  Multi-process file sharing semantics. Proper VFS
+  write-path trait.
+- **Revisit when:** First consumer needs nested /tmp dirs.
+  Append semantics required (log file). On-disk FS lands.
+  First multi-process writer appears.
+- **Related tracks:** Track 5 (VFS — writable tier teaser),
+  Track 7 (Userland shell — redirect + file mgmt).
+
+---
+
 ## 082 — Tab path completion for ls / cat
 
 - **Scope:** `kernel/core/shell.cpp` — `ShellTabComplete`
