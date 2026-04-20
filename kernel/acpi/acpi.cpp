@@ -305,6 +305,8 @@ void ParseMadt(const Madt& madt)
 
 void AcpiInit(uptr multiboot_info_phys)
 {
+    KASSERT(multiboot_info_phys != 0, "acpi", "AcpiInit null multiboot info");
+
     const Rsdp* rsdp = FindRsdpInMultiboot(multiboot_info_phys);
     if (rsdp == nullptr)
     {

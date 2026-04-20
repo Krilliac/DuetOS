@@ -146,6 +146,9 @@ void SchedInit()
 
 Task* SchedCreate(TaskEntry entry, void* arg, const char* name)
 {
+    KASSERT(entry != nullptr, "sched", "SchedCreate null entry fn");
+    KASSERT(name != nullptr, "sched", "SchedCreate null name");
+
     auto* t = static_cast<Task*>(mm::KMalloc(sizeof(Task)));
     if (t == nullptr)
     {
@@ -353,6 +356,8 @@ SchedStats SchedStatsRead()
 
 void WaitQueueBlock(WaitQueue* wq)
 {
+    KASSERT(wq != nullptr, "sched", "WaitQueueBlock null queue");
+
     Task* t = g_current;
     t->state = TaskState::Blocked;
     t->next = nullptr;
@@ -374,6 +379,8 @@ void WaitQueueBlock(WaitQueue* wq)
 
 Task* WaitQueueWakeOne(WaitQueue* wq)
 {
+    KASSERT(wq != nullptr, "sched", "WaitQueueWakeOne null queue");
+
     Task* t = wq->head;
     if (t == nullptr)
     {
@@ -399,6 +406,8 @@ Task* WaitQueueWakeOne(WaitQueue* wq)
 
 u64 WaitQueueWakeAll(WaitQueue* wq)
 {
+    KASSERT(wq != nullptr, "sched", "WaitQueueWakeAll null queue");
+
     u64 count = 0;
     while (WaitQueueWakeOne(wq) != nullptr)
     {
@@ -419,6 +428,8 @@ u64 WaitQueueWakeAll(WaitQueue* wq)
 
 void MutexLock(Mutex* m)
 {
+    KASSERT(m != nullptr, "sched", "MutexLock null mutex");
+
     arch::Cli();
     if (m->owner == nullptr)
     {
@@ -437,6 +448,8 @@ void MutexLock(Mutex* m)
 
 bool MutexTryLock(Mutex* m)
 {
+    KASSERT(m != nullptr, "sched", "MutexTryLock null mutex");
+
     arch::Cli();
     const bool ok = (m->owner == nullptr);
     if (ok)
@@ -449,6 +462,8 @@ bool MutexTryLock(Mutex* m)
 
 void MutexUnlock(Mutex* m)
 {
+    KASSERT(m != nullptr, "sched", "MutexUnlock null mutex");
+
     arch::Cli();
     if (m->owner != g_current)
     {

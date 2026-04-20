@@ -7,6 +7,7 @@
 #include "../../arch/x86_64/lapic.h"
 #include "../../arch/x86_64/serial.h"
 #include "../../arch/x86_64/traps.h"
+#include "../../core/panic.h"
 #include "../../sched/sched.h"
 
 // Defined in exceptions.S — the stub for vector 0x21 that pushes a zero
@@ -92,6 +93,14 @@ void IrqHandler()
 
 void Ps2KeyboardInit()
 {
+    // Double-init guard: re-routing the IOAPIC pin and re-installing
+    // the handler would cause transient IRQ loss + a duplicate route
+    // entry. Panic is the right outcome — silent second-init is
+    // impossible to diagnose from logs later.
+    static constinit bool s_initialised = false;
+    KASSERT(!s_initialised, "drivers/ps2kbd", "Ps2KeyboardInit called twice");
+    s_initialised = true;
+
     // Drain any leftover bytes the firmware / bootloader produced. Any
     // key presses during GRUB (arrow-key navigation in the menu!) land
     // in the 8042 output buffer and would fire a stale IRQ right after
