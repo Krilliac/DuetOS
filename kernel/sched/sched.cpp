@@ -5,6 +5,7 @@
 #include "../core/klog.h"
 #include "../core/panic.h"
 #include "../core/recovery.h"
+#include "../cpu/percpu.h"
 #include "../mm/kheap.h"
 
 namespace customos::sched
@@ -35,7 +36,6 @@ using arch::SerialWriteHex;
 
 constexpr u64 kKernelStackBytes = 16 * 1024; // 16 KiB per task — plenty for v0
 
-constinit Task* g_current = nullptr;
 constinit Task* g_run_head = nullptr;   // next to run
 constinit Task* g_run_tail = nullptr;   // append here
 constinit Task* g_sleep_head = nullptr; // sorted by wake_tick (ascending)
@@ -54,7 +54,20 @@ constinit u64 g_tasks_reaped = 0;
 constinit Task* g_zombies = nullptr;
 constinit WaitQueue g_reaper_wq{};
 constinit u64 g_tasks_exited = 0;
-constinit bool g_need_resched = false;
+
+// Current() and NeedResched() moved to cpu::PerCpu. Per-CPU accessors
+// keep call sites terse and read unambiguously: Current() is the
+// currently-running task on THIS CPU; NeedResched() is THIS CPU's
+// pending-reschedule flag. BSP's slot is initialised in SchedInit;
+// APs initialise their own in the AP bring-up trampoline.
+inline Task*& Current()
+{
+    return cpu::CurrentCpu()->current_task;
+}
+inline bool& NeedResched()
+{
+    return cpu::CurrentCpu()->need_resched;
+}
 
 [[noreturn]] void PanicSched(const char* message)
 {
@@ -146,7 +159,7 @@ void SchedInit()
     boot_task->name = "kboot";
     boot_task->next = nullptr;
 
-    g_current = boot_task;
+    Current() = boot_task;
     g_tasks_created = 1;
     g_tasks_live = 1;
 
@@ -227,7 +240,7 @@ Task* SchedCreate(TaskEntry entry, void* arg, const char* name)
 
 void Schedule()
 {
-    if (g_current == nullptr)
+    if (Current() == nullptr)
     {
         return; // pre-SchedInit timer tick (shouldn't happen, but be safe)
     }
@@ -237,14 +250,14 @@ void Schedule()
     Task* next = RunqueuePop();
     if (next == nullptr)
     {
-        if (g_current->state != TaskState::Running)
+        if (Current()->state != TaskState::Running)
         {
             PanicSched("no runnable task available");
         }
         return;
     }
 
-    Task* prev = g_current;
+    Task* prev = Current();
     if (prev->state == TaskState::Running)
     {
         prev->state = TaskState::Ready;
@@ -254,7 +267,7 @@ void Schedule()
     // until a future reaper reclaims them (see Notes in sched.h).
 
     next->state = TaskState::Running;
-    g_current = next;
+    Current() = next;
     ++g_context_switches;
 
     ContextSwitch(&prev->rsp, next->rsp);
@@ -278,7 +291,7 @@ void SchedSleepTicks(u64 ticks)
     }
 
     arch::Cli();
-    Task* current = g_current;
+    Task* current = Current();
     current->state = TaskState::Sleeping;
     current->wake_tick = g_tick_now + ticks;
     SleepqueueInsert(current);
@@ -290,7 +303,7 @@ void SchedSleepTicks(u64 ticks)
 void SchedExit()
 {
     arch::Cli();
-    Task* self = g_current;
+    Task* self = Current();
     self->state = TaskState::Dead;
     ++g_tasks_exited;
     --g_tasks_live;
@@ -304,7 +317,7 @@ void SchedExit()
     // the free from ITS stack, after Schedule() puts us off-CPU.
     //
     // Single-CPU safety argument: once Schedule() below context-switches
-    // away, this task's g_current assignment is gone and only the
+    // away, this task's Current() assignment is gone and only the
     // zombie pointer references the struct. The reaper inspecting the
     // zombie list after this point is safe — no other code can touch
     // us. SMP bring-up will need to also verify the task isn't
@@ -327,13 +340,13 @@ void SchedExit()
 
 void SetNeedResched()
 {
-    g_need_resched = true;
+    NeedResched() = true;
 }
 
 bool TakeNeedResched()
 {
-    const bool v = g_need_resched;
-    g_need_resched = false;
+    const bool v = NeedResched();
+    NeedResched() = false;
     return v;
 }
 
@@ -355,13 +368,13 @@ void OnTimerTick(u64 now_ticks)
 
     if (woke_any)
     {
-        g_need_resched = true;
+        NeedResched() = true;
     }
 }
 
 Task* CurrentTask()
 {
-    return g_current;
+    return Current();
 }
 
 SchedStats SchedStatsRead()
@@ -450,7 +463,7 @@ void WaitQueueBlock(WaitQueue* wq)
 {
     KASSERT(wq != nullptr, "sched", "WaitQueueBlock null queue");
 
-    Task* t = g_current;
+    Task* t = Current();
     t->state = TaskState::Blocked;
     t->next = nullptr;
     if (wq->tail == nullptr)
@@ -492,7 +505,7 @@ Task* WaitQueueWakeOne(WaitQueue* wq)
     // lets the very next timer tick preempt us into the woken task. If
     // it's from IRQ context, the dispatcher already checks need_resched
     // after EOI. Either path converges.
-    g_need_resched = true;
+    NeedResched() = true;
     return t;
 }
 
@@ -526,7 +539,7 @@ void MutexLock(Mutex* m)
     if (m->owner == nullptr)
     {
         // Fast path: uncontended acquire.
-        m->owner = g_current;
+        m->owner = Current();
     }
     else
     {
@@ -546,7 +559,7 @@ bool MutexTryLock(Mutex* m)
     const bool ok = (m->owner == nullptr);
     if (ok)
     {
-        m->owner = g_current;
+        m->owner = Current();
     }
     arch::Sti();
     return ok;
@@ -557,7 +570,7 @@ void MutexUnlock(Mutex* m)
     KASSERT(m != nullptr, "sched", "MutexUnlock null mutex");
 
     arch::Cli();
-    if (m->owner != g_current)
+    if (m->owner != Current())
     {
         PanicSched("MutexUnlock by non-owner");
     }
