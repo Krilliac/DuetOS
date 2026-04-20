@@ -275,6 +275,77 @@ void SpawnRing3Task(const char* name, CapSet caps, const fs::RamfsNode* root, u6
     sched::SchedCreateUser(&Ring3UserEntry, nullptr, name, proc);
 }
 
+// Dedicated NX-probe payload: jumps into its own NX stack page at
+// 0x40010000. The stack is mapped with kPageNoExecute; instruction
+// fetch from there triggers #PF with the "instruction fetch" bit
+// (err_code bit 4) set. The kernel's ring-3 trap path turns the
+// fault into a [task-kill] and reschedules. This is the DEP /
+// NX-exec enforcement proof: we can directly observe "the CPU
+// refused to execute bytes on a writable page." Without EFER.NXE
+// being honored or without kPageNoExecute on the stack, the jump
+// would succeed and the CPU would start executing random stack
+// bytes.
+//
+// clang-format off
+constexpr u8 kNxProbeBytes[] = {
+    0xF3, 0x90,                                                   // pause
+    // mov rax, 0x40010000
+    0x48, 0xB8, 0x00, 0x00, 0x01, 0x40, 0x00, 0x00, 0x00, 0x00,
+    0xFF, 0xE0,                                                   // jmp rax
+    0x0F, 0x0B,                                                   // ud2 (belt-and-braces)
+};
+// clang-format on
+
+void SpawnNxProbeTask()
+{
+    using arch::SerialWrite;
+    using arch::SerialWriteHex;
+    using namespace customos::mm;
+
+    AddressSpace* as = AddressSpaceCreate(kFrameBudgetSandbox);
+    if (as == nullptr)
+    {
+        Panic("core/ring3", "AS create failed for nx probe");
+    }
+
+    const PhysAddr code_frame = AllocateFrame();
+    if (code_frame == kNullFrame)
+    {
+        Panic("core/ring3", "code frame alloc failed for nx probe");
+    }
+    auto* code_direct = static_cast<u8*>(PhysToVirt(code_frame));
+    for (u64 i = 0; i < mm::kPageSize; ++i)
+    {
+        code_direct[i] = 0;
+    }
+    for (u64 i = 0; i < sizeof(kNxProbeBytes); ++i)
+    {
+        code_direct[i] = kNxProbeBytes[i];
+    }
+
+    const PhysAddr stack_frame = AllocateFrame();
+    if (stack_frame == kNullFrame)
+    {
+        Panic("core/ring3", "stack frame alloc failed for nx probe");
+    }
+
+    AddressSpaceMapUserPage(as, kUserCodeVirt, code_frame, kPagePresent | kPageUser);
+    AddressSpaceMapUserPage(as, kUserStackVirt, stack_frame,
+                            kPagePresent | kPageWritable | kPageUser | kPageNoExecute);
+
+    Process* proc = ProcessCreate("ring3-nx-probe", as, CapSetEmpty(), fs::RamfsSandboxRoot());
+    if (proc == nullptr)
+    {
+        Panic("core/ring3", "ProcessCreate failed for nx probe");
+    }
+
+    SerialWrite("[ring3] queued nx-probe task pid=");
+    SerialWriteHex(proc->pid);
+    SerialWrite("\n");
+
+    sched::SchedCreateUser(&Ring3UserEntry, nullptr, "ring3-nx-probe", proc);
+}
+
 // Dedicated jail-probe payload: immediately attempts to write into
 // its own R-X code page at 0x40000000. The code page is mapped
 // kPagePresent | kPageUser — no kPageWritable — so the store #PFs.
@@ -401,7 +472,8 @@ void StartRing3SmokeTask()
     // kernel instead panics / halts here, the sandboxing contract
     // is broken: a user-mode fault must never bring down the OS.
     SpawnJailProbeTask();
-    Log(LogLevel::Info, "core/ring3", "trusted+sandbox+jail-probe ring3 tasks queued");
+    SpawnNxProbeTask();
+    Log(LogLevel::Info, "core/ring3", "trusted+sandbox+jail-probe+nx-probe ring3 tasks queued");
 }
 
 } // namespace customos::core
