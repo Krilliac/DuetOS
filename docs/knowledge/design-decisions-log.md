@@ -383,7 +383,7 @@ get an inline "superseded by <commit>" note and stay.
   `kernel/arch/x86_64/smp.{h,cpp}` (discovery + `SmpSendIpi` ICR
   helper), `kernel/sched/sched.cpp` (g_current/g_need_resched already
   per-CPU via entry 017)
-- **Commit:** _(filled at commit)_
+- **Commit:** `ec40d9f`
 - **Decision:** Land the SMP discovery half — MADT processor-LAPIC
   enumeration + an IPI-send helper that wraps the LAPIC ICR dance —
   without the real→long-mode trampoline. The trampoline is ~150
