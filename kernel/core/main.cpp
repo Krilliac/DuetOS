@@ -14,6 +14,9 @@
 #include "../drivers/input/ps2kbd.h"
 #include "../drivers/pci/pci.h"
 #include "../drivers/storage/ahci.h"
+#include "../fs/ramfs.h"
+#include "../fs/vfs.h"
+#include "../mm/address_space.h"
 #include "../mm/frame_allocator.h"
 #include "../sync/spinlock.h"
 #include "heartbeat.h"
@@ -39,6 +42,26 @@
  * the new wait-queue blocking path), then drop into the idle loop with
  * interrupts enabled. SMP and userland are separate follow-up commits.
  */
+
+#ifdef CUSTOMOS_CANARY_DEMO
+// Deliberately overrun a stack buffer so the function's epilogue
+// stack-canary check fails on return. Volatile + asm sink prevent
+// the optimiser from eliding the out-of-bounds stores. MUST return
+// normally — the stack-protector epilogue runs on `ret`, and we
+// want the __stack_chk_fail tail-call to happen.
+//
+// No __attribute__((no_stack_protector)) here — the WHOLE POINT is
+// that this function DOES have a canary the compiler can check.
+[[gnu::noinline]] static void CanarySmashDemo()
+{
+    volatile customos::u8 buf[8] = {};
+    for (int i = 0; i < 64; ++i)
+    {
+        buf[i] = static_cast<customos::u8>(i);
+    }
+    asm volatile("" : : "r"(&buf[0]) : "memory");
+}
+#endif
 
 extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multiboot_info)
 {
@@ -97,6 +120,58 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     SerialWrite("[boot] Bringing up paging.\n");
     PagingInit();
     PagingSelfTest();
+    // Kernel-image W^X / DEP — split the 2 MiB PS direct map covering
+    // the kernel image into 4 KiB pages, then apply per-section flags:
+    //   .text  → R + X   (writes to .text now #PF)
+    //   .rodata → R      (writes or execution from .rodata now #PF)
+    //   .data/.bss → R + W (execution from .data/.bss now #PF)
+    //
+    // MUST run AFTER PagingInit adopted the boot PML4 + enabled
+    // EFER.NXE, and BEFORE anything else needs .rodata strings. No
+    // subsystem below this point should be writing to .text; if any
+    // of them does, the fault will fire here at boot rather than
+    // corrupt code silently later.
+    ProtectKernelImage();
+
+    SerialWrite("[boot] Seeding ramfs + VFS self-test.\n");
+    customos::fs::RamfsInit();
+    {
+        using namespace customos::fs;
+        const RamfsNode* trusted = RamfsTrustedRoot();
+        const RamfsNode* sandbox = RamfsSandboxRoot();
+
+        // Positive lookups against the trusted tree. Trailing slash,
+        // leading slash, empty-component runs — all tolerated.
+        if (VfsLookup(trusted, "/etc/version", 64) == nullptr)
+            customos::core::Panic("fs/vfs", "self-test: /etc/version missing from trusted root");
+        if (VfsLookup(trusted, "/bin/hello", 64) == nullptr)
+            customos::core::Panic("fs/vfs", "self-test: /bin/hello missing from trusted root");
+        if (VfsLookup(trusted, "//etc//version", 64) == nullptr)
+            customos::core::Panic("fs/vfs", "self-test: double-slash tolerance broken");
+
+        // The sandbox root has exactly one file; its lookup must
+        // succeed, and the trusted-only paths must fail.
+        if (VfsLookup(sandbox, "/welcome.txt", 64) == nullptr)
+            customos::core::Panic("fs/vfs", "self-test: /welcome.txt missing from sandbox root");
+        if (VfsLookup(sandbox, "/etc/version", 64) != nullptr)
+            customos::core::Panic("fs/vfs", "self-test: JAIL BROKEN — sandbox saw trusted /etc/version");
+        if (VfsLookup(sandbox, "/bin/hello", 64) != nullptr)
+            customos::core::Panic("fs/vfs", "self-test: JAIL BROKEN — sandbox saw trusted /bin/hello");
+
+        // ".." is rejected outright.
+        if (VfsLookup(trusted, "/etc/..", 64) != nullptr)
+            customos::core::Panic("fs/vfs", "self-test: .. accepted (would break jails)");
+
+        SerialWrite("[fs/vfs] self-test OK\n");
+    }
+
+    // Address-space isolation self-test — direct assertion that a
+    // user page mapped in one AS is invisible in a sibling AS, and
+    // that AddressSpaceActivate flips CR3 correctly. Indirectly
+    // covered by ring3_smoke running two tasks at the same VA, but
+    // this runs BEFORE scheduler/ring3 bring-up so a regression
+    // surfaces at the earliest possible point.
+    customos::mm::AddressSpaceSelfTest();
 
     SerialWrite("[boot] Parsing ACPI tables.\n");
     customos::acpi::AcpiInit(multiboot_info);
@@ -226,6 +301,19 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
 
     SerialWrite("[boot] All subsystems online. Entering idle loop.\n");
 
+#ifdef CUSTOMOS_CANARY_DEMO
+    // Compile-time-gated deliberate stack smash. Calls a helper that
+    // overruns a local array past its stack canary; on function
+    // return, the compiler-inserted epilogue reads the stashed
+    // canary, finds it clobbered, and tail-calls __stack_chk_fail,
+    // which panics with "stack canary corrupted — overflow detected".
+    //
+    // MUST be a function that actually returns — kernel_main itself
+    // doesn't (it ends in IdleLoop), so the epilogue-check would
+    // never run if we inlined the smash here.
+    CanarySmashDemo();
+#endif
+
 #ifdef CUSTOMOS_PANIC_DEMO
     // Compile-time-gated deliberate panic used by tools/test-panic.sh
     // to verify the panic path stays healthy end-to-end. Never
@@ -244,5 +332,25 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     asm volatile("ud2");
 #endif
 
-    IdleLoop();
+    // Terminate the boot task instead of idle-looping on the boot
+    // stack. Rationale: kboot runs on the low-VA boot stack
+    // (.bss.boot). Any Schedule() triggered from kboot's context
+    // (e.g. a timer IRQ that raises need_resched) flips CR3 to
+    // whatever task we're switching INTO. Per-process ASes zero
+    // PML4[0..255], so the boot stack's low VA isn't reachable
+    // after the flip — the next stack access would #PF on IST
+    // stacks (also low-VA) and cascade into a #DF cluster.
+    //
+    // SchedExit marks kboot Dead, drops it from the runqueue,
+    // and loops in Schedule() picking other tasks. The dedicated
+    // idle task (SchedStartIdle) ensures the runqueue is never
+    // empty. From this point on, kboot is never re-scheduled and
+    // the boot stack is never touched again — it just sits at
+    // low VA unreferenced until reboot.
+    //
+    // Note: kboot has stack_base=nullptr (it never had a
+    // scheduler-allocated stack), so the reaper's KFree(stack_base)
+    // is a no-op for it. The boot stack's .bss.boot storage isn't
+    // heap-managed; the linker placed it and it persists.
+    customos::sched::SchedExit();
 }

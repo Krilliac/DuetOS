@@ -31,7 +31,59 @@ set(CUSTOMOS_KERNEL_TARGET "x86_64-unknown-none-elf")
 set(CUSTOMOS_KERNEL_C_FLAGS
     "--target=${CUSTOMOS_KERNEL_TARGET}"
     -ffreestanding
-    -fno-stack-protector
+    # Stack canaries: compiler emits a per-function prologue that plants
+    # a cookie from __stack_chk_guard and an epilogue that verifies it
+    # before return. On mismatch, compiler-inserted code calls
+    # __stack_chk_fail, which we panic from. Use -fstack-protector-strong
+    # so any function with an array, address-of-local, or alloca gets
+    # protected (unlike vanilla -fstack-protector which only gates on
+    # char arrays > 8 bytes).
+    #
+    # -mstack-protector-guard=global picks __stack_chk_guard via the
+    # ordinary ELF symbol path instead of the glibc TLS form (%fs:0x28),
+    # which doesn't apply in freestanding mode because we don't set up
+    # the TLS slot.
+    -fstack-protector-strong
+    -mstack-protector-guard=global
+    # Control-Flow Integrity via Intel CET / IBT (Indirect Branch
+    # Tracking). -fcf-protection=branch makes clang emit `endbr64`
+    # at every indirect-branch target in C/C++ code. Combined with
+    # CR4.CET + IA32_S_CET.ENDBR_EN (set in CetInit at boot when
+    # CPUID reports support), a ret/jmp/call to a non-endbr target
+    # raises #CP (vector 21), which we turn into a ring-3
+    # [task-kill] or a ring-0 panic.
+    #
+    # endbr64 is a NOP on pre-CET CPUs, so this is safe to emit
+    # unconditionally; the protection activates only when the MSR
+    # is enabled at boot.
+    -fcf-protection=branch
+    # Spectre-v2 / branch-target-injection mitigation. Replaces
+    # every `jmp/call *%reg` with a `call __x86_indirect_thunk_<reg>`
+    # that traps speculation at a lfence before the indirect
+    # transfer. Attackers who can write to the branch-predictor
+    # (via another process on a shared core, or via CPU-internal
+    # timing channels) can't use mispredicted speculative
+    # execution to steer our indirect branches toward a gadget.
+    #
+    # Needs us to provide the thunks (otherwise the linker fails
+    # on __x86_indirect_thunk_rax etc.). Those live in
+    # kernel/arch/x86_64/retpoline_thunks.S.
+    #
+    # Independent of CET/IBT: IBT blocks BRANCHES TO unexpected
+    # targets at the victim site; retpoline blocks BRANCHES FROM
+    # going to mispredicted targets at the call site. They
+    # compose — IBT catches a successful injection; retpoline
+    # prevents the injection from succeeding in the first place.
+    -mretpoline
+    # Note: -mspeculative-load-hardening was tried for Spectre-v1
+    # coverage but the emitted barriers stall the kernel to a
+    # crawl (boot reaches task-spawn then no more output inside
+    # 60s QEMU wall-time). Clang's SLH is better tuned for
+    # userland workloads; it interacts poorly with our tight
+    # freestanding paths (inline asm around swapgs/iretq, the
+    # timer-IRQ hot path, etc.). Deferred until we have per-site
+    # __attribute__((speculation_hardening)) control to scope
+    # the cost to the syscall boundary where it actually matters.
     -fno-pic
     -fno-pie
     -fno-builtin

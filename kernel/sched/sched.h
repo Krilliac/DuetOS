@@ -2,6 +2,16 @@
 
 #include "../core/types.h"
 
+namespace customos::mm
+{
+struct AddressSpace; // forward decl; defined in kernel/mm/address_space.h
+}
+
+namespace customos::core
+{
+struct Process; // forward decl; defined in kernel/core/process.h
+}
+
 /*
  * CustomOS kernel scheduler — v0.
  *
@@ -59,6 +69,56 @@ void SchedInit();
 /// TaskPriority::Idle for per-CPU idle tasks (ones that should only
 /// run when no Normal task is Ready).
 Task* SchedCreate(TaskEntry entry, void* arg, const char* name, TaskPriority priority = TaskPriority::Normal);
+
+/// Spawn a new task bound to a `core::Process`. The process owns the
+/// address space; the task holds one reference on the process. The
+/// scheduler caches `process->as` on the task so the CR3 flip on
+/// context-switch remains a single pointer load — per-task AS
+/// lookup never indirects through the Process on the hot path.
+///
+/// The AS must already have any required user mappings (code, stack)
+/// installed via `mm::AddressSpaceMapUserPage` BEFORE calling
+/// SchedCreateUser — the task's entry function sees them installed
+/// when it calls `arch::EnterUserMode`.
+///
+/// `entry` runs in ring 0 on a fresh kernel stack (same as
+/// SchedCreate); it's expected to set TSS.RSP0 and call
+/// arch::EnterUserMode to drop to ring 3.
+///
+/// On task death, the reaper calls `core::ProcessRelease` on the
+/// task's process pointer — the process's destructor then drops
+/// the AS reference (tearing it down if the process was the last
+/// holder).
+Task* SchedCreateUser(TaskEntry entry, void* arg, const char* name, core::Process* process);
+
+/// Accessor for the Task's owning process pointer. nullptr for
+/// kernel-only tasks (workers, reaper, idle). Used by syscall
+/// handlers via `core::CurrentProcess()` to cap-check.
+core::Process* TaskProcess(Task* t);
+
+/// Canonical reasons a kernel subsystem can request task
+/// termination via `FlagCurrentForKill(reason)`. Used by
+/// Schedule() for the single-line reason log when it converts
+/// a flagged task into a zombie. Extend at the tail — the
+/// integer value is a stable handle for logs / future ABI.
+enum class KillReason : u8
+{
+    TickBudget = 1,    // CPU-tick budget exhausted (slice 14)
+    SandboxDenialThreshold = 2, // too many cap-denials (slice 16)
+    // Add new reasons at the end.
+};
+
+const char* KillReasonName(KillReason r);
+
+/// Flag the current task for termination at next resched. The
+/// reason is stored on the task and used by Schedule() when it
+/// converts the task into a zombie — so the kill log line names
+/// WHY the task died, not just that it did.
+///
+/// Same mechanism for every cause: set the flag + need_resched,
+/// Schedule() catches on re-enqueue. Callable from any kernel
+/// or syscall context; no-op if there's no current task.
+void FlagCurrentForKill(KillReason reason);
 
 /// Voluntary yield. Pushes current task to the tail of the runqueue and
 /// switches to the head (if any other task is ready).
@@ -119,32 +179,21 @@ u64 CurrentTaskId();
 u64 SchedCurrentKernelStackTop();
 
 /*
- * Per-task user-VM bookkeeping.
+ * Per-task user-VM bookkeeping has moved into `mm::AddressSpace`.
  *
- * A ring-3-capable task registers every user-accessible page it maps
- * (code page, stack page, and — eventually — heap/shared pages). When
- * the task exits (SchedExit / SYS_EXIT), the reaper walks the list and
- * calls `mm::UnmapPage(vaddr) + mm::FreeFrame(frame)` for each, so
- * nothing leaks across task boundaries.
+ * Rationale: with per-process page tables, the unit that owns user
+ * pages is the address space, not the task. Multiple tasks of the
+ * same process (future thread support) share an AS and therefore
+ * share its mappings; freeing user pages only when the LAST task
+ * dies is the only correct semantics. The reaper now releases the
+ * AS reference on task death; the AS itself is responsible for
+ * walking its region table and returning frames at refcount-zero.
  *
- * v0 keeps the list on-Task-struct at a fixed size (4 entries), so
- * registration is allocation-free and the reaper's access pattern is
- * tight. The bound grows once a consumer needs more than code + stack
- * + a heap + a shared page — none exist today.
- *
- * `RegisterUserVmRegion` is called from the registering task's own
- * entry function (so it targets `Current()` unambiguously). Calling it
- * more than `kMaxUserVmRegionsPerTask` times panics.
+ * Code that used to call `sched::RegisterUserVmRegion(virt, frame)`
+ * after a `mm::MapPage` should now call
+ * `mm::AddressSpaceMapUserPage(as, virt, frame, flags)` — one call
+ * that both installs the mapping AND records ownership.
  */
-inline constexpr u64 kMaxUserVmRegionsPerTask = 4;
-
-struct UserVmRegion
-{
-    u64 vaddr; // start of a 4 KiB user page
-    u64 frame; // PhysAddr returned by mm::AllocateFrame
-};
-
-void RegisterUserVmRegion(u64 vaddr, u64 frame);
 
 /// Diagnostics — cheap snapshots.
 struct SchedStats

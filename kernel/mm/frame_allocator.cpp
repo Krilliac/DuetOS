@@ -1,6 +1,7 @@
 #include "frame_allocator.h"
 
 #include "multiboot2.h"
+#include "page.h"
 
 #include "../arch/x86_64/cpu.h"
 #include "../arch/x86_64/serial.h"
@@ -343,7 +344,34 @@ PhysAddr AllocateFrame()
         {
             BitmapMarkUsed(frame);
             g_next_hint = frame + 1;
-            return frame << kPageSizeLog2;
+            const PhysAddr phys = frame << kPageSizeLog2;
+            // Zero the frame before handing it out. Prevents any
+            // stale content (a reaper'd task struct, freed kheap
+            // chunk, previous user process's page) from leaking
+            // into the new owner. Hardens against info-leak
+            // primitives in future user-visible allocation paths
+            // (SYS_MMAP etc.): a malicious process that allocates
+            // a fresh page and reads it sees only zeros.
+            //
+            // Reachable only for frames inside the 1 GiB direct
+            // map. On systems with >1 GiB RAM, frames above the
+            // direct-map window are returned un-zeroed until a
+            // dynamic-direct-map or MapMmio-based zeroing helper
+            // lands (all test configurations today stay under
+            // 1 GiB, so this isn't yet exposed).
+            //
+            // Cost: 4 KiB memset per allocation. Boot does hundreds
+            // of these (~ms total). If this ever shows up in a
+            // profile, a GFP_ZERO / GFP_NOZERO split is the fix.
+            if (phys < kDirectMapBytes)
+            {
+                auto* virt = static_cast<u8*>(PhysToVirt(phys));
+                for (u64 b = 0; b < kPageSize; ++b)
+                {
+                    virt[b] = 0;
+                }
+            }
+            return phys;
         }
     }
     return kNullFrame;

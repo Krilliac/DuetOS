@@ -2,9 +2,11 @@
 
 #include "../arch/x86_64/idt.h"
 #include "../arch/x86_64/serial.h"
+#include "../fs/vfs.h"
 #include "../mm/paging.h"
 #include "../sched/sched.h"
 #include "klog.h"
+#include "process.h"
 
 // Defined in exceptions.S (via `ISR_NOERR 128`) — the .global label for
 // the int-0x80 stub. SyscallInit installs its address into the IDT with
@@ -30,6 +32,11 @@ constexpr u8 kSyscallVector = 0x80;
 // the truncation — standard POSIX write() semantics.
 constexpr u64 kSyscallWriteMax = 256;
 
+// Cap on path length for SYS_STAT. Same rationale as kSyscallWriteMax:
+// on-kernel-stack bounce buffer, no unbounded copy. 256 bytes is
+// well past anything a sandboxed process should be naming in v0.
+constexpr u64 kSyscallPathMax = 256;
+
 // Pretty-printer for boot diagnostics — the Warn path for an
 // unrecognised syscall number should be noisy enough to catch during
 // bring-up but cheap enough to leave in release builds.
@@ -48,10 +55,43 @@ void ReportUnknownSyscall(u64 num, u64 rip)
 // caller error and returns -1 so the pattern is immediately
 // auditable. Returns the actual byte count written (possibly
 // truncated) or -1 on failure.
+//
+// Cap check: fd=1 requires kCapSerialConsole. A sandboxed process
+// with an empty cap set sees -1 and nothing reaches the kernel
+// serial console. The denial is logged so it's trivially
+// auditable — without the log we'd be silently swallowing a
+// sandbox policy hit.
 i64 DoWrite(u64 fd, const void* user_buf, u64 len)
 {
     if (fd != 1)
     {
+        return -1;
+    }
+
+    Process* proc = CurrentProcess();
+    if (proc == nullptr || !CapSetHas(proc->caps, kCapSerialConsole))
+    {
+        // Emit a single-line denial record. Machine-readable format
+        // so a future audit tool can grep boot logs: "[sys] denied
+        // syscall=N pid=P cap=NAME". pid=0 indicates a caller with
+        // no Process (kernel bug — kernel threads shouldn't be
+        // issuing SYS_WRITE via the syscall gate).
+        const u64 pid = (proc != nullptr) ? proc->pid : 0;
+        RecordSandboxDenial(kCapSerialConsole);
+        // Rate-limit the log line so a hostile burst doesn't
+        // flood COM1. Denial is still counted every time — only
+        // the visible print is gated — so the threshold kill
+        // still fires at the right count.
+        if (proc != nullptr && ShouldLogDenial(proc->sandbox_denials))
+        {
+            arch::SerialWrite("[sys] denied syscall=SYS_WRITE pid=");
+            arch::SerialWriteHex(pid);
+            arch::SerialWrite(" cap=");
+            arch::SerialWrite(CapName(kCapSerialConsole));
+            arch::SerialWrite(" denial_idx=");
+            arch::SerialWriteHex(proc->sandbox_denials);
+            arch::SerialWrite("\n");
+        }
         return -1;
     }
 
@@ -136,6 +176,206 @@ void SyscallDispatch(arch::TrapFrame* frame)
         // us back in. Returns 0 — reserved for an "I was preempted"
         // boolean later if any consumer cares.
         sched::SchedYield();
+        frame->rax = 0;
+        return;
+    }
+
+    case SYS_READ:
+    {
+        // rdi = user pointer to NUL-terminated path.
+        // rsi = user pointer to destination buffer.
+        // rdx = buffer capacity in bytes.
+        // Returns bytes copied on success, -1 on any failure.
+        //
+        // Same cap + jail composition as SYS_STAT: kCapFsRead gates
+        // the call, Process::root bounds what can be named. The
+        // leaf-node check also rejects reading a directory —
+        // "read a dir entry by entry" is a future getdents-style
+        // syscall.
+        Process* proc = CurrentProcess();
+        if (proc == nullptr || !CapSetHas(proc->caps, kCapFsRead))
+        {
+            const u64 pid = (proc != nullptr) ? proc->pid : 0;
+            RecordSandboxDenial(kCapFsRead);
+            if (proc != nullptr && ShouldLogDenial(proc->sandbox_denials))
+            {
+                arch::SerialWrite("[sys] denied syscall=SYS_READ pid=");
+                arch::SerialWriteHex(pid);
+                arch::SerialWrite(" cap=");
+                arch::SerialWrite(CapName(kCapFsRead));
+                arch::SerialWrite(" denial_idx=");
+                arch::SerialWriteHex(proc->sandbox_denials);
+                arch::SerialWrite("\n");
+            }
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+
+        char kpath[kSyscallPathMax];
+        if (!mm::CopyFromUser(kpath, reinterpret_cast<const void*>(frame->rdi), kSyscallPathMax))
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        kpath[kSyscallPathMax - 1] = '\0';
+
+        const fs::RamfsNode* n = fs::VfsLookup(proc->root, kpath, kSyscallPathMax);
+        if (n == nullptr)
+        {
+            arch::SerialWrite("[fs] read miss pid=");
+            arch::SerialWriteHex(proc->pid);
+            arch::SerialWrite(" path=\"");
+            arch::SerialWrite(kpath);
+            arch::SerialWrite("\"\n");
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        if (n->type != fs::RamfsNodeType::kFile)
+        {
+            arch::SerialWrite("[fs] read not-file pid=");
+            arch::SerialWriteHex(proc->pid);
+            arch::SerialWrite(" path=\"");
+            arch::SerialWrite(kpath);
+            arch::SerialWrite("\"\n");
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+
+        // Clamp the copy to whichever is smaller: the caller's
+        // buffer capacity or the file size. Short reads are normal
+        // — the caller gets the actual bytes-written count back in
+        // rax and handles partial reads.
+        const u64 cap_bytes = frame->rdx;
+        const u64 to_copy = (n->file_size < cap_bytes) ? n->file_size : cap_bytes;
+        if (to_copy == 0)
+        {
+            frame->rax = 0;
+            return;
+        }
+
+        if (!mm::CopyToUser(reinterpret_cast<void*>(frame->rsi), n->file_bytes, to_copy))
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+
+        arch::SerialWrite("[fs] read ok pid=");
+        arch::SerialWriteHex(proc->pid);
+        arch::SerialWrite(" path=\"");
+        arch::SerialWrite(kpath);
+        arch::SerialWrite("\" bytes=");
+        arch::SerialWriteHex(to_copy);
+        arch::SerialWrite("\n");
+        frame->rax = to_copy;
+        return;
+    }
+
+    case SYS_STAT:
+    {
+        // rdi = user pointer to NUL-terminated path.
+        // rsi = user pointer to u64 output slot (receives file size).
+        // Returns 0 on success, -1 on any failure.
+        //
+        // Cap check first — a process without kCapFsRead can't even
+        // ATTEMPT a lookup. Denial is logged for auditability,
+        // identical format to SYS_WRITE.
+        Process* proc = CurrentProcess();
+        if (proc == nullptr || !CapSetHas(proc->caps, kCapFsRead))
+        {
+            const u64 pid = (proc != nullptr) ? proc->pid : 0;
+            RecordSandboxDenial(kCapFsRead);
+            if (proc != nullptr && ShouldLogDenial(proc->sandbox_denials))
+            {
+                arch::SerialWrite("[sys] denied syscall=SYS_STAT pid=");
+                arch::SerialWriteHex(pid);
+                arch::SerialWrite(" cap=");
+                arch::SerialWrite(CapName(kCapFsRead));
+                arch::SerialWrite(" denial_idx=");
+                arch::SerialWriteHex(proc->sandbox_denials);
+                arch::SerialWrite("\n");
+            }
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+
+        // Bounce the user path onto the kernel stack. CopyFromUser
+        // validates pointer range + walks the active AS's PML4
+        // (cap + namespace jail compose on top of that: even after
+        // copy, lookup is bounded by proc->root).
+        char kpath[kSyscallPathMax];
+        if (!mm::CopyFromUser(kpath, reinterpret_cast<const void*>(frame->rdi), kSyscallPathMax))
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        // Ensure terminal NUL within the buffer — a user pointer
+        // to an unterminated buffer would let VfsLookup wander;
+        // force-terminate at kSyscallPathMax - 1.
+        kpath[kSyscallPathMax - 1] = '\0';
+
+        const fs::RamfsNode* n = fs::VfsLookup(proc->root, kpath, kSyscallPathMax);
+        if (n == nullptr)
+        {
+            // Lookup miss. Could be: component not found, ".." hit
+            // (jail-escape attempt), or a walk-through-file. All
+            // surface as -1 to ring 3; the log line says which
+            // process tried what, without leaking structure of
+            // what exists vs. what's blocked.
+            arch::SerialWrite("[fs] stat miss pid=");
+            arch::SerialWriteHex(proc->pid);
+            arch::SerialWrite(" path=\"");
+            arch::SerialWrite(kpath);
+            arch::SerialWrite("\"\n");
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+
+        // Hit. Write the file size back to the user's output slot.
+        // Directories report size=0 — the existence alone is the
+        // answer the caller needed.
+        const u64 size = (n->type == fs::RamfsNodeType::kFile) ? n->file_size : 0;
+        if (!mm::CopyToUser(reinterpret_cast<void*>(frame->rsi), &size, sizeof(size)))
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+
+        arch::SerialWrite("[fs] stat ok pid=");
+        arch::SerialWriteHex(proc->pid);
+        arch::SerialWrite(" path=\"");
+        arch::SerialWrite(kpath);
+        arch::SerialWrite("\" size=");
+        arch::SerialWriteHex(size);
+        arch::SerialWrite("\n");
+        frame->rax = 0;
+        return;
+    }
+
+    case SYS_DROPCAPS:
+    {
+        // rdi = bitmask of caps to remove. No cap check on this
+        // syscall itself — anyone can voluntarily deprivilege.
+        // Irreversible: once bits are cleared from proc->caps,
+        // no syscall path can set them back (we never expose a
+        // SYS_GRANTCAPS).
+        Process* proc = CurrentProcess();
+        if (proc == nullptr)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        const u64 drop_mask = frame->rdi;
+        const u64 before = proc->caps.bits;
+        proc->caps.bits &= ~drop_mask;
+        arch::SerialWrite("[sys] dropcaps pid=");
+        arch::SerialWriteHex(proc->pid);
+        arch::SerialWrite(" mask=");
+        arch::SerialWriteHex(drop_mask);
+        arch::SerialWrite(" caps=");
+        arch::SerialWriteHex(before);
+        arch::SerialWrite("->");
+        arch::SerialWriteHex(proc->caps.bits);
+        arch::SerialWrite("\n");
         frame->rax = 0;
         return;
     }

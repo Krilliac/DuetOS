@@ -71,6 +71,19 @@ inline constexpr u64 kMmioArenaBytes = 512ULL * 1024 * 1024;
 /// honoured, and prime internal bookkeeping. Panics on failure.
 void PagingInit();
 
+/// Boot PML4 — installed by boot.S and adopted by PagingInit. Exposed
+/// for `mm::AddressSpace` so it can copy the kernel-half PML4 entries
+/// (indices 256..511) into every newly-created per-process PML4. The
+/// kernel half is shared across every address space by sharing the
+/// PDPT pages those entries point at, so changes deep in the kernel
+/// page-table tree (new MMIO mapping, heap growth) propagate to every
+/// process automatically — no shootdown needed. The constraint is
+/// that nobody installs a brand-new top-level PML4 entry on the
+/// kernel half AFTER the first AddressSpace has been created; today
+/// nothing does (MMIO arena and direct map both live in PML4[511]).
+u64* BootPml4Virt();
+PhysAddr BootPml4Phys();
+
 /// Install a 4 KiB mapping at `virt` for the given physical frame and
 /// flags. `kPagePresent` is implied — callers should still pass it for
 /// clarity. Allocates intermediate page tables on demand.
@@ -117,6 +130,36 @@ PagingStats PagingStatsRead();
 /// Exercise MapMmio + write/read aliasing + UnmapMmio end-to-end. Prints
 /// to COM1 and panics on inconsistency. Boot-time use only.
 void PagingSelfTest();
+
+/// Split every 2 MiB PS mapping covering the kernel image into a full
+/// set of 512 4 KiB PTEs, then apply per-section W^X flags across
+/// the kernel image:
+///
+///   .text             : R + X   (no Writable, no NoExecute)
+///   .rodata           : R       (no Writable, kPageNoExecute)
+///   .data / .bss      : R + W   (kPageWritable, kPageNoExecute)
+///
+/// This is the kernel-side W^X / DEP enforcement — the equivalent of
+/// what a Windows kernel gets from PAGE_EXECUTE_READ vs. PAGE_READWRITE
+/// on the kernel image. Before this runs, boot.S's 2 MiB PS direct
+/// map gives every kernel byte R + W + X. After: an accidental write
+/// through a kernel pointer into .text #PFs at the write site instead
+/// of silently corrupting code, and a ROP chain that somehow reaches
+/// a .data / .bss VA can't execute because those pages are NX.
+///
+/// Relies on linker-script symbols:
+///   _text_start / _text_end
+///   _rodata_start / _rodata_end
+///   _data_start / _data_end
+///   _bss_start / _bss_end
+///
+/// Idempotent — safe to call twice, but intended for a single call
+/// at boot, after PagingInit. Panics on failure. Does NOT touch the
+/// low-half identity map (.text.boot / .bss.boot) — boot.S needs
+/// those identity-mapped for the bring-up code, and once kernel_main
+/// has jumped to the higher half they're effectively dead code that
+/// won't run again.
+void ProtectKernelImage();
 
 /*
  * User-pointer copy helpers.

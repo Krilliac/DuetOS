@@ -1,0 +1,183 @@
+#include "process.h"
+
+#include "../arch/x86_64/serial.h"
+#include "../mm/kheap.h"
+#include "../sched/sched.h"
+#include "klog.h"
+#include "panic.h"
+
+namespace customos::core
+{
+
+namespace
+{
+
+// Monotonic PID generator. Never reuses — matches the Task id
+// discipline in the scheduler. PID 0 is reserved for "no process"
+// (the kernel's implicit, never-allocated init-context), so the
+// counter starts at 1.
+constinit u64 g_next_pid = 1;
+constinit u64 g_live_processes = 0;
+
+} // namespace
+
+Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, const fs::RamfsNode* root, u64 user_code_va,
+                       u64 user_stack_va, u64 tick_budget)
+{
+    KASSERT(name != nullptr, "core/process", "ProcessCreate null name");
+    KASSERT(as != nullptr, "core/process", "ProcessCreate null as");
+    KASSERT(root != nullptr, "core/process", "ProcessCreate null root");
+    KASSERT(tick_budget > 0, "core/process", "ProcessCreate zero tick_budget");
+
+    auto* p = static_cast<Process*>(mm::KMalloc(sizeof(Process)));
+    if (p == nullptr)
+    {
+        return nullptr;
+    }
+
+    p->pid = g_next_pid++;
+    p->name = name;
+    p->as = as;
+    p->caps = caps;
+    p->root = root;
+    p->user_code_va = user_code_va;
+    p->user_stack_va = user_stack_va;
+    p->tick_budget = tick_budget;
+    p->ticks_used = 0;
+    p->sandbox_denials = 0;
+    p->refcount = 1;
+
+    ++g_live_processes;
+
+    arch::SerialWrite("[proc] create pid=");
+    arch::SerialWriteHex(p->pid);
+    arch::SerialWrite(" name=\"");
+    arch::SerialWrite(name);
+    arch::SerialWrite("\" caps=");
+    arch::SerialWriteHex(caps.bits);
+    arch::SerialWrite(" code_va=");
+    arch::SerialWriteHex(user_code_va);
+    arch::SerialWrite(" stack_va=");
+    arch::SerialWriteHex(user_stack_va);
+    arch::SerialWrite("\n");
+
+    return p;
+}
+
+void ProcessRetain(Process* p)
+{
+    if (p == nullptr)
+    {
+        return;
+    }
+    ++p->refcount;
+}
+
+void ProcessRelease(Process* p)
+{
+    if (p == nullptr)
+    {
+        return;
+    }
+    if (p->refcount == 0)
+    {
+        PanicWithValue("core/process", "ProcessRelease on refcount==0", reinterpret_cast<u64>(p));
+    }
+    --p->refcount;
+    if (p->refcount != 0)
+    {
+        return;
+    }
+
+    arch::SerialWrite("[proc] destroy pid=");
+    arch::SerialWriteHex(p->pid);
+    arch::SerialWrite(" name=\"");
+    arch::SerialWrite(p->name);
+    arch::SerialWrite("\"\n");
+
+    // Drop the AS reference we took at create. If this was the last
+    // process/task holding that AS (v0: always true — one task per
+    // process, one process per AS), the AS destroy path runs inline:
+    // user-half tables freed, backing frames returned, PML4 frame
+    // returned.
+    mm::AddressSpaceRelease(p->as);
+    p->as = nullptr;
+
+    mm::KFree(p);
+    --g_live_processes;
+}
+
+Process* CurrentProcess()
+{
+    sched::Task* t = sched::CurrentTask();
+    if (t == nullptr)
+    {
+        return nullptr;
+    }
+    return sched::TaskProcess(t);
+}
+
+void RecordSandboxDenial(Cap cap)
+{
+    sched::Task* t = sched::CurrentTask();
+    if (t == nullptr)
+    {
+        return;
+    }
+    Process* p = sched::TaskProcess(t);
+    if (p == nullptr)
+    {
+        return; // kernel-only task hit a cap-denial — shouldn't happen
+    }
+    ++p->sandbox_denials;
+
+    // Threshold-crossing: fire once at exactly kSandbox-
+    // DenialKillThreshold and flag the task. Uses `==` so the
+    // message doesn't repeat for denials that race past the
+    // flag before Schedule picks them up.
+    if (p->sandbox_denials == kSandboxDenialKillThreshold)
+    {
+        arch::SerialWrite("[sandbox] pid=");
+        arch::SerialWriteHex(p->pid);
+        arch::SerialWrite(" hit ");
+        arch::SerialWriteHex(kSandboxDenialKillThreshold);
+        arch::SerialWrite(" denials (last cap=");
+        arch::SerialWrite(CapName(cap));
+        arch::SerialWrite(") — terminating as malicious\n");
+        sched::FlagCurrentForKill(sched::KillReason::SandboxDenialThreshold);
+    }
+}
+
+bool ShouldLogDenial(u64 denial_index)
+{
+    // Rate-limit per-process denial log output. Always log the
+    // first denial (so a bug in legitimate code surfaces
+    // immediately), then log once every 32 thereafter. A burst
+    // of 100 denials produces 1 + 3 = 4 log lines instead of
+    // 100. The counter itself advances on every denial — only
+    // the log is rate-limited — so the threshold-kill still
+    // fires at the exact 100th attempt.
+    //
+    // 32 chosen because log2 is convenient and it produces ~4
+    // lines at the threshold; tune if future workloads spam
+    // the log at a different rate.
+    return denial_index == 1 || (denial_index & 31) == 0;
+}
+
+const char* CapName(Cap c)
+{
+    switch (c)
+    {
+    case kCapNone:
+        return "<none>";
+    case kCapSerialConsole:
+        return "SerialConsole";
+    case kCapFsRead:
+        return "FsRead";
+    case kCapCount:
+        return "<sentinel>";
+    }
+    return "<unknown>";
+}
+
+} // namespace customos::core

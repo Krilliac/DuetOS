@@ -25,9 +25,11 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     core/klog.cpp
     core/main.cpp
     core/panic.cpp
+    core/process.cpp
     core/reboot.cpp
     core/recovery.cpp
     core/ring3_smoke.cpp
+    core/stack_canary.cpp
     core/symbols.cpp
     core/syscall.cpp
     acpi/acpi.cpp
@@ -40,6 +42,7 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     arch/x86_64/ioapic.cpp
     arch/x86_64/lapic.cpp
     arch/x86_64/pic.cpp
+    arch/x86_64/retpoline_thunks.S
     arch/x86_64/serial.cpp
     arch/x86_64/smp.cpp
     arch/x86_64/timer.cpp
@@ -49,10 +52,14 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     drivers/input/ps2kbd.cpp
     drivers/pci/pci.cpp
     drivers/storage/ahci.cpp
+    fs/ramfs.cpp
+    fs/vfs.cpp
+    mm/address_space.cpp
     mm/frame_allocator.cpp
     mm/kheap.cpp
     mm/page.cpp
     mm/paging.cpp
+    mm/user_copy.S
     sched/context_switch.S
     sched/sched.cpp
     sync/spinlock.cpp
@@ -140,6 +147,17 @@ if(CUSTOMOS_PANIC_DEMO)
     target_compile_definitions(customos-kernel          PRIVATE CUSTOMOS_PANIC_DEMO=1)
     target_compile_definitions(customos-kernel-stage1   PRIVATE CUSTOMOS_PANIC_DEMO=1)
 endif()
+
+# Deliberate stack-smash build flag. Enables a small in-kernel_main
+# block that overruns a local array past its stack canary, forcing
+# __stack_chk_fail to fire on return. Intended for verifying the
+# canary infrastructure works end-to-end; OFF for normal builds.
+option(CUSTOMOS_CANARY_DEMO "Insert a deliberate stack smash at end of kernel_main (verifies stack-canary panic path)" OFF)
+if(CUSTOMOS_CANARY_DEMO)
+    target_compile_definitions(customos-kernel          PRIVATE CUSTOMOS_CANARY_DEMO=1)
+    target_compile_definitions(customos-kernel-stage1   PRIVATE CUSTOMOS_CANARY_DEMO=1)
+endif()
+
 
 # Deliberate-CPU-exception build flag, consumed by kernel_main and
 # triggered by tools/test-trap.sh. Executes `ud2` to take a #UD fault

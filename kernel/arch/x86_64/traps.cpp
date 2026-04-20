@@ -9,11 +9,30 @@
 #include "../../core/syscall.h"
 #include "../../sched/sched.h"
 
+// user_copy.S labels, exposed to the trap dispatcher for the
+// kernel-#PF fault-fixup path. Defined as non-const u8 arrays so
+// the name refers to the address of the label directly (same
+// pattern linker scripts use for _text_start / _kernel_end_phys).
+extern "C" customos::u8 __copy_user_from_start[];
+extern "C" customos::u8 __copy_user_from_end[];
+extern "C" customos::u8 __copy_user_to_start[];
+extern "C" customos::u8 __copy_user_to_end[];
+extern "C" customos::u8 __copy_user_fault_fixup[];
+
 namespace customos::arch
 {
 
 namespace
 {
+
+// Local aliases so the dispatcher code reads tidy. Taking the
+// addresses through these shims also sidesteps a subtle clang
+// warning about extern arrays without bounds in header form.
+constexpr customos::u8* g_copy_user_from_start = ::__copy_user_from_start;
+constexpr customos::u8* g_copy_user_from_end = ::__copy_user_from_end;
+constexpr customos::u8* g_copy_user_to_start = ::__copy_user_to_start;
+constexpr customos::u8* g_copy_user_to_end = ::__copy_user_to_end;
+constexpr customos::u8* g_copy_user_fault_fixup = ::__copy_user_fault_fixup;
 
 // Per-vector IRQ handler table. Entries 0..15 cover IRQ vectors 32..47;
 // entry 16 is the LAPIC spurious vector (0xFF). nullptr means "no handler
@@ -148,6 +167,87 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         {
             asm volatile("cli; hlt");
         }
+    }
+
+    // Extable / fault fixup for kernel-mode #PF inside the user-copy
+    // asm helpers. mm::CopyFromUser / CopyToUser delegate to byte
+    // loops in user_copy.S that are bracketed by paired labels
+    // (__copy_user_{from,to}_{start,end}). If a #PF fires while rip
+    // is inside either [start, end) range — because the user page
+    // vanished between our pre-walk and the actual byte copy (SMP,
+    // future demand paging) — the fault is RECOVERABLE: rewrite
+    // frame->rip to __copy_user_fault_fixup and iretq. The fixup
+    // emits `clac`, zeroes rax (return value = 0 = failure), and
+    // ret's back to the C++ caller, which sees `false` without the
+    // kernel ever panicking.
+    //
+    // Scoped narrowly to vector 14 (#PF) + ring 0 — a user-mode #PF
+    // at the SAME RIP wouldn't happen (user can't execute kernel
+    // asm), and non-#PF kernel exceptions inside the copy range are
+    // bugs we want to surface loudly.
+    if (frame->vector == 14 && (frame->cs & 3) == 0)
+    {
+        const u64 rip = frame->rip;
+        const u64 from_s = reinterpret_cast<u64>(g_copy_user_from_start);
+        const u64 from_e = reinterpret_cast<u64>(g_copy_user_from_end);
+        const u64 to_s = reinterpret_cast<u64>(g_copy_user_to_start);
+        const u64 to_e = reinterpret_cast<u64>(g_copy_user_to_end);
+        if ((rip >= from_s && rip < from_e) || (rip >= to_s && rip < to_e))
+        {
+            SerialWrite("[extable] recovered kernel #PF in user-copy helper — rip=");
+            SerialWriteHex(rip);
+            SerialWrite(" cr2=");
+            SerialWriteHex(ReadCr2());
+            SerialWrite("\n");
+            frame->rip = reinterpret_cast<u64>(g_copy_user_fault_fixup);
+            return;
+        }
+    }
+
+    // Ring-3 exception handling. A faulting user task MUST NOT bring
+    // down the kernel — that would turn any sandboxed process's
+    // mistake (wild pointer, write to its own RX code page, jump
+    // into its own NX stack) into a full-system DoS. Distinguish
+    // kernel vs. user by the saved CS's RPL:
+    //   CS.RPL == 0 → kernel exception → panic, halt (below).
+    //   CS.RPL == 3 → user exception  → log + terminate this task,
+    //                                    reschedule.
+    //
+    // SchedExit is [[noreturn]]; it marks the task Dead, wakes the
+    // reaper, and Schedule()s away. The reaper tears down the task's
+    // Process (which tears down its AddressSpace → returns every
+    // backing frame + page-table page to the physical allocator).
+    // The half-consumed trap frame on this task's kernel stack is
+    // abandoned along with the stack itself — free with the rest
+    // at reap time.
+    if ((frame->cs & 3) == 3)
+    {
+        const char* vec_name = (frame->vector < 32) ? kVectorNames[frame->vector] : "user-vector-oor";
+        SerialWrite("\n[task-kill] ring-3 task took ");
+        SerialWrite(vec_name);
+        SerialWrite(" — terminating\n");
+        SerialWrite("  pid  : ");
+        SerialWriteHex(customos::sched::CurrentTaskId());
+        SerialWrite("\n  rip  : ");
+        SerialWriteHex(frame->rip);
+        SerialWrite("\n  rsp  : ");
+        SerialWriteHex(frame->rsp);
+        SerialWrite("\n  cs   : ");
+        SerialWriteHex(frame->cs);
+        if (frame->vector == 14)
+        {
+            SerialWrite("\n  cr2  : ");
+            SerialWriteHex(ReadCr2());
+            SerialWrite("\n  err  : ");
+            SerialWriteHex(frame->error_code);
+        }
+        SerialWrite("\n");
+        // SchedExit must NOT run with IF=0 forever; it ends in a
+        // Schedule() that waits for the reaper, and the reaper needs
+        // timer IRQs to make progress. SchedYield/SchedExit internally
+        // cli/sti around Schedule, so we don't need to explicitly sti
+        // here. Control never returns from SchedExit.
+        customos::sched::SchedExit();
     }
 
     // Pre-marker human-readable banner. Anything before BEGIN / after END

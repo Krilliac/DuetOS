@@ -23,16 +23,22 @@ namespace customos::sched
 struct Task; // forward decl; defined in kernel/sched/sched.cpp
 }
 
+namespace customos::mm
+{
+struct AddressSpace; // forward decl; defined in kernel/mm/address_space.h
+}
+
 namespace customos::cpu
 {
 
 struct PerCpu
 {
-    u32 cpu_id;                // 0 = BSP; APs number 1..N in bring-up order
-    u32 lapic_id;              // APIC ID as read from LAPIC ID register
-    sched::Task* current_task; // currently-running Task (was g_current)
-    bool need_resched;         // set by TimerHandler / wake paths
-    u8 _pad[7];                // keep 8-byte alignment after bool
+    u32 cpu_id;                   // 0 = BSP; APs number 1..N in bring-up order
+    u32 lapic_id;                 // APIC ID as read from LAPIC ID register
+    sched::Task* current_task;    // currently-running Task (was g_current)
+    mm::AddressSpace* current_as; // AS currently loaded in CR3 (nullptr = kernel AS / boot PML4)
+    bool need_resched;            // set by TimerHandler / wake paths
+    u8 _pad[7];                   // keep 8-byte alignment after bool
 
     // Everything below this line will grow as SMP matures:
     //   - per-CPU runqueue head/tail + spinlock

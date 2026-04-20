@@ -37,6 +37,31 @@ enum SyscallNumber : u64
     SYS_GETPID = 1,
     SYS_WRITE = 2,
     SYS_YIELD = 3,
+    // SYS_STAT: rdi = user pointer to NUL-terminated path, rsi = user
+    // pointer to a u64 output slot that receives the file size.
+    // Returns 0 on success, -1 on any failure (path not found, path
+    // out of jail, bad user pointer, or cap missing). Gated on
+    // kCapFsRead. Path lookup is anchored at CurrentProcess()->root
+    // — a sandboxed process's namespace is its subtree only.
+    SYS_STAT = 4,
+    // SYS_READ: rdi = user pointer to NUL-terminated path, rsi = user
+    // pointer to destination buffer, rdx = buffer capacity in bytes.
+    // Returns number of bytes actually written on success (≤ both
+    // the file size and the buffer capacity), 0 for an empty file,
+    // or -1 on failure (cap missing, path out of jail, not a file,
+    // bad user pointers). Gated on kCapFsRead; lookup is anchored
+    // at CurrentProcess()->root.
+    SYS_READ = 5,
+    // SYS_DROPCAPS: rdi = bitmask of caps to remove from the
+    // calling process's CapSet. Always succeeds (dropping a cap
+    // the process doesn't hold is a no-op). The drop is
+    // irreversible — there's no SYS_GRANTCAPS. Useful pattern:
+    // a process starts trusted, does trusted initialization,
+    // then SYS_DROPCAPS'es down to a minimal set before parsing
+    // untrusted input. Returns 0 always. No cap check on the
+    // syscall itself (anyone can make themselves LESS
+    // privileged).
+    SYS_DROPCAPS = 6,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit

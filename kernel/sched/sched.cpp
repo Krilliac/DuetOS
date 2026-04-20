@@ -5,8 +5,10 @@
 #include "../arch/x86_64/serial.h"
 #include "../core/klog.h"
 #include "../core/panic.h"
+#include "../core/process.h"
 #include "../core/recovery.h"
 #include "../cpu/percpu.h"
+#include "../mm/address_space.h"
 #include "../mm/frame_allocator.h"
 #include "../mm/kheap.h"
 #include "../mm/paging.h"
@@ -59,16 +61,44 @@ struct Task
     // / real-time class would need a mutable field.
     TaskPriority priority;
 
-    // User-VM regions this task owns. Registered via
-    // RegisterUserVmRegion (usually from the task's entry function
-    // right after it maps its user-accessible pages). Reaped by
-    // the dead-task reaper: each entry turns into an UnmapPage +
-    // FreeFrame before the Task struct itself is KFreed. Size
-    // bounded at kMaxUserVmRegionsPerTask — hitting the cap
-    // panics, which is the "a consumer I didn't know about wants
-    // more user pages" signal.
-    u8 user_region_count;
-    UserVmRegion user_regions[kMaxUserVmRegionsPerTask];
+    // Per-process address space. nullptr means "kernel AS" (the
+    // boot PML4) — used by every kernel-only thread (workers,
+    // reaper, idle, keyboard reader, etc.). A non-null AS means
+    // this task holds a process reference that transitively owns
+    // the AS: the reaper calls core::ProcessRelease on process,
+    // which drops the AS reference, which runs the AS destructor
+    // if it was the last holder.
+    //
+    // Schedule() publishes task->as to CR3 on every switch-in via
+    // AddressSpaceActivate. Same-AS switches (kernel→kernel) hit
+    // the fast-path and do not touch CR3 — no TLB flush paid for
+    // a scheduler decision that doesn't change the address space.
+    // We cache the AS pointer on the Task (rather than always
+    // dereferencing process->as) so the context-switch hot path
+    // stays one load.
+    mm::AddressSpace* as;
+
+    // Owning process. nullptr for kernel-only tasks. Set once at
+    // SchedCreateUser; the reaper ProcessReleases it on death.
+    // Used by CurrentProcess() for cap lookup.
+    core::Process* process;
+
+    // Flag set by any kernel subsystem that wants this task
+    // killed at next resched. Historical name was tick_exhausted
+    // because the tick-budget path set it first; now the cap-
+    // denial threshold, future audit-triggered kills, etc. all
+    // route through the same flag. Checked by Schedule() on each
+    // re-enqueue; when set, the task is diverted to the zombie
+    // list instead of being put back on the runqueue, and the
+    // reaper tears it down normally. Irrelevant for kernel-only
+    // tasks (process == nullptr — they have neither budgets nor
+    // sandbox policies).
+    bool kill_requested;
+    // Why the kill was requested. Populated alongside
+    // kill_requested; Schedule() reads this to log a meaningful
+    // reason when it converts the task into a zombie. Only valid
+    // when kill_requested is true.
+    KillReason kill_reason;
 };
 
 namespace
@@ -290,6 +320,13 @@ bool TickReached(u64 now, u64 deadline)
     return static_cast<i64>(now - deadline) >= 0;
 }
 
+// Forward decl — defined in the wait-queue block further down.
+// Schedule() needs it for the tick-budget kill path (it already
+// holds g_sched_lock and can't call the non-_Locked variant that
+// would re-acquire). Must be extern-linkage inside this anon
+// namespace; the definition below has the same linkage.
+Task* WaitQueueWakeOneLocked(WaitQueue* wq);
+
 // Defined in context_switch.S. The first `ret` out of ContextSwitch for a
 // freshly-created task lands here. Reads the entry function and argument
 // from the callee-saved registers the SchedCreate stack primer planted
@@ -322,7 +359,10 @@ void SchedInit()
     boot_task->waiting_on = nullptr;
     boot_task->wake_by_timeout = false;
     boot_task->priority = TaskPriority::Normal;
-    boot_task->user_region_count = 0;
+    boot_task->as = nullptr;           // kernel AS — boot PML4
+    boot_task->process = nullptr;      // kernel-only — no owning process
+    boot_task->kill_requested = false; // kernel tasks never hit a budget
+    boot_task->kill_reason = KillReason::TickBudget; // unused when kill_requested=false
 
     Current() = boot_task;
     g_tasks_created = 1;
@@ -331,7 +371,13 @@ void SchedInit()
     SerialWrite("[sched] online; task 0 is \"kboot\"\n");
 }
 
-Task* SchedCreate(TaskEntry entry, void* arg, const char* name, TaskPriority priority)
+namespace
+{
+
+// Shared body for SchedCreate / SchedCreateUser. The only difference
+// between the two callers is the task's address space — kernel-only
+// tasks pass nullptr; ring-3-bound tasks pass a freshly-created AS.
+Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPriority priority, mm::AddressSpace* as)
 {
     KASSERT(entry != nullptr, "sched", "SchedCreate null entry fn");
     KASSERT(name != nullptr, "sched", "SchedCreate null name");
@@ -365,7 +411,10 @@ Task* SchedCreate(TaskEntry entry, void* arg, const char* name, TaskPriority pri
     t->waiting_on = nullptr;
     t->wake_by_timeout = false;
     t->priority = priority;
-    t->user_region_count = 0;
+    t->as = as;
+    t->process = nullptr; // populated by SchedCreateUser for user tasks
+    t->kill_requested = false;
+    t->kill_reason = KillReason::TickBudget;
 
     // Build the initial stack. ContextSwitch pops r15, r14, r13, r12,
     // rbp, rbx and then rets. So from bottom to top of the pre-planted
@@ -412,9 +461,71 @@ Task* SchedCreate(TaskEntry entry, void* arg, const char* name, TaskPriority pri
     SerialWrite(name);
     SerialWrite("\" rsp=");
     SerialWriteHex(t->rsp);
+    SerialWrite(" as=");
+    SerialWriteHex(reinterpret_cast<u64>(as));
     SerialWrite("\n");
 
     return t;
+}
+
+} // namespace
+
+Task* SchedCreate(TaskEntry entry, void* arg, const char* name, TaskPriority priority)
+{
+    return SchedCreateInternal(entry, arg, name, priority, /*as=*/nullptr);
+}
+
+Task* SchedCreateUser(TaskEntry entry, void* arg, const char* name, core::Process* process)
+{
+    KASSERT(process != nullptr, "sched", "SchedCreateUser without Process");
+    KASSERT(process->as != nullptr, "sched", "SchedCreateUser Process has no AS");
+
+    Task* t = SchedCreateInternal(entry, arg, name, TaskPriority::Normal, process->as);
+    t->process = process;
+    // Refcount discipline: ProcessCreate returned refcount=1 (one
+    // for the creating caller). The caller hands that reference off
+    // to this Task — no retain needed. Subsequent Tasks that want
+    // to share the Process (future thread spawn) must ProcessRetain
+    // before calling SchedCreateUser with an already-owned process.
+    return t;
+}
+
+core::Process* TaskProcess(Task* t)
+{
+    if (t == nullptr)
+    {
+        return nullptr;
+    }
+    return t->process;
+}
+
+void FlagCurrentForKill(KillReason reason)
+{
+    Task* t = Current();
+    if (t == nullptr)
+    {
+        return;
+    }
+    // Schedule() converts (kill_requested == true) on re-enqueue
+    // into a Dead transition. The reason is logged there.
+    // Setting the flag is atomic from this context (single-CPU,
+    // same core). On SMP the flag is per-task, so only this CPU's
+    // Schedule() reads it for this task.
+    t->kill_requested = true;
+    t->kill_reason = reason;
+    NeedResched() = true;
+}
+
+const char* KillReasonName(KillReason r)
+{
+    switch (r)
+    {
+    case KillReason::TickBudget:
+        return "TickBudget";
+    case KillReason::SandboxDenialThreshold:
+        return "SandboxDenialThreshold";
+    }
+    return "<unknown>";
 }
 
 void Schedule()
@@ -446,8 +557,37 @@ void Schedule()
         prev = Current();
         if (prev->state == TaskState::Running)
         {
-            prev->state = TaskState::Ready;
-            RunqueuePush(prev);
+            if (prev->kill_requested)
+            {
+                SerialWrite("[sched] killing task id=");
+                SerialWriteHex(prev->id);
+                SerialWrite(" name=\"");
+                SerialWrite(prev->name);
+                SerialWrite("\" reason=");
+                SerialWrite(KillReasonName(prev->kill_reason));
+                SerialWrite("\n");
+                // CPU-tick budget ran out (flagged by OnTimerTick). Treat
+                // identically to SchedExit but inline — we're already
+                // inside Schedule()'s locked section, calling SchedExit
+                // here would re-enter the lock and fight the state
+                // machine. Transition Running → Dead, push to zombies,
+                // wake the reaper.
+                prev->state = TaskState::Dead;
+                ++g_tasks_exited;
+                --g_tasks_live;
+                prev->next = g_zombies;
+                g_zombies = prev;
+                // Wake the reaper; it's blocked on g_reaper_wq and
+                // noticing a new zombie needs a wake. WaitQueueWakeOne
+                // itself acquires g_sched_lock — but we already hold
+                // it. Use the _Locked variant to avoid recursive lock.
+                WaitQueueWakeOneLocked(&g_reaper_wq);
+            }
+            else
+            {
+                prev->state = TaskState::Ready;
+                RunqueuePush(prev);
+            }
         }
         // Dead tasks are NOT re-enqueued; their Task struct + stack live on
         // until the reaper reclaims them.
@@ -478,6 +618,23 @@ void Schedule()
         const u64 rsp0 = reinterpret_cast<u64>(next->stack_base) + next->stack_size;
         arch::TssSetRsp0(rsp0);
     }
+
+    // Activate the next task's address space. nullptr means "kernel
+    // AS" (the boot PML4 — every kernel-only task uses it). The
+    // call is a no-op when next->as already matches this CPU's
+    // current AS, so the common kernel→kernel switch pays no CR3
+    // write and no TLB flush. Switching INTO a user task or BACK
+    // to a kernel-only task across user-task boundaries is the
+    // only path that actually writes CR3.
+    //
+    // Critical: must happen BEFORE ContextSwitch. The next task's
+    // first instruction after ContextSwitch may be in user space
+    // (via the iretq inside arch::EnterUserMode at the trampoline
+    // tail) or it may dereference its own user-half pointers via
+    // the kernel-side direct map (PhysToVirt — kernel half — is
+    // always valid, but a user pointer in next->rsp's frame would
+    // read stale TLB entries from prev's AS without the flip).
+    mm::AddressSpaceActivate(next->as);
 
     ContextSwitch(&prev->rsp, next->rsp);
     // When we return here, `prev` is running again (it may have been
@@ -596,6 +753,43 @@ void OnTimerTick(u64 now_ticks)
 {
     g_tick_now = now_ticks;
 
+    // Tick-budget accounting for the currently-running task's
+    // process. Every tick this task is Running counts against
+    // its process's CPU-time budget. When the budget is exhausted,
+    // flag the task to be terminated at next resched — we do NOT
+    // call SchedExit here (this is IRQ context; Schedule() would
+    // switch away before LAPIC EOI, leaving the in-service bit
+    // stuck). The flag is read by Schedule() which converts a
+    // budget-exhausted task into a Dead one on re-enqueue.
+    //
+    // Kernel-only tasks (process == nullptr) don't have a budget
+    // — they're trusted runtime threads (reaper, idle, workers).
+    // Tick-budget accounting for the currently-running task's process.
+    // Every tick the task was Running counts against its process's CPU
+    // budget. When exhausted, flag the task — Schedule() reads the flag
+    // and converts a budget-burned task into a Dead one on next resched
+    // (we deliberately don't call SchedExit here; this is IRQ context
+    // and SchedExit ends in a Schedule that would switch-away before
+    // LAPIC EOI, leaving the in-service bit stuck).
+    //
+    // Kernel-only tasks (process == nullptr) don't have budgets —
+    // they're trusted runtime threads (reaper, idle, workers).
+    Task* cur = Current();
+    if (cur != nullptr && cur->process != nullptr)
+    {
+        core::Process* proc = cur->process;
+        ++proc->ticks_used;
+        if (proc->ticks_used >= proc->tick_budget && !cur->kill_requested)
+        {
+            cur->kill_requested = true;
+            cur->kill_reason = KillReason::TickBudget;
+            arch::SerialWrite("[sched] tick budget exhausted pid=");
+            arch::SerialWriteHex(proc->pid);
+            arch::SerialWrite("\n");
+            NeedResched() = true;
+        }
+    }
+
     bool woke_any = false;
     {
         sync::SpinLockGuard guard(g_sched_lock);
@@ -648,23 +842,6 @@ u64 CurrentTaskId()
         return ~0ULL;
     }
     return self->id;
-}
-
-void RegisterUserVmRegion(u64 vaddr, u64 frame)
-{
-    Task* self = Current();
-    if (self == nullptr)
-    {
-        PanicSched("RegisterUserVmRegion with no current task");
-    }
-    if (self->user_region_count >= kMaxUserVmRegionsPerTask)
-    {
-        PanicSched("RegisterUserVmRegion: per-task cap exceeded");
-    }
-    // No sched_lock — a task only registers its own regions from its
-    // own context; there's no contender to race against.
-    self->user_regions[self->user_region_count] = UserVmRegion{vaddr, frame};
-    ++self->user_region_count;
 }
 
 u64 SchedCurrentKernelStackTop()
@@ -741,21 +918,38 @@ namespace
             drained = dead->next;
             dead->next = nullptr;
 
-            // Reclaim every user-VM region the task registered via
-            // RegisterUserVmRegion — unmap the page from the global
-            // PML4 AND return the backing frame to the physical
-            // allocator. Must happen BEFORE the Task struct itself
-            // is freed (we read the region table out of it). Doing
-            // this in the reaper (not SchedExit) keeps the unmap +
-            // FreeFrame off the dying task's own stack, same
-            // argument as the stack KFree.
-            for (u8 i = 0; i < dead->user_region_count; ++i)
+            // Drop the task's process reference. The Process owns
+            // the AS — ProcessRelease drops its AS reference, and
+            // when the last holder goes away the AS destructor
+            // walks the region table, returns every backing user
+            // frame, walks the user-half page tables to free
+            // intermediate PDPT/PD/PT pages, and frees the PML4
+            // frame. Tasks with process == nullptr (kernel-only
+            // workers, idle, reaper's own thread) fall through
+            // with no state change.
+            //
+            // AS-only tasks (process == nullptr but as != nullptr)
+            // don't exist today but the fallback path is preserved
+            // so a future helper that spawns a ring-3 thread
+            // without a surrounding Process (testing, diagnostics)
+            // still gets its AS reaped.
+            //
+            // Must happen BEFORE freeing the Task struct — we read
+            // the pointers out of it — and AFTER the dying task is
+            // off-CPU (which it is by construction: SchedExit only
+            // enqueues to the zombie list once Schedule() has
+            // switched away).
+            if (dead->process != nullptr)
             {
-                const UserVmRegion region = dead->user_regions[i];
-                mm::UnmapPage(region.vaddr);
-                mm::FreeFrame(region.frame);
+                core::ProcessRelease(dead->process);
+                dead->process = nullptr;
+                dead->as = nullptr; // process owned it; pointer is now dangling, clear it
             }
-            dead->user_region_count = 0;
+            else
+            {
+                mm::AddressSpaceRelease(dead->as);
+                dead->as = nullptr;
+            }
 
             // Stack_base can be nullptr for the boot task (task 0);
             // defensive null-check even though task 0 should never

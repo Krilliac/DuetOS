@@ -16,6 +16,7 @@ constinit PerCpu g_bsp_percpu = {
     .cpu_id = 0,
     .lapic_id = 0,
     .current_task = nullptr,
+    .current_as = nullptr, // kernel AS = boot PML4, until a process is activated
     .need_resched = false,
     ._pad = {},
 };

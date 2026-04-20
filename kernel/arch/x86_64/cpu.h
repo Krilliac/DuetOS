@@ -61,6 +61,15 @@ inline u64 ReadCr0()
     return value;
 }
 
+/// Load CR0 with a new value. Changing certain bits (PG, PE, CD/NW,
+/// WP) has system-wide effect — callers should be deliberate about
+/// what they flip. The "memory" clobber prevents the compiler from
+/// reordering loads/stores across the write.
+inline void WriteCr0(u64 value)
+{
+    asm volatile("mov %0, %%cr0" : : "r"(value) : "memory");
+}
+
 inline u64 ReadCr2()
 {
     u64 value;
@@ -73,6 +82,19 @@ inline u64 ReadCr3()
     u64 value;
     asm volatile("mov %%cr3, %0" : "=r"(value));
     return value;
+}
+
+/// Load CR3 with a new PML4 physical address. Implicitly flushes every
+/// non-global TLB entry on the executing CPU. The "memory" clobber tells
+/// the compiler not to reorder loads/stores across the switch — the
+/// caller has just changed which page tables are authoritative.
+///
+/// Invariant: bits 0..11 of `pml4_phys` MUST be zero (4 KiB-aligned PML4
+/// frame). The low 12 bits of CR3 are PCID / cache-control flags; we
+/// don't use PCIDs in v0, so callers pass a clean physical address.
+inline void WriteCr3(u64 pml4_phys)
+{
+    asm volatile("mov %0, %%cr3" : : "r"(pml4_phys) : "memory");
 }
 
 inline u64 ReadCr4()

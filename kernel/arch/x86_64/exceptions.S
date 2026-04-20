@@ -23,6 +23,12 @@
     .align 16
     .global isr_\vec
 isr_\vec:
+    /* endbr64 for IBT — every IDT entry points at one of these
+     * labels and the CPU treats IDT dispatch as an indirect branch.
+     * Without an endbr landing pad, each interrupt would raise #CP
+     * instead of running the handler. Emits as a 4-byte NOP on
+     * pre-CET CPUs. */
+    endbr64
     push    0                   /* fake error code      */
     push    \vec                /* vector number        */
     jmp     isr_common
@@ -32,6 +38,7 @@ isr_\vec:
     .align 16
     .global isr_\vec
 isr_\vec:
+    endbr64
     /* CPU already pushed the error code. */
     push    \vec                /* vector number        */
     jmp     isr_common
@@ -127,6 +134,7 @@ ISR_NOERR 128                   /* int 0x80 — user-mode syscall gate */
 .align 16
 .global isr_spurious
 isr_spurious:
+    endbr64
     push    0                   /* fake error code      */
     push    0xFF                /* vector number        */
     jmp     isr_common
@@ -145,6 +153,21 @@ isr_spurious:
 .align 16
 .global isr_common
 isr_common:
+    /* swapgs gate — restore the kernel's pcpu pointer into GSBASE if we
+     * entered from user mode. On entry the stack layout (from rsp) is:
+     *   vec (0), err (8), rip (16), cs (24), rflags, rsp, ss.
+     * The pushed CS's low two bits encode RPL: 0 for kernel entry,
+     * 3 for user entry. `test qword ptr [rsp+24], 3` is zero for
+     * ring-0 entry (no swapgs — GSBASE already correct) and non-zero
+     * for ring-3 entry (swapgs to retrieve the kernel pcpu pointer
+     * stashed in KERNEL_GS_BASE by EnterUserMode or by the previous
+     * iretq-to-user). Without this, any gs-relative read
+     * (cpu::CurrentCpu() etc.) from a trap handler that came from
+     * user mode would deref address 0. */
+    test    qword ptr [rsp + 24], 3
+    jz      1f
+    swapgs
+1:
     push    rax
     push    rbx
     push    rcx
@@ -188,6 +211,17 @@ isr_common:
     pop     rbx
     pop     rax
     add     rsp, 16             /* discard vector + error_code */
+
+    /* Mirror of the entry gate. Stack is now: rip (0), cs (8), rflags,
+     * rsp, ss. If we're returning to user mode (CS.RPL == 3), swapgs
+     * to restore user's GSBASE from KERNEL_GS_BASE and stash our pcpu
+     * pointer back into KERNEL_GS_BASE for the next entry. Skipped on
+     * kernel-mode returns (IRQ from kernel, kernel-side faults), where
+     * GSBASE is already what the resumed kernel context expects. */
+    test    qword ptr [rsp + 8], 3
+    jz      2f
+    swapgs
+2:
     iretq
 
 
