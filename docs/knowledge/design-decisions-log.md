@@ -381,7 +381,7 @@ get an inline "superseded by <commit>" note and stay.
 
 - **Scope:** `kernel/sched/sched.{h,cpp}`,
   `kernel/core/main.cpp` calls `SchedStartReaper`
-- **Commit:** _(filled at commit)_
+- **Commit:** `273058c`
 - **Decision:** `SchedExit` now pushes the dying task onto a global
   `g_zombies` list under CLI and wakes a dedicated `reaper` kernel
   thread via a `WaitQueue`. The reaper pops zombies one at a time
