@@ -377,6 +377,44 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 018 — Runtime recovery taxonomy: halt / restart / retry / reject
+
+- **Scope:** `docs/knowledge/runtime-recovery-strategy.md`
+- **Commit:** _(filled at commit)_
+- **Decision:** Codify, per fault class, what the kernel does:
+    - Class A (kernel integrity) → **HALT** via `core::Panic`.
+    - Class B (driver fault) → **RESTART** the driver behind its
+      fault-isolation boundary.
+    - Class C (process fault) → **KILL** the task; kernel lives.
+    - Class D (transient hardware) → **RETRY** with bounded backoff.
+    - Class E (bad input across trust boundary) → **REJECT** with
+      typed error + audit event.
+    - Class F (well-bounded object state) → **RESET + AUDIT**,
+      case-by-case with written bounded-ness argument.
+  Unexpected fault with no matching class defaults to **HALT**
+  (secure default). Every recovery emits an audit event — silent
+  self-heal is the anti-pattern, security-relevant corruption must
+  be visible.
+- **Why:** Prevents the two failure modes a kernel can drift into
+  without a written taxonomy: (a) panicking on non-integrity issues
+  (availability death) or (b) silently self-healing corrupt state
+  (security death). The anti-malware posture in
+  `security-malware-hard-stop-plan.md` is incompatible with (b) —
+  sophisticated rootkits actively exploit self-healing code.
+- **Rules out / defers:** Catch-and-swallow of kernel faults. "Reset
+  to default on corruption" patterns inside kernel data structures.
+  Infinite retry. Silent restart.
+- **Revisit when:** First real driver fault path (tune Class B retry
+  counts), ring 3 (populate Class C fully), first I/O path (put
+  real numbers on Class D), Security Policy Engine (wire Class
+  E/F audit events into the event stream), SMP (Class A must
+  broadcast NMI-halt peers).
+- **Related tracks:** Track 4 (Process — Class C),
+  Track 6 (Drivers — Class B), Track 13 (Security — Class E/F
+  audit path).
+
+---
+
 ## 017 — SMP foundations: xchg spinlock + per-CPU data via GSBASE
 
 - **Scope:** `kernel/sync/spinlock.{h,cpp}`,

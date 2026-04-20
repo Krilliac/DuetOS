@@ -11,6 +11,7 @@ Planning and living-decisions documents intended to capture long-range execution
 - `track-2-platform-foundation-implementation-plan.md` — detailed implementation plan for Track 2 (UEFI/ACPI/SMP/PCIe/diagnostics), including ordered work items, acceptance tests, and embedded security constraints.
 - `implementation-backlog-gates.md` — execution backlog and gate framework translating roadmap tracks into epics, streams, and next-session checklist.
 - `usb-xhci-scope-estimate.md` — scope estimate + staged plan for the USB HID path (PCI enumeration → xHCI → USB core → HID class). Explains why USB is deferred past the v0 PS/2 driver.
+- `runtime-recovery-strategy.md` — the **halt vs. restart vs. retry vs. reject** taxonomy. Source of truth for "when X happens, what does the kernel do?" Every subsystem defers to this and records any deviation in the design-decisions log.
 
 ### Implementation ground-truth (append-only)
 
