@@ -17,6 +17,7 @@
 #include "../sync/spinlock.h"
 #include "heartbeat.h"
 #include "klog.h"
+#include "panic.h"
 #include "../mm/kheap.h"
 #include "../mm/paging.h"
 #include "../sched/sched.h"
@@ -194,5 +195,14 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     customos::core::StartHeartbeatThread();
 
     SerialWrite("[boot] All subsystems online. Entering idle loop.\n");
+
+#ifdef CUSTOMOS_PANIC_DEMO
+    // Compile-time-gated deliberate panic used by tools/test-panic.sh
+    // to verify the panic path stays healthy end-to-end. Never
+    // enabled in a normal build — the default preset does not pass
+    // -DCUSTOMOS_PANIC_DEMO.
+    customos::core::Panic("test/panic-demo", "CUSTOMOS_PANIC_DEMO enabled; halting on purpose");
+#endif
+
     IdleLoop();
 }

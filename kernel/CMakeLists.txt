@@ -38,6 +38,14 @@ set(CUSTOMOS_KERNEL_SOURCES
 
 add_executable(customos-kernel ${CUSTOMOS_KERNEL_SOURCES})
 
+# Deliberate-panic build flag, consumed by kernel_main and triggered
+# by tools/test-panic.sh. OFF for normal builds — the demo panic
+# halts the kernel on purpose and must not ship in a release preset.
+option(CUSTOMOS_PANIC_DEMO "Insert a deliberate Panic() at end of kernel_main (test-panic.sh)" OFF)
+if(CUSTOMOS_PANIC_DEMO)
+    target_compile_definitions(customos-kernel PRIVATE CUSTOMOS_PANIC_DEMO=1)
+endif()
+
 set_target_properties(customos-kernel PROPERTIES
     OUTPUT_NAME "customos-kernel.elf"
     C_STANDARD 17

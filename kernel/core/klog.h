@@ -64,6 +64,20 @@ void LogWithValue(LogLevel level, const char* subsystem, const char* message, u6
 /// kernel_main after Serial is up.
 void KLogSelfTest();
 
+/// Dump the last kLogRingCapacity entries from the in-kernel ring
+/// buffer to COM1 in oldest-first order. Called by `core::Panic`
+/// (via `DumpDiagnostics`) so the final serial log always shows
+/// the last ~64 klog lines leading up to the halt, even when the
+/// panic banner buries the scroll-back.
+///
+/// Safe to call from panic / IRQ context. Does NOT clear the ring —
+/// multiple calls emit the same content.
+void DumpLogRing();
+
+/// Size of the log-ring buffer. Exposed so tests / diagnostics can
+/// reason about how many historical lines are retained.
+inline constexpr u64 kLogRingCapacity = 64;
+
 } // namespace customos::core
 
 // Convenience macros. The `do { } while (0)` lets call sites still

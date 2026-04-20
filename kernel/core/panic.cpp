@@ -4,6 +4,7 @@
 #include "../arch/x86_64/serial.h"
 #include "../arch/x86_64/timer.h"
 #include "../cpu/percpu.h"
+#include "klog.h"
 
 namespace customos::core
 {
@@ -162,6 +163,7 @@ void DumpDiagnostics(u64 rip, u64 rsp, u64 rbp)
     WriteLabelled("efer     ", arch::ReadEfer());
     DumpBacktrace(rbp);
     DumpStack(rsp, 16);
+    DumpLogRing();
 }
 
 void Panic(const char* subsystem, const char* message)
