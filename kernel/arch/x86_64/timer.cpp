@@ -52,6 +52,7 @@ constinit u64 g_lapic_ticks_per_period = 0;
 void TimerHandler()
 {
     ++g_ticks;
+    sched::OnTimerTick(g_ticks);
 
     // Heartbeat: print every 100 ticks so the boot log shows the IRQ path
     // is alive. Drop this once there's a real periodic workload to drive.
