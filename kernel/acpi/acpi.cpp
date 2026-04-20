@@ -105,6 +105,78 @@ struct [[gnu::packed]] MbAcpiTag
     // Rsdp bytes follow (20 bytes for v1, 36 for v2).
 };
 
+// ACPI GenericAddress — the 12-byte descriptor FADT uses for the
+// reset register, PM1 event/control blocks, etc. AddressSpaceID
+// selects the namespace of `address`: 0 = system memory (MMIO),
+// 1 = system I/O (port), 2 = PCI config, 3 = EC, 4 = SMBus, etc.
+struct [[gnu::packed]] GenericAddress
+{
+    u8 address_space_id;
+    u8 bit_width;
+    u8 bit_offset;
+    u8 access_size;
+    u64 address;
+};
+
+constexpr u8 kGenericAddrSpaceMemory = 0;
+constexpr u8 kGenericAddrSpaceIo = 1;
+
+// FADT — Fixed ACPI Description Table. Only fields up through the
+// reset register block are declared; later fields (X_* 64-bit
+// addresses, SLEEP_CONTROL_REG, HypervisorVendorID) come in when a
+// consumer needs them.
+struct [[gnu::packed]] Fadt
+{
+    SdtHeader header;
+    u32 firmware_ctrl;
+    u32 dsdt;
+    u8 reserved;
+    u8 preferred_pm_profile;
+    u16 sci_int;
+    u32 smi_cmd;
+    u8 acpi_enable;
+    u8 acpi_disable;
+    u8 s4bios_req;
+    u8 pstate_cnt;
+    u32 pm1a_evt_blk;
+    u32 pm1b_evt_blk;
+    u32 pm1a_cnt_blk;
+    u32 pm1b_cnt_blk;
+    u32 pm2_cnt_blk;
+    u32 pm_tmr_blk;
+    u32 gpe0_blk;
+    u32 gpe1_blk;
+    u8 pm1_evt_len;
+    u8 pm1_cnt_len;
+    u8 pm2_cnt_len;
+    u8 pm_tmr_len;
+    u8 gpe0_blk_len;
+    u8 gpe1_blk_len;
+    u8 gpe1_base;
+    u8 cst_cnt;
+    u16 p_lvl2_lat;
+    u16 p_lvl3_lat;
+    u16 flush_size;
+    u16 flush_stride;
+    u8 duty_offset;
+    u8 duty_width;
+    u8 day_alrm;
+    u8 mon_alrm;
+    u8 century;
+    u16 iapc_boot_arch;
+    u8 reserved2;
+    u32 flags;
+    GenericAddress reset_reg;
+    u8 reset_value;
+    // Trailing fields (arm_boot_arch, fadt_minor_version, X_* 64-bit
+    // blocks, SLEEP_CONTROL_REG, SLEEP_STATUS_REG, HypervisorVendorID)
+    // are unused today and intentionally omitted.
+};
+
+// FADT flags bit 10 — RESET_REG_SUP. When set, the RESET_REG +
+// RESET_VALUE fields are meaningful. ACPI spec 4.1.3.
+constexpr u32 kFadtFlagResetRegSup = 1U << 10;
+
 // ---------------------------------------------------------------------------
 // Cache. Populated once by AcpiInit; read-only after.
 // ---------------------------------------------------------------------------
@@ -115,6 +187,15 @@ constinit InterruptOverride g_overrides[kMaxInterruptOverrides]{};
 constinit u64 g_override_count = 0;
 constinit LapicRecord g_lapics[kMaxCpus]{};
 constinit u64 g_lapic_count = 0;
+
+// FADT-derived cache. Populated by ParseFadt if the FADT is
+// present; left at defaults (reset unsupported, SCI on ISA IRQ 9)
+// otherwise. The SCI default is the ACPI-spec fallback (ISA IRQ
+// 9, level, active-low).
+constinit u16 g_sci_vector = 9;
+constinit bool g_reset_supported = false;
+constinit GenericAddress g_reset_reg{};
+constinit u8 g_reset_value = 0;
 
 [[noreturn]] void PanicAcpi(const char* message)
 {
@@ -332,6 +413,17 @@ void ParseMadt(const Madt& madt)
     }
 }
 
+void ParseFadt(const Fadt& fadt)
+{
+    g_sci_vector = fadt.sci_int;
+    if ((fadt.flags & kFadtFlagResetRegSup) != 0)
+    {
+        g_reset_supported = true;
+        g_reset_reg = fadt.reset_reg;
+        g_reset_value = fadt.reset_value;
+    }
+}
+
 } // namespace
 
 void AcpiInit(uptr multiboot_info_phys)
@@ -369,6 +461,24 @@ void AcpiInit(uptr multiboot_info_phys)
     }
     ParseMadt(*reinterpret_cast<const Madt*>(madt_hdr));
 
+    // FADT is optional — a missing one leaves reset unsupported and
+    // the SCI vector at the ACPI default (9). Every PC firmware we
+    // target ships it, but we don't panic on absence the way MADT
+    // does: nothing else in the kernel requires FADT today.
+    const SdtHeader* fadt_hdr = FindTable(*rsdp, "FACP");
+    if (fadt_hdr != nullptr)
+    {
+        if (fadt_hdr->length < sizeof(Fadt))
+        {
+            PanicAcpi("FADT shorter than the fields we read");
+        }
+        if (!ChecksumOk(fadt_hdr, fadt_hdr->length))
+        {
+            PanicAcpi("FADT checksum failed");
+        }
+        ParseFadt(*reinterpret_cast<const Fadt*>(fadt_hdr));
+    }
+
     SerialWrite("[acpi] rsdp rev=");
     SerialWriteHex(rsdp->revision);
     SerialWrite(" lapic=");
@@ -379,6 +489,23 @@ void AcpiInit(uptr multiboot_info_phys)
     SerialWriteHex(g_override_count);
     SerialWrite(" cpus=");
     SerialWriteHex(g_lapic_count);
+    SerialWrite("\n");
+
+    SerialWrite("[acpi] sci_int=");
+    SerialWriteHex(g_sci_vector);
+    SerialWrite(" reset_reg=");
+    if (g_reset_supported)
+    {
+        SerialWriteHex(g_reset_reg.address_space_id);
+        SerialWrite(":");
+        SerialWriteHex(g_reset_reg.address);
+        SerialWrite(" val=");
+        SerialWriteHex(g_reset_value);
+    }
+    else
+    {
+        SerialWrite("unsupported");
+    }
     SerialWrite("\n");
 
     for (u64 i = 0; i < g_lapic_count; ++i)
@@ -475,6 +602,35 @@ u16 IsaIrqFlags(u8 isa_irq)
         }
     }
     return 0; // bus-default polarity + trigger
+}
+
+u16 SciVector()
+{
+    return g_sci_vector;
+}
+
+bool AcpiReset()
+{
+    if (!g_reset_supported)
+    {
+        return false;
+    }
+
+    // Most PC firmware points RESET_REG at I/O port 0xCF9 with value
+    // 0x06 (full reset, including chipset). QEMU q35 follows suit.
+    // Memory-mapped reset is legal in the spec but unused in the
+    // wild on x86 — add MapMmio when a real machine demands it.
+    switch (g_reset_reg.address_space_id)
+    {
+    case kGenericAddrSpaceIo:
+        arch::Outb(static_cast<u16>(g_reset_reg.address), g_reset_value);
+        return true;
+    case kGenericAddrSpaceMemory:
+        // Intentional no-op pending an MMIO-reset host to test against.
+        return false;
+    default:
+        return false;
+    }
 }
 
 } // namespace customos::acpi

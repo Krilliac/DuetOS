@@ -20,8 +20,12 @@
  *     RAM (reachable via the boot direct map). Panics otherwise. The
  *     fix is to MapMmio the out-of-range range; deferred until a real
  *     machine makes us care.
- *   - Only MADT is parsed. FADT, MCFG, HPET, SRAT etc. are untouched.
- *     Add a dispatcher when a consumer needs one.
+ *   - FADT parsing is minimal — only RESET_REG + RESET_VALUE + SCI_INT
+ *     are cached. The rest (PM1a/PM1b event/control blocks, PM timer,
+ *     GPE blocks, preferred CPU C-state hints) lands when a consumer
+ *     exists.
+ *   - MCFG (PCIe ECAM), HPET, SRAT are still untouched. Add a
+ *     dispatcher when a consumer needs one.
  *   - No DSDT/SSDT bytecode interpreter. That's a multi-thousand-line
  *     subsystem in its own right (see: ACPICA). When we need
  *     enumeration beyond static tables we'll integrate or write one.
@@ -91,5 +95,21 @@ u32 IsaIrqToGsi(u8 isa_irq);
 /// in bits 2..3 (00 bus default, 01 edge, 11 level). Callers program the
 /// IOAPIC redirection entry accordingly.
 u16 IsaIrqFlags(u8 isa_irq);
+
+/// ACPI System Control Interrupt vector, as reported by the FADT.
+/// Returns 9 (the ACPI-spec default ISA IRQ) if the FADT was not
+/// found or didn't set a value. The SCI itself is an edge/level-
+/// triggered line that fires on power-management events; no handler
+/// is installed yet.
+u16 SciVector();
+
+/// Issue a firmware-defined reboot via the FADT's RESET_REG. Returns
+/// true if the reset register was advertised as supported and the
+/// write was issued — on success the CPU does not return, so any
+/// code past `if (AcpiReset()) unreachable;` is executed only on
+/// failure (no FADT, RESET_REG_SUP flag clear, or unsupported
+/// address-space id). Fall back to `Outb(0xCF9, 0x06)` or a triple
+/// fault in that case.
+bool AcpiReset();
 
 } // namespace customos::acpi
