@@ -96,6 +96,18 @@ void FramebufferFillRect(u32 x, u32 y, u32 w, u32 h, u32 rgb);
 /// Clipped; no-op on empty dimensions or !Available().
 void FramebufferDrawRect(u32 x, u32 y, u32 w, u32 h, u32 rgb, u32 thickness);
 
+/// Draw one 8x8 glyph at (x, y) using the built-in bitmap font.
+/// `fg` is the ink colour; `bg` is painted behind the glyph cell
+/// so text appears on a clean background rather than alpha-blended.
+/// Unmapped characters render as a placeholder box (see font8x8.h).
+void FramebufferDrawChar(u32 x, u32 y, char ch, u32 fg, u32 bg);
+
+/// Draw a NUL-terminated string at (x, y). Cell advance is 8 px
+/// per glyph. No wrapping, no newline handling — the caller
+/// controls layout. Stops at the first NUL or when the next cell
+/// would exceed the framebuffer width.
+void FramebufferDrawString(u32 x, u32 y, const char* text, u32 fg, u32 bg);
+
 /// Exercise the draw path at boot: clear to black, draw coloured
 /// corner swatches + a framing rectangle. Visible proof that the
 /// firmware handoff + Mmio map + pixel store all work end-to-end.

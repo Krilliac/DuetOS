@@ -164,6 +164,16 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     demo_window.title_height = 22;
     customos::drivers::video::WindowDraw(demo_window);
 
+    // Title-bar label. 8-pixel glyph cells + 2-pixel top/left
+    // padding inside the title bar keeps the text from touching
+    // the border. White ink on the title's navy fill.
+    customos::drivers::video::FramebufferDrawString(demo_window.x + 8, demo_window.y + 7, "CUSTOMOS GUI v0",
+                                                    0x00FFFFFF, demo_window.colour_title);
+
+    // Desktop banner across the top — proves text renders over
+    // the desktop fill too, not just inside window chrome.
+    customos::drivers::video::FramebufferDrawString(16, 8, "WELCOME TO CUSTOMOS   BOOT OK", 0x00FFFFFF, kDesktopTeal);
+
     // Demo clickable button, now sitting inside the window's
     // client area. Click lights it up red; release returns it
     // to grey — the smallest proof the mouse-event pipeline
@@ -179,6 +189,16 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     demo_button.colour_border = 0x00101828;  // dark outline
     customos::drivers::video::WidgetRegisterButton(demo_button);
     customos::drivers::video::WidgetDrawAll();
+
+    // Button label on top of the button fill. Dark ink on the
+    // neutral-grey normal colour. When the button is pressed
+    // the text is overdrawn by the PaintButton call and will
+    // be redrawn by the click-handling code; for v0 the label
+    // disappears during the press and reappears on release —
+    // acceptable for a demo, a proper button would re-render
+    // the text inside PaintButton.
+    customos::drivers::video::FramebufferDrawString(demo_button.x + 28, demo_button.y + 20, "CLICK ME", 0x00101828,
+                                                    demo_button.colour_normal);
 
     customos::drivers::video::CursorInit(kDesktopTeal);
 

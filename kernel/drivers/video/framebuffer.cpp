@@ -3,6 +3,7 @@
 #include "../../arch/x86_64/serial.h"
 #include "../../mm/multiboot2.h"
 #include "../../mm/paging.h"
+#include "font8x8.h"
 
 namespace customos::drivers::video
 {
@@ -194,6 +195,43 @@ void FramebufferClear(u32 rgb)
         return;
     }
     FramebufferFillRect(0, 0, g_info.width, g_info.height, rgb);
+}
+
+void FramebufferDrawChar(u32 x, u32 y, char ch, u32 fg, u32 bg)
+{
+    if (!g_available)
+    {
+        return;
+    }
+    const u8* glyph = Font8x8Lookup(ch);
+    for (u32 row = 0; row < kGlyphHeight; ++row)
+    {
+        const u8 bits = glyph[row];
+        for (u32 col = 0; col < kGlyphWidth; ++col)
+        {
+            const bool on = (bits & (0x80U >> col)) != 0;
+            FramebufferPutPixel(x + col, y + row, on ? fg : bg);
+        }
+    }
+}
+
+void FramebufferDrawString(u32 x, u32 y, const char* text, u32 fg, u32 bg)
+{
+    if (!g_available || text == nullptr)
+    {
+        return;
+    }
+    u32 cx = x;
+    while (*text != '\0')
+    {
+        if (cx + kGlyphWidth > g_info.width)
+        {
+            break;
+        }
+        FramebufferDrawChar(cx, y, *text, fg, bg);
+        cx += kGlyphWidth;
+        ++text;
+    }
 }
 
 void FramebufferDrawRect(u32 x, u32 y, u32 w, u32 h, u32 rgb, u32 thickness)
