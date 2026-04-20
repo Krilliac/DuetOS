@@ -607,6 +607,158 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 043 — PS/2 keyboard device reset + explicit scan-code-set-1
+
+- **Scope:** `kernel/drivers/input/ps2kbd.cpp` — new
+  `KbdSendAndAck` helper + steps 7-9 added to `ControllerInit`
+- **Decision:** After the controller-level init (#027) finishes,
+  drive the device directly: 0xFF (reset → 0xFA ACK → 0xAA self-
+  test pass), 0xF0 0x01 (force scan code set 1), 0xF4 (enable
+  scanning). Unexpected / missing ACK logs a Warn and continues
+  — USB-legacy emulated keyboards routinely drop device commands
+  while still producing scan codes, so panicking would refuse
+  interactive input on too much hardware.
+- **Why:** Closes the "device reset" and "scan-code-set
+  selection" items explicitly deferred in #027. The scan-code
+  translator (#024) is correct only if the device is actually
+  emitting set 1. Firmware default is usually "set 2 + 8042
+  translation on" (indistinguishable on 0x60), but some boards
+  leave the device on set 2 with translation disabled, which
+  would silently wreck the keymap.
+- **Rules out / defers:** Typematic (repeat rate + delay)
+  configuration — 0xF3 `<byte>` works but we don't care today.
+  Caps-lock / num-lock / scroll-lock LED control (0xED
+  `<mask>`) — no consumer. Port 2 / aux-channel (mouse) — no
+  driver.
+- **Revisit when:** First non-PS/2-primary machine where the
+  device-reset path actually matters on real hardware. Typematic
+  configuration becomes useful (games / terminals). USB HID
+  stack lands (primary input path on modern hardware, PS/2 path
+  stays as fallback).
+- **Related tracks:** Track 6 (Drivers — input).
+
+---
+
+## 042 — HPET self-test
+
+- **Scope:** `kernel/arch/x86_64/hpet.{h,cpp}` — new
+  `HpetSelfTest`, called from `kernel_main` right after
+  `HpetInit`
+- **Decision:** Read the HPET main counter twice with a bounded
+  busy-wait between. Panic if the counter didn't advance or
+  went backwards (monotonicity invariant). No-op if ACPI didn't
+  find an HPET. Runs early — before the scheduler — so the
+  test uses `pause` rather than `SchedSleepTicks`.
+- **Why:** HPET is a silent dependency for the log-timestamp
+  path (#035) and every future fine-grained timing consumer. A
+  broken counter would surface downstream as "time didn't
+  advance for an hour" type mysteries; better to halt at boot
+  with a named diagnostic.
+- **Rules out / defers:** Verifying the reported period against
+  the actual rate (would need a second clock source to cross-
+  check — PIT calibration could do it, but pulls in extra
+  init ordering). Catching a stuck counter that later resumes
+  (would need periodic re-checks from a watchdog). Self-tests
+  for individual comparators (we don't use them yet).
+- **Revisit when:** HPET starts driving interrupts (the
+  comparators land). First discrepancy observed between HPET
+  time and wall-clock / PIT (means adding cross-check).
+- **Related tracks:** Track 2 (Platform — observability).
+
+---
+
+## 041 — Heartbeat to SchedSleepUntil (drift-free cadence)
+
+- **Scope:** `kernel/core/heartbeat.cpp` — replace
+  `SchedSleepTicks(kHeartbeatTicks)` with
+  `SchedSleepUntil(deadline); deadline += kHeartbeatTicks;`
+- **Decision:** First consumer of the absolute-deadline
+  primitive from #034. Period stays exactly
+  `kHeartbeatTicks * 10 ms` regardless of how long the dump
+  body takes to serialize — previously ~0.2% drift per beat.
+- **Why:** Trivial migration, real win. Heartbeat is the
+  canonical periodic kernel task; future periodic drivers
+  (watchdogs, health probes) will copy this pattern as the
+  default — so codifying it here sets the template.
+- **Rules out / defers:** Catch-up semantics (if the CPU was
+  starved for >kHeartbeatTicks, we yield once and move on;
+  no multi-beat burst). Phase alignment to wall-clock
+  boundaries (needs RTC).
+- **Revisit when:** Second periodic kernel task lands (extract
+  a `PeriodicTaskLoop` helper). Priorities grow enough that
+  heartbeat needs a guaranteed-wake class.
+- **Related tracks:** Track 2 (Platform — observability).
+
+---
+
+## 040 — Stack canaries on IST stacks
+
+- **Scope:** `kernel/arch/x86_64/gdt.{h,cpp}` —
+  `kIstStackCanary` + `IstStackCanariesIntact()`;
+  `kernel/core/panic.cpp` — dumps `ist_canary : ok/CORRUPT`
+  in `DumpDiagnostics`
+- **Decision:** Plant the same
+  `0xC0DEB0B0CAFED00D` canary at the low edge of each IST
+  stack (#DF, #MC, #NMI) that per-task kernel stacks already
+  carry. `TssInit` plants; crash-dump path checks. Any blown
+  canary becomes a named "CORRUPT" diagnostic instead of
+  silent-BSS-scribble.
+- **Why:** A 4 KiB IST stack is tight — the crash-dump path
+  runs near 2 KiB, leaving thin margin. Without canaries, an
+  IST overflow would clobber the next BSS variable (the next
+  stack, the TSS, random globals) and manifest as unrelated
+  weirdness later. Mirrors the per-task stack-canary pattern
+  (#010 era) so the checking discipline is uniform.
+- **Rules out / defers:** Page-level guard pages below each
+  IST (would need a paged stack allocator). Canaries at
+  multiple depths (stack poisoning). Per-AP IST canaries —
+  APs still halt in ApEntryFromTrampoline, no IST stack in use.
+- **Revisit when:** First IST overflow seen in CI / real
+  hardware (reduce IST stack budget? expand it? add guard
+  pages?). SMP scheduler join — each AP gets its own IST
+  stacks that need canaries too.
+- **Related tracks:** Track 2 (Platform — stack hardening),
+  Track 13 (Security — defence in depth).
+
+---
+
+## 039 — 2-level priority scheduling (Normal + Idle)
+
+- **Scope:** `kernel/sched/sched.{h,cpp}` — new `TaskPriority`
+  enum, two runqueues (`g_run_head_normal` /
+  `g_run_head_idle`), drain-normal-first policy in
+  `RunqueuePop`, `SchedCreate` grows an optional priority
+  parameter
+- **Decision:** Split the single FIFO runqueue into two
+  priority bands. Normal-priority tasks (drivers, workers,
+  reapers, kbd-reader, all SchedCreate defaults) round-robin
+  on one queue; Idle-priority tasks (per-CPU idle threads
+  from `SchedStartIdle`) wait on the other and only get
+  picked when Normal is empty. Priority is fixed at
+  SchedCreate and never changes — priority inheritance /
+  real-time class are deferred.
+- **Why:** First half of decision log #010's "Priorities.
+  Real-time class." deferral. With the idle task on the
+  Normal queue, it was round-robinning CPU time with real
+  workloads — every N+1th scheduler slot went to halt,
+  compressing worker throughput by ~1/(N+1). Moving idle to
+  its own lower band means CPU goes to real work first.
+- **Rules out / defers:** Priority inheritance (needs a
+  runtime `boost_priority_to(...)` + revert hook). Real-time
+  class (guaranteed-latency band). Per-priority timeslicing
+  (just drain-top-first here). More bands (normal has one
+  level). CPU affinity (no per-CPU runqueues).
+- **Revisit when:** First interactive workload where CPU
+  budget visibly suffers from round-robin fairness. Real-time
+  driver (audio, input latency) needs an above-Normal band.
+  SMP scheduler join — per-CPU runqueues move per-priority
+  band per CPU.
+- **Related tracks:** Track 2 (SMP — per-CPU runqueues),
+  Track 4 (Process model — user priorities),
+  Track 9 (GUI responsiveness — compositor needs real-time).
+
+---
+
 ## 038 — PCI CONFIG_ADDRESS/DATA serialisation
 
 - **Scope:** `kernel/drivers/pci/pci.cpp` — adds a global
