@@ -111,13 +111,8 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     SerialWrite("[boot] Bringing up PS/2 keyboard.\n");
     customos::drivers::input::Ps2KeyboardInit();
 
-    SerialWrite("[boot] Bringing up APs.\n");
-    SmpStartAps();
-
     SerialWrite("[boot] Enumerating PCI bus.\n");
     customos::drivers::pci::PciEnumerate();
-
-    customos::core::StartHeartbeatThread();
 
     // Keyboard reader thread: blocks on Ps2KeyboardRead, prints each
     // scan code. First real end-to-end test of the IRQ path: ACPI →
@@ -181,6 +176,18 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     customos::sched::SchedCreate(worker, const_cast<char*>("A"), "worker-A");
     customos::sched::SchedCreate(worker, const_cast<char*>("B"), "worker-B");
     customos::sched::SchedCreate(worker, const_cast<char*>("C"), "worker-C");
+
+    // Bring up APs AFTER worker spawn — SmpStartAps calls
+    // SchedSleepTicks(1) between INIT and SIPI, and the BSP needs
+    // SOMETHING runnable (any Ready task) for the scheduler to pick
+    // while it sleeps. Workers are still running through their 15
+    // iterations (~150 ms at 10 ms/sleep) at this point, plus the
+    // kheartbeat thread below — plenty to keep the runqueue non-
+    // empty. Proper fix is an idle task per CPU; deferred.
+    SerialWrite("[boot] Bringing up APs.\n");
+    SmpStartAps();
+
+    customos::core::StartHeartbeatThread();
 
     SerialWrite("[boot] All subsystems online. Entering idle loop.\n");
     IdleLoop();

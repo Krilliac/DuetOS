@@ -11,6 +11,7 @@ set(CUSTOMOS_KERNEL_SOURCES
     core/panic.cpp
     core/recovery.cpp
     acpi/acpi.cpp
+    arch/x86_64/ap_trampoline.S
     arch/x86_64/boot.S
     arch/x86_64/exceptions.S
     arch/x86_64/gdt.cpp
