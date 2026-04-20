@@ -607,6 +607,93 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 090 — Shell env variables + $VAR whole-token substitution
+
+- **Scope:** `kernel/core/shell.cpp` — 8-slot env table
+  (32-byte names, 128-byte values). New `set` / `unset` /
+  `env` commands + pre-tokenize pass in Dispatch that
+  replaces whole-token `$VAR` references with their value
+  (undefined → empty string).
+- **Decision:** Whole-token substitution only. Partial
+  expansion (`prefix$VAR`, `${VAR}`, nested, command
+  substitution) all deferred. Rationale: whole-token catches
+  every boot-time use (`echo $HOME`, `cat $FILE`) and keeps
+  the substituter a one-line `argv[i] = EnvFind(...)->value`
+  swap. A real expander lands when someone writes a non-
+  trivial shell script.
+- **Why:** Env vars unlock a PATH-like story for when
+  SYS_SPAWN arrives (shell picks binaries by `$PATH` lookup
+  rather than hard-coded `/bin`). Before that, they're just
+  a scratchpad, but the primitive is the same either way.
+- **Rules out / defers:** `${VAR}` syntax. Partial-token
+  expansion. Quoting. Export vs local. PATH semantics.
+  Per-process env (all commands share the single table).
+  Persistence across reboot.
+- **Revisit when:** SYS_SPAWN lands. First env-dependent
+  shell script attempt. Quoting needed for filenames with
+  spaces (a tmpfs that allows them).
+- **Related tracks:** Track 7 (Userland shell), Track 4
+  (Process model — per-process env).
+
+---
+
+## 089 — cp / mv / wc / head / tail coreutils-ish commands
+
+- **Scope:** `kernel/core/shell.cpp` — five new commands
+  built on a shared `ReadFileToBuf` helper that dispatches
+  on the /tmp prefix to pick tmpfs vs ramfs.
+- **Decision:** Keep the commands thin — each is a 20-50
+  line wrapper around the shared read helper + the existing
+  tmpfs write path. `cp` reads from either backend, writes to
+  tmpfs; `mv` is tmpfs-only and unlinks the source only AFTER
+  write succeeds. `head` / `tail` default to 5 lines with a
+  `-N` short form; `wc` emits the POSIX trio (lines, words,
+  bytes) with unterminated-last-line counting as a line.
+- **Why:** `cp` + `mv` round out file manipulation so users
+  can do more than "write once, read". `head` / `tail` / `wc`
+  are the classic file-inspection trio — adding them makes
+  the shell feel genuinely like a terminal, not a demo.
+- **Rules out / defers:** -r recursive variants. `cp` into
+  ramfs (impossible, read-only). Globbing. `wc -l` / `-w`
+  selector flags. `head`/`tail` follow mode.
+- **Revisit when:** Second writable backend (on-disk FS) lets
+  us relax the tmpfs-only destination restriction. First
+  shell script needs a specific single-column count.
+- **Related tracks:** Track 7 (Userland shell), Track 5
+  (VFS — multi-backend read dispatch is already factored).
+
+---
+
+## 088 — Shell `history` + `!N` / `!!` recall
+
+- **Scope:** `kernel/core/shell.{h,cpp}` — `ShellHistoryCount`
+  / `ShellHistoryGet` expose the existing history ring;
+  new `history` command prints it oldest-first with 1-based
+  numbering. `HistoryExpand` runs before argv tokenisation in
+  Dispatch, resolving `!!` and `!N` into the recalled line
+  (echoed first, then recursively dispatched).
+- **Decision:** Display numbers count oldest-first so users
+  intuit "!1 is what I ran first." Internal `HistoryAt(n)`
+  still counts newest-first; the `history` command + the
+  recall path both invert at the boundary. Recursion is
+  depth-bounded at 1 — history entries can't themselves
+  begin with `!` because the push path dedups, and a `!X`
+  that resolves to another `!Y` is rejected up front.
+- **Why:** Up/Down arrow cursor recall + `history` + `!N`
+  together cover the full bash-flavoured history surface
+  users expect. Zero new storage; just wrappers + a tiny
+  pre-dispatch expansion step.
+- **Rules out / defers:** `!prefix` (run the most recent
+  command starting with `prefix`). `!$` (last arg of last
+  command). `Ctrl+R` incremental search. Persistent history
+  across reboot.
+- **Revisit when:** Second shell session coexists (needs
+  per-session vs global). Persistent history (needs writable
+  FS).
+- **Related tracks:** Track 7 (Userland shell).
+
+---
+
 ## 087 — Live KERNEL LOG viewer window
 
 - **Scope:** `kernel/core/main.cpp` — fourth registered window
