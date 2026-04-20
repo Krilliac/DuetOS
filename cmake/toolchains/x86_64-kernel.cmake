@@ -31,7 +31,20 @@ set(CUSTOMOS_KERNEL_TARGET "x86_64-unknown-none-elf")
 set(CUSTOMOS_KERNEL_C_FLAGS
     "--target=${CUSTOMOS_KERNEL_TARGET}"
     -ffreestanding
-    -fno-stack-protector
+    # Stack canaries: compiler emits a per-function prologue that plants
+    # a cookie from __stack_chk_guard and an epilogue that verifies it
+    # before return. On mismatch, compiler-inserted code calls
+    # __stack_chk_fail, which we panic from. Use -fstack-protector-strong
+    # so any function with an array, address-of-local, or alloca gets
+    # protected (unlike vanilla -fstack-protector which only gates on
+    # char arrays > 8 bytes).
+    #
+    # -mstack-protector-guard=global picks __stack_chk_guard via the
+    # ordinary ELF symbol path instead of the glibc TLS form (%fs:0x28),
+    # which doesn't apply in freestanding mode because we don't set up
+    # the TLS slot.
+    -fstack-protector-strong
+    -mstack-protector-guard=global
     -fno-pic
     -fno-pie
     -fno-builtin
