@@ -93,6 +93,31 @@ a future syscall grows a process's memory on demand.
 
 Files: `kernel/mm/address_space.{h,cpp}`.
 
+### 5b. Per-process CPU-tick budget
+
+`Process::tick_budget` caps how many 100 Hz timer ticks a
+process's tasks can be Running. The timer IRQ bumps
+`ticks_used` for the currently-running task's process; when it
+exceeds the budget, the scheduler marks the task
+`tick_exhausted`, and Schedule() converts that into a Dead
+transition on the next re-enqueue (pushes to zombies, wakes the
+reaper). Sandbox: 1000 ticks (~10 s). Trusted: effectively
+unlimited.
+
+Live-fire: `ring3-cpu-hog` spawns at boot with a 50-tick
+(~500 ms) budget and spins forever in ring 3. Boot log shows:
+
+```
+[sched] tick budget exhausted pid=0x6
+[ts=...] sched/reaper : reaped task id = 0xa
+```
+
+Resource-quota coverage: frames (wall 5) + CPU time (wall 5b)
+together bound what a malicious EXE can exhaust.
+
+Files: `kernel/core/process.{h,cpp}`, `kernel/sched/sched.{h,cpp}`,
+`kernel/core/ring3_smoke.cpp` (`SpawnCpuHogProbe`).
+
 ### 6. W^X / DEP (Windows name: DEP = NX bit)
 
 - `EFER.NXE` is enabled in `PagingInit`.
@@ -220,6 +245,9 @@ The sandboxing work landed in the following commits on
 | 688ea51 | 10b | Kernel-image W^X via PS-split + per-section PTE flags |
 | fcc92c2 | 11 | Per-process ASLR for user code/stack VAs |
 | c21d7a0 | 12 | Stack canaries (`-fstack-protector-strong`) |
+| 6af0a4a | 13 | CET/IBT CFI via `endbr64` + CUSTOMOS_CANARY_DEMO |
+| a8fa853 | 14a | Per-process CPU-tick budget infrastructure |
+| 5ff1894 | 14b | kboot boot-stack race fix + cpu-hog live-fire |
 
 ## What is NOT yet enforced (known gaps)
 
