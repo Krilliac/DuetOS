@@ -162,8 +162,12 @@ void CursorInit(u32 desktop_rgb)
     }
     const auto info = FramebufferGet();
 
+    // Remember desktop colour for any later "restore under cursor"
+    // that falls back to a flat fill (widget-less regions). Do NOT
+    // clear the framebuffer here — callers may already have painted
+    // desktop chrome + widgets before invoking this, and we must
+    // render on top rather than wipe.
     g_desktop_rgb = desktop_rgb;
-    FramebufferClear(desktop_rgb);
 
     // Centre the cursor. Guard against a framebuffer smaller than
     // the cursor sprite — clamp the starting position so the draw
@@ -211,6 +215,33 @@ void CursorPosition(u32* x_out, u32* y_out)
     {
         *y_out = g_y;
     }
+}
+
+void CursorHide()
+{
+    if (!g_ready)
+    {
+        return;
+    }
+    RestoreAt(g_x, g_y);
+    g_ready = false;
+    // Leave backing_valid true — it's just stale, but the next
+    // SaveAt from CursorShow replaces it before it's read.
+}
+
+void CursorShow()
+{
+    if (g_ready)
+    {
+        return; // already visible
+    }
+    if (!FramebufferAvailable())
+    {
+        return;
+    }
+    SaveAt(g_x, g_y);
+    DrawAt(g_x, g_y);
+    g_ready = true;
 }
 
 } // namespace customos::drivers::video

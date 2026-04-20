@@ -38,10 +38,11 @@
 namespace customos::drivers::video
 {
 
-/// Paint the entire framebuffer with `desktop_rgb`, remember that
-/// colour as the background to restore under a moving cursor, and
-/// render the initial cursor at screen centre. Safe no-op if the
-/// framebuffer isn't available.
+/// Remember `desktop_rgb` as the fallback "background" colour and
+/// render the initial cursor sprite at screen centre. Does NOT
+/// clear the framebuffer — the caller is responsible for painting
+/// the desktop + any widgets first so the cursor's save-backing
+/// captures them. Safe no-op if the framebuffer isn't available.
 void CursorInit(u32 desktop_rgb);
 
 /// Apply a relative motion — typically sourced from
@@ -54,5 +55,16 @@ void CursorMove(i32 dx, i32 dy);
 /// widget that wants to hit-test the mouse against its own bounds
 /// without subscribing to packets itself.
 void CursorPosition(u32* x_out, u32* y_out);
+
+/// Restore the backing pixels under the cursor and mark the cursor
+/// hidden. Used by widget code that wants to redraw under the
+/// cursor without leaving stale backing pixels captured around the
+/// edit. Must be paired with a subsequent CursorShow() — leaving
+/// it hidden is a silent bug that drops mouse feedback.
+void CursorHide();
+
+/// Re-sample backing pixels at the current position and draw the
+/// sprite on top. Pairs with CursorHide().
+void CursorShow();
 
 } // namespace customos::drivers::video

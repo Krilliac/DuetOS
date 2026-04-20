@@ -17,6 +17,7 @@
 #include "../drivers/storage/ahci.h"
 #include "../drivers/video/cursor.h"
 #include "../drivers/video/framebuffer.h"
+#include "../drivers/video/widget.h"
 #include "../fs/ramfs.h"
 #include "../fs/vfs.h"
 #include "../mm/address_space.h"
@@ -140,12 +141,28 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     customos::drivers::video::FramebufferInit(multiboot_info);
     customos::drivers::video::FramebufferSelfTest();
 
-    // Paint a "desktop" background and render the initial cursor
-    // sprite. Kept as a solid colour in v0 — the mouse reader
-    // thread below drives CursorMove on every packet to produce
-    // the first visible interactive UI element: a pointer that
-    // tracks the mouse end-to-end from IRQ-12 to pixel.
+    // Paint a "desktop" background, register boot-time widgets,
+    // draw them, then render the cursor on top. Order matters —
+    // cursor always last so its saved backing pixels include the
+    // widgets underneath.
     constexpr customos::u32 kDesktopTeal = 0x00204868;
+    customos::drivers::video::FramebufferClear(kDesktopTeal);
+
+    // Demo clickable button. Click lights it up red; release
+    // returns it to grey — the smallest proof the mouse-event
+    // pipeline reaches widgets end-to-end.
+    customos::drivers::video::ButtonWidget demo_button{};
+    demo_button.id = 1;
+    demo_button.x = 40;
+    demo_button.y = 40;
+    demo_button.w = 160;
+    demo_button.h = 48;
+    demo_button.colour_normal = 0x00C0C0C0;  // neutral grey
+    demo_button.colour_pressed = 0x00E04020; // warm red on press
+    demo_button.colour_border = 0x00101828;  // dark outline
+    customos::drivers::video::WidgetRegisterButton(demo_button);
+    customos::drivers::video::WidgetDrawAll();
+
     customos::drivers::video::CursorInit(kDesktopTeal);
 
     SerialWrite("[boot] Seeding ramfs + VFS self-test.\n");
@@ -267,6 +284,20 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
             // available, CursorMove is a silent no-op — the log line
             // below still prints so IRQ-12 health is visible.
             customos::drivers::video::CursorMove(p.dx, p.dy);
+
+            // Route the latest cursor-state sample through the
+            // widget table. A click on the demo button switches
+            // its fill colour; release switches it back.
+            customos::u32 cx = 0, cy = 0;
+            customos::drivers::video::CursorPosition(&cx, &cy);
+            const customos::u32 hit = customos::drivers::video::WidgetRouteMouse(cx, cy, p.buttons);
+            if (hit != customos::drivers::video::kWidgetInvalid)
+            {
+                SerialWrite("[ui] widget event id=");
+                SerialWriteHex(hit);
+                SerialWrite("\n");
+            }
+
             SerialWrite("[mouse] dx=");
             SerialWriteHex(static_cast<customos::u64>(p.dx));
             SerialWrite(" dy=");

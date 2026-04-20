@@ -196,6 +196,27 @@ void FramebufferClear(u32 rgb)
     FramebufferFillRect(0, 0, g_info.width, g_info.height, rgb);
 }
 
+void FramebufferDrawRect(u32 x, u32 y, u32 w, u32 h, u32 rgb, u32 thickness)
+{
+    if (!g_available || w == 0 || h == 0 || thickness == 0)
+    {
+        return;
+    }
+    // Clamp thickness so the four bands don't overlap into the
+    // interior in a way that changes the outlined-rect semantics
+    // (e.g. a 2-pixel outline on a 3-pixel-tall rect should fill
+    // the whole thing, not double-write the middle row).
+    const u32 cap = (w < h ? w : h) / 2;
+    if (thickness > cap)
+    {
+        thickness = (cap == 0) ? 1 : cap;
+    }
+    FramebufferFillRect(x, y, w, thickness, rgb);                        // top
+    FramebufferFillRect(x, y + h - thickness, w, thickness, rgb);        // bottom
+    FramebufferFillRect(x, y, thickness, h, rgb);                        // left
+    FramebufferFillRect(x + w - thickness, y, thickness, h, rgb);        // right
+}
+
 void FramebufferSelfTest()
 {
     if (!g_available)

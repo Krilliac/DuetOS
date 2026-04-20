@@ -55,6 +55,7 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     drivers/storage/ahci.cpp
     drivers/video/cursor.cpp
     drivers/video/framebuffer.cpp
+    drivers/video/widget.cpp
     fs/ramfs.cpp
     fs/vfs.cpp
     mm/address_space.cpp

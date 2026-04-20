@@ -91,6 +91,11 @@ void FramebufferPutPixel(u32 x, u32 y, u32 rgb);
 /// is a silent no-op. No-op if !Available().
 void FramebufferFillRect(u32 x, u32 y, u32 w, u32 h, u32 rgb);
 
+/// Draw the OUTLINE of the rect [x, x+w) x [y, y+h) with
+/// `thickness` pixels of border in `rgb`. Interior is untouched.
+/// Clipped; no-op on empty dimensions or !Available().
+void FramebufferDrawRect(u32 x, u32 y, u32 w, u32 h, u32 rgb, u32 thickness);
+
 /// Exercise the draw path at boot: clear to black, draw coloured
 /// corner swatches + a framing rectangle. Visible proof that the
 /// firmware handoff + Mmio map + pixel store all work end-to-end.
