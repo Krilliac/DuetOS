@@ -65,4 +65,11 @@ void ShellHistoryPrev();
 /// Past the newest entry, clears the line. Wired to Down arrow.
 void ShellHistoryNext();
 
+/// Tab completion: if the current edit buffer has a unique
+/// command-name prefix among the built-ins, extend the line to
+/// the full name + a trailing space. Ambiguous prefix prints
+/// the list of candidates beneath the prompt then redraws the
+/// prompt with the partial. Empty buffer is a no-op.
+void ShellTabComplete();
+
 } // namespace customos::core

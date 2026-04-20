@@ -601,6 +601,11 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                 customos::core::ShellHistoryNext();
                 dirty = true;
             }
+            else if (ev.code == kKeyTab)
+            {
+                customos::core::ShellTabComplete();
+                dirty = true;
+            }
             else if (ev.code >= 0x20 && ev.code <= 0x7E)
             {
                 const char ch = static_cast<char>(ev.code);

@@ -3,6 +3,8 @@
 #include "../arch/x86_64/rtc.h"
 #include "../drivers/video/console.h"
 #include "../drivers/video/widget.h"
+#include "../fs/ramfs.h"
+#include "../fs/vfs.h"
 #include "../sched/sched.h"
 
 namespace customos::core
@@ -158,17 +160,20 @@ void Prompt()
 void CmdHelp()
 {
     ConsoleWriteln("AVAILABLE COMMANDS:");
-    ConsoleWriteln("  HELP        LIST THIS HELP");
-    ConsoleWriteln("  ABOUT       ABOUT CUSTOMOS");
-    ConsoleWriteln("  VERSION     CUSTOMOS VERSION");
-    ConsoleWriteln("  CLEAR       CLEAR THE CONSOLE");
-    ConsoleWriteln("  UPTIME      SECONDS SINCE BOOT");
-    ConsoleWriteln("  DATE        WALL TIME + DATE");
-    ConsoleWriteln("  WINDOWS     LIST REGISTERED WINDOWS");
-    ConsoleWriteln("  MODE        SHOW CURRENT DISPLAY MODE");
-    ConsoleWriteln("  ECHO TEXT   PRINT TEXT");
+    ConsoleWriteln("  HELP         LIST THIS HELP");
+    ConsoleWriteln("  ABOUT        ABOUT CUSTOMOS");
+    ConsoleWriteln("  VERSION      CUSTOMOS VERSION");
+    ConsoleWriteln("  CLEAR        CLEAR THE CONSOLE");
+    ConsoleWriteln("  UPTIME       SECONDS SINCE BOOT");
+    ConsoleWriteln("  DATE         WALL TIME + DATE");
+    ConsoleWriteln("  WINDOWS      LIST REGISTERED WINDOWS");
+    ConsoleWriteln("  MODE         SHOW CURRENT DISPLAY MODE");
+    ConsoleWriteln("  LS [PATH]    LIST DIRECTORY CONTENTS");
+    ConsoleWriteln("  CAT PATH     PRINT FILE CONTENTS");
+    ConsoleWriteln("  ECHO ARG..   PRINT ARGS");
     ConsoleWriteln("");
-    ConsoleWriteln("KEYS:  UP/DOWN = HISTORY   CTRL+ALT+T = TOGGLE MODE");
+    ConsoleWriteln("KEYS:  UP/DOWN = HISTORY   TAB = COMPLETE");
+    ConsoleWriteln("       CTRL+ALT+T = TOGGLE MODE");
     ConsoleWriteln("       ALT+TAB = CYCLE WINDOW  ALT+F4 = CLOSE WINDOW");
 }
 
@@ -239,76 +244,199 @@ void CmdMode()
     ConsoleWriteln("PRESS CTRL+ALT+T TO TOGGLE.");
 }
 
-void CmdEcho(const char* args)
+void CmdEcho(u32 argc, char** argv)
 {
-    // `args` points at the remainder of the line after the
-    // "echo " prefix. Skip any leading whitespace so "echo  x"
-    // and "echo x" produce the same output.
-    while (*args == ' ')
+    // Print each arg separated by a single space, regardless of
+    // how the user spaced the input. Matches /bin/echo defaults.
+    for (u32 i = 1; i < argc; ++i)
     {
-        ++args;
+        if (i > 1)
+        {
+            ConsoleWriteChar(' ');
+        }
+        ConsoleWrite(argv[i]);
     }
-    ConsoleWriteln(args);
+    ConsoleWriteChar('\n');
 }
 
-void Dispatch(const char* line)
+void CmdLs(u32 argc, char** argv)
 {
-    if (line[0] == '\0')
+    const char* path = (argc >= 2) ? argv[1] : "/";
+    const auto* root = customos::fs::RamfsTrustedRoot();
+    const auto* node = customos::fs::VfsLookup(root, path, 128);
+    if (node == nullptr)
+    {
+        ConsoleWrite("LS: NO SUCH PATH: ");
+        ConsoleWriteln(path);
+        return;
+    }
+    if (node->type == customos::fs::RamfsNodeType::kFile)
+    {
+        // POSIX-style: `ls file` prints the filename (no dir walk).
+        ConsoleWrite(node->name);
+        ConsoleWrite("   ");
+        WriteU64Dec(node->file_size);
+        ConsoleWriteln(" BYTES");
+        return;
+    }
+    if (node->children == nullptr)
+    {
+        ConsoleWriteln("(EMPTY DIRECTORY)");
+        return;
+    }
+    for (u32 i = 0; node->children[i] != nullptr; ++i)
+    {
+        const auto* c = node->children[i];
+        ConsoleWrite("  ");
+        ConsoleWrite(c->name);
+        if (c->type == customos::fs::RamfsNodeType::kDir)
+        {
+            ConsoleWriteln("/");
+        }
+        else
+        {
+            ConsoleWrite("   ");
+            WriteU64Dec(c->file_size);
+            ConsoleWriteln(" BYTES");
+        }
+    }
+}
+
+void CmdCat(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("CAT: MISSING PATH");
+        return;
+    }
+    const auto* root = customos::fs::RamfsTrustedRoot();
+    const auto* node = customos::fs::VfsLookup(root, argv[1], 128);
+    if (node == nullptr)
+    {
+        ConsoleWrite("CAT: NO SUCH FILE: ");
+        ConsoleWriteln(argv[1]);
+        return;
+    }
+    if (node->type != customos::fs::RamfsNodeType::kFile)
+    {
+        ConsoleWrite("CAT: NOT A FILE: ");
+        ConsoleWriteln(argv[1]);
+        return;
+    }
+    for (u64 i = 0; i < node->file_size; ++i)
+    {
+        ConsoleWriteChar(static_cast<char>(node->file_bytes[i]));
+    }
+    // Ensure the prompt lands on a fresh row if the file didn't
+    // end in a newline. Most text files do; binary or generated
+    // ones often don't.
+    if (node->file_size == 0 || node->file_bytes[node->file_size - 1] != '\n')
+    {
+        ConsoleWriteChar('\n');
+    }
+}
+
+constexpr u32 kMaxArgs = 8;
+
+// Tokenize `buf` in place. Spaces and tabs are separators; runs
+// of whitespace collapse to a single break. Mutates `buf` —
+// separator bytes get NUL'd so each argv entry is a proper
+// NUL-terminated string sitting inside the original buffer.
+// Stops at kMaxArgs; trailing tokens past the cap are ignored.
+u32 Tokenize(char* buf, char** argv)
+{
+    u32 count = 0;
+    char* p = buf;
+    while (*p != '\0' && count < kMaxArgs)
+    {
+        while (*p == ' ' || *p == '\t')
+        {
+            ++p;
+        }
+        if (*p == '\0')
+        {
+            break;
+        }
+        argv[count++] = p;
+        while (*p != '\0' && *p != ' ' && *p != '\t')
+        {
+            ++p;
+        }
+        if (*p != '\0')
+        {
+            *p = '\0';
+            ++p;
+        }
+    }
+    return count;
+}
+
+void Dispatch(char* line)
+{
+    char* argv[kMaxArgs] = {};
+    const u32 argc = Tokenize(line, argv);
+    if (argc == 0)
     {
         return; // empty submission — no diagnostic, just re-prompt
     }
-    if (StrEq(line, "help"))
+    const char* cmd = argv[0];
+    if (StrEq(cmd, "help"))
     {
         CmdHelp();
         return;
     }
-    if (StrEq(line, "about"))
+    if (StrEq(cmd, "about"))
     {
         CmdAbout();
         return;
     }
-    if (StrEq(line, "version"))
+    if (StrEq(cmd, "version"))
     {
         CmdVersion();
         return;
     }
-    if (StrEq(line, "clear"))
+    if (StrEq(cmd, "clear"))
     {
         CmdClear();
         return;
     }
-    if (StrEq(line, "uptime"))
+    if (StrEq(cmd, "uptime"))
     {
         CmdUptime();
         return;
     }
-    if (StrEq(line, "date"))
+    if (StrEq(cmd, "date"))
     {
         CmdDate();
         return;
     }
-    if (StrEq(line, "windows"))
+    if (StrEq(cmd, "windows"))
     {
         CmdWindows();
         return;
     }
-    if (StrEq(line, "mode"))
+    if (StrEq(cmd, "mode"))
     {
         CmdMode();
         return;
     }
-    if (StrStartsWith(line, "echo ") || StrEq(line, "echo"))
+    if (StrEq(cmd, "echo"))
     {
-        const char* args = line + 4;
-        if (*args == ' ')
-        {
-            ++args;
-        }
-        CmdEcho(args);
+        CmdEcho(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "ls"))
+    {
+        CmdLs(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "cat"))
+    {
+        CmdCat(argc, argv);
         return;
     }
     ConsoleWrite("COMMAND NOT FOUND: ");
-    ConsoleWriteln(line);
+    ConsoleWriteln(cmd);
     ConsoleWriteln("TYPE HELP FOR A LIST OF COMMANDS.");
 }
 
@@ -385,6 +513,85 @@ void ShellHistoryNext()
         return;
     }
     ReplaceLine(HistoryAt(g_history_cursor));
+}
+
+void ShellTabComplete()
+{
+    // v0 completion surface = the command-name set (no path
+    // completion yet). Only relevant when the edit buffer has
+    // exactly one whitespace-less token so far — the classic
+    // "complete the command name" case.
+    if (g_len == 0)
+    {
+        return;
+    }
+    // Reject buffers that already contain whitespace — path
+    // completion comes later.
+    for (u32 i = 0; i < g_len; ++i)
+    {
+        if (g_input[i] == ' ' || g_input[i] == '\t')
+        {
+            return;
+        }
+    }
+    g_input[g_len] = '\0';
+
+    static const char* const kCommandSet[] = {
+        "help", "about", "version", "clear",  "uptime", "date",
+        "windows", "mode", "ls",    "cat",    "echo",
+    };
+    constexpr u32 kCmdCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
+
+    const char* match = nullptr;
+    u32 match_count = 0;
+    for (u32 i = 0; i < kCmdCount; ++i)
+    {
+        if (StrStartsWith(kCommandSet[i], g_input))
+        {
+            match = kCommandSet[i];
+            ++match_count;
+        }
+    }
+
+    if (match_count == 0)
+    {
+        return; // no candidates, silent
+    }
+    if (match_count == 1)
+    {
+        // Unique — extend the edit buffer + echo the tail + a
+        // trailing space so the user can start typing an argument.
+        u32 i = g_len;
+        while (match[i] != '\0' && i + 1 < kInputMax)
+        {
+            g_input[i] = match[i];
+            ConsoleWriteChar(match[i]);
+            ++i;
+        }
+        if (i + 1 < kInputMax)
+        {
+            g_input[i] = ' ';
+            ConsoleWriteChar(' ');
+            ++i;
+        }
+        g_len = i;
+        g_input[g_len] = '\0';
+        return;
+    }
+
+    // Ambiguous — list candidates on a new line, then re-prompt
+    // with the partial echoed back so the user can keep typing.
+    ConsoleWriteChar('\n');
+    for (u32 i = 0; i < kCmdCount; ++i)
+    {
+        if (StrStartsWith(kCommandSet[i], g_input))
+        {
+            ConsoleWrite("  ");
+            ConsoleWriteln(kCommandSet[i]);
+        }
+    }
+    Prompt();
+    ConsoleWrite(g_input);
 }
 
 } // namespace customos::core
