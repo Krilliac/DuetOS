@@ -607,6 +607,87 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 029 — KernelReboot: ACPI → 0xCF9 → 8042 → triple-fault chain
+
+- **Scope:** `kernel/core/reboot.{h,cpp}` (new module), wired into
+  the build in `kernel/CMakeLists.txt`
+- **Decision:** Consolidate every known x86 reset path behind a
+  single `core::KernelReboot()` entry point that tries them in
+  descending order of preference: (1) `acpi::AcpiReset()` — the
+  firmware-defined FADT path; (2) port 0xCF9 values 0x02 then
+  0x06 — the PC-AT chipset reset; (3) 8042 command 0xFE — the
+  legacy keyboard-controller reset line, still honoured by most
+  boards; (4) null IDT + `int3` — a guaranteed triple-fault last
+  resort. Each step logs at Warn / Error so the serial log
+  records which path actually fired. `[[noreturn]]`, safe from any
+  context.
+- **Why:** The FADT parse landed in entry #025 without a consumer —
+  exactly the kind of "primitive built but not wired in" pattern
+  the anti-bloat guidelines flag. Landing `KernelReboot` closes
+  the loop: the first ACPI consumer is now a real, callable
+  reboot path, and the fall-back chain covers the handful of
+  failure modes that would otherwise leave us stuck (firmware
+  without RESET_REG_SUP, chipsets that ignore ACPI reset on boot-
+  era state, broken 8042 emulation). The triple-fault fall-back
+  is the "physics doesn't lie" exit — a CPU cannot ignore a
+  #DF + #DF + reset chain.
+- **Rules out / defers:** Clean shutdown (stop-all-tasks → flush
+  caches → sync filesystems → enter ACPI S5). S5 needs AML — the
+  DSDT / SSDT interpreter we punted on in #012. Power-off (S5) as
+  a distinct path from reset. Graceful PCI-device teardown before
+  reset. Reboot-reason reporting in the log (warm reset vs. panic
+  vs. user-triggered).
+- **Revisit when:** First shutdown request from user-space
+  arrives (syscalls land). Panic path wants to optionally reboot
+  instead of halt (useful for automated CI reboots after a crash
+  on real hardware). AML support lands — then this module gains
+  a sibling `KernelPowerOff()` that enters S5.
+- **Related tracks:** Track 2 (Platform — reset), Track 13
+  (Security — crash-reboot loop is part of the recovery posture).
+
+---
+
+## 028 — Condition variables (drop-mutex-and-block)
+
+- **Scope:** `kernel/sched/sched.{h,cpp}` — new `Condvar` struct,
+  `CondvarWait`, `CondvarSignal`, `CondvarBroadcast`; extracts
+  internal `WaitQueueWakeOneLocked` helper
+- **Decision:** Land the classic producer/consumer primitive on
+  top of the existing `Mutex` + `WaitQueue` foundations. The
+  subtlety is atomicity: `CondvarWait` splices the mutex hand-off
+  AND the self-enqueue onto `cv->waiters` under a single
+  `g_sched_lock` hold, so a signal that races the release cannot
+  slip through the crack. The mutex hand-off inlines
+  `WaitQueueWakeOneLocked` on `m->waiters` (FIFO fairness,
+  identical to `MutexUnlock` except callable with the scheduler
+  lock already held). On wake the caller re-acquires via the
+  standard `MutexLock` path — possibly fast (mutex free) or slow
+  (blocks on `m->waiters` again).
+- **Why:** Entry #011 deferred "Condition variables (drop-mutex-
+  and-block atomically)" as a separate slice after the sleep /
+  wait / mutex primitives. With the timed-wait primitive in from
+  entry #026 and the locked-wake helper now factored out, the
+  remaining work is genuinely just the glue — and condvars
+  remove a whole class of awkward polling patterns from the
+  driver surface. Landing it standalone means the first driver
+  that needs the pattern doesn't also have to design it.
+- **Rules out / defers:** Timed condvars (`CondvarWaitTimeout`) —
+  trivial follow-up on top of `WaitQueueBlockTimeout`, but no
+  consumer yet. Priority-donation on condvar wake (requires
+  priorities). Cancellation / interruption of a condvar wait
+  (needs the "cancel this blocked task" primitive, which lands
+  with the first syscall that takes signals).
+- **Revisit when:** First driver that needs "wake me when a
+  guarded queue is non-empty" semantics. First syscall that
+  carries a signal (cancellation extends both condvar and wait-
+  queue blocking to `bool was_cancelled` returns). Priority
+  inheritance lands (the companion `Mutex` grows PI, and condvar
+  wake order honours priority).
+- **Related tracks:** Track 4 (IPC / synchronisation), Track 6
+  (Drivers — consumer).
+
+---
+
 ## 027 — PS/2 8042 controller init sequence
 
 - **Scope:** `kernel/drivers/input/ps2kbd.cpp` (new `ControllerInit`,
