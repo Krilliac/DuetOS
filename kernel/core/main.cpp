@@ -5,6 +5,7 @@
 #include "../arch/x86_64/serial.h"
 #include "../mm/frame_allocator.h"
 #include "../mm/kheap.h"
+#include "../mm/paging.h"
 
 /*
  * Kernel entry in C++. Called by kernel/arch/x86_64/boot.S once the CPU is
@@ -54,6 +55,10 @@ extern "C" void kernel_main(customos::u32 multiboot_magic,
     SerialWrite("[boot] Bringing up kernel heap.\n");
     KernelHeapInit();
     KernelHeapSelfTest();
+
+    SerialWrite("[boot] Bringing up paging.\n");
+    PagingInit();
+    PagingSelfTest();
 
     SerialWrite("[boot] All subsystems online. Halting CPU.\n");
     Halt();

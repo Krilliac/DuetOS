@@ -15,6 +15,7 @@ set(CUSTOMOS_KERNEL_SOURCES
     mm/frame_allocator.cpp
     mm/kheap.cpp
     mm/page.cpp
+    mm/paging.cpp
 )
 
 add_executable(customos-kernel ${CUSTOMOS_KERNEL_SOURCES})
