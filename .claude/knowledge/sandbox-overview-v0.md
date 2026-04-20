@@ -212,24 +212,56 @@ Files: `kernel/mm/user_copy.S`, `kernel/mm/paging.cpp`,
 
 Per-process `sandbox_denials` counter. Every cap-check
 rejection bumps it. At 100 denials (`kSandboxDenialKillThreshold`),
-the process is flagged for termination as "confirmed hostile"
-— a well-behaved sandboxed process shouldn't attempt blocked
-syscalls at all; hitting the threshold means it's brute-forcing
-the syscall surface looking for a gap.
+the process is flagged for termination as "confirmed hostile".
 
-Reuses the tick-exhausted kill machinery: flag the task, let
-Schedule() convert it to a zombie at next resched.
+Denial log is rate-limited: first denial + every 32nd. A 100-
+denial burst produces 4 log lines instead of 100. Counter
+advances every time so the threshold-kill still fires at 100.
 
-Live demo: `SpawnHostileProbe` — a 16-byte ring-3 payload that
-retries a blocked `SYS_WRITE` in a tight loop. Boot log:
+Unified kill path: both this and the tick-budget kill flag the
+task's `kill_requested` + `kill_reason`. Schedule() logs
+`[sched] killing task id=N name="..." reason=<KillReason>` so
+post-mortem can distinguish TickBudget vs SandboxDenialThreshold
+(and future reasons — the enum is extensible).
+
+Live demo: `SpawnHostileProbe` — 16-byte payload that retries
+a blocked `SYS_WRITE` in a tight loop. Boot log:
 `[sandbox] pid=0x7 hit 0x64 denials (last cap=SerialConsole)
-— terminating as malicious`.
+— terminating as malicious`
+followed by
+`[sched] killing task id=0xd name="ring3-hostile-syscall"
+reason=SandboxDenialThreshold`.
 
-Resource-quota coverage is now complete along three axes:
-frames (wall 5), CPU time (wall 5b), policy retries (wall 11).
+Resource-quota coverage along three axes: frames (5), CPU time
+(5b), policy retries (11).
 
 Files: `kernel/core/process.{h,cpp}`, `kernel/sched/sched.{h,cpp}`,
 `kernel/core/syscall.cpp`, `kernel/core/ring3_smoke.cpp`.
+
+### 12. Voluntary cap-dropping (SYS_DROPCAPS)
+
+`SYS_DROPCAPS = 6`. Takes a bitmask in rdi; clears matching
+bits from the caller's CapSet. No cap check on the syscall
+itself — deprivileging is always allowed. No `SYS_GRANTCAPS`
+counterpart, so drops are **irreversible**.
+
+Canonical usage: a process starts trusted, does trusted init
+(parse config, open files), then drops all but the caps needed
+for the sensitive work, before parsing untrusted input.
+Equivalent to Linux's `prctl(PR_SET_NO_NEW_PRIVS)` family.
+
+Live demo: `SpawnDropcapsProbe` — a trusted task that calls:
+```
+SYS_WRITE("pre-drop\n")     ; succeeds (trusted caps)
+SYS_DROPCAPS(0xFFFFFFFF)    ; drop everything
+SYS_WRITE("post-drop ...")  ; denied, denial_idx=0x1
+```
+Boot log shows the first message printed, then
+`[sys] dropcaps pid=N mask=0xFFFFFFFF caps=0x6->0x0`, then the
+second message DOES NOT print — confirming irreversibility at
+the user-mode level.
+
+Files: `kernel/core/syscall.{h,cpp}`, `kernel/core/ring3_smoke.cpp`.
 
 ## Separate from the walls: graceful task death
 
@@ -310,6 +342,11 @@ The sandboxing work landed in the following commits on
 | 5ff1894 | 14b | kboot boot-stack race fix + cpu-hog live-fire |
 | b629cb9 | 15  | `__copy_user_fault_fixup` — kernel #PF recovery |
 | c779a6b | 16  | Sandbox-denial threshold kill + hostile-syscall probe |
+| 7586e10 | 17-19 | CR0.WP + zero-on-alloc + retpoline |
+| 1df6e8b | doc | detour-hook-hardening threat-model doc |
+| 108d28d | 20-21 | Denial-log rate-limit + SYS_DROPCAPS (SLH deferred) |
+| d3695ce | live | SpawnDropcapsProbe live-fire task |
+| (next)  | 22  | `tick_exhausted` → `kill_requested` + `KillReason` enum |
 
 ## What is NOT yet enforced (known gaps)
 

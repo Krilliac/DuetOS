@@ -83,13 +83,22 @@ struct Task
     // Used by CurrentProcess() for cap lookup.
     core::Process* process;
 
-    // Flag set by OnTimerTick when the owning process's tick
-    // budget has been exhausted. Checked by Schedule() on each
+    // Flag set by any kernel subsystem that wants this task
+    // killed at next resched. Historical name was tick_exhausted
+    // because the tick-budget path set it first; now the cap-
+    // denial threshold, future audit-triggered kills, etc. all
+    // route through the same flag. Checked by Schedule() on each
     // re-enqueue; when set, the task is diverted to the zombie
     // list instead of being put back on the runqueue, and the
     // reaper tears it down normally. Irrelevant for kernel-only
-    // tasks (process == nullptr — they never have budgets).
-    bool tick_exhausted;
+    // tasks (process == nullptr — they have neither budgets nor
+    // sandbox policies).
+    bool kill_requested;
+    // Why the kill was requested. Populated alongside
+    // kill_requested; Schedule() reads this to log a meaningful
+    // reason when it converts the task into a zombie. Only valid
+    // when kill_requested is true.
+    KillReason kill_reason;
 };
 
 namespace
@@ -352,7 +361,8 @@ void SchedInit()
     boot_task->priority = TaskPriority::Normal;
     boot_task->as = nullptr;           // kernel AS — boot PML4
     boot_task->process = nullptr;      // kernel-only — no owning process
-    boot_task->tick_exhausted = false; // kernel tasks never hit a budget
+    boot_task->kill_requested = false; // kernel tasks never hit a budget
+    boot_task->kill_reason = KillReason::TickBudget; // unused when kill_requested=false
 
     Current() = boot_task;
     g_tasks_created = 1;
@@ -403,7 +413,8 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
     t->priority = priority;
     t->as = as;
     t->process = nullptr; // populated by SchedCreateUser for user tasks
-    t->tick_exhausted = false;
+    t->kill_requested = false;
+    t->kill_reason = KillReason::TickBudget;
 
     // Build the initial stack. ContextSwitch pops r15, r14, r13, r12,
     // rbp, rbx and then rets. So from bottom to top of the pre-planted
@@ -488,20 +499,33 @@ core::Process* TaskProcess(Task* t)
     return t->process;
 }
 
-void FlagCurrentForKill()
+void FlagCurrentForKill(KillReason reason)
 {
     Task* t = Current();
     if (t == nullptr)
     {
         return;
     }
-    // Piggy-back on the tick_exhausted mechanism — same kill
-    // semantics (Dead on next resched, reaper tears down the
-    // Process). Setting the flag is atomic from this context
-    // (single-CPU, same core). On SMP, the flag is per-task;
-    // only this CPU's Schedule() reads it for this task.
-    t->tick_exhausted = true;
+    // Schedule() converts (kill_requested == true) on re-enqueue
+    // into a Dead transition. The reason is logged there.
+    // Setting the flag is atomic from this context (single-CPU,
+    // same core). On SMP the flag is per-task, so only this CPU's
+    // Schedule() reads it for this task.
+    t->kill_requested = true;
+    t->kill_reason = reason;
     NeedResched() = true;
+}
+
+const char* KillReasonName(KillReason r)
+{
+    switch (r)
+    {
+    case KillReason::TickBudget:
+        return "TickBudget";
+    case KillReason::SandboxDenialThreshold:
+        return "SandboxDenialThreshold";
+    }
+    return "<unknown>";
 }
 
 void Schedule()
@@ -533,8 +557,15 @@ void Schedule()
         prev = Current();
         if (prev->state == TaskState::Running)
         {
-            if (prev->tick_exhausted)
+            if (prev->kill_requested)
             {
+                SerialWrite("[sched] killing task id=");
+                SerialWriteHex(prev->id);
+                SerialWrite(" name=\"");
+                SerialWrite(prev->name);
+                SerialWrite("\" reason=");
+                SerialWrite(KillReasonName(prev->kill_reason));
+                SerialWrite("\n");
                 // CPU-tick budget ran out (flagged by OnTimerTick). Treat
                 // identically to SchedExit but inline — we're already
                 // inside Schedule()'s locked section, calling SchedExit
@@ -748,9 +779,10 @@ void OnTimerTick(u64 now_ticks)
     {
         core::Process* proc = cur->process;
         ++proc->ticks_used;
-        if (proc->ticks_used >= proc->tick_budget && !cur->tick_exhausted)
+        if (proc->ticks_used >= proc->tick_budget && !cur->kill_requested)
         {
-            cur->tick_exhausted = true;
+            cur->kill_requested = true;
+            cur->kill_reason = KillReason::TickBudget;
             arch::SerialWrite("[sched] tick budget exhausted pid=");
             arch::SerialWriteHex(proc->pid);
             arch::SerialWrite("\n");

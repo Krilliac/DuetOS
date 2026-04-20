@@ -96,12 +96,29 @@ Task* SchedCreateUser(TaskEntry entry, void* arg, const char* name, core::Proces
 /// handlers via `core::CurrentProcess()` to cap-check.
 core::Process* TaskProcess(Task* t);
 
-/// Flag the current task for termination at next resched, same
-/// mechanism the tick-budget path uses. Schedule() reads the
-/// flag and converts the task into a zombie on re-enqueue.
-/// Safe to call from kernel / syscall context; a no-op if
-/// there's no current task (should never happen in practice).
-void FlagCurrentForKill();
+/// Canonical reasons a kernel subsystem can request task
+/// termination via `FlagCurrentForKill(reason)`. Used by
+/// Schedule() for the single-line reason log when it converts
+/// a flagged task into a zombie. Extend at the tail — the
+/// integer value is a stable handle for logs / future ABI.
+enum class KillReason : u8
+{
+    TickBudget = 1,    // CPU-tick budget exhausted (slice 14)
+    SandboxDenialThreshold = 2, // too many cap-denials (slice 16)
+    // Add new reasons at the end.
+};
+
+const char* KillReasonName(KillReason r);
+
+/// Flag the current task for termination at next resched. The
+/// reason is stored on the task and used by Schedule() when it
+/// converts the task into a zombie — so the kill log line names
+/// WHY the task died, not just that it did.
+///
+/// Same mechanism for every cause: set the flag + need_resched,
+/// Schedule() catches on re-enqueue. Callable from any kernel
+/// or syscall context; no-op if there's no current task.
+void FlagCurrentForKill(KillReason reason);
 
 /// Voluntary yield. Pushes current task to the tail of the runqueue and
 /// switches to the head (if any other task is ready).

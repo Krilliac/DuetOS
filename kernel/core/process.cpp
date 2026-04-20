@@ -144,7 +144,7 @@ void RecordSandboxDenial(Cap cap)
         arch::SerialWrite(" denials (last cap=");
         arch::SerialWrite(CapName(cap));
         arch::SerialWrite(") — terminating as malicious\n");
-        sched::FlagCurrentForKill();
+        sched::FlagCurrentForKill(sched::KillReason::SandboxDenialThreshold);
     }
 }
 
