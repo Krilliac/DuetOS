@@ -168,7 +168,8 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     win_a_chrome.colour_client = 0x00D8D8D8;
     win_a_chrome.colour_close_btn = 0x00E04020;
     win_a_chrome.title_height = 22;
-    customos::drivers::video::WindowRegister(win_a_chrome, "CUSTOMOS GUI v0");
+    const customos::drivers::video::WindowHandle win_a_handle =
+        customos::drivers::video::WindowRegister(win_a_chrome, "CUSTOMOS GUI v0");
 
     customos::drivers::video::WindowChrome win_b_chrome{};
     win_b_chrome.x = 500;
@@ -204,13 +205,15 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     customos::drivers::video::ConsoleWriteln("");
     customos::drivers::video::ConsoleWriteln("READY.  TRY DRAGGING A WINDOW BY ITS TITLE BAR.");
 
-    // Demo clickable button. Label renders inside PaintButton
-    // on every redraw — survives click → press-state → release
-    // without the v0 "label disappears on press" glitch.
+    // Demo clickable button, owned by window A. x/y are offsets
+    // INTO window A — dragging window A carries the button
+    // along, and the button only responds to clicks when window
+    // A is on top of any other window at the click point.
     customos::drivers::video::ButtonWidget demo_button{};
     demo_button.id = 1;
-    demo_button.x = 110;
-    demo_button.y = 150;
+    demo_button.owner = win_a_handle;
+    demo_button.x = 40;   // offset into window A
+    demo_button.y = 90;
     demo_button.w = 160;
     demo_button.h = 48;
     demo_button.colour_normal = 0x00C0C0C0;

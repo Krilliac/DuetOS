@@ -39,14 +39,23 @@ constexpr u32 kWidgetInvalid = 0xFFFFFFFFu;
 struct ButtonWidget
 {
     u32 id;              // caller-assigned, returned by the router on events
-    u32 x, y, w, h;      // bounds in framebuffer pixels
+    u32 x, y, w, h;      // bounds in framebuffer pixels when owner=kWindowInvalid
     u32 colour_normal;
     u32 colour_pressed;
     u32 colour_border;
     u32 colour_label;    // ink colour for the label text
     const char* label;   // caller-owned, nullable (skips text draw)
+
+    // When `owner` is a valid WindowHandle, `x` / `y` are
+    // interpreted as OFFSETS from the owning window's origin —
+    // the button moves with its window on every drag. When
+    // `owner == kWindowInvalid` (the default for zero-init),
+    // `x` / `y` are absolute framebuffer coordinates and the
+    // button stays put regardless of which window is on top.
+    u32 owner;
+
     bool pressed;        // current visual state
-    u8 _pad[7];
+    u8 _pad[3];
 };
 
 /// Register a button. Copies the descriptor into the widget table.

@@ -25,9 +25,52 @@ constinit u32 g_widget_count = 0;
 // events — the router has to diff against the prior sample.
 constinit bool g_prev_left_down = false;
 
+// Resolve a button's effective absolute bounds. When the button
+// has an owning window, its stored (x, y) are offsets into that
+// window; otherwise they're absolute framebuffer coordinates.
+// Returns false if the button has a dead owner — caller should
+// skip paint + hit-test.
+bool EffectiveButtonPos(const ButtonWidget& b, u32* ax, u32* ay)
+{
+    if (b.owner == kWindowInvalid)
+    {
+        *ax = b.x;
+        *ay = b.y;
+        return true;
+    }
+    u32 wx = 0, wy = 0;
+    if (!WindowGetBounds(b.owner, &wx, &wy, nullptr, nullptr))
+    {
+        return false;
+    }
+    *ax = wx + b.x;
+    *ay = wy + b.y;
+    return true;
+}
+
 bool PointInButton(const ButtonWidget& b, u32 x, u32 y)
 {
-    return x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + b.h;
+    u32 bx = 0, by = 0;
+    if (!EffectiveButtonPos(b, &bx, &by))
+    {
+        return false;
+    }
+    if (x < bx || x >= bx + b.w || y < by || y >= by + b.h)
+    {
+        return false;
+    }
+    // Window-local widgets only fire when their owner is the
+    // topmost window at the click point. Stops a click that
+    // visually lands on a foreground window from waking a
+    // button that's hidden under that window.
+    if (b.owner != kWindowInvalid)
+    {
+        if (WindowTopmostAt(x, y) != b.owner)
+        {
+            return false;
+        }
+    }
+    return true;
 }
 
 u32 StringPixelWidth(const char* s)
@@ -44,17 +87,22 @@ u32 StringPixelWidth(const char* s)
 
 void PaintButton(const ButtonWidget& b)
 {
+    u32 bx = 0, by = 0;
+    if (!EffectiveButtonPos(b, &bx, &by))
+    {
+        return; // dead owner window — skip silently
+    }
     const u32 fill = b.pressed ? b.colour_pressed : b.colour_normal;
-    FramebufferFillRect(b.x, b.y, b.w, b.h, fill);
-    FramebufferDrawRect(b.x, b.y, b.w, b.h, b.colour_border, 2);
+    FramebufferFillRect(bx, by, b.w, b.h, fill);
+    FramebufferDrawRect(bx, by, b.w, b.h, b.colour_border, 2);
     if (b.label != nullptr)
     {
         // Centre the label inside the button. 8x8 cell metrics,
         // rounded down so odd-pixel buttons don't wiggle by a
         // pixel between normal and pressed states.
         const u32 text_w = StringPixelWidth(b.label);
-        const u32 cx = (text_w < b.w) ? b.x + (b.w - text_w) / 2 : b.x + 4;
-        const u32 cy = (b.h > 8) ? b.y + (b.h - 8) / 2 : b.y + 2;
+        const u32 cx = (text_w < b.w) ? bx + (b.w - text_w) / 2 : bx + 4;
+        const u32 cy = (b.h > 8) ? by + (b.h - 8) / 2 : by + 2;
         FramebufferDrawString(cx, cy, b.label, b.colour_label, fill);
     }
 }
@@ -283,6 +331,15 @@ void WindowDrawAllOrdered()
         {
             FramebufferDrawString(c.x + 8, c.y + 7, g_windows[h].title, 0x00FFFFFF, c.colour_title);
         }
+        // Widgets owned by this window — layered on top of the
+        // window's chrome, under any windows that stack above.
+        for (u32 j = 0; j < g_widget_count; ++j)
+        {
+            if (g_widgets[j].owner == h)
+            {
+                PaintButton(g_widgets[j]);
+            }
+        }
     }
 }
 
@@ -314,10 +371,14 @@ void DesktopCompose(u32 desktop_rgb, const char* banner)
         FramebufferDrawString(16, 8, banner, 0x00FFFFFF, desktop_rgb);
     }
     ConsoleRedraw();
-    WindowDrawAllOrdered();
+    WindowDrawAllOrdered(); // windows + their owned widgets together in z-order
+    // Freestanding widgets float on top of everything.
     for (u32 i = 0; i < g_widget_count; ++i)
     {
-        PaintButton(g_widgets[i]);
+        if (g_widgets[i].owner == kWindowInvalid)
+        {
+            PaintButton(g_widgets[i]);
+        }
     }
 }
 
