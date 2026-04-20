@@ -34,6 +34,7 @@ constexpr u16 kStatusPort = 0x64;
 // Status register bits.
 constexpr u8 kStatusOutputFull = 1U << 0; // data waiting in 0x60
 constexpr u8 kStatusInputFull = 1U << 1;  // 0x60 / 0x64 busy — do not write
+constexpr u8 kStatusMouseData = 1U << 5;  // byte in 0x60 is from aux channel
 
 // Controller commands issued via 0x64.
 constexpr u8 kCmdReadConfig = 0x20;
@@ -358,9 +359,22 @@ void IrqHandler()
 
     // Drain every pending byte in one pass. The 8042 can latch multiple
     // scan codes (a single keypress sends 1..3 bytes, and key repeat
-    // under load stacks them up) before the next IRQ arrives.
-    while ((Inb(kStatusPort) & kStatusOutputFull) != 0)
+    // under load stacks them up) before the next IRQ arrives. Skip
+    // aux-channel bytes (status bit 5) — those belong to the mouse
+    // and its own IRQ-12 handler will consume them. Without this
+    // filter, a mouse packet landing in 0x60 between our scan-code
+    // reads would be misinterpreted as keyboard bytes.
+    while (true)
     {
+        const u8 st = Inb(kStatusPort);
+        if ((st & kStatusOutputFull) == 0)
+        {
+            break;
+        }
+        if ((st & kStatusMouseData) != 0)
+        {
+            break; // leave aux byte for the mouse IRQ handler
+        }
         const u8 byte = Inb(kDataPort);
 
         // Ring is full iff (head - tail) == size. In that case the

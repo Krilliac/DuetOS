@@ -12,6 +12,7 @@
 #include "../arch/x86_64/timer.h"
 #include "../cpu/percpu.h"
 #include "../drivers/input/ps2kbd.h"
+#include "../drivers/input/ps2mouse.h"
 #include "../drivers/pci/pci.h"
 #include "../drivers/storage/ahci.h"
 #include "../drivers/video/framebuffer.h"
@@ -215,6 +216,9 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     SerialWrite("[boot] Bringing up PS/2 keyboard.\n");
     customos::drivers::input::Ps2KeyboardInit();
 
+    SerialWrite("[boot] Bringing up PS/2 mouse.\n");
+    customos::drivers::input::Ps2MouseInit();
+
     SerialWrite("[boot] Enumerating PCI bus.\n");
     customos::drivers::pci::PciEnumerate();
 
@@ -239,6 +243,27 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
         }
     };
     customos::sched::SchedCreate(kbd_reader, nullptr, "kbd-reader");
+
+    // Mouse reader thread: blocks on Ps2MouseReadPacket, prints one
+    // line per decoded packet. Same end-to-end closure the keyboard
+    // reader gives, for IRQ 12. On machines without a PS/2 aux line
+    // (most laptops), Ps2MouseInit returned without routing the
+    // IRQ — the reader just parks forever on an unfed queue.
+    auto mouse_reader = [](void*)
+    {
+        for (;;)
+        {
+            const auto p = customos::drivers::input::Ps2MouseReadPacket();
+            SerialWrite("[mouse] dx=");
+            SerialWriteHex(static_cast<customos::u64>(p.dx));
+            SerialWrite(" dy=");
+            SerialWriteHex(static_cast<customos::u64>(p.dy));
+            SerialWrite(" btn=");
+            SerialWriteHex(p.buttons);
+            SerialWrite("\n");
+        }
+    };
+    customos::sched::SchedCreate(mouse_reader, nullptr, "mouse-reader");
 
     // Scheduler self-test: three kernel threads that each bump a shared
     // counter five times under a mutex. If the mutex serialises them

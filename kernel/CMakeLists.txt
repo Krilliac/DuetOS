@@ -50,6 +50,7 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     arch/x86_64/usermode.S
     cpu/percpu.cpp
     drivers/input/ps2kbd.cpp
+    drivers/input/ps2mouse.cpp
     drivers/pci/pci.cpp
     drivers/storage/ahci.cpp
     drivers/video/framebuffer.cpp
