@@ -3,6 +3,8 @@
 #include "cpu.h"
 #include "serial.h"
 
+#include "../../core/klog.h"
+
 namespace customos::arch
 {
 
@@ -61,7 +63,7 @@ void PicDisable()
     Outb(kPicMasterData, 0xFF);
     Outb(kPicSlaveData, 0xFF);
 
-    SerialWrite("[pic] 8259 remapped (0x20..0x2F) and fully masked\n");
+    core::Log(core::LogLevel::Info, "arch/pic", "8259 remapped (0x20..0x2F) and fully masked");
 }
 
 } // namespace customos::arch

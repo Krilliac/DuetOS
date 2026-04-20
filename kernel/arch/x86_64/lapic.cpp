@@ -4,6 +4,7 @@
 #include "idt.h"
 #include "serial.h"
 
+#include "../../core/klog.h"
 #include "../../core/panic.h"
 #include "../../mm/paging.h"
 
@@ -110,15 +111,10 @@ void LapicInit()
     LapicWrite(kLapicRegTpr, 0); // accept all
     LapicWrite(kLapicRegSvr, kSvrSoftwareEnable | kSpuriousVector);
 
-    SerialWrite("[lapic] base_phys=");
-    SerialWriteHex(base_phys);
-    SerialWrite(" mmio=");
-    SerialWriteHex(reinterpret_cast<u64>(g_lapic_mmio));
-    SerialWrite(" id=");
-    SerialWriteHex(LapicRead(kLapicRegId));
-    SerialWrite(" version=");
-    SerialWriteHex(LapicRead(kLapicRegVersion));
-    SerialWrite("\n");
+    core::LogWithValue(core::LogLevel::Info, "arch/lapic", "base_phys", base_phys);
+    core::LogWithValue(core::LogLevel::Info, "arch/lapic", "mmio", reinterpret_cast<u64>(g_lapic_mmio));
+    core::LogWithValue(core::LogLevel::Info, "arch/lapic", "id", LapicRead(kLapicRegId));
+    core::LogWithValue(core::LogLevel::Info, "arch/lapic", "version", LapicRead(kLapicRegVersion));
 }
 
 } // namespace customos::arch

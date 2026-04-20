@@ -5,6 +5,7 @@
 #include "serial.h"
 
 #include "../../acpi/acpi.h"
+#include "../../core/klog.h"
 #include "../../core/panic.h"
 #include "../../mm/paging.h"
 
@@ -139,17 +140,11 @@ void IoApicInit()
             WriteRedir(io, e, static_cast<u64>(kRedirLowMask));
         }
 
-        SerialWrite("[ioapic] mapped id=");
-        SerialWriteHex(io.id);
-        SerialWrite(" mmio=");
-        SerialWriteHex(reinterpret_cast<u64>(io.mmio));
-        SerialWrite(" ver=");
-        SerialWriteHex(version_reg & 0xFF);
-        SerialWrite(" entries=");
-        SerialWriteHex(io.redir_count);
-        SerialWrite(" gsi_base=");
-        SerialWriteHex(io.gsi_base);
-        SerialWrite("\n");
+        core::LogWithValue(core::LogLevel::Info, "arch/ioapic", "mapped id", io.id);
+        core::LogWithValue(core::LogLevel::Info, "arch/ioapic", "  mmio", reinterpret_cast<u64>(io.mmio));
+        core::LogWithValue(core::LogLevel::Info, "arch/ioapic", "  version", version_reg & 0xFF);
+        core::LogWithValue(core::LogLevel::Info, "arch/ioapic", "  entries", io.redir_count);
+        core::LogWithValue(core::LogLevel::Info, "arch/ioapic", "  gsi_base", io.gsi_base);
     }
     g_ioapic_count = count;
 
@@ -168,9 +163,8 @@ void IoApicInit()
     }
     WriteRedir(io0, 0, static_cast<u64>(kRedirLowMask));
 
-    SerialWrite("[ioapic] init OK, ");
-    SerialWriteHex(g_ioapic_count);
-    SerialWrite(" controller(s) online, all pins masked.\n");
+    core::LogWithValue(core::LogLevel::Info, "arch/ioapic", "init OK, controllers online (all pins masked)",
+                       g_ioapic_count);
 }
 
 void IoApicRoute(u32 gsi, u8 vector, u8 lapic_id, u8 isa_irq)

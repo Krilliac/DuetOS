@@ -7,6 +7,7 @@
 #include "../../arch/x86_64/lapic.h"
 #include "../../arch/x86_64/serial.h"
 #include "../../arch/x86_64/traps.h"
+#include "../../core/klog.h"
 #include "../../core/panic.h"
 #include "../../sched/sched.h"
 
@@ -124,15 +125,10 @@ void Ps2KeyboardInit()
     const u8 bsp_id = static_cast<u8>(arch::LapicRead(arch::kLapicRegId) >> 24);
     arch::IoApicRoute(gsi, kKbdVector, bsp_id, kKbdIsaIrq);
 
-    SerialWrite("[ps2kbd] routed isa_irq=");
-    SerialWriteHex(kKbdIsaIrq);
-    SerialWrite(" gsi=");
-    SerialWriteHex(gsi);
-    SerialWrite(" vector=");
-    SerialWriteHex(kKbdVector);
-    SerialWrite(" lapic_id=");
-    SerialWriteHex(bsp_id);
-    SerialWrite("\n");
+    customos::core::LogWithValue(customos::core::LogLevel::Info, "drivers/ps2kbd", "routed isa_irq", kKbdIsaIrq);
+    customos::core::LogWithValue(customos::core::LogLevel::Info, "drivers/ps2kbd", "  gsi", gsi);
+    customos::core::LogWithValue(customos::core::LogLevel::Info, "drivers/ps2kbd", "  vector", kKbdVector);
+    customos::core::LogWithValue(customos::core::LogLevel::Info, "drivers/ps2kbd", "  lapic_id", bsp_id);
 }
 
 u8 Ps2KeyboardRead()
