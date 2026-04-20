@@ -1,53 +1,48 @@
 #include "types.h"
+#include "../arch/x86_64/cpu.h"
+#include "../arch/x86_64/gdt.h"
+#include "../arch/x86_64/idt.h"
 #include "../arch/x86_64/serial.h"
+#include "../arch/x86_64/traps.h"
 
 /*
- * Kernel entry in C++. Called by kernel/arch/x86_64/boot.S once the CPU
- * is in 64-bit long mode with a valid stack and a minimal identity-mapped
+ * Kernel entry in C++. Called by kernel/arch/x86_64/boot.S once the CPU is
+ * in 64-bit long mode with a valid stack and a minimal identity-mapped
  * page hierarchy.
  *
- * Scope of this function today: produce visible output on COM1, then halt
- * deterministically. Paging, IDT, GDT reload, SMP bring-up, and scheduler
- * init all land in follow-up commits — each large enough to stand on its
- * own without being smeared into this entry point.
+ * Current scope: bring up the canonical GDT + IDT, exercise the trap path
+ * with a self-test int3, halt deterministically. Physical frame allocator,
+ * higher-half move, and IRQ controller bring-up are all future commits —
+ * each large enough to stand on its own rather than being smeared in here.
  */
-
-namespace
-{
-
-[[noreturn]] void HaltForever()
-{
-    for (;;)
-    {
-        asm volatile("cli; hlt");
-    }
-}
-
-} // namespace
 
 extern "C" void kernel_main(customos::u32 multiboot_magic,
                             customos::uptr multiboot_info)
 {
-    customos::arch::SerialInit();
-    customos::arch::SerialWrite("[boot] CustomOS kernel reached long mode.\n");
+    using namespace customos::arch;
 
-    // Verify we were loaded by a Multiboot2-compliant loader. The magic
-    // value is defined by the spec and passed in eax at handoff; boot.S
-    // forwards it here. If it's wrong we still halt, but we announce the
-    // mismatch so early hardware bring-up doesn't silently boot on an
-    // unexpected protocol.
+    SerialInit();
+    SerialWrite("[boot] CustomOS kernel reached long mode.\n");
+
     constexpr customos::u32 kMultiboot2BootMagic = 0x36D76289;
     if (multiboot_magic == kMultiboot2BootMagic)
     {
-        customos::arch::SerialWrite("[boot] Multiboot2 handoff verified.\n");
+        SerialWrite("[boot] Multiboot2 handoff verified.\n");
     }
     else
     {
-        customos::arch::SerialWrite("[boot] WARNING: unexpected boot magic.\n");
+        SerialWrite("[boot] WARNING: unexpected boot magic.\n");
     }
 
     (void)multiboot_info;   // Consumed by the memory-map parser in a later commit.
 
-    customos::arch::SerialWrite("[boot] Halting CPU.\n");
-    HaltForever();
+    SerialWrite("[boot] Installing kernel GDT.\n");
+    GdtInit();
+
+    SerialWrite("[boot] Installing IDT (vectors 0..31).\n");
+    IdtInit();
+
+    SerialWrite("[boot] Trap path online — raising int3 to self-test.\n");
+    RaiseSelfTestBreakpoint();
+    // RaiseSelfTestBreakpoint never returns (the dispatcher halts).
 }

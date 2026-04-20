@@ -1,22 +1,12 @@
 #include "serial.h"
 
+#include "cpu.h"
+
 namespace customos::arch
 {
 
 namespace
 {
-
-inline void Outb(u16 port, u8 value)
-{
-    asm volatile("outb %0, %1" : : "a"(value), "Nd"(port));
-}
-
-inline u8 Inb(u16 port)
-{
-    u8 value;
-    asm volatile("inb %1, %0" : "=a"(value) : "Nd"(port));
-    return value;
-}
 
 /* 16550 register offsets from the base port. */
 constexpr u16 kRegData           = 0;   // DLAB=0: RBR/THR
@@ -81,6 +71,19 @@ void SerialWrite(const char* str)
             SerialWriteByte('\r');
         }
         SerialWriteByte(static_cast<u8>(*p));
+    }
+}
+
+void SerialWriteHex(u64 value)
+{
+    static constexpr char kDigits[] = "0123456789abcdef";
+
+    SerialWriteByte('0');
+    SerialWriteByte('x');
+
+    for (int shift = 60; shift >= 0; shift -= 4)
+    {
+        SerialWriteByte(static_cast<u8>(kDigits[(value >> shift) & 0xF]));
     }
 }
 

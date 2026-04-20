@@ -27,4 +27,7 @@ void SerialWriteByte(u8 byte);
 /// Write a NUL-terminated string to COM1.
 void SerialWrite(const char* str);
 
+/// Write a 64-bit value as "0x" + 16 hex digits, no newline.
+void SerialWriteHex(u64 value);
+
 } // namespace customos::arch
