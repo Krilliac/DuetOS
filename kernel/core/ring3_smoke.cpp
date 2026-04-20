@@ -417,6 +417,142 @@ void SpawnRing3Task(const char* name, CapSet caps, const fs::RamfsNode* root, u6
     sched::SchedCreateUser(&Ring3UserEntry, nullptr, name, proc);
 }
 
+// Deprivilege demo: a trusted task that voluntarily drops its caps
+// mid-flight via SYS_DROPCAPS, then attempts SYS_WRITE again.
+// Demonstrates that caps can be irreversibly revoked — the
+// canonical NO_NEW_PRIVS pattern.
+//
+// Payload layout:
+//   offset 0x00: pause
+//   offset 0x02: SYS_WRITE("pre-drop\n")   ; succeeds (trusted caps)
+//   offset 0x18: SYS_DROPCAPS(0xFFFFFFFF)  ; drop every bit
+//   offset 0x24: SYS_WRITE("post-drop!\n") ; denied by cap check
+//   offset 0x3A: SYS_YIELD
+//   offset 0x41: SYS_EXIT
+//
+// Strings:
+//   offset 0x80: "pre-drop\n"      (9 bytes)
+//   offset 0xA0: "post-drop!\n"    (11 bytes)
+//
+// clang-format off
+constexpr char kDropcapsPreMsg[] = "[dropcaps-demo] pre-drop\n";
+constexpr char kDropcapsPostMsg[] = "[dropcaps-demo] post-drop (should never print!)\n";
+constexpr u64 kDropcapsPreOffset = 0x80;
+constexpr u64 kDropcapsPostOffset = 0xC0;
+
+constexpr u8 kDropcapsProbeBytes[] = {
+    0xF3, 0x90,                                                   // pause
+    // SYS_WRITE pre-drop
+    0xB8, 0x02, 0x00, 0x00, 0x00,                                 // mov eax, 2
+    0xBF, 0x01, 0x00, 0x00, 0x00,                                 // mov edi, 1
+    0xBE, 0x80, 0x00, 0x00, 0x40,                                 // mov esi, code_va + 0x80 (PATCHED)
+    0xBA, static_cast<u8>(sizeof(kDropcapsPreMsg) - 1), 0x00, 0x00, 0x00,  // mov edx, len
+    0xCD, 0x80,                                                   // int 0x80
+    // SYS_DROPCAPS all caps
+    0xB8, 0x06, 0x00, 0x00, 0x00,                                 // mov eax, 6 (SYS_DROPCAPS)
+    0xBF, 0xFF, 0xFF, 0xFF, 0xFF,                                 // mov edi, 0xFFFFFFFF (drop everything)
+    0xCD, 0x80,                                                   // int 0x80
+    // SYS_WRITE post-drop (will be denied)
+    0xB8, 0x02, 0x00, 0x00, 0x00,                                 // mov eax, 2
+    0xBF, 0x01, 0x00, 0x00, 0x00,                                 // mov edi, 1
+    0xBE, 0xC0, 0x00, 0x00, 0x40,                                 // mov esi, code_va + 0xC0 (PATCHED)
+    0xBA, static_cast<u8>(sizeof(kDropcapsPostMsg) - 1), 0x00, 0x00, 0x00,  // mov edx, len
+    0xCD, 0x80,                                                   // int 0x80
+    // SYS_YIELD
+    0xB8, 0x03, 0x00, 0x00, 0x00,                                 // mov eax, 3
+    0xCD, 0x80,                                                   // int 0x80
+    // SYS_EXIT
+    0x31, 0xC0,                                                   // xor eax, eax
+    0x31, 0xFF,                                                   // xor edi, edi
+    0xCD, 0x80,                                                   // int 0x80
+    0xF4,                                                         // hlt
+};
+// clang-format on
+
+// Offsets of imm32 fields that embed absolute user VAs. Patched
+// at spawn against the ASLR-chosen code_va.
+struct DropcapsPatch
+{
+    u16 bytecode_offset;
+    u16 code_offset;
+};
+// imm32 sits at byte offset 13 of the SYS_WRITE #1 block
+// (F3 90 pause, then B8 02 00 00 00, BF 01 00 00 00, BE <imm32>).
+// SYS_WRITE #2 starts at offset 36 (after SYS_WRITE #1 ends at 24
+// and SYS_DROPCAPS takes 12 more bytes), imm32 at 36+11 = 47.
+constexpr DropcapsPatch kDropcapsPatches[] = {
+    {0x0D, kDropcapsPreOffset},   // SYS_WRITE #1 msg ptr
+    {0x2F, kDropcapsPostOffset},  // SYS_WRITE #2 msg ptr
+};
+
+void SpawnDropcapsProbe()
+{
+    using arch::SerialWrite;
+    using arch::SerialWriteHex;
+    using namespace customos::mm;
+
+    const u64 code_va = AslrPickBase();
+    const u64 stack_va = code_va + kStackOffsetFromCode;
+    KASSERT(code_va <= 0xFFFFFFFFULL, "core/ring3", "dropcaps code_va overflow");
+
+    AddressSpace* as = AddressSpaceCreate(kFrameBudgetTrusted);
+    if (as == nullptr)
+    {
+        Panic("core/ring3", "AS create failed for dropcaps probe");
+    }
+    const PhysAddr code_frame = AllocateFrame();
+    if (code_frame == kNullFrame)
+    {
+        Panic("core/ring3", "code frame alloc failed for dropcaps probe");
+    }
+    auto* code_direct = static_cast<u8*>(PhysToVirt(code_frame));
+    // Zero-on-alloc (slice 18) means the page is already zeroed.
+    for (u64 i = 0; i < sizeof(kDropcapsProbeBytes); ++i)
+    {
+        code_direct[i] = kDropcapsProbeBytes[i];
+    }
+    // Strings at their fixed offsets (include trailing NUL explicitly
+    // though it's not read by SYS_WRITE — keeps the layout self-
+    // documenting).
+    for (u64 i = 0; i < sizeof(kDropcapsPreMsg); ++i)
+    {
+        code_direct[kDropcapsPreOffset + i] = static_cast<u8>(kDropcapsPreMsg[i]);
+    }
+    for (u64 i = 0; i < sizeof(kDropcapsPostMsg); ++i)
+    {
+        code_direct[kDropcapsPostOffset + i] = static_cast<u8>(kDropcapsPostMsg[i]);
+    }
+    // ASLR patches.
+    for (const auto& p : kDropcapsPatches)
+    {
+        const u64 target = code_va + p.code_offset;
+        WriteImm32LE(code_direct, p.bytecode_offset, static_cast<u32>(target));
+    }
+
+    const PhysAddr stack_frame = AllocateFrame();
+    if (stack_frame == kNullFrame)
+    {
+        Panic("core/ring3", "stack frame alloc failed for dropcaps probe");
+    }
+    AddressSpaceMapUserPage(as, code_va, code_frame, kPagePresent | kPageUser);
+    AddressSpaceMapUserPage(as, stack_va, stack_frame, kPagePresent | kPageWritable | kPageUser | kPageNoExecute);
+
+    // Starts with FULL trusted caps — the point is to show
+    // that a trusted task can voluntarily deprivilege.
+    Process* proc = ProcessCreate("ring3-dropcaps-demo", as, CapSetTrusted(), fs::RamfsTrustedRoot(), code_va, stack_va,
+                                  kTickBudgetTrusted);
+    if (proc == nullptr)
+    {
+        Panic("core/ring3", "ProcessCreate failed for dropcaps probe");
+    }
+    SerialWrite("[ring3] queued dropcaps-demo pid=");
+    SerialWriteHex(proc->pid);
+    SerialWrite(" code_va=");
+    SerialWriteHex(code_va);
+    SerialWrite("\n");
+    sched::SchedCreateUser(&Ring3UserEntry, nullptr, "ring3-dropcaps-demo", proc);
+}
+
 // Dedicated hostile-syscall-spam payload: spins calling SYS_WRITE(fd=1)
 // forever. Each iteration fails the kCapSerialConsole cap check and
 // bumps the Process's sandbox_denials counter. Once the counter hits
@@ -820,7 +956,10 @@ void StartRing3SmokeTask()
     // After 100 cap denials, the sandbox-denial threshold kills
     // the task. Boot log shows `[sandbox] pid=N hit 100 denials`.
     SpawnHostileProbe();
-    Log(LogLevel::Info, "core/ring3", "ring3 smoke tasks queued (incl cpu-hog + hostile-syscall)");
+    // Dropcaps demo: trusted task drops its caps mid-flight and
+    // verifies subsequent SYS_WRITE is denied.
+    SpawnDropcapsProbe();
+    Log(LogLevel::Info, "core/ring3", "ring3 smoke tasks queued (incl cpu-hog + hostile + dropcaps)");
 }
 
 } // namespace customos::core
