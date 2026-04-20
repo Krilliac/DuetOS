@@ -2,26 +2,24 @@
 #
 # Launch the freshly-built CustomOS kernel in QEMU.
 #
-# This script is deliberately minimal. It:
-#   1. Locates the kernel ELF in build/<preset>/kernel/.
-#   2. Picks sensible QEMU flags for early-boot diagnosis:
-#        -serial stdio       : pipe COM1 to this terminal
-#        -no-reboot          : halt on triple fault instead of resetting
-#        -no-shutdown        : leave QEMU alive so `info registers` works
-#        -d int,cpu_reset    : trace interrupts + reset causes
-#        -D qemu.log         : dump that trace to qemu.log in the CWD
-#   3. Forwards any extra argv to QEMU, so callers can add `-s -S` for gdb,
-#      `-display none -nographic`, `-smp 4`, etc.
+# Default boot path:  ISO + GRUB + Multiboot2.
+# Reasoning:          QEMU's `-kernel` flag speaks Multiboot 1, but our
+#                     kernel header is Multiboot 2. Booting the ISO lets
+#                     GRUB do the Multiboot2 handoff properly.
 #
-# Requires: qemu-system-x86_64 on PATH. On Ubuntu:
-#     sudo apt-get install -y qemu-system-x86 ovmf xorriso grub-pc-bin grub-common
+# Flags chosen for early-boot diagnosis:
+#   -serial stdio          : pipe COM1 to this terminal
+#   -no-reboot             : halt on triple fault instead of resetting
+#   -no-shutdown           : leave QEMU alive so `info registers` works
+#   -d int,cpu_reset       : trace interrupts + reset causes
+#   -D qemu.log            : dump that trace to qemu.log
+#   -display none          : headless (override by exporting CUSTOMOS_DISPLAY=gtk)
 #
-# Multiboot2 note: QEMU's `-kernel` uses the Multiboot 1 protocol. Our
-# kernel header is Multiboot 2 — so for now this script expects a
-# Multiboot2-aware path (either a GRUB ISO built with grub-mkrescue, or a
-# QEMU fork that understands Multiboot2). The ISO-build helper will land
-# in a follow-up commit. Until then, this script is a placeholder that
-# documents the final invocation.
+# Extra argv is forwarded to QEMU, so `tools/qemu/run.sh -s -S` will start
+# it waiting for gdb on :1234.
+#
+# Requires (on Ubuntu):
+#   sudo apt-get install -y qemu-system-x86 grub-common grub-pc-bin xorriso mtools
 
 set -euo pipefail
 
@@ -30,32 +28,48 @@ readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 PRESET="${CUSTOMOS_PRESET:-x86_64-debug}"
 BUILD_DIR="${REPO_ROOT}/build/${PRESET}"
+ISO_IMAGE="${BUILD_DIR}/customos.iso"
 KERNEL_ELF="${BUILD_DIR}/kernel/customos-kernel.elf"
+DISPLAY_MODE="${CUSTOMOS_DISPLAY:-none}"
+TIMEOUT_SECS="${CUSTOMOS_TIMEOUT:-}"
 
-if [[ ! -f "${KERNEL_ELF}" ]]; then
-    echo "error: kernel ELF not found at ${KERNEL_ELF}" >&2
-    echo "       build it first:" >&2
+if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
+    echo "error: qemu-system-x86_64 is not installed." >&2
+    echo "       sudo apt-get install -y qemu-system-x86" >&2
+    exit 1
+fi
+
+if [[ -f "${ISO_IMAGE}" ]]; then
+    BOOT_SOURCE=(-cdrom "${ISO_IMAGE}" -boot d)
+elif [[ -f "${KERNEL_ELF}" ]]; then
+    echo "warning: ${ISO_IMAGE} not found, falling back to -kernel (Multiboot 1)." >&2
+    echo "         This will NOT boot today — the kernel uses Multiboot 2." >&2
+    echo "         Install grub-pc-bin + xorriso and rebuild so the ISO target runs." >&2
+    BOOT_SOURCE=(-kernel "${KERNEL_ELF}")
+else
+    echo "error: neither ${ISO_IMAGE} nor ${KERNEL_ELF} exists." >&2
+    echo "       build first:" >&2
     echo "         cmake --preset ${PRESET}" >&2
     echo "         cmake --build build/${PRESET}" >&2
     exit 1
 fi
 
-if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    echo "error: qemu-system-x86_64 is not installed." >&2
-    echo "       install with: sudo apt-get install -y qemu-system-x86" >&2
-    exit 1
-fi
+QEMU_ARGS=(
+    -machine  q35
+    -cpu      max
+    -m        512M
+    -display  "${DISPLAY_MODE}"
+    -serial   stdio
+    -no-reboot
+    -no-shutdown
+    -d        int,cpu_reset
+    -D        qemu.log
+    "${BOOT_SOURCE[@]}"
+)
 
-# -kernel uses Multiboot 1. Once grub-mkrescue-based ISO assembly lands,
-# switch this to `-cdrom build/${PRESET}/customos.iso`.
-exec qemu-system-x86_64 \
-    -machine q35 \
-    -cpu max \
-    -m 512M \
-    -kernel "${KERNEL_ELF}" \
-    -serial stdio \
-    -no-reboot \
-    -no-shutdown \
-    -d int,cpu_reset \
-    -D qemu.log \
-    "$@"
+if [[ -n "${TIMEOUT_SECS}" ]]; then
+    exec timeout --foreground --preserve-status --signal=TERM "${TIMEOUT_SECS}" \
+         qemu-system-x86_64 "${QEMU_ARGS[@]}" "$@"
+else
+    exec qemu-system-x86_64 "${QEMU_ARGS[@]}" "$@"
+fi

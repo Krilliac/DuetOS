@@ -15,12 +15,13 @@ _Read this at every session start (after git sync). Each row links to a detailed
 | Win32/NT subsystem architecture | [knowledge/win32-subsystem-design.md](knowledge/win32-subsystem-design.md) | Decision | Active | 2026-04-20 |
 | Hardware target matrix (CPU/GPU/IO tiers) | [knowledge/hardware-target-matrix.md](knowledge/hardware-target-matrix.md) | Decision | Active | 2026-04-20 |
 | Kernel bring-up v0 (Multiboot2 → long mode → `kernel_main`) | [knowledge/kernel-bringup-v0.md](knowledge/kernel-bringup-v0.md) | Observation | Active | 2026-04-20 |
+| ISO build & end-to-end boot verification | [knowledge/iso-build-and-boot.md](knowledge/iso-build-and-boot.md) | Pattern | Active | 2026-04-20 |
 
 ## Quick Reference
 
 ### Current Project State (2026-04-20)
 
-- **Repository**: first kernel commit landed. Build system online; kernel boots to long mode and writes to COM1 (pending Multiboot2-aware loader — see below).
+- **Repository**: end-to-end boot verified. `cmake --build` produces a bootable ISO; `tools/qemu/run.sh` boots it in QEMU and the kernel reaches long mode + writes three lines on COM1.
 - **Default branch**: `main`.
 - **Active dev branch**: `claude/port-sparkengine-components-f38iH` (Claude-driven bootstrapping).
 - **Platforms**: x86_64 first (Multiboot2 → long mode). ARM64 planned, not started. UEFI path planned, not started.

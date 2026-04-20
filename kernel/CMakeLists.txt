@@ -39,3 +39,48 @@ target_link_options(customos-kernel PRIVATE
 set_target_properties(customos-kernel PROPERTIES
     LINK_DEPENDS "${CUSTOMOS_KERNEL_LINKER_SCRIPT}"
 )
+
+# ----------------------------------------------------------------------------
+# Bootable ISO — uses GRUB as a third-party loader until our own UEFI boot
+# loader exists. If grub-mkrescue / xorriso aren't installed, the kernel
+# still builds; only the `customos-iso` target is skipped, with a status
+# message explaining what to install.
+# ----------------------------------------------------------------------------
+
+find_program(GRUB_MKRESCUE grub-mkrescue)
+find_program(XORRISO       xorriso)
+
+if(GRUB_MKRESCUE AND XORRISO)
+    set(CUSTOMOS_ISO_STAGE  "${CMAKE_CURRENT_BINARY_DIR}/iso-stage")
+    set(CUSTOMOS_ISO_OUTPUT "${CMAKE_BINARY_DIR}/customos.iso")
+    set(CUSTOMOS_GRUB_CFG   "${CMAKE_SOURCE_DIR}/boot/grub/grub.cfg")
+
+    add_custom_command(
+        OUTPUT "${CUSTOMOS_ISO_OUTPUT}"
+
+        # Lay out the ISO root exactly the way grub.cfg expects.
+        COMMAND ${CMAKE_COMMAND} -E rm -rf  "${CUSTOMOS_ISO_STAGE}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${CUSTOMOS_ISO_STAGE}/boot/grub"
+        COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:customos-kernel>"
+                                         "${CUSTOMOS_ISO_STAGE}/boot/customos-kernel.elf"
+        COMMAND ${CMAKE_COMMAND} -E copy "${CUSTOMOS_GRUB_CFG}"
+                                         "${CUSTOMOS_ISO_STAGE}/boot/grub/grub.cfg"
+
+        # Produce the ISO. grub-mkrescue embeds the i386-pc boot image so the
+        # result is bootable on both legacy BIOS (via QEMU's default SeaBIOS)
+        # and — when GRUB's EFI modules are present on the host — UEFI.
+        COMMAND ${GRUB_MKRESCUE} --compress=xz -o "${CUSTOMOS_ISO_OUTPUT}"
+                                 "${CUSTOMOS_ISO_STAGE}"
+
+        DEPENDS customos-kernel "${CUSTOMOS_GRUB_CFG}"
+        COMMENT "Building bootable customos.iso"
+        VERBATIM
+    )
+
+    add_custom_target(customos-iso ALL
+        DEPENDS "${CUSTOMOS_ISO_OUTPUT}"
+    )
+else()
+    message(STATUS "customos-iso target disabled (grub-mkrescue or xorriso not found).")
+    message(STATUS "  Install with: sudo apt-get install -y grub-common grub-pc-bin xorriso mtools")
+endif()
