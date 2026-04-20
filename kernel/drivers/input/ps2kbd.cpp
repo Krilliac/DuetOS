@@ -58,6 +58,70 @@ constinit u64 g_irqs_seen = 0;
 constinit u64 g_bytes_buffered = 0;
 constinit u64 g_bytes_dropped = 0;
 
+// ---------------------------------------------------------------------------
+// Scan code set 1 → ASCII translation.
+//
+// QEMU (and every real 8042 in AT-compatible mode) emits scan code
+// set 1 by default: one byte per make, one byte per break with the
+// top bit set (0x80 | make). Certain keys (arrows, right-side mods)
+// send a 0xE0 prefix followed by the make/break byte.
+//
+// The translator runs in TASK context (inside Ps2KeyboardReadChar),
+// NOT in IRQ context — the IRQ handler still buffers raw bytes,
+// preserving the existing "lossless raw path" for any consumer that
+// needs un-translated scan codes (debuggers, alt keymap consumers).
+//
+// v0 scope:
+//   - US QWERTY, no alt layouts.
+//   - Tracks LShift / RShift (press + release) and Caps Lock (toggle
+//     on press, ignore release). Letters XOR shift and capslock;
+//     number-row and symbols only respect shift.
+//   - Ignores Ctrl, Alt, Meta, F-keys, numpad, arrows, and every
+//     other 0xE0-prefixed key — returns 0 so the caller can re-poll.
+//   - Returns a non-zero ASCII byte per resolved keypress; returns
+//     nothing (blocks) on pure modifier transitions or releases.
+// ---------------------------------------------------------------------------
+
+constexpr u8 kScanExtendedPrefix = 0xE0;
+constexpr u8 kScanBreakBit = 0x80;
+constexpr u8 kScanLShift = 0x2A;
+constexpr u8 kScanRShift = 0x36;
+constexpr u8 kScanCapsLock = 0x3A;
+constexpr u64 kKeymapSize = 128;
+
+// NOTE: indexed by scan code (0..127); 0 means "no ASCII mapping —
+// caller re-polls." Only keys in the main alphanumeric block are
+// mapped; specials (Esc, F1..F12, numlock, numpad, arrows) are 0.
+constinit const char kKeymapLower[kKeymapSize] = {
+    /* 0x00 */ 0,   0,   '1', '2', '3', '4', '5', '6', '7',  '8', '9', '0',  '-',  '=', '\b', '\t',
+    /* 0x10 */ 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o',  'p', '[', ']',  '\n', 0,   'a',  's',
+    /* 0x20 */ 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', '\'', '`', 0,   '\\', 'z',  'x', 'c',  'v',
+    /* 0x30 */ 'b', 'n', 'm', ',', '.', '/', 0,   '*', 0,    ' ', 0,   0,    0,    0,   0,    0,
+    /* 0x40 */ 0,   0,   0,   0,   0,   0,   0,   0,   0,    0,   0,   0,    0,    0,   0,    0,
+    /* 0x50 */ 0,   0,   0,   0,   0,   0,   0,   0,   0,    0,   0,   0,    0,    0,   0,    0,
+    /* 0x60 */ 0,   0,   0,   0,   0,   0,   0,   0,   0,    0,   0,   0,    0,    0,   0,    0,
+    /* 0x70 */ 0,   0,   0,   0,   0,   0,   0,   0,   0,    0,   0,   0,    0,    0,   0,    0,
+};
+
+constinit const char kKeymapUpper[kKeymapSize] = {
+    /* 0x00 */ 0,   0,   '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '_',  '+', '\b', '\t',
+    /* 0x10 */ 'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', '{', '}', '\n', 0,   'A',  'S',
+    /* 0x20 */ 'D', 'F', 'G', 'H', 'J', 'K', 'L', ':', '"', '~', 0,   '|', 'Z',  'X', 'C',  'V',
+    /* 0x30 */ 'B', 'N', 'M', '<', '>', '?', 0,   '*', 0,   ' ', 0,   0,   0,    0,   0,    0,
+    /* 0x40 */ 0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,    0,   0,    0,
+    /* 0x50 */ 0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,    0,   0,    0,
+    /* 0x60 */ 0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,    0,   0,    0,
+    /* 0x70 */ 0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,    0,   0,    0,
+};
+
+// Translator state is per-driver, not per-reader: any reader that
+// calls Ps2KeyboardReadChar shares the same modifier view. That's
+// the correct model — physical Shift / Caps Lock state is a
+// property of the keyboard, not of any one consumer.
+constinit bool g_shift_held = false;
+constinit bool g_capslock_on = false;
+constinit bool g_extended_pending = false;
+
 void IrqHandler()
 {
     ++g_irqs_seen;
@@ -146,6 +210,79 @@ u8 Ps2KeyboardRead()
     ++g_ring_tail;
     arch::Sti();
     return byte;
+}
+
+char Ps2KeyboardReadChar()
+{
+    // Drain raw scan codes until one resolves to a printable
+    // character; modifier transitions, releases, and unmapped keys
+    // loop back to the next byte rather than being returned as 0.
+    // This keeps the caller loop simple: a non-zero return is
+    // always a real keypress.
+    for (;;)
+    {
+        const u8 sc = Ps2KeyboardRead();
+
+        if (sc == kScanExtendedPrefix)
+        {
+            g_extended_pending = true;
+            continue;
+        }
+
+        const bool released = (sc & kScanBreakBit) != 0;
+        const u8 code = static_cast<u8>(sc & ~kScanBreakBit);
+
+        if (g_extended_pending)
+        {
+            // Extended keys (arrows, right-side modifiers, multimedia)
+            // don't map into the ASCII keymap today. Consume and skip.
+            g_extended_pending = false;
+            continue;
+        }
+
+        // Modifier updates happen on BOTH press and release for shift,
+        // but only on press for caps lock (it toggles a latch).
+        if (code == kScanLShift || code == kScanRShift)
+        {
+            g_shift_held = !released;
+            continue;
+        }
+        if (code == kScanCapsLock)
+        {
+            if (!released)
+            {
+                g_capslock_on = !g_capslock_on;
+            }
+            continue;
+        }
+
+        if (released)
+        {
+            continue; // only emit ASCII on press edges
+        }
+        if (code >= kKeymapSize)
+        {
+            continue; // outside our mapped range (F1..F12 etc.)
+        }
+
+        const char lower = kKeymapLower[code];
+        if (lower == 0)
+        {
+            continue; // explicitly-unmapped slot
+        }
+
+        // Letters toggle on (shift XOR capslock); everything else
+        // respects shift alone. Caps Lock on a digit or punctuation
+        // key does NOT shift it — matches standard PC behaviour.
+        const bool is_letter = (lower >= 'a' && lower <= 'z');
+        const bool use_upper = is_letter ? (g_shift_held != g_capslock_on) : g_shift_held;
+        const char resolved = use_upper ? kKeymapUpper[code] : lower;
+
+        // Upper half of a letter keymap is always populated when the
+        // lower half is; any 0 here would be a keymap table bug.
+        KASSERT(resolved != 0, "drivers/ps2kbd", "keymap inconsistency");
+        return resolved;
+    }
 }
 
 Ps2Stats Ps2KeyboardStats()

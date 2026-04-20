@@ -125,19 +125,21 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     SerialWrite("[boot] Discovering AHCI controller.\n");
     customos::drivers::storage::AhciInit();
 
-    // Keyboard reader thread: blocks on Ps2KeyboardRead, prints each
-    // scan code. First real end-to-end test of the IRQ path: ACPI →
-    // IOAPIC → IDT → dispatcher → IrqHandler → WaitQueueWakeOne →
-    // Schedule → reader wakes in Ps2KeyboardRead → prints. If any link
-    // in that chain is broken, keypresses in QEMU are silently dropped.
+    // Keyboard reader thread: blocks on Ps2KeyboardReadChar, prints
+    // one line per resolved key press. End-to-end path exercised:
+    // ACPI → IOAPIC → IDT → dispatcher → IrqHandler → WaitQueueWakeOne
+    // → Schedule → reader wakes → translator consumes modifier +
+    // release bytes → returns ASCII → prints. If any link in that
+    // chain is broken, keypresses in QEMU are silently dropped.
     auto kbd_reader = [](void*)
     {
         for (;;)
         {
-            const customos::u8 sc = customos::drivers::input::Ps2KeyboardRead();
-            SerialWrite("[kbd] scan=");
-            SerialWriteHex(sc);
-            SerialWrite("\n");
+            const char ch = customos::drivers::input::Ps2KeyboardReadChar();
+            const char buf[2] = {ch, '\0'};
+            SerialWrite("[kbd] char='");
+            SerialWrite(buf);
+            SerialWrite("'\n");
         }
     };
     customos::sched::SchedCreate(kbd_reader, nullptr, "kbd-reader");

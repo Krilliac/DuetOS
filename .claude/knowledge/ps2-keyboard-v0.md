@@ -11,11 +11,20 @@ closure of the full IRQ-driven pipeline: ACPI (MADT IRQ override) →
 IOAPIC (redirection entry) → IDT (stub isr_33) → TrapDispatch (IRQ
 path) → per-vector handler → ring buffer → WaitQueueWakeOne →
 Schedule → reader task resumes. If every link in that chain works,
-typing in QEMU produces `[kbd] scan=0xNN` lines on the serial console.
+typing in QEMU produces `[kbd] char='X'` lines on the serial console
+(or `[kbd] scan=0xNN` if a consumer asks for raw bytes via the lower-
+level API).
 
-Not a finished keyboard subsystem — no scan-code decoding, no modifier
-tracking, no aux (mouse) channel, no typematic configuration. Just
-raw bytes on a wait queue.
+Two levels of access are exposed:
+- `Ps2KeyboardRead()` — raw scan code bytes, lossless.
+- `Ps2KeyboardReadChar()` — US QWERTY scan code set 1 → ASCII
+  translation with LShift / RShift / Caps Lock tracking. Consumes
+  modifier transitions, releases, and 0xE0-prefixed extended keys
+  internally; only returns on a real printable press.
+
+Still not a finished keyboard subsystem — no aux (mouse) channel,
+no typematic configuration, no Ctrl / Alt / Meta chord reporting,
+no KeyEvent stream with modifier bitmaps, no alternate layouts.
 
 ## Context
 

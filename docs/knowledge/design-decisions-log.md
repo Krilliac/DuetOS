@@ -607,6 +607,56 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 024 — PS/2 keyboard: scan code set 1 → ASCII translator + modifier tracking
+
+- **Scope:** `kernel/drivers/input/ps2kbd.{h,cpp}` (adds
+  `Ps2KeyboardReadChar`, keymap tables, modifier state),
+  `kernel/core/main.cpp` (`kbd-reader` task now prints resolved
+  characters instead of raw scan bytes)
+- **Decision:** Layer an in-driver ASCII translator on top of the
+  existing raw byte ring without replacing it. The IRQ path and the
+  raw `Ps2KeyboardRead` API are unchanged — any future consumer that
+  needs set-2 decoding, a debugger-side view, or an alternate keymap
+  keeps access to un-translated bytes. The new `Ps2KeyboardReadChar`
+  drains scan codes in task context, handles break (`0x80 | make`)
+  vs make bytes, tracks LShift / RShift (press + release edges) and
+  Caps Lock (press-to-toggle, release ignored), and consumes
+  0xE0-prefixed extended scans (arrows, right-side mods) silently.
+  Only returns on a real press that resolves to a printable US
+  QWERTY character; letters XOR shift and caps lock, number-row and
+  symbols respect shift alone.
+- **Why:** Entry #014 ("PS/2 keyboard as the first end-to-end IRQ-
+  driven driver") explicitly deferred "scan-code-to-keysym
+  translation, modifier tracking" as a separate slice so the IRQ
+  plumbing commit stayed focused on the pipeline itself. With the
+  pipeline verified, closing that slice is the tractable next step:
+  translator logic is small (~100 lines), has no new dependencies,
+  and upgrades the boot log from "meaningless hex bytes" to "what
+  the user actually typed" — a real diagnostic improvement.
+  Keeping the raw API preserves optionality for a future input
+  layer / compositor event stream that wants modifier bitmaps
+  rather than pre-resolved chars.
+- **Rules out / defers:** Ctrl / Alt / Meta chord reporting (the
+  state isn't tracked yet; would require a new `KeyEvent { char,
+  modifiers }` API rather than a bare `char` return). Extended-key
+  reporting (arrows, Home/End, PageUp/PageDown — all 0xE0-prefixed,
+  all dropped today). Alternate layouts (AZERTY, Dvorak). 8042
+  scan-code-set configuration (we rely on firmware default = set 1
+  with translation enabled). Key-repeat rate tuning. Multi-reader
+  safety on `Ps2KeyboardReadChar` (state is per-driver, not per-
+  reader — two concurrent readers would race on modifier state).
+- **Revisit when:** The first interactive shell lands (needs Ctrl-C,
+  Ctrl-D, arrow keys — promotes the API to `KeyEvent`). A non-US
+  keymap is requested (adds a layout-selection indirection on top
+  of the scan-code → keysym step). USB HID stack lands (HID
+  usages → the same higher-level API, so whatever shape we pick
+  here is reused). Compositor input routing begins (event stream
+  replaces pull-reader model).
+- **Related tracks:** Track 6 (Drivers — input), Track 9 (Windowing
+  — eventual input source for the compositor).
+
+---
+
 ## 023 — Dedicated per-CPU idle task + batched zombie reaping
 
 - **Scope:** `kernel/sched/sched.{h,cpp}` (new `SchedStartIdle`,
