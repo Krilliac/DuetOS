@@ -978,6 +978,68 @@ void CondvarWait(Condvar* cv, Mutex* m)
     MutexLock(m);
 }
 
+bool CondvarWaitTimeout(Condvar* cv, Mutex* m, u64 ticks)
+{
+    KASSERT(cv != nullptr, "sched", "CondvarWaitTimeout null condvar");
+    KASSERT(m != nullptr, "sched", "CondvarWaitTimeout null mutex");
+
+    // Zero ticks: drop the lock, yield, re-acquire — report as
+    // timeout so the caller doesn't treat a missed signal as a
+    // real one.
+    if (ticks == 0)
+    {
+        MutexUnlock(m);
+        SchedYield();
+        MutexLock(m);
+        return false;
+    }
+
+    arch::Cli();
+    if (m->owner != Current())
+    {
+        PanicSched("CondvarWaitTimeout called without the companion mutex held");
+    }
+
+    {
+        sync::SpinLockGuard guard(g_sched_lock);
+
+        // Atomic mutex hand-off (identical to CondvarWait).
+        Task* successor = WaitQueueWakeOneLocked(&m->waiters);
+        m->owner = successor;
+
+        // Enqueue self on condvar's waiters with a deadline, and
+        // also on the sleep queue — the timer path is the second
+        // wake arm, exactly like WaitQueueBlockTimeout.
+        Task* t = Current();
+        t->state = TaskState::Blocked;
+        t->next = nullptr;
+        t->wake_tick = g_tick_now + ticks;
+        t->waiting_on = &cv->waiters;
+        t->wake_by_timeout = false;
+        if (cv->waiters.tail == nullptr)
+        {
+            cv->waiters.head = cv->waiters.tail = t;
+        }
+        else
+        {
+            cv->waiters.tail->next = t;
+            cv->waiters.tail = t;
+        }
+        ++g_tasks_blocked;
+
+        SleepqueueInsert(t);
+        ++g_tasks_sleeping;
+    }
+
+    Schedule();
+    // Woken. Read the timeout flag once — it's only valid for
+    // this one wait and will be overwritten on the next block.
+    const bool timed_out = Current()->wake_by_timeout;
+    arch::Sti();
+    MutexLock(m);
+    return !timed_out;
+}
+
 void CondvarSignal(Condvar* cv)
 {
     KASSERT(cv != nullptr, "sched", "CondvarSignal null condvar");

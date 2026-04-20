@@ -210,6 +210,17 @@ struct Condvar
 /// `while (!condition) CondvarWait(...)` loop, never a plain `if`.
 void CondvarWait(Condvar* cv, Mutex* m);
 
+/// Timed variant — blocks at most `ticks` timer ticks before
+/// resuming. Same atomicity contract as CondvarWait (mutex hand-off
+/// + self-enqueue under a single sched_lock hold), plus also goes
+/// onto the sleep queue. Returns true if woken by an explicit
+/// CondvarSignal / CondvarBroadcast, false if woken by timeout.
+/// `ticks == 0` is a test-and-drop: same as calling Unlock +
+/// Yield + Lock. Re-check your guarded condition after return —
+/// a true return doesn't prove the condition still holds by the
+/// time you re-acquire `m`.
+bool CondvarWaitTimeout(Condvar* cv, Mutex* m, u64 ticks);
+
 /// Wake the single longest-waiting task on `cv`. No-op on empty
 /// queue. Typical pattern is to call this WITH the companion mutex
 /// held — guarantees the signalled waiter sees whatever state
