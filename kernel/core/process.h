@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../fs/ramfs.h"
 #include "../mm/address_space.h"
 #include "types.h"
 
@@ -66,6 +67,13 @@ enum Cap : u32
     // behaviour).
     kCapSerialConsole = 1,
 
+    // Read filesystem metadata (SYS_STAT). Lookup is always
+    // bounded by the process's `root` pointer — even a process
+    // WITH this cap cannot name a node outside its root. The cap
+    // gates the syscall itself, while Process::root gates the
+    // reachable namespace; both layers compose.
+    kCapFsRead = 2,
+
     // Sentinel: keep this as the last entry so kProfileTrusted can
     // be built by a loop that iterates [1 .. kCapCount). Do NOT
     // use kCapCount as a live cap — it's a boundary marker.
@@ -120,6 +128,13 @@ struct Process
     const char* name;
     mm::AddressSpace* as;
     CapSet caps;
+    // Per-process view of the filesystem root. Path resolution
+    // starts here — a process cannot name any node that isn't
+    // reachable from `root`. Trusted processes get the rich
+    // fs::RamfsTrustedRoot(); sandboxed processes get
+    // fs::RamfsSandboxRoot() (which has one file). Never null
+    // for a valid Process.
+    const fs::RamfsNode* root;
     u64 refcount;
 };
 
@@ -127,8 +142,10 @@ struct Process
 /// `as`'s refcount — ProcessCreate assumes the caller hands over
 /// the one reference AddressSpaceCreate returned. On ProcessRelease,
 /// the AS reference is dropped (which tears down the AS if nothing
-/// else holds it). Returns nullptr on kheap failure.
-Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps);
+/// else holds it). `root` MUST be non-null — pick from
+/// fs::RamfsTrustedRoot() / fs::RamfsSandboxRoot() based on the
+/// process's trust level. Returns nullptr on kheap failure.
+Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, const fs::RamfsNode* root);
 
 /// Bump refcount. Use when a second holder appears (a future thread
 /// spawn that shares the process, a borrow into a non-owning table).

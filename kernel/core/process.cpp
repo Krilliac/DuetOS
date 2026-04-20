@@ -21,10 +21,11 @@ constinit u64 g_live_processes = 0;
 
 } // namespace
 
-Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps)
+Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, const fs::RamfsNode* root)
 {
     KASSERT(name != nullptr, "core/process", "ProcessCreate null name");
     KASSERT(as != nullptr, "core/process", "ProcessCreate null as");
+    KASSERT(root != nullptr, "core/process", "ProcessCreate null root");
 
     auto* p = static_cast<Process*>(mm::KMalloc(sizeof(Process)));
     if (p == nullptr)
@@ -36,6 +37,7 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps)
     p->name = name;
     p->as = as;
     p->caps = caps;
+    p->root = root;
     p->refcount = 1;
 
     ++g_live_processes;
@@ -112,6 +114,8 @@ const char* CapName(Cap c)
         return "<none>";
     case kCapSerialConsole:
         return "SerialConsole";
+    case kCapFsRead:
+        return "FsRead";
     case kCapCount:
         return "<sentinel>";
     }

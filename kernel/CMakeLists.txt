@@ -50,6 +50,8 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     drivers/input/ps2kbd.cpp
     drivers/pci/pci.cpp
     drivers/storage/ahci.cpp
+    fs/ramfs.cpp
+    fs/vfs.cpp
     mm/address_space.cpp
     mm/frame_allocator.cpp
     mm/kheap.cpp

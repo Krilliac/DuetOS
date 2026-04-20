@@ -2,6 +2,7 @@
 
 #include "../arch/x86_64/idt.h"
 #include "../arch/x86_64/serial.h"
+#include "../fs/vfs.h"
 #include "../mm/paging.h"
 #include "../sched/sched.h"
 #include "klog.h"
@@ -30,6 +31,11 @@ constexpr u8 kSyscallVector = 0x80;
 // truncated to this length and the returned byte count reflects
 // the truncation — standard POSIX write() semantics.
 constexpr u64 kSyscallWriteMax = 256;
+
+// Cap on path length for SYS_STAT. Same rationale as kSyscallWriteMax:
+// on-kernel-stack bounce buffer, no unbounded copy. 256 bytes is
+// well past anything a sandboxed process should be naming in v0.
+constexpr u64 kSyscallPathMax = 256;
 
 // Pretty-printer for boot diagnostics — the Warn path for an
 // unrecognised syscall number should be noisy enough to catch during
@@ -160,6 +166,81 @@ void SyscallDispatch(arch::TrapFrame* frame)
         // us back in. Returns 0 — reserved for an "I was preempted"
         // boolean later if any consumer cares.
         sched::SchedYield();
+        frame->rax = 0;
+        return;
+    }
+
+    case SYS_STAT:
+    {
+        // rdi = user pointer to NUL-terminated path.
+        // rsi = user pointer to u64 output slot (receives file size).
+        // Returns 0 on success, -1 on any failure.
+        //
+        // Cap check first — a process without kCapFsRead can't even
+        // ATTEMPT a lookup. Denial is logged for auditability,
+        // identical format to SYS_WRITE.
+        Process* proc = CurrentProcess();
+        if (proc == nullptr || !CapSetHas(proc->caps, kCapFsRead))
+        {
+            const u64 pid = (proc != nullptr) ? proc->pid : 0;
+            arch::SerialWrite("[sys] denied syscall=SYS_STAT pid=");
+            arch::SerialWriteHex(pid);
+            arch::SerialWrite(" cap=");
+            arch::SerialWrite(CapName(kCapFsRead));
+            arch::SerialWrite("\n");
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+
+        // Bounce the user path onto the kernel stack. CopyFromUser
+        // validates pointer range + walks the active AS's PML4
+        // (cap + namespace jail compose on top of that: even after
+        // copy, lookup is bounded by proc->root).
+        char kpath[kSyscallPathMax];
+        if (!mm::CopyFromUser(kpath, reinterpret_cast<const void*>(frame->rdi), kSyscallPathMax))
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        // Ensure terminal NUL within the buffer — a user pointer
+        // to an unterminated buffer would let VfsLookup wander;
+        // force-terminate at kSyscallPathMax - 1.
+        kpath[kSyscallPathMax - 1] = '\0';
+
+        const fs::RamfsNode* n = fs::VfsLookup(proc->root, kpath, kSyscallPathMax);
+        if (n == nullptr)
+        {
+            // Lookup miss. Could be: component not found, ".." hit
+            // (jail-escape attempt), or a walk-through-file. All
+            // surface as -1 to ring 3; the log line says which
+            // process tried what, without leaking structure of
+            // what exists vs. what's blocked.
+            arch::SerialWrite("[fs] stat miss pid=");
+            arch::SerialWriteHex(proc->pid);
+            arch::SerialWrite(" path=\"");
+            arch::SerialWrite(kpath);
+            arch::SerialWrite("\"\n");
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+
+        // Hit. Write the file size back to the user's output slot.
+        // Directories report size=0 — the existence alone is the
+        // answer the caller needed.
+        const u64 size = (n->type == fs::RamfsNodeType::kFile) ? n->file_size : 0;
+        if (!mm::CopyToUser(reinterpret_cast<void*>(frame->rsi), &size, sizeof(size)))
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+
+        arch::SerialWrite("[fs] stat ok pid=");
+        arch::SerialWriteHex(proc->pid);
+        arch::SerialWrite(" path=\"");
+        arch::SerialWrite(kpath);
+        arch::SerialWrite("\" size=");
+        arch::SerialWriteHex(size);
+        arch::SerialWrite("\n");
         frame->rax = 0;
         return;
     }

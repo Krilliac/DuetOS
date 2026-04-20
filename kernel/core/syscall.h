@@ -37,6 +37,13 @@ enum SyscallNumber : u64
     SYS_GETPID = 1,
     SYS_WRITE = 2,
     SYS_YIELD = 3,
+    // SYS_STAT: rdi = user pointer to NUL-terminated path, rsi = user
+    // pointer to a u64 output slot that receives the file size.
+    // Returns 0 on success, -1 on any failure (path not found, path
+    // out of jail, bad user pointer, or cap missing). Gated on
+    // kCapFsRead. Path lookup is anchored at CurrentProcess()->root
+    // — a sandboxed process's namespace is its subtree only.
+    SYS_STAT = 4,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit

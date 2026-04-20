@@ -3,6 +3,7 @@
 #include "../arch/x86_64/gdt.h"
 #include "../arch/x86_64/serial.h"
 #include "../arch/x86_64/usermode.h"
+#include "../fs/ramfs.h"
 #include "../mm/address_space.h"
 #include "../mm/frame_allocator.h"
 #include "../mm/page.h"
@@ -133,7 +134,7 @@ void WriteUserCodeFrame(mm::PhysAddr frame)
 // Process with the caller-supplied cap set, hand the Process to a
 // new task. The reaper's ProcessRelease tears everything down at
 // task death.
-void SpawnRing3Task(const char* name, CapSet caps)
+void SpawnRing3Task(const char* name, CapSet caps, const fs::RamfsNode* root)
 {
     using arch::SerialWrite;
     using arch::SerialWriteHex;
@@ -165,7 +166,7 @@ void SpawnRing3Task(const char* name, CapSet caps)
     AddressSpaceMapUserPage(as, kUserCodeVirt, code_frame, kPagePresent | kPageUser);
     AddressSpaceMapUserPage(as, kUserStackVirt, stack_frame, kPagePresent | kPageWritable | kPageUser | kPageNoExecute);
 
-    Process* proc = ProcessCreate(name, as, caps);
+    Process* proc = ProcessCreate(name, as, caps, root);
     if (proc == nullptr)
     {
         Panic("core/ring3", "ProcessCreate failed");
@@ -212,9 +213,20 @@ void StartRing3SmokeTask()
     //     serial console even though it shares the int 0x80 gate
     //     with trusted processes — the gate is open, the caps
     //     aren't.
-    SpawnRing3Task("ring3-smoke-A", CapSetTrusted());
-    SpawnRing3Task("ring3-smoke-B", CapSetTrusted());
-    SpawnRing3Task("ring3-smoke-sandbox", CapSetEmpty());
+    // Trusted tasks run off the rich ramfs root (/etc/version,
+    // /bin/hello reachable). Their SYS_WRITE ⇒ "Hello from ring 3!"
+    // succeeds because they hold kCapSerialConsole.
+    //
+    // Sandbox task runs off the one-file root (only
+    // /welcome.txt exists there). It holds ZERO caps, so:
+    //   - SYS_WRITE is denied by the cap check.
+    //   - SYS_STAT would be denied too, if the user payload
+    //     issued one (today's payload doesn't — the next bite
+    //     adds per-task payloads so the sandbox actively tries
+    //     a jail-escape and gets logged).
+    SpawnRing3Task("ring3-smoke-A", CapSetTrusted(), fs::RamfsTrustedRoot());
+    SpawnRing3Task("ring3-smoke-B", CapSetTrusted(), fs::RamfsTrustedRoot());
+    SpawnRing3Task("ring3-smoke-sandbox", CapSetEmpty(), fs::RamfsSandboxRoot());
     Log(LogLevel::Info, "core/ring3", "two trusted + one sandboxed ring3 smoke tasks queued");
 }
 

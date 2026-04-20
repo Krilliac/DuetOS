@@ -14,6 +14,8 @@
 #include "../drivers/input/ps2kbd.h"
 #include "../drivers/pci/pci.h"
 #include "../drivers/storage/ahci.h"
+#include "../fs/ramfs.h"
+#include "../fs/vfs.h"
 #include "../mm/frame_allocator.h"
 #include "../sync/spinlock.h"
 #include "heartbeat.h"
@@ -97,6 +99,38 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     SerialWrite("[boot] Bringing up paging.\n");
     PagingInit();
     PagingSelfTest();
+
+    SerialWrite("[boot] Seeding ramfs + VFS self-test.\n");
+    customos::fs::RamfsInit();
+    {
+        using namespace customos::fs;
+        const RamfsNode* trusted = RamfsTrustedRoot();
+        const RamfsNode* sandbox = RamfsSandboxRoot();
+
+        // Positive lookups against the trusted tree. Trailing slash,
+        // leading slash, empty-component runs — all tolerated.
+        if (VfsLookup(trusted, "/etc/version", 64) == nullptr)
+            customos::core::Panic("fs/vfs", "self-test: /etc/version missing from trusted root");
+        if (VfsLookup(trusted, "/bin/hello", 64) == nullptr)
+            customos::core::Panic("fs/vfs", "self-test: /bin/hello missing from trusted root");
+        if (VfsLookup(trusted, "//etc//version", 64) == nullptr)
+            customos::core::Panic("fs/vfs", "self-test: double-slash tolerance broken");
+
+        // The sandbox root has exactly one file; its lookup must
+        // succeed, and the trusted-only paths must fail.
+        if (VfsLookup(sandbox, "/welcome.txt", 64) == nullptr)
+            customos::core::Panic("fs/vfs", "self-test: /welcome.txt missing from sandbox root");
+        if (VfsLookup(sandbox, "/etc/version", 64) != nullptr)
+            customos::core::Panic("fs/vfs", "self-test: JAIL BROKEN — sandbox saw trusted /etc/version");
+        if (VfsLookup(sandbox, "/bin/hello", 64) != nullptr)
+            customos::core::Panic("fs/vfs", "self-test: JAIL BROKEN — sandbox saw trusted /bin/hello");
+
+        // ".." is rejected outright.
+        if (VfsLookup(trusted, "/etc/..", 64) != nullptr)
+            customos::core::Panic("fs/vfs", "self-test: .. accepted (would break jails)");
+
+        SerialWrite("[fs/vfs] self-test OK\n");
+    }
 
     SerialWrite("[boot] Parsing ACPI tables.\n");
     customos::acpi::AcpiInit(multiboot_info);
