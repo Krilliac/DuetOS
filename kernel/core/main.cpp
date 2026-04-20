@@ -15,6 +15,7 @@
 #include "../drivers/input/ps2mouse.h"
 #include "../drivers/pci/pci.h"
 #include "../drivers/storage/ahci.h"
+#include "../drivers/video/cursor.h"
 #include "../drivers/video/framebuffer.h"
 #include "../fs/ramfs.h"
 #include "../fs/vfs.h"
@@ -139,6 +140,14 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     customos::drivers::video::FramebufferInit(multiboot_info);
     customos::drivers::video::FramebufferSelfTest();
 
+    // Paint a "desktop" background and render the initial cursor
+    // sprite. Kept as a solid colour in v0 — the mouse reader
+    // thread below drives CursorMove on every packet to produce
+    // the first visible interactive UI element: a pointer that
+    // tracks the mouse end-to-end from IRQ-12 to pixel.
+    constexpr customos::u32 kDesktopTeal = 0x00204868;
+    customos::drivers::video::CursorInit(kDesktopTeal);
+
     SerialWrite("[boot] Seeding ramfs + VFS self-test.\n");
     customos::fs::RamfsInit();
     {
@@ -254,6 +263,10 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
         for (;;)
         {
             const auto p = customos::drivers::input::Ps2MouseReadPacket();
+            // Drive the on-screen cursor. When the framebuffer isn't
+            // available, CursorMove is a silent no-op — the log line
+            // below still prints so IRQ-12 health is visible.
+            customos::drivers::video::CursorMove(p.dx, p.dy);
             SerialWrite("[mouse] dx=");
             SerialWriteHex(static_cast<customos::u64>(p.dx));
             SerialWrite(" dy=");
