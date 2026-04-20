@@ -100,6 +100,18 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     SerialWrite("[boot] Bringing up paging.\n");
     PagingInit();
     PagingSelfTest();
+    // Kernel-image W^X / DEP — split the 2 MiB PS direct map covering
+    // the kernel image into 4 KiB pages, then apply per-section flags:
+    //   .text  → R + X   (writes to .text now #PF)
+    //   .rodata → R      (writes or execution from .rodata now #PF)
+    //   .data/.bss → R + W (execution from .data/.bss now #PF)
+    //
+    // MUST run AFTER PagingInit adopted the boot PML4 + enabled
+    // EFER.NXE, and BEFORE anything else needs .rodata strings. No
+    // subsystem below this point should be writing to .text; if any
+    // of them does, the fault will fire here at boot rather than
+    // corrupt code silently later.
+    ProtectKernelImage();
 
     SerialWrite("[boot] Seeding ramfs + VFS self-test.\n");
     customos::fs::RamfsInit();

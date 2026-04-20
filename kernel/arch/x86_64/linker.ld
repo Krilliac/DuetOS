@@ -74,26 +74,38 @@ SECTIONS
     . = ALIGN(4K);
     . += KERNEL_VIRTUAL_BASE;
 
+    _text_start = .;
     .text : AT(ADDR(.text) - KERNEL_VIRTUAL_BASE) ALIGN(4K)
     {
         *(.text .text.*)
     }
+    . = ALIGN(4K);
+    _text_end = .;
 
+    _rodata_start = .;
     .rodata : AT(ADDR(.rodata) - KERNEL_VIRTUAL_BASE) ALIGN(4K)
     {
         *(.rodata .rodata.*)
     }
+    . = ALIGN(4K);
+    _rodata_end = .;
 
+    _data_start = .;
     .data : AT(ADDR(.data) - KERNEL_VIRTUAL_BASE) ALIGN(4K)
     {
         *(.data .data.*)
     }
+    . = ALIGN(4K);
+    _data_end = .;
 
+    _bss_start = .;
     .bss : AT(ADDR(.bss) - KERNEL_VIRTUAL_BASE) ALIGN(4K)
     {
         *(COMMON)
         *(.bss .bss.*)
     }
+    . = ALIGN(4K);
+    _bss_end = .;
 
     . = ALIGN(4K);
     _kernel_end_virt  = .;

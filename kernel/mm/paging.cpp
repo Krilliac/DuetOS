@@ -539,6 +539,176 @@ PhysAddr BootPml4Phys()
     return VirtToPhys(g_pml4);
 }
 
+// ---------------------------------------------------------------------------
+// Kernel-image W^X — split PS-mapped direct map into 4 KiB pages.
+// ---------------------------------------------------------------------------
+//
+// boot.S installs the first 1 GiB of physical memory into the kernel's
+// higher half as 2 MiB PS-mapped pages. Every kernel byte (.text,
+// .rodata, .data, .bss) thus gets R + W + X by default. ProtectKernelImage
+// below walks the four kernel sections, splits each 2 MiB PS page that
+// covers a section boundary or interior, then rewrites the per-4 KiB
+// PTE flags to match the section's intended protection.
+
+extern "C" u8 _text_start[];
+extern "C" u8 _text_end[];
+extern "C" u8 _rodata_start[];
+extern "C" u8 _rodata_end[];
+extern "C" u8 _data_start[];
+extern "C" u8 _data_end[];
+extern "C" u8 _bss_start[];
+extern "C" u8 _bss_end[];
+
+namespace
+{
+
+// Bring the arch::SerialWrite / SerialWriteHex names into scope for
+// this anon namespace — paging.cpp's original anon block does the
+// same via its own `using arch::...` directives, but those are
+// confined to that block.
+using arch::SerialWrite;
+using arch::SerialWriteHex;
+
+// Split the 2 MiB PS page covering `virt_2m_aligned` into 512 4 KiB
+// PTEs. `virt_2m_aligned` must be the 2 MiB-aligned base of the PS
+// region; the function is a no-op if the PD entry is already a
+// pointer to a PT (not a PS page). Preserves the original PS
+// entry's physical base and common flags (P/W/U — the PS bit
+// itself is dropped since the new entry is a PT pointer).
+void SplitPsPage(u64 virt_2m_aligned)
+{
+    const u64 i4 = IndexPml4(virt_2m_aligned);
+    const u64 i3 = IndexPdpt(virt_2m_aligned);
+    const u64 i2 = IndexPd(virt_2m_aligned);
+
+    u64& pml4_entry = g_pml4[i4];
+    if ((pml4_entry & kPagePresent) == 0)
+    {
+        PanicPaging("SplitPsPage: PML4 entry not present", virt_2m_aligned);
+    }
+    auto* pdpt = static_cast<u64*>(PhysToVirt(pml4_entry & kAddrMask));
+
+    u64& pdpt_entry = pdpt[i3];
+    if ((pdpt_entry & kPagePresent) == 0)
+    {
+        PanicPaging("SplitPsPage: PDPT entry not present", virt_2m_aligned);
+    }
+    if (pdpt_entry & kPageHugeOrPat)
+    {
+        PanicPaging("SplitPsPage: 1 GiB PS page at PDPT level (unsupported)", virt_2m_aligned);
+    }
+    auto* pd = static_cast<u64*>(PhysToVirt(pdpt_entry & kAddrMask));
+
+    u64 pd_entry = pd[i2];
+    if ((pd_entry & kPagePresent) == 0)
+    {
+        PanicPaging("SplitPsPage: PD entry not present", virt_2m_aligned);
+    }
+    if ((pd_entry & kPageHugeOrPat) == 0)
+    {
+        return; // already a PT pointer — nothing to split
+    }
+
+    // Preserve the PS page's physical base + per-entry flag bits
+    // that carry over to 4 KiB entries (P/W/U/WT/CD/A/D/G/NX). The
+    // PS bit itself is in a different slot on a PTE (it's the PAT
+    // bit), so we explicitly clear the PS bit and let each 4 KiB
+    // entry inherit only the common flags.
+    const u64 ps_phys_base = pd_entry & 0x000FFFFFFFE00000ULL; // 2 MiB-aligned
+    const u64 ps_flags = pd_entry & ~(0x000FFFFFFFE00000ULL | kPageHugeOrPat);
+
+    u64* new_pt = AllocateTable();
+    for (u64 i = 0; i < kEntriesPerTable; ++i)
+    {
+        new_pt[i] = (ps_phys_base + i * kPageSize) | ps_flags | kPagePresent;
+    }
+
+    const PhysAddr pt_phys = VirtToPhys(new_pt);
+    // Install the new PT pointer with PERMISSIVE flags at the PD
+    // level: the CPU AND-combines each level's W bit and OR-combines
+    // each level's NX bit during a walk. Setting NX=1 or W=0 on the
+    // PD pointer would restrict every leaf under it regardless of
+    // the leaf PTE's own flags — so for .text to stay executable
+    // AND .data/.bss to stay writable through the same PD, the PD
+    // pointer must have W=1 and NX=0. The per-4 KiB PTE rewrite in
+    // SetPteFlags4K is what actually enforces W^X at leaf granularity.
+    pd[i2] = pt_phys | kPagePresent | kPageWritable;
+
+    // Flush every 4 KiB entry the split covers so the CPU can't
+    // keep using the cached 2 MiB TLB entry.
+    for (u64 off = 0; off < 2ULL * 1024 * 1024; off += kPageSize)
+    {
+        Invlpg(virt_2m_aligned + off);
+    }
+}
+
+// Overwrite the PTE flags for one 4 KiB page (keeping the physical
+// base). Splits the parent 2 MiB PS if necessary. Panics if the
+// page isn't mapped yet — we don't create mappings here, only
+// adjust flags on existing ones.
+void SetPteFlags4K(u64 virt, u64 new_flags)
+{
+    if ((virt & kPageMask) != 0)
+    {
+        PanicPaging("SetPteFlags4K: unaligned virt", virt);
+    }
+    const u64 ps_base = virt & ~0x1FFFFFULL; // 2 MiB-aligned
+    SplitPsPage(ps_base);
+
+    u64* pte = WalkToPte(g_pml4, virt, /*create=*/false);
+    if (pte == nullptr || (*pte & kPagePresent) == 0)
+    {
+        PanicPaging("SetPteFlags4K: page not mapped", virt);
+    }
+    const u64 phys = *pte & kAddrMask;
+    *pte = phys | (new_flags | kPagePresent);
+    Invlpg(virt);
+}
+
+// Apply `flags` to every 4 KiB page in [va_start, va_end). Both
+// addresses must be 4 KiB-aligned on entry; the linker script uses
+// ALIGN(4K) after every section to ensure this.
+void ProtectRange(u64 va_start, u64 va_end, u64 flags, const char* name)
+{
+    if (va_start >= va_end)
+    {
+        return;
+    }
+    SerialWrite("[mm/paging] protecting ");
+    SerialWrite(name);
+    SerialWrite(" [");
+    SerialWriteHex(va_start);
+    SerialWrite(" .. ");
+    SerialWriteHex(va_end);
+    SerialWrite(") flags=");
+    SerialWriteHex(flags);
+    SerialWrite("\n");
+
+    for (u64 v = va_start; v < va_end; v += kPageSize)
+    {
+        SetPteFlags4K(v, flags);
+    }
+}
+
+} // namespace
+
+void ProtectKernelImage()
+{
+    // Flags for each section. .text is RO + executable; everything
+    // else gets NX. .rodata stays non-writable too (constants); .data
+    // and .bss are writable scratch/state for the kernel.
+    constexpr u64 kText = kPagePresent;                                      // R + X
+    constexpr u64 kRodata = kPagePresent | kPageNoExecute;                   // R
+    constexpr u64 kDataBss = kPagePresent | kPageWritable | kPageNoExecute;  // R + W
+
+    ProtectRange(reinterpret_cast<u64>(_text_start), reinterpret_cast<u64>(_text_end), kText, ".text");
+    ProtectRange(reinterpret_cast<u64>(_rodata_start), reinterpret_cast<u64>(_rodata_end), kRodata, ".rodata");
+    ProtectRange(reinterpret_cast<u64>(_data_start), reinterpret_cast<u64>(_data_end), kDataBss, ".data");
+    ProtectRange(reinterpret_cast<u64>(_bss_start), reinterpret_cast<u64>(_bss_end), kDataBss, ".bss");
+
+    arch::SerialWrite("[mm/paging] kernel image W^X applied\n");
+}
+
 PagingStats PagingStatsRead()
 {
     return PagingStats{
