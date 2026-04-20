@@ -31,8 +31,34 @@ using arch::SerialWriteHex;
 constexpr u16 kDataPort = 0x60;
 constexpr u16 kStatusPort = 0x64;
 
-// Status register bit 0 = output buffer full (data waiting to be read).
-constexpr u8 kStatusOutputFull = 1U << 0;
+// Status register bits.
+constexpr u8 kStatusOutputFull = 1U << 0; // data waiting in 0x60
+constexpr u8 kStatusInputFull = 1U << 1;  // 0x60 / 0x64 busy — do not write
+
+// Controller commands issued via 0x64.
+constexpr u8 kCmdReadConfig = 0x20;
+constexpr u8 kCmdWriteConfig = 0x60;
+constexpr u8 kCmdDisablePort2 = 0xA7;
+constexpr u8 kCmdTestPort1 = 0xAB;
+constexpr u8 kCmdDisablePort1 = 0xAD;
+constexpr u8 kCmdEnablePort1 = 0xAE;
+constexpr u8 kCmdSelfTest = 0xAA;
+
+// Response bytes.
+constexpr u8 kResponseSelfTestPass = 0x55;
+constexpr u8 kResponseTestPort1Pass = 0x00;
+
+// Configuration byte bits (Wired-OR on the 8042's internal RAM[0]).
+constexpr u8 kConfigPort1IrqEnable = 1U << 0;
+constexpr u8 kConfigPort2IrqEnable = 1U << 1;
+constexpr u8 kConfigPort1ClockDisable = 1U << 4;
+
+// Bounded spin count for controller-response polling. 1M reads is
+// ~tens of milliseconds on a modern CPU — well past any legitimate
+// 8042 turnaround. Hitting it means the controller is wedged, and
+// the right recovery is to panic loudly (Class A: kernel integrity
+// depends on a working keyboard path).
+constexpr u64 kPollSpinLimit = 1'000'000;
 
 // ISA IRQ 1 = keyboard. The MADT may remap it to a different GSI, so
 // always consult `acpi::IsaIrqToGsi(1)` rather than assuming identity.
@@ -122,6 +148,133 @@ constinit bool g_shift_held = false;
 constinit bool g_capslock_on = false;
 constinit bool g_extended_pending = false;
 
+// ---------------------------------------------------------------------------
+// 8042 initialization sequence.
+//
+// Reference: OSDev wiki "8042 PS/2 Controller" + IBM AT Technical
+// Reference. Panics on any hard failure (self-test mismatch, spin
+// timeout) — the keyboard is on the critical path for an interactive
+// console, and silently limping forward hides firmware bugs we'd
+// rather see immediately.
+// ---------------------------------------------------------------------------
+
+void WaitInputClear()
+{
+    // Controller is ready to accept a command/data byte when bit 1 of
+    // the status register clears. Without this wait, a rapid-fire write
+    // sequence can drop bytes on slow firmware.
+    for (u64 i = 0; i < kPollSpinLimit; ++i)
+    {
+        if ((Inb(kStatusPort) & kStatusInputFull) == 0)
+        {
+            return;
+        }
+    }
+    core::Panic("drivers/ps2kbd", "8042 input buffer never cleared");
+}
+
+u8 WaitOutputFull()
+{
+    // Wait for a response byte to be available and return it. Panics
+    // on timeout — a wedged 8042 during init means the PS/2 driver
+    // is unusable, and Class A halt is the right posture.
+    for (u64 i = 0; i < kPollSpinLimit; ++i)
+    {
+        if ((Inb(kStatusPort) & kStatusOutputFull) != 0)
+        {
+            return Inb(kDataPort);
+        }
+    }
+    core::Panic("drivers/ps2kbd", "8042 output buffer never filled");
+}
+
+void SendCtrlCmd(u8 cmd)
+{
+    WaitInputClear();
+    Outb(kStatusPort, cmd);
+}
+
+void SendCtrlData(u8 data)
+{
+    WaitInputClear();
+    Outb(kDataPort, data);
+}
+
+u8 ReadConfigByte()
+{
+    SendCtrlCmd(kCmdReadConfig);
+    return WaitOutputFull();
+}
+
+void WriteConfigByte(u8 value)
+{
+    SendCtrlCmd(kCmdWriteConfig);
+    SendCtrlData(value);
+}
+
+void Drain()
+{
+    while ((Inb(kStatusPort) & kStatusOutputFull) != 0)
+    {
+        (void)Inb(kDataPort);
+    }
+}
+
+void ControllerInit()
+{
+    // Step 1: disable both channels so no IRQ fires mid-configuration.
+    // Port 2 disable is safe even on controllers that have no aux
+    // channel — the command is a no-op in that case.
+    SendCtrlCmd(kCmdDisablePort1);
+    SendCtrlCmd(kCmdDisablePort2);
+
+    // Step 2: flush any stale byte the firmware / bootloader produced.
+    Drain();
+
+    // Step 3: pull the current config byte, turn OFF both IRQ enables
+    // (we'll re-enable port 1 last), and leave translation whatever
+    // firmware set it to — our scan-code translator expects set 1 +
+    // translation on, which is the PC-AT default every BIOS honours.
+    u8 config = ReadConfigByte();
+    config = static_cast<u8>(config & ~(kConfigPort1IrqEnable | kConfigPort2IrqEnable));
+    WriteConfigByte(config);
+
+    // Step 4: controller self-test. Some buggy firmware resets the
+    // config byte on this command, so re-write it after.
+    SendCtrlCmd(kCmdSelfTest);
+    const u8 self_test = WaitOutputFull();
+    if (self_test != kResponseSelfTestPass)
+    {
+        core::PanicWithValue("drivers/ps2kbd", "8042 self-test failed", self_test);
+    }
+    WriteConfigByte(config);
+
+    // Step 5: port 1 interface test. Zero = pass; anything else is a
+    // clock/data line fault. Log and continue — QEMU always reports
+    // pass, and on real hardware we'd rather try the keyboard anyway
+    // than refuse to boot on a controller quirk.
+    SendCtrlCmd(kCmdTestPort1);
+    const u8 port1_test = WaitOutputFull();
+    if (port1_test != kResponseTestPort1Pass)
+    {
+        core::LogWithValue(core::LogLevel::Warn, "drivers/ps2kbd", "port-1 self-test failed", port1_test);
+    }
+
+    // Step 6: enable port 1, then turn on its IRQ + ensure the clock
+    // line is active. The keyboard will start sending scan codes on
+    // any keypress from this point forward.
+    SendCtrlCmd(kCmdEnablePort1);
+    config |= kConfigPort1IrqEnable;
+    config = static_cast<u8>(config & ~kConfigPort1ClockDisable);
+    WriteConfigByte(config);
+
+    // Step 7: final drain — enabling IRQs can latch a pending byte
+    // on some firmware; clear it before we unmask at the IOAPIC.
+    Drain();
+
+    core::Log(core::LogLevel::Info, "drivers/ps2kbd", "8042 controller initialised");
+}
+
 void IrqHandler()
 {
     ++g_irqs_seen;
@@ -166,14 +319,14 @@ void Ps2KeyboardInit()
     KASSERT(!s_initialised, "drivers/ps2kbd", "Ps2KeyboardInit called twice");
     s_initialised = true;
 
-    // Drain any leftover bytes the firmware / bootloader produced. Any
-    // key presses during GRUB (arrow-key navigation in the menu!) land
-    // in the 8042 output buffer and would fire a stale IRQ right after
-    // we unmask. Reading them here keeps the post-init log clean.
-    while ((Inb(kStatusPort) & kStatusOutputFull) != 0)
-    {
-        (void)Inb(kDataPort);
-    }
+    // Full 8042 bring-up: disable both channels, flush stale data,
+    // self-test the controller, enable port 1 + its IRQ. Leaves the
+    // controller in a known-good state regardless of what the BIOS
+    // did before we ran. Any failure panics inside ControllerInit
+    // with a tagged value — the keyboard path is on the critical
+    // path for an interactive console, so silent degradation is
+    // worse than halting.
+    ControllerInit();
 
     // Install the handler in BOTH tables: the low-level IDT stub for
     // vector 0x21, and the IRQ dispatcher's per-vector slot. The IDT
