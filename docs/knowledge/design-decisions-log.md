@@ -607,6 +607,86 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 045 — First syscall gate: int 0x80 (DPL=3) + SYS_exit
+
+- **Scope:** `kernel/arch/x86_64/exceptions.S` (new `ISR_NOERR 128`
+  stub reaching `isr_common`), `kernel/arch/x86_64/idt.{h,cpp}`
+  (new `IdtSetUserGate` — DPL=3 interrupt-gate installer),
+  `kernel/arch/x86_64/traps.cpp` (TrapDispatch branch for
+  `frame->vector == 0x80` → `core::SyscallDispatch` before the
+  exception fallback), `kernel/core/syscall.{h,cpp}` (new module:
+  `SyscallNumber::SYS_EXIT`, `SyscallInit`, `SyscallDispatch`),
+  wiring in `kernel/core/main.cpp`, payload update in
+  `kernel/core/ring3_smoke.cpp`.
+- **Decision:** Land the minimum usable user→kernel ABI. A single
+  vector (0x80) via legacy `int N` (not SYSCALL/SYSRET), installed
+  with a DPL=3 interrupt gate so ring-3 code can issue the int
+  without #GP'ing on the privilege check. Calling convention v0:
+  syscall number in rax, args in rdi / rsi / rdx, return value
+  written back into `frame->rax`. Exactly one syscall today —
+  `SYS_EXIT = 0` — which calls `sched::SchedExit` from inside the
+  dispatcher; that function is `[[noreturn]]`, so the trap frame
+  on the dying task's kernel stack is simply abandoned and the
+  reaper eventually KFrees both the stack and the Task struct.
+  Unknown syscall numbers log at Warn and write `-1` into
+  `frame->rax` — the ABI promise is that a bad number is a
+  recoverable error from the caller's point of view, not a task
+  kill. The ring-3 smoke payload grew from 4 bytes to 13: four
+  `pause` iterations (so the 100 Hz timer actually preempts us at
+  least once before exit) followed by `xor eax,eax; xor edi,edi;
+  int 0x80; hlt` — the trailing `hlt` is unreachable on the happy
+  path and a clean #GP signal on the unhappy one.
+- **Why:** Entry #044 landed ring 3 as a one-way door — the smoke
+  task had no way to exit, which meant any attempt to restart the
+  scenario required a full reboot and left a zombie-ish ring-3
+  task pinned forever. Landing the gate now closes that loop AND
+  validates the full round-trip: user → `int 0x80` → hardware
+  delivers onto RSP0 → isr_common → TrapDispatch → SyscallDispatch
+  → SchedExit → reaper. Every link in that chain becomes
+  regression-testable. SYS_EXIT is deliberately the first syscall
+  because it's the one syscall whose return semantics are trivially
+  "no return" — it avoids the entire "write frame->rax then iretq"
+  half of the ABI on the first slice. The second syscall (future
+  `write`/`log` or `getpid`) will exercise the return-value path.
+- **Rules out / defers:** SYSCALL/SYSRET (needs STAR/LSTAR/SFMASK
+  MSR plumbing + a FRED-or-classic entry stub; `int 0x80` is ~30×
+  slower than SYSCALL but "good enough" while exactly one
+  consumer exists). A proper syscall ABI document (names, numbers,
+  argument types, errno-style return convention) — deferred until
+  the 3rd-or-4th syscall when the pattern stabilises. Copy-from /
+  copy-to-user helpers with SMAP + fault-tolerant user-pointer
+  validation — no syscall today takes a pointer argument.
+  Argument clobber rules (which regs SYSCALL-v1 trashes, which
+  ones it preserves) — documented with the MSR-based path, not
+  here. Interrupted-syscall restart (EINTR semantics) — no signal
+  delivery yet, so the question doesn't arise. Syscall entry
+  tracing (an LTTng-ish ring buffer of (task, num, args, retval,
+  duration)) — belongs to observability track, not gate v0.
+  Per-process syscall filters (seccomp-bpf-style) — security
+  track, after the policy engine lands. fork/exec/wait — the
+  whole process-lifecycle triad depends on per-process address
+  spaces, which still don't exist. Batch syscalls / iovec-style
+  `writev` — YAGNI.
+- **Revisit when:** First syscall with a return value lands —
+  verify `frame->rax = retval; return;` round-trips correctly
+  through iretq. First syscall with a pointer argument —
+  introduce `copy_from_user` / `copy_to_user` behind SMAP, plus
+  the #PF-in-copy recovery path. First signal delivery or
+  cancellation — EINTR semantics need picking. SYSCALL/SYSRET
+  performance work is wanted — migrate the gate; leave `int 0x80`
+  as a compat path until it can be deprecated with a clear
+  consumer count. Second ring-3 task exists — TSS.rsp0 has to
+  move into scheduler switch-in (already called out in #044 but
+  now actually load-bearing for syscall correctness, since every
+  syscall lands on RSP0).
+- **Related tracks:** Track 4 (Process model — user→kernel ABI
+  is the foundation every process op sits on top of), Track 11
+  (Win32 subsystem — NT syscalls eventually descend from the
+  same gate machinery), Track 13 (Security — syscall filtering
+  and the policy engine will graft onto this dispatch point).
+
+---
+
 ## 044 — First ring-3 slice: GDT user segments + iretq entry + smoke task
 
 - **Scope:** `kernel/arch/x86_64/gdt.{h,cpp}` (DPL=3 user code

@@ -27,10 +27,10 @@ syscalls or per-process address spaces:
   loads SS/CS from the frame.
 - **`customos::core::StartRing3SmokeTask()`** spawns a dedicated
   scheduler thread that maps a user code page + user stack page,
-  publishes RSP0, and iretq's into ring 3. The user payload is
-  four bytes: `F3 90 EB FC` (`pause; jmp short -4`) — no
-  privileged instructions, no memory references, interruptible,
-  infinite.
+  publishes RSP0, and iretq's into ring 3. The user payload was
+  originally four bytes (`pause; jmp short -4`); it is now 13
+  bytes — four `pause` iterations followed by `SYS_EXIT` via
+  `int 0x80`. See the syscall-slice follow-up below.
 
 ## Chosen VA layout
 
@@ -75,11 +75,32 @@ smoke task prints its chosen addresses before iretq'ing:
   kernel-stack top on every context switch into a user-mode-
   capable task).
 
-## Deliberately deferred
+## Follow-up slice (2026-04-20, same session) — syscall gate v0
 
-- SYSCALL / SYSRET: requires STAR / LSTAR / SFMASK MSRs + a
-  syscall entry stub. `int 0x80` gate: requires a DPL=3 IDT gate
-  and a handler that consumes a trap frame.
+`int 0x80` with a DPL=3 interrupt gate is now online:
+
+- `exceptions.S` got an `ISR_NOERR 128` stub; the usual
+  `isr_common` path carries the trap frame to `TrapDispatch`.
+- `arch::IdtSetUserGate(vec, handler)` installs a `0xEE`
+  (P=1, DPL=3, type=0xE) descriptor. `SyscallInit` uses it to
+  wire vector 0x80 → `isr_128`.
+- `TrapDispatch` branches on `frame->vector == 0x80` before the
+  exception fallback and calls `core::SyscallDispatch(frame)`.
+- Calling convention: syscall number in rax, args in rdi/rsi/rdx,
+  return value written into `frame->rax` (iretq delivers it).
+- v0 catalogue: `SYS_EXIT = 0` → `sched::SchedExit()`. Unknown
+  numbers log Warn and return `-1` in rax.
+
+The ring-3 smoke payload now ends with `xor eax,eax; xor edi,edi;
+int 0x80`, so the task exits cleanly after a few pauses instead
+of looping forever. The reaper KFrees its stack + Task struct.
+
+## Deliberately deferred (post-syscall slice)
+
+- SYSCALL / SYSRET (STAR / LSTAR / SFMASK MSR path) — `int 0x80`
+  is ~30× slower but correct; migrate once a consumer cares.
+- copy_from_user / copy_to_user behind SMAP — needed as soon as
+  any syscall takes a pointer argument.
 - Per-process address space: single global PML4 still. Any user
   task sees the same user code/stack pages. One-and-done is fine
   while we only have one ring-3 task.

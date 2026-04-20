@@ -29,6 +29,14 @@ void IdtInit();
 /// interrupt gate.
 void IdtSetGate(u8 vector, u64 handler);
 
+/// Same as IdtSetGate, but installs a DPL=3 interrupt gate — which is what
+/// makes `int N` legal from ring 3. Used by the syscall gate at vector
+/// 0x80. A DPL=0 gate on a user-reachable vector would #GP(vector) on every
+/// `int` from ring 3, which is the correct posture for vectors the user
+/// has no business touching; flip to this variant only on vectors that are
+/// explicitly part of the user-kernel ABI.
+void IdtSetUserGate(u8 vector, u64 handler);
+
 /// Patch an existing gate's IST field so the CPU switches to the
 /// indexed IST stack before entering the handler. `ist` is 1..7
 /// (0 would disable IST for that gate). Call AFTER IdtInit AND

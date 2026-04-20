@@ -6,6 +6,7 @@
 
 #include "../../core/panic.h"
 #include "../../core/symbols.h"
+#include "../../core/syscall.h"
 #include "../../sched/sched.h"
 
 namespace customos::arch
@@ -117,6 +118,19 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         {
             sched::Schedule();
         }
+        return;
+    }
+
+    // User-mode syscall gate. Vector 0x80 is installed with DPL=3 by
+    // core::SyscallInit so ring-3 code can issue `int 0x80` without
+    // #GP'ing on the gate's privilege check. The dispatcher writes the
+    // return value into frame->rax; isr_common's pop-all + iretq then
+    // delivers it back to user mode. A syscall that never returns
+    // (SYS_exit) simply calls sched::SchedExit from the dispatcher —
+    // we never reach the return below because the task is off-CPU.
+    if (frame->vector == 0x80)
+    {
+        core::SyscallDispatch(frame);
         return;
     }
 

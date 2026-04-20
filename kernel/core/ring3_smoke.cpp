@@ -28,18 +28,27 @@
  * stack sits 64 KiB above so there's obvious headroom between the two
  * regions if the payload ever grows.
  *
- * Payload is the minimum possible ring-3 instruction sequence that
- * keeps the CPU alive without ever faulting:
+ * Payload exercises two independent things in order:
  *
  *     user_entry:
- *         pause          ; F3 90 — friendly to CPU power mgmt
- *         jmp short -4   ; EB FC — relative jump back to user_entry
+ *         pause                 ; F3 90 ─┐
+ *         pause                 ; F3 90  │ Four `pause` iterations give
+ *         pause                 ; F3 90  │ the 100 Hz timer a few ticks'
+ *         pause                 ; F3 90 ─┘ worth of chance to preempt us
+ *                                          at least once while ring-3.
+ *         xor eax, eax          ; 31 C0    rax = 0 (SYS_EXIT)
+ *         xor edi, edi          ; 31 FF    rdi = 0 (exit code)
+ *         int 0x80              ; CD 80    trap into the kernel syscall gate
+ *         hlt                   ; F4       unreachable — a syscall return
+ *                                          here would be a bug
  *
- * Four bytes, no privileged instructions, no memory references. A
- * privileged instruction (e.g. `hlt`) would #GP and pull the kernel
- * into the trap dispatcher; an infinite-loop-only payload lets the
- * kernel continue to round-robin its other tasks, which is the
- * evidence we use to declare the slice green.
+ * 13 bytes. No privileged instructions on the happy path: all four
+ * pauses are ring-3-legal, `int 0x80` is explicitly what the DPL=3
+ * gate allows, and the trailing `hlt` only executes if the syscall
+ * returns (which SYS_EXIT promises never to). If the gate were
+ * misconfigured (DPL=0) the `int 0x80` would #GP on delivery, which
+ * is the clean failure mode we want — the trap dispatcher prints
+ * a record rather than a silent misbehaviour.
  */
 
 namespace customos::core
@@ -52,10 +61,21 @@ constexpr u64 kUserCodeVirt = 0x0000000040000000ULL;
 constexpr u64 kUserStackVirt = 0x0000000040010000ULL;
 constexpr u64 kUserStackTop = kUserStackVirt + mm::kPageSize;
 
-// Four-byte user payload: `pause; jmp short -4`. Emitted as raw bytes
-// rather than a .S file so the user-mode VA layout, the bytes, and
-// the "hands-off: this runs in ring 3" context all stay in one place.
-constexpr u8 kUserPayload[] = {0xF3, 0x90, 0xEB, 0xFC};
+// 13-byte user payload: four pauses (so the timer gets a chance to
+// preempt us in ring 3 at least once), then SYS_EXIT via int 0x80.
+// Emitted as raw bytes rather than a .S file so the user-mode VA
+// layout, the bytes, and the "hands-off: this runs in ring 3"
+// context all stay in one place.
+constexpr u8 kUserPayload[] = {
+    0xF3, 0x90, // pause
+    0xF3, 0x90, // pause
+    0xF3, 0x90, // pause
+    0xF3, 0x90, // pause
+    0x31, 0xC0, // xor eax, eax  -> rax = 0  (SYS_EXIT)
+    0x31, 0xFF, // xor edi, edi  -> rdi = 0  (exit code)
+    0xCD, 0x80, // int 0x80
+    0xF4,       // hlt (unreachable)
+};
 
 [[noreturn]] void Ring3SmokeMain(void*)
 {

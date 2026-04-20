@@ -29,6 +29,7 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     core/recovery.cpp
     core/ring3_smoke.cpp
     core/symbols.cpp
+    core/syscall.cpp
     acpi/acpi.cpp
     arch/x86_64/ap_trampoline.S
     arch/x86_64/boot.S

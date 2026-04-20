@@ -20,6 +20,7 @@
 #include "klog.h"
 #include "panic.h"
 #include "ring3_smoke.h"
+#include "syscall.h"
 #include "../mm/kheap.h"
 #include "../mm/paging.h"
 #include "../sched/sched.h"
@@ -73,6 +74,9 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     IdtSetIst(2, kIstNmi);           // #NMI
     IdtSetIst(8, kIstDoubleFault);   // #DF
     IdtSetIst(18, kIstMachineCheck); // #MC
+
+    SerialWrite("[boot] Installing syscall gate (int 0x80, DPL=3).\n");
+    customos::core::SyscallInit();
 
     SerialWrite("[boot] Parsing Multiboot2 memory map.\n");
     FrameAllocatorInit(multiboot_info);
