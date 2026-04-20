@@ -36,13 +36,25 @@
 namespace customos::core
 {
 
-/// Write the panic banner + message to COM1, then halt the CPU.
-/// NEVER returns. Safe from IRQ context.
+/// Write the panic banner + diagnostic dump + message to COM1, then
+/// halt the CPU. NEVER returns. Safe from IRQ context.
+///
+/// Output includes: current CPU id + LAPIC id (if PerCpu installed),
+/// current task name + id (if scheduler online), uptime ticks,
+/// control registers (CR0/CR2/CR3/CR4 + EFER + RFLAGS), a 16-frame
+/// RBP-chain backtrace from the call site, and a 16-quadword raw
+/// stack dump from current RSP.
 [[noreturn]] void Panic(const char* subsystem, const char* message);
 
 /// Like Panic but includes a single u64 value rendered as hex. Used
 /// for "here's the address that tripped the fault" diagnostics.
 [[noreturn]] void PanicWithValue(const char* subsystem, const char* message, u64 value);
+
+/// Emit the diagnostic dump portion (without the halt) using a
+/// caller-supplied RIP / RSP / RBP. Used by the trap dispatcher to
+/// dump state from the faulting instruction's frame rather than the
+/// dispatcher's own frame. Does NOT halt — caller halts.
+void DumpDiagnostics(u64 rip, u64 rsp, u64 rbp);
 
 } // namespace customos::core
 

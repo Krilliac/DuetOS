@@ -36,6 +36,7 @@ set(CUSTOMOS_KERNEL_C_FLAGS
     -fno-pie
     -fno-builtin
     -fno-common
+    -fno-omit-frame-pointer
     -mno-red-zone
     -mno-mmx
     -mno-sse

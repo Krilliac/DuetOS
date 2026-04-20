@@ -4,6 +4,7 @@
 #include "lapic.h"
 #include "serial.h"
 
+#include "../../core/panic.h"
 #include "../../sched/sched.h"
 
 namespace customos::arch
@@ -160,6 +161,12 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     WriteLabelled("r13       ", frame->r13);
     WriteLabelled("r14       ", frame->r14);
     WriteLabelled("r15       ", frame->r15);
+
+    // Rich diagnostics from the faulting frame — backtrace climbs
+    // the stack from rbp AT THE POINT OF THE FAULT (not from the
+    // dispatcher's own frame), so the returned frame chain shows
+    // the actual call path that led to the exception.
+    core::DumpDiagnostics(frame->rip, frame->rsp, frame->rbp);
 
     SerialWrite("[panic] Halting CPU.\n");
     Halt();
