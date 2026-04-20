@@ -607,6 +607,149 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 069 — Clickable taskbar tabs
+
+- **Scope:** `kernel/drivers/video/taskbar.{h,cpp}` —
+  `TaskbarRedraw` records each painted tab's bounds into a
+  fixed-size layout array; `TaskbarTabAt` and
+  `TaskbarContains` expose hit-tests. `kernel/core/main.cpp`
+  — mouse reader resolves taskbar-tab presses above every
+  other priority so a buried window can be raised with
+  one click on its tab.
+- **Decision:** Closes the window-management loop: register,
+  raise on click, drag by title, close by X, switch via
+  taskbar. The layout array is rewritten by every redraw —
+  tabs that overflow the strip simply stop being recorded,
+  matching what the human sees.
+- **Why:** Without taskbar dispatch, a window hidden
+  underneath two others has no way back to the front — the
+  click-to-raise slice only reaches the topmost hit. The
+  taskbar is the canonical OS answer.
+- **Rules out / defers:** Middle-click close, right-click
+  menu, drag tabs to reorder, tab-group "flashing" on
+  background events, hover-preview thumbnails.
+- **Revisit when:** Second widget class (menu) wants to
+  re-use the layout-record pattern. Dynamic tab
+  sort/filter needed.
+- **Related tracks:** Track 9 (Windowing), Track 7
+  (Userland shell).
+
+---
+
+## 068 — Taskbar with START, tabs, uptime + ui-ticker
+
+- **Scope:** `kernel/drivers/video/taskbar.{h,cpp}` — new
+  module. `widget.{h,cpp}` — adds `WindowRegistryCount`,
+  `WindowIsAlive`, `WindowTitle`. `kernel/core/main.cpp` —
+  new `ui-ticker` scheduler thread re-composites at 1 Hz.
+- **Decision:** A 28-pixel bottom strip painted last in
+  DesktopCompose so it sits on top of everything else.
+  Shows a "START" accent square, one tab per live window,
+  and a right-anchored "UP NNNNs" uptime counter sourced
+  from `sched::SchedNowTicks() / 100`. `ui-ticker` sleeps
+  100 ticks and recomposes under the compositor mutex so
+  the uptime advances without user input — first animated
+  element.
+- **Why:** The tree's boot story had no persistent shell
+  chrome; mouse/keyboard demos landed as ephemeral
+  transitions. A taskbar is the smallest thing that reads
+  as a living desktop. The ticker also proves the compositor
+  mutex holds up against a third concurrent writer.
+- **Rules out / defers:** Real wall-clock time (needs RTC
+  driver). Click dispatch on START / tabs (tabs land in
+  #069). Icons. Tab overflow menu. Auto-hide. Multi-
+  monitor.
+- **Revisit when:** RTC driver lands (clock becomes
+  meaningful). Second widget panel needed (notification
+  area, system tray).
+- **Related tracks:** Track 9 (Windowing — persistent
+  chrome), Track 6 (Drivers — RTC).
+
+---
+
+## 067 — Functional close button
+
+- **Scope:** `kernel/drivers/video/widget.{h,cpp}` — adds
+  `WindowPointInCloseBox`, `WindowClose`. `kernel/core/main.cpp`
+  — mouse reader resolves close-box presses above title-bar
+  drags and general window raises.
+- **Decision:** Promote the decorative red square in the
+  title bar corner to a real action. `WindowClose` sets the
+  `alive` flag false; every subsequent draw / hit-test
+  skips the slot. Handles aren't reused — `kMaxWindows=4`
+  is bounded enough that leaking the slot for the rest of
+  boot is acceptable.
+- **Why:** Clicking X on a window and having nothing
+  happen is uncanny-valley GUI. Wiring the action NOW,
+  with the same priority ordering the mouse reader already
+  uses, makes the window manager feel complete without
+  adding a menu / keyboard shortcut layer.
+- **Rules out / defers:** Handle re-use after close.
+  Confirmation prompt. "Close all" on right-click. Process
+  kill for ring-3-owned windows (needs SYS_SPAWN first).
+- **Revisit when:** Ring-3 apps register windows
+  (close = signal the owning process). Handle count grows
+  past 4.
+- **Related tracks:** Track 9 (Windowing), Track 4
+  (Process model — once apps own their windows).
+
+---
+
+## 066 — Window-local widgets (owner + offsets)
+
+- **Scope:** `kernel/drivers/video/widget.{h,cpp}` —
+  `ButtonWidget` grows an `owner` field (WindowHandle) and
+  reinterprets `x, y` as offsets into the owner's origin
+  when the owner is valid.
+- **Decision:** Widgets that belong to a window move with
+  it on drag, paint as part of its z-order, and only fire
+  when the owner is topmost at the click point. Effective
+  absolute bounds are resolved on the fly from the owner's
+  current position — no per-widget bookkeeping during
+  window motion. Freestanding widgets (owner ==
+  kWindowInvalid) keep the old behaviour of floating on
+  top.
+- **Why:** A button that stays put while its host window
+  moves is obviously wrong to any GUI user. The owner-
+  offset model is the industry-standard answer (HWNDs
+  parent HWNDs, NSView subviews, GTK container children)
+  and the simplest one that reads correctly.
+- **Rules out / defers:** Nested widget containers (a
+  button inside a panel inside a window). Per-window
+  clip rectangles so widgets can't escape their owner
+  bounds. Relative sizing.
+- **Revisit when:** Second widget class lands (text field,
+  checkbox) — forces a shared container abstraction.
+  Overflow clipping matters visually.
+- **Related tracks:** Track 9 (Windowing — widget
+  parent/child graph is the skeleton of any toolkit).
+
+---
+
+## 065 — Click-to-raise anywhere on a window
+
+- **Scope:** `kernel/core/main.cpp` — mouse reader's press-
+  edge branch now raises the topmost hit window even when
+  the click didn't land on the title bar.
+- **Decision:** Any press inside a window raises it; title-
+  bar press additionally starts a drag. Matches the
+  universal GUI convention — clicking a background window
+  brings it forward.
+- **Why:** Without this, z-order feels stuck unless users
+  hunt the title bar. Landing it at one-line cost before
+  the deeper window-manager slices (widgets, close, tabs)
+  means those features never ship with a regressive
+  "click outside title bar does nothing" behaviour.
+- **Rules out / defers:** Focus model (raise != focus).
+  Click-to-focus vs focus-follows-mouse policy. Modal
+  windows that ignore raise-on-click.
+- **Revisit when:** Keyboard focus lands and becomes
+  decoupled from z-order. A modal dialog needs to block
+  raise on background clicks.
+- **Related tracks:** Track 9 (Windowing).
+
+---
+
 ## 064 — Compositor mutex for cross-thread UI state
 
 - **Scope:** `kernel/drivers/video/widget.{h,cpp}` — new
