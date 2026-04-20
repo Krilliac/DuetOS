@@ -90,7 +90,9 @@ void HistoryPush(const char* line)
 }
 
 // Look up the `n`th most-recent entry (n=1 newest, n=history_count
-// oldest). Returns nullptr if n is out of range.
+// oldest). Returns nullptr if n is out of range. Exposed externally
+// via Shell{HistoryCount,HistoryGet} so the `history` command + the
+// `!N` recall can share the same walker.
 const char* HistoryAt(u32 n)
 {
     if (n == 0 || n > g_history_count)
@@ -179,9 +181,11 @@ void CmdHelp()
     ConsoleWriteln("  DMESG        DUMP KERNEL LOG RING");
     ConsoleWriteln("  STATS        SCHEDULER STATISTICS");
     ConsoleWriteln("  MEM          PHYSICAL MEMORY USAGE");
+    ConsoleWriteln("  HISTORY      LIST RECENT COMMANDS (!N RECALL, !! REPEAT)");
     ConsoleWriteln("");
     ConsoleWriteln("KEYS:  UP/DOWN = HISTORY   TAB = COMPLETE");
     ConsoleWriteln("       CTRL+ALT+T = TOGGLE MODE");
+    ConsoleWriteln("       CTRL+ALT+F1 = SHELL   CTRL+ALT+F2 = KLOG");
     ConsoleWriteln("       ALT+TAB = CYCLE WINDOW  ALT+F4 = CLOSE WINDOW");
 }
 
@@ -273,6 +277,27 @@ void CmdStats()
     ConsoleWrite("TASKS REAPED     ");
     WriteU64Dec(s.tasks_reaped);
     ConsoleWriteChar('\n');
+}
+
+void CmdHistory()
+{
+    if (g_history_count == 0)
+    {
+        ConsoleWriteln("(NO HISTORY)");
+        return;
+    }
+    // Display oldest-first so the numbers count in typing order —
+    // readers intuit "1 is the first thing I ran" even though
+    // internally `HistoryAt(1)` is the newest entry. Swap the
+    // mapping here; callers of `!N` use the same convention.
+    for (u32 i = g_history_count; i > 0; --i)
+    {
+        const u32 display_num = g_history_count - i + 1;
+        ConsoleWrite("  ");
+        WriteU64Dec(display_num);
+        ConsoleWrite("  ");
+        ConsoleWriteln(HistoryAt(i));
+    }
 }
 
 void CmdMem()
@@ -652,8 +677,75 @@ u32 Tokenize(char* buf, char** argv)
     return count;
 }
 
+// Resolve a `!` history-expansion token. Returns the string to
+// dispatch, or nullptr if no valid recall applies (caller should
+// print "NO SUCH HISTORY ENTRY" and continue with the original
+// line). `!!` = most recent; `!N` = the Nth entry displayed by
+// `history` (oldest is 1).
+const char* HistoryExpand(const char* line)
+{
+    if (line[0] != '!')
+    {
+        return nullptr;
+    }
+    if (line[1] == '!' && line[2] == '\0')
+    {
+        return HistoryAt(1);
+    }
+    // !N — parse decimal.
+    u32 n = 0;
+    u32 i = 1;
+    if (line[i] == '\0')
+    {
+        return nullptr;
+    }
+    for (; line[i] != '\0'; ++i)
+    {
+        if (line[i] < '0' || line[i] > '9')
+        {
+            return nullptr;
+        }
+        n = n * 10 + static_cast<u32>(line[i] - '0');
+    }
+    if (n == 0 || n > g_history_count)
+    {
+        return nullptr;
+    }
+    // Display index is oldest-first; convert to newest-first
+    // for HistoryAt.
+    const u32 inv = g_history_count - n + 1;
+    return HistoryAt(inv);
+}
+
 void Dispatch(char* line)
 {
+    // !N / !! history expansion — resolve before tokenizing so
+    // the recalled text goes through the full command path as
+    // if the user had typed it. Echo the recalled text first so
+    // the user can see what they ran.
+    if (line[0] == '!')
+    {
+        const char* recalled = HistoryExpand(line);
+        if (recalled == nullptr)
+        {
+            ConsoleWriteln("SHELL: NO SUCH HISTORY ENTRY");
+            return;
+        }
+        ConsoleWriteln(recalled);
+        // Copy into g_input (it's the buffer `line` points into)
+        // and recurse once into Dispatch with the new content.
+        // Bounded recursion depth = 1 because the recalled entry
+        // never starts with '!'.
+        u32 i = 0;
+        for (; recalled[i] != '\0' && i + 1 < kInputMax; ++i)
+        {
+            line[i] = recalled[i];
+        }
+        line[i] = '\0';
+        Dispatch(line);
+        return;
+    }
+
     char* argv[kMaxArgs] = {};
     const u32 argc = Tokenize(line, argv);
     if (argc == 0)
@@ -741,6 +833,11 @@ void Dispatch(char* line)
         CmdMem();
         return;
     }
+    if (StrEq(cmd, "history"))
+    {
+        CmdHistory();
+        return;
+    }
     ConsoleWrite("COMMAND NOT FOUND: ");
     ConsoleWriteln(cmd);
     ConsoleWriteln("TYPE HELP FOR A LIST OF COMMANDS.");
@@ -790,6 +887,16 @@ void ShellSubmit()
     g_len = 0;
     g_input[0] = '\0';
     Prompt();
+}
+
+u32 ShellHistoryCount()
+{
+    return g_history_count;
+}
+
+const char* ShellHistoryGet(u32 n)
+{
+    return HistoryAt(n);
 }
 
 void ShellHistoryPrev()
@@ -862,8 +969,9 @@ bool NamePrefixMatch(const char* name, const char* prefix, u32 plen)
 void CompleteCommandName()
 {
     static const char* const kCommandSet[] = {
-        "help",  "about", "version", "clear", "uptime", "date", "windows", "mode",
-        "ls",    "cat",   "touch",   "rm",    "echo",   "dmesg", "stats",  "mem",
+        "help",  "about", "version", "clear",   "uptime", "date",  "windows", "mode",
+        "ls",    "cat",   "touch",   "rm",      "echo",   "dmesg", "stats",   "mem",
+        "history",
     };
     constexpr u32 kCmdCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 

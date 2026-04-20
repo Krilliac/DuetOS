@@ -72,4 +72,12 @@ void ShellHistoryNext();
 /// prompt with the partial. Empty buffer is a no-op.
 void ShellTabComplete();
 
+/// Read access to the command history ring — the `history`
+/// command + `!N` recall both enumerate entries by index.
+/// n = 1 is the most recent entry; n = ShellHistoryCount()
+/// is the oldest. Returns nullptr on out-of-range. Length
+/// cap matches the internal ring capacity.
+u32 ShellHistoryCount();
+const char* ShellHistoryGet(u32 n);
+
 } // namespace customos::core
