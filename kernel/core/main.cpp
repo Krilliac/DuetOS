@@ -4,6 +4,7 @@
 #include "../arch/x86_64/idt.h"
 #include "../arch/x86_64/serial.h"
 #include "../mm/frame_allocator.h"
+#include "../mm/kheap.h"
 
 /*
  * Kernel entry in C++. Called by kernel/arch/x86_64/boot.S once the CPU is
@@ -11,9 +12,10 @@
  * memory identity-mapped.
  *
  * Current scope: bring up descriptors, parse the Multiboot2 memory map,
- * hand the frame allocator a working bitmap, run its self-test, halt.
- * Higher-half move, IRQ controller bring-up, and slab allocator are
- * separate follow-up commits.
+ * hand the frame allocator a working bitmap, run its self-test, carve a
+ * fixed-size pool out for the kernel heap and self-test that, then halt.
+ * IRQ controller bring-up, page-table API, and SMP are separate follow-up
+ * commits.
  */
 
 extern "C" void kernel_main(customos::u32 multiboot_magic,
@@ -48,6 +50,10 @@ extern "C" void kernel_main(customos::u32 multiboot_magic,
     SerialWrite("  free frames  : "); SerialWriteHex(FreeFramesCount()); SerialWrite("\n");
 
     FrameAllocatorSelfTest();
+
+    SerialWrite("[boot] Bringing up kernel heap.\n");
+    KernelHeapInit();
+    KernelHeapSelfTest();
 
     SerialWrite("[boot] All subsystems online. Halting CPU.\n");
     Halt();

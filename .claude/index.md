@@ -19,12 +19,13 @@ _Read this at every session start (after git sync). Each row links to a detailed
 | GDT + IDT v0 — canonical descriptors and trap path | [knowledge/gdt-idt-v0.md](knowledge/gdt-idt-v0.md) | Observation | Active | 2026-04-20 |
 | Physical frame allocator v0 — bitmap over Multiboot2 map | [knowledge/frame-allocator-v0.md](knowledge/frame-allocator-v0.md) | Observation | Active | 2026-04-20 |
 | Higher-half kernel move v0 — `0xFFFFFFFF80000000` | [knowledge/higher-half-kernel-v0.md](knowledge/higher-half-kernel-v0.md) | Observation | Active | 2026-04-20 |
+| Kernel heap v0 — first-fit + coalescing over direct map | [knowledge/kernel-heap-v0.md](knowledge/kernel-heap-v0.md) | Observation | Active | 2026-04-20 |
 
 ## Quick Reference
 
 ### Current Project State (2026-04-20)
 
-- **Repository**: kernel runs at `0xFFFFFFFF80000000` (higher-half), brings up GDT + IDT, parses the Multiboot2 memory map, and runs a bitmap-backed physical frame allocator. First 1 GiB is both identity-mapped (for boot artifacts) and higher-half-mapped. Allocator self-test passes in QEMU. Next bite is the slab/heap allocator or a managed page-table API.
+- **Repository**: kernel runs at `0xFFFFFFFF80000000` (higher-half), brings up GDT + IDT, parses the Multiboot2 memory map, runs a bitmap-backed physical frame allocator (with single + contiguous-run allocation), and brings up a 2 MiB first-fit + coalescing kernel heap (`KMalloc`/`KFree`) over the higher-half direct map. First 1 GiB is both identity-mapped (for boot artifacts) and higher-half-mapped. Frame allocator and heap self-tests both pass. Next bite is the managed page-table API (so the heap can grow and arbitrary physical pages can be mapped) or the IRQ controller bring-up (LAPIC + PIT/HPET).
 - **Default branch**: `main`.
 - **Active dev branch**: `claude/port-sparkengine-components-f38iH` (Claude-driven bootstrapping).
 - **Platforms**: x86_64 first (Multiboot2 → long mode). ARM64 planned, not started. UEFI path planned, not started.
