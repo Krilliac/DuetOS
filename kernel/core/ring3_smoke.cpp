@@ -38,6 +38,8 @@
  *         mov esi, 0x40000080      ; BE 80 00 00 40   rsi = msg ptr
  *         mov edx, <msg_len>       ; BA nn 00 00 00   rdx = length
  *         int 0x80                 ; CD 80
+ *         mov eax, 3               ; B8 03 00 00 00   rax = SYS_YIELD
+ *         int 0x80                 ; CD 80   cooperative yield
  *         xor eax, eax             ; 31 C0   rax = 0 (SYS_EXIT)
  *         xor edi, edi             ; 31 FF   rdi = 0 (exit code)
  *         int 0x80                 ; CD 80
@@ -84,10 +86,10 @@ constexpr char kUserMessage[] = "Hello from ring 3!\n";
 // sizeof - 1 so the NUL isn't written to COM1.
 constexpr u64 kUserMessageLen = sizeof(kUserMessage) - 1;
 
-// 24-byte user code: pause x2, SYS_WRITE(1, 0x40000080, len),
-// SYS_EXIT(0), hlt. Emitted as raw bytes rather than a .S file so
-// the user-mode VA layout, the bytes, and the "hands-off: this
-// runs in ring 3" context all stay in one place.
+// 31-byte user code: pause x2, SYS_WRITE(1, 0x40000080, len),
+// SYS_YIELD, SYS_EXIT(0), hlt. Emitted as raw bytes rather than
+// a .S file so the user-mode VA layout, the bytes, and the
+// "hands-off: this runs in ring 3" context all stay in one place.
 // clang-format off
 constexpr u8 kUserCodeBytes[] = {
     0xF3, 0x90,                                                       // pause
@@ -96,10 +98,12 @@ constexpr u8 kUserCodeBytes[] = {
     0xBF, 0x01, 0x00, 0x00, 0x00,                                     // mov edi, 1         (fd=1)
     0xBE, 0x80, 0x00, 0x00, 0x40,                                     // mov esi, 0x40000080 (msg ptr)
     0xBA, static_cast<u8>(kUserMessageLen), 0x00, 0x00, 0x00,         // mov edx, len
-    0xCD, 0x80,                                                       // int 0x80
+    0xCD, 0x80,                                                       // int 0x80   (SYS_WRITE)
+    0xB8, 0x03, 0x00, 0x00, 0x00,                                     // mov eax, 3         (SYS_YIELD)
+    0xCD, 0x80,                                                       // int 0x80   (yield)
     0x31, 0xC0,                                                       // xor eax, eax       (SYS_EXIT)
     0x31, 0xFF,                                                       // xor edi, edi       (rc=0)
-    0xCD, 0x80,                                                       // int 0x80
+    0xCD, 0x80,                                                       // int 0x80   (exit)
     0xF4,                                                             // hlt (unreachable)
 };
 // clang-format on
@@ -151,6 +155,7 @@ static_assert(sizeof(kUserCodeBytes) <= kUserMessageOffset, "user code runs into
     // kPagePresent + kPageUser only — no kPageWritable (W^X for user
     // code) and no kPageNoExecute (exec is exactly what we want).
     MapPage(kUserCodeVirt, code_frame, kPagePresent | kPageUser);
+    sched::RegisterUserVmRegion(kUserCodeVirt, code_frame);
 
     // ---- 2) Allocate + map the user stack page. ----------------------------
 
@@ -161,6 +166,7 @@ static_assert(sizeof(kUserCodeBytes) <= kUserMessageOffset, "user code runs into
     }
 
     MapPage(kUserStackVirt, stack_frame, kPagePresent | kPageWritable | kPageUser | kPageNoExecute);
+    sched::RegisterUserVmRegion(kUserStackVirt, stack_frame);
 
     // ---- 3) Publish kernel stack top to the TSS so user→kernel traps land. -
     //

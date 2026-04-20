@@ -153,28 +153,82 @@ Hello from ring 3!
 [sched/reaper] reaped task id = N
 ```
 
+## Follow-up slices 049..051 — hygiene + one more syscall
+
+- **Walk-first user-pointer check** (entry #049): both copy
+  helpers now walk the PT and verify each 4 KiB page has
+  `Present | User` before attempting the stac/clac-bracketed
+  copy. Unmapped-but-in-range user pointers now return `false`
+  instead of halting the kernel on #PF.
+- **Per-task user-VM cleanup** (entry #050): Task struct
+  gained a fixed 4-slot `user_regions[]` array (vaddr +
+  frame). `sched::RegisterUserVmRegion` is called from the
+  task's entry fn after each MapPage; the reaper walks the
+  array on task death and does `mm::UnmapPage` +
+  `mm::FreeFrame`. Ring-3 smoke registers its code + stack.
+  No leaks across task lifetimes.
+- **SYS_YIELD = 3** (entry #051): cooperative-yield syscall;
+  kernel-side handler calls `sched::SchedYield`, returns 0.
+  Smoke payload now does SYS_WRITE → SYS_YIELD → SYS_EXIT.
+
+## Updated ring-3 smoke payload (38 bytes)
+
+```
+user_entry:                   ; at 0x40000000
+    pause                     ; give the timer a tick
+    pause
+    mov eax, 2                ; SYS_WRITE
+    mov edi, 1                ; fd = stdout
+    mov esi, 0x40000080       ; msg ptr
+    mov edx, <msg_len>
+    int 0x80
+    mov eax, 3                ; SYS_YIELD
+    int 0x80
+    xor eax, eax              ; SYS_EXIT
+    xor edi, edi              ; rc = 0
+    int 0x80
+    hlt                       ; unreachable
+
+msg: "Hello from ring 3!\n"   ; at 0x40000080
+```
+
+Expected serial log shape:
+
+```
+[ring3] smoke task starting
+[ring3] user rip=0x40000000 user rsp=0x40011000 rsp0=<...>
+[core/ring3] entering user mode at rip = 0x40000000
+Hello from ring 3!
+[sys] exit rc = 0
+[sched/reaper] reaped task id = N
+```
+
 ## Deliberately deferred (next batch after this)
 
 - SYSCALL / SYSRET (STAR / LSTAR / SFMASK MSR path) — `int 0x80`
   is ~30× slower but correct; migrate once a consumer cares.
-- `__copy_user_fault_fixup` — return `false` from the copy
-  helpers on #PF instead of halting the kernel. Needed the
-  moment a user pointer can legitimately be in-range but
-  unmapped.
+- `__copy_user_fault_fixup` — the walk-first check handles
+  the "in-range but unmapped" case in pure C++; the fixup
+  table becomes necessary the moment demand paging or
+  concurrent cross-CPU unmap lands (race: page was mapped
+  at walk time, gone by the time the copy reads it).
 - Per-process address space: single global PML4 still. Any user
   task sees the same user code/stack pages — so a second
   ring-3 task needs either distinct VAs (simple patch to
-  `Ring3SmokeMain`, but doesn't reclaim on exit) or per-process
-  CR3 (a much larger slice).
-- `UnmapPage` sweep on ring-3 task exit — the user pages at
-  0x40000000 / 0x40010000 are leaked when the ring-3 smoke
-  task exits. No symptom today (kernel keeps running) but a
-  second task or a restart would collide.
-- Second ring-3 task — needs distinct VAs or proper exit
-  cleanup first.
+  `Ring3SmokeMain`) or per-process CR3 (larger slice).
+- Second ring-3 task — now unblocked on the cleanup side
+  (regions reaped on exit), but still needs either sequential
+  execution with fresh VAs or distinct VA bases for concurrent
+  execution. Distinct-VA version is a small follow-up slice
+  (patch the `mov esi, imm32` immediate at install time).
 - Per-CPU TSS / per-AP RSP0 — the current `arch::TssSetRsp0`
   writes the BSP's TSS only; SMP join will need a per-CPU
   wrapper.
+- Writable-bit check in `CopyToUser`'s walk — today the
+  walker tests only Present + User, so a CopyToUser into a
+  read-only user page panics mid-copy instead of returning
+  false up front. No consumer yet; land when the first
+  CopyToUser caller arrives.
 - FPU/SSE user state: kernel is built `-mno-sse
   -mgeneral-regs-only`; user code that touches xmm registers
   will take #UD, which is the correct signal that this layer

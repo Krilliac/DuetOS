@@ -7,7 +7,9 @@
 #include "../core/panic.h"
 #include "../core/recovery.h"
 #include "../cpu/percpu.h"
+#include "../mm/frame_allocator.h"
 #include "../mm/kheap.h"
+#include "../mm/paging.h"
 #include "../sync/spinlock.h"
 
 namespace customos::sched
@@ -56,6 +58,17 @@ struct Task
     // once at SchedCreate and never changed — priority inheritance
     // / real-time class would need a mutable field.
     TaskPriority priority;
+
+    // User-VM regions this task owns. Registered via
+    // RegisterUserVmRegion (usually from the task's entry function
+    // right after it maps its user-accessible pages). Reaped by
+    // the dead-task reaper: each entry turns into an UnmapPage +
+    // FreeFrame before the Task struct itself is KFreed. Size
+    // bounded at kMaxUserVmRegionsPerTask — hitting the cap
+    // panics, which is the "a consumer I didn't know about wants
+    // more user pages" signal.
+    u8 user_region_count;
+    UserVmRegion user_regions[kMaxUserVmRegionsPerTask];
 };
 
 namespace
@@ -309,6 +322,7 @@ void SchedInit()
     boot_task->waiting_on = nullptr;
     boot_task->wake_by_timeout = false;
     boot_task->priority = TaskPriority::Normal;
+    boot_task->user_region_count = 0;
 
     Current() = boot_task;
     g_tasks_created = 1;
@@ -351,6 +365,7 @@ Task* SchedCreate(TaskEntry entry, void* arg, const char* name, TaskPriority pri
     t->waiting_on = nullptr;
     t->wake_by_timeout = false;
     t->priority = priority;
+    t->user_region_count = 0;
 
     // Build the initial stack. ContextSwitch pops r15, r14, r13, r12,
     // rbp, rbx and then rets. So from bottom to top of the pre-planted
@@ -635,6 +650,23 @@ u64 CurrentTaskId()
     return self->id;
 }
 
+void RegisterUserVmRegion(u64 vaddr, u64 frame)
+{
+    Task* self = Current();
+    if (self == nullptr)
+    {
+        PanicSched("RegisterUserVmRegion with no current task");
+    }
+    if (self->user_region_count >= kMaxUserVmRegionsPerTask)
+    {
+        PanicSched("RegisterUserVmRegion: per-task cap exceeded");
+    }
+    // No sched_lock — a task only registers its own regions from its
+    // own context; there's no contender to race against.
+    self->user_regions[self->user_region_count] = UserVmRegion{vaddr, frame};
+    ++self->user_region_count;
+}
+
 u64 SchedCurrentKernelStackTop()
 {
     Task* self = Current();
@@ -708,6 +740,22 @@ namespace
             Task* dead = drained;
             drained = dead->next;
             dead->next = nullptr;
+
+            // Reclaim every user-VM region the task registered via
+            // RegisterUserVmRegion — unmap the page from the global
+            // PML4 AND return the backing frame to the physical
+            // allocator. Must happen BEFORE the Task struct itself
+            // is freed (we read the region table out of it). Doing
+            // this in the reaper (not SchedExit) keeps the unmap +
+            // FreeFrame off the dying task's own stack, same
+            // argument as the stack KFree.
+            for (u8 i = 0; i < dead->user_region_count; ++i)
+            {
+                const UserVmRegion region = dead->user_regions[i];
+                mm::UnmapPage(region.vaddr);
+                mm::FreeFrame(region.frame);
+            }
+            dead->user_region_count = 0;
 
             // Stack_base can be nullptr for the boot task (task 0);
             // defensive null-check even though task 0 should never

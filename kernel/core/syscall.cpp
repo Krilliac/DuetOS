@@ -127,6 +127,19 @@ void SyscallDispatch(arch::TrapFrame* frame)
         return;
     }
 
+    case SYS_YIELD:
+    {
+        // Cooperative-yield from ring 3. The kernel-side SchedYield
+        // briefly cli / Schedule / sti; by the time we return here,
+        // either the same task was picked (no-op from ring 3's
+        // perspective) or another task ran and eventually switched
+        // us back in. Returns 0 — reserved for an "I was preempted"
+        // boolean later if any consumer cares.
+        sched::SchedYield();
+        frame->rax = 0;
+        return;
+    }
+
     default:
         ReportUnknownSyscall(num, frame->rip);
         // Convention: -1 back to the caller for a bad syscall number.

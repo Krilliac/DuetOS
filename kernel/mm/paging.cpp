@@ -304,9 +304,61 @@ bool IsUserAddressRange(u64 addr, u64 len)
     return true;
 }
 
+namespace
+{
+
+// Page-table walk helper: returns true iff the 4 KiB page containing
+// `virt` is present AND user-accessible. Missing intermediate tables
+// (PDPT / PD / PT not allocated) are treated as "not mapped" —
+// identical result to a PTE with Present=0.
+bool PagePresentAndUser(u64 virt)
+{
+    u64* pte = WalkToPte(virt, /*create=*/false);
+    if (pte == nullptr)
+    {
+        return false;
+    }
+    constexpr u64 kNeed = kPagePresent | kPageUser;
+    return (*pte & kNeed) == kNeed;
+}
+
+// Walks every 4 KiB page covered by [addr, addr+len) and returns
+// true only if all of them are present with the user bit set.
+// Single-address-space today (no concurrent unmap under our feet),
+// so the check-then-copy window is race-free on UP and still race-
+// free on SMP because no AP runs user code yet. Revisit when either
+// (a) per-process page tables land (another CPU could unmap mid-
+// copy), or (b) demand paging lands (a kernel-legal user page can
+// start out NOT-present). Then move to a proper #PF fault-fixup
+// table in the trap dispatcher.
+bool IsUserRangeAccessible(u64 addr, u64 len)
+{
+    if (len == 0)
+    {
+        return true;
+    }
+    const u64 start = addr & ~kPageMask;
+    const u64 end = (addr + len - 1) & ~kPageMask;
+    for (u64 p = start; p <= end; p += kPageSize)
+    {
+        if (!PagePresentAndUser(p))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+} // namespace
+
 bool CopyFromUser(void* kernel_dst, const void* user_src, u64 len)
 {
-    if (!IsUserAddressRange(reinterpret_cast<u64>(user_src), len))
+    const u64 src_addr = reinterpret_cast<u64>(user_src);
+    if (!IsUserAddressRange(src_addr, len))
+    {
+        return false;
+    }
+    if (!IsUserRangeAccessible(src_addr, len))
     {
         return false;
     }
@@ -330,7 +382,12 @@ bool CopyFromUser(void* kernel_dst, const void* user_src, u64 len)
 
 bool CopyToUser(void* user_dst, const void* kernel_src, u64 len)
 {
-    if (!IsUserAddressRange(reinterpret_cast<u64>(user_dst), len))
+    const u64 dst_addr = reinterpret_cast<u64>(user_dst);
+    if (!IsUserAddressRange(dst_addr, len))
+    {
+        return false;
+    }
+    if (!IsUserRangeAccessible(dst_addr, len))
     {
         return false;
     }

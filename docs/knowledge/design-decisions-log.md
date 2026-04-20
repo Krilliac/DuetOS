@@ -607,6 +607,172 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 051 — SYS_YIELD = 3 (cooperative yield from ring 3)
+
+- **Scope:** `kernel/core/syscall.{h,cpp}` — new enum value,
+  new switch case; `kernel/core/ring3_smoke.cpp` — payload
+  grew from 31 → 31+7 = 38 bytes to insert `mov eax, 3; int
+  0x80` between the SYS_WRITE and SYS_EXIT calls.
+- **Decision:** Expose `sched::SchedYield` to ring 3 via a
+  dedicated syscall number. Cooperative-yield semantics: the
+  kernel-side handler calls SchedYield (cli / Schedule / sti),
+  writes 0 into frame->rax, and returns. The ring-3 side sees
+  the same net effect as a `pause` loop that happens to have
+  given the scheduler a chance to run other tasks. v0 returns
+  a constant 0 — the reserved slot lets a future "did I
+  actually get descheduled" boolean slot in without an ABI
+  break.
+- **Why:** The smoke payload now exercises all three non-exit
+  syscalls on its happy path: WRITE (pointer + return-value
+  ABI), YIELD (kernel-state-change without a return value),
+  and GETPID (not yet in the payload, but dispatched end-to-
+  end in the handler). Landing YIELD now also closes a latent
+  ABI-design gap: "can a ring-3 task ever voluntarily give up
+  its slice without exiting?" was implicitly "no" before this
+  slice, which is the wrong default for any future userland
+  main loop.
+- **Rules out / defers:** Priority inheritance through yield
+  (if a lower-prio task is holding a resource a yield caller
+  wants, the yield should donate the caller's priority — not
+  a thing yet, only Normal + Idle classes). Bounded-yield
+  variants (`SYS_YIELD_UNTIL(deadline)`, `SYS_SLEEP(ticks)`)
+  — both are natural follow-ups, but each is its own slice
+  with its own ABI choices. Per-CPU yield stats in the klog
+  (interesting once concurrency is real).
+- **Revisit when:** First shell / userland main loop lands
+  (consumer of yield). First real-time scheduling class
+  (yield semantics change — "give up slice" vs "give up
+  slice AND drop to end of priority band"). SYS_SLEEP /
+  SYS_YIELD_UNTIL land (this gate grows siblings).
+- **Related tracks:** Track 4 (Process model — cooperative
+  yield is the baseline userland sees), Track 11 (Win32 —
+  NtYieldExecution eventually descends from this).
+
+---
+
+## 050 — Per-task user-VM regions: reaper-driven unmap + free
+
+- **Scope:** `kernel/sched/sched.{h,cpp}` — new `UserVmRegion`
+  struct (vaddr + frame), Task grows a fixed-size
+  `user_regions[4]` array + count field, new
+  `sched::RegisterUserVmRegion(vaddr, frame)` accessor, the
+  reaper drains the array before KFreeing the Task struct
+  (calls `mm::UnmapPage` + `mm::FreeFrame` per entry).
+  Ring-3 smoke registers its code + stack pages immediately
+  after each MapPage.
+- **Decision:** Store every user-VM page a task maps in a
+  fixed-size on-Task-struct array. The reaper (already the
+  owner of "a zombie just went off-CPU, tear it down") walks
+  the array, unmaps each vaddr, and returns each frame to the
+  physical allocator. Cap at 4 entries per task — comfortably
+  covers code + stack + a heap page + one scratch; hitting
+  the cap panics, which is the "a consumer grew without
+  updating this constant" signal. Registration is lock-free
+  because only the task itself writes its own region array,
+  only from its own context, and the reaper only reads it
+  after the task is off-CPU and flagged Dead.
+- **Why:** Entry #044 noted "A way for the user task to exit
+  (the ring-3 loop is genuinely infinite; the reaper never
+  sees it)"; #045 closed that by landing SYS_EXIT; #047's
+  smoke payload now exercises SYS_EXIT on every boot. But
+  without region cleanup, each exit LEAKED one code page
+  + one stack page from the global PML4 + their backing
+  frames. First symptom would have been either (a) a
+  restart of the smoke task panicking on "virtual address
+  already mapped" in MapPage, or (b) the physical allocator
+  slowly draining to exhaustion over many boots. Neither is
+  a visible failure today — the smoke task runs once per
+  boot — but the kernel-invariant is "no resource outlives
+  its owning task," and violating it silently is exactly the
+  kind of drift the anti-bloat guidelines flag.
+- **Rules out / defers:** Variable-sized region lists (would
+  require heap allocation tied to task lifetime — out of
+  scope while 4 is the common case). Sharing a region
+  between tasks (requires refcounted frames; needed the
+  moment two ring-3 tasks share a library page). Lazy
+  deferred free (free the frames but keep the page-table
+  entries for fast re-install — a micro-optimisation with
+  no consumer yet). TLB shootdown on the unmap — single-
+  CPU ring 3 today, so invlpg on the local CPU in
+  UnmapPage is enough.
+- **Revisit when:** A second ring-3 task exists (it'll
+  probably want shared read-only mappings for its code
+  → refcount). Per-process address spaces land (the whole
+  "region list owned by the Task struct" becomes "region
+  list owned by the address space, Tasks point at an
+  address space"). SMP ring 3 — TLB shootdown on unmap
+  becomes necessary.
+- **Related tracks:** Track 3 (MM — page-table lifecycle),
+  Track 4 (Process model — resource ownership is per-Task
+  until per-process address spaces land), Track 13
+  (Security — leaking mappings across tasks is a
+  confidentiality bug waiting for a consumer).
+
+---
+
+## 049 — Walk-first user-pointer mapping check in CopyFrom/ToUser
+
+- **Scope:** `kernel/mm/paging.cpp` — new file-local
+  `PagePresentAndUser(virt)` + `IsUserRangeAccessible(addr,
+  len)` helpers that walk the PT via the existing
+  `WalkToPte(..., create=false)`. `CopyFromUser` / `CopyToUser`
+  now chain: range check → page-walk check → SMAP-bracketed
+  copy.
+- **Decision:** Before any SMAP-bracketed user copy, walk the
+  page table for every 4 KiB page the copy will touch and
+  verify both `Present` and `User` are set on the PTE. A
+  page that's in-range but not mapped (or mapped but not
+  user-accessible) returns `false` from the copy call
+  without ever actually dereferencing it. This makes the v0
+  "kernel halts on any #PF, including #PFs inside copy
+  loops" posture survivable against an uncooperative
+  user — a caller that passes an unmapped (but in-range)
+  pointer now gets a clean -1 from SYS_WRITE instead of
+  halting the whole machine.
+- **Why:** SMAP tells the CPU "don't let kernel code touch
+  user pages without stac," but it doesn't tell the CPU
+  "don't touch unmapped pages." A user pointer that's in
+  the canonical low half but points at a 4 KiB hole in the
+  address space (either never mapped, or a page we haven't
+  allocated) would still #PF on the copy — and today's trap
+  dispatcher halts on #PF. The right long-term fix is a
+  `__copy_user_fault_fixup` table (patches the fault RIP to
+  a "return false" label), but that requires inline asm for
+  the copy loops AND a linker-section sweep in the #PF
+  handler. Walk-first achieves the same user-visible
+  behaviour in pure C++ with no ABI or linker changes, at
+  the cost of one PT walk per copy. That's ~4 memory reads
+  per 4 KiB page — negligible for the 256-byte SYS_WRITE
+  copy, irrelevant for anything smaller, and a genuinely
+  bad idea for multi-megabyte copies that we don't have
+  and aren't about to land.
+- **Rules out / defers:** The proper fault-fixup table
+  (deferred until either a) a syscall needs to copy more
+  than the walk-first budget allows, or b) demand paging /
+  lazy page-in lands — at which point a "page was present
+  at walk time but got swapped out before the copy" race
+  becomes real). Multi-range copy / scatter-gather I/O.
+  Copy-on-write for forked address spaces. Concurrent-
+  unmap races on SMP (no AP user code today). Writable-
+  check for CopyToUser — today the walker only tests
+  Present + User, not Writable; a truly robust version
+  would verify the user page is writable before CopyToUser
+  even starts, turning "copy half-way then #PF on a
+  read-only page" into "return false up front." No
+  consumer today; add when one lands.
+- **Revisit when:** First consumer copying > a few KiB
+  (the walk's cost becomes measurable). Demand paging
+  lands. Per-process address spaces land (concurrent
+  unmap from another CPU becomes possible → race window
+  opens → fault-fixup becomes necessary). First CopyToUser
+  caller that wants a strict pre-check on writable pages.
+- **Related tracks:** Track 3 (MM — address-space
+  correctness), Track 13 (Security — robust user-pointer
+  handling is upstream of every syscall-level trust
+  boundary).
+
+---
+
 ## 048 — Scheduler publishes TSS.RSP0 on every switch-in
 
 - **Scope:** `kernel/sched/sched.cpp` — `Schedule()` now calls
