@@ -1,4 +1,5 @@
 #include "types.h"
+#include "../acpi/acpi.h"
 #include "../arch/x86_64/cpu.h"
 #include "../arch/x86_64/gdt.h"
 #include "../arch/x86_64/idt.h"
@@ -69,6 +70,9 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     SerialWrite("[boot] Bringing up paging.\n");
     PagingInit();
     PagingSelfTest();
+
+    SerialWrite("[boot] Parsing ACPI tables.\n");
+    customos::acpi::AcpiInit(multiboot_info);
 
     SerialWrite("[boot] Disabling 8259 PIC.\n");
     PicDisable();
