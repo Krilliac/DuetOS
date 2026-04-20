@@ -18,6 +18,7 @@ struct Task
     u64 rsp;        // saved stack pointer (0 while running)
     u8* stack_base; // lowest address of the kernel stack
     u64 stack_size;
+    u64 wake_tick; // valid only while state == Sleeping
     const char* name;
     Task* next; // runqueue link (intrusive)
 };
@@ -32,11 +33,14 @@ using arch::SerialWriteHex;
 constexpr u64 kKernelStackBytes = 16 * 1024; // 16 KiB per task — plenty for v0
 
 constinit Task* g_current = nullptr;
-constinit Task* g_run_head = nullptr; // next to run
-constinit Task* g_run_tail = nullptr; // append here
+constinit Task* g_run_head = nullptr;   // next to run
+constinit Task* g_run_tail = nullptr;   // append here
+constinit Task* g_sleep_head = nullptr; // sorted by wake_tick (ascending)
+constinit u64 g_tick_now = 0;
 constinit u64 g_next_task_id = 0;
 constinit u64 g_context_switches = 0;
 constinit u64 g_tasks_live = 0;
+constinit u64 g_tasks_sleeping = 0;
 constinit u64 g_tasks_created = 0;
 constinit u64 g_tasks_exited = 0;
 constinit bool g_need_resched = false;
@@ -79,6 +83,32 @@ Task* RunqueuePop()
     return t;
 }
 
+void SleepqueueInsert(Task* t)
+{
+    t->next = nullptr;
+    if (g_sleep_head == nullptr || t->wake_tick < g_sleep_head->wake_tick)
+    {
+        t->next = g_sleep_head;
+        g_sleep_head = t;
+        return;
+    }
+
+    Task* it = g_sleep_head;
+    while (it->next != nullptr && it->next->wake_tick <= t->wake_tick)
+    {
+        it = it->next;
+    }
+    t->next = it->next;
+    it->next = t;
+}
+
+// Wrap-safe tick deadline compare. Works as long as nobody sleeps for more
+// than 2^63-1 ticks in one call (orders of magnitude beyond practical use).
+bool TickReached(u64 now, u64 deadline)
+{
+    return static_cast<i64>(now - deadline) >= 0;
+}
+
 // Defined in context_switch.S. The first `ret` out of ContextSwitch for a
 // freshly-created task lands here. Reads the entry function and argument
 // from the callee-saved registers the SchedCreate stack primer planted
@@ -104,6 +134,7 @@ void SchedInit()
     boot_task->rsp = 0; // populated on first context switch out
     boot_task->stack_base = nullptr;
     boot_task->stack_size = 0;
+    boot_task->wake_tick = 0;
     boot_task->name = "kboot";
     boot_task->next = nullptr;
 
@@ -132,6 +163,7 @@ Task* SchedCreate(TaskEntry entry, void* arg, const char* name)
     t->state = TaskState::Ready;
     t->stack_base = stack;
     t->stack_size = kKernelStackBytes;
+    t->wake_tick = 0;
     t->name = name;
     t->next = nullptr;
 
@@ -194,6 +226,10 @@ void Schedule()
     Task* next = RunqueuePop();
     if (next == nullptr)
     {
+        if (g_current->state != TaskState::Running)
+        {
+            PanicSched("no runnable task available");
+        }
         return;
     }
 
@@ -218,6 +254,24 @@ void Schedule()
 void SchedYield()
 {
     arch::Cli();
+    Schedule();
+    arch::Sti();
+}
+
+void SchedSleepTicks(u64 ticks)
+{
+    if (ticks == 0)
+    {
+        SchedYield();
+        return;
+    }
+
+    arch::Cli();
+    Task* current = g_current;
+    current->state = TaskState::Sleeping;
+    current->wake_tick = g_tick_now + ticks;
+    SleepqueueInsert(current);
+    ++g_tasks_sleeping;
     Schedule();
     arch::Sti();
 }
@@ -251,6 +305,28 @@ bool TakeNeedResched()
     return v;
 }
 
+void OnTimerTick(u64 now_ticks)
+{
+    g_tick_now = now_ticks;
+
+    bool woke_any = false;
+    while (g_sleep_head != nullptr && TickReached(now_ticks, g_sleep_head->wake_tick))
+    {
+        Task* woken = g_sleep_head;
+        g_sleep_head = woken->next;
+        woken->next = nullptr;
+        woken->state = TaskState::Ready;
+        RunqueuePush(woken);
+        --g_tasks_sleeping;
+        woke_any = true;
+    }
+
+    if (woke_any)
+    {
+        g_need_resched = true;
+    }
+}
+
 Task* CurrentTask()
 {
     return g_current;
@@ -261,6 +337,7 @@ SchedStats SchedStatsRead()
     return SchedStats{
         .context_switches = g_context_switches,
         .tasks_live = g_tasks_live,
+        .tasks_sleeping = g_tasks_sleeping,
         .tasks_created = g_tasks_created,
         .tasks_exited = g_tasks_exited,
     };

@@ -13,8 +13,8 @@
  * Scope limits that will be fixed in later commits:
  *   - No userland. Every task runs in ring 0 on its own kernel stack.
  *   - No priorities. FIFO runqueue, picked head on every reschedule.
- *   - No blocking / wait-queues / sleep. Tasks are Ready or Running.
- *     Dying is a one-way state set by SchedExit.
+ *   - Sleep is tick-based only (`SchedSleepTicks`) and run from the timer
+ *     IRQ wake path. Generic wait-queues / mutex blocking come later.
  *   - Not SMP. g_current_task is global; spinlocks come with APs.
  *   - Preemption only at IRQ boundaries (the timer). Kernel code cannot
  *     be preempted in the middle of a non-IRQ critical section.
@@ -32,7 +32,8 @@ enum class TaskState : u8
 {
     Ready,   // on the runqueue, waiting for a slot
     Running, // currently on a CPU
-    Dead,    // SchedExit called; stack + task struct reclaimable
+    Sleeping,
+    Dead, // SchedExit called; stack + task struct reclaimable
 };
 
 struct Task;
@@ -51,6 +52,10 @@ Task* SchedCreate(TaskEntry entry, void* arg, const char* name);
 /// switches to the head (if any other task is ready).
 void SchedYield();
 
+/// Block the current task for at least `ticks` timer ticks (100 Hz clock
+/// today). A value of 0 behaves like SchedYield().
+void SchedSleepTicks(u64 ticks);
+
 /// Terminate the current task. Marks it Dead, reclaims nothing in v0 (a
 /// reaper thread lands later), and switches away — never returns.
 [[noreturn]] void SchedExit();
@@ -65,6 +70,10 @@ void Schedule();
 void SetNeedResched();
 bool TakeNeedResched(); // read-and-clear
 
+/// Timer IRQ hook. Called exactly once per timer tick from interrupt
+/// context after the global tick counter is incremented.
+void OnTimerTick(u64 now_ticks);
+
 /// Pointer to the currently-executing task. Never null after SchedInit.
 Task* CurrentTask();
 
@@ -73,6 +82,7 @@ struct SchedStats
 {
     u64 context_switches; // lifetime
     u64 tasks_live;       // current length of the runqueue + running task
+    u64 tasks_sleeping;   // current number of sleeping tasks
     u64 tasks_created;    // lifetime
     u64 tasks_exited;     // lifetime (Dead count)
 };

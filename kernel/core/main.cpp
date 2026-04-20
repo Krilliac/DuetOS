@@ -99,13 +99,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
             SerialWriteHex(TimerTicks());
             SerialWrite("\n");
 
-            // Burn ~10 ms of CPU so the timer has a chance to preempt us
-            // between iterations. Pure busy-loop; once sleep() lands,
-            // switch to that.
-            for (customos::u64 j = 0; j < 5'000'000; ++j)
-            {
-                asm volatile("" ::: "memory");
-            }
+            customos::sched::SchedSleepTicks(1); // 10 ms at 100 Hz
         }
     };
 
