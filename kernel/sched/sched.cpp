@@ -7,6 +7,7 @@
 #include "../core/recovery.h"
 #include "../cpu/percpu.h"
 #include "../mm/kheap.h"
+#include "../sync/spinlock.h"
 
 namespace customos::sched
 {
@@ -64,6 +65,30 @@ constinit Task* g_zombies = nullptr;
 constinit WaitQueue g_reaper_wq{};
 constinit u64 g_tasks_exited = 0;
 
+// Single global scheduler lock protecting every mutation of:
+//   - g_run_head / g_run_tail
+//   - g_sleep_head
+//   - g_zombies
+//   - any WaitQueue head/tail
+//   - g_tasks_* counters
+//
+// On single CPU today this is a no-op: callers that matter are
+// already CLI'd, so there's no concurrency to guard against. The
+// value is enforcing a single locking discipline across every
+// mutation point so SMP bring-up (Commit D in smp-ap-bringup-scope)
+// has uniform ground truth — "this lock protects the runqueue" —
+// rather than a per-site bolt-on.
+//
+// IMPORTANT gap: Schedule() does NOT hold this lock across the
+// ContextSwitch call. The lock covers RunqueuePop/Push and the
+// state transitions; it's released before ContextSwitch. On single
+// CPU that's fine (CLI prevents concurrent IRQs on this core). On
+// SMP, another CPU could wake `prev` between the release and the
+// context switch, then try to schedule INTO prev while we're still
+// on prev's stack. Commit D fixes via lock-passing-across-switch,
+// mirroring Linux's finish_task_switch pattern.
+constinit sync::SpinLock g_sched_lock{};
+
 // Current() and NeedResched() moved to cpu::PerCpu. Per-CPU accessors
 // keep call sites terse and read unambiguously: Current() is the
 // currently-running task on THIS CPU; NeedResched() is THIS CPU's
@@ -83,6 +108,10 @@ inline bool& NeedResched()
     core::Panic("sched", message);
 }
 
+// Low-level helpers — assume the caller holds g_sched_lock. Internal
+// "_Locked" suffix would be Linux-style but in our file-local scope
+// the expectation is encoded by staying inside the anonymous namespace
+// and calling only from functions that acquire the lock themselves.
 void RunqueuePush(Task* t)
 {
     t->next = nullptr;
@@ -238,9 +267,12 @@ Task* SchedCreate(TaskEntry entry, void* arg, const char* name)
 
     t->rsp = reinterpret_cast<u64>(sp);
 
-    RunqueuePush(t);
-    ++g_tasks_created;
-    ++g_tasks_live;
+    {
+        sync::SpinLockGuard guard(g_sched_lock);
+        RunqueuePush(t);
+        ++g_tasks_created;
+        ++g_tasks_live;
+    }
 
     SerialWrite("[sched] created task id=");
     SerialWriteHex(t->id);
@@ -260,30 +292,38 @@ void Schedule()
         return; // pre-SchedInit timer tick (shouldn't happen, but be safe)
     }
 
-    // Pick the next runnable task. If the runqueue is empty, keep
-    // running the current task — no one else wants the CPU.
-    Task* next = RunqueuePop();
-    if (next == nullptr)
+    Task* prev = nullptr;
+    Task* next = nullptr;
     {
-        if (Current()->state != TaskState::Running)
+        // Acquire the scheduler lock ONLY for the pick + state-transition
+        // phase. We release BEFORE ContextSwitch — see the SMP gap note
+        // on g_sched_lock: on single CPU this is safe (CLI serialises),
+        // on SMP Commit D adds the lock-passing-across-switch dance.
+        sync::SpinLockGuard guard(g_sched_lock);
+
+        next = RunqueuePop();
+        if (next == nullptr)
         {
-            PanicSched("no runnable task available");
+            if (Current()->state != TaskState::Running)
+            {
+                PanicSched("no runnable task available");
+            }
+            return;
         }
-        return;
-    }
 
-    Task* prev = Current();
-    if (prev->state == TaskState::Running)
-    {
-        prev->state = TaskState::Ready;
-        RunqueuePush(prev);
-    }
-    // Dead tasks are NOT re-enqueued; their Task struct + stack live on
-    // until a future reaper reclaims them (see Notes in sched.h).
+        prev = Current();
+        if (prev->state == TaskState::Running)
+        {
+            prev->state = TaskState::Ready;
+            RunqueuePush(prev);
+        }
+        // Dead tasks are NOT re-enqueued; their Task struct + stack live on
+        // until the reaper reclaims them.
 
-    next->state = TaskState::Running;
-    Current() = next;
-    ++g_context_switches;
+        next->state = TaskState::Running;
+        Current() = next;
+        ++g_context_switches;
+    }
 
     ContextSwitch(&prev->rsp, next->rsp);
     // When we return here, `prev` is running again (it may have been
@@ -309,8 +349,11 @@ void SchedSleepTicks(u64 ticks)
     Task* current = Current();
     current->state = TaskState::Sleeping;
     current->wake_tick = g_tick_now + ticks;
-    SleepqueueInsert(current);
-    ++g_tasks_sleeping;
+    {
+        sync::SpinLockGuard guard(g_sched_lock);
+        SleepqueueInsert(current);
+        ++g_tasks_sleeping;
+    }
     Schedule();
     arch::Sti();
 }
@@ -370,15 +413,18 @@ void OnTimerTick(u64 now_ticks)
     g_tick_now = now_ticks;
 
     bool woke_any = false;
-    while (g_sleep_head != nullptr && TickReached(now_ticks, g_sleep_head->wake_tick))
     {
-        Task* woken = g_sleep_head;
-        g_sleep_head = woken->next;
-        woken->next = nullptr;
-        woken->state = TaskState::Ready;
-        RunqueuePush(woken);
-        --g_tasks_sleeping;
-        woke_any = true;
+        sync::SpinLockGuard guard(g_sched_lock);
+        while (g_sleep_head != nullptr && TickReached(now_ticks, g_sleep_head->wake_tick))
+        {
+            Task* woken = g_sleep_head;
+            g_sleep_head = woken->next;
+            woken->next = nullptr;
+            woken->state = TaskState::Ready;
+            RunqueuePush(woken);
+            --g_tasks_sleeping;
+            woke_any = true;
+        }
     }
 
     if (woke_any)
@@ -487,19 +533,22 @@ void WaitQueueBlock(WaitQueue* wq)
 {
     KASSERT(wq != nullptr, "sched", "WaitQueueBlock null queue");
 
-    Task* t = Current();
-    t->state = TaskState::Blocked;
-    t->next = nullptr;
-    if (wq->tail == nullptr)
     {
-        wq->head = wq->tail = t;
+        sync::SpinLockGuard guard(g_sched_lock);
+        Task* t = Current();
+        t->state = TaskState::Blocked;
+        t->next = nullptr;
+        if (wq->tail == nullptr)
+        {
+            wq->head = wq->tail = t;
+        }
+        else
+        {
+            wq->tail->next = t;
+            wq->tail = t;
+        }
+        ++g_tasks_blocked;
     }
-    else
-    {
-        wq->tail->next = t;
-        wq->tail = t;
-    }
-    ++g_tasks_blocked;
 
     Schedule();
     // Woken. Our state was flipped back to Running by Schedule() + the
@@ -510,25 +559,30 @@ Task* WaitQueueWakeOne(WaitQueue* wq)
 {
     KASSERT(wq != nullptr, "sched", "WaitQueueWakeOne null queue");
 
-    Task* t = wq->head;
-    if (t == nullptr)
+    Task* t = nullptr;
     {
-        return nullptr;
+        sync::SpinLockGuard guard(g_sched_lock);
+        t = wq->head;
+        if (t == nullptr)
+        {
+            return nullptr;
+        }
+        wq->head = t->next;
+        if (wq->head == nullptr)
+        {
+            wq->tail = nullptr;
+        }
+        t->next = nullptr;
+        t->state = TaskState::Ready;
+        RunqueuePush(t);
+        --g_tasks_blocked;
     }
-    wq->head = t->next;
-    if (wq->head == nullptr)
-    {
-        wq->tail = nullptr;
-    }
-    t->next = nullptr;
-    t->state = TaskState::Ready;
-    RunqueuePush(t);
-    --g_tasks_blocked;
 
     // If the wake happens from a non-IRQ context, leaving need_resched set
     // lets the very next timer tick preempt us into the woken task. If
     // it's from IRQ context, the dispatcher already checks need_resched
-    // after EOI. Either path converges.
+    // after EOI. Either path converges. need_resched is per-CPU, so
+    // setting it outside the lock is safe.
     NeedResched() = true;
     return t;
 }
