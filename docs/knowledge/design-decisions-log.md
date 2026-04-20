@@ -359,7 +359,7 @@ get an inline "superseded by <commit>" note and stay.
 ## 015 — Prefer Multiboot2 ACPI "new" tag over "old" tag
 
 - **Scope:** `kernel/acpi/acpi.cpp` — `FindRsdpInMultiboot`
-- **Commit:** _(filled at commit)_
+- **Commit:** `cfd2057`
 - **Decision:** Scan the entire Multiboot2 tag list, remember both the
   type-14 (v1 RSDP) and type-15 (v2 RSDP) tags if present, and prefer
   the v2 one.
