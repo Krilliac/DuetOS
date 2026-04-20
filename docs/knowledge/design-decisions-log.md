@@ -607,6 +607,155 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 060 — 8x8 bitmap font + framebuffer text rendering
+
+- **Scope:** `kernel/drivers/video/font8x8.{h,cpp}` — hand-crafted
+  5x7-in-8x8 font (space, digits, uppercase A-Z, 20 punctuation).
+  `framebuffer.{h,cpp}` — `DrawChar` / `DrawString` with fg/bg.
+  `main.cpp` — desktop banner + window title + button label.
+- **Decision:** Ship the smallest font that is coherent (all
+  visible characters same design language, consistent kerning,
+  full uppercase + digits + punctuation) rather than a broader
+  font that's partially transcribed. Lowercase aliases to
+  uppercase at lookup. Unmapped codes render as a placeholder
+  box so gaps are visible rather than silent. Bit 7 is
+  leftmost — classic IBM font layout, matches every open font
+  tool on earth.
+- **Why:** Every subsequent UI element — menus, labels,
+  status bars, dialog buttons, console output — needs glyphs.
+  Landing a font NOW with cleanly-defined layout (8-px cell
+  advance, bg fill behind each glyph) means widget code can
+  render text with one call and not worry about alpha / anti-
+  aliasing yet.
+- **Rules out / defers:** Lowercase glyph shapes (alias to
+  uppercase for now — ugly but readable). Proportional spacing.
+  Anti-aliasing / subpixel rendering. Unicode (ASCII only).
+  Multiple font sizes. True italic / bold (bitmap manipulations
+  only). Kerning pairs.
+- **Revisit when:** First locale grows a non-ASCII character
+  (unlocks an ICU-shaped translation layer). Compositor wants
+  hi-DPI text rendering (forces a vector font). Real terminal
+  emulator lands (wants control-char handling + scrollback).
+- **Related tracks:** Track 9 (Windowing — labels / title text),
+  Track 7 (Userland — shell needs glyphs too).
+
+---
+
+## 059 — KeyEvent API with modifiers + extended keys
+
+- **Scope:** `kernel/drivers/input/ps2kbd.{h,cpp}` — new
+  `Ps2KeyboardReadEvent` returning `KeyEvent { code, modifiers,
+  is_release }`. Translator grows LCtrl / RCtrl / LAlt / RAlt /
+  Meta tracking; 0xE0-prefixed arrows / Home / End / PgUp /
+  PgDn / Insert / Delete lift to `KeyCode` values; F1..F12
+  decoded; Esc / Tab / Enter / Backspace named.
+- **Decision:** Supersede the `char`-returning
+  `Ps2KeyboardReadChar` with an event-shaped API that preserves
+  both press AND release edges, a modifier bitmask, and non-
+  ASCII keys. Keep the old API for simple echo-style readers
+  (the two share the raw ring). Modifier-only edges surface as
+  `code == kKeyNone` + populated modifiers so the UI can render
+  "Ctrl held" cues.
+- **Why:** Closes the deferral from entry #024 — "a future
+  KeyEvent interface will carry [modifiers] as a modifier
+  bitmap." No shell / text input / Ctrl+C / arrow navigation
+  is possible with a bare `char` return. Landing it now, before
+  any compositor, means every toolkit consumer sees one shape
+  from day one.
+- **Rules out / defers:** Key-repeat rate config. Non-US
+  layouts (AZERTY, Dvorak). Numpad / NumLock-aware numpad. IME
+  composition. Print Screen / Pause / Multimedia keys. 6KRO /
+  NKRO tracking (8042 reports one press at a time anyway).
+- **Revisit when:** Non-US locale needed. USB HID lands
+  (replaces PS/2 on real hardware; KeyEvent stays the same
+  shape). Shell widget needs key-repeat semantics.
+- **Related tracks:** Track 6 (Drivers — input), Track 9
+  (Windowing — keyboard-event source).
+
+---
+
+## 058 — Window chrome primitive (title bar + client + close box)
+
+- **Scope:** `kernel/drivers/video/widget.{h,cpp}` — `WindowChrome`
+  struct + `WindowDraw`. Paints outer 2-px border, coloured title
+  bar, client area fill, 1-px divider line, and a close-button
+  square in the top-right corner with its own outline.
+- **Decision:** Windows are a STATIC draw primitive in v0, not a
+  widget-table entry. Callers invoke `WindowDraw` once per paint
+  pass; dragging / focus / z-order grow this into a real widget
+  once the toolkit lands. Chrome is intentionally Windows-98-
+  adjacent: recognisable to every human who's ever seen a GUI.
+- **Why:** First GUI element that looks unmistakably "window-
+  like" — a frame with a title bar and a close button. No
+  ambiguity about what the primitive represents; any future
+  toolkit can grow dragging / stacking on top of this without
+  reworking the shape.
+- **Rules out / defers:** Dragging. Resizing. Focus + z-order
+  stack. Title text (needs font — landed in #060). Minimize /
+  maximise widgets. Shadow / alpha. Non-rectangular shapes.
+  Scroll bars. Non-client hit testing.
+- **Revisit when:** Two windows coexist on screen (forces
+  z-order + focus). First drag operation lands. Compositor
+  takes over chrome rendering.
+- **Related tracks:** Track 9 (Windowing — iconic primitive).
+
+---
+
+## 057 — Clickable button widget + mouse event router
+
+- **Scope:** `kernel/drivers/video/widget.{h,cpp}` —
+  `ButtonWidget`, `WidgetRegisterButton`, `WidgetDrawAll`,
+  `WidgetRouteMouse`. `framebuffer.{h,cpp}` — `DrawRect`
+  (4-band outline primitive). `cursor.{h,cpp}` —
+  `CursorHide` / `CursorShow` helpers.
+- **Decision:** First UI event primitive. A button is a rect
+  with normal + pressed colours + a caller-assigned id. Router
+  diffs the latest `button_mask` against the prior sample and
+  transitions visual state on press / release edges (no hover
+  state). Redraws bracket `CursorHide / Show` so the cursor's
+  backing-pixel cache stays consistent with what's beneath.
+- **Why:** Clicks ARE the event primitive. Landing a router
+  now, before a full compositor, gives every future toolkit
+  one canonical "which widget did the user hit?" answer.
+  Avoids each new widget kind reimplementing hit-test.
+- **Rules out / defers:** Hover state (needs `prev_cursor_over`
+  tracking + hover colour — straightforward follow-up). Drag
+  & drop. Keyboard focus traversal (Tab cycling). Nested
+  widgets / z-order. Accessibility / screen-reader hooks.
+  Dynamic widget allocation (fixed 8-entry table).
+- **Revisit when:** Second widget kind lands (forces a shared
+  base class or a dispatch tag). Hover feedback needed.
+  Widget count exceeds 8.
+- **Related tracks:** Track 9 (Windowing — event routing
+  foundation), Track 6 (Drivers — consumer of mouse packets).
+
+---
+
+## 056 — Shaped cursor with per-pixel save/restore
+
+- **Scope:** `kernel/drivers/video/cursor.{h,cpp}`.
+- **Decision:** Upgrade the triangle-fill cursor to a 12x20
+  shaped-mask arrow with three kinds of pixel (transparent,
+  outline-black, fill-white). Save every non-transparent
+  pixel under the sprite on `SaveAt`; restore on `RestoreAt`.
+  Framebuffer grows a file-local `ReadPixel` helper for the
+  save path.
+- **Why:** Entry #055's "erase to desktop colour" shortcut
+  broke the moment any non-desktop content (widgets, window
+  chrome) landed under the cursor. Per-pixel save/restore is
+  the only correct answer short of a compositor-managed
+  overlay plane. Cost is negligible (240 u32s of .bss).
+- **Rules out / defers:** Hardware cursor plane (vendor-
+  specific MMIO — land with each GPU driver). Animated
+  cursors. Per-context cursor shapes (I-beam, resize,
+  hourglass). Colour cursor themes.
+- **Revisit when:** GPU drivers expose a hardware cursor.
+  Toolkit needs shape-switching based on widget class.
+  Compositor lands (overlay plane becomes natural).
+- **Related tracks:** Track 8 (Graphics), Track 9 (Windowing).
+
+---
+
 ## 055 — Mouse cursor overlay on the framebuffer
 
 - **Scope:** `kernel/drivers/video/cursor.{h,cpp}` — new module:
