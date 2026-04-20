@@ -74,10 +74,16 @@ alignas(16) constinit Tss g_bsp_tss = {};
 // Dedicated exception stacks. 4 KiB each is comfortable — the trap
 // dispatcher's deepest path (symbolised backtrace + register dump +
 // klog ring drain) runs to about 2 KiB, and these stacks never
-// re-enter themselves. Declared in BSS (zero-initialised) rather
-// than forcing a specific non-zero pattern; the stack canary lives
-// in the task struct, not here.
+// re-enter themselves.
+//
+// Each gets a stack canary at its LOW edge (stacks grow down, so
+// byte 0 is the overflow edge). `TssInit` plants the canary; the
+// trap dispatcher's crash-dump path can check it after the trap
+// runs to detect a blown IST (which would otherwise corrupt
+// neighbouring BSS silently). Matches the per-task stack canary
+// pattern in kernel/sched/sched.cpp.
 constexpr u64 kIstStackBytes = 4096;
+constexpr u64 kIstStackCanary = 0xC0DEB0B0CAFED00DULL;
 alignas(16) constinit u8 g_ist_stack_df[kIstStackBytes] = {};
 alignas(16) constinit u8 g_ist_stack_mc[kIstStackBytes] = {};
 alignas(16) constinit u8 g_ist_stack_nmi[kIstStackBytes] = {};
@@ -116,6 +122,13 @@ void GdtInit()
 
 void TssInit()
 {
+    // Plant a canary at the low edge of each IST stack. A blown
+    // exception stack (say, #DF deeper than 4 KiB) would scribble
+    // this value and IstStackCanaryIntact() picks it up.
+    *reinterpret_cast<u64*>(g_ist_stack_df) = kIstStackCanary;
+    *reinterpret_cast<u64*>(g_ist_stack_mc) = kIstStackCanary;
+    *reinterpret_cast<u64*>(g_ist_stack_nmi) = kIstStackCanary;
+
     // Fill the TSS body. Stacks grow down; each IST pointer is the
     // stack's TOP (base + size). RSP0 stays 0 until ring 3 lands —
     // it's only consulted on user→kernel privilege transitions.
@@ -143,6 +156,14 @@ void TssInit()
     // pointer already covers slots 0..4 (loaded by GdtInit above),
     // so there's no re-lgdt dance.
     asm volatile("ltr %w0" : : "r"(kTssSelector));
+}
+
+bool IstStackCanariesIntact()
+{
+    const u64 df = *reinterpret_cast<const u64*>(g_ist_stack_df);
+    const u64 mc = *reinterpret_cast<const u64*>(g_ist_stack_mc);
+    const u64 nmi = *reinterpret_cast<const u64*>(g_ist_stack_nmi);
+    return df == kIstStackCanary && mc == kIstStackCanary && nmi == kIstStackCanary;
 }
 
 } // namespace customos::arch

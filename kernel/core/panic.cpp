@@ -1,6 +1,7 @@
 #include "panic.h"
 
 #include "../arch/x86_64/cpu.h"
+#include "../arch/x86_64/gdt.h"
 #include "../arch/x86_64/serial.h"
 #include "../arch/x86_64/smp.h"
 #include "../arch/x86_64/timer.h"
@@ -233,6 +234,13 @@ void DumpDiagnostics(u64 rip, u64 rsp, u64 rbp)
     WriteLabelled("cr4      ", arch::ReadCr4());
     WriteLabelled("rflags   ", arch::ReadRflags());
     WriteLabelled("efer     ", arch::ReadEfer());
+    // A blown IST stack is one of the quietest ways a kernel can
+    // die — silently corrupts neighbouring BSS and shows up as
+    // mystery data corruption later. Surface it explicitly here
+    // so a canary violation is named, not debugged from entrails.
+    arch::SerialWrite("  ist_canary : ");
+    arch::SerialWrite(arch::IstStackCanariesIntact() ? "ok" : "CORRUPT");
+    arch::SerialWrite("\n");
     DumpBacktrace(rbp);
     DumpStack(rsp, 16);
     DumpLogRing();

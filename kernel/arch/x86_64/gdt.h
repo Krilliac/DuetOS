@@ -52,4 +52,12 @@ void GdtInit();
 /// — each AP needs its own TSS + IST stacks.
 void TssInit();
 
+/// Check whether all three IST stack canaries are still the magic
+/// pattern planted by TssInit. Returns false if any has been
+/// overwritten — indicates a stack blown through its 4 KiB budget,
+/// which would otherwise silently corrupt adjacent BSS. Called by
+/// the crash-dump path so IST overflow is a named diagnostic
+/// instead of mystery heap / data corruption.
+bool IstStackCanariesIntact();
+
 } // namespace customos::arch
