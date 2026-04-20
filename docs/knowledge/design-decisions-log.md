@@ -607,6 +607,73 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 082 — Tab path completion for ls / cat
+
+- **Scope:** `kernel/core/shell.cpp` — `ShellTabComplete`
+  split into `CompleteCommandName` + `CompletePath`, with
+  shared helpers `ExtendLine` / `NamePrefixMatch`. Tab on a
+  buffer containing whitespace dispatches to path completion
+  only when the first token is `ls` or `cat`; other commands
+  keep their silent no-op behaviour.
+- **Decision:** Split the partial at the last '/' to get
+  parent + leaf. VfsLookup the parent, filter children by
+  prefix, extend on unique match — trailing '/' for
+  directories, trailing space for files so the user can
+  continue typing. Ambiguous match prints the candidate list
+  (dirs suffixed with '/') and re-prompts with the partial
+  intact. Absolute paths only; relative paths wait on a CWD.
+- **Why:** The v0 shell already exposed the ramfs via `ls` /
+  `cat`, but users had to type paths blind. Tab completion
+  is the single cheapest polish that makes the filesystem
+  feel discoverable.
+- **Rules out / defers:** Relative paths (no CWD yet). Quoted
+  paths with spaces. Globbing. Completion for non-ramfs
+  backends (will drop in for any backend that implements the
+  `children` enumeration shape). Middle-of-line completion.
+- **Revisit when:** Per-process CWD lands (relative paths).
+  Second FS backend (tmpfs / on-disk) lands and needs the
+  same completion shape.
+- **Related tracks:** Track 7 (Userland shell), Track 5
+  (VFS — completion is a read-path consumer).
+
+---
+
+## 081 — Right-click context menus + ambient MenuContext
+
+- **Scope:** `kernel/drivers/video/menu.{h,cpp}` — MenuOpen
+  grows `items`, `count`, `context` parameters; MenuInit is
+  retired; new `MenuContext()` accessor. `kernel/core/main.cpp`
+  — mouse reader detects right-button edges and opens one of
+  three item sets (kStartItems / kDesktopMenuItems /
+  kWindowMenuItems) with the appropriate context. Dispatch
+  grows cases 5 / 10 / 11 for SWITCH-TO-TTY / RAISE / CLOSE.
+- **Decision:** Menu open is stateful (single current item
+  list + context), but each call replaces both atomically.
+  Context is an opaque u32 the dispatcher reads via
+  MenuContext() — for window menus it's the target
+  WindowHandle. Action-id ranges documented in-comment:
+    1..9   global / desktop
+    10..19 window-targeted
+  leaving room for future actions without renumbering.
+- **Why:** Right-click context menus are the most iconic
+  Windows interaction we hadn't done. Landing them on the
+  existing menu primitive — with no new layout / hit-test /
+  render code — proves the primitive was sized right. Also
+  closes the "how do I close a window from a bystander POV"
+  question without depending on the X close-box hit-test.
+- **Rules out / defers:** Sub-menus / hover open. Right-click
+  on the taskbar (deliberately skipped — no useful actions
+  yet). Right-click drag / gesture. Multi-instance menus.
+  Keyboard navigation of context menus.
+- **Revisit when:** Taskbar grows useful context actions
+  (pin window, close all, etc.). Sub-menu support needed
+  (File > Open > Recent). Accessibility requires keyboard-
+  only nav.
+- **Related tracks:** Track 9 (Windowing — context-menu
+  dispatch is an input-routing layer).
+
+---
+
 ## 080 — Shell introspection: dmesg / stats / mem
 
 - **Scope:** `kernel/core/shell.{h,cpp}` — new commands.
