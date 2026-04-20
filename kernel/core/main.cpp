@@ -12,6 +12,7 @@
 #include "../drivers/input/ps2kbd.h"
 #include "../mm/frame_allocator.h"
 #include "../sync/spinlock.h"
+#include "klog.h"
 #include "../mm/kheap.h"
 #include "../mm/paging.h"
 #include "../sched/sched.h"
@@ -38,6 +39,11 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
 
     SerialInit();
     SerialWrite("[boot] CustomOS kernel reached long mode.\n");
+
+    // klog online as early as Serial. Self-test prints one line at
+    // each severity so visual inspection of the early boot log
+    // confirms the tag format + u64-value form are working.
+    customos::core::KLogSelfTest();
 
     constexpr customos::u32 kMultiboot2BootMagic = 0x36D76289;
     if (multiboot_magic == kMultiboot2BootMagic)

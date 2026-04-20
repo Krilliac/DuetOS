@@ -5,6 +5,7 @@
 # can load at physical 1 MiB and hand control to `_start` in boot.S.
 
 set(CUSTOMOS_KERNEL_SOURCES
+    core/klog.cpp
     core/main.cpp
     core/panic.cpp
     acpi/acpi.cpp
