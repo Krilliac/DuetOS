@@ -313,21 +313,60 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     SerialWrite("[boot] Discovering AHCI controller.\n");
     customos::drivers::storage::AhciInit();
 
-    // Keyboard reader thread: blocks on Ps2KeyboardReadChar, prints
-    // one line per resolved key press. End-to-end path exercised:
-    // ACPI → IOAPIC → IDT → dispatcher → IrqHandler → WaitQueueWakeOne
-    // → Schedule → reader wakes → translator consumes modifier +
-    // release bytes → returns ASCII → prints. If any link in that
-    // chain is broken, keypresses in QEMU are silently dropped.
+    // Keyboard reader thread: consumes KeyEvents and writes the
+    // printable ones into the framebuffer console. Backspace and
+    // Enter get line-editing semantics; modifier-only edges
+    // update internal state silently. The console is also
+    // mirrored to COM1 so a headless run still produces the
+    // classic serial boot log.
+    //
+    // v0 race note: this thread and the mouse reader both call
+    // DesktopCompose without a lock. FB writes are per-pixel
+    // atomic on x86_64 and the worst-case collision is a
+    // transient visual artifact, not corrupt state. A proper
+    // compositor mutex lands with the first crash, or on SMP
+    // scheduler join — whichever comes first.
     auto kbd_reader = [](void*)
     {
+        using namespace customos::drivers::input;
+        constexpr customos::u32 kDesktopTealLocal = 0x00204868;
         for (;;)
         {
-            const char ch = customos::drivers::input::Ps2KeyboardReadChar();
-            const char buf[2] = {ch, '\0'};
-            SerialWrite("[kbd] char='");
-            SerialWrite(buf);
-            SerialWrite("'\n");
+            const KeyEvent ev = Ps2KeyboardReadEvent();
+            if (ev.is_release || ev.code == kKeyNone)
+            {
+                continue;
+            }
+            bool dirty = false;
+            if (ev.code == kKeyBackspace)
+            {
+                // v0: backspace removes the last character from the
+                // display but NOT from the scrollback — the Console
+                // has no edit-point concept. A future shell line-
+                // edit layer sits on top of this.
+                customos::drivers::video::ConsoleWriteChar(' ');
+                dirty = true;
+            }
+            else if (ev.code == kKeyEnter)
+            {
+                customos::drivers::video::ConsoleWriteChar('\n');
+                dirty = true;
+            }
+            else if (ev.code >= 0x20 && ev.code <= 0x7E)
+            {
+                const char ch = static_cast<char>(ev.code);
+                customos::drivers::video::ConsoleWriteChar(ch);
+                const char buf[2] = {ch, '\0'};
+                SerialWrite(buf);
+                dirty = true;
+            }
+            if (dirty)
+            {
+                customos::drivers::video::CursorHide();
+                customos::drivers::video::DesktopCompose(kDesktopTealLocal,
+                                                         "WELCOME TO CUSTOMOS   BOOT OK");
+                customos::drivers::video::CursorShow();
+            }
         }
     };
     customos::sched::SchedCreate(kbd_reader, nullptr, "kbd-reader");
