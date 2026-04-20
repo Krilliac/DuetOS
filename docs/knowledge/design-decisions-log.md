@@ -328,7 +328,7 @@ get an inline "superseded by <commit>" note and stay.
 ## 014 — PS/2 keyboard as the first end-to-end IRQ-driven driver
 
 - **Scope:** `kernel/drivers/input/ps2kbd.{h,cpp}`
-- **Commit:** _to be filled in at commit time_
+- **Commit:** `8b60148`
 - **Decision:** First real device driver is the PS/2 keyboard on the
   8042 controller (ports 0x60 / 0x64), routed through the IOAPIC on
   the GSI that ACPI maps from ISA IRQ 1. Raw scan codes go into a
