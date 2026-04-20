@@ -175,7 +175,7 @@ void CmdHelp()
     ConsoleWriteln("  CAT PATH     PRINT FILE CONTENTS");
     ConsoleWriteln("  TOUCH PATH   CREATE EMPTY /tmp FILE");
     ConsoleWriteln("  RM PATH      REMOVE /tmp FILE");
-    ConsoleWriteln("  ECHO ..  > PATH   PRINT OR REDIRECT TO /tmp");
+    ConsoleWriteln("  ECHO ..  > PATH   PRINT OR REDIRECT TO /tmp (>> TO APPEND)");
     ConsoleWriteln("  DMESG        DUMP KERNEL LOG RING");
     ConsoleWriteln("  STATS        SCHEDULER STATISTICS");
     ConsoleWriteln("  MEM          PHYSICAL MEMORY USAGE");
@@ -346,11 +346,19 @@ void CmdEcho(u32 argc, char** argv)
     // after is the target path (tmpfs-only in v0). Plain echo
     // without a redirect just prints.
     u32 redirect_idx = argc;
+    bool append = false;
     for (u32 i = 1; i < argc; ++i)
     {
         if (argv[i][0] == '>' && argv[i][1] == '\0')
         {
             redirect_idx = i;
+            append = false;
+            break;
+        }
+        if (argv[i][0] == '>' && argv[i][1] == '>' && argv[i][2] == '\0')
+        {
+            redirect_idx = i;
+            append = true;
             break;
         }
     }
@@ -386,7 +394,9 @@ void CmdEcho(u32 argc, char** argv)
         {
             buf[out++] = '\n'; // match /bin/echo's trailing newline
         }
-        if (!customos::fs::TmpFsWrite(leaf, buf, out))
+        const bool ok = append ? customos::fs::TmpFsAppend(leaf, buf, out)
+                                : customos::fs::TmpFsWrite(leaf, buf, out);
+        if (!ok)
         {
             ConsoleWrite("ECHO: WRITE FAILED: ");
             ConsoleWriteln(target);

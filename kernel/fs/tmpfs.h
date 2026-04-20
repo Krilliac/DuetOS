@@ -45,6 +45,13 @@ bool TmpFsTouch(const char* name);
 /// it doesn't already exist. Returns true on success.
 bool TmpFsWrite(const char* name, const char* bytes, u32 len);
 
+/// Append `len` bytes to the named file. Creates it if absent.
+/// If the existing size + len exceeds kTmpFsContentMax, fills
+/// to the cap and drops the rest — matches the "write until
+/// the device fills" semantic of a real fs under ENOSPC.
+/// Returns true if at least one byte landed.
+bool TmpFsAppend(const char* name, const char* bytes, u32 len);
+
 /// Look up a file by name. On success, writes a pointer to the
 /// content + its length to the out params and returns true.
 /// Returns false if the file doesn't exist.

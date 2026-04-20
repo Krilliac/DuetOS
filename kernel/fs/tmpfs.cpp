@@ -137,6 +137,29 @@ bool TmpFsWrite(const char* name, const char* bytes, u32 len)
     return true;
 }
 
+bool TmpFsAppend(const char* name, const char* bytes, u32 len)
+{
+    if (!NameIsValid(name))
+    {
+        return false;
+    }
+    TmpFsSlot* s = Find(name);
+    if (s == nullptr)
+    {
+        s = AllocSlot(name);
+        if (s == nullptr)
+        {
+            return false;
+        }
+    }
+    u32 written = 0;
+    while (written < len && s->length < kTmpFsContentMax)
+    {
+        s->content[s->length++] = bytes[written++];
+    }
+    return written > 0;
+}
+
 bool TmpFsRead(const char* name, const char** bytes_out, u32* len_out)
 {
     TmpFsSlot* s = Find(name);
