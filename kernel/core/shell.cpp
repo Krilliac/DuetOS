@@ -5,7 +5,9 @@
 #include "../drivers/video/widget.h"
 #include "../fs/ramfs.h"
 #include "../fs/vfs.h"
+#include "../mm/frame_allocator.h"
 #include "../sched/sched.h"
+#include "klog.h"
 
 namespace customos::core
 {
@@ -171,6 +173,9 @@ void CmdHelp()
     ConsoleWriteln("  LS [PATH]    LIST DIRECTORY CONTENTS");
     ConsoleWriteln("  CAT PATH     PRINT FILE CONTENTS");
     ConsoleWriteln("  ECHO ARG..   PRINT ARGS");
+    ConsoleWriteln("  DMESG        DUMP KERNEL LOG RING");
+    ConsoleWriteln("  STATS        SCHEDULER STATISTICS");
+    ConsoleWriteln("  MEM          PHYSICAL MEMORY USAGE");
     ConsoleWriteln("");
     ConsoleWriteln("KEYS:  UP/DOWN = HISTORY   TAB = COMPLETE");
     ConsoleWriteln("       CTRL+ALT+T = TOGGLE MODE");
@@ -233,6 +238,61 @@ void CmdWindows()
         const char* t = WindowTitle(h);
         ConsoleWriteln((t != nullptr) ? t : "(UNTITLED)");
     }
+}
+
+void CmdDmesg()
+{
+    ConsoleWriteln("-- KERNEL LOG RING (OLDEST FIRST) --");
+    customos::core::DumpLogRingTo([](const char* s) { ConsoleWrite(s); });
+}
+
+void CmdStats()
+{
+    const auto s = customos::sched::SchedStatsRead();
+    ConsoleWrite("CONTEXT SWITCHES ");
+    WriteU64Dec(s.context_switches);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("TASKS LIVE       ");
+    WriteU64Dec(s.tasks_live);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("TASKS SLEEPING   ");
+    WriteU64Dec(s.tasks_sleeping);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("TASKS BLOCKED    ");
+    WriteU64Dec(s.tasks_blocked);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("TASKS CREATED    ");
+    WriteU64Dec(s.tasks_created);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("TASKS EXITED     ");
+    WriteU64Dec(s.tasks_exited);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("TASKS REAPED     ");
+    WriteU64Dec(s.tasks_reaped);
+    ConsoleWriteChar('\n');
+}
+
+void CmdMem()
+{
+    const u64 total = customos::mm::TotalFrames();
+    const u64 free_frames = customos::mm::FreeFramesCount();
+    const u64 used = total - free_frames;
+    constexpr u64 kPageKiB = 4;
+    ConsoleWrite("TOTAL  ");
+    WriteU64Dec(total);
+    ConsoleWrite(" FRAMES (");
+    WriteU64Dec(total * kPageKiB);
+    ConsoleWriteln(" KIB)");
+    ConsoleWrite("USED   ");
+    WriteU64Dec(used);
+    ConsoleWrite(" FRAMES (");
+    WriteU64Dec(used * kPageKiB);
+    ConsoleWriteln(" KIB)");
+    ConsoleWrite("FREE   ");
+    WriteU64Dec(free_frames);
+    ConsoleWrite(" FRAMES (");
+    WriteU64Dec(free_frames * kPageKiB);
+    ConsoleWriteln(" KIB)");
 }
 
 void CmdMode()
@@ -435,6 +495,21 @@ void Dispatch(char* line)
         CmdCat(argc, argv);
         return;
     }
+    if (StrEq(cmd, "dmesg"))
+    {
+        CmdDmesg();
+        return;
+    }
+    if (StrEq(cmd, "stats"))
+    {
+        CmdStats();
+        return;
+    }
+    if (StrEq(cmd, "mem"))
+    {
+        CmdMem();
+        return;
+    }
     ConsoleWrite("COMMAND NOT FOUND: ");
     ConsoleWriteln(cmd);
     ConsoleWriteln("TYPE HELP FOR A LIST OF COMMANDS.");
@@ -537,8 +612,8 @@ void ShellTabComplete()
     g_input[g_len] = '\0';
 
     static const char* const kCommandSet[] = {
-        "help", "about", "version", "clear",  "uptime", "date",
-        "windows", "mode", "ls",    "cat",    "echo",
+        "help", "about", "version", "clear", "uptime", "date",  "windows",
+        "mode", "ls",    "cat",     "echo",  "dmesg",  "stats", "mem",
     };
     constexpr u32 kCmdCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 

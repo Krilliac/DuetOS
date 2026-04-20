@@ -102,6 +102,13 @@ inline constexpr u64 kLogRingCapacity = 64;
 using LogTee = void (*)(const char*);
 void SetLogTee(LogTee writer);
 
+/// Variant of DumpLogRing that writes to an arbitrary string
+/// sink instead of COM1 directly. Useful for surfacing the ring
+/// to a shell `dmesg` command without also echoing to serial.
+/// Same oldest-first order; caller-supplied writer sees one
+/// chunk per formatted token.
+void DumpLogRingTo(LogTee writer);
+
 } // namespace customos::core
 
 // Convenience macros. The `do { } while (0)` lets call sites still

@@ -216,6 +216,31 @@ void DumpLogRing()
     }
 }
 
+void DumpLogRingTo(LogTee writer)
+{
+    if (writer == nullptr)
+    {
+        return;
+    }
+    // Oldest-first walk. No timestamp / header prefix — the
+    // caller (shell `dmesg`) may want to frame its own banner.
+    const u64 start = g_log_ring_next - g_log_ring_count;
+    for (u64 i = 0; i < g_log_ring_count; ++i)
+    {
+        const u64 slot = (start + i) % kLogRingCapacity;
+        const LogEntry& e = g_log_ring[slot];
+        if (e.subsystem == nullptr || e.message == nullptr)
+        {
+            continue;
+        }
+        writer(LevelTag(e.level));
+        writer(e.subsystem);
+        writer(" : ");
+        writer(e.message);
+        writer("\n");
+    }
+}
+
 void KLogSelfTest()
 {
     KLOG_DEBUG("core/klog", "debug-level sanity line");
