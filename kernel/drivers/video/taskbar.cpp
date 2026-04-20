@@ -131,7 +131,11 @@ void TaskbarRedraw()
         {
             break; // ran out of middle — overflow unshown in v0
         }
-        const u32 tab_bg = 0x00303848;
+        const bool is_active = (h == WindowActive());
+        // Active tab uses the taskbar's accent colour so the
+        // focused window reads at a glance — matches the window-
+        // chrome active/inactive distinction.
+        const u32 tab_bg = is_active ? g_accent : 0x00303848;
         FramebufferFillRect(tab_x, g_y + 4, tab_w, g_h - 8, tab_bg);
         FramebufferDrawRect(tab_x, g_y + 4, tab_w, g_h - 8, 0x00101828, 1);
         const char* title = WindowTitle(h);

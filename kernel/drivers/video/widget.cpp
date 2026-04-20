@@ -157,6 +157,18 @@ constinit u32 g_z_order[kMaxWindows] = {};
 // so concurrent typing-while-dragging is race-free.
 constinit customos::sched::Mutex g_compositor_mutex{};
 
+// Currently-active (focused) window — the one with the brightly
+// painted title bar. Follows the topmost z-order slot: WindowRaise
+// sets it; WindowClose may clear it. kWindowInvalid when no
+// window is active.
+constinit WindowHandle g_active_window = kWindowInvalid;
+
+// Muted colour used for inactive windows' title bars. Chosen
+// slightly darker + desaturated versus any window's own
+// `colour_title`, so the active/inactive distinction reads at a
+// glance without having to match each window's palette.
+constexpr u32 kInactiveTitleRgb = 0x00506070;
+
 bool WindowValid(WindowHandle h)
 {
     return h < g_window_count && g_windows[h].alive;
@@ -217,6 +229,11 @@ WindowHandle WindowRegister(const WindowChrome& chrome, const char* title)
     g_windows[h].alive = true;
     g_z_order[g_window_count] = h;
     ++g_window_count;
+    // The latest-registered window lands on top of z-order and
+    // is the obvious "just appeared" active choice. Boot-time
+    // registration ends with the last window active, which is
+    // what every user expects.
+    g_active_window = h;
     return h;
 }
 
@@ -226,6 +243,10 @@ void WindowRaise(WindowHandle h)
     {
         return;
     }
+    // Activation tracks the raise even when the window is
+    // already topmost — a click on the single-window desktop
+    // still confirms focus.
+    g_active_window = h;
     // Find `h` in the z-order, shift everything above it down
     // by one, place `h` at the top. O(count) — fine for tiny
     // counts; a linked list would be overkill at kMaxWindows=4.
@@ -250,6 +271,11 @@ void WindowRaise(WindowHandle h)
         g_z_order[j] = g_z_order[j + 1];
     }
     g_z_order[g_window_count - 1] = h;
+}
+
+WindowHandle WindowActive()
+{
+    return g_active_window;
 }
 
 void WindowMoveTo(WindowHandle h, u32 x, u32 y)
@@ -343,6 +369,21 @@ void WindowClose(WindowHandle h)
         return;
     }
     g_windows[h].alive = false;
+    if (g_active_window == h)
+    {
+        // Promote the next topmost alive window, if any, so
+        // activation doesn't dangle on a dead handle.
+        g_active_window = kWindowInvalid;
+        for (u32 i = g_window_count; i > 0; --i)
+        {
+            const WindowHandle candidate = g_z_order[i - 1];
+            if (candidate != h && WindowValid(candidate))
+            {
+                g_active_window = candidate;
+                break;
+            }
+        }
+    }
     // Leave entry in z_order — WindowDrawAllOrdered already
     // skips dead windows via the `alive` check, and compacting
     // the z-order would require touching every index stored in
@@ -376,14 +417,24 @@ void WindowDrawAllOrdered()
         const WindowHandle h = g_z_order[i];
         if (!g_windows[h].alive)
             continue;
-        const auto& c = g_windows[h].chrome;
-        WindowDraw(c);
+        const bool is_active = (h == g_active_window);
+        // Use the window's registered title colour when active,
+        // a muted global grey otherwise. Copying the chrome
+        // struct keeps WindowDraw's signature simple — the
+        // alternative (adding an is_active parameter) would
+        // ripple through every caller for one bit of state.
+        WindowChrome drawn = g_windows[h].chrome;
+        if (!is_active)
+        {
+            drawn.colour_title = kInactiveTitleRgb;
+        }
+        WindowDraw(drawn);
         // Title text. White ink on the title-bar fill, 8-px top
         // padding + 8-px left padding so the first glyph clears
         // the 2-px outer border comfortably.
         if (g_windows[h].title != nullptr)
         {
-            FramebufferDrawString(c.x + 8, c.y + 7, g_windows[h].title, 0x00FFFFFF, c.colour_title);
+            FramebufferDrawString(drawn.x + 8, drawn.y + 7, g_windows[h].title, 0x00FFFFFF, drawn.colour_title);
         }
         // Widgets owned by this window — layered on top of the
         // window's chrome, under any windows that stack above.

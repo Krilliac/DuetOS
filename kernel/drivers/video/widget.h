@@ -116,9 +116,18 @@ void WindowDraw(const WindowChrome& w);
 WindowHandle WindowRegister(const WindowChrome& chrome, const char* title);
 
 /// Move `h` to the top of the z-order so the next draw pass
-/// paints it last (i.e. on top of every other window). No-op
-/// if it's already topmost or the handle is invalid.
+/// paints it last (i.e. on top of every other window). Also
+/// sets `h` as the active window — the "raised == active"
+/// coupling matches every desktop OS that doesn't have
+/// focus-follows-mouse turned on. No-op if the handle is
+/// invalid; safe to call when already topmost (refreshes
+/// active state without re-ordering).
 void WindowRaise(WindowHandle h);
+
+/// Currently active window handle, or `kWindowInvalid` if
+/// none. Active == focused for keyboard routing purposes and
+/// highlighted in title-bar chrome.
+WindowHandle WindowActive();
 
 /// Set absolute position. Width / height / colours are unchanged.
 /// Clamps so the window stays entirely within the framebuffer.
