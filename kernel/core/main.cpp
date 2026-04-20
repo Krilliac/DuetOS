@@ -67,6 +67,12 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     SerialWrite("[boot] Installing IDT (vectors 0..31).\n");
     IdtInit();
 
+    SerialWrite("[boot] Installing TSS + IST stacks (#DF / #MC / #NMI).\n");
+    TssInit();
+    IdtSetIst(2, kIstNmi);           // #NMI
+    IdtSetIst(8, kIstDoubleFault);   // #DF
+    IdtSetIst(18, kIstMachineCheck); // #MC
+
     SerialWrite("[boot] Parsing Multiboot2 memory map.\n");
     FrameAllocatorInit(multiboot_info);
 
