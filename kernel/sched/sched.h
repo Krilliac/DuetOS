@@ -103,6 +103,14 @@ void OnTimerTick(u64 now_ticks);
 /// Pointer to the currently-executing task. Never null after SchedInit.
 Task* CurrentTask();
 
+/// Top (high address) of the current task's kernel stack. Returns 0 for
+/// the boot task (it never had a scheduler-managed kernel stack — it
+/// runs on the boot.S stack, which is irrelevant for ring-3 RSP0
+/// purposes). Used by the ring-3 entry path: the caller passes this to
+/// arch::TssSetRsp0 before iretq so the first interrupt from user mode
+/// lands on a valid kernel stack.
+u64 SchedCurrentKernelStackTop();
+
 /// Diagnostics — cheap snapshots.
 struct SchedStats
 {

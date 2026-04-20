@@ -602,6 +602,16 @@ Task* CurrentTask()
     return Current();
 }
 
+u64 SchedCurrentKernelStackTop()
+{
+    Task* self = Current();
+    if (self == nullptr || self->stack_base == nullptr)
+    {
+        return 0;
+    }
+    return reinterpret_cast<u64>(self->stack_base) + self->stack_size;
+}
+
 SchedStats SchedStatsRead()
 {
     return SchedStats{

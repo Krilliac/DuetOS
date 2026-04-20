@@ -607,6 +607,92 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 044 — First ring-3 slice: GDT user segments + iretq entry + smoke task
+
+- **Scope:** `kernel/arch/x86_64/gdt.{h,cpp}` (DPL=3 user code
+  + user data in slots 5–6, `TssSetRsp0` helper),
+  `kernel/arch/x86_64/usermode.{h,S}` (new module:
+  `EnterUserMode(rip, rsp)` — iretq into ring 3),
+  `kernel/sched/sched.{h,cpp}` (`SchedCurrentKernelStackTop`
+  accessor), `kernel/core/ring3_smoke.{h,cpp}` (new module:
+  dedicated scheduler thread that maps a user code + stack
+  page, publishes RSP0, and iretq's into ring 3), wiring in
+  `kernel/core/main.cpp`.
+- **Decision:** Land the minimum infrastructure to prove ring
+  3 works end-to-end, without yet dragging in syscalls,
+  per-process address spaces, or scheduler-aware RSP0
+  updates. A single boot-time scheduler thread (`ring3-smoke`)
+  does four things in order: (1) allocates one 4 KiB frame
+  for user code at VA `0x40000000` and plants a 4-byte
+  `pause; jmp short -4` payload, (2) allocates one 4 KiB
+  frame for user stack at VA `0x40010000`, (3) sets TSS.RSP0
+  to the top of its own kernel stack so the first user→kernel
+  transition lands safely, (4) calls `EnterUserMode` which
+  builds an iretq frame (SS / RSP / RFLAGS=0x202 / CS / RIP)
+  and iretq's to ring 3. The user code loops forever with
+  IF=1; timer interrupts preempt it, the trap dispatcher
+  handles the IRQ, the scheduler round-robins, and every
+  other kernel worker (heartbeat, keyboard reader, demo
+  mutex workers, idle) continues to make forward progress
+  — which is the verifiable evidence that ring 3 entry did
+  not corrupt kernel state. `EnterUserMode` is
+  `[[noreturn]]`; a ring-3 task returns to the kernel only
+  via a trap/IRQ, never via a plain ret.
+- **Why:** Entries #032 (TSS + IST) and multiple others have
+  been plumbing the "when ring 3 lands" side of the house
+  in anticipation of this slice. The index's current-state
+  note called out "transition to ring 3 (user processes +
+  syscalls)" as one of three candidate next bites. Taking
+  the smallest possible first bite — GDT + iretq + a user
+  payload that doesn't fault — keeps the scheduler,
+  paging, and trap-handling machinery honest without
+  forcing the simultaneous landing of SYSCALL/SYSRET,
+  per-process page tables, and a libc stub. The pattern is:
+  land ring 3 now, validate the scheduler survives it, then
+  land syscalls on top of a tested foundation.
+- **Rules out / defers:** Per-task RSP0 updates on context
+  switch (single ring-3 task in v0 — TSS.rsp0 is set once
+  and stays valid because no other task ever enters ring 3).
+  SYSCALL/SYSRET (no syscall dispatch yet). Per-process
+  address spaces (single global PML4 still — the user
+  pages at `0x40000000` are visible to every task, kernel
+  or user). A way for the user task to exit (the ring-3
+  loop is genuinely infinite; the reaper never sees it).
+  Syscall gate via `int 0x80` (vector stays non-present;
+  a deliberate `int` from ring 3 #GPs, which is the
+  correct posture until a handler exists). Signals. Page-
+  table tear-down on user-task exit. `int3` / `ud2` from
+  ring 3 (still halts the dispatcher — the trap frame
+  would carry CS=0x1B, which is diagnostically useful but
+  not yet a recoverable path). FPU/SSE user state (we
+  compile `-mno-sse -mgeneral-regs-only` so user code that
+  touches xmm registers #UDs cleanly). STAR/LSTAR/SFMASK
+  MSRs (consumed only by SYSCALL/SYSRET; leaving them zero
+  is fine).
+- **Revisit when:** First syscall lands — the gate needs a
+  DPL=3 IDT entry for `int 0x80`, the C++ handler consumes
+  the trap frame's rax/rdi/rsi/... as argN registers, and
+  the slice grows a `SchedCreateUserProcess` that replaces
+  today's manual "one user task, one smoke thread" wiring.
+  Second ring-3 task is created — that's when
+  `arch::TssSetRsp0` must move into the scheduler's
+  switch-in path (update on every context switch INTO a
+  user-mode-capable task). Per-process address spaces
+  land — today's single shared PML4 becomes one CR3 per
+  process, which also means `g_user_code_virt` /
+  `g_user_stack_virt` stop being global constants. SMP
+  ring 3 — each CPU's TSS needs its own RSP0 slot (today's
+  BSP-only helper doesn't generalise).
+- **Related tracks:** Track 4 (Process model — first
+  concrete user-mode execution), Track 11 (Win32 subsystem
+  — every PE executable will end up in ring 3 via
+  something descended from this entry path), Track 13
+  (Security — W^X enforced on the user code mapping:
+  present + user-accessible, no writable bit; stack
+  mapping: present + writable + user + NX).
+
+---
+
 ## 043 — PS/2 keyboard device reset + explicit scan-code-set-1
 
 - **Scope:** `kernel/drivers/input/ps2kbd.cpp` — new

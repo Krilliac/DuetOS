@@ -27,6 +27,7 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     core/panic.cpp
     core/reboot.cpp
     core/recovery.cpp
+    core/ring3_smoke.cpp
     core/symbols.cpp
     acpi/acpi.cpp
     arch/x86_64/ap_trampoline.S
@@ -42,6 +43,7 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     arch/x86_64/smp.cpp
     arch/x86_64/timer.cpp
     arch/x86_64/traps.cpp
+    arch/x86_64/usermode.S
     cpu/percpu.cpp
     drivers/input/ps2kbd.cpp
     drivers/pci/pci.cpp

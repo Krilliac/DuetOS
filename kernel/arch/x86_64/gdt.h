@@ -34,6 +34,11 @@ namespace customos::arch
 inline constexpr u16 kKernelCodeSelector = 0x08;
 inline constexpr u16 kKernelDataSelector = 0x10;
 inline constexpr u16 kTssSelector = 0x18;
+// Slot 5 holds the user code descriptor (DPL=3). Consumer selectors
+// must carry the RPL=3 bits, so the value the CPU sees is 0x2B, not
+// 0x28. Same for user data in slot 6 — 0x33, not 0x30.
+inline constexpr u16 kUserCodeSelector = 0x28 | 0x3;
+inline constexpr u16 kUserDataSelector = 0x30 | 0x3;
 
 // IST indices are 1..7 in the IDT (0 means "use the RSP-for-this-DPL
 // from TSS"); we reserve 1..3 for the three critical faults.
@@ -51,6 +56,18 @@ void GdtInit();
 /// their IST indices. Per-AP TSS install comes with SMP scheduler join
 /// — each AP needs its own TSS + IST stacks.
 void TssInit();
+
+/// Update the BSP TSS's RSP0 slot. The CPU consults this value on every
+/// user→kernel privilege transition (interrupt or trap from ring 3) to
+/// pick the stack on which to deliver the trap frame. Must point at the
+/// TOP of a valid kernel stack for whichever task is about to enter
+/// ring 3 — a stale or zero value here turns the next interrupt in user
+/// mode into a double fault.
+///
+/// Multi-task ring-3 correctness requires the scheduler to call this
+/// whenever it switches IN to a user-mode-capable task; v0's single
+/// ring-3 smoke task sets it once at entry and never revisits.
+void TssSetRsp0(u64 rsp0);
 
 /// Check whether all three IST stack canaries are still the magic
 /// pattern planted by TssInit. Returns false if any has been
