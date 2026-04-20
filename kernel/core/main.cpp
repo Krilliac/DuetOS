@@ -14,6 +14,7 @@
 #include "../drivers/input/ps2kbd.h"
 #include "../drivers/pci/pci.h"
 #include "../drivers/storage/ahci.h"
+#include "../drivers/video/framebuffer.h"
 #include "../fs/ramfs.h"
 #include "../fs/vfs.h"
 #include "../mm/address_space.h"
@@ -132,6 +133,10 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // of them does, the fault will fire here at boot rather than
     // corrupt code silently later.
     ProtectKernelImage();
+
+    SerialWrite("[boot] Bringing up framebuffer (if present).\n");
+    customos::drivers::video::FramebufferInit(multiboot_info);
+    customos::drivers::video::FramebufferSelfTest();
 
     SerialWrite("[boot] Seeding ramfs + VFS self-test.\n");
     customos::fs::RamfsInit();

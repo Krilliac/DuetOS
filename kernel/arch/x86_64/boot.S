@@ -48,6 +48,21 @@ multiboot2_header_start:
     .long   multiboot2_header_end - multiboot2_header_start
     .long   -(MULTIBOOT2_MAGIC + MULTIBOOT2_ARCH_I386 + (multiboot2_header_end - multiboot2_header_start))
 
+    /* Framebuffer request tag (type 5). width=height=depth=0 means
+     * "give me any linear framebuffer the firmware has" — GRUB picks
+     * a sensible default (1024x768x32 on QEMU std-vga, 800x600 on
+     * VESA fallback). Flags bit 0 = 0 → optional: if no mode is
+     * available, GRUB still boots us with EGA text. The kernel-side
+     * framebuffer driver treats "no tag 8" as "no graphics; keep
+     * using serial" rather than a hard failure. */
+    .align 8
+    .word   5                   /* type = MULTIBOOT_HEADER_TAG_FRAMEBUFFER */
+    .word   1                   /* flags = 1 → optional */
+    .long   20                  /* size */
+    .long   0                   /* width  — any  */
+    .long   0                   /* height — any  */
+    .long   0                   /* depth  — any  */
+
     /* End tag */
     .align 8
     .word   MULTIBOOT2_TAG_END

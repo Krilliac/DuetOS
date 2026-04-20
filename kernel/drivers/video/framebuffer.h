@@ -1,0 +1,100 @@
+#pragma once
+
+#include "../../core/types.h"
+
+/*
+ * CustomOS — linear framebuffer driver, v0.
+ *
+ * First direct-to-pixel graphics primitive in the tree. Consumes the
+ * Multiboot2 framebuffer tag (type 8) GRUB hands over on boot, maps
+ * the linear framebuffer into the kernel MMIO arena, and exposes the
+ * minimum ops every higher-level surface (console font rasterizer,
+ * splash screen, compositor later) will need:
+ *
+ *   - `FramebufferInit(multiboot_info_phys)` — parses tag, validates
+ *     "direct RGB" shape, MapMmios the pixel buffer. Safe to call
+ *     when no tag is present: leaves the driver `Available() == false`
+ *     and returns silently.
+ *   - `FramebufferClear(rgb)` / `FramebufferFillRect(x, y, w, h, rgb)` /
+ *     `FramebufferPutPixel(x, y, rgb)` — the classic trio; all
+ *     coordinate-clipped, no panics on out-of-range.
+ *   - Accessors for info the console layer needs (width in pixels,
+ *     height in pixels, pitch in bytes).
+ *
+ * Scope limits that will be fixed in later commits:
+ *   - Assumes BPP = 32 (8:8:8:8 with one reserved byte). Some real
+ *     VBE modes hand back 24-bit packed, and EFI GOP sometimes
+ *     reports 15 or 16 bit. Unsupported depths log + disable the
+ *     driver rather than guessing.
+ *   - Assumes the firmware placed red/green/blue in the classic
+ *     A=24 / R=16 / G=8 / B=0 arrangement (QEMU std-vga, BGA, most
+ *     Intel iGPUs). Different masks will render with swapped colour
+ *     channels — visible but functional, and fixable by reading the
+ *     colour-info trailer once a real machine forces the issue.
+ *   - No back buffer / no double buffering. Every draw lands in the
+ *     live framebuffer. Fine for boot splash + kernel panic display;
+ *     the compositor will install its own off-screen buffer chain.
+ *   - No dirty-rect tracking. Redraws are full-rect. The cost is
+ *     a handful of MB/s at 1024x768x32, well inside the PCIe budget
+ *     for the devices we care about.
+ *   - No cursor / blinking text / scrolling. Those land with the
+ *     framebuffer console on top of this driver.
+ *
+ * Context: kernel. Init runs once AFTER `PagingInit` (uses MapMmio)
+ * and BEFORE any subsystem wants to draw. Drawing is IRQ-safe in
+ * principle (writes to MMIO), but drawing from an IRQ handler on
+ * a slow framebuffer will cause visible scheduling jitter; keep
+ * draw calls in task context unless the panic path specifically
+ * needs them.
+ */
+
+namespace customos::drivers::video
+{
+
+struct FramebufferInfo
+{
+    void* virt;   // kernel-virtual pointer into the MMIO arena
+    u64 phys;     // physical base the firmware handed us
+    u32 width;    // pixels
+    u32 height;   // pixels
+    u32 pitch;    // bytes per scanline (>= width * bytes_per_pixel)
+    u8 bpp;       // bits per pixel (we only support 32 today)
+    u8 _pad[3];
+};
+
+/// Parse the Multiboot2 framebuffer tag from the info struct at
+/// `multiboot_info_phys`, validate that it's a direct-RGB 32-bpp
+/// linear framebuffer, and MapMmio the pixel buffer. Idempotent:
+/// second call is a no-op. If GRUB didn't provide a tag or the tag
+/// describes an unsupported mode, logs the reason to the serial
+/// console and leaves the driver `Available() == false`.
+void FramebufferInit(uptr multiboot_info_phys);
+
+/// True if init found a usable framebuffer and drawing is permitted.
+bool FramebufferAvailable();
+
+/// Snapshot of the live framebuffer parameters. Valid for the whole
+/// uptime once Init has returned; framebuffer parameters don't
+/// change after boot.
+FramebufferInfo FramebufferGet();
+
+/// Fill the entire surface with `rgb` (0x00RRGGBB). No-op if
+/// !Available().
+void FramebufferClear(u32 rgb);
+
+/// Write one pixel. Out-of-range coordinates silently drop — callers
+/// that care are expected to clip up front. No-op if !Available().
+void FramebufferPutPixel(u32 x, u32 y, u32 rgb);
+
+/// Fill the axis-aligned rect [x, x+w) x [y, y+h) with `rgb`.
+/// Clipped to the surface; passing a rect that's entirely off-screen
+/// is a silent no-op. No-op if !Available().
+void FramebufferFillRect(u32 x, u32 y, u32 w, u32 h, u32 rgb);
+
+/// Exercise the draw path at boot: clear to black, draw coloured
+/// corner swatches + a framing rectangle. Visible proof that the
+/// firmware handoff + Mmio map + pixel store all work end-to-end.
+/// No-op if !Available().
+void FramebufferSelfTest();
+
+} // namespace customos::drivers::video
