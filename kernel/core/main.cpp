@@ -319,9 +319,20 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
             // where to render. Compositor mutex is held
             // around the whole compose so these statics are
             // race-free.
+            //
+            // Severity colouring: the first chunk per log line
+            // is always the 4-byte tag ("[I] " / "[W] " / "[E] "
+            // / "[D] ") from LevelTag(). We inspect it and set
+            // the line's fg; subsequent chunks on the same line
+            // inherit that colour until the newline resets.
+            constexpr customos::u32 kFgInfo = 0x00A0C8FF; // muted blue-white
+            constexpr customos::u32 kFgWarn = 0x00FFD860; // amber
+            constexpr customos::u32 kFgError = 0x00FF6050; // soft red
+            constexpr customos::u32 kFgDebug = 0x00808080; // grey
+            constexpr customos::u32 kBg = 0x00101020;
             struct Render
             {
-                customos::u32 cx, cy, col, row, max_col, max_row;
+                customos::u32 cx, cy, col, row, max_col, max_row, fg;
                 bool done;
             };
             static Render r;
@@ -331,12 +342,37 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
             r.row = 0;
             r.max_col = cw / 8;
             r.max_row = ch / 10;
+            r.fg = kFgInfo;
             r.done = false;
             customos::core::DumpLogRingTo(
                 [](const char* s)
                 {
                     if (r.done || s == nullptr)
                         return;
+                    // Severity detection: first char per chunk
+                    // is '[' for the tag chunks klog emits.
+                    // Other chunks (subsystem, message) don't
+                    // start with '[' so won't match.
+                    if (s[0] == '[' && s[2] == ']')
+                    {
+                        switch (s[1])
+                        {
+                        case 'I':
+                            r.fg = kFgInfo;
+                            break;
+                        case 'W':
+                            r.fg = kFgWarn;
+                            break;
+                        case 'E':
+                            r.fg = kFgError;
+                            break;
+                        case 'D':
+                            r.fg = kFgDebug;
+                            break;
+                        default:
+                            break;
+                        }
+                    }
                     while (*s != '\0')
                     {
                         const char c = *s++;
@@ -362,7 +398,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                             }
                         }
                         customos::drivers::video::FramebufferDrawChar(
-                            r.cx + r.col * 8, r.cy + r.row * 10, c, 0x00A0C8FF, 0x00101020);
+                            r.cx + r.col * 8, r.cy + r.row * 10, c, r.fg, kBg);
                         ++r.col;
                     }
                 });
