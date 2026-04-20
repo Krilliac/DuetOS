@@ -5,6 +5,31 @@
 #include "../arch/x86_64/timer.h"
 #include "../cpu/percpu.h"
 #include "klog.h"
+#include "symbols.h"
+
+/*
+ * Panic / crash-dump output.
+ *
+ * Every halt path emits a self-contained crash dump bracketed by:
+ *
+ *     === CUSTOMOS CRASH DUMP BEGIN ===
+ *     ...
+ *     === CUSTOMOS CRASH DUMP END ===
+ *
+ * on COM1. Host-side tooling (`tools/test-panic.sh` today, a
+ * post-mortem harness later) captures the bytes between the markers
+ * into a file — that is the "dump file" the crash system produces,
+ * given CustomOS has no persistent filesystem yet.
+ *
+ * Every address reachable through the embedded symbol table is
+ * annotated inline with
+ *
+ *     0xADDRESS  [function+0xOFF (kernel/path/file.cpp:LINE)]
+ *
+ * so a dump is readable without re-running a symbolizer. Addresses
+ * we cannot resolve (asm trampolines, early-boot stack data, user-
+ * mode RIPs) fall back to bare hex — we never fabricate a symbol.
+ */
 
 namespace customos::core
 {
@@ -12,12 +37,34 @@ namespace customos::core
 namespace
 {
 
+constexpr const char* kDumpBeginMarker = "=== CUSTOMOS CRASH DUMP BEGIN ===\n";
+constexpr const char* kDumpEndMarker = "=== CUSTOMOS CRASH DUMP END ===\n";
+
+// u16 schema version of the dump record. Bump whenever the layout of
+// lines between BEGIN/END changes in a way a parser would care about.
+// Host-side tools should read this first line and refuse dumps from a
+// newer kernel than they know.
+constexpr u64 kDumpSchemaVersion = 1;
+
 void WriteLabelled(const char* label, u64 value)
 {
     arch::SerialWrite("  ");
     arch::SerialWrite(label);
     arch::SerialWrite(" : ");
     arch::SerialWriteHex(value);
+    arch::SerialWrite("\n");
+}
+
+// Like WriteLabelled, but also annotates the value with
+// function+offset and source location if it resolves against the
+// embedded symbol table. Used for RIP and other code-ish registers
+// (the x86_64 return-address slots in the stack dump).
+void WriteLabelledCode(const char* label, u64 value)
+{
+    arch::SerialWrite("  ");
+    arch::SerialWrite(label);
+    arch::SerialWrite(" : ");
+    WriteAddressWithSymbol(value);
     arch::SerialWrite("\n");
 }
 
@@ -76,8 +123,8 @@ void DumpBacktrace(u64 rbp)
         arch::SerialWrite("    #");
         arch::SerialWriteHex(static_cast<u64>(depth));
         arch::SerialWrite("  rip=");
-        arch::SerialWriteHex(ret_addr);
-        arch::SerialWrite(" rbp=");
+        WriteAddressWithSymbol(ret_addr);
+        arch::SerialWrite("\n            rbp=");
         arch::SerialWriteHex(rbp);
         arch::SerialWrite("\n");
         if (saved_rbp <= rbp)
@@ -95,7 +142,9 @@ void DumpBacktrace(u64 rbp)
 // Dump the first N 8-byte quads starting at RSP. Useful for seeing
 // the live state of the stack around a crash — local variables,
 // spilled registers, return addresses that frame-pointer walking
-// might have missed.
+// might have missed. Each quad is run through the symbol table so
+// saved return addresses auto-label even when RBP-walking missed
+// them.
 void DumpStack(u64 rsp, int count)
 {
     arch::SerialWrite("  stack (");
@@ -112,7 +161,7 @@ void DumpStack(u64 rsp, int count)
         arch::SerialWrite("    [");
         arch::SerialWriteHex(addr);
         arch::SerialWrite("] = ");
-        arch::SerialWriteHex(value);
+        WriteAddressWithSymbol(value);
         arch::SerialWrite("\n");
     }
 }
@@ -145,6 +194,23 @@ void DumpTask()
     }
 }
 
+void WriteDumpHeader(const char* subsystem, const char* message, const u64* optional_value)
+{
+    arch::SerialWrite("\n");
+    arch::SerialWrite(kDumpBeginMarker);
+    WriteLabelled("version  ", kDumpSchemaVersion);
+    arch::SerialWrite("  subsystem: ");
+    arch::SerialWrite(subsystem);
+    arch::SerialWrite("\n  message  : ");
+    arch::SerialWrite(message);
+    arch::SerialWrite("\n");
+    if (optional_value != nullptr)
+    {
+        WriteLabelled("value    ", *optional_value);
+    }
+    WriteLabelled("symtab_entries", SymbolTableSize());
+}
+
 } // namespace
 
 void DumpDiagnostics(u64 rip, u64 rsp, u64 rbp)
@@ -152,7 +218,7 @@ void DumpDiagnostics(u64 rip, u64 rsp, u64 rbp)
     arch::SerialWrite("[panic] --- diagnostics ---\n");
     WriteLabelled("uptime   ", arch::TimerTicks());
     DumpTask();
-    WriteLabelled("rip      ", rip);
+    WriteLabelledCode("rip      ", rip);
     WriteLabelled("rsp      ", rsp);
     WriteLabelled("rbp      ", rbp);
     WriteLabelled("cr0      ", arch::ReadCr0());
@@ -180,11 +246,14 @@ void Panic(const char* subsystem, const char* message)
     arch::SerialWrite(message);
     arch::SerialWrite("\n");
 
+    WriteDumpHeader(subsystem, message, nullptr);
+
     // Dump diagnostics using the panic call site's own frame. Reading
     // RBP/RSP here captures the state of Panic() itself; the backtrace
     // walker then climbs up through the caller.
     DumpDiagnostics(reinterpret_cast<u64>(__builtin_return_address(0)), arch::ReadRsp(), arch::ReadRbp());
 
+    arch::SerialWrite(kDumpEndMarker);
     arch::SerialWrite("[panic] CPU halted — no recovery.\n");
     arch::Halt();
 }
@@ -201,8 +270,11 @@ void PanicWithValue(const char* subsystem, const char* message, u64 value)
     arch::SerialWriteHex(value);
     arch::SerialWrite("\n");
 
+    WriteDumpHeader(subsystem, message, &value);
+
     DumpDiagnostics(reinterpret_cast<u64>(__builtin_return_address(0)), arch::ReadRsp(), arch::ReadRbp());
 
+    arch::SerialWrite(kDumpEndMarker);
     arch::SerialWrite("[panic] CPU halted — no recovery.\n");
     arch::Halt();
 }
