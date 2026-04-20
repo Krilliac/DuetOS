@@ -18,6 +18,7 @@ set(CUSTOMOS_KERNEL_SOURCES
     arch/x86_64/lapic.cpp
     arch/x86_64/pic.cpp
     arch/x86_64/serial.cpp
+    arch/x86_64/smp.cpp
     arch/x86_64/timer.cpp
     arch/x86_64/traps.cpp
     cpu/percpu.cpp

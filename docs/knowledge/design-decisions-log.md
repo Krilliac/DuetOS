@@ -377,6 +377,40 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 021 — SMP discovery + IPI plumbing, AP trampoline deferred
+
+- **Scope:** `kernel/acpi/acpi.{h,cpp}` (MADT type-0 parse),
+  `kernel/arch/x86_64/smp.{h,cpp}` (discovery + `SmpSendIpi` ICR
+  helper), `kernel/sched/sched.cpp` (g_current/g_need_resched already
+  per-CPU via entry 017)
+- **Commit:** _(filled at commit)_
+- **Decision:** Land the SMP discovery half — MADT processor-LAPIC
+  enumeration + an IPI-send helper that wraps the LAPIC ICR dance —
+  without the real→long-mode trampoline. The trampoline is ~150
+  lines of GAS Intel-syntax assembly that needs iterative QEMU
+  testing to get right (two-symbol-arithmetic operand restrictions,
+  mode-transition far-jump encoding, etc.); separating it from the
+  plumbing avoids committing non-functional code.
+- **Why:** Discovery + ICR plumbing are independently useful —
+  future consumers (TLB shootdown, reschedule-IPI, SMP-aware driver
+  notifications) need `SmpSendIpi` regardless of whether APs are
+  running. And committing the trampoline half-baked risks a broken
+  boot log until the next session. Honest deferral behind a scope
+  doc (`smp-ap-bringup-scope.md`) is better than a stub that
+  compiles but doesn't boot.
+- **Rules out / defers:** Actual AP execution — APs remain halted
+  by the firmware reset state. Per-AP LAPIC, GDT, TSS, stack, and
+  scheduler integration. Scheduler runqueue/sleepqueue/zombie-list
+  spinlock (prerequisite for SMP scheduler). Broadcast-NMI panic
+  halt (Class-A recovery gap).
+- **Revisit when:** Dedicated session for Commits A-E in
+  `smp-ap-bringup-scope.md`. Estimated 1.5-2 focused sessions for
+  the full journey from "APs halted" to "APs running scheduled
+  tasks."
+- **Related tracks:** Track 2 (SMP platform foundation).
+
+---
+
 ## 020 — Dead-task reaper: first concrete Class-C recovery path
 
 - **Scope:** `kernel/sched/sched.{h,cpp}`,

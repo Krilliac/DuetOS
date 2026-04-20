@@ -62,9 +62,14 @@ struct [[gnu::packed]] MadtEntryHeader
     u8 length;
 };
 
+constexpr u8 kMadtEntryLapic = 0;
 constexpr u8 kMadtEntryIoApic = 1;
 constexpr u8 kMadtEntryIntSourceOverride = 2;
 constexpr u8 kMadtEntryLapicAddrOverride = 5;
+
+// MADT LAPIC entry flags (Intel-defined, since ACPI 5.0).
+constexpr u32 kLapicFlagEnabled = 1U << 0;
+constexpr u32 kLapicFlagOnlineCapable = 1U << 1;
 
 struct [[gnu::packed]] MadtIoApic
 {
@@ -108,6 +113,8 @@ constinit IoApicRecord g_ioapics[kMaxIoapics]{};
 constinit u64 g_ioapic_count = 0;
 constinit InterruptOverride g_overrides[kMaxInterruptOverrides]{};
 constinit u64 g_override_count = 0;
+constinit LapicRecord g_lapics[kMaxCpus]{};
+constinit u64 g_lapic_count = 0;
 
 [[noreturn]] void PanicAcpi(const char* message)
 {
@@ -255,6 +262,30 @@ void ParseMadt(const Madt& madt)
 
         switch (h->type)
         {
+        case kMadtEntryLapic:
+        {
+            // Processor Local APIC (ACPI 1.0+). 8-byte body: processor
+            // uid (u8), apic id (u8), flags (u32).
+            struct [[gnu::packed]] Body
+            {
+                MadtEntryHeader header;
+                u8 processor_uid;
+                u8 apic_id;
+                u32 flags;
+            };
+            const auto* e = reinterpret_cast<const Body*>(h);
+            if (g_lapic_count >= kMaxCpus)
+            {
+                PanicAcpi("MADT lists more LAPICs than kMaxCpus");
+            }
+            g_lapics[g_lapic_count++] = LapicRecord{
+                .processor_uid = e->processor_uid,
+                .apic_id = e->apic_id,
+                .enabled = (e->flags & kLapicFlagEnabled) != 0,
+                .online_capable = (e->flags & kLapicFlagOnlineCapable) != 0,
+            };
+            break;
+        }
         case kMadtEntryIoApic:
         {
             const auto* e = reinterpret_cast<const MadtIoApic*>(h);
@@ -346,7 +377,22 @@ void AcpiInit(uptr multiboot_info_phys)
     SerialWriteHex(g_ioapic_count);
     SerialWrite(" overrides=");
     SerialWriteHex(g_override_count);
+    SerialWrite(" cpus=");
+    SerialWriteHex(g_lapic_count);
     SerialWrite("\n");
+
+    for (u64 i = 0; i < g_lapic_count; ++i)
+    {
+        SerialWrite("  lapic[");
+        SerialWriteHex(i);
+        SerialWrite("] uid=");
+        SerialWriteHex(g_lapics[i].processor_uid);
+        SerialWrite(" apic_id=");
+        SerialWriteHex(g_lapics[i].apic_id);
+        SerialWrite(" enabled=");
+        SerialWriteHex(g_lapics[i].enabled ? 1 : 0);
+        SerialWrite("\n");
+    }
 
     for (u64 i = 0; i < g_ioapic_count; ++i)
     {
@@ -403,6 +449,20 @@ u32 IsaIrqToGsi(u8 isa_irq)
         }
     }
     return isa_irq; // ISA IRQ N → GSI N when unoverridden
+}
+
+u64 CpuCount()
+{
+    return g_lapic_count;
+}
+
+const LapicRecord& Lapic(u64 index)
+{
+    if (index >= g_lapic_count)
+    {
+        PanicAcpi("Lapic(index) out of range");
+    }
+    return g_lapics[index];
 }
 
 u16 IsaIrqFlags(u8 isa_irq)

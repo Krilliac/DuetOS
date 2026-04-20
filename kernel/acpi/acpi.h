@@ -35,12 +35,21 @@ namespace customos::acpi
 
 constexpr u64 kMaxIoapics = 4;
 constexpr u64 kMaxInterruptOverrides = 16;
+constexpr u64 kMaxCpus = 32; // upper bound on MADT LAPIC entries cached
 
 struct IoApicRecord
 {
     u8 id;
     u32 address;  // physical base of the IOAPIC's 4 KiB MMIO window
     u32 gsi_base; // first Global System Interrupt this IOAPIC handles
+};
+
+struct LapicRecord
+{
+    u8 processor_uid;    // ACPI processor UID (opaque to us beyond logging)
+    u8 apic_id;          // LAPIC ID — the target for IPIs / IOAPIC routes
+    bool enabled;        // MADT flag bit 0: 1 = present + usable
+    bool online_capable; // MADT flag bit 1: 1 = can be onlined by OS
 };
 
 struct InterruptOverride
@@ -65,6 +74,11 @@ u64 LocalApicAddress();
 
 u64 IoApicCount();
 const IoApicRecord& IoApic(u64 index);
+
+/// Number of processor-LAPIC entries the MADT reported. The BSP itself
+/// counts; AP bring-up iterates Lapic(0..CpuCount-1) to find its targets.
+u64 CpuCount();
+const LapicRecord& Lapic(u64 index);
 
 /// Translate a legacy ISA IRQ (0..15) to the Global System Interrupt
 /// the IOAPIC should be programmed to trigger on. Returns the input

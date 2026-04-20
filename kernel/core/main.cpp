@@ -7,6 +7,7 @@
 #include "../arch/x86_64/lapic.h"
 #include "../arch/x86_64/pic.h"
 #include "../arch/x86_64/serial.h"
+#include "../arch/x86_64/smp.h"
 #include "../arch/x86_64/timer.h"
 #include "../cpu/percpu.h"
 #include "../drivers/input/ps2kbd.h"
@@ -107,6 +108,9 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
 
     SerialWrite("[boot] Bringing up PS/2 keyboard.\n");
     customos::drivers::input::Ps2KeyboardInit();
+
+    SerialWrite("[boot] Bringing up APs.\n");
+    SmpStartAps();
 
     // Keyboard reader thread: blocks on Ps2KeyboardRead, prints each
     // scan code. First real end-to-end test of the IRQ path: ACPI →
