@@ -724,15 +724,15 @@ void StartRing3SmokeTask()
     // is broken: a user-mode fault must never bring down the OS.
     SpawnJailProbeTask();
     SpawnNxProbeTask();
-    // CPU-hog probe: infrastructure is live (tick_budget + tick_exhausted
-    // + Schedule() kill path), but spawning a ring-3 task that spins
-    // forever currently races with reaper cleanup in a way that
-    // triggers a #DF after the jail+nx probes are reaped. Deferred
-    // until the IST-stacks-in-low-VA gotcha is fixed (they need to
-    // be higher-half-direct-mapped so they survive CR3 flips to user
-    // ASes — right now a CR3 flip done from inside a #DF handler
-    // running on IST1 unmaps the very stack the handler is on).
-    //     SpawnCpuHogProbe();
+#ifdef CUSTOMOS_BUDGET_DEMO
+    // CPU-hog probe: spins forever with a 50-tick budget. Exercises
+    // the tick-budget kill path end-to-end. Default-off because the
+    // kill-path's CR3 flip currently cascades into a #DF cluster
+    // with the IST-stack-not-mapped-in-user-AS gotcha. Build with
+    // -DCUSTOMOS_BUDGET_DEMO=ON to opt in and observe the
+    // `[sched] tick budget exhausted pid=...` + task-kill sequence.
+    SpawnCpuHogProbe();
+#endif
     Log(LogLevel::Info, "core/ring3", "trusted+sandbox+jail-probe+nx-probe ring3 tasks queued");
 }
 

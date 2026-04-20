@@ -156,6 +156,16 @@ if(CUSTOMOS_CANARY_DEMO)
     target_compile_definitions(customos-kernel-stage1   PRIVATE CUSTOMOS_CANARY_DEMO=1)
 endif()
 
+# Tick-budget live-fire build flag. Spawns ring3-cpu-hog which
+# infinite-loops in ring 3 with a 50-tick (~500 ms) budget; the
+# scheduler's tick-exhausted path kills it. OFF for normal builds;
+# opt in to verify the tick-budget kill path.
+option(CUSTOMOS_BUDGET_DEMO "Spawn a ring-3 task that spins forever to exercise the tick-budget kill" OFF)
+if(CUSTOMOS_BUDGET_DEMO)
+    target_compile_definitions(customos-kernel          PRIVATE CUSTOMOS_BUDGET_DEMO=1)
+    target_compile_definitions(customos-kernel-stage1   PRIVATE CUSTOMOS_BUDGET_DEMO=1)
+endif()
+
 # Deliberate-CPU-exception build flag, consumed by kernel_main and
 # triggered by tools/test-trap.sh. Executes `ud2` to take a #UD fault
 # so the trap dispatcher's crash-dump path can be verified end-to-end
