@@ -412,29 +412,40 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
             const bool release_edge = !left_down && prev_left;
             prev_left = left_down;
 
-            // Press on a title bar → start a drag on that window
-            // (bring it to the top first, since raised + dragged
-            // go together in every GUI users have ever seen).
+            // Press on a window — ANY part of it — raises that
+            // window to the top of z-order (standard GUI feel:
+            // clicking a background window brings it to front).
+            // If the press also landed on the title bar, start
+            // a drag.
             if (press_edge && !drag.active)
             {
                 const auto hit = customos::drivers::video::WindowTopmostAt(cx, cy);
-                if (hit != customos::drivers::video::kWindowInvalid &&
-                    customos::drivers::video::WindowPointInTitle(hit, cx, cy))
+                if (hit != customos::drivers::video::kWindowInvalid)
                 {
                     customos::u32 wx = 0, wy = 0;
                     customos::drivers::video::WindowGetBounds(hit, &wx, &wy, nullptr, nullptr);
-                    drag.active = true;
-                    drag.window = hit;
-                    drag.grab_offset_x = cx - wx;
-                    drag.grab_offset_y = cy - wy;
                     customos::drivers::video::WindowRaise(hit);
+                    const bool in_title = customos::drivers::video::WindowPointInTitle(hit, cx, cy);
+                    if (in_title)
+                    {
+                        drag.active = true;
+                        drag.window = hit;
+                        drag.grab_offset_x = cx - wx;
+                        drag.grab_offset_y = cy - wy;
+                        SerialWrite("[ui] drag begin window=");
+                        SerialWriteHex(hit);
+                        SerialWrite("\n");
+                    }
+                    else
+                    {
+                        SerialWrite("[ui] raise window=");
+                        SerialWriteHex(hit);
+                        SerialWrite("\n");
+                    }
                     customos::drivers::video::CursorHide();
                     customos::drivers::video::DesktopCompose(kDesktopTealLocal,
                                                              "WELCOME TO CUSTOMOS   BOOT OK");
                     customos::drivers::video::CursorShow();
-                    SerialWrite("[ui] drag begin window=");
-                    SerialWriteHex(hit);
-                    SerialWrite("\n");
                 }
             }
             if (release_edge && drag.active)
