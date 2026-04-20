@@ -607,6 +607,126 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 032 — TSS + IST stacks for #DF, #MC, #NMI
+
+- **Scope:** `kernel/arch/x86_64/gdt.{h,cpp}` (TSS struct,
+  `TssInit`, three 4 KiB IST stacks, GDT grown to 5 slots),
+  `kernel/arch/x86_64/idt.{h,cpp}` (`IdtSetIst`), wiring in
+  `kernel/core/main.cpp`
+- **Decision:** Install a long-mode TSS with three dedicated IST
+  stacks for the three critical faults where continuing on the
+  currently-running task's stack is dangerous: #DF (double fault —
+  caller's stack might be bad), #MC (machine check — caller's
+  stack might be corrupted), #NMI (asynchronous, can fire at any
+  moment including inside a locked region). Each IST stack is a
+  separate 4 KiB BSS array; the TSS descriptor lives in GDT slots
+  3-4 (long-mode TSS is 16 bytes = 2 slots). IDT entries for the
+  three vectors get their IST field patched to 1/2/3 respectively
+  via a new `IdtSetIst` helper.
+- **Why:** Entry #004 called out "IST stacks for critical
+  exceptions (#DF, #MC, #NMI — all currently share the kernel
+  stack)" as deferred. Without IST, a double fault on a bad
+  kernel stack triple-faults the machine; with IST, #DF is
+  guaranteed to deliver onto a known-good stack regardless of
+  what state the prior one was in. Same reasoning for #MC and
+  #NMI. Landing now also wires the `RSP0` slot in the TSS so
+  the descriptor is already in-place when ring 3 lands —
+  user→kernel transitions consume that field.
+- **Rules out / defers:** Per-AP TSS + IST stacks — APs still
+  halt in `ApEntryFromTrampoline` with IF=0, so they never
+  take a fault on a bad stack. Lands with SMP scheduler join
+  (Commit E in smp-ap-bringup-scope.md). Per-task kernel stack
+  via RSP0 (ring 3 transition's job — the slot is wired, the
+  value stays 0 until the first user process runs). Guard
+  pages around each IST stack (would need paging-backed
+  allocations; no consumer yet). I/O-permission bitmap (disabled
+  by setting `iopb_offset` past the TSS body — every ring-3
+  port access will #GP, which is the posture we want).
+- **Revisit when:** Ring 3 lands — RSP0 gets wired to the
+  current task's kernel stack on every context switch. SMP
+  scheduler join — each AP allocates its own TSS + IST stacks
+  and does `ltr` in its entry. First real machine check hits —
+  the panic path walks the #MC frame, which is now delivered
+  on IST2.
+- **Related tracks:** Track 2 (Platform — interrupt infrastructure),
+  Track 4 (Process model — RSP0 becomes per-task).
+
+---
+
+## 031 — HPET driver: ACPI parse + main-counter enable
+
+- **Scope:** `kernel/acpi/acpi.{h,cpp}` (HpetTable struct,
+  `ParseHpet`, `HpetAddress()` / `HpetTimerCount()` /
+  `HpetCounterWidth()`), `kernel/arch/x86_64/hpet.{h,cpp}` (new
+  module: `HpetInit`, `HpetReadCounter`, `HpetPeriodFemtoseconds`),
+  wiring in `kernel/core/main.cpp`
+- **Decision:** Parse the ACPI HPET table, `MapMmio` the 1 KiB
+  event-timer-block window, validate that COUNT_SIZE_CAP == 1
+  (64-bit counter), zero the main counter, and set ENABLE_CNF.
+  Expose a 64-bit `HpetReadCounter()` for sub-tick precision
+  timing and `HpetPeriodFemtoseconds()` so callers can convert
+  deltas without a second MMIO read. HPET is OPTIONAL — a missing
+  table just skips init with a Warn log line. 32-bit HPETs panic
+  loudly rather than getting a read+retry fallback we can't
+  validate (vanishingly rare on x86_64).
+- **Why:** Entry #012 deferred "HPET (high-precision timer)"
+  alongside FADT. FADT landed in #025; HPET is the natural
+  follow-up and brings a high-precision counter primitive into
+  the tree. LAPIC timer still owns the 100 Hz scheduler tick —
+  HPET is a read-only precision counter for future consumers
+  (calibration, log timestamps, fine-grained driver delays).
+  Landing now means the first consumer doesn't also have to
+  design the parse + MMIO map.
+- **Rules out / defers:** Per-timer comparator programming
+  (HPET can drive its own interrupts — not needed while LAPIC
+  timer is the tick source). Legacy replacement mode
+  (LEG_RT_CNF — we've already moved the tick off the PIT, so
+  no consumer cares). 32-bit counter fallback (panic for now).
+  Multi-HPET support (the spec allows multiple blocks; every
+  real chipset ships exactly one).
+- **Revisit when:** Log timestamps land (read `HpetReadCounter`
+  in the klog prologue). Driver code needs sub-100 Hz delays
+  (use HPET spin instead of `SchedSleepTicks`). TSC calibration
+  (HPET is the gold standard for deriving TSC frequency). Sleep
+  states + wake-from-S3 — HPET survives, RTC does not, so it
+  becomes the preferred clock.
+- **Related tracks:** Track 2 (Platform — precision timing),
+  Track 13 (Power management — HPET across S-states).
+
+---
+
+## 030 — CondvarWaitTimeout
+
+- **Scope:** `kernel/sched/sched.{h,cpp}` — adds
+  `CondvarWaitTimeout` alongside the untimed `CondvarWait`
+- **Decision:** Mirror `WaitQueueBlockTimeout` (entry #026) on
+  the condvar layer. Same atomicity splice as `CondvarWait`
+  (mutex hand-off + self-enqueue under one sched_lock), plus
+  also go onto the sleep queue so the timer path can fire.
+  Returns `true` if woken by an explicit `CondvarSignal` /
+  `CondvarBroadcast`, `false` if the timer won. `ticks == 0` is
+  a test-and-drop: Unlock + Yield + Lock, report as timeout.
+- **Why:** Entry #028 explicitly called out "Timed condvars
+  (`CondvarWaitTimeout`) — trivial follow-up on top of
+  `WaitQueueBlockTimeout`, but no consumer yet" as deferred.
+  Now that two independent users could want it (driver
+  command-completion wait with timeout, producer/consumer
+  where the consumer bounds its idle time), closing the
+  deferral is cheap and keeps the blocking primitive set
+  uniform — every pattern has both timed and untimed variants.
+- **Rules out / defers:** Wake-reason propagation beyond the
+  bool return (callers don't learn whether it was Signal vs.
+  Broadcast; they shouldn't care). Cancellation / interruption
+  (needs the "cancel this blocked task" primitive — arrives with
+  the first syscall that takes signals).
+- **Revisit when:** First driver I/O path that needs
+  "complete-or-timeout" semantics on a condvar. First syscall
+  with signal delivery (cancellation).
+- **Related tracks:** Track 4 (IPC / sync), Track 6 (Drivers —
+  consumer).
+
+---
+
 ## 029 — KernelReboot: ACPI → 0xCF9 → 8042 → triple-fault chain
 
 - **Scope:** `kernel/core/reboot.{h,cpp}` (new module), wired into
