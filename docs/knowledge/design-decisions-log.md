@@ -607,6 +607,64 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 092 — Severity-coloured KERNEL LOG window
+
+- **Scope:** `kernel/core/main.cpp` — log-viewer content
+  drawer inspects the first chunk per line (always the
+  severity tag from `LevelTag()`) and sets the render
+  foreground per line: white-ish = Info, grey = Debug,
+  amber = Warn, soft red = Error. Newline resets.
+- **Decision:** Line-level colouring, not per-cell. Detected
+  from the LevelTag() shape "[X] " — the renderer matches
+  `s[0]=='[' && s[2]==']'`, which no other chunk produces.
+  Zero storage overhead; colour lives only in the render
+  function's static.
+- **Why:** Previously every severity looked identical on
+  screen; klog output was visually flat. Amber warnings and
+  red errors now jump out the moment the window paints —
+  matches every modern log viewer (journalctl, dmesg -H,
+  etc.).
+- **Rules out / defers:** Per-token / per-column colours
+  (no rich ANSI escape handling). Colour theme config. Per-
+  severity background highlight. Copy-with-colour.
+- **Revisit when:** ANSI escape codes land in the console
+  generally. User wants a custom palette.
+- **Related tracks:** Track 9 (Windowing — log surface),
+  Track 7 (Userland — readable logs).
+
+---
+
+## 091 — Shell alias / unalias / sysinfo + $PS1 prompt
+
+- **Scope:** `kernel/core/shell.cpp` — 8-slot alias table
+  (names 32B, expansions 96B); `alias` / `unalias` / `sysinfo`
+  commands; Prompt() now consults $PS1 before defaulting to
+  "$ ".
+- **Decision:** Alias expansion runs BEFORE tokenisation in
+  Dispatch — the expansion flows through the full shell
+  pipeline (env substitution, redirects). One level of
+  expansion; an alias referencing another is not recursively
+  expanded (bash's default sans expand_aliases). sysinfo
+  consolidates version + uptime + wall time + task counts +
+  memory + window count + display mode into a single
+  read-only dump.
+- **Why:** Three small polish items that together make the
+  shell feel like a real terminal:
+    alias    — muscle memory ("alias ll ls")
+    $PS1     — prompt customization (the canonical shell
+               expression of individuality)
+    sysinfo  — one-shot "what is this machine doing?"
+- **Rules out / defers:** Recursive alias expansion.
+  Alias arguments / parameters. $PS1 escape sequences
+  (\u, \h, \w, \t — would need richer Prompt rendering).
+  sysinfo -v flags.
+- **Revisit when:** First alias consumer needs parameter
+  substitution. $PS1 users ask for hostname / cwd
+  expansion (implies a CWD concept).
+- **Related tracks:** Track 7 (Userland shell).
+
+---
+
 ## 090 — Shell env variables + $VAR whole-token substitution
 
 - **Scope:** `kernel/core/shell.cpp` — 8-slot env table
