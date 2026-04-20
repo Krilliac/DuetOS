@@ -20,8 +20,12 @@
  *     RAM (reachable via the boot direct map). Panics otherwise. The
  *     fix is to MapMmio the out-of-range range; deferred until a real
  *     machine makes us care.
- *   - Only MADT is parsed. FADT, MCFG, HPET, SRAT etc. are untouched.
- *     Add a dispatcher when a consumer needs one.
+ *   - FADT parsing is minimal — only RESET_REG + RESET_VALUE + SCI_INT
+ *     are cached. The rest (PM1a/PM1b event/control blocks, PM timer,
+ *     GPE blocks, preferred CPU C-state hints) lands when a consumer
+ *     exists.
+ *   - MCFG (PCIe ECAM), HPET, SRAT are still untouched. Add a
+ *     dispatcher when a consumer needs one.
  *   - No DSDT/SSDT bytecode interpreter. That's a multi-thousand-line
  *     subsystem in its own right (see: ACPICA). When we need
  *     enumeration beyond static tables we'll integrate or write one.
@@ -91,5 +95,51 @@ u32 IsaIrqToGsi(u8 isa_irq);
 /// in bits 2..3 (00 bus default, 01 edge, 11 level). Callers program the
 /// IOAPIC redirection entry accordingly.
 u16 IsaIrqFlags(u8 isa_irq);
+
+/// ACPI System Control Interrupt vector, as reported by the FADT.
+/// Returns 9 (the ACPI-spec default ISA IRQ) if the FADT was not
+/// found or didn't set a value. The SCI itself is an edge/level-
+/// triggered line that fires on power-management events; no handler
+/// is installed yet.
+u16 SciVector();
+
+/// Issue a firmware-defined reboot via the FADT's RESET_REG. Returns
+/// true if the reset register was advertised as supported and the
+/// write was issued — on success the CPU does not return, so any
+/// code past `if (AcpiReset()) unreachable;` is executed only on
+/// failure (no FADT, RESET_REG_SUP flag clear, or unsupported
+/// address-space id). Fall back to `Outb(0xCF9, 0x06)` or a triple
+/// fault in that case.
+bool AcpiReset();
+
+/// HPET event-timer-block physical address from the ACPI HPET
+/// table. Returns 0 if no HPET table was present (in which case
+/// drivers should fall back to PIT or LAPIC timers only).
+u64 HpetAddress();
+
+/// Number of timers implemented in the HPET (1..32). Returns 0
+/// if no HPET is present.
+u8 HpetTimerCount();
+
+/// HPET main-counter width — 64 if the COUNT_SIZE_CAP bit is set
+/// in the HPET capabilities register (from the ACPI table's
+/// event-timer-block-id), 32 otherwise. Returns 0 if no HPET.
+u8 HpetCounterWidth();
+
+/// MCFG (PCIe Memory-Mapped Configuration Space) base address for
+/// segment group 0 (the only segment that exists on every x86_64
+/// machine we target). Returns 0 if no MCFG table was present —
+/// callers fall back to legacy port-IO config access in that case.
+///
+/// The region runs from `McfgAddress()` to
+/// `McfgAddress() + (McfgEndBus() - McfgStartBus() + 1) * 0x100000`;
+/// each bus covers 1 MiB, each device 32 KiB, each function 4 KiB.
+u64 McfgAddress();
+
+/// First PCI bus covered by the MCFG region. Usually 0.
+u8 McfgStartBus();
+
+/// Last PCI bus covered by the MCFG region (inclusive).
+u8 McfgEndBus();
 
 } // namespace customos::acpi

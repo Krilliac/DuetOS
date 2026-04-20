@@ -37,6 +37,14 @@ enum class TaskState : u8
     Dead,     // SchedExit called; stack + task struct reclaimable
 };
 
+enum class TaskPriority : u8
+{
+    Normal = 0, // default for everything that does real work
+    Idle = 1,   // picked only when no Normal task is Ready — dedicated
+                // per-CPU idle tasks live here so they don't round-robin
+                // CPU time with actual workloads
+};
+
 struct Task;
 
 /// Bootstrap the scheduler. Wraps the currently-running code (kernel_main)
@@ -45,9 +53,12 @@ void SchedInit();
 
 /// Spawn a new kernel thread. Allocates a Task struct and a dedicated
 /// kernel stack, primes the stack so the first context switch lands on
-/// `entry(arg)`, and enqueues the task. Returns the task (for debugging
-/// / future join support).
-Task* SchedCreate(TaskEntry entry, void* arg, const char* name);
+/// `entry(arg)`, and enqueues the task at the given priority. Returns
+/// the task (for debugging / future join support). Default priority
+/// is Normal — real workloads, drivers, reapers, workers. Pass
+/// TaskPriority::Idle for per-CPU idle tasks (ones that should only
+/// run when no Normal task is Ready).
+Task* SchedCreate(TaskEntry entry, void* arg, const char* name, TaskPriority priority = TaskPriority::Normal);
 
 /// Voluntary yield. Pushes current task to the tail of the runqueue and
 /// switches to the head (if any other task is ready).
@@ -56,6 +67,20 @@ void SchedYield();
 /// Block the current task for at least `ticks` timer ticks (100 Hz clock
 /// today). A value of 0 behaves like SchedYield().
 void SchedSleepTicks(u64 ticks);
+
+/// Block the current task until the timer's tick counter reaches
+/// `deadline_tick`. If the counter has already passed `deadline_tick`
+/// by the time the call runs, behaves like SchedYield(). Useful for
+/// periodic tasks that want to fire on a fixed cadence without drift
+/// (increment deadline by `period` each iteration instead of
+/// sleeping `period` at the end of each loop body).
+void SchedSleepUntil(u64 deadline_tick);
+
+/// Current value of the scheduler's tick counter (also exposed by
+/// `arch::TimerTicks()`; this is the scheduler-visible copy, updated
+/// inside `OnTimerTick`). Use as the base for building a deadline
+/// to pass to `SchedSleepUntil`.
+u64 SchedNowTicks();
 
 /// Terminate the current task. Marks it Dead, reclaims nothing in v0 (a
 /// reaper thread lands later), and switches away — never returns.
@@ -97,6 +122,14 @@ SchedStats SchedStatsRead();
 /// closes the "Dead tasks leak" note in sched-blocking-primitives-v0.
 void SchedStartReaper();
 
+/// Spawn the per-CPU idle task. On the BSP, call once after SchedInit
+/// so the runqueue is never empty when the boot task (or any other
+/// task) blocks. The idle task does `sti; hlt` forever — it consumes
+/// no CPU while halted, but its presence on the runqueue means
+/// Schedule() always has a fallback to pick. On SMP, each AP's
+/// bring-up will call this again with a distinct `name` per CPU.
+void SchedStartIdle(const char* name);
+
 /*
  * Wait queues — event-driven blocking.
  *
@@ -120,6 +153,19 @@ struct WaitQueue
 /// (or IRQ handler) calls WaitQueueWakeOne / WaitQueueWakeAll. Caller
 /// must hold interrupts disabled across the enqueue → Schedule pair.
 void WaitQueueBlock(WaitQueue* wq);
+
+/// Block the current task on `wq` with a tick-based timeout. Returns
+/// when either (a) another task or IRQ handler calls
+/// WaitQueueWake{One,All}, or (b) `ticks` timer ticks have elapsed.
+/// Same interrupt contract as WaitQueueBlock. A `ticks == 0` value
+/// behaves like SchedYield — no actual block.
+///
+/// Return value: true if woken by an explicit wake, false if woken
+/// by the timer. Callers that can resynthesise the answer from their
+/// guarded condition can ignore it; callers that need to distinguish
+/// "I got the event I was waiting for" from "I gave up" (I/O retry
+/// paths, driver command-completion waits) use it to branch.
+bool WaitQueueBlockTimeout(WaitQueue* wq, u64 ticks);
 
 /// Wake the single longest-waiting task on `wq` (FIFO). No-op on empty
 /// queue. Callable from IRQ context; caller holds interrupts disabled.
@@ -153,5 +199,60 @@ void MutexLock(Mutex* m);
 void MutexUnlock(Mutex* m);
 /// Non-blocking acquire. Returns true on success, false if already held.
 bool MutexTryLock(Mutex* m);
+
+/*
+ * Condition variable — drop-mutex-and-block with safe re-acquire.
+ *
+ * Standard producer/consumer pattern:
+ *
+ *     MutexLock(&m);
+ *     while (!ready) CondvarWait(&cv, &m);
+ *     // m is held here; `ready` was true.
+ *
+ *     // producer:
+ *     MutexLock(&m);
+ *     ready = true;
+ *     CondvarSignal(&cv);
+ *     MutexUnlock(&m);
+ *
+ * `CondvarWait` atomically hands off the mutex (with FIFO fairness
+ * identical to MutexUnlock — the longest-waiting lock contender
+ * becomes the new owner) AND enqueues the caller on `cv->waiters`.
+ * No signal-between-release-and-block race window.
+ *
+ * Zero-initialise a Condvar to the empty state — no explicit Init
+ * is required.
+ */
+struct Condvar
+{
+    WaitQueue waiters;
+};
+
+/// Drop `m` (with MutexUnlock hand-off semantics), block on `cv`,
+/// re-acquire `m` on wake. Caller MUST hold `m` at entry; panics
+/// otherwise.  Spurious wakeups are possible under the current
+/// wait-queue primitives — always re-check your condition in a
+/// `while (!condition) CondvarWait(...)` loop, never a plain `if`.
+void CondvarWait(Condvar* cv, Mutex* m);
+
+/// Timed variant — blocks at most `ticks` timer ticks before
+/// resuming. Same atomicity contract as CondvarWait (mutex hand-off
+/// + self-enqueue under a single sched_lock hold), plus also goes
+/// onto the sleep queue. Returns true if woken by an explicit
+/// CondvarSignal / CondvarBroadcast, false if woken by timeout.
+/// `ticks == 0` is a test-and-drop: same as calling Unlock +
+/// Yield + Lock. Re-check your guarded condition after return —
+/// a true return doesn't prove the condition still holds by the
+/// time you re-acquire `m`.
+bool CondvarWaitTimeout(Condvar* cv, Mutex* m, u64 ticks);
+
+/// Wake the single longest-waiting task on `cv`. No-op on empty
+/// queue. Typical pattern is to call this WITH the companion mutex
+/// held — guarantees the signalled waiter sees whatever state
+/// change the signaller made before signalling.
+void CondvarSignal(Condvar* cv);
+
+/// Wake every task on `cv`. Returns the number of tasks woken.
+u64 CondvarBroadcast(Condvar* cv);
 
 } // namespace customos::sched

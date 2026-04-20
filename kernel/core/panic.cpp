@@ -1,7 +1,9 @@
 #include "panic.h"
 
 #include "../arch/x86_64/cpu.h"
+#include "../arch/x86_64/gdt.h"
 #include "../arch/x86_64/serial.h"
+#include "../arch/x86_64/smp.h"
 #include "../arch/x86_64/timer.h"
 #include "../cpu/percpu.h"
 #include "klog.h"
@@ -232,6 +234,13 @@ void DumpDiagnostics(u64 rip, u64 rsp, u64 rbp)
     WriteLabelled("cr4      ", arch::ReadCr4());
     WriteLabelled("rflags   ", arch::ReadRflags());
     WriteLabelled("efer     ", arch::ReadEfer());
+    // A blown IST stack is one of the quietest ways a kernel can
+    // die — silently corrupts neighbouring BSS and shows up as
+    // mystery data corruption later. Surface it explicitly here
+    // so a canary violation is named, not debugged from entrails.
+    arch::SerialWrite("  ist_canary : ");
+    arch::SerialWrite(arch::IstStackCanariesIntact() ? "ok" : "CORRUPT");
+    arch::SerialWrite("\n");
     DumpBacktrace(rbp);
     DumpStack(rsp, 16);
     DumpLogRing();
@@ -244,6 +253,12 @@ void Panic(const char* subsystem, const char* message)
     // itself also CLI+HLT loops, but getting the clean banner out
     // first matters for diagnosis.
     arch::Cli();
+
+    // Broadcast NMI to peer CPUs so they stop fighting for the
+    // serial line / executing against potentially-corrupt shared
+    // state. Peers halt quietly in the trap dispatcher's NMI
+    // short-circuit. No-op pre-LapicInit.
+    arch::PanicBroadcastNmi();
 
     arch::SerialWrite("\n[panic] ");
     arch::SerialWrite(subsystem);
@@ -266,6 +281,7 @@ void Panic(const char* subsystem, const char* message)
 void PanicWithValue(const char* subsystem, const char* message, u64 value)
 {
     arch::Cli();
+    arch::PanicBroadcastNmi();
 
     arch::SerialWrite("\n[panic] ");
     arch::SerialWrite(subsystem);

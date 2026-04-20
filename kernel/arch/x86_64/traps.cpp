@@ -120,6 +120,22 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         return;
     }
 
+    // Vector 2 (NMI) is used for cross-CPU panic halt (see
+    // arch::PanicBroadcastNmi). The panicking CPU is about to write
+    // the crash dump to serial; every other CPU that receives the
+    // broadcast NMI comes through here and must halt quietly so it
+    // doesn't fight for the serial line. If NMI ever grows a real
+    // consumer (chipset error, power button, watchdog), route it
+    // before this early-halt — today the default posture is "NMI
+    // means stop and stay stopped."
+    if (frame->vector == 2)
+    {
+        for (;;)
+        {
+            asm volatile("cli; hlt");
+        }
+    }
+
     // Pre-marker human-readable banner. Anything before BEGIN / after END
     // is free-form prose; the bracketed region is the machine-extractable
     // dump record.

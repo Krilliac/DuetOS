@@ -29,4 +29,12 @@ void IdtInit();
 /// interrupt gate.
 void IdtSetGate(u8 vector, u64 handler);
 
+/// Patch an existing gate's IST field so the CPU switches to the
+/// indexed IST stack before entering the handler. `ist` is 1..7
+/// (0 would disable IST for that gate). Call AFTER IdtInit AND
+/// AFTER TssInit — the IST entry in the TSS must hold a valid
+/// stack pointer before the first delivery on `vector` or the CPU
+/// faults on the empty-stack dereference.
+void IdtSetIst(u8 vector, u8 ist);
+
 } // namespace customos::arch

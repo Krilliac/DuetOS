@@ -63,6 +63,11 @@ u32 LapicRead(u64 reg_offset)
     return g_lapic_mmio[reg_offset / sizeof(u32)];
 }
 
+bool LapicIsReady()
+{
+    return g_lapic_mmio != nullptr;
+}
+
 void LapicWrite(u64 reg_offset, u32 value)
 {
     g_lapic_mmio[reg_offset / sizeof(u32)] = value;

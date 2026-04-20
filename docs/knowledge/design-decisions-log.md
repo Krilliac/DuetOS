@@ -607,6 +607,776 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 043 — PS/2 keyboard device reset + explicit scan-code-set-1
+
+- **Scope:** `kernel/drivers/input/ps2kbd.cpp` — new
+  `KbdSendAndAck` helper + steps 7-9 added to `ControllerInit`
+- **Decision:** After the controller-level init (#027) finishes,
+  drive the device directly: 0xFF (reset → 0xFA ACK → 0xAA self-
+  test pass), 0xF0 0x01 (force scan code set 1), 0xF4 (enable
+  scanning). Unexpected / missing ACK logs a Warn and continues
+  — USB-legacy emulated keyboards routinely drop device commands
+  while still producing scan codes, so panicking would refuse
+  interactive input on too much hardware.
+- **Why:** Closes the "device reset" and "scan-code-set
+  selection" items explicitly deferred in #027. The scan-code
+  translator (#024) is correct only if the device is actually
+  emitting set 1. Firmware default is usually "set 2 + 8042
+  translation on" (indistinguishable on 0x60), but some boards
+  leave the device on set 2 with translation disabled, which
+  would silently wreck the keymap.
+- **Rules out / defers:** Typematic (repeat rate + delay)
+  configuration — 0xF3 `<byte>` works but we don't care today.
+  Caps-lock / num-lock / scroll-lock LED control (0xED
+  `<mask>`) — no consumer. Port 2 / aux-channel (mouse) — no
+  driver.
+- **Revisit when:** First non-PS/2-primary machine where the
+  device-reset path actually matters on real hardware. Typematic
+  configuration becomes useful (games / terminals). USB HID
+  stack lands (primary input path on modern hardware, PS/2 path
+  stays as fallback).
+- **Related tracks:** Track 6 (Drivers — input).
+
+---
+
+## 042 — HPET self-test
+
+- **Scope:** `kernel/arch/x86_64/hpet.{h,cpp}` — new
+  `HpetSelfTest`, called from `kernel_main` right after
+  `HpetInit`
+- **Decision:** Read the HPET main counter twice with a bounded
+  busy-wait between. Panic if the counter didn't advance or
+  went backwards (monotonicity invariant). No-op if ACPI didn't
+  find an HPET. Runs early — before the scheduler — so the
+  test uses `pause` rather than `SchedSleepTicks`.
+- **Why:** HPET is a silent dependency for the log-timestamp
+  path (#035) and every future fine-grained timing consumer. A
+  broken counter would surface downstream as "time didn't
+  advance for an hour" type mysteries; better to halt at boot
+  with a named diagnostic.
+- **Rules out / defers:** Verifying the reported period against
+  the actual rate (would need a second clock source to cross-
+  check — PIT calibration could do it, but pulls in extra
+  init ordering). Catching a stuck counter that later resumes
+  (would need periodic re-checks from a watchdog). Self-tests
+  for individual comparators (we don't use them yet).
+- **Revisit when:** HPET starts driving interrupts (the
+  comparators land). First discrepancy observed between HPET
+  time and wall-clock / PIT (means adding cross-check).
+- **Related tracks:** Track 2 (Platform — observability).
+
+---
+
+## 041 — Heartbeat to SchedSleepUntil (drift-free cadence)
+
+- **Scope:** `kernel/core/heartbeat.cpp` — replace
+  `SchedSleepTicks(kHeartbeatTicks)` with
+  `SchedSleepUntil(deadline); deadline += kHeartbeatTicks;`
+- **Decision:** First consumer of the absolute-deadline
+  primitive from #034. Period stays exactly
+  `kHeartbeatTicks * 10 ms` regardless of how long the dump
+  body takes to serialize — previously ~0.2% drift per beat.
+- **Why:** Trivial migration, real win. Heartbeat is the
+  canonical periodic kernel task; future periodic drivers
+  (watchdogs, health probes) will copy this pattern as the
+  default — so codifying it here sets the template.
+- **Rules out / defers:** Catch-up semantics (if the CPU was
+  starved for >kHeartbeatTicks, we yield once and move on;
+  no multi-beat burst). Phase alignment to wall-clock
+  boundaries (needs RTC).
+- **Revisit when:** Second periodic kernel task lands (extract
+  a `PeriodicTaskLoop` helper). Priorities grow enough that
+  heartbeat needs a guaranteed-wake class.
+- **Related tracks:** Track 2 (Platform — observability).
+
+---
+
+## 040 — Stack canaries on IST stacks
+
+- **Scope:** `kernel/arch/x86_64/gdt.{h,cpp}` —
+  `kIstStackCanary` + `IstStackCanariesIntact()`;
+  `kernel/core/panic.cpp` — dumps `ist_canary : ok/CORRUPT`
+  in `DumpDiagnostics`
+- **Decision:** Plant the same
+  `0xC0DEB0B0CAFED00D` canary at the low edge of each IST
+  stack (#DF, #MC, #NMI) that per-task kernel stacks already
+  carry. `TssInit` plants; crash-dump path checks. Any blown
+  canary becomes a named "CORRUPT" diagnostic instead of
+  silent-BSS-scribble.
+- **Why:** A 4 KiB IST stack is tight — the crash-dump path
+  runs near 2 KiB, leaving thin margin. Without canaries, an
+  IST overflow would clobber the next BSS variable (the next
+  stack, the TSS, random globals) and manifest as unrelated
+  weirdness later. Mirrors the per-task stack-canary pattern
+  (#010 era) so the checking discipline is uniform.
+- **Rules out / defers:** Page-level guard pages below each
+  IST (would need a paged stack allocator). Canaries at
+  multiple depths (stack poisoning). Per-AP IST canaries —
+  APs still halt in ApEntryFromTrampoline, no IST stack in use.
+- **Revisit when:** First IST overflow seen in CI / real
+  hardware (reduce IST stack budget? expand it? add guard
+  pages?). SMP scheduler join — each AP gets its own IST
+  stacks that need canaries too.
+- **Related tracks:** Track 2 (Platform — stack hardening),
+  Track 13 (Security — defence in depth).
+
+---
+
+## 039 — 2-level priority scheduling (Normal + Idle)
+
+- **Scope:** `kernel/sched/sched.{h,cpp}` — new `TaskPriority`
+  enum, two runqueues (`g_run_head_normal` /
+  `g_run_head_idle`), drain-normal-first policy in
+  `RunqueuePop`, `SchedCreate` grows an optional priority
+  parameter
+- **Decision:** Split the single FIFO runqueue into two
+  priority bands. Normal-priority tasks (drivers, workers,
+  reapers, kbd-reader, all SchedCreate defaults) round-robin
+  on one queue; Idle-priority tasks (per-CPU idle threads
+  from `SchedStartIdle`) wait on the other and only get
+  picked when Normal is empty. Priority is fixed at
+  SchedCreate and never changes — priority inheritance /
+  real-time class are deferred.
+- **Why:** First half of decision log #010's "Priorities.
+  Real-time class." deferral. With the idle task on the
+  Normal queue, it was round-robinning CPU time with real
+  workloads — every N+1th scheduler slot went to halt,
+  compressing worker throughput by ~1/(N+1). Moving idle to
+  its own lower band means CPU goes to real work first.
+- **Rules out / defers:** Priority inheritance (needs a
+  runtime `boost_priority_to(...)` + revert hook). Real-time
+  class (guaranteed-latency band). Per-priority timeslicing
+  (just drain-top-first here). More bands (normal has one
+  level). CPU affinity (no per-CPU runqueues).
+- **Revisit when:** First interactive workload where CPU
+  budget visibly suffers from round-robin fairness. Real-time
+  driver (audio, input latency) needs an above-Normal band.
+  SMP scheduler join — per-CPU runqueues move per-priority
+  band per CPU.
+- **Related tracks:** Track 2 (SMP — per-CPU runqueues),
+  Track 4 (Process model — user priorities),
+  Track 9 (GUI responsiveness — compositor needs real-time).
+
+---
+
+## 038 — PCI CONFIG_ADDRESS/DATA serialisation
+
+- **Scope:** `kernel/drivers/pci/pci.cpp` — adds a global
+  `sync::SpinLock g_pci_config_lock`, taken across the port-IO
+  pair in `PciConfigRead32` and `PciConfigWrite32`
+- **Decision:** Every low-level config access (32-bit read + 32-
+  bit write) takes a single global lock so the CF8/CFC dance
+  can't interleave across CPUs. Multi-step sequences (BAR size
+  probe — read, write 0xFF, read back, restore) still release
+  the lock between individual accesses. That's acceptable today:
+  enumeration runs at boot before APs can meaningfully interact.
+  A future atomicity pass would expose `PciConfigLock/Unlock`
+  so probe callers hold the lock across all four operations.
+- **Why:** `pci-enum-v0.md:145` flagged this as deferred "until
+  a consumer hits it." With broadcast-NMI panic halt (#037) and
+  eventual SMP scheduler join in flight, the cost of adding
+  correctness now is trivial (one lock, no refactor) and the
+  cost of hitting the race later is a bizarre intermittent bug
+  that's hard to triage. Land while it's still cheap.
+- **Rules out / defers:** `PciConfigLock / Unlock` for
+  multi-step atomicity (needed for 64-bit BAR probe, MSI/MSI-X
+  capability programming). ECAM fast path (still deferred until
+  MCFG entry #036 has a real consumer).
+- **Revisit when:** First driver that programs MSI-X with the
+  device active and being probed concurrently by another CPU
+  (needs full-sequence atomicity). PCIe ECAM migration (lock
+  moves with the accessor).
+- **Related tracks:** Track 2 (SMP), Track 6 (Drivers).
+
+---
+
+## 037 — Broadcast-NMI panic halt (SMP Class-A recovery)
+
+- **Scope:** `kernel/arch/x86_64/smp.{h,cpp}` — new
+  `PanicBroadcastNmi`; `kernel/arch/x86_64/traps.cpp` — vector-2
+  short-circuit; `kernel/arch/x86_64/lapic.{h,cpp}` — new
+  `LapicIsReady`; `kernel/core/panic.cpp` wires the broadcast into
+  both Panic and PanicWithValue
+- **Decision:** On panic, before writing the crash dump, the
+  panicking CPU fires an "all excluding self" NMI IPI via the
+  LAPIC ICR shorthand. Every peer CPU receives the NMI on its
+  IST3 stack (wired by #032), enters the trap dispatcher, and is
+  short-circuited to a `cli; hlt` loop. The panicking CPU then
+  has exclusive use of the serial line for the dump. The
+  broadcast guards on `LapicIsReady()` so early-boot panics
+  (before LAPIC init) skip it gracefully.
+- **Why:** Decision log #017, #018, #021, and
+  smp-ap-bringup-scope.md §"Open questions" all flagged this as
+  the Class-A recovery gap on SMP. Without it, a panic on one
+  CPU leaves peers running against whatever corrupt shared state
+  triggered the panic — exactly the wrong posture per the
+  runtime-recovery strategy's "Class A → HALT, everywhere."
+- **Rules out / defers:** NMI-on-AP-already-halted is a no-op
+  (AP enters the IST3 handler, falls into the same short-
+  circuit, halts again — wasteful but correct). Stuck-ICR
+  timeout recursing into Panic is avoided by inlining the wait
+  loop and logging a Warn on timeout rather than panicking.
+  NMI with a real consumer (chipset error, watchdog,
+  power-button) — every NMI today means "stop." Revisiting
+  requires a subsystem registration API.
+- **Revisit when:** First subsystem needs a real NMI handler
+  (power-button or hardware watchdog). AP scheduler join lands
+  — confirm NMI still fires cleanly on a CPU running scheduled
+  work, not just the halt loop.
+- **Related tracks:** Track 2 (SMP), Track 13 (Security /
+  recovery — Class A on SMP).
+
+---
+
+## 036 — MCFG parse for PCIe ECAM (base + bus range)
+
+- **Scope:** `kernel/acpi/acpi.{h,cpp}` — adds `McfgTable` /
+  `McfgEntry` structs, `ParseMcfg`, and
+  `McfgAddress/StartBus/EndBus` accessors
+- **Decision:** Find the MCFG table, checksum-validate it, and
+  cache the first segment-group-0 entry's base address + bus
+  range. Multi-segment hardware is vendor-specific and no x86_64
+  platform we target ships it. Optional like FADT/HPET/MCFG —
+  a missing table leaves accessors at 0 so PCI drivers keep
+  using legacy port IO.
+- **Why:** Decision log #012 deferred "MCFG (PCIe ECAM)"
+  alongside HPET and FADT. #025 and #031 both landed their
+  respective table parses; MCFG is the natural third. Landing
+  the parse now keeps the ECAM migration commit focused purely
+  on the port-IO → MMIO swap.
+- **Rules out / defers:** Actually using ECAM — PCI enumeration
+  still uses CONFIG_ADDRESS/DATA (#022). Multi-segment support.
+  Cross-checking the MCFG-reported base against chipset
+  registers (real-hardware cross-validation).
+- **Revisit when:** First PCIe device that needs >256 bytes of
+  config space (legacy port IO can't reach extended capabilities).
+  MSI-X vector table programming (ECAM makes the capability
+  chain access much simpler). xHCI driver begins — primary
+  driver that benefits from ECAM speed.
+- **Related tracks:** Track 2 (Platform), Track 6 (Drivers —
+  PCIe endpoints).
+
+---
+
+## 035 — HPET-timestamped klog lines
+
+- **Scope:** `kernel/core/klog.cpp` — prefixes every log line
+  with `[ts=0xNNNNNNNNNNNNNNNN] `
+- **Decision:** Timestamp source is HPET main counter if
+  available (sub-microsecond precision), scheduler tick counter
+  otherwise (100 Hz). Unit is implied by the source; readers
+  cross-reference the "[acpi] hpet=..." boot log. Format is raw
+  hex — a printf-free kernel isn't going to format decimal
+  fractional seconds. Falls back cleanly to 100 Hz tick if no
+  HPET is present.
+- **Why:** Makes log lines visibly ordered within a single 10
+  ms tick. Previously a 10-second idle between two lines and a
+  same-tick burst of 50 lines looked identical in the serial
+  log. HPET primitive from #031 is now consumed by its first
+  caller, closing the "built but not wired in" concern.
+- **Rules out / defers:** Human-readable decimal formatting
+  (needs printf-class formatting infrastructure). Per-CPU
+  timestamp source (NMI broadcast uses this path, and the two
+  cores might have slightly skewed HPET reads; same source
+  across CPUs is fine for now). Wall-clock anchor (needs RTC
+  read + leap-second handling).
+- **Revisit when:** Post-mortem tool starts parsing timestamps
+  (decide formatting — decimal or keep hex?). SMP scheduler
+  join (HPET is globally coherent, but logs will want CPU ID
+  alongside). Wall-clock support arrives (RTC init).
+- **Related tracks:** Track 2 (Platform), Track 1 (CI — log
+  diff tooling).
+
+---
+
+## 034 — SchedSleepUntil (absolute-deadline sleep)
+
+- **Scope:** `kernel/sched/sched.{h,cpp}` — adds
+  `SchedSleepUntil(deadline_tick)` and `SchedNowTicks()`
+- **Decision:** Complement the existing relative sleep with an
+  absolute-deadline variant. Caller reads `SchedNowTicks()`
+  once to establish a base, then loops `deadline += period;
+  SchedSleepUntil(deadline);` — drift-free. Reuses the existing
+  sleep queue + `TickReached` wrap-safe compare; no new
+  machinery.
+- **Why:** Periodic kernel tasks that use `SchedSleepTicks`
+  accumulate body latency into the period. `kheartbeat`
+  (entry #014 adjacent) is the canonical example: "print stats
+  every 5 seconds" drifts to 5+ε seconds per cycle if the
+  print path takes non-trivial time. Land the primitive before
+  the first caller so periodic-task patterns have a one-line
+  right answer.
+- **Rules out / defers:** Phase alignment to wall-clock
+  boundaries (needs RTC). Catch-up scheduling (if the deadline
+  is already past when the caller wakes, we Yield but don't
+  fire multiple iterations back-to-back).
+- **Revisit when:** First caller that shows measurable drift on
+  `SchedSleepTicks`. Heartbeat thread migrates to absolute
+  deadlines (cheap follow-up).
+- **Related tracks:** Track 4 (IPC / sync — periodic patterns).
+
+---
+
+## 033 — KLog runtime severity threshold
+
+- **Scope:** `kernel/core/klog.{h,cpp}` — adds
+  `SetLogThreshold` / `GetLogThreshold` + a global
+  `g_log_threshold`, evaluated alongside the compile-time
+  `kKlogMinLevel` on every Log/LogWithValue call
+- **Decision:** Effective log level is
+  `max(kKlogMinLevel, g_log_threshold)`. The runtime knob can
+  only RAISE the filter past the compile-time floor, never
+  lower it — production builds compile Debug out entirely and
+  no runtime call can re-enable it. Default threshold matches
+  the floor so behaviour is unchanged unless a caller opts in.
+- **Why:** Driver bring-up often wants Debug noise during
+  init and Info-only once settled. Without a runtime knob, the
+  choice was "rebuild" vs "drown in output." Same pattern
+  useful for CI runs (drop to Warn+ only to keep logs compact).
+- **Rules out / defers:** Per-subsystem thresholds (globally
+  one knob — if a subsystem is noisy, it's a klog-call-site
+  problem). Dynamic thresholds tied to heartbeat / health
+  (e.g., "raise to Debug when panic is imminent"). Log-level
+  introspection from a debugger.
+- **Revisit when:** Per-subsystem tuning becomes necessary
+  (first noisy driver). A shell lands and SetLogThreshold
+  becomes invokable from user-space.
+- **Related tracks:** Track 2 (Platform — observability),
+  Track 1 (CI).
+
+---
+
+## 032 — TSS + IST stacks for #DF, #MC, #NMI
+
+- **Scope:** `kernel/arch/x86_64/gdt.{h,cpp}` (TSS struct,
+  `TssInit`, three 4 KiB IST stacks, GDT grown to 5 slots),
+  `kernel/arch/x86_64/idt.{h,cpp}` (`IdtSetIst`), wiring in
+  `kernel/core/main.cpp`
+- **Decision:** Install a long-mode TSS with three dedicated IST
+  stacks for the three critical faults where continuing on the
+  currently-running task's stack is dangerous: #DF (double fault —
+  caller's stack might be bad), #MC (machine check — caller's
+  stack might be corrupted), #NMI (asynchronous, can fire at any
+  moment including inside a locked region). Each IST stack is a
+  separate 4 KiB BSS array; the TSS descriptor lives in GDT slots
+  3-4 (long-mode TSS is 16 bytes = 2 slots). IDT entries for the
+  three vectors get their IST field patched to 1/2/3 respectively
+  via a new `IdtSetIst` helper.
+- **Why:** Entry #004 called out "IST stacks for critical
+  exceptions (#DF, #MC, #NMI — all currently share the kernel
+  stack)" as deferred. Without IST, a double fault on a bad
+  kernel stack triple-faults the machine; with IST, #DF is
+  guaranteed to deliver onto a known-good stack regardless of
+  what state the prior one was in. Same reasoning for #MC and
+  #NMI. Landing now also wires the `RSP0` slot in the TSS so
+  the descriptor is already in-place when ring 3 lands —
+  user→kernel transitions consume that field.
+- **Rules out / defers:** Per-AP TSS + IST stacks — APs still
+  halt in `ApEntryFromTrampoline` with IF=0, so they never
+  take a fault on a bad stack. Lands with SMP scheduler join
+  (Commit E in smp-ap-bringup-scope.md). Per-task kernel stack
+  via RSP0 (ring 3 transition's job — the slot is wired, the
+  value stays 0 until the first user process runs). Guard
+  pages around each IST stack (would need paging-backed
+  allocations; no consumer yet). I/O-permission bitmap (disabled
+  by setting `iopb_offset` past the TSS body — every ring-3
+  port access will #GP, which is the posture we want).
+- **Revisit when:** Ring 3 lands — RSP0 gets wired to the
+  current task's kernel stack on every context switch. SMP
+  scheduler join — each AP allocates its own TSS + IST stacks
+  and does `ltr` in its entry. First real machine check hits —
+  the panic path walks the #MC frame, which is now delivered
+  on IST2.
+- **Related tracks:** Track 2 (Platform — interrupt infrastructure),
+  Track 4 (Process model — RSP0 becomes per-task).
+
+---
+
+## 031 — HPET driver: ACPI parse + main-counter enable
+
+- **Scope:** `kernel/acpi/acpi.{h,cpp}` (HpetTable struct,
+  `ParseHpet`, `HpetAddress()` / `HpetTimerCount()` /
+  `HpetCounterWidth()`), `kernel/arch/x86_64/hpet.{h,cpp}` (new
+  module: `HpetInit`, `HpetReadCounter`, `HpetPeriodFemtoseconds`),
+  wiring in `kernel/core/main.cpp`
+- **Decision:** Parse the ACPI HPET table, `MapMmio` the 1 KiB
+  event-timer-block window, validate that COUNT_SIZE_CAP == 1
+  (64-bit counter), zero the main counter, and set ENABLE_CNF.
+  Expose a 64-bit `HpetReadCounter()` for sub-tick precision
+  timing and `HpetPeriodFemtoseconds()` so callers can convert
+  deltas without a second MMIO read. HPET is OPTIONAL — a missing
+  table just skips init with a Warn log line. 32-bit HPETs panic
+  loudly rather than getting a read+retry fallback we can't
+  validate (vanishingly rare on x86_64).
+- **Why:** Entry #012 deferred "HPET (high-precision timer)"
+  alongside FADT. FADT landed in #025; HPET is the natural
+  follow-up and brings a high-precision counter primitive into
+  the tree. LAPIC timer still owns the 100 Hz scheduler tick —
+  HPET is a read-only precision counter for future consumers
+  (calibration, log timestamps, fine-grained driver delays).
+  Landing now means the first consumer doesn't also have to
+  design the parse + MMIO map.
+- **Rules out / defers:** Per-timer comparator programming
+  (HPET can drive its own interrupts — not needed while LAPIC
+  timer is the tick source). Legacy replacement mode
+  (LEG_RT_CNF — we've already moved the tick off the PIT, so
+  no consumer cares). 32-bit counter fallback (panic for now).
+  Multi-HPET support (the spec allows multiple blocks; every
+  real chipset ships exactly one).
+- **Revisit when:** Log timestamps land (read `HpetReadCounter`
+  in the klog prologue). Driver code needs sub-100 Hz delays
+  (use HPET spin instead of `SchedSleepTicks`). TSC calibration
+  (HPET is the gold standard for deriving TSC frequency). Sleep
+  states + wake-from-S3 — HPET survives, RTC does not, so it
+  becomes the preferred clock.
+- **Related tracks:** Track 2 (Platform — precision timing),
+  Track 13 (Power management — HPET across S-states).
+
+---
+
+## 030 — CondvarWaitTimeout
+
+- **Scope:** `kernel/sched/sched.{h,cpp}` — adds
+  `CondvarWaitTimeout` alongside the untimed `CondvarWait`
+- **Decision:** Mirror `WaitQueueBlockTimeout` (entry #026) on
+  the condvar layer. Same atomicity splice as `CondvarWait`
+  (mutex hand-off + self-enqueue under one sched_lock), plus
+  also go onto the sleep queue so the timer path can fire.
+  Returns `true` if woken by an explicit `CondvarSignal` /
+  `CondvarBroadcast`, `false` if the timer won. `ticks == 0` is
+  a test-and-drop: Unlock + Yield + Lock, report as timeout.
+- **Why:** Entry #028 explicitly called out "Timed condvars
+  (`CondvarWaitTimeout`) — trivial follow-up on top of
+  `WaitQueueBlockTimeout`, but no consumer yet" as deferred.
+  Now that two independent users could want it (driver
+  command-completion wait with timeout, producer/consumer
+  where the consumer bounds its idle time), closing the
+  deferral is cheap and keeps the blocking primitive set
+  uniform — every pattern has both timed and untimed variants.
+- **Rules out / defers:** Wake-reason propagation beyond the
+  bool return (callers don't learn whether it was Signal vs.
+  Broadcast; they shouldn't care). Cancellation / interruption
+  (needs the "cancel this blocked task" primitive — arrives with
+  the first syscall that takes signals).
+- **Revisit when:** First driver I/O path that needs
+  "complete-or-timeout" semantics on a condvar. First syscall
+  with signal delivery (cancellation).
+- **Related tracks:** Track 4 (IPC / sync), Track 6 (Drivers —
+  consumer).
+
+---
+
+## 029 — KernelReboot: ACPI → 0xCF9 → 8042 → triple-fault chain
+
+- **Scope:** `kernel/core/reboot.{h,cpp}` (new module), wired into
+  the build in `kernel/CMakeLists.txt`
+- **Decision:** Consolidate every known x86 reset path behind a
+  single `core::KernelReboot()` entry point that tries them in
+  descending order of preference: (1) `acpi::AcpiReset()` — the
+  firmware-defined FADT path; (2) port 0xCF9 values 0x02 then
+  0x06 — the PC-AT chipset reset; (3) 8042 command 0xFE — the
+  legacy keyboard-controller reset line, still honoured by most
+  boards; (4) null IDT + `int3` — a guaranteed triple-fault last
+  resort. Each step logs at Warn / Error so the serial log
+  records which path actually fired. `[[noreturn]]`, safe from any
+  context.
+- **Why:** The FADT parse landed in entry #025 without a consumer —
+  exactly the kind of "primitive built but not wired in" pattern
+  the anti-bloat guidelines flag. Landing `KernelReboot` closes
+  the loop: the first ACPI consumer is now a real, callable
+  reboot path, and the fall-back chain covers the handful of
+  failure modes that would otherwise leave us stuck (firmware
+  without RESET_REG_SUP, chipsets that ignore ACPI reset on boot-
+  era state, broken 8042 emulation). The triple-fault fall-back
+  is the "physics doesn't lie" exit — a CPU cannot ignore a
+  #DF + #DF + reset chain.
+- **Rules out / defers:** Clean shutdown (stop-all-tasks → flush
+  caches → sync filesystems → enter ACPI S5). S5 needs AML — the
+  DSDT / SSDT interpreter we punted on in #012. Power-off (S5) as
+  a distinct path from reset. Graceful PCI-device teardown before
+  reset. Reboot-reason reporting in the log (warm reset vs. panic
+  vs. user-triggered).
+- **Revisit when:** First shutdown request from user-space
+  arrives (syscalls land). Panic path wants to optionally reboot
+  instead of halt (useful for automated CI reboots after a crash
+  on real hardware). AML support lands — then this module gains
+  a sibling `KernelPowerOff()` that enters S5.
+- **Related tracks:** Track 2 (Platform — reset), Track 13
+  (Security — crash-reboot loop is part of the recovery posture).
+
+---
+
+## 028 — Condition variables (drop-mutex-and-block)
+
+- **Scope:** `kernel/sched/sched.{h,cpp}` — new `Condvar` struct,
+  `CondvarWait`, `CondvarSignal`, `CondvarBroadcast`; extracts
+  internal `WaitQueueWakeOneLocked` helper
+- **Decision:** Land the classic producer/consumer primitive on
+  top of the existing `Mutex` + `WaitQueue` foundations. The
+  subtlety is atomicity: `CondvarWait` splices the mutex hand-off
+  AND the self-enqueue onto `cv->waiters` under a single
+  `g_sched_lock` hold, so a signal that races the release cannot
+  slip through the crack. The mutex hand-off inlines
+  `WaitQueueWakeOneLocked` on `m->waiters` (FIFO fairness,
+  identical to `MutexUnlock` except callable with the scheduler
+  lock already held). On wake the caller re-acquires via the
+  standard `MutexLock` path — possibly fast (mutex free) or slow
+  (blocks on `m->waiters` again).
+- **Why:** Entry #011 deferred "Condition variables (drop-mutex-
+  and-block atomically)" as a separate slice after the sleep /
+  wait / mutex primitives. With the timed-wait primitive in from
+  entry #026 and the locked-wake helper now factored out, the
+  remaining work is genuinely just the glue — and condvars
+  remove a whole class of awkward polling patterns from the
+  driver surface. Landing it standalone means the first driver
+  that needs the pattern doesn't also have to design it.
+- **Rules out / defers:** Timed condvars (`CondvarWaitTimeout`) —
+  trivial follow-up on top of `WaitQueueBlockTimeout`, but no
+  consumer yet. Priority-donation on condvar wake (requires
+  priorities). Cancellation / interruption of a condvar wait
+  (needs the "cancel this blocked task" primitive, which lands
+  with the first syscall that takes signals).
+- **Revisit when:** First driver that needs "wake me when a
+  guarded queue is non-empty" semantics. First syscall that
+  carries a signal (cancellation extends both condvar and wait-
+  queue blocking to `bool was_cancelled` returns). Priority
+  inheritance lands (the companion `Mutex` grows PI, and condvar
+  wake order honours priority).
+- **Related tracks:** Track 4 (IPC / synchronisation), Track 6
+  (Drivers — consumer).
+
+---
+
+## 027 — PS/2 8042 controller init sequence
+
+- **Scope:** `kernel/drivers/input/ps2kbd.cpp` (new `ControllerInit`,
+  `WaitInputClear`, `WaitOutputFull`, `SendCtrlCmd`, `SendCtrlData`,
+  `ReadConfigByte`, `WriteConfigByte`, `Drain` helpers)
+- **Decision:** Replace the bare "drain leftovers and hope" startup
+  with a full 8042 bring-up: disable both channels, flush, self-test
+  the controller (`0xAA` → `0x55`), test port 1 (`0xAB` → `0x00`),
+  enable port 1, turn on port-1 IRQ + clock in the config byte, drain
+  again. Controller self-test mismatch panics (Class A — the keyboard
+  is on the critical path for any interactive console); port-1
+  interface-test failures log a warning and continue (QEMU always
+  passes, but real-hardware boards can flag this falsely). Every
+  response wait has a bounded spin limit (~10 ms) and panics on
+  timeout rather than stalling forever.
+- **Why:** Entry #014 deferred "No 8042 reset / init sequence;
+  trusts the firmware to have left the controller in a usable
+  state." The trust assumption holds for QEMU but is fragile on
+  real machines — boards ship with the controller in various
+  post-BIOS states (port 2 still enabled, translation off, IRQs
+  masked). Landing an explicit init makes the driver portable to
+  real hardware without changing the IRQ / translator code downstream.
+- **Rules out / defers:** Scan-code-set configuration via device
+  command (`0xF0 0x01`) — still relying on firmware default of set 1
+  + translation. Keyboard device reset (`0xFF` on port 1 data —
+  some firmware leaves the device in a weird state; the OSDev wiki
+  recommends it, but QEMU's ACK sequence is flaky and we don't need
+  it today). Port 2 / aux channel enable (no mouse support yet).
+  Typematic rate configuration. 8042 USB-legacy-mode detection (real
+  hardware sometimes routes USB HID through the 8042 emulation; we
+  treat it as "it works or it doesn't").
+- **Revisit when:** First real-hardware boot with a chipset that
+  ships the 8042 in an unusual state. USB HID stack lands (might
+  then actively DISABLE the 8042 legacy path to avoid dual IRQs).
+  Aux channel / mouse support (reuse the SendCtrl helpers for port
+  2 commands).
+- **Related tracks:** Track 6 (Drivers — input).
+
+---
+
+## 026 — Timed WaitQueue blocking (WaitQueueBlockTimeout)
+
+- **Scope:** `kernel/sched/sched.{h,cpp}` — new public
+  `WaitQueueBlockTimeout`, internal `SleepqueueRemove` and
+  `WaitQueueUnlink` helpers, Task struct grows `sleep_next`,
+  `waiting_on`, `wake_by_timeout`
+- **Decision:** A task that calls `WaitQueueBlockTimeout(wq, ticks)`
+  parks on the wait queue AND the sleep queue simultaneously.
+  Whichever wake path fires first unlinks the task from the other
+  list and resumes it; the return value tells the caller which
+  won (`true` = explicit wake, `false` = timeout). The two
+  intrusive queues use different Task fields (`next` for runqueue /
+  waitqueue / zombie; `sleep_next` for sleep queue) so the same
+  Task can sit on both without pointer aliasing. `waiting_on` is a
+  back-pointer the timer path uses to unlink from whatever wait
+  queue the task was on. `wake_by_timeout` is a transient flag —
+  set by the timer path, cleared by the wake path, read once by
+  the waiter the moment `Schedule()` returns.
+- **Why:** Entry #011 deferred "Timed waits on `WaitQueue`" as a
+  separate slice after the sleep + wait + mutex primitives
+  landed. Closing it now unblocks the first tractable driver
+  retry pattern (command-completion wait with timeout: "wait for
+  this transfer to complete, but give up after 100 ms") and is
+  the last scheduler primitive needed before the recovery
+  Class-D retry helper has a way to block a caller for a bounded
+  interval. Implementation lands the API before the first caller
+  so the consumer doesn't have to co-design the sleep/wait
+  coupling; that's the same pattern we used for `AcpiReset`
+  (entry #025) and `SchedStartIdle` (entry #023).
+- **Rules out / defers:** Condition variables (drop-mutex-and-
+  block atomically — the recipient still owns the lock on wake).
+  Cancellable blocking (external cancel from another task).
+  Tick-precision accuracy better than ±1 tick (the timer fires on
+  a 10 ms grid; deadlines between ticks round up). Mixing
+  `WaitQueueBlock` and `WaitQueueBlockTimeout` readers on the
+  same queue works — waiters don't know or care — but the
+  timeout path only cleans up its own waiter.
+- **Revisit when:** First driver `RetryWithBackoff` caller (uses
+  the timeout as its per-attempt budget). First I/O command with
+  hardware-completion wait (xHCI, AHCI, NVMe). Condition variable
+  primitive lands (drops-mutex-and-blocks using the same wait-
+  queue plus timeout machinery as its foundation).
+- **Related tracks:** Track 2 (SMP — timed waits will need
+  spinlock-protected list ops once the scheduler spinlock goes
+  live across context switch), Track 6 (Drivers — consumer).
+
+---
+
+## 025 — FADT parse + AcpiReset() reboot primitive
+
+- **Scope:** `kernel/acpi/acpi.{h,cpp}` — new FADT struct,
+  `ParseFadt`, `SciVector()`, `AcpiReset()`
+- **Decision:** Extend `AcpiInit` to locate the FADT (FACP
+  signature), checksum-validate it, and cache the three fields we
+  actually use: `RESET_REG`, `RESET_VALUE`, `SCI_INT`. FADT is
+  OPTIONAL — a missing one leaves reset unsupported and SCI at
+  the ACPI-default ISA IRQ 9, rather than panicking like MADT
+  does. Expose `AcpiReset()` that writes the reset value to the
+  reset register when supported (I/O address space only —
+  memory-mapped reset is legal per spec but unused on x86 PCs;
+  add when a real machine demands it). Returns `false` on "no
+  FADT / register unsupported / MMIO space" so the caller can
+  fall back to `Outb(0xCF9, 0x06)` or a triple fault.
+- **Why:** Entry #012 deferred "FADT, MCFG, HPET, SRAT etc. are
+  untouched. Add a dispatcher when a consumer needs one." FADT
+  in particular is the cheapest to land and unlocks a genuinely
+  useful kernel primitive: a firmware-defined reboot. Today we
+  have no way to restart the machine other than triple-faulting
+  it, which is an ugly signal on a real board. `AcpiReset()`
+  gives us a clean one. The SCI vector cache is a side benefit
+  — power-management events (thermal, battery, lid close on
+  laptops) fire on this line; caching it lets a future ACPI
+  interrupt handler install itself at the right place without
+  another FADT parse.
+- **Rules out / defers:** PM1a/PM1b event/control block parsing
+  (entering S-states requires AML — DSDT/SSDT — for the SLP_TYP
+  values). GPE block parsing. HPET (still untouched). MCFG /
+  PCIe ECAM (the next most-wanted one; sizes the PCI space and
+  unlocks MSI-X configuration-space access without port IO).
+  SRAT / NUMA topology.
+- **Revisit when:** First shutdown / reboot path lands (use
+  `AcpiReset` as the primary, `Outb(0xCF9, 0x06)` as fallback).
+  PCI enumeration switches from legacy port IO to ECAM (needs
+  MCFG). High-precision-timer consumers arrive (HPET). Power-
+  management work starts (SCI handler installs on the vector
+  `SciVector()` returns; full S-state support then needs an AML
+  interpreter).
+- **Related tracks:** Track 2 (Platform — shutdown/reboot),
+  Track 13 (Power management).
+
+---
+
+## 024 — PS/2 keyboard: scan code set 1 → ASCII translator + modifier tracking
+
+- **Scope:** `kernel/drivers/input/ps2kbd.{h,cpp}` (adds
+  `Ps2KeyboardReadChar`, keymap tables, modifier state),
+  `kernel/core/main.cpp` (`kbd-reader` task now prints resolved
+  characters instead of raw scan bytes)
+- **Decision:** Layer an in-driver ASCII translator on top of the
+  existing raw byte ring without replacing it. The IRQ path and the
+  raw `Ps2KeyboardRead` API are unchanged — any future consumer that
+  needs set-2 decoding, a debugger-side view, or an alternate keymap
+  keeps access to un-translated bytes. The new `Ps2KeyboardReadChar`
+  drains scan codes in task context, handles break (`0x80 | make`)
+  vs make bytes, tracks LShift / RShift (press + release edges) and
+  Caps Lock (press-to-toggle, release ignored), and consumes
+  0xE0-prefixed extended scans (arrows, right-side mods) silently.
+  Only returns on a real press that resolves to a printable US
+  QWERTY character; letters XOR shift and caps lock, number-row and
+  symbols respect shift alone.
+- **Why:** Entry #014 ("PS/2 keyboard as the first end-to-end IRQ-
+  driven driver") explicitly deferred "scan-code-to-keysym
+  translation, modifier tracking" as a separate slice so the IRQ
+  plumbing commit stayed focused on the pipeline itself. With the
+  pipeline verified, closing that slice is the tractable next step:
+  translator logic is small (~100 lines), has no new dependencies,
+  and upgrades the boot log from "meaningless hex bytes" to "what
+  the user actually typed" — a real diagnostic improvement.
+  Keeping the raw API preserves optionality for a future input
+  layer / compositor event stream that wants modifier bitmaps
+  rather than pre-resolved chars.
+- **Rules out / defers:** Ctrl / Alt / Meta chord reporting (the
+  state isn't tracked yet; would require a new `KeyEvent { char,
+  modifiers }` API rather than a bare `char` return). Extended-key
+  reporting (arrows, Home/End, PageUp/PageDown — all 0xE0-prefixed,
+  all dropped today). Alternate layouts (AZERTY, Dvorak). 8042
+  scan-code-set configuration (we rely on firmware default = set 1
+  with translation enabled). Key-repeat rate tuning. Multi-reader
+  safety on `Ps2KeyboardReadChar` (state is per-driver, not per-
+  reader — two concurrent readers would race on modifier state).
+- **Revisit when:** The first interactive shell lands (needs Ctrl-C,
+  Ctrl-D, arrow keys — promotes the API to `KeyEvent`). A non-US
+  keymap is requested (adds a layout-selection indirection on top
+  of the scan-code → keysym step). USB HID stack lands (HID
+  usages → the same higher-level API, so whatever shape we pick
+  here is reused). Compositor input routing begins (event stream
+  replaces pull-reader model).
+- **Related tracks:** Track 6 (Drivers — input), Track 9 (Windowing
+  — eventual input source for the compositor).
+
+---
+
+## 023 — Dedicated per-CPU idle task + batched zombie reaping
+
+- **Scope:** `kernel/sched/sched.{h,cpp}` (new `SchedStartIdle`,
+  internal `IdleMain`, drained-list reaping), `kernel/core/main.cpp`
+  (spawn `idle-bsp` immediately after `SchedInit`)
+- **Decision:** Retire the "boot task is the fallback idle" pattern.
+  `SchedStartIdle(name)` spawns a dedicated kernel thread that loops
+  on `sti; hlt` forever and participates in the regular round-robin
+  runqueue. The BSP calls it right after `SchedInit`, before any
+  other task creation, so `Schedule()` always has at least one
+  `Ready` member to pick even when the boot task (or any driver
+  thread) blocks on a WaitQueue / sleep queue. Separately, the dead-
+  task reaper now detaches the entire zombie list in one CLI section
+  and frees the whole batch with interrupts enabled — avoiding the
+  per-task wake→free→block→wake round trips that the v0 reaper took
+  on a burst of exits.
+- **Why:** The old layout tolerated an empty runqueue only because
+  the boot task stayed `Running` while everything else slept. The
+  moment `kernel_main` called `SchedSleepTicks` (first occurrence:
+  `SmpStartAps`'s INIT→SIPI delay), worker-creation order became
+  load-bearing for whether `Schedule()` would panic with "no
+  runnable task available". A dedicated idle task moves that
+  invariant out of the boot sequence and into the scheduler itself.
+  It also matches what every AP will need on bring-up — each AP
+  calls `SchedStartIdle("idle-apN")` from its own entry, so the
+  primitive lands once and serves both sides. Batched reaping was
+  explicitly flagged as a two-line win in entry #020 ("we do one
+  per wake — 2 lines to batch when it becomes a hot path"); since
+  both changes touch `sched.cpp` they land together rather than
+  separately.
+- **Rules out / defers:** Idle-task priority / CPU-accounting
+  (round-robin puts it in rotation with everything else — fine for
+  v0, where `hlt` releases the CPU to the next IRQ anyway).
+  Per-CPU idle wiring for APs (the hook exists; actually calling
+  it from AP entry lands alongside the broader scheduler SMP
+  refactor). Reaper batching ceiling / rate limiting (v0 drains
+  unboundedly, matching the single-shot behaviour it replaces).
+- **Revisit when:** Priorities / classes land (idle becomes `IDLE`
+  class, never picked if any other task is `Ready`). SMP AP entry
+  wiring (each AP calls `SchedStartIdle` with its CPU index in the
+  name). Profiles show reaper pause time dominating a burst-exit
+  workload (cap the drain per wake and re-arm `g_reaper_wq`).
+- **Related tracks:** Track 2 (SMP — AP entry reuses the idle
+  primitive), Track 4 (Process model — priorities + CPU accounting
+  retire the round-robin rotation).
+
+---
+
 After landing a non-trivial commit, append a new section here with
 the **next sequential number**. Keep entries small. Link the commit
 hash. Always write the "Revisit when" marker — that's the point of

@@ -12,17 +12,18 @@ namespace
 {
 
 // AHCI HBA (Host Bus Adapter) MMIO register offsets.
-// Full spec: Serial ATA AHCI 1.3.1 §3.
+// Full spec: Serial ATA AHCI 1.3.1 §3. Only the offsets this
+// discovery pass reads are listed — the rest (IS, CCC, EM, BOHC,
+// per-port Command List Base etc.) come back when a real HBA
+// driver lands. git history + the spec are the source of truth.
 constexpr u64 kHbaRegCap = 0x00; // Capabilities
 constexpr u64 kHbaRegGhc = 0x04; // Global Host Control
-constexpr u64 kHbaRegIs = 0x08;  // Interrupt Status
 constexpr u64 kHbaRegPi = 0x0C;  // Ports Implemented (bitmap, 1 bit / port)
 constexpr u64 kHbaRegVs = 0x10;  // Version
 constexpr u64 kHbaPortsBase = 0x100;
 constexpr u64 kHbaPortStride = 0x80;
 
 // Per-port register offsets (relative to PortsBase + port_index * PortStride).
-constexpr u64 kPortRegClb = 0x00;  // Command List Base (low 32)
 constexpr u64 kPortRegCmd = 0x18;  // Command + Status
 constexpr u64 kPortRegTfd = 0x20;  // Task File Data
 constexpr u64 kPortRegSig = 0x24;  // Signature (SATA device type fingerprint)

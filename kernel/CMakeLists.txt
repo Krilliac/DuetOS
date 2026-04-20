@@ -25,6 +25,7 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     core/klog.cpp
     core/main.cpp
     core/panic.cpp
+    core/reboot.cpp
     core/recovery.cpp
     core/symbols.cpp
     acpi/acpi.cpp
@@ -32,6 +33,7 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     arch/x86_64/boot.S
     arch/x86_64/exceptions.S
     arch/x86_64/gdt.cpp
+    arch/x86_64/hpet.cpp
     arch/x86_64/idt.cpp
     arch/x86_64/ioapic.cpp
     arch/x86_64/lapic.cpp

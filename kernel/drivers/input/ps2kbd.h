@@ -12,17 +12,29 @@
  * on a wait queue until data arrives.
  *
  * This module exists to close the full ACPI → IOAPIC → IRQ → driver →
- * scheduler loop end-to-end. It's not a finished keyboard subsystem —
- * there's no scan-code-to-keysym translation, no modifier tracking, no
- * aux (mouse) channel, no typematic configuration.
+ * scheduler loop end-to-end. It exposes two levels of access:
+ *   - `Ps2KeyboardRead()`: raw scan code bytes, one per call. Lossless
+ *     end-to-end path; suitable for a debugger or an alternate
+ *     keymap consumer.
+ *   - `Ps2KeyboardReadChar()`: blocks until a key press resolves to a
+ *     printable ASCII byte using the built-in US QWERTY translator
+ *     (scan code set 1 → ASCII, tracking LShift / RShift / Caps Lock).
+ *     Releases, pure-modifier transitions, and unmapped keys are
+ *     swallowed; the call only returns on real press events.
  *
  * Scope limits that will be fixed in later commits:
  *   - No 8042 reset / init sequence; trusts the firmware to have left
  *     the controller in a usable state.
- *   - Scan code set 1 / 2 auto-detection not done; we return raw bytes
- *     and let a future input layer decide.
- *   - Single reader. `Ps2KeyboardRead` blocks on one wait queue; two
- *     concurrent readers would fight over the returned byte.
+ *   - Scan code set 1 only. Set 2 (post-init default for some
+ *     controllers) would need either a translation table or an
+ *     explicit "set 1" command sent to the 8042.
+ *   - Translator is US QWERTY, no alternate layouts.
+ *   - Extended (0xE0-prefixed) keys — arrow keys, right-side mods,
+ *     multimedia — are consumed and dropped. Ctrl / Alt / Meta are
+ *     tracked-as-held by neither API today; a future KeyEvent
+ *     interface will carry them as a modifier bitmap.
+ *   - Single reader for raw bytes. `Ps2KeyboardRead` blocks on one
+ *     wait queue; two concurrent readers would fight over bytes.
  *   - Ring buffer drops oldest bytes on overflow (not newest, not
  *     block-in-IRQ — that would deadlock).
  *
@@ -41,6 +53,15 @@ void Ps2KeyboardInit();
 /// the oldest is returned; the next call returns the next. Never
 /// blocks if a byte is already buffered.
 u8 Ps2KeyboardRead();
+
+/// Block the calling task until the next press resolves to an ASCII
+/// character via the built-in US QWERTY translator, then return it.
+/// Never returns 0: modifier transitions, releases, and unmapped
+/// keys are consumed internally and the call loops. Uses the same
+/// ring + wait queue as `Ps2KeyboardRead` — concurrent callers of
+/// the two APIs race for bytes and will see interleaved / partial
+/// results. Pick one API per reader thread.
+char Ps2KeyboardReadChar();
 
 /// Lifetime counters for diagnostics / tests.
 struct Ps2Stats

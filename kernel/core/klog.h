@@ -52,8 +52,21 @@ enum class LogLevel : u8
 /// exists). Calls below this level compile to a no-op in release.
 inline constexpr LogLevel kKlogMinLevel = LogLevel::Debug;
 
+/// Set the RUNTIME minimum severity. Lines below this level are
+/// dropped at the head of Log / LogWithValue (they still don't
+/// enter the log ring). Compile-time filtering via `kKlogMinLevel`
+/// still applies — runtime threshold can only be raised above the
+/// compile-time floor, never below. Useful during driver
+/// bring-up (dial Debug noise down mid-boot) or in CI runs (drop
+/// Warn+ only).
+void SetLogThreshold(LogLevel level);
+
+/// Current runtime threshold. Defaults to the compile-time floor.
+LogLevel GetLogThreshold();
+
 /// Emit a tagged log line. Single-letter severity + subsystem + msg.
-/// Safe from IRQ context. No-op if `level < kKlogMinLevel`.
+/// Safe from IRQ context. No-op if `level < max(kKlogMinLevel,
+/// GetLogThreshold())`.
 void Log(LogLevel level, const char* subsystem, const char* message);
 
 /// As above, with a u64 rendered as hex after the message.

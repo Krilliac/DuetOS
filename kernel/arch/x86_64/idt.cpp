@@ -87,4 +87,15 @@ void IdtSetGate(u8 vector, u64 handler)
     SetGate(vector, handler, kGateInterruptDpl0);
 }
 
+void IdtSetIst(u8 vector, u8 ist)
+{
+    // IST index lives in the low 3 bits of the ist field; upper 5
+    // bits must be zero. 0 would disable IST redirection; we
+    // assert against that because IdtSetIst is always called with
+    // a non-zero value — disabling would mean the caller meant to
+    // SetGate instead.
+    KASSERT_WITH_VALUE(ist >= 1 && ist <= 7, "arch/idt", "IdtSetIst index out of range", static_cast<u64>(ist));
+    g_idt[vector].ist = static_cast<u8>(ist & 0x7);
+}
+
 } // namespace customos::arch

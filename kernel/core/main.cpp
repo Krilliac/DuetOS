@@ -2,6 +2,7 @@
 #include "../acpi/acpi.h"
 #include "../arch/x86_64/cpu.h"
 #include "../arch/x86_64/gdt.h"
+#include "../arch/x86_64/hpet.h"
 #include "../arch/x86_64/idt.h"
 #include "../arch/x86_64/ioapic.h"
 #include "../arch/x86_64/lapic.h"
@@ -66,6 +67,12 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     SerialWrite("[boot] Installing IDT (vectors 0..31).\n");
     IdtInit();
 
+    SerialWrite("[boot] Installing TSS + IST stacks (#DF / #MC / #NMI).\n");
+    TssInit();
+    IdtSetIst(2, kIstNmi);           // #NMI
+    IdtSetIst(8, kIstDoubleFault);   // #DF
+    IdtSetIst(18, kIstMachineCheck); // #MC
+
     SerialWrite("[boot] Parsing Multiboot2 memory map.\n");
     FrameAllocatorInit(multiboot_info);
 
@@ -98,6 +105,10 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     SerialWrite("[boot] Bringing up IOAPIC.\n");
     IoApicInit();
 
+    SerialWrite("[boot] Bringing up HPET (if present).\n");
+    HpetInit();
+    HpetSelfTest();
+
     SerialWrite("[boot] Installing BSP per-CPU struct.\n");
     customos::cpu::PerCpuInitBsp();
 
@@ -108,6 +119,12 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
 
     SerialWrite("[boot] Bringing up scheduler.\n");
     customos::sched::SchedInit();
+    // Idle task FIRST so the runqueue is never empty — even if the
+    // reaper or any subsequent worker blocks before the boot task
+    // spawns anything else, Schedule() always has a fallback to
+    // pick. Supersedes the "ensure SmpStartAps has a runnable peer"
+    // workaround that used to depend on worker creation order.
+    customos::sched::SchedStartIdle("idle-bsp");
     customos::sched::SchedStartReaper();
 
     SerialWrite("[boot] Bringing up PS/2 keyboard.\n");
@@ -119,19 +136,21 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     SerialWrite("[boot] Discovering AHCI controller.\n");
     customos::drivers::storage::AhciInit();
 
-    // Keyboard reader thread: blocks on Ps2KeyboardRead, prints each
-    // scan code. First real end-to-end test of the IRQ path: ACPI →
-    // IOAPIC → IDT → dispatcher → IrqHandler → WaitQueueWakeOne →
-    // Schedule → reader wakes in Ps2KeyboardRead → prints. If any link
-    // in that chain is broken, keypresses in QEMU are silently dropped.
+    // Keyboard reader thread: blocks on Ps2KeyboardReadChar, prints
+    // one line per resolved key press. End-to-end path exercised:
+    // ACPI → IOAPIC → IDT → dispatcher → IrqHandler → WaitQueueWakeOne
+    // → Schedule → reader wakes → translator consumes modifier +
+    // release bytes → returns ASCII → prints. If any link in that
+    // chain is broken, keypresses in QEMU are silently dropped.
     auto kbd_reader = [](void*)
     {
         for (;;)
         {
-            const customos::u8 sc = customos::drivers::input::Ps2KeyboardRead();
-            SerialWrite("[kbd] scan=");
-            SerialWriteHex(sc);
-            SerialWrite("\n");
+            const char ch = customos::drivers::input::Ps2KeyboardReadChar();
+            const char buf[2] = {ch, '\0'};
+            SerialWrite("[kbd] char='");
+            SerialWrite(buf);
+            SerialWrite("'\n");
         }
     };
     customos::sched::SchedCreate(kbd_reader, nullptr, "kbd-reader");
@@ -182,13 +201,11 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     customos::sched::SchedCreate(worker, const_cast<char*>("B"), "worker-B");
     customos::sched::SchedCreate(worker, const_cast<char*>("C"), "worker-C");
 
-    // Bring up APs AFTER worker spawn — SmpStartAps calls
-    // SchedSleepTicks(1) between INIT and SIPI, and the BSP needs
-    // SOMETHING runnable (any Ready task) for the scheduler to pick
-    // while it sleeps. Workers are still running through their 15
-    // iterations (~150 ms at 10 ms/sleep) at this point, plus the
-    // kheartbeat thread below — plenty to keep the runqueue non-
-    // empty. Proper fix is an idle task per CPU; deferred.
+    // Bring up APs. SmpStartAps calls SchedSleepTicks(1) between
+    // INIT and SIPI; the dedicated idle task installed at the top
+    // of SchedInit guarantees the runqueue is non-empty, so the
+    // BSP always has something to switch to while it sleeps —
+    // independent of worker-creation order.
     SerialWrite("[boot] Bringing up APs.\n");
     SmpStartAps();
 

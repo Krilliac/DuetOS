@@ -1,6 +1,8 @@
 #include "klog.h"
 
+#include "../arch/x86_64/hpet.h"
 #include "../arch/x86_64/serial.h"
+#include "../arch/x86_64/timer.h"
 
 namespace customos::core
 {
@@ -26,6 +28,12 @@ struct LogEntry
 constinit LogEntry g_log_ring[kLogRingCapacity] = {};
 constinit u64 g_log_ring_next = 0;  // monotonically increasing write cursor
 constinit u64 g_log_ring_count = 0; // saturates at kLogRingCapacity
+
+// Runtime severity threshold — set via SetLogThreshold. Lines with
+// level < max(threshold, kKlogMinLevel) are silently dropped. Default
+// matches the compile-time floor so behaviour is unchanged unless
+// somebody explicitly raises it.
+constinit LogLevel g_log_threshold = kKlogMinLevel;
 
 inline void PushEntry(LogLevel level, const char* subsystem, const char* message, u64 value, bool has_value)
 {
@@ -62,10 +70,48 @@ inline const char* LevelTag(LogLevel level)
 
 inline bool LevelEnabled(LogLevel level)
 {
-    return static_cast<u8>(level) >= static_cast<u8>(kKlogMinLevel);
+    const u8 floor = static_cast<u8>(kKlogMinLevel);
+    const u8 runtime = static_cast<u8>(g_log_threshold);
+    const u8 effective = floor > runtime ? floor : runtime;
+    return static_cast<u8>(level) >= effective;
+}
+
+// Timestamp source preference:
+//   1. HPET main counter (sub-microsecond precision; unit is
+//      HpetPeriodFemtoseconds()).
+//   2. Scheduler tick counter (100 Hz; unit is 10 ms).
+// The readable format is intentionally left as raw hex — a printf-
+// free kernel isn't going to do decimal-with-microsecond-field. The
+// unit is implied by which source fired (reader can cross-reference
+// the "[acpi] hpet=..." boot log line).
+inline u64 Timestamp()
+{
+    const u64 hpet = arch::HpetReadCounter();
+    if (hpet != 0)
+    {
+        return hpet;
+    }
+    return arch::TimerTicks();
+}
+
+inline void WriteTimestampPrefix()
+{
+    arch::SerialWrite("[ts=");
+    arch::SerialWriteHex(Timestamp());
+    arch::SerialWrite("] ");
 }
 
 } // namespace
+
+void SetLogThreshold(LogLevel level)
+{
+    g_log_threshold = level;
+}
+
+LogLevel GetLogThreshold()
+{
+    return g_log_threshold;
+}
 
 void Log(LogLevel level, const char* subsystem, const char* message)
 {
@@ -73,6 +119,7 @@ void Log(LogLevel level, const char* subsystem, const char* message)
     {
         return;
     }
+    WriteTimestampPrefix();
     arch::SerialWrite(LevelTag(level));
     arch::SerialWrite(subsystem);
     arch::SerialWrite(" : ");
@@ -88,6 +135,7 @@ void LogWithValue(LogLevel level, const char* subsystem, const char* message, u6
     {
         return;
     }
+    WriteTimestampPrefix();
     arch::SerialWrite(LevelTag(level));
     arch::SerialWrite(subsystem);
     arch::SerialWrite(" : ");
