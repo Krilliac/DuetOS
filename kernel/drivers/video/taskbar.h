@@ -35,7 +35,19 @@ namespace customos::drivers::video
 void TaskbarInit(u32 y, u32 height, u32 bg_rgb, u32 fg_rgb, u32 accent_rgb);
 
 /// Paint the taskbar strip + its dynamic contents. Safe no-op
-/// before init.
+/// before init. Records the current tab layout so subsequent
+/// `TaskbarTabAt` calls can hit-test without re-running the
+/// layout.
 void TaskbarRedraw();
+
+/// Hit-test a point against the last-painted tab layout. Returns
+/// the `WindowHandle` of the tab containing (x, y), or a value
+/// equal to `kWindowInvalid` if none does. Caller must have
+/// called `TaskbarRedraw` at least once for a valid result.
+u32 TaskbarTabAt(u32 x, u32 y);
+
+/// Whole-strip hit-test. Useful for the mouse reader's "is this
+/// click on the taskbar at all?" branch.
+bool TaskbarContains(u32 x, u32 y);
 
 } // namespace customos::drivers::video

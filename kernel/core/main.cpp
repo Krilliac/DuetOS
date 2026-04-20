@@ -446,11 +446,29 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
             const bool release_edge = !left_down && prev_left;
             prev_left = left_down;
 
-            // Press on a window resolves in priority order:
+            // Priority for press edges:
+            //   0. Taskbar tab → raise the tab's window even if
+            //      it's buried behind others.
             //   1. Close-box on topmost window → close it.
             //   2. Title bar → raise + begin drag.
             //   3. Any other part of the window → raise only.
-            if (press_edge && !drag.active)
+            if (press_edge && !drag.active &&
+                customos::drivers::video::TaskbarContains(cx, cy))
+            {
+                const customos::u32 tab_hit = customos::drivers::video::TaskbarTabAt(cx, cy);
+                if (tab_hit != customos::drivers::video::kWindowInvalid)
+                {
+                    customos::drivers::video::WindowRaise(tab_hit);
+                    SerialWrite("[ui] taskbar raise window=");
+                    SerialWriteHex(tab_hit);
+                    SerialWrite("\n");
+                    customos::drivers::video::CursorHide();
+                    customos::drivers::video::DesktopCompose(kDesktopTealLocal,
+                                                             "WELCOME TO CUSTOMOS   BOOT OK");
+                    customos::drivers::video::CursorShow();
+                }
+            }
+            else if (press_edge && !drag.active)
             {
                 const auto hit = customos::drivers::video::WindowTopmostAt(cx, cy);
                 if (hit != customos::drivers::video::kWindowInvalid)

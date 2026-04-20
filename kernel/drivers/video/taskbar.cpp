@@ -17,6 +17,18 @@ constinit u32 g_fg = 0x00FFFFFF;
 constinit u32 g_accent = 0x00406080;
 constinit bool g_ready = false;
 
+// Last-painted tab layout. Updated by TaskbarRedraw; consumed by
+// TaskbarTabAt. Capacity matches kMaxWindows so tabs and window
+// slots are in 1:1 correspondence.
+constexpr u32 kMaxTabs = 8;
+struct TabSlot
+{
+    u32 x, y, w, h;
+    u32 window; // WindowHandle, or 0xFFFFFFFF for empty
+};
+constinit TabSlot g_tabs[kMaxTabs] = {};
+constinit u32 g_tab_count = 0;
+
 // Format an unsigned u64 as a decimal ASCII string into `buf`.
 // Writes at most `cap - 1` bytes + NUL. Returns the number of
 // characters written (excluding NUL). Simple, no float / %d.
@@ -106,6 +118,7 @@ void TaskbarRedraw()
     u32 tab_x = start_w + 16;
     const u32 tabs_right_limit = (fbw > uptime_reserve) ? fbw - uptime_reserve : fbw;
 
+    g_tab_count = 0;
     const u32 count = WindowRegistryCount();
     for (u32 i = 0; i < count; ++i)
     {
@@ -126,6 +139,17 @@ void TaskbarRedraw()
         {
             FramebufferDrawString(tab_x + 8, text_y, title, g_fg, tab_bg);
         }
+        // Record the slot so subsequent hit-tests can map a
+        // click back to a window without re-running the layout.
+        if (g_tab_count < kMaxTabs)
+        {
+            g_tabs[g_tab_count].x = tab_x;
+            g_tabs[g_tab_count].y = g_y + 4;
+            g_tabs[g_tab_count].w = tab_w;
+            g_tabs[g_tab_count].h = g_h - 8;
+            g_tabs[g_tab_count].window = h;
+            ++g_tab_count;
+        }
         tab_x += tab_w + tab_gap;
     }
 
@@ -144,6 +168,33 @@ void TaskbarRedraw()
     const u32 text_w = (3 + n + 1) * 8;
     const u32 text_x = (fbw > text_w + 8) ? fbw - text_w - 8 : 0;
     FramebufferDrawString(text_x, text_y, buf, g_fg, g_bg);
+}
+
+u32 TaskbarTabAt(u32 x, u32 y)
+{
+    if (!g_ready)
+    {
+        return 0xFFFFFFFFu;
+    }
+    for (u32 i = 0; i < g_tab_count; ++i)
+    {
+        const TabSlot& t = g_tabs[i];
+        if (x >= t.x && x < t.x + t.w && y >= t.y && y < t.y + t.h)
+        {
+            return t.window;
+        }
+    }
+    return 0xFFFFFFFFu;
+}
+
+bool TaskbarContains(u32 x, u32 y)
+{
+    if (!g_ready)
+    {
+        return false;
+    }
+    (void)x;
+    return y >= g_y && y < g_y + g_h;
 }
 
 } // namespace customos::drivers::video
