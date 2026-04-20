@@ -377,6 +377,39 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 022 — PCI enumeration via legacy port IO (0xCF8/0xCFC)
+
+- **Scope:** `kernel/drivers/pci/pci.{h,cpp}`,
+  `kernel/core/main.cpp` calls `PciEnumerate` after `SmpStartAps`
+- **Commit:** _(filled at commit)_
+- **Decision:** Use legacy Configuration Mechanism #1 (write 32-bit
+  address to port 0xCF8, read/write 32-bit dword at 0xCFC) instead
+  of MCFG/ECAM for the first PCI enumerator. Walk bus 0..3; read
+  vendor_id, device_id, class/subclass/prog_if, header_type; cache
+  up to `kMaxDevices = 64` records; log each. Expose raw
+  `PciConfigRead32/16/8` + `PciConfigWrite32` accessors for
+  driver use.
+- **Why:** Legacy port-IO works on every x86 machine made in the
+  last 25 years and fits in ~150 lines. MCFG/ECAM is faster and
+  SMP-friendlier but requires ACPI MCFG parsing (another ~100
+  lines) that we haven't needed until now — deferring bundles
+  that work with the xHCI commit where the ECAM latency
+  matters. Good hygiene: land the unblocking primitive minimal,
+  grow it when a consumer appears.
+- **Rules out / defers:** BAR sizing + allocation (destructive
+  probe dance; needs driver-side convention). MSI/MSI-X setup
+  (capability-list walk). INTx routing via ACPI `_PRT` (needs an
+  AML interpreter). Recursive bridge walking (q35 has nothing
+  interesting on bus 1+). Hot-plug. MCFG/ECAM fast path.
+- **Revisit when:** First driver that needs MSI (likely xHCI),
+  first ACPI `_PRT` consumer, first real bridge, first hot-
+  plug-capable driver, or profiles show CONFIG_ADDRESS port
+  contention on SMP.
+- **Related tracks:** Track 6 (Drivers — every PCIe driver
+  depends on this).
+
+---
+
 ## 021 — SMP discovery + IPI plumbing, AP trampoline deferred
 
 - **Scope:** `kernel/acpi/acpi.{h,cpp}` (MADT type-0 parse),

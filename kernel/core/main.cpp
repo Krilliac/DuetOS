@@ -11,6 +11,7 @@
 #include "../arch/x86_64/timer.h"
 #include "../cpu/percpu.h"
 #include "../drivers/input/ps2kbd.h"
+#include "../drivers/pci/pci.h"
 #include "../mm/frame_allocator.h"
 #include "../sync/spinlock.h"
 #include "heartbeat.h"
@@ -112,6 +113,9 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
 
     SerialWrite("[boot] Bringing up APs.\n");
     SmpStartAps();
+
+    SerialWrite("[boot] Enumerating PCI bus.\n");
+    customos::drivers::pci::PciEnumerate();
 
     customos::core::StartHeartbeatThread();
 

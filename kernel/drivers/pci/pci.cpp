@@ -1,0 +1,228 @@
+#include "pci.h"
+
+#include "../../arch/x86_64/cpu.h"
+#include "../../arch/x86_64/serial.h"
+#include "../../core/klog.h"
+#include "../../core/panic.h"
+
+namespace customos::drivers::pci
+{
+
+namespace
+{
+
+// Configuration Mechanism #1 (the only one anyone implements on
+// modern hardware). Write a 32-bit address to 0xCF8, then read/write
+// the matching 32-bit word at 0xCFC.
+constexpr u16 kConfigAddressPort = 0xCF8;
+constexpr u16 kConfigDataPort = 0xCFC;
+constexpr u32 kConfigEnable = 1U << 31;
+
+constinit Device g_devices[kMaxDevices] = {};
+constinit u64 g_device_count = 0;
+
+inline u32 MakeAddress(DeviceAddress addr, u8 offset)
+{
+    // offset must be 4-byte aligned for legacy port IO — the low 2 bits
+    // of the address register are reserved.
+    return kConfigEnable | (static_cast<u32>(addr.bus) << 16) | (static_cast<u32>(addr.device & 0x1F) << 11) |
+           (static_cast<u32>(addr.function & 0x07) << 8) | (static_cast<u32>(offset & 0xFC));
+}
+
+} // namespace
+
+u32 PciConfigRead32(DeviceAddress addr, u8 offset)
+{
+    const u32 address = MakeAddress(addr, offset);
+    asm volatile("outl %0, %w1" : : "a"(address), "Nd"(kConfigAddressPort));
+    u32 value;
+    asm volatile("inl %w1, %0" : "=a"(value) : "Nd"(kConfigDataPort));
+    return value;
+}
+
+u16 PciConfigRead16(DeviceAddress addr, u8 offset)
+{
+    const u32 word = PciConfigRead32(addr, offset & 0xFC);
+    const u32 shift = (offset & 0x02) * 8;
+    return static_cast<u16>((word >> shift) & 0xFFFF);
+}
+
+u8 PciConfigRead8(DeviceAddress addr, u8 offset)
+{
+    const u32 word = PciConfigRead32(addr, offset & 0xFC);
+    const u32 shift = (offset & 0x03) * 8;
+    return static_cast<u8>((word >> shift) & 0xFF);
+}
+
+void PciConfigWrite32(DeviceAddress addr, u8 offset, u32 value)
+{
+    u32 address = MakeAddress(addr, offset);
+    asm volatile("outl %0, %w1" : : "a"(address), "Nd"(kConfigAddressPort));
+    asm volatile("outl %0, %w1" : : "a"(value), "Nd"(kConfigDataPort));
+}
+
+u64 PciDeviceCount()
+{
+    return g_device_count;
+}
+
+const Device& PciDevice(u64 index)
+{
+    KASSERT_WITH_VALUE(index < g_device_count, "drivers/pci", "PciDevice index out of range", index);
+    return g_devices[index];
+}
+
+const char* PciClassName(u8 class_code)
+{
+    // Subset of the PCI SIG base-class codes. Extend as we grow drivers
+    // that care.
+    switch (class_code)
+    {
+    case 0x00:
+        return "legacy";
+    case 0x01:
+        return "mass storage";
+    case 0x02:
+        return "network";
+    case 0x03:
+        return "display";
+    case 0x04:
+        return "multimedia";
+    case 0x05:
+        return "memory";
+    case 0x06:
+        return "bridge";
+    case 0x07:
+        return "comm";
+    case 0x08:
+        return "system";
+    case 0x09:
+        return "input";
+    case 0x0A:
+        return "docking";
+    case 0x0B:
+        return "processor";
+    case 0x0C:
+        return "serial bus";
+    case 0x0D:
+        return "wireless";
+    case 0x0E:
+        return "intelligent";
+    case 0x0F:
+        return "satellite";
+    case 0x10:
+        return "crypto";
+    case 0x11:
+        return "signal proc";
+    case 0xFF:
+        return "unassigned";
+    default:
+        return "unknown";
+    }
+}
+
+namespace
+{
+
+void CacheDevice(DeviceAddress addr, u32 vendor_device, u32 class_reg, u32 header_reg)
+{
+    if (g_device_count >= kMaxDevices)
+    {
+        core::Log(core::LogLevel::Warn, "drivers/pci", "device table full; further devices ignored");
+        return;
+    }
+    Device& d = g_devices[g_device_count++];
+    d.addr = addr;
+    d.vendor_id = static_cast<u16>(vendor_device & 0xFFFF);
+    d.device_id = static_cast<u16>((vendor_device >> 16) & 0xFFFF);
+    d.revision = static_cast<u8>(class_reg & 0xFF);
+    d.prog_if = static_cast<u8>((class_reg >> 8) & 0xFF);
+    d.subclass = static_cast<u8>((class_reg >> 16) & 0xFF);
+    d.class_code = static_cast<u8>((class_reg >> 24) & 0xFF);
+    d.header_type = static_cast<u8>((header_reg >> 16) & 0xFF);
+}
+
+// Probe a single (bus, device, function). Returns true if a device was
+// present + cached; false if the slot is empty.
+bool Probe(u8 bus, u8 dev, u8 fn)
+{
+    const DeviceAddress addr{.bus = bus, .device = dev, .function = fn, ._pad = 0};
+    const u32 vd = PciConfigRead32(addr, 0x00);
+    if ((vd & 0xFFFF) == 0xFFFF)
+    {
+        return false;
+    }
+    const u32 cls = PciConfigRead32(addr, 0x08);
+    const u32 hdr = PciConfigRead32(addr, 0x0C);
+    CacheDevice(addr, vd, cls, hdr);
+    return true;
+}
+
+} // namespace
+
+void PciEnumerate()
+{
+    static constinit bool s_done = false;
+    KASSERT(!s_done, "drivers/pci", "PciEnumerate called twice");
+    s_done = true;
+
+    // v0: bus 0..3 is plenty for QEMU q35 + any other board we'd realistically
+    // boot today. Recursive bridge walking lands when we actually meet a
+    // board whose interesting devices are behind a bridge (not q35).
+    for (u32 bus = 0; bus < 4; ++bus)
+    {
+        for (u8 dev = 0; dev < 32; ++dev)
+        {
+            const DeviceAddress fn0{.bus = static_cast<u8>(bus), .device = dev, .function = 0, ._pad = 0};
+            const u32 vendor_device = PciConfigRead32(fn0, 0x00);
+            if ((vendor_device & 0xFFFF) == 0xFFFF)
+            {
+                continue; // no device at this slot
+            }
+
+            // Function 0 always exists; cache it. Then check the multi-function
+            // bit (header_type bit 7) to decide if we need to scan functions
+            // 1..7.
+            Probe(static_cast<u8>(bus), dev, 0);
+            const u8 header = PciConfigRead8(fn0, 0x0E);
+            if ((header & 0x80) != 0)
+            {
+                for (u8 fn = 1; fn < 8; ++fn)
+                {
+                    Probe(static_cast<u8>(bus), dev, fn);
+                }
+            }
+        }
+    }
+
+    core::LogWithValue(core::LogLevel::Info, "drivers/pci", "enumerated devices", g_device_count);
+    for (u64 i = 0; i < g_device_count; ++i)
+    {
+        const Device& d = g_devices[i];
+        // Pack address + ids + class into one structured line per device.
+        // Format: "pci XX:YY.Z  VID:DID class=XX/YY/ZZ (name) hdr=XX"
+        arch::SerialWrite("  pci ");
+        arch::SerialWriteHex(d.addr.bus);
+        arch::SerialWrite(":");
+        arch::SerialWriteHex(d.addr.device);
+        arch::SerialWrite(".");
+        arch::SerialWriteHex(d.addr.function);
+        arch::SerialWrite("  vid=");
+        arch::SerialWriteHex(d.vendor_id);
+        arch::SerialWrite(" did=");
+        arch::SerialWriteHex(d.device_id);
+        arch::SerialWrite(" class=");
+        arch::SerialWriteHex(d.class_code);
+        arch::SerialWrite("/");
+        arch::SerialWriteHex(d.subclass);
+        arch::SerialWrite("/");
+        arch::SerialWriteHex(d.prog_if);
+        arch::SerialWrite(" (");
+        arch::SerialWrite(PciClassName(d.class_code));
+        arch::SerialWrite(") hdr=");
+        arch::SerialWriteHex(d.header_type);
+        arch::SerialWrite("\n");
+    }
+}
+
+} // namespace customos::drivers::pci
