@@ -197,6 +197,28 @@ constexpr u32 kHpetBlockIdNumTimMask = 0x1F00;
 constexpr u32 kHpetBlockIdNumTimShift = 8;
 constexpr u32 kHpetBlockIdCountSize64 = 1U << 13;
 
+// MCFG — PCI Express Memory-Mapped Configuration Space. Header is
+// followed by `reserved:u64` and then N Configuration Space Base
+// Address Allocation Structures, 16 bytes each. We only parse the
+// first entry (segment group 0) — multi-segment hardware is vendor-
+// specific and no x86_64 platform we target ships it.
+struct [[gnu::packed]] McfgEntry
+{
+    u64 base_address;
+    u16 segment_group;
+    u8 start_bus;
+    u8 end_bus;
+    u32 reserved;
+};
+static_assert(sizeof(McfgEntry) == 16, "MCFG entry is 16 bytes");
+
+struct [[gnu::packed]] McfgTable
+{
+    SdtHeader header;
+    u64 reserved;
+    // McfgEntry entries follow; count = (length - sizeof(McfgTable)) / 16.
+};
+
 // ---------------------------------------------------------------------------
 // Cache. Populated once by AcpiInit; read-only after.
 // ---------------------------------------------------------------------------
@@ -222,6 +244,12 @@ constinit u8 g_reset_value = 0;
 constinit u64 g_hpet_address = 0;
 constinit u8 g_hpet_timer_count = 0;
 constinit u8 g_hpet_counter_width = 0;
+
+// MCFG-derived cache. Segment group 0 only. All zero if no MCFG
+// table was present — PCI drivers fall back to legacy port IO.
+constinit u64 g_mcfg_address = 0;
+constinit u8 g_mcfg_start_bus = 0;
+constinit u8 g_mcfg_end_bus = 0;
 
 [[noreturn]] void PanicAcpi(const char* message)
 {
@@ -466,6 +494,31 @@ void ParseHpet(const HpetTable& hpet)
     g_hpet_counter_width = (hpet.event_timer_block_id & kHpetBlockIdCountSize64) != 0 ? 64 : 32;
 }
 
+void ParseMcfg(const McfgTable& mcfg)
+{
+    const u64 entries_bytes = mcfg.header.length - sizeof(McfgTable);
+    if (entries_bytes < sizeof(McfgEntry))
+    {
+        return; // MCFG table with zero entries — treat as absent
+    }
+
+    const auto* first = reinterpret_cast<const McfgEntry*>(reinterpret_cast<uptr>(&mcfg) + sizeof(McfgTable));
+
+    // Only cache segment group 0. Walk the entries in case segment 0
+    // isn't the first record — firmware ordering isn't guaranteed.
+    const u64 count = entries_bytes / sizeof(McfgEntry);
+    for (u64 i = 0; i < count; ++i)
+    {
+        if (first[i].segment_group == 0)
+        {
+            g_mcfg_address = first[i].base_address;
+            g_mcfg_start_bus = first[i].start_bus;
+            g_mcfg_end_bus = first[i].end_bus;
+            return;
+        }
+    }
+}
+
 } // namespace
 
 void AcpiInit(uptr multiboot_info_phys)
@@ -538,6 +591,23 @@ void AcpiInit(uptr multiboot_info_phys)
         ParseHpet(*reinterpret_cast<const HpetTable*>(hpet_hdr));
     }
 
+    // MCFG is optional — QEMU q35 provides it, legacy platforms
+    // without PCIe do not. PCI drivers use the cached base to enable
+    // ECAM config access; missing means "fall back to port IO."
+    const SdtHeader* mcfg_hdr = FindTable(*rsdp, "MCFG");
+    if (mcfg_hdr != nullptr)
+    {
+        if (mcfg_hdr->length < sizeof(McfgTable))
+        {
+            PanicAcpi("MCFG table shorter than the header");
+        }
+        if (!ChecksumOk(mcfg_hdr, mcfg_hdr->length))
+        {
+            PanicAcpi("MCFG table checksum failed");
+        }
+        ParseMcfg(*reinterpret_cast<const McfgTable*>(mcfg_hdr));
+    }
+
     SerialWrite("[acpi] rsdp rev=");
     SerialWriteHex(rsdp->revision);
     SerialWrite(" lapic=");
@@ -575,6 +645,21 @@ void AcpiInit(uptr multiboot_info_phys)
         SerialWriteHex(g_hpet_timer_count);
         SerialWrite(" width=");
         SerialWriteHex(g_hpet_counter_width);
+    }
+    else
+    {
+        SerialWrite("absent");
+    }
+    SerialWrite("\n");
+
+    SerialWrite("[acpi] mcfg=");
+    if (g_mcfg_address != 0)
+    {
+        SerialWriteHex(g_mcfg_address);
+        SerialWrite(" buses=");
+        SerialWriteHex(g_mcfg_start_bus);
+        SerialWrite("..");
+        SerialWriteHex(g_mcfg_end_bus);
     }
     else
     {
@@ -696,6 +781,21 @@ u8 HpetTimerCount()
 u8 HpetCounterWidth()
 {
     return g_hpet_counter_width;
+}
+
+u64 McfgAddress()
+{
+    return g_mcfg_address;
+}
+
+u8 McfgStartBus()
+{
+    return g_mcfg_start_bus;
+}
+
+u8 McfgEndBus()
+{
+    return g_mcfg_end_bus;
 }
 
 bool AcpiReset()

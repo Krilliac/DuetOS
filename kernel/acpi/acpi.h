@@ -126,4 +126,20 @@ u8 HpetTimerCount();
 /// event-timer-block-id), 32 otherwise. Returns 0 if no HPET.
 u8 HpetCounterWidth();
 
+/// MCFG (PCIe Memory-Mapped Configuration Space) base address for
+/// segment group 0 (the only segment that exists on every x86_64
+/// machine we target). Returns 0 if no MCFG table was present —
+/// callers fall back to legacy port-IO config access in that case.
+///
+/// The region runs from `McfgAddress()` to
+/// `McfgAddress() + (McfgEndBus() - McfgStartBus() + 1) * 0x100000`;
+/// each bus covers 1 MiB, each device 32 KiB, each function 4 KiB.
+u64 McfgAddress();
+
+/// First PCI bus covered by the MCFG region. Usually 0.
+u8 McfgStartBus();
+
+/// Last PCI bus covered by the MCFG region (inclusive).
+u8 McfgEndBus();
+
 } // namespace customos::acpi
