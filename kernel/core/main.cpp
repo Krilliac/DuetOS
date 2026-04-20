@@ -8,6 +8,7 @@
 #include "../arch/x86_64/pic.h"
 #include "../arch/x86_64/serial.h"
 #include "../arch/x86_64/timer.h"
+#include "../drivers/input/ps2kbd.h"
 #include "../mm/frame_allocator.h"
 #include "../mm/kheap.h"
 #include "../mm/paging.h"
@@ -89,6 +90,26 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
 
     SerialWrite("[boot] Bringing up scheduler.\n");
     customos::sched::SchedInit();
+
+    SerialWrite("[boot] Bringing up PS/2 keyboard.\n");
+    customos::drivers::input::Ps2KeyboardInit();
+
+    // Keyboard reader thread: blocks on Ps2KeyboardRead, prints each
+    // scan code. First real end-to-end test of the IRQ path: ACPI →
+    // IOAPIC → IDT → dispatcher → IrqHandler → WaitQueueWakeOne →
+    // Schedule → reader wakes in Ps2KeyboardRead → prints. If any link
+    // in that chain is broken, keypresses in QEMU are silently dropped.
+    auto kbd_reader = [](void*)
+    {
+        for (;;)
+        {
+            const customos::u8 sc = customos::drivers::input::Ps2KeyboardRead();
+            SerialWrite("[kbd] scan=");
+            SerialWriteHex(sc);
+            SerialWrite("\n");
+        }
+    };
+    customos::sched::SchedCreate(kbd_reader, nullptr, "kbd-reader");
 
     // Scheduler self-test: three kernel threads that each bump a shared
     // counter five times under a mutex. If the mutex serialises them

@@ -17,6 +17,7 @@ set(CUSTOMOS_KERNEL_SOURCES
     arch/x86_64/serial.cpp
     arch/x86_64/timer.cpp
     arch/x86_64/traps.cpp
+    drivers/input/ps2kbd.cpp
     mm/frame_allocator.cpp
     mm/kheap.cpp
     mm/page.cpp
