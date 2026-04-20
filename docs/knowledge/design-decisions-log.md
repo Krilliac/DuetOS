@@ -607,6 +607,193 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 038 — PCI CONFIG_ADDRESS/DATA serialisation
+
+- **Scope:** `kernel/drivers/pci/pci.cpp` — adds a global
+  `sync::SpinLock g_pci_config_lock`, taken across the port-IO
+  pair in `PciConfigRead32` and `PciConfigWrite32`
+- **Decision:** Every low-level config access (32-bit read + 32-
+  bit write) takes a single global lock so the CF8/CFC dance
+  can't interleave across CPUs. Multi-step sequences (BAR size
+  probe — read, write 0xFF, read back, restore) still release
+  the lock between individual accesses. That's acceptable today:
+  enumeration runs at boot before APs can meaningfully interact.
+  A future atomicity pass would expose `PciConfigLock/Unlock`
+  so probe callers hold the lock across all four operations.
+- **Why:** `pci-enum-v0.md:145` flagged this as deferred "until
+  a consumer hits it." With broadcast-NMI panic halt (#037) and
+  eventual SMP scheduler join in flight, the cost of adding
+  correctness now is trivial (one lock, no refactor) and the
+  cost of hitting the race later is a bizarre intermittent bug
+  that's hard to triage. Land while it's still cheap.
+- **Rules out / defers:** `PciConfigLock / Unlock` for
+  multi-step atomicity (needed for 64-bit BAR probe, MSI/MSI-X
+  capability programming). ECAM fast path (still deferred until
+  MCFG entry #036 has a real consumer).
+- **Revisit when:** First driver that programs MSI-X with the
+  device active and being probed concurrently by another CPU
+  (needs full-sequence atomicity). PCIe ECAM migration (lock
+  moves with the accessor).
+- **Related tracks:** Track 2 (SMP), Track 6 (Drivers).
+
+---
+
+## 037 — Broadcast-NMI panic halt (SMP Class-A recovery)
+
+- **Scope:** `kernel/arch/x86_64/smp.{h,cpp}` — new
+  `PanicBroadcastNmi`; `kernel/arch/x86_64/traps.cpp` — vector-2
+  short-circuit; `kernel/arch/x86_64/lapic.{h,cpp}` — new
+  `LapicIsReady`; `kernel/core/panic.cpp` wires the broadcast into
+  both Panic and PanicWithValue
+- **Decision:** On panic, before writing the crash dump, the
+  panicking CPU fires an "all excluding self" NMI IPI via the
+  LAPIC ICR shorthand. Every peer CPU receives the NMI on its
+  IST3 stack (wired by #032), enters the trap dispatcher, and is
+  short-circuited to a `cli; hlt` loop. The panicking CPU then
+  has exclusive use of the serial line for the dump. The
+  broadcast guards on `LapicIsReady()` so early-boot panics
+  (before LAPIC init) skip it gracefully.
+- **Why:** Decision log #017, #018, #021, and
+  smp-ap-bringup-scope.md §"Open questions" all flagged this as
+  the Class-A recovery gap on SMP. Without it, a panic on one
+  CPU leaves peers running against whatever corrupt shared state
+  triggered the panic — exactly the wrong posture per the
+  runtime-recovery strategy's "Class A → HALT, everywhere."
+- **Rules out / defers:** NMI-on-AP-already-halted is a no-op
+  (AP enters the IST3 handler, falls into the same short-
+  circuit, halts again — wasteful but correct). Stuck-ICR
+  timeout recursing into Panic is avoided by inlining the wait
+  loop and logging a Warn on timeout rather than panicking.
+  NMI with a real consumer (chipset error, watchdog,
+  power-button) — every NMI today means "stop." Revisiting
+  requires a subsystem registration API.
+- **Revisit when:** First subsystem needs a real NMI handler
+  (power-button or hardware watchdog). AP scheduler join lands
+  — confirm NMI still fires cleanly on a CPU running scheduled
+  work, not just the halt loop.
+- **Related tracks:** Track 2 (SMP), Track 13 (Security /
+  recovery — Class A on SMP).
+
+---
+
+## 036 — MCFG parse for PCIe ECAM (base + bus range)
+
+- **Scope:** `kernel/acpi/acpi.{h,cpp}` — adds `McfgTable` /
+  `McfgEntry` structs, `ParseMcfg`, and
+  `McfgAddress/StartBus/EndBus` accessors
+- **Decision:** Find the MCFG table, checksum-validate it, and
+  cache the first segment-group-0 entry's base address + bus
+  range. Multi-segment hardware is vendor-specific and no x86_64
+  platform we target ships it. Optional like FADT/HPET/MCFG —
+  a missing table leaves accessors at 0 so PCI drivers keep
+  using legacy port IO.
+- **Why:** Decision log #012 deferred "MCFG (PCIe ECAM)"
+  alongside HPET and FADT. #025 and #031 both landed their
+  respective table parses; MCFG is the natural third. Landing
+  the parse now keeps the ECAM migration commit focused purely
+  on the port-IO → MMIO swap.
+- **Rules out / defers:** Actually using ECAM — PCI enumeration
+  still uses CONFIG_ADDRESS/DATA (#022). Multi-segment support.
+  Cross-checking the MCFG-reported base against chipset
+  registers (real-hardware cross-validation).
+- **Revisit when:** First PCIe device that needs >256 bytes of
+  config space (legacy port IO can't reach extended capabilities).
+  MSI-X vector table programming (ECAM makes the capability
+  chain access much simpler). xHCI driver begins — primary
+  driver that benefits from ECAM speed.
+- **Related tracks:** Track 2 (Platform), Track 6 (Drivers —
+  PCIe endpoints).
+
+---
+
+## 035 — HPET-timestamped klog lines
+
+- **Scope:** `kernel/core/klog.cpp` — prefixes every log line
+  with `[ts=0xNNNNNNNNNNNNNNNN] `
+- **Decision:** Timestamp source is HPET main counter if
+  available (sub-microsecond precision), scheduler tick counter
+  otherwise (100 Hz). Unit is implied by the source; readers
+  cross-reference the "[acpi] hpet=..." boot log. Format is raw
+  hex — a printf-free kernel isn't going to format decimal
+  fractional seconds. Falls back cleanly to 100 Hz tick if no
+  HPET is present.
+- **Why:** Makes log lines visibly ordered within a single 10
+  ms tick. Previously a 10-second idle between two lines and a
+  same-tick burst of 50 lines looked identical in the serial
+  log. HPET primitive from #031 is now consumed by its first
+  caller, closing the "built but not wired in" concern.
+- **Rules out / defers:** Human-readable decimal formatting
+  (needs printf-class formatting infrastructure). Per-CPU
+  timestamp source (NMI broadcast uses this path, and the two
+  cores might have slightly skewed HPET reads; same source
+  across CPUs is fine for now). Wall-clock anchor (needs RTC
+  read + leap-second handling).
+- **Revisit when:** Post-mortem tool starts parsing timestamps
+  (decide formatting — decimal or keep hex?). SMP scheduler
+  join (HPET is globally coherent, but logs will want CPU ID
+  alongside). Wall-clock support arrives (RTC init).
+- **Related tracks:** Track 2 (Platform), Track 1 (CI — log
+  diff tooling).
+
+---
+
+## 034 — SchedSleepUntil (absolute-deadline sleep)
+
+- **Scope:** `kernel/sched/sched.{h,cpp}` — adds
+  `SchedSleepUntil(deadline_tick)` and `SchedNowTicks()`
+- **Decision:** Complement the existing relative sleep with an
+  absolute-deadline variant. Caller reads `SchedNowTicks()`
+  once to establish a base, then loops `deadline += period;
+  SchedSleepUntil(deadline);` — drift-free. Reuses the existing
+  sleep queue + `TickReached` wrap-safe compare; no new
+  machinery.
+- **Why:** Periodic kernel tasks that use `SchedSleepTicks`
+  accumulate body latency into the period. `kheartbeat`
+  (entry #014 adjacent) is the canonical example: "print stats
+  every 5 seconds" drifts to 5+ε seconds per cycle if the
+  print path takes non-trivial time. Land the primitive before
+  the first caller so periodic-task patterns have a one-line
+  right answer.
+- **Rules out / defers:** Phase alignment to wall-clock
+  boundaries (needs RTC). Catch-up scheduling (if the deadline
+  is already past when the caller wakes, we Yield but don't
+  fire multiple iterations back-to-back).
+- **Revisit when:** First caller that shows measurable drift on
+  `SchedSleepTicks`. Heartbeat thread migrates to absolute
+  deadlines (cheap follow-up).
+- **Related tracks:** Track 4 (IPC / sync — periodic patterns).
+
+---
+
+## 033 — KLog runtime severity threshold
+
+- **Scope:** `kernel/core/klog.{h,cpp}` — adds
+  `SetLogThreshold` / `GetLogThreshold` + a global
+  `g_log_threshold`, evaluated alongside the compile-time
+  `kKlogMinLevel` on every Log/LogWithValue call
+- **Decision:** Effective log level is
+  `max(kKlogMinLevel, g_log_threshold)`. The runtime knob can
+  only RAISE the filter past the compile-time floor, never
+  lower it — production builds compile Debug out entirely and
+  no runtime call can re-enable it. Default threshold matches
+  the floor so behaviour is unchanged unless a caller opts in.
+- **Why:** Driver bring-up often wants Debug noise during
+  init and Info-only once settled. Without a runtime knob, the
+  choice was "rebuild" vs "drown in output." Same pattern
+  useful for CI runs (drop to Warn+ only to keep logs compact).
+- **Rules out / defers:** Per-subsystem thresholds (globally
+  one knob — if a subsystem is noisy, it's a klog-call-site
+  problem). Dynamic thresholds tied to heartbeat / health
+  (e.g., "raise to Debug when panic is imminent"). Log-level
+  introspection from a debugger.
+- **Revisit when:** Per-subsystem tuning becomes necessary
+  (first noisy driver). A shell lands and SetLogThreshold
+  becomes invokable from user-space.
+- **Related tracks:** Track 2 (Platform — observability),
+  Track 1 (CI).
+
+---
+
 ## 032 — TSS + IST stacks for #DF, #MC, #NMI
 
 - **Scope:** `kernel/arch/x86_64/gdt.{h,cpp}` (TSS struct,
