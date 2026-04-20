@@ -61,6 +61,15 @@ inline u64 ReadCr0()
     return value;
 }
 
+/// Load CR0 with a new value. Changing certain bits (PG, PE, CD/NW,
+/// WP) has system-wide effect — callers should be deliberate about
+/// what they flip. The "memory" clobber prevents the compiler from
+/// reordering loads/stores across the write.
+inline void WriteCr0(u64 value)
+{
+    asm volatile("mov %0, %%cr0" : : "r"(value) : "memory");
+}
+
 inline u64 ReadCr2()
 {
     u64 value;

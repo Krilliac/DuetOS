@@ -122,6 +122,22 @@ void EnableKernelProtectionBits()
     u32 leaf7_edx = 0;
     ReadCpuidLeaf7_0(leaf7_ebx, leaf7_edx);
 
+    // CR0.WP (bit 16) — Write Protect. With WP=0 (default), ring-0
+    // stores bypass the page-table W bit: the kernel can overwrite
+    // any page regardless of its RO flag. That defeats slice-10b's
+    // kernel-image W^X — a buggy kernel pointer could silently
+    // scribble .text. Setting WP=1 enforces W against ring 0 too,
+    // so any write to a RO page #PFs whether the writer is user or
+    // kernel. The existing W^X bundles (kKernelData, kKernelMmio,
+    // kKernelCode) + ProtectKernelImage all respect this; this
+    // flip closes the ring-0 escape hatch.
+    u64 cr0 = arch::ReadCr0();
+    constexpr u64 kCr0_Wp = 1ULL << 16;
+    if ((cr0 & kCr0_Wp) == 0)
+    {
+        arch::WriteCr0(cr0 | kCr0_Wp);
+    }
+
     u64 cr4 = ReadCr4();
     const u64 before = cr4;
     bool cet_ibt_on = false;
@@ -167,6 +183,8 @@ void EnableKernelProtectionBits()
     SerialWrite((cr4 & kCr4_Smap) ? "on" : "off");
     SerialWrite(" CET/IBT=");
     SerialWrite(cet_ibt_on ? "on" : "off");
+    SerialWrite(" CR0.WP=");
+    SerialWrite((arch::ReadCr0() & kCr0_Wp) ? "on" : "off");
     SerialWrite("\n");
 }
 

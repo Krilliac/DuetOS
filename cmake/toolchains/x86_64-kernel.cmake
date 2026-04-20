@@ -57,6 +57,24 @@ set(CUSTOMOS_KERNEL_C_FLAGS
     # unconditionally; the protection activates only when the MSR
     # is enabled at boot.
     -fcf-protection=branch
+    # Spectre-v2 / branch-target-injection mitigation. Replaces
+    # every `jmp/call *%reg` with a `call __x86_indirect_thunk_<reg>`
+    # that traps speculation at a lfence before the indirect
+    # transfer. Attackers who can write to the branch-predictor
+    # (via another process on a shared core, or via CPU-internal
+    # timing channels) can't use mispredicted speculative
+    # execution to steer our indirect branches toward a gadget.
+    #
+    # Needs us to provide the thunks (otherwise the linker fails
+    # on __x86_indirect_thunk_rax etc.). Those live in
+    # kernel/arch/x86_64/retpoline_thunks.S.
+    #
+    # Independent of CET/IBT: IBT blocks BRANCHES TO unexpected
+    # targets at the victim site; retpoline blocks BRANCHES FROM
+    # going to mispredicted targets at the call site. They
+    # compose — IBT catches a successful injection; retpoline
+    # prevents the injection from succeeding in the first place.
+    -mretpoline
     -fno-pic
     -fno-pie
     -fno-builtin

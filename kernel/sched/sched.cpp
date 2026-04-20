@@ -535,11 +535,6 @@ void Schedule()
         {
             if (prev->tick_exhausted)
             {
-                SerialWrite("[sched] tick-exhausted kill: id=");
-                SerialWriteHex(prev->id);
-                SerialWrite(" name=\"");
-                SerialWrite(prev->name);
-                SerialWrite("\"\n");
                 // CPU-tick budget ran out (flagged by OnTimerTick). Treat
                 // identically to SchedExit but inline — we're already
                 // inside Schedule()'s locked section, calling SchedExit
