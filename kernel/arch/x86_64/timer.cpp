@@ -5,6 +5,7 @@
 #include "serial.h"
 #include "traps.h"
 
+#include "../../core/klog.h"
 #include "../../sched/sched.h"
 
 namespace customos::arch
@@ -54,13 +55,13 @@ void TimerHandler()
     ++g_ticks;
     sched::OnTimerTick(g_ticks);
 
-    // Heartbeat: print every 100 ticks so the boot log shows the IRQ path
-    // is alive. Drop this once there's a real periodic workload to drive.
+    // Liveness heartbeat at 1 Hz. Debug-level so a release preset's
+    // kKlogMinLevel filter can drop the per-second spam while still
+    // leaving the full trace available during driver-bring-up debug.
+    // The kheartbeat thread (every 5 s) gives the richer stats view.
     if ((g_ticks % kTickFrequencyHz) == 0)
     {
-        SerialWrite("[timer] tick=");
-        SerialWriteHex(g_ticks);
-        SerialWrite("\n");
+        core::LogWithValue(core::LogLevel::Debug, "arch/timer", "tick", g_ticks);
     }
 
     // Request a reschedule on every tick. The IRQ dispatcher consults this
@@ -130,11 +131,8 @@ void TimerInit()
     // Convert calibration window (10 ms) to the desired period.
     const u64 ticks_per_kernel_tick = (static_cast<u64>(ticks_per_period) * 1000) / (kCalibrationMs * kTickFrequencyHz);
 
-    SerialWrite("[timer] calibrated: lapic_ticks/10ms=");
-    SerialWriteHex(ticks_per_period);
-    SerialWrite(" ticks_per_kernel_tick=");
-    SerialWriteHex(ticks_per_kernel_tick);
-    SerialWrite("\n");
+    core::LogWithValue(core::LogLevel::Info, "arch/timer", "calibrated lapic_ticks/10ms", ticks_per_period);
+    core::LogWithValue(core::LogLevel::Info, "arch/timer", "ticks_per_kernel_tick", ticks_per_kernel_tick);
 
     // Install handler before unmasking the LVT — otherwise the very first
     // IRQ would land on a null handler and emit an "unhandled vector"
@@ -148,11 +146,7 @@ void TimerInit()
     LapicWrite(kLapicRegLvtTimer, kLvtTimerPeriodicBit | kTimerVector);
     LapicWrite(kLapicRegTimerInit, static_cast<u32>(ticks_per_kernel_tick));
 
-    SerialWrite("[timer] periodic LAPIC timer armed at ");
-    SerialWriteHex(kTickFrequencyHz);
-    SerialWrite(" Hz on vector ");
-    SerialWriteHex(kTimerVector);
-    SerialWrite("\n");
+    core::LogWithValue(core::LogLevel::Info, "arch/timer", "periodic LAPIC timer armed, vector", kTimerVector);
 }
 
 u64 TimerTicks()
