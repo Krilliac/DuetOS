@@ -157,4 +157,16 @@ void ConsoleRedraw()
     }
 }
 
+void ConsoleSetOrigin(u32 x, u32 y)
+{
+    g_origin_x = x;
+    g_origin_y = y;
+}
+
+void ConsoleSetColours(u32 fg, u32 bg)
+{
+    g_fg = fg;
+    g_bg = bg;
+}
+
 } // namespace customos::drivers::video

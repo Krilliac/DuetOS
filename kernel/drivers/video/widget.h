@@ -205,4 +205,26 @@ void DesktopCompose(u32 desktop_rgb, const char* banner);
 void CompositorLock();
 void CompositorUnlock();
 
+// ---------------------------------------------------------------
+// Display mode — desktop (windows + taskbar + cursor) vs TTY
+// (fullscreen console only). Single flag; DesktopCompose branches
+// on it. The two modes share one framebuffer console buffer, so
+// the scrollback is preserved across mode flips.
+// ---------------------------------------------------------------
+
+enum class DisplayMode : u8
+{
+    Desktop = 0,
+    Tty = 1,
+};
+
+/// Read the current display mode.
+DisplayMode GetDisplayMode();
+
+/// Switch modes. The caller is expected to re-anchor / recolour
+/// the console (ConsoleSetOrigin / ConsoleSetColours) to fit the
+/// new mode, then trigger a DesktopCompose so the new layout
+/// appears on screen. This function is pure state — no paint.
+void SetDisplayMode(DisplayMode mode);
+
 } // namespace customos::drivers::video

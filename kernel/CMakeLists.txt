@@ -179,6 +179,18 @@ if(CUSTOMOS_TRAP_DEMO)
     target_compile_definitions(customos-kernel-stage1   PRIVATE CUSTOMOS_TRAP_DEMO=1)
 endif()
 
+
+# Initial boot mode: desktop (windowed shell) vs TTY (fullscreen
+# framebuffer console). Runtime toggle with Ctrl+Alt+T works
+# regardless of this flag; it only affects what the user sees
+# when the kernel first hits kernel_main's compose phase. Useful
+# for an install / rescue build that prefers text-first UX.
+option(CUSTOMOS_BOOT_TTY "Boot straight into TTY mode instead of the windowed desktop" OFF)
+if(CUSTOMOS_BOOT_TTY)
+    target_compile_definitions(customos-kernel          PRIVATE CUSTOMOS_BOOT_TTY=1)
+    target_compile_definitions(customos-kernel-stage1   PRIVATE CUSTOMOS_BOOT_TTY=1)
+endif()
+
 set_target_properties(customos-kernel PROPERTIES
     OUTPUT_NAME "customos-kernel.elf"
     C_STANDARD 17

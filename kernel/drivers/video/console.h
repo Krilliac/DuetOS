@@ -69,4 +69,15 @@ void ConsoleWriteln(const char* s);
 /// from DesktopCompose so the console survives window-drag redraws.
 void ConsoleRedraw();
 
+/// Re-anchor the console to a new framebuffer origin. Useful for
+/// switching between "docked" desktop mode (compact, inside the
+/// window stack) and "fullscreen" TTY mode (top-left of the
+/// surface). Does NOT clear the char buffer — the scrollback
+/// persists across mode flips.
+void ConsoleSetOrigin(u32 x, u32 y);
+
+/// Replace the foreground / background colours. Takes effect on
+/// the next ConsoleRedraw.
+void ConsoleSetColours(u32 fg, u32 bg);
+
 } // namespace customos::drivers::video

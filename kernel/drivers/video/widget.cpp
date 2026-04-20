@@ -164,6 +164,13 @@ constinit customos::sched::Mutex g_compositor_mutex{};
 // window is active.
 constinit WindowHandle g_active_window = kWindowInvalid;
 
+// Boot-mode state. Desktop == full shell; TTY == fullscreen
+// console only. Kept in widget.cpp because DesktopCompose is the
+// one place that needs it, and the toggle path is a single
+// function — a dedicated compositor module would be over-
+// engineering at v0 scale.
+constinit DisplayMode g_display_mode = DisplayMode::Desktop;
+
 // Muted colour used for inactive windows' title bars. Chosen
 // slightly darker + desaturated versus any window's own
 // `colour_title`, so the active/inactive distinction reads at a
@@ -499,20 +506,33 @@ void CompositorUnlock()
 
 void DesktopCompose(u32 desktop_rgb, const char* banner)
 {
-    // Paint stack (bottom to top):
+    if (g_display_mode == DisplayMode::Tty)
+    {
+        // TTY mode: fullscreen console, no windows / cursor /
+        // taskbar. Black background so the green-on-dark console
+        // reads like a Linux VT. The caller is responsible for
+        // re-anchoring the console (ConsoleSetOrigin to (0, 0)
+        // or similar) before switching modes.
+        FramebufferClear(0x00000000);
+        ConsoleRedraw();
+        return;
+    }
+
+    // Desktop paint stack (bottom to top):
     //   1. Desktop fill
-    //   2. Banner string across the top
-    //   3. Framebuffer console area (under windows — windows
-    //      dragged over the console occlude it, which restores
-    //      when the window moves away — standard z-order feel)
-    //   4. Windows in z-order
-    //   5. Widgets (buttons float on top of windows for v0)
+    //   2. Framebuffer console (under windows — windows dragged
+    //      over the console occlude it, which restores on next
+    //      compose — standard z-order feel)
+    //   3. Windows in z-order + their owned widgets
+    //   4. Freestanding widgets (float on top of windows for v0)
+    //   5. Banner (desktop-level label)
+    //   6. Taskbar
+    //   7. Menu (popup, on top of everything)
     // The cursor is not touched here — the mouse reader owns
     // CursorHide / CursorShow around this call.
     FramebufferClear(desktop_rgb);
     ConsoleRedraw();
-    WindowDrawAllOrdered(); // windows + their owned widgets together in z-order
-    // Freestanding widgets float on top of windows.
+    WindowDrawAllOrdered();
     for (u32 i = 0; i < g_widget_count; ++i)
     {
         if (g_widgets[i].owner == kWindowInvalid)
@@ -520,16 +540,22 @@ void DesktopCompose(u32 desktop_rgb, const char* banner)
             PaintButton(g_widgets[i]);
         }
     }
-    // Taskbar is painted next-to-last so it always sits on top
-    // of windows + widgets. The menu (if open) goes last so it
-    // covers the taskbar's START button when anchored there.
-    // Banner renders on the desktop behind all of this.
     if (banner != nullptr)
     {
         FramebufferDrawString(16, 8, banner, 0x00FFFFFF, desktop_rgb);
     }
     TaskbarRedraw();
     MenuRedraw();
+}
+
+DisplayMode GetDisplayMode()
+{
+    return g_display_mode;
+}
+
+void SetDisplayMode(DisplayMode mode)
+{
+    g_display_mode = mode;
 }
 
 u32 WidgetRouteMouse(u32 cursor_x, u32 cursor_y, u8 button_mask)

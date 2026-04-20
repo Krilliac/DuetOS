@@ -254,12 +254,20 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     demo_button.label = "CLICK ME";
     customos::drivers::video::WidgetRegisterButton(demo_button);
 
-    // First paint. Uses the same path subsequent drags take,
-    // so any layout bug shows up at boot rather than on first
-    // mouse interaction.
+    // Initial display mode + first paint. CUSTOMOS_BOOT_TTY
+    // build flag selects text-first boot; runtime Ctrl+Alt+T
+    // toggles regardless. Desktop mode paints the windowed
+    // compose; TTY mode relocates the console to the top-left
+    // with a black background and skips cursor setup.
+#ifdef CUSTOMOS_BOOT_TTY
+    customos::drivers::video::SetDisplayMode(customos::drivers::video::DisplayMode::Tty);
+    customos::drivers::video::ConsoleSetOrigin(16, 16);
+    customos::drivers::video::ConsoleSetColours(0x0080F088, 0x00000000);
+    customos::drivers::video::DesktopCompose(0x00000000, nullptr);
+#else
     customos::drivers::video::DesktopCompose(kDesktopTeal, "WELCOME TO CUSTOMOS   BOOT OK");
-
     customos::drivers::video::CursorInit(kDesktopTeal);
+#endif
 
     SerialWrite("[boot] Seeding ramfs + VFS self-test.\n");
     customos::fs::RamfsInit();
@@ -372,7 +380,41 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                 continue;
             }
             const bool alt = (ev.modifiers & kKeyModAlt) != 0;
+            const bool ctrl = (ev.modifiers & kKeyModCtrl) != 0;
             bool dirty = false;
+
+            // Ctrl+Alt+T flips between desktop and TTY mode. In
+            // TTY mode the console fills the framebuffer with a
+            // Linux-VT feel (black bg, console top-left); in
+            // desktop mode the console docks back into the
+            // windowed layout. The underlying char buffer is
+            // shared, so scrollback survives the flip.
+            if (ctrl && alt && (ev.code == 't' || ev.code == 'T'))
+            {
+                customos::drivers::video::CompositorLock();
+                const bool to_tty =
+                    (customos::drivers::video::GetDisplayMode() == customos::drivers::video::DisplayMode::Desktop);
+                if (to_tty)
+                {
+                    customos::drivers::video::CursorHide();
+                    customos::drivers::video::SetDisplayMode(customos::drivers::video::DisplayMode::Tty);
+                    customos::drivers::video::ConsoleSetOrigin(16, 16);
+                    customos::drivers::video::ConsoleSetColours(0x0080F088, 0x00000000);
+                    customos::drivers::video::DesktopCompose(0x00000000, nullptr);
+                }
+                else
+                {
+                    customos::drivers::video::SetDisplayMode(customos::drivers::video::DisplayMode::Desktop);
+                    customos::drivers::video::ConsoleSetOrigin(16, 400);
+                    customos::drivers::video::ConsoleSetColours(0x0080F088, 0x00181028);
+                    customos::drivers::video::DesktopCompose(kDesktopTealLocal,
+                                                             "WELCOME TO CUSTOMOS   BOOT OK");
+                    customos::drivers::video::CursorShow();
+                }
+                customos::drivers::video::CompositorUnlock();
+                SerialWrite(to_tty ? "[ui] enter TTY mode\n" : "[ui] enter DESKTOP mode\n");
+                continue;
+            }
 
             // Window-manager shortcuts take priority over any
             // text-input path. Alt+Tab cycles active window;
@@ -433,10 +475,19 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
             if (dirty)
             {
                 customos::drivers::video::CompositorLock();
-                customos::drivers::video::CursorHide();
-                customos::drivers::video::DesktopCompose(kDesktopTealLocal,
-                                                         "WELCOME TO CUSTOMOS   BOOT OK");
-                customos::drivers::video::CursorShow();
+                const bool is_tty = (customos::drivers::video::GetDisplayMode() ==
+                                     customos::drivers::video::DisplayMode::Tty);
+                if (is_tty)
+                {
+                    customos::drivers::video::DesktopCompose(0x00000000, nullptr);
+                }
+                else
+                {
+                    customos::drivers::video::CursorHide();
+                    customos::drivers::video::DesktopCompose(kDesktopTealLocal,
+                                                             "WELCOME TO CUSTOMOS   BOOT OK");
+                    customos::drivers::video::CursorShow();
+                }
                 customos::drivers::video::CompositorUnlock();
             }
         }
@@ -444,11 +495,12 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     customos::sched::SchedCreate(kbd_reader, nullptr, "kbd-reader");
 
     // UI ticker: once per second, re-composite so the taskbar's
-    // uptime counter advances even when the user hasn't touched
-    // keyboard or mouse. Uses the compositor mutex so it serialises
-    // cleanly with input threads. No separate "dirty" flag — full
-    // recompose at 1 Hz costs ~one frame's worth of MMIO writes and
-    // keeps the code branch-free.
+    // uptime / wall-clock counter advances even when the user
+    // hasn't touched keyboard or mouse. Uses the compositor
+    // mutex so it serialises cleanly with input threads. Full
+    // recompose at 1 Hz costs ~one frame's worth of MMIO writes.
+    // Branches on display mode so TTY-mode ticks don't re-draw
+    // a hidden desktop.
     auto ui_ticker = [](void*)
     {
         constexpr customos::u32 kDesktopTealLocal = 0x00204868;
@@ -456,9 +508,16 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
         {
             customos::sched::SchedSleepTicks(100);
             customos::drivers::video::CompositorLock();
-            customos::drivers::video::CursorHide();
-            customos::drivers::video::DesktopCompose(kDesktopTealLocal, "WELCOME TO CUSTOMOS   BOOT OK");
-            customos::drivers::video::CursorShow();
+            if (customos::drivers::video::GetDisplayMode() == customos::drivers::video::DisplayMode::Tty)
+            {
+                customos::drivers::video::DesktopCompose(0x00000000, nullptr);
+            }
+            else
+            {
+                customos::drivers::video::CursorHide();
+                customos::drivers::video::DesktopCompose(kDesktopTealLocal, "WELCOME TO CUSTOMOS   BOOT OK");
+                customos::drivers::video::CursorShow();
+            }
             customos::drivers::video::CompositorUnlock();
         }
     };
@@ -488,6 +547,22 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
         for (;;)
         {
             const auto p = customos::drivers::input::Ps2MouseReadPacket();
+
+            // In TTY mode the cursor is hidden and windows aren't
+            // painted — ignore UI-side mouse handling entirely.
+            // Serial logging still happens so packet delivery is
+            // visible end-to-end.
+            if (customos::drivers::video::GetDisplayMode() == customos::drivers::video::DisplayMode::Tty)
+            {
+                SerialWrite("[mouse-tty] dx=");
+                SerialWriteHex(static_cast<customos::u64>(p.dx));
+                SerialWrite(" dy=");
+                SerialWriteHex(static_cast<customos::u64>(p.dy));
+                SerialWrite(" btn=");
+                SerialWriteHex(p.buttons);
+                SerialWrite("\n");
+                continue;
+            }
 
             // Every UI mutation inside this packet lives under
             // the compositor mutex — the kbd reader can be mid-
