@@ -5,8 +5,12 @@
 #include "../arch/x86_64/cpu.h"
 #include "../arch/x86_64/serial.h"
 
-extern "C" char _kernel_start[];
-extern "C" char _kernel_end[];
+// Linker-script symbols. Both are PHYSICAL addresses: the kernel image is
+// loaded contiguously starting at 1 MiB and the bitmap reservation needs
+// physical frame numbers. The higher-half virtual aliases are irrelevant to
+// the allocator — we never dereference these; only take their addresses.
+extern "C" char _kernel_start_phys[];
+extern "C" char _kernel_end_phys[];
 
 namespace customos::mm
 {
@@ -158,12 +162,18 @@ u64 ComputeHighestUsableAddr(uptr info_phys)
 }
 
 // ---------------------------------------------------------------------------
-// Find a "type == available" region large enough for the bitmap, above the
-// kernel image, within the identity-mapped 1 GiB. Returns 0 on failure.
+// Find a "type == available" region large enough for the bitmap, above both
+// the kernel image AND the Multiboot2 info struct, within the identity-
+// mapped 1 GiB. Returns 0 on failure.
+//
+// GRUB places the info struct in low RAM just past the kernel — a naïve
+// "above _kernel_end" search will pick an address that overwrites it.
 // ---------------------------------------------------------------------------
-u64 FindBitmapHome(uptr info_phys, u64 bitmap_bytes)
+u64 FindBitmapHome(uptr info_phys, u64 info_size, u64 bitmap_bytes)
 {
-    const u64 kernel_end_phys = reinterpret_cast<u64>(_kernel_end);
+    const u64 kernel_end_phys = reinterpret_cast<u64>(_kernel_end_phys);
+    const u64 info_end_phys   = info_phys + info_size;
+    u64 floor = kernel_end_phys > info_end_phys ? kernel_end_phys : info_end_phys;
     const u64 identity_limit  = 1ULL * 1024 * 1024 * 1024;  // 1 GiB
 
     u64 chosen = 0;
@@ -176,10 +186,10 @@ u64 FindBitmapHome(uptr info_phys, u64 bitmap_bytes)
         u64 start = entry.base_addr;
         u64 end   = entry.base_addr + entry.length;
 
-        // Must start after the kernel image. If the region overlaps, bump up.
-        if (start < kernel_end_phys)
+        // Must start after the kernel image AND the Multiboot2 info struct.
+        if (start < floor)
         {
-            start = kernel_end_phys;
+            start = floor;
         }
         // Align to page boundary.
         start = (start + kPageSize - 1) & ~(kPageSize - 1);
@@ -241,7 +251,10 @@ void FrameAllocatorInit(uptr multiboot_info_phys)
     g_bitmap_frames = (highest + kPageSize - 1) >> kPageSizeLog2;
     g_bitmap_bytes  = (g_bitmap_frames + 7) >> 3;
 
-    const u64 home = FindBitmapHome(multiboot_info_phys, g_bitmap_bytes);
+    const auto* info      = reinterpret_cast<const MultibootInfoHeader*>(multiboot_info_phys);
+    const u64   info_size = info->total_size;
+
+    const u64 home = FindBitmapHome(multiboot_info_phys, info_size, g_bitmap_bytes);
     if (home == 0)
     {
         PanicFrame("no available region large enough for the bitmap");
@@ -279,18 +292,18 @@ void FrameAllocatorInit(uptr multiboot_info_phys)
     ReserveRange(0, 0x100000);
 
     // Kernel image.
-    ReserveRange(reinterpret_cast<u64>(_kernel_start),
-                 reinterpret_cast<u64>(_kernel_end));
+    ReserveRange(reinterpret_cast<u64>(_kernel_start_phys),
+                 reinterpret_cast<u64>(_kernel_end_phys));
 
     // The bitmap itself.
     ReserveRange(home, home + g_bitmap_bytes);
 
     // Multiboot2 info structure — we still need to read it past Init, and
-    // downstream code may parse more tags. Pin its whole page range.
-    {
-        const auto* info = reinterpret_cast<const MultibootInfoHeader*>(multiboot_info_phys);
-        ReserveRange(multiboot_info_phys, multiboot_info_phys + info->total_size);
-    }
+    // downstream code may parse more tags. Pin its whole page range. Use
+    // info_size captured before any bitmap writes: FindBitmapHome already
+    // placed the bitmap past this range, so it's safe — but keeping the
+    // captured value is defensive.
+    ReserveRange(multiboot_info_phys, multiboot_info_phys + info_size);
 
     // Frame 0 is never handed out — it aliases kNullFrame, used as the
     // "no memory" sentinel. Defense in depth over the 1 MiB reserve above.

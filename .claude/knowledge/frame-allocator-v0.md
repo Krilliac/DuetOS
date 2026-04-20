@@ -36,13 +36,12 @@ fill_pd_loop:
 ### Linker-script symbols
 
 ```ld
-_kernel_start = .;   // immediately before .multiboot2
+_kernel_start_phys = .;   // before .multiboot2 (low physical)
 ...
-. = ALIGN(4K);
-_kernel_end = .;     // immediately after .bss, page-aligned
+_kernel_end_phys   = . - KERNEL_VIRTUAL_BASE;   // after .bss (low physical)
 ```
 
-The allocator consumes these as `extern "C" char _kernel_start[]` / `_kernel_end[]` and reserves the covered frame range. Don't remove them — anything that reasons about "where is the kernel in physical memory" needs them.
+The allocator consumes these as `extern "C" char _kernel_start_phys[]` / `_kernel_end_phys[]` and reserves the covered frame range. Since the higher-half move, they're explicitly **physical** addresses — using the high-VMA aliases would silently fall out of the bitmap range and the kernel's frames would be handed out as free. Don't remove them — anything that reasons about "where is the kernel in physical memory" needs them.
 
 ### Bitmap layout
 
@@ -58,7 +57,9 @@ Naïvely sizing the bitmap to "highest address anywhere in the map" falls over h
 
 ### Bitmap placement
 
-Linear scan of the memory map, first "available" region above `_kernel_end` that is both ≥ bitmap size AND within the 1 GiB identity map. On a typical 512 MiB QEMU run the bitmap lands at `_kernel_end` rounded up to the next page (~`0x110000`), and the first allocatable frame is `0x114000`.
+Linear scan of the memory map, first "available" region above `max(_kernel_end_phys, info_phys + info_size)` that is both ≥ bitmap size AND within the 1 GiB identity map. On a typical 512 MiB QEMU run the bitmap lands just past the Multiboot2 info struct (GRUB parks it around `0x113a80`) and the first allocatable frame is `0x110000` — the gap between kernel end and info struct.
+
+**Gotcha** (caught during the higher-half move): if `FindBitmapHome` only skips the kernel image, it happily lands ON TOP OF the Multiboot2 info struct, which corrupts `info->total_size` and silently breaks later tag iteration. Always include the info struct in the reservation floor.
 
 ### What gets reserved
 
@@ -96,12 +97,12 @@ Explicit scope-limiting decisions for v0:
   base=0x00000000fffc0000 len=0x0000000000040000 type=reserved
   base=0x000000fd00000000 len=0x0000000300000000 type=reserved
   total frames : 0x000000000001ffdf           (131039 × 4 KiB ≈ 512 MiB)
-  free frames  : 0x000000000001fecb           (130763 free after reservations)
+  free frames  : 0x000000000001fec9           (130761 free after reservations)
 [mm] frame allocator self-test
-  alloc A    : 0x0000000000114000
-  alloc B    : 0x0000000000115000
-  alloc C    : 0x0000000000116000
-  realloc    : 0x0000000000114000 (reused A/B/C)
+  alloc A    : 0x0000000000110000
+  alloc B    : 0x0000000000111000
+  alloc C    : 0x0000000000112000
+  realloc    : 0x0000000000110000 (reused A/B/C)
 [mm] frame allocator self-test OK
 ```
 
