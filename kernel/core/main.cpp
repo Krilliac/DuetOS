@@ -294,6 +294,81 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     const customos::drivers::video::WindowHandle taskman_handle =
         customos::drivers::video::WindowRegister(taskman_chrome, "TASK MANAGER");
 
+    // Live log viewer window — renders a compact view of the
+    // klog ring (the same ring `dmesg` prints). Refreshes every
+    // ui-ticker beat, so kernel activity appears without the
+    // user having to flip consoles.
+    customos::drivers::video::WindowChrome logview_chrome{};
+    logview_chrome.x = 560;
+    logview_chrome.y = 310;
+    logview_chrome.w = 420;
+    logview_chrome.h = 180;
+    logview_chrome.colour_border = 0x00101828;
+    logview_chrome.colour_title = 0x00407080;
+    logview_chrome.colour_client = 0x00101020;
+    logview_chrome.colour_close_btn = 0x00E04020;
+    logview_chrome.title_height = 22;
+    const customos::drivers::video::WindowHandle logview_handle =
+        customos::drivers::video::WindowRegister(logview_chrome, "KERNEL LOG");
+
+    customos::drivers::video::WindowSetContentDraw(
+        logview_handle,
+        [](customos::u32 cx, customos::u32 cy, customos::u32 cw, customos::u32 ch, void*)
+        {
+            // Shared state so the klog chunk callback knows
+            // where to render. Compositor mutex is held
+            // around the whole compose so these statics are
+            // race-free.
+            struct Render
+            {
+                customos::u32 cx, cy, col, row, max_col, max_row;
+                bool done;
+            };
+            static Render r;
+            r.cx = cx;
+            r.cy = cy;
+            r.col = 0;
+            r.row = 0;
+            r.max_col = cw / 8;
+            r.max_row = ch / 10;
+            r.done = false;
+            customos::core::DumpLogRingTo(
+                [](const char* s)
+                {
+                    if (r.done || s == nullptr)
+                        return;
+                    while (*s != '\0')
+                    {
+                        const char c = *s++;
+                        if (c == '\n')
+                        {
+                            ++r.row;
+                            r.col = 0;
+                            if (r.row >= r.max_row)
+                            {
+                                r.done = true;
+                                return;
+                            }
+                            continue;
+                        }
+                        if (r.col >= r.max_col)
+                        {
+                            ++r.row;
+                            r.col = 0;
+                            if (r.row >= r.max_row)
+                            {
+                                r.done = true;
+                                return;
+                            }
+                        }
+                        customos::drivers::video::FramebufferDrawChar(
+                            r.cx + r.col * 8, r.cy + r.row * 10, c, 0x00A0C8FF, 0x00101020);
+                        ++r.col;
+                    }
+                });
+        },
+        nullptr);
+
     customos::drivers::video::WindowSetContentDraw(
         taskman_handle,
         [](customos::u32 cx, customos::u32 cy, customos::u32 /*cw*/, customos::u32 /*ch*/, void*)
