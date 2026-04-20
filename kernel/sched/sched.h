@@ -97,6 +97,14 @@ SchedStats SchedStatsRead();
 /// closes the "Dead tasks leak" note in sched-blocking-primitives-v0.
 void SchedStartReaper();
 
+/// Spawn the per-CPU idle task. On the BSP, call once after SchedInit
+/// so the runqueue is never empty when the boot task (or any other
+/// task) blocks. The idle task does `sti; hlt` forever — it consumes
+/// no CPU while halted, but its presence on the runqueue means
+/// Schedule() always has a fallback to pick. On SMP, each AP's
+/// bring-up will call this again with a distinct `name` per CPU.
+void SchedStartIdle(const char* name);
+
 /*
  * Wait queues — event-driven blocking.
  *

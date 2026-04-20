@@ -7,13 +7,17 @@
 ## Description
 
 The kernel runs multiple threads now. `SchedInit` wraps `kernel_main` as
-task 0 (the idle/boot task). `SchedCreate(entry, arg, name)` spawns a
-kernel thread with its own 16 KiB stack. The LAPIC timer IRQ sets a
-`need_resched` flag; the IRQ dispatcher calls `Schedule()` after EOI.
-Round-robin runqueue, single CPU, kernel-only threads. Self-test in
-boot: three worker threads print name + iteration + current tick count,
-each exit after 5 iterations; boot log interleaves A/B/C, proving
-preemption works.
+task 0 (the boot task). `SchedStartIdle("idle-bsp")` is called
+immediately after `SchedInit` to spawn a dedicated idle task that loops
+on `sti; hlt` forever — this guarantees the runqueue is never empty
+when any other task blocks, so `Schedule()` always has a fallback to
+pick. `SchedCreate(entry, arg, name)` spawns a regular kernel thread
+with its own 16 KiB stack. The LAPIC timer IRQ sets a `need_resched`
+flag; the IRQ dispatcher calls `Schedule()` after EOI. Round-robin
+runqueue, single CPU, kernel-only threads. Self-test in boot: three
+worker threads print name + iteration + current tick count, each exit
+after 5 iterations; boot log interleaves A/B/C, proving preemption
+works.
 
 ## Context
 

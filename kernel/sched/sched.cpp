@@ -482,34 +482,46 @@ namespace
             WaitQueueBlock(&g_reaper_wq);
         }
 
-        // Pop one zombie under CLI. KFree happens AFTER we Sti so the
-        // heap path is not running with interrupts disabled (the heap
-        // is not required to be IRQ-safe today, but holding CLI across
-        // KFree locks out the timer for longer than the reap itself).
-        Task* dead = g_zombies;
-        g_zombies = dead->next;
-        dead->next = nullptr;
+        // Detach the entire zombie list under CLI. Zombies are all
+        // off-CPU by construction (SchedExit enqueues only AFTER
+        // Schedule() has switched away from the dying task), so the
+        // order we free them in doesn't matter. Draining the list in
+        // one pass avoids N wake-up round trips when a burst of tasks
+        // exits at once.
+        Task* drained = g_zombies;
+        g_zombies = nullptr;
         arch::Sti();
 
-        // Stack_base can be nullptr for the boot task (task 0); defensive
-        // null-check even though task 0 should never exit. Every other
-        // task got a canary planted at stack_base in SchedCreate —
-        // verify before freeing so stack overflow surfaces as a named
-        // panic here instead of as downstream heap-magic corruption
-        // later.
-        if (dead->stack_base != nullptr)
+        // KFree happens AFTER we Sti so the heap path is not running
+        // with interrupts disabled (the heap is not required to be
+        // IRQ-safe today, but holding CLI across KFree locks out the
+        // timer for longer than the reap itself).
+        while (drained != nullptr)
         {
-            const u64 canary = *reinterpret_cast<const u64*>(dead->stack_base);
-            if (canary != kStackCanary)
-            {
-                core::PanicWithValue("sched/reaper", "stack canary corrupted (task overflow?)", canary);
-            }
-            mm::KFree(dead->stack_base);
-        }
-        mm::KFree(dead);
-        ++g_tasks_reaped;
+            Task* dead = drained;
+            drained = dead->next;
+            dead->next = nullptr;
 
-        core::LogWithValue(core::LogLevel::Info, "sched/reaper", "reaped task id", g_tasks_reaped);
+            // Stack_base can be nullptr for the boot task (task 0);
+            // defensive null-check even though task 0 should never
+            // exit. Every other task got a canary planted at
+            // stack_base in SchedCreate — verify before freeing so
+            // stack overflow surfaces as a named panic here instead
+            // of as downstream heap-magic corruption later.
+            if (dead->stack_base != nullptr)
+            {
+                const u64 canary = *reinterpret_cast<const u64*>(dead->stack_base);
+                if (canary != kStackCanary)
+                {
+                    core::PanicWithValue("sched/reaper", "stack canary corrupted (task overflow?)", canary);
+                }
+                mm::KFree(dead->stack_base);
+            }
+            mm::KFree(dead);
+            ++g_tasks_reaped;
+
+            core::LogWithValue(core::LogLevel::Info, "sched/reaper", "reaped task id", g_tasks_reaped);
+        }
     }
 }
 
@@ -519,6 +531,49 @@ void SchedStartReaper()
 {
     SchedCreate(&ReaperMain, nullptr, "reaper");
     core::Log(core::LogLevel::Info, "sched/reaper", "reaper thread online");
+}
+
+// ---------------------------------------------------------------------------
+// Idle task
+//
+// The round-robin runqueue must never be empty while any task is
+// Sleeping or Blocked — Schedule() panics with "no runnable task
+// available" if the only non-Running task on the system just blocked.
+// The boot task used to paper over this by being a perpetually-
+// Running fallback, but as soon as kernel_main calls SchedSleepTicks
+// (e.g. inside SmpStartAps's INIT→SIPI spacing) the boot task is no
+// longer Running, and if no worker has been created yet we crash.
+//
+// SchedStartIdle spawns a dedicated kernel thread that does `sti;
+// hlt` forever. It's a normal round-robin participant — nothing
+// special — but because it never blocks and never exits, the
+// runqueue always has at least one member to hand out. When it runs,
+// it halts until the next IRQ, so it consumes effectively no CPU.
+//
+// SMP: each AP calls SchedStartIdle("idle-apN") from
+// ApEntryFromTrampoline once its PerCpu / LAPIC timer are armed.
+// That's how we ensure every CPU has a local fallback without
+// having to special-case scheduler state for empty runqueues.
+// ---------------------------------------------------------------------------
+namespace
+{
+
+[[noreturn]] void IdleMain(void*)
+{
+    for (;;)
+    {
+        arch::Sti();
+        asm volatile("hlt");
+    }
+}
+
+} // namespace
+
+void SchedStartIdle(const char* name)
+{
+    KASSERT(name != nullptr, "sched", "SchedStartIdle null name");
+    SchedCreate(&IdleMain, nullptr, name);
+    core::Log(core::LogLevel::Info, "sched/idle", "idle task online");
 }
 
 // ---------------------------------------------------------------------------

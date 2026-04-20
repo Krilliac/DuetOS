@@ -108,6 +108,12 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
 
     SerialWrite("[boot] Bringing up scheduler.\n");
     customos::sched::SchedInit();
+    // Idle task FIRST so the runqueue is never empty — even if the
+    // reaper or any subsequent worker blocks before the boot task
+    // spawns anything else, Schedule() always has a fallback to
+    // pick. Supersedes the "ensure SmpStartAps has a runnable peer"
+    // workaround that used to depend on worker creation order.
+    customos::sched::SchedStartIdle("idle-bsp");
     customos::sched::SchedStartReaper();
 
     SerialWrite("[boot] Bringing up PS/2 keyboard.\n");
@@ -182,13 +188,11 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     customos::sched::SchedCreate(worker, const_cast<char*>("B"), "worker-B");
     customos::sched::SchedCreate(worker, const_cast<char*>("C"), "worker-C");
 
-    // Bring up APs AFTER worker spawn — SmpStartAps calls
-    // SchedSleepTicks(1) between INIT and SIPI, and the BSP needs
-    // SOMETHING runnable (any Ready task) for the scheduler to pick
-    // while it sleeps. Workers are still running through their 15
-    // iterations (~150 ms at 10 ms/sleep) at this point, plus the
-    // kheartbeat thread below — plenty to keep the runqueue non-
-    // empty. Proper fix is an idle task per CPU; deferred.
+    // Bring up APs. SmpStartAps calls SchedSleepTicks(1) between
+    // INIT and SIPI; the dedicated idle task installed at the top
+    // of SchedInit guarantees the runqueue is non-empty, so the
+    // BSP always has something to switch to while it sleeps —
+    // independent of worker-creation order.
     SerialWrite("[boot] Bringing up APs.\n");
     SmpStartAps();
 

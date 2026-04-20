@@ -607,6 +607,54 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 023 — Dedicated per-CPU idle task + batched zombie reaping
+
+- **Scope:** `kernel/sched/sched.{h,cpp}` (new `SchedStartIdle`,
+  internal `IdleMain`, drained-list reaping), `kernel/core/main.cpp`
+  (spawn `idle-bsp` immediately after `SchedInit`)
+- **Decision:** Retire the "boot task is the fallback idle" pattern.
+  `SchedStartIdle(name)` spawns a dedicated kernel thread that loops
+  on `sti; hlt` forever and participates in the regular round-robin
+  runqueue. The BSP calls it right after `SchedInit`, before any
+  other task creation, so `Schedule()` always has at least one
+  `Ready` member to pick even when the boot task (or any driver
+  thread) blocks on a WaitQueue / sleep queue. Separately, the dead-
+  task reaper now detaches the entire zombie list in one CLI section
+  and frees the whole batch with interrupts enabled — avoiding the
+  per-task wake→free→block→wake round trips that the v0 reaper took
+  on a burst of exits.
+- **Why:** The old layout tolerated an empty runqueue only because
+  the boot task stayed `Running` while everything else slept. The
+  moment `kernel_main` called `SchedSleepTicks` (first occurrence:
+  `SmpStartAps`'s INIT→SIPI delay), worker-creation order became
+  load-bearing for whether `Schedule()` would panic with "no
+  runnable task available". A dedicated idle task moves that
+  invariant out of the boot sequence and into the scheduler itself.
+  It also matches what every AP will need on bring-up — each AP
+  calls `SchedStartIdle("idle-apN")` from its own entry, so the
+  primitive lands once and serves both sides. Batched reaping was
+  explicitly flagged as a two-line win in entry #020 ("we do one
+  per wake — 2 lines to batch when it becomes a hot path"); since
+  both changes touch `sched.cpp` they land together rather than
+  separately.
+- **Rules out / defers:** Idle-task priority / CPU-accounting
+  (round-robin puts it in rotation with everything else — fine for
+  v0, where `hlt` releases the CPU to the next IRQ anyway).
+  Per-CPU idle wiring for APs (the hook exists; actually calling
+  it from AP entry lands alongside the broader scheduler SMP
+  refactor). Reaper batching ceiling / rate limiting (v0 drains
+  unboundedly, matching the single-shot behaviour it replaces).
+- **Revisit when:** Priorities / classes land (idle becomes `IDLE`
+  class, never picked if any other task is `Ready`). SMP AP entry
+  wiring (each AP calls `SchedStartIdle` with its CPU index in the
+  name). Profiles show reaper pause time dominating a burst-exit
+  workload (cap the drain per wake and re-arm `g_reaper_wq`).
+- **Related tracks:** Track 2 (SMP — AP entry reuses the idle
+  primitive), Track 4 (Process model — priorities + CPU accounting
+  retire the round-robin rotation).
+
+---
+
 After landing a non-trivial commit, append a new section here with
 the **next sequential number**. Keep entries small. Link the commit
 hash. Always write the "Revisit when" marker — that's the point of
