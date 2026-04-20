@@ -16,6 +16,7 @@
 #include "../drivers/storage/ahci.h"
 #include "../fs/ramfs.h"
 #include "../fs/vfs.h"
+#include "../mm/address_space.h"
 #include "../mm/frame_allocator.h"
 #include "../sync/spinlock.h"
 #include "heartbeat.h"
@@ -131,6 +132,14 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
 
         SerialWrite("[fs/vfs] self-test OK\n");
     }
+
+    // Address-space isolation self-test — direct assertion that a
+    // user page mapped in one AS is invisible in a sibling AS, and
+    // that AddressSpaceActivate flips CR3 correctly. Indirectly
+    // covered by ring3_smoke running two tasks at the same VA, but
+    // this runs BEFORE scheduler/ring3 bring-up so a regression
+    // surfaces at the earliest possible point.
+    customos::mm::AddressSpaceSelfTest();
 
     SerialWrite("[boot] Parsing ACPI tables.\n");
     customos::acpi::AcpiInit(multiboot_info);

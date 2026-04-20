@@ -407,4 +407,70 @@ AddressSpaceStats AddressSpaceStatsRead()
     };
 }
 
+void AddressSpaceSelfTest()
+{
+    // Use a VA inside PDPT[1] of the low half — outside anything
+    // ring3_smoke or any existing mapping touches. If ring3 ever
+    // moves to the same VA range, bump this to stay disjoint.
+    constexpr u64 kTestVa = 0x0000000050000000ULL;
+
+    arch::SerialWrite("[mm/as] isolation self-test\n");
+
+    AddressSpace* a = AddressSpaceCreate();
+    if (a == nullptr)
+    {
+        PanicAs("self-test: AddressSpaceCreate failed for A", 0);
+    }
+    AddressSpace* b = AddressSpaceCreate();
+    if (b == nullptr)
+    {
+        PanicAs("self-test: AddressSpaceCreate failed for B", 0);
+    }
+
+    const PhysAddr frame = AllocateFrame();
+    if (frame == kNullFrame)
+    {
+        PanicAs("self-test: AllocateFrame failed", 0);
+    }
+    AddressSpaceMapUserPage(a, kTestVa, frame, kPagePresent | kPageWritable | kPageUser | kPageNoExecute);
+
+    // Walk a's tables directly — must find the PTE we just
+    // installed, with Present + User bits set.
+    u64* a_pte = WalkToPteIn(a->pml4_virt, kTestVa, /*create=*/false);
+    if (a_pte == nullptr || (*a_pte & kPagePresent) == 0 || (*a_pte & kPageUser) == 0)
+    {
+        PanicAs("self-test: AS-A does not have the page we mapped", kTestVa);
+    }
+
+    // Walk b's tables at the same VA — must return nullptr (no
+    // user-half tables exist for this VA in b's PML4 tree yet).
+    // This is the CORE isolation assertion: two sibling ASes DO
+    // NOT share a mapping installed in one of them.
+    u64* b_pte = WalkToPteIn(b->pml4_virt, kTestVa, /*create=*/false);
+    if (b_pte != nullptr && ((*b_pte) & kPagePresent) != 0)
+    {
+        PanicAs("self-test: AS-B SAW AS-A's private page — ISOLATION BROKEN", kTestVa);
+    }
+
+    // Deliberately NOT flipping CR3 here. kernel_main runs on the
+    // boot stack (.bss.boot — low-half VA, reachable only via
+    // PML4[0] of the boot PML4). New ASes copy ONLY the kernel
+    // half (PML4[256..511]), so switching CR3 to a freshly-made
+    // AS while on the boot stack would triple-fault on the next
+    // stack access. The switch mechanics are instead proven by
+    // ring3_smoke (two tasks in two ASes run to completion on
+    // KMalloc'd kernel stacks, which ARE in the higher-half
+    // direct map and thus reachable after CR3 flip).
+    //
+    // If a worker-thread-hosted flavour of this self-test is ever
+    // wanted, spawn it via sched::SchedCreate after scheduler
+    // bring-up — the worker's kernel stack is in kernel-half, so
+    // the CR3 flip is safe from that context.
+
+    AddressSpaceRelease(a);
+    AddressSpaceRelease(b);
+
+    arch::SerialWrite("[mm/as] isolation self-test OK\n");
+}
+
 } // namespace customos::mm

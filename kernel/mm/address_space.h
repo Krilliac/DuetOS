@@ -150,4 +150,17 @@ struct AddressSpaceStats
 };
 AddressSpaceStats AddressSpaceStatsRead();
 
+/// Boot-time self-test: create two ASes, map a unique user page in
+/// AS-A, verify the page is REACHABLE in AS-A's tables and
+/// UNREACHABLE in AS-B's tables, and verify that
+/// AddressSpaceActivate flips CR3 to the correct PML4 physical
+/// address for each. Panics on any failure. Intended for use
+/// during boot only.
+///
+/// Runs on the kernel's own kernel-half direct-mapped stack — safe
+/// to call with interrupts either on or off, as long as no other
+/// CPU is simultaneously using the same active-AS slot (single-CPU
+/// at boot today).
+void AddressSpaceSelfTest();
+
 } // namespace customos::mm
