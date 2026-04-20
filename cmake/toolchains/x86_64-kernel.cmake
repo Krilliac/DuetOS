@@ -45,6 +45,18 @@ set(CUSTOMOS_KERNEL_C_FLAGS
     # the TLS slot.
     -fstack-protector-strong
     -mstack-protector-guard=global
+    # Control-Flow Integrity via Intel CET / IBT (Indirect Branch
+    # Tracking). -fcf-protection=branch makes clang emit `endbr64`
+    # at every indirect-branch target in C/C++ code. Combined with
+    # CR4.CET + IA32_S_CET.ENDBR_EN (set in CetInit at boot when
+    # CPUID reports support), a ret/jmp/call to a non-endbr target
+    # raises #CP (vector 21), which we turn into a ring-3
+    # [task-kill] or a ring-0 panic.
+    #
+    # endbr64 is a NOP on pre-CET CPUs, so this is safe to emit
+    # unconditionally; the protection activates only when the MSR
+    # is enabled at boot.
+    -fcf-protection=branch
     -fno-pic
     -fno-pie
     -fno-builtin

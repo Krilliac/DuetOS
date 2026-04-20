@@ -27,6 +27,12 @@
 .global ContextSwitch
 .type ContextSwitch, @function
 ContextSwitch:
+    /* ContextSwitch is called via direct `call` from sched.cpp, so
+     * strictly speaking IBT doesn't require an endbr here. But marking
+     * function entries is standard hygiene; emit one so a future
+     * indirect caller (fn-pointer-dispatched scheduler variant) doesn't
+     * need to remember to land on an endbr. Zero-cost on pre-CET CPUs. */
+    endbr64
     /* Save callee-saved GPRs in a fixed order so the "fresh task" stack
      * layout in SchedCreate matches exactly. */
     push    rbx
@@ -74,6 +80,12 @@ ContextSwitch:
 .global SchedTaskTrampoline
 .type SchedTaskTrampoline, @function
 SchedTaskTrampoline:
+    /* Reached via `ret` from ContextSwitch (the stack primer planted
+     * this address as the return target). `ret` is an indirect branch
+     * from IBT's perspective: without an endbr here, the first
+     * scheduler switch INTO a fresh task would raise #CP instead of
+     * running the trampoline. */
+    endbr64
     /* The first time we run a fresh task we arrive here via ret from
      * ContextSwitch, not via iretq — so RFLAGS.IF is whatever the prior
      * caller had. Typical path: Schedule() was invoked from the timer

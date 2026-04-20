@@ -146,6 +146,16 @@ if(CUSTOMOS_PANIC_DEMO)
     target_compile_definitions(customos-kernel-stage1   PRIVATE CUSTOMOS_PANIC_DEMO=1)
 endif()
 
+# Deliberate stack-smash build flag. Enables a small in-kernel_main
+# block that overruns a local array past its stack canary, forcing
+# __stack_chk_fail to fire on return. Intended for verifying the
+# canary infrastructure works end-to-end; OFF for normal builds.
+option(CUSTOMOS_CANARY_DEMO "Insert a deliberate stack smash at end of kernel_main (verifies stack-canary panic path)" OFF)
+if(CUSTOMOS_CANARY_DEMO)
+    target_compile_definitions(customos-kernel          PRIVATE CUSTOMOS_CANARY_DEMO=1)
+    target_compile_definitions(customos-kernel-stage1   PRIVATE CUSTOMOS_CANARY_DEMO=1)
+endif()
+
 # Deliberate-CPU-exception build flag, consumed by kernel_main and
 # triggered by tools/test-trap.sh. Executes `ud2` to take a #UD fault
 # so the trap dispatcher's crash-dump path can be verified end-to-end

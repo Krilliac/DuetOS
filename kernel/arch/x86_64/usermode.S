@@ -33,6 +33,9 @@
 .global EnterUserMode
 .type EnterUserMode, @function
 EnterUserMode:
+    /* Direct-call target from Ring3UserEntry, but emit endbr for
+     * hygiene — cheap NOP on pre-CET CPUs. */
+    endbr64
     /* Disable interrupts from the moment we start setting up segments.
      * A timer tick between "mov ds, ax" and "iretq" would deliver onto
      * the current kernel stack with the data segments half-swapped;

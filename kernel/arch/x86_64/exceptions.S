@@ -23,6 +23,12 @@
     .align 16
     .global isr_\vec
 isr_\vec:
+    /* endbr64 for IBT — every IDT entry points at one of these
+     * labels and the CPU treats IDT dispatch as an indirect branch.
+     * Without an endbr landing pad, each interrupt would raise #CP
+     * instead of running the handler. Emits as a 4-byte NOP on
+     * pre-CET CPUs. */
+    endbr64
     push    0                   /* fake error code      */
     push    \vec                /* vector number        */
     jmp     isr_common
@@ -32,6 +38,7 @@ isr_\vec:
     .align 16
     .global isr_\vec
 isr_\vec:
+    endbr64
     /* CPU already pushed the error code. */
     push    \vec                /* vector number        */
     jmp     isr_common
@@ -127,6 +134,7 @@ ISR_NOERR 128                   /* int 0x80 — user-mode syscall gate */
 .align 16
 .global isr_spurious
 isr_spurious:
+    endbr64
     push    0                   /* fake error code      */
     push    0xFF                /* vector number        */
     jmp     isr_common

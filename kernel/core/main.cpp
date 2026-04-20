@@ -43,6 +43,26 @@
  * interrupts enabled. SMP and userland are separate follow-up commits.
  */
 
+#ifdef CUSTOMOS_CANARY_DEMO
+// Deliberately overrun a stack buffer so the function's epilogue
+// stack-canary check fails on return. Volatile + asm sink prevent
+// the optimiser from eliding the out-of-bounds stores. MUST return
+// normally — the stack-protector epilogue runs on `ret`, and we
+// want the __stack_chk_fail tail-call to happen.
+//
+// No __attribute__((no_stack_protector)) here — the WHOLE POINT is
+// that this function DOES have a canary the compiler can check.
+[[gnu::noinline]] static void CanarySmashDemo()
+{
+    volatile customos::u8 buf[8] = {};
+    for (int i = 0; i < 64; ++i)
+    {
+        buf[i] = static_cast<customos::u8>(i);
+    }
+    asm volatile("" : : "r"(&buf[0]) : "memory");
+}
+#endif
+
 extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multiboot_info)
 {
     using namespace customos::arch;
@@ -280,6 +300,19 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     customos::core::StartHeartbeatThread();
 
     SerialWrite("[boot] All subsystems online. Entering idle loop.\n");
+
+#ifdef CUSTOMOS_CANARY_DEMO
+    // Compile-time-gated deliberate stack smash. Calls a helper that
+    // overruns a local array past its stack canary; on function
+    // return, the compiler-inserted epilogue reads the stashed
+    // canary, finds it clobbered, and tail-calls __stack_chk_fail,
+    // which panics with "stack canary corrupted — overflow detected".
+    //
+    // MUST be a function that actually returns — kernel_main itself
+    // doesn't (it ends in IdleLoop), so the epilogue-check would
+    // never run if we inlined the smash here.
+    CanarySmashDemo();
+#endif
 
 #ifdef CUSTOMOS_PANIC_DEMO
     // Compile-time-gated deliberate panic used by tools/test-panic.sh

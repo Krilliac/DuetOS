@@ -69,20 +69,27 @@ inline void WriteMsr(u32 msr, u64 value)
     asm volatile("wrmsr" : : "c"(msr), "a"(lo), "d"(hi));
 }
 
-// CPUID.7.0 feature bits consulted by the SMEP / SMAP gate below.
+// CPUID.7.0 feature bits consulted by the SMEP / SMAP / CET gates below.
 // Bit positions per Intel SDM Vol. 2A "CPUID — CPU Identification".
 constexpr u32 kCpuidLeaf7Ebx_Smep = 1U << 7;
 constexpr u32 kCpuidLeaf7Ebx_Smap = 1U << 20;
+constexpr u32 kCpuidLeaf7Edx_CetIbt = 1U << 20; // Indirect Branch Tracking
 
-// CR4 enable bits for the two kernel-protection features.
+// CR4 enable bits for the kernel-protection features.
 constexpr u64 kCr4_Smep = 1ULL << 20;
 constexpr u64 kCr4_Smap = 1ULL << 21;
+constexpr u64 kCr4_Cet = 1ULL << 23;
 
-inline void ReadCpuidLeaf7_0(u32& ebx_out)
+// CET MSRs.
+constexpr u32 kIa32_S_Cet = 0x6A2; // supervisor-mode CET config
+constexpr u64 kCetMsr_EndbrEn = 1ULL << 2; // enable IBT (endbr64 enforcement)
+
+inline void ReadCpuidLeaf7_0(u32& ebx_out, u32& edx_out)
 {
     u32 eax = 7, ebx = 0, ecx = 0, edx = 0;
     asm volatile("cpuid" : "+a"(eax), "+c"(ecx), "=b"(ebx), "=d"(edx));
     ebx_out = ebx;
+    edx_out = edx;
 }
 
 inline u64 ReadCr4()
@@ -112,10 +119,12 @@ bool g_smap_enabled = false;
 void EnableKernelProtectionBits()
 {
     u32 leaf7_ebx = 0;
-    ReadCpuidLeaf7_0(leaf7_ebx);
+    u32 leaf7_edx = 0;
+    ReadCpuidLeaf7_0(leaf7_ebx, leaf7_edx);
 
     u64 cr4 = ReadCr4();
     const u64 before = cr4;
+    bool cet_ibt_on = false;
 
     if ((leaf7_ebx & kCpuidLeaf7Ebx_Smep) != 0)
     {
@@ -127,6 +136,26 @@ void EnableKernelProtectionBits()
         g_smap_enabled = true;
     }
 
+    // CET / IBT — the hardware side of Control-Flow Integrity.
+    // Compiler already emitted endbr64 at indirect-branch targets
+    // (via -fcf-protection=branch in the toolchain + hand-written
+    // endbr64 at asm entry points); turning on IA32_S_CET.ENDBR_EN
+    // + CR4.CET makes the CPU raise #CP (vector 21) on any
+    // indirect branch whose target isn't an endbr64. The write
+    // order MUST be: set the MSR first (so the CPU has a valid
+    // CET config), then flip CR4 (which activates the feature) —
+    // reversed order triggers #GP.
+    //
+    // IBT only, for now. Shadow stacks (CET_SS) need per-task
+    // SHSTK allocation + context-switch plumbing; separate slice.
+    if ((leaf7_edx & kCpuidLeaf7Edx_CetIbt) != 0)
+    {
+        const u64 s_cet = ReadMsr(kIa32_S_Cet);
+        WriteMsr(kIa32_S_Cet, s_cet | kCetMsr_EndbrEn);
+        cr4 |= kCr4_Cet;
+        cet_ibt_on = true;
+    }
+
     if (cr4 != before)
     {
         WriteCr4(cr4);
@@ -136,6 +165,8 @@ void EnableKernelProtectionBits()
     SerialWrite((cr4 & kCr4_Smep) ? "on" : "off");
     SerialWrite(" SMAP=");
     SerialWrite((cr4 & kCr4_Smap) ? "on" : "off");
+    SerialWrite(" CET/IBT=");
+    SerialWrite(cet_ibt_on ? "on" : "off");
     SerialWrite("\n");
 }
 
