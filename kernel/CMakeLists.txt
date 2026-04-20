@@ -8,6 +8,7 @@ set(CUSTOMOS_KERNEL_SOURCES
     core/klog.cpp
     core/main.cpp
     core/panic.cpp
+    core/recovery.cpp
     acpi/acpi.cpp
     arch/x86_64/boot.S
     arch/x86_64/exceptions.S
