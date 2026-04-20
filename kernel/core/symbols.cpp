@@ -106,8 +106,13 @@ bool ResolveAddress(u64 addr, SymbolResolution* out)
 
     // A size of 0 means "unknown extent" — only match if the query is
     // exactly the symbol's entry address. Otherwise require offset to
-    // lie inside the reported extent. This keeps us from attributing
-    // linker-inserted alignment padding to the previous function.
+    // lie inside the reported extent, plus a single byte of slack:
+    // `__builtin_return_address(0)` on a call to a [[noreturn]]
+    // function points one byte past the caller's claimed end (the
+    // byte AFTER the trailing `call` instruction). We treat that
+    // post-end slot as still belonging to the caller, which is how
+    // addr2line / llvm-symbolizer report it. Anything farther past
+    // the end would have hit the next entry in the binary search.
     if (cand.size == 0)
     {
         if (offset != 0)
@@ -115,7 +120,7 @@ bool ResolveAddress(u64 addr, SymbolResolution* out)
             return false;
         }
     }
-    else if (offset >= cand.size)
+    else if (offset > cand.size)
     {
         return false;
     }

@@ -101,6 +101,14 @@ changes in a way a parser would care about.
   zero-sized symbols (asm labels, alias symbols) only match their exact start.
   This avoids silently mis-attributing linker-inserted alignment padding to the
   previous function.
+- **Post-end slack**: a `[[noreturn]]` call to `Panic` leaves
+  `__builtin_return_address(0)` pointing one byte past the caller's
+  claimed end (the byte AFTER the trailing `call` instruction). The
+  resolver treats `offset == size` as still-inside, matching how
+  `addr2line` reports it. Without this slack every deliberate-panic
+  RIP resolves to `??` — found the hard way when the first pass of
+  `test-panic.sh` failed on the RIP line while every other address
+  resolved cleanly.
 - Returns `(entry, offset)` — caller formats.
 - Safe in any context: no allocation, no lock, read-only rodata.
 
