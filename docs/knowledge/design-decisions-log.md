@@ -607,6 +607,92 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 080 — Shell introspection: dmesg / stats / mem
+
+- **Scope:** `kernel/core/shell.{h,cpp}` — new commands.
+  `kernel/core/klog.{h,cpp}` — new `DumpLogRingTo(LogTee)`
+  reuses the panic-path formatter with a caller-supplied sink.
+- **Decision:** Three read-only views exposing existing
+  diagnostic APIs:
+    dmesg  → DumpLogRingTo with a ConsoleWrite lambda (klog
+             ring, oldest-first).
+    stats  → every counter from SchedStatsRead.
+    mem    → TotalFrames / FreeFramesCount with KiB-mapped
+             output.
+  Added to the Tab-complete set + help listing. All zero-risk
+  wrappers around state the kernel already tracks.
+- **Why:** Closes the loop on "get logs from the desktop" —
+  the klog ring was only visible via panic dumps until now.
+  `stats` and `mem` answer "what is the kernel doing?" without
+  grepping serial.
+- **Rules out / defers:** `ps`-style per-task enumeration
+  (needs scheduler to expose its task list). `top`-style live
+  refresh. Per-PID memory accounting. Ring-filter by severity.
+- **Revisit when:** First per-task enumeration API lands on
+  sched. Writable FS lets `dmesg > file` land.
+- **Related tracks:** Track 7 (Userland shell).
+
+---
+
+## 079 — Argv tokenizer + ls / cat / tab completion
+
+- **Scope:** `kernel/core/shell.{h,cpp}` — in-place whitespace
+  tokenizer with `kMaxArgs = 8`, Dispatch switches on argv[0],
+  new `ls [path]` / `cat path` / `echo arg...` bound to the
+  ramfs trusted root. `ShellTabComplete` adds Tab-key
+  completion against the command-name set.
+- **Decision:** Tokenize the edit buffer in place by writing
+  NULs over separator bytes — argv pointers point into the
+  original buffer, no allocation. Echo / ls / cat all follow
+  POSIX-ish defaults (echo one-space, ls of file = file, cat
+  newline-terminates). Tab uniquely extends; ambiguous lists
+  candidates and re-prompts with the partial.
+- **Why:** The v0 shell dispatched on raw strings and couldn't
+  carry arguments; that was fine for `help` / `clear` but
+  uninteresting. With argv + filesystem hooks, the shell now
+  genuinely browses the running kernel — `ls /etc`, `cat
+  /etc/version`, `ls /bin` all work out of the box.
+- **Rules out / defers:** Quoted arg handling. Path completion
+  (Tab only completes command names). Globbing. `cd` (no
+  current-directory concept — every shell path is absolute
+  against the trusted root). Redirects.
+- **Revisit when:** First need for quoted args (filenames with
+  spaces). Per-process CWD lands. Writable FS unlocks
+  redirects.
+- **Related tracks:** Track 7 (Userland shell — this is the
+  interactive surface), Track 5 (VFS — first real consumer).
+
+---
+
+## 078 — Kernel cmdline parse + GRUB dual boot entry
+
+- **Scope:** `kernel/mm/multiboot2.h` — `kMultibootTagCmdline
+  = 1`. `kernel/core/main.cpp` — `FindBootCmdline` walker +
+  `CmdlineMatches(key, want)` token-predicate helper.
+  `boot/grub/grub.cfg` — two menu entries, each passing a
+  different cmdline (`boot=desktop` / `boot=tty`).
+- **Decision:** Parse the Multiboot2 cmdline tag at kernel
+  entry, match `boot=tty` / `boot=desktop` against
+  whitespace-delimited tokens. Runtime selection beats the
+  compile-time `CUSTOMOS_BOOT_TTY` flag; no cmdline leaves
+  the flag's default in place. 3-second GRUB timeout, default
+  entry is Desktop.
+- **Why:** Direct answer to "I want to boot straight into
+  terminal OR desktop, and switch between them easily" —
+  now the SAME binary does both and the user chooses at
+  boot. Ctrl+Alt+T keeps flipping at runtime.
+- **Rules out / defers:** Full cmdline parser (quotes,
+  escapes). Per-token handlers (we only recognise `boot=`).
+  Kernel parameter dumping to stderr for diagnostic. UEFI
+  boot (still routed through GRUB's MB2 protocol).
+- **Revisit when:** A second cmdline key is requested
+  (debug=, console=, etc.) — graduate to a proper parser.
+  UEFI-direct boot path lands.
+- **Related tracks:** Track 2 (Platform — boot options),
+  Track 7 (Userland framing).
+
+---
+
 ## 077 — Shell command history + mode info command
 
 - **Scope:** `kernel/core/shell.{h,cpp}` — 8-entry ring-buffer
