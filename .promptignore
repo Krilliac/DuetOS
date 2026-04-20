@@ -1,0 +1,56 @@
+# .promptignore — Directories and files excluded from AI prompt context.
+# Similar to .gitignore syntax. These paths should not be included when
+# loading context for AI assistants, to optimize token usage.
+
+# Third-party vendored code (large, not project code)
+third_party/
+ThirdParty/
+
+# Build output
+build/
+build-*/
+out/
+cmake-build-*/
+
+# Disk images, kernel images, ramdisks (binary artifacts)
+*.img
+*.iso
+*.bin
+*.elf
+*.efi
+*.ko
+
+# IDE-specific files
+.vs/
+.vscode/
+.idea/
+
+# Git internals
+.git/
+
+# OS-generated files
+.DS_Store
+Thumbs.db
+
+# Binary assets (not useful as text context)
+*.o
+*.obj
+*.a
+*.so
+*.dll
+*.dylib
+*.exe
+*.pdb
+*.dmp
+*.core
+*.zip
+*.tar.gz
+*.7z
+
+# Auto-generated docs (when doc generation lands)
+docs/html/
+docs/xml/
+docs/api/
+
+# NOTE: Do NOT exclude .claude/ — it is intentionally visible so Claude
+# can load persistent context at session start.

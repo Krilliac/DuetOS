@@ -1,0 +1,133 @@
+# Persistence Context Database
+
+This directory is Claude's persistent memory for the CustomOS project. It is **not** OS code — it is a structured knowledge store that Claude reads and writes across sessions to accumulate learning: solutions to problems, effective workflows, codebase observations, and project-specific decisions.
+
+## Why This Exists
+
+Claude starts each session without memory of prior sessions. Without a persistence mechanism, the same issues get diagnosed repeatedly, effective workflows are rediscovered from scratch, and non-obvious codebase facts have to be re-inferred. This directory is the remedy.
+
+In an OS project the cost of re-learning is particularly high: low-level facts (page-table bit layouts, PE import resolution quirks, GPU register maps) are not things you want to re-derive every session.
+
+## How Claude Should Use This
+
+### At Session Start (mandatory)
+
+After syncing with the upstream `main` branch (per the "Session start" section in `CLAUDE.md`), Claude must:
+
+1. Read `.claude/index.md` to load the table of contents.
+2. Identify any entries relevant to the current task or domain.
+3. Read those knowledge files before proceeding.
+
+This prevents re-discovering solutions, re-experiencing dead ends, and re-learning project conventions.
+
+### When to Write a New Entry
+
+Write a new entry (or update an existing one) whenever Claude learns something worth preserving across sessions:
+
+| Write when... | Entry type |
+|---------------|-----------|
+| A problem required multiple attempts to solve | **Issue** |
+| A workflow or approach proved consistently effective | **Pattern** |
+| A faster/better way to do something was discovered | **Optimization** |
+| A non-obvious fact about the codebase was discovered | **Observation** |
+| An architectural or stylistic decision was made for this project | **Decision** |
+
+**Do not** write entries for trivial single-step tasks or things already clearly stated in CLAUDE.md.
+
+### When to Update an Existing Entry
+
+- A new method was tried and the status changed
+- A workaround was superseded by a proper fix
+- A codebase observation became outdated (e.g., a deprecated API was removed)
+- Additional edge cases or caveats were discovered
+
+## Entry Format
+
+All entries use this structure. Sections marked _(Issue only)_ are omitted for non-Issue types; _(non-Issue)_ sections replace them.
+
+```markdown
+# [Topic Name]
+
+**Last updated:** YYYY-MM-DD
+**Type:** Issue | Pattern | Optimization | Observation | Decision
+**Status:** Resolved | Active | Ongoing | Superseded
+
+## Description
+[What this entry is about. One paragraph.]
+
+## Context
+[When/where this applies — which tools, workflows, CI jobs, codebase areas]
+
+## Methods Tried  ← Issue only
+1. **[Approach]** → FAILED
+   Reason: [why]
+2. **[Approach]** → WORKED
+
+## Approach  ← Pattern / Optimization only
+[What to do. Actionable steps or commands.]
+
+## Details  ← Observation / Decision only
+[The fact, finding, or decision and its rationale.]
+
+## Solution / Summary
+[For Issues: exact working commands. For others: key takeaway in one paragraph.]
+
+## Notes
+- [Caveats, edge cases, related entries, links to CLAUDE.md sections]
+```
+
+**Status values:**
+- `Resolved` — Issue fixed; no longer a problem
+- `Active` — Pattern/Optimization/Observation currently in use
+- `Ongoing` — Issue or situation that recurs and is being managed
+- `Superseded` — Entry replaced by a better approach (keep for history)
+
+## Cross-References
+
+When an entry directly relates to another, add a `**See also:**` line in the Notes section:
+
+```markdown
+## Notes
+- **See also:** [topic description](other-entry-filename.md)
+```
+
+Use this when one entry's context or solution depends on knowledge from another (e.g., an Optimization that references its related Issue, or an Observation that leads to a Pattern). This allows navigating between related entries without returning to the index.
+
+## Rules
+
+1. **Claude owns these files** — written by Claude sessions; humans may correct factual errors.
+2. **Keep entries factual** — document what actually happened, not hypotheticals.
+3. **Commit changes** — context files are tracked in git so future sessions on any branch benefit.
+4. **Do not exclude from `.promptignore`** — this directory must remain visible to Claude.
+5. **Update the index** — whenever you add or update a knowledge file, update `index.md`.
+6. **Prefer updating over creating** — if an existing entry covers the topic, extend it.
+7. **Cross-reference related entries** — add `See also:` links when entries are meaningfully related.
+
+## Entry Types Reference
+
+| Type | Purpose | Mandatory sections |
+|------|---------|-------------------|
+| **Issue** | Problem + fix; records failed attempts | Description, Context, Methods Tried, Solution, Notes |
+| **Pattern** | Repeatable workflow that works well | Description, Context, Approach, Notes |
+| **Optimization** | Faster/better way to do something | Description, Context, Approach, Notes |
+| **Observation** | Non-obvious codebase/tooling fact | Description, Context, Details, Notes |
+| **Decision** | Project-specific architectural or style choice | Description, Context, Details, Notes |
+
+## Directory Structure
+
+```
+.claude/
+├── README.md                              # This file — system overview
+├── index.md                               # Master index — READ THIS AT SESSION START
+└── knowledge/
+    ├── ai-bloat-pattern.md                # [Observation] AI bloat causes and countermeasures
+    ├── clang-format.md                    # [Pattern] CI-matching clang-format invocation
+    ├── git-rebase-conflicts.md            # [Pattern] Rebase conflict resolution rules
+    ├── github-api-pr-checks.md            # [Pattern] PR check polling and failure diagnosis
+    ├── build-optimizations.md             # [Optimization] Build/CI workflow speedups
+    ├── workflow-patterns.md               # [Pattern] Effective dev workflows
+    ├── win32-subsystem-design.md          # [Decision] Win32/NT subsystem architecture
+    └── hardware-target-matrix.md          # [Decision] Supported CPU/GPU/IO hardware tiers
+```
+
+Entries will accumulate as the project grows. Prune Superseded entries only when you are certain they hold no historical value.

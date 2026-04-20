@@ -1,0 +1,174 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#                            CustomOS .gitignore
+#        Build artifacts, disk/kernel images, compiler debris,
+#        IDE files, and other generated content stay out of git.
+# ─────────────────────────────────────────────────────────────────────────────
+
+##########################
+# CMake / build output   #
+##########################
+
+build/
+build-*/
+out/
+cmake-build-*/
+
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+Makefile
+
+##########################
+# OS / kernel images      #
+##########################
+
+*.img
+*.iso
+*.bin
+*.elf
+*.efi
+*.ko
+*.raw
+*.qcow2
+
+##########################
+# Object / intermediate   #
+##########################
+
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.pdb
+*.gch
+*.pch
+*.d
+*.map
+
+##########################
+# QEMU / debug artifacts  #
+##########################
+
+qemu.log
+*.core
+*.dmp
+*.crash
+
+##########################
+# Logs / scratch          #
+##########################
+
+*.log
+*.tmp
+*.temp
+*.bak
+*.backup*
+*~
+*.swp
+*.swo
+
+##########################
+# IDE / editor            #
+##########################
+
+.vs/
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.code-workspace
+
+.idea/
+*.iml
+*.iws
+
+##########################
+# OS / FS junk            #
+##########################
+
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+##########################
+# Env / credentials       #
+##########################
+
+*.env
+*.env.*.local
+credentials.json
+*.key
+*.pem
+*.pfx
+settings.local.ini
+
+##########################
+# Coverage / reports      #
+##########################
+
+coverage/
+coverage.*
+lcov-report/
+*.gcov
+*.gcno
+*.gcda
+
+##########################
+# Language runtimes       #
+##########################
+
+# Rust
+target/
+Cargo.lock
+
+# Python scratch (in tools/, scripts/)
+__pycache__/
+*.pyc
+
+# Node (in case we ever need it for docs tooling)
+node_modules/
+
+##########################
+# Generated docs          #
+##########################
+
+docs/api/
+docs/html/
+docs/xml/
+docs/output/
+docs/.api_checksums
+docs/.doc_checksums
+
+##########################
+# CTest artifacts         #
+##########################
+
+Testing/
+
+##########################
+# Local dev scripts       #
+##########################
+
+localdev.sh
+localdev.bat
+localdev.ps1
+
+##########################
+# Archives                #
+##########################
+
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.7z
+*.rar
+
+# End of CustomOS .gitignore

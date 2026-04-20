@@ -1,0 +1,49 @@
+# CustomOS editor configuration
+# https://editorconfig.org
+
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.{c,cpp,h,hpp,cc,cxx}]
+indent_style = space
+indent_size = 4
+
+[*.rs]
+indent_style = space
+indent_size = 4
+
+[*.{asm,s,S}]
+indent_style = space
+indent_size = 8
+
+[*.{ld,lds,ld.in}]
+indent_style = space
+indent_size = 4
+
+[*.{json,yml,yaml,xml,cfg,toml}]
+indent_style = space
+indent_size = 2
+
+[*.{cmake,txt}]
+indent_style = space
+indent_size = 4
+
+[CMakeLists.txt]
+indent_style = space
+indent_size = 4
+
+[*.md]
+trim_trailing_whitespace = false
+
+[*.sh]
+end_of_line = lf
+indent_style = space
+indent_size = 4
+
+[Makefile]
+indent_style = tab
