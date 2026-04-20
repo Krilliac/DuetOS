@@ -103,6 +103,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
 
     SerialWrite("[boot] Bringing up scheduler.\n");
     customos::sched::SchedInit();
+    customos::sched::SchedStartReaper();
 
     SerialWrite("[boot] Bringing up PS/2 keyboard.\n");
     customos::drivers::input::Ps2KeyboardInit();

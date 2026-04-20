@@ -87,8 +87,15 @@ struct SchedStats
     u64 tasks_blocked;    // current number of tasks on wait queues
     u64 tasks_created;    // lifetime
     u64 tasks_exited;     // lifetime (Dead count)
+    u64 tasks_reaped;     // lifetime (Task structs + stacks KFree'd by reaper)
 };
 SchedStats SchedStatsRead();
+
+/// Start the dead-task reaper kernel thread. Run once after SchedInit +
+/// the keyboard/driver init pass. The reaper sleeps on a WaitQueue;
+/// SchedExit enqueues dead tasks to a zombie list and wakes it. This
+/// closes the "Dead tasks leak" note in sched-blocking-primitives-v0.
+void SchedStartReaper();
 
 /*
  * Wait queues — event-driven blocking.

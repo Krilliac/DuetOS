@@ -377,6 +377,74 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 020 — Dead-task reaper: first concrete Class-C recovery path
+
+- **Scope:** `kernel/sched/sched.{h,cpp}`,
+  `kernel/core/main.cpp` calls `SchedStartReaper`
+- **Commit:** _(filled at commit)_
+- **Decision:** `SchedExit` now pushes the dying task onto a global
+  `g_zombies` list under CLI and wakes a dedicated `reaper` kernel
+  thread via a `WaitQueue`. The reaper pops zombies one at a time
+  and calls `KFree` on both the stack and the `Task` struct — from
+  its own stack, so the free is always safe. Adds `tasks_reaped` to
+  `SchedStats` and an `[I] sched/reaper : reaped task id val=N` log
+  line per reap.
+- **Why:** `sched-blocking-primitives-v0.md` called out "Dead tasks
+  leak" as a known issue — each `SchedExit` permanently held a
+  `Task` + 16 KiB stack (~16400 bytes). Boot-era usage made it
+  bounded in practice, but the pattern doesn't survive any dynamic
+  task-creation workload. This is **Class C** in the recovery
+  taxonomy: a task fault (or normal exit) triggers cleanup of the
+  per-task resources without taking down the kernel. Full ring-3
+  process-kill grows this cleanup to address-space / fds / caps /
+  ipc; the stack + struct path is already in place and verified.
+- **Rules out / defers:** Batched reaping (we do one per wake — 2
+  lines to batch when it becomes a hot path). Cross-CPU safety
+  (today's single-CPU argument is: once `Schedule` switches away
+  from a `Dead` task, no code can reference it; SMP will need a
+  "not currently `Running` on any CPU" check). Reaping the reaper
+  itself (it never exits, so not a concern).
+- **Revisit when:** SMP bring-up (add peer-CPU running check).
+  Ring 3 (extend `core::OnTaskExited` to do the full process
+  teardown). The reaper's log output gets noisy (gate behind a
+  klog level).
+- **Related tracks:** Track 2 (SMP — cross-CPU safety),
+  Track 4 (Process — full teardown), Track 13 (Security — reaper
+  audit log feeds the event stream).
+
+---
+
+## 019 — Recovery infrastructure shells (Classes B, C, D)
+
+- **Scope:** `kernel/core/recovery.{h,cpp}`
+- **Commit:** `2affa01`
+- **Decision:** Expose the API shapes from the recovery taxonomy
+  as a unified module before any concrete caller uses them, so the
+  first driver / retry path / task-exit hook routes through the
+  same audit stream. Concretely: `DriverFault(name, reason)` +
+  `DriverFaultCount()` for Class B, `RetryWithBackoff<Fn>(label,
+  fn, policy)` + `kRetryFastIo` / `kRetryBackground` defaults for
+  Class D, `OnTaskExited()` as the Class C extension point
+  (scheduler calls it in `SchedExit`).
+- **Why:** Landing the API BEFORE the first real consumer means
+  every subsystem hits the same audit pattern on day one. Without
+  it each driver / retry path / ring-3-kill path would invent its
+  own logging and counter conventions, drifting back into the
+  same "every subsystem reimplements the same primitive" pattern
+  we just cleaned up with `core::Panic`.
+- **Rules out / defers:** Actual driver-restart dispatch (needs
+  the driver model — today `DriverFault` just logs + counts).
+  Retry callers (no I/O path exists today — the helper is tested
+  structurally by the template instantiation path, not exercised
+  at runtime).
+- **Revisit when:** First driver that calls `DriverFault`. First
+  I/O path that needs `RetryWithBackoff`. Ring 3 process-kill
+  grows `OnTaskExited` into full teardown.
+- **Related tracks:** Track 6 (Drivers — Class B),
+  Track 4 (Process — Class C), Track 6 (I/O retry in block/net).
+
+---
+
 ## 018 — Runtime recovery taxonomy: halt / restart / retry / reject
 
 - **Scope:** `docs/knowledge/runtime-recovery-strategy.md`

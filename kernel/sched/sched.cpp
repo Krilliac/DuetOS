@@ -2,7 +2,9 @@
 
 #include "../arch/x86_64/cpu.h"
 #include "../arch/x86_64/serial.h"
+#include "../core/klog.h"
 #include "../core/panic.h"
+#include "../core/recovery.h"
 #include "../mm/kheap.h"
 
 namespace customos::sched
@@ -44,6 +46,13 @@ constinit u64 g_tasks_live = 0;
 constinit u64 g_tasks_sleeping = 0;
 constinit u64 g_tasks_blocked = 0;
 constinit u64 g_tasks_created = 0;
+constinit u64 g_tasks_reaped = 0;
+
+// Zombie list — tasks that called SchedExit and are off-CPU, waiting
+// for the reaper to free their struct + stack. Linked through Task::next
+// (reused from runqueue/waitqueue — a task is only ever on one list).
+constinit Task* g_zombies = nullptr;
+constinit WaitQueue g_reaper_wq{};
 constinit u64 g_tasks_exited = 0;
 constinit bool g_need_resched = false;
 
@@ -281,17 +290,38 @@ void SchedSleepTicks(u64 ticks)
 void SchedExit()
 {
     arch::Cli();
-    g_current->state = TaskState::Dead;
+    Task* self = g_current;
+    self->state = TaskState::Dead;
     ++g_tasks_exited;
     --g_tasks_live;
+
+    // Recovery Class C extension point — ring-3 process kill will grow
+    // this to tear down address space / fds / caps / ipc.
+    core::OnTaskExited();
+
+    // Push onto the zombie list. Important: we do NOT KFree ourselves
+    // here — we're still running on our own stack. The reaper does
+    // the free from ITS stack, after Schedule() puts us off-CPU.
+    //
+    // Single-CPU safety argument: once Schedule() below context-switches
+    // away, this task's g_current assignment is gone and only the
+    // zombie pointer references the struct. The reaper inspecting the
+    // zombie list after this point is safe — no other code can touch
+    // us. SMP bring-up will need to also verify the task isn't
+    // `Running` on a peer CPU before the reaper touches it.
+    self->next = g_zombies;
+    g_zombies = self;
+
+    // Wake the reaper if it's parked.
+    WaitQueueWakeOne(&g_reaper_wq);
+
     // Schedule() will not re-enqueue a Dead task, so this is a one-way
-    // switch. If the runqueue is empty, we'll loop here forever, which
-    // is also correct — SchedExit must never return.
+    // switch. If the runqueue is empty we'll loop here, still on the
+    // dying task's stack — but by then the boot task (idle) should be
+    // runnable; if not, we have bigger problems than the reaper.
     for (;;)
     {
         Schedule();
-        // Shouldn't reach here (Schedule() won't return into a Dead
-        // task), but if it does, re-enter the dead-task loop.
     }
 }
 
@@ -343,7 +373,69 @@ SchedStats SchedStatsRead()
         .tasks_blocked = g_tasks_blocked,
         .tasks_created = g_tasks_created,
         .tasks_exited = g_tasks_exited,
+        .tasks_reaped = g_tasks_reaped,
     };
+}
+
+// ---------------------------------------------------------------------------
+// Dead-task reaper
+//
+// Runs as a dedicated kernel thread. Sleeps on g_reaper_wq; woken by
+// SchedExit whenever a task flips to Dead. Consumes the zombie list
+// one at a time and KFrees each task's stack + Task struct.
+//
+// Why a dedicated thread rather than inline cleanup in SchedExit:
+// the dying task is still running on its own stack. Freeing the
+// stack from within SchedExit would pull the rug out from under the
+// very function doing the freeing. The reaper runs on a DIFFERENT
+// stack, so by the time it sees a zombie, that zombie is off-CPU
+// and its stack is safe to free.
+//
+// v0 is lazy — one reap per wake. Batching when many tasks exit at
+// once is a straightforward follow-up (the zombie list is already
+// a LIFO singly-linked list; we could drain it entirely per wake).
+// ---------------------------------------------------------------------------
+namespace
+{
+
+[[noreturn]] void ReaperMain(void*)
+{
+    for (;;)
+    {
+        arch::Cli();
+        while (g_zombies == nullptr)
+        {
+            WaitQueueBlock(&g_reaper_wq);
+        }
+
+        // Pop one zombie under CLI. KFree happens AFTER we Sti so the
+        // heap path is not running with interrupts disabled (the heap
+        // is not required to be IRQ-safe today, but holding CLI across
+        // KFree locks out the timer for longer than the reap itself).
+        Task* dead = g_zombies;
+        g_zombies = dead->next;
+        dead->next = nullptr;
+        arch::Sti();
+
+        // Stack_base can be nullptr for the boot task (task 0); defensive
+        // null-check even though task 0 should never exit.
+        if (dead->stack_base != nullptr)
+        {
+            mm::KFree(dead->stack_base);
+        }
+        mm::KFree(dead);
+        ++g_tasks_reaped;
+
+        core::LogWithValue(core::LogLevel::Info, "sched/reaper", "reaped task id", g_tasks_reaped);
+    }
+}
+
+} // namespace
+
+void SchedStartReaper()
+{
+    SchedCreate(&ReaperMain, nullptr, "reaper");
+    core::Log(core::LogLevel::Info, "sched/reaper", "reaper thread online");
 }
 
 // ---------------------------------------------------------------------------

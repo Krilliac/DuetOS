@@ -213,11 +213,14 @@ Signals to confirm the machinery works:
 - **No priorities.** Every task is equal. A real-time class can go on
   top of this without rewriting the core — introduce a separate
   priority-0 runqueue that's checked first.
-- **Dead tasks leak.** `SchedExit` marks the task Dead but doesn't
-  free the `Task` struct or its stack — a reaper thread (or the
-  scheduler at idle) will do it once we have a plan for the race with
-  "another CPU about to context-switch INTO this task." For v0,
-  tasks are boot-time fixtures; the leak is bounded.
+- **Dead tasks are now reaped.** `SchedExit` pushes the dying
+  task onto a zombie list and wakes the reaper thread via
+  `g_reaper_wq`. The reaper (`ReaperMain` in `sched.cpp`) runs
+  on its own stack, pops zombies, and `KFree`s the stack + Task
+  struct. Boot log shows `[I] sched/reaper : reaped task id
+  val=0xN` per freed task. SMP will need to also check that the
+  zombie isn't `Running` on a peer CPU before the reaper touches
+  it — see `runtime-recovery-strategy.md` Class C.
 - **No SMP.** Everything assumes single CPU. SMP bring-up will:
   - replace `g_current` with a per-CPU variable
   - add per-CPU runqueues + work-stealing
