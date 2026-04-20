@@ -1,6 +1,7 @@
 #include "widget.h"
 
 #include "../../drivers/input/ps2mouse.h"
+#include "console.h"
 #include "cursor.h"
 #include "framebuffer.h"
 
@@ -278,11 +279,22 @@ void WindowDrawAllOrdered()
 
 void DesktopCompose(u32 desktop_rgb, const char* banner)
 {
+    // Paint stack (bottom to top):
+    //   1. Desktop fill
+    //   2. Banner string across the top
+    //   3. Framebuffer console area (under windows — windows
+    //      dragged over the console occlude it, which restores
+    //      when the window moves away — standard z-order feel)
+    //   4. Windows in z-order
+    //   5. Widgets (buttons float on top of windows for v0)
+    // The cursor is not touched here — the mouse reader owns
+    // CursorHide / CursorShow around this call.
     FramebufferClear(desktop_rgb);
     if (banner != nullptr)
     {
         FramebufferDrawString(16, 8, banner, 0x00FFFFFF, desktop_rgb);
     }
+    ConsoleRedraw();
     WindowDrawAllOrdered();
     for (u32 i = 0; i < g_widget_count; ++i)
     {

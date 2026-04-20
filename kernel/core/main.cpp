@@ -15,6 +15,7 @@
 #include "../drivers/input/ps2mouse.h"
 #include "../drivers/pci/pci.h"
 #include "../drivers/storage/ahci.h"
+#include "../drivers/video/console.h"
 #include "../drivers/video/cursor.h"
 #include "../drivers/video/framebuffer.h"
 #include "../drivers/video/widget.h"
@@ -158,8 +159,8 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // was registered second. Click-drag on either title bar
     // moves that window and brings it to the top.
     customos::drivers::video::WindowChrome win_a_chrome{};
-    win_a_chrome.x = 140;
-    win_a_chrome.y = 90;
+    win_a_chrome.x = 60;
+    win_a_chrome.y = 60;
     win_a_chrome.w = 380;
     win_a_chrome.h = 220;
     win_a_chrome.colour_border = 0x00101828;
@@ -170,10 +171,10 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     customos::drivers::video::WindowRegister(win_a_chrome, "CUSTOMOS GUI v0");
 
     customos::drivers::video::WindowChrome win_b_chrome{};
-    win_b_chrome.x = 360;
-    win_b_chrome.y = 200;
-    win_b_chrome.w = 360;
-    win_b_chrome.h = 180;
+    win_b_chrome.x = 500;
+    win_b_chrome.y = 100;
+    win_b_chrome.w = 380;
+    win_b_chrome.h = 200;
     win_b_chrome.colour_border = 0x00101828;
     win_b_chrome.colour_title = 0x00306838;
     win_b_chrome.colour_client = 0x00E0E0D8;
@@ -181,13 +182,35 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     win_b_chrome.title_height = 22;
     customos::drivers::video::WindowRegister(win_b_chrome, "NOTES   DRAG ME");
 
+    // Framebuffer text console. 80x40 chars of boot log at the
+    // bottom of the desktop, under the windows in z-order. Dragging
+    // a window over it occludes; moving away restores.
+    customos::drivers::video::ConsoleInit(16, 400, 0x0080F088, 0x00181028);
+    customos::drivers::video::ConsoleWriteln("CUSTOMOS BOOT LOG");
+    customos::drivers::video::ConsoleWriteln("=================");
+    customos::drivers::video::ConsoleWriteln("");
+    customos::drivers::video::ConsoleWriteln("LONG-MODE KERNEL        OK");
+    customos::drivers::video::ConsoleWriteln("GDT IDT TSS IST         OK");
+    customos::drivers::video::ConsoleWriteln("PAGING W^X SMEP SMAP    OK");
+    customos::drivers::video::ConsoleWriteln("FRAME ALLOCATOR / HEAP  OK");
+    customos::drivers::video::ConsoleWriteln("ACPI MADT FADT MCFG     OK");
+    customos::drivers::video::ConsoleWriteln("LAPIC IOAPIC HPET       OK");
+    customos::drivers::video::ConsoleWriteln("SCHEDULER + BLOCKING    OK");
+    customos::drivers::video::ConsoleWriteln("PS/2 KEYBOARD           OK");
+    customos::drivers::video::ConsoleWriteln("PS/2 MOUSE              OK");
+    customos::drivers::video::ConsoleWriteln("PCI ENUMERATION         OK");
+    customos::drivers::video::ConsoleWriteln("FRAMEBUFFER + FONT      OK");
+    customos::drivers::video::ConsoleWriteln("WINDOW MANAGER v0       OK");
+    customos::drivers::video::ConsoleWriteln("");
+    customos::drivers::video::ConsoleWriteln("READY.  TRY DRAGGING A WINDOW BY ITS TITLE BAR.");
+
     // Demo clickable button. Label renders inside PaintButton
     // on every redraw — survives click → press-state → release
     // without the v0 "label disappears on press" glitch.
     customos::drivers::video::ButtonWidget demo_button{};
     demo_button.id = 1;
-    demo_button.x = 176;
-    demo_button.y = 170;
+    demo_button.x = 110;
+    demo_button.y = 150;
     demo_button.w = 160;
     demo_button.h = 48;
     demo_button.colour_normal = 0x00C0C0C0;
