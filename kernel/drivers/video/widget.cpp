@@ -315,6 +315,40 @@ bool WindowPointInTitle(WindowHandle h, u32 x, u32 y)
     return x >= c.x && x < c.x + c.w && y >= c.y && y < c.y + tbh;
 }
 
+bool WindowPointInCloseBox(WindowHandle h, u32 x, u32 y)
+{
+    if (!WindowValid(h))
+    {
+        return false;
+    }
+    const auto& c = g_windows[h].chrome;
+    const u32 tbh = (c.title_height == 0) ? 22 : c.title_height;
+    const u32 tbh_eff = (tbh > c.h) ? c.h : tbh;
+    const u32 btn_pad = 4;
+    if (tbh_eff <= 2 * btn_pad + 4 || c.w <= tbh_eff)
+    {
+        return false; // title bar too short for a visible close box
+    }
+    const u32 btn_side = tbh_eff - 2 * btn_pad;
+    const u32 btn_x = c.x + c.w - btn_side - btn_pad;
+    const u32 btn_y = c.y + btn_pad;
+    return x >= btn_x && x < btn_x + btn_side && y >= btn_y && y < btn_y + btn_side;
+}
+
+void WindowClose(WindowHandle h)
+{
+    if (!WindowValid(h))
+    {
+        return;
+    }
+    g_windows[h].alive = false;
+    // Leave entry in z_order — WindowDrawAllOrdered already
+    // skips dead windows via the `alive` check, and compacting
+    // the z-order would require touching every index stored in
+    // any drag state elsewhere. Slot is "leaked" in the sense
+    // that it can't be re-registered; v0 doesn't need to.
+}
+
 void WindowDrawAllOrdered()
 {
     for (u32 i = 0; i < g_window_count; ++i)

@@ -139,6 +139,18 @@ WindowHandle WindowTopmostAt(u32 x, u32 y);
 /// window's top down to `title_height` pixels).
 bool WindowPointInTitle(WindowHandle h, u32 x, u32 y);
 
+/// True iff (x, y) is inside the close-button square in the
+/// top-right corner of `h`'s title bar — same geometry the
+/// WindowDraw chrome paints.
+bool WindowPointInCloseBox(WindowHandle h, u32 x, u32 y);
+
+/// Mark `h` closed: the window stops drawing, stops participating
+/// in hit-testing, and its widgets (buttons with owner=h) also
+/// disappear. The handle stays valid — no re-use — but the slot
+/// is effectively leaked for the rest of boot. A future session
+/// (delete / re-register, handle pools) cleans that up.
+void WindowClose(WindowHandle h);
+
 /// Paint every registered window in z-order (bottom first, top
 /// last) + render the stored title string across each title bar
 /// in the default ink colour. Intended as part of a full-desktop

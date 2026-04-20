@@ -415,35 +415,44 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
             const bool release_edge = !left_down && prev_left;
             prev_left = left_down;
 
-            // Press on a window — ANY part of it — raises that
-            // window to the top of z-order (standard GUI feel:
-            // clicking a background window brings it to front).
-            // If the press also landed on the title bar, start
-            // a drag.
+            // Press on a window resolves in priority order:
+            //   1. Close-box on topmost window → close it.
+            //   2. Title bar → raise + begin drag.
+            //   3. Any other part of the window → raise only.
             if (press_edge && !drag.active)
             {
                 const auto hit = customos::drivers::video::WindowTopmostAt(cx, cy);
                 if (hit != customos::drivers::video::kWindowInvalid)
                 {
-                    customos::u32 wx = 0, wy = 0;
-                    customos::drivers::video::WindowGetBounds(hit, &wx, &wy, nullptr, nullptr);
-                    customos::drivers::video::WindowRaise(hit);
-                    const bool in_title = customos::drivers::video::WindowPointInTitle(hit, cx, cy);
-                    if (in_title)
+                    if (customos::drivers::video::WindowPointInCloseBox(hit, cx, cy))
                     {
-                        drag.active = true;
-                        drag.window = hit;
-                        drag.grab_offset_x = cx - wx;
-                        drag.grab_offset_y = cy - wy;
-                        SerialWrite("[ui] drag begin window=");
+                        customos::drivers::video::WindowClose(hit);
+                        SerialWrite("[ui] close window=");
                         SerialWriteHex(hit);
                         SerialWrite("\n");
                     }
                     else
                     {
-                        SerialWrite("[ui] raise window=");
-                        SerialWriteHex(hit);
-                        SerialWrite("\n");
+                        customos::u32 wx = 0, wy = 0;
+                        customos::drivers::video::WindowGetBounds(hit, &wx, &wy, nullptr, nullptr);
+                        customos::drivers::video::WindowRaise(hit);
+                        const bool in_title = customos::drivers::video::WindowPointInTitle(hit, cx, cy);
+                        if (in_title)
+                        {
+                            drag.active = true;
+                            drag.window = hit;
+                            drag.grab_offset_x = cx - wx;
+                            drag.grab_offset_y = cy - wy;
+                            SerialWrite("[ui] drag begin window=");
+                            SerialWriteHex(hit);
+                            SerialWrite("\n");
+                        }
+                        else
+                        {
+                            SerialWrite("[ui] raise window=");
+                            SerialWriteHex(hit);
+                            SerialWrite("\n");
+                        }
                     }
                     customos::drivers::video::CursorHide();
                     customos::drivers::video::DesktopCompose(kDesktopTealLocal,
