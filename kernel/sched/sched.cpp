@@ -50,6 +50,11 @@ struct Task
     // that is undefined, since the slot is reused on the next
     // wait.
     bool wake_by_timeout;
+    // Scheduling priority. Normal tasks round-robin on the Normal
+    // runqueue; Idle tasks only run when Normal is empty. Set
+    // once at SchedCreate and never changed — priority inheritance
+    // / real-time class would need a mutable field.
+    TaskPriority priority;
 };
 
 namespace
@@ -70,8 +75,15 @@ constexpr u64 kKernelStackBytes = 16 * 1024; // 16 KiB per task — plenty for v
 // with the task's identity attached.
 constexpr u64 kStackCanary = 0xC0DEB0B0CAFED00DULL;
 
-constinit Task* g_run_head = nullptr;   // next to run
-constinit Task* g_run_tail = nullptr;   // append here
+// Two-level priority queue: Normal and Idle. Schedule() drains
+// Normal first; Idle tasks only run when Normal is empty. Each
+// queue is FIFO round-robin within its priority band. Promoting
+// beyond two levels (real-time class, per-priority timeslicing)
+// is deferred until a workload needs it (see decision log #010).
+constinit Task* g_run_head_normal = nullptr;
+constinit Task* g_run_tail_normal = nullptr;
+constinit Task* g_run_head_idle = nullptr;
+constinit Task* g_run_tail_idle = nullptr;
 constinit Task* g_sleep_head = nullptr; // sorted by wake_tick (ascending)
 constinit u64 g_tick_now = 0;
 constinit u64 g_next_task_id = 0;
@@ -139,31 +151,46 @@ inline bool& NeedResched()
 void RunqueuePush(Task* t)
 {
     t->next = nullptr;
-    if (g_run_tail == nullptr)
+    Task*& head = (t->priority == TaskPriority::Idle) ? g_run_head_idle : g_run_head_normal;
+    Task*& tail = (t->priority == TaskPriority::Idle) ? g_run_tail_idle : g_run_tail_normal;
+    if (tail == nullptr)
     {
-        g_run_head = g_run_tail = t;
+        head = tail = t;
     }
     else
     {
-        g_run_tail->next = t;
-        g_run_tail = t;
+        tail->next = t;
+        tail = t;
     }
 }
 
+// Pops the highest-priority-available Ready task. Normal drains
+// before Idle — an Idle task only runs when Normal is empty.
 Task* RunqueuePop()
 {
-    Task* t = g_run_head;
-    if (t == nullptr)
+    Task* t = g_run_head_normal;
+    if (t != nullptr)
     {
-        return nullptr;
+        g_run_head_normal = t->next;
+        if (g_run_head_normal == nullptr)
+        {
+            g_run_tail_normal = nullptr;
+        }
+        t->next = nullptr;
+        return t;
     }
-    g_run_head = t->next;
-    if (g_run_head == nullptr)
+    t = g_run_head_idle;
+    if (t != nullptr)
     {
-        g_run_tail = nullptr;
+        g_run_head_idle = t->next;
+        if (g_run_head_idle == nullptr)
+        {
+            g_run_tail_idle = nullptr;
+        }
+        t->next = nullptr;
+        return t;
     }
-    t->next = nullptr;
-    return t;
+    return nullptr;
 }
 
 void SleepqueueInsert(Task* t)
@@ -280,6 +307,7 @@ void SchedInit()
     boot_task->sleep_next = nullptr;
     boot_task->waiting_on = nullptr;
     boot_task->wake_by_timeout = false;
+    boot_task->priority = TaskPriority::Normal;
 
     Current() = boot_task;
     g_tasks_created = 1;
@@ -288,7 +316,7 @@ void SchedInit()
     SerialWrite("[sched] online; task 0 is \"kboot\"\n");
 }
 
-Task* SchedCreate(TaskEntry entry, void* arg, const char* name)
+Task* SchedCreate(TaskEntry entry, void* arg, const char* name, TaskPriority priority)
 {
     KASSERT(entry != nullptr, "sched", "SchedCreate null entry fn");
     KASSERT(name != nullptr, "sched", "SchedCreate null name");
@@ -321,6 +349,7 @@ Task* SchedCreate(TaskEntry entry, void* arg, const char* name)
     t->sleep_next = nullptr;
     t->waiting_on = nullptr;
     t->wake_by_timeout = false;
+    t->priority = priority;
 
     // Build the initial stack. ContextSwitch pops r15, r14, r13, r12,
     // rbp, rbx and then rets. So from bottom to top of the pre-planted
@@ -707,7 +736,7 @@ namespace
 void SchedStartIdle(const char* name)
 {
     KASSERT(name != nullptr, "sched", "SchedStartIdle null name");
-    SchedCreate(&IdleMain, nullptr, name);
+    SchedCreate(&IdleMain, nullptr, name, TaskPriority::Idle);
     core::Log(core::LogLevel::Info, "sched/idle", "idle task online");
 }
 

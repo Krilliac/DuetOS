@@ -37,6 +37,14 @@ enum class TaskState : u8
     Dead,     // SchedExit called; stack + task struct reclaimable
 };
 
+enum class TaskPriority : u8
+{
+    Normal = 0, // default for everything that does real work
+    Idle = 1,   // picked only when no Normal task is Ready — dedicated
+                // per-CPU idle tasks live here so they don't round-robin
+                // CPU time with actual workloads
+};
+
 struct Task;
 
 /// Bootstrap the scheduler. Wraps the currently-running code (kernel_main)
@@ -45,9 +53,12 @@ void SchedInit();
 
 /// Spawn a new kernel thread. Allocates a Task struct and a dedicated
 /// kernel stack, primes the stack so the first context switch lands on
-/// `entry(arg)`, and enqueues the task. Returns the task (for debugging
-/// / future join support).
-Task* SchedCreate(TaskEntry entry, void* arg, const char* name);
+/// `entry(arg)`, and enqueues the task at the given priority. Returns
+/// the task (for debugging / future join support). Default priority
+/// is Normal — real workloads, drivers, reapers, workers. Pass
+/// TaskPriority::Idle for per-CPU idle tasks (ones that should only
+/// run when no Normal task is Ready).
+Task* SchedCreate(TaskEntry entry, void* arg, const char* name, TaskPriority priority = TaskPriority::Normal);
 
 /// Voluntary yield. Pushes current task to the tail of the runqueue and
 /// switches to the head (if any other task is ready).
