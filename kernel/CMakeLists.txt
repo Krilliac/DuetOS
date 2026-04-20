@@ -57,6 +57,7 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     drivers/video/cursor.cpp
     drivers/video/font8x8.cpp
     drivers/video/framebuffer.cpp
+    drivers/video/taskbar.cpp
     drivers/video/widget.cpp
     fs/ramfs.cpp
     fs/vfs.cpp

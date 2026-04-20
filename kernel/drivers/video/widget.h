@@ -151,6 +151,19 @@ bool WindowPointInCloseBox(WindowHandle h, u32 x, u32 y);
 /// (delete / re-register, handle pools) cleans that up.
 void WindowClose(WindowHandle h);
 
+/// Total windows ever registered — dead + alive. Handles are
+/// `0 .. WindowRegistryCount() - 1`; iterate and filter by
+/// `WindowIsAlive` for the live set.
+u32 WindowRegistryCount();
+
+/// True iff `h` is a valid registered slot AND the window has not
+/// been closed.
+bool WindowIsAlive(WindowHandle h);
+
+/// Return the title pointer stored at registration (not copied).
+/// `nullptr` if the handle is invalid or the window is dead.
+const char* WindowTitle(WindowHandle h);
+
 /// Paint every registered window in z-order (bottom first, top
 /// last) + render the stored title string across each title bar
 /// in the default ink colour. Intended as part of a full-desktop

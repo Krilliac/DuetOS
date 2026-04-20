@@ -18,6 +18,7 @@
 #include "../drivers/video/console.h"
 #include "../drivers/video/cursor.h"
 #include "../drivers/video/framebuffer.h"
+#include "../drivers/video/taskbar.h"
 #include "../drivers/video/widget.h"
 #include "../fs/ramfs.h"
 #include "../fs/vfs.h"
@@ -186,6 +187,15 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // Framebuffer text console. 80x40 chars of boot log at the
     // bottom of the desktop, under the windows in z-order. Dragging
     // a window over it occludes; moving away restores.
+    // Taskbar across the bottom of the framebuffer. Placed at
+    // runtime so a different resolution still anchors correctly.
+    {
+        const auto fb_info = customos::drivers::video::FramebufferGet();
+        constexpr customos::u32 tb_h = 28;
+        const customos::u32 tb_y = (fb_info.height > tb_h) ? fb_info.height - tb_h : 0;
+        customos::drivers::video::TaskbarInit(tb_y, tb_h, 0x00202838, 0x00FFFFFF, 0x00406090);
+    }
+
     customos::drivers::video::ConsoleInit(16, 400, 0x0080F088, 0x00181028);
     customos::drivers::video::ConsoleWriteln("CUSTOMOS BOOT LOG");
     customos::drivers::video::ConsoleWriteln("=================");
@@ -375,6 +385,27 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
         }
     };
     customos::sched::SchedCreate(kbd_reader, nullptr, "kbd-reader");
+
+    // UI ticker: once per second, re-composite so the taskbar's
+    // uptime counter advances even when the user hasn't touched
+    // keyboard or mouse. Uses the compositor mutex so it serialises
+    // cleanly with input threads. No separate "dirty" flag — full
+    // recompose at 1 Hz costs ~one frame's worth of MMIO writes and
+    // keeps the code branch-free.
+    auto ui_ticker = [](void*)
+    {
+        constexpr customos::u32 kDesktopTealLocal = 0x00204868;
+        for (;;)
+        {
+            customos::sched::SchedSleepTicks(100);
+            customos::drivers::video::CompositorLock();
+            customos::drivers::video::CursorHide();
+            customos::drivers::video::DesktopCompose(kDesktopTealLocal, "WELCOME TO CUSTOMOS   BOOT OK");
+            customos::drivers::video::CursorShow();
+            customos::drivers::video::CompositorUnlock();
+        }
+    };
+    customos::sched::SchedCreate(ui_ticker, nullptr, "ui-ticker");
 
     // Mouse reader thread: blocks on Ps2MouseReadPacket, prints one
     // line per decoded packet. Same end-to-end closure the keyboard

@@ -5,6 +5,7 @@
 #include "console.h"
 #include "cursor.h"
 #include "framebuffer.h"
+#include "taskbar.h"
 
 namespace customos::drivers::video
 {
@@ -349,6 +350,25 @@ void WindowClose(WindowHandle h)
     // that it can't be re-registered; v0 doesn't need to.
 }
 
+u32 WindowRegistryCount()
+{
+    return g_window_count;
+}
+
+bool WindowIsAlive(WindowHandle h)
+{
+    return WindowValid(h);
+}
+
+const char* WindowTitle(WindowHandle h)
+{
+    if (!WindowValid(h))
+    {
+        return nullptr;
+    }
+    return g_windows[h].title;
+}
+
 void WindowDrawAllOrdered()
 {
     for (u32 i = 0; i < g_window_count; ++i)
@@ -400,13 +420,9 @@ void DesktopCompose(u32 desktop_rgb, const char* banner)
     // The cursor is not touched here — the mouse reader owns
     // CursorHide / CursorShow around this call.
     FramebufferClear(desktop_rgb);
-    if (banner != nullptr)
-    {
-        FramebufferDrawString(16, 8, banner, 0x00FFFFFF, desktop_rgb);
-    }
     ConsoleRedraw();
     WindowDrawAllOrdered(); // windows + their owned widgets together in z-order
-    // Freestanding widgets float on top of everything.
+    // Freestanding widgets float on top of windows.
     for (u32 i = 0; i < g_widget_count; ++i)
     {
         if (g_widgets[i].owner == kWindowInvalid)
@@ -414,6 +430,14 @@ void DesktopCompose(u32 desktop_rgb, const char* banner)
             PaintButton(g_widgets[i]);
         }
     }
+    // Taskbar is painted last so it always sits on top — matches
+    // every desktop OS. The banner, if supplied, renders on the
+    // desktop only in regions the taskbar doesn't cover.
+    if (banner != nullptr)
+    {
+        FramebufferDrawString(16, 8, banner, 0x00FFFFFF, desktop_rgb);
+    }
+    TaskbarRedraw();
 }
 
 u32 WidgetRouteMouse(u32 cursor_x, u32 cursor_y, u8 button_mask)
