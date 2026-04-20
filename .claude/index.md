@@ -17,12 +17,13 @@ _Read this at every session start (after git sync). Each row links to a detailed
 | Kernel bring-up v0 (Multiboot2 → long mode → `kernel_main`) | [knowledge/kernel-bringup-v0.md](knowledge/kernel-bringup-v0.md) | Observation | Active | 2026-04-20 |
 | ISO build & end-to-end boot verification | [knowledge/iso-build-and-boot.md](knowledge/iso-build-and-boot.md) | Pattern | Active | 2026-04-20 |
 | GDT + IDT v0 — canonical descriptors and trap path | [knowledge/gdt-idt-v0.md](knowledge/gdt-idt-v0.md) | Observation | Active | 2026-04-20 |
+| Physical frame allocator v0 — bitmap over Multiboot2 map | [knowledge/frame-allocator-v0.md](knowledge/frame-allocator-v0.md) | Observation | Active | 2026-04-20 |
 
 ## Quick Reference
 
 ### Current Project State (2026-04-20)
 
-- **Repository**: kernel boots to long mode, installs real GDT + IDT, and handles CPU exceptions 0..31 with a full-register trap dump on COM1. Self-test via `int3` confirms the path. Next bite is the physical frame allocator.
+- **Repository**: kernel boots, brings up GDT + IDT, parses the Multiboot2 memory map, and runs a bitmap-backed physical frame allocator. Identity map extended to 1 GiB. Allocator self-test passes in QEMU. Next bite is the higher-half kernel move or the slab allocator — both are tractable from here.
 - **Default branch**: `main`.
 - **Active dev branch**: `claude/port-sparkengine-components-f38iH` (Claude-driven bootstrapping).
 - **Platforms**: x86_64 first (Multiboot2 → long mode). ARM64 planned, not started. UEFI path planned, not started.

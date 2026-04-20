@@ -11,6 +11,7 @@ ENTRY(_start)
 SECTIONS
 {
     . = 1M;
+    _kernel_start = .;
 
     /* Multiboot2 header must appear within the first 32 KiB of the ELF and
      * must be 8-byte aligned. Keeping it first in its own section guarantees
@@ -45,6 +46,9 @@ SECTIONS
         *(COMMON)
         *(.bss .bss.*)
     }
+
+    . = ALIGN(4K);
+    _kernel_end = .;
 
     /DISCARD/ :
     {

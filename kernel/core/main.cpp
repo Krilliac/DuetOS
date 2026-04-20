@@ -3,23 +3,24 @@
 #include "../arch/x86_64/gdt.h"
 #include "../arch/x86_64/idt.h"
 #include "../arch/x86_64/serial.h"
-#include "../arch/x86_64/traps.h"
+#include "../mm/frame_allocator.h"
 
 /*
  * Kernel entry in C++. Called by kernel/arch/x86_64/boot.S once the CPU is
- * in 64-bit long mode with a valid stack and a minimal identity-mapped
- * page hierarchy.
+ * in 64-bit long mode with a valid stack and the first 1 GiB of physical
+ * memory identity-mapped.
  *
- * Current scope: bring up the canonical GDT + IDT, exercise the trap path
- * with a self-test int3, halt deterministically. Physical frame allocator,
- * higher-half move, and IRQ controller bring-up are all future commits —
- * each large enough to stand on its own rather than being smeared in here.
+ * Current scope: bring up descriptors, parse the Multiboot2 memory map,
+ * hand the frame allocator a working bitmap, run its self-test, halt.
+ * Higher-half move, IRQ controller bring-up, and slab allocator are
+ * separate follow-up commits.
  */
 
 extern "C" void kernel_main(customos::u32 multiboot_magic,
                             customos::uptr multiboot_info)
 {
     using namespace customos::arch;
+    using namespace customos::mm;
 
     SerialInit();
     SerialWrite("[boot] CustomOS kernel reached long mode.\n");
@@ -34,15 +35,20 @@ extern "C" void kernel_main(customos::u32 multiboot_magic,
         SerialWrite("[boot] WARNING: unexpected boot magic.\n");
     }
 
-    (void)multiboot_info;   // Consumed by the memory-map parser in a later commit.
-
     SerialWrite("[boot] Installing kernel GDT.\n");
     GdtInit();
 
     SerialWrite("[boot] Installing IDT (vectors 0..31).\n");
     IdtInit();
 
-    SerialWrite("[boot] Trap path online — raising int3 to self-test.\n");
-    RaiseSelfTestBreakpoint();
-    // RaiseSelfTestBreakpoint never returns (the dispatcher halts).
+    SerialWrite("[boot] Parsing Multiboot2 memory map.\n");
+    FrameAllocatorInit(multiboot_info);
+
+    SerialWrite("  total frames : "); SerialWriteHex(TotalFrames());     SerialWrite("\n");
+    SerialWrite("  free frames  : "); SerialWriteHex(FreeFramesCount()); SerialWrite("\n");
+
+    FrameAllocatorSelfTest();
+
+    SerialWrite("[boot] All subsystems online. Halting CPU.\n");
+    Halt();
 }

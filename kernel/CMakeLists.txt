@@ -12,6 +12,7 @@ set(CUSTOMOS_KERNEL_SOURCES
     arch/x86_64/idt.cpp
     arch/x86_64/serial.cpp
     arch/x86_64/traps.cpp
+    mm/frame_allocator.cpp
 )
 
 add_executable(customos-kernel ${CUSTOMOS_KERNEL_SOURCES})

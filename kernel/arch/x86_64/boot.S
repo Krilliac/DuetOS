@@ -6,7 +6,13 @@
  * identity-mapped page hierarchy, then calls kernel_main().
  *
  * Memory layout set up here (all physical = virtual while we're identity-mapped):
- *   0x0000000000 .. 0x0000200000   First 2 MiB, mapped via one 2 MiB PDE.
+ *   0x0000000000 .. 0x0000040000000   First 1 GiB, mapped via 512 × 2 MiB PDEs.
+ *
+ *   Why 1 GiB: the frame allocator bitmap lives in normal RAM and scales
+ *   with physical memory size. QEMU dev machines routinely have 512 MiB
+ *   to a few GiB. 1 GiB keeps us well under the "need a second PDPT"
+ *   threshold while giving the allocator room to work without further
+ *   paging surgery.
  *
  * This is deliberately the smallest bring-up that can call C++ code. Paging,
  * IDT, GDT, SMP, and the real kernel address-space layout come in follow-up
@@ -81,10 +87,15 @@ _start:
     mov     esi, ebx            /* esi = info struct phys addr */
 
     /*
-     * Build identity-mapped first 2 MiB using a single 2 MiB PDE.
-     *   PML4[0] -> boot_pdpt  (P | RW)
-     *   PDPT[0] -> boot_pd    (P | RW)
-     *   PD[0]   -> 0x00000000 (P | RW | PS) — 2 MiB huge page
+     * Build identity-mapped first 1 GiB using 512 × 2 MiB PDEs.
+     *   PML4[0]    -> boot_pdpt   (P | RW)
+     *   PDPT[0]    -> boot_pd     (P | RW)
+     *   PD[0..511] -> phys 0..1 GiB in 2 MiB steps (P | RW | PS)
+     *
+     * All three tables live in .bss and are zero-initialised, so we only
+     * write the entries we care about — unused high slots stay zero. We
+     * write just the low 32 bits of each PDE: the high 32 stay zero,
+     * which is correct for any physical address under 4 GiB.
      */
     mov     eax, offset boot_pdpt
     or      eax, 0x03           /* present | writable */
@@ -94,9 +105,17 @@ _start:
     or      eax, 0x03
     mov     [boot_pdpt], eax
 
-    mov     eax, 0x00000000
-    or      eax, 0x83           /* present | writable | page-size (2 MiB) */
-    mov     [boot_pd], eax
+    /* NOTE: edi and esi hold the Multiboot2 magic and info pointer that we
+     * pass to kernel_main. Don't touch them here. ebx was stashed into esi
+     * above so it's free to reuse as our PD cursor. */
+    mov     ecx, 512                    /* 512 PDEs = 1 GiB */
+    mov     ebx, offset boot_pd
+    mov     eax, 0x00000083             /* phys 0, P | RW | PS (2 MiB huge) */
+fill_pd_loop:
+    mov     [ebx], eax
+    add     ebx, 8                      /* next PDE (high 32 bits stay zero) */
+    add     eax, 0x00200000             /* advance physical by 2 MiB        */
+    loop    fill_pd_loop
 
     /* Load PML4 into CR3. */
     mov     eax, offset boot_pml4
