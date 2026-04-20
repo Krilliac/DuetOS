@@ -63,6 +63,7 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     drivers/video/taskbar.cpp
     drivers/video/widget.cpp
     fs/ramfs.cpp
+    fs/tmpfs.cpp
     fs/vfs.cpp
     mm/address_space.cpp
     mm/frame_allocator.cpp
