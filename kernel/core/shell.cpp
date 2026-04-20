@@ -177,6 +177,11 @@ void CmdHelp()
     ConsoleWriteln("  CAT PATH     PRINT FILE CONTENTS");
     ConsoleWriteln("  TOUCH PATH   CREATE EMPTY /tmp FILE");
     ConsoleWriteln("  RM PATH      REMOVE /tmp FILE");
+    ConsoleWriteln("  CP SRC DST   COPY FILE INTO /tmp");
+    ConsoleWriteln("  MV SRC DST   MOVE /tmp FILE");
+    ConsoleWriteln("  HEAD [-N] P  FIRST N LINES (DEFAULT 5)");
+    ConsoleWriteln("  TAIL [-N] P  LAST N LINES (DEFAULT 5)");
+    ConsoleWriteln("  WC PATH      LINES / WORDS / BYTES");
     ConsoleWriteln("  ECHO ..  > PATH   PRINT OR REDIRECT TO /tmp (>> TO APPEND)");
     ConsoleWriteln("  DMESG        DUMP KERNEL LOG RING");
     ConsoleWriteln("  STATS        SCHEDULER STATISTICS");
@@ -277,6 +282,279 @@ void CmdStats()
     ConsoleWrite("TASKS REAPED     ");
     WriteU64Dec(s.tasks_reaped);
     ConsoleWriteChar('\n');
+}
+
+// Forward — TmpLeaf lives further down alongside the tmpfs
+// command implementations; these read/copy helpers need it.
+const char* TmpLeaf(const char* path);
+
+// Pull a file's bytes into an output buffer. Source can be
+// either tmpfs (/tmp/<leaf>) or the read-only ramfs. Returns
+// the number of bytes copied (up to `cap`) or u32 max on miss.
+// Never dereferences a nullptr out buffer.
+u32 ReadFileToBuf(const char* path, char* buf, u32 cap)
+{
+    if (path == nullptr || buf == nullptr || cap == 0)
+    {
+        return static_cast<u32>(-1);
+    }
+    if (const char* tmp_leaf = TmpLeaf(path); tmp_leaf != nullptr && *tmp_leaf != '\0')
+    {
+        const char* bytes = nullptr;
+        u32 len = 0;
+        if (!customos::fs::TmpFsRead(tmp_leaf, &bytes, &len))
+        {
+            return static_cast<u32>(-1);
+        }
+        const u32 n = (len > cap) ? cap : len;
+        for (u32 i = 0; i < n; ++i)
+        {
+            buf[i] = bytes[i];
+        }
+        return n;
+    }
+    const auto* root = customos::fs::RamfsTrustedRoot();
+    const auto* node = customos::fs::VfsLookup(root, path, 128);
+    if (node == nullptr || node->type != customos::fs::RamfsNodeType::kFile)
+    {
+        return static_cast<u32>(-1);
+    }
+    const u32 n = (node->file_size > cap) ? cap : static_cast<u32>(node->file_size);
+    for (u32 i = 0; i < n; ++i)
+    {
+        buf[i] = static_cast<char>(node->file_bytes[i]);
+    }
+    return n;
+}
+
+void CmdCp(u32 argc, char** argv)
+{
+    if (argc < 3)
+    {
+        ConsoleWriteln("CP: USAGE: CP SRC DST");
+        return;
+    }
+    const char* dst_leaf = TmpLeaf(argv[2]);
+    if (dst_leaf == nullptr || *dst_leaf == '\0')
+    {
+        ConsoleWriteln("CP: DST MUST BE /tmp/<NAME>");
+        return;
+    }
+    char scratch[customos::fs::kTmpFsContentMax];
+    const u32 n = ReadFileToBuf(argv[1], scratch, sizeof(scratch));
+    if (n == static_cast<u32>(-1))
+    {
+        ConsoleWrite("CP: CANNOT READ: ");
+        ConsoleWriteln(argv[1]);
+        return;
+    }
+    if (!customos::fs::TmpFsWrite(dst_leaf, scratch, n))
+    {
+        ConsoleWrite("CP: WRITE FAILED: ");
+        ConsoleWriteln(argv[2]);
+    }
+}
+
+void CmdMv(u32 argc, char** argv)
+{
+    if (argc < 3)
+    {
+        ConsoleWriteln("MV: USAGE: MV SRC DST");
+        return;
+    }
+    const char* src_leaf = TmpLeaf(argv[1]);
+    const char* dst_leaf = TmpLeaf(argv[2]);
+    if (src_leaf == nullptr || *src_leaf == '\0' || dst_leaf == nullptr || *dst_leaf == '\0')
+    {
+        ConsoleWriteln("MV: SRC AND DST MUST BOTH BE /tmp/<NAME>");
+        return;
+    }
+    const char* bytes = nullptr;
+    u32 len = 0;
+    if (!customos::fs::TmpFsRead(src_leaf, &bytes, &len))
+    {
+        ConsoleWrite("MV: NO SUCH FILE: ");
+        ConsoleWriteln(argv[1]);
+        return;
+    }
+    // Copy through a scratch buffer so we don't alias the
+    // tmpfs slot's own storage during write (a same-slot
+    // rename collapses to the copy-back-into-self case).
+    char scratch[customos::fs::kTmpFsContentMax];
+    const u32 n = (len > sizeof(scratch)) ? sizeof(scratch) : len;
+    for (u32 i = 0; i < n; ++i)
+    {
+        scratch[i] = bytes[i];
+    }
+    if (!customos::fs::TmpFsWrite(dst_leaf, scratch, n))
+    {
+        ConsoleWrite("MV: WRITE FAILED: ");
+        ConsoleWriteln(argv[2]);
+        return;
+    }
+    // Only unlink the source AFTER the write succeeded —
+    // partial failure mustn't lose data.
+    customos::fs::TmpFsUnlink(src_leaf);
+}
+
+void CmdWc(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("WC: MISSING PATH");
+        return;
+    }
+    char scratch[customos::fs::kTmpFsContentMax];
+    const u32 n = ReadFileToBuf(argv[1], scratch, sizeof(scratch));
+    if (n == static_cast<u32>(-1))
+    {
+        ConsoleWrite("WC: NO SUCH FILE: ");
+        ConsoleWriteln(argv[1]);
+        return;
+    }
+    u32 lines = 0;
+    u32 words = 0;
+    bool in_word = false;
+    for (u32 i = 0; i < n; ++i)
+    {
+        const char c = scratch[i];
+        if (c == '\n')
+        {
+            ++lines;
+        }
+        const bool is_space = (c == ' ' || c == '\t' || c == '\n' || c == '\r');
+        if (is_space)
+        {
+            in_word = false;
+        }
+        else if (!in_word)
+        {
+            in_word = true;
+            ++words;
+        }
+    }
+    // Treat an unterminated last line as a line for counting
+    // purposes — matches `wc` on POSIX.
+    if (n > 0 && scratch[n - 1] != '\n')
+    {
+        ++lines;
+    }
+    ConsoleWrite("  ");
+    WriteU64Dec(lines);
+    ConsoleWrite(" LINES  ");
+    WriteU64Dec(words);
+    ConsoleWrite(" WORDS  ");
+    WriteU64Dec(n);
+    ConsoleWrite(" BYTES  ");
+    ConsoleWriteln(argv[1]);
+}
+
+// Parse an optional `-N` line count at argv[1]. Returns the
+// parsed count (or default_n if no -N flag) and writes the
+// path-arg index to `*path_idx_out`.
+u32 ParseLineCount(u32 argc, char** argv, u32 default_n, u32* path_idx_out)
+{
+    if (argc >= 3 && argv[1][0] == '-')
+    {
+        u32 n = 0;
+        for (u32 i = 1; argv[1][i] != '\0'; ++i)
+        {
+            if (argv[1][i] < '0' || argv[1][i] > '9')
+            {
+                n = default_n;
+                break;
+            }
+            n = n * 10 + static_cast<u32>(argv[1][i] - '0');
+        }
+        *path_idx_out = 2;
+        return (n == 0) ? default_n : n;
+    }
+    *path_idx_out = 1;
+    return default_n;
+}
+
+void CmdHead(u32 argc, char** argv)
+{
+    u32 path_idx = 1;
+    const u32 want = ParseLineCount(argc, argv, 5, &path_idx);
+    if (path_idx >= argc)
+    {
+        ConsoleWriteln("HEAD: MISSING PATH");
+        return;
+    }
+    char scratch[customos::fs::kTmpFsContentMax];
+    const u32 n = ReadFileToBuf(argv[path_idx], scratch, sizeof(scratch));
+    if (n == static_cast<u32>(-1))
+    {
+        ConsoleWrite("HEAD: NO SUCH FILE: ");
+        ConsoleWriteln(argv[path_idx]);
+        return;
+    }
+    u32 lines = 0;
+    for (u32 i = 0; i < n && lines < want; ++i)
+    {
+        ConsoleWriteChar(scratch[i]);
+        if (scratch[i] == '\n')
+        {
+            ++lines;
+        }
+    }
+    if (lines < want && n > 0 && scratch[n - 1] != '\n')
+    {
+        ConsoleWriteChar('\n');
+    }
+}
+
+void CmdTail(u32 argc, char** argv)
+{
+    u32 path_idx = 1;
+    const u32 want = ParseLineCount(argc, argv, 5, &path_idx);
+    if (path_idx >= argc)
+    {
+        ConsoleWriteln("TAIL: MISSING PATH");
+        return;
+    }
+    char scratch[customos::fs::kTmpFsContentMax];
+    const u32 n = ReadFileToBuf(argv[path_idx], scratch, sizeof(scratch));
+    if (n == static_cast<u32>(-1))
+    {
+        ConsoleWrite("TAIL: NO SUCH FILE: ");
+        ConsoleWriteln(argv[path_idx]);
+        return;
+    }
+    // Count total newlines, then skip forward to reach
+    // (total_lines - want) before printing. Unterminated last
+    // line counts as a line.
+    u32 total = 0;
+    for (u32 i = 0; i < n; ++i)
+    {
+        if (scratch[i] == '\n')
+        {
+            ++total;
+        }
+    }
+    if (n > 0 && scratch[n - 1] != '\n')
+    {
+        ++total;
+    }
+    const u32 skip = (total > want) ? total - want : 0;
+    u32 seen = 0;
+    u32 start = 0;
+    for (; start < n && seen < skip; ++start)
+    {
+        if (scratch[start] == '\n')
+        {
+            ++seen;
+        }
+    }
+    for (u32 i = start; i < n; ++i)
+    {
+        ConsoleWriteChar(scratch[i]);
+    }
+    if (n > 0 && scratch[n - 1] != '\n')
+    {
+        ConsoleWriteChar('\n');
+    }
 }
 
 void CmdHistory()
@@ -838,6 +1116,31 @@ void Dispatch(char* line)
         CmdHistory();
         return;
     }
+    if (StrEq(cmd, "cp"))
+    {
+        CmdCp(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "mv"))
+    {
+        CmdMv(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "wc"))
+    {
+        CmdWc(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "head"))
+    {
+        CmdHead(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "tail"))
+    {
+        CmdTail(argc, argv);
+        return;
+    }
     ConsoleWrite("COMMAND NOT FOUND: ");
     ConsoleWriteln(cmd);
     ConsoleWriteln("TYPE HELP FOR A LIST OF COMMANDS.");
@@ -969,9 +1272,9 @@ bool NamePrefixMatch(const char* name, const char* prefix, u32 plen)
 void CompleteCommandName()
 {
     static const char* const kCommandSet[] = {
-        "help",  "about", "version", "clear",   "uptime", "date",  "windows", "mode",
-        "ls",    "cat",   "touch",   "rm",      "echo",   "dmesg", "stats",   "mem",
-        "history",
+        "help",    "about", "version", "clear", "uptime", "date", "windows", "mode",
+        "ls",      "cat",   "touch",   "rm",    "echo",   "cp",   "mv",      "wc",
+        "head",    "tail",  "dmesg",   "stats", "mem",    "history",
     };
     constexpr u32 kCmdCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -1199,7 +1502,10 @@ void ShellTabComplete()
     const char saved = g_input[first_ws];
     g_input[first_ws] = '\0';
     const bool path_cmd = StrEq(g_input, "ls") || StrEq(g_input, "cat") ||
-                          StrEq(g_input, "touch") || StrEq(g_input, "rm");
+                          StrEq(g_input, "touch") || StrEq(g_input, "rm") ||
+                          StrEq(g_input, "cp") || StrEq(g_input, "mv") ||
+                          StrEq(g_input, "wc") || StrEq(g_input, "head") ||
+                          StrEq(g_input, "tail");
     g_input[first_ws] = saved;
 
     if (path_cmd)
