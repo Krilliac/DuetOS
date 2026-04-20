@@ -147,6 +147,82 @@ constexpr u8 kPciCapMsix = 0x11;
 u8 PciFindCapability(DeviceAddress addr, u8 cap_id);
 
 // -----------------------------------------------------------------
+// MSI-X routing helpers.
+//
+// MSI-X is the PCIe interrupt path every modern high-throughput
+// device prefers (xHCI, NVMe, modern NICs). Each vector has its own
+// target address + data, written into a table whose location is
+// described by the MSI-X capability structure. This module exposes
+// the plumbing; drivers own the table-BAR mapping.
+//
+// Typical driver sequence:
+//     pci::MsixInfo info;
+//     if (!pci::PciMsixFind(dev.addr, &info)) goto legacy_intx;
+//     pci::Bar table_bar = pci::PciReadBar(dev.addr, info.table_bir);
+//     void* table = mm::MapMmio(table_bar.address + info.table_offset,
+//                                info.table_size * sizeof(pci::MsixEntry));
+//     pci::PciMsixSetEntry(table, 0, bsp_apic_id, kVectorMyDevice);
+//     pci::PciMsixEnable(dev.addr);
+//
+// For x86_64, the message-address format is fixed: 0xFEE0_0000 |
+// (apic_id << 12), physical destination, redirection hint = 0. The
+// message-data field carries {vector, delivery_mode, trigger, level};
+// we always emit fixed + edge + assert. Drivers that need exotic
+// delivery modes can reach in with PciMsixSetEntryRaw.
+// -----------------------------------------------------------------
+
+struct MsixInfo
+{
+    u8 cap_offset; // config-space offset of the MSI-X capability
+    u8 table_bir;  // 0..5 — which BAR contains the table
+    u8 pba_bir;    // 0..5 — which BAR contains the Pending Bit Array
+    u8 _pad;
+    u32 table_offset; // byte offset into table_bir
+    u32 pba_offset;   // byte offset into pba_bir
+    u16 table_size;   // number of entries in the table (1..2048)
+    u16 _pad2;
+};
+
+/// MSI-X table entry (each is 16 bytes, aligned to 16).
+struct MsixEntry
+{
+    u32 addr_lo;
+    u32 addr_hi;
+    u32 data;
+    u32 vector_control; // bit 0 = mask
+};
+
+static_assert(sizeof(MsixEntry) == 16, "MSI-X entry must be 16 bytes");
+
+/// Populate `info` with the device's MSI-X parameters. Returns false
+/// if the device doesn't support MSI-X. Safe to call on any device.
+bool PciMsixFind(DeviceAddress addr, MsixInfo* info);
+
+/// Program a single table entry to route IRQ (vector) to lapic_id
+/// using physical-destination + fixed-delivery + edge-triggered +
+/// assert. `table_base` is the virtual pointer returned by the
+/// caller's MapMmio of the table region.
+void PciMsixSetEntry(volatile void* table_base, u16 index, u8 lapic_id, u8 vector);
+
+/// Mask (or unmask) a single table entry's vector_control bit 0.
+/// Safer than PciMsixEnable/Disable for per-vector gating once the
+/// overall function is already enabled.
+void PciMsixMaskEntry(volatile void* table_base, u16 index);
+void PciMsixUnmaskEntry(volatile void* table_base, u16 index);
+
+/// Flip the Enable bit in the MSI-X message-control register, taking
+/// the device from "legacy INTx" to "fire MSI-X interrupts per table
+/// entries." Callers must have programmed at least one table entry
+/// first — enabling with all vectors still masked is fine.
+void PciMsixEnable(DeviceAddress addr);
+
+/// Flip the Function-Mask bit instead of Enable — masks every MSI-X
+/// vector at once while leaving per-entry control bits as the driver
+/// programmed them. Useful for quiescing a device at reset time.
+void PciMsixFunctionMask(DeviceAddress addr);
+void PciMsixFunctionUnmask(DeviceAddress addr);
+
+// -----------------------------------------------------------------
 // Class-code string for diagnostic logs. Returns a stable pointer to
 // a short label ("mass storage", "network", "display", "bridge", ...)
 // or "unknown" for codes we haven't named yet.

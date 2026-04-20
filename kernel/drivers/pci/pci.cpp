@@ -139,6 +139,127 @@ Bar PciReadBar(DeviceAddress addr, u8 index)
     return bar;
 }
 
+bool PciMsixFind(DeviceAddress addr, MsixInfo* info)
+{
+    KASSERT(info != nullptr, "drivers/pci", "PciMsixFind null info");
+
+    const u8 cap = PciFindCapability(addr, kPciCapMsix);
+    if (cap == 0)
+    {
+        return false;
+    }
+
+    // MSI-X capability layout:
+    //   cap + 0  : {id (u8), next (u8)}
+    //   cap + 2  : message_control (u16)
+    //   cap + 4  : table offset/BIR (u32)
+    //   cap + 8  : pba   offset/BIR (u32)
+    //
+    // Table size lives in message_control bits 10..0 minus 1 (so read
+    // and add 1). BIR lives in bits 2..0 of table_offset/BIR; the offset
+    // is bits 31..3 shifted (the low 3 bits are always zero because the
+    // table is 8-byte aligned within the BAR).
+    const u16 msg_ctrl = PciConfigRead16(addr, static_cast<u8>(cap + 2));
+    const u32 table_reg = PciConfigRead32(addr, static_cast<u8>(cap + 4));
+    const u32 pba_reg = PciConfigRead32(addr, static_cast<u8>(cap + 8));
+
+    info->cap_offset = cap;
+    info->table_size = static_cast<u16>((msg_ctrl & 0x7FF) + 1);
+    info->table_bir = static_cast<u8>(table_reg & 0x7);
+    info->table_offset = table_reg & ~0x7u;
+    info->pba_bir = static_cast<u8>(pba_reg & 0x7);
+    info->pba_offset = pba_reg & ~0x7u;
+    info->_pad = 0;
+    info->_pad2 = 0;
+    return true;
+}
+
+void PciMsixSetEntry(volatile void* table_base, u16 index, u8 lapic_id, u8 vector)
+{
+    KASSERT(table_base != nullptr, "drivers/pci", "PciMsixSetEntry null table");
+
+    auto* table = static_cast<volatile MsixEntry*>(table_base);
+    volatile MsixEntry& entry = table[index];
+
+    // Message address: 0xFEE_xxxxx encodes "deliver to LAPIC"; high 20 bits
+    // fixed, bits 19..12 carry the destination APIC ID when redirection
+    // hint (RH) and destination mode (DM) are both zero (physical
+    // destination to the specified APIC ID). Bits 11..4 are reserved/0.
+    const u32 addr_lo = 0xFEE00000u | (static_cast<u32>(lapic_id) << 12);
+
+    // Message data: low 8 bits = vector, bits 10..8 = delivery mode
+    // (000 = fixed), bit 14 = level (1 = assert), bit 15 = trigger
+    // (0 = edge). For v0 we always emit {fixed, edge, assert}.
+    const u32 data = static_cast<u32>(vector);
+
+    // Mask the entry before rewriting address/data so no stale
+    // half-update ever delivers. Writing vector_control with bit 0=1
+    // sets mask.
+    entry.vector_control = 1;
+    entry.addr_lo = addr_lo;
+    entry.addr_hi = 0;
+    entry.data = data;
+    // Leave the entry masked; caller unmasks when they're ready. This
+    // matches the mask-at-init pattern already in use for IOAPIC.
+}
+
+void PciMsixMaskEntry(volatile void* table_base, u16 index)
+{
+    auto* table = static_cast<volatile MsixEntry*>(table_base);
+    table[index].vector_control = 1;
+}
+
+void PciMsixUnmaskEntry(volatile void* table_base, u16 index)
+{
+    auto* table = static_cast<volatile MsixEntry*>(table_base);
+    table[index].vector_control = 0;
+}
+
+void PciMsixEnable(DeviceAddress addr)
+{
+    const u8 cap = PciFindCapability(addr, kPciCapMsix);
+    if (cap == 0)
+    {
+        core::Panic("drivers/pci", "PciMsixEnable on device without MSI-X");
+    }
+    // Read-modify-write message_control: set bit 15 = Enable, clear
+    // bit 14 = Function Mask (leave per-entry mask bits as-is).
+    u16 msg_ctrl = PciConfigRead16(addr, static_cast<u8>(cap + 2));
+    msg_ctrl |= (1U << 15);
+    msg_ctrl &= ~(1U << 14);
+    // Write via PciConfigWrite32 on the 32-bit word; the other 16 bits
+    // contain capability id + next_pointer which are read-only.
+    const u32 word = PciConfigRead32(addr, static_cast<u8>(cap + 0));
+    const u32 updated = (word & 0x0000FFFFu) | (static_cast<u32>(msg_ctrl) << 16);
+    PciConfigWrite32(addr, static_cast<u8>(cap + 0), updated);
+}
+
+void PciMsixFunctionMask(DeviceAddress addr)
+{
+    const u8 cap = PciFindCapability(addr, kPciCapMsix);
+    if (cap == 0)
+    {
+        return;
+    }
+    const u32 word = PciConfigRead32(addr, static_cast<u8>(cap + 0));
+    u16 msg_ctrl = static_cast<u16>(word >> 16);
+    msg_ctrl |= (1U << 14);
+    PciConfigWrite32(addr, static_cast<u8>(cap + 0), (word & 0x0000FFFFu) | (static_cast<u32>(msg_ctrl) << 16));
+}
+
+void PciMsixFunctionUnmask(DeviceAddress addr)
+{
+    const u8 cap = PciFindCapability(addr, kPciCapMsix);
+    if (cap == 0)
+    {
+        return;
+    }
+    const u32 word = PciConfigRead32(addr, static_cast<u8>(cap + 0));
+    u16 msg_ctrl = static_cast<u16>(word >> 16);
+    msg_ctrl &= ~(1U << 14);
+    PciConfigWrite32(addr, static_cast<u8>(cap + 0), (word & 0x0000FFFFu) | (static_cast<u32>(msg_ctrl) << 16));
+}
+
 u8 PciFindCapability(DeviceAddress addr, u8 cap_id)
 {
     // Status register bit 4 at offset 0x06 == "Capabilities List present".
