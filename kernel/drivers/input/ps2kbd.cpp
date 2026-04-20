@@ -220,6 +220,25 @@ void Drain()
     }
 }
 
+// Send a byte to the keyboard device (port 1 data line, accessed
+// through port 0x60) and wait for the 0xFA ACK response. Returns
+// false on timeout or any other byte — callers log + continue
+// rather than panic, since USB-legacy emulated keyboards can
+// silently drop some device commands.
+bool KbdSendAndAck(u8 byte)
+{
+    WaitInputClear();
+    Outb(kDataPort, byte);
+    for (u64 i = 0; i < kPollSpinLimit; ++i)
+    {
+        if ((Inb(kStatusPort) & kStatusOutputFull) != 0)
+        {
+            return Inb(kDataPort) == 0xFA;
+        }
+    }
+    return false;
+}
+
 void ControllerInit()
 {
     // Step 1: disable both channels so no IRQ fires mid-configuration.
@@ -260,19 +279,77 @@ void ControllerInit()
         core::LogWithValue(core::LogLevel::Warn, "drivers/ps2kbd", "port-1 self-test failed", port1_test);
     }
 
-    // Step 6: enable port 1, then turn on its IRQ + ensure the clock
-    // line is active. The keyboard will start sending scan codes on
-    // any keypress from this point forward.
+    // Step 6: enable port 1 (controller-side). Still CLI / IRQs
+    // disabled in the config byte — device commands are polled.
     SendCtrlCmd(kCmdEnablePort1);
+
+    // Step 7: device-level reset. 0xFF on port 1 data asks the
+    // keyboard to reset and run its own self-test; response is
+    // 0xFA (ACK) immediately followed by 0xAA (self-test pass)
+    // after a short delay. Many USB-legacy emulated keyboards
+    // don't support this — log and continue on any failure so
+    // the port stays usable.
+    if (!KbdSendAndAck(0xFF))
+    {
+        core::Log(core::LogLevel::Warn, "drivers/ps2kbd", "device RESET (0xFF) not ACKed — continuing");
+    }
+    else
+    {
+        // Wait for the post-reset self-test byte. ~500 ms on real
+        // hardware, instant in QEMU. Use an extended spin cap and
+        // log anything that isn't 0xAA so firmware bugs show up.
+        for (u64 i = 0; i < kPollSpinLimit * 10; ++i)
+        {
+            if ((Inb(kStatusPort) & kStatusOutputFull) != 0)
+            {
+                const u8 st = Inb(kDataPort);
+                if (st != 0xAA)
+                {
+                    core::LogWithValue(core::LogLevel::Warn, "drivers/ps2kbd", "device self-test unexpected response",
+                                       st);
+                }
+                break;
+            }
+        }
+    }
+
+    // Step 8: force scan code set 1 explicitly. Firmware default is
+    // usually "set 2 + translation on" (indistinguishable on 0x60
+    // from "set 1 + translation off"). Making it explicit survives
+    // firmware that leaves the device on set 2 with translation
+    // disabled, which would otherwise wreck our keymap.
+    // Sequence: 0xF0 (set scan code set command) → 0xFA, then
+    // 0x01 (set 1) → 0xFA.
+    if (!KbdSendAndAck(0xF0))
+    {
+        core::Log(core::LogLevel::Warn, "drivers/ps2kbd", "scan-code-set-select (0xF0) not ACKed");
+    }
+    else if (!KbdSendAndAck(0x01))
+    {
+        core::Log(core::LogLevel::Warn, "drivers/ps2kbd", "scan code set 1 select not ACKed");
+    }
+
+    // Step 9: enable scanning — reset above disables it on most
+    // devices. 0xF4 on port 1 data tells the keyboard to start
+    // producing scan codes again. Without this, keypresses land
+    // in the ether.
+    if (!KbdSendAndAck(0xF4))
+    {
+        core::Log(core::LogLevel::Warn, "drivers/ps2kbd", "enable-scanning (0xF4) not ACKed");
+    }
+
+    // Step 10: flip on port 1 IRQ + ensure clock is active in the
+    // config byte. From here, IOAPIC route + unmask (in
+    // Ps2KeyboardInit) delivers scan codes to our IRQ handler.
     config |= kConfigPort1IrqEnable;
     config = static_cast<u8>(config & ~kConfigPort1ClockDisable);
     WriteConfigByte(config);
 
-    // Step 7: final drain — enabling IRQs can latch a pending byte
+    // Step 11: final drain — enabling IRQs can latch a pending byte
     // on some firmware; clear it before we unmask at the IOAPIC.
     Drain();
 
-    core::Log(core::LogLevel::Info, "drivers/ps2kbd", "8042 controller initialised");
+    core::Log(core::LogLevel::Info, "drivers/ps2kbd", "8042 controller + device initialised");
 }
 
 void IrqHandler()
