@@ -445,6 +445,36 @@ void SchedSleepTicks(u64 ticks)
     arch::Sti();
 }
 
+void SchedSleepUntil(u64 deadline_tick)
+{
+    // Wrap-safe deadline compare. Task-visible ticks are the same
+    // monotonically-increasing counter that OnTimerTick publishes,
+    // so "passed" means (i64)(g_tick_now - deadline) >= 0.
+    arch::Cli();
+    if (TickReached(g_tick_now, deadline_tick))
+    {
+        arch::Sti();
+        SchedYield();
+        return;
+    }
+
+    Task* current = Current();
+    current->state = TaskState::Sleeping;
+    current->wake_tick = deadline_tick;
+    {
+        sync::SpinLockGuard guard(g_sched_lock);
+        SleepqueueInsert(current);
+        ++g_tasks_sleeping;
+    }
+    Schedule();
+    arch::Sti();
+}
+
+u64 SchedNowTicks()
+{
+    return g_tick_now;
+}
+
 void SchedExit()
 {
     arch::Cli();

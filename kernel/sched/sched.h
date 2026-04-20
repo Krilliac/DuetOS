@@ -57,6 +57,20 @@ void SchedYield();
 /// today). A value of 0 behaves like SchedYield().
 void SchedSleepTicks(u64 ticks);
 
+/// Block the current task until the timer's tick counter reaches
+/// `deadline_tick`. If the counter has already passed `deadline_tick`
+/// by the time the call runs, behaves like SchedYield(). Useful for
+/// periodic tasks that want to fire on a fixed cadence without drift
+/// (increment deadline by `period` each iteration instead of
+/// sleeping `period` at the end of each loop body).
+void SchedSleepUntil(u64 deadline_tick);
+
+/// Current value of the scheduler's tick counter (also exposed by
+/// `arch::TimerTicks()`; this is the scheduler-visible copy, updated
+/// inside `OnTimerTick`). Use as the base for building a deadline
+/// to pass to `SchedSleepUntil`.
+u64 SchedNowTicks();
+
 /// Terminate the current task. Marks it Dead, reclaims nothing in v0 (a
 /// reaper thread lands later), and switches away — never returns.
 [[noreturn]] void SchedExit();
