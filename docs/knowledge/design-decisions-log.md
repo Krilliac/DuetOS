@@ -356,6 +356,53 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 015 — Prefer Multiboot2 ACPI "new" tag over "old" tag
+
+- **Scope:** `kernel/acpi/acpi.cpp` — `FindRsdpInMultiboot`
+- **Commit:** _(filled at commit)_
+- **Decision:** Scan the entire Multiboot2 tag list, remember both the
+  type-14 (v1 RSDP) and type-15 (v2 RSDP) tags if present, and prefer
+  the v2 one.
+- **Why:** Observed in the first real QEMU boot that GRUB provides
+  BOTH tags and the original "first-match returns" walker picked the
+  v1 RSDP. The v1 RSDP reports `revision = 0`, forcing the RSDT
+  (32-bit entries) path on a q35 machine whose XSDT (64-bit entries)
+  would be authoritative. Functional but loses robustness against
+  tables placed above 4 GiB (real servers).
+- **Rules out / defers:** Nothing — pure bug fix.
+- **Revisit when:** First machine with ACPI tables above 4 GiB
+  physical — at that point we'll also need to MapMmio tables outside
+  the direct map (see entry 012 deferrals).
+- **Related tracks:** Track 2 (Platform).
+
+---
+
+## 016 — End-to-end QEMU boot verified as baseline
+
+- **Scope:** Whole boot path; `tools/qemu/run.sh` as the launcher
+- **Commit:** _(same commit as 015)_
+- **Decision:** First integration boot of the kernel captured and
+  documented. All self-tests pass (frame allocator, heap, paging,
+  ACPI parse, IOAPIC round-trip, scheduler-mutex counter reaching
+  exactly `0x0F`, timer tick monotonic after worker exit). Boot
+  task enters `IdleLoop` cleanly. Tooling baseline:
+  `qemu-system-x86 + grub-pc-bin + xorriso + mtools` (now installed).
+- **Why:** Every commit before this was validated only by
+  compile-clean + in-boot self-tests. Running those self-tests on a
+  real CPU emulator closes "builds clean but might deadlock on a
+  real CPU" as a category of unknown. Baseline log shape is written
+  down in `boot-verification-v0.md` for regression comparison.
+- **Rules out / defers:** Automated boot-log diff in CI (cheap win —
+  grep for `[panic]` at minimum). OVMF / UEFI-direct boot (still
+  using GRUB + BIOS path). Real-hardware boot.
+- **Revisit when:** CI lands; wire a boot-log smoke test. Also when
+  bringing up a second machine profile (different CPU, different
+  memory size, multicore) — the baseline log drifts and must be
+  captured per profile.
+- **Related tracks:** Track 1 (Build/CI), Track 2 (Platform).
+
+---
+
 After landing a non-trivial commit, append a new section here with
 the **next sequential number**. Keep entries small. Link the commit
 hash. Always write the "Revisit when" marker — that's the point of

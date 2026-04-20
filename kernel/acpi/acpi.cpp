@@ -142,11 +142,22 @@ bool ChecksumOk(const void* p, u32 length)
 // Tag walker that doesn't require any other helpers. We can't reuse the
 // one in frame_allocator because it's file-local there; and duplicating a
 // 15-line loop is cleaner than plumbing a shared iterator.
+//
+// Preference: take the "new" (v2+) ACPI tag over the "old" (v1) tag if
+// both are present. GRUB provides both for compatibility, and an in-
+// order first-match loop would pick whichever appeared first. Since the
+// v1 RSDP reports revision = 0 and only the 32-bit RSDT address, using
+// it on a v2+ machine means we walk the legacy RSDT instead of the
+// authoritative XSDT — still works, but loses the 64-bit entry pointers
+// the XSDT gives us.
 const Rsdp* FindRsdpInMultiboot(uptr info_phys)
 {
     const auto* info = reinterpret_cast<const mm::MultibootInfoHeader*>(info_phys);
     uptr cursor = info_phys + sizeof(mm::MultibootInfoHeader);
     const uptr end = info_phys + info->total_size;
+
+    const Rsdp* old_rsdp = nullptr;
+    const Rsdp* new_rsdp = nullptr;
 
     while (cursor < end)
     {
@@ -155,13 +166,17 @@ const Rsdp* FindRsdpInMultiboot(uptr info_phys)
         {
             break;
         }
-        if (tag->type == mm::kMultibootTagAcpiOld || tag->type == mm::kMultibootTagAcpiNew)
+        if (tag->type == mm::kMultibootTagAcpiNew && new_rsdp == nullptr)
         {
-            return reinterpret_cast<const Rsdp*>(cursor + sizeof(MbAcpiTag));
+            new_rsdp = reinterpret_cast<const Rsdp*>(cursor + sizeof(MbAcpiTag));
+        }
+        else if (tag->type == mm::kMultibootTagAcpiOld && old_rsdp == nullptr)
+        {
+            old_rsdp = reinterpret_cast<const Rsdp*>(cursor + sizeof(MbAcpiTag));
         }
         cursor += (tag->size + 7u) & ~uptr{7};
     }
-    return nullptr;
+    return new_rsdp != nullptr ? new_rsdp : old_rsdp;
 }
 
 const SdtHeader* PhysToHeader(u64 phys)
