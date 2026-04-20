@@ -54,6 +54,13 @@ inline void Sti()
     }
 }
 
+inline u64 ReadCr0()
+{
+    u64 value;
+    asm volatile("mov %%cr0, %0" : "=r"(value));
+    return value;
+}
+
 inline u64 ReadCr2()
 {
     u64 value;
@@ -66,6 +73,41 @@ inline u64 ReadCr3()
     u64 value;
     asm volatile("mov %%cr3, %0" : "=r"(value));
     return value;
+}
+
+inline u64 ReadCr4()
+{
+    u64 value;
+    asm volatile("mov %%cr4, %0" : "=r"(value));
+    return value;
+}
+
+inline u64 ReadRflags()
+{
+    u64 value;
+    asm volatile("pushfq; pop %0" : "=r"(value));
+    return value;
+}
+
+inline u64 ReadRsp()
+{
+    u64 value;
+    asm volatile("mov %%rsp, %0" : "=r"(value));
+    return value;
+}
+
+inline u64 ReadRbp()
+{
+    u64 value;
+    asm volatile("mov %%rbp, %0" : "=r"(value));
+    return value;
+}
+
+inline u64 ReadEfer()
+{
+    u32 lo, hi;
+    asm volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(0xC0000080u));
+    return (static_cast<u64>(hi) << 32) | lo;
 }
 
 } // namespace customos::arch

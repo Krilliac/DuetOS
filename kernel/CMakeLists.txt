@@ -5,25 +5,46 @@
 # can load at physical 1 MiB and hand control to `_start` in boot.S.
 
 set(CUSTOMOS_KERNEL_SOURCES
+    core/heartbeat.cpp
+    core/klog.cpp
     core/main.cpp
+    core/panic.cpp
+    core/recovery.cpp
+    acpi/acpi.cpp
+    arch/x86_64/ap_trampoline.S
     arch/x86_64/boot.S
     arch/x86_64/exceptions.S
     arch/x86_64/gdt.cpp
     arch/x86_64/idt.cpp
+    arch/x86_64/ioapic.cpp
     arch/x86_64/lapic.cpp
     arch/x86_64/pic.cpp
     arch/x86_64/serial.cpp
+    arch/x86_64/smp.cpp
     arch/x86_64/timer.cpp
     arch/x86_64/traps.cpp
+    cpu/percpu.cpp
+    drivers/input/ps2kbd.cpp
+    drivers/pci/pci.cpp
+    drivers/storage/ahci.cpp
     mm/frame_allocator.cpp
     mm/kheap.cpp
     mm/page.cpp
     mm/paging.cpp
     sched/context_switch.S
     sched/sched.cpp
+    sync/spinlock.cpp
 )
 
 add_executable(customos-kernel ${CUSTOMOS_KERNEL_SOURCES})
+
+# Deliberate-panic build flag, consumed by kernel_main and triggered
+# by tools/test-panic.sh. OFF for normal builds — the demo panic
+# halts the kernel on purpose and must not ship in a release preset.
+option(CUSTOMOS_PANIC_DEMO "Insert a deliberate Panic() at end of kernel_main (test-panic.sh)" OFF)
+if(CUSTOMOS_PANIC_DEMO)
+    target_compile_definitions(customos-kernel PRIVATE CUSTOMOS_PANIC_DEMO=1)
+endif()
 
 set_target_properties(customos-kernel PROPERTIES
     OUTPUT_NAME "customos-kernel.elf"

@@ -5,6 +5,7 @@
 
 #include "../arch/x86_64/cpu.h"
 #include "../arch/x86_64/serial.h"
+#include "../core/panic.h"
 
 namespace customos::mm
 {
@@ -16,19 +17,59 @@ using arch::Halt;
 using arch::SerialWrite;
 using arch::SerialWriteHex;
 
-// Header sits at the start of every chunk, allocated or free. 16 bytes wide
-// to keep returned payload pointers 16-byte aligned without any padding.
+// Magic values for the header's `magic` field. Large / unlikely / asymmetric
+// so they won't collide with arbitrary payload bytes. If KFree ever sees
+// neither value, the header has been overwritten — heap corruption — which
+// is a Class-A integrity violation (runtime-recovery-strategy.md): halt.
+constexpr u64 kHeapMagicLive = 0xDEADBEEFCAFEBABEULL; // chunk is handed out
+constexpr u64 kHeapMagicFree = 0xFEEDFACE5A5A5A5AULL; // chunk is on freelist
+
+// Byte pattern written over every freed payload so use-after-free + read-
+// uninitialized bugs surface as obvious 0xDE..DE instead of stale data.
+// Picked deliberately: 0xDE is a valid x86 prefix byte AND commonly used as
+// a poison in other kernels, so grep-ability is good.
+constexpr u8 kHeapFreePoison = 0xDE;
+
+// Header sits at the start of every chunk, allocated or free. 32 bytes wide:
+// payload is still returned 16-byte aligned because the header is a multiple
+// of the alignment.
 //
 // The `next` field is meaningful only while the chunk is on the freelist;
-// for an allocated chunk it overlaps the first 8 bytes of the user payload,
-// which is fine — the user owns those bytes once we hand them out.
+// for an allocated chunk it overlaps the payload but the user owns those
+// bytes once we hand them out, so it doesn't matter.
 struct alignas(kHeapAlignment) ChunkHeader
 {
     u64 size;          // total chunk size in bytes (header + payload)
+    u64 magic;         // kHeapMagicLive or kHeapMagicFree
     ChunkHeader* next; // address-ordered freelist link (free chunks only)
+    u64 reserved;      // padding to 32 bytes; zero when allocated
 };
 
-static_assert(sizeof(ChunkHeader) == kHeapAlignment, "Header size must equal payload alignment to avoid padding");
+static_assert(sizeof(ChunkHeader) == 32, "Header must be 32 bytes");
+static_assert(sizeof(ChunkHeader) % kHeapAlignment == 0, "Header must preserve payload alignment");
+
+[[noreturn]] void PanicHeapCorrupt(const char* what, const ChunkHeader* chunk)
+{
+    core::PanicWithValue("mm/kheap", what, reinterpret_cast<u64>(chunk));
+}
+
+inline void PoisonPayload(ChunkHeader* chunk)
+{
+    u8* payload = reinterpret_cast<u8*>(chunk) + sizeof(ChunkHeader);
+    const u64 payload_size = chunk->size - sizeof(ChunkHeader);
+    for (u64 i = 0; i < payload_size; ++i)
+    {
+        payload[i] = kHeapFreePoison;
+    }
+}
+
+inline void AssertMagic(const ChunkHeader* chunk, u64 expected, const char* context)
+{
+    if (chunk->magic != expected)
+    {
+        PanicHeapCorrupt(context, chunk);
+    }
+}
 
 constinit u8* g_pool_base = nullptr;
 constinit u64 g_pool_bytes = 0;
@@ -38,10 +79,7 @@ constinit u64 g_free_count = 0;
 
 [[noreturn]] void PanicHeap(const char* message)
 {
-    SerialWrite("\n[panic] mm/kheap: ");
-    SerialWrite(message);
-    SerialWrite("\n");
-    Halt();
+    core::Panic("mm/kheap", message);
 }
 
 inline u64 RoundUp(u64 value, u64 align)
@@ -91,9 +129,12 @@ void FreelistInsertAndCoalesce(ChunkHeader* chunk)
         cursor->next = chunk;
     }
 
-    // Coalesce forward (chunk + next).
+    // Coalesce forward (chunk + next). Verify magic before folding —
+    // if the "free" successor got its magic clobbered we'd silently
+    // absorb corrupt bytes into `chunk`'s size.
     if (chunk->next != nullptr && ChunkAdjacent(chunk, chunk->next))
     {
+        AssertMagic(chunk->next, kHeapMagicFree, "Coalesce: forward neighbour not Free");
         chunk->size += chunk->next->size;
         chunk->next = chunk->next->next;
     }
@@ -109,6 +150,7 @@ void FreelistInsertAndCoalesce(ChunkHeader* chunk)
         }
         if (ChunkAdjacent(prev, chunk))
         {
+            AssertMagic(prev, kHeapMagicFree, "Coalesce: backward neighbour not Free");
             prev->size += chunk->size;
             prev->next = chunk->next;
         }
@@ -135,7 +177,9 @@ void KernelHeapInit()
     g_pool_bytes = kKernelHeapBytes;
     g_freelist = reinterpret_cast<ChunkHeader*>(g_pool_base);
     g_freelist->size = kKernelHeapBytes;
+    g_freelist->magic = kHeapMagicFree;
     g_freelist->next = nullptr;
+    g_freelist->reserved = 0;
     g_alloc_count = 0;
     g_free_count = 0;
 
@@ -164,6 +208,13 @@ void* KMalloc(u64 bytes)
     ChunkHeader* cursor = g_freelist;
     while (cursor != nullptr)
     {
+        // Every chunk on the freelist MUST have the Free magic. A Live
+        // magic here means a double-free somewhere stitched an allocated
+        // chunk into the freelist; random bytes mean heap header got
+        // overwritten by an OOB write. Either way: heap integrity is
+        // gone — halt loud, don't silently heal.
+        AssertMagic(cursor, kHeapMagicFree, "KMalloc: corrupt magic on freelist chunk");
+
         if (cursor->size >= needed)
         {
             // Split if the remainder can hold another minimum-sized chunk
@@ -175,7 +226,9 @@ void* KMalloc(u64 bytes)
             {
                 auto* split = reinterpret_cast<ChunkHeader*>(reinterpret_cast<u8*>(cursor) + needed);
                 split->size = remainder;
+                split->magic = kHeapMagicFree;
                 split->next = cursor->next;
+                split->reserved = 0;
                 cursor->size = needed;
                 if (prev == nullptr)
                 {
@@ -198,7 +251,9 @@ void* KMalloc(u64 bytes)
                 }
             }
 
+            cursor->magic = kHeapMagicLive;
             cursor->next = nullptr; // not on freelist anymore
+            cursor->reserved = 0;
             ++g_alloc_count;
             return reinterpret_cast<void*>(reinterpret_cast<u8*>(cursor) + sizeof(ChunkHeader));
         }
@@ -222,13 +277,27 @@ void KFree(void* ptr)
 
     auto* chunk = reinterpret_cast<ChunkHeader*>(static_cast<u8*>(ptr) - sizeof(ChunkHeader));
 
+    // Magic check first: catches double-free (previous KFree flipped
+    // magic to Free; second KFree sees wrong magic and panics instead
+    // of re-inserting a free chunk into the freelist, which would
+    // eventually hand the same memory out twice) and catches
+    // foreign-KFree on a pointer that isn't from KMalloc.
+    AssertMagic(chunk, kHeapMagicLive, "KFree on chunk without Live magic (double-free / corruption?)");
+
     // Sanity-check the header. A size below one chunk's worth or above the
-    // pool is a double-free or corruption. Cheap to detect; expensive to
-    // debug if we don't.
+    // pool means the magic check passed by coincidence but the rest of
+    // the header is corrupt — safer to halt than proceed with a bogus
+    // size and walk past the end of the pool on coalesce.
     if (chunk->size < sizeof(ChunkHeader) + kHeapAlignment || chunk->size > g_pool_bytes)
     {
-        PanicHeap("KFree on chunk with corrupt size (double-free?)");
+        PanicHeap("KFree on chunk with corrupt size (magic OK, size wild?)");
     }
+
+    // Flip to Free BEFORE poisoning so that if poison races with another
+    // thread reading the magic (future SMP concern), the transition is
+    // observable in sensible order.
+    chunk->magic = kHeapMagicFree;
+    PoisonPayload(chunk);
 
     FreelistInsertAndCoalesce(chunk);
     ++g_free_count;
@@ -353,12 +422,45 @@ void KernelHeapSelfTest()
     SerialWrite("\n");
     KFree(big);
 
+    // Poison verification: allocate, write a pattern, free. The payload
+    // is now back on the freelist as poisoned bytes. Re-allocate the
+    // SAME size; since the freelist just coalesced into one chunk, the
+    // new allocation lands at the same address. Its bytes must be
+    // kHeapFreePoison — any stale pattern means poison-on-free
+    // regressed and use-after-free would no longer be obvious.
+    void* poison_probe = KMalloc(128);
+    if (poison_probe == nullptr)
+    {
+        PanicHeap("self-test: poison-probe alloc failed");
+    }
+    auto* poison_bytes = static_cast<u8*>(poison_probe);
+    for (u64 i = 0; i < 128; ++i)
+    {
+        poison_bytes[i] = 0xAA;
+    }
+    KFree(poison_probe);
+    void* poison_probe2 = KMalloc(128);
+    if (poison_probe2 != poison_probe)
+    {
+        PanicHeap("self-test: expected to re-use same chunk for poison probe");
+    }
+    const auto* reread = static_cast<const u8*>(poison_probe2);
+    for (u64 i = 0; i < 128; ++i)
+    {
+        if (reread[i] != kHeapFreePoison)
+        {
+            PanicHeap("self-test: poison-on-free did not mark freed payload");
+        }
+    }
+    KFree(poison_probe2);
+
     const KernelHeapStats final_stats = KernelHeapStatsRead();
     if (final_stats.free_bytes != baseline.pool_bytes || final_stats.free_chunk_count != 1)
     {
         PanicHeap("self-test: heap not pristine at end");
     }
 
+    SerialWrite("  poison     : verified 0xDE across freed payload\n");
     SerialWrite("[mm] kernel heap self-test OK\n");
 }
 

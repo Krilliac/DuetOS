@@ -16,14 +16,16 @@
 namespace customos::mm
 {
 
-inline constexpr u32 kMultibootTagEnd     = 0;
-inline constexpr u32 kMultibootTagMmap    = 6;
+inline constexpr u32 kMultibootTagEnd = 0;
+inline constexpr u32 kMultibootTagMmap = 6;
+inline constexpr u32 kMultibootTagAcpiOld = 14; // RSDP v1 (20 bytes) embedded
+inline constexpr u32 kMultibootTagAcpiNew = 15; // RSDP v2 (36 bytes) embedded
 
-inline constexpr u32 kMmapTypeAvailable        = 1;
-inline constexpr u32 kMmapTypeReserved         = 2;
-inline constexpr u32 kMmapTypeAcpiReclaimable  = 3;
-inline constexpr u32 kMmapTypeAcpiNvs          = 4;
-inline constexpr u32 kMmapTypeBadRam           = 5;
+inline constexpr u32 kMmapTypeAvailable = 1;
+inline constexpr u32 kMmapTypeReserved = 2;
+inline constexpr u32 kMmapTypeAcpiReclaimable = 3;
+inline constexpr u32 kMmapTypeAcpiNvs = 4;
+inline constexpr u32 kMmapTypeBadRam = 5;
 
 struct [[gnu::packed]] MultibootInfoHeader
 {
@@ -48,10 +50,10 @@ struct [[gnu::packed]] MultibootMmapEntry
 
 struct [[gnu::packed]] MultibootMmapTag
 {
-    u32 type;            // = kMultibootTagMmap
-    u32 size;            // includes header + all entries
-    u32 entry_size;      // typically 24
-    u32 entry_version;   // 0
+    u32 type;          // = kMultibootTagMmap
+    u32 size;          // includes header + all entries
+    u32 entry_size;    // typically 24
+    u32 entry_version; // 0
     // MultibootMmapEntry entries follow.
 };
 
