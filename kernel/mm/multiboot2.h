@@ -17,6 +17,7 @@ namespace customos::mm
 {
 
 inline constexpr u32 kMultibootTagEnd = 0;
+inline constexpr u32 kMultibootTagCmdline = 1;     // boot command-line (NUL-terminated)
 inline constexpr u32 kMultibootTagMmap = 6;
 inline constexpr u32 kMultibootTagFramebuffer = 8; // linear FB info from GRUB
 inline constexpr u32 kMultibootTagAcpiOld = 14;    // RSDP v1 (20 bytes) embedded

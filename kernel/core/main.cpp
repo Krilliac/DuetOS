@@ -33,6 +33,7 @@
 #include "shell.h"
 #include "syscall.h"
 #include "../mm/kheap.h"
+#include "../mm/multiboot2.h"
 #include "../mm/paging.h"
 #include "../sched/sched.h"
 
@@ -70,6 +71,97 @@
     asm volatile("" : : "r"(&buf[0]) : "memory");
 }
 #endif
+
+namespace
+{
+
+// Walk the Multiboot2 tag list for type-1 (boot cmdline) and
+// return its NUL-terminated string, or nullptr if absent. The
+// pointer is into the live info struct; do not free.
+const char* FindBootCmdline(customos::uptr info_phys)
+{
+    if (info_phys == 0)
+    {
+        return nullptr;
+    }
+    const auto* info = reinterpret_cast<const customos::mm::MultibootInfoHeader*>(info_phys);
+    customos::uptr cursor = info_phys + sizeof(customos::mm::MultibootInfoHeader);
+    const customos::uptr end = info_phys + info->total_size;
+    while (cursor < end)
+    {
+        const auto* tag = reinterpret_cast<const customos::mm::MultibootTagHeader*>(cursor);
+        if (tag->type == customos::mm::kMultibootTagEnd)
+        {
+            break;
+        }
+        if (tag->type == customos::mm::kMultibootTagCmdline)
+        {
+            // String starts right after the 8-byte {type, size} header.
+            return reinterpret_cast<const char*>(cursor + sizeof(customos::mm::MultibootTagHeader));
+        }
+        cursor += (tag->size + 7u) & ~customos::uptr{7};
+    }
+    return nullptr;
+}
+
+// Return true iff `cmdline` contains the whitespace-delimited
+// token "key=value" where `value` matches `want`. Case-sensitive.
+// A nullptr cmdline returns false. This is the smallest thing
+// that'll work for "boot=tty" / "boot=desktop"; a full parser
+// lands with the first cmdline-heavy consumer.
+bool CmdlineMatches(const char* cmdline, const char* key, const char* want)
+{
+    if (cmdline == nullptr)
+    {
+        return false;
+    }
+    // Walk tokens. A token is a run of non-whitespace, separated
+    // by spaces. Compare key prefix + '=' then the value tail.
+    const char* p = cmdline;
+    while (*p != '\0')
+    {
+        while (*p == ' ' || *p == '\t')
+        {
+            ++p;
+        }
+        if (*p == '\0')
+        {
+            break;
+        }
+        const char* token = p;
+        while (*p != '\0' && *p != ' ' && *p != '\t')
+        {
+            ++p;
+        }
+        // [token, p) is the current token.
+        // Match key+'=' prefix.
+        const char* k = key;
+        const char* t = token;
+        while (*k != '\0' && t < p && *t == *k)
+        {
+            ++k;
+            ++t;
+        }
+        if (*k == '\0' && t < p && *t == '=')
+        {
+            ++t;
+            // Compare [t, p) against want.
+            const char* w = want;
+            while (*w != '\0' && t < p && *t == *w)
+            {
+                ++t;
+                ++w;
+            }
+            if (*w == '\0' && t == p)
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+} // namespace
 
 extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multiboot_info)
 {
@@ -261,20 +353,47 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     demo_button.label = "CLICK ME";
     customos::drivers::video::WidgetRegisterButton(demo_button);
 
-    // Initial display mode + first paint. CUSTOMOS_BOOT_TTY
-    // build flag selects text-first boot; runtime Ctrl+Alt+T
-    // toggles regardless. Desktop mode paints the windowed
-    // compose; TTY mode relocates the console to the top-left
-    // with a black background and skips cursor setup.
+    // Initial display mode. Priority:
+    //   1. Runtime kernel cmdline "boot=tty" / "boot=desktop"
+    //      (Multiboot2 tag 1 — set via GRUB menu entry).
+    //   2. Compile-time CUSTOMOS_BOOT_TTY fallback.
+    //   3. Desktop (default).
+    // Runtime Ctrl+Alt+T still flips regardless after boot.
+    const char* cmdline = FindBootCmdline(multiboot_info);
+    if (cmdline != nullptr)
+    {
+        SerialWrite("[boot] cmdline: \"");
+        SerialWrite(cmdline);
+        SerialWrite("\"\n");
+    }
+    bool want_tty = false;
+    if (CmdlineMatches(cmdline, "boot", "tty"))
+    {
+        want_tty = true;
+    }
+    else if (CmdlineMatches(cmdline, "boot", "desktop"))
+    {
+        want_tty = false;
+    }
+    else
+    {
 #ifdef CUSTOMOS_BOOT_TTY
-    customos::drivers::video::SetDisplayMode(customos::drivers::video::DisplayMode::Tty);
-    customos::drivers::video::ConsoleSetOrigin(16, 16);
-    customos::drivers::video::ConsoleSetColours(0x0080F088, 0x00000000);
-    customos::drivers::video::DesktopCompose(0x00000000, nullptr);
-#else
-    customos::drivers::video::DesktopCompose(kDesktopTeal, "WELCOME TO CUSTOMOS   BOOT OK");
-    customos::drivers::video::CursorInit(kDesktopTeal);
+        want_tty = true;
 #endif
+    }
+
+    if (want_tty)
+    {
+        customos::drivers::video::SetDisplayMode(customos::drivers::video::DisplayMode::Tty);
+        customos::drivers::video::ConsoleSetOrigin(16, 16);
+        customos::drivers::video::ConsoleSetColours(0x0080F088, 0x00000000);
+        customos::drivers::video::DesktopCompose(0x00000000, nullptr);
+    }
+    else
+    {
+        customos::drivers::video::DesktopCompose(kDesktopTeal, "WELCOME TO CUSTOMOS   BOOT OK");
+        customos::drivers::video::CursorInit(kDesktopTeal);
+    }
 
     SerialWrite("[boot] Seeding ramfs + VFS self-test.\n");
     customos::fs::RamfsInit();
