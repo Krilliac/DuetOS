@@ -4,6 +4,7 @@
 #include "../../arch/x86_64/serial.h"
 #include "../../core/klog.h"
 #include "../../core/panic.h"
+#include "../../sync/spinlock.h"
 
 namespace customos::drivers::pci
 {
@@ -14,9 +15,17 @@ namespace
 // Configuration Mechanism #1 (the only one anyone implements on
 // modern hardware). Write a 32-bit address to 0xCF8, then read/write
 // the matching 32-bit word at 0xCFC.
+//
+// The address-then-data dance is NOT atomic — between the outl to
+// 0xCF8 and the outl/inl to 0xCFC, a peer CPU could write its own
+// address and race us to the data port. On SMP the global spinlock
+// below serialises every config-space access; on single CPU the
+// spinlock's CLI save/restore is the only overhead.
 constexpr u16 kConfigAddressPort = 0xCF8;
 constexpr u16 kConfigDataPort = 0xCFC;
 constexpr u32 kConfigEnable = 1U << 31;
+
+constinit sync::SpinLock g_pci_config_lock{};
 
 constinit Device g_devices[kMaxDevices] = {};
 constinit u64 g_device_count = 0;
@@ -34,6 +43,7 @@ inline u32 MakeAddress(DeviceAddress addr, u8 offset)
 u32 PciConfigRead32(DeviceAddress addr, u8 offset)
 {
     const u32 address = MakeAddress(addr, offset);
+    sync::SpinLockGuard guard(g_pci_config_lock);
     asm volatile("outl %0, %w1" : : "a"(address), "Nd"(kConfigAddressPort));
     u32 value;
     asm volatile("inl %w1, %0" : "=a"(value) : "Nd"(kConfigDataPort));
@@ -57,6 +67,7 @@ u8 PciConfigRead8(DeviceAddress addr, u8 offset)
 void PciConfigWrite32(DeviceAddress addr, u8 offset, u32 value)
 {
     u32 address = MakeAddress(addr, offset);
+    sync::SpinLockGuard guard(g_pci_config_lock);
     asm volatile("outl %0, %w1" : : "a"(address), "Nd"(kConfigAddressPort));
     asm volatile("outl %0, %w1" : : "a"(value), "Nd"(kConfigDataPort));
 }
