@@ -80,4 +80,28 @@ void ConsoleSetOrigin(u32 x, u32 y);
 /// the next ConsoleRedraw.
 void ConsoleSetColours(u32 fg, u32 bg);
 
+// ---------------------------------------------------------------
+// Multi-console routing — v0 has two buffers:
+//   - Shell console (the interactive prompt, output, scrollback).
+//   - Klog console (kernel log-line tee target, read-only view).
+// Both share the same origin + geometry; `ConsoleRedraw` paints
+// whichever is currently selected. Ctrl+Alt+F1 selects the shell,
+// Ctrl+Alt+F2 selects klog. Writes to ConsoleWrite / ConsoleWriteChar
+// / ConsoleClear always target the shell regardless of the render
+// target; ConsoleWriteKlog targets the klog buffer.
+// ---------------------------------------------------------------
+
+/// Forward a string to the klog console's buffer. Primary
+/// consumer is the klog tee registered from main.cpp.
+void ConsoleWriteKlog(const char* s);
+
+/// Render-target selectors. The console module picks which
+/// buffer ConsoleRedraw paints; neither the shell nor the klog
+/// tee pays attention — their writes go where they go.
+void ConsoleSelectShell();
+void ConsoleSelectKlog();
+
+/// True iff the klog buffer is currently selected for render.
+bool ConsoleIsKlogActive();
+
 } // namespace customos::drivers::video

@@ -396,7 +396,12 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // forces a recompose on demand). IRQ-time klogs race the kbd
     // reader on the char buffer but the damage is bounded to one
     // garbled line at worst; the authoritative log ring is serial.
-    customos::core::SetLogTee([](const char* s) { customos::drivers::video::ConsoleWrite(s); });
+    // Klog lines route to the dedicated klog console buffer.
+    // Ctrl+Alt+F2 switches the render target to that buffer so
+    // the user sees live kernel log output; Ctrl+Alt+F1 goes
+    // back to the interactive shell buffer. Both consoles share
+    // the same screen origin so the flip is in-place.
+    customos::core::SetLogTee([](const char* s) { customos::drivers::video::ConsoleWriteKlog(s); });
     customos::drivers::video::ConsoleWriteln("CUSTOMOS BOOT LOG");
     customos::drivers::video::ConsoleWriteln("=================");
     customos::drivers::video::ConsoleWriteln("");
@@ -594,6 +599,40 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
             const bool alt = (ev.modifiers & kKeyModAlt) != 0;
             const bool ctrl = (ev.modifiers & kKeyModCtrl) != 0;
             bool dirty = false;
+
+            // Ctrl+Alt+F1 / F2 flip the render target between
+            // the shell and klog consoles. Same screen origin,
+            // so the switch is in-place; each has its own
+            // scrollback. Works in both desktop and TTY modes.
+            if (ctrl && alt && (ev.code == kKeyF1 || ev.code == kKeyF2))
+            {
+                customos::drivers::video::CompositorLock();
+                if (ev.code == kKeyF1)
+                {
+                    customos::drivers::video::ConsoleSelectShell();
+                    SerialWrite("[ui] tty -> shell\n");
+                }
+                else
+                {
+                    customos::drivers::video::ConsoleSelectKlog();
+                    SerialWrite("[ui] tty -> klog\n");
+                }
+                const bool is_tty = (customos::drivers::video::GetDisplayMode() ==
+                                     customos::drivers::video::DisplayMode::Tty);
+                if (is_tty)
+                {
+                    customos::drivers::video::DesktopCompose(0x00000000, nullptr);
+                }
+                else
+                {
+                    customos::drivers::video::CursorHide();
+                    customos::drivers::video::DesktopCompose(kDesktopTealLocal,
+                                                             "WELCOME TO CUSTOMOS   BOOT OK");
+                    customos::drivers::video::CursorShow();
+                }
+                customos::drivers::video::CompositorUnlock();
+                continue;
+            }
 
             // Ctrl+Alt+T flips between desktop and TTY mode. In
             // TTY mode the console fills the framebuffer with a
