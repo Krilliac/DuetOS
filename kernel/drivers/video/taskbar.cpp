@@ -1,5 +1,6 @@
 #include "taskbar.h"
 
+#include "../../arch/x86_64/rtc.h"
 #include "../../sched/sched.h"
 #include "framebuffer.h"
 #include "widget.h"
@@ -157,19 +158,35 @@ void TaskbarRedraw()
         tab_x += tab_w + tab_gap;
     }
 
-    // Right-anchored uptime. 100 Hz scheduler tick → seconds.
+    // Right-anchored wall clock. RtcRead returns decoded 24-hour
+    // fields; we format "HH:MM:SS" with leading zeros so column
+    // width stays constant across minute / hour rollover. A
+    // trailing "  UP NNNNs" keeps the scheduler uptime visible
+    // alongside wall time — useful for boot-latency sanity.
+    customos::arch::RtcTime rtc{};
+    customos::arch::RtcRead(&rtc);
+    char buf[32];
+    u32 off = 0;
+    buf[off++] = static_cast<char>('0' + (rtc.hour / 10));
+    buf[off++] = static_cast<char>('0' + (rtc.hour % 10));
+    buf[off++] = ':';
+    buf[off++] = static_cast<char>('0' + (rtc.minute / 10));
+    buf[off++] = static_cast<char>('0' + (rtc.minute % 10));
+    buf[off++] = ':';
+    buf[off++] = static_cast<char>('0' + (rtc.second / 10));
+    buf[off++] = static_cast<char>('0' + (rtc.second % 10));
+    buf[off++] = ' ';
+    buf[off++] = ' ';
+    buf[off++] = 'U';
+    buf[off++] = 'P';
+    buf[off++] = ' ';
     const u64 ticks = customos::sched::SchedNowTicks();
     const u64 secs = ticks / 100;
-    char buf[24];
-    // Build "UP " + decimal + "s" in place to keep the font table
-    // honest (no %u helper in kernel C++).
-    buf[0] = 'U';
-    buf[1] = 'P';
-    buf[2] = ' ';
-    const u32 n = FormatU64Dec(secs, buf + 3, sizeof(buf) - 5);
-    buf[3 + n] = 'S';
-    buf[3 + n + 1] = '\0';
-    const u32 text_w = (3 + n + 1) * 8;
+    off += FormatU64Dec(secs, buf + off, sizeof(buf) - off - 2);
+    buf[off++] = 'S';
+    buf[off] = '\0';
+
+    const u32 text_w = off * 8;
     const u32 text_x = (fbw > text_w + 8) ? fbw - text_w - 8 : 0;
     FramebufferDrawString(text_x, text_y, buf, g_fg, g_bg);
 }
