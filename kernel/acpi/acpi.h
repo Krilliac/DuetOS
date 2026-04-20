@@ -112,4 +112,18 @@ u16 SciVector();
 /// fault in that case.
 bool AcpiReset();
 
+/// HPET event-timer-block physical address from the ACPI HPET
+/// table. Returns 0 if no HPET table was present (in which case
+/// drivers should fall back to PIT or LAPIC timers only).
+u64 HpetAddress();
+
+/// Number of timers implemented in the HPET (1..32). Returns 0
+/// if no HPET is present.
+u8 HpetTimerCount();
+
+/// HPET main-counter width — 64 if the COUNT_SIZE_CAP bit is set
+/// in the HPET capabilities register (from the ACPI table's
+/// event-timer-block-id), 32 otherwise. Returns 0 if no HPET.
+u8 HpetCounterWidth();
+
 } // namespace customos::acpi

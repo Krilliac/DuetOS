@@ -177,6 +177,26 @@ struct [[gnu::packed]] Fadt
 // RESET_VALUE fields are meaningful. ACPI spec 4.1.3.
 constexpr u32 kFadtFlagResetRegSup = 1U << 10;
 
+// HPET description table (ACPI 6.4 §5.2.28). Only fields we use are
+// declared — AML-creator metadata and OEM attributes are skipped.
+struct [[gnu::packed]] HpetTable
+{
+    SdtHeader header;
+    // Event-timer-block ID: rev + num_tim + count_size + leg_route +
+    // vendor — same layout as the low 32 bits of the runtime
+    // capabilities register, so drivers can reuse the decoder.
+    u32 event_timer_block_id;
+    GenericAddress base_address;
+    u8 hpet_number;
+    u16 main_counter_minimum;
+    u8 page_protection_oem;
+};
+
+// Bit layout of `event_timer_block_id` (matches CAP[31:0]).
+constexpr u32 kHpetBlockIdNumTimMask = 0x1F00;
+constexpr u32 kHpetBlockIdNumTimShift = 8;
+constexpr u32 kHpetBlockIdCountSize64 = 1U << 13;
+
 // ---------------------------------------------------------------------------
 // Cache. Populated once by AcpiInit; read-only after.
 // ---------------------------------------------------------------------------
@@ -196,6 +216,12 @@ constinit u16 g_sci_vector = 9;
 constinit bool g_reset_supported = false;
 constinit GenericAddress g_reset_reg{};
 constinit u8 g_reset_value = 0;
+
+// HPET-derived cache. All zero if no HPET table was present — the
+// HPET driver treats that as "no HPET, fall back to PIT/LAPIC."
+constinit u64 g_hpet_address = 0;
+constinit u8 g_hpet_timer_count = 0;
+constinit u8 g_hpet_counter_width = 0;
 
 [[noreturn]] void PanicAcpi(const char* message)
 {
@@ -424,6 +450,22 @@ void ParseFadt(const Fadt& fadt)
     }
 }
 
+void ParseHpet(const HpetTable& hpet)
+{
+    // BaseAddress.address is the physical base of the 1 KiB HPET
+    // MMIO block. We only honour system-memory space (the spec
+    // allows I/O space but no hardware ships that way).
+    if (hpet.base_address.address_space_id != kGenericAddrSpaceMemory)
+    {
+        return;
+    }
+
+    g_hpet_address = hpet.base_address.address;
+    const u32 num = (hpet.event_timer_block_id & kHpetBlockIdNumTimMask) >> kHpetBlockIdNumTimShift;
+    g_hpet_timer_count = static_cast<u8>(num + 1);
+    g_hpet_counter_width = (hpet.event_timer_block_id & kHpetBlockIdCountSize64) != 0 ? 64 : 32;
+}
+
 } // namespace
 
 void AcpiInit(uptr multiboot_info_phys)
@@ -479,6 +521,23 @@ void AcpiInit(uptr multiboot_info_phys)
         ParseFadt(*reinterpret_cast<const Fadt*>(fadt_hdr));
     }
 
+    // HPET is optional — QEMU q35 provides it, older boards may
+    // not. Missing is fine; present-but-malformed panics so we
+    // don't silently drift past a firmware bug.
+    const SdtHeader* hpet_hdr = FindTable(*rsdp, "HPET");
+    if (hpet_hdr != nullptr)
+    {
+        if (hpet_hdr->length < sizeof(HpetTable))
+        {
+            PanicAcpi("HPET table shorter than the fields we read");
+        }
+        if (!ChecksumOk(hpet_hdr, hpet_hdr->length))
+        {
+            PanicAcpi("HPET table checksum failed");
+        }
+        ParseHpet(*reinterpret_cast<const HpetTable*>(hpet_hdr));
+    }
+
     SerialWrite("[acpi] rsdp rev=");
     SerialWriteHex(rsdp->revision);
     SerialWrite(" lapic=");
@@ -505,6 +564,21 @@ void AcpiInit(uptr multiboot_info_phys)
     else
     {
         SerialWrite("unsupported");
+    }
+    SerialWrite("\n");
+
+    SerialWrite("[acpi] hpet=");
+    if (g_hpet_address != 0)
+    {
+        SerialWriteHex(g_hpet_address);
+        SerialWrite(" timers=");
+        SerialWriteHex(g_hpet_timer_count);
+        SerialWrite(" width=");
+        SerialWriteHex(g_hpet_counter_width);
+    }
+    else
+    {
+        SerialWrite("absent");
     }
     SerialWrite("\n");
 
@@ -607,6 +681,21 @@ u16 IsaIrqFlags(u8 isa_irq)
 u16 SciVector()
 {
     return g_sci_vector;
+}
+
+u64 HpetAddress()
+{
+    return g_hpet_address;
+}
+
+u8 HpetTimerCount()
+{
+    return g_hpet_timer_count;
+}
+
+u8 HpetCounterWidth()
+{
+    return g_hpet_counter_width;
 }
 
 bool AcpiReset()

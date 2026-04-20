@@ -2,6 +2,7 @@
 #include "../acpi/acpi.h"
 #include "../arch/x86_64/cpu.h"
 #include "../arch/x86_64/gdt.h"
+#include "../arch/x86_64/hpet.h"
 #include "../arch/x86_64/idt.h"
 #include "../arch/x86_64/ioapic.h"
 #include "../arch/x86_64/lapic.h"
@@ -97,6 +98,9 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
 
     SerialWrite("[boot] Bringing up IOAPIC.\n");
     IoApicInit();
+
+    SerialWrite("[boot] Bringing up HPET (if present).\n");
+    HpetInit();
 
     SerialWrite("[boot] Installing BSP per-CPU struct.\n");
     customos::cpu::PerCpuInitBsp();
