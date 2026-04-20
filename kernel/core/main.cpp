@@ -3,6 +3,7 @@
 #include "../arch/x86_64/cpu.h"
 #include "../arch/x86_64/gdt.h"
 #include "../arch/x86_64/idt.h"
+#include "../arch/x86_64/ioapic.h"
 #include "../arch/x86_64/lapic.h"
 #include "../arch/x86_64/pic.h"
 #include "../arch/x86_64/serial.h"
@@ -79,6 +80,9 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
 
     SerialWrite("[boot] Bringing up LAPIC.\n");
     LapicInit();
+
+    SerialWrite("[boot] Bringing up IOAPIC.\n");
+    IoApicInit();
 
     SerialWrite("[boot] Bringing up periodic timer.\n");
     TimerInit();

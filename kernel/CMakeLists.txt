@@ -11,6 +11,7 @@ set(CUSTOMOS_KERNEL_SOURCES
     arch/x86_64/exceptions.S
     arch/x86_64/gdt.cpp
     arch/x86_64/idt.cpp
+    arch/x86_64/ioapic.cpp
     arch/x86_64/lapic.cpp
     arch/x86_64/pic.cpp
     arch/x86_64/serial.cpp
