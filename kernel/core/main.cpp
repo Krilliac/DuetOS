@@ -332,5 +332,25 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     asm volatile("ud2");
 #endif
 
-    IdleLoop();
+    // Terminate the boot task instead of idle-looping on the boot
+    // stack. Rationale: kboot runs on the low-VA boot stack
+    // (.bss.boot). Any Schedule() triggered from kboot's context
+    // (e.g. a timer IRQ that raises need_resched) flips CR3 to
+    // whatever task we're switching INTO. Per-process ASes zero
+    // PML4[0..255], so the boot stack's low VA isn't reachable
+    // after the flip — the next stack access would #PF on IST
+    // stacks (also low-VA) and cascade into a #DF cluster.
+    //
+    // SchedExit marks kboot Dead, drops it from the runqueue,
+    // and loops in Schedule() picking other tasks. The dedicated
+    // idle task (SchedStartIdle) ensures the runqueue is never
+    // empty. From this point on, kboot is never re-scheduled and
+    // the boot stack is never touched again — it just sits at
+    // low VA unreferenced until reboot.
+    //
+    // Note: kboot has stack_base=nullptr (it never had a
+    // scheduler-allocated stack), so the reaper's KFree(stack_base)
+    // is a no-op for it. The boot stack's .bss.boot storage isn't
+    // heap-managed; the linker placed it and it persists.
+    customos::sched::SchedExit();
 }

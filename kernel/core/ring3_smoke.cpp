@@ -724,16 +724,11 @@ void StartRing3SmokeTask()
     // is broken: a user-mode fault must never bring down the OS.
     SpawnJailProbeTask();
     SpawnNxProbeTask();
-#ifdef CUSTOMOS_BUDGET_DEMO
     // CPU-hog probe: spins forever with a 50-tick budget. Exercises
-    // the tick-budget kill path end-to-end. Default-off because the
-    // kill-path's CR3 flip currently cascades into a #DF cluster
-    // with the IST-stack-not-mapped-in-user-AS gotcha. Build with
-    // -DCUSTOMOS_BUDGET_DEMO=ON to opt in and observe the
-    // `[sched] tick budget exhausted pid=...` + task-kill sequence.
+    // the tick-budget kill path end-to-end — scheduler fires
+    // `[sched] tick budget exhausted pid=...` + `[task-kill]`.
     SpawnCpuHogProbe();
-#endif
-    Log(LogLevel::Info, "core/ring3", "trusted+sandbox+jail-probe+nx-probe ring3 tasks queued");
+    Log(LogLevel::Info, "core/ring3", "ring3 smoke tasks queued (including cpu-hog)");
 }
 
 } // namespace customos::core

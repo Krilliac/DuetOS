@@ -206,11 +206,21 @@ AddressSpace* AddressSpaceCreate(u64 frame_budget)
 
     auto* pml4 = static_cast<u64*>(PhysToVirt(pml4_frame));
 
-    // Zero the user half (PML4[0..255]) so a freshly-spawned process
-    // has a guaranteed-empty low half. Copy the kernel half
-    // (PML4[256..511]) verbatim from the boot PML4 — those entries
-    // point at PDPTs that are shared by every AS, so any future
-    // kernel-half mapping change propagates everywhere automatically.
+    // PML4 layout for a per-process AS:
+    //
+    //   [0..255]    — zero. User-half, fully private. MapUserPage
+    //                 installs fresh PDPTs/PDs/PTs on demand.
+    //                 BUT: ring3_smoke's ASLR picker MUST keep user
+    //                 bases >= 1 GiB — the boot PML4's PML4[0]
+    //                 PDPT[0] covers [0, 1 GiB) with 2 MiB PS pages
+    //                 (the boot stack + IST stacks + kernel image
+    //                 live there), and the per-AS walker would
+    //                 descend into a PS entry and panic. User VAs
+    //                 above 1 GiB land in fresh private tables.
+    //   [256..511]  — copied from boot PML4 (kernel-half direct map +
+    //                 MMIO arena). Shared via copied PDPTs so future
+    //                 kernel-half mapping changes propagate everywhere
+    //                 without shootdown.
     u64* boot_pml4 = BootPml4Virt();
     for (u64 i = 0; i < kKernelHalfFirstIndex; ++i)
     {
