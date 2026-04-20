@@ -6,6 +6,7 @@
 
 set(CUSTOMOS_KERNEL_SOURCES
     core/main.cpp
+    core/panic.cpp
     acpi/acpi.cpp
     arch/x86_64/boot.S
     arch/x86_64/exceptions.S

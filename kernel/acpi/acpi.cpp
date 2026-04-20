@@ -2,6 +2,7 @@
 
 #include "../arch/x86_64/cpu.h"
 #include "../arch/x86_64/serial.h"
+#include "../core/panic.h"
 #include "../mm/multiboot2.h"
 #include "../mm/page.h"
 
@@ -110,10 +111,7 @@ constinit u64 g_override_count = 0;
 
 [[noreturn]] void PanicAcpi(const char* message)
 {
-    SerialWrite("\n[panic] acpi: ");
-    SerialWrite(message);
-    SerialWrite("\n");
-    Halt();
+    core::Panic("acpi", message);
 }
 
 bool BytesEqual(const char* a, const char* b, u64 n)

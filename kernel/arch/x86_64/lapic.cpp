@@ -4,6 +4,7 @@
 #include "idt.h"
 #include "serial.h"
 
+#include "../../core/panic.h"
 #include "../../mm/paging.h"
 
 // Defined in exceptions.S — the dedicated stub for the LAPIC spurious
@@ -51,10 +52,7 @@ bool CpuidApicPresent()
 
 [[noreturn]] void PanicLapic(const char* message)
 {
-    SerialWrite("\n[panic] arch/lapic: ");
-    SerialWrite(message);
-    SerialWrite("\n");
-    Halt();
+    core::Panic("arch/lapic", message);
 }
 
 } // namespace

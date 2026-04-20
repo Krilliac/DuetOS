@@ -2,6 +2,7 @@
 
 #include "../arch/x86_64/cpu.h"
 #include "../arch/x86_64/serial.h"
+#include "../core/panic.h"
 #include "../cpu/percpu.h"
 
 namespace customos::sync
@@ -34,10 +35,7 @@ inline u32 XchgU32(volatile u32& slot, u32 value)
 
 [[noreturn]] void PanicSpinlock(const char* message)
 {
-    arch::SerialWrite("\n[panic] sync/spinlock: ");
-    arch::SerialWrite(message);
-    arch::SerialWrite("\n");
-    arch::Halt();
+    core::Panic("sync/spinlock", message);
 }
 
 } // namespace

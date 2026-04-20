@@ -1,7 +1,6 @@
 #include "page.h"
 
-#include "../arch/x86_64/cpu.h"
-#include "../arch/x86_64/serial.h"
+#include "../core/panic.h"
 
 namespace customos::mm
 {
@@ -9,18 +8,9 @@ namespace customos::mm
 namespace
 {
 
-using arch::Halt;
-using arch::SerialWrite;
-using arch::SerialWriteHex;
-
 [[noreturn]] void PanicPage(const char* message, u64 value)
 {
-    SerialWrite("\n[panic] mm/page: ");
-    SerialWrite(message);
-    SerialWrite(" value=");
-    SerialWriteHex(value);
-    SerialWrite("\n");
-    Halt();
+    core::PanicWithValue("mm/page", message, value);
 }
 
 } // namespace

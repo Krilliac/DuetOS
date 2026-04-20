@@ -5,6 +5,7 @@
 
 #include "../arch/x86_64/cpu.h"
 #include "../arch/x86_64/serial.h"
+#include "../core/panic.h"
 
 namespace customos::mm
 {
@@ -38,10 +39,7 @@ constinit u64 g_free_count = 0;
 
 [[noreturn]] void PanicHeap(const char* message)
 {
-    SerialWrite("\n[panic] mm/kheap: ");
-    SerialWrite(message);
-    SerialWrite("\n");
-    Halt();
+    core::Panic("mm/kheap", message);
 }
 
 inline u64 RoundUp(u64 value, u64 align)

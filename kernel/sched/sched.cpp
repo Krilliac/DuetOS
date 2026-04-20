@@ -2,6 +2,7 @@
 
 #include "../arch/x86_64/cpu.h"
 #include "../arch/x86_64/serial.h"
+#include "../core/panic.h"
 #include "../mm/kheap.h"
 
 namespace customos::sched
@@ -48,10 +49,7 @@ constinit bool g_need_resched = false;
 
 [[noreturn]] void PanicSched(const char* message)
 {
-    SerialWrite("\n[panic] sched: ");
-    SerialWrite(message);
-    SerialWrite("\n");
-    Halt();
+    core::Panic("sched", message);
 }
 
 void RunqueuePush(Task* t)

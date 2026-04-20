@@ -5,6 +5,7 @@
 #include "serial.h"
 
 #include "../../acpi/acpi.h"
+#include "../../core/panic.h"
 #include "../../mm/paging.h"
 
 namespace customos::arch
@@ -50,10 +51,7 @@ constinit u64 g_ioapic_count = 0;
 
 [[noreturn]] void PanicIoApic(const char* message)
 {
-    SerialWrite("\n[panic] arch/ioapic: ");
-    SerialWrite(message);
-    SerialWrite("\n");
-    Halt();
+    core::Panic("arch/ioapic", message);
 }
 
 u32 IoApicRead(const IoApic& io, u32 reg)

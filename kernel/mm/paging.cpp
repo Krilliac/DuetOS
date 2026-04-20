@@ -5,6 +5,7 @@
 
 #include "../arch/x86_64/cpu.h"
 #include "../arch/x86_64/serial.h"
+#include "../core/panic.h"
 
 namespace customos::mm
 {
@@ -12,7 +13,6 @@ namespace customos::mm
 namespace
 {
 
-using arch::Halt;
 using arch::ReadCr3;
 using arch::SerialWrite;
 using arch::SerialWriteHex;
@@ -30,12 +30,7 @@ constinit u64 g_mappings_removed = 0;
 
 [[noreturn]] void PanicPaging(const char* message, u64 value)
 {
-    SerialWrite("\n[panic] mm/paging: ");
-    SerialWrite(message);
-    SerialWrite(" value=");
-    SerialWriteHex(value);
-    SerialWrite("\n");
-    Halt();
+    core::PanicWithValue("mm/paging", message, value);
 }
 
 inline u64 IndexPml4(uptr v)
