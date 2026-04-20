@@ -607,6 +607,146 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 064 — Compositor mutex for cross-thread UI state
+
+- **Scope:** `kernel/drivers/video/widget.{h,cpp}` — new
+  `CompositorLock` / `CompositorUnlock` wrapping a
+  file-static `sched::Mutex`. `kernel/core/main.cpp` —
+  mouse + keyboard reader threads bracket every UI-mutating
+  section with the lock.
+- **Decision:** Single global mutex guards every
+  UI-mutable data structure (cursor backing, window
+  registry, widget table, console buffer) and every
+  framebuffer write sequence that crosses them. FIFO
+  hand-off from the existing sched::Mutex means the
+  loser parks on a WaitQueue instead of spinning — cheap
+  even under heavy typing-while-dragging.
+- **Why:** The previous slice (kbd → console) documented
+  a latent race: both readers write to the framebuffer
+  and mutate the same console / cursor / window state
+  without coordination. Before SMP user code or an RT
+  input task arrives, this is "transient visual artifact"
+  level — but landing the fix now, on a single mutex with
+  obvious brackets, is far cheaper than retrofitting
+  after the first crash report.
+- **Rules out / defers:** Fine-grained locking (per-
+  surface, per-widget). Lock-free double-buffer compositor.
+  IRQ-context painting (mutex can sleep). Multi-monitor
+  lock topology.
+- **Revisit when:** Contention shows up in profiles. SMP
+  scheduler join (per-CPU cursors, RCU-style widget list).
+  Per-window damage tracking (each window gets its own
+  lock).
+- **Related tracks:** Track 9 (Windowing), Track 2 (SMP).
+
+---
+
+## 063 — Keyboard routed into the framebuffer console
+
+- **Scope:** `kernel/core/main.cpp` — `kbd_reader` thread
+  switches from `Ps2KeyboardReadChar` to
+  `Ps2KeyboardReadEvent`, filters press edges of printable
+  ASCII, writes to `ConsoleWriteChar`, triggers
+  DesktopCompose per keystroke. Enter and Backspace get
+  line-editing semantics; modifier-only edges are silent.
+- **Decision:** First closure of "keypress in hardware
+  to pixel on screen" end-to-end — matches the mouse
+  path's visible payoff. Each keystroke triggers one
+  full-desktop repaint inside CursorHide/Show. Repaint
+  cost is ~3 MB/s for a 1024x768x32 framebuffer at
+  typing rates (<30 Hz), comfortably under MMIO budget.
+- **Why:** A desktop with two windows, a cursor, and a
+  console without an input path is a museum diorama.
+  Wiring the console's input now validates the KeyEvent
+  API under real use AND makes the boot-log surface
+  feel alive.
+- **Rules out / defers:** Line editor (cursor nav,
+  word-delete, history). Proper terminal emulator (ANSI
+  escapes, bold / colour). Per-console fg/bg. Real shell
+  on top (needs line-editor + tokeniser + command
+  dispatch). Printable input while dragging (widget
+  router path is mutually exclusive during drag).
+- **Revisit when:** First shell-shaped widget lands
+  (wants the full edit API). Non-ASCII keyboard layout
+  needed (unlocks wider keymap).
+- **Related tracks:** Track 9 (Windowing — text input
+  source for every future toolkit widget), Track 7
+  (Userland — path to a shell).
+
+---
+
+## 062 — Framebuffer text console (80x40 char grid)
+
+- **Scope:** `kernel/drivers/video/console.{h,cpp}` — new
+  module. `kernel/drivers/video/widget.cpp` — DesktopCompose
+  paints the console BETWEEN banner and windows.
+- **Decision:** Fixed-size character grid backed by the
+  bitmap font. Writes append to a char buffer at a
+  tail cursor; newlines advance the row; bottom-row
+  overflow scrolls everything up. Re-rendered from the
+  char buffer on every ConsoleRedraw, so z-ordering
+  against windows is a pure draw-order question —
+  windows dragged over the console occlude, and a
+  follow-up DesktopCompose restores.
+- **Why:** Every interesting GUI surface eventually wants
+  multi-line text: boot log, shell, chat, source editor,
+  error dialogs. Landing the primitive now, on a simple
+  bg-fill + per-cell char-render model, means the first
+  consumer doesn't have to reinvent scrolling.
+- **Rules out / defers:** ANSI escape handling. Per-char
+  colour. Multiple console instances. Cursor navigation
+  (back, up, page). Line editing. Proportional text.
+  Thread safety (kept external via the compositor mutex).
+  Variable-size grid.
+- **Revisit when:** First real shell needs line editing.
+  Colour boot log wanted (entry-#033 klog severity colours
+  map to fg per line). Multi-console / tty tab bar lands.
+- **Related tracks:** Track 9 (Windowing — scrollable text
+  surface), Track 7 (Userland — shell foundation).
+
+---
+
+## 061 — Window registry + z-order + drag-by-title-bar
+
+- **Scope:** `kernel/drivers/video/widget.{h,cpp}` — window
+  storage (`kMaxWindows=4`), `WindowRegister`, `WindowRaise`,
+  `WindowMoveTo`, `WindowGetBounds`, `WindowTopmostAt`,
+  `WindowPointInTitle`, `WindowDrawAllOrdered`,
+  `DesktopCompose`. Buttons grow a `label` field so
+  PaintButton survives repaint without losing text.
+  `kernel/core/main.cpp` — mouse reader tracks drag state,
+  triggers DesktopCompose per packet during drag.
+- **Decision:** Promote windows from a one-shot
+  `WindowDraw` primitive to a flat fixed-size registry
+  with a z-order array. Press on a title bar raises +
+  begins drag; motion repaints the full desktop each
+  packet (no damage tracking — 1024x768x32 runs well
+  under budget at 100 Hz); release ends drag. Button
+  widgets float on top of all windows for v0 — the
+  "widgets belong to a window" refactor is its own
+  slice.
+- **Why:** Two windows with working stacking + drag is
+  the smallest thing that reads as a real window
+  manager. Z-order + raise-to-front-on-click is the
+  invariant every GUI converges on; landing it now
+  means every future window-manipulation slice builds
+  on the correct shape.
+- **Rules out / defers:** Proper damage-rect compositor
+  (full repaint works at current surface size). Resizing.
+  Close-button action (the red square is visual-only).
+  Stacking shadows. Minimise / maximise. Per-window
+  widget trees. Keyboard focus + Tab cycling. Window
+  deletion.
+- **Revisit when:** Surface gets bigger (4K) or draw
+  rate needs to hit 60 Hz with widgets — forces damage
+  tracking. Second widget class (menu, list box) makes
+  "widgets live in a window" a forcing refactor.
+  Close-button-click lands.
+- **Related tracks:** Track 9 (Windowing — core window
+  manager), Track 6 (Drivers — pointer event consumer).
+
+---
+
 ## 060 — 8x8 bitmap font + framebuffer text rendering
 
 - **Scope:** `kernel/drivers/video/font8x8.{h,cpp}` — hand-crafted
