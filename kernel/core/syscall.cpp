@@ -82,6 +82,7 @@ i64 DoWrite(u64 fd, const void* user_buf, u64 len)
         arch::SerialWrite(" cap=");
         arch::SerialWrite(CapName(kCapSerialConsole));
         arch::SerialWrite("\n");
+        RecordSandboxDenial(kCapSerialConsole);
         return -1;
     }
 
@@ -191,6 +192,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
             arch::SerialWrite(" cap=");
             arch::SerialWrite(CapName(kCapFsRead));
             arch::SerialWrite("\n");
+            RecordSandboxDenial(kCapFsRead);
             frame->rax = static_cast<u64>(-1);
             return;
         }
@@ -272,6 +274,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
             arch::SerialWrite(" cap=");
             arch::SerialWrite(CapName(kCapFsRead));
             arch::SerialWrite("\n");
+            RecordSandboxDenial(kCapFsRead);
             frame->rax = static_cast<u64>(-1);
             return;
         }

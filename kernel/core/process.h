@@ -160,12 +160,27 @@ struct Process
     u64 tick_budget;
     u64 ticks_used;
 
+    // Sandbox-denial counter. Every cap-gated syscall that rejects
+    // the caller bumps this by one. Legitimate sandboxed code
+    // shouldn't attempt blocked syscalls; a process that crosses
+    // the threshold is almost certainly hostile (e.g. brute-
+    // forcing syscalls looking for something that isn't denied)
+    // and is terminated. Complements the tick budget: a spinning
+    // task would be caught by ticks, a retrying task by denials.
+    u64 sandbox_denials;
+
     u64 refcount;
 };
 
 // Canonical tick budgets. Timer runs at 100 Hz, so 1000 ticks ≈ 10 s.
 inline constexpr u64 kTickBudgetSandbox = 1000;          // 10 seconds at 100 Hz
 inline constexpr u64 kTickBudgetTrusted = 1ULL << 40;    // ~12 decades at 100 Hz = effectively unlimited
+
+// Threshold at which sandbox denials are treated as confirmed
+// malicious behaviour. 100 is generous — a well-written sandbox
+// probe (our ring3-sandbox task in the smoke test) stays well
+// under this — but anything higher is a hostile retry loop.
+inline constexpr u64 kSandboxDenialKillThreshold = 100;
 
 /// Allocate a Process and take ownership of `as`. Does NOT bump
 /// `as`'s refcount — ProcessCreate assumes the caller hands over
@@ -197,5 +212,17 @@ Process* CurrentProcess();
 /// string or "unknown". Must be safe from any context (no locks,
 /// no allocation).
 const char* CapName(Cap c);
+
+/// Called from every cap-denial site (inside a syscall that
+/// rejected its caller). Bumps the current Process's
+/// sandbox_denials counter and, if the threshold is crossed,
+/// flags the task for termination at next resched (same
+/// mechanism the tick-budget path uses — the scheduler
+/// converts the flag into a Dead transition).
+///
+/// Idempotent past the threshold — repeated calls keep
+/// counting but the task is flagged exactly once. `cap`
+/// argument is just for the log line; no functional effect.
+void RecordSandboxDenial(Cap cap);
 
 } // namespace customos::core

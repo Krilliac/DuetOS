@@ -488,6 +488,22 @@ core::Process* TaskProcess(Task* t)
     return t->process;
 }
 
+void FlagCurrentForKill()
+{
+    Task* t = Current();
+    if (t == nullptr)
+    {
+        return;
+    }
+    // Piggy-back on the tick_exhausted mechanism — same kill
+    // semantics (Dead on next resched, reaper tears down the
+    // Process). Setting the flag is atomic from this context
+    // (single-CPU, same core). On SMP, the flag is per-task;
+    // only this CPU's Schedule() reads it for this task.
+    t->tick_exhausted = true;
+    NeedResched() = true;
+}
+
 void Schedule()
 {
     if (Current() == nullptr)

@@ -417,6 +417,97 @@ void SpawnRing3Task(const char* name, CapSet caps, const fs::RamfsNode* root, u6
     sched::SchedCreateUser(&Ring3UserEntry, nullptr, name, proc);
 }
 
+// Dedicated hostile-syscall-spam payload: spins calling SYS_WRITE(fd=1)
+// forever. Each iteration fails the kCapSerialConsole cap check and
+// bumps the Process's sandbox_denials counter. Once the counter hits
+// kSandboxDenialKillThreshold (100 denials ≈ a hundred iterations),
+// the cap-check code calls FlagCurrentForKill() and the scheduler
+// terminates the task at next resched.
+//
+// This is the "a malicious EXE retrying a blocked syscall" threat
+// model in action. The existing ring3-smoke-sandbox only hits 2
+// denials (well under threshold), so it's not a hostile probe
+// per-se — just a compliance check. This task is explicitly hostile.
+//
+// Payload (16 bytes):
+//   offset 0x00: pause
+//   offset 0x02 loop: mov eax, 2            ; SYS_WRITE (5 bytes)
+//   offset 0x07: mov edi, 1                 ; fd=1 (5 bytes)
+//                                             — otherwise fd-check short-
+//                                             circuits before the cap
+//                                             check and we never bump
+//                                             the denial counter.
+//   offset 0x0C: int 0x80                   ; denied by cap check (2 b)
+//   offset 0x0E: jmp loop                   ; rel8 = -14 (2 bytes)
+//                                             — targets offset 2, skipping
+//                                             the one-off `pause` prefix.
+//
+// Next_rip after the jmp = 0x10. disp = target(0x02) - next_rip(0x10)
+// = -14 = 0xF2 (signed int8).
+//
+// clang-format off
+constexpr u8 kHostileProbeBytes[] = {
+    0xF3, 0x90,                                                   // pause
+    0xB8, 0x02, 0x00, 0x00, 0x00,                                 // mov eax, 2    (SYS_WRITE)
+    0xBF, 0x01, 0x00, 0x00, 0x00,                                 // mov edi, 1
+    0xCD, 0x80,                                                   // int 0x80
+    0xEB, 0xF2,                                                   // jmp -14 (back to mov eax, 2)
+};
+// clang-format on
+
+void SpawnHostileProbe()
+{
+    using arch::SerialWrite;
+    using arch::SerialWriteHex;
+    using namespace customos::mm;
+
+    const u64 code_va = AslrPickBase();
+    const u64 stack_va = code_va + kStackOffsetFromCode;
+
+    AddressSpace* as = AddressSpaceCreate(kFrameBudgetSandbox);
+    if (as == nullptr)
+    {
+        Panic("core/ring3", "AS create failed for hostile probe");
+    }
+    const PhysAddr code_frame = AllocateFrame();
+    if (code_frame == kNullFrame)
+    {
+        Panic("core/ring3", "code frame alloc failed for hostile probe");
+    }
+    auto* code_direct = static_cast<u8*>(PhysToVirt(code_frame));
+    for (u64 i = 0; i < mm::kPageSize; ++i)
+    {
+        code_direct[i] = 0;
+    }
+    for (u64 i = 0; i < sizeof(kHostileProbeBytes); ++i)
+    {
+        code_direct[i] = kHostileProbeBytes[i];
+    }
+    const PhysAddr stack_frame = AllocateFrame();
+    if (stack_frame == kNullFrame)
+    {
+        Panic("core/ring3", "stack frame alloc failed for hostile probe");
+    }
+    AddressSpaceMapUserPage(as, code_va, code_frame, kPagePresent | kPageUser);
+    AddressSpaceMapUserPage(as, stack_va, stack_frame, kPagePresent | kPageWritable | kPageUser | kPageNoExecute);
+
+    // Empty caps — SYS_WRITE is the target, so we want the cap
+    // check to reject. Tight tick budget too; denial counter
+    // should fire LONG before the tick budget does (100 syscalls
+    // in ring 3 is microseconds), but a generous floor protects
+    // against a weird schedule.
+    Process* proc = ProcessCreate("ring3-hostile-syscall", as, CapSetEmpty(), fs::RamfsSandboxRoot(), code_va, stack_va,
+                                  kTickBudgetSandbox);
+    if (proc == nullptr)
+    {
+        Panic("core/ring3", "ProcessCreate failed for hostile probe");
+    }
+    SerialWrite("[ring3] queued hostile-syscall probe pid=");
+    SerialWriteHex(proc->pid);
+    SerialWrite("\n");
+    sched::SchedCreateUser(&Ring3UserEntry, nullptr, "ring3-hostile-syscall", proc);
+}
+
 // Dedicated CPU-hog payload: spins in a tight `jmp $` loop so the
 // scheduler's tick-budget check eventually triggers. A sandbox with
 // a 50-tick budget reaches [sched] tick budget exhausted after
@@ -724,11 +815,12 @@ void StartRing3SmokeTask()
     // is broken: a user-mode fault must never bring down the OS.
     SpawnJailProbeTask();
     SpawnNxProbeTask();
-    // CPU-hog probe: spins forever with a 50-tick budget. Exercises
-    // the tick-budget kill path end-to-end — scheduler fires
-    // `[sched] tick budget exhausted pid=...` + `[task-kill]`.
     SpawnCpuHogProbe();
-    Log(LogLevel::Info, "core/ring3", "ring3 smoke tasks queued (including cpu-hog)");
+    // Hostile-syscall probe: retries a blocked SYS_WRITE forever.
+    // After 100 cap denials, the sandbox-denial threshold kills
+    // the task. Boot log shows `[sandbox] pid=N hit 100 denials`.
+    SpawnHostileProbe();
+    Log(LogLevel::Info, "core/ring3", "ring3 smoke tasks queued (incl cpu-hog + hostile-syscall)");
 }
 
 } // namespace customos::core

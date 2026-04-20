@@ -44,6 +44,7 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     p->user_stack_va = user_stack_va;
     p->tick_budget = tick_budget;
     p->ticks_used = 0;
+    p->sandbox_denials = 0;
     p->refcount = 1;
 
     ++g_live_processes;
@@ -114,6 +115,35 @@ Process* CurrentProcess()
         return nullptr;
     }
     return sched::TaskProcess(t);
+}
+
+void RecordSandboxDenial(Cap cap)
+{
+    sched::Task* t = sched::CurrentTask();
+    if (t == nullptr)
+    {
+        return;
+    }
+    Process* p = sched::TaskProcess(t);
+    if (p == nullptr)
+    {
+        return; // kernel-only task hit a cap-denial — shouldn't happen
+    }
+    ++p->sandbox_denials;
+    if (p->sandbox_denials == kSandboxDenialKillThreshold)
+    {
+        // Crossed the threshold. Log once (the `==` comparison
+        // ensures we don't spam the log for every subsequent
+        // denial past threshold) and flag for termination.
+        arch::SerialWrite("[sandbox] pid=");
+        arch::SerialWriteHex(p->pid);
+        arch::SerialWrite(" hit ");
+        arch::SerialWriteHex(kSandboxDenialKillThreshold);
+        arch::SerialWrite(" denials (last cap=");
+        arch::SerialWrite(CapName(cap));
+        arch::SerialWrite(") — terminating as malicious\n");
+        sched::FlagCurrentForKill();
+    }
 }
 
 const char* CapName(Cap c)

@@ -96,6 +96,13 @@ Task* SchedCreateUser(TaskEntry entry, void* arg, const char* name, core::Proces
 /// handlers via `core::CurrentProcess()` to cap-check.
 core::Process* TaskProcess(Task* t);
 
+/// Flag the current task for termination at next resched, same
+/// mechanism the tick-budget path uses. Schedule() reads the
+/// flag and converts the task into a zombie on re-enqueue.
+/// Safe to call from kernel / syscall context; a no-op if
+/// there's no current task (should never happen in practice).
+void FlagCurrentForKill();
+
 /// Voluntary yield. Pushes current task to the tail of the runqueue and
 /// switches to the head (if any other task is ready).
 void SchedYield();
