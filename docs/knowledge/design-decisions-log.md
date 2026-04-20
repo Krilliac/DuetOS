@@ -607,6 +607,129 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 073 — START menu popup with action dispatch
+
+- **Scope:** `kernel/drivers/video/menu.{h,cpp}` — new popup-
+  menu primitive. `kernel/drivers/video/taskbar.{h,cpp}` —
+  `TaskbarStartBounds` exposes the anchor rectangle.
+  `kernel/core/main.cpp` — seeds four demo menu items and
+  dispatches them from the mouse reader.
+- **Decision:** Single-instance vertical item menu stored as
+  `(label, action_id)` pairs. MenuOpen anchors at a caller-
+  supplied (x, y) point; MenuRedraw paints last in
+  DesktopCompose so it sits above the taskbar that opened
+  it. Callers own id allocation + dispatch switch — the
+  menu primitive is content-agnostic and has no callbacks.
+- **Why:** The START button was a visual stub for several
+  slices; wiring it to a popup that actually does something
+  turns "looks like a GUI" into "behaves like one." The
+  (label, action_id) shape maps cleanly to future context
+  menus, menu bars (File / Edit / View), and right-click
+  popups — all of which the same primitive will serve.
+- **Rules out / defers:** Keyboard navigation (arrow keys,
+  Enter / Esc). Hover highlight. Sub-menus. Separators /
+  icons / shortcut hints. Multiple menus simultaneously
+  open. Long-text ellipsis.
+- **Revisit when:** Second menu instance needed (right-click
+  menu). Menu bar lands (same primitive, multiple anchors).
+  Keyboard-only navigation required for accessibility.
+- **Related tracks:** Track 9 (Windowing), Track 7
+  (Userland — shell launcher).
+
+---
+
+## 072 — Alt+Tab and Alt+F4 keyboard shortcuts
+
+- **Scope:** `kernel/drivers/video/widget.{h,cpp}` —
+  `WindowCycleActive` walks z-order forward to the next
+  alive window and raises it. `kernel/core/main.cpp` —
+  kbd reader intercepts Alt+Tab / Alt+F4 before any
+  text-input dispatch.
+- **Decision:** Two iconic keyboard interactions land
+  together because they share the Alt-modifier branch.
+  Alt+Tab cycles; Alt+F4 calls WindowClose on the active
+  window. Both trigger a full recompose under the
+  compositor mutex so chrome + tab highlight update
+  immediately.
+- **Why:** Muscle memory. Keyboard window-management is
+  a baseline expectation on every desktop OS; skipping
+  it would invalidate the "Windows-like" framing.
+  Landing both now, before more input surfaces arrive,
+  keeps the dispatch ladder clean.
+- **Rules out / defers:** Alt+Tab overlay (thumbnail
+  preview + multi-tap cycle). Shift+Alt+Tab reverse cycle.
+  Ctrl+Alt+Del handler. Meta+L / Meta+E shell launchers.
+- **Revisit when:** Thumbnail overlay lands (needs
+  damage-rect + held-Alt state machine). First shell-
+  global shortcut (e.g. Meta+R run dialog).
+- **Related tracks:** Track 9 (Windowing), Track 6
+  (Drivers — KeyEvent consumer).
+
+---
+
+## 071 — CMOS RTC driver + HH:MM:SS in taskbar
+
+- **Scope:** `kernel/arch/x86_64/rtc.{h,cpp}` — new MC146818-
+  compatible CMOS reader. `kernel/drivers/video/taskbar.cpp`
+  — taskbar clock replaces uptime-only with HH:MM:SS.
+- **Decision:** Read-only wall-clock access via CMOS ports
+  0x70 / 0x71. Waits out UIP (Update In Progress) before
+  sampling; double-reads all six fields and retries on
+  mismatch; honours firmware-set BCD/binary + 12/24-hour
+  flags from Status-B. Century register deferred —
+  assume 2000s through 2099.
+- **Why:** First real wall-clock source in the tree. The
+  scheduler uptime counter was fine for boot sanity but
+  is meaningless for "what time is it." RTC is universally
+  available (every chipset + every hypervisor emulates
+  MC146818) and cheap to parse.
+- **Rules out / defers:** Writing the RTC (needs different
+  UIP handling). IRQ 8 periodic mode (LAPIC timer already
+  covers periodic). Century register from FADT. Timezone
+  awareness (RTC is typically UTC or local, firmware-
+  dependent — no strategy yet). Drift correction vs NTP.
+- **Revisit when:** Logs gain wall-clock timestamps. First
+  writable FS wants mtime. NTP client lands (needs clock
+  writes). Century register matters (post-2099 or pre-
+  2000 dual-boot).
+- **Related tracks:** Track 2 (Platform — time sources),
+  Track 5 (FS — mtimes).
+
+---
+
+## 070 — Active window state + focus-visible chrome
+
+- **Scope:** `kernel/drivers/video/widget.{h,cpp}` — new
+  `g_active_window` global; `WindowRaise` / `WindowRegister`
+  set it; `WindowClose` promotes next alive. `WindowActive`
+  accessor. Inactive windows paint with
+  `kInactiveTitleRgb = 0x00506070`.
+  `kernel/drivers/video/taskbar.cpp` — active window's tab
+  fills with the accent colour.
+- **Decision:** Raised == active — the simplest focus model,
+  matches Windows 95 through 11 (without focus-follows-
+  mouse). Inactive title bars use a muted global grey-blue
+  instead of each window's registered colour, so the
+  active/inactive distinction reads at a glance without
+  per-window palette matching.
+- **Why:** Every subsequent slice that cares about focus
+  (keyboard routing to a window, F4 = close active, menu
+  shortcuts) needs one canonical "which window is
+  focused" answer. Landing it before those consumers
+  arrive means they build on the right shape.
+- **Rules out / defers:** Focus decoupled from raise
+  (modal dialogs, focus-follows-mouse). Keyboard focus
+  traversal within a window (Tab cycling). Window-level
+  focus callbacks. Distinct active/inactive button
+  colours.
+- **Revisit when:** Modal dialogs land. Text-input
+  widgets inside a window need caret blink gated on
+  active state. Focus-follows-mouse option requested.
+- **Related tracks:** Track 9 (Windowing), Track 7
+  (Shell — keyboard shortcut routing).
+
+---
+
 ## 069 — Clickable taskbar tabs
 
 - **Scope:** `kernel/drivers/video/taskbar.{h,cpp}` —
