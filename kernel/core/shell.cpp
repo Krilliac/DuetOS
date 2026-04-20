@@ -153,10 +153,9 @@ void WriteU8TwoDigits(u8 v)
     ConsoleWriteChar(static_cast<char>('0' + (v % 10)));
 }
 
-void Prompt()
-{
-    ConsoleWrite("$ ");
-}
+// Prompt() reads $PS1 from the env table if set; implementation
+// lives after the env infrastructure is declared, further down.
+void Prompt();
 
 // ---------------------------------------------------------------
 // Commands
@@ -187,9 +186,12 @@ void CmdHelp()
     ConsoleWriteln("  STATS        SCHEDULER STATISTICS");
     ConsoleWriteln("  MEM          PHYSICAL MEMORY USAGE");
     ConsoleWriteln("  HISTORY      LIST RECENT COMMANDS (!N RECALL, !! REPEAT)");
-    ConsoleWriteln("  SET NAME VAL SET ENV VARIABLE");
+    ConsoleWriteln("  SET NAME VAL SET ENV VARIABLE  (SET PS1 '%' CUSTOMISES PROMPT)");
     ConsoleWriteln("  UNSET NAME   REMOVE ENV VARIABLE");
     ConsoleWriteln("  ENV          LIST ENV VARIABLES  (USE $NAME IN ARGS)");
+    ConsoleWriteln("  ALIAS N CMD  CREATE ALIAS (BARE ALIAS LISTS ALL)");
+    ConsoleWriteln("  UNALIAS N    REMOVE ALIAS");
+    ConsoleWriteln("  SYSINFO      ONE-SHOT SYSTEM STATUS SUMMARY");
     ConsoleWriteln("");
     ConsoleWriteln("KEYS:  UP/DOWN = HISTORY   TAB = COMPLETE");
     ConsoleWriteln("       CTRL+ALT+T = TOGGLE MODE");
@@ -287,9 +289,11 @@ void CmdStats()
     ConsoleWriteChar('\n');
 }
 
-// Forward — TmpLeaf lives further down alongside the tmpfs
-// command implementations; these read/copy helpers need it.
+// Forwards — these helpers live further down but are used by
+// the earlier command implementations / the Prompt helper.
 const char* TmpLeaf(const char* path);
+struct EnvSlot;
+EnvSlot* EnvFind(const char* name);
 
 // ---------------------------------------------------------------
 // Environment variables. Fixed 8-slot table, 32-byte names +
@@ -379,6 +383,86 @@ bool EnvUnset(const char* name)
     s->name[0] = '\0';
     s->value[0] = '\0';
     return true;
+}
+
+// ---------------------------------------------------------------
+// Aliases. Same shape as the env table — 8 slots, 32-byte names,
+// 96-byte expansions. Dispatched BEFORE the env-var pass so an
+// alias that includes $VAR references still gets expanded.
+// ---------------------------------------------------------------
+
+constexpr u32 kAliasSlotCount = 8;
+constexpr u32 kAliasExpansionMax = 96;
+
+struct AliasSlot
+{
+    bool in_use;
+    char name[kEnvNameMax];
+    char expansion[kAliasExpansionMax];
+};
+
+constinit AliasSlot g_aliases[kAliasSlotCount] = {};
+
+AliasSlot* AliasFind(const char* name)
+{
+    for (u32 i = 0; i < kAliasSlotCount; ++i)
+    {
+        if (g_aliases[i].in_use && EnvNameEq(g_aliases[i].name, name))
+        {
+            return &g_aliases[i];
+        }
+    }
+    return nullptr;
+}
+
+bool AliasSet(const char* name, const char* expansion)
+{
+    AliasSlot* s = AliasFind(name);
+    if (s == nullptr)
+    {
+        for (u32 i = 0; i < kAliasSlotCount; ++i)
+        {
+            if (!g_aliases[i].in_use)
+            {
+                s = &g_aliases[i];
+                s->in_use = true;
+                break;
+            }
+        }
+    }
+    if (s == nullptr)
+    {
+        return false;
+    }
+    EnvCopy(s->name, name, kEnvNameMax);
+    EnvCopy(s->expansion, expansion, kAliasExpansionMax);
+    return true;
+}
+
+bool AliasUnset(const char* name)
+{
+    AliasSlot* s = AliasFind(name);
+    if (s == nullptr)
+    {
+        return false;
+    }
+    s->in_use = false;
+    s->name[0] = '\0';
+    s->expansion[0] = '\0';
+    return true;
+}
+
+void Prompt()
+{
+    // If the user sets $PS1, honour it as the prompt string.
+    // Defaults to "$ " — the simplest POSIX-flavour prompt.
+    const EnvSlot* s = EnvFind("PS1");
+    if (s != nullptr && s->value[0] != '\0')
+    {
+        ConsoleWrite(s->value);
+        return;
+    }
+    ConsoleWrite("$ ");
 }
 
 // Pull a file's bytes into an output buffer. Source can be
@@ -675,6 +759,131 @@ void CmdUnset(u32 argc, char** argv)
         ConsoleWrite("UNSET: NO SUCH VAR: ");
         ConsoleWriteln(argv[1]);
     }
+}
+
+void CmdAlias(u32 argc, char** argv)
+{
+    if (argc == 1)
+    {
+        // List all.
+        bool any = false;
+        for (u32 i = 0; i < kAliasSlotCount; ++i)
+        {
+            if (!g_aliases[i].in_use)
+                continue;
+            any = true;
+            ConsoleWrite("  ");
+            ConsoleWrite(g_aliases[i].name);
+            ConsoleWrite("  = ");
+            ConsoleWriteln(g_aliases[i].expansion);
+        }
+        if (!any)
+        {
+            ConsoleWriteln("(NO ALIASES)");
+        }
+        return;
+    }
+    if (argc == 2)
+    {
+        const AliasSlot* s = AliasFind(argv[1]);
+        if (s == nullptr)
+        {
+            ConsoleWrite("ALIAS: NO SUCH ALIAS: ");
+            ConsoleWriteln(argv[1]);
+            return;
+        }
+        ConsoleWrite(argv[1]);
+        ConsoleWrite(" = ");
+        ConsoleWriteln(s->expansion);
+        return;
+    }
+    // 3+ args — join args[2..argc] with single spaces into the
+    // expansion, matching how the user typed it.
+    char buf[kAliasExpansionMax];
+    u32 out = 0;
+    for (u32 i = 2; i < argc; ++i)
+    {
+        if (i > 2 && out + 1 < sizeof(buf))
+            buf[out++] = ' ';
+        for (u32 j = 0; argv[i][j] != '\0' && out + 1 < sizeof(buf); ++j)
+            buf[out++] = argv[i][j];
+    }
+    buf[out] = '\0';
+    if (!AliasSet(argv[1], buf))
+    {
+        ConsoleWriteln("ALIAS: TABLE FULL");
+    }
+}
+
+void CmdUnalias(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("UNALIAS: MISSING NAME");
+        return;
+    }
+    if (!AliasUnset(argv[1]))
+    {
+        ConsoleWrite("UNALIAS: NO SUCH ALIAS: ");
+        ConsoleWriteln(argv[1]);
+    }
+}
+
+void CmdSysinfo()
+{
+    // One-shot dump of the introspection surface — saves a user
+    // from typing version / uptime / date / mem / stats / windows
+    // in sequence. Read-only; all data comes from the same
+    // accessors the individual commands use.
+    ConsoleWriteln("CUSTOMOS v0  (WINDOWED DESKTOP SHELL)");
+    ConsoleWrite("UPTIME:  ");
+    const u64 secs = customos::sched::SchedNowTicks() / 100;
+    WriteU64Dec(secs);
+    ConsoleWriteln(" SECONDS");
+    customos::arch::RtcTime t{};
+    customos::arch::RtcRead(&t);
+    ConsoleWrite("WALL:    ");
+    WriteU8TwoDigits(t.hour);
+    ConsoleWriteChar(':');
+    WriteU8TwoDigits(t.minute);
+    ConsoleWriteChar(':');
+    WriteU8TwoDigits(t.second);
+    ConsoleWriteChar(' ');
+    WriteU64Dec(t.year);
+    ConsoleWriteChar('-');
+    WriteU8TwoDigits(t.month);
+    ConsoleWriteChar('-');
+    WriteU8TwoDigits(t.day);
+    ConsoleWriteChar('\n');
+    const auto s = customos::sched::SchedStatsRead();
+    ConsoleWrite("TASKS:   ");
+    WriteU64Dec(s.tasks_live);
+    ConsoleWrite(" LIVE, ");
+    WriteU64Dec(s.tasks_sleeping);
+    ConsoleWrite(" SLEEPING, ");
+    WriteU64Dec(s.tasks_blocked);
+    ConsoleWriteln(" BLOCKED");
+    const u64 total = customos::mm::TotalFrames();
+    const u64 free_frames = customos::mm::FreeFramesCount();
+    ConsoleWrite("MEMORY:  ");
+    WriteU64Dec((total - free_frames) * 4);
+    ConsoleWrite(" KIB USED / ");
+    WriteU64Dec(total * 4);
+    ConsoleWriteln(" KIB TOTAL");
+    u32 alive = 0;
+    for (u32 h = 0; h < customos::drivers::video::WindowRegistryCount(); ++h)
+    {
+        if (customos::drivers::video::WindowIsAlive(h))
+            ++alive;
+    }
+    ConsoleWrite("WINDOWS: ");
+    WriteU64Dec(alive);
+    ConsoleWriteln(" ALIVE");
+    ConsoleWrite("MODE:    ");
+    ConsoleWriteln(customos::drivers::video::GetDisplayMode() ==
+                           customos::drivers::video::DisplayMode::Tty
+                       ? "TTY"
+                       : "DESKTOP");
 }
 
 void CmdEnv()
@@ -1163,6 +1372,37 @@ void Dispatch(char* line)
         return;
     }
 
+    // Alias expansion — runs before tokenize. If the first
+    // whitespace-delimited token matches a registered alias,
+    // substitute the alias's expansion and keep the remainder
+    // of the line. One level of expansion; an alias that
+    // references another alias is NOT recursively expanded,
+    // matching bash's default (`shopt -u expand_aliases`
+    // territory — recursive is a footgun).
+    {
+        u32 wend = 0;
+        while (line[wend] != '\0' && line[wend] != ' ' && line[wend] != '\t')
+            ++wend;
+        const char saved = line[wend];
+        line[wend] = '\0';
+        AliasSlot* a = AliasFind(line);
+        line[wend] = saved;
+        if (a != nullptr)
+        {
+            char scratch[kInputMax + kAliasExpansionMax];
+            u32 o = 0;
+            for (u32 i = 0; a->expansion[i] != '\0' && o + 1 < sizeof(scratch); ++i)
+                scratch[o++] = a->expansion[i];
+            for (u32 i = wend; line[i] != '\0' && o + 1 < sizeof(scratch); ++i)
+                scratch[o++] = line[i];
+            scratch[o] = '\0';
+            u32 j = 0;
+            for (; scratch[j] != '\0' && j + 1 < kInputMax; ++j)
+                line[j] = scratch[j];
+            line[j] = '\0';
+        }
+    }
+
     char* argv[kMaxArgs] = {};
     const u32 argc = Tokenize(line, argv);
     if (argc == 0)
@@ -1311,6 +1551,21 @@ void Dispatch(char* line)
         CmdEnv();
         return;
     }
+    if (StrEq(cmd, "alias"))
+    {
+        CmdAlias(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "unalias"))
+    {
+        CmdUnalias(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "sysinfo"))
+    {
+        CmdSysinfo();
+        return;
+    }
     ConsoleWrite("COMMAND NOT FOUND: ");
     ConsoleWriteln(cmd);
     ConsoleWriteln("TYPE HELP FOR A LIST OF COMMANDS.");
@@ -1442,10 +1697,10 @@ bool NamePrefixMatch(const char* name, const char* prefix, u32 plen)
 void CompleteCommandName()
 {
     static const char* const kCommandSet[] = {
-        "help",    "about", "version", "clear", "uptime", "date",  "windows", "mode",
-        "ls",      "cat",   "touch",   "rm",    "echo",   "cp",    "mv",      "wc",
-        "head",    "tail",  "dmesg",   "stats", "mem",    "history", "set",   "unset",
-        "env",
+        "help",    "about",   "version", "clear",   "uptime",  "date",    "windows",
+        "mode",    "ls",      "cat",     "touch",   "rm",      "echo",    "cp",
+        "mv",      "wc",      "head",    "tail",    "dmesg",   "stats",   "mem",
+        "history", "set",     "unset",   "env",     "alias",   "unalias", "sysinfo",
     };
     constexpr u32 kCmdCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
