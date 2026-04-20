@@ -5,6 +5,8 @@
 #include "serial.h"
 #include "traps.h"
 
+#include "../../sched/sched.h"
+
 namespace customos::arch
 {
 
@@ -59,6 +61,11 @@ void TimerHandler()
         SerialWriteHex(g_ticks);
         SerialWrite("\n");
     }
+
+    // Request a reschedule on every tick. The IRQ dispatcher consults this
+    // flag (and clears it) AFTER sending EOI, so we don't context-switch
+    // away with the LAPIC in-service bit still set for this vector.
+    sched::SetNeedResched();
 }
 
 // Spin until the PIT channel 2 OUT line goes high (terminal count reached

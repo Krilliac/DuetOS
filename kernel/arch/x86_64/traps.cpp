@@ -4,6 +4,8 @@
 #include "lapic.h"
 #include "serial.h"
 
+#include "../../sched/sched.h"
+
 namespace customos::arch
 {
 
@@ -15,10 +17,10 @@ namespace
 // registered" — the dispatcher logs and EOIs but takes no other action.
 constinit IrqHandler g_irq_handlers[17] = {};
 
-constexpr u8 kIrqVectorBase    = 32;
-constexpr u8 kIrqVectorCount   = 16;
-constexpr u8 kSpuriousVector   = 0xFF;
-constexpr u8 kSpuriousSlot     = 16;
+constexpr u8 kIrqVectorBase = 32;
+constexpr u8 kIrqVectorCount = 16;
+constexpr u8 kSpuriousVector = 0xFF;
+constexpr u8 kSpuriousSlot = 16;
 
 inline u8 IrqSlot(u64 vector)
 {
@@ -81,8 +83,7 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     // EOIs the LAPIC and returns to isr_common's iretq, which resumes the
     // interrupted code. No diagnostic spew per IRQ — the timer alone fires
     // hundreds of times a second.
-    if ((frame->vector >= kIrqVectorBase &&
-         frame->vector < kIrqVectorBase + kIrqVectorCount) ||
+    if ((frame->vector >= kIrqVectorBase && frame->vector < kIrqVectorBase + kIrqVectorCount) ||
         frame->vector == kSpuriousVector)
     {
         const u8 slot = IrqSlot(frame->vector);
@@ -104,6 +105,15 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         if (frame->vector != kSpuriousVector)
         {
             LapicEoi();
+        }
+
+        // Preemption point. EOI happens first so a task we switch to can
+        // immediately take its own timer IRQ; if we swapped CR3/stack
+        // BEFORE EOI, the LAPIC's in-service bit would still be set for
+        // this vector and the next tick would be suppressed.
+        if (sched::TakeNeedResched())
+        {
+            sched::Schedule();
         }
         return;
     }
@@ -129,7 +139,7 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     WriteLabelled("rsp       ", frame->rsp);
     WriteLabelled("ss        ", frame->ss);
 
-    if (frame->vector == 14)    // #PF
+    if (frame->vector == 14) // #PF
     {
         WriteLabelled("cr2       ", ReadCr2());
     }
@@ -157,8 +167,7 @@ extern "C" void TrapDispatch(TrapFrame* frame)
 
 void IrqInstall(u8 vector, IrqHandler handler)
 {
-    if ((vector < kIrqVectorBase || vector >= kIrqVectorBase + kIrqVectorCount) &&
-        vector != kSpuriousVector)
+    if ((vector < kIrqVectorBase || vector >= kIrqVectorBase + kIrqVectorCount) && vector != kSpuriousVector)
     {
         SerialWrite("[irq] IrqInstall: vector out of range ");
         SerialWriteHex(vector);

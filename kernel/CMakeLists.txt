@@ -19,6 +19,8 @@ set(CUSTOMOS_KERNEL_SOURCES
     mm/kheap.cpp
     mm/page.cpp
     mm/paging.cpp
+    sched/context_switch.S
+    sched/sched.cpp
 )
 
 add_executable(customos-kernel ${CUSTOMOS_KERNEL_SOURCES})

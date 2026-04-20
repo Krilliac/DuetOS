@@ -22,12 +22,13 @@ _Read this at every session start (after git sync). Each row links to a detailed
 | Kernel heap v0 — first-fit + coalescing over direct map | [knowledge/kernel-heap-v0.md](knowledge/kernel-heap-v0.md) | Observation | Active | 2026-04-20 |
 | Managed page-table API v0 — 4-level walker over boot PML4 | [knowledge/paging-v0.md](knowledge/paging-v0.md) | Observation | Active | 2026-04-20 |
 | LAPIC + periodic timer v0 — PIT-calibrated 100 Hz tick | [knowledge/lapic-timer-v0.md](knowledge/lapic-timer-v0.md) | Observation | Active | 2026-04-20 |
+| Scheduler v0 — round-robin kernel threads with preemption | [knowledge/scheduler-v0.md](knowledge/scheduler-v0.md) | Observation | Active | 2026-04-20 |
 
 ## Quick Reference
 
 ### Current Project State (2026-04-20)
 
-- **Repository**: kernel runs at `0xFFFFFFFF80000000` (higher-half), brings up GDT + IDT (vectors 0..47 + LAPIC spurious 0xFF), parses the Multiboot2 memory map, runs a bitmap-backed physical frame allocator with single + contiguous-run allocation, brings up a 2 MiB first-fit + coalescing kernel heap (`KMalloc`/`KFree`) over the higher-half direct map, adopts the boot PML4 with a 4-level managed paging API (`MapPage`/`UnmapPage`/`MapMmio` into a 512 MiB MMIO arena at `0xFFFFFFFFC0000000`, EFER.NXE on), masks the legacy 8259 PIC, brings up the BSP LAPIC, and arms a PIT-calibrated periodic LAPIC timer at 100 Hz on vector 0x20. Boot ends in `IdleLoop` (sti+hlt) and the timer ISR ticks the heartbeat. All self-tests pass. Next bite is a scheduler + per-CPU runqueue, or IOAPIC routing for the first device driver, or the SMP AP bring-up.
+- **Repository**: kernel runs at `0xFFFFFFFF80000000` (higher-half), brings up GDT + IDT (vectors 0..47 + LAPIC spurious 0xFF), parses the Multiboot2 memory map, runs a bitmap-backed physical frame allocator with single + contiguous-run allocation, brings up a 2 MiB first-fit + coalescing kernel heap (`KMalloc`/`KFree`) over the higher-half direct map, adopts the boot PML4 with a 4-level managed paging API (`MapPage`/`UnmapPage`/`MapMmio` into a 512 MiB MMIO arena at `0xFFFFFFFFC0000000`, EFER.NXE on), masks the legacy 8259 PIC, brings up the BSP LAPIC, arms a PIT-calibrated periodic LAPIC timer at 100 Hz on vector 0x20, and runs a round-robin preemptive scheduler with kernel threads (`SchedCreate` / `SchedYield` / `SchedExit`) whose time slices are driven by the timer IRQ. Boot ends with three worker threads spinning round-robin, the boot task in `IdleLoop`. All self-tests pass. Next bite is either blocking primitives (sleep + wait queues), SMP AP bring-up, IOAPIC routing for the first device driver, or the transition to ring 3 (user processes + syscalls).
 - **Default branch**: `main`.
 - **Active dev branch**: `claude/port-sparkengine-components-f38iH` (Claude-driven bootstrapping).
 - **Platforms**: x86_64 first (Multiboot2 → long mode). ARM64 planned, not started. UEFI path planned, not started.
