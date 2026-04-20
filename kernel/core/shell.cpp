@@ -590,27 +590,46 @@ void ShellHistoryNext()
     ReplaceLine(HistoryAt(g_history_cursor));
 }
 
-void ShellTabComplete()
+// Extend the edit buffer with the tail of `text` starting at
+// offset `from`, optionally followed by a single `trailer`
+// character. Echoes each byte to the console. Caps at kInputMax
+// silently. Used by both command-name and path completion.
+void ExtendLine(const char* text, u32 from, char trailer)
 {
-    // v0 completion surface = the command-name set (no path
-    // completion yet). Only relevant when the edit buffer has
-    // exactly one whitespace-less token so far — the classic
-    // "complete the command name" case.
-    if (g_len == 0)
+    u32 i = g_len;
+    while (text[from] != '\0' && i + 1 < kInputMax)
     {
-        return;
+        g_input[i] = text[from];
+        ConsoleWriteChar(text[from]);
+        ++i;
+        ++from;
     }
-    // Reject buffers that already contain whitespace — path
-    // completion comes later.
-    for (u32 i = 0; i < g_len; ++i)
+    if (trailer != '\0' && i + 1 < kInputMax)
     {
-        if (g_input[i] == ' ' || g_input[i] == '\t')
+        g_input[i] = trailer;
+        ConsoleWriteChar(trailer);
+        ++i;
+    }
+    g_len = i;
+    g_input[g_len] = '\0';
+}
+
+// True iff `name` starts with the first `plen` bytes of `prefix`
+// (or `plen == 0`, in which case everything matches).
+bool NamePrefixMatch(const char* name, const char* prefix, u32 plen)
+{
+    for (u32 i = 0; i < plen; ++i)
+    {
+        if (name[i] == '\0' || name[i] != prefix[i])
         {
-            return;
+            return false;
         }
     }
-    g_input[g_len] = '\0';
+    return true;
+}
 
+void CompleteCommandName()
+{
     static const char* const kCommandSet[] = {
         "help", "about", "version", "clear", "uptime", "date",  "windows",
         "mode", "ls",    "cat",     "echo",  "dmesg",  "stats", "mem",
@@ -627,35 +646,15 @@ void ShellTabComplete()
             ++match_count;
         }
     }
-
     if (match_count == 0)
     {
-        return; // no candidates, silent
+        return;
     }
     if (match_count == 1)
     {
-        // Unique — extend the edit buffer + echo the tail + a
-        // trailing space so the user can start typing an argument.
-        u32 i = g_len;
-        while (match[i] != '\0' && i + 1 < kInputMax)
-        {
-            g_input[i] = match[i];
-            ConsoleWriteChar(match[i]);
-            ++i;
-        }
-        if (i + 1 < kInputMax)
-        {
-            g_input[i] = ' ';
-            ConsoleWriteChar(' ');
-            ++i;
-        }
-        g_len = i;
-        g_input[g_len] = '\0';
+        ExtendLine(match, g_len, ' ');
         return;
     }
-
-    // Ambiguous — list candidates on a new line, then re-prompt
-    // with the partial echoed back so the user can keep typing.
     ConsoleWriteChar('\n');
     for (u32 i = 0; i < kCmdCount; ++i)
     {
@@ -667,6 +666,152 @@ void ShellTabComplete()
     }
     Prompt();
     ConsoleWrite(g_input);
+}
+
+// Complete an absolute path in the tail of the edit buffer. The
+// `partial_start` argument is the index into g_input where the
+// path begins (first char AFTER the separating whitespace).
+// Leading character MUST be '/' for v0 — relative-path support
+// lands with a CWD concept.
+void CompletePath(u32 partial_start)
+{
+    const u32 partial_len = g_len - partial_start;
+    if (partial_len == 0 || g_input[partial_start] != '/')
+    {
+        return;
+    }
+    // Find the last '/' inside the partial so we can split
+    // parent dir from the leaf-name prefix.
+    u32 last_slash = 0;
+    for (u32 i = 0; i < partial_len; ++i)
+    {
+        if (g_input[partial_start + i] == '/')
+        {
+            last_slash = i;
+        }
+    }
+    // Build the parent path in a scratch buffer. When the last
+    // '/' is at offset 0 the parent is the root "/"; otherwise
+    // the parent is g_input[partial_start .. partial_start+last_slash]
+    // with the slash stripped.
+    char parent_buf[96];
+    if (last_slash == 0)
+    {
+        parent_buf[0] = '/';
+        parent_buf[1] = '\0';
+    }
+    else
+    {
+        u32 j = 0;
+        for (; j < last_slash && j + 1 < sizeof(parent_buf); ++j)
+        {
+            parent_buf[j] = g_input[partial_start + j];
+        }
+        parent_buf[j] = '\0';
+    }
+
+    const auto* root = customos::fs::RamfsTrustedRoot();
+    const auto* parent = customos::fs::VfsLookup(root, parent_buf, sizeof(parent_buf));
+    if (parent == nullptr || parent->type != customos::fs::RamfsNodeType::kDir || parent->children == nullptr)
+    {
+        return;
+    }
+
+    const char* leaf = &g_input[partial_start + last_slash + 1];
+    const u32 leaf_len = partial_len - last_slash - 1;
+
+    const customos::fs::RamfsNode* match = nullptr;
+    u32 match_count = 0;
+    for (u32 i = 0; parent->children[i] != nullptr; ++i)
+    {
+        if (NamePrefixMatch(parent->children[i]->name, leaf, leaf_len))
+        {
+            match = parent->children[i];
+            ++match_count;
+        }
+    }
+    if (match_count == 0)
+    {
+        return;
+    }
+    if (match_count == 1)
+    {
+        const char trailer = (match->type == customos::fs::RamfsNodeType::kDir) ? '/' : ' ';
+        ExtendLine(match->name, leaf_len, trailer);
+        return;
+    }
+    ConsoleWriteChar('\n');
+    for (u32 i = 0; parent->children[i] != nullptr; ++i)
+    {
+        if (NamePrefixMatch(parent->children[i]->name, leaf, leaf_len))
+        {
+            ConsoleWrite("  ");
+            ConsoleWrite(parent->children[i]->name);
+            if (parent->children[i]->type == customos::fs::RamfsNodeType::kDir)
+            {
+                ConsoleWriteln("/");
+            }
+            else
+            {
+                ConsoleWriteChar('\n');
+            }
+        }
+    }
+    Prompt();
+    ConsoleWrite(g_input);
+}
+
+void ShellTabComplete()
+{
+    if (g_len == 0)
+    {
+        return;
+    }
+    g_input[g_len] = '\0';
+
+    // Split the buffer at the FIRST whitespace. If there isn't
+    // one, this is command-name completion. Otherwise the first
+    // token is a command name and we complete the last token as
+    // a path — but only for commands that take a path.
+    u32 first_ws = 0;
+    bool has_ws = false;
+    for (u32 i = 0; i < g_len; ++i)
+    {
+        if (g_input[i] == ' ' || g_input[i] == '\t')
+        {
+            first_ws = i;
+            has_ws = true;
+            break;
+        }
+    }
+    if (!has_ws)
+    {
+        CompleteCommandName();
+        return;
+    }
+
+    // Find the LAST whitespace so we know where the last token
+    // begins. That's the token we're completing.
+    u32 last_ws = first_ws;
+    for (u32 i = first_ws + 1; i < g_len; ++i)
+    {
+        if (g_input[i] == ' ' || g_input[i] == '\t')
+        {
+            last_ws = i;
+        }
+    }
+
+    // Temporarily terminate the first token so StrEq can read it.
+    const char saved = g_input[first_ws];
+    g_input[first_ws] = '\0';
+    const bool is_ls = StrEq(g_input, "ls");
+    const bool is_cat = StrEq(g_input, "cat");
+    g_input[first_ws] = saved;
+
+    if (is_ls || is_cat)
+    {
+        CompletePath(last_ws + 1);
+    }
 }
 
 } // namespace customos::core
