@@ -5,6 +5,7 @@
 #include "../arch/x86_64/serial.h"
 #include "../core/klog.h"
 #include "../core/panic.h"
+#include "../core/process.h"
 #include "../core/recovery.h"
 #include "../cpu/percpu.h"
 #include "../mm/address_space.h"
@@ -63,16 +64,24 @@ struct Task
     // Per-process address space. nullptr means "kernel AS" (the
     // boot PML4) — used by every kernel-only thread (workers,
     // reaper, idle, keyboard reader, etc.). A non-null AS means
-    // this task owns one reference on it: the reaper drops that
-    // reference on task death, and if it was the last, the AS
-    // destructor walks the region table, frees the backing user
-    // frames, and tears down the user-half page tables.
+    // this task holds a process reference that transitively owns
+    // the AS: the reaper calls core::ProcessRelease on process,
+    // which drops the AS reference, which runs the AS destructor
+    // if it was the last holder.
     //
     // Schedule() publishes task->as to CR3 on every switch-in via
     // AddressSpaceActivate. Same-AS switches (kernel→kernel) hit
     // the fast-path and do not touch CR3 — no TLB flush paid for
     // a scheduler decision that doesn't change the address space.
+    // We cache the AS pointer on the Task (rather than always
+    // dereferencing process->as) so the context-switch hot path
+    // stays one load.
     mm::AddressSpace* as;
+
+    // Owning process. nullptr for kernel-only tasks. Set once at
+    // SchedCreateUser; the reaper ProcessReleases it on death.
+    // Used by CurrentProcess() for cap lookup.
+    core::Process* process;
 };
 
 namespace
@@ -326,7 +335,8 @@ void SchedInit()
     boot_task->waiting_on = nullptr;
     boot_task->wake_by_timeout = false;
     boot_task->priority = TaskPriority::Normal;
-    boot_task->as = nullptr; // kernel AS — boot PML4
+    boot_task->as = nullptr;      // kernel AS — boot PML4
+    boot_task->process = nullptr; // kernel-only — no owning process
 
     Current() = boot_task;
     g_tasks_created = 1;
@@ -376,6 +386,7 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
     t->wake_by_timeout = false;
     t->priority = priority;
     t->as = as;
+    t->process = nullptr; // populated by SchedCreateUser for user tasks
 
     // Build the initial stack. ContextSwitch pops r15, r14, r13, r12,
     // rbp, rbx and then rets. So from bottom to top of the pre-planted
@@ -436,10 +447,28 @@ Task* SchedCreate(TaskEntry entry, void* arg, const char* name, TaskPriority pri
     return SchedCreateInternal(entry, arg, name, priority, /*as=*/nullptr);
 }
 
-Task* SchedCreateUser(TaskEntry entry, void* arg, const char* name, mm::AddressSpace* as)
+Task* SchedCreateUser(TaskEntry entry, void* arg, const char* name, core::Process* process)
 {
-    KASSERT(as != nullptr, "sched", "SchedCreateUser without AS");
-    return SchedCreateInternal(entry, arg, name, TaskPriority::Normal, as);
+    KASSERT(process != nullptr, "sched", "SchedCreateUser without Process");
+    KASSERT(process->as != nullptr, "sched", "SchedCreateUser Process has no AS");
+
+    Task* t = SchedCreateInternal(entry, arg, name, TaskPriority::Normal, process->as);
+    t->process = process;
+    // Refcount discipline: ProcessCreate returned refcount=1 (one
+    // for the creating caller). The caller hands that reference off
+    // to this Task — no retain needed. Subsequent Tasks that want
+    // to share the Process (future thread spawn) must ProcessRetain
+    // before calling SchedCreateUser with an already-owned process.
+    return t;
+}
+
+core::Process* TaskProcess(Task* t)
+{
+    if (t == nullptr)
+    {
+        return nullptr;
+    }
+    return t->process;
 }
 
 void Schedule()
@@ -766,21 +795,38 @@ namespace
             drained = dead->next;
             dead->next = nullptr;
 
-            // Drop the task's address-space reference. If this was
-            // the last task on that AS (the v0 case — one Task per
-            // AS), AddressSpaceRelease walks the region table to
-            // return every backing user frame, walks the user-half
-            // page tables to free intermediate PDPT/PD/PT pages,
-            // and frees the PML4 frame. Tasks with as == nullptr
-            // are kernel-only and the call is a no-op.
+            // Drop the task's process reference. The Process owns
+            // the AS — ProcessRelease drops its AS reference, and
+            // when the last holder goes away the AS destructor
+            // walks the region table, returns every backing user
+            // frame, walks the user-half page tables to free
+            // intermediate PDPT/PD/PT pages, and frees the PML4
+            // frame. Tasks with process == nullptr (kernel-only
+            // workers, idle, reaper's own thread) fall through
+            // with no state change.
             //
-            // Must happen BEFORE freeing the Task struct (we read
-            // dead->as out of it) and AFTER the dying task is off-
-            // CPU (which it is by construction — SchedExit only
+            // AS-only tasks (process == nullptr but as != nullptr)
+            // don't exist today but the fallback path is preserved
+            // so a future helper that spawns a ring-3 thread
+            // without a surrounding Process (testing, diagnostics)
+            // still gets its AS reaped.
+            //
+            // Must happen BEFORE freeing the Task struct — we read
+            // the pointers out of it — and AFTER the dying task is
+            // off-CPU (which it is by construction: SchedExit only
             // enqueues to the zombie list once Schedule() has
             // switched away).
-            mm::AddressSpaceRelease(dead->as);
-            dead->as = nullptr;
+            if (dead->process != nullptr)
+            {
+                core::ProcessRelease(dead->process);
+                dead->process = nullptr;
+                dead->as = nullptr; // process owned it; pointer is now dangling, clear it
+            }
+            else
+            {
+                mm::AddressSpaceRelease(dead->as);
+                dead->as = nullptr;
+            }
 
             // Stack_base can be nullptr for the boot task (task 0);
             // defensive null-check even though task 0 should never

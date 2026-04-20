@@ -5,6 +5,7 @@
 #include "../mm/paging.h"
 #include "../sched/sched.h"
 #include "klog.h"
+#include "process.h"
 
 // Defined in exceptions.S (via `ISR_NOERR 128`) — the .global label for
 // the int-0x80 stub. SyscallInit installs its address into the IDT with
@@ -48,10 +49,33 @@ void ReportUnknownSyscall(u64 num, u64 rip)
 // caller error and returns -1 so the pattern is immediately
 // auditable. Returns the actual byte count written (possibly
 // truncated) or -1 on failure.
+//
+// Cap check: fd=1 requires kCapSerialConsole. A sandboxed process
+// with an empty cap set sees -1 and nothing reaches the kernel
+// serial console. The denial is logged so it's trivially
+// auditable — without the log we'd be silently swallowing a
+// sandbox policy hit.
 i64 DoWrite(u64 fd, const void* user_buf, u64 len)
 {
     if (fd != 1)
     {
+        return -1;
+    }
+
+    Process* proc = CurrentProcess();
+    if (proc == nullptr || !CapSetHas(proc->caps, kCapSerialConsole))
+    {
+        // Emit a single-line denial record. Machine-readable format
+        // so a future audit tool can grep boot logs: "[sys] denied
+        // syscall=N pid=P cap=NAME". pid=0 indicates a caller with
+        // no Process (kernel bug — kernel threads shouldn't be
+        // issuing SYS_WRITE via the syscall gate).
+        const u64 pid = (proc != nullptr) ? proc->pid : 0;
+        arch::SerialWrite("[sys] denied syscall=SYS_WRITE pid=");
+        arch::SerialWriteHex(pid);
+        arch::SerialWrite(" cap=");
+        arch::SerialWrite(CapName(kCapSerialConsole));
+        arch::SerialWrite("\n");
         return -1;
     }
 

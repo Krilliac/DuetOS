@@ -10,6 +10,7 @@
 #include "../sched/sched.h"
 #include "klog.h"
 #include "panic.h"
+#include "process.h"
 
 /*
  * Ring-3 smoke test, second iteration.
@@ -128,10 +129,11 @@ void WriteUserCodeFrame(mm::PhysAddr frame)
 }
 
 // Build a ring-3 task: allocate AS, allocate + populate code page,
-// allocate stack page, install both into the AS, hand the AS to a
-// new task. The AS reference is owned by the new task from this
-// point on — its reaper-time release will tear everything down.
-void SpawnRing3Task(const char* name)
+// allocate stack page, install both into the AS, wrap the AS in a
+// Process with the caller-supplied cap set, hand the Process to a
+// new task. The reaper's ProcessRelease tears everything down at
+// task death.
+void SpawnRing3Task(const char* name, CapSet caps)
 {
     using arch::SerialWrite;
     using arch::SerialWriteHex;
@@ -163,9 +165,19 @@ void SpawnRing3Task(const char* name)
     AddressSpaceMapUserPage(as, kUserCodeVirt, code_frame, kPagePresent | kPageUser);
     AddressSpaceMapUserPage(as, kUserStackVirt, stack_frame, kPagePresent | kPageWritable | kPageUser | kPageNoExecute);
 
+    Process* proc = ProcessCreate(name, as, caps);
+    if (proc == nullptr)
+    {
+        Panic("core/ring3", "ProcessCreate failed");
+    }
+
     SerialWrite("[ring3] queued task name=\"");
     SerialWrite(name);
-    SerialWrite("\" as=");
+    SerialWrite("\" pid=");
+    SerialWriteHex(proc->pid);
+    SerialWrite(" caps=");
+    SerialWriteHex(proc->caps.bits);
+    SerialWrite(" as=");
     SerialWriteHex(reinterpret_cast<u64>(as));
     SerialWrite(" code_frame=");
     SerialWriteHex(code_frame);
@@ -173,24 +185,37 @@ void SpawnRing3Task(const char* name)
     SerialWriteHex(stack_frame);
     SerialWrite("\n");
 
-    sched::SchedCreateUser(&Ring3UserEntry, nullptr, name, as);
+    sched::SchedCreateUser(&Ring3UserEntry, nullptr, name, proc);
 }
 
 } // namespace
 
 void StartRing3SmokeTask()
 {
-    // Two ring-3 tasks, both at the SAME user VAs (0x40000000 code,
-    // 0x40010000 stack). With per-process address spaces, both
-    // succeed: each has its own PML4 and the VA collisions are
-    // therefore not collisions at all. With the previous shared-
-    // PML4 design, the second SpawnRing3Task's MapUserPage at
-    // 0x40000000 would have panicked on the "virt already mapped"
-    // assertion — which is exactly the property that proves
-    // isolation is real here.
-    SpawnRing3Task("ring3-smoke-A");
-    SpawnRing3Task("ring3-smoke-B");
-    Log(LogLevel::Info, "core/ring3", "two ring3 smoke tasks queued (per-AS isolation)");
+    // Three ring-3 tasks, all using the SAME user VAs (0x40000000
+    // code, 0x40010000 stack) in their own private address spaces.
+    // Per-AS isolation means the VA "collisions" aren't collisions
+    // at all.
+    //
+    //   - ring3-smoke-A, ring3-smoke-B: trusted profile (full cap
+    //     set). Both print "Hello from ring 3!" via SYS_WRITE and
+    //     exit cleanly.
+    //
+    //   - ring3-smoke-sandbox: empty cap set. Same user payload,
+    //     but SYS_WRITE(fd=1) is denied by the cap check in the
+    //     syscall dispatcher — the kernel logs
+    //       "[sys] denied syscall=SYS_WRITE pid=N cap=SerialConsole"
+    //     and returns -1 to ring 3. The user code ignores the
+    //     return value (SYS_YIELD + SYS_EXIT follow unconditionally)
+    //     so the task exits cleanly. Demonstrates that a process
+    //     with zero ambient authority cannot reach the kernel
+    //     serial console even though it shares the int 0x80 gate
+    //     with trusted processes — the gate is open, the caps
+    //     aren't.
+    SpawnRing3Task("ring3-smoke-A", CapSetTrusted());
+    SpawnRing3Task("ring3-smoke-B", CapSetTrusted());
+    SpawnRing3Task("ring3-smoke-sandbox", CapSetEmpty());
+    Log(LogLevel::Info, "core/ring3", "two trusted + one sandboxed ring3 smoke tasks queued");
 }
 
 } // namespace customos::core

@@ -7,6 +7,11 @@ namespace customos::mm
 struct AddressSpace; // forward decl; defined in kernel/mm/address_space.h
 }
 
+namespace customos::core
+{
+struct Process; // forward decl; defined in kernel/core/process.h
+}
+
 /*
  * CustomOS kernel scheduler — v0.
  *
@@ -65,20 +70,31 @@ void SchedInit();
 /// run when no Normal task is Ready).
 Task* SchedCreate(TaskEntry entry, void* arg, const char* name, TaskPriority priority = TaskPriority::Normal);
 
-/// Spawn a new task with a private address space. The AS becomes the
-/// task's CR3 on its first switch-in, and the reaper drops the AS
-/// reference when the task dies — if this task was the last holder,
-/// the AS is destroyed (page tables freed, backing frames returned).
+/// Spawn a new task bound to a `core::Process`. The process owns the
+/// address space; the task holds one reference on the process. The
+/// scheduler caches `process->as` on the task so the CR3 flip on
+/// context-switch remains a single pointer load — per-task AS
+/// lookup never indirects through the Process on the hot path.
 ///
-/// The AS must come from `mm::AddressSpaceCreate`. Map any user code
-/// + stack pages into it via `mm::AddressSpaceMapUserPage` BEFORE
-/// calling SchedCreateUser; the task's entry function sees those
-/// mappings already installed when it calls `arch::EnterUserMode`.
+/// The AS must already have any required user mappings (code, stack)
+/// installed via `mm::AddressSpaceMapUserPage` BEFORE calling
+/// SchedCreateUser — the task's entry function sees them installed
+/// when it calls `arch::EnterUserMode`.
 ///
 /// `entry` runs in ring 0 on a fresh kernel stack (same as
 /// SchedCreate); it's expected to set TSS.RSP0 and call
 /// arch::EnterUserMode to drop to ring 3.
-Task* SchedCreateUser(TaskEntry entry, void* arg, const char* name, mm::AddressSpace* as);
+///
+/// On task death, the reaper calls `core::ProcessRelease` on the
+/// task's process pointer — the process's destructor then drops
+/// the AS reference (tearing it down if the process was the last
+/// holder).
+Task* SchedCreateUser(TaskEntry entry, void* arg, const char* name, core::Process* process);
+
+/// Accessor for the Task's owning process pointer. nullptr for
+/// kernel-only tasks (workers, reaper, idle). Used by syscall
+/// handlers via `core::CurrentProcess()` to cap-check.
+core::Process* TaskProcess(Task* t);
 
 /// Voluntary yield. Pushes current task to the tail of the runqueue and
 /// switches to the head (if any other task is ready).
