@@ -204,5 +204,15 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     customos::core::Panic("test/panic-demo", "CUSTOMOS_PANIC_DEMO enabled; halting on purpose");
 #endif
 
+#ifdef CUSTOMOS_TRAP_DEMO
+    // Compile-time-gated deliberate CPU exception used by
+    // tools/test-trap.sh to verify the trap dispatcher's crash-dump
+    // path produces an extractable record (BEGIN/END markers,
+    // symbolized RIP, backtrace). `ud2` is the canonical "never
+    // resume" undefined-opcode encoding and raises #UD with no
+    // error code.
+    asm volatile("ud2");
+#endif
+
     IdleLoop();
 }

@@ -7,11 +7,19 @@
 
 ## Summary
 
-`core::Panic` now emits a self-contained, symbolicated crash dump bracketed by
+Both `core::Panic` and `arch::TrapDispatch` (CPU-exception path) emit a
+self-contained, symbolicated crash dump bracketed by
 `=== CUSTOMOS CRASH DUMP BEGIN ===` / `=== CUSTOMOS CRASH DUMP END ===`. Every
 in-kernel code address in the dump (RIP, backtrace frames, stack quads) is
 inline-annotated with `function+0xOFFSET (kernel/path/file.cpp:LINE)` using an
 embedded symbol table linked into the kernel at build time.
+
+The two entry points share one emission contract via the public API pair
+`core::BeginCrashDump(subsystem, message, optional_value)` + `core::EndCrashDump()`
+so a parser that handles one handles the other. The differences are in the
+body: `Panic` emits control registers + diagnostics; `TrapDispatch` also emits
+every GPR (`rax..r15`) captured in the TrapFrame, which is worth a lot when the
+fault is register-dependent (bad `cr2`, garbage `rdi`, etc.).
 
 Because there is no kernel filesystem yet, "dump file" means "the bytes between
 the two markers on COM1". `tools/test-panic.sh` extracts that range into
@@ -60,10 +68,11 @@ the crash dump, so BSS drift is irrelevant.
 ```
 === CUSTOMOS CRASH DUMP BEGIN ===
   version  : 0x0000000000000001
-  subsystem: <subsys>
-  message  : <message>
-  value    : 0xNN                         (present for PanicWithValue only)
+  subsystem: <subsys>                     (e.g. "arch/traps", "test/panic-demo")
+  message  : <message>                    (vector mnemonic for traps; caller string for Panic)
+  value    : 0xNN                         (present for PanicWithValue + every trap; error_code on traps)
   symtab_entries : 0xNN
+  <trap-only: vector + rip + cs + rflags + rsp + ss + cr2(PF) + all GPRs>
 [panic] --- diagnostics ---
   uptime   : 0xNN
   cpu_id   : 0xNN
@@ -122,11 +131,22 @@ Lookups are O(log N). With ~300 symbols today the longest walk is 9 iterations
 - `tools/gen-symbols.sh` — ELF → `symbols_generated.cpp` generator. Depends on
   `llvm-nm` (or `nm`) + `llvm-addr2line` (or `addr2line`). Filter uses
   mawk-compatible awk — no gawk-only builtins like `strtonum`.
-- `kernel/core/panic.cpp` — emits the bracketed dump, symbolizes RIP +
-  backtrace frames + stack quads.
-- `kernel/CMakeLists.txt` — two-stage build wiring.
-- `tools/test-panic.sh` — captures the dump into
+- `kernel/core/panic.{h,cpp}` — emits the bracketed dump, symbolizes RIP +
+  backtrace frames + stack quads. Exposes `BeginCrashDump` / `EndCrashDump`
+  for reuse by the trap dispatcher.
+- `kernel/arch/x86_64/traps.cpp` — CPU-exception path wraps its register +
+  GPR dump in the same BEGIN/END markers with `subsystem: arch/traps`,
+  `message: <vector mnemonic>` (e.g. `#PF Page fault`, `#UD Invalid opcode`),
+  `value: <error_code>`, and symbolized `rip`.
+- `kernel/CMakeLists.txt` — two-stage build wiring. Gates `CUSTOMOS_PANIC_DEMO`
+  (deliberate `Panic()` at end of `kernel_main`) and `CUSTOMOS_TRAP_DEMO`
+  (deliberate `ud2` at end of `kernel_main` → `#UD`).
+- `tools/test-panic.sh` — exercises the `Panic` path. Captures the dump into
   `build/<preset>/crash-dumps/<timestamp>.dump` and asserts its shape.
+- `tools/test-trap.sh` — exercises the trap-dispatcher path via `ud2`.
+  Captures into `<timestamp>-trap.dump` and asserts the trap-specific fields
+  (`subsystem: arch/traps`, `#UD` message, symbolized RIP). Kept separate so
+  a regression in one path can't masquerade as a regression in the other.
 
 ## Cost
 
@@ -137,6 +157,29 @@ Lookups are O(log N). With ~300 symbols today the longest walk is 9 iterations
 - Panic path: `WriteAddressWithSymbol` is one binary search + a handful of
   `SerialWrite` calls per address. Already bounded by the 16-frame backtrace
   and 16-quad stack dumps.
+
+## Why two entry points, one contract
+
+The panic path and the trap path are semantically different kinds of crash —
+`Panic` is the kernel noticing its own invariant violation, a trap is the CPU
+telling the kernel "you asked me to do something illegal". They come in
+through different code paths (direct call vs. IDT → isr_common → TrapDispatch)
+and carry different data (panic captures call-site frame; trap captures the
+hardware TrapFrame including all GPRs + error code + segment selectors).
+
+Sharing `BeginCrashDump` / `EndCrashDump` means:
+
+1. Host-side tooling (`test-panic.sh`, `test-trap.sh`, and anything built later
+   that harvests dumps from serial captures) uses **one** extraction routine.
+2. The schema version field tells a parser what fields to expect — bumping it
+   is a single point of coordination.
+3. The symbol-resolution path is identical: whatever `WriteAddressWithSymbol`
+   does for a Panic RIP, it does for a trap RIP.
+
+Keeping two test scripts (`test-panic.sh` + `test-trap.sh`) was deliberate: a
+regression in `TrapDispatch` shouldn't be masked by a passing Panic test, and
+vice versa. Each script builds with its own deliberate-crash flag, boots, and
+asserts the path-specific shape.
 
 ## Revisit when
 

@@ -5,6 +5,7 @@
 #include "serial.h"
 
 #include "../../core/panic.h"
+#include "../../core/symbols.h"
 #include "../../sched/sched.h"
 
 namespace customos::arch
@@ -119,22 +120,23 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         return;
     }
 
+    // Pre-marker human-readable banner. Anything before BEGIN / after END
+    // is free-form prose; the bracketed region is the machine-extractable
+    // dump record.
     SerialWrite("\n** CPU EXCEPTION **\n");
 
-    WriteLabelled("vector    ", frame->vector);
-    SerialWrite("             (");
-    if (frame->vector < 32)
-    {
-        SerialWrite(kVectorNames[frame->vector]);
-    }
-    else
-    {
-        SerialWrite("out-of-range");
-    }
-    SerialWrite(")\n");
+    // Bracket the record so host-side tooling can extract a .dump file
+    // from the serial capture, matching the panic path's contract. The
+    // vector mnemonic becomes the dump's `message` and the error code
+    // rides along as the `value` field — the two things a reader wants
+    // to see first on a fault.
+    const char* vector_name = (frame->vector < 32) ? kVectorNames[frame->vector] : "out-of-range";
+    core::BeginCrashDump("arch/traps", vector_name, &frame->error_code);
 
-    WriteLabelled("error_code", frame->error_code);
-    WriteLabelled("rip       ", frame->rip);
+    WriteLabelled("vector    ", frame->vector);
+    SerialWrite("  rip       : ");
+    core::WriteAddressWithSymbol(frame->rip);
+    SerialWrite("\n");
     WriteLabelled("cs        ", frame->cs);
     WriteLabelled("rflags    ", frame->rflags);
     WriteLabelled("rsp       ", frame->rsp);
@@ -168,6 +170,7 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     // the actual call path that led to the exception.
     core::DumpDiagnostics(frame->rip, frame->rsp, frame->rbp);
 
+    core::EndCrashDump();
     SerialWrite("[panic] Halting CPU.\n");
     Halt();
 }

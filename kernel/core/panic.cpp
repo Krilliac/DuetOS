@@ -194,7 +194,9 @@ void DumpTask()
     }
 }
 
-void WriteDumpHeader(const char* subsystem, const char* message, const u64* optional_value)
+} // namespace
+
+void BeginCrashDump(const char* subsystem, const char* message, const u64* optional_value)
 {
     arch::SerialWrite("\n");
     arch::SerialWrite(kDumpBeginMarker);
@@ -211,7 +213,10 @@ void WriteDumpHeader(const char* subsystem, const char* message, const u64* opti
     WriteLabelled("symtab_entries", SymbolTableSize());
 }
 
-} // namespace
+void EndCrashDump()
+{
+    arch::SerialWrite(kDumpEndMarker);
+}
 
 void DumpDiagnostics(u64 rip, u64 rsp, u64 rbp)
 {
@@ -246,14 +251,14 @@ void Panic(const char* subsystem, const char* message)
     arch::SerialWrite(message);
     arch::SerialWrite("\n");
 
-    WriteDumpHeader(subsystem, message, nullptr);
+    BeginCrashDump(subsystem, message, nullptr);
 
     // Dump diagnostics using the panic call site's own frame. Reading
     // RBP/RSP here captures the state of Panic() itself; the backtrace
     // walker then climbs up through the caller.
     DumpDiagnostics(reinterpret_cast<u64>(__builtin_return_address(0)), arch::ReadRsp(), arch::ReadRbp());
 
-    arch::SerialWrite(kDumpEndMarker);
+    EndCrashDump();
     arch::SerialWrite("[panic] CPU halted — no recovery.\n");
     arch::Halt();
 }
@@ -270,11 +275,11 @@ void PanicWithValue(const char* subsystem, const char* message, u64 value)
     arch::SerialWriteHex(value);
     arch::SerialWrite("\n");
 
-    WriteDumpHeader(subsystem, message, &value);
+    BeginCrashDump(subsystem, message, &value);
 
     DumpDiagnostics(reinterpret_cast<u64>(__builtin_return_address(0)), arch::ReadRsp(), arch::ReadRbp());
 
-    arch::SerialWrite(kDumpEndMarker);
+    EndCrashDump();
     arch::SerialWrite("[panic] CPU halted — no recovery.\n");
     arch::Halt();
 }

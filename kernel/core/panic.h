@@ -56,6 +56,18 @@ namespace customos::core
 /// dispatcher's own frame. Does NOT halt — caller halts.
 void DumpDiagnostics(u64 rip, u64 rsp, u64 rbp);
 
+/// Emit `=== CUSTOMOS CRASH DUMP BEGIN ===` + the dump header
+/// (schema version, subsystem, message, optional value, symbol-table
+/// entry count). Callers then emit their own body and finish with
+/// EndCrashDump so host-side tooling can extract the bracketed
+/// record into a .dump file. Pass `optional_value = nullptr` to omit
+/// the `value` line.
+void BeginCrashDump(const char* subsystem, const char* message, const u64* optional_value);
+
+/// Close the dump record started with BeginCrashDump by emitting the
+/// `=== CUSTOMOS CRASH DUMP END ===` marker.
+void EndCrashDump();
+
 } // namespace customos::core
 
 // ---------------------------------------------------------------------------
