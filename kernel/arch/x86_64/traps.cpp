@@ -150,6 +150,52 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         }
     }
 
+    // Ring-3 exception handling. A faulting user task MUST NOT bring
+    // down the kernel — that would turn any sandboxed process's
+    // mistake (wild pointer, write to its own RX code page, jump
+    // into its own NX stack) into a full-system DoS. Distinguish
+    // kernel vs. user by the saved CS's RPL:
+    //   CS.RPL == 0 → kernel exception → panic, halt (below).
+    //   CS.RPL == 3 → user exception  → log + terminate this task,
+    //                                    reschedule.
+    //
+    // SchedExit is [[noreturn]]; it marks the task Dead, wakes the
+    // reaper, and Schedule()s away. The reaper tears down the task's
+    // Process (which tears down its AddressSpace → returns every
+    // backing frame + page-table page to the physical allocator).
+    // The half-consumed trap frame on this task's kernel stack is
+    // abandoned along with the stack itself — free with the rest
+    // at reap time.
+    if ((frame->cs & 3) == 3)
+    {
+        const char* vec_name = (frame->vector < 32) ? kVectorNames[frame->vector] : "user-vector-oor";
+        SerialWrite("\n[task-kill] ring-3 task took ");
+        SerialWrite(vec_name);
+        SerialWrite(" — terminating\n");
+        SerialWrite("  pid  : ");
+        SerialWriteHex(customos::sched::CurrentTaskId());
+        SerialWrite("\n  rip  : ");
+        SerialWriteHex(frame->rip);
+        SerialWrite("\n  rsp  : ");
+        SerialWriteHex(frame->rsp);
+        SerialWrite("\n  cs   : ");
+        SerialWriteHex(frame->cs);
+        if (frame->vector == 14)
+        {
+            SerialWrite("\n  cr2  : ");
+            SerialWriteHex(ReadCr2());
+            SerialWrite("\n  err  : ");
+            SerialWriteHex(frame->error_code);
+        }
+        SerialWrite("\n");
+        // SchedExit must NOT run with IF=0 forever; it ends in a
+        // Schedule() that waits for the reaper, and the reaper needs
+        // timer IRQs to make progress. SchedYield/SchedExit internally
+        // cli/sti around Schedule, so we don't need to explicitly sti
+        // here. Control never returns from SchedExit.
+        customos::sched::SchedExit();
+    }
+
     // Pre-marker human-readable banner. Anything before BEGIN / after END
     // is free-form prose; the bracketed region is the machine-extractable
     // dump record.

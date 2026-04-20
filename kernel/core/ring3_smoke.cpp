@@ -275,6 +275,77 @@ void SpawnRing3Task(const char* name, CapSet caps, const fs::RamfsNode* root)
     sched::SchedCreateUser(&Ring3UserEntry, nullptr, name, proc);
 }
 
+// Dedicated jail-probe payload: immediately attempts to write into
+// its own R-X code page at 0x40000000. The code page is mapped
+// kPagePresent | kPageUser — no kPageWritable — so the store #PFs.
+// The kernel's ring-3 exception path logs [task-kill] and calls
+// SchedExit, terminating the task cleanly. The ud2 at the tail is
+// belt-and-braces — if, impossibly, the write succeeded, ud2 raises
+// #UD and the task still dies.
+//
+// clang-format off
+constexpr u8 kJailProbeBytes[] = {
+    0xF3, 0x90,                                                   // pause
+    // mov dword ptr [0x40000000], 0xDEADBEEF
+    0xC7, 0x04, 0x25, 0x00, 0x00, 0x00, 0x40, 0xEF, 0xBE, 0xAD, 0xDE,
+    0x0F, 0x0B,                                                   // ud2
+};
+// clang-format on
+
+void SpawnJailProbeTask()
+{
+    using arch::SerialWrite;
+    using arch::SerialWriteHex;
+    using namespace customos::mm;
+
+    AddressSpace* as = AddressSpaceCreate();
+    if (as == nullptr)
+    {
+        Panic("core/ring3", "AS create failed for jail probe");
+    }
+
+    const PhysAddr code_frame = AllocateFrame();
+    if (code_frame == kNullFrame)
+    {
+        Panic("core/ring3", "code frame alloc failed for jail probe");
+    }
+    auto* code_direct = static_cast<u8*>(PhysToVirt(code_frame));
+    for (u64 i = 0; i < mm::kPageSize; ++i)
+    {
+        code_direct[i] = 0;
+    }
+    for (u64 i = 0; i < sizeof(kJailProbeBytes); ++i)
+    {
+        code_direct[i] = kJailProbeBytes[i];
+    }
+
+    const PhysAddr stack_frame = AllocateFrame();
+    if (stack_frame == kNullFrame)
+    {
+        Panic("core/ring3", "stack frame alloc failed for jail probe");
+    }
+
+    AddressSpaceMapUserPage(as, kUserCodeVirt, code_frame, kPagePresent | kPageUser);
+    AddressSpaceMapUserPage(as, kUserStackVirt, stack_frame,
+                            kPagePresent | kPageWritable | kPageUser | kPageNoExecute);
+
+    // Empty cap set — the jail probe never gets a chance to issue
+    // a syscall (it faults first), but if the fault path ever
+    // regressed and the task reached int 0x80, denying caps
+    // defence-in-depths that path too.
+    Process* proc = ProcessCreate("ring3-jail-probe", as, CapSetEmpty(), fs::RamfsSandboxRoot());
+    if (proc == nullptr)
+    {
+        Panic("core/ring3", "ProcessCreate failed for jail probe");
+    }
+
+    SerialWrite("[ring3] queued jail-probe task pid=");
+    SerialWriteHex(proc->pid);
+    SerialWrite("\n");
+
+    sched::SchedCreateUser(&Ring3UserEntry, nullptr, "ring3-jail-probe", proc);
+}
+
 } // namespace
 
 void StartRing3SmokeTask()
@@ -323,7 +394,14 @@ void StartRing3SmokeTask()
     SpawnRing3Task("ring3-smoke-A", CapSetTrusted(), fs::RamfsTrustedRoot());
     SpawnRing3Task("ring3-smoke-B", CapSetTrusted(), fs::RamfsTrustedRoot());
     SpawnRing3Task("ring3-smoke-sandbox", sandbox_caps, fs::RamfsSandboxRoot());
-    Log(LogLevel::Info, "core/ring3", "two trusted + one sandboxed ring3 smoke tasks queued");
+
+    // Jail-probe task: writes to its own RX code page. Expected
+    // outcome is the kernel's ring-3 trap handler terminating the
+    // task via SchedExit and emitting [task-kill] on COM1. If the
+    // kernel instead panics / halts here, the sandboxing contract
+    // is broken: a user-mode fault must never bring down the OS.
+    SpawnJailProbeTask();
+    Log(LogLevel::Info, "core/ring3", "trusted+sandbox+jail-probe ring3 tasks queued");
 }
 
 } // namespace customos::core
