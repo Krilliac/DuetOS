@@ -607,6 +607,135 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 077 — Shell command history + mode info command
+
+- **Scope:** `kernel/core/shell.{h,cpp}` — 8-entry ring-buffer
+  history, `ShellHistoryPrev` / `ShellHistoryNext`, dedup on
+  push, `ReplaceLine` helper that repaints the edit line.
+  `kernel/core/main.cpp` — kbd reader dispatches Up / Down
+  arrows to the history entries. New `mode` command prints the
+  current DisplayMode with the Ctrl+Alt+T reminder.
+- **Decision:** Linux/macOS terminal feel closure — every
+  muscle-memory interaction a user expects from an interactive
+  prompt (history, cursor recall, current-mode query) now
+  works. Dedup matches bash's `HISTCONTROL=ignoredups`
+  default. Cursor recall uses backspace+echo rather than a
+  proper line-edit primitive; fine for 64-char lines where the
+  cost is invisible.
+- **Why:** Without history the shell is a calculator. Up/Down
+  arrows are the cheapest improvement that turns it into a
+  usable terminal. The `mode` command gives the shell an
+  answer to "what display am I in?" for both interactive and
+  future-script use.
+- **Rules out / defers:** Incremental search (Ctrl+R).
+  Multi-line history. Persistent history across reboots
+  (needs writable FS). Tab-complete.
+- **Revisit when:** Writable FS lands (persistent ~/.history).
+  First multi-line command (script / heredoc) wants history
+  that's more than strictly line-based.
+- **Related tracks:** Track 7 (Userland shell).
+
+---
+
+## 076 — CustomOS shell: interactive command line
+
+- **Scope:** `kernel/core/shell.{h,cpp}` — new module. 64-char
+  line-edit buffer, prompt, command dispatcher. Commands:
+  help, about, version, clear, uptime, date, windows, echo.
+  `kernel/drivers/video/console.{h,cpp}` — ConsoleWriteChar
+  grows '\b' handling (back-up + overwrite-with-space).
+  `kernel/core/main.cpp` — kbd reader routes printable /
+  Backspace / Enter into Shell* instead of writing the
+  console directly.
+- **Decision:** Linux/macOS-style prompt ("$ "), one command
+  per line, dispatch via string match on the first token.
+  Output goes through the existing framebuffer console, which
+  means the shell works identically in desktop mode and TTY
+  mode — one shell, two framings.
+- **Why:** The boot log + interactive prompt is the minimum
+  viable terminal UX. Every later feature (tab complete,
+  pipes, argv, shell scripts) builds on this dispatch shape;
+  getting the primitive in now means those slices don't fork
+  the interaction model.
+- **Rules out / defers:** argv tokenising (each cmd parses
+  raw remainder). Pipes / redirection. Environment variables.
+  Shell scripts. Backgrounding (`&`). Signals (Ctrl+C). Tab
+  completion. Writable FS for `cat` / `ls` on user files.
+- **Revisit when:** Writable FS lands (unlocks `cat` / `ls`
+  / `cd`). SYS_SPAWN lands (shell can launch ring-3 apps).
+  Multi-line editing needed.
+- **Related tracks:** Track 7 (Userland shell — this IS
+  that track), Track 4 (Process — shell eventually spawns).
+
+---
+
+## 075 — TTY / Desktop display mode with Ctrl+Alt+T toggle
+
+- **Scope:** `kernel/drivers/video/widget.{h,cpp}` — new
+  `DisplayMode` enum + accessors; DesktopCompose branches
+  on mode. `kernel/drivers/video/console.{h,cpp}` —
+  `ConsoleSetOrigin` / `ConsoleSetColours` re-anchor the
+  console in place. `kernel/core/main.cpp` — kbd reader
+  dispatches Ctrl+Alt+T to toggle; mouse reader skips UI in
+  TTY mode; ui-ticker branches on mode. `kernel/CMakeLists.txt`
+  — new `CUSTOMOS_BOOT_TTY` option for text-first initial boot.
+- **Decision:** Two modes, one console buffer. Desktop =
+  full windowed shell; TTY = fullscreen console, black bg,
+  no windows / taskbar / cursor. Scrollback survives the
+  flip because both modes render the same char buffer from
+  different origins.
+- **Why:** Direct answer to "I want to boot directly into a
+  terminal OR desktop and switch between them easily."
+  Ctrl+Alt+T is the universal shortcut for that kind of
+  switch; the build flag gives deployments a say in the
+  first-paint state without forking the binary.
+- **Rules out / defers:** GRUB kernel-cmdline parser
+  (runtime mode-by-string). Multiple VTs à la Linux
+  (Ctrl+Alt+F1..F6). Per-mode separate consoles (we share
+  one buffer). User-configurable TTY colours.
+- **Revisit when:** Kernel cmdline parser lands. Multi-
+  session / user-switching arrives. A second console
+  instance needs to coexist (e.g. a boot-log viewer
+  window alongside the shell).
+- **Related tracks:** Track 2 (Platform — boot options),
+  Track 7 (Userland — shell framing), Track 9 (Windowing —
+  compositor / mode switching).
+
+---
+
+## 074 — klog teed to the on-screen console
+
+- **Scope:** `kernel/core/klog.{h,cpp}` — new `SetLogTee`
+  registers a secondary string sink. Log / LogWithValue
+  forward each chunk (tag, subsystem, separator, message,
+  newline) to the tee after the serial write, minus the
+  timestamp prefix. `kernel/core/main.cpp` hooks the tee
+  to a lambda that calls `ConsoleWrite`.
+- **Decision:** Single-writer tee pattern. No timestamps
+  on the framebuffer path (the serial log keeps the
+  authoritative record). No DesktopCompose triggered from
+  the tee — ui-ticker + user input cover that. Race is
+  accepted: IRQ-time klogs can land a garbled character
+  on the console buffer under concurrent typing, but the
+  log ring and serial record both stay intact.
+- **Why:** Direct answer to "I also want to get the logs
+  from the desktop." Now every kernel subsystem's runtime
+  log line appears on screen as well as serial — boot
+  behaviour is visible without attaching a serial console.
+- **Rules out / defers:** Per-severity colour on the tee
+  (same ink colour for all). Tee filtering (e.g. only Warn+).
+  Multiple tees. SMP-safe klog buffering (still sharing the
+  single serial / console path today).
+- **Revisit when:** Colour klog output requested (e.g.
+  red for Error). Second tee needed (serial over network,
+  log viewer widget). SMP user code arrives and the race
+  becomes observable.
+- **Related tracks:** Track 7 (Userland — shell surfaces
+  the log too), Track 9 (Windowing — compositor framing
+  of the log).
+
+---
+
 ## 073 — START menu popup with action dispatch
 
 - **Scope:** `kernel/drivers/video/menu.{h,cpp}` — new popup-
