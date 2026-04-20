@@ -179,6 +179,16 @@ bool WindowIsAlive(WindowHandle h);
 /// `nullptr` if the handle is invalid or the window is dead.
 const char* WindowTitle(WindowHandle h);
 
+/// Optional content-paint callback. Invoked from
+/// WindowDrawAllOrdered after the window's chrome + owned
+/// widgets, receiving the client-area rectangle (everything
+/// inside the border + title bar, in framebuffer coordinates).
+/// Callback is responsible for NOT drawing outside the rect.
+/// `nullptr` clears any previously-registered drawer. The
+/// cookie is passed back unchanged.
+using WindowContentFn = void (*)(u32 x, u32 y, u32 w, u32 h, void* cookie);
+void WindowSetContentDraw(WindowHandle handle, WindowContentFn fn, void* cookie);
+
 /// Paint every registered window in z-order (bottom first, top
 /// last) + render the stored title string across each title bar
 /// in the default ink colour. Intended as part of a full-desktop

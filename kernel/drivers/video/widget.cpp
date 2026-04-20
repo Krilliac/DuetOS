@@ -138,6 +138,8 @@ struct RegisteredWindow
 {
     WindowChrome chrome;
     const char* title; // caller-owned string, stored by reference
+    WindowContentFn content_fn; // nullable per-window content drawer
+    void* content_cookie;
     bool alive;
     u8 _pad[7];
 };
@@ -456,6 +458,16 @@ const char* WindowTitle(WindowHandle h)
     return g_windows[h].title;
 }
 
+void WindowSetContentDraw(WindowHandle h, WindowContentFn fn, void* cookie)
+{
+    if (!WindowValid(h))
+    {
+        return;
+    }
+    g_windows[h].content_fn = fn;
+    g_windows[h].content_cookie = cookie;
+}
+
 void WindowDrawAllOrdered()
 {
     for (u32 i = 0; i < g_window_count; ++i)
@@ -490,6 +502,21 @@ void WindowDrawAllOrdered()
             {
                 PaintButton(g_widgets[j]);
             }
+        }
+        // Dynamic content drawer — runs after chrome + widgets
+        // so live text (e.g. task-manager stats) overlays the
+        // static client-area fill. Given the client rect so
+        // the drawer doesn't need to know about the title bar.
+        if (g_windows[h].content_fn != nullptr)
+        {
+            const auto& c = drawn;
+            const u32 tbh = (c.title_height == 0) ? 22 : c.title_height;
+            const u32 tbh_eff = (tbh > c.h) ? c.h : tbh;
+            const u32 cx = c.x + 2;
+            const u32 cy = c.y + tbh_eff + 2;
+            const u32 cw = (c.w > 4) ? c.w - 4 : 0;
+            const u32 ch = (c.h > tbh_eff + 4) ? c.h - tbh_eff - 4 : 0;
+            g_windows[h].content_fn(cx, cy, cw, ch, g_windows[h].content_cookie);
         }
     }
 }

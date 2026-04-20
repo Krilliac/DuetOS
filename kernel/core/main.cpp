@@ -278,6 +278,94 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     win_b_chrome.title_height = 22;
     customos::drivers::video::WindowRegister(win_b_chrome, "NOTES   DRAG ME");
 
+    // Task Manager window — a window whose content drawer
+    // prints live scheduler + memory stats. The ui-ticker's
+    // 1 Hz recompose refreshes it for free.
+    customos::drivers::video::WindowChrome taskman_chrome{};
+    taskman_chrome.x = 180;
+    taskman_chrome.y = 310;
+    taskman_chrome.w = 340;
+    taskman_chrome.h = 170;
+    taskman_chrome.colour_border = 0x00101828;
+    taskman_chrome.colour_title = 0x00803020;
+    taskman_chrome.colour_client = 0x00101828;
+    taskman_chrome.colour_close_btn = 0x00E04020;
+    taskman_chrome.title_height = 22;
+    const customos::drivers::video::WindowHandle taskman_handle =
+        customos::drivers::video::WindowRegister(taskman_chrome, "TASK MANAGER");
+
+    customos::drivers::video::WindowSetContentDraw(
+        taskman_handle,
+        [](customos::u32 cx, customos::u32 cy, customos::u32 /*cw*/, customos::u32 /*ch*/, void*)
+        {
+            using customos::drivers::video::FramebufferDrawString;
+            constexpr customos::u32 kFg = 0x0080F088;
+            constexpr customos::u32 kBg = 0x00101828;
+            // Manual decimal formatter for u64 — kernel has no
+            // printf. Fixed-width (10 digits) so the numeric
+            // column doesn't jitter when values roll over.
+            auto fmt_u64 = [](customos::u64 v, char* out)
+            {
+                char tmp[24];
+                customos::u32 n = 0;
+                if (v == 0)
+                {
+                    tmp[n++] = '0';
+                }
+                else
+                {
+                    while (v > 0 && n < sizeof(tmp))
+                    {
+                        tmp[n++] = static_cast<char>('0' + (v % 10));
+                        v /= 10;
+                    }
+                }
+                customos::u32 pad = (n < 10) ? 10 - n : 0;
+                customos::u32 o = 0;
+                for (customos::u32 i = 0; i < pad; ++i)
+                    out[o++] = ' ';
+                for (customos::u32 i = 0; i < n; ++i)
+                    out[o++] = tmp[n - 1 - i];
+                out[o] = '\0';
+            };
+
+            const auto s = customos::sched::SchedStatsRead();
+            const customos::u64 total = customos::mm::TotalFrames();
+            const customos::u64 free_frames = customos::mm::FreeFramesCount();
+            const customos::u64 uptime_s = customos::sched::SchedNowTicks() / 100;
+
+            char num[24];
+            char line[64];
+            struct Row
+            {
+                const char* label;
+                customos::u64 value;
+            };
+            const Row rows[] = {
+                {"UPTIME (S)     ", uptime_s},
+                {"CTX SWITCHES   ", s.context_switches},
+                {"TASKS LIVE     ", s.tasks_live},
+                {"TASKS SLEEPING ", s.tasks_sleeping},
+                {"TASKS BLOCKED  ", s.tasks_blocked},
+                {"MEM FREE (4K)  ", free_frames},
+                {"MEM TOTAL (4K) ", total},
+            };
+            customos::u32 y_off = cy + 4;
+            for (customos::u32 i = 0; i < sizeof(rows) / sizeof(rows[0]); ++i)
+            {
+                fmt_u64(rows[i].value, num);
+                customos::u32 o = 0;
+                for (customos::u32 j = 0; rows[i].label[j] != '\0' && o + 1 < sizeof(line); ++j)
+                    line[o++] = rows[i].label[j];
+                for (customos::u32 j = 0; num[j] != '\0' && o + 1 < sizeof(line); ++j)
+                    line[o++] = num[j];
+                line[o] = '\0';
+                FramebufferDrawString(cx + 6, y_off, line, kFg, kBg);
+                y_off += 10;
+            }
+        },
+        nullptr);
+
     // Framebuffer text console. 80x40 chars of boot log at the
     // bottom of the desktop, under the windows in z-order. Dragging
     // a window over it occludes; moving away restores.
