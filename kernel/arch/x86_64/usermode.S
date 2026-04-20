@@ -41,6 +41,19 @@ EnterUserMode:
      * the ring-3 transition. */
     cli
 
+    /* swapgs NOW, before we touch the GS selector. Rationale: in long
+     * mode, `mov gs, <non-null sel>` reloads the hidden GSBASE from
+     * the selected descriptor's base field. The user-data descriptor's
+     * base is 0, so the mov below would ZERO GSBASE — and on the next
+     * kernel entry (timer / syscall), any gs-relative read of per-CPU
+     * state would fault against address 0. Instead, stash the kernel's
+     * GSBASE into the KERNEL_GS_BASE MSR now; the isr_common entry
+     * path's matching swapgs restores it on every trap from user. The
+     * `mov gs, ax` that follows is free to zero GSBASE — that's the
+     * value user mode sees, and KERNEL_GS_BASE preserves the kernel's
+     * pcpu pointer across the round trip. */
+    swapgs
+
     /* Load user data selector into DS/ES/FS/GS. The selector includes
      * RPL=3 (0x33); the CPU checks DPL == RPL for data segments loaded
      * outside of an iretq, which is why we don't just push zero here. */

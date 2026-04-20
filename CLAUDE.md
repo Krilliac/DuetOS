@@ -200,6 +200,48 @@ Planned toolchain baseline: Clang 18+ / GCC 13+, CMake 3.25+, NASM 2.16+, `lld` 
 
 Until the build system exists, **do not invent a fake preset**. If a task asks "build it," answer truthfully: the build system is not yet written; here is what needs to happen to land one.
 
+### Live-test runtime tooling — install on demand
+
+The dev host does not ship with `qemu-system-x86_64`,
+`grub-mkrescue`, `xorriso`, `mtools`, or `ovmf`. Build-clean is the
+only signal available until they are installed.
+
+**If a task legitimately requires a live-boot smoke test**, install
+the packages before proceeding — do not fake it, do not ship a
+"compiled cleanly, therefore it works" claim for code whose
+correctness can only be proven at runtime:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y qemu-system-x86 grub-common grub-pc-bin xorriso mtools ovmf
+```
+
+Count as "legitimately requires":
+
+- The commit introduces or changes an observable runtime
+  behaviour (scheduler ordering, new syscall return codes, new
+  boot-log line, new trap path, new sandbox-policy refusal).
+- The commit claims end-to-end correctness for a path that a
+  compile-time check cannot prove (address-space isolation, TLB
+  shootdown, IRQ routing, timer drift, PE-image execution).
+- A previous slice's runtime claim has never been verified on
+  this host and the new slice depends on it.
+
+Do NOT install for:
+
+- Pure refactors with no behavioural delta.
+- Docs / CLAUDE.md / `.claude/knowledge/` changes only.
+- Code that compiles but is not yet wired into any live path.
+
+After install, `CUSTOMOS_TIMEOUT=20 tools/qemu/run.sh` is the
+canonical headless smoke invocation (see script header for other
+env-var overrides). Once CI lands, the same install line goes in
+the workflow file.
+
+IMPORTANT: assembly (`.S`) files are NOT formatted by
+`clang-format`. Never pass a `.S` file to `clang-format -i` — it
+will parse it as C++ and mangle it. Assembly stays hand-formatted.
+
 ## Git Sync Workflow
 
 Run this before every session start and before every commit/push. The default upstream branch is `main`.
