@@ -19,6 +19,8 @@
 #include "heartbeat.h"
 #include "klog.h"
 #include "panic.h"
+#include "ring3_smoke.h"
+#include "syscall.h"
 #include "../mm/kheap.h"
 #include "../mm/paging.h"
 #include "../sched/sched.h"
@@ -72,6 +74,9 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     IdtSetIst(2, kIstNmi);           // #NMI
     IdtSetIst(8, kIstDoubleFault);   // #DF
     IdtSetIst(18, kIstMachineCheck); // #MC
+
+    SerialWrite("[boot] Installing syscall gate (int 0x80, DPL=3).\n");
+    customos::core::SyscallInit();
 
     SerialWrite("[boot] Parsing Multiboot2 memory map.\n");
     FrameAllocatorInit(multiboot_info);
@@ -200,6 +205,14 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     customos::sched::SchedCreate(worker, const_cast<char*>("A"), "worker-A");
     customos::sched::SchedCreate(worker, const_cast<char*>("B"), "worker-B");
     customos::sched::SchedCreate(worker, const_cast<char*>("C"), "worker-C");
+
+    // First ring-3 slice: spawn a dedicated scheduler thread that maps a
+    // user code + stack page, drops to ring 3, and runs an interruptible
+    // pause/jmp loop forever. Kernel workers above keep running and
+    // periodically preempt it; the proof-of-life is that this whole
+    // boot sequence continues to make forward progress after the
+    // iretq into user mode.
+    customos::core::StartRing3SmokeTask();
 
     // Bring up APs. SmpStartAps calls SchedSleepTicks(1) between
     // INIT and SIPI; the dedicated idle task installed at the top

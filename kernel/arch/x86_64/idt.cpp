@@ -44,6 +44,7 @@ alignas(16) constinit IdtGate g_idt[256] = {};
 IdtPointer g_idt_pointer;
 
 constexpr u8 kGateInterruptDpl0 = 0x8E; // P=1, DPL=0, type=0xE (interrupt)
+constexpr u8 kGateInterruptDpl3 = 0xEE; // P=1, DPL=3, type=0xE (interrupt) — user-reachable
 
 void SetGate(u8 vector, u64 handler, u8 type_attr)
 {
@@ -85,6 +86,13 @@ void IdtSetGate(u8 vector, u64 handler)
     KASSERT_WITH_VALUE(handler != 0, "arch/idt", "IdtSetGate null handler", static_cast<u64>(vector));
 
     SetGate(vector, handler, kGateInterruptDpl0);
+}
+
+void IdtSetUserGate(u8 vector, u64 handler)
+{
+    KASSERT_WITH_VALUE(handler != 0, "arch/idt", "IdtSetUserGate null handler", static_cast<u64>(vector));
+
+    SetGate(vector, handler, kGateInterruptDpl3);
 }
 
 void IdtSetIst(u8 vector, u8 ist)

@@ -1,12 +1,15 @@
 #include "sched.h"
 
 #include "../arch/x86_64/cpu.h"
+#include "../arch/x86_64/gdt.h"
 #include "../arch/x86_64/serial.h"
 #include "../core/klog.h"
 #include "../core/panic.h"
 #include "../core/recovery.h"
 #include "../cpu/percpu.h"
+#include "../mm/frame_allocator.h"
 #include "../mm/kheap.h"
+#include "../mm/paging.h"
 #include "../sync/spinlock.h"
 
 namespace customos::sched
@@ -55,6 +58,17 @@ struct Task
     // once at SchedCreate and never changed — priority inheritance
     // / real-time class would need a mutable field.
     TaskPriority priority;
+
+    // User-VM regions this task owns. Registered via
+    // RegisterUserVmRegion (usually from the task's entry function
+    // right after it maps its user-accessible pages). Reaped by
+    // the dead-task reaper: each entry turns into an UnmapPage +
+    // FreeFrame before the Task struct itself is KFreed. Size
+    // bounded at kMaxUserVmRegionsPerTask — hitting the cap
+    // panics, which is the "a consumer I didn't know about wants
+    // more user pages" signal.
+    u8 user_region_count;
+    UserVmRegion user_regions[kMaxUserVmRegionsPerTask];
 };
 
 namespace
@@ -308,6 +322,7 @@ void SchedInit()
     boot_task->waiting_on = nullptr;
     boot_task->wake_by_timeout = false;
     boot_task->priority = TaskPriority::Normal;
+    boot_task->user_region_count = 0;
 
     Current() = boot_task;
     g_tasks_created = 1;
@@ -350,6 +365,7 @@ Task* SchedCreate(TaskEntry entry, void* arg, const char* name, TaskPriority pri
     t->waiting_on = nullptr;
     t->wake_by_timeout = false;
     t->priority = priority;
+    t->user_region_count = 0;
 
     // Build the initial stack. ContextSwitch pops r15, r14, r13, r12,
     // rbp, rbx and then rets. So from bottom to top of the pre-planted
@@ -439,6 +455,28 @@ void Schedule()
         next->state = TaskState::Running;
         Current() = next;
         ++g_context_switches;
+    }
+
+    // Publish `next`'s kernel-stack top to the BSP's TSS.RSP0 slot.
+    // RSP0 is the stack the CPU auto-switches to on a user→kernel
+    // privilege transition; without this update every subsequent
+    // ring-3 interrupt would land on whichever task happened to set
+    // it last — fine for a single ring-3 task (the old contract)
+    // but wrong as soon as two user-mode tasks coexist, because the
+    // second task's stack frames could overwrite the first task's
+    // in-flight trap frame.
+    //
+    // Tasks with stack_base == nullptr are the boot task (and the
+    // boot task alone); it runs exclusively in ring 0, so RSP0 is
+    // never consulted while it's `Current()`. Skipping the update
+    // for it keeps the boot path from needing a fake RSP0. On SMP,
+    // each AP will update its own TSS via its own per-CPU slot —
+    // this path is BSP-only today and will need a per-CPU wrapper
+    // on AP scheduler join.
+    if (next->stack_base != nullptr)
+    {
+        const u64 rsp0 = reinterpret_cast<u64>(next->stack_base) + next->stack_size;
+        arch::TssSetRsp0(rsp0);
     }
 
     ContextSwitch(&prev->rsp, next->rsp);
@@ -602,6 +640,43 @@ Task* CurrentTask()
     return Current();
 }
 
+u64 CurrentTaskId()
+{
+    Task* self = Current();
+    if (self == nullptr)
+    {
+        return ~0ULL;
+    }
+    return self->id;
+}
+
+void RegisterUserVmRegion(u64 vaddr, u64 frame)
+{
+    Task* self = Current();
+    if (self == nullptr)
+    {
+        PanicSched("RegisterUserVmRegion with no current task");
+    }
+    if (self->user_region_count >= kMaxUserVmRegionsPerTask)
+    {
+        PanicSched("RegisterUserVmRegion: per-task cap exceeded");
+    }
+    // No sched_lock — a task only registers its own regions from its
+    // own context; there's no contender to race against.
+    self->user_regions[self->user_region_count] = UserVmRegion{vaddr, frame};
+    ++self->user_region_count;
+}
+
+u64 SchedCurrentKernelStackTop()
+{
+    Task* self = Current();
+    if (self == nullptr || self->stack_base == nullptr)
+    {
+        return 0;
+    }
+    return reinterpret_cast<u64>(self->stack_base) + self->stack_size;
+}
+
 SchedStats SchedStatsRead()
 {
     return SchedStats{
@@ -665,6 +740,22 @@ namespace
             Task* dead = drained;
             drained = dead->next;
             dead->next = nullptr;
+
+            // Reclaim every user-VM region the task registered via
+            // RegisterUserVmRegion — unmap the page from the global
+            // PML4 AND return the backing frame to the physical
+            // allocator. Must happen BEFORE the Task struct itself
+            // is freed (we read the region table out of it). Doing
+            // this in the reaper (not SchedExit) keeps the unmap +
+            // FreeFrame off the dying task's own stack, same
+            // argument as the stack KFree.
+            for (u8 i = 0; i < dead->user_region_count; ++i)
+            {
+                const UserVmRegion region = dead->user_regions[i];
+                mm::UnmapPage(region.vaddr);
+                mm::FreeFrame(region.frame);
+            }
+            dead->user_region_count = 0;
 
             // Stack_base can be nullptr for the boot task (task 0);
             // defensive null-check even though task 0 should never

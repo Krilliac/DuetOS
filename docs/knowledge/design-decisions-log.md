@@ -607,6 +607,499 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 051 — SYS_YIELD = 3 (cooperative yield from ring 3)
+
+- **Scope:** `kernel/core/syscall.{h,cpp}` — new enum value,
+  new switch case; `kernel/core/ring3_smoke.cpp` — payload
+  grew from 31 → 31+7 = 38 bytes to insert `mov eax, 3; int
+  0x80` between the SYS_WRITE and SYS_EXIT calls.
+- **Decision:** Expose `sched::SchedYield` to ring 3 via a
+  dedicated syscall number. Cooperative-yield semantics: the
+  kernel-side handler calls SchedYield (cli / Schedule / sti),
+  writes 0 into frame->rax, and returns. The ring-3 side sees
+  the same net effect as a `pause` loop that happens to have
+  given the scheduler a chance to run other tasks. v0 returns
+  a constant 0 — the reserved slot lets a future "did I
+  actually get descheduled" boolean slot in without an ABI
+  break.
+- **Why:** The smoke payload now exercises all three non-exit
+  syscalls on its happy path: WRITE (pointer + return-value
+  ABI), YIELD (kernel-state-change without a return value),
+  and GETPID (not yet in the payload, but dispatched end-to-
+  end in the handler). Landing YIELD now also closes a latent
+  ABI-design gap: "can a ring-3 task ever voluntarily give up
+  its slice without exiting?" was implicitly "no" before this
+  slice, which is the wrong default for any future userland
+  main loop.
+- **Rules out / defers:** Priority inheritance through yield
+  (if a lower-prio task is holding a resource a yield caller
+  wants, the yield should donate the caller's priority — not
+  a thing yet, only Normal + Idle classes). Bounded-yield
+  variants (`SYS_YIELD_UNTIL(deadline)`, `SYS_SLEEP(ticks)`)
+  — both are natural follow-ups, but each is its own slice
+  with its own ABI choices. Per-CPU yield stats in the klog
+  (interesting once concurrency is real).
+- **Revisit when:** First shell / userland main loop lands
+  (consumer of yield). First real-time scheduling class
+  (yield semantics change — "give up slice" vs "give up
+  slice AND drop to end of priority band"). SYS_SLEEP /
+  SYS_YIELD_UNTIL land (this gate grows siblings).
+- **Related tracks:** Track 4 (Process model — cooperative
+  yield is the baseline userland sees), Track 11 (Win32 —
+  NtYieldExecution eventually descends from this).
+
+---
+
+## 050 — Per-task user-VM regions: reaper-driven unmap + free
+
+- **Scope:** `kernel/sched/sched.{h,cpp}` — new `UserVmRegion`
+  struct (vaddr + frame), Task grows a fixed-size
+  `user_regions[4]` array + count field, new
+  `sched::RegisterUserVmRegion(vaddr, frame)` accessor, the
+  reaper drains the array before KFreeing the Task struct
+  (calls `mm::UnmapPage` + `mm::FreeFrame` per entry).
+  Ring-3 smoke registers its code + stack pages immediately
+  after each MapPage.
+- **Decision:** Store every user-VM page a task maps in a
+  fixed-size on-Task-struct array. The reaper (already the
+  owner of "a zombie just went off-CPU, tear it down") walks
+  the array, unmaps each vaddr, and returns each frame to the
+  physical allocator. Cap at 4 entries per task — comfortably
+  covers code + stack + a heap page + one scratch; hitting
+  the cap panics, which is the "a consumer grew without
+  updating this constant" signal. Registration is lock-free
+  because only the task itself writes its own region array,
+  only from its own context, and the reaper only reads it
+  after the task is off-CPU and flagged Dead.
+- **Why:** Entry #044 noted "A way for the user task to exit
+  (the ring-3 loop is genuinely infinite; the reaper never
+  sees it)"; #045 closed that by landing SYS_EXIT; #047's
+  smoke payload now exercises SYS_EXIT on every boot. But
+  without region cleanup, each exit LEAKED one code page
+  + one stack page from the global PML4 + their backing
+  frames. First symptom would have been either (a) a
+  restart of the smoke task panicking on "virtual address
+  already mapped" in MapPage, or (b) the physical allocator
+  slowly draining to exhaustion over many boots. Neither is
+  a visible failure today — the smoke task runs once per
+  boot — but the kernel-invariant is "no resource outlives
+  its owning task," and violating it silently is exactly the
+  kind of drift the anti-bloat guidelines flag.
+- **Rules out / defers:** Variable-sized region lists (would
+  require heap allocation tied to task lifetime — out of
+  scope while 4 is the common case). Sharing a region
+  between tasks (requires refcounted frames; needed the
+  moment two ring-3 tasks share a library page). Lazy
+  deferred free (free the frames but keep the page-table
+  entries for fast re-install — a micro-optimisation with
+  no consumer yet). TLB shootdown on the unmap — single-
+  CPU ring 3 today, so invlpg on the local CPU in
+  UnmapPage is enough.
+- **Revisit when:** A second ring-3 task exists (it'll
+  probably want shared read-only mappings for its code
+  → refcount). Per-process address spaces land (the whole
+  "region list owned by the Task struct" becomes "region
+  list owned by the address space, Tasks point at an
+  address space"). SMP ring 3 — TLB shootdown on unmap
+  becomes necessary.
+- **Related tracks:** Track 3 (MM — page-table lifecycle),
+  Track 4 (Process model — resource ownership is per-Task
+  until per-process address spaces land), Track 13
+  (Security — leaking mappings across tasks is a
+  confidentiality bug waiting for a consumer).
+
+---
+
+## 049 — Walk-first user-pointer mapping check in CopyFrom/ToUser
+
+- **Scope:** `kernel/mm/paging.cpp` — new file-local
+  `PagePresentAndUser(virt)` + `IsUserRangeAccessible(addr,
+  len)` helpers that walk the PT via the existing
+  `WalkToPte(..., create=false)`. `CopyFromUser` / `CopyToUser`
+  now chain: range check → page-walk check → SMAP-bracketed
+  copy.
+- **Decision:** Before any SMAP-bracketed user copy, walk the
+  page table for every 4 KiB page the copy will touch and
+  verify both `Present` and `User` are set on the PTE. A
+  page that's in-range but not mapped (or mapped but not
+  user-accessible) returns `false` from the copy call
+  without ever actually dereferencing it. This makes the v0
+  "kernel halts on any #PF, including #PFs inside copy
+  loops" posture survivable against an uncooperative
+  user — a caller that passes an unmapped (but in-range)
+  pointer now gets a clean -1 from SYS_WRITE instead of
+  halting the whole machine.
+- **Why:** SMAP tells the CPU "don't let kernel code touch
+  user pages without stac," but it doesn't tell the CPU
+  "don't touch unmapped pages." A user pointer that's in
+  the canonical low half but points at a 4 KiB hole in the
+  address space (either never mapped, or a page we haven't
+  allocated) would still #PF on the copy — and today's trap
+  dispatcher halts on #PF. The right long-term fix is a
+  `__copy_user_fault_fixup` table (patches the fault RIP to
+  a "return false" label), but that requires inline asm for
+  the copy loops AND a linker-section sweep in the #PF
+  handler. Walk-first achieves the same user-visible
+  behaviour in pure C++ with no ABI or linker changes, at
+  the cost of one PT walk per copy. That's ~4 memory reads
+  per 4 KiB page — negligible for the 256-byte SYS_WRITE
+  copy, irrelevant for anything smaller, and a genuinely
+  bad idea for multi-megabyte copies that we don't have
+  and aren't about to land.
+- **Rules out / defers:** The proper fault-fixup table
+  (deferred until either a) a syscall needs to copy more
+  than the walk-first budget allows, or b) demand paging /
+  lazy page-in lands — at which point a "page was present
+  at walk time but got swapped out before the copy" race
+  becomes real). Multi-range copy / scatter-gather I/O.
+  Copy-on-write for forked address spaces. Concurrent-
+  unmap races on SMP (no AP user code today). Writable-
+  check for CopyToUser — today the walker only tests
+  Present + User, not Writable; a truly robust version
+  would verify the user page is writable before CopyToUser
+  even starts, turning "copy half-way then #PF on a
+  read-only page" into "return false up front." No
+  consumer today; add when one lands.
+- **Revisit when:** First consumer copying > a few KiB
+  (the walk's cost becomes measurable). Demand paging
+  lands. Per-process address spaces land (concurrent
+  unmap from another CPU becomes possible → race window
+  opens → fault-fixup becomes necessary). First CopyToUser
+  caller that wants a strict pre-check on writable pages.
+- **Related tracks:** Track 3 (MM — address-space
+  correctness), Track 13 (Security — robust user-pointer
+  handling is upstream of every syscall-level trust
+  boundary).
+
+---
+
+## 048 — Scheduler publishes TSS.RSP0 on every switch-in
+
+- **Scope:** `kernel/sched/sched.cpp` — `Schedule()` now calls
+  `arch::TssSetRsp0(next->stack_base + next->stack_size)` right
+  before `ContextSwitch`, for every task with a non-null
+  `stack_base`. Include reorg in `kernel/sched/sched.cpp` +
+  comment in `kernel/core/ring3_smoke.cpp` downgrading the manual
+  TssSetRsp0 call there to belt-and-braces.
+- **Decision:** Make "TSS.RSP0 always reflects the current task's
+  kernel-stack top" an invariant the scheduler owns, not an
+  invariant individual ring-3 tasks have to remember. On every
+  context switch INTO a task with its own managed kernel stack
+  (everyone except the boot task), publish the top of that stack
+  to the BSP's TSS. The boot task is skipped because its
+  `stack_base` is nullptr and it never runs in ring 3, so RSP0 is
+  never consulted while it's `Current()`.
+- **Why:** Entry #044 explicitly deferred this wiring with
+  "single ring-3 task in v0 — TSS.rsp0 is set once and stays
+  valid." That's true for exactly one user-mode-capable task;
+  as soon as two coexist, the second task's trap frames would
+  land on the first task's kernel stack and overwrite it. The
+  correctness question doesn't depend on a SECOND task existing
+  today — the invariant must hold BEFORE that lands, or the first
+  second-task bug would be indistinguishable from "a trap frame
+  mysteriously corrupts adjacent kernel memory." Cheap to do
+  now, expensive to add later under pressure.
+- **Rules out / defers:** Per-CPU TSS + per-AP RSP0 management
+  (today's `arch::TssSetRsp0` writes the BSP's TSS; APs need
+  their own TSS + their own TssSetRsp0 that indexes by
+  `cpu::CurrentCpu()`). Lazy RSP0 update (skipping the write
+  for ring-0-only tasks) — the two or three extra stores per
+  context switch are negligible, and gating on "is this task
+  ring-3 capable" adds a Task field we don't have yet.
+- **Revisit when:** SMP scheduler join — per-CPU TSS lands. A
+  dedicated "does this task enter ring 3?" flag becomes
+  ergonomic to add (replaces the `stack_base != nullptr` proxy).
+- **Related tracks:** Track 2 (SMP — per-CPU TSS), Track 4
+  (Process model — per-task kernel stack is the central invariant
+  of user-mode transitions).
+
+---
+
+## 047 — First pointer-arg syscall: SYS_write(fd, buf, len)
+
+- **Scope:** `kernel/core/syscall.{h,cpp}` — `SYS_WRITE = 2`,
+  `DoWrite` helper, `kSyscallWriteMax = 256` bounce buffer cap.
+  Ring-3 payload update in `kernel/core/ring3_smoke.cpp` (now
+  calls SYS_WRITE with "Hello from ring 3!\n" before SYS_EXIT).
+- **Decision:** First syscall that consumes a pointer argument.
+  Calling convention: rdi = fd, rsi = buf, rdx = len. Only fd=1
+  (stdout) is recognised in v0 — anything else returns -1. The
+  kernel allocates a 256-byte bounce buffer on its stack, copies
+  up to `min(len, 256)` bytes from userspace via
+  `mm::CopyFromUser` (which SMAP-gates the read), and emits the
+  bytes one-at-a-time to COM1. Returns the byte count actually
+  written (possibly truncated — standard POSIX-ish short-write
+  semantics). Truncation is not an error; the caller loops if
+  they care. NUL bytes inside the user buffer are forwarded
+  faithfully to COM1 (via a 2-char `{b, '\0'}` scratch buffer)
+  so the ABI doesn't quietly lose embedded nulls.
+- **Why:** The exit syscall in #045 deliberately dodged the
+  return-value half of the ABI (SchedExit never returns). This
+  one exercises a pointer-arg path and completes the round-trip
+  invariants: user passes a pointer, kernel validates + SMAPs +
+  copies into a bounce buffer, kernel acts on a kernel-owned
+  copy (no TOCTOU), kernel writes rax back, iretq delivers the
+  count. A fixed 256-byte cap keeps this syscall on-stack
+  without making it unbounded in kernel memory. "stdout only"
+  is deliberate — introducing anything that looks like an fd
+  table before VFS lands would be speculative machinery.
+- **Rules out / defers:** File descriptor table (v0 has exactly
+  one well-known fd: stdout=1). writev / iovec support —
+  no consumer. Real short-write semantics with EINTR / partial
+  progress — no signals yet. Async I/O — neither the infrastructure
+  nor a consumer exists. An fd=2 (stderr) split, or any other
+  well-known fd — stdout is the only sink COM1 cares about for
+  now. Non-COM1 destinations (e.g. a framebuffer tty) — the
+  whole tty layer is a later track. Line-buffered vs
+  unbuffered write semantics — unbuffered is the right default
+  for a serial console with no scroll-back concerns.
+- **Revisit when:** First fd table lands — SYS_WRITE grows a
+  dispatch per fd instead of its hard-coded fd==1 check.
+  First bug caused by a user pointer that's in-range but
+  unmapped — land `__copy_user_fault_fixup` so
+  `CopyFromUser` returns false instead of #PF'ing the kernel.
+  First consumer that writes > 256 bytes — either grow the
+  bounce buffer (cost: kernel-stack budget) or move to a
+  per-task scratch buffer allocated at SchedCreate time.
+- **Related tracks:** Track 4 (Process — first consumer of the
+  write syscall is the init / shell when they land),
+  Track 5 (Filesystem — SYS_WRITE becomes a thin dispatch once
+  VFS arrives), Track 13 (Security — SMAP is the first real
+  hardware-enforced boundary on user-pointer trust).
+
+---
+
+## 046 — SMEP + SMAP + mm::CopyFromUser / CopyToUser
+
+- **Scope:** `kernel/mm/paging.{h,cpp}` — CPUID-gated CR4 flips
+  (`EnableKernelProtectionBits`, called from `PagingInit`) plus
+  two public helpers (`CopyFromUser`, `CopyToUser`) that
+  validate the user pointer's range and SMAP-gate the copy
+  with stac / clac when the feature is on.
+- **Decision:** Enable both kernel-protection bits as early as
+  possible in the boot path — inside `PagingInit`, right after
+  EFER.NXE. SMEP (CR4 bit 20) makes kernel-mode execution of
+  any page with `U/S=1` #PF; SMAP (CR4 bit 21) makes kernel-mode
+  DATA access to a user page #PF unless RFLAGS.AC is set.
+  Both are gated on CPUID.7.0.EBX bits 7 (SMEP) and 20 (SMAP);
+  older CPUs stay in the pre-protection posture without
+  breaking the boot. Every user-pointer read/write the kernel
+  does now goes through `mm::CopyFromUser` or `mm::CopyToUser`
+  which:
+    1. reject pointers outside the canonical low half
+       (kUserMax = 0x00007FFF_FFFFFFFF — everything above is
+       the non-canonical hole or kernel space),
+    2. reject lengths that would overflow or cross into the
+       high half,
+    3. issue `stac` before the byte-by-byte copy and `clac`
+       after, so the CPU's SMAP check grants kernel access to
+       user memory only inside this one helper. Any other
+       kernel code path that dereferences a user pointer
+       still #PFs.
+- **Why:** Enables the first pointer-arg syscall (SYS_WRITE, #047)
+  safely. Without SMAP, a kernel bug that dereferences a user
+  pointer anywhere (not just inside the copy helper) still
+  works at the hardware level, which is how several
+  high-profile Linux exploits (e.g. the wait4 pointer-confusion
+  class) historically escalated. With SMAP, those same bugs
+  degrade to a clean #PF in the kernel — the trap dispatcher
+  records the violation and halts, which is infinitely
+  preferable to silent exploitation. SMEP closes the
+  complementary "spray shellcode into a user page, trick the
+  kernel into jumping there" class of exploits. Both bits are
+  present on any x86_64 CPU from 2014 onwards; not landing them
+  now would be choosing weaker defaults for no gain. Landing
+  them with the copy helpers avoids the "enable SMAP, then
+  immediately crash on the first user-pointer touch because
+  we forgot stac" debugging round.
+- **Rules out / defers:** Fault-recovery table for the copy
+  loops (`__copy_user_fault_fixup` — one entry per copy, lets
+  an in-range-but-unmapped user pointer return `false` instead
+  of #PF-halting the kernel). CET (shadow stack / IBT) — a
+  separate CR4 bit set with its own CPUID gate; lands as its
+  own slice. `mm::StrlenUser` and friends — no consumer yet.
+  Per-CPU SMAP state management on context switch — AC is
+  cleared by the hardware on iretq to a lower privilege, so
+  preemption during a stac'd copy is safe without extra work.
+- **Revisit when:** First syscall whose user pointer can
+  legitimately fault (e.g. a read from a just-mmap'd file
+  that's lazily populated) — land the fault-fixup table then.
+  SMP bring-up — SMAP is per-CPU; each AP needs its CR4 bits
+  set in its startup path. CET lands — touches the same CR4
+  register, may need coordinated write.
+- **Related tracks:** Track 3 (MM — the copy API is an MM
+  concern), Track 13 (Security — SMEP/SMAP are hardware
+  enforcement of the W^X + trust-boundary posture the
+  malware-hard-stop plan relies on).
+
+---
+
+## 045 — First syscall gate: int 0x80 (DPL=3) + SYS_exit
+
+- **Scope:** `kernel/arch/x86_64/exceptions.S` (new `ISR_NOERR 128`
+  stub reaching `isr_common`), `kernel/arch/x86_64/idt.{h,cpp}`
+  (new `IdtSetUserGate` — DPL=3 interrupt-gate installer),
+  `kernel/arch/x86_64/traps.cpp` (TrapDispatch branch for
+  `frame->vector == 0x80` → `core::SyscallDispatch` before the
+  exception fallback), `kernel/core/syscall.{h,cpp}` (new module:
+  `SyscallNumber::SYS_EXIT`, `SyscallInit`, `SyscallDispatch`),
+  wiring in `kernel/core/main.cpp`, payload update in
+  `kernel/core/ring3_smoke.cpp`.
+- **Decision:** Land the minimum usable user→kernel ABI. A single
+  vector (0x80) via legacy `int N` (not SYSCALL/SYSRET), installed
+  with a DPL=3 interrupt gate so ring-3 code can issue the int
+  without #GP'ing on the privilege check. Calling convention v0:
+  syscall number in rax, args in rdi / rsi / rdx, return value
+  written back into `frame->rax`. Exactly one syscall today —
+  `SYS_EXIT = 0` — which calls `sched::SchedExit` from inside the
+  dispatcher; that function is `[[noreturn]]`, so the trap frame
+  on the dying task's kernel stack is simply abandoned and the
+  reaper eventually KFrees both the stack and the Task struct.
+  Unknown syscall numbers log at Warn and write `-1` into
+  `frame->rax` — the ABI promise is that a bad number is a
+  recoverable error from the caller's point of view, not a task
+  kill. The ring-3 smoke payload grew from 4 bytes to 13: four
+  `pause` iterations (so the 100 Hz timer actually preempts us at
+  least once before exit) followed by `xor eax,eax; xor edi,edi;
+  int 0x80; hlt` — the trailing `hlt` is unreachable on the happy
+  path and a clean #GP signal on the unhappy one.
+- **Why:** Entry #044 landed ring 3 as a one-way door — the smoke
+  task had no way to exit, which meant any attempt to restart the
+  scenario required a full reboot and left a zombie-ish ring-3
+  task pinned forever. Landing the gate now closes that loop AND
+  validates the full round-trip: user → `int 0x80` → hardware
+  delivers onto RSP0 → isr_common → TrapDispatch → SyscallDispatch
+  → SchedExit → reaper. Every link in that chain becomes
+  regression-testable. SYS_EXIT is deliberately the first syscall
+  because it's the one syscall whose return semantics are trivially
+  "no return" — it avoids the entire "write frame->rax then iretq"
+  half of the ABI on the first slice. The second syscall (future
+  `write`/`log` or `getpid`) will exercise the return-value path.
+- **Rules out / defers:** SYSCALL/SYSRET (needs STAR/LSTAR/SFMASK
+  MSR plumbing + a FRED-or-classic entry stub; `int 0x80` is ~30×
+  slower than SYSCALL but "good enough" while exactly one
+  consumer exists). A proper syscall ABI document (names, numbers,
+  argument types, errno-style return convention) — deferred until
+  the 3rd-or-4th syscall when the pattern stabilises. Copy-from /
+  copy-to-user helpers with SMAP + fault-tolerant user-pointer
+  validation — no syscall today takes a pointer argument.
+  Argument clobber rules (which regs SYSCALL-v1 trashes, which
+  ones it preserves) — documented with the MSR-based path, not
+  here. Interrupted-syscall restart (EINTR semantics) — no signal
+  delivery yet, so the question doesn't arise. Syscall entry
+  tracing (an LTTng-ish ring buffer of (task, num, args, retval,
+  duration)) — belongs to observability track, not gate v0.
+  Per-process syscall filters (seccomp-bpf-style) — security
+  track, after the policy engine lands. fork/exec/wait — the
+  whole process-lifecycle triad depends on per-process address
+  spaces, which still don't exist. Batch syscalls / iovec-style
+  `writev` — YAGNI.
+- **Revisit when:** First syscall with a return value lands —
+  verify `frame->rax = retval; return;` round-trips correctly
+  through iretq. First syscall with a pointer argument —
+  introduce `copy_from_user` / `copy_to_user` behind SMAP, plus
+  the #PF-in-copy recovery path. First signal delivery or
+  cancellation — EINTR semantics need picking. SYSCALL/SYSRET
+  performance work is wanted — migrate the gate; leave `int 0x80`
+  as a compat path until it can be deprecated with a clear
+  consumer count. Second ring-3 task exists — TSS.rsp0 has to
+  move into scheduler switch-in (already called out in #044 but
+  now actually load-bearing for syscall correctness, since every
+  syscall lands on RSP0).
+- **Related tracks:** Track 4 (Process model — user→kernel ABI
+  is the foundation every process op sits on top of), Track 11
+  (Win32 subsystem — NT syscalls eventually descend from the
+  same gate machinery), Track 13 (Security — syscall filtering
+  and the policy engine will graft onto this dispatch point).
+
+---
+
+## 044 — First ring-3 slice: GDT user segments + iretq entry + smoke task
+
+- **Scope:** `kernel/arch/x86_64/gdt.{h,cpp}` (DPL=3 user code
+  + user data in slots 5–6, `TssSetRsp0` helper),
+  `kernel/arch/x86_64/usermode.{h,S}` (new module:
+  `EnterUserMode(rip, rsp)` — iretq into ring 3),
+  `kernel/sched/sched.{h,cpp}` (`SchedCurrentKernelStackTop`
+  accessor), `kernel/core/ring3_smoke.{h,cpp}` (new module:
+  dedicated scheduler thread that maps a user code + stack
+  page, publishes RSP0, and iretq's into ring 3), wiring in
+  `kernel/core/main.cpp`.
+- **Decision:** Land the minimum infrastructure to prove ring
+  3 works end-to-end, without yet dragging in syscalls,
+  per-process address spaces, or scheduler-aware RSP0
+  updates. A single boot-time scheduler thread (`ring3-smoke`)
+  does four things in order: (1) allocates one 4 KiB frame
+  for user code at VA `0x40000000` and plants a 4-byte
+  `pause; jmp short -4` payload, (2) allocates one 4 KiB
+  frame for user stack at VA `0x40010000`, (3) sets TSS.RSP0
+  to the top of its own kernel stack so the first user→kernel
+  transition lands safely, (4) calls `EnterUserMode` which
+  builds an iretq frame (SS / RSP / RFLAGS=0x202 / CS / RIP)
+  and iretq's to ring 3. The user code loops forever with
+  IF=1; timer interrupts preempt it, the trap dispatcher
+  handles the IRQ, the scheduler round-robins, and every
+  other kernel worker (heartbeat, keyboard reader, demo
+  mutex workers, idle) continues to make forward progress
+  — which is the verifiable evidence that ring 3 entry did
+  not corrupt kernel state. `EnterUserMode` is
+  `[[noreturn]]`; a ring-3 task returns to the kernel only
+  via a trap/IRQ, never via a plain ret.
+- **Why:** Entries #032 (TSS + IST) and multiple others have
+  been plumbing the "when ring 3 lands" side of the house
+  in anticipation of this slice. The index's current-state
+  note called out "transition to ring 3 (user processes +
+  syscalls)" as one of three candidate next bites. Taking
+  the smallest possible first bite — GDT + iretq + a user
+  payload that doesn't fault — keeps the scheduler,
+  paging, and trap-handling machinery honest without
+  forcing the simultaneous landing of SYSCALL/SYSRET,
+  per-process page tables, and a libc stub. The pattern is:
+  land ring 3 now, validate the scheduler survives it, then
+  land syscalls on top of a tested foundation.
+- **Rules out / defers:** Per-task RSP0 updates on context
+  switch (single ring-3 task in v0 — TSS.rsp0 is set once
+  and stays valid because no other task ever enters ring 3).
+  SYSCALL/SYSRET (no syscall dispatch yet). Per-process
+  address spaces (single global PML4 still — the user
+  pages at `0x40000000` are visible to every task, kernel
+  or user). A way for the user task to exit (the ring-3
+  loop is genuinely infinite; the reaper never sees it).
+  Syscall gate via `int 0x80` (vector stays non-present;
+  a deliberate `int` from ring 3 #GPs, which is the
+  correct posture until a handler exists). Signals. Page-
+  table tear-down on user-task exit. `int3` / `ud2` from
+  ring 3 (still halts the dispatcher — the trap frame
+  would carry CS=0x1B, which is diagnostically useful but
+  not yet a recoverable path). FPU/SSE user state (we
+  compile `-mno-sse -mgeneral-regs-only` so user code that
+  touches xmm registers #UDs cleanly). STAR/LSTAR/SFMASK
+  MSRs (consumed only by SYSCALL/SYSRET; leaving them zero
+  is fine).
+- **Revisit when:** First syscall lands — the gate needs a
+  DPL=3 IDT entry for `int 0x80`, the C++ handler consumes
+  the trap frame's rax/rdi/rsi/... as argN registers, and
+  the slice grows a `SchedCreateUserProcess` that replaces
+  today's manual "one user task, one smoke thread" wiring.
+  Second ring-3 task is created — that's when
+  `arch::TssSetRsp0` must move into the scheduler's
+  switch-in path (update on every context switch INTO a
+  user-mode-capable task). Per-process address spaces
+  land — today's single shared PML4 becomes one CR3 per
+  process, which also means `g_user_code_virt` /
+  `g_user_stack_virt` stop being global constants. SMP
+  ring 3 — each CPU's TSS needs its own RSP0 slot (today's
+  BSP-only helper doesn't generalise).
+- **Related tracks:** Track 4 (Process model — first
+  concrete user-mode execution), Track 11 (Win32 subsystem
+  — every PE executable will end up in ring 3 via
+  something descended from this entry path), Track 13
+  (Security — W^X enforced on the user code mapping:
+  present + user-accessible, no writable bit; stack
+  mapping: present + writable + user + NX).
+
+---
+
 ## 043 — PS/2 keyboard device reset + explicit scan-code-set-1
 
 - **Scope:** `kernel/drivers/input/ps2kbd.cpp` — new

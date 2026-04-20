@@ -10,6 +10,8 @@ namespace
 // 16-bit era but we only care about a handful of fields:
 //   0x9A = P | DPL=0 | S | exec/read code
 //   0x92 = P | DPL=0 | S | read/write data
+//   0xFA = P | DPL=3 | S | exec/read code  (user code)
+//   0xF2 = P | DPL=3 | S | read/write data (user data)
 //   0xA  (high nibble of flags) = G=1 | L=1 | DB=0   (code)
 //   0xA  (high nibble of flags) = G=1 | L=0 | DB=0   (data — L ignored)
 //
@@ -19,13 +21,21 @@ namespace
 constexpr u64 kGdtNull = 0x0000000000000000ULL;
 constexpr u64 kGdtKernelCode = 0x00AF9A000000FFFFULL;
 constexpr u64 kGdtKernelData = 0x00AF92000000FFFFULL;
+constexpr u64 kGdtUserCode = 0x00AFFA000000FFFFULL;
+constexpr u64 kGdtUserData = 0x00AFF2000000FFFFULL;
 
 // Slots 3-4 hold the 16-byte TSS system descriptor, filled in at
 // runtime by TssInit. The initial 0s make them a null-present-bit
 // descriptor that the CPU rejects, so LTR on an uninitialised TSS
 // would fault rather than use garbage.
-alignas(16) constinit u64 g_gdt[5] = {
-    kGdtNull, kGdtKernelCode, kGdtKernelData, 0, 0,
+//
+// Slots 5-6 are the ring-3 descriptors consumed by iretq-based user-
+// mode entry: the CPU reads CS/SS from the iretq frame, looks them
+// up in the GDT, and checks DPL/RPL/permission bits. An iretq with
+// CS == kUserCodeSelector with the matching DPL=3 descriptor absent
+// raises #GP(selector).
+alignas(16) constinit u64 g_gdt[7] = {
+    kGdtNull, kGdtKernelCode, kGdtKernelData, 0, 0, kGdtUserCode, kGdtUserData,
 };
 
 struct [[gnu::packed]] GdtPointer
@@ -164,6 +174,11 @@ bool IstStackCanariesIntact()
     const u64 mc = *reinterpret_cast<const u64*>(g_ist_stack_mc);
     const u64 nmi = *reinterpret_cast<const u64*>(g_ist_stack_nmi);
     return df == kIstStackCanary && mc == kIstStackCanary && nmi == kIstStackCanary;
+}
+
+void TssSetRsp0(u64 rsp0)
+{
+    g_bsp_tss.rsp0 = rsp0;
 }
 
 } // namespace customos::arch

@@ -103,6 +103,49 @@ void OnTimerTick(u64 now_ticks);
 /// Pointer to the currently-executing task. Never null after SchedInit.
 Task* CurrentTask();
 
+/// Opaque identity of the currently-executing task. Monotonically
+/// assigned at SchedCreate and never reused — the boot task is 0, then
+/// 1, 2, 3, … in creation order. Used by SYS_GETPID and any future
+/// diagnostic that wants to name a task without exposing the Task*
+/// itself. Returns ~0 if called before SchedInit.
+u64 CurrentTaskId();
+
+/// Top (high address) of the current task's kernel stack. Returns 0 for
+/// the boot task (it never had a scheduler-managed kernel stack — it
+/// runs on the boot.S stack, which is irrelevant for ring-3 RSP0
+/// purposes). Used by the ring-3 entry path: the caller passes this to
+/// arch::TssSetRsp0 before iretq so the first interrupt from user mode
+/// lands on a valid kernel stack.
+u64 SchedCurrentKernelStackTop();
+
+/*
+ * Per-task user-VM bookkeeping.
+ *
+ * A ring-3-capable task registers every user-accessible page it maps
+ * (code page, stack page, and — eventually — heap/shared pages). When
+ * the task exits (SchedExit / SYS_EXIT), the reaper walks the list and
+ * calls `mm::UnmapPage(vaddr) + mm::FreeFrame(frame)` for each, so
+ * nothing leaks across task boundaries.
+ *
+ * v0 keeps the list on-Task-struct at a fixed size (4 entries), so
+ * registration is allocation-free and the reaper's access pattern is
+ * tight. The bound grows once a consumer needs more than code + stack
+ * + a heap + a shared page — none exist today.
+ *
+ * `RegisterUserVmRegion` is called from the registering task's own
+ * entry function (so it targets `Current()` unambiguously). Calling it
+ * more than `kMaxUserVmRegionsPerTask` times panics.
+ */
+inline constexpr u64 kMaxUserVmRegionsPerTask = 4;
+
+struct UserVmRegion
+{
+    u64 vaddr; // start of a 4 KiB user page
+    u64 frame; // PhysAddr returned by mm::AllocateFrame
+};
+
+void RegisterUserVmRegion(u64 vaddr, u64 frame);
+
 /// Diagnostics — cheap snapshots.
 struct SchedStats
 {

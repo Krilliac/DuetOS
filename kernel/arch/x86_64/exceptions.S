@@ -104,6 +104,21 @@ ISR_NOERR 46                    /* IRQ14                               */
 ISR_NOERR 47                    /* IRQ15 — also the 8259 spurious slot */
 
 /* -------------------------------------------------------------------------
+ * User-mode syscall gate (vector 0x80). Installed by core::SyscallInit via
+ * IdtSetUserGate so the descriptor has DPL=3 — which is what makes the
+ * int instruction legal from ring 3 in the first place. No error code is
+ * pushed by the CPU for `int N`, so this uses the NOERR shape.
+ *
+ * The stub reaches isr_common just like any other ISR; the dispatcher
+ * branches on frame->vector == 0x80 and routes into core::SyscallDispatch.
+ * That handler may write frame->rax with a return value before returning,
+ * and isr_common's pop-all + iretq delivers it to ring 3. A syscall that
+ * never returns (SYS_exit) simply calls sched::SchedExit from the
+ * dispatcher — the half-consumed trap frame is abandoned with its task.
+ * ------------------------------------------------------------------------- */
+ISR_NOERR 128                   /* int 0x80 — user-mode syscall gate */
+
+/* -------------------------------------------------------------------------
  * LAPIC spurious-interrupt vector. Per Intel SDM, the SVR's vector field
  * has the low 4 bits hard-wired to 1, so the spurious vector is conven-
  * tionally 0xFF. Exported by name so the LAPIC bring-up can install it
