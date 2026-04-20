@@ -381,7 +381,7 @@ get an inline "superseded by <commit>" note and stay.
 
 - **Scope:** `kernel/drivers/pci/pci.{h,cpp}`,
   `kernel/core/main.cpp` calls `PciEnumerate` after `SmpStartAps`
-- **Commit:** _(filled at commit)_
+- **Commit:** `9158df9`
 - **Decision:** Use legacy Configuration Mechanism #1 (write 32-bit
   address to port 0xCF8, read/write 32-bit dword at 0xCFC) instead
   of MCFG/ECAM for the first PCI enumerator. Walk bus 0..3; read
