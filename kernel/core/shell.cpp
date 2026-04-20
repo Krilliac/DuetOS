@@ -187,6 +187,9 @@ void CmdHelp()
     ConsoleWriteln("  STATS        SCHEDULER STATISTICS");
     ConsoleWriteln("  MEM          PHYSICAL MEMORY USAGE");
     ConsoleWriteln("  HISTORY      LIST RECENT COMMANDS (!N RECALL, !! REPEAT)");
+    ConsoleWriteln("  SET NAME VAL SET ENV VARIABLE");
+    ConsoleWriteln("  UNSET NAME   REMOVE ENV VARIABLE");
+    ConsoleWriteln("  ENV          LIST ENV VARIABLES  (USE $NAME IN ARGS)");
     ConsoleWriteln("");
     ConsoleWriteln("KEYS:  UP/DOWN = HISTORY   TAB = COMPLETE");
     ConsoleWriteln("       CTRL+ALT+T = TOGGLE MODE");
@@ -287,6 +290,96 @@ void CmdStats()
 // Forward — TmpLeaf lives further down alongside the tmpfs
 // command implementations; these read/copy helpers need it.
 const char* TmpLeaf(const char* path);
+
+// ---------------------------------------------------------------
+// Environment variables. Fixed 8-slot table, 32-byte names +
+// 128-byte values. set / env / unset commands plus $VAR token
+// substitution in Dispatch.
+// ---------------------------------------------------------------
+
+constexpr u32 kEnvSlotCount = 8;
+constexpr u32 kEnvNameMax = 32;
+constexpr u32 kEnvValueMax = 128;
+
+struct EnvSlot
+{
+    bool in_use;
+    char name[kEnvNameMax];
+    char value[kEnvValueMax];
+};
+
+constinit EnvSlot g_env[kEnvSlotCount] = {};
+
+bool EnvNameEq(const char* a, const char* b)
+{
+    for (u32 i = 0; i < kEnvNameMax; ++i)
+    {
+        if (a[i] != b[i])
+            return false;
+        if (a[i] == '\0')
+            return true;
+    }
+    return true;
+}
+
+void EnvCopy(char* dst, const char* src, u32 cap)
+{
+    u32 i = 0;
+    for (; i + 1 < cap && src[i] != '\0'; ++i)
+    {
+        dst[i] = src[i];
+    }
+    dst[i] = '\0';
+}
+
+EnvSlot* EnvFind(const char* name)
+{
+    for (u32 i = 0; i < kEnvSlotCount; ++i)
+    {
+        if (g_env[i].in_use && EnvNameEq(g_env[i].name, name))
+        {
+            return &g_env[i];
+        }
+    }
+    return nullptr;
+}
+
+bool EnvSet(const char* name, const char* value)
+{
+    EnvSlot* s = EnvFind(name);
+    if (s == nullptr)
+    {
+        for (u32 i = 0; i < kEnvSlotCount; ++i)
+        {
+            if (!g_env[i].in_use)
+            {
+                s = &g_env[i];
+                s->in_use = true;
+                break;
+            }
+        }
+    }
+    if (s == nullptr)
+    {
+        return false;
+    }
+    EnvCopy(s->name, name, kEnvNameMax);
+    EnvCopy(s->value, value, kEnvValueMax);
+    return true;
+}
+
+bool EnvUnset(const char* name)
+{
+    EnvSlot* s = EnvFind(name);
+    if (s == nullptr)
+    {
+        return false;
+    }
+    s->in_use = false;
+    s->name[0] = '\0';
+    s->value[0] = '\0';
+    return true;
+}
 
 // Pull a file's bytes into an output buffer. Source can be
 // either tmpfs (/tmp/<leaf>) or the read-only ramfs. Returns
@@ -554,6 +647,52 @@ void CmdTail(u32 argc, char** argv)
     if (n > 0 && scratch[n - 1] != '\n')
     {
         ConsoleWriteChar('\n');
+    }
+}
+
+void CmdSet(u32 argc, char** argv)
+{
+    if (argc < 3)
+    {
+        ConsoleWriteln("SET: USAGE: SET NAME VALUE");
+        return;
+    }
+    if (!EnvSet(argv[1], argv[2]))
+    {
+        ConsoleWriteln("SET: ENV TABLE FULL");
+    }
+}
+
+void CmdUnset(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("UNSET: MISSING NAME");
+        return;
+    }
+    if (!EnvUnset(argv[1]))
+    {
+        ConsoleWrite("UNSET: NO SUCH VAR: ");
+        ConsoleWriteln(argv[1]);
+    }
+}
+
+void CmdEnv()
+{
+    bool any = false;
+    for (u32 i = 0; i < kEnvSlotCount; ++i)
+    {
+        if (!g_env[i].in_use)
+            continue;
+        any = true;
+        ConsoleWrite("  ");
+        ConsoleWrite(g_env[i].name);
+        ConsoleWriteChar('=');
+        ConsoleWriteln(g_env[i].value);
+    }
+    if (!any)
+    {
+        ConsoleWriteln("(NO VARIABLES SET)");
     }
 }
 
@@ -1030,6 +1169,22 @@ void Dispatch(char* line)
     {
         return; // empty submission — no diagnostic, just re-prompt
     }
+
+    // $VAR substitution — only for whole-token matches. `$PATH`
+    // becomes its env value; `/etc/$PATH` stays verbatim. Empty
+    // value (undefined var) substitutes as "". Keeping the
+    // whole-token rule makes substitution trivial + safe; a real
+    // parser lands when someone needs quoted / concatenated
+    // expansions.
+    static char env_empty[1] = {'\0'};
+    for (u32 i = 1; i < argc; ++i)
+    {
+        if (argv[i][0] != '$' || argv[i][1] == '\0')
+            continue;
+        EnvSlot* s = EnvFind(argv[i] + 1);
+        argv[i] = (s != nullptr) ? s->value : env_empty;
+    }
+
     const char* cmd = argv[0];
     if (StrEq(cmd, "help"))
     {
@@ -1139,6 +1294,21 @@ void Dispatch(char* line)
     if (StrEq(cmd, "tail"))
     {
         CmdTail(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "set"))
+    {
+        CmdSet(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "unset"))
+    {
+        CmdUnset(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "env"))
+    {
+        CmdEnv();
         return;
     }
     ConsoleWrite("COMMAND NOT FOUND: ");
@@ -1272,9 +1442,10 @@ bool NamePrefixMatch(const char* name, const char* prefix, u32 plen)
 void CompleteCommandName()
 {
     static const char* const kCommandSet[] = {
-        "help",    "about", "version", "clear", "uptime", "date", "windows", "mode",
-        "ls",      "cat",   "touch",   "rm",    "echo",   "cp",   "mv",      "wc",
-        "head",    "tail",  "dmesg",   "stats", "mem",    "history",
+        "help",    "about", "version", "clear", "uptime", "date",  "windows", "mode",
+        "ls",      "cat",   "touch",   "rm",    "echo",   "cp",    "mv",      "wc",
+        "head",    "tail",  "dmesg",   "stats", "mem",    "history", "set",   "unset",
+        "env",
     };
     constexpr u32 kCmdCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
