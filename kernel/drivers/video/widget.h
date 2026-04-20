@@ -67,4 +67,34 @@ void WidgetDrawAll();
 /// a single button bit).
 u32 WidgetRouteMouse(u32 cursor_x, u32 cursor_y, u8 button_mask);
 
+// ---------------------------------------------------------------
+// Window chrome primitive.
+//
+// Draws the classic "Windows 98-ish" window: outer dark border,
+// title bar fill across the top, client-area fill below, plus an
+// accent stripe separating the two. No text yet (bitmap font is
+// a separate slice); a title-bar label renders as a solid
+// placeholder rect for now. A tiny close-button glyph drawn in
+// the top-right corner as a red square with an outlined border.
+//
+// This is a STATIC draw primitive, not a widget — the router
+// doesn't know about windows yet. Once dragging / focus land,
+// windows become first-class widget-table entries.
+// ---------------------------------------------------------------
+
+struct WindowChrome
+{
+    u32 x, y, w, h;
+    u32 colour_border;
+    u32 colour_title;     // title bar fill
+    u32 colour_client;    // body fill
+    u32 colour_close_btn; // close-button square fill
+    u32 title_height;     // pixels from top devoted to title bar
+};
+
+/// Paint the window chrome described by `w`. Idempotent — safe
+/// to call repeatedly. No-op on zero dimensions or when the
+/// framebuffer is unavailable.
+void WindowDraw(const WindowChrome& w);
+
 } // namespace customos::drivers::video

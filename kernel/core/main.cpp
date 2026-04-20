@@ -148,13 +148,30 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     constexpr customos::u32 kDesktopTeal = 0x00204868;
     customos::drivers::video::FramebufferClear(kDesktopTeal);
 
-    // Demo clickable button. Click lights it up red; release
-    // returns it to grey — the smallest proof the mouse-event
-    // pipeline reaches widgets end-to-end.
+    // Demo window chrome. Classic three-colour scheme: dark
+    // border, navy title bar, light-grey client area, with a
+    // red close-button square at the top-right corner. Proves
+    // the window-drawing primitive end-to-end.
+    customos::drivers::video::WindowChrome demo_window{};
+    demo_window.x = 220;
+    demo_window.y = 120;
+    demo_window.w = 420;
+    demo_window.h = 260;
+    demo_window.colour_border = 0x00101828;
+    demo_window.colour_title = 0x00284878;
+    demo_window.colour_client = 0x00D8D8D8;
+    demo_window.colour_close_btn = 0x00E04020;
+    demo_window.title_height = 22;
+    customos::drivers::video::WindowDraw(demo_window);
+
+    // Demo clickable button, now sitting inside the window's
+    // client area. Click lights it up red; release returns it
+    // to grey — the smallest proof the mouse-event pipeline
+    // reaches widgets end-to-end.
     customos::drivers::video::ButtonWidget demo_button{};
     demo_button.id = 1;
-    demo_button.x = 40;
-    demo_button.y = 40;
+    demo_button.x = 256;
+    demo_button.y = 168;
     demo_button.w = 160;
     demo_button.h = 48;
     demo_button.colour_normal = 0x00C0C0C0;  // neutral grey

@@ -57,6 +57,47 @@ void WidgetDrawAll()
     }
 }
 
+void WindowDraw(const WindowChrome& w)
+{
+    if (w.w == 0 || w.h == 0)
+    {
+        return;
+    }
+
+    // Client area first — the title bar draw below overwrites
+    // the top strip. Painting the whole client-area colour up
+    // front avoids a branch-per-row "am I inside the title?"
+    // pattern.
+    FramebufferFillRect(w.x, w.y, w.w, w.h, w.colour_client);
+
+    // Title bar.
+    const u32 tbh = (w.title_height == 0) ? 22 : w.title_height;
+    const u32 tbh_eff = (tbh > w.h) ? w.h : tbh;
+    FramebufferFillRect(w.x, w.y, w.w, tbh_eff, w.colour_title);
+
+    // Outer border — 2-pixel dark frame over the whole window.
+    FramebufferDrawRect(w.x, w.y, w.w, w.h, w.colour_border, 2);
+
+    // Title / client divider — 1-pixel line where the title
+    // bar ends. Helps the eye separate chrome from content.
+    if (tbh_eff + 2 <= w.h)
+    {
+        FramebufferFillRect(w.x + 2, w.y + tbh_eff, w.w - 4, 1, w.colour_border);
+    }
+
+    // Close-button-ish square near top-right. Sized to fit
+    // inside the title bar with 4px padding on top/bottom.
+    const u32 btn_pad = 4;
+    if (tbh_eff > 2 * btn_pad + 4 && w.w > tbh_eff)
+    {
+        const u32 btn_side = tbh_eff - 2 * btn_pad;
+        const u32 btn_x = w.x + w.w - btn_side - btn_pad;
+        const u32 btn_y = w.y + btn_pad;
+        FramebufferFillRect(btn_x, btn_y, btn_side, btn_side, w.colour_close_btn);
+        FramebufferDrawRect(btn_x, btn_y, btn_side, btn_side, w.colour_border, 1);
+    }
+}
+
 u32 WidgetRouteMouse(u32 cursor_x, u32 cursor_y, u8 button_mask)
 {
     const bool left_down = (button_mask & drivers::input::kMouseButtonLeft) != 0;
