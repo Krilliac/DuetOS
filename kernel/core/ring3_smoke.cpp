@@ -47,40 +47,78 @@ constexpr u64 kUserCodeVirt = 0x0000000040000000ULL;
 constexpr u64 kUserStackVirt = 0x0000000040010000ULL;
 constexpr u64 kUserStackTop = kUserStackVirt + mm::kPageSize;
 
-// Fixed offset of the "Hello from ring 3!\n" string inside the user
-// code page. Encoded as the low-32 immediate in the user's
-// `mov esi, 0x40000080` instruction below; changing this value
-// requires updating BOTH the constant AND the instruction byte
-// at the same time (the test below enforces that they match).
-constexpr u64 kUserMessageOffset = 0x80;
+// Fixed offsets of string constants inside the user code page.
+// Every offset below is encoded as a 32-bit immediate in the
+// machine code — changing any of them here requires updating the
+// matching byte in kUserCodeBytes too. The static_assert at the
+// bottom bounds the instruction region so a new instruction byte
+// can't silently overrun the first string.
+constexpr u64 kUserMessageOffset = 0x80; // "Hello from ring 3!\n"
+constexpr u64 kUserStatPath1Offset = 0xA0; // "/etc/version"
+constexpr u64 kUserStatPath2Offset = 0xB0; // "/welcome.txt"
 
 constexpr char kUserMessage[] = "Hello from ring 3!\n";
-// sizeof includes the trailing NUL; the user syscall passes
-// sizeof - 1 so the NUL isn't written to COM1.
+constexpr char kUserStatPath1[] = "/etc/version";
+constexpr char kUserStatPath2[] = "/welcome.txt";
 constexpr u64 kUserMessageLen = sizeof(kUserMessage) - 1;
 
-// 31-byte user code: pause x2, SYS_WRITE(1, 0x40000080, len),
-// SYS_YIELD, SYS_EXIT(0), hlt. Emitted as raw bytes rather than
-// a .S file so the user-mode VA layout, the bytes, and the
-// "hands-off: this runs in ring 3" context all stay in one place.
+// SYS_STAT writes a u64 size to the user-provided buffer. The
+// user stack page is mapped writable (NX), so point the buffer
+// near the top of the stack — comfortably below where any stack
+// frames would grow for this payload.
+constexpr u64 kUserStatOutVa = kUserStackVirt + 0xFF0;
+
+// 74-byte user code. Order:
+//   pause, pause,
+//   SYS_STAT("/etc/version",  &stat_out),   — trusted sees size; sandbox gets "stat miss" (namespace jail)
+//   SYS_STAT("/welcome.txt",  &stat_out),   — sandbox sees size; trusted gets "stat miss" (path not in its root)
+//   SYS_WRITE(1, "Hello from ring 3!\n", 19),   — trusted prints; sandbox denied (cap jail)
+//   SYS_YIELD,
+//   SYS_EXIT(0), hlt.
+//
+// Same bytes run in every task — the divergence in observed
+// behaviour is driven purely by Process::caps and Process::root.
+// That's the demonstration: the jail is a property of the kernel's
+// per-process state, not of the code the process runs.
 // clang-format off
 constexpr u8 kUserCodeBytes[] = {
-    0xF3, 0x90,                                                       // pause
-    0xF3, 0x90,                                                       // pause
-    0xB8, 0x02, 0x00, 0x00, 0x00,                                     // mov eax, 2         (SYS_WRITE)
-    0xBF, 0x01, 0x00, 0x00, 0x00,                                     // mov edi, 1         (fd=1)
-    0xBE, 0x80, 0x00, 0x00, 0x40,                                     // mov esi, 0x40000080 (msg ptr)
-    0xBA, static_cast<u8>(kUserMessageLen), 0x00, 0x00, 0x00,         // mov edx, len
-    0xCD, 0x80,                                                       // int 0x80   (SYS_WRITE)
-    0xB8, 0x03, 0x00, 0x00, 0x00,                                     // mov eax, 3         (SYS_YIELD)
-    0xCD, 0x80,                                                       // int 0x80   (yield)
-    0x31, 0xC0,                                                       // xor eax, eax       (SYS_EXIT)
-    0x31, 0xFF,                                                       // xor edi, edi       (rc=0)
-    0xCD, 0x80,                                                       // int 0x80   (exit)
-    0xF4,                                                             // hlt (unreachable)
+    0xF3, 0x90,                                                   // pause
+    0xF3, 0x90,                                                   // pause
+
+    // SYS_STAT /etc/version
+    0xB8, 0x04, 0x00, 0x00, 0x00,                                 // mov eax, 4    (SYS_STAT)
+    0xBF, 0xA0, 0x00, 0x00, 0x40,                                 // mov edi, 0x400000A0 (path1)
+    0xBE, 0xF0, 0x0F, 0x01, 0x40,                                 // mov esi, 0x40010FF0 (out)
+    0xCD, 0x80,                                                   // int 0x80
+
+    // SYS_STAT /welcome.txt
+    0xB8, 0x04, 0x00, 0x00, 0x00,                                 // mov eax, 4    (SYS_STAT)
+    0xBF, 0xB0, 0x00, 0x00, 0x40,                                 // mov edi, 0x400000B0 (path2)
+    0xBE, 0xF0, 0x0F, 0x01, 0x40,                                 // mov esi, 0x40010FF0 (out)
+    0xCD, 0x80,                                                   // int 0x80
+
+    // SYS_WRITE(1, msg, len)
+    0xB8, 0x02, 0x00, 0x00, 0x00,                                 // mov eax, 2    (SYS_WRITE)
+    0xBF, 0x01, 0x00, 0x00, 0x00,                                 // mov edi, 1    (fd=1)
+    0xBE, 0x80, 0x00, 0x00, 0x40,                                 // mov esi, 0x40000080 (msg)
+    0xBA, static_cast<u8>(kUserMessageLen), 0x00, 0x00, 0x00,     // mov edx, len
+    0xCD, 0x80,                                                   // int 0x80
+
+    // SYS_YIELD
+    0xB8, 0x03, 0x00, 0x00, 0x00,                                 // mov eax, 3
+    0xCD, 0x80,                                                   // int 0x80
+
+    // SYS_EXIT(0)
+    0x31, 0xC0,                                                   // xor eax, eax
+    0x31, 0xFF,                                                   // xor edi, edi
+    0xCD, 0x80,                                                   // int 0x80
+    0xF4,                                                         // hlt (unreachable)
 };
 // clang-format on
-static_assert(sizeof(kUserCodeBytes) <= kUserMessageOffset, "user code runs into the fixed message offset");
+static_assert(sizeof(kUserCodeBytes) <= kUserMessageOffset, "user code runs into the first string region");
+static_assert(kUserMessageOffset + sizeof(kUserMessage) <= kUserStatPath1Offset, "msg overruns stat-path-1 region");
+static_assert(kUserStatPath1Offset + sizeof(kUserStatPath1) <= kUserStatPath2Offset,
+              "stat-path-1 overruns stat-path-2 region");
 
 // Populate `frame` with the user-code-page contents via the kernel
 // direct-map alias. Reaches the frame from the parent task's view —
@@ -99,6 +137,18 @@ void WriteUserCodeFrame(mm::PhysAddr frame)
     for (u64 i = 0; i < kUserMessageLen; ++i)
     {
         code_direct[kUserMessageOffset + i] = static_cast<u8>(kUserMessage[i]);
+    }
+    // Stat paths: include the terminating NUL so VfsLookup has a
+    // clean stop. The initial zero-fill guarantees every byte past
+    // the string is 0, but writing the NUL explicitly keeps the
+    // layout self-documenting.
+    for (u64 i = 0; i < sizeof(kUserStatPath1); ++i)
+    {
+        code_direct[kUserStatPath1Offset + i] = static_cast<u8>(kUserStatPath1[i]);
+    }
+    for (u64 i = 0; i < sizeof(kUserStatPath2); ++i)
+    {
+        code_direct[kUserStatPath2Offset + i] = static_cast<u8>(kUserStatPath2[i]);
     }
 }
 
@@ -224,9 +274,19 @@ void StartRing3SmokeTask()
     //     issued one (today's payload doesn't — the next bite
     //     adds per-task payloads so the sandbox actively tries
     //     a jail-escape and gets logged).
+    // Sandbox gets kCapFsRead so SYS_STAT reaches the namespace
+    // layer — with an empty cap set, the cap check would short-
+    // circuit and we'd never exercise VfsLookup against the
+    // sandbox root. Granting the cap lets the demo prove that
+    // EVEN WITH the cap, Process::root bounds what the process
+    // can name: "/etc/version" in the sandbox root simply does
+    // not exist.
+    CapSet sandbox_caps = CapSetEmpty();
+    CapSetAdd(sandbox_caps, kCapFsRead);
+
     SpawnRing3Task("ring3-smoke-A", CapSetTrusted(), fs::RamfsTrustedRoot());
     SpawnRing3Task("ring3-smoke-B", CapSetTrusted(), fs::RamfsTrustedRoot());
-    SpawnRing3Task("ring3-smoke-sandbox", CapSetEmpty(), fs::RamfsSandboxRoot());
+    SpawnRing3Task("ring3-smoke-sandbox", sandbox_caps, fs::RamfsSandboxRoot());
     Log(LogLevel::Info, "core/ring3", "two trusted + one sandboxed ring3 smoke tasks queued");
 }
 
