@@ -48,9 +48,22 @@ struct TrapFrame
 static_assert(sizeof(TrapFrame) == 22 * sizeof(u64),
               "TrapFrame size must match exceptions.S push order");
 
-/// Called from isr_common. Prints diagnostic state to COM1 and halts the
-/// CPU — today no exception is recoverable.
-extern "C" [[noreturn]] void TrapDispatch(TrapFrame* frame);
+/// Called from isr_common. For CPU exceptions (vector < 32), prints
+/// diagnostic state to COM1 and halts — none are recoverable yet. For
+/// IRQs (vector 32..47, plus the LAPIC spurious at 0xFF), routes through
+/// the per-vector IRQ handler and returns so isr_common's iretq path
+/// resumes the interrupted code.
+extern "C" void TrapDispatch(TrapFrame* frame);
+
+/// Per-vector IRQ handler signature. The LAPIC EOI is sent by the IRQ
+/// dispatcher (not by individual handlers), so handlers should NOT EOI
+/// themselves — doing so twice loses an interrupt.
+using IrqHandler = void (*)();
+
+/// Install (or replace) a handler for IRQ vector `vector` (32..47) or the
+/// LAPIC spurious vector (0xFF). Passing `nullptr` clears the handler;
+/// the dispatcher then logs a one-line "unhandled IRQ" message.
+void IrqInstall(u8 vector, IrqHandler handler);
 
 /// Deliberately trigger int3 to verify the IDT path is wired up correctly.
 /// Used only during early bring-up; remove from the boot sequence once

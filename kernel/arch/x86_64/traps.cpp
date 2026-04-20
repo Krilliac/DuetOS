@@ -1,6 +1,7 @@
 #include "traps.h"
 
 #include "cpu.h"
+#include "lapic.h"
 #include "serial.h"
 
 namespace customos::arch
@@ -8,6 +9,25 @@ namespace customos::arch
 
 namespace
 {
+
+// Per-vector IRQ handler table. Entries 0..15 cover IRQ vectors 32..47;
+// entry 16 is the LAPIC spurious vector (0xFF). nullptr means "no handler
+// registered" — the dispatcher logs and EOIs but takes no other action.
+constinit IrqHandler g_irq_handlers[17] = {};
+
+constexpr u8 kIrqVectorBase    = 32;
+constexpr u8 kIrqVectorCount   = 16;
+constexpr u8 kSpuriousVector   = 0xFF;
+constexpr u8 kSpuriousSlot     = 16;
+
+inline u8 IrqSlot(u64 vector)
+{
+    if (vector == kSpuriousVector)
+    {
+        return kSpuriousSlot;
+    }
+    return static_cast<u8>(vector - kIrqVectorBase);
+}
 
 constexpr const char* kVectorNames[32] = {
     "#DE Divide-by-zero",
@@ -57,6 +77,37 @@ void WriteLabelled(const char* label, u64 value)
 
 extern "C" void TrapDispatch(TrapFrame* frame)
 {
+    // Hardware IRQ path. Routes to the registered handler (if any), then
+    // EOIs the LAPIC and returns to isr_common's iretq, which resumes the
+    // interrupted code. No diagnostic spew per IRQ — the timer alone fires
+    // hundreds of times a second.
+    if ((frame->vector >= kIrqVectorBase &&
+         frame->vector < kIrqVectorBase + kIrqVectorCount) ||
+        frame->vector == kSpuriousVector)
+    {
+        const u8 slot = IrqSlot(frame->vector);
+        if (g_irq_handlers[slot] != nullptr)
+        {
+            g_irq_handlers[slot]();
+        }
+        else
+        {
+            SerialWrite("[irq] unhandled vector ");
+            SerialWriteHex(frame->vector);
+            SerialWrite("\n");
+        }
+
+        // The LAPIC spurious vector (0xFF) is special: per Intel SDM, the
+        // CPU does NOT advance the In-Service Register for it, so EOI must
+        // NOT be sent. Sending one would acknowledge whichever real
+        // interrupt is currently in service and cause it to be lost.
+        if (frame->vector != kSpuriousVector)
+        {
+            LapicEoi();
+        }
+        return;
+    }
+
     SerialWrite("\n** CPU EXCEPTION **\n");
 
     WriteLabelled("vector    ", frame->vector);
@@ -102,6 +153,19 @@ extern "C" void TrapDispatch(TrapFrame* frame)
 
     SerialWrite("[panic] Halting CPU.\n");
     Halt();
+}
+
+void IrqInstall(u8 vector, IrqHandler handler)
+{
+    if ((vector < kIrqVectorBase || vector >= kIrqVectorBase + kIrqVectorCount) &&
+        vector != kSpuriousVector)
+    {
+        SerialWrite("[irq] IrqInstall: vector out of range ");
+        SerialWriteHex(vector);
+        SerialWrite("\n");
+        Halt();
+    }
+    g_irq_handlers[IrqSlot(vector)] = handler;
 }
 
 void RaiseSelfTestBreakpoint()

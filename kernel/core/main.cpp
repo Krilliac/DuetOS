@@ -2,7 +2,10 @@
 #include "../arch/x86_64/cpu.h"
 #include "../arch/x86_64/gdt.h"
 #include "../arch/x86_64/idt.h"
+#include "../arch/x86_64/lapic.h"
+#include "../arch/x86_64/pic.h"
 #include "../arch/x86_64/serial.h"
+#include "../arch/x86_64/timer.h"
 #include "../mm/frame_allocator.h"
 #include "../mm/kheap.h"
 #include "../mm/paging.h"
@@ -14,9 +17,11 @@
  *
  * Current scope: bring up descriptors, parse the Multiboot2 memory map,
  * hand the frame allocator a working bitmap, run its self-test, carve a
- * fixed-size pool out for the kernel heap and self-test that, then halt.
- * IRQ controller bring-up, page-table API, and SMP are separate follow-up
- * commits.
+ * fixed-size pool out for the kernel heap and self-test it, adopt the
+ * boot PML4 + run the paging self-test, mask the legacy 8259, bring up
+ * the LAPIC, calibrate + arm the LAPIC timer at 100 Hz, then drop into
+ * the idle loop with interrupts enabled. SMP, scheduler, and userland
+ * are separate follow-up commits.
  */
 
 extern "C" void kernel_main(customos::u32 multiboot_magic,
@@ -60,6 +65,15 @@ extern "C" void kernel_main(customos::u32 multiboot_magic,
     PagingInit();
     PagingSelfTest();
 
-    SerialWrite("[boot] All subsystems online. Halting CPU.\n");
-    Halt();
+    SerialWrite("[boot] Disabling 8259 PIC.\n");
+    PicDisable();
+
+    SerialWrite("[boot] Bringing up LAPIC.\n");
+    LapicInit();
+
+    SerialWrite("[boot] Bringing up periodic timer.\n");
+    TimerInit();
+
+    SerialWrite("[boot] All subsystems online. Entering idle loop.\n");
+    IdleLoop();
 }

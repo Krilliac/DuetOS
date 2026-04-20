@@ -22,4 +22,11 @@ namespace customos::arch
 /// from gdt.h already being the active CS.
 void IdtInit();
 
+/// Late-bound gate install for vectors that don't have a matching slot in
+/// `isr_stub_table` (e.g. the LAPIC spurious vector at 0xFF). The handler
+/// must be a real ISR stub: it has to push a fake error code + vector, set
+/// up a TrapFrame, and tail into `isr_common`. Type is fixed to a DPL=0
+/// interrupt gate.
+void IdtSetGate(u8 vector, u64 handler);
+
 } // namespace customos::arch
