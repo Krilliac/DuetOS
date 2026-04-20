@@ -290,16 +290,14 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
         customos::drivers::video::TaskbarInit(tb_y, tb_h, 0x00202838, 0x00FFFFFF, 0x00406090);
     }
 
-    // Start menu items. action_id is a caller-owned enumeration
-    // the mouse reader switches on — zero is reserved for
-    // "no item hit," so first id starts at 1.
-    static const customos::drivers::video::MenuItem start_items[] = {
-        {"ABOUT CUSTOMOS", 1},
-        {"CYCLE WINDOWS", 2},
-        {"LIST WINDOWS", 3},
-        {"PING CONSOLE", 4},
-    };
-    customos::drivers::video::MenuInit(start_items, 4);
+    // Menu action ids. Ambient MenuContext() carries a target
+    // (window handle) for context-menu items that need one.
+    //   1..9   — desktop / global actions (ignore context)
+    //   10     — raise window (context = WindowHandle)
+    //   11     — close window (context = WindowHandle)
+    // Range scheme keeps the dispatcher's switch table readable
+    // and leaves room for future desktop / window actions without
+    // reshuffling ids.
 
     customos::drivers::video::ConsoleInit(16, 400, 0x0080F088, 0x00181028);
 
@@ -684,7 +682,28 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
         };
         static DragState drag{false, customos::drivers::video::kWindowInvalid, 0, 0};
         static bool prev_left = false;
+        static bool prev_right = false;
         constexpr customos::u32 kDesktopTealLocal = 0x00204868;
+
+        // Menu item sets — static so their label pointers outlive
+        // the menu's open state. action_id scheme is documented in
+        // kernel_main's comment above; keep these tables in sync.
+        static const customos::drivers::video::MenuItem kStartItems[] = {
+            {"ABOUT CUSTOMOS", 1},
+            {"CYCLE WINDOWS", 2},
+            {"LIST WINDOWS", 3},
+            {"PING CONSOLE", 4},
+        };
+        static const customos::drivers::video::MenuItem kDesktopMenuItems[] = {
+            {"ABOUT CUSTOMOS", 1},
+            {"CYCLE WINDOWS", 2},
+            {"LIST WINDOWS", 3},
+            {"SWITCH TO TTY", 5},
+        };
+        static const customos::drivers::video::MenuItem kWindowMenuItems[] = {
+            {"RAISE", 10},
+            {"CLOSE", 11},
+        };
 
         for (;;)
         {
@@ -720,6 +739,53 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
             const bool release_edge = !left_down && prev_left;
             prev_left = left_down;
 
+            const bool right_down = (p.buttons & customos::drivers::input::kMouseButtonRight) != 0;
+            const bool right_press = right_down && !prev_right;
+            prev_right = right_down;
+
+            // Right-click opens a context menu. Different item set
+            // depending on what's under the cursor:
+            //   - Taskbar: skip (no right-click menu there yet).
+            //   - Window body or title: window menu with Raise/
+            //     Close, context = that window's handle.
+            //   - Desktop: desktop menu (ABOUT / CYCLE / LIST /
+            //     TTY), context = 0.
+            // If a menu is already open, a right-click simply
+            // closes it — matches Windows behaviour (right-click
+            // on whitespace dismisses the popup).
+            if (right_press)
+            {
+                if (customos::drivers::video::MenuIsOpen())
+                {
+                    customos::drivers::video::MenuClose();
+                }
+                else if (!customos::drivers::video::TaskbarContains(cx, cy))
+                {
+                    const auto hit = customos::drivers::video::WindowTopmostAt(cx, cy);
+                    if (hit != customos::drivers::video::kWindowInvalid)
+                    {
+                        customos::drivers::video::MenuOpen(
+                            kWindowMenuItems,
+                            sizeof(kWindowMenuItems) / sizeof(kWindowMenuItems[0]), cx, cy,
+                            hit);
+                    }
+                    else
+                    {
+                        customos::drivers::video::MenuOpen(
+                            kDesktopMenuItems,
+                            sizeof(kDesktopMenuItems) / sizeof(kDesktopMenuItems[0]), cx, cy,
+                            0);
+                    }
+                }
+                customos::drivers::video::CursorHide();
+                customos::drivers::video::DesktopCompose(kDesktopTealLocal,
+                                                         "WELCOME TO CUSTOMOS   BOOT OK");
+                customos::drivers::video::CursorShow();
+                customos::drivers::video::CompositorUnlock();
+                SerialWrite("[ui] right-click\n");
+                continue;
+            }
+
             // Priority for press edges (highest first):
             //   0a. Menu open + click on item → fire action, close.
             //   0b. Menu open + click outside → close.
@@ -734,9 +800,10 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                 const customos::u32 action = customos::drivers::video::MenuItemAt(cx, cy);
                 if (action != 0)
                 {
-                    // Dispatch action. Pure demo actions — wire
-                    // into real functionality as each feature
-                    // becomes available.
+                    const customos::u32 ctx = customos::drivers::video::MenuContext();
+                    // Dispatch action. Context (ctx) is a caller-
+                    // supplied u32 — for window menus it's the
+                    // target WindowHandle.
                     switch (action)
                     {
                     case 1: // ABOUT CUSTOMOS
@@ -767,6 +834,25 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                     case 4: // PING CONSOLE
                         customos::drivers::video::ConsoleWriteln("-> PONG");
                         break;
+                    case 5: // SWITCH TO TTY (from desktop context menu)
+                        customos::drivers::video::SetDisplayMode(
+                            customos::drivers::video::DisplayMode::Tty);
+                        customos::drivers::video::ConsoleSetOrigin(16, 16);
+                        customos::drivers::video::ConsoleSetColours(0x0080F088,
+                                                                   0x00000000);
+                        break;
+                    case 10: // RAISE <ctx>
+                        customos::drivers::video::WindowRaise(ctx);
+                        SerialWrite("[ui] ctx raise window=");
+                        SerialWriteHex(ctx);
+                        SerialWrite("\n");
+                        break;
+                    case 11: // CLOSE <ctx>
+                        customos::drivers::video::WindowClose(ctx);
+                        SerialWrite("[ui] ctx close window=");
+                        SerialWriteHex(ctx);
+                        SerialWrite("\n");
+                        break;
                     }
                     SerialWrite("[ui] menu fire action=");
                     SerialWriteHex(action);
@@ -789,9 +875,21 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                     }
                     else
                     {
-                        const customos::u32 mh = customos::drivers::video::MenuPanelHeight();
+                        // Open with the start item set; measure
+                        // panel height AFTER MenuOpen populates
+                        // its item count so the anchor sits
+                        // flush against the top of the START
+                        // button regardless of how many items
+                        // are in the set.
+                        customos::drivers::video::MenuOpen(
+                            kStartItems, sizeof(kStartItems) / sizeof(kStartItems[0]),
+                            sx, sy, 0);
+                        const customos::u32 mh =
+                            customos::drivers::video::MenuPanelHeight();
                         const customos::u32 my = (sy > mh) ? sy - mh : 0;
-                        customos::drivers::video::MenuOpen(sx, my);
+                        customos::drivers::video::MenuOpen(
+                            kStartItems, sizeof(kStartItems) / sizeof(kStartItems[0]),
+                            sx, my, 0);
                         SerialWrite("[ui] menu open\n");
                     }
                     menu_handled = true;

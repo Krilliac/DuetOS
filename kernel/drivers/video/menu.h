@@ -34,16 +34,18 @@ struct MenuItem
     u32 action_id;
 };
 
-/// Register the item list. Labels are caller-owned and must
-/// outlive the menu (v0: static const strings in the kernel
-/// image, always safe). Sets a sensible default row height +
-/// width.
-void MenuInit(const MenuItem* items, u32 count);
+/// Open the menu with `items` as its content and `context` as
+/// an opaque u32 the dispatcher can read back via `MenuContext()`.
+/// Typical use: pass a target window handle so a "Close" item
+/// knows what to close. Labels + items array must outlive the
+/// open state — v0 uses static const arrays. Safe to call when
+/// already open (swaps contents in place).
+void MenuOpen(const MenuItem* items, u32 count, u32 ax, u32 ay, u32 context = 0);
 
-/// Mark the menu open + anchored at the upper-left corner
-/// (ax, ay). Safe to call when already open — just moves
-/// the anchor.
-void MenuOpen(u32 ax, u32 ay);
+/// Ambient context set by MenuOpen. Read by the dispatcher to
+/// resolve `action_id`s that depend on a target (window handle,
+/// taskbar slot, etc.). Defaults to 0 when the menu is closed.
+u32 MenuContext();
 
 /// Mark the menu closed. Safe any time.
 void MenuClose();
@@ -66,9 +68,10 @@ u32 MenuItemAt(u32 x, u32 y);
 /// click-outside-to-close cleanly.
 bool MenuContains(u32 x, u32 y);
 
-/// Height in pixels the menu will paint at, given the current
-/// item list. Useful for callers that need to anchor the menu
-/// to the bottom of a button (popup grows upward).
+/// Height in pixels the menu will paint at, given the items
+/// passed in the most recent `MenuOpen`. Useful for callers
+/// that need to anchor the menu to the bottom of a button
+/// (popup grows upward).
 u32 MenuPanelHeight();
 
 } // namespace customos::drivers::video

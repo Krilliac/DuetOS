@@ -10,7 +10,7 @@ namespace
 
 constexpr u32 kMaxItems = 8;
 constexpr u32 kRowHeight = 22;
-constexpr u32 kMenuWidth = 200;
+constexpr u32 kMenuWidth = 240;
 constexpr u32 kPaddingX = 8;
 constexpr u32 kTextOffsetY = 7;
 
@@ -18,6 +18,7 @@ constinit MenuItem g_items[kMaxItems] = {};
 constinit u32 g_item_count = 0;
 constinit u32 g_anchor_x = 0;
 constinit u32 g_anchor_y = 0;
+constinit u32 g_context = 0;
 constinit bool g_open = false;
 
 u32 PanelHeight()
@@ -27,11 +28,11 @@ u32 PanelHeight()
 
 } // namespace
 
-void MenuInit(const MenuItem* items, u32 count)
+void MenuOpen(const MenuItem* items, u32 count, u32 ax, u32 ay, u32 context)
 {
-    if (items == nullptr)
+    if (items == nullptr || count == 0)
     {
-        g_item_count = 0;
+        g_open = false;
         return;
     }
     if (count > kMaxItems)
@@ -43,14 +44,15 @@ void MenuInit(const MenuItem* items, u32 count)
         g_items[i] = items[i];
     }
     g_item_count = count;
-    g_open = false;
-}
-
-void MenuOpen(u32 ax, u32 ay)
-{
     g_anchor_x = ax;
     g_anchor_y = ay;
+    g_context = context;
     g_open = true;
+}
+
+u32 MenuContext()
+{
+    return g_context;
 }
 
 void MenuClose()
