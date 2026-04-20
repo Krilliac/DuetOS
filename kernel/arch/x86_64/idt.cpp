@@ -3,11 +3,13 @@
 #include "gdt.h"
 
 /*
- * The exception stubs in exceptions.S publish their addresses through this
- * 32-entry array. Each stub pushes a uniform trap frame and jumps to a
- * common path that calls the C++ dispatcher.
+ * The exception + IRQ stubs in exceptions.S publish their addresses through
+ * this 48-entry array. Slots 0..31 are CPU exceptions; slots 32..47 are the
+ * remapped IRQs (8259 layout, also used by the LAPIC). The LAPIC spurious
+ * vector at 0xFF is published as a separate symbol — it would be wasteful
+ * to extend this table to 256 entries just to hold one extra address.
  */
-extern "C" customos::u64 isr_stub_table[32];
+extern "C" customos::u64 isr_stub_table[48];
 
 namespace customos::arch
 {
@@ -57,9 +59,12 @@ void SetGate(u8 vector, u64 handler, u8 type_attr)
 
 void IdtInit()
 {
-    // Vectors 0..31 are CPU exceptions. Hardware IRQs (vectors 32+) stay
-    // as non-present gates until the interrupt controller is brought up.
-    for (u8 vector = 0; vector < 32; ++vector)
+    // Install both the CPU-exception vectors (0..31) and the remapped IRQ
+    // vectors (32..47). The IRQ stubs are present from boot, but until
+    // PicDisable + LapicInit run no controller will actually deliver to
+    // them — the slots are wired so that any spurious IRQ produced during
+    // bring-up still hits a real handler instead of triple-faulting.
+    for (u8 vector = 0; vector < 48; ++vector)
     {
         SetGate(vector, isr_stub_table[vector], kGateInterruptDpl0);
     }
@@ -68,6 +73,11 @@ void IdtInit()
     g_idt_pointer.base  = reinterpret_cast<u64>(&g_idt[0]);
 
     asm volatile("lidt %0" : : "m"(g_idt_pointer) : "memory");
+}
+
+void IdtSetGate(u8 vector, u64 handler)
+{
+    SetGate(vector, handler, kGateInterruptDpl0);
 }
 
 } // namespace customos::arch

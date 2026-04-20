@@ -38,8 +38,23 @@ void FrameAllocatorInit(uptr multiboot_info_phys);
 /// Allocate one 4 KiB frame. Returns kNullFrame on out-of-memory.
 PhysAddr AllocateFrame();
 
+/// Allocate `count` physically-contiguous 4 KiB frames. Returns the base
+/// physical address of the run, or kNullFrame if no run of that length is
+/// available. `count == 0` is treated as an error and returns kNullFrame.
+///
+/// Used by the kernel heap (which needs a contiguous virtual range backed by
+/// the static higher-half direct map) and any future driver that needs a
+/// contiguous DMA buffer.
+PhysAddr AllocateContiguousFrames(u64 count);
+
 /// Return a previously-allocated frame to the pool.
 void FreeFrame(PhysAddr frame);
+
+/// Return a previously-allocated contiguous run of frames to the pool.
+/// `base` must be the value returned by AllocateContiguousFrames; `count`
+/// must match the original allocation. Mismatched count is a kernel bug —
+/// frames outside the original run will be marked free silently.
+void FreeContiguousFrames(PhysAddr base, u64 count);
 
 /// Diagnostic counters; cheap enough to read at any time.
 u64 TotalFrames();

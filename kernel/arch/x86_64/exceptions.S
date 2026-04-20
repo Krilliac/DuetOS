@@ -78,6 +78,46 @@ ISR_NOERR 31                    /* Reserved                 */
 
 
 /* -------------------------------------------------------------------------
+ * Hardware IRQ vectors. The 8259 PIC and LAPIC are remapped so that IRQs
+ * 0..15 land at vectors 32..47. None of these push an error code (only the
+ * exception subset architecturally does), so they all use the NOERR macro.
+ * The dispatcher distinguishes IRQ from exception by frame->vector >= 32.
+ *
+ * In a CustomOS system the legacy 8259 PIC is masked (see pic.cpp); these
+ * vectors are driven by the LAPIC and, when enabled, the IOAPIC.
+ * ------------------------------------------------------------------------- */
+ISR_NOERR 32                    /* IRQ0  — LAPIC timer (periodic tick) */
+ISR_NOERR 33                    /* IRQ1                                */
+ISR_NOERR 34                    /* IRQ2                                */
+ISR_NOERR 35                    /* IRQ3                                */
+ISR_NOERR 36                    /* IRQ4                                */
+ISR_NOERR 37                    /* IRQ5                                */
+ISR_NOERR 38                    /* IRQ6                                */
+ISR_NOERR 39                    /* IRQ7  — also the 8259 spurious slot */
+ISR_NOERR 40                    /* IRQ8                                */
+ISR_NOERR 41                    /* IRQ9                                */
+ISR_NOERR 42                    /* IRQ10                               */
+ISR_NOERR 43                    /* IRQ11                               */
+ISR_NOERR 44                    /* IRQ12                               */
+ISR_NOERR 45                    /* IRQ13                               */
+ISR_NOERR 46                    /* IRQ14                               */
+ISR_NOERR 47                    /* IRQ15 — also the 8259 spurious slot */
+
+/* -------------------------------------------------------------------------
+ * LAPIC spurious-interrupt vector. Per Intel SDM, the SVR's vector field
+ * has the low 4 bits hard-wired to 1, so the spurious vector is conven-
+ * tionally 0xFF. Exported by name so the LAPIC bring-up can install it
+ * directly without extending isr_stub_table to 256 entries.
+ * ------------------------------------------------------------------------- */
+.align 16
+.global isr_spurious
+isr_spurious:
+    push    0                   /* fake error code      */
+    push    0xFF                /* vector number        */
+    jmp     isr_common
+
+
+/* -------------------------------------------------------------------------
  * Common tail. On entry the stack already has:
  *   [top] vector, error_code, rip, cs, rflags, rsp, ss
  *
@@ -177,6 +217,22 @@ isr_stub_table:
     .quad   isr_29
     .quad   isr_30
     .quad   isr_31
+    .quad   isr_32
+    .quad   isr_33
+    .quad   isr_34
+    .quad   isr_35
+    .quad   isr_36
+    .quad   isr_37
+    .quad   isr_38
+    .quad   isr_39
+    .quad   isr_40
+    .quad   isr_41
+    .quad   isr_42
+    .quad   isr_43
+    .quad   isr_44
+    .quad   isr_45
+    .quad   isr_46
+    .quad   isr_47
 
 /* Stack is NX — silence lld's PT_GNU_STACK warning. */
 .section .note.GNU-stack, "", @progbits

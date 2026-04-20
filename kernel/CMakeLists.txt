@@ -10,9 +10,17 @@ set(CUSTOMOS_KERNEL_SOURCES
     arch/x86_64/exceptions.S
     arch/x86_64/gdt.cpp
     arch/x86_64/idt.cpp
+    arch/x86_64/lapic.cpp
+    arch/x86_64/pic.cpp
     arch/x86_64/serial.cpp
+    arch/x86_64/timer.cpp
     arch/x86_64/traps.cpp
     mm/frame_allocator.cpp
+    mm/kheap.cpp
+    mm/page.cpp
+    mm/paging.cpp
+    sched/context_switch.S
+    sched/sched.cpp
 )
 
 add_executable(customos-kernel ${CUSTOMOS_KERNEL_SOURCES})

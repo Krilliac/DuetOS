@@ -348,6 +348,65 @@ void FreeFrame(PhysAddr frame)
     }
 }
 
+PhysAddr AllocateContiguousFrames(u64 count)
+{
+    if (count == 0 || count > g_bitmap_frames)
+    {
+        return kNullFrame;
+    }
+    if (count == 1)
+    {
+        return AllocateFrame();
+    }
+
+    // Linear scan for a run of `count` consecutive free frames. v0: O(n).
+    // Replace with a freelist of contiguous runs when allocation patterns
+    // demand it (i.e., when we see the cost in profiles, not before).
+    u64 run_start = 0;
+    u64 run_len   = 0;
+    for (u64 frame = 0; frame < g_bitmap_frames; ++frame)
+    {
+        if (BitmapIsUsed(frame))
+        {
+            run_len = 0;
+            continue;
+        }
+        if (run_len == 0)
+        {
+            run_start = frame;
+        }
+        ++run_len;
+        if (run_len == count)
+        {
+            for (u64 f = run_start; f < run_start + count; ++f)
+            {
+                BitmapMarkUsed(f);
+            }
+            // Don't advance g_next_hint — single-frame allocations may still
+            // find earlier free slots that this scan skipped over.
+            return run_start << kPageSizeLog2;
+        }
+    }
+    return kNullFrame;
+}
+
+void FreeContiguousFrames(PhysAddr base, u64 count)
+{
+    if (base == kNullFrame || count == 0)
+    {
+        return;
+    }
+    const u64 first = base >> kPageSizeLog2;
+    for (u64 i = 0; i < count; ++i)
+    {
+        BitmapMarkFree(first + i);
+    }
+    if (first < g_next_hint)
+    {
+        g_next_hint = first;
+    }
+}
+
 u64 TotalFrames()
 {
     return g_total_frames;
@@ -400,6 +459,31 @@ void FrameAllocatorSelfTest()
     SerialWrite("  realloc    : "); SerialWriteHex(reuse);
     SerialWrite(" (reused A/B/C)\n");
     FreeFrame(reuse);
+
+    // Contiguous-run allocation. The kernel heap depends on this returning
+    // a base whose successor frames are also reserved — verify by probing
+    // each frame index inside the run.
+    constexpr u64 kRun = 8;
+    const PhysAddr run_base = AllocateContiguousFrames(kRun);
+    if (run_base == kNullFrame)
+    {
+        PanicFrame("self-test: contiguous allocation returned null");
+    }
+    if ((run_base & (kPageSize - 1)) != 0)
+    {
+        PanicFrame("self-test: contiguous base not page-aligned");
+    }
+    for (u64 i = 0; i < kRun; ++i)
+    {
+        const u64 frame_index = (run_base >> kPageSizeLog2) + i;
+        if (!BitmapIsUsed(frame_index))
+        {
+            PanicFrame("self-test: contiguous run has free frames inside it");
+        }
+    }
+    SerialWrite("  contig x"); SerialWriteHex(kRun);
+    SerialWrite(" : "); SerialWriteHex(run_base); SerialWrite("\n");
+    FreeContiguousFrames(run_base, kRun);
 
     SerialWrite("[mm] frame allocator self-test OK\n");
 }

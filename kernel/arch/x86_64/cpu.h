@@ -42,6 +42,18 @@ inline void Sti()
     }
 }
 
+/// Idle the CPU forever with interrupts ENABLED. Wakes on every IRQ to run
+/// the dispatcher, then halts again. The kernel's "I'm done with bring-up,
+/// now wait for work" sink — distinct from `Halt`, which masks interrupts
+/// and is the unrecoverable-error sink.
+[[noreturn]] inline void IdleLoop()
+{
+    for (;;)
+    {
+        asm volatile("sti; hlt");
+    }
+}
+
 inline u64 ReadCr2()
 {
     u64 value;

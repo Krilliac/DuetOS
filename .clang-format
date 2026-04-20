@@ -12,7 +12,7 @@ TabWidth: 4
 UseTab: Never
 IndentCaseLabels: false
 IndentPPDirectives: None
-NamespaceIndentation: All
+NamespaceIndentation: None
 
 # Braces
 BreakBeforeBraces: Allman
