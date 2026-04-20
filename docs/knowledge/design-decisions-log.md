@@ -607,6 +607,138 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 027 — PS/2 8042 controller init sequence
+
+- **Scope:** `kernel/drivers/input/ps2kbd.cpp` (new `ControllerInit`,
+  `WaitInputClear`, `WaitOutputFull`, `SendCtrlCmd`, `SendCtrlData`,
+  `ReadConfigByte`, `WriteConfigByte`, `Drain` helpers)
+- **Decision:** Replace the bare "drain leftovers and hope" startup
+  with a full 8042 bring-up: disable both channels, flush, self-test
+  the controller (`0xAA` → `0x55`), test port 1 (`0xAB` → `0x00`),
+  enable port 1, turn on port-1 IRQ + clock in the config byte, drain
+  again. Controller self-test mismatch panics (Class A — the keyboard
+  is on the critical path for any interactive console); port-1
+  interface-test failures log a warning and continue (QEMU always
+  passes, but real-hardware boards can flag this falsely). Every
+  response wait has a bounded spin limit (~10 ms) and panics on
+  timeout rather than stalling forever.
+- **Why:** Entry #014 deferred "No 8042 reset / init sequence;
+  trusts the firmware to have left the controller in a usable
+  state." The trust assumption holds for QEMU but is fragile on
+  real machines — boards ship with the controller in various
+  post-BIOS states (port 2 still enabled, translation off, IRQs
+  masked). Landing an explicit init makes the driver portable to
+  real hardware without changing the IRQ / translator code downstream.
+- **Rules out / defers:** Scan-code-set configuration via device
+  command (`0xF0 0x01`) — still relying on firmware default of set 1
+  + translation. Keyboard device reset (`0xFF` on port 1 data —
+  some firmware leaves the device in a weird state; the OSDev wiki
+  recommends it, but QEMU's ACK sequence is flaky and we don't need
+  it today). Port 2 / aux channel enable (no mouse support yet).
+  Typematic rate configuration. 8042 USB-legacy-mode detection (real
+  hardware sometimes routes USB HID through the 8042 emulation; we
+  treat it as "it works or it doesn't").
+- **Revisit when:** First real-hardware boot with a chipset that
+  ships the 8042 in an unusual state. USB HID stack lands (might
+  then actively DISABLE the 8042 legacy path to avoid dual IRQs).
+  Aux channel / mouse support (reuse the SendCtrl helpers for port
+  2 commands).
+- **Related tracks:** Track 6 (Drivers — input).
+
+---
+
+## 026 — Timed WaitQueue blocking (WaitQueueBlockTimeout)
+
+- **Scope:** `kernel/sched/sched.{h,cpp}` — new public
+  `WaitQueueBlockTimeout`, internal `SleepqueueRemove` and
+  `WaitQueueUnlink` helpers, Task struct grows `sleep_next`,
+  `waiting_on`, `wake_by_timeout`
+- **Decision:** A task that calls `WaitQueueBlockTimeout(wq, ticks)`
+  parks on the wait queue AND the sleep queue simultaneously.
+  Whichever wake path fires first unlinks the task from the other
+  list and resumes it; the return value tells the caller which
+  won (`true` = explicit wake, `false` = timeout). The two
+  intrusive queues use different Task fields (`next` for runqueue /
+  waitqueue / zombie; `sleep_next` for sleep queue) so the same
+  Task can sit on both without pointer aliasing. `waiting_on` is a
+  back-pointer the timer path uses to unlink from whatever wait
+  queue the task was on. `wake_by_timeout` is a transient flag —
+  set by the timer path, cleared by the wake path, read once by
+  the waiter the moment `Schedule()` returns.
+- **Why:** Entry #011 deferred "Timed waits on `WaitQueue`" as a
+  separate slice after the sleep + wait + mutex primitives
+  landed. Closing it now unblocks the first tractable driver
+  retry pattern (command-completion wait with timeout: "wait for
+  this transfer to complete, but give up after 100 ms") and is
+  the last scheduler primitive needed before the recovery
+  Class-D retry helper has a way to block a caller for a bounded
+  interval. Implementation lands the API before the first caller
+  so the consumer doesn't have to co-design the sleep/wait
+  coupling; that's the same pattern we used for `AcpiReset`
+  (entry #025) and `SchedStartIdle` (entry #023).
+- **Rules out / defers:** Condition variables (drop-mutex-and-
+  block atomically — the recipient still owns the lock on wake).
+  Cancellable blocking (external cancel from another task).
+  Tick-precision accuracy better than ±1 tick (the timer fires on
+  a 10 ms grid; deadlines between ticks round up). Mixing
+  `WaitQueueBlock` and `WaitQueueBlockTimeout` readers on the
+  same queue works — waiters don't know or care — but the
+  timeout path only cleans up its own waiter.
+- **Revisit when:** First driver `RetryWithBackoff` caller (uses
+  the timeout as its per-attempt budget). First I/O command with
+  hardware-completion wait (xHCI, AHCI, NVMe). Condition variable
+  primitive lands (drops-mutex-and-blocks using the same wait-
+  queue plus timeout machinery as its foundation).
+- **Related tracks:** Track 2 (SMP — timed waits will need
+  spinlock-protected list ops once the scheduler spinlock goes
+  live across context switch), Track 6 (Drivers — consumer).
+
+---
+
+## 025 — FADT parse + AcpiReset() reboot primitive
+
+- **Scope:** `kernel/acpi/acpi.{h,cpp}` — new FADT struct,
+  `ParseFadt`, `SciVector()`, `AcpiReset()`
+- **Decision:** Extend `AcpiInit` to locate the FADT (FACP
+  signature), checksum-validate it, and cache the three fields we
+  actually use: `RESET_REG`, `RESET_VALUE`, `SCI_INT`. FADT is
+  OPTIONAL — a missing one leaves reset unsupported and SCI at
+  the ACPI-default ISA IRQ 9, rather than panicking like MADT
+  does. Expose `AcpiReset()` that writes the reset value to the
+  reset register when supported (I/O address space only —
+  memory-mapped reset is legal per spec but unused on x86 PCs;
+  add when a real machine demands it). Returns `false` on "no
+  FADT / register unsupported / MMIO space" so the caller can
+  fall back to `Outb(0xCF9, 0x06)` or a triple fault.
+- **Why:** Entry #012 deferred "FADT, MCFG, HPET, SRAT etc. are
+  untouched. Add a dispatcher when a consumer needs one." FADT
+  in particular is the cheapest to land and unlocks a genuinely
+  useful kernel primitive: a firmware-defined reboot. Today we
+  have no way to restart the machine other than triple-faulting
+  it, which is an ugly signal on a real board. `AcpiReset()`
+  gives us a clean one. The SCI vector cache is a side benefit
+  — power-management events (thermal, battery, lid close on
+  laptops) fire on this line; caching it lets a future ACPI
+  interrupt handler install itself at the right place without
+  another FADT parse.
+- **Rules out / defers:** PM1a/PM1b event/control block parsing
+  (entering S-states requires AML — DSDT/SSDT — for the SLP_TYP
+  values). GPE block parsing. HPET (still untouched). MCFG /
+  PCIe ECAM (the next most-wanted one; sizes the PCI space and
+  unlocks MSI-X configuration-space access without port IO).
+  SRAT / NUMA topology.
+- **Revisit when:** First shutdown / reboot path lands (use
+  `AcpiReset` as the primary, `Outb(0xCF9, 0x06)` as fallback).
+  PCI enumeration switches from legacy port IO to ECAM (needs
+  MCFG). High-precision-timer consumers arrive (HPET). Power-
+  management work starts (SCI handler installs on the vector
+  `SciVector()` returns; full S-state support then needs an AML
+  interpreter).
+- **Related tracks:** Track 2 (Platform — shutdown/reboot),
+  Track 13 (Power management).
+
+---
+
 ## 024 — PS/2 keyboard: scan code set 1 → ASCII translator + modifier tracking
 
 - **Scope:** `kernel/drivers/input/ps2kbd.{h,cpp}` (adds
