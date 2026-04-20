@@ -29,6 +29,7 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     core/reboot.cpp
     core/recovery.cpp
     core/ring3_smoke.cpp
+    core/shell.cpp
     core/stack_canary.cpp
     core/symbols.cpp
     core/syscall.cpp

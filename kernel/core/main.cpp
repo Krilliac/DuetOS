@@ -30,6 +30,7 @@
 #include "klog.h"
 #include "panic.h"
 #include "ring3_smoke.h"
+#include "shell.h"
 #include "syscall.h"
 #include "../mm/kheap.h"
 #include "../mm/paging.h"
@@ -235,6 +236,12 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     customos::drivers::video::ConsoleWriteln("WINDOW MANAGER v0       OK");
     customos::drivers::video::ConsoleWriteln("");
     customos::drivers::video::ConsoleWriteln("READY.  TRY DRAGGING A WINDOW BY ITS TITLE BAR.");
+
+    // Shell welcome + initial prompt. Landing here after every
+    // subsystem init line keeps the boot log visible above the
+    // prompt — the user sees the tail end of the kernel's own
+    // output, then their own typing cursor.
+    customos::core::ShellInit();
 
     // Demo clickable button, owned by window A. x/y are offsets
     // INTO window A — dragging window A carries the button
@@ -450,24 +457,25 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                 continue;
             }
 
+            // Feed the shell instead of writing to the console
+            // directly. ShellFeedChar echoes the char; Backspace
+            // rubs out the last input; Enter submits + dispatches.
+            // Mirror input chars to COM1 so a headless session is
+            // still diagnosable end-to-end.
             if (ev.code == kKeyBackspace)
             {
-                // v0: backspace removes the last character from the
-                // display but NOT from the scrollback — the Console
-                // has no edit-point concept. A future shell line-
-                // edit layer sits on top of this.
-                customos::drivers::video::ConsoleWriteChar(' ');
+                customos::core::ShellBackspace();
                 dirty = true;
             }
             else if (ev.code == kKeyEnter)
             {
-                customos::drivers::video::ConsoleWriteChar('\n');
+                customos::core::ShellSubmit();
                 dirty = true;
             }
             else if (ev.code >= 0x20 && ev.code <= 0x7E)
             {
                 const char ch = static_cast<char>(ev.code);
-                customos::drivers::video::ConsoleWriteChar(ch);
+                customos::core::ShellFeedChar(ch);
                 const char buf[2] = {ch, '\0'};
                 SerialWrite(buf);
                 dirty = true;

@@ -111,6 +111,18 @@ void ConsoleWriteChar(char c)
         g_cursor_col = 0;
         return;
     }
+    if (c == '\b')
+    {
+        // Classic backspace: move cursor left and overwrite
+        // with a space. Doesn't cross row boundaries — the
+        // shell's edit layer handles line-start behaviour.
+        if (g_cursor_col > 0)
+        {
+            --g_cursor_col;
+            g_buffer[g_cursor_row][g_cursor_col] = ' ';
+        }
+        return;
+    }
     g_buffer[g_cursor_row][g_cursor_col] = c;
     AdvanceCursor();
 }
