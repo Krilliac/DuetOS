@@ -56,4 +56,13 @@ void ShellBackspace();
 /// prompt.
 void ShellSubmit();
 
+/// Recall the previous history entry into the edit buffer,
+/// rewriting the visible line to match. No-op at the oldest
+/// entry or when history is empty. Wired to Up arrow.
+void ShellHistoryPrev();
+
+/// Move forward through history (towards the live prompt).
+/// Past the newest entry, clears the line. Wired to Down arrow.
+void ShellHistoryNext();
+
 } // namespace customos::core
