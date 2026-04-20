@@ -170,6 +170,90 @@ void SyscallDispatch(arch::TrapFrame* frame)
         return;
     }
 
+    case SYS_READ:
+    {
+        // rdi = user pointer to NUL-terminated path.
+        // rsi = user pointer to destination buffer.
+        // rdx = buffer capacity in bytes.
+        // Returns bytes copied on success, -1 on any failure.
+        //
+        // Same cap + jail composition as SYS_STAT: kCapFsRead gates
+        // the call, Process::root bounds what can be named. The
+        // leaf-node check also rejects reading a directory —
+        // "read a dir entry by entry" is a future getdents-style
+        // syscall.
+        Process* proc = CurrentProcess();
+        if (proc == nullptr || !CapSetHas(proc->caps, kCapFsRead))
+        {
+            const u64 pid = (proc != nullptr) ? proc->pid : 0;
+            arch::SerialWrite("[sys] denied syscall=SYS_READ pid=");
+            arch::SerialWriteHex(pid);
+            arch::SerialWrite(" cap=");
+            arch::SerialWrite(CapName(kCapFsRead));
+            arch::SerialWrite("\n");
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+
+        char kpath[kSyscallPathMax];
+        if (!mm::CopyFromUser(kpath, reinterpret_cast<const void*>(frame->rdi), kSyscallPathMax))
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        kpath[kSyscallPathMax - 1] = '\0';
+
+        const fs::RamfsNode* n = fs::VfsLookup(proc->root, kpath, kSyscallPathMax);
+        if (n == nullptr)
+        {
+            arch::SerialWrite("[fs] read miss pid=");
+            arch::SerialWriteHex(proc->pid);
+            arch::SerialWrite(" path=\"");
+            arch::SerialWrite(kpath);
+            arch::SerialWrite("\"\n");
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        if (n->type != fs::RamfsNodeType::kFile)
+        {
+            arch::SerialWrite("[fs] read not-file pid=");
+            arch::SerialWriteHex(proc->pid);
+            arch::SerialWrite(" path=\"");
+            arch::SerialWrite(kpath);
+            arch::SerialWrite("\"\n");
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+
+        // Clamp the copy to whichever is smaller: the caller's
+        // buffer capacity or the file size. Short reads are normal
+        // — the caller gets the actual bytes-written count back in
+        // rax and handles partial reads.
+        const u64 cap_bytes = frame->rdx;
+        const u64 to_copy = (n->file_size < cap_bytes) ? n->file_size : cap_bytes;
+        if (to_copy == 0)
+        {
+            frame->rax = 0;
+            return;
+        }
+
+        if (!mm::CopyToUser(reinterpret_cast<void*>(frame->rsi), n->file_bytes, to_copy))
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+
+        arch::SerialWrite("[fs] read ok pid=");
+        arch::SerialWriteHex(proc->pid);
+        arch::SerialWrite(" path=\"");
+        arch::SerialWrite(kpath);
+        arch::SerialWrite("\" bytes=");
+        arch::SerialWriteHex(to_copy);
+        arch::SerialWrite("\n");
+        frame->rax = to_copy;
+        return;
+    }
+
     case SYS_STAT:
     {
         // rdi = user pointer to NUL-terminated path.

@@ -68,18 +68,38 @@ constexpr u64 kUserMessageLen = sizeof(kUserMessage) - 1;
 // frames would grow for this payload.
 constexpr u64 kUserStatOutVa = kUserStackVirt + 0xFF0;
 
-// 74-byte user code. Order:
+// SYS_READ destination buffer. 256 bytes, centred in the stack
+// page. Deliberately non-overlapping with kUserStatOutVa.
+constexpr u64 kUserReadBufVa = kUserStackVirt + 0x800;
+constexpr u64 kUserReadBufCap = 128;
+
+// User code. Order:
 //   pause, pause,
-//   SYS_STAT("/etc/version",  &stat_out),   — trusted sees size; sandbox gets "stat miss" (namespace jail)
-//   SYS_STAT("/welcome.txt",  &stat_out),   — sandbox sees size; trusted gets "stat miss" (path not in its root)
-//   SYS_WRITE(1, "Hello from ring 3!\n", 19),   — trusted prints; sandbox denied (cap jail)
+//   SYS_STAT("/etc/version",  &stat_out),
+//   SYS_STAT("/welcome.txt",  &stat_out),
+//   SYS_READ("/etc/version",  read_buf, 128),
+//     rax <- bytes_read (or -1)
+//     rdx <- rax        (preserve length for the write that follows)
+//   SYS_WRITE(1, read_buf, rdx),                  ; echoes the file
+//   SYS_WRITE(1, "Hello from ring 3!\n", 19),     ; existing banner
 //   SYS_YIELD,
 //   SYS_EXIT(0), hlt.
 //
-// Same bytes run in every task — the divergence in observed
-// behaviour is driven purely by Process::caps and Process::root.
-// That's the demonstration: the jail is a property of the kernel's
-// per-process state, not of the code the process runs.
+// Same bytes in every task. Trusted pid gets:
+//   - stat ok /etc/version (size=0x1b)
+//   - stat miss /welcome.txt
+//   - read ok /etc/version (bytes=0x1b) → /etc/version content echoed
+//   - write "Hello from ring 3!"
+// Sandbox pid gets:
+//   - stat miss /etc/version        <- namespace jail
+//   - stat ok /welcome.txt (size=0x30)
+//   - read miss /etc/version        <- jail again, on the read path
+//   - SYS_WRITE denied by cap check (sandbox lacks kCapSerialConsole)
+//
+// For the sandbox, after the failed read rax=-1 and the follow-up
+// mov rdx, rax puts 0xFFFF_FFFF_FFFF_FFFF in rdx. The subsequent
+// SYS_WRITE never touches that length because the cap check fires
+// first and returns -1 — so even an invalid length is harmless.
 // clang-format off
 constexpr u8 kUserCodeBytes[] = {
     0xF3, 0x90,                                                   // pause
@@ -88,18 +108,34 @@ constexpr u8 kUserCodeBytes[] = {
     // SYS_STAT /etc/version
     0xB8, 0x04, 0x00, 0x00, 0x00,                                 // mov eax, 4    (SYS_STAT)
     0xBF, 0xA0, 0x00, 0x00, 0x40,                                 // mov edi, 0x400000A0 (path1)
-    0xBE, 0xF0, 0x0F, 0x01, 0x40,                                 // mov esi, 0x40010FF0 (out)
+    0xBE, 0xF0, 0x0F, 0x01, 0x40,                                 // mov esi, 0x40010FF0 (stat_out)
     0xCD, 0x80,                                                   // int 0x80
 
     // SYS_STAT /welcome.txt
     0xB8, 0x04, 0x00, 0x00, 0x00,                                 // mov eax, 4    (SYS_STAT)
     0xBF, 0xB0, 0x00, 0x00, 0x40,                                 // mov edi, 0x400000B0 (path2)
-    0xBE, 0xF0, 0x0F, 0x01, 0x40,                                 // mov esi, 0x40010FF0 (out)
+    0xBE, 0xF0, 0x0F, 0x01, 0x40,                                 // mov esi, 0x40010FF0 (stat_out)
     0xCD, 0x80,                                                   // int 0x80
 
-    // SYS_WRITE(1, msg, len)
+    // SYS_READ /etc/version into read_buf (rax <- bytes_read or -1)
+    0xB8, 0x05, 0x00, 0x00, 0x00,                                 // mov eax, 5    (SYS_READ)
+    0xBF, 0xA0, 0x00, 0x00, 0x40,                                 // mov edi, 0x400000A0 (path1)
+    0xBE, 0x00, 0x08, 0x01, 0x40,                                 // mov esi, 0x40010800 (read_buf)
+    0xBA, 0x80, 0x00, 0x00, 0x00,                                 // mov edx, 128  (cap)
+    0xCD, 0x80,                                                   // int 0x80
+
+    // Preserve read length for the write below.
+    0x48, 0x89, 0xC2,                                             // mov rdx, rax
+
+    // SYS_WRITE(1, read_buf, rdx)
     0xB8, 0x02, 0x00, 0x00, 0x00,                                 // mov eax, 2    (SYS_WRITE)
-    0xBF, 0x01, 0x00, 0x00, 0x00,                                 // mov edi, 1    (fd=1)
+    0xBF, 0x01, 0x00, 0x00, 0x00,                                 // mov edi, 1
+    0xBE, 0x00, 0x08, 0x01, 0x40,                                 // mov esi, 0x40010800 (read_buf)
+    0xCD, 0x80,                                                   // int 0x80
+
+    // SYS_WRITE(1, msg, kUserMessageLen)
+    0xB8, 0x02, 0x00, 0x00, 0x00,                                 // mov eax, 2    (SYS_WRITE)
+    0xBF, 0x01, 0x00, 0x00, 0x00,                                 // mov edi, 1
     0xBE, 0x80, 0x00, 0x00, 0x40,                                 // mov esi, 0x40000080 (msg)
     0xBA, static_cast<u8>(kUserMessageLen), 0x00, 0x00, 0x00,     // mov edx, len
     0xCD, 0x80,                                                   // int 0x80

@@ -44,6 +44,14 @@ enum SyscallNumber : u64
     // kCapFsRead. Path lookup is anchored at CurrentProcess()->root
     // — a sandboxed process's namespace is its subtree only.
     SYS_STAT = 4,
+    // SYS_READ: rdi = user pointer to NUL-terminated path, rsi = user
+    // pointer to destination buffer, rdx = buffer capacity in bytes.
+    // Returns number of bytes actually written on success (≤ both
+    // the file size and the buffer capacity), 0 for an empty file,
+    // or -1 on failure (cap missing, path out of jail, not a file,
+    // bad user pointers). Gated on kCapFsRead; lookup is anchored
+    // at CurrentProcess()->root.
+    SYS_READ = 5,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit
