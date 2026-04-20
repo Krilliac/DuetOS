@@ -8,8 +8,10 @@
 #include "../arch/x86_64/pic.h"
 #include "../arch/x86_64/serial.h"
 #include "../arch/x86_64/timer.h"
+#include "../cpu/percpu.h"
 #include "../drivers/input/ps2kbd.h"
 #include "../mm/frame_allocator.h"
+#include "../sync/spinlock.h"
 #include "../mm/kheap.h"
 #include "../mm/paging.h"
 #include "../sched/sched.h"
@@ -84,6 +86,11 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
 
     SerialWrite("[boot] Bringing up IOAPIC.\n");
     IoApicInit();
+
+    SerialWrite("[boot] Installing BSP per-CPU struct.\n");
+    customos::cpu::PerCpuInitBsp();
+
+    customos::sync::SpinLockSelfTest();
 
     SerialWrite("[boot] Bringing up periodic timer.\n");
     TimerInit();

@@ -377,6 +377,37 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 017 — SMP foundations: xchg spinlock + per-CPU data via GSBASE
+
+- **Scope:** `kernel/sync/spinlock.{h,cpp}`,
+  `kernel/cpu/percpu.{h,cpp}`, wire-up in `kernel_main`
+- **Commit:** _(filled at commit)_
+- **Decision:** Land two primitives without yet refactoring the
+  scheduler: (1) a test-and-set spinlock with IF save/restore +
+  owner-CPU tracking + RAII guard, (2) a `PerCpu` struct addressed
+  via `IA32_GS_BASE` MSR, with `PerCpuInitBsp()` called after
+  `IoApicInit` and before `SchedInit`. `g_current` / `g_need_resched`
+  in `sched.cpp` stay global for now.
+- **Why:** Bringing up APs and refactoring the scheduler to be
+  MP-safe in the same commit is a megacommit guaranteed to introduce
+  subtle bugs that are impossible to bisect. Landing the primitives
+  first (with their own self-tests) lets the next commit focus
+  cleanly on AP state machine + trampoline without also dragging in
+  the runqueue-goes-per-CPU migration.
+- **Rules out / defers:** Ticket / MCS locks (TAS is fine below ~8
+  contended CPUs). Recursive locks (fix the design instead).
+  Lockdep-style cycle detection. `rdgsbase` fast path (needs
+  CPUID.EBX.FSGSBASE gate). Actually putting `g_current` into PerCpu
+  (will land alongside AP bring-up).
+- **Revisit when:** AP bring-up (next commit — migrate `g_current`
+  and `g_need_resched` into PerCpu, add per-CPU runqueue spinlock).
+  Profiles show spinlock cache-line ping-pong (switch to MCS / ticket).
+  Third spinlock lands (add a lock-ordering debug annotation).
+- **Related tracks:** Track 2 (SMP), Track 4 (Process model — will
+  need per-process data that is today "per-CPU" as a proxy).
+
+---
+
 ## 016 — End-to-end QEMU boot verified as baseline
 
 - **Scope:** Whole boot path; `tools/qemu/run.sh` as the launcher
