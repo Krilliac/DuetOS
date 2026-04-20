@@ -443,6 +443,17 @@ void MapPage(uptr virt, PhysAddr phys, u64 flags)
     {
         PanicPaging("MapPage: unaligned physical address", phys);
     }
+    // W^X enforcement — same rule as AddressSpaceMapUserPage. A
+    // kernel mapping that is both writable and executable is a
+    // loaded gun; enforce the invariant at the single choke point
+    // where kernel mappings are created. The defined kernel flag
+    // bundles (kKernelData, kKernelMmio, kKernelCode) already obey
+    // the rule, so this is a defensive check against ad-hoc
+    // flag sets leaking into future driver / allocator code.
+    if ((flags & kPageWritable) != 0 && (flags & kPageNoExecute) == 0)
+    {
+        PanicPaging("MapPage: W^X violation (writable+exec kernel page)", flags);
+    }
 
     u64* pte = WalkToPte(g_pml4, virt, /*create=*/true);
     if (*pte & kPagePresent)

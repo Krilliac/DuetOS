@@ -264,6 +264,30 @@ void AddressSpaceMapUserPage(AddressSpace* as, u64 virt, PhysAddr frame, u64 fla
     {
         PanicAs("AddressSpaceMapUserPage: flags missing kPageUser", flags);
     }
+    // W^X enforcement — no user mapping may be BOTH writable AND
+    // executable. That combination is the canonical shellcode-
+    // injection substrate (write bytes to a page, then jump there).
+    // A mapping that's writable must carry kPageNoExecute; a mapping
+    // that's executable (NX clear) must NOT carry kPageWritable.
+    // This applies to every caller of MapUserPage — loader, spawn,
+    // future mprotect-equivalent, etc. Panicking here turns "I
+    // accidentally introduced W+X in a new code path" into a boot-
+    // time failure rather than a silent regression.
+    //
+    // The kernel's own mapping API (mm::MapPage) mirrors this
+    // check; see paging.cpp.
+    if ((flags & kPageWritable) != 0 && (flags & kPageNoExecute) == 0)
+    {
+        PanicAs("AddressSpaceMapUserPage: W^X violation (writable+exec user page)", flags);
+    }
+    // Reject kPageGlobal on user pages. A global mapping survives a
+    // CR3 flush, so a user page marked global would remain in the
+    // TLB across a process switch — cross-process leak. Kernel-half
+    // mappings legitimately use global; user-half never should.
+    if ((flags & kPageGlobal) != 0)
+    {
+        PanicAs("AddressSpaceMapUserPage: kPageGlobal on user page", flags);
+    }
     if (as->region_count >= kMaxUserVmRegionsPerAs)
     {
         PanicAs("AddressSpaceMapUserPage: region table full", as->region_count);
