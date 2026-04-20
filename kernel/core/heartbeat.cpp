@@ -22,9 +22,18 @@ constexpr u64 kHeartbeatTicks = 500;
 
 [[noreturn]] void HeartbeatMain(void* /*arg*/)
 {
+    // Absolute-deadline cadence. Incrementing the deadline each
+    // iteration eliminates drift from the dump body's own latency —
+    // otherwise a heartbeat that takes 12 ms to serialize every 5 s
+    // pushes the period out by 0.2% per beat. SchedSleepUntil's
+    // wrap-safe compare handles the "already past" case by
+    // yielding, so a long stall just compresses subsequent
+    // heartbeats rather than breaking the loop.
+    u64 deadline = sched::SchedNowTicks() + kHeartbeatTicks;
     for (;;)
     {
-        sched::SchedSleepTicks(kHeartbeatTicks);
+        sched::SchedSleepUntil(deadline);
+        deadline += kHeartbeatTicks;
 
         const auto sched_stats = sched::SchedStatsRead();
         const auto heap_stats = mm::KernelHeapStatsRead();
