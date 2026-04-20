@@ -107,6 +107,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
 
     SerialWrite("[boot] Bringing up HPET (if present).\n");
     HpetInit();
+    HpetSelfTest();
 
     SerialWrite("[boot] Installing BSP per-CPU struct.\n");
     customos::cpu::PerCpuInitBsp();

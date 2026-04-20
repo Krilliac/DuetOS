@@ -52,4 +52,11 @@ u64 HpetReadCounter();
 /// ~69841279 fs. Returns 0 if HpetInit wasn't called successfully.
 u32 HpetPeriodFemtoseconds();
 
+/// Basic sanity check: read the counter twice (with a bounded busy-
+/// wait between) and verify it advanced and did not go backwards.
+/// Panics on failure — a broken HPET counter is a firmware or
+/// emulator bug worth surfacing immediately. No-op if HpetInit
+/// wasn't called successfully.
+void HpetSelfTest();
+
 } // namespace customos::arch

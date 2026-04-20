@@ -76,6 +76,43 @@ void HpetInit()
     core::Log(core::LogLevel::Info, "arch/hpet", "main counter enabled");
 }
 
+void HpetSelfTest()
+{
+    if (g_mmio == nullptr)
+    {
+        return; // no HPET — nothing to test, not an error
+    }
+
+    // Sanity: the counter must advance between two quick reads. Done
+    // with a bounded spin cap rather than a sleep because the timer
+    // isn't guaranteed to be armed yet (HpetSelfTest runs right
+    // after HpetInit, well before the scheduler comes up). The
+    // counter ticks at ~14 MHz on QEMU q35, so a few-million-
+    // iteration pause should see plenty of increments.
+    const u64 before = HpetReadCounter();
+    for (u64 i = 0; i < 10'000'000; ++i)
+    {
+        asm volatile("pause" ::: "memory");
+        if (HpetReadCounter() != before)
+        {
+            break;
+        }
+    }
+    const u64 after = HpetReadCounter();
+    if (after == before)
+    {
+        core::Panic("arch/hpet", "self-test: counter did not advance");
+    }
+    if (after < before)
+    {
+        // 64-bit monotonic counter — any backwards step is a bug in
+        // firmware, emulator, or our read path. Worth halting over.
+        core::PanicWithValue("arch/hpet", "self-test: counter went backwards", after);
+    }
+
+    core::LogWithValue(core::LogLevel::Info, "arch/hpet", "self-test delta", after - before);
+}
+
 u64 HpetReadCounter()
 {
     if (g_mmio == nullptr)
