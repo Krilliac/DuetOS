@@ -278,6 +278,44 @@ WindowHandle WindowActive()
     return g_active_window;
 }
 
+void WindowCycleActive()
+{
+    // Find the handle of the currently-active window in z-order,
+    // then walk forward (wrapping) until we hit a different alive
+    // window. Raise it. Handles the 0- and 1-window corner cases
+    // inside the loop: the first pass that finds the active
+    // window tries to bump to the next, and the wrap detects
+    // "no other alive windows."
+    if (g_window_count == 0)
+    {
+        return;
+    }
+    // Locate the active window's index in z_order (search from
+    // the top since that's where it lives).
+    u32 active_idx = g_window_count;
+    for (u32 i = 0; i < g_window_count; ++i)
+    {
+        if (g_z_order[i] == g_active_window)
+        {
+            active_idx = i;
+            break;
+        }
+    }
+    // Start the search one past the active slot (wrap). Walk up
+    // to kMaxWindows steps; bail out if nothing else is alive.
+    const u32 start = (active_idx + 1) % g_window_count;
+    for (u32 step = 0; step < g_window_count; ++step)
+    {
+        const u32 idx = (start + step) % g_window_count;
+        const WindowHandle candidate = g_z_order[idx];
+        if (candidate != g_active_window && WindowValid(candidate))
+        {
+            WindowRaise(candidate);
+            return;
+        }
+    }
+}
+
 void WindowMoveTo(WindowHandle h, u32 x, u32 y)
 {
     if (!WindowValid(h))

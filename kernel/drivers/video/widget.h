@@ -129,6 +129,12 @@ void WindowRaise(WindowHandle h);
 /// highlighted in title-bar chrome.
 WindowHandle WindowActive();
 
+/// Cycle activation to the next alive window in z-order (wraps).
+/// Also raises that window so it becomes topmost. No-op if zero
+/// or one alive windows exist. Wired to Alt+Tab in the keyboard
+/// reader.
+void WindowCycleActive();
+
 /// Set absolute position. Width / height / colours are unchanged.
 /// Clamps so the window stays entirely within the framebuffer.
 void WindowMoveTo(WindowHandle h, u32 x, u32 y);

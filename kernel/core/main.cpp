@@ -350,7 +350,43 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
             {
                 continue;
             }
+            const bool alt = (ev.modifiers & kKeyModAlt) != 0;
             bool dirty = false;
+
+            // Window-manager shortcuts take priority over any
+            // text-input path. Alt+Tab cycles active window;
+            // Alt+F4 closes it.
+            if (alt && ev.code == kKeyTab)
+            {
+                customos::drivers::video::CompositorLock();
+                customos::drivers::video::WindowCycleActive();
+                customos::drivers::video::CursorHide();
+                customos::drivers::video::DesktopCompose(kDesktopTealLocal,
+                                                         "WELCOME TO CUSTOMOS   BOOT OK");
+                customos::drivers::video::CursorShow();
+                customos::drivers::video::CompositorUnlock();
+                SerialWrite("[ui] alt-tab\n");
+                continue;
+            }
+            if (alt && ev.code == kKeyF4)
+            {
+                customos::drivers::video::CompositorLock();
+                const auto active = customos::drivers::video::WindowActive();
+                if (active != customos::drivers::video::kWindowInvalid)
+                {
+                    customos::drivers::video::WindowClose(active);
+                    SerialWrite("[ui] alt-f4 close window=");
+                    SerialWriteHex(active);
+                    SerialWrite("\n");
+                }
+                customos::drivers::video::CursorHide();
+                customos::drivers::video::DesktopCompose(kDesktopTealLocal,
+                                                         "WELCOME TO CUSTOMOS   BOOT OK");
+                customos::drivers::video::CursorShow();
+                customos::drivers::video::CompositorUnlock();
+                continue;
+            }
+
             if (ev.code == kKeyBackspace)
             {
                 // v0: backspace removes the last character from the
