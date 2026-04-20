@@ -380,7 +380,7 @@ get an inline "superseded by <commit>" note and stay.
 ## 018 — Runtime recovery taxonomy: halt / restart / retry / reject
 
 - **Scope:** `docs/knowledge/runtime-recovery-strategy.md`
-- **Commit:** _(filled at commit)_
+- **Commit:** `af665c1`
 - **Decision:** Codify, per fault class, what the kernel does:
     - Class A (kernel integrity) → **HALT** via `core::Panic`.
     - Class B (driver fault) → **RESTART** the driver behind its
