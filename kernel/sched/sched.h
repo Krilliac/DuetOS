@@ -175,4 +175,48 @@ void MutexUnlock(Mutex* m);
 /// Non-blocking acquire. Returns true on success, false if already held.
 bool MutexTryLock(Mutex* m);
 
+/*
+ * Condition variable — drop-mutex-and-block with safe re-acquire.
+ *
+ * Standard producer/consumer pattern:
+ *
+ *     MutexLock(&m);
+ *     while (!ready) CondvarWait(&cv, &m);
+ *     // m is held here; `ready` was true.
+ *
+ *     // producer:
+ *     MutexLock(&m);
+ *     ready = true;
+ *     CondvarSignal(&cv);
+ *     MutexUnlock(&m);
+ *
+ * `CondvarWait` atomically hands off the mutex (with FIFO fairness
+ * identical to MutexUnlock — the longest-waiting lock contender
+ * becomes the new owner) AND enqueues the caller on `cv->waiters`.
+ * No signal-between-release-and-block race window.
+ *
+ * Zero-initialise a Condvar to the empty state — no explicit Init
+ * is required.
+ */
+struct Condvar
+{
+    WaitQueue waiters;
+};
+
+/// Drop `m` (with MutexUnlock hand-off semantics), block on `cv`,
+/// re-acquire `m` on wake. Caller MUST hold `m` at entry; panics
+/// otherwise.  Spurious wakeups are possible under the current
+/// wait-queue primitives — always re-check your condition in a
+/// `while (!condition) CondvarWait(...)` loop, never a plain `if`.
+void CondvarWait(Condvar* cv, Mutex* m);
+
+/// Wake the single longest-waiting task on `cv`. No-op on empty
+/// queue. Typical pattern is to call this WITH the companion mutex
+/// held — guarantees the signalled waiter sees whatever state
+/// change the signaller made before signalling.
+void CondvarSignal(Condvar* cv);
+
+/// Wake every task on `cv`. Returns the number of tasks woken.
+u64 CondvarBroadcast(Condvar* cv);
+
 } // namespace customos::sched

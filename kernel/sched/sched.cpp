@@ -769,6 +769,44 @@ bool WaitQueueBlockTimeout(WaitQueue* wq, u64 ticks)
     return !timed_out;
 }
 
+namespace
+{
+
+// Caller must hold g_sched_lock. Pulls the head of `wq`, does all
+// the book-keeping (sleep-queue unlink for timed waiters, counters,
+// state flip, runqueue push), and returns the woken Task*.
+// Factored out so CondvarWait can call it under its own held lock
+// to splice the mutex hand-off + self-enqueue atomically.
+Task* WaitQueueWakeOneLocked(WaitQueue* wq)
+{
+    Task* t = wq->head;
+    if (t == nullptr)
+    {
+        return nullptr;
+    }
+    wq->head = t->next;
+    if (wq->head == nullptr)
+    {
+        wq->tail = nullptr;
+    }
+    t->next = nullptr;
+
+    if (t->wake_tick != 0)
+    {
+        SleepqueueRemove(t);
+        --g_tasks_sleeping;
+    }
+    t->waiting_on = nullptr;
+    t->wake_tick = 0;
+    t->wake_by_timeout = false;
+    t->state = TaskState::Ready;
+    RunqueuePush(t);
+    --g_tasks_blocked;
+    return t;
+}
+
+} // namespace
+
 Task* WaitQueueWakeOne(WaitQueue* wq)
 {
     KASSERT(wq != nullptr, "sched", "WaitQueueWakeOne null queue");
@@ -776,35 +814,11 @@ Task* WaitQueueWakeOne(WaitQueue* wq)
     Task* t = nullptr;
     {
         sync::SpinLockGuard guard(g_sched_lock);
-        t = wq->head;
+        t = WaitQueueWakeOneLocked(wq);
         if (t == nullptr)
         {
             return nullptr;
         }
-        wq->head = t->next;
-        if (wq->head == nullptr)
-        {
-            wq->tail = nullptr;
-        }
-        t->next = nullptr;
-
-        // If this was a timed wait, also unlink from the sleep
-        // queue so the timer path doesn't later try to wake an
-        // already-Ready task. `wake_tick != 0` is the signal:
-        // WaitQueueBlock leaves wake_tick at 0, WaitQueueBlock-
-        // Timeout sets it to the deadline. Plain Sleeping tasks
-        // never reach this path — they're not on any wait queue.
-        if (t->wake_tick != 0)
-        {
-            SleepqueueRemove(t);
-            --g_tasks_sleeping;
-        }
-        t->waiting_on = nullptr;
-        t->wake_tick = 0;
-        t->wake_by_timeout = false;
-        t->state = TaskState::Ready;
-        RunqueuePush(t);
-        --g_tasks_blocked;
     }
 
     // If the wake happens from a non-IRQ context, leaving need_resched set
@@ -893,6 +907,92 @@ void MutexUnlock(Mutex* m)
         m->owner = next;
     }
     arch::Sti();
+}
+
+// ---------------------------------------------------------------------------
+// Condition variable
+//
+// Splices three existing primitives under a single sched_lock hold:
+//   1. Hand off the companion mutex (FIFO wake of m->waiters, owner
+//      pointer re-assigned atomically — same semantics as MutexUnlock
+//      except inlined so the whole sequence is indivisible from the
+//      scheduler's point of view).
+//   2. Enqueue the caller on cv->waiters (state = Blocked).
+// Then Schedule() switches away. On wake the task re-acquires m via
+// the standard MutexLock path.
+//
+// The critical invariant: steps 1 and 2 happen under the same
+// sched_lock hold, so a CondvarSignal that runs between them is
+// impossible — either the signal sees cv->waiters already holding
+// us (and wakes us), or it sees cv->waiters empty (and is a no-op,
+// which is fine because the companion mutex still blocks the
+// signaller from having produced anything we were waiting for).
+// ---------------------------------------------------------------------------
+
+void CondvarWait(Condvar* cv, Mutex* m)
+{
+    KASSERT(cv != nullptr, "sched", "CondvarWait null condvar");
+    KASSERT(m != nullptr, "sched", "CondvarWait null mutex");
+
+    arch::Cli();
+    if (m->owner != Current())
+    {
+        PanicSched("CondvarWait called without the companion mutex held");
+    }
+
+    {
+        sync::SpinLockGuard guard(g_sched_lock);
+
+        // Atomic mutex hand-off: wake the longest-waiting contender
+        // and transfer ownership directly to it. Same FIFO-fairness
+        // semantics as MutexUnlock; inlined so no sched_lock
+        // re-entry is needed.
+        Task* successor = WaitQueueWakeOneLocked(&m->waiters);
+        m->owner = successor; // nullptr if no contender, fine
+
+        // Enqueue self on the condvar's waiters.
+        Task* t = Current();
+        t->state = TaskState::Blocked;
+        t->next = nullptr;
+        t->wake_tick = 0;
+        t->waiting_on = &cv->waiters;
+        t->wake_by_timeout = false;
+        if (cv->waiters.tail == nullptr)
+        {
+            cv->waiters.head = cv->waiters.tail = t;
+        }
+        else
+        {
+            cv->waiters.tail->next = t;
+            cv->waiters.tail = t;
+        }
+        ++g_tasks_blocked;
+    }
+
+    Schedule();
+    // Woken by CondvarSignal / CondvarBroadcast. Interrupts are
+    // still disabled; re-enable before re-acquiring the mutex so
+    // MutexLock's slow path doesn't run with IF=0 across a
+    // context switch.
+    arch::Sti();
+    MutexLock(m);
+}
+
+void CondvarSignal(Condvar* cv)
+{
+    KASSERT(cv != nullptr, "sched", "CondvarSignal null condvar");
+    // WaitQueueWakeOne moves the head task to Ready + sets
+    // need_resched. The signal is valid whether or not the caller
+    // holds the companion mutex — the canonical pattern is to hold
+    // it so the signalled waiter sees a consistent guarded state
+    // when it re-acquires, but we don't enforce that.
+    WaitQueueWakeOne(&cv->waiters);
+}
+
+u64 CondvarBroadcast(Condvar* cv)
+{
+    KASSERT(cv != nullptr, "sched", "CondvarBroadcast null condvar");
+    return WaitQueueWakeAll(&cv->waiters);
 }
 
 } // namespace customos::sched
