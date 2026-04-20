@@ -607,6 +607,87 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 087 — Live KERNEL LOG viewer window
+
+- **Scope:** `kernel/core/main.cpp` — fourth registered window
+  ("KERNEL LOG") with a content drawer that streams the klog
+  ring into a wrapped character grid. Uses
+  `DumpLogRingTo` with a chunk callback that writes char-by-
+  char, stopping at the client-area row limit.
+- **Decision:** Render from the ring directly — no scratch
+  buffer, no per-window state. ui-ticker's 1 Hz recompose is
+  the refresh cadence; that matches the klog update rate for
+  boot-line cadence.
+- **Why:** Second consumer of the content-drawer API proves
+  the hook is general enough for streaming wrapped text, not
+  just fixed-row numeric panels like Task Manager. Also
+  surfaces klog in desktop mode where Ctrl+Alt+F2 isn't
+  available as a flip.
+- **Rules out / defers:** Scrollback pagination. Filter by
+  severity. Click-to-copy. Sticky tail-follow.
+- **Revisit when:** Log volume exceeds one screen often
+  enough that scrolling matters. Severity highlighting
+  becomes visually useful.
+- **Related tracks:** Track 9 (Windowing — second content
+  drawer), Track 7 (Userland — visible logs).
+
+---
+
+## 086 — `>>` append redirect for tmpfs
+
+- **Scope:** `kernel/fs/tmpfs.{h,cpp}` — new `TmpFsAppend`
+  that grows the target slot's content up to the hard cap.
+  `kernel/core/shell.cpp` — echo tokenizer recognises `>>`
+  separately from `>` and routes accordingly.
+- **Decision:** Append truncates the portion past
+  kTmpFsContentMax rather than failing — matches ENOSPC on a
+  real fs. `>>` is a distinct token from `>`; the shell's
+  whitespace tokenizer already separates them cleanly.
+- **Why:** `>` plus `cat` covered one-shot content, but any
+  log-style use (`date >> /tmp/notes`, multi-line scratch)
+  needs append. One-line add on the fs side; one-line branch
+  on the shell side.
+- **Rules out / defers:** 2>&1 / 2> stderr redirects (no
+  separate stderr yet). Heredocs. Process-substitution.
+- **Revisit when:** Second output stream exists (stderr
+  split from stdout for commands).
+- **Related tracks:** Track 7 (Userland shell).
+
+---
+
+## 085 — Dual consoles (shell + klog) with Ctrl+Alt+F1/F2
+
+- **Scope:** `kernel/drivers/video/console.{h,cpp}` —
+  ConsoleState struct + 2-slot array. Slot 0 = shell
+  (interactive), slot 1 = klog (read-only, target of the
+  klog tee). New `ConsoleSelectShell` / `ConsoleSelectKlog`
+  swap the render target in place; both consoles share the
+  same screen origin. `kernel/core/main.cpp` — klog tee now
+  forwards to `ConsoleWriteKlog`; new Ctrl+Alt+F1 / F2
+  shortcuts flip the render target.
+- **Decision:** Single shell instance, dual output channels,
+  user-selectable render target. Shell output always lands in
+  slot 0; klog always in slot 1. Switching is a pure
+  presentation-layer change — shell state never moves. Each
+  slot has independent scrollback, so flipping back to F1
+  after watching klog leaves the prompt undisturbed.
+- **Why:** Linux VT feel without per-VT shell state (which
+  would balloon into per-console history, process contexts,
+  stdio redirection). The 80% win — see kernel log without
+  interleaving it with your typing — is delivered for one
+  extra 3 KB .bss console buffer.
+- **Rules out / defers:** True multi-shell VTs (one shell per
+  console). More than two channels (F3..F6). Per-channel font /
+  theme. Copy-between-channels. Scrollback paging.
+- **Revisit when:** SYS_SPAWN lands (multiple processes could
+  each want a TTY). First user needs a dedicated "mouse event
+  log" or similar third channel.
+- **Related tracks:** Track 7 (Userland shell — where input
+  lands), Track 9 (Windowing — presentation switch), Track 2
+  (Platform — logging infrastructure).
+
+---
+
 ## 084 — Per-window content drawers + Task Manager window
 
 - **Scope:** `kernel/drivers/video/widget.{h,cpp}` — new
