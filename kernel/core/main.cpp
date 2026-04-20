@@ -362,10 +362,12 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
             }
             if (dirty)
             {
+                customos::drivers::video::CompositorLock();
                 customos::drivers::video::CursorHide();
                 customos::drivers::video::DesktopCompose(kDesktopTealLocal,
                                                          "WELCOME TO CUSTOMOS   BOOT OK");
                 customos::drivers::video::CursorShow();
+                customos::drivers::video::CompositorUnlock();
             }
         }
     };
@@ -395,6 +397,11 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
         for (;;)
         {
             const auto p = customos::drivers::input::Ps2MouseReadPacket();
+
+            // Every UI mutation inside this packet lives under
+            // the compositor mutex — the kbd reader can be mid-
+            // ConsoleWrite / DesktopCompose at the same time.
+            customos::drivers::video::CompositorLock();
             customos::drivers::video::CursorMove(p.dx, p.dy);
 
             customos::u32 cx = 0, cy = 0;
@@ -466,6 +473,8 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                     SerialWrite("\n");
                 }
             }
+
+            customos::drivers::video::CompositorUnlock();
 
             SerialWrite("[mouse] dx=");
             SerialWriteHex(static_cast<customos::u64>(p.dx));

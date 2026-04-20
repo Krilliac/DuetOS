@@ -1,6 +1,7 @@
 #include "widget.h"
 
 #include "../../drivers/input/ps2mouse.h"
+#include "../../sched/sched.h"
 #include "console.h"
 #include "cursor.h"
 #include "framebuffer.h"
@@ -98,6 +99,14 @@ constinit u32 g_window_count = 0;
 // entries are indices into `g_windows`. We never delete windows
 // in v0, so this is append-only modulo raise-to-top moves.
 constinit u32 g_z_order[kMaxWindows] = {};
+
+// Single compositor mutex guarding every UI-side mutable: cursor
+// backing, window registry, widget table, console buffer, and
+// framebuffer writes. The mouse reader (drag + widget events)
+// and keyboard reader (typing into the console) both acquire it
+// before any Cursor* / Window* / Widget* / DesktopCompose call,
+// so concurrent typing-while-dragging is race-free.
+constinit customos::sched::Mutex g_compositor_mutex{};
 
 bool WindowValid(WindowHandle h)
 {
@@ -275,6 +284,16 @@ void WindowDrawAllOrdered()
             FramebufferDrawString(c.x + 8, c.y + 7, g_windows[h].title, 0x00FFFFFF, c.colour_title);
         }
     }
+}
+
+void CompositorLock()
+{
+    customos::sched::MutexLock(&g_compositor_mutex);
+}
+
+void CompositorUnlock()
+{
+    customos::sched::MutexUnlock(&g_compositor_mutex);
 }
 
 void DesktopCompose(u32 desktop_rgb, const char* banner)

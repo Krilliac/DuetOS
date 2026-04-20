@@ -146,4 +146,14 @@ void WindowDrawAllOrdered();
 /// owns when to show / hide it).
 void DesktopCompose(u32 desktop_rgb, const char* banner);
 
+/// Serialise access to every GUI-side mutable data structure:
+/// cursor backing, window registry, widget table, console
+/// buffer, framebuffer writes. Any task touching UI state
+/// (mouse reader, keyboard reader, future compositor helpers)
+/// MUST bracket its work with CompositorLock / CompositorUnlock.
+/// Internally a plain sched::Mutex with FIFO hand-off — safe
+/// to block in task context, NEVER call from IRQ.
+void CompositorLock();
+void CompositorUnlock();
+
 } // namespace customos::drivers::video
