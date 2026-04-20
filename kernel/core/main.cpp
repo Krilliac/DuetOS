@@ -209,6 +209,15 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     customos::drivers::video::MenuInit(start_items, 4);
 
     customos::drivers::video::ConsoleInit(16, 400, 0x0080F088, 0x00181028);
+
+    // Tee kernel log lines to the on-screen console so the desktop
+    // shows subsystem activity live — not just the boot seed block.
+    // Forwards chunks through ConsoleWrite; no DesktopCompose is
+    // triggered here (ui-ticker recomposes at 1 Hz, and user input
+    // forces a recompose on demand). IRQ-time klogs race the kbd
+    // reader on the char buffer but the damage is bounded to one
+    // garbled line at worst; the authoritative log ring is serial.
+    customos::core::SetLogTee([](const char* s) { customos::drivers::video::ConsoleWrite(s); });
     customos::drivers::video::ConsoleWriteln("CUSTOMOS BOOT LOG");
     customos::drivers::video::ConsoleWriteln("=================");
     customos::drivers::video::ConsoleWriteln("");

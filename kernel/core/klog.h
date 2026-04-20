@@ -91,6 +91,17 @@ void DumpLogRing();
 /// reason about how many historical lines are retained.
 inline constexpr u64 kLogRingCapacity = 64;
 
+/// Optional second sink for every log line. When set, each line
+/// is forwarded to `writer` AFTER the serial write completes so
+/// a slow sink never blocks the primary path. The writer is
+/// called with short chunks (tag, subsystem, separator, message,
+/// newline) in sequence — no timestamp prefix — so a framebuffer
+/// console receives clean "[I] subsys : msg" lines. Pass
+/// `nullptr` to disable. Safe to set from task context; avoid
+/// setting from IRQ.
+using LogTee = void (*)(const char*);
+void SetLogTee(LogTee writer);
+
 } // namespace customos::core
 
 // Convenience macros. The `do { } while (0)` lets call sites still

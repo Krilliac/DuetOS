@@ -35,6 +35,19 @@ constinit u64 g_log_ring_count = 0; // saturates at kLogRingCapacity
 // somebody explicitly raises it.
 constinit LogLevel g_log_threshold = kKlogMinLevel;
 
+// Secondary sink. Set via SetLogTee once a framebuffer console (or
+// any string consumer) is up. Timestamps are NOT forwarded — they
+// would clutter on-screen output, and the serial log keeps them.
+constinit LogTee g_tee = nullptr;
+
+inline void Tee(const char* s)
+{
+    if (g_tee != nullptr && s != nullptr)
+    {
+        g_tee(s);
+    }
+}
+
 inline void PushEntry(LogLevel level, const char* subsystem, const char* message, u64 value, bool has_value)
 {
     const u64 slot = g_log_ring_next % kLogRingCapacity;
@@ -108,6 +121,11 @@ void SetLogThreshold(LogLevel level)
     g_log_threshold = level;
 }
 
+void SetLogTee(LogTee writer)
+{
+    g_tee = writer;
+}
+
 LogLevel GetLogThreshold()
 {
     return g_log_threshold;
@@ -119,12 +137,24 @@ void Log(LogLevel level, const char* subsystem, const char* message)
     {
         return;
     }
+    const char* tag = LevelTag(level);
     WriteTimestampPrefix();
-    arch::SerialWrite(LevelTag(level));
+    arch::SerialWrite(tag);
     arch::SerialWrite(subsystem);
     arch::SerialWrite(" : ");
     arch::SerialWrite(message);
     arch::SerialWrite("\n");
+
+    // Tee to the secondary sink (framebuffer console etc.). No
+    // timestamp on this path — on-screen renderers want the text,
+    // not the hex tick stamp. Chunk-by-chunk mirrors the serial
+    // ordering so an interleaved IRQ tee doesn't scramble one
+    // logical line.
+    Tee(tag);
+    Tee(subsystem);
+    Tee(" : ");
+    Tee(message);
+    Tee("\n");
 
     PushEntry(level, subsystem, message, 0, false);
 }
@@ -135,14 +165,21 @@ void LogWithValue(LogLevel level, const char* subsystem, const char* message, u6
     {
         return;
     }
+    const char* tag = LevelTag(level);
     WriteTimestampPrefix();
-    arch::SerialWrite(LevelTag(level));
+    arch::SerialWrite(tag);
     arch::SerialWrite(subsystem);
     arch::SerialWrite(" : ");
     arch::SerialWrite(message);
     arch::SerialWrite("   val=");
     arch::SerialWriteHex(value);
     arch::SerialWrite("\n");
+
+    Tee(tag);
+    Tee(subsystem);
+    Tee(" : ");
+    Tee(message);
+    Tee("\n");
 
     PushEntry(level, subsystem, message, value, true);
 }
