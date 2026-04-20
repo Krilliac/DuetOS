@@ -27,6 +27,12 @@ constinit LogEntry g_log_ring[kLogRingCapacity] = {};
 constinit u64 g_log_ring_next = 0;  // monotonically increasing write cursor
 constinit u64 g_log_ring_count = 0; // saturates at kLogRingCapacity
 
+// Runtime severity threshold — set via SetLogThreshold. Lines with
+// level < max(threshold, kKlogMinLevel) are silently dropped. Default
+// matches the compile-time floor so behaviour is unchanged unless
+// somebody explicitly raises it.
+constinit LogLevel g_log_threshold = kKlogMinLevel;
+
 inline void PushEntry(LogLevel level, const char* subsystem, const char* message, u64 value, bool has_value)
 {
     const u64 slot = g_log_ring_next % kLogRingCapacity;
@@ -62,10 +68,23 @@ inline const char* LevelTag(LogLevel level)
 
 inline bool LevelEnabled(LogLevel level)
 {
-    return static_cast<u8>(level) >= static_cast<u8>(kKlogMinLevel);
+    const u8 floor = static_cast<u8>(kKlogMinLevel);
+    const u8 runtime = static_cast<u8>(g_log_threshold);
+    const u8 effective = floor > runtime ? floor : runtime;
+    return static_cast<u8>(level) >= effective;
 }
 
 } // namespace
+
+void SetLogThreshold(LogLevel level)
+{
+    g_log_threshold = level;
+}
+
+LogLevel GetLogThreshold()
+{
+    return g_log_threshold;
+}
 
 void Log(LogLevel level, const char* subsystem, const char* message)
 {
