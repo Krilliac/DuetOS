@@ -220,13 +220,13 @@ void WriteUserCodeFrame(mm::PhysAddr frame)
 // Process with the caller-supplied cap set, hand the Process to a
 // new task. The reaper's ProcessRelease tears everything down at
 // task death.
-void SpawnRing3Task(const char* name, CapSet caps, const fs::RamfsNode* root)
+void SpawnRing3Task(const char* name, CapSet caps, const fs::RamfsNode* root, u64 frame_budget)
 {
     using arch::SerialWrite;
     using arch::SerialWriteHex;
     using namespace customos::mm;
 
-    AddressSpace* as = AddressSpaceCreate();
+    AddressSpace* as = AddressSpaceCreate(frame_budget);
     if (as == nullptr)
     {
         Panic("core/ring3", "AddressSpaceCreate failed");
@@ -298,7 +298,7 @@ void SpawnJailProbeTask()
     using arch::SerialWriteHex;
     using namespace customos::mm;
 
-    AddressSpace* as = AddressSpaceCreate();
+    AddressSpace* as = AddressSpaceCreate(kFrameBudgetSandbox);
     if (as == nullptr)
     {
         Panic("core/ring3", "AS create failed for jail probe");
@@ -391,9 +391,9 @@ void StartRing3SmokeTask()
     CapSet sandbox_caps = CapSetEmpty();
     CapSetAdd(sandbox_caps, kCapFsRead);
 
-    SpawnRing3Task("ring3-smoke-A", CapSetTrusted(), fs::RamfsTrustedRoot());
-    SpawnRing3Task("ring3-smoke-B", CapSetTrusted(), fs::RamfsTrustedRoot());
-    SpawnRing3Task("ring3-smoke-sandbox", sandbox_caps, fs::RamfsSandboxRoot());
+    SpawnRing3Task("ring3-smoke-A", CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted);
+    SpawnRing3Task("ring3-smoke-B", CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted);
+    SpawnRing3Task("ring3-smoke-sandbox", sandbox_caps, fs::RamfsSandboxRoot(), mm::kFrameBudgetSandbox);
 
     // Jail-probe task: writes to its own RX code page. Expected
     // outcome is the kernel's ring-3 trap handler terminating the

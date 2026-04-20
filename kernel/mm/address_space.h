@@ -75,6 +75,25 @@ namespace customos::mm
 
 inline constexpr u64 kMaxUserVmRegionsPerAs = 32;
 
+// Default frame budgets for the two canonical profiles. A new AS is
+// created with one of these (or a caller-supplied value) and
+// AddressSpaceMapUserPage refuses to install a new mapping once the
+// AS's region_count meets the budget. The budget bounds how many
+// 4 KiB user frames the process can own — a DoS-prevention layer
+// on top of the fixed-size region table.
+//
+// kFrameBudgetSandbox = 8:
+//   Enough for a code page + stack page + a handful of heap/shared
+//   pages. Untrusted PE images that legitimately need more pages
+//   get a custom larger budget at spawn time; no runtime request
+//   path exists today.
+//
+// kFrameBudgetTrusted = kMaxUserVmRegionsPerAs:
+//   The full region table is allowed. Kernel-shipped userland
+//   runs under this profile.
+inline constexpr u64 kFrameBudgetSandbox = 8;
+inline constexpr u64 kFrameBudgetTrusted = kMaxUserVmRegionsPerAs;
+
 struct AddressSpaceUserRegion
 {
     u64 vaddr;      // start of a 4 KiB user page
@@ -87,18 +106,30 @@ struct AddressSpace
     u64* pml4_virt;     // direct-map alias for kernel-side editing
     u64 refcount;       // tasks holding this AS
 
-    // User-VM region table. Bounded by kMaxUserVmRegionsPerAs;
-    // exceeding the cap panics. Destroy walks this table to return
-    // every backing frame to the physical allocator.
+    // Maximum number of user frames this AS is allowed to own.
+    // MapUserPage rejects new mappings once region_count reaches
+    // this budget, returning false to the caller (or panicking in
+    // the v0 "panics on failure" API). Set at create time and
+    // immutable — a process's policy can't be widened after it
+    // starts running.
+    u64 frame_budget;
+
+    // User-VM region table. Bounded by kMaxUserVmRegionsPerAs (the
+    // fixed-size array capacity); the AS's frame_budget caps usage
+    // within that array to an even smaller number for untrusted
+    // processes. Destroy walks the first `region_count` entries.
     u8 region_count;
     AddressSpaceUserRegion regions[kMaxUserVmRegionsPerAs];
 };
 
 /// Allocate a fresh AS with a zeroed user half and the kernel half
-/// copied from the boot PML4. Returns nullptr on frame-allocator
-/// or kheap failure (no panic — callers may want to refuse the
-/// process spawn cleanly).
-AddressSpace* AddressSpaceCreate();
+/// copied from the boot PML4. `frame_budget` caps how many user
+/// frames this AS can map (via AddressSpaceMapUserPage); pick
+/// `kFrameBudgetSandbox` for untrusted callers or
+/// `kFrameBudgetTrusted` for kernel-shipped userland. Returns
+/// nullptr on frame-allocator or kheap failure (no panic — callers
+/// may want to refuse the process spawn cleanly).
+AddressSpace* AddressSpaceCreate(u64 frame_budget);
 
 /// Install a user-accessible 4 KiB mapping at `virt` in `as`. `virt`
 /// must be in the canonical low half and 4 KiB-aligned; `flags` must

@@ -184,8 +184,13 @@ void FreeUserHalfTables(u64* pml4)
 
 } // namespace
 
-AddressSpace* AddressSpaceCreate()
+AddressSpace* AddressSpaceCreate(u64 frame_budget)
 {
+    if (frame_budget == 0 || frame_budget > kMaxUserVmRegionsPerAs)
+    {
+        PanicAs("AddressSpaceCreate: frame_budget out of range [1..kMaxUserVmRegionsPerAs]", frame_budget);
+    }
+
     auto* as = static_cast<AddressSpace*>(KMalloc(sizeof(AddressSpace)));
     if (as == nullptr)
     {
@@ -219,6 +224,7 @@ AddressSpace* AddressSpaceCreate()
     as->pml4_phys = pml4_frame;
     as->pml4_virt = pml4;
     as->refcount = 1;
+    as->frame_budget = frame_budget;
     as->region_count = 0;
     for (u64 i = 0; i < kMaxUserVmRegionsPerAs; ++i)
     {
@@ -288,9 +294,18 @@ void AddressSpaceMapUserPage(AddressSpace* as, u64 virt, PhysAddr frame, u64 fla
     {
         PanicAs("AddressSpaceMapUserPage: kPageGlobal on user page", flags);
     }
-    if (as->region_count >= kMaxUserVmRegionsPerAs)
+    if (as->region_count >= as->frame_budget)
     {
-        PanicAs("AddressSpaceMapUserPage: region table full", as->region_count);
+        // Budget exhausted. For a trusted AS this means the hard
+        // region-table cap was hit; for a sandbox AS it means the
+        // much smaller per-profile budget was hit. Either way,
+        // refusing the mapping is the safe default — a runaway
+        // process cannot drain the frame allocator past this
+        // point. Panic in v0 because the only callers today are
+        // kernel-side spawn paths that shouldn't ever exceed
+        // budget; when a syscall-driven grow path lands, it'll
+        // need a non-fatal Result<> variant.
+        PanicAs("AddressSpaceMapUserPage: frame budget exhausted", as->region_count);
     }
 
     u64* pte = WalkToPteIn(as->pml4_virt, virt, /*create=*/true);
@@ -416,12 +431,12 @@ void AddressSpaceSelfTest()
 
     arch::SerialWrite("[mm/as] isolation self-test\n");
 
-    AddressSpace* a = AddressSpaceCreate();
+    AddressSpace* a = AddressSpaceCreate(kFrameBudgetTrusted);
     if (a == nullptr)
     {
         PanicAs("self-test: AddressSpaceCreate failed for A", 0);
     }
-    AddressSpace* b = AddressSpaceCreate();
+    AddressSpace* b = AddressSpaceCreate(kFrameBudgetTrusted);
     if (b == nullptr)
     {
         PanicAs("self-test: AddressSpaceCreate failed for B", 0);
