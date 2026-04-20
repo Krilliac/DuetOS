@@ -205,9 +205,11 @@ Signals to confirm the machinery works:
 
 ## Notes
 
-- **No blocking primitives.** No `SchedSleep`, no wait queues, no
-  mutexes. A task needing to wait busy-loops + yields. Add a real
-  sleep + wait-queue when the first driver needs to block on an IRQ.
+- **Blocking primitives live in a sister doc.** `SchedSleepTicks`,
+  `WaitQueue`, and `Mutex` were added on top of this core scheduler —
+  they share the task state machine but have their own invariants and
+  regression canaries. See
+  [sched-blocking-primitives-v0.md](sched-blocking-primitives-v0.md).
 - **No priorities.** Every task is equal. A real-time class can go on
   top of this without rewriting the core — introduce a separate
   priority-0 runqueue that's checked first.

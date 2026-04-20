@@ -20,9 +20,10 @@
  * hand the frame allocator a working bitmap, run its self-test, carve a
  * fixed-size pool out for the kernel heap and self-test it, adopt the
  * boot PML4 + run the paging self-test, mask the legacy 8259, bring up
- * the LAPIC, calibrate + arm the LAPIC timer at 100 Hz, then drop into
- * the idle loop with interrupts enabled. SMP, scheduler, and userland
- * are separate follow-up commits.
+ * the LAPIC, calibrate + arm the LAPIC timer at 100 Hz, start the
+ * scheduler with three workers contending on a shared mutex (exercising
+ * the new wait-queue blocking path), then drop into the idle loop with
+ * interrupts enabled. SMP and userland are separate follow-up commits.
  */
 
 extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multiboot_info)
@@ -81,25 +82,45 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     SerialWrite("[boot] Bringing up scheduler.\n");
     customos::sched::SchedInit();
 
-    // Scheduler self-test: three kernel threads that each print their
-    // name + iteration counter a handful of times, then exit. The boot
-    // task (this one) then drops into IdleLoop; once all three workers
-    // have called SchedExit the boot task is the only runnable task and
-    // stays on the CPU indefinitely.
+    // Scheduler self-test: three kernel threads that each bump a shared
+    // counter five times under a mutex. If the mutex serialises them
+    // correctly, the counter reaches exactly 15 and the prints interleave
+    // without any skipped values. A race would skip values (two workers
+    // reading the same `before` and writing `before + 1`). This also
+    // exercises WaitQueueBlock / WaitQueueWakeOne whenever two workers
+    // collide on MutexLock, so the wait-queue machinery is on the boot
+    // path by default.
+    static customos::sched::Mutex s_demo_mutex{};
+    static customos::u64 s_shared_counter = 0;
+
     auto worker = [](void* arg)
     {
         const char* name = static_cast<const char*>(arg);
         for (customos::u64 i = 0; i < 5; ++i)
         {
+            customos::sched::MutexLock(&s_demo_mutex);
+
+            const customos::u64 before = s_shared_counter;
+            // Burn a couple of ms of CPU inside the critical section so
+            // that other workers are almost guaranteed to hit the slow
+            // path on MutexLock and park on the wait queue. Without this
+            // the race is too tight for the self-test to be meaningful.
+            for (customos::u64 j = 0; j < 2'000'000; ++j)
+            {
+                asm volatile("" ::: "memory");
+            }
+            s_shared_counter = before + 1;
+
             SerialWrite("[sched] ");
             SerialWrite(name);
             SerialWrite(" i=");
             SerialWriteHex(i);
-            SerialWrite(" ticks=");
-            SerialWriteHex(TimerTicks());
+            SerialWrite(" counter=");
+            SerialWriteHex(s_shared_counter);
             SerialWrite("\n");
 
-            customos::sched::SchedSleepTicks(1); // 10 ms at 100 Hz
+            customos::sched::MutexUnlock(&s_demo_mutex);
+            customos::sched::SchedSleepTicks(1); // yield + 10 ms pause
         }
     };
 

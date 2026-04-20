@@ -41,6 +41,7 @@ constinit u64 g_next_task_id = 0;
 constinit u64 g_context_switches = 0;
 constinit u64 g_tasks_live = 0;
 constinit u64 g_tasks_sleeping = 0;
+constinit u64 g_tasks_blocked = 0;
 constinit u64 g_tasks_created = 0;
 constinit u64 g_tasks_exited = 0;
 constinit bool g_need_resched = false;
@@ -338,9 +339,135 @@ SchedStats SchedStatsRead()
         .context_switches = g_context_switches,
         .tasks_live = g_tasks_live,
         .tasks_sleeping = g_tasks_sleeping,
+        .tasks_blocked = g_tasks_blocked,
         .tasks_created = g_tasks_created,
         .tasks_exited = g_tasks_exited,
     };
+}
+
+// ---------------------------------------------------------------------------
+// Wait queues
+//
+// A WaitQueue is a singly-linked FIFO of Tasks parked in state Blocked.
+// Callers uphold the interrupt-disabled contract so the "check then block"
+// race is closed against IRQ-context wakers. See sched.h for the contract.
+// ---------------------------------------------------------------------------
+
+void WaitQueueBlock(WaitQueue* wq)
+{
+    Task* t = g_current;
+    t->state = TaskState::Blocked;
+    t->next = nullptr;
+    if (wq->tail == nullptr)
+    {
+        wq->head = wq->tail = t;
+    }
+    else
+    {
+        wq->tail->next = t;
+        wq->tail = t;
+    }
+    ++g_tasks_blocked;
+
+    Schedule();
+    // Woken. Our state was flipped back to Running by Schedule() + the
+    // waker pushed us onto the runqueue before we got here.
+}
+
+Task* WaitQueueWakeOne(WaitQueue* wq)
+{
+    Task* t = wq->head;
+    if (t == nullptr)
+    {
+        return nullptr;
+    }
+    wq->head = t->next;
+    if (wq->head == nullptr)
+    {
+        wq->tail = nullptr;
+    }
+    t->next = nullptr;
+    t->state = TaskState::Ready;
+    RunqueuePush(t);
+    --g_tasks_blocked;
+
+    // If the wake happens from a non-IRQ context, leaving need_resched set
+    // lets the very next timer tick preempt us into the woken task. If
+    // it's from IRQ context, the dispatcher already checks need_resched
+    // after EOI. Either path converges.
+    g_need_resched = true;
+    return t;
+}
+
+u64 WaitQueueWakeAll(WaitQueue* wq)
+{
+    u64 count = 0;
+    while (WaitQueueWakeOne(wq) != nullptr)
+    {
+        ++count;
+    }
+    return count;
+}
+
+// ---------------------------------------------------------------------------
+// Mutex
+//
+// Owner pointer doubles as the "locked" flag. An unowned mutex has
+// owner == nullptr and empty waiters. Lock contention parks the caller on
+// the waiters queue; Unlock hands the lock directly to the longest-waiting
+// task (FIFO fairness), avoiding the thundering-herd pattern of "wake all,
+// everyone re-races for the lock."
+// ---------------------------------------------------------------------------
+
+void MutexLock(Mutex* m)
+{
+    arch::Cli();
+    if (m->owner == nullptr)
+    {
+        // Fast path: uncontended acquire.
+        m->owner = g_current;
+    }
+    else
+    {
+        // Slow path: block on the waiters queue. Unlock's hand-off sets
+        // m->owner = us BEFORE waking us, so there's nothing to redo
+        // here — the lock is already ours when WaitQueueBlock returns.
+        WaitQueueBlock(&m->waiters);
+    }
+    arch::Sti();
+}
+
+bool MutexTryLock(Mutex* m)
+{
+    arch::Cli();
+    const bool ok = (m->owner == nullptr);
+    if (ok)
+    {
+        m->owner = g_current;
+    }
+    arch::Sti();
+    return ok;
+}
+
+void MutexUnlock(Mutex* m)
+{
+    arch::Cli();
+    if (m->owner != g_current)
+    {
+        PanicSched("MutexUnlock by non-owner");
+    }
+    m->owner = nullptr;
+
+    // Hand-off: if there's a waiter, wake one AND transfer ownership to it
+    // directly. Without hand-off, a freshly-woken waiter would have to re-
+    // acquire a lock we just cleared, racing against any task that calls
+    // Lock in the gap. Hand-off guarantees FIFO progress.
+    Task* next = WaitQueueWakeOne(&m->waiters);
+    if (next != nullptr)
+    {
+        m->owner = next;
+    }
+    arch::Sti();
 }
 
 } // namespace customos::sched
