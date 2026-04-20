@@ -607,6 +607,66 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 052 — Writable-bit pre-check in `CopyToUser`
+
+- **Scope:** `kernel/mm/paging.cpp` — `PagePresentAndUser` grows a
+  `need_writable` parameter, `IsUserRangeAccessible` grows the same,
+  `CopyFromUser` calls with `need_writable=false`, `CopyToUser`
+  calls with `need_writable=true`. No header / ABI change.
+- **Decision:** Before SMAP-bracketing a user-destination copy,
+  walk every 4 KiB page in the destination range and require the
+  Writable bit (in addition to Present + User) on each PTE. A
+  buffer whose tail crosses into a read-only user page now fails
+  the pre-walk cleanly without the copy having stored any bytes.
+  `CopyFromUser` keeps the pre-existing Present + User-only check
+  — reading a non-writable user page is a legitimate operation
+  (e.g. a ring-3 task passing an immutable string pointer).
+- **Why:** Entry #049 deferred this with "No consumer today; add
+  when one lands." SYS_READ and SYS_STAT both reached for
+  `CopyToUser` in the VFS-namespace work — SYS_READ copies file
+  bytes into a caller-supplied buffer, SYS_STAT writes a `u64`
+  size into a caller-supplied slot. Both are exactly the shape the
+  deferral called out: the user passes a destination pointer the
+  kernel has no up-front guarantee is writable. Without this
+  check, a destination that straddles the RO/RW boundary stores
+  the leading bytes into the writable page, then the copy loop's
+  `mov byte ptr [rdi], cl` #PFs on the first RO byte; the trap
+  dispatcher's fault-fixup unwinds the kernel cleanly and returns
+  `false`, but up to `page_size - 1` bytes have already landed in
+  user memory. The caller sees `-1` and assumes the write was
+  a no-op — a quiet TOCTOU-shaped surprise waiting for the first
+  syscall that relies on "all or nothing" semantics. The walk-
+  first check costs one extra PT descent per destination page
+  (already paid for the Present + User check anyway — same
+  descent, one more bit-mask test), and eliminates the partial-
+  write window entirely.
+- **Rules out / defers:** Dirty-bit check (no consumer — the
+  CPU sets Dirty on its own on the first write, which is the
+  right time). Copy-on-write handling for writable-but-shared
+  pages (no CoW mappings yet). Writable check on the KERNEL
+  side of `CopyFromUser`'s destination (`kernel_dst` is trusted
+  kernel memory; validating it would be kernel-policing-kernel).
+  Explicit error differentiation between "range invalid",
+  "page unmapped", "page read-only", and "page not user" — all
+  still collapse to `return false`; the caller gets `-1` and
+  decides what it means in context. Adding a typed error enum
+  is a separate ABI decision that lands with the first syscall
+  that needs to disambiguate.
+- **Revisit when:** First syscall that needs typed error returns
+  (replaces the `bool` with `enum class UserCopyError`). CoW
+  mappings land (Writable=0 then means "RW-on-fault" rather than
+  "RO" — the pre-check needs to consult the VMA, not just the
+  PTE). Demand paging lands — the walk might see Present=0 on a
+  page the MM intends to page in; the fault-fixup path becomes
+  the fast path and the pre-check becomes a filter for
+  structurally-invalid pointers only.
+- **Related tracks:** Track 3 (MM — user-pointer robustness),
+  Track 4 (Process model — syscall ABI cleanliness), Track 13
+  (Security — every kernel→user store is now strict on the
+  permission side of the mapping, not just the presence side).
+
+---
+
 ## 051 — SYS_YIELD = 3 (cooperative yield from ring 3)
 
 - **Scope:** `kernel/core/syscall.{h,cpp}` — new enum value,

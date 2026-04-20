@@ -378,32 +378,42 @@ u64* ActivePml4()
 
 // Page-table walk helper: returns true iff the 4 KiB page containing
 // `virt` is present AND user-accessible in the ACTIVE address space.
+// If `need_writable` is true, the page must also carry the Writable
+// bit — used by CopyToUser so a read-only user page fails the pre-
+// walk cleanly instead of partially writing the first N bytes and
+// then faulting on byte N+1 (the fault-fixup would recover the
+// kernel, but any bytes already stored into user memory stay).
 // Missing intermediate tables (PDPT / PD / PT not allocated) are
 // treated as "not mapped" — identical result to a PTE with Present=0.
-bool PagePresentAndUser(u64* pml4, u64 virt)
+bool PagePresentAndUser(u64* pml4, u64 virt, bool need_writable)
 {
     u64* pte = WalkToPte(pml4, virt, /*create=*/false);
     if (pte == nullptr)
     {
         return false;
     }
-    constexpr u64 kNeed = kPagePresent | kPageUser;
-    return (*pte & kNeed) == kNeed;
+    u64 need = kPagePresent | kPageUser;
+    if (need_writable)
+    {
+        need |= kPageWritable;
+    }
+    return (*pte & need) == need;
 }
 
 // Walks every 4 KiB page covered by [addr, addr+len) in the ACTIVE
 // PML4 and returns true only if all of them are present with the
-// user bit set. The "active PML4" anchor is what makes per-process
-// isolation work: a syscall handler running on behalf of process X
-// reads X's tables, so it cannot accidentally validate a pointer
-// against process Y's mappings.
+// user bit set (and, when `need_writable` is true, also writable).
+// The "active PML4" anchor is what makes per-process isolation
+// work: a syscall handler running on behalf of process X reads X's
+// tables, so it cannot accidentally validate a pointer against
+// process Y's mappings.
 //
 // Per-process tables now exist (Commit: per-process PML4) so an
 // unmap from another CPU's task COULD race a copy in-flight on
 // this CPU — but no AP runs user code today, so the window is
 // still empty in practice. Revisit when SMP scheduler join lands
 // alongside a __copy_user_fault_fixup table in the trap dispatcher.
-bool IsUserRangeAccessible(u64 addr, u64 len)
+bool IsUserRangeAccessible(u64 addr, u64 len, bool need_writable)
 {
     if (len == 0)
     {
@@ -414,7 +424,7 @@ bool IsUserRangeAccessible(u64 addr, u64 len)
     const u64 end = (addr + len - 1) & ~kPageMask;
     for (u64 p = start; p <= end; p += kPageSize)
     {
-        if (!PagePresentAndUser(pml4, p))
+        if (!PagePresentAndUser(pml4, p, need_writable))
         {
             return false;
         }
@@ -453,7 +463,7 @@ bool CopyFromUser(void* kernel_dst, const void* user_src, u64 len)
     // page vanishes between pre-walk and copy; the pre-walk
     // itself keeps the common "bad ptr" path out of the fault
     // handler.
-    if (!IsUserRangeAccessible(src_addr, len))
+    if (!IsUserRangeAccessible(src_addr, len, /*need_writable=*/false))
     {
         return false;
     }
@@ -471,7 +481,15 @@ bool CopyToUser(void* user_dst, const void* kernel_src, u64 len)
     {
         return false;
     }
-    if (!IsUserRangeAccessible(dst_addr, len))
+    // Writable check matters for destinations: without it, a copy
+    // into a buffer whose tail crosses into a read-only user page
+    // would store the leading bytes (the head page being writable)
+    // before faulting on the first byte of the RO page. The fault-
+    // fixup unwinds cleanly for the kernel, but the caller gets
+    // -1 with some prefix already in user memory — a subtle
+    // TOCTOU-shaped surprise for any future syscall that wants
+    // "all or nothing" semantics.
+    if (!IsUserRangeAccessible(dst_addr, len, /*need_writable=*/true))
     {
         return false;
     }
