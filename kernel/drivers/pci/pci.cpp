@@ -61,6 +61,118 @@ void PciConfigWrite32(DeviceAddress addr, u8 offset, u32 value)
     asm volatile("outl %0, %w1" : : "a"(value), "Nd"(kConfigDataPort));
 }
 
+Bar PciReadBar(DeviceAddress addr, u8 index)
+{
+    // Only header-type-0 endpoints have 6 BARs at 0x10..0x24; header-
+    // type-1 bridges have 2 BARs + secondary-bus fields. Callers are
+    // expected to check header_type before calling. v0 doesn't police
+    // it — returning size=0 for bridge "BARs" beyond index 1 is
+    // reasonable since they read back as bridge-specific registers.
+    if (index >= 6)
+    {
+        return Bar{};
+    }
+
+    const u8 offset = static_cast<u8>(0x10 + index * 4);
+    const u32 original = PciConfigRead32(addr, offset);
+
+    // Empty BAR slot reads back all zeros.
+    if (original == 0)
+    {
+        return Bar{};
+    }
+
+    // Size-probe: write all 1s, read back. Low bits are fixed by the
+    // device to indicate type (bit 0 = I/O, bits 1..2 = memory type).
+    // Restore the original value before returning so we don't leave
+    // the device pointing at 0xFFFFFFFF.
+    PciConfigWrite32(addr, offset, 0xFFFFFFFFu);
+    const u32 probe = PciConfigRead32(addr, offset);
+    PciConfigWrite32(addr, offset, original);
+
+    Bar bar{};
+    bar.is_io = (original & 0x1) != 0;
+
+    if (bar.is_io)
+    {
+        // I/O BAR: address in bits 2..31, size from inverted probe-mask.
+        bar.address = original & 0xFFFFFFFCu;
+        const u32 mask = probe & 0xFFFFFFFCu;
+        bar.size = mask == 0 ? 0 : (~static_cast<u64>(mask) + 1) & 0xFFFFFFFFu;
+        return bar;
+    }
+
+    // MMIO BAR. Bits 1..2 are the type field:
+    //   00 = 32-bit MMIO
+    //   10 = 64-bit MMIO (consumes this + next BAR)
+    //   others reserved
+    const u32 type = (original >> 1) & 0x3;
+    bar.is_prefetchable = (original & 0x8) != 0;
+    bar.is_64bit = (type == 0x2);
+
+    u64 low_mask = static_cast<u64>(probe & 0xFFFFFFF0u);
+    bar.address = static_cast<u64>(original & 0xFFFFFFF0u);
+
+    if (bar.is_64bit)
+    {
+        // Read + probe the upper 32 bits from BAR[index+1].
+        if (index + 1 >= 6)
+        {
+            // Malformed: a 64-bit BAR MUST have a successor slot.
+            return Bar{};
+        }
+        const u8 hi_offset = static_cast<u8>(offset + 4);
+        const u32 hi_orig = PciConfigRead32(addr, hi_offset);
+        PciConfigWrite32(addr, hi_offset, 0xFFFFFFFFu);
+        const u32 hi_probe = PciConfigRead32(addr, hi_offset);
+        PciConfigWrite32(addr, hi_offset, hi_orig);
+
+        bar.address |= static_cast<u64>(hi_orig) << 32;
+        const u64 full_mask = low_mask | (static_cast<u64>(hi_probe) << 32);
+        bar.size = full_mask == 0 ? 0 : (~full_mask + 1);
+    }
+    else
+    {
+        bar.size = low_mask == 0 ? 0 : (~low_mask + 1) & 0xFFFFFFFFu;
+    }
+
+    return bar;
+}
+
+u8 PciFindCapability(DeviceAddress addr, u8 cap_id)
+{
+    // Status register bit 4 at offset 0x06 == "Capabilities List present".
+    const u16 status = PciConfigRead16(addr, 0x06);
+    if ((status & (1U << 4)) == 0)
+    {
+        return 0;
+    }
+
+    // First capability pointer lives at 0x34 (header-0) or 0x14 for
+    // CardBus bridges. We only handle header-0 devices today — caller
+    // should not pass bridges with type != 0. Low two bits of the
+    // pointer are reserved and must be masked off.
+    u8 cursor = PciConfigRead8(addr, 0x34) & 0xFC;
+
+    // Bounded walk: a malformed device could produce a cycle;
+    // terminate after 48 hops (any real device has fewer than that).
+    for (int i = 0; i < 48 && cursor != 0; ++i)
+    {
+        const u8 id = PciConfigRead8(addr, cursor);
+        if (id == cap_id)
+        {
+            return cursor;
+        }
+        const u8 next = PciConfigRead8(addr, static_cast<u8>(cursor + 1)) & 0xFC;
+        if (next == cursor)
+        {
+            break; // self-loop; give up silently
+        }
+        cursor = next;
+    }
+    return 0;
+}
+
 u64 PciDeviceCount()
 {
     return g_device_count;
@@ -199,8 +311,10 @@ void PciEnumerate()
     for (u64 i = 0; i < g_device_count; ++i)
     {
         const Device& d = g_devices[i];
-        // Pack address + ids + class into one structured line per device.
-        // Format: "pci XX:YY.Z  VID:DID class=XX/YY/ZZ (name) hdr=XX"
+        // Structured one-liner per device, plus a "caps:" tail listing
+        // which interesting capabilities were found. Drivers auditing
+        // the boot log can confirm at a glance that (say) the xHCI
+        // controller exposes MSI-X before trying to use it.
         arch::SerialWrite("  pci ");
         arch::SerialWriteHex(d.addr.bus);
         arch::SerialWrite(":");
@@ -219,8 +333,38 @@ void PciEnumerate()
         arch::SerialWriteHex(d.prog_if);
         arch::SerialWrite(" (");
         arch::SerialWrite(PciClassName(d.class_code));
-        arch::SerialWrite(") hdr=");
-        arch::SerialWriteHex(d.header_type);
+        arch::SerialWrite(")");
+
+        // BAR0 — the "main" MMIO window for most endpoints. Header-type-1
+        // bridges have different layout (only 2 BARs, then secondary-bus
+        // fields); skip them to avoid printing bogus "BARs" decoded from
+        // bridge-control registers.
+        if ((d.header_type & 0x7F) == 0x00)
+        {
+            const Bar bar0 = PciReadBar(d.addr, 0);
+            if (bar0.size != 0)
+            {
+                arch::SerialWrite(" bar0=");
+                arch::SerialWriteHex(bar0.address);
+                arch::SerialWrite("/");
+                arch::SerialWriteHex(bar0.size);
+                arch::SerialWrite(bar0.is_io ? "(io)" : bar0.is_64bit ? "(m64)" : "(m32)");
+            }
+
+            // Short capability summary: print IDs we recognise.
+            if (PciFindCapability(d.addr, kPciCapMsi) != 0)
+            {
+                arch::SerialWrite(" msi");
+            }
+            if (PciFindCapability(d.addr, kPciCapMsix) != 0)
+            {
+                arch::SerialWrite(" msix");
+            }
+            if (PciFindCapability(d.addr, kPciCapPcie) != 0)
+            {
+                arch::SerialWrite(" pcie");
+            }
+        }
         arch::SerialWrite("\n");
     }
 }

@@ -24,12 +24,25 @@ q35 baseline):
 ```
 [I] drivers/pci : enumerated devices val=0x6
   pci 0:00.0  vid=0x8086 did=0x29c0 class=0x6/0x0/0x0 (bridge)
-  pci 0:01.0  vid=0x1234 did=0x1111 class=0x3/0x0/0x0 (display)
-  pci 0:02.0  vid=0x8086 did=0x10d3 class=0x2/0x0/0x0 (network)  ← e1000
-  pci 0:1f.0  vid=0x8086 did=0x2918 class=0x6/0x1/0x0 (bridge)   ← ICH9 LPC
-  pci 0:1f.2  vid=0x8086 did=0x2922 class=0x1/0x6/0x1 (mass storage) ← AHCI
-  pci 0:1f.3  vid=0x8086 did=0x2930 class=0xc/0x5/0x0 (serial bus)   ← SMBus
+  pci 0:01.0  vid=0x1234 did=0x1111 class=0x3/0x0/0x0 (display) bar0=0xfd000000/0x1000000(m32)
+  pci 0:02.0  vid=0x8086 did=0x10d3 class=0x2/0x0/0x0 (network) bar0=0xfeb80000/0x20000(m32) msi msix pcie
+  pci 0:1f.0  vid=0x8086 did=0x2918 class=0x6/0x1/0x0 (bridge)
+  pci 0:1f.2  vid=0x8086 did=0x2922 class=0x1/0x6/0x1 (mass storage) msi
+  pci 0:1f.3  vid=0x8086 did=0x2930 class=0xc/0x5/0x0 (serial bus)
 ```
+
+Interpretation:
+- **VGA** exposes a 16 MiB MMIO framebuffer at `0xfd000000` in BAR0.
+- **e1000** exposes a 128 KiB MMIO register window at `0xfeb80000`;
+  offers MSI, MSI-X, and PCIe capabilities — the MSI-X path is the
+  one a modern driver would wire up.
+- **AHCI** reports MSI but no BAR0 — correct. AHCI's main ABAR
+  register window is **BAR5**, not BAR0. Drivers specifically read
+  BAR5 for the AHCI Host Bus Adapter registers.
+- **SMBus / bridges** have no BAR0 line either because their
+  windows live in different positions or because we skip BAR
+  display for header-type-1 bridges (their BARs overlap with
+  bridge-control registers).
 
 ## Context
 
@@ -106,14 +119,23 @@ interesting devices downstream.
 
 ### What's missing
 
-- **BAR parsing + size probe + resource allocation.** Today we read
-  BAR 0..5 raw on demand via `PciConfigRead32`. Sizing a BAR requires
-  writing all 1s then reading back the mask, which is destructive
-  and needs a driver-side "I want this BAR" convention. Deferred.
-- **MSI / MSI-X setup.** The device's capabilities list (pointer at
-  offset 0x34) chains MSI/MSI-X/PM/PCIe-Cap structures. A driver
-  that wants MSI-X has to walk this list and write the target
-  address + vector. Separate commit.
+- **BAR parsing + size probe.** ✓ Landed. `PciReadBar(addr, idx)`
+  returns `{address, size, is_io, is_64bit, is_prefetchable}`;
+  the probe is non-destructive (saves + restores the original
+  BAR value). 64-bit BARs correctly consume the next slot.
+  NOT yet landed: resource-allocation helpers that let drivers
+  "claim" a BAR and get it mapped through `MapMmio` automatically.
+  Each driver does that by hand today.
+- **Capability iteration.** ✓ Landed. `PciFindCapability(addr, id)`
+  walks the capabilities list (gated on status bit 4, rooted at
+  config 0x34) and returns the first match's config-space offset
+  or 0. Common IDs exposed as `kPciCapMsi` / `kPciCapMsix` /
+  `kPciCapPcie`.
+- **MSI / MSI-X setup.** Capability walk is in, but writing the
+  target-address + vector fields to actually route interrupts is
+  not yet. MSI-X specifically needs the table BAR mapped via
+  `MapMmio`. Lands with the first driver that needs MSI-X (xHCI
+  is the obvious trigger).
 - **INTx routing.** Needs the ACPI `_PRT` (PCI Routing Table) or a
   hardcoded q35 map for v0. Drivers needing legacy INTx fall back
   to the IOAPIC machinery we already have; the `interrupt_line` /

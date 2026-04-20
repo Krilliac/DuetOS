@@ -82,6 +82,71 @@ u8 PciConfigRead8(DeviceAddress addr, u8 offset);
 void PciConfigWrite32(DeviceAddress addr, u8 offset, u32 value);
 
 // -----------------------------------------------------------------
+// BAR (Base Address Register) inspection.
+//
+// Each header-type-0 endpoint has up to 6 BARs at config offsets
+// 0x10, 0x14, 0x18, 0x1C, 0x20, 0x24. Each BAR is either a 32-bit
+// MMIO window, a 64-bit MMIO window (consumes the next BAR slot
+// too), or a 16-bit I/O port range. The size of each region is
+// discovered by writing all 1s and reading back the one-bits mask.
+//
+// PciReadBar performs that size probe non-destructively (saves +
+// restores the BAR value) and returns the decoded result.
+//   bar.address      : base MMIO/IO address (already decoded).
+//                      For 64-bit BARs, includes the upper half.
+//   bar.size         : size in bytes. 0 means the BAR is unused.
+//   bar.is_io        : true for I/O port BAR, false for MMIO.
+//   bar.is_64bit     : true if BAR consumes this index + index+1.
+//   bar.is_prefetchable : MMIO-only; true if the spec allows
+//                      prefetching (controller framebuffer etc.).
+// -----------------------------------------------------------------
+
+struct Bar
+{
+    u64 address;
+    u64 size;
+    bool is_io;
+    bool is_64bit;
+    bool is_prefetchable;
+    bool _pad;
+};
+
+/// Read and size BAR `index` (0..5) on a header-type-0 endpoint.
+/// Returns Bar{size=0} for empty / invalid BARs. Non-destructive:
+/// the original BAR value is restored before returning.
+///
+/// NOT safe to call on a BAR that a driver has already claimed and
+/// is actively using — the size-probe sequence briefly writes
+/// all-1s into the BAR which would re-parent any MMIO access during
+/// the probe. Call during device bring-up only.
+Bar PciReadBar(DeviceAddress addr, u8 index);
+
+// -----------------------------------------------------------------
+// PCI capability list iteration. Each capability is at least two
+// bytes: {id, next_offset}. next_offset == 0 terminates the list.
+// Status register bit 4 (offset 0x06) gates whether a capabilities
+// list is present at all.
+//
+// Common capability IDs:
+//   0x01 PM  (power management)
+//   0x05 MSI (message-signalled interrupts)
+//   0x10 PCIe (express capability)
+//   0x11 MSI-X (MSI with separate vector table)
+//   0x12 SATA (SATA HBA-specific)
+//   0x13 AF  (advanced features)
+// -----------------------------------------------------------------
+
+constexpr u8 kPciCapMsi = 0x05;
+constexpr u8 kPciCapPcie = 0x10;
+constexpr u8 kPciCapMsix = 0x11;
+
+/// Find the first capability with the given ID. Returns the config-
+/// space offset where that capability's header lives (always non-
+/// zero for the low 16 reserved offsets), or 0 if not found / no
+/// capabilities list present.
+u8 PciFindCapability(DeviceAddress addr, u8 cap_id);
+
+// -----------------------------------------------------------------
 // Class-code string for diagnostic logs. Returns a stable pointer to
 // a short label ("mass storage", "network", "display", "bridge", ...)
 // or "unknown" for codes we haven't named yet.
