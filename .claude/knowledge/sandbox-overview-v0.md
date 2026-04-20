@@ -93,6 +93,59 @@ a future syscall grows a process's memory on demand.
 
 Files: `kernel/mm/address_space.{h,cpp}`.
 
+### 6. W^X / DEP (Windows name: DEP = NX bit)
+
+- `EFER.NXE` is enabled in `PagingInit`.
+- `mm::MapPage` + `mm::AddressSpaceMapUserPage` refuse any flag
+  combination with W=1 + NX=0 at map time.
+- User code pages: R + X (no W). User stack pages: R + W + NX.
+- Kernel image sections split from 2 MiB PS into 4 KiB pages at
+  boot by `ProtectKernelImage`, with `.text` = R + X,
+  `.rodata` = R, `.data` / `.bss` = R + W + NX.
+- Live probes (`ring3-jail-probe`, `ring3-nx-probe`) exercise
+  both arms of W^X at ring 3 — writes to RX code page produce
+  err=0x7 (P+W+U), fetches from NX stack produce err=0x15
+  (P+U+I/D). Both end with `[task-kill]` and the kernel
+  continues running.
+
+Files: `kernel/mm/paging.{h,cpp}`,
+`kernel/core/ring3_smoke.cpp`,
+`.claude/knowledge/dep-nx-v0.md`.
+
+### 7. ASLR — per-process code/stack base randomisation
+
+Every ring-3 process picks its user code base from a splitmix64
+PRNG seeded off the TSC at first spawn. Range: 16 MiB-aligned
+within `[0x01000000, 0xEF000000)` — 238 candidates, ~7.9 bits
+of entropy. The stack sits 64 KiB above the code base. The
+shared payload bytes are patched at spawn with the chosen VAs
+so the same source bytes execute at a different absolute
+address in every process.
+
+Probes similarly patched so their intended fault signatures
+(W+U for jail-probe, I/D for nx-probe) are stable across any
+ASLR outcome — `mov rax, <imm64>` forms avoid the sign-
+extension gotcha of `mov [disp32], imm32`.
+
+Files: `kernel/core/process.{h,cpp}`,
+`kernel/core/ring3_smoke.cpp`.
+
+### 8. Stack canaries
+
+Toolchain: `-fstack-protector-strong -mstack-protector-guard=global`.
+Every kernel function that has an array / address-of-local /
+alloca gets a compiler prologue that stashes `__stack_chk_guard`
+on the stack and an epilogue that verifies. Mismatch tail-calls
+`__stack_chk_fail`, which panics with
+`security/stack: stack canary corrupted`.
+
+`__stack_chk_fail` itself is marked `no_stack_protector` — it
+can't check its own canary, since the stack is already
+corrupt.
+
+Files: `kernel/core/stack_canary.cpp`,
+`cmake/toolchains/x86_64-kernel.cmake`.
+
 ## Separate from the walls: graceful task death
 
 Before this work, any ring-3 exception (#PF, #GP, #UD) brought
@@ -163,6 +216,10 @@ The sandboxing work landed in the following commits on
 | b406ede | 7 | Boot-time AS-isolation self-test |
 | af38372 | 8 | Ring-3 exceptions kill the task, not the kernel |
 | 16cfd62 | 9 | Per-AS frame budget |
+| 10004b0 | 10a | NX-probe task — W^X execute arm proved live |
+| 688ea51 | 10b | Kernel-image W^X via PS-split + per-section PTE flags |
+| fcc92c2 | 11 | Per-process ASLR for user code/stack VAs |
+| c21d7a0 | 12 | Stack canaries (`-fstack-protector-strong`) |
 
 ## What is NOT yet enforced (known gaps)
 
