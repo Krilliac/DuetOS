@@ -3,37 +3,49 @@
 #include "../../core/types.h"
 
 /*
- * SMP AP bring-up — v0 (discovery-only scaffolding).
+ * SMP AP bring-up.
  *
- * v0 scope: enumerate MADT LAPIC records and log which apic_ids are
- * candidates for AP bring-up. Expose `SmpSendIpi()` so future
- * subsystems (TLB shootdown, IPI-driven reschedule) can already use
- * the LAPIC ICR plumbing.
+ * Current scope (as of decision log #023):
+ *   - MADT LAPIC enumeration identifies BSP + AP candidates
+ *     (`acpi::Lapic(i)`).
+ *   - `SmpSendIpi` wraps the LAPIC ICR dance; usable by any future
+ *     caller (AP wake-up, TLB shootdown, resched-IPI).
+ *   - `SmpStartAps` copies the trampoline image to physical 0x8000,
+ *     allocates each AP's stack + `PerCpu`, and drives the full
+ *     INIT-SIPI-SIPI sequence. Each AP writes `online_flag` from
+ *     `ApEntryFromTrampoline` after installing GSBASE + enabling
+ *     its LAPIC; BSP polls with a bounded timeout before moving on.
+ *   - AP-side C++ entry halts with interrupts masked — the AP's
+ *     LAPIC is live, but the scheduler is not SMP-safe across
+ *     context-switch yet (the lock-passing half of
+ *     `smp-ap-bringup-scope.md` Commit D is still pending).
  *
- * Deferred to a dedicated session (see
- * `docs/knowledge/smp-ap-bringup-scope.md`):
- *   - The real→long mode trampoline assembly.
- *   - The INIT-SIPI-SIPI sequence that wakes each AP.
- *   - Per-AP stack + PerCpu allocation.
- *   - AP-side LAPIC enable + C++ entry + scheduler join.
+ * Deferred (see `docs/knowledge/smp-ap-bringup-scope.md`):
+ *   - Lock-passing across `ContextSwitch` so a peer CPU can safely
+ *     wake tasks that this CPU is about to switch away from.
+ *   - `SchedEnterOnAp` — each AP calls `SchedStartIdle("idle-apN")`,
+ *     arms its LAPIC timer, and enters the scheduler loop.
+ *   - Per-AP TSS + IST (needed alongside ring 3).
+ *   - Broadcast-NMI panic halt for Class-A recovery on SMP.
  *
- * Landing this half first gets the ACPI MADT LAPIC enumeration +
- * IPI-send helper into the tree without blocking on the trampoline
- * assembly, which needs iterative QEMU testing to get right.
- *
- * Context: kernel. Run once after SchedInit + IoApicInit.
+ * Context: kernel. Run once after SchedInit + IoApicInit +
+ * PerCpuInitBsp (BSP's `PerCpu` must be live before APs allocate
+ * theirs).
  */
 
 namespace customos::arch
 {
 
-/// Discover APs and log them. Returns 0 in v0 (no APs actually brought
-/// up). Future versions return the number of APs that reached the
-/// scheduler.
+/// Copy the trampoline to physical 0x8000, allocate each AP's stack
+/// + per-CPU struct, and drive INIT-SIPI-SIPI for every enabled
+/// LAPIC in the MADT other than the BSP's. Returns the number of
+/// APs that reached `ApEntryFromTrampoline` and flipped their
+/// `online_flag` within the bounded polling window.
 u64 SmpStartAps();
 
-/// Number of online CPUs. BSP is always 1; APs contribute when they
-/// finish bringing themselves up.
+/// Number of online CPUs (BSP + any APs that successfully entered
+/// `ApEntryFromTrampoline`). BSP is always counted; each AP
+/// increments this on bring-up.
 u64 SmpCpusOnline();
 
 /// Send an arbitrary IPI via the LAPIC Interrupt Command Register.
