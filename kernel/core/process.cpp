@@ -130,11 +130,13 @@ void RecordSandboxDenial(Cap cap)
         return; // kernel-only task hit a cap-denial — shouldn't happen
     }
     ++p->sandbox_denials;
+
+    // Threshold-crossing: fire once at exactly kSandbox-
+    // DenialKillThreshold and flag the task. Uses `==` so the
+    // message doesn't repeat for denials that race past the
+    // flag before Schedule picks them up.
     if (p->sandbox_denials == kSandboxDenialKillThreshold)
     {
-        // Crossed the threshold. Log once (the `==` comparison
-        // ensures we don't spam the log for every subsequent
-        // denial past threshold) and flag for termination.
         arch::SerialWrite("[sandbox] pid=");
         arch::SerialWriteHex(p->pid);
         arch::SerialWrite(" hit ");
@@ -144,6 +146,22 @@ void RecordSandboxDenial(Cap cap)
         arch::SerialWrite(") — terminating as malicious\n");
         sched::FlagCurrentForKill();
     }
+}
+
+bool ShouldLogDenial(u64 denial_index)
+{
+    // Rate-limit per-process denial log output. Always log the
+    // first denial (so a bug in legitimate code surfaces
+    // immediately), then log once every 32 thereafter. A burst
+    // of 100 denials produces 1 + 3 = 4 log lines instead of
+    // 100. The counter itself advances on every denial — only
+    // the log is rate-limited — so the threshold-kill still
+    // fires at the exact 100th attempt.
+    //
+    // 32 chosen because log2 is convenient and it produces ~4
+    // lines at the threshold; tune if future workloads spam
+    // the log at a different rate.
+    return denial_index == 1 || (denial_index & 31) == 0;
 }
 
 const char* CapName(Cap c)

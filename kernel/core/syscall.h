@@ -52,6 +52,16 @@ enum SyscallNumber : u64
     // bad user pointers). Gated on kCapFsRead; lookup is anchored
     // at CurrentProcess()->root.
     SYS_READ = 5,
+    // SYS_DROPCAPS: rdi = bitmask of caps to remove from the
+    // calling process's CapSet. Always succeeds (dropping a cap
+    // the process doesn't hold is a no-op). The drop is
+    // irreversible — there's no SYS_GRANTCAPS. Useful pattern:
+    // a process starts trusted, does trusted initialization,
+    // then SYS_DROPCAPS'es down to a minimal set before parsing
+    // untrusted input. Returns 0 always. No cap check on the
+    // syscall itself (anyone can make themselves LESS
+    // privileged).
+    SYS_DROPCAPS = 6,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit

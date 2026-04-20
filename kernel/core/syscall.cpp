@@ -77,12 +77,21 @@ i64 DoWrite(u64 fd, const void* user_buf, u64 len)
         // no Process (kernel bug — kernel threads shouldn't be
         // issuing SYS_WRITE via the syscall gate).
         const u64 pid = (proc != nullptr) ? proc->pid : 0;
-        arch::SerialWrite("[sys] denied syscall=SYS_WRITE pid=");
-        arch::SerialWriteHex(pid);
-        arch::SerialWrite(" cap=");
-        arch::SerialWrite(CapName(kCapSerialConsole));
-        arch::SerialWrite("\n");
         RecordSandboxDenial(kCapSerialConsole);
+        // Rate-limit the log line so a hostile burst doesn't
+        // flood COM1. Denial is still counted every time — only
+        // the visible print is gated — so the threshold kill
+        // still fires at the right count.
+        if (proc != nullptr && ShouldLogDenial(proc->sandbox_denials))
+        {
+            arch::SerialWrite("[sys] denied syscall=SYS_WRITE pid=");
+            arch::SerialWriteHex(pid);
+            arch::SerialWrite(" cap=");
+            arch::SerialWrite(CapName(kCapSerialConsole));
+            arch::SerialWrite(" denial_idx=");
+            arch::SerialWriteHex(proc->sandbox_denials);
+            arch::SerialWrite("\n");
+        }
         return -1;
     }
 
@@ -187,12 +196,17 @@ void SyscallDispatch(arch::TrapFrame* frame)
         if (proc == nullptr || !CapSetHas(proc->caps, kCapFsRead))
         {
             const u64 pid = (proc != nullptr) ? proc->pid : 0;
-            arch::SerialWrite("[sys] denied syscall=SYS_READ pid=");
-            arch::SerialWriteHex(pid);
-            arch::SerialWrite(" cap=");
-            arch::SerialWrite(CapName(kCapFsRead));
-            arch::SerialWrite("\n");
             RecordSandboxDenial(kCapFsRead);
+            if (proc != nullptr && ShouldLogDenial(proc->sandbox_denials))
+            {
+                arch::SerialWrite("[sys] denied syscall=SYS_READ pid=");
+                arch::SerialWriteHex(pid);
+                arch::SerialWrite(" cap=");
+                arch::SerialWrite(CapName(kCapFsRead));
+                arch::SerialWrite(" denial_idx=");
+                arch::SerialWriteHex(proc->sandbox_denials);
+                arch::SerialWrite("\n");
+            }
             frame->rax = static_cast<u64>(-1);
             return;
         }
@@ -269,12 +283,17 @@ void SyscallDispatch(arch::TrapFrame* frame)
         if (proc == nullptr || !CapSetHas(proc->caps, kCapFsRead))
         {
             const u64 pid = (proc != nullptr) ? proc->pid : 0;
-            arch::SerialWrite("[sys] denied syscall=SYS_STAT pid=");
-            arch::SerialWriteHex(pid);
-            arch::SerialWrite(" cap=");
-            arch::SerialWrite(CapName(kCapFsRead));
-            arch::SerialWrite("\n");
             RecordSandboxDenial(kCapFsRead);
+            if (proc != nullptr && ShouldLogDenial(proc->sandbox_denials))
+            {
+                arch::SerialWrite("[sys] denied syscall=SYS_STAT pid=");
+                arch::SerialWriteHex(pid);
+                arch::SerialWrite(" cap=");
+                arch::SerialWrite(CapName(kCapFsRead));
+                arch::SerialWrite(" denial_idx=");
+                arch::SerialWriteHex(proc->sandbox_denials);
+                arch::SerialWrite("\n");
+            }
             frame->rax = static_cast<u64>(-1);
             return;
         }
@@ -327,6 +346,35 @@ void SyscallDispatch(arch::TrapFrame* frame)
         arch::SerialWrite(kpath);
         arch::SerialWrite("\" size=");
         arch::SerialWriteHex(size);
+        arch::SerialWrite("\n");
+        frame->rax = 0;
+        return;
+    }
+
+    case SYS_DROPCAPS:
+    {
+        // rdi = bitmask of caps to remove. No cap check on this
+        // syscall itself — anyone can voluntarily deprivilege.
+        // Irreversible: once bits are cleared from proc->caps,
+        // no syscall path can set them back (we never expose a
+        // SYS_GRANTCAPS).
+        Process* proc = CurrentProcess();
+        if (proc == nullptr)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        const u64 drop_mask = frame->rdi;
+        const u64 before = proc->caps.bits;
+        proc->caps.bits &= ~drop_mask;
+        arch::SerialWrite("[sys] dropcaps pid=");
+        arch::SerialWriteHex(proc->pid);
+        arch::SerialWrite(" mask=");
+        arch::SerialWriteHex(drop_mask);
+        arch::SerialWrite(" caps=");
+        arch::SerialWriteHex(before);
+        arch::SerialWrite("->");
+        arch::SerialWriteHex(proc->caps.bits);
         arch::SerialWrite("\n");
         frame->rax = 0;
         return;

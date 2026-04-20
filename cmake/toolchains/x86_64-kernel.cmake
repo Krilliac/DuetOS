@@ -75,6 +75,15 @@ set(CUSTOMOS_KERNEL_C_FLAGS
     # compose — IBT catches a successful injection; retpoline
     # prevents the injection from succeeding in the first place.
     -mretpoline
+    # Note: -mspeculative-load-hardening was tried for Spectre-v1
+    # coverage but the emitted barriers stall the kernel to a
+    # crawl (boot reaches task-spawn then no more output inside
+    # 60s QEMU wall-time). Clang's SLH is better tuned for
+    # userland workloads; it interacts poorly with our tight
+    # freestanding paths (inline asm around swapgs/iretq, the
+    # timer-IRQ hot path, etc.). Deferred until we have per-site
+    # __attribute__((speculation_hardening)) control to scope
+    # the cost to the syscall boundary where it actually matters.
     -fno-pic
     -fno-pie
     -fno-builtin

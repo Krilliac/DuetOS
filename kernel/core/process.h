@@ -225,4 +225,13 @@ const char* CapName(Cap c);
 /// argument is just for the log line; no functional effect.
 void RecordSandboxDenial(Cap cap);
 
+/// Rate-limit predicate for denial log output. Call sites check
+/// this after incrementing the counter (see
+/// e.g. kernel/core/syscall.cpp SYS_WRITE/STAT/READ denial
+/// paths) so a burst of 100 denials produces ~4 log lines
+/// instead of 100 — the counter still advances every time, the
+/// threshold-kill still fires at exactly 100. Returns true for
+/// the 1st denial, then the 32nd, 64th, 96th, and so on.
+bool ShouldLogDenial(u64 denial_index);
+
 } // namespace customos::core
