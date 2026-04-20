@@ -171,6 +171,66 @@ corrupt.
 Files: `kernel/core/stack_canary.cpp`,
 `cmake/toolchains/x86_64-kernel.cmake`.
 
+### 9. Control-Flow Integrity via Intel CET / IBT
+
+Toolchain `-fcf-protection=branch` makes clang emit `endbr64` at
+every indirect-branch target. Hand-written `endbr64` in every
+asm entry point the compiler can't see: ISR stubs,
+ContextSwitch, SchedTaskTrampoline, EnterUserMode. 264+ endbr64
+instances in the final ELF.
+
+`paging.cpp`'s EnableKernelProtectionBits checks
+CPUID.7.0.EDX.CET_IBT; if set, writes `IA32_S_CET.ENDBR_EN`
+then flips `CR4.CET`. On CET-capable hardware, any indirect
+branch whose target isn't `endbr64` raises `#CP` (vector 21),
+which the existing ring-3 task-kill path (slice 8) handles
+cleanly. On pre-CET CPUs the endbr bytes are hardware NOPs.
+
+Files: `kernel/arch/x86_64/exceptions.S`,
+`kernel/arch/x86_64/usermode.S`,
+`kernel/sched/context_switch.S`,
+`kernel/mm/paging.cpp`.
+
+### 10. User-copy fault fixup
+
+`CopyFromUser` / `CopyToUser` now delegate the actual byte
+loops to assembly in `kernel/mm/user_copy.S`, bracketed by
+`__copy_user_{from,to}_{start,end}` labels. On a kernel-mode
+`#PF` whose `rip` falls inside either range, the trap
+dispatcher rewrites `frame->rip` to `__copy_user_fault_fixup`
+and iretq's. The fixup emits `clac`, zeros `rax`, and returns
+`false` to the C++ caller — the kernel survives a user page
+vanishing mid-copy (SMP race, future demand paging) without
+panicking. Defense-in-depth: the existing `IsUserRangeAccessible`
+pre-walk catches all "bad user pointer" cases in the common
+path; the fixup is the safety net.
+
+Files: `kernel/mm/user_copy.S`, `kernel/mm/paging.cpp`,
+`kernel/arch/x86_64/traps.cpp`.
+
+### 11. Sandbox-denial threshold kill
+
+Per-process `sandbox_denials` counter. Every cap-check
+rejection bumps it. At 100 denials (`kSandboxDenialKillThreshold`),
+the process is flagged for termination as "confirmed hostile"
+— a well-behaved sandboxed process shouldn't attempt blocked
+syscalls at all; hitting the threshold means it's brute-forcing
+the syscall surface looking for a gap.
+
+Reuses the tick-exhausted kill machinery: flag the task, let
+Schedule() convert it to a zombie at next resched.
+
+Live demo: `SpawnHostileProbe` — a 16-byte ring-3 payload that
+retries a blocked `SYS_WRITE` in a tight loop. Boot log:
+`[sandbox] pid=0x7 hit 0x64 denials (last cap=SerialConsole)
+— terminating as malicious`.
+
+Resource-quota coverage is now complete along three axes:
+frames (wall 5), CPU time (wall 5b), policy retries (wall 11).
+
+Files: `kernel/core/process.{h,cpp}`, `kernel/sched/sched.{h,cpp}`,
+`kernel/core/syscall.cpp`, `kernel/core/ring3_smoke.cpp`.
+
 ## Separate from the walls: graceful task death
 
 Before this work, any ring-3 exception (#PF, #GP, #UD) brought
@@ -248,6 +308,8 @@ The sandboxing work landed in the following commits on
 | 6af0a4a | 13 | CET/IBT CFI via `endbr64` + CUSTOMOS_CANARY_DEMO |
 | a8fa853 | 14a | Per-process CPU-tick budget infrastructure |
 | 5ff1894 | 14b | kboot boot-stack race fix + cpu-hog live-fire |
+| b629cb9 | 15  | `__copy_user_fault_fixup` — kernel #PF recovery |
+| c779a6b | 16  | Sandbox-denial threshold kill + hostile-syscall probe |
 
 ## What is NOT yet enforced (known gaps)
 
