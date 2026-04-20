@@ -38,12 +38,14 @@ constexpr u32 kWidgetInvalid = 0xFFFFFFFFu;
 
 struct ButtonWidget
 {
-    u32 id;           // caller-assigned, returned by the router on events
-    u32 x, y, w, h;   // bounds in framebuffer pixels
+    u32 id;              // caller-assigned, returned by the router on events
+    u32 x, y, w, h;      // bounds in framebuffer pixels
     u32 colour_normal;
     u32 colour_pressed;
     u32 colour_border;
-    bool pressed;     // current visual state
+    u32 colour_label;    // ink colour for the label text
+    const char* label;   // caller-owned, nullable (skips text draw)
+    bool pressed;        // current visual state
     u8 _pad[7];
 };
 
@@ -68,19 +70,20 @@ void WidgetDrawAll();
 u32 WidgetRouteMouse(u32 cursor_x, u32 cursor_y, u8 button_mask);
 
 // ---------------------------------------------------------------
-// Window chrome primitive.
+// Window chrome + registry.
 //
-// Draws the classic "Windows 98-ish" window: outer dark border,
-// title bar fill across the top, client-area fill below, plus an
-// accent stripe separating the two. No text yet (bitmap font is
-// a separate slice); a title-bar label renders as a solid
-// placeholder rect for now. A tiny close-button glyph drawn in
-// the top-right corner as a red square with an outlined border.
-//
-// This is a STATIC draw primitive, not a widget — the router
-// doesn't know about windows yet. Once dragging / focus land,
-// windows become first-class widget-table entries.
+// A window is a rectangle with "Windows 98-ish" chrome: outer
+// dark border, coloured title bar, light client area, a close-
+// button square in the top-right. Registered windows carry a
+// title string (rendered via the 8x8 font) and participate in a
+// z-ordered draw stack — later registrations paint on top of
+// earlier ones, and `WindowRaise` moves a window to the top.
 // ---------------------------------------------------------------
+
+constexpr u32 kWindowInvalid = 0xFFFFFFFFu;
+constexpr u32 kMaxWindows = 4;
+
+using WindowHandle = u32;
 
 struct WindowChrome
 {
@@ -92,9 +95,55 @@ struct WindowChrome
     u32 title_height;     // pixels from top devoted to title bar
 };
 
-/// Paint the window chrome described by `w`. Idempotent — safe
-/// to call repeatedly. No-op on zero dimensions or when the
-/// framebuffer is unavailable.
+/// Paint one window's chrome directly (legacy one-shot path).
+/// Idempotent. No-op on zero dimensions or unavailable framebuffer.
 void WindowDraw(const WindowChrome& w);
+
+/// Register a window + its title string. Returns a handle, or
+/// `kWindowInvalid` if the table is full. The title pointer is
+/// stored by reference — caller owns the memory and must keep it
+/// alive for the window's lifetime. Newly-registered windows go
+/// to the TOP of the z-order.
+WindowHandle WindowRegister(const WindowChrome& chrome, const char* title);
+
+/// Move `h` to the top of the z-order so the next draw pass
+/// paints it last (i.e. on top of every other window). No-op
+/// if it's already topmost or the handle is invalid.
+void WindowRaise(WindowHandle h);
+
+/// Set absolute position. Width / height / colours are unchanged.
+/// Clamps so the window stays entirely within the framebuffer.
+void WindowMoveTo(WindowHandle h, u32 x, u32 y);
+
+/// Read back the current bounds. `x_out` / `y_out` / `w_out` /
+/// `h_out` are populated on success; all four are nullable.
+/// Returns false if the handle is invalid.
+bool WindowGetBounds(WindowHandle h, u32* x_out, u32* y_out, u32* w_out, u32* h_out);
+
+/// Return the topmost window whose bounds contain (x, y), or
+/// `kWindowInvalid` if none do. Walks the z-order from top to
+/// bottom — matches the visual stacking order a user expects
+/// when clicking on overlapping windows.
+WindowHandle WindowTopmostAt(u32 x, u32 y);
+
+/// True iff (x, y) is inside `h`'s title bar (the strip from the
+/// window's top down to `title_height` pixels).
+bool WindowPointInTitle(WindowHandle h, u32 x, u32 y);
+
+/// Paint every registered window in z-order (bottom first, top
+/// last) + render the stored title string across each title bar
+/// in the default ink colour. Intended as part of a full-desktop
+/// repaint pass.
+void WindowDrawAllOrdered();
+
+/// Full-desktop repaint. Fills the framebuffer with `desktop_rgb`,
+/// renders a banner string across the top, draws every window
+/// in z-order, then paints every widget. Caller is responsible
+/// for CursorHide / CursorShow around this call if the cursor
+/// is currently visible — the desktop compose path does NOT
+/// manage cursor save-restore itself (the cursor lives "above"
+/// the desktop in the logical paint stack and the mouse reader
+/// owns when to show / hide it).
+void DesktopCompose(u32 desktop_rgb, const char* banner);
 
 } // namespace customos::drivers::video

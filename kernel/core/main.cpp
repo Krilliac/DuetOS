@@ -141,64 +141,66 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     customos::drivers::video::FramebufferInit(multiboot_info);
     customos::drivers::video::FramebufferSelfTest();
 
-    // Paint a "desktop" background, register boot-time widgets,
-    // draw them, then render the cursor on top. Order matters —
-    // cursor always last so its saved backing pixels include the
-    // widgets underneath.
+    // GUI composition. Order for every paint pass:
+    //   1. Desktop fill
+    //   2. Desktop banner text
+    //   3. Windows in z-order (back-to-front)
+    //   4. Widgets (buttons on top of windows for v0)
+    //   5. Cursor on top (CursorShow re-samples backing)
+    //
+    // Wrapped in a file-scope helper so both the initial boot
+    // paint AND the window-drag path (mouse reader thread) can
+    // repaint the whole surface with one call.
     constexpr customos::u32 kDesktopTeal = 0x00204868;
-    customos::drivers::video::FramebufferClear(kDesktopTeal);
 
-    // Demo window chrome. Classic three-colour scheme: dark
-    // border, navy title bar, light-grey client area, with a
-    // red close-button square at the top-right corner. Proves
-    // the window-drawing primitive end-to-end.
-    customos::drivers::video::WindowChrome demo_window{};
-    demo_window.x = 220;
-    demo_window.y = 120;
-    demo_window.w = 420;
-    demo_window.h = 260;
-    demo_window.colour_border = 0x00101828;
-    demo_window.colour_title = 0x00284878;
-    demo_window.colour_client = 0x00D8D8D8;
-    demo_window.colour_close_btn = 0x00E04020;
-    demo_window.title_height = 22;
-    customos::drivers::video::WindowDraw(demo_window);
+    // Register two demo windows so z-order + raise-to-front are
+    // visibly exercised. Window B starts in front because it
+    // was registered second. Click-drag on either title bar
+    // moves that window and brings it to the top.
+    customos::drivers::video::WindowChrome win_a_chrome{};
+    win_a_chrome.x = 140;
+    win_a_chrome.y = 90;
+    win_a_chrome.w = 380;
+    win_a_chrome.h = 220;
+    win_a_chrome.colour_border = 0x00101828;
+    win_a_chrome.colour_title = 0x00205080;
+    win_a_chrome.colour_client = 0x00D8D8D8;
+    win_a_chrome.colour_close_btn = 0x00E04020;
+    win_a_chrome.title_height = 22;
+    customos::drivers::video::WindowRegister(win_a_chrome, "CUSTOMOS GUI v0");
 
-    // Title-bar label. 8-pixel glyph cells + 2-pixel top/left
-    // padding inside the title bar keeps the text from touching
-    // the border. White ink on the title's navy fill.
-    customos::drivers::video::FramebufferDrawString(demo_window.x + 8, demo_window.y + 7, "CUSTOMOS GUI v0",
-                                                    0x00FFFFFF, demo_window.colour_title);
+    customos::drivers::video::WindowChrome win_b_chrome{};
+    win_b_chrome.x = 360;
+    win_b_chrome.y = 200;
+    win_b_chrome.w = 360;
+    win_b_chrome.h = 180;
+    win_b_chrome.colour_border = 0x00101828;
+    win_b_chrome.colour_title = 0x00306838;
+    win_b_chrome.colour_client = 0x00E0E0D8;
+    win_b_chrome.colour_close_btn = 0x00E04020;
+    win_b_chrome.title_height = 22;
+    customos::drivers::video::WindowRegister(win_b_chrome, "NOTES   DRAG ME");
 
-    // Desktop banner across the top — proves text renders over
-    // the desktop fill too, not just inside window chrome.
-    customos::drivers::video::FramebufferDrawString(16, 8, "WELCOME TO CUSTOMOS   BOOT OK", 0x00FFFFFF, kDesktopTeal);
-
-    // Demo clickable button, now sitting inside the window's
-    // client area. Click lights it up red; release returns it
-    // to grey — the smallest proof the mouse-event pipeline
-    // reaches widgets end-to-end.
+    // Demo clickable button. Label renders inside PaintButton
+    // on every redraw — survives click → press-state → release
+    // without the v0 "label disappears on press" glitch.
     customos::drivers::video::ButtonWidget demo_button{};
     demo_button.id = 1;
-    demo_button.x = 256;
-    demo_button.y = 168;
+    demo_button.x = 176;
+    demo_button.y = 170;
     demo_button.w = 160;
     demo_button.h = 48;
-    demo_button.colour_normal = 0x00C0C0C0;  // neutral grey
-    demo_button.colour_pressed = 0x00E04020; // warm red on press
-    demo_button.colour_border = 0x00101828;  // dark outline
+    demo_button.colour_normal = 0x00C0C0C0;
+    demo_button.colour_pressed = 0x00E04020;
+    demo_button.colour_border = 0x00101828;
+    demo_button.colour_label = 0x00101828;
+    demo_button.label = "CLICK ME";
     customos::drivers::video::WidgetRegisterButton(demo_button);
-    customos::drivers::video::WidgetDrawAll();
 
-    // Button label on top of the button fill. Dark ink on the
-    // neutral-grey normal colour. When the button is pressed
-    // the text is overdrawn by the PaintButton call and will
-    // be redrawn by the click-handling code; for v0 the label
-    // disappears during the press and reappears on release —
-    // acceptable for a demo, a proper button would re-render
-    // the text inside PaintButton.
-    customos::drivers::video::FramebufferDrawString(demo_button.x + 28, demo_button.y + 20, "CLICK ME", 0x00101828,
-                                                    demo_button.colour_normal);
+    // First paint. Uses the same path subsequent drags take,
+    // so any layout bug shows up at boot rather than on first
+    // mouse interaction.
+    customos::drivers::video::DesktopCompose(kDesktopTeal, "WELCOME TO CUSTOMOS   BOOT OK");
 
     customos::drivers::video::CursorInit(kDesktopTeal);
 
@@ -314,25 +316,93 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // IRQ — the reader just parks forever on an unfed queue.
     auto mouse_reader = [](void*)
     {
+        // Drag state is local to this thread. No other task
+        // observes windows moving, so keeping the state on the
+        // stack (via static-lambda-local) avoids a fragile global.
+        struct DragState
+        {
+            bool active;
+            customos::drivers::video::WindowHandle window;
+            customos::u32 grab_offset_x;
+            customos::u32 grab_offset_y;
+        };
+        static DragState drag{false, customos::drivers::video::kWindowInvalid, 0, 0};
+        static bool prev_left = false;
+        constexpr customos::u32 kDesktopTealLocal = 0x00204868;
+
         for (;;)
         {
             const auto p = customos::drivers::input::Ps2MouseReadPacket();
-            // Drive the on-screen cursor. When the framebuffer isn't
-            // available, CursorMove is a silent no-op — the log line
-            // below still prints so IRQ-12 health is visible.
             customos::drivers::video::CursorMove(p.dx, p.dy);
 
-            // Route the latest cursor-state sample through the
-            // widget table. A click on the demo button switches
-            // its fill colour; release switches it back.
             customos::u32 cx = 0, cy = 0;
             customos::drivers::video::CursorPosition(&cx, &cy);
-            const customos::u32 hit = customos::drivers::video::WidgetRouteMouse(cx, cy, p.buttons);
-            if (hit != customos::drivers::video::kWidgetInvalid)
+
+            const bool left_down = (p.buttons & customos::drivers::input::kMouseButtonLeft) != 0;
+            const bool press_edge = left_down && !prev_left;
+            const bool release_edge = !left_down && prev_left;
+            prev_left = left_down;
+
+            // Press on a title bar → start a drag on that window
+            // (bring it to the top first, since raised + dragged
+            // go together in every GUI users have ever seen).
+            if (press_edge && !drag.active)
             {
-                SerialWrite("[ui] widget event id=");
-                SerialWriteHex(hit);
+                const auto hit = customos::drivers::video::WindowTopmostAt(cx, cy);
+                if (hit != customos::drivers::video::kWindowInvalid &&
+                    customos::drivers::video::WindowPointInTitle(hit, cx, cy))
+                {
+                    customos::u32 wx = 0, wy = 0;
+                    customos::drivers::video::WindowGetBounds(hit, &wx, &wy, nullptr, nullptr);
+                    drag.active = true;
+                    drag.window = hit;
+                    drag.grab_offset_x = cx - wx;
+                    drag.grab_offset_y = cy - wy;
+                    customos::drivers::video::WindowRaise(hit);
+                    customos::drivers::video::CursorHide();
+                    customos::drivers::video::DesktopCompose(kDesktopTealLocal,
+                                                             "WELCOME TO CUSTOMOS   BOOT OK");
+                    customos::drivers::video::CursorShow();
+                    SerialWrite("[ui] drag begin window=");
+                    SerialWriteHex(hit);
+                    SerialWrite("\n");
+                }
+            }
+            if (release_edge && drag.active)
+            {
+                SerialWrite("[ui] drag end window=");
+                SerialWriteHex(drag.window);
                 SerialWrite("\n");
+                drag.active = false;
+            }
+
+            if (drag.active)
+            {
+                // Position the window so the grabbed pixel stays
+                // under the cursor. Any sub-pixel clamp lives
+                // inside WindowMoveTo.
+                const customos::u32 nx = (cx > drag.grab_offset_x) ? cx - drag.grab_offset_x : 0;
+                const customos::u32 ny = (cy > drag.grab_offset_y) ? cy - drag.grab_offset_y : 0;
+                customos::drivers::video::WindowMoveTo(drag.window, nx, ny);
+                customos::drivers::video::CursorHide();
+                customos::drivers::video::DesktopCompose(kDesktopTealLocal, "WELCOME TO CUSTOMOS   BOOT OK");
+                customos::drivers::video::CursorShow();
+            }
+            else
+            {
+                // Non-drag path: route clicks + motion through the
+                // widget table as before. Only reachable when the
+                // cursor is NOT pinning a window move; this keeps
+                // the button widget inert during drag, matching
+                // Windows' "modal drag" semantics.
+                const customos::u32 hit =
+                    customos::drivers::video::WidgetRouteMouse(cx, cy, p.buttons);
+                if (hit != customos::drivers::video::kWidgetInvalid)
+                {
+                    SerialWrite("[ui] widget event id=");
+                    SerialWriteHex(hit);
+                    SerialWrite("\n");
+                }
             }
 
             SerialWrite("[mouse] dx=");
