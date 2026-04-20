@@ -406,6 +406,22 @@ bool IsUserRangeAccessible(u64 addr, u64 len)
 
 } // namespace
 
+// Defined in kernel/mm/user_copy.S. Both do the actual byte copy
+// plus stac/clac around it. Their inner byte-mov instructions live
+// inside [__copy_user_{from,to}_start, __copy_user_{from,to}_end)
+// ranges that the trap dispatcher recognises as "recoverable": on
+// a ring-0 #PF inside those ranges, TrapDispatch rewrites
+// frame->rip to __copy_user_fault_fixup, which cleans up and
+// returns 0 — the caller sees `false` without the kernel ever
+// panicking.
+//
+// Return: non-zero on success (all bytes copied), zero on
+// recovered fault (some prefix may have landed — partial copies
+// aren't rolled back; the caller treats any failure as "don't
+// trust any of the buffer").
+extern "C" u64 _copy_user_from(void* kernel_dst, const void* user_src, u64 len);
+extern "C" u64 _copy_user_to(void* user_dst, const void* kernel_src, u64 len);
+
 bool CopyFromUser(void* kernel_dst, const void* user_src, u64 len)
 {
     const u64 src_addr = reinterpret_cast<u64>(user_src);
@@ -413,26 +429,21 @@ bool CopyFromUser(void* kernel_dst, const void* user_src, u64 len)
     {
         return false;
     }
+    // Pre-walk the PTEs to fail fast on obviously-bad pointers
+    // (unmapped, supervisor-only). The asm helper's fault-fixup
+    // is a SAFETY NET for the SMP / demand-paging case where a
+    // page vanishes between pre-walk and copy; the pre-walk
+    // itself keeps the common "bad ptr" path out of the fault
+    // handler.
     if (!IsUserRangeAccessible(src_addr, len))
     {
         return false;
     }
-    auto* dst = static_cast<u8*>(kernel_dst);
-    const auto* src = static_cast<const u8*>(user_src);
-
-    if (g_smap_enabled)
+    if (len == 0)
     {
-        asm volatile("stac" ::: "cc");
+        return true;
     }
-    for (u64 i = 0; i < len; ++i)
-    {
-        dst[i] = src[i];
-    }
-    if (g_smap_enabled)
-    {
-        asm volatile("clac" ::: "cc");
-    }
-    return true;
+    return _copy_user_from(kernel_dst, user_src, len) != 0;
 }
 
 bool CopyToUser(void* user_dst, const void* kernel_src, u64 len)
@@ -446,22 +457,11 @@ bool CopyToUser(void* user_dst, const void* kernel_src, u64 len)
     {
         return false;
     }
-    auto* dst = static_cast<u8*>(user_dst);
-    const auto* src = static_cast<const u8*>(kernel_src);
-
-    if (g_smap_enabled)
+    if (len == 0)
     {
-        asm volatile("stac" ::: "cc");
+        return true;
     }
-    for (u64 i = 0; i < len; ++i)
-    {
-        dst[i] = src[i];
-    }
-    if (g_smap_enabled)
-    {
-        asm volatile("clac" ::: "cc");
-    }
-    return true;
+    return _copy_user_to(user_dst, kernel_src, len) != 0;
 }
 
 void MapPage(uptr virt, PhysAddr phys, u64 flags)

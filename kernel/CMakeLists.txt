@@ -58,6 +58,7 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     mm/kheap.cpp
     mm/page.cpp
     mm/paging.cpp
+    mm/user_copy.S
     sched/context_switch.S
     sched/sched.cpp
     sync/spinlock.cpp
