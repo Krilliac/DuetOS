@@ -21,7 +21,8 @@ constinit u64 g_live_processes = 0;
 
 } // namespace
 
-Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, const fs::RamfsNode* root)
+Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, const fs::RamfsNode* root, u64 user_code_va,
+                       u64 user_stack_va)
 {
     KASSERT(name != nullptr, "core/process", "ProcessCreate null name");
     KASSERT(as != nullptr, "core/process", "ProcessCreate null as");
@@ -38,6 +39,8 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     p->as = as;
     p->caps = caps;
     p->root = root;
+    p->user_code_va = user_code_va;
+    p->user_stack_va = user_stack_va;
     p->refcount = 1;
 
     ++g_live_processes;
@@ -48,6 +51,10 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     arch::SerialWrite(name);
     arch::SerialWrite("\" caps=");
     arch::SerialWriteHex(caps.bits);
+    arch::SerialWrite(" code_va=");
+    arch::SerialWriteHex(user_code_va);
+    arch::SerialWrite(" stack_va=");
+    arch::SerialWriteHex(user_stack_va);
     arch::SerialWrite("\n");
 
     return p;

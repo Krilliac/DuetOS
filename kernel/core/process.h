@@ -135,6 +135,16 @@ struct Process
     // fs::RamfsSandboxRoot() (which has one file). Never null
     // for a valid Process.
     const fs::RamfsNode* root;
+    // ASLR — randomised per process at spawn time. The payload
+    // bytes installed in the user code page are patched to embed
+    // these VAs, so two processes running "the same" user code
+    // actually execute at different addresses and reference their
+    // stacks at different addresses. Makes pre-computed ROP chains
+    // useless against any individual sandboxed process — the
+    // attacker can't know where gadgets live without first leaking
+    // the base.
+    u64 user_code_va;
+    u64 user_stack_va; // stack base; top = user_stack_va + kPageSize
     u64 refcount;
 };
 
@@ -145,7 +155,8 @@ struct Process
 /// else holds it). `root` MUST be non-null — pick from
 /// fs::RamfsTrustedRoot() / fs::RamfsSandboxRoot() based on the
 /// process's trust level. Returns nullptr on kheap failure.
-Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, const fs::RamfsNode* root);
+Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, const fs::RamfsNode* root, u64 user_code_va,
+                       u64 user_stack_va);
 
 /// Bump refcount. Use when a second holder appears (a future thread
 /// spawn that shares the process, a borrow into a non-owning table).

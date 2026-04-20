@@ -43,9 +43,82 @@ namespace customos::core
 namespace
 {
 
-constexpr u64 kUserCodeVirt = 0x0000000040000000ULL;
-constexpr u64 kUserStackVirt = 0x0000000040010000ULL;
-constexpr u64 kUserStackTop = kUserStackVirt + mm::kPageSize;
+// ASLR: per-process randomised base for the user code page. The
+// stack sits 64 KiB above, and both fit in 32 bits (so the
+// payload's imm32 fields can still encode absolute VAs).
+//
+// Range: [0x01000000, 0xEF000000), 16 MiB-aligned — 238 candidate
+// bases, ~7.9 bits of entropy. Small, but each sandboxed process
+// has its own layout and an attacker observing one process's
+// layout learns nothing about a sibling's. The range is deliberately
+// kept below 4 GiB so we don't need REX.W-imm64 forms in the
+// payload — everything encodes as `mov r32, imm32` (which zero-
+// extends to r64 for free on x86-64).
+//
+// The boot.S direct map at PDPT[0] covers [0, 1 GiB) as 2 MiB PS
+// pages — we must NOT try to install 4 KiB user pages inside that
+// range (MapPage panics on PS regions). So the lower bound is
+// 0x40000000 in practice — but the AddressSpaceMapUserPage walker
+// is on a per-process PML4 whose PDPT[0] is empty (we zero the
+// user half at create), so the walker happily creates a fresh
+// PD + PT and the 2 MiB-PS panic doesn't apply. Starting at
+// 0x01000000 is safe.
+constexpr u64 kAslrMinBase = 0x0000000001000000ULL;
+constexpr u64 kAslrMaxBase = 0x00000000EF000000ULL;
+constexpr u64 kAslrAlign = 0x0000000001000000ULL; // 16 MiB
+constexpr u64 kStackOffsetFromCode = 0x10000;
+
+// Offsets WITHIN the 4 KiB code page for string constants. Identical
+// layout across processes — only the PAGE base is randomised.
+constexpr u64 kMsgOffsetInCode = 0x80;
+constexpr u64 kPath1OffsetInCode = 0xA0;
+constexpr u64 kPath2OffsetInCode = 0xB0;
+
+// Offsets WITHIN the 4 KiB stack page for scratch buffers.
+constexpr u64 kReadBufOffsetInStack = 0x800;
+constexpr u64 kStatOutOffsetInStack = 0xFF0;
+
+// Small, deterministic PRNG seeded from the TSC at boot. Not
+// cryptographic — the goal is "layouts differ across processes of
+// a single boot"; unpredictability across reboots falls out of
+// the TSC seed. splitmix64 per call is 2 arithmetic ops.
+u64 Splitmix64(u64& state)
+{
+    state += 0x9E3779B97F4A7C15ULL;
+    u64 z = state;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return z ^ (z >> 31);
+}
+
+u64 g_aslr_state = 0;
+
+void AslrInitIfNeeded()
+{
+    if (g_aslr_state != 0)
+    {
+        return;
+    }
+    u32 lo = 0, hi = 0;
+    asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    g_aslr_state = (static_cast<u64>(hi) << 32) | lo;
+    if (g_aslr_state == 0)
+    {
+        g_aslr_state = 0xDEADBEEFCAFEBABEULL; // TSC unavailable? use a
+                                              // fixed seed rather than
+                                              // 0 (which would skip
+                                              // randomisation entirely).
+    }
+}
+
+// Pick a fresh 16 MiB-aligned base in [kAslrMinBase, kAslrMaxBase).
+u64 AslrPickBase()
+{
+    AslrInitIfNeeded();
+    const u64 range = (kAslrMaxBase - kAslrMinBase) / kAslrAlign;
+    const u64 r = Splitmix64(g_aslr_state) % range;
+    return kAslrMinBase + r * kAslrAlign;
+}
 
 // Fixed offsets of string constants inside the user code page.
 // Every offset below is encoded as a 32-bit immediate in the
@@ -62,16 +135,12 @@ constexpr char kUserStatPath1[] = "/etc/version";
 constexpr char kUserStatPath2[] = "/welcome.txt";
 constexpr u64 kUserMessageLen = sizeof(kUserMessage) - 1;
 
-// SYS_STAT writes a u64 size to the user-provided buffer. The
-// user stack page is mapped writable (NX), so point the buffer
-// near the top of the stack — comfortably below where any stack
-// frames would grow for this payload.
-constexpr u64 kUserStatOutVa = kUserStackVirt + 0xFF0;
-
-// SYS_READ destination buffer. 256 bytes, centred in the stack
-// page. Deliberately non-overlapping with kUserStatOutVa.
-constexpr u64 kUserReadBufVa = kUserStackVirt + 0x800;
-constexpr u64 kUserReadBufCap = 128;
+// Stack-page layout (offsets kReadBufOffsetInStack and
+// kStatOutOffsetInStack above) is fixed across processes; only
+// the stack page's BASE VA is randomised per process. SYS_STAT's
+// output slot lives near the top of the stack, the SYS_READ
+// destination buffer lives mid-page, and both are patched into
+// the payload as absolute (stack_va + offset) values at spawn.
 
 // User code. Order:
 //   pause, pause,
@@ -156,10 +225,65 @@ static_assert(kUserMessageOffset + sizeof(kUserMessage) <= kUserStatPath1Offset,
 static_assert(kUserStatPath1Offset + sizeof(kUserStatPath1) <= kUserStatPath2Offset,
               "stat-path-1 overruns stat-path-2 region");
 
+// ASLR patch table for the common smoke-task payload. Each entry says
+// "at this offset inside the copy of kUserCodeBytes, overwrite the
+// 4-byte imm32 with the absolute VA of (either code_base + off_in_code
+// OR stack_base + off_in_stack)."
+//
+// The offsets below are derived from hand-tracing the payload byte
+// sequence — see the comment above kUserCodeBytes for the instruction
+// ordering. If the payload is ever re-ordered or extended, these
+// offsets MUST be re-derived; the static_assert on the payload size
+// gives a canary but doesn't protect against reshuffles. Keep them
+// in lockstep.
+enum class PatchBase : u8
+{
+    kCode,
+    kStack,
+};
+struct PayloadPatch
+{
+    u16 bytecode_offset;
+    u16 base_offset; // offset within the target page
+    PatchBase base;
+};
+
+// NOTE: offsets point at the START of each imm32 field (the byte
+// AFTER the mov opcode byte). e.g. the "BF A0 00 00 40" at bytecode
+// offset 0x09 has imm32 starting at 0x0A.
+constexpr PayloadPatch kPayloadPatches[] = {
+    {0x0A, kPath1OffsetInCode, PatchBase::kCode},      // SYS_STAT #1: path1
+    {0x0F, kStatOutOffsetInStack, PatchBase::kStack},  // SYS_STAT #1: statout
+    {0x1B, kPath2OffsetInCode, PatchBase::kCode},      // SYS_STAT #2: path2
+    {0x20, kStatOutOffsetInStack, PatchBase::kStack},  // SYS_STAT #2: statout
+    {0x2C, kPath1OffsetInCode, PatchBase::kCode},      // SYS_READ: path1
+    {0x31, kReadBufOffsetInStack, PatchBase::kStack},  // SYS_READ: readbuf
+    {0x4A, kReadBufOffsetInStack, PatchBase::kStack},  // SYS_WRITE (dyn): readbuf
+    {0x5B, kMsgOffsetInCode, PatchBase::kCode},        // SYS_WRITE (banner): msg
+};
+
+// Write a little-endian u32 into `buf` at byte offset `off`. Asserts
+// the 4 bytes fit. Used by all payload patchers.
+void WriteImm32LE(u8* buf, u64 off, u32 value)
+{
+    buf[off + 0] = static_cast<u8>(value & 0xFF);
+    buf[off + 1] = static_cast<u8>((value >> 8) & 0xFF);
+    buf[off + 2] = static_cast<u8>((value >> 16) & 0xFF);
+    buf[off + 3] = static_cast<u8>((value >> 24) & 0xFF);
+}
+
+void WriteImm64LE(u8* buf, u64 off, u64 value)
+{
+    WriteImm32LE(buf, off, static_cast<u32>(value));
+    WriteImm32LE(buf, off + 4, static_cast<u32>(value >> 32));
+}
+
 // Populate `frame` with the user-code-page contents via the kernel
 // direct-map alias. Reaches the frame from the parent task's view —
 // the AS this frame is going into doesn't have to be active.
-void WriteUserCodeFrame(mm::PhysAddr frame)
+// Patches every ASLR-affected imm32 so absolute VAs in the payload
+// match the caller's randomly-chosen code_va / stack_va.
+void WriteUserCodeFrame(mm::PhysAddr frame, u64 code_va, u64 stack_va)
 {
     auto* code_direct = static_cast<u8*>(mm::PhysToVirt(frame));
     for (u64 i = 0; i < mm::kPageSize; ++i)
@@ -174,10 +298,6 @@ void WriteUserCodeFrame(mm::PhysAddr frame)
     {
         code_direct[kUserMessageOffset + i] = static_cast<u8>(kUserMessage[i]);
     }
-    // Stat paths: include the terminating NUL so VfsLookup has a
-    // clean stop. The initial zero-fill guarantees every byte past
-    // the string is 0, but writing the NUL explicitly keeps the
-    // layout self-documenting.
     for (u64 i = 0; i < sizeof(kUserStatPath1); ++i)
     {
         code_direct[kUserStatPath1Offset + i] = static_cast<u8>(kUserStatPath1[i]);
@@ -186,12 +306,24 @@ void WriteUserCodeFrame(mm::PhysAddr frame)
     {
         code_direct[kUserStatPath2Offset + i] = static_cast<u8>(kUserStatPath2[i]);
     }
+
+    // Apply ASLR patches. Each entry rewrites one imm32 field in
+    // the payload so its absolute-VA reference targets the right
+    // page at this process's chosen layout.
+    for (const auto& p : kPayloadPatches)
+    {
+        const u64 base = (p.base == PatchBase::kCode) ? code_va : stack_va;
+        const u64 target = base + p.base_offset;
+        KASSERT(target <= 0xFFFFFFFFULL, "core/ring3", "ASLR target overflows imm32");
+        WriteImm32LE(code_direct, p.bytecode_offset, static_cast<u32>(target));
+    }
 }
 
 // Entry point for the user task. Runs in ring 0 on a fresh kernel
 // stack with the task's own AS already loaded in CR3 (Schedule()
-// flipped it on first switch-in). All this entry needs to do is
-// publish RSP0 and iretq to user space.
+// flipped it on first switch-in). Reads the per-process ASLR
+// layout from CurrentProcess() so every task enters ring 3 at
+// its own code_va / stack_va.
 [[noreturn]] void Ring3UserEntry(void*)
 {
     using arch::SerialWrite;
@@ -204,15 +336,23 @@ void WriteUserCodeFrame(mm::PhysAddr frame)
     }
     arch::TssSetRsp0(kstack_top);
 
+    Process* proc = CurrentProcess();
+    if (proc == nullptr)
+    {
+        Panic("core/ring3", "Ring3UserEntry without a Process");
+    }
+    const u64 code_va = proc->user_code_va;
+    const u64 stack_top = proc->user_stack_va + mm::kPageSize;
+
     SerialWrite("[ring3] task pid=");
     SerialWriteHex(sched::CurrentTaskId());
     SerialWrite(" entering ring 3 rip=");
-    SerialWriteHex(kUserCodeVirt);
+    SerialWriteHex(code_va);
     SerialWrite(" rsp=");
-    SerialWriteHex(kUserStackTop);
+    SerialWriteHex(stack_top);
     SerialWrite("\n");
 
-    arch::EnterUserMode(kUserCodeVirt, kUserStackTop);
+    arch::EnterUserMode(code_va, stack_top);
 }
 
 // Build a ring-3 task: allocate AS, allocate + populate code page,
@@ -226,6 +366,9 @@ void SpawnRing3Task(const char* name, CapSet caps, const fs::RamfsNode* root, u6
     using arch::SerialWriteHex;
     using namespace customos::mm;
 
+    const u64 code_va = AslrPickBase();
+    const u64 stack_va = code_va + kStackOffsetFromCode;
+
     AddressSpace* as = AddressSpaceCreate(frame_budget);
     if (as == nullptr)
     {
@@ -237,7 +380,7 @@ void SpawnRing3Task(const char* name, CapSet caps, const fs::RamfsNode* root, u6
     {
         Panic("core/ring3", "failed to allocate user code frame");
     }
-    WriteUserCodeFrame(code_frame);
+    WriteUserCodeFrame(code_frame, code_va, stack_va);
 
     const PhysAddr stack_frame = AllocateFrame();
     if (stack_frame == kNullFrame)
@@ -248,11 +391,12 @@ void SpawnRing3Task(const char* name, CapSet caps, const fs::RamfsNode* root, u6
     // Code: present + user, RX (no W, no NX). Stack: present + user
     // + writable + NX. Same flags as the pre-AS version — what's
     // different is they go into THIS AS's PML4 only, not the boot
-    // PML4 or any sibling AS.
-    AddressSpaceMapUserPage(as, kUserCodeVirt, code_frame, kPagePresent | kPageUser);
-    AddressSpaceMapUserPage(as, kUserStackVirt, stack_frame, kPagePresent | kPageWritable | kPageUser | kPageNoExecute);
+    // PML4 or any sibling AS, AND their VAs are randomised per
+    // process via ASLR.
+    AddressSpaceMapUserPage(as, code_va, code_frame, kPagePresent | kPageUser);
+    AddressSpaceMapUserPage(as, stack_va, stack_frame, kPagePresent | kPageWritable | kPageUser | kPageNoExecute);
 
-    Process* proc = ProcessCreate(name, as, caps, root);
+    Process* proc = ProcessCreate(name, as, caps, root, code_va, stack_va);
     if (proc == nullptr)
     {
         Panic("core/ring3", "ProcessCreate failed");
@@ -264,12 +408,10 @@ void SpawnRing3Task(const char* name, CapSet caps, const fs::RamfsNode* root, u6
     SerialWriteHex(proc->pid);
     SerialWrite(" caps=");
     SerialWriteHex(proc->caps.bits);
-    SerialWrite(" as=");
-    SerialWriteHex(reinterpret_cast<u64>(as));
-    SerialWrite(" code_frame=");
-    SerialWriteHex(code_frame);
-    SerialWrite(" stack_frame=");
-    SerialWriteHex(stack_frame);
+    SerialWrite(" code_va=");
+    SerialWriteHex(code_va);
+    SerialWrite(" stack_va=");
+    SerialWriteHex(stack_va);
     SerialWrite("\n");
 
     sched::SchedCreateUser(&Ring3UserEntry, nullptr, name, proc);
@@ -302,6 +444,9 @@ void SpawnNxProbeTask()
     using arch::SerialWriteHex;
     using namespace customos::mm;
 
+    const u64 code_va = AslrPickBase();
+    const u64 stack_va = code_va + kStackOffsetFromCode;
+
     AddressSpace* as = AddressSpaceCreate(kFrameBudgetSandbox);
     if (as == nullptr)
     {
@@ -322,6 +467,13 @@ void SpawnNxProbeTask()
     {
         code_direct[i] = kNxProbeBytes[i];
     }
+    // Patch the "mov rax, 0x40010000" imm64 to match this process's
+    // randomised stack VA. Without the patch, the `jmp rax` would
+    // land at 0x40010000 — possibly unmapped in this AS (if ASLR
+    // chose a different base), producing a not-present #PF rather
+    // than the NX #PF we're trying to demonstrate. Imm64 sits 2
+    // bytes into the payload (after `pause` + `48 B8` opcode).
+    WriteImm64LE(code_direct, 4, stack_va);
 
     const PhysAddr stack_frame = AllocateFrame();
     if (stack_frame == kNullFrame)
@@ -329,11 +481,10 @@ void SpawnNxProbeTask()
         Panic("core/ring3", "stack frame alloc failed for nx probe");
     }
 
-    AddressSpaceMapUserPage(as, kUserCodeVirt, code_frame, kPagePresent | kPageUser);
-    AddressSpaceMapUserPage(as, kUserStackVirt, stack_frame,
-                            kPagePresent | kPageWritable | kPageUser | kPageNoExecute);
+    AddressSpaceMapUserPage(as, code_va, code_frame, kPagePresent | kPageUser);
+    AddressSpaceMapUserPage(as, stack_va, stack_frame, kPagePresent | kPageWritable | kPageUser | kPageNoExecute);
 
-    Process* proc = ProcessCreate("ring3-nx-probe", as, CapSetEmpty(), fs::RamfsSandboxRoot());
+    Process* proc = ProcessCreate("ring3-nx-probe", as, CapSetEmpty(), fs::RamfsSandboxRoot(), code_va, stack_va);
     if (proc == nullptr)
     {
         Panic("core/ring3", "ProcessCreate failed for nx probe");
@@ -341,6 +492,10 @@ void SpawnNxProbeTask()
 
     SerialWrite("[ring3] queued nx-probe task pid=");
     SerialWriteHex(proc->pid);
+    SerialWrite(" code_va=");
+    SerialWriteHex(code_va);
+    SerialWrite(" stack_va=");
+    SerialWriteHex(stack_va);
     SerialWrite("\n");
 
     sched::SchedCreateUser(&Ring3UserEntry, nullptr, "ring3-nx-probe", proc);
@@ -355,10 +510,22 @@ void SpawnNxProbeTask()
 // #UD and the task still dies.
 //
 // clang-format off
+// mov rax, <imm64 patched to code_va>   ; 48 B8 <8 bytes>
+// mov dword ptr [rax], 0xDEADBEEF       ; C7 00 EF BE AD DE
+// ud2                                   ; 0F 0B
+//
+// Uses rax as an unsigned 64-bit base so the store address is
+// whatever code_va the ASLR picker chose, with no sign-extension
+// gotcha (which `mov [disp32], imm32` has — disp32 is signed
+// and anything ≥ 0x80000000 sign-extends into the kernel half).
+// That guarantees the fault is "write to a RX page" — #PF
+// err=0x7 (P + W + U) — rather than "wild pointer to unmapped
+// kernel VA," regardless of which 16 MiB-aligned base ASLR
+// picked.
 constexpr u8 kJailProbeBytes[] = {
     0xF3, 0x90,                                                   // pause
-    // mov dword ptr [0x40000000], 0xDEADBEEF
-    0xC7, 0x04, 0x25, 0x00, 0x00, 0x00, 0x40, 0xEF, 0xBE, 0xAD, 0xDE,
+    0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0,                           // mov rax, <imm64 patched>
+    0xC7, 0x00, 0xEF, 0xBE, 0xAD, 0xDE,                           // mov dword ptr [rax], 0xDEADBEEF
     0x0F, 0x0B,                                                   // ud2
 };
 // clang-format on
@@ -368,6 +535,10 @@ void SpawnJailProbeTask()
     using arch::SerialWrite;
     using arch::SerialWriteHex;
     using namespace customos::mm;
+
+    const u64 code_va = AslrPickBase();
+    const u64 stack_va = code_va + kStackOffsetFromCode;
+    KASSERT(code_va <= 0xFFFFFFFFULL, "core/ring3", "jail-probe code_va overflows imm32");
 
     AddressSpace* as = AddressSpaceCreate(kFrameBudgetSandbox);
     if (as == nullptr)
@@ -389,6 +560,12 @@ void SpawnJailProbeTask()
     {
         code_direct[i] = kJailProbeBytes[i];
     }
+    // Patch the imm64 inside `mov rax, <imm64>`. imm64 starts at
+    // byte offset 4:
+    //   offset 0: pause F3 90
+    //   offset 2: 48 B8 <imm64>  (REX.W mov rax, imm64)
+    // imm64 begins at offset 4.
+    WriteImm64LE(code_direct, 4, code_va);
 
     const PhysAddr stack_frame = AllocateFrame();
     if (stack_frame == kNullFrame)
@@ -396,15 +573,14 @@ void SpawnJailProbeTask()
         Panic("core/ring3", "stack frame alloc failed for jail probe");
     }
 
-    AddressSpaceMapUserPage(as, kUserCodeVirt, code_frame, kPagePresent | kPageUser);
-    AddressSpaceMapUserPage(as, kUserStackVirt, stack_frame,
-                            kPagePresent | kPageWritable | kPageUser | kPageNoExecute);
+    AddressSpaceMapUserPage(as, code_va, code_frame, kPagePresent | kPageUser);
+    AddressSpaceMapUserPage(as, stack_va, stack_frame, kPagePresent | kPageWritable | kPageUser | kPageNoExecute);
 
     // Empty cap set — the jail probe never gets a chance to issue
     // a syscall (it faults first), but if the fault path ever
     // regressed and the task reached int 0x80, denying caps
     // defence-in-depths that path too.
-    Process* proc = ProcessCreate("ring3-jail-probe", as, CapSetEmpty(), fs::RamfsSandboxRoot());
+    Process* proc = ProcessCreate("ring3-jail-probe", as, CapSetEmpty(), fs::RamfsSandboxRoot(), code_va, stack_va);
     if (proc == nullptr)
     {
         Panic("core/ring3", "ProcessCreate failed for jail probe");
@@ -412,6 +588,10 @@ void SpawnJailProbeTask()
 
     SerialWrite("[ring3] queued jail-probe task pid=");
     SerialWriteHex(proc->pid);
+    SerialWrite(" code_va=");
+    SerialWriteHex(code_va);
+    SerialWrite(" stack_va=");
+    SerialWriteHex(stack_va);
     SerialWrite("\n");
 
     sched::SchedCreateUser(&Ring3UserEntry, nullptr, "ring3-jail-probe", proc);
