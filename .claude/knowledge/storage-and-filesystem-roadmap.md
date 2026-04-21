@@ -2,7 +2,7 @@
 
 **Last updated:** 2026-04-21
 **Type:** Decision
-**Status:** Active (stages 1–2, 4 landed; stage 3 (AHCI) + stage 5 (FAT32) remain)
+**Status:** Active (stages 1–4 landed; stage 5 (FAT32) remains)
 
 ## Description
 
@@ -76,20 +76,48 @@ Does not apply to:
   and dump the first 32 bytes. (The MBR/GPT signature at
   offset 510 is a natural parity check for stage 3.)
 
-### Stage 3 — AHCI real driver (next session after Stage 2)
+### Stage 3 — AHCI real driver (landed 2026-04-21)
 
-Flesh out `drivers/storage/ahci.cpp` from discovery-only to
-read-capable. Order: port reset, allocate command list + FIS
-receive area, READ DMA EXT (0x25) via a single command slot,
-wire polling completion. Register as `BlockDevice`.
+Promoted `drivers/storage/ahci.cpp` from discovery-only to a
+working read path.
 
-Doing AHCI after NVMe is deliberate:
-- NVMe is simpler (2 rings, no ATA command set complexity,
-  no FIS framing). Cleaner first pass at queue-based I/O.
-- QEMU's default `-drive if=none -device nvme` is trivial to
-  test against. AHCI via QEMU's ICH9 chipset is more fiddly.
-- The block layer's vtable absorbs the driver difference —
-  stage 4+ doesn't care which backend served a sector.
+Per-port bring-up:
+- Stop the engine (clear PxCMD.ST + FRE, wait for CR/FR to
+  clear), then one 4 KiB DMA frame carved into:
+    0..1023   command list (32 slots × 32 B)
+    1024..1279 FIS receive area (256 B, 256-aligned)
+    1280..1535 command table (cfis + prdt[1])
+    1536..2047 IDENTIFY DEVICE reply buffer
+- Program PxCLB/CLBU + PxFB/FBU to those physaddrs.
+- Clear PxSERR + PxIS, re-enable FRE then ST, wait for BSY +
+  DRQ to drop.
+- Issue IDENTIFY DEVICE (ATA 0xEC) on slot 0, extract LBA48
+  sector count from words 100..103, register as "sata0".
+
+Read path (`BlockOps::read`):
+- Build H2D Register FIS for READ DMA EXT (ATA 0x25) with
+  caller LBA + count. PRD[0] = (VirtToPhys(buf), count*512 - 1).
+- Poll PxCI until slot 0 clears, watching PxIS.TFES for task-
+  file errors. 8-sector cap per call.
+
+PCI wiring: enable Memory Space + Bus Master in the PCI command
+register before touching MMIO/DMA. Set GHC.AE=1 on the HBA.
+
+Multi-controller: walks every AHCI PCI match (up to 4). With
+QEMU q35, controller #1 is the built-in (carries the boot
+CD-ROM, skipped as ATAPI), controller #2 is our test
+`ahci,id=ahci1` with one SATA disk.
+
+Out of scope for v1 (each is a future slice): writes, NCQ,
+multiple in-flight slots, MSI, hotplug, 4K native sectors.
+
+Decision: ATAPI (CD-ROM) is deliberately unsupported. Our
+pattern is "boot from ISO once, mount real FS from SATA/NVMe
+after" — an ATAPI driver is a different command set (PACKET)
+with its own quirks and no lasting value.
+
+Validation: `[ahci] self-test OK (LBA 0 read + 0x55AA signature
+present)` plus GPT parse `handle=0x2 name=sata0`.
 
 ### Stage 4 — GPT partition parser (landed 2026-04-21)
 
