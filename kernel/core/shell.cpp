@@ -183,6 +183,9 @@ void CmdHelp()
     ConsoleWriteln("  WC PATH      LINES / WORDS / BYTES");
     ConsoleWriteln("  GREP PAT P   PRINT LINES OF P CONTAINING PAT");
     ConsoleWriteln("  FIND NAME    LIST PATHS WHOSE LEAF CONTAINS NAME");
+    ConsoleWriteln("  WHICH CMD    SHOW WHETHER CMD IS A BUILTIN OR ALIAS");
+    ConsoleWriteln("  TIME CMD..   MEASURE WALL TIME (10 MS RESOLUTION)");
+    ConsoleWriteln("  SEQ N        PRINT 1..N (CAPPED AT 200)");
     ConsoleWriteln("  ECHO ..  > PATH   PRINT OR REDIRECT TO /tmp (>> TO APPEND)");
     ConsoleWriteln("  DMESG        DUMP KERNEL LOG RING");
     ConsoleWriteln("  STATS        SCHEDULER STATISTICS");
@@ -298,6 +301,7 @@ void CmdStats()
 const char* TmpLeaf(const char* path);
 struct EnvSlot;
 EnvSlot* EnvFind(const char* name);
+void Dispatch(char* line); // CmdTime + CmdSource recurse via this
 
 // ---------------------------------------------------------------
 // Environment variables. Fixed 8-slot table, 32-byte names +
@@ -888,6 +892,114 @@ void CmdFind(u32 argc, char** argv)
             }
         },
         &cookie);
+}
+
+// Canonical built-in command list. Single source of truth used
+// by ShellTabComplete + `which`. New commands added here +
+// dispatched in Dispatch — keeping the two in sync is the
+// price of not having reflection.
+static const char* const kCommandSet[] = {
+    "help",    "about",   "version", "clear",   "uptime",  "date",    "windows",
+    "mode",    "ls",      "cat",     "touch",   "rm",      "echo",    "cp",
+    "mv",      "wc",      "head",    "tail",    "dmesg",   "stats",   "mem",
+    "history", "set",     "unset",   "env",     "alias",   "unalias", "sysinfo",
+    "source",  "man",     "grep",    "find",    "time",    "which",   "seq",
+};
+constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
+
+void CmdWhich(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("WHICH: MISSING NAME");
+        return;
+    }
+    for (u32 i = 0; i < kCommandCount; ++i)
+    {
+        if (StrEq(kCommandSet[i], argv[1]))
+        {
+            ConsoleWrite(argv[1]);
+            ConsoleWriteln(": SHELL BUILTIN");
+            return;
+        }
+    }
+    if (AliasFind(argv[1]) != nullptr)
+    {
+        ConsoleWrite(argv[1]);
+        ConsoleWriteln(": SHELL ALIAS");
+        return;
+    }
+    ConsoleWrite(argv[1]);
+    ConsoleWriteln(": NOT FOUND");
+}
+
+void CmdSeq(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("SEQ: USAGE: SEQ N");
+        return;
+    }
+    u32 n = 0;
+    for (u32 i = 0; argv[1][i] != '\0'; ++i)
+    {
+        if (argv[1][i] < '0' || argv[1][i] > '9')
+        {
+            ConsoleWriteln("SEQ: BAD NUMBER");
+            return;
+        }
+        n = n * 10 + static_cast<u32>(argv[1][i] - '0');
+    }
+    // Cap at the visible scrollback so seq can't lock the
+    // console into a multi-thousand-line scroll users can't
+    // interrupt yet (no Ctrl+C handler).
+    if (n > 200)
+    {
+        n = 200;
+        ConsoleWriteln("SEQ: CAPPED AT 200 (NO INTERRUPT YET)");
+    }
+    for (u32 i = 1; i <= n; ++i)
+    {
+        WriteU64Dec(i);
+        ConsoleWriteChar('\n');
+    }
+}
+
+void CmdTime(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("TIME: USAGE: TIME CMD ARGS...");
+        return;
+    }
+    // Reconstruct the inner command line from argv[1..]. The
+    // sub-dispatch goes through the full pipeline (alias /
+    // env / redirect), so `time alias` and `time ls /etc`
+    // both work.
+    char buf[kInputMax];
+    u32 o = 0;
+    for (u32 i = 1; i < argc; ++i)
+    {
+        if (i > 1 && o + 1 < sizeof(buf))
+        {
+            buf[o++] = ' ';
+        }
+        for (u32 j = 0; argv[i][j] != '\0' && o + 1 < sizeof(buf); ++j)
+        {
+            buf[o++] = argv[i][j];
+        }
+    }
+    buf[o] = '\0';
+    const u64 t0 = customos::sched::SchedNowTicks();
+    Dispatch(buf);
+    const u64 t1 = customos::sched::SchedNowTicks();
+    // 100 Hz scheduler tick → each tick is 10 ms. Round-trip
+    // resolution is therefore one tick; sub-tick durations
+    // show as 0 ms, which is honest given the time source.
+    const u64 ms = (t1 - t0) * 10;
+    ConsoleWrite("real    ");
+    WriteU64Dec(ms);
+    ConsoleWriteln(" ms");
 }
 
 void CmdSet(u32 argc, char** argv)
@@ -1912,6 +2024,21 @@ void Dispatch(char* line)
         CmdFind(argc, argv);
         return;
     }
+    if (StrEq(cmd, "time"))
+    {
+        CmdTime(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "which"))
+    {
+        CmdWhich(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "seq"))
+    {
+        CmdSeq(argc, argv);
+        return;
+    }
     ConsoleWrite("COMMAND NOT FOUND: ");
     ConsoleWriteln(cmd);
     ConsoleWriteln("TYPE HELP FOR A LIST OF COMMANDS.");
@@ -2080,14 +2207,7 @@ bool NamePrefixMatch(const char* name, const char* prefix, u32 plen)
 
 void CompleteCommandName()
 {
-    static const char* const kCommandSet[] = {
-        "help",    "about",   "version", "clear",   "uptime",  "date",    "windows",
-        "mode",    "ls",      "cat",     "touch",   "rm",      "echo",    "cp",
-        "mv",      "wc",      "head",    "tail",    "dmesg",   "stats",   "mem",
-        "history", "set",     "unset",   "env",     "alias",   "unalias", "sysinfo",
-        "source",  "man",     "grep",    "find",
-    };
-    constexpr u32 kCmdCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
+    constexpr u32 kCmdCount = kCommandCount;
 
     const char* match = nullptr;
     u32 match_count = 0;
