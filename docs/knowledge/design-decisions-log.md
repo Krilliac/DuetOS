@@ -607,6 +607,61 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 095 — Shell `time` / `which` / `seq` + factored kCommandSet
+
+- **Scope:** `kernel/core/shell.cpp` — three new commands, plus
+  the canonical `kCommandSet[]` lifted from a function-local
+  static into a file-scope `static const` so it has one source
+  of truth for tab-complete and the new `which` lookup.
+- **Decision:** All three are 10-30 LOC wrappers around stuff
+  that already exists. `time` recurses through `Dispatch` so
+  it inherits the full pipeline (alias / env / redirect).
+  `seq` caps at 200 because there's no Ctrl+C handler — one-
+  shot infinite output would lock a screen we can't interrupt.
+  `which` checks builtins then aliases; reporting "NOT FOUND"
+  matches `which`'s POSIX exit-code-1 case.
+- **Why:** All three are muscle-memory commands. `time` in
+  particular is what users reach for the moment they want to
+  benchmark anything; no point asking them to read tick
+  counts from `stats`.
+- **Rules out / defers:** `time` user vs system breakdown
+  (no per-task accounting). `seq START STOP STEP` POSIX form.
+  `which -a` to list shadowing.
+- **Revisit when:** SYS_SPAWN lands (`which` should also
+  resolve `/bin/<cmd>` real binaries). Per-task time
+  accounting available (separate user/sys/real).
+- **Related tracks:** Track 7 (Userland shell).
+
+---
+
+## 094 — Shell `grep` + `find`
+
+- **Scope:** `kernel/core/shell.cpp` — `grep PATTERN PATH`
+  walks line-by-line and prints matches; `find NAME`
+  recursively walks the ramfs tree printing absolute paths
+  whose leaf contains NAME, then enumerates tmpfs slots.
+  Shared `SubstringPresent` helper.
+- **Decision:** Substring match only (no regex), case-
+  sensitive, no flags. `find` walks both backends because
+  the user expects `/tmp/<name>` paths to surface alongside
+  ramfs ones — keeping them visually unified. Path buffer
+  is 128B and stack-local so the recursion doesn't pressure
+  any global state.
+- **Why:** `grep` + `find` are how you inspect any non-trivial
+  filesystem — even at 6 ramfs files it's nicer than scrolling
+  `ls`. The same shape extends to a real on-disk FS without
+  refactoring.
+- **Rules out / defers:** Regex (`grep -E`). Recursive grep.
+  `find` predicates (-type, -name with glob, -size).
+  Case-insensitive (-i). Multi-file `grep PATH PATH PATH`.
+- **Revisit when:** First user wants regex (which usually
+  means writing log filters). On-disk FS lands and the
+  recursion depth needs bumping past 128B.
+- **Related tracks:** Track 7 (Userland shell), Track 5
+  (VFS — multi-backend walker reuse).
+
+---
+
 ## 093 — /etc/motd + /etc/profile + source / man commands
 
 - **Scope:** `kernel/fs/ramfs.cpp` — seeds `/etc/motd`
