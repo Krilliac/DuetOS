@@ -183,6 +183,8 @@ void CmdHelp()
     ConsoleWriteln("  WC PATH      LINES / WORDS / BYTES");
     ConsoleWriteln("  GREP PAT P   PRINT LINES OF P CONTAINING PAT");
     ConsoleWriteln("  FIND NAME    LIST PATHS WHOSE LEAF CONTAINS NAME");
+    ConsoleWriteln("  SORT PATH    SORT LINES ALPHABETICALLY");
+    ConsoleWriteln("  UNIQ PATH    SUPPRESS CONSECUTIVE DUPLICATE LINES");
     ConsoleWriteln("  WHICH CMD    SHOW WHETHER CMD IS A BUILTIN OR ALIAS");
     ConsoleWriteln("  TIME CMD..   MEASURE WALL TIME (10 MS RESOLUTION)");
     ConsoleWriteln("  SEQ N        PRINT 1..N (CAPPED AT 200)");
@@ -773,6 +775,138 @@ bool SubstringPresent(const char* haystack, u32 hay_len, const char* needle)
     return false;
 }
 
+// Compare two byte ranges lexicographically. Returns -1/0/+1.
+int LineCompare(const char* a, u32 alen, const char* b, u32 blen)
+{
+    const u32 min = (alen < blen) ? alen : blen;
+    for (u32 i = 0; i < min; ++i)
+    {
+        if (a[i] != b[i])
+        {
+            return (a[i] < b[i]) ? -1 : 1;
+        }
+    }
+    if (alen == blen)
+        return 0;
+    return (alen < blen) ? -1 : 1;
+}
+
+// Walk `scratch[0..n)` and populate `offs`/`lens` with one
+// entry per line (excluding the terminating '\n'). Unterminated
+// final line is counted. Returns number of lines written (capped).
+u32 SliceLines(const char* scratch, u32 n, u32* offs, u32* lens, u32 cap)
+{
+    u32 count = 0;
+    u32 start = 0;
+    for (u32 i = 0; i <= n && count < cap; ++i)
+    {
+        const bool at_end = (i == n);
+        if (at_end || scratch[i] == '\n')
+        {
+            offs[count] = start;
+            lens[count] = i - start;
+            ++count;
+            start = i + 1;
+        }
+    }
+    return count;
+}
+
+void CmdSort(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("SORT: MISSING PATH");
+        return;
+    }
+    char scratch[customos::fs::kTmpFsContentMax];
+    const u32 n = ReadFileToBuf(argv[1], scratch, sizeof(scratch));
+    if (n == static_cast<u32>(-1))
+    {
+        ConsoleWrite("SORT: NO SUCH FILE: ");
+        ConsoleWriteln(argv[1]);
+        return;
+    }
+    // Fixed cap of 128 lines — well over anything we can render
+    // without scrolling far past the user's attention span, and
+    // keeps the sort arrays comfortably on the stack.
+    constexpr u32 kMaxLines = 128;
+    u32 offs[kMaxLines];
+    u32 lens[kMaxLines];
+    const u32 count = SliceLines(scratch, n, offs, lens, kMaxLines);
+    // Insertion sort — O(N^2) but N ≤ 128 and the line bodies
+    // stay in place (we only swap the index pairs).
+    for (u32 i = 1; i < count; ++i)
+    {
+        const u32 off_i = offs[i];
+        const u32 len_i = lens[i];
+        u32 j = i;
+        while (j > 0 &&
+               LineCompare(&scratch[offs[j - 1]], lens[j - 1], &scratch[off_i], len_i) > 0)
+        {
+            offs[j] = offs[j - 1];
+            lens[j] = lens[j - 1];
+            --j;
+        }
+        offs[j] = off_i;
+        lens[j] = len_i;
+    }
+    for (u32 i = 0; i < count; ++i)
+    {
+        for (u32 k = 0; k < lens[i]; ++k)
+        {
+            ConsoleWriteChar(scratch[offs[i] + k]);
+        }
+        ConsoleWriteChar('\n');
+    }
+}
+
+void CmdUniq(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("UNIQ: MISSING PATH");
+        return;
+    }
+    char scratch[customos::fs::kTmpFsContentMax];
+    const u32 n = ReadFileToBuf(argv[1], scratch, sizeof(scratch));
+    if (n == static_cast<u32>(-1))
+    {
+        ConsoleWrite("UNIQ: NO SUCH FILE: ");
+        ConsoleWriteln(argv[1]);
+        return;
+    }
+    // Classic uniq: only suppress consecutive duplicates. Walk
+    // line by line and remember the PREVIOUS line's range to
+    // compare against the current. First line always prints.
+    u32 prev_off = 0;
+    u32 prev_len = 0;
+    bool have_prev = false;
+    u32 start = 0;
+    for (u32 i = 0; i <= n; ++i)
+    {
+        const bool at_end = (i == n);
+        if (at_end || scratch[i] == '\n')
+        {
+            const u32 len = i - start;
+            const bool is_dup = have_prev &&
+                                LineCompare(&scratch[prev_off], prev_len, &scratch[start], len) == 0;
+            if (!is_dup)
+            {
+                for (u32 k = 0; k < len; ++k)
+                {
+                    ConsoleWriteChar(scratch[start + k]);
+                }
+                ConsoleWriteChar('\n');
+                prev_off = start;
+                prev_len = len;
+                have_prev = true;
+            }
+            start = i + 1;
+        }
+    }
+}
+
 void CmdGrep(u32 argc, char** argv)
 {
     if (argc < 3)
@@ -904,6 +1038,7 @@ static const char* const kCommandSet[] = {
     "mv",      "wc",      "head",    "tail",    "dmesg",   "stats",   "mem",
     "history", "set",     "unset",   "env",     "alias",   "unalias", "sysinfo",
     "source",  "man",     "grep",    "find",    "time",    "which",   "seq",
+    "sort",    "uniq",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -1956,6 +2091,16 @@ void Dispatch(char* line)
         CmdFind(argc, argv);
         return;
     }
+    if (StrEq(cmd, "sort"))
+    {
+        CmdSort(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "uniq"))
+    {
+        CmdUniq(argc, argv);
+        return;
+    }
     if (StrEq(cmd, "time"))
     {
         CmdTime(argc, argv);
@@ -2369,7 +2514,8 @@ void ShellTabComplete()
                           StrEq(g_input, "cp") || StrEq(g_input, "mv") ||
                           StrEq(g_input, "wc") || StrEq(g_input, "head") ||
                           StrEq(g_input, "tail") || StrEq(g_input, "source") ||
-                          StrEq(g_input, "grep");
+                          StrEq(g_input, "grep") || StrEq(g_input, "sort") ||
+                          StrEq(g_input, "uniq");
     g_input[first_ws] = saved;
 
     if (path_cmd)
