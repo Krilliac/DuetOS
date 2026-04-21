@@ -302,6 +302,11 @@ void CmdHelp()
     ConsoleWriteln("  NL PATH      NUMBER LINES");
     ConsoleWriteln("  REV PATH     REVERSE EACH LINE'S CHARACTERS");
     ConsoleWriteln("  EXPR A OP B  INTEGER ARITHMETIC (+ - * / %)");
+    ConsoleWriteln("  COLOR FG[BG] SET SHELL CONSOLE PALETTE (HEX)");
+    ConsoleWriteln("  RAND [N]     N PSEUDO-RANDOM 64-BIT HEX VALUES");
+    ConsoleWriteln("  FLUSHTLB     RELOAD CR3 (FLUSH NON-GLOBAL TLB)");
+    ConsoleWriteln("  CHECKSUM P   FNV1A-32 HASH OF FILE CONTENT");
+    ConsoleWriteln("  REPEAT N CMD RUN CMD N TIMES (^C ABORTS)");
     ConsoleWriteln("");
     ConsoleWriteln("KEYS:  UP/DOWN = HISTORY   TAB = COMPLETE");
     ConsoleWriteln("       CTRL+ALT+T = TOGGLE MODE");
@@ -1146,6 +1151,7 @@ static const char* const kCommandSet[] = {
     "mount",   "lsmod",   "free",    "ps",      "spawn",   "readelf",
     "hexdump", "stat",    "basename","dirname", "cal",
     "sleep",   "reset",   "tac",     "nl",      "rev",     "expr",
+    "color",   "rand",    "flushtlb","checksum","repeat",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -2228,6 +2234,207 @@ const char* ElfPtypeName(u32 t)
         return "GNU_RELRO";
     default:
         return "OTHER";
+    }
+}
+
+// Parse a hex literal like "0xA0C8FF" or "A0C8FF" into a u32.
+// Returns true + writes to *out on success.
+bool ParseHex32(const char* s, u32* out)
+{
+    if (s == nullptr || s[0] == '\0')
+        return false;
+    if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))
+        s += 2;
+    u32 v = 0;
+    u32 n = 0;
+    for (u32 i = 0; s[i] != '\0'; ++i)
+    {
+        const char c = s[i];
+        u32 nib;
+        if (c >= '0' && c <= '9')
+            nib = c - '0';
+        else if (c >= 'a' && c <= 'f')
+            nib = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F')
+            nib = c - 'A' + 10;
+        else
+            return false;
+        if (++n > 8)
+            return false;
+        v = (v << 4) | nib;
+    }
+    *out = v;
+    return true;
+}
+
+void CmdColor(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("COLOR: USAGE: COLOR FG_HEX [BG_HEX]");
+        ConsoleWriteln("  EXAMPLES: COLOR 00FFFF          (cyan on current bg)");
+        ConsoleWriteln("            COLOR A0C8FF 101828  (light blue on dark navy)");
+        ConsoleWriteln("  SHELL DEFAULTS: COLOR 80F088 181028");
+        return;
+    }
+    u32 fg = 0, bg = 0;
+    if (!ParseHex32(argv[1], &fg))
+    {
+        ConsoleWriteln("COLOR: BAD FG HEX");
+        return;
+    }
+    // Default bg to whatever the shell console is using — we
+    // don't expose a getter, so just read a sane fallback:
+    // the existing shell bg (dark navy-ish). Users can pass
+    // their own.
+    bg = 0x00181028;
+    if (argc >= 3)
+    {
+        if (!ParseHex32(argv[2], &bg))
+        {
+            ConsoleWriteln("COLOR: BAD BG HEX");
+            return;
+        }
+    }
+    customos::drivers::video::ConsoleSetColours(fg, bg);
+    ConsoleWriteln("COLOR: UPDATED. NEXT REDRAW USES THE NEW PALETTE.");
+}
+
+void CmdRand(u32 argc, char** argv)
+{
+    // Simple splitmix64 seeded from the TSC. Not cryptographic.
+    // Count defaults to 1; max 100 to keep output bounded.
+    u32 n = 1;
+    if (argc >= 2)
+    {
+        n = 0;
+        for (u32 i = 0; argv[1][i] != '\0'; ++i)
+        {
+            if (argv[1][i] < '0' || argv[1][i] > '9')
+            {
+                ConsoleWriteln("RAND: BAD COUNT");
+                return;
+            }
+            n = n * 10 + static_cast<u32>(argv[1][i] - '0');
+        }
+    }
+    if (n > 100)
+    {
+        n = 100;
+    }
+    static u64 state = 0;
+    if (state == 0)
+    {
+        u32 lo, hi;
+        asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
+        state = (static_cast<u64>(hi) << 32) | lo;
+        if (state == 0)
+            state = 0xCAFEBABE12345678ULL;
+    }
+    for (u32 i = 0; i < n; ++i)
+    {
+        state += 0x9E3779B97F4A7C15ULL;
+        u64 z = state;
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+        z = z ^ (z >> 31);
+        WriteU64Hex(z);
+        ConsoleWriteChar('\n');
+    }
+}
+
+void CmdFlushTlb()
+{
+    // Reload CR3 with its current value — the classic x86_64
+    // "flush every non-global TLB entry" primitive. Global
+    // pages survive (they're typically kernel direct-map);
+    // anything else is cold on next access.
+    const u64 cr3 = customos::arch::ReadCr3();
+    asm volatile("mov %0, %%cr3" : : "r"(cr3) : "memory");
+    ConsoleWriteln("TLB FLUSHED (CR3 RELOAD).");
+}
+
+void CmdChecksum(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("CHECKSUM: USAGE: CHECKSUM PATH");
+        return;
+    }
+    char scratch[customos::fs::kTmpFsContentMax];
+    const u32 n = ReadFileToBuf(argv[1], scratch, sizeof(scratch));
+    if (n == static_cast<u32>(-1))
+    {
+        ConsoleWrite("CHECKSUM: NO SUCH FILE: ");
+        ConsoleWriteln(argv[1]);
+        return;
+    }
+    // FNV-1a 32-bit. Fast, no allocation, good enough for
+    // shell-level "did this file change" sanity.
+    u32 h = 0x811C9DC5u;
+    for (u32 i = 0; i < n; ++i)
+    {
+        h ^= static_cast<u8>(scratch[i]);
+        h *= 0x01000193u;
+    }
+    ConsoleWrite("FNV1A32 ");
+    WriteU64Hex(h, 8);
+    ConsoleWriteChar(' ');
+    ConsoleWriteln(argv[1]);
+}
+
+void CmdRepeat(u32 argc, char** argv)
+{
+    if (argc < 3)
+    {
+        ConsoleWriteln("REPEAT: USAGE: REPEAT N CMD...");
+        return;
+    }
+    u32 n = 0;
+    for (u32 i = 0; argv[1][i] != '\0'; ++i)
+    {
+        if (argv[1][i] < '0' || argv[1][i] > '9')
+        {
+            ConsoleWriteln("REPEAT: BAD COUNT");
+            return;
+        }
+        n = n * 10 + static_cast<u32>(argv[1][i] - '0');
+    }
+    // Cap at 100 to keep the output bounded until we have
+    // proper stdout throttling.
+    if (n > 100)
+    {
+        n = 100;
+    }
+    // Join argv[2..] into one line for Dispatch. Tokenisation
+    // of args is preserved verbatim on the join.
+    char line[kInputMax];
+    u32 o = 0;
+    for (u32 i = 2; i < argc; ++i)
+    {
+        if (i > 2 && o + 1 < sizeof(line))
+            line[o++] = ' ';
+        for (u32 j = 0; argv[i][j] != '\0' && o + 1 < sizeof(line); ++j)
+            line[o++] = argv[i][j];
+    }
+    line[o] = '\0';
+    for (u32 i = 0; i < n; ++i)
+    {
+        if (ShellInterruptRequested())
+        {
+            ConsoleWriteln("^C");
+            return;
+        }
+        // Dispatch mutates `line`, so we need a fresh copy
+        // each iteration.
+        char copy[kInputMax];
+        for (u32 j = 0; j < sizeof(copy); ++j)
+        {
+            copy[j] = line[j];
+            if (line[j] == '\0')
+                break;
+        }
+        Dispatch(copy);
     }
 }
 
@@ -3981,6 +4188,31 @@ void Dispatch(char* line)
         CmdExpr(argc, argv);
         return;
     }
+    if (StrEq(cmd, "color"))
+    {
+        CmdColor(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "rand"))
+    {
+        CmdRand(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "flushtlb") || StrEq(cmd, "flush-tlb"))
+    {
+        CmdFlushTlb();
+        return;
+    }
+    if (StrEq(cmd, "checksum"))
+    {
+        CmdChecksum(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "repeat"))
+    {
+        CmdRepeat(argc, argv);
+        return;
+    }
     if (StrEq(cmd, "reboot"))
     {
         CmdRebootNow();
@@ -4408,7 +4640,7 @@ void ShellTabComplete()
                           StrEq(g_input, "uniq") || StrEq(g_input, "readelf") ||
                           StrEq(g_input, "hexdump") || StrEq(g_input, "stat") ||
                           StrEq(g_input, "tac") || StrEq(g_input, "nl") ||
-                          StrEq(g_input, "rev");
+                          StrEq(g_input, "rev") || StrEq(g_input, "checksum");
     g_input[first_ws] = saved;
 
     if (path_cmd)
