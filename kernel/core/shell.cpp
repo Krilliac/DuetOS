@@ -247,7 +247,7 @@ void CmdHelp()
     ConsoleWriteln("  TIME CMD..   MEASURE WALL TIME (10 MS RESOLUTION)");
     ConsoleWriteln("  SEQ N        PRINT 1..N (CAPPED AT 200)");
     ConsoleWriteln("  ECHO ..  > PATH   PRINT OR REDIRECT TO /tmp (>> TO APPEND)");
-    ConsoleWriteln("  DMESG [TDIWE] DUMP KERNEL LOG RING (OPT: MIN SEVERITY)");
+    ConsoleWriteln("  DMESG [TDIWE|C] DUMP KERNEL LOG RING (OR C=CLEAR)");
     ConsoleWriteln("  STATS        SCHEDULER STATISTICS");
     ConsoleWriteln("  MEM          PHYSICAL MEMORY USAGE");
     ConsoleWriteln("  HISTORY      LIST RECENT COMMANDS (!N RECALL, !! REPEAT)");
@@ -294,6 +294,9 @@ void CmdHelp()
     ConsoleWriteln("  LSMOD        LIST ACTIVE KERNEL SUBSYSTEMS");
     ConsoleWriteln("  LSBLK        LIST REGISTERED BLOCK DEVICES");
     ConsoleWriteln("  LSGPT        LIST PARTITIONS FROM GPT-PROBED DISKS");
+    ConsoleWriteln("  METRICS      LOG RESOURCE SNAPSHOT (HEAP / FRAMES / TASKS)");
+    ConsoleWriteln("  TRACE [ON|OFF] TOGGLE TRACE THRESHOLD + SHOW IN-FLIGHT SCOPES");
+    ConsoleWriteln("  READ H LBA [C] HEXDUMP C SECTORS FROM BLOCK HANDLE H AT LBA");
     ConsoleWriteln("  FREE         MEMORY USAGE (PHYS + HEAP)");
     ConsoleWriteln("  PS           LIST EVERY SCHEDULER TASK");
     ConsoleWriteln("  SPAWN KIND   LAUNCH A RING-3 TASK (hello/sandbox/jail/...)");
@@ -384,13 +387,20 @@ void CmdWindows()
 void CmdDmesg(customos::u32 argc, char** argv)
 {
     // Optional first arg picks the minimum severity. Matches the
-    // single-letter `loglevel` command ("d" / "i" / "w" / "e").
-    // Default (no arg) shows every entry.
-    customos::core::LogLevel min_level = customos::core::LogLevel::Debug;
+    // single-letter `loglevel` command ("t" / "d" / "i" / "w" / "e").
+    // Default (no arg) shows every entry. Special: `dmesg c` clears
+    // the ring (shorthand for the hidden ClearLogRing API).
+    customos::core::LogLevel min_level = customos::core::LogLevel::Trace;
     const char* banner_suffix = "";
     if (argc >= 2 && argv[1] != nullptr && argv[1][0] != 0)
     {
         const char c = argv[1][0];
+        if (c == 'c' || c == 'C')
+        {
+            customos::core::ClearLogRing();
+            ConsoleWriteln("-- KERNEL LOG RING CLEARED --");
+            return;
+        }
         switch (c)
         {
         case 't':
@@ -419,7 +429,7 @@ void CmdDmesg(customos::u32 argc, char** argv)
             banner_suffix = " [FILTER: E ONLY]";
             break;
         default:
-            ConsoleWriteln("DMESG: USE [T|D|I|W|E] FOR SEVERITY FILTER");
+            ConsoleWriteln("DMESG: USE [T|D|I|W|E] (severity) OR [C] (clear ring)");
             return;
         }
     }
@@ -1196,6 +1206,7 @@ static const char* const kCommandSet[] = {
     "hostname", "pwd",        "true",     "false",    "mount",    "lsmod",    "lsblk",    "lsgpt",   "free",   "ps",
     "spawn",    "readelf",    "hexdump",  "stat",     "basename", "dirname",  "cal",      "sleep",   "reset",  "tac",
     "nl",       "rev",        "expr",     "color",    "rand",     "flushtlb", "checksum", "repeat",  "kill",   "exec",
+    "metrics",  "trace",      "read",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -2195,6 +2206,164 @@ void CmdMount()
     // /tmp. Real mount table lands with multi-backend VFS.
     ConsoleWriteln("ramfs on /       type=ramfs (ro)");
     ConsoleWriteln("tmpfs on /tmp    type=tmpfs (rw, 16 slots, 512B each)");
+}
+
+// Shared helper: parse decimal (default) or hex (0x prefix) into u64.
+// Returns true + writes `*out` on success. Used by `read` + any future
+// command taking a sector number / address.
+bool ParseU64Str(const char* s, customos::u64* out)
+{
+    if (s == nullptr || out == nullptr || s[0] == 0)
+        return false;
+    customos::u64 v = 0;
+    customos::u32 base = 10;
+    if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))
+    {
+        s += 2;
+        base = 16;
+    }
+    if (*s == 0)
+        return false;
+    for (; *s != 0; ++s)
+    {
+        customos::u64 d;
+        if (*s >= '0' && *s <= '9')
+            d = static_cast<customos::u64>(*s - '0');
+        else if (base == 16 && *s >= 'a' && *s <= 'f')
+            d = static_cast<customos::u64>(*s - 'a' + 10);
+        else if (base == 16 && *s >= 'A' && *s <= 'F')
+            d = static_cast<customos::u64>(*s - 'A' + 10);
+        else
+            return false;
+        v = v * base + d;
+    }
+    *out = v;
+    return true;
+}
+
+void CmdMetrics()
+{
+    // One-shot LogMetrics at Info level, tagged "shell" so the
+    // origin is distinguishable from the boot-time checkpoints.
+    customos::core::LogMetrics(customos::core::LogLevel::Info, "shell", "user-requested");
+    ConsoleWriteln("(also logged to kernel ring at INFO)");
+}
+
+void CmdRead(customos::u32 argc, char** argv)
+{
+    // `read <handle> <lba> [count]` — reads up to one page (4096 B)
+    // from the given block device and hexdumps it to the console.
+    // Lets a user verify driver reads end-to-end without writing a
+    // program. Parses handle/LBA as decimal or hex (0x prefix).
+    if (argc < 3)
+    {
+        ConsoleWriteln("READ: USAGE: READ HANDLE LBA [COUNT]");
+        ConsoleWriteln("      (count in sectors, default 1, max = 4096/sector_size)");
+        return;
+    }
+    namespace storage = customos::drivers::storage;
+    customos::u64 handle_u64 = 0;
+    customos::u64 lba = 0;
+    customos::u64 count = 1;
+    if (!ParseU64Str(argv[1], &handle_u64) || handle_u64 >= 0x100000000ULL)
+    {
+        ConsoleWriteln("READ: BAD HANDLE");
+        return;
+    }
+    if (!ParseU64Str(argv[2], &lba))
+    {
+        ConsoleWriteln("READ: BAD LBA");
+        return;
+    }
+    if (argc >= 4 && !ParseU64Str(argv[3], &count))
+    {
+        ConsoleWriteln("READ: BAD COUNT");
+        return;
+    }
+    const customos::u32 handle = static_cast<customos::u32>(handle_u64);
+    const customos::u32 ssize = storage::BlockDeviceSectorSize(handle);
+    if (ssize == 0)
+    {
+        ConsoleWriteln("READ: INVALID HANDLE (no such block device)");
+        return;
+    }
+    const customos::u32 max_count = 4096u / ssize;
+    if (count == 0 || count > max_count)
+    {
+        ConsoleWrite("READ: COUNT OUT OF RANGE (max ");
+        WriteU64Hex(max_count, 0);
+        ConsoleWriteln(")");
+        return;
+    }
+    static customos::u8 buf[4096];
+    for (customos::u64 i = 0; i < 4096; ++i)
+        buf[i] = 0;
+    if (storage::BlockDeviceRead(handle, lba, static_cast<customos::u32>(count), buf) != 0)
+    {
+        ConsoleWriteln("READ: DRIVER RETURNED ERROR");
+        return;
+    }
+    const customos::u32 bytes = static_cast<customos::u32>(count) * ssize;
+    ConsoleWrite("READ ");
+    WriteU64Hex(bytes, 0);
+    ConsoleWrite(" BYTES FROM HANDLE ");
+    WriteU64Hex(handle, 0);
+    ConsoleWrite(" LBA ");
+    WriteU64Hex(lba, 0);
+    ConsoleWriteln(":");
+    // Classic 16-byte hex + ASCII rows, mirroring CmdHexdump.
+    for (customos::u32 row = 0; row < bytes; row += 16)
+    {
+        WriteU64Hex(row, 8);
+        ConsoleWrite("  ");
+        for (customos::u32 i = 0; i < 16; ++i)
+        {
+            if (row + i < bytes)
+                WriteU64Hex(buf[row + i], 2);
+            else
+                ConsoleWrite("  ");
+            ConsoleWriteChar(' ');
+            if (i == 7)
+                ConsoleWriteChar(' ');
+        }
+        ConsoleWrite(" |");
+        for (customos::u32 i = 0; i < 16 && row + i < bytes; ++i)
+        {
+            const char c = static_cast<char>(buf[row + i]);
+            ConsoleWriteChar((c >= 0x20 && c <= 0x7E) ? c : '.');
+        }
+        ConsoleWriteln("|");
+    }
+}
+
+void CmdTrace(customos::u32 argc, char** argv)
+{
+    // `trace`              — show current threshold + in-flight scopes
+    // `trace on` / `trace off` — shortcut for loglevel t / i
+    if (argc < 2)
+    {
+        const auto cur = customos::core::GetLogThreshold();
+        ConsoleWrite("TRACE THRESHOLD: ");
+        ConsoleWriteln(cur == customos::core::LogLevel::Trace ? "ON" : "OFF");
+        ConsoleWriteln("(IN-FLIGHT SCOPES LOGGED TO SERIAL BELOW)");
+        customos::core::DumpInflightScopes();
+        ConsoleWriteln("USAGE: TRACE [ON|OFF]");
+        return;
+    }
+    if (argv[1][0] == 'o' && (argv[1][1] == 'n' || argv[1][1] == 'N'))
+    {
+        customos::core::SetLogThreshold(customos::core::LogLevel::Trace);
+        ConsoleWriteln("TRACE ON (threshold = TRACE)");
+    }
+    else if (argv[1][0] == 'o' && (argv[1][1] == 'f' || argv[1][1] == 'F'))
+    {
+        customos::core::SetLogThreshold(customos::core::LogLevel::Info);
+        ConsoleWriteln("TRACE OFF (threshold = INFO)");
+    }
+    else
+    {
+        ConsoleWriteln("TRACE: USE ON|OFF");
+    }
 }
 
 void CmdLsblk()
@@ -4451,6 +4620,21 @@ void Dispatch(char* line)
     if (StrEq(cmd, "lsgpt"))
     {
         CmdLsgpt();
+        return;
+    }
+    if (StrEq(cmd, "metrics"))
+    {
+        CmdMetrics();
+        return;
+    }
+    if (StrEq(cmd, "trace"))
+    {
+        CmdTrace(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "read"))
+    {
+        CmdRead(argc, argv);
         return;
     }
     if (StrEq(cmd, "free"))

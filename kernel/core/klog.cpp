@@ -511,6 +511,16 @@ bool GetLogColor()
     return g_color_enabled;
 }
 
+void ClearLogRing()
+{
+    g_log_ring_next = 0;
+    g_log_ring_count = 0;
+    for (u64 i = 0; i < kLogRingCapacity; ++i)
+    {
+        g_log_ring[i] = LogEntry{};
+    }
+}
+
 void DumpLogRing()
 {
     arch::SerialWrite("[panic] --- log ring (last ");

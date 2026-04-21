@@ -190,6 +190,11 @@ void KLogSelfTest();
 /// multiple calls emit the same content.
 void DumpLogRing();
 
+/// Drop every entry currently in the ring. Used by `dmesg c` to
+/// "zero the clock" so the next `dmesg` starts fresh. Does not
+/// affect in-flight scope tracking (that has its own table).
+void ClearLogRing();
+
 /// Size of the log-ring buffer. Exposed so tests / diagnostics can
 /// reason about how many historical lines are retained.
 inline constexpr u64 kLogRingCapacity = 64;
