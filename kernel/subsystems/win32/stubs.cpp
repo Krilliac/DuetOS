@@ -52,6 +52,7 @@ constexpr u32 kOffStrlen = 0xFD;              // batch 7 — 17 bytes
 constexpr u32 kOffWcslen = 0x10E;             // batch 7 — 22 bytes
 constexpr u32 kOffStrchr = 0x124;             // batch 7 — 23 bytes
 constexpr u32 kOffStrcpy = 0x13B;             // batch 7 — 23 bytes
+constexpr u32 kOffReturnOne = 0x152;          // batch 8 — 6 bytes (shared "mov eax, 1; ret")
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -406,10 +407,21 @@ constexpr u8 kStubsBytes[] = {
     0xEB, 0xED,           // 0x14F jmp -19 -> 0x13E .loop
     // .done:
     0xC3,                 // 0x151 ret
+
+    // === Batch 8: kernel32 safe-ignore shims ==================
+
+    // --- Return-one (offset 0x152, 6 bytes) --------------------
+    // Shared stub for Win32 functions whose v0 semantic is
+    // "report success, do nothing". Mostly BOOL-returning
+    // functions where TRUE (1) means "succeeded" — e.g.
+    // CloseHandle, SetConsoleCtrlHandler. Some callers
+    // branch on the BOOL, so 1 is the safe default.
+    0xB8, 0x01, 0x00, 0x00, 0x00, // 0x152 mov eax, 1
+    0xC3,                         // 0x157 ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x152, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0x158, "stub layout drifted; update kOff* constants");
 
 struct StubEntry
 {
@@ -518,6 +530,36 @@ constexpr StubEntry kStubsTable[] = {
     {"msvcrt.dll", "wcslen", kOffWcslen},
     {"msvcrt.dll", "strchr", kOffStrchr},
     {"msvcrt.dll", "strcpy", kOffStrcpy},
+
+    // Batch 8 — kernel32 "safe ignore" shims. These functions
+    // do real work on Windows but can safely return a sentinel
+    // value in v0 without causing the caller to immediately
+    // crash. Most of them surface in the windows-kill.exe
+    // import list; this batch narrows that gap.
+    //
+    // Return-zero family (returns NULL / FALSE / 0):
+    //   GetModuleHandle* — NULL means "module not found"
+    //     (or, for NULL arg, a default that's fine to be 0).
+    //   GetProcAddress   — NULL means "symbol not exported";
+    //     caller falls back.
+    //   IsDebuggerPresent          — FALSE = not debugged.
+    //   IsProcessorFeaturePresent  — FALSE = feature absent;
+    //     caller uses non-SIMD fallback path.
+    //   SetUnhandledExceptionFilter — NULL = no previous filter.
+    //   UnhandledExceptionFilter    — 0 = EXCEPTION_CONTINUE_SEARCH.
+    {"kernel32.dll", "GetModuleHandleA", kOffReturnZero},
+    {"kernel32.dll", "GetModuleHandleW", kOffReturnZero},
+    {"kernel32.dll", "GetProcAddress", kOffReturnZero},
+    {"kernel32.dll", "IsDebuggerPresent", kOffReturnZero},
+    {"kernel32.dll", "IsProcessorFeaturePresent", kOffReturnZero},
+    {"kernel32.dll", "SetUnhandledExceptionFilter", kOffReturnZero},
+    {"kernel32.dll", "UnhandledExceptionFilter", kOffReturnZero},
+
+    // Return-one family (returns TRUE / 1 = success):
+    //   CloseHandle          — pretend we closed it.
+    //   SetConsoleCtrlHandler — pretend we registered.
+    {"kernel32.dll", "CloseHandle", kOffReturnOne},
+    {"kernel32.dll", "SetConsoleCtrlHandler", kOffReturnOne},
 };
 
 // Case-insensitive strcmp for ASCII. Win32 DLL name
