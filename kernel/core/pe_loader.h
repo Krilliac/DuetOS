@@ -95,9 +95,15 @@ void PeReport(const u8* file, u64 file_len);
 struct PeLoadResult
 {
     bool ok;
-    u64 entry_va;  // ImageBase + AddressOfEntryPoint
-    u64 stack_va;  // Lowest VA of the stack page.
-    u64 stack_top; // rsp at ring-3 entry (stack_va + kPageSize).
+    bool imports_resolved; // true iff this PE had imports the resolver patched
+                           // — SpawnPeFile uses this flag to decide whether to
+                           // stand up the per-process Win32 heap. Freestanding
+                           // PEs (hello.exe) get ok=true, imports_resolved=false
+                           // and skip heap init to keep their frame footprint
+                           // down.
+    u64 entry_va;          // ImageBase + AddressOfEntryPoint
+    u64 stack_va;          // Lowest VA of the stack page.
+    u64 stack_top;         // rsp at ring-3 entry (stack_va + kPageSize).
     u64 image_base;
     u64 image_size;
 };

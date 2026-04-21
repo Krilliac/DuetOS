@@ -1,4 +1,4 @@
-# Win32 subsystem v0 — import resolution + 7 stub batches
+# Win32 subsystem v0 — import resolution + 9 stub batches (heap landed)
 
 **Type:** Observation · **Status:** Active · **Last updated:** 2026-04-21
 
@@ -12,7 +12,7 @@ imported `{dll, func}` to a handful of machine-code thunks
 translating the Windows x64 ABI into CustomOS native
 syscalls.
 
-As of 2026-04-21, **7 batches** of stubs have landed:
+As of 2026-04-21, **9 batches** of stubs have landed:
 
 | Batch | DLLs | Functions | Notes |
 |---|---|---|---|
@@ -24,12 +24,49 @@ As of 2026-04-21, **7 batches** of stubs have landed:
 | 5 | vcruntime140 | `memset`, `memcpy`, `memmove` | + SSE enablement (CR0/CR4) + rsp alignment fix |
 | 6 | 5 apiset DLLs + ucrtbase | ~17 UCRT startup shims | Most → return-0 or nop |
 | 7 | 3 apiset DLLs + ucrtbase + msvcrt | `strcmp`, `strlen`, `wcslen`, `strchr`, `strcpy` | Pure assembly loops |
+| 8 | kernel32 | `GetModuleHandle*`, `GetProcAddress`, `IsDebuggerPresent`, `CloseHandle`, `SetConsoleCtrlHandler`, `SetUnhandledExceptionFilter`, `UnhandledExceptionFilter`, `IsProcessorFeaturePresent` | Safe-ignore shims (return 0/1) |
+| 9 | kernel32 + ucrt/msvcrt/apiset-heap | `HeapAlloc`, `HeapFree`, `GetProcessHeap`, `HeapCreate`, `HeapDestroy`, `HeapReAlloc`, `HeapSize`, `malloc`, `free`, `calloc`, `realloc`, `_aligned_malloc`, `_aligned_free` | + `SYS_HEAP_ALLOC`/`SYS_HEAP_FREE` + per-process 64 KiB heap |
 
-Total: **~45 Win32 functions resolved across 10 DLL names**.
-`hello_winapi.exe` exercises every batch on boot; 14 kernel32
-imports, 3 vcruntime140, 10+ UCRT apiset imports, all
-resolve, all execute, process exits with the round-tripped
-`SetLastError(0xBEEF)` value.
+Total: **~60 Win32 functions resolved across 11 DLL names**.
+`hello_winapi.exe` exercises every batch on boot: process
+exits with `SetLastError(0xBEEF)` round-trip as the success
+signature.
+
+## Batch 9 — process heap
+
+First stubs that carry real kernel state. The allocator is
+**kernel-side**, with the free list living **inside** the
+user's mapped heap region:
+
+- `kernel/subsystems/win32/heap.{h,cpp}` — first-fit
+  allocator with O(1) free-prepend, no coalescing.
+- `Process::heap_base / heap_pages / heap_free_head` track
+  per-process state. Populated by `Win32HeapInit(proc)` from
+  `SpawnPeFile` right after `ProcessCreate` succeeds, **only
+  when the PE had imports** — freestanding PEs (hello.exe)
+  skip the 16-frame cost.
+- Heap region: 16 pages (64 KiB) at fixed user VA
+  `kWin32HeapVa = 0x50000000`, mapped RW+NX.
+- Syscalls `SYS_HEAP_ALLOC = 11`, `SYS_HEAP_FREE = 12`.
+- Stubs trampoline directly: `mov rdi, r8; mov eax, 11;
+  int 0x80; ret` for HeapAlloc; same shape for malloc except
+  size comes from `rcx`.
+- Block header: 16 bytes (`size`, `next`), payload follows.
+  Allocated payload returns `header + 8`; `free()` reads
+  back from `payload - 8`.
+- `calloc` is a 35-byte stub that calls `SYS_HEAP_ALLOC`,
+  then does `rep stosb` to zero-fill the returned region.
+- `HeapReAlloc` / `realloc` return NULL in v0 (safe failure —
+  caller keeps old pointer). Full impl needs block-size
+  tracking on alloc, deferred.
+
+Boot log confirms three round-trips:
+```
+[w32-heap] init pid=0xf base=0x50000000 size=0x10000
+[heap] HeapAlloc + GetProcessHeap OK
+[heap] malloc+free+malloc round-trip OK
+[heap] calloc zero-fill OK
+```
 
 ## The mechanism, top to bottom
 

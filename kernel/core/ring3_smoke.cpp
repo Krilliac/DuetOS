@@ -12,6 +12,7 @@
 #include "../mm/page.h"
 #include "../mm/paging.h"
 #include "../sched/sched.h"
+#include "../subsystems/win32/heap.h"
 #include "elf_loader.h"
 #include "klog.h"
 #include "panic.h"
@@ -1611,6 +1612,21 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     {
         AddressSpaceRelease(as);
         return 0;
+    }
+    // Per-process Win32 heap. Only initialised for PEs that
+    // actually imported anything — a freestanding PE like
+    // /bin/hello.exe doesn't call HeapAlloc and shouldn't burn
+    // the 16 frames the heap region costs.
+    if (r.imports_resolved)
+    {
+        if (!win32::Win32HeapInit(proc))
+        {
+            SerialWrite("[ring3] win32 heap init failed for \"");
+            SerialWrite(name);
+            SerialWrite("\"\n");
+            AddressSpaceRelease(as);
+            return 0;
+        }
     }
     SerialWrite("[ring3] pe spawn name=\"");
     SerialWrite(name);

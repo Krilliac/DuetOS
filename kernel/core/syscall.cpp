@@ -5,6 +5,7 @@
 #include "../fs/vfs.h"
 #include "../mm/paging.h"
 #include "../sched/sched.h"
+#include "../subsystems/win32/heap.h"
 #include "klog.h"
 #include "process.h"
 #include "ring3_smoke.h"
@@ -196,6 +197,29 @@ void SyscallDispatch(arch::TrapFrame* frame)
         {
             frame->rax = 0;
         }
+        return;
+    }
+
+    case SYS_HEAP_ALLOC:
+    {
+        // rdi = size in bytes. Returns user VA or 0 on OOM.
+        // See kernel/subsystems/win32/heap.cpp for the first-fit
+        // allocator. Unprivileged — every Win32 process gets
+        // its own heap mapped during PeLoad; the syscall only
+        // reads/writes that region through the process's own
+        // frames.
+        Process* proc = CurrentProcess();
+        frame->rax = (proc != nullptr) ? win32::Win32HeapAlloc(proc, frame->rdi) : 0;
+        return;
+    }
+
+    case SYS_HEAP_FREE:
+    {
+        // rdi = user ptr (or 0 for no-op). Returns 0.
+        Process* proc = CurrentProcess();
+        if (proc != nullptr)
+            win32::Win32HeapFree(proc, frame->rdi);
+        frame->rax = 0;
         return;
     }
 

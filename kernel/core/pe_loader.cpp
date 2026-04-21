@@ -639,6 +639,7 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, customos::mm::AddressSpace* as
     }
 
     r.ok = true;
+    r.imports_resolved = (ps == PeStatus::ImportsPresent);
     r.entry_va = h.image_base + h.entry_rva;
     r.stack_va = kV0StackVa;
     r.stack_top = kV0StackVa + kPageSize;

@@ -31,6 +31,7 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     core/elf_loader.cpp
     core/pe_loader.cpp
     core/ring3_smoke.cpp
+    subsystems/win32/heap.cpp
     subsystems/win32/stubs.cpp
     core/shell.cpp
     core/stack_canary.cpp

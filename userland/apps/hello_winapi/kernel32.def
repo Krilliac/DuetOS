@@ -36,3 +36,11 @@ EXPORTS
     EnterCriticalSection
     LeaveCriticalSection
     DeleteCriticalSection
+    ; Batch 9 — process heap
+    GetProcessHeap
+    HeapAlloc
+    HeapFree
+    HeapCreate
+    HeapDestroy
+    HeapReAlloc
+    HeapSize

@@ -46,6 +46,9 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     p->ticks_used = 0;
     p->sandbox_denials = 0;
     p->win32_last_error = 0; // ERROR_SUCCESS
+    p->heap_base = 0;        // PeLoad fills these when the PE has
+    p->heap_pages = 0;       // imports — see subsystems/win32/heap.cpp
+    p->heap_free_head = 0;
     p->refcount = 1;
 
     ++g_live_processes;

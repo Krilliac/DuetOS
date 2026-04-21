@@ -53,6 +53,12 @@ constexpr u32 kOffWcslen = 0x10E;             // batch 7 — 22 bytes
 constexpr u32 kOffStrchr = 0x124;             // batch 7 — 23 bytes
 constexpr u32 kOffStrcpy = 0x13B;             // batch 7 — 23 bytes
 constexpr u32 kOffReturnOne = 0x152;          // batch 8 — 6 bytes (shared "mov eax, 1; ret")
+constexpr u32 kOffHeapAlloc = 0x158;          // batch 9 — 11 bytes
+constexpr u32 kOffHeapFree = 0x163;           // batch 9 — 16 bytes
+constexpr u32 kOffGetProcessHeap = 0x173;     // batch 9 — 8 bytes
+constexpr u32 kOffMalloc = 0x17B;             // batch 9 — 11 bytes
+constexpr u32 kOffFree = 0x186;               // batch 9 — 11 bytes
+constexpr u32 kOffCalloc = 0x191;             // batch 9 — 35 bytes
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -418,10 +424,95 @@ constexpr u8 kStubsBytes[] = {
     // branch on the BOOL, so 1 is the safe default.
     0xB8, 0x01, 0x00, 0x00, 0x00, // 0x152 mov eax, 1
     0xC3,                         // 0x157 ret
+
+    // === Batch 9: Win32 process heap ==========================
+    //
+    // Per-process heap backed by SYS_HEAP_ALLOC / SYS_HEAP_FREE,
+    // serviced by kernel/subsystems/win32/heap.cpp against the
+    // 16-page region mapped at 0x50000000 during PeLoad.
+    //
+    // Flag arguments (dwFlags on HeapAlloc / HeapFree) are
+    // IGNORED in v0. Notable consequence: HEAP_ZERO_MEMORY
+    // (0x8) is not honoured — callers that need zeroed memory
+    // must use calloc (which zeros explicitly) or memset
+    // afterwards. HEAP_GENERATE_EXCEPTIONS (0x4) is also
+    // ignored — OOM returns NULL, never raises.
+
+    // --- HeapAlloc (offset 0x158, 11 bytes) --------------------
+    // LPVOID HeapAlloc(HANDLE hHeap=rcx, DWORD dwFlags=rdx, SIZE_T dwBytes=r8).
+    // v0: ignore hHeap + dwFlags. Pass dwBytes through to
+    // SYS_HEAP_ALLOC. rax = returned VA or 0 on OOM.
+    0x4C, 0x89, 0xC7,             // 0x158 mov rdi, r8
+    0xB8, 0x0B, 0x00, 0x00, 0x00, // 0x15B mov eax, 11 (SYS_HEAP_ALLOC)
+    0xCD, 0x80,                   // 0x160 int 0x80
+    0xC3,                         // 0x162 ret
+
+    // --- HeapFree (offset 0x163, 16 bytes) ---------------------
+    // BOOL HeapFree(HANDLE hHeap=rcx, DWORD dwFlags=rdx, LPVOID lpMem=r8).
+    // v0: ignore hHeap + dwFlags. Pass lpMem to SYS_HEAP_FREE.
+    // Always return TRUE — the kernel side silently ignores
+    // null/out-of-range pointers (Win32 contract: free(NULL)
+    // is legal and should not fail).
+    0x4C, 0x89, 0xC7,             // 0x163 mov rdi, r8
+    0xB8, 0x0C, 0x00, 0x00, 0x00, // 0x166 mov eax, 12 (SYS_HEAP_FREE)
+    0xCD, 0x80,                   // 0x16B int 0x80
+    0xB8, 0x01, 0x00, 0x00, 0x00, // 0x16D mov eax, 1  ; BOOL TRUE
+    0xC3,                         // 0x172 ret
+
+    // --- GetProcessHeap (offset 0x173, 8 bytes) ----------------
+    // HANDLE GetProcessHeap(void). Returns the heap base VA
+    // as an opaque handle. v0 collapses all heap handles to
+    // the same value; HeapAlloc's stub ignores it.
+    0x48, 0xC7, 0xC0, 0x00, 0x00, 0x00, 0x50, // 0x173 mov rax, 0x50000000
+    0xC3,                                     // 0x17A ret
+
+    // --- malloc (offset 0x17B, 11 bytes) -----------------------
+    // void* malloc(size_t size=rcx).
+    // Identical to HeapAlloc but takes size in rcx (x64 ABI
+    // first arg position) instead of r8.
+    0x48, 0x89, 0xCF,             // 0x17B mov rdi, rcx
+    0xB8, 0x0B, 0x00, 0x00, 0x00, // 0x17E mov eax, 11 (SYS_HEAP_ALLOC)
+    0xCD, 0x80,                   // 0x183 int 0x80
+    0xC3,                         // 0x185 ret
+
+    // --- free (offset 0x186, 11 bytes) -------------------------
+    // void free(void* ptr=rcx).
+    // No return value; rax left as syscall result (0) which
+    // is fine — C "void" discards it.
+    0x48, 0x89, 0xCF,             // 0x186 mov rdi, rcx
+    0xB8, 0x0C, 0x00, 0x00, 0x00, // 0x189 mov eax, 12 (SYS_HEAP_FREE)
+    0xCD, 0x80,                   // 0x18E int 0x80
+    0xC3,                         // 0x190 ret
+
+    // --- calloc (offset 0x191, 35 bytes) -----------------------
+    // void* calloc(size_t count=rcx, size_t size=rdx).
+    // Allocate count*size bytes and zero-fill. Zero on OOM.
+    //
+    // Implementation:
+    //   rcx = count * size (imul is nonzero-trashing, rdx is
+    //         only read; after imul, rdx is untouched)
+    //   r9  = saved count*size (for the stosb loop)
+    //   SYS_HEAP_ALLOC preserves r9 (int 0x80 only writes rax).
+    //   On success: rep stosb zeros [rdi, rdi+rcx); push/pop
+    //   rax around the loop because stosb destroys rdi, rcx.
+    0x48, 0x0F, 0xAF, 0xCA,       // 0x191 imul rcx, rdx       ; rcx = count*size
+    0x48, 0x89, 0xCF,             // 0x195 mov rdi, rcx        ; arg: size
+    0x49, 0x89, 0xC9,             // 0x198 mov r9, rcx         ; save size for stosb
+    0xB8, 0x0B, 0x00, 0x00, 0x00, // 0x19B mov eax, 11 (SYS_HEAP_ALLOC)
+    0xCD, 0x80,                   // 0x1A0 int 0x80            ; rax = ptr or 0
+    0x48, 0x85, 0xC0,             // 0x1A2 test rax, rax
+    0x74, 0x0C,                   // 0x1A5 jz +12 -> 0x1B3 (ret)
+    0x48, 0x89, 0xC7,             // 0x1A7 mov rdi, rax        ; dst
+    0x4C, 0x89, 0xC9,             // 0x1AA mov rcx, r9         ; count
+    0x50,                         // 0x1AD push rax            ; preserve return
+    0x30, 0xC0,                   // 0x1AE xor al, al          ; zero byte
+    0xF3, 0xAA,                   // 0x1B0 rep stosb
+    0x58,                         // 0x1B2 pop rax
+    0xC3,                         // 0x1B3 ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x158, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0x1B4, "stub layout drifted; update kOff* constants");
 
 struct StubEntry
 {
@@ -560,6 +651,59 @@ constexpr StubEntry kStubsTable[] = {
     //   SetConsoleCtrlHandler — pretend we registered.
     {"kernel32.dll", "CloseHandle", kOffReturnOne},
     {"kernel32.dll", "SetConsoleCtrlHandler", kOffReturnOne},
+
+    // Batch 9 — Win32 process heap, backed by the per-process
+    // 16-page region at 0x50000000 and SYS_HEAP_ALLOC /
+    // SYS_HEAP_FREE. See kernel/subsystems/win32/heap.cpp.
+    //
+    // kernel32 heap exports: take a HANDLE arg that v0
+    // ignores — GetProcessHeap returns the same cookie
+    // HeapAlloc ignores, so it's internally consistent.
+    {"kernel32.dll", "GetProcessHeap", kOffGetProcessHeap},
+    {"kernel32.dll", "HeapAlloc", kOffHeapAlloc},
+    {"kernel32.dll", "HeapFree", kOffHeapFree},
+    // HeapCreate: Win32 normally creates a private heap.
+    // v0 collapses to the shared process heap — same handle
+    // as GetProcessHeap. HeapDestroy is a no-op returning
+    // TRUE (we never actually free the heap pages).
+    {"kernel32.dll", "HeapCreate", kOffGetProcessHeap},
+    {"kernel32.dll", "HeapDestroy", kOffReturnOne},
+    // HeapReAlloc: v0 returns NULL (allocation failed). A
+    // well-behaved caller keeps its old pointer on NULL
+    // return. Real realloc support needs block-size tracking
+    // via the header — deferred.
+    {"kernel32.dll", "HeapReAlloc", kOffReturnZero},
+    // HeapSize: v0 returns 0 as a sentinel. Proper
+    // implementation would read the 8-byte size header
+    // preceding the pointer. Deferred.
+    {"kernel32.dll", "HeapSize", kOffReturnZero},
+
+    // UCRT / msvcrt / apiset heap names — all forward to the
+    // same syscall-backed stubs. realloc returns NULL; malloc
+    // and free are straight-through.
+    {"api-ms-win-crt-heap-l1-1-0.dll", "malloc", kOffMalloc},
+    {"api-ms-win-crt-heap-l1-1-0.dll", "free", kOffFree},
+    {"api-ms-win-crt-heap-l1-1-0.dll", "calloc", kOffCalloc},
+    {"api-ms-win-crt-heap-l1-1-0.dll", "realloc", kOffReturnZero},
+    // _aligned_malloc / _aligned_free: v0 ignores alignment.
+    // The allocator already returns 8-byte aligned pointers,
+    // which covers most callers (16-byte alignment failure
+    // will surface later if anything needs AVX/SSE locals
+    // stored in a heap allocation).
+    {"api-ms-win-crt-heap-l1-1-0.dll", "_aligned_malloc", kOffMalloc},
+    {"api-ms-win-crt-heap-l1-1-0.dll", "_aligned_free", kOffFree},
+
+    {"ucrtbase.dll", "malloc", kOffMalloc},
+    {"ucrtbase.dll", "free", kOffFree},
+    {"ucrtbase.dll", "calloc", kOffCalloc},
+    {"ucrtbase.dll", "realloc", kOffReturnZero},
+    {"ucrtbase.dll", "_aligned_malloc", kOffMalloc},
+    {"ucrtbase.dll", "_aligned_free", kOffFree},
+
+    {"msvcrt.dll", "malloc", kOffMalloc},
+    {"msvcrt.dll", "free", kOffFree},
+    {"msvcrt.dll", "calloc", kOffCalloc},
+    {"msvcrt.dll", "realloc", kOffReturnZero},
 };
 
 // Case-insensitive strcmp for ASCII. Win32 DLL name

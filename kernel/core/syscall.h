@@ -92,6 +92,20 @@ enum SyscallNumber : u64
     // exposes them via syscalls until per-thread TEBs land.
     SYS_GETLASTERROR = 9,
     SYS_SETLASTERROR = 10,
+
+    // SYS_HEAP_ALLOC / SYS_HEAP_FREE: Win32 process-heap
+    // allocator backends. HEAP_ALLOC takes rdi = size in bytes,
+    // returns the user VA of the allocation (0 on OOM).
+    // HEAP_FREE takes rdi = pointer returned by a prior
+    // HEAP_ALLOC, returns 0 (value ignored by the user stubs).
+    //
+    // Unprivileged: every Win32 process gets its own heap
+    // region mapped at 0x50000000 when the PE loader stands
+    // up the stubs page. The kernel32 stubs HeapAlloc /
+    // HeapFree / malloc / free / calloc trampoline through
+    // these syscalls. See kernel/subsystems/win32/heap.h.
+    SYS_HEAP_ALLOC = 11,
+    SYS_HEAP_FREE = 12,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit
