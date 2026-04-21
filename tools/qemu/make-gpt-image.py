@@ -35,6 +35,34 @@ PART_TYPE = uuid.UUID("0FC63DAF-8483-4772-8E79-3D69D8477DE4")
 
 MARKER = b"CUSTOMOS"
 
+# ----- FAT32 layout written into the data partition -----------------------
+# All values are sectors-within-the-partition. Partition starts at
+# absolute LBA FIRST_LBA, so partition-LBA 0 == absolute LBA FIRST_LBA.
+#
+# Microsoft FAT32 spec minimum useful layout (15 MiB partition):
+#   reserved sectors       : 32
+#   FAT count              : 2
+#   FAT size (each)        : 64 sectors = 8192 entries
+#   sectors per cluster    : 8 (= 4 KiB clusters)
+#   root dir cluster       : 2
+#
+# Data region (cluster N) absolute sector =
+#     FIRST_LBA + reserved + num_fats*fat_size + (N-2)*sectors_per_cluster
+#
+# Seeds the root directory with one file, HELLO.TXT, containing a short
+# ASCII string. The kernel's FAT32 self-test reads LBA 0 of the partition,
+# parses the BPB, walks the root, and logs each entry — the test succeeds
+# iff "HELLO   TXT" appears in that listing.
+
+FAT_RESERVED = 32
+FAT_NUM_FATS = 2
+FAT_FATSZ = 64  # sectors per FAT
+FAT_SPC = 8     # sectors per cluster (4 KiB)
+FAT_ROOT_CLUSTER = 2
+FAT_FILE_CLUSTER = 3
+FAT_FILE_NAME = b"HELLO   TXT"  # 8.3, space-padded, no dot
+FAT_FILE_BODY = b"hello from fat32\n"
+
 
 def build_pmbr() -> bytearray:
     sec = bytearray(SECTOR)
@@ -87,6 +115,102 @@ def build_header(entries_crc: int) -> bytearray:
     return hdr
 
 
+def build_fat32(part_sector_count: int) -> bytearray:
+    """Build a FAT32 region `part_sector_count` sectors long.
+
+    Returns a bytearray exactly `part_sector_count * SECTOR` bytes. Writes:
+      - Boot sector (BPB) at sector 0 (+ backup at sector 6)
+      - FSInfo at sector 1
+      - FAT1 + FAT2 starting at sector 32
+      - Root directory in cluster 2 with ONE file entry (HELLO.TXT)
+      - File data at cluster 3
+    """
+    buf = bytearray(part_sector_count * SECTOR)
+
+    # BPB.
+    bs = bytearray(SECTOR)
+    bs[0:3] = b"\xEB\x58\x90"          # JMP short + NOP
+    bs[3:11] = b"CUSTOMOS"             # OEM name (8 bytes)
+    struct.pack_into("<H", bs, 11, SECTOR)          # bytes_per_sector
+    bs[13] = FAT_SPC                                # sectors_per_cluster
+    struct.pack_into("<H", bs, 14, FAT_RESERVED)    # reserved_sectors
+    bs[16] = FAT_NUM_FATS                           # num_fats
+    struct.pack_into("<H", bs, 17, 0)               # root_entries (0 for FAT32)
+    struct.pack_into("<H", bs, 19, 0)               # total_sectors_16 (0 for FAT32)
+    bs[21] = 0xF8                                   # media
+    struct.pack_into("<H", bs, 22, 0)               # fat_size_16 (0 for FAT32)
+    struct.pack_into("<H", bs, 24, 32)              # sectors_per_track (legacy)
+    struct.pack_into("<H", bs, 26, 64)              # num_heads (legacy)
+    struct.pack_into("<I", bs, 28, 0)               # hidden_sectors
+    struct.pack_into("<I", bs, 32, part_sector_count)   # total_sectors_32
+    struct.pack_into("<I", bs, 36, FAT_FATSZ)       # fat_size_32
+    struct.pack_into("<H", bs, 40, 0)               # ext_flags
+    struct.pack_into("<H", bs, 42, 0)               # fs_version
+    struct.pack_into("<I", bs, 44, FAT_ROOT_CLUSTER)    # root_cluster
+    struct.pack_into("<H", bs, 48, 1)               # fs_info sector
+    struct.pack_into("<H", bs, 50, 6)               # backup_boot sector
+    # (reserved 52..63)
+    bs[64] = 0x80                                   # drive_number
+    bs[65] = 0                                      # reserved
+    bs[66] = 0x29                                   # boot_sig
+    struct.pack_into("<I", bs, 67, 0xCAFEBABE)      # volume_id
+    bs[71:82] = b"CUSTOMOS   "                      # volume_label (11 bytes)
+    bs[82:90] = b"FAT32   "                         # fs_type (8 bytes)
+    bs[510] = 0x55
+    bs[511] = 0xAA
+    buf[0:SECTOR] = bs
+    buf[6 * SECTOR:7 * SECTOR] = bs   # backup
+
+    # FSInfo: lead sig 0x41615252 @ 0, struct sig 0x61417272 @ 484,
+    # trail sig 0xAA550000 @ 508. Free count / next free = 0xFFFFFFFF (unknown).
+    fsinfo = bytearray(SECTOR)
+    struct.pack_into("<I", fsinfo, 0,   0x41615252)
+    struct.pack_into("<I", fsinfo, 484, 0x61417272)
+    struct.pack_into("<I", fsinfo, 488, 0xFFFFFFFF)
+    struct.pack_into("<I", fsinfo, 492, 0xFFFFFFFF)
+    struct.pack_into("<I", fsinfo, 508, 0xAA550000)
+    buf[1 * SECTOR:2 * SECTOR] = fsinfo
+
+    # FAT table: 4 bytes per entry, little-endian, top 4 bits reserved (0).
+    # Entry 0 = media | 0x0FFFFF00, entry 1 = 0x0FFFFFFF (dirty/clean trailer),
+    # entry 2 = 0x0FFFFFFF (EOC for the one-cluster root directory),
+    # entry 3 = 0x0FFFFFFF (EOC for the one-cluster test file).
+    fat = bytearray(FAT_FATSZ * SECTOR)
+    struct.pack_into("<I", fat, 0 * 4, 0x0FFFFFF8)
+    struct.pack_into("<I", fat, 1 * 4, 0x0FFFFFFF)
+    struct.pack_into("<I", fat, 2 * 4, 0x0FFFFFFF)  # root dir EOC
+    struct.pack_into("<I", fat, 3 * 4, 0x0FFFFFFF)  # HELLO.TXT EOC
+    fat1_off = FAT_RESERVED * SECTOR
+    fat2_off = fat1_off + FAT_FATSZ * SECTOR
+    buf[fat1_off:fat1_off + len(fat)] = fat
+    buf[fat2_off:fat2_off + len(fat)] = fat
+
+    # Root directory (cluster 2). One 32-byte SFN entry.
+    data_start_sector = FAT_RESERVED + FAT_NUM_FATS * FAT_FATSZ
+    root_off = data_start_sector * SECTOR
+    entry = bytearray(32)
+    entry[0:11] = FAT_FILE_NAME            # 8.3 short name
+    entry[11] = 0x20                       # ATTR_ARCHIVE
+    entry[12] = 0                          # NTRes
+    entry[13] = 0                          # CrtTimeTenth
+    struct.pack_into("<H", entry, 14, 0)   # creation time
+    struct.pack_into("<H", entry, 16, 0)   # creation date
+    struct.pack_into("<H", entry, 18, 0)   # last access date
+    struct.pack_into("<H", entry, 20, 0)   # first_cluster_high (= 0; cluster 3 fits in low)
+    struct.pack_into("<H", entry, 22, 0)   # write time
+    struct.pack_into("<H", entry, 24, 0)   # write date
+    struct.pack_into("<H", entry, 26, FAT_FILE_CLUSTER)  # first_cluster_low
+    struct.pack_into("<I", entry, 28, len(FAT_FILE_BODY))
+    buf[root_off:root_off + 32] = entry
+
+    # File data at cluster 3.
+    file_cluster_sector = data_start_sector + (FAT_FILE_CLUSTER - 2) * FAT_SPC
+    file_off = file_cluster_sector * SECTOR
+    buf[file_off:file_off + len(FAT_FILE_BODY)] = FAT_FILE_BODY
+
+    return buf
+
+
 def main(out_path: str) -> None:
     img = bytearray(TOTAL_SECTORS * SECTOR)
     img[0:SECTOR] = build_pmbr()
@@ -98,8 +222,12 @@ def main(out_path: str) -> None:
     img[1 * SECTOR:1 * SECTOR + len(hdr)] = hdr
     img[2 * SECTOR:2 * SECTOR + len(entries)] = entries
 
-    # Marker at the first LBA of the data partition.
-    img[FIRST_LBA * SECTOR:FIRST_LBA * SECTOR + len(MARKER)] = MARKER
+    # Format the data partition as FAT32. Blanks the CUSTOMOS marker that
+    # used to live at byte 0 of the partition — the BPB lives there now;
+    # the kernel no longer needs the raw marker since it can parse the FS.
+    part_sectors = LAST_LBA - FIRST_LBA + 1
+    fat_region = build_fat32(part_sectors)
+    img[FIRST_LBA * SECTOR:FIRST_LBA * SECTOR + len(fat_region)] = fat_region
 
     with open(out_path, "wb") as f:
         f.write(img)

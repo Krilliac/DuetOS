@@ -17,6 +17,7 @@
 #include "../drivers/storage/ahci.h"
 #include "../drivers/storage/block.h"
 #include "../drivers/storage/nvme.h"
+#include "../fs/fat32.h"
 #include "../fs/gpt.h"
 #include "../apps/calculator.h"
 #include "../apps/clock.h"
@@ -772,6 +773,9 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
 
     SerialWrite("[boot] Probing GPT on block devices.\n");
     customos::fs::gpt::GptSelfTest();
+
+    SerialWrite("[boot] Probing FAT32 on block devices.\n");
+    customos::fs::fat32::Fat32SelfTest();
 
     // Metrics checkpoint: everything above is bringup overhead; what
     // the system consumes from here on is steady-state.
