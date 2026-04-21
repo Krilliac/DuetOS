@@ -1,14 +1,27 @@
 #include "shell.h"
 
+#include "../arch/x86_64/cpu.h"
+#include "../arch/x86_64/hpet.h"
+#include "../arch/x86_64/lapic.h"
 #include "../arch/x86_64/rtc.h"
+#include "../arch/x86_64/serial.h"
+#include "../arch/x86_64/smp.h"
+#include "../arch/x86_64/timer.h"
+#include "../drivers/input/ps2kbd.h"
+#include "../drivers/input/ps2mouse.h"
+#include "../drivers/pci/pci.h"
 #include "../drivers/video/console.h"
+#include "../drivers/video/framebuffer.h"
 #include "../drivers/video/widget.h"
 #include "../fs/ramfs.h"
 #include "../fs/tmpfs.h"
 #include "../fs/vfs.h"
 #include "../mm/frame_allocator.h"
+#include "../mm/kheap.h"
+#include "../mm/paging.h"
 #include "../sched/sched.h"
 #include "klog.h"
+#include "reboot.h"
 
 namespace customos::core
 {
@@ -153,6 +166,38 @@ void WriteU8TwoDigits(u8 v)
     ConsoleWriteChar(static_cast<char>('0' + (v % 10)));
 }
 
+// Fixed-width hex writer: prints `digits` nibbles of `v`, high
+// nibble first, with a leading "0x". digits == 0 trims leading
+// zeros (min 1). Used by every register-dump / MSR / CPUID
+// command.
+void WriteU64Hex(u64 v, u32 digits = 16)
+{
+    ConsoleWrite("0x");
+    if (digits == 0)
+    {
+        // Strip leading zeros — find highest non-zero nibble.
+        digits = 1;
+        for (u32 i = 16; i > 0; --i)
+        {
+            if (((v >> ((i - 1) * 4)) & 0xF) != 0)
+            {
+                digits = i;
+                break;
+            }
+        }
+    }
+    if (digits > 16)
+    {
+        digits = 16;
+    }
+    for (u32 i = digits; i > 0; --i)
+    {
+        const u8 nib = static_cast<u8>((v >> ((i - 1) * 4)) & 0xF);
+        const char c = (nib < 10) ? static_cast<char>('0' + nib) : static_cast<char>('A' + nib - 10);
+        ConsoleWriteChar(c);
+    }
+}
+
 // Prompt() reads $PS1 from the env table if set; implementation
 // lives after the env infrastructure is declared, further down.
 void Prompt();
@@ -201,6 +246,30 @@ void CmdHelp()
     ConsoleWriteln("  SYSINFO      ONE-SHOT SYSTEM STATUS SUMMARY");
     ConsoleWriteln("  SOURCE PATH  RUN EACH LINE OF PATH AS A COMMAND");
     ConsoleWriteln("  MAN NAME     DETAILED HELP FOR ONE COMMAND");
+    ConsoleWriteln("");
+    ConsoleWriteln("SYSTEM INTROSPECTION:");
+    ConsoleWriteln("  CPUID [LEAF] CPU VENDOR / FAMILY / FEATURES / BRAND");
+    ConsoleWriteln("  CR           CONTROL REGISTERS CR0/CR2/CR3/CR4");
+    ConsoleWriteln("  RFLAGS       CURRENT RFLAGS + DECODED BITS");
+    ConsoleWriteln("  TSC          TIME-STAMP COUNTER (RDTSC)");
+    ConsoleWriteln("  HPET         HPET COUNTER + PERIOD");
+    ConsoleWriteln("  TICKS        TIMER + SCHEDULER TICK COUNTERS");
+    ConsoleWriteln("  MSR HEX      READ ONE MODEL-SPECIFIC REGISTER");
+    ConsoleWriteln("  LAPIC        LOCAL APIC ID / VERSION / TIMER");
+    ConsoleWriteln("  SMP          CPUS ONLINE");
+    ConsoleWriteln("  LSPCI        LIST PCI DEVICES");
+    ConsoleWriteln("  HEAP         KERNEL HEAP USAGE");
+    ConsoleWriteln("  PAGING       PAGE TABLE + MAPPING STATS");
+    ConsoleWriteln("  FB           FRAMEBUFFER GEOMETRY");
+    ConsoleWriteln("  KBDSTATS     PS/2 KEYBOARD IRQ COUNTERS");
+    ConsoleWriteln("  MOUSESTATS   PS/2 MOUSE IRQ COUNTERS");
+    ConsoleWriteln("");
+    ConsoleWriteln("RUNTIME CONTROL:");
+    ConsoleWriteln("  LOGLEVEL [L] GET / SET KLOG THRESHOLD (D/I/W/E)");
+    ConsoleWriteln("  GETENV NAME  READ ONE ENV VARIABLE");
+    ConsoleWriteln("  YIELD        FORCE A SCHEDULER YIELD");
+    ConsoleWriteln("  REBOOT       RESET THE MACHINE (NO CONFIRM)");
+    ConsoleWriteln("  HALT         STOP THE CPU (NO CONFIRM)");
     ConsoleWriteln("");
     ConsoleWriteln("KEYS:  UP/DOWN = HISTORY   TAB = COMPLETE");
     ConsoleWriteln("       CTRL+ALT+T = TOGGLE MODE");
@@ -1038,7 +1107,10 @@ static const char* const kCommandSet[] = {
     "mv",      "wc",      "head",    "tail",    "dmesg",   "stats",   "mem",
     "history", "set",     "unset",   "env",     "alias",   "unalias", "sysinfo",
     "source",  "man",     "grep",    "find",    "time",    "which",   "seq",
-    "sort",    "uniq",
+    "sort",    "uniq",    "cpuid",   "cr",      "rflags",  "tsc",     "hpet",
+    "ticks",   "msr",     "lapic",   "smp",     "lspci",   "heap",    "paging",
+    "fb",      "kbdstats","mousestats","loglevel","getenv","yield",   "reboot",
+    "halt",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -1408,6 +1480,540 @@ void CmdEnv()
     {
         ConsoleWriteln("(NO VARIABLES SET)");
     }
+}
+
+// ---------------------------------------------------------------
+// System introspection / manipulation commands.
+// Raw views into CPU / MSR / APIC / PCI / paging / heap / input
+// drivers, plus power-control (reboot, halt) + runtime setters
+// (loglevel, getenv). Every getter is side-effect-free; power
+// commands call the existing kernel primitives.
+// ---------------------------------------------------------------
+
+// Inline CPUID wrapper. Returns eax/ebx/ecx/edx for the given
+// leaf + sub-leaf. The kernel has no <cpuid.h>, so we roll the
+// inline asm here.
+void CpuidRaw(u32 leaf, u32 subleaf, u32& a, u32& b, u32& c, u32& d)
+{
+    u32 ra = leaf, rb = 0, rc = subleaf, rd = 0;
+    asm volatile("cpuid" : "+a"(ra), "+b"(rb), "+c"(rc), "+d"(rd));
+    a = ra;
+    b = rb;
+    c = rc;
+    d = rd;
+}
+
+inline u64 ReadRflags()
+{
+    u64 v;
+    asm volatile("pushfq; pop %0" : "=r"(v));
+    return v;
+}
+
+inline u64 ReadTsc()
+{
+    u32 lo, hi;
+    asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    return (static_cast<u64>(hi) << 32) | lo;
+}
+
+inline u64 ReadMsrRaw(u32 msr)
+{
+    u32 lo, hi;
+    asm volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(msr));
+    return (static_cast<u64>(hi) << 32) | lo;
+}
+
+void CmdCpuid(u32 argc, char** argv)
+{
+    // Default: print vendor string + feature summary. With a
+    // leaf arg, dump the raw eax/ebx/ecx/edx.
+    u32 a = 0, b = 0, c = 0, d = 0;
+    if (argc >= 2)
+    {
+        u32 leaf = 0;
+        for (u32 i = 0; argv[1][i] != '\0'; ++i)
+        {
+            const char ch = argv[1][i];
+            if (ch == 'x' || ch == 'X')
+            {
+                leaf = 0;
+                continue;
+            }
+            if (ch >= '0' && ch <= '9')
+                leaf = leaf * 16 + (ch - '0');
+            else if (ch >= 'a' && ch <= 'f')
+                leaf = leaf * 16 + (ch - 'a' + 10);
+            else if (ch >= 'A' && ch <= 'F')
+                leaf = leaf * 16 + (ch - 'A' + 10);
+        }
+        CpuidRaw(leaf, 0, a, b, c, d);
+        ConsoleWrite("LEAF=");
+        WriteU64Hex(leaf, 8);
+        ConsoleWrite("  EAX=");
+        WriteU64Hex(a, 8);
+        ConsoleWrite(" EBX=");
+        WriteU64Hex(b, 8);
+        ConsoleWrite(" ECX=");
+        WriteU64Hex(c, 8);
+        ConsoleWrite(" EDX=");
+        WriteU64Hex(d, 8);
+        ConsoleWriteChar('\n');
+        return;
+    }
+    // Leaf 0 — vendor string in EBX, EDX, ECX (in that order).
+    CpuidRaw(0, 0, a, b, c, d);
+    const u32 max_leaf = a;
+    char vendor[13];
+    vendor[0] = static_cast<char>(b & 0xFF);
+    vendor[1] = static_cast<char>((b >> 8) & 0xFF);
+    vendor[2] = static_cast<char>((b >> 16) & 0xFF);
+    vendor[3] = static_cast<char>((b >> 24) & 0xFF);
+    vendor[4] = static_cast<char>(d & 0xFF);
+    vendor[5] = static_cast<char>((d >> 8) & 0xFF);
+    vendor[6] = static_cast<char>((d >> 16) & 0xFF);
+    vendor[7] = static_cast<char>((d >> 24) & 0xFF);
+    vendor[8] = static_cast<char>(c & 0xFF);
+    vendor[9] = static_cast<char>((c >> 8) & 0xFF);
+    vendor[10] = static_cast<char>((c >> 16) & 0xFF);
+    vendor[11] = static_cast<char>((c >> 24) & 0xFF);
+    vendor[12] = '\0';
+    ConsoleWrite("VENDOR:    ");
+    ConsoleWriteln(vendor);
+    ConsoleWrite("MAX LEAF:  ");
+    WriteU64Hex(max_leaf, 8);
+    ConsoleWriteChar('\n');
+
+    // Leaf 1 — family/model + feature flags.
+    CpuidRaw(1, 0, a, b, c, d);
+    const u32 stepping = a & 0xF;
+    const u32 model = (a >> 4) & 0xF;
+    const u32 family = (a >> 8) & 0xF;
+    const u32 ext_model = (a >> 16) & 0xF;
+    const u32 ext_family = (a >> 20) & 0xFF;
+    ConsoleWrite("FAMILY:    ");
+    WriteU64Dec(family + (family == 0xF ? ext_family : 0));
+    ConsoleWrite("   MODEL: ");
+    WriteU64Dec(model | (ext_model << 4));
+    ConsoleWrite("   STEP: ");
+    WriteU64Dec(stepping);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("FEAT ECX:  ");
+    WriteU64Hex(c, 8);
+    ConsoleWrite("   EDX: ");
+    WriteU64Hex(d, 8);
+    ConsoleWriteChar('\n');
+
+    // Leaf 0x80000000 — max extended leaf + brand string.
+    CpuidRaw(0x80000000u, 0, a, b, c, d);
+    if (a >= 0x80000004u)
+    {
+        char brand[49];
+        u32 off = 0;
+        for (u32 leaf = 0x80000002u; leaf <= 0x80000004u; ++leaf)
+        {
+            CpuidRaw(leaf, 0, a, b, c, d);
+            const u32 r[4] = {a, b, c, d};
+            for (u32 k = 0; k < 4; ++k)
+            {
+                for (u32 m = 0; m < 4 && off + 1 < sizeof(brand); ++m)
+                {
+                    brand[off++] = static_cast<char>((r[k] >> (m * 8)) & 0xFF);
+                }
+            }
+        }
+        brand[off] = '\0';
+        // Trim leading spaces (Intel pads the brand string).
+        const char* p = brand;
+        while (*p == ' ')
+            ++p;
+        ConsoleWrite("BRAND:     ");
+        ConsoleWriteln(p);
+    }
+}
+
+void CmdCr()
+{
+    ConsoleWrite("CR0:  ");
+    WriteU64Hex(customos::arch::ReadCr0());
+    ConsoleWriteChar('\n');
+    ConsoleWrite("CR2:  ");
+    WriteU64Hex(customos::arch::ReadCr2());
+    ConsoleWriteChar('\n');
+    ConsoleWrite("CR3:  ");
+    WriteU64Hex(customos::arch::ReadCr3());
+    ConsoleWriteChar('\n');
+    ConsoleWrite("CR4:  ");
+    WriteU64Hex(customos::arch::ReadCr4());
+    ConsoleWriteChar('\n');
+}
+
+// Rflags bit positions + names, parallel arrays so the
+// initialisers are trivial — a struct-array local would need
+// memcpy from .rodata, which the freestanding kernel doesn't
+// link.
+constexpr u8 kRflagsBitIdx[] = {0, 2, 4, 6, 7, 8, 9, 10, 11, 14, 16, 17, 18, 19, 20, 21};
+constexpr const char* kRflagsBitNames[] = {"CF", "PF",  "AF",  "ZF", "SF", "TF", "IF", "DF",
+                                            "OF", "NT",  "RF",  "VM", "AC", "VIF","VIP","ID"};
+
+void CmdRflags()
+{
+    const u64 f = ReadRflags();
+    ConsoleWrite("RFLAGS: ");
+    WriteU64Hex(f);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("BITS:  ");
+    bool any = false;
+    for (u32 i = 0; i < sizeof(kRflagsBitIdx); ++i)
+    {
+        if ((f >> kRflagsBitIdx[i]) & 1)
+        {
+            if (any)
+                ConsoleWriteChar(' ');
+            ConsoleWrite(kRflagsBitNames[i]);
+            any = true;
+        }
+    }
+    if (!any)
+    {
+        ConsoleWrite("(none set)");
+    }
+    ConsoleWriteChar('\n');
+}
+
+void CmdTsc()
+{
+    ConsoleWrite("TSC:   ");
+    WriteU64Hex(ReadTsc());
+    ConsoleWriteChar('\n');
+}
+
+void CmdHpet()
+{
+    const u64 v = customos::arch::HpetReadCounter();
+    const u32 p = customos::arch::HpetPeriodFemtoseconds();
+    ConsoleWrite("HPET COUNTER: ");
+    WriteU64Hex(v);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("HPET PERIOD:  ");
+    WriteU64Dec(p);
+    ConsoleWriteln(" fs/tick");
+    if (p > 0)
+    {
+        // Counter * period (fs) / 1e12 = seconds elapsed.
+        const u64 secs = (v / 1'000'000ull) * p / 1'000'000ull;
+        ConsoleWrite("APPROX SECS:  ");
+        WriteU64Dec(secs);
+        ConsoleWriteChar('\n');
+    }
+}
+
+void CmdTicks()
+{
+    ConsoleWrite("TIMER TICKS: ");
+    WriteU64Dec(customos::arch::TimerTicks());
+    ConsoleWriteChar('\n');
+    ConsoleWrite("SCHED TICKS: ");
+    WriteU64Dec(customos::sched::SchedNowTicks());
+    ConsoleWriteChar('\n');
+}
+
+void CmdMsr(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("MSR: USAGE: MSR <HEX-INDEX>");
+        ConsoleWriteln("   EXAMPLES: MSR C0000080 (EFER)  MSR 1B (APIC BASE)");
+        return;
+    }
+    u32 idx = 0;
+    for (u32 i = 0; argv[1][i] != '\0'; ++i)
+    {
+        const char ch = argv[1][i];
+        if (ch == 'x' || ch == 'X')
+            continue;
+        if (ch >= '0' && ch <= '9')
+            idx = idx * 16 + (ch - '0');
+        else if (ch >= 'a' && ch <= 'f')
+            idx = idx * 16 + (ch - 'a' + 10);
+        else if (ch >= 'A' && ch <= 'F')
+            idx = idx * 16 + (ch - 'A' + 10);
+        else
+        {
+            ConsoleWriteln("MSR: BAD HEX");
+            return;
+        }
+    }
+    // rdmsr can #GP on a reserved index. The kernel's trap
+    // handler will panic loudly, so only run this on MSRs the
+    // user knows are safe. v0: no protection — an invalid
+    // MSR here crashes the system. Document clearly and trust
+    // the user.
+    ConsoleWrite("MSR ");
+    WriteU64Hex(idx, 8);
+    ConsoleWrite(":  ");
+    WriteU64Hex(ReadMsrRaw(idx));
+    ConsoleWriteChar('\n');
+}
+
+void CmdLapic()
+{
+    using namespace customos::arch;
+    const u32 id = LapicRead(kLapicRegId);
+    const u32 ver = LapicRead(kLapicRegVersion);
+    const u32 svr = LapicRead(kLapicRegSvr);
+    const u32 lvt = LapicRead(kLapicRegLvtTimer);
+    const u32 init = LapicRead(kLapicRegTimerInit);
+    const u32 cur = LapicRead(kLapicRegTimerCount);
+    ConsoleWrite("LAPIC ID:      ");
+    WriteU64Hex(id, 8);
+    ConsoleWrite("   (CPU# ");
+    WriteU64Dec(id >> 24);
+    ConsoleWriteln(")");
+    ConsoleWrite("LAPIC VERSION: ");
+    WriteU64Hex(ver, 8);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("SVR:           ");
+    WriteU64Hex(svr, 8);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("LVT TIMER:     ");
+    WriteU64Hex(lvt, 8);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("TIMER INIT:    ");
+    WriteU64Hex(init, 8);
+    ConsoleWrite("   CUR: ");
+    WriteU64Hex(cur, 8);
+    ConsoleWriteChar('\n');
+}
+
+void CmdSmp()
+{
+    const u64 n = customos::arch::SmpCpusOnline();
+    ConsoleWrite("CPUS ONLINE:   ");
+    WriteU64Dec(n);
+    ConsoleWriteChar('\n');
+    if (n == 1)
+    {
+        ConsoleWriteln("(BSP only; AP bring-up deferred — see decision log #021)");
+    }
+}
+
+void CmdLspci()
+{
+    const u64 n = customos::drivers::pci::PciDeviceCount();
+    ConsoleWrite("PCI DEVICES:   ");
+    WriteU64Dec(n);
+    ConsoleWriteChar('\n');
+    for (u64 i = 0; i < n; ++i)
+    {
+        const auto& d = customos::drivers::pci::PciDevice(i);
+        ConsoleWrite("  ");
+        WriteU64Hex(d.addr.bus, 2);
+        ConsoleWriteChar(':');
+        WriteU64Hex(d.addr.device, 2);
+        ConsoleWriteChar('.');
+        WriteU64Hex(d.addr.function, 1);
+        ConsoleWrite("  ");
+        WriteU64Hex(d.vendor_id, 4);
+        ConsoleWriteChar(':');
+        WriteU64Hex(d.device_id, 4);
+        ConsoleWrite("  class=");
+        WriteU64Hex(d.class_code, 2);
+        ConsoleWriteChar('.');
+        WriteU64Hex(d.subclass, 2);
+        ConsoleWriteChar(' ');
+        ConsoleWriteln(customos::drivers::pci::PciClassName(d.class_code));
+    }
+}
+
+void CmdHeap()
+{
+    const auto s = customos::mm::KernelHeapStatsRead();
+    ConsoleWrite("POOL BYTES:       ");
+    WriteU64Dec(s.pool_bytes);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("USED BYTES:       ");
+    WriteU64Dec(s.used_bytes);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("FREE BYTES:       ");
+    WriteU64Dec(s.free_bytes);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("ALLOCATIONS:      ");
+    WriteU64Dec(s.alloc_count);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("FREES:            ");
+    WriteU64Dec(s.free_count);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("LARGEST FREE RUN: ");
+    WriteU64Dec(s.largest_free_run);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("FREE CHUNKS:      ");
+    WriteU64Dec(s.free_chunk_count);
+    ConsoleWriteChar('\n');
+}
+
+void CmdPaging()
+{
+    const auto s = customos::mm::PagingStatsRead();
+    ConsoleWrite("PAGE TABLES:       ");
+    WriteU64Dec(s.page_tables_allocated);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("MAPPINGS INSTALL:  ");
+    WriteU64Dec(s.mappings_installed);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("MAPPINGS REMOVE:   ");
+    WriteU64Dec(s.mappings_removed);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("MMIO ARENA USED:   ");
+    WriteU64Dec(s.mmio_arena_used_bytes);
+    ConsoleWriteln(" bytes");
+}
+
+void CmdFb()
+{
+    if (!customos::drivers::video::FramebufferAvailable())
+    {
+        ConsoleWriteln("FB: NOT AVAILABLE");
+        return;
+    }
+    const auto info = customos::drivers::video::FramebufferGet();
+    ConsoleWrite("FB PHYS:   ");
+    WriteU64Hex(info.phys);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("FB VIRT:   ");
+    WriteU64Hex(reinterpret_cast<u64>(info.virt));
+    ConsoleWriteChar('\n');
+    ConsoleWrite("FB SIZE:   ");
+    WriteU64Dec(info.width);
+    ConsoleWrite(" x ");
+    WriteU64Dec(info.height);
+    ConsoleWrite(" @ ");
+    WriteU64Dec(info.bpp);
+    ConsoleWrite(" bpp  (pitch ");
+    WriteU64Dec(info.pitch);
+    ConsoleWriteln(")");
+}
+
+void CmdKbdStats()
+{
+    const auto s = customos::drivers::input::Ps2KeyboardStats();
+    ConsoleWrite("KBD IRQS:      ");
+    WriteU64Dec(s.irqs_seen);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("KBD BUFFERED:  ");
+    WriteU64Dec(s.bytes_buffered);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("KBD DROPPED:   ");
+    WriteU64Dec(s.bytes_dropped);
+    ConsoleWriteChar('\n');
+}
+
+void CmdMouseStats()
+{
+    const auto s = customos::drivers::input::Ps2MouseStatsRead();
+    ConsoleWrite("MOUSE IRQS:     ");
+    WriteU64Dec(s.irqs_seen);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("MOUSE PACKETS:  ");
+    WriteU64Dec(s.packets_decoded);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("MOUSE DROPPED:  ");
+    WriteU64Dec(s.bytes_dropped);
+    ConsoleWriteChar('\n');
+}
+
+void CmdLoglevel(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        const auto cur = customos::core::GetLogThreshold();
+        ConsoleWrite("LOG THRESHOLD: ");
+        switch (cur)
+        {
+        case customos::core::LogLevel::Debug:
+            ConsoleWriteln("DEBUG (show everything)");
+            break;
+        case customos::core::LogLevel::Info:
+            ConsoleWriteln("INFO");
+            break;
+        case customos::core::LogLevel::Warn:
+            ConsoleWriteln("WARN");
+            break;
+        case customos::core::LogLevel::Error:
+            ConsoleWriteln("ERROR (show only errors)");
+            break;
+        }
+        ConsoleWriteln("USAGE: LOGLEVEL [D|I|W|E]");
+        return;
+    }
+    const char c = argv[1][0];
+    customos::core::LogLevel lvl = customos::core::LogLevel::Info;
+    switch (c)
+    {
+    case 'd':
+    case 'D':
+        lvl = customos::core::LogLevel::Debug;
+        break;
+    case 'i':
+    case 'I':
+        lvl = customos::core::LogLevel::Info;
+        break;
+    case 'w':
+    case 'W':
+        lvl = customos::core::LogLevel::Warn;
+        break;
+    case 'e':
+    case 'E':
+        lvl = customos::core::LogLevel::Error;
+        break;
+    default:
+        ConsoleWriteln("LOGLEVEL: USE D / I / W / E");
+        return;
+    }
+    customos::core::SetLogThreshold(lvl);
+    ConsoleWriteln("LOG THRESHOLD UPDATED");
+}
+
+void CmdGetenv(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("GETENV: USAGE: GETENV NAME");
+        return;
+    }
+    const EnvSlot* s = EnvFind(argv[1]);
+    if (s == nullptr)
+    {
+        ConsoleWriteln("(UNSET)");
+        return;
+    }
+    ConsoleWriteln(s->value);
+}
+
+void CmdYield()
+{
+    // Voluntary yield from the shell thread — useful for testing
+    // cooperative scheduling behaviour by hand. No output.
+    customos::sched::SchedYield();
+}
+
+[[noreturn]] void CmdRebootNow()
+{
+    ConsoleWriteln("REBOOTING...");
+    // Serial also carries the notice so a headless run sees
+    // the final line before the reset reg fires.
+    customos::arch::SerialWrite("[shell] user invoked reboot\n");
+    customos::core::KernelReboot();
+}
+
+[[noreturn]] void CmdHaltNow()
+{
+    ConsoleWriteln("HALTING. SAFE TO POWER OFF.");
+    customos::arch::SerialWrite("[shell] user invoked halt\n");
+    // Infinite "cli; hlt" via arch::Halt. The scheduler will
+    // never run again on this CPU. For multi-CPU this would
+    // need an NMI broadcast; v0 is single-CPU so this is fine.
+    customos::arch::Halt();
 }
 
 void CmdHistory()
@@ -2205,6 +2811,106 @@ void Dispatch(char* line)
     {
         CmdSeq(argc, argv);
         return;
+    }
+    if (StrEq(cmd, "cpuid"))
+    {
+        CmdCpuid(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "cr"))
+    {
+        CmdCr();
+        return;
+    }
+    if (StrEq(cmd, "rflags"))
+    {
+        CmdRflags();
+        return;
+    }
+    if (StrEq(cmd, "tsc"))
+    {
+        CmdTsc();
+        return;
+    }
+    if (StrEq(cmd, "hpet"))
+    {
+        CmdHpet();
+        return;
+    }
+    if (StrEq(cmd, "ticks"))
+    {
+        CmdTicks();
+        return;
+    }
+    if (StrEq(cmd, "msr"))
+    {
+        CmdMsr(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "lapic"))
+    {
+        CmdLapic();
+        return;
+    }
+    if (StrEq(cmd, "smp"))
+    {
+        CmdSmp();
+        return;
+    }
+    if (StrEq(cmd, "lspci"))
+    {
+        CmdLspci();
+        return;
+    }
+    if (StrEq(cmd, "heap"))
+    {
+        CmdHeap();
+        return;
+    }
+    if (StrEq(cmd, "paging"))
+    {
+        CmdPaging();
+        return;
+    }
+    if (StrEq(cmd, "fb"))
+    {
+        CmdFb();
+        return;
+    }
+    if (StrEq(cmd, "kbdstats"))
+    {
+        CmdKbdStats();
+        return;
+    }
+    if (StrEq(cmd, "mousestats"))
+    {
+        CmdMouseStats();
+        return;
+    }
+    if (StrEq(cmd, "loglevel"))
+    {
+        CmdLoglevel(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "getenv"))
+    {
+        CmdGetenv(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "yield"))
+    {
+        CmdYield();
+        return;
+    }
+    if (StrEq(cmd, "reboot"))
+    {
+        CmdRebootNow();
+        // unreachable
+    }
+    if (StrEq(cmd, "halt"))
+    {
+        CmdHaltNow();
+        // unreachable
     }
     ConsoleWrite("COMMAND NOT FOUND: ");
     ConsoleWriteln(cmd);
