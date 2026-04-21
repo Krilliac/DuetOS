@@ -1146,16 +1146,15 @@ void CmdFind(u32 argc, char** argv)
 // dispatched in Dispatch — keeping the two in sync is the
 // price of not having reflection.
 static const char* const kCommandSet[] = {
-    "help",    "about",    "version", "clear",    "uptime",   "date",     "windows",    "mode",     "ls",
-    "cat",     "touch",    "rm",      "echo",     "cp",       "mv",       "wc",         "head",     "tail",
-    "dmesg",   "stats",    "mem",     "history",  "set",      "unset",    "env",        "alias",    "unalias",
-    "sysinfo", "source",   "man",     "grep",     "find",     "time",     "which",      "seq",      "sort",
-    "uniq",    "cpuid",    "cr",      "rflags",   "tsc",      "hpet",     "ticks",      "msr",      "lapic",
-    "smp",     "lspci",    "heap",    "paging",   "fb",       "kbdstats", "mousestats", "loglevel", "getenv",
-    "yield",   "reboot",   "halt",    "uname",    "whoami",   "hostname", "pwd",        "true",     "false",
-    "mount",   "lsmod",    "lsblk",   "lsgpt",    "free",     "ps",       "spawn",      "readelf",  "hexdump",
-    "stat",    "basename", "dirname", "cal",      "sleep",    "reset",    "tac",        "nl",       "rev",
-    "expr",    "color",    "rand",    "flushtlb", "checksum", "repeat",   "kill",       "exec",
+    "help",     "about",      "version",  "clear",    "uptime",   "date",     "windows",  "mode",    "ls",     "cat",
+    "touch",    "rm",         "echo",     "cp",       "mv",       "wc",       "head",     "tail",    "dmesg",  "stats",
+    "mem",      "history",    "set",      "unset",    "env",      "alias",    "unalias",  "sysinfo", "source", "man",
+    "grep",     "find",       "time",     "which",    "seq",      "sort",     "uniq",     "cpuid",   "cr",     "rflags",
+    "tsc",      "hpet",       "ticks",    "msr",      "lapic",    "smp",      "lspci",    "heap",    "paging", "fb",
+    "kbdstats", "mousestats", "loglevel", "logcolor", "getenv",   "yield",    "reboot",   "halt",    "uname",  "whoami",
+    "hostname", "pwd",        "true",     "false",    "mount",    "lsmod",    "lsblk",    "lsgpt",   "free",   "ps",
+    "spawn",    "readelf",    "hexdump",  "stat",     "basename", "dirname",  "cal",      "sleep",   "reset",  "tac",
+    "nl",       "rev",        "expr",     "color",    "rand",     "flushtlb", "checksum", "repeat",  "kill",   "exec",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -2052,6 +2051,25 @@ void CmdLoglevel(u32 argc, char** argv)
     }
     customos::core::SetLogThreshold(lvl);
     ConsoleWriteln("LOG THRESHOLD UPDATED");
+}
+
+void CmdLogcolor(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        const bool cur = customos::core::GetLogColor();
+        ConsoleWrite("SERIAL LOG COLOUR: ");
+        ConsoleWriteln(cur ? "ON" : "OFF");
+        ConsoleWriteln("USAGE: LOGCOLOR ON|OFF");
+        return;
+    }
+    const char c = argv[1][0];
+    const bool want = (c == 'o' || c == 'O') ? (argv[1][1] == 'n' || argv[1][1] == 'N') : false;
+    // "on"  -> c='o', [1]='n'  -> true
+    // "off" -> c='o', [1]='f'  -> false
+    customos::core::SetLogColor(want);
+    ConsoleWrite("SERIAL LOG COLOUR: ");
+    ConsoleWriteln(want ? "ON" : "OFF");
 }
 
 void CmdGetenv(u32 argc, char** argv)
@@ -4315,6 +4333,11 @@ void Dispatch(char* line)
     if (StrEq(cmd, "mousestats"))
     {
         CmdMouseStats();
+        return;
+    }
+    if (StrEq(cmd, "logcolor"))
+    {
+        CmdLogcolor(argc, argv);
         return;
     }
     if (StrEq(cmd, "loglevel"))

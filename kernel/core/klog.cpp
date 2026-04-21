@@ -20,6 +20,7 @@ struct LogEntry
 {
     LogLevel level;
     bool has_value;
+    u64 timestamp_us; // wall-time snapshot at write, 0 if HPET wasn't up
     const char* subsystem;
     const char* message;
     u64 value;
@@ -28,6 +29,8 @@ struct LogEntry
 constinit LogEntry g_log_ring[kLogRingCapacity] = {};
 constinit u64 g_log_ring_next = 0;  // monotonically increasing write cursor
 constinit u64 g_log_ring_count = 0; // saturates at kLogRingCapacity
+
+constinit bool g_color_enabled = true;
 
 // Runtime severity threshold — set via SetLogThreshold. Lines with
 // level < max(threshold, kKlogMinLevel) are silently dropped. Default
@@ -48,12 +51,16 @@ inline void Tee(const char* s)
     }
 }
 
+// Forward decl — defined below; PushEntry captures timestamp.
+inline u64 ElapsedMicros();
+
 inline void PushEntry(LogLevel level, const char* subsystem, const char* message, u64 value, bool has_value)
 {
     const u64 slot = g_log_ring_next % kLogRingCapacity;
     g_log_ring[slot] = LogEntry{
         .level = level,
         .has_value = has_value,
+        .timestamp_us = ElapsedMicros(),
         .subsystem = subsystem,
         .message = message,
         .value = value,
@@ -143,6 +150,60 @@ inline const char* LevelTag(LogLevel level)
         return "[E] ";
     }
     return "[?] ";
+}
+
+// ANSI SGR escape sequences for severity colouring. `None` is the
+// universal reset; everything else is a per-level foreground tint.
+// Emitted only around the `[X]` tag so the subsystem + message
+// bodies stay uncoloured (they'd clash with any in-text highlighting
+// readers add manually, and the tag-only colour is enough to spot
+// warns/errors on a busy boot log).
+inline const char* LevelColorPrefix(LogLevel level)
+{
+    switch (level)
+    {
+    case LogLevel::Debug:
+        return "\x1b[2m"; // dim
+    case LogLevel::Info:
+        return ""; // no tint — default terminal colour
+    case LogLevel::Warn:
+        return "\x1b[33m"; // yellow
+    case LogLevel::Error:
+        return "\x1b[1;31m"; // bold red
+    }
+    return "";
+}
+
+inline const char* kAnsiReset = "\x1b[0m";
+
+// Emit the colour prefix for `level` iff colour is enabled. Safe to
+// call when the terminal doesn't understand SGR — the escape shows
+// up as literal bytes, which is already how a plain log-capture tool
+// would render it. For that case, use `SetLogColor(false)`.
+inline void OpenColor(LogLevel level)
+{
+    if (!g_color_enabled)
+    {
+        return;
+    }
+    const char* p = LevelColorPrefix(level);
+    if (p[0] != 0)
+    {
+        arch::SerialWrite(p);
+    }
+}
+
+inline void CloseColor(LogLevel level)
+{
+    if (!g_color_enabled)
+    {
+        return;
+    }
+    const char* p = LevelColorPrefix(level);
+    if (p[0] != 0)
+    {
+        arch::SerialWrite(kAnsiReset);
+    }
 }
 
 inline bool LevelEnabled(LogLevel level)
@@ -251,17 +312,17 @@ void Log(LogLevel level, const char* subsystem, const char* message)
     }
     const char* tag = LevelTag(level);
     WriteTimestampPrefix();
+    OpenColor(level);
     arch::SerialWrite(tag);
+    CloseColor(level);
     arch::SerialWrite(subsystem);
     arch::SerialWrite(" : ");
     arch::SerialWrite(message);
     arch::SerialWrite("\n");
 
     // Tee to the secondary sink (framebuffer console etc.). No
-    // timestamp on this path — on-screen renderers want the text,
-    // not the hex tick stamp. Chunk-by-chunk mirrors the serial
-    // ordering so an interleaved IRQ tee doesn't scramble one
-    // logical line.
+    // timestamp or ANSI codes on this path — on-screen renderers
+    // want clean text and drive their own colour from LogLevel.
     Tee(tag);
     Tee(subsystem);
     Tee(" : ");
@@ -279,7 +340,9 @@ void LogWithValue(LogLevel level, const char* subsystem, const char* message, u6
     }
     const char* tag = LevelTag(level);
     WriteTimestampPrefix();
+    OpenColor(level);
     arch::SerialWrite(tag);
+    CloseColor(level);
     arch::SerialWrite(subsystem);
     arch::SerialWrite(" : ");
     arch::SerialWrite(message);
@@ -295,6 +358,89 @@ void LogWithValue(LogLevel level, const char* subsystem, const char* message, u6
     Tee("\n");
 
     PushEntry(level, subsystem, message, value, true);
+}
+
+void LogWithString(LogLevel level, const char* subsystem, const char* message, const char* label, const char* value_str)
+{
+    if (!LevelEnabled(level))
+    {
+        return;
+    }
+    const char* tag = LevelTag(level);
+    WriteTimestampPrefix();
+    OpenColor(level);
+    arch::SerialWrite(tag);
+    CloseColor(level);
+    arch::SerialWrite(subsystem);
+    arch::SerialWrite(" : ");
+    arch::SerialWrite(message);
+    arch::SerialWrite("   ");
+    arch::SerialWrite(label ? label : "str");
+    arch::SerialWrite("=\"");
+    arch::SerialWrite(value_str ? value_str : "(null)");
+    arch::SerialWrite("\"\n");
+
+    Tee(tag);
+    Tee(subsystem);
+    Tee(" : ");
+    Tee(message);
+    Tee(" ");
+    Tee(label ? label : "str");
+    Tee("=");
+    Tee(value_str ? value_str : "(null)");
+    Tee("\n");
+
+    // Ring-buffer entry records the message only; the string pointer
+    // would need per-entry deep-copy storage we don't have yet.
+    PushEntry(level, subsystem, message, 0, false);
+}
+
+void LogWith2Values(LogLevel level, const char* subsystem, const char* message, const char* a_label, u64 a_value,
+                    const char* b_label, u64 b_value)
+{
+    if (!LevelEnabled(level))
+    {
+        return;
+    }
+    const char* tag = LevelTag(level);
+    WriteTimestampPrefix();
+    OpenColor(level);
+    arch::SerialWrite(tag);
+    CloseColor(level);
+    arch::SerialWrite(subsystem);
+    arch::SerialWrite(" : ");
+    arch::SerialWrite(message);
+    arch::SerialWrite("   ");
+    arch::SerialWrite(a_label ? a_label : "a");
+    arch::SerialWrite("=");
+    WriteCompactHex(a_value);
+    MaybeAppendDecimal(a_value);
+    arch::SerialWrite("   ");
+    arch::SerialWrite(b_label ? b_label : "b");
+    arch::SerialWrite("=");
+    WriteCompactHex(b_value);
+    MaybeAppendDecimal(b_value);
+    arch::SerialWrite("\n");
+
+    Tee(tag);
+    Tee(subsystem);
+    Tee(" : ");
+    Tee(message);
+    Tee("\n");
+
+    // Record only the first value — a second u64 would bloat every
+    // entry just to service the rarer 2-value path.
+    PushEntry(level, subsystem, message, a_value, true);
+}
+
+void SetLogColor(bool enabled)
+{
+    g_color_enabled = enabled;
+}
+
+bool GetLogColor()
+{
+    return g_color_enabled;
 }
 
 void DumpLogRing()
@@ -316,7 +462,36 @@ void DumpLogRing()
         {
             continue;
         }
+        // Render the timestamp the entry was written with — same
+        // format as live logging. Zero (HPET-wasn't-up) prints as
+        // "[t=?]" so the gap is explicit.
+        if (e.timestamp_us == 0)
+        {
+            arch::SerialWrite("[t=?] ");
+        }
+        else if (e.timestamp_us < 1000)
+        {
+            arch::SerialWrite("[t=");
+            WriteDecimal(e.timestamp_us);
+            arch::SerialWrite("us] ");
+        }
+        else
+        {
+            const u64 ms_whole = e.timestamp_us / 1000;
+            const u64 us_frac = e.timestamp_us % 1000;
+            arch::SerialWrite("[t=");
+            WriteDecimal(ms_whole);
+            arch::SerialWrite(".");
+            if (us_frac < 100)
+                arch::SerialWriteByte('0');
+            if (us_frac < 10)
+                arch::SerialWriteByte('0');
+            WriteDecimal(us_frac);
+            arch::SerialWrite("ms] ");
+        }
+        OpenColor(e.level);
         arch::SerialWrite(LevelTag(e.level));
+        CloseColor(e.level);
         arch::SerialWrite(e.subsystem);
         arch::SerialWrite(" : ");
         arch::SerialWrite(e.message);
@@ -362,6 +537,14 @@ void KLogSelfTest()
     KLOG_WARN("core/klog", "warn-level sanity line");
     KLOG_ERROR("core/klog", "error-level sanity line");
     KLOG_INFO_V("core/klog", "value-form sanity line", 0xCAFEBABE);
+    KLOG_INFO_S("core/klog", "string-form sanity line", "who", "CustomOS");
+    KLOG_INFO_2V("core/klog", "two-value sanity line", "a", 0x8000, "b", 512);
+    // Fire the same once-macro call site from a loop — the static
+    // guard is per-site, so only the first iteration should emit.
+    for (int i = 0; i < 3; ++i)
+    {
+        KLOG_ONCE_INFO("core/klog", "once-info sanity (fires once even in a loop)");
+    }
 }
 
 } // namespace customos::core

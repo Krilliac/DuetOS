@@ -8,21 +8,27 @@
  * Replaces the ad-hoc `arch::SerialWrite("[subsys] msg\n")` pattern
  * with a uniform, severity-tagged API. Output lines look like:
  *
- *     [I] <subsystem> : <message>
- *     [I] <subsystem> : <message>   val=0x<hex>
- *     [W] <subsystem> : <message>
- *     [E] <subsystem> : <message>
- *     [D] <subsystem> : <message>
+ *     [t=12.345ms] [I] <subsystem> : <message>
+ *     [t=12.345ms] [I] <subsystem> : <message>   val=0x<hex> (<dec>)
+ *     [t=12.345ms] [W] <subsystem> : <message>
+ *     [t=12.345ms] [E] <subsystem> : <message>
+ *     [t=12.345ms] [D] <subsystem> : <message>
+ *     [t=12.345ms] [I] <subsystem> : <message>   <label>="<str>"
+ *     [t=12.345ms] [I] <subsystem> : <message>   <a>=0x.. (N)   <b>=0x.. (N)
  *
- * Severity letter is the single-character bracket prefix; consuming
- * tools (future CI log diff, log grep in `qemu.log`) can filter on
- * it trivially. Subsystem tag convention matches core::Panic (use
- * the kernel-tree path sans `kernel/`).
+ * The severity letter is the single-character bracket prefix; tools
+ * grep on it to filter. Subsystem tag convention matches core::Panic
+ * (use the kernel-tree path sans `kernel/`). ANSI SGR colour is wrapped
+ * around the tag so terminals highlight warn/error at a glance; it
+ * can be toggled with `SetLogColor(false)` when capturing to a file.
+ *
+ * Timestamp is wall-time since boot — microseconds when HPET is up,
+ * scheduler-tick * 10ms ("[t~50ms] ") before that.
  *
  * Design choices:
  *   - No variadic printf. `snprintf` in a kernel is a large surface;
- *     the "message + optional u64" API covers every existing need
- *     and we reach for `PanicWithValue`-style for anything richer.
+ *     the fixed-shape helpers (u64 / string / pair) cover every
+ *     current need without the format-string footgun.
  *   - Compile-time min level (`kKlogMinLevel`) filters cheaply —
  *     Debug calls compile to a single inline check.
  *   - No allocation, no lock. Concurrent writers may interleave;
@@ -30,8 +36,10 @@
  *     context with no deadlock risk. An SMP-safe ring buffer that
  *     serialises writes is a future improvement (see revisit
  *     markers in the decision log).
- *   - Timestamp omitted for now; when added it'll be TimerTicks()
- *     at 10 ms resolution. Cheap single-instruction read.
+ *   - Ring buffer remembers the last kLogRingCapacity entries with
+ *     their timestamps, replayed by core::Panic so the post-mortem
+ *     shows "what happened in the 63 lines before we died" with
+ *     wall-clock times attached.
  *
  * Context: kernel. Safe at any interrupt level.
  */
@@ -71,6 +79,32 @@ void Log(LogLevel level, const char* subsystem, const char* message);
 
 /// As above, with a u64 rendered as hex after the message.
 void LogWithValue(LogLevel level, const char* subsystem, const char* message, u64 value);
+
+/// Variant that takes a labelled NUL-terminated string. Renders as
+///     [I] subsys : message   <label>="<value>"
+/// Handy for device names, PCI vendors, file paths — anything the
+/// reader wants to see literally, not as hex. `value_str` must
+/// outlive the log call; it's stored by pointer in the ring buffer.
+void LogWithString(LogLevel level, const char* subsystem, const char* message, const char* label,
+                   const char* value_str);
+
+/// Variant that carries two labelled u64 values on one line. Renders as
+///     [I] subsys : message   <a_label>=0x... (dec)   <b_label>=0x... (dec)
+/// Useful for (base, size) / (count, stride) / (got, want) pairs that
+/// currently take two separate log lines. Ring-buffer persistence
+/// captures only the first value to keep the entry size bounded; if
+/// both values matter for post-mortem analysis, use two LogWithValue
+/// calls instead.
+void LogWith2Values(LogLevel level, const char* subsystem, const char* message, const char* a_label, u64 a_value,
+                    const char* b_label, u64 b_value);
+
+/// Toggle ANSI colour codes on the serial sink. Defaults to on.
+/// Off is useful for log-capture tools that don't understand escape
+/// sequences, or for CI runs that diff boot logs byte-wise.
+/// Does NOT affect the tee (framebuffer) — colours there are driven
+/// by the console itself.
+void SetLogColor(bool enabled);
+bool GetLogColor();
 
 /// Runtime sanity check of the log path. Prints one line at each
 /// level; visual inspection confirms the format. Called from
@@ -154,4 +188,57 @@ void DumpLogRingTo(LogTee writer);
     do                                                                                                                 \
     {                                                                                                                  \
         ::customos::core::LogWithValue(::customos::core::LogLevel::Error, (subsys), (msg), (val));                     \
+    } while (0)
+
+// "With string" forms — one labelled C-string appended.
+#define KLOG_INFO_S(subsys, msg, label, s)                                                                             \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        ::customos::core::LogWithString(::customos::core::LogLevel::Info, (subsys), (msg), (label), (s));              \
+    } while (0)
+
+#define KLOG_WARN_S(subsys, msg, label, s)                                                                             \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        ::customos::core::LogWithString(::customos::core::LogLevel::Warn, (subsys), (msg), (label), (s));              \
+    } while (0)
+
+// "With two values" forms — two labelled u64 values on one line.
+#define KLOG_INFO_2V(subsys, msg, la, a, lb, b)                                                                        \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        ::customos::core::LogWith2Values(::customos::core::LogLevel::Info, (subsys), (msg), (la), (a), (lb), (b));     \
+    } while (0)
+
+#define KLOG_WARN_2V(subsys, msg, la, a, lb, b)                                                                        \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        ::customos::core::LogWith2Values(::customos::core::LogLevel::Warn, (subsys), (msg), (la), (a), (lb), (b));     \
+    } while (0)
+
+// Once-firing variants — each call site emits at most once per boot.
+// The static bool sits in .bss, so KLOG_ONCE_INFO from inside a hot
+// loop costs one load + one branch after the first firing.
+// Useful for unimplemented-stub warnings, rare-but-expected conditions,
+// or any "I only want to know once" observation.
+#define KLOG_ONCE_INFO(subsys, msg)                                                                                    \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        static bool _klog_once = false;                                                                                \
+        if (!_klog_once)                                                                                               \
+        {                                                                                                              \
+            _klog_once = true;                                                                                         \
+            ::customos::core::Log(::customos::core::LogLevel::Info, (subsys), (msg));                                  \
+        }                                                                                                              \
+    } while (0)
+
+#define KLOG_ONCE_WARN(subsys, msg)                                                                                    \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        static bool _klog_once = false;                                                                                \
+        if (!_klog_once)                                                                                               \
+        {                                                                                                              \
+            _klog_once = true;                                                                                         \
+            ::customos::core::Log(::customos::core::LogLevel::Warn, (subsys), (msg));                                  \
+        }                                                                                                              \
     } while (0)

@@ -372,18 +372,18 @@ bool IdentifyControllerLogOnly()
     if (ok)
     {
         // Model number is at byte offset 24, 40 bytes, space-padded ASCII.
-        // Log the first 16 characters of the serial (byte 4) or model
-        // (byte 24). Stick with a short field for a single log line.
+        // Copy the first 20 printable chars into a local NUL-terminated
+        // buffer and ship it through LogWithString — fixed-width
+        // padding stays, non-printables become '.' for safety.
         const u8* bytes = static_cast<const u8*>(mm::PhysToVirt(buf));
-        arch::SerialWrite("[drivers/nvme] controller model: ");
+        static char model[21]; // static so the pointer is stable for the ring
         for (u32 i = 0; i < 20; ++i)
         {
             const char c = static_cast<char>(bytes[24 + i]);
-            const char printable = (c >= 0x20 && c < 0x7F) ? c : '.';
-            const char s[2] = {printable, 0};
-            arch::SerialWrite(s);
+            model[i] = (c >= 0x20 && c < 0x7F) ? c : '.';
         }
-        arch::SerialWrite("\n");
+        model[20] = 0;
+        core::LogWithString(core::LogLevel::Info, "drivers/nvme", "identify controller", "model", model);
     }
     mm::FreeFrame(buf);
     return ok;
@@ -419,8 +419,8 @@ bool IdentifyNamespaceOne()
         const u32 sector_size = (lbads >= 9 && lbads <= 12) ? (1U << lbads) : 512;
         g_ctrl.ns_sector_count = nsze;
         g_ctrl.ns_sector_size = sector_size;
-        core::LogWithValue(core::LogLevel::Info, "drivers/nvme", "namespace 1 sector count", nsze);
-        core::LogWithValue(core::LogLevel::Info, "drivers/nvme", "namespace 1 sector size", sector_size);
+        core::LogWith2Values(core::LogLevel::Info, "drivers/nvme", "namespace 1 geometry", "sectors", nsze, "bytes/sec",
+                             sector_size);
     }
     mm::FreeFrame(buf);
     return ok;
@@ -592,9 +592,9 @@ void NvmeInit()
     g_ctrl.next_cid = 1;
 
     core::LogWithValue(core::LogLevel::Info, "drivers/nvme", "version", vs);
-    core::LogWithValue(core::LogLevel::Info, "drivers/nvme", "cap.mqes+1", g_ctrl.max_queue_entries);
-    core::LogWithValue(core::LogLevel::Info, "drivers/nvme", "cap.dstrd bytes", g_ctrl.doorbell_stride_bytes);
-    core::LogWithValue(core::LogLevel::Info, "drivers/nvme", "cap.to ms", g_ctrl.cap_to_ms);
+    core::LogWith2Values(core::LogLevel::Info, "drivers/nvme", "capabilities", "max_queue_entries",
+                         g_ctrl.max_queue_entries, "doorbell_stride", g_ctrl.doorbell_stride_bytes);
+    core::LogWithValue(core::LogLevel::Info, "drivers/nvme", "timeout (ms)", g_ctrl.cap_to_ms);
 
     if (g_ctrl.max_queue_entries < kAdminQueueEntries || g_ctrl.max_queue_entries < kIoQueueEntries)
     {
