@@ -10,9 +10,11 @@
 #include "../drivers/input/ps2kbd.h"
 #include "../drivers/input/ps2mouse.h"
 #include "../drivers/pci/pci.h"
+#include "../drivers/storage/block.h"
 #include "../drivers/video/console.h"
 #include "../drivers/video/framebuffer.h"
 #include "../drivers/video/widget.h"
+#include "../fs/gpt.h"
 #include "../fs/ramfs.h"
 #include "../fs/tmpfs.h"
 #include "../fs/vfs.h"
@@ -290,6 +292,8 @@ void CmdHelp()
     ConsoleWriteln("  TRUE / FALSE NO-OP SUCCESS / FAILURE");
     ConsoleWriteln("  MOUNT        LIST FS MOUNTS");
     ConsoleWriteln("  LSMOD        LIST ACTIVE KERNEL SUBSYSTEMS");
+    ConsoleWriteln("  LSBLK        LIST REGISTERED BLOCK DEVICES");
+    ConsoleWriteln("  LSGPT        LIST PARTITIONS FROM GPT-PROBED DISKS");
     ConsoleWriteln("  FREE         MEMORY USAGE (PHYS + HEAP)");
     ConsoleWriteln("  PS           LIST EVERY SCHEDULER TASK");
     ConsoleWriteln("  SPAWN KIND   LAUNCH A RING-3 TASK (hello/sandbox/jail/...)");
@@ -952,8 +956,7 @@ void CmdSort(u32 argc, char** argv)
         const u32 off_i = offs[i];
         const u32 len_i = lens[i];
         u32 j = i;
-        while (j > 0 &&
-               LineCompare(&scratch[offs[j - 1]], lens[j - 1], &scratch[off_i], len_i) > 0)
+        while (j > 0 && LineCompare(&scratch[offs[j - 1]], lens[j - 1], &scratch[off_i], len_i) > 0)
         {
             offs[j] = offs[j - 1];
             lens[j] = lens[j - 1];
@@ -1000,8 +1003,7 @@ void CmdUniq(u32 argc, char** argv)
         if (at_end || scratch[i] == '\n')
         {
             const u32 len = i - start;
-            const bool is_dup = have_prev &&
-                                LineCompare(&scratch[prev_off], prev_len, &scratch[start], len) == 0;
+            const bool is_dup = have_prev && LineCompare(&scratch[prev_off], prev_len, &scratch[start], len) == 0;
             if (!is_dup)
             {
                 for (u32 k = 0; k < len; ++k)
@@ -1063,8 +1065,7 @@ void CmdGrep(u32 argc, char** argv)
 // back so sibling subtrees see the correct prefix. Root's name
 // is empty — we skip the name-match test there but still walk
 // its children.
-void FindWalk(const customos::fs::RamfsNode* node, const char* needle, char* path_buf,
-              u32& path_len, u32 path_cap)
+void FindWalk(const customos::fs::RamfsNode* node, const char* needle, char* path_buf, u32& path_len, u32 path_cap)
 {
     if (node == nullptr)
     {
@@ -1125,7 +1126,8 @@ void CmdFind(u32 argc, char** argv)
     };
     Cookie cookie{needle};
     customos::fs::TmpFsEnumerate(
-        [](const char* name, u32 /*len*/, void* ck) {
+        [](const char* name, u32 /*len*/, void* ck)
+        {
             auto* c = static_cast<Cookie*>(ck);
             u32 nlen = 0;
             while (name[nlen] != '\0')
@@ -1144,20 +1146,16 @@ void CmdFind(u32 argc, char** argv)
 // dispatched in Dispatch — keeping the two in sync is the
 // price of not having reflection.
 static const char* const kCommandSet[] = {
-    "help",    "about",   "version", "clear",   "uptime",  "date",    "windows",
-    "mode",    "ls",      "cat",     "touch",   "rm",      "echo",    "cp",
-    "mv",      "wc",      "head",    "tail",    "dmesg",   "stats",   "mem",
-    "history", "set",     "unset",   "env",     "alias",   "unalias", "sysinfo",
-    "source",  "man",     "grep",    "find",    "time",    "which",   "seq",
-    "sort",    "uniq",    "cpuid",   "cr",      "rflags",  "tsc",     "hpet",
-    "ticks",   "msr",     "lapic",   "smp",     "lspci",   "heap",    "paging",
-    "fb",      "kbdstats","mousestats","loglevel","getenv","yield",   "reboot",
-    "halt",    "uname",   "whoami",  "hostname","pwd",     "true",    "false",
-    "mount",   "lsmod",   "free",    "ps",      "spawn",   "readelf",
-    "hexdump", "stat",    "basename","dirname", "cal",
-    "sleep",   "reset",   "tac",     "nl",      "rev",     "expr",
-    "color",   "rand",    "flushtlb","checksum","repeat",   "kill",
-    "exec",
+    "help",    "about",    "version", "clear",    "uptime",   "date",     "windows",    "mode",     "ls",
+    "cat",     "touch",    "rm",      "echo",     "cp",       "mv",       "wc",         "head",     "tail",
+    "dmesg",   "stats",    "mem",     "history",  "set",      "unset",    "env",        "alias",    "unalias",
+    "sysinfo", "source",   "man",     "grep",     "find",     "time",     "which",      "seq",      "sort",
+    "uniq",    "cpuid",    "cr",      "rflags",   "tsc",      "hpet",     "ticks",      "msr",      "lapic",
+    "smp",     "lspci",    "heap",    "paging",   "fb",       "kbdstats", "mousestats", "loglevel", "getenv",
+    "yield",   "reboot",   "halt",    "uname",    "whoami",   "hostname", "pwd",        "true",     "false",
+    "mount",   "lsmod",    "lsblk",   "lsgpt",    "free",     "ps",       "spawn",      "readelf",  "hexdump",
+    "stat",    "basename", "dirname", "cal",      "sleep",    "reset",    "tac",        "nl",       "rev",
+    "expr",    "color",    "rand",    "flushtlb", "checksum", "repeat",   "kill",       "exec",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -1395,8 +1393,7 @@ void CmdSource(u32 argc, char** argv)
         }
         line_buf[j] = '\0';
         // Trim trailing whitespace for cleaner dispatch.
-        while (j > 0 && (line_buf[j - 1] == ' ' || line_buf[j - 1] == '\t' ||
-                         line_buf[j - 1] == '\r'))
+        while (j > 0 && (line_buf[j - 1] == ' ' || line_buf[j - 1] == '\t' || line_buf[j - 1] == '\r'))
         {
             line_buf[--j] = '\0';
         }
@@ -1505,10 +1502,8 @@ void CmdSysinfo()
     WriteU64Dec(alive);
     ConsoleWriteln(" ALIVE");
     ConsoleWrite("MODE:    ");
-    ConsoleWriteln(customos::drivers::video::GetDisplayMode() ==
-                           customos::drivers::video::DisplayMode::Tty
-                       ? "TTY"
-                       : "DESKTOP");
+    ConsoleWriteln(
+        customos::drivers::video::GetDisplayMode() == customos::drivers::video::DisplayMode::Tty ? "TTY" : "DESKTOP");
 }
 
 void CmdEnv()
@@ -1701,8 +1696,8 @@ void CmdCr()
 // memcpy from .rodata, which the freestanding kernel doesn't
 // link.
 constexpr u8 kRflagsBitIdx[] = {0, 2, 4, 6, 7, 8, 9, 10, 11, 14, 16, 17, 18, 19, 20, 21};
-constexpr const char* kRflagsBitNames[] = {"CF", "PF",  "AF",  "ZF", "SF", "TF", "IF", "DF",
-                                            "OF", "NT",  "RF",  "VM", "AC", "VIF","VIP","ID"};
+constexpr const char* kRflagsBitNames[] = {"CF", "PF", "AF", "ZF", "SF", "TF",  "IF",  "DF",
+                                           "OF", "NT", "RF", "VM", "AC", "VIF", "VIP", "ID"};
 
 void CmdRflags()
 {
@@ -2136,16 +2131,104 @@ void CmdMount()
     ConsoleWriteln("tmpfs on /tmp    type=tmpfs (rw, 16 slots, 512B each)");
 }
 
+void CmdLsblk()
+{
+    namespace storage = customos::drivers::storage;
+    const customos::u32 count = storage::BlockDeviceCount();
+    ConsoleWrite("NAME       HANDLE  SECT_SZ  SECT_COUNT       MODE");
+    ConsoleWriteln("");
+    for (customos::u32 i = 0; i < count; ++i)
+    {
+        const char* name = storage::BlockDeviceName(i);
+        ConsoleWrite(name);
+        // Pad the name column to 10 chars (max realistic "nvme0n99").
+        for (customos::u32 p = 0; p < 11; ++p)
+        {
+            if (name[p] == 0)
+            {
+                for (customos::u32 q = p; q < 11; ++q)
+                    ConsoleWriteChar(' ');
+                break;
+            }
+        }
+        WriteU64Hex(i, 4);
+        ConsoleWrite("    ");
+        WriteU64Hex(storage::BlockDeviceSectorSize(i), 6);
+        ConsoleWrite("  ");
+        WriteU64Hex(storage::BlockDeviceSectorCount(i), 16);
+        ConsoleWrite("  ");
+        ConsoleWriteln(storage::BlockDeviceIsWritable(i) ? "rw" : "ro");
+    }
+    if (count == 0)
+    {
+        ConsoleWriteln("  (no block devices registered)");
+    }
+}
+
+void CmdLsgpt()
+{
+    namespace gpt = customos::fs::gpt;
+    const customos::u32 disks = gpt::GptDiskCount();
+    if (disks == 0)
+    {
+        ConsoleWriteln("  (no GPT disks probed)");
+        return;
+    }
+    for (customos::u32 di = 0; di < disks; ++di)
+    {
+        const gpt::Disk* d = gpt::GptDisk(di);
+        if (d == nullptr)
+            continue;
+        ConsoleWrite("DISK HANDLE ");
+        WriteU64Hex(d->block_handle, 4);
+        ConsoleWrite("  SECTOR_SIZE ");
+        WriteU64Hex(d->sector_size, 4);
+        ConsoleWrite("  PARTS ");
+        WriteU64Hex(d->partition_count, 2);
+        ConsoleWriteln("");
+        for (customos::u32 pi = 0; pi < d->partition_count; ++pi)
+        {
+            const gpt::Partition& p = d->partitions[pi];
+            ConsoleWrite("  PART ");
+            WriteU64Hex(pi, 2);
+            ConsoleWrite(" FIRST_LBA ");
+            WriteU64Hex(p.first_lba, 0);
+            ConsoleWrite(" LAST_LBA ");
+            WriteU64Hex(p.last_lba, 0);
+            ConsoleWriteln("");
+            ConsoleWrite("       TYPE ");
+            // Canonical mixed-endian GUID rendering.
+            static constexpr int kOrder[] = {3, 2, 1, 0, -1, 5, 4, -1, 7, 6, -1, 8, 9, -1, 10, 11, 12, 13, 14, 15};
+            for (int k = 0; k < 20; ++k)
+            {
+                const int idx = kOrder[k];
+                if (idx < 0)
+                {
+                    ConsoleWriteChar('-');
+                }
+                else
+                {
+                    const customos::u8 b = p.type_guid[idx];
+                    const char hi = (b >> 4) < 10 ? char('0' + (b >> 4)) : char('A' + (b >> 4) - 10);
+                    const char lo = (b & 0xF) < 10 ? char('0' + (b & 0xF)) : char('A' + (b & 0xF) - 10);
+                    ConsoleWriteChar(hi);
+                    ConsoleWriteChar(lo);
+                }
+            }
+            ConsoleWriteln("");
+        }
+    }
+}
+
 void CmdLsmod()
 {
     // Not real modules — just a static list of the subsystems
     // currently online. Still useful as a "what's loaded" view.
     static const char* const kModules[] = {
-        "multiboot2", "gdt", "idt", "tss+ist", "paging",      "frame_alloc", "kheap",
-        "acpi",       "pic", "lapic", "ioapic", "hpet",       "timer",       "scheduler",
-        "percpu",     "ps2kbd", "ps2mouse", "pci",            "ahci",        "framebuffer",
-        "cursor",     "font8x8", "console", "widget",         "taskbar",     "menu",
-        "ramfs",      "tmpfs",   "vfs",     "rtc",            "klog",        "shell",
+        "multiboot2", "gdt",   "idt",    "tss+ist",     "paging", "frame_alloc", "kheap",   "acpi",
+        "pic",        "lapic", "ioapic", "hpet",        "timer",  "scheduler",   "percpu",  "ps2kbd",
+        "ps2mouse",   "pci",   "ahci",   "framebuffer", "cursor", "font8x8",     "console", "widget",
+        "taskbar",    "menu",  "ramfs",  "tmpfs",       "vfs",    "rtc",         "klog",    "shell",
     };
     constexpr u32 kCount = sizeof(kModules) / sizeof(kModules[0]);
     for (u32 i = 0; i < kCount; ++i)
@@ -2247,7 +2330,10 @@ void CmdSpawn(u32 argc, char** argv)
 
 // Little-endian u16/u32/u64 readers — the ELF parser walks
 // raw bytes, so we don't rely on alignment or struct packing.
-u16 LeU16(const u8* p) { return u16(p[0]) | (u16(p[1]) << 8); }
+u16 LeU16(const u8* p)
+{
+    return u16(p[0]) | (u16(p[1]) << 8);
+}
 u32 LeU32(const u8* p)
 {
     return u32(p[0]) | (u32(p[1]) << 8) | (u32(p[2]) << 16) | (u32(p[3]) << 24);
@@ -3009,9 +3095,8 @@ void CmdCal()
     // h: 0=Sat, 1=Sun, 2=Mon, ..., 6=Fri — remap to Sun=0.
     const u32 dow_first = (h + 6) % 7;
 
-    static const char* const kMonths[] = {"January",  "February", "March",     "April",
-                                           "May",      "June",     "July",      "August",
-                                           "September","October",  "November",  "December"};
+    static const char* const kMonths[] = {"January", "February", "March",     "April",   "May",      "June",
+                                          "July",    "August",   "September", "October", "November", "December"};
     ConsoleWrite("        ");
     ConsoleWrite(kMonths[(t.month - 1) % 12]);
     ConsoleWriteChar(' ');
@@ -3038,8 +3123,7 @@ void CmdCal()
         }
         else
         {
-            ConsoleWriteChar(day == t.day ? static_cast<char>('0' + day % 10)
-                                          : static_cast<char>('0' + day % 10));
+            ConsoleWriteChar(day == t.day ? static_cast<char>('0' + day % 10) : static_cast<char>('0' + day % 10));
         }
         if (((day + dow_first) % 7) == 0)
         {
@@ -3092,7 +3176,8 @@ void CmdExec(u32 argc, char** argv)
     Cookie cookie{0};
     const u32 visited = customos::core::ElfForEachPtLoad(
         file, n,
-        [](const customos::core::ElfSegment& seg, void* ck) {
+        [](const customos::core::ElfSegment& seg, void* ck)
+        {
             auto* c = static_cast<Cookie*>(ck);
             ++c->count;
             ConsoleWrite("  ");
@@ -3287,7 +3372,8 @@ void CmdPs()
     };
     Cookie cookie{0};
     customos::sched::SchedEnumerate(
-        [](const customos::sched::SchedTaskInfo& info, void* ck) {
+        [](const customos::sched::SchedTaskInfo& info, void* ck)
+        {
             auto* c = static_cast<Cookie*>(ck);
             // 4-digit PID aligned, status tag, priority, name.
             // Running task gets a '*' prefix so it's obvious.
@@ -3409,7 +3495,7 @@ void CmdMode()
     const auto mode = customos::drivers::video::GetDisplayMode();
     ConsoleWrite("CURRENT MODE: ");
     ConsoleWriteln(mode == customos::drivers::video::DisplayMode::Tty ? "TTY (FULLSCREEN CONSOLE)"
-                                                                       : "DESKTOP (WINDOWED SHELL)");
+                                                                      : "DESKTOP (WINDOWED SHELL)");
     ConsoleWriteln("PRESS CTRL+ALT+T TO TOGGLE.");
 }
 
@@ -3500,8 +3586,7 @@ void CmdEcho(u32 argc, char** argv)
         {
             buf[out++] = '\n'; // match /bin/echo's trailing newline
         }
-        const bool ok = append ? customos::fs::TmpFsAppend(leaf, buf, out)
-                                : customos::fs::TmpFsWrite(leaf, buf, out);
+        const bool ok = append ? customos::fs::TmpFsAppend(leaf, buf, out) : customos::fs::TmpFsWrite(leaf, buf, out);
         if (!ok)
         {
             ConsoleWrite("ECHO: WRITE FAILED: ");
@@ -3531,7 +3616,8 @@ void LsTmpDir()
     {
         bool* any;
     };
-    auto cb = [](const char* name, u32 len, void* cookie) {
+    auto cb = [](const char* name, u32 len, void* cookie)
+    {
         auto* c = static_cast<Cookie*>(cookie);
         *c->any = true;
         ConsoleWrite("  ");
@@ -4286,6 +4372,16 @@ void Dispatch(char* line)
         CmdLsmod();
         return;
     }
+    if (StrEq(cmd, "lsblk"))
+    {
+        CmdLsblk();
+        return;
+    }
+    if (StrEq(cmd, "lsgpt"))
+    {
+        CmdLsgpt();
+        return;
+    }
     if (StrEq(cmd, "free"))
     {
         CmdFree();
@@ -4685,7 +4781,8 @@ void CompletePath(u32 partial_start)
     // Tab at / yields both worlds.
     if (StrEq(parent_buf, "/tmp"))
     {
-        auto cb = [](const char* name, u32 /*len*/, void* cookie) {
+        auto cb = [](const char* name, u32 /*len*/, void* cookie)
+        {
             auto* c = static_cast<CompleteCollector*>(cookie);
             if (c->count >= kCompleteMax)
                 return;
@@ -4814,16 +4911,12 @@ void ShellTabComplete()
     // Temporarily terminate the first token so StrEq can read it.
     const char saved = g_input[first_ws];
     g_input[first_ws] = '\0';
-    const bool path_cmd = StrEq(g_input, "ls") || StrEq(g_input, "cat") ||
-                          StrEq(g_input, "touch") || StrEq(g_input, "rm") ||
-                          StrEq(g_input, "cp") || StrEq(g_input, "mv") ||
-                          StrEq(g_input, "wc") || StrEq(g_input, "head") ||
-                          StrEq(g_input, "tail") || StrEq(g_input, "source") ||
-                          StrEq(g_input, "grep") || StrEq(g_input, "sort") ||
-                          StrEq(g_input, "uniq") || StrEq(g_input, "readelf") ||
-                          StrEq(g_input, "hexdump") || StrEq(g_input, "stat") ||
-                          StrEq(g_input, "tac") || StrEq(g_input, "nl") ||
-                          StrEq(g_input, "rev") || StrEq(g_input, "checksum");
+    const bool path_cmd =
+        StrEq(g_input, "ls") || StrEq(g_input, "cat") || StrEq(g_input, "touch") || StrEq(g_input, "rm") ||
+        StrEq(g_input, "cp") || StrEq(g_input, "mv") || StrEq(g_input, "wc") || StrEq(g_input, "head") ||
+        StrEq(g_input, "tail") || StrEq(g_input, "source") || StrEq(g_input, "grep") || StrEq(g_input, "sort") ||
+        StrEq(g_input, "uniq") || StrEq(g_input, "readelf") || StrEq(g_input, "hexdump") || StrEq(g_input, "stat") ||
+        StrEq(g_input, "tac") || StrEq(g_input, "nl") || StrEq(g_input, "rev") || StrEq(g_input, "checksum");
     g_input[first_ws] = saved;
 
     if (path_cmd)
