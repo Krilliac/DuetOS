@@ -607,6 +607,44 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 093 — /etc/motd + /etc/profile + source / man commands
+
+- **Scope:** `kernel/fs/ramfs.cpp` — seeds `/etc/motd`
+  (welcome banner + key bindings) and `/etc/profile`
+  (default aliases + prompt). `kernel/core/shell.cpp` —
+  new `source` command (dispatches each line of a file as
+  a shell command; `#` comments + blank lines skipped;
+  `.` alias). New `man NAME` prints detailed per-command
+  help from an inline switch. `ShellInit` auto-cats motd
+  + auto-sources /etc/profile.
+- **Decision:** motd + profile land in the ramfs as real
+  files so users can point at them with `cat /etc/motd` and
+  eventually edit via tmpfs copy. `source` lets the user
+  run ad-hoc scripts from /tmp too (write a script to
+  /tmp/foo, source it). `man` pages stay inline in shell.cpp
+  for v0 — moving them to /etc/man/<cmd> files is a mostly-
+  mechanical refactor that adds pressure on the ramfs
+  seeding code, so defer until an on-disk FS lands.
+- **Why:** The shell boots feeling like a real system now:
+  a persistent system-identity file is on disk, defaults
+  auto-apply, users can get detailed help on any command,
+  and scripts are a thing. Incremental but high-impact
+  polish.
+- **Rules out / defers:** /etc/man/<cmd> as real files
+  (easy follow-up once there's more disk content). Scripts
+  with shebang, arguments, conditionals, loops. Per-user
+  profile (no user concept yet). Motd generators (dynamic
+  content via special markers).
+- **Revisit when:** On-disk FS lands (motd/profile/man
+  become real files; user-edited profile persists). First
+  scripting construct needed (if/while/for). Multi-user
+  appears.
+- **Related tracks:** Track 5 (VFS — persistent system
+  config files), Track 7 (Userland shell — scripts),
+  Track 4 (Process model — per-user / per-process env).
+
+---
+
 ## 092 — Severity-coloured KERNEL LOG window
 
 - **Scope:** `kernel/core/main.cpp` — log-viewer content
