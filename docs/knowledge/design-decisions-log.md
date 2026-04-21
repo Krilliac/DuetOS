@@ -607,6 +607,60 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 097 — Shell `sort` + `uniq`
+
+- **Scope:** `kernel/core/shell.cpp` — `CmdSort` + `CmdUniq`
+  and shared helpers `SliceLines` + `LineCompare`.
+- **Decision:** `sort` uses insertion sort on a (offset, length)
+  index pair array (stack-local, cap 128 lines) — line bodies
+  stay in the scratch buffer and we only swap indices, so the
+  algorithm is zero-copy. Classic `uniq` semantics — consecutive
+  duplicates only. Both share `SliceLines` so future line-
+  oriented commands (`tac`, `uniq -c`, `sort -r`) pick up the
+  slicing for free.
+- **Why:** Closes the "classic text pipeline" trio (grep / sort
+  / uniq) — a user can now script read-only log triage
+  workflows entirely in the shell.
+- **Rules out / defers:** `-r` reverse sort. `-n` numeric sort.
+  `-u` unique (merged into sort). `uniq -c` / `-d`. Large-file
+  sort (backing store).
+- **Revisit when:** Pipes land (`sort` and `uniq` are the
+  canonical pipe consumers — `cmd | sort | uniq`). First user
+  wants `-r` or `-n` flags.
+- **Related tracks:** Track 7 (Userland shell).
+
+---
+
+## 096 — Move man pages into /etc/man/ ramfs files
+
+- **Scope:** `kernel/fs/ramfs.cpp` — twelve new `/etc/man/*`
+  files (ls, cat, echo, cp, mv, grep, find, history, alias,
+  env, time, source) declared via a one-line `MAN_NODE()`
+  macro. New `k_trusted_etc_man_dir` slots into `/etc`.
+  `kernel/core/shell.cpp` — `CmdMan` rewritten to build
+  `/etc/man/<name>` and dispatch through `ReadFileToBuf`.
+- **Decision:** Keep the man-page text in ramfs, not inline
+  in shell.cpp. MAN_NODE() macro collapses each per-page
+  `RamfsNode` definition to one line. CmdMan loses ~100
+  lines of switch/case for a 30-line VfsLookup + cat.
+- **Why:** `cat /etc/man/ls` now works, which is the POSIX
+  promise; `ls /etc/man` enumerates what's available; and
+  shell.cpp stops carrying help text that belongs on disk.
+  Also sets up the pattern for future man-page additions —
+  drop a constexpr byte array + a MAN_NODE() line.
+- **Rules out / defers:** Sectioned pages (man 1, 2, ...).
+  Formatting (bold / italic / underline — none of which our
+  font supports anyway). User-writable man pages in
+  /tmp/man/ (mount nesting).
+- **Revisit when:** On-disk FS lands (man moves to a real
+  disk path). Formatted output primitives arrive (ANSI SGR,
+  per-cell colour).
+- **Related tracks:** Track 5 (VFS — first nested directory
+  with > 2 files), Track 7 (Userland shell — disk-backed
+  documentation).
+
+---
+
 ## 095 — Shell `time` / `which` / `seq` + factored kCommandSet
 
 - **Scope:** `kernel/core/shell.cpp` — three new commands, plus
