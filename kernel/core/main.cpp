@@ -16,6 +16,7 @@
 #include "../drivers/pci/pci.h"
 #include "../drivers/storage/ahci.h"
 #include "../apps/calculator.h"
+#include "../apps/clock.h"
 #include "../apps/files.h"
 #include "../apps/notes.h"
 #include "../drivers/video/console.h"
@@ -507,6 +508,24 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
         customos::drivers::video::WindowRegister(files_chrome, "FILES");
     customos::apps::files::FilesInit(files_handle);
     customos::apps::files::FilesSelfTest();
+
+    // CLOCK — 7-segment-style wall clock. No input, refreshes
+    // via the 1 Hz ui-ticker. Sized tight around the digit row
+    // (6 digits + 2 colons + gaps) with room for a date line.
+    customos::drivers::video::WindowChrome clock_chrome{};
+    clock_chrome.x = 640;
+    clock_chrome.y = 520;
+    clock_chrome.w = 240;
+    clock_chrome.h = 110;
+    clock_chrome.colour_border = 0x00101828;
+    clock_chrome.colour_title = 0x00203040;
+    clock_chrome.colour_client = 0x00081008;
+    clock_chrome.colour_close_btn = 0x00E04020;
+    clock_chrome.title_height = 22;
+    const customos::drivers::video::WindowHandle clock_handle =
+        customos::drivers::video::WindowRegister(clock_chrome, "CLOCK");
+    customos::apps::clock::ClockInit(clock_handle);
+    customos::apps::clock::ClockSelfTest();
 
     // Framebuffer text console. 80x40 chars of boot log at the
     // bottom of the desktop, under the windows in z-order. Dragging
