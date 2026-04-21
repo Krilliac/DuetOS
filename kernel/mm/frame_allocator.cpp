@@ -353,23 +353,33 @@ PhysAddr AllocateFrame()
             // (SYS_MMAP etc.): a malicious process that allocates
             // a fresh page and reads it sees only zeros.
             //
-            // Reachable only for frames inside the 1 GiB direct
-            // map. On systems with >1 GiB RAM, frames above the
-            // direct-map window are returned un-zeroed until a
-            // dynamic-direct-map or MapMmio-based zeroing helper
-            // lands (all test configurations today stay under
-            // 1 GiB, so this isn't yet exposed).
+            // Only frames inside the 1 GiB direct map are
+            // reachable for zeroing today. A frame above the
+            // direct-map window has no virtual alias we can
+            // safely touch without spilling the allocator into
+            // MapMmio during bring-up. Until a dynamic-direct-map
+            // or MapMmio-based zeroing helper lands, halt loud
+            // rather than quietly hand out un-zeroed memory —
+            // that would be an info-leak primitive as soon as a
+            // user-visible allocator (SYS_MMAP, page-cache) gets
+            // a consumer with >1 GiB of RAM. Bitmap initialisation
+            // already reserves memory past the direct-map window
+            // as used, so this branch should be unreachable today;
+            // the panic is defence-in-depth against a future
+            // caller accidentally freeing or coloring a high
+            // frame back into the pool.
             //
             // Cost: 4 KiB memset per allocation. Boot does hundreds
             // of these (~ms total). If this ever shows up in a
             // profile, a GFP_ZERO / GFP_NOZERO split is the fix.
-            if (phys < kDirectMapBytes)
+            if (phys >= kDirectMapBytes)
             {
-                auto* virt = static_cast<u8*>(PhysToVirt(phys));
-                for (u64 b = 0; b < kPageSize; ++b)
-                {
-                    virt[b] = 0;
-                }
+                PanicFrame("AllocateFrame: frame past direct map, cannot zero");
+            }
+            auto* virt = static_cast<u8*>(PhysToVirt(phys));
+            for (u64 b = 0; b < kPageSize; ++b)
+            {
+                virt[b] = 0;
             }
             return phys;
         }

@@ -92,9 +92,12 @@ ElfStatus ElfValidate(const u8* file, u64 file_len)
     {
         return ElfStatus::NoProgramHeaders;
     }
-    // All program headers must fit inside the file.
-    const u64 phtbl_end = e_phoff + static_cast<u64>(e_phnum) * e_phentsize;
-    if (phtbl_end > file_len)
+    // All program headers must fit inside the file. Do every addition
+    // as an overflow-checked step: a malicious ELF with e_phoff near
+    // UINT64_MAX and a non-zero phtbl size would otherwise wrap and
+    // pass the file-length check while indexing far past `file`.
+    const u64 phtbl_bytes = static_cast<u64>(e_phnum) * e_phentsize;
+    if (e_phoff > file_len || phtbl_bytes > file_len - e_phoff)
     {
         return ElfStatus::HeaderOutOfBounds;
     }
@@ -113,8 +116,30 @@ ElfStatus ElfValidate(const u8* file, u64 file_len)
         const u64 p_offset = LeU64(p + 8);
         const u64 p_vaddr = LeU64(p + 16);
         const u64 p_filesz = LeU64(p + 32);
+        const u64 p_memsz = LeU64(p + 40);
         const u64 p_align = LeU64(p + 48);
-        if (p_offset + p_filesz > file_len)
+        // Overflow-safe bounds: a crafted ELF with p_offset = UINT64_MAX
+        // and p_filesz = 0x10 would pass `p_offset + p_filesz > file_len`
+        // after wrapping unless we compare subtractively.
+        if (p_offset > file_len || p_filesz > file_len - p_offset)
+        {
+            return ElfStatus::SegmentOutOfBounds;
+        }
+        // memsz >= filesz is required by the spec.
+        if (p_memsz < p_filesz)
+        {
+            return ElfStatus::SegmentOutOfBounds;
+        }
+        // User VAs must live in the canonical low half. Checking against
+        // kUserMax subtractively keeps the arithmetic overflow-safe and
+        // stops a malformed ELF from tripping the kernel-half panic
+        // inside AddressSpaceMapUserPage.
+        constexpr u64 kUserMax = 0x00007FFFFFFFFFFFULL;
+        if (p_vaddr > kUserMax)
+        {
+            return ElfStatus::SegmentOutOfBounds;
+        }
+        if (p_memsz > 0 && (p_memsz - 1) > (kUserMax - p_vaddr))
         {
             return ElfStatus::SegmentOutOfBounds;
         }
