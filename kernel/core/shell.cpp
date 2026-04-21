@@ -192,6 +192,8 @@ void CmdHelp()
     ConsoleWriteln("  ALIAS N CMD  CREATE ALIAS (BARE ALIAS LISTS ALL)");
     ConsoleWriteln("  UNALIAS N    REMOVE ALIAS");
     ConsoleWriteln("  SYSINFO      ONE-SHOT SYSTEM STATUS SUMMARY");
+    ConsoleWriteln("  SOURCE PATH  RUN EACH LINE OF PATH AS A COMMAND");
+    ConsoleWriteln("  MAN NAME     DETAILED HELP FOR ONE COMMAND");
     ConsoleWriteln("");
     ConsoleWriteln("KEYS:  UP/DOWN = HISTORY   TAB = COMPLETE");
     ConsoleWriteln("       CTRL+ALT+T = TOGGLE MODE");
@@ -826,6 +828,176 @@ void CmdUnalias(u32 argc, char** argv)
     {
         ConsoleWrite("UNALIAS: NO SUCH ALIAS: ");
         ConsoleWriteln(argv[1]);
+    }
+}
+
+// Forward declaration for mutual recursion: source -> dispatch
+// -> (a sourced line could reference another command).
+void Dispatch(char* line);
+
+void CmdSource(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("SOURCE: MISSING PATH");
+        return;
+    }
+    char scratch[customos::fs::kTmpFsContentMax];
+    const u32 n = ReadFileToBuf(argv[1], scratch, sizeof(scratch));
+    if (n == static_cast<u32>(-1))
+    {
+        ConsoleWrite("SOURCE: NO SUCH FILE: ");
+        ConsoleWriteln(argv[1]);
+        return;
+    }
+    // Walk the content line by line. Each line dispatches
+    // through the full shell pipeline (alias expansion, env
+    // substitution, redirects). Lines starting with '#' are
+    // comments. Blank lines are silently skipped.
+    char line_buf[kInputMax];
+    u32 i = 0;
+    while (i < n)
+    {
+        u32 j = 0;
+        while (i < n && scratch[i] != '\n' && j + 1 < sizeof(line_buf))
+        {
+            line_buf[j++] = scratch[i++];
+        }
+        // Skip to end-of-line if the line was too long.
+        while (i < n && scratch[i] != '\n')
+        {
+            ++i;
+        }
+        if (i < n)
+        {
+            ++i; // consume '\n'
+        }
+        line_buf[j] = '\0';
+        // Trim trailing whitespace for cleaner dispatch.
+        while (j > 0 && (line_buf[j - 1] == ' ' || line_buf[j - 1] == '\t' ||
+                         line_buf[j - 1] == '\r'))
+        {
+            line_buf[--j] = '\0';
+        }
+        if (j == 0 || line_buf[0] == '#')
+        {
+            continue;
+        }
+        Dispatch(line_buf);
+    }
+}
+
+void CmdMan(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("MAN: MISSING COMMAND NAME");
+        ConsoleWriteln("MAN: TRY `help` FOR A COMMAND LIST");
+        return;
+    }
+    // v0 man pages are inline strings indexed by command name.
+    // The "proper" approach is /etc/man/<cmd> files in the
+    // ramfs, but inlining avoids another round of constinit
+    // RamfsNode declarations for 15+ commands. The inline
+    // strings move to ramfs when the on-disk FS lands.
+    const char* name = argv[1];
+    const char* body = nullptr;
+    if (StrEq(name, "ls"))
+    {
+        body = "LS [PATH]\n"
+               "  Lists the children of PATH (default /).\n"
+               "  For a file, prints the filename + size.\n"
+               "  /tmp is a writable namespace; other paths are read-only.\n";
+    }
+    else if (StrEq(name, "cat"))
+    {
+        body = "CAT PATH\n"
+               "  Prints the contents of PATH.\n"
+               "  Works on ramfs (/etc, /bin) and tmpfs (/tmp).\n";
+    }
+    else if (StrEq(name, "echo"))
+    {
+        body = "ECHO ARG..  [> PATH | >> PATH]\n"
+               "  Prints args separated by single spaces + newline.\n"
+               "  With >, writes to /tmp/<NAME> (replaces).\n"
+               "  With >>, appends. Target must be /tmp.\n";
+    }
+    else if (StrEq(name, "cp"))
+    {
+        body = "CP SRC DST\n"
+               "  Copies SRC to DST. DST must be /tmp/<NAME>.\n"
+               "  SRC may be /tmp or any read-only ramfs path.\n";
+    }
+    else if (StrEq(name, "mv"))
+    {
+        body = "MV SRC DST\n"
+               "  Renames a /tmp file. Both paths must be /tmp/<NAME>.\n"
+               "  Source is unlinked only after write succeeds.\n";
+    }
+    else if (StrEq(name, "set") || StrEq(name, "unset") || StrEq(name, "env"))
+    {
+        body = "SET NAME VALUE   Store an environment variable.\n"
+               "UNSET NAME       Remove a variable.\n"
+               "ENV              List all variables.\n"
+               "Reference a variable in args as $NAME (whole-token only).\n"
+               "Set PS1 to customise the shell prompt.\n";
+    }
+    else if (StrEq(name, "alias") || StrEq(name, "unalias"))
+    {
+        body = "ALIAS NAME CMD   Create or redefine an alias.\n"
+               "ALIAS            List all aliases.\n"
+               "UNALIAS NAME     Remove an alias.\n"
+               "Aliases expand once before dispatch; no recursion.\n";
+    }
+    else if (StrEq(name, "history"))
+    {
+        body = "HISTORY\n"
+               "  Prints the last 8 commands (oldest first).\n"
+               "  Recall: !N runs command N, !! repeats the last.\n"
+               "  Up/Down arrows cycle through history in-place.\n";
+    }
+    else if (StrEq(name, "source") || StrEq(name, "."))
+    {
+        body = "SOURCE PATH\n"
+               "  Runs each line of PATH as a shell command.\n"
+               "  Blank lines and lines starting with # are skipped.\n"
+               "  Used to auto-run /etc/profile at boot.\n";
+    }
+    else if (StrEq(name, "dmesg") || StrEq(name, "stats") || StrEq(name, "mem") ||
+             StrEq(name, "sysinfo") || StrEq(name, "mode"))
+    {
+        body = "Introspection commands — no args.\n"
+               "  DMESG    dump the kernel log ring.\n"
+               "  STATS    scheduler counters.\n"
+               "  MEM      frame-allocator usage.\n"
+               "  SYSINFO  one-shot system summary.\n"
+               "  MODE     current display mode (desktop / TTY).\n";
+    }
+    else if (StrEq(name, "windows"))
+    {
+        body = "WINDOWS\n"
+               "  Lists every registered window slot.\n"
+               "  Shows ALIVE / DEAD status + the registered title.\n";
+    }
+    if (body == nullptr)
+    {
+        ConsoleWrite("MAN: NO PAGE FOR: ");
+        ConsoleWriteln(name);
+        ConsoleWriteln("MAN: TRY `help` FOR A COMMAND LIST");
+        return;
+    }
+    ConsoleWrite(body);
+    // Most man-page strings already end with '\n', but if a
+    // future page doesn't, ensure the prompt lands on a clean row.
+    const u32 blen = [body]() {
+        u32 n = 0;
+        while (body[n] != '\0')
+            ++n;
+        return n;
+    }();
+    if (blen == 0 || body[blen - 1] != '\n')
+    {
+        ConsoleWriteChar('\n');
     }
 }
 
@@ -1566,6 +1738,16 @@ void Dispatch(char* line)
         CmdSysinfo();
         return;
     }
+    if (StrEq(cmd, "source") || StrEq(cmd, "."))
+    {
+        CmdSource(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "man"))
+    {
+        CmdMan(argc, argv);
+        return;
+    }
     ConsoleWrite("COMMAND NOT FOUND: ");
     ConsoleWriteln(cmd);
     ConsoleWriteln("TYPE HELP FOR A LIST OF COMMANDS.");
@@ -1576,7 +1758,45 @@ void Dispatch(char* line)
 void ShellInit()
 {
     ConsoleWriteln("");
-    ConsoleWriteln("CUSTOMOS SHELL v0   TYPE HELP FOR COMMANDS.");
+
+    // Print /etc/motd if present — human-facing welcome text,
+    // replaces the tiny "CUSTOMOS SHELL" banner the earlier
+    // version used. If the file is missing (e.g. a stripped
+    // sandbox tree), fall back to the minimum one-liner.
+    char scratch[customos::fs::kTmpFsContentMax];
+    const u32 motd_len = ReadFileToBuf("/etc/motd", scratch, sizeof(scratch));
+    if (motd_len != static_cast<u32>(-1))
+    {
+        for (u32 i = 0; i < motd_len; ++i)
+        {
+            ConsoleWriteChar(scratch[i]);
+        }
+        if (motd_len == 0 || scratch[motd_len - 1] != '\n')
+        {
+            ConsoleWriteChar('\n');
+        }
+    }
+    else
+    {
+        ConsoleWriteln("CUSTOMOS SHELL v0   TYPE HELP FOR COMMANDS.");
+    }
+
+    // Auto-source /etc/profile. Effect is identical to the user
+    // running `source /etc/profile` manually — sets any boot-time
+    // aliases / prompt / env vars the distribution wants. Silent
+    // no-op if the file doesn't exist.
+    char profile_line[] = "/etc/profile";
+    char* argv[2] = {nullptr, profile_line};
+    const char* bytes = nullptr;
+    u32 plen = 0;
+    const auto* prof = customos::fs::VfsLookup(customos::fs::RamfsTrustedRoot(), "/etc/profile", 64);
+    if (prof != nullptr && prof->type == customos::fs::RamfsNodeType::kFile)
+    {
+        (void)bytes;
+        (void)plen;
+        CmdSource(2, argv);
+    }
+
     Prompt();
 }
 
@@ -1701,6 +1921,7 @@ void CompleteCommandName()
         "mode",    "ls",      "cat",     "touch",   "rm",      "echo",    "cp",
         "mv",      "wc",      "head",    "tail",    "dmesg",   "stats",   "mem",
         "history", "set",     "unset",   "env",     "alias",   "unalias", "sysinfo",
+        "source",  "man",
     };
     constexpr u32 kCmdCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -1931,7 +2152,7 @@ void ShellTabComplete()
                           StrEq(g_input, "touch") || StrEq(g_input, "rm") ||
                           StrEq(g_input, "cp") || StrEq(g_input, "mv") ||
                           StrEq(g_input, "wc") || StrEq(g_input, "head") ||
-                          StrEq(g_input, "tail");
+                          StrEq(g_input, "tail") || StrEq(g_input, "source");
     g_input[first_ws] = saved;
 
     if (path_cmd)
