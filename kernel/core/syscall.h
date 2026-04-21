@@ -72,6 +72,16 @@ enum SyscallNumber : u64
     // the caller's CapSet + namespace root (POSIX fork+exec
     // shape: spawn-from-path, same privileges down).
     SYS_SPAWN = 7,
+    // SYS_GETPROCID: no args. Returns CurrentProcess()->pid —
+    // distinct from SYS_GETPID, which returns the scheduler's
+    // task id. Win32's GetCurrentProcessId/GetCurrentThreadId
+    // map to this pair: process id is the `Process` struct's
+    // pid (what `[proc] create pid=N` logs); thread id is the
+    // scheduler task id (what `[sched] created task id=N`
+    // logs). In v0 each process has exactly one task, but the
+    // two IDs already come from different counters — the
+    // stubs in kernel/subsystems/win32 need to distinguish.
+    SYS_GETPROCID = 8,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit

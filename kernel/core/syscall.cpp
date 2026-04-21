@@ -157,6 +157,17 @@ void SyscallDispatch(arch::TrapFrame* frame)
         return;
     }
 
+    case SYS_GETPROCID:
+    {
+        // Process id, as distinct from task (scheduler) id. See
+        // the SYS_GETPROCID comment in syscall.h for why the two
+        // live in different counters. No caps needed — it's
+        // the caller's own pid.
+        Process* proc = CurrentProcess();
+        frame->rax = (proc != nullptr) ? proc->pid : 0;
+        return;
+    }
+
     case SYS_WRITE:
     {
         // rdi = fd, rsi = user buf, rdx = len. DoWrite validates

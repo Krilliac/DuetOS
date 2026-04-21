@@ -41,6 +41,7 @@ typedef DWORD* LPDWORD;
 
 #define STD_OUTPUT_HANDLE ((DWORD)-11)
 
+// Batch 1 — console I/O
 __declspec(dllimport) HANDLE __stdcall GetStdHandle(DWORD nStdHandle);
 __declspec(dllimport) BOOL   __stdcall WriteFile(HANDLE hFile,
                                                  LPCVOID lpBuffer,
@@ -48,6 +49,13 @@ __declspec(dllimport) BOOL   __stdcall WriteFile(HANDLE hFile,
                                                  LPDWORD lpNumberOfBytesWritten,
                                                  void* lpOverlapped);
 __declspec(dllimport) void   __stdcall ExitProcess(unsigned int uExitCode);
+
+// Batch 2 — process/thread lifecycle
+__declspec(dllimport) HANDLE __stdcall GetCurrentProcess(void);
+__declspec(dllimport) HANDLE __stdcall GetCurrentThread(void);
+__declspec(dllimport) DWORD  __stdcall GetCurrentProcessId(void);
+__declspec(dllimport) DWORD  __stdcall GetCurrentThreadId(void);
+__declspec(dllimport) BOOL   __stdcall TerminateProcess(HANDLE hProcess, unsigned int uExitCode);
 
 static const char kMsg[] = "[hello-winapi] printed via kernel32.WriteFile!\n";
 #define kMsgLen ((DWORD)(sizeof(kMsg) - 1))
@@ -62,5 +70,26 @@ void _start(void)
     // effect.
     DWORD written = 0;
     WriteFile(out, kMsg, kMsgLen, &written, 0);
+
+    // Exercise every batch-2 stub. The `volatile` sinks keep
+    // the reads from being DCE'd — without them lld-link
+    // could drop the IAT entries as unused and we'd never
+    // see the resolver log the new functions.
+    volatile HANDLE p_sink   = GetCurrentProcess();
+    volatile HANDLE t_sink   = GetCurrentThread();
+    volatile DWORD  pid_sink = GetCurrentProcessId();
+    volatile DWORD  tid_sink = GetCurrentThreadId();
+    (void)p_sink;
+    (void)t_sink;
+    (void)pid_sink;
+    (void)tid_sink;
+
+    // TerminateProcess is [[noreturn]] in practice — can't
+    // call it without skipping ExitProcess(42). Pull its IAT
+    // entry in via a function-pointer sink instead.
+    typedef BOOL(__stdcall * tp_fn_t)(HANDLE, unsigned int);
+    volatile tp_fn_t tp_sink = TerminateProcess;
+    (void)tp_sink;
+
     ExitProcess(42);
 }

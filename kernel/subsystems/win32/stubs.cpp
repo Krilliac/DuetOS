@@ -30,9 +30,14 @@ namespace
 // Stub offsets. Kept as named constants so the table below
 // stays readable and so two exports (WriteFile + WriteConsoleA)
 // can alias to the same offset without duplicating the code.
-constexpr u32 kOffExitProcess = 0x00;  // 9 bytes
-constexpr u32 kOffGetStdHandle = 0x09; // 3 bytes
-constexpr u32 kOffWriteFile = 0x0C;    // 44 bytes
+constexpr u32 kOffExitProcess = 0x00;        // batch 1 — 9 bytes
+constexpr u32 kOffGetStdHandle = 0x09;       // batch 1 — 3 bytes
+constexpr u32 kOffWriteFile = 0x0C;          // batch 1 — 44 bytes
+constexpr u32 kOffGetCurrentProcess = 0x38;  // batch 2 — 8 bytes
+constexpr u32 kOffGetCurrentThread = 0x40;   // batch 2 — 8 bytes
+constexpr u32 kOffGetCurrentProcessId = 0x48; // batch 2 — 8 bytes
+constexpr u32 kOffGetCurrentThreadId = 0x50;  // batch 2 — 8 bytes
+constexpr u32 kOffTerminateProcess = 0x58;    // batch 2 — 9 bytes
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -103,10 +108,60 @@ constexpr u8 kStubsBytes[] = {
     0x0F, 0x99, 0xC0, // 0x31 setns al
     0x0F, 0xB6, 0xC0, // 0x34 movzx eax, al
     0xC3,             // 0x37 ret
+
+    // === Batch 2: process/thread lifecycle ====================
+
+    // --- GetCurrentProcess (offset 0x38, 8 bytes) --------------
+    // Win32: HANDLE GetCurrentProcess(void). Returns the
+    // pseudo-handle (HANDLE)(-1) = 0xFFFFFFFFFFFFFFFF. Any
+    // function that receives this value treats it as "the
+    // current process" without going through the real handle
+    // table. Mirrors the literal Windows behavior — OpenProcess
+    // on this pseudo-handle never opens anything.
+    0x48, 0xC7, 0xC0, 0xFF, 0xFF, 0xFF, 0xFF, // 0x38 mov rax, -1
+    0xC3,                                     // 0x3F ret
+
+    // --- GetCurrentThread (offset 0x40, 8 bytes) ---------------
+    // Win32: HANDLE GetCurrentThread(void). Pseudo-handle
+    // (HANDLE)(-2) = 0xFFFFFFFFFFFFFFFE.
+    0x48, 0xC7, 0xC0, 0xFE, 0xFF, 0xFF, 0xFF, // 0x40 mov rax, -2
+    0xC3,                                     // 0x47 ret
+
+    // --- GetCurrentProcessId (offset 0x48, 8 bytes) ------------
+    // Win32: DWORD GetCurrentProcessId(void). Maps to
+    // SYS_GETPROCID = 8 which returns CurrentProcess()->pid.
+    // Return value in rax (low 32 bits → DWORD).
+    0xB8, 0x08, 0x00, 0x00, 0x00, // 0x48 mov eax, 8 (SYS_GETPROCID)
+    0xCD, 0x80,                   // 0x4D int 0x80
+    0xC3,                         // 0x4F ret
+
+    // --- GetCurrentThreadId (offset 0x50, 8 bytes) -------------
+    // Win32: DWORD GetCurrentThreadId(void). Maps to
+    // SYS_GETPID = 1 which returns the scheduler task id.
+    // Distinct value from the process id — the kernel log's
+    // `[sched] created task id=N` is this value.
+    0xB8, 0x01, 0x00, 0x00, 0x00, // 0x50 mov eax, 1 (SYS_GETPID)
+    0xCD, 0x80,                   // 0x55 int 0x80
+    0xC3,                         // 0x57 ret
+
+    // --- TerminateProcess (offset 0x58, 9 bytes) ---------------
+    // Win32: BOOL TerminateProcess(HANDLE hProcess, UINT
+    // uExitCode). The hProcess arg (rcx) is ignored in v0 —
+    // we always terminate the calling process. Real Windows
+    // would walk the handle table and kill the target; for
+    // our single-process model this reduces to ExitProcess
+    // with the exit code coming from rdx instead of rcx.
+    //
+    // Bytes identical in shape to ExitProcess but with rdx
+    // as the source register for the exit code.
+    0x48, 0x89, 0xD7, // 0x58 mov rdi, rdx          ; code
+    0x31, 0xC0,       // 0x5B xor eax, eax          ; SYS_EXIT
+    0xCD, 0x80,       // 0x5D int 0x80
+    0x0F, 0x0B,       // 0x5F ud2                   ; [[noreturn]]
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x38, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0x61, "stub layout drifted; update kOff* constants");
 
 struct StubEntry
 {
@@ -116,6 +171,7 @@ struct StubEntry
 };
 
 constexpr StubEntry kStubsTable[] = {
+    // Batch 1 — console I/O
     {"kernel32.dll", "ExitProcess", kOffExitProcess},
     {"kernel32.dll", "GetStdHandle", kOffGetStdHandle},
     // WriteFile and WriteConsoleA share the same stub — both
@@ -125,6 +181,12 @@ constexpr StubEntry kStubsTable[] = {
     // codes, real handle dispatch) lands in both at once.
     {"kernel32.dll", "WriteFile", kOffWriteFile},
     {"kernel32.dll", "WriteConsoleA", kOffWriteFile},
+    // Batch 2 — process/thread lifecycle
+    {"kernel32.dll", "GetCurrentProcess", kOffGetCurrentProcess},
+    {"kernel32.dll", "GetCurrentThread", kOffGetCurrentThread},
+    {"kernel32.dll", "GetCurrentProcessId", kOffGetCurrentProcessId},
+    {"kernel32.dll", "GetCurrentThreadId", kOffGetCurrentThreadId},
+    {"kernel32.dll", "TerminateProcess", kOffTerminateProcess},
 };
 
 // Case-insensitive strcmp for ASCII. Win32 DLL name

@@ -15,7 +15,14 @@ LIBRARY kernel32.dll
 ; two lists in sync or the import resolver will reject the
 ; executable at load time with UNRESOLVED <dll>!<func>.
 EXPORTS
+    ; Batch 1 — console I/O
     ExitProcess
     GetStdHandle
     WriteFile
     WriteConsoleA
+    ; Batch 2 — process/thread lifecycle
+    GetCurrentProcess
+    GetCurrentThread
+    GetCurrentProcessId
+    GetCurrentThreadId
+    TerminateProcess
