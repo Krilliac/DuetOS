@@ -52,6 +52,9 @@ void StartRing3SmokeTask();
 ///   hog      Infinite loop → killed by tick-budget.
 ///   hostile  Retries denied SYS_WRITE → killed by denial ceiling.
 ///   dropcaps Trusted task that voluntarily drops its caps.
+///   priv     Issues `cli` from ring 3 → #GP (CPL > IOPL).
+///   badint   Issues `int 0x81` → gate-not-present → task-kill.
+///   kread    Reads kernel-half VA → #PF (U/S mismatch) → kill.
 ///
 /// All spawned tasks are reaped cleanly through the normal
 /// scheduler path; the shell command returns immediately

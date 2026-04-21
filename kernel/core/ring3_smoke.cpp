@@ -901,6 +901,242 @@ void SpawnJailProbeTask()
     sched::SchedCreateUser(&Ring3UserEntry, nullptr, "ring3-jail-probe", proc);
 }
 
+// Dedicated privileged-instruction probe: tries to execute `cli` from
+// ring 3. IOPL is left at 0 in the iretq frame that runs every ring-3
+// task (see usermode.S), so CPL(3) > IOPL(0) — the CPU must raise #GP
+// on the `cli` attempt. If it didn't, a sandboxed task could globally
+// disable interrupts and spin forever, starving every other process
+// plus the reaper, taking the system down. Proving the #GP path kills
+// the task (and only the task) is the sandbox invariant in action.
+//
+// Payload:
+//   pause      ; 0xF3 0x90    — gives the scheduler a stable landing
+//   cli        ; 0xFA         — privileged; #GP expected
+//   ud2        ; 0x0F 0x0B    — belt-and-braces if cli regressed
+//
+// Expected: "[task-kill] ring-3 task took General protection fault —
+// terminating" on COM1, followed by the same reap-and-destroy flow
+// every other sandbox probe uses. Other workers (heartbeat, kbd-reader,
+// idle) keep running — which they couldn't if `cli` had actually taken
+// effect.
+//
+// clang-format off
+constexpr u8 kPrivProbeBytes[] = {
+    0xF3, 0x90,                                                   // pause
+    0xFA,                                                         // cli (privileged → #GP from ring 3)
+    0x0F, 0x0B,                                                   // ud2
+};
+// clang-format on
+
+void SpawnPrivProbeTask()
+{
+    using arch::SerialWrite;
+    using arch::SerialWriteHex;
+    using namespace customos::mm;
+
+    const u64 code_va = AslrPickBase();
+    const u64 stack_va = code_va + kStackOffsetFromCode;
+
+    AddressSpace* as = AddressSpaceCreate(kFrameBudgetSandbox);
+    if (as == nullptr)
+    {
+        Panic("core/ring3", "AS create failed for priv probe");
+    }
+
+    const PhysAddr code_frame = AllocateFrame();
+    if (code_frame == kNullFrame)
+    {
+        Panic("core/ring3", "code frame alloc failed for priv probe");
+    }
+    auto* code_direct = static_cast<u8*>(PhysToVirt(code_frame));
+    for (u64 i = 0; i < mm::kPageSize; ++i)
+    {
+        code_direct[i] = 0;
+    }
+    for (u64 i = 0; i < sizeof(kPrivProbeBytes); ++i)
+    {
+        code_direct[i] = kPrivProbeBytes[i];
+    }
+    const PhysAddr stack_frame = AllocateFrame();
+    if (stack_frame == kNullFrame)
+    {
+        Panic("core/ring3", "stack frame alloc failed for priv probe");
+    }
+    AddressSpaceMapUserPage(as, code_va, code_frame, kPagePresent | kPageUser);
+    AddressSpaceMapUserPage(as, stack_va, stack_frame, kPagePresent | kPageWritable | kPageUser | kPageNoExecute);
+
+    Process* proc = ProcessCreate("ring3-priv-probe", as, CapSetEmpty(), fs::RamfsSandboxRoot(), code_va, stack_va,
+                                  kTickBudgetSandbox);
+    if (proc == nullptr)
+    {
+        Panic("core/ring3", "ProcessCreate failed for priv probe");
+    }
+    SerialWrite("[ring3] queued priv-probe task pid=");
+    SerialWriteHex(proc->pid);
+    SerialWrite(" code_va=");
+    SerialWriteHex(code_va);
+    SerialWrite(" (expect #GP on cli)\n");
+    sched::SchedCreateUser(&Ring3UserEntry, nullptr, "ring3-priv-probe", proc);
+}
+
+// Dedicated bad-int probe: issues `int 0x81` from ring 3. The IDT
+// installs vectors 0..47 plus the DPL=3 gate at 0x80; vector 0x81 has
+// a zero gate descriptor (present bit clear). Intel SDM Vol. 3A §6.11:
+// executing `int N` when IDT[N] is not present raises #NP (vector 11)
+// with error-code pointing at the offending gate. The ring-3 trap
+// path logs and kills the task. This proves the kernel tolerates a
+// user-driven interrupt instruction targeting an unconfigured vector
+// — without the trap dispatcher's DPL-agnostic "any vector from
+// ring 3 = kill the task" rule, an unhandled vector could triple-
+// fault the box.
+//
+// Payload:
+//   pause       ; 0xF3 0x90
+//   int 0x81    ; 0xCD 0x81
+//   ud2         ; 0x0F 0x0B
+//
+// clang-format off
+constexpr u8 kBadIntProbeBytes[] = {
+    0xF3, 0x90,                                                   // pause
+    0xCD, 0x81,                                                   // int 0x81 (gate not present)
+    0x0F, 0x0B,                                                   // ud2
+};
+// clang-format on
+
+void SpawnBadIntProbeTask()
+{
+    using arch::SerialWrite;
+    using arch::SerialWriteHex;
+    using namespace customos::mm;
+
+    const u64 code_va = AslrPickBase();
+    const u64 stack_va = code_va + kStackOffsetFromCode;
+
+    AddressSpace* as = AddressSpaceCreate(kFrameBudgetSandbox);
+    if (as == nullptr)
+    {
+        Panic("core/ring3", "AS create failed for bad-int probe");
+    }
+
+    const PhysAddr code_frame = AllocateFrame();
+    if (code_frame == kNullFrame)
+    {
+        Panic("core/ring3", "code frame alloc failed for bad-int probe");
+    }
+    auto* code_direct = static_cast<u8*>(PhysToVirt(code_frame));
+    for (u64 i = 0; i < mm::kPageSize; ++i)
+    {
+        code_direct[i] = 0;
+    }
+    for (u64 i = 0; i < sizeof(kBadIntProbeBytes); ++i)
+    {
+        code_direct[i] = kBadIntProbeBytes[i];
+    }
+    const PhysAddr stack_frame = AllocateFrame();
+    if (stack_frame == kNullFrame)
+    {
+        Panic("core/ring3", "stack frame alloc failed for bad-int probe");
+    }
+    AddressSpaceMapUserPage(as, code_va, code_frame, kPagePresent | kPageUser);
+    AddressSpaceMapUserPage(as, stack_va, stack_frame, kPagePresent | kPageWritable | kPageUser | kPageNoExecute);
+
+    Process* proc = ProcessCreate("ring3-badint-probe", as, CapSetEmpty(), fs::RamfsSandboxRoot(), code_va, stack_va,
+                                  kTickBudgetSandbox);
+    if (proc == nullptr)
+    {
+        Panic("core/ring3", "ProcessCreate failed for bad-int probe");
+    }
+    SerialWrite("[ring3] queued bad-int-probe task pid=");
+    SerialWriteHex(proc->pid);
+    SerialWrite(" code_va=");
+    SerialWriteHex(code_va);
+    SerialWrite(" (expect #GP/#NP on int 0x81)\n");
+    sched::SchedCreateUser(&Ring3UserEntry, nullptr, "ring3-badint-probe", proc);
+}
+
+// Dedicated kernel-read probe: tries to load a byte from a kernel-
+// half address (0xFFFFFFFF80000000, the higher-half kernel image
+// base). The page walker finds a PTE that is Present but lacks the
+// U/S bit, so a ring-3 read gets err=5 (P | U-fetch-on-non-U page).
+// Kill path identical to every other user-mode fault.
+//
+// This is the "I have a gadget that leaks kernel addresses to ring 3"
+// threat model in action: the attacker already knows a kernel
+// symbol, can compute its VA, and tries to dereference it. The
+// kernel's user-bit enforcement (set at boot_PML4 time) is the
+// firewall between them.
+//
+// Payload:
+//   pause            ; 0xF3 0x90
+//   mov rax, <imm64> ; 0x48 0xB8 <8 bytes> — patched to 0xFFFFFFFF80000000
+//   mov al,  [rax]   ; 0x8A 0x00
+//   ud2              ; 0x0F 0x0B
+//
+// clang-format off
+constexpr u8 kKernelReadProbeBytes[] = {
+    0xF3, 0x90,                                                   // pause
+    0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0,                           // mov rax, <imm64 patched>
+    0x8A, 0x00,                                                   // mov al, byte ptr [rax]
+    0x0F, 0x0B,                                                   // ud2
+};
+// clang-format on
+
+constexpr u64 kKernelHigherHalfBase = 0xFFFFFFFF80000000ULL;
+
+void SpawnKernelReadProbeTask()
+{
+    using arch::SerialWrite;
+    using arch::SerialWriteHex;
+    using namespace customos::mm;
+
+    const u64 code_va = AslrPickBase();
+    const u64 stack_va = code_va + kStackOffsetFromCode;
+
+    AddressSpace* as = AddressSpaceCreate(kFrameBudgetSandbox);
+    if (as == nullptr)
+    {
+        Panic("core/ring3", "AS create failed for kernel-read probe");
+    }
+
+    const PhysAddr code_frame = AllocateFrame();
+    if (code_frame == kNullFrame)
+    {
+        Panic("core/ring3", "code frame alloc failed for kernel-read probe");
+    }
+    auto* code_direct = static_cast<u8*>(PhysToVirt(code_frame));
+    for (u64 i = 0; i < mm::kPageSize; ++i)
+    {
+        code_direct[i] = 0;
+    }
+    for (u64 i = 0; i < sizeof(kKernelReadProbeBytes); ++i)
+    {
+        code_direct[i] = kKernelReadProbeBytes[i];
+    }
+    // Patch imm64 at byte offset 4 (after `pause` + `48 B8`).
+    WriteImm64LE(code_direct, 4, kKernelHigherHalfBase);
+
+    const PhysAddr stack_frame = AllocateFrame();
+    if (stack_frame == kNullFrame)
+    {
+        Panic("core/ring3", "stack frame alloc failed for kernel-read probe");
+    }
+    AddressSpaceMapUserPage(as, code_va, code_frame, kPagePresent | kPageUser);
+    AddressSpaceMapUserPage(as, stack_va, stack_frame, kPagePresent | kPageWritable | kPageUser | kPageNoExecute);
+
+    Process* proc = ProcessCreate("ring3-kread-probe", as, CapSetEmpty(), fs::RamfsSandboxRoot(), code_va, stack_va,
+                                  kTickBudgetSandbox);
+    if (proc == nullptr)
+    {
+        Panic("core/ring3", "ProcessCreate failed for kernel-read probe");
+    }
+    SerialWrite("[ring3] queued kread-probe task pid=");
+    SerialWriteHex(proc->pid);
+    SerialWrite(" code_va=");
+    SerialWriteHex(code_va);
+    SerialWrite(" (expect #PF on kernel-half read)\n");
+    sched::SchedCreateUser(&Ring3UserEntry, nullptr, "ring3-kread-probe", proc);
+}
+
 bool LocalStrEq(const char* a, const char* b)
 {
     for (u32 i = 0;; ++i)
@@ -1001,6 +1237,21 @@ bool SpawnOnDemand(const char* kind)
         SpawnDropcapsProbe();
         return true;
     }
+    if (LocalStrEq(kind, "priv"))
+    {
+        SpawnPrivProbeTask();
+        return true;
+    }
+    if (LocalStrEq(kind, "badint"))
+    {
+        SpawnBadIntProbeTask();
+        return true;
+    }
+    if (LocalStrEq(kind, "kread"))
+    {
+        SpawnKernelReadProbeTask();
+        return true;
+    }
     return false;
 }
 
@@ -1069,7 +1320,20 @@ void StartRing3SmokeTask()
     // Dropcaps demo: trusted task drops its caps mid-flight and
     // verifies subsequent SYS_WRITE is denied.
     SpawnDropcapsProbe();
-    Log(LogLevel::Info, "core/ring3", "ring3 smoke tasks queued (incl cpu-hog + hostile + dropcaps)");
+    // Priv-instruction probe: `cli` from ring 3 → #GP → task-kill.
+    // Proves CPL(3) > IOPL(0) enforcement is live — a sandboxed
+    // process cannot globally mask interrupts.
+    SpawnPrivProbeTask();
+    // Bad-int probe: `int 0x81` → gate-not-present → task-kill.
+    // Proves the trap dispatcher catches any ring-3 vector, not
+    // just the architectural 0..31 it installs handlers for.
+    SpawnBadIntProbeTask();
+    // Kernel-read probe: ring 3 dereferences a higher-half kernel
+    // VA → #PF (U/S mismatch) → task-kill. Proves the user-bit
+    // firewall between ring 3 and the kernel image.
+    SpawnKernelReadProbeTask();
+    Log(LogLevel::Info, "core/ring3",
+        "ring3 smoke tasks queued (incl cpu-hog + hostile + dropcaps + priv + badint + kread)");
 }
 
 } // namespace customos::core
