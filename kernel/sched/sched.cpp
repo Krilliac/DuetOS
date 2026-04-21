@@ -867,6 +867,70 @@ SchedStats SchedStatsRead()
     };
 }
 
+namespace
+{
+
+void EmitTask(const Task* t, SchedEnumCb cb, void* cookie, bool is_running)
+{
+    if (t == nullptr)
+        return;
+    SchedTaskInfo info;
+    info.id = t->id;
+    info.name = t->name;
+    info.wake_tick = t->wake_tick;
+    info.stack_size = t->stack_size;
+    info.state = static_cast<u8>(t->state);
+    info.priority = static_cast<u8>(t->priority);
+    info.is_running = is_running;
+    for (u32 i = 0; i < sizeof(info._pad); ++i)
+        info._pad[i] = 0;
+    cb(info, cookie);
+}
+
+// Walk a singly-linked list threaded by `next`. De-dup against
+// the already-emitted current task so the running thread isn't
+// printed twice when it also sits on a runqueue head.
+void EmitList(Task* head, SchedEnumCb cb, void* cookie, const Task* skip)
+{
+    for (Task* t = head; t != nullptr; t = t->next)
+    {
+        if (t == skip)
+            continue;
+        EmitTask(t, cb, cookie, false);
+    }
+}
+
+} // namespace
+
+void SchedEnumerate(SchedEnumCb cb, void* cookie)
+{
+    if (cb == nullptr)
+        return;
+    // Brief CLI window so the timer IRQ + WaitQueueWake* can't
+    // splice the lists mid-walk. The callback runs inside the
+    // critical section — this is fine for Console writes
+    // (byte-sized stores) but would not be for anything that
+    // can block.
+    arch::Cli();
+    const Task* running = Current();
+    if (running != nullptr)
+    {
+        EmitTask(running, cb, cookie, true);
+    }
+    EmitList(g_run_head_normal, cb, cookie, running);
+    EmitList(g_run_head_idle, cb, cookie, running);
+    // Sleep queue is threaded by sleep_next, not next — walk
+    // that separately.
+    for (Task* t = g_sleep_head; t != nullptr; t = t->sleep_next)
+    {
+        if (t == running)
+            continue;
+        EmitTask(t, cb, cookie, false);
+    }
+    EmitList(g_zombies, cb, cookie, running);
+    arch::Sti();
+}
+
 // ---------------------------------------------------------------------------
 // Dead-task reaper
 //

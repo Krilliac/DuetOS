@@ -208,6 +208,31 @@ struct SchedStats
 };
 SchedStats SchedStatsRead();
 
+// Read-only view of one task for ps-style enumeration. Fields
+// are snapshots copied at the moment SchedEnumerate visits the
+// task; no pointer-chasing across the boundary so callbacks can
+// safely write to the console / framebuffer.
+struct SchedTaskInfo
+{
+    u64 id;
+    const char* name; // borrowed; points into the task's stable name field
+    u64 wake_tick;    // valid for Sleeping / timed-Blocked, else 0
+    u64 stack_size;
+    u8 state;         // TaskState cast to u8 (Ready/Running/Sleeping/Blocked/Dead)
+    u8 priority;      // TaskPriority cast to u8
+    bool is_running;  // true if this is the currently-scheduled task
+    u8 _pad[5];
+};
+
+/// Enumerate every known task — runqueues (Normal + Idle),
+/// sleep queue, zombie list, and the currently-running task.
+/// `cb` is invoked once per task with a snapshot; safe to call
+/// Console* / printf-equivalents from inside the callback.
+/// Internally brackets the walk with CLI to protect against
+/// the timer tick mutating the lists mid-visit.
+using SchedEnumCb = void (*)(const SchedTaskInfo& info, void* cookie);
+void SchedEnumerate(SchedEnumCb cb, void* cookie);
+
 /// Start the dead-task reaper kernel thread. Run once after SchedInit +
 /// the keyboard/driver init pass. The reaper sleeps on a WaitQueue;
 /// SchedExit enqueues dead tasks to a zombie list and wakes it. This

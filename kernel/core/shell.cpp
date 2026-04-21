@@ -287,6 +287,7 @@ void CmdHelp()
     ConsoleWriteln("  MOUNT        LIST FS MOUNTS");
     ConsoleWriteln("  LSMOD        LIST ACTIVE KERNEL SUBSYSTEMS");
     ConsoleWriteln("  FREE         MEMORY USAGE (PHYS + HEAP)");
+    ConsoleWriteln("  PS           LIST EVERY SCHEDULER TASK");
     ConsoleWriteln("");
     ConsoleWriteln("KEYS:  UP/DOWN = HISTORY   TAB = COMPLETE");
     ConsoleWriteln("       CTRL+ALT+T = TOGGLE MODE");
@@ -1128,7 +1129,7 @@ static const char* const kCommandSet[] = {
     "ticks",   "msr",     "lapic",   "smp",     "lspci",   "heap",    "paging",
     "fb",      "kbdstats","mousestats","loglevel","getenv","yield",   "reboot",
     "halt",    "uname",   "whoami",  "hostname","pwd",     "true",    "false",
-    "mount",   "lsmod",   "free",
+    "mount",   "lsmod",   "free",    "ps",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -2087,6 +2088,65 @@ void CmdLsmod()
         ConsoleWrite("  ");
         ConsoleWriteln(kModules[i]);
     }
+}
+
+const char* SchedStateName(u8 s)
+{
+    switch (s)
+    {
+    case 0:
+        return "READY";
+    case 1:
+        return "RUN  ";
+    case 2:
+        return "SLEEP";
+    case 3:
+        return "BLOCK";
+    case 4:
+        return "DEAD ";
+    default:
+        return "?    ";
+    }
+}
+
+void CmdPs()
+{
+    // Header row matches the classic ps widths — ID, STATE, PRI,
+    // NAME. A future slice adds CPU time + memory once those
+    // are tracked per-task.
+    ConsoleWriteln(" PID  STATE  PRI  NAME");
+    struct Cookie
+    {
+        u32 count;
+    };
+    Cookie cookie{0};
+    customos::sched::SchedEnumerate(
+        [](const customos::sched::SchedTaskInfo& info, void* ck) {
+            auto* c = static_cast<Cookie*>(ck);
+            // 4-digit PID aligned, status tag, priority, name.
+            // Running task gets a '*' prefix so it's obvious.
+            ConsoleWriteChar(info.is_running ? '*' : ' ');
+            // Right-pad id to 3 digits.
+            if (info.id < 10)
+                ConsoleWriteChar(' ');
+            if (info.id < 100)
+                ConsoleWriteChar(' ');
+            WriteU64Dec(info.id);
+            ConsoleWriteChar(' ');
+            ConsoleWriteChar(' ');
+            ConsoleWrite(SchedStateName(info.state));
+            ConsoleWriteChar(' ');
+            ConsoleWriteChar(' ');
+            ConsoleWriteChar(info.priority == 0 ? 'N' : 'I'); // Normal / Idle
+            ConsoleWriteChar(' ');
+            ConsoleWriteChar(' ');
+            ConsoleWriteln(info.name != nullptr ? info.name : "(unnamed)");
+            ++c->count;
+        },
+        &cookie);
+    ConsoleWrite("TOTAL: ");
+    WriteU64Dec(cookie.count);
+    ConsoleWriteln(" tasks");
 }
 
 void CmdFree()
@@ -3063,6 +3123,11 @@ void Dispatch(char* line)
     if (StrEq(cmd, "free"))
     {
         CmdFree();
+        return;
+    }
+    if (StrEq(cmd, "ps"))
+    {
+        CmdPs();
         return;
     }
     if (StrEq(cmd, "reboot"))
