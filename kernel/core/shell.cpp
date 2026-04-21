@@ -1161,107 +1161,39 @@ void CmdMan(u32 argc, char** argv)
         ConsoleWriteln("MAN: TRY `help` FOR A COMMAND LIST");
         return;
     }
-    // v0 man pages are inline strings indexed by command name.
-    // The "proper" approach is /etc/man/<cmd> files in the
-    // ramfs, but inlining avoids another round of constinit
-    // RamfsNode declarations for 15+ commands. The inline
-    // strings move to ramfs when the on-disk FS lands.
     const char* name = argv[1];
-    const char* body = nullptr;
-    if (StrEq(name, "ls"))
+
+    // Build "/etc/man/<name>" in a scratch buffer and cat it.
+    // 6 ("/etc/man") + "/" + up to name-max (32 is plenty) +
+    // NUL fits comfortably in 48 bytes.
+    char path[64];
+    const char prefix[] = "/etc/man/";
+    u32 o = 0;
+    for (; prefix[o] != '\0'; ++o)
     {
-        body = "LS [PATH]\n"
-               "  Lists the children of PATH (default /).\n"
-               "  For a file, prints the filename + size.\n"
-               "  /tmp is a writable namespace; other paths are read-only.\n";
+        path[o] = prefix[o];
     }
-    else if (StrEq(name, "cat"))
+    for (u32 i = 0; name[i] != '\0' && o + 1 < sizeof(path); ++i)
     {
-        body = "CAT PATH\n"
-               "  Prints the contents of PATH.\n"
-               "  Works on ramfs (/etc, /bin) and tmpfs (/tmp).\n";
+        path[o++] = name[i];
     }
-    else if (StrEq(name, "echo"))
-    {
-        body = "ECHO ARG..  [> PATH | >> PATH]\n"
-               "  Prints args separated by single spaces + newline.\n"
-               "  With >, writes to /tmp/<NAME> (replaces).\n"
-               "  With >>, appends. Target must be /tmp.\n";
-    }
-    else if (StrEq(name, "cp"))
-    {
-        body = "CP SRC DST\n"
-               "  Copies SRC to DST. DST must be /tmp/<NAME>.\n"
-               "  SRC may be /tmp or any read-only ramfs path.\n";
-    }
-    else if (StrEq(name, "mv"))
-    {
-        body = "MV SRC DST\n"
-               "  Renames a /tmp file. Both paths must be /tmp/<NAME>.\n"
-               "  Source is unlinked only after write succeeds.\n";
-    }
-    else if (StrEq(name, "set") || StrEq(name, "unset") || StrEq(name, "env"))
-    {
-        body = "SET NAME VALUE   Store an environment variable.\n"
-               "UNSET NAME       Remove a variable.\n"
-               "ENV              List all variables.\n"
-               "Reference a variable in args as $NAME (whole-token only).\n"
-               "Set PS1 to customise the shell prompt.\n";
-    }
-    else if (StrEq(name, "alias") || StrEq(name, "unalias"))
-    {
-        body = "ALIAS NAME CMD   Create or redefine an alias.\n"
-               "ALIAS            List all aliases.\n"
-               "UNALIAS NAME     Remove an alias.\n"
-               "Aliases expand once before dispatch; no recursion.\n";
-    }
-    else if (StrEq(name, "history"))
-    {
-        body = "HISTORY\n"
-               "  Prints the last 8 commands (oldest first).\n"
-               "  Recall: !N runs command N, !! repeats the last.\n"
-               "  Up/Down arrows cycle through history in-place.\n";
-    }
-    else if (StrEq(name, "source") || StrEq(name, "."))
-    {
-        body = "SOURCE PATH\n"
-               "  Runs each line of PATH as a shell command.\n"
-               "  Blank lines and lines starting with # are skipped.\n"
-               "  Used to auto-run /etc/profile at boot.\n";
-    }
-    else if (StrEq(name, "dmesg") || StrEq(name, "stats") || StrEq(name, "mem") ||
-             StrEq(name, "sysinfo") || StrEq(name, "mode"))
-    {
-        body = "Introspection commands — no args.\n"
-               "  DMESG    dump the kernel log ring.\n"
-               "  STATS    scheduler counters.\n"
-               "  MEM      frame-allocator usage.\n"
-               "  SYSINFO  one-shot system summary.\n"
-               "  MODE     current display mode (desktop / TTY).\n";
-    }
-    else if (StrEq(name, "windows"))
-    {
-        body = "WINDOWS\n"
-               "  Lists every registered window slot.\n"
-               "  Shows ALIVE / DEAD status + the registered title.\n";
-    }
-    if (body == nullptr)
+    path[o] = '\0';
+
+    char scratch[customos::fs::kTmpFsContentMax];
+    const u32 n = ReadFileToBuf(path, scratch, sizeof(scratch));
+    if (n == static_cast<u32>(-1))
     {
         ConsoleWrite("MAN: NO PAGE FOR: ");
         ConsoleWriteln(name);
         ConsoleWriteln("MAN: TRY `help` FOR A COMMAND LIST");
+        ConsoleWriteln("MAN: OR `ls /etc/man` TO SEE WHAT'S AVAILABLE");
         return;
     }
-    ConsoleWrite(body);
-    // Most man-page strings already end with '\n', but if a
-    // future page doesn't, ensure the prompt lands on a clean row.
-    const u32 blen = [body]() {
-        u32 n = 0;
-        while (body[n] != '\0')
-            ++n;
-        return n;
-    }();
-    if (blen == 0 || body[blen - 1] != '\n')
+    for (u32 i = 0; i < n; ++i)
+    {
+        ConsoleWriteChar(scratch[i]);
+    }
+    if (n == 0 || scratch[n - 1] != '\n')
     {
         ConsoleWriteChar('\n');
     }

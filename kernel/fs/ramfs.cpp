@@ -49,6 +49,79 @@ constexpr u8 kEtcProfileBytes[] =
     "alias l ls\n"
     "alias cls clear\n";
 
+// Man pages — plain-text per-command help. Each file here lands
+// at /etc/man/<name> and is read by the shell's `man` command
+// via a straight VfsLookup + cat. Keeping these as real files
+// rather than inline strings lets `cat /etc/man/ls` work too,
+// and makes the ramfs feel lived-in.
+constexpr u8 kManLsBytes[] =
+    "LS [PATH]\n"
+    "  Lists the children of PATH (default /).\n"
+    "  For a file, prints the filename + size.\n"
+    "  /tmp is a writable namespace; other paths are read-only.\n";
+
+constexpr u8 kManCatBytes[] =
+    "CAT PATH\n"
+    "  Prints the contents of PATH.\n"
+    "  Works on ramfs (/etc, /bin) and tmpfs (/tmp).\n";
+
+constexpr u8 kManEchoBytes[] =
+    "ECHO ARG..  [> PATH | >> PATH]\n"
+    "  Prints args separated by single spaces + newline.\n"
+    "  With >, writes to /tmp/<NAME> (replaces).\n"
+    "  With >>, appends. Target must be /tmp.\n";
+
+constexpr u8 kManCpBytes[] =
+    "CP SRC DST\n"
+    "  Copies SRC to DST. DST must be /tmp/<NAME>.\n"
+    "  SRC may be /tmp or any read-only ramfs path.\n";
+
+constexpr u8 kManMvBytes[] =
+    "MV SRC DST\n"
+    "  Renames a /tmp file. Both paths must be /tmp/<NAME>.\n"
+    "  Source is unlinked only after write succeeds.\n";
+
+constexpr u8 kManGrepBytes[] =
+    "GREP PATTERN PATH\n"
+    "  Prints every line of PATH containing PATTERN as a substring.\n"
+    "  Case-sensitive. Empty pattern matches every line.\n";
+
+constexpr u8 kManFindBytes[] =
+    "FIND NAME\n"
+    "  Recursively lists paths whose leaf contains NAME.\n"
+    "  Walks both the static ramfs and the writable tmpfs.\n";
+
+constexpr u8 kManHistoryBytes[] =
+    "HISTORY\n"
+    "  Prints the last 8 commands (oldest first).\n"
+    "  !N runs command N, !! repeats the last.\n"
+    "  Up/Down arrows also cycle history in-place.\n";
+
+constexpr u8 kManAliasBytes[] =
+    "ALIAS NAME CMD   Create or redefine an alias.\n"
+    "ALIAS            List all aliases.\n"
+    "UNALIAS NAME     Remove an alias.\n"
+    "Aliases expand once before dispatch; no recursion.\n";
+
+constexpr u8 kManEnvBytes[] =
+    "SET NAME VALUE   Store an environment variable.\n"
+    "UNSET NAME       Remove a variable.\n"
+    "ENV              List all variables.\n"
+    "Reference a variable in args as $NAME (whole-token only).\n"
+    "Set PS1 to customise the shell prompt.\n";
+
+constexpr u8 kManTimeBytes[] =
+    "TIME CMD..\n"
+    "  Measure wall time of CMD at 10 ms resolution.\n"
+    "  Runs through the full shell pipeline (alias / env /\n"
+    "  redirect all apply).\n";
+
+constexpr u8 kManSourceBytes[] =
+    "SOURCE PATH\n"
+    "  Runs each line of PATH as a shell command.\n"
+    "  Blank lines and lines starting with # are skipped.\n"
+    "  Used to auto-run /etc/profile at boot.\n";
+
 // ------- Trusted tree: / -> {etc/version, bin/hello} -------
 
 constinit RamfsNode k_trusted_etc_version = {
@@ -75,10 +148,51 @@ constinit RamfsNode k_trusted_etc_profile = {
     .file_size = sizeof(kEtcProfileBytes) - 1,
 };
 
+// /etc/man — one RamfsNode per page. Macro-tight since the
+// shape is identical for every entry.
+#define MAN_NODE(name_str, bytes_sym)                                                                                  \
+    constinit RamfsNode k_man_##bytes_sym = {.name = name_str,                                                         \
+                                             .type = RamfsNodeType::kFile,                                             \
+                                             .children = nullptr,                                                      \
+                                             .file_bytes = bytes_sym,                                                  \
+                                             .file_size = sizeof(bytes_sym) - 1}
+
+MAN_NODE("ls", kManLsBytes);
+MAN_NODE("cat", kManCatBytes);
+MAN_NODE("echo", kManEchoBytes);
+MAN_NODE("cp", kManCpBytes);
+MAN_NODE("mv", kManMvBytes);
+MAN_NODE("grep", kManGrepBytes);
+MAN_NODE("find", kManFindBytes);
+MAN_NODE("history", kManHistoryBytes);
+MAN_NODE("alias", kManAliasBytes);
+MAN_NODE("env", kManEnvBytes);
+MAN_NODE("time", kManTimeBytes);
+MAN_NODE("source", kManSourceBytes);
+
+#undef MAN_NODE
+
+constinit const RamfsNode* const k_trusted_etc_man_children[] = {
+    &k_man_kManLsBytes,     &k_man_kManCatBytes,     &k_man_kManEchoBytes,
+    &k_man_kManCpBytes,     &k_man_kManMvBytes,      &k_man_kManGrepBytes,
+    &k_man_kManFindBytes,   &k_man_kManHistoryBytes, &k_man_kManAliasBytes,
+    &k_man_kManEnvBytes,    &k_man_kManTimeBytes,    &k_man_kManSourceBytes,
+    nullptr,
+};
+
+constinit RamfsNode k_trusted_etc_man_dir = {
+    .name = "man",
+    .type = RamfsNodeType::kDir,
+    .children = k_trusted_etc_man_children,
+    .file_bytes = nullptr,
+    .file_size = 0,
+};
+
 constinit const RamfsNode* const k_trusted_etc_children[] = {
     &k_trusted_etc_version,
     &k_trusted_etc_motd,
     &k_trusted_etc_profile,
+    &k_trusted_etc_man_dir,
     nullptr,
 };
 
