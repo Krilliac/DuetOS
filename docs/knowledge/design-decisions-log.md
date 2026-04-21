@@ -607,6 +607,45 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 105 — Shell utility batch (sleep / reset / tac / nl / rev / expr / color / rand / flushtlb / checksum / repeat)
+
+- **Scope:** `kernel/core/shell.cpp` — eleven commands in
+  two sub-batches. All wrappers around existing APIs.
+- **Decision:**
+  - `sleep N` polls the interrupt flag every second so a
+    long sleep can be aborted, rather than one big
+    SchedSleepTicks(N*100) that would ignore Ctrl+C.
+  - `expr` is 64-bit signed, divide-by-zero reports
+    instead of trapping (no #DE from user-typed input).
+  - `repeat N CMD` re-dispatches through Dispatch() so
+    alias / env / redirect / pipes all apply to each
+    iteration. Fresh buffer copy per iteration because
+    Dispatch() mutates its input.
+  - `rand` uses splitmix64 seeded from TSC. Not
+    cryptographic — disclosed in the output.
+  - `flushtlb` reloads CR3 with its current value — the
+    classic "invalidate non-global TLB" primitive.
+  - `checksum` is FNV1A-32: no allocation, one pass, good
+    enough for "did content change" sanity.
+  - `color` takes hex fg + optional bg; defaults bg to a
+    sane navy rather than requiring both.
+- **Why:** Filling out the shell's utility surface — the
+  last round was file-inspection; this round is
+  script-friendly ergonomics (sleep, repeat, expr, rand)
+  + text-processing (tac, nl, rev) + runtime tuning
+  (color, flushtlb).
+- **Rules out / defers:** `sleep 0.5` fractional seconds
+  (no sub-tick granularity yet). `expr` parentheses /
+  precedence. `rand MIN MAX`. Cryptographic rand source.
+  SHA / MD5 hashes. `repeat INF` (would need a clean
+  interrupt story on pipelines).
+- **Revisit when:** Fractional-second timing arrives via
+  HPET scheduler integration. First user wants bigger
+  rand ranges. SHA-2 hardware instructions become useful.
+- **Related tracks:** Track 7 (Userland shell).
+
+---
+
 ## 104 — Shell file-inspection commands (hexdump / stat / basename / dirname / cal)
 
 - **Scope:** `kernel/core/shell.cpp` — five commands, each a
