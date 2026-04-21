@@ -271,6 +271,16 @@ void CmdHelp()
     ConsoleWriteln("  REBOOT       RESET THE MACHINE (NO CONFIRM)");
     ConsoleWriteln("  HALT         STOP THE CPU (NO CONFIRM)");
     ConsoleWriteln("");
+    ConsoleWriteln("COMPAT / IDENTITY:");
+    ConsoleWriteln("  UNAME [-A]   KERNEL IDENTITY (-A VERBOSE)");
+    ConsoleWriteln("  WHOAMI       EFFECTIVE USER");
+    ConsoleWriteln("  HOSTNAME     HOST NAME (OR $HOSTNAME)");
+    ConsoleWriteln("  PWD          CURRENT DIRECTORY (ALWAYS /)");
+    ConsoleWriteln("  TRUE / FALSE NO-OP SUCCESS / FAILURE");
+    ConsoleWriteln("  MOUNT        LIST FS MOUNTS");
+    ConsoleWriteln("  LSMOD        LIST ACTIVE KERNEL SUBSYSTEMS");
+    ConsoleWriteln("  FREE         MEMORY USAGE (PHYS + HEAP)");
+    ConsoleWriteln("");
     ConsoleWriteln("KEYS:  UP/DOWN = HISTORY   TAB = COMPLETE");
     ConsoleWriteln("       CTRL+ALT+T = TOGGLE MODE");
     ConsoleWriteln("       CTRL+ALT+F1 = SHELL   CTRL+ALT+F2 = KLOG");
@@ -1110,7 +1120,8 @@ static const char* const kCommandSet[] = {
     "sort",    "uniq",    "cpuid",   "cr",      "rflags",  "tsc",     "hpet",
     "ticks",   "msr",     "lapic",   "smp",     "lspci",   "heap",    "paging",
     "fb",      "kbdstats","mousestats","loglevel","getenv","yield",   "reboot",
-    "halt",
+    "halt",    "uname",   "whoami",  "hostname","pwd",     "true",    "false",
+    "mount",   "lsmod",   "free",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -1995,6 +2006,105 @@ void CmdYield()
     // Voluntary yield from the shell thread — useful for testing
     // cooperative scheduling behaviour by hand. No output.
     customos::sched::SchedYield();
+}
+
+void CmdUname(u32 argc, char** argv)
+{
+    // uname default: kernel name. -a prints everything.
+    const bool all = (argc >= 2 && argv[1][0] == '-' && argv[1][1] == 'a');
+    if (all)
+    {
+        ConsoleWrite("CustomOS customos v0 x86_64  (tick ");
+        WriteU64Dec(customos::sched::SchedNowTicks());
+        ConsoleWriteln(")");
+    }
+    else
+    {
+        ConsoleWriteln("CustomOS");
+    }
+}
+
+void CmdWhoami()
+{
+    ConsoleWriteln("root");
+}
+
+void CmdHostname()
+{
+    const EnvSlot* s = EnvFind("HOSTNAME");
+    ConsoleWriteln((s != nullptr) ? s->value : "customos");
+}
+
+void CmdPwd()
+{
+    // No per-process CWD yet; every path in the shell is
+    // absolute against the trusted ramfs root. `pwd` prints
+    // "/" so scripts that consult it don't break.
+    ConsoleWriteln("/");
+}
+
+void CmdTrue()
+{
+    // No-op success — useful in scripts: `cmd && true`.
+}
+
+void CmdFalse()
+{
+    // No-op failure placeholder. No exit codes yet; the
+    // visual-only marker prints nothing (matches /bin/false).
+}
+
+void CmdMount()
+{
+    // Show every mounted backend. v0: ramfs at /, tmpfs at
+    // /tmp. Real mount table lands with multi-backend VFS.
+    ConsoleWriteln("ramfs on /       type=ramfs (ro)");
+    ConsoleWriteln("tmpfs on /tmp    type=tmpfs (rw, 16 slots, 512B each)");
+}
+
+void CmdLsmod()
+{
+    // Not real modules — just a static list of the subsystems
+    // currently online. Still useful as a "what's loaded" view.
+    static const char* const kModules[] = {
+        "multiboot2", "gdt", "idt", "tss+ist", "paging",      "frame_alloc", "kheap",
+        "acpi",       "pic", "lapic", "ioapic", "hpet",       "timer",       "scheduler",
+        "percpu",     "ps2kbd", "ps2mouse", "pci",            "ahci",        "framebuffer",
+        "cursor",     "font8x8", "console", "widget",         "taskbar",     "menu",
+        "ramfs",      "tmpfs",   "vfs",     "rtc",            "klog",        "shell",
+    };
+    constexpr u32 kCount = sizeof(kModules) / sizeof(kModules[0]);
+    for (u32 i = 0; i < kCount; ++i)
+    {
+        ConsoleWrite("  ");
+        ConsoleWriteln(kModules[i]);
+    }
+}
+
+void CmdFree()
+{
+    // Compact "free -k"-ish output: one line each for memory
+    // totals and the kernel heap.
+    const u64 total = customos::mm::TotalFrames();
+    const u64 free_f = customos::mm::FreeFramesCount();
+    const u64 used = total - free_f;
+    constexpr u64 kKiB = 4;
+    ConsoleWriteln("           total         used         free");
+    ConsoleWrite("PHYS  ");
+    WriteU64Dec(total * kKiB);
+    ConsoleWrite("K  ");
+    WriteU64Dec(used * kKiB);
+    ConsoleWrite("K  ");
+    WriteU64Dec(free_f * kKiB);
+    ConsoleWriteln("K");
+    const auto h = customos::mm::KernelHeapStatsRead();
+    ConsoleWrite("HEAP  ");
+    WriteU64Dec(h.pool_bytes);
+    ConsoleWrite("   ");
+    WriteU64Dec(h.used_bytes);
+    ConsoleWrite("   ");
+    WriteU64Dec(h.free_bytes);
+    ConsoleWriteChar('\n');
 }
 
 [[noreturn]] void CmdRebootNow()
@@ -2900,6 +3010,51 @@ void Dispatch(char* line)
     if (StrEq(cmd, "yield"))
     {
         CmdYield();
+        return;
+    }
+    if (StrEq(cmd, "uname"))
+    {
+        CmdUname(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "whoami"))
+    {
+        CmdWhoami();
+        return;
+    }
+    if (StrEq(cmd, "hostname"))
+    {
+        CmdHostname();
+        return;
+    }
+    if (StrEq(cmd, "pwd"))
+    {
+        CmdPwd();
+        return;
+    }
+    if (StrEq(cmd, "true"))
+    {
+        CmdTrue();
+        return;
+    }
+    if (StrEq(cmd, "false"))
+    {
+        CmdFalse();
+        return;
+    }
+    if (StrEq(cmd, "mount"))
+    {
+        CmdMount();
+        return;
+    }
+    if (StrEq(cmd, "lsmod"))
+    {
+        CmdLsmod();
+        return;
+    }
+    if (StrEq(cmd, "free"))
+    {
+        CmdFree();
         return;
     }
     if (StrEq(cmd, "reboot"))
