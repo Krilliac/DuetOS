@@ -299,6 +299,7 @@ void CmdHelp()
     ConsoleWriteln("  TRACE [ON|OFF] TOGGLE TRACE THRESHOLD + SHOW IN-FLIGHT SCOPES");
     ConsoleWriteln("  READ H LBA [C] HEXDUMP C SECTORS FROM BLOCK HANDLE H AT LBA");
     ConsoleWriteln("  GUARD [SUB]  SECURITY GUARD: STATUS OR ON/ENFORCE/OFF/TEST");
+    ConsoleWriteln("  TOP          PER-TASK CPU% + SYSTEM IDLE FRACTION");
     ConsoleWriteln("  FREE         MEMORY USAGE (PHYS + HEAP)");
     ConsoleWriteln("  PS           LIST EVERY SCHEDULER TASK");
     ConsoleWriteln("  SPAWN KIND   LAUNCH A RING-3 TASK (hello/sandbox/jail/...)");
@@ -1208,7 +1209,7 @@ static const char* const kCommandSet[] = {
     "hostname", "pwd",        "true",     "false",    "mount",    "lsmod",    "lsblk",    "lsgpt",   "free",   "ps",
     "spawn",    "readelf",    "hexdump",  "stat",     "basename", "dirname",  "cal",      "sleep",   "reset",  "tac",
     "nl",       "rev",        "expr",     "color",    "rand",     "flushtlb", "checksum", "repeat",  "kill",   "exec",
-    "metrics",  "trace",      "read",     "guard",
+    "metrics",  "trace",      "read",     "guard",    "top",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -3661,10 +3662,11 @@ void CmdReadelf(u32 argc, char** argv)
 
 void CmdPs()
 {
-    // Header row matches the classic ps widths — ID, STATE, PRI,
-    // NAME. A future slice adds CPU time + memory once those
-    // are tracked per-task.
-    ConsoleWriteln(" PID  STATE  PRI  NAME");
+    // Header row: PID + STATE + PRI + TICKS-run + NAME.
+    //   TICKS is the cumulative per-task tick count since creation.
+    //   Divide by `SchedStatsRead().total_ticks` for a since-boot
+    //   CPU-%; `top` renders that column directly.
+    ConsoleWriteln(" PID  STATE  PRI  TICKS     NAME");
     struct Cookie
     {
         u32 count;
@@ -3691,6 +3693,29 @@ void CmdPs()
             ConsoleWriteChar(info.priority == 0 ? 'N' : 'I'); // Normal / Idle
             ConsoleWriteChar(' ');
             ConsoleWriteChar(' ');
+            // Right-pad tick count to 8 decimal digits.
+            char tbuf[24];
+            u32 tw = 0;
+            u64 tr = info.ticks_run;
+            if (tr == 0)
+                tbuf[tw++] = '0';
+            else
+            {
+                char rev[24];
+                u32 rn = 0;
+                while (tr > 0)
+                {
+                    rev[rn++] = static_cast<char>('0' + tr % 10);
+                    tr /= 10;
+                }
+                while (rn > 0)
+                    tbuf[tw++] = rev[--rn];
+            }
+            tbuf[tw] = 0;
+            for (u32 k = tw; k < 8; ++k)
+                ConsoleWriteChar(' ');
+            ConsoleWrite(tbuf);
+            ConsoleWriteChar(' ');
             ConsoleWriteln(info.name != nullptr ? info.name : "(unnamed)");
             ++c->count;
         },
@@ -3698,6 +3723,58 @@ void CmdPs()
     ConsoleWrite("TOTAL: ");
     WriteU64Dec(cookie.count);
     ConsoleWriteln(" tasks");
+}
+
+void CmdTop()
+{
+    // `top`: one-shot snapshot of CPU% per task + system idle.
+    // Not a live refresh (the shell blocks on keyboard input with
+    // no input-loop integration yet) — run it repeatedly for a
+    // trend. CPU% is since-boot — `ticks_run / total_ticks * 100`.
+    const auto s = customos::sched::SchedStatsRead();
+    const u64 total = s.total_ticks;
+    ConsoleWrite("SYSTEM: total_ticks=");
+    WriteU64Dec(total);
+    ConsoleWrite(" idle_ticks=");
+    WriteU64Dec(s.idle_ticks);
+    ConsoleWrite(" cpu_busy=");
+    const u64 busy_pct = (total > 0) ? ((total - s.idle_ticks) * 100u / total) : 0;
+    WriteU64Dec(busy_pct);
+    ConsoleWriteln("%");
+    ConsoleWriteln(" PID  CPU%  STATE  PRI  NAME");
+    struct Cookie
+    {
+        u64 total;
+    };
+    Cookie cookie{total};
+    customos::sched::SchedEnumerate(
+        [](const customos::sched::SchedTaskInfo& info, void* ck)
+        {
+            auto* c = static_cast<Cookie*>(ck);
+            ConsoleWriteChar(info.is_running ? '*' : ' ');
+            // PID right-padded to 3 digits.
+            if (info.id < 10)
+                ConsoleWriteChar(' ');
+            if (info.id < 100)
+                ConsoleWriteChar(' ');
+            WriteU64Dec(info.id);
+            ConsoleWrite("  ");
+            // CPU% = ticks_run / total * 100, rounded toward zero.
+            // Format as two-digit percentage with a trailing '%'.
+            const u64 pct = (c->total > 0) ? (info.ticks_run * 100u / c->total) : 0;
+            if (pct < 10)
+                ConsoleWriteChar(' ');
+            if (pct < 100)
+                ConsoleWriteChar(' ');
+            WriteU64Dec(pct);
+            ConsoleWrite("%   ");
+            ConsoleWrite(SchedStateName(info.state));
+            ConsoleWrite("  ");
+            ConsoleWriteChar(info.priority == 0 ? 'N' : 'I');
+            ConsoleWrite("   ");
+            ConsoleWriteln(info.name != nullptr ? info.name : "(unnamed)");
+        },
+        &cookie);
 }
 
 void CmdFree()
@@ -4704,6 +4781,11 @@ void Dispatch(char* line)
     if (StrEq(cmd, "guard"))
     {
         CmdGuard(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "top"))
+    {
+        CmdTop();
         return;
     }
     if (StrEq(cmd, "free"))

@@ -51,6 +51,14 @@ constexpr u64 kHeartbeatTicks = 500;
         LogWithValue(LogLevel::Info, "kheartbeat", "heap_free_bytes", heap_stats.free_bytes);
         LogWithValue(LogLevel::Info, "kheartbeat", "heap_free_chunks", heap_stats.free_chunk_count);
         LogWithValue(LogLevel::Info, "kheartbeat", "frames_free", mm::FreeFramesCount());
+        // System CPU-busy fraction, since boot. total_ticks is the
+        // raw 100 Hz timer count; idle_ticks is the subset spent in
+        // the idle task (priority == Idle). 100 - idle/total = busy%.
+        // Guard against 0 ticks when the heartbeat beats before the
+        // first real timer tick arrives.
+        const u64 total = sched_stats.total_ticks;
+        const u64 busy_pct = (total > 0) ? ((total - sched_stats.idle_ticks) * 100u / total) : 0;
+        LogWithValue(LogLevel::Info, "kheartbeat", "cpu_busy_pct", busy_pct);
     }
 }
 

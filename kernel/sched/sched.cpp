@@ -100,6 +100,21 @@ struct Task
     // reason when it converts the task into a zombie. Only valid
     // when kill_requested is true.
     KillReason kill_reason;
+
+    // CPU-time accounting. `ticks_run` accumulates one tick per
+    // OnTimerTick call where this task was the current task; it
+    // is the authoritative "how much CPU time has this consumed
+    // since creation?" number. `schedin_tick` is the tick value
+    // at the most recent switch-in — Schedule() uses it to
+    // compute the delta for the outgoing task instead of tripping
+    // a per-tick increment inside OnTimerTick (which runs on
+    // every clock interrupt and must stay cheap).
+    //
+    // Both fields are read by SchedEnumerate so `ps` / `top` can
+    // render CPU-% per task. Idle tasks accumulate too — that's
+    // how SchedIdleTicks() can report system-wide idle fraction.
+    u64 ticks_run;
+    u64 schedin_tick;
 };
 
 namespace
@@ -138,6 +153,12 @@ constinit u64 g_tasks_sleeping = 0;
 constinit u64 g_tasks_blocked = 0;
 constinit u64 g_tasks_created = 0;
 constinit u64 g_tasks_reaped = 0;
+// System-wide CPU accounting. `g_total_ticks` counts every timer
+// tick since boot; `g_idle_ticks` counts the subset where the idle
+// task was on-CPU. Their ratio is the system CPU-busy fraction —
+// reported by the heartbeat and by the `top` shell command.
+constinit u64 g_total_ticks = 0;
+constinit u64 g_idle_ticks = 0;
 
 // Zombie list — tasks that called SchedExit and are off-CPU, waiting
 // for the reaper to free their struct + stack. Linked through Task::next
@@ -416,6 +437,8 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
     t->process = nullptr; // populated by SchedCreateUser for user tasks
     t->kill_requested = false;
     t->kill_reason = KillReason::TickBudget;
+    t->ticks_run = 0;
+    t->schedin_tick = 0;
 
     // Build the initial stack. ContextSwitch pops r15, r14, r13, r12,
     // rbp, rbx and then rets. So from bottom to top of the pre-planted
@@ -791,6 +814,20 @@ void OnTimerTick(u64 now_ticks)
     // Kernel-only tasks (process == nullptr) don't have budgets —
     // they're trusted runtime threads (reaper, idle, workers).
     Task* cur = Current();
+    // CPU-time accounting: charge ONE tick to whichever task was on
+    // the CPU when the timer fired. Idle tasks charge normally — the
+    // idle share of boot is the system-wide "how busy is the OS?"
+    // signal. No additional work in the hot path: one load + one
+    // store per tick.
+    if (cur != nullptr)
+    {
+        ++cur->ticks_run;
+        ++g_total_ticks;
+        if (cur->priority == TaskPriority::Idle)
+        {
+            ++g_idle_ticks;
+        }
+    }
     if (cur != nullptr && cur->process != nullptr)
     {
         core::Process* proc = cur->process;
@@ -880,6 +917,8 @@ SchedStats SchedStatsRead()
         .tasks_created = g_tasks_created,
         .tasks_exited = g_tasks_exited,
         .tasks_reaped = g_tasks_reaped,
+        .total_ticks = g_total_ticks,
+        .idle_ticks = g_idle_ticks,
     };
 }
 
@@ -895,6 +934,7 @@ void EmitTask(const Task* t, SchedEnumCb cb, void* cookie, bool is_running)
     info.name = t->name;
     info.wake_tick = t->wake_tick;
     info.stack_size = t->stack_size;
+    info.ticks_run = t->ticks_run;
     info.state = static_cast<u8>(t->state);
     info.priority = static_cast<u8>(t->priority);
     info.is_running = is_running;
