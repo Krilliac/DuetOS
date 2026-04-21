@@ -16,12 +16,14 @@
 #include "../fs/ramfs.h"
 #include "../fs/tmpfs.h"
 #include "../fs/vfs.h"
+#include "../mm/address_space.h"
 #include "../mm/frame_allocator.h"
 #include "../mm/kheap.h"
 #include "../mm/paging.h"
 #include "../sched/sched.h"
 #include "elf_loader.h"
 #include "klog.h"
+#include "process.h"
 #include "reboot.h"
 #include "ring3_smoke.h"
 
@@ -3072,7 +3074,24 @@ void CmdExec(u32 argc, char** argv)
     ConsoleWrite("EXEC: ");
     WriteU64Dec(visited);
     ConsoleWriteln(" PT_LOAD SEGMENTS.");
-    ConsoleWriteln("EXEC: (DRY-RUN — SPAWN PIPELINE LANDS WITH SYS_SPAWN)");
+
+    // Real spawn: ElfLoad + ProcessCreate + SchedCreateUser.
+    // Inherits the shell's (kernel-task) default cap posture for
+    // now — every manually-exec'd binary gets trusted caps +
+    // the trusted ramfs root. When SYS_SPAWN arrives, ring-3
+    // callers will inherit their own.
+    const u64 new_pid = customos::core::SpawnElfFile(
+        argv[1], file, n, customos::core::CapSetTrusted(), customos::fs::RamfsTrustedRoot(),
+        customos::mm::kFrameBudgetTrusted, customos::core::kTickBudgetTrusted);
+    if (new_pid == 0)
+    {
+        ConsoleWriteln("EXEC: SPAWN FAILED (OOM or bad ELF layout).");
+        return;
+    }
+    ConsoleWrite("EXEC: SPAWN pid=");
+    WriteU64Dec(new_pid);
+    ConsoleWriteln(" queued.");
+    ConsoleWriteln("EXEC: (use `ps` to observe, kernel log for entry line.)");
 }
 
 void CmdReadelf(u32 argc, char** argv)

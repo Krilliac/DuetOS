@@ -1,5 +1,10 @@
 #include "elf_loader.h"
 
+#include "../mm/address_space.h"
+#include "../mm/frame_allocator.h"
+#include "../mm/page.h"
+#include "../mm/paging.h"
+
 namespace customos::core
 {
 
@@ -161,6 +166,134 @@ u32 ElfForEachPtLoad(const u8* file, u64 /*file_len*/, ElfSegmentCb cb, void* co
         ++visited;
     }
     return visited;
+}
+
+// ---------------------------------------------------------------
+// ElfLoad implementation
+//
+// Stack VA is fixed at 0x7FFFE000 for v0 — a page below the top of
+// the 32-bit low-canonical range. Well clear of any PT_LOAD we'd
+// see (Intel convention is 0x400000, which is 256 MiB below this).
+// When a real toolchain ships that grows stacks or uses TLS, this
+// picks out of a per-process stack arena instead.
+// ---------------------------------------------------------------
+
+namespace
+{
+
+constexpr u64 kV0StackVa = 0x7FFFE000ULL;
+
+// Context struct passed through ElfForEachPtLoad via the void*
+// cookie so we can plumb state into the lambda.
+struct LoadCtx
+{
+    const u8* file;
+    customos::mm::AddressSpace* as;
+    bool ok;
+};
+
+// Walk the pages covering one segment's [vaddr, vaddr+memsz) and
+// install them. Separate from the dispatcher so the OOM / partial-
+// failure path is one clear bail-out instead of nested loops.
+void LoadSegment(LoadCtx& ctx, const ElfSegment& seg)
+{
+    using namespace customos::mm;
+    if (!ctx.ok)
+        return; // a prior segment already failed; fall through
+
+    // Page-aligned bounds. memsz can exceed filesz: the tail is
+    // zero-init (.bss in practice). We copy [file[p_offset],
+    // file[p_offset + filesz]) and leave the rest at 0 — frames
+    // from AllocateFrame are zeroed-on-alloc already (see frame
+    // allocator zero-frame path), so the .bss half is free.
+    const u64 page_mask = kPageSize - 1;
+    const u64 start = seg.vaddr & ~page_mask;
+    const u64 end = (seg.vaddr + seg.memsz + page_mask) & ~page_mask;
+    if (end <= start)
+        return; // zero-length memsz: nothing to do
+
+    // Derive page-level flags from the ELF PF_* bits. Always set
+    // Present + User. Writable iff PF_W. Non-exec iff !PF_X — EFER.NXE
+    // is on so the bit is honoured.
+    u64 flags = kPagePresent | kPageUser;
+    if (seg.flags & kElfPfW)
+        flags |= kPageWritable;
+    if (!(seg.flags & kElfPfX))
+        flags |= kPageNoExecute;
+
+    for (u64 page_va = start; page_va < end; page_va += kPageSize)
+    {
+        const PhysAddr frame = AllocateFrame();
+        if (frame == kNullFrame)
+        {
+            ctx.ok = false;
+            return;
+        }
+        // AllocateFrame zeroes the page for us (frame allocator
+        // contract for frames under the direct map). Still safe to
+        // rely on: the ELF bytes we copy below overwrite the
+        // filesz region; the tail stays zero.
+        auto* frame_direct = static_cast<u8*>(PhysToVirt(frame));
+
+        // Intersect [seg.vaddr, seg.vaddr + seg.filesz) with this
+        // page. Only the bytes inside the intersection are copied
+        // from the file; everything else in the page remains zero.
+        const u64 page_end = page_va + kPageSize;
+        const u64 seg_file_end = seg.vaddr + seg.filesz;
+        const u64 copy_lo = (seg.vaddr > page_va) ? seg.vaddr : page_va;
+        const u64 copy_hi = (seg_file_end < page_end) ? seg_file_end : page_end;
+        if (copy_hi > copy_lo)
+        {
+            const u64 page_off = copy_lo - page_va;
+            const u64 file_off = seg.file_offset + (copy_lo - seg.vaddr);
+            const u64 n = copy_hi - copy_lo;
+            for (u64 i = 0; i < n; ++i)
+            {
+                frame_direct[page_off + i] = ctx.file[file_off + i];
+            }
+        }
+
+        AddressSpaceMapUserPage(ctx.as, page_va, frame, flags);
+    }
+}
+
+} // namespace
+
+ElfLoadResult ElfLoad(const u8* file, u64 file_len, customos::mm::AddressSpace* as)
+{
+    ElfLoadResult r;
+    r.ok = false;
+    r.entry_va = 0;
+    r.stack_va = 0;
+    r.stack_top = 0;
+    if (as == nullptr)
+        return r;
+    if (ElfValidate(file, file_len) != ElfStatus::Ok)
+        return r;
+
+    LoadCtx ctx{file, as, true};
+    ElfForEachPtLoad(file, file_len,
+                     [](const ElfSegment& seg, void* cookie) {
+                         LoadSegment(*static_cast<LoadCtx*>(cookie), seg);
+                     },
+                     &ctx);
+    if (!ctx.ok)
+        return r;
+
+    // Stack page. Writable + NX + User. Caller has already populated
+    // the code segment(s); the stack goes at the fixed v0 VA.
+    using namespace customos::mm;
+    const PhysAddr stack_frame = AllocateFrame();
+    if (stack_frame == kNullFrame)
+        return r;
+    AddressSpaceMapUserPage(as, kV0StackVa, stack_frame,
+                            kPagePresent | kPageUser | kPageWritable | kPageNoExecute);
+
+    r.ok = true;
+    r.entry_va = ElfEntry(file);
+    r.stack_va = kV0StackVa;
+    r.stack_top = kV0StackVa + kPageSize;
+    return r;
 }
 
 } // namespace customos::core

@@ -1,5 +1,11 @@
 #pragma once
 
+#include "types.h"
+
+// Forward-declares to keep this header lightweight.
+namespace customos::fs { struct RamfsNode; }
+namespace customos::core { struct CapSet; }
+
 /*
  * CustomOS ring-3 smoke task — v0.
  *
@@ -51,5 +57,22 @@ void StartRing3SmokeTask();
 /// scheduler path; the shell command returns immediately
 /// without waiting for completion.
 bool SpawnOnDemand(const char* kind);
+
+/// Entry trampoline for every ring-3 task created via
+/// SchedCreateUser. Reads user_code_va / user_stack_va from
+/// CurrentProcess(), publishes the kernel stack top to the
+/// TSS, and iretqs into ring 3. Exposed so non-ring3 callers
+/// (shell `exec`, SYS_SPAWN handler) can hand it to
+/// SchedCreateUser.
+[[noreturn]] void Ring3UserEntry(void* arg);
+
+/// Load an ELF64 image into a fresh AddressSpace, wrap it in a
+/// Process with the given caps + namespace root + budgets, and
+/// queue a ring-3 task for it via SchedCreateUser. Returns the
+/// new pid on success, or 0 on any failure (invalid ELF, OOM,
+/// ProcessCreate failure). On failure, any partial state is
+/// cleaned up through AddressSpaceRelease.
+u64 SpawnElfFile(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps,
+                 const fs::RamfsNode* root, u64 frame_budget, u64 tick_budget);
 
 } // namespace customos::core

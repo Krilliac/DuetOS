@@ -2,6 +2,13 @@
 
 #include "types.h"
 
+// Forward-declare mm::AddressSpace — ElfLoad takes one without
+// pulling address_space.h into every consumer of this header.
+namespace customos::mm
+{
+struct AddressSpace;
+}
+
 /*
  * CustomOS ELF64 loader — v0.
  *
@@ -73,5 +80,38 @@ u32 ElfForEachPtLoad(const u8* file, u64 file_len, ElfSegmentCb cb, void* cookie
 inline constexpr u8 kElfPfX = 0x1;
 inline constexpr u8 kElfPfW = 0x2;
 inline constexpr u8 kElfPfR = 0x4;
+
+// ---------------------------------------------------------------
+// ElfLoad — populate an AddressSpace from a validated ELF.
+//
+// For each PT_LOAD segment, allocates one frame per 4 KiB page in
+// [vaddr & ~0xFFF, (vaddr + memsz + 0xFFF) & ~0xFFF), copies the
+// relevant slice of file[p_offset..p_offset+p_filesz) into it
+// (zero-padding bytes in the memsz-but-not-filesz tail), and
+// installs the mapping into `as` with flags derived from
+// p_flags (R/W/X → kPageWritable / !kPageNoExecute; the U bit is
+// forced on by AddressSpaceMapUserPage).
+//
+// Also allocates + maps one stack page at a fixed v0 VA
+// (0x7FFFE000, top of canonical low half minus a guard). Future:
+// per-process stack base, growable stacks.
+//
+// On any failure (invalid ELF, AllocateFrame OOM) returns
+// {ok=false}; partial mappings are NOT rolled back — caller must
+// AddressSpaceRelease the AS to free anything that got installed.
+// ---------------------------------------------------------------
+
+struct ElfLoadResult
+{
+    bool ok;
+    u64 entry_va;  // where to set rip (= e_entry from the ELF)
+    u64 stack_va;  // lowest VA of the stack page
+    u64 stack_top; // rsp at ring-3 entry (= stack_va + kPageSize)
+};
+
+/// Load a validated ELF image into `as`. Returns {ok=true, ...} on
+/// success. On failure, the AddressSpace may contain partial state
+/// — caller should AddressSpaceRelease it.
+ElfLoadResult ElfLoad(const u8* file, u64 file_len, customos::mm::AddressSpace* as);
 
 } // namespace customos::core

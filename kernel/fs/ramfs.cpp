@@ -24,12 +24,12 @@ constexpr u8 kEtcVersionBytes[] = "CustomOS v0 (ramfs-seeded)\n";
 constexpr u8 kBinHelloBytes[] = "Hello from /bin/hello\n";
 constexpr u8 kWelcomeBytes[] = "Welcome, sandbox. This file is all you can see.\n";
 
-// Minimal but valid ELF64 file so `readelf /bin/sample.elf`
-// has something real to parse end-to-end. 64-byte ELF header +
-// one 56-byte PT_LOAD program header = 120 bytes total. No
-// section headers. No actual code — this is a parser demo,
-// not a loadable binary.
-constexpr u8 kBinSampleElfBytes[] = {
+// A runnable ELF64 at /bin/exit.elf: 64-byte Ehdr + 56-byte Phdr
+// + 9 bytes of code = 129 bytes total. Code: `mov eax, 0;
+// xor edi, edi; int 0x80` — SYS_EXIT(0). Loadable by ElfLoad
+// (proper validator passes: class=64, data=LSB, machine=x86_64,
+// p_align=1 so the alignment invariant holds).
+constexpr u8 kBinExitElfBytes[] = {
     // -- ELF64 header (64 bytes) --
     0x7F, 'E', 'L', 'F',       // e_ident[0..3] magic
     0x02,                      // EI_CLASS = ELFCLASS64
@@ -55,12 +55,17 @@ constexpr u8 kBinSampleElfBytes[] = {
     // -- PT_LOAD program header (56 bytes) --
     0x01, 0x00, 0x00, 0x00,    // p_type = PT_LOAD
     0x05, 0x00, 0x00, 0x00,    // p_flags = PF_R | PF_X
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // p_offset = 0
+    0x78, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // p_offset = 120
     0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, // p_vaddr = 0x400000
     0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, // p_paddr = 0x400000
-    0x78, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // p_filesz = 120
-    0x78, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // p_memsz = 120
-    0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // p_align = 0x1000
+    0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // p_filesz = 9
+    0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // p_memsz = 9
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // p_align = 1
+
+    // -- Code (9 bytes, at file offset 120, mapped at 0x400000) --
+    0xB8, 0x00, 0x00, 0x00, 0x00, // mov eax, 0    (SYS_EXIT)
+    0x31, 0xFF,                   // xor edi, edi  (exit code 0)
+    0xCD, 0x80,                   // int 0x80
 };
 
 // Message-of-the-day shown by the shell on startup. Kept short
@@ -251,17 +256,17 @@ constinit RamfsNode k_trusted_bin_hello = {
     .file_size = sizeof(kBinHelloBytes) - 1,
 };
 
-constinit RamfsNode k_trusted_bin_sample_elf = {
-    .name = "sample.elf",
+constinit RamfsNode k_trusted_bin_exit_elf = {
+    .name = "exit.elf",
     .type = RamfsNodeType::kFile,
     .children = nullptr,
-    .file_bytes = kBinSampleElfBytes,
-    .file_size = sizeof(kBinSampleElfBytes),
+    .file_bytes = kBinExitElfBytes,
+    .file_size = sizeof(kBinExitElfBytes),
 };
 
 constinit const RamfsNode* const k_trusted_bin_children[] = {
     &k_trusted_bin_hello,
-    &k_trusted_bin_sample_elf,
+    &k_trusted_bin_exit_elf,
     nullptr,
 };
 
