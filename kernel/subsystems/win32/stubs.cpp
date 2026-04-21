@@ -65,6 +65,9 @@ constexpr u32 kOffInitSListHead = 0x1CE;      // batch 10 — 16 bytes
 constexpr u32 kOffGetSysTimeFT = 0x1DE;       // batch 10 — 8 bytes
 constexpr u32 kOffOpenProcess = 0x1E6;        // batch 10 — 4 bytes
 constexpr u32 kOffGetExitCodeThread = 0x1EA;  // batch 10 — 12 bytes
+constexpr u32 kOffQueryPerfCounter = 0x1F6;   // batch 11 — 16 bytes
+constexpr u32 kOffQueryPerfFreq = 0x206;      // batch 11 — 13 bytes
+constexpr u32 kOffGetTickCount = 0x213;       // batch 11 — 12 bytes (shared w/ GetTickCount64)
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -587,10 +590,51 @@ constexpr u8 kStubsBytes[] = {
     0xC7, 0x02, 0x03, 0x01, 0x00, 0x00,       // 0x1EA mov dword [rdx], 0x103
     0xB8, 0x01, 0x00, 0x00, 0x00,             // 0x1F0 mov eax, 1
     0xC3,                                     // 0x1F5 ret
+
+    // === Batch 11: performance counters + tick count =========
+    //
+    // Backed by SYS_PERF_COUNTER (13), which returns the
+    // kernel's tick counter from arch::TimerTicks(). 100 Hz =
+    // 10 ms per tick; the stubs convert to Win32's semantic
+    // appropriately (raw u64 counter for QPC, ticks*10 for
+    // GetTickCount).
+
+    // --- QueryPerformanceCounter (offset 0x1F6, 16 bytes) ------
+    // Win32: BOOL QueryPerformanceCounter(LARGE_INTEGER* ctr=rcx).
+    // Out-param: *ctr = current tick count (u64).
+    // Return TRUE.
+    0xB8, 0x0D, 0x00, 0x00, 0x00, // 0x1F6 mov eax, 13 (SYS_PERF_COUNTER)
+    0xCD, 0x80,                   // 0x1FB int 0x80           ; rax = ticks
+    0x48, 0x89, 0x01,             // 0x1FD mov [rcx], rax
+    0xB8, 0x01, 0x00, 0x00, 0x00, // 0x200 mov eax, 1
+    0xC3,                         // 0x205 ret
+
+    // --- QueryPerformanceFrequency (offset 0x206, 13 bytes) ----
+    // Win32: BOOL QueryPerformanceFrequency(LARGE_INTEGER* freq=rcx).
+    // Out-param: *freq = 100 (Hz). Matches the kernel tick
+    // frequency so (counter_end - counter_start) / freq
+    // gives seconds correctly.
+    // Return TRUE.
+    0x48, 0xC7, 0x01, 0x64, 0x00, 0x00, 0x00, // 0x206 mov qword [rcx], 100
+    0xB8, 0x01, 0x00, 0x00, 0x00,             // 0x20D mov eax, 1
+    0xC3,                                     // 0x212 ret
+
+    // --- GetTickCount / GetTickCount64 (offset 0x213, 12 bytes) -
+    // Win32: DWORD GetTickCount(void), ULONGLONG GetTickCount64(void).
+    // Both return milliseconds since boot. We scale the 100 Hz
+    // tick counter by 10 to convert to ms.
+    //   * GetTickCount truncates to 32 bits — caller reads
+    //     only EAX; upper half of RAX is ignored.
+    //   * GetTickCount64 returns the full RAX.
+    // Same implementation either way.
+    0xB8, 0x0D, 0x00, 0x00, 0x00, // 0x213 mov eax, 13 (SYS_PERF_COUNTER)
+    0xCD, 0x80,                   // 0x218 int 0x80
+    0x48, 0x6B, 0xC0, 0x0A,       // 0x21A imul rax, rax, 10 ; ticks -> ms
+    0xC3,                         // 0x21E ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x1F6, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0x21F, "stub layout drifted; update kOff* constants");
 
 struct StubEntry
 {
@@ -840,6 +884,45 @@ constexpr StubEntry kStubsTable[] = {
     {"kernel32.dll", "OpenProcess", kOffOpenProcess},
     {"kernel32.dll", "GetExitCodeThread", kOffGetExitCodeThread},
     {"kernel32.dll", "GenerateConsoleCtrlEvent", kOffReturnOne},
+
+    // Batch 11 — performance counters, tick count, and the
+    // Rtl*/Toolhelp32/thread-management clusters. The perf
+    // counter family is REAL — backed by SYS_PERF_COUNTER
+    // and the kernel 100 Hz tick. The rest are safe no-ops
+    // that let callers proceed without crashing:
+    //   * Rtl* unwind family returns 0 — "no function entry
+    //     found" / "no frames captured". Code that uses
+    //     these for crash-report formatting gets an empty
+    //     report but doesn't fault.
+    //   * Toolhelp32 snapshot returns 1 (non-null handle)
+    //     but Process32First returns FALSE — program sees
+    //     an empty process list.
+    //   * CreateRemoteThread returns 0 (NULL) — the target
+    //     program handles failure gracefully per the Win32
+    //     contract (GetLastError returns the last set
+    //     error; our stub stack doesn't populate that yet).
+    {"kernel32.dll", "QueryPerformanceCounter", kOffQueryPerfCounter},
+    {"kernel32.dll", "QueryPerformanceFrequency", kOffQueryPerfFreq},
+    {"kernel32.dll", "GetTickCount", kOffGetTickCount},
+    {"kernel32.dll", "GetTickCount64", kOffGetTickCount},
+
+    // Rtl* unwind (v0: empty / not-found sentinels)
+    {"kernel32.dll", "RtlCaptureStackBackTrace", kOffReturnZero},
+    {"kernel32.dll", "RtlCaptureContext", kOffReturnZero},
+    {"kernel32.dll", "RtlLookupFunctionEntry", kOffReturnZero},
+    {"kernel32.dll", "RtlVirtualUnwind", kOffReturnZero},
+
+    // Toolhelp32 + thread management (empty snapshot / no
+    // ops). Real implementation requires the kernel to
+    // expose the process table to ring 3 — deferred.
+    {"kernel32.dll", "CreateToolhelp32Snapshot", kOffReturnOne},
+    {"kernel32.dll", "Process32First", kOffReturnZero},
+    {"kernel32.dll", "Process32FirstW", kOffReturnZero},
+    {"kernel32.dll", "Process32Next", kOffReturnZero},
+    {"kernel32.dll", "Process32NextW", kOffReturnZero},
+    {"kernel32.dll", "CreateRemoteThread", kOffReturnZero},
+    {"kernel32.dll", "ResumeThread", kOffReturnZero},
+    {"kernel32.dll", "GetExitCodeProcess", kOffGetExitCodeThread},
 };
 
 // Case-insensitive strcmp for ASCII. Win32 DLL name

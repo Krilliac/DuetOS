@@ -147,6 +147,18 @@ __declspec(dllimport) void __stdcall GetSystemTimeAsFileTime(void* FileTime);
 __declspec(dllimport) HANDLE __stdcall OpenProcess(DWORD DesiredAccess, BOOL InheritHandle, DWORD ProcessId);
 __declspec(dllimport) BOOL __stdcall GetExitCodeThread(HANDLE Thread, DWORD* ExitCode);
 
+// Batch 11 — real perf counter + tick count (backed by
+// SYS_PERF_COUNTER and arch::TimerTicks()), plus Rtl/
+// toolhelp/thread no-ops.
+typedef struct
+{
+    long long QuadPart;
+} LARGE_INTEGER;
+__declspec(dllimport) BOOL __stdcall QueryPerformanceCounter(LARGE_INTEGER* ctr);
+__declspec(dllimport) BOOL __stdcall QueryPerformanceFrequency(LARGE_INTEGER* freq);
+__declspec(dllimport) DWORD __stdcall GetTickCount(void);
+__declspec(dllimport) unsigned long long __stdcall GetTickCount64(void);
+
 static const char kMsg[] = "[hello-winapi] printed via kernel32.WriteFile!\n";
 #define kMsgLen ((DWORD)(sizeof(kMsg) - 1))
 
@@ -360,6 +372,36 @@ void _start(void)
         WriteFile(out, b10_ok, sizeof(b10_ok) - 1, &b10w, 0);
     else
         WriteFile(out, b10_bad, sizeof(b10_bad) - 1, &b10w, 0);
+
+    // Batch 11 exercise — real perf counter + tick count.
+    //
+    // Invariants:
+    //   * QueryPerformanceFrequency writes 100 (our 100 Hz
+    //     kernel tick). Deterministic.
+    //   * QueryPerformanceCounter writes a non-zero value
+    //     (unless we booted in the last 10 ms, which the
+    //     serial-log and init time precludes).
+    //   * Two consecutive QPC calls are non-decreasing.
+    //   * GetTickCount is QPC * 10 (ticks -> ms). It
+    //     should also be non-zero.
+    LARGE_INTEGER freq = {0};
+    LARGE_INTEGER ctr1 = {0};
+    LARGE_INTEGER ctr2 = {0};
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&ctr1);
+    QueryPerformanceCounter(&ctr2);
+    volatile DWORD ms = GetTickCount();
+    volatile unsigned long long ms64 = GetTickCount64();
+    const char b11_ok[] = "[batch11] perf counter + tick count OK\n";
+    const char b11_bad[] = "[batch11] perf counter + tick count FAILED\n";
+    BOOL b11_pass = freq.QuadPart == 100 && ctr1.QuadPart > 0 && ctr2.QuadPart >= ctr1.QuadPart && ms > 0 && ms64 > 0;
+    (void)ms;
+    (void)ms64;
+    DWORD b11w = 0;
+    if (b11_pass)
+        WriteFile(out, b11_ok, sizeof(b11_ok) - 1, &b11w, 0);
+    else
+        WriteFile(out, b11_bad, sizeof(b11_bad) - 1, &b11w, 0);
 
     // Batch 3 round-trip: store a distinctive value via
     // SetLastError, read it back via GetLastError, exit with

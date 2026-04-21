@@ -106,6 +106,19 @@ enum SyscallNumber : u64
     // these syscalls. See kernel/subsystems/win32/heap.h.
     SYS_HEAP_ALLOC = 11,
     SYS_HEAP_FREE = 12,
+
+    // SYS_PERF_COUNTER: no args. Returns the kernel tick
+    // counter from arch::TimerTicks() — a monotonically
+    // increasing u64, incremented at kTickFrequencyHz
+    // (100 Hz → 10 ms resolution). Used by the Win32
+    // QueryPerformanceCounter / GetTickCount stubs; the
+    // kernel32 stub can convert ticks → ms or hand the raw
+    // value through.
+    //
+    // Unprivileged — exposing the tick counter leaks boot
+    // time and timing info, but so does any millisecond-
+    // resolution clock; we accept it.
+    SYS_PERF_COUNTER = 13,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit

@@ -55,3 +55,18 @@ EXPORTS
     OpenProcess
     GetExitCodeThread
     GenerateConsoleCtrlEvent
+    ; Batch 11 — perf counter + tick + Rtl/Toolhelp stubs
+    QueryPerformanceCounter
+    QueryPerformanceFrequency
+    GetTickCount
+    GetTickCount64
+    RtlCaptureStackBackTrace
+    RtlCaptureContext
+    RtlLookupFunctionEntry
+    RtlVirtualUnwind
+    CreateToolhelp32Snapshot
+    Process32FirstW
+    Process32NextW
+    CreateRemoteThread
+    ResumeThread
+    GetExitCodeProcess

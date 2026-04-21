@@ -2,6 +2,7 @@
 
 #include "../arch/x86_64/idt.h"
 #include "../arch/x86_64/serial.h"
+#include "../arch/x86_64/timer.h"
 #include "../fs/vfs.h"
 #include "../mm/paging.h"
 #include "../sched/sched.h"
@@ -220,6 +221,16 @@ void SyscallDispatch(arch::TrapFrame* frame)
         if (proc != nullptr)
             win32::Win32HeapFree(proc, frame->rdi);
         frame->rax = 0;
+        return;
+    }
+
+    case SYS_PERF_COUNTER:
+    {
+        // No args. Return the kernel tick counter —
+        // monotonically increasing u64 at 100 Hz. Used by
+        // the Win32 QueryPerformanceCounter + GetTickCount
+        // stubs.
+        frame->rax = arch::TimerTicks();
         return;
     }
 
