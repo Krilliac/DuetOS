@@ -29,6 +29,7 @@
 #include "../drivers/video/taskbar.h"
 #include "../drivers/video/widget.h"
 #include "../fs/ramfs.h"
+#include "../fs/tmpfs.h"
 #include "../fs/vfs.h"
 #include "../mm/address_space.h"
 #include "../mm/frame_allocator.h"
@@ -342,8 +343,8 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
             // / "[D] ") from LevelTag(). We inspect it and set
             // the line's fg; subsequent chunks on the same line
             // inherit that colour until the newline resets.
-            constexpr customos::u32 kFgInfo = 0x00A0C8FF; // muted blue-white
-            constexpr customos::u32 kFgWarn = 0x00FFD860; // amber
+            constexpr customos::u32 kFgInfo = 0x00A0C8FF;  // muted blue-white
+            constexpr customos::u32 kFgWarn = 0x00FFD860;  // amber
             constexpr customos::u32 kFgError = 0x00FF6050; // soft red
             constexpr customos::u32 kFgDebug = 0x00808080; // grey
             constexpr customos::u32 kBg = 0x00101020;
@@ -414,8 +415,8 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                                 return;
                             }
                         }
-                        customos::drivers::video::FramebufferDrawChar(
-                            r.cx + r.col * 8, r.cy + r.row * 10, c, r.fg, kBg);
+                        customos::drivers::video::FramebufferDrawChar(r.cx + r.col * 8, r.cy + r.row * 10, c, r.fg,
+                                                                      kBg);
                         ++r.col;
                     }
                 });
@@ -470,12 +471,9 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                 customos::u64 value;
             };
             const Row rows[] = {
-                {"UPTIME (S)     ", uptime_s},
-                {"CTX SWITCHES   ", s.context_switches},
-                {"TASKS LIVE     ", s.tasks_live},
-                {"TASKS SLEEPING ", s.tasks_sleeping},
-                {"TASKS BLOCKED  ", s.tasks_blocked},
-                {"MEM FREE (4K)  ", free_frames},
+                {"UPTIME (S)     ", uptime_s},        {"CTX SWITCHES   ", s.context_switches},
+                {"TASKS LIVE     ", s.tasks_live},    {"TASKS SLEEPING ", s.tasks_sleeping},
+                {"TASKS BLOCKED  ", s.tasks_blocked}, {"MEM FREE (4K)  ", free_frames},
                 {"MEM TOTAL (4K) ", total},
             };
             customos::u32 y_off = cy + 4;
@@ -566,6 +564,34 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // back to the interactive shell buffer. Both consoles share
     // the same screen origin so the flip is in-place.
     customos::core::SetLogTee([](const char* s) { customos::drivers::video::ConsoleWriteKlog(s); });
+
+    // File sink: tee every Info+ log line into /tmp/boot.log on tmpfs.
+    // Accumulates chunks until a newline arrives, then appends the
+    // whole line. tmpfs caps files at 512 bytes — once that fills,
+    // further appends silently truncate, so the file captures the
+    // earliest boot-critical Info+ lines. Once a real FS lands, swap
+    // the sink for an on-disk writer and remove the cap.
+    customos::core::SetLogFileSink(
+        [](const char* s)
+        {
+            static char line[256];
+            static customos::u32 len = 0;
+            if (s == nullptr)
+                return;
+            while (*s != 0)
+            {
+                if (len < sizeof(line) - 1)
+                {
+                    line[len++] = *s;
+                }
+                if (*s == '\n')
+                {
+                    customos::fs::TmpFsAppend("boot.log", line, len);
+                    len = 0;
+                }
+                ++s;
+            }
+        });
     customos::drivers::video::ConsoleWriteln("CUSTOMOS BOOT LOG");
     customos::drivers::video::ConsoleWriteln("=================");
     customos::drivers::video::ConsoleWriteln("");
@@ -734,6 +760,22 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     SerialWrite("[boot] Probing GPT on block devices.\n");
     customos::fs::gpt::GptSelfTest();
 
+    // Sanity-check the tmpfs log sink — by now enough Info+ lines
+    // have fired that /tmp/boot.log should be at its 512-byte cap.
+    {
+        const char* bytes = nullptr;
+        customos::u32 len = 0;
+        if (customos::fs::TmpFsRead("boot.log", &bytes, &len))
+        {
+            customos::core::LogWithValue(customos::core::LogLevel::Info, "core/klog", "/tmp/boot.log size (bytes)",
+                                         len);
+        }
+        else
+        {
+            customos::core::Log(customos::core::LogLevel::Warn, "core/klog", "/tmp/boot.log not present");
+        }
+    }
+
     // Keyboard reader thread: consumes KeyEvents and writes the
     // printable ones into the framebuffer console. Backspace and
     // Enter get line-editing semantics; modifier-only edges
@@ -791,8 +833,8 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                     customos::drivers::video::ConsoleSelectKlog();
                     SerialWrite("[ui] tty -> klog\n");
                 }
-                const bool is_tty = (customos::drivers::video::GetDisplayMode() ==
-                                     customos::drivers::video::DisplayMode::Tty);
+                const bool is_tty =
+                    (customos::drivers::video::GetDisplayMode() == customos::drivers::video::DisplayMode::Tty);
                 if (is_tty)
                 {
                     customos::drivers::video::DesktopCompose(0x00000000, nullptr);
@@ -800,8 +842,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                 else
                 {
                     customos::drivers::video::CursorHide();
-                    customos::drivers::video::DesktopCompose(kDesktopTealLocal,
-                                                             "WELCOME TO CUSTOMOS   BOOT OK");
+                    customos::drivers::video::DesktopCompose(kDesktopTealLocal, "WELCOME TO CUSTOMOS   BOOT OK");
                     customos::drivers::video::CursorShow();
                 }
                 customos::drivers::video::CompositorUnlock();
@@ -832,8 +873,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                     customos::drivers::video::SetDisplayMode(customos::drivers::video::DisplayMode::Desktop);
                     customos::drivers::video::ConsoleSetOrigin(16, 400);
                     customos::drivers::video::ConsoleSetColours(0x0080F088, 0x00181028);
-                    customos::drivers::video::DesktopCompose(kDesktopTealLocal,
-                                                             "WELCOME TO CUSTOMOS   BOOT OK");
+                    customos::drivers::video::DesktopCompose(kDesktopTealLocal, "WELCOME TO CUSTOMOS   BOOT OK");
                     customos::drivers::video::CursorShow();
                 }
                 customos::drivers::video::CompositorUnlock();
@@ -849,8 +889,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                 customos::drivers::video::CompositorLock();
                 customos::drivers::video::WindowCycleActive();
                 customos::drivers::video::CursorHide();
-                customos::drivers::video::DesktopCompose(kDesktopTealLocal,
-                                                         "WELCOME TO CUSTOMOS   BOOT OK");
+                customos::drivers::video::DesktopCompose(kDesktopTealLocal, "WELCOME TO CUSTOMOS   BOOT OK");
                 customos::drivers::video::CursorShow();
                 customos::drivers::video::CompositorUnlock();
                 SerialWrite("[ui] alt-tab\n");
@@ -868,8 +907,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                     SerialWrite("\n");
                 }
                 customos::drivers::video::CursorHide();
-                customos::drivers::video::DesktopCompose(kDesktopTealLocal,
-                                                         "WELCOME TO CUSTOMOS   BOOT OK");
+                customos::drivers::video::DesktopCompose(kDesktopTealLocal, "WELCOME TO CUSTOMOS   BOOT OK");
                 customos::drivers::video::CursorShow();
                 customos::drivers::video::CompositorUnlock();
                 continue;
@@ -892,8 +930,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                     if (active == customos::apps::files::FilesWindow() &&
                         (ev.code == kKeyArrowUp || ev.code == kKeyArrowDown))
                     {
-                        app_consumed =
-                            customos::apps::files::FilesFeedArrow(ev.code == kKeyArrowUp);
+                        app_consumed = customos::apps::files::FilesFeedArrow(ev.code == kKeyArrowUp);
                     }
                     else
                     {
@@ -974,8 +1011,8 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
             if (dirty)
             {
                 customos::drivers::video::CompositorLock();
-                const bool is_tty = (customos::drivers::video::GetDisplayMode() ==
-                                     customos::drivers::video::DisplayMode::Tty);
+                const bool is_tty =
+                    (customos::drivers::video::GetDisplayMode() == customos::drivers::video::DisplayMode::Tty);
                 if (is_tty)
                 {
                     customos::drivers::video::DesktopCompose(0x00000000, nullptr);
@@ -983,8 +1020,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                 else
                 {
                     customos::drivers::video::CursorHide();
-                    customos::drivers::video::DesktopCompose(kDesktopTealLocal,
-                                                             "WELCOME TO CUSTOMOS   BOOT OK");
+                    customos::drivers::video::DesktopCompose(kDesktopTealLocal, "WELCOME TO CUSTOMOS   BOOT OK");
                     customos::drivers::video::CursorShow();
                 }
                 customos::drivers::video::CompositorUnlock();
@@ -1124,21 +1160,16 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                     if (hit != customos::drivers::video::kWindowInvalid)
                     {
                         customos::drivers::video::MenuOpen(
-                            kWindowMenuItems,
-                            sizeof(kWindowMenuItems) / sizeof(kWindowMenuItems[0]), cx, cy,
-                            hit);
+                            kWindowMenuItems, sizeof(kWindowMenuItems) / sizeof(kWindowMenuItems[0]), cx, cy, hit);
                     }
                     else
                     {
                         customos::drivers::video::MenuOpen(
-                            kDesktopMenuItems,
-                            sizeof(kDesktopMenuItems) / sizeof(kDesktopMenuItems[0]), cx, cy,
-                            0);
+                            kDesktopMenuItems, sizeof(kDesktopMenuItems) / sizeof(kDesktopMenuItems[0]), cx, cy, 0);
                     }
                 }
                 customos::drivers::video::CursorHide();
-                customos::drivers::video::DesktopCompose(kDesktopTealLocal,
-                                                         "WELCOME TO CUSTOMOS   BOOT OK");
+                customos::drivers::video::DesktopCompose(kDesktopTealLocal, "WELCOME TO CUSTOMOS   BOOT OK");
                 customos::drivers::video::CursorShow();
                 customos::drivers::video::CompositorUnlock();
                 SerialWrite("[ui] right-click\n");
@@ -1167,10 +1198,8 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                     {
                     case 1: // ABOUT CUSTOMOS
                         customos::drivers::video::ConsoleWriteln("");
-                        customos::drivers::video::ConsoleWriteln(
-                            "-> CUSTOMOS v0 — WINDOWED DESKTOP SHELL");
-                        customos::drivers::video::ConsoleWriteln(
-                            "   KEYBOARD + MOUSE + FRAMEBUFFER ALL LIVE");
+                        customos::drivers::video::ConsoleWriteln("-> CUSTOMOS v0 — WINDOWED DESKTOP SHELL");
+                        customos::drivers::video::ConsoleWriteln("   KEYBOARD + MOUSE + FRAMEBUFFER ALL LIVE");
                         break;
                     case 2: // CYCLE WINDOWS
                         customos::drivers::video::WindowCycleActive();
@@ -1178,15 +1207,13 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                         break;
                     case 3: // LIST WINDOWS
                         customos::drivers::video::ConsoleWriteln("-> REGISTERED WINDOWS:");
-                        for (customos::u32 h = 0;
-                             h < customos::drivers::video::WindowRegistryCount(); ++h)
+                        for (customos::u32 h = 0; h < customos::drivers::video::WindowRegistryCount(); ++h)
                         {
                             if (customos::drivers::video::WindowIsAlive(h))
                             {
                                 const char* title = customos::drivers::video::WindowTitle(h);
                                 customos::drivers::video::ConsoleWrite("   ");
-                                customos::drivers::video::ConsoleWriteln(
-                                    (title != nullptr) ? title : "(UNNAMED)");
+                                customos::drivers::video::ConsoleWriteln((title != nullptr) ? title : "(UNNAMED)");
                             }
                         }
                         break;
@@ -1194,11 +1221,9 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                         customos::drivers::video::ConsoleWriteln("-> PONG");
                         break;
                     case 5: // SWITCH TO TTY (from desktop context menu)
-                        customos::drivers::video::SetDisplayMode(
-                            customos::drivers::video::DisplayMode::Tty);
+                        customos::drivers::video::SetDisplayMode(customos::drivers::video::DisplayMode::Tty);
                         customos::drivers::video::ConsoleSetOrigin(16, 16);
-                        customos::drivers::video::ConsoleSetColours(0x0080F088,
-                                                                   0x00000000);
+                        customos::drivers::video::ConsoleSetColours(0x0080F088, 0x00000000);
                         break;
                     case 10: // RAISE <ctx>
                         customos::drivers::video::WindowRaise(ctx);
@@ -1240,23 +1265,19 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                         // flush against the top of the START
                         // button regardless of how many items
                         // are in the set.
-                        customos::drivers::video::MenuOpen(
-                            kStartItems, sizeof(kStartItems) / sizeof(kStartItems[0]),
-                            sx, sy, 0);
-                        const customos::u32 mh =
-                            customos::drivers::video::MenuPanelHeight();
+                        customos::drivers::video::MenuOpen(kStartItems, sizeof(kStartItems) / sizeof(kStartItems[0]),
+                                                           sx, sy, 0);
+                        const customos::u32 mh = customos::drivers::video::MenuPanelHeight();
                         const customos::u32 my = (sy > mh) ? sy - mh : 0;
-                        customos::drivers::video::MenuOpen(
-                            kStartItems, sizeof(kStartItems) / sizeof(kStartItems[0]),
-                            sx, my, 0);
+                        customos::drivers::video::MenuOpen(kStartItems, sizeof(kStartItems) / sizeof(kStartItems[0]),
+                                                           sx, my, 0);
                         SerialWrite("[ui] menu open\n");
                     }
                     menu_handled = true;
                 }
             }
 
-            if (press_edge && !menu_handled && !drag.active &&
-                customos::drivers::video::TaskbarContains(cx, cy))
+            if (press_edge && !menu_handled && !drag.active && customos::drivers::video::TaskbarContains(cx, cy))
             {
                 const customos::u32 tab_hit = customos::drivers::video::TaskbarTabAt(cx, cy);
                 if (tab_hit != customos::drivers::video::kWindowInvalid)
@@ -1266,8 +1287,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                     SerialWriteHex(tab_hit);
                     SerialWrite("\n");
                     customos::drivers::video::CursorHide();
-                    customos::drivers::video::DesktopCompose(kDesktopTealLocal,
-                                                             "WELCOME TO CUSTOMOS   BOOT OK");
+                    customos::drivers::video::DesktopCompose(kDesktopTealLocal, "WELCOME TO CUSTOMOS   BOOT OK");
                     customos::drivers::video::CursorShow();
                     menu_handled = true; // taskbar ate the click
                 }
@@ -1276,8 +1296,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
             if (press_edge && menu_handled)
             {
                 customos::drivers::video::CursorHide();
-                customos::drivers::video::DesktopCompose(kDesktopTealLocal,
-                                                         "WELCOME TO CUSTOMOS   BOOT OK");
+                customos::drivers::video::DesktopCompose(kDesktopTealLocal, "WELCOME TO CUSTOMOS   BOOT OK");
                 customos::drivers::video::CursorShow();
             }
             else if (press_edge && !drag.active)
@@ -1316,8 +1335,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                         }
                     }
                     customos::drivers::video::CursorHide();
-                    customos::drivers::video::DesktopCompose(kDesktopTealLocal,
-                                                             "WELCOME TO CUSTOMOS   BOOT OK");
+                    customos::drivers::video::DesktopCompose(kDesktopTealLocal, "WELCOME TO CUSTOMOS   BOOT OK");
                     customos::drivers::video::CursorShow();
                 }
             }
@@ -1348,8 +1366,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                 // cursor is NOT pinning a window move; this keeps
                 // the button widget inert during drag, matching
                 // Windows' "modal drag" semantics.
-                const customos::u32 hit =
-                    customos::drivers::video::WidgetRouteMouse(cx, cy, p.buttons);
+                const customos::u32 hit = customos::drivers::video::WidgetRouteMouse(cx, cy, p.buttons);
                 if (hit != customos::drivers::video::kWidgetInvalid)
                 {
                     SerialWrite("[ui] widget event id=");

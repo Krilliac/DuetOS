@@ -95,14 +95,11 @@ void LogPort(volatile u8* hba, u32 port_idx)
     const u32 tfd = HbaReg(port, kPortRegTfd);
     const u32 cmd = HbaReg(port, kPortRegCmd);
 
-    core::LogWithValue(core::LogLevel::Info, "drivers/ahci", "  port index", port_idx);
-    core::LogWithValue(core::LogLevel::Info, "drivers/ahci", "    ssts(det)", det);
+    core::LogWith2Values(core::LogLevel::Info, "drivers/ahci", "port", "idx", port_idx, "ssts(det)", det);
     if (det == kSstsDetReady)
     {
-        core::LogWithValue(core::LogLevel::Info, "drivers/ahci", "    sig", sig);
-        core::Log(core::LogLevel::Info, "drivers/ahci", SignatureName(sig));
-        core::LogWithValue(core::LogLevel::Info, "drivers/ahci", "    tfd", tfd);
-        core::LogWithValue(core::LogLevel::Info, "drivers/ahci", "    cmd", cmd);
+        core::LogWithString(core::LogLevel::Info, "drivers/ahci", "  attached device", "kind", SignatureName(sig));
+        core::LogWith2Values(core::LogLevel::Info, "drivers/ahci", "  regs", "tfd", tfd, "cmd", cmd);
     }
 }
 
@@ -142,12 +139,10 @@ void AhciInit()
     // CAP bits 4..0 (NP) = number of ports - 1.
     const u32 num_ports = (cap & 0x1F) + 1;
 
-    core::LogWithValue(core::LogLevel::Info, "drivers/ahci", "controller at pci bar5", static_cast<u64>(bar5.address));
-    core::LogWithValue(core::LogLevel::Info, "drivers/ahci", "  abar mmio", reinterpret_cast<u64>(hba));
-    core::LogWithValue(core::LogLevel::Info, "drivers/ahci", "  cap", cap);
-    core::LogWithValue(core::LogLevel::Info, "drivers/ahci", "  vs ", vs);
-    core::LogWithValue(core::LogLevel::Info, "drivers/ahci", "  pi ", pi);
-    core::LogWithValue(core::LogLevel::Info, "drivers/ahci", "  ghc", ghc);
+    core::LogWith2Values(core::LogLevel::Info, "drivers/ahci", "controller", "bar5_phys",
+                         static_cast<u64>(bar5.address), "abar_mmio", reinterpret_cast<u64>(hba));
+    core::LogWith2Values(core::LogLevel::Info, "drivers/ahci", "  caps", "cap", cap, "vs", vs);
+    core::LogWith2Values(core::LogLevel::Info, "drivers/ahci", "  state", "ghc", ghc, "pi", pi);
     core::LogWithValue(core::LogLevel::Info, "drivers/ahci", "  num_ports", num_ports);
 
     for (u32 i = 0; i < num_ports && i < 32; ++i)

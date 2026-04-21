@@ -42,12 +42,29 @@ constinit LogLevel g_log_threshold = kKlogMinLevel;
 // any string consumer) is up. Timestamps are NOT forwarded — they
 // would clutter on-screen output, and the serial log keeps them.
 constinit LogTee g_tee = nullptr;
+constinit LogTee g_file_sink = nullptr;
+constinit LogLevel g_file_sink_min_level = LogLevel::Info;
+// Per-line current level: set at the top of Log/LogWithValue/etc;
+// read by Tee when deciding whether to forward to the file sink.
+// Racy under SMP; accept that for v0 — the pattern is single-CPU.
+constinit LogLevel g_current_log_level = LogLevel::Debug;
 
 inline void Tee(const char* s)
 {
-    if (g_tee != nullptr && s != nullptr)
+    if (s == nullptr)
+    {
+        return;
+    }
+    if (g_tee != nullptr)
     {
         g_tee(s);
+    }
+    // File sink respects its own minimum level so low-noise captures
+    // (e.g. /tmp/boot.log on a 512-byte tmpfs file) don't fill up
+    // with Debug ticks.
+    if (g_file_sink != nullptr && static_cast<u8>(g_current_log_level) >= static_cast<u8>(g_file_sink_min_level))
+    {
+        g_file_sink(s);
     }
 }
 
@@ -299,6 +316,43 @@ void SetLogTee(LogTee writer)
     g_tee = writer;
 }
 
+void SetLogFileSink(LogTee writer)
+{
+    g_file_sink = writer;
+    // Back-fill: every log line that has fired up to now went through
+    // Tee but not through this sink (it wasn't installed yet). Replay
+    // the ring — with the current min-level filter applied — so the
+    // file sink sees the relevant boot history.
+    if (writer == nullptr)
+    {
+        return;
+    }
+    const u64 start = g_log_ring_next - g_log_ring_count;
+    for (u64 i = 0; i < g_log_ring_count; ++i)
+    {
+        const u64 slot = (start + i) % kLogRingCapacity;
+        const LogEntry& e = g_log_ring[slot];
+        if (e.subsystem == nullptr || e.message == nullptr)
+        {
+            continue;
+        }
+        if (static_cast<u8>(e.level) < static_cast<u8>(g_file_sink_min_level))
+        {
+            continue;
+        }
+        writer(LevelTag(e.level));
+        writer(e.subsystem);
+        writer(" : ");
+        writer(e.message);
+        writer("\n");
+    }
+}
+
+void SetLogFileSinkMinLevel(LogLevel min_level)
+{
+    g_file_sink_min_level = min_level;
+}
+
 LogLevel GetLogThreshold()
 {
     return g_log_threshold;
@@ -310,6 +364,7 @@ void Log(LogLevel level, const char* subsystem, const char* message)
     {
         return;
     }
+    g_current_log_level = level;
     const char* tag = LevelTag(level);
     WriteTimestampPrefix();
     OpenColor(level);
@@ -338,6 +393,7 @@ void LogWithValue(LogLevel level, const char* subsystem, const char* message, u6
     {
         return;
     }
+    g_current_log_level = level;
     const char* tag = LevelTag(level);
     WriteTimestampPrefix();
     OpenColor(level);
@@ -366,6 +422,7 @@ void LogWithString(LogLevel level, const char* subsystem, const char* message, c
     {
         return;
     }
+    g_current_log_level = level;
     const char* tag = LevelTag(level);
     WriteTimestampPrefix();
     OpenColor(level);
@@ -402,6 +459,7 @@ void LogWith2Values(LogLevel level, const char* subsystem, const char* message, 
     {
         return;
     }
+    g_current_log_level = level;
     const char* tag = LevelTag(level);
     WriteTimestampPrefix();
     OpenColor(level);
@@ -507,6 +565,11 @@ void DumpLogRing()
 
 void DumpLogRingTo(LogTee writer)
 {
+    DumpLogRingToFiltered(writer, LogLevel::Debug);
+}
+
+void DumpLogRingToFiltered(LogTee writer, LogLevel min_level)
+{
     if (writer == nullptr)
     {
         return;
@@ -519,6 +582,10 @@ void DumpLogRingTo(LogTee writer)
         const u64 slot = (start + i) % kLogRingCapacity;
         const LogEntry& e = g_log_ring[slot];
         if (e.subsystem == nullptr || e.message == nullptr)
+        {
+            continue;
+        }
+        if (static_cast<u8>(e.level) < static_cast<u8>(min_level))
         {
             continue;
         }

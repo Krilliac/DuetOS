@@ -136,12 +136,30 @@ inline constexpr u64 kLogRingCapacity = 64;
 using LogTee = void (*)(const char*);
 void SetLogTee(LogTee writer);
 
+/// Install a third sink dedicated to file-style persistence
+/// (tmpfs today, on-disk log once a real FS lands). Called on every
+/// log-line chunk, independently of the framebuffer tee. When set,
+/// the current log ring is replayed into `writer` immediately so the
+/// sink captures the full boot history — not just post-install lines.
+/// Pass `nullptr` to disable. Safe to install from task context.
+///
+/// The sink's minimum severity is controlled separately via
+/// `SetLogFileSinkMinLevel` (default Info — Debug entries are filtered
+/// out so the file isn't overwhelmed by timer-tick spam).
+void SetLogFileSink(LogTee writer);
+void SetLogFileSinkMinLevel(LogLevel min_level);
+
 /// Variant of DumpLogRing that writes to an arbitrary string
 /// sink instead of COM1 directly. Useful for surfacing the ring
 /// to a shell `dmesg` command without also echoing to serial.
 /// Same oldest-first order; caller-supplied writer sees one
 /// chunk per formatted token.
 void DumpLogRingTo(LogTee writer);
+
+/// As DumpLogRingTo, but drops entries below `min_level` before
+/// writing. `min_level == Debug` is equivalent to the unfiltered
+/// form. Shell `dmesg w` uses this to emit only Warn+ entries.
+void DumpLogRingToFiltered(LogTee writer, LogLevel min_level);
 
 } // namespace customos::core
 

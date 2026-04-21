@@ -247,7 +247,7 @@ void CmdHelp()
     ConsoleWriteln("  TIME CMD..   MEASURE WALL TIME (10 MS RESOLUTION)");
     ConsoleWriteln("  SEQ N        PRINT 1..N (CAPPED AT 200)");
     ConsoleWriteln("  ECHO ..  > PATH   PRINT OR REDIRECT TO /tmp (>> TO APPEND)");
-    ConsoleWriteln("  DMESG        DUMP KERNEL LOG RING");
+    ConsoleWriteln("  DMESG [DIWE]  DUMP KERNEL LOG RING (OPT: MIN SEVERITY)");
     ConsoleWriteln("  STATS        SCHEDULER STATISTICS");
     ConsoleWriteln("  MEM          PHYSICAL MEMORY USAGE");
     ConsoleWriteln("  HISTORY      LIST RECENT COMMANDS (!N RECALL, !! REPEAT)");
@@ -381,10 +381,46 @@ void CmdWindows()
     }
 }
 
-void CmdDmesg()
+void CmdDmesg(customos::u32 argc, char** argv)
 {
-    ConsoleWriteln("-- KERNEL LOG RING (OLDEST FIRST) --");
-    customos::core::DumpLogRingTo([](const char* s) { ConsoleWrite(s); });
+    // Optional first arg picks the minimum severity. Matches the
+    // single-letter `loglevel` command ("d" / "i" / "w" / "e").
+    // Default (no arg) shows every entry.
+    customos::core::LogLevel min_level = customos::core::LogLevel::Debug;
+    const char* banner_suffix = "";
+    if (argc >= 2 && argv[1] != nullptr && argv[1][0] != 0)
+    {
+        const char c = argv[1][0];
+        switch (c)
+        {
+        case 'd':
+        case 'D':
+            min_level = customos::core::LogLevel::Debug;
+            banner_suffix = " [FILTER: D+]";
+            break;
+        case 'i':
+        case 'I':
+            min_level = customos::core::LogLevel::Info;
+            banner_suffix = " [FILTER: I+]";
+            break;
+        case 'w':
+        case 'W':
+            min_level = customos::core::LogLevel::Warn;
+            banner_suffix = " [FILTER: W+]";
+            break;
+        case 'e':
+        case 'E':
+            min_level = customos::core::LogLevel::Error;
+            banner_suffix = " [FILTER: E ONLY]";
+            break;
+        default:
+            ConsoleWriteln("DMESG: USE [D|I|W|E] FOR SEVERITY FILTER");
+            return;
+        }
+    }
+    ConsoleWrite("-- KERNEL LOG RING (OLDEST FIRST)");
+    ConsoleWriteln(banner_suffix);
+    customos::core::DumpLogRingToFiltered([](const char* s) { ConsoleWrite(s); }, min_level);
 }
 
 void CmdStats()
@@ -4142,7 +4178,7 @@ void Dispatch(char* line)
     }
     if (StrEq(cmd, "dmesg"))
     {
-        CmdDmesg();
+        CmdDmesg(argc, argv);
         return;
     }
     if (StrEq(cmd, "stats"))

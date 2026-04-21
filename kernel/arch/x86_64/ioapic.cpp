@@ -140,10 +140,10 @@ void IoApicInit()
             WriteRedir(io, e, static_cast<u64>(kRedirLowMask));
         }
 
-        core::LogWithValue(core::LogLevel::Info, "arch/ioapic", "mapped id", io.id);
-        core::LogWithValue(core::LogLevel::Info, "arch/ioapic", "  mmio", reinterpret_cast<u64>(io.mmio));
-        core::LogWithValue(core::LogLevel::Info, "arch/ioapic", "  version", version_reg & 0xFF);
-        core::LogWithValue(core::LogLevel::Info, "arch/ioapic", "  entries", io.redir_count);
+        core::LogWith2Values(core::LogLevel::Info, "arch/ioapic", "mapped", "id", io.id, "mmio",
+                             reinterpret_cast<u64>(io.mmio));
+        core::LogWith2Values(core::LogLevel::Info, "arch/ioapic", "  config", "version", version_reg & 0xFF, "entries",
+                             io.redir_count);
         core::LogWithValue(core::LogLevel::Info, "arch/ioapic", "  gsi_base", io.gsi_base);
     }
     g_ioapic_count = count;

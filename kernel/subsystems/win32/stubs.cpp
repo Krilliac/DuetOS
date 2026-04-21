@@ -30,11 +30,11 @@ namespace
 // Stub offsets. Kept as named constants so the table below
 // stays readable and so two exports (WriteFile + WriteConsoleA)
 // can alias to the same offset without duplicating the code.
-constexpr u32 kOffExitProcess = 0x00;        // batch 1 — 9 bytes
-constexpr u32 kOffGetStdHandle = 0x09;       // batch 1 — 3 bytes
-constexpr u32 kOffWriteFile = 0x0C;          // batch 1 — 44 bytes
-constexpr u32 kOffGetCurrentProcess = 0x38;  // batch 2 — 8 bytes
-constexpr u32 kOffGetCurrentThread = 0x40;   // batch 2 — 8 bytes
+constexpr u32 kOffExitProcess = 0x00;         // batch 1 — 9 bytes
+constexpr u32 kOffGetStdHandle = 0x09;        // batch 1 — 3 bytes
+constexpr u32 kOffWriteFile = 0x0C;           // batch 1 — 44 bytes
+constexpr u32 kOffGetCurrentProcess = 0x38;   // batch 2 — 8 bytes
+constexpr u32 kOffGetCurrentThread = 0x40;    // batch 2 — 8 bytes
 constexpr u32 kOffGetCurrentProcessId = 0x48; // batch 2 — 8 bytes
 constexpr u32 kOffGetCurrentThreadId = 0x50;  // batch 2 — 8 bytes
 constexpr u32 kOffTerminateProcess = 0x58;    // batch 2 — 9 bytes
@@ -264,44 +264,44 @@ constexpr u8 kStubsBytes[] = {
     // (Win64 ABI contract).
     //
     // Saves nonvolatile rsi, rdi around the work.
-    0x56,                 // 0x87 push rsi
-    0x57,                 // 0x88 push rdi
-    0x49, 0x89, 0xC9,     // 0x89 mov r9, rcx     ; save dst for return
-    0x48, 0x89, 0xCF,     // 0x8C mov rdi, rcx    ; dst
-    0x48, 0x89, 0xD6,     // 0x8F mov rsi, rdx    ; src
-    0x4C, 0x89, 0xC1,     // 0x92 mov rcx, r8     ; n
-    0x48, 0x39, 0xF7,     // 0x95 cmp rdi, rsi
-    0x76, 0x12,           // 0x98 jbe +18 -> 0xAC (forward path)
+    0x56,             // 0x87 push rsi
+    0x57,             // 0x88 push rdi
+    0x49, 0x89, 0xC9, // 0x89 mov r9, rcx     ; save dst for return
+    0x48, 0x89, 0xCF, // 0x8C mov rdi, rcx    ; dst
+    0x48, 0x89, 0xD6, // 0x8F mov rsi, rdx    ; src
+    0x4C, 0x89, 0xC1, // 0x92 mov rcx, r8     ; n
+    0x48, 0x39, 0xF7, // 0x95 cmp rdi, rsi
+    0x76, 0x12,       // 0x98 jbe +18 -> 0xAC (forward path)
     // backward-copy path (dst > src, overlap-safe)
-    0x48, 0x01, 0xCF,     // 0x9A add rdi, rcx
-    0x48, 0xFF, 0xCF,     // 0x9D dec rdi
-    0x48, 0x01, 0xCE,     // 0xA0 add rsi, rcx
-    0x48, 0xFF, 0xCE,     // 0xA3 dec rsi
-    0xFD,                 // 0xA6 std
-    0xF3, 0xA4,           // 0xA7 rep movsb
-    0xFC,                 // 0xA9 cld
-    0xEB, 0x02,           // 0xAA jmp +2 -> 0xAE (skip forward's rep movsb)
+    0x48, 0x01, 0xCF, // 0x9A add rdi, rcx
+    0x48, 0xFF, 0xCF, // 0x9D dec rdi
+    0x48, 0x01, 0xCE, // 0xA0 add rsi, rcx
+    0x48, 0xFF, 0xCE, // 0xA3 dec rsi
+    0xFD,             // 0xA6 std
+    0xF3, 0xA4,       // 0xA7 rep movsb
+    0xFC,             // 0xA9 cld
+    0xEB, 0x02,       // 0xAA jmp +2 -> 0xAE (skip forward's rep movsb)
     // forward-copy path
-    0xF3, 0xA4,           // 0xAC rep movsb
+    0xF3, 0xA4, // 0xAC rep movsb
     // common epilogue
-    0x4C, 0x89, 0xC8,     // 0xAE mov rax, r9     ; return dst
-    0x5F,                 // 0xB1 pop rdi
-    0x5E,                 // 0xB2 pop rsi
-    0xC3,                 // 0xB3 ret
+    0x4C, 0x89, 0xC8, // 0xAE mov rax, r9     ; return dst
+    0x5F,             // 0xB1 pop rdi
+    0x5E,             // 0xB2 pop rsi
+    0xC3,             // 0xB3 ret
 
     // --- memset (offset 0xB4, 19 bytes) ------------------------
     // Signature: void* memset(void* dst=rcx, int c=rdx, size_t n=r8).
     // Byte value is the low 8 bits of c (edx). Returns dst.
     // Saves nonvolatile rdi.
-    0x57,                 // 0xB4 push rdi
-    0x49, 0x89, 0xC9,     // 0xB5 mov r9, rcx     ; save dst for return
-    0x48, 0x89, 0xCF,     // 0xB8 mov rdi, rcx    ; dst
-    0x89, 0xD0,           // 0xBB mov eax, edx    ; al = c
-    0x4C, 0x89, 0xC1,     // 0xBD mov rcx, r8     ; n
-    0xF3, 0xAA,           // 0xC0 rep stosb
-    0x4C, 0x89, 0xC8,     // 0xC2 mov rax, r9     ; return dst
-    0x5F,                 // 0xC5 pop rdi
-    0xC3,                 // 0xC6 ret
+    0x57,             // 0xB4 push rdi
+    0x49, 0x89, 0xC9, // 0xB5 mov r9, rcx     ; save dst for return
+    0x48, 0x89, 0xCF, // 0xB8 mov rdi, rcx    ; dst
+    0x89, 0xD0,       // 0xBB mov eax, edx    ; al = c
+    0x4C, 0x89, 0xC1, // 0xBD mov rcx, r8     ; n
+    0xF3, 0xAA,       // 0xC0 rep stosb
+    0x4C, 0x89, 0xC8, // 0xC2 mov rax, r9     ; return dst
+    0x5F,             // 0xC5 pop rdi
+    0xC3,             // 0xC6 ret
 
     // === Batch 6: UCRT CRT-startup shims ======================
 
@@ -319,8 +319,8 @@ constexpr u8 kStubsBytes[] = {
     // _seh_filter_exe, _register_thread_local_exe_atexit_callback,
     // _initterm_e, _get_initial_narrow_environment (returns
     // char** — null pointer is semantically "empty env").
-    0x31, 0xC0,           // 0xC7 xor eax, eax
-    0xC3,                 // 0xC9 ret
+    0x31, 0xC0, // 0xC7 xor eax, eax
+    0xC3,       // 0xC9 ret
 
     // --- terminate (offset 0xCA, 11 bytes) ---------------------
     // std::terminate semantics: [[noreturn]] abort. Exit
@@ -349,65 +349,65 @@ constexpr u8 kStubsBytes[] = {
     // mismatch, or 0 if both reach NUL simultaneously.
     // Byte-at-a-time loop; doesn't touch any nonvolatile
     // register (rcx, rdx, rax are all caller-saved).
-    0x8A, 0x01,           // 0xE0 mov al, [rcx]
-    0x8A, 0x12,           // 0xE2 mov dl, [rdx]
-    0x38, 0xD0,           // 0xE4 cmp al, dl
-    0x75, 0x0C,           // 0xE6 jne +12 -> 0xF4 .done
-    0x84, 0xC0,           // 0xE8 test al, al
-    0x74, 0x08,           // 0xEA je +8 -> 0xF4 .done
-    0x48, 0xFF, 0xC1,     // 0xEC inc rcx
-    0x48, 0xFF, 0xC2,     // 0xEF inc rdx
-    0xEB, 0xEC,           // 0xF2 jmp -20 -> 0xE0 .loop
+    0x8A, 0x01,       // 0xE0 mov al, [rcx]
+    0x8A, 0x12,       // 0xE2 mov dl, [rdx]
+    0x38, 0xD0,       // 0xE4 cmp al, dl
+    0x75, 0x0C,       // 0xE6 jne +12 -> 0xF4 .done
+    0x84, 0xC0,       // 0xE8 test al, al
+    0x74, 0x08,       // 0xEA je +8 -> 0xF4 .done
+    0x48, 0xFF, 0xC1, // 0xEC inc rcx
+    0x48, 0xFF, 0xC2, // 0xEF inc rdx
+    0xEB, 0xEC,       // 0xF2 jmp -20 -> 0xE0 .loop
     // .done:
-    0x0F, 0xB6, 0xC0,     // 0xF4 movzx eax, al
-    0x0F, 0xB6, 0xD2,     // 0xF7 movzx edx, dl
-    0x29, 0xD0,           // 0xFA sub eax, edx
-    0xC3,                 // 0xFC ret
+    0x0F, 0xB6, 0xC0, // 0xF4 movzx eax, al
+    0x0F, 0xB6, 0xD2, // 0xF7 movzx edx, dl
+    0x29, 0xD0,       // 0xFA sub eax, edx
+    0xC3,             // 0xFC ret
 
     // --- strlen (offset 0xFD, 17 bytes) ------------------------
     // size_t strlen(const char* s=rcx). Walks until NUL,
     // returns byte count.
-    0x48, 0x89, 0xC8,     // 0xFD mov rax, rcx    ; save start
-    0x80, 0x38, 0x00,     // 0x100 cmp byte [rax], 0
-    0x74, 0x05,           // 0x103 je +5 -> 0x10A .done
-    0x48, 0xFF, 0xC0,     // 0x105 inc rax
-    0xEB, 0xF6,           // 0x108 jmp -10 -> 0x100 .loop
+    0x48, 0x89, 0xC8, // 0xFD mov rax, rcx    ; save start
+    0x80, 0x38, 0x00, // 0x100 cmp byte [rax], 0
+    0x74, 0x05,       // 0x103 je +5 -> 0x10A .done
+    0x48, 0xFF, 0xC0, // 0x105 inc rax
+    0xEB, 0xF6,       // 0x108 jmp -10 -> 0x100 .loop
     // .done:
-    0x48, 0x29, 0xC8,     // 0x10A sub rax, rcx   ; length = end - start
-    0xC3,                 // 0x10D ret
+    0x48, 0x29, 0xC8, // 0x10A sub rax, rcx   ; length = end - start
+    0xC3,             // 0x10D ret
 
     // --- wcslen (offset 0x10E, 22 bytes) -----------------------
     // size_t wcslen(const wchar_t* s=rcx). Identical shape
     // to strlen but 2-byte stride and the final length is
     // divided by 2 (UTF-16 char count).
-    0x48, 0x89, 0xC8,     // 0x10E mov rax, rcx
+    0x48, 0x89, 0xC8,       // 0x10E mov rax, rcx
     0x66, 0x83, 0x38, 0x00, // 0x111 cmp word [rax], 0
-    0x74, 0x06,           // 0x115 je +6 -> 0x11D .done
+    0x74, 0x06,             // 0x115 je +6 -> 0x11D .done
     0x48, 0x83, 0xC0, 0x02, // 0x117 add rax, 2
-    0xEB, 0xF4,           // 0x11B jmp -12 -> 0x111 .loop
+    0xEB, 0xF4,             // 0x11B jmp -12 -> 0x111 .loop
     // .done:
-    0x48, 0x29, 0xC8,     // 0x11D sub rax, rcx
-    0x48, 0xD1, 0xE8,     // 0x120 shr rax, 1     ; byte count / 2 = chars
-    0xC3,                 // 0x123 ret
+    0x48, 0x29, 0xC8, // 0x11D sub rax, rcx
+    0x48, 0xD1, 0xE8, // 0x120 shr rax, 1     ; byte count / 2 = chars
+    0xC3,             // 0x123 ret
 
     // --- strchr (offset 0x124, 23 bytes) -----------------------
     // char* strchr(const char* s=rcx, int c=rdx).
     // Returns pointer to first byte matching (char)c,
     // including the terminating NUL, or nullptr if not
     // found. Matches Win32/ISO C semantics.
-    0x88, 0xD0,           // 0x124 mov al, dl      ; byte to find
-    0x38, 0x01,           // 0x126 cmp [rcx], al
-    0x74, 0x0A,           // 0x128 je +10 -> 0x134 .found
-    0x80, 0x39, 0x00,     // 0x12A cmp byte [rcx], 0
-    0x74, 0x09,           // 0x12D je +9 -> 0x138 .notfound
-    0x48, 0xFF, 0xC1,     // 0x12F inc rcx
-    0xEB, 0xF2,           // 0x132 jmp -14 -> 0x126 .loop
+    0x88, 0xD0,       // 0x124 mov al, dl      ; byte to find
+    0x38, 0x01,       // 0x126 cmp [rcx], al
+    0x74, 0x0A,       // 0x128 je +10 -> 0x134 .found
+    0x80, 0x39, 0x00, // 0x12A cmp byte [rcx], 0
+    0x74, 0x09,       // 0x12D je +9 -> 0x138 .notfound
+    0x48, 0xFF, 0xC1, // 0x12F inc rcx
+    0xEB, 0xF2,       // 0x132 jmp -14 -> 0x126 .loop
     // .found:
-    0x48, 0x89, 0xC8,     // 0x134 mov rax, rcx
-    0xC3,                 // 0x137 ret
+    0x48, 0x89, 0xC8, // 0x134 mov rax, rcx
+    0xC3,             // 0x137 ret
     // .notfound:
-    0x31, 0xC0,           // 0x138 xor eax, eax
-    0xC3,                 // 0x13A ret
+    0x31, 0xC0, // 0x138 xor eax, eax
+    0xC3,       // 0x13A ret
 
     // --- strcpy (offset 0x13B, 23 bytes) -----------------------
     // char* strcpy(char* dst=rcx, const char* src=rdx).
@@ -415,16 +415,16 @@ constexpr u8 kStubsBytes[] = {
     // Uses r8b (scratch byte, caller-saved) as the transfer
     // register — can't use dl since rdx is the source
     // pointer.
-    0x48, 0x89, 0xC8,     // 0x13B mov rax, rcx    ; save dst
-    0x44, 0x8A, 0x02,     // 0x13E mov r8b, [rdx]
-    0x44, 0x88, 0x01,     // 0x141 mov [rcx], r8b
-    0x45, 0x84, 0xC0,     // 0x144 test r8b, r8b
-    0x74, 0x08,           // 0x147 je +8 -> 0x151 .done
-    0x48, 0xFF, 0xC1,     // 0x149 inc rcx
-    0x48, 0xFF, 0xC2,     // 0x14C inc rdx
-    0xEB, 0xED,           // 0x14F jmp -19 -> 0x13E .loop
+    0x48, 0x89, 0xC8, // 0x13B mov rax, rcx    ; save dst
+    0x44, 0x8A, 0x02, // 0x13E mov r8b, [rdx]
+    0x44, 0x88, 0x01, // 0x141 mov [rcx], r8b
+    0x45, 0x84, 0xC0, // 0x144 test r8b, r8b
+    0x74, 0x08,       // 0x147 je +8 -> 0x151 .done
+    0x48, 0xFF, 0xC1, // 0x149 inc rcx
+    0x48, 0xFF, 0xC2, // 0x14C inc rdx
+    0xEB, 0xED,       // 0x14F jmp -19 -> 0x13E .loop
     // .done:
-    0xC3,                 // 0x151 ret
+    0xC3, // 0x151 ret
 
     // === Batch 8: kernel32 safe-ignore shims ==================
 
@@ -556,9 +556,9 @@ constexpr u8 kStubsBytes[] = {
     // SLIST_HEADER is 16 bytes on x64 (two pointers / atomic
     // state). Zeroing is the correct initialisation — an
     // empty interlocked SList is all-zero.
-    0x48, 0xC7, 0x01, 0x00, 0x00, 0x00, 0x00,             // 0x1CE mov qword [rcx], 0
-    0x48, 0xC7, 0x41, 0x08, 0x00, 0x00, 0x00, 0x00,       // 0x1D5 mov qword [rcx+8], 0
-    0xC3,                                                  // 0x1DD ret
+    0x48, 0xC7, 0x01, 0x00, 0x00, 0x00, 0x00,       // 0x1CE mov qword [rcx], 0
+    0x48, 0xC7, 0x41, 0x08, 0x00, 0x00, 0x00, 0x00, // 0x1D5 mov qword [rcx+8], 0
+    0xC3,                                           // 0x1DD ret
 
     // --- GetSystemTimeAsFileTime (offset 0x1DE, 8 bytes) -------
     // Win32: void GetSystemTimeAsFileTime(LPFILETIME=rcx).
@@ -590,9 +590,9 @@ constexpr u8 kStubsBytes[] = {
     // caller "the thread is still running" — the safe answer
     // for a hosted environment with no real thread exit
     // codes. Return TRUE.
-    0xC7, 0x02, 0x03, 0x01, 0x00, 0x00,       // 0x1EA mov dword [rdx], 0x103
-    0xB8, 0x01, 0x00, 0x00, 0x00,             // 0x1F0 mov eax, 1
-    0xC3,                                     // 0x1F5 ret
+    0xC7, 0x02, 0x03, 0x01, 0x00, 0x00, // 0x1EA mov dword [rdx], 0x103
+    0xB8, 0x01, 0x00, 0x00, 0x00,       // 0x1F0 mov eax, 1
+    0xC3,                               // 0x1F5 ret
 
     // === Batch 11: performance counters + tick count =========
     //
@@ -1083,6 +1083,11 @@ void Win32StubsPopulate(u8* dst)
 
 bool Win32StubsLookup(const char* dll, const char* func, u64* out_va)
 {
+    return Win32StubsLookupKind(dll, func, out_va, nullptr);
+}
+
+bool Win32StubsLookupKind(const char* dll, const char* func, u64* out_va, bool* out_is_noop)
+{
     if (dll == nullptr || func == nullptr || out_va == nullptr)
         return false;
     for (const StubEntry& e : kStubsTable)
@@ -1092,6 +1097,17 @@ bool Win32StubsLookup(const char* dll, const char* func, u64* out_va)
         if (!AsciiEqual(e.func, func))
             continue;
         *out_va = kWin32StubsVa + e.offset;
+        if (out_is_noop != nullptr)
+        {
+            // "No-op / safe-ignore" stubs are the ones whose
+            // entire implementation is a constant return. They
+            // silently succeed but never actually do the thing
+            // the Win32 contract asks for. Flag the exact
+            // offsets so a reader of the boot log can tell
+            // which imports land on real syscalls vs. shims.
+            *out_is_noop = (e.offset == kOffReturnZero) || (e.offset == kOffReturnOne) ||
+                           (e.offset == kOffCritSecNop) || (e.offset == kOffGetProcessHeap);
+        }
         return true;
     }
     return false;

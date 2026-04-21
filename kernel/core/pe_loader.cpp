@@ -4,6 +4,7 @@
 #include "../mm/address_space.h"
 #include "../mm/frame_allocator.h"
 #include "../mm/page.h"
+#include "klog.h"
 #include "../mm/paging.h"
 #include "../subsystems/win32/stubs.h"
 
@@ -652,13 +653,15 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, customos::
             }
 
             u64 stub_va = 0;
-            if (!win32::Win32StubsLookup(dll_name, fn_name, &stub_va))
+            bool is_noop_stub = false;
+            if (!win32::Win32StubsLookupKind(dll_name, fn_name, &stub_va, &is_noop_stub))
             {
-                SerialWrite("[pe-resolve] UNRESOLVED ");
-                SerialWrite(dll_name);
-                SerialWrite("!");
-                SerialWrite(fn_name);
-                SerialWrite("\n");
+                // Unresolved import — the PE calls a function we
+                // don't even stub. Loader-side fatal for v0; log
+                // in structured form so the boot log highlights
+                // it (red) and `dmesg w` catches it.
+                core::LogWithString(core::LogLevel::Error, "pe-resolve", "UNRESOLVED import", "fn", fn_name);
+                core::LogWithString(core::LogLevel::Error, "pe-resolve", "  from", "dll", dll_name);
                 return false;
             }
 
@@ -684,19 +687,17 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, customos::
                 iat_direct[page_off + b] = static_cast<u8>((stub_va >> (b * 8)) & 0xFF);
             ++resolved;
 
-            SerialWrite("[pe-resolve] ");
-            SerialWrite(dll_name);
-            SerialWrite("!");
-            SerialWrite(fn_name);
-            SerialWrite(" -> ");
-            SerialWriteHex(stub_va);
-            SerialWrite("\n");
+            // Structured klog: Info for real stubs, Warn for no-op
+            // "safe-ignore" shims. The Warn colour (yellow) makes it
+            // obvious at boot-log skim which imports will silently
+            // misbehave if the PE actually relies on them.
+            const core::LogLevel lvl = is_noop_stub ? core::LogLevel::Warn : core::LogLevel::Info;
+            const char* msg = is_noop_stub ? "import resolved to NO-OP stub" : "import resolved";
+            core::LogWithString(lvl, "pe-resolve", msg, "fn", fn_name);
         }
     }
 
-    SerialWrite("[pe-resolve] total resolved: ");
-    SerialWriteHex(resolved);
-    SerialWrite("\n");
+    core::LogWithValue(core::LogLevel::Info, "pe-resolve", "total imports resolved", resolved);
     return true;
 }
 
