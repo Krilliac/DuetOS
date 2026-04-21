@@ -244,6 +244,7 @@ void DumpDiagnostics(u64 rip, u64 rsp, u64 rbp)
     DumpBacktrace(rbp);
     DumpStack(rsp, 16);
     DumpLogRing();
+    DumpInflightScopes();
 }
 
 void Panic(const char* subsystem, const char* message)

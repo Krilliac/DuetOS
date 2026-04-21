@@ -247,7 +247,7 @@ void CmdHelp()
     ConsoleWriteln("  TIME CMD..   MEASURE WALL TIME (10 MS RESOLUTION)");
     ConsoleWriteln("  SEQ N        PRINT 1..N (CAPPED AT 200)");
     ConsoleWriteln("  ECHO ..  > PATH   PRINT OR REDIRECT TO /tmp (>> TO APPEND)");
-    ConsoleWriteln("  DMESG [DIWE]  DUMP KERNEL LOG RING (OPT: MIN SEVERITY)");
+    ConsoleWriteln("  DMESG [TDIWE] DUMP KERNEL LOG RING (OPT: MIN SEVERITY)");
     ConsoleWriteln("  STATS        SCHEDULER STATISTICS");
     ConsoleWriteln("  MEM          PHYSICAL MEMORY USAGE");
     ConsoleWriteln("  HISTORY      LIST RECENT COMMANDS (!N RECALL, !! REPEAT)");
@@ -393,6 +393,11 @@ void CmdDmesg(customos::u32 argc, char** argv)
         const char c = argv[1][0];
         switch (c)
         {
+        case 't':
+        case 'T':
+            min_level = customos::core::LogLevel::Trace;
+            banner_suffix = " [FILTER: T+]";
+            break;
         case 'd':
         case 'D':
             min_level = customos::core::LogLevel::Debug;
@@ -414,7 +419,7 @@ void CmdDmesg(customos::u32 argc, char** argv)
             banner_suffix = " [FILTER: E ONLY]";
             break;
         default:
-            ConsoleWriteln("DMESG: USE [D|I|W|E] FOR SEVERITY FILTER");
+            ConsoleWriteln("DMESG: USE [T|D|I|W|E] FOR SEVERITY FILTER");
             return;
         }
     }
@@ -2045,6 +2050,9 @@ void CmdLoglevel(u32 argc, char** argv)
         ConsoleWrite("LOG THRESHOLD: ");
         switch (cur)
         {
+        case customos::core::LogLevel::Trace:
+            ConsoleWriteln("TRACE (fn enter/exit + timing)");
+            break;
         case customos::core::LogLevel::Debug:
             ConsoleWriteln("DEBUG (show everything)");
             break;
@@ -2058,13 +2066,17 @@ void CmdLoglevel(u32 argc, char** argv)
             ConsoleWriteln("ERROR (show only errors)");
             break;
         }
-        ConsoleWriteln("USAGE: LOGLEVEL [D|I|W|E]");
+        ConsoleWriteln("USAGE: LOGLEVEL [T|D|I|W|E]");
         return;
     }
     const char c = argv[1][0];
     customos::core::LogLevel lvl = customos::core::LogLevel::Info;
     switch (c)
     {
+    case 't':
+    case 'T':
+        lvl = customos::core::LogLevel::Trace;
+        break;
     case 'd':
     case 'D':
         lvl = customos::core::LogLevel::Debug;
@@ -2082,7 +2094,7 @@ void CmdLoglevel(u32 argc, char** argv)
         lvl = customos::core::LogLevel::Error;
         break;
     default:
-        ConsoleWriteln("LOGLEVEL: USE D / I / W / E");
+        ConsoleWriteln("LOGLEVEL: USE T / D / I / W / E");
         return;
     }
     customos::core::SetLogThreshold(lvl);

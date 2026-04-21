@@ -3,6 +3,9 @@
 #include "../arch/x86_64/hpet.h"
 #include "../arch/x86_64/serial.h"
 #include "../arch/x86_64/timer.h"
+#include "../mm/frame_allocator.h"
+#include "../mm/kheap.h"
+#include "../sched/sched.h"
 
 namespace customos::core
 {
@@ -33,10 +36,13 @@ constinit u64 g_log_ring_count = 0; // saturates at kLogRingCapacity
 constinit bool g_color_enabled = true;
 
 // Runtime severity threshold — set via SetLogThreshold. Lines with
-// level < max(threshold, kKlogMinLevel) are silently dropped. Default
-// matches the compile-time floor so behaviour is unchanged unless
-// somebody explicitly raises it.
-constinit LogLevel g_log_threshold = kKlogMinLevel;
+// level < max(threshold, kKlogMinLevel) are silently dropped.
+// Default is Info: the compile-time floor is Trace (so Trace calls
+// exist in the binary), but the runtime default drops them. Users
+// dial down to Trace via `loglevel t` when they want function
+// entry / exit timing. This keeps boot logs readable by default
+// while leaving deep instrumentation a shell command away.
+constinit LogLevel g_log_threshold = LogLevel::Info;
 
 // Secondary sink. Set via SetLogTee once a framebuffer console (or
 // any string consumer) is up. Timestamps are NOT forwarded — they
@@ -157,6 +163,8 @@ inline const char* LevelTag(LogLevel level)
 {
     switch (level)
     {
+    case LogLevel::Trace:
+        return "[T] ";
     case LogLevel::Debug:
         return "[D] ";
     case LogLevel::Info:
@@ -179,6 +187,8 @@ inline const char* LevelColorPrefix(LogLevel level)
 {
     switch (level)
     {
+    case LogLevel::Trace:
+        return "\x1b[36m"; // cyan — distinct from Debug's dim grey
     case LogLevel::Debug:
         return "\x1b[2m"; // dim
     case LogLevel::Info:
@@ -597,8 +607,195 @@ void DumpLogRingToFiltered(LogTee writer, LogLevel min_level)
     }
 }
 
+// ---------------------------------------------------------------
+// Trace scope tracking
+// ---------------------------------------------------------------
+//
+// A fixed-size table of currently-entered scopes. On panic, each
+// still-active slot emits "X entered at tN ms, still running for
+// NN ms" so a hang tells you which function stopped making
+// progress. Racy under SMP (multi-CPU scope enter/exit would want
+// per-CPU tables); single-CPU today, so a global works.
+
+namespace
+{
+
+struct InflightEntry
+{
+    const char* subsystem;
+    const char* name;
+    u64 enter_us;
+    bool active;
+};
+
+constinit InflightEntry g_inflight[kScopeInflightCapacity] = {};
+
+// Find the first free slot. Returns the index or -1.
+i32 InflightClaim()
+{
+    for (u32 i = 0; i < kScopeInflightCapacity; ++i)
+    {
+        if (!g_inflight[i].active)
+        {
+            return static_cast<i32>(i);
+        }
+    }
+    return -1;
+}
+
+void InflightRelease(i32 slot)
+{
+    if (slot >= 0 && static_cast<u32>(slot) < kScopeInflightCapacity)
+    {
+        g_inflight[slot].active = false;
+    }
+}
+
+} // namespace
+
+TraceScope::TraceScope(const char* subsystem, const char* name)
+    : m_subsystem(subsystem), m_name(name), m_enter_us(ElapsedMicros()), m_slot(InflightClaim())
+{
+    if (m_slot >= 0)
+    {
+        g_inflight[m_slot].subsystem = subsystem;
+        g_inflight[m_slot].name = name;
+        g_inflight[m_slot].enter_us = m_enter_us;
+        g_inflight[m_slot].active = true;
+    }
+    else
+    {
+        // Table full — one-shot warn so the user knows the hang
+        // dump may be missing entries if we die from here on.
+        KLOG_ONCE_WARN("core/klog", "trace inflight table full; hang diagnosis degraded");
+    }
+
+    // Runtime-gated Trace log. The call site couldn't know at
+    // compile time whether the scope would fire, so the macro
+    // already passed the compile-time gate; this call does the
+    // runtime check inside Log().
+    LogWithString(LogLevel::Trace, subsystem, "> enter", "fn", name);
+}
+
+TraceScope::~TraceScope()
+{
+    const u64 exit_us = ElapsedMicros();
+    const u64 elapsed = (exit_us >= m_enter_us) ? (exit_us - m_enter_us) : 0;
+    InflightRelease(m_slot);
+
+    if (!LevelEnabled(LogLevel::Trace))
+    {
+        return;
+    }
+    // Hand-rolled line: we want "< exit   fn=\"name\"   elapsed_us=N"
+    // which no existing helper produces (LogWithString lacks a second
+    // labelled value; LogWith2Values can't carry a string).
+    g_current_log_level = LogLevel::Trace;
+    const char* tag = LevelTag(LogLevel::Trace);
+    WriteTimestampPrefix();
+    OpenColor(LogLevel::Trace);
+    arch::SerialWrite(tag);
+    CloseColor(LogLevel::Trace);
+    arch::SerialWrite(m_subsystem);
+    arch::SerialWrite(" : < exit   fn=\"");
+    arch::SerialWrite(m_name);
+    arch::SerialWrite("\"   elapsed_us=");
+    WriteDecimal(elapsed);
+    arch::SerialWrite("\n");
+
+    Tee(tag);
+    Tee(m_subsystem);
+    Tee(" : < exit ");
+    Tee(m_name);
+    Tee("\n");
+
+    PushEntry(LogLevel::Trace, m_subsystem, m_name, elapsed, true);
+}
+
+void DumpInflightScopes()
+{
+    // Walk the table; count active entries first so the banner
+    // can report "N scopes still in flight" before the detail.
+    u32 active = 0;
+    for (u32 i = 0; i < kScopeInflightCapacity; ++i)
+    {
+        if (g_inflight[i].active)
+            ++active;
+    }
+    if (active == 0)
+    {
+        arch::SerialWrite("[panic] no scopes in flight at panic\n");
+        return;
+    }
+    arch::SerialWrite("[panic] --- ");
+    WriteDecimal(active);
+    arch::SerialWrite(" scope(s) still running at panic ---\n");
+    const u64 now_us = ElapsedMicros();
+    for (u32 i = 0; i < kScopeInflightCapacity; ++i)
+    {
+        const InflightEntry& e = g_inflight[i];
+        if (!e.active)
+            continue;
+        const u64 running = (now_us >= e.enter_us) ? (now_us - e.enter_us) : 0;
+        arch::SerialWrite("[panic]   ");
+        arch::SerialWrite(e.subsystem ? e.subsystem : "(null)");
+        arch::SerialWrite(" :: ");
+        arch::SerialWrite(e.name ? e.name : "(null)");
+        arch::SerialWrite("   running_us=");
+        WriteDecimal(running);
+        arch::SerialWrite("\n");
+    }
+}
+
+// ---------------------------------------------------------------
+// Resource-metrics snapshot
+// ---------------------------------------------------------------
+
+void LogMetrics(LogLevel level, const char* subsystem, const char* label)
+{
+    if (!LevelEnabled(level))
+    {
+        return;
+    }
+    const auto heap = mm::KernelHeapStatsRead();
+    const u64 free_frames = mm::FreeFramesCount();
+    const auto sched_stats = sched::SchedStatsRead();
+
+    g_current_log_level = level;
+    const char* tag = LevelTag(level);
+    WriteTimestampPrefix();
+    OpenColor(level);
+    arch::SerialWrite(tag);
+    CloseColor(level);
+    arch::SerialWrite(subsystem);
+    arch::SerialWrite(" : metrics ");
+    arch::SerialWrite(label ? label : "");
+    arch::SerialWrite("   heap_used=");
+    WriteDecimal(heap.used_bytes);
+    arch::SerialWrite("   heap_free=");
+    WriteDecimal(heap.free_bytes);
+    arch::SerialWrite("   frames_free=");
+    WriteDecimal(free_frames);
+    arch::SerialWrite("   ctx_switches=");
+    WriteDecimal(sched_stats.context_switches);
+    arch::SerialWrite("   tasks_live=");
+    WriteDecimal(sched_stats.tasks_live);
+    arch::SerialWrite("\n");
+
+    Tee(tag);
+    Tee(subsystem);
+    Tee(" : metrics ");
+    Tee(label ? label : "");
+    Tee("\n");
+
+    // Ring entry: record heap used as the one preserved value so
+    // post-mortem shows "at metrics checkpoint X, heap was at Y".
+    PushEntry(level, subsystem, label ? label : "metrics", heap.used_bytes, true);
+}
+
 void KLogSelfTest()
 {
+    KLOG_TRACE("core/klog", "trace-level sanity line (filtered by default)");
     KLOG_DEBUG("core/klog", "debug-level sanity line");
     KLOG_INFO("core/klog", "info-level sanity line");
     KLOG_WARN("core/klog", "warn-level sanity line");
@@ -611,6 +808,12 @@ void KLogSelfTest()
     for (int i = 0; i < 3; ++i)
     {
         KLOG_ONCE_INFO("core/klog", "once-info sanity (fires once even in a loop)");
+    }
+    // Exercise TraceScope — RAII guard emits enter + exit if the
+    // runtime threshold is dialed down to Trace. With the default
+    // Info threshold this is invisible.
+    {
+        KLOG_TRACE_SCOPE("core/klog", "self-test-scope");
     }
 }
 

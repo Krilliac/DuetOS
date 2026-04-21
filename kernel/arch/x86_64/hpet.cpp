@@ -38,6 +38,7 @@ inline volatile u64& Reg(u64 offset)
 
 void HpetInit()
 {
+    KLOG_TRACE_SCOPE("arch/hpet", "HpetInit");
     const u64 phys = acpi::HpetAddress();
     if (phys == 0)
     {

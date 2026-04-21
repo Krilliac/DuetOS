@@ -74,6 +74,7 @@ constinit const BlockOps kRamBlockOps = {
 
 void BlockLayerInit()
 {
+    KLOG_TRACE_SCOPE("block", "BlockLayerInit");
     if (g_initialised)
         return;
     g_initialised = true;
@@ -208,6 +209,7 @@ u32 RamBlockDeviceCreate(const char* name, u32 sector_size, u64 sector_count)
 
 void BlockLayerSelfTest()
 {
+    KLOG_TRACE_SCOPE("block", "BlockLayerSelfTest");
     using arch::SerialWrite;
     const u32 h = RamBlockDeviceCreate("ramtest0", 512, 64);
     if (h == kBlockHandleInvalid)

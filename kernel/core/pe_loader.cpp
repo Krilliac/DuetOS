@@ -553,6 +553,7 @@ bool ApplyRelocations(const u8* file, u64 file_len, const PeHeaders& h, customos
 
 bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, customos::mm::AddressSpace* as)
 {
+    KLOG_TRACE_SCOPE("pe-resolve", "ResolveImports");
     using arch::SerialWrite;
     using arch::SerialWriteHex;
     const PeDataDir imp = ReadDataDir(file, h, kDirEntryImport);
@@ -705,6 +706,7 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, customos::
 
 PeLoadResult PeLoad(const u8* file, u64 file_len, customos::mm::AddressSpace* as)
 {
+    KLOG_TRACE_SCOPE("pe-loader", "PeLoad");
     PeLoadResult r{};
     r.ok = false;
     if (as == nullptr)

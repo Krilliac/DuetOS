@@ -104,6 +104,7 @@ u64 ReadRedir(const IoApic& io, u32 entry)
 
 void IoApicInit()
 {
+    KLOG_TRACE_SCOPE("arch/ioapic", "IoApicInit");
     const u64 count = acpi::IoApicCount();
     if (count == 0)
     {

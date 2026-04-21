@@ -255,6 +255,7 @@ void LogPartitionLine(const Partition& p, u32 index)
 
 bool GptProbe(u32 block_handle, u32* out_index)
 {
+    KLOG_TRACE_SCOPE("fs/gpt", "GptProbe");
     if (g_disk_count >= kMaxDisks)
     {
         core::Log(core::LogLevel::Warn, "fs/gpt", "disk registry full");
@@ -389,6 +390,7 @@ const Disk* GptDisk(u32 index)
 
 void GptSelfTest()
 {
+    KLOG_TRACE_SCOPE("fs/gpt", "GptSelfTest");
     const u32 block_count = drivers::storage::BlockDeviceCount();
     arch::SerialWrite("[fs/gpt] probing ");
     arch::SerialWriteHex(block_count);

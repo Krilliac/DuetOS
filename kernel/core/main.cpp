@@ -181,7 +181,9 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
 
     // klog online as early as Serial. Self-test prints one line at
     // each severity so visual inspection of the early boot log
-    // confirms the tag format + u64-value form are working.
+    // confirms the tag format + u64-value form are working. Trace
+    // calls are gated by the runtime threshold (default Info) — use
+    // `loglevel t` at the shell to enable function-scope tracing.
     customos::core::KLogSelfTest();
 
     constexpr customos::u32 kMultiboot2BootMagic = 0x36D76289;
@@ -224,6 +226,8 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     SerialWrite("[boot] Bringing up kernel heap.\n");
     KernelHeapInit();
     KernelHeapSelfTest();
+
+    KLOG_METRICS("boot", "after-kernel-heap");
 
     SerialWrite("[boot] Bringing up paging.\n");
     PagingInit();
@@ -759,6 +763,10 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
 
     SerialWrite("[boot] Probing GPT on block devices.\n");
     customos::fs::gpt::GptSelfTest();
+
+    // Metrics checkpoint: everything above is bringup overhead; what
+    // the system consumes from here on is steady-state.
+    KLOG_METRICS("boot", "bringup-complete");
 
     // Sanity-check the tmpfs log sink — by now enough Info+ lines
     // have fired that /tmp/boot.log should be at its 512-byte cap.

@@ -107,6 +107,7 @@ void LogPort(volatile u8* hba, u32 port_idx)
 
 void AhciInit()
 {
+    KLOG_TRACE_SCOPE("drivers/ahci", "AhciInit");
     const pci::Device* dev = FindAhci();
     if (dev == nullptr)
     {

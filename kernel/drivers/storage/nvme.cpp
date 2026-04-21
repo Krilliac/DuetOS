@@ -559,6 +559,7 @@ bool RegisterAsBlockDevice()
 
 void NvmeInit()
 {
+    KLOG_TRACE_SCOPE("drivers/nvme", "NvmeInit");
     const pci::Device* dev = FindNvme();
     if (dev == nullptr)
     {
@@ -639,6 +640,7 @@ void NvmeInit()
 
 void NvmeSelfTest()
 {
+    KLOG_TRACE_SCOPE("drivers/nvme", "NvmeSelfTest");
     using arch::SerialWrite;
     if (!g_ctrl.online)
     {

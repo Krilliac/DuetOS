@@ -49,16 +49,21 @@ namespace customos::core
 
 enum class LogLevel : u8
 {
-    Debug = 0,
-    Info = 1,
-    Warn = 2,
-    Error = 3,
+    Trace = 0, // finest-grained — function enter/exit + timing
+    Debug = 1,
+    Info = 2,
+    Warn = 3,
+    Error = 4,
 };
 
-/// Compile-time minimum severity. Adjust per build preset — Debug for
-/// `x86_64-debug`, Info for `x86_64-release` (once release preset
-/// exists). Calls below this level compile to a no-op in release.
-inline constexpr LogLevel kKlogMinLevel = LogLevel::Debug;
+/// Compile-time minimum severity. Trace is always compiled in; the
+/// runtime threshold defaults to Info so Trace calls are filtered
+/// unless somebody explicitly dials it down via `loglevel t`.
+/// Release builds can raise this to Info if the per-call Trace
+/// branch ever shows up in profiles — the macros gate on
+/// `if constexpr (level >= kKlogMinLevel)` so raising the floor
+/// genuinely compiles away Trace call sites.
+inline constexpr LogLevel kKlogMinLevel = LogLevel::Trace;
 
 /// Set the RUNTIME minimum severity. Lines below this level are
 /// dropped at the head of Log / LogWithValue (they still don't
@@ -105,6 +110,70 @@ void LogWith2Values(LogLevel level, const char* subsystem, const char* message, 
 /// by the console itself.
 void SetLogColor(bool enabled);
 bool GetLogColor();
+
+// -----------------------------------------------------------------
+// Trace / scope instrumentation.
+//
+// `TraceScope` is an RAII guard: construction logs "enter" at Trace
+// level with the current timestamp; destruction logs "exit" with the
+// elapsed wall time in microseconds. Use via KLOG_TRACE_SCOPE() at
+// the top of a function to get automatic enter/exit pairing.
+//
+// While a scope is alive it also registers in a small global
+// in-flight table; on panic the panic path dumps every scope that
+// entered but never exited — so a hang gives you a grep-able
+// "function X was still running after NNms" record.
+//
+// The in-flight table is fixed-size (kScopeInflightCapacity). A
+// scope that opens when the table is full still logs enter/exit but
+// doesn't occupy a slot — the hang-dump list becomes incomplete,
+// logged as a one-shot warn so you notice.
+//
+// Cost when Trace is filtered at runtime: one load + compare +
+// branch at enter, same at exit, plus the RAII guard storage
+// (three pointers, 8 bytes of timestamp). Near-zero.
+//
+// Cost when Trace is raised above the compile-time floor: the
+// KLOG_TRACE_SCOPE macro folds to a no-op via `if constexpr` —
+// zero instructions, zero storage, the RAII object isn't even
+// declared. That's the mode release builds can opt into once we
+// have a real release preset.
+// -----------------------------------------------------------------
+
+inline constexpr u32 kScopeInflightCapacity = 16;
+
+class TraceScope
+{
+  public:
+    /// `subsystem` + `name` must outlive the scope (static strings).
+    /// Entering logs "> name" at Trace level; leaving logs "< name
+    /// elapsed_us=N".
+    TraceScope(const char* subsystem, const char* name);
+    ~TraceScope();
+
+    TraceScope(const TraceScope&) = delete;
+    TraceScope(TraceScope&&) = delete;
+    TraceScope& operator=(const TraceScope&) = delete;
+    TraceScope& operator=(TraceScope&&) = delete;
+
+  private:
+    const char* m_subsystem;
+    const char* m_name;
+    u64 m_enter_us;
+    i32 m_slot; // -1 if the in-flight table was full at construction
+};
+
+/// Snapshot of in-flight scopes, emitted by `core::Panic` so a
+/// hang dump shows "X was still running when we died". Safe to
+/// call from any context. No-op if nothing is in flight.
+void DumpInflightScopes();
+
+/// Emit a single structured "metrics snapshot" line covering
+/// heap, frames, context switches, and task counts. Callers use
+/// this at key checkpoints (end of boot, per-phase markers) so
+/// the timeline of resource consumption is visible without
+/// ad-hoc prints. Level-gated like any klog call.
+void LogMetrics(LogLevel level, const char* subsystem, const char* label);
 
 /// Runtime sanity check of the log path. Prints one line at each
 /// level; visual inspection confirms the format. Called from
@@ -165,6 +234,58 @@ void DumpLogRingToFiltered(LogTee writer, LogLevel min_level);
 
 // Convenience macros. The `do { } while (0)` lets call sites still
 // write `KLOG_INFO(...);` with a trailing semicolon.
+
+// Trace-level call sites fold to nothing when the compile-time
+// floor is above Trace. The `if constexpr` guard checks the enum
+// value of kKlogMinLevel at compile time; if Trace < floor, the
+// body is discarded and no call is emitted.
+#define KLOG_TRACE(subsys, msg)                                                                                        \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        if constexpr (static_cast<::customos::u8>(::customos::core::LogLevel::Trace) >=                                \
+                      static_cast<::customos::u8>(::customos::core::kKlogMinLevel))                                    \
+        {                                                                                                              \
+            ::customos::core::Log(::customos::core::LogLevel::Trace, (subsys), (msg));                                 \
+        }                                                                                                              \
+    } while (0)
+
+#define KLOG_TRACE_V(subsys, msg, val)                                                                                 \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        if constexpr (static_cast<::customos::u8>(::customos::core::LogLevel::Trace) >=                                \
+                      static_cast<::customos::u8>(::customos::core::kKlogMinLevel))                                    \
+        {                                                                                                              \
+            ::customos::core::LogWithValue(::customos::core::LogLevel::Trace, (subsys), (msg), (val));                 \
+        }                                                                                                              \
+    } while (0)
+
+// Function-scope instrumentation. Drop this at the top of a
+// function and get automatic enter / exit / elapsed logging at
+// Trace level, plus in-flight tracking for hang diagnosis.
+//
+// Usage:
+//     void AhciInit() {
+//         KLOG_TRACE_SCOPE("drivers/ahci", "AhciInit");
+//         // ... body ...
+//     }
+//
+// The helper creates a unique local name per call site by
+// concatenating __LINE__, so two scopes in the same function
+// don't collide.
+#define KLOG_TRACE_SCOPE_IMPL2(subsys, name, line_)                                                                    \
+    ::customos::core::TraceScope _klog_trace_scope_##line_((subsys), (name))
+#define KLOG_TRACE_SCOPE_IMPL(subsys, name, line_) KLOG_TRACE_SCOPE_IMPL2(subsys, name, line_)
+#define KLOG_TRACE_SCOPE(subsys, name) KLOG_TRACE_SCOPE_IMPL(subsys, name, __LINE__)
+
+// Metrics snapshot. Prints one line with current heap-used,
+// frames-free, context-switches, tasks-live, each as a labelled
+// decimal value. Use at phase boundaries to see the timeline.
+#define KLOG_METRICS(subsys, label)                                                                                    \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        ::customos::core::LogMetrics(::customos::core::LogLevel::Info, (subsys), (label));                             \
+    } while (0)
+
 #define KLOG_DEBUG(subsys, msg)                                                                                        \
     do                                                                                                                 \
     {                                                                                                                  \
