@@ -181,6 +181,8 @@ void CmdHelp()
     ConsoleWriteln("  HEAD [-N] P  FIRST N LINES (DEFAULT 5)");
     ConsoleWriteln("  TAIL [-N] P  LAST N LINES (DEFAULT 5)");
     ConsoleWriteln("  WC PATH      LINES / WORDS / BYTES");
+    ConsoleWriteln("  GREP PAT P   PRINT LINES OF P CONTAINING PAT");
+    ConsoleWriteln("  FIND NAME    LIST PATHS WHOSE LEAF CONTAINS NAME");
     ConsoleWriteln("  ECHO ..  > PATH   PRINT OR REDIRECT TO /tmp (>> TO APPEND)");
     ConsoleWriteln("  DMESG        DUMP KERNEL LOG RING");
     ConsoleWriteln("  STATS        SCHEDULER STATISTICS");
@@ -734,6 +736,158 @@ void CmdTail(u32 argc, char** argv)
     {
         ConsoleWriteChar('\n');
     }
+}
+
+// True iff `needle` is a substring of `haystack[0..hay_len)`.
+// Case-sensitive — all our commands run in a mostly-uppercase
+// world already, and a lowercase option is a one-flag extension
+// for later.
+bool SubstringPresent(const char* haystack, u32 hay_len, const char* needle)
+{
+    if (needle == nullptr || needle[0] == '\0')
+    {
+        return true; // empty needle matches every line (`grep "" x`)
+    }
+    u32 nlen = 0;
+    while (needle[nlen] != '\0')
+        ++nlen;
+    if (nlen > hay_len)
+    {
+        return false;
+    }
+    for (u32 i = 0; i + nlen <= hay_len; ++i)
+    {
+        u32 j = 0;
+        for (; j < nlen; ++j)
+        {
+            if (haystack[i + j] != needle[j])
+                break;
+        }
+        if (j == nlen)
+            return true;
+    }
+    return false;
+}
+
+void CmdGrep(u32 argc, char** argv)
+{
+    if (argc < 3)
+    {
+        ConsoleWriteln("GREP: USAGE: GREP PATTERN PATH");
+        return;
+    }
+    const char* pattern = argv[1];
+    const char* path = argv[2];
+    char scratch[customos::fs::kTmpFsContentMax];
+    const u32 n = ReadFileToBuf(path, scratch, sizeof(scratch));
+    if (n == static_cast<u32>(-1))
+    {
+        ConsoleWrite("GREP: NO SUCH FILE: ");
+        ConsoleWriteln(path);
+        return;
+    }
+    // Walk line by line. A line runs from the last newline+1 to
+    // the next newline (or EOF). For each line, substring-match
+    // on `pattern`.
+    u32 start = 0;
+    for (u32 i = 0; i <= n; ++i)
+    {
+        const bool at_end = (i == n);
+        if (at_end || scratch[i] == '\n')
+        {
+            const u32 len = i - start;
+            if (SubstringPresent(&scratch[start], len, pattern))
+            {
+                for (u32 j = 0; j < len; ++j)
+                {
+                    ConsoleWriteChar(scratch[start + j]);
+                }
+                ConsoleWriteChar('\n');
+            }
+            start = i + 1;
+        }
+    }
+}
+
+// Recursive ramfs walker for `find`. Builds the absolute path
+// in `path_buf` as it descends; restores the length on the way
+// back so sibling subtrees see the correct prefix. Root's name
+// is empty — we skip the name-match test there but still walk
+// its children.
+void FindWalk(const customos::fs::RamfsNode* node, const char* needle, char* path_buf,
+              u32& path_len, u32 path_cap)
+{
+    if (node == nullptr)
+    {
+        return;
+    }
+    if (node->name != nullptr && node->name[0] != '\0')
+    {
+        u32 nlen = 0;
+        while (node->name[nlen] != '\0')
+            ++nlen;
+        if (SubstringPresent(node->name, nlen, needle))
+        {
+            for (u32 i = 0; i < path_len; ++i)
+            {
+                ConsoleWriteChar(path_buf[i]);
+            }
+            ConsoleWriteChar('\n');
+        }
+    }
+    if (node->type != customos::fs::RamfsNodeType::kDir || node->children == nullptr)
+    {
+        return;
+    }
+    for (u32 i = 0; node->children[i] != nullptr; ++i)
+    {
+        const auto* c = node->children[i];
+        const u32 saved = path_len;
+        if (path_len + 1 < path_cap)
+        {
+            path_buf[path_len++] = '/';
+        }
+        for (u32 k = 0; c->name[k] != '\0' && path_len + 1 < path_cap; ++k)
+        {
+            path_buf[path_len++] = c->name[k];
+        }
+        path_buf[path_len] = '\0';
+        FindWalk(c, needle, path_buf, path_len, path_cap);
+        path_len = saved;
+        path_buf[path_len] = '\0';
+    }
+}
+
+void CmdFind(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("FIND: USAGE: FIND NAME");
+        return;
+    }
+    const char* needle = argv[1];
+    char path_buf[128] = {};
+    u32 path_len = 0;
+    FindWalk(customos::fs::RamfsTrustedRoot(), needle, path_buf, path_len, sizeof(path_buf));
+    // tmpfs is flat under /tmp/ — enumerate directly.
+    struct Cookie
+    {
+        const char* needle;
+    };
+    Cookie cookie{needle};
+    customos::fs::TmpFsEnumerate(
+        [](const char* name, u32 /*len*/, void* ck) {
+            auto* c = static_cast<Cookie*>(ck);
+            u32 nlen = 0;
+            while (name[nlen] != '\0')
+                ++nlen;
+            if (SubstringPresent(name, nlen, c->needle))
+            {
+                ConsoleWrite("/tmp/");
+                ConsoleWriteln(name);
+            }
+        },
+        &cookie);
 }
 
 void CmdSet(u32 argc, char** argv)
@@ -1748,6 +1902,16 @@ void Dispatch(char* line)
         CmdMan(argc, argv);
         return;
     }
+    if (StrEq(cmd, "grep"))
+    {
+        CmdGrep(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "find"))
+    {
+        CmdFind(argc, argv);
+        return;
+    }
     ConsoleWrite("COMMAND NOT FOUND: ");
     ConsoleWriteln(cmd);
     ConsoleWriteln("TYPE HELP FOR A LIST OF COMMANDS.");
@@ -1921,7 +2085,7 @@ void CompleteCommandName()
         "mode",    "ls",      "cat",     "touch",   "rm",      "echo",    "cp",
         "mv",      "wc",      "head",    "tail",    "dmesg",   "stats",   "mem",
         "history", "set",     "unset",   "env",     "alias",   "unalias", "sysinfo",
-        "source",  "man",
+        "source",  "man",     "grep",    "find",
     };
     constexpr u32 kCmdCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -2152,7 +2316,8 @@ void ShellTabComplete()
                           StrEq(g_input, "touch") || StrEq(g_input, "rm") ||
                           StrEq(g_input, "cp") || StrEq(g_input, "mv") ||
                           StrEq(g_input, "wc") || StrEq(g_input, "head") ||
-                          StrEq(g_input, "tail") || StrEq(g_input, "source");
+                          StrEq(g_input, "tail") || StrEq(g_input, "source") ||
+                          StrEq(g_input, "grep");
     g_input[first_ws] = saved;
 
     if (path_cmd)
