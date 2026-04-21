@@ -16,6 +16,7 @@
 #include "../drivers/pci/pci.h"
 #include "../drivers/storage/ahci.h"
 #include "../apps/calculator.h"
+#include "../apps/files.h"
 #include "../apps/notes.h"
 #include "../drivers/video/console.h"
 #include "../drivers/video/cursor.h"
@@ -489,6 +490,24 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
         },
         nullptr);
 
+    // FILES — native CustomOS file browser. Lists the ramfs
+    // trusted root; Up/Down to move, Enter to descend, Backspace
+    // or 'B' to go back.
+    customos::drivers::video::WindowChrome files_chrome{};
+    files_chrome.x = 220;
+    files_chrome.y = 160;
+    files_chrome.w = 400;
+    files_chrome.h = 200;
+    files_chrome.colour_border = 0x00101828;
+    files_chrome.colour_title = 0x00606020;
+    files_chrome.colour_client = 0x00101828;
+    files_chrome.colour_close_btn = 0x00E04020;
+    files_chrome.title_height = 22;
+    const customos::drivers::video::WindowHandle files_handle =
+        customos::drivers::video::WindowRegister(files_chrome, "FILES");
+    customos::apps::files::FilesInit(files_handle);
+    customos::apps::files::FilesSelfTest();
+
     // Framebuffer text console. 80x40 chars of boot log at the
     // bottom of the desktop, under the windows in z-order. Dragging
     // a window over it occludes; moving away restores.
@@ -834,23 +853,39 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                 const auto active = customos::drivers::video::WindowActive();
                 if (active != customos::drivers::video::kWindowInvalid)
                 {
-                    char c = 0;
-                    if (ev.code == kKeyEnter)
-                        c = '\n';
-                    else if (ev.code == kKeyBackspace)
-                        c = 0x08;
-                    else if (ev.code >= 0x20 && ev.code <= 0x7E)
-                        c = static_cast<char>(ev.code);
-                    if (c != 0)
+                    // Arrow-key routing — only Files consumes these
+                    // today, but the block is shaped so future apps
+                    // can add their own arrow handlers.
+                    if (active == customos::apps::files::FilesWindow() &&
+                        (ev.code == kKeyArrowUp || ev.code == kKeyArrowDown))
                     {
-                        if (active == customos::apps::notes::NotesWindow())
+                        app_consumed =
+                            customos::apps::files::FilesFeedArrow(ev.code == kKeyArrowUp);
+                    }
+                    else
+                    {
+                        char c = 0;
+                        if (ev.code == kKeyEnter)
+                            c = '\n';
+                        else if (ev.code == kKeyBackspace)
+                            c = 0x08;
+                        else if (ev.code >= 0x20 && ev.code <= 0x7E)
+                            c = static_cast<char>(ev.code);
+                        if (c != 0)
                         {
-                            customos::apps::notes::NotesFeedChar(c);
-                            app_consumed = true;
-                        }
-                        else if (active == customos::apps::calculator::CalculatorWindow())
-                        {
-                            app_consumed = customos::apps::calculator::CalculatorFeedChar(c);
+                            if (active == customos::apps::notes::NotesWindow())
+                            {
+                                customos::apps::notes::NotesFeedChar(c);
+                                app_consumed = true;
+                            }
+                            else if (active == customos::apps::calculator::CalculatorWindow())
+                            {
+                                app_consumed = customos::apps::calculator::CalculatorFeedChar(c);
+                            }
+                            else if (active == customos::apps::files::FilesWindow())
+                            {
+                                app_consumed = customos::apps::files::FilesFeedChar(c);
+                            }
                         }
                     }
                 }

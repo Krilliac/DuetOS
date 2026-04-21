@@ -39,6 +39,7 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     core/syscall.cpp
     acpi/acpi.cpp
     apps/calculator.cpp
+    apps/files.cpp
     apps/notes.cpp
     arch/x86_64/ap_trampoline.S
     arch/x86_64/boot.S

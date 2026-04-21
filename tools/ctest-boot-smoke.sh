@@ -66,6 +66,7 @@ expected=(
     "[batch11] perf counter + tick count OK"
     "[batch14] HeapSize + HeapReAlloc + realloc OK"
     "[calc] self-test OK"
+    "[files] self-test OK"
     "exit rc   val=0x000000000000beef"
 )
 

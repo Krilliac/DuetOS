@@ -90,7 +90,7 @@ u32 WidgetRouteMouse(u32 cursor_x, u32 cursor_y, u8 button_mask);
 // ---------------------------------------------------------------
 
 constexpr u32 kWindowInvalid = 0xFFFFFFFFu;
-constexpr u32 kMaxWindows = 4;
+constexpr u32 kMaxWindows = 6;
 
 using WindowHandle = u32;
 
