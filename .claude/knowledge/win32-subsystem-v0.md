@@ -370,13 +370,11 @@ Ordered roughly by ROI for getting `windows-kill.exe` to run:
    Small work; deferred only because winkill currently fails
    before reaching them.
 
-3. **Base relocation application.** Our loader rejects any PE
-   with a non-empty `.reloc` directory. Walking
-   `IMAGE_REL_BASED_DIR64` entries and adjusting absolute
-   addresses by `actual_base - preferred_base` is ~40 lines.
-   Unlocks loading any PE at a non-preferred ImageBase,
-   including hostile images that can't be guaranteed a
-   specific VA.
+3. ~~Base relocation application~~ — landed. Loader accepts
+   PEs with a non-empty `.reloc` directory; `ApplyRelocations`
+   walks the blocks and is ready to patch DIR64 entries when
+   an ASLR slice supplies a nonzero delta. See
+   [pe-base-reloc-v0.md](pe-base-reloc-v0.md).
 
 4. **TLS callback dispatch.** `windows-kill.exe` has a TLS
    directory (though the callback list is empty). A real Win32

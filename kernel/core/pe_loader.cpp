@@ -246,8 +246,11 @@ PeStatus ParseHeaders(const u8* file, u64 file_len, PeHeaders& out)
     };
     if (dir_rva(kDirEntryImport) != 0 || dir_size(kDirEntryImport) != 0)
         return PeStatus::ImportsPresent;
-    if (dir_rva(kDirEntryBaseReloc) != 0 || dir_size(kDirEntryBaseReloc) != 0)
-        return PeStatus::RelocsNonEmpty;
+    // Base-reloc directory is accepted as of the base-reloc slice
+    // — PeLoad walks the table in ApplyRelocations below. In v0
+    // we always map the image at its preferred ImageBase so the
+    // effective delta is zero; the walk still runs to validate
+    // the table shape and catch malformed .reloc sections early.
     if (dir_rva(kDirEntryTls) != 0 || dir_size(kDirEntryTls) != 0)
         return PeStatus::TlsPresent;
 
@@ -421,6 +424,131 @@ PeStatus PeValidate(const u8* file, u64 file_len)
 // helper without forcing a forward-declare.
 namespace
 {
+
+// Walk the base-relocation directory and apply each entry to
+// the in-memory image. `delta = actual_base - preferred_base`;
+// in v0 we always load at the preferred base so delta == 0 and
+// the inner patch is a no-op, but the walk still runs to catch
+// a malformed .reloc section (bad block size, unsupported
+// relocation type, out-of-bounds page RVA).
+//
+// Each block patches entries within one 4 KiB virtual page:
+//   u32 PageRVA
+//   u32 BlockSize  (includes the 8-byte header)
+//   u16 entries[]  (top 4 bits = type, bottom 12 bits = page offset)
+//
+// v0 supports:
+//   type 0  IMAGE_REL_BASED_ABSOLUTE  — padding, skip.
+//   type 10 IMAGE_REL_BASED_DIR64     — add delta to the u64 at
+//                                        ImageBase + PageRVA + offset.
+// Any other type is rejected — PE32+ images produced by MSVC /
+// lld-link use only these two.
+//
+// When delta != 0, a DIR64 patch whose 8 bytes straddle a page
+// boundary needs two `AddressSpaceLookupUserFrame` lookups. The
+// apply path handles that correctly; the zero-delta pass never
+// touches memory so the split case is invisible there.
+bool ApplyRelocations(const u8* file, u64 file_len, const PeHeaders& h, customos::mm::AddressSpace* as, u64 delta)
+{
+    using arch::SerialWrite;
+    using arch::SerialWriteHex;
+    const PeDataDir br = ReadDataDir(file, h, kDirEntryBaseReloc);
+    if (br.rva == 0 || br.size == 0)
+        return true;
+
+    const u64 tbl_off = RvaToFile(file, h, br.rva);
+    if (tbl_off == ~u64(0) || tbl_off + br.size > file_len)
+    {
+        SerialWrite("[pe-reloc] reloc table rva out of bounds\n");
+        return false;
+    }
+
+    const u64 end = tbl_off + br.size;
+    u64 cursor = tbl_off;
+    u32 blocks_seen = 0;
+    u32 entries_applied = 0;
+
+    while (cursor + 8 <= end)
+    {
+        const u32 page_rva = LeU32(file + cursor + 0);
+        const u32 block_sz = LeU32(file + cursor + 4);
+        if (block_sz < 8 || cursor + block_sz > end)
+        {
+            SerialWrite("[pe-reloc] malformed block size\n");
+            return false;
+        }
+        // Terminator: an all-zero block ends the directory even if
+        // br.size covers trailing padding.
+        if (page_rva == 0 && block_sz == 0)
+            break;
+
+        const u32 entry_count = (block_sz - 8) / 2;
+        for (u32 i = 0; i < entry_count; ++i)
+        {
+            const u16 entry = LeU16(file + cursor + 8 + u64(i) * 2);
+            const u16 type = entry >> 12;
+            const u16 offset = entry & 0x0FFF;
+
+            if (type == 0) // IMAGE_REL_BASED_ABSOLUTE — pad entry.
+                continue;
+            if (type != 10) // IMAGE_REL_BASED_DIR64 is the only other type we expect.
+            {
+                SerialWrite("[pe-reloc] unsupported reloc type=");
+                SerialWriteHex(type);
+                SerialWrite("\n");
+                return false;
+            }
+
+            if (delta == 0)
+                continue; // no-op apply — still validated the entry shape.
+
+            const u64 patch_va = h.image_base + u64(page_rva) + u64(offset);
+            // Read current 8 bytes, add delta, write back. Split
+            // across two frames if the write straddles a page.
+            u64 orig = 0;
+            for (u64 b = 0; b < 8; ++b)
+            {
+                const u64 va = patch_va + b;
+                const u64 page_va = va & ~0xFFFULL;
+                const mm::PhysAddr frame = mm::AddressSpaceLookupUserFrame(as, page_va);
+                if (frame == mm::kNullFrame)
+                {
+                    SerialWrite("[pe-reloc] patch va unmapped rva=");
+                    SerialWriteHex(page_rva);
+                    SerialWrite(" off=");
+                    SerialWriteHex(offset);
+                    SerialWrite("\n");
+                    return false;
+                }
+                const auto* direct = static_cast<const u8*>(mm::PhysToVirt(frame));
+                orig |= u64(direct[va & 0xFFFULL]) << (b * 8);
+            }
+            const u64 fixed = orig + delta;
+            for (u64 b = 0; b < 8; ++b)
+            {
+                const u64 va = patch_va + b;
+                const u64 page_va = va & ~0xFFFULL;
+                const mm::PhysAddr frame = mm::AddressSpaceLookupUserFrame(as, page_va);
+                if (frame == mm::kNullFrame)
+                    return false; // can't happen — just read this frame.
+                auto* direct = static_cast<u8*>(mm::PhysToVirt(frame));
+                direct[va & 0xFFFULL] = u8((fixed >> (b * 8)) & 0xFF);
+            }
+            ++entries_applied;
+        }
+        ++blocks_seen;
+        cursor += block_sz;
+    }
+
+    SerialWrite("[pe-reloc] blocks=");
+    SerialWriteHex(blocks_seen);
+    SerialWrite(" applied=");
+    SerialWriteHex(entries_applied);
+    SerialWrite(" delta=");
+    SerialWriteHex(delta);
+    SerialWrite("\n");
+    return true;
+}
 
 bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, customos::mm::AddressSpace* as)
 {
@@ -611,7 +739,16 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, customos::mm::AddressSpace* as
             return r;
     }
 
-    // 3. One stack page, writable + NX, same VA the ELF
+    // 3. Apply base relocations. v0 always loads at the preferred
+    //    ImageBase (no ASLR, no DLL collision handling), so delta
+    //    is 0 and the apply path is a no-op — the walk still runs
+    //    to reject a malformed .reloc section before ring-3 entry.
+    //    When ASLR lands, compute the actual_base delta here.
+    const u64 reloc_delta = 0;
+    if (!ApplyRelocations(file, file_len, h, as, reloc_delta))
+        return r;
+
+    // 4. One stack page, writable + NX, same VA the ELF
     //    loader uses so the rest of the ring3 plumbing does
     //    not need to know which loader produced the image.
     const PhysAddr stack_frame = AllocateFrame();
@@ -619,7 +756,7 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, customos::mm::AddressSpace* as
         return r;
     AddressSpaceMapUserPage(as, kV0StackVa, stack_frame, kPagePresent | kPageUser | kPageWritable | kPageNoExecute);
 
-    // 4. If imports are present, stand up the per-process
+    // 5. If imports are present, stand up the per-process
     //    Win32 stubs page + resolve every IAT entry.
     if (ps == PeStatus::ImportsPresent)
     {
