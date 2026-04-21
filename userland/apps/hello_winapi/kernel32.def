@@ -29,3 +29,10 @@ EXPORTS
     ; Batch 3 — last-error slot
     GetLastError
     SetLastError
+    ; Batch 4 — critical sections (v0 no-ops)
+    InitializeCriticalSection
+    InitializeCriticalSectionEx
+    InitializeCriticalSectionAndSpinCount
+    EnterCriticalSection
+    LeaveCriticalSection
+    DeleteCriticalSection

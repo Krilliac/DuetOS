@@ -40,6 +40,8 @@ constexpr u32 kOffGetCurrentThreadId = 0x50;  // batch 2 — 8 bytes
 constexpr u32 kOffTerminateProcess = 0x58;    // batch 2 — 9 bytes
 constexpr u32 kOffGetLastError = 0x61;        // batch 3 — 8 bytes
 constexpr u32 kOffSetLastError = 0x69;        // batch 3 — 10 bytes
+constexpr u32 kOffInitCritSec = 0x74;         // batch 4 — 18 bytes
+constexpr u32 kOffCritSecNop = 0x86;          // batch 4 — 1 byte (ret)
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -179,10 +181,39 @@ constexpr u8 kStubsBytes[] = {
     0xB8, 0x0A, 0x00, 0x00, 0x00, // 0x6C mov eax, 10 (SYS_SETLASTERROR)
     0xCD, 0x80,                   // 0x71 int 0x80
     0xC3,                         // 0x73 ret
+
+    // === Batch 4: critical sections (v0 no-ops) ===============
+
+    // --- InitializeCriticalSection (offset 0x74, 18 bytes) -----
+    // Aliased by InitializeCriticalSectionEx and
+    // InitializeCriticalSectionAndSpinCount. Zero out the
+    // 40-byte CRITICAL_SECTION at [rcx], return BOOL TRUE.
+    //
+    // v0 is single-task per process, so a critical section
+    // with no recursion tracking, no owning-thread check, and
+    // no semaphore is semantically correct — there's nothing
+    // to serialize against. A future slice will replace this
+    // when a multi-threading model lands.
+    //
+    // Assumes DF=0 on entry (Win64 ABI contract). Uses rdi
+    // (scratch, caller-saved), clobbers rcx (scratch), eax.
+    0x48, 0x89, 0xCF,             // 0x74 mov rdi, rcx
+    0xB9, 0x28, 0x00, 0x00, 0x00, // 0x77 mov ecx, 40
+    0x31, 0xC0,                   // 0x7C xor eax, eax
+    0xF3, 0xAA,                   // 0x7E rep stosb
+    0xB8, 0x01, 0x00, 0x00, 0x00, // 0x80 mov eax, 1 (BOOL TRUE for Ex variants)
+    0xC3,                         // 0x85 ret
+
+    // --- CritSec nop (offset 0x86, 1 byte) ---------------------
+    // Shared stub for EnterCriticalSection / LeaveCriticalSection
+    // / DeleteCriticalSection. All three are `void(LPCS)`;
+    // with no contention to handle they collapse to a single
+    // return.
+    0xC3, // 0x86 ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x74, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0x87, "stub layout drifted; update kOff* constants");
 
 struct StubEntry
 {
@@ -211,6 +242,13 @@ constexpr StubEntry kStubsTable[] = {
     // Batch 3 — last-error slot
     {"kernel32.dll", "GetLastError", kOffGetLastError},
     {"kernel32.dll", "SetLastError", kOffSetLastError},
+    // Batch 4 — critical sections (v0 no-ops)
+    {"kernel32.dll", "InitializeCriticalSection", kOffInitCritSec},
+    {"kernel32.dll", "InitializeCriticalSectionEx", kOffInitCritSec},
+    {"kernel32.dll", "InitializeCriticalSectionAndSpinCount", kOffInitCritSec},
+    {"kernel32.dll", "EnterCriticalSection", kOffCritSecNop},
+    {"kernel32.dll", "LeaveCriticalSection", kOffCritSecNop},
+    {"kernel32.dll", "DeleteCriticalSection", kOffCritSecNop},
 };
 
 // Case-insensitive strcmp for ASCII. Win32 DLL name

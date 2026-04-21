@@ -61,6 +61,20 @@ __declspec(dllimport) BOOL   __stdcall TerminateProcess(HANDLE hProcess, unsigne
 __declspec(dllimport) DWORD __stdcall GetLastError(void);
 __declspec(dllimport) void  __stdcall SetLastError(DWORD dwErrCode);
 
+// Batch 4 — critical sections (v0 no-ops)
+// CRITICAL_SECTION is 40 bytes on x64: {PDEBUG_INFO, LONG,
+// LONG, HANDLE, HANDLE, ULONG_PTR}. We only need the size
+// right — the stub zeros the whole struct and never reads
+// the fields.
+typedef struct
+{
+    void* _opaque[5];
+} CRITICAL_SECTION, *LPCRITICAL_SECTION;
+__declspec(dllimport) void __stdcall InitializeCriticalSection(LPCRITICAL_SECTION);
+__declspec(dllimport) void __stdcall EnterCriticalSection(LPCRITICAL_SECTION);
+__declspec(dllimport) void __stdcall LeaveCriticalSection(LPCRITICAL_SECTION);
+__declspec(dllimport) void __stdcall DeleteCriticalSection(LPCRITICAL_SECTION);
+
 static const char kMsg[] = "[hello-winapi] printed via kernel32.WriteFile!\n";
 #define kMsgLen ((DWORD)(sizeof(kMsg) - 1))
 
@@ -94,6 +108,16 @@ void _start(void)
     typedef BOOL(__stdcall * tp_fn_t)(HANDLE, unsigned int);
     volatile tp_fn_t tp_sink = TerminateProcess;
     (void)tp_sink;
+
+    // Batch 4 round-trip: init + enter + leave + delete a
+    // local CRITICAL_SECTION. Any stub that crashes would
+    // take out the process with #PF/#GP. Reaching the next
+    // line means all four resolved AND executed.
+    CRITICAL_SECTION cs;
+    InitializeCriticalSection(&cs);
+    EnterCriticalSection(&cs);
+    LeaveCriticalSection(&cs);
+    DeleteCriticalSection(&cs);
 
     // Batch 3 round-trip: store a distinctive value via
     // SetLastError, read it back via GetLastError, exit with
