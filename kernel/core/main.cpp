@@ -15,6 +15,7 @@
 #include "../drivers/input/ps2mouse.h"
 #include "../drivers/pci/pci.h"
 #include "../drivers/storage/ahci.h"
+#include "../apps/calculator.h"
 #include "../apps/notes.h"
 #include "../drivers/video/console.h"
 #include "../drivers/video/cursor.h"
@@ -250,22 +251,26 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // repaint the whole surface with one call.
     constexpr customos::u32 kDesktopTeal = 0x00204868;
 
-    // Register two demo windows so z-order + raise-to-front are
-    // visibly exercised. Window B starts in front because it
-    // was registered second. Click-drag on either title bar
-    // moves that window and brings it to the top.
+    // CALCULATOR — native CustomOS app. Window chrome first,
+    // then CalculatorInit registers its 16 buttons + content
+    // drawer against the returned handle. Width / height are
+    // sized to fit the 4x4 keypad (4 * 68 + 3 * 4 = 284 px
+    // wide + 2 * 8 inset = 300; 4 * 36 + 3 * 4 + 60 top
+    // inset + 4 bottom = 220).
     customos::drivers::video::WindowChrome win_a_chrome{};
     win_a_chrome.x = 60;
     win_a_chrome.y = 60;
-    win_a_chrome.w = 380;
+    win_a_chrome.w = 300;
     win_a_chrome.h = 220;
     win_a_chrome.colour_border = 0x00101828;
     win_a_chrome.colour_title = 0x00205080;
-    win_a_chrome.colour_client = 0x00D8D8D8;
+    win_a_chrome.colour_client = 0x00101828;
     win_a_chrome.colour_close_btn = 0x00E04020;
     win_a_chrome.title_height = 22;
-    const customos::drivers::video::WindowHandle win_a_handle =
-        customos::drivers::video::WindowRegister(win_a_chrome, "CUSTOMOS GUI v0");
+    const customos::drivers::video::WindowHandle calc_handle =
+        customos::drivers::video::WindowRegister(win_a_chrome, "CALCULATOR");
+    customos::apps::calculator::CalculatorInit(calc_handle);
+    customos::apps::calculator::CalculatorSelfTest();
 
     customos::drivers::video::WindowChrome win_b_chrome{};
     win_b_chrome.x = 500;
@@ -545,22 +550,9 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     customos::core::ShellInit();
 
     // Demo clickable button, owned by window A. x/y are offsets
-    // INTO window A — dragging window A carries the button
-    // along, and the button only responds to clicks when window
-    // A is on top of any other window at the click point.
-    customos::drivers::video::ButtonWidget demo_button{};
-    demo_button.id = 1;
-    demo_button.owner = win_a_handle;
-    demo_button.x = 40;   // offset into window A
-    demo_button.y = 90;
-    demo_button.w = 160;
-    demo_button.h = 48;
-    demo_button.colour_normal = 0x00C0C0C0;
-    demo_button.colour_pressed = 0x00E04020;
-    demo_button.colour_border = 0x00101828;
-    demo_button.colour_label = 0x00101828;
-    demo_button.label = "CLICK ME";
-    customos::drivers::video::WidgetRegisterButton(demo_button);
+    // (The CLICK ME demo button previously registered here has
+    // been removed — the window it lived in is now the Calculator,
+    // which registers its own 4x4 keypad via CalculatorInit above.)
 
     // Initial display mode. Priority:
     //   1. Runtime kernel cmdline "boot=tty" / "boot=desktop"
@@ -832,16 +824,15 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
             }
 
             // App-routed keystrokes. When the active window is an
-            // app that registered a typed-input surface (the Notes
-            // buffer, later the Calculator), feed it here and skip
-            // the shell path entirely. Compositor lock brackets
-            // the feed so it serialises with the ui-ticker's draw.
+            // app that registered a typed-input surface (Notes,
+            // Calculator), feed it here and skip the shell path
+            // entirely. Compositor lock brackets the feed so it
+            // serialises with the ui-ticker's draw.
             {
                 bool app_consumed = false;
                 customos::drivers::video::CompositorLock();
                 const auto active = customos::drivers::video::WindowActive();
-                if (active != customos::drivers::video::kWindowInvalid &&
-                    active == customos::apps::notes::NotesWindow())
+                if (active != customos::drivers::video::kWindowInvalid)
                 {
                     char c = 0;
                     if (ev.code == kKeyEnter)
@@ -852,8 +843,15 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                         c = static_cast<char>(ev.code);
                     if (c != 0)
                     {
-                        customos::apps::notes::NotesFeedChar(c);
-                        app_consumed = true;
+                        if (active == customos::apps::notes::NotesWindow())
+                        {
+                            customos::apps::notes::NotesFeedChar(c);
+                            app_consumed = true;
+                        }
+                        else if (active == customos::apps::calculator::CalculatorWindow())
+                        {
+                            app_consumed = customos::apps::calculator::CalculatorFeedChar(c);
+                        }
                     }
                 }
                 customos::drivers::video::CompositorUnlock();
@@ -1289,6 +1287,11 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                     SerialWrite("[ui] widget event id=");
                     SerialWriteHex(hit);
                     SerialWrite("\n");
+                    // Dispatch to app-level handlers. Each app
+                    // claims a private ID range (see Calculator's
+                    // kIdBase); non-claiming handlers return false
+                    // and the event is just logged above.
+                    customos::apps::calculator::CalculatorOnWidgetEvent(hit);
                 }
             }
 
