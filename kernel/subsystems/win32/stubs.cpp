@@ -965,6 +965,35 @@ constexpr StubEntry kStubsTable[] = {
     {"msvcrt.dll", "strtol", kOffReturnZero},
     {"msvcrt.dll", "atoi", kOffReturnZero},
     {"msvcrt.dll", "atol", kOffReturnZero},
+
+    // Batch 13a — MSVCP140 throw helpers + small-return
+    // helpers. All aliases. The `?_X*_error` + `?_Xbad_alloc`
+    // family are unconditionally-throwing functions; under
+    // Windows a caller wraps them in try/catch. We don't have
+    // SEH, so reaching any of these is a crash by definition —
+    // route to SYS_EXIT(3) so the serial log shows a
+    // recognisable rc=3 instead of a #PF at some arbitrary
+    // site.
+    //
+    // The `?_Winerror_*` + `?_Syserror_*` functions map Win32
+    // error codes to human strings or category values; callers
+    // format the result into log output. Returning 0 (or the
+    // null string) is plausible "no translation available".
+    //
+    // `?uncaught_exception@std@@YA_NXZ` is std::uncaught_exception()
+    // which returns bool — safe answer is false (no exception
+    // currently in flight), i.e. kOffReturnZero.
+    //
+    // Not yet covered: the cout / basic_ostream cluster.
+    // windows-kill.exe's next UNRESOLVED after this batch
+    // lands will be in that group.
+    {"MSVCP140.dll", "?_Xbad_alloc@std@@YAXXZ", kOffTerminate},
+    {"MSVCP140.dll", "?_Xlength_error@std@@YAXPEBD@Z", kOffTerminate},
+    {"MSVCP140.dll", "?_Xout_of_range@std@@YAXPEBD@Z", kOffTerminate},
+    {"MSVCP140.dll", "?_Syserror_map@std@@YAPEBDH@Z", kOffReturnZero},
+    {"MSVCP140.dll", "?_Winerror_map@std@@YAHH@Z", kOffReturnZero},
+    {"MSVCP140.dll", "?_Winerror_message@std@@YAKKPEADK@Z", kOffReturnZero},
+    {"MSVCP140.dll", "?uncaught_exception@std@@YA_NXZ", kOffReturnZero},
 };
 
 // Case-insensitive strcmp for ASCII. Win32 DLL name
