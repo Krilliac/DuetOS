@@ -70,6 +70,50 @@ constinit const BlockOps kRamBlockOps = {
     /*.write = */ &RamBlockWrite,
 };
 
+// --- Partition-view block device -----------------------------------------
+//
+// Translates (lba, count) on a child handle into (first_lba + lba, count)
+// on a parent handle. No buffering, no caching — every I/O is a pass-through
+// plus a pre-check that (lba + count) fits inside the partition span.
+//
+// The parent handle is resolved once at create time; if the caller passes a
+// stale parent (layout we don't do today) results are undefined. Kept tiny
+// on purpose: the block layer already validates bounds against the view's
+// declared sector_count before dispatch, so the wrapper only has to do the
+// LBA shift.
+
+struct PartitionBlock
+{
+    u32 parent_handle;
+    u64 first_lba;
+};
+
+i32 PartitionBlockRead(void* cookie, u64 lba, u32 count, void* buf)
+{
+    auto* dev = static_cast<PartitionBlock*>(cookie);
+    return BlockDeviceRead(dev->parent_handle, dev->first_lba + lba, count, buf);
+}
+
+i32 PartitionBlockWrite(void* cookie, u64 lba, u32 count, const void* buf)
+{
+    auto* dev = static_cast<PartitionBlock*>(cookie);
+    return BlockDeviceWrite(dev->parent_handle, dev->first_lba + lba, count, buf);
+}
+
+constinit const BlockOps kPartitionBlockOps = {
+    /*.read = */ &PartitionBlockRead,
+    /*.write = */ &PartitionBlockWrite,
+};
+
+// Read-only variant used when the parent device exposes no write
+// op. The block layer checks `BlockOps::write == nullptr` to
+// populate `BlockDeviceIsWritable`, so picking the right vtable
+// at create time keeps that flag accurate through the wrapper.
+constinit const BlockOps kPartitionBlockOpsRO = {
+    /*.read = */ &PartitionBlockRead,
+    /*.write = */ nullptr,
+};
+
 } // namespace
 
 void BlockLayerInit()
@@ -204,6 +248,42 @@ u32 RamBlockDeviceCreate(const char* name, u32 sector_size, u64 sector_count)
     desc.cookie = dev;
     desc.sector_size = sector_size;
     desc.sector_count = sector_count;
+    return BlockDeviceRegister(desc);
+}
+
+u32 PartitionBlockDeviceCreate(const char* name, u32 parent_handle, u64 first_lba, u64 last_lba)
+{
+    if (!ValidHandle(parent_handle))
+    {
+        core::Log(core::LogLevel::Error, "block", "partition create: invalid parent handle");
+        return kBlockHandleInvalid;
+    }
+    if (first_lba > last_lba)
+    {
+        core::Log(core::LogLevel::Error, "block", "partition create: first_lba > last_lba");
+        return kBlockHandleInvalid;
+    }
+    const BlockDesc& parent = g_devices[parent_handle].desc;
+    if (last_lba >= parent.sector_count)
+    {
+        core::Log(core::LogLevel::Error, "block", "partition create: last_lba past end of parent");
+        return kBlockHandleInvalid;
+    }
+    auto* dev = static_cast<PartitionBlock*>(mm::KMalloc(sizeof(PartitionBlock)));
+    if (dev == nullptr)
+    {
+        core::Log(core::LogLevel::Error, "block", "partition create: cookie KMalloc failed");
+        return kBlockHandleInvalid;
+    }
+    dev->parent_handle = parent_handle;
+    dev->first_lba = first_lba;
+
+    BlockDesc desc{};
+    desc.name = name;
+    desc.ops = (parent.ops->write != nullptr) ? &kPartitionBlockOps : &kPartitionBlockOpsRO;
+    desc.cookie = dev;
+    desc.sector_size = parent.sector_size;
+    desc.sector_count = (last_lba - first_lba) + 1;
     return BlockDeviceRegister(desc);
 }
 

@@ -126,6 +126,23 @@ i32 BlockDeviceWrite(u32 handle, u64 lba, u32 count, const void* buf);
 /// they land.
 u32 RamBlockDeviceCreate(const char* name, u32 sector_size, u64 sector_count);
 
+/// Stand up a partition view over an existing parent block
+/// device. Sector I/O on the returned handle addresses LBA 0
+/// .. (last_lba - first_lba); each call translates to
+/// (first_lba + lba) on the parent. Writable iff the parent
+/// is writable — the wrapper routes writes through without
+/// caching the flag.
+///
+/// The partition view does NOT own the parent; the parent's
+/// lifetime must cover the view's (kernel lifetime in v0 —
+/// no deregistration). `name` must outlive the registered
+/// entry (typically a static string or the GPT parser's
+/// per-disk name table).
+///
+/// Constraints: first_lba <= last_lba, last_lba < parent's
+/// sector_count. Any violation returns kBlockHandleInvalid.
+u32 PartitionBlockDeviceCreate(const char* name, u32 parent_handle, u64 first_lba, u64 last_lba);
+
 /// Init: logs "[block] layer online" and resets the registry
 /// to empty. Safe to call multiple times; only the first call
 /// has effect.

@@ -91,6 +91,12 @@ static_assert(sizeof(GptEntry) == 128, "GPT entry must be 128 bytes");
 constinit Disk g_disks[kMaxDisks] = {};
 constinit u32 g_disk_count = 0;
 
+// Static storage for generated partition-device names — one name
+// per (disk, partition) slot, kept alive for the kernel's lifetime
+// so the block-layer registry can hold the pointer. Linux-style
+// 1-based naming: "<parent>pN", e.g. "sata0p1", "nvme0n1p2".
+constinit char g_part_names[kMaxDisks][kMaxPartitionsPerDisk][20] = {};
+
 bool IsZeroGuid(const u8* guid)
 {
     for (u32 i = 0; i < kGuidBytes; ++i)
@@ -369,6 +375,37 @@ bool GptProbe(u32 block_handle, u32* out_index)
     for (u32 i = 0; i < found; ++i)
     {
         LogPartitionLine(disk.partitions[i], i);
+    }
+
+    // Build and register a partition-block view per entry so
+    // higher layers (FAT32 mount, `lsblk`, the GPT self-test) can
+    // address a partition as a standalone block device. Name is
+    // "<parent>p<N>" (1-based) — matches Linux disk partition
+    // conventions and keeps log lines grep-friendly.
+    const char* parent_name = drivers::storage::BlockDeviceName(block_handle);
+    for (u32 i = 0; i < found; ++i)
+    {
+        char* out = g_part_names[index][i];
+        u32 w = 0;
+        for (u32 c = 0; parent_name[c] != 0 && w < sizeof(g_part_names[0][0]) - 4; ++c)
+        {
+            out[w++] = parent_name[c];
+        }
+        out[w++] = 'p';
+        // Partition numbers are 1-based and max 16 per disk, so two
+        // digits is enough. No sprintf in kernel.
+        const u32 n = i + 1;
+        if (n >= 10)
+            out[w++] = static_cast<char>('0' + n / 10);
+        out[w++] = static_cast<char>('0' + n % 10);
+        out[w] = 0;
+
+        const u32 ph = drivers::storage::PartitionBlockDeviceCreate(out, block_handle, disk.partitions[i].first_lba,
+                                                                    disk.partitions[i].last_lba);
+        if (ph == drivers::storage::kBlockHandleInvalid)
+        {
+            core::LogWithValue(core::LogLevel::Error, "fs/gpt", "partition-block register failed idx", i);
+        }
     }
 
     if (out_index != nullptr)
