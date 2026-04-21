@@ -64,6 +64,7 @@ expected=(
     "[heap] calloc zero-fill OK"
     "[batch10] advapi32 + event/wait/time/proc OK"
     "[batch11] perf counter + tick count OK"
+    "[batch14] HeapSize + HeapReAlloc + realloc OK"
     "exit rc   val=0x000000000000beef"
 )
 

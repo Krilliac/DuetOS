@@ -200,4 +200,106 @@ void Win32HeapFree(customos::core::Process* proc, u64 user_ptr)
     proc->heap_free_head = block_hdr;
 }
 
+u64 Win32HeapSize(customos::core::Process* proc, u64 user_ptr)
+{
+    if (proc == nullptr || user_ptr == 0)
+        return 0;
+    const u64 block_hdr = user_ptr - kHeaderSize;
+    if (block_hdr < proc->heap_base)
+        return 0;
+    if (block_hdr >= proc->heap_base + proc->heap_pages * customos::mm::kPageSize)
+        return 0;
+    const u64 block_size = PeekU64(proc, block_hdr + 0);
+    if (block_size < kHeaderSize)
+        return 0;
+    return block_size - kHeaderSize;
+}
+
+u64 Win32HeapRealloc(customos::core::Process* proc, u64 user_ptr, u64 new_size)
+{
+    if (proc == nullptr)
+        return 0;
+    // realloc(NULL, size) ≡ malloc(size). Matches both the
+    // ucrt realloc contract and Windows HeapReAlloc's behaviour
+    // when lpMem is NULL (though real Windows returns an error
+    // for HeapReAlloc(NULL) — our version collapses the two
+    // paths since callers can't tell the difference without a
+    // working GetLastError and we don't set one here).
+    if (user_ptr == 0)
+        return Win32HeapAlloc(proc, new_size);
+    // realloc(ptr, 0) — ucrt convention: free and return NULL.
+    // Win32 HeapReAlloc with size 0 is undefined; ucrt / msvcrt
+    // realloc with size 0 frees.
+    if (new_size == 0)
+    {
+        Win32HeapFree(proc, user_ptr);
+        return 0;
+    }
+
+    const u64 block_hdr = user_ptr - kHeaderSize;
+    if (block_hdr < proc->heap_base)
+        return 0;
+    if (block_hdr >= proc->heap_base + proc->heap_pages * customos::mm::kPageSize)
+        return 0;
+    const u64 old_block_size = PeekU64(proc, block_hdr + 0);
+    if (old_block_size < kHeaderSize)
+        return 0;
+    const u64 old_payload = old_block_size - kHeaderSize;
+
+    // Fits in place — the existing block already reserved at
+    // least new_size bytes during its original allocation (size
+    // got rounded up to 8 by RoundRequestToBlockSize). No
+    // shrink-in-place: v0 doesn't have coalescing, so splitting
+    // off the tail would fragment without an offsetting benefit.
+    if (new_size <= old_payload)
+        return user_ptr;
+
+    const u64 new_ptr = Win32HeapAlloc(proc, new_size);
+    if (new_ptr == 0)
+        return 0; // alloc failed; caller keeps old pointer.
+
+    // Copy old payload -> new block. Walk one page-chunk at a
+    // time through AddressSpaceLookupUserFrame so blocks that
+    // straddle page boundaries still copy correctly (block
+    // alignment is 8 bytes, not 4 KiB, so any allocation above
+    // a few KiB or straddling a boundary is common).
+    u64 src_va = user_ptr;
+    u64 dst_va = new_ptr;
+    u64 remaining = old_payload;
+    while (remaining > 0)
+    {
+        const u64 src_page = src_va & ~0xFFFULL;
+        const u64 dst_page = dst_va & ~0xFFFULL;
+        const customos::mm::PhysAddr src_frame = customos::mm::AddressSpaceLookupUserFrame(proc->as, src_page);
+        const customos::mm::PhysAddr dst_frame = customos::mm::AddressSpaceLookupUserFrame(proc->as, dst_page);
+        if (src_frame == customos::mm::kNullFrame || dst_frame == customos::mm::kNullFrame)
+        {
+            // Shouldn't happen — both VAs come from our own
+            // heap region, which PeLoad mapped every page of.
+            // Defensive: free the new block so we don't leak
+            // on this unexpected path.
+            Win32HeapFree(proc, new_ptr);
+            return 0;
+        }
+        const u64 src_off = src_va - src_page;
+        const u64 dst_off = dst_va - dst_page;
+        const u64 src_room = customos::mm::kPageSize - src_off;
+        const u64 dst_room = customos::mm::kPageSize - dst_off;
+        u64 chunk = remaining;
+        if (chunk > src_room)
+            chunk = src_room;
+        if (chunk > dst_room)
+            chunk = dst_room;
+        const auto* src = static_cast<const u8*>(customos::mm::PhysToVirt(src_frame)) + src_off;
+        auto* dst = static_cast<u8*>(customos::mm::PhysToVirt(dst_frame)) + dst_off;
+        for (u64 i = 0; i < chunk; ++i)
+            dst[i] = src[i];
+        src_va += chunk;
+        dst_va += chunk;
+        remaining -= chunk;
+    }
+    Win32HeapFree(proc, user_ptr);
+    return new_ptr;
+}
+
 } // namespace customos::win32

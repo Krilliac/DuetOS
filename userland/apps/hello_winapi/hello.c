@@ -123,6 +123,14 @@ __declspec(dllimport) void* malloc(size_t size);
 __declspec(dllimport) void free(void* ptr);
 __declspec(dllimport) void* calloc(size_t count, size_t size);
 
+// Batch 14 — real HeapSize + HeapReAlloc / realloc. The
+// block header the v0 allocator already writes gives us the
+// payload capacity for free; HeapReAlloc copies through the
+// kernel direct map.
+__declspec(dllimport) unsigned long long __stdcall HeapSize(HANDLE hHeap, DWORD dwFlags, const void* lpMem);
+__declspec(dllimport) void* __stdcall HeapReAlloc(HANDLE hHeap, DWORD dwFlags, void* lpMem, unsigned long long dwBytes);
+__declspec(dllimport) void* realloc(void* ptr, size_t size);
+
 // Batch 10 — advapi32 privilege dance + kernel32 event/wait/
 // time/process shims. All return success; the values they
 // write to out-params are plausible placeholders.
@@ -402,6 +410,63 @@ void _start(void)
         WriteFile(out, b11_ok, sizeof(b11_ok) - 1, &b11w, 0);
     else
         WriteFile(out, b11_bad, sizeof(b11_bad) - 1, &b11w, 0);
+
+    // Batch 14 exercise — HeapSize + HeapReAlloc / realloc.
+    //
+    // Invariants checked:
+    //   * HeapSize on a 100-byte allocation returns at least
+    //     100 (allocator rounds up, but never down).
+    //   * HeapReAlloc growing the same block returns a non-null
+    //     pointer whose HeapSize is at least the new request.
+    //   * The first byte written before the grow survives the
+    //     copy (if the grow allocates fresh memory, the old
+    //     payload must have been copied across).
+    //   * realloc(NULL, size) behaves like malloc.
+    //   * realloc(ptr, 0) frees and returns NULL.
+    char* b14_buf = (char*)HeapAlloc(heap, 0, 100);
+    unsigned long long b14_sz0 = 0;
+    unsigned long long b14_sz1 = 0;
+    char b14_first_before = 0;
+    char b14_first_after = 0;
+    char* b14_grown = 0;
+    void* b14_rm_new = 0;
+    void* b14_rm_freed = (void*)1; // sentinel "not yet overwritten"
+    if (b14_buf != 0)
+    {
+        b14_buf[0] = 'Q';
+        b14_first_before = b14_buf[0];
+        b14_sz0 = HeapSize(heap, 0, b14_buf);
+        // Grow to well beyond the block's rounded-up capacity
+        // so the implementation has to allocate + copy + free.
+        b14_grown = (char*)HeapReAlloc(heap, 0, b14_buf, 1024);
+        if (b14_grown != 0)
+        {
+            b14_sz1 = HeapSize(heap, 0, b14_grown);
+            b14_first_after = b14_grown[0];
+            HeapFree(heap, 0, b14_grown);
+        }
+        else
+        {
+            // On failure, the old pointer is still valid —
+            // free it to keep the arena clean for later tests.
+            HeapFree(heap, 0, b14_buf);
+        }
+    }
+    // realloc-as-malloc: NULL source, new block allocated.
+    b14_rm_new = realloc(0, 32);
+    // realloc-as-free: size 0, returns NULL, releases ptr.
+    if (b14_rm_new != 0)
+        b14_rm_freed = realloc(b14_rm_new, 0);
+
+    const char b14_ok[] = "[batch14] HeapSize + HeapReAlloc + realloc OK\n";
+    const char b14_bad[] = "[batch14] HeapSize/HeapReAlloc/realloc FAILED\n";
+    BOOL b14_pass = b14_buf != 0 && b14_sz0 >= 100 && b14_grown != 0 && b14_sz1 >= 1024 && b14_first_before == 'Q' &&
+                    b14_first_after == 'Q' && b14_rm_new != 0 && b14_rm_freed == 0;
+    DWORD b14w = 0;
+    if (b14_pass)
+        WriteFile(out, b14_ok, sizeof(b14_ok) - 1, &b14w, 0);
+    else
+        WriteFile(out, b14_bad, sizeof(b14_bad) - 1, &b14w, 0);
 
     // Batch 3 round-trip: store a distinctive value via
     // SetLastError, read it back via GetLastError, exit with
