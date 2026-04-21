@@ -296,6 +296,12 @@ void CmdHelp()
     ConsoleWriteln("  BASENAME P   STRIP LEADING DIRS");
     ConsoleWriteln("  DIRNAME P    STRIP TRAILING COMPONENT");
     ConsoleWriteln("  CAL          CURRENT MONTH CALENDAR");
+    ConsoleWriteln("  SLEEP N      PAUSE FOR N SECONDS (^C ABORTS)");
+    ConsoleWriteln("  RESET        CLEAR + REPRINT MOTD");
+    ConsoleWriteln("  TAC PATH     PRINT LINES IN REVERSE ORDER");
+    ConsoleWriteln("  NL PATH      NUMBER LINES");
+    ConsoleWriteln("  REV PATH     REVERSE EACH LINE'S CHARACTERS");
+    ConsoleWriteln("  EXPR A OP B  INTEGER ARITHMETIC (+ - * / %)");
     ConsoleWriteln("");
     ConsoleWriteln("KEYS:  UP/DOWN = HISTORY   TAB = COMPLETE");
     ConsoleWriteln("       CTRL+ALT+T = TOGGLE MODE");
@@ -1139,6 +1145,7 @@ static const char* const kCommandSet[] = {
     "halt",    "uname",   "whoami",  "hostname","pwd",     "true",    "false",
     "mount",   "lsmod",   "free",    "ps",      "spawn",   "readelf",
     "hexdump", "stat",    "basename","dirname", "cal",
+    "sleep",   "reset",   "tac",     "nl",      "rev",     "expr",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -2222,6 +2229,278 @@ const char* ElfPtypeName(u32 t)
     default:
         return "OTHER";
     }
+}
+
+void CmdSleep(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("SLEEP: USAGE: SLEEP SECONDS");
+        return;
+    }
+    u32 secs = 0;
+    for (u32 i = 0; argv[1][i] != '\0'; ++i)
+    {
+        if (argv[1][i] < '0' || argv[1][i] > '9')
+        {
+            ConsoleWriteln("SLEEP: BAD NUMBER");
+            return;
+        }
+        secs = secs * 10 + static_cast<u32>(argv[1][i] - '0');
+    }
+    // 100 Hz scheduler tick → 100 ticks per second. Sleep via
+    // the scheduler's block-on-tick primitive so the CPU
+    // genuinely yields to other tasks, rather than spin-waiting.
+    // Poll the interrupt flag in 1-second increments so Ctrl+C
+    // can abort a long sleep.
+    for (u32 s = 0; s < secs; ++s)
+    {
+        if (ShellInterruptRequested())
+        {
+            ConsoleWriteln("^C");
+            return;
+        }
+        customos::sched::SchedSleepTicks(100);
+    }
+}
+
+void CmdReset()
+{
+    // Wipe the console + reprint the boot banner. Same content
+    // ShellInit emits; useful when the scrollback is cluttered
+    // or the user just switched terminals.
+    customos::drivers::video::ConsoleClear();
+    char scratch[customos::fs::kTmpFsContentMax];
+    const u32 n = ReadFileToBuf("/etc/motd", scratch, sizeof(scratch));
+    if (n != static_cast<u32>(-1))
+    {
+        for (u32 i = 0; i < n; ++i)
+        {
+            ConsoleWriteChar(scratch[i]);
+        }
+    }
+}
+
+void CmdTac(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("TAC: USAGE: TAC PATH");
+        return;
+    }
+    char scratch[customos::fs::kTmpFsContentMax];
+    const u32 n = ReadFileToBuf(argv[1], scratch, sizeof(scratch));
+    if (n == static_cast<u32>(-1))
+    {
+        ConsoleWrite("TAC: NO SUCH FILE: ");
+        ConsoleWriteln(argv[1]);
+        return;
+    }
+    constexpr u32 kMaxLines = 128;
+    u32 offs[kMaxLines];
+    u32 lens[kMaxLines];
+    const u32 count = SliceLines(scratch, n, offs, lens, kMaxLines);
+    // Print lines in reverse order. Each line is a range
+    // (offs[i], lens[i]) inside the original scratch.
+    for (u32 i = count; i > 0; --i)
+    {
+        const u32 idx = i - 1;
+        for (u32 k = 0; k < lens[idx]; ++k)
+        {
+            ConsoleWriteChar(scratch[offs[idx] + k]);
+        }
+        ConsoleWriteChar('\n');
+    }
+}
+
+void CmdNl(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("NL: USAGE: NL PATH");
+        return;
+    }
+    char scratch[customos::fs::kTmpFsContentMax];
+    const u32 n = ReadFileToBuf(argv[1], scratch, sizeof(scratch));
+    if (n == static_cast<u32>(-1))
+    {
+        ConsoleWrite("NL: NO SUCH FILE: ");
+        ConsoleWriteln(argv[1]);
+        return;
+    }
+    u32 line_num = 1;
+    u32 start = 0;
+    for (u32 i = 0; i <= n; ++i)
+    {
+        const bool at_end = (i == n);
+        if (at_end || scratch[i] == '\n')
+        {
+            const u32 len = i - start;
+            // Right-align the line number in a 5-col field
+            // to match standard `nl` output.
+            char num[8];
+            u32 nn = 0;
+            u32 v = line_num;
+            if (v == 0)
+            {
+                num[nn++] = '0';
+            }
+            else
+            {
+                while (v > 0)
+                {
+                    num[nn++] = static_cast<char>('0' + (v % 10));
+                    v /= 10;
+                }
+            }
+            for (u32 pad = nn; pad < 5; ++pad)
+            {
+                ConsoleWriteChar(' ');
+            }
+            for (u32 k = nn; k > 0; --k)
+            {
+                ConsoleWriteChar(num[k - 1]);
+            }
+            ConsoleWrite("  ");
+            for (u32 k = 0; k < len; ++k)
+            {
+                ConsoleWriteChar(scratch[start + k]);
+            }
+            ConsoleWriteChar('\n');
+            ++line_num;
+            start = i + 1;
+        }
+    }
+}
+
+void CmdRev(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("REV: USAGE: REV PATH");
+        return;
+    }
+    char scratch[customos::fs::kTmpFsContentMax];
+    const u32 n = ReadFileToBuf(argv[1], scratch, sizeof(scratch));
+    if (n == static_cast<u32>(-1))
+    {
+        ConsoleWrite("REV: NO SUCH FILE: ");
+        ConsoleWriteln(argv[1]);
+        return;
+    }
+    u32 start = 0;
+    for (u32 i = 0; i <= n; ++i)
+    {
+        const bool at_end = (i == n);
+        if (at_end || scratch[i] == '\n')
+        {
+            const u32 len = i - start;
+            for (u32 k = len; k > 0; --k)
+            {
+                ConsoleWriteChar(scratch[start + k - 1]);
+            }
+            ConsoleWriteChar('\n');
+            start = i + 1;
+        }
+    }
+}
+
+// Parse an optionally-signed decimal integer. On success writes
+// into `*out` and returns true. Used by expr for A / B.
+bool ParseI64(const char* s, i64* out)
+{
+    if (s == nullptr || s[0] == '\0')
+        return false;
+    bool neg = false;
+    u32 i = 0;
+    if (s[0] == '-')
+    {
+        neg = true;
+        i = 1;
+    }
+    else if (s[0] == '+')
+    {
+        i = 1;
+    }
+    if (s[i] == '\0')
+        return false;
+    u64 acc = 0;
+    for (; s[i] != '\0'; ++i)
+    {
+        if (s[i] < '0' || s[i] > '9')
+            return false;
+        acc = acc * 10 + static_cast<u32>(s[i] - '0');
+    }
+    *out = neg ? -static_cast<i64>(acc) : static_cast<i64>(acc);
+    return true;
+}
+
+void WriteI64Dec(i64 v)
+{
+    if (v < 0)
+    {
+        ConsoleWriteChar('-');
+        WriteU64Dec(static_cast<u64>(-v));
+    }
+    else
+    {
+        WriteU64Dec(static_cast<u64>(v));
+    }
+}
+
+void CmdExpr(u32 argc, char** argv)
+{
+    if (argc < 4)
+    {
+        ConsoleWriteln("EXPR: USAGE: EXPR A OP B   (OP = + - * / %)");
+        return;
+    }
+    i64 a = 0, b = 0;
+    if (!ParseI64(argv[1], &a) || !ParseI64(argv[3], &b))
+    {
+        ConsoleWriteln("EXPR: BAD NUMBER");
+        return;
+    }
+    const char* op = argv[2];
+    if (op[1] != '\0')
+    {
+        ConsoleWriteln("EXPR: BAD OPERATOR");
+        return;
+    }
+    i64 r = 0;
+    switch (op[0])
+    {
+    case '+':
+        r = a + b;
+        break;
+    case '-':
+        r = a - b;
+        break;
+    case '*':
+        r = a * b;
+        break;
+    case '/':
+        if (b == 0)
+        {
+            ConsoleWriteln("EXPR: DIVIDE BY ZERO");
+            return;
+        }
+        r = a / b;
+        break;
+    case '%':
+        if (b == 0)
+        {
+            ConsoleWriteln("EXPR: DIVIDE BY ZERO");
+            return;
+        }
+        r = a % b;
+        break;
+    default:
+        ConsoleWriteln("EXPR: BAD OPERATOR");
+        return;
+    }
+    WriteI64Dec(r);
+    ConsoleWriteChar('\n');
 }
 
 void CmdHexdump(u32 argc, char** argv)
@@ -3672,6 +3951,36 @@ void Dispatch(char* line)
         CmdCal();
         return;
     }
+    if (StrEq(cmd, "sleep"))
+    {
+        CmdSleep(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "reset"))
+    {
+        CmdReset();
+        return;
+    }
+    if (StrEq(cmd, "tac"))
+    {
+        CmdTac(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "nl"))
+    {
+        CmdNl(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "rev"))
+    {
+        CmdRev(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "expr"))
+    {
+        CmdExpr(argc, argv);
+        return;
+    }
     if (StrEq(cmd, "reboot"))
     {
         CmdRebootNow();
@@ -4097,7 +4406,9 @@ void ShellTabComplete()
                           StrEq(g_input, "tail") || StrEq(g_input, "source") ||
                           StrEq(g_input, "grep") || StrEq(g_input, "sort") ||
                           StrEq(g_input, "uniq") || StrEq(g_input, "readelf") ||
-                          StrEq(g_input, "hexdump") || StrEq(g_input, "stat");
+                          StrEq(g_input, "hexdump") || StrEq(g_input, "stat") ||
+                          StrEq(g_input, "tac") || StrEq(g_input, "nl") ||
+                          StrEq(g_input, "rev");
     g_input[first_ws] = saved;
 
     if (path_cmd)
