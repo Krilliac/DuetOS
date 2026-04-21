@@ -44,6 +44,7 @@
 #include "../mm/multiboot2.h"
 #include "../mm/paging.h"
 #include "../sched/sched.h"
+#include "../security/guard.h"
 
 /*
  * Kernel entry in C++. Called by kernel/arch/x86_64/boot.S once the CPU is
@@ -761,6 +762,13 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     SerialWrite("[boot] Bringing up AHCI controller(s).\n");
     customos::drivers::storage::AhciInit();
     customos::drivers::storage::AhciSelfTest();
+
+    // Security guard must be live BEFORE any loader runs. Advisory
+    // mode at boot: scans + logs, never blocks. Flip to Enforce via
+    // the shell `guard enforce` once the boot-log is clean.
+    SerialWrite("[boot] Starting security guard.\n");
+    customos::security::GuardInit();
+    customos::security::GuardSelfTest();
 
     SerialWrite("[boot] Probing GPT on block devices.\n");
     customos::fs::gpt::GptSelfTest();

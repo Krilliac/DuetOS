@@ -4,6 +4,7 @@
 #include "../mm/frame_allocator.h"
 #include "../mm/page.h"
 #include "../mm/paging.h"
+#include "../security/guard.h"
 #include "klog.h"
 
 namespace customos::core
@@ -302,6 +303,16 @@ ElfLoadResult ElfLoad(const u8* file, u64 file_len, customos::mm::AddressSpace* 
     if (as == nullptr)
     {
         KLOG_WARN("elf-loader", "ElfLoad called with null AddressSpace");
+        return r;
+    }
+    // Security guard. Every image goes through the guard before
+    // mapping a single page. In Advisory mode (the default) the
+    // gate always returns true but the scan + log lines run so
+    // operators can spot heuristic fires before flipping Enforce.
+    customos::security::ImageDescriptor gd{customos::security::ImageKind::NativeElf, "(elf)", file, file_len};
+    if (!customos::security::Gate(gd))
+    {
+        KLOG_WARN("elf-loader", "security guard blocked ELF load");
         return r;
     }
     const ElfStatus vs = ElfValidate(file, file_len);

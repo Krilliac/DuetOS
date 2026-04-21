@@ -84,6 +84,7 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     mm/user_copy.S
     sched/context_switch.S
     sched/sched.cpp
+    security/guard.cpp
     sync/spinlock.cpp
 )
 

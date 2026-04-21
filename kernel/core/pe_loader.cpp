@@ -6,6 +6,7 @@
 #include "../mm/page.h"
 #include "klog.h"
 #include "../mm/paging.h"
+#include "../security/guard.h"
 #include "../subsystems/win32/stubs.h"
 
 namespace customos::core
@@ -711,6 +712,17 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, customos::mm::AddressSpace* as
     r.ok = false;
     if (as == nullptr)
         return r;
+
+    // Security guard. Catches the classic process-injection combo
+    // (CreateRemoteThread + WriteProcessMemory), the suspicious-API
+    // multi-match, and packed/no-import PEs. Advisory mode (default)
+    // always allows; Enforce mode prompts the user.
+    customos::security::ImageDescriptor gd{customos::security::ImageKind::WindowsPE, "(pe)", file, file_len};
+    if (!customos::security::Gate(gd))
+    {
+        arch::SerialWrite("[pe-loader] security guard blocked PE load\n");
+        return r;
+    }
 
     PeHeaders h{};
     const PeStatus ps = ParseHeaders(file, file_len, h);

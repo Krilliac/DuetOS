@@ -23,6 +23,7 @@
 #include "../mm/kheap.h"
 #include "../mm/paging.h"
 #include "../sched/sched.h"
+#include "../security/guard.h"
 #include "elf_loader.h"
 #include "klog.h"
 #include "process.h"
@@ -297,6 +298,7 @@ void CmdHelp()
     ConsoleWriteln("  METRICS      LOG RESOURCE SNAPSHOT (HEAP / FRAMES / TASKS)");
     ConsoleWriteln("  TRACE [ON|OFF] TOGGLE TRACE THRESHOLD + SHOW IN-FLIGHT SCOPES");
     ConsoleWriteln("  READ H LBA [C] HEXDUMP C SECTORS FROM BLOCK HANDLE H AT LBA");
+    ConsoleWriteln("  GUARD [SUB]  SECURITY GUARD: STATUS OR ON/ENFORCE/OFF/TEST");
     ConsoleWriteln("  FREE         MEMORY USAGE (PHYS + HEAP)");
     ConsoleWriteln("  PS           LIST EVERY SCHEDULER TASK");
     ConsoleWriteln("  SPAWN KIND   LAUNCH A RING-3 TASK (hello/sandbox/jail/...)");
@@ -1206,7 +1208,7 @@ static const char* const kCommandSet[] = {
     "hostname", "pwd",        "true",     "false",    "mount",    "lsmod",    "lsblk",    "lsgpt",   "free",   "ps",
     "spawn",    "readelf",    "hexdump",  "stat",     "basename", "dirname",  "cal",      "sleep",   "reset",  "tac",
     "nl",       "rev",        "expr",     "color",    "rand",     "flushtlb", "checksum", "repeat",  "kill",   "exec",
-    "metrics",  "trace",      "read",
+    "metrics",  "trace",      "read",     "guard",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -2247,6 +2249,68 @@ void CmdMetrics()
     // origin is distinguishable from the boot-time checkpoints.
     customos::core::LogMetrics(customos::core::LogLevel::Info, "shell", "user-requested");
     ConsoleWriteln("(also logged to kernel ring at INFO)");
+}
+
+void CmdGuard(customos::u32 argc, char** argv)
+{
+    // Show / control the security guard.
+    //   guard                  status line
+    //   guard on | advisory    switch to advisory mode
+    //   guard enforce          switch to enforce mode (prompts on Warn/Deny)
+    //   guard off              disable the guard entirely (use sparingly)
+    //   guard test             re-run GuardSelfTest
+    namespace sec = customos::security;
+    if (argc < 2)
+    {
+        ConsoleWrite("GUARD MODE   : ");
+        ConsoleWriteln(sec::GuardModeName(sec::GuardMode()));
+        ConsoleWrite("SCANS  : ");
+        WriteU64Hex(sec::GuardScanCount(), 0);
+        ConsoleWriteln("");
+        ConsoleWrite("ALLOW  : ");
+        WriteU64Hex(sec::GuardAllowCount(), 0);
+        ConsoleWriteln("");
+        ConsoleWrite("WARN   : ");
+        WriteU64Hex(sec::GuardWarnCount(), 0);
+        ConsoleWriteln("");
+        ConsoleWrite("DENY   : ");
+        WriteU64Hex(sec::GuardDenyCount(), 0);
+        ConsoleWriteln("");
+        const sec::Report* last = sec::GuardLastReport();
+        if (last != nullptr && last->finding_count > 0)
+        {
+            ConsoleWrite("LAST REPORT FINDINGS: ");
+            WriteU64Hex(last->finding_count, 0);
+            ConsoleWriteln("");
+        }
+        ConsoleWriteln("USAGE: GUARD [ON|ADVISORY|ENFORCE|OFF|TEST]");
+        return;
+    }
+    if (StrEq(argv[1], "on") || StrEq(argv[1], "advisory"))
+    {
+        sec::SetGuardMode(sec::Mode::Advisory);
+        ConsoleWriteln("GUARD: ADVISORY (logs, never blocks)");
+        return;
+    }
+    if (StrEq(argv[1], "enforce"))
+    {
+        sec::SetGuardMode(sec::Mode::Enforce);
+        ConsoleWriteln("GUARD: ENFORCE (prompts on Warn/Deny, default-deny on timeout)");
+        return;
+    }
+    if (StrEq(argv[1], "off"))
+    {
+        sec::SetGuardMode(sec::Mode::Off);
+        ConsoleWriteln("GUARD: OFF (all images pass through)");
+        return;
+    }
+    if (StrEq(argv[1], "test"))
+    {
+        sec::GuardSelfTest();
+        ConsoleWriteln("(self-test output on COM1)");
+        return;
+    }
+    ConsoleWriteln("GUARD: UNKNOWN SUBCOMMAND");
 }
 
 void CmdRead(customos::u32 argc, char** argv)
@@ -4635,6 +4699,11 @@ void Dispatch(char* line)
     if (StrEq(cmd, "read"))
     {
         CmdRead(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "guard"))
+    {
+        CmdGuard(argc, argv);
         return;
     }
     if (StrEq(cmd, "free"))
