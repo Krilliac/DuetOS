@@ -1,0 +1,32 @@
+; userland/apps/hello_winapi/api-ms-win-crt-runtime-l1-1-0.def
+;
+; Import library for the UCRT runtime apiset. A handful of
+; functions we resolve to the v0 return-zero / nop / exit
+; shims in kernel/subsystems/win32/stubs.cpp. Only the ones
+; referenced from hello.c get imported into the final PE.
+;
+; The apiset DLLs are virtual — on real Windows they forward
+; to ucrtbase.dll. Our resolver registers each function under
+; BOTH the apiset name AND ucrtbase.dll, so a link against
+; either works.
+
+LIBRARY api-ms-win-crt-runtime-l1-1-0.dll
+
+EXPORTS
+    _initialize_onexit_table
+    _register_onexit_function
+    _crt_atexit
+    _initterm_e
+    _initterm
+    _configure_narrow_argv
+    _initialize_narrow_environment
+    _get_initial_narrow_environment
+    _cexit
+    _c_exit
+    _set_app_type
+    _seh_filter_exe
+    _register_thread_local_exe_atexit_callback
+    _invalid_parameter_noinfo_noreturn
+    exit
+    _exit
+    terminate

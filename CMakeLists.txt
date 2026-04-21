@@ -36,6 +36,32 @@ set(CUSTOMOS_ARTIFACTS "" CACHE INTERNAL "Accumulated build artifacts")
 
 add_subdirectory(kernel)
 
+# ----------------------------------------------------------------------------
+# Test harness — boots the built kernel in QEMU and greps the serial log for
+# the set of expected boot signatures emitted by the ring3 smoke probes.
+#
+# The test runs only if the QEMU launcher script is present (it is installed
+# on-demand; see CLAUDE.md's "live-test runtime tooling" section). When the
+# tools are missing `ctest` just skips with an informative message instead
+# of failing.
+#
+# SparkEngine inspires the shape here: a single comprehensive smoke test
+# that exercises the full boot path, rather than per-subsystem unit tests
+# that would require a hosted test runtime the kernel can't provide.
+# ----------------------------------------------------------------------------
+enable_testing()
+
+set(CUSTOMOS_QEMU_RUN "${CMAKE_SOURCE_DIR}/tools/qemu/run.sh")
+set(CUSTOMOS_SMOKE_DRIVER "${CMAKE_SOURCE_DIR}/tools/ctest-boot-smoke.sh")
+
+add_test(NAME customos-boot-smoke
+    COMMAND "${CUSTOMOS_SMOKE_DRIVER}" "${CMAKE_BINARY_DIR}"
+)
+set_tests_properties(customos-boot-smoke PROPERTIES
+    LABELS "smoke;boot;win32"
+    TIMEOUT 60
+)
+
 message(STATUS "")
 message(STATUS "CustomOS configured.")
 message(STATUS "  Build type : ${CMAKE_BUILD_TYPE}")

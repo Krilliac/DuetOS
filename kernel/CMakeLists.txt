@@ -29,7 +29,10 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     core/reboot.cpp
     core/recovery.cpp
     core/elf_loader.cpp
+    core/pe_loader.cpp
     core/ring3_smoke.cpp
+    subsystems/win32/heap.cpp
+    subsystems/win32/stubs.cpp
     core/shell.cpp
     core/stack_canary.cpp
     core/symbols.cpp
@@ -77,6 +80,109 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     sync/spinlock.cpp
 )
 
+# ----------------------------------------------------------------------------
+# Host-side userland build: userland/apps/hello_pe/hello.c is compiled
+# with clang targeting x86_64-pc-windows-msvc and linked by lld-link
+# into a real freestanding PE/COFF .exe. The bytes are embedded into a
+# C++ constexpr u8 header that ramfs.cpp includes, so /bin/hello.exe
+# appears on the boot filesystem without a disk backend.
+#
+# This relies on host clang + lld-link + python3 being present, which
+# the dev container ships with. A future slice will guard this with a
+# CMake probe and fall back to a hand-laid byte array if the
+# toolchain is missing.
+# ----------------------------------------------------------------------------
+set(CUSTOMOS_HELLO_PE_SRC "${CMAKE_SOURCE_DIR}/userland/apps/hello_pe/hello.c")
+set(CUSTOMOS_HELLO_PE_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_hello_pe.h")
+set(CUSTOMOS_HELLO_PE_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-hello-pe.sh")
+set(CUSTOMOS_EMBED_BLOB_SCRIPT "${CMAKE_SOURCE_DIR}/tools/embed-blob.py")
+
+add_custom_command(
+    OUTPUT "${CUSTOMOS_HELLO_PE_HEADER}"
+    COMMAND "${CUSTOMOS_HELLO_PE_SCRIPT}"
+            "${CMAKE_SOURCE_DIR}"
+            "${CUSTOMOS_HELLO_PE_HEADER}"
+    DEPENDS
+        "${CUSTOMOS_HELLO_PE_SRC}"
+        "${CUSTOMOS_HELLO_PE_SCRIPT}"
+        "${CUSTOMOS_EMBED_BLOB_SCRIPT}"
+    COMMENT "Compiling + embedding /bin/hello.exe (freestanding PE)"
+    VERBATIM
+)
+
+# ramfs.cpp includes the generated header. Add it to the shared
+# source list so BOTH stages see the dependency and the custom
+# command fires on first configure.
+list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_HELLO_PE_HEADER}")
+
+# ----------------------------------------------------------------------------
+# Embed a real Windows PE (windows-kill.exe, a small standalone
+# Win32 console utility — 79 KiB, 12 DLL deps, 100 imported
+# functions, TLS callbacks). This is NOT a file we can run: v0
+# has no Win32 subsystem, no ntdll, nothing to resolve the
+# imports against. But the kernel PE loader's diagnostic path
+# (PeReport) exercises every directory on this image, giving a
+# concrete gap report on boot.
+#
+# This is the tractable substitute for "download Chrome and try
+# to run it": real Windows PE, real imports, but small enough
+# that embedding it into a constexpr u8 array doesn't balloon
+# the kernel.
+# ----------------------------------------------------------------------------
+set(CUSTOMOS_WINKILL_SRC "${CMAKE_SOURCE_DIR}/userland/apps/windows_kill/windows-kill.exe")
+set(CUSTOMOS_WINKILL_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_winkill_pe.h")
+
+add_custom_command(
+    OUTPUT "${CUSTOMOS_WINKILL_HEADER}"
+    COMMAND python3
+            "${CUSTOMOS_EMBED_BLOB_SCRIPT}"
+            "${CUSTOMOS_WINKILL_SRC}"
+            "${CUSTOMOS_WINKILL_HEADER}"
+            kBinWinKillBytes
+            --namespace "customos::fs::generated"
+    DEPENDS
+        "${CUSTOMOS_WINKILL_SRC}"
+        "${CUSTOMOS_EMBED_BLOB_SCRIPT}"
+    COMMENT "Embedding real Windows PE /bin/windows-kill.exe"
+    VERBATIM
+)
+
+list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_WINKILL_HEADER}")
+
+# ----------------------------------------------------------------------------
+# Third PE fixture: hello_winapi.exe — first userland program
+# that talks to the CustomOS Win32 subsystem through a real
+# Import Directory. Built via llvm-dlltool (kernel32.lib) +
+# clang + lld-link. See tools/build-hello-winapi.sh and
+# .claude/knowledge/pe-subsystem-v0.md for the layered
+# mechanism.
+# ----------------------------------------------------------------------------
+set(CUSTOMOS_HELLO_WINAPI_SRC "${CMAKE_SOURCE_DIR}/userland/apps/hello_winapi/hello.c")
+# Every .def file in the hello_winapi dir becomes a separate
+# import library feeding lld-link. Glob-dependency means adding
+# a new .def (e.g. for a future DLL stub set) automatically
+# triggers a rebuild without touching this CMakeLists.
+file(GLOB CUSTOMOS_HELLO_WINAPI_DEFS
+    "${CMAKE_SOURCE_DIR}/userland/apps/hello_winapi/*.def")
+set(CUSTOMOS_HELLO_WINAPI_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_hello_winapi.h")
+set(CUSTOMOS_HELLO_WINAPI_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-hello-winapi.sh")
+
+add_custom_command(
+    OUTPUT "${CUSTOMOS_HELLO_WINAPI_HEADER}"
+    COMMAND "${CUSTOMOS_HELLO_WINAPI_SCRIPT}"
+            "${CMAKE_SOURCE_DIR}"
+            "${CUSTOMOS_HELLO_WINAPI_HEADER}"
+    DEPENDS
+        "${CUSTOMOS_HELLO_WINAPI_SRC}"
+        ${CUSTOMOS_HELLO_WINAPI_DEFS}
+        "${CUSTOMOS_HELLO_WINAPI_SCRIPT}"
+        "${CUSTOMOS_EMBED_BLOB_SCRIPT}"
+    COMMENT "Compiling + embedding /bin/hello_winapi.exe (Win32 import path)"
+    VERBATIM
+)
+
+list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_HELLO_WINAPI_HEADER}")
+
 set(CUSTOMOS_KERNEL_LINKER_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/arch/x86_64/linker.ld")
 
 # Shared link flags — applied identically to both stages so the symbol
@@ -116,7 +222,10 @@ set_target_properties(customos-kernel-stage1 PROPERTIES
     # Stage 1 is internal plumbing — don't install or package it.
     EXCLUDE_FROM_ALL FALSE
 )
-target_include_directories(customos-kernel-stage1 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(customos-kernel-stage1 PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_BINARY_DIR}
+)
 customos_apply_kernel_link_flags(customos-kernel-stage1)
 
 # ----------------------------------------------------------------------------
@@ -204,6 +313,7 @@ set_target_properties(customos-kernel PROPERTIES
 
 target_include_directories(customos-kernel PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_BINARY_DIR}
 )
 
 customos_apply_kernel_link_flags(customos-kernel)

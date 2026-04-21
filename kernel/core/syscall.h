@@ -72,6 +72,53 @@ enum SyscallNumber : u64
     // the caller's CapSet + namespace root (POSIX fork+exec
     // shape: spawn-from-path, same privileges down).
     SYS_SPAWN = 7,
+    // SYS_GETPROCID: no args. Returns CurrentProcess()->pid —
+    // distinct from SYS_GETPID, which returns the scheduler's
+    // task id. Win32's GetCurrentProcessId/GetCurrentThreadId
+    // map to this pair: process id is the `Process` struct's
+    // pid (what `[proc] create pid=N` logs); thread id is the
+    // scheduler task id (what `[sched] created task id=N`
+    // logs). In v0 each process has exactly one task, but the
+    // two IDs already come from different counters — the
+    // stubs in kernel/subsystems/win32 need to distinguish.
+    SYS_GETPROCID = 8,
+    // SYS_GETLASTERROR / SYS_SETLASTERROR: Win32 last-error
+    // read/write. GetLastError takes no args, returns the
+    // caller's Process.win32_last_error. SetLastError takes
+    // rdi = new error code (low 32 bits), no return. Both
+    // are unprivileged — a process's own error slot is not
+    // cap-gated. In real Windows these live in the TEB at
+    // offset 0x68; v0 parks them on the Process struct and
+    // exposes them via syscalls until per-thread TEBs land.
+    SYS_GETLASTERROR = 9,
+    SYS_SETLASTERROR = 10,
+
+    // SYS_HEAP_ALLOC / SYS_HEAP_FREE: Win32 process-heap
+    // allocator backends. HEAP_ALLOC takes rdi = size in bytes,
+    // returns the user VA of the allocation (0 on OOM).
+    // HEAP_FREE takes rdi = pointer returned by a prior
+    // HEAP_ALLOC, returns 0 (value ignored by the user stubs).
+    //
+    // Unprivileged: every Win32 process gets its own heap
+    // region mapped at 0x50000000 when the PE loader stands
+    // up the stubs page. The kernel32 stubs HeapAlloc /
+    // HeapFree / malloc / free / calloc trampoline through
+    // these syscalls. See kernel/subsystems/win32/heap.h.
+    SYS_HEAP_ALLOC = 11,
+    SYS_HEAP_FREE = 12,
+
+    // SYS_PERF_COUNTER: no args. Returns the kernel tick
+    // counter from arch::TimerTicks() — a monotonically
+    // increasing u64, incremented at kTickFrequencyHz
+    // (100 Hz → 10 ms resolution). Used by the Win32
+    // QueryPerformanceCounter / GetTickCount stubs; the
+    // kernel32 stub can convert ticks → ms or hand the raw
+    // value through.
+    //
+    // Unprivileged — exposing the tick counter leaks boot
+    // time and timing info, but so does any millisecond-
+    // resolution clock; we accept it.
+    SYS_PERF_COUNTER = 13,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit

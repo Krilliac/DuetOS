@@ -1,0 +1,30 @@
+; msvcp140.def
+;
+; Minimal .def for MSVC C++ std:: runtime (MSVCP140.dll).
+; v0 covers only the "throw helpers" (functions that
+; unconditionally throw a std:: exception — safe stub:
+; terminate the process with SYS_EXIT(3)) and a handful of
+; small-return helpers whose return value callers treat as
+; "no error" when zero.
+;
+; Not yet covered (batch 13b territory):
+;   * ?cout@std@@3V... — the global std::cout ostream.
+;     Needs a fake ostream object living in the stubs page.
+;   * The handful of basic_ostream / basic_streambuf /
+;     basic_ios member functions that operate on cout.
+;
+; Mangled names come from `llvm-readobj --coff-imports
+; windows-kill.exe` — keep these symbols exactly as the
+; linker emits them, since MSVCP140 exports are name-mangled
+; and undecorated aliases don't exist.
+
+LIBRARY MSVCP140.dll
+
+EXPORTS
+    ?_Xbad_alloc@std@@YAXXZ
+    ?_Xlength_error@std@@YAXPEBD@Z
+    ?_Xout_of_range@std@@YAXPEBD@Z
+    ?_Syserror_map@std@@YAPEBDH@Z
+    ?_Winerror_map@std@@YAHH@Z
+    ?_Winerror_message@std@@YAKKPEADK@Z
+    ?uncaught_exception@std@@YA_NXZ

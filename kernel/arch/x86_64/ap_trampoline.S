@@ -103,10 +103,21 @@ ap_trampoline_start:
     mov     eax, [TRAMP_BASE + OFF_PML4]
     mov     cr3, eax
 
-    /* CR4.PAE = 1 (required for long mode). */
+    /* CR4.PAE + SSE support bits. Must match the BSP path in
+     * boot.S so SSE-using user binaries work on any CPU:
+     *   bit 5  = PAE   (required for long mode)
+     *   bit 9  = OSFXSR  (SSE FXSAVE/FXRSTOR)
+     *   bit 10 = OSXMMEXCPT (SIMD FP exceptions) */
     mov     eax, cr4
-    or      eax, 1 << 5
+    or      eax, (1 << 5) | (1 << 9) | (1 << 10)
     mov     cr4, eax
+
+    /* CR0 tune-up for SSE: CR0.EM=0 (no emulation), CR0.MP=1.
+     * See boot.S for rationale. */
+    mov     eax, cr0
+    and     eax, ~(1 << 2)
+    or      eax, (1 << 1)
+    mov     cr0, eax
 
     /* EFER.LME = 1 AND EFER.NXE = 1. NXE matters: the kernel's MMIO
        mappings have the NX bit set (see mm/paging.h kKernelMmio),

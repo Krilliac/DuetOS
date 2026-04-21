@@ -185,9 +185,21 @@ bool PciMsixFind(DeviceAddress addr, MsixInfo* info)
     return true;
 }
 
-void PciMsixSetEntry(volatile void* table_base, u16 index, u8 lapic_id, u8 vector)
+void PciMsixSetEntry(volatile void* table_base, u16 table_size, u16 index, u8 lapic_id, u8 vector)
 {
     KASSERT(table_base != nullptr, "drivers/pci", "PciMsixSetEntry null table");
+    // Index must be inside the capability-reported table_size. The
+    // MSI-X table is mapped with MapMmio(table_size * sizeof(MsixEntry))
+    // by the caller, so `table[index]` past table_size walks into
+    // whatever happens to sit after the mapping — adjacent MMIO
+    // registers, another device, or unmapped memory. A malicious or
+    // buggy device reporting a short table_size plus a driver that
+    // trusts its own index arithmetic is the exact combination that
+    // turns a capability into an arbitrary-write primitive.
+    if (index >= table_size)
+    {
+        core::Panic("drivers/pci", "PciMsixSetEntry: index past table_size");
+    }
 
     auto* table = static_cast<volatile MsixEntry*>(table_base);
     volatile MsixEntry& entry = table[index];
@@ -214,14 +226,22 @@ void PciMsixSetEntry(volatile void* table_base, u16 index, u8 lapic_id, u8 vecto
     // matches the mask-at-init pattern already in use for IOAPIC.
 }
 
-void PciMsixMaskEntry(volatile void* table_base, u16 index)
+void PciMsixMaskEntry(volatile void* table_base, u16 table_size, u16 index)
 {
+    if (index >= table_size)
+    {
+        core::Panic("drivers/pci", "PciMsixMaskEntry: index past table_size");
+    }
     auto* table = static_cast<volatile MsixEntry*>(table_base);
     table[index].vector_control = 1;
 }
 
-void PciMsixUnmaskEntry(volatile void* table_base, u16 index)
+void PciMsixUnmaskEntry(volatile void* table_base, u16 table_size, u16 index)
 {
+    if (index >= table_size)
+    {
+        core::Panic("drivers/pci", "PciMsixUnmaskEntry: index past table_size");
+    }
     auto* table = static_cast<volatile MsixEntry*>(table_base);
     table[index].vector_control = 0;
 }

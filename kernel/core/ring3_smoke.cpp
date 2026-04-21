@@ -4,14 +4,19 @@
 #include "../arch/x86_64/serial.h"
 #include "../arch/x86_64/usermode.h"
 #include "../fs/ramfs.h"
+#include "generated_hello_pe.h"
+#include "generated_hello_winapi.h"
+#include "generated_winkill_pe.h"
 #include "../mm/address_space.h"
 #include "../mm/frame_allocator.h"
 #include "../mm/page.h"
 #include "../mm/paging.h"
 #include "../sched/sched.h"
+#include "../subsystems/win32/heap.h"
 #include "elf_loader.h"
 #include "klog.h"
 #include "panic.h"
+#include "pe_loader.h"
 #include "process.h"
 
 /*
@@ -349,7 +354,16 @@ void WriteUserCodeFrame(mm::PhysAddr frame, u64 code_va, u64 stack_va)
         Panic("core/ring3", "Ring3UserEntry without a Process");
     }
     const u64 code_va = proc->user_code_va;
-    const u64 stack_top = proc->user_stack_va + mm::kPageSize;
+    // Both SysV and Microsoft x64 ABIs expect rsp % 16 == 8 on
+    // function entry — i.e., the caller has already pushed an
+    // 8-byte return address before the call. When we iretq
+    // into user code, no return address has been pushed, so
+    // rsp would be exactly page-aligned (%16 == 0) without
+    // this adjustment and any movaps against rsp-relative
+    // offsets inside the function prologue would #GP. Bias
+    // rsp by -8 once, up front, so the ring-3 entry point
+    // sees the same layout it would on a CALL.
+    const u64 stack_top = proc->user_stack_va + mm::kPageSize - 8;
 
     SerialWrite("[ring3] task pid=");
     SerialWriteHex(sched::CurrentTaskId());
@@ -901,6 +915,586 @@ void SpawnJailProbeTask()
     sched::SchedCreateUser(&Ring3UserEntry, nullptr, "ring3-jail-probe", proc);
 }
 
+// Dedicated privileged-instruction probe: tries to execute `cli` from
+// ring 3. IOPL is left at 0 in the iretq frame that runs every ring-3
+// task (see usermode.S), so CPL(3) > IOPL(0) — the CPU must raise #GP
+// on the `cli` attempt. If it didn't, a sandboxed task could globally
+// disable interrupts and spin forever, starving every other process
+// plus the reaper, taking the system down. Proving the #GP path kills
+// the task (and only the task) is the sandbox invariant in action.
+//
+// Payload:
+//   pause      ; 0xF3 0x90    — gives the scheduler a stable landing
+//   cli        ; 0xFA         — privileged; #GP expected
+//   ud2        ; 0x0F 0x0B    — belt-and-braces if cli regressed
+//
+// Expected: "[task-kill] ring-3 task took General protection fault —
+// terminating" on COM1, followed by the same reap-and-destroy flow
+// every other sandbox probe uses. Other workers (heartbeat, kbd-reader,
+// idle) keep running — which they couldn't if `cli` had actually taken
+// effect.
+//
+// clang-format off
+constexpr u8 kPrivProbeBytes[] = {
+    0xF3, 0x90,                                                   // pause
+    0xFA,                                                         // cli (privileged → #GP from ring 3)
+    0x0F, 0x0B,                                                   // ud2
+};
+// clang-format on
+
+void SpawnPrivProbeTask()
+{
+    using arch::SerialWrite;
+    using arch::SerialWriteHex;
+    using namespace customos::mm;
+
+    const u64 code_va = AslrPickBase();
+    const u64 stack_va = code_va + kStackOffsetFromCode;
+
+    AddressSpace* as = AddressSpaceCreate(kFrameBudgetSandbox);
+    if (as == nullptr)
+    {
+        Panic("core/ring3", "AS create failed for priv probe");
+    }
+
+    const PhysAddr code_frame = AllocateFrame();
+    if (code_frame == kNullFrame)
+    {
+        Panic("core/ring3", "code frame alloc failed for priv probe");
+    }
+    auto* code_direct = static_cast<u8*>(PhysToVirt(code_frame));
+    for (u64 i = 0; i < mm::kPageSize; ++i)
+    {
+        code_direct[i] = 0;
+    }
+    for (u64 i = 0; i < sizeof(kPrivProbeBytes); ++i)
+    {
+        code_direct[i] = kPrivProbeBytes[i];
+    }
+    const PhysAddr stack_frame = AllocateFrame();
+    if (stack_frame == kNullFrame)
+    {
+        Panic("core/ring3", "stack frame alloc failed for priv probe");
+    }
+    AddressSpaceMapUserPage(as, code_va, code_frame, kPagePresent | kPageUser);
+    AddressSpaceMapUserPage(as, stack_va, stack_frame, kPagePresent | kPageWritable | kPageUser | kPageNoExecute);
+
+    Process* proc = ProcessCreate("ring3-priv-probe", as, CapSetEmpty(), fs::RamfsSandboxRoot(), code_va, stack_va,
+                                  kTickBudgetSandbox);
+    if (proc == nullptr)
+    {
+        Panic("core/ring3", "ProcessCreate failed for priv probe");
+    }
+    SerialWrite("[ring3] queued priv-probe task pid=");
+    SerialWriteHex(proc->pid);
+    SerialWrite(" code_va=");
+    SerialWriteHex(code_va);
+    SerialWrite(" (expect #GP on cli)\n");
+    sched::SchedCreateUser(&Ring3UserEntry, nullptr, "ring3-priv-probe", proc);
+}
+
+// Dedicated bad-int probe: issues `int 0x81` from ring 3. The IDT
+// installs vectors 0..47 plus the DPL=3 gate at 0x80; vector 0x81 has
+// a zero gate descriptor (present bit clear). Intel SDM Vol. 3A §6.11:
+// executing `int N` when IDT[N] is not present raises #NP (vector 11)
+// with error-code pointing at the offending gate. The ring-3 trap
+// path logs and kills the task. This proves the kernel tolerates a
+// user-driven interrupt instruction targeting an unconfigured vector
+// — without the trap dispatcher's DPL-agnostic "any vector from
+// ring 3 = kill the task" rule, an unhandled vector could triple-
+// fault the box.
+//
+// Payload:
+//   pause       ; 0xF3 0x90
+//   int 0x81    ; 0xCD 0x81
+//   ud2         ; 0x0F 0x0B
+//
+// clang-format off
+constexpr u8 kBadIntProbeBytes[] = {
+    0xF3, 0x90,                                                   // pause
+    0xCD, 0x81,                                                   // int 0x81 (gate not present)
+    0x0F, 0x0B,                                                   // ud2
+};
+// clang-format on
+
+void SpawnBadIntProbeTask()
+{
+    using arch::SerialWrite;
+    using arch::SerialWriteHex;
+    using namespace customos::mm;
+
+    const u64 code_va = AslrPickBase();
+    const u64 stack_va = code_va + kStackOffsetFromCode;
+
+    AddressSpace* as = AddressSpaceCreate(kFrameBudgetSandbox);
+    if (as == nullptr)
+    {
+        Panic("core/ring3", "AS create failed for bad-int probe");
+    }
+
+    const PhysAddr code_frame = AllocateFrame();
+    if (code_frame == kNullFrame)
+    {
+        Panic("core/ring3", "code frame alloc failed for bad-int probe");
+    }
+    auto* code_direct = static_cast<u8*>(PhysToVirt(code_frame));
+    for (u64 i = 0; i < mm::kPageSize; ++i)
+    {
+        code_direct[i] = 0;
+    }
+    for (u64 i = 0; i < sizeof(kBadIntProbeBytes); ++i)
+    {
+        code_direct[i] = kBadIntProbeBytes[i];
+    }
+    const PhysAddr stack_frame = AllocateFrame();
+    if (stack_frame == kNullFrame)
+    {
+        Panic("core/ring3", "stack frame alloc failed for bad-int probe");
+    }
+    AddressSpaceMapUserPage(as, code_va, code_frame, kPagePresent | kPageUser);
+    AddressSpaceMapUserPage(as, stack_va, stack_frame, kPagePresent | kPageWritable | kPageUser | kPageNoExecute);
+
+    Process* proc = ProcessCreate("ring3-badint-probe", as, CapSetEmpty(), fs::RamfsSandboxRoot(), code_va, stack_va,
+                                  kTickBudgetSandbox);
+    if (proc == nullptr)
+    {
+        Panic("core/ring3", "ProcessCreate failed for bad-int probe");
+    }
+    SerialWrite("[ring3] queued bad-int-probe task pid=");
+    SerialWriteHex(proc->pid);
+    SerialWrite(" code_va=");
+    SerialWriteHex(code_va);
+    SerialWrite(" (expect #GP/#NP on int 0x81)\n");
+    sched::SchedCreateUser(&Ring3UserEntry, nullptr, "ring3-badint-probe", proc);
+}
+
+// Dedicated kernel-read probe: tries to load a byte from a kernel-
+// half address (0xFFFFFFFF80000000, the higher-half kernel image
+// base). The page walker finds a PTE that is Present but lacks the
+// U/S bit, so a ring-3 read gets err=5 (P | U-fetch-on-non-U page).
+// Kill path identical to every other user-mode fault.
+//
+// This is the "I have a gadget that leaks kernel addresses to ring 3"
+// threat model in action: the attacker already knows a kernel
+// symbol, can compute its VA, and tries to dereference it. The
+// kernel's user-bit enforcement (set at boot_PML4 time) is the
+// firewall between them.
+//
+// Payload:
+//   pause            ; 0xF3 0x90
+//   mov rax, <imm64> ; 0x48 0xB8 <8 bytes> — patched to 0xFFFFFFFF80000000
+//   mov al,  [rax]   ; 0x8A 0x00
+//   ud2              ; 0x0F 0x0B
+//
+// clang-format off
+constexpr u8 kKernelReadProbeBytes[] = {
+    0xF3, 0x90,                                                   // pause
+    0x48, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0,                           // mov rax, <imm64 patched>
+    0x8A, 0x00,                                                   // mov al, byte ptr [rax]
+    0x0F, 0x0B,                                                   // ud2
+};
+// clang-format on
+
+constexpr u64 kKernelHigherHalfBase = 0xFFFFFFFF80000000ULL;
+
+void SpawnKernelReadProbeTask()
+{
+    using arch::SerialWrite;
+    using arch::SerialWriteHex;
+    using namespace customos::mm;
+
+    const u64 code_va = AslrPickBase();
+    const u64 stack_va = code_va + kStackOffsetFromCode;
+
+    AddressSpace* as = AddressSpaceCreate(kFrameBudgetSandbox);
+    if (as == nullptr)
+    {
+        Panic("core/ring3", "AS create failed for kernel-read probe");
+    }
+
+    const PhysAddr code_frame = AllocateFrame();
+    if (code_frame == kNullFrame)
+    {
+        Panic("core/ring3", "code frame alloc failed for kernel-read probe");
+    }
+    auto* code_direct = static_cast<u8*>(PhysToVirt(code_frame));
+    for (u64 i = 0; i < mm::kPageSize; ++i)
+    {
+        code_direct[i] = 0;
+    }
+    for (u64 i = 0; i < sizeof(kKernelReadProbeBytes); ++i)
+    {
+        code_direct[i] = kKernelReadProbeBytes[i];
+    }
+    // Patch imm64 at byte offset 4 (after `pause` + `48 B8`).
+    WriteImm64LE(code_direct, 4, kKernelHigherHalfBase);
+
+    const PhysAddr stack_frame = AllocateFrame();
+    if (stack_frame == kNullFrame)
+    {
+        Panic("core/ring3", "stack frame alloc failed for kernel-read probe");
+    }
+    AddressSpaceMapUserPage(as, code_va, code_frame, kPagePresent | kPageUser);
+    AddressSpaceMapUserPage(as, stack_va, stack_frame, kPagePresent | kPageWritable | kPageUser | kPageNoExecute);
+
+    Process* proc = ProcessCreate("ring3-kread-probe", as, CapSetEmpty(), fs::RamfsSandboxRoot(), code_va, stack_va,
+                                  kTickBudgetSandbox);
+    if (proc == nullptr)
+    {
+        Panic("core/ring3", "ProcessCreate failed for kernel-read probe");
+    }
+    SerialWrite("[ring3] queued kread-probe task pid=");
+    SerialWriteHex(proc->pid);
+    SerialWrite(" code_va=");
+    SerialWriteHex(code_va);
+    SerialWrite(" (expect #PF on kernel-half read)\n");
+    sched::SchedCreateUser(&Ring3UserEntry, nullptr, "ring3-kread-probe", proc);
+}
+
+// Dedicated user-pointer fuzz probe: a TRUSTED ring-3 task that
+// hands four deliberately wild user_buf values to SYS_WRITE in
+// sequence. Each call must return -1 from `DoWrite` (via the
+// `CopyFromUser` rejection path) without the kernel ever touching
+// the bogus address. After the four attacks, the task issues one
+// CONTROL SYS_WRITE with a valid pointer to a literal string —
+// if the kernel survived all four wild attempts, the control
+// message reaches COM1; if any of them corrupted state or
+// panicked, the control print is missing from the boot log.
+//
+// Trusted caps are intentional: cap check must pass so the
+// `CopyFromUser` machinery is exercised. The probes that send
+// ring 3 with empty caps (hostile, jail, nx, ...) short-circuit
+// at the cap check and never reach the pointer validators.
+//
+// Pointer choices:
+//   1. NULL                — passes IsUserAddressRange (0 < kUserMax)
+//                            but walker finds no PTE → false.
+//   2. 0xFFFFFFFF80000000  — kernel image base, > kUserMax →
+//                            IsUserAddressRange rejects up front.
+//   3. 0xDEADBEEF00000000  — non-canonical hole, > kUserMax →
+//                            IsUserAddressRange rejects up front.
+//   4. 0x00007FFFFFFFFFFE  — last 2 bytes of user space + len=256
+//                            crosses into kernel half →
+//                            IsUserAddressRange rejects on the
+//                            addr + len - 1 overflow check.
+//
+// Expected boot log (in this order):
+//   [ring3] queued ptrfuzz-probe task pid=N
+//   [ring3] task pid=N entering ring 3 ...
+//   [ptrfuzz] passed                       <- the control print
+//   [ts=...] [I] sys : exit rc val=0
+//   [proc] destroy pid=N name="ring3-ptrfuzz-probe"
+//
+// A panic / triple fault / missing "[ptrfuzz] passed" is the
+// failure signal — the kernel didn't survive one of the wild
+// pointer attempts.
+//
+// clang-format off
+constexpr char kPtrFuzzMsg[] = "[ptrfuzz] passed\n";
+constexpr u64 kPtrFuzzMsgOffset = 0xC0; // string sits at code_va + 0xC0
+constexpr u64 kPtrFuzzMsgLen = sizeof(kPtrFuzzMsg) - 1;
+
+constexpr u8 kPtrFuzzProbeBytes[] = {
+    0xF3, 0x90,                                                   // pause
+
+    // ---- attack 1: SYS_WRITE(fd=1, buf=NULL, len=1) ---------------
+    0xB8, 0x02, 0x00, 0x00, 0x00,                                 // mov eax, 2
+    0xBF, 0x01, 0x00, 0x00, 0x00,                                 // mov edi, 1
+    0xBE, 0x00, 0x00, 0x00, 0x00,                                 // mov esi, 0  (NULL)
+    0xBA, 0x01, 0x00, 0x00, 0x00,                                 // mov edx, 1
+    0xCD, 0x80,                                                   // int 0x80
+
+    // ---- attack 2: SYS_WRITE(1, 0xFFFFFFFF80000000, 1) ------------
+    0xB8, 0x02, 0x00, 0x00, 0x00,                                 // mov eax, 2
+    0xBF, 0x01, 0x00, 0x00, 0x00,                                 // mov edi, 1
+    0x48, 0xBE, 0x00, 0x00, 0x00, 0x80, 0xFF, 0xFF, 0xFF, 0xFF,   // mov rsi, 0xFFFFFFFF80000000
+    0xBA, 0x01, 0x00, 0x00, 0x00,                                 // mov edx, 1
+    0xCD, 0x80,                                                   // int 0x80
+
+    // ---- attack 3: SYS_WRITE(1, 0xDEADBEEF00000000, 1) ------------
+    0xB8, 0x02, 0x00, 0x00, 0x00,                                 // mov eax, 2
+    0xBF, 0x01, 0x00, 0x00, 0x00,                                 // mov edi, 1
+    0x48, 0xBE, 0x00, 0x00, 0x00, 0x00, 0xEF, 0xBE, 0xAD, 0xDE,   // mov rsi, 0xDEADBEEF00000000
+    0xBA, 0x01, 0x00, 0x00, 0x00,                                 // mov edx, 1
+    0xCD, 0x80,                                                   // int 0x80
+
+    // ---- attack 4: SYS_WRITE(1, 0x7FFFFFFFFFFE, 256) — boundary --
+    0xB8, 0x02, 0x00, 0x00, 0x00,                                 // mov eax, 2
+    0xBF, 0x01, 0x00, 0x00, 0x00,                                 // mov edi, 1
+    0x48, 0xBE, 0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F, 0x00, 0x00,   // mov rsi, 0x00007FFFFFFFFFFE
+    0xBA, 0x00, 0x01, 0x00, 0x00,                                 // mov edx, 256
+    0xCD, 0x80,                                                   // int 0x80
+
+    // ---- control: SYS_WRITE(1, code_va + 0xC0, kPtrFuzzMsgLen) ---
+    0xB8, 0x02, 0x00, 0x00, 0x00,                                 // mov eax, 2
+    0xBF, 0x01, 0x00, 0x00, 0x00,                                 // mov edi, 1
+    0xBE, 0xC0, 0x00, 0x00, 0x40,                                 // mov esi, <patched: code_va+0xC0>
+    0xBA, static_cast<u8>(kPtrFuzzMsgLen), 0x00, 0x00, 0x00,      // mov edx, len
+    0xCD, 0x80,                                                   // int 0x80
+
+    // ---- SYS_EXIT(0) ----------------------------------------------
+    0x31, 0xC0,                                                   // xor eax, eax
+    0x31, 0xFF,                                                   // xor edi, edi
+    0xCD, 0x80,                                                   // int 0x80
+    0x0F, 0x0B,                                                   // ud2
+};
+// clang-format on
+static_assert(sizeof(kPtrFuzzProbeBytes) <= kPtrFuzzMsgOffset, "ptrfuzz code overruns msg region");
+static_assert(kPtrFuzzMsgOffset + sizeof(kPtrFuzzMsg) <= mm::kPageSize, "ptrfuzz msg past end of page");
+
+// Offset of the control SYS_WRITE's `mov esi, imm32` field. The
+// payload is a fixed sequence so this is a constant; verify by
+// hand if the byte sequence above is ever reordered. The byte at
+// `kPtrFuzzCtrlSrcOffset - 1` MUST be 0xBE (the mov-esi-imm32
+// opcode) — the spawn helper asserts that before patching.
+//
+// Hand-traced layout:
+//   0x00 .. 0x01   pause                                   (  2)
+//   0x02 .. 0x17   attack 1 — NULL ptr,        22 bytes
+//   0x18 .. 0x32   attack 2 — kernel-half,     27 bytes
+//   0x33 .. 0x4D   attack 3 — non-canonical,   27 bytes
+//   0x4E .. 0x68   attack 4 — boundary cross,  27 bytes
+//   0x69 .. 0x7E   control SYS_WRITE,          22 bytes
+//                    0x69 .. 0x6D  mov eax, 2
+//                    0x6E .. 0x72  mov edi, 1
+//                    0x73 .. 0x77  mov esi, imm32  <- patched
+//                                   ^ 0x73 = opcode 0xBE, imm32 at 0x74
+//                    0x78 .. 0x7C  mov edx, len
+//                    0x7D .. 0x7E  int 0x80
+//   0x7F .. 0x86   SYS_EXIT(0) + ud2                       (  8)
+constexpr u16 kPtrFuzzCtrlSrcOffset = 0x74; // imm32 starts at byte 0x74 (116)
+
+void SpawnPtrFuzzProbeTask()
+{
+    using arch::SerialWrite;
+    using arch::SerialWriteHex;
+    using namespace customos::mm;
+
+    const u64 code_va = AslrPickBase();
+    const u64 stack_va = code_va + kStackOffsetFromCode;
+    KASSERT(code_va <= 0xFFFFFFFFULL, "core/ring3", "ptrfuzz code_va overflows imm32");
+
+    AddressSpace* as = AddressSpaceCreate(kFrameBudgetTrusted);
+    if (as == nullptr)
+    {
+        Panic("core/ring3", "AS create failed for ptrfuzz probe");
+    }
+
+    const PhysAddr code_frame = AllocateFrame();
+    if (code_frame == kNullFrame)
+    {
+        Panic("core/ring3", "code frame alloc failed for ptrfuzz probe");
+    }
+    auto* code_direct = static_cast<u8*>(PhysToVirt(code_frame));
+    for (u64 i = 0; i < mm::kPageSize; ++i)
+    {
+        code_direct[i] = 0;
+    }
+    for (u64 i = 0; i < sizeof(kPtrFuzzProbeBytes); ++i)
+    {
+        code_direct[i] = kPtrFuzzProbeBytes[i];
+    }
+    for (u64 i = 0; i < sizeof(kPtrFuzzMsg); ++i)
+    {
+        code_direct[kPtrFuzzMsgOffset + i] = static_cast<u8>(kPtrFuzzMsg[i]);
+    }
+    // Patch control-write source pointer with code_va + msg_offset.
+    KASSERT(code_direct[kPtrFuzzCtrlSrcOffset - 1] == 0xBE, "core/ring3",
+            "ptrfuzz patch: byte before ctrl-src offset is not the mov-esi-imm32 opcode");
+    WriteImm32LE(code_direct, kPtrFuzzCtrlSrcOffset, static_cast<u32>(code_va + kPtrFuzzMsgOffset));
+
+    const PhysAddr stack_frame = AllocateFrame();
+    if (stack_frame == kNullFrame)
+    {
+        Panic("core/ring3", "stack frame alloc failed for ptrfuzz probe");
+    }
+    AddressSpaceMapUserPage(as, code_va, code_frame, kPagePresent | kPageUser);
+    AddressSpaceMapUserPage(as, stack_va, stack_frame, kPagePresent | kPageWritable | kPageUser | kPageNoExecute);
+
+    // Trusted caps: cap check must PASS so the wild user pointers
+    // actually reach `CopyFromUser`. With empty caps, every
+    // SYS_WRITE would short-circuit at the cap check and the
+    // pointer validator would never run.
+    Process* proc = ProcessCreate("ring3-ptrfuzz-probe", as, CapSetTrusted(), fs::RamfsTrustedRoot(), code_va, stack_va,
+                                  kTickBudgetTrusted);
+    if (proc == nullptr)
+    {
+        Panic("core/ring3", "ProcessCreate failed for ptrfuzz probe");
+    }
+    SerialWrite("[ring3] queued ptrfuzz-probe task pid=");
+    SerialWriteHex(proc->pid);
+    SerialWrite(" code_va=");
+    SerialWriteHex(code_va);
+    SerialWrite(" (expect 4× -1 then [ptrfuzz] passed)\n");
+    sched::SchedCreateUser(&Ring3UserEntry, nullptr, "ring3-ptrfuzz-probe", proc);
+}
+
+// writefuzz probe — the CopyToUser sibling of ptrfuzz. Ptrfuzz
+// covers `SYS_WRITE`, which exercises `CopyFromUser`. This probe
+// covers the write-direction of the pointer validator:
+// `CopyToUser` inside `SYS_STAT` (writes a `u64` size) and
+// `SYS_READ` (writes file bytes). A trusted task with
+// `kCapFsRead` issues four syscalls that ALL hit valid lookups
+// (so the call actually reaches `CopyToUser`) but supply wild
+// DESTINATION pointers:
+//
+//   1. SYS_STAT(/etc/version, dst=NULL)
+//      IsUserAddressRange(0, 8) passes (0 ≤ kUserMax); walker
+//      finds no PTE → IsUserRangeAccessible → false → -1.
+//   2. SYS_STAT(/etc/version, dst=0xFFFFFFFF80000000)
+//      kernel-half, > kUserMax → range-check reject → -1.
+//   3. SYS_READ(/etc/version, dst=0xDEADBEEF00000000, cap=128)
+//      non-canonical, > kUserMax → range-check reject → -1.
+//   4. SYS_READ(/etc/version, dst=0x7FFFFFFFFFFE, cap=256)
+//      to_copy clamps to file_size (27 for /etc/version);
+//      rsi + 26 = 0x800000000018 > kUserMax →
+//      range-check reject → -1.
+//
+// Each call must return -1 WITHOUT the kernel writing a byte to
+// the bogus address. After the four attacks, a control
+// SYS_WRITE prints "[writefuzz] passed" — if any CopyToUser
+// stumbled and actually attempted the write, the task would
+// crash (or worse, the kernel would page-fault in the copy
+// routine) and the control print would be missing.
+//
+// This closes the CopyToUser half of the pointer-validator story
+// flagged in .claude/knowledge/pentest-ring3-adversarial-v0.md.
+
+// clang-format off
+constexpr char kWriteFuzzPath[] = "/etc/version";
+constexpr char kWriteFuzzMsg[] = "[writefuzz] passed\n";
+constexpr u64 kWriteFuzzPathOffset = 0x80; // NUL-terminated path in code page
+constexpr u64 kWriteFuzzMsgOffset = 0xA0;  // control message in code page
+constexpr u64 kWriteFuzzMsgLen = sizeof(kWriteFuzzMsg) - 1;
+
+constexpr u8 kWriteFuzzProbeBytes[] = {
+    0xF3, 0x90,                                                   // 0x00 pause
+
+    // attack 1: SYS_STAT(path, NULL) — unmapped user VA
+    0xB8, 0x04, 0x00, 0x00, 0x00,                                 // 0x02 mov eax, 4
+    0xBF, 0x80, 0x00, 0x00, 0x40,                                 // 0x07 mov edi, path (patched)
+    0xBE, 0x00, 0x00, 0x00, 0x00,                                 // 0x0C mov esi, 0 (NULL)
+    0xCD, 0x80,                                                   // 0x11 int 0x80
+
+    // attack 2: SYS_STAT(path, 0xFFFFFFFF80000000) — kernel-half
+    0xB8, 0x04, 0x00, 0x00, 0x00,                                 // 0x13 mov eax, 4
+    0xBF, 0x80, 0x00, 0x00, 0x40,                                 // 0x18 mov edi, path (patched)
+    0x48, 0xBE, 0x00, 0x00, 0x00, 0x80, 0xFF, 0xFF, 0xFF, 0xFF,   // 0x1D mov rsi, 0xFFFFFFFF80000000
+    0xCD, 0x80,                                                   // 0x27 int 0x80
+
+    // attack 3: SYS_READ(path, 0xDEADBEEF00000000, 128) — non-canonical
+    0xB8, 0x05, 0x00, 0x00, 0x00,                                 // 0x29 mov eax, 5
+    0xBF, 0x80, 0x00, 0x00, 0x40,                                 // 0x2E mov edi, path (patched)
+    0x48, 0xBE, 0x00, 0x00, 0x00, 0x00, 0xEF, 0xBE, 0xAD, 0xDE,   // 0x33 mov rsi, 0xDEADBEEF00000000
+    0xBA, 0x80, 0x00, 0x00, 0x00,                                 // 0x3D mov edx, 128
+    0xCD, 0x80,                                                   // 0x42 int 0x80
+
+    // attack 4: SYS_READ(path, 0x00007FFFFFFFFFFE, 256) — boundary cross
+    0xB8, 0x05, 0x00, 0x00, 0x00,                                 // 0x44 mov eax, 5
+    0xBF, 0x80, 0x00, 0x00, 0x40,                                 // 0x49 mov edi, path (patched)
+    0x48, 0xBE, 0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F, 0x00, 0x00,   // 0x4E mov rsi, 0x00007FFFFFFFFFFE
+    0xBA, 0x00, 0x01, 0x00, 0x00,                                 // 0x58 mov edx, 256
+    0xCD, 0x80,                                                   // 0x5D int 0x80
+
+    // control: SYS_WRITE(1, msg, kWriteFuzzMsgLen)
+    0xB8, 0x02, 0x00, 0x00, 0x00,                                 // 0x5F mov eax, 2
+    0xBF, 0x01, 0x00, 0x00, 0x00,                                 // 0x64 mov edi, 1
+    0xBE, 0xA0, 0x00, 0x00, 0x40,                                 // 0x69 mov esi, msg (patched)
+    0xBA, static_cast<u8>(kWriteFuzzMsgLen), 0x00, 0x00, 0x00,    // 0x6E mov edx, len
+    0xCD, 0x80,                                                   // 0x73 int 0x80
+
+    // SYS_EXIT(0)
+    0x31, 0xC0,                                                   // 0x75 xor eax, eax
+    0x31, 0xFF,                                                   // 0x77 xor edi, edi
+    0xCD, 0x80,                                                   // 0x79 int 0x80
+    0x0F, 0x0B,                                                   // 0x7B ud2
+};
+// clang-format on
+static_assert(sizeof(kWriteFuzzProbeBytes) <= kWriteFuzzPathOffset, "writefuzz code overruns path region");
+static_assert(kWriteFuzzPathOffset + sizeof(kWriteFuzzPath) <= kWriteFuzzMsgOffset, "writefuzz path overruns msg");
+static_assert(kWriteFuzzMsgOffset + sizeof(kWriteFuzzMsg) <= mm::kPageSize, "writefuzz msg past end of page");
+
+// Patch offsets — the imm32 byte in each `mov edi/esi, imm32`
+// sits one byte past the opcode. See the hand-traced layout in
+// the payload comment block above. Re-derive if the sequence is
+// ever reshuffled.
+constexpr u16 kWriteFuzzPathPatchOffsets[] = {0x08, 0x19, 0x2F, 0x4A};
+constexpr u16 kWriteFuzzMsgPatchOffset = 0x6A;
+
+void SpawnWriteFuzzProbeTask()
+{
+    using arch::SerialWrite;
+    using arch::SerialWriteHex;
+    using namespace customos::mm;
+
+    const u64 code_va = AslrPickBase();
+    const u64 stack_va = code_va + kStackOffsetFromCode;
+    KASSERT(code_va <= 0xFFFFFFFFULL, "core/ring3", "writefuzz code_va overflows imm32");
+
+    AddressSpace* as = AddressSpaceCreate(kFrameBudgetTrusted);
+    if (as == nullptr)
+    {
+        Panic("core/ring3", "AS create failed for writefuzz probe");
+    }
+
+    const PhysAddr code_frame = AllocateFrame();
+    if (code_frame == kNullFrame)
+    {
+        Panic("core/ring3", "code frame alloc failed for writefuzz probe");
+    }
+    auto* code_direct = static_cast<u8*>(PhysToVirt(code_frame));
+    for (u64 i = 0; i < mm::kPageSize; ++i)
+    {
+        code_direct[i] = 0;
+    }
+    for (u64 i = 0; i < sizeof(kWriteFuzzProbeBytes); ++i)
+    {
+        code_direct[i] = kWriteFuzzProbeBytes[i];
+    }
+    for (u64 i = 0; i < sizeof(kWriteFuzzPath); ++i)
+    {
+        code_direct[kWriteFuzzPathOffset + i] = static_cast<u8>(kWriteFuzzPath[i]);
+    }
+    for (u64 i = 0; i < sizeof(kWriteFuzzMsg); ++i)
+    {
+        code_direct[kWriteFuzzMsgOffset + i] = static_cast<u8>(kWriteFuzzMsg[i]);
+    }
+    // Patch all four rdi path-pointer slots and the control rsi.
+    for (u16 off : kWriteFuzzPathPatchOffsets)
+    {
+        KASSERT(code_direct[off - 1] == 0xBF, "core/ring3",
+                "writefuzz patch: byte before path slot is not mov-edi opcode");
+        WriteImm32LE(code_direct, off, static_cast<u32>(code_va + kWriteFuzzPathOffset));
+    }
+    KASSERT(code_direct[kWriteFuzzMsgPatchOffset - 1] == 0xBE, "core/ring3",
+            "writefuzz patch: byte before ctrl-src slot is not mov-esi opcode");
+    WriteImm32LE(code_direct, kWriteFuzzMsgPatchOffset, static_cast<u32>(code_va + kWriteFuzzMsgOffset));
+
+    const PhysAddr stack_frame = AllocateFrame();
+    if (stack_frame == kNullFrame)
+    {
+        Panic("core/ring3", "stack frame alloc failed for writefuzz probe");
+    }
+    AddressSpaceMapUserPage(as, code_va, code_frame, kPagePresent | kPageUser);
+    AddressSpaceMapUserPage(as, stack_va, stack_frame, kPagePresent | kPageWritable | kPageUser | kPageNoExecute);
+
+    // Trusted caps: need kCapFsRead to reach the SYS_READ/SYS_STAT
+    // implementations. With empty caps the cap gate would
+    // short-circuit and CopyToUser would never run.
+    Process* proc = ProcessCreate("ring3-writefuzz-probe", as, CapSetTrusted(), fs::RamfsTrustedRoot(), code_va,
+                                  stack_va, kTickBudgetTrusted);
+    if (proc == nullptr)
+    {
+        Panic("core/ring3", "ProcessCreate failed for writefuzz probe");
+    }
+    SerialWrite("[ring3] queued writefuzz-probe task pid=");
+    SerialWriteHex(proc->pid);
+    SerialWrite(" code_va=");
+    SerialWriteHex(code_va);
+    SerialWrite(" (expect 4× -1 then [writefuzz] passed)\n");
+    sched::SchedCreateUser(&Ring3UserEntry, nullptr, "ring3-writefuzz-probe", proc);
+}
+
 bool LocalStrEq(const char* a, const char* b)
 {
     for (u32 i = 0;; ++i)
@@ -958,6 +1552,97 @@ u64 SpawnElfFile(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps
     return proc->pid;
 }
 
+// PE twin of SpawnElfFile. Parses a PE/COFF image with the
+// v0 loader, maps its sections + a stack page into a fresh
+// AddressSpace, and enqueues a ring-3 task to enter it. The
+// process-level glue (Process / Ring3UserEntry / EnterUserMode)
+// does NOT care whether the image came from an ELF or a PE —
+// once the entry_va + stack_top are set, the ring-3 transition
+// is identical.
+u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, const fs::RamfsNode* root,
+                u64 frame_budget, u64 tick_budget)
+{
+    using arch::SerialWrite;
+    using arch::SerialWriteHex;
+    using namespace customos::mm;
+
+    if (pe_bytes == nullptr || pe_len == 0 || root == nullptr)
+    {
+        return 0;
+    }
+    // Diagnostic pre-pass — always runs, always logs. A PE we
+    // reject below still gets a full report: sections, imports,
+    // relocs, TLS. That's how we know what a real Win32
+    // subsystem would have to provide.
+    SerialWrite("[ring3] pe report name=\"");
+    SerialWrite(name);
+    SerialWrite("\"\n");
+    PeReport(pe_bytes, pe_len);
+
+    // PeLoad handles both Ok and ImportsPresent (the latter
+    // by walking the IAT and patching via the Win32 stub
+    // table). Any other non-Ok status is fatal — log and
+    // bail. For ImportsPresent we don't bail here; PeLoad may
+    // still fail if a specific import isn't in the stub
+    // table, at which point ok=false and we fall through to
+    // the generic "load failed" cleanup below.
+    const PeStatus vs = PeValidate(pe_bytes, pe_len);
+    if (vs != PeStatus::Ok && vs != PeStatus::ImportsPresent)
+    {
+        SerialWrite("[ring3] pe reject name=\"");
+        SerialWrite(name);
+        SerialWrite("\" reason=");
+        SerialWrite(PeStatusName(vs));
+        SerialWrite("\n");
+        return 0;
+    }
+    AddressSpace* as = AddressSpaceCreate(frame_budget);
+    if (as == nullptr)
+    {
+        return 0;
+    }
+    const PeLoadResult r = PeLoad(pe_bytes, pe_len, as);
+    if (!r.ok)
+    {
+        AddressSpaceRelease(as);
+        return 0;
+    }
+    Process* proc = ProcessCreate(name, as, caps, root, r.entry_va, r.stack_va, tick_budget);
+    if (proc == nullptr)
+    {
+        AddressSpaceRelease(as);
+        return 0;
+    }
+    // Per-process Win32 heap. Only initialised for PEs that
+    // actually imported anything — a freestanding PE like
+    // /bin/hello.exe doesn't call HeapAlloc and shouldn't burn
+    // the 16 frames the heap region costs.
+    if (r.imports_resolved)
+    {
+        if (!win32::Win32HeapInit(proc))
+        {
+            SerialWrite("[ring3] win32 heap init failed for \"");
+            SerialWrite(name);
+            SerialWrite("\"\n");
+            AddressSpaceRelease(as);
+            return 0;
+        }
+    }
+    SerialWrite("[ring3] pe spawn name=\"");
+    SerialWrite(name);
+    SerialWrite("\" pid=");
+    SerialWriteHex(proc->pid);
+    SerialWrite(" entry=");
+    SerialWriteHex(r.entry_va);
+    SerialWrite(" image_base=");
+    SerialWriteHex(r.image_base);
+    SerialWrite(" stack_top=");
+    SerialWriteHex(r.stack_top);
+    SerialWrite("\n");
+    sched::SchedCreateUser(&Ring3UserEntry, nullptr, name, proc);
+    return proc->pid;
+}
+
 bool SpawnOnDemand(const char* kind)
 {
     if (kind == nullptr || kind[0] == '\0')
@@ -999,6 +1684,59 @@ bool SpawnOnDemand(const char* kind)
     if (LocalStrEq(kind, "dropcaps"))
     {
         SpawnDropcapsProbe();
+        return true;
+    }
+    if (LocalStrEq(kind, "priv"))
+    {
+        SpawnPrivProbeTask();
+        return true;
+    }
+    if (LocalStrEq(kind, "badint"))
+    {
+        SpawnBadIntProbeTask();
+        return true;
+    }
+    if (LocalStrEq(kind, "kread"))
+    {
+        SpawnKernelReadProbeTask();
+        return true;
+    }
+    if (LocalStrEq(kind, "ptrfuzz"))
+    {
+        SpawnPtrFuzzProbeTask();
+        return true;
+    }
+    if (LocalStrEq(kind, "writefuzz"))
+    {
+        SpawnWriteFuzzProbeTask();
+        return true;
+    }
+    if (LocalStrEq(kind, "hellope"))
+    {
+        SpawnPeFile("ring3-hello-pe", fs::generated::kBinHelloPeBytes, fs::generated::kBinHelloPeBytes_len,
+                    CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        return true;
+    }
+    if (LocalStrEq(kind, "winhello"))
+    {
+        // First Win32 PE: imports ExitProcess, gets resolved
+        // through the kernel-hosted stub page, exits with
+        // code 42. "Exit rc=0x2a" in the serial log confirms
+        // the full IAT resolution chain worked.
+        SpawnPeFile("ring3-hello-winapi", fs::generated::kBinHelloWinapiBytes,
+                    fs::generated::kBinHelloWinapiBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                    mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        return true;
+    }
+    if (LocalStrEq(kind, "winkill"))
+    {
+        // Real-world PE that the v0 loader cannot execute.
+        // SpawnPeFile's diagnostic pre-pass still fires
+        // (PeReport logs imports/relocs/TLS), then the load is
+        // rejected with a typed status code. The point is the
+        // serial log, not a running process.
+        SpawnPeFile("ring3-winkill", fs::generated::kBinWinKillBytes, fs::generated::kBinWinKillBytes_len,
+                    CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
         return true;
     }
     return false;
@@ -1069,7 +1807,51 @@ void StartRing3SmokeTask()
     // Dropcaps demo: trusted task drops its caps mid-flight and
     // verifies subsequent SYS_WRITE is denied.
     SpawnDropcapsProbe();
-    Log(LogLevel::Info, "core/ring3", "ring3 smoke tasks queued (incl cpu-hog + hostile + dropcaps)");
+    // Priv-instruction probe: `cli` from ring 3 → #GP → task-kill.
+    // Proves CPL(3) > IOPL(0) enforcement is live — a sandboxed
+    // process cannot globally mask interrupts.
+    SpawnPrivProbeTask();
+    // Bad-int probe: `int 0x81` → gate-not-present → task-kill.
+    // Proves the trap dispatcher catches any ring-3 vector, not
+    // just the architectural 0..31 it installs handlers for.
+    SpawnBadIntProbeTask();
+    // Kernel-read probe: ring 3 dereferences a higher-half kernel
+    // VA → #PF (U/S mismatch) → task-kill. Proves the user-bit
+    // firewall between ring 3 and the kernel image.
+    SpawnKernelReadProbeTask();
+    // Ptrfuzz probe: trusted task hands four wild user pointers
+    // to SYS_WRITE in sequence. Proves `CopyFromUser` rejection
+    // path is robust — kernel never touches a bad address. Final
+    // control message confirms the task survived intact.
+    SpawnPtrFuzzProbeTask();
+    // Writefuzz probe: trusted task hands four wild DESTINATION
+    // pointers to SYS_STAT + SYS_READ. Proves `CopyToUser`
+    // rejection path is robust — no byte ever lands at a bad VA.
+    SpawnWriteFuzzProbeTask();
+    // First PE executable on the system. Freestanding, compiled
+    // from userland/apps/hello_pe/hello.c by the host clang +
+    // lld-link rule in kernel/CMakeLists.txt. Exercises the v0
+    // PE loader: DOS + NT header parse, section map, entry
+    // point dispatch. Expected output: "[hello-pe] Hello from a
+    // PE executable!" then clean exit.
+    SpawnPeFile("ring3-hello-pe", fs::generated::kBinHelloPeBytes, fs::generated::kBinHelloPeBytes_len, CapSetTrusted(),
+                fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    // First Win32 PE that gets RESOLVED (not just reported)
+    // by the kernel. Imports kernel32.dll!ExitProcess, hits
+    // the stub page, exits with code 42. See
+    // .claude/knowledge/win32-subsystem-v0.md.
+    SpawnPeFile("ring3-hello-winapi", fs::generated::kBinHelloWinapiBytes,
+                fs::generated::kBinHelloWinapiBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    // Real-world Windows PE diagnostic attempt. Expected to
+    // reject (most imports unresolved) — the value is the
+    // PeReport log line showing the full import / reloc / TLS
+    // gap. See .claude/knowledge/pe-subsystem-v0.md.
+    SpawnPeFile("ring3-winkill", fs::generated::kBinWinKillBytes, fs::generated::kBinWinKillBytes_len, CapSetTrusted(),
+                fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    Log(LogLevel::Info, "core/ring3",
+        "ring3 smoke tasks queued (incl cpu-hog + hostile + dropcaps + priv + badint + kread + "
+        "ptrfuzz + writefuzz + hellope + winkill-report)");
 }
 
 } // namespace customos::core

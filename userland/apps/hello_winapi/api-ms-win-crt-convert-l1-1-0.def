@@ -1,0 +1,17 @@
+; api-ms-win-crt-convert-l1-1-0.def
+;
+; UCRT apiset for string-to-number conversions. On real
+; Windows this DLL forwards to ucrtbase.dll. CustomOS resolves
+; the apiset name directly in the stub table. v0 implements
+; each as "return 0" — callers of strtoul typically check
+; errno for overflow or use a tentative-parse pattern, and
+; returning 0 is a plausible "parse failed / empty input"
+; answer that doesn't crash the caller.
+
+LIBRARY api-ms-win-crt-convert-l1-1-0.dll
+
+EXPORTS
+    strtoul
+    strtol
+    atoi
+    atol

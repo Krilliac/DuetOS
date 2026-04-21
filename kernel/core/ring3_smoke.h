@@ -52,6 +52,14 @@ void StartRing3SmokeTask();
 ///   hog      Infinite loop → killed by tick-budget.
 ///   hostile  Retries denied SYS_WRITE → killed by denial ceiling.
 ///   dropcaps Trusted task that voluntarily drops its caps.
+///   priv     Issues `cli` from ring 3 → #GP (CPL > IOPL).
+///   badint   Issues `int 0x81` → gate-not-present → task-kill.
+///   kread    Reads kernel-half VA → #PF (U/S mismatch) → kill.
+///   ptrfuzz  Trusted task; SYS_WRITE with 4 wild user pointers.
+///            Each must return -1; control print confirms survival.
+///   writefuzz Trusted task; SYS_STAT + SYS_READ with 4 wild
+///            destination pointers. Exercises CopyToUser's
+///            rejection paths (the write-side sibling of ptrfuzz).
 ///
 /// All spawned tasks are reaped cleanly through the normal
 /// scheduler path; the shell command returns immediately
@@ -74,5 +82,12 @@ bool SpawnOnDemand(const char* kind);
 /// cleaned up through AddressSpaceRelease.
 u64 SpawnElfFile(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps,
                  const fs::RamfsNode* root, u64 frame_budget, u64 tick_budget);
+
+/// PE/COFF twin of SpawnElfFile. Loads via the v0 PE loader
+/// (freestanding, no imports, no relocations) and queues a
+/// ring-3 task at the image's entry point. Same return-code
+/// and cleanup contract as SpawnElfFile.
+u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps,
+                const fs::RamfsNode* root, u64 frame_budget, u64 tick_budget);
 
 } // namespace customos::core

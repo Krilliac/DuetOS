@@ -147,6 +147,16 @@ AddressSpace* AddressSpaceCreate(u64 frame_budget);
 /// switching the child task in.
 void AddressSpaceMapUserPage(AddressSpace* as, u64 virt, PhysAddr frame, u64 flags);
 
+/// Reverse of MapUserPage: given a user VA, return the physical
+/// frame backing its containing page, or kNullFrame if unmapped.
+/// Walks the AS's `regions` array (small N, linear scan). Used
+/// by the PE loader to patch IAT slots from the kernel side
+/// without touching page-table flags — the kernel's direct map
+/// is always writable, so `PhysToVirt(LookupUserFrame(...))` is
+/// the shortest path to "modify this page that's currently RO
+/// in the user's view."
+PhysAddr AddressSpaceLookupUserFrame(const AddressSpace* as, u64 virt);
+
 /// Activate `as` by loading its PML4 into CR3 — but only if `as` is
 /// not already the active AS on this CPU. Updates the per-CPU
 /// current-AS tracker. `as == nullptr` selects the kernel AS (the

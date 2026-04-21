@@ -2,9 +2,11 @@
 
 #include "../arch/x86_64/idt.h"
 #include "../arch/x86_64/serial.h"
+#include "../arch/x86_64/timer.h"
 #include "../fs/vfs.h"
 #include "../mm/paging.h"
 #include "../sched/sched.h"
+#include "../subsystems/win32/heap.h"
 #include "klog.h"
 #include "process.h"
 #include "ring3_smoke.h"
@@ -154,6 +156,81 @@ void SyscallDispatch(arch::TrapFrame* frame)
         // half of the ABI: the dispatcher writes frame->rax and
         // isr_common's pop-all + iretq delivers it to ring 3.
         frame->rax = sched::CurrentTaskId();
+        return;
+    }
+
+    case SYS_GETPROCID:
+    {
+        // Process id, as distinct from task (scheduler) id. See
+        // the SYS_GETPROCID comment in syscall.h for why the two
+        // live in different counters. No caps needed — it's
+        // the caller's own pid.
+        Process* proc = CurrentProcess();
+        frame->rax = (proc != nullptr) ? proc->pid : 0;
+        return;
+    }
+
+    case SYS_GETLASTERROR:
+    {
+        // Read Process.win32_last_error. Unprivileged — the
+        // slot belongs to the caller. Returns 0 if no process
+        // (shouldn't happen from ring 3, but defensive).
+        Process* proc = CurrentProcess();
+        frame->rax = (proc != nullptr) ? u64(proc->win32_last_error) : 0;
+        return;
+    }
+
+    case SYS_SETLASTERROR:
+    {
+        // Write rdi (low 32 bits) into Process.win32_last_error.
+        // No return value (Win32 SetLastError is void). Still
+        // populate rax so the stub's epilogue doesn't leak the
+        // syscall number; use the PREVIOUS error so callers
+        // that want a read-modify-write can get it in one
+        // trip if we ever expose that pattern.
+        Process* proc = CurrentProcess();
+        if (proc != nullptr)
+        {
+            frame->rax = u64(proc->win32_last_error);
+            proc->win32_last_error = u32(frame->rdi & 0xFFFFFFFFULL);
+        }
+        else
+        {
+            frame->rax = 0;
+        }
+        return;
+    }
+
+    case SYS_HEAP_ALLOC:
+    {
+        // rdi = size in bytes. Returns user VA or 0 on OOM.
+        // See kernel/subsystems/win32/heap.cpp for the first-fit
+        // allocator. Unprivileged — every Win32 process gets
+        // its own heap mapped during PeLoad; the syscall only
+        // reads/writes that region through the process's own
+        // frames.
+        Process* proc = CurrentProcess();
+        frame->rax = (proc != nullptr) ? win32::Win32HeapAlloc(proc, frame->rdi) : 0;
+        return;
+    }
+
+    case SYS_HEAP_FREE:
+    {
+        // rdi = user ptr (or 0 for no-op). Returns 0.
+        Process* proc = CurrentProcess();
+        if (proc != nullptr)
+            win32::Win32HeapFree(proc, frame->rdi);
+        frame->rax = 0;
+        return;
+    }
+
+    case SYS_PERF_COUNTER:
+    {
+        // No args. Return the kernel tick counter —
+        // monotonically increasing u64 at 100 Hz. Used by
+        // the Win32 QueryPerformanceCounter + GetTickCount
+        // stubs.
+        frame->rax = arch::TimerTicks();
         return;
     }
 

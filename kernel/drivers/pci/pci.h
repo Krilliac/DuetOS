@@ -161,7 +161,7 @@ u8 PciFindCapability(DeviceAddress addr, u8 cap_id);
 //     pci::Bar table_bar = pci::PciReadBar(dev.addr, info.table_bir);
 //     void* table = mm::MapMmio(table_bar.address + info.table_offset,
 //                                info.table_size * sizeof(pci::MsixEntry));
-//     pci::PciMsixSetEntry(table, 0, bsp_apic_id, kVectorMyDevice);
+//     pci::PciMsixSetEntry(table, info.table_size, 0, bsp_apic_id, kVectorMyDevice);
 //     pci::PciMsixEnable(dev.addr);
 //
 // For x86_64, the message-address format is fixed: 0xFEE0_0000 |
@@ -201,14 +201,18 @@ bool PciMsixFind(DeviceAddress addr, MsixInfo* info);
 /// Program a single table entry to route IRQ (vector) to lapic_id
 /// using physical-destination + fixed-delivery + edge-triggered +
 /// assert. `table_base` is the virtual pointer returned by the
-/// caller's MapMmio of the table region.
-void PciMsixSetEntry(volatile void* table_base, u16 index, u8 lapic_id, u8 vector);
+/// caller's MapMmio of the table region; `table_size` is the
+/// capability-reported entry count and is used to bounds-check
+/// `index` — passing a stale or wrong size is a kernel panic,
+/// never a silent out-of-bounds write into adjacent MMIO.
+void PciMsixSetEntry(volatile void* table_base, u16 table_size, u16 index, u8 lapic_id, u8 vector);
 
 /// Mask (or unmask) a single table entry's vector_control bit 0.
 /// Safer than PciMsixEnable/Disable for per-vector gating once the
-/// overall function is already enabled.
-void PciMsixMaskEntry(volatile void* table_base, u16 index);
-void PciMsixUnmaskEntry(volatile void* table_base, u16 index);
+/// overall function is already enabled. `table_size` bounds-checks
+/// `index` (same contract as PciMsixSetEntry).
+void PciMsixMaskEntry(volatile void* table_base, u16 table_size, u16 index);
+void PciMsixUnmaskEntry(volatile void* table_base, u16 table_size, u16 index);
 
 /// Flip the Enable bit in the MSI-X message-control register, taking
 /// the device from "legacy INTx" to "fire MSI-X interrupts per table

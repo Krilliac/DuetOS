@@ -169,6 +169,32 @@ struct Process
     // task would be caught by ticks, a retrying task by denials.
     u64 sandbox_denials;
 
+    // Win32 last-error slot. Read + written by the kernel32
+    // GetLastError / SetLastError stubs via SYS_GETLASTERROR /
+    // SYS_SETLASTERROR. In real Windows this lives in the TEB
+    // at offset 0x68 (thread-local). v0 is single-task per
+    // process, so we park it on the Process struct and defer
+    // the per-thread TEB until multi-threading lands. Zero-
+    // initialised by ProcessCreate — matches the Win32
+    // convention that fresh processes see ERROR_SUCCESS (0).
+    u32 win32_last_error;
+
+    // Win32 process heap — a per-process free-list allocator.
+    // `heap_base` is the fixed user VA where heap pages start
+    // (kWin32HeapVa, 0x50000000). `heap_pages` is the count of
+    // pages currently mapped (zero if the PE had no imports and
+    // the loader didn't stand up a heap). `heap_free_head` is
+    // the user VA of the first free block's header; nullptr =
+    // empty free list (everything allocated or heap uninit).
+    //
+    // Managed by kernel/subsystems/win32/heap.cpp and mutated
+    // from SYS_HEAP_ALLOC / SYS_HEAP_FREE. A real Windows NT
+    // process has many heaps (default + LocalAlloc + HeapCreate
+    // returns); v0 collapses this to one process-wide heap.
+    u64 heap_base;
+    u64 heap_pages;
+    u64 heap_free_head;
+
     u64 refcount;
 };
 

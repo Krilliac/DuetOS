@@ -45,6 +45,9 @@ Makefile
 *.dylib
 *.dll
 *.exe
+# Real third-party Windows PE binaries vendored for the PE loader
+# diagnostic pipeline (kernel/core/pe_loader.cpp + PeReport).
+!userland/apps/**/*.exe
 *.pdb
 *.gch
 *.pch
