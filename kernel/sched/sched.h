@@ -105,6 +105,7 @@ enum class KillReason : u8
 {
     TickBudget = 1,    // CPU-tick budget exhausted (slice 14)
     SandboxDenialThreshold = 2, // too many cap-denials (slice 16)
+    UserKill = 3,      // shell `kill <pid>` / operator-initiated
     // Add new reasons at the end.
 };
 
@@ -232,6 +233,26 @@ struct SchedTaskInfo
 /// the timer tick mutating the lists mid-visit.
 using SchedEnumCb = void (*)(const SchedTaskInfo& info, void* cookie);
 void SchedEnumerate(SchedEnumCb cb, void* cookie);
+
+/// Result of a cross-task kill request.
+enum class KillResult : u8
+{
+    Signaled = 0,    // Task found and flagged for termination
+    NotFound = 1,    // No task with that PID
+    Protected = 2,   // Task is special (idle / reaper / PID 0)
+    AlreadyDead = 3, // Task is in the zombie list
+    Blocked = 4,     // Task is Blocked — v0 can't detach safely
+};
+const char* KillResultName(KillResult r);
+
+/// Flag a non-current task by PID for termination. For Running
+/// / Ready targets, the kill activates the next time Schedule()
+/// runs. For Sleeping targets, the task is lifted off the sleep
+/// queue and re-queued Ready so it runs and dies on its next
+/// slot. Blocked targets are not detached in v0 — the caller
+/// gets a Blocked result code and should try again after the
+/// task is woken by something else.
+KillResult SchedKillByPid(u64 pid);
 
 /// Start the dead-task reaper kernel thread. Run once after SchedInit +
 /// the keyboard/driver init pass. The reaper sleeps on a WaitQueue;

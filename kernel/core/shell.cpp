@@ -290,6 +290,7 @@ void CmdHelp()
     ConsoleWriteln("  FREE         MEMORY USAGE (PHYS + HEAP)");
     ConsoleWriteln("  PS           LIST EVERY SCHEDULER TASK");
     ConsoleWriteln("  SPAWN KIND   LAUNCH A RING-3 TASK (hello/sandbox/jail/...)");
+    ConsoleWriteln("  KILL PID     TERMINATE A TASK BY ID (USE `ps` TO FIND PIDS)");
     ConsoleWriteln("  READELF PATH PARSE AN ELF64 HEADER + PROGRAM HEADERS");
     ConsoleWriteln("  HEXDUMP PATH 16-BYTE ROWS OF HEX + ASCII");
     ConsoleWriteln("  STAT PATH    FILE / DIR METADATA");
@@ -1151,7 +1152,7 @@ static const char* const kCommandSet[] = {
     "mount",   "lsmod",   "free",    "ps",      "spawn",   "readelf",
     "hexdump", "stat",    "basename","dirname", "cal",
     "sleep",   "reset",   "tac",     "nl",      "rev",     "expr",
-    "color",   "rand",    "flushtlb","checksum","repeat",
+    "color",   "rand",    "flushtlb","checksum","repeat",   "kill",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -2128,6 +2129,54 @@ const char* SchedStateName(u8 s)
         return "DEAD ";
     default:
         return "?    ";
+    }
+}
+
+void CmdKill(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("KILL: USAGE: KILL PID");
+        return;
+    }
+    u64 pid = 0;
+    for (u32 i = 0; argv[1][i] != '\0'; ++i)
+    {
+        if (argv[1][i] < '0' || argv[1][i] > '9')
+        {
+            ConsoleWriteln("KILL: BAD PID");
+            return;
+        }
+        pid = pid * 10 + static_cast<u64>(argv[1][i] - '0');
+    }
+    const auto r = customos::sched::SchedKillByPid(pid);
+    switch (r)
+    {
+    case customos::sched::KillResult::Signaled:
+        ConsoleWrite("KILL: SIGNALED PID ");
+        WriteU64Dec(pid);
+        ConsoleWriteln(" (WILL DIE ON NEXT SCHEDULE)");
+        break;
+    case customos::sched::KillResult::NotFound:
+        ConsoleWrite("KILL: NO SUCH PID: ");
+        WriteU64Dec(pid);
+        ConsoleWriteChar('\n');
+        break;
+    case customos::sched::KillResult::Protected:
+        ConsoleWrite("KILL: PID ");
+        WriteU64Dec(pid);
+        ConsoleWriteln(" IS PROTECTED (idle/reaper/boot)");
+        break;
+    case customos::sched::KillResult::AlreadyDead:
+        ConsoleWrite("KILL: PID ");
+        WriteU64Dec(pid);
+        ConsoleWriteln(" IS ALREADY DEAD");
+        break;
+    case customos::sched::KillResult::Blocked:
+        ConsoleWrite("KILL: PID ");
+        WriteU64Dec(pid);
+        ConsoleWriteln(" IS BLOCKED — FLAGGED, WILL DIE WHEN WOKEN");
+        break;
     }
 }
 
@@ -4126,6 +4175,11 @@ void Dispatch(char* line)
     if (StrEq(cmd, "spawn"))
     {
         CmdSpawn(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "kill"))
+    {
+        CmdKill(argc, argv);
         return;
     }
     if (StrEq(cmd, "readelf"))
