@@ -607,6 +607,106 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 109 — SYS_SPAWN = 7 — ring-3 can spawn ring-3 from an ELF path
+
+- **Scope:** `kernel/core/syscall.{h,cpp}` — new `SYS_SPAWN`
+  enum value + dispatcher case. Gated on `kCapFsRead` (the
+  same cap that lets a process name a file path in `SYS_STAT`
+  / `SYS_READ`). `rdi` = user pointer to path, `rsi` = path
+  length. Returns child pid on success, `(u64)-1` on failure.
+- **Decision:**
+  - Inherit the caller's caps + namespace root (POSIX
+    fork+exec shape: "spawn from a path, same privileges
+    down"). A child that needs lower privileges drops caps
+    post-spawn via `SYS_DROPCAPS`, matching the existing
+    deprivilege pattern.
+  - Cap check is on `kCapFsRead` rather than a new
+    `kCapSpawn` — the observable primitive is "the caller
+    named a file path," which is exactly what `kCapFsRead`
+    already gates in STAT/READ. Avoids cap-set inflation.
+  - `VfsLookup` runs against `proc->root`, so a sandboxed
+    caller can only spawn binaries reachable from its own
+    namespace — matching the existing jail semantics.
+  - Budgets (`kFrameBudgetTrusted`, `kTickBudgetTrusted`) are
+    hard-coded for v0; differentiated budgets per child land
+    when a use case demands.
+- **Why:** Completes the ring-3 story started in entries #107
+  (ELF validator) + #108 (ElfLoad). With this, a ring-3
+  program written as a byte payload wrapped in an ELF can
+  call `int 0x80` with `eax=7` to launch peers, closing the
+  self-hosting loop.
+- **Rules out / defers:** Separate `kCapSpawn` cap. Explicit
+  budget args in the syscall. Exec-in-place semantics
+  (replace calling process's AS — POSIX `execve`). Arguments
+  / environment passed to the child. Parent-child process
+  graph for exit-code waiting. Spawn-with-reduced-caps via a
+  pre-spawn DROPCAPS variant.
+- **Revisit when:** First ring-3 program wants argv / env.
+  Parent / child lifecycle matters (`waitpid` analogue).
+  Toolchain lands that compiles real programs.
+- **Related tracks:** Track 4 (Process — spawn syscall ABI),
+  Track 7 (Userland — in-ring-3 launcher shape).
+
+---
+
+## 108 — `ElfLoad` — populate an AddressSpace from a validated ELF
+
+- **Scope:** `kernel/core/elf_loader.{h,cpp}` extended with
+  `ElfLoadResult` struct + `ElfLoad(file, len, AddressSpace*)`.
+  `kernel/fs/ramfs.cpp` — `/bin/sample.elf` replaced with
+  runnable 129-byte `/bin/exit.elf` (header + PT_LOAD + 9 bytes
+  of `mov eax,0; xor edi,edi; int 0x80`). `kernel/core/
+  ring3_smoke.{h,cpp}` — `Ring3UserEntry` promoted out of the
+  anon namespace; new `SpawnElfFile` wraps the full AS → ELF →
+  Process → SchedCreateUser pipeline. `kernel/core/shell.cpp`
+  — `CmdExec`'s dry-run print is now followed by a real
+  `SpawnElfFile` call.
+- **Decision:**
+  - Per-page frame allocation. Each 4 KiB page of
+    `[vaddr & ~page_mask, (vaddr+memsz+mask) & ~mask)` gets
+    its own frame from `AllocateFrame`. Frames are
+    zero-on-alloc (frame allocator contract), so the
+    `memsz - filesz` .bss tail is free — no explicit zeroing
+    required.
+  - Page-level flag derivation: `kPagePresent | kPageUser`
+    always; `kPageWritable` iff `PF_W`; `kPageNoExecute` iff
+    NOT `PF_X`. The U-bit is forced on by
+    `AddressSpaceMapUserPage` regardless.
+  - Fixed v0 stack VA `0x7FFFE000` (one page below top of
+    canonical 32-bit low), mapped `R|W|U|NX`. Clear of any
+    typical PT_LOAD at 0x400000.
+  - On partial failure (AllocateFrame OOM mid-walk):
+    `ElfLoadResult::ok = false`, partial mappings left to
+    the caller's `AddressSpaceRelease` to tear down.
+    Rationale: the v0 AS tracks its user-region table and
+    its destructor already handles teardown; duplicating
+    that unwind here would drift from the canonical
+    release path.
+  - `/bin/exit.elf` uses `p_align = 1` so the file stays
+    compact (129 bytes) rather than padding to match
+    `p_offset % p_align == p_vaddr % p_align` for
+    p_align=4096. ElfValidate skips the alignment check
+    when `p_align <= 1`.
+- **Why:** Closes the gap between "ELF parser works" (entry
+  #107) and "ring-3 tasks can actually run from files."
+  `exec /bin/exit.elf` now produces a real process that
+  takes the SYS_EXIT path — end-to-end proof the pipeline
+  works, unblocking SYS_SPAWN (entry #109) and any future
+  user-mode toolchain.
+- **Rules out / defers:** Multi-MiB binaries (stack VA is
+  fixed; a PT_LOAD reaching 0x7FFFE000 would collide). PIE /
+  relocated e_entry. ET_DYN files with DT_NEEDED. PT_INTERP
+  (dynamic linker handoff). Per-task stack guard pages.
+- **Revisit when:** Toolchain lands (ELFs produced by a
+  cross-compiler have bigger PT_LOADs + possibly dynamic
+  relocation). First PIE executable arrives.
+- **Related tracks:** Track 4 (Process model — loader is
+  the mouth of every user-mode launch path), Track 3 (MM —
+  ElfLoad is now one of the two callers of
+  `AddressSpaceMapUserPage`, alongside the smoke tasks).
+
+---
+
 ## 107 — Proper ELF64 loader module + `exec` dry-run command
 
 - **Scope:** `kernel/core/elf_loader.{h,cpp}` — new module.
