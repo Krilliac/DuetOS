@@ -607,6 +607,54 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 106 — Cross-task `kill` by PID + KillResult taxonomy
+
+- **Scope:** `kernel/sched/sched.{h,cpp}` — new
+  `KillReason::UserKill`, `KillResult` enum, and
+  `SchedKillByPid(pid)` that walks every task list under
+  Cli() to find the target, applies a state-specific
+  detach, and sets `kill_requested` + `kill_reason`.
+  Reserved tasks (pid 0, reaper, idle-*) are rejected as
+  Protected. `kernel/core/shell.cpp` — `kill PID` command
+  translates KillResult to user messages.
+- **Decision:** State-specific behaviour:
+    Running / Ready  — flag only; Schedule() handles.
+    Sleeping         — lift off sleep queue, re-queue Ready
+                       (and decrement g_tasks_sleeping).
+    Blocked          — flag only; caller gets `Blocked`
+                       result. v0 has no safe cross-queue
+                       detach — doing one would race the
+                       WaitQueue's producer mid-enqueue.
+                       The task dies when its normal
+                       producer next wakes it.
+    Dead             — reports `AlreadyDead`.
+  Protected list enforces three hard-coded safety rules
+  (boot task id==0, name=="reaper", name starts with
+  "idle-"). Killing any of those would break scheduler
+  invariants (empty runqueue, leaked zombies, broken
+  boot-stack alias).
+- **Why:** The `spawn` command lets users start ring-3
+  tasks interactively but they ran to their own
+  tick-budget / denial-ceiling ends; users couldn't
+  terminate them on demand. `kill` closes that loop and
+  makes interactive process management possible.
+- **Rules out / defers:** Safe cross-WaitQueue detach
+  (requires a global queue-registry or per-queue spinlock
+  — neither exists). Signals (SIGTERM / SIGKILL / SIGINT
+  as a real ABI). Group kills by parent or name prefix.
+  `kill -9` / `kill -15` semantics. Kill notification to
+  parent process (no parent/child graph yet).
+- **Revisit when:** SMP scheduler lands (need per-cpu
+  locks instead of global Cli). SIGINT-style signals
+  arrive. Parent/child process graph lands (zombie
+  delivery to parent). WaitQueue registry lands (then
+  Blocked kills work).
+- **Related tracks:** Track 2 (Scheduler — kill path),
+  Track 4 (Process — lifecycle), Track 7 (Userland shell
+  — `kill` command).
+
+---
+
 ## 105 — Shell utility batch (sleep / reset / tac / nl / rev / expr / color / rand / flushtlb / checksum / repeat)
 
 - **Scope:** `kernel/core/shell.cpp` — eleven commands in
