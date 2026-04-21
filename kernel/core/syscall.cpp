@@ -7,6 +7,7 @@
 #include "../sched/sched.h"
 #include "klog.h"
 #include "process.h"
+#include "ring3_smoke.h"
 
 // Defined in exceptions.S (via `ISR_NOERR 128`) — the .global label for
 // the int-0x80 stub. SyscallInit installs its address into the IDT with
@@ -348,6 +349,88 @@ void SyscallDispatch(arch::TrapFrame* frame)
         arch::SerialWriteHex(size);
         arch::SerialWrite("\n");
         frame->rax = 0;
+        return;
+    }
+
+    case SYS_SPAWN:
+    {
+        // rdi = user path pointer, rsi = path length.
+        // Inherits caller's caps + namespace root — a sandboxed
+        // process spawning a binary gets an equally-sandboxed
+        // child. Cap-gated on kCapFsRead because the observable
+        // primitive is "the caller named a file path"; without
+        // it, even the lookup is not something the process is
+        // authorised to perform.
+        Process* proc = CurrentProcess();
+        if (proc == nullptr || !CapSetHas(proc->caps, kCapFsRead))
+        {
+            const u64 pid = (proc != nullptr) ? proc->pid : 0;
+            RecordSandboxDenial(kCapFsRead);
+            if (proc != nullptr && ShouldLogDenial(proc->sandbox_denials))
+            {
+                arch::SerialWrite("[sys] denied syscall=SYS_SPAWN pid=");
+                arch::SerialWriteHex(pid);
+                arch::SerialWrite(" cap=");
+                arch::SerialWrite(CapName(kCapFsRead));
+                arch::SerialWrite(" denial_idx=");
+                arch::SerialWriteHex(proc->sandbox_denials);
+                arch::SerialWrite("\n");
+            }
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        char kpath[kSyscallPathMax];
+        u64 plen = frame->rsi;
+        if (plen >= kSyscallPathMax)
+        {
+            plen = kSyscallPathMax - 1;
+        }
+        if (plen == 0)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        if (!mm::CopyFromUser(kpath, reinterpret_cast<const void*>(frame->rdi), plen))
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        kpath[plen] = '\0';
+        const fs::RamfsNode* n = fs::VfsLookup(proc->root, kpath, kSyscallPathMax);
+        if (n == nullptr || n->type != fs::RamfsNodeType::kFile)
+        {
+            arch::SerialWrite("[sys] spawn miss pid=");
+            arch::SerialWriteHex(proc->pid);
+            arch::SerialWrite(" path=\"");
+            arch::SerialWrite(kpath);
+            arch::SerialWrite("\"\n");
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        // Inherit caps + root + trusted budgets. Later slices can
+        // differentiate spawn from a sandboxed parent by dropping
+        // caps after SpawnElfFile.
+        const u64 child_pid =
+            SpawnElfFile(kpath, n->file_bytes, n->file_size, proc->caps, proc->root,
+                         mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        if (child_pid == 0)
+        {
+            arch::SerialWrite("[sys] spawn fail pid=");
+            arch::SerialWriteHex(proc->pid);
+            arch::SerialWrite(" path=\"");
+            arch::SerialWrite(kpath);
+            arch::SerialWrite("\"\n");
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        arch::SerialWrite("[sys] spawn ok parent=");
+        arch::SerialWriteHex(proc->pid);
+        arch::SerialWrite(" child=");
+        arch::SerialWriteHex(child_pid);
+        arch::SerialWrite(" path=\"");
+        arch::SerialWrite(kpath);
+        arch::SerialWrite("\"\n");
+        frame->rax = child_pid;
         return;
     }
 

@@ -62,6 +62,16 @@ enum SyscallNumber : u64
     // syscall itself (anyone can make themselves LESS
     // privileged).
     SYS_DROPCAPS = 6,
+    // SYS_SPAWN: rdi = user pointer to NUL-terminated ELF path,
+    // rsi = path length (caller-supplied to bound the CopyFromUser).
+    // Returns the new child pid on success, or (u64)-1 on any
+    // failure (cap missing, path out of jail, not a file, invalid
+    // ELF, OOM). Gated on kCapFsRead (file-path access is the
+    // observable primitive) — a sandbox without it can't name
+    // a binary to spawn in the first place. The child inherits
+    // the caller's CapSet + namespace root (POSIX fork+exec
+    // shape: spawn-from-path, same privileges down).
+    SYS_SPAWN = 7,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit
