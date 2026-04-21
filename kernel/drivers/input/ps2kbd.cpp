@@ -157,8 +157,8 @@ constinit bool g_ctrl_held = false;
 constinit bool g_alt_held = false;
 constinit bool g_meta_held = false;
 
-constexpr u8 kScanLCtrl = 0x1D;  // RCtrl is 0xE0-prefixed with same byte
-constexpr u8 kScanLAlt = 0x38;   // RAlt / AltGr similarly 0xE0-prefixed
+constexpr u8 kScanLCtrl = 0x1D; // RCtrl is 0xE0-prefixed with same byte
+constexpr u8 kScanLAlt = 0x38;  // RAlt / AltGr similarly 0xE0-prefixed
 constexpr u8 kScanEscape = 0x01;
 constexpr u8 kScanBackspace = 0x0E;
 constexpr u8 kScanTab = 0x0F;
@@ -567,6 +567,59 @@ char Ps2KeyboardReadChar()
         KASSERT(resolved != 0, "drivers/ps2kbd", "keymap inconsistency");
         return resolved;
     }
+}
+
+char Ps2KeyboardTryReadChar()
+{
+    // Non-blocking single-step of the scan-code decoder. If the
+    // ring is empty, return 0 without touching state. If a byte
+    // is pending but it's a modifier / release / unmapped key,
+    // consume it and still return 0 — the caller's next poll will
+    // try the following byte. Only a genuine printable keypress
+    // returns a non-zero char.
+    if (g_ring_head == g_ring_tail)
+    {
+        return 0;
+    }
+    const u8 sc = g_ring[g_ring_tail & kRingMask];
+    ++g_ring_tail;
+
+    if (sc == kScanExtendedPrefix)
+    {
+        g_extended_pending = true;
+        return 0;
+    }
+    const bool released = (sc & kScanBreakBit) != 0;
+    const u8 code = static_cast<u8>(sc & ~kScanBreakBit);
+    if (g_extended_pending)
+    {
+        g_extended_pending = false;
+        return 0;
+    }
+    if (code == kScanLShift || code == kScanRShift)
+    {
+        g_shift_held = !released;
+        return 0;
+    }
+    if (code == kScanCapsLock)
+    {
+        if (!released)
+            g_capslock_on = !g_capslock_on;
+        return 0;
+    }
+    if (released || code >= kKeymapSize)
+    {
+        return 0;
+    }
+    const char lower = kKeymapLower[code];
+    if (lower == 0)
+    {
+        return 0;
+    }
+    const bool is_letter = (lower >= 'a' && lower <= 'z');
+    const bool use_upper = is_letter ? (g_shift_held != g_capslock_on) : g_shift_held;
+    const char resolved = use_upper ? kKeymapUpper[code] : lower;
+    return resolved;
 }
 
 namespace

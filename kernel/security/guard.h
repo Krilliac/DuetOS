@@ -124,9 +124,25 @@ u64 GuardWarnCount();
 u64 GuardDenyCount();
 const Report* GuardLastReport();
 
+/// Quick-path gate for thread creation. Bytes/size are null (a
+/// thread is a function pointer, not an image), so only the
+/// name-based deny list applies. Separate entry so callers don't
+/// have to construct an ImageDescriptor.
+bool GateThread(ImageKind kind, const char* name);
+
+/// Load the persistent allow-list from tmpfs (one hex FNV-1a
+/// hash per line). Called from GuardInit. Safe if the file is
+/// absent — missing file means an empty allowlist.
+void GuardLoadAllowlist();
+
+/// Append a hash to the persistent allowlist. Called by the
+/// prompter when the user answers "yes" so the same image is
+/// pre-allowed on the next boot.
+void GuardRememberAllow(u64 hash);
+
 /// Boot-time init: zero counters, seed the allow/deny tables,
-/// drop into the default mode (Advisory). Safe to call twice;
-/// second call is a no-op with a Warn log.
+/// load the persistent allowlist from tmpfs, drop into Advisory
+/// mode. Safe to call twice; second call is a no-op with a Warn log.
 void GuardInit();
 
 /// Boot-time self-test: synthesise a few fake images (clean ELF,

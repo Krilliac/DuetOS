@@ -10,6 +10,7 @@
 #include "../cpu/percpu.h"
 #include "../mm/address_space.h"
 #include "../mm/frame_allocator.h"
+#include "../security/guard.h"
 #include "../mm/kheap.h"
 #include "../mm/paging.h"
 #include "../sync/spinlock.h"
@@ -359,9 +360,9 @@ void SchedInit()
     boot_task->waiting_on = nullptr;
     boot_task->wake_by_timeout = false;
     boot_task->priority = TaskPriority::Normal;
-    boot_task->as = nullptr;           // kernel AS — boot PML4
-    boot_task->process = nullptr;      // kernel-only — no owning process
-    boot_task->kill_requested = false; // kernel tasks never hit a budget
+    boot_task->as = nullptr;                         // kernel AS — boot PML4
+    boot_task->process = nullptr;                    // kernel-only — no owning process
+    boot_task->kill_requested = false;               // kernel tasks never hit a budget
     boot_task->kill_reason = KillReason::TickBudget; // unused when kill_requested=false
 
     Current() = boot_task;
@@ -472,6 +473,14 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
 
 Task* SchedCreate(TaskEntry entry, void* arg, const char* name, TaskPriority priority)
 {
+    // Name-based security gate. No image bytes to scan at this
+    // layer — that happens in the loader before entry is ever
+    // handed to the scheduler — so this catches only filename
+    // denylist hits. Returns a null Task if the guard denies.
+    if (!customos::security::GateThread(customos::security::ImageKind::KernelThread, name))
+    {
+        return nullptr;
+    }
     return SchedCreateInternal(entry, arg, name, priority, /*as=*/nullptr);
 }
 
@@ -479,6 +488,11 @@ Task* SchedCreateUser(TaskEntry entry, void* arg, const char* name, core::Proces
 {
     KASSERT(process != nullptr, "sched", "SchedCreateUser without Process");
     KASSERT(process->as != nullptr, "sched", "SchedCreateUser Process has no AS");
+
+    if (!customos::security::GateThread(customos::security::ImageKind::UserThread, name))
+    {
+        return nullptr;
+    }
 
     Task* t = SchedCreateInternal(entry, arg, name, TaskPriority::Normal, process->as);
     t->process = process;

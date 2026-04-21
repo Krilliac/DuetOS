@@ -5,6 +5,9 @@
 #include "../arch/x86_64/serial.h"
 #include "../core/klog.h"
 #include "../core/types.h"
+#include "../drivers/input/ps2kbd.h"
+#include "../drivers/video/framebuffer.h"
+#include "../fs/tmpfs.h"
 
 namespace customos::security
 {
@@ -26,6 +29,19 @@ constinit u64 g_warn_count = 0;
 constinit u64 g_deny_count = 0;
 constinit Report g_last_report = {};
 constinit bool g_init_done = false;
+
+// Persistent allow-list, keyed by FNV-1a image hash. A hash that
+// landed here during a previous boot (because the user answered
+// "yes" at a prompt) short-circuits Inspect -> Allow. Capacity is
+// static so the allowlist survives the life of the kernel without
+// depending on kmalloc.
+constexpr u32 kMaxAllowed = 256;
+constinit u64 g_allowed_hashes[kMaxAllowed] = {};
+constinit u32 g_allowed_count = 0;
+
+// Path the persistent allowlist lives at inside tmpfs. Flat-name
+// space, no subdirectories (matches existing tmpfs conventions).
+constexpr const char* kAllowlistPath = "guard-allowed";
 
 // ---------------------------------------------------------------
 // Policy tables.
@@ -421,14 +437,184 @@ u64 HpetTicksToMs(u64 ticks)
     return (ticks * period_fs) / 1'000'000'000'000ull;
 }
 
-bool PromptSerial(const ImageDescriptor& desc, const Report& r)
+// ---------------------------------------------------------------
+// Persistent allowlist (tmpfs-backed).
+// ---------------------------------------------------------------
+
+bool IsHashAllowed(u64 h)
 {
+    for (u32 i = 0; i < g_allowed_count; ++i)
+    {
+        if (g_allowed_hashes[i] == h)
+            return true;
+    }
+    return false;
+}
+
+void AppendAllowedHash(u64 h)
+{
+    if (g_allowed_count >= kMaxAllowed)
+    {
+        arch::SerialWrite("[guard] allowlist full (256 entries); dropping new entry\n");
+        return;
+    }
+    g_allowed_hashes[g_allowed_count++] = h;
+}
+
+// Parse a 16-char hex byte into a u64 nibble count; accepts lower
+// or upper hex. Returns -1 on any non-hex character.
+i32 HexNibble(char c)
+{
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    if (c >= 'a' && c <= 'f')
+        return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F')
+        return c - 'A' + 10;
+    return -1;
+}
+
+// One line of the allowlist file: 16 hex chars + '\n'. Returns
+// the parsed hash in `*out`. False on malformed line.
+bool ParseHashLine(const char* line, u64 len, u64* out)
+{
+    if (len < 16)
+        return false;
+    u64 h = 0;
+    for (u32 i = 0; i < 16; ++i)
+    {
+        const i32 n = HexNibble(line[i]);
+        if (n < 0)
+            return false;
+        h = (h << 4) | static_cast<u64>(n);
+    }
+    *out = h;
+    return true;
+}
+
+void LoadAllowlist()
+{
+    const char* bytes = nullptr;
+    u32 len = 0;
+    if (!customos::fs::TmpFsRead(kAllowlistPath, &bytes, &len))
+    {
+        arch::SerialWrite("[guard] no persistent allowlist (first boot or cleared)\n");
+        return;
+    }
+    u32 i = 0;
+    while (i < len)
+    {
+        // Find end of line.
+        u32 j = i;
+        while (j < len && bytes[j] != '\n')
+            ++j;
+        u64 h = 0;
+        if (ParseHashLine(bytes + i, j - i, &h))
+        {
+            AppendAllowedHash(h);
+        }
+        i = j + 1;
+    }
+    arch::SerialWrite("[guard] loaded allowlist: ");
+    arch::SerialWriteHex(g_allowed_count);
+    arch::SerialWrite(" entries\n");
+}
+
+void SaveAllowlist()
+{
+    // Render the whole list back out. 16 hex chars + '\n' per
+    // entry = 17 bytes; cap at kMaxAllowed so the buffer is
+    // bounded. tmpfs writes are cheap; we rewrite the whole file
+    // rather than tracking diffs.
+    static char buf[kMaxAllowed * 17 + 1];
+    u32 w = 0;
+    for (u32 i = 0; i < g_allowed_count; ++i)
+    {
+        const u64 h = g_allowed_hashes[i];
+        for (u32 k = 0; k < 16; ++k)
+        {
+            const u32 shift = (15 - k) * 4;
+            const u8 nib = static_cast<u8>((h >> shift) & 0xF);
+            buf[w++] = static_cast<char>(nib < 10 ? '0' + nib : 'a' + nib - 10);
+        }
+        buf[w++] = '\n';
+    }
+    customos::fs::TmpFsTouch(kAllowlistPath);
+    customos::fs::TmpFsWrite(kAllowlistPath, buf, w);
+}
+
+// ---------------------------------------------------------------
+// GUI modal. Draws a centered dialog on the framebuffer. Poll
+// loop unified with the serial reader so the user can answer
+// from either channel.
+// ---------------------------------------------------------------
+
+void DrawModal(const ImageDescriptor& desc, const Report& r)
+{
+    if (!customos::drivers::video::FramebufferAvailable())
+        return;
+    const auto info = customos::drivers::video::FramebufferGet();
+    namespace fb = customos::drivers::video;
+
+    // Modal dimensions: 600x240, centred. 8x8 font so a 70-char
+    // line fits in ~560 px. Colours: RED border, dark grey body,
+    // white text. Matches the kernel's existing console palette
+    // so users read it as "this is a system dialog", not "this
+    // is an app".
+    constexpr u32 kBorderRgb = 0xCC2222;
+    constexpr u32 kBodyRgb = 0x101418;
+    constexpr u32 kTextRgb = 0xEEEEEE;
+    constexpr u32 kHeaderRgb = 0xFFCC00;
+
+    const u32 mw = 600, mh = 240;
+    const u32 mx = (info.width > mw) ? (info.width - mw) / 2 : 0;
+    const u32 my = (info.height > mh) ? (info.height - mh) / 2 : 0;
+
+    fb::FramebufferFillRect(mx, my, mw, mh, kBodyRgb);
+    fb::FramebufferDrawRect(mx, my, mw, mh, kBorderRgb, 3);
+
+    fb::FramebufferDrawString(mx + 16, my + 12, "!! SECURITY GUARD PROMPT !!", kHeaderRgb, kBodyRgb);
+    fb::FramebufferDrawString(mx + 16, my + 40, "image  :", kTextRgb, kBodyRgb);
+    fb::FramebufferDrawString(mx + 96, my + 40, desc.name, kTextRgb, kBodyRgb);
+    fb::FramebufferDrawString(mx + 16, my + 56, "kind   :", kTextRgb, kBodyRgb);
+    fb::FramebufferDrawString(mx + 96, my + 56, KindName(desc.kind), kTextRgb, kBodyRgb);
+    fb::FramebufferDrawString(mx + 16, my + 72, "verdict:", kTextRgb, kBodyRgb);
+    fb::FramebufferDrawString(mx + 96, my + 72, VerdictName(r.verdict), kBorderRgb, kBodyRgb);
+
+    u32 line_y = my + 100;
+    fb::FramebufferDrawString(mx + 16, line_y, "findings:", kTextRgb, kBodyRgb);
+    for (u32 i = 0; i < r.finding_count && i < 4; ++i)
+    {
+        line_y += 16;
+        fb::FramebufferDrawString(mx + 32, line_y, FindingName(r.findings[i].code), kTextRgb, kBodyRgb);
+    }
+
+    fb::FramebufferDrawString(mx + 16, my + mh - 40, "Allow [y]   Deny [n]   (10s default-deny)", kHeaderRgb, kBodyRgb);
+}
+
+void DrawModalDecision(const char* what, u32 rgb)
+{
+    if (!customos::drivers::video::FramebufferAvailable())
+        return;
+    const auto info = customos::drivers::video::FramebufferGet();
+    namespace fb = customos::drivers::video;
+    const u32 mw = 600, mh = 240;
+    const u32 mx = (info.width > mw) ? (info.width - mw) / 2 : 0;
+    const u32 my = (info.height > mh) ? (info.height - mh) / 2 : 0;
+    fb::FramebufferDrawString(mx + 16, my + mh - 20, what, rgb, 0x101418);
+}
+
+bool PromptUser(const ImageDescriptor& desc, const Report& r)
+{
+    // Unified prompt: draws the modal dialog (if framebuffer is
+    // live) AND emits the serial text. Answer accepted from
+    // whichever channel responds first. 10s default-deny.
     using arch::SerialWrite;
     SerialWrite("\n[guard] ========================================\n");
-    SerialWrite("[guard]  SECURITY GUARD PROMPT (serial)\n");
-    SerialWrite("[guard]    image : ");
+    SerialWrite("[guard]  SECURITY GUARD PROMPT\n");
+    SerialWrite("[guard]    image  : ");
     SerialWrite(desc.name);
-    SerialWrite("\n[guard]    kind  : ");
+    SerialWrite("\n[guard]    kind   : ");
     SerialWrite(KindName(desc.kind));
     SerialWrite("\n[guard]    verdict: ");
     SerialWrite(VerdictName(r.verdict));
@@ -439,8 +625,9 @@ bool PromptSerial(const ImageDescriptor& desc, const Report& r)
         SerialWrite(FindingName(r.findings[i].code));
         SerialWrite("\n");
     }
-    SerialWrite("[guard]  Allow [y] / Deny [n] — 10s default-deny.\n");
-    SerialWrite("[guard]  > ");
+    SerialWrite("[guard]  Allow [y] / Deny [n] — 10s default-deny. > ");
+
+    DrawModal(desc, r);
 
     const u64 start = arch::HpetReadCounter();
     for (;;)
@@ -450,20 +637,35 @@ bool PromptSerial(const ImageDescriptor& desc, const Report& r)
             const u8 c = SerialRxChar();
             if (c == 'y' || c == 'Y')
             {
-                SerialWrite("y\n[guard] user ALLOWED override\n");
+                SerialWrite("y (serial)\n[guard] user ALLOWED override\n");
+                DrawModalDecision("*** ALLOWED BY USER ***", 0x66EE66);
                 return true;
             }
             if (c == 'n' || c == 'N')
             {
-                SerialWrite("n\n[guard] user DENIED\n");
+                SerialWrite("n (serial)\n[guard] user DENIED\n");
+                DrawModalDecision("*** DENIED BY USER ***", 0xEE6666);
                 return false;
             }
-            // Ignore other chars, keep polling.
+        }
+        const char k = customos::drivers::input::Ps2KeyboardTryReadChar();
+        if (k == 'y' || k == 'Y')
+        {
+            SerialWrite("y (keyboard)\n[guard] user ALLOWED override\n");
+            DrawModalDecision("*** ALLOWED BY USER ***", 0x66EE66);
+            return true;
+        }
+        if (k == 'n' || k == 'N')
+        {
+            SerialWrite("n (keyboard)\n[guard] user DENIED\n");
+            DrawModalDecision("*** DENIED BY USER ***", 0xEE6666);
+            return false;
         }
         const u64 now = arch::HpetReadCounter();
         if (HpetTicksToMs(now - start) >= 10'000)
         {
             SerialWrite("\n[guard] prompt timeout: default-deny\n");
+            DrawModalDecision("*** TIMEOUT: DEFAULT-DENY ***", 0xEE6666);
             return false;
         }
         asm volatile("pause" ::: "memory");
@@ -500,6 +702,22 @@ bool Gate(const ImageDescriptor& desc)
         return true;
     }
 
+    // Persistent-allowlist short-circuit. A hash the user previously
+    // said "yes" to skips heuristics entirely. Saves the prompt on
+    // every subsequent boot for apps the user has already vouched for.
+    if (desc.bytes != nullptr && desc.size > 0)
+    {
+        const u64 h = Fnv1aHash(desc.bytes, desc.size);
+        if (IsHashAllowed(h))
+        {
+            ++g_allow_count;
+            arch::SerialWrite("[guard] allowlist hit (pre-approved): ");
+            arch::SerialWrite(desc.name);
+            arch::SerialWrite("\n");
+            return true;
+        }
+    }
+
     const Report r = Inspect(desc);
     CopyReport(g_last_report, r);
     LogReport(desc, r);
@@ -514,8 +732,15 @@ bool Gate(const ImageDescriptor& desc)
         ++g_warn_count;
         if (g_mode == Mode::Advisory)
             return true;
-        // Enforce: prompt.
-        return PromptSerial(desc, r);
+        // Enforce: prompt, and remember on allow.
+        {
+            const bool allowed = PromptUser(desc, r);
+            if (allowed && desc.bytes != nullptr && desc.size > 0)
+            {
+                GuardRememberAllow(Fnv1aHash(desc.bytes, desc.size));
+            }
+            return allowed;
+        }
 
     case Verdict::Deny:
         ++g_deny_count;
@@ -524,9 +749,39 @@ bool Gate(const ImageDescriptor& desc)
             arch::SerialWrite("[guard] advisory: would DENY (mode=Advisory, allowing)\n");
             return true;
         }
-        return PromptSerial(desc, r);
+        {
+            const bool allowed = PromptUser(desc, r);
+            if (allowed && desc.bytes != nullptr && desc.size > 0)
+            {
+                GuardRememberAllow(Fnv1aHash(desc.bytes, desc.size));
+            }
+            return allowed;
+        }
     }
     return true;
+}
+
+bool GateThread(ImageKind kind, const char* name)
+{
+    // Threads have no image bytes — only name-based checks apply.
+    // Cheap: Inspect will run CheckNameDeny and short-circuit on
+    // the other heuristics (all guarded by `bytes != nullptr`).
+    ImageDescriptor d{kind, name != nullptr ? name : "(thread)", nullptr, 0};
+    return Gate(d);
+}
+
+void GuardLoadAllowlist()
+{
+    LoadAllowlist();
+}
+
+void GuardRememberAllow(u64 hash)
+{
+    if (IsHashAllowed(hash))
+        return;
+    AppendAllowedHash(hash);
+    SaveAllowlist();
+    arch::SerialWrite("[guard] allow-remembered: hash added to persistent allowlist\n");
 }
 
 Mode GuardMode()
@@ -595,7 +850,9 @@ void GuardInit()
     g_warn_count = 0;
     g_deny_count = 0;
     VZero(&g_last_report, sizeof(g_last_report));
+    g_allowed_count = 0;
     arch::SerialWrite("[guard] init (mode=advisory)\n");
+    LoadAllowlist();
 }
 
 void GuardSelfTest()

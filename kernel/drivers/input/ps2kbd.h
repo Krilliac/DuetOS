@@ -63,6 +63,13 @@ u8 Ps2KeyboardRead();
 /// results. Pick one API per reader thread.
 char Ps2KeyboardReadChar();
 
+/// Non-blocking: return one pending ASCII char, or 0 if the ring
+/// is empty. Used by the security guard prompt to poll both COM1
+/// and the keyboard in one loop without taking the lock away from
+/// the shell reader task. Releases / modifier scancodes consume a
+/// byte and return 0 (the release is still swallowed).
+char Ps2KeyboardTryReadChar();
+
 // ---------------------------------------------------------------
 // Higher-level KeyEvent API.
 //
@@ -126,9 +133,9 @@ enum KeyCode : u16
 
 struct KeyEvent
 {
-    u16 code;         // KeyCode value or printable-ASCII byte
-    u8 modifiers;     // bitmask of KeyModifier
-    bool is_release;  // false = press (or auto-repeat), true = release
+    u16 code;        // KeyCode value or printable-ASCII byte
+    u8 modifiers;    // bitmask of KeyModifier
+    bool is_release; // false = press (or auto-repeat), true = release
     u8 _pad;
 };
 
