@@ -113,6 +113,40 @@ add_custom_command(
 # command fires on first configure.
 list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_HELLO_PE_HEADER}")
 
+# ----------------------------------------------------------------------------
+# Embed a real Windows PE (windows-kill.exe, a small standalone
+# Win32 console utility — 79 KiB, 12 DLL deps, 100 imported
+# functions, TLS callbacks). This is NOT a file we can run: v0
+# has no Win32 subsystem, no ntdll, nothing to resolve the
+# imports against. But the kernel PE loader's diagnostic path
+# (PeReport) exercises every directory on this image, giving a
+# concrete gap report on boot.
+#
+# This is the tractable substitute for "download Chrome and try
+# to run it": real Windows PE, real imports, but small enough
+# that embedding it into a constexpr u8 array doesn't balloon
+# the kernel.
+# ----------------------------------------------------------------------------
+set(CUSTOMOS_WINKILL_SRC "${CMAKE_SOURCE_DIR}/userland/apps/windows_kill/windows-kill.exe")
+set(CUSTOMOS_WINKILL_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_winkill_pe.h")
+
+add_custom_command(
+    OUTPUT "${CUSTOMOS_WINKILL_HEADER}"
+    COMMAND python3
+            "${CUSTOMOS_EMBED_BLOB_SCRIPT}"
+            "${CUSTOMOS_WINKILL_SRC}"
+            "${CUSTOMOS_WINKILL_HEADER}"
+            kBinWinKillBytes
+            --namespace "customos::fs::generated"
+    DEPENDS
+        "${CUSTOMOS_WINKILL_SRC}"
+        "${CUSTOMOS_EMBED_BLOB_SCRIPT}"
+    COMMENT "Embedding real Windows PE /bin/windows-kill.exe"
+    VERBATIM
+)
+
+list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_WINKILL_HEADER}")
+
 set(CUSTOMOS_KERNEL_LINKER_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/arch/x86_64/linker.ld")
 
 # Shared link flags — applied identically to both stages so the symbol

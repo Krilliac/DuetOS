@@ -5,6 +5,7 @@
 #include "../arch/x86_64/usermode.h"
 #include "../fs/ramfs.h"
 #include "generated_hello_pe.h"
+#include "generated_winkill_pe.h"
 #include "../mm/address_space.h"
 #include "../mm/frame_allocator.h"
 #include "../mm/page.h"
@@ -1558,6 +1559,15 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     {
         return 0;
     }
+    // Diagnostic pre-pass — always runs, always logs. A PE we
+    // reject below still gets a full report: sections, imports,
+    // relocs, TLS. That's how we know what a real Win32
+    // subsystem would have to provide.
+    SerialWrite("[ring3] pe report name=\"");
+    SerialWrite(name);
+    SerialWrite("\"\n");
+    PeReport(pe_bytes, pe_len);
+
     const PeStatus vs = PeValidate(pe_bytes, pe_len);
     if (vs != PeStatus::Ok)
     {
@@ -1674,6 +1684,17 @@ bool SpawnOnDemand(const char* kind)
                     CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
         return true;
     }
+    if (LocalStrEq(kind, "winkill"))
+    {
+        // Real-world PE that the v0 loader cannot execute.
+        // SpawnPeFile's diagnostic pre-pass still fires
+        // (PeReport logs imports/relocs/TLS), then the load is
+        // rejected with a typed status code. The point is the
+        // serial log, not a running process.
+        SpawnPeFile("ring3-winkill", fs::generated::kBinWinKillBytes, fs::generated::kBinWinKillBytes_len,
+                    CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        return true;
+    }
     return false;
 }
 
@@ -1771,9 +1792,15 @@ void StartRing3SmokeTask()
     // PE executable!" then clean exit.
     SpawnPeFile("ring3-hello-pe", fs::generated::kBinHelloPeBytes, fs::generated::kBinHelloPeBytes_len, CapSetTrusted(),
                 fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    // Real-world Windows PE diagnostic attempt. Expected to
+    // reject (no kernel32, no ntdll) — the value is the
+    // PeReport log line showing the full import / reloc / TLS
+    // gap. See .claude/knowledge/pe-subsystem-v0.md.
+    SpawnPeFile("ring3-winkill", fs::generated::kBinWinKillBytes, fs::generated::kBinWinKillBytes_len, CapSetTrusted(),
+                fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     Log(LogLevel::Info, "core/ring3",
         "ring3 smoke tasks queued (incl cpu-hog + hostile + dropcaps + priv + badint + kread + "
-        "ptrfuzz + writefuzz + hellope)");
+        "ptrfuzz + writefuzz + hellope + winkill-report)");
 }
 
 } // namespace customos::core

@@ -10,6 +10,12 @@
 // kernel/CMakeLists.txt.
 #include "generated_hello_pe.h"
 
+// A real 3rd-party Windows PE embedded verbatim from
+// userland/apps/windows_kill/windows-kill.exe. 79 KiB, 12 DLL
+// imports, TLS callbacks — the v0 loader rejects it (no Win32
+// subsystem) but PeReport still dumps the full gap on boot.
+#include "generated_winkill_pe.h"
+
 /*
  * Seed trees are declared at file scope as constinit data so the
  * whole structure lives in .rodata. Children arrays are similarly
@@ -283,11 +289,21 @@ constinit RamfsNode k_trusted_bin_hello_pe = {
     .file_size = generated::kBinHelloPeBytes_len,
 };
 
+// /bin/windows-kill.exe — a real Windows executable copied from
+// the host as-is. v0 cannot run it (no kernel32, no ntdll).
+// Exists so the diagnostic PE path has a real-world image to
+// report against — every directory (import, reloc, TLS) is
+// non-empty, so every branch of PeReport fires.
+constinit RamfsNode k_trusted_bin_winkill = {
+    .name = "windows-kill.exe",
+    .type = RamfsNodeType::kFile,
+    .children = nullptr,
+    .file_bytes = generated::kBinWinKillBytes,
+    .file_size = generated::kBinWinKillBytes_len,
+};
+
 constinit const RamfsNode* const k_trusted_bin_children[] = {
-    &k_trusted_bin_hello,
-    &k_trusted_bin_exit_elf,
-    &k_trusted_bin_hello_pe,
-    nullptr,
+    &k_trusted_bin_hello, &k_trusted_bin_exit_elf, &k_trusted_bin_hello_pe, &k_trusted_bin_winkill, nullptr,
 };
 
 constinit RamfsNode k_trusted_bin_dir = {

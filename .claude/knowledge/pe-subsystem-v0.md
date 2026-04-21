@@ -1,4 +1,4 @@
-# PE subsystem v0 — freestanding hello.exe end-to-end
+# PE subsystem v0 — freestanding hello.exe + real-world PE diagnostic
 
 **Type:** Observation · **Status:** Active · **Last updated:** 2026-04-21
 
@@ -154,6 +154,114 @@ the host side. No `#GP`, no `#PF`, no `[task-kill]`.
    `clang` + `lld-link` are installed. A probe + fallback to a
    pre-built blob in `third_party/` would make the build
    portable to containers without those tools.
+
+## Gap measurement — `PeReport` on real-world PEs
+
+Running `SpawnPeFile` logs two lines before either loading or
+rejecting: the raw size and the `ParseHeaders` status. On any
+PE that clears the DOS + NT + machine + PE32+ gates, it then
+dumps the full diagnostic: every section, every imported DLL
++ function, the base-relocation block/entry totals, and the
+TLS raw-data extent + callback count.
+
+This pre-pass runs regardless of whether the image is
+loadable. It turns a "rejected PE" into a concrete measurement
+of what a real Win32 subsystem would have to provide.
+
+### Substitute target: `windows-kill.exe`
+
+We can't reach `dl.google.com` from the dev sandbox
+(`host_not_allowed`), and Chrome is hundreds of MB plus a
+decade of subsystem work. The tractable proxy is
+`/opt/node22/.../nodemon/bin/windows-kill.exe`: a real 79 KiB
+x64 Windows console PE embedded at `/bin/windows-kill.exe`.
+
+Boot-time PeReport output (abridged):
+
+```
+[pe-report] bytes=0x13a00 parse_status=ImportsPresent
+  image_base=0x140000000 entry_rva=0x4070 image_size=0x1a000
+  sections (8)
+    [.text]   rva=0x1000  vsz=0x45f3 rsz=0x4600 flags=0x60000020
+    [.rdata]  rva=0x6000  vsz=0x3534 rsz=0x3600 flags=0x40000040
+    [.data]   rva=0xa000  vsz=0x8f8  rsz=0x400  flags=0xc0000040
+    [.pdata]  rva=0xb000  vsz=0x540  rsz=0x600  flags=0x40000040
+    [.gfids]  rva=0xc000  vsz=0x40   rsz=0x200  flags=0x40000040
+    [.tls]    rva=0xd000  vsz=0x9    rsz=0x200  flags=0xc0000040
+    [.rsrc]   rva=0xe000  vsz=0xa850 rsz=0xaa00 flags=0x40000040
+    [.reloc]  rva=0x19000 vsz=0xb4   rsz=0x200  flags=0x42000040
+  imports: rva=0x8564 size=0x104
+    needs dbghelp.dll:     SymCleanup, SymFromAddr, SymInitialize
+    needs KERNEL32.dll:    CreateToolhelp32Snapshot, Process32FirstW,
+                           …36 functions…
+    needs ADVAPI32.dll:    LookupPrivilegeValueW, OpenProcessToken,
+                           AdjustTokenPrivileges
+    needs MSVCP140.dll:    …18 std:: C++ runtime symbols…
+    needs VCRUNTIME140.dll: __CxxFrameHandler3, _CxxThrowException,
+                            memcpy, memset, memmove, __C_specific_handler,
+                            …11 functions…
+    needs api-ms-win-crt-runtime-l1-1-0.dll: _exit, exit, terminate,
+                            _initterm, _initterm_e, _seh_filter_exe,
+                            …19 functions…
+    needs api-ms-win-crt-{heap,string,stdio,math,locale,convert}-l1-1-0.dll:
+                            malloc, free, strcmp, strtoul, _set_fmode,
+                            __setusermatherr, _configthreadlocale, …
+  imports total: dlls=0xc functions=0x64
+  relocs: blocks=0x3 entries=0x4e dir_size=0xb4
+  tls: raw=[0x14000d000..0x14000d008] callbacks_va=0x1400063e8 callbacks=0
+[ring3] pe reject name="ring3-winkill" reason=ImportsPresent
+```
+
+### Interpretation of the gap
+
+A Win32 subsystem that runs `windows-kill.exe` natively on
+CustomOS would need, at minimum:
+
+1. **Base relocation application** — apply the 78 entries
+   across 3 reloc blocks so the image can land anywhere, not
+   only at fixed ImageBase 0x140000000.
+2. **Import resolver** — parse the IDT + INT + IAT (already
+   done by PeReport), then for each function-name entry:
+   find the exporting DLL in our subsystem table, look up the
+   name in that DLL's export table, patch the IAT slot with
+   the stub address.
+3. **12 user-mode DLL implementations** (or stubs thereof):
+   - `kernel32.dll` — process + thread + handle management,
+     console API, heap, sync primitives, timers. Largest
+     single surface.
+   - `ntdll.dll` — the syscall thunk layer (`Nt*`
+     functions). windows-kill.exe doesn't import ntdll
+     directly but kernel32 is historically layered on
+     top of it.
+   - `advapi32.dll` — token + privilege API (for
+     `AdjustTokenPrivileges`).
+   - `dbghelp.dll` — `SymInitialize` / `SymFromAddr` /
+     `SymCleanup` (stack walking for crash diagnostics).
+   - `msvcp140.dll` — the C++ std:: runtime (ostream,
+     string, exception, locale).
+   - `vcruntime140.dll` — CRT intrinsics (memset, memcpy,
+     `_CxxThrowException`, `__CxxFrameHandler3` for SEH →
+     C++ exception translation).
+   - **7 Universal CRT (UCRT) apisets**:
+     `api-ms-win-crt-{convert,runtime,math,stdio,locale,heap,string}-l1-1-0.dll`.
+     These are API-set redirectors — tiny stubs that forward
+     to `ucrtbase.dll`. So really: 1 real DLL (ucrtbase).
+4. **TLS callback infrastructure** — invoke the callback list
+   before calling the entry point. The v0 loader doesn't have
+   this, but `windows-kill.exe`'s callback list is actually
+   empty (one-entry null terminator), so a minimal TLS
+   implementation could handle this specific binary.
+5. **SEH + unwind tables** — `.pdata` contains unwind info
+   (RUNTIME_FUNCTION records). `_C_specific_handler` expects
+   the kernel/runtime to dispatch exceptions by walking the
+   function table. Full support here is C++ exception dispatch
+   territory.
+
+Chrome would multiply item 3 by roughly 20×: d3d11, dxgi,
+ws2_32, crypt32, winhttp, wininet, ole32, comctl32, gdi32,
+user32 (and its enormous surface), the WebRTC runtime,
+Skia's dependencies, V8's dependencies. Item 5 is also
+dramatically larger.
 
 ## Related entries
 

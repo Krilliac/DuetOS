@@ -64,7 +64,7 @@ enum class PeStatus : u8
     BadMachine,           // Not IMAGE_FILE_MACHINE_AMD64.
     NotPe32Plus,          // OptionalHeader.Magic != 0x20B.
     SectionAlignUnsup,    // SectionAlignment != 4096.
-    FileAlignUnsup,       // FileAlignment != 4096.
+    FileAlignUnsup,       // FileAlignment not a power-of-2 in [512, 4096].
     SectionCountZero,     // No sections to load.
     OptHeaderOutOfBounds, // SizeOfOptionalHeader shorter than required.
     SectionOutOfBounds,   // Section raw data extends past end-of-file.
@@ -79,6 +79,17 @@ const char* PeStatusName(PeStatus s);
 /// Does not allocate. Returns PeStatus::Ok iff PeLoad will
 /// succeed on the same buffer.
 PeStatus PeValidate(const u8* file, u64 file_len);
+
+/// Dump a human-readable diagnostic report of the PE image to
+/// the serial console: DOS + NT header summary, section table,
+/// import directory (every DLL + function name), base-reloc
+/// summary, TLS summary. Intended for the "we can't load this
+/// yet, but here's exactly what's missing" path — called before
+/// PeValidate in the spawn path so the log shows the full gap
+/// even when the load is rejected. Safe to call on any
+/// well-enough-formed PE; bails out silently on malformed
+/// bytes.
+void PeReport(const u8* file, u64 file_len);
 
 struct PeLoadResult
 {
