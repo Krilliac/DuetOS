@@ -2,7 +2,7 @@
 
 **Last updated:** 2026-04-21
 **Type:** Decision
-**Status:** Active (stages 1–4 landed; stage 5 (FAT32) remains)
+**Status:** Active (stages 1–5 landed; file-read + VFS mount follow-ups remain)
 
 ## Description
 
@@ -136,35 +136,46 @@ discipline from the PE loader.
 MBR fallback for non-GPT disks stays out of scope — modern
 SSDs ship GPT.
 
-### Stage 5 — Filesystem: first Rust crate
+### Stage 5 — FAT32 filesystem (landed 2026-04-21, C++ after all)
 
-`fs/fat32/` as the first Rust subsystem per `rust-bringup-plan.md`.
+Initial shipment: `kernel/fs/fat32.{h,cpp}` as **C++**, not Rust.
 
-Why FAT32 first:
-- Spec is small, stable, battle-tested. One week to ship a
-  read-only implementation; no novel invariants.
-- Every disk image format tool (mkfs.vfat) produces FAT32
-  predictably, so fixturing is trivial.
-- Windows PEs we want to run from disk live in FAT32-
-  compatible partitions (ESP + data).
+Revisiting the "Rust first" plan: after implementing PE + ELF
+loaders, the GPT parser, and the AHCI driver all in C++ with
+tight byte-parsing and bounded static state, FAT32 was a natural
+fit for the same style. No lifetime gymnastics called for a new
+language surface; Rust-for-filesystems is deferred until a
+genuine invariant (e.g. journaling consistency, btree concurrent
+readers) demands it.
 
-Scope for v0:
-- Read-only.
-- Parse BPB, locate first FAT + data region.
-- Directory-entry iteration (short names only — LFN entries
-  skipped for v0).
-- File-cluster-chain read.
-- Expose via `fs::FatMount(BlockDeviceHandle, first_lba)
-  -> Mount*` — a new per-mount type that plugs into the VFS
-  alongside ramfs.
+Scope landed (v0):
+- `Fat32Probe(block_handle)` reads LBA 0 of a block device,
+  validates 0x55AA + "FAT32" marker + BPB geometry, and logs the
+  decoded fields.
+- Walks the root-directory cluster chain via the FAT to enumerate
+  up to `kMaxDirEntries=32` short-8.3 entries per volume. LFN
+  fragments, deleted slots (0xE5), and volume-label pseudo-entries
+  are skipped.
+- `Fat32SelfTest()` probes every block-device handle; partitions
+  that aren't FAT32 log "not FAT32" + skip.
+- Image builder (`tools/qemu/make-gpt-image.py`) writes a minimal
+  FAT32 layout into the data partition with one test file
+  `HELLO.TXT` (17 bytes) so the self-test has a deterministic
+  fixture.
 
-Rust bring-up details (from `rust-bringup-plan.md`):
-- `rust-toolchain.toml` pinned to a nightly date.
-- Crate at `fs/fat32/` with `crate-type = ["staticlib"]`,
-  `panic = "abort"`.
-- Kernel C++ calls into `fat32_mount` / `fat32_readdir` /
-  `fat32_read_file` via a hand-written C FFI header.
-- No bindgen. No second toolchain dep beyond rustup.
+Validation (on-boot):
+  [fs/fat32] volume: handle=3 bps=0x200 spc=0x8 res=0x20
+             fat_size=0x40 root_cluster=0x2 data_start=0xa0
+  [fs/fat32]   - HELLO.TXT  attr=0x20  first_cluster=0x3  size=0x11
+  [fs/fat32] self-test OK
+
+Follow-up slices (not yet landed):
+- File content read by cluster-chain walk (`Fat32ReadFile(vol,
+  name, buf, max)`). Next natural commit.
+- Long-filename decoding (attr == 0x0F fragments).
+- Subdirectory recursion.
+- VFS integration so `ls` / `cat` in the shell can reach these.
+- Writes.
 
 ### Stage 6 — VFS mount path
 
