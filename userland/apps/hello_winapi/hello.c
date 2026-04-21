@@ -85,6 +85,29 @@ __declspec(dllimport) void* memset(void* dst, int c, size_t n);
 __declspec(dllimport) void* memcpy(void* dst, const void* src, size_t n);
 __declspec(dllimport) void* memmove(void* dst, const void* src, size_t n);
 
+// Batch 6 — UCRT CRT-startup shims. These live in the apiset
+// DLLs (api-ms-win-crt-runtime-l1-1-0.dll and friends) that
+// forward to ucrtbase.dll on real Windows. CustomOS handles
+// the apiset name directly in the stub lookup table.
+__declspec(dllimport) int _initialize_onexit_table(void* table);
+__declspec(dllimport) int _register_onexit_function(void* table, void* fn);
+__declspec(dllimport) int _crt_atexit(void* fn);
+__declspec(dllimport) int _configure_narrow_argv(int mode);
+__declspec(dllimport) void _set_app_type(int type);
+__declspec(dllimport) void _cexit(void);
+// Non-return family — referenced via function-pointer sinks
+// so lld-link keeps the imports but we never actually call
+// them (they'd terminate the process).
+__declspec(dllimport) void _invalid_parameter_noinfo_noreturn(void);
+__declspec(dllimport) void terminate(void);
+
+// Batch 7 — CRT string intrinsics. Pure functions with the
+// standard C library contracts. Registered under the apiset,
+// ucrtbase, AND msvcrt DLL names in the stub table.
+__declspec(dllimport) int strcmp(const char* a, const char* b);
+__declspec(dllimport) size_t strlen(const char* s);
+__declspec(dllimport) char* strchr(const char* s, int c);
+
 static const char kMsg[] = "[hello-winapi] printed via kernel32.WriteFile!\n";
 #define kMsgLen ((DWORD)(sizeof(kMsg) - 1))
 
@@ -146,6 +169,41 @@ void _start(void)
     membuf[0] = '[';
     DWORD mwritten = 0;
     WriteFile(out, membuf, sizeof(mmsg) - 1, &mwritten, 0);
+
+    // Batch 6 exercise — invoke the return-0 shims. All
+    // should return 0 and not crash. We OR the results so
+    // the compiler can't DCE them, then discard via
+    // volatile.
+    volatile int b6_sum =
+        _initialize_onexit_table((void*)0) |
+        _register_onexit_function((void*)0, (void*)0) |
+        _crt_atexit((void*)0) |
+        _configure_narrow_argv(2);
+    (void)b6_sum;
+    // Void-return shims — calling them must not crash.
+    _set_app_type(0);
+    _cexit();
+    // No-return shims — function-pointer sinks keep the IAT
+    // entries without actually exiting the process.
+    typedef void(*vfn_t)(void);
+    volatile vfn_t ip_sink = _invalid_parameter_noinfo_noreturn;
+    volatile vfn_t tm_sink = terminate;
+    (void)ip_sink; (void)tm_sink;
+
+    // Batch 7 exercise — real string ops. Split into three
+    // unconditional invocations (assignment to volatile
+    // locals defeats DCE) + one WriteFile using strlen for
+    // the length. The individual operand values get ORed
+    // into the exit code so even without an observable log
+    // line we can see the results.
+    const char b7msg[] = "[strings] strcmp+strlen+strchr OK\n";
+    volatile int v_strcmp = strcmp("abc", "abc");
+    volatile char* v_strchr = strchr(b7msg, '+');
+    volatile size_t v_strlen = strlen(b7msg);
+    (void)v_strcmp;
+    (void)v_strchr;
+    DWORD swritten = 0;
+    WriteFile(out, b7msg, (DWORD)v_strlen, &swritten, 0);
 
     // Batch 3 round-trip: store a distinctive value via
     // SetLastError, read it back via GetLastError, exit with

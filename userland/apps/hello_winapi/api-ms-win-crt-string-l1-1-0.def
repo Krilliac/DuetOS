@@ -1,0 +1,14 @@
+; userland/apps/hello_winapi/api-ms-win-crt-string-l1-1-0.def
+;
+; Import library for the UCRT string apiset. All five functions
+; are stubbed in kernel/subsystems/win32/stubs.cpp as pure
+; hand-assembled x86-64 loops (no state, no syscalls).
+
+LIBRARY api-ms-win-crt-string-l1-1-0.dll
+
+EXPORTS
+    strcmp
+    strlen
+    wcslen
+    strchr
+    strcpy

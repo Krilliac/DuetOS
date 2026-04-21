@@ -35,28 +35,33 @@ REPO_ROOT="$1"
 OUT_HEADER="$2"
 SRC_DIR="${REPO_ROOT}/userland/apps/hello_winapi"
 SRC_C="${SRC_DIR}/hello.c"
-DEF_KERNEL32="${SRC_DIR}/kernel32.def"
-DEF_VCRUNTIME140="${SRC_DIR}/vcruntime140.def"
 EMBED="${REPO_ROOT}/tools/embed-blob.py"
 
 WORK_DIR="$(dirname "${OUT_HEADER}")/hello_winapi"
 mkdir -p "${WORK_DIR}"
 OBJ="${WORK_DIR}/hello.obj"
-LIB_KERNEL32="${WORK_DIR}/kernel32.lib"
-LIB_VCRUNTIME140="${WORK_DIR}/vcruntime140.lib"
 EXE="${WORK_DIR}/hello_winapi.exe"
 
 CLANG="${CLANG:-clang}"
 LLD_LINK="${LLD_LINK:-lld-link}"
 DLLTOOL="${DLLTOOL:-llvm-dlltool}"
 
-# Generate per-DLL import libraries from their .def files.
-# Each .lib contains only __imp_* symbols for functions from
-# the specific DLL the .def names. lld-link uses the import
-# descriptors to decide which kernel32/vcruntime140 functions
-# end up in the final PE's Import Directory.
-"${DLLTOOL}" -d "${DEF_KERNEL32}" -l "${LIB_KERNEL32}" -m i386:x86-64
-"${DLLTOOL}" -d "${DEF_VCRUNTIME140}" -l "${LIB_VCRUNTIME140}" -m i386:x86-64
+# Generate one import library per .def file in the source
+# directory. Each .def names a specific DLL in its LIBRARY
+# line (kernel32.dll, vcruntime140.dll, api-ms-win-crt-*, …)
+# and llvm-dlltool bakes that name into the resulting .lib's
+# import descriptors. The PE lld-link produces references
+# each DLL by exactly the name from the corresponding .def.
+#
+# Collect all generated .libs into GEN_LIBS so we can pass
+# them to lld-link below.
+GEN_LIBS=()
+for def in "${SRC_DIR}"/*.def; do
+    base=$(basename "${def}" .def)
+    lib="${WORK_DIR}/${base}.lib"
+    "${DLLTOOL}" -d "${def}" -l "${lib}" -m i386:x86-64
+    GEN_LIBS+=("${lib}")
+done
 
 # Compile.
 "${CLANG}" \
@@ -83,8 +88,7 @@ DLLTOOL="${DLLTOOL:-llvm-dlltool}"
     /dynamicbase:no \
     /out:"${EXE}" \
     "${OBJ}" \
-    "${LIB_KERNEL32}" \
-    "${LIB_VCRUNTIME140}" 2>&1 | grep -v "align specified without /driver" || true
+    "${GEN_LIBS[@]}" 2>&1 | grep -v "align specified without /driver" || true
 
 if [[ ! -s "${EXE}" ]]; then
     echo "build-hello-winapi.sh: lld-link produced no output" >&2

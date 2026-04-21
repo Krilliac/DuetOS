@@ -44,6 +44,14 @@ constexpr u32 kOffInitCritSec = 0x74;         // batch 4 — 18 bytes
 constexpr u32 kOffCritSecNop = 0x86;          // batch 4 — 1 byte (ret)
 constexpr u32 kOffMemmove = 0x87;             // batch 5 — 45 bytes (memcpy aliases)
 constexpr u32 kOffMemset = 0xB4;              // batch 5 — 19 bytes
+constexpr u32 kOffReturnZero = 0xC7;          // batch 6 — 3 bytes  (shared "xor eax,eax; ret")
+constexpr u32 kOffTerminate = 0xCA;           // batch 6 — 11 bytes (SYS_EXIT(3))
+constexpr u32 kOffInvalidParam = 0xD5;        // batch 6 — 11 bytes (SYS_EXIT(0xC0000417))
+constexpr u32 kOffStrcmp = 0xE0;              // batch 7 — 29 bytes
+constexpr u32 kOffStrlen = 0xFD;              // batch 7 — 17 bytes
+constexpr u32 kOffWcslen = 0x10E;             // batch 7 — 22 bytes
+constexpr u32 kOffStrchr = 0x124;             // batch 7 — 23 bytes
+constexpr u32 kOffStrcpy = 0x13B;             // batch 7 — 23 bytes
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -275,10 +283,133 @@ constexpr u8 kStubsBytes[] = {
     0x4C, 0x89, 0xC8,     // 0xC2 mov rax, r9     ; return dst
     0x5F,                 // 0xC5 pop rdi
     0xC3,                 // 0xC6 ret
+
+    // === Batch 6: UCRT CRT-startup shims ======================
+
+    // --- Return-zero (offset 0xC7, 3 bytes) --------------------
+    // Shared stub for every apiset/ucrt function whose v0
+    // semantic is "report success, do nothing". In the
+    // Windows x64 ABI a function that returns int/LONG/BOOL
+    // writes to eax; zero-extended to rax; the caller reads
+    // eax. `xor eax, eax` produces 0 in rax too.
+    //
+    // Used by: _configure_narrow_argv,
+    // _initialize_narrow_environment, _configthreadlocale,
+    // _set_new_mode, _set_fmode, _crt_atexit,
+    // _register_onexit_function, _initialize_onexit_table,
+    // _seh_filter_exe, _register_thread_local_exe_atexit_callback,
+    // _initterm_e, _get_initial_narrow_environment (returns
+    // char** — null pointer is semantically "empty env").
+    0x31, 0xC0,           // 0xC7 xor eax, eax
+    0xC3,                 // 0xC9 ret
+
+    // --- terminate (offset 0xCA, 11 bytes) ---------------------
+    // std::terminate semantics: [[noreturn]] abort. Exit
+    // with code 3 (same as POSIX SIGABRT-ish — 3 is the
+    // conventional abort exit in the CRT).
+    0xBF, 0x03, 0x00, 0x00, 0x00, // 0xCA mov edi, 3
+    0x31, 0xC0,                   // 0xCF xor eax, eax   ; SYS_EXIT
+    0xCD, 0x80,                   // 0xD1 int 0x80
+    0x0F, 0x0B,                   // 0xD3 ud2
+
+    // --- _invalid_parameter_noinfo_noreturn (offset 0xD5, 11) --
+    // UCRT's "caller violated a contract" bailout. Windows
+    // returns STATUS_INVALID_CRT_PARAMETER (0xC0000417). We
+    // exit with that so the code is observable in the serial
+    // log.
+    0xBF, 0x17, 0x04, 0x00, 0xC0, // 0xD5 mov edi, 0xC0000417
+    0x31, 0xC0,                   // 0xDA xor eax, eax   ; SYS_EXIT
+    0xCD, 0x80,                   // 0xDC int 0x80
+    0x0F, 0x0B,                   // 0xDE ud2
+
+    // === Batch 7: CRT string intrinsics =======================
+
+    // --- strcmp (offset 0xE0, 29 bytes) ------------------------
+    // int strcmp(const char* a=rcx, const char* b=rdx).
+    // Returns (int)(unsigned)*a - (int)(unsigned)*b at first
+    // mismatch, or 0 if both reach NUL simultaneously.
+    // Byte-at-a-time loop; doesn't touch any nonvolatile
+    // register (rcx, rdx, rax are all caller-saved).
+    0x8A, 0x01,           // 0xE0 mov al, [rcx]
+    0x8A, 0x12,           // 0xE2 mov dl, [rdx]
+    0x38, 0xD0,           // 0xE4 cmp al, dl
+    0x75, 0x0C,           // 0xE6 jne +12 -> 0xF4 .done
+    0x84, 0xC0,           // 0xE8 test al, al
+    0x74, 0x08,           // 0xEA je +8 -> 0xF4 .done
+    0x48, 0xFF, 0xC1,     // 0xEC inc rcx
+    0x48, 0xFF, 0xC2,     // 0xEF inc rdx
+    0xEB, 0xEC,           // 0xF2 jmp -20 -> 0xE0 .loop
+    // .done:
+    0x0F, 0xB6, 0xC0,     // 0xF4 movzx eax, al
+    0x0F, 0xB6, 0xD2,     // 0xF7 movzx edx, dl
+    0x29, 0xD0,           // 0xFA sub eax, edx
+    0xC3,                 // 0xFC ret
+
+    // --- strlen (offset 0xFD, 17 bytes) ------------------------
+    // size_t strlen(const char* s=rcx). Walks until NUL,
+    // returns byte count.
+    0x48, 0x89, 0xC8,     // 0xFD mov rax, rcx    ; save start
+    0x80, 0x38, 0x00,     // 0x100 cmp byte [rax], 0
+    0x74, 0x05,           // 0x103 je +5 -> 0x10A .done
+    0x48, 0xFF, 0xC0,     // 0x105 inc rax
+    0xEB, 0xF6,           // 0x108 jmp -10 -> 0x100 .loop
+    // .done:
+    0x48, 0x29, 0xC8,     // 0x10A sub rax, rcx   ; length = end - start
+    0xC3,                 // 0x10D ret
+
+    // --- wcslen (offset 0x10E, 22 bytes) -----------------------
+    // size_t wcslen(const wchar_t* s=rcx). Identical shape
+    // to strlen but 2-byte stride and the final length is
+    // divided by 2 (UTF-16 char count).
+    0x48, 0x89, 0xC8,     // 0x10E mov rax, rcx
+    0x66, 0x83, 0x38, 0x00, // 0x111 cmp word [rax], 0
+    0x74, 0x06,           // 0x115 je +6 -> 0x11D .done
+    0x48, 0x83, 0xC0, 0x02, // 0x117 add rax, 2
+    0xEB, 0xF4,           // 0x11B jmp -12 -> 0x111 .loop
+    // .done:
+    0x48, 0x29, 0xC8,     // 0x11D sub rax, rcx
+    0x48, 0xD1, 0xE8,     // 0x120 shr rax, 1     ; byte count / 2 = chars
+    0xC3,                 // 0x123 ret
+
+    // --- strchr (offset 0x124, 23 bytes) -----------------------
+    // char* strchr(const char* s=rcx, int c=rdx).
+    // Returns pointer to first byte matching (char)c,
+    // including the terminating NUL, or nullptr if not
+    // found. Matches Win32/ISO C semantics.
+    0x88, 0xD0,           // 0x124 mov al, dl      ; byte to find
+    0x38, 0x01,           // 0x126 cmp [rcx], al
+    0x74, 0x0A,           // 0x128 je +10 -> 0x134 .found
+    0x80, 0x39, 0x00,     // 0x12A cmp byte [rcx], 0
+    0x74, 0x09,           // 0x12D je +9 -> 0x138 .notfound
+    0x48, 0xFF, 0xC1,     // 0x12F inc rcx
+    0xEB, 0xF2,           // 0x132 jmp -14 -> 0x126 .loop
+    // .found:
+    0x48, 0x89, 0xC8,     // 0x134 mov rax, rcx
+    0xC3,                 // 0x137 ret
+    // .notfound:
+    0x31, 0xC0,           // 0x138 xor eax, eax
+    0xC3,                 // 0x13A ret
+
+    // --- strcpy (offset 0x13B, 23 bytes) -----------------------
+    // char* strcpy(char* dst=rcx, const char* src=rdx).
+    // Copies bytes including NUL terminator, returns dst.
+    // Uses r8b (scratch byte, caller-saved) as the transfer
+    // register — can't use dl since rdx is the source
+    // pointer.
+    0x48, 0x89, 0xC8,     // 0x13B mov rax, rcx    ; save dst
+    0x44, 0x8A, 0x02,     // 0x13E mov r8b, [rdx]
+    0x44, 0x88, 0x01,     // 0x141 mov [rcx], r8b
+    0x45, 0x84, 0xC0,     // 0x144 test r8b, r8b
+    0x74, 0x08,           // 0x147 je +8 -> 0x151 .done
+    0x48, 0xFF, 0xC1,     // 0x149 inc rcx
+    0x48, 0xFF, 0xC2,     // 0x14C inc rdx
+    0xEB, 0xED,           // 0x14F jmp -19 -> 0x13E .loop
+    // .done:
+    0xC3,                 // 0x151 ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0xC7, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0x152, "stub layout drifted; update kOff* constants");
 
 struct StubEntry
 {
@@ -320,6 +451,73 @@ constexpr StubEntry kStubsTable[] = {
     // superset (handles overlap), same return value contract.
     {"vcruntime140.dll", "memcpy", kOffMemmove},
     {"vcruntime140.dll", "memset", kOffMemset},
+
+    // Batch 6 — UCRT CRT-startup shims.
+    //
+    // Most of these are "return success, do nothing" stubs that
+    // let a CRT-driven startup sequence advance far enough for
+    // main() to get called. They live under api-set DLL names
+    // (api-ms-win-crt-*-l1-1-0.dll) on modern Windows — each
+    // apiset forwards to ucrtbase.dll. The real runtime is
+    // distributed across both; programs reference whichever
+    // DLL name the linker chose.
+    //
+    // We register each stub under ALL plausible DLL names the
+    // import resolver might see (apiset, ucrtbase, and the
+    // legacy msvcrt.dll where applicable). The lookup scan is
+    // linear and small — duplicate entries are cheap.
+
+    // Return-0 family (spread across several apisets).
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "_initialize_onexit_table", kOffReturnZero},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "_register_onexit_function", kOffReturnZero},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "_crt_atexit", kOffReturnZero},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "_initterm_e", kOffReturnZero},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "_configure_narrow_argv", kOffReturnZero},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "_initialize_narrow_environment", kOffReturnZero},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "_get_initial_narrow_environment", kOffReturnZero},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "_seh_filter_exe", kOffReturnZero},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "_register_thread_local_exe_atexit_callback", kOffReturnZero},
+    {"api-ms-win-crt-locale-l1-1-0.dll", "_configthreadlocale", kOffReturnZero},
+    {"api-ms-win-crt-heap-l1-1-0.dll", "_set_new_mode", kOffReturnZero},
+    {"api-ms-win-crt-stdio-l1-1-0.dll", "_set_fmode", kOffReturnZero},
+
+    // Return-void family.
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "_initterm", kOffCritSecNop},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "_cexit", kOffCritSecNop},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "_c_exit", kOffCritSecNop},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "_set_app_type", kOffCritSecNop},
+    {"api-ms-win-crt-math-l1-1-0.dll", "__setusermatherr", kOffCritSecNop},
+
+    // Exit family — `exit` and `_exit` alias ExitProcess
+    // (same rcx=code ABI, same SYS_EXIT semantic).
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "exit", kOffExitProcess},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "_exit", kOffExitProcess},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "terminate", kOffTerminate},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "_invalid_parameter_noinfo_noreturn", kOffInvalidParam},
+    // Same functions surface directly under ucrtbase too.
+    {"ucrtbase.dll", "exit", kOffExitProcess},
+    {"ucrtbase.dll", "_exit", kOffExitProcess},
+    {"ucrtbase.dll", "terminate", kOffTerminate},
+
+    // Batch 7 — CRT string intrinsics. Pure functions; no
+    // kernel state, no ABI surprises. Register under the
+    // apiset + ucrtbase + msvcrt names to cover all three
+    // common link paths.
+    {"api-ms-win-crt-string-l1-1-0.dll", "strcmp", kOffStrcmp},
+    {"api-ms-win-crt-string-l1-1-0.dll", "strlen", kOffStrlen},
+    {"api-ms-win-crt-string-l1-1-0.dll", "wcslen", kOffWcslen},
+    {"api-ms-win-crt-string-l1-1-0.dll", "strchr", kOffStrchr},
+    {"api-ms-win-crt-string-l1-1-0.dll", "strcpy", kOffStrcpy},
+    {"ucrtbase.dll", "strcmp", kOffStrcmp},
+    {"ucrtbase.dll", "strlen", kOffStrlen},
+    {"ucrtbase.dll", "wcslen", kOffWcslen},
+    {"ucrtbase.dll", "strchr", kOffStrchr},
+    {"ucrtbase.dll", "strcpy", kOffStrcpy},
+    {"msvcrt.dll", "strcmp", kOffStrcmp},
+    {"msvcrt.dll", "strlen", kOffStrlen},
+    {"msvcrt.dll", "wcslen", kOffWcslen},
+    {"msvcrt.dll", "strchr", kOffStrchr},
+    {"msvcrt.dll", "strcpy", kOffStrcpy},
 };
 
 // Case-insensitive strcmp for ASCII. Win32 DLL name

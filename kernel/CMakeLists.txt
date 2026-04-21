@@ -157,8 +157,12 @@ list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_WINKILL_HEADER}")
 # mechanism.
 # ----------------------------------------------------------------------------
 set(CUSTOMOS_HELLO_WINAPI_SRC "${CMAKE_SOURCE_DIR}/userland/apps/hello_winapi/hello.c")
-set(CUSTOMOS_HELLO_WINAPI_DEF "${CMAKE_SOURCE_DIR}/userland/apps/hello_winapi/kernel32.def")
-set(CUSTOMOS_HELLO_WINAPI_VCR_DEF "${CMAKE_SOURCE_DIR}/userland/apps/hello_winapi/vcruntime140.def")
+# Every .def file in the hello_winapi dir becomes a separate
+# import library feeding lld-link. Glob-dependency means adding
+# a new .def (e.g. for a future DLL stub set) automatically
+# triggers a rebuild without touching this CMakeLists.
+file(GLOB CUSTOMOS_HELLO_WINAPI_DEFS
+    "${CMAKE_SOURCE_DIR}/userland/apps/hello_winapi/*.def")
 set(CUSTOMOS_HELLO_WINAPI_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_hello_winapi.h")
 set(CUSTOMOS_HELLO_WINAPI_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-hello-winapi.sh")
 
@@ -169,8 +173,7 @@ add_custom_command(
             "${CUSTOMOS_HELLO_WINAPI_HEADER}"
     DEPENDS
         "${CUSTOMOS_HELLO_WINAPI_SRC}"
-        "${CUSTOMOS_HELLO_WINAPI_DEF}"
-        "${CUSTOMOS_HELLO_WINAPI_VCR_DEF}"
+        ${CUSTOMOS_HELLO_WINAPI_DEFS}
         "${CUSTOMOS_HELLO_WINAPI_SCRIPT}"
         "${CUSTOMOS_EMBED_BLOB_SCRIPT}"
     COMMENT "Compiling + embedding /bin/hello_winapi.exe (Win32 import path)"
