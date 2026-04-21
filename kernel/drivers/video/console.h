@@ -104,4 +104,22 @@ void ConsoleSelectKlog();
 /// True iff the klog buffer is currently selected for render.
 bool ConsoleIsKlogActive();
 
+// ---------------------------------------------------------------
+// Capture mode — divert shell-console writes into a buffer
+// instead of the scrollback. Used by the shell's pipe machinery:
+// during `A | B`, segment A's output is captured, then fed back
+// as a path argument to B. Klog writes are unaffected.
+// ---------------------------------------------------------------
+
+/// Begin capturing subsequent shell-console writes into `buf`
+/// (capped at `cap` bytes), writing the running count into
+/// `*len_out`. Overflow silently drops the excess. Safe to
+/// nest conceptually only by re-entering after End — there's
+/// one global slot.
+void ConsoleBeginCapture(char* buf, u32 cap, u32* len_out);
+
+/// End capture — subsequent shell-console writes go back to
+/// the scrollback.
+void ConsoleEndCapture();
+
 } // namespace customos::drivers::video

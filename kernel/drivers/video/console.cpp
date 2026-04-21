@@ -40,6 +40,14 @@ constinit ConsoleState g_consoles[kConsoleCount] = {};
 // painted on next recompose.
 constinit u32 g_render_target = kConsoleShellIdx;
 
+// Capture-mode state — when set, shell-console writes divert
+// into the buffer instead of the scrollback. Klog writes are
+// unaffected. Used by the shell's pipe dispatch to route
+// segment N's output to segment N+1's input.
+constinit char* g_capture_buf = nullptr;
+constinit u32 g_capture_cap = 0;
+constinit u32* g_capture_len = nullptr;
+
 ConsoleState& Shell() { return g_consoles[kConsoleShellIdx]; }
 ConsoleState& Klog()  { return g_consoles[kConsoleKlogIdx]; }
 
@@ -86,6 +94,18 @@ void AdvanceCursor(ConsoleState& cs)
 
 void WriteCharImpl(ConsoleState& cs, char c)
 {
+    // Shell-slot writes under capture mode divert to the
+    // buffer instead of the scrollback. Klog-slot writes
+    // always take the normal path so kernel activity still
+    // lands in its dedicated console even during a pipe.
+    if (&cs == &g_consoles[kConsoleShellIdx] && g_capture_buf != nullptr)
+    {
+        if (g_capture_len != nullptr && *g_capture_len + 1 < g_capture_cap)
+        {
+            g_capture_buf[(*g_capture_len)++] = c;
+        }
+        return;
+    }
     if (!cs.ready)
     {
         return;
@@ -265,6 +285,24 @@ void ConsoleSelectKlog()
 bool ConsoleIsKlogActive()
 {
     return g_render_target == kConsoleKlogIdx;
+}
+
+void ConsoleBeginCapture(char* buf, u32 cap, u32* len_out)
+{
+    g_capture_buf = buf;
+    g_capture_cap = cap;
+    g_capture_len = len_out;
+    if (len_out != nullptr)
+    {
+        *len_out = 0;
+    }
+}
+
+void ConsoleEndCapture()
+{
+    g_capture_buf = nullptr;
+    g_capture_cap = 0;
+    g_capture_len = nullptr;
 }
 
 } // namespace customos::drivers::video

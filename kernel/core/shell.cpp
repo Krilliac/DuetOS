@@ -1877,6 +1877,96 @@ void Dispatch(char* line)
         return;
     }
 
+    // Pipe dispatch — `A | B` (and multi-stage `A | B | C`)
+    // routes each segment's output into the next segment as a
+    // trailing path argument, via a tmpfs temp file. Detection
+    // is the simplest possible: find an UNQUOTED '|' outside
+    // any '>' or '>>' redirect. We don't have quotes yet, so
+    // every '|' is unquoted; the redirect edge-case is the
+    // only thing to skip. A whole-pipeline recursion keeps
+    // the implementation self-contained.
+    {
+        u32 pipe_at = 0;
+        bool have_pipe = false;
+        for (u32 i = 0; line[i] != '\0'; ++i)
+        {
+            if (line[i] == '|')
+            {
+                pipe_at = i;
+                have_pipe = true;
+                break;
+            }
+        }
+        if (have_pipe)
+        {
+            // Split into left / right halves at the first pipe.
+            // Recursion on the right side handles multi-stage.
+            char left[kInputMax];
+            char right[kInputMax];
+            u32 li = 0;
+            for (u32 i = 0; i < pipe_at && li + 1 < sizeof(left); ++i)
+            {
+                left[li++] = line[i];
+            }
+            // Trim trailing whitespace from left so the redirect
+            // we append below is tokenized correctly.
+            while (li > 0 && (left[li - 1] == ' ' || left[li - 1] == '\t'))
+                --li;
+            left[li] = '\0';
+
+            u32 start = pipe_at + 1;
+            while (line[start] == ' ' || line[start] == '\t')
+                ++start;
+            u32 ri = 0;
+            for (u32 i = start; line[i] != '\0' && ri + 1 < sizeof(right); ++i)
+            {
+                right[ri++] = line[i];
+            }
+            right[ri] = '\0';
+
+            // Run the LEFT half with output captured.
+            static constexpr u32 kPipeBufMax = customos::fs::kTmpFsContentMax;
+            static char g_pipe_buf[kPipeBufMax];
+            u32 captured = 0;
+            customos::drivers::video::ConsoleBeginCapture(g_pipe_buf, kPipeBufMax, &captured);
+            Dispatch(left);
+            customos::drivers::video::ConsoleEndCapture();
+
+            // Stash captured output in a reserved tmpfs slot.
+            // Use a well-known name so nested pipes share the
+            // space — each level overwrites as it unwinds.
+            constexpr const char* kPipeName = "__pipe__";
+            customos::fs::TmpFsWrite(kPipeName, g_pipe_buf, captured);
+
+            // Append "/tmp/__pipe__" to the right command so it
+            // receives the prior stage's output as its final arg.
+            // Works for any command that takes a path last:
+            // cat, grep, head, tail, wc, sort, uniq, find (for
+            // find the needle is arg1 and the pipe-file becomes
+            // a spurious extra arg it ignores — fine).
+            char combined[kInputMax];
+            u32 ci = 0;
+            for (u32 i = 0; right[i] != '\0' && ci + 1 < sizeof(combined); ++i)
+            {
+                combined[ci++] = right[i];
+            }
+            const char suffix[] = " /tmp/__pipe__";
+            for (u32 i = 0; suffix[i] != '\0' && ci + 1 < sizeof(combined); ++i)
+            {
+                combined[ci++] = suffix[i];
+            }
+            combined[ci] = '\0';
+
+            // Recurse — the right half may itself contain
+            // another pipe. Final stage writes to the console.
+            Dispatch(combined);
+
+            // Drop the temp file so `ls /tmp` stays clean.
+            customos::fs::TmpFsUnlink(kPipeName);
+            return;
+        }
+    }
+
     // Alias expansion — runs before tokenize. If the first
     // whitespace-delimited token matches a registered alias,
     // substitute the alias's expansion and keep the remainder
