@@ -711,6 +711,18 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
             const bool ctrl = (ev.modifiers & kKeyModCtrl) != 0;
             bool dirty = false;
 
+            // Ctrl+C latches the shell interrupt flag. No
+            // DesktopCompose here — the long-running command
+            // holding the shell will notice next time it polls.
+            // Skipped entirely if Alt is also held (that's a
+            // different shortcut like Ctrl+Alt+T).
+            if (ctrl && !alt && (ev.code == 'c' || ev.code == 'C'))
+            {
+                customos::core::ShellInterrupt();
+                SerialWrite("[ui] ^C\n");
+                continue;
+            }
+
             // Ctrl+Alt+F1 / F2 flip the render target between
             // the shell and klog consoles. Same screen origin,
             // so the switch is in-place; each has its own

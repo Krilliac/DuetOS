@@ -72,6 +72,16 @@ void ShellHistoryNext();
 /// prompt with the partial. Empty buffer is a no-op.
 void ShellTabComplete();
 
+/// Keyboard reader calls this when Ctrl+C is pressed. Sets
+/// a latched flag that long-running commands poll via
+/// ShellInterruptRequested.
+void ShellInterrupt();
+
+/// Consume + reset the interrupt flag. Returns true if Ctrl+C
+/// has been pressed since the last call. Long-running loops
+/// (seq, sort, grep, find) check this to allow user abort.
+bool ShellInterruptRequested();
+
 /// Read access to the command history ring — the `history`
 /// command + `!N` recall both enumerate entries by index.
 /// n = 1 is the most recent entry; n = ShellHistoryCount()

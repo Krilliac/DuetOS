@@ -37,6 +37,13 @@ constexpr u32 kInputMax = 64;
 constinit char g_input[kInputMax] = {};
 constinit u32 g_len = 0;
 
+// Latched Ctrl+C flag. Long-running commands poll via
+// ShellInterruptRequested; the kbd reader flips it on from
+// the Ctrl+C hotkey. Read/clear is atomic at word granularity
+// on x86_64, which is good enough for the kbd-reader + shell-
+// task single-producer / single-consumer pattern.
+constinit bool g_interrupt = false;
+
 // Command history. Ring buffer of the last `kHistoryCap`
 // submitted lines. g_history_count saturates at the cap; newest
 // entry lives at ((head - 1) mod cap). g_history_cursor is the
@@ -1168,16 +1175,17 @@ void CmdSeq(u32 argc, char** argv)
         }
         n = n * 10 + static_cast<u32>(argv[1][i] - '0');
     }
-    // Cap at the visible scrollback so seq can't lock the
-    // console into a multi-thousand-line scroll users can't
-    // interrupt yet (no Ctrl+C handler).
-    if (n > 200)
-    {
-        n = 200;
-        ConsoleWriteln("SEQ: CAPPED AT 200 (NO INTERRUPT YET)");
-    }
+    // Uncapped; check the Ctrl+C flag every iteration. A user
+    // who mistakes `seq 100000` for `seq 100` can bail out the
+    // moment the scroll starts. The interrupt latch is cleared
+    // on consume, so a second command after ^C runs normally.
     for (u32 i = 1; i <= n; ++i)
     {
+        if (ShellInterruptRequested())
+        {
+            ConsoleWriteln("^C");
+            return;
+        }
         WriteU64Dec(i);
         ConsoleWriteChar('\n');
     }
@@ -3415,6 +3423,21 @@ void CompletePath(u32 partial_start)
     }
     Prompt();
     ConsoleWrite(g_input);
+}
+
+void ShellInterrupt()
+{
+    g_interrupt = true;
+}
+
+bool ShellInterruptRequested()
+{
+    if (g_interrupt)
+    {
+        g_interrupt = false;
+        return true;
+    }
+    return false;
 }
 
 void ShellTabComplete()
