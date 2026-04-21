@@ -15,6 +15,7 @@
 #include "../drivers/input/ps2mouse.h"
 #include "../drivers/pci/pci.h"
 #include "../drivers/storage/ahci.h"
+#include "../apps/notes.h"
 #include "../drivers/video/console.h"
 #include "../drivers/video/cursor.h"
 #include "../drivers/video/framebuffer.h"
@@ -276,7 +277,13 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     win_b_chrome.colour_client = 0x00E0E0D8;
     win_b_chrome.colour_close_btn = 0x00E04020;
     win_b_chrome.title_height = 22;
-    customos::drivers::video::WindowRegister(win_b_chrome, "NOTES   DRAG ME");
+    // NOTEPAD — native CustomOS notes app. The content-draw
+    // callback is installed inside NotesInit; the kbd-reader
+    // thread below routes keystrokes here when this window
+    // is active (focus == keyboard owner).
+    const customos::drivers::video::WindowHandle notes_handle =
+        customos::drivers::video::WindowRegister(win_b_chrome, "NOTEPAD");
+    customos::apps::notes::NotesInit(notes_handle);
 
     // Task Manager window — a window whose content drawer
     // prints live scheduler + memory stats. The ui-ticker's
@@ -824,6 +831,41 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                 continue;
             }
 
+            // App-routed keystrokes. When the active window is an
+            // app that registered a typed-input surface (the Notes
+            // buffer, later the Calculator), feed it here and skip
+            // the shell path entirely. Compositor lock brackets
+            // the feed so it serialises with the ui-ticker's draw.
+            {
+                bool app_consumed = false;
+                customos::drivers::video::CompositorLock();
+                const auto active = customos::drivers::video::WindowActive();
+                if (active != customos::drivers::video::kWindowInvalid &&
+                    active == customos::apps::notes::NotesWindow())
+                {
+                    char c = 0;
+                    if (ev.code == kKeyEnter)
+                        c = '\n';
+                    else if (ev.code == kKeyBackspace)
+                        c = 0x08;
+                    else if (ev.code >= 0x20 && ev.code <= 0x7E)
+                        c = static_cast<char>(ev.code);
+                    if (c != 0)
+                    {
+                        customos::apps::notes::NotesFeedChar(c);
+                        app_consumed = true;
+                    }
+                }
+                customos::drivers::video::CompositorUnlock();
+                if (app_consumed)
+                {
+                    dirty = true;
+                    // Fall through to the `if (dirty)` recompose
+                    // below by skipping the shell-routing branches.
+                    goto app_key_recompose;
+                }
+            }
+
             // Feed the shell instead of writing to the console
             // directly. ShellFeedChar echoes the char; Backspace
             // rubs out the last input; Enter submits + dispatches.
@@ -862,6 +904,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                 SerialWrite(buf);
                 dirty = true;
             }
+        app_key_recompose:
             if (dirty)
             {
                 customos::drivers::video::CompositorLock();
