@@ -82,6 +82,16 @@ enum SyscallNumber : u64
     // two IDs already come from different counters — the
     // stubs in kernel/subsystems/win32 need to distinguish.
     SYS_GETPROCID = 8,
+    // SYS_GETLASTERROR / SYS_SETLASTERROR: Win32 last-error
+    // read/write. GetLastError takes no args, returns the
+    // caller's Process.win32_last_error. SetLastError takes
+    // rdi = new error code (low 32 bits), no return. Both
+    // are unprivileged — a process's own error slot is not
+    // cap-gated. In real Windows these live in the TEB at
+    // offset 0x68; v0 parks them on the Process struct and
+    // exposes them via syscalls until per-thread TEBs land.
+    SYS_GETLASTERROR = 9,
+    SYS_SETLASTERROR = 10,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit

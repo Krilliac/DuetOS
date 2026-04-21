@@ -168,6 +168,37 @@ void SyscallDispatch(arch::TrapFrame* frame)
         return;
     }
 
+    case SYS_GETLASTERROR:
+    {
+        // Read Process.win32_last_error. Unprivileged — the
+        // slot belongs to the caller. Returns 0 if no process
+        // (shouldn't happen from ring 3, but defensive).
+        Process* proc = CurrentProcess();
+        frame->rax = (proc != nullptr) ? u64(proc->win32_last_error) : 0;
+        return;
+    }
+
+    case SYS_SETLASTERROR:
+    {
+        // Write rdi (low 32 bits) into Process.win32_last_error.
+        // No return value (Win32 SetLastError is void). Still
+        // populate rax so the stub's epilogue doesn't leak the
+        // syscall number; use the PREVIOUS error so callers
+        // that want a read-modify-write can get it in one
+        // trip if we ever expose that pattern.
+        Process* proc = CurrentProcess();
+        if (proc != nullptr)
+        {
+            frame->rax = u64(proc->win32_last_error);
+            proc->win32_last_error = u32(frame->rdi & 0xFFFFFFFFULL);
+        }
+        else
+        {
+            frame->rax = 0;
+        }
+        return;
+    }
+
     case SYS_WRITE:
     {
         // rdi = fd, rsi = user buf, rdx = len. DoWrite validates

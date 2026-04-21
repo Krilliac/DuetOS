@@ -38,6 +38,8 @@ constexpr u32 kOffGetCurrentThread = 0x40;   // batch 2 — 8 bytes
 constexpr u32 kOffGetCurrentProcessId = 0x48; // batch 2 — 8 bytes
 constexpr u32 kOffGetCurrentThreadId = 0x50;  // batch 2 — 8 bytes
 constexpr u32 kOffTerminateProcess = 0x58;    // batch 2 — 9 bytes
+constexpr u32 kOffGetLastError = 0x61;        // batch 3 — 8 bytes
+constexpr u32 kOffSetLastError = 0x69;        // batch 3 — 10 bytes
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -158,10 +160,29 @@ constexpr u8 kStubsBytes[] = {
     0x31, 0xC0,       // 0x5B xor eax, eax          ; SYS_EXIT
     0xCD, 0x80,       // 0x5D int 0x80
     0x0F, 0x0B,       // 0x5F ud2                   ; [[noreturn]]
+
+    // === Batch 3: last-error slot =============================
+
+    // --- GetLastError (offset 0x61, 8 bytes) -------------------
+    // Win32: DWORD GetLastError(void). Returns
+    // Process.win32_last_error via SYS_GETLASTERROR = 9.
+    0xB8, 0x09, 0x00, 0x00, 0x00, // 0x61 mov eax, 9 (SYS_GETLASTERROR)
+    0xCD, 0x80,                   // 0x66 int 0x80
+    0xC3,                         // 0x68 ret
+
+    // --- SetLastError (offset 0x69, 10 bytes) ------------------
+    // Win32: void SetLastError(DWORD dwErrCode). Forwards
+    // the code to SYS_SETLASTERROR = 10 via rdi. No return
+    // value to massage — the Win32 prototype is void, so
+    // whatever the syscall leaves in rax is fine.
+    0x48, 0x89, 0xCF,             // 0x69 mov rdi, rcx
+    0xB8, 0x0A, 0x00, 0x00, 0x00, // 0x6C mov eax, 10 (SYS_SETLASTERROR)
+    0xCD, 0x80,                   // 0x71 int 0x80
+    0xC3,                         // 0x73 ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x61, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0x74, "stub layout drifted; update kOff* constants");
 
 struct StubEntry
 {
@@ -187,6 +208,9 @@ constexpr StubEntry kStubsTable[] = {
     {"kernel32.dll", "GetCurrentProcessId", kOffGetCurrentProcessId},
     {"kernel32.dll", "GetCurrentThreadId", kOffGetCurrentThreadId},
     {"kernel32.dll", "TerminateProcess", kOffTerminateProcess},
+    // Batch 3 — last-error slot
+    {"kernel32.dll", "GetLastError", kOffGetLastError},
+    {"kernel32.dll", "SetLastError", kOffSetLastError},
 };
 
 // Case-insensitive strcmp for ASCII. Win32 DLL name

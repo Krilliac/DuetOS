@@ -26,3 +26,6 @@ EXPORTS
     GetCurrentProcessId
     GetCurrentThreadId
     TerminateProcess
+    ; Batch 3 — last-error slot
+    GetLastError
+    SetLastError

@@ -57,6 +57,10 @@ __declspec(dllimport) DWORD  __stdcall GetCurrentProcessId(void);
 __declspec(dllimport) DWORD  __stdcall GetCurrentThreadId(void);
 __declspec(dllimport) BOOL   __stdcall TerminateProcess(HANDLE hProcess, unsigned int uExitCode);
 
+// Batch 3 — last-error slot
+__declspec(dllimport) DWORD __stdcall GetLastError(void);
+__declspec(dllimport) void  __stdcall SetLastError(DWORD dwErrCode);
+
 static const char kMsg[] = "[hello-winapi] printed via kernel32.WriteFile!\n";
 #define kMsgLen ((DWORD)(sizeof(kMsg) - 1))
 
@@ -85,11 +89,18 @@ void _start(void)
     (void)tid_sink;
 
     // TerminateProcess is [[noreturn]] in practice — can't
-    // call it without skipping ExitProcess(42). Pull its IAT
+    // call it without skipping ExitProcess. Pull its IAT
     // entry in via a function-pointer sink instead.
     typedef BOOL(__stdcall * tp_fn_t)(HANDLE, unsigned int);
     volatile tp_fn_t tp_sink = TerminateProcess;
     (void)tp_sink;
 
-    ExitProcess(42);
+    // Batch 3 round-trip: store a distinctive value via
+    // SetLastError, read it back via GetLastError, exit with
+    // whatever came back. If the slot works, the kernel log
+    // shows `[I] sys : exit rc val=0xBEEF`. Any other value
+    // means the round-trip is broken — the serial log
+    // becomes the assertion.
+    SetLastError(0xBEEF);
+    ExitProcess(GetLastError());
 }

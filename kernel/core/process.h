@@ -169,6 +169,16 @@ struct Process
     // task would be caught by ticks, a retrying task by denials.
     u64 sandbox_denials;
 
+    // Win32 last-error slot. Read + written by the kernel32
+    // GetLastError / SetLastError stubs via SYS_GETLASTERROR /
+    // SYS_SETLASTERROR. In real Windows this lives in the TEB
+    // at offset 0x68 (thread-local). v0 is single-task per
+    // process, so we park it on the Process struct and defer
+    // the per-thread TEB until multi-threading lands. Zero-
+    // initialised by ProcessCreate — matches the Win32
+    // convention that fresh processes see ERROR_SUCCESS (0).
+    u32 win32_last_error;
+
     u64 refcount;
 };
 

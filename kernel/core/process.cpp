@@ -45,6 +45,7 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     p->tick_budget = tick_budget;
     p->ticks_used = 0;
     p->sandbox_denials = 0;
+    p->win32_last_error = 0; // ERROR_SUCCESS
     p->refcount = 1;
 
     ++g_live_processes;
