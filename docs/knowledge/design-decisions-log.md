@@ -607,6 +607,48 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 098 — Shell pipes (`|`) via console capture + tmpfs transport
+
+- **Scope:** `kernel/drivers/video/console.{h,cpp}` — new
+  `ConsoleBeginCapture` / `ConsoleEndCapture` divert
+  shell-slot writes to a caller buffer (klog slot
+  unaffected). `kernel/core/shell.cpp` — Dispatch parses
+  `|` before tokenisation, runs the left half with
+  capture active, stashes the output in `/tmp/__pipe__`,
+  then re-dispatches the right half with the tmpfs path
+  appended as the final argument. Unlinks the temp file
+  on unwind.
+- **Decision:** Pipe transport via tmpfs file + recursion
+  into Dispatch, not via an in-process stream abstraction.
+  Rationale: no command in the tree reads stdin (they
+  read paths), so the cheapest mechanism that makes
+  `A | B` work is "capture A's console output into a
+  real file and feed that file's path to B." Multi-stage
+  pipes fall out for free because the recursion handles
+  the right side's own embedded `|`. Reserved name
+  `/tmp/__pipe__` makes nested reuses overwrite-safe.
+- **Why:** The one iconic missing shell feature. Every
+  command already produces console text and most already
+  accept a trailing path; the capture/transport trick
+  reuses both without touching the individual commands.
+  Real pipes (Linux-style fd 1 → fd 0 kernel buffer) come
+  later with SYS_SPAWN; v0's tmpfs transport satisfies the
+  ergonomics.
+- **Rules out / defers:** Streaming (a stage can't produce
+  output before the previous stage finishes). Stderr
+  redirection (2>&1). Commands that read real stdin.
+  Capture buffer cap == tmpfs content max; longer pipelines
+  truncate. pipefail / SIGPIPE semantics.
+- **Revisit when:** SYS_SPAWN lands (real process-to-process
+  pipes). User pipelines exceed 512 bytes of intermediate
+  output (bump the tmpfs slot size or move to heap).
+  Streaming required (interactive filters like `tail -f`).
+- **Related tracks:** Track 7 (Userland shell — iconic
+  feature), Track 4 (Process — real pipes wait on this),
+  Track 5 (VFS — pipe file-style abstraction).
+
+---
+
 ## 097 — Shell `sort` + `uniq`
 
 - **Scope:** `kernel/core/shell.cpp` — `CmdSort` + `CmdUniq`
