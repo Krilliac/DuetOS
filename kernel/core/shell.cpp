@@ -291,6 +291,11 @@ void CmdHelp()
     ConsoleWriteln("  PS           LIST EVERY SCHEDULER TASK");
     ConsoleWriteln("  SPAWN KIND   LAUNCH A RING-3 TASK (hello/sandbox/jail/...)");
     ConsoleWriteln("  READELF PATH PARSE AN ELF64 HEADER + PROGRAM HEADERS");
+    ConsoleWriteln("  HEXDUMP PATH 16-BYTE ROWS OF HEX + ASCII");
+    ConsoleWriteln("  STAT PATH    FILE / DIR METADATA");
+    ConsoleWriteln("  BASENAME P   STRIP LEADING DIRS");
+    ConsoleWriteln("  DIRNAME P    STRIP TRAILING COMPONENT");
+    ConsoleWriteln("  CAL          CURRENT MONTH CALENDAR");
     ConsoleWriteln("");
     ConsoleWriteln("KEYS:  UP/DOWN = HISTORY   TAB = COMPLETE");
     ConsoleWriteln("       CTRL+ALT+T = TOGGLE MODE");
@@ -1133,6 +1138,7 @@ static const char* const kCommandSet[] = {
     "fb",      "kbdstats","mousestats","loglevel","getenv","yield",   "reboot",
     "halt",    "uname",   "whoami",  "hostname","pwd",     "true",    "false",
     "mount",   "lsmod",   "free",    "ps",      "spawn",   "readelf",
+    "hexdump", "stat",    "basename","dirname", "cal",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -2216,6 +2222,256 @@ const char* ElfPtypeName(u32 t)
     default:
         return "OTHER";
     }
+}
+
+void CmdHexdump(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("HEXDUMP: USAGE: HEXDUMP PATH");
+        return;
+    }
+    char scratch[customos::fs::kTmpFsContentMax];
+    const u32 n = ReadFileToBuf(argv[1], scratch, sizeof(scratch));
+    if (n == static_cast<u32>(-1))
+    {
+        ConsoleWrite("HEXDUMP: NO SUCH FILE: ");
+        ConsoleWriteln(argv[1]);
+        return;
+    }
+    // Classic 16-byte row: "OFFSET  HH HH HH ... HH  |ascii...|".
+    for (u32 row = 0; row < n; row += 16)
+    {
+        WriteU64Hex(row, 8);
+        ConsoleWrite("  ");
+        for (u32 i = 0; i < 16; ++i)
+        {
+            if (row + i < n)
+            {
+                WriteU64Hex(static_cast<u8>(scratch[row + i]), 2);
+            }
+            else
+            {
+                ConsoleWrite("  ");
+            }
+            ConsoleWriteChar(' ');
+            if (i == 7)
+            {
+                ConsoleWriteChar(' ');
+            }
+        }
+        ConsoleWrite(" |");
+        for (u32 i = 0; i < 16 && row + i < n; ++i)
+        {
+            const char c = scratch[row + i];
+            ConsoleWriteChar((c >= 0x20 && c <= 0x7E) ? c : '.');
+        }
+        ConsoleWriteln("|");
+    }
+}
+
+void CmdStat(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("STAT: USAGE: STAT PATH");
+        return;
+    }
+    const char* path = argv[1];
+    // tmpfs first (flat namespace).
+    if (const char* tmp_leaf = TmpLeaf(path); tmp_leaf != nullptr && *tmp_leaf != '\0')
+    {
+        const char* bytes = nullptr;
+        u32 len = 0;
+        if (!customos::fs::TmpFsRead(tmp_leaf, &bytes, &len))
+        {
+            ConsoleWrite("STAT: NO SUCH FILE: ");
+            ConsoleWriteln(path);
+            return;
+        }
+        ConsoleWrite("  PATH:    ");
+        ConsoleWriteln(path);
+        ConsoleWrite("  TYPE:    FILE (tmpfs, writable)\n");
+        ConsoleWrite("  SIZE:    ");
+        WriteU64Dec(len);
+        ConsoleWriteln(" bytes");
+        return;
+    }
+    const auto* root = customos::fs::RamfsTrustedRoot();
+    const auto* node = customos::fs::VfsLookup(root, path, 128);
+    if (node == nullptr)
+    {
+        ConsoleWrite("STAT: NO SUCH PATH: ");
+        ConsoleWriteln(path);
+        return;
+    }
+    ConsoleWrite("  PATH:    ");
+    ConsoleWriteln(path);
+    ConsoleWrite("  NAME:    ");
+    ConsoleWriteln(node->name[0] != '\0' ? node->name : "/");
+    if (node->type == customos::fs::RamfsNodeType::kDir)
+    {
+        ConsoleWrite("  TYPE:    DIRECTORY (ramfs, read-only)\n");
+        u32 count = 0;
+        if (node->children != nullptr)
+        {
+            while (node->children[count] != nullptr)
+                ++count;
+        }
+        ConsoleWrite("  ENTRIES: ");
+        WriteU64Dec(count);
+        ConsoleWriteChar('\n');
+    }
+    else
+    {
+        ConsoleWrite("  TYPE:    FILE (ramfs, read-only)\n");
+        ConsoleWrite("  SIZE:    ");
+        WriteU64Dec(node->file_size);
+        ConsoleWriteln(" bytes");
+    }
+}
+
+void CmdBasename(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("BASENAME: USAGE: BASENAME PATH");
+        return;
+    }
+    const char* p = argv[1];
+    u32 last_slash = 0;
+    bool have = false;
+    for (u32 i = 0; p[i] != '\0'; ++i)
+    {
+        if (p[i] == '/')
+        {
+            last_slash = i;
+            have = true;
+        }
+    }
+    if (!have)
+    {
+        ConsoleWriteln(p);
+        return;
+    }
+    // Everything after the last '/'. Empty (trailing slash) →
+    // print the original path minus slashes, matching coreutils.
+    const char* tail = p + last_slash + 1;
+    if (*tail == '\0')
+    {
+        ConsoleWriteln(p);
+    }
+    else
+    {
+        ConsoleWriteln(tail);
+    }
+}
+
+void CmdDirname(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("DIRNAME: USAGE: DIRNAME PATH");
+        return;
+    }
+    const char* p = argv[1];
+    u32 last_slash = 0;
+    bool have = false;
+    for (u32 i = 0; p[i] != '\0'; ++i)
+    {
+        if (p[i] == '/')
+        {
+            last_slash = i;
+            have = true;
+        }
+    }
+    if (!have)
+    {
+        ConsoleWriteln(".");
+        return;
+    }
+    if (last_slash == 0)
+    {
+        ConsoleWriteln("/");
+        return;
+    }
+    for (u32 i = 0; i < last_slash; ++i)
+    {
+        ConsoleWriteChar(p[i]);
+    }
+    ConsoleWriteChar('\n');
+}
+
+void CmdCal()
+{
+    // Print the current month's calendar using RTC for today's
+    // date. Simple: build the weekday of the 1st via Zeller,
+    // emit a 7-column grid.
+    customos::arch::RtcTime t{};
+    customos::arch::RtcRead(&t);
+    static const u8 kDaysPerMonth[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    const bool leap = ((t.year % 4 == 0) && (t.year % 100 != 0)) || (t.year % 400 == 0);
+    u32 mlen = kDaysPerMonth[(t.month - 1) % 12];
+    if (t.month == 2 && leap)
+        mlen = 29;
+
+    // Zeller's congruence gives day-of-week for year/month/day.
+    // Classic Gregorian form: h = (q + 13(m+1)/5 + K + K/4 + J/4 + 5J) mod 7
+    // where for Jan/Feb treat as month 13/14 of previous year.
+    u32 y = t.year, m = t.month;
+    if (m < 3)
+    {
+        m += 12;
+        --y;
+    }
+    const u32 K = y % 100;
+    const u32 J = y / 100;
+    const u32 h = (1 + (13 * (m + 1)) / 5 + K + K / 4 + J / 4 + 5 * J) % 7;
+    // h: 0=Sat, 1=Sun, 2=Mon, ..., 6=Fri — remap to Sun=0.
+    const u32 dow_first = (h + 6) % 7;
+
+    static const char* const kMonths[] = {"January",  "February", "March",     "April",
+                                           "May",      "June",     "July",      "August",
+                                           "September","October",  "November",  "December"};
+    ConsoleWrite("        ");
+    ConsoleWrite(kMonths[(t.month - 1) % 12]);
+    ConsoleWriteChar(' ');
+    WriteU64Dec(t.year);
+    ConsoleWriteChar('\n');
+    ConsoleWriteln("Su Mo Tu We Th Fr Sa");
+    for (u32 i = 0; i < dow_first; ++i)
+    {
+        ConsoleWrite("   ");
+    }
+    for (u32 day = 1; day <= mlen; ++day)
+    {
+        if (day == t.day)
+        {
+            ConsoleWriteChar('*');
+        }
+        else
+        {
+            ConsoleWriteChar(day < 10 ? ' ' : static_cast<char>('0' + day / 10));
+        }
+        if (day < 10)
+        {
+            ConsoleWriteChar(static_cast<char>('0' + day));
+        }
+        else
+        {
+            ConsoleWriteChar(day == t.day ? static_cast<char>('0' + day % 10)
+                                          : static_cast<char>('0' + day % 10));
+        }
+        if (((day + dow_first) % 7) == 0)
+        {
+            ConsoleWriteChar('\n');
+        }
+        else
+        {
+            ConsoleWriteChar(' ');
+        }
+    }
+    ConsoleWriteChar('\n');
 }
 
 void CmdReadelf(u32 argc, char** argv)
@@ -3391,6 +3647,31 @@ void Dispatch(char* line)
         CmdReadelf(argc, argv);
         return;
     }
+    if (StrEq(cmd, "hexdump"))
+    {
+        CmdHexdump(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "stat"))
+    {
+        CmdStat(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "basename"))
+    {
+        CmdBasename(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "dirname"))
+    {
+        CmdDirname(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "cal"))
+    {
+        CmdCal();
+        return;
+    }
     if (StrEq(cmd, "reboot"))
     {
         CmdRebootNow();
@@ -3815,7 +4096,8 @@ void ShellTabComplete()
                           StrEq(g_input, "wc") || StrEq(g_input, "head") ||
                           StrEq(g_input, "tail") || StrEq(g_input, "source") ||
                           StrEq(g_input, "grep") || StrEq(g_input, "sort") ||
-                          StrEq(g_input, "uniq") || StrEq(g_input, "readelf");
+                          StrEq(g_input, "uniq") || StrEq(g_input, "readelf") ||
+                          StrEq(g_input, "hexdump") || StrEq(g_input, "stat");
     g_input[first_ws] = saved;
 
     if (path_cmd)
