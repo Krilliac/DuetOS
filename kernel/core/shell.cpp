@@ -22,6 +22,7 @@
 #include "../sched/sched.h"
 #include "klog.h"
 #include "reboot.h"
+#include "ring3_smoke.h"
 
 namespace customos::core
 {
@@ -288,6 +289,7 @@ void CmdHelp()
     ConsoleWriteln("  LSMOD        LIST ACTIVE KERNEL SUBSYSTEMS");
     ConsoleWriteln("  FREE         MEMORY USAGE (PHYS + HEAP)");
     ConsoleWriteln("  PS           LIST EVERY SCHEDULER TASK");
+    ConsoleWriteln("  SPAWN KIND   LAUNCH A RING-3 TASK (hello/sandbox/jail/...)");
     ConsoleWriteln("");
     ConsoleWriteln("KEYS:  UP/DOWN = HISTORY   TAB = COMPLETE");
     ConsoleWriteln("       CTRL+ALT+T = TOGGLE MODE");
@@ -1129,7 +1131,7 @@ static const char* const kCommandSet[] = {
     "ticks",   "msr",     "lapic",   "smp",     "lspci",   "heap",    "paging",
     "fb",      "kbdstats","mousestats","loglevel","getenv","yield",   "reboot",
     "halt",    "uname",   "whoami",  "hostname","pwd",     "true",    "false",
-    "mount",   "lsmod",   "free",    "ps",
+    "mount",   "lsmod",   "free",    "ps",      "spawn",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -2107,6 +2109,27 @@ const char* SchedStateName(u8 s)
     default:
         return "?    ";
     }
+}
+
+void CmdSpawn(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("SPAWN: USAGE: SPAWN <KIND>");
+        ConsoleWriteln("  KINDS:  hello  sandbox  jail  nx  hog  hostile  dropcaps");
+        ConsoleWriteln("  SEE `MAN SPAWN` FOR DETAILS.");
+        return;
+    }
+    if (!customos::core::SpawnOnDemand(argv[1]))
+    {
+        ConsoleWrite("SPAWN: UNKNOWN KIND: ");
+        ConsoleWriteln(argv[1]);
+        ConsoleWriteln("  KINDS:  hello  sandbox  jail  nx  hog  hostile  dropcaps");
+        return;
+    }
+    ConsoleWrite("SPAWN: QUEUED ");
+    ConsoleWriteln(argv[1]);
+    ConsoleWriteln("  (RUN `PS` TO SEE IT, OR WATCH THE KERNEL LOG)");
 }
 
 void CmdPs()
@@ -3128,6 +3151,11 @@ void Dispatch(char* line)
     if (StrEq(cmd, "ps"))
     {
         CmdPs();
+        return;
+    }
+    if (StrEq(cmd, "spawn"))
+    {
+        CmdSpawn(argc, argv);
         return;
     }
     if (StrEq(cmd, "reboot"))

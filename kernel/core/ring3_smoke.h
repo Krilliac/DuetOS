@@ -33,4 +33,23 @@ namespace customos::core
 
 void StartRing3SmokeTask();
 
+/// Spawn one ring-3 task on demand, dispatched by `kind`.
+/// Returns true if `kind` matched a known spawner, false if
+/// the user passed an unknown name. Each spawn call creates
+/// a fresh Process + AddressSpace — the ring-3 payload, caps,
+/// and ramfs root depend on the kind. Known kinds:
+///
+///   hello    Trusted, prints "Hello from ring 3!", exits.
+///   sandbox  Empty caps + sandbox root; SYS_WRITE denied.
+///   jail     Writes into its own RX page → killed on #PF.
+///   nx       Jumps into its own NX stack → killed on #PF.
+///   hog      Infinite loop → killed by tick-budget.
+///   hostile  Retries denied SYS_WRITE → killed by denial ceiling.
+///   dropcaps Trusted task that voluntarily drops its caps.
+///
+/// All spawned tasks are reaped cleanly through the normal
+/// scheduler path; the shell command returns immediately
+/// without waiting for completion.
+bool SpawnOnDemand(const char* kind);
+
 } // namespace customos::core

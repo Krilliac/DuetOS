@@ -892,7 +892,64 @@ void SpawnJailProbeTask()
     sched::SchedCreateUser(&Ring3UserEntry, nullptr, "ring3-jail-probe", proc);
 }
 
+bool LocalStrEq(const char* a, const char* b)
+{
+    for (u32 i = 0;; ++i)
+    {
+        if (a[i] != b[i])
+            return false;
+        if (a[i] == '\0')
+            return true;
+    }
+}
+
 } // namespace
+
+bool SpawnOnDemand(const char* kind)
+{
+    if (kind == nullptr || kind[0] == '\0')
+        return false;
+    if (LocalStrEq(kind, "hello"))
+    {
+        SpawnRing3Task("ring3-cmd-hello", CapSetTrusted(), fs::RamfsTrustedRoot(),
+                       mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        return true;
+    }
+    if (LocalStrEq(kind, "sandbox"))
+    {
+        CapSet caps = CapSetEmpty();
+        CapSetAdd(caps, kCapFsRead);
+        SpawnRing3Task("ring3-cmd-sandbox", caps, fs::RamfsSandboxRoot(),
+                       mm::kFrameBudgetSandbox, kTickBudgetSandbox);
+        return true;
+    }
+    if (LocalStrEq(kind, "jail"))
+    {
+        SpawnJailProbeTask();
+        return true;
+    }
+    if (LocalStrEq(kind, "nx"))
+    {
+        SpawnNxProbeTask();
+        return true;
+    }
+    if (LocalStrEq(kind, "hog"))
+    {
+        SpawnCpuHogProbe();
+        return true;
+    }
+    if (LocalStrEq(kind, "hostile"))
+    {
+        SpawnHostileProbe();
+        return true;
+    }
+    if (LocalStrEq(kind, "dropcaps"))
+    {
+        SpawnDropcapsProbe();
+        return true;
+    }
+    return false;
+}
 
 void StartRing3SmokeTask()
 {
