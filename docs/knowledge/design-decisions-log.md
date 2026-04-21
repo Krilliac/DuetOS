@@ -607,6 +607,96 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 102 — Shell `spawn` command — ring-3 tasks on demand
+
+- **Scope:** `kernel/core/ring3_smoke.{h,cpp}` — new
+  `SpawnOnDemand(kind)` dispatcher exposing the existing
+  boot-time ring-3 spawners. `kernel/core/shell.cpp` —
+  new `spawn <kind>` command where kind ∈ {hello, sandbox,
+  jail, nx, hog, hostile, dropcaps}.
+- **Decision:** Keep SYS_SPAWN deferred until a user-mode
+  toolchain lands (ELF loader, user-mode libc, user-mode
+  linker script); in the meantime, expose the hand-crafted
+  byte payloads the boot fleet already uses via an opt-in
+  shell command. Each invocation creates a fresh Process +
+  AddressSpace — the standard path — so every gadget the
+  kernel reaches for (ASLR, reaper cleanup, per-AS VAs)
+  runs just as it does at boot.
+- **Why:** Lets a user at the prompt watch the ring-3
+  machinery in action — `spawn hello` produces a visible
+  ring-3 task; `spawn jail` proves the page-protection
+  kill path; `spawn hog` proves the tick-budget kill path.
+  Closes the gap between "ring 3 works once at boot" and
+  "ring 3 can be driven interactively."
+- **Rules out / defers:** Loading arbitrary ELFs from
+  ramfs. Running user-written binaries. SYS_SPAWN syscall
+  (ring-3 → ring-3 spawn). Toolchain for ring-3 binaries.
+- **Revisit when:** ELF loader lands; user toolchain in
+  tree; SYS_SPAWN slice begins.
+- **Related tracks:** Track 4 (Process model — spawn
+  dispatcher shape), Track 7 (Userland shell — user-
+  facing surface).
+
+---
+
+## 101 — Scheduler task enumeration + `ps` command
+
+- **Scope:** `kernel/sched/sched.{h,cpp}` — new
+  `SchedTaskInfo` snapshot struct + `SchedEnumerate(cb,
+  cookie)` that walks every known task (current +
+  runqueues + sleep queue + zombie list). `kernel/core/
+  shell.cpp` — `ps` command renders `PID STATE PRI NAME`
+  rows with a `*` marker on the running task.
+- **Decision:** Snapshot-by-value (no Task* leaves the
+  API), CLI-bracketed walk to protect against timer-IRQ
+  list mutations mid-visit. Callback runs under the CLI
+  window — Console writes are byte-sized stores so that's
+  fine; nothing blocking permitted inside the callback.
+- **Why:** Before this the scheduler only published
+  aggregate counters (SchedStatsRead). `ps` is what users
+  reach for to understand what the OS is doing; without
+  it `stats` is a partial answer.
+- **Rules out / defers:** Per-task CPU time / runtime
+  accumulation. Memory per task. Parent/child links.
+  Kill-by-pid. Sort-by-cpu.
+- **Revisit when:** Per-task time accounting lands (add
+  a TIME column). SYS_SPAWN lands (parent PID matters).
+  kill(pid) lands (interactive process management).
+- **Related tracks:** Track 2 (Scheduler — enumeration
+  API), Track 7 (Userland shell — consumer).
+
+---
+
+## 100 — Shell Ctrl+C interrupt + uncapped seq
+
+- **Scope:** `kernel/core/shell.{h,cpp}` — latched
+  `g_interrupt` flag, `ShellInterrupt` + `ShellInterruptRequested`
+  API. `kernel/core/main.cpp` — kbd reader catches Ctrl+C
+  (Ctrl held + 'c' / 'C', no Alt) and flips the flag
+  without triggering any recompose. `seq` loses its 200-
+  iteration cap and polls the flag per iteration.
+- **Decision:** One-shot latched flag, single producer
+  (kbd reader) + single consumer (command loop), no
+  explicit barrier. Works because x86_64's byte-store
+  memory model guarantees the reader sees the set on the
+  next poll. Future commands (infinite `yes`, tail -f,
+  long find) poll the same hook.
+- **Why:** Uncapping `seq` was the immediate driver, but
+  the pattern generalises — any long-running command now
+  has a standard "user can abort" shape. The cap itself
+  was always a workaround for the missing interrupt; now
+  it's gone.
+- **Rules out / defers:** SIGINT handler dispatch (no
+  signals yet). Cross-task interrupt (only the running
+  command sees the flag). Ctrl+Z / suspend. Blocking on
+  interrupt (the flag is polled, not waited on).
+- **Revisit when:** SIGINT-shaped API needed for user-
+  mode handlers. Signals across ring boundaries land.
+- **Related tracks:** Track 7 (Userland shell), Track 4
+  (Process — signals / interrupts).
+
+---
+
 ## 099 — Shell system-manipulation command suite (29 new commands)
 
 - **Scope:** `kernel/core/shell.cpp` — one batch of 20 kernel-
