@@ -29,6 +29,7 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     core/reboot.cpp
     core/recovery.cpp
     core/elf_loader.cpp
+    core/pe_loader.cpp
     core/ring3_smoke.cpp
     core/shell.cpp
     core/stack_canary.cpp
@@ -77,6 +78,41 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     sync/spinlock.cpp
 )
 
+# ----------------------------------------------------------------------------
+# Host-side userland build: userland/apps/hello_pe/hello.c is compiled
+# with clang targeting x86_64-pc-windows-msvc and linked by lld-link
+# into a real freestanding PE/COFF .exe. The bytes are embedded into a
+# C++ constexpr u8 header that ramfs.cpp includes, so /bin/hello.exe
+# appears on the boot filesystem without a disk backend.
+#
+# This relies on host clang + lld-link + python3 being present, which
+# the dev container ships with. A future slice will guard this with a
+# CMake probe and fall back to a hand-laid byte array if the
+# toolchain is missing.
+# ----------------------------------------------------------------------------
+set(CUSTOMOS_HELLO_PE_SRC "${CMAKE_SOURCE_DIR}/userland/apps/hello_pe/hello.c")
+set(CUSTOMOS_HELLO_PE_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_hello_pe.h")
+set(CUSTOMOS_HELLO_PE_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-hello-pe.sh")
+set(CUSTOMOS_EMBED_BLOB_SCRIPT "${CMAKE_SOURCE_DIR}/tools/embed-blob.py")
+
+add_custom_command(
+    OUTPUT "${CUSTOMOS_HELLO_PE_HEADER}"
+    COMMAND "${CUSTOMOS_HELLO_PE_SCRIPT}"
+            "${CMAKE_SOURCE_DIR}"
+            "${CUSTOMOS_HELLO_PE_HEADER}"
+    DEPENDS
+        "${CUSTOMOS_HELLO_PE_SRC}"
+        "${CUSTOMOS_HELLO_PE_SCRIPT}"
+        "${CUSTOMOS_EMBED_BLOB_SCRIPT}"
+    COMMENT "Compiling + embedding /bin/hello.exe (freestanding PE)"
+    VERBATIM
+)
+
+# ramfs.cpp includes the generated header. Add it to the shared
+# source list so BOTH stages see the dependency and the custom
+# command fires on first configure.
+list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_HELLO_PE_HEADER}")
+
 set(CUSTOMOS_KERNEL_LINKER_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/arch/x86_64/linker.ld")
 
 # Shared link flags — applied identically to both stages so the symbol
@@ -116,7 +152,10 @@ set_target_properties(customos-kernel-stage1 PROPERTIES
     # Stage 1 is internal plumbing — don't install or package it.
     EXCLUDE_FROM_ALL FALSE
 )
-target_include_directories(customos-kernel-stage1 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(customos-kernel-stage1 PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_BINARY_DIR}
+)
 customos_apply_kernel_link_flags(customos-kernel-stage1)
 
 # ----------------------------------------------------------------------------
@@ -204,6 +243,7 @@ set_target_properties(customos-kernel PROPERTIES
 
 target_include_directories(customos-kernel PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_BINARY_DIR}
 )
 
 customos_apply_kernel_link_flags(customos-kernel)

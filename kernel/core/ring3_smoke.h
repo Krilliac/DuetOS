@@ -83,4 +83,11 @@ bool SpawnOnDemand(const char* kind);
 u64 SpawnElfFile(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps,
                  const fs::RamfsNode* root, u64 frame_budget, u64 tick_budget);
 
+/// PE/COFF twin of SpawnElfFile. Loads via the v0 PE loader
+/// (freestanding, no imports, no relocations) and queues a
+/// ring-3 task at the image's entry point. Same return-code
+/// and cleanup contract as SpawnElfFile.
+u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps,
+                const fs::RamfsNode* root, u64 frame_budget, u64 tick_budget);
+
 } // namespace customos::core

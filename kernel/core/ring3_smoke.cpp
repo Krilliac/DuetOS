@@ -4,6 +4,7 @@
 #include "../arch/x86_64/serial.h"
 #include "../arch/x86_64/usermode.h"
 #include "../fs/ramfs.h"
+#include "generated_hello_pe.h"
 #include "../mm/address_space.h"
 #include "../mm/frame_allocator.h"
 #include "../mm/page.h"
@@ -12,6 +13,7 @@
 #include "elf_loader.h"
 #include "klog.h"
 #include "panic.h"
+#include "pe_loader.h"
 #include "process.h"
 
 /*
@@ -1538,6 +1540,66 @@ u64 SpawnElfFile(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps
     return proc->pid;
 }
 
+// PE twin of SpawnElfFile. Parses a PE/COFF image with the
+// v0 loader, maps its sections + a stack page into a fresh
+// AddressSpace, and enqueues a ring-3 task to enter it. The
+// process-level glue (Process / Ring3UserEntry / EnterUserMode)
+// does NOT care whether the image came from an ELF or a PE —
+// once the entry_va + stack_top are set, the ring-3 transition
+// is identical.
+u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, const fs::RamfsNode* root,
+                u64 frame_budget, u64 tick_budget)
+{
+    using arch::SerialWrite;
+    using arch::SerialWriteHex;
+    using namespace customos::mm;
+
+    if (pe_bytes == nullptr || pe_len == 0 || root == nullptr)
+    {
+        return 0;
+    }
+    const PeStatus vs = PeValidate(pe_bytes, pe_len);
+    if (vs != PeStatus::Ok)
+    {
+        SerialWrite("[ring3] pe reject name=\"");
+        SerialWrite(name);
+        SerialWrite("\" reason=");
+        SerialWrite(PeStatusName(vs));
+        SerialWrite("\n");
+        return 0;
+    }
+    AddressSpace* as = AddressSpaceCreate(frame_budget);
+    if (as == nullptr)
+    {
+        return 0;
+    }
+    const PeLoadResult r = PeLoad(pe_bytes, pe_len, as);
+    if (!r.ok)
+    {
+        AddressSpaceRelease(as);
+        return 0;
+    }
+    Process* proc = ProcessCreate(name, as, caps, root, r.entry_va, r.stack_va, tick_budget);
+    if (proc == nullptr)
+    {
+        AddressSpaceRelease(as);
+        return 0;
+    }
+    SerialWrite("[ring3] pe spawn name=\"");
+    SerialWrite(name);
+    SerialWrite("\" pid=");
+    SerialWriteHex(proc->pid);
+    SerialWrite(" entry=");
+    SerialWriteHex(r.entry_va);
+    SerialWrite(" image_base=");
+    SerialWriteHex(r.image_base);
+    SerialWrite(" stack_top=");
+    SerialWriteHex(r.stack_top);
+    SerialWrite("\n");
+    sched::SchedCreateUser(&Ring3UserEntry, nullptr, name, proc);
+    return proc->pid;
+}
+
 bool SpawnOnDemand(const char* kind)
 {
     if (kind == nullptr || kind[0] == '\0')
@@ -1604,6 +1666,12 @@ bool SpawnOnDemand(const char* kind)
     if (LocalStrEq(kind, "writefuzz"))
     {
         SpawnWriteFuzzProbeTask();
+        return true;
+    }
+    if (LocalStrEq(kind, "hellope"))
+    {
+        SpawnPeFile("ring3-hello-pe", fs::generated::kBinHelloPeBytes, fs::generated::kBinHelloPeBytes_len,
+                    CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
         return true;
     }
     return false;
@@ -1695,8 +1763,17 @@ void StartRing3SmokeTask()
     // pointers to SYS_STAT + SYS_READ. Proves `CopyToUser`
     // rejection path is robust — no byte ever lands at a bad VA.
     SpawnWriteFuzzProbeTask();
-    Log(LogLevel::Info, "core/ring3", "ring3 smoke tasks queued (incl cpu-hog + hostile + dropcaps + priv + badint + "
-                                      "kread + ptrfuzz + writefuzz)");
+    // First PE executable on the system. Freestanding, compiled
+    // from userland/apps/hello_pe/hello.c by the host clang +
+    // lld-link rule in kernel/CMakeLists.txt. Exercises the v0
+    // PE loader: DOS + NT header parse, section map, entry
+    // point dispatch. Expected output: "[hello-pe] Hello from a
+    // PE executable!" then clean exit.
+    SpawnPeFile("ring3-hello-pe", fs::generated::kBinHelloPeBytes, fs::generated::kBinHelloPeBytes_len, CapSetTrusted(),
+                fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    Log(LogLevel::Info, "core/ring3",
+        "ring3 smoke tasks queued (incl cpu-hog + hostile + dropcaps + priv + badint + kread + "
+        "ptrfuzz + writefuzz + hellope)");
 }
 
 } // namespace customos::core
