@@ -2,7 +2,7 @@
 
 **Last updated:** 2026-04-21
 **Type:** Decision
-**Status:** Active (stages 1–2 landed; stage 3 next)
+**Status:** Active (stages 1–2, 4 landed; stage 3 (AHCI) + stage 5 (FAT32) remain)
 
 ## Description
 
@@ -91,7 +91,7 @@ Doing AHCI after NVMe is deliberate:
 - The block layer's vtable absorbs the driver difference —
   stage 4+ doesn't care which backend served a sector.
 
-### Stage 4 — GPT partition parser (next session after Stage 3)
+### Stage 4 — GPT partition parser (landed 2026-04-21)
 
 `kernel/fs/gpt.{h,cpp}`. C++ parser, not Rust — GPT is
 bounded, well-defined, and we already have tight byte-parsing

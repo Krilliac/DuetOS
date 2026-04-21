@@ -54,15 +54,16 @@ else
     exit 1
 fi
 
-# Scratch NVMe image. 16 MiB raw file; first 8 bytes are a
-# well-known marker ("CUSTOMOS") the kernel reads back in the
-# boot self-test so a successful LBA 0 read is grep-able. Kept
-# in the build directory so it rebuilds per-preset and never
-# pollutes the source tree.
+# Scratch NVMe image. 16 MiB GPT-formatted raw file with one data
+# partition at LBA 2048..(end-34). The first 8 bytes of that
+# partition carry a "CUSTOMOS" marker so both the NVMe self-test
+# (via the GPT parse in kernel/fs/gpt) and any future filesystem
+# slice has a grep-able success signal. Kept in the build
+# directory so it rebuilds per-preset and never pollutes the
+# source tree.
 NVME_IMAGE="${BUILD_DIR}/nvme0.img"
 if [[ ! -f "${NVME_IMAGE}" ]]; then
-    dd if=/dev/zero of="${NVME_IMAGE}" bs=1M count=16 status=none
-    printf 'CUSTOMOS' | dd of="${NVME_IMAGE}" bs=1 seek=0 count=8 conv=notrunc status=none
+    python3 "${SCRIPT_DIR}/make-gpt-image.py" "${NVME_IMAGE}"
 fi
 
 QEMU_ARGS=(

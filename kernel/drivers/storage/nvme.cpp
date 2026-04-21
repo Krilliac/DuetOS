@@ -647,8 +647,6 @@ void NvmeSelfTest()
     }
 
     const u32 ss = g_ctrl.ns_sector_size;
-    // Work with a single-sector buffer — matches the marker layout in
-    // tools/qemu/run.sh which writes "CUSTOMOS" at offset 0.
     u8 scratch[4096];
     if (ss > sizeof(scratch))
     {
@@ -658,23 +656,22 @@ void NvmeSelfTest()
     for (u32 i = 0; i < ss; ++i)
         scratch[i] = 0;
 
+    // LBA 0 on a GPT disk is the Protective MBR, which ends in the classic
+    // 0x55 0xAA boot signature at offset 510/511. This is the cheapest
+    // "real disk content" assertion we can make without parsing the GPT
+    // — `fs/gpt::GptSelfTest` does the full parse after we return.
     const i32 rc = BlockDeviceRead(g_ctrl.block_handle, 0, 1, scratch);
     if (rc != 0)
     {
         SerialWrite("[nvme] self-test FAILED: LBA 0 read returned error\n");
         return;
     }
-
-    const char kMarker[] = "CUSTOMOS";
-    for (u32 i = 0; i < 8; ++i)
+    if (scratch[510] != 0x55 || scratch[511] != 0xAA)
     {
-        if (scratch[i] != static_cast<u8>(kMarker[i]))
-        {
-            SerialWrite("[nvme] self-test FAILED: LBA 0 marker mismatch\n");
-            return;
-        }
+        SerialWrite("[nvme] self-test FAILED: LBA 0 missing 0x55AA boot signature\n");
+        return;
     }
-    SerialWrite("[nvme] self-test OK (LBA 0 marker = CUSTOMOS)\n");
+    SerialWrite("[nvme] self-test OK (LBA 0 read + 0x55AA signature present)\n");
 }
 
 } // namespace customos::drivers::storage

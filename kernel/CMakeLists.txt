@@ -72,6 +72,7 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     drivers/video/menu.cpp
     drivers/video/taskbar.cpp
     drivers/video/widget.cpp
+    fs/gpt.cpp
     fs/ramfs.cpp
     fs/tmpfs.cpp
     fs/vfs.cpp

@@ -17,6 +17,7 @@
 #include "../drivers/storage/ahci.h"
 #include "../drivers/storage/block.h"
 #include "../drivers/storage/nvme.h"
+#include "../fs/gpt.h"
 #include "../apps/calculator.h"
 #include "../apps/clock.h"
 #include "../apps/files.h"
@@ -729,6 +730,9 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     SerialWrite("[boot] Bringing up NVMe controller.\n");
     customos::drivers::storage::NvmeInit();
     customos::drivers::storage::NvmeSelfTest();
+
+    SerialWrite("[boot] Probing GPT on block devices.\n");
+    customos::fs::gpt::GptSelfTest();
 
     // Keyboard reader thread: consumes KeyEvents and writes the
     // printable ones into the framebuffer console. Backspace and
