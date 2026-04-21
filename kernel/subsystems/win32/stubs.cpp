@@ -42,6 +42,8 @@ constexpr u32 kOffGetLastError = 0x61;        // batch 3 — 8 bytes
 constexpr u32 kOffSetLastError = 0x69;        // batch 3 — 10 bytes
 constexpr u32 kOffInitCritSec = 0x74;         // batch 4 — 18 bytes
 constexpr u32 kOffCritSecNop = 0x86;          // batch 4 — 1 byte (ret)
+constexpr u32 kOffMemmove = 0x87;             // batch 5 — 45 bytes (memcpy aliases)
+constexpr u32 kOffMemset = 0xB4;              // batch 5 — 19 bytes
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -210,10 +212,73 @@ constexpr u8 kStubsBytes[] = {
     // with no contention to handle they collapse to a single
     // return.
     0xC3, // 0x86 ret
+
+    // === Batch 5: vcruntime140 memory intrinsics ==============
+    //
+    // CRITICAL ABI NOTE: the Microsoft x64 ABI marks RDI, RSI,
+    // RBX, RBP, R12-R15 as NONVOLATILE (callee-saved) — the
+    // opposite of the SysV convention where rdi/rsi are
+    // scratch. A stub that uses rdi as a scratch register
+    // (e.g. as the destination of rep movsb) MUST save and
+    // restore it, or the caller's rdi is silently trashed
+    // across the call. Every stub here pushes the nonvolatile
+    // registers it touches and pops them before ret.
+
+    // --- memmove (offset 0x87, 45 bytes) -----------------------
+    // Signature: void* memmove(void* dst=rcx, const void* src=rdx, size_t n=r8).
+    // memcpy aliases to this — memmove is a strict superset
+    // (handles overlapping regions) and produces the same
+    // result as memcpy when regions don't overlap, so aliasing
+    // is safe. Returns the original dst in rax.
+    //
+    // Strategy: if dst <= src (non-overlap or src above dst)
+    // forward-copy with rep movsb. Otherwise backward-copy
+    // with DF=1 + adjusted start pointers, then restore DF=0
+    // (Win64 ABI contract).
+    //
+    // Saves nonvolatile rsi, rdi around the work.
+    0x56,                 // 0x87 push rsi
+    0x57,                 // 0x88 push rdi
+    0x49, 0x89, 0xC9,     // 0x89 mov r9, rcx     ; save dst for return
+    0x48, 0x89, 0xCF,     // 0x8C mov rdi, rcx    ; dst
+    0x48, 0x89, 0xD6,     // 0x8F mov rsi, rdx    ; src
+    0x4C, 0x89, 0xC1,     // 0x92 mov rcx, r8     ; n
+    0x48, 0x39, 0xF7,     // 0x95 cmp rdi, rsi
+    0x76, 0x12,           // 0x98 jbe +18 -> 0xAC (forward path)
+    // backward-copy path (dst > src, overlap-safe)
+    0x48, 0x01, 0xCF,     // 0x9A add rdi, rcx
+    0x48, 0xFF, 0xCF,     // 0x9D dec rdi
+    0x48, 0x01, 0xCE,     // 0xA0 add rsi, rcx
+    0x48, 0xFF, 0xCE,     // 0xA3 dec rsi
+    0xFD,                 // 0xA6 std
+    0xF3, 0xA4,           // 0xA7 rep movsb
+    0xFC,                 // 0xA9 cld
+    0xEB, 0x02,           // 0xAA jmp +2 -> 0xAE (skip forward's rep movsb)
+    // forward-copy path
+    0xF3, 0xA4,           // 0xAC rep movsb
+    // common epilogue
+    0x4C, 0x89, 0xC8,     // 0xAE mov rax, r9     ; return dst
+    0x5F,                 // 0xB1 pop rdi
+    0x5E,                 // 0xB2 pop rsi
+    0xC3,                 // 0xB3 ret
+
+    // --- memset (offset 0xB4, 19 bytes) ------------------------
+    // Signature: void* memset(void* dst=rcx, int c=rdx, size_t n=r8).
+    // Byte value is the low 8 bits of c (edx). Returns dst.
+    // Saves nonvolatile rdi.
+    0x57,                 // 0xB4 push rdi
+    0x49, 0x89, 0xC9,     // 0xB5 mov r9, rcx     ; save dst for return
+    0x48, 0x89, 0xCF,     // 0xB8 mov rdi, rcx    ; dst
+    0x89, 0xD0,           // 0xBB mov eax, edx    ; al = c
+    0x4C, 0x89, 0xC1,     // 0xBD mov rcx, r8     ; n
+    0xF3, 0xAA,           // 0xC0 rep stosb
+    0x4C, 0x89, 0xC8,     // 0xC2 mov rax, r9     ; return dst
+    0x5F,                 // 0xC5 pop rdi
+    0xC3,                 // 0xC6 ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x87, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0xC7, "stub layout drifted; update kOff* constants");
 
 struct StubEntry
 {
@@ -249,6 +314,12 @@ constexpr StubEntry kStubsTable[] = {
     {"kernel32.dll", "EnterCriticalSection", kOffCritSecNop},
     {"kernel32.dll", "LeaveCriticalSection", kOffCritSecNop},
     {"kernel32.dll", "DeleteCriticalSection", kOffCritSecNop},
+    // Batch 5 — vcruntime140 memory intrinsics
+    {"vcruntime140.dll", "memmove", kOffMemmove},
+    // memcpy is safe to alias to memmove — memmove is a strict
+    // superset (handles overlap), same return value contract.
+    {"vcruntime140.dll", "memcpy", kOffMemmove},
+    {"vcruntime140.dll", "memset", kOffMemset},
 };
 
 // Case-insensitive strcmp for ASCII. Win32 DLL name

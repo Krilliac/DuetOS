@@ -75,6 +75,16 @@ __declspec(dllimport) void __stdcall EnterCriticalSection(LPCRITICAL_SECTION);
 __declspec(dllimport) void __stdcall LeaveCriticalSection(LPCRITICAL_SECTION);
 __declspec(dllimport) void __stdcall DeleteCriticalSection(LPCRITICAL_SECTION);
 
+// Batch 5 — vcruntime140 memory intrinsics. CRT functions
+// use the plain x64 calling convention (no __stdcall
+// decoration — __stdcall is ignored on x64 anyway, but we
+// keep the annotations to match vcruntime140.dll's export
+// table on a real Windows system). size_t is 64-bit on x64.
+typedef unsigned long long size_t;
+__declspec(dllimport) void* memset(void* dst, int c, size_t n);
+__declspec(dllimport) void* memcpy(void* dst, const void* src, size_t n);
+__declspec(dllimport) void* memmove(void* dst, const void* src, size_t n);
+
 static const char kMsg[] = "[hello-winapi] printed via kernel32.WriteFile!\n";
 #define kMsgLen ((DWORD)(sizeof(kMsg) - 1))
 
@@ -118,6 +128,24 @@ void _start(void)
     EnterCriticalSection(&cs);
     LeaveCriticalSection(&cs);
     DeleteCriticalSection(&cs);
+
+    // Batch 5 round-trip: memset a buffer with filler, then
+    // memcpy a message over the front, then print with
+    // WriteFile. If memset or memcpy is broken the output
+    // won't match the expected string.
+    char membuf[64];
+    memset(membuf, '=', sizeof(membuf)); // fill with '=' -- proves memset
+    const char mmsg[] = "[vcruntime140] memset+memcpy+memmove OK\n";
+    memcpy(membuf, mmsg, sizeof(mmsg) - 1); // overwrite prefix -- proves memcpy
+    // Overlap test for memmove: shift the tail right by 1,
+    // forcing the backward-copy branch (dst > src, regions
+    // overlap). If the forward-copy branch ran by mistake,
+    // the trailing bytes would get corrupted to '\n\n\n...'.
+    memmove(membuf + 1, membuf, sizeof(mmsg) - 2);
+    // Restore the leading char so the message reads clean.
+    membuf[0] = '[';
+    DWORD mwritten = 0;
+    WriteFile(out, membuf, sizeof(mmsg) - 1, &mwritten, 0);
 
     // Batch 3 round-trip: store a distinctive value via
     // SetLastError, read it back via GetLastError, exit with

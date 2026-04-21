@@ -178,10 +178,34 @@ fill_pd_loop:
     mov     eax, offset boot_pml4
     mov     cr3, eax
 
-    /* Enable PAE (CR4.PAE = bit 5). */
+    /* Enable PAE (CR4.PAE = bit 5) plus SSE support bits:
+     *   CR4.OSFXSR     (bit 9)  — OS uses FXSAVE/FXRSTOR
+     *   CR4.OSXMMEXCPT (bit 10) — OS handles SIMD FP exceptions
+     *
+     * SSE2 is architecturally guaranteed on x86-64 and is part
+     * of the Microsoft x64 ABI, so any real Win32 PE (and
+     * almost any clang-compiled C code) will emit MOVUPS /
+     * MOVAPS etc. Without OSFXSR, those instructions #UD in
+     * ring 3.
+     *
+     * The kernel itself is built with -mno-sse / -mno-sse2 /
+     * -mgeneral-regs-only, so it won't touch XMM state; no
+     * FXSAVE/FXRSTOR on context switch is needed until
+     * multiple ring-3 tasks actually use SSE simultaneously.
+     */
     mov     eax, cr4
-    or      eax, (1 << 5)
+    or      eax, (1 << 5) | (1 << 9) | (1 << 10)
     mov     cr4, eax
+
+    /* CR0 tune-up for SSE:
+     *   CR0.EM = 0 (bit 2) — don't emulate FPU; SSE lives here
+     *   CR0.MP = 1 (bit 1) — WAIT/FWAIT triggers #NM when TS=1
+     * PE (bit 0) is already set by the BIOS/loader handoff.
+     */
+    mov     eax, cr0
+    and     eax, ~(1 << 2)   /* clear CR0.EM */
+    or      eax, (1 << 1)    /* set CR0.MP */
+    mov     cr0, eax
 
     /* Enable long mode via EFER.LME (MSR 0xC0000080, bit 8). */
     mov     ecx, 0xC0000080

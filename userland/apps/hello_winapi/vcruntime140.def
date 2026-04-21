@@ -1,0 +1,19 @@
+; userland/apps/hello_winapi/vcruntime140.def
+;
+; Import library for vcruntime140.dll — the MSVC C runtime
+; intrinsics DLL. Feeds llvm-dlltool the same way
+; kernel32.def does. The produced vcruntime140.lib is passed
+; to lld-link alongside kernel32.lib so user code can call
+; memset / memcpy / memmove directly.
+;
+; Kept separate from kernel32.def because a single import
+; library is per-DLL by construction — the .lib embeds the
+; source DLL name into each import descriptor.
+
+LIBRARY vcruntime140.dll
+
+EXPORTS
+    ; Batch 5 — memory intrinsics
+    memset
+    memcpy
+    memmove

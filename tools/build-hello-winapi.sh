@@ -33,24 +33,30 @@ fi
 
 REPO_ROOT="$1"
 OUT_HEADER="$2"
-SRC_C="${REPO_ROOT}/userland/apps/hello_winapi/hello.c"
-SRC_DEF="${REPO_ROOT}/userland/apps/hello_winapi/kernel32.def"
+SRC_DIR="${REPO_ROOT}/userland/apps/hello_winapi"
+SRC_C="${SRC_DIR}/hello.c"
+DEF_KERNEL32="${SRC_DIR}/kernel32.def"
+DEF_VCRUNTIME140="${SRC_DIR}/vcruntime140.def"
 EMBED="${REPO_ROOT}/tools/embed-blob.py"
 
 WORK_DIR="$(dirname "${OUT_HEADER}")/hello_winapi"
 mkdir -p "${WORK_DIR}"
 OBJ="${WORK_DIR}/hello.obj"
-LIB="${WORK_DIR}/kernel32.lib"
+LIB_KERNEL32="${WORK_DIR}/kernel32.lib"
+LIB_VCRUNTIME140="${WORK_DIR}/vcruntime140.lib"
 EXE="${WORK_DIR}/hello_winapi.exe"
 
 CLANG="${CLANG:-clang}"
 LLD_LINK="${LLD_LINK:-lld-link}"
 DLLTOOL="${DLLTOOL:-llvm-dlltool}"
 
-# Generate kernel32.lib from the .def. llvm-dlltool emits a
-# COFF import library with the right __imp_ symbols so
-# lld-link can resolve ExitProcess at link time.
-"${DLLTOOL}" -d "${SRC_DEF}" -l "${LIB}" -m i386:x86-64
+# Generate per-DLL import libraries from their .def files.
+# Each .lib contains only __imp_* symbols for functions from
+# the specific DLL the .def names. lld-link uses the import
+# descriptors to decide which kernel32/vcruntime140 functions
+# end up in the final PE's Import Directory.
+"${DLLTOOL}" -d "${DEF_KERNEL32}" -l "${LIB_KERNEL32}" -m i386:x86-64
+"${DLLTOOL}" -d "${DEF_VCRUNTIME140}" -l "${LIB_VCRUNTIME140}" -m i386:x86-64
 
 # Compile.
 "${CLANG}" \
@@ -77,7 +83,8 @@ DLLTOOL="${DLLTOOL:-llvm-dlltool}"
     /dynamicbase:no \
     /out:"${EXE}" \
     "${OBJ}" \
-    "${LIB}" 2>&1 | grep -v "align specified without /driver" || true
+    "${LIB_KERNEL32}" \
+    "${LIB_VCRUNTIME140}" 2>&1 | grep -v "align specified without /driver" || true
 
 if [[ ! -s "${EXE}" ]]; then
     echo "build-hello-winapi.sh: lld-link produced no output" >&2

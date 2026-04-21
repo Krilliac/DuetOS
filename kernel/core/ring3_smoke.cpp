@@ -353,7 +353,16 @@ void WriteUserCodeFrame(mm::PhysAddr frame, u64 code_va, u64 stack_va)
         Panic("core/ring3", "Ring3UserEntry without a Process");
     }
     const u64 code_va = proc->user_code_va;
-    const u64 stack_top = proc->user_stack_va + mm::kPageSize;
+    // Both SysV and Microsoft x64 ABIs expect rsp % 16 == 8 on
+    // function entry — i.e., the caller has already pushed an
+    // 8-byte return address before the call. When we iretq
+    // into user code, no return address has been pushed, so
+    // rsp would be exactly page-aligned (%16 == 0) without
+    // this adjustment and any movaps against rsp-relative
+    // offsets inside the function prologue would #GP. Bias
+    // rsp by -8 once, up front, so the ring-3 entry point
+    // sees the same layout it would on a CALL.
+    const u64 stack_top = proc->user_stack_va + mm::kPageSize - 8;
 
     SerialWrite("[ring3] task pid=");
     SerialWriteHex(sched::CurrentTaskId());
