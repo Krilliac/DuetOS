@@ -63,6 +63,7 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     drivers/input/ps2mouse.cpp
     drivers/pci/pci.cpp
     drivers/storage/ahci.cpp
+    drivers/storage/block.cpp
     drivers/video/console.cpp
     drivers/video/cursor.cpp
     drivers/video/font8x8.cpp

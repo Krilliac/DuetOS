@@ -15,6 +15,7 @@
 #include "../drivers/input/ps2mouse.h"
 #include "../drivers/pci/pci.h"
 #include "../drivers/storage/ahci.h"
+#include "../drivers/storage/block.h"
 #include "../apps/calculator.h"
 #include "../apps/clock.h"
 #include "../apps/files.h"
@@ -719,6 +720,10 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
 
     SerialWrite("[boot] Discovering AHCI controller.\n");
     customos::drivers::storage::AhciInit();
+
+    SerialWrite("[boot] Bringing up block device layer.\n");
+    customos::drivers::storage::BlockLayerInit();
+    customos::drivers::storage::BlockLayerSelfTest();
 
     // Keyboard reader thread: consumes KeyEvents and writes the
     // printable ones into the framebuffer console. Backspace and

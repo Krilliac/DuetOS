@@ -68,6 +68,7 @@ expected=(
     "[calc] self-test OK"
     "[files] self-test OK"
     "[clock] self-test OK"
+    "[block] self-test OK"
     "exit rc   val=0x000000000000beef"
 )
 
