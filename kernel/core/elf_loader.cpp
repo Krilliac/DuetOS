@@ -4,6 +4,7 @@
 #include "../mm/frame_allocator.h"
 #include "../mm/page.h"
 #include "../mm/paging.h"
+#include "klog.h"
 
 namespace customos::core
 {
@@ -13,7 +14,10 @@ namespace
 
 // Little-endian readers — the buffer is byte-addressed and may
 // not be naturally aligned at the offsets we need.
-inline u16 LeU16(const u8* p) { return u16(p[0]) | (u16(p[1]) << 8); }
+inline u16 LeU16(const u8* p)
+{
+    return u16(p[0]) | (u16(p[1]) << 8);
+}
 inline u32 LeU32(const u8* p)
 {
     return u32(p[0]) | (u32(p[1]) << 8) | (u32(p[2]) << 16) | (u32(p[3]) << 24);
@@ -151,7 +155,10 @@ ElfStatus ElfValidate(const u8* file, u64 file_len)
     return ElfStatus::Ok;
 }
 
-u64 ElfEntry(const u8* file) { return LeU64(file + 24); }
+u64 ElfEntry(const u8* file)
+{
+    return LeU64(file + 24);
+}
 
 void ElfProgramHeaderInfo(const u8* file, u64* phoff_out, u16* phnum_out, u16* phentsize_out)
 {
@@ -286,33 +293,44 @@ void LoadSegment(LoadCtx& ctx, const ElfSegment& seg)
 
 ElfLoadResult ElfLoad(const u8* file, u64 file_len, customos::mm::AddressSpace* as)
 {
+    KLOG_TRACE_SCOPE("elf-loader", "ElfLoad");
     ElfLoadResult r;
     r.ok = false;
     r.entry_va = 0;
     r.stack_va = 0;
     r.stack_top = 0;
     if (as == nullptr)
+    {
+        KLOG_WARN("elf-loader", "ElfLoad called with null AddressSpace");
         return r;
-    if (ElfValidate(file, file_len) != ElfStatus::Ok)
+    }
+    const ElfStatus vs = ElfValidate(file, file_len);
+    if (vs != ElfStatus::Ok)
+    {
+        KLOG_WARN_S("elf-loader", "ElfValidate rejected file", "status", ElfStatusName(vs));
         return r;
+    }
 
     LoadCtx ctx{file, as, true};
-    ElfForEachPtLoad(file, file_len,
-                     [](const ElfSegment& seg, void* cookie) {
-                         LoadSegment(*static_cast<LoadCtx*>(cookie), seg);
-                     },
-                     &ctx);
+    ElfForEachPtLoad(
+        file, file_len, [](const ElfSegment& seg, void* cookie) { LoadSegment(*static_cast<LoadCtx*>(cookie), seg); },
+        &ctx);
     if (!ctx.ok)
+    {
+        KLOG_ERROR("elf-loader", "PT_LOAD segment mapping failed mid-load");
         return r;
+    }
 
     // Stack page. Writable + NX + User. Caller has already populated
     // the code segment(s); the stack goes at the fixed v0 VA.
     using namespace customos::mm;
     const PhysAddr stack_frame = AllocateFrame();
     if (stack_frame == kNullFrame)
+    {
+        KLOG_ERROR("elf-loader", "stack frame allocation failed (OOM)");
         return r;
-    AddressSpaceMapUserPage(as, kV0StackVa, stack_frame,
-                            kPagePresent | kPageUser | kPageWritable | kPageNoExecute);
+    }
+    AddressSpaceMapUserPage(as, kV0StackVa, stack_frame, kPagePresent | kPageUser | kPageWritable | kPageNoExecute);
 
     r.ok = true;
     r.entry_va = ElfEntry(file);

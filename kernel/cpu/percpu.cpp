@@ -2,6 +2,7 @@
 
 #include "../arch/x86_64/lapic.h"
 #include "../arch/x86_64/serial.h"
+#include "../core/klog.h"
 
 namespace customos::cpu
 {
@@ -37,6 +38,7 @@ inline void WriteMsr(u32 msr, u64 value)
 
 void PerCpuInitBsp()
 {
+    KLOG_TRACE_SCOPE("cpu/percpu", "PerCpuInitBsp");
     // Stamp the LAPIC ID from the LAPIC register — the MADT also
     // reports LAPIC IDs, but the register is the authoritative source
     // for the CPU we're actually executing on.

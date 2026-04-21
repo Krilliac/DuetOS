@@ -2,6 +2,7 @@
 
 #include "../arch/x86_64/cpu.h"
 #include "../arch/x86_64/serial.h"
+#include "../core/klog.h"
 #include "../core/panic.h"
 #include "../cpu/percpu.h"
 
@@ -104,6 +105,7 @@ void SpinLockAssertHeld(const SpinLock& lock)
 
 void SpinLockSelfTest()
 {
+    KLOG_TRACE_SCOPE("sync/spinlock", "SpinLockSelfTest");
     arch::SerialWrite("[sync] spinlock self-test\n");
 
     SpinLock lock{};

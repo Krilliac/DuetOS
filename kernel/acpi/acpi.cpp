@@ -2,6 +2,7 @@
 
 #include "../arch/x86_64/cpu.h"
 #include "../arch/x86_64/serial.h"
+#include "../core/klog.h"
 #include "../core/panic.h"
 #include "../mm/multiboot2.h"
 #include "../mm/page.h"
@@ -523,6 +524,7 @@ void ParseMcfg(const McfgTable& mcfg)
 
 void AcpiInit(uptr multiboot_info_phys)
 {
+    KLOG_TRACE_SCOPE("acpi", "AcpiInit");
     KASSERT(multiboot_info_phys != 0, "acpi", "AcpiInit null multiboot info");
 
     const Rsdp* rsdp = FindRsdpInMultiboot(multiboot_info_phys);

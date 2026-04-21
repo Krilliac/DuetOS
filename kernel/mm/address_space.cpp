@@ -186,6 +186,7 @@ void FreeUserHalfTables(u64* pml4)
 
 AddressSpace* AddressSpaceCreate(u64 frame_budget)
 {
+    KLOG_TRACE_SCOPE("mm/as", "AddressSpaceCreate");
     if (frame_budget == 0 || frame_budget > kMaxUserVmRegionsPerAs)
     {
         PanicAs("AddressSpaceCreate: frame_budget out of range [1..kMaxUserVmRegionsPerAs]", frame_budget);
@@ -447,6 +448,7 @@ AddressSpaceStats AddressSpaceStatsRead()
 
 void AddressSpaceSelfTest()
 {
+    KLOG_TRACE_SCOPE("mm/as", "AddressSpaceSelfTest");
     // Use a VA inside PDPT[1] of the low half — outside anything
     // ring3_smoke or any existing mapping touches. If ring3 ever
     // moves to the same VA range, bump this to stay disjoint.

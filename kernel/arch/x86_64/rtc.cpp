@@ -1,5 +1,6 @@
 #include "rtc.h"
 
+#include "../../core/klog.h"
 #include "cpu.h"
 
 namespace customos::arch
@@ -72,6 +73,7 @@ void RtcRead(RtcTime* out)
     u8 s1, m1, h1, d1, mo1, y1;
     u8 s2, m2, h2, d2, mo2, y2;
     u8 status_b = 0;
+    bool stable = false;
     for (u32 attempt = 0; attempt < 8; ++attempt)
     {
         s1 = ReadRaw(kRegSeconds);
@@ -91,8 +93,17 @@ void RtcRead(RtcTime* out)
 
         if (s1 == s2 && m1 == m2 && h1 == h2 && d1 == d2 && mo1 == mo2 && y1 == y2)
         {
+            stable = true;
             break;
         }
+    }
+    if (!stable)
+    {
+        // RTC kept changing under us across all retries. Hardware
+        // is wedged or QEMU's CMOS emulation is racing. Caller gets
+        // whatever the last attempt produced; flag it once so an
+        // operator notices.
+        KLOG_ONCE_WARN("arch/rtc", "RtcRead: 8 retries failed to converge; returning last sample");
     }
 
     const bool binary_mode = (status_b & kStatusBBinaryMode) != 0;

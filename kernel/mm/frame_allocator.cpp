@@ -5,6 +5,7 @@
 
 #include "../arch/x86_64/cpu.h"
 #include "../arch/x86_64/serial.h"
+#include "../core/klog.h"
 #include "../core/panic.h"
 
 // Linker-script symbols. Both are PHYSICAL addresses: the kernel image is
@@ -215,6 +216,7 @@ u64 FindBitmapHome(uptr info_phys, u64 info_size, u64 bitmap_bytes)
 // ---------------------------------------------------------------------------
 void FrameAllocatorInit(uptr multiboot_info_phys)
 {
+    KLOG_TRACE_SCOPE("mm/frame", "FrameAllocatorInit");
     if (multiboot_info_phys == 0)
     {
         PanicFrame("null Multiboot2 info pointer");
@@ -384,6 +386,10 @@ PhysAddr AllocateFrame()
             return phys;
         }
     }
+    // Physical memory exhausted. Warn once per boot — repeat spam
+    // during a sustained OOM storm helps nobody. Callers get the
+    // kNullFrame return value to react to.
+    KLOG_ONCE_WARN("mm/frame", "out of physical frames (AllocateFrame)");
     return kNullFrame;
 }
 
@@ -456,6 +462,7 @@ PhysAddr AllocateContiguousFrames(u64 count)
             return run_start << kPageSizeLog2;
         }
     }
+    KLOG_WARN_V("mm/frame", "no contiguous run available; requested frames", count);
     return kNullFrame;
 }
 
@@ -499,6 +506,7 @@ u64 FreeFramesCount()
 
 void FrameAllocatorSelfTest()
 {
+    KLOG_TRACE_SCOPE("mm/frame", "FrameAllocatorSelfTest");
     SerialWrite("[mm] frame allocator self-test\n");
 
     const u64 free_before = g_free_count;

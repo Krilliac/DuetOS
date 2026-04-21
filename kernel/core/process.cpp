@@ -24,6 +24,7 @@ constinit u64 g_live_processes = 0;
 Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, const fs::RamfsNode* root, u64 user_code_va,
                        u64 user_stack_va, u64 tick_budget)
 {
+    KLOG_TRACE_SCOPE("core/process", "ProcessCreate");
     KASSERT(name != nullptr, "core/process", "ProcessCreate null name");
     KASSERT(as != nullptr, "core/process", "ProcessCreate null as");
     KASSERT(root != nullptr, "core/process", "ProcessCreate null root");
