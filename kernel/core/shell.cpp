@@ -290,6 +290,7 @@ void CmdHelp()
     ConsoleWriteln("  FREE         MEMORY USAGE (PHYS + HEAP)");
     ConsoleWriteln("  PS           LIST EVERY SCHEDULER TASK");
     ConsoleWriteln("  SPAWN KIND   LAUNCH A RING-3 TASK (hello/sandbox/jail/...)");
+    ConsoleWriteln("  READELF PATH PARSE AN ELF64 HEADER + PROGRAM HEADERS");
     ConsoleWriteln("");
     ConsoleWriteln("KEYS:  UP/DOWN = HISTORY   TAB = COMPLETE");
     ConsoleWriteln("       CTRL+ALT+T = TOGGLE MODE");
@@ -1131,7 +1132,7 @@ static const char* const kCommandSet[] = {
     "ticks",   "msr",     "lapic",   "smp",     "lspci",   "heap",    "paging",
     "fb",      "kbdstats","mousestats","loglevel","getenv","yield",   "reboot",
     "halt",    "uname",   "whoami",  "hostname","pwd",     "true",    "false",
-    "mount",   "lsmod",   "free",    "ps",      "spawn",
+    "mount",   "lsmod",   "free",    "ps",      "spawn",   "readelf",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -2130,6 +2131,233 @@ void CmdSpawn(u32 argc, char** argv)
     ConsoleWrite("SPAWN: QUEUED ");
     ConsoleWriteln(argv[1]);
     ConsoleWriteln("  (RUN `PS` TO SEE IT, OR WATCH THE KERNEL LOG)");
+}
+
+// Little-endian u16/u32/u64 readers — the ELF parser walks
+// raw bytes, so we don't rely on alignment or struct packing.
+u16 LeU16(const u8* p) { return u16(p[0]) | (u16(p[1]) << 8); }
+u32 LeU32(const u8* p)
+{
+    return u32(p[0]) | (u32(p[1]) << 8) | (u32(p[2]) << 16) | (u32(p[3]) << 24);
+}
+u64 LeU64(const u8* p)
+{
+    u64 lo = LeU32(p);
+    u64 hi = LeU32(p + 4);
+    return lo | (hi << 32);
+}
+
+const char* ElfTypeName(u16 t)
+{
+    switch (t)
+    {
+    case 0:
+        return "NONE";
+    case 1:
+        return "REL";
+    case 2:
+        return "EXEC";
+    case 3:
+        return "DYN (shared or PIE)";
+    case 4:
+        return "CORE";
+    default:
+        return "OTHER";
+    }
+}
+
+const char* ElfMachineName(u16 m)
+{
+    switch (m)
+    {
+    case 0x00:
+        return "none";
+    case 0x03:
+        return "x86 (i386)";
+    case 0x28:
+        return "arm";
+    case 0x3E:
+        return "x86_64";
+    case 0xB7:
+        return "aarch64";
+    case 0xF3:
+        return "riscv";
+    default:
+        return "unknown";
+    }
+}
+
+const char* ElfPtypeName(u32 t)
+{
+    switch (t)
+    {
+    case 0:
+        return "NULL";
+    case 1:
+        return "LOAD";
+    case 2:
+        return "DYNAMIC";
+    case 3:
+        return "INTERP";
+    case 4:
+        return "NOTE";
+    case 5:
+        return "SHLIB";
+    case 6:
+        return "PHDR";
+    case 7:
+        return "TLS";
+    case 0x6474E550:
+        return "GNU_EH_FRAME";
+    case 0x6474E551:
+        return "GNU_STACK";
+    case 0x6474E552:
+        return "GNU_RELRO";
+    default:
+        return "OTHER";
+    }
+}
+
+void CmdReadelf(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("READELF: USAGE: READELF PATH");
+        return;
+    }
+    char scratch[customos::fs::kTmpFsContentMax];
+    const u32 n = ReadFileToBuf(argv[1], scratch, sizeof(scratch));
+    if (n == static_cast<u32>(-1))
+    {
+        ConsoleWrite("READELF: NO SUCH FILE: ");
+        ConsoleWriteln(argv[1]);
+        return;
+    }
+    if (n < 64)
+    {
+        ConsoleWriteln("READELF: FILE TOO SMALL FOR AN ELF HEADER");
+        return;
+    }
+    const u8* b = reinterpret_cast<const u8*>(scratch);
+    if (!(b[0] == 0x7F && b[1] == 'E' && b[2] == 'L' && b[3] == 'F'))
+    {
+        ConsoleWriteln("READELF: NOT AN ELF FILE (BAD MAGIC)");
+        return;
+    }
+    const u8 ei_class = b[4];
+    const u8 ei_data = b[5];
+    if (ei_class != 2)
+    {
+        ConsoleWriteln("READELF: NOT ELF64 (ei_class != 2)");
+        return;
+    }
+    if (ei_data != 1)
+    {
+        ConsoleWriteln("READELF: NOT LITTLE-ENDIAN (ei_data != 1)");
+        return;
+    }
+    ConsoleWriteln("-- ELF HEADER --");
+    ConsoleWrite("  CLASS:      ELF64\n");
+    ConsoleWrite("  DATA:       LSB\n");
+    ConsoleWrite("  VERSION:    ");
+    WriteU64Dec(b[6]);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("  OSABI:      ");
+    WriteU64Dec(b[7]);
+    ConsoleWriteChar('\n');
+    const u16 e_type = LeU16(b + 16);
+    ConsoleWrite("  TYPE:       ");
+    WriteU64Hex(e_type, 4);
+    ConsoleWrite("  (");
+    ConsoleWrite(ElfTypeName(e_type));
+    ConsoleWriteln(")");
+    const u16 e_machine = LeU16(b + 18);
+    ConsoleWrite("  MACHINE:    ");
+    WriteU64Hex(e_machine, 4);
+    ConsoleWrite("  (");
+    ConsoleWrite(ElfMachineName(e_machine));
+    ConsoleWriteln(")");
+    const u64 e_entry = LeU64(b + 24);
+    ConsoleWrite("  ENTRY:      ");
+    WriteU64Hex(e_entry);
+    ConsoleWriteChar('\n');
+    const u64 e_phoff = LeU64(b + 32);
+    const u64 e_shoff = LeU64(b + 40);
+    ConsoleWrite("  PHOFF:      ");
+    WriteU64Dec(e_phoff);
+    ConsoleWrite("   SHOFF: ");
+    WriteU64Dec(e_shoff);
+    ConsoleWriteChar('\n');
+    const u16 e_phentsize = LeU16(b + 54);
+    const u16 e_phnum = LeU16(b + 56);
+    const u16 e_shentsize = LeU16(b + 58);
+    const u16 e_shnum = LeU16(b + 60);
+    ConsoleWrite("  PHDRS:      ");
+    WriteU64Dec(e_phnum);
+    ConsoleWrite(" x ");
+    WriteU64Dec(e_phentsize);
+    ConsoleWrite(" bytes");
+    ConsoleWriteChar('\n');
+    ConsoleWrite("  SHDRS:      ");
+    WriteU64Dec(e_shnum);
+    ConsoleWrite(" x ");
+    WriteU64Dec(e_shentsize);
+    ConsoleWrite(" bytes");
+    ConsoleWriteChar('\n');
+
+    // Walk PT_LOAD (and any other) program headers.
+    if (e_phnum == 0 || e_phentsize < 56 || e_phoff == 0)
+    {
+        return;
+    }
+    ConsoleWriteln("-- PROGRAM HEADERS --");
+    ConsoleWriteln("   TYPE       FLAGS  OFFSET           VADDR            FILESZ    MEMSZ     ALIGN");
+    for (u16 i = 0; i < e_phnum; ++i)
+    {
+        const u64 off = e_phoff + static_cast<u64>(i) * e_phentsize;
+        if (off + 56 > n)
+        {
+            ConsoleWriteln("  <TRUNCATED>");
+            break;
+        }
+        const u8* p = b + off;
+        const u32 p_type = LeU32(p + 0);
+        const u32 p_flags = LeU32(p + 4);
+        const u64 p_offset = LeU64(p + 8);
+        const u64 p_vaddr = LeU64(p + 16);
+        // p_paddr = LeU64(p + 24) — skipped
+        const u64 p_filesz = LeU64(p + 32);
+        const u64 p_memsz = LeU64(p + 40);
+        const u64 p_align = LeU64(p + 48);
+        ConsoleWrite("  ");
+        // Type — left-justify name to 10 cols.
+        const char* tn = ElfPtypeName(p_type);
+        ConsoleWrite(tn);
+        for (u32 k = 0; k < 12; ++k)
+        {
+            if (tn[k] == '\0')
+            {
+                for (u32 j = k; j < 12; ++j)
+                    ConsoleWriteChar(' ');
+                break;
+            }
+        }
+        // Flags as 3-char RWE.
+        ConsoleWriteChar((p_flags & 4) ? 'R' : '-'); // PF_R
+        ConsoleWriteChar((p_flags & 2) ? 'W' : '-'); // PF_W
+        ConsoleWriteChar((p_flags & 1) ? 'X' : '-'); // PF_X
+        ConsoleWrite("    ");
+        WriteU64Hex(p_offset);
+        ConsoleWrite(" ");
+        WriteU64Hex(p_vaddr);
+        ConsoleWrite(" ");
+        WriteU64Hex(p_filesz, 8);
+        ConsoleWrite("  ");
+        WriteU64Hex(p_memsz, 8);
+        ConsoleWrite("  ");
+        WriteU64Hex(p_align, 5);
+        ConsoleWriteChar('\n');
+    }
 }
 
 void CmdPs()
@@ -3158,6 +3386,11 @@ void Dispatch(char* line)
         CmdSpawn(argc, argv);
         return;
     }
+    if (StrEq(cmd, "readelf"))
+    {
+        CmdReadelf(argc, argv);
+        return;
+    }
     if (StrEq(cmd, "reboot"))
     {
         CmdRebootNow();
@@ -3582,7 +3815,7 @@ void ShellTabComplete()
                           StrEq(g_input, "wc") || StrEq(g_input, "head") ||
                           StrEq(g_input, "tail") || StrEq(g_input, "source") ||
                           StrEq(g_input, "grep") || StrEq(g_input, "sort") ||
-                          StrEq(g_input, "uniq");
+                          StrEq(g_input, "uniq") || StrEq(g_input, "readelf");
     g_input[first_ws] = saved;
 
     if (path_cmd)

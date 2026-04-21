@@ -24,6 +24,45 @@ constexpr u8 kEtcVersionBytes[] = "CustomOS v0 (ramfs-seeded)\n";
 constexpr u8 kBinHelloBytes[] = "Hello from /bin/hello\n";
 constexpr u8 kWelcomeBytes[] = "Welcome, sandbox. This file is all you can see.\n";
 
+// Minimal but valid ELF64 file so `readelf /bin/sample.elf`
+// has something real to parse end-to-end. 64-byte ELF header +
+// one 56-byte PT_LOAD program header = 120 bytes total. No
+// section headers. No actual code — this is a parser demo,
+// not a loadable binary.
+constexpr u8 kBinSampleElfBytes[] = {
+    // -- ELF64 header (64 bytes) --
+    0x7F, 'E', 'L', 'F',       // e_ident[0..3] magic
+    0x02,                      // EI_CLASS = ELFCLASS64
+    0x01,                      // EI_DATA = ELFDATA2LSB
+    0x01,                      // EI_VERSION = EV_CURRENT
+    0x00,                      // EI_OSABI = ELFOSABI_SYSV
+    0x00,                      // EI_ABIVERSION
+    0, 0, 0, 0, 0, 0, 0,       // padding (7 bytes)
+    0x02, 0x00,                // e_type = ET_EXEC
+    0x3E, 0x00,                // e_machine = EM_X86_64
+    0x01, 0x00, 0x00, 0x00,    // e_version
+    0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, // e_entry = 0x400000
+    0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // e_phoff = 64
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // e_shoff = 0
+    0x00, 0x00, 0x00, 0x00,    // e_flags
+    0x40, 0x00,                // e_ehsize = 64
+    0x38, 0x00,                // e_phentsize = 56
+    0x01, 0x00,                // e_phnum = 1
+    0x00, 0x00,                // e_shentsize
+    0x00, 0x00,                // e_shnum
+    0x00, 0x00,                // e_shstrndx
+
+    // -- PT_LOAD program header (56 bytes) --
+    0x01, 0x00, 0x00, 0x00,    // p_type = PT_LOAD
+    0x05, 0x00, 0x00, 0x00,    // p_flags = PF_R | PF_X
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // p_offset = 0
+    0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, // p_vaddr = 0x400000
+    0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, // p_paddr = 0x400000
+    0x78, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // p_filesz = 120
+    0x78, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // p_memsz = 120
+    0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // p_align = 0x1000
+};
+
 // Message-of-the-day shown by the shell on startup. Kept short
 // so a 80x40 console has room for the banner + boot log + first
 // prompt without scrolling anything important off the top.
@@ -212,8 +251,17 @@ constinit RamfsNode k_trusted_bin_hello = {
     .file_size = sizeof(kBinHelloBytes) - 1,
 };
 
+constinit RamfsNode k_trusted_bin_sample_elf = {
+    .name = "sample.elf",
+    .type = RamfsNodeType::kFile,
+    .children = nullptr,
+    .file_bytes = kBinSampleElfBytes,
+    .file_size = sizeof(kBinSampleElfBytes),
+};
+
 constinit const RamfsNode* const k_trusted_bin_children[] = {
     &k_trusted_bin_hello,
+    &k_trusted_bin_sample_elf,
     nullptr,
 };
 
