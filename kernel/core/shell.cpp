@@ -14,6 +14,7 @@
 #include "../drivers/video/console.h"
 #include "../drivers/video/framebuffer.h"
 #include "../drivers/video/widget.h"
+#include "../fs/fat32.h"
 #include "../fs/gpt.h"
 #include "../fs/ramfs.h"
 #include "../fs/tmpfs.h"
@@ -300,6 +301,8 @@ void CmdHelp()
     ConsoleWriteln("  READ H LBA [C] HEXDUMP C SECTORS FROM BLOCK HANDLE H AT LBA");
     ConsoleWriteln("  GUARD [SUB]  SECURITY GUARD: STATUS OR ON/ENFORCE/OFF/TEST");
     ConsoleWriteln("  TOP          PER-TASK CPU% + SYSTEM IDLE FRACTION");
+    ConsoleWriteln("  FATLS [VOL]  LIST ROOT DIR OF FAT32 VOLUME (default vol 0)");
+    ConsoleWriteln("  FATCAT [VOL] NAME  READ FILE FROM FAT32 VOLUME TO CONSOLE");
     ConsoleWriteln("  FREE         MEMORY USAGE (PHYS + HEAP)");
     ConsoleWriteln("  PS           LIST EVERY SCHEDULER TASK");
     ConsoleWriteln("  SPAWN KIND   LAUNCH A RING-3 TASK (hello/sandbox/jail/...)");
@@ -1209,7 +1212,7 @@ static const char* const kCommandSet[] = {
     "hostname", "pwd",        "true",     "false",    "mount",    "lsmod",    "lsblk",    "lsgpt",   "free",   "ps",
     "spawn",    "readelf",    "hexdump",  "stat",     "basename", "dirname",  "cal",      "sleep",   "reset",  "tac",
     "nl",       "rev",        "expr",     "color",    "rand",     "flushtlb", "checksum", "repeat",  "kill",   "exec",
-    "metrics",  "trace",      "read",     "guard",    "top",
+    "metrics",  "trace",      "read",     "guard",    "top",      "fatcat",   "fatls",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -2312,6 +2315,106 @@ void CmdGuard(customos::u32 argc, char** argv)
         return;
     }
     ConsoleWriteln("GUARD: UNKNOWN SUBCOMMAND");
+}
+
+void CmdFatls(customos::u32 argc, char** argv)
+{
+    // `fatls [vol_idx]` — list root-directory entries from a
+    // probed FAT32 volume. Default volume 0. Columns mirror the
+    // boot-time self-test: name, attr, first_cluster, size.
+    namespace fat = customos::fs::fat32;
+    u32 vol_idx = 0;
+    if (argc >= 2)
+    {
+        customos::u64 v = 0;
+        if (!ParseU64Str(argv[1], &v) || v >= fat::Fat32VolumeCount())
+        {
+            ConsoleWriteln("FATLS: BAD VOLUME INDEX");
+            return;
+        }
+        vol_idx = static_cast<u32>(v);
+    }
+    const fat::Volume* v = fat::Fat32Volume(vol_idx);
+    if (v == nullptr)
+    {
+        ConsoleWriteln("FATLS: NO VOLUMES (did FAT32 self-test find one?)");
+        return;
+    }
+    ConsoleWriteln("NAME          ATTR  FIRST_CLUSTER  SIZE");
+    for (customos::u32 i = 0; i < v->root_entry_count; ++i)
+    {
+        const fat::DirEntry& e = v->root_entries[i];
+        ConsoleWrite(e.name);
+        // Pad name column to 13 chars.
+        customos::u32 len = 0;
+        while (e.name[len] != 0)
+            ++len;
+        for (customos::u32 p = len; p < 13; ++p)
+            ConsoleWriteChar(' ');
+        ConsoleWriteChar(' ');
+        WriteU64Hex(e.attributes, 2);
+        ConsoleWrite("    ");
+        WriteU64Hex(e.first_cluster, 8);
+        ConsoleWriteChar(' ');
+        WriteU64Hex(e.size_bytes, 8);
+        ConsoleWriteln("");
+    }
+}
+
+void CmdFatcat(customos::u32 argc, char** argv)
+{
+    // `fatcat [vol_idx] <name>` — read the named file from a FAT32
+    // volume and write it to the console. Caps at 4 KiB (one scratch
+    // buffer) for v0; larger reads are a follow-up that streams in
+    // chunks. Volume index is optional and defaults to 0.
+    namespace fat = customos::fs::fat32;
+    if (argc < 2)
+    {
+        ConsoleWriteln("FATCAT: USAGE: FATCAT [VOL] NAME");
+        return;
+    }
+    u32 vol_idx = 0;
+    const char* name = argv[1];
+    if (argc >= 3)
+    {
+        customos::u64 v = 0;
+        if (ParseU64Str(argv[1], &v) && v < fat::Fat32VolumeCount())
+        {
+            vol_idx = static_cast<u32>(v);
+            name = argv[2];
+        }
+    }
+    const fat::Volume* v = fat::Fat32Volume(vol_idx);
+    if (v == nullptr)
+    {
+        ConsoleWriteln("FATCAT: NO SUCH VOLUME");
+        return;
+    }
+    const fat::DirEntry* e = fat::Fat32FindInRoot(v, name);
+    if (e == nullptr)
+    {
+        ConsoleWrite("FATCAT: NO SUCH FILE: ");
+        ConsoleWriteln(name);
+        return;
+    }
+    static customos::u8 buf[4096];
+    const customos::i64 n = fat::Fat32ReadFile(v, e, buf, sizeof(buf));
+    if (n < 0)
+    {
+        ConsoleWriteln("FATCAT: READ ERROR");
+        return;
+    }
+    for (customos::i64 i = 0; i < n; ++i)
+    {
+        const char c = static_cast<char>(buf[i]);
+        ConsoleWriteChar((c >= 0x20 && c <= 0x7E) || c == '\n' || c == '\r' || c == '\t' ? c : '.');
+    }
+    // Ensure the shell prompt starts on a fresh line even if the
+    // file didn't end with a newline.
+    if (n == 0 || buf[n - 1] != '\n')
+    {
+        ConsoleWriteln("");
+    }
 }
 
 void CmdRead(customos::u32 argc, char** argv)
@@ -4786,6 +4889,16 @@ void Dispatch(char* line)
     if (StrEq(cmd, "top"))
     {
         CmdTop();
+        return;
+    }
+    if (StrEq(cmd, "fatls"))
+    {
+        CmdFatls(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "fatcat"))
+    {
+        CmdFatcat(argc, argv);
         return;
     }
     if (StrEq(cmd, "free"))

@@ -75,11 +75,30 @@ bool Fat32Probe(u32 block_handle, u32* out_index);
 u32 Fat32VolumeCount();
 const Volume* Fat32Volume(u32 index);
 
+/// Case-insensitive lookup for an 8.3 name in the volume's root
+/// snapshot. `name` is the human-form "HELLO.TXT" (as emitted by
+/// Fat32Probe into DirEntry.name), NOT the raw 11-byte spaced
+/// form. Returns nullptr on miss.
+const DirEntry* Fat32FindInRoot(const Volume* v, const char* name);
+
+/// Read up to `max` bytes of a file's contents into `out`. Returns
+/// the number of bytes actually written (0..file.size_bytes), or
+/// -1 on any I/O failure. Safe to call with max==0 (trivially
+/// returns 0). Follows the cluster chain through the FAT; no
+/// caching, no prefetch — a fresh BlockDeviceRead per cluster.
+///
+/// Bounded: caps at 65536 clusters (256 MiB at 4 KiB cluster), so
+/// a corrupt chain that self-loops can't spin forever. Bounded
+/// loop also protects against the compiler-noticed infinite-loop
+/// undefined-behaviour warnings clang emits at -O3.
+i64 Fat32ReadFile(const Volume* v, const DirEntry* e, void* out, u64 max);
+
 /// Boot-time self-test. Calls `Fat32Probe` on every registered
 /// block device; partitions that aren't FAT32 are expected to fail
-/// and are logged as "not FAT32" (no failure shout). One PASS line
-/// if the self-test found at least one volume AND that volume's
-/// root contains at least one non-directory entry.
+/// and are logged as "not FAT32" (no failure shout). PASS
+/// criterion: at least one volume's root contains a file AND
+/// the seed file HELLO.TXT reads back exactly as the image-
+/// builder wrote it.
 void Fat32SelfTest();
 
 } // namespace customos::fs::fat32

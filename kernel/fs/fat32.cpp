@@ -284,6 +284,93 @@ const Volume* Fat32Volume(u32 index)
     return &g_volumes[index];
 }
 
+const DirEntry* Fat32FindInRoot(const Volume* v, const char* name)
+{
+    if (v == nullptr || name == nullptr)
+        return nullptr;
+    for (u32 i = 0; i < v->root_entry_count; ++i)
+    {
+        const DirEntry& e = v->root_entries[i];
+        bool match = true;
+        u32 k = 0;
+        for (; e.name[k] != 0 && name[k] != 0; ++k)
+        {
+            // Case-insensitive over ASCII A-Z.
+            char a = e.name[k];
+            char b = name[k];
+            if (a >= 'a' && a <= 'z')
+                a = static_cast<char>(a - 32);
+            if (b >= 'a' && b <= 'z')
+                b = static_cast<char>(b - 32);
+            if (a != b)
+            {
+                match = false;
+                break;
+            }
+        }
+        if (match && e.name[k] == 0 && name[k] == 0)
+        {
+            return &e;
+        }
+    }
+    return nullptr;
+}
+
+i64 Fat32ReadFile(const Volume* v, const DirEntry* e, void* out, u64 max)
+{
+    if (v == nullptr || e == nullptr || out == nullptr)
+        return -1;
+    if (max == 0 || e->size_bytes == 0 || e->first_cluster < 2)
+        return 0;
+
+    // Cap the copy at the file's declared size — overruns would
+    // bleed cluster slack (zero-padding or the next file's data)
+    // into the caller's buffer, which callers never want.
+    const u64 want = (e->size_bytes < max) ? u64(e->size_bytes) : max;
+    const u64 cluster_bytes = u64(v->sectors_per_cluster) * u64(v->bytes_per_sector);
+    u8* dst = static_cast<u8*>(out);
+    u64 written = 0;
+    u32 cluster = e->first_cluster;
+
+    for (u32 step = 0; step < 65536; ++step)
+    {
+        if (cluster < 2 || cluster >= 0x0FFFFFF8u)
+            break;
+        const u64 lba = u64(v->data_start_sector) + u64(cluster - 2) * u64(v->sectors_per_cluster);
+        const u64 need = want - written;
+        if (need == 0)
+            break;
+
+        if (need >= cluster_bytes)
+        {
+            // Full-cluster transfer direct into caller's buffer —
+            // no staging copy. Block-layer bounds-checks lba+count
+            // against the partition's sector_count before dispatch.
+            if (drivers::storage::BlockDeviceRead(v->block_handle, lba, v->sectors_per_cluster, dst + written) != 0)
+            {
+                return -1;
+            }
+            written += cluster_bytes;
+        }
+        else
+        {
+            // Partial last cluster — read into the shared scratch
+            // page, then copy exactly `need` bytes out so the
+            // caller's buffer is never over-filled.
+            if (drivers::storage::BlockDeviceRead(v->block_handle, lba, v->sectors_per_cluster, g_scratch) != 0)
+            {
+                return -1;
+            }
+            for (u64 i = 0; i < need; ++i)
+                dst[written + i] = g_scratch[i];
+            written += need;
+            break;
+        }
+        cluster = ReadFatEntry(*v, cluster);
+    }
+    return static_cast<i64>(written);
+}
+
 void Fat32SelfTest()
 {
     KLOG_TRACE_SCOPE("fs/fat32", "Fat32SelfTest");
@@ -327,14 +414,51 @@ void Fat32SelfTest()
         if (any_file)
             break;
     }
-    if (any_file)
-    {
-        SerialWrite("[fs/fat32] self-test OK (at least one file in a root)\n");
-    }
-    else
+    if (!any_file)
     {
         SerialWrite("[fs/fat32] self-test WARN: volumes found but no files in any root\n");
+        return;
     }
+
+    // Content check: read the seed file from the first volume and
+    // compare against the string the image-builder writes.
+    //   tools/qemu/make-gpt-image.py : FAT_FILE_BODY = "hello from fat32\n"
+    // A mismatch points at either an image-builder change that
+    // forgot to update this assertion, or a driver regression in
+    // the cluster-chain walk.
+    const Volume* v0 = Fat32Volume(0);
+    const DirEntry* hello = Fat32FindInRoot(v0, "HELLO.TXT");
+    if (hello == nullptr)
+    {
+        SerialWrite("[fs/fat32] self-test WARN: HELLO.TXT not found in first volume\n");
+        return;
+    }
+    static u8 buf[64];
+    VZero(buf, sizeof(buf));
+    const i64 n = Fat32ReadFile(v0, hello, buf, sizeof(buf));
+    if (n < 0)
+    {
+        SerialWrite("[fs/fat32] self-test FAILED: read error on HELLO.TXT\n");
+        return;
+    }
+    const char* expect = "hello from fat32\n";
+    u32 elen = 0;
+    while (expect[elen] != 0)
+        ++elen;
+    if (static_cast<u64>(n) != elen)
+    {
+        SerialWrite("[fs/fat32] self-test FAILED: HELLO.TXT wrong size\n");
+        return;
+    }
+    for (u32 i = 0; i < elen; ++i)
+    {
+        if (buf[i] != static_cast<u8>(expect[i]))
+        {
+            SerialWrite("[fs/fat32] self-test FAILED: HELLO.TXT content mismatch\n");
+            return;
+        }
+    }
+    SerialWrite("[fs/fat32] self-test OK (HELLO.TXT contents verified)\n");
 }
 
 } // namespace customos::fs::fat32
