@@ -5,6 +5,7 @@
 #include "../arch/x86_64/usermode.h"
 #include "../fs/ramfs.h"
 #include "generated_hello_pe.h"
+#include "generated_hello_winapi.h"
 #include "generated_winkill_pe.h"
 #include "../mm/address_space.h"
 #include "../mm/frame_allocator.h"
@@ -1568,8 +1569,15 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     SerialWrite("\"\n");
     PeReport(pe_bytes, pe_len);
 
+    // PeLoad handles both Ok and ImportsPresent (the latter
+    // by walking the IAT and patching via the Win32 stub
+    // table). Any other non-Ok status is fatal — log and
+    // bail. For ImportsPresent we don't bail here; PeLoad may
+    // still fail if a specific import isn't in the stub
+    // table, at which point ok=false and we fall through to
+    // the generic "load failed" cleanup below.
     const PeStatus vs = PeValidate(pe_bytes, pe_len);
-    if (vs != PeStatus::Ok)
+    if (vs != PeStatus::Ok && vs != PeStatus::ImportsPresent)
     {
         SerialWrite("[ring3] pe reject name=\"");
         SerialWrite(name);
@@ -1684,6 +1692,17 @@ bool SpawnOnDemand(const char* kind)
                     CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
         return true;
     }
+    if (LocalStrEq(kind, "winhello"))
+    {
+        // First Win32 PE: imports ExitProcess, gets resolved
+        // through the kernel-hosted stub page, exits with
+        // code 42. "Exit rc=0x2a" in the serial log confirms
+        // the full IAT resolution chain worked.
+        SpawnPeFile("ring3-hello-winapi", fs::generated::kBinHelloWinapiBytes,
+                    fs::generated::kBinHelloWinapiBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                    mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        return true;
+    }
     if (LocalStrEq(kind, "winkill"))
     {
         // Real-world PE that the v0 loader cannot execute.
@@ -1792,8 +1811,15 @@ void StartRing3SmokeTask()
     // PE executable!" then clean exit.
     SpawnPeFile("ring3-hello-pe", fs::generated::kBinHelloPeBytes, fs::generated::kBinHelloPeBytes_len, CapSetTrusted(),
                 fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    // First Win32 PE that gets RESOLVED (not just reported)
+    // by the kernel. Imports kernel32.dll!ExitProcess, hits
+    // the stub page, exits with code 42. See
+    // .claude/knowledge/win32-subsystem-v0.md.
+    SpawnPeFile("ring3-hello-winapi", fs::generated::kBinHelloWinapiBytes,
+                fs::generated::kBinHelloWinapiBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     // Real-world Windows PE diagnostic attempt. Expected to
-    // reject (no kernel32, no ntdll) — the value is the
+    // reject (most imports unresolved) — the value is the
     // PeReport log line showing the full import / reloc / TLS
     // gap. See .claude/knowledge/pe-subsystem-v0.md.
     SpawnPeFile("ring3-winkill", fs::generated::kBinWinKillBytes, fs::generated::kBinWinKillBytes_len, CapSetTrusted(),

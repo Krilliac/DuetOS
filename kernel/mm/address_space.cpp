@@ -358,6 +358,19 @@ AddressSpace* AddressSpaceCurrent()
     return cpu::CurrentCpu()->current_as;
 }
 
+PhysAddr AddressSpaceLookupUserFrame(const AddressSpace* as, u64 virt)
+{
+    if (as == nullptr)
+        return kNullFrame;
+    const u64 page_va = virt & ~(kPageSize - 1);
+    for (u8 i = 0; i < as->region_count; ++i)
+    {
+        if (as->regions[i].vaddr == page_va)
+            return as->regions[i].frame;
+    }
+    return kNullFrame;
+}
+
 void AddressSpaceRetain(AddressSpace* as)
 {
     if (as == nullptr)

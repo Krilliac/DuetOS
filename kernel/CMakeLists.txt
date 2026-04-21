@@ -31,6 +31,7 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     core/elf_loader.cpp
     core/pe_loader.cpp
     core/ring3_smoke.cpp
+    subsystems/win32/stubs.cpp
     core/shell.cpp
     core/stack_canary.cpp
     core/symbols.cpp
@@ -146,6 +147,35 @@ add_custom_command(
 )
 
 list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_WINKILL_HEADER}")
+
+# ----------------------------------------------------------------------------
+# Third PE fixture: hello_winapi.exe — first userland program
+# that talks to the CustomOS Win32 subsystem through a real
+# Import Directory. Built via llvm-dlltool (kernel32.lib) +
+# clang + lld-link. See tools/build-hello-winapi.sh and
+# .claude/knowledge/pe-subsystem-v0.md for the layered
+# mechanism.
+# ----------------------------------------------------------------------------
+set(CUSTOMOS_HELLO_WINAPI_SRC "${CMAKE_SOURCE_DIR}/userland/apps/hello_winapi/hello.c")
+set(CUSTOMOS_HELLO_WINAPI_DEF "${CMAKE_SOURCE_DIR}/userland/apps/hello_winapi/kernel32.def")
+set(CUSTOMOS_HELLO_WINAPI_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_hello_winapi.h")
+set(CUSTOMOS_HELLO_WINAPI_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-hello-winapi.sh")
+
+add_custom_command(
+    OUTPUT "${CUSTOMOS_HELLO_WINAPI_HEADER}"
+    COMMAND "${CUSTOMOS_HELLO_WINAPI_SCRIPT}"
+            "${CMAKE_SOURCE_DIR}"
+            "${CUSTOMOS_HELLO_WINAPI_HEADER}"
+    DEPENDS
+        "${CUSTOMOS_HELLO_WINAPI_SRC}"
+        "${CUSTOMOS_HELLO_WINAPI_DEF}"
+        "${CUSTOMOS_HELLO_WINAPI_SCRIPT}"
+        "${CUSTOMOS_EMBED_BLOB_SCRIPT}"
+    COMMENT "Compiling + embedding /bin/hello_winapi.exe (Win32 import path)"
+    VERBATIM
+)
+
+list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_HELLO_WINAPI_HEADER}")
 
 set(CUSTOMOS_KERNEL_LINKER_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/arch/x86_64/linker.ld")
 

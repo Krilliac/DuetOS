@@ -68,9 +68,10 @@ enum class PeStatus : u8
     SectionCountZero,     // No sections to load.
     OptHeaderOutOfBounds, // SizeOfOptionalHeader shorter than required.
     SectionOutOfBounds,   // Section raw data extends past end-of-file.
-    ImportsPresent,       // Import Directory is non-empty (v0 unsupported).
+    ImportsPresent,       // Imports non-empty AND at least one unresolved stub.
     RelocsNonEmpty,       // Base Reloc Directory is non-empty (v0 unsupported).
     TlsPresent,           // TLS Directory is non-empty (v0 unsupported).
+    StubsPageAllocFail,   // Could not allocate the Win32 stubs page during load.
 };
 
 const char* PeStatusName(PeStatus s);

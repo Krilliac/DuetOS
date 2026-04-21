@@ -10,6 +10,13 @@
 // kernel/CMakeLists.txt.
 #include "generated_hello_pe.h"
 
+// First PE that imports from kernel32.dll and is designed to
+// be RESOLVED (not just reported) by the Win32 subsystem.
+// Produced from userland/apps/hello_winapi/hello.c. Exercises
+// the full chain: Import Directory -> IAT patch -> stub page
+// -> int 0x80 SYS_EXIT.
+#include "generated_hello_winapi.h"
+
 // A real 3rd-party Windows PE embedded verbatim from
 // userland/apps/windows_kill/windows-kill.exe. 79 KiB, 12 DLL
 // imports, TLS callbacks — the v0 loader rejects it (no Win32
@@ -302,8 +309,17 @@ constinit RamfsNode k_trusted_bin_winkill = {
     .file_size = generated::kBinWinKillBytes_len,
 };
 
+constinit RamfsNode k_trusted_bin_hello_winapi = {
+    .name = "hello_winapi.exe",
+    .type = RamfsNodeType::kFile,
+    .children = nullptr,
+    .file_bytes = generated::kBinHelloWinapiBytes,
+    .file_size = generated::kBinHelloWinapiBytes_len,
+};
+
 constinit const RamfsNode* const k_trusted_bin_children[] = {
-    &k_trusted_bin_hello, &k_trusted_bin_exit_elf, &k_trusted_bin_hello_pe, &k_trusted_bin_winkill, nullptr,
+    &k_trusted_bin_hello,   &k_trusted_bin_exit_elf,     &k_trusted_bin_hello_pe,
+    &k_trusted_bin_winkill, &k_trusted_bin_hello_winapi, nullptr,
 };
 
 constinit RamfsNode k_trusted_bin_dir = {

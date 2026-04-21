@@ -1,0 +1,13 @@
+; userland/apps/hello_winapi/kernel32.def
+;
+; Minimal .def file used to build a kernel32.lib import library
+; (via llvm-dlltool). The resulting .lib lets lld-link satisfy
+; __imp_ExitProcess without needing the real kernel32.dll or
+; the Windows SDK. The kernel32.dll reference in the produced
+; PE is a runtime concern — resolved by the CustomOS PE loader
+; against its internal stub table.
+
+LIBRARY kernel32.dll
+
+EXPORTS
+    ExitProcess

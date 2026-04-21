@@ -5,6 +5,7 @@
 #include "../mm/frame_allocator.h"
 #include "../mm/page.h"
 #include "../mm/paging.h"
+#include "../subsystems/win32/stubs.h"
 
 namespace customos::core
 {
@@ -77,6 +78,66 @@ struct PeHeaders
     u64 image_size;
     u64 entry_rva;
 };
+
+// Read a NUL-terminated ASCII string at `file[off..]` with
+// bounds checks. Returns nullptr if we can't prove there's a
+// NUL before the buffer ends — callers treat that as "skip,
+// malformed". Cap at 256 chars so a hostile image can't dangle
+// the serial log forever.
+const char* BoundedCString(const u8* file, u64 file_len, u64 off)
+{
+    if (off >= file_len)
+        return nullptr;
+    constexpr u64 kMaxLen = 256;
+    const u64 cap = (file_len - off) < kMaxLen ? (file_len - off) : kMaxLen;
+    for (u64 i = 0; i < cap; ++i)
+    {
+        if (file[off + i] == 0)
+            return reinterpret_cast<const char*>(file + off);
+    }
+    return nullptr;
+}
+
+// RVA -> file offset using the section table. Returns u64(-1)
+// if the RVA lies outside every section's virtual extent.
+// PE directories (Import, BaseReloc, TLS) point to RVAs, and
+// those RVAs must land inside one of the sections we've
+// already bounds-checked.
+u64 RvaToFile(const u8* file, const PeHeaders& h, u32 rva)
+{
+    for (u16 i = 0; i < h.section_count; ++i)
+    {
+        const u8* sec = file + h.section_base + u64(i) * kSectionHeaderSize;
+        const u32 va = LeU32(sec + kSectionHeaderVirtualAddress);
+        const u32 raw_size = LeU32(sec + kSectionHeaderSizeOfRawData);
+        const u32 virt_size = LeU32(sec + kSectionHeaderVirtualSize);
+        const u32 extent = raw_size > virt_size ? raw_size : virt_size;
+        if (rva >= va && rva < va + extent)
+        {
+            const u32 raw_off = LeU32(sec + kSectionHeaderPointerToRawData);
+            return u64(raw_off) + u64(rva - va);
+        }
+    }
+    return ~u64(0);
+}
+
+// Read directory [rva, size] from the Optional Header's data
+// directory table. Returns {rva=0, size=0} if the index is
+// past NumberOfRvaAndSizes.
+struct PeDataDir
+{
+    u32 rva;
+    u32 size;
+};
+PeDataDir ReadDataDir(const u8* file, const PeHeaders& h, u64 idx)
+{
+    const u8* opt = file + h.opt_base;
+    const u32 num_dirs = LeU32(opt + kOptHeaderNumberOfRvaAndSizes);
+    if (idx >= num_dirs)
+        return {0, 0};
+    const u8* e = opt + kOptHeaderDataDirectories + idx * kDataDirEntrySize;
+    return {LeU32(e + 0), LeU32(e + 4)};
+}
 
 // Parse and validate. PeHeaders is populated iff status is Ok.
 PeStatus ParseHeaders(const u8* file, u64 file_len, PeHeaders& out)
@@ -327,6 +388,8 @@ const char* PeStatusName(PeStatus s)
         return "RelocsNonEmpty";
     case PeStatus::TlsPresent:
         return "TlsPresent";
+    case PeStatus::StubsPageAllocFail:
+        return "StubsPageAllocFail";
     }
     return "?";
 }
@@ -337,6 +400,180 @@ PeStatus PeValidate(const u8* file, u64 file_len)
     return ParseHeaders(file, file_len, h);
 }
 
+// Resolve every entry in the import table by patching the IAT
+// in place. For each import descriptor:
+//   1. Read the DLL name from its Name RVA.
+//   2. For each function entry (by-name; ordinal imports get
+//      rejected in v0), read the hint/name from the IBN, look
+//      up the stub VA in win32::Win32StubsLookup.
+//   3. Write the stub VA to the corresponding IAT slot by
+//      finding the user page's physical frame and poking
+//      through the kernel's direct map (the user-level
+//      mapping is read-only; the kernel's mapping isn't).
+//
+// Returns true only if EVERY import resolves. The caller must
+// treat `false` as a fatal load failure — a half-resolved IAT
+// leaves null slots that would #PF on the first call.
+//
+// Separate namespace{} block from the parsing/reporting
+// helpers above: that earlier block is closed before PeLoad,
+// so a fresh anon namespace is the cheapest place to put this
+// helper without forcing a forward-declare.
+namespace
+{
+
+bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, customos::mm::AddressSpace* as)
+{
+    using arch::SerialWrite;
+    using arch::SerialWriteHex;
+    const PeDataDir imp = ReadDataDir(file, h, kDirEntryImport);
+    if (imp.rva == 0 || imp.size == 0)
+        return true; // no imports, nothing to do
+
+    const u64 tbl_off = RvaToFile(file, h, imp.rva);
+    if (tbl_off == ~u64(0) || tbl_off + imp.size > file_len)
+    {
+        SerialWrite("[pe-resolve] import table rva out of bounds\n");
+        return false;
+    }
+
+    constexpr u32 kMaxDll = 64;
+    constexpr u32 kMaxFnPerDll = 256;
+    u32 resolved = 0;
+
+    for (u32 d = 0; d < kMaxDll; ++d)
+    {
+        const u64 desc_off = tbl_off + u64(d) * 20;
+        if (desc_off + 20 > file_len)
+            break;
+        const u8* desc = file + desc_off;
+        const u32 orig_thunk = LeU32(desc + 0);
+        const u32 name_rva = LeU32(desc + 12);
+        const u32 first_thunk = LeU32(desc + 16);
+        if (orig_thunk == 0 && name_rva == 0 && first_thunk == 0)
+            break; // terminator
+
+        const u64 name_off = RvaToFile(file, h, name_rva);
+        const char* dll_name = (name_off == ~u64(0)) ? nullptr : BoundedCString(file, file_len, name_off);
+        if (dll_name == nullptr)
+        {
+            SerialWrite("[pe-resolve] descriptor ");
+            SerialWriteHex(d);
+            SerialWrite(": bad dll name rva\n");
+            return false;
+        }
+
+        // Walk the INT (which sits in .rdata and is stable
+        // across load) to get function names. The IAT might
+        // already have been patched by the OS in a real
+        // Windows load, but on disk INT == IAT until the
+        // loader runs, so OriginalFirstThunk and FirstThunk
+        // are interchangeable as the name table source. We
+        // prefer OriginalFirstThunk (present on every
+        // non-bound import) and fall back to FirstThunk.
+        const u32 int_rva = orig_thunk ? orig_thunk : first_thunk;
+        if (int_rva == 0 || first_thunk == 0)
+        {
+            SerialWrite("[pe-resolve] ");
+            SerialWrite(dll_name);
+            SerialWrite(": descriptor missing IAT or INT\n");
+            return false;
+        }
+        const u64 int_off = RvaToFile(file, h, int_rva);
+        if (int_off == ~u64(0))
+        {
+            SerialWrite("[pe-resolve] ");
+            SerialWrite(dll_name);
+            SerialWrite(": INT rva out of bounds\n");
+            return false;
+        }
+
+        for (u32 fn_idx = 0; fn_idx < kMaxFnPerDll; ++fn_idx)
+        {
+            const u64 int_ent_off = int_off + u64(fn_idx) * 8;
+            if (int_ent_off + 8 > file_len)
+                break;
+            const u64 ent = LeU64(file + int_ent_off);
+            if (ent == 0)
+                break;
+            if (ent & (u64(1) << 63))
+            {
+                SerialWrite("[pe-resolve] ");
+                SerialWrite(dll_name);
+                SerialWrite(": ordinal import #");
+                SerialWriteHex(ent & 0xFFFF);
+                SerialWrite(" — v0 only resolves by-name imports\n");
+                return false;
+            }
+            const u32 ibn_rva = static_cast<u32>(ent & 0x7FFFFFFF);
+            const u64 ibn_off = RvaToFile(file, h, ibn_rva);
+            if (ibn_off == ~u64(0) || ibn_off + 2 >= file_len)
+            {
+                SerialWrite("[pe-resolve] ");
+                SerialWrite(dll_name);
+                SerialWrite(": IBN rva out of bounds\n");
+                return false;
+            }
+            const char* fn_name = BoundedCString(file, file_len, ibn_off + 2);
+            if (fn_name == nullptr)
+            {
+                SerialWrite("[pe-resolve] ");
+                SerialWrite(dll_name);
+                SerialWrite(": IBN name unterminated\n");
+                return false;
+            }
+
+            u64 stub_va = 0;
+            if (!win32::Win32StubsLookup(dll_name, fn_name, &stub_va))
+            {
+                SerialWrite("[pe-resolve] UNRESOLVED ");
+                SerialWrite(dll_name);
+                SerialWrite("!");
+                SerialWrite(fn_name);
+                SerialWrite("\n");
+                return false;
+            }
+
+            // Patch the IAT slot. Slot VA = image_base +
+            // first_thunk + fn_idx * 8. Find backing frame,
+            // write via direct map.
+            const u64 iat_slot_va = h.image_base + u64(first_thunk) + u64(fn_idx) * 8;
+            const mm::PhysAddr iat_frame = mm::AddressSpaceLookupUserFrame(as, iat_slot_va);
+            if (iat_frame == mm::kNullFrame)
+            {
+                SerialWrite("[pe-resolve] ");
+                SerialWrite(dll_name);
+                SerialWrite("!");
+                SerialWrite(fn_name);
+                SerialWrite(": IAT slot VA not mapped\n");
+                return false;
+            }
+            auto* iat_direct = static_cast<u8*>(mm::PhysToVirt(iat_frame));
+            const u64 page_off = iat_slot_va & 0xFFFULL;
+            // Store little-endian u64 byte-by-byte; avoids any
+            // alignment assumption on the direct-map pointer.
+            for (u64 b = 0; b < 8; ++b)
+                iat_direct[page_off + b] = static_cast<u8>((stub_va >> (b * 8)) & 0xFF);
+            ++resolved;
+
+            SerialWrite("[pe-resolve] ");
+            SerialWrite(dll_name);
+            SerialWrite("!");
+            SerialWrite(fn_name);
+            SerialWrite(" -> ");
+            SerialWriteHex(stub_va);
+            SerialWrite("\n");
+        }
+    }
+
+    SerialWrite("[pe-resolve] total resolved: ");
+    SerialWriteHex(resolved);
+    SerialWrite("\n");
+    return true;
+}
+
+} // namespace
+
 PeLoadResult PeLoad(const u8* file, u64 file_len, customos::mm::AddressSpace* as)
 {
     PeLoadResult r{};
@@ -345,7 +582,18 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, customos::mm::AddressSpace* as
         return r;
 
     PeHeaders h{};
-    if (ParseHeaders(file, file_len, h) != PeStatus::Ok)
+    const PeStatus ps = ParseHeaders(file, file_len, h);
+    // Two parse outcomes are tractable for v0:
+    //   Ok             — freestanding PE, no imports, load
+    //                    directly (hello_pe path).
+    //   ImportsPresent — imports exist; resolve them through
+    //                    the Win32 stubs table below. Returned
+    //                    by ParseHeaders before it checks
+    //                    Relocs/TLS, so we know the reject
+    //                    reason IS imports (not something we
+    //                    don't handle at all yet).
+    // Everything else is still a hard reject for v0.
+    if (ps != PeStatus::Ok && ps != PeStatus::ImportsPresent)
         return r;
 
     using namespace customos::mm;
@@ -370,6 +618,25 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, customos::mm::AddressSpace* as
     if (stack_frame == kNullFrame)
         return r;
     AddressSpaceMapUserPage(as, kV0StackVa, stack_frame, kPagePresent | kPageUser | kPageWritable | kPageNoExecute);
+
+    // 4. If imports are present, stand up the per-process
+    //    Win32 stubs page + resolve every IAT entry.
+    if (ps == PeStatus::ImportsPresent)
+    {
+        const PhysAddr stubs_frame = AllocateFrame();
+        if (stubs_frame == kNullFrame)
+            return r;
+        auto* stubs_direct = static_cast<u8*>(PhysToVirt(stubs_frame));
+        for (u64 i = 0; i < kPageSize; ++i)
+            stubs_direct[i] = 0;
+        win32::Win32StubsPopulate(stubs_direct);
+        // R-X: no kPageWritable (W^X), no kPageNoExecute. The
+        // AS layer enforces W^X and will panic if both are set.
+        AddressSpaceMapUserPage(as, win32::kWin32StubsVa, stubs_frame, kPagePresent | kPageUser);
+
+        if (!ResolveImports(file, file_len, h, as))
+            return r;
+    }
 
     r.ok = true;
     r.entry_va = h.image_base + h.entry_rva;
@@ -397,66 +664,6 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, customos::mm::AddressSpace* as
 
 namespace
 {
-
-// Read a NUL-terminated ASCII string at `file[off..]` with
-// bounds checks. Returns nullptr if we can't prove there's a
-// NUL before the buffer ends — callers treat that as "skip,
-// malformed". Cap at 256 chars so a hostile image can't dangle
-// the serial log forever.
-const char* BoundedCString(const u8* file, u64 file_len, u64 off)
-{
-    if (off >= file_len)
-        return nullptr;
-    constexpr u64 kMaxLen = 256;
-    const u64 cap = (file_len - off) < kMaxLen ? (file_len - off) : kMaxLen;
-    for (u64 i = 0; i < cap; ++i)
-    {
-        if (file[off + i] == 0)
-            return reinterpret_cast<const char*>(file + off);
-    }
-    return nullptr;
-}
-
-// RVA -> file offset using the section table. Returns u64(-1)
-// if the RVA lies outside every section's virtual extent.
-// PE directories (Import, BaseReloc, TLS) point to RVAs, and
-// those RVAs must land inside one of the sections we've
-// already bounds-checked.
-u64 RvaToFile(const u8* file, const PeHeaders& h, u32 rva)
-{
-    for (u16 i = 0; i < h.section_count; ++i)
-    {
-        const u8* sec = file + h.section_base + u64(i) * kSectionHeaderSize;
-        const u32 va = LeU32(sec + kSectionHeaderVirtualAddress);
-        const u32 raw_size = LeU32(sec + kSectionHeaderSizeOfRawData);
-        const u32 virt_size = LeU32(sec + kSectionHeaderVirtualSize);
-        const u32 extent = raw_size > virt_size ? raw_size : virt_size;
-        if (rva >= va && rva < va + extent)
-        {
-            const u32 raw_off = LeU32(sec + kSectionHeaderPointerToRawData);
-            return u64(raw_off) + u64(rva - va);
-        }
-    }
-    return ~u64(0);
-}
-
-// Read directory [rva, size] from the Optional Header's data
-// directory table. Returns {rva=0, size=0} if the index is
-// past NumberOfRvaAndSizes.
-struct PeDataDir
-{
-    u32 rva;
-    u32 size;
-};
-PeDataDir ReadDataDir(const u8* file, const PeHeaders& h, u64 idx)
-{
-    const u8* opt = file + h.opt_base;
-    const u32 num_dirs = LeU32(opt + kOptHeaderNumberOfRvaAndSizes);
-    if (idx >= num_dirs)
-        return {0, 0};
-    const u8* e = opt + kOptHeaderDataDirectories + idx * kDataDirEntrySize;
-    return {LeU32(e + 0), LeU32(e + 4)};
-}
 
 void ReportSections(const u8* file, const PeHeaders& h)
 {
