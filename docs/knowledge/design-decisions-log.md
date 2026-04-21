@@ -607,6 +607,40 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 107 — Proper ELF64 loader module + `exec` dry-run command
+
+- **Scope:** `kernel/core/elf_loader.{h,cpp}` — new module.
+  `kernel/core/shell.cpp` — `exec PATH` command.
+- **Decision:** Two-stage landing for SYS_SPAWN:
+    Stage 1 (this slice): validation + iteration API.
+      ElfValidate, ElfEntry, ElfProgramHeaderInfo,
+      ElfForEachPtLoad. Returns rich ElfStatus enum so
+      callers distinguish "too small" vs "bad magic" vs
+      "bad machine" vs "segment out of bounds."
+    Stage 2 (next): ElfLoad into an AddressSpace, then
+      the full `exec PATH` that spawns a ring-3 task.
+  Shell `exec` already exists as a DRY RUN — validates
+  the ELF and prints the load plan. Lets users see the
+  validator reject / accept a file without committing
+  kernel state.
+- **Why:** Splitting validation from loading keeps each
+  layer testable on its own. The dry-run command is
+  useful standalone for inspecting any ELF file the shell
+  can read, and it exercises every validator rejection
+  path without risk.
+- **Rules out / defers:** Actual segment loading /
+  AddressSpace population / process spawn. Dynamic
+  linking (DT_NEEDED). Interpreter support (PT_INTERP).
+  Segment NX enforcement beyond honoring PF_X flag bit.
+  PIE / position-independent executables (entry relocated
+  per process).
+- **Revisit when:** User-mode toolchain lands (compiles
+  into loadable ELFs). SYS_SPAWN implementation begins.
+- **Related tracks:** Track 4 (Process — loader input),
+  Track 7 (Userland shell — `exec` becomes spawn).
+
+---
+
 ## 106 — Cross-task `kill` by PID + KillResult taxonomy
 
 - **Scope:** `kernel/sched/sched.{h,cpp}` — new
