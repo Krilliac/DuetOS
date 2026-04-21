@@ -12,8 +12,15 @@
 #include "../arch/x86_64/timer.h"
 #include "../cpu/percpu.h"
 #include "../drivers/input/ps2kbd.h"
+#include "../drivers/input/ps2mouse.h"
 #include "../drivers/pci/pci.h"
 #include "../drivers/storage/ahci.h"
+#include "../drivers/video/console.h"
+#include "../drivers/video/cursor.h"
+#include "../drivers/video/framebuffer.h"
+#include "../drivers/video/menu.h"
+#include "../drivers/video/taskbar.h"
+#include "../drivers/video/widget.h"
 #include "../fs/ramfs.h"
 #include "../fs/vfs.h"
 #include "../mm/address_space.h"
@@ -23,8 +30,10 @@
 #include "klog.h"
 #include "panic.h"
 #include "ring3_smoke.h"
+#include "shell.h"
 #include "syscall.h"
 #include "../mm/kheap.h"
+#include "../mm/multiboot2.h"
 #include "../mm/paging.h"
 #include "../sched/sched.h"
 
@@ -62,6 +71,97 @@
     asm volatile("" : : "r"(&buf[0]) : "memory");
 }
 #endif
+
+namespace
+{
+
+// Walk the Multiboot2 tag list for type-1 (boot cmdline) and
+// return its NUL-terminated string, or nullptr if absent. The
+// pointer is into the live info struct; do not free.
+const char* FindBootCmdline(customos::uptr info_phys)
+{
+    if (info_phys == 0)
+    {
+        return nullptr;
+    }
+    const auto* info = reinterpret_cast<const customos::mm::MultibootInfoHeader*>(info_phys);
+    customos::uptr cursor = info_phys + sizeof(customos::mm::MultibootInfoHeader);
+    const customos::uptr end = info_phys + info->total_size;
+    while (cursor < end)
+    {
+        const auto* tag = reinterpret_cast<const customos::mm::MultibootTagHeader*>(cursor);
+        if (tag->type == customos::mm::kMultibootTagEnd)
+        {
+            break;
+        }
+        if (tag->type == customos::mm::kMultibootTagCmdline)
+        {
+            // String starts right after the 8-byte {type, size} header.
+            return reinterpret_cast<const char*>(cursor + sizeof(customos::mm::MultibootTagHeader));
+        }
+        cursor += (tag->size + 7u) & ~customos::uptr{7};
+    }
+    return nullptr;
+}
+
+// Return true iff `cmdline` contains the whitespace-delimited
+// token "key=value" where `value` matches `want`. Case-sensitive.
+// A nullptr cmdline returns false. This is the smallest thing
+// that'll work for "boot=tty" / "boot=desktop"; a full parser
+// lands with the first cmdline-heavy consumer.
+bool CmdlineMatches(const char* cmdline, const char* key, const char* want)
+{
+    if (cmdline == nullptr)
+    {
+        return false;
+    }
+    // Walk tokens. A token is a run of non-whitespace, separated
+    // by spaces. Compare key prefix + '=' then the value tail.
+    const char* p = cmdline;
+    while (*p != '\0')
+    {
+        while (*p == ' ' || *p == '\t')
+        {
+            ++p;
+        }
+        if (*p == '\0')
+        {
+            break;
+        }
+        const char* token = p;
+        while (*p != '\0' && *p != ' ' && *p != '\t')
+        {
+            ++p;
+        }
+        // [token, p) is the current token.
+        // Match key+'=' prefix.
+        const char* k = key;
+        const char* t = token;
+        while (*k != '\0' && t < p && *t == *k)
+        {
+            ++k;
+            ++t;
+        }
+        if (*k == '\0' && t < p && *t == '=')
+        {
+            ++t;
+            // Compare [t, p) against want.
+            const char* w = want;
+            while (*w != '\0' && t < p && *t == *w)
+            {
+                ++t;
+                ++w;
+            }
+            if (*w == '\0' && t == p)
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+} // namespace
 
 extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multiboot_info)
 {
@@ -132,6 +232,370 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // of them does, the fault will fire here at boot rather than
     // corrupt code silently later.
     ProtectKernelImage();
+
+    SerialWrite("[boot] Bringing up framebuffer (if present).\n");
+    customos::drivers::video::FramebufferInit(multiboot_info);
+    customos::drivers::video::FramebufferSelfTest();
+
+    // GUI composition. Order for every paint pass:
+    //   1. Desktop fill
+    //   2. Desktop banner text
+    //   3. Windows in z-order (back-to-front)
+    //   4. Widgets (buttons on top of windows for v0)
+    //   5. Cursor on top (CursorShow re-samples backing)
+    //
+    // Wrapped in a file-scope helper so both the initial boot
+    // paint AND the window-drag path (mouse reader thread) can
+    // repaint the whole surface with one call.
+    constexpr customos::u32 kDesktopTeal = 0x00204868;
+
+    // Register two demo windows so z-order + raise-to-front are
+    // visibly exercised. Window B starts in front because it
+    // was registered second. Click-drag on either title bar
+    // moves that window and brings it to the top.
+    customos::drivers::video::WindowChrome win_a_chrome{};
+    win_a_chrome.x = 60;
+    win_a_chrome.y = 60;
+    win_a_chrome.w = 380;
+    win_a_chrome.h = 220;
+    win_a_chrome.colour_border = 0x00101828;
+    win_a_chrome.colour_title = 0x00205080;
+    win_a_chrome.colour_client = 0x00D8D8D8;
+    win_a_chrome.colour_close_btn = 0x00E04020;
+    win_a_chrome.title_height = 22;
+    const customos::drivers::video::WindowHandle win_a_handle =
+        customos::drivers::video::WindowRegister(win_a_chrome, "CUSTOMOS GUI v0");
+
+    customos::drivers::video::WindowChrome win_b_chrome{};
+    win_b_chrome.x = 500;
+    win_b_chrome.y = 100;
+    win_b_chrome.w = 380;
+    win_b_chrome.h = 200;
+    win_b_chrome.colour_border = 0x00101828;
+    win_b_chrome.colour_title = 0x00306838;
+    win_b_chrome.colour_client = 0x00E0E0D8;
+    win_b_chrome.colour_close_btn = 0x00E04020;
+    win_b_chrome.title_height = 22;
+    customos::drivers::video::WindowRegister(win_b_chrome, "NOTES   DRAG ME");
+
+    // Task Manager window — a window whose content drawer
+    // prints live scheduler + memory stats. The ui-ticker's
+    // 1 Hz recompose refreshes it for free.
+    customos::drivers::video::WindowChrome taskman_chrome{};
+    taskman_chrome.x = 180;
+    taskman_chrome.y = 310;
+    taskman_chrome.w = 340;
+    taskman_chrome.h = 170;
+    taskman_chrome.colour_border = 0x00101828;
+    taskman_chrome.colour_title = 0x00803020;
+    taskman_chrome.colour_client = 0x00101828;
+    taskman_chrome.colour_close_btn = 0x00E04020;
+    taskman_chrome.title_height = 22;
+    const customos::drivers::video::WindowHandle taskman_handle =
+        customos::drivers::video::WindowRegister(taskman_chrome, "TASK MANAGER");
+
+    // Live log viewer window — renders a compact view of the
+    // klog ring (the same ring `dmesg` prints). Refreshes every
+    // ui-ticker beat, so kernel activity appears without the
+    // user having to flip consoles.
+    customos::drivers::video::WindowChrome logview_chrome{};
+    logview_chrome.x = 560;
+    logview_chrome.y = 310;
+    logview_chrome.w = 420;
+    logview_chrome.h = 180;
+    logview_chrome.colour_border = 0x00101828;
+    logview_chrome.colour_title = 0x00407080;
+    logview_chrome.colour_client = 0x00101020;
+    logview_chrome.colour_close_btn = 0x00E04020;
+    logview_chrome.title_height = 22;
+    const customos::drivers::video::WindowHandle logview_handle =
+        customos::drivers::video::WindowRegister(logview_chrome, "KERNEL LOG");
+
+    customos::drivers::video::WindowSetContentDraw(
+        logview_handle,
+        [](customos::u32 cx, customos::u32 cy, customos::u32 cw, customos::u32 ch, void*)
+        {
+            // Shared state so the klog chunk callback knows
+            // where to render. Compositor mutex is held
+            // around the whole compose so these statics are
+            // race-free.
+            //
+            // Severity colouring: the first chunk per log line
+            // is always the 4-byte tag ("[I] " / "[W] " / "[E] "
+            // / "[D] ") from LevelTag(). We inspect it and set
+            // the line's fg; subsequent chunks on the same line
+            // inherit that colour until the newline resets.
+            constexpr customos::u32 kFgInfo = 0x00A0C8FF; // muted blue-white
+            constexpr customos::u32 kFgWarn = 0x00FFD860; // amber
+            constexpr customos::u32 kFgError = 0x00FF6050; // soft red
+            constexpr customos::u32 kFgDebug = 0x00808080; // grey
+            constexpr customos::u32 kBg = 0x00101020;
+            struct Render
+            {
+                customos::u32 cx, cy, col, row, max_col, max_row, fg;
+                bool done;
+            };
+            static Render r;
+            r.cx = cx;
+            r.cy = cy;
+            r.col = 0;
+            r.row = 0;
+            r.max_col = cw / 8;
+            r.max_row = ch / 10;
+            r.fg = kFgInfo;
+            r.done = false;
+            customos::core::DumpLogRingTo(
+                [](const char* s)
+                {
+                    if (r.done || s == nullptr)
+                        return;
+                    // Severity detection: first char per chunk
+                    // is '[' for the tag chunks klog emits.
+                    // Other chunks (subsystem, message) don't
+                    // start with '[' so won't match.
+                    if (s[0] == '[' && s[2] == ']')
+                    {
+                        switch (s[1])
+                        {
+                        case 'I':
+                            r.fg = kFgInfo;
+                            break;
+                        case 'W':
+                            r.fg = kFgWarn;
+                            break;
+                        case 'E':
+                            r.fg = kFgError;
+                            break;
+                        case 'D':
+                            r.fg = kFgDebug;
+                            break;
+                        default:
+                            break;
+                        }
+                    }
+                    while (*s != '\0')
+                    {
+                        const char c = *s++;
+                        if (c == '\n')
+                        {
+                            ++r.row;
+                            r.col = 0;
+                            if (r.row >= r.max_row)
+                            {
+                                r.done = true;
+                                return;
+                            }
+                            continue;
+                        }
+                        if (r.col >= r.max_col)
+                        {
+                            ++r.row;
+                            r.col = 0;
+                            if (r.row >= r.max_row)
+                            {
+                                r.done = true;
+                                return;
+                            }
+                        }
+                        customos::drivers::video::FramebufferDrawChar(
+                            r.cx + r.col * 8, r.cy + r.row * 10, c, r.fg, kBg);
+                        ++r.col;
+                    }
+                });
+        },
+        nullptr);
+
+    customos::drivers::video::WindowSetContentDraw(
+        taskman_handle,
+        [](customos::u32 cx, customos::u32 cy, customos::u32 /*cw*/, customos::u32 /*ch*/, void*)
+        {
+            using customos::drivers::video::FramebufferDrawString;
+            constexpr customos::u32 kFg = 0x0080F088;
+            constexpr customos::u32 kBg = 0x00101828;
+            // Manual decimal formatter for u64 — kernel has no
+            // printf. Fixed-width (10 digits) so the numeric
+            // column doesn't jitter when values roll over.
+            auto fmt_u64 = [](customos::u64 v, char* out)
+            {
+                char tmp[24];
+                customos::u32 n = 0;
+                if (v == 0)
+                {
+                    tmp[n++] = '0';
+                }
+                else
+                {
+                    while (v > 0 && n < sizeof(tmp))
+                    {
+                        tmp[n++] = static_cast<char>('0' + (v % 10));
+                        v /= 10;
+                    }
+                }
+                customos::u32 pad = (n < 10) ? 10 - n : 0;
+                customos::u32 o = 0;
+                for (customos::u32 i = 0; i < pad; ++i)
+                    out[o++] = ' ';
+                for (customos::u32 i = 0; i < n; ++i)
+                    out[o++] = tmp[n - 1 - i];
+                out[o] = '\0';
+            };
+
+            const auto s = customos::sched::SchedStatsRead();
+            const customos::u64 total = customos::mm::TotalFrames();
+            const customos::u64 free_frames = customos::mm::FreeFramesCount();
+            const customos::u64 uptime_s = customos::sched::SchedNowTicks() / 100;
+
+            char num[24];
+            char line[64];
+            struct Row
+            {
+                const char* label;
+                customos::u64 value;
+            };
+            const Row rows[] = {
+                {"UPTIME (S)     ", uptime_s},
+                {"CTX SWITCHES   ", s.context_switches},
+                {"TASKS LIVE     ", s.tasks_live},
+                {"TASKS SLEEPING ", s.tasks_sleeping},
+                {"TASKS BLOCKED  ", s.tasks_blocked},
+                {"MEM FREE (4K)  ", free_frames},
+                {"MEM TOTAL (4K) ", total},
+            };
+            customos::u32 y_off = cy + 4;
+            for (customos::u32 i = 0; i < sizeof(rows) / sizeof(rows[0]); ++i)
+            {
+                fmt_u64(rows[i].value, num);
+                customos::u32 o = 0;
+                for (customos::u32 j = 0; rows[i].label[j] != '\0' && o + 1 < sizeof(line); ++j)
+                    line[o++] = rows[i].label[j];
+                for (customos::u32 j = 0; num[j] != '\0' && o + 1 < sizeof(line); ++j)
+                    line[o++] = num[j];
+                line[o] = '\0';
+                FramebufferDrawString(cx + 6, y_off, line, kFg, kBg);
+                y_off += 10;
+            }
+        },
+        nullptr);
+
+    // Framebuffer text console. 80x40 chars of boot log at the
+    // bottom of the desktop, under the windows in z-order. Dragging
+    // a window over it occludes; moving away restores.
+    // Taskbar across the bottom of the framebuffer. Placed at
+    // runtime so a different resolution still anchors correctly.
+    {
+        const auto fb_info = customos::drivers::video::FramebufferGet();
+        constexpr customos::u32 tb_h = 28;
+        const customos::u32 tb_y = (fb_info.height > tb_h) ? fb_info.height - tb_h : 0;
+        customos::drivers::video::TaskbarInit(tb_y, tb_h, 0x00202838, 0x00FFFFFF, 0x00406090);
+    }
+
+    // Menu action ids. Ambient MenuContext() carries a target
+    // (window handle) for context-menu items that need one.
+    //   1..9   — desktop / global actions (ignore context)
+    //   10     — raise window (context = WindowHandle)
+    //   11     — close window (context = WindowHandle)
+    // Range scheme keeps the dispatcher's switch table readable
+    // and leaves room for future desktop / window actions without
+    // reshuffling ids.
+
+    customos::drivers::video::ConsoleInit(16, 400, 0x0080F088, 0x00181028);
+
+    // Tee kernel log lines to the on-screen console so the desktop
+    // shows subsystem activity live — not just the boot seed block.
+    // Forwards chunks through ConsoleWrite; no DesktopCompose is
+    // triggered here (ui-ticker recomposes at 1 Hz, and user input
+    // forces a recompose on demand). IRQ-time klogs race the kbd
+    // reader on the char buffer but the damage is bounded to one
+    // garbled line at worst; the authoritative log ring is serial.
+    // Klog lines route to the dedicated klog console buffer.
+    // Ctrl+Alt+F2 switches the render target to that buffer so
+    // the user sees live kernel log output; Ctrl+Alt+F1 goes
+    // back to the interactive shell buffer. Both consoles share
+    // the same screen origin so the flip is in-place.
+    customos::core::SetLogTee([](const char* s) { customos::drivers::video::ConsoleWriteKlog(s); });
+    customos::drivers::video::ConsoleWriteln("CUSTOMOS BOOT LOG");
+    customos::drivers::video::ConsoleWriteln("=================");
+    customos::drivers::video::ConsoleWriteln("");
+    customos::drivers::video::ConsoleWriteln("LONG-MODE KERNEL        OK");
+    customos::drivers::video::ConsoleWriteln("GDT IDT TSS IST         OK");
+    customos::drivers::video::ConsoleWriteln("PAGING W^X SMEP SMAP    OK");
+    customos::drivers::video::ConsoleWriteln("FRAME ALLOCATOR / HEAP  OK");
+    customos::drivers::video::ConsoleWriteln("ACPI MADT FADT MCFG     OK");
+    customos::drivers::video::ConsoleWriteln("LAPIC IOAPIC HPET       OK");
+    customos::drivers::video::ConsoleWriteln("SCHEDULER + BLOCKING    OK");
+    customos::drivers::video::ConsoleWriteln("PS/2 KEYBOARD           OK");
+    customos::drivers::video::ConsoleWriteln("PS/2 MOUSE              OK");
+    customos::drivers::video::ConsoleWriteln("PCI ENUMERATION         OK");
+    customos::drivers::video::ConsoleWriteln("FRAMEBUFFER + FONT      OK");
+    customos::drivers::video::ConsoleWriteln("WINDOW MANAGER v0       OK");
+    customos::drivers::video::ConsoleWriteln("");
+    customos::drivers::video::ConsoleWriteln("READY.  TRY DRAGGING A WINDOW BY ITS TITLE BAR.");
+
+    // Shell welcome + initial prompt. Landing here after every
+    // subsystem init line keeps the boot log visible above the
+    // prompt — the user sees the tail end of the kernel's own
+    // output, then their own typing cursor.
+    customos::core::ShellInit();
+
+    // Demo clickable button, owned by window A. x/y are offsets
+    // INTO window A — dragging window A carries the button
+    // along, and the button only responds to clicks when window
+    // A is on top of any other window at the click point.
+    customos::drivers::video::ButtonWidget demo_button{};
+    demo_button.id = 1;
+    demo_button.owner = win_a_handle;
+    demo_button.x = 40;   // offset into window A
+    demo_button.y = 90;
+    demo_button.w = 160;
+    demo_button.h = 48;
+    demo_button.colour_normal = 0x00C0C0C0;
+    demo_button.colour_pressed = 0x00E04020;
+    demo_button.colour_border = 0x00101828;
+    demo_button.colour_label = 0x00101828;
+    demo_button.label = "CLICK ME";
+    customos::drivers::video::WidgetRegisterButton(demo_button);
+
+    // Initial display mode. Priority:
+    //   1. Runtime kernel cmdline "boot=tty" / "boot=desktop"
+    //      (Multiboot2 tag 1 — set via GRUB menu entry).
+    //   2. Compile-time CUSTOMOS_BOOT_TTY fallback.
+    //   3. Desktop (default).
+    // Runtime Ctrl+Alt+T still flips regardless after boot.
+    const char* cmdline = FindBootCmdline(multiboot_info);
+    if (cmdline != nullptr)
+    {
+        SerialWrite("[boot] cmdline: \"");
+        SerialWrite(cmdline);
+        SerialWrite("\"\n");
+    }
+    bool want_tty = false;
+    if (CmdlineMatches(cmdline, "boot", "tty"))
+    {
+        want_tty = true;
+    }
+    else if (CmdlineMatches(cmdline, "boot", "desktop"))
+    {
+        want_tty = false;
+    }
+    else
+    {
+#ifdef CUSTOMOS_BOOT_TTY
+        want_tty = true;
+#endif
+    }
+
+    if (want_tty)
+    {
+        customos::drivers::video::SetDisplayMode(customos::drivers::video::DisplayMode::Tty);
+        customos::drivers::video::ConsoleSetOrigin(16, 16);
+        customos::drivers::video::ConsoleSetColours(0x0080F088, 0x00000000);
+        customos::drivers::video::DesktopCompose(0x00000000, nullptr);
+    }
+    else
+    {
+        customos::drivers::video::DesktopCompose(kDesktopTeal, "WELCOME TO CUSTOMOS   BOOT OK");
+        customos::drivers::video::CursorInit(kDesktopTeal);
+    }
 
     SerialWrite("[boot] Seeding ramfs + VFS self-test.\n");
     customos::fs::RamfsInit();
@@ -210,30 +674,593 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     SerialWrite("[boot] Bringing up PS/2 keyboard.\n");
     customos::drivers::input::Ps2KeyboardInit();
 
+    SerialWrite("[boot] Bringing up PS/2 mouse.\n");
+    customos::drivers::input::Ps2MouseInit();
+
     SerialWrite("[boot] Enumerating PCI bus.\n");
     customos::drivers::pci::PciEnumerate();
 
     SerialWrite("[boot] Discovering AHCI controller.\n");
     customos::drivers::storage::AhciInit();
 
-    // Keyboard reader thread: blocks on Ps2KeyboardReadChar, prints
-    // one line per resolved key press. End-to-end path exercised:
-    // ACPI → IOAPIC → IDT → dispatcher → IrqHandler → WaitQueueWakeOne
-    // → Schedule → reader wakes → translator consumes modifier +
-    // release bytes → returns ASCII → prints. If any link in that
-    // chain is broken, keypresses in QEMU are silently dropped.
+    // Keyboard reader thread: consumes KeyEvents and writes the
+    // printable ones into the framebuffer console. Backspace and
+    // Enter get line-editing semantics; modifier-only edges
+    // update internal state silently. The console is also
+    // mirrored to COM1 so a headless run still produces the
+    // classic serial boot log.
+    //
+    // v0 race note: this thread and the mouse reader both call
+    // DesktopCompose without a lock. FB writes are per-pixel
+    // atomic on x86_64 and the worst-case collision is a
+    // transient visual artifact, not corrupt state. A proper
+    // compositor mutex lands with the first crash, or on SMP
+    // scheduler join — whichever comes first.
     auto kbd_reader = [](void*)
     {
+        using namespace customos::drivers::input;
+        constexpr customos::u32 kDesktopTealLocal = 0x00204868;
         for (;;)
         {
-            const char ch = customos::drivers::input::Ps2KeyboardReadChar();
-            const char buf[2] = {ch, '\0'};
-            SerialWrite("[kbd] char='");
-            SerialWrite(buf);
-            SerialWrite("'\n");
+            const KeyEvent ev = Ps2KeyboardReadEvent();
+            if (ev.is_release || ev.code == kKeyNone)
+            {
+                continue;
+            }
+            const bool alt = (ev.modifiers & kKeyModAlt) != 0;
+            const bool ctrl = (ev.modifiers & kKeyModCtrl) != 0;
+            bool dirty = false;
+
+            // Ctrl+C latches the shell interrupt flag. No
+            // DesktopCompose here — the long-running command
+            // holding the shell will notice next time it polls.
+            // Skipped entirely if Alt is also held (that's a
+            // different shortcut like Ctrl+Alt+T).
+            if (ctrl && !alt && (ev.code == 'c' || ev.code == 'C'))
+            {
+                customos::core::ShellInterrupt();
+                SerialWrite("[ui] ^C\n");
+                continue;
+            }
+
+            // Ctrl+Alt+F1 / F2 flip the render target between
+            // the shell and klog consoles. Same screen origin,
+            // so the switch is in-place; each has its own
+            // scrollback. Works in both desktop and TTY modes.
+            if (ctrl && alt && (ev.code == kKeyF1 || ev.code == kKeyF2))
+            {
+                customos::drivers::video::CompositorLock();
+                if (ev.code == kKeyF1)
+                {
+                    customos::drivers::video::ConsoleSelectShell();
+                    SerialWrite("[ui] tty -> shell\n");
+                }
+                else
+                {
+                    customos::drivers::video::ConsoleSelectKlog();
+                    SerialWrite("[ui] tty -> klog\n");
+                }
+                const bool is_tty = (customos::drivers::video::GetDisplayMode() ==
+                                     customos::drivers::video::DisplayMode::Tty);
+                if (is_tty)
+                {
+                    customos::drivers::video::DesktopCompose(0x00000000, nullptr);
+                }
+                else
+                {
+                    customos::drivers::video::CursorHide();
+                    customos::drivers::video::DesktopCompose(kDesktopTealLocal,
+                                                             "WELCOME TO CUSTOMOS   BOOT OK");
+                    customos::drivers::video::CursorShow();
+                }
+                customos::drivers::video::CompositorUnlock();
+                continue;
+            }
+
+            // Ctrl+Alt+T flips between desktop and TTY mode. In
+            // TTY mode the console fills the framebuffer with a
+            // Linux-VT feel (black bg, console top-left); in
+            // desktop mode the console docks back into the
+            // windowed layout. The underlying char buffer is
+            // shared, so scrollback survives the flip.
+            if (ctrl && alt && (ev.code == 't' || ev.code == 'T'))
+            {
+                customos::drivers::video::CompositorLock();
+                const bool to_tty =
+                    (customos::drivers::video::GetDisplayMode() == customos::drivers::video::DisplayMode::Desktop);
+                if (to_tty)
+                {
+                    customos::drivers::video::CursorHide();
+                    customos::drivers::video::SetDisplayMode(customos::drivers::video::DisplayMode::Tty);
+                    customos::drivers::video::ConsoleSetOrigin(16, 16);
+                    customos::drivers::video::ConsoleSetColours(0x0080F088, 0x00000000);
+                    customos::drivers::video::DesktopCompose(0x00000000, nullptr);
+                }
+                else
+                {
+                    customos::drivers::video::SetDisplayMode(customos::drivers::video::DisplayMode::Desktop);
+                    customos::drivers::video::ConsoleSetOrigin(16, 400);
+                    customos::drivers::video::ConsoleSetColours(0x0080F088, 0x00181028);
+                    customos::drivers::video::DesktopCompose(kDesktopTealLocal,
+                                                             "WELCOME TO CUSTOMOS   BOOT OK");
+                    customos::drivers::video::CursorShow();
+                }
+                customos::drivers::video::CompositorUnlock();
+                SerialWrite(to_tty ? "[ui] enter TTY mode\n" : "[ui] enter DESKTOP mode\n");
+                continue;
+            }
+
+            // Window-manager shortcuts take priority over any
+            // text-input path. Alt+Tab cycles active window;
+            // Alt+F4 closes it.
+            if (alt && ev.code == kKeyTab)
+            {
+                customos::drivers::video::CompositorLock();
+                customos::drivers::video::WindowCycleActive();
+                customos::drivers::video::CursorHide();
+                customos::drivers::video::DesktopCompose(kDesktopTealLocal,
+                                                         "WELCOME TO CUSTOMOS   BOOT OK");
+                customos::drivers::video::CursorShow();
+                customos::drivers::video::CompositorUnlock();
+                SerialWrite("[ui] alt-tab\n");
+                continue;
+            }
+            if (alt && ev.code == kKeyF4)
+            {
+                customos::drivers::video::CompositorLock();
+                const auto active = customos::drivers::video::WindowActive();
+                if (active != customos::drivers::video::kWindowInvalid)
+                {
+                    customos::drivers::video::WindowClose(active);
+                    SerialWrite("[ui] alt-f4 close window=");
+                    SerialWriteHex(active);
+                    SerialWrite("\n");
+                }
+                customos::drivers::video::CursorHide();
+                customos::drivers::video::DesktopCompose(kDesktopTealLocal,
+                                                         "WELCOME TO CUSTOMOS   BOOT OK");
+                customos::drivers::video::CursorShow();
+                customos::drivers::video::CompositorUnlock();
+                continue;
+            }
+
+            // Feed the shell instead of writing to the console
+            // directly. ShellFeedChar echoes the char; Backspace
+            // rubs out the last input; Enter submits + dispatches.
+            // Mirror input chars to COM1 so a headless session is
+            // still diagnosable end-to-end.
+            if (ev.code == kKeyBackspace)
+            {
+                customos::core::ShellBackspace();
+                dirty = true;
+            }
+            else if (ev.code == kKeyEnter)
+            {
+                customos::core::ShellSubmit();
+                dirty = true;
+            }
+            else if (ev.code == kKeyArrowUp)
+            {
+                customos::core::ShellHistoryPrev();
+                dirty = true;
+            }
+            else if (ev.code == kKeyArrowDown)
+            {
+                customos::core::ShellHistoryNext();
+                dirty = true;
+            }
+            else if (ev.code == kKeyTab)
+            {
+                customos::core::ShellTabComplete();
+                dirty = true;
+            }
+            else if (ev.code >= 0x20 && ev.code <= 0x7E)
+            {
+                const char ch = static_cast<char>(ev.code);
+                customos::core::ShellFeedChar(ch);
+                const char buf[2] = {ch, '\0'};
+                SerialWrite(buf);
+                dirty = true;
+            }
+            if (dirty)
+            {
+                customos::drivers::video::CompositorLock();
+                const bool is_tty = (customos::drivers::video::GetDisplayMode() ==
+                                     customos::drivers::video::DisplayMode::Tty);
+                if (is_tty)
+                {
+                    customos::drivers::video::DesktopCompose(0x00000000, nullptr);
+                }
+                else
+                {
+                    customos::drivers::video::CursorHide();
+                    customos::drivers::video::DesktopCompose(kDesktopTealLocal,
+                                                             "WELCOME TO CUSTOMOS   BOOT OK");
+                    customos::drivers::video::CursorShow();
+                }
+                customos::drivers::video::CompositorUnlock();
+            }
         }
     };
     customos::sched::SchedCreate(kbd_reader, nullptr, "kbd-reader");
+
+    // UI ticker: once per second, re-composite so the taskbar's
+    // uptime / wall-clock counter advances even when the user
+    // hasn't touched keyboard or mouse. Uses the compositor
+    // mutex so it serialises cleanly with input threads. Full
+    // recompose at 1 Hz costs ~one frame's worth of MMIO writes.
+    // Branches on display mode so TTY-mode ticks don't re-draw
+    // a hidden desktop.
+    auto ui_ticker = [](void*)
+    {
+        constexpr customos::u32 kDesktopTealLocal = 0x00204868;
+        for (;;)
+        {
+            customos::sched::SchedSleepTicks(100);
+            customos::drivers::video::CompositorLock();
+            if (customos::drivers::video::GetDisplayMode() == customos::drivers::video::DisplayMode::Tty)
+            {
+                customos::drivers::video::DesktopCompose(0x00000000, nullptr);
+            }
+            else
+            {
+                customos::drivers::video::CursorHide();
+                customos::drivers::video::DesktopCompose(kDesktopTealLocal, "WELCOME TO CUSTOMOS   BOOT OK");
+                customos::drivers::video::CursorShow();
+            }
+            customos::drivers::video::CompositorUnlock();
+        }
+    };
+    customos::sched::SchedCreate(ui_ticker, nullptr, "ui-ticker");
+
+    // Mouse reader thread: blocks on Ps2MouseReadPacket, prints one
+    // line per decoded packet. Same end-to-end closure the keyboard
+    // reader gives, for IRQ 12. On machines without a PS/2 aux line
+    // (most laptops), Ps2MouseInit returned without routing the
+    // IRQ — the reader just parks forever on an unfed queue.
+    auto mouse_reader = [](void*)
+    {
+        // Drag state is local to this thread. No other task
+        // observes windows moving, so keeping the state on the
+        // stack (via static-lambda-local) avoids a fragile global.
+        struct DragState
+        {
+            bool active;
+            customos::drivers::video::WindowHandle window;
+            customos::u32 grab_offset_x;
+            customos::u32 grab_offset_y;
+        };
+        static DragState drag{false, customos::drivers::video::kWindowInvalid, 0, 0};
+        static bool prev_left = false;
+        static bool prev_right = false;
+        constexpr customos::u32 kDesktopTealLocal = 0x00204868;
+
+        // Menu item sets — static so their label pointers outlive
+        // the menu's open state. action_id scheme is documented in
+        // kernel_main's comment above; keep these tables in sync.
+        static const customos::drivers::video::MenuItem kStartItems[] = {
+            {"ABOUT CUSTOMOS", 1},
+            {"CYCLE WINDOWS", 2},
+            {"LIST WINDOWS", 3},
+            {"PING CONSOLE", 4},
+        };
+        static const customos::drivers::video::MenuItem kDesktopMenuItems[] = {
+            {"ABOUT CUSTOMOS", 1},
+            {"CYCLE WINDOWS", 2},
+            {"LIST WINDOWS", 3},
+            {"SWITCH TO TTY", 5},
+        };
+        static const customos::drivers::video::MenuItem kWindowMenuItems[] = {
+            {"RAISE", 10},
+            {"CLOSE", 11},
+        };
+
+        for (;;)
+        {
+            const auto p = customos::drivers::input::Ps2MouseReadPacket();
+
+            // In TTY mode the cursor is hidden and windows aren't
+            // painted — ignore UI-side mouse handling entirely.
+            // Serial logging still happens so packet delivery is
+            // visible end-to-end.
+            if (customos::drivers::video::GetDisplayMode() == customos::drivers::video::DisplayMode::Tty)
+            {
+                SerialWrite("[mouse-tty] dx=");
+                SerialWriteHex(static_cast<customos::u64>(p.dx));
+                SerialWrite(" dy=");
+                SerialWriteHex(static_cast<customos::u64>(p.dy));
+                SerialWrite(" btn=");
+                SerialWriteHex(p.buttons);
+                SerialWrite("\n");
+                continue;
+            }
+
+            // Every UI mutation inside this packet lives under
+            // the compositor mutex — the kbd reader can be mid-
+            // ConsoleWrite / DesktopCompose at the same time.
+            customos::drivers::video::CompositorLock();
+            customos::drivers::video::CursorMove(p.dx, p.dy);
+
+            customos::u32 cx = 0, cy = 0;
+            customos::drivers::video::CursorPosition(&cx, &cy);
+
+            const bool left_down = (p.buttons & customos::drivers::input::kMouseButtonLeft) != 0;
+            const bool press_edge = left_down && !prev_left;
+            const bool release_edge = !left_down && prev_left;
+            prev_left = left_down;
+
+            const bool right_down = (p.buttons & customos::drivers::input::kMouseButtonRight) != 0;
+            const bool right_press = right_down && !prev_right;
+            prev_right = right_down;
+
+            // Right-click opens a context menu. Different item set
+            // depending on what's under the cursor:
+            //   - Taskbar: skip (no right-click menu there yet).
+            //   - Window body or title: window menu with Raise/
+            //     Close, context = that window's handle.
+            //   - Desktop: desktop menu (ABOUT / CYCLE / LIST /
+            //     TTY), context = 0.
+            // If a menu is already open, a right-click simply
+            // closes it — matches Windows behaviour (right-click
+            // on whitespace dismisses the popup).
+            if (right_press)
+            {
+                if (customos::drivers::video::MenuIsOpen())
+                {
+                    customos::drivers::video::MenuClose();
+                }
+                else if (!customos::drivers::video::TaskbarContains(cx, cy))
+                {
+                    const auto hit = customos::drivers::video::WindowTopmostAt(cx, cy);
+                    if (hit != customos::drivers::video::kWindowInvalid)
+                    {
+                        customos::drivers::video::MenuOpen(
+                            kWindowMenuItems,
+                            sizeof(kWindowMenuItems) / sizeof(kWindowMenuItems[0]), cx, cy,
+                            hit);
+                    }
+                    else
+                    {
+                        customos::drivers::video::MenuOpen(
+                            kDesktopMenuItems,
+                            sizeof(kDesktopMenuItems) / sizeof(kDesktopMenuItems[0]), cx, cy,
+                            0);
+                    }
+                }
+                customos::drivers::video::CursorHide();
+                customos::drivers::video::DesktopCompose(kDesktopTealLocal,
+                                                         "WELCOME TO CUSTOMOS   BOOT OK");
+                customos::drivers::video::CursorShow();
+                customos::drivers::video::CompositorUnlock();
+                SerialWrite("[ui] right-click\n");
+                continue;
+            }
+
+            // Priority for press edges (highest first):
+            //   0a. Menu open + click on item → fire action, close.
+            //   0b. Menu open + click outside → close.
+            //   1.  Click on START → open/close menu.
+            //   2.  Taskbar tab → raise tab's window.
+            //   3.  Close-box on topmost window → close it.
+            //   4.  Title bar → raise + begin drag.
+            //   5.  Any other part of a window → raise only.
+            bool menu_handled = false;
+            if (press_edge && customos::drivers::video::MenuIsOpen())
+            {
+                const customos::u32 action = customos::drivers::video::MenuItemAt(cx, cy);
+                if (action != 0)
+                {
+                    const customos::u32 ctx = customos::drivers::video::MenuContext();
+                    // Dispatch action. Context (ctx) is a caller-
+                    // supplied u32 — for window menus it's the
+                    // target WindowHandle.
+                    switch (action)
+                    {
+                    case 1: // ABOUT CUSTOMOS
+                        customos::drivers::video::ConsoleWriteln("");
+                        customos::drivers::video::ConsoleWriteln(
+                            "-> CUSTOMOS v0 — WINDOWED DESKTOP SHELL");
+                        customos::drivers::video::ConsoleWriteln(
+                            "   KEYBOARD + MOUSE + FRAMEBUFFER ALL LIVE");
+                        break;
+                    case 2: // CYCLE WINDOWS
+                        customos::drivers::video::WindowCycleActive();
+                        customos::drivers::video::ConsoleWriteln("-> CYCLED ACTIVE WINDOW");
+                        break;
+                    case 3: // LIST WINDOWS
+                        customos::drivers::video::ConsoleWriteln("-> REGISTERED WINDOWS:");
+                        for (customos::u32 h = 0;
+                             h < customos::drivers::video::WindowRegistryCount(); ++h)
+                        {
+                            if (customos::drivers::video::WindowIsAlive(h))
+                            {
+                                const char* title = customos::drivers::video::WindowTitle(h);
+                                customos::drivers::video::ConsoleWrite("   ");
+                                customos::drivers::video::ConsoleWriteln(
+                                    (title != nullptr) ? title : "(UNNAMED)");
+                            }
+                        }
+                        break;
+                    case 4: // PING CONSOLE
+                        customos::drivers::video::ConsoleWriteln("-> PONG");
+                        break;
+                    case 5: // SWITCH TO TTY (from desktop context menu)
+                        customos::drivers::video::SetDisplayMode(
+                            customos::drivers::video::DisplayMode::Tty);
+                        customos::drivers::video::ConsoleSetOrigin(16, 16);
+                        customos::drivers::video::ConsoleSetColours(0x0080F088,
+                                                                   0x00000000);
+                        break;
+                    case 10: // RAISE <ctx>
+                        customos::drivers::video::WindowRaise(ctx);
+                        SerialWrite("[ui] ctx raise window=");
+                        SerialWriteHex(ctx);
+                        SerialWrite("\n");
+                        break;
+                    case 11: // CLOSE <ctx>
+                        customos::drivers::video::WindowClose(ctx);
+                        SerialWrite("[ui] ctx close window=");
+                        SerialWriteHex(ctx);
+                        SerialWrite("\n");
+                        break;
+                    }
+                    SerialWrite("[ui] menu fire action=");
+                    SerialWriteHex(action);
+                    SerialWrite("\n");
+                }
+                customos::drivers::video::MenuClose();
+                menu_handled = true;
+            }
+
+            // START button press opens (or closes) the menu.
+            if (press_edge && !menu_handled && !drag.active)
+            {
+                customos::u32 sx = 0, sy = 0, sw = 0, sh = 0;
+                customos::drivers::video::TaskbarStartBounds(&sx, &sy, &sw, &sh);
+                if (cx >= sx && cx < sx + sw && cy >= sy && cy < sy + sh)
+                {
+                    if (customos::drivers::video::MenuIsOpen())
+                    {
+                        customos::drivers::video::MenuClose();
+                    }
+                    else
+                    {
+                        // Open with the start item set; measure
+                        // panel height AFTER MenuOpen populates
+                        // its item count so the anchor sits
+                        // flush against the top of the START
+                        // button regardless of how many items
+                        // are in the set.
+                        customos::drivers::video::MenuOpen(
+                            kStartItems, sizeof(kStartItems) / sizeof(kStartItems[0]),
+                            sx, sy, 0);
+                        const customos::u32 mh =
+                            customos::drivers::video::MenuPanelHeight();
+                        const customos::u32 my = (sy > mh) ? sy - mh : 0;
+                        customos::drivers::video::MenuOpen(
+                            kStartItems, sizeof(kStartItems) / sizeof(kStartItems[0]),
+                            sx, my, 0);
+                        SerialWrite("[ui] menu open\n");
+                    }
+                    menu_handled = true;
+                }
+            }
+
+            if (press_edge && !menu_handled && !drag.active &&
+                customos::drivers::video::TaskbarContains(cx, cy))
+            {
+                const customos::u32 tab_hit = customos::drivers::video::TaskbarTabAt(cx, cy);
+                if (tab_hit != customos::drivers::video::kWindowInvalid)
+                {
+                    customos::drivers::video::WindowRaise(tab_hit);
+                    SerialWrite("[ui] taskbar raise window=");
+                    SerialWriteHex(tab_hit);
+                    SerialWrite("\n");
+                    customos::drivers::video::CursorHide();
+                    customos::drivers::video::DesktopCompose(kDesktopTealLocal,
+                                                             "WELCOME TO CUSTOMOS   BOOT OK");
+                    customos::drivers::video::CursorShow();
+                    menu_handled = true; // taskbar ate the click
+                }
+            }
+
+            if (press_edge && menu_handled)
+            {
+                customos::drivers::video::CursorHide();
+                customos::drivers::video::DesktopCompose(kDesktopTealLocal,
+                                                         "WELCOME TO CUSTOMOS   BOOT OK");
+                customos::drivers::video::CursorShow();
+            }
+            else if (press_edge && !drag.active)
+            {
+                const auto hit = customos::drivers::video::WindowTopmostAt(cx, cy);
+                if (hit != customos::drivers::video::kWindowInvalid)
+                {
+                    if (customos::drivers::video::WindowPointInCloseBox(hit, cx, cy))
+                    {
+                        customos::drivers::video::WindowClose(hit);
+                        SerialWrite("[ui] close window=");
+                        SerialWriteHex(hit);
+                        SerialWrite("\n");
+                    }
+                    else
+                    {
+                        customos::u32 wx = 0, wy = 0;
+                        customos::drivers::video::WindowGetBounds(hit, &wx, &wy, nullptr, nullptr);
+                        customos::drivers::video::WindowRaise(hit);
+                        const bool in_title = customos::drivers::video::WindowPointInTitle(hit, cx, cy);
+                        if (in_title)
+                        {
+                            drag.active = true;
+                            drag.window = hit;
+                            drag.grab_offset_x = cx - wx;
+                            drag.grab_offset_y = cy - wy;
+                            SerialWrite("[ui] drag begin window=");
+                            SerialWriteHex(hit);
+                            SerialWrite("\n");
+                        }
+                        else
+                        {
+                            SerialWrite("[ui] raise window=");
+                            SerialWriteHex(hit);
+                            SerialWrite("\n");
+                        }
+                    }
+                    customos::drivers::video::CursorHide();
+                    customos::drivers::video::DesktopCompose(kDesktopTealLocal,
+                                                             "WELCOME TO CUSTOMOS   BOOT OK");
+                    customos::drivers::video::CursorShow();
+                }
+            }
+            if (release_edge && drag.active)
+            {
+                SerialWrite("[ui] drag end window=");
+                SerialWriteHex(drag.window);
+                SerialWrite("\n");
+                drag.active = false;
+            }
+
+            if (drag.active)
+            {
+                // Position the window so the grabbed pixel stays
+                // under the cursor. Any sub-pixel clamp lives
+                // inside WindowMoveTo.
+                const customos::u32 nx = (cx > drag.grab_offset_x) ? cx - drag.grab_offset_x : 0;
+                const customos::u32 ny = (cy > drag.grab_offset_y) ? cy - drag.grab_offset_y : 0;
+                customos::drivers::video::WindowMoveTo(drag.window, nx, ny);
+                customos::drivers::video::CursorHide();
+                customos::drivers::video::DesktopCompose(kDesktopTealLocal, "WELCOME TO CUSTOMOS   BOOT OK");
+                customos::drivers::video::CursorShow();
+            }
+            else
+            {
+                // Non-drag path: route clicks + motion through the
+                // widget table as before. Only reachable when the
+                // cursor is NOT pinning a window move; this keeps
+                // the button widget inert during drag, matching
+                // Windows' "modal drag" semantics.
+                const customos::u32 hit =
+                    customos::drivers::video::WidgetRouteMouse(cx, cy, p.buttons);
+                if (hit != customos::drivers::video::kWidgetInvalid)
+                {
+                    SerialWrite("[ui] widget event id=");
+                    SerialWriteHex(hit);
+                    SerialWrite("\n");
+                }
+            }
+
+            customos::drivers::video::CompositorUnlock();
+
+            SerialWrite("[mouse] dx=");
+            SerialWriteHex(static_cast<customos::u64>(p.dx));
+            SerialWrite(" dy=");
+            SerialWriteHex(static_cast<customos::u64>(p.dy));
+            SerialWrite(" btn=");
+            SerialWriteHex(p.buttons);
+            SerialWrite("\n");
+        }
+    };
+    customos::sched::SchedCreate(mouse_reader, nullptr, "mouse-reader");
 
     // Scheduler self-test: three kernel threads that each bump a shared
     // counter five times under a mutex. If the mutex serialises them

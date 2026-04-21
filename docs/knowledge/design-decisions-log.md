@@ -607,6 +607,1906 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 109 — SYS_SPAWN = 7 — ring-3 can spawn ring-3 from an ELF path
+
+- **Scope:** `kernel/core/syscall.{h,cpp}` — new `SYS_SPAWN`
+  enum value + dispatcher case. Gated on `kCapFsRead` (the
+  same cap that lets a process name a file path in `SYS_STAT`
+  / `SYS_READ`). `rdi` = user pointer to path, `rsi` = path
+  length. Returns child pid on success, `(u64)-1` on failure.
+- **Decision:**
+  - Inherit the caller's caps + namespace root (POSIX
+    fork+exec shape: "spawn from a path, same privileges
+    down"). A child that needs lower privileges drops caps
+    post-spawn via `SYS_DROPCAPS`, matching the existing
+    deprivilege pattern.
+  - Cap check is on `kCapFsRead` rather than a new
+    `kCapSpawn` — the observable primitive is "the caller
+    named a file path," which is exactly what `kCapFsRead`
+    already gates in STAT/READ. Avoids cap-set inflation.
+  - `VfsLookup` runs against `proc->root`, so a sandboxed
+    caller can only spawn binaries reachable from its own
+    namespace — matching the existing jail semantics.
+  - Budgets (`kFrameBudgetTrusted`, `kTickBudgetTrusted`) are
+    hard-coded for v0; differentiated budgets per child land
+    when a use case demands.
+- **Why:** Completes the ring-3 story started in entries #107
+  (ELF validator) + #108 (ElfLoad). With this, a ring-3
+  program written as a byte payload wrapped in an ELF can
+  call `int 0x80` with `eax=7` to launch peers, closing the
+  self-hosting loop.
+- **Rules out / defers:** Separate `kCapSpawn` cap. Explicit
+  budget args in the syscall. Exec-in-place semantics
+  (replace calling process's AS — POSIX `execve`). Arguments
+  / environment passed to the child. Parent-child process
+  graph for exit-code waiting. Spawn-with-reduced-caps via a
+  pre-spawn DROPCAPS variant.
+- **Revisit when:** First ring-3 program wants argv / env.
+  Parent / child lifecycle matters (`waitpid` analogue).
+  Toolchain lands that compiles real programs.
+- **Related tracks:** Track 4 (Process — spawn syscall ABI),
+  Track 7 (Userland — in-ring-3 launcher shape).
+
+---
+
+## 108 — `ElfLoad` — populate an AddressSpace from a validated ELF
+
+- **Scope:** `kernel/core/elf_loader.{h,cpp}` extended with
+  `ElfLoadResult` struct + `ElfLoad(file, len, AddressSpace*)`.
+  `kernel/fs/ramfs.cpp` — `/bin/sample.elf` replaced with
+  runnable 129-byte `/bin/exit.elf` (header + PT_LOAD + 9 bytes
+  of `mov eax,0; xor edi,edi; int 0x80`). `kernel/core/
+  ring3_smoke.{h,cpp}` — `Ring3UserEntry` promoted out of the
+  anon namespace; new `SpawnElfFile` wraps the full AS → ELF →
+  Process → SchedCreateUser pipeline. `kernel/core/shell.cpp`
+  — `CmdExec`'s dry-run print is now followed by a real
+  `SpawnElfFile` call.
+- **Decision:**
+  - Per-page frame allocation. Each 4 KiB page of
+    `[vaddr & ~page_mask, (vaddr+memsz+mask) & ~mask)` gets
+    its own frame from `AllocateFrame`. Frames are
+    zero-on-alloc (frame allocator contract), so the
+    `memsz - filesz` .bss tail is free — no explicit zeroing
+    required.
+  - Page-level flag derivation: `kPagePresent | kPageUser`
+    always; `kPageWritable` iff `PF_W`; `kPageNoExecute` iff
+    NOT `PF_X`. The U-bit is forced on by
+    `AddressSpaceMapUserPage` regardless.
+  - Fixed v0 stack VA `0x7FFFE000` (one page below top of
+    canonical 32-bit low), mapped `R|W|U|NX`. Clear of any
+    typical PT_LOAD at 0x400000.
+  - On partial failure (AllocateFrame OOM mid-walk):
+    `ElfLoadResult::ok = false`, partial mappings left to
+    the caller's `AddressSpaceRelease` to tear down.
+    Rationale: the v0 AS tracks its user-region table and
+    its destructor already handles teardown; duplicating
+    that unwind here would drift from the canonical
+    release path.
+  - `/bin/exit.elf` uses `p_align = 1` so the file stays
+    compact (129 bytes) rather than padding to match
+    `p_offset % p_align == p_vaddr % p_align` for
+    p_align=4096. ElfValidate skips the alignment check
+    when `p_align <= 1`.
+- **Why:** Closes the gap between "ELF parser works" (entry
+  #107) and "ring-3 tasks can actually run from files."
+  `exec /bin/exit.elf` now produces a real process that
+  takes the SYS_EXIT path — end-to-end proof the pipeline
+  works, unblocking SYS_SPAWN (entry #109) and any future
+  user-mode toolchain.
+- **Rules out / defers:** Multi-MiB binaries (stack VA is
+  fixed; a PT_LOAD reaching 0x7FFFE000 would collide). PIE /
+  relocated e_entry. ET_DYN files with DT_NEEDED. PT_INTERP
+  (dynamic linker handoff). Per-task stack guard pages.
+- **Revisit when:** Toolchain lands (ELFs produced by a
+  cross-compiler have bigger PT_LOADs + possibly dynamic
+  relocation). First PIE executable arrives.
+- **Related tracks:** Track 4 (Process model — loader is
+  the mouth of every user-mode launch path), Track 3 (MM —
+  ElfLoad is now one of the two callers of
+  `AddressSpaceMapUserPage`, alongside the smoke tasks).
+
+---
+
+## 107 — Proper ELF64 loader module + `exec` dry-run command
+
+- **Scope:** `kernel/core/elf_loader.{h,cpp}` — new module.
+  `kernel/core/shell.cpp` — `exec PATH` command.
+- **Decision:** Two-stage landing for SYS_SPAWN:
+    Stage 1 (this slice): validation + iteration API.
+      ElfValidate, ElfEntry, ElfProgramHeaderInfo,
+      ElfForEachPtLoad. Returns rich ElfStatus enum so
+      callers distinguish "too small" vs "bad magic" vs
+      "bad machine" vs "segment out of bounds."
+    Stage 2 (next): ElfLoad into an AddressSpace, then
+      the full `exec PATH` that spawns a ring-3 task.
+  Shell `exec` already exists as a DRY RUN — validates
+  the ELF and prints the load plan. Lets users see the
+  validator reject / accept a file without committing
+  kernel state.
+- **Why:** Splitting validation from loading keeps each
+  layer testable on its own. The dry-run command is
+  useful standalone for inspecting any ELF file the shell
+  can read, and it exercises every validator rejection
+  path without risk.
+- **Rules out / defers:** Actual segment loading /
+  AddressSpace population / process spawn. Dynamic
+  linking (DT_NEEDED). Interpreter support (PT_INTERP).
+  Segment NX enforcement beyond honoring PF_X flag bit.
+  PIE / position-independent executables (entry relocated
+  per process).
+- **Revisit when:** User-mode toolchain lands (compiles
+  into loadable ELFs). SYS_SPAWN implementation begins.
+- **Related tracks:** Track 4 (Process — loader input),
+  Track 7 (Userland shell — `exec` becomes spawn).
+
+---
+
+## 106 — Cross-task `kill` by PID + KillResult taxonomy
+
+- **Scope:** `kernel/sched/sched.{h,cpp}` — new
+  `KillReason::UserKill`, `KillResult` enum, and
+  `SchedKillByPid(pid)` that walks every task list under
+  Cli() to find the target, applies a state-specific
+  detach, and sets `kill_requested` + `kill_reason`.
+  Reserved tasks (pid 0, reaper, idle-*) are rejected as
+  Protected. `kernel/core/shell.cpp` — `kill PID` command
+  translates KillResult to user messages.
+- **Decision:** State-specific behaviour:
+    Running / Ready  — flag only; Schedule() handles.
+    Sleeping         — lift off sleep queue, re-queue Ready
+                       (and decrement g_tasks_sleeping).
+    Blocked          — flag only; caller gets `Blocked`
+                       result. v0 has no safe cross-queue
+                       detach — doing one would race the
+                       WaitQueue's producer mid-enqueue.
+                       The task dies when its normal
+                       producer next wakes it.
+    Dead             — reports `AlreadyDead`.
+  Protected list enforces three hard-coded safety rules
+  (boot task id==0, name=="reaper", name starts with
+  "idle-"). Killing any of those would break scheduler
+  invariants (empty runqueue, leaked zombies, broken
+  boot-stack alias).
+- **Why:** The `spawn` command lets users start ring-3
+  tasks interactively but they ran to their own
+  tick-budget / denial-ceiling ends; users couldn't
+  terminate them on demand. `kill` closes that loop and
+  makes interactive process management possible.
+- **Rules out / defers:** Safe cross-WaitQueue detach
+  (requires a global queue-registry or per-queue spinlock
+  — neither exists). Signals (SIGTERM / SIGKILL / SIGINT
+  as a real ABI). Group kills by parent or name prefix.
+  `kill -9` / `kill -15` semantics. Kill notification to
+  parent process (no parent/child graph yet).
+- **Revisit when:** SMP scheduler lands (need per-cpu
+  locks instead of global Cli). SIGINT-style signals
+  arrive. Parent/child process graph lands (zombie
+  delivery to parent). WaitQueue registry lands (then
+  Blocked kills work).
+- **Related tracks:** Track 2 (Scheduler — kill path),
+  Track 4 (Process — lifecycle), Track 7 (Userland shell
+  — `kill` command).
+
+---
+
+## 105 — Shell utility batch (sleep / reset / tac / nl / rev / expr / color / rand / flushtlb / checksum / repeat)
+
+- **Scope:** `kernel/core/shell.cpp` — eleven commands in
+  two sub-batches. All wrappers around existing APIs.
+- **Decision:**
+  - `sleep N` polls the interrupt flag every second so a
+    long sleep can be aborted, rather than one big
+    SchedSleepTicks(N*100) that would ignore Ctrl+C.
+  - `expr` is 64-bit signed, divide-by-zero reports
+    instead of trapping (no #DE from user-typed input).
+  - `repeat N CMD` re-dispatches through Dispatch() so
+    alias / env / redirect / pipes all apply to each
+    iteration. Fresh buffer copy per iteration because
+    Dispatch() mutates its input.
+  - `rand` uses splitmix64 seeded from TSC. Not
+    cryptographic — disclosed in the output.
+  - `flushtlb` reloads CR3 with its current value — the
+    classic "invalidate non-global TLB" primitive.
+  - `checksum` is FNV1A-32: no allocation, one pass, good
+    enough for "did content change" sanity.
+  - `color` takes hex fg + optional bg; defaults bg to a
+    sane navy rather than requiring both.
+- **Why:** Filling out the shell's utility surface — the
+  last round was file-inspection; this round is
+  script-friendly ergonomics (sleep, repeat, expr, rand)
+  + text-processing (tac, nl, rev) + runtime tuning
+  (color, flushtlb).
+- **Rules out / defers:** `sleep 0.5` fractional seconds
+  (no sub-tick granularity yet). `expr` parentheses /
+  precedence. `rand MIN MAX`. Cryptographic rand source.
+  SHA / MD5 hashes. `repeat INF` (would need a clean
+  interrupt story on pipelines).
+- **Revisit when:** Fractional-second timing arrives via
+  HPET scheduler integration. First user wants bigger
+  rand ranges. SHA-2 hardware instructions become useful.
+- **Related tracks:** Track 7 (Userland shell).
+
+---
+
+## 104 — Shell file-inspection commands (hexdump / stat / basename / dirname / cal)
+
+- **Scope:** `kernel/core/shell.cpp` — five commands, each a
+  thin wrapper around existing ramfs/tmpfs paths + a bit of
+  local parsing. `hexdump` renders 16-byte rows with the
+  canonical HH/ASCII layout. `stat` prints ramfs vs tmpfs +
+  size / child count. `basename` / `dirname` do path
+  splitting. `cal` renders the current month using Zeller's
+  congruence against the RTC date with today highlighted.
+- **Decision:** All five are leaf commands — no new kernel
+  API needed. `cal` uses Zeller for weekday-of-first rather
+  than baking a lookup table; cheap and reuses the existing
+  RTC reader.
+- **Why:** File-inspection ergonomics. `stat` closes the
+  "is this file there" question without a full ls; `hexdump`
+  complements `readelf` for byte-level inspection;
+  `basename`/`dirname` round out path manipulation; `cal`
+  is just nice to have when a clock is visible.
+- **Rules out / defers:** `stat -c '%s'` format strings. Full
+  `hexdump -C` feature set (region / length flags). `cal`
+  multi-month / yearly views.
+- **Revisit when:** First user wants hexdump slice / length
+  flags. Scripts need format-string output.
+- **Related tracks:** Track 7 (Userland shell).
+
+---
+
+## 103 — `readelf` command + sample ELF64 in ramfs
+
+- **Scope:** `kernel/fs/ramfs.cpp` — 120-byte minimal valid
+  ELF64 binary at `/bin/sample.elf` (64-byte header + one
+  PT_LOAD). `kernel/core/shell.cpp` — `readelf PATH` parser
+  + LeU16/LeU32/LeU64 unaligned readers + type-name lookup
+  tables.
+- **Decision:** Ship a synthetic header rather than wire up
+  a real build target for user-mode binaries. The synthetic
+  file is just enough to exercise every field of the parser;
+  when a real user toolchain arrives, the parser works on
+  its output unchanged. Validate magic + ELFCLASS64 +
+  ELFDATA2LSB up front; reject anything else.
+- **Why:** First concrete step toward SYS_SPAWN + ELF
+  loading. The parser is the gate — once it accepts real
+  ELFs, "copy each PT_LOAD segment into the right VA" is a
+  direct extension. Also useful standalone for inspecting
+  any future disk images.
+- **Rules out / defers:** Section header parsing. Symbol
+  tables. Relocation entries. DYNAMIC segment handling
+  (needed for PIE). Note / .comment section display.
+  Actual program loading.
+- **Revisit when:** First user-mode toolchain produces an
+  ELF to load. SYS_SPAWN implementation begins.
+- **Related tracks:** Track 4 (Process — loader input),
+  Track 7 (Userland shell — inspection tool).
+
+---
+
+## 102 — Shell `spawn` command — ring-3 tasks on demand
+
+- **Scope:** `kernel/core/ring3_smoke.{h,cpp}` — new
+  `SpawnOnDemand(kind)` dispatcher exposing the existing
+  boot-time ring-3 spawners. `kernel/core/shell.cpp` —
+  new `spawn <kind>` command where kind ∈ {hello, sandbox,
+  jail, nx, hog, hostile, dropcaps}.
+- **Decision:** Keep SYS_SPAWN deferred until a user-mode
+  toolchain lands (ELF loader, user-mode libc, user-mode
+  linker script); in the meantime, expose the hand-crafted
+  byte payloads the boot fleet already uses via an opt-in
+  shell command. Each invocation creates a fresh Process +
+  AddressSpace — the standard path — so every gadget the
+  kernel reaches for (ASLR, reaper cleanup, per-AS VAs)
+  runs just as it does at boot.
+- **Why:** Lets a user at the prompt watch the ring-3
+  machinery in action — `spawn hello` produces a visible
+  ring-3 task; `spawn jail` proves the page-protection
+  kill path; `spawn hog` proves the tick-budget kill path.
+  Closes the gap between "ring 3 works once at boot" and
+  "ring 3 can be driven interactively."
+- **Rules out / defers:** Loading arbitrary ELFs from
+  ramfs. Running user-written binaries. SYS_SPAWN syscall
+  (ring-3 → ring-3 spawn). Toolchain for ring-3 binaries.
+- **Revisit when:** ELF loader lands; user toolchain in
+  tree; SYS_SPAWN slice begins.
+- **Related tracks:** Track 4 (Process model — spawn
+  dispatcher shape), Track 7 (Userland shell — user-
+  facing surface).
+
+---
+
+## 101 — Scheduler task enumeration + `ps` command
+
+- **Scope:** `kernel/sched/sched.{h,cpp}` — new
+  `SchedTaskInfo` snapshot struct + `SchedEnumerate(cb,
+  cookie)` that walks every known task (current +
+  runqueues + sleep queue + zombie list). `kernel/core/
+  shell.cpp` — `ps` command renders `PID STATE PRI NAME`
+  rows with a `*` marker on the running task.
+- **Decision:** Snapshot-by-value (no Task* leaves the
+  API), CLI-bracketed walk to protect against timer-IRQ
+  list mutations mid-visit. Callback runs under the CLI
+  window — Console writes are byte-sized stores so that's
+  fine; nothing blocking permitted inside the callback.
+- **Why:** Before this the scheduler only published
+  aggregate counters (SchedStatsRead). `ps` is what users
+  reach for to understand what the OS is doing; without
+  it `stats` is a partial answer.
+- **Rules out / defers:** Per-task CPU time / runtime
+  accumulation. Memory per task. Parent/child links.
+  Kill-by-pid. Sort-by-cpu.
+- **Revisit when:** Per-task time accounting lands (add
+  a TIME column). SYS_SPAWN lands (parent PID matters).
+  kill(pid) lands (interactive process management).
+- **Related tracks:** Track 2 (Scheduler — enumeration
+  API), Track 7 (Userland shell — consumer).
+
+---
+
+## 100 — Shell Ctrl+C interrupt + uncapped seq
+
+- **Scope:** `kernel/core/shell.{h,cpp}` — latched
+  `g_interrupt` flag, `ShellInterrupt` + `ShellInterruptRequested`
+  API. `kernel/core/main.cpp` — kbd reader catches Ctrl+C
+  (Ctrl held + 'c' / 'C', no Alt) and flips the flag
+  without triggering any recompose. `seq` loses its 200-
+  iteration cap and polls the flag per iteration.
+- **Decision:** One-shot latched flag, single producer
+  (kbd reader) + single consumer (command loop), no
+  explicit barrier. Works because x86_64's byte-store
+  memory model guarantees the reader sees the set on the
+  next poll. Future commands (infinite `yes`, tail -f,
+  long find) poll the same hook.
+- **Why:** Uncapping `seq` was the immediate driver, but
+  the pattern generalises — any long-running command now
+  has a standard "user can abort" shape. The cap itself
+  was always a workaround for the missing interrupt; now
+  it's gone.
+- **Rules out / defers:** SIGINT handler dispatch (no
+  signals yet). Cross-task interrupt (only the running
+  command sees the flag). Ctrl+Z / suspend. Blocking on
+  interrupt (the flag is polled, not waited on).
+- **Revisit when:** SIGINT-shaped API needed for user-
+  mode handlers. Signals across ring boundaries land.
+- **Related tracks:** Track 7 (Userland shell), Track 4
+  (Process — signals / interrupts).
+
+---
+
+## 099 — Shell system-manipulation command suite (29 new commands)
+
+- **Scope:** `kernel/core/shell.cpp` — one batch of 20 kernel-
+  introspection / control commands (cpuid, cr, rflags, tsc, msr,
+  hpet, ticks, lapic, smp, lspci, heap, paging, fb, kbdstats,
+  mousestats, loglevel, getenv, yield, reboot, halt) plus a
+  second batch of 9 POSIX-compat stubs (uname, whoami, hostname,
+  pwd, true, false, mount, lsmod, free). New `WriteU64Hex`
+  helper shared by every register-dump command.
+- **Decision:** All commands are thin wrappers around existing
+  kernel accessors. The register-dump commands roll inline
+  asm (cpuid, rdmsr, rdtsc, pushfq) rather than taking a
+  dependency on a cpu.h extension — keeps the kernel core
+  unchanged. Power commands (`reboot`, `halt`) don't prompt
+  for confirmation; the user typed them intentionally.
+  Freestanding-build gotcha: avoid in-function struct arrays
+  like `const Bit bits[] = {...}` — they emit a memcpy from
+  .rodata that the kernel doesn't link. Use parallel
+  primitive-array locals instead.
+- **Why:** The user explicitly asked for every possible
+  getter / setter / manipulator command — this batch cashes
+  in on every kernel API the tree already exposes. Also
+  closes the gap between "system looks real" and "system
+  answers diagnostic questions like a real OS."
+- **Rules out / defers:** MSR writes (wrmsr can brick the
+  CPU with bad values). `reboot` confirmation prompt.
+  `mount` / `lsmod` as genuine reflection (they're static
+  strings). True per-task `ps` (scheduler doesn't expose a
+  task enumerator yet). Nested CPUID subleaf parsing.
+- **Revisit when:** SYS_SPAWN lands (`reboot` could warn
+  about active processes first; `ps` becomes real).
+  Per-task accounting (`free` grows a per-task column).
+  Writable MSR subset approved (some runtime tuning).
+- **Related tracks:** Track 7 (Userland shell — all 29
+  commands live here), Track 2 (Platform — register /
+  device introspection).
+
+---
+
+## 098 — Shell pipes (`|`) via console capture + tmpfs transport
+
+- **Scope:** `kernel/drivers/video/console.{h,cpp}` — new
+  `ConsoleBeginCapture` / `ConsoleEndCapture` divert
+  shell-slot writes to a caller buffer (klog slot
+  unaffected). `kernel/core/shell.cpp` — Dispatch parses
+  `|` before tokenisation, runs the left half with
+  capture active, stashes the output in `/tmp/__pipe__`,
+  then re-dispatches the right half with the tmpfs path
+  appended as the final argument. Unlinks the temp file
+  on unwind.
+- **Decision:** Pipe transport via tmpfs file + recursion
+  into Dispatch, not via an in-process stream abstraction.
+  Rationale: no command in the tree reads stdin (they
+  read paths), so the cheapest mechanism that makes
+  `A | B` work is "capture A's console output into a
+  real file and feed that file's path to B." Multi-stage
+  pipes fall out for free because the recursion handles
+  the right side's own embedded `|`. Reserved name
+  `/tmp/__pipe__` makes nested reuses overwrite-safe.
+- **Why:** The one iconic missing shell feature. Every
+  command already produces console text and most already
+  accept a trailing path; the capture/transport trick
+  reuses both without touching the individual commands.
+  Real pipes (Linux-style fd 1 → fd 0 kernel buffer) come
+  later with SYS_SPAWN; v0's tmpfs transport satisfies the
+  ergonomics.
+- **Rules out / defers:** Streaming (a stage can't produce
+  output before the previous stage finishes). Stderr
+  redirection (2>&1). Commands that read real stdin.
+  Capture buffer cap == tmpfs content max; longer pipelines
+  truncate. pipefail / SIGPIPE semantics.
+- **Revisit when:** SYS_SPAWN lands (real process-to-process
+  pipes). User pipelines exceed 512 bytes of intermediate
+  output (bump the tmpfs slot size or move to heap).
+  Streaming required (interactive filters like `tail -f`).
+- **Related tracks:** Track 7 (Userland shell — iconic
+  feature), Track 4 (Process — real pipes wait on this),
+  Track 5 (VFS — pipe file-style abstraction).
+
+---
+
+## 097 — Shell `sort` + `uniq`
+
+- **Scope:** `kernel/core/shell.cpp` — `CmdSort` + `CmdUniq`
+  and shared helpers `SliceLines` + `LineCompare`.
+- **Decision:** `sort` uses insertion sort on a (offset, length)
+  index pair array (stack-local, cap 128 lines) — line bodies
+  stay in the scratch buffer and we only swap indices, so the
+  algorithm is zero-copy. Classic `uniq` semantics — consecutive
+  duplicates only. Both share `SliceLines` so future line-
+  oriented commands (`tac`, `uniq -c`, `sort -r`) pick up the
+  slicing for free.
+- **Why:** Closes the "classic text pipeline" trio (grep / sort
+  / uniq) — a user can now script read-only log triage
+  workflows entirely in the shell.
+- **Rules out / defers:** `-r` reverse sort. `-n` numeric sort.
+  `-u` unique (merged into sort). `uniq -c` / `-d`. Large-file
+  sort (backing store).
+- **Revisit when:** Pipes land (`sort` and `uniq` are the
+  canonical pipe consumers — `cmd | sort | uniq`). First user
+  wants `-r` or `-n` flags.
+- **Related tracks:** Track 7 (Userland shell).
+
+---
+
+## 096 — Move man pages into /etc/man/ ramfs files
+
+- **Scope:** `kernel/fs/ramfs.cpp` — twelve new `/etc/man/*`
+  files (ls, cat, echo, cp, mv, grep, find, history, alias,
+  env, time, source) declared via a one-line `MAN_NODE()`
+  macro. New `k_trusted_etc_man_dir` slots into `/etc`.
+  `kernel/core/shell.cpp` — `CmdMan` rewritten to build
+  `/etc/man/<name>` and dispatch through `ReadFileToBuf`.
+- **Decision:** Keep the man-page text in ramfs, not inline
+  in shell.cpp. MAN_NODE() macro collapses each per-page
+  `RamfsNode` definition to one line. CmdMan loses ~100
+  lines of switch/case for a 30-line VfsLookup + cat.
+- **Why:** `cat /etc/man/ls` now works, which is the POSIX
+  promise; `ls /etc/man` enumerates what's available; and
+  shell.cpp stops carrying help text that belongs on disk.
+  Also sets up the pattern for future man-page additions —
+  drop a constexpr byte array + a MAN_NODE() line.
+- **Rules out / defers:** Sectioned pages (man 1, 2, ...).
+  Formatting (bold / italic / underline — none of which our
+  font supports anyway). User-writable man pages in
+  /tmp/man/ (mount nesting).
+- **Revisit when:** On-disk FS lands (man moves to a real
+  disk path). Formatted output primitives arrive (ANSI SGR,
+  per-cell colour).
+- **Related tracks:** Track 5 (VFS — first nested directory
+  with > 2 files), Track 7 (Userland shell — disk-backed
+  documentation).
+
+---
+
+## 095 — Shell `time` / `which` / `seq` + factored kCommandSet
+
+- **Scope:** `kernel/core/shell.cpp` — three new commands, plus
+  the canonical `kCommandSet[]` lifted from a function-local
+  static into a file-scope `static const` so it has one source
+  of truth for tab-complete and the new `which` lookup.
+- **Decision:** All three are 10-30 LOC wrappers around stuff
+  that already exists. `time` recurses through `Dispatch` so
+  it inherits the full pipeline (alias / env / redirect).
+  `seq` caps at 200 because there's no Ctrl+C handler — one-
+  shot infinite output would lock a screen we can't interrupt.
+  `which` checks builtins then aliases; reporting "NOT FOUND"
+  matches `which`'s POSIX exit-code-1 case.
+- **Why:** All three are muscle-memory commands. `time` in
+  particular is what users reach for the moment they want to
+  benchmark anything; no point asking them to read tick
+  counts from `stats`.
+- **Rules out / defers:** `time` user vs system breakdown
+  (no per-task accounting). `seq START STOP STEP` POSIX form.
+  `which -a` to list shadowing.
+- **Revisit when:** SYS_SPAWN lands (`which` should also
+  resolve `/bin/<cmd>` real binaries). Per-task time
+  accounting available (separate user/sys/real).
+- **Related tracks:** Track 7 (Userland shell).
+
+---
+
+## 094 — Shell `grep` + `find`
+
+- **Scope:** `kernel/core/shell.cpp` — `grep PATTERN PATH`
+  walks line-by-line and prints matches; `find NAME`
+  recursively walks the ramfs tree printing absolute paths
+  whose leaf contains NAME, then enumerates tmpfs slots.
+  Shared `SubstringPresent` helper.
+- **Decision:** Substring match only (no regex), case-
+  sensitive, no flags. `find` walks both backends because
+  the user expects `/tmp/<name>` paths to surface alongside
+  ramfs ones — keeping them visually unified. Path buffer
+  is 128B and stack-local so the recursion doesn't pressure
+  any global state.
+- **Why:** `grep` + `find` are how you inspect any non-trivial
+  filesystem — even at 6 ramfs files it's nicer than scrolling
+  `ls`. The same shape extends to a real on-disk FS without
+  refactoring.
+- **Rules out / defers:** Regex (`grep -E`). Recursive grep.
+  `find` predicates (-type, -name with glob, -size).
+  Case-insensitive (-i). Multi-file `grep PATH PATH PATH`.
+- **Revisit when:** First user wants regex (which usually
+  means writing log filters). On-disk FS lands and the
+  recursion depth needs bumping past 128B.
+- **Related tracks:** Track 7 (Userland shell), Track 5
+  (VFS — multi-backend walker reuse).
+
+---
+
+## 093 — /etc/motd + /etc/profile + source / man commands
+
+- **Scope:** `kernel/fs/ramfs.cpp` — seeds `/etc/motd`
+  (welcome banner + key bindings) and `/etc/profile`
+  (default aliases + prompt). `kernel/core/shell.cpp` —
+  new `source` command (dispatches each line of a file as
+  a shell command; `#` comments + blank lines skipped;
+  `.` alias). New `man NAME` prints detailed per-command
+  help from an inline switch. `ShellInit` auto-cats motd
+  + auto-sources /etc/profile.
+- **Decision:** motd + profile land in the ramfs as real
+  files so users can point at them with `cat /etc/motd` and
+  eventually edit via tmpfs copy. `source` lets the user
+  run ad-hoc scripts from /tmp too (write a script to
+  /tmp/foo, source it). `man` pages stay inline in shell.cpp
+  for v0 — moving them to /etc/man/<cmd> files is a mostly-
+  mechanical refactor that adds pressure on the ramfs
+  seeding code, so defer until an on-disk FS lands.
+- **Why:** The shell boots feeling like a real system now:
+  a persistent system-identity file is on disk, defaults
+  auto-apply, users can get detailed help on any command,
+  and scripts are a thing. Incremental but high-impact
+  polish.
+- **Rules out / defers:** /etc/man/<cmd> as real files
+  (easy follow-up once there's more disk content). Scripts
+  with shebang, arguments, conditionals, loops. Per-user
+  profile (no user concept yet). Motd generators (dynamic
+  content via special markers).
+- **Revisit when:** On-disk FS lands (motd/profile/man
+  become real files; user-edited profile persists). First
+  scripting construct needed (if/while/for). Multi-user
+  appears.
+- **Related tracks:** Track 5 (VFS — persistent system
+  config files), Track 7 (Userland shell — scripts),
+  Track 4 (Process model — per-user / per-process env).
+
+---
+
+## 092 — Severity-coloured KERNEL LOG window
+
+- **Scope:** `kernel/core/main.cpp` — log-viewer content
+  drawer inspects the first chunk per line (always the
+  severity tag from `LevelTag()`) and sets the render
+  foreground per line: white-ish = Info, grey = Debug,
+  amber = Warn, soft red = Error. Newline resets.
+- **Decision:** Line-level colouring, not per-cell. Detected
+  from the LevelTag() shape "[X] " — the renderer matches
+  `s[0]=='[' && s[2]==']'`, which no other chunk produces.
+  Zero storage overhead; colour lives only in the render
+  function's static.
+- **Why:** Previously every severity looked identical on
+  screen; klog output was visually flat. Amber warnings and
+  red errors now jump out the moment the window paints —
+  matches every modern log viewer (journalctl, dmesg -H,
+  etc.).
+- **Rules out / defers:** Per-token / per-column colours
+  (no rich ANSI escape handling). Colour theme config. Per-
+  severity background highlight. Copy-with-colour.
+- **Revisit when:** ANSI escape codes land in the console
+  generally. User wants a custom palette.
+- **Related tracks:** Track 9 (Windowing — log surface),
+  Track 7 (Userland — readable logs).
+
+---
+
+## 091 — Shell alias / unalias / sysinfo + $PS1 prompt
+
+- **Scope:** `kernel/core/shell.cpp` — 8-slot alias table
+  (names 32B, expansions 96B); `alias` / `unalias` / `sysinfo`
+  commands; Prompt() now consults $PS1 before defaulting to
+  "$ ".
+- **Decision:** Alias expansion runs BEFORE tokenisation in
+  Dispatch — the expansion flows through the full shell
+  pipeline (env substitution, redirects). One level of
+  expansion; an alias referencing another is not recursively
+  expanded (bash's default sans expand_aliases). sysinfo
+  consolidates version + uptime + wall time + task counts +
+  memory + window count + display mode into a single
+  read-only dump.
+- **Why:** Three small polish items that together make the
+  shell feel like a real terminal:
+    alias    — muscle memory ("alias ll ls")
+    $PS1     — prompt customization (the canonical shell
+               expression of individuality)
+    sysinfo  — one-shot "what is this machine doing?"
+- **Rules out / defers:** Recursive alias expansion.
+  Alias arguments / parameters. $PS1 escape sequences
+  (\u, \h, \w, \t — would need richer Prompt rendering).
+  sysinfo -v flags.
+- **Revisit when:** First alias consumer needs parameter
+  substitution. $PS1 users ask for hostname / cwd
+  expansion (implies a CWD concept).
+- **Related tracks:** Track 7 (Userland shell).
+
+---
+
+## 090 — Shell env variables + $VAR whole-token substitution
+
+- **Scope:** `kernel/core/shell.cpp` — 8-slot env table
+  (32-byte names, 128-byte values). New `set` / `unset` /
+  `env` commands + pre-tokenize pass in Dispatch that
+  replaces whole-token `$VAR` references with their value
+  (undefined → empty string).
+- **Decision:** Whole-token substitution only. Partial
+  expansion (`prefix$VAR`, `${VAR}`, nested, command
+  substitution) all deferred. Rationale: whole-token catches
+  every boot-time use (`echo $HOME`, `cat $FILE`) and keeps
+  the substituter a one-line `argv[i] = EnvFind(...)->value`
+  swap. A real expander lands when someone writes a non-
+  trivial shell script.
+- **Why:** Env vars unlock a PATH-like story for when
+  SYS_SPAWN arrives (shell picks binaries by `$PATH` lookup
+  rather than hard-coded `/bin`). Before that, they're just
+  a scratchpad, but the primitive is the same either way.
+- **Rules out / defers:** `${VAR}` syntax. Partial-token
+  expansion. Quoting. Export vs local. PATH semantics.
+  Per-process env (all commands share the single table).
+  Persistence across reboot.
+- **Revisit when:** SYS_SPAWN lands. First env-dependent
+  shell script attempt. Quoting needed for filenames with
+  spaces (a tmpfs that allows them).
+- **Related tracks:** Track 7 (Userland shell), Track 4
+  (Process model — per-process env).
+
+---
+
+## 089 — cp / mv / wc / head / tail coreutils-ish commands
+
+- **Scope:** `kernel/core/shell.cpp` — five new commands
+  built on a shared `ReadFileToBuf` helper that dispatches
+  on the /tmp prefix to pick tmpfs vs ramfs.
+- **Decision:** Keep the commands thin — each is a 20-50
+  line wrapper around the shared read helper + the existing
+  tmpfs write path. `cp` reads from either backend, writes to
+  tmpfs; `mv` is tmpfs-only and unlinks the source only AFTER
+  write succeeds. `head` / `tail` default to 5 lines with a
+  `-N` short form; `wc` emits the POSIX trio (lines, words,
+  bytes) with unterminated-last-line counting as a line.
+- **Why:** `cp` + `mv` round out file manipulation so users
+  can do more than "write once, read". `head` / `tail` / `wc`
+  are the classic file-inspection trio — adding them makes
+  the shell feel genuinely like a terminal, not a demo.
+- **Rules out / defers:** -r recursive variants. `cp` into
+  ramfs (impossible, read-only). Globbing. `wc -l` / `-w`
+  selector flags. `head`/`tail` follow mode.
+- **Revisit when:** Second writable backend (on-disk FS) lets
+  us relax the tmpfs-only destination restriction. First
+  shell script needs a specific single-column count.
+- **Related tracks:** Track 7 (Userland shell), Track 5
+  (VFS — multi-backend read dispatch is already factored).
+
+---
+
+## 088 — Shell `history` + `!N` / `!!` recall
+
+- **Scope:** `kernel/core/shell.{h,cpp}` — `ShellHistoryCount`
+  / `ShellHistoryGet` expose the existing history ring;
+  new `history` command prints it oldest-first with 1-based
+  numbering. `HistoryExpand` runs before argv tokenisation in
+  Dispatch, resolving `!!` and `!N` into the recalled line
+  (echoed first, then recursively dispatched).
+- **Decision:** Display numbers count oldest-first so users
+  intuit "!1 is what I ran first." Internal `HistoryAt(n)`
+  still counts newest-first; the `history` command + the
+  recall path both invert at the boundary. Recursion is
+  depth-bounded at 1 — history entries can't themselves
+  begin with `!` because the push path dedups, and a `!X`
+  that resolves to another `!Y` is rejected up front.
+- **Why:** Up/Down arrow cursor recall + `history` + `!N`
+  together cover the full bash-flavoured history surface
+  users expect. Zero new storage; just wrappers + a tiny
+  pre-dispatch expansion step.
+- **Rules out / defers:** `!prefix` (run the most recent
+  command starting with `prefix`). `!$` (last arg of last
+  command). `Ctrl+R` incremental search. Persistent history
+  across reboot.
+- **Revisit when:** Second shell session coexists (needs
+  per-session vs global). Persistent history (needs writable
+  FS).
+- **Related tracks:** Track 7 (Userland shell).
+
+---
+
+## 087 — Live KERNEL LOG viewer window
+
+- **Scope:** `kernel/core/main.cpp` — fourth registered window
+  ("KERNEL LOG") with a content drawer that streams the klog
+  ring into a wrapped character grid. Uses
+  `DumpLogRingTo` with a chunk callback that writes char-by-
+  char, stopping at the client-area row limit.
+- **Decision:** Render from the ring directly — no scratch
+  buffer, no per-window state. ui-ticker's 1 Hz recompose is
+  the refresh cadence; that matches the klog update rate for
+  boot-line cadence.
+- **Why:** Second consumer of the content-drawer API proves
+  the hook is general enough for streaming wrapped text, not
+  just fixed-row numeric panels like Task Manager. Also
+  surfaces klog in desktop mode where Ctrl+Alt+F2 isn't
+  available as a flip.
+- **Rules out / defers:** Scrollback pagination. Filter by
+  severity. Click-to-copy. Sticky tail-follow.
+- **Revisit when:** Log volume exceeds one screen often
+  enough that scrolling matters. Severity highlighting
+  becomes visually useful.
+- **Related tracks:** Track 9 (Windowing — second content
+  drawer), Track 7 (Userland — visible logs).
+
+---
+
+## 086 — `>>` append redirect for tmpfs
+
+- **Scope:** `kernel/fs/tmpfs.{h,cpp}` — new `TmpFsAppend`
+  that grows the target slot's content up to the hard cap.
+  `kernel/core/shell.cpp` — echo tokenizer recognises `>>`
+  separately from `>` and routes accordingly.
+- **Decision:** Append truncates the portion past
+  kTmpFsContentMax rather than failing — matches ENOSPC on a
+  real fs. `>>` is a distinct token from `>`; the shell's
+  whitespace tokenizer already separates them cleanly.
+- **Why:** `>` plus `cat` covered one-shot content, but any
+  log-style use (`date >> /tmp/notes`, multi-line scratch)
+  needs append. One-line add on the fs side; one-line branch
+  on the shell side.
+- **Rules out / defers:** 2>&1 / 2> stderr redirects (no
+  separate stderr yet). Heredocs. Process-substitution.
+- **Revisit when:** Second output stream exists (stderr
+  split from stdout for commands).
+- **Related tracks:** Track 7 (Userland shell).
+
+---
+
+## 085 — Dual consoles (shell + klog) with Ctrl+Alt+F1/F2
+
+- **Scope:** `kernel/drivers/video/console.{h,cpp}` —
+  ConsoleState struct + 2-slot array. Slot 0 = shell
+  (interactive), slot 1 = klog (read-only, target of the
+  klog tee). New `ConsoleSelectShell` / `ConsoleSelectKlog`
+  swap the render target in place; both consoles share the
+  same screen origin. `kernel/core/main.cpp` — klog tee now
+  forwards to `ConsoleWriteKlog`; new Ctrl+Alt+F1 / F2
+  shortcuts flip the render target.
+- **Decision:** Single shell instance, dual output channels,
+  user-selectable render target. Shell output always lands in
+  slot 0; klog always in slot 1. Switching is a pure
+  presentation-layer change — shell state never moves. Each
+  slot has independent scrollback, so flipping back to F1
+  after watching klog leaves the prompt undisturbed.
+- **Why:** Linux VT feel without per-VT shell state (which
+  would balloon into per-console history, process contexts,
+  stdio redirection). The 80% win — see kernel log without
+  interleaving it with your typing — is delivered for one
+  extra 3 KB .bss console buffer.
+- **Rules out / defers:** True multi-shell VTs (one shell per
+  console). More than two channels (F3..F6). Per-channel font /
+  theme. Copy-between-channels. Scrollback paging.
+- **Revisit when:** SYS_SPAWN lands (multiple processes could
+  each want a TTY). First user needs a dedicated "mouse event
+  log" or similar third channel.
+- **Related tracks:** Track 7 (Userland shell — where input
+  lands), Track 9 (Windowing — presentation switch), Track 2
+  (Platform — logging infrastructure).
+
+---
+
+## 084 — Per-window content drawers + Task Manager window
+
+- **Scope:** `kernel/drivers/video/widget.{h,cpp}` — new
+  `WindowContentFn` type, `WindowSetContentDraw`, and a
+  content-invoke step at the end of each window's entry in
+  `WindowDrawAllOrdered`. `kernel/core/main.cpp` — registers
+  a "TASK MANAGER" window and installs a drawer that prints
+  seven live rows (uptime, context switches, task counts,
+  memory frames).
+- **Decision:** Content drawers are optional per-window
+  function pointers plus a void* cookie, invoked with the
+  pre-computed client rect. The drawer runs inside the
+  compositor lock (via the normal compose path) so it can
+  safely read any GUI-adjacent state. No clipping yet — the
+  drawer is trusted to stay inside the rect.
+- **Why:** Closes the "windows are static images" observation.
+  Every live-data panel (task manager, log viewer, network
+  monitor, device list) fits this shape. Landing the hook
+  now means the next dozen such windows cost one small
+  function each.
+- **Rules out / defers:** Per-window repaint cadence
+  (ui-ticker recomposes at 1 Hz and that's fine for v0).
+  Clip rects enforced by the compositor. Partial redraw.
+  Content-drawer-only repaint without recomposing the whole
+  window stack.
+- **Revisit when:** First window needs to repaint at a
+  different cadence (e.g. 60 Hz animation). Damage-rect
+  compositor lands. Clipping matters.
+- **Related tracks:** Track 9 (Windowing — widget + content
+  hook), Track 7 (Userland — shell complement).
+
+---
+
+## 083 — Writable /tmp tier (tmpfs) + touch / rm / echo redirect
+
+- **Scope:** `kernel/fs/tmpfs.{h,cpp}` — new 16-slot flat
+  writable tier with 32-byte names and 512-byte content
+  buffers in .bss. `kernel/core/shell.cpp` — `ls` / `cat` /
+  Tab completion route /tmp paths through tmpfs; new
+  `touch` / `rm` commands; `echo ... > /tmp/name` redirect.
+- **Decision:** The first writable tier is deliberately
+  primitive — flat namespace, static-size slots, no heap —
+  so it unblocks shell feel (`echo hi > /tmp/note; cat
+  /tmp/note`) without prejudging the real VFS write-path
+  API. Every later tier (on-disk FS, network mount) plugs
+  into the VFS instead. Paths outside /tmp stay read-only,
+  shell refuses writes with a clear "ONLY /tmp/<NAME>" msg.
+- **Why:** Direct answer to "I want a terminal that feels
+  like Linux/macOS" — without writable files the shell is
+  a read-only REPL. tmpfs is the cheapest concrete storage
+  that lets the classic "echo > file && cat file" pipeline
+  actually work end-to-end.
+- **Rules out / defers:** Subdirectories inside /tmp.
+  Appending (>> redirect). Moving / renaming. Permissions.
+  Mount abstraction. Heap allocation (all storage is .bss).
+  Multi-process file sharing semantics. Proper VFS
+  write-path trait.
+- **Revisit when:** First consumer needs nested /tmp dirs.
+  Append semantics required (log file). On-disk FS lands.
+  First multi-process writer appears.
+- **Related tracks:** Track 5 (VFS — writable tier teaser),
+  Track 7 (Userland shell — redirect + file mgmt).
+
+---
+
+## 082 — Tab path completion for ls / cat
+
+- **Scope:** `kernel/core/shell.cpp` — `ShellTabComplete`
+  split into `CompleteCommandName` + `CompletePath`, with
+  shared helpers `ExtendLine` / `NamePrefixMatch`. Tab on a
+  buffer containing whitespace dispatches to path completion
+  only when the first token is `ls` or `cat`; other commands
+  keep their silent no-op behaviour.
+- **Decision:** Split the partial at the last '/' to get
+  parent + leaf. VfsLookup the parent, filter children by
+  prefix, extend on unique match — trailing '/' for
+  directories, trailing space for files so the user can
+  continue typing. Ambiguous match prints the candidate list
+  (dirs suffixed with '/') and re-prompts with the partial
+  intact. Absolute paths only; relative paths wait on a CWD.
+- **Why:** The v0 shell already exposed the ramfs via `ls` /
+  `cat`, but users had to type paths blind. Tab completion
+  is the single cheapest polish that makes the filesystem
+  feel discoverable.
+- **Rules out / defers:** Relative paths (no CWD yet). Quoted
+  paths with spaces. Globbing. Completion for non-ramfs
+  backends (will drop in for any backend that implements the
+  `children` enumeration shape). Middle-of-line completion.
+- **Revisit when:** Per-process CWD lands (relative paths).
+  Second FS backend (tmpfs / on-disk) lands and needs the
+  same completion shape.
+- **Related tracks:** Track 7 (Userland shell), Track 5
+  (VFS — completion is a read-path consumer).
+
+---
+
+## 081 — Right-click context menus + ambient MenuContext
+
+- **Scope:** `kernel/drivers/video/menu.{h,cpp}` — MenuOpen
+  grows `items`, `count`, `context` parameters; MenuInit is
+  retired; new `MenuContext()` accessor. `kernel/core/main.cpp`
+  — mouse reader detects right-button edges and opens one of
+  three item sets (kStartItems / kDesktopMenuItems /
+  kWindowMenuItems) with the appropriate context. Dispatch
+  grows cases 5 / 10 / 11 for SWITCH-TO-TTY / RAISE / CLOSE.
+- **Decision:** Menu open is stateful (single current item
+  list + context), but each call replaces both atomically.
+  Context is an opaque u32 the dispatcher reads via
+  MenuContext() — for window menus it's the target
+  WindowHandle. Action-id ranges documented in-comment:
+    1..9   global / desktop
+    10..19 window-targeted
+  leaving room for future actions without renumbering.
+- **Why:** Right-click context menus are the most iconic
+  Windows interaction we hadn't done. Landing them on the
+  existing menu primitive — with no new layout / hit-test /
+  render code — proves the primitive was sized right. Also
+  closes the "how do I close a window from a bystander POV"
+  question without depending on the X close-box hit-test.
+- **Rules out / defers:** Sub-menus / hover open. Right-click
+  on the taskbar (deliberately skipped — no useful actions
+  yet). Right-click drag / gesture. Multi-instance menus.
+  Keyboard navigation of context menus.
+- **Revisit when:** Taskbar grows useful context actions
+  (pin window, close all, etc.). Sub-menu support needed
+  (File > Open > Recent). Accessibility requires keyboard-
+  only nav.
+- **Related tracks:** Track 9 (Windowing — context-menu
+  dispatch is an input-routing layer).
+
+---
+
+## 080 — Shell introspection: dmesg / stats / mem
+
+- **Scope:** `kernel/core/shell.{h,cpp}` — new commands.
+  `kernel/core/klog.{h,cpp}` — new `DumpLogRingTo(LogTee)`
+  reuses the panic-path formatter with a caller-supplied sink.
+- **Decision:** Three read-only views exposing existing
+  diagnostic APIs:
+    dmesg  → DumpLogRingTo with a ConsoleWrite lambda (klog
+             ring, oldest-first).
+    stats  → every counter from SchedStatsRead.
+    mem    → TotalFrames / FreeFramesCount with KiB-mapped
+             output.
+  Added to the Tab-complete set + help listing. All zero-risk
+  wrappers around state the kernel already tracks.
+- **Why:** Closes the loop on "get logs from the desktop" —
+  the klog ring was only visible via panic dumps until now.
+  `stats` and `mem` answer "what is the kernel doing?" without
+  grepping serial.
+- **Rules out / defers:** `ps`-style per-task enumeration
+  (needs scheduler to expose its task list). `top`-style live
+  refresh. Per-PID memory accounting. Ring-filter by severity.
+- **Revisit when:** First per-task enumeration API lands on
+  sched. Writable FS lets `dmesg > file` land.
+- **Related tracks:** Track 7 (Userland shell).
+
+---
+
+## 079 — Argv tokenizer + ls / cat / tab completion
+
+- **Scope:** `kernel/core/shell.{h,cpp}` — in-place whitespace
+  tokenizer with `kMaxArgs = 8`, Dispatch switches on argv[0],
+  new `ls [path]` / `cat path` / `echo arg...` bound to the
+  ramfs trusted root. `ShellTabComplete` adds Tab-key
+  completion against the command-name set.
+- **Decision:** Tokenize the edit buffer in place by writing
+  NULs over separator bytes — argv pointers point into the
+  original buffer, no allocation. Echo / ls / cat all follow
+  POSIX-ish defaults (echo one-space, ls of file = file, cat
+  newline-terminates). Tab uniquely extends; ambiguous lists
+  candidates and re-prompts with the partial.
+- **Why:** The v0 shell dispatched on raw strings and couldn't
+  carry arguments; that was fine for `help` / `clear` but
+  uninteresting. With argv + filesystem hooks, the shell now
+  genuinely browses the running kernel — `ls /etc`, `cat
+  /etc/version`, `ls /bin` all work out of the box.
+- **Rules out / defers:** Quoted arg handling. Path completion
+  (Tab only completes command names). Globbing. `cd` (no
+  current-directory concept — every shell path is absolute
+  against the trusted root). Redirects.
+- **Revisit when:** First need for quoted args (filenames with
+  spaces). Per-process CWD lands. Writable FS unlocks
+  redirects.
+- **Related tracks:** Track 7 (Userland shell — this is the
+  interactive surface), Track 5 (VFS — first real consumer).
+
+---
+
+## 078 — Kernel cmdline parse + GRUB dual boot entry
+
+- **Scope:** `kernel/mm/multiboot2.h` — `kMultibootTagCmdline
+  = 1`. `kernel/core/main.cpp` — `FindBootCmdline` walker +
+  `CmdlineMatches(key, want)` token-predicate helper.
+  `boot/grub/grub.cfg` — two menu entries, each passing a
+  different cmdline (`boot=desktop` / `boot=tty`).
+- **Decision:** Parse the Multiboot2 cmdline tag at kernel
+  entry, match `boot=tty` / `boot=desktop` against
+  whitespace-delimited tokens. Runtime selection beats the
+  compile-time `CUSTOMOS_BOOT_TTY` flag; no cmdline leaves
+  the flag's default in place. 3-second GRUB timeout, default
+  entry is Desktop.
+- **Why:** Direct answer to "I want to boot straight into
+  terminal OR desktop, and switch between them easily" —
+  now the SAME binary does both and the user chooses at
+  boot. Ctrl+Alt+T keeps flipping at runtime.
+- **Rules out / defers:** Full cmdline parser (quotes,
+  escapes). Per-token handlers (we only recognise `boot=`).
+  Kernel parameter dumping to stderr for diagnostic. UEFI
+  boot (still routed through GRUB's MB2 protocol).
+- **Revisit when:** A second cmdline key is requested
+  (debug=, console=, etc.) — graduate to a proper parser.
+  UEFI-direct boot path lands.
+- **Related tracks:** Track 2 (Platform — boot options),
+  Track 7 (Userland framing).
+
+---
+
+## 077 — Shell command history + mode info command
+
+- **Scope:** `kernel/core/shell.{h,cpp}` — 8-entry ring-buffer
+  history, `ShellHistoryPrev` / `ShellHistoryNext`, dedup on
+  push, `ReplaceLine` helper that repaints the edit line.
+  `kernel/core/main.cpp` — kbd reader dispatches Up / Down
+  arrows to the history entries. New `mode` command prints the
+  current DisplayMode with the Ctrl+Alt+T reminder.
+- **Decision:** Linux/macOS terminal feel closure — every
+  muscle-memory interaction a user expects from an interactive
+  prompt (history, cursor recall, current-mode query) now
+  works. Dedup matches bash's `HISTCONTROL=ignoredups`
+  default. Cursor recall uses backspace+echo rather than a
+  proper line-edit primitive; fine for 64-char lines where the
+  cost is invisible.
+- **Why:** Without history the shell is a calculator. Up/Down
+  arrows are the cheapest improvement that turns it into a
+  usable terminal. The `mode` command gives the shell an
+  answer to "what display am I in?" for both interactive and
+  future-script use.
+- **Rules out / defers:** Incremental search (Ctrl+R).
+  Multi-line history. Persistent history across reboots
+  (needs writable FS). Tab-complete.
+- **Revisit when:** Writable FS lands (persistent ~/.history).
+  First multi-line command (script / heredoc) wants history
+  that's more than strictly line-based.
+- **Related tracks:** Track 7 (Userland shell).
+
+---
+
+## 076 — CustomOS shell: interactive command line
+
+- **Scope:** `kernel/core/shell.{h,cpp}` — new module. 64-char
+  line-edit buffer, prompt, command dispatcher. Commands:
+  help, about, version, clear, uptime, date, windows, echo.
+  `kernel/drivers/video/console.{h,cpp}` — ConsoleWriteChar
+  grows '\b' handling (back-up + overwrite-with-space).
+  `kernel/core/main.cpp` — kbd reader routes printable /
+  Backspace / Enter into Shell* instead of writing the
+  console directly.
+- **Decision:** Linux/macOS-style prompt ("$ "), one command
+  per line, dispatch via string match on the first token.
+  Output goes through the existing framebuffer console, which
+  means the shell works identically in desktop mode and TTY
+  mode — one shell, two framings.
+- **Why:** The boot log + interactive prompt is the minimum
+  viable terminal UX. Every later feature (tab complete,
+  pipes, argv, shell scripts) builds on this dispatch shape;
+  getting the primitive in now means those slices don't fork
+  the interaction model.
+- **Rules out / defers:** argv tokenising (each cmd parses
+  raw remainder). Pipes / redirection. Environment variables.
+  Shell scripts. Backgrounding (`&`). Signals (Ctrl+C). Tab
+  completion. Writable FS for `cat` / `ls` on user files.
+- **Revisit when:** Writable FS lands (unlocks `cat` / `ls`
+  / `cd`). SYS_SPAWN lands (shell can launch ring-3 apps).
+  Multi-line editing needed.
+- **Related tracks:** Track 7 (Userland shell — this IS
+  that track), Track 4 (Process — shell eventually spawns).
+
+---
+
+## 075 — TTY / Desktop display mode with Ctrl+Alt+T toggle
+
+- **Scope:** `kernel/drivers/video/widget.{h,cpp}` — new
+  `DisplayMode` enum + accessors; DesktopCompose branches
+  on mode. `kernel/drivers/video/console.{h,cpp}` —
+  `ConsoleSetOrigin` / `ConsoleSetColours` re-anchor the
+  console in place. `kernel/core/main.cpp` — kbd reader
+  dispatches Ctrl+Alt+T to toggle; mouse reader skips UI in
+  TTY mode; ui-ticker branches on mode. `kernel/CMakeLists.txt`
+  — new `CUSTOMOS_BOOT_TTY` option for text-first initial boot.
+- **Decision:** Two modes, one console buffer. Desktop =
+  full windowed shell; TTY = fullscreen console, black bg,
+  no windows / taskbar / cursor. Scrollback survives the
+  flip because both modes render the same char buffer from
+  different origins.
+- **Why:** Direct answer to "I want to boot directly into a
+  terminal OR desktop and switch between them easily."
+  Ctrl+Alt+T is the universal shortcut for that kind of
+  switch; the build flag gives deployments a say in the
+  first-paint state without forking the binary.
+- **Rules out / defers:** GRUB kernel-cmdline parser
+  (runtime mode-by-string). Multiple VTs à la Linux
+  (Ctrl+Alt+F1..F6). Per-mode separate consoles (we share
+  one buffer). User-configurable TTY colours.
+- **Revisit when:** Kernel cmdline parser lands. Multi-
+  session / user-switching arrives. A second console
+  instance needs to coexist (e.g. a boot-log viewer
+  window alongside the shell).
+- **Related tracks:** Track 2 (Platform — boot options),
+  Track 7 (Userland — shell framing), Track 9 (Windowing —
+  compositor / mode switching).
+
+---
+
+## 074 — klog teed to the on-screen console
+
+- **Scope:** `kernel/core/klog.{h,cpp}` — new `SetLogTee`
+  registers a secondary string sink. Log / LogWithValue
+  forward each chunk (tag, subsystem, separator, message,
+  newline) to the tee after the serial write, minus the
+  timestamp prefix. `kernel/core/main.cpp` hooks the tee
+  to a lambda that calls `ConsoleWrite`.
+- **Decision:** Single-writer tee pattern. No timestamps
+  on the framebuffer path (the serial log keeps the
+  authoritative record). No DesktopCompose triggered from
+  the tee — ui-ticker + user input cover that. Race is
+  accepted: IRQ-time klogs can land a garbled character
+  on the console buffer under concurrent typing, but the
+  log ring and serial record both stay intact.
+- **Why:** Direct answer to "I also want to get the logs
+  from the desktop." Now every kernel subsystem's runtime
+  log line appears on screen as well as serial — boot
+  behaviour is visible without attaching a serial console.
+- **Rules out / defers:** Per-severity colour on the tee
+  (same ink colour for all). Tee filtering (e.g. only Warn+).
+  Multiple tees. SMP-safe klog buffering (still sharing the
+  single serial / console path today).
+- **Revisit when:** Colour klog output requested (e.g.
+  red for Error). Second tee needed (serial over network,
+  log viewer widget). SMP user code arrives and the race
+  becomes observable.
+- **Related tracks:** Track 7 (Userland — shell surfaces
+  the log too), Track 9 (Windowing — compositor framing
+  of the log).
+
+---
+
+## 073 — START menu popup with action dispatch
+
+- **Scope:** `kernel/drivers/video/menu.{h,cpp}` — new popup-
+  menu primitive. `kernel/drivers/video/taskbar.{h,cpp}` —
+  `TaskbarStartBounds` exposes the anchor rectangle.
+  `kernel/core/main.cpp` — seeds four demo menu items and
+  dispatches them from the mouse reader.
+- **Decision:** Single-instance vertical item menu stored as
+  `(label, action_id)` pairs. MenuOpen anchors at a caller-
+  supplied (x, y) point; MenuRedraw paints last in
+  DesktopCompose so it sits above the taskbar that opened
+  it. Callers own id allocation + dispatch switch — the
+  menu primitive is content-agnostic and has no callbacks.
+- **Why:** The START button was a visual stub for several
+  slices; wiring it to a popup that actually does something
+  turns "looks like a GUI" into "behaves like one." The
+  (label, action_id) shape maps cleanly to future context
+  menus, menu bars (File / Edit / View), and right-click
+  popups — all of which the same primitive will serve.
+- **Rules out / defers:** Keyboard navigation (arrow keys,
+  Enter / Esc). Hover highlight. Sub-menus. Separators /
+  icons / shortcut hints. Multiple menus simultaneously
+  open. Long-text ellipsis.
+- **Revisit when:** Second menu instance needed (right-click
+  menu). Menu bar lands (same primitive, multiple anchors).
+  Keyboard-only navigation required for accessibility.
+- **Related tracks:** Track 9 (Windowing), Track 7
+  (Userland — shell launcher).
+
+---
+
+## 072 — Alt+Tab and Alt+F4 keyboard shortcuts
+
+- **Scope:** `kernel/drivers/video/widget.{h,cpp}` —
+  `WindowCycleActive` walks z-order forward to the next
+  alive window and raises it. `kernel/core/main.cpp` —
+  kbd reader intercepts Alt+Tab / Alt+F4 before any
+  text-input dispatch.
+- **Decision:** Two iconic keyboard interactions land
+  together because they share the Alt-modifier branch.
+  Alt+Tab cycles; Alt+F4 calls WindowClose on the active
+  window. Both trigger a full recompose under the
+  compositor mutex so chrome + tab highlight update
+  immediately.
+- **Why:** Muscle memory. Keyboard window-management is
+  a baseline expectation on every desktop OS; skipping
+  it would invalidate the "Windows-like" framing.
+  Landing both now, before more input surfaces arrive,
+  keeps the dispatch ladder clean.
+- **Rules out / defers:** Alt+Tab overlay (thumbnail
+  preview + multi-tap cycle). Shift+Alt+Tab reverse cycle.
+  Ctrl+Alt+Del handler. Meta+L / Meta+E shell launchers.
+- **Revisit when:** Thumbnail overlay lands (needs
+  damage-rect + held-Alt state machine). First shell-
+  global shortcut (e.g. Meta+R run dialog).
+- **Related tracks:** Track 9 (Windowing), Track 6
+  (Drivers — KeyEvent consumer).
+
+---
+
+## 071 — CMOS RTC driver + HH:MM:SS in taskbar
+
+- **Scope:** `kernel/arch/x86_64/rtc.{h,cpp}` — new MC146818-
+  compatible CMOS reader. `kernel/drivers/video/taskbar.cpp`
+  — taskbar clock replaces uptime-only with HH:MM:SS.
+- **Decision:** Read-only wall-clock access via CMOS ports
+  0x70 / 0x71. Waits out UIP (Update In Progress) before
+  sampling; double-reads all six fields and retries on
+  mismatch; honours firmware-set BCD/binary + 12/24-hour
+  flags from Status-B. Century register deferred —
+  assume 2000s through 2099.
+- **Why:** First real wall-clock source in the tree. The
+  scheduler uptime counter was fine for boot sanity but
+  is meaningless for "what time is it." RTC is universally
+  available (every chipset + every hypervisor emulates
+  MC146818) and cheap to parse.
+- **Rules out / defers:** Writing the RTC (needs different
+  UIP handling). IRQ 8 periodic mode (LAPIC timer already
+  covers periodic). Century register from FADT. Timezone
+  awareness (RTC is typically UTC or local, firmware-
+  dependent — no strategy yet). Drift correction vs NTP.
+- **Revisit when:** Logs gain wall-clock timestamps. First
+  writable FS wants mtime. NTP client lands (needs clock
+  writes). Century register matters (post-2099 or pre-
+  2000 dual-boot).
+- **Related tracks:** Track 2 (Platform — time sources),
+  Track 5 (FS — mtimes).
+
+---
+
+## 070 — Active window state + focus-visible chrome
+
+- **Scope:** `kernel/drivers/video/widget.{h,cpp}` — new
+  `g_active_window` global; `WindowRaise` / `WindowRegister`
+  set it; `WindowClose` promotes next alive. `WindowActive`
+  accessor. Inactive windows paint with
+  `kInactiveTitleRgb = 0x00506070`.
+  `kernel/drivers/video/taskbar.cpp` — active window's tab
+  fills with the accent colour.
+- **Decision:** Raised == active — the simplest focus model,
+  matches Windows 95 through 11 (without focus-follows-
+  mouse). Inactive title bars use a muted global grey-blue
+  instead of each window's registered colour, so the
+  active/inactive distinction reads at a glance without
+  per-window palette matching.
+- **Why:** Every subsequent slice that cares about focus
+  (keyboard routing to a window, F4 = close active, menu
+  shortcuts) needs one canonical "which window is
+  focused" answer. Landing it before those consumers
+  arrive means they build on the right shape.
+- **Rules out / defers:** Focus decoupled from raise
+  (modal dialogs, focus-follows-mouse). Keyboard focus
+  traversal within a window (Tab cycling). Window-level
+  focus callbacks. Distinct active/inactive button
+  colours.
+- **Revisit when:** Modal dialogs land. Text-input
+  widgets inside a window need caret blink gated on
+  active state. Focus-follows-mouse option requested.
+- **Related tracks:** Track 9 (Windowing), Track 7
+  (Shell — keyboard shortcut routing).
+
+---
+
+## 069 — Clickable taskbar tabs
+
+- **Scope:** `kernel/drivers/video/taskbar.{h,cpp}` —
+  `TaskbarRedraw` records each painted tab's bounds into a
+  fixed-size layout array; `TaskbarTabAt` and
+  `TaskbarContains` expose hit-tests. `kernel/core/main.cpp`
+  — mouse reader resolves taskbar-tab presses above every
+  other priority so a buried window can be raised with
+  one click on its tab.
+- **Decision:** Closes the window-management loop: register,
+  raise on click, drag by title, close by X, switch via
+  taskbar. The layout array is rewritten by every redraw —
+  tabs that overflow the strip simply stop being recorded,
+  matching what the human sees.
+- **Why:** Without taskbar dispatch, a window hidden
+  underneath two others has no way back to the front — the
+  click-to-raise slice only reaches the topmost hit. The
+  taskbar is the canonical OS answer.
+- **Rules out / defers:** Middle-click close, right-click
+  menu, drag tabs to reorder, tab-group "flashing" on
+  background events, hover-preview thumbnails.
+- **Revisit when:** Second widget class (menu) wants to
+  re-use the layout-record pattern. Dynamic tab
+  sort/filter needed.
+- **Related tracks:** Track 9 (Windowing), Track 7
+  (Userland shell).
+
+---
+
+## 068 — Taskbar with START, tabs, uptime + ui-ticker
+
+- **Scope:** `kernel/drivers/video/taskbar.{h,cpp}` — new
+  module. `widget.{h,cpp}` — adds `WindowRegistryCount`,
+  `WindowIsAlive`, `WindowTitle`. `kernel/core/main.cpp` —
+  new `ui-ticker` scheduler thread re-composites at 1 Hz.
+- **Decision:** A 28-pixel bottom strip painted last in
+  DesktopCompose so it sits on top of everything else.
+  Shows a "START" accent square, one tab per live window,
+  and a right-anchored "UP NNNNs" uptime counter sourced
+  from `sched::SchedNowTicks() / 100`. `ui-ticker` sleeps
+  100 ticks and recomposes under the compositor mutex so
+  the uptime advances without user input — first animated
+  element.
+- **Why:** The tree's boot story had no persistent shell
+  chrome; mouse/keyboard demos landed as ephemeral
+  transitions. A taskbar is the smallest thing that reads
+  as a living desktop. The ticker also proves the compositor
+  mutex holds up against a third concurrent writer.
+- **Rules out / defers:** Real wall-clock time (needs RTC
+  driver). Click dispatch on START / tabs (tabs land in
+  #069). Icons. Tab overflow menu. Auto-hide. Multi-
+  monitor.
+- **Revisit when:** RTC driver lands (clock becomes
+  meaningful). Second widget panel needed (notification
+  area, system tray).
+- **Related tracks:** Track 9 (Windowing — persistent
+  chrome), Track 6 (Drivers — RTC).
+
+---
+
+## 067 — Functional close button
+
+- **Scope:** `kernel/drivers/video/widget.{h,cpp}` — adds
+  `WindowPointInCloseBox`, `WindowClose`. `kernel/core/main.cpp`
+  — mouse reader resolves close-box presses above title-bar
+  drags and general window raises.
+- **Decision:** Promote the decorative red square in the
+  title bar corner to a real action. `WindowClose` sets the
+  `alive` flag false; every subsequent draw / hit-test
+  skips the slot. Handles aren't reused — `kMaxWindows=4`
+  is bounded enough that leaking the slot for the rest of
+  boot is acceptable.
+- **Why:** Clicking X on a window and having nothing
+  happen is uncanny-valley GUI. Wiring the action NOW,
+  with the same priority ordering the mouse reader already
+  uses, makes the window manager feel complete without
+  adding a menu / keyboard shortcut layer.
+- **Rules out / defers:** Handle re-use after close.
+  Confirmation prompt. "Close all" on right-click. Process
+  kill for ring-3-owned windows (needs SYS_SPAWN first).
+- **Revisit when:** Ring-3 apps register windows
+  (close = signal the owning process). Handle count grows
+  past 4.
+- **Related tracks:** Track 9 (Windowing), Track 4
+  (Process model — once apps own their windows).
+
+---
+
+## 066 — Window-local widgets (owner + offsets)
+
+- **Scope:** `kernel/drivers/video/widget.{h,cpp}` —
+  `ButtonWidget` grows an `owner` field (WindowHandle) and
+  reinterprets `x, y` as offsets into the owner's origin
+  when the owner is valid.
+- **Decision:** Widgets that belong to a window move with
+  it on drag, paint as part of its z-order, and only fire
+  when the owner is topmost at the click point. Effective
+  absolute bounds are resolved on the fly from the owner's
+  current position — no per-widget bookkeeping during
+  window motion. Freestanding widgets (owner ==
+  kWindowInvalid) keep the old behaviour of floating on
+  top.
+- **Why:** A button that stays put while its host window
+  moves is obviously wrong to any GUI user. The owner-
+  offset model is the industry-standard answer (HWNDs
+  parent HWNDs, NSView subviews, GTK container children)
+  and the simplest one that reads correctly.
+- **Rules out / defers:** Nested widget containers (a
+  button inside a panel inside a window). Per-window
+  clip rectangles so widgets can't escape their owner
+  bounds. Relative sizing.
+- **Revisit when:** Second widget class lands (text field,
+  checkbox) — forces a shared container abstraction.
+  Overflow clipping matters visually.
+- **Related tracks:** Track 9 (Windowing — widget
+  parent/child graph is the skeleton of any toolkit).
+
+---
+
+## 065 — Click-to-raise anywhere on a window
+
+- **Scope:** `kernel/core/main.cpp` — mouse reader's press-
+  edge branch now raises the topmost hit window even when
+  the click didn't land on the title bar.
+- **Decision:** Any press inside a window raises it; title-
+  bar press additionally starts a drag. Matches the
+  universal GUI convention — clicking a background window
+  brings it forward.
+- **Why:** Without this, z-order feels stuck unless users
+  hunt the title bar. Landing it at one-line cost before
+  the deeper window-manager slices (widgets, close, tabs)
+  means those features never ship with a regressive
+  "click outside title bar does nothing" behaviour.
+- **Rules out / defers:** Focus model (raise != focus).
+  Click-to-focus vs focus-follows-mouse policy. Modal
+  windows that ignore raise-on-click.
+- **Revisit when:** Keyboard focus lands and becomes
+  decoupled from z-order. A modal dialog needs to block
+  raise on background clicks.
+- **Related tracks:** Track 9 (Windowing).
+
+---
+
+## 064 — Compositor mutex for cross-thread UI state
+
+- **Scope:** `kernel/drivers/video/widget.{h,cpp}` — new
+  `CompositorLock` / `CompositorUnlock` wrapping a
+  file-static `sched::Mutex`. `kernel/core/main.cpp` —
+  mouse + keyboard reader threads bracket every UI-mutating
+  section with the lock.
+- **Decision:** Single global mutex guards every
+  UI-mutable data structure (cursor backing, window
+  registry, widget table, console buffer) and every
+  framebuffer write sequence that crosses them. FIFO
+  hand-off from the existing sched::Mutex means the
+  loser parks on a WaitQueue instead of spinning — cheap
+  even under heavy typing-while-dragging.
+- **Why:** The previous slice (kbd → console) documented
+  a latent race: both readers write to the framebuffer
+  and mutate the same console / cursor / window state
+  without coordination. Before SMP user code or an RT
+  input task arrives, this is "transient visual artifact"
+  level — but landing the fix now, on a single mutex with
+  obvious brackets, is far cheaper than retrofitting
+  after the first crash report.
+- **Rules out / defers:** Fine-grained locking (per-
+  surface, per-widget). Lock-free double-buffer compositor.
+  IRQ-context painting (mutex can sleep). Multi-monitor
+  lock topology.
+- **Revisit when:** Contention shows up in profiles. SMP
+  scheduler join (per-CPU cursors, RCU-style widget list).
+  Per-window damage tracking (each window gets its own
+  lock).
+- **Related tracks:** Track 9 (Windowing), Track 2 (SMP).
+
+---
+
+## 063 — Keyboard routed into the framebuffer console
+
+- **Scope:** `kernel/core/main.cpp` — `kbd_reader` thread
+  switches from `Ps2KeyboardReadChar` to
+  `Ps2KeyboardReadEvent`, filters press edges of printable
+  ASCII, writes to `ConsoleWriteChar`, triggers
+  DesktopCompose per keystroke. Enter and Backspace get
+  line-editing semantics; modifier-only edges are silent.
+- **Decision:** First closure of "keypress in hardware
+  to pixel on screen" end-to-end — matches the mouse
+  path's visible payoff. Each keystroke triggers one
+  full-desktop repaint inside CursorHide/Show. Repaint
+  cost is ~3 MB/s for a 1024x768x32 framebuffer at
+  typing rates (<30 Hz), comfortably under MMIO budget.
+- **Why:** A desktop with two windows, a cursor, and a
+  console without an input path is a museum diorama.
+  Wiring the console's input now validates the KeyEvent
+  API under real use AND makes the boot-log surface
+  feel alive.
+- **Rules out / defers:** Line editor (cursor nav,
+  word-delete, history). Proper terminal emulator (ANSI
+  escapes, bold / colour). Per-console fg/bg. Real shell
+  on top (needs line-editor + tokeniser + command
+  dispatch). Printable input while dragging (widget
+  router path is mutually exclusive during drag).
+- **Revisit when:** First shell-shaped widget lands
+  (wants the full edit API). Non-ASCII keyboard layout
+  needed (unlocks wider keymap).
+- **Related tracks:** Track 9 (Windowing — text input
+  source for every future toolkit widget), Track 7
+  (Userland — path to a shell).
+
+---
+
+## 062 — Framebuffer text console (80x40 char grid)
+
+- **Scope:** `kernel/drivers/video/console.{h,cpp}` — new
+  module. `kernel/drivers/video/widget.cpp` — DesktopCompose
+  paints the console BETWEEN banner and windows.
+- **Decision:** Fixed-size character grid backed by the
+  bitmap font. Writes append to a char buffer at a
+  tail cursor; newlines advance the row; bottom-row
+  overflow scrolls everything up. Re-rendered from the
+  char buffer on every ConsoleRedraw, so z-ordering
+  against windows is a pure draw-order question —
+  windows dragged over the console occlude, and a
+  follow-up DesktopCompose restores.
+- **Why:** Every interesting GUI surface eventually wants
+  multi-line text: boot log, shell, chat, source editor,
+  error dialogs. Landing the primitive now, on a simple
+  bg-fill + per-cell char-render model, means the first
+  consumer doesn't have to reinvent scrolling.
+- **Rules out / defers:** ANSI escape handling. Per-char
+  colour. Multiple console instances. Cursor navigation
+  (back, up, page). Line editing. Proportional text.
+  Thread safety (kept external via the compositor mutex).
+  Variable-size grid.
+- **Revisit when:** First real shell needs line editing.
+  Colour boot log wanted (entry-#033 klog severity colours
+  map to fg per line). Multi-console / tty tab bar lands.
+- **Related tracks:** Track 9 (Windowing — scrollable text
+  surface), Track 7 (Userland — shell foundation).
+
+---
+
+## 061 — Window registry + z-order + drag-by-title-bar
+
+- **Scope:** `kernel/drivers/video/widget.{h,cpp}` — window
+  storage (`kMaxWindows=4`), `WindowRegister`, `WindowRaise`,
+  `WindowMoveTo`, `WindowGetBounds`, `WindowTopmostAt`,
+  `WindowPointInTitle`, `WindowDrawAllOrdered`,
+  `DesktopCompose`. Buttons grow a `label` field so
+  PaintButton survives repaint without losing text.
+  `kernel/core/main.cpp` — mouse reader tracks drag state,
+  triggers DesktopCompose per packet during drag.
+- **Decision:** Promote windows from a one-shot
+  `WindowDraw` primitive to a flat fixed-size registry
+  with a z-order array. Press on a title bar raises +
+  begins drag; motion repaints the full desktop each
+  packet (no damage tracking — 1024x768x32 runs well
+  under budget at 100 Hz); release ends drag. Button
+  widgets float on top of all windows for v0 — the
+  "widgets belong to a window" refactor is its own
+  slice.
+- **Why:** Two windows with working stacking + drag is
+  the smallest thing that reads as a real window
+  manager. Z-order + raise-to-front-on-click is the
+  invariant every GUI converges on; landing it now
+  means every future window-manipulation slice builds
+  on the correct shape.
+- **Rules out / defers:** Proper damage-rect compositor
+  (full repaint works at current surface size). Resizing.
+  Close-button action (the red square is visual-only).
+  Stacking shadows. Minimise / maximise. Per-window
+  widget trees. Keyboard focus + Tab cycling. Window
+  deletion.
+- **Revisit when:** Surface gets bigger (4K) or draw
+  rate needs to hit 60 Hz with widgets — forces damage
+  tracking. Second widget class (menu, list box) makes
+  "widgets live in a window" a forcing refactor.
+  Close-button-click lands.
+- **Related tracks:** Track 9 (Windowing — core window
+  manager), Track 6 (Drivers — pointer event consumer).
+
+---
+
+## 060 — 8x8 bitmap font + framebuffer text rendering
+
+- **Scope:** `kernel/drivers/video/font8x8.{h,cpp}` — hand-crafted
+  5x7-in-8x8 font (space, digits, uppercase A-Z, 20 punctuation).
+  `framebuffer.{h,cpp}` — `DrawChar` / `DrawString` with fg/bg.
+  `main.cpp` — desktop banner + window title + button label.
+- **Decision:** Ship the smallest font that is coherent (all
+  visible characters same design language, consistent kerning,
+  full uppercase + digits + punctuation) rather than a broader
+  font that's partially transcribed. Lowercase aliases to
+  uppercase at lookup. Unmapped codes render as a placeholder
+  box so gaps are visible rather than silent. Bit 7 is
+  leftmost — classic IBM font layout, matches every open font
+  tool on earth.
+- **Why:** Every subsequent UI element — menus, labels,
+  status bars, dialog buttons, console output — needs glyphs.
+  Landing a font NOW with cleanly-defined layout (8-px cell
+  advance, bg fill behind each glyph) means widget code can
+  render text with one call and not worry about alpha / anti-
+  aliasing yet.
+- **Rules out / defers:** Lowercase glyph shapes (alias to
+  uppercase for now — ugly but readable). Proportional spacing.
+  Anti-aliasing / subpixel rendering. Unicode (ASCII only).
+  Multiple font sizes. True italic / bold (bitmap manipulations
+  only). Kerning pairs.
+- **Revisit when:** First locale grows a non-ASCII character
+  (unlocks an ICU-shaped translation layer). Compositor wants
+  hi-DPI text rendering (forces a vector font). Real terminal
+  emulator lands (wants control-char handling + scrollback).
+- **Related tracks:** Track 9 (Windowing — labels / title text),
+  Track 7 (Userland — shell needs glyphs too).
+
+---
+
+## 059 — KeyEvent API with modifiers + extended keys
+
+- **Scope:** `kernel/drivers/input/ps2kbd.{h,cpp}` — new
+  `Ps2KeyboardReadEvent` returning `KeyEvent { code, modifiers,
+  is_release }`. Translator grows LCtrl / RCtrl / LAlt / RAlt /
+  Meta tracking; 0xE0-prefixed arrows / Home / End / PgUp /
+  PgDn / Insert / Delete lift to `KeyCode` values; F1..F12
+  decoded; Esc / Tab / Enter / Backspace named.
+- **Decision:** Supersede the `char`-returning
+  `Ps2KeyboardReadChar` with an event-shaped API that preserves
+  both press AND release edges, a modifier bitmask, and non-
+  ASCII keys. Keep the old API for simple echo-style readers
+  (the two share the raw ring). Modifier-only edges surface as
+  `code == kKeyNone` + populated modifiers so the UI can render
+  "Ctrl held" cues.
+- **Why:** Closes the deferral from entry #024 — "a future
+  KeyEvent interface will carry [modifiers] as a modifier
+  bitmap." No shell / text input / Ctrl+C / arrow navigation
+  is possible with a bare `char` return. Landing it now, before
+  any compositor, means every toolkit consumer sees one shape
+  from day one.
+- **Rules out / defers:** Key-repeat rate config. Non-US
+  layouts (AZERTY, Dvorak). Numpad / NumLock-aware numpad. IME
+  composition. Print Screen / Pause / Multimedia keys. 6KRO /
+  NKRO tracking (8042 reports one press at a time anyway).
+- **Revisit when:** Non-US locale needed. USB HID lands
+  (replaces PS/2 on real hardware; KeyEvent stays the same
+  shape). Shell widget needs key-repeat semantics.
+- **Related tracks:** Track 6 (Drivers — input), Track 9
+  (Windowing — keyboard-event source).
+
+---
+
+## 058 — Window chrome primitive (title bar + client + close box)
+
+- **Scope:** `kernel/drivers/video/widget.{h,cpp}` — `WindowChrome`
+  struct + `WindowDraw`. Paints outer 2-px border, coloured title
+  bar, client area fill, 1-px divider line, and a close-button
+  square in the top-right corner with its own outline.
+- **Decision:** Windows are a STATIC draw primitive in v0, not a
+  widget-table entry. Callers invoke `WindowDraw` once per paint
+  pass; dragging / focus / z-order grow this into a real widget
+  once the toolkit lands. Chrome is intentionally Windows-98-
+  adjacent: recognisable to every human who's ever seen a GUI.
+- **Why:** First GUI element that looks unmistakably "window-
+  like" — a frame with a title bar and a close button. No
+  ambiguity about what the primitive represents; any future
+  toolkit can grow dragging / stacking on top of this without
+  reworking the shape.
+- **Rules out / defers:** Dragging. Resizing. Focus + z-order
+  stack. Title text (needs font — landed in #060). Minimize /
+  maximise widgets. Shadow / alpha. Non-rectangular shapes.
+  Scroll bars. Non-client hit testing.
+- **Revisit when:** Two windows coexist on screen (forces
+  z-order + focus). First drag operation lands. Compositor
+  takes over chrome rendering.
+- **Related tracks:** Track 9 (Windowing — iconic primitive).
+
+---
+
+## 057 — Clickable button widget + mouse event router
+
+- **Scope:** `kernel/drivers/video/widget.{h,cpp}` —
+  `ButtonWidget`, `WidgetRegisterButton`, `WidgetDrawAll`,
+  `WidgetRouteMouse`. `framebuffer.{h,cpp}` — `DrawRect`
+  (4-band outline primitive). `cursor.{h,cpp}` —
+  `CursorHide` / `CursorShow` helpers.
+- **Decision:** First UI event primitive. A button is a rect
+  with normal + pressed colours + a caller-assigned id. Router
+  diffs the latest `button_mask` against the prior sample and
+  transitions visual state on press / release edges (no hover
+  state). Redraws bracket `CursorHide / Show` so the cursor's
+  backing-pixel cache stays consistent with what's beneath.
+- **Why:** Clicks ARE the event primitive. Landing a router
+  now, before a full compositor, gives every future toolkit
+  one canonical "which widget did the user hit?" answer.
+  Avoids each new widget kind reimplementing hit-test.
+- **Rules out / defers:** Hover state (needs `prev_cursor_over`
+  tracking + hover colour — straightforward follow-up). Drag
+  & drop. Keyboard focus traversal (Tab cycling). Nested
+  widgets / z-order. Accessibility / screen-reader hooks.
+  Dynamic widget allocation (fixed 8-entry table).
+- **Revisit when:** Second widget kind lands (forces a shared
+  base class or a dispatch tag). Hover feedback needed.
+  Widget count exceeds 8.
+- **Related tracks:** Track 9 (Windowing — event routing
+  foundation), Track 6 (Drivers — consumer of mouse packets).
+
+---
+
+## 056 — Shaped cursor with per-pixel save/restore
+
+- **Scope:** `kernel/drivers/video/cursor.{h,cpp}`.
+- **Decision:** Upgrade the triangle-fill cursor to a 12x20
+  shaped-mask arrow with three kinds of pixel (transparent,
+  outline-black, fill-white). Save every non-transparent
+  pixel under the sprite on `SaveAt`; restore on `RestoreAt`.
+  Framebuffer grows a file-local `ReadPixel` helper for the
+  save path.
+- **Why:** Entry #055's "erase to desktop colour" shortcut
+  broke the moment any non-desktop content (widgets, window
+  chrome) landed under the cursor. Per-pixel save/restore is
+  the only correct answer short of a compositor-managed
+  overlay plane. Cost is negligible (240 u32s of .bss).
+- **Rules out / defers:** Hardware cursor plane (vendor-
+  specific MMIO — land with each GPU driver). Animated
+  cursors. Per-context cursor shapes (I-beam, resize,
+  hourglass). Colour cursor themes.
+- **Revisit when:** GPU drivers expose a hardware cursor.
+  Toolkit needs shape-switching based on widget class.
+  Compositor lands (overlay plane becomes natural).
+- **Related tracks:** Track 8 (Graphics), Track 9 (Windowing).
+
+---
+
+## 055 — Mouse cursor overlay on the framebuffer
+
+- **Scope:** `kernel/drivers/video/cursor.{h,cpp}` — new module:
+  `CursorInit(desktop_rgb)` paints background + draws initial
+  sprite at screen centre; `CursorMove(dx, dy)` erases old rect,
+  clamps new position, redraws; `CursorPosition` accessor for
+  future hit-testing. `kernel/core/main.cpp` — mouse reader thread
+  now calls `CursorMove` on every packet.
+- **Decision:** Render the cursor as a 12x20 diagonal-right-edge
+  rectangle (arrow-ish without a bitmap mask), erase-then-redraw
+  on every move, no per-pixel save/restore. v0's desktop is a
+  solid dark-teal fill, so "restore background" is just
+  "overpaint with the desktop colour" — a mask / alpha / dirty-
+  rect path isn't worth the complexity until a compositor wants
+  to overlap real windows under the cursor.
+- **Why:** First visible interactive UI element. Ties together
+  three prior slices (Multiboot2 FB parse, FB driver, PS/2 mouse
+  IRQ 12) into one end-to-end chain you can SEE: physical mouse
+  motion → IOAPIC → 8042 aux → packet decode → task queue →
+  cursor move → pixel store. Previously every link was serial-
+  log verification only; this closes the loop visually.
+- **Rules out / defers:** Shaped-mask arrow sprite (needs per-
+  pixel save/restore — premature without a compositor). Hardware
+  cursor plane (Intel / AMD / NVIDIA cursor MMIO paths; land
+  with each vendor's GPU driver). Per-display cursor (multi-
+  monitor, far future). Cursor hide-on-inactive (no focus model
+  yet). Double-click timing (needs a timer-wheel). Click-drag
+  selection (needs widgets to drag-select).
+- **Revisit when:** First compositor draws overlapping windows
+  (forces pixel save/restore or a hardware cursor). Multi-display
+  lands. Widget toolkit wants an API for cursor shape changes
+  (I-beam, resize, hourglass).
+- **Related tracks:** Track 8 (Graphics), Track 9 (Windowing —
+  cursor is the root primitive of every pointer event).
+
+---
+
+## 054 — PS/2 mouse v0 (IRQ 12, 3-byte standard protocol)
+
+- **Scope:** `kernel/drivers/input/ps2mouse.{h,cpp}` — new driver.
+  `kernel/drivers/input/ps2kbd.cpp` — IRQ handler grows an aux-bit
+  filter so mouse bytes don't get misread as scan codes.
+- **Decision:** Second end-to-end IRQ-driven input device on the
+  8042 aux channel. Re-enables the aux port the keyboard init
+  disabled, runs port-2 self-test, sends the mouse `SetDefaults`
+  (0xF6) + `EnableReporting` (0xF4), routes ISA IRQ 12 via the
+  IOAPIC. Packet assembly happens in the IRQ handler; task-side
+  reader consumes pre-decoded `MousePacket`s with `dx`, `dy`
+  (screen-space: +y = down), and button bitmask. Sync-byte
+  check on byte 0 (bit 3 = always 1) catches and recovers from
+  mid-stream desync. Overflow bits saturate to ±255 rather than
+  dropping the whole packet — button-state updates matter more
+  than one-frame movement accuracy.
+- **Why:** Pointer input is the prerequisite for any GUI. Landing
+  it now (before a compositor) gives the mouse cursor overlay
+  and any future widget hit-test a working event source from
+  day one. Soft-failing on machines without a PS/2 aux line
+  (most laptops) keeps boot clean there — USB HID will eventually
+  be primary on real hardware.
+- **Rules out / defers:** Wheel / 5-button IntelliMouse extension
+  (needs sample-rate handshake + 4-byte packets). Absolute-
+  coordinate tablets (USB HID path). Sample-rate override
+  (accepting firmware default, typically 100 Hz). Coalescing
+  consecutive small-delta packets (compositor can do it).
+- **Revisit when:** USB HID stack lands (primary on real hardware
+  — PS/2 becomes legacy fallback). First compositor needs
+  absolute coordinates or high-frequency sampling. Wheel-scroll
+  support becomes necessary.
+- **Related tracks:** Track 6 (Drivers — input), Track 9
+  (Windowing — pointer event source).
+
+---
+
+## 053 — Linear framebuffer v0 (Multiboot2 tag 8 → MapMmio → pixels)
+
+- **Scope:** `kernel/arch/x86_64/boot.S` — Multiboot2 header grows
+  framebuffer request tag (type 5, optional). `kernel/mm/multiboot2.h`
+  — adds `kMultibootTagFramebuffer = 8` + `MultibootFramebufferTag`
+  struct + framebuffer-type constants.
+  `kernel/drivers/video/framebuffer.{h,cpp}` — new driver:
+  `FramebufferInit`, `FramebufferClear`, `FramebufferPutPixel`,
+  `FramebufferFillRect`, `FramebufferSelfTest`.
+- **Decision:** First direct-to-pixel output path. Parses GRUB's
+  framebuffer tag, validates direct-RGB + 32-bpp + sane pitch,
+  MapMmios the surface into the kernel MMIO arena. Soft-fails
+  cleanly when the loader doesn't provide a tag or the mode is
+  unsupported — `Available()` stays false, boot continues on
+  serial. Self-test draws black background + four corner
+  swatches (R/G/B/W) + a framing rectangle so channel order
+  and full-surface coverage are visually confirmable in one
+  glance.
+- **Why:** Every GUI element (desktop, windows, cursor, fonts)
+  starts with pixels. Landing a clean FB abstraction now means
+  the compositor, splash screen, panic display, and kernel
+  console all build on one layer. Cache-disabled MMIO is the
+  right v0 posture — write-combining needs PAT programming we
+  don't have yet, and at 1024x768x32 @ 60 Hz the bandwidth is
+  well under any PCIe budget.
+- **Rules out / defers:** 24-bpp packed (different pixel-store
+  inner loop). 15/16-bpp (channel packing). Non-classic colour
+  masks (need the variable-length colour-info trailer). Back
+  buffer / double buffering (compositor owns that). Write-
+  combining via PAT. Dirty-rect tracking. Hardware cursor
+  planes. EFI GOP (UEFI direct boot path, future).
+- **Revisit when:** First real machine reports an unsupported
+  depth or non-standard colour masks. Compositor lands and
+  demands a back-buffer API. Performance profile shows MMIO
+  stores dominating the draw path (PAT + WC is the fix).
+  Intel / AMD / NVIDIA GPU drivers arrive (vendor-specific
+  modeset + accelerated blit replace this path for their
+  panels).
+- **Related tracks:** Track 8 (Graphics Foundation — first
+  slice), Track 2 (Platform — firmware handoff grows a new
+  class of info beyond ACPI).
+
+---
+
+## 052 — Writable-bit pre-check in `CopyToUser`
+
+- **Scope:** `kernel/mm/paging.cpp` — `PagePresentAndUser` grows a
+  `need_writable` parameter, `IsUserRangeAccessible` grows the same,
+  `CopyFromUser` calls with `need_writable=false`, `CopyToUser`
+  calls with `need_writable=true`. No header / ABI change.
+- **Decision:** Before SMAP-bracketing a user-destination copy,
+  walk every 4 KiB page in the destination range and require the
+  Writable bit (in addition to Present + User) on each PTE. A
+  buffer whose tail crosses into a read-only user page now fails
+  the pre-walk cleanly without the copy having stored any bytes.
+  `CopyFromUser` keeps the pre-existing Present + User-only check
+  — reading a non-writable user page is a legitimate operation
+  (e.g. a ring-3 task passing an immutable string pointer).
+- **Why:** Entry #049 deferred this with "No consumer today; add
+  when one lands." SYS_READ and SYS_STAT both reached for
+  `CopyToUser` in the VFS-namespace work — SYS_READ copies file
+  bytes into a caller-supplied buffer, SYS_STAT writes a `u64`
+  size into a caller-supplied slot. Both are exactly the shape the
+  deferral called out: the user passes a destination pointer the
+  kernel has no up-front guarantee is writable. Without this
+  check, a destination that straddles the RO/RW boundary stores
+  the leading bytes into the writable page, then the copy loop's
+  `mov byte ptr [rdi], cl` #PFs on the first RO byte; the trap
+  dispatcher's fault-fixup unwinds the kernel cleanly and returns
+  `false`, but up to `page_size - 1` bytes have already landed in
+  user memory. The caller sees `-1` and assumes the write was
+  a no-op — a quiet TOCTOU-shaped surprise waiting for the first
+  syscall that relies on "all or nothing" semantics. The walk-
+  first check costs one extra PT descent per destination page
+  (already paid for the Present + User check anyway — same
+  descent, one more bit-mask test), and eliminates the partial-
+  write window entirely.
+- **Rules out / defers:** Dirty-bit check (no consumer — the
+  CPU sets Dirty on its own on the first write, which is the
+  right time). Copy-on-write handling for writable-but-shared
+  pages (no CoW mappings yet). Writable check on the KERNEL
+  side of `CopyFromUser`'s destination (`kernel_dst` is trusted
+  kernel memory; validating it would be kernel-policing-kernel).
+  Explicit error differentiation between "range invalid",
+  "page unmapped", "page read-only", and "page not user" — all
+  still collapse to `return false`; the caller gets `-1` and
+  decides what it means in context. Adding a typed error enum
+  is a separate ABI decision that lands with the first syscall
+  that needs to disambiguate.
+- **Revisit when:** First syscall that needs typed error returns
+  (replaces the `bool` with `enum class UserCopyError`). CoW
+  mappings land (Writable=0 then means "RW-on-fault" rather than
+  "RO" — the pre-check needs to consult the VMA, not just the
+  PTE). Demand paging lands — the walk might see Present=0 on a
+  page the MM intends to page in; the fault-fixup path becomes
+  the fast path and the pre-check becomes a filter for
+  structurally-invalid pointers only.
+- **Related tracks:** Track 3 (MM — user-pointer robustness),
+  Track 4 (Process model — syscall ABI cleanliness), Track 13
+  (Security — every kernel→user store is now strict on the
+  permission side of the mapping, not just the presence side).
+
+---
+
 ## 051 — SYS_YIELD = 3 (cooperative yield from ring 3)
 
 - **Scope:** `kernel/core/syscall.{h,cpp}` — new enum value,

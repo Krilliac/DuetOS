@@ -105,6 +105,7 @@ enum class KillReason : u8
 {
     TickBudget = 1,    // CPU-tick budget exhausted (slice 14)
     SandboxDenialThreshold = 2, // too many cap-denials (slice 16)
+    UserKill = 3,      // shell `kill <pid>` / operator-initiated
     // Add new reasons at the end.
 };
 
@@ -207,6 +208,51 @@ struct SchedStats
     u64 tasks_reaped;     // lifetime (Task structs + stacks KFree'd by reaper)
 };
 SchedStats SchedStatsRead();
+
+// Read-only view of one task for ps-style enumeration. Fields
+// are snapshots copied at the moment SchedEnumerate visits the
+// task; no pointer-chasing across the boundary so callbacks can
+// safely write to the console / framebuffer.
+struct SchedTaskInfo
+{
+    u64 id;
+    const char* name; // borrowed; points into the task's stable name field
+    u64 wake_tick;    // valid for Sleeping / timed-Blocked, else 0
+    u64 stack_size;
+    u8 state;         // TaskState cast to u8 (Ready/Running/Sleeping/Blocked/Dead)
+    u8 priority;      // TaskPriority cast to u8
+    bool is_running;  // true if this is the currently-scheduled task
+    u8 _pad[5];
+};
+
+/// Enumerate every known task — runqueues (Normal + Idle),
+/// sleep queue, zombie list, and the currently-running task.
+/// `cb` is invoked once per task with a snapshot; safe to call
+/// Console* / printf-equivalents from inside the callback.
+/// Internally brackets the walk with CLI to protect against
+/// the timer tick mutating the lists mid-visit.
+using SchedEnumCb = void (*)(const SchedTaskInfo& info, void* cookie);
+void SchedEnumerate(SchedEnumCb cb, void* cookie);
+
+/// Result of a cross-task kill request.
+enum class KillResult : u8
+{
+    Signaled = 0,    // Task found and flagged for termination
+    NotFound = 1,    // No task with that PID
+    Protected = 2,   // Task is special (idle / reaper / PID 0)
+    AlreadyDead = 3, // Task is in the zombie list
+    Blocked = 4,     // Task is Blocked — v0 can't detach safely
+};
+const char* KillResultName(KillResult r);
+
+/// Flag a non-current task by PID for termination. For Running
+/// / Ready targets, the kill activates the next time Schedule()
+/// runs. For Sleeping targets, the task is lifted off the sleep
+/// queue and re-queued Ready so it runs and dies on its next
+/// slot. Blocked targets are not detached in v0 — the caller
+/// gets a Blocked result code and should try again after the
+/// task is woken by something else.
+KillResult SchedKillByPid(u64 pid);
 
 /// Start the dead-task reaper kernel thread. Run once after SchedInit +
 /// the keyboard/driver init pass. The reaper sleeps on a WaitQueue;

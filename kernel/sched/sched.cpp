@@ -524,6 +524,8 @@ const char* KillReasonName(KillReason r)
         return "TickBudget";
     case KillReason::SandboxDenialThreshold:
         return "SandboxDenialThreshold";
+    case KillReason::UserKill:
+        return "UserKill";
     }
     return "<unknown>";
 }
@@ -865,6 +867,254 @@ SchedStats SchedStatsRead()
         .tasks_exited = g_tasks_exited,
         .tasks_reaped = g_tasks_reaped,
     };
+}
+
+namespace
+{
+
+void EmitTask(const Task* t, SchedEnumCb cb, void* cookie, bool is_running)
+{
+    if (t == nullptr)
+        return;
+    SchedTaskInfo info;
+    info.id = t->id;
+    info.name = t->name;
+    info.wake_tick = t->wake_tick;
+    info.stack_size = t->stack_size;
+    info.state = static_cast<u8>(t->state);
+    info.priority = static_cast<u8>(t->priority);
+    info.is_running = is_running;
+    for (u32 i = 0; i < sizeof(info._pad); ++i)
+        info._pad[i] = 0;
+    cb(info, cookie);
+}
+
+// Walk a singly-linked list threaded by `next`. De-dup against
+// the already-emitted current task so the running thread isn't
+// printed twice when it also sits on a runqueue head.
+void EmitList(Task* head, SchedEnumCb cb, void* cookie, const Task* skip)
+{
+    for (Task* t = head; t != nullptr; t = t->next)
+    {
+        if (t == skip)
+            continue;
+        EmitTask(t, cb, cookie, false);
+    }
+}
+
+} // namespace
+
+const char* KillResultName(KillResult r)
+{
+    switch (r)
+    {
+    case KillResult::Signaled:
+        return "Signaled";
+    case KillResult::NotFound:
+        return "NotFound";
+    case KillResult::Protected:
+        return "Protected";
+    case KillResult::AlreadyDead:
+        return "AlreadyDead";
+    case KillResult::Blocked:
+        return "Blocked";
+    }
+    return "<unknown>";
+}
+
+namespace
+{
+
+bool SchedNameEq(const char* a, const char* b)
+{
+    for (u32 i = 0; i < 64; ++i)
+    {
+        if (a[i] != b[i])
+            return false;
+        if (a[i] == '\0')
+            return true;
+    }
+    return true;
+}
+
+bool SchedNameStarts(const char* s, const char* prefix)
+{
+    for (u32 i = 0;; ++i)
+    {
+        if (prefix[i] == '\0')
+            return true;
+        if (s[i] != prefix[i])
+            return false;
+    }
+}
+
+// Task is considered "protected" if killing it would break
+// kernel invariants: the boot task (pid 0), the reaper (we
+// need it to clean up zombies — including the very task we'd
+// be killing), and any idle task (empty runqueue would panic
+// Schedule()).
+bool IsProtectedTask(const Task* t)
+{
+    if (t == nullptr)
+        return true;
+    if (t->id == 0)
+        return true;
+    if (t->name == nullptr)
+        return false;
+    if (SchedNameEq(t->name, "reaper"))
+        return true;
+    if (SchedNameStarts(t->name, "idle-"))
+        return true;
+    return false;
+}
+
+// Detach `t` from g_sleep_head (threaded by sleep_next).
+// No-op if t isn't on the list. Caller holds CLI.
+void SleepQueueRemove(Task* t)
+{
+    Task** pp = &g_sleep_head;
+    while (*pp != nullptr)
+    {
+        if (*pp == t)
+        {
+            *pp = t->sleep_next;
+            t->sleep_next = nullptr;
+            if (g_tasks_sleeping > 0)
+                --g_tasks_sleeping;
+            return;
+        }
+        pp = &(*pp)->sleep_next;
+    }
+}
+
+} // namespace
+
+KillResult SchedKillByPid(u64 pid)
+{
+    arch::Cli();
+
+    // Walk every possible home of a Task* with this id. Ordered
+    // so the hottest cases (running + ready runqueues) hit first.
+    Task* target = nullptr;
+    Task* cur = Current();
+    if (cur != nullptr && cur->id == pid)
+    {
+        target = cur;
+    }
+    if (target == nullptr)
+    {
+        for (Task* t = g_run_head_normal; t != nullptr; t = t->next)
+        {
+            if (t->id == pid)
+            {
+                target = t;
+                break;
+            }
+        }
+    }
+    if (target == nullptr)
+    {
+        for (Task* t = g_run_head_idle; t != nullptr; t = t->next)
+        {
+            if (t->id == pid)
+            {
+                target = t;
+                break;
+            }
+        }
+    }
+    if (target == nullptr)
+    {
+        for (Task* t = g_sleep_head; t != nullptr; t = t->sleep_next)
+        {
+            if (t->id == pid)
+            {
+                target = t;
+                break;
+            }
+        }
+    }
+    if (target == nullptr)
+    {
+        // Zombie list is linked via `next`; walking it just for
+        // a report-as-dead case keeps the caller's model clean.
+        for (Task* t = g_zombies; t != nullptr; t = t->next)
+        {
+            if (t->id == pid)
+            {
+                arch::Sti();
+                return KillResult::AlreadyDead;
+            }
+        }
+        arch::Sti();
+        return KillResult::NotFound;
+    }
+
+    if (IsProtectedTask(target))
+    {
+        arch::Sti();
+        return KillResult::Protected;
+    }
+    if (target->state == TaskState::Dead)
+    {
+        arch::Sti();
+        return KillResult::AlreadyDead;
+    }
+    // Blocked tasks sit on a WaitQueue threaded via `next`. We
+    // don't have a safe cross-queue detach primitive in v0 — the
+    // producer that owns the WaitQueue might be mid-enqueue. So
+    // mark the flag but DON'T try to move the task; the next
+    // wake (from its normal producer) will see kill_requested
+    // and terminate. Report the constraint to the caller.
+    target->kill_requested = true;
+    target->kill_reason = KillReason::UserKill;
+    if (target->state == TaskState::Blocked)
+    {
+        arch::Sti();
+        return KillResult::Blocked;
+    }
+    // Sleeping: lift off the sleep queue + re-queue Ready so
+    // the task runs and takes the kill path on its next slot.
+    if (target->state == TaskState::Sleeping)
+    {
+        SleepQueueRemove(target);
+        target->wake_tick = 0;
+        target->state = TaskState::Ready;
+        RunqueuePush(target);
+    }
+    // Ready / Running tasks don't need repositioning — they'll
+    // hit Schedule() naturally and die there.
+    arch::Sti();
+    return KillResult::Signaled;
+}
+
+void SchedEnumerate(SchedEnumCb cb, void* cookie)
+{
+    if (cb == nullptr)
+        return;
+    // Brief CLI window so the timer IRQ + WaitQueueWake* can't
+    // splice the lists mid-walk. The callback runs inside the
+    // critical section — this is fine for Console writes
+    // (byte-sized stores) but would not be for anything that
+    // can block.
+    arch::Cli();
+    const Task* running = Current();
+    if (running != nullptr)
+    {
+        EmitTask(running, cb, cookie, true);
+    }
+    EmitList(g_run_head_normal, cb, cookie, running);
+    EmitList(g_run_head_idle, cb, cookie, running);
+    // Sleep queue is threaded by sleep_next, not next — walk
+    // that separately.
+    for (Task* t = g_sleep_head; t != nullptr; t = t->sleep_next)
+    {
+        if (t == running)
+            continue;
+        EmitTask(t, cb, cookie, false);
+    }
+    EmitList(g_zombies, cb, cookie, running);
+    arch::Sti();
 }
 
 // ---------------------------------------------------------------------------

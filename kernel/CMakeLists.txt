@@ -28,7 +28,9 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     core/process.cpp
     core/reboot.cpp
     core/recovery.cpp
+    core/elf_loader.cpp
     core/ring3_smoke.cpp
+    core/shell.cpp
     core/stack_canary.cpp
     core/symbols.cpp
     core/syscall.cpp
@@ -43,6 +45,7 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     arch/x86_64/lapic.cpp
     arch/x86_64/pic.cpp
     arch/x86_64/retpoline_thunks.S
+    arch/x86_64/rtc.cpp
     arch/x86_64/serial.cpp
     arch/x86_64/smp.cpp
     arch/x86_64/timer.cpp
@@ -50,9 +53,18 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     arch/x86_64/usermode.S
     cpu/percpu.cpp
     drivers/input/ps2kbd.cpp
+    drivers/input/ps2mouse.cpp
     drivers/pci/pci.cpp
     drivers/storage/ahci.cpp
+    drivers/video/console.cpp
+    drivers/video/cursor.cpp
+    drivers/video/font8x8.cpp
+    drivers/video/framebuffer.cpp
+    drivers/video/menu.cpp
+    drivers/video/taskbar.cpp
+    drivers/video/widget.cpp
     fs/ramfs.cpp
+    fs/tmpfs.cpp
     fs/vfs.cpp
     mm/address_space.cpp
     mm/frame_allocator.cpp
@@ -168,6 +180,18 @@ option(CUSTOMOS_TRAP_DEMO "Execute ud2 at end of kernel_main to take #UD (test-t
 if(CUSTOMOS_TRAP_DEMO)
     target_compile_definitions(customos-kernel          PRIVATE CUSTOMOS_TRAP_DEMO=1)
     target_compile_definitions(customos-kernel-stage1   PRIVATE CUSTOMOS_TRAP_DEMO=1)
+endif()
+
+
+# Initial boot mode: desktop (windowed shell) vs TTY (fullscreen
+# framebuffer console). Runtime toggle with Ctrl+Alt+T works
+# regardless of this flag; it only affects what the user sees
+# when the kernel first hits kernel_main's compose phase. Useful
+# for an install / rescue build that prefers text-first UX.
+option(CUSTOMOS_BOOT_TTY "Boot straight into TTY mode instead of the windowed desktop" OFF)
+if(CUSTOMOS_BOOT_TTY)
+    target_compile_definitions(customos-kernel          PRIVATE CUSTOMOS_BOOT_TTY=1)
+    target_compile_definitions(customos-kernel-stage1   PRIVATE CUSTOMOS_BOOT_TTY=1)
 endif()
 
 set_target_properties(customos-kernel PROPERTIES

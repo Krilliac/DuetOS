@@ -9,6 +9,7 @@
 #include "../mm/page.h"
 #include "../mm/paging.h"
 #include "../sched/sched.h"
+#include "elf_loader.h"
 #include "klog.h"
 #include "panic.h"
 #include "process.h"
@@ -319,11 +320,17 @@ void WriteUserCodeFrame(mm::PhysAddr frame, u64 code_va, u64 stack_va)
     }
 }
 
-// Entry point for the user task. Runs in ring 0 on a fresh kernel
-// stack with the task's own AS already loaded in CR3 (Schedule()
-// flipped it on first switch-in). Reads the per-process ASLR
-// layout from CurrentProcess() so every task enters ring 3 at
-// its own code_va / stack_va.
+} // namespace (close anon so Ring3UserEntry has external linkage)
+
+// Entry point for every ring-3 task created via SchedCreateUser.
+// Runs in ring 0 on a fresh kernel stack with the task's own AS
+// already loaded in CR3 (Schedule() flipped it on first switch-in).
+// Reads user_code_va / user_stack_va from CurrentProcess() so a
+// caller-configured layout (ASLR'd smoke tasks, ELF-loaded tasks
+// at 0x400000 / 0x7FFFE000, etc.) is picked up automatically.
+//
+// Exposed via ring3_smoke.h so non-ring3 callers (syscall
+// dispatch, shell `exec`) can hand it to SchedCreateUser too.
 [[noreturn]] void Ring3UserEntry(void*)
 {
     using arch::SerialWrite;
@@ -354,6 +361,8 @@ void WriteUserCodeFrame(mm::PhysAddr frame, u64 code_va, u64 stack_va)
 
     arch::EnterUserMode(code_va, stack_top);
 }
+
+namespace { // reopen anon for the rest of the file
 
 // Build a ring-3 task: allocate AS, allocate + populate code page,
 // allocate stack page, install both into the AS, wrap the AS in a
@@ -892,7 +901,108 @@ void SpawnJailProbeTask()
     sched::SchedCreateUser(&Ring3UserEntry, nullptr, "ring3-jail-probe", proc);
 }
 
+bool LocalStrEq(const char* a, const char* b)
+{
+    for (u32 i = 0;; ++i)
+    {
+        if (a[i] != b[i])
+            return false;
+        if (a[i] == '\0')
+            return true;
+    }
+}
+
 } // namespace
+
+u64 SpawnElfFile(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps,
+                 const fs::RamfsNode* root, u64 frame_budget, u64 tick_budget)
+{
+    using arch::SerialWrite;
+    using arch::SerialWriteHex;
+    using namespace customos::mm;
+
+    if (elf_bytes == nullptr || elf_len == 0 || root == nullptr)
+    {
+        return 0;
+    }
+    AddressSpace* as = AddressSpaceCreate(frame_budget);
+    if (as == nullptr)
+    {
+        return 0;
+    }
+    const ElfLoadResult r = ElfLoad(elf_bytes, elf_len, as);
+    if (!r.ok)
+    {
+        // ElfLoad may have installed partial mappings; Release
+        // walks the AS's user-region table and frees whatever
+        // landed.
+        AddressSpaceRelease(as);
+        return 0;
+    }
+    Process* proc = ProcessCreate(name, as, caps, root, r.entry_va, r.stack_va, tick_budget);
+    if (proc == nullptr)
+    {
+        AddressSpaceRelease(as);
+        return 0;
+    }
+    SerialWrite("[ring3] elf spawn name=\"");
+    SerialWrite(name);
+    SerialWrite("\" pid=");
+    SerialWriteHex(proc->pid);
+    SerialWrite(" entry=");
+    SerialWriteHex(r.entry_va);
+    SerialWrite(" stack_top=");
+    SerialWriteHex(r.stack_top);
+    SerialWrite("\n");
+    sched::SchedCreateUser(&Ring3UserEntry, nullptr, name, proc);
+    return proc->pid;
+}
+
+bool SpawnOnDemand(const char* kind)
+{
+    if (kind == nullptr || kind[0] == '\0')
+        return false;
+    if (LocalStrEq(kind, "hello"))
+    {
+        SpawnRing3Task("ring3-cmd-hello", CapSetTrusted(), fs::RamfsTrustedRoot(),
+                       mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        return true;
+    }
+    if (LocalStrEq(kind, "sandbox"))
+    {
+        CapSet caps = CapSetEmpty();
+        CapSetAdd(caps, kCapFsRead);
+        SpawnRing3Task("ring3-cmd-sandbox", caps, fs::RamfsSandboxRoot(),
+                       mm::kFrameBudgetSandbox, kTickBudgetSandbox);
+        return true;
+    }
+    if (LocalStrEq(kind, "jail"))
+    {
+        SpawnJailProbeTask();
+        return true;
+    }
+    if (LocalStrEq(kind, "nx"))
+    {
+        SpawnNxProbeTask();
+        return true;
+    }
+    if (LocalStrEq(kind, "hog"))
+    {
+        SpawnCpuHogProbe();
+        return true;
+    }
+    if (LocalStrEq(kind, "hostile"))
+    {
+        SpawnHostileProbe();
+        return true;
+    }
+    if (LocalStrEq(kind, "dropcaps"))
+    {
+        SpawnDropcapsProbe();
+        return true;
+    }
+    return false;
+}
 
 void StartRing3SmokeTask()
 {

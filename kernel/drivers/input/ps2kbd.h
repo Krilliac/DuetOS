@@ -63,6 +63,84 @@ u8 Ps2KeyboardRead();
 /// results. Pick one API per reader thread.
 char Ps2KeyboardReadChar();
 
+// ---------------------------------------------------------------
+// Higher-level KeyEvent API.
+//
+// Supersedes Ps2KeyboardReadChar for anything beyond "echo text to
+// a console": reports press AND release edges, carries a modifier
+// bitmask (Shift / Ctrl / Alt / Meta / Caps Lock), and exposes
+// non-ASCII keys (arrows, Home/End/PgUp/PgDn, Insert/Delete, F1..F12,
+// Esc, Enter, Backspace, Tab) as numeric codes. Needed for shells,
+// text-input widgets, and any GUI that wants to handle Ctrl+C or
+// arrow navigation.
+// ---------------------------------------------------------------
+
+enum KeyModifier : u8
+{
+    kKeyModShift = 1U << 0,
+    kKeyModCtrl = 1U << 1,
+    kKeyModAlt = 1U << 2,
+    kKeyModMeta = 1U << 3, // "Windows" / "Super" / "Cmd"
+    kKeyModCapsLock = 1U << 4,
+};
+
+// Logical key codes. ASCII-printable characters (0x20..0x7E) pass
+// through as themselves, in the `event.code` field. Non-printable
+// keys use values starting at 0x100 so they don't collide with
+// ASCII. Release events set `event.is_release`; press events
+// (including auto-repeat from the controller) clear it.
+enum KeyCode : u16
+{
+    kKeyNone = 0,
+
+    kKeyEsc = 0x1B,
+    kKeyBackspace = 0x08,
+    kKeyTab = 0x09,
+    kKeyEnter = 0x0A,
+
+    // Non-ASCII special keys. High enough to never collide with
+    // any ASCII byte a legitimate keypress could produce.
+    kKeyArrowUp = 0x100,
+    kKeyArrowDown,
+    kKeyArrowLeft,
+    kKeyArrowRight,
+    kKeyHome,
+    kKeyEnd,
+    kKeyPageUp,
+    kKeyPageDown,
+    kKeyInsert,
+    kKeyDelete,
+    kKeyF1,
+    kKeyF2,
+    kKeyF3,
+    kKeyF4,
+    kKeyF5,
+    kKeyF6,
+    kKeyF7,
+    kKeyF8,
+    kKeyF9,
+    kKeyF10,
+    kKeyF11,
+    kKeyF12,
+};
+
+struct KeyEvent
+{
+    u16 code;         // KeyCode value or printable-ASCII byte
+    u8 modifiers;     // bitmask of KeyModifier
+    bool is_release;  // false = press (or auto-repeat), true = release
+    u8 _pad;
+};
+
+/// Block the calling task until the next keyboard edge (press or
+/// release) resolves to a KeyEvent. Modifier-only transitions update
+/// internal state and are returned as events with `code == kKeyNone`
+/// so callers can render "Ctrl held" UI cues without polling. For
+/// a simpler "give me the next typed character" loop, keep using
+/// Ps2KeyboardReadChar — both APIs share the raw ring buffer, so
+/// a single reader thread should pick ONE.
+KeyEvent Ps2KeyboardReadEvent();
+
 /// Lifetime counters for diagnostics / tests.
 struct Ps2Stats
 {
