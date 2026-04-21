@@ -1,4 +1,4 @@
-# Win32 subsystem v0 — import resolution + kernel32.ExitProcess stub
+# Win32 subsystem v0 — import resolution + 7 stub batches
 
 **Type:** Observation · **Status:** Active · **Last updated:** 2026-04-21
 
@@ -6,11 +6,30 @@
 
 The v0 PE loader (`pe-subsystem-v0.md`) could parse any real
 Windows PE but only **execute** freestanding images with no
-imports. This entry documents the next slice: running a PE that
-imports `ExitProcess` from `kernel32.dll`, via a kernel-hosted
-stub page. This is the first piece of a real Win32 subsystem —
-the scaffolding that ntdll, kernel32, user32, etc. will plug
-into as separate slices.
+imports. This entry documents the Win32 subsystem on top of
+it: a kernel-hosted per-process "stubs page" that maps each
+imported `{dll, func}` to a handful of machine-code thunks
+translating the Windows x64 ABI into CustomOS native
+syscalls.
+
+As of 2026-04-21, **7 batches** of stubs have landed:
+
+| Batch | DLLs | Functions | Notes |
+|---|---|---|---|
+| 0 (v0) | kernel32 | `ExitProcess` | Scaffolding commit |
+| 1 | kernel32 | `GetStdHandle`, `WriteFile`, `WriteConsoleA` | Console I/O |
+| 2 | kernel32 | `GetCurrentProcess(Id)`, `GetCurrentThread(Id)`, `TerminateProcess` | + new `SYS_GETPROCID` |
+| 3 | kernel32 | `GetLastError`, `SetLastError` | + `SYS_GETLASTERROR`, `SYS_SETLASTERROR`, Process slot |
+| 4 | kernel32 | `InitializeCriticalSection`(`Ex`/`AndSpinCount`), `Enter`/`Leave`/`DeleteCriticalSection` | v0 no-ops; fine for single-threaded processes |
+| 5 | vcruntime140 | `memset`, `memcpy`, `memmove` | + SSE enablement (CR0/CR4) + rsp alignment fix |
+| 6 | 5 apiset DLLs + ucrtbase | ~17 UCRT startup shims | Most → return-0 or nop |
+| 7 | 3 apiset DLLs + ucrtbase + msvcrt | `strcmp`, `strlen`, `wcslen`, `strchr`, `strcpy` | Pure assembly loops |
+
+Total: **~45 Win32 functions resolved across 10 DLL names**.
+`hello_winapi.exe` exercises every batch on boot; 14 kernel32
+imports, 3 vcruntime140, 10+ UCRT apiset imports, all
+resolve, all execute, process exits with the round-tripped
+`SetLastError(0xBEEF)` value.
 
 ## The mechanism, top to bottom
 
@@ -176,63 +195,132 @@ A future slice may relax this for DLLs loaded by
 is a user-mode-visible failure. For static imports, zero
 tolerance is correct.
 
-## Stubs table today
+## Stubs page layout (as of batch 7)
 
-| DLL | Function | Stub offset | Semantics |
-|-----|----------|------------|-----------|
-| `kernel32.dll` | `ExitProcess` | 0x00 | `SYS_EXIT(rcx)` |
+| Offset | Size | Name | Source batch |
+|---|---|---|---|
+| `0x00` | 9 | `ExitProcess` (+ `exit`, `_exit` via alias) | v0 |
+| `0x09` | 3 | `GetStdHandle` | 1 |
+| `0x0C` | 44 | `WriteFile` (+ `WriteConsoleA` alias) | 1 |
+| `0x38` | 8 | `GetCurrentProcess` | 2 |
+| `0x40` | 8 | `GetCurrentThread` | 2 |
+| `0x48` | 8 | `GetCurrentProcessId` | 2 |
+| `0x50` | 8 | `GetCurrentThreadId` | 2 |
+| `0x58` | 9 | `TerminateProcess` | 2 |
+| `0x61` | 8 | `GetLastError` | 3 |
+| `0x69` | 10 | `SetLastError` | 3 |
+| `0x74` | 18 | `InitializeCriticalSection`(`Ex`/`AndSpinCount`) | 4 |
+| `0x86` | 1 | nop-ret (shared by CS Enter/Leave/Delete + CRT `_initterm` / `_cexit` / `_c_exit` / `_set_app_type` / `__setusermatherr`) | 4 + 6 |
+| `0x87` | 45 | `memmove` (+ `memcpy` alias) | 5 |
+| `0xB4` | 19 | `memset` | 5 |
+| `0xC7` | 3 | return-0 (shared by 12 UCRT "report success" shims) | 6 |
+| `0xCA` | 11 | `terminate` | 6 |
+| `0xD5` | 11 | `_invalid_parameter_noinfo_noreturn` | 6 |
+| `0xE0` | 29 | `strcmp` | 7 |
+| `0xFD` | 17 | `strlen` | 7 |
+| `0x10E` | 22 | `wcslen` | 7 |
+| `0x124` | 23 | `strchr` | 7 |
+| `0x13B` | 23 | `strcpy` | 7 |
 
-That's it. Everything else in the `windows-kill.exe` gap list
-(kernel32's 35 other functions, ntdll, msvcp140, vcruntime140,
-the UCRT api-sets, advapi32, dbghelp) is future work.
-`Win32StubsLookup` returns false for everything else, and the
-resolver logs `UNRESOLVED <dll>!<func>` and fails the load.
+Total: **0x152 bytes (338)** in a 4 KiB page. 3.65 KiB headroom.
+
+20 unique stubs power ~45 distinct `{dll, func}` entries
+in `kStubsTable` through aliasing.
+
+## New syscalls introduced along the way
+
+| # | Name | Batch | Semantics |
+|---|---|---|---|
+| 8 | `SYS_GETPROCID` | 2 | Returns `CurrentProcess()->pid` |
+| 9 | `SYS_GETLASTERROR` | 3 | Returns `Process.win32_last_error` |
+| 10 | `SYS_SETLASTERROR` | 3 | Writes `Process.win32_last_error`; returns previous value |
+
+All are unprivileged (no cap check) — they only touch the
+caller's own state.
+
+## Cross-cutting infrastructure landed during the work
+
+These aren't Win32-specific but were prerequisites surfaced by
+the batches:
+
+- **SSE enablement.** boot.S + ap_trampoline.S now set
+  `CR0.MP=1`, `CR0.EM=0`, `CR4.OSFXSR=1`, `CR4.OSXMMEXCPT=1`.
+  Without this, any ring-3 MOVUPS/MOVAPS `#UD`s (batch 5 was
+  the first stub that exercised them — clang emits them for
+  string-literal initialization).
+- **rsp % 16 == 8 on ring-3 entry.** `Ring3UserEntry` biases
+  the initial rsp by -8 so the entering function sees the
+  same layout it would on a CALL. Matches both SysV and
+  Microsoft x64 ABIs. Without this, any function with a
+  `movaps [rsp+N]` in its prologue crashes.
+- **`AddressSpaceLookupUserFrame`.** The PE loader needs to
+  write to IAT slots that live on user-RO pages; this helper
+  walks the AS regions array and returns the backing physical
+  frame so the kernel can modify via `PhysToVirt`.
 
 ## What's next (deliberately deferred)
 
-1. **More kernel32 stubs.** The three that are nearly free
-   once we have a serial console path:
-   - `GetStdHandle(DWORD id)` — return a fake handle (e.g.
-     the `id` itself); used as the first arg to
-     `WriteConsoleA`/`WriteFile`.
-   - `WriteConsoleA(HANDLE, LPCVOID, DWORD, LPDWORD, LPVOID)`
-     — thunk to `SYS_WRITE(1, buf, n)`. Ignores the LPDWORD
-     (bytes-written) out-param for v0.
-   - `WriteFile(HANDLE, LPCVOID, DWORD, LPDWORD, LPVOID)` —
-     if handle is 1 or 2, same as WriteConsoleA. Else fail.
-   With these, we can have a proper Win32 "Hello, world" that
-   prints via the Win32 API.
+Ordered roughly by ROI for getting `windows-kill.exe` to run:
 
-2. **GetLastError / SetLastError.** A per-TEB u32 slot. Needs
-   a TEB (Thread Environment Block) per task — GS-based on
-   Windows. For v0, could park in a per-process kernel-side
-   `u32 last_error` and have stubs read/write it.
+1. **Real user-mode heap.** `malloc` / `free` / `HeapAlloc` /
+   `HeapCreate` / `HeapDestroy`. Requires per-process heap
+   backing — either a new `SYS_BRK`-style syscall or a
+   kernel-side VMO. Highest-ROI unblock: every non-trivial
+   CRT function uses the heap transitively.
 
-3. **Base relocations.** `hello_winapi.exe` has an empty
-   `.reloc` (nothing to relocate — only rip-relative code and
-   a static IAT slot). Any non-trivial PE has a real reloc
-   table. Must land before we can relocate images off their
-   preferred ImageBase.
+2. **`__p___argc` / `__p___argv` / `__p__commode`.** These
+   return pointers to ints; the stub needs static storage on
+   the stubs page itself (a few bytes of data after the code).
+   Small work; deferred only because winkill currently fails
+   before reaching them.
 
-4. **Multiple DLLs.** The stubs table is flat today; when
-   two DLLs export the same function name (e.g.
-   `CreateFileA` in both kernel32 and a compat shim), we need
-   per-DLL sub-tables. Trivial change to the lookup loop.
+3. **Base relocation application.** Our loader rejects any PE
+   with a non-empty `.reloc` directory. Walking
+   `IMAGE_REL_BASED_DIR64` entries and adjusting absolute
+   addresses by `actual_base - preferred_base` is ~40 lines.
+   Unlocks loading any PE at a non-preferred ImageBase,
+   including hostile images that can't be guaranteed a
+   specific VA.
 
-5. **Export-table-backed stubs.** Instead of a hand-written
-   kernel array, lay out a fake DLL image in memory (with a
-   real PE header + export directory), and have the resolver
-   walk `IMAGE_EXPORT_DIRECTORY` like the Windows loader
-   does. One step closer to loading real DLLs.
+4. **TLS callback dispatch.** `windows-kill.exe` has a TLS
+   directory (though the callback list is empty). A real Win32
+   loader walks `AddressOfCallBacks` and invokes each with
+   `DLL_PROCESS_ATTACH` before the entry point. Needed by any
+   PE with C++ global ctors registered via TLS.
 
-6. **TLS callback dispatch.** `windows-kill.exe` has a TLS
-   directory; MSVC-compiled PEs often do. A real Win32 loader
-   walks `AddressOfCallBacks` and invokes each with
-   `DLL_PROCESS_ATTACH` before the entry point.
+5. **Per-thread TEB.** GS-based TEB like real Windows, so the
+   `GetLastError` / `SetLastError` stubs can read from
+   `gs:[0x68]` directly instead of going through a syscall.
+   Requires wiring `IA32_GS_BASE` MSR on context switch.
+   Mostly a performance win; correctness works today.
 
-7. **SEH dispatch.** `.pdata` + `.xdata` + `__C_specific_handler`
-   — the whole x64 structured exception handling runtime. Only
-   relevant once we run PEs that actually throw.
+6. **SEH dispatch.** `.pdata` + `.xdata` +
+   `__C_specific_handler` — x64 structured exception
+   handling. Only relevant once we run PEs that throw.
+   Windows-kill doesn't throw in practice; deferred until a
+   PE that does.
+
+7. **Export-table-backed stubs.** Lay out a fake DLL image in
+   memory (PE header + export directory + stubs), and have
+   the resolver walk `IMAGE_EXPORT_DIRECTORY` like the real
+   Windows loader. One step closer to loading third-party
+   DLLs. Primarily refactoring — no new functionality until
+   we actually need ordinal imports or GetProcAddress.
+
+8. **Ordinal imports.** `WriteImpl` imports by ordinal
+   (e.g. `@123`). Our resolver rejects them today. Would fall
+   out naturally from (7).
+
+9. **Wide-string intrinsics.** `wcscmp`, `wcscpy`, `wcschr`.
+   Same shape as their narrow counterparts but with 2-byte
+   stride. Batch 8 material if needed.
+
+10. **More kernel32 surface.** A single big file of stubs
+    covering `CreateFileW`, `ReadFile`, `CloseHandle`,
+    `GetModuleHandle`, `GetProcAddress`, `LoadLibraryW`, etc.
+    Each needs real kernel-side state (handle table, module
+    list). Substantial; defer until we pick a specific PE to
+    target.
 
 ## Related entries
 
