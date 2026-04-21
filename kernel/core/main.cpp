@@ -750,9 +750,6 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     SerialWrite("[boot] Enumerating PCI bus.\n");
     customos::drivers::pci::PciEnumerate();
 
-    SerialWrite("[boot] Discovering AHCI controller.\n");
-    customos::drivers::storage::AhciInit();
-
     SerialWrite("[boot] Bringing up block device layer.\n");
     customos::drivers::storage::BlockLayerInit();
     customos::drivers::storage::BlockLayerSelfTest();
@@ -760,6 +757,10 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     SerialWrite("[boot] Bringing up NVMe controller.\n");
     customos::drivers::storage::NvmeInit();
     customos::drivers::storage::NvmeSelfTest();
+
+    SerialWrite("[boot] Bringing up AHCI controller(s).\n");
+    customos::drivers::storage::AhciInit();
+    customos::drivers::storage::AhciSelfTest();
 
     SerialWrite("[boot] Probing GPT on block devices.\n");
     customos::fs::gpt::GptSelfTest();

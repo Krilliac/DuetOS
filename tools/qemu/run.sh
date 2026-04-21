@@ -66,6 +66,16 @@ if [[ ! -f "${NVME_IMAGE}" ]]; then
     python3 "${SCRIPT_DIR}/make-gpt-image.py" "${NVME_IMAGE}"
 fi
 
+# Scratch SATA image. Same layout as the NVMe image — a small GPT
+# disk with a "CUSTOMOS" marker in the data partition — so the
+# AHCI self-test can assert the 0x55AA PMBR signature just like
+# NVMe. Kept as a separate file so writes on one backend never
+# bleed into the other's self-test.
+SATA_IMAGE="${BUILD_DIR}/sata0.img"
+if [[ ! -f "${SATA_IMAGE}" ]]; then
+    python3 "${SCRIPT_DIR}/make-gpt-image.py" "${SATA_IMAGE}"
+fi
+
 QEMU_ARGS=(
     -machine  q35
     -cpu      max
@@ -78,6 +88,14 @@ QEMU_ARGS=(
     -D        qemu.log
     -drive    "file=${NVME_IMAGE},if=none,id=nvme0,format=raw"
     -device   "nvme,serial=cafebabe,drive=nvme0"
+    # Separate AHCI controller with one SATA disk. The q35 machine
+    # has a built-in AHCI at 0:1f.2 carrying the CD-ROM; adding a
+    # dedicated "ahci,id=ahci1" plus an ide-hd on bus ahci1.0
+    # gives us a clean test path with only a hard-disk device
+    # (no ATAPI), which matches the v1 driver scope.
+    -device   "ahci,id=ahci1"
+    -drive    "file=${SATA_IMAGE},if=none,id=sata0,format=raw"
+    -device   "ide-hd,bus=ahci1.0,drive=sata0"
     "${BOOT_SOURCE[@]}"
 )
 
