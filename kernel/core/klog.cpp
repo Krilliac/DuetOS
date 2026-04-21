@@ -65,6 +65,70 @@ inline void PushEntry(LogLevel level, const char* subsystem, const char* message
     }
 }
 
+// Write a u64 as decimal, no padding. Handles 0 explicitly.
+// Max 20 digits fits any u64.
+inline void WriteDecimal(u64 v)
+{
+    if (v == 0)
+    {
+        arch::SerialWriteByte('0');
+        return;
+    }
+    char buf[20];
+    int n = 0;
+    while (v > 0)
+    {
+        buf[n++] = static_cast<char>('0' + (v % 10));
+        v /= 10;
+    }
+    while (n > 0)
+    {
+        arch::SerialWriteByte(static_cast<u8>(buf[--n]));
+    }
+}
+
+// Hex without leading zeros. Always prints "0x"; 0 comes out as "0x0".
+inline void WriteCompactHex(u64 v)
+{
+    arch::SerialWrite("0x");
+    if (v == 0)
+    {
+        arch::SerialWriteByte('0');
+        return;
+    }
+    // Find the highest non-zero nibble, then emit from there down.
+    u32 start = 16;
+    for (u32 i = 16; i > 0; --i)
+    {
+        if (((v >> ((i - 1) * 4)) & 0xF) != 0)
+        {
+            start = i;
+            break;
+        }
+    }
+    for (u32 i = start; i > 0; --i)
+    {
+        const u8 nib = static_cast<u8>((v >> ((i - 1) * 4)) & 0xF);
+        const char c = (nib < 10) ? static_cast<char>('0' + nib) : static_cast<char>('a' + nib - 10);
+        arch::SerialWriteByte(static_cast<u8>(c));
+    }
+}
+
+// Append a decimal rendering after the hex when the value is small
+// enough that decimal is actually easier to read than hex.
+// Threshold = 1e12 covers every sector count, byte size up to 1 TB,
+// tick counter, PID, etc. Pointers / bitmasks above that stay hex-only
+// since decimal would just be a longer string of digits.
+inline void MaybeAppendDecimal(u64 v)
+{
+    if (v < 1'000'000'000'000ULL)
+    {
+        arch::SerialWrite(" (");
+        WriteDecimal(v);
+        arch::SerialWrite(")");
+    }
+}
+
 inline const char* LevelTag(LogLevel level)
 {
     switch (level)
@@ -89,29 +153,77 @@ inline bool LevelEnabled(LogLevel level)
     return static_cast<u8>(level) >= effective;
 }
 
-// Timestamp source preference:
-//   1. HPET main counter (sub-microsecond precision; unit is
-//      HpetPeriodFemtoseconds()).
-//   2. Scheduler tick counter (100 Hz; unit is 10 ms).
-// The readable format is intentionally left as raw hex — a printf-
-// free kernel isn't going to do decimal-with-microsecond-field. The
-// unit is implied by which source fired (reader can cross-reference
-// the "[acpi] hpet=..." boot log line).
-inline u64 Timestamp()
+// Timestamp rendering. We format wall time since boot — in
+// microseconds when HPET is up, or scheduler ticks (10 ms units)
+// when it isn't. The goal is something a human can glance at and
+// immediately understand how long a boot phase took, without
+// decoding HPET counts.
+//
+// Output formats (stable, grep-friendly):
+//   HPET-backed : "[t=123.456ms] "  — millisecond + 3-digit fraction
+//                 "[t=89us] "       — sub-millisecond, raw microseconds
+//   Fallback    : "[t=50ms] "       — scheduler-tick * 10
+//
+// HPET period is in femtoseconds per tick. Microseconds = counter *
+// period_fs / 1e9; we reorganise to avoid overflow by computing
+// ticks-per-microsecond up front.
+inline u64 ElapsedMicros()
 {
-    const u64 hpet = arch::HpetReadCounter();
-    if (hpet != 0)
+    const u64 counter = arch::HpetReadCounter();
+    if (counter == 0)
     {
-        return hpet;
+        return 0;
     }
-    return arch::TimerTicks();
+    const u32 period_fs = arch::HpetPeriodFemtoseconds();
+    if (period_fs == 0)
+    {
+        return 0;
+    }
+    // ticks_per_us = 1e9 fs / period_fs. Integer division is fine
+    // for the period values we actually see (100000000, 69841279).
+    const u64 ticks_per_us = 1'000'000'000ULL / period_fs;
+    if (ticks_per_us == 0)
+    {
+        return 0;
+    }
+    return counter / ticks_per_us;
 }
 
 inline void WriteTimestampPrefix()
 {
-    arch::SerialWrite("[ts=");
-    arch::SerialWriteHex(Timestamp());
-    arch::SerialWrite("] ");
+    const u64 us = ElapsedMicros();
+    if (us != 0)
+    {
+        if (us < 1000)
+        {
+            arch::SerialWrite("[t=");
+            WriteDecimal(us);
+            arch::SerialWrite("us] ");
+        }
+        else
+        {
+            const u64 ms_whole = us / 1000;
+            const u64 us_frac = us % 1000;
+            arch::SerialWrite("[t=");
+            WriteDecimal(ms_whole);
+            arch::SerialWrite(".");
+            // Zero-pad to 3 digits.
+            if (us_frac < 100)
+                arch::SerialWriteByte('0');
+            if (us_frac < 10)
+                arch::SerialWriteByte('0');
+            WriteDecimal(us_frac);
+            arch::SerialWrite("ms] ");
+        }
+        return;
+    }
+    // HPET wasn't ready — fall back to the scheduler tick counter
+    // (10 ms per tick). Prefix "~" as a reminder the precision is
+    // coarse.
+    const u64 ticks = arch::TimerTicks();
+    arch::SerialWrite("[t~");
+    WriteDecimal(ticks * 10);
+    arch::SerialWrite("ms] ");
 }
 
 } // namespace
@@ -172,7 +284,8 @@ void LogWithValue(LogLevel level, const char* subsystem, const char* message, u6
     arch::SerialWrite(" : ");
     arch::SerialWrite(message);
     arch::SerialWrite("   val=");
-    arch::SerialWriteHex(value);
+    WriteCompactHex(value);
+    MaybeAppendDecimal(value);
     arch::SerialWrite("\n");
 
     Tee(tag);
@@ -187,7 +300,7 @@ void LogWithValue(LogLevel level, const char* subsystem, const char* message, u6
 void DumpLogRing()
 {
     arch::SerialWrite("[panic] --- log ring (last ");
-    arch::SerialWriteHex(g_log_ring_count);
+    WriteDecimal(g_log_ring_count);
     arch::SerialWrite(" entries, oldest first) ---\n");
 
     // Oldest entry lives at (next - count) mod capacity. Walk forward
@@ -210,7 +323,8 @@ void DumpLogRing()
         if (e.has_value)
         {
             arch::SerialWrite("   val=");
-            arch::SerialWriteHex(e.value);
+            WriteCompactHex(e.value);
+            MaybeAppendDecimal(e.value);
         }
         arch::SerialWrite("\n");
     }
