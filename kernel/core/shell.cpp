@@ -20,6 +20,7 @@
 #include "../mm/kheap.h"
 #include "../mm/paging.h"
 #include "../sched/sched.h"
+#include "elf_loader.h"
 #include "klog.h"
 #include "reboot.h"
 #include "ring3_smoke.h"
@@ -291,6 +292,7 @@ void CmdHelp()
     ConsoleWriteln("  PS           LIST EVERY SCHEDULER TASK");
     ConsoleWriteln("  SPAWN KIND   LAUNCH A RING-3 TASK (hello/sandbox/jail/...)");
     ConsoleWriteln("  KILL PID     TERMINATE A TASK BY ID (USE `ps` TO FIND PIDS)");
+    ConsoleWriteln("  EXEC PATH    DRY-RUN ELF64 LOAD PLAN (PRE-SYS_SPAWN)");
     ConsoleWriteln("  READELF PATH PARSE AN ELF64 HEADER + PROGRAM HEADERS");
     ConsoleWriteln("  HEXDUMP PATH 16-BYTE ROWS OF HEX + ASCII");
     ConsoleWriteln("  STAT PATH    FILE / DIR METADATA");
@@ -1153,6 +1155,7 @@ static const char* const kCommandSet[] = {
     "hexdump", "stat",    "basename","dirname", "cal",
     "sleep",   "reset",   "tac",     "nl",      "rev",     "expr",
     "color",   "rand",    "flushtlb","checksum","repeat",   "kill",
+    "exec",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -3009,6 +3012,69 @@ void CmdCal()
     ConsoleWriteChar('\n');
 }
 
+void CmdExec(u32 argc, char** argv)
+{
+    // Dry-run version of the ELF loader: validates the file and
+    // prints the load plan (one line per PT_LOAD) — no actual
+    // spawn yet. Once SYS_SPAWN lands, this becomes the mouth
+    // of that pipeline.
+    if (argc < 2)
+    {
+        ConsoleWriteln("EXEC: USAGE: EXEC PATH   (dry-run ELF loader)");
+        return;
+    }
+    char scratch[customos::fs::kTmpFsContentMax];
+    const u32 n = ReadFileToBuf(argv[1], scratch, sizeof(scratch));
+    if (n == static_cast<u32>(-1))
+    {
+        ConsoleWrite("EXEC: NO SUCH FILE: ");
+        ConsoleWriteln(argv[1]);
+        return;
+    }
+    const u8* file = reinterpret_cast<const u8*>(scratch);
+    const customos::core::ElfStatus st = customos::core::ElfValidate(file, n);
+    if (st != customos::core::ElfStatus::Ok)
+    {
+        ConsoleWrite("EXEC: INVALID ELF: ");
+        ConsoleWriteln(customos::core::ElfStatusName(st));
+        return;
+    }
+    ConsoleWrite("EXEC: OK. ENTRY = ");
+    WriteU64Hex(customos::core::ElfEntry(file));
+    ConsoleWriteChar('\n');
+    ConsoleWriteln("LOAD PLAN:");
+    ConsoleWriteln("  VADDR             FILESZ    MEMSZ     FLAGS   FILE-OFFSET");
+    struct Cookie
+    {
+        u32 count;
+    };
+    Cookie cookie{0};
+    const u32 visited = customos::core::ElfForEachPtLoad(
+        file, n,
+        [](const customos::core::ElfSegment& seg, void* ck) {
+            auto* c = static_cast<Cookie*>(ck);
+            ++c->count;
+            ConsoleWrite("  ");
+            WriteU64Hex(seg.vaddr);
+            ConsoleWrite("  ");
+            WriteU64Hex(seg.filesz, 8);
+            ConsoleWrite("  ");
+            WriteU64Hex(seg.memsz, 8);
+            ConsoleWrite("  ");
+            ConsoleWriteChar((seg.flags & customos::core::kElfPfR) ? 'R' : '-');
+            ConsoleWriteChar((seg.flags & customos::core::kElfPfW) ? 'W' : '-');
+            ConsoleWriteChar((seg.flags & customos::core::kElfPfX) ? 'X' : '-');
+            ConsoleWrite("     ");
+            WriteU64Hex(seg.file_offset, 8);
+            ConsoleWriteChar('\n');
+        },
+        &cookie);
+    ConsoleWrite("EXEC: ");
+    WriteU64Dec(visited);
+    ConsoleWriteln(" PT_LOAD SEGMENTS.");
+    ConsoleWriteln("EXEC: (DRY-RUN — SPAWN PIPELINE LANDS WITH SYS_SPAWN)");
+}
+
 void CmdReadelf(u32 argc, char** argv)
 {
     if (argc < 2)
@@ -4185,6 +4251,11 @@ void Dispatch(char* line)
     if (StrEq(cmd, "readelf"))
     {
         CmdReadelf(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "exec"))
+    {
+        CmdExec(argc, argv);
         return;
     }
     if (StrEq(cmd, "hexdump"))

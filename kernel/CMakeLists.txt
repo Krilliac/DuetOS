@@ -28,6 +28,7 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     core/process.cpp
     core/reboot.cpp
     core/recovery.cpp
+    core/elf_loader.cpp
     core/ring3_smoke.cpp
     core/shell.cpp
     core/stack_canary.cpp
