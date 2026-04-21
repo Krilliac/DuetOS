@@ -1,0 +1,157 @@
+# CustomOS CI — x86_64 kernel build + QEMU boot smoke.
+#
+# Scope (v0):
+#   * check-format: enforce clang-format on kernel/ + userland/
+#   * build-debug:  freestanding x86_64 kernel, debug preset
+#   * build-release: same source, release preset
+#   * qemu-smoke:   boot the debug build in QEMU, grep the serial
+#                   log for expected boot signatures. Anything
+#                   missing (a crash, a #PF that wasn't expected,
+#                   a missing "hello-winapi" line) fails the job.
+#
+# Inspired by SparkEngine's build.yml structure (multi-stage jobs,
+# dependency-cached artifacts) but massively trimmed — no sanitizer
+# configs (freestanding kernel, no libasan), no multi-OS matrix
+# (kernel only builds on Linux hosts today), no coverage (gcov
+# doesn't work against ring-0 code). Those land when they make
+# sense.
+
+name: build
+on:
+  push:
+    branches: [main, claude/**]
+    paths-ignore:
+      - '**/*.md'
+      - 'LICENSE'
+      - '.claude/**'
+      - 'docs/**'
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+
+  check-format:
+    name: clang-format
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang-format
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18
+          sudo ln -sf /usr/bin/clang-format-18 /usr/local/bin/clang-format
+      - name: Check format
+        run: |
+          mapfile -t SRCS < <(find kernel userland \
+            \( -name '*.h' -o -name '*.hpp' -o -name '*.c' -o -name '*.cpp' \))
+          if [[ ${#SRCS[@]} -eq 0 ]]; then
+            echo "No C/C++ sources found"; exit 0
+          fi
+          clang-format --dry-run --Werror "${SRCS[@]}"
+
+  build-debug:
+    name: build debug
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 lld-18 llvm-18 cmake ninja-build python3
+          sudo ln -sf /usr/bin/clang-18 /usr/local/bin/clang
+          sudo ln -sf /usr/bin/clang++-18 /usr/local/bin/clang++
+          sudo ln -sf /usr/bin/lld-link-18 /usr/local/bin/lld-link
+          sudo ln -sf /usr/bin/llvm-dlltool-18 /usr/local/bin/llvm-dlltool
+          sudo ln -sf /usr/bin/ld.lld-18 /usr/local/bin/ld.lld
+      - name: Configure
+        run: cmake --preset x86_64-debug
+      - name: Build
+        run: cmake --build build/x86_64-debug --parallel $(nproc)
+      - name: Upload kernel
+        uses: actions/upload-artifact@v4
+        with:
+          name: customos-kernel-debug
+          path: |
+            build/x86_64-debug/customos.iso
+            build/x86_64-debug/kernel/customos-kernel.elf
+          retention-days: 7
+
+  build-release:
+    name: build release
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 lld-18 llvm-18 cmake ninja-build python3
+          sudo ln -sf /usr/bin/clang-18 /usr/local/bin/clang
+          sudo ln -sf /usr/bin/clang++-18 /usr/local/bin/clang++
+          sudo ln -sf /usr/bin/lld-link-18 /usr/local/bin/lld-link
+          sudo ln -sf /usr/bin/llvm-dlltool-18 /usr/local/bin/llvm-dlltool
+          sudo ln -sf /usr/bin/ld.lld-18 /usr/local/bin/ld.lld
+      - name: Configure
+        run: cmake --preset x86_64-release
+      - name: Build
+        run: cmake --build build/x86_64-release --parallel $(nproc)
+
+  qemu-smoke:
+    name: qemu smoke
+    needs: build-debug
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install QEMU + grub
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 grub-common grub-pc-bin \
+                                  xorriso mtools ovmf
+      - name: Download kernel artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: customos-kernel-debug
+          path: build/x86_64-debug/
+      - name: Boot + assert signatures via ctest driver
+        run: |
+          set -eo pipefail
+          cmake --preset x86_64-debug
+          # Drive the exact same script ctest would run locally
+          # so local + CI stay in sync. The downloaded artifact
+          # is at build/x86_64-debug/ already.
+          CUSTOMOS_TIMEOUT=30 \
+            tools/ctest-boot-smoke.sh build/x86_64-debug
+      - name: Upload serial log (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-serial-log
+          path: /tmp/qemu-smoke/serial.log
+          retention-days: 7
+
+  clang-tidy:
+    name: clang-tidy (advisory)
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    needs: build-debug
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tidy
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-tidy-18 clang-18 cmake ninja-build
+          sudo ln -sf /usr/bin/clang-tidy-18 /usr/local/bin/clang-tidy
+      - name: Configure (for compile_commands.json)
+        run: cmake --preset x86_64-debug -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+      - name: Run clang-tidy
+        run: |
+          # Advisory pass on the first 30 .cpp files only — a full
+          # run on a freestanding kernel produces a lot of
+          # false-positive noise. Surface the signal early, don't
+          # fail the build.
+          find kernel -name '*.cpp' | head -30 | while read f; do
+            clang-tidy -p build/x86_64-debug "$f" --quiet 2>&1 || true
+          done | head -200
