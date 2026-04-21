@@ -59,6 +59,12 @@ constexpr u32 kOffGetProcessHeap = 0x173;     // batch 9 — 8 bytes
 constexpr u32 kOffMalloc = 0x17B;             // batch 9 — 11 bytes
 constexpr u32 kOffFree = 0x186;               // batch 9 — 11 bytes
 constexpr u32 kOffCalloc = 0x191;             // batch 9 — 35 bytes
+constexpr u32 kOffOpenProcessToken = 0x1B4;   // batch 10 — 13 bytes
+constexpr u32 kOffLookupPrivVal = 0x1C1;      // batch 10 — 13 bytes
+constexpr u32 kOffInitSListHead = 0x1CE;      // batch 10 — 16 bytes
+constexpr u32 kOffGetSysTimeFT = 0x1DE;       // batch 10 — 8 bytes
+constexpr u32 kOffOpenProcess = 0x1E6;        // batch 10 — 4 bytes
+constexpr u32 kOffGetExitCodeThread = 0x1EA;  // batch 10 — 12 bytes
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -509,10 +515,82 @@ constexpr u8 kStubsBytes[] = {
     0xF3, 0xAA,                   // 0x1B0 rep stosb
     0x58,                         // 0x1B2 pop rax
     0xC3,                         // 0x1B3 ret
+
+    // === Batch 10: advapi32 + kernel32 safe-ignore expansion ==
+    //
+    // advapi32 token/privilege dance: every caller of these
+    // expects BOOL return + out-params filled in with
+    // "something plausible". v0 gives them all 1s so the
+    // setup code path proceeds to the eventual privileged
+    // operation (which we can't actually perform anyway).
+
+    // --- OpenProcessToken (offset 0x1B4, 13 bytes) -------------
+    // Win32: BOOL OpenProcessToken(HANDLE Process=rcx,
+    //                              DWORD DesiredAccess=rdx,
+    //                              PHANDLE TokenHandle=r8).
+    // Out-param: *TokenHandle = 1 (non-null fake handle).
+    // Return TRUE.
+    0x49, 0xC7, 0x00, 0x01, 0x00, 0x00, 0x00, // 0x1B4 mov qword [r8], 1
+    0xB8, 0x01, 0x00, 0x00, 0x00,             // 0x1BB mov eax, 1
+    0xC3,                                     // 0x1C0 ret
+
+    // --- LookupPrivilegeValueW (offset 0x1C1, 13 bytes) --------
+    // Win32: BOOL LookupPrivilegeValueW(LPCWSTR System=rcx,
+    //                                   LPCWSTR Name=rdx,
+    //                                   PLUID Luid=r8).
+    // Out-param: *Luid = {LowPart=1, HighPart=0} (LUID is a
+    // pair of 32-bit fields in one u64). Non-zero so
+    // AdjustTokenPrivileges doesn't treat it as invalid.
+    0x49, 0xC7, 0x00, 0x01, 0x00, 0x00, 0x00, // 0x1C1 mov qword [r8], 1
+    0xB8, 0x01, 0x00, 0x00, 0x00,             // 0x1C8 mov eax, 1
+    0xC3,                                     // 0x1CD ret
+
+    // --- InitializeSListHead (offset 0x1CE, 16 bytes) ----------
+    // Win32: void InitializeSListHead(PSLIST_HEADER=rcx).
+    // SLIST_HEADER is 16 bytes on x64 (two pointers / atomic
+    // state). Zeroing is the correct initialisation — an
+    // empty interlocked SList is all-zero.
+    0x48, 0xC7, 0x01, 0x00, 0x00, 0x00, 0x00,             // 0x1CE mov qword [rcx], 0
+    0x48, 0xC7, 0x41, 0x08, 0x00, 0x00, 0x00, 0x00,       // 0x1D5 mov qword [rcx+8], 0
+    0xC3,                                                  // 0x1DD ret
+
+    // --- GetSystemTimeAsFileTime (offset 0x1DE, 8 bytes) -------
+    // Win32: void GetSystemTimeAsFileTime(LPFILETIME=rcx).
+    // FILETIME is {u32 low; u32 high} = 8 bytes representing
+    // 100ns ticks since 1601-01-01. v0 returns 0 — programs
+    // that use this for logging timestamps will see 1601 for
+    // every log line. Real implementation would need
+    // SYS_GETTIME. Deferred.
+    0x48, 0xC7, 0x01, 0x00, 0x00, 0x00, 0x00, // 0x1DE mov qword [rcx], 0
+    0xC3,                                     // 0x1E5 ret
+
+    // --- OpenProcess (offset 0x1E6, 4 bytes) -------------------
+    // Win32: HANDLE OpenProcess(DWORD Access=rcx,
+    //                           BOOL Inherit=rdx,
+    //                           DWORD ProcessId=r8).
+    // Return the PID itself as the handle. Any later call
+    // that receives this handle (e.g. GetExitCodeProcess)
+    // can still identify the process if we ever wire up
+    // real process-handle tables. For now it's just a
+    // non-null value derived from the input so programs
+    // that sanity-check "same PID in == same handle out"
+    // still work.
+    0x4C, 0x89, 0xC0, // 0x1E6 mov rax, r8
+    0xC3,             // 0x1E9 ret
+
+    // --- GetExitCodeThread (offset 0x1EA, 12 bytes) ------------
+    // Win32: BOOL GetExitCodeThread(HANDLE=rcx, LPDWORD Exit=rdx).
+    // Out-param: *Exit = STILL_ACTIVE (0x103). Tells the
+    // caller "the thread is still running" — the safe answer
+    // for a hosted environment with no real thread exit
+    // codes. Return TRUE.
+    0xC7, 0x02, 0x03, 0x01, 0x00, 0x00,       // 0x1EA mov dword [rdx], 0x103
+    0xB8, 0x01, 0x00, 0x00, 0x00,             // 0x1F0 mov eax, 1
+    0xC3,                                     // 0x1F5 ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x1B4, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0x1F6, "stub layout drifted; update kOff* constants");
 
 struct StubEntry
 {
@@ -704,6 +782,64 @@ constexpr StubEntry kStubsTable[] = {
     {"msvcrt.dll", "free", kOffFree},
     {"msvcrt.dll", "calloc", kOffCalloc},
     {"msvcrt.dll", "realloc", kOffReturnZero},
+
+    // Batch 10 — advapi32 privilege/token + kernel32 event /
+    // wait / system-time / process shims. Mostly "return
+    // success and do nothing" since the kernel has no real
+    // security model, no multi-threading in user land, and
+    // no wall-clock yet. The exceptions are the two advapi32
+    // token stubs that fill an out-param (see stub comments)
+    // and the three kernel32 functions with real out-param
+    // contracts (InitializeSListHead, GetSystemTimeAsFileTime,
+    // GetExitCodeThread).
+
+    // advapi32 — privilege/token dance. All BOOL-returning.
+    {"advapi32.dll", "OpenProcessToken", kOffOpenProcessToken},
+    {"advapi32.dll", "LookupPrivilegeValueW", kOffLookupPrivVal},
+    // ASCII variant shares the same stub — v0 ignores the
+    // name string entirely.
+    {"advapi32.dll", "LookupPrivilegeValueA", kOffLookupPrivVal},
+    {"advapi32.dll", "AdjustTokenPrivileges", kOffReturnOne},
+    // Uppercase aliases — llvm-dlltool writes the DLL name
+    // using the .def file's LIBRARY line verbatim, but some
+    // linkers normalise to uppercase. Register both so
+    // capitalisation in the PE's import table (either way)
+    // hits the stub.
+    {"ADVAPI32.dll", "OpenProcessToken", kOffOpenProcessToken},
+    {"ADVAPI32.dll", "LookupPrivilegeValueW", kOffLookupPrivVal},
+    {"ADVAPI32.dll", "LookupPrivilegeValueA", kOffLookupPrivVal},
+    {"ADVAPI32.dll", "AdjustTokenPrivileges", kOffReturnOne},
+
+    // kernel32 — event objects (v0: no real signalling, every
+    // event is "always signaled"; CreateEventW returns a fake
+    // non-null handle; SetEvent/ResetEvent return TRUE).
+    {"kernel32.dll", "CreateEventW", kOffReturnOne},
+    {"kernel32.dll", "CreateEventA", kOffReturnOne},
+    {"kernel32.dll", "SetEvent", kOffReturnOne},
+    {"kernel32.dll", "ResetEvent", kOffReturnOne},
+
+    // kernel32 — wait (v0: immediate return with
+    // WAIT_OBJECT_0 = 0; single-threaded processes never
+    // actually block, so "already signaled" is correct for
+    // any handle they pass in).
+    {"kernel32.dll", "WaitForSingleObject", kOffReturnZero},
+    {"kernel32.dll", "WaitForSingleObjectEx", kOffReturnZero},
+
+    // kernel32 — interlocked SList (zero-init an SList head).
+    {"kernel32.dll", "InitializeSListHead", kOffInitSListHead},
+
+    // kernel32 — system time placeholder. Real impl needs
+    // a SYS_GETTIME backing syscall; deferred.
+    {"kernel32.dll", "GetSystemTimeAsFileTime", kOffGetSysTimeFT},
+
+    // kernel32 — process handles. OpenProcess returns the
+    // PID as the handle (non-null iff PID != 0). Real
+    // implementations would have a handle table; the handle
+    // value is opaque to callers so this "identity"
+    // mapping is fine.
+    {"kernel32.dll", "OpenProcess", kOffOpenProcess},
+    {"kernel32.dll", "GetExitCodeThread", kOffGetExitCodeThread},
+    {"kernel32.dll", "GenerateConsoleCtrlEvent", kOffReturnOne},
 };
 
 // Case-insensitive strcmp for ASCII. Win32 DLL name

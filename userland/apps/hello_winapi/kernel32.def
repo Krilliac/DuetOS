@@ -44,3 +44,14 @@ EXPORTS
     HeapDestroy
     HeapReAlloc
     HeapSize
+    ; Batch 10 — event/wait/time/process safe-ignore shims
+    CreateEventW
+    SetEvent
+    ResetEvent
+    WaitForSingleObject
+    WaitForSingleObjectEx
+    InitializeSListHead
+    GetSystemTimeAsFileTime
+    OpenProcess
+    GetExitCodeThread
+    GenerateConsoleCtrlEvent

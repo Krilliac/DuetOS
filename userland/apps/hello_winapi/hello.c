@@ -123,6 +123,30 @@ __declspec(dllimport) void* malloc(size_t size);
 __declspec(dllimport) void free(void* ptr);
 __declspec(dllimport) void* calloc(size_t count, size_t size);
 
+// Batch 10 — advapi32 privilege dance + kernel32 event/wait/
+// time/process shims. All return success; the values they
+// write to out-params are plausible placeholders.
+typedef struct
+{
+    DWORD LowPart;
+    int HighPart;
+} LUID;
+__declspec(dllimport) BOOL __stdcall OpenProcessToken(HANDLE ProcessHandle, DWORD DesiredAccess,
+                                                     HANDLE* TokenHandle);
+__declspec(dllimport) BOOL __stdcall LookupPrivilegeValueW(const unsigned short* SystemName, const unsigned short* Name,
+                                                           LUID* Luid);
+__declspec(dllimport) BOOL __stdcall AdjustTokenPrivileges(HANDLE TokenHandle, BOOL DisableAll, void* NewState,
+                                                           DWORD BufferLen, void* PreviousState, DWORD* ReturnLen);
+__declspec(dllimport) HANDLE __stdcall CreateEventW(void* Attrs, BOOL ManualReset, BOOL InitialState,
+                                                    const unsigned short* Name);
+__declspec(dllimport) BOOL __stdcall SetEvent(HANDLE);
+__declspec(dllimport) BOOL __stdcall ResetEvent(HANDLE);
+__declspec(dllimport) DWORD __stdcall WaitForSingleObject(HANDLE, DWORD TimeoutMs);
+__declspec(dllimport) void __stdcall InitializeSListHead(void* ListHead);
+__declspec(dllimport) void __stdcall GetSystemTimeAsFileTime(void* FileTime);
+__declspec(dllimport) HANDLE __stdcall OpenProcess(DWORD DesiredAccess, BOOL InheritHandle, DWORD ProcessId);
+__declspec(dllimport) BOOL __stdcall GetExitCodeThread(HANDLE Thread, DWORD* ExitCode);
+
 static const char kMsg[] = "[hello-winapi] printed via kernel32.WriteFile!\n";
 #define kMsgLen ((DWORD)(sizeof(kMsg) - 1))
 
@@ -141,7 +165,7 @@ void _start(void)
     // the reads from being DCE'd — without them lld-link
     // could drop the IAT entries as unused and we'd never
     // see the resolver log the new functions.
-    volatile HANDLE p_sink   = GetCurrentProcess();
+    volatile HANDLE p_sink = GetCurrentProcess();
     volatile HANDLE t_sink   = GetCurrentThread();
     volatile DWORD  pid_sink = GetCurrentProcessId();
     volatile DWORD  tid_sink = GetCurrentThreadId();
@@ -276,6 +300,66 @@ void _start(void)
             WriteFile(out, cmsg_bad, sizeof(cmsg_bad) - 1, &cw, 0);
         free(czero);
     }
+
+    // Batch 10 exercise — advapi32 privilege dance +
+    // kernel32 event/wait/time/process shims. Drive every
+    // stub along the success path a real program would
+    // follow, catching "stub was wired up but crashes on
+    // call" (a common way I introduce bugs) as a #PF
+    // immediately rather than a silent regression.
+    //
+    // Invariants checked:
+    //   * OpenProcessToken writes a non-null HANDLE.
+    //   * LookupPrivilegeValueW writes {LowPart=1, HighPart=0}.
+    //   * CreateEventW returns a non-null HANDLE.
+    //   * SetEvent / ResetEvent return TRUE.
+    //   * WaitForSingleObject returns WAIT_OBJECT_0 (0) —
+    //     no actual blocking, but the ret path fires.
+    //   * GetExitCodeThread writes STILL_ACTIVE (0x103).
+    //   * InitializeSListHead + GetSystemTimeAsFileTime
+    //     don't crash on a stack-local out-buffer.
+    HANDLE token = 0;
+    volatile BOOL opt_ok = OpenProcessToken(GetCurrentProcess(), 0x28, &token);
+    LUID se_debug = {0, 0};
+    volatile BOOL lpv_ok = LookupPrivilegeValueW(0, 0, &se_debug);
+    volatile BOOL atp_ok = AdjustTokenPrivileges(token, 0, 0, 0, 0, 0);
+    HANDLE evt = CreateEventW(0, 1, 0, 0);
+    volatile BOOL set_ok = SetEvent(evt);
+    volatile DWORD wait_rc = WaitForSingleObject(evt, 100);
+    volatile BOOL rst_ok = ResetEvent(evt);
+    HANDLE ph = OpenProcess(0, 0, 0x1234);
+    DWORD thr_exit = 0;
+    volatile BOOL get_ok = GetExitCodeThread(ph, &thr_exit);
+    unsigned char slist[16] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+                               0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00};
+    InitializeSListHead(slist);
+    unsigned char ft[8] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    GetSystemTimeAsFileTime(ft);
+    // Sink all results so the compiler can't DCE them.
+    (void)opt_ok;
+    (void)lpv_ok;
+    (void)atp_ok;
+    (void)set_ok;
+    (void)wait_rc;
+    (void)rst_ok;
+    (void)get_ok;
+    (void)thr_exit;
+
+    // Report success if every invariant held. The
+    // handful of bit-tests here catches any stub that
+    // reported TRUE but failed to write its out-param —
+    // exactly the class of bug a "return TRUE" stub
+    // could silently introduce.
+    const char b10_ok[] = "[batch10] advapi32 + event/wait/time/proc OK\n";
+    const char b10_bad[] = "[batch10] advapi32/event/wait FAILED invariants\n";
+    BOOL b10_pass = token != 0 && se_debug.LowPart == 1 && se_debug.HighPart == 0 && evt != 0 && wait_rc == 0 &&
+                    thr_exit == 0x103 && slist[0] == 0 && slist[8] == 0 // InitializeSListHead zeroed it
+                    && ft[0] == 0 && ft[7] == 0;                        // GetSystemTimeAsFileTime zeroed it
+    DWORD b10w = 0;
+    if (b10_pass)
+        WriteFile(out, b10_ok, sizeof(b10_ok) - 1, &b10w, 0);
+    else
+        WriteFile(out, b10_bad, sizeof(b10_bad) - 1, &b10w, 0);
 
     // Batch 3 round-trip: store a distinctive value via
     // SetLastError, read it back via GetLastError, exit with

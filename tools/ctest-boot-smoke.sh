@@ -62,6 +62,7 @@ expected=(
     "[heap] HeapAlloc + GetProcessHeap OK"
     "[heap] malloc+free+malloc round-trip OK"
     "[heap] calloc zero-fill OK"
+    "[batch10] advapi32 + event/wait/time/proc OK"
     "exit rc   val=0x000000000000beef"
 )
 

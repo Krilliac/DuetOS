@@ -1,4 +1,4 @@
-# Win32 subsystem v0 — import resolution + 9 stub batches (heap landed)
+# Win32 subsystem v0 — import resolution + 10 stub batches
 
 **Type:** Observation · **Status:** Active · **Last updated:** 2026-04-21
 
@@ -26,8 +26,9 @@ As of 2026-04-21, **9 batches** of stubs have landed:
 | 7 | 3 apiset DLLs + ucrtbase + msvcrt | `strcmp`, `strlen`, `wcslen`, `strchr`, `strcpy` | Pure assembly loops |
 | 8 | kernel32 | `GetModuleHandle*`, `GetProcAddress`, `IsDebuggerPresent`, `CloseHandle`, `SetConsoleCtrlHandler`, `SetUnhandledExceptionFilter`, `UnhandledExceptionFilter`, `IsProcessorFeaturePresent` | Safe-ignore shims (return 0/1) |
 | 9 | kernel32 + ucrt/msvcrt/apiset-heap | `HeapAlloc`, `HeapFree`, `GetProcessHeap`, `HeapCreate`, `HeapDestroy`, `HeapReAlloc`, `HeapSize`, `malloc`, `free`, `calloc`, `realloc`, `_aligned_malloc`, `_aligned_free` | + `SYS_HEAP_ALLOC`/`SYS_HEAP_FREE` + per-process 64 KiB heap |
+| 10 | advapi32 + kernel32 | `OpenProcessToken`, `LookupPrivilegeValue{A,W}`, `AdjustTokenPrivileges`, `CreateEvent{A,W}`, `SetEvent`, `ResetEvent`, `WaitForSingleObject{Ex}`, `InitializeSListHead`, `GetSystemTimeAsFileTime`, `OpenProcess`, `GetExitCodeThread`, `GenerateConsoleCtrlEvent` | 6 new stubs (66 bytes) + 7 aliases; new advapi32 DLL namespace |
 
-Total: **~60 Win32 functions resolved across 11 DLL names**.
+Total: **~75 Win32 functions resolved across 12 DLL names**.
 `hello_winapi.exe` exercises every batch on boot: process
 exits with `SetLastError(0xBEEF)` round-trip as the success
 signature.
