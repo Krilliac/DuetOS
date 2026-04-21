@@ -607,6 +607,45 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 099 — Shell system-manipulation command suite (29 new commands)
+
+- **Scope:** `kernel/core/shell.cpp` — one batch of 20 kernel-
+  introspection / control commands (cpuid, cr, rflags, tsc, msr,
+  hpet, ticks, lapic, smp, lspci, heap, paging, fb, kbdstats,
+  mousestats, loglevel, getenv, yield, reboot, halt) plus a
+  second batch of 9 POSIX-compat stubs (uname, whoami, hostname,
+  pwd, true, false, mount, lsmod, free). New `WriteU64Hex`
+  helper shared by every register-dump command.
+- **Decision:** All commands are thin wrappers around existing
+  kernel accessors. The register-dump commands roll inline
+  asm (cpuid, rdmsr, rdtsc, pushfq) rather than taking a
+  dependency on a cpu.h extension — keeps the kernel core
+  unchanged. Power commands (`reboot`, `halt`) don't prompt
+  for confirmation; the user typed them intentionally.
+  Freestanding-build gotcha: avoid in-function struct arrays
+  like `const Bit bits[] = {...}` — they emit a memcpy from
+  .rodata that the kernel doesn't link. Use parallel
+  primitive-array locals instead.
+- **Why:** The user explicitly asked for every possible
+  getter / setter / manipulator command — this batch cashes
+  in on every kernel API the tree already exposes. Also
+  closes the gap between "system looks real" and "system
+  answers diagnostic questions like a real OS."
+- **Rules out / defers:** MSR writes (wrmsr can brick the
+  CPU with bad values). `reboot` confirmation prompt.
+  `mount` / `lsmod` as genuine reflection (they're static
+  strings). True per-task `ps` (scheduler doesn't expose a
+  task enumerator yet). Nested CPUID subleaf parsing.
+- **Revisit when:** SYS_SPAWN lands (`reboot` could warn
+  about active processes first; `ps` becomes real).
+  Per-task accounting (`free` grows a per-task column).
+  Writable MSR subset approved (some runtime tuning).
+- **Related tracks:** Track 7 (Userland shell — all 29
+  commands live here), Track 2 (Platform — register /
+  device introspection).
+
+---
+
 ## 098 — Shell pipes (`|`) via console capture + tmpfs transport
 
 - **Scope:** `kernel/drivers/video/console.{h,cpp}` — new
