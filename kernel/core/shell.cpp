@@ -1772,6 +1772,8 @@ void CmdMsr(u32 argc, char** argv)
     {
         ConsoleWriteln("MSR: USAGE: MSR <HEX-INDEX>");
         ConsoleWriteln("   EXAMPLES: MSR C0000080 (EFER)  MSR 1B (APIC BASE)");
+        ConsoleWriteln("   ALLOWED: 10 1B C0000080 C0000081 C0000082 C0000084");
+        ConsoleWriteln("            C0000100 C0000101 C0000102");
         return;
     }
     u32 idx = 0;
@@ -1792,11 +1794,46 @@ void CmdMsr(u32 argc, char** argv)
             return;
         }
     }
-    // rdmsr can #GP on a reserved index. The kernel's trap
-    // handler will panic loudly, so only run this on MSRs the
-    // user knows are safe. v0: no protection — an invalid
-    // MSR here crashes the system. Document clearly and trust
-    // the user.
+    // rdmsr on a reserved / model-specific index raises #GP. The
+    // kernel's trap handler will then panic and halt the box —
+    // turning an interactive diagnostic into a denial-of-service
+    // primitive for any operator with a keyboard. Gate reads to
+    // the architectural indices the kernel already touches plus
+    // the handful that are useful for boot-up diagnosis; anything
+    // outside the list returns a polite "not allowed" and leaves
+    // the CPU alone.
+    //
+    //   0x00000010            IA32_TSC
+    //   0x0000001B            IA32_APIC_BASE
+    //   0xC0000080            IA32_EFER
+    //   0xC0000081..0xC0000084 IA32_STAR / LSTAR / CSTAR / FMASK
+    //   0xC0000100..0xC0000102 IA32_FS_BASE / GS_BASE / KERNEL_GS_BASE
+    //
+    // Every entry above is guaranteed readable on any x86_64 CPU
+    // the kernel supports; none can be made #GP by a guest-side
+    // misconfiguration. Adding more is fine — the rule is "only
+    // architectural MSRs the kernel itself relies on, never a
+    // model-specific bank we haven't verified."
+    static constexpr u32 kMsrWhitelist[] = {
+        0x00000010u, 0x0000001Bu, 0xC0000080u, 0xC0000081u, 0xC0000082u,
+        0xC0000083u, 0xC0000084u, 0xC0000100u, 0xC0000101u, 0xC0000102u,
+    };
+    bool allowed = false;
+    for (u32 i = 0; i < sizeof(kMsrWhitelist) / sizeof(kMsrWhitelist[0]); ++i)
+    {
+        if (kMsrWhitelist[i] == idx)
+        {
+            allowed = true;
+            break;
+        }
+    }
+    if (!allowed)
+    {
+        ConsoleWrite("MSR ");
+        WriteU64Hex(idx, 8);
+        ConsoleWriteln(":  NOT ALLOWED (reserved index would #GP the kernel)");
+        return;
+    }
     ConsoleWrite("MSR ");
     WriteU64Hex(idx, 8);
     ConsoleWrite(":  ");
