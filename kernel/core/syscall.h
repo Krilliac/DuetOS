@@ -119,6 +119,29 @@ enum SyscallNumber : u64
     // time and timing info, but so does any millisecond-
     // resolution clock; we accept it.
     SYS_PERF_COUNTER = 13,
+
+    // SYS_HEAP_SIZE: rdi = user pointer previously returned
+    // by SYS_HEAP_ALLOC. Returns the block's payload
+    // capacity in bytes (the rounded-up allocation size
+    // recorded in the block header, minus the 16-byte
+    // header). Returns 0 for a null pointer or a pointer
+    // outside the caller's heap region. Backs Win32
+    // HeapSize.
+    SYS_HEAP_SIZE = 14,
+
+    // SYS_HEAP_REALLOC: rdi = existing user pointer (may be
+    // 0 to request a fresh allocation), rsi = new requested
+    // size in bytes. Returns the new user VA (possibly
+    // equal to rdi if the existing block already fit) or 0
+    // on failure. Semantics: if rdi == 0, equivalent to
+    // SYS_HEAP_ALLOC(rsi). If rsi == 0, frees rdi and
+    // returns 0 (ucrt-realloc convention). Otherwise, if
+    // the existing block's payload is already >= rsi the
+    // same pointer comes back unchanged; if not, a new
+    // block is allocated, the old payload is copied across,
+    // and the old block is freed. Backs Win32 HeapReAlloc,
+    // ucrt realloc, msvcrt realloc.
+    SYS_HEAP_REALLOC = 15,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit

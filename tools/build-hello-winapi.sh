@@ -79,13 +79,17 @@ done
     -o "${OBJ}"
 
 # Link. No /align:4096 — we want the real-world default
-# FileAlignment=512 that the PE loader now accepts.
+# FileAlignment=512 that the PE loader now accepts. Also
+# default /dynamicbase, which emits a real .reloc directory —
+# the base-reloc slice of the loader walks it (delta is 0 in
+# v0 so no addresses actually change, but the walk catches a
+# malformed .reloc table up front and keeps the test fixture
+# shape aligned with real-world MSVC-linked PEs).
 "${LLD_LINK}" \
     /subsystem:console \
     /entry:_start \
     /nodefaultlib \
     /base:0x140000000 \
-    /dynamicbase:no \
     /out:"${EXE}" \
     "${OBJ}" \
     "${GEN_LIBS[@]}" 2>&1 | grep -v "align specified without /driver" || true

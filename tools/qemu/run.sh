@@ -54,6 +54,17 @@ else
     exit 1
 fi
 
+# Scratch NVMe image. 16 MiB raw file; first 8 bytes are a
+# well-known marker ("CUSTOMOS") the kernel reads back in the
+# boot self-test so a successful LBA 0 read is grep-able. Kept
+# in the build directory so it rebuilds per-preset and never
+# pollutes the source tree.
+NVME_IMAGE="${BUILD_DIR}/nvme0.img"
+if [[ ! -f "${NVME_IMAGE}" ]]; then
+    dd if=/dev/zero of="${NVME_IMAGE}" bs=1M count=16 status=none
+    printf 'CUSTOMOS' | dd of="${NVME_IMAGE}" bs=1 seek=0 count=8 conv=notrunc status=none
+fi
+
 QEMU_ARGS=(
     -machine  q35
     -cpu      max
@@ -64,6 +75,8 @@ QEMU_ARGS=(
     -no-shutdown
     -d        int,cpu_reset
     -D        qemu.log
+    -drive    "file=${NVME_IMAGE},if=none,id=nvme0,format=raw"
+    -device   "nvme,serial=cafebabe,drive=nvme0"
     "${BOOT_SOURCE[@]}"
 )
 

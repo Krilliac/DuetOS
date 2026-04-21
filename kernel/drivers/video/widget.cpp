@@ -16,9 +16,9 @@ namespace
 
 // Widget table. Flat array sized for boot-time widgets; grows to
 // a dynamic structure once there are more than a handful on
-// screen. Seven is enough for a v0 demo (one clickable button +
-// room to spare).
-constexpr u32 kMaxWidgets = 8;
+// screen. 32 accommodates the Calculator app's 4x4 keypad
+// (16 buttons) plus reserve for another app of similar size.
+constexpr u32 kMaxWidgets = 32;
 constinit ButtonWidget g_widgets[kMaxWidgets] = {};
 constinit u32 g_widget_count = 0;
 

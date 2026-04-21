@@ -86,4 +86,29 @@ u64 Win32HeapAlloc(customos::core::Process* proc, u64 size);
 /// [heap_base, heap_base + heap_pages * 4096)".
 void Win32HeapFree(customos::core::Process* proc, u64 user_ptr);
 
+/// Report the payload capacity in bytes of a block previously
+/// returned by Win32HeapAlloc. Returns 0 for a null pointer
+/// or a pointer outside the heap region. The capacity
+/// reported is the rounded-up block size minus the 16-byte
+/// header — callers observe the full space the allocator
+/// reserved, not the original requested size. Backs Win32
+/// HeapSize.
+u64 Win32HeapSize(customos::core::Process* proc, u64 user_ptr);
+
+/// Resize a heap block. Semantics mirror ucrt realloc:
+///   * user_ptr == 0         -> equivalent to Win32HeapAlloc(new_size).
+///   * new_size == 0         -> frees user_ptr, returns 0.
+///   * new_size <= existing  -> returns user_ptr unchanged.
+///   * otherwise             -> allocates a new block, copies
+///                              the old payload across, frees
+///                              the old block, returns the new
+///                              user VA (or 0 on alloc failure,
+///                              leaving user_ptr unchanged).
+///
+/// Not an in-place resizer — v0 has no coalescing and
+/// therefore cannot grow a block into an adjacent free
+/// region. The copy path walks the heap one page-chunk at
+/// a time through the AS lookup used by PeekU64/PokeU64.
+u64 Win32HeapRealloc(customos::core::Process* proc, u64 user_ptr, u64 new_size);
+
 } // namespace customos::win32

@@ -224,6 +224,25 @@ void SyscallDispatch(arch::TrapFrame* frame)
         return;
     }
 
+    case SYS_HEAP_SIZE:
+    {
+        // rdi = user ptr. Returns payload capacity in bytes
+        // (block header size - 16). 0 for null / out-of-range.
+        Process* proc = CurrentProcess();
+        frame->rax = (proc != nullptr) ? win32::Win32HeapSize(proc, frame->rdi) : 0;
+        return;
+    }
+
+    case SYS_HEAP_REALLOC:
+    {
+        // rdi = existing user ptr (or 0), rsi = new size.
+        // Returns new user VA or 0 on failure (see
+        // Win32HeapRealloc doc comment for full semantics).
+        Process* proc = CurrentProcess();
+        frame->rax = (proc != nullptr) ? win32::Win32HeapRealloc(proc, frame->rdi, frame->rsi) : 0;
+        return;
+    }
+
     case SYS_PERF_COUNTER:
     {
         // No args. Return the kernel tick counter —

@@ -68,6 +68,9 @@ constexpr u32 kOffGetExitCodeThread = 0x1EA;  // batch 10 — 12 bytes
 constexpr u32 kOffQueryPerfCounter = 0x1F6;   // batch 11 — 16 bytes
 constexpr u32 kOffQueryPerfFreq = 0x206;      // batch 11 — 13 bytes
 constexpr u32 kOffGetTickCount = 0x213;       // batch 11 — 12 bytes (shared w/ GetTickCount64)
+constexpr u32 kOffHeapSize = 0x21F;           // batch 14 — 11 bytes
+constexpr u32 kOffHeapRealloc = 0x22A;        // batch 14 — 14 bytes
+constexpr u32 kOffRealloc = 0x238;            // batch 14 — 14 bytes
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -631,10 +634,51 @@ constexpr u8 kStubsBytes[] = {
     0xCD, 0x80,                   // 0x218 int 0x80
     0x48, 0x6B, 0xC0, 0x0A,       // 0x21A imul rax, rax, 10 ; ticks -> ms
     0xC3,                         // 0x21E ret
+
+    // === Batch 14: real HeapSize + HeapReAlloc ================
+    //
+    // Upgrades the v0 "return 0" stubs from batch 9 to real
+    // syscalls backed by kernel/subsystems/win32/heap.cpp.
+    // Payload-capacity tracking falls out for free from the
+    // 16-byte block header the allocator already writes — the
+    // kernel reads `header.size` and subtracts kHeaderSize.
+
+    // --- HeapSize (offset 0x21F, 11 bytes) ---------------------
+    // Win32: SIZE_T HeapSize(HANDLE hHeap=rcx, DWORD dwFlags=rdx, LPCVOID lpMem=r8).
+    // Ignores hHeap + dwFlags (v0 has one heap per process).
+    // Pass lpMem through rdi to SYS_HEAP_SIZE = 14; kernel
+    // returns the block's payload capacity in rax.
+    0x4C, 0x89, 0xC7,             // 0x21F mov rdi, r8
+    0xB8, 0x0E, 0x00, 0x00, 0x00, // 0x222 mov eax, 14 (SYS_HEAP_SIZE)
+    0xCD, 0x80,                   // 0x227 int 0x80
+    0xC3,                         // 0x229 ret
+
+    // --- HeapReAlloc (offset 0x22A, 14 bytes) ------------------
+    // Win32: LPVOID HeapReAlloc(HANDLE hHeap=rcx, DWORD dwFlags=rdx,
+    //                           LPVOID lpMem=r8, SIZE_T dwBytes=r9).
+    // Translate to the two-arg SYS_HEAP_REALLOC = 15: rdi =
+    // lpMem (r8), rsi = dwBytes (r9). hHeap + dwFlags ignored.
+    // Return value in rax (new VA, or 0 on failure).
+    0x4C, 0x89, 0xC7,             // 0x22A mov rdi, r8
+    0x4C, 0x89, 0xCE,             // 0x22D mov rsi, r9
+    0xB8, 0x0F, 0x00, 0x00, 0x00, // 0x230 mov eax, 15 (SYS_HEAP_REALLOC)
+    0xCD, 0x80,                   // 0x235 int 0x80
+    0xC3,                         // 0x237 ret
+
+    // --- realloc (offset 0x238, 14 bytes) ----------------------
+    // Win32/ucrt: void* realloc(void* ptr=rcx, size_t size=rdx).
+    // Same syscall as HeapReAlloc but arguments come from
+    // rcx / rdx (standard C calling convention position) —
+    // shuffle into rdi / rsi and invoke.
+    0x48, 0x89, 0xCF,             // 0x238 mov rdi, rcx
+    0x48, 0x89, 0xD6,             // 0x23B mov rsi, rdx
+    0xB8, 0x0F, 0x00, 0x00, 0x00, // 0x23E mov eax, 15 (SYS_HEAP_REALLOC)
+    0xCD, 0x80,                   // 0x243 int 0x80
+    0xC3,                         // 0x245 ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x21F, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0x246, "stub layout drifted; update kOff* constants");
 
 struct StubEntry
 {
@@ -790,15 +834,12 @@ constexpr StubEntry kStubsTable[] = {
     // TRUE (we never actually free the heap pages).
     {"kernel32.dll", "HeapCreate", kOffGetProcessHeap},
     {"kernel32.dll", "HeapDestroy", kOffReturnOne},
-    // HeapReAlloc: v0 returns NULL (allocation failed). A
-    // well-behaved caller keeps its old pointer on NULL
-    // return. Real realloc support needs block-size tracking
-    // via the header — deferred.
-    {"kernel32.dll", "HeapReAlloc", kOffReturnZero},
-    // HeapSize: v0 returns 0 as a sentinel. Proper
-    // implementation would read the 8-byte size header
-    // preceding the pointer. Deferred.
-    {"kernel32.dll", "HeapSize", kOffReturnZero},
+    // HeapReAlloc / HeapSize: backed by SYS_HEAP_REALLOC +
+    // SYS_HEAP_SIZE as of batch 14 — block header carries the
+    // rounded-up size so we can translate both operations
+    // without extra per-block bookkeeping.
+    {"kernel32.dll", "HeapReAlloc", kOffHeapRealloc},
+    {"kernel32.dll", "HeapSize", kOffHeapSize},
 
     // UCRT / msvcrt / apiset heap names — all forward to the
     // same syscall-backed stubs. realloc returns NULL; malloc
@@ -806,7 +847,7 @@ constexpr StubEntry kStubsTable[] = {
     {"api-ms-win-crt-heap-l1-1-0.dll", "malloc", kOffMalloc},
     {"api-ms-win-crt-heap-l1-1-0.dll", "free", kOffFree},
     {"api-ms-win-crt-heap-l1-1-0.dll", "calloc", kOffCalloc},
-    {"api-ms-win-crt-heap-l1-1-0.dll", "realloc", kOffReturnZero},
+    {"api-ms-win-crt-heap-l1-1-0.dll", "realloc", kOffRealloc},
     // _aligned_malloc / _aligned_free: v0 ignores alignment.
     // The allocator already returns 8-byte aligned pointers,
     // which covers most callers (16-byte alignment failure
@@ -818,14 +859,14 @@ constexpr StubEntry kStubsTable[] = {
     {"ucrtbase.dll", "malloc", kOffMalloc},
     {"ucrtbase.dll", "free", kOffFree},
     {"ucrtbase.dll", "calloc", kOffCalloc},
-    {"ucrtbase.dll", "realloc", kOffReturnZero},
+    {"ucrtbase.dll", "realloc", kOffRealloc},
     {"ucrtbase.dll", "_aligned_malloc", kOffMalloc},
     {"ucrtbase.dll", "_aligned_free", kOffFree},
 
     {"msvcrt.dll", "malloc", kOffMalloc},
     {"msvcrt.dll", "free", kOffFree},
     {"msvcrt.dll", "calloc", kOffCalloc},
-    {"msvcrt.dll", "realloc", kOffReturnZero},
+    {"msvcrt.dll", "realloc", kOffRealloc},
 
     // Batch 10 — advapi32 privilege/token + kernel32 event /
     // wait / system-time / process shims. Mostly "return

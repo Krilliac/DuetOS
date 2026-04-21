@@ -30,11 +30,61 @@ As of 2026-04-21, **9 batches** of stubs have landed:
 | 11 | kernel32 | `QueryPerformanceCounter`, `QueryPerformanceFrequency`, `GetTickCount{64}`, `RtlCapture{Context,StackBackTrace}`, `RtlLookupFunctionEntry`, `RtlVirtualUnwind`, `CreateToolhelp32Snapshot`, `Process32{First,Next}{A,W}`, `CreateRemoteThread`, `ResumeThread`, `GetExitCodeProcess` | + `SYS_PERF_COUNTER` backed by `arch::TimerTicks()`; 3 new stubs (41 bytes) + 12 no-op aliases |
 | 12 | dbghelp + vcruntime140 + api-ms-win-crt-convert + ucrtbase + msvcrt | `SymInitialize`, `SymCleanup`, `SymFromAddr`, `__CxxFrameHandler3`, `__C_specific_handler`, `_CxxThrowException`, `_purecall`, `__std_terminate`, `__std_exception_{copy,destroy}`, `__vcrt_InitializeCriticalSectionEx`, `strtoul`, `strtol`, `atoi`, `atol` | All aliases — no new bytecode. Advances windows-kill.exe resolution from `dbghelp.dll!SymCleanup` → `MSVCP140.dll!?_Xbad_alloc@std@@YAXXZ` (C++ std runtime, batch 13 material) |
 | 13a | MSVCP140 | `?_Xbad_alloc@std@@YAXXZ`, `?_Xlength_error@std@@YAXPEBD@Z`, `?_Xout_of_range@std@@YAXPEBD@Z`, `?_Syserror_map@std@@YAPEBDH@Z`, `?_Winerror_map@std@@YAHH@Z`, `?_Winerror_message@std@@YAKKPEADK@Z`, `?uncaught_exception@std@@YA_NXZ` | Throw helpers → `kOffTerminate`; small-return helpers → `kOffReturnZero`. Advances winkill resolution to `?cout@std@@...` — batch 13b territory (pseudo-ostream needed) |
+| 14 | kernel32 + ucrt/msvcrt/apiset-heap | `HeapSize`, `HeapReAlloc`, `realloc` (upgrade from the v0 return-zero stubs) | + `SYS_HEAP_SIZE = 14`, `SYS_HEAP_REALLOC = 15`. Block header already tracks rounded-up size; realloc copies page-chunk at a time through `AddressSpaceLookupUserFrame`. 39 new bytecode bytes. |
 
 Total: **~122 Win32 functions resolved across 14 DLL names** (+ MSVCP140).
 `hello_winapi.exe` exercises every batch on boot: process
 exits with `SetLastError(0xBEEF)` round-trip as the success
 signature.
+
+## Batch 14 — real HeapSize + HeapReAlloc
+
+Batch 9 registered `HeapReAlloc`, `HeapSize`, and ucrt
+`realloc` as aliases to `kOffReturnZero` with the note "deferred
+until we track per-block size." Re-reading batch 9 revealed the
+block header **already** carries the rounded-up size — every
+`Win32HeapAlloc` writes `header.size = needed` (= payload +
+kHeaderSize). No allocator changes needed; the information is
+sitting there.
+
+Three new stubs (39 bytes total), two new syscalls:
+
+- `SYS_HEAP_SIZE = 14` — rdi = user ptr; returns
+  `header.size - kHeaderSize` (payload capacity) or 0 on
+  invalid/null ptr.
+- `SYS_HEAP_REALLOC = 15` — rdi = user ptr (may be 0),
+  rsi = new size. Mirrors ucrt realloc semantics:
+  - ptr == 0 → `SYS_HEAP_ALLOC(rsi)` (malloc fallback).
+  - size == 0 → free + return 0.
+  - new_size ≤ existing payload → same pointer back.
+  - otherwise → new alloc, copy old payload, free old.
+
+The copy walks the heap one page-chunk at a time through
+`AddressSpaceLookupUserFrame`, so blocks straddling page
+boundaries (block alignment is 8 bytes, not 4 KiB) copy
+correctly. Each chunk is `min(remaining, src_page_room,
+dst_page_room)`.
+
+The hello_winapi smoke probe exercises the grow path: allocate
+100 bytes, write a known byte at offset 0, HeapSize reports
+≥ 100, HeapReAlloc to 1024 (forces allocate-copy-free because
+the rounded-up old block is ~104 bytes), HeapSize on the new
+pointer reports ≥ 1024, the known byte survived. Then
+`realloc(NULL, 32)` + `realloc(ptr, 0)` covers the two
+degenerate cases. Success prints `[batch14] HeapSize +
+HeapReAlloc + realloc OK`.
+
+### Why no shrink-in-place
+
+v0 has no coalescing. Splitting a block on shrink produces an
+orphan free fragment that can't merge with its neighbor at
+free-time. The allocator would leak addressable space slowly
+across long-running processes. Same-pointer-on-shrink is
+correct (callers observe a block at least as large as they
+requested) and keeps fragmentation bounded by the alloc path's
+min-split rule. Upgrade when (a) coalescing lands, or (b) a
+workload surfaces a real memory-footprint problem caused by
+this decision.
 
 ## Batch 9 — process heap
 
@@ -275,6 +325,11 @@ in `kStubsTable` through aliasing.
 | 8 | `SYS_GETPROCID` | 2 | Returns `CurrentProcess()->pid` |
 | 9 | `SYS_GETLASTERROR` | 3 | Returns `Process.win32_last_error` |
 | 10 | `SYS_SETLASTERROR` | 3 | Writes `Process.win32_last_error`; returns previous value |
+| 11 | `SYS_HEAP_ALLOC` | 9 | First-fit payload allocation from per-process heap |
+| 12 | `SYS_HEAP_FREE` | 9 | Prepend-to-free-list, no coalescing |
+| 13 | `SYS_PERF_COUNTER` | 11 | Raw tick counter (100 Hz) |
+| 14 | `SYS_HEAP_SIZE` | 14 | Block header → payload capacity |
+| 15 | `SYS_HEAP_REALLOC` | 14 | alloc + page-chunk copy + free |
 
 All are unprivileged (no cap check) — they only touch the
 caller's own state.
@@ -315,13 +370,11 @@ Ordered roughly by ROI for getting `windows-kill.exe` to run:
    Small work; deferred only because winkill currently fails
    before reaching them.
 
-3. **Base relocation application.** Our loader rejects any PE
-   with a non-empty `.reloc` directory. Walking
-   `IMAGE_REL_BASED_DIR64` entries and adjusting absolute
-   addresses by `actual_base - preferred_base` is ~40 lines.
-   Unlocks loading any PE at a non-preferred ImageBase,
-   including hostile images that can't be guaranteed a
-   specific VA.
+3. ~~Base relocation application~~ — landed. Loader accepts
+   PEs with a non-empty `.reloc` directory; `ApplyRelocations`
+   walks the blocks and is ready to patch DIR64 entries when
+   an ASLR slice supplies a nonzero delta. See
+   [pe-base-reloc-v0.md](pe-base-reloc-v0.md).
 
 4. **TLS callback dispatch.** `windows-kill.exe` has a TLS
    directory (though the callback list is empty). A real Win32
