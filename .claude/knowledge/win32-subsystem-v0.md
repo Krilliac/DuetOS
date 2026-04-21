@@ -1,4 +1,4 @@
-# Win32 subsystem v0 — import resolution + 11 stub batches
+# Win32 subsystem v0 — import resolution + 12 stub batches
 
 **Type:** Observation · **Status:** Active · **Last updated:** 2026-04-21
 
@@ -28,8 +28,9 @@ As of 2026-04-21, **9 batches** of stubs have landed:
 | 9 | kernel32 + ucrt/msvcrt/apiset-heap | `HeapAlloc`, `HeapFree`, `GetProcessHeap`, `HeapCreate`, `HeapDestroy`, `HeapReAlloc`, `HeapSize`, `malloc`, `free`, `calloc`, `realloc`, `_aligned_malloc`, `_aligned_free` | + `SYS_HEAP_ALLOC`/`SYS_HEAP_FREE` + per-process 64 KiB heap |
 | 10 | advapi32 + kernel32 | `OpenProcessToken`, `LookupPrivilegeValue{A,W}`, `AdjustTokenPrivileges`, `CreateEvent{A,W}`, `SetEvent`, `ResetEvent`, `WaitForSingleObject{Ex}`, `InitializeSListHead`, `GetSystemTimeAsFileTime`, `OpenProcess`, `GetExitCodeThread`, `GenerateConsoleCtrlEvent` | 6 new stubs (66 bytes) + 7 aliases; new advapi32 DLL namespace |
 | 11 | kernel32 | `QueryPerformanceCounter`, `QueryPerformanceFrequency`, `GetTickCount{64}`, `RtlCapture{Context,StackBackTrace}`, `RtlLookupFunctionEntry`, `RtlVirtualUnwind`, `CreateToolhelp32Snapshot`, `Process32{First,Next}{A,W}`, `CreateRemoteThread`, `ResumeThread`, `GetExitCodeProcess` | + `SYS_PERF_COUNTER` backed by `arch::TimerTicks()`; 3 new stubs (41 bytes) + 12 no-op aliases |
+| 12 | dbghelp + vcruntime140 + api-ms-win-crt-convert + ucrtbase + msvcrt | `SymInitialize`, `SymCleanup`, `SymFromAddr`, `__CxxFrameHandler3`, `__C_specific_handler`, `_CxxThrowException`, `_purecall`, `__std_terminate`, `__std_exception_{copy,destroy}`, `__vcrt_InitializeCriticalSectionEx`, `strtoul`, `strtol`, `atoi`, `atol` | All aliases — no new bytecode. Advances windows-kill.exe resolution from `dbghelp.dll!SymCleanup` → `MSVCP140.dll!?_Xbad_alloc@std@@YAXXZ` (C++ std runtime, batch 13 material) |
 
-Total: **~90 Win32 functions resolved across 12 DLL names**.
+Total: **~115 Win32 functions resolved across 14 DLL names**.
 `hello_winapi.exe` exercises every batch on boot: process
 exits with `SetLastError(0xBEEF)` round-trip as the success
 signature.

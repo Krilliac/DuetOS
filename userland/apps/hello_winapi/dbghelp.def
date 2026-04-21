@@ -1,0 +1,14 @@
+; dbghelp.def
+;
+; Minimal Win32 dbghelp stubs for symbol-lookup code paths
+; (crash handlers, stack walkers). v0 semantic: SymInitialize
+; succeeds, SymFromAddr reports "address not found", SymCleanup
+; succeeds. Programs that use dbghelp only for crash logging
+; get empty reports but don't fault on the call itself.
+
+LIBRARY dbghelp.dll
+
+EXPORTS
+    SymInitialize
+    SymCleanup
+    SymFromAddr

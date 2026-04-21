@@ -17,3 +17,14 @@ EXPORTS
     memset
     memcpy
     memmove
+    ; Batch 12 — SEH + C++ ABI intrinsics (stubs: terminate
+    ; on call for anything that implies a thrown exception;
+    ; return 0 / no-op for the benign ones)
+    __CxxFrameHandler3
+    __C_specific_handler
+    _CxxThrowException
+    _purecall
+    __std_terminate
+    __std_exception_copy
+    __std_exception_destroy
+    __vcrt_InitializeCriticalSectionEx

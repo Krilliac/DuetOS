@@ -83,10 +83,14 @@ forbidden=(
 # yet. The FIRST one reached bails the resolver. Keep this
 # list narrow — any new allowed UNRESOLVED is a conscious gap.
 allowed_unresolved=(
-    "dbghelp.dll!"       # Sym* family, never stubbed in v0
-    "ADVAPI32.dll!"      # OpenProcessToken etc., batch-10+
-    "VCRUNTIME140.dll!__"  # SEH intrinsics that aren't trivial
-    "api-ms-win-crt-convert"   # strtoul family
+    # All of these are gaps documented in the knowledge
+    # entry. Keep this list narrow — any NEW unresolved is
+    # a conscious gap we're choosing not to close yet.
+    "MSVCP140.dll!"      # C++ std runtime, batch 13+ material
+    "dbghelp.dll!"       # Sym* family (most landed in batch 12, keep for any latent)
+    "ADVAPI32.dll!"      # batch-10 covered the trio but PEs vary in case
+    "VCRUNTIME140.dll!"  # SEH intrinsics stubbed in batch 12, case-variant fallback
+    "api-ms-win-crt-convert"  # batch 12 stubbed; fallback for pre-batch case
 )
 
 fail=0

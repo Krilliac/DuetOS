@@ -923,6 +923,48 @@ constexpr StubEntry kStubsTable[] = {
     {"kernel32.dll", "CreateRemoteThread", kOffReturnZero},
     {"kernel32.dll", "ResumeThread", kOffReturnZero},
     {"kernel32.dll", "GetExitCodeProcess", kOffGetExitCodeThread},
+
+    // Batch 12 — dbghelp + vcruntime SEH + UCRT convert.
+    // All aliases to existing stubs; no new bytecode.
+    //
+    // dbghelp: symbol-table code paths. Succeed-but-find-nothing
+    // is the safe stub semantic for crash loggers that call
+    // SymFromAddr — they'll print "address=0x???" instead of
+    // "file:line", but never fault.
+    {"dbghelp.dll", "SymInitialize", kOffReturnOne},
+    {"dbghelp.dll", "SymCleanup", kOffReturnOne},
+    {"dbghelp.dll", "SymFromAddr", kOffReturnZero},
+
+    // vcruntime SEH / C++ ABI — any program that actually
+    // throws or dispatches a pure-virtual call will hit these.
+    // We route them to SYS_EXIT(3) so a crash is visible in
+    // the log (rc=0x3) rather than a silent #PF. Non-terminal
+    // ones return 0.
+    {"vcruntime140.dll", "__CxxFrameHandler3", kOffTerminate},
+    {"vcruntime140.dll", "__C_specific_handler", kOffTerminate},
+    {"vcruntime140.dll", "_CxxThrowException", kOffTerminate},
+    {"vcruntime140.dll", "_purecall", kOffTerminate},
+    {"vcruntime140.dll", "__std_terminate", kOffTerminate},
+    {"vcruntime140.dll", "__std_exception_copy", kOffReturnZero},
+    {"vcruntime140.dll", "__std_exception_destroy", kOffReturnZero},
+    // Same shape as InitCritSec: zero-init 40 bytes at [rcx].
+    {"vcruntime140.dll", "__vcrt_InitializeCriticalSectionEx", kOffInitCritSec},
+
+    // UCRT convert — return 0 for every parse. Callers that
+    // check errno get the wrong answer (we don't wire errno)
+    // but won't crash.
+    {"api-ms-win-crt-convert-l1-1-0.dll", "strtoul", kOffReturnZero},
+    {"api-ms-win-crt-convert-l1-1-0.dll", "strtol", kOffReturnZero},
+    {"api-ms-win-crt-convert-l1-1-0.dll", "atoi", kOffReturnZero},
+    {"api-ms-win-crt-convert-l1-1-0.dll", "atol", kOffReturnZero},
+    {"ucrtbase.dll", "strtoul", kOffReturnZero},
+    {"ucrtbase.dll", "strtol", kOffReturnZero},
+    {"ucrtbase.dll", "atoi", kOffReturnZero},
+    {"ucrtbase.dll", "atol", kOffReturnZero},
+    {"msvcrt.dll", "strtoul", kOffReturnZero},
+    {"msvcrt.dll", "strtol", kOffReturnZero},
+    {"msvcrt.dll", "atoi", kOffReturnZero},
+    {"msvcrt.dll", "atol", kOffReturnZero},
 };
 
 // Case-insensitive strcmp for ASCII. Win32 DLL name
