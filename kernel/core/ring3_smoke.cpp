@@ -1315,6 +1315,172 @@ void SpawnPtrFuzzProbeTask()
     sched::SchedCreateUser(&Ring3UserEntry, nullptr, "ring3-ptrfuzz-probe", proc);
 }
 
+// writefuzz probe — the CopyToUser sibling of ptrfuzz. Ptrfuzz
+// covers `SYS_WRITE`, which exercises `CopyFromUser`. This probe
+// covers the write-direction of the pointer validator:
+// `CopyToUser` inside `SYS_STAT` (writes a `u64` size) and
+// `SYS_READ` (writes file bytes). A trusted task with
+// `kCapFsRead` issues four syscalls that ALL hit valid lookups
+// (so the call actually reaches `CopyToUser`) but supply wild
+// DESTINATION pointers:
+//
+//   1. SYS_STAT(/etc/version, dst=NULL)
+//      IsUserAddressRange(0, 8) passes (0 ≤ kUserMax); walker
+//      finds no PTE → IsUserRangeAccessible → false → -1.
+//   2. SYS_STAT(/etc/version, dst=0xFFFFFFFF80000000)
+//      kernel-half, > kUserMax → range-check reject → -1.
+//   3. SYS_READ(/etc/version, dst=0xDEADBEEF00000000, cap=128)
+//      non-canonical, > kUserMax → range-check reject → -1.
+//   4. SYS_READ(/etc/version, dst=0x7FFFFFFFFFFE, cap=256)
+//      to_copy clamps to file_size (27 for /etc/version);
+//      rsi + 26 = 0x800000000018 > kUserMax →
+//      range-check reject → -1.
+//
+// Each call must return -1 WITHOUT the kernel writing a byte to
+// the bogus address. After the four attacks, a control
+// SYS_WRITE prints "[writefuzz] passed" — if any CopyToUser
+// stumbled and actually attempted the write, the task would
+// crash (or worse, the kernel would page-fault in the copy
+// routine) and the control print would be missing.
+//
+// This closes the CopyToUser half of the pointer-validator story
+// flagged in .claude/knowledge/pentest-ring3-adversarial-v0.md.
+
+// clang-format off
+constexpr char kWriteFuzzPath[] = "/etc/version";
+constexpr char kWriteFuzzMsg[] = "[writefuzz] passed\n";
+constexpr u64 kWriteFuzzPathOffset = 0x80; // NUL-terminated path in code page
+constexpr u64 kWriteFuzzMsgOffset = 0xA0;  // control message in code page
+constexpr u64 kWriteFuzzMsgLen = sizeof(kWriteFuzzMsg) - 1;
+
+constexpr u8 kWriteFuzzProbeBytes[] = {
+    0xF3, 0x90,                                                   // 0x00 pause
+
+    // attack 1: SYS_STAT(path, NULL) — unmapped user VA
+    0xB8, 0x04, 0x00, 0x00, 0x00,                                 // 0x02 mov eax, 4
+    0xBF, 0x80, 0x00, 0x00, 0x40,                                 // 0x07 mov edi, path (patched)
+    0xBE, 0x00, 0x00, 0x00, 0x00,                                 // 0x0C mov esi, 0 (NULL)
+    0xCD, 0x80,                                                   // 0x11 int 0x80
+
+    // attack 2: SYS_STAT(path, 0xFFFFFFFF80000000) — kernel-half
+    0xB8, 0x04, 0x00, 0x00, 0x00,                                 // 0x13 mov eax, 4
+    0xBF, 0x80, 0x00, 0x00, 0x40,                                 // 0x18 mov edi, path (patched)
+    0x48, 0xBE, 0x00, 0x00, 0x00, 0x80, 0xFF, 0xFF, 0xFF, 0xFF,   // 0x1D mov rsi, 0xFFFFFFFF80000000
+    0xCD, 0x80,                                                   // 0x27 int 0x80
+
+    // attack 3: SYS_READ(path, 0xDEADBEEF00000000, 128) — non-canonical
+    0xB8, 0x05, 0x00, 0x00, 0x00,                                 // 0x29 mov eax, 5
+    0xBF, 0x80, 0x00, 0x00, 0x40,                                 // 0x2E mov edi, path (patched)
+    0x48, 0xBE, 0x00, 0x00, 0x00, 0x00, 0xEF, 0xBE, 0xAD, 0xDE,   // 0x33 mov rsi, 0xDEADBEEF00000000
+    0xBA, 0x80, 0x00, 0x00, 0x00,                                 // 0x3D mov edx, 128
+    0xCD, 0x80,                                                   // 0x42 int 0x80
+
+    // attack 4: SYS_READ(path, 0x00007FFFFFFFFFFE, 256) — boundary cross
+    0xB8, 0x05, 0x00, 0x00, 0x00,                                 // 0x44 mov eax, 5
+    0xBF, 0x80, 0x00, 0x00, 0x40,                                 // 0x49 mov edi, path (patched)
+    0x48, 0xBE, 0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F, 0x00, 0x00,   // 0x4E mov rsi, 0x00007FFFFFFFFFFE
+    0xBA, 0x00, 0x01, 0x00, 0x00,                                 // 0x58 mov edx, 256
+    0xCD, 0x80,                                                   // 0x5D int 0x80
+
+    // control: SYS_WRITE(1, msg, kWriteFuzzMsgLen)
+    0xB8, 0x02, 0x00, 0x00, 0x00,                                 // 0x5F mov eax, 2
+    0xBF, 0x01, 0x00, 0x00, 0x00,                                 // 0x64 mov edi, 1
+    0xBE, 0xA0, 0x00, 0x00, 0x40,                                 // 0x69 mov esi, msg (patched)
+    0xBA, static_cast<u8>(kWriteFuzzMsgLen), 0x00, 0x00, 0x00,    // 0x6E mov edx, len
+    0xCD, 0x80,                                                   // 0x73 int 0x80
+
+    // SYS_EXIT(0)
+    0x31, 0xC0,                                                   // 0x75 xor eax, eax
+    0x31, 0xFF,                                                   // 0x77 xor edi, edi
+    0xCD, 0x80,                                                   // 0x79 int 0x80
+    0x0F, 0x0B,                                                   // 0x7B ud2
+};
+// clang-format on
+static_assert(sizeof(kWriteFuzzProbeBytes) <= kWriteFuzzPathOffset, "writefuzz code overruns path region");
+static_assert(kWriteFuzzPathOffset + sizeof(kWriteFuzzPath) <= kWriteFuzzMsgOffset, "writefuzz path overruns msg");
+static_assert(kWriteFuzzMsgOffset + sizeof(kWriteFuzzMsg) <= mm::kPageSize, "writefuzz msg past end of page");
+
+// Patch offsets — the imm32 byte in each `mov edi/esi, imm32`
+// sits one byte past the opcode. See the hand-traced layout in
+// the payload comment block above. Re-derive if the sequence is
+// ever reshuffled.
+constexpr u16 kWriteFuzzPathPatchOffsets[] = {0x08, 0x19, 0x2F, 0x4A};
+constexpr u16 kWriteFuzzMsgPatchOffset = 0x6A;
+
+void SpawnWriteFuzzProbeTask()
+{
+    using arch::SerialWrite;
+    using arch::SerialWriteHex;
+    using namespace customos::mm;
+
+    const u64 code_va = AslrPickBase();
+    const u64 stack_va = code_va + kStackOffsetFromCode;
+    KASSERT(code_va <= 0xFFFFFFFFULL, "core/ring3", "writefuzz code_va overflows imm32");
+
+    AddressSpace* as = AddressSpaceCreate(kFrameBudgetTrusted);
+    if (as == nullptr)
+    {
+        Panic("core/ring3", "AS create failed for writefuzz probe");
+    }
+
+    const PhysAddr code_frame = AllocateFrame();
+    if (code_frame == kNullFrame)
+    {
+        Panic("core/ring3", "code frame alloc failed for writefuzz probe");
+    }
+    auto* code_direct = static_cast<u8*>(PhysToVirt(code_frame));
+    for (u64 i = 0; i < mm::kPageSize; ++i)
+    {
+        code_direct[i] = 0;
+    }
+    for (u64 i = 0; i < sizeof(kWriteFuzzProbeBytes); ++i)
+    {
+        code_direct[i] = kWriteFuzzProbeBytes[i];
+    }
+    for (u64 i = 0; i < sizeof(kWriteFuzzPath); ++i)
+    {
+        code_direct[kWriteFuzzPathOffset + i] = static_cast<u8>(kWriteFuzzPath[i]);
+    }
+    for (u64 i = 0; i < sizeof(kWriteFuzzMsg); ++i)
+    {
+        code_direct[kWriteFuzzMsgOffset + i] = static_cast<u8>(kWriteFuzzMsg[i]);
+    }
+    // Patch all four rdi path-pointer slots and the control rsi.
+    for (u16 off : kWriteFuzzPathPatchOffsets)
+    {
+        KASSERT(code_direct[off - 1] == 0xBF, "core/ring3",
+                "writefuzz patch: byte before path slot is not mov-edi opcode");
+        WriteImm32LE(code_direct, off, static_cast<u32>(code_va + kWriteFuzzPathOffset));
+    }
+    KASSERT(code_direct[kWriteFuzzMsgPatchOffset - 1] == 0xBE, "core/ring3",
+            "writefuzz patch: byte before ctrl-src slot is not mov-esi opcode");
+    WriteImm32LE(code_direct, kWriteFuzzMsgPatchOffset, static_cast<u32>(code_va + kWriteFuzzMsgOffset));
+
+    const PhysAddr stack_frame = AllocateFrame();
+    if (stack_frame == kNullFrame)
+    {
+        Panic("core/ring3", "stack frame alloc failed for writefuzz probe");
+    }
+    AddressSpaceMapUserPage(as, code_va, code_frame, kPagePresent | kPageUser);
+    AddressSpaceMapUserPage(as, stack_va, stack_frame, kPagePresent | kPageWritable | kPageUser | kPageNoExecute);
+
+    // Trusted caps: need kCapFsRead to reach the SYS_READ/SYS_STAT
+    // implementations. With empty caps the cap gate would
+    // short-circuit and CopyToUser would never run.
+    Process* proc = ProcessCreate("ring3-writefuzz-probe", as, CapSetTrusted(), fs::RamfsTrustedRoot(), code_va,
+                                  stack_va, kTickBudgetTrusted);
+    if (proc == nullptr)
+    {
+        Panic("core/ring3", "ProcessCreate failed for writefuzz probe");
+    }
+    SerialWrite("[ring3] queued writefuzz-probe task pid=");
+    SerialWriteHex(proc->pid);
+    SerialWrite(" code_va=");
+    SerialWriteHex(code_va);
+    SerialWrite(" (expect 4× -1 then [writefuzz] passed)\n");
+    sched::SchedCreateUser(&Ring3UserEntry, nullptr, "ring3-writefuzz-probe", proc);
+}
+
 bool LocalStrEq(const char* a, const char* b)
 {
     for (u32 i = 0;; ++i)
@@ -1435,6 +1601,11 @@ bool SpawnOnDemand(const char* kind)
         SpawnPtrFuzzProbeTask();
         return true;
     }
+    if (LocalStrEq(kind, "writefuzz"))
+    {
+        SpawnWriteFuzzProbeTask();
+        return true;
+    }
     return false;
 }
 
@@ -1520,8 +1691,12 @@ void StartRing3SmokeTask()
     // path is robust — kernel never touches a bad address. Final
     // control message confirms the task survived intact.
     SpawnPtrFuzzProbeTask();
-    Log(LogLevel::Info, "core/ring3",
-        "ring3 smoke tasks queued (incl cpu-hog + hostile + dropcaps + priv + badint + kread + ptrfuzz)");
+    // Writefuzz probe: trusted task hands four wild DESTINATION
+    // pointers to SYS_STAT + SYS_READ. Proves `CopyToUser`
+    // rejection path is robust — no byte ever lands at a bad VA.
+    SpawnWriteFuzzProbeTask();
+    Log(LogLevel::Info, "core/ring3", "ring3 smoke tasks queued (incl cpu-hog + hostile + dropcaps + priv + badint + "
+                                      "kread + ptrfuzz + writefuzz)");
 }
 
 } // namespace customos::core

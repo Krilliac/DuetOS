@@ -2227,7 +2227,8 @@ void CmdSpawn(u32 argc, char** argv)
     if (argc < 2)
     {
         ConsoleWriteln("SPAWN: USAGE: SPAWN <KIND>");
-        ConsoleWriteln("  KINDS:  hello  sandbox  jail  nx  hog  hostile  dropcaps  priv  badint  kread  ptrfuzz");
+        ConsoleWriteln("  KINDS:  hello  sandbox  jail  nx  hog  hostile  dropcaps  priv  badint");
+        ConsoleWriteln("          kread  ptrfuzz  writefuzz");
         ConsoleWriteln("  SEE `MAN SPAWN` FOR DETAILS.");
         return;
     }
@@ -2235,7 +2236,8 @@ void CmdSpawn(u32 argc, char** argv)
     {
         ConsoleWrite("SPAWN: UNKNOWN KIND: ");
         ConsoleWriteln(argv[1]);
-        ConsoleWriteln("  KINDS:  hello  sandbox  jail  nx  hog  hostile  dropcaps  priv  badint  kread  ptrfuzz");
+        ConsoleWriteln("  KINDS:  hello  sandbox  jail  nx  hog  hostile  dropcaps  priv  badint");
+        ConsoleWriteln("          kread  ptrfuzz  writefuzz");
         return;
     }
     ConsoleWrite("SPAWN: QUEUED ");

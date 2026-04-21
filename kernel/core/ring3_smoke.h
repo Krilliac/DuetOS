@@ -57,6 +57,9 @@ void StartRing3SmokeTask();
 ///   kread    Reads kernel-half VA → #PF (U/S mismatch) → kill.
 ///   ptrfuzz  Trusted task; SYS_WRITE with 4 wild user pointers.
 ///            Each must return -1; control print confirms survival.
+///   writefuzz Trusted task; SYS_STAT + SYS_READ with 4 wild
+///            destination pointers. Exercises CopyToUser's
+///            rejection paths (the write-side sibling of ptrfuzz).
 ///
 /// All spawned tasks are reaped cleanly through the normal
 /// scheduler path; the shell command returns immediately
