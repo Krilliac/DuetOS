@@ -607,6 +607,62 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
+## 104 — Shell file-inspection commands (hexdump / stat / basename / dirname / cal)
+
+- **Scope:** `kernel/core/shell.cpp` — five commands, each a
+  thin wrapper around existing ramfs/tmpfs paths + a bit of
+  local parsing. `hexdump` renders 16-byte rows with the
+  canonical HH/ASCII layout. `stat` prints ramfs vs tmpfs +
+  size / child count. `basename` / `dirname` do path
+  splitting. `cal` renders the current month using Zeller's
+  congruence against the RTC date with today highlighted.
+- **Decision:** All five are leaf commands — no new kernel
+  API needed. `cal` uses Zeller for weekday-of-first rather
+  than baking a lookup table; cheap and reuses the existing
+  RTC reader.
+- **Why:** File-inspection ergonomics. `stat` closes the
+  "is this file there" question without a full ls; `hexdump`
+  complements `readelf` for byte-level inspection;
+  `basename`/`dirname` round out path manipulation; `cal`
+  is just nice to have when a clock is visible.
+- **Rules out / defers:** `stat -c '%s'` format strings. Full
+  `hexdump -C` feature set (region / length flags). `cal`
+  multi-month / yearly views.
+- **Revisit when:** First user wants hexdump slice / length
+  flags. Scripts need format-string output.
+- **Related tracks:** Track 7 (Userland shell).
+
+---
+
+## 103 — `readelf` command + sample ELF64 in ramfs
+
+- **Scope:** `kernel/fs/ramfs.cpp` — 120-byte minimal valid
+  ELF64 binary at `/bin/sample.elf` (64-byte header + one
+  PT_LOAD). `kernel/core/shell.cpp` — `readelf PATH` parser
+  + LeU16/LeU32/LeU64 unaligned readers + type-name lookup
+  tables.
+- **Decision:** Ship a synthetic header rather than wire up
+  a real build target for user-mode binaries. The synthetic
+  file is just enough to exercise every field of the parser;
+  when a real user toolchain arrives, the parser works on
+  its output unchanged. Validate magic + ELFCLASS64 +
+  ELFDATA2LSB up front; reject anything else.
+- **Why:** First concrete step toward SYS_SPAWN + ELF
+  loading. The parser is the gate — once it accepts real
+  ELFs, "copy each PT_LOAD segment into the right VA" is a
+  direct extension. Also useful standalone for inspecting
+  any future disk images.
+- **Rules out / defers:** Section header parsing. Symbol
+  tables. Relocation entries. DYNAMIC segment handling
+  (needed for PIE). Note / .comment section display.
+  Actual program loading.
+- **Revisit when:** First user-mode toolchain produces an
+  ELF to load. SYS_SPAWN implementation begins.
+- **Related tracks:** Track 4 (Process — loader input),
+  Track 7 (Userland shell — inspection tool).
+
+---
+
 ## 102 — Shell `spawn` command — ring-3 tasks on demand
 
 - **Scope:** `kernel/core/ring3_smoke.{h,cpp}` — new
