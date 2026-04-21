@@ -27,18 +27,86 @@ namespace
 // abstraction for v0.
 // ---------------------------------------------------------------
 
+// Stub offsets. Kept as named constants so the table below
+// stays readable and so two exports (WriteFile + WriteConsoleA)
+// can alias to the same offset without duplicating the code.
+constexpr u32 kOffExitProcess = 0x00;  // 9 bytes
+constexpr u32 kOffGetStdHandle = 0x09; // 3 bytes
+constexpr u32 kOffWriteFile = 0x0C;    // 44 bytes
+
 constexpr u8 kStubsBytes[] = {
-    // --- ExitProcess (offset 0x00) -----------------------------
+    // --- ExitProcess (offset 0x00, 9 bytes) --------------------
     // Windows x64 ABI: first arg (uExitCode) in RCX.
     // CustomOS native ABI: syscall # in RAX, first arg in RDI,
     // SYS_EXIT = 0.
     0x48, 0x89, 0xCF, // 0x00 mov rdi, rcx      ; code
     0x31, 0xC0,       // 0x03 xor eax, eax      ; rax = 0 = SYS_EXIT
     0xCD, 0x80,       // 0x05 int 0x80
-    0x0F, 0x0B,       // 0x07 ud2               ; unreachable
+    0x0F, 0x0B,       // 0x07 ud2               ; [[noreturn]]
+
+    // --- GetStdHandle (offset 0x09, 3 bytes) -------------------
+    // Win32: HANDLE GetStdHandle(DWORD nStdHandle).
+    // nStdHandle is STD_INPUT_HANDLE (-10), STD_OUTPUT_HANDLE
+    // (-11), or STD_ERROR_HANDLE (-12), each represented as
+    // the low 32 bits of a DWORD (e.g. 0xFFFFFFF5).
+    //
+    // v0 semantic: pass the DWORD through as the HANDLE. The
+    // downstream WriteFile stub ignores the handle and always
+    // routes to SYS_WRITE(fd=1). This is correct for any
+    // program whose only use of GetStdHandle is to pass the
+    // result to WriteFile / WriteConsoleA — which is every
+    // console "hello world" we care about.
+    //
+    // `mov eax, ecx` zero-extends ecx into rax (x86-64 32-bit
+    // op clears upper 32 bits), so STD_OUTPUT_HANDLE's
+    // 0xFFFFFFF5 becomes 0x00000000FFFFFFF5 as a HANDLE.
+    0x89, 0xC8, // 0x09 mov eax, ecx
+    0xC3,       // 0x0B ret
+
+    // --- WriteFile / WriteConsoleA (offset 0x0C, 44 bytes) -----
+    // Win32 signatures (identical shape, that's why we alias):
+    //   BOOL WriteFile(HANDLE hFile,        rcx
+    //                  LPCVOID lpBuffer,    rdx
+    //                  DWORD nBytes,        r8
+    //                  LPDWORD lpWritten,   r9
+    //                  LPOVERLAPPED ovl);   [rsp+0x28]
+    //   BOOL WriteConsoleA(HANDLE hConsoleOutput, rcx
+    //                      LPCVOID lpBuffer,      rdx
+    //                      DWORD nChars,          r8
+    //                      LPDWORD lpCharsOut,    r9
+    //                      LPVOID lpReserved);    [rsp+0x28]
+    //
+    // v0 semantic: ignore the handle + the trailing reserved/
+    // overlapped arg, issue SYS_WRITE(1, buf, n), and store
+    // the result count back into *lpWritten (clamped to 0 on
+    // syscall error). Return BOOL = (rax >= 0).
+    //
+    // int 0x80 preserves all registers except RAX, so r9 (the
+    // lpWritten pointer) survives the syscall and we can use
+    // it to store the output count without saving.
+    0x48, 0x89, 0xD6,             // 0x0C mov rsi, rdx         ; buf
+    0x4C, 0x89, 0xC2,             // 0x0F mov rdx, r8          ; n
+    0xBF, 0x01, 0x00, 0x00, 0x00, // 0x12 mov edi, 1           ; fd = 1 (stdout)
+    0xB8, 0x02, 0x00, 0x00, 0x00, // 0x17 mov eax, 2           ; SYS_WRITE
+    0xCD, 0x80,                   // 0x1C int 0x80             ; rax = n or -1
+
+    // If lpWritten (r9) != NULL, store max(rax, 0) as DWORD.
+    0x4D, 0x85, 0xC9, // 0x1E test r9, r9
+    0x74, 0x0B,       // 0x21 je +0x0B -> 0x2E
+    0x31, 0xC9,       // 0x23 xor ecx, ecx
+    0x48, 0x85, 0xC0, // 0x25 test rax, rax
+    0x0F, 0x49, 0xC8, // 0x28 cmovns ecx, eax  ; ecx = rax if rax>=0, else 0
+    0x41, 0x89, 0x09, // 0x2B mov [r9], ecx
+
+    // BOOL return: 1 if rax >= 0, else 0.
+    0x48, 0x85, 0xC0, // 0x2E test rax, rax
+    0x0F, 0x99, 0xC0, // 0x31 setns al
+    0x0F, 0xB6, 0xC0, // 0x34 movzx eax, al
+    0xC3,             // 0x37 ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
+static_assert(sizeof(kStubsBytes) == 0x38, "stub layout drifted; update kOff* constants");
 
 struct StubEntry
 {
@@ -48,7 +116,15 @@ struct StubEntry
 };
 
 constexpr StubEntry kStubsTable[] = {
-    {"kernel32.dll", "ExitProcess", 0x00},
+    {"kernel32.dll", "ExitProcess", kOffExitProcess},
+    {"kernel32.dll", "GetStdHandle", kOffGetStdHandle},
+    // WriteFile and WriteConsoleA share the same stub — both
+    // take the same 5-arg shape and we ignore the handle +
+    // trailing arg anyway. Aliasing keeps the stubs page
+    // small and means any improvement (clamping, error
+    // codes, real handle dispatch) lands in both at once.
+    {"kernel32.dll", "WriteFile", kOffWriteFile},
+    {"kernel32.dll", "WriteConsoleA", kOffWriteFile},
 };
 
 // Case-insensitive strcmp for ASCII. Win32 DLL name

@@ -1,59 +1,66 @@
 /*
  * userland/apps/hello_winapi/hello.c
  *
- * First CustomOS userland program that talks to "Win32" — i.e.
- * calls real imported functions through a real Import Address
- * Table rather than going to the native int 0x80 syscall ABI
- * directly.
+ * First CustomOS userland program that talks to "Win32" —
+ * real imported functions through a real Import Address Table.
+ *
+ * v0 scope:
+ *   - GetStdHandle(STD_OUTPUT_HANDLE) -> HANDLE
+ *   - WriteFile(handle, buf, n, &written, NULL) -> BOOL
+ *   - ExitProcess(42)
  *
  * What this exercises end-to-end:
  *
- *   1. The C source calls ExitProcess(42) like any Win32 program.
- *   2. lld-link resolves ExitProcess against the minimal
- *      kernel32.lib import library produced from kernel32.def.
- *   3. The linker emits an Import Directory + IAT referencing
- *      "kernel32.dll!ExitProcess".
- *   4. The resulting PE carries a real base-relocation table
- *      (FileAlignment=512, no /dynamicbase:no).
- *   5. On load, the CustomOS PE loader:
- *        a. Parses + reports the PE (as before).
- *        b. Applies the base relocations (NEW — v0 only handled
- *           fixed-base images).
- *        c. Walks the IAT, looks each import up in the
- *           kernel-resident Win32 stub table, patches the IAT
- *           slot with the stub VA (NEW).
- *   6. The stub page (NEW — per-process, mapped R-X at a fixed
- *      high-user VA) contains tiny machine-code thunks that
- *      translate the Win32 calling convention into a native
- *      CustomOS syscall.
- *   7. Control transfer: PE entry -> CALL IAT slot -> stub page ->
- *      int 0x80 -> SYS_EXIT(42) -> process destroyed with code 42.
+ *   1. lld-link resolves the three imports against the minimal
+ *      kernel32.lib produced by llvm-dlltool from kernel32.def.
+ *   2. The resulting PE carries an Import Directory with three
+ *      kernel32.dll entries.
+ *   3. On load, the CustomOS PE loader's ResolveImports walks
+ *      the IAT and patches each slot with the stub VA from
+ *      kernel/subsystems/win32/stubs.cpp.
+ *   4. Each IAT-routed call lands in the per-process stubs
+ *      page at 0x60000000 + stub_offset, which translates the
+ *      Windows x64 ABI into a CustomOS int 0x80 syscall.
+ *   5. The WriteFile stub maps to SYS_WRITE(1, buf, n); the
+ *      ExitProcess stub maps to SYS_EXIT(code).
  *
- * If any link in that chain is broken, the boot log tells us
- * which — PeReport dumps the PE layout, the loader logs each
- * resolved/unresolved import, and the scheduler logs the exit
- * code.
+ * Success is observable in the serial log as:
+ *     [hello-winapi] printed via kernel32.WriteFile!
+ *     [I] sys : exit rc val=0x2a
  *
- * Build (host): see tools/build-hello-winapi.sh.
+ * Exit code 42 stays as the "success signature" — distinctive
+ * enough to spot in boot logs alongside the zero-exit
+ * compliance tasks.
  */
 
-// Forward-declare ExitProcess manually so we don't need the
-// Windows SDK headers. __stdcall is the classic Win32 calling
-// convention on x86 — on x64 it's ignored (all Win32 APIs use
-// the x64 ABI), but we keep the annotation for clarity.
-__declspec(dllimport) void __stdcall ExitProcess(unsigned int uExitCode);
+typedef void* HANDLE;
+typedef unsigned int DWORD;
+typedef int BOOL;
+typedef const void* LPCVOID;
+typedef DWORD* LPDWORD;
 
-// _start because we're linking with /nodefaultlib — there's no
-// CRT entry point. Control transfers here directly from the PE
-// loader (rsp = stack_top, rax/rbx/etc. undefined; only rsp is
-// guaranteed).
+#define STD_OUTPUT_HANDLE ((DWORD)-11)
+
+__declspec(dllimport) HANDLE __stdcall GetStdHandle(DWORD nStdHandle);
+__declspec(dllimport) BOOL   __stdcall WriteFile(HANDLE hFile,
+                                                 LPCVOID lpBuffer,
+                                                 DWORD nNumberOfBytesToWrite,
+                                                 LPDWORD lpNumberOfBytesWritten,
+                                                 void* lpOverlapped);
+__declspec(dllimport) void   __stdcall ExitProcess(unsigned int uExitCode);
+
+static const char kMsg[] = "[hello-winapi] printed via kernel32.WriteFile!\n";
+#define kMsgLen ((DWORD)(sizeof(kMsg) - 1))
+
 void _start(void)
 {
-    // If the import resolver has done its job, this call jumps
-    // into the stub page, which thunks to SYS_EXIT(42).
-    //
-    // Exit code 42 is arbitrary but distinctive — the native
-    // SpawnPeFile path logs the exit code, so "42" in the boot
-    // serial is the success signature for this test.
+    HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+    // Intentionally pass a non-null lpNumberOfBytesWritten so
+    // the stub exercises its output-param store path (matches
+    // the Win32 contract: 0 on failure, n on success). The
+    // value isn't checked here — the point is the side
+    // effect.
+    DWORD written = 0;
+    WriteFile(out, kMsg, kMsgLen, &written, 0);
     ExitProcess(42);
 }
