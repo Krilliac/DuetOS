@@ -2,7 +2,7 @@
 
 **Last updated:** 2026-04-21
 **Type:** Decision
-**Status:** Active (stage 1 in-flight)
+**Status:** Active (stages 1–2 landed; stage 3 next)
 
 ## Description
 
@@ -54,7 +54,7 @@ Does not apply to:
   deterministic pattern at LBA 0, read it back, verify. One
   PASS/FAIL line on COM1.
 
-### Stage 2 — NVMe driver (next session)
+### Stage 2 — NVMe driver (landed 2026-04-21)
 
 `kernel/drivers/storage/nvme.{h,cpp}`. The modern SSD path.
 

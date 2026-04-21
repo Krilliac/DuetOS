@@ -64,6 +64,7 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     drivers/pci/pci.cpp
     drivers/storage/ahci.cpp
     drivers/storage/block.cpp
+    drivers/storage/nvme.cpp
     drivers/video/console.cpp
     drivers/video/cursor.cpp
     drivers/video/font8x8.cpp
