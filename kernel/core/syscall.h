@@ -332,6 +332,32 @@ enum SyscallNumber : u64
     //   * INFINITE timeout (0xFFFFFFFF): block forever via
     //     WaitQueueBlock.
     SYS_EVENT_WAIT = 33,
+
+    // SYS_TLS_ALLOC: no args. Returns the lowest unused TLS
+    // slot index (0..63) or u64(-1) if all 64 slots are in use.
+    // Sets the corresponding bit in Process::tls_slot_in_use.
+    // Backs Win32 TlsAlloc (+FlsAlloc aliases).
+    SYS_TLS_ALLOC = 34,
+
+    // SYS_TLS_FREE: rdi = slot index. Returns 0 on success,
+    // u64(-1) on bad index / unallocated slot. Clears the
+    // in-use bit AND zeros the stored value. Backs Win32
+    // TlsFree.
+    SYS_TLS_FREE = 35,
+
+    // SYS_TLS_GET: rdi = slot index. Returns the stored u64
+    // value, or 0 if the index is invalid / unallocated
+    // (Win32 TlsGetValue returns 0 + sets LastError to
+    // ERROR_INVALID_PARAMETER in the bad-index case; v0 skips
+    // the LastError side effect). Backs Win32 TlsGetValue.
+    SYS_TLS_GET = 36,
+
+    // SYS_TLS_SET: rdi = slot index, rsi = value. Returns 0
+    // on success, u64(-1) on bad index. Silently succeeds
+    // even if the slot was allocated and then freed — caller
+    // is responsible for tracking which slots are live.
+    // Backs Win32 TlsSetValue.
+    SYS_TLS_SET = 37,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit

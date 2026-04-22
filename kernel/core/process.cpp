@@ -107,6 +107,10 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
         p->win32_events[i].waiters.head = nullptr;
         p->win32_events[i].waiters.tail = nullptr;
     }
+    // Win32 TLS — no slots allocated, all values zero.
+    p->tls_slot_in_use = 0;
+    for (u32 i = 0; i < Process::kWin32TlsCap; ++i)
+        p->tls_slot_value[i] = 0;
     p->refcount = 1;
 
     ++g_live_processes;

@@ -140,6 +140,10 @@ constexpr u32 kOffCreateEventReal = 0x730;       // batch 45 — 18 bytes (real 
 constexpr u32 kOffSetEventReal = 0x742;          // batch 45 — 15 bytes
 constexpr u32 kOffResetEventReal = 0x751;        // batch 45 — 15 bytes
 constexpr u32 kOffWaitForObj2 = 0x760;           // batch 45 — 66 bytes (mutex+event-aware)
+constexpr u32 kOffTlsAllocReal = 0x7A2;          // batch 46 —  8 bytes
+constexpr u32 kOffTlsFreeReal = 0x7AA;           // batch 46 — 24 bytes
+constexpr u32 kOffTlsGetValueReal = 0x7C2;       // batch 46 — 13 bytes
+constexpr u32 kOffTlsSetValueReal = 0x7CF;       // batch 46 — 20 bytes
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -1954,10 +1958,62 @@ constexpr u8 kStubsBytes[] = {
     0x5E,                         // 0x79F pop rsi
     0x5F,                         // 0x7A0 pop rdi
     0xC3,                         // 0x7A1 ret
+
+    // === Batch 46: real TLS (persistent slot storage) ==========
+    //
+    // Per-process 64-slot table with u64 storage per slot + a
+    // 64-bit bitmap for in-use tracking. Supersedes batch 39's
+    // alias-to-kOffReturnMinus1 TlsAlloc which always claimed
+    // TLS_OUT_OF_INDEXES. Single-threaded process in v0 means
+    // "thread-local" == "process-local" — but the CRT uses TLS
+    // for errno / locale / exception state without caring about
+    // multi-thread semantics, so the storage is what matters.
+
+    // --- TlsAlloc (offset 0x7A2, 8 bytes) ---------------------
+    // Win32: DWORD TlsAlloc(void). Returns slot 0..63 or -1.
+    0xB8, 0x22, 0x00, 0x00, 0x00, // 0x7A2 mov eax, 34 (SYS_TLS_ALLOC)
+    0xCD, 0x80,                   // 0x7A7 int 0x80
+    0xC3,                         // 0x7A9 ret
+
+    // --- TlsFree (offset 0x7AA, 24 bytes) ---------------------
+    // Win32: BOOL TlsFree(DWORD rcx). Returns TRUE on success.
+    0x57,                         // 0x7AA push rdi
+    0x48, 0x89, 0xCF,             // 0x7AB mov rdi, rcx
+    0xB8, 0x23, 0x00, 0x00, 0x00, // 0x7AE mov eax, 35 (SYS_TLS_FREE)
+    0xCD, 0x80,                   // 0x7B3 int 0x80
+    0x31, 0xC9,                   // 0x7B5 xor ecx, ecx
+    0x48, 0x85, 0xC0,             // 0x7B7 test rax, rax
+    0x0F, 0x94, 0xC1,             // 0x7BA sete cl
+    0x0F, 0xB6, 0xC1,             // 0x7BD movzx eax, cl
+    0x5F,                         // 0x7C0 pop rdi
+    0xC3,                         // 0x7C1 ret
+
+    // --- TlsGetValue (offset 0x7C2, 13 bytes) -----------------
+    // Win32: LPVOID TlsGetValue(DWORD rcx). Returns stored
+    // value (or 0 on bad index).
+    0x57,                         // 0x7C2 push rdi
+    0x48, 0x89, 0xCF,             // 0x7C3 mov rdi, rcx
+    0xB8, 0x24, 0x00, 0x00, 0x00, // 0x7C6 mov eax, 36 (SYS_TLS_GET)
+    0xCD, 0x80,                   // 0x7CB int 0x80
+    0x5F,                         // 0x7CD pop rdi
+    0xC3,                         // 0x7CE ret
+
+    // --- TlsSetValue (offset 0x7CF, 20 bytes) -----------------
+    // Win32: BOOL TlsSetValue(DWORD rcx, LPVOID rdx).
+    0x57,                         // 0x7CF push rdi
+    0x56,                         // 0x7D0 push rsi
+    0x48, 0x89, 0xCF,             // 0x7D1 mov rdi, rcx
+    0x48, 0x89, 0xD6,             // 0x7D4 mov rsi, rdx
+    0xB8, 0x25, 0x00, 0x00, 0x00, // 0x7D7 mov eax, 37 (SYS_TLS_SET)
+    0xCD, 0x80,                   // 0x7DC int 0x80
+    0xB0, 0x01,                   // 0x7DE mov al, 1 (BOOL TRUE)
+    0x5E,                         // 0x7E0 pop rsi
+    0x5F,                         // 0x7E1 pop rdi
+    0xC3,                         // 0x7E2 ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x7A2, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0x7E3, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -2162,6 +2218,18 @@ constexpr StubEntry kStubsTable[] = {
     {"kernel32.dll", "CreateEventExA", kOffCreateEventReal},
     {"kernel32.dll", "SetEvent", kOffSetEventReal},
     {"kernel32.dll", "ResetEvent", kOffResetEventReal},
+
+    // Batch 46 — real TLS. Replaces batch 39's alias-to-
+    // TLS_OUT_OF_INDEXES TlsAlloc. Per-process 64-slot table.
+    // Fls* aliases to the same storage (v0 has no fibers).
+    {"kernel32.dll", "TlsAlloc", kOffTlsAllocReal},
+    {"kernel32.dll", "TlsFree", kOffTlsFreeReal},
+    {"kernel32.dll", "TlsGetValue", kOffTlsGetValueReal},
+    {"kernel32.dll", "TlsSetValue", kOffTlsSetValueReal},
+    {"kernel32.dll", "FlsAlloc", kOffTlsAllocReal},
+    {"kernel32.dll", "FlsFree", kOffTlsFreeReal},
+    {"kernel32.dll", "FlsGetValue", kOffTlsGetValueReal},
+    {"kernel32.dll", "FlsSetValue", kOffTlsSetValueReal},
 
     // Batch 27 — console APIs. WriteConsoleW is the major
     // Unicode-output entry point; the stub UTF-16-strips to
@@ -2377,14 +2445,8 @@ constexpr StubEntry kStubsTable[] = {
     {"kernel32.dll", "SetThreadPriority", kOffReturnOne},
     {"kernel32.dll", "CreateThread", kOffReturnZero},       // NULL — can't spawn in v0
     {"kernel32.dll", "CreateRemoteThread", kOffReturnZero}, // already batch-24 fallback
-    {"kernel32.dll", "TlsAlloc", kOffReturnMinus1},         // TLS_OUT_OF_INDEXES
-    {"kernel32.dll", "TlsGetValue", kOffReturnZero},
-    {"kernel32.dll", "TlsSetValue", kOffReturnOne},
-    {"kernel32.dll", "TlsFree", kOffReturnOne},
-    {"kernel32.dll", "FlsAlloc", kOffReturnMinus1}, // FLS_OUT_OF_INDEXES
-    {"kernel32.dll", "FlsGetValue", kOffReturnZero},
-    {"kernel32.dll", "FlsSetValue", kOffReturnOne},
-    {"kernel32.dll", "FlsFree", kOffReturnOne},
+    // Tls/Fls now route through real per-process storage —
+    // moved to batch 46 below.
     {"kernel32.dll", "SetEndOfFile", kOffReturnOne},
     {"kernel32.dll", "FlushFileBuffers", kOffReturnOne}, // pretend fsync
     {"kernel32.dll", "GetFileType", kOffReturnTwo},      // 2 = FILE_TYPE_CHAR (console-ish)

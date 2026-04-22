@@ -342,6 +342,12 @@ __declspec(dllimport) long __stdcall RegCloseKey(HKEY hKey);
 __declspec(dllimport) DWORD __stdcall GetFileAttributesW(LPCWSTR lpFileName);
 __declspec(dllimport) BOOL __stdcall SetFileAttributesW(LPCWSTR lpFileName, DWORD dwFileAttributes);
 
+// Batch 46 — real TLS (per-process slot storage).
+__declspec(dllimport) DWORD __stdcall TlsAlloc(void);
+__declspec(dllimport) BOOL __stdcall TlsFree(DWORD dwTlsIndex);
+__declspec(dllimport) void* __stdcall TlsGetValue(DWORD dwTlsIndex);
+__declspec(dllimport) BOOL __stdcall TlsSetValue(DWORD dwTlsIndex, void* lpTlsValue);
+
 // Batch 40 — Interlocked atomic operations (real LOCK-prefix
 // ops, correct even under SMP).
 typedef long LONG;
@@ -1368,6 +1374,42 @@ void _start(void)
         WriteFile(out, b45_ok, sizeof(b45_ok) - 1, &b45w, 0);
     else
         WriteFile(out, b45_bad, sizeof(b45_bad) - 1, &b45w, 0);
+
+    // Batch 46 exercise — real TLS.
+    //
+    // Invariants checked:
+    //   * TlsAlloc returns a valid slot (0..63).
+    //   * Two TlsAlloc calls return DIFFERENT slots.
+    //   * TlsGetValue on freshly-allocated slot returns 0.
+    //   * TlsSetValue + TlsGetValue round-trips arbitrary u64.
+    //   * Slots are isolated — setting slot A doesn't affect
+    //     slot B.
+    //   * TlsFree releases the slot; subsequent TlsAlloc can
+    //     re-allocate the same slot.
+    //   * TlsFree(invalid) returns FALSE.
+    DWORD b46_s1 = TlsAlloc();
+    DWORD b46_s2 = TlsAlloc();
+    void* b46_init = TlsGetValue(b46_s1); // should be 0
+    BOOL b46_set1 = TlsSetValue(b46_s1, (void*)0xDEADBEEFCAFEULL);
+    BOOL b46_set2 = TlsSetValue(b46_s2, (void*)0x1122334455667788ULL);
+    void* b46_get1 = TlsGetValue(b46_s1);
+    void* b46_get2 = TlsGetValue(b46_s2);
+    BOOL b46_free1 = TlsFree(b46_s1);
+    DWORD b46_s3 = TlsAlloc();             // should be able to reuse s1's slot
+    BOOL b46_free_bad = TlsFree(0x1000UL); // out of range
+    BOOL b46_free2 = TlsFree(b46_s2);
+    BOOL b46_free3 = TlsFree(b46_s3);
+
+    const char b46_ok[] = "[batch46] real TLS (Alloc/Set/Get/Free) OK\n";
+    const char b46_bad[] = "[batch46] TLS semantics FAILED invariants\n";
+    BOOL b46_pass = b46_s1 != 0xFFFFFFFFUL && b46_s2 != 0xFFFFFFFFUL && b46_s1 != b46_s2 && b46_init == 0 && b46_set1 &&
+                    b46_set2 && b46_get1 == (void*)0xDEADBEEFCAFEULL && b46_get2 == (void*)0x1122334455667788ULL &&
+                    b46_free1 && b46_s3 != 0xFFFFFFFFUL && !b46_free_bad && b46_free2 && b46_free3;
+    DWORD b46w = 0;
+    if (b46_pass)
+        WriteFile(out, b46_ok, sizeof(b46_ok) - 1, &b46w, 0);
+    else
+        WriteFile(out, b46_bad, sizeof(b46_bad) - 1, &b46w, 0);
 
     // Batch 3 round-trip: store a distinctive value via
     // SetLastError, read it back via GetLastError, exit with

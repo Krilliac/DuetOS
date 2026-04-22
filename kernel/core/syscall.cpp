@@ -896,6 +896,105 @@ void SyscallDispatch(arch::TrapFrame* frame)
         return;
     }
 
+    case SYS_TLS_ALLOC:
+    {
+        Process* proc = CurrentProcess();
+        if (proc == nullptr)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        arch::Cli();
+        // Find the lowest clear bit in tls_slot_in_use.
+        u64 slot = Process::kWin32TlsCap;
+        for (u64 i = 0; i < Process::kWin32TlsCap; ++i)
+        {
+            if ((proc->tls_slot_in_use & (1ULL << i)) == 0)
+            {
+                slot = i;
+                break;
+            }
+        }
+        if (slot == Process::kWin32TlsCap)
+        {
+            arch::Sti();
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        proc->tls_slot_in_use |= (1ULL << slot);
+        proc->tls_slot_value[slot] = 0; // TlsAlloc docs: initial value is NULL
+        arch::Sti();
+        frame->rax = slot;
+        return;
+    }
+
+    case SYS_TLS_FREE:
+    {
+        Process* proc = CurrentProcess();
+        if (proc == nullptr)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        const u64 idx = frame->rdi;
+        if (idx >= Process::kWin32TlsCap)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        arch::Cli();
+        if ((proc->tls_slot_in_use & (1ULL << idx)) == 0)
+        {
+            arch::Sti();
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        proc->tls_slot_in_use &= ~(1ULL << idx);
+        proc->tls_slot_value[idx] = 0;
+        arch::Sti();
+        frame->rax = 0;
+        return;
+    }
+
+    case SYS_TLS_GET:
+    {
+        Process* proc = CurrentProcess();
+        if (proc == nullptr)
+        {
+            frame->rax = 0;
+            return;
+        }
+        const u64 idx = frame->rdi;
+        if (idx >= Process::kWin32TlsCap)
+        {
+            frame->rax = 0;
+            return;
+        }
+        // Win32 TlsGetValue returns 0 for unallocated slots too,
+        // so no in-use check; just return the stored value.
+        frame->rax = proc->tls_slot_value[idx];
+        return;
+    }
+
+    case SYS_TLS_SET:
+    {
+        Process* proc = CurrentProcess();
+        if (proc == nullptr)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        const u64 idx = frame->rdi;
+        if (idx >= Process::kWin32TlsCap)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        proc->tls_slot_value[idx] = frame->rsi;
+        frame->rax = 0;
+        return;
+    }
+
     case SYS_VMAP:
     {
         // Bump-arena VirtualAlloc. Rounds size up to pages,

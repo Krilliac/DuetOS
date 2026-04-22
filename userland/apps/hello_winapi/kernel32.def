@@ -144,3 +144,8 @@ EXPORTS
     InterlockedCompareExchange
     InterlockedExchange
     InterlockedExchangeAdd
+    ; Batch 46 — real TLS
+    TlsAlloc
+    TlsFree
+    TlsGetValue
+    TlsSetValue

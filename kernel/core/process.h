@@ -360,6 +360,21 @@ struct Process
     static constexpr u64 kWin32EventBase = 0x300;
     Win32EventHandle win32_events[kWin32EventCap];
 
+    // Win32 TLS (Thread-Local Storage) slots — backs TlsAlloc /
+    // TlsGetValue / TlsSetValue / TlsFree (batch 46). v0 is
+    // single-threaded per process, so "thread-local" is just
+    // "process-local" — but the slot allocator + per-slot
+    // storage give MSVC CRT's TLS-using startup paths (errno,
+    // locale, uncaught_exception tracking) something real to
+    // point at instead of TLS_OUT_OF_INDEXES.
+    //
+    // 64 slots is plenty for any CRT — typical MSVC CRT
+    // uses 3-5 TLS slots. FLS (Fiber-Local Storage) aliases
+    // to the same API in v0 since we have no fibers.
+    static constexpr u64 kWin32TlsCap = 64;
+    u64 tls_slot_in_use; // bitmap: bit N = slot N allocated
+    u64 tls_slot_value[kWin32TlsCap];
+
     // Win32 VirtualAlloc bump arena — backs VirtualAlloc /
     // VirtualFree / VirtualProtect (batch 28). Each SYS_VMAP
     // request rounds the size up to page multiples, allocates
