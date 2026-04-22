@@ -163,6 +163,14 @@ enum SyscallNumber : u64
     // `GetSystemTimeAsFileTime` stub to replace the old
     // "write 0 and return" placeholder with a real timestamp.
     SYS_GETTIME_FT = 17,
+
+    // SYS_NOW_NS: returns nanoseconds since boot in rax. No args.
+    // Backed by the HPET counter × femtosecond-period / 1e6 —
+    // ~70 ns resolution on QEMU (14.318 MHz HPET), nanosecond
+    // resolution on modern chipsets. Used by the Win32
+    // QueryPerformanceCounter stub for a sub-millisecond
+    // high-resolution clock.
+    SYS_NOW_NS = 18,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit

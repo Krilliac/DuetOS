@@ -390,15 +390,13 @@ void _start(void)
 
     // Batch 11 exercise — real perf counter + tick count.
     //
-    // Invariants:
-    //   * QueryPerformanceFrequency writes 100 (our 100 Hz
-    //     kernel tick). Deterministic.
-    //   * QueryPerformanceCounter writes a non-zero value
-    //     (unless we booted in the last 10 ms, which the
-    //     serial-log and init time precludes).
+    // Invariants (post-batch-21 HPET upgrade):
+    //   * QueryPerformanceFrequency writes 1'000'000'000
+    //     (= 1 GHz — nanoseconds).
+    //   * QueryPerformanceCounter writes a non-zero value.
     //   * Two consecutive QPC calls are non-decreasing.
-    //   * GetTickCount is QPC * 10 (ticks -> ms). It
-    //     should also be non-zero.
+    //   * GetTickCount / GetTickCount64 are non-zero (ms since
+    //     boot, still LAPIC-tick-backed).
     LARGE_INTEGER freq = {0};
     LARGE_INTEGER ctr1 = {0};
     LARGE_INTEGER ctr2 = {0};
@@ -409,7 +407,8 @@ void _start(void)
     volatile unsigned long long ms64 = GetTickCount64();
     const char b11_ok[] = "[batch11] perf counter + tick count OK\n";
     const char b11_bad[] = "[batch11] perf counter + tick count FAILED\n";
-    BOOL b11_pass = freq.QuadPart == 100 && ctr1.QuadPart > 0 && ctr2.QuadPart >= ctr1.QuadPart && ms > 0 && ms64 > 0;
+    BOOL b11_pass = freq.QuadPart == 1000000000LL && ctr1.QuadPart > 0 && ctr2.QuadPart >= ctr1.QuadPart && ms > 0 &&
+                    ms64 > 0;
     (void)ms;
     (void)ms64;
     DWORD b11w = 0;

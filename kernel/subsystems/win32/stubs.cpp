@@ -80,6 +80,8 @@ constexpr u32 kOffReturnThis = 0x294;         // batch 18 —  4 bytes
 constexpr u32 kOffWiden = 0x298;              // batch 18 —  4 bytes
 constexpr u32 kOffHresultEFail = 0x29C;       // batch 19 —  6 bytes
 constexpr u32 kOffGetSysTimeFTReal = 0x2A2;   // batch 20 — 13 bytes
+constexpr u32 kOffQpcNs = 0x2AF;              // batch 21 — 13 bytes
+constexpr u32 kOffQpfNs = 0x2BC;              // batch 21 — 10 bytes
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -867,10 +869,40 @@ constexpr u8 kStubsBytes[] = {
     0x59,                         // 0x2AA pop rcx
     0x48, 0x89, 0x01,             // 0x2AB mov [rcx], rax
     0xC3,                         // 0x2AE ret
+
+    // === Batch 21: HPET-backed QueryPerformance{Counter,Frequency} ===
+    //
+    // The old QPC at 0x1F6 returned LAPIC tick counter (100 Hz)
+    // and the old QPF at 0x206 returned 100. Replacing both so
+    // QPC returns nanoseconds since boot (via SYS_NOW_NS → HPET)
+    // and QPF returns 1 GHz (= 1e9, matching nanoseconds).
+    //
+    // Any (counter_end - counter_start) / frequency computation
+    // a caller does now yields real seconds with ~70 ns granularity.
+    // The old 0x1F6 and 0x206 stubs stay as dead page bytes.
+
+    // --- QPC via SYS_NOW_NS (offset 0x2AF, 15 bytes) -----------
+    // Win32: BOOL QueryPerformanceCounter(LARGE_INTEGER* ctr=rcx).
+    0x51,                         // 0x2AF push rcx
+    0xB8, 0x12, 0x00, 0x00, 0x00, // 0x2B0 mov eax, 18 (SYS_NOW_NS)
+    0xCD, 0x80,                   // 0x2B5 int 0x80         ; rax = ns since boot
+    0x59,                         // 0x2B7 pop rcx
+    0x48, 0x89, 0x01,             // 0x2B8 mov [rcx], rax
+    0xB0, 0x01,                   // 0x2BB mov al, 1        ; BOOL TRUE (low byte)
+    0xC3,                         // 0x2BD ret
+
+    // --- QPF via constant 1'000'000'000 (offset 0x2BE, 13 bytes) --
+    // Win32: BOOL QueryPerformanceFrequency(LARGE_INTEGER* freq=rcx).
+    // 1e9 = 0x3B9ACA00 fits in a positive imm32, so the
+    // `mov qword [rcx], imm32` encoding sign-extends to
+    // 0x00000000_3B9ACA00 — exactly the 64-bit value we want.
+    0x48, 0xC7, 0x01, 0x00, 0xCA, 0x9A, 0x3B, // 0x2BE mov qword [rcx], 0x3B9ACA00
+    0xB8, 0x01, 0x00, 0x00, 0x00,             // 0x2C5 mov eax, 1 (BOOL TRUE)
+    0xC3,                                     // 0x2CA ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x2AF, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0x2CB, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -1146,8 +1178,11 @@ constexpr StubEntry kStubsTable[] = {
     //     program handles failure gracefully per the Win32
     //     contract (GetLastError returns the last set
     //     error; our stub stack doesn't populate that yet).
-    {"kernel32.dll", "QueryPerformanceCounter", kOffQueryPerfCounter},
-    {"kernel32.dll", "QueryPerformanceFrequency", kOffQueryPerfFreq},
+    // QueryPerformance{Counter,Frequency} upgraded (batch 21) to
+    // HPET-backed nanosecond resolution. The old stubs at 0x1F6
+    // / 0x206 stay in the page as dead bytes.
+    {"kernel32.dll", "QueryPerformanceCounter", kOffQpcNs},
+    {"kernel32.dll", "QueryPerformanceFrequency", kOffQpfNs},
     {"kernel32.dll", "GetTickCount", kOffGetTickCount},
     {"kernel32.dll", "GetTickCount64", kOffGetTickCount},
 

@@ -1,5 +1,6 @@
 #include "syscall.h"
 
+#include "../arch/x86_64/hpet.h"
 #include "../arch/x86_64/idt.h"
 #include "../arch/x86_64/rtc.h"
 #include "../arch/x86_64/serial.h"
@@ -289,6 +290,22 @@ void SyscallDispatch(arch::TrapFrame* frame)
         // the Win32 QueryPerformanceCounter + GetTickCount
         // stubs.
         frame->rax = arch::TimerTicks();
+        return;
+    }
+
+    case SYS_NOW_NS:
+    {
+        // No args. Return HPET counter × period_fs / 1'000'000
+        // = nanoseconds since boot. HPET is in use as the high-
+        // res clocksource; the LAPIC tick counter is still the
+        // scheduler's time-slice driver.
+        const u64 counter = arch::HpetReadCounter();
+        const u64 period_fs = arch::HpetPeriodFemtoseconds();
+        // fs / 1e6 == ns. Overflow window: counter × period_fs
+        // fits in u64 for any realistic uptime — 64-bit counter
+        // at 14.3 MHz with 70k fs period saturates after ~10^16
+        // ticks = ~22 billion years. Safe.
+        frame->rax = (counter * period_fs) / 1'000'000ULL;
         return;
     }
 
