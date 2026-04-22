@@ -7,7 +7,7 @@
 // Source data: tools/win32-compat/nt-syscalls-x64.csv (j00ru/windows-syscalls)
 // Target Windows version: Windows 11 and Server (11 25H2)
 // Bedrock NT calls (present in every Windows XP→Win11 25H2): 292
-// CustomOS coverage: 13/292 = 4%
+// CustomOS coverage: 16/292 = 5%
 //
 // See tools/win32-compat/README.md for the legal + design rationale.
 
@@ -41,7 +41,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
     {"NtAccessCheck", 0x0000, kSysNtNotImpl},
     {"NtAcceptConnectPort", 0x0002, kSysNtNotImpl},
     {"NtMapUserPhysicalPagesScatter", 0x0003, kSysNtNotImpl},
-    {"NtWaitForSingleObject", 0x0004, kSysNtNotImpl},
+    {"NtWaitForSingleObject", 0x0004, static_cast<u32>(::customos::core::SYS_MUTEX_WAIT)},
     {"NtCallbackReturn", 0x0005, kSysNtNotImpl},
     {"NtReadFile", 0x0006, static_cast<u32>(::customos::core::SYS_FILE_READ)},
     {"NtDeviceIoControlFile", 0x0007, kSysNtNotImpl},
@@ -69,7 +69,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
     {"NtCreateKey", 0x001d, kSysNtNotImpl},
     {"NtFreeVirtualMemory", 0x001e, static_cast<u32>(::customos::core::SYS_HEAP_FREE)},
     {"NtImpersonateClientOfPort", 0x001f, kSysNtNotImpl},
-    {"NtReleaseMutant", 0x0020, kSysNtNotImpl},
+    {"NtReleaseMutant", 0x0020, static_cast<u32>(::customos::core::SYS_MUTEX_RELEASE)},
     {"NtQueryInformationToken", 0x0021, kSysNtNotImpl},
     {"NtRequestWaitReplyPort", 0x0022, kSysNtNotImpl},
     {"NtQueryVirtualMemory", 0x0023, kSysNtNotImpl},
@@ -163,7 +163,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
     {"NtCreateJobSet", 0x00b5, kSysNtNotImpl},
     {"NtCreateKeyedEvent", 0x00b7, kSysNtNotImpl},
     {"NtCreateMailslotFile", 0x00b9, kSysNtNotImpl},
-    {"NtCreateMutant", 0x00ba, kSysNtNotImpl},
+    {"NtCreateMutant", 0x00ba, static_cast<u32>(::customos::core::SYS_MUTEX_CREATE)},
     {"NtCreateNamedPipeFile", 0x00bb, kSysNtNotImpl},
     {"NtCreatePagingFile", 0x00bc, kSysNtNotImpl},
     {"NtCreatePort", 0x00be, kSysNtNotImpl},
@@ -335,6 +335,6 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
 inline constexpr u32 kBedrockNtSyscallCount =
     sizeof(kBedrockNtSyscalls) / sizeof(kBedrockNtSyscalls[0]);
 
-inline constexpr u32 kBedrockNtSyscallsCovered = 13;
+inline constexpr u32 kBedrockNtSyscallsCovered = 16;
 
 } // namespace customos::subsystems::win32

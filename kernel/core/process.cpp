@@ -81,6 +81,17 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
         p->win32_handles[i].node = nullptr;
         p->win32_handles[i].cursor = 0;
     }
+    // Win32 mutex table — every slot starts free + unowned.
+    for (u32 i = 0; i < Process::kWin32MutexCap; ++i)
+    {
+        p->win32_mutexes[i].in_use = false;
+        for (u32 j = 0; j < sizeof(p->win32_mutexes[i]._pad); ++j)
+            p->win32_mutexes[i]._pad[j] = 0;
+        p->win32_mutexes[i].recursion = 0;
+        p->win32_mutexes[i].owner = nullptr;
+        p->win32_mutexes[i].waiters.head = nullptr;
+        p->win32_mutexes[i].waiters.tail = nullptr;
+    }
     p->refcount = 1;
 
     ++g_live_processes;

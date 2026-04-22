@@ -48,9 +48,11 @@ KNOWN_MAPPINGS = {
     "NtReadFile":                  "SYS_FILE_READ",        # batch 24
     "NtClose":                     "SYS_FILE_CLOSE",       # batch 24
     "NtQueryInformationFile":      "SYS_FILE_FSTAT",       # batch 25 (size info class)
-    # Slice 82+ candidates (filled in as the SYS_* lands)
+    "NtCreateMutant":              "SYS_MUTEX_CREATE",     # batch 26
+    "NtReleaseMutant":             "SYS_MUTEX_RELEASE",    # batch 26
+    "NtWaitForSingleObject":       "SYS_MUTEX_WAIT",       # batch 26 (mutex handles)
+    # Slice 83+ candidates (filled in as the SYS_* lands)
     # "NtSetInformationFile":      "SYS_FILE_SEEK",   (Position info class)
-    # "NtCreateMutant":            "SYS_MUTEX_*",
 }
 
 HEADER_TEMPLATE = """// AUTO-GENERATED — do not edit by hand.

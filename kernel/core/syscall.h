@@ -233,6 +233,40 @@ enum SyscallNumber : u64
     // SYS_FILE_SEEK with SEEK_END which would). Backs Win32
     // GetFileSizeEx + GetFileSize.
     SYS_FILE_FSTAT = 24,
+
+    // SYS_MUTEX_CREATE: rdi = bInitialOwner (0 or 1).
+    // Allocates a per-process mutex slot and returns a Win32
+    // pseudo-handle (Process::kWin32MutexBase + slot_idx, i.e.
+    // 0x200..0x207). On bInitialOwner=1 the calling task is
+    // recorded as the owner with recursion=1 — subsequent
+    // SYS_MUTEX_WAIT calls from the same task increment
+    // recursion (Win32 mutexes are recursive). Returns u64(-1)
+    // on slot exhaustion. Backs Win32 CreateMutexW / CreateMutexA.
+    SYS_MUTEX_CREATE = 25,
+
+    // SYS_MUTEX_WAIT: rdi = mutex handle, rsi = timeout in ms
+    // (0xFFFFFFFF = INFINITE). Returns:
+    //   0           — WAIT_OBJECT_0   (got the mutex)
+    //   0x102       — WAIT_TIMEOUT    (woken by timer, not by release)
+    //   u64(-1)     — WAIT_FAILED     (bad handle)
+    // Recursive: if the owner is the calling task, recursion++ and
+    // we return WAIT_OBJECT_0 immediately. Otherwise blocks on the
+    // mutex's waitqueue with the given timeout. ReleaseMutex's
+    // hand-off sets owner=us before waking, so the lock is already
+    // ours on return. Backs Win32 WaitForSingleObject / WaitForSingleObjectEx
+    // for mutex handles only — handles outside the mutex range
+    // hit the user-mode stub's pseudo-signal path (return 0 for
+    // events / threads / etc., preserving the slice-10 semantics).
+    SYS_MUTEX_WAIT = 26,
+
+    // SYS_MUTEX_RELEASE: rdi = mutex handle. Returns 0 on
+    // success, u64(-1) on bad handle or non-owner release
+    // (ERROR_NOT_OWNER). Decrements recursion; on reaching 0,
+    // clears owner and hands off to the longest-waiting blocker
+    // (FIFO via WaitQueueWakeOne) — that waiter's SYS_MUTEX_WAIT
+    // call returns WAIT_OBJECT_0 with the lock already theirs.
+    // Backs Win32 ReleaseMutex.
+    SYS_MUTEX_RELEASE = 27,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit

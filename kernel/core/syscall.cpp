@@ -1,5 +1,6 @@
 #include "syscall.h"
 
+#include "../arch/x86_64/cpu.h"
 #include "../arch/x86_64/hpet.h"
 #include "../arch/x86_64/idt.h"
 #include "../arch/x86_64/rtc.h"
@@ -513,8 +514,14 @@ void SyscallDispatch(arch::TrapFrame* frame)
 
     case SYS_FILE_CLOSE:
     {
-        // Free the handle slot. Closing an out-of-range or
-        // already-closed handle is a no-op (per Win32 contract).
+        // Generic Win32 CloseHandle. Dispatches by handle range:
+        // file table (0x100..0x10F) or mutex table (0x200..0x207).
+        // Out-of-range handles are a documented no-op per the
+        // Win32 contract. An owned mutex closed by its owner is
+        // implicitly released first; closing one we DON'T own is
+        // also accepted (Win32's "abandoned mutex" semantics —
+        // the next waiter would see WAIT_ABANDONED on real
+        // Windows; v0 just frees the slot).
         Process* proc = CurrentProcess();
         if (proc == nullptr)
         {
@@ -528,6 +535,184 @@ void SyscallDispatch(arch::TrapFrame* frame)
             proc->win32_handles[slot].node = nullptr;
             proc->win32_handles[slot].cursor = 0;
         }
+        else if (handle >= Process::kWin32MutexBase && handle < Process::kWin32MutexBase + Process::kWin32MutexCap)
+        {
+            const u64 slot = handle - Process::kWin32MutexBase;
+            arch::Cli();
+            Process::Win32MutexHandle& m = proc->win32_mutexes[slot];
+            // If owned, treat as abandoned: clear owner + wake one
+            // waiter so the queue makes progress.
+            sched::Task* next = sched::WaitQueueWakeOne(&m.waiters);
+            m.owner = next; // nullptr if no waiters; else hand off
+            m.recursion = (next != nullptr) ? 1 : 0;
+            m.in_use = false;
+            arch::Sti();
+        }
+        frame->rax = 0;
+        return;
+    }
+
+    case SYS_MUTEX_CREATE:
+    {
+        // Allocate a mutex slot; record the calling task as the
+        // initial owner if rdi==1 (Win32 bInitialOwner).
+        Process* proc = CurrentProcess();
+        if (proc == nullptr)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        u64 slot = Process::kWin32MutexCap;
+        arch::Cli();
+        for (u64 i = 0; i < Process::kWin32MutexCap; ++i)
+        {
+            if (!proc->win32_mutexes[i].in_use)
+            {
+                slot = i;
+                break;
+            }
+        }
+        if (slot == Process::kWin32MutexCap)
+        {
+            arch::Sti();
+            arch::SerialWrite("[sys] mutex_create out-of-slots pid=");
+            arch::SerialWriteHex(proc->pid);
+            arch::SerialWrite("\n");
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        Process::Win32MutexHandle& m = proc->win32_mutexes[slot];
+        m.in_use = true;
+        m.waiters.head = nullptr;
+        m.waiters.tail = nullptr;
+        if (frame->rdi != 0)
+        {
+            m.owner = sched::CurrentTask();
+            m.recursion = 1;
+        }
+        else
+        {
+            m.owner = nullptr;
+            m.recursion = 0;
+        }
+        arch::Sti();
+        const u64 handle = Process::kWin32MutexBase + slot;
+        arch::SerialWrite("[sys] mutex_create ok pid=");
+        arch::SerialWriteHex(proc->pid);
+        arch::SerialWrite(" handle=");
+        arch::SerialWriteHex(handle);
+        arch::SerialWrite(" initial_owner=");
+        arch::SerialWriteHex(frame->rdi);
+        arch::SerialWrite("\n");
+        frame->rax = handle;
+        return;
+    }
+
+    case SYS_MUTEX_WAIT:
+    {
+        // Acquire-or-block-with-timeout. Recursive owner check
+        // first; otherwise WaitQueueBlockTimeout. ReleaseMutex's
+        // hand-off sets m.owner = us before WaitQueueWakeOne, so
+        // a successful wake means the lock is already ours.
+        constexpr u64 kInfiniteMs = 0xFFFFFFFFu;
+        constexpr u64 kWaitObject0 = 0;
+        constexpr u64 kWaitTimeout = 0x102;
+        Process* proc = CurrentProcess();
+        if (proc == nullptr)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        const u64 handle = frame->rdi;
+        if (handle < Process::kWin32MutexBase || handle >= Process::kWin32MutexBase + Process::kWin32MutexCap)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        const u64 slot = handle - Process::kWin32MutexBase;
+        Process::Win32MutexHandle& m = proc->win32_mutexes[slot];
+        if (!m.in_use)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        const u64 timeout_ms = frame->rsi & 0xFFFFFFFFu;
+        sched::Task* me = sched::CurrentTask();
+        arch::Cli();
+        if (m.owner == nullptr)
+        {
+            // Uncontended.
+            m.owner = me;
+            m.recursion = 1;
+            arch::Sti();
+            frame->rax = kWaitObject0;
+            return;
+        }
+        if (m.owner == me)
+        {
+            // Recursive acquire by current owner.
+            m.recursion += 1;
+            arch::Sti();
+            frame->rax = kWaitObject0;
+            return;
+        }
+        // Contended. Block on the waitqueue. Hand-off in
+        // SYS_MUTEX_RELEASE sets m.owner = us before waking, so
+        // an explicit wake means the lock is ours.
+        if (timeout_ms == kInfiniteMs)
+        {
+            sched::WaitQueueBlock(&m.waiters);
+            arch::Sti();
+            frame->rax = kWaitObject0;
+            return;
+        }
+        // Convert ms -> ticks (round up; 100 Hz = 10 ms grain).
+        constexpr u64 kMsPerTick = 10;
+        const u64 ticks = (timeout_ms + (kMsPerTick - 1)) / kMsPerTick;
+        const bool got = sched::WaitQueueBlockTimeout(&m.waiters, ticks);
+        arch::Sti();
+        frame->rax = got ? kWaitObject0 : kWaitTimeout;
+        return;
+    }
+
+    case SYS_MUTEX_RELEASE:
+    {
+        Process* proc = CurrentProcess();
+        if (proc == nullptr)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        const u64 handle = frame->rdi;
+        if (handle < Process::kWin32MutexBase || handle >= Process::kWin32MutexBase + Process::kWin32MutexCap)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        const u64 slot = handle - Process::kWin32MutexBase;
+        Process::Win32MutexHandle& m = proc->win32_mutexes[slot];
+        sched::Task* me = sched::CurrentTask();
+        arch::Cli();
+        if (!m.in_use || m.owner != me)
+        {
+            arch::Sti();
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        m.recursion -= 1;
+        if (m.recursion > 0)
+        {
+            arch::Sti();
+            frame->rax = 0;
+            return;
+        }
+        // Final release. Hand off to the longest-waiting blocker
+        // by setting owner BEFORE waking so the woken task sees
+        // the lock as already theirs.
+        sched::Task* next = sched::WaitQueueWakeOne(&m.waiters);
+        m.owner = next;
+        m.recursion = (next != nullptr) ? 1 : 0;
+        arch::Sti();
         frame->rax = 0;
         return;
     }

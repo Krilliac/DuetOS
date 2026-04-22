@@ -96,6 +96,9 @@ constexpr u32 kOffCloseHandle = 0x35C;        // batch 24 — 15 bytes
 constexpr u32 kOffSetFilePtrEx = 0x36B;       // batch 24 — 38 bytes
 constexpr u32 kOffGetFileSizeEx = 0x391;      // batch 25 — 29 bytes
 constexpr u32 kOffGetModuleHandleW = 0x3AE;   // batch 25 — 17 bytes
+constexpr u32 kOffCreateMutexW = 0x3BF;       // batch 26 — 13 bytes
+constexpr u32 kOffWaitForObj = 0x3CC;         // batch 26 — 38 bytes (mutex-aware)
+constexpr u32 kOffReleaseMutex = 0x3F2;       // batch 26 — 24 bytes
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -1135,10 +1138,69 @@ constexpr u8 kStubsBytes[] = {
     // .not_null:
     0x31, 0xC0, // 0x3BC xor eax, eax
     0xC3,       // 0x3BE ret
+
+    // === Batch 26: Win32 mutex (real waitqueue-backed) =========
+
+    // --- CreateMutexW (offset 0x3BF, 13 bytes) ----------------
+    // Win32: HANDLE CreateMutexW(LPSECURITY_ATTRIBUTES rcx,
+    //          BOOL bInitialOwner=rdx, LPCWSTR lpName=r8).
+    // Ignores attrs + name; forwards bInitialOwner to
+    // SYS_MUTEX_CREATE which returns the kWin32MutexBase + slot
+    // pseudo-handle directly.
+    0x57,                         // 0x3BF push rdi
+    0x48, 0x89, 0xD7,             // 0x3C0 mov rdi, rdx       ; bInitialOwner
+    0xB8, 0x19, 0x00, 0x00, 0x00, // 0x3C3 mov eax, 25        ; SYS_MUTEX_CREATE
+    0xCD, 0x80,                   // 0x3C8 int 0x80
+    0x5F,                         // 0x3CA pop rdi
+    0xC3,                         // 0x3CB ret
+
+    // --- WaitForSingleObject (offset 0x3CC, 38 bytes) ---------
+    // Win32: DWORD WaitForSingleObject(HANDLE rcx, DWORD timeout=rdx).
+    //
+    // Dispatches by handle range:
+    //   * Mutex range (0x200..0x207): SYS_MUTEX_WAIT.
+    //   * Anything else: pseudo-signal (return 0 = WAIT_OBJECT_0)
+    //     to preserve the slice-10 batch-10 behaviour for events,
+    //     thread handles, etc., that the v0 stubs don't track.
+    //
+    // RDI / RSI saved+restored — Win32 ABI callee-saved.
+    0x57,                               // 0x3CC push rdi
+    0x56,                               // 0x3CD push rsi
+    0x48, 0x89, 0xC8,                   // 0x3CE mov rax, rcx       ; handle
+    0x48, 0x2D, 0x00, 0x02, 0x00, 0x00, // 0x3D1 sub rax, 0x200     ; rax -= base
+    0x48, 0x83, 0xF8, 0x08,             // 0x3D7 cmp rax, 8         ; in mutex range?
+    0x73, 0x10,                         // 0x3DB jae .pseudo (+0x10)
+    0x48, 0x89, 0xCF,                   // 0x3DD mov rdi, rcx       ; handle
+    0x48, 0x89, 0xD6,                   // 0x3E0 mov rsi, rdx       ; timeout_ms
+    0xB8, 0x1A, 0x00, 0x00, 0x00,       // 0x3E3 mov eax, 26        ; SYS_MUTEX_WAIT
+    0xCD, 0x80,                         // 0x3E8 int 0x80
+    0x5E,                               // 0x3EA pop rsi
+    0x5F,                               // 0x3EB pop rdi
+    0xC3,                               // 0x3EC ret
+    // .pseudo:
+    0x31, 0xC0, // 0x3ED xor eax, eax       ; WAIT_OBJECT_0 = 0
+    0x5E,       // 0x3EF pop rsi
+    0x5F,       // 0x3F0 pop rdi
+    0xC3,       // 0x3F1 ret
+
+    // --- ReleaseMutex (offset 0x3F2, 24 bytes) ----------------
+    // Win32: BOOL ReleaseMutex(HANDLE rcx).
+    // SYS_MUTEX_RELEASE returns 0 on success, -1 on failure;
+    // BOOL = (rax == 0).
+    0x57,                         // 0x3F2 push rdi
+    0x48, 0x89, 0xCF,             // 0x3F3 mov rdi, rcx
+    0xB8, 0x1B, 0x00, 0x00, 0x00, // 0x3F6 mov eax, 27         ; SYS_MUTEX_RELEASE
+    0xCD, 0x80,                   // 0x3FB int 0x80
+    0x31, 0xC9,                   // 0x3FD xor ecx, ecx
+    0x48, 0x85, 0xC0,             // 0x3FF test rax, rax
+    0x0F, 0x94, 0xC1,             // 0x402 sete cl
+    0x0F, 0xB6, 0xC1,             // 0x405 movzx eax, cl
+    0x5F,                         // 0x408 pop rdi
+    0xC3,                         // 0x409 ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x3BF, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0x40A, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -1319,6 +1381,21 @@ constexpr StubEntry kStubsTable[] = {
     {"kernel32.dll", "FreeLibrary", kOffReturnOne}, // pretend success
     {"kernel32.dll", "GetProcAddress", kOffReturnZero},
 
+    // Batch 26 — Win32 mutex (real waitqueue-backed semantics).
+    // CreateMutexW allocates a per-process slot returning a 0x200+
+    // pseudo-handle. WaitForSingleObject dispatches by handle range
+    // — mutex handles route to SYS_MUTEX_WAIT, anything else
+    // pseudo-signals as before. ReleaseMutex routes to
+    // SYS_MUTEX_RELEASE. All three are recursive (Win32 contract).
+    // CloseHandle (batch 24) handles mutex slots too via range
+    // dispatch in SYS_FILE_CLOSE.
+    {"kernel32.dll", "CreateMutexW", kOffCreateMutexW},
+    {"kernel32.dll", "CreateMutexA", kOffCreateMutexW},
+    {"kernel32.dll", "CreateMutexExW", kOffCreateMutexW}, // ignores extra Ex args
+    {"kernel32.dll", "WaitForSingleObject", kOffWaitForObj},
+    {"kernel32.dll", "WaitForSingleObjectEx", kOffWaitForObj},
+    {"kernel32.dll", "ReleaseMutex", kOffReleaseMutex},
+
     // Batch 9 — Win32 process heap, backed by the per-process
     // 16-page region at 0x50000000 and SYS_HEAP_ALLOC /
     // SYS_HEAP_FREE. See kernel/subsystems/win32/heap.cpp.
@@ -1405,11 +1482,10 @@ constexpr StubEntry kStubsTable[] = {
     {"kernel32.dll", "ResetEvent", kOffReturnOne},
 
     // kernel32 — wait (v0: immediate return with
-    // WAIT_OBJECT_0 = 0; single-threaded processes never
-    // actually block, so "already signaled" is correct for
-    // any handle they pass in).
-    {"kernel32.dll", "WaitForSingleObject", kOffReturnZero},
-    {"kernel32.dll", "WaitForSingleObjectEx", kOffReturnZero},
+    // WaitForSingleObject moved to batch 26 below — now mutex-aware.
+    // The stub still pseudo-signals (returns 0 = WAIT_OBJECT_0) for
+    // non-mutex handles, preserving the original batch-10 contract
+    // for events / thread handles that v0 doesn't track.
 
     // kernel32 — interlocked SList (zero-init an SList head).
     {"kernel32.dll", "InitializeSListHead", kOffInitSListHead},

@@ -90,3 +90,6 @@ EXPORTS
     LoadLibraryW
     GetProcAddress
     FreeLibrary
+    ; Batch 26 — Win32 mutex (real waitqueue-backed)
+    CreateMutexW
+    ReleaseMutex

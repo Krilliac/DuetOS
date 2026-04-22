@@ -227,6 +227,17 @@ __declspec(dllimport) HMODULE __stdcall LoadLibraryW(LPCWSTR lpLibFileName);
 __declspec(dllimport) BOOL __stdcall FreeLibrary(HMODULE hLibModule);
 __declspec(dllimport) FARPROC __stdcall GetProcAddress(HMODULE hModule, LPCSTR lpProcName);
 
+// Batch 26 — Win32 mutex (real waitqueue-backed). The
+// CreateMutexW stub allocates a per-process slot and returns a
+// pseudo-handle; WaitForSingleObject (already imported above)
+// dispatches to SYS_MUTEX_WAIT for mutex handles. ReleaseMutex
+// decrements recursion + hands off to a waiter on final release.
+#define INFINITE 0xFFFFFFFFUL
+#define WAIT_OBJECT_0 0UL
+__declspec(dllimport) HANDLE __stdcall CreateMutexW(SECURITY_ATTRIBUTES* lpMutexAttributes, BOOL bInitialOwner,
+                                                    LPCWSTR lpName);
+__declspec(dllimport) BOOL __stdcall ReleaseMutex(HANDLE hMutex);
+
 static const char kMsg[] = "[hello-winapi] printed via kernel32.WriteFile!\n";
 #define kMsgLen ((DWORD)(sizeof(kMsg) - 1))
 
@@ -530,7 +541,36 @@ void _start(void)
     if (b14_pass)
         WriteFile(out, b14_ok, sizeof(b14_ok) - 1, &b14w, 0);
     else
+    {
         WriteFile(out, b14_bad, sizeof(b14_bad) - 1, &b14w, 0);
+        // Always-on field-level dump (cheap; only fires on
+        // failure). Distinguishes which invariant tripped:
+        // alloc miss, size mismatch, payload mismatch, etc.
+        const char b14_dbg[] = "[batch14-dbg] ";
+        WriteFile(out, b14_dbg, sizeof(b14_dbg) - 1, &b14w, 0);
+        unsigned long long vals[8] = {(unsigned long long)b14_buf,
+                                      b14_sz0,
+                                      (unsigned long long)b14_grown,
+                                      b14_sz1,
+                                      (unsigned long long)(unsigned char)b14_first_before,
+                                      (unsigned long long)(unsigned char)b14_first_after,
+                                      (unsigned long long)b14_rm_new,
+                                      (unsigned long long)b14_rm_freed};
+        const char* names[8] = {
+            "buf=", " sz0=", " grown=", " sz1=", " first_b=", " first_a=", " rm_new=", " rm_freed="};
+        char hex[18];
+        for (int i = 0; i < 8; ++i)
+        {
+            WriteFile(out, names[i], (DWORD)strlen(names[i]), &b14w, 0);
+            for (int d = 0; d < 16; ++d)
+            {
+                int nyb = (int)((vals[i] >> ((15 - d) * 4)) & 0xF);
+                hex[d] = (char)((nyb < 10) ? ('0' + nyb) : ('a' + nyb - 10));
+            }
+            hex[16] = '\n';
+            WriteFile(out, hex, (i == 7) ? 17 : 16, &b14w, 0);
+        }
+    }
 
     // Batch 22 exercise — Sleep + SwitchToThread.
     //
@@ -699,6 +739,42 @@ void _start(void)
         WriteFile(out, b25_ok, sizeof(b25_ok) - 1, &b25w, 0);
     else
         WriteFile(out, b25_bad, sizeof(b25_bad) - 1, &b25w, 0);
+
+    // Batch 26 exercise — Win32 mutex round-trip.
+    //
+    // Single-threaded process so we can't test contention, but
+    // we can fully exercise the recursion + handle lifecycle:
+    //   * CreateMutexW(initial=TRUE) returns a non-NULL handle
+    //     and the calling task is the initial owner.
+    //   * Recursive WaitForSingleObject acquires return WAIT_OBJECT_0.
+    //   * Each ReleaseMutex returns TRUE.
+    //   * Final release leaves the mutex unowned.
+    //   * Re-acquiring (Wait) on the now-unowned mutex returns
+    //     WAIT_OBJECT_0 immediately.
+    //   * CloseHandle (already in batch 24) closes the mutex slot.
+    //   * Wait on a non-mutex handle (e.g. NULL) returns 0
+    //     (pseudo-signal — preserves batch-10 contract).
+    HANDLE b26_m = CreateMutexW(0, 1, 0); // initial owner = TRUE
+    DWORD b26_w1 = WaitForSingleObject(b26_m, INFINITE);
+    DWORD b26_w2 = WaitForSingleObject(b26_m, INFINITE);
+    BOOL b26_r1 = ReleaseMutex(b26_m);              // recursion 3 -> 2
+    BOOL b26_r2 = ReleaseMutex(b26_m);              // recursion 2 -> 1
+    BOOL b26_r3 = ReleaseMutex(b26_m);              // recursion 1 -> 0; owner cleared
+    DWORD b26_w3 = WaitForSingleObject(b26_m, 100); // re-acquire
+    BOOL b26_r4 = ReleaseMutex(b26_m);
+    BOOL b26_close = CloseHandle(b26_m);
+    DWORD b26_pseudo = WaitForSingleObject(0, 100); // non-mutex handle
+
+    const char b26_ok[] = "[batch26] CreateMutexW + Wait + Release recursion OK\n";
+    const char b26_bad[] = "[batch26] mutex semantics FAILED invariants\n";
+    BOOL b26_pass = b26_m != 0 && b26_w1 == WAIT_OBJECT_0 && b26_w2 == WAIT_OBJECT_0 && b26_r1 != 0 && b26_r2 != 0 &&
+                    b26_r3 != 0 && b26_w3 == WAIT_OBJECT_0 && b26_r4 != 0 && b26_close != 0 &&
+                    b26_pseudo == WAIT_OBJECT_0;
+    DWORD b26w = 0;
+    if (b26_pass)
+        WriteFile(out, b26_ok, sizeof(b26_ok) - 1, &b26w, 0);
+    else
+        WriteFile(out, b26_bad, sizeof(b26_bad) - 1, &b26w, 0);
 
     // Batch 3 round-trip: store a distinctive value via
     // SetLastError, read it back via GetLastError, exit with
