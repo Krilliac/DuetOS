@@ -80,6 +80,13 @@ inline constexpr u64 kProcEnvCmdlineAOff = 0x380;
 // process gets its own env namespace.
 inline constexpr u64 kProcEnvEnvBlockWOff = 0x400;
 
+// EXE module base (HMODULE of the running PE). Win32
+// GetModuleHandleW(NULL) returns this — the linker sets it to
+// kImageBase + ASLR delta at PE load. Stored as a little-endian
+// u64 so the GetModuleHandleW stub can do a single
+// `mov rax, [kProcEnvVa + kProcEnvModuleBaseOff]` read.
+inline constexpr u64 kProcEnvModuleBaseOff = 0x500;
+
 /*
  * Data-import catch-all landing pad.
  *
@@ -110,7 +117,7 @@ inline constexpr u64 kProcEnvDataMissOff = 0x800;
 /// the page as `argv[0]`; additional args are not supported in
 /// v0 (argc always = 1). Truncates `program_name` to
 /// `kProcEnvStringBudget - 1` bytes if too long.
-void Win32ProcEnvPopulate(u8* proc_env_page, const char* program_name);
+void Win32ProcEnvPopulate(u8* proc_env_page, const char* program_name, u64 module_base);
 
 /// Copy the compiled stub bytes into `dst`. Caller supplies a
 /// kPageSize buffer; we write exactly kWin32StubsCodeSize bytes

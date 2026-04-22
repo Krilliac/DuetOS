@@ -84,3 +84,9 @@ EXPORTS
     ReadFile
     CloseHandle
     SetFilePointerEx
+    ; Batch 25 — file stat + module lookup
+    GetFileSizeEx
+    GetModuleHandleW
+    LoadLibraryW
+    GetProcAddress
+    FreeLibrary

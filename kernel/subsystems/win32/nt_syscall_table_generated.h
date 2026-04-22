@@ -7,7 +7,7 @@
 // Source data: tools/win32-compat/nt-syscalls-x64.csv (j00ru/windows-syscalls)
 // Target Windows version: Windows 11 and Server (11 25H2)
 // Bedrock NT calls (present in every Windows XP→Win11 25H2): 292
-// CustomOS coverage: 12/292 = 4%
+// CustomOS coverage: 13/292 = 4%
 //
 // See tools/win32-compat/README.md for the legal + design rationale.
 
@@ -54,7 +54,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
     {"NtSetEvent", 0x000e, kSysNtNotImpl},
     {"NtClose", 0x000f, static_cast<u32>(::customos::core::SYS_FILE_CLOSE)},
     {"NtQueryObject", 0x0010, kSysNtNotImpl},
-    {"NtQueryInformationFile", 0x0011, kSysNtNotImpl},
+    {"NtQueryInformationFile", 0x0011, static_cast<u32>(::customos::core::SYS_FILE_FSTAT)},
     {"NtOpenKey", 0x0012, kSysNtNotImpl},
     {"NtEnumerateValueKey", 0x0013, kSysNtNotImpl},
     {"NtFindAtom", 0x0014, kSysNtNotImpl},
@@ -335,6 +335,6 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
 inline constexpr u32 kBedrockNtSyscallCount =
     sizeof(kBedrockNtSyscalls) / sizeof(kBedrockNtSyscalls[0]);
 
-inline constexpr u32 kBedrockNtSyscallsCovered = 12;
+inline constexpr u32 kBedrockNtSyscallsCovered = 13;
 
 } // namespace customos::subsystems::win32

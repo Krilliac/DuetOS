@@ -583,6 +583,40 @@ void SyscallDispatch(arch::TrapFrame* frame)
         return;
     }
 
+    case SYS_FILE_FSTAT:
+    {
+        // Non-destructive size query for an open Win32 handle.
+        // GetFileSizeEx maps here directly. Distinct from
+        // SEEK_END so the read cursor isn't perturbed.
+        Process* proc = CurrentProcess();
+        if (proc == nullptr)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        const u64 handle = frame->rdi;
+        if (handle < Process::kWin32HandleBase || handle >= Process::kWin32HandleBase + Process::kWin32HandleCap)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        const u64 slot = handle - Process::kWin32HandleBase;
+        const Process::Win32FileHandle& h = proc->win32_handles[slot];
+        if (h.node == nullptr)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        const u64 size = h.node->file_size;
+        if (!mm::CopyToUser(reinterpret_cast<void*>(frame->rsi), &size, sizeof(size)))
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        frame->rax = 0;
+        return;
+    }
+
     case SYS_SLEEP_MS:
     {
         // rdi = ms. ms == 0 -> equivalent to SchedYield. Otherwise

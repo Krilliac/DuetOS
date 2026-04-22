@@ -94,6 +94,8 @@ constexpr u32 kOffCreateFileW = 0x2F3;        // batch 24 — 59 bytes (UTF-16 s
 constexpr u32 kOffReadFile = 0x32E;           // batch 24 — 46 bytes
 constexpr u32 kOffCloseHandle = 0x35C;        // batch 24 — 15 bytes
 constexpr u32 kOffSetFilePtrEx = 0x36B;       // batch 24 — 38 bytes
+constexpr u32 kOffGetFileSizeEx = 0x391;      // batch 25 — 29 bytes
+constexpr u32 kOffGetModuleHandleW = 0x3AE;   // batch 25 — 17 bytes
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -1094,10 +1096,49 @@ constexpr u8 kStubsBytes[] = {
     0x5E,                         // 0x38E pop rsi
     0x5F,                         // 0x38F pop rdi
     0xC3,                         // 0x390 ret
+
+    // === Batch 25: file stat + module lookup ==================
+
+    // --- GetFileSizeEx (offset 0x391, 29 bytes) ---------------
+    // Win32: BOOL GetFileSizeEx(HANDLE rcx, LARGE_INTEGER* rdx).
+    // Maps to SYS_FILE_FSTAT — non-destructive size query that
+    // doesn't perturb the read cursor (vs. SEEK_END which
+    // would).
+    0x57,                         // 0x391 push rdi
+    0x56,                         // 0x392 push rsi
+    0x48, 0x89, 0xCF,             // 0x393 mov rdi, rcx     ; handle
+    0x48, 0x89, 0xD6,             // 0x396 mov rsi, rdx     ; out ptr
+    0xB8, 0x18, 0x00, 0x00, 0x00, // 0x399 mov eax, 24      ; SYS_FILE_FSTAT
+    0xCD, 0x80,                   // 0x39E int 0x80
+    0x31, 0xC9,                   // 0x3A0 xor ecx, ecx
+    0x48, 0x85, 0xC0,             // 0x3A2 test rax, rax    ; ZF=1 iff success (rax==0)
+    0x0F, 0x94, 0xC1,             // 0x3A5 sete cl
+    0x0F, 0xB6, 0xC1,             // 0x3A8 movzx eax, cl
+    0x5E,                         // 0x3AB pop rsi
+    0x5F,                         // 0x3AC pop rdi
+    0xC3,                         // 0x3AD ret
+
+    // --- GetModuleHandleW (offset 0x3AE, 17 bytes) ------------
+    // Win32: HMODULE GetModuleHandleW(LPCWSTR lpModuleName=rcx).
+    //
+    // v0 supports exactly the lpModuleName == NULL form (returns
+    // the EXE's own HMODULE) — that's what the CRT calls during
+    // startup to populate __ImageBase. Any non-NULL name returns
+    // 0 (= "module not in our process" → caller's GetLastError
+    // path runs). The EXE's image base lives in the proc-env
+    // page at kProcEnvVa + kProcEnvModuleBaseOff (= 0x65000500),
+    // populated by Win32ProcEnvPopulate from the PE loader.
+    0x48, 0x85, 0xC9,                               // 0x3AE test rcx, rcx
+    0x75, 0x09,                                     // 0x3B1 jne +0x09 -> .not_null
+    0x48, 0x8B, 0x04, 0x25, 0x00, 0x05, 0x00, 0x65, // 0x3B3 mov rax, [0x65000500]
+    0xC3,                                           // 0x3BB ret
+    // .not_null:
+    0x31, 0xC0, // 0x3BC xor eax, eax
+    0xC3,       // 0x3BE ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x391, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0x3BF, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -1232,9 +1273,12 @@ constexpr StubEntry kStubsTable[] = {
     //     caller uses non-SIMD fallback path.
     //   SetUnhandledExceptionFilter — NULL = no previous filter.
     //   UnhandledExceptionFilter    — 0 = EXCEPTION_CONTINUE_SEARCH.
-    {"kernel32.dll", "GetModuleHandleA", kOffReturnZero},
-    {"kernel32.dll", "GetModuleHandleW", kOffReturnZero},
-    {"kernel32.dll", "GetProcAddress", kOffReturnZero},
+    // GetModuleHandleA / GetModuleHandleW / GetProcAddress moved to
+    // batch 25 below — GetModuleHandleW(NULL) now returns the EXE
+    // image base instead of always-zero. The Win32StubsLookup walk
+    // returns the first match, so the real entries take precedence
+    // by appearing earlier in the table.
+    {"kernel32.dll", "IsDebuggerPresent", kOffReturnZero},
     {"kernel32.dll", "IsDebuggerPresent", kOffReturnZero},
     {"kernel32.dll", "IsProcessorFeaturePresent", kOffReturnZero},
     {"kernel32.dll", "SetUnhandledExceptionFilter", kOffReturnZero},
@@ -1253,6 +1297,27 @@ constexpr StubEntry kStubsTable[] = {
     {"kernel32.dll", "ReadFile", kOffReadFile},
     {"kernel32.dll", "CloseHandle", kOffCloseHandle},
     {"kernel32.dll", "SetFilePointerEx", kOffSetFilePtrEx},
+
+    // Batch 25 — file stat + module lookup. GetFileSizeEx is
+    // backed by SYS_FILE_FSTAT (non-destructive size).
+    // GetModuleHandleW(NULL) returns the EXE image base from
+    // the proc-env page; any non-NULL name returns 0. Library
+    // loading is unsupported in v0 — LoadLibraryW/A return 0
+    // (failed) and GetProcAddress returns 0 (not found). Apps
+    // that GetProcAddress for an optional API gracefully fall
+    // back to their non-dynamic path.
+    {"kernel32.dll", "GetFileSizeEx", kOffGetFileSizeEx},
+    {"kernel32.dll", "GetFileSize", kOffGetFileSizeEx}, // close enough for callers w/ small files
+    {"kernel32.dll", "GetModuleHandleW", kOffGetModuleHandleW},
+    {"kernel32.dll", "GetModuleHandleA", kOffGetModuleHandleW}, // ASCII path also accepts NULL
+    {"kernel32.dll", "GetModuleHandleExW", kOffReturnZero},
+    {"kernel32.dll", "GetModuleHandleExA", kOffReturnZero},
+    {"kernel32.dll", "LoadLibraryW", kOffReturnZero},
+    {"kernel32.dll", "LoadLibraryA", kOffReturnZero},
+    {"kernel32.dll", "LoadLibraryExW", kOffReturnZero},
+    {"kernel32.dll", "LoadLibraryExA", kOffReturnZero},
+    {"kernel32.dll", "FreeLibrary", kOffReturnOne}, // pretend success
+    {"kernel32.dll", "GetProcAddress", kOffReturnZero},
 
     // Batch 9 — Win32 process heap, backed by the per-process
     // 16-page region at 0x50000000 and SYS_HEAP_ALLOC /
@@ -1682,7 +1747,7 @@ inline void StoreLeU64(u8* dst, u64 value)
 }
 } // namespace
 
-void Win32ProcEnvPopulate(u8* proc_env_page, const char* program_name)
+void Win32ProcEnvPopulate(u8* proc_env_page, const char* program_name, u64 module_base)
 {
     if (proc_env_page == nullptr)
         return;
@@ -1691,6 +1756,11 @@ void Win32ProcEnvPopulate(u8* proc_env_page, const char* program_name)
     // defensive — populate only the specific fields we own,
     // leaving the rest at its incoming value.
     u8* const page = proc_env_page;
+
+    // EXE module base — what GetModuleHandleW(NULL) hands back.
+    // u64, little-endian. Read directly by the GetModuleHandleW
+    // stub; no syscall on the hot path.
+    StoreLeU64(page + kProcEnvModuleBaseOff, module_base);
 
     // argc = 1. Stored as a little-endian u32 at offset 0.
     page[kProcEnvArgcOff + 0] = 0x01;

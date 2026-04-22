@@ -47,6 +47,7 @@ KNOWN_MAPPINGS = {
     "NtOpenFile":                  "SYS_FILE_OPEN",        # batch 24 (read-only variant)
     "NtReadFile":                  "SYS_FILE_READ",        # batch 24
     "NtClose":                     "SYS_FILE_CLOSE",       # batch 24
+    "NtQueryInformationFile":      "SYS_FILE_FSTAT",       # batch 25 (size info class)
     # Slice 82+ candidates (filled in as the SYS_* lands)
     # "NtSetInformationFile":      "SYS_FILE_SEEK",   (Position info class)
     # "NtCreateMutant":            "SYS_MUTEX_*",

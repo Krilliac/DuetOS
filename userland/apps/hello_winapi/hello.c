@@ -212,6 +212,21 @@ __declspec(dllimport) BOOL __stdcall CloseHandle(HANDLE hObject);
 __declspec(dllimport) BOOL __stdcall SetFilePointerEx(HANDLE hFile, LARGE_INTEGER liDistanceToMove,
                                                       LARGE_INTEGER* lpNewFilePointer, DWORD dwMoveMethod);
 
+// Batch 25 — file stat + module lookup. GetFileSizeEx queries
+// a handle's file size without perturbing the read cursor.
+// GetModuleHandleW(NULL) returns the EXE's HMODULE; non-NULL
+// names return NULL (we have no module registry yet).
+// LoadLibrary* / GetProcAddress / FreeLibrary are stubbed —
+// LoadLibrary returns NULL ("not found"); GetProcAddress
+// returns NULL; FreeLibrary returns TRUE.
+typedef HANDLE HMODULE;
+typedef void (*FARPROC)(void);
+__declspec(dllimport) BOOL __stdcall GetFileSizeEx(HANDLE hFile, LARGE_INTEGER* lpFileSize);
+__declspec(dllimport) HMODULE __stdcall GetModuleHandleW(LPCWSTR lpModuleName);
+__declspec(dllimport) HMODULE __stdcall LoadLibraryW(LPCWSTR lpLibFileName);
+__declspec(dllimport) BOOL __stdcall FreeLibrary(HMODULE hLibModule);
+__declspec(dllimport) FARPROC __stdcall GetProcAddress(HMODULE hModule, LPCSTR lpProcName);
+
 static const char kMsg[] = "[hello-winapi] printed via kernel32.WriteFile!\n";
 #define kMsgLen ((DWORD)(sizeof(kMsg) - 1))
 
@@ -634,6 +649,56 @@ void _start(void)
         WriteFile(out, b24_ok, sizeof(b24_ok) - 1, &b24w, 0);
     else
         WriteFile(out, b24_bad, sizeof(b24_bad) - 1, &b24w, 0);
+
+    // Batch 25 exercise — file stat + module lookup.
+    //
+    // Invariants checked:
+    //   * Re-open /etc/version, GetFileSizeEx returns 27 (the
+    //     ramfs payload "CustomOS v0 (ramfs-seeded)\n").
+    //   * Reading 1 byte after GetFileSizeEx shows the cursor
+    //     wasn't moved by the stat call (still at 0).
+    //   * GetModuleHandleW(NULL) returns a non-NULL HMODULE
+    //     (the PE's image base).
+    //   * GetModuleHandleW(L"kernel32.dll") returns NULL (we
+    //     don't track named modules).
+    //   * LoadLibraryW(L"foo.dll") returns NULL (loading
+    //     unsupported).
+    //   * GetProcAddress(NULL, "X") returns NULL.
+    //   * FreeLibrary(NULL) returns TRUE (no-op).
+    static const WCHAR kEtcVersion2[14] = {'/', 'e', 't', 'c', '/', 'v', 'e', 'r', 's', 'i', 'o', 'n', 0, 0};
+    HANDLE b25_h = CreateFileW(kEtcVersion2, GENERIC_READ, FILE_SHARE_READ, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
+    LARGE_INTEGER b25_size;
+    b25_size.QuadPart = 0;
+    BOOL b25_size_ok = 0;
+    char b25_first = 0;
+    DWORD b25_n = 0;
+    BOOL b25_close_ok = 0;
+    if (b25_h != INVALID_HANDLE_VALUE)
+    {
+        b25_size_ok = GetFileSizeEx(b25_h, &b25_size);
+        // Cursor must still be at 0 after a stat — read 1 byte
+        // and assert it's 'C' (the start of "CustomOS").
+        ReadFile(b25_h, &b25_first, 1, &b25_n, 0);
+        b25_close_ok = CloseHandle(b25_h);
+    }
+    HMODULE b25_self = GetModuleHandleW(0);
+    static const WCHAR kKern32[14] = {'k', 'e', 'r', 'n', 'e', 'l', '3', '2', '.', 'd', 'l', 'l', 0, 0};
+    HMODULE b25_named = GetModuleHandleW(kKern32);
+    static const WCHAR kFooDll[8] = {'f', 'o', 'o', '.', 'd', 'l', 'l', 0};
+    HMODULE b25_loaded = LoadLibraryW(kFooDll);
+    FARPROC b25_proc = GetProcAddress(0, "X");
+    BOOL b25_free_ok = FreeLibrary(0);
+
+    const char b25_ok[] = "[batch25] GetFileSizeEx + GetModuleHandleW + LoadLibraryW OK\n";
+    const char b25_bad[] = "[batch25] file stat / module lookup FAILED invariants\n";
+    BOOL b25_pass = b25_h != INVALID_HANDLE_VALUE && b25_size_ok && b25_size.QuadPart == 27 && b25_n == 1 &&
+                    b25_first == 'C' && b25_close_ok && b25_self != 0 && b25_named == 0 && b25_loaded == 0 &&
+                    b25_proc == 0 && b25_free_ok != 0;
+    DWORD b25w = 0;
+    if (b25_pass)
+        WriteFile(out, b25_ok, sizeof(b25_ok) - 1, &b25w, 0);
+    else
+        WriteFile(out, b25_bad, sizeof(b25_bad) - 1, &b25w, 0);
 
     // Batch 3 round-trip: store a distinctive value via
     // SetLastError, read it back via GetLastError, exit with

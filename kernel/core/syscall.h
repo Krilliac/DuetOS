@@ -225,6 +225,14 @@ enum SyscallNumber : u64
     // — seeking past EOF lands at file_size, seeking before
     // start lands at 0. Backs Win32 SetFilePointerEx.
     SYS_FILE_SEEK = 23,
+
+    // SYS_FILE_FSTAT: rdi = handle, rsi = user pointer to a
+    // u64 output slot that receives the file size in bytes.
+    // Returns 0 on success, u64(-1) on bad handle / bad user
+    // pointer. Does NOT modify the read cursor (unlike
+    // SYS_FILE_SEEK with SEEK_END which would). Backs Win32
+    // GetFileSizeEx + GetFileSize.
+    SYS_FILE_FSTAT = 24,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit

@@ -965,7 +965,7 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, customos::mm::AddressSpace* as
         auto* env_direct = static_cast<u8*>(PhysToVirt(env_frame));
         for (u64 i = 0; i < kPageSize; ++i)
             env_direct[i] = 0;
-        win32::Win32ProcEnvPopulate(env_direct, program_name);
+        win32::Win32ProcEnvPopulate(env_direct, program_name, h.image_base);
         AddressSpaceMapUserPage(as, win32::kProcEnvVa, env_frame,
                                 kPagePresent | kPageUser | kPageWritable | kPageNoExecute);
         SerialWrite("[pe-load] step4c proc-env mapped va=");
