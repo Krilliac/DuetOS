@@ -3,6 +3,7 @@
 #include "../arch/x86_64/gdt.h"
 #include "../arch/x86_64/serial.h"
 #include "../arch/x86_64/usermode.h"
+#include "../cpu/percpu.h"
 #include "../fs/ramfs.h"
 #include "generated_hello_pe.h"
 #include "generated_hello_winapi.h"
@@ -132,7 +133,7 @@ u64 AslrPickBase()
 // matching byte in kUserCodeBytes too. The static_assert at the
 // bottom bounds the instruction region so a new instruction byte
 // can't silently overrun the first string.
-constexpr u64 kUserMessageOffset = 0x80; // "Hello from ring 3!\n"
+constexpr u64 kUserMessageOffset = 0x80;   // "Hello from ring 3!\n"
 constexpr u64 kUserStatPath1Offset = 0xA0; // "/etc/version"
 constexpr u64 kUserStatPath2Offset = 0xB0; // "/welcome.txt"
 
@@ -258,14 +259,14 @@ struct PayloadPatch
 // AFTER the mov opcode byte). e.g. the "BF A0 00 00 40" at bytecode
 // offset 0x09 has imm32 starting at 0x0A.
 constexpr PayloadPatch kPayloadPatches[] = {
-    {0x0A, kPath1OffsetInCode, PatchBase::kCode},      // SYS_STAT #1: path1
-    {0x0F, kStatOutOffsetInStack, PatchBase::kStack},  // SYS_STAT #1: statout
-    {0x1B, kPath2OffsetInCode, PatchBase::kCode},      // SYS_STAT #2: path2
-    {0x20, kStatOutOffsetInStack, PatchBase::kStack},  // SYS_STAT #2: statout
-    {0x2C, kPath1OffsetInCode, PatchBase::kCode},      // SYS_READ: path1
-    {0x31, kReadBufOffsetInStack, PatchBase::kStack},  // SYS_READ: readbuf
-    {0x4A, kReadBufOffsetInStack, PatchBase::kStack},  // SYS_WRITE (dyn): readbuf
-    {0x5B, kMsgOffsetInCode, PatchBase::kCode},        // SYS_WRITE (banner): msg
+    {0x0A, kPath1OffsetInCode, PatchBase::kCode},     // SYS_STAT #1: path1
+    {0x0F, kStatOutOffsetInStack, PatchBase::kStack}, // SYS_STAT #1: statout
+    {0x1B, kPath2OffsetInCode, PatchBase::kCode},     // SYS_STAT #2: path2
+    {0x20, kStatOutOffsetInStack, PatchBase::kStack}, // SYS_STAT #2: statout
+    {0x2C, kPath1OffsetInCode, PatchBase::kCode},     // SYS_READ: path1
+    {0x31, kReadBufOffsetInStack, PatchBase::kStack}, // SYS_READ: readbuf
+    {0x4A, kReadBufOffsetInStack, PatchBase::kStack}, // SYS_WRITE (dyn): readbuf
+    {0x5B, kMsgOffsetInCode, PatchBase::kCode},       // SYS_WRITE (banner): msg
 };
 
 // Write a little-endian u32 into `buf` at byte offset `off`. Asserts
@@ -325,7 +326,7 @@ void WriteUserCodeFrame(mm::PhysAddr frame, u64 code_va, u64 stack_va)
     }
 }
 
-} // namespace (close anon so Ring3UserEntry has external linkage)
+} // namespace
 
 // Entry point for every ring-3 task created via SchedCreateUser.
 // Runs in ring 0 on a fresh kernel stack with the task's own AS
@@ -347,6 +348,10 @@ void WriteUserCodeFrame(mm::PhysAddr frame, u64 code_va, u64 stack_va)
         Panic("core/ring3", "SchedCurrentKernelStackTop returned 0");
     }
     arch::TssSetRsp0(kstack_top);
+    // Mirror into the per-CPU slot used by the Linux-ABI syscall
+    // entry stub. See kernel/cpu/percpu.h for the field; same
+    // pattern as the scheduler's context-switch path.
+    cpu::CurrentCpu()->kernel_rsp = kstack_top;
 
     Process* proc = CurrentProcess();
     if (proc == nullptr)
@@ -363,7 +368,14 @@ void WriteUserCodeFrame(mm::PhysAddr frame, u64 code_va, u64 stack_va)
     // offsets inside the function prologue would #GP. Bias
     // rsp by -8 once, up front, so the ring-3 entry point
     // sees the same layout it would on a CALL.
-    const u64 stack_top = proc->user_stack_va + mm::kPageSize - 8;
+    //
+    // Linux-ABI tasks override this via proc->user_rsp_init —
+    // the loader has pre-populated argc/argv/envp/auxv at the
+    // top of the stack page and picked an rsp that lands user
+    // _start on `argc` (which satisfies its own 16-alignment
+    // requirement without the -8 bias, since the Linux initial
+    // stack shape has argc at a 16-aligned boundary).
+    const u64 stack_top = (proc->user_rsp_init != 0) ? proc->user_rsp_init : (proc->user_stack_va + mm::kPageSize - 8);
 
     SerialWrite("[ring3] task pid=");
     SerialWriteHex(sched::CurrentTaskId());
@@ -371,12 +383,18 @@ void WriteUserCodeFrame(mm::PhysAddr frame, u64 code_va, u64 stack_va)
     SerialWriteHex(code_va);
     SerialWrite(" rsp=");
     SerialWriteHex(stack_top);
+    if (proc->user_gs_base != 0)
+    {
+        SerialWrite(" gs_base=");
+        SerialWriteHex(proc->user_gs_base);
+    }
     SerialWrite("\n");
 
-    arch::EnterUserMode(code_va, stack_top);
+    arch::EnterUserModeWithGs(code_va, stack_top, proc->user_gs_base);
 }
 
-namespace { // reopen anon for the rest of the file
+namespace
+{ // reopen anon for the rest of the file
 
 // Build a ring-3 task: allocate AS, allocate + populate code page,
 // allocate stack page, install both into the AS, wrap the AS in a
@@ -504,8 +522,8 @@ struct DropcapsPatch
 // SYS_WRITE #2 starts at offset 36 (after SYS_WRITE #1 ends at 24
 // and SYS_DROPCAPS takes 12 more bytes), imm32 at 36+11 = 47.
 constexpr DropcapsPatch kDropcapsPatches[] = {
-    {0x0D, kDropcapsPreOffset},   // SYS_WRITE #1 msg ptr
-    {0x2F, kDropcapsPostOffset},  // SYS_WRITE #2 msg ptr
+    {0x0D, kDropcapsPreOffset},  // SYS_WRITE #1 msg ptr
+    {0x2F, kDropcapsPostOffset}, // SYS_WRITE #2 msg ptr
 };
 
 void SpawnDropcapsProbe()
@@ -1508,8 +1526,8 @@ bool LocalStrEq(const char* a, const char* b)
 
 } // namespace
 
-u64 SpawnElfFile(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps,
-                 const fs::RamfsNode* root, u64 frame_budget, u64 tick_budget)
+u64 SpawnElfFile(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps, const fs::RamfsNode* root,
+                 u64 frame_budget, u64 tick_budget)
 {
     using arch::SerialWrite;
     using arch::SerialWriteHex;
@@ -1518,6 +1536,17 @@ u64 SpawnElfFile(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps
     if (elf_bytes == nullptr || elf_len == 0 || root == nullptr)
     {
         return 0;
+    }
+    // Auto-detect Linux-ABI binaries by EI_OSABI byte at ELF
+    // offset 7. ELFOSABI_LINUX = 3. Most gcc/clang output uses
+    // ELFOSABI_SYSV = 0 (which we treat as native); only binaries
+    // explicitly marked Linux route through SpawnElfLinux so the
+    // caller's intent is preserved for ambiguous inputs. When a
+    // richer discriminator lands (PT_INTERP sniffing,
+    // `.note.ABI-tag` parsing), add it here.
+    if (elf_len > 7 && elf_bytes[7] == 3)
+    {
+        return SpawnElfLinux(name, elf_bytes, elf_len, caps, root, frame_budget, tick_budget);
     }
     AddressSpace* as = AddressSpaceCreate(frame_budget);
     if (as == nullptr)
@@ -1540,6 +1569,126 @@ u64 SpawnElfFile(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps
         return 0;
     }
     SerialWrite("[ring3] elf spawn name=\"");
+    SerialWrite(name);
+    SerialWrite("\" pid=");
+    SerialWriteHex(proc->pid);
+    SerialWrite(" entry=");
+    SerialWriteHex(r.entry_va);
+    SerialWrite(" stack_top=");
+    SerialWriteHex(r.stack_top);
+    SerialWrite("\n");
+    sched::SchedCreateUser(&Ring3UserEntry, nullptr, name, proc);
+    return proc->pid;
+}
+
+u64 SpawnElfLinux(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps, const fs::RamfsNode* root,
+                  u64 frame_budget, u64 tick_budget)
+{
+    using arch::SerialWrite;
+    using arch::SerialWriteHex;
+    using namespace customos::mm;
+
+    if (elf_bytes == nullptr || elf_len == 0 || root == nullptr)
+    {
+        return 0;
+    }
+    AddressSpace* as = AddressSpaceCreate(frame_budget);
+    if (as == nullptr)
+    {
+        return 0;
+    }
+    const ElfLoadResult r = ElfLoad(elf_bytes, elf_len, as);
+    if (!r.ok)
+    {
+        AddressSpaceRelease(as);
+        return 0;
+    }
+    Process* proc = ProcessCreate(name, as, caps, root, r.entry_va, r.stack_va, tick_budget);
+    if (proc == nullptr)
+    {
+        AddressSpaceRelease(as);
+        return 0;
+    }
+    // Flip the ABI flavor + seed Linux heap/mmap anchors. The ELF
+    // loader doesn't know which ABI the image targets; we decide
+    // here. kAbiLinux steers this task's `syscall` instructions
+    // through subsystems::linux::LinuxSyscallDispatch instead of
+    // the native int-0x80 table.
+    //
+    // brk base: well past any reasonable static ELF's highest
+    // PT_LOAD. Our smokes load at 0x400078; 256 MiB past that is
+    // plenty of headroom without poking into the 0x7fffe000
+    // stack. A future loader pass will compute this from the
+    // max p_vaddr+p_memsz; v0 hard-codes.
+    //
+    // mmap cursor: 112 TiB up — well clear of everything else
+    // in the user half.
+    proc->abi_flavor = kAbiLinux;
+    proc->linux_brk_base = 0x0000'0000'1000'0000ull; // 256 MiB
+    proc->linux_brk_current = proc->linux_brk_base;
+    proc->linux_mmap_cursor = 0x0000'7000'0000'0000ull;
+
+    // Populate the top of the user stack with a Linux-ABI initial
+    // layout. Musl's _start reads from rsp; the layout is
+    // (rsp -> higher addresses):
+    //
+    //   [rsp_init +  0]: argc = 0
+    //   [rsp_init +  8]: argv[0] = NULL
+    //   [rsp_init + 16]: envp[0] = NULL
+    //   [rsp_init + 24]: AT_PAGESZ  = 6
+    //   [rsp_init + 32]: page size  = 4096
+    //   [rsp_init + 40]: AT_RANDOM  = 25
+    //   [rsp_init + 48]: rand_ptr   = rsp_init + 72
+    //   [rsp_init + 56]: AT_NULL    = 0
+    //   [rsp_init + 64]: auxv end   = 0
+    //   [rsp_init + 72]: 16 bytes of xorshift-mixed rdtsc entropy
+    //   [rsp_init + 88]: 8 bytes pad (keep rsp_init 16-aligned)
+    //
+    // 96 bytes total. musl uses AT_PAGESZ for mmap bookkeeping
+    // and AT_RANDOM as a stack-cookie / pointer-mangling seed.
+    // AT_PHDR / AT_EXECFN are not supplied; musl skips what it
+    // can't find and pulls program-header info from the ELF it
+    // loaded itself (works for static binaries).
+    const PhysAddr stack_frame = AddressSpaceLookupUserFrame(as, r.stack_va);
+    if (stack_frame != kNullFrame)
+    {
+        auto* stack_direct = static_cast<u8*>(PhysToVirt(stack_frame));
+        const u64 off = mm::kPageSize - 96;
+        for (u64 i = 0; i < 96; ++i)
+            stack_direct[off + i] = 0;
+        const u64 rsp_init = r.stack_top - 96;
+
+        auto put_u64 = [&](u64 at, u64 v)
+        {
+            for (u64 i = 0; i < 8; ++i)
+                stack_direct[off + at + i] = static_cast<u8>(v >> (i * 8));
+        };
+        // argc / argv[0] / envp[0] already zeroed.
+        // Aux vector.
+        put_u64(24, 6);             // AT_PAGESZ
+        put_u64(32, 4096);          // page size
+        put_u64(40, 25);            // AT_RANDOM
+        put_u64(48, rsp_init + 72); // pointer (user VA) to random block
+        put_u64(56, 0);             // AT_NULL
+        put_u64(64, 0);             // terminator value
+        // Fill the 16-byte random block with xorshift64 seeded
+        // from rdtsc. Non-crypto but mixed — same quality as
+        // sys_getrandom's stub.
+        u32 lo, hi;
+        asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
+        u64 state = (static_cast<u64>(hi) << 32) | lo;
+        state ^= 0xA5A5A5A5A5A5A5A5ull;
+        for (u64 i = 0; i < 16; ++i)
+        {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            stack_direct[off + 72 + i] = static_cast<u8>(state >> 24);
+        }
+        proc->user_rsp_init = rsp_init;
+    }
+
+    SerialWrite("[ring3] linux elf spawn name=\"");
     SerialWrite(name);
     SerialWrite("\" pid=");
     SerialWriteHex(proc->pid);
@@ -1587,7 +1736,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     // table, at which point ok=false and we fall through to
     // the generic "load failed" cleanup below.
     const PeStatus vs = PeValidate(pe_bytes, pe_len);
-    if (vs != PeStatus::Ok && vs != PeStatus::ImportsPresent)
+    if (vs != PeStatus::Ok && vs != PeStatus::ImportsPresent && vs != PeStatus::TlsPresent)
     {
         SerialWrite("[ring3] pe reject name=\"");
         SerialWrite(name);
@@ -1613,6 +1762,27 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         AddressSpaceRelease(as);
         return 0;
     }
+    // PE loader now maps a multi-page stack; Ring3UserEntry's
+    // default rsp = user_stack_va + PAGE - 8 would land at the
+    // BOTTOM of that range. Override with a Windows-ABI rsp
+    // near the top: the x64 Win64 ABI says at function entry
+    // rsp is of form `16n + 8` and [rsp] holds the return
+    // address with [rsp+8..rsp+0x28] being 32 bytes of caller-
+    // reserved shadow space the callee is free to spill argN
+    // into. MSVC's entry prolog does exactly that, so an rsp
+    // of stack_top - 8 faults immediately because rsp+8 is
+    // one byte above the mapped stack. Start at stack_top-0x48
+    // (72 bytes = 64 slack + 8) so the whole prolog window fits
+    // comfortably inside the top stack page. 0x48 mod 16 = 8,
+    // satisfying the 16n+8 rule.
+    proc->user_rsp_init = r.stack_top - 0x48;
+    proc->user_gs_base = r.teb_va;
+    // Transfer any catch-all IAT miss (slot_va -> name) entries
+    // the loader queued during ResolveImports. This arms the
+    // runtime miss-logger: on the first call to an unstubbed
+    // import, SYS_WIN32_MISS_LOG can decode the IAT slot VA back
+    // to the function name via this table.
+    PeLoadDrainIatMisses(proc);
     // Per-process Win32 heap. Only initialised for PEs that
     // actually imported anything — a freestanding PE like
     // /bin/hello.exe doesn't call HeapAlloc and shouldn't burn
@@ -1649,16 +1819,15 @@ bool SpawnOnDemand(const char* kind)
         return false;
     if (LocalStrEq(kind, "hello"))
     {
-        SpawnRing3Task("ring3-cmd-hello", CapSetTrusted(), fs::RamfsTrustedRoot(),
-                       mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        SpawnRing3Task("ring3-cmd-hello", CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted,
+                       kTickBudgetTrusted);
         return true;
     }
     if (LocalStrEq(kind, "sandbox"))
     {
         CapSet caps = CapSetEmpty();
         CapSetAdd(caps, kCapFsRead);
-        SpawnRing3Task("ring3-cmd-sandbox", caps, fs::RamfsSandboxRoot(),
-                       mm::kFrameBudgetSandbox, kTickBudgetSandbox);
+        SpawnRing3Task("ring3-cmd-sandbox", caps, fs::RamfsSandboxRoot(), mm::kFrameBudgetSandbox, kTickBudgetSandbox);
         return true;
     }
     if (LocalStrEq(kind, "jail"))
@@ -1723,9 +1892,8 @@ bool SpawnOnDemand(const char* kind)
         // through the kernel-hosted stub page, exits with
         // code 42. "Exit rc=0x2a" in the serial log confirms
         // the full IAT resolution chain worked.
-        SpawnPeFile("ring3-hello-winapi", fs::generated::kBinHelloWinapiBytes,
-                    fs::generated::kBinHelloWinapiBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                    mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        SpawnPeFile("ring3-hello-winapi", fs::generated::kBinHelloWinapiBytes, fs::generated::kBinHelloWinapiBytes_len,
+                    CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
         return true;
     }
     if (LocalStrEq(kind, "winkill"))
@@ -1840,9 +2008,8 @@ void StartRing3SmokeTask()
     // by the kernel. Imports kernel32.dll!ExitProcess, hits
     // the stub page, exits with code 42. See
     // .claude/knowledge/win32-subsystem-v0.md.
-    SpawnPeFile("ring3-hello-winapi", fs::generated::kBinHelloWinapiBytes,
-                fs::generated::kBinHelloWinapiBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-hello-winapi", fs::generated::kBinHelloWinapiBytes, fs::generated::kBinHelloWinapiBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     // Real-world Windows PE diagnostic attempt. Expected to
     // reject (most imports unresolved) — the value is the
     // PeReport log line showing the full import / reloc / TLS

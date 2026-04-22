@@ -10,9 +10,13 @@
 #include "../drivers/input/ps2kbd.h"
 #include "../drivers/input/ps2mouse.h"
 #include "../drivers/pci/pci.h"
+#include "../drivers/storage/block.h"
 #include "../drivers/video/console.h"
 #include "../drivers/video/framebuffer.h"
 #include "../drivers/video/widget.h"
+#include "../fs/fat32.h"
+#include "../subsystems/translation/translate.h"
+#include "../fs/gpt.h"
 #include "../fs/ramfs.h"
 #include "../fs/tmpfs.h"
 #include "../fs/vfs.h"
@@ -21,6 +25,7 @@
 #include "../mm/kheap.h"
 #include "../mm/paging.h"
 #include "../sched/sched.h"
+#include "../security/guard.h"
 #include "elf_loader.h"
 #include "klog.h"
 #include "process.h"
@@ -245,7 +250,7 @@ void CmdHelp()
     ConsoleWriteln("  TIME CMD..   MEASURE WALL TIME (10 MS RESOLUTION)");
     ConsoleWriteln("  SEQ N        PRINT 1..N (CAPPED AT 200)");
     ConsoleWriteln("  ECHO ..  > PATH   PRINT OR REDIRECT TO /tmp (>> TO APPEND)");
-    ConsoleWriteln("  DMESG        DUMP KERNEL LOG RING");
+    ConsoleWriteln("  DMESG [TDIWE|C] DUMP KERNEL LOG RING (OR C=CLEAR)");
     ConsoleWriteln("  STATS        SCHEDULER STATISTICS");
     ConsoleWriteln("  MEM          PHYSICAL MEMORY USAGE");
     ConsoleWriteln("  HISTORY      LIST RECENT COMMANDS (!N RECALL, !! REPEAT)");
@@ -290,6 +295,24 @@ void CmdHelp()
     ConsoleWriteln("  TRUE / FALSE NO-OP SUCCESS / FAILURE");
     ConsoleWriteln("  MOUNT        LIST FS MOUNTS");
     ConsoleWriteln("  LSMOD        LIST ACTIVE KERNEL SUBSYSTEMS");
+    ConsoleWriteln("  LSBLK        LIST REGISTERED BLOCK DEVICES");
+    ConsoleWriteln("  LSGPT        LIST PARTITIONS FROM GPT-PROBED DISKS");
+    ConsoleWriteln("  METRICS      LOG RESOURCE SNAPSHOT (HEAP / FRAMES / TASKS)");
+    ConsoleWriteln("  TRACE [ON|OFF] TOGGLE TRACE THRESHOLD + SHOW IN-FLIGHT SCOPES");
+    ConsoleWriteln("  READ H LBA [C] HEXDUMP C SECTORS FROM BLOCK HANDLE H AT LBA");
+    ConsoleWriteln("  GUARD [SUB]  SECURITY GUARD: STATUS OR ON/ENFORCE/OFF/TEST");
+    ConsoleWriteln("  TOP          PER-TASK CPU% + SYSTEM IDLE FRACTION");
+    ConsoleWriteln("  FATLS [VOL]  LIST ROOT DIR OF FAT32 VOLUME (default vol 0)");
+    ConsoleWriteln("  FATCAT [VOL] NAME  READ FILE FROM FAT32 VOLUME TO CONSOLE");
+    ConsoleWriteln("  FATWRITE PATH OFF BYTES  OVERWRITE EXISTING FILE BYTES IN-PLACE");
+    ConsoleWriteln("  FATAPPEND NAME BYTES     APPEND BYTES TO EXISTING ROOT-DIR FILE (GROWS)");
+    ConsoleWriteln("  FATNEW NAME [BYTES...]   CREATE NEW FAT32 FILE IN ROOT (8.3 NAME)");
+    ConsoleWriteln("  FATRM NAME               DELETE A FAT32 FILE FROM ROOT");
+    ConsoleWriteln("  FATTRUNC NAME NEW_SIZE   SHRINK OR ZERO-GROW AN EXISTING FILE");
+    ConsoleWriteln("  FATMKDIR PATH            CREATE A NEW DIRECTORY");
+    ConsoleWriteln("  FATRMDIR PATH            REMOVE AN EMPTY DIRECTORY");
+    ConsoleWriteln("  LINUXEXEC PATH           LOAD ELF FROM FAT32 AS A LINUX-ABI PROCESS");
+    ConsoleWriteln("  TRANSLATE                ABI TRANSLATION-UNIT HIT TABLE");
     ConsoleWriteln("  FREE         MEMORY USAGE (PHYS + HEAP)");
     ConsoleWriteln("  PS           LIST EVERY SCHEDULER TASK");
     ConsoleWriteln("  SPAWN KIND   LAUNCH A RING-3 TASK (hello/sandbox/jail/...)");
@@ -377,10 +400,58 @@ void CmdWindows()
     }
 }
 
-void CmdDmesg()
+void CmdDmesg(customos::u32 argc, char** argv)
 {
-    ConsoleWriteln("-- KERNEL LOG RING (OLDEST FIRST) --");
-    customos::core::DumpLogRingTo([](const char* s) { ConsoleWrite(s); });
+    // Optional first arg picks the minimum severity. Matches the
+    // single-letter `loglevel` command ("t" / "d" / "i" / "w" / "e").
+    // Default (no arg) shows every entry. Special: `dmesg c` clears
+    // the ring (shorthand for the hidden ClearLogRing API).
+    customos::core::LogLevel min_level = customos::core::LogLevel::Trace;
+    const char* banner_suffix = "";
+    if (argc >= 2 && argv[1] != nullptr && argv[1][0] != 0)
+    {
+        const char c = argv[1][0];
+        if (c == 'c' || c == 'C')
+        {
+            customos::core::ClearLogRing();
+            ConsoleWriteln("-- KERNEL LOG RING CLEARED --");
+            return;
+        }
+        switch (c)
+        {
+        case 't':
+        case 'T':
+            min_level = customos::core::LogLevel::Trace;
+            banner_suffix = " [FILTER: T+]";
+            break;
+        case 'd':
+        case 'D':
+            min_level = customos::core::LogLevel::Debug;
+            banner_suffix = " [FILTER: D+]";
+            break;
+        case 'i':
+        case 'I':
+            min_level = customos::core::LogLevel::Info;
+            banner_suffix = " [FILTER: I+]";
+            break;
+        case 'w':
+        case 'W':
+            min_level = customos::core::LogLevel::Warn;
+            banner_suffix = " [FILTER: W+]";
+            break;
+        case 'e':
+        case 'E':
+            min_level = customos::core::LogLevel::Error;
+            banner_suffix = " [FILTER: E ONLY]";
+            break;
+        default:
+            ConsoleWriteln("DMESG: USE [T|D|I|W|E] (severity) OR [C] (clear ring)");
+            return;
+        }
+    }
+    ConsoleWrite("-- KERNEL LOG RING (OLDEST FIRST)");
+    ConsoleWriteln(banner_suffix);
+    customos::core::DumpLogRingToFiltered([](const char* s) { ConsoleWrite(s); }, min_level);
 }
 
 void CmdStats()
@@ -412,6 +483,7 @@ void CmdStats()
 // Forwards — these helpers live further down but are used by
 // the earlier command implementations / the Prompt helper.
 const char* TmpLeaf(const char* path);
+const char* FatLeaf(const char* path);
 struct EnvSlot;
 EnvSlot* EnvFind(const char* name);
 void Dispatch(char* line); // CmdTime + CmdSource recurse via this
@@ -952,8 +1024,7 @@ void CmdSort(u32 argc, char** argv)
         const u32 off_i = offs[i];
         const u32 len_i = lens[i];
         u32 j = i;
-        while (j > 0 &&
-               LineCompare(&scratch[offs[j - 1]], lens[j - 1], &scratch[off_i], len_i) > 0)
+        while (j > 0 && LineCompare(&scratch[offs[j - 1]], lens[j - 1], &scratch[off_i], len_i) > 0)
         {
             offs[j] = offs[j - 1];
             lens[j] = lens[j - 1];
@@ -1000,8 +1071,7 @@ void CmdUniq(u32 argc, char** argv)
         if (at_end || scratch[i] == '\n')
         {
             const u32 len = i - start;
-            const bool is_dup = have_prev &&
-                                LineCompare(&scratch[prev_off], prev_len, &scratch[start], len) == 0;
+            const bool is_dup = have_prev && LineCompare(&scratch[prev_off], prev_len, &scratch[start], len) == 0;
             if (!is_dup)
             {
                 for (u32 k = 0; k < len; ++k)
@@ -1063,8 +1133,7 @@ void CmdGrep(u32 argc, char** argv)
 // back so sibling subtrees see the correct prefix. Root's name
 // is empty — we skip the name-match test there but still walk
 // its children.
-void FindWalk(const customos::fs::RamfsNode* node, const char* needle, char* path_buf,
-              u32& path_len, u32 path_cap)
+void FindWalk(const customos::fs::RamfsNode* node, const char* needle, char* path_buf, u32& path_len, u32 path_cap)
 {
     if (node == nullptr)
     {
@@ -1125,7 +1194,8 @@ void CmdFind(u32 argc, char** argv)
     };
     Cookie cookie{needle};
     customos::fs::TmpFsEnumerate(
-        [](const char* name, u32 /*len*/, void* ck) {
+        [](const char* name, u32 /*len*/, void* ck)
+        {
             auto* c = static_cast<Cookie*>(ck);
             u32 nlen = 0;
             while (name[nlen] != '\0')
@@ -1144,20 +1214,18 @@ void CmdFind(u32 argc, char** argv)
 // dispatched in Dispatch — keeping the two in sync is the
 // price of not having reflection.
 static const char* const kCommandSet[] = {
-    "help",    "about",   "version", "clear",   "uptime",  "date",    "windows",
-    "mode",    "ls",      "cat",     "touch",   "rm",      "echo",    "cp",
-    "mv",      "wc",      "head",    "tail",    "dmesg",   "stats",   "mem",
-    "history", "set",     "unset",   "env",     "alias",   "unalias", "sysinfo",
-    "source",  "man",     "grep",    "find",    "time",    "which",   "seq",
-    "sort",    "uniq",    "cpuid",   "cr",      "rflags",  "tsc",     "hpet",
-    "ticks",   "msr",     "lapic",   "smp",     "lspci",   "heap",    "paging",
-    "fb",      "kbdstats","mousestats","loglevel","getenv","yield",   "reboot",
-    "halt",    "uname",   "whoami",  "hostname","pwd",     "true",    "false",
-    "mount",   "lsmod",   "free",    "ps",      "spawn",   "readelf",
-    "hexdump", "stat",    "basename","dirname", "cal",
-    "sleep",   "reset",   "tac",     "nl",      "rev",     "expr",
-    "color",   "rand",    "flushtlb","checksum","repeat",   "kill",
-    "exec",
+    "help",    "about",  "version",  "clear",    "uptime",   "date",      "windows",    "mode",     "ls",
+    "cat",     "touch",  "rm",       "echo",     "cp",       "mv",        "wc",         "head",     "tail",
+    "dmesg",   "stats",  "mem",      "history",  "set",      "unset",     "env",        "alias",    "unalias",
+    "sysinfo", "source", "man",      "grep",     "find",     "time",      "which",      "seq",      "sort",
+    "uniq",    "cpuid",  "cr",       "rflags",   "tsc",      "hpet",      "ticks",      "msr",      "lapic",
+    "smp",     "lspci",  "heap",     "paging",   "fb",       "kbdstats",  "mousestats", "loglevel", "logcolor",
+    "getenv",  "yield",  "reboot",   "halt",     "uname",    "whoami",    "hostname",   "pwd",      "true",
+    "false",   "mount",  "lsmod",    "lsblk",    "lsgpt",    "free",      "ps",         "spawn",    "readelf",
+    "hexdump", "stat",   "basename", "dirname",  "cal",      "sleep",     "reset",      "tac",      "nl",
+    "rev",     "expr",   "color",    "rand",     "flushtlb", "checksum",  "repeat",     "kill",     "exec",
+    "metrics", "trace",  "read",     "guard",    "top",      "fatcat",    "fatls",      "fatwrite", "fatappend",
+    "fatnew",  "fatrm",  "fattrunc", "fatmkdir", "fatrmdir", "linuxexec", "translate",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -1395,8 +1463,7 @@ void CmdSource(u32 argc, char** argv)
         }
         line_buf[j] = '\0';
         // Trim trailing whitespace for cleaner dispatch.
-        while (j > 0 && (line_buf[j - 1] == ' ' || line_buf[j - 1] == '\t' ||
-                         line_buf[j - 1] == '\r'))
+        while (j > 0 && (line_buf[j - 1] == ' ' || line_buf[j - 1] == '\t' || line_buf[j - 1] == '\r'))
         {
             line_buf[--j] = '\0';
         }
@@ -1505,10 +1572,8 @@ void CmdSysinfo()
     WriteU64Dec(alive);
     ConsoleWriteln(" ALIVE");
     ConsoleWrite("MODE:    ");
-    ConsoleWriteln(customos::drivers::video::GetDisplayMode() ==
-                           customos::drivers::video::DisplayMode::Tty
-                       ? "TTY"
-                       : "DESKTOP");
+    ConsoleWriteln(
+        customos::drivers::video::GetDisplayMode() == customos::drivers::video::DisplayMode::Tty ? "TTY" : "DESKTOP");
 }
 
 void CmdEnv()
@@ -1701,8 +1766,8 @@ void CmdCr()
 // memcpy from .rodata, which the freestanding kernel doesn't
 // link.
 constexpr u8 kRflagsBitIdx[] = {0, 2, 4, 6, 7, 8, 9, 10, 11, 14, 16, 17, 18, 19, 20, 21};
-constexpr const char* kRflagsBitNames[] = {"CF", "PF",  "AF",  "ZF", "SF", "TF", "IF", "DF",
-                                            "OF", "NT",  "RF",  "VM", "AC", "VIF","VIP","ID"};
+constexpr const char* kRflagsBitNames[] = {"CF", "PF", "AF", "ZF", "SF", "TF",  "IF",  "DF",
+                                           "OF", "NT", "RF", "VM", "AC", "VIF", "VIP", "ID"};
 
 void CmdRflags()
 {
@@ -2015,6 +2080,9 @@ void CmdLoglevel(u32 argc, char** argv)
         ConsoleWrite("LOG THRESHOLD: ");
         switch (cur)
         {
+        case customos::core::LogLevel::Trace:
+            ConsoleWriteln("TRACE (fn enter/exit + timing)");
+            break;
         case customos::core::LogLevel::Debug:
             ConsoleWriteln("DEBUG (show everything)");
             break;
@@ -2028,13 +2096,17 @@ void CmdLoglevel(u32 argc, char** argv)
             ConsoleWriteln("ERROR (show only errors)");
             break;
         }
-        ConsoleWriteln("USAGE: LOGLEVEL [D|I|W|E]");
+        ConsoleWriteln("USAGE: LOGLEVEL [T|D|I|W|E]");
         return;
     }
     const char c = argv[1][0];
     customos::core::LogLevel lvl = customos::core::LogLevel::Info;
     switch (c)
     {
+    case 't':
+    case 'T':
+        lvl = customos::core::LogLevel::Trace;
+        break;
     case 'd':
     case 'D':
         lvl = customos::core::LogLevel::Debug;
@@ -2052,11 +2124,30 @@ void CmdLoglevel(u32 argc, char** argv)
         lvl = customos::core::LogLevel::Error;
         break;
     default:
-        ConsoleWriteln("LOGLEVEL: USE D / I / W / E");
+        ConsoleWriteln("LOGLEVEL: USE T / D / I / W / E");
         return;
     }
     customos::core::SetLogThreshold(lvl);
     ConsoleWriteln("LOG THRESHOLD UPDATED");
+}
+
+void CmdLogcolor(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        const bool cur = customos::core::GetLogColor();
+        ConsoleWrite("SERIAL LOG COLOUR: ");
+        ConsoleWriteln(cur ? "ON" : "OFF");
+        ConsoleWriteln("USAGE: LOGCOLOR ON|OFF");
+        return;
+    }
+    const char c = argv[1][0];
+    const bool want = (c == 'o' || c == 'O') ? (argv[1][1] == 'n' || argv[1][1] == 'N') : false;
+    // "on"  -> c='o', [1]='n'  -> true
+    // "off" -> c='o', [1]='f'  -> false
+    customos::core::SetLogColor(want);
+    ConsoleWrite("SERIAL LOG COLOUR: ");
+    ConsoleWriteln(want ? "ON" : "OFF");
 }
 
 void CmdGetenv(u32 argc, char** argv)
@@ -2136,16 +2227,907 @@ void CmdMount()
     ConsoleWriteln("tmpfs on /tmp    type=tmpfs (rw, 16 slots, 512B each)");
 }
 
+// Shared helper: parse decimal (default) or hex (0x prefix) into u64.
+// Returns true + writes `*out` on success. Used by `read` + any future
+// command taking a sector number / address.
+bool ParseU64Str(const char* s, customos::u64* out)
+{
+    if (s == nullptr || out == nullptr || s[0] == 0)
+        return false;
+    customos::u64 v = 0;
+    customos::u32 base = 10;
+    if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))
+    {
+        s += 2;
+        base = 16;
+    }
+    if (*s == 0)
+        return false;
+    for (; *s != 0; ++s)
+    {
+        customos::u64 d;
+        if (*s >= '0' && *s <= '9')
+            d = static_cast<customos::u64>(*s - '0');
+        else if (base == 16 && *s >= 'a' && *s <= 'f')
+            d = static_cast<customos::u64>(*s - 'a' + 10);
+        else if (base == 16 && *s >= 'A' && *s <= 'F')
+            d = static_cast<customos::u64>(*s - 'A' + 10);
+        else
+            return false;
+        v = v * base + d;
+    }
+    *out = v;
+    return true;
+}
+
+void CmdMetrics()
+{
+    // One-shot LogMetrics at Info level, tagged "shell" so the
+    // origin is distinguishable from the boot-time checkpoints.
+    customos::core::LogMetrics(customos::core::LogLevel::Info, "shell", "user-requested");
+    ConsoleWriteln("(also logged to kernel ring at INFO)");
+}
+
+void CmdGuard(customos::u32 argc, char** argv)
+{
+    // Show / control the security guard.
+    //   guard                  status line
+    //   guard on | advisory    switch to advisory mode
+    //   guard enforce          switch to enforce mode (prompts on Warn/Deny)
+    //   guard off              disable the guard entirely (use sparingly)
+    //   guard test             re-run GuardSelfTest
+    namespace sec = customos::security;
+    if (argc < 2)
+    {
+        ConsoleWrite("GUARD MODE   : ");
+        ConsoleWriteln(sec::GuardModeName(sec::GuardMode()));
+        ConsoleWrite("SCANS  : ");
+        WriteU64Hex(sec::GuardScanCount(), 0);
+        ConsoleWriteln("");
+        ConsoleWrite("ALLOW  : ");
+        WriteU64Hex(sec::GuardAllowCount(), 0);
+        ConsoleWriteln("");
+        ConsoleWrite("WARN   : ");
+        WriteU64Hex(sec::GuardWarnCount(), 0);
+        ConsoleWriteln("");
+        ConsoleWrite("DENY   : ");
+        WriteU64Hex(sec::GuardDenyCount(), 0);
+        ConsoleWriteln("");
+        const sec::Report* last = sec::GuardLastReport();
+        if (last != nullptr && last->finding_count > 0)
+        {
+            ConsoleWrite("LAST REPORT FINDINGS: ");
+            WriteU64Hex(last->finding_count, 0);
+            ConsoleWriteln("");
+        }
+        ConsoleWriteln("USAGE: GUARD [ON|ADVISORY|ENFORCE|OFF|TEST]");
+        return;
+    }
+    if (StrEq(argv[1], "on") || StrEq(argv[1], "advisory"))
+    {
+        sec::SetGuardMode(sec::Mode::Advisory);
+        ConsoleWriteln("GUARD: ADVISORY (logs, never blocks)");
+        return;
+    }
+    if (StrEq(argv[1], "enforce"))
+    {
+        sec::SetGuardMode(sec::Mode::Enforce);
+        ConsoleWriteln("GUARD: ENFORCE (prompts on Warn/Deny, default-deny on timeout)");
+        return;
+    }
+    if (StrEq(argv[1], "off"))
+    {
+        sec::SetGuardMode(sec::Mode::Off);
+        ConsoleWriteln("GUARD: OFF (all images pass through)");
+        return;
+    }
+    if (StrEq(argv[1], "test"))
+    {
+        sec::GuardSelfTest();
+        ConsoleWriteln("(self-test output on COM1)");
+        return;
+    }
+    ConsoleWriteln("GUARD: UNKNOWN SUBCOMMAND");
+}
+
+void CmdFatls(customos::u32 argc, char** argv)
+{
+    // `fatls [vol_idx]` — list root-directory entries from a
+    // probed FAT32 volume. Default volume 0. Columns mirror the
+    // boot-time self-test: name, attr, first_cluster, size.
+    namespace fat = customos::fs::fat32;
+    u32 vol_idx = 0;
+    if (argc >= 2)
+    {
+        customos::u64 v = 0;
+        if (!ParseU64Str(argv[1], &v) || v >= fat::Fat32VolumeCount())
+        {
+            ConsoleWriteln("FATLS: BAD VOLUME INDEX");
+            return;
+        }
+        vol_idx = static_cast<u32>(v);
+    }
+    const fat::Volume* v = fat::Fat32Volume(vol_idx);
+    if (v == nullptr)
+    {
+        ConsoleWriteln("FATLS: NO VOLUMES (did FAT32 self-test find one?)");
+        return;
+    }
+    ConsoleWriteln("NAME          ATTR  FIRST_CLUSTER  SIZE");
+    for (customos::u32 i = 0; i < v->root_entry_count; ++i)
+    {
+        const fat::DirEntry& e = v->root_entries[i];
+        ConsoleWrite(e.name);
+        // Pad name column to 13 chars.
+        customos::u32 len = 0;
+        while (e.name[len] != 0)
+            ++len;
+        for (customos::u32 p = len; p < 13; ++p)
+            ConsoleWriteChar(' ');
+        ConsoleWriteChar(' ');
+        WriteU64Hex(e.attributes, 2);
+        ConsoleWrite("    ");
+        WriteU64Hex(e.first_cluster, 8);
+        ConsoleWriteChar(' ');
+        WriteU64Hex(e.size_bytes, 8);
+        ConsoleWriteln("");
+    }
+}
+
+void CmdFatcat(customos::u32 argc, char** argv)
+{
+    // `fatcat [vol_idx] <name>` — read the named file from a FAT32
+    // volume and write it to the console. Caps at 4 KiB (one scratch
+    // buffer) for v0; larger reads are a follow-up that streams in
+    // chunks. Volume index is optional and defaults to 0.
+    namespace fat = customos::fs::fat32;
+    if (argc < 2)
+    {
+        ConsoleWriteln("FATCAT: USAGE: FATCAT [VOL] NAME");
+        return;
+    }
+    u32 vol_idx = 0;
+    const char* name = argv[1];
+    if (argc >= 3)
+    {
+        customos::u64 v = 0;
+        if (ParseU64Str(argv[1], &v) && v < fat::Fat32VolumeCount())
+        {
+            vol_idx = static_cast<u32>(v);
+            name = argv[2];
+        }
+    }
+    const fat::Volume* v = fat::Fat32Volume(vol_idx);
+    if (v == nullptr)
+    {
+        ConsoleWriteln("FATCAT: NO SUCH VOLUME");
+        return;
+    }
+    const fat::DirEntry* e = fat::Fat32FindInRoot(v, name);
+    if (e == nullptr)
+    {
+        ConsoleWrite("FATCAT: NO SUCH FILE: ");
+        ConsoleWriteln(name);
+        return;
+    }
+    // Streamed; no size cap. Non-printable bytes collapse to '.'
+    // so operator-driven cat doesn't spray garbage on the console.
+    struct StreamCtx
+    {
+        u8 last_byte;
+        bool any;
+    };
+    StreamCtx ctx{0, false};
+    const bool ok = fat::Fat32ReadFileStream(
+        v, e,
+        [](const customos::u8* data, customos::u64 len, void* cx) -> bool
+        {
+            auto* s = static_cast<StreamCtx*>(cx);
+            for (customos::u64 i = 0; i < len; ++i)
+            {
+                const char c = static_cast<char>(data[i]);
+                ConsoleWriteChar((c >= 0x20 && c <= 0x7E) || c == '\n' || c == '\r' || c == '\t' ? c : '.');
+            }
+            if (len > 0)
+            {
+                s->last_byte = data[len - 1];
+                s->any = true;
+            }
+            return true;
+        },
+        &ctx);
+    if (!ok)
+    {
+        ConsoleWriteln("FATCAT: READ ERROR");
+        return;
+    }
+    if (!ctx.any || ctx.last_byte != '\n')
+    {
+        ConsoleWriteln("");
+    }
+}
+
+void CmdFatwrite(customos::u32 argc, char** argv)
+{
+    // `fatwrite <path> <offset> <bytes>` — overwrite existing file
+    // bytes in-place. `<bytes>` is taken as a literal ASCII string
+    // (joined with spaces if multiple tokens). No size change, no
+    // extension — matches the driver's v0 Fat32WriteInPlace scope.
+    // Handy for demonstrating the write path without a user-space
+    // editor. Destructive: runs directly against sata0p1 / nvme0n1p1.
+    namespace fat = customos::fs::fat32;
+    if (argc < 4)
+    {
+        ConsoleWriteln("FATWRITE: USAGE: FATWRITE PATH OFFSET BYTES...");
+        return;
+    }
+    const char* path = argv[1];
+    customos::u64 off = 0;
+    if (!ParseU64Str(argv[2], &off))
+    {
+        ConsoleWriteln("FATWRITE: BAD OFFSET");
+        return;
+    }
+    // Join argv[3..argc-1] with single spaces to form the payload.
+    static customos::u8 payload[1024];
+    customos::u64 plen = 0;
+    for (u32 i = 3; i < argc; ++i)
+    {
+        if (i > 3 && plen + 1 < sizeof(payload))
+        {
+            payload[plen++] = ' ';
+        }
+        for (u32 j = 0; argv[i][j] != 0 && plen + 1 < sizeof(payload); ++j)
+        {
+            payload[plen++] = static_cast<customos::u8>(argv[i][j]);
+        }
+    }
+    // Fat32LookupPath wants a volume-relative path; our shell sniff
+    // expects a /fat-prefixed one. Accept either form here for
+    // operator convenience.
+    const char* leaf = FatLeaf(path);
+    if (leaf == nullptr)
+        leaf = (path[0] == '/') ? path + 1 : path;
+    const fat::Volume* v = fat::Fat32Volume(0);
+    if (v == nullptr)
+    {
+        ConsoleWriteln("FATWRITE: FAT32 NOT MOUNTED");
+        return;
+    }
+    fat::DirEntry entry;
+    if (!fat::Fat32LookupPath(v, leaf, &entry))
+    {
+        ConsoleWrite("FATWRITE: NO SUCH FILE: ");
+        ConsoleWriteln(path);
+        return;
+    }
+    if (entry.attributes & 0x10)
+    {
+        ConsoleWriteln("FATWRITE: PATH IS A DIRECTORY");
+        return;
+    }
+    const customos::i64 rc = fat::Fat32WriteInPlace(v, &entry, off, payload, plen);
+    if (rc < 0)
+    {
+        ConsoleWriteln("FATWRITE: WRITE FAILED (offset+len > size? backend RO?)");
+        return;
+    }
+    ConsoleWrite("FATWRITE: WROTE ");
+    WriteU64Dec(static_cast<customos::u64>(rc));
+    ConsoleWrite(" BYTES AT OFFSET ");
+    WriteU64Dec(off);
+    ConsoleWriteln("");
+}
+
+void CmdFatappend(customos::u32 argc, char** argv)
+{
+    // `fatappend <name> <bytes...>` — append the trailing argv
+    // tokens (joined with single spaces) to the end of a file in
+    // FAT32 volume 0's root. Grows the file; allocates clusters as
+    // needed. v0 scope is root-dir only — no path walking, no
+    // subdirectory targets. The image rebuilds every boot-smoke,
+    // so any appends are ephemeral across test cycles.
+    namespace fat = customos::fs::fat32;
+    if (argc < 3)
+    {
+        ConsoleWriteln("FATAPPEND: USAGE: FATAPPEND NAME BYTES...");
+        return;
+    }
+    const char* name = argv[1];
+    // Strip a leading /fat/ if the operator gave a mount-rooted
+    // path, matching CmdFatwrite's convenience policy.
+    if (const char* leaf = FatLeaf(name); leaf != nullptr && *leaf != '\0')
+    {
+        name = leaf;
+    }
+    else if (name[0] == '/')
+    {
+        ++name;
+    }
+    static customos::u8 payload[1024];
+    customos::u64 plen = 0;
+    for (u32 i = 2; i < argc; ++i)
+    {
+        if (i > 2 && plen + 1 < sizeof(payload))
+        {
+            payload[plen++] = ' ';
+        }
+        for (u32 j = 0; argv[i][j] != 0 && plen + 1 < sizeof(payload); ++j)
+        {
+            payload[plen++] = static_cast<customos::u8>(argv[i][j]);
+        }
+    }
+    const fat::Volume* v = fat::Fat32Volume(0);
+    if (v == nullptr)
+    {
+        ConsoleWriteln("FATAPPEND: FAT32 NOT MOUNTED");
+        return;
+    }
+    bool has_slash = false;
+    for (u32 i = 0; name[i] != 0; ++i)
+    {
+        if (name[i] == '/')
+        {
+            has_slash = true;
+            break;
+        }
+    }
+    const customos::i64 rc =
+        has_slash ? fat::Fat32AppendAtPath(v, name, payload, plen) : fat::Fat32AppendInRoot(v, name, payload, plen);
+    if (rc < 0)
+    {
+        ConsoleWriteln("FATAPPEND: APPEND FAILED (backend RO? disk full? file not in root?)");
+        return;
+    }
+    ConsoleWrite("FATAPPEND: APPENDED ");
+    WriteU64Dec(static_cast<customos::u64>(rc));
+    ConsoleWrite(" BYTES TO ");
+    ConsoleWriteln(name);
+}
+
+void CmdFatnew(customos::u32 argc, char** argv)
+{
+    // `fatnew <name> [bytes...]` — create a new root-dir file
+    // with optional initial content (joined argv). Name must fit
+    // in the 8.3 SFN encoding; anything longer is rejected.
+    namespace fat = customos::fs::fat32;
+    if (argc < 2)
+    {
+        ConsoleWriteln("FATNEW: USAGE: FATNEW NAME [BYTES...]");
+        return;
+    }
+    const char* name = argv[1];
+    if (const char* leaf = FatLeaf(name); leaf != nullptr && *leaf != '\0')
+    {
+        name = leaf;
+    }
+    else if (name[0] == '/')
+    {
+        ++name;
+    }
+    static customos::u8 payload[1024];
+    customos::u64 plen = 0;
+    for (u32 i = 2; i < argc; ++i)
+    {
+        if (i > 2 && plen + 1 < sizeof(payload))
+        {
+            payload[plen++] = ' ';
+        }
+        for (u32 j = 0; argv[i][j] != 0 && plen + 1 < sizeof(payload); ++j)
+        {
+            payload[plen++] = static_cast<customos::u8>(argv[i][j]);
+        }
+    }
+    const fat::Volume* v = fat::Fat32Volume(0);
+    if (v == nullptr)
+    {
+        ConsoleWriteln("FATNEW: FAT32 NOT MOUNTED");
+        return;
+    }
+    bool has_slash = false;
+    for (u32 i = 0; name[i] != 0; ++i)
+    {
+        if (name[i] == '/')
+        {
+            has_slash = true;
+            break;
+        }
+    }
+    const customos::i64 rc =
+        has_slash ? fat::Fat32CreateAtPath(v, name, payload, plen) : fat::Fat32CreateInRoot(v, name, payload, plen);
+    if (rc < 0)
+    {
+        ConsoleWriteln("FATNEW: CREATE FAILED (bad name? exists? full dir? disk full?)");
+        return;
+    }
+    ConsoleWrite("FATNEW: CREATED ");
+    ConsoleWrite(name);
+    ConsoleWrite(" (");
+    WriteU64Dec(static_cast<customos::u64>(rc));
+    ConsoleWriteln(" BYTES)");
+}
+
+void CmdFatrm(customos::u32 argc, char** argv)
+{
+    // `fatrm <name>` — delete a root-dir file. Frees its cluster
+    // chain, marks the directory entry deleted.
+    namespace fat = customos::fs::fat32;
+    if (argc < 2)
+    {
+        ConsoleWriteln("FATRM: USAGE: FATRM NAME");
+        return;
+    }
+    const char* name = argv[1];
+    if (const char* leaf = FatLeaf(name); leaf != nullptr && *leaf != '\0')
+    {
+        name = leaf;
+    }
+    else if (name[0] == '/')
+    {
+        ++name;
+    }
+    const fat::Volume* v = fat::Fat32Volume(0);
+    if (v == nullptr)
+    {
+        ConsoleWriteln("FATRM: FAT32 NOT MOUNTED");
+        return;
+    }
+    bool has_slash = false;
+    for (u32 i = 0; name[i] != 0; ++i)
+    {
+        if (name[i] == '/')
+        {
+            has_slash = true;
+            break;
+        }
+    }
+    const bool ok = has_slash ? fat::Fat32DeleteAtPath(v, name) : fat::Fat32DeleteInRoot(v, name);
+    if (!ok)
+    {
+        ConsoleWrite("FATRM: FAILED: ");
+        ConsoleWriteln(name);
+        return;
+    }
+    ConsoleWrite("FATRM: DELETED ");
+    ConsoleWriteln(name);
+}
+
+void CmdFattrunc(customos::u32 argc, char** argv)
+{
+    // `fattrunc <name> <new_size>` — shrink or grow a file to
+    // `new_size` bytes. Growth pads with zeros.
+    namespace fat = customos::fs::fat32;
+    if (argc < 3)
+    {
+        ConsoleWriteln("FATTRUNC: USAGE: FATTRUNC NAME NEW_SIZE");
+        return;
+    }
+    const char* name = argv[1];
+    if (const char* leaf = FatLeaf(name); leaf != nullptr && *leaf != '\0')
+    {
+        name = leaf;
+    }
+    else if (name[0] == '/')
+    {
+        ++name;
+    }
+    customos::u64 new_size = 0;
+    if (!ParseU64Str(argv[2], &new_size))
+    {
+        ConsoleWriteln("FATTRUNC: BAD SIZE");
+        return;
+    }
+    const fat::Volume* v = fat::Fat32Volume(0);
+    if (v == nullptr)
+    {
+        ConsoleWriteln("FATTRUNC: FAT32 NOT MOUNTED");
+        return;
+    }
+    bool has_slash = false;
+    for (u32 i = 0; name[i] != 0; ++i)
+    {
+        if (name[i] == '/')
+        {
+            has_slash = true;
+            break;
+        }
+    }
+    const customos::i64 rc =
+        has_slash ? fat::Fat32TruncateAtPath(v, name, new_size) : fat::Fat32TruncateInRoot(v, name, new_size);
+    if (rc < 0)
+    {
+        ConsoleWriteln("FATTRUNC: FAILED");
+        return;
+    }
+    ConsoleWrite("FATTRUNC: ");
+    ConsoleWrite(name);
+    ConsoleWrite(" -> ");
+    WriteU64Dec(static_cast<customos::u64>(rc));
+    ConsoleWriteln(" BYTES");
+}
+
+void CmdFatmkdir(customos::u32 argc, char** argv)
+{
+    // `fatmkdir <path>` — create a directory in FAT32 volume 0.
+    namespace fat = customos::fs::fat32;
+    if (argc < 2)
+    {
+        ConsoleWriteln("FATMKDIR: USAGE: FATMKDIR PATH");
+        return;
+    }
+    const char* path = argv[1];
+    if (const char* leaf = FatLeaf(path); leaf != nullptr && *leaf != '\0')
+    {
+        path = leaf;
+    }
+    else if (path[0] == '/')
+    {
+        ++path;
+    }
+    const fat::Volume* v = fat::Fat32Volume(0);
+    if (v == nullptr)
+    {
+        ConsoleWriteln("FATMKDIR: FAT32 NOT MOUNTED");
+        return;
+    }
+    if (!fat::Fat32MkdirAtPath(v, path))
+    {
+        ConsoleWrite("FATMKDIR: FAILED: ");
+        ConsoleWriteln(path);
+        return;
+    }
+    ConsoleWrite("FATMKDIR: CREATED ");
+    ConsoleWriteln(path);
+}
+
+void CmdFatrmdir(customos::u32 argc, char** argv)
+{
+    // `fatrmdir <path>` — remove an empty directory.
+    namespace fat = customos::fs::fat32;
+    if (argc < 2)
+    {
+        ConsoleWriteln("FATRMDIR: USAGE: FATRMDIR PATH");
+        return;
+    }
+    const char* path = argv[1];
+    if (const char* leaf = FatLeaf(path); leaf != nullptr && *leaf != '\0')
+    {
+        path = leaf;
+    }
+    else if (path[0] == '/')
+    {
+        ++path;
+    }
+    const fat::Volume* v = fat::Fat32Volume(0);
+    if (v == nullptr)
+    {
+        ConsoleWriteln("FATRMDIR: FAT32 NOT MOUNTED");
+        return;
+    }
+    if (!fat::Fat32RmdirAtPath(v, path))
+    {
+        ConsoleWriteln("FATRMDIR: FAILED (not a dir? not empty? not found?)");
+        return;
+    }
+    ConsoleWrite("FATRMDIR: REMOVED ");
+    ConsoleWriteln(path);
+}
+
+void CmdLinuxexec(customos::u32 argc, char** argv)
+{
+    // `linuxexec <path>` — read an ELF file from FAT32 volume 0,
+    // hand the bytes to core::SpawnElfLinux, and queue the result
+    // as a ring-3 task. A simple way to run "any Linux binary the
+    // loader supports" once it's on disk. Accepts either a
+    // volume-relative ("LINUX.ELF") or mount-prefixed
+    // ("/fat/LINUX.ELF") path.
+    namespace fat = customos::fs::fat32;
+    if (argc < 2)
+    {
+        ConsoleWriteln("LINUXEXEC: USAGE: LINUXEXEC PATH");
+        return;
+    }
+    const char* path = argv[1];
+    if (const char* leaf = FatLeaf(path); leaf != nullptr && *leaf != '\0')
+    {
+        path = leaf;
+    }
+    else if (path[0] == '/')
+    {
+        ++path;
+    }
+    const fat::Volume* v = fat::Fat32Volume(0);
+    if (v == nullptr)
+    {
+        ConsoleWriteln("LINUXEXEC: FAT32 NOT MOUNTED");
+        return;
+    }
+    fat::DirEntry entry;
+    if (!fat::Fat32LookupPath(v, path, &entry))
+    {
+        ConsoleWrite("LINUXEXEC: NO SUCH FILE: ");
+        ConsoleWriteln(path);
+        return;
+    }
+    if (entry.attributes & 0x10)
+    {
+        ConsoleWriteln("LINUXEXEC: PATH IS A DIRECTORY");
+        return;
+    }
+    // 16 KiB cap fits the v0 smoke ELF (~260 B) with plenty of
+    // headroom. Larger binaries will hit the cap — expand once a
+    // non-trivial musl program needs more.
+    static customos::u8 elf_buf[16384];
+    const customos::i64 n = fat::Fat32ReadFile(v, &entry, elf_buf, sizeof(elf_buf));
+    if (n <= 0)
+    {
+        ConsoleWriteln("LINUXEXEC: READ ERROR OR EMPTY");
+        return;
+    }
+    const customos::u64 pid = customos::core::SpawnElfLinux(
+        "linuxexec", elf_buf, static_cast<customos::u64>(n), customos::core::CapSetEmpty(),
+        customos::fs::RamfsSandboxRoot(), /*frame_budget=*/16, customos::core::kTickBudgetSandbox);
+    if (pid == 0)
+    {
+        ConsoleWriteln("LINUXEXEC: SPAWNELFLINUX FAILED");
+        return;
+    }
+    ConsoleWrite("LINUXEXEC: SPAWNED PID=");
+    WriteU64Dec(pid);
+    ConsoleWrite(" PATH=");
+    ConsoleWriteln(path);
+}
+
+void CmdTranslate()
+{
+    // `translate` — print the ABI translation unit's hit tables.
+    // One row per bucket that has fired at least once, split by
+    // direction. Buckets are syscall_nr & 0x3FF; overlaps between
+    // Linux's wide numbering and native's narrow numbering are
+    // rare enough to keep the 1024-slot scheme.
+    namespace tx = customos::subsystems::translation;
+    const auto& linux = tx::LinuxHitsRead();
+    const auto& native = tx::NativeHitsRead();
+    ConsoleWriteln("TRANSLATION UNIT HIT TABLE");
+    ConsoleWriteln("  DIR     NR     HITS");
+    for (customos::u32 i = 0; i < 1024; ++i)
+    {
+        if (linux.buckets[i] == 0)
+            continue;
+        ConsoleWrite("  linux   0x");
+        WriteU64Hex(i, 3);
+        ConsoleWrite("  ");
+        WriteU64Dec(linux.buckets[i]);
+        ConsoleWriteln("");
+    }
+    for (customos::u32 i = 0; i < 1024; ++i)
+    {
+        if (native.buckets[i] == 0)
+            continue;
+        ConsoleWrite("  native  0x");
+        WriteU64Hex(i, 3);
+        ConsoleWrite("  ");
+        WriteU64Dec(native.buckets[i]);
+        ConsoleWriteln("");
+    }
+    ConsoleWriteln("-- end --");
+}
+
+void CmdRead(customos::u32 argc, char** argv)
+{
+    // `read <handle> <lba> [count]` — reads up to one page (4096 B)
+    // from the given block device and hexdumps it to the console.
+    // Lets a user verify driver reads end-to-end without writing a
+    // program. Parses handle/LBA as decimal or hex (0x prefix).
+    if (argc < 3)
+    {
+        ConsoleWriteln("READ: USAGE: READ HANDLE LBA [COUNT]");
+        ConsoleWriteln("      (count in sectors, default 1, max = 4096/sector_size)");
+        return;
+    }
+    namespace storage = customos::drivers::storage;
+    customos::u64 handle_u64 = 0;
+    customos::u64 lba = 0;
+    customos::u64 count = 1;
+    if (!ParseU64Str(argv[1], &handle_u64) || handle_u64 >= 0x100000000ULL)
+    {
+        ConsoleWriteln("READ: BAD HANDLE");
+        return;
+    }
+    if (!ParseU64Str(argv[2], &lba))
+    {
+        ConsoleWriteln("READ: BAD LBA");
+        return;
+    }
+    if (argc >= 4 && !ParseU64Str(argv[3], &count))
+    {
+        ConsoleWriteln("READ: BAD COUNT");
+        return;
+    }
+    const customos::u32 handle = static_cast<customos::u32>(handle_u64);
+    const customos::u32 ssize = storage::BlockDeviceSectorSize(handle);
+    if (ssize == 0)
+    {
+        ConsoleWriteln("READ: INVALID HANDLE (no such block device)");
+        return;
+    }
+    const customos::u32 max_count = 4096u / ssize;
+    if (count == 0 || count > max_count)
+    {
+        ConsoleWrite("READ: COUNT OUT OF RANGE (max ");
+        WriteU64Hex(max_count, 0);
+        ConsoleWriteln(")");
+        return;
+    }
+    static customos::u8 buf[4096];
+    for (customos::u64 i = 0; i < 4096; ++i)
+        buf[i] = 0;
+    if (storage::BlockDeviceRead(handle, lba, static_cast<customos::u32>(count), buf) != 0)
+    {
+        ConsoleWriteln("READ: DRIVER RETURNED ERROR");
+        return;
+    }
+    const customos::u32 bytes = static_cast<customos::u32>(count) * ssize;
+    ConsoleWrite("READ ");
+    WriteU64Hex(bytes, 0);
+    ConsoleWrite(" BYTES FROM HANDLE ");
+    WriteU64Hex(handle, 0);
+    ConsoleWrite(" LBA ");
+    WriteU64Hex(lba, 0);
+    ConsoleWriteln(":");
+    // Classic 16-byte hex + ASCII rows, mirroring CmdHexdump.
+    for (customos::u32 row = 0; row < bytes; row += 16)
+    {
+        WriteU64Hex(row, 8);
+        ConsoleWrite("  ");
+        for (customos::u32 i = 0; i < 16; ++i)
+        {
+            if (row + i < bytes)
+                WriteU64Hex(buf[row + i], 2);
+            else
+                ConsoleWrite("  ");
+            ConsoleWriteChar(' ');
+            if (i == 7)
+                ConsoleWriteChar(' ');
+        }
+        ConsoleWrite(" |");
+        for (customos::u32 i = 0; i < 16 && row + i < bytes; ++i)
+        {
+            const char c = static_cast<char>(buf[row + i]);
+            ConsoleWriteChar((c >= 0x20 && c <= 0x7E) ? c : '.');
+        }
+        ConsoleWriteln("|");
+    }
+}
+
+void CmdTrace(customos::u32 argc, char** argv)
+{
+    // `trace`              — show current threshold + in-flight scopes
+    // `trace on` / `trace off` — shortcut for loglevel t / i
+    if (argc < 2)
+    {
+        const auto cur = customos::core::GetLogThreshold();
+        ConsoleWrite("TRACE THRESHOLD: ");
+        ConsoleWriteln(cur == customos::core::LogLevel::Trace ? "ON" : "OFF");
+        ConsoleWriteln("(IN-FLIGHT SCOPES LOGGED TO SERIAL BELOW)");
+        customos::core::DumpInflightScopes();
+        ConsoleWriteln("USAGE: TRACE [ON|OFF]");
+        return;
+    }
+    if (argv[1][0] == 'o' && (argv[1][1] == 'n' || argv[1][1] == 'N'))
+    {
+        customos::core::SetLogThreshold(customos::core::LogLevel::Trace);
+        ConsoleWriteln("TRACE ON (threshold = TRACE)");
+    }
+    else if (argv[1][0] == 'o' && (argv[1][1] == 'f' || argv[1][1] == 'F'))
+    {
+        customos::core::SetLogThreshold(customos::core::LogLevel::Info);
+        ConsoleWriteln("TRACE OFF (threshold = INFO)");
+    }
+    else
+    {
+        ConsoleWriteln("TRACE: USE ON|OFF");
+    }
+}
+
+void CmdLsblk()
+{
+    namespace storage = customos::drivers::storage;
+    const customos::u32 count = storage::BlockDeviceCount();
+    ConsoleWrite("NAME       HANDLE  SECT_SZ  SECT_COUNT       MODE");
+    ConsoleWriteln("");
+    for (customos::u32 i = 0; i < count; ++i)
+    {
+        const char* name = storage::BlockDeviceName(i);
+        ConsoleWrite(name);
+        // Pad the name column to 10 chars (max realistic "nvme0n99").
+        for (customos::u32 p = 0; p < 11; ++p)
+        {
+            if (name[p] == 0)
+            {
+                for (customos::u32 q = p; q < 11; ++q)
+                    ConsoleWriteChar(' ');
+                break;
+            }
+        }
+        WriteU64Hex(i, 4);
+        ConsoleWrite("    ");
+        WriteU64Hex(storage::BlockDeviceSectorSize(i), 6);
+        ConsoleWrite("  ");
+        WriteU64Hex(storage::BlockDeviceSectorCount(i), 16);
+        ConsoleWrite("  ");
+        ConsoleWriteln(storage::BlockDeviceIsWritable(i) ? "rw" : "ro");
+    }
+    if (count == 0)
+    {
+        ConsoleWriteln("  (no block devices registered)");
+    }
+}
+
+void CmdLsgpt()
+{
+    namespace gpt = customos::fs::gpt;
+    const customos::u32 disks = gpt::GptDiskCount();
+    if (disks == 0)
+    {
+        ConsoleWriteln("  (no GPT disks probed)");
+        return;
+    }
+    for (customos::u32 di = 0; di < disks; ++di)
+    {
+        const gpt::Disk* d = gpt::GptDisk(di);
+        if (d == nullptr)
+            continue;
+        ConsoleWrite("DISK HANDLE ");
+        WriteU64Hex(d->block_handle, 4);
+        ConsoleWrite("  SECTOR_SIZE ");
+        WriteU64Hex(d->sector_size, 4);
+        ConsoleWrite("  PARTS ");
+        WriteU64Hex(d->partition_count, 2);
+        ConsoleWriteln("");
+        for (customos::u32 pi = 0; pi < d->partition_count; ++pi)
+        {
+            const gpt::Partition& p = d->partitions[pi];
+            ConsoleWrite("  PART ");
+            WriteU64Hex(pi, 2);
+            ConsoleWrite(" FIRST_LBA ");
+            WriteU64Hex(p.first_lba, 0);
+            ConsoleWrite(" LAST_LBA ");
+            WriteU64Hex(p.last_lba, 0);
+            ConsoleWriteln("");
+            ConsoleWrite("       TYPE ");
+            // Canonical mixed-endian GUID rendering.
+            static constexpr int kOrder[] = {3, 2, 1, 0, -1, 5, 4, -1, 7, 6, -1, 8, 9, -1, 10, 11, 12, 13, 14, 15};
+            for (int k = 0; k < 20; ++k)
+            {
+                const int idx = kOrder[k];
+                if (idx < 0)
+                {
+                    ConsoleWriteChar('-');
+                }
+                else
+                {
+                    const customos::u8 b = p.type_guid[idx];
+                    const char hi = (b >> 4) < 10 ? char('0' + (b >> 4)) : char('A' + (b >> 4) - 10);
+                    const char lo = (b & 0xF) < 10 ? char('0' + (b & 0xF)) : char('A' + (b & 0xF) - 10);
+                    ConsoleWriteChar(hi);
+                    ConsoleWriteChar(lo);
+                }
+            }
+            ConsoleWriteln("");
+        }
+    }
+}
+
 void CmdLsmod()
 {
     // Not real modules — just a static list of the subsystems
     // currently online. Still useful as a "what's loaded" view.
     static const char* const kModules[] = {
-        "multiboot2", "gdt", "idt", "tss+ist", "paging",      "frame_alloc", "kheap",
-        "acpi",       "pic", "lapic", "ioapic", "hpet",       "timer",       "scheduler",
-        "percpu",     "ps2kbd", "ps2mouse", "pci",            "ahci",        "framebuffer",
-        "cursor",     "font8x8", "console", "widget",         "taskbar",     "menu",
-        "ramfs",      "tmpfs",   "vfs",     "rtc",            "klog",        "shell",
+        "multiboot2", "gdt",   "idt",    "tss+ist",     "paging", "frame_alloc", "kheap",   "acpi",
+        "pic",        "lapic", "ioapic", "hpet",        "timer",  "scheduler",   "percpu",  "ps2kbd",
+        "ps2mouse",   "pci",   "ahci",   "framebuffer", "cursor", "font8x8",     "console", "widget",
+        "taskbar",    "menu",  "ramfs",  "tmpfs",       "vfs",    "rtc",         "klog",    "shell",
     };
     constexpr u32 kCount = sizeof(kModules) / sizeof(kModules[0]);
     for (u32 i = 0; i < kCount; ++i)
@@ -2247,7 +3229,10 @@ void CmdSpawn(u32 argc, char** argv)
 
 // Little-endian u16/u32/u64 readers — the ELF parser walks
 // raw bytes, so we don't rely on alignment or struct packing.
-u16 LeU16(const u8* p) { return u16(p[0]) | (u16(p[1]) << 8); }
+u16 LeU16(const u8* p)
+{
+    return u16(p[0]) | (u16(p[1]) << 8);
+}
 u32 LeU32(const u8* p)
 {
     return u32(p[0]) | (u32(p[1]) << 8) | (u32(p[2]) << 16) | (u32(p[3]) << 24);
@@ -3009,9 +3994,8 @@ void CmdCal()
     // h: 0=Sat, 1=Sun, 2=Mon, ..., 6=Fri — remap to Sun=0.
     const u32 dow_first = (h + 6) % 7;
 
-    static const char* const kMonths[] = {"January",  "February", "March",     "April",
-                                           "May",      "June",     "July",      "August",
-                                           "September","October",  "November",  "December"};
+    static const char* const kMonths[] = {"January", "February", "March",     "April",   "May",      "June",
+                                          "July",    "August",   "September", "October", "November", "December"};
     ConsoleWrite("        ");
     ConsoleWrite(kMonths[(t.month - 1) % 12]);
     ConsoleWriteChar(' ');
@@ -3038,8 +4022,7 @@ void CmdCal()
         }
         else
         {
-            ConsoleWriteChar(day == t.day ? static_cast<char>('0' + day % 10)
-                                          : static_cast<char>('0' + day % 10));
+            ConsoleWriteChar(day == t.day ? static_cast<char>('0' + day % 10) : static_cast<char>('0' + day % 10));
         }
         if (((day + dow_first) % 7) == 0)
         {
@@ -3092,7 +4075,8 @@ void CmdExec(u32 argc, char** argv)
     Cookie cookie{0};
     const u32 visited = customos::core::ElfForEachPtLoad(
         file, n,
-        [](const customos::core::ElfSegment& seg, void* ck) {
+        [](const customos::core::ElfSegment& seg, void* ck)
+        {
             auto* c = static_cast<Cookie*>(ck);
             ++c->count;
             ConsoleWrite("  ");
@@ -3277,17 +4261,19 @@ void CmdReadelf(u32 argc, char** argv)
 
 void CmdPs()
 {
-    // Header row matches the classic ps widths — ID, STATE, PRI,
-    // NAME. A future slice adds CPU time + memory once those
-    // are tracked per-task.
-    ConsoleWriteln(" PID  STATE  PRI  NAME");
+    // Header row: PID + STATE + PRI + TICKS-run + NAME.
+    //   TICKS is the cumulative per-task tick count since creation.
+    //   Divide by `SchedStatsRead().total_ticks` for a since-boot
+    //   CPU-%; `top` renders that column directly.
+    ConsoleWriteln(" PID  STATE  PRI  TICKS     NAME");
     struct Cookie
     {
         u32 count;
     };
     Cookie cookie{0};
     customos::sched::SchedEnumerate(
-        [](const customos::sched::SchedTaskInfo& info, void* ck) {
+        [](const customos::sched::SchedTaskInfo& info, void* ck)
+        {
             auto* c = static_cast<Cookie*>(ck);
             // 4-digit PID aligned, status tag, priority, name.
             // Running task gets a '*' prefix so it's obvious.
@@ -3306,6 +4292,29 @@ void CmdPs()
             ConsoleWriteChar(info.priority == 0 ? 'N' : 'I'); // Normal / Idle
             ConsoleWriteChar(' ');
             ConsoleWriteChar(' ');
+            // Right-pad tick count to 8 decimal digits.
+            char tbuf[24];
+            u32 tw = 0;
+            u64 tr = info.ticks_run;
+            if (tr == 0)
+                tbuf[tw++] = '0';
+            else
+            {
+                char rev[24];
+                u32 rn = 0;
+                while (tr > 0)
+                {
+                    rev[rn++] = static_cast<char>('0' + tr % 10);
+                    tr /= 10;
+                }
+                while (rn > 0)
+                    tbuf[tw++] = rev[--rn];
+            }
+            tbuf[tw] = 0;
+            for (u32 k = tw; k < 8; ++k)
+                ConsoleWriteChar(' ');
+            ConsoleWrite(tbuf);
+            ConsoleWriteChar(' ');
             ConsoleWriteln(info.name != nullptr ? info.name : "(unnamed)");
             ++c->count;
         },
@@ -3313,6 +4322,58 @@ void CmdPs()
     ConsoleWrite("TOTAL: ");
     WriteU64Dec(cookie.count);
     ConsoleWriteln(" tasks");
+}
+
+void CmdTop()
+{
+    // `top`: one-shot snapshot of CPU% per task + system idle.
+    // Not a live refresh (the shell blocks on keyboard input with
+    // no input-loop integration yet) — run it repeatedly for a
+    // trend. CPU% is since-boot — `ticks_run / total_ticks * 100`.
+    const auto s = customos::sched::SchedStatsRead();
+    const u64 total = s.total_ticks;
+    ConsoleWrite("SYSTEM: total_ticks=");
+    WriteU64Dec(total);
+    ConsoleWrite(" idle_ticks=");
+    WriteU64Dec(s.idle_ticks);
+    ConsoleWrite(" cpu_busy=");
+    const u64 busy_pct = (total > 0) ? ((total - s.idle_ticks) * 100u / total) : 0;
+    WriteU64Dec(busy_pct);
+    ConsoleWriteln("%");
+    ConsoleWriteln(" PID  CPU%  STATE  PRI  NAME");
+    struct Cookie
+    {
+        u64 total;
+    };
+    Cookie cookie{total};
+    customos::sched::SchedEnumerate(
+        [](const customos::sched::SchedTaskInfo& info, void* ck)
+        {
+            auto* c = static_cast<Cookie*>(ck);
+            ConsoleWriteChar(info.is_running ? '*' : ' ');
+            // PID right-padded to 3 digits.
+            if (info.id < 10)
+                ConsoleWriteChar(' ');
+            if (info.id < 100)
+                ConsoleWriteChar(' ');
+            WriteU64Dec(info.id);
+            ConsoleWrite("  ");
+            // CPU% = ticks_run / total * 100, rounded toward zero.
+            // Format as two-digit percentage with a trailing '%'.
+            const u64 pct = (c->total > 0) ? (info.ticks_run * 100u / c->total) : 0;
+            if (pct < 10)
+                ConsoleWriteChar(' ');
+            if (pct < 100)
+                ConsoleWriteChar(' ');
+            WriteU64Dec(pct);
+            ConsoleWrite("%   ");
+            ConsoleWrite(SchedStateName(info.state));
+            ConsoleWrite("  ");
+            ConsoleWriteChar(info.priority == 0 ? 'N' : 'I');
+            ConsoleWrite("   ");
+            ConsoleWriteln(info.name != nullptr ? info.name : "(unnamed)");
+        },
+        &cookie);
 }
 
 void CmdFree()
@@ -3409,7 +4470,7 @@ void CmdMode()
     const auto mode = customos::drivers::video::GetDisplayMode();
     ConsoleWrite("CURRENT MODE: ");
     ConsoleWriteln(mode == customos::drivers::video::DisplayMode::Tty ? "TTY (FULLSCREEN CONSOLE)"
-                                                                       : "DESKTOP (WINDOWED SHELL)");
+                                                                      : "DESKTOP (WINDOWED SHELL)");
     ConsoleWriteln("PRESS CTRL+ALT+T TO TOGGLE.");
 }
 
@@ -3426,6 +4487,41 @@ const char* TmpLeaf(const char* path)
         return nullptr;
     }
     const char prefix[] = "/tmp";
+    u32 i = 0;
+    for (; prefix[i] != '\0'; ++i)
+    {
+        if (path[i] != prefix[i])
+        {
+            return nullptr;
+        }
+    }
+    if (path[i] == '\0')
+    {
+        return path + i; // ""
+    }
+    if (path[i] == '/')
+    {
+        return path + i + 1;
+    }
+    return nullptr;
+}
+
+// Same shape as TmpLeaf, but for the FAT32 mount surfaced at /fat.
+// /fat          -> "" (list volume 0's root)
+// /fat/FILE     -> "FILE"   (look up FILE in volume 0's root)
+// anything else -> nullptr  (falls through to ramfs / tmpfs)
+//
+// Hard-coded to volume 0 for now: the shell has no syntax for
+// picking a different mount, and the first (and only) FAT32 volume
+// we probe in tests is at index 0. The `fatcat` raw command still
+// lets an operator poke any volume by index if they need to.
+const char* FatLeaf(const char* path)
+{
+    if (path == nullptr)
+    {
+        return nullptr;
+    }
+    const char prefix[] = "/fat";
     u32 i = 0;
     for (; prefix[i] != '\0'; ++i)
     {
@@ -3500,8 +4596,7 @@ void CmdEcho(u32 argc, char** argv)
         {
             buf[out++] = '\n'; // match /bin/echo's trailing newline
         }
-        const bool ok = append ? customos::fs::TmpFsAppend(leaf, buf, out)
-                                : customos::fs::TmpFsWrite(leaf, buf, out);
+        const bool ok = append ? customos::fs::TmpFsAppend(leaf, buf, out) : customos::fs::TmpFsWrite(leaf, buf, out);
         if (!ok)
         {
             ConsoleWrite("ECHO: WRITE FAILED: ");
@@ -3531,7 +4626,8 @@ void LsTmpDir()
     {
         bool* any;
     };
-    auto cb = [](const char* name, u32 len, void* cookie) {
+    auto cb = [](const char* name, u32 len, void* cookie)
+    {
         auto* c = static_cast<Cookie*>(cookie);
         *c->any = true;
         ConsoleWrite("  ");
@@ -3577,6 +4673,62 @@ void CmdLs(u32 argc, char** argv)
         return;
     }
 
+    // FAT32 mount at /fat → volume 0. `ls /fat[/subpath]` resolves
+    // the full path via Fat32LookupPath so arbitrarily deep
+    // directory trees work, not just the root.
+    if (const char* fat_leaf = FatLeaf(path); fat_leaf != nullptr)
+    {
+        namespace fat = customos::fs::fat32;
+        const fat::Volume* v = fat::Fat32Volume(0);
+        if (v == nullptr)
+        {
+            ConsoleWriteln("LS: FAT32 NOT MOUNTED (no probed volume)");
+            return;
+        }
+        fat::DirEntry entry;
+        if (!fat::Fat32LookupPath(v, fat_leaf, &entry))
+        {
+            ConsoleWrite("LS: NO SUCH PATH: ");
+            ConsoleWriteln(path);
+            return;
+        }
+        if ((entry.attributes & 0x10) == 0)
+        {
+            // Regular file — POSIX-style: print the name and size.
+            ConsoleWrite(entry.name);
+            ConsoleWrite("   ");
+            WriteU64Dec(entry.size_bytes);
+            ConsoleWriteln(" BYTES");
+            return;
+        }
+        // Directory — enumerate. The on-disk walker returns a
+        // fresh snapshot each call; cap at 32 entries for v0.
+        static fat::DirEntry listing[32];
+        const u32 count = fat::Fat32ListDirByCluster(v, entry.first_cluster, listing, 32);
+        if (count == 0)
+        {
+            ConsoleWriteln("(EMPTY DIRECTORY)");
+            return;
+        }
+        for (u32 i = 0; i < count; ++i)
+        {
+            const fat::DirEntry& e = listing[i];
+            ConsoleWrite("  ");
+            ConsoleWrite(e.name);
+            if (e.attributes & 0x10)
+            {
+                ConsoleWriteln("/");
+            }
+            else
+            {
+                ConsoleWrite("   ");
+                WriteU64Dec(e.size_bytes);
+                ConsoleWriteln(" BYTES");
+            }
+        }
+        return;
+    }
+
     const auto* root = customos::fs::RamfsTrustedRoot();
     const auto* node = customos::fs::VfsLookup(root, path, 128);
     if (node == nullptr)
@@ -3615,12 +4767,18 @@ void CmdLs(u32 argc, char** argv)
             ConsoleWriteln(" BYTES");
         }
     }
-    // If the caller asked for the root, also surface /tmp as a
-    // directory so it's discoverable without needing to know
-    // the tmpfs mount point is hard-coded.
+    // If the caller asked for the root, also surface /tmp and
+    // /fat as directories so both are discoverable without the
+    // operator needing to know the mount points are hard-coded.
+    // Only show /fat when a volume has actually been probed —
+    // don't advertise a mount that isn't there.
     if (StrEq(path, "/") || StrEq(path, ""))
     {
         ConsoleWriteln("  tmp/   (WRITABLE)");
+        if (customos::fs::fat32::Fat32VolumeCount() > 0)
+        {
+            ConsoleWriteln("  fat/   (READ-ONLY)");
+        }
     }
 }
 
@@ -3633,8 +4791,8 @@ void CmdCat(u32 argc, char** argv)
     }
     const char* path = argv[1];
 
-    // /tmp served from tmpfs; everything else from the read-
-    // only ramfs.
+    // /tmp served from tmpfs; /fat served from FAT32 volume 0;
+    // everything else from the read-only ramfs.
     if (const char* tmp_leaf = TmpLeaf(path); tmp_leaf != nullptr && *tmp_leaf != '\0')
     {
         const char* bytes = nullptr;
@@ -3650,6 +4808,68 @@ void CmdCat(u32 argc, char** argv)
             ConsoleWriteChar(bytes[i]);
         }
         if (len == 0 || bytes[len - 1] != '\n')
+        {
+            ConsoleWriteChar('\n');
+        }
+        return;
+    }
+
+    if (const char* fat_leaf = FatLeaf(path); fat_leaf != nullptr && *fat_leaf != '\0')
+    {
+        namespace fat = customos::fs::fat32;
+        const fat::Volume* v = fat::Fat32Volume(0);
+        if (v == nullptr)
+        {
+            ConsoleWriteln("CAT: FAT32 NOT MOUNTED");
+            return;
+        }
+        fat::DirEntry entry;
+        if (!fat::Fat32LookupPath(v, fat_leaf, &entry))
+        {
+            ConsoleWrite("CAT: NO SUCH FILE: ");
+            ConsoleWriteln(path);
+            return;
+        }
+        if (entry.attributes & 0x10)
+        {
+            ConsoleWrite("CAT: IS A DIRECTORY: ");
+            ConsoleWriteln(path);
+            return;
+        }
+        // Stream cluster-by-cluster so files larger than scratch
+        // (4 KiB) are not truncated. The driver streams 4 KiB per
+        // chunk; ConsoleWriteChar handles each byte synchronously,
+        // so the chunk pointer (into FAT scratch) stays valid
+        // for the whole callback.
+        struct StreamCtx
+        {
+            u8 last_byte;
+            bool any;
+        };
+        StreamCtx ctx{0, false};
+        const bool ok = fat::Fat32ReadFileStream(
+            v, &entry,
+            [](const customos::u8* data, customos::u64 len, void* cx) -> bool
+            {
+                auto* s = static_cast<StreamCtx*>(cx);
+                for (customos::u64 i = 0; i < len; ++i)
+                {
+                    ConsoleWriteChar(static_cast<char>(data[i]));
+                }
+                if (len > 0)
+                {
+                    s->last_byte = data[len - 1];
+                    s->any = true;
+                }
+                return true;
+            },
+            &ctx);
+        if (!ok)
+        {
+            ConsoleWriteln("CAT: READ ERROR");
+            return;
+        }
+        if (!ctx.any || ctx.last_byte != '\n')
         {
             ConsoleWriteChar('\n');
         }
@@ -4038,7 +5258,7 @@ void Dispatch(char* line)
     }
     if (StrEq(cmd, "dmesg"))
     {
-        CmdDmesg();
+        CmdDmesg(argc, argv);
         return;
     }
     if (StrEq(cmd, "stats"))
@@ -4231,6 +5451,11 @@ void Dispatch(char* line)
         CmdMouseStats();
         return;
     }
+    if (StrEq(cmd, "logcolor"))
+    {
+        CmdLogcolor(argc, argv);
+        return;
+    }
     if (StrEq(cmd, "loglevel"))
     {
         CmdLoglevel(argc, argv);
@@ -4284,6 +5509,96 @@ void Dispatch(char* line)
     if (StrEq(cmd, "lsmod"))
     {
         CmdLsmod();
+        return;
+    }
+    if (StrEq(cmd, "lsblk"))
+    {
+        CmdLsblk();
+        return;
+    }
+    if (StrEq(cmd, "lsgpt"))
+    {
+        CmdLsgpt();
+        return;
+    }
+    if (StrEq(cmd, "metrics"))
+    {
+        CmdMetrics();
+        return;
+    }
+    if (StrEq(cmd, "trace"))
+    {
+        CmdTrace(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "read"))
+    {
+        CmdRead(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "guard"))
+    {
+        CmdGuard(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "top"))
+    {
+        CmdTop();
+        return;
+    }
+    if (StrEq(cmd, "fatls"))
+    {
+        CmdFatls(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "fatcat"))
+    {
+        CmdFatcat(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "fatwrite"))
+    {
+        CmdFatwrite(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "fatappend"))
+    {
+        CmdFatappend(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "fatnew"))
+    {
+        CmdFatnew(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "fatrm"))
+    {
+        CmdFatrm(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "fattrunc"))
+    {
+        CmdFattrunc(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "fatmkdir"))
+    {
+        CmdFatmkdir(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "fatrmdir"))
+    {
+        CmdFatrmdir(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "translate"))
+    {
+        CmdTranslate();
+        return;
+    }
+    if (StrEq(cmd, "linuxexec"))
+    {
+        CmdLinuxexec(argc, argv);
         return;
     }
     if (StrEq(cmd, "free"))
@@ -4685,7 +6000,8 @@ void CompletePath(u32 partial_start)
     // Tab at / yields both worlds.
     if (StrEq(parent_buf, "/tmp"))
     {
-        auto cb = [](const char* name, u32 /*len*/, void* cookie) {
+        auto cb = [](const char* name, u32 /*len*/, void* cookie)
+        {
             auto* c = static_cast<CompleteCollector*>(cookie);
             if (c->count >= kCompleteMax)
                 return;
@@ -4814,16 +6130,12 @@ void ShellTabComplete()
     // Temporarily terminate the first token so StrEq can read it.
     const char saved = g_input[first_ws];
     g_input[first_ws] = '\0';
-    const bool path_cmd = StrEq(g_input, "ls") || StrEq(g_input, "cat") ||
-                          StrEq(g_input, "touch") || StrEq(g_input, "rm") ||
-                          StrEq(g_input, "cp") || StrEq(g_input, "mv") ||
-                          StrEq(g_input, "wc") || StrEq(g_input, "head") ||
-                          StrEq(g_input, "tail") || StrEq(g_input, "source") ||
-                          StrEq(g_input, "grep") || StrEq(g_input, "sort") ||
-                          StrEq(g_input, "uniq") || StrEq(g_input, "readelf") ||
-                          StrEq(g_input, "hexdump") || StrEq(g_input, "stat") ||
-                          StrEq(g_input, "tac") || StrEq(g_input, "nl") ||
-                          StrEq(g_input, "rev") || StrEq(g_input, "checksum");
+    const bool path_cmd =
+        StrEq(g_input, "ls") || StrEq(g_input, "cat") || StrEq(g_input, "touch") || StrEq(g_input, "rm") ||
+        StrEq(g_input, "cp") || StrEq(g_input, "mv") || StrEq(g_input, "wc") || StrEq(g_input, "head") ||
+        StrEq(g_input, "tail") || StrEq(g_input, "source") || StrEq(g_input, "grep") || StrEq(g_input, "sort") ||
+        StrEq(g_input, "uniq") || StrEq(g_input, "readelf") || StrEq(g_input, "hexdump") || StrEq(g_input, "stat") ||
+        StrEq(g_input, "tac") || StrEq(g_input, "nl") || StrEq(g_input, "rev") || StrEq(g_input, "checksum");
     g_input[first_ws] = saved;
 
     if (path_cmd)

@@ -3,8 +3,14 @@
 #include "types.h"
 
 // Forward-declares to keep this header lightweight.
-namespace customos::fs { struct RamfsNode; }
-namespace customos::core { struct CapSet; }
+namespace customos::fs
+{
+struct RamfsNode;
+}
+namespace customos::core
+{
+struct CapSet;
+}
 
 /*
  * CustomOS ring-3 smoke task — v0.
@@ -80,14 +86,28 @@ bool SpawnOnDemand(const char* kind);
 /// new pid on success, or 0 on any failure (invalid ELF, OOM,
 /// ProcessCreate failure). On failure, any partial state is
 /// cleaned up through AddressSpaceRelease.
-u64 SpawnElfFile(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps,
-                 const fs::RamfsNode* root, u64 frame_budget, u64 tick_budget);
+u64 SpawnElfFile(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps, const fs::RamfsNode* root,
+                 u64 frame_budget, u64 tick_budget);
+
+/// Linux-ABI twin of SpawnElfFile. Same parse + AS + Process
+/// pipeline, but flips `Process::abi_flavor = kAbiLinux` after
+/// ProcessCreate so the task's ring-3 `syscall` instructions land
+/// on the Linux dispatcher (MSR_LSTAR) rather than the native
+/// int-0x80 path. Also seeds linux_brk_{base,current} and
+/// linux_mmap_cursor so brk/mmap have sensible starting anchors.
+///
+/// The underlying ELF loader does NOT inspect EI_OSABI — caller
+/// decides the flavor. A future auto-detector could sniff the
+/// ELF's `.note` sections or PT_INTERP contents to pick between
+/// this and SpawnElfFile; for now, it's explicit.
+u64 SpawnElfLinux(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps, const fs::RamfsNode* root,
+                  u64 frame_budget, u64 tick_budget);
 
 /// PE/COFF twin of SpawnElfFile. Loads via the v0 PE loader
 /// (freestanding, no imports, no relocations) and queues a
 /// ring-3 task at the image's entry point. Same return-code
 /// and cleanup contract as SpawnElfFile.
-u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps,
-                const fs::RamfsNode* root, u64 frame_budget, u64 tick_budget);
+u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, const fs::RamfsNode* root,
+                u64 frame_budget, u64 tick_budget);
 
 } // namespace customos::core

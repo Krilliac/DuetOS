@@ -426,6 +426,7 @@ bool Probe(u8 bus, u8 dev, u8 fn)
 
 void PciEnumerate()
 {
+    KLOG_TRACE_SCOPE("drivers/pci", "PciEnumerate");
     static constinit bool s_done = false;
     KASSERT(!s_done, "drivers/pci", "PciEnumerate called twice");
     s_done = true;

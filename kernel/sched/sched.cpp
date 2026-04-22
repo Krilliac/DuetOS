@@ -10,6 +10,7 @@
 #include "../cpu/percpu.h"
 #include "../mm/address_space.h"
 #include "../mm/frame_allocator.h"
+#include "../security/guard.h"
 #include "../mm/kheap.h"
 #include "../mm/paging.h"
 #include "../sync/spinlock.h"
@@ -99,6 +100,31 @@ struct Task
     // reason when it converts the task into a zombie. Only valid
     // when kill_requested is true.
     KillReason kill_reason;
+
+    // CPU-time accounting. `ticks_run` accumulates one tick per
+    // OnTimerTick call where this task was the current task; it
+    // is the authoritative "how much CPU time has this consumed
+    // since creation?" number. `schedin_tick` is the tick value
+    // at the most recent switch-in — Schedule() uses it to
+    // compute the delta for the outgoing task instead of tripping
+    // a per-tick increment inside OnTimerTick (which runs on
+    // every clock interrupt and must stay cheap).
+    //
+    // Both fields are read by SchedEnumerate so `ps` / `top` can
+    // render CPU-% per task. Idle tasks accumulate too — that's
+    // how SchedIdleTicks() can report system-wide idle fraction.
+    u64 ticks_run;
+    u64 schedin_tick;
+
+    // Linux-ABI FS.base (MSR_FS_BASE). Meaningful only for tasks
+    // whose process has abi_flavor == kAbiLinux — that's where
+    // musl plants its TLS anchor via arch_prctl(ARCH_SET_FS).
+    // Saved by the scheduler just before ContextSwitch and
+    // restored immediately after, so each Linux task sees its own
+    // TLS regardless of what other tasks ran in between. Kernel-
+    // only and native tasks leave this at 0 and never touch
+    // MSR_FS_BASE; the save/restore is a no-op for them.
+    u64 fs_base;
 };
 
 namespace
@@ -137,6 +163,12 @@ constinit u64 g_tasks_sleeping = 0;
 constinit u64 g_tasks_blocked = 0;
 constinit u64 g_tasks_created = 0;
 constinit u64 g_tasks_reaped = 0;
+// System-wide CPU accounting. `g_total_ticks` counts every timer
+// tick since boot; `g_idle_ticks` counts the subset where the idle
+// task was on-CPU. Their ratio is the system CPU-busy fraction —
+// reported by the heartbeat and by the `top` shell command.
+constinit u64 g_total_ticks = 0;
+constinit u64 g_idle_ticks = 0;
 
 // Zombie list — tasks that called SchedExit and are off-CPU, waiting
 // for the reaper to free their struct + stack. Linked through Task::next
@@ -359,9 +391,9 @@ void SchedInit()
     boot_task->waiting_on = nullptr;
     boot_task->wake_by_timeout = false;
     boot_task->priority = TaskPriority::Normal;
-    boot_task->as = nullptr;           // kernel AS — boot PML4
-    boot_task->process = nullptr;      // kernel-only — no owning process
-    boot_task->kill_requested = false; // kernel tasks never hit a budget
+    boot_task->as = nullptr;                         // kernel AS — boot PML4
+    boot_task->process = nullptr;                    // kernel-only — no owning process
+    boot_task->kill_requested = false;               // kernel tasks never hit a budget
     boot_task->kill_reason = KillReason::TickBudget; // unused when kill_requested=false
 
     Current() = boot_task;
@@ -415,6 +447,9 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
     t->process = nullptr; // populated by SchedCreateUser for user tasks
     t->kill_requested = false;
     t->kill_reason = KillReason::TickBudget;
+    t->ticks_run = 0;
+    t->schedin_tick = 0;
+    t->fs_base = 0;
 
     // Build the initial stack. ContextSwitch pops r15, r14, r13, r12,
     // rbp, rbx and then rets. So from bottom to top of the pre-planted
@@ -472,6 +507,14 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
 
 Task* SchedCreate(TaskEntry entry, void* arg, const char* name, TaskPriority priority)
 {
+    // Name-based security gate. No image bytes to scan at this
+    // layer — that happens in the loader before entry is ever
+    // handed to the scheduler — so this catches only filename
+    // denylist hits. Returns a null Task if the guard denies.
+    if (!customos::security::GateThread(customos::security::ImageKind::KernelThread, name))
+    {
+        return nullptr;
+    }
     return SchedCreateInternal(entry, arg, name, priority, /*as=*/nullptr);
 }
 
@@ -479,6 +522,16 @@ Task* SchedCreateUser(TaskEntry entry, void* arg, const char* name, core::Proces
 {
     KASSERT(process != nullptr, "sched", "SchedCreateUser without Process");
     KASSERT(process->as != nullptr, "sched", "SchedCreateUser Process has no AS");
+
+    if (!customos::security::GateThread(customos::security::ImageKind::UserThread, name))
+    {
+        // The caller handed us its Process reference expecting
+        // the Task to absorb it. No Task was created — the ref
+        // would leak (AS + Process struct + PID slot held forever)
+        // unless we release it here on the gate-denial exit path.
+        core::ProcessRelease(process);
+        return nullptr;
+    }
 
     Task* t = SchedCreateInternal(entry, arg, name, TaskPriority::Normal, process->as);
     t->process = process;
@@ -619,6 +672,11 @@ void Schedule()
     {
         const u64 rsp0 = reinterpret_cast<u64>(next->stack_base) + next->stack_size;
         arch::TssSetRsp0(rsp0);
+        // Mirror into the per-CPU slot that the Linux-ABI syscall
+        // entry stub reads. `syscall` doesn't consult the TSS, so
+        // the two entry paths need separate storage for the same
+        // "this task's kernel stack top" value.
+        cpu::CurrentCpu()->kernel_rsp = rsp0;
     }
 
     // Activate the next task's address space. nullptr means "kernel
@@ -638,9 +696,32 @@ void Schedule()
     // read stale TLB entries from prev's AS without the flip).
     mm::AddressSpaceActivate(next->as);
 
+    // FS_BASE snapshot. Linux tasks own MSR_FS_BASE (musl's TLS
+    // anchor); every context switch needs to stash the outgoing
+    // task's value and restore the incoming task's. No-op for
+    // kernel threads and native user tasks — they leave fs_base
+    // at 0 and don't touch the MSR.
+    constexpr u32 kMsrFsBase = 0xC0000100;
+    {
+        u32 lo, hi;
+        asm volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(kMsrFsBase));
+        prev->fs_base = (static_cast<u64>(hi) << 32) | lo;
+    }
+
     ContextSwitch(&prev->rsp, next->rsp);
-    // When we return here, `prev` is running again (it may have been
-    // scheduled out and back in an arbitrary number of times).
+    // When we return here, we're executing on a DIFFERENT task's
+    // stack — whichever task got switched in to run us. The local
+    // `prev` on our new stack was bound at THAT task's last
+    // Schedule() call and does NOT refer to "the task that just
+    // swapped to us." Use Current() instead — the scheduler wrote
+    // it to the incoming task BEFORE the stack flip, so Current()
+    // here is the task that just resumed.
+    {
+        const u64 v = Current()->fs_base;
+        const u32 lo = static_cast<u32>(v);
+        const u32 hi = static_cast<u32>(v >> 32);
+        asm volatile("wrmsr" : : "c"(kMsrFsBase), "a"(lo), "d"(hi));
+    }
 }
 
 void SchedYield()
@@ -777,6 +858,20 @@ void OnTimerTick(u64 now_ticks)
     // Kernel-only tasks (process == nullptr) don't have budgets —
     // they're trusted runtime threads (reaper, idle, workers).
     Task* cur = Current();
+    // CPU-time accounting: charge ONE tick to whichever task was on
+    // the CPU when the timer fired. Idle tasks charge normally — the
+    // idle share of boot is the system-wide "how busy is the OS?"
+    // signal. No additional work in the hot path: one load + one
+    // store per tick.
+    if (cur != nullptr)
+    {
+        ++cur->ticks_run;
+        ++g_total_ticks;
+        if (cur->priority == TaskPriority::Idle)
+        {
+            ++g_idle_ticks;
+        }
+    }
     if (cur != nullptr && cur->process != nullptr)
     {
         core::Process* proc = cur->process;
@@ -866,6 +961,8 @@ SchedStats SchedStatsRead()
         .tasks_created = g_tasks_created,
         .tasks_exited = g_tasks_exited,
         .tasks_reaped = g_tasks_reaped,
+        .total_ticks = g_total_ticks,
+        .idle_ticks = g_idle_ticks,
     };
 }
 
@@ -881,6 +978,7 @@ void EmitTask(const Task* t, SchedEnumCb cb, void* cookie, bool is_running)
     info.name = t->name;
     info.wake_tick = t->wake_tick;
     info.stack_size = t->stack_size;
+    info.ticks_run = t->ticks_run;
     info.state = static_cast<u8>(t->state);
     info.priority = static_cast<u8>(t->priority);
     info.is_running = is_running;

@@ -1,5 +1,7 @@
 #include "gdt.h"
 
+#include "../../core/klog.h"
+
 namespace customos::arch
 {
 
@@ -102,6 +104,7 @@ alignas(16) constinit u8 g_ist_stack_nmi[kIstStackBytes] = {};
 
 void GdtInit()
 {
+    KLOG_TRACE_SCOPE("arch/gdt", "GdtInit");
     g_gdt_pointer.limit = sizeof(g_gdt) - 1;
     g_gdt_pointer.base = reinterpret_cast<u64>(&g_gdt[0]);
 
@@ -132,6 +135,7 @@ void GdtInit()
 
 void TssInit()
 {
+    KLOG_TRACE_SCOPE("arch/gdt", "TssInit");
     // Plant a canary at the low edge of each IST stack. A blown
     // exception stack (say, #DF deeper than 4 KiB) would scribble
     // this value and IstStackCanaryIntact() picks it up.
@@ -173,7 +177,16 @@ bool IstStackCanariesIntact()
     const u64 df = *reinterpret_cast<const u64*>(g_ist_stack_df);
     const u64 mc = *reinterpret_cast<const u64*>(g_ist_stack_mc);
     const u64 nmi = *reinterpret_cast<const u64*>(g_ist_stack_nmi);
-    return df == kIstStackCanary && mc == kIstStackCanary && nmi == kIstStackCanary;
+    const bool ok = df == kIstStackCanary && mc == kIstStackCanary && nmi == kIstStackCanary;
+    if (!ok)
+    {
+        // A clobbered canary means an IST stack overflowed during a
+        // double fault / NMI / #MC handler. The handler returned (or
+        // we wouldn't be here to check) but kernel state may be
+        // corrupt. Loud Error so it doesn't get lost in the noise.
+        KLOG_ERROR("arch/gdt", "IST stack canary clobbered — IST overflow occurred");
+    }
+    return ok;
 }
 
 void TssSetRsp0(u64 rsp0)

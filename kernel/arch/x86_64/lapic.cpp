@@ -80,6 +80,7 @@ void LapicEoi()
 
 void LapicInit()
 {
+    KLOG_TRACE_SCOPE("arch/lapic", "LapicInit");
     if (!CpuidApicPresent())
     {
         PanicLapic("CPUID reports no on-chip APIC (impossible on x86_64?)");

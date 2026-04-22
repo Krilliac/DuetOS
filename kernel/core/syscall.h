@@ -142,6 +142,19 @@ enum SyscallNumber : u64
     // and the old block is freed. Backs Win32 HeapReAlloc,
     // ucrt realloc, msvcrt realloc.
     SYS_HEAP_REALLOC = 15,
+
+    // SYS_WIN32_MISS_LOG: rdi = VA of the IAT slot that was just
+    // called (produced by the miss-logger trampoline in the
+    // Win32 stubs page, which reads its own `call [rip+disp32]`
+    // return address to compute the slot). No arguments beyond
+    // that; no meaningful return value (the trampoline zeroes
+    // rax itself). The handler looks up the IAT slot VA in
+    // `CurrentProcess()->win32_iat_misses` and emits a
+    // `[win32-miss] called <fn>` line so the boot log tells us,
+    // in real time, exactly which unstubbed import the PE just
+    // reached. Unprivileged — the trampoline is our own code
+    // and the lookup reads only this process's own table.
+    SYS_WIN32_MISS_LOG = 16,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit

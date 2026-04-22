@@ -4,8 +4,11 @@
 #include "../mm/address_space.h"
 #include "../mm/frame_allocator.h"
 #include "../mm/page.h"
+#include "klog.h"
 #include "../mm/paging.h"
+#include "../security/guard.h"
 #include "../subsystems/win32/stubs.h"
+#include "process.h"
 
 namespace customos::core
 {
@@ -64,8 +67,31 @@ constexpr u64 kDirEntryImport = 1;
 constexpr u64 kDirEntryBaseReloc = 5;
 constexpr u64 kDirEntryTls = 9;
 
-constexpr u64 kV0StackVa = 0x7FFFE000ULL;
+// Stack layout: kV0StackTop is the one-past-last byte (initial rsp
+// is kV0StackTop - 8), kV0StackPages is how many 4 KiB pages we
+// actually map ending just below it. One page is enough for the
+// freestanding hello_pe and hello_winapi tests but not for a real
+// MSVC PE — the CRT's __chkstk walks the stack a page at a time
+// during startup and a cold PE like windows-kill.exe needs ~tens
+// of KiB of it mapped up front. 16 pages (64 KiB) is the committed
+// v0 default; workloads that want more get a larger budget via an
+// explicit override at spawn time (path not wired yet).
+constexpr u64 kV0StackTop = 0x80000000ULL;
+constexpr u64 kV0StackPages = 16;
+constexpr u64 kV0StackVa = kV0StackTop - kV0StackPages * customos::mm::kPageSize;
 constexpr u64 kPageMask = kPageAlign - 1;
+
+// Minimal TEB (Thread Environment Block) page for Win32 PEs.
+// Placed between the Win32 stubs (0x60000000) and the user stack
+// (0x7FFF0000) so it doesn't collide with anything the loader
+// already maps. Populated with NT_TIB.Self at offset 0x30 so MSVC
+// CRT startup code that reads gs:[0x30] (the classic x64 TEB
+// self-pointer dereference) gets a valid VA back. All other TEB
+// fields stay zero — good enough to progress past the CRT's
+// earliest TEB reads; anything later (TLS slot lookup, PEB
+// traversal) will fault visibly so we can fill it in incrementally.
+constexpr u64 kV0TebVa = 0x70000000ULL;
+constexpr u64 kTebOffSelf = 0x30;
 
 struct PeHeaders
 {
@@ -425,6 +451,35 @@ PeStatus PeValidate(const u8* file, u64 file_len)
 namespace
 {
 
+// Staging buffer for Win32 catch-all misses recorded during the
+// current PeLoad. Drained by PeLoadDrainIatMisses() after the
+// Process is created — Process doesn't exist while PeLoad runs,
+// so the catch-all path queues entries here and SpawnPeFile
+// transfers them once it has a proc to attach them to. Single
+// PE load at a time (kernel has one boot-time loader worker),
+// so no concurrency guard needed.
+struct StagedMiss
+{
+    u64 slot_va;
+    const char* name;
+};
+constexpr u64 kStagedMissCap = 128;
+StagedMiss g_staged_misses[kStagedMissCap];
+u64 g_staged_miss_count = 0;
+
+void StagedMissReset()
+{
+    g_staged_miss_count = 0;
+}
+void StagedMissAppend(u64 slot_va, const char* name)
+{
+    if (g_staged_miss_count >= kStagedMissCap)
+        return; // silently drop — log line already warned
+    g_staged_misses[g_staged_miss_count].slot_va = slot_va;
+    g_staged_misses[g_staged_miss_count].name = name;
+    ++g_staged_miss_count;
+}
+
 // Walk the base-relocation directory and apply each entry to
 // the in-memory image. `delta = actual_base - preferred_base`;
 // in v0 we always load at the preferred base so delta == 0 and
@@ -552,6 +607,7 @@ bool ApplyRelocations(const u8* file, u64 file_len, const PeHeaders& h, customos
 
 bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, customos::mm::AddressSpace* as)
 {
+    KLOG_TRACE_SCOPE("pe-resolve", "ResolveImports");
     using arch::SerialWrite;
     using arch::SerialWriteHex;
     const PeDataDir imp = ReadDataDir(file, h, kDirEntryImport);
@@ -652,14 +708,40 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, customos::
             }
 
             u64 stub_va = 0;
-            if (!win32::Win32StubsLookup(dll_name, fn_name, &stub_va))
+            bool is_noop_stub = false;
+            if (!win32::Win32StubsLookupKind(dll_name, fn_name, &stub_va, &is_noop_stub))
             {
-                SerialWrite("[pe-resolve] UNRESOLVED ");
-                SerialWrite(dll_name);
-                SerialWrite("!");
-                SerialWrite(fn_name);
-                SerialWrite("\n");
-                return false;
+                // Unresolved import — the PE calls (or imports as
+                // data) a symbol not in the stub table. Historically
+                // this was a hard load failure; to let real-world
+                // PEs like windows-kill.exe actually run far enough
+                // to exercise what IS stubbed, we fall back to the
+                // shared "return 0" stub and flag it prominently.
+                // Two consequences if the binary really uses it:
+                //   - Called as a function -> returns 0, call site
+                //     either tolerates it or crashes visibly.
+                //   - Dereferenced as a data global -> reads the
+                //     3-byte "xor eax,eax; ret" opcode (the page is
+                //     present R-X), which is garbage but not a #PF.
+                // Either outcome is louder than "loader silently
+                // refuses the entire image."
+                if (!win32::Win32StubsLookupCatchAll(&stub_va))
+                {
+                    core::LogWithString(core::LogLevel::Error, "pe-resolve", "UNRESOLVED import (no catch-all)", "fn",
+                                        fn_name);
+                    core::LogWithString(core::LogLevel::Error, "pe-resolve", "  from", "dll", dll_name);
+                    return false;
+                }
+                is_noop_stub = true;
+                core::LogWithString(core::LogLevel::Warn, "pe-resolve", "unknown import -> catch-all NO-OP", "fn",
+                                    fn_name);
+                core::LogWithString(core::LogLevel::Warn, "pe-resolve", "  from", "dll", dll_name);
+                // Stage (slot_va, name) so the miss-logger syscall
+                // can translate a runtime call back to the function
+                // name. Slot VA computed a few lines below; do it
+                // now into a local so the record lines up.
+                const u64 iat_slot_va_for_miss = h.image_base + u64(first_thunk) + u64(fn_idx) * 8;
+                StagedMissAppend(iat_slot_va_for_miss, fn_name);
             }
 
             // Patch the IAT slot. Slot VA = image_base +
@@ -684,19 +766,17 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, customos::
                 iat_direct[page_off + b] = static_cast<u8>((stub_va >> (b * 8)) & 0xFF);
             ++resolved;
 
-            SerialWrite("[pe-resolve] ");
-            SerialWrite(dll_name);
-            SerialWrite("!");
-            SerialWrite(fn_name);
-            SerialWrite(" -> ");
-            SerialWriteHex(stub_va);
-            SerialWrite("\n");
+            // Structured klog: Info for real stubs, Warn for no-op
+            // "safe-ignore" shims. The Warn colour (yellow) makes it
+            // obvious at boot-log skim which imports will silently
+            // misbehave if the PE actually relies on them.
+            const core::LogLevel lvl = is_noop_stub ? core::LogLevel::Warn : core::LogLevel::Info;
+            const char* msg = is_noop_stub ? "import resolved to NO-OP stub" : "import resolved";
+            core::LogWithString(lvl, "pe-resolve", msg, "fn", fn_name);
         }
     }
 
-    SerialWrite("[pe-resolve] total resolved: ");
-    SerialWriteHex(resolved);
-    SerialWrite("\n");
+    core::LogWithValue(core::LogLevel::Info, "pe-resolve", "total imports resolved", resolved);
     return true;
 }
 
@@ -704,10 +784,27 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, customos::
 
 PeLoadResult PeLoad(const u8* file, u64 file_len, customos::mm::AddressSpace* as)
 {
+    KLOG_TRACE_SCOPE("pe-loader", "PeLoad");
     PeLoadResult r{};
     r.ok = false;
     if (as == nullptr)
         return r;
+
+    // Security guard. Catches the classic process-injection combo
+    // (CreateRemoteThread + WriteProcessMemory), the suspicious-API
+    // multi-match, and packed/no-import PEs. Advisory mode (default)
+    // always allows; Enforce mode prompts the user.
+    customos::security::ImageDescriptor gd{customos::security::ImageKind::WindowsPE, "(pe)", file, file_len};
+    if (!customos::security::Gate(gd))
+    {
+        arch::SerialWrite("[pe-loader] security guard blocked PE load\n");
+        return r;
+    }
+
+    // Clear staged miss buffer before walking imports — previous
+    // PeLoad's drain may have left it populated if a caller
+    // skipped PeLoadDrainIatMisses (e.g. PeLoad failed mid-way).
+    StagedMissReset();
 
     PeHeaders h{};
     const PeStatus ps = ParseHeaders(file, file_len, h);
@@ -721,23 +818,59 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, customos::mm::AddressSpace* as
     //                    reason IS imports (not something we
     //                    don't handle at all yet).
     // Everything else is still a hard reject for v0.
-    if (ps != PeStatus::Ok && ps != PeStatus::ImportsPresent)
+    // Accept TlsPresent alongside Ok + ImportsPresent — TLS
+    // callbacks aren't wired (the PE will not have _tls_index
+    // or TEB.ThreadLocalStoragePointer populated), but many
+    // real-world PEs carry a near-empty .tls section that the
+    // program itself doesn't actually read at runtime (e.g.
+    // MSVC's default CRT stubs). Rejecting on TLS presence
+    // alone keeps us from even ATTEMPTING to run binaries like
+    // windows-kill.exe; accepting + logging lets us see how
+    // far they get before the first real gap.
+    if (ps != PeStatus::Ok && ps != PeStatus::ImportsPresent && ps != PeStatus::TlsPresent)
         return r;
 
     using namespace customos::mm;
+    using arch::SerialWrite;
+    using arch::SerialWriteHex;
+
+    // Step-trace breadcrumbs. PeLoad has several paths that can
+    // silently return false (frame-alloc OOMs, bad section RVA,
+    // ResolveImports internals). Logging each gate gives us a
+    // "last breadcrumb wins" view of where a real-world PE like
+    // windows-kill.exe drops out, without having to instrument
+    // every helper.
+    SerialWrite("[pe-load] begin status=");
+    SerialWrite(PeStatusName(ps));
+    SerialWrite(" image_base=");
+    SerialWriteHex(h.image_base);
+    SerialWrite(" sections=");
+    SerialWriteHex(h.section_count);
+    SerialWrite("\n");
+
     // 1. Map PE headers (RO, NX) at ImageBase. Loader
     //    convention — makes __ImageBase usable from ring 3.
     const u64 sizeof_headers = LeU32(file + h.opt_base + kOptHeaderSizeOfHeaders);
     if (!MapHeaders(file, sizeof_headers, h.image_base, as))
+    {
+        SerialWrite("[pe-load] FAIL MapHeaders\n");
         return r;
+    }
+    SerialWrite("[pe-load] step1 headers mapped\n");
 
     // 2. Map every section.
     for (u16 i = 0; i < h.section_count; ++i)
     {
         const u8* sec = file + h.section_base + u64(i) * kSectionHeaderSize;
         if (!MapSection(file, sec, h.image_base, as))
+        {
+            SerialWrite("[pe-load] FAIL MapSection idx=");
+            SerialWriteHex(i);
+            SerialWrite("\n");
             return r;
+        }
     }
+    SerialWrite("[pe-load] step2 sections mapped\n");
 
     // 3. Apply base relocations. v0 always loads at the preferred
     //    ImageBase (no ASLR, no DLL collision handling), so delta
@@ -746,15 +879,61 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, customos::mm::AddressSpace* as
     //    When ASLR lands, compute the actual_base delta here.
     const u64 reloc_delta = 0;
     if (!ApplyRelocations(file, file_len, h, as, reloc_delta))
+    {
+        SerialWrite("[pe-load] FAIL ApplyRelocations\n");
         return r;
+    }
+    SerialWrite("[pe-load] step3 relocs applied\n");
 
-    // 4. One stack page, writable + NX, same VA the ELF
-    //    loader uses so the rest of the ring3 plumbing does
-    //    not need to know which loader produced the image.
-    const PhysAddr stack_frame = AllocateFrame();
-    if (stack_frame == kNullFrame)
-        return r;
-    AddressSpaceMapUserPage(as, kV0StackVa, stack_frame, kPagePresent | kPageUser | kPageWritable | kPageNoExecute);
+    // 4. Stack: kV0StackPages pages, writable + NX, mapped
+    //    ending at kV0StackTop. MSVC's __chkstk probes the
+    //    stack a page at a time during CRT startup, so a real
+    //    PE needs several pages up front (1 page was enough
+    //    for hello_winapi but not for windows-kill.exe, which
+    //    blew out at rsp+0x1000 inside the CRT).
+    for (u64 p = 0; p < kV0StackPages; ++p)
+    {
+        const PhysAddr stack_frame = AllocateFrame();
+        if (stack_frame == kNullFrame)
+        {
+            SerialWrite("[pe-load] FAIL stack frame alloc idx=");
+            SerialWriteHex(p);
+            SerialWrite("\n");
+            return r;
+        }
+        const u64 page_va = kV0StackVa + p * kPageSize;
+        AddressSpaceMapUserPage(as, page_va, stack_frame, kPagePresent | kPageUser | kPageWritable | kPageNoExecute);
+    }
+    SerialWrite("[pe-load] step4 stack mapped pages=");
+    SerialWriteHex(kV0StackPages);
+    SerialWrite("\n");
+
+    // 4b. TEB page (Win32 PEs only). MSVC CRT startup reads
+    //     gs:[0x30] for the self-pointer during __security_init
+    //     _cookie / __scrt_common_main_seh; without this page it
+    //     faults at linear 0x30. One page, RW+NX. Self-pointer
+    //     stored at offset 0x30.
+    u64 teb_va = 0;
+    if (ps == PeStatus::ImportsPresent)
+    {
+        const PhysAddr teb_frame = AllocateFrame();
+        if (teb_frame == kNullFrame)
+        {
+            SerialWrite("[pe-load] FAIL teb frame alloc\n");
+            return r;
+        }
+        auto* teb_direct = static_cast<u8*>(PhysToVirt(teb_frame));
+        for (u64 i = 0; i < kPageSize; ++i)
+            teb_direct[i] = 0;
+        // Write self-pointer (little-endian u64).
+        for (u64 b = 0; b < 8; ++b)
+            teb_direct[kTebOffSelf + b] = static_cast<u8>((kV0TebVa >> (b * 8)) & 0xFF);
+        AddressSpaceMapUserPage(as, kV0TebVa, teb_frame, kPagePresent | kPageUser | kPageWritable | kPageNoExecute);
+        teb_va = kV0TebVa;
+        SerialWrite("[pe-load] step4b teb mapped va=");
+        SerialWriteHex(teb_va);
+        SerialWrite("\n");
+    }
 
     // 5. If imports are present, stand up the per-process
     //    Win32 stubs page + resolve every IAT entry.
@@ -762,7 +941,10 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, customos::mm::AddressSpace* as
     {
         const PhysAddr stubs_frame = AllocateFrame();
         if (stubs_frame == kNullFrame)
+        {
+            SerialWrite("[pe-load] FAIL stubs frame alloc\n");
             return r;
+        }
         auto* stubs_direct = static_cast<u8*>(PhysToVirt(stubs_frame));
         for (u64 i = 0; i < kPageSize; ++i)
             stubs_direct[i] = 0;
@@ -772,17 +954,37 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, customos::mm::AddressSpace* as
         AddressSpaceMapUserPage(as, win32::kWin32StubsVa, stubs_frame, kPagePresent | kPageUser);
 
         if (!ResolveImports(file, file_len, h, as))
+        {
+            SerialWrite("[pe-load] FAIL ResolveImports\n");
             return r;
+        }
+        SerialWrite("[pe-load] step5 imports resolved\n");
     }
+    SerialWrite("[pe-load] OK\n");
 
     r.ok = true;
     r.imports_resolved = (ps == PeStatus::ImportsPresent);
     r.entry_va = h.image_base + h.entry_rva;
     r.stack_va = kV0StackVa;
-    r.stack_top = kV0StackVa + kPageSize;
+    r.stack_top = kV0StackTop;
     r.image_base = h.image_base;
     r.image_size = h.image_size;
+    r.teb_va = teb_va;
     return r;
+}
+
+void PeLoadDrainIatMisses(Process* proc)
+{
+    if (proc == nullptr)
+        return;
+    const u64 n = g_staged_miss_count < Process::kWin32IatMissCap ? g_staged_miss_count : Process::kWin32IatMissCap;
+    for (u64 i = 0; i < n; ++i)
+    {
+        proc->win32_iat_misses[i].slot_va = g_staged_misses[i].slot_va;
+        proc->win32_iat_misses[i].name = g_staged_misses[i].name;
+    }
+    proc->win32_iat_miss_count = n;
+    g_staged_miss_count = 0;
 }
 
 // ---------------------------------------------------------------

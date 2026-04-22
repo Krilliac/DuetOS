@@ -1,5 +1,7 @@
 #include "tmpfs.h"
 
+#include "../core/klog.h"
+
 namespace customos::fs
 {
 
@@ -92,6 +94,10 @@ TmpFsSlot* AllocSlot(const char* name)
             return &g_slots[i];
         }
     }
+    // Slot table exhausted (16 slots). Once-per-boot warn so we don't
+    // flood under sustained pressure; the caller's nullptr return is
+    // the actionable signal.
+    KLOG_ONCE_WARN("fs/tmpfs", "slot table full; cannot allocate more files");
     return nullptr;
 }
 

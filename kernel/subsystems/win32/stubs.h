@@ -48,4 +48,26 @@ void Win32StubsPopulate(u8* dst);
 /// (Win32 convention).
 bool Win32StubsLookup(const char* dll, const char* func, u64* out_va);
 
+/// As above, but also reports whether the matched stub is a
+/// "safe-ignore" shim — a thunk that returns a constant (0, 1,
+/// current process handle) without doing any real work. The PE
+/// loader uses this to emit a Warn-level log when an imported
+/// symbol lands on such a stub, so one glance at the boot log
+/// reveals which Win32 APIs a PE will silently misbehave on. The
+/// same `out_va` is populated as the 3-arg form.
+bool Win32StubsLookupKind(const char* dll, const char* func, u64* out_va, bool* out_is_noop);
+
+/// Catch-all stub for any import the table doesn't know. Points at
+/// the shared "xor eax,eax; ret" thunk, so:
+///   - called as a function: returns 0 (the standard Win32 "failed
+///     but no-op") and the callsite either tolerates it or faults
+///     visibly further down;
+///   - dereferenced as a data import: reads the stub bytes (the
+///     page is mapped R-X, so no #PF), which is garbage but makes
+///     the ensuing misuse loud rather than a silent loader reject.
+/// Used by the PE loader when `Win32StubsLookupKind` misses, so a
+/// real-world PE never fails to load purely because an obscure
+/// import isn't yet implemented.
+bool Win32StubsLookupCatchAll(u64* out_va);
+
 } // namespace customos::win32

@@ -5,6 +5,7 @@
 
 #include "../arch/x86_64/cpu.h"
 #include "../arch/x86_64/serial.h"
+#include "../core/klog.h"
 #include "../core/panic.h"
 
 namespace customos::mm
@@ -81,7 +82,7 @@ constexpr u64 kCr4_Smap = 1ULL << 21;
 constexpr u64 kCr4_Cet = 1ULL << 23;
 
 // CET MSRs.
-constexpr u32 kIa32_S_Cet = 0x6A2; // supervisor-mode CET config
+constexpr u32 kIa32_S_Cet = 0x6A2;         // supervisor-mode CET config
 constexpr u64 kCetMsr_EndbrEn = 1ULL << 2; // enable IBT (endbr64 enforcement)
 
 inline void ReadCpuidLeaf7_0(u32& ebx_out, u32& edx_out)
@@ -280,18 +281,27 @@ u64* WalkToPte(u64* pml4, uptr virt, bool create)
 // ---------------------------------------------------------------------------
 void PagingInit()
 {
+    KLOG_TRACE_SCOPE("mm/paging", "PagingInit");
     const u64 cr3 = ReadCr3();
     const PhysAddr pml4_phys = cr3 & kAddrMask;
     g_pml4 = static_cast<u64*>(PhysToVirt(pml4_phys));
 
     // Enable EFER.NXE so PageNoExecute mappings are honoured. Without this
     // bit, setting bit 63 in any PTE causes a #GP.
+    //
+    // Also enable EFER.SCE (bit 0) so the `syscall` instruction is
+    // legal from ring 3. Without it, the Linux-ABI entry at
+    // MSR_LSTAR is never reached — the CPU raises #UD on the
+    // syscall opcode. MSR_LSTAR itself gets programmed separately
+    // by linux::SyscallInit once per-CPU data is up.
     constexpr u32 kEferMsr = 0xC0000080;
     constexpr u64 kEferNxeBit = 1ULL << 11;
+    constexpr u64 kEferSceBit = 1ULL << 0;
     const u64 efer = ReadMsr(kEferMsr);
-    if ((efer & kEferNxeBit) == 0)
+    const u64 efer_want = efer | kEferNxeBit | kEferSceBit;
+    if (efer != efer_want)
     {
-        WriteMsr(kEferMsr, efer | kEferNxeBit);
+        WriteMsr(kEferMsr, efer_want);
     }
 
     g_mmio_cursor = 0;
@@ -553,6 +563,7 @@ void UnmapPage(uptr virt)
 
 void* MapMmio(PhysAddr phys, u64 bytes)
 {
+    KLOG_TRACE_SCOPE("mm/paging", "MapMmio");
     if (bytes == 0)
     {
         return nullptr;
@@ -761,12 +772,13 @@ void ProtectRange(u64 va_start, u64 va_end, u64 flags, const char* name)
 
 void ProtectKernelImage()
 {
+    KLOG_TRACE_SCOPE("mm/paging", "ProtectKernelImage");
     // Flags for each section. .text is RO + executable; everything
     // else gets NX. .rodata stays non-writable too (constants); .data
     // and .bss are writable scratch/state for the kernel.
-    constexpr u64 kText = kPagePresent;                                      // R + X
-    constexpr u64 kRodata = kPagePresent | kPageNoExecute;                   // R
-    constexpr u64 kDataBss = kPagePresent | kPageWritable | kPageNoExecute;  // R + W
+    constexpr u64 kText = kPagePresent;                                     // R + X
+    constexpr u64 kRodata = kPagePresent | kPageNoExecute;                  // R
+    constexpr u64 kDataBss = kPagePresent | kPageWritable | kPageNoExecute; // R + W
 
     ProtectRange(reinterpret_cast<u64>(_text_start), reinterpret_cast<u64>(_text_end), kText, ".text");
     ProtectRange(reinterpret_cast<u64>(_rodata_start), reinterpret_cast<u64>(_rodata_end), kRodata, ".rodata");
@@ -788,6 +800,7 @@ PagingStats PagingStatsRead()
 
 void PagingSelfTest()
 {
+    KLOG_TRACE_SCOPE("mm/paging", "PagingSelfTest");
     SerialWrite("[mm] paging self-test\n");
 
     // Allocate one frame, map it twice into the MMIO arena, and use the

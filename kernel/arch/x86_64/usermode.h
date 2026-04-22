@@ -34,4 +34,12 @@ namespace customos::arch
 // usermode.S that anyone calls.
 extern "C" [[noreturn]] void EnterUserMode(u64 user_rip, u64 user_rsp);
 
+// PE variant: same contract as EnterUserMode, but also sets the
+// user's GS base to `user_gs_base` before iretq. Used for Win32
+// PE tasks so that `mov rax, gs:[0x30]` (TEB self-pointer) and
+// other TEB reads resolve into a valid TEB page instead of
+// faulting against linear address 0x30. `user_gs_base` of 0 is
+// legal (makes this equivalent to the 2-arg form).
+extern "C" [[noreturn]] void EnterUserModeWithGs(u64 user_rip, u64 user_rsp, u64 user_gs_base);
+
 } // namespace customos::arch

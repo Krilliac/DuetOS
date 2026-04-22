@@ -31,6 +31,10 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     core/elf_loader.cpp
     core/pe_loader.cpp
     core/ring3_smoke.cpp
+    subsystems/linux/ring3_smoke.cpp
+    subsystems/linux/syscall.cpp
+    subsystems/linux/syscall_entry.S
+    subsystems/translation/translate.cpp
     subsystems/win32/heap.cpp
     subsystems/win32/stubs.cpp
     core/shell.cpp
@@ -64,6 +68,7 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     drivers/pci/pci.cpp
     drivers/storage/ahci.cpp
     drivers/storage/block.cpp
+    drivers/storage/nvme.cpp
     drivers/video/console.cpp
     drivers/video/cursor.cpp
     drivers/video/font8x8.cpp
@@ -71,6 +76,8 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     drivers/video/menu.cpp
     drivers/video/taskbar.cpp
     drivers/video/widget.cpp
+    fs/fat32.cpp
+    fs/gpt.cpp
     fs/ramfs.cpp
     fs/tmpfs.cpp
     fs/vfs.cpp
@@ -82,6 +89,7 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     mm/user_copy.S
     sched/context_switch.S
     sched/sched.cpp
+    security/guard.cpp
     sync/spinlock.cpp
 )
 

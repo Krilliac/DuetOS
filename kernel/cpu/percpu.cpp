@@ -2,6 +2,7 @@
 
 #include "../arch/x86_64/lapic.h"
 #include "../arch/x86_64/serial.h"
+#include "../core/klog.h"
 
 namespace customos::cpu
 {
@@ -19,6 +20,8 @@ constinit PerCpu g_bsp_percpu = {
     .current_as = nullptr, // kernel AS = boot PML4, until a process is activated
     .need_resched = false,
     ._pad = {},
+    .kernel_rsp = 0,       // filled on first ring3 task switch-in (sched + ring3 smoke)
+    .user_rsp_scratch = 0, // touched only by the syscall entry stub
 };
 
 // One-shot flag so CurrentCpuIdOrBsp can return a sane value before
@@ -37,6 +40,7 @@ inline void WriteMsr(u32 msr, u64 value)
 
 void PerCpuInitBsp()
 {
+    KLOG_TRACE_SCOPE("cpu/percpu", "PerCpuInitBsp");
     // Stamp the LAPIC ID from the LAPIC register — the MADT also
     // reports LAPIC IDs, but the register is the authoritative source
     // for the CPU we're actually executing on.

@@ -2,7 +2,7 @@
 
 **Last updated:** 2026-04-21
 **Type:** Decision
-**Status:** Active (stage 1 in-flight)
+**Status:** Active (stages 1–5 landed; file-read + VFS mount follow-ups remain)
 
 ## Description
 
@@ -54,7 +54,7 @@ Does not apply to:
   deterministic pattern at LBA 0, read it back, verify. One
   PASS/FAIL line on COM1.
 
-### Stage 2 — NVMe driver (next session)
+### Stage 2 — NVMe driver (landed 2026-04-21)
 
 `kernel/drivers/storage/nvme.{h,cpp}`. The modern SSD path.
 
@@ -76,22 +76,50 @@ Does not apply to:
   and dump the first 32 bytes. (The MBR/GPT signature at
   offset 510 is a natural parity check for stage 3.)
 
-### Stage 3 — AHCI real driver (next session after Stage 2)
+### Stage 3 — AHCI real driver (landed 2026-04-21)
 
-Flesh out `drivers/storage/ahci.cpp` from discovery-only to
-read-capable. Order: port reset, allocate command list + FIS
-receive area, READ DMA EXT (0x25) via a single command slot,
-wire polling completion. Register as `BlockDevice`.
+Promoted `drivers/storage/ahci.cpp` from discovery-only to a
+working read path.
 
-Doing AHCI after NVMe is deliberate:
-- NVMe is simpler (2 rings, no ATA command set complexity,
-  no FIS framing). Cleaner first pass at queue-based I/O.
-- QEMU's default `-drive if=none -device nvme` is trivial to
-  test against. AHCI via QEMU's ICH9 chipset is more fiddly.
-- The block layer's vtable absorbs the driver difference —
-  stage 4+ doesn't care which backend served a sector.
+Per-port bring-up:
+- Stop the engine (clear PxCMD.ST + FRE, wait for CR/FR to
+  clear), then one 4 KiB DMA frame carved into:
+    0..1023   command list (32 slots × 32 B)
+    1024..1279 FIS receive area (256 B, 256-aligned)
+    1280..1535 command table (cfis + prdt[1])
+    1536..2047 IDENTIFY DEVICE reply buffer
+- Program PxCLB/CLBU + PxFB/FBU to those physaddrs.
+- Clear PxSERR + PxIS, re-enable FRE then ST, wait for BSY +
+  DRQ to drop.
+- Issue IDENTIFY DEVICE (ATA 0xEC) on slot 0, extract LBA48
+  sector count from words 100..103, register as "sata0".
 
-### Stage 4 — GPT partition parser (next session after Stage 3)
+Read path (`BlockOps::read`):
+- Build H2D Register FIS for READ DMA EXT (ATA 0x25) with
+  caller LBA + count. PRD[0] = (VirtToPhys(buf), count*512 - 1).
+- Poll PxCI until slot 0 clears, watching PxIS.TFES for task-
+  file errors. 8-sector cap per call.
+
+PCI wiring: enable Memory Space + Bus Master in the PCI command
+register before touching MMIO/DMA. Set GHC.AE=1 on the HBA.
+
+Multi-controller: walks every AHCI PCI match (up to 4). With
+QEMU q35, controller #1 is the built-in (carries the boot
+CD-ROM, skipped as ATAPI), controller #2 is our test
+`ahci,id=ahci1` with one SATA disk.
+
+Out of scope for v1 (each is a future slice): writes, NCQ,
+multiple in-flight slots, MSI, hotplug, 4K native sectors.
+
+Decision: ATAPI (CD-ROM) is deliberately unsupported. Our
+pattern is "boot from ISO once, mount real FS from SATA/NVMe
+after" — an ATAPI driver is a different command set (PACKET)
+with its own quirks and no lasting value.
+
+Validation: `[ahci] self-test OK (LBA 0 read + 0x55AA signature
+present)` plus GPT parse `handle=0x2 name=sata0`.
+
+### Stage 4 — GPT partition parser (landed 2026-04-21)
 
 `kernel/fs/gpt.{h,cpp}`. C++ parser, not Rust — GPT is
 bounded, well-defined, and we already have tight byte-parsing
@@ -108,35 +136,46 @@ discipline from the PE loader.
 MBR fallback for non-GPT disks stays out of scope — modern
 SSDs ship GPT.
 
-### Stage 5 — Filesystem: first Rust crate
+### Stage 5 — FAT32 filesystem (landed 2026-04-21, C++ after all)
 
-`fs/fat32/` as the first Rust subsystem per `rust-bringup-plan.md`.
+Initial shipment: `kernel/fs/fat32.{h,cpp}` as **C++**, not Rust.
 
-Why FAT32 first:
-- Spec is small, stable, battle-tested. One week to ship a
-  read-only implementation; no novel invariants.
-- Every disk image format tool (mkfs.vfat) produces FAT32
-  predictably, so fixturing is trivial.
-- Windows PEs we want to run from disk live in FAT32-
-  compatible partitions (ESP + data).
+Revisiting the "Rust first" plan: after implementing PE + ELF
+loaders, the GPT parser, and the AHCI driver all in C++ with
+tight byte-parsing and bounded static state, FAT32 was a natural
+fit for the same style. No lifetime gymnastics called for a new
+language surface; Rust-for-filesystems is deferred until a
+genuine invariant (e.g. journaling consistency, btree concurrent
+readers) demands it.
 
-Scope for v0:
-- Read-only.
-- Parse BPB, locate first FAT + data region.
-- Directory-entry iteration (short names only — LFN entries
-  skipped for v0).
-- File-cluster-chain read.
-- Expose via `fs::FatMount(BlockDeviceHandle, first_lba)
-  -> Mount*` — a new per-mount type that plugs into the VFS
-  alongside ramfs.
+Scope landed (v0):
+- `Fat32Probe(block_handle)` reads LBA 0 of a block device,
+  validates 0x55AA + "FAT32" marker + BPB geometry, and logs the
+  decoded fields.
+- Walks the root-directory cluster chain via the FAT to enumerate
+  up to `kMaxDirEntries=32` short-8.3 entries per volume. LFN
+  fragments, deleted slots (0xE5), and volume-label pseudo-entries
+  are skipped.
+- `Fat32SelfTest()` probes every block-device handle; partitions
+  that aren't FAT32 log "not FAT32" + skip.
+- Image builder (`tools/qemu/make-gpt-image.py`) writes a minimal
+  FAT32 layout into the data partition with one test file
+  `HELLO.TXT` (17 bytes) so the self-test has a deterministic
+  fixture.
 
-Rust bring-up details (from `rust-bringup-plan.md`):
-- `rust-toolchain.toml` pinned to a nightly date.
-- Crate at `fs/fat32/` with `crate-type = ["staticlib"]`,
-  `panic = "abort"`.
-- Kernel C++ calls into `fat32_mount` / `fat32_readdir` /
-  `fat32_read_file` via a hand-written C FFI header.
-- No bindgen. No second toolchain dep beyond rustup.
+Validation (on-boot):
+  [fs/fat32] volume: handle=3 bps=0x200 spc=0x8 res=0x20
+             fat_size=0x40 root_cluster=0x2 data_start=0xa0
+  [fs/fat32]   - HELLO.TXT  attr=0x20  first_cluster=0x3  size=0x11
+  [fs/fat32] self-test OK
+
+Follow-up slices (not yet landed):
+- File content read by cluster-chain walk (`Fat32ReadFile(vol,
+  name, buf, max)`). Next natural commit.
+- Long-filename decoding (attr == 0x0F fragments).
+- Subdirectory recursion.
+- VFS integration so `ls` / `cat` in the shell can reach these.
+- Writes.
 
 ### Stage 6 — VFS mount path
 

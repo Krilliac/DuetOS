@@ -6,6 +6,7 @@
 #include "../fs/vfs.h"
 #include "../mm/paging.h"
 #include "../sched/sched.h"
+#include "../subsystems/translation/translate.h"
 #include "../subsystems/win32/heap.h"
 #include "klog.h"
 #include "process.h"
@@ -250,6 +251,38 @@ void SyscallDispatch(arch::TrapFrame* frame)
         // the Win32 QueryPerformanceCounter + GetTickCount
         // stubs.
         frame->rax = arch::TimerTicks();
+        return;
+    }
+
+    case SYS_WIN32_MISS_LOG:
+    {
+        // rdi = IAT slot VA that the miss-logger trampoline
+        // decoded from its caller's `call [rip+disp32]`.
+        // Search CurrentProcess()->win32_iat_misses; if found,
+        // emit a [win32-miss] line with the function name.
+        const u64 slot_va = frame->rdi;
+        Process* proc = CurrentProcess();
+        const char* name = nullptr;
+        if (proc != nullptr)
+        {
+            for (u64 i = 0; i < proc->win32_iat_miss_count; ++i)
+            {
+                if (proc->win32_iat_misses[i].slot_va == slot_va)
+                {
+                    name = proc->win32_iat_misses[i].name;
+                    break;
+                }
+            }
+        }
+        arch::SerialWrite("[win32-miss] slot=");
+        arch::SerialWriteHex(slot_va);
+        arch::SerialWrite(" called fn=\"");
+        arch::SerialWrite(name ? name : "<unmapped>");
+        arch::SerialWrite("\"\n");
+        // Trampoline zeroes rax itself; set here too for
+        // clarity (we overwrite rax anyway via the syscall
+        // return value mechanism).
+        frame->rax = 0;
         return;
     }
 
@@ -506,9 +539,8 @@ void SyscallDispatch(arch::TrapFrame* frame)
         // Inherit caps + root + trusted budgets. Later slices can
         // differentiate spawn from a sandboxed parent by dropping
         // caps after SpawnElfFile.
-        const u64 child_pid =
-            SpawnElfFile(kpath, n->file_bytes, n->file_size, proc->caps, proc->root,
-                         mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        const u64 child_pid = SpawnElfFile(kpath, n->file_bytes, n->file_size, proc->caps, proc->root,
+                                           mm::kFrameBudgetTrusted, kTickBudgetTrusted);
         if (child_pid == 0)
         {
             arch::SerialWrite("[sys] spawn fail pid=");
@@ -560,12 +592,25 @@ void SyscallDispatch(arch::TrapFrame* frame)
     }
 
     default:
+    {
+        // Offer to the translation unit before surfacing the
+        // "unknown syscall" warning. The TU may synthesise the
+        // call from Linux primitives or route through the Win32
+        // subsystem's kernel-side helpers (heap, etc.); its own
+        // log lines distinguish success from miss.
+        const auto t = subsystems::translation::NativeGapFill(frame);
+        if (t.handled)
+        {
+            frame->rax = static_cast<u64>(t.rv);
+            return;
+        }
         ReportUnknownSyscall(num, frame->rip);
         // Convention: -1 back to the caller for a bad syscall number.
         // Two's-complement cast keeps the rax payload machine-visible
         // as 0xFFFFFFFFFFFFFFFF rather than relying on enum promotion.
         frame->rax = static_cast<u64>(-1);
         return;
+    }
     }
 }
 

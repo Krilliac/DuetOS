@@ -54,16 +54,17 @@ else
     exit 1
 fi
 
-# Scratch NVMe image. 16 MiB raw file; first 8 bytes are a
-# well-known marker ("CUSTOMOS") the kernel reads back in the
-# boot self-test so a successful LBA 0 read is grep-able. Kept
-# in the build directory so it rebuilds per-preset and never
-# pollutes the source tree.
+# Scratch NVMe + SATA images. GPT-formatted raw files with one
+# FAT32 data partition seeded by make-gpt-image.py. The FS self-
+# tests mutate these images (fatwrite / fatappend / fatnew); an
+# image from a previous run would fail the "fresh fixture"
+# assertions (e.g. HELLO.TXT expected at 17 bytes, not 5017).
+# Regenerate on every invocation — build is seconds, trades off
+# nothing meaningful for determinism.
 NVME_IMAGE="${BUILD_DIR}/nvme0.img"
-if [[ ! -f "${NVME_IMAGE}" ]]; then
-    dd if=/dev/zero of="${NVME_IMAGE}" bs=1M count=16 status=none
-    printf 'CUSTOMOS' | dd of="${NVME_IMAGE}" bs=1 seek=0 count=8 conv=notrunc status=none
-fi
+SATA_IMAGE="${BUILD_DIR}/sata0.img"
+python3 "${SCRIPT_DIR}/make-gpt-image.py" "${NVME_IMAGE}"
+python3 "${SCRIPT_DIR}/make-gpt-image.py" "${SATA_IMAGE}"
 
 QEMU_ARGS=(
     -machine  q35
@@ -77,6 +78,14 @@ QEMU_ARGS=(
     -D        qemu.log
     -drive    "file=${NVME_IMAGE},if=none,id=nvme0,format=raw"
     -device   "nvme,serial=cafebabe,drive=nvme0"
+    # Separate AHCI controller with one SATA disk. The q35 machine
+    # has a built-in AHCI at 0:1f.2 carrying the CD-ROM; adding a
+    # dedicated "ahci,id=ahci1" plus an ide-hd on bus ahci1.0
+    # gives us a clean test path with only a hard-disk device
+    # (no ATAPI), which matches the v1 driver scope.
+    -device   "ahci,id=ahci1"
+    -drive    "file=${SATA_IMAGE},if=none,id=sata0,format=raw"
+    -device   "ide-hd,bus=ahci1.0,drive=sata0"
     "${BOOT_SOURCE[@]}"
 )
 

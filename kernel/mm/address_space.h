@@ -73,7 +73,14 @@
 namespace customos::mm
 {
 
-inline constexpr u64 kMaxUserVmRegionsPerAs = 32;
+// Max user-page mappings per address space. Bumped from 32 → 128
+// so a real-world PE (e.g. windows-kill.exe: 8 sections, 100
+// imports, 16 heap pages) fits without hitting the region-table
+// cap. 128 × 16 bytes/region = 2 KiB per AS — still cheap, and
+// well under a page so the fixed-size table stays on the AS
+// struct. Workloads beyond this still panic the loader, which is
+// the behaviour we want while the region table is flat.
+inline constexpr u64 kMaxUserVmRegionsPerAs = 128;
 
 // Default frame budgets for the two canonical profiles. A new AS is
 // created with one of these (or a caller-supplied value) and

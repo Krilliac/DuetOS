@@ -24,6 +24,7 @@ constinit u64 g_live_processes = 0;
 Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, const fs::RamfsNode* root, u64 user_code_va,
                        u64 user_stack_va, u64 tick_budget)
 {
+    KLOG_TRACE_SCOPE("core/process", "ProcessCreate");
     KASSERT(name != nullptr, "core/process", "ProcessCreate null name");
     KASSERT(as != nullptr, "core/process", "ProcessCreate null as");
     KASSERT(root != nullptr, "core/process", "ProcessCreate null root");
@@ -42,6 +43,9 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     p->root = root;
     p->user_code_va = user_code_va;
     p->user_stack_va = user_stack_va;
+    p->user_rsp_init = 0; // loader overrides if it wants a custom rsp
+    p->user_gs_base = 0;  // PE loader sets this to the TEB VA
+    p->win32_iat_miss_count = 0;
     p->tick_budget = tick_budget;
     p->ticks_used = 0;
     p->sandbox_denials = 0;
@@ -49,6 +53,25 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     p->heap_base = 0;        // PeLoad fills these when the PE has
     p->heap_pages = 0;       // imports — see subsystems/win32/heap.cpp
     p->heap_free_head = 0;
+    // Linux fd table: reserve stdin/stdout/stderr, mark rest unused.
+    for (u32 i = 0; i < 16; ++i)
+    {
+        p->linux_fds[i].state = (i < 3) ? 1 /* reserved-tty */ : 0;
+        p->linux_fds[i].first_cluster = 0;
+        p->linux_fds[i].size = 0;
+        p->linux_fds[i].offset = 0;
+        for (u32 j = 0; j < sizeof(p->linux_fds[i]._pad); ++j)
+            p->linux_fds[i]._pad[j] = 0;
+        p->linux_fds[i]._pad2 = 0;
+        for (u32 j = 0; j < sizeof(p->linux_fds[i].path); ++j)
+            p->linux_fds[i].path[j] = 0;
+    }
+    p->linux_brk_base = 0; // loader fills when abi_flavor = kAbiLinux
+    p->linux_brk_current = 0;
+    p->linux_mmap_cursor = 0;
+    p->abi_flavor = kAbiNative; // loaders flip to kAbiLinux if appropriate
+    for (u32 i = 0; i < sizeof(p->_abi_pad); ++i)
+        p->_abi_pad[i] = 0;
     p->refcount = 1;
 
     ++g_live_processes;

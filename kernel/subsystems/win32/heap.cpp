@@ -1,6 +1,7 @@
 #include "heap.h"
 
 #include "../../arch/x86_64/serial.h"
+#include "../../core/klog.h"
 #include "../../core/process.h"
 #include "../../mm/address_space.h"
 #include "../../mm/frame_allocator.h"
@@ -82,6 +83,7 @@ u64 RoundRequestToBlockSize(u64 requested)
 
 bool Win32HeapInit(customos::core::Process* proc)
 {
+    KLOG_TRACE_SCOPE("win32/heap", "Win32HeapInit");
     using namespace customos::mm;
     using arch::SerialWrite;
     using arch::SerialWriteHex;
@@ -180,6 +182,7 @@ u64 Win32HeapAlloc(customos::core::Process* proc, u64 size)
     // No free block large enough. Win32 returns NULL when
     // HEAP_GENERATE_EXCEPTIONS isn't set — we never honor
     // that flag, so always NULL on OOM.
+    KLOG_ONCE_WARN("win32/heap", "process heap exhausted (HeapAlloc returned NULL)");
     return 0;
 }
 

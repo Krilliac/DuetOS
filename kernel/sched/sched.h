@@ -103,9 +103,9 @@ core::Process* TaskProcess(Task* t);
 /// integer value is a stable handle for logs / future ABI.
 enum class KillReason : u8
 {
-    TickBudget = 1,    // CPU-tick budget exhausted (slice 14)
+    TickBudget = 1,             // CPU-tick budget exhausted (slice 14)
     SandboxDenialThreshold = 2, // too many cap-denials (slice 16)
-    UserKill = 3,      // shell `kill <pid>` / operator-initiated
+    UserKill = 3,               // shell `kill <pid>` / operator-initiated
     // Add new reasons at the end.
 };
 
@@ -206,6 +206,8 @@ struct SchedStats
     u64 tasks_created;    // lifetime
     u64 tasks_exited;     // lifetime (Dead count)
     u64 tasks_reaped;     // lifetime (Task structs + stacks KFree'd by reaper)
+    u64 total_ticks;      // lifetime — number of timer ticks since boot
+    u64 idle_ticks;       // lifetime — ticks spent in the idle task (both BSP and AP)
 };
 SchedStats SchedStatsRead();
 
@@ -219,9 +221,13 @@ struct SchedTaskInfo
     const char* name; // borrowed; points into the task's stable name field
     u64 wake_tick;    // valid for Sleeping / timed-Blocked, else 0
     u64 stack_size;
-    u8 state;         // TaskState cast to u8 (Ready/Running/Sleeping/Blocked/Dead)
-    u8 priority;      // TaskPriority cast to u8
-    bool is_running;  // true if this is the currently-scheduled task
+    // Cumulative tick-count this task has consumed on-CPU since
+    // creation. Divide by `SchedTotalTicks()` for a since-boot
+    // CPU-%; a `top`-style periodic delta is built by the shell.
+    u64 ticks_run;
+    u8 state;        // TaskState cast to u8 (Ready/Running/Sleeping/Blocked/Dead)
+    u8 priority;     // TaskPriority cast to u8
+    bool is_running; // true if this is the currently-scheduled task
     u8 _pad[5];
 };
 

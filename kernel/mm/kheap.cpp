@@ -5,6 +5,7 @@
 
 #include "../arch/x86_64/cpu.h"
 #include "../arch/x86_64/serial.h"
+#include "../core/klog.h"
 #include "../core/panic.h"
 
 namespace customos::mm
@@ -164,6 +165,7 @@ void FreelistInsertAndCoalesce(ChunkHeader* chunk)
 // ---------------------------------------------------------------------------
 void KernelHeapInit()
 {
+    KLOG_TRACE_SCOPE("mm/kheap", "KernelHeapInit");
     constexpr u64 kFrames = kKernelHeapBytes / kPageSize;
     static_assert(kFrames * kPageSize == kKernelHeapBytes, "Heap size must be a multiple of the page size");
 
@@ -261,7 +263,11 @@ void* KMalloc(u64 bytes)
         cursor = cursor->next;
     }
 
-    return nullptr; // pool exhausted
+    // Pool exhausted. Once-per-boot to avoid log floods under sustained
+    // memory pressure; the caller's nullptr return is the actionable
+    // signal. Subsequent OOMs are silent at this layer.
+    KLOG_ONCE_WARN("mm/kheap", "pool exhausted (KMalloc returned null)");
+    return nullptr;
 }
 
 void KFree(void* ptr)
@@ -325,6 +331,7 @@ KernelHeapStats KernelHeapStatsRead()
 
 void KernelHeapSelfTest()
 {
+    KLOG_TRACE_SCOPE("mm/kheap", "KernelHeapSelfTest");
     SerialWrite("[mm] kernel heap self-test\n");
 
     const KernelHeapStats baseline = KernelHeapStatsRead();

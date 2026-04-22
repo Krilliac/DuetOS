@@ -145,6 +145,21 @@ struct Process
     // the base.
     u64 user_code_va;
     u64 user_stack_va; // stack base; top = user_stack_va + kPageSize
+    // When non-zero, Ring3UserEntry enters ring 3 with rsp = this
+    // value instead of the default `user_stack_va + kPageSize`.
+    // Used by SpawnElfLinux to land the user task on a pre-
+    // populated argc/argv/envp/auxv region at the top of the
+    // stack page. 0 means "use the default" — keeps native + PE
+    // spawn paths unchanged.
+    u64 user_rsp_init;
+
+    // When non-zero, Ring3UserEntry enters ring 3 with GSBASE
+    // set to this VA instead of the zero default. Populated by
+    // SpawnPeFile with the TEB VA so Win32 PEs can resolve
+    // `gs:[0x30]` (TEB self-pointer), TLS slot reads, PEB
+    // pointer, etc. Non-PE tasks leave this at 0 — they never
+    // look at gs-relative addresses.
+    u64 user_gs_base;
 
     // CPU-tick budget. tick_budget is a hard cap; ticks_used is
     // incremented by the timer IRQ for every tick this process's
@@ -195,12 +210,95 @@ struct Process
     u64 heap_pages;
     u64 heap_free_head;
 
+    // Linux-ABI file descriptor table. Meaningful only when
+    // abi_flavor == kAbiLinux. Slots 0 / 1 / 2 are reserved for
+    // stdin / stdout / stderr; slots 3+ are file handles opened
+    // via sys_open, each carrying the backing FAT32 entry's
+    // first-cluster + size + the current read offset.
+    //
+    // A fixed-size 16-entry table is plenty for smoke tests and
+    // the typical static-musl binary. Real programs (shells,
+    // dynamic linkers) need more; grow to a KMalloc'd array when
+    // a workload actually exceeds 16 open handles.
+    struct LinuxFd
+    {
+        u8 state; // 0=unused, 1=reserved-tty, 2=file
+        u8 _pad[3];
+        u32 first_cluster; // only meaningful for state=file
+        u32 size;          // only meaningful for state=file
+        u32 _pad2;
+        u64 offset; // read cursor; only meaningful for state=file
+        // Volume-relative path as passed to sys_open, NUL-
+        // terminated. Needed so sys_write's extend path can call
+        // Fat32AppendAtPath — the FAT32 writer walks the parent
+        // directory by name to update the entry's size field.
+        // Cap matches the sys_open copy buffer (63 chars + NUL).
+        char path[64];
+    };
+    LinuxFd linux_fds[16];
+
+    // Linux-ABI brk heap. Meaningful only when abi_flavor ==
+    // kAbiLinux; untouched otherwise. `linux_brk_base` is the
+    // start of the program's data segment end (v0 smoke hard-
+    // codes this; future ELF loader will set it from the highest
+    // PT_LOAD's p_vaddr + p_memsz). `linux_brk_current` tracks
+    // the top of the currently-mapped heap; brk() grows it by
+    // mapping fresh RW pages on demand.
+    u64 linux_brk_base;
+    u64 linux_brk_current;
+
+    // Linux-ABI mmap bump allocator. Anonymous private mmap()
+    // calls return page-aligned regions starting here and march
+    // forward. No reuse on munmap yet — v0 leaks mappings on
+    // munmap, which is fine for short-lived smoke tasks.
+    u64 linux_mmap_cursor;
+
+    // ABI flavor — which kernel syscall entry path this process's
+    // tasks will route through at ring-3 boundary.
+    //   kAbiNative (0): int 0x80 -> core::SyscallDispatch. The
+    //     CustomOS native ABI + Win32 PE subsystem both live
+    //     here (Win32 is a user-mode shim that trampolines
+    //     through the native ints).
+    //   kAbiLinux (1): syscall instruction -> linux::Dispatch.
+    //     Linux-ABI binaries (RAX=nr, RDI/RSI/RDX/R10/R8/R9 args,
+    //     sysret expected) reach a separate in-kernel table.
+    //
+    // Set by the loader at spawn time; read by the syscall entry
+    // path. A u8 is enough — we aren't planning more than a
+    // handful of peer subsystems.
+    u8 abi_flavor;
+    u8 _abi_pad[7];
+
+    // Win32 "catch-all" miss table. Populated during PeLoad for
+    // every import that didn't match a real stub and got routed
+    // through the shared miss-logger trampoline. When the PE calls
+    // the trampoline, the SYS_WIN32_MISS_LOG syscall looks up the
+    // caller's IAT slot VA here and logs the function name it
+    // maps to — telling us, in real time, which unstubbed import
+    // the CRT just tried to call. Cap at 128 entries: winkill has
+    // ~24 catch-alls, any PE with a full CRT will stay under 100.
+    struct Win32IatMiss
+    {
+        u64 slot_va;      // VA of the IAT slot (user-space).
+        const char* name; // kernel-direct-map pointer into the PE's
+                          // on-disk byte buffer (RAM-fs'd), valid
+                          // for the life of the Process.
+    };
+    static constexpr u64 kWin32IatMissCap = 128;
+    Win32IatMiss win32_iat_misses[kWin32IatMissCap];
+    u64 win32_iat_miss_count;
+
     u64 refcount;
 };
 
+// Canonical ABI flavors. Enum-class would be cleaner but the
+// existing Process fields use plain u8/u32 for ABI stability.
+inline constexpr u8 kAbiNative = 0;
+inline constexpr u8 kAbiLinux = 1;
+
 // Canonical tick budgets. Timer runs at 100 Hz, so 1000 ticks ≈ 10 s.
-inline constexpr u64 kTickBudgetSandbox = 1000;          // 10 seconds at 100 Hz
-inline constexpr u64 kTickBudgetTrusted = 1ULL << 40;    // ~12 decades at 100 Hz = effectively unlimited
+inline constexpr u64 kTickBudgetSandbox = 1000;       // 10 seconds at 100 Hz
+inline constexpr u64 kTickBudgetTrusted = 1ULL << 40; // ~12 decades at 100 Hz = effectively unlimited
 
 // Threshold at which sandbox denials are treated as confirmed
 // malicious behaviour. 100 is generous — a well-written sandbox

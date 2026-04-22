@@ -121,6 +121,7 @@ u32 CalibrateLapicTimer()
 
 void TimerInit()
 {
+    KLOG_TRACE_SCOPE("arch/timer", "TimerInit");
     // Calibration must run with interrupts disabled — the PIT poll uses
     // CPU cycles for an accurate window. Caller is responsible for the
     // overall IRQ-disabled bring-up; we assert by checking RFLAGS.IF

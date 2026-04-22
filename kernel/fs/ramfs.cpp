@@ -51,30 +51,30 @@ constexpr u8 kWelcomeBytes[] = "Welcome, sandbox. This file is all you can see.\
 // p_align=1 so the alignment invariant holds).
 constexpr u8 kBinExitElfBytes[] = {
     // -- ELF64 header (64 bytes) --
-    0x7F, 'E', 'L', 'F',       // e_ident[0..3] magic
-    0x02,                      // EI_CLASS = ELFCLASS64
-    0x01,                      // EI_DATA = ELFDATA2LSB
-    0x01,                      // EI_VERSION = EV_CURRENT
-    0x00,                      // EI_OSABI = ELFOSABI_SYSV
-    0x00,                      // EI_ABIVERSION
-    0, 0, 0, 0, 0, 0, 0,       // padding (7 bytes)
-    0x02, 0x00,                // e_type = ET_EXEC
-    0x3E, 0x00,                // e_machine = EM_X86_64
-    0x01, 0x00, 0x00, 0x00,    // e_version
+    0x7F, 'E', 'L', 'F',                            // e_ident[0..3] magic
+    0x02,                                           // EI_CLASS = ELFCLASS64
+    0x01,                                           // EI_DATA = ELFDATA2LSB
+    0x01,                                           // EI_VERSION = EV_CURRENT
+    0x00,                                           // EI_OSABI = ELFOSABI_SYSV
+    0x00,                                           // EI_ABIVERSION
+    0, 0, 0, 0, 0, 0, 0,                            // padding (7 bytes)
+    0x02, 0x00,                                     // e_type = ET_EXEC
+    0x3E, 0x00,                                     // e_machine = EM_X86_64
+    0x01, 0x00, 0x00, 0x00,                         // e_version
     0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, // e_entry = 0x400000
     0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // e_phoff = 64
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // e_shoff = 0
-    0x00, 0x00, 0x00, 0x00,    // e_flags
-    0x40, 0x00,                // e_ehsize = 64
-    0x38, 0x00,                // e_phentsize = 56
-    0x01, 0x00,                // e_phnum = 1
-    0x00, 0x00,                // e_shentsize
-    0x00, 0x00,                // e_shnum
-    0x00, 0x00,                // e_shstrndx
+    0x00, 0x00, 0x00, 0x00,                         // e_flags
+    0x40, 0x00,                                     // e_ehsize = 64
+    0x38, 0x00,                                     // e_phentsize = 56
+    0x01, 0x00,                                     // e_phnum = 1
+    0x00, 0x00,                                     // e_shentsize
+    0x00, 0x00,                                     // e_shnum
+    0x00, 0x00,                                     // e_shstrndx
 
     // -- PT_LOAD program header (56 bytes) --
-    0x01, 0x00, 0x00, 0x00,    // p_type = PT_LOAD
-    0x05, 0x00, 0x00, 0x00,    // p_flags = PF_R | PF_X
+    0x01, 0x00, 0x00, 0x00,                         // p_type = PT_LOAD
+    0x05, 0x00, 0x00, 0x00,                         // p_flags = PF_R | PF_X
     0x78, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // p_offset = 120
     0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, // p_vaddr = 0x400000
     0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, // p_paddr = 0x400000
@@ -91,100 +91,86 @@ constexpr u8 kBinExitElfBytes[] = {
 // Message-of-the-day shown by the shell on startup. Kept short
 // so a 80x40 console has room for the banner + boot log + first
 // prompt without scrolling anything important off the top.
-constexpr u8 kEtcMotdBytes[] =
-    "------------------------------------------------------------\n"
-    "            CUSTOMOS v0 - WINDOWED DESKTOP SHELL\n"
-    "------------------------------------------------------------\n"
-    " Ctrl+Alt+T   toggle desktop / TTY mode\n"
-    " Ctrl+Alt+F1  shell console     Ctrl+Alt+F2  kernel log\n"
-    " Alt+Tab      cycle window      Alt+F4       close window\n"
-    " Tab          complete          Up/Down      history\n"
-    " help         command list      sysinfo      system status\n"
-    "------------------------------------------------------------\n";
+constexpr u8 kEtcMotdBytes[] = "------------------------------------------------------------\n"
+                               "            CUSTOMOS v0 - WINDOWED DESKTOP SHELL\n"
+                               "------------------------------------------------------------\n"
+                               " Ctrl+Alt+T   toggle desktop / TTY mode\n"
+                               " Ctrl+Alt+F1  shell console     Ctrl+Alt+F2  kernel log\n"
+                               " Alt+Tab      cycle window      Alt+F4       close window\n"
+                               " Tab          complete          Up/Down      history\n"
+                               " help         command list      sysinfo      system status\n"
+                               "------------------------------------------------------------\n";
 
 // Default shell profile — auto-sourced by the shell on init.
 // Each line dispatches as if typed at the prompt. Lines starting
 // with '#' are comments and skipped by the source command.
-constexpr u8 kEtcProfileBytes[] =
-    "# CustomOS default profile\n"
-    "# Runs every time the shell starts.\n"
-    "set PS1 customos> \n"
-    "alias ll ls\n"
-    "alias l ls\n"
-    "alias cls clear\n";
+constexpr u8 kEtcProfileBytes[] = "# CustomOS default profile\n"
+                                  "# Runs every time the shell starts.\n"
+                                  "set PS1 customos> \n"
+                                  "alias ll ls\n"
+                                  "alias l ls\n"
+                                  "alias cls clear\n";
 
 // Man pages — plain-text per-command help. Each file here lands
 // at /etc/man/<name> and is read by the shell's `man` command
 // via a straight VfsLookup + cat. Keeping these as real files
 // rather than inline strings lets `cat /etc/man/ls` work too,
 // and makes the ramfs feel lived-in.
-constexpr u8 kManLsBytes[] =
-    "LS [PATH]\n"
-    "  Lists the children of PATH (default /).\n"
-    "  For a file, prints the filename + size.\n"
-    "  /tmp is a writable namespace; other paths are read-only.\n";
+constexpr u8 kManLsBytes[] = "LS [PATH]\n"
+                             "  Lists the children of PATH (default /).\n"
+                             "  For a file, prints the filename + size.\n"
+                             "  /tmp is a writable namespace; other paths are read-only.\n";
 
-constexpr u8 kManCatBytes[] =
-    "CAT PATH\n"
-    "  Prints the contents of PATH.\n"
-    "  Works on ramfs (/etc, /bin) and tmpfs (/tmp).\n";
+constexpr u8 kManCatBytes[] = "CAT PATH\n"
+                              "  Prints the contents of PATH.\n"
+                              "  Works on ramfs (/etc, /bin) and tmpfs (/tmp).\n";
 
-constexpr u8 kManEchoBytes[] =
-    "ECHO ARG..  [> PATH | >> PATH]\n"
-    "  Prints args separated by single spaces + newline.\n"
-    "  With >, writes to /tmp/<NAME> (replaces).\n"
-    "  With >>, appends. Target must be /tmp.\n";
+constexpr u8 kManEchoBytes[] = "ECHO ARG..  [> PATH | >> PATH]\n"
+                               "  Prints args separated by single spaces + newline.\n"
+                               "  With >, writes to /tmp/<NAME> (replaces).\n"
+                               "  With >>, appends. Target must be /tmp.\n";
 
-constexpr u8 kManCpBytes[] =
-    "CP SRC DST\n"
-    "  Copies SRC to DST. DST must be /tmp/<NAME>.\n"
-    "  SRC may be /tmp or any read-only ramfs path.\n";
+constexpr u8 kManCpBytes[] = "CP SRC DST\n"
+                             "  Copies SRC to DST. DST must be /tmp/<NAME>.\n"
+                             "  SRC may be /tmp or any read-only ramfs path.\n";
 
-constexpr u8 kManMvBytes[] =
-    "MV SRC DST\n"
-    "  Renames a /tmp file. Both paths must be /tmp/<NAME>.\n"
-    "  Source is unlinked only after write succeeds.\n";
+constexpr u8 kManMvBytes[] = "MV SRC DST\n"
+                             "  Renames a /tmp file. Both paths must be /tmp/<NAME>.\n"
+                             "  Source is unlinked only after write succeeds.\n";
 
-constexpr u8 kManGrepBytes[] =
-    "GREP PATTERN PATH\n"
-    "  Prints every line of PATH containing PATTERN as a substring.\n"
-    "  Case-sensitive. Empty pattern matches every line.\n";
+constexpr u8 kManGrepBytes[] = "GREP PATTERN PATH\n"
+                               "  Prints every line of PATH containing PATTERN as a substring.\n"
+                               "  Case-sensitive. Empty pattern matches every line.\n";
 
-constexpr u8 kManFindBytes[] =
-    "FIND NAME\n"
-    "  Recursively lists paths whose leaf contains NAME.\n"
-    "  Walks both the static ramfs and the writable tmpfs.\n";
+constexpr u8 kManFindBytes[] = "FIND NAME\n"
+                               "  Recursively lists paths whose leaf contains NAME.\n"
+                               "  Walks both the static ramfs and the writable tmpfs.\n";
 
-constexpr u8 kManHistoryBytes[] =
-    "HISTORY\n"
-    "  Prints the last 8 commands (oldest first).\n"
-    "  !N runs command N, !! repeats the last.\n"
-    "  Up/Down arrows also cycle history in-place.\n";
+constexpr u8 kManHistoryBytes[] = "HISTORY\n"
+                                  "  Prints the last 8 commands (oldest first).\n"
+                                  "  !N runs command N, !! repeats the last.\n"
+                                  "  Up/Down arrows also cycle history in-place.\n";
 
-constexpr u8 kManAliasBytes[] =
-    "ALIAS NAME CMD   Create or redefine an alias.\n"
-    "ALIAS            List all aliases.\n"
-    "UNALIAS NAME     Remove an alias.\n"
-    "Aliases expand once before dispatch; no recursion.\n";
+constexpr u8 kManAliasBytes[] = "ALIAS NAME CMD   Create or redefine an alias.\n"
+                                "ALIAS            List all aliases.\n"
+                                "UNALIAS NAME     Remove an alias.\n"
+                                "Aliases expand once before dispatch; no recursion.\n";
 
-constexpr u8 kManEnvBytes[] =
-    "SET NAME VALUE   Store an environment variable.\n"
-    "UNSET NAME       Remove a variable.\n"
-    "ENV              List all variables.\n"
-    "Reference a variable in args as $NAME (whole-token only).\n"
-    "Set PS1 to customise the shell prompt.\n";
+constexpr u8 kManEnvBytes[] = "SET NAME VALUE   Store an environment variable.\n"
+                              "UNSET NAME       Remove a variable.\n"
+                              "ENV              List all variables.\n"
+                              "Reference a variable in args as $NAME (whole-token only).\n"
+                              "Set PS1 to customise the shell prompt.\n";
 
-constexpr u8 kManTimeBytes[] =
-    "TIME CMD..\n"
-    "  Measure wall time of CMD at 10 ms resolution.\n"
-    "  Runs through the full shell pipeline (alias / env /\n"
-    "  redirect all apply).\n";
+constexpr u8 kManTimeBytes[] = "TIME CMD..\n"
+                               "  Measure wall time of CMD at 10 ms resolution.\n"
+                               "  Runs through the full shell pipeline (alias / env /\n"
+                               "  redirect all apply).\n";
 
-constexpr u8 kManSourceBytes[] =
-    "SOURCE PATH\n"
-    "  Runs each line of PATH as a shell command.\n"
-    "  Blank lines and lines starting with # are skipped.\n"
-    "  Used to auto-run /etc/profile at boot.\n";
+constexpr u8 kManSourceBytes[] = "SOURCE PATH\n"
+                                 "  Runs each line of PATH as a shell command.\n"
+                                 "  Blank lines and lines starting with # are skipped.\n"
+                                 "  Used to auto-run /etc/profile at boot.\n";
 
 // ------- Trusted tree: / -> {etc/version, bin/hello} -------
 
@@ -237,10 +223,18 @@ MAN_NODE("source", kManSourceBytes);
 #undef MAN_NODE
 
 constinit const RamfsNode* const k_trusted_etc_man_children[] = {
-    &k_man_kManLsBytes,     &k_man_kManCatBytes,     &k_man_kManEchoBytes,
-    &k_man_kManCpBytes,     &k_man_kManMvBytes,      &k_man_kManGrepBytes,
-    &k_man_kManFindBytes,   &k_man_kManHistoryBytes, &k_man_kManAliasBytes,
-    &k_man_kManEnvBytes,    &k_man_kManTimeBytes,    &k_man_kManSourceBytes,
+    &k_man_kManLsBytes,
+    &k_man_kManCatBytes,
+    &k_man_kManEchoBytes,
+    &k_man_kManCpBytes,
+    &k_man_kManMvBytes,
+    &k_man_kManGrepBytes,
+    &k_man_kManFindBytes,
+    &k_man_kManHistoryBytes,
+    &k_man_kManAliasBytes,
+    &k_man_kManEnvBytes,
+    &k_man_kManTimeBytes,
+    &k_man_kManSourceBytes,
     nullptr,
 };
 
@@ -253,11 +247,7 @@ constinit RamfsNode k_trusted_etc_man_dir = {
 };
 
 constinit const RamfsNode* const k_trusted_etc_children[] = {
-    &k_trusted_etc_version,
-    &k_trusted_etc_motd,
-    &k_trusted_etc_profile,
-    &k_trusted_etc_man_dir,
-    nullptr,
+    &k_trusted_etc_version, &k_trusted_etc_motd, &k_trusted_etc_profile, &k_trusted_etc_man_dir, nullptr,
 };
 
 constinit RamfsNode k_trusted_etc_dir = {
@@ -377,6 +367,7 @@ constinit RamfsNode k_sandbox_root = {
 
 void RamfsInit()
 {
+    KLOG_TRACE_SCOPE("fs/ramfs", "RamfsInit");
     // Both trees are constinit — nothing to do at runtime. The
     // function exists so (a) the boot sequence has a visible hook
     // for "filesystem is up", and (b) when mutable state lands

@@ -7,6 +7,11 @@ namespace customos::mm
 struct AddressSpace;
 }
 
+namespace customos::core
+{
+struct Process;
+}
+
 /*
  * CustomOS PE/COFF loader — v0.
  *
@@ -106,6 +111,10 @@ struct PeLoadResult
     u64 stack_top;         // rsp at ring-3 entry (stack_va + kPageSize).
     u64 image_base;
     u64 image_size;
+    u64 teb_va; // VA of the per-task TEB page (0 if PE has no
+                // imports — the freestanding hello.exe path).
+                // Non-zero value is the GSBASE to load before
+                // ring-3 entry.
 };
 
 /// Load a validated PE into `as`. On failure, the AS may hold
@@ -113,6 +122,12 @@ struct PeLoadResult
 /// of ElfLoad in shape so SpawnPeFile can drop straight into
 /// the existing ring3 spawn plumbing.
 PeLoadResult PeLoad(const u8* file, u64 file_len, customos::mm::AddressSpace* as);
+
+/// Transfer any (IAT-slot-VA, function-name) pairs the loader
+/// staged for catch-all imports during the most recent PeLoad
+/// into `proc->win32_iat_misses`. Call once right after
+/// ProcessCreate. Idempotent: drains the staging buffer to empty.
+void PeLoadDrainIatMisses(customos::core::Process* proc);
 
 // IMAGE_SCN_* bits exposed for any caller that wants to decode
 // section flags on its own (readelf-style tools later).
