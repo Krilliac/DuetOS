@@ -124,6 +124,7 @@ constexpr u32 kOffGetLogicalDrives = 0x6A9;   // batch 36 — 6 bytes (returns 0
 constexpr u32 kOffGetDriveType = 0x6AF;       // batch 36 — 6 bytes (returns 3 = DRIVE_FIXED)
 constexpr u32 kOffReturnTwo = 0x6B5;          // batch 37 — 6 bytes (ERROR_FILE_NOT_FOUND / stream pos)
 constexpr u32 kOffReturnMinus1 = 0x6BB;       // batch 37 — 6 bytes (INVALID_FILE_ATTRIBUTES)
+constexpr u32 kOffReturnPrioNormal = 0x6C1;   // batch 39 — 6 bytes (0x20 = NORMAL_PRIORITY_CLASS)
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -1740,10 +1741,18 @@ constexpr u8 kStubsBytes[] = {
     // DWORD-returning API that signals "not found" with -1.
     0xB8, 0xFF, 0xFF, 0xFF, 0xFF, // 0x6BB mov eax, 0xFFFFFFFF
     0xC3,                         // 0x6C0 ret
+
+    // --- return-priority-normal (offset 0x6C1, 6 bytes) -------
+    // Win32 GetPriorityClass returns a priority-class constant.
+    // NORMAL_PRIORITY_CLASS = 0x20. Most apps probe this
+    // value; reporting "normal" means they don't try to bump
+    // themselves to REALTIME (which would fail anyway).
+    0xB8, 0x20, 0x00, 0x00, 0x00, // 0x6C1 mov eax, 0x20 (NORMAL_PRIORITY_CLASS)
+    0xC3,                         // 0x6C6 ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x6C1, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0x6C7, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -2139,6 +2148,35 @@ constexpr StubEntry kStubsTable[] = {
     {"kernel32.dll", "GlobalMemoryStatusEx", kOffReturnZero},
     {"kernel32.dll", "GetSystemTimes", kOffReturnZero},
     {"kernel32.dll", "GetNumaHighestNodeNumber", kOffReturnZero},
+
+    // Batch 39 — process priority / TLS / file-type aliases.
+    // TlsAlloc returning TLS_OUT_OF_INDEXES (0xFFFFFFFF) is a
+    // supported "no slots available" signal — forces the MSVC
+    // CRT into its single-threaded fallback path instead of
+    // panicking. TlsGetValue/SetValue/Free still return sane
+    // values so callers holding stale slot indices don't
+    // fault.
+    {"kernel32.dll", "GetPriorityClass", kOffReturnPrioNormal}, // 0x20 = NORMAL
+    {"kernel32.dll", "SetPriorityClass", kOffReturnOne},
+    {"kernel32.dll", "GetThreadPriority", kOffReturnZero}, // 0 = NORMAL
+    {"kernel32.dll", "SetThreadPriority", kOffReturnOne},
+    {"kernel32.dll", "CreateThread", kOffReturnZero},       // NULL — can't spawn in v0
+    {"kernel32.dll", "CreateRemoteThread", kOffReturnZero}, // already batch-24 fallback
+    {"kernel32.dll", "TlsAlloc", kOffReturnMinus1},         // TLS_OUT_OF_INDEXES
+    {"kernel32.dll", "TlsGetValue", kOffReturnZero},
+    {"kernel32.dll", "TlsSetValue", kOffReturnOne},
+    {"kernel32.dll", "TlsFree", kOffReturnOne},
+    {"kernel32.dll", "FlsAlloc", kOffReturnMinus1}, // FLS_OUT_OF_INDEXES
+    {"kernel32.dll", "FlsGetValue", kOffReturnZero},
+    {"kernel32.dll", "FlsSetValue", kOffReturnOne},
+    {"kernel32.dll", "FlsFree", kOffReturnOne},
+    {"kernel32.dll", "SetEndOfFile", kOffReturnOne},
+    {"kernel32.dll", "FlushFileBuffers", kOffReturnOne}, // pretend fsync
+    {"kernel32.dll", "GetFileType", kOffReturnTwo},      // 2 = FILE_TYPE_CHAR (console-ish)
+    {"kernel32.dll", "GetConsoleWindow", kOffReturnZero},
+    {"kernel32.dll", "AddVectoredExceptionHandler", kOffReturnZero},
+    {"kernel32.dll", "RemoveVectoredExceptionHandler", kOffReturnZero},
+    {"kernel32.dll", "AddVectoredContinueHandler", kOffReturnZero},
 
     // Batch 9 — Win32 process heap, backed by the per-process
     // 16-page region at 0x50000000 and SYS_HEAP_ALLOC /
