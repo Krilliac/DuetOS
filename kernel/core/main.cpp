@@ -1477,6 +1477,11 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // proves the whole plumbing — EFER.SCE, MSR setup, swapgs
     // dance, iretq return — works end-to-end.
     customos::subsystems::linux::SpawnRing3LinuxSmoke();
+    // Same payload wrapped in an ELF64 image loaded via
+    // SpawnElfLinux — proves the loader + abi-flavor plumbing
+    // works, which is the path a real Linux ELF off disk will
+    // use once FAT32 exec wiring lands.
+    customos::subsystems::linux::SpawnRing3LinuxElfSmoke();
 
     // Bring up APs. SmpStartAps calls SchedSleepTicks(1) between
     // INIT and SIPI; the dedicated idle task installed at the top

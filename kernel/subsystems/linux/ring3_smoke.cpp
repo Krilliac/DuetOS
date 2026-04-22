@@ -211,6 +211,120 @@ constexpr u64 kMmapBase = 0x0000'7000'0000'0000ull;
 
 } // namespace
 
+namespace
+{
+
+// ELF64 field layout: ehdr (64 B) then one phdr (56 B) then the
+// payload. We cheat on alignment by choosing p_vaddr = 0x400078
+// so the segment's (vaddr % kPageSize) matches p_offset (120) —
+// the ElfLoader validates this equivalence. Keeps the ELF tiny
+// (one 4 KiB page instead of padding to a real 4 KiB offset).
+constexpr u64 kSmokeElfVaddr = 0x0000'0000'0040'0078ull;
+constexpr u64 kSmokeElfPhdrSize = 56;
+constexpr u64 kSmokeElfEhdrSize = 64;
+
+// Build a valid ELF64 image into `out_buf` with the Linux smoke
+// payload inline. Returns total bytes written. Caller sizes the
+// buffer at kSmokeElfEhdrSize + kSmokeElfPhdrSize + sizeof(kPayload)
+// (= 64 + 56 + payload = ~260 bytes for our current payload).
+u64 BuildLinuxElf(u8* out_buf, u64 buf_cap)
+{
+    const u64 total = kSmokeElfEhdrSize + kSmokeElfPhdrSize + sizeof(kPayload);
+    if (buf_cap < total)
+    {
+        return 0;
+    }
+    // Zero everything first so reserved fields / e_flags read as 0.
+    for (u64 i = 0; i < total; ++i)
+        out_buf[i] = 0;
+
+    auto put_u16 = [&](u64 off, u16 v)
+    {
+        out_buf[off + 0] = static_cast<u8>(v);
+        out_buf[off + 1] = static_cast<u8>(v >> 8);
+    };
+    auto put_u32 = [&](u64 off, u32 v)
+    {
+        out_buf[off + 0] = static_cast<u8>(v);
+        out_buf[off + 1] = static_cast<u8>(v >> 8);
+        out_buf[off + 2] = static_cast<u8>(v >> 16);
+        out_buf[off + 3] = static_cast<u8>(v >> 24);
+    };
+    auto put_u64 = [&](u64 off, u64 v)
+    {
+        for (u64 i = 0; i < 8; ++i)
+            out_buf[off + i] = static_cast<u8>(v >> (i * 8));
+    };
+
+    // --- ehdr ---
+    out_buf[0] = 0x7F;
+    out_buf[1] = 'E';
+    out_buf[2] = 'L';
+    out_buf[3] = 'F';
+    out_buf[4] = 2; // EI_CLASS = ELFCLASS64
+    out_buf[5] = 1; // EI_DATA = ELFDATA2LSB
+    out_buf[6] = 1; // EI_VERSION = EV_CURRENT
+    out_buf[7] = 0; // EI_OSABI = ELFOSABI_SYSV — our loader doesn't check
+    // bytes 8..15 already zeroed.
+    put_u16(16, 2);                 // e_type = ET_EXEC
+    put_u16(18, 0x3E);              // e_machine = EM_X86_64
+    put_u32(20, 1);                 // e_version = EV_CURRENT
+    put_u64(24, kSmokeElfVaddr);    // e_entry — points at payload byte 0
+    put_u64(32, kSmokeElfEhdrSize); // e_phoff = 64
+    put_u64(40, 0);                 // e_shoff = 0, no sections
+    put_u32(48, 0);                 // e_flags
+    put_u16(52, static_cast<u16>(kSmokeElfEhdrSize));
+    put_u16(54, static_cast<u16>(kSmokeElfPhdrSize));
+    put_u16(56, 1); // e_phnum = 1
+    put_u16(58, 0); // e_shentsize
+    put_u16(60, 0); // e_shnum
+    put_u16(62, 0); // e_shstrndx
+
+    // --- phdr[0] at offset 64 ---
+    const u64 phdr = kSmokeElfEhdrSize;
+    const u64 p_offset = kSmokeElfEhdrSize + kSmokeElfPhdrSize; // = 120
+    put_u32(phdr + 0, 1);                                       // p_type = PT_LOAD
+    put_u32(phdr + 4, 0x05);                                    // p_flags = PF_R | PF_X — RX code
+    put_u64(phdr + 8, p_offset);
+    put_u64(phdr + 16, kSmokeElfVaddr);
+    put_u64(phdr + 24, kSmokeElfVaddr);
+    put_u64(phdr + 32, sizeof(kPayload)); // p_filesz
+    put_u64(phdr + 40, sizeof(kPayload)); // p_memsz
+    put_u64(phdr + 48, 0x1000);           // p_align
+    // 120 % 0x1000 == 120 and 0x400078 % 0x1000 == 120, so the
+    // ElfLoader's "p_offset % p_align == p_vaddr % p_align" check
+    // passes.
+
+    // --- payload at offset 120 ---
+    for (u64 i = 0; i < sizeof(kPayload); ++i)
+        out_buf[p_offset + i] = kPayload[i];
+
+    return total;
+}
+
+} // namespace
+
+void SpawnRing3LinuxElfSmoke()
+{
+    KLOG_TRACE_SCOPE("linux/smoke", "SpawnRing3LinuxElfSmoke");
+
+    // Construct the ELF in a static scratch buffer. One call at a
+    // time (boot-sequence-only); SpawnElfLinux copies the bytes it
+    // needs into user pages, so the buffer can be reused after.
+    static u8 scratch[512];
+    const u64 n = BuildLinuxElf(scratch, sizeof(scratch));
+    if (n == 0)
+    {
+        core::Panic("linux/smoke", "BuildLinuxElf scratch too small");
+    }
+    const u64 pid = core::SpawnElfLinux("linux-elf-smoke", scratch, n, core::CapSetEmpty(), fs::RamfsSandboxRoot(),
+                                        /*frame_budget=*/16, core::kTickBudgetSandbox);
+    if (pid == 0)
+    {
+        arch::SerialWrite("[linux] SpawnElfLinux FAILED for linux-elf-smoke\n");
+    }
+}
+
 void SpawnRing3LinuxSmoke()
 {
     KLOG_TRACE_SCOPE("linux/smoke", "SpawnRing3LinuxSmoke");

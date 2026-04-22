@@ -29,4 +29,11 @@ namespace customos::subsystems::linux
 /// switches to it and the syscall reaches SchedExit.
 void SpawnRing3LinuxSmoke();
 
+/// Spawn the same payload wrapped in a minimal ELF64 and loaded via
+/// core::SpawnElfLinux. Exercises the ElfLoader + SpawnElfLinux path
+/// end-to-end, which is what a real Linux ELF off disk will use
+/// once the FAT32 loader wiring lands. Prints the same "MOK\nhello
+/// linux!\n" to COM1 before exit_group(0x42).
+void SpawnRing3LinuxElfSmoke();
+
 } // namespace customos::subsystems::linux

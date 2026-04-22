@@ -1558,6 +1558,66 @@ u64 SpawnElfFile(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps
     return proc->pid;
 }
 
+u64 SpawnElfLinux(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps, const fs::RamfsNode* root,
+                  u64 frame_budget, u64 tick_budget)
+{
+    using arch::SerialWrite;
+    using arch::SerialWriteHex;
+    using namespace customos::mm;
+
+    if (elf_bytes == nullptr || elf_len == 0 || root == nullptr)
+    {
+        return 0;
+    }
+    AddressSpace* as = AddressSpaceCreate(frame_budget);
+    if (as == nullptr)
+    {
+        return 0;
+    }
+    const ElfLoadResult r = ElfLoad(elf_bytes, elf_len, as);
+    if (!r.ok)
+    {
+        AddressSpaceRelease(as);
+        return 0;
+    }
+    Process* proc = ProcessCreate(name, as, caps, root, r.entry_va, r.stack_va, tick_budget);
+    if (proc == nullptr)
+    {
+        AddressSpaceRelease(as);
+        return 0;
+    }
+    // Flip the ABI flavor + seed Linux heap/mmap anchors. The ELF
+    // loader doesn't know which ABI the image targets; we decide
+    // here. kAbiLinux steers this task's `syscall` instructions
+    // through subsystems::linux::LinuxSyscallDispatch instead of
+    // the native int-0x80 table.
+    //
+    // brk base: well past any reasonable static ELF's highest
+    // PT_LOAD. Our smokes load at 0x400078; 256 MiB past that is
+    // plenty of headroom without poking into the 0x7fffe000
+    // stack. A future loader pass will compute this from the
+    // max p_vaddr+p_memsz; v0 hard-codes.
+    //
+    // mmap cursor: 112 TiB up — well clear of everything else
+    // in the user half.
+    proc->abi_flavor = kAbiLinux;
+    proc->linux_brk_base = 0x0000'0000'1000'0000ull; // 256 MiB
+    proc->linux_brk_current = proc->linux_brk_base;
+    proc->linux_mmap_cursor = 0x0000'7000'0000'0000ull;
+
+    SerialWrite("[ring3] linux elf spawn name=\"");
+    SerialWrite(name);
+    SerialWrite("\" pid=");
+    SerialWriteHex(proc->pid);
+    SerialWrite(" entry=");
+    SerialWriteHex(r.entry_va);
+    SerialWrite(" stack_top=");
+    SerialWriteHex(r.stack_top);
+    SerialWrite("\n");
+    sched::SchedCreateUser(&Ring3UserEntry, nullptr, name, proc);
+    return proc->pid;
+}
+
 // PE twin of SpawnElfFile. Parses a PE/COFF image with the
 // v0 loader, maps its sections + a stack page into a fresh
 // AddressSpace, and enqueues a ring-3 task to enter it. The
