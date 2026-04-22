@@ -183,6 +183,35 @@ RandomStats RandomStatsRead()
     return g_stats;
 }
 
+Uuid UuidV4()
+{
+    Uuid u;
+    RandomFillBytes(u.bytes, 16);
+    // Version 4 — high nibble of byte 6 = 0100.
+    u.bytes[6] = u8((u.bytes[6] & 0x0F) | 0x40);
+    // Variant 10 — high two bits of byte 8 = 10.
+    u.bytes[8] = u8((u.bytes[8] & 0x3F) | 0x80);
+    return u;
+}
+
+void UuidFormat(const Uuid& u, char* out)
+{
+    if (out == nullptr)
+        return;
+    static const char hex[] = "0123456789abcdef";
+    // Dash positions in the canonical form:
+    //   8-4-4-4-12 chars = dashes after bytes 3, 5, 7, 9 (1-based index).
+    u64 pos = 0;
+    for (u64 i = 0; i < 16; ++i)
+    {
+        out[pos++] = hex[(u.bytes[i] >> 4) & 0x0F];
+        out[pos++] = hex[u.bytes[i] & 0x0F];
+        if (i == 3 || i == 5 || i == 7 || i == 9)
+            out[pos++] = '-';
+    }
+    out[pos] = '\0';
+}
+
 void RandomSelfTest()
 {
     u8 buf[64];
@@ -217,6 +246,24 @@ void RandomSelfTest()
         arch::SerialWriteHex(buf[i]);
     }
     arch::SerialWrite(")\n");
+
+    // UUID self-test: generate one, format it, verify the
+    // version + variant bits are set correctly per RFC 4122.
+    const Uuid u = UuidV4();
+    char uuid_str[37];
+    UuidFormat(u, uuid_str);
+    const u8 ver = (u.bytes[6] >> 4) & 0x0F;
+    const u8 var = (u.bytes[8] >> 6) & 0x03;
+    if (ver != 4 || var != 0b10)
+    {
+        Log(LogLevel::Warn, "core/random", "UUID self-test failed — version/variant bits wrong");
+    }
+    else
+    {
+        arch::SerialWrite("[uuid] v4 self-test OK — ");
+        arch::SerialWrite(uuid_str);
+        arch::SerialWrite(" (version=4 variant=10)\n");
+    }
 }
 
 } // namespace customos::core

@@ -71,4 +71,31 @@ RandomStats RandomStatsRead();
 /// isn't all-zeros / all-0xFF / trivially monotonic. Logs result.
 void RandomSelfTest();
 
+// -------------------------------------------------------------------
+// UUID v4 — RFC 4122 §4.4 "random-based" UUID.
+//
+// 128 bits of randomness with two bytes tweaked:
+//   byte 6, bits 7..4 = 0100  (version 4)
+//   byte 8, bits 7..6 = 10    (variant = RFC 4122)
+// Remaining 122 bits come from the entropy pool. Collision
+// probability for 10^9 UUIDs is around 10^-20.
+// -------------------------------------------------------------------
+
+/// 16-byte storage shape. No namespacing — byte layout is network-
+/// byte-order per RFC 4122 (big-endian fields on the wire; we
+/// store in-memory as raw bytes and format at print time).
+struct Uuid
+{
+    u8 bytes[16];
+};
+
+/// Generate a v4 UUID from the entropy pool. Safe to call from
+/// any context once RandomInit has run.
+Uuid UuidV4();
+
+/// Format a UUID as the canonical 36-char lowercase string
+/// `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` into `out`. `out` must
+/// have capacity for at least 37 bytes (36 chars + NUL).
+void UuidFormat(const Uuid& uuid, char* out);
+
 } // namespace customos::core

@@ -1242,7 +1242,7 @@ static const char* const kCommandSet[] = {
     "metrics", "trace",   "read",     "guard",    "top",      "fatcat",    "fatls",      "fatwrite", "fatappend",
     "fatnew",  "fatrm",   "fattrunc", "fatmkdir", "fatrmdir", "linuxexec", "translate",  "smbios",   "power",
     "battery", "thermal", "temp",     "gpu",      "lsgpu",    "nic",       "lsnic",      "ip",       "arp",
-    "ipv4",
+    "ipv4",    "uuid",    "uuidgen",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -3702,6 +3702,34 @@ void CmdRand(u32 argc, char** argv)
     }
 }
 
+void CmdUuid(u32 argc, char** argv)
+{
+    // Default: one UUID. `uuid N` prints N (cap 20).
+    u32 n = 1;
+    if (argc >= 2)
+    {
+        n = 0;
+        for (u32 i = 0; argv[1][i] != '\0'; ++i)
+        {
+            if (argv[1][i] < '0' || argv[1][i] > '9')
+            {
+                ConsoleWriteln("UUID: BAD COUNT");
+                return;
+            }
+            n = n * 10 + u32(argv[1][i] - '0');
+        }
+    }
+    if (n > 20)
+        n = 20;
+    char buf[37];
+    for (u32 i = 0; i < n; ++i)
+    {
+        const auto u = customos::core::UuidV4();
+        customos::core::UuidFormat(u, buf);
+        ConsoleWriteln(buf);
+    }
+}
+
 void CmdFlushTlb()
 {
     // Reload CR3 with its current value — the classic x86_64
@@ -5765,6 +5793,11 @@ void Dispatch(char* line)
     if (StrEq(cmd, "ipv4"))
     {
         CmdIpv4();
+        return;
+    }
+    if (StrEq(cmd, "uuid") || StrEq(cmd, "uuidgen"))
+    {
+        CmdUuid(argc, argv);
         return;
     }
     if (StrEq(cmd, "logcolor"))
