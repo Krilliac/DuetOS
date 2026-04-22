@@ -104,6 +104,7 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     net/stack.cpp
     sched/context_switch.S
     sched/sched.cpp
+    security/attack_sim.cpp
     security/guard.cpp
     sync/spinlock.cpp
 )
@@ -317,6 +318,19 @@ option(CUSTOMOS_CANARY_DEMO "Insert a deliberate stack smash at end of kernel_ma
 if(CUSTOMOS_CANARY_DEMO)
     target_compile_definitions(customos-kernel          PRIVATE CUSTOMOS_CANARY_DEMO=1)
     target_compile_definitions(customos-kernel-stage1   PRIVATE CUSTOMOS_CANARY_DEMO=1)
+endif()
+
+# Red-team attack-simulation flag. Runs the AttackSim suite once
+# at the end of kernel_main, exercising every runtime-checker
+# detector by performing the attack a rootkit would and
+# verifying the detector catches it. OFF for normal boot — the
+# simulations escalate the security guard to Enforce mode and
+# the block write-guard to Deny, which would poison every
+# subsequent image load / sensitive-LBA write for the session.
+option(CUSTOMOS_ATTACK_SIM "Run the AttackSim red-team suite at end of kernel_main" OFF)
+if(CUSTOMOS_ATTACK_SIM)
+    target_compile_definitions(customos-kernel          PRIVATE CUSTOMOS_ATTACK_SIM=1)
+    target_compile_definitions(customos-kernel-stage1   PRIVATE CUSTOMOS_ATTACK_SIM=1)
 endif()
 
 

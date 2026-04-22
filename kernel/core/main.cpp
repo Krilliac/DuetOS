@@ -64,6 +64,7 @@
 #include "../mm/multiboot2.h"
 #include "../mm/paging.h"
 #include "../sched/sched.h"
+#include "../security/attack_sim.h"
 #include "../security/guard.h"
 
 /*
@@ -1647,6 +1648,18 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // doesn't (it ends in IdleLoop), so the epilogue-check would
     // never run if we inlined the smash here.
     CanarySmashDemo();
+#endif
+
+#ifdef CUSTOMOS_ATTACK_SIM
+    // Compile-time-gated red-team attack suite. Runs five
+    // in-kernel attack scenarios (IDT hijack, GDT swap, LSTAR
+    // syscall-hook, canary defang, LBA 0 bootkit write) and
+    // verifies the runtime invariant checker catches each one.
+    // OFF in normal builds because the simulations escalate the
+    // guard to Enforce + blockguard to Deny — stateful
+    // side-effects that would poison subsequent image loads /
+    // sensitive-LBA writes for the rest of the boot.
+    customos::security::AttackSimRun();
 #endif
 
 #ifdef CUSTOMOS_PANIC_DEMO

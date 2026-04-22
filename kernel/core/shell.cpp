@@ -32,6 +32,7 @@
 #include "../mm/kheap.h"
 #include "../mm/paging.h"
 #include "../sched/sched.h"
+#include "../security/attack_sim.h"
 #include "../security/guard.h"
 #include "elf_loader.h"
 #include "klog.h"
@@ -297,6 +298,7 @@ void CmdHelp()
     ConsoleWriteln("  IPV4         IPV4 RX COUNTERS");
     ConsoleWriteln("  HEALTH       RUN RUNTIME INVARIANT SCAN (HEAP/FRAMES/SCHED/CRX)");
     ConsoleWriteln("  UUID [N]     GENERATE N V4 UUIDS FROM THE ENTROPY POOL");
+    ConsoleWriteln("  ATTACKSIM    RUN RED-TEAM ATTACK SUITE (IDT/GDT/LSTAR/CANARY/LBA0)");
     ConsoleWriteln("");
     ConsoleWriteln("RUNTIME CONTROL:");
     ConsoleWriteln("  LOGLEVEL [L] GET / SET KLOG THRESHOLD (D/I/W/E)");
@@ -1245,7 +1247,7 @@ static const char* const kCommandSet[] = {
     "metrics", "trace",   "read",     "guard",    "top",      "fatcat",    "fatls",      "fatwrite", "fatappend",
     "fatnew",  "fatrm",   "fattrunc", "fatmkdir", "fatrmdir", "linuxexec", "translate",  "smbios",   "power",
     "battery", "thermal", "temp",     "gpu",      "lsgpu",    "nic",       "lsnic",      "ip",       "arp",
-    "ipv4",    "uuid",    "uuidgen",  "health",   "checkup",
+    "ipv4",    "uuid",    "uuidgen",  "health",   "checkup",  "attacksim", "redteam",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -3742,6 +3744,28 @@ void CmdRand(u32 argc, char** argv)
     }
 }
 
+void CmdAttackSim()
+{
+    customos::security::AttackSimRun();
+    const auto& s = customos::security::AttackSimSummary();
+    ConsoleWrite("ATTACK SIM COMPLETE: ");
+    WriteU64Dec(s.passed);
+    ConsoleWrite(" passed, ");
+    WriteU64Dec(s.failed);
+    ConsoleWrite(" failed, ");
+    WriteU64Dec(s.skipped);
+    ConsoleWriteln(" skipped");
+    for (u64 i = 0; i < s.count; ++i)
+    {
+        ConsoleWrite("  [");
+        ConsoleWrite(customos::security::AttackOutcomeName(s.results[i].outcome));
+        ConsoleWrite("] ");
+        ConsoleWrite(s.results[i].name);
+        ConsoleWrite(" -> ");
+        ConsoleWriteln(s.results[i].detector);
+    }
+}
+
 void CmdUuid(u32 argc, char** argv)
 {
     // Default: one UUID. `uuid N` prints N (cap 20).
@@ -5843,6 +5867,11 @@ void Dispatch(char* line)
     if (StrEq(cmd, "uuid") || StrEq(cmd, "uuidgen"))
     {
         CmdUuid(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "attacksim") || StrEq(cmd, "redteam"))
+    {
+        CmdAttackSim();
         return;
     }
     if (StrEq(cmd, "logcolor"))
