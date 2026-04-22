@@ -64,6 +64,7 @@ constexpr u8 kFisH2dRegister = 0x27;
 
 constexpr u8 kAtaCmdIdentify = 0xEC;
 constexpr u8 kAtaCmdReadDmaExt = 0x25;
+constexpr u8 kAtaCmdWriteDmaExt = 0x35;
 
 constexpr u32 kSectorSize = 512;      // v1: hard-assume 512 B sectors.
 constexpr u32 kMaxSectorsPerXfer = 8; // 4 KiB — fits one frame.
@@ -353,10 +354,39 @@ i32 AhciBlockRead(void* cookie, u64 lba, u32 count, void* buf)
     return 0;
 }
 
-// Read-only in v1.
+i32 AhciBlockWrite(void* cookie, u64 lba, u32 count, const void* buf)
+{
+    auto* p = static_cast<Port*>(cookie);
+    if (!p->online)
+        return -1;
+    if (count == 0 || count > kMaxSectorsPerXfer)
+        return -1;
+    if (lba + count > p->sector_count)
+        return -1;
+
+    // Mirror of read path: translate caller buffer, issue slot 0
+    // with WRITE_DMA_EXT + the H2D W bit. BuildCmd already toggles
+    // the command-header H/W bit when dir_write=true; the FIS body
+    // is identical to a read.
+    const mm::PhysAddr buf_phys = mm::VirtToPhys(const_cast<void*>(buf));
+    if (buf_phys == 0)
+    {
+        core::Log(core::LogLevel::Error, "drivers/ahci", "write: VirtToPhys returned 0");
+        return -1;
+    }
+    BuildCmd(*p, kAtaCmdWriteDmaExt, lba, static_cast<u16>(count), buf_phys, count * kSectorSize,
+             /*dir_write=*/true);
+    if (!IssueSlot0(p->regs))
+    {
+        core::LogWithValue(core::LogLevel::Error, "drivers/ahci", "write: slot0 failed lba=", lba);
+        return -1;
+    }
+    return 0;
+}
+
 constexpr BlockOps kAhciOps{
     .read = AhciBlockRead,
-    .write = nullptr,
+    .write = AhciBlockWrite,
 };
 
 void NamePort(Port& p, u32 idx)

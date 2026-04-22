@@ -127,6 +127,30 @@ using ReadChunkCb = bool (*)(const u8* data, u64 len, void* ctx);
 /// walk; false on I/O error.
 bool Fat32ReadFileStream(const Volume* v, const DirEntry* e, ReadChunkCb cb, void* ctx);
 
+/// Overwrite `len` bytes at byte offset `offset` inside the file
+/// described by `e`. NO size change, NO new cluster allocation —
+/// `offset + len` MUST be <= `e->size_bytes`. Returns the number
+/// of bytes written (== len on success), or -1 on validation /
+/// I/O error.
+///
+/// Implementation:
+///   - Walks the cluster chain from `first_cluster` to find the
+///     starting cluster for `offset`.
+///   - For any cluster whose byte range is fully inside [offset,
+///     offset+len), writes the caller's buffer directly (full-
+///     cluster transfer, no read-modify-write).
+///   - For partial clusters (head / tail), reads the cluster,
+///     patches the bytes in place, writes back.
+///   - Issues writes through BlockDeviceWrite on the volume's
+///     partition handle. The backing driver (AHCI WRITE_DMA_EXT
+///     today) must be writable; NvmeBlockWrite has always been.
+///
+/// Out of scope in this slice: extending a file, creating a new
+/// file, allocating free clusters, FAT mirror updates for the
+/// allocation-table itself (the only FAT entries we touch are
+/// read-only). FSInfo is not updated.
+i64 Fat32WriteInPlace(const Volume* v, const DirEntry* e, u64 offset, const void* buf, u64 len);
+
 /// Boot-time self-test. Calls `Fat32Probe` on every registered
 /// block device; partitions that aren't FAT32 are expected to fail
 /// and are logged as "not FAT32" (no failure shout). PASS

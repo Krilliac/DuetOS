@@ -641,6 +641,85 @@ i64 Fat32ReadFile(const Volume* v, const DirEntry* e, void* out, u64 max)
     return static_cast<i64>(written);
 }
 
+i64 Fat32WriteInPlace(const Volume* v, const DirEntry* e, u64 offset, const void* buf, u64 len)
+{
+    if (v == nullptr || e == nullptr || buf == nullptr)
+        return -1;
+    if (len == 0)
+        return 0;
+    if (offset > e->size_bytes || offset + len > u64(e->size_bytes))
+        return -1; // write would extend the file; not supported in v0
+    if (e->first_cluster < 2)
+        return -1;
+
+    const u64 cluster_bytes = u64(v->sectors_per_cluster) * u64(v->bytes_per_sector);
+    if (v->sectors_per_cluster > sizeof(g_scratch) / 512)
+        return -1; // cluster wider than scratch page
+    const auto* src = static_cast<const u8*>(buf);
+
+    // Phase 1: walk to the cluster containing `offset`.
+    u32 cluster = e->first_cluster;
+    u64 cluster_idx = offset / cluster_bytes;
+    for (u64 i = 0; i < cluster_idx; ++i)
+    {
+        cluster = ReadFatEntry(*v, cluster);
+        if (cluster < 2 || cluster >= 0x0FFFFFF8u)
+            return -1; // chain ended early — filesystem corrupt
+    }
+
+    u64 written = 0;
+    u64 in_cluster_off = offset - cluster_idx * cluster_bytes;
+
+    // Phase 2: write one cluster at a time. Three cases:
+    //   (a) full cluster — write without read-modify-write
+    //   (b) partial cluster head / tail — read-modify-write via g_scratch
+    while (written < len)
+    {
+        if (cluster < 2 || cluster >= 0x0FFFFFF8u)
+            return -1;
+        const u64 lba = u64(v->data_start_sector) + u64(cluster - 2) * u64(v->sectors_per_cluster);
+        const u64 remain = len - written;
+        const u64 avail = cluster_bytes - in_cluster_off;
+        const u64 chunk = (remain < avail) ? remain : avail;
+
+        if (in_cluster_off == 0 && chunk == cluster_bytes)
+        {
+            // Case (a): full-cluster overwrite. Stage through
+            // scratch (the caller's buffer may not be contiguous
+            // in physical memory — block layer wants a direct-map
+            // alias, which g_scratch always is).
+            for (u64 i = 0; i < chunk; ++i)
+                g_scratch[i] = src[written + i];
+            if (drivers::storage::BlockDeviceWrite(v->block_handle, lba, v->sectors_per_cluster, g_scratch) != 0)
+                return -1;
+        }
+        else
+        {
+            // Case (b): read-modify-write. Read cluster, patch the
+            // in-range bytes, write back. Only touches [in_cluster_off,
+            // in_cluster_off+chunk) — the rest stays whatever the
+            // filesystem already had.
+            if (drivers::storage::BlockDeviceRead(v->block_handle, lba, v->sectors_per_cluster, g_scratch) != 0)
+                return -1;
+            for (u64 i = 0; i < chunk; ++i)
+                g_scratch[in_cluster_off + i] = src[written + i];
+            if (drivers::storage::BlockDeviceWrite(v->block_handle, lba, v->sectors_per_cluster, g_scratch) != 0)
+                return -1;
+        }
+
+        written += chunk;
+        if (written == len)
+            break;
+        // Advance to the next cluster. g_scratch gets clobbered by
+        // ReadFatEntry, which is fine — we've already issued the
+        // write for this cluster.
+        cluster = ReadFatEntry(*v, cluster);
+        in_cluster_off = 0;
+    }
+
+    return static_cast<i64>(written);
+}
+
 bool Fat32ReadFileStream(const Volume* v, const DirEntry* e, ReadChunkCb cb, void* ctx)
 {
     if (v == nullptr || e == nullptr || cb == nullptr)
@@ -890,6 +969,43 @@ void Fat32SelfTest()
         return;
     }
     SerialWrite("[fs/fat32] self-test OK (streamed /BIG.TXT 6000 B across clusters)\n");
+
+    // Fifth phase: in-place write. Take HELLO.TXT (body "hello from
+    // fat32\n"), overwrite bytes [0..5) from "hello" to "HELLO",
+    // read back, then restore. Round-trip verifies the whole chain:
+    //   Fat32WriteInPlace -> BlockDeviceWrite -> AHCI/NVMe WRITE_DMA
+    //   -> re-read -> byte-compare -> restore.
+    // Volume 0 picked because we already verified HELLO.TXT there.
+    const DirEntry* hello2 = Fat32FindInRoot(v0, "HELLO.TXT");
+    if (hello2 == nullptr)
+    {
+        SerialWrite("[fs/fat32] self-test WARN: HELLO.TXT missing for write test\n");
+        return;
+    }
+    const u8 upper[] = {'H', 'E', 'L', 'L', 'O'};
+    const u8 lower[] = {'h', 'e', 'l', 'l', 'o'};
+    if (Fat32WriteInPlace(v0, hello2, 0, upper, 5) != 5)
+    {
+        SerialWrite("[fs/fat32] self-test FAILED: HELLO.TXT write returned wrong count\n");
+        return;
+    }
+    VZero(buf, sizeof(buf));
+    const i64 n4 = Fat32ReadFile(v0, hello2, buf, sizeof(buf));
+    if (n4 != 17 || buf[0] != 'H' || buf[1] != 'E' || buf[2] != 'L' || buf[3] != 'L' || buf[4] != 'O' || buf[5] != ' ')
+    {
+        SerialWrite("[fs/fat32] self-test FAILED: HELLO.TXT read-back after write mismatch\n");
+        return;
+    }
+    // Restore to the original body so subsequent re-runs see a
+    // clean fixture. Not strictly necessary (the image is rebuilt
+    // every run by make-gpt-image.py) but makes the on-disk state
+    // match the image-builder's output at test end.
+    if (Fat32WriteInPlace(v0, hello2, 0, lower, 5) != 5)
+    {
+        SerialWrite("[fs/fat32] self-test FAILED: HELLO.TXT restore write failed\n");
+        return;
+    }
+    SerialWrite("[fs/fat32] self-test OK (HELLO.TXT in-place round-trip verified)\n");
 }
 
 } // namespace customos::fs::fat32

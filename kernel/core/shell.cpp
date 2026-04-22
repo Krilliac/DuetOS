@@ -303,6 +303,7 @@ void CmdHelp()
     ConsoleWriteln("  TOP          PER-TASK CPU% + SYSTEM IDLE FRACTION");
     ConsoleWriteln("  FATLS [VOL]  LIST ROOT DIR OF FAT32 VOLUME (default vol 0)");
     ConsoleWriteln("  FATCAT [VOL] NAME  READ FILE FROM FAT32 VOLUME TO CONSOLE");
+    ConsoleWriteln("  FATWRITE PATH OFF BYTES  OVERWRITE EXISTING FILE BYTES IN-PLACE");
     ConsoleWriteln("  FREE         MEMORY USAGE (PHYS + HEAP)");
     ConsoleWriteln("  PS           LIST EVERY SCHEDULER TASK");
     ConsoleWriteln("  SPAWN KIND   LAUNCH A RING-3 TASK (hello/sandbox/jail/...)");
@@ -1204,16 +1205,17 @@ void CmdFind(u32 argc, char** argv)
 // dispatched in Dispatch — keeping the two in sync is the
 // price of not having reflection.
 static const char* const kCommandSet[] = {
-    "help",     "about",      "version",  "clear",    "uptime",   "date",     "windows",  "mode",    "ls",     "cat",
-    "touch",    "rm",         "echo",     "cp",       "mv",       "wc",       "head",     "tail",    "dmesg",  "stats",
-    "mem",      "history",    "set",      "unset",    "env",      "alias",    "unalias",  "sysinfo", "source", "man",
-    "grep",     "find",       "time",     "which",    "seq",      "sort",     "uniq",     "cpuid",   "cr",     "rflags",
-    "tsc",      "hpet",       "ticks",    "msr",      "lapic",    "smp",      "lspci",    "heap",    "paging", "fb",
-    "kbdstats", "mousestats", "loglevel", "logcolor", "getenv",   "yield",    "reboot",   "halt",    "uname",  "whoami",
-    "hostname", "pwd",        "true",     "false",    "mount",    "lsmod",    "lsblk",    "lsgpt",   "free",   "ps",
-    "spawn",    "readelf",    "hexdump",  "stat",     "basename", "dirname",  "cal",      "sleep",   "reset",  "tac",
-    "nl",       "rev",        "expr",     "color",    "rand",     "flushtlb", "checksum", "repeat",  "kill",   "exec",
-    "metrics",  "trace",      "read",     "guard",    "top",      "fatcat",   "fatls",
+    "help",    "about",  "version",  "clear",   "uptime",   "date",     "windows",    "mode",     "ls",
+    "cat",     "touch",  "rm",       "echo",    "cp",       "mv",       "wc",         "head",     "tail",
+    "dmesg",   "stats",  "mem",      "history", "set",      "unset",    "env",        "alias",    "unalias",
+    "sysinfo", "source", "man",      "grep",    "find",     "time",     "which",      "seq",      "sort",
+    "uniq",    "cpuid",  "cr",       "rflags",  "tsc",      "hpet",     "ticks",      "msr",      "lapic",
+    "smp",     "lspci",  "heap",     "paging",  "fb",       "kbdstats", "mousestats", "loglevel", "logcolor",
+    "getenv",  "yield",  "reboot",   "halt",    "uname",    "whoami",   "hostname",   "pwd",      "true",
+    "false",   "mount",  "lsmod",    "lsblk",   "lsgpt",    "free",     "ps",         "spawn",    "readelf",
+    "hexdump", "stat",   "basename", "dirname", "cal",      "sleep",    "reset",      "tac",      "nl",
+    "rev",     "expr",   "color",    "rand",    "flushtlb", "checksum", "repeat",     "kill",     "exec",
+    "metrics", "trace",  "read",     "guard",   "top",      "fatcat",   "fatls",      "fatwrite",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -2433,6 +2435,78 @@ void CmdFatcat(customos::u32 argc, char** argv)
     {
         ConsoleWriteln("");
     }
+}
+
+void CmdFatwrite(customos::u32 argc, char** argv)
+{
+    // `fatwrite <path> <offset> <bytes>` — overwrite existing file
+    // bytes in-place. `<bytes>` is taken as a literal ASCII string
+    // (joined with spaces if multiple tokens). No size change, no
+    // extension — matches the driver's v0 Fat32WriteInPlace scope.
+    // Handy for demonstrating the write path without a user-space
+    // editor. Destructive: runs directly against sata0p1 / nvme0n1p1.
+    namespace fat = customos::fs::fat32;
+    if (argc < 4)
+    {
+        ConsoleWriteln("FATWRITE: USAGE: FATWRITE PATH OFFSET BYTES...");
+        return;
+    }
+    const char* path = argv[1];
+    customos::u64 off = 0;
+    if (!ParseU64Str(argv[2], &off))
+    {
+        ConsoleWriteln("FATWRITE: BAD OFFSET");
+        return;
+    }
+    // Join argv[3..argc-1] with single spaces to form the payload.
+    static customos::u8 payload[1024];
+    customos::u64 plen = 0;
+    for (u32 i = 3; i < argc; ++i)
+    {
+        if (i > 3 && plen + 1 < sizeof(payload))
+        {
+            payload[plen++] = ' ';
+        }
+        for (u32 j = 0; argv[i][j] != 0 && plen + 1 < sizeof(payload); ++j)
+        {
+            payload[plen++] = static_cast<customos::u8>(argv[i][j]);
+        }
+    }
+    // Fat32LookupPath wants a volume-relative path; our shell sniff
+    // expects a /fat-prefixed one. Accept either form here for
+    // operator convenience.
+    const char* leaf = FatLeaf(path);
+    if (leaf == nullptr)
+        leaf = (path[0] == '/') ? path + 1 : path;
+    const fat::Volume* v = fat::Fat32Volume(0);
+    if (v == nullptr)
+    {
+        ConsoleWriteln("FATWRITE: FAT32 NOT MOUNTED");
+        return;
+    }
+    fat::DirEntry entry;
+    if (!fat::Fat32LookupPath(v, leaf, &entry))
+    {
+        ConsoleWrite("FATWRITE: NO SUCH FILE: ");
+        ConsoleWriteln(path);
+        return;
+    }
+    if (entry.attributes & 0x10)
+    {
+        ConsoleWriteln("FATWRITE: PATH IS A DIRECTORY");
+        return;
+    }
+    const customos::i64 rc = fat::Fat32WriteInPlace(v, &entry, off, payload, plen);
+    if (rc < 0)
+    {
+        ConsoleWriteln("FATWRITE: WRITE FAILED (offset+len > size? backend RO?)");
+        return;
+    }
+    ConsoleWrite("FATWRITE: WROTE ");
+    WriteU64Dec(static_cast<customos::u64>(rc));
+    ConsoleWrite(" BYTES AT OFFSET ");
+    WriteU64Dec(off);
+    ConsoleWriteln("");
 }
 
 void CmdRead(customos::u32 argc, char** argv)
@@ -5076,6 +5150,11 @@ void Dispatch(char* line)
     if (StrEq(cmd, "fatcat"))
     {
         CmdFatcat(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "fatwrite"))
+    {
+        CmdFatwrite(argc, argv);
         return;
     }
     if (StrEq(cmd, "free"))
