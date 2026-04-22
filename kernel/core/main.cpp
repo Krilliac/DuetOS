@@ -1,12 +1,14 @@
 #include "types.h"
 #include "../acpi/acpi.h"
 #include "../arch/x86_64/cpu.h"
+#include "../arch/x86_64/cpu_info.h"
 #include "../arch/x86_64/gdt.h"
 #include "../arch/x86_64/hpet.h"
 #include "../arch/x86_64/idt.h"
 #include "../arch/x86_64/ioapic.h"
 #include "../arch/x86_64/lapic.h"
 #include "../arch/x86_64/pic.h"
+#include "../arch/x86_64/rtc.h"
 #include "../arch/x86_64/serial.h"
 #include "../arch/x86_64/smp.h"
 #include "../arch/x86_64/timer.h"
@@ -210,6 +212,9 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     {
         SerialWrite("[boot] WARNING: unexpected boot magic.\n");
     }
+
+    SerialWrite("[boot] Probing CPU features.\n");
+    customos::arch::CpuInfoProbe();
 
     SerialWrite("[boot] Installing kernel GDT.\n");
     GdtInit();
@@ -737,6 +742,27 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     SerialWrite("[boot] Bringing up HPET (if present).\n");
     HpetInit();
     HpetSelfTest();
+
+    // Sample the CMOS RTC once at boot so the wall-clock time
+    // is visible in the boot log. A future slice wires this
+    // into the VFS stat path + Win32 GetSystemTimeAsFileTime.
+    {
+        customos::arch::RtcTime t = {};
+        customos::arch::RtcRead(&t);
+        SerialWrite("[rtc] wall clock ");
+        SerialWriteHex(t.year);
+        SerialWrite("-");
+        SerialWriteHex(t.month);
+        SerialWrite("-");
+        SerialWriteHex(t.day);
+        SerialWrite(" ");
+        SerialWriteHex(t.hour);
+        SerialWrite(":");
+        SerialWriteHex(t.minute);
+        SerialWrite(":");
+        SerialWriteHex(t.second);
+        SerialWrite(" (UTC)\n");
+    }
 
     SerialWrite("[boot] Installing BSP per-CPU struct.\n");
     customos::cpu::PerCpuInitBsp();

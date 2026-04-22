@@ -85,6 +85,13 @@ expected=(
     # would mean the iostream stubs or the proc-env pipeline
     # got broken.
     "Windows Kill "
+    # CPU probe: every machine must produce a vendor + feature
+    # list. QEMU TCG identifies as AuthenticAMD or GenuineIntel.
+    "[cpu] vendor=\""
+    "[cpu] features:"
+    # RTC readable at boot. Wall-clock is non-zero on any live
+    # machine; regression would mean CMOS access broke.
+    "[rtc] wall clock"
     # GPU discovery: the drivers/gpu slice walks the PCI cache,
     # classifies display controllers by vendor, and maps BAR 0.
     # QEMU's Bochs VGA always appears here — a missing line means

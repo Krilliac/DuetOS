@@ -49,6 +49,7 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     apps/notes.cpp
     arch/x86_64/ap_trampoline.S
     arch/x86_64/boot.S
+    arch/x86_64/cpu_info.cpp
     arch/x86_64/exceptions.S
     arch/x86_64/gdt.cpp
     arch/x86_64/hpet.cpp
