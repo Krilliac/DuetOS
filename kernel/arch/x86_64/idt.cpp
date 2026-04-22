@@ -106,6 +106,11 @@ void IdtSetIst(u8 vector, u8 ist)
     g_idt[vector].ist = static_cast<u8>(ist & 0x7);
 }
 
+u8* IdtRawBase()
+{
+    return reinterpret_cast<u8*>(g_idt);
+}
+
 u64 IdtHash()
 {
     // FNV-1a over the raw IDT bytes. 4096 bytes -> ~1 µs per

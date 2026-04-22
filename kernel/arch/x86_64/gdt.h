@@ -60,6 +60,12 @@ void GdtInit();
 /// switch as a "modification".
 u64 GdtHash();
 
+/// Raw pointer to the 7-entry GDT. The runtime-checker Heal
+/// path uses it to snapshot + restore the table verbatim when
+/// a descriptor swap is detected. NOT exposed as general API:
+/// writing to this bypasses every safety check GdtInit makes.
+u64* GdtRawBase();
+
 /// Fill the BSP's TSS descriptor + body, then `ltr` the task register.
 /// Must be called after GdtInit (the TSS occupies GDT slots 3-4) and
 /// BEFORE the IDT entries for #DF / #MC / #NMI are patched to reference

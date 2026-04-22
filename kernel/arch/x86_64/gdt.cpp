@@ -194,6 +194,11 @@ void TssSetRsp0(u64 rsp0)
     g_bsp_tss.rsp0 = rsp0;
 }
 
+u64* GdtRawBase()
+{
+    return g_gdt;
+}
+
 u64 GdtHash()
 {
     // FNV-1a over the code/data descriptors, with two

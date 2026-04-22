@@ -53,4 +53,10 @@ void IdtSetIst(u8 vector, u8 ist);
 /// `RuntimeCheckerInit`.
 u64 IdtHash();
 
+/// Raw byte base of the 4096-byte IDT table. The runtime-checker
+/// Heal path uses this to snapshot + restore the table verbatim
+/// when a hijack is detected. Not exposed to general callers —
+/// direct access bypasses IdtSetGate's validation.
+u8* IdtRawBase();
+
 } // namespace customos::arch

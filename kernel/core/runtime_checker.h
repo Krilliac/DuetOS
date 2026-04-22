@@ -163,6 +163,51 @@ enum class HealthIssue : u32
 
 const char* HealthIssueName(HealthIssue i);
 
+// Response policy — what the kernel does when a finding fires.
+//
+// Heal    : Restore the affected state from a golden baseline
+//           the checker captured at init. Log the finding
+//           *and* the heal outcome. Safe only for bytes whose
+//           legitimate value is known, immutable, and
+//           restorable without racing against the hardware
+//           (descriptor tables, syscall MSRs, security CR
+//           bits). An attacker who trips a Heal-tier finding
+//           observes full logging + their corruption rolled
+//           back — they don't get a crash oracle + they don't
+//           get lingering influence on the kernel either.
+//
+// Isolate : Kill the offending task / quarantine the offending
+//           region; kernel keeps running. Used when the
+//           corruption is scoped to one resource (a task's
+//           own kernel stack) and the rest of the kernel is
+//           unaffected.
+//
+// LogOnly : Not safely recoverable in either direction; not
+//           catastrophic enough to warrant a panic. Scan logs,
+//           bumps counters, continues. Operator-facing signal
+//           only. Examples: clock drift, counter regression,
+//           boot-sector hash drift on a disk we can't roll
+//           back from in-kernel.
+//
+// Panic   : Continued execution would accumulate damage or
+//           execute against a structure we fundamentally
+//           can't trust (heap bookkeeping, kernel .text).
+//           Last resort — reached only when Heal fails or the
+//           finding class has no known restoration path.
+enum class HealthResponse : u8
+{
+    Heal = 0,
+    Isolate,
+    LogOnly,
+    Panic,
+};
+
+const char* HealthResponseName(HealthResponse r);
+
+/// The response policy for each finding. Consulted inside
+/// `Report` after counters + logging are updated.
+HealthResponse ResponseFor(HealthIssue issue);
+
 struct HealthReport
 {
     u64 scans_run;

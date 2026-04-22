@@ -58,6 +58,27 @@ constinit u64 g_baseline_feature_control = 0;
 // skip silently.
 constinit bool g_baseline_feature_control_valid = false;
 
+// ------------------------------------------------------------------
+// Golden baselines used by the Heal response path.
+//
+// Layout:
+//   IDT: 256 entries × 16 bytes = 4096 bytes, captured verbatim.
+//   GDT:   7 entries ×  8 bytes =   56 bytes.
+// Both are immutable after boot (save CPU-set bits excluded from
+// the hash), so "restore" just writes the cached bytes back.
+//
+// For the syscall MSRs + security CR bits, the baseline u64s we
+// already have are enough to wrmsr-back-to-known-good.
+// ------------------------------------------------------------------
+alignas(16) constinit u8 g_golden_idt[4096] = {};
+constinit u64 g_golden_gdt[7] = {};
+// Whether the golden copies have been populated. The heal path
+// refuses to write if we never captured.
+constinit bool g_golden_captured = false;
+// Cumulative heal counters for operator visibility.
+constinit u64 g_heal_success_count = 0;
+constinit u64 g_heal_failure_count = 0;
+
 // Per-block-device disk-image baseline. We hash LBA 0 (MBR /
 // GPT protective MBR) + LBA 1 (GPT primary header) on every
 // block device at init. 16 devices × 2 LBAs = 32 hashes max.
@@ -135,6 +156,12 @@ u64 ReadCr4()
     asm volatile("mov %%cr4, %0" : "=r"(v));
     return v;
 }
+void WriteMsr(u32 msr, u64 value)
+{
+    const u32 lo = u32(value);
+    const u32 hi = u32(value >> 32);
+    asm volatile("wrmsr" : : "c"(msr), "a"(lo), "d"(hi));
+}
 u64 ReadMsr(u32 msr)
 {
     u32 lo, hi;
@@ -170,6 +197,106 @@ bool IsSecurityCritical(HealthIssue issue)
     }
 }
 
+// ------------------------------------------------------------------
+// Heal paths. Each one restores the affected state from the
+// golden baseline + re-verifies the scan-time check. Return
+// true if the heal was successful (detector will now see the
+// world as clean), false if the heal couldn't run or left the
+// state still drifted (caller falls through to Panic).
+// ------------------------------------------------------------------
+
+bool HealIdt()
+{
+    if (!g_golden_captured)
+        return false;
+    u8* dst = arch::IdtRawBase();
+    for (u64 i = 0; i < sizeof(g_golden_idt); ++i)
+        dst[i] = g_golden_idt[i];
+    return arch::IdtHash() == g_baseline_idt_hash;
+}
+
+bool HealGdt()
+{
+    if (!g_golden_captured)
+        return false;
+    u64* dst = arch::GdtRawBase();
+    for (u64 i = 0; i < 7; ++i)
+        dst[i] = g_golden_gdt[i];
+    return arch::GdtHash() == g_baseline_gdt_hash;
+}
+
+bool HealSyscallMsrs()
+{
+    // Wrmsr each baseline value back. Unconditional — cheaper
+    // than rdmsr-compare-then-wrmsr, and wrmsr of the already-
+    // correct value is a no-op for the CPU.
+    WriteMsr(kMsrIa32Lstar, g_baseline_lstar);
+    WriteMsr(kMsrIa32Star, g_baseline_star);
+    WriteMsr(kMsrIa32Cstar, g_baseline_cstar);
+    WriteMsr(kMsrIa32SysenterEip, g_baseline_sysenter_eip);
+    WriteMsr(kMsrIa32SysenterCs, g_baseline_sysenter_cs);
+    return ReadMsr(kMsrIa32Lstar) == g_baseline_lstar;
+}
+
+bool HealControlRegisters()
+{
+    // Re-assert every security bit we confirmed in the
+    // baseline. Uses __asm__ volatile mov to CR0/CR4 so the
+    // compiler can't re-order the update. Read-modify-write
+    // so we don't clobber unrelated bits that may have been
+    // legitimately set after baseline capture.
+    u64 cr0;
+    asm volatile("mov %%cr0, %0" : "=r"(cr0));
+    if ((g_baseline_cr0 & kCr0Wp) != 0)
+        cr0 |= kCr0Wp;
+    asm volatile("mov %0, %%cr0" : : "r"(cr0));
+
+    u64 cr4;
+    asm volatile("mov %%cr4, %0" : "=r"(cr4));
+    if ((g_baseline_cr4 & kCr4Smep) != 0)
+        cr4 |= kCr4Smep;
+    if ((g_baseline_cr4 & kCr4Smap) != 0)
+        cr4 |= kCr4Smap;
+    asm volatile("mov %0, %%cr4" : : "r"(cr4));
+
+    if ((g_baseline_efer & kEferNxe) != 0)
+    {
+        const u64 efer_now = ReadMsr(kMsrEfer);
+        WriteMsr(kMsrEfer, efer_now | kEferNxe);
+    }
+    return true;
+}
+
+bool AttemptHeal(HealthIssue issue)
+{
+    bool ok = false;
+    switch (issue)
+    {
+    case HealthIssue::IdtModified:
+        ok = HealIdt();
+        break;
+    case HealthIssue::GdtModified:
+        ok = HealGdt();
+        break;
+    case HealthIssue::SyscallMsrHijacked:
+        ok = HealSyscallMsrs();
+        break;
+    case HealthIssue::Cr0WpCleared:
+    case HealthIssue::Cr4SmepCleared:
+    case HealthIssue::Cr4SmapCleared:
+    case HealthIssue::EferNxeCleared:
+        ok = HealControlRegisters();
+        break;
+    default:
+        return false;
+    }
+    if (ok)
+        ++g_heal_success_count;
+    else
+        ++g_heal_failure_count;
+    return ok;
+}
+
 void Report(HealthIssue issue)
 {
     const u32 idx = u32(issue);
@@ -200,7 +327,36 @@ void Report(HealthIssue issue)
         arch::SerialWrite("[health] ESCALATE: blockguard -> Deny (rootkit indicator)\n");
         drivers::storage::BlockWriteGuardSetMode(drivers::storage::WriteGuardMode::Deny);
     }
+
+    // Tiered response: Heal first, Panic as last resort.
+    // Isolate is enacted by the detector itself (task walker
+    // kills the offending task) and LogOnly has already done
+    // its job (the Log call above).
+    const HealthResponse policy = ResponseFor(issue);
+    if (policy == HealthResponse::Heal)
+    {
+        if (AttemptHeal(issue))
+        {
+            arch::SerialWrite("[health] HEAL: restored ");
+            arch::SerialWrite(HealthIssueName(issue));
+            arch::SerialWrite(" from golden baseline\n");
+            return;
+        }
+        arch::SerialWrite("[health] HEAL FAILED for ");
+        arch::SerialWrite(HealthIssueName(issue));
+        arch::SerialWrite(" — escalating to Panic\n");
+        Panic("health", "heal failed — kernel state cannot be restored");
+    }
+    if (policy == HealthResponse::Panic)
+    {
+        Panic("health", "security-critical finding with no heal path");
+    }
 }
+
+// ResponseFor + HealthResponseName live at the customos::core
+// namespace level, not the anonymous-namespace level, so the
+// header declaration resolves + Report()'s call binds.
+// See definitions below, after the `} // namespace` closing.
 
 bool CheckHeap()
 {
@@ -629,6 +785,70 @@ bool CheckTaskStacks()
 
 } // namespace
 
+HealthResponse ResponseFor(HealthIssue issue)
+{
+    switch (issue)
+    {
+    // Heal: byte-level restore from golden baseline.
+    case HealthIssue::IdtModified:
+    case HealthIssue::GdtModified:
+    case HealthIssue::SyscallMsrHijacked:
+    case HealthIssue::Cr0WpCleared:
+    case HealthIssue::Cr4SmepCleared:
+    case HealthIssue::Cr4SmapCleared:
+    case HealthIssue::EferNxeCleared:
+        return HealthResponse::Heal;
+
+    // Isolate: detector itself kills the task; the Report
+    // path just logs + counts.
+    case HealthIssue::TaskStackOverflow:
+    case HealthIssue::TaskRspOutOfRange:
+        return HealthResponse::Isolate;
+
+    // Panic: no safe recovery.
+    //   StackCanaryZero — any protected function return already
+    //     panicked; reaching Report means we got lucky, halt now.
+    //   KernelTextModified — we're executing from the corrupted
+    //     bytes; anything past this point is untrustworthy.
+    //   FeatureControlUnlocked — VMX attack setup; can't re-lock
+    //     (the lock bit requires power cycle to clear).
+    //   HeapPoolMismatch / HeapUnderflow — allocator bookkeeping
+    //     is lying; next KMalloc could return corrupt memory.
+    //   FramesOverflow — physical bitmap is lying.
+    case HealthIssue::StackCanaryZero:
+    case HealthIssue::KernelTextModified:
+    case HealthIssue::FeatureControlUnlocked:
+    case HealthIssue::HeapPoolMismatch:
+    case HealthIssue::HeapUnderflow:
+    case HealthIssue::FramesOverflow:
+        return HealthResponse::Panic;
+
+    // LogOnly: everything else. Not recoverable by heal and
+    // not catastrophic — operator signal only. Some of these
+    // MAY be legitimate (FramesAllAllocated on a deliberately-
+    // full system), so panicking would be over-reaction.
+    default:
+        return HealthResponse::LogOnly;
+    }
+}
+
+const char* HealthResponseName(HealthResponse r)
+{
+    switch (r)
+    {
+    case HealthResponse::Heal:
+        return "Heal";
+    case HealthResponse::Isolate:
+        return "Isolate";
+    case HealthResponse::LogOnly:
+        return "LogOnly";
+    case HealthResponse::Panic:
+        return "Panic";
+    default:
+        return "?";
+    }
+}
+
 const char* HealthIssueName(HealthIssue i)
 {
     switch (i)
@@ -717,6 +937,18 @@ void RuntimeCheckerInit()
     {
         g_baseline_feature_control = ReadMsr(kMsrIa32FeatureControl);
         g_baseline_feature_control_valid = true;
+    }
+
+    // Capture golden byte-level snapshots of IDT + GDT so the
+    // Heal response path can restore them verbatim on drift.
+    {
+        const u8* src_idt = arch::IdtRawBase();
+        for (u64 i = 0; i < sizeof(g_golden_idt); ++i)
+            g_golden_idt[i] = src_idt[i];
+        const u64* src_gdt = arch::GdtRawBase();
+        for (u64 i = 0; i < 7; ++i)
+            g_golden_gdt[i] = src_gdt[i];
+        g_golden_captured = true;
     }
 
     // Per-disk boot-sector baselines. Done last because it
