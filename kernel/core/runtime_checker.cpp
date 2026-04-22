@@ -189,6 +189,17 @@ void Report(HealthIssue issue)
         arch::SerialWrite("[health] ESCALATE: guard -> Enforce (critical finding)\n");
         security::SetGuardMode(security::Mode::Enforce);
     }
+
+    // Bootkit-specific escalation: any boot-sector drift or
+    // syscall-MSR-hook flips the block-layer write guard from
+    // Advisory to Deny so a subsequent write attempt by the
+    // attacker is refused rather than just logged.
+    if ((issue == HealthIssue::BootSectorModified || issue == HealthIssue::SyscallMsrHijacked) &&
+        drivers::storage::BlockWriteGuardMode() != drivers::storage::WriteGuardMode::Deny)
+    {
+        arch::SerialWrite("[health] ESCALATE: blockguard -> Deny (rootkit indicator)\n");
+        drivers::storage::BlockWriteGuardSetMode(drivers::storage::WriteGuardMode::Deny);
+    }
 }
 
 bool CheckHeap()
@@ -358,10 +369,10 @@ u64 HashSector(const u8* p)
     return h;
 }
 
-// Populate the per-device boot-sector hashes. Called from
-// RuntimeCheckerInit; skip devices that fail to read (e.g.
-// a ramfs-only boot where the "disk" is virtual and might
-// not respond to LBA 0).
+// Populate the per-device boot-sector hashes AND arm the
+// block-layer write guard for the same LBAs so any later write
+// is either logged (Advisory) or refused (Deny). Called from
+// RuntimeCheckerInit.
 void CaptureDiskBaselines()
 {
     const u32 n = drivers::storage::BlockDeviceCount();
@@ -377,7 +388,15 @@ void CaptureDiskBaselines()
                 g_baseline_disk_valid[i][lba] = true;
             }
         }
+        // Arm the write guard. Two rules per device — LBA 0
+        // (MBR / protective MBR) and LBA 1 (GPT primary header).
+        // A future enhancement adds the last two LBAs (GPT
+        // backup header + backup table) once we teach the block
+        // layer how to compute a device's trailing offsets.
+        drivers::storage::BlockWriteGuardAddRule(i, 0, 1, "MBR / protective MBR");
+        drivers::storage::BlockWriteGuardAddRule(i, 1, 1, "GPT primary header");
     }
+    drivers::storage::BlockWriteGuardSetMode(drivers::storage::WriteGuardMode::Advisory);
 }
 
 bool CheckBootSectors()

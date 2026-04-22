@@ -206,6 +206,83 @@ i32 BlockDeviceRead(u32 handle, u64 lba, u32 count, void* buf)
     return d.ops->read(d.cookie, lba, count, buf);
 }
 
+namespace
+{
+
+// Write-guard rule storage. Fixed-capacity array; linear scan
+// on every write is fine because rule-count is tiny (the health
+// subsystem arms LBA 0 + LBA 1 per device = ≤32 rules on a
+// 16-device system).
+struct WriteRule
+{
+    u32 handle; // kBlockHandleInvalid = match every device
+    u64 first_lba;
+    u32 count;
+    const char* tag; // string literal — no lifetime concerns
+    bool valid;
+};
+
+constexpr u64 kMaxWriteRules = 32;
+constinit WriteRule g_write_rules[kMaxWriteRules] = {};
+constinit u64 g_write_rule_count = 0;
+constinit WriteGuardMode g_write_guard_mode = WriteGuardMode::Off;
+constinit u64 g_write_guard_deny_count = 0;
+
+// Returns the first rule that covers any byte of [lba, lba+count)
+// on the given device, or nullptr if none matches.
+const WriteRule* FindMatchingRule(u32 handle, u64 lba, u32 count)
+{
+    for (u64 i = 0; i < g_write_rule_count; ++i)
+    {
+        const WriteRule& r = g_write_rules[i];
+        if (!r.valid)
+            continue;
+        if (r.handle != kBlockHandleInvalid && r.handle != handle)
+            continue;
+        const u64 req_end = lba + count;
+        const u64 rule_end = r.first_lba + r.count;
+        // Overlap if ranges intersect.
+        if (lba < rule_end && r.first_lba < req_end)
+            return &r;
+    }
+    return nullptr;
+}
+
+} // namespace
+
+WriteGuardMode BlockWriteGuardMode()
+{
+    return g_write_guard_mode;
+}
+
+void BlockWriteGuardSetMode(WriteGuardMode m)
+{
+    const WriteGuardMode old = g_write_guard_mode;
+    g_write_guard_mode = m;
+    const char* names[] = {"Off", "Advisory", "Deny"};
+    arch::SerialWrite("[blockguard] mode ");
+    arch::SerialWrite(names[u8(old)]);
+    arch::SerialWrite(" -> ");
+    arch::SerialWrite(names[u8(m)]);
+    arch::SerialWrite("\n");
+}
+
+void BlockWriteGuardAddRule(u32 handle, u64 first_lba, u32 count, const char* tag)
+{
+    if (g_write_rule_count >= kMaxWriteRules)
+    {
+        core::Log(core::LogLevel::Warn, "blockguard", "rule table full — dropping new rule");
+        return;
+    }
+    g_write_rules[g_write_rule_count] = {handle, first_lba, count, (tag != nullptr) ? tag : "(untagged)", true};
+    ++g_write_rule_count;
+}
+
+u64 BlockWriteGuardDenyCount()
+{
+    return g_write_guard_deny_count;
+}
+
 i32 BlockDeviceWrite(u32 handle, u64 lba, u32 count, const void* buf)
 {
     if (!ValidHandle(handle) || buf == nullptr || count == 0)
@@ -215,6 +292,30 @@ i32 BlockDeviceWrite(u32 handle, u64 lba, u32 count, const void* buf)
         return -1;
     if (lba >= d.sector_count || lba + count > d.sector_count)
         return -1;
+
+    // Write-guard consultation. Runs before dispatch so the
+    // backend never sees a denied write.
+    if (g_write_guard_mode != WriteGuardMode::Off)
+    {
+        const WriteRule* r = FindMatchingRule(handle, lba, count);
+        if (r != nullptr)
+        {
+            arch::SerialWrite("[blockguard] write to guarded LBA: dev=");
+            arch::SerialWriteHex(handle);
+            arch::SerialWrite(" lba=");
+            arch::SerialWriteHex(lba);
+            arch::SerialWrite(" count=");
+            arch::SerialWriteHex(count);
+            arch::SerialWrite(" rule=\"");
+            arch::SerialWrite(r->tag);
+            arch::SerialWrite(g_write_guard_mode == WriteGuardMode::Deny ? "\" DENIED\n" : "\" (advisory)\n");
+            if (g_write_guard_mode == WriteGuardMode::Deny)
+            {
+                ++g_write_guard_deny_count;
+                return -1;
+            }
+        }
+    }
     return d.ops->write(d.cookie, lba, count, buf);
 }
 
