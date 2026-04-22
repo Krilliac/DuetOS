@@ -308,6 +308,8 @@ void CmdHelp()
     ConsoleWriteln("  FATNEW NAME [BYTES...]   CREATE NEW FAT32 FILE IN ROOT (8.3 NAME)");
     ConsoleWriteln("  FATRM NAME               DELETE A FAT32 FILE FROM ROOT");
     ConsoleWriteln("  FATTRUNC NAME NEW_SIZE   SHRINK OR ZERO-GROW AN EXISTING FILE");
+    ConsoleWriteln("  FATMKDIR PATH            CREATE A NEW DIRECTORY");
+    ConsoleWriteln("  FATRMDIR PATH            REMOVE AN EMPTY DIRECTORY");
     ConsoleWriteln("  FREE         MEMORY USAGE (PHYS + HEAP)");
     ConsoleWriteln("  PS           LIST EVERY SCHEDULER TASK");
     ConsoleWriteln("  SPAWN KIND   LAUNCH A RING-3 TASK (hello/sandbox/jail/...)");
@@ -1209,18 +1211,18 @@ void CmdFind(u32 argc, char** argv)
 // dispatched in Dispatch — keeping the two in sync is the
 // price of not having reflection.
 static const char* const kCommandSet[] = {
-    "help",    "about",  "version",  "clear",   "uptime",   "date",     "windows",    "mode",     "ls",
-    "cat",     "touch",  "rm",       "echo",    "cp",       "mv",       "wc",         "head",     "tail",
-    "dmesg",   "stats",  "mem",      "history", "set",      "unset",    "env",        "alias",    "unalias",
-    "sysinfo", "source", "man",      "grep",    "find",     "time",     "which",      "seq",      "sort",
-    "uniq",    "cpuid",  "cr",       "rflags",  "tsc",      "hpet",     "ticks",      "msr",      "lapic",
-    "smp",     "lspci",  "heap",     "paging",  "fb",       "kbdstats", "mousestats", "loglevel", "logcolor",
-    "getenv",  "yield",  "reboot",   "halt",    "uname",    "whoami",   "hostname",   "pwd",      "true",
-    "false",   "mount",  "lsmod",    "lsblk",   "lsgpt",    "free",     "ps",         "spawn",    "readelf",
-    "hexdump", "stat",   "basename", "dirname", "cal",      "sleep",    "reset",      "tac",      "nl",
-    "rev",     "expr",   "color",    "rand",    "flushtlb", "checksum", "repeat",     "kill",     "exec",
-    "metrics", "trace",  "read",     "guard",   "top",      "fatcat",   "fatls",      "fatwrite", "fatappend",
-    "fatnew",  "fatrm",  "fattrunc",
+    "help",    "about",  "version",  "clear",    "uptime",   "date",     "windows",    "mode",     "ls",
+    "cat",     "touch",  "rm",       "echo",     "cp",       "mv",       "wc",         "head",     "tail",
+    "dmesg",   "stats",  "mem",      "history",  "set",      "unset",    "env",        "alias",    "unalias",
+    "sysinfo", "source", "man",      "grep",     "find",     "time",     "which",      "seq",      "sort",
+    "uniq",    "cpuid",  "cr",       "rflags",   "tsc",      "hpet",     "ticks",      "msr",      "lapic",
+    "smp",     "lspci",  "heap",     "paging",   "fb",       "kbdstats", "mousestats", "loglevel", "logcolor",
+    "getenv",  "yield",  "reboot",   "halt",     "uname",    "whoami",   "hostname",   "pwd",      "true",
+    "false",   "mount",  "lsmod",    "lsblk",    "lsgpt",    "free",     "ps",         "spawn",    "readelf",
+    "hexdump", "stat",   "basename", "dirname",  "cal",      "sleep",    "reset",      "tac",      "nl",
+    "rev",     "expr",   "color",    "rand",     "flushtlb", "checksum", "repeat",     "kill",     "exec",
+    "metrics", "trace",  "read",     "guard",    "top",      "fatcat",   "fatls",      "fatwrite", "fatappend",
+    "fatnew",  "fatrm",  "fattrunc", "fatmkdir", "fatrmdir",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -2739,6 +2741,73 @@ void CmdFattrunc(customos::u32 argc, char** argv)
     ConsoleWrite(" -> ");
     WriteU64Dec(static_cast<customos::u64>(rc));
     ConsoleWriteln(" BYTES");
+}
+
+void CmdFatmkdir(customos::u32 argc, char** argv)
+{
+    // `fatmkdir <path>` — create a directory in FAT32 volume 0.
+    namespace fat = customos::fs::fat32;
+    if (argc < 2)
+    {
+        ConsoleWriteln("FATMKDIR: USAGE: FATMKDIR PATH");
+        return;
+    }
+    const char* path = argv[1];
+    if (const char* leaf = FatLeaf(path); leaf != nullptr && *leaf != '\0')
+    {
+        path = leaf;
+    }
+    else if (path[0] == '/')
+    {
+        ++path;
+    }
+    const fat::Volume* v = fat::Fat32Volume(0);
+    if (v == nullptr)
+    {
+        ConsoleWriteln("FATMKDIR: FAT32 NOT MOUNTED");
+        return;
+    }
+    if (!fat::Fat32MkdirAtPath(v, path))
+    {
+        ConsoleWrite("FATMKDIR: FAILED: ");
+        ConsoleWriteln(path);
+        return;
+    }
+    ConsoleWrite("FATMKDIR: CREATED ");
+    ConsoleWriteln(path);
+}
+
+void CmdFatrmdir(customos::u32 argc, char** argv)
+{
+    // `fatrmdir <path>` — remove an empty directory.
+    namespace fat = customos::fs::fat32;
+    if (argc < 2)
+    {
+        ConsoleWriteln("FATRMDIR: USAGE: FATRMDIR PATH");
+        return;
+    }
+    const char* path = argv[1];
+    if (const char* leaf = FatLeaf(path); leaf != nullptr && *leaf != '\0')
+    {
+        path = leaf;
+    }
+    else if (path[0] == '/')
+    {
+        ++path;
+    }
+    const fat::Volume* v = fat::Fat32Volume(0);
+    if (v == nullptr)
+    {
+        ConsoleWriteln("FATRMDIR: FAT32 NOT MOUNTED");
+        return;
+    }
+    if (!fat::Fat32RmdirAtPath(v, path))
+    {
+        ConsoleWriteln("FATRMDIR: FAILED (not a dir? not empty? not found?)");
+        return;
+    }
+    ConsoleWrite("FATRMDIR: REMOVED ");
+    ConsoleWriteln(path);
 }
 
 void CmdRead(customos::u32 argc, char** argv)
@@ -5407,6 +5476,16 @@ void Dispatch(char* line)
     if (StrEq(cmd, "fattrunc"))
     {
         CmdFattrunc(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "fatmkdir"))
+    {
+        CmdFatmkdir(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "fatrmdir"))
+    {
+        CmdFatrmdir(argc, argv);
         return;
     }
     if (StrEq(cmd, "free"))

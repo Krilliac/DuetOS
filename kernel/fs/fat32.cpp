@@ -1832,10 +1832,33 @@ bool DeleteInDir(const Volume* v, u32 dir_cluster, const char* name)
         if (!FreeClusterChain(*v, fc.first_cluster))
             return false;
     }
-    // Patch the entry's first byte to 0xE5.
+    // Patch the SFN entry + any preceding LFN fragments to 0xE5.
+    // FAT doesn't require the LFN trail to be cleaned — readers
+    // skip orphan fragments anyway — but tidying keeps the
+    // directory compact for subsequent FindFreeRunInDir calls
+    // and matches what Windows / mkfs.fat do on delete.
+    //
+    // Strategy: RMW the SFN's sector. Walk BACKWARDS from the
+    // SFN offset; for each entry with attr == 0x0F and first
+    // byte between 0x01 and 0x7F (ord), stamp 0xE5. Stop at the
+    // first non-LFN record. Bounded by 20 slots (FAT LFN max).
+    // Doesn't cross sector boundaries in v0 — long-name runs
+    // never exceed a single sector's 16-slot capacity for our
+    // test image.
     if (drivers::storage::BlockDeviceRead(v->block_handle, fc.lba, 1, g_scratch) != 0)
         return false;
     g_scratch[fc.off] = 0xE5;
+    {
+        u32 probe = fc.off;
+        for (u32 step = 0; step < 20 && probe >= 32; ++step)
+        {
+            probe -= 32;
+            const u8* e = g_scratch + probe;
+            if (e[11] != 0x0F)
+                break;
+            g_scratch[probe] = 0xE5;
+        }
+    }
     if (drivers::storage::BlockDeviceWrite(v->block_handle, fc.lba, 1, g_scratch) != 0)
         return false;
 
@@ -1864,6 +1887,222 @@ bool Fat32DeleteAtPath(const Volume* v, const char* path)
     char basename[64];
     if (!ResolveParentDir(*v, path, &parent_cluster, basename, sizeof(basename)))
         return false;
+    return DeleteInDir(v, parent_cluster, basename);
+}
+
+namespace
+{
+
+// Plant the "." and ".." synthetic entries at the start of a new
+// directory's cluster. Per FAT32 spec:
+//   "." entry's first_cluster = the new directory's own cluster
+//   ".." entry's first_cluster = the parent directory's cluster,
+//        except when the parent is the root, where it must be 0.
+bool SeedDotEntries(const Volume& v, u32 new_dir_cluster, u32 parent_cluster)
+{
+    if (!ZeroCluster(v, new_dir_cluster))
+        return false;
+    // One sector of the new cluster = first two 32-B records.
+    const u64 lba = u64(v.data_start_sector) + u64(new_dir_cluster - 2) * u64(v.sectors_per_cluster);
+    VZero(g_scratch, v.bytes_per_sector);
+
+    u8* dot = g_scratch;
+    for (u32 i = 0; i < 11; ++i)
+        dot[i] = ' ';
+    dot[0] = '.';
+    dot[11] = 0x10; // ATTR_DIRECTORY
+    dot[26] = static_cast<u8>(new_dir_cluster & 0xFF);
+    dot[27] = static_cast<u8>((new_dir_cluster >> 8) & 0xFF);
+    dot[20] = static_cast<u8>((new_dir_cluster >> 16) & 0xFF);
+    dot[21] = static_cast<u8>((new_dir_cluster >> 24) & 0xFF);
+
+    u8* dotdot = g_scratch + 32;
+    for (u32 i = 0; i < 11; ++i)
+        dotdot[i] = ' ';
+    dotdot[0] = '.';
+    dotdot[1] = '.';
+    dotdot[11] = 0x10;
+    // Spec: when parent IS the root, record 0 in ".." — not the
+    // root's actual cluster number. Our enumerator already hides
+    // dot entries, so the value only matters if tools like
+    // chkdsk / fsck inspect the raw record.
+    const u32 dotdot_cluster = (parent_cluster == v.root_cluster) ? 0 : parent_cluster;
+    dotdot[26] = static_cast<u8>(dotdot_cluster & 0xFF);
+    dotdot[27] = static_cast<u8>((dotdot_cluster >> 8) & 0xFF);
+    dotdot[20] = static_cast<u8>((dotdot_cluster >> 16) & 0xFF);
+    dotdot[21] = static_cast<u8>((dotdot_cluster >> 24) & 0xFF);
+
+    return drivers::storage::BlockDeviceWrite(v.block_handle, lba, 1, g_scratch) == 0;
+}
+
+// Write a directory-slot SFN (+ optional LFN fragments) that
+// describes an existing new entry (cluster already allocated,
+// content already populated). Shared between file-create and
+// mkdir, factored out because their only difference is the
+// attribute byte.
+bool PlantDirEntry(const Volume& v, u32 dir_cluster, const char* name, u32 first_cluster, u32 size, u8 attributes)
+{
+    const bool use_lfn = NeedsLfn(name);
+    u8 sfn[11];
+    u32 lfn_frag_count = 0;
+    u32 long_len = 0;
+    if (!use_lfn)
+    {
+        if (!MakeSfn(name, sfn))
+            return false;
+        char human[13];
+        FormatShortName(sfn, human);
+        DirEntry tmp;
+        if (FindInDirByName(v, dir_cluster, human, &tmp))
+            return false;
+    }
+    else
+    {
+        while (name[long_len] != 0)
+            ++long_len;
+        if (long_len > 127)
+            return false;
+        DirEntry tmp;
+        if (FindInDirByName(v, dir_cluster, name, &tmp))
+            return false;
+        if (!GenerateUniqueSfn(v, dir_cluster, name, sfn))
+            return false;
+        lfn_frag_count = (long_len + 12) / 13;
+        if (lfn_frag_count == 0 || lfn_frag_count > 20)
+            return false;
+    }
+
+    u64 slot_lba = 0;
+    u32 slot_off = 0;
+    const u32 slots_needed = lfn_frag_count + 1;
+    if (slots_needed == 1)
+    {
+        if (!FindFreeSlotInDir(v, dir_cluster, &slot_lba, &slot_off))
+            return false;
+    }
+    else
+    {
+        if (!FindFreeRunInDir(v, dir_cluster, slots_needed, &slot_lba, &slot_off))
+            return false;
+    }
+    if (drivers::storage::BlockDeviceRead(v.block_handle, slot_lba, 1, g_scratch) != 0)
+        return false;
+    const bool was_eod = (g_scratch[slot_off] == 0x00);
+    if (use_lfn)
+    {
+        const u8 chk = SfnChecksum(sfn);
+        for (u32 i = 0; i < lfn_frag_count; ++i)
+        {
+            const u32 ord = lfn_frag_count - i;
+            const bool is_last_piece = (i == 0);
+            const u32 chunk_start = (ord - 1) * 13;
+            u32 chunk_len = 0;
+            while (chunk_len < 13 && chunk_start + chunk_len < long_len)
+                ++chunk_len;
+            u8* rec = g_scratch + slot_off + i * 32;
+            EncodeLfnFragment(name + chunk_start, chunk_len, static_cast<u8>(ord), is_last_piece, chk, rec);
+        }
+    }
+    u8* rec = g_scratch + slot_off + lfn_frag_count * 32;
+    VZero(rec, 32);
+    for (u32 i = 0; i < 11; ++i)
+        rec[i] = sfn[i];
+    rec[11] = attributes;
+    rec[26] = static_cast<u8>(first_cluster & 0xFF);
+    rec[27] = static_cast<u8>((first_cluster >> 8) & 0xFF);
+    rec[20] = static_cast<u8>((first_cluster >> 16) & 0xFF);
+    rec[21] = static_cast<u8>((first_cluster >> 24) & 0xFF);
+    rec[28] = static_cast<u8>(size & 0xFF);
+    rec[29] = static_cast<u8>((size >> 8) & 0xFF);
+    rec[30] = static_cast<u8>((size >> 16) & 0xFF);
+    rec[31] = static_cast<u8>((size >> 24) & 0xFF);
+    const u32 past_end = slot_off + slots_needed * 32;
+    if (was_eod && past_end + 32 <= v.bytes_per_sector)
+    {
+        g_scratch[past_end] = 0x00;
+    }
+    return drivers::storage::BlockDeviceWrite(v.block_handle, slot_lba, 1, g_scratch) == 0;
+}
+
+// True if a directory's cluster chain contains ANY entry beyond
+// the "." / ".." synthetic pair. Used by rmdir to enforce the
+// "must be empty" precondition.
+bool DirHasOnlyDots(const Volume& v, u32 dir_cluster)
+{
+    struct Ctx
+    {
+        bool only_dots;
+    };
+    Ctx ctx{true};
+    WalkDirChain(
+        v, dir_cluster,
+        [](const DirEntry& e, void* cx) -> bool
+        {
+            (void)e;
+            auto* c = static_cast<Ctx*>(cx);
+            // Walker already filters dot entries, so any surviving
+            // visit is a real entry — directory is not empty.
+            c->only_dots = false;
+            return false;
+        },
+        &ctx);
+    return ctx.only_dots;
+}
+
+} // namespace
+
+bool Fat32MkdirAtPath(const Volume* v, const char* path)
+{
+    if (v == nullptr || path == nullptr)
+        return false;
+    u32 parent_cluster = 0;
+    char basename[64];
+    if (!ResolveParentDir(*v, path, &parent_cluster, basename, sizeof(basename)))
+        return false;
+
+    // Allocate a fresh cluster for the new directory's data,
+    // seed it with "." and ".." entries.
+    const u32 new_cluster = AllocateFreeCluster(*v);
+    if (new_cluster == 0)
+        return false;
+    if (!SeedDotEntries(*v, new_cluster, parent_cluster))
+    {
+        FreeClusterChain(*v, new_cluster);
+        return false;
+    }
+
+    // Plant the entry in the parent. On failure, roll back the
+    // cluster allocation.
+    if (!PlantDirEntry(*v, parent_cluster, basename, new_cluster, 0, /*attrs=*/0x10))
+    {
+        FreeClusterChain(*v, new_cluster);
+        return false;
+    }
+    if (parent_cluster == v->root_cluster)
+    {
+        Volume* vm = const_cast<Volume*>(v);
+        WalkRootIntoSnapshot(*vm, vm->root_cluster);
+    }
+    return true;
+}
+
+bool Fat32RmdirAtPath(const Volume* v, const char* path)
+{
+    if (v == nullptr || path == nullptr)
+        return false;
+    u32 parent_cluster = 0;
+    char basename[64];
+    if (!ResolveParentDir(*v, path, &parent_cluster, basename, sizeof(basename)))
+        return false;
+    DirEntry target;
+    if (!FindInDirByName(*v, parent_cluster, basename, &target))
+        return false;
+    if ((target.attributes & 0x10) == 0)
+        return false; // not a directory
+    if (!DirHasOnlyDots(*v, target.first_cluster))
+        return false; // not empty
+    // Reuse DeleteInDir — it frees the cluster chain AND clears
+    // preceding LFN fragments, which is exactly what we need.
     return DeleteInDir(v, parent_cluster, basename);
 }
 
@@ -2512,6 +2751,50 @@ void Fat32SelfTest()
         return;
     }
     SerialWrite("[fs/fat32] self-test OK (LFN emitted + read back on create/delete)\n");
+
+    // Twelfth phase: mkdir / rmdir round-trip. Create /NEWDIR,
+    // verify it's a directory, create a file inside it, verify
+    // rmdir FAILS when non-empty, remove the file, rmdir
+    // succeeds, verify the directory is gone.
+    if (!Fat32MkdirAtPath(v0, "/NEWDIR"))
+    {
+        SerialWrite("[fs/fat32] self-test FAILED: mkdir /NEWDIR\n");
+        return;
+    }
+    DirEntry mkd;
+    if (!Fat32LookupPath(v0, "/NEWDIR", &mkd) || (mkd.attributes & 0x10) == 0)
+    {
+        SerialWrite("[fs/fat32] self-test FAILED: /NEWDIR not a directory post-mkdir\n");
+        return;
+    }
+    const u8 inside_body[] = "inside\n";
+    if (Fat32CreateAtPath(v0, "/NEWDIR/FILE.TXT", inside_body, 7) != 7)
+    {
+        SerialWrite("[fs/fat32] self-test FAILED: create /NEWDIR/FILE.TXT\n");
+        return;
+    }
+    if (Fat32RmdirAtPath(v0, "/NEWDIR"))
+    {
+        SerialWrite("[fs/fat32] self-test FAILED: rmdir on non-empty dir should refuse\n");
+        return;
+    }
+    if (!Fat32DeleteAtPath(v0, "/NEWDIR/FILE.TXT"))
+    {
+        SerialWrite("[fs/fat32] self-test FAILED: delete /NEWDIR/FILE.TXT\n");
+        return;
+    }
+    if (!Fat32RmdirAtPath(v0, "/NEWDIR"))
+    {
+        SerialWrite("[fs/fat32] self-test FAILED: rmdir /NEWDIR when empty\n");
+        return;
+    }
+    DirEntry after_rmdir;
+    if (Fat32LookupPath(v0, "/NEWDIR", &after_rmdir))
+    {
+        SerialWrite("[fs/fat32] self-test FAILED: /NEWDIR still visible after rmdir\n");
+        return;
+    }
+    SerialWrite("[fs/fat32] self-test OK (mkdir + rmdir round-trip with empty-check)\n");
 }
 
 } // namespace customos::fs::fat32

@@ -232,6 +232,27 @@ bool Fat32DeleteAtPath(const Volume* v, const char* path);
 i64 Fat32TruncateAtPath(const Volume* v, const char* path, u64 new_size);
 i64 Fat32AppendAtPath(const Volume* v, const char* path, const void* buf, u64 len);
 
+/// Create a new directory at `path`. The parent directory must
+/// exist; the basename must not collide with an existing entry.
+/// Seeds the new directory with the required "." and ".." self
+/// / parent entries per spec, then plants an attr=0x10 directory
+/// entry in the parent (with LFN fragments emitted when the
+/// basename doesn't fit 8.3).
+///
+/// Returns true on success, false on validation / allocation /
+/// I/O error.
+bool Fat32MkdirAtPath(const Volume* v, const char* path);
+
+/// Remove an empty directory at `path`. Refuses if the directory
+/// still contains any entries beyond the "." / ".." self and
+/// parent records. Frees the directory's cluster chain and marks
+/// the parent's entry (+ any LFN fragments that precede it)
+/// deleted.
+///
+/// Returns true on success. false on "not a directory", "not
+/// empty", "not found", or I/O error.
+bool Fat32RmdirAtPath(const Volume* v, const char* path);
+
 /// Boot-time self-test. Calls `Fat32Probe` on every registered
 /// block device; partitions that aren't FAT32 are expected to fail
 /// and are logged as "not FAT32" (no failure shout). PASS
