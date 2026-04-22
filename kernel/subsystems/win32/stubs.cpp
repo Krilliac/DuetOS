@@ -2392,6 +2392,78 @@ constexpr StubEntry kStubsTable[] = {
     {"ntdll.dll", "NtMapViewOfSection", kOffReturnStatusNotImpl},
     {"ntdll.dll", "NtUnmapViewOfSection", kOffReturnStatusNotImpl},
 
+    // === Batch 43 — UI / locale / clipboard / mapping ==========
+    //
+    // Broad coverage sweep. Most bindings are "best-effort
+    // failure" aliases so a PE that probes any of these at
+    // startup sees a documented negative return and falls back
+    // cleanly rather than hitting the miss-logger.
+
+    // user32 — UI surface. CustomOS has no window system
+    // reachable from ring 3 yet, so every user32 entry either
+    // returns failure or a benign constant.
+    {"user32.dll", "MessageBoxW", kOffReturnOne}, // IDOK (1) — caller proceeds
+    {"user32.dll", "MessageBoxA", kOffReturnOne},
+    {"user32.dll", "MessageBoxExW", kOffReturnOne},
+    {"user32.dll", "GetDesktopWindow", kOffReturnZero},
+    {"user32.dll", "GetProcessWindowStation", kOffReturnZero},
+    {"user32.dll", "GetSysColor", kOffReturnZero},
+    {"user32.dll", "GetSystemMetrics", kOffReturnZero},
+    {"user32.dll", "OpenClipboard", kOffReturnZero}, // FALSE — unavailable
+    {"user32.dll", "CloseClipboard", kOffReturnOne},
+    {"user32.dll", "EmptyClipboard", kOffReturnOne},
+    {"user32.dll", "GetClipboardData", kOffReturnZero},
+    {"user32.dll", "SetClipboardData", kOffReturnZero},
+    {"user32.dll", "LoadStringW", kOffReturnZero}, // 0 chars copied
+    {"user32.dll", "CharUpperW", kOffReturnZero},
+    {"user32.dll", "CharLowerW", kOffReturnZero},
+    {"user32.dll", "IsWindow", kOffReturnZero},
+    {"user32.dll", "GetActiveWindow", kOffReturnZero},
+    {"user32.dll", "GetForegroundWindow", kOffReturnZero},
+
+    // kernel32 — handle / file-mapping / env extensions.
+    {"kernel32.dll", "SetHandleInformation", kOffReturnOne},
+    {"kernel32.dll", "GetHandleInformation", kOffReturnZero},
+    {"kernel32.dll", "DuplicateHandle", kOffReturnZero}, // FALSE
+    {"kernel32.dll", "CreateFileMappingW", kOffReturnZero},
+    {"kernel32.dll", "CreateFileMappingA", kOffReturnZero},
+    {"kernel32.dll", "OpenFileMappingW", kOffReturnZero},
+    {"kernel32.dll", "MapViewOfFile", kOffReturnZero},
+    {"kernel32.dll", "MapViewOfFileEx", kOffReturnZero},
+    {"kernel32.dll", "UnmapViewOfFile", kOffReturnOne},
+    {"kernel32.dll", "FlushViewOfFile", kOffReturnOne},
+    {"kernel32.dll", "ExpandEnvironmentStringsW", kOffReturnZero},
+    {"kernel32.dll", "ExpandEnvironmentStringsA", kOffReturnZero},
+    {"kernel32.dll", "GetEnvironmentStringsA", kOffReturnZero},
+    {"kernel32.dll", "FreeEnvironmentStringsA", kOffReturnOne},
+    {"kernel32.dll", "SetStdHandle", kOffReturnOne},
+    {"kernel32.dll", "GetConsoleScreenBufferInfo", kOffReturnZero}, // FALSE
+    {"kernel32.dll", "GetNumberOfConsoleInputEvents", kOffReturnZero},
+    {"kernel32.dll", "PeekConsoleInputW", kOffReturnZero},
+    {"kernel32.dll", "ReadConsoleInputW", kOffReturnZero},
+    {"kernel32.dll", "WaitForInputIdle", kOffReturnZero}, // 0 = WAIT_OBJECT_0
+    {"kernel32.dll", "PeekNamedPipe", kOffReturnZero},
+
+    // kernel32 — locale / comparison.
+    // CompareStringW returns 2 (CSTR_EQUAL) so callers treating
+    // it as a 3-way compare see "equal" — the conservative
+    // fallback that avoids misordering.
+    {"kernel32.dll", "CompareStringW", kOffReturnTwo}, // CSTR_EQUAL
+    {"kernel32.dll", "CompareStringA", kOffReturnTwo},
+    {"kernel32.dll", "CompareStringEx", kOffReturnTwo},
+    {"kernel32.dll", "LCMapStringW", kOffReturnZero},
+    {"kernel32.dll", "LCMapStringA", kOffReturnZero},
+    {"kernel32.dll", "LCMapStringEx", kOffReturnZero},
+    {"kernel32.dll", "GetLocaleInfoW", kOffReturnZero},
+    {"kernel32.dll", "GetLocaleInfoA", kOffReturnZero},
+    {"kernel32.dll", "GetLocaleInfoEx", kOffReturnZero},
+    {"kernel32.dll", "EnumSystemLocalesW", kOffReturnOne}, // pretend iteration done
+    {"kernel32.dll", "EnumSystemLocalesA", kOffReturnOne},
+    {"kernel32.dll", "GetStringTypeW", kOffReturnOne},
+    {"kernel32.dll", "GetStringTypeA", kOffReturnOne},
+    {"kernel32.dll", "GetStringTypeExW", kOffReturnOne},
+    {"kernel32.dll", "IsDBCSLeadByte", kOffReturnZero}, // FALSE — no DBCS
+
     // Batch 9 — Win32 process heap, backed by the per-process
     // 16-page region at 0x50000000 and SYS_HEAP_ALLOC /
     // SYS_HEAP_FREE. See kernel/subsystems/win32/heap.cpp.
