@@ -2706,6 +2706,117 @@ constexpr StubEntry kStubsTable[] = {
     {"psapi.dll", "GetMappedFileNameW", kOffReturnZero},
     {"psapi.dll", "QueryWorkingSet", kOffReturnZero},
 
+    // === Batch 47 — kernelbase / bcrypt / dbghelp / extended ntdll ===
+    //
+    // Coverage for the newer DLL split (kernelbase.dll = common
+    // kernel32+advapi32 core since Win8) + crypto + debugging
+    // helpers + more ntdll. All aliases.
+
+    // kernelbase.dll — most exports mirror kernel32. Real apps
+    // built against the Win8+ SDK bind directly to kernelbase.
+    // Aliasing to the same internal stubs means they work
+    // identically.
+    {"kernelbase.dll", "GetLastError", kOffGetLastError},
+    {"kernelbase.dll", "SetLastError", kOffSetLastError},
+    {"kernelbase.dll", "GetCurrentProcess", kOffGetCurrentProcess},
+    {"kernelbase.dll", "GetCurrentProcessId", kOffGetCurrentProcessId},
+    {"kernelbase.dll", "GetCurrentThreadId", kOffGetCurrentThreadId},
+    {"kernelbase.dll", "ExitProcess", kOffExitProcess},
+    {"kernelbase.dll", "WriteFile", kOffWriteFile},
+    {"kernelbase.dll", "ReadFile", kOffReadFile},
+    {"kernelbase.dll", "CloseHandle", kOffCloseHandle},
+    {"kernelbase.dll", "CreateFileW", kOffCreateFileW},
+    {"kernelbase.dll", "HeapAlloc", kOffHeapAlloc},
+    {"kernelbase.dll", "HeapFree", kOffHeapFree},
+    {"kernelbase.dll", "GetProcessHeap", kOffGetProcessHeap},
+    {"kernelbase.dll", "GetStdHandle", kOffGetStdHandle},
+    {"kernelbase.dll", "VirtualAlloc", kOffVirtualAlloc},
+    {"kernelbase.dll", "VirtualFree", kOffVirtualFree},
+    {"kernelbase.dll", "VirtualProtect", kOffVirtualProtect},
+    {"kernelbase.dll", "CreateMutexW", kOffCreateMutexW},
+    {"kernelbase.dll", "WaitForSingleObject", kOffWaitForObj2},
+    {"kernelbase.dll", "WaitForSingleObjectEx", kOffWaitForObj2},
+    {"kernelbase.dll", "ReleaseMutex", kOffReleaseMutex},
+    {"kernelbase.dll", "CreateEventW", kOffCreateEventReal},
+    {"kernelbase.dll", "SetEvent", kOffSetEventReal},
+    {"kernelbase.dll", "ResetEvent", kOffResetEventReal},
+    {"kernelbase.dll", "Sleep", kOffSleep},
+    {"kernelbase.dll", "SwitchToThread", kOffSwitchToThread},
+    {"kernelbase.dll", "GetCommandLineW", kOffGetCmdLineW},
+    {"kernelbase.dll", "GetCommandLineA", kOffGetCmdLineA},
+    {"kernelbase.dll", "GetModuleHandleW", kOffGetModuleHandleW},
+    {"kernelbase.dll", "GetModuleFileNameW", kOffGetModFileNameW},
+    {"kernelbase.dll", "TlsAlloc", kOffTlsAllocReal},
+    {"kernelbase.dll", "TlsFree", kOffTlsFreeReal},
+    {"kernelbase.dll", "TlsGetValue", kOffTlsGetValueReal},
+    {"kernelbase.dll", "TlsSetValue", kOffTlsSetValueReal},
+    {"kernelbase.dll", "InterlockedIncrement", kOffInterlockedInc},
+    {"kernelbase.dll", "InterlockedDecrement", kOffInterlockedDec},
+    {"kernelbase.dll", "InterlockedCompareExchange", kOffInterlockedCmpXchg},
+    {"kernelbase.dll", "InterlockedExchange", kOffInterlockedExchg},
+    {"kernelbase.dll", "VerifyVersionInfoW", kOffReturnOne},
+    {"kernelbase.dll", "IsWow64Process", kOffIsWow64},
+    {"kernelbase.dll", "GetVersionExW", kOffGetVersionExW},
+    {"kernelbase.dll", "lstrlenW", kOffLstrlenW},
+    {"kernelbase.dll", "lstrcmpW", kOffLstrcmpW},
+    {"kernelbase.dll", "MultiByteToWideChar", kOffMBtoWC},
+    {"kernelbase.dll", "WideCharToMultiByte", kOffWCtoMB},
+
+    // bcrypt.dll — CNG crypto. All "no-op success" for v0; real
+    // entropy comes from RtlGenRandom (below) if callers fall
+    // through to it. Most callers handle STATUS_UNSUCCESSFUL by
+    // bailing the crypto path cleanly.
+    {"bcrypt.dll", "BCryptOpenAlgorithmProvider", kOffReturnStatusNotImpl},
+    {"bcrypt.dll", "BCryptCloseAlgorithmProvider", kOffReturnZero},
+    {"bcrypt.dll", "BCryptGenRandom", kOffReturnStatusNotImpl},
+    {"bcrypt.dll", "BCryptCreateHash", kOffReturnStatusNotImpl},
+    {"bcrypt.dll", "BCryptHashData", kOffReturnStatusNotImpl},
+    {"bcrypt.dll", "BCryptFinishHash", kOffReturnStatusNotImpl},
+    {"bcrypt.dll", "BCryptDestroyHash", kOffReturnZero},
+    {"bcrypt.dll", "BCryptGetProperty", kOffReturnStatusNotImpl},
+    // advapi32 has a legacy crypto entry that some CRT builds probe.
+    {"advapi32.dll", "SystemFunction036", kOffReturnOne}, // RtlGenRandom — return TRUE, buf untouched
+
+    // dbghelp.dll — symbolic debugging. Everything stubbed to
+    // "not available"; programs usually fall back to raw addresses.
+    {"dbghelp.dll", "SymInitialize", kOffReturnOne},
+    {"dbghelp.dll", "SymInitializeW", kOffReturnOne},
+    {"dbghelp.dll", "SymCleanup", kOffReturnOne},
+    {"dbghelp.dll", "SymFromAddr", kOffReturnZero},
+    {"dbghelp.dll", "SymFromAddrW", kOffReturnZero},
+    {"dbghelp.dll", "SymGetLineFromAddr64", kOffReturnZero},
+    {"dbghelp.dll", "SymLoadModule64", kOffReturnZero},
+    {"dbghelp.dll", "StackWalk64", kOffReturnZero},
+    {"dbghelp.dll", "SymFunctionTableAccess64", kOffReturnZero},
+    {"dbghelp.dll", "SymGetModuleBase64", kOffReturnZero},
+    {"dbghelp.dll", "MiniDumpWriteDump", kOffReturnZero},
+
+    // More ntdll Rtl* — pure user-mode helpers often touched
+    // even from kernel32-using apps. Most return 0/success.
+    {"ntdll.dll", "RtlInitUnicodeString", kOffCritSecNop}, // void
+    {"ntdll.dll", "RtlInitAnsiString", kOffCritSecNop},    // void
+    {"ntdll.dll", "RtlFreeUnicodeString", kOffCritSecNop},
+    {"ntdll.dll", "RtlAllocateHeap", kOffHeapAlloc}, // real heap
+    {"ntdll.dll", "RtlFreeHeap", kOffHeapFree},      // real heap
+    {"ntdll.dll", "RtlSizeHeap", kOffHeapSize},
+    {"ntdll.dll", "RtlReAllocateHeap", kOffHeapRealloc},
+    {"ntdll.dll", "RtlCreateHeap", kOffReturnZero}, // NULL
+    {"ntdll.dll", "RtlDestroyHeap", kOffReturnZero},
+    {"ntdll.dll", "RtlCompareMemory", kOffReturnZero},
+    {"ntdll.dll", "RtlZeroMemory", kOffCritSecNop}, // void
+    {"ntdll.dll", "RtlFillMemory", kOffCritSecNop},
+    {"ntdll.dll", "RtlCopyMemory", kOffMemmove}, // real memcpy
+    {"ntdll.dll", "RtlMoveMemory", kOffMemmove},
+    {"ntdll.dll", "RtlEnterCriticalSection", kOffCritSecNop},
+    {"ntdll.dll", "RtlLeaveCriticalSection", kOffCritSecNop},
+    {"ntdll.dll", "RtlInitializeCriticalSection", kOffInitCritSec},
+    {"ntdll.dll", "RtlDeleteCriticalSection", kOffCritSecNop},
+    {"ntdll.dll", "RtlTryEnterCriticalSection", kOffReturnOne}, // TRUE
+    {"ntdll.dll", "LdrLoadDll", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "LdrGetDllHandle", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "LdrGetProcedureAddress", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "RtlRunOnceExecuteOnce", kOffReturnZero}, // S_OK
+
     // Batch 9 — Win32 process heap, backed by the per-process
     // 16-page region at 0x50000000 and SYS_HEAP_ALLOC /
     // SYS_HEAP_FREE. See kernel/subsystems/win32/heap.cpp.
