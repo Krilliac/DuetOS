@@ -72,6 +72,10 @@ done
     -fno-stack-protector \
     -fno-builtin \
     -mno-red-zone \
+    -mno-sse \
+    -mno-sse2 \
+    -mno-mmx \
+    -mgeneral-regs-only \
     -fno-asynchronous-unwind-tables \
     -O2 \
     -Wall -Wextra \

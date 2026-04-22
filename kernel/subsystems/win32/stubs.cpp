@@ -110,6 +110,9 @@ constexpr u32 kOffLstrcmpW = 0x4C7;           // batch 29 — 37 bytes
 constexpr u32 kOffLstrcpyW = 0x4EC;           // batch 29 — 27 bytes
 constexpr u32 kOffIsWow64 = 0x507;            // batch 30 — 17 bytes
 constexpr u32 kOffGetVersionExW = 0x518;      // batch 30 — 34 bytes
+constexpr u32 kOffLstrlenA = 0x53A;           // batch 31 — 14 bytes
+constexpr u32 kOffLstrcmpA = 0x548;           // batch 31 — 37 bytes
+constexpr u32 kOffLstrcpyA = 0x56D;           // batch 31 — 26 bytes
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -1433,10 +1436,61 @@ constexpr u8 kStubsBytes[] = {
     0xC7, 0x41, 0x10, 0x02, 0x00, 0x00, 0x00, // 0x52D mov dword [rcx+0x10], 2     (NT platform)
     0xB8, 0x01, 0x00, 0x00, 0x00,             // 0x534 mov eax, 1 (BOOL TRUE)
     0xC3,                                     // 0x539 ret
+
+    // === Batch 31: ANSI-byte string helpers ====================
+    // Symmetric to batch 29 but for single-byte LPCSTR inputs.
+
+    // --- lstrlenA (offset 0x53A, 14 bytes) --------------------
+    // Win32: int lstrlenA(LPCSTR rcx). Byte-strlen.
+    0x31, 0xC0, // 0x53A xor eax, eax
+    // .loop:
+    0x80, 0x3C, 0x01, 0x00, // 0x53C cmp byte [rcx+rax*1], 0
+    0x74, 0x05,             // 0x540 je .done (+5)
+    0x48, 0xFF, 0xC0,       // 0x542 inc rax
+    0xEB, 0xF5,             // 0x545 jmp .loop (-11)
+    // .done:
+    0xC3, // 0x547 ret
+
+    // --- lstrcmpA (offset 0x548, 37 bytes) --------------------
+    // Win32: int lstrcmpA(LPCSTR rcx, LPCSTR rdx). Byte-strcmp
+    // (ordinal — no locale fold). 0 / negative / positive per
+    // classic strcmp contract.
+    0x31, 0xC0, // 0x548 xor eax, eax
+    // .loop:
+    0x44, 0x0F, 0xB6, 0x04, 0x01, // 0x54A movzx r8d, byte [rcx+rax]
+    0x44, 0x0F, 0xB6, 0x0C, 0x02, // 0x54F movzx r9d, byte [rdx+rax]
+    0x45, 0x39, 0xC8,             // 0x554 cmp r8d, r9d
+    0x75, 0x0D,                   // 0x557 jne .diff (+0x0D)
+    0x45, 0x85, 0xC0,             // 0x559 test r8d, r8d
+    0x74, 0x05,                   // 0x55C je .equal (+5)
+    0x48, 0xFF, 0xC0,             // 0x55E inc rax
+    0xEB, 0xE7,                   // 0x561 jmp .loop (-0x19)
+    // .equal:
+    0x31, 0xC0, // 0x563 xor eax, eax
+    0xC3,       // 0x565 ret
+    // .diff:
+    0x44, 0x89, 0xC0, // 0x566 mov eax, r8d
+    0x44, 0x29, 0xC8, // 0x569 sub eax, r9d
+    0xC3,             // 0x56C ret
+
+    // --- lstrcpyA (offset 0x56D, 26 bytes) --------------------
+    // Win32: LPSTR lstrcpyA(LPSTR rcx, LPCSTR rdx). Byte-strcpy,
+    // returns dst (rcx).
+    0x48, 0x89, 0xC8, // 0x56D mov rax, rcx   ; save dst for return
+    0x45, 0x31, 0xC0, // 0x570 xor r8d, r8d   ; i = 0
+    // .loop:
+    0x46, 0x0F, 0xB6, 0x0C, 0x02, // 0x573 movzx r9d, byte [rdx+r8]
+    0x46, 0x88, 0x0C, 0x01,       // 0x578 mov byte [rcx+r8], r9b
+    0x45, 0x85, 0xC9,             // 0x57C test r9d, r9d
+    0x74, 0x05,                   // 0x57F je .done (+5)
+    0x49, 0xFF, 0xC0,             // 0x581 inc r8
+    0xEB, 0xED,                   // 0x584 jmp .loop (-0x13)
+    // .done:
+    0xC3, // 0x586 ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x53A, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0x587, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -1691,6 +1745,12 @@ constexpr StubEntry kStubsTable[] = {
     {"kernel32.dll", "IsWow64Process2", kOffIsWow64}, // fills similar PBOOL
     {"kernel32.dll", "GetVersionExW", kOffGetVersionExW},
     {"kernel32.dll", "GetVersionExA", kOffGetVersionExW}, // ASCII CSD left untouched
+
+    // Batch 31 — ANSI-byte string helpers. Symmetric to batch 29
+    // but for LPCSTR. Pure compute, no syscalls.
+    {"kernel32.dll", "lstrlenA", kOffLstrlenA},
+    {"kernel32.dll", "lstrcmpA", kOffLstrcmpA},
+    {"kernel32.dll", "lstrcpyA", kOffLstrcpyA},
 
     // Batch 9 — Win32 process heap, backed by the per-process
     // 16-page region at 0x50000000 and SYS_HEAP_ALLOC /

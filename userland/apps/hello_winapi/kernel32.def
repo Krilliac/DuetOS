@@ -113,3 +113,7 @@ EXPORTS
     ; Batch 30 — system-info probes
     IsWow64Process
     GetVersionExW
+    ; Batch 31 — ANSI-byte string helpers
+    lstrlenA
+    lstrcmpA
+    lstrcpyA

@@ -292,6 +292,11 @@ typedef struct
 __declspec(dllimport) BOOL __stdcall IsWow64Process(HANDLE hProcess, BOOL* Wow64Process);
 __declspec(dllimport) BOOL __stdcall GetVersionExW(OSVERSIONINFOW* lpVersionInformation);
 
+// Batch 31 — ANSI string helpers (symmetric to batch 29).
+__declspec(dllimport) int __stdcall lstrlenA(LPCSTR lpString);
+__declspec(dllimport) int __stdcall lstrcmpA(LPCSTR lpString1, LPCSTR lpString2);
+__declspec(dllimport) LPSTR __stdcall lstrcpyA(LPSTR lpString1, LPCSTR lpString2);
+
 static const char kMsg[] = "[hello-winapi] printed via kernel32.WriteFile!\n";
 #define kMsgLen ((DWORD)(sizeof(kMsg) - 1))
 
@@ -988,6 +993,33 @@ void _start(void)
         WriteFile(out, b30_ok, sizeof(b30_ok) - 1, &b30w, 0);
     else
         WriteFile(out, b30_bad, sizeof(b30_bad) - 1, &b30w, 0);
+
+    // Batch 31 exercise — ANSI string helpers.
+    // Mirrors batch 29 but with byte strings.
+    // The build script passes -mno-sse -mgeneral-regs-only, so
+    // the poison loop compiles to plain byte stores (clang can't
+    // fall back to XMM vectorisation).
+    char b31_cpy[16];
+    for (int i = 0; i < 16; ++i)
+        b31_cpy[i] = (char)0xAA;
+    int b31_len_hello = lstrlenA("hello");
+    int b31_len_empty = lstrlenA("");
+    int b31_cmp_eq = lstrcmpA("abc", "abc");
+    int b31_cmp_lt = lstrcmpA("abc", "abd");
+    int b31_cmp_gt = lstrcmpA("abd", "abc");
+    int b31_cmp_pfx = lstrcmpA("abc", "abcd");
+    LPSTR b31_ret = lstrcpyA(b31_cpy, "hello");
+    int b31_cpy_len = lstrlenA(b31_cpy);
+
+    const char b31_ok[] = "[batch31] lstrlenA + lstrcmpA + lstrcpyA OK\n";
+    const char b31_bad[] = "[batch31] ANSI string helpers FAILED invariants\n";
+    BOOL b31_pass = b31_len_hello == 5 && b31_len_empty == 0 && b31_cmp_eq == 0 && b31_cmp_lt < 0 && b31_cmp_gt > 0 &&
+                    b31_cmp_pfx < 0 && b31_ret == b31_cpy && b31_cpy_len == 5 && b31_cpy[5] == 0;
+    DWORD b31w = 0;
+    if (b31_pass)
+        WriteFile(out, b31_ok, sizeof(b31_ok) - 1, &b31w, 0);
+    else
+        WriteFile(out, b31_bad, sizeof(b31_bad) - 1, &b31w, 0);
 
     // Batch 3 round-trip: store a distinctive value via
     // SetLastError, read it back via GetLastError, exit with
