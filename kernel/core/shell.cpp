@@ -36,6 +36,7 @@
 #include "elf_loader.h"
 #include "klog.h"
 #include "process.h"
+#include "random.h"
 #include "reboot.h"
 #include "ring3_smoke.h"
 
@@ -3610,8 +3611,72 @@ void CmdColor(u32 argc, char** argv)
 
 void CmdRand(u32 argc, char** argv)
 {
-    // Simple splitmix64 seeded from the TSC. Not cryptographic.
-    // Count defaults to 1; max 100 to keep output bounded.
+    // Modes:
+    //   rand           - one u64 from the kernel entropy pool
+    //   rand N         - N u64s (cap 100)
+    //   rand -s        - show entropy-pool stats + current tier
+    //   rand -hex N    - N hex bytes (cap 512) on a single line
+    // The pool is seeded once at boot by RandomInit; each `rand`
+    // call drains fresh bytes (RDSEED/RDRAND/splitmix per tier).
+    if (argc >= 2 && argv[1][0] == '-' && argv[1][1] == 's' && argv[1][2] == '\0')
+    {
+        const auto s = customos::core::RandomStatsRead();
+        const auto t = customos::core::RandomCurrentTier();
+        ConsoleWrite("TIER:          ");
+        switch (t)
+        {
+        case customos::core::EntropyTier::Rdseed:
+            ConsoleWriteln("RDSEED (NIST TRNG)");
+            break;
+        case customos::core::EntropyTier::Rdrand:
+            ConsoleWriteln("RDRAND (NIST DRBG)");
+            break;
+        default:
+            ConsoleWriteln("splitmix64 (NOT cryptographic)");
+            break;
+        }
+        ConsoleWrite("RDSEED CALLS:  ");
+        WriteU64Dec(s.rdseed_calls);
+        ConsoleWriteChar('\n');
+        ConsoleWrite("RDSEED OKS:    ");
+        WriteU64Dec(s.rdseed_successes);
+        ConsoleWriteChar('\n');
+        ConsoleWrite("RDRAND CALLS:  ");
+        WriteU64Dec(s.rdrand_calls);
+        ConsoleWriteChar('\n');
+        ConsoleWrite("RDRAND OKS:    ");
+        WriteU64Dec(s.rdrand_successes);
+        ConsoleWriteChar('\n');
+        ConsoleWrite("SPLITMIX:      ");
+        WriteU64Dec(s.splitmix_calls);
+        ConsoleWriteChar('\n');
+        ConsoleWrite("BYTES OUT:     ");
+        WriteU64Dec(s.bytes_produced);
+        ConsoleWriteChar('\n');
+        return;
+    }
+    if (argc >= 3 && argv[1][0] == '-' && argv[1][1] == 'h' && argv[1][2] == 'e' && argv[1][3] == 'x' &&
+        argv[1][4] == '\0')
+    {
+        u32 bytes = 0;
+        for (u32 i = 0; argv[2][i] != '\0'; ++i)
+        {
+            if (argv[2][i] < '0' || argv[2][i] > '9')
+            {
+                ConsoleWriteln("RAND: BAD COUNT");
+                return;
+            }
+            bytes = bytes * 10 + u32(argv[2][i] - '0');
+        }
+        if (bytes > 512)
+            bytes = 512;
+        u8 buf[512];
+        customos::core::RandomFillBytes(buf, bytes);
+        for (u32 i = 0; i < bytes; ++i)
+            WriteU64Hex(buf[i], 2);
+        ConsoleWriteChar('\n');
+        return;
+    }
     u32 n = 1;
     if (argc >= 2)
     {
@@ -3630,23 +3695,9 @@ void CmdRand(u32 argc, char** argv)
     {
         n = 100;
     }
-    static u64 state = 0;
-    if (state == 0)
-    {
-        u32 lo, hi;
-        asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
-        state = (static_cast<u64>(hi) << 32) | lo;
-        if (state == 0)
-            state = 0xCAFEBABE12345678ULL;
-    }
     for (u32 i = 0; i < n; ++i)
     {
-        state += 0x9E3779B97F4A7C15ULL;
-        u64 z = state;
-        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
-        z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
-        z = z ^ (z >> 31);
-        WriteU64Hex(z);
+        WriteU64Hex(customos::core::RandomU64());
         ConsoleWriteChar('\n');
     }
 }
