@@ -305,6 +305,9 @@ void CmdHelp()
     ConsoleWriteln("  FATCAT [VOL] NAME  READ FILE FROM FAT32 VOLUME TO CONSOLE");
     ConsoleWriteln("  FATWRITE PATH OFF BYTES  OVERWRITE EXISTING FILE BYTES IN-PLACE");
     ConsoleWriteln("  FATAPPEND NAME BYTES     APPEND BYTES TO EXISTING ROOT-DIR FILE (GROWS)");
+    ConsoleWriteln("  FATNEW NAME [BYTES...]   CREATE NEW FAT32 FILE IN ROOT (8.3 NAME)");
+    ConsoleWriteln("  FATRM NAME               DELETE A FAT32 FILE FROM ROOT");
+    ConsoleWriteln("  FATTRUNC NAME NEW_SIZE   SHRINK OR ZERO-GROW AN EXISTING FILE");
     ConsoleWriteln("  FREE         MEMORY USAGE (PHYS + HEAP)");
     ConsoleWriteln("  PS           LIST EVERY SCHEDULER TASK");
     ConsoleWriteln("  SPAWN KIND   LAUNCH A RING-3 TASK (hello/sandbox/jail/...)");
@@ -1217,6 +1220,7 @@ static const char* const kCommandSet[] = {
     "hexdump", "stat",   "basename", "dirname", "cal",      "sleep",    "reset",      "tac",      "nl",
     "rev",     "expr",   "color",    "rand",    "flushtlb", "checksum", "repeat",     "kill",     "exec",
     "metrics", "trace",  "read",     "guard",   "top",      "fatcat",   "fatls",      "fatwrite", "fatappend",
+    "fatnew",  "fatrm",  "fattrunc",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -2564,6 +2568,137 @@ void CmdFatappend(customos::u32 argc, char** argv)
     WriteU64Dec(static_cast<customos::u64>(rc));
     ConsoleWrite(" BYTES TO ");
     ConsoleWriteln(name);
+}
+
+void CmdFatnew(customos::u32 argc, char** argv)
+{
+    // `fatnew <name> [bytes...]` — create a new root-dir file
+    // with optional initial content (joined argv). Name must fit
+    // in the 8.3 SFN encoding; anything longer is rejected.
+    namespace fat = customos::fs::fat32;
+    if (argc < 2)
+    {
+        ConsoleWriteln("FATNEW: USAGE: FATNEW NAME [BYTES...]");
+        return;
+    }
+    const char* name = argv[1];
+    if (const char* leaf = FatLeaf(name); leaf != nullptr && *leaf != '\0')
+    {
+        name = leaf;
+    }
+    else if (name[0] == '/')
+    {
+        ++name;
+    }
+    static customos::u8 payload[1024];
+    customos::u64 plen = 0;
+    for (u32 i = 2; i < argc; ++i)
+    {
+        if (i > 2 && plen + 1 < sizeof(payload))
+        {
+            payload[plen++] = ' ';
+        }
+        for (u32 j = 0; argv[i][j] != 0 && plen + 1 < sizeof(payload); ++j)
+        {
+            payload[plen++] = static_cast<customos::u8>(argv[i][j]);
+        }
+    }
+    const fat::Volume* v = fat::Fat32Volume(0);
+    if (v == nullptr)
+    {
+        ConsoleWriteln("FATNEW: FAT32 NOT MOUNTED");
+        return;
+    }
+    const customos::i64 rc = fat::Fat32CreateInRoot(v, name, payload, plen);
+    if (rc < 0)
+    {
+        ConsoleWriteln("FATNEW: CREATE FAILED (bad name? exists? full dir? disk full?)");
+        return;
+    }
+    ConsoleWrite("FATNEW: CREATED ");
+    ConsoleWrite(name);
+    ConsoleWrite(" (");
+    WriteU64Dec(static_cast<customos::u64>(rc));
+    ConsoleWriteln(" BYTES)");
+}
+
+void CmdFatrm(customos::u32 argc, char** argv)
+{
+    // `fatrm <name>` — delete a root-dir file. Frees its cluster
+    // chain, marks the directory entry deleted.
+    namespace fat = customos::fs::fat32;
+    if (argc < 2)
+    {
+        ConsoleWriteln("FATRM: USAGE: FATRM NAME");
+        return;
+    }
+    const char* name = argv[1];
+    if (const char* leaf = FatLeaf(name); leaf != nullptr && *leaf != '\0')
+    {
+        name = leaf;
+    }
+    else if (name[0] == '/')
+    {
+        ++name;
+    }
+    const fat::Volume* v = fat::Fat32Volume(0);
+    if (v == nullptr)
+    {
+        ConsoleWriteln("FATRM: FAT32 NOT MOUNTED");
+        return;
+    }
+    if (!fat::Fat32DeleteInRoot(v, name))
+    {
+        ConsoleWrite("FATRM: FAILED: ");
+        ConsoleWriteln(name);
+        return;
+    }
+    ConsoleWrite("FATRM: DELETED ");
+    ConsoleWriteln(name);
+}
+
+void CmdFattrunc(customos::u32 argc, char** argv)
+{
+    // `fattrunc <name> <new_size>` — shrink or grow a file to
+    // `new_size` bytes. Growth pads with zeros.
+    namespace fat = customos::fs::fat32;
+    if (argc < 3)
+    {
+        ConsoleWriteln("FATTRUNC: USAGE: FATTRUNC NAME NEW_SIZE");
+        return;
+    }
+    const char* name = argv[1];
+    if (const char* leaf = FatLeaf(name); leaf != nullptr && *leaf != '\0')
+    {
+        name = leaf;
+    }
+    else if (name[0] == '/')
+    {
+        ++name;
+    }
+    customos::u64 new_size = 0;
+    if (!ParseU64Str(argv[2], &new_size))
+    {
+        ConsoleWriteln("FATTRUNC: BAD SIZE");
+        return;
+    }
+    const fat::Volume* v = fat::Fat32Volume(0);
+    if (v == nullptr)
+    {
+        ConsoleWriteln("FATTRUNC: FAT32 NOT MOUNTED");
+        return;
+    }
+    const customos::i64 rc = fat::Fat32TruncateInRoot(v, name, new_size);
+    if (rc < 0)
+    {
+        ConsoleWriteln("FATTRUNC: FAILED");
+        return;
+    }
+    ConsoleWrite("FATTRUNC: ");
+    ConsoleWrite(name);
+    ConsoleWrite(" -> ");
+    WriteU64Dec(static_cast<customos::u64>(rc));
+    ConsoleWriteln(" BYTES");
 }
 
 void CmdRead(customos::u32 argc, char** argv)
@@ -5217,6 +5352,21 @@ void Dispatch(char* line)
     if (StrEq(cmd, "fatappend"))
     {
         CmdFatappend(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "fatnew"))
+    {
+        CmdFatnew(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "fatrm"))
+    {
+        CmdFatrm(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "fattrunc"))
+    {
+        CmdFattrunc(argc, argv);
         return;
     }
     if (StrEq(cmd, "free"))

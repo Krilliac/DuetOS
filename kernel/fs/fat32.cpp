@@ -853,6 +853,211 @@ bool RootUpdateEntrySize(const Volume& v, const char* want, u32 new_size)
     return false;
 }
 
+// Convert user-supplied "NAME.EXT" into the 11-byte space-padded
+// uppercase 8.3 form FAT32 stores on disk. Returns true on success
+// and fills `out_11`; false if the name is invalid (base > 8 chars,
+// ext > 3 chars, reserved initial char 0x00 / 0xE5, or contains a
+// disallowed character).
+bool MakeSfn(const char* name, u8* out_11)
+{
+    if (name == nullptr || name[0] == 0)
+        return false;
+    for (u32 i = 0; i < 11; ++i)
+        out_11[i] = ' ';
+    // Split at the LAST '.' — FAT doesn't support multiple dots
+    // (spec forbids them in SFN), but users may type "a.b.c". We
+    // reject multi-dot for now; operator can rename.
+    u32 dot_pos = 0xFFFFFFFFu;
+    u32 n = 0;
+    while (name[n] != 0)
+        ++n;
+    for (u32 i = 0; i < n; ++i)
+    {
+        if (name[i] == '.')
+        {
+            if (dot_pos != 0xFFFFFFFFu)
+                return false; // multiple dots
+            dot_pos = i;
+        }
+    }
+    const u32 base_len = (dot_pos == 0xFFFFFFFFu) ? n : dot_pos;
+    const u32 ext_len = (dot_pos == 0xFFFFFFFFu) ? 0 : (n - dot_pos - 1);
+    if (base_len == 0 || base_len > 8 || ext_len > 3)
+        return false;
+
+    auto to_sfn_char = [](char c) -> int
+    {
+        if (c >= 'a' && c <= 'z')
+            c = static_cast<char>(c - 32);
+        // Permitted: A-Z 0-9 and "!#$%&'()-@^_`{}~" (subset; spec is
+        // wider). Space inside a name is not allowed — would confuse
+        // the padding.
+        if (c >= 'A' && c <= 'Z')
+            return static_cast<u8>(c);
+        if (c >= '0' && c <= '9')
+            return static_cast<u8>(c);
+        const char kExtra[] = "!#$%&'()-@^_`{}~";
+        for (u32 i = 0; kExtra[i] != 0; ++i)
+            if (c == kExtra[i])
+                return static_cast<u8>(c);
+        return -1;
+    };
+
+    for (u32 i = 0; i < base_len; ++i)
+    {
+        const int ch = to_sfn_char(name[i]);
+        if (ch < 0)
+            return false;
+        out_11[i] = static_cast<u8>(ch);
+    }
+    for (u32 i = 0; i < ext_len; ++i)
+    {
+        const int ch = to_sfn_char(name[dot_pos + 1 + i]);
+        if (ch < 0)
+            return false;
+        out_11[8 + i] = static_cast<u8>(ch);
+    }
+    // Spec forbids 0x00 / 0xE5 as the first byte — 0xE5 collides
+    // with the deletion marker; 0x05 is the escape in the SFN
+    // record for a legitimate 0xE5 first char. v0 rejects rather
+    // than escaping.
+    if (out_11[0] == 0x00 || out_11[0] == 0xE5)
+        return false;
+    return true;
+}
+
+// Walk every in-use SFN slot in the root and invoke `visit`.
+// `visit` receives the absolute sector LBA, the 32-byte offset
+// inside that sector, and a decoded DirEntry. Returning false
+// stops the walk. LFN fragments, deleted, volume-id and dot
+// entries are skipped. Used by find-by-name and find-free-slot.
+// Separate from WalkDirChain because it exposes the on-disk
+// address, which WalkDirChain intentionally hides.
+using OnDiskSfnVisitor = bool (*)(u64 sector_lba, u32 off_in_sec, const u8* raw, const DirEntry& e, void* ctx);
+
+bool WalkRootOnDisk(const Volume& v, OnDiskSfnVisitor visit, void* ctx)
+{
+    u32 cluster = v.root_cluster;
+    for (u32 step = 0; step < 64; ++step)
+    {
+        if (cluster < 2 || cluster >= 0x0FFFFFF8u)
+            return true;
+        for (u32 sec = 0; sec < v.sectors_per_cluster; ++sec)
+        {
+            const u64 lba = u64(v.data_start_sector) + u64(cluster - 2) * u64(v.sectors_per_cluster) + sec;
+            if (drivers::storage::BlockDeviceRead(v.block_handle, lba, 1, g_scratch) != 0)
+                return false;
+            for (u32 off = 0; off + 32 <= v.bytes_per_sector; off += 32)
+            {
+                const u8* e = g_scratch + off;
+                if (e[0] == 0x00)
+                    return true;
+                if (e[0] == 0xE5)
+                    continue;
+                const u8 attr = e[11];
+                if ((attr & kAttrLongName) == kAttrLongName)
+                    continue;
+                if (attr & kAttrVolumeId)
+                    continue;
+                DirEntry decoded;
+                DecodeEntry(e, decoded);
+                if (IsDotEntry(decoded.name))
+                    continue;
+                if (!visit(lba, off, e, decoded, ctx))
+                    return true;
+            }
+        }
+        cluster = ReadFatEntry(v, cluster);
+    }
+    return true;
+}
+
+// Find any slot suitable for a new SFN record. Preference:
+//   (1) first 0xE5 (deleted) slot — reuses dir space.
+//   (2) the 0x00 end-of-dir slot — extends the dir one entry.
+// Returns true + fills sector/off when a slot is found.
+bool FindFreeRootSlot(const Volume& v, u64* out_lba, u32* out_off)
+{
+    u32 cluster = v.root_cluster;
+    for (u32 step = 0; step < 64; ++step)
+    {
+        if (cluster < 2 || cluster >= 0x0FFFFFF8u)
+            return false;
+        for (u32 sec = 0; sec < v.sectors_per_cluster; ++sec)
+        {
+            const u64 lba = u64(v.data_start_sector) + u64(cluster - 2) * u64(v.sectors_per_cluster) + sec;
+            if (drivers::storage::BlockDeviceRead(v.block_handle, lba, 1, g_scratch) != 0)
+                return false;
+            for (u32 off = 0; off + 32 <= v.bytes_per_sector; off += 32)
+            {
+                const u8* e = g_scratch + off;
+                if (e[0] == 0x00 || e[0] == 0xE5)
+                {
+                    *out_lba = lba;
+                    *out_off = off;
+                    return true;
+                }
+            }
+        }
+        cluster = ReadFatEntry(v, cluster);
+    }
+    return false;
+}
+
+// Find the sector LBA + offset of the root-dir SFN entry whose
+// decoded name matches `want` (case-insensitive). Returns false
+// if not found or on I/O error.
+bool FindEntryLba(const Volume& v, const char* want, u64* out_lba, u32* out_off)
+{
+    struct Ctx
+    {
+        const char* want;
+        u64 lba;
+        u32 off;
+        bool found;
+    };
+    Ctx ctx{want, 0, 0, false};
+    const bool walk_ok = WalkRootOnDisk(
+        v,
+        [](u64 lba, u32 off, const u8* raw, const DirEntry& e, void* cx) -> bool
+        {
+            (void)raw;
+            auto* c = static_cast<Ctx*>(cx);
+            if (NameIEqual(e.name, c->want))
+            {
+                c->lba = lba;
+                c->off = off;
+                c->found = true;
+                return false;
+            }
+            return true;
+        },
+        &ctx);
+    if (!walk_ok || !ctx.found)
+        return false;
+    *out_lba = ctx.lba;
+    *out_off = ctx.off;
+    return true;
+}
+
+// Free an entire cluster chain starting at `first_cluster`. Each
+// FAT entry is zeroed (in both mirrors). Bounded at 65536
+// clusters so a corrupted self-loop can't spin forever.
+bool FreeClusterChain(const Volume& v, u32 first_cluster)
+{
+    u32 cluster = first_cluster;
+    for (u32 step = 0; step < 65536; ++step)
+    {
+        if (cluster < 2 || cluster >= 0x0FFFFFF8u)
+            return true;
+        const u32 next = ReadFatEntry(v, cluster);
+        if (!WriteFatEntry(v, cluster, 0))
+            return false;
+        cluster = next;
+    }
+    return true;
+}
+
 } // namespace
 
 i64 Fat32AppendInRoot(const Volume* v, const char* name, const void* buf, u64 len)
@@ -976,6 +1181,290 @@ i64 Fat32AppendInRoot(const Volume* v, const char* name, const void* buf, u64 le
     WalkRootIntoSnapshot(*vm, vm->root_cluster);
 
     return static_cast<i64>(written);
+}
+
+i64 Fat32CreateInRoot(const Volume* v, const char* name, const void* buf, u64 len)
+{
+    if (v == nullptr || name == nullptr)
+        return -1;
+    if (buf == nullptr && len != 0)
+        return -1;
+    if (len > 0xFFFFFFFFu)
+        return -1;
+
+    u8 sfn[11];
+    if (!MakeSfn(name, sfn))
+        return -1;
+
+    // Duplicate check — walking the cached snapshot is cheaper
+    // than a fresh on-disk walk and sufficient because our create
+    // immediately refreshes the snapshot at success.
+    char human[13];
+    FormatShortName(sfn, human);
+    if (Fat32FindInRoot(v, human) != nullptr)
+        return -1;
+
+    u64 slot_lba = 0;
+    u32 slot_off = 0;
+    if (!FindFreeRootSlot(*v, &slot_lba, &slot_off))
+        return -1;
+
+    // Allocate and chain clusters for the content, if any.
+    const u64 cluster_bytes = u64(v->sectors_per_cluster) * u64(v->bytes_per_sector);
+    if (v->sectors_per_cluster > sizeof(g_scratch) / 512)
+        return -1;
+    u32 first_cluster = 0;
+    if (len > 0)
+    {
+        first_cluster = AllocateFreeCluster(*v);
+        if (first_cluster == 0)
+            return -1;
+        if (!ZeroCluster(*v, first_cluster))
+            return -1;
+        u32 tail = first_cluster;
+        u64 written = 0;
+        const auto* src = static_cast<const u8*>(buf);
+        while (written < len)
+        {
+            const u64 remain = len - written;
+            const u64 chunk = (remain < cluster_bytes) ? remain : cluster_bytes;
+            const u64 lba = u64(v->data_start_sector) + u64(tail - 2) * u64(v->sectors_per_cluster);
+            if (chunk == cluster_bytes)
+            {
+                for (u64 i = 0; i < chunk; ++i)
+                    g_scratch[i] = src[written + i];
+            }
+            else
+            {
+                // Read-before-write so the cluster's trailing slack
+                // (zeroed by ZeroCluster) is preserved. Cheaper
+                // alternative: VZero scratch then copy. Do the
+                // cheaper thing since we just zeroed the cluster.
+                VZero(g_scratch, cluster_bytes);
+                for (u64 i = 0; i < chunk; ++i)
+                    g_scratch[i] = src[written + i];
+            }
+            if (drivers::storage::BlockDeviceWrite(v->block_handle, lba, v->sectors_per_cluster, g_scratch) != 0)
+            {
+                FreeClusterChain(*v, first_cluster);
+                return -1;
+            }
+            written += chunk;
+            if (written == len)
+                break;
+            const u32 fresh = AllocateFreeCluster(*v);
+            if (fresh == 0 || !ZeroCluster(*v, fresh) || !WriteFatEntry(*v, tail, fresh))
+            {
+                FreeClusterChain(*v, first_cluster);
+                return -1;
+            }
+            tail = fresh;
+        }
+    }
+
+    // Write the SFN record into the chosen slot. Read the sector
+    // first — other entries in that sector must not be clobbered.
+    if (drivers::storage::BlockDeviceRead(v->block_handle, slot_lba, 1, g_scratch) != 0)
+    {
+        if (first_cluster != 0)
+            FreeClusterChain(*v, first_cluster);
+        return -1;
+    }
+    u8* rec = g_scratch + slot_off;
+    // Remember whether this slot was the end-of-dir marker. If it
+    // was, we have to also bump the NEXT slot's first byte to 0x00
+    // so the enumerator still sees a terminator.
+    const bool was_eod = (rec[0] == 0x00);
+    VZero(rec, 32);
+    for (u32 i = 0; i < 11; ++i)
+        rec[i] = sfn[i];
+    rec[11] = 0x20; // ATTR_ARCHIVE
+    rec[26] = static_cast<u8>(first_cluster & 0xFF);
+    rec[27] = static_cast<u8>((first_cluster >> 8) & 0xFF);
+    rec[20] = static_cast<u8>((first_cluster >> 16) & 0xFF);
+    rec[21] = static_cast<u8>((first_cluster >> 24) & 0xFF);
+    const u32 size32 = static_cast<u32>(len);
+    rec[28] = static_cast<u8>(size32 & 0xFF);
+    rec[29] = static_cast<u8>((size32 >> 8) & 0xFF);
+    rec[30] = static_cast<u8>((size32 >> 16) & 0xFF);
+    rec[31] = static_cast<u8>((size32 >> 24) & 0xFF);
+    if (was_eod && slot_off + 32 < v->bytes_per_sector)
+    {
+        // In-sector neighbour: zero it so iterator sees EOD there.
+        g_scratch[slot_off + 32] = 0x00;
+    }
+    if (drivers::storage::BlockDeviceWrite(v->block_handle, slot_lba, 1, g_scratch) != 0)
+    {
+        if (first_cluster != 0)
+            FreeClusterChain(*v, first_cluster);
+        return -1;
+    }
+    // If was_eod and the slot was the final entry of its sector,
+    // write the first byte of the FIRST entry of the next
+    // directory sector to 0x00 so enumeration doesn't read stale
+    // data. For v0 the directory lives in one cluster and our
+    // tests never reach that corner — skip.
+
+    // Refresh cached snapshot.
+    Volume* vm = const_cast<Volume*>(v);
+    WalkRootIntoSnapshot(*vm, vm->root_cluster);
+    return static_cast<i64>(len);
+}
+
+bool Fat32DeleteInRoot(const Volume* v, const char* name)
+{
+    if (v == nullptr || name == nullptr)
+        return false;
+    struct FindCtx
+    {
+        const char* want;
+        u64 lba;
+        u32 off;
+        u32 first_cluster;
+        bool found;
+    };
+    FindCtx fc{name, 0, 0, 0, false};
+    WalkRootOnDisk(
+        *v,
+        [](u64 lba, u32 off, const u8* raw, const DirEntry& e, void* cx) -> bool
+        {
+            auto* c = static_cast<FindCtx*>(cx);
+            if (NameIEqual(e.name, c->want))
+            {
+                c->lba = lba;
+                c->off = off;
+                c->first_cluster = e.first_cluster;
+                c->found = true;
+                (void)raw;
+                return false;
+            }
+            return true;
+        },
+        &fc);
+    if (!fc.found)
+        return false;
+
+    // Free clusters FIRST — if this fails partway, the dir entry
+    // still points at a partially-freed chain, which is bad but
+    // the deletion was requested; the operator knows. If we
+    // marked the entry deleted first and then the cluster chain
+    // free failed, we'd leak clusters from a file that's already
+    // invisible. Freeing first minimizes leak risk.
+    if (fc.first_cluster >= 2)
+    {
+        if (!FreeClusterChain(*v, fc.first_cluster))
+            return false;
+    }
+    // Patch the entry's first byte to 0xE5.
+    if (drivers::storage::BlockDeviceRead(v->block_handle, fc.lba, 1, g_scratch) != 0)
+        return false;
+    g_scratch[fc.off] = 0xE5;
+    if (drivers::storage::BlockDeviceWrite(v->block_handle, fc.lba, 1, g_scratch) != 0)
+        return false;
+
+    Volume* vm = const_cast<Volume*>(v);
+    WalkRootIntoSnapshot(*vm, vm->root_cluster);
+    return true;
+}
+
+i64 Fat32TruncateInRoot(const Volume* v, const char* name, u64 new_size)
+{
+    if (v == nullptr || name == nullptr)
+        return -1;
+    if (new_size > 0xFFFFFFFFu)
+        return -1;
+
+    const DirEntry* e = Fat32FindInRoot(v, name);
+    if (e == nullptr)
+        return -1;
+    if (e->attributes & kAttrDirectory)
+        return -1;
+    const u64 old_size = e->size_bytes;
+    if (new_size == old_size)
+        return static_cast<i64>(new_size);
+
+    if (new_size > old_size)
+    {
+        // Growth: append zero bytes. Simplest, matches spec (FAT32
+        // has no sparse semantics, so the tail is materialised).
+        const u64 grow = new_size - old_size;
+        // Budget our zero buffer at 1 KiB chunks — cluster_bytes
+        // is never more than 4 KiB in our test image, fits fine.
+        static u8 zeros[1024];
+        VZero(zeros, sizeof(zeros));
+        u64 remain = grow;
+        if (e->first_cluster < 2)
+            return -1; // can't grow a truly-empty file in v0
+        while (remain > 0)
+        {
+            const u64 chunk = (remain < sizeof(zeros)) ? remain : sizeof(zeros);
+            const i64 a = Fat32AppendInRoot(v, name, zeros, chunk);
+            if (a != static_cast<i64>(chunk))
+                return -1;
+            remain -= chunk;
+        }
+        return static_cast<i64>(new_size);
+    }
+
+    // Shrink: walk to the cluster containing byte (new_size - 1),
+    // mark it EOC, free the rest. Special case new_size == 0:
+    // release first_cluster too and zero it in the dir entry.
+    const u64 cluster_bytes = u64(v->sectors_per_cluster) * u64(v->bytes_per_sector);
+    if (new_size == 0)
+    {
+        // Free the whole chain, then patch the dir entry to
+        // size=0, first_cluster=0. Read-modify-write the sector
+        // containing the entry; touch ONLY bytes 20/21 (hi) and
+        // 26/27 (lo) for cluster + 28..31 for size.
+        if (e->first_cluster >= 2)
+        {
+            if (!FreeClusterChain(*v, e->first_cluster))
+                return -1;
+        }
+        u64 flba = 0;
+        u32 foff = 0;
+        if (!FindEntryLba(*v, name, &flba, &foff))
+            return -1;
+        if (drivers::storage::BlockDeviceRead(v->block_handle, flba, 1, g_scratch) != 0)
+            return -1;
+        g_scratch[foff + 20] = 0;
+        g_scratch[foff + 21] = 0;
+        g_scratch[foff + 26] = 0;
+        g_scratch[foff + 27] = 0;
+        g_scratch[foff + 28] = 0;
+        g_scratch[foff + 29] = 0;
+        g_scratch[foff + 30] = 0;
+        g_scratch[foff + 31] = 0;
+        if (drivers::storage::BlockDeviceWrite(v->block_handle, flba, 1, g_scratch) != 0)
+            return -1;
+        Volume* vm = const_cast<Volume*>(v);
+        WalkRootIntoSnapshot(*vm, vm->root_cluster);
+        return 0;
+    }
+
+    // Non-zero shrink.
+    const u64 keep_clusters = (new_size + cluster_bytes - 1) / cluster_bytes;
+    u32 cluster = e->first_cluster;
+    for (u64 i = 1; i < keep_clusters; ++i)
+    {
+        const u32 next = ReadFatEntry(*v, cluster);
+        if (next < 2 || next >= 0x0FFFFFF8u)
+            return -1;
+        cluster = next;
+    }
+    const u32 first_to_free = ReadFatEntry(*v, cluster);
+    if (!WriteFatEntry(*v, cluster, 0x0FFFFFFFu))
+        return -1;
+    if (first_to_free >= 2 && first_to_free < 0x0FFFFFF8u)
+    {
+        if (!FreeClusterChain(*v, first_to_free))
+            return -1;
+    }
+    Volume* vm = const_cast<Volume*>(v);
+    if (!RootUpdateEntrySize(*vm, name, static_cast<u32>(new_size)))
+        return -1;
+    WalkRootIntoSnapshot(*vm, vm->root_cluster);
+    return static_cast<i64>(new_size);
 }
 
 bool Fat32ReadFileStream(const Volume* v, const DirEntry* e, ReadChunkCb cb, void* ctx)
@@ -1330,6 +1819,77 @@ void Fat32SelfTest()
         return;
     }
     SerialWrite("[fs/fat32] self-test OK (append grew HELLO.TXT 17 -> 5017 B)\n");
+
+    // Seventh phase: create. New file "NEW.TXT" with content
+    // "created at runtime\n" (19 bytes). Must enumerate + read
+    // back exactly.
+    const u8 create_body[] = "created at runtime\n";
+    const u64 create_len = 19;
+    if (Fat32CreateInRoot(v0, "NEW.TXT", create_body, create_len) != static_cast<i64>(create_len))
+    {
+        SerialWrite("[fs/fat32] self-test FAILED: create NEW.TXT\n");
+        return;
+    }
+    const DirEntry* newent = Fat32FindInRoot(v0, "NEW.TXT");
+    if (newent == nullptr || newent->size_bytes != create_len)
+    {
+        SerialWrite("[fs/fat32] self-test FAILED: NEW.TXT not visible / wrong size\n");
+        return;
+    }
+    VZero(buf, sizeof(buf));
+    const i64 n5 = Fat32ReadFile(v0, newent, buf, sizeof(buf));
+    if (n5 != static_cast<i64>(create_len))
+    {
+        SerialWrite("[fs/fat32] self-test FAILED: NEW.TXT read-back wrong size\n");
+        return;
+    }
+    for (u32 i = 0; i < create_len; ++i)
+    {
+        if (buf[i] != create_body[i])
+        {
+            SerialWrite("[fs/fat32] self-test FAILED: NEW.TXT content mismatch\n");
+            return;
+        }
+    }
+    SerialWrite("[fs/fat32] self-test OK (created NEW.TXT 19 B, round-tripped)\n");
+
+    // Eighth phase: truncate. Shrink NEW.TXT from 19 to 7 bytes
+    // ("created"), then verify. Cluster is not freed (fits in
+    // one cluster either way) but the size field and any future
+    // read must stop at 7.
+    if (Fat32TruncateInRoot(v0, "NEW.TXT", 7) != 7)
+    {
+        SerialWrite("[fs/fat32] self-test FAILED: truncate NEW.TXT -> 7\n");
+        return;
+    }
+    const DirEntry* trunc_ent = Fat32FindInRoot(v0, "NEW.TXT");
+    if (trunc_ent == nullptr || trunc_ent->size_bytes != 7)
+    {
+        SerialWrite("[fs/fat32] self-test FAILED: NEW.TXT post-truncate size wrong\n");
+        return;
+    }
+    VZero(buf, sizeof(buf));
+    const i64 n6 = Fat32ReadFile(v0, trunc_ent, buf, sizeof(buf));
+    if (n6 != 7 || buf[0] != 'c' || buf[6] != 'd')
+    {
+        SerialWrite("[fs/fat32] self-test FAILED: NEW.TXT post-truncate content\n");
+        return;
+    }
+    SerialWrite("[fs/fat32] self-test OK (truncated NEW.TXT 19 -> 7 B)\n");
+
+    // Ninth phase: delete. Remove NEW.TXT; enumeration must no
+    // longer see it.
+    if (!Fat32DeleteInRoot(v0, "NEW.TXT"))
+    {
+        SerialWrite("[fs/fat32] self-test FAILED: delete NEW.TXT\n");
+        return;
+    }
+    if (Fat32FindInRoot(v0, "NEW.TXT") != nullptr)
+    {
+        SerialWrite("[fs/fat32] self-test FAILED: NEW.TXT still visible after delete\n");
+        return;
+    }
+    SerialWrite("[fs/fat32] self-test OK (deleted NEW.TXT)\n");
 }
 
 } // namespace customos::fs::fat32

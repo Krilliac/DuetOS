@@ -170,6 +170,53 @@ i64 Fat32WriteInPlace(const Volume* v, const DirEntry* e, u64 offset, const void
 /// which the path walker doesn't yet expose. Follow-up slice.
 i64 Fat32AppendInRoot(const Volume* v, const char* name, const void* buf, u64 len);
 
+/// Create a new file in the root directory with the given name
+/// and initial content. `name` may be a "NAME.EXT" form (up to
+/// 8 + 3 chars, case-insensitive) or a bare "NAME" with no dot.
+/// Anything that can't fit in the 8.3 SFN encoding (longer than
+/// 8 base or 3 extension, or containing forbidden chars) is
+/// rejected with -1. No LFN is emitted in v0 — callers get
+/// the 8.3 form preserved verbatim.
+///
+/// Behavior:
+///   - Finds the first unused directory slot (0x00 end-of-dir or
+///     0xE5 deleted) in the root cluster chain.
+///   - If bytes != nullptr && len > 0: allocates one or more
+///     clusters, writes the content, chains them, and records
+///     first_cluster + size in the directory entry.
+///   - Writes the SFN record (attributes = 0x20 = ARCHIVE).
+///   - Does NOT support subdirectory targets, LFN emission, or
+///     root-cluster-full growth. A filled root dir returns -1.
+///
+/// Returns the file's new size on success, -1 on failure.
+/// Duplicate-name detection: returns -1 if a non-deleted entry
+/// with the same 8.3 already exists.
+i64 Fat32CreateInRoot(const Volume* v, const char* name, const void* buf, u64 len);
+
+/// Delete a file from the root directory. Finds the entry by
+/// name, marks the SFN record's first byte to 0xE5 (FAT's
+/// deleted marker), frees the entire cluster chain by writing
+/// 0 to each entry in both FAT copies. Refreshes the cached
+/// root snapshot.
+///
+/// Returns true on success, false if the file is not found or
+/// I/O fails mid-way. On partial failure the on-disk state MAY
+/// be inconsistent — v0 has no journaling.
+bool Fat32DeleteInRoot(const Volume* v, const char* name);
+
+/// Truncate a root-dir file to `new_size` bytes. Three cases:
+///   - new_size == current: no-op, returns 0.
+///   - new_size >  current: equivalent to Fat32AppendInRoot of
+///     (new_size - current) zero bytes.
+///   - new_size <  current: walks the chain to the cluster
+///     containing byte (new_size - 1), marks it EOC, frees all
+///     subsequent clusters. If new_size == 0, also releases
+///     first_cluster and zeros that field in the directory
+///     entry. Updates size in place.
+///
+/// Returns the new size on success, -1 on failure.
+i64 Fat32TruncateInRoot(const Volume* v, const char* name, u64 new_size);
+
 /// Boot-time self-test. Calls `Fat32Probe` on every registered
 /// block device; partitions that aren't FAT32 are expected to fail
 /// and are logged as "not FAT32" (no failure shout). PASS
