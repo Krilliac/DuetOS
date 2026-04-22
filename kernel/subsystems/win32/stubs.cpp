@@ -120,6 +120,8 @@ constexpr u32 kOffWCtoMB = 0x5EF;             // batch 33 — 48 bytes
 constexpr u32 kOffGetUserNameW = 0x61F;       // batch 34 — 47 bytes
 constexpr u32 kOffGetComputerNameW = 0x64E;   // batch 34 — 61 bytes
 constexpr u32 kOffGetWinDirW = 0x68B;         // batch 35 — 30 bytes (buf-first sig)
+constexpr u32 kOffGetLogicalDrives = 0x6A9;   // batch 36 — 6 bytes (returns 0x00800000, X: drive)
+constexpr u32 kOffGetDriveType = 0x6AF;       // batch 36 — 6 bytes (returns 3 = DRIVE_FIXED)
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -1703,10 +1705,26 @@ constexpr u8 kStubsBytes[] = {
     // .small:
     0xB8, 0x04, 0x00, 0x00, 0x00, // 0x6A3 mov eax, 4 (required incl NUL)
     0xC3,                         // 0x6A8 ret
+
+    // === Batch 36: misc — drives + error mode + format msg ====
+
+    // --- GetLogicalDrives (offset 0x6A9, 6 bytes) -------------
+    // Win32: DWORD GetLogicalDrives(void). Returns a bitmap of
+    // drive letters (bit 0 = A:, bit 23 = X:). v0 reports only
+    // X: — matches our single fixed path.
+    0xB8, 0x00, 0x00, 0x80, 0x00, // 0x6A9 mov eax, 0x00800000 (bit 23 = X:)
+    0xC3,                         // 0x6AE ret
+
+    // --- GetDriveType (offset 0x6AF, 6 bytes) -----------------
+    // Win32: UINT GetDriveType{A,W}(LPCxSTR rcx). Returns the
+    // drive type. v0 always returns 3 (DRIVE_FIXED) — X: is a
+    // "fixed" logical drive in CustomOS land.
+    0xB8, 0x03, 0x00, 0x00, 0x00, // 0x6AF mov eax, 3 (DRIVE_FIXED)
+    0xC3,                         // 0x6B4 ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x6A9, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0x6B5, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -2009,6 +2027,21 @@ constexpr StubEntry kStubsTable[] = {
     {"kernel32.dll", "GetSystemDirectoryA", kOffGetWinDirW},
     {"kernel32.dll", "GetSystemWindowsDirectoryW", kOffGetWinDirW},
     {"kernel32.dll", "GetSystemWindowsDirectoryA", kOffGetWinDirW},
+
+    // Batch 36 — drives, error modes, format messages.
+    //   GetLogicalDrives returns bit 23 set (only X: mounted).
+    //   GetDriveType*   returns 3 (DRIVE_FIXED) for any input.
+    //   SetErrorMode / GetErrorMode return 0 (no special mode).
+    //   FormatMessage{W,A} returns 0 — callers usually fall
+    //     back to their own format-by-code path.
+    {"kernel32.dll", "GetLogicalDrives", kOffGetLogicalDrives},
+    {"kernel32.dll", "GetDriveTypeW", kOffGetDriveType},
+    {"kernel32.dll", "GetDriveTypeA", kOffGetDriveType},
+    {"kernel32.dll", "SetErrorMode", kOffReturnZero},
+    {"kernel32.dll", "GetErrorMode", kOffReturnZero},
+    {"kernel32.dll", "SetThreadErrorMode", kOffReturnOne}, // return TRUE, ignore mode
+    {"kernel32.dll", "FormatMessageW", kOffReturnZero},
+    {"kernel32.dll", "FormatMessageA", kOffReturnZero},
 
     // Batch 9 — Win32 process heap, backed by the per-process
     // 16-page region at 0x50000000 and SYS_HEAP_ALLOC /

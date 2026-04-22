@@ -323,6 +323,13 @@ __declspec(dllimport) DWORD __stdcall GetTempPathW(DWORD nBufferLength, LPWSTR l
 __declspec(dllimport) unsigned int __stdcall GetWindowsDirectoryW(LPWSTR lpBuffer, unsigned int uSize);
 __declspec(dllimport) unsigned int __stdcall GetSystemDirectoryW(LPWSTR lpBuffer, unsigned int uSize);
 
+// Batch 36 — misc drives/error/format stubs.
+__declspec(dllimport) DWORD __stdcall GetLogicalDrives(void);
+__declspec(dllimport) unsigned int __stdcall GetDriveTypeW(LPCWSTR lpRootPathName);
+__declspec(dllimport) unsigned int __stdcall SetErrorMode(unsigned int uMode);
+__declspec(dllimport) DWORD __stdcall FormatMessageW(DWORD dwFlags, const void* lpSource, DWORD dwMessageId,
+                                                     DWORD dwLanguageId, LPWSTR lpBuffer, DWORD nSize, void* Arguments);
+
 static const char kMsg[] = "[hello-winapi] printed via kernel32.WriteFile!\n";
 #define kMsgLen ((DWORD)(sizeof(kMsg) - 1))
 
@@ -1205,6 +1212,32 @@ void _start(void)
         WriteFile(out, b35_ok, sizeof(b35_ok) - 1, &b35w, 0);
     else
         WriteFile(out, b35_bad, sizeof(b35_bad) - 1, &b35w, 0);
+
+    // Batch 36 exercise — drives/error/format.
+    //
+    // Invariants checked:
+    //   * GetLogicalDrives returns 0x00800000 (bit 23 = X:).
+    //   * GetDriveTypeW(L"X:\\") returns 3 (DRIVE_FIXED).
+    //   * SetErrorMode returns 0 (previous mode).
+    //   * FormatMessageW returns 0 (can't format — caller
+    //     should handle).
+    DWORD b36_drives = GetLogicalDrives();
+    static const WCHAR kDriveX[] = {'X', ':', '\\', 0};
+    unsigned int b36_drive_type = GetDriveTypeW(kDriveX);
+    unsigned int b36_prev_em = SetErrorMode(0x8001); // SEM_FAILCRITICALERRORS
+    WCHAR b36_fmbuf[16];
+    for (int i = 0; i < 16; ++i)
+        b36_fmbuf[i] = 0;
+    DWORD b36_fm = FormatMessageW(0x1000 /* FROM_SYSTEM */, 0, 5 /* ERROR_ACCESS_DENIED */, 0, b36_fmbuf, 16, 0);
+
+    const char b36_ok[] = "[batch36] drives + error mode + format OK\n";
+    const char b36_bad[] = "[batch36] misc-stubs FAILED invariants\n";
+    BOOL b36_pass = b36_drives == 0x00800000 && b36_drive_type == 3 && b36_prev_em == 0 && b36_fm == 0;
+    DWORD b36w = 0;
+    if (b36_pass)
+        WriteFile(out, b36_ok, sizeof(b36_ok) - 1, &b36w, 0);
+    else
+        WriteFile(out, b36_bad, sizeof(b36_bad) - 1, &b36w, 0);
 
     // Batch 3 round-trip: store a distinctive value via
     // SetLastError, read it back via GetLastError, exit with

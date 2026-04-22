@@ -130,3 +130,8 @@ EXPORTS
     GetTempPathW
     GetWindowsDirectoryW
     GetSystemDirectoryW
+    ; Batch 36 — misc drives/error/format
+    GetLogicalDrives
+    GetDriveTypeW
+    SetErrorMode
+    FormatMessageW
