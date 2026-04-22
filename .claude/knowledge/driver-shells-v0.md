@@ -136,6 +136,22 @@ init.
 family tags are also explicit — they won't drift unless QEMU's
 default devices change.
 
+## Companion skeletons that landed alongside
+
+- **`kernel/net/stack.{h,cpp}`** — L2/L3/L4 types + NetStackInit.
+  Binds each NIC from `drivers::net` as an interface. Logs a
+  per-iface line. `static_assert`s every on-wire header size.
+- **`kernel/fs/ext4.{h,cpp}`**, **`kernel/fs/ntfs.{h,cpp}`**,
+  **`kernel/fs/exfat.{h,cpp}`** — boot-sector / superblock probe
+  shells for the three interoperability formats. Each scans
+  every block device and logs "volumes found" (0 on QEMU's
+  ramfs-only boot).
+- **`kernel/subsystems/graphics/graphics.{h,cpp}`** — Vulkan
+  ICD skeleton + D3D11/D3D12/DXGI translation stubs. Enumerates
+  `drivers::gpu::Gpu(i)` as physical devices, returns
+  `VK_ERROR_INCOMPATIBLE_DRIVER` / `E_FAIL` so callers hit
+  their fallback paths cleanly.
+
 ## Next slice candidates
 
 1. **virtio-gpu bring-up** — simplest real GPU driver. 2D
@@ -149,8 +165,14 @@ default devices change.
    validating that the MMIO window decodes.
 4. **Intel HDA codec probe** — 2 MMIO reads to confirm the
    controller presence, no codec parsing.
-5. **Networking stack skeleton** — `kernel/net/` directory,
-   link-layer packet API that the NIC drivers plug into.
+5. **ext4 superblock → directory walk** — the probe shell
+   already validated the magic; next is reading block-group
+   descriptors and the root-directory inode.
+6. **Wire D3D PE imports into the graphics ICD** —
+   win32/stubs.cpp would route `d3d11.dll!D3D11CreateDevice`
+   straight to `subsystems::graphics::D3D11CreateDeviceStub`
+   instead of the miss-logger. First step toward
+   DXVK/vkd3d-proton-style translation.
 
 Each is a single commit's worth of work.
 

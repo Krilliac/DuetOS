@@ -19,6 +19,7 @@
 #include "../drivers/pci/pci.h"
 #include "../drivers/usb/usb.h"
 #include "../net/stack.h"
+#include "../subsystems/graphics/graphics.h"
 #include "../drivers/storage/ahci.h"
 #include "../drivers/storage/block.h"
 #include "../drivers/storage/nvme.h"
@@ -781,6 +782,9 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
 
     SerialWrite("[boot] Bringing up network stack skeleton.\n");
     customos::net::NetStackInit();
+
+    SerialWrite("[boot] Bringing up graphics ICD skeleton.\n");
+    customos::subsystems::graphics::GraphicsIcdInit();
 
     SerialWrite("[boot] Bringing up block device layer.\n");
     customos::drivers::storage::BlockLayerInit();
