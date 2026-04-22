@@ -117,6 +117,8 @@ constexpr u32 kOffGetModFileNameW = 0x587;    // batch 32 — 24 bytes
 constexpr u32 kOffGetCurrentDirW = 0x59F;     // batch 32 — 31 bytes
 constexpr u32 kOffMBtoWC = 0x5BE;             // batch 33 — 49 bytes
 constexpr u32 kOffWCtoMB = 0x5EF;             // batch 33 — 48 bytes
+constexpr u32 kOffGetUserNameW = 0x61F;       // batch 34 — 47 bytes
+constexpr u32 kOffGetComputerNameW = 0x64E;   // batch 34 — 61 bytes
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -1626,10 +1628,57 @@ constexpr u8 kStubsBytes[] = {
     0x5E,       // 0x61C pop rsi
     0x5F,       // 0x61D pop rdi
     0xC3,       // 0x61E ret
+
+    // === Batch 34: identity queries ============================
+    //
+    // Fixed-string probes for "who am I on this machine?"
+    // queries. Real Windows writes the NetBIOS name / SAM user.
+    // v0 hands back constants: user = "user" (4 chars), computer
+    // = "CustomOS" (8 chars). Both follow the same in/out-size
+    // shape: *pcchSize is capacity on entry, chars-written-
+    // including-NUL on exit.
+
+    // --- GetUserNameW (offset 0x61F, 47 bytes) ----------------
+    // Win32: BOOL GetUserNameW(LPWSTR rcx, LPDWORD rdx).
+    //   If *rdx >= 5, write L"user\0", *rdx = 5, return TRUE.
+    //   Else, *rdx = 5 (required), return FALSE.
+    0x8B, 0x02,                               // 0x61F mov eax, [rdx]  (capacity in wide chars)
+    0x83, 0xF8, 0x05,                         // 0x621 cmp eax, 5
+    0x72, 0x1F,                               // 0x624 jb .small (+0x1F = 31)
+    0xC7, 0x01, 0x75, 0x00, 0x73, 0x00,       // 0x626 mov dword [rcx], 0x00730075 (L"us")
+    0xC7, 0x41, 0x04, 0x65, 0x00, 0x72, 0x00, // 0x62C mov dword [rcx+4], 0x00720065 (L"er")
+    0x66, 0xC7, 0x41, 0x08, 0x00, 0x00,       // 0x633 mov word [rcx+8], 0 (NUL)
+    0xC7, 0x02, 0x05, 0x00, 0x00, 0x00,       // 0x639 mov dword [rdx], 5 (chars incl NUL)
+    0xB8, 0x01, 0x00, 0x00, 0x00,             // 0x63F mov eax, 1 (BOOL TRUE)
+    0xC3,                                     // 0x644 ret
+    // .small:
+    0xC7, 0x02, 0x05, 0x00, 0x00, 0x00, // 0x645 mov dword [rdx], 5 (required)
+    0x31, 0xC0,                         // 0x64B xor eax, eax (BOOL FALSE)
+    0xC3,                               // 0x64D ret
+
+    // --- GetComputerNameW (offset 0x64E, 61 bytes) ------------
+    // Win32: BOOL GetComputerNameW(LPWSTR rcx, LPDWORD rdx).
+    //   Writes L"CustomOS\0" (9 wide chars incl NUL) if buffer
+    //   has room. Same size-convention as GetUserNameW.
+    0x8B, 0x02,                               // 0x64E mov eax, [rdx]
+    0x83, 0xF8, 0x09,                         // 0x650 cmp eax, 9
+    0x72, 0x2D,                               // 0x653 jb .small (+0x2D = 45)
+    0xC7, 0x01, 0x43, 0x00, 0x75, 0x00,       // 0x655 mov dword [rcx], 0x00750043 (L"Cu")
+    0xC7, 0x41, 0x04, 0x73, 0x00, 0x74, 0x00, // 0x65B mov dword [rcx+4], 0x00740073 (L"st")
+    0xC7, 0x41, 0x08, 0x6F, 0x00, 0x6D, 0x00, // 0x662 mov dword [rcx+8], 0x006D006F (L"om")
+    0xC7, 0x41, 0x0C, 0x4F, 0x00, 0x53, 0x00, // 0x669 mov dword [rcx+12], 0x0053004F (L"OS")
+    0x66, 0xC7, 0x41, 0x10, 0x00, 0x00,       // 0x670 mov word [rcx+16], 0 (NUL)
+    0xC7, 0x02, 0x09, 0x00, 0x00, 0x00,       // 0x676 mov dword [rdx], 9
+    0xB8, 0x01, 0x00, 0x00, 0x00,             // 0x67C mov eax, 1
+    0xC3,                                     // 0x681 ret
+    // .small:
+    0xC7, 0x02, 0x09, 0x00, 0x00, 0x00, // 0x682 mov dword [rdx], 9 (required)
+    0x31, 0xC0,                         // 0x688 xor eax, eax
+    0xC3,                               // 0x68A ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x61F, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0x68B, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -1908,6 +1957,16 @@ constexpr StubEntry kStubsTable[] = {
     // UTF-8 sequences lose high-plane data.
     {"kernel32.dll", "MultiByteToWideChar", kOffMBtoWC},
     {"kernel32.dll", "WideCharToMultiByte", kOffWCtoMB},
+
+    // Batch 34 — identity queries. Fixed-string stubs.
+    // kernel32 hosts GetComputerNameW; advapi32 hosts
+    // GetUserNameW (on real Windows it's an advapi32 export
+    // that delegates to LsaQueryInformationPolicy). Both land
+    // on our same in/out-size stub pattern.
+    {"advapi32.dll", "GetUserNameW", kOffGetUserNameW},
+    {"advapi32.dll", "GetUserNameA", kOffGetUserNameW}, // ASCII caller gets ASCII-range bytes OK
+    {"kernel32.dll", "GetComputerNameW", kOffGetComputerNameW},
+    {"kernel32.dll", "GetComputerNameA", kOffGetComputerNameW},
 
     // Batch 9 — Win32 process heap, backed by the per-process
     // 16-page region at 0x50000000 and SYS_HEAP_ALLOC /

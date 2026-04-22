@@ -20,3 +20,5 @@ EXPORTS
     LookupPrivilegeValueW
     LookupPrivilegeValueA
     AdjustTokenPrivileges
+    ; Batch 34 — identity queries
+    GetUserNameW

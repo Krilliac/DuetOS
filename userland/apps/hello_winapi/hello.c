@@ -310,6 +310,11 @@ __declspec(dllimport) int __stdcall WideCharToMultiByte(unsigned int CodePage, D
                                                         int cchWideChar, LPSTR lpMultiByteStr, int cbMultiByte,
                                                         LPCSTR lpDefaultChar, BOOL* lpUsedDefaultChar);
 
+// Batch 34 — identity queries. Both take (buf, *size-in-chars);
+// *size updated to chars-written-INCLUDING-NUL on output.
+__declspec(dllimport) BOOL __stdcall GetUserNameW(LPWSTR lpBuffer, LPDWORD pcbBuffer);
+__declspec(dllimport) BOOL __stdcall GetComputerNameW(LPWSTR lpBuffer, LPDWORD nSize);
+
 static const char kMsg[] = "[hello-winapi] printed via kernel32.WriteFile!\n";
 #define kMsgLen ((DWORD)(sizeof(kMsg) - 1))
 
@@ -1119,6 +1124,45 @@ void _start(void)
         WriteFile(out, b33_ok, sizeof(b33_ok) - 1, &b33w, 0);
     else
         WriteFile(out, b33_bad, sizeof(b33_bad) - 1, &b33w, 0);
+
+    // Batch 34 exercise — identity queries.
+    //
+    // Invariants checked:
+    //   * GetUserNameW with a 16-char buffer returns TRUE,
+    //     writes L"user\0", and sets *size = 5.
+    //   * GetUserNameW with a 2-char buffer returns FALSE and
+    //     sets *size = 5 (required).
+    //   * GetComputerNameW with a 16-char buffer returns TRUE,
+    //     writes L"CustomOS\0", and sets *size = 9.
+    WCHAR b34_ubuf[16];
+    for (int i = 0; i < 16; ++i)
+        b34_ubuf[i] = (WCHAR)0xAAAA;
+    DWORD b34_usize = 16;
+    BOOL b34_u_ok = GetUserNameW(b34_ubuf, &b34_usize);
+    BOOL b34_u_str =
+        b34_ubuf[0] == 'u' && b34_ubuf[1] == 's' && b34_ubuf[2] == 'e' && b34_ubuf[3] == 'r' && b34_ubuf[4] == 0;
+
+    DWORD b34_usmall = 2;
+    BOOL b34_u_fail = GetUserNameW(b34_ubuf, &b34_usmall);
+
+    WCHAR b34_cbuf[16];
+    for (int i = 0; i < 16; ++i)
+        b34_cbuf[i] = (WCHAR)0xAAAA;
+    DWORD b34_csize = 16;
+    BOOL b34_c_ok = GetComputerNameW(b34_cbuf, &b34_csize);
+    BOOL b34_c_str = b34_cbuf[0] == 'C' && b34_cbuf[1] == 'u' && b34_cbuf[2] == 's' && b34_cbuf[3] == 't' &&
+                     b34_cbuf[4] == 'o' && b34_cbuf[5] == 'm' && b34_cbuf[6] == 'O' && b34_cbuf[7] == 'S' &&
+                     b34_cbuf[8] == 0;
+
+    const char b34_ok[] = "[batch34] GetUserNameW + GetComputerNameW OK\n";
+    const char b34_bad[] = "[batch34] identity queries FAILED invariants\n";
+    BOOL b34_pass = b34_u_ok && b34_usize == 5 && b34_u_str && !b34_u_fail && b34_usmall == 5 && b34_c_ok &&
+                    b34_csize == 9 && b34_c_str;
+    DWORD b34w = 0;
+    if (b34_pass)
+        WriteFile(out, b34_ok, sizeof(b34_ok) - 1, &b34w, 0);
+    else
+        WriteFile(out, b34_bad, sizeof(b34_bad) - 1, &b34w, 0);
 
     // Batch 3 round-trip: store a distinctive value via
     // SetLastError, read it back via GetLastError, exit with
