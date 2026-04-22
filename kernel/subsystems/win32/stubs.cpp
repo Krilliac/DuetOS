@@ -78,6 +78,7 @@ constexpr u32 kOffPCommode = 0x27B;           // batch 17 —  6 bytes
 constexpr u32 kOffSputn = 0x281;              // batch 18 — 19 bytes
 constexpr u32 kOffReturnThis = 0x294;         // batch 18 —  4 bytes
 constexpr u32 kOffWiden = 0x298;              // batch 18 —  4 bytes
+constexpr u32 kOffHresultEFail = 0x29C;       // batch 19 —  6 bytes
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -819,10 +820,33 @@ constexpr u8 kStubsBytes[] = {
     // Args: rcx=this (ignored), dl=c. Returns c in al.
     0x0F, 0xB6, 0xC2, // 0x298 movzx eax, dl
     0xC3,             // 0x29B ret
+
+    // === Batch 19: D3D / DXGI — HRESULT E_FAIL ================
+    //
+    // Any PE that imports d3d11 / d3d12 / dxgi entry points
+    // lands on this stub. Returns HRESULT E_FAIL
+    // (0x80004005) so the caller's "no graphics available"
+    // fallback path activates cleanly. Prevents the caller
+    // from treating the miss-logger's 0-return as success
+    // (HRESULT S_OK == 0), which would lead to a null-deref
+    // on the returned IDirect3D*/ID3D11*/IDXGI* interface.
+    //
+    // Wire-up target: a future slice redirects this IAT
+    // landing through a syscall to
+    // subsystems::graphics::D3D11CreateDeviceStub etc., so the
+    // kernel log records exactly which D3D entry point got
+    // called. For v0, returning E_FAIL is enough to make the
+    // caller's fallback branch fire.
+
+    // --- HRESULT E_FAIL (offset 0x29C, 6 bytes) ----------------
+    // `mov eax, 0x80004005; ret`. The 32-bit form zero-extends
+    // to rax; HRESULT is 32-bit so upper bits don't matter.
+    0xB8, 0x05, 0x40, 0x00, 0x80, // 0x29C mov eax, 0x80004005
+    0xC3,                         // 0x2A1 ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x29C, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0x2A2, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -1270,6 +1294,44 @@ constexpr StubEntry kStubsTable[] = {
     {"MSVCP140.dll", "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@K@Z", kOffReturnThis},
     {"MSVCP140.dll", "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@P6AAEAV01@AEAV01@@Z@Z",
      kOffReturnThis},
+
+    // Batch 19 — D3D / DXGI create-device family. Returning
+    // HRESULT E_FAIL lets a caller's "no graphics" fallback
+    // kick in. Covers the entry points DXVK / vkd3d-proton
+    // intercept at the top of their translation chain:
+    //
+    //   D3D11CreateDevice / D3D11CreateDeviceAndSwapChain
+    //     — MSVC d3d11.dll direct
+    //   D3D12CreateDevice
+    //     — MSVC d3d12.dll direct
+    //   CreateDXGIFactory / CreateDXGIFactory1 / CreateDXGIFactory2
+    //     — dxgi.dll, prerequisite for D3D device creation
+    //   Direct3DCreate9 / Direct3DCreate9Ex
+    //     — legacy d3d9.dll entry
+    //
+    // Direct3DCreate9 returns an IDirect3D9* — NULL on failure.
+    // E_FAIL (0x80004005) in eax still lands as a non-NULL
+    // pointer from the caller's perspective. For the pre-D3D10
+    // path we use kOffReturnZero instead.
+    {"d3d11.dll", "D3D11CreateDevice", kOffHresultEFail},
+    {"d3d11.dll", "D3D11CreateDeviceAndSwapChain", kOffHresultEFail},
+    {"D3D11.dll", "D3D11CreateDevice", kOffHresultEFail},
+    {"D3D11.dll", "D3D11CreateDeviceAndSwapChain", kOffHresultEFail},
+    {"d3d12.dll", "D3D12CreateDevice", kOffHresultEFail},
+    {"d3d12.dll", "D3D12GetDebugInterface", kOffHresultEFail},
+    {"d3d12.dll", "D3D12SerializeRootSignature", kOffHresultEFail},
+    {"D3D12.dll", "D3D12CreateDevice", kOffHresultEFail},
+    {"dxgi.dll", "CreateDXGIFactory", kOffHresultEFail},
+    {"dxgi.dll", "CreateDXGIFactory1", kOffHresultEFail},
+    {"dxgi.dll", "CreateDXGIFactory2", kOffHresultEFail},
+    {"DXGI.dll", "CreateDXGIFactory", kOffHresultEFail},
+    {"DXGI.dll", "CreateDXGIFactory1", kOffHresultEFail},
+    {"DXGI.dll", "CreateDXGIFactory2", kOffHresultEFail},
+    // d3d9 predates HRESULT-first API — it returns an interface
+    // pointer, NULL = failure. Alias to the shared return-zero
+    // stub rather than E_FAIL.
+    {"d3d9.dll", "Direct3DCreate9", kOffReturnZero},
+    {"d3d9.dll", "Direct3DCreate9Ex", kOffHresultEFail},
 };
 
 // Case-insensitive strcmp for ASCII. Win32 DLL name
