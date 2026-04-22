@@ -71,10 +71,10 @@ constexpr u32 kOffGetTickCount = 0x213;       // batch 11 — 12 bytes (shared w
 constexpr u32 kOffHeapSize = 0x21F;           // batch 14 — 11 bytes
 constexpr u32 kOffHeapRealloc = 0x22A;        // batch 14 — 14 bytes
 constexpr u32 kOffRealloc = 0x238;            // batch 14 — 14 bytes
-constexpr u32 kOffMissLogger = 0x246;         // batch 15 — 24 bytes
-constexpr u32 kOffPArgc = 0x269;              // batch 16 —  6 bytes
-constexpr u32 kOffPArgv = 0x26F;              // batch 16 —  6 bytes
-constexpr u32 kOffPCommode = 0x275;           // batch 17 —  6 bytes
+constexpr u32 kOffMissLogger = 0x246;         // batch 15 — 41 bytes
+constexpr u32 kOffPArgc = 0x26F;              // batch 16 —  6 bytes
+constexpr u32 kOffPArgv = 0x275;              // batch 16 —  6 bytes
+constexpr u32 kOffPCommode = 0x27B;           // batch 17 —  6 bytes
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -701,20 +701,33 @@ constexpr u8 kStubsBytes[] = {
     // miss table populated at load time and logs the function
     // name. Each call still returns 0 (same as the old stub).
     //
+    // Guard: before decoding, check that the byte immediately
+    // preceding the return address is `0xE8` (the `call rel32`
+    // opcode). If not, the caller used an indirect call pattern
+    // (`call rax`, `call [reg+disp]`, vtable dispatch, etc.);
+    // the decode would alias whatever bytes happen to sit there,
+    // yielding a plausible-looking but entirely wrong slot VA
+    // that surfaces as `<unmapped>`. Skipping the syscall in
+    // that case keeps the log honest — "no legible call
+    // pattern" becomes silence rather than fake data.
+    //
     // Regs: we clobber rax, rcx, rdi — all caller-saved under
     // any Win64 callable we'd be substituted for, and the syscall
     // path preserves the rest. No save/restore needed.
-    0x48, 0x8B, 0x04, 0x24,       // 0x246 mov rax, [rsp]               ; return addr (post-CALL)
-    0x48, 0x63, 0x48, 0xFC,       // 0x24A movsxd rcx, dword [rax-4]    ; CALL rel32
-    0x48, 0x01, 0xC1,             // 0x24E add rcx, rax                 ; rcx = thunk VA
-    0x48, 0x63, 0x41, 0x02,       // 0x251 movsxd rax, dword [rcx+2]    ; thunk's JMP rel32
-    0x48, 0x01, 0xC8,             // 0x255 add rax, rcx                 ; rax = thunk + rel32
-    0x48, 0x83, 0xC0, 0x06,       // 0x258 add rax, 6                   ; rax = IAT slot VA
-    0x48, 0x89, 0xC7,             // 0x25C mov rdi, rax                 ; arg0 = IAT slot VA
-    0xB8, 0x10, 0x00, 0x00, 0x00, // 0x25F mov eax, 16 (SYS_WIN32_MISS_LOG)
-    0xCD, 0x80,                   // 0x264 int 0x80
-    0x31, 0xC0,                   // 0x266 xor eax, eax
-    0xC3,                         // 0x268 ret
+    0x48, 0x8B, 0x04, 0x24,       // 0x246 mov rax, [rsp]               ; return addr
+    0x80, 0x78, 0xFB, 0xE8,       // 0x24A cmp byte [rax-5], 0xE8        ; CALL rel32?
+    0x75, 0x1C,                   // 0x24E jne +28 -> 0x26C              ; skip decode+syscall
+    0x48, 0x63, 0x48, 0xFC,       // 0x250 movsxd rcx, dword [rax-4]    ; CALL rel32
+    0x48, 0x01, 0xC1,             // 0x254 add rcx, rax                 ; rcx = thunk VA
+    0x48, 0x63, 0x41, 0x02,       // 0x257 movsxd rax, dword [rcx+2]    ; thunk's JMP rel32
+    0x48, 0x01, 0xC8,             // 0x25B add rax, rcx                 ; rax = thunk + rel32
+    0x48, 0x83, 0xC0, 0x06,       // 0x25E add rax, 6                   ; rax = IAT slot VA
+    0x48, 0x89, 0xC7,             // 0x262 mov rdi, rax                 ; arg0 = IAT slot VA
+    0xB8, 0x10, 0x00, 0x00, 0x00, // 0x265 mov eax, 16 (SYS_WIN32_MISS_LOG)
+    0xCD, 0x80,                   // 0x26A int 0x80
+    // .skip target — common epilogue returns 0 for both paths.
+    0x31, 0xC0, // 0x26C xor eax, eax
+    0xC3,       // 0x26E ret
 
     // === Batch 16: CRT argc / argv accessors ==================
     //
@@ -735,20 +748,20 @@ constexpr u8 kStubsBytes[] = {
     // are zeroed by the x86-64 ABI for any 32-bit dest op, giving
     // us the right 64-bit pointer without a 10-byte movabs.
 
-    // --- __p___argc (offset 0x269, 6 bytes) --------------------
+    // --- __p___argc (offset 0x26F, 6 bytes) --------------------
     // Returns &argc (int*). argc lives at kProcEnvVa + 0x00.
-    0xB8, 0x00, 0x00, 0x00, 0x65, // 0x269 mov eax, 0x65000000
-    0xC3,                         // 0x26E ret
+    0xB8, 0x00, 0x00, 0x00, 0x65, // 0x26F mov eax, 0x65000000
+    0xC3,                         // 0x274 ret
 
-    // --- __p___argv (offset 0x26F, 6 bytes) --------------------
+    // --- __p___argv (offset 0x275, 6 bytes) --------------------
     // Returns &argv (char***). argv (a char**) lives at
     // kProcEnvVa + 0x08.
-    0xB8, 0x08, 0x00, 0x00, 0x65, // 0x26F mov eax, 0x65000008
-    0xC3,                         // 0x274 ret
+    0xB8, 0x08, 0x00, 0x00, 0x65, // 0x275 mov eax, 0x65000008
+    0xC3,                         // 0x27A ret
 
     // === Batch 17: UCRT stdio accessors =======================
 
-    // --- __p__commode (offset 0x275, 6 bytes) ------------------
+    // --- __p__commode (offset 0x27B, 6 bytes) ------------------
     // int* __p__commode(void) — returns a pointer to the
     // `_commode` global, which encodes the default file-mode
     // flags (0 = O_TEXT, _O_BINARY = 0x4000, …). Callers of
@@ -757,12 +770,12 @@ constexpr u8 kStubsBytes[] = {
     // in v0 workloads. We point at a zero int in the proc-env
     // page — "default text mode" — which is what UCRT itself
     // initialises it to.
-    0xB8, 0x00, 0x02, 0x00, 0x65, // 0x275 mov eax, 0x65000200
-    0xC3,                         // 0x27A ret
+    0xB8, 0x00, 0x02, 0x00, 0x65, // 0x27B mov eax, 0x65000200
+    0xC3,                         // 0x280 ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x27B, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0x281, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
