@@ -603,11 +603,47 @@ bool CheckFeatureControlLock()
     return true;
 }
 
+// Emit a compact diff dump of the first N byte positions where
+// `now` differs from `golden`. Caps at `max_hits` mismatches to
+// keep the log size bounded when the attacker scrambled the
+// whole table. Each hit prints `[idx] expected=XX got=XX`.
+void DumpDiff(const char* tag, const u8* golden, const u8* now, u64 len, u32 max_hits)
+{
+    u32 hits = 0;
+    for (u64 i = 0; i < len && hits < max_hits; ++i)
+    {
+        if (golden[i] != now[i])
+        {
+            arch::SerialWrite("[health-diff] ");
+            arch::SerialWrite(tag);
+            arch::SerialWrite(" byte[");
+            arch::SerialWriteHex(i);
+            arch::SerialWrite("] expected=");
+            arch::SerialWriteHex(golden[i]);
+            arch::SerialWrite(" got=");
+            arch::SerialWriteHex(now[i]);
+            arch::SerialWrite("\n");
+            ++hits;
+        }
+    }
+    if (hits == max_hits)
+    {
+        arch::SerialWrite("[health-diff] ");
+        arch::SerialWrite(tag);
+        arch::SerialWrite(" (log truncated — more mismatches beyond cap)\n");
+    }
+}
+
 bool CheckIdt()
 {
     const u64 now = arch::IdtHash();
     if (now != g_baseline_idt_hash)
     {
+        // Dump up to 8 diffing bytes so the operator sees which
+        // vector(s) were hooked — the IDT is 256 × 16 bytes;
+        // each vector's handler offset lives in bytes 0/1 + 6/7
+        // + 8..11 of its 16-byte slot.
+        DumpDiff("IDT", g_golden_idt, arch::IdtRawBase(), sizeof(g_golden_idt), 8);
         Report(HealthIssue::IdtModified);
         return false;
     }
@@ -619,6 +655,8 @@ bool CheckGdt()
     const u64 now = arch::GdtHash();
     if (now != g_baseline_gdt_hash)
     {
+        DumpDiff("GDT", reinterpret_cast<const u8*>(g_golden_gdt), reinterpret_cast<const u8*>(arch::GdtRawBase()),
+                 sizeof(g_golden_gdt), 8);
         Report(HealthIssue::GdtModified);
         return false;
     }
