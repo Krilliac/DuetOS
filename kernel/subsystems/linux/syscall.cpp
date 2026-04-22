@@ -4,6 +4,7 @@
 #include "../../arch/x86_64/traps.h"
 #include "../../core/klog.h"
 #include "../../cpu/percpu.h"
+#include "../../mm/paging.h"
 #include "../../sched/sched.h"
 
 extern "C" void linux_syscall_entry();
@@ -15,8 +16,8 @@ namespace
 {
 
 // Linux x86_64 MSR numbers.
-constexpr u32 kMsrStar = 0xC0000081;         // CS selectors for syscall/sysret
-constexpr u32 kMsrLstar = 0xC0000082;        // entry RIP for 64-bit syscall
+constexpr u32 kMsrStar = 0xC0000081;  // CS selectors for syscall/sysret
+constexpr u32 kMsrLstar = 0xC0000082; // entry RIP for 64-bit syscall
 // MSR_CSTAR (0xC0000083) is the compat-mode entry; we don't
 // plan to run 32-bit code, so leave it unprogrammed.
 constexpr u32 kMsrSfmask = 0xC0000084;       // RFLAGS mask applied at entry
@@ -25,6 +26,14 @@ constexpr u32 kMsrKernelGsBase = 0xC0000102; // swapgs source for kernel GS
 // Canonical Linux errno values used by the handlers we implement.
 // Only the subset we actually return today; extend as needed.
 constexpr i64 kENOSYS = -38;
+constexpr i64 kEBADF = -9;
+constexpr i64 kEFAULT = -14;
+
+// Per-process Linux fd cap on a single write/read. A real kernel
+// wouldn't impose this but musl's newline-buffered stdout rarely
+// issues writes over a few KiB. Cap matches the native int-0x80
+// write path so behaviour stays predictable across ABIs.
+constexpr u64 kLinuxIoMax = 4096;
 
 void WriteMsr(u32 msr, u64 value)
 {
@@ -39,8 +48,10 @@ void WriteMsr(u32 msr, u64 value)
 // others fall through to the default -ENOSYS arm.
 enum : u64
 {
-    kSysExit = 60,
+    kSysRead = 0,
+    kSysWrite = 1,
     kSysGetPid = 39,
+    kSysExit = 60,
     kSysExitGroup = 231,
 };
 
@@ -56,6 +67,56 @@ i64 DoExitGroup(u64 status)
     return 0;
 }
 
+// Linux: write(fd, buf, count). v0 implements fd=1 (stdout) and
+// fd=2 (stderr) only — both go to COM1. Everything else returns
+// -EBADF so musl's perror / write-to-pipe error paths surface
+// predictably. No cap-gating here yet: a Linux process that
+// reached the dispatcher is trusted to the same degree a native
+// ring-3 task reaching SYS_WRITE is. Gating by Process::caps
+// gets bolted on when we need per-sandbox Linux policy.
+i64 DoWrite(u64 fd, u64 user_buf, u64 len)
+{
+    if (fd != 1 && fd != 2)
+    {
+        return kEBADF;
+    }
+    const u64 to_copy = (len > kLinuxIoMax) ? kLinuxIoMax : len;
+    if (to_copy == 0)
+    {
+        return 0;
+    }
+    u8 kbuf[kLinuxIoMax];
+    if (!mm::CopyFromUser(kbuf, reinterpret_cast<const void*>(user_buf), to_copy))
+    {
+        return kEFAULT;
+    }
+    // Per-byte feed so any \0 in the payload forwards as a literal
+    // 0 rather than truncating the string. Same pattern as the
+    // native SYS_WRITE.
+    for (u64 i = 0; i < to_copy; ++i)
+    {
+        const char two[2] = {static_cast<char>(kbuf[i]), '\0'};
+        arch::SerialWrite(two);
+    }
+    return static_cast<i64>(to_copy);
+}
+
+// Linux: read(fd, buf, count). v0 stub — returns 0 (EOF) on fd=0
+// (stdin). A real implementation would block on the keyboard FIFO
+// or pipe; returning 0 lets musl's CRT see "no input" and proceed
+// without blocking, which is what a non-interactive smoke wants.
+// Non-0 fds return -EBADF.
+i64 DoRead(u64 fd, u64 user_buf, u64 len)
+{
+    (void)user_buf;
+    (void)len;
+    if (fd != 0)
+    {
+        return kEBADF;
+    }
+    return 0;
+}
+
 } // namespace
 
 extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
@@ -65,6 +126,12 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
     i64 rv = kENOSYS;
     switch (nr)
     {
+    case kSysWrite:
+        rv = DoWrite(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysRead:
+        rv = DoRead(frame->rdi, frame->rsi, frame->rdx);
+        break;
     case kSysExit:
     case kSysExitGroup:
         DoExitGroup(frame->rdi);

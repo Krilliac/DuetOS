@@ -31,24 +31,78 @@ using customos::mm::AddressSpaceMapUserPage;
 using customos::mm::AllocateFrame;
 using customos::mm::PhysAddr;
 
-// Raw machine code for the smoke task. No strings, no pointers —
-// pure register immediates + syscall + ud2. Assembles to:
+// Raw machine code for the smoke task. RIP-relative LEA is used
+// to address the inline "hello linux!\n" string, so we still don't
+// need ASLR patching — the displacement is position-independent.
 //
-//   mov eax, 231        ; sys_exit_group
-//   mov edi, 0x42       ; exit code (42h, a visible sentinel)
+//   mov  eax, 1                  ; sys_write
+//   mov  edi, 1                  ; fd = stdout
+//   lea  rsi, [rip + msg]        ; buf
+//   mov  edx, 13                 ; count
 //   syscall
-//   ud2                 ; unreachable — if the syscall returns
-//                       ; instead of killing us, we want a
-//                       ; diagnosable #UD, not a silent wander.
+//   mov  eax, 231                ; sys_exit_group
+//   mov  edi, 0x42               ; exit code
+//   syscall
+//   ud2                          ; unreachable
+//   msg: db "hello linux!\n"
 //
-// 14 bytes total. Must NOT contain any absolute-address immediates
-// — we don't have ASLR patching in this smoke and the code page's
-// VA is chosen per-process.
+// 51 bytes total. Fits comfortably in the 4 KiB code page.
 constexpr u8 kPayload[] = {
-    0xB8, 0xE7, 0x00, 0x00, 0x00, // mov eax, 231
-    0xBF, 0x42, 0x00, 0x00, 0x00, // mov edi, 0x42
-    0x0F, 0x05,                   // syscall
-    0x0F, 0x0B,                   // ud2
+    // write(1, msg, 13)
+    0xB8,
+    0x01,
+    0x00,
+    0x00,
+    0x00, // mov eax, 1
+    0xBF,
+    0x01,
+    0x00,
+    0x00,
+    0x00, // mov edi, 1
+    0x48,
+    0x8D,
+    0x35,
+    0x15,
+    0x00,
+    0x00,
+    0x00, // lea rsi, [rip + 0x15]
+    0xBA,
+    0x0D,
+    0x00,
+    0x00,
+    0x00, // mov edx, 13
+    0x0F,
+    0x05, // syscall
+    // exit_group(0x42)
+    0xB8,
+    0xE7,
+    0x00,
+    0x00,
+    0x00, // mov eax, 231
+    0xBF,
+    0x42,
+    0x00,
+    0x00,
+    0x00, // mov edi, 0x42
+    0x0F,
+    0x05, // syscall
+    0x0F,
+    0x0B, // ud2 (unreachable guard)
+    // msg — starts at offset 38; LEA's disp32 above = 21 = 0x15
+    // because RIP after the LEA points at offset 17, and 38-17 = 21.
+    'h',
+    'e',
+    'l',
+    'l',
+    'o',
+    ' ',
+    'l',
+    'i',
+    'n',
+    'u',
+    'x',
+    '!',
+    '\n',
 };
 
 // Hard-coded VAs — simpler than ASLR for a smoke. Chosen to avoid
@@ -94,8 +148,8 @@ void SpawnRing3LinuxSmoke()
 
     // Minimal caps — smoke doesn't need filesystem / networking.
     const core::CapSet caps = core::CapSetEmpty();
-    Process* proc = ProcessCreate("linux-smoke", as, caps, fs::RamfsSandboxRoot(), kCodeVa, kStackVa,
-                                  core::kTickBudgetSandbox);
+    Process* proc =
+        ProcessCreate("linux-smoke", as, caps, fs::RamfsSandboxRoot(), kCodeVa, kStackVa, core::kTickBudgetSandbox);
     if (proc == nullptr)
     {
         core::Panic("linux/smoke", "ProcessCreate failed");
