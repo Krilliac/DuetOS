@@ -26,12 +26,21 @@ constexpr i64 kEINVAL = -22;
 // redundancy is waste.
 enum : u64
 {
+    kSysPipe = 22,
     kSysReadv = 19,
     kSysMadvise = 28,
+    kSysSocket = 41,
     kSysFsync = 74,
     kSysFdatasync = 75,
+    kSysUmask = 95,
     kSysGettimeofday = 96,
+    kSysGetrlimit = 97,
     kSysSysinfo = 99,
+    kSysGetpgrp = 111,
+    kSysStatfs = 137,
+    kSysFstatfs = 138,
+    kSysSetrlimit = 160,
+    kSysPipe2 = 293,
     kSysPrlimit64 = 302,
     kSysRseq = 334,
 };
@@ -198,6 +207,99 @@ i64 TranslateNoOp(arch::TrapFrame* /*f*/)
     return 0;
 }
 
+// umask(mask) — returns the OLD umask. Linux-standard default is
+// 022. We have no permission model so nothing actually enforces
+// it; the value is purely for compat with programs that track +
+// restore the process's umask during setup.
+i64 TranslateUmask(arch::TrapFrame* /*f*/)
+{
+    return 022;
+}
+
+// getpgrp() — process group id of the calling process. v0 has no
+// job-control model; return 0 (same as getpgid(0)).
+i64 TranslateGetpgrp(arch::TrapFrame* /*f*/)
+{
+    return 0;
+}
+
+// getrlimit(resource, rlimit*) / setrlimit(resource, rlimit*) —
+// older shape than prlimit64. We use the same "infinite limits"
+// story for both: reads return RLIM_INFINITY, writes accepted
+// but ignored.
+i64 TranslateGetrlimit(arch::TrapFrame* f)
+{
+    (void)f->rdi;
+    const u64 user_old = f->rsi;
+    if (user_old == 0)
+        return kEFAULT;
+    constexpr u64 kRlimInfinity = 0xFFFFFFFFFFFFFFFFull;
+    struct
+    {
+        u64 cur;
+        u64 max;
+    } old{kRlimInfinity, kRlimInfinity};
+    if (!mm::CopyToUser(reinterpret_cast<void*>(user_old), &old, sizeof(old)))
+        return kEFAULT;
+    return 0;
+}
+
+i64 TranslateSetrlimit(arch::TrapFrame* /*f*/)
+{
+    // Accept + no-op. Writing rlim values against our no-limits
+    // model would be storage-only; skip until a consumer reads
+    // back its own set value.
+    return 0;
+}
+
+// statfs(path, buf) / fstatfs(fd, buf) — filesystem statistics.
+// Fill a zeroed struct statfs with sensible-looking FAT32 totals
+// (we don't track exact block counts per-mount) so musl's `df`
+// / "is enough space available" probes don't choke.
+i64 TranslateStatfs(arch::TrapFrame* f)
+{
+    const u64 user_buf = f->rsi;
+    if (user_buf == 0)
+        return kEFAULT;
+    struct Statfs
+    {
+        i64 f_type;
+        i64 f_bsize;
+        u64 f_blocks;
+        u64 f_bfree;
+        u64 f_bavail;
+        u64 f_files;
+        u64 f_ffree;
+        u64 f_fsid[2];
+        i64 f_namelen;
+        i64 f_frsize;
+        i64 f_flags;
+        i64 f_spare[4];
+    };
+    Statfs s;
+    for (u64 i = 0; i < sizeof(s); ++i)
+        reinterpret_cast<u8*>(&s)[i] = 0;
+    s.f_type = 0x4d44;   // "MD" — MS-DOS/FAT magic
+    s.f_bsize = 4096;    // our cluster size
+    s.f_blocks = 0x1000; // 16 MiB notional
+    s.f_bfree = 0x800;   // half-free
+    s.f_bavail = 0x800;
+    s.f_namelen = 255;
+    s.f_frsize = 4096;
+    if (!mm::CopyToUser(reinterpret_cast<void*>(user_buf), &s, sizeof(s)))
+        return kEFAULT;
+    return 0;
+}
+
+// pipe / pipe2 / socket: deliberate -ENOSYS. We have no pipe,
+// no socket. Logging as TU-handled (vs. primary-unhandled)
+// makes it clear we've considered these and aren't silently
+// returning zeros.
+i64 TranslateDeliberateEnosys(arch::TrapFrame* /*f*/)
+{
+    return -38;
+}
+
 // rseq: restartable sequences. glibc and newer musl register an
 // rseq structure at startup for high-perf per-CPU data. v0
 // doesn't implement the machinery; return -ENOSYS and let the
@@ -331,6 +433,33 @@ Result LinuxGapFill(arch::TrapFrame* frame)
     case kSysRseq:
         LogTranslation("linux", nr, "synthetic:enosys-deliberate");
         r = {true, TranslateRseq(frame)};
+        break;
+    case kSysUmask:
+        LogTranslation("linux", nr, "synthetic:022-default");
+        r = {true, TranslateUmask(frame)};
+        break;
+    case kSysGetpgrp:
+        LogTranslation("linux", nr, "synthetic:pgrp=0");
+        r = {true, TranslateGetpgrp(frame)};
+        break;
+    case kSysGetrlimit:
+        LogTranslation("linux", nr, "synthetic:rlim-infinity");
+        r = {true, TranslateGetrlimit(frame)};
+        break;
+    case kSysSetrlimit:
+        LogTranslation("linux", nr, "noop:limits-unenforced");
+        r = {true, TranslateSetrlimit(frame)};
+        break;
+    case kSysStatfs:
+    case kSysFstatfs:
+        LogTranslation("linux", nr, "synthetic:fat32-style-statfs");
+        r = {true, TranslateStatfs(frame)};
+        break;
+    case kSysPipe:
+    case kSysPipe2:
+    case kSysSocket:
+        LogTranslation("linux", nr, "synthetic:enosys-no-ipc");
+        r = {true, TranslateDeliberateEnosys(frame)};
         break;
     default:
         LogMiss("linux", nr);

@@ -1,8 +1,8 @@
 # ABI translation unit
 
-**Last updated:** 2026-04-22
+**Last updated:** 2026-04-22 (post bidirectional + expand)
 **Type:** Observation
-**Status:** Active — LinuxGapFill shipped with 7 translations + on-boot exerciser
+**Status:** Active — bidirectional (Linux + native), 18 Linux translations, 4 native translations, hit-counter telemetry, shell `translate` diagnostic
 
 ## Description
 
@@ -41,18 +41,57 @@ Exposed handler wrappers in `subsystems/linux/syscall.h`:
 `LinuxRead`, `LinuxWrite`, `LinuxClockGetTime`, `LinuxNowNs` —
 the TU synthesizes larger calls (readv, gettimeofday) from these.
 
-## Current translations (slice 20)
+## Linux-side translations (as of slice 24)
 
 | Linux # | Linux call | Strategy |
 |---------|-----------|----------|
-| 19 | readv | Loop over LinuxRead per iovec (primary has writev, not readv) |
-| 28 | madvise | Noop — hints advisory until real page cache |
-| 74 | fsync | Noop — writes unbuffered in kernel, always durable |
-| 75 | fdatasync | Noop — same as fsync |
-| 96 | gettimeofday | Reshape LinuxNowNs → timeval (tv_sec + tv_usec) |
+| 19 | readv | Loop over LinuxRead per iovec |
+| 22 | pipe | Deliberate -ENOSYS (no IPC) |
+| 28 | madvise | Noop — hints advisory |
+| 41 | socket | Deliberate -ENOSYS (no network) |
+| 74 | fsync | Noop — writes unbuffered |
+| 75 | fdatasync | Noop — same |
+| 95 | umask | Return 022 (traditional default) |
+| 96 | gettimeofday | Reshape LinuxNowNs → timeval |
+| 97 | getrlimit | RLIM_INFINITY for old |
 | 99 | sysinfo | Zeroed struct + uptime from HPET |
+| 111 | getpgrp | Return 0 |
+| 137 | statfs | Zeroed struct with FAT32-style totals |
+| 138 | fstatfs | Same as statfs |
+| 160 | setrlimit | Accept + no-op |
+| 293 | pipe2 | Deliberate -ENOSYS |
 | 302 | prlimit64 | RLIM64_INFINITY for old; ignore new |
-| 334 | rseq | Deliberate -ENOSYS, logged distinctly |
+| 334 | rseq | Deliberate -ENOSYS |
+
+## Native-side translations
+
+Called from `core::SyscallDispatch`'s default arm. Experimental
+syscall numbers (0x200+) well past the committed native ABI —
+any caller uses them ahead of a formal primary handler.
+
+| Native # | Behavior |
+|---|---|
+| 0x200 | `NativeClockNs` — returns `LinuxNowNs()` |
+| 0x201 | `NativeGetRandom(buf, count)` — xorshift64 from rdtsc |
+| 0x210 | `NativeWin32Alloc(size)` — `Win32HeapAlloc` on current process |
+| 0x211 | `NativeWin32Free(ptr)` — `Win32HeapFree` |
+
+## Hit counters
+
+`HitTable g_linux_hits` / `g_native_hits` — 1024-bucket arrays
+keyed by `syscall_nr & 0x3FF`. Bumped once per successful
+translation (saturating at 2^32-1).
+
+Accessors:
+```cpp
+const HitTable& LinuxHitsRead();
+const HitTable& NativeHitsRead();
+```
+
+Shell command: `translate` — prints every non-zero bucket per
+direction. Run after a workload to see which translations fire
+most; those are the ones to consider promoting to primary
+handlers.
 
 ## Log format
 
@@ -71,15 +110,34 @@ Target tags in use:
 - `noop:<why>` — accepted as a no-op with reason
 - `native:SYS_X` — routed to a native kernel syscall (future; none ship today)
 
-## Why Win32 isn't wired yet
+## Win32 integration
 
 Win32 in CustomOS is a user-mode shim — each PE gets `ntdll` /
 `kernel32` equivalents patched into its IAT, and those stubs
-trampoline through native int-0x80 syscalls. There's no peer
-kernel dispatch to consult; whatever Win32 "has" is just a
-particular native call. The moment native-missing → Linux
-translation matters, it goes through this same `Result`-returning
-pattern.
+trampoline through native int-0x80 syscalls. So there's no peer
+kernel dispatch to consult; what the TU exposes instead is
+direct kernel-side access to the Win32 heap primitives
+(`Win32HeapAlloc` / `Win32HeapFree`) via two of its native
+translations. Any Win32 stub that wants a Linux semantic (or
+vice versa) reaches it via:
+
+```
+Win32 stub  ──int 0x80──>  native SyscallDispatch
+                                │
+                                └─> default arm ──> NativeGapFill
+                                                         │
+                                                         └─> Linux handler / Win32 heap
+```
+
+Same three-layer pattern Linux-side uses:
+
+```
+Linux task  ──syscall──>  LinuxSyscallDispatch
+                                │
+                                └─> default arm ──> LinuxGapFill
+                                                         │
+                                                         └─> Linux handler / synth
+```
 
 ## Boot-time exerciser
 
