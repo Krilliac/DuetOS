@@ -65,6 +65,7 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     cpu/percpu.cpp
     drivers/input/ps2kbd.cpp
     drivers/input/ps2mouse.cpp
+    drivers/gpu/gpu.cpp
     drivers/pci/pci.cpp
     drivers/storage/ahci.cpp
     drivers/storage/block.cpp

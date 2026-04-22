@@ -85,6 +85,11 @@ expected=(
     # would mean the iostream stubs or the proc-env pipeline
     # got broken.
     "Windows Kill "
+    # GPU discovery: the drivers/gpu slice walks the PCI cache,
+    # classifies display controllers by vendor, and maps BAR 0.
+    # QEMU's Bochs VGA always appears here — a missing line means
+    # GpuInit didn't run or the PCI device table regressed.
+    'drivers/gpu : discovered GPUs'
 )
 
 # Forbidden signatures — anything indicating an unhandled

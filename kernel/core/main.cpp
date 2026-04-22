@@ -11,6 +11,7 @@
 #include "../arch/x86_64/smp.h"
 #include "../arch/x86_64/timer.h"
 #include "../cpu/percpu.h"
+#include "../drivers/gpu/gpu.h"
 #include "../drivers/input/ps2kbd.h"
 #include "../drivers/input/ps2mouse.h"
 #include "../drivers/pci/pci.h"
@@ -758,6 +759,9 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
 
     SerialWrite("[boot] Enumerating PCI bus.\n");
     customos::drivers::pci::PciEnumerate();
+
+    SerialWrite("[boot] Detecting GPUs.\n");
+    customos::drivers::gpu::GpuInit();
 
     SerialWrite("[boot] Bringing up block device layer.\n");
     customos::drivers::storage::BlockLayerInit();
