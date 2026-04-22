@@ -100,7 +100,20 @@ enum : u64
     kSysClockGetTime = 228,
     kSysTime = 201,
     kSysNanosleep = 35,
+    kSysMprotect = 10,
+    kSysRtSigreturn = 15,
+    kSysSigaltstack = 131,
+    kSysSchedYield = 24,
+    kSysGetTid = 186,
+    kSysTgkill = 234,
+    kSysKill = 62,
+    kSysSetPgid = 109,
+    kSysGetPpid = 110,
+    kSysGetPgid = 121,
+    kSysGetSid = 124,
 };
+
+constexpr i64 kESRCH = -3;
 
 constexpr i64 kESPIPE = -29;
 constexpr i64 kENOTTY = -25;
@@ -822,6 +835,106 @@ i64 DoNanosleep(u64 user_req, u64 user_rem)
     return 0;
 }
 
+// Linux: mprotect(addr, len, prot). v0 maps all user pages RW
+// and treats prot as advisory. Return 0 to satisfy callers;
+// actual flag updates wait for an MM-layer MapProtect helper.
+i64 DoMprotect(u64 addr, u64 len, u64 prot)
+{
+    (void)addr;
+    (void)len;
+    (void)prot;
+    return 0;
+}
+
+// Linux: sigaltstack(ss, old_ss). Stub — no signal delivery so
+// no alt-stack semantics are observable. Returns 0.
+i64 DoSigaltstack(u64 ss, u64 old_ss)
+{
+    (void)ss;
+    (void)old_ss;
+    return 0;
+}
+
+// Linux: rt_sigreturn. Called by user-mode signal trampolines
+// at the end of a signal handler. Without signal delivery
+// there's no frame to unwind; if a program ever calls this
+// unexpectedly, kill it so we don't silently return garbage.
+i64 DoRtSigreturn()
+{
+    arch::SerialWrite("[linux] rt_sigreturn on task without signal frame — exiting\n");
+    sched::SchedExit();
+    return 0;
+}
+
+// Linux: sched_yield. Direct passthrough to the native scheduler.
+i64 DoSchedYield()
+{
+    sched::SchedYield();
+    return 0;
+}
+
+// Linux: gettid. v0 has one task per process, so tid == pid.
+i64 DoGetTid()
+{
+    return static_cast<i64>(sched::CurrentTaskId());
+}
+
+// Linux: tgkill(tgid, tid, sig). Used by musl's abort() to send
+// SIGABRT to itself. v0 has no signal delivery — if the target
+// is self, just exit with an abort-ish status; any other tid
+// returns -ESRCH.
+i64 DoTgkill(u64 tgid, u64 tid, u64 sig)
+{
+    (void)tgid;
+    if (tid != sched::CurrentTaskId())
+        return kESRCH;
+    arch::SerialWrite("[linux] tgkill -> self; interpreting as abort. sig=");
+    arch::SerialWriteHex(sig);
+    arch::SerialWrite("\n");
+    sched::SchedExit();
+    return 0;
+}
+
+// Linux: kill(pid, sig). Same as tgkill in this single-threaded
+// world — if targeting self, exit; else -ESRCH. A real signal
+// implementation would look up the target Process and deliver
+// via its sig queue.
+i64 DoKill(u64 pid, u64 sig)
+{
+    if (pid != sched::CurrentTaskId())
+        return kESRCH;
+    arch::SerialWrite("[linux] kill(self) sig=");
+    arch::SerialWriteHex(sig);
+    arch::SerialWrite("\n");
+    sched::SchedExit();
+    return 0;
+}
+
+// Linux: getppid / getpgid / getsid / setpgid. v0 has a flat
+// process namespace with no session/pg model; return 1 (init-
+// like) for ppid and 0 for everything else. setpgid accepts and
+// is silently a no-op.
+i64 DoGetPpid()
+{
+    return 1;
+}
+i64 DoGetPgid(u64 pid)
+{
+    (void)pid;
+    return 0;
+}
+i64 DoGetSid(u64 pid)
+{
+    (void)pid;
+    return 0;
+}
+i64 DoSetPgid(u64 pid, u64 pgid)
+{
+    (void)pid;
+    (void)pgid;
+    return 0;
+}
+
 // Identity stubs. v0 presents every process as uid=0/gid=0 —
 // CustomOS doesn't have a user-account model yet. Returning 0
 // satisfies musl's libc.a startup without misleading it: programs
@@ -1128,6 +1241,39 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
         break;
     case kSysNanosleep:
         rv = DoNanosleep(frame->rdi, frame->rsi);
+        break;
+    case kSysMprotect:
+        rv = DoMprotect(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysRtSigreturn:
+        rv = DoRtSigreturn();
+        break;
+    case kSysSigaltstack:
+        rv = DoSigaltstack(frame->rdi, frame->rsi);
+        break;
+    case kSysSchedYield:
+        rv = DoSchedYield();
+        break;
+    case kSysGetTid:
+        rv = DoGetTid();
+        break;
+    case kSysTgkill:
+        rv = DoTgkill(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysKill:
+        rv = DoKill(frame->rdi, frame->rsi);
+        break;
+    case kSysGetPpid:
+        rv = DoGetPpid();
+        break;
+    case kSysGetPgid:
+        rv = DoGetPgid(frame->rdi);
+        break;
+    case kSysGetSid:
+        rv = DoGetSid(frame->rdi);
+        break;
+    case kSysSetPgid:
+        rv = DoSetPgid(frame->rdi, frame->rsi);
         break;
     case kSysBrk:
         rv = DoBrk(frame->rdi);
