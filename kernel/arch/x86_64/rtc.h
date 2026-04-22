@@ -47,4 +47,19 @@ struct RtcTime
 /// Safe no-op on nullptr.
 void RtcRead(RtcTime* out);
 
+/// Read a single CMOS RAM byte via the 0x70 / 0x71 index/data
+/// port pair. `index` is a 7-bit address (0..127); bit 7 of the
+/// index port controls NMI disable — we always leave it clear.
+/// Safe from any task-level caller (same UIP race as `RtcRead`
+/// is irrelevant here — non-time bytes are stable).
+u8 CmosReadByte(u8 index);
+
+/// Dump the full 128-byte CMOS RAM to the serial console in
+/// 16-byte rows, indexed. Intended as a boot-time observability
+/// aid: laptop EC firmware often stashes battery / thermal /
+/// inventory hints in the non-standard bytes (40..127), and
+/// BIOS POST codes live at 0x0E/0x0F. No interpretation — just
+/// the raw hex. Safe single-init; a second call just re-dumps.
+void CmosDump();
+
 } // namespace customos::arch

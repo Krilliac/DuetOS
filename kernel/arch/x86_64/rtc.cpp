@@ -1,5 +1,6 @@
 #include "rtc.h"
 
+#include "../../arch/x86_64/serial.h"
 #include "../../core/klog.h"
 #include "cpu.h"
 
@@ -151,6 +152,29 @@ void RtcRead(RtcTime* out)
     // Assume 2000s — century register is FADT-dependent and v0
     // doesn't consume it. Good through 2099.
     out->year = static_cast<u16>(2000 + y1);
+}
+
+u8 CmosReadByte(u8 index)
+{
+    // Mask to 7 bits so we never set the NMI-disable bit.
+    return ReadRaw(index & 0x7F);
+}
+
+void CmosDump()
+{
+    SerialWrite("[cmos] 128-byte RAM dump\n");
+    for (u32 row = 0; row < 8; ++row)
+    {
+        SerialWrite("[cmos] ");
+        SerialWriteHex(u8(row * 16));
+        SerialWrite(":");
+        for (u32 col = 0; col < 16; ++col)
+        {
+            SerialWrite(" ");
+            SerialWriteHex(CmosReadByte(u8(row * 16 + col)));
+        }
+        SerialWrite("\n");
+    }
 }
 
 } // namespace customos::arch

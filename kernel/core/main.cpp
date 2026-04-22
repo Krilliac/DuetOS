@@ -773,6 +773,13 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
         SerialWrite(" (UTC)\n");
     }
 
+    // CMOS is a 128-byte nvram that survives power-off; firmware
+    // stashes BIOS setup + POST diagnostic codes + (on some
+    // laptops) battery / thermal hints here. Dump it once at boot
+    // for observability — the hex grid is enough for a reader to
+    // cross-reference against vendor docs.
+    customos::arch::CmosDump();
+
     SerialWrite("[boot] Installing BSP per-CPU struct.\n");
     customos::cpu::PerCpuInitBsp();
 
