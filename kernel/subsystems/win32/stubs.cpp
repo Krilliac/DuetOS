@@ -33,103 +33,108 @@ namespace
 // Stub offsets. Kept as named constants so the table below
 // stays readable and so two exports (WriteFile + WriteConsoleA)
 // can alias to the same offset without duplicating the code.
-constexpr u32 kOffExitProcess = 0x00;          // batch 1 — 9 bytes
-constexpr u32 kOffGetStdHandle = 0x09;         // batch 1 — 3 bytes
-constexpr u32 kOffWriteFile = 0x0C;            // batch 1 — 44 bytes
-constexpr u32 kOffGetCurrentProcess = 0x38;    // batch 2 — 8 bytes
-constexpr u32 kOffGetCurrentThread = 0x40;     // batch 2 — 8 bytes
-constexpr u32 kOffGetCurrentProcessId = 0x48;  // batch 2 — 8 bytes
-constexpr u32 kOffGetCurrentThreadId = 0x50;   // batch 2 — 8 bytes
-constexpr u32 kOffTerminateProcess = 0x58;     // batch 2 — 9 bytes
-constexpr u32 kOffGetLastError = 0x61;         // batch 3 — 8 bytes
-constexpr u32 kOffSetLastError = 0x69;         // batch 3 — 10 bytes
-constexpr u32 kOffInitCritSec = 0x74;          // batch 4 — 18 bytes
-constexpr u32 kOffCritSecNop = 0x86;           // batch 4 — 1 byte (ret)
-constexpr u32 kOffMemmove = 0x87;              // batch 5 — 45 bytes (memcpy aliases)
-constexpr u32 kOffMemset = 0xB4;               // batch 5 — 19 bytes
-constexpr u32 kOffReturnZero = 0xC7;           // batch 6 — 3 bytes  (shared "xor eax,eax; ret")
-constexpr u32 kOffTerminate = 0xCA;            // batch 6 — 11 bytes (SYS_EXIT(3))
-constexpr u32 kOffInvalidParam = 0xD5;         // batch 6 — 11 bytes (SYS_EXIT(0xC0000417))
-constexpr u32 kOffStrcmp = 0xE0;               // batch 7 — 29 bytes
-constexpr u32 kOffStrlen = 0xFD;               // batch 7 — 17 bytes
-constexpr u32 kOffWcslen = 0x10E;              // batch 7 — 22 bytes
-constexpr u32 kOffStrchr = 0x124;              // batch 7 — 23 bytes
-constexpr u32 kOffStrcpy = 0x13B;              // batch 7 — 23 bytes
-constexpr u32 kOffReturnOne = 0x152;           // batch 8 — 6 bytes (shared "mov eax, 1; ret")
-constexpr u32 kOffHeapAlloc = 0x158;           // batch 9 — 11 bytes
-constexpr u32 kOffHeapFree = 0x163;            // batch 9 — 16 bytes
-constexpr u32 kOffGetProcessHeap = 0x173;      // batch 9 — 8 bytes
-constexpr u32 kOffMalloc = 0x17B;              // batch 9 — 11 bytes
-constexpr u32 kOffFree = 0x186;                // batch 9 — 11 bytes
-constexpr u32 kOffCalloc = 0x191;              // batch 9 — 35 bytes
-constexpr u32 kOffOpenProcessToken = 0x1B4;    // batch 10 — 13 bytes
-constexpr u32 kOffLookupPrivVal = 0x1C1;       // batch 10 — 13 bytes
-constexpr u32 kOffInitSListHead = 0x1CE;       // batch 10 — 16 bytes
-constexpr u32 kOffGetSysTimeFT = 0x1DE;        // batch 10 — 8 bytes
-constexpr u32 kOffOpenProcess = 0x1E6;         // batch 10 — 4 bytes
-constexpr u32 kOffGetExitCodeThread = 0x1EA;   // batch 10 — 12 bytes
-constexpr u32 kOffQueryPerfCounter = 0x1F6;    // batch 11 — 16 bytes
-constexpr u32 kOffQueryPerfFreq = 0x206;       // batch 11 — 13 bytes
-constexpr u32 kOffGetTickCount = 0x213;        // batch 11 — 12 bytes (shared w/ GetTickCount64)
-constexpr u32 kOffHeapSize = 0x21F;            // batch 14 — 11 bytes
-constexpr u32 kOffHeapRealloc = 0x22A;         // batch 14 — 14 bytes
-constexpr u32 kOffRealloc = 0x238;             // batch 14 — 14 bytes
-constexpr u32 kOffMissLogger = 0x246;          // batch 15 — 41 bytes
-constexpr u32 kOffPArgc = 0x26F;               // batch 16 —  6 bytes
-constexpr u32 kOffPArgv = 0x275;               // batch 16 —  6 bytes
-constexpr u32 kOffPCommode = 0x27B;            // batch 17 —  6 bytes
-constexpr u32 kOffSputn = 0x281;               // batch 18 — 19 bytes
-constexpr u32 kOffReturnThis = 0x294;          // batch 18 —  4 bytes
-constexpr u32 kOffWiden = 0x298;               // batch 18 —  4 bytes
-constexpr u32 kOffHresultEFail = 0x29C;        // batch 19 —  6 bytes
-constexpr u32 kOffGetSysTimeFTReal = 0x2A2;    // batch 20 — 13 bytes
-constexpr u32 kOffQpcNs = 0x2AF;               // batch 21 — 13 bytes
-constexpr u32 kOffQpfNs = 0x2BC;               // batch 21 — 10 bytes
-constexpr u32 kOffSleep = 0x2CB;               // batch 22 — 12 bytes (push/pop rdi)
-constexpr u32 kOffSwitchToThread = 0x2D7;      // batch 22 — 10 bytes
-constexpr u32 kOffGetCmdLineW = 0x2E1;         // batch 23 — 6 bytes
-constexpr u32 kOffGetCmdLineA = 0x2E7;         // batch 23 — 6 bytes
-constexpr u32 kOffGetEnvBlockW = 0x2ED;        // batch 23 — 6 bytes
-constexpr u32 kOffCreateFileW = 0x2F3;         // batch 24 — 59 bytes (UTF-16 strip + open)
-constexpr u32 kOffReadFile = 0x32E;            // batch 24 — 46 bytes
-constexpr u32 kOffCloseHandle = 0x35C;         // batch 24 — 15 bytes
-constexpr u32 kOffSetFilePtrEx = 0x36B;        // batch 24 — 38 bytes
-constexpr u32 kOffGetFileSizeEx = 0x391;       // batch 25 — 29 bytes
-constexpr u32 kOffGetModuleHandleW = 0x3AE;    // batch 25 — 17 bytes
-constexpr u32 kOffCreateMutexW = 0x3BF;        // batch 26 — 13 bytes
-constexpr u32 kOffWaitForObj = 0x3CC;          // batch 26 — 38 bytes (mutex-aware)
-constexpr u32 kOffReleaseMutex = 0x3F2;        // batch 26 — 24 bytes
-constexpr u32 kOffWriteConsoleW = 0x40A;       // batch 27 — 96 bytes (UTF-16 strip + SYS_WRITE)
-constexpr u32 kOffGetConsoleMode = 0x46A;      // batch 27 — 12 bytes
-constexpr u32 kOffGetConsoleCP = 0x476;        // batch 27 — 6 bytes
-constexpr u32 kOffVirtualAlloc = 0x47C;        // batch 28 — 13 bytes
-constexpr u32 kOffVirtualFree = 0x489;         // batch 28 — 29 bytes
-constexpr u32 kOffVirtualProtect = 0x4A6;      // batch 28 — 18 bytes
-constexpr u32 kOffLstrlenW = 0x4B8;            // batch 29 — 15 bytes
-constexpr u32 kOffLstrcmpW = 0x4C7;            // batch 29 — 37 bytes
-constexpr u32 kOffLstrcpyW = 0x4EC;            // batch 29 — 27 bytes
-constexpr u32 kOffIsWow64 = 0x507;             // batch 30 — 17 bytes
-constexpr u32 kOffGetVersionExW = 0x518;       // batch 30 — 34 bytes
-constexpr u32 kOffLstrlenA = 0x53A;            // batch 31 — 14 bytes
-constexpr u32 kOffLstrcmpA = 0x548;            // batch 31 — 37 bytes
-constexpr u32 kOffLstrcpyA = 0x56D;            // batch 31 — 26 bytes
-constexpr u32 kOffGetModFileNameW = 0x587;     // batch 32 — 24 bytes
-constexpr u32 kOffGetCurrentDirW = 0x59F;      // batch 32 — 31 bytes
-constexpr u32 kOffMBtoWC = 0x5BE;              // batch 33 — 49 bytes
-constexpr u32 kOffWCtoMB = 0x5EF;              // batch 33 — 48 bytes
-constexpr u32 kOffGetUserNameW = 0x61F;        // batch 34 — 47 bytes
-constexpr u32 kOffGetComputerNameW = 0x64E;    // batch 34 — 61 bytes
-constexpr u32 kOffGetWinDirW = 0x68B;          // batch 35 — 30 bytes (buf-first sig)
-constexpr u32 kOffGetLogicalDrives = 0x6A9;    // batch 36 — 6 bytes (returns 0x00800000, X: drive)
-constexpr u32 kOffGetDriveType = 0x6AF;        // batch 36 — 6 bytes (returns 3 = DRIVE_FIXED)
-constexpr u32 kOffReturnTwo = 0x6B5;           // batch 37 — 6 bytes (ERROR_FILE_NOT_FOUND / stream pos)
-constexpr u32 kOffReturnMinus1 = 0x6BB;        // batch 37 — 6 bytes (INVALID_FILE_ATTRIBUTES)
-constexpr u32 kOffReturnPrioNormal = 0x6C1;    // batch 39 — 6 bytes (0x20 = NORMAL_PRIORITY_CLASS)
-constexpr u32 kOffInterlockedInc = 0x6C7;      // batch 40 — 12 bytes
-constexpr u32 kOffInterlockedDec = 0x6D3;      // batch 40 — 12 bytes
-constexpr u32 kOffInterlockedCmpXchg = 0x6DF;  // batch 40 —  8 bytes
-constexpr u32 kOffInterlockedExchg = 0x6E7;    // batch 40 —  5 bytes
-constexpr u32 kOffInterlockedExchgAdd = 0x6EC; // batch 40 —  7 bytes
+constexpr u32 kOffExitProcess = 0x00;            // batch 1 — 9 bytes
+constexpr u32 kOffGetStdHandle = 0x09;           // batch 1 — 3 bytes
+constexpr u32 kOffWriteFile = 0x0C;              // batch 1 — 44 bytes
+constexpr u32 kOffGetCurrentProcess = 0x38;      // batch 2 — 8 bytes
+constexpr u32 kOffGetCurrentThread = 0x40;       // batch 2 — 8 bytes
+constexpr u32 kOffGetCurrentProcessId = 0x48;    // batch 2 — 8 bytes
+constexpr u32 kOffGetCurrentThreadId = 0x50;     // batch 2 — 8 bytes
+constexpr u32 kOffTerminateProcess = 0x58;       // batch 2 — 9 bytes
+constexpr u32 kOffGetLastError = 0x61;           // batch 3 — 8 bytes
+constexpr u32 kOffSetLastError = 0x69;           // batch 3 — 10 bytes
+constexpr u32 kOffInitCritSec = 0x74;            // batch 4 — 18 bytes
+constexpr u32 kOffCritSecNop = 0x86;             // batch 4 — 1 byte (ret)
+constexpr u32 kOffMemmove = 0x87;                // batch 5 — 45 bytes (memcpy aliases)
+constexpr u32 kOffMemset = 0xB4;                 // batch 5 — 19 bytes
+constexpr u32 kOffReturnZero = 0xC7;             // batch 6 — 3 bytes  (shared "xor eax,eax; ret")
+constexpr u32 kOffTerminate = 0xCA;              // batch 6 — 11 bytes (SYS_EXIT(3))
+constexpr u32 kOffInvalidParam = 0xD5;           // batch 6 — 11 bytes (SYS_EXIT(0xC0000417))
+constexpr u32 kOffStrcmp = 0xE0;                 // batch 7 — 29 bytes
+constexpr u32 kOffStrlen = 0xFD;                 // batch 7 — 17 bytes
+constexpr u32 kOffWcslen = 0x10E;                // batch 7 — 22 bytes
+constexpr u32 kOffStrchr = 0x124;                // batch 7 — 23 bytes
+constexpr u32 kOffStrcpy = 0x13B;                // batch 7 — 23 bytes
+constexpr u32 kOffReturnOne = 0x152;             // batch 8 — 6 bytes (shared "mov eax, 1; ret")
+constexpr u32 kOffHeapAlloc = 0x158;             // batch 9 — 11 bytes
+constexpr u32 kOffHeapFree = 0x163;              // batch 9 — 16 bytes
+constexpr u32 kOffGetProcessHeap = 0x173;        // batch 9 — 8 bytes
+constexpr u32 kOffMalloc = 0x17B;                // batch 9 — 11 bytes
+constexpr u32 kOffFree = 0x186;                  // batch 9 — 11 bytes
+constexpr u32 kOffCalloc = 0x191;                // batch 9 — 35 bytes
+constexpr u32 kOffOpenProcessToken = 0x1B4;      // batch 10 — 13 bytes
+constexpr u32 kOffLookupPrivVal = 0x1C1;         // batch 10 — 13 bytes
+constexpr u32 kOffInitSListHead = 0x1CE;         // batch 10 — 16 bytes
+constexpr u32 kOffGetSysTimeFT = 0x1DE;          // batch 10 — 8 bytes
+constexpr u32 kOffOpenProcess = 0x1E6;           // batch 10 — 4 bytes
+constexpr u32 kOffGetExitCodeThread = 0x1EA;     // batch 10 — 12 bytes
+constexpr u32 kOffQueryPerfCounter = 0x1F6;      // batch 11 — 16 bytes
+constexpr u32 kOffQueryPerfFreq = 0x206;         // batch 11 — 13 bytes
+constexpr u32 kOffGetTickCount = 0x213;          // batch 11 — 12 bytes (shared w/ GetTickCount64)
+constexpr u32 kOffHeapSize = 0x21F;              // batch 14 — 11 bytes
+constexpr u32 kOffHeapRealloc = 0x22A;           // batch 14 — 14 bytes
+constexpr u32 kOffRealloc = 0x238;               // batch 14 — 14 bytes
+constexpr u32 kOffMissLogger = 0x246;            // batch 15 — 41 bytes
+constexpr u32 kOffPArgc = 0x26F;                 // batch 16 —  6 bytes
+constexpr u32 kOffPArgv = 0x275;                 // batch 16 —  6 bytes
+constexpr u32 kOffPCommode = 0x27B;              // batch 17 —  6 bytes
+constexpr u32 kOffSputn = 0x281;                 // batch 18 — 19 bytes
+constexpr u32 kOffReturnThis = 0x294;            // batch 18 —  4 bytes
+constexpr u32 kOffWiden = 0x298;                 // batch 18 —  4 bytes
+constexpr u32 kOffHresultEFail = 0x29C;          // batch 19 —  6 bytes
+constexpr u32 kOffGetSysTimeFTReal = 0x2A2;      // batch 20 — 13 bytes
+constexpr u32 kOffQpcNs = 0x2AF;                 // batch 21 — 13 bytes
+constexpr u32 kOffQpfNs = 0x2BC;                 // batch 21 — 10 bytes
+constexpr u32 kOffSleep = 0x2CB;                 // batch 22 — 12 bytes (push/pop rdi)
+constexpr u32 kOffSwitchToThread = 0x2D7;        // batch 22 — 10 bytes
+constexpr u32 kOffGetCmdLineW = 0x2E1;           // batch 23 — 6 bytes
+constexpr u32 kOffGetCmdLineA = 0x2E7;           // batch 23 — 6 bytes
+constexpr u32 kOffGetEnvBlockW = 0x2ED;          // batch 23 — 6 bytes
+constexpr u32 kOffCreateFileW = 0x2F3;           // batch 24 — 59 bytes (UTF-16 strip + open)
+constexpr u32 kOffReadFile = 0x32E;              // batch 24 — 46 bytes
+constexpr u32 kOffCloseHandle = 0x35C;           // batch 24 — 15 bytes
+constexpr u32 kOffSetFilePtrEx = 0x36B;          // batch 24 — 38 bytes
+constexpr u32 kOffGetFileSizeEx = 0x391;         // batch 25 — 29 bytes
+constexpr u32 kOffGetModuleHandleW = 0x3AE;      // batch 25 — 17 bytes
+constexpr u32 kOffCreateMutexW = 0x3BF;          // batch 26 — 13 bytes
+constexpr u32 kOffWaitForObj = 0x3CC;            // batch 26 — 38 bytes (mutex-aware)
+constexpr u32 kOffReleaseMutex = 0x3F2;          // batch 26 — 24 bytes
+constexpr u32 kOffWriteConsoleW = 0x40A;         // batch 27 — 96 bytes (UTF-16 strip + SYS_WRITE)
+constexpr u32 kOffGetConsoleMode = 0x46A;        // batch 27 — 12 bytes
+constexpr u32 kOffGetConsoleCP = 0x476;          // batch 27 — 6 bytes
+constexpr u32 kOffVirtualAlloc = 0x47C;          // batch 28 — 13 bytes
+constexpr u32 kOffVirtualFree = 0x489;           // batch 28 — 29 bytes
+constexpr u32 kOffVirtualProtect = 0x4A6;        // batch 28 — 18 bytes
+constexpr u32 kOffLstrlenW = 0x4B8;              // batch 29 — 15 bytes
+constexpr u32 kOffLstrcmpW = 0x4C7;              // batch 29 — 37 bytes
+constexpr u32 kOffLstrcpyW = 0x4EC;              // batch 29 — 27 bytes
+constexpr u32 kOffIsWow64 = 0x507;               // batch 30 — 17 bytes
+constexpr u32 kOffGetVersionExW = 0x518;         // batch 30 — 34 bytes
+constexpr u32 kOffLstrlenA = 0x53A;              // batch 31 — 14 bytes
+constexpr u32 kOffLstrcmpA = 0x548;              // batch 31 — 37 bytes
+constexpr u32 kOffLstrcpyA = 0x56D;              // batch 31 — 26 bytes
+constexpr u32 kOffGetModFileNameW = 0x587;       // batch 32 — 24 bytes
+constexpr u32 kOffGetCurrentDirW = 0x59F;        // batch 32 — 31 bytes
+constexpr u32 kOffMBtoWC = 0x5BE;                // batch 33 — 49 bytes
+constexpr u32 kOffWCtoMB = 0x5EF;                // batch 33 — 48 bytes
+constexpr u32 kOffGetUserNameW = 0x61F;          // batch 34 — 47 bytes
+constexpr u32 kOffGetComputerNameW = 0x64E;      // batch 34 — 61 bytes
+constexpr u32 kOffGetWinDirW = 0x68B;            // batch 35 — 30 bytes (buf-first sig)
+constexpr u32 kOffGetLogicalDrives = 0x6A9;      // batch 36 — 6 bytes (returns 0x00800000, X: drive)
+constexpr u32 kOffGetDriveType = 0x6AF;          // batch 36 — 6 bytes (returns 3 = DRIVE_FIXED)
+constexpr u32 kOffReturnTwo = 0x6B5;             // batch 37 — 6 bytes (ERROR_FILE_NOT_FOUND / stream pos)
+constexpr u32 kOffReturnMinus1 = 0x6BB;          // batch 37 — 6 bytes (INVALID_FILE_ATTRIBUTES)
+constexpr u32 kOffReturnPrioNormal = 0x6C1;      // batch 39 — 6 bytes (0x20 = NORMAL_PRIORITY_CLASS)
+constexpr u32 kOffInterlockedInc = 0x6C7;        // batch 40 — 12 bytes
+constexpr u32 kOffInterlockedDec = 0x6D3;        // batch 40 — 12 bytes
+constexpr u32 kOffInterlockedCmpXchg = 0x6DF;    // batch 40 —  8 bytes
+constexpr u32 kOffInterlockedExchg = 0x6E7;      // batch 40 —  5 bytes
+constexpr u32 kOffInterlockedExchgAdd = 0x6EC;   // batch 40 —  7 bytes
+constexpr u32 kOffInterlockedInc64 = 0x6F3;      // batch 41 — 14 bytes
+constexpr u32 kOffInterlockedDec64 = 0x701;      // batch 41 — 16 bytes
+constexpr u32 kOffInterlockedCmpXchg64 = 0x711;  // batch 41 —  9 bytes
+constexpr u32 kOffInterlockedExchg64 = 0x71A;    // batch 41 —  7 bytes
+constexpr u32 kOffInterlockedExchgAdd64 = 0x721; // batch 41 —  9 bytes
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -1803,10 +1808,54 @@ constexpr u8 kStubsBytes[] = {
     0x89, 0xD0,             // 0x6EC mov eax, edx        ; add -> EAX
     0xF0, 0x0F, 0xC1, 0x01, // 0x6EE lock xadd [rcx], eax ; EAX = old, [rcx] += add
     0xC3,                   // 0x6F2 ret
+
+    // === Batch 41: 64-bit Interlocked atomics ==================
+    //
+    // 64-bit counterparts to batch 40. REX.W prefix (0x48) makes
+    // the ops 64-bit wide. `mov rax, -1` uses the full 7-byte
+    // sign-extended form — `mov eax, -1` would zero-extend to
+    // 0x00000000FFFFFFFF which is NOT -1 in 64-bit.
+
+    // --- InterlockedIncrement64 (offset 0x6F3, 14 bytes) ------
+    // Win32: LONGLONG InterlockedIncrement64(LONGLONG* rcx).
+    // mov eax, 1 zero-extends to rax = 1. Returns NEW value.
+    0xB8, 0x01, 0x00, 0x00, 0x00, // 0x6F3 mov eax, 1
+    0xF0, 0x48, 0x0F, 0xC1, 0x01, // 0x6F8 lock xadd [rcx], rax
+    0x48, 0xFF, 0xC0,             // 0x6FD inc rax
+    0xC3,                         // 0x700 ret
+
+    // --- InterlockedDecrement64 (offset 0x701, 16 bytes) ------
+    // Win32: LONGLONG InterlockedDecrement64(LONGLONG* rcx).
+    // `mov rax, -1` sign-extends imm32 0xFFFFFFFF to rax = -1.
+    0x48, 0xC7, 0xC0, 0xFF, 0xFF, 0xFF, 0xFF, // 0x701 mov rax, -1
+    0xF0, 0x48, 0x0F, 0xC1, 0x01,             // 0x708 lock xadd [rcx], rax
+    0x48, 0xFF, 0xC8,                         // 0x70D dec rax
+    0xC3,                                     // 0x710 ret
+
+    // --- InterlockedCompareExchange64 (offset 0x711, 9 bytes) -
+    // Win32: LONGLONG InterlockedCompareExchange64(LONGLONG* rcx,
+    //          LONGLONG exchange=rdx, LONGLONG compare=r8).
+    0x4C, 0x89, 0xC0,             // 0x711 mov rax, r8        ; compare -> RAX
+    0xF0, 0x48, 0x0F, 0xB1, 0x11, // 0x714 lock cmpxchg [rcx], rdx
+    0xC3,                         // 0x719 ret
+
+    // --- InterlockedExchange64 (offset 0x71A, 7 bytes) --------
+    // Win32: LONGLONG InterlockedExchange64(LONGLONG* rcx,
+    //          LONGLONG val=rdx). XCHG with memory implicitly LOCKs.
+    0x48, 0x89, 0xD0, // 0x71A mov rax, rdx
+    0x48, 0x87, 0x01, // 0x71D xchg [rcx], rax
+    0xC3,             // 0x720 ret
+
+    // --- InterlockedExchangeAdd64 (offset 0x721, 9 bytes) -----
+    // Win32: LONGLONG InterlockedExchangeAdd64(LONGLONG* rcx,
+    //          LONGLONG add=rdx). Returns OLD value.
+    0x48, 0x89, 0xD0,             // 0x721 mov rax, rdx
+    0xF0, 0x48, 0x0F, 0xC1, 0x01, // 0x724 lock xadd [rcx], rax
+    0xC3,                         // 0x729 ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x6F3, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0x72A, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -2248,6 +2297,17 @@ constexpr StubEntry kStubsTable[] = {
     {"vcruntime140.dll", "_InterlockedCompareExchange", kOffInterlockedCmpXchg},
     {"vcruntime140.dll", "_InterlockedExchange", kOffInterlockedExchg},
     {"vcruntime140.dll", "_InterlockedExchangeAdd", kOffInterlockedExchgAdd},
+    // 64-bit variants (batch 41)
+    {"kernel32.dll", "InterlockedIncrement64", kOffInterlockedInc64},
+    {"kernel32.dll", "InterlockedDecrement64", kOffInterlockedDec64},
+    {"kernel32.dll", "InterlockedCompareExchange64", kOffInterlockedCmpXchg64},
+    {"kernel32.dll", "InterlockedExchange64", kOffInterlockedExchg64},
+    {"kernel32.dll", "InterlockedExchangeAdd64", kOffInterlockedExchgAdd64},
+    {"vcruntime140.dll", "_InterlockedIncrement64", kOffInterlockedInc64},
+    {"vcruntime140.dll", "_InterlockedDecrement64", kOffInterlockedDec64},
+    {"vcruntime140.dll", "_InterlockedCompareExchange64", kOffInterlockedCmpXchg64},
+    {"vcruntime140.dll", "_InterlockedExchange64", kOffInterlockedExchg64},
+    {"vcruntime140.dll", "_InterlockedExchangeAdd64", kOffInterlockedExchgAdd64},
 
     // Batch 9 — Win32 process heap, backed by the per-process
     // 16-page region at 0x50000000 and SYS_HEAP_ALLOC /
