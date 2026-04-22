@@ -254,6 +254,38 @@ void SyscallDispatch(arch::TrapFrame* frame)
         return;
     }
 
+    case SYS_WIN32_MISS_LOG:
+    {
+        // rdi = IAT slot VA that the miss-logger trampoline
+        // decoded from its caller's `call [rip+disp32]`.
+        // Search CurrentProcess()->win32_iat_misses; if found,
+        // emit a [win32-miss] line with the function name.
+        const u64 slot_va = frame->rdi;
+        Process* proc = CurrentProcess();
+        const char* name = nullptr;
+        if (proc != nullptr)
+        {
+            for (u64 i = 0; i < proc->win32_iat_miss_count; ++i)
+            {
+                if (proc->win32_iat_misses[i].slot_va == slot_va)
+                {
+                    name = proc->win32_iat_misses[i].name;
+                    break;
+                }
+            }
+        }
+        arch::SerialWrite("[win32-miss] slot=");
+        arch::SerialWriteHex(slot_va);
+        arch::SerialWrite(" called fn=\"");
+        arch::SerialWrite(name ? name : "<unmapped>");
+        arch::SerialWrite("\"\n");
+        // Trampoline zeroes rax itself; set here too for
+        // clarity (we overwrite rax anyway via the syscall
+        // return value mechanism).
+        frame->rax = 0;
+        return;
+    }
+
     case SYS_WRITE:
     {
         // rdi = fd, rsi = user buf, rdx = len. DoWrite validates

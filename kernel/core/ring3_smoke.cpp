@@ -1777,6 +1777,12 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     // satisfying the 16n+8 rule.
     proc->user_rsp_init = r.stack_top - 0x48;
     proc->user_gs_base = r.teb_va;
+    // Transfer any catch-all IAT miss (slot_va -> name) entries
+    // the loader queued during ResolveImports. This arms the
+    // runtime miss-logger: on the first call to an unstubbed
+    // import, SYS_WIN32_MISS_LOG can decode the IAT slot VA back
+    // to the function name via this table.
+    PeLoadDrainIatMisses(proc);
     // Per-process Win32 heap. Only initialised for PEs that
     // actually imported anything — a freestanding PE like
     // /bin/hello.exe doesn't call HeapAlloc and shouldn't burn

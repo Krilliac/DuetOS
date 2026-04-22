@@ -8,6 +8,7 @@
 #include "../mm/paging.h"
 #include "../security/guard.h"
 #include "../subsystems/win32/stubs.h"
+#include "process.h"
 
 namespace customos::core
 {
@@ -450,6 +451,35 @@ PeStatus PeValidate(const u8* file, u64 file_len)
 namespace
 {
 
+// Staging buffer for Win32 catch-all misses recorded during the
+// current PeLoad. Drained by PeLoadDrainIatMisses() after the
+// Process is created — Process doesn't exist while PeLoad runs,
+// so the catch-all path queues entries here and SpawnPeFile
+// transfers them once it has a proc to attach them to. Single
+// PE load at a time (kernel has one boot-time loader worker),
+// so no concurrency guard needed.
+struct StagedMiss
+{
+    u64 slot_va;
+    const char* name;
+};
+constexpr u64 kStagedMissCap = 128;
+StagedMiss g_staged_misses[kStagedMissCap];
+u64 g_staged_miss_count = 0;
+
+void StagedMissReset()
+{
+    g_staged_miss_count = 0;
+}
+void StagedMissAppend(u64 slot_va, const char* name)
+{
+    if (g_staged_miss_count >= kStagedMissCap)
+        return; // silently drop — log line already warned
+    g_staged_misses[g_staged_miss_count].slot_va = slot_va;
+    g_staged_misses[g_staged_miss_count].name = name;
+    ++g_staged_miss_count;
+}
+
 // Walk the base-relocation directory and apply each entry to
 // the in-memory image. `delta = actual_base - preferred_base`;
 // in v0 we always load at the preferred base so delta == 0 and
@@ -706,6 +736,12 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, customos::
                 core::LogWithString(core::LogLevel::Warn, "pe-resolve", "unknown import -> catch-all NO-OP", "fn",
                                     fn_name);
                 core::LogWithString(core::LogLevel::Warn, "pe-resolve", "  from", "dll", dll_name);
+                // Stage (slot_va, name) so the miss-logger syscall
+                // can translate a runtime call back to the function
+                // name. Slot VA computed a few lines below; do it
+                // now into a local so the record lines up.
+                const u64 iat_slot_va_for_miss = h.image_base + u64(first_thunk) + u64(fn_idx) * 8;
+                StagedMissAppend(iat_slot_va_for_miss, fn_name);
             }
 
             // Patch the IAT slot. Slot VA = image_base +
@@ -764,6 +800,11 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, customos::mm::AddressSpace* as
         arch::SerialWrite("[pe-loader] security guard blocked PE load\n");
         return r;
     }
+
+    // Clear staged miss buffer before walking imports — previous
+    // PeLoad's drain may have left it populated if a caller
+    // skipped PeLoadDrainIatMisses (e.g. PeLoad failed mid-way).
+    StagedMissReset();
 
     PeHeaders h{};
     const PeStatus ps = ParseHeaders(file, file_len, h);
@@ -930,6 +971,20 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, customos::mm::AddressSpace* as
     r.image_size = h.image_size;
     r.teb_va = teb_va;
     return r;
+}
+
+void PeLoadDrainIatMisses(Process* proc)
+{
+    if (proc == nullptr)
+        return;
+    const u64 n = g_staged_miss_count < Process::kWin32IatMissCap ? g_staged_miss_count : Process::kWin32IatMissCap;
+    for (u64 i = 0; i < n; ++i)
+    {
+        proc->win32_iat_misses[i].slot_va = g_staged_misses[i].slot_va;
+        proc->win32_iat_misses[i].name = g_staged_misses[i].name;
+    }
+    proc->win32_iat_miss_count = n;
+    g_staged_miss_count = 0;
 }
 
 // ---------------------------------------------------------------

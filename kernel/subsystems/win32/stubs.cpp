@@ -71,6 +71,7 @@ constexpr u32 kOffGetTickCount = 0x213;       // batch 11 — 12 bytes (shared w
 constexpr u32 kOffHeapSize = 0x21F;           // batch 14 — 11 bytes
 constexpr u32 kOffHeapRealloc = 0x22A;        // batch 14 — 14 bytes
 constexpr u32 kOffRealloc = 0x238;            // batch 14 — 14 bytes
+constexpr u32 kOffMissLogger = 0x246;         // batch 15 — 24 bytes
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -675,10 +676,46 @@ constexpr u8 kStubsBytes[] = {
     0xB8, 0x0F, 0x00, 0x00, 0x00, // 0x23E mov eax, 15 (SYS_HEAP_REALLOC)
     0xCD, 0x80,                   // 0x243 int 0x80
     0xC3,                         // 0x245 ret
+
+    // --- miss-logger (offset 0x246, 35 bytes) -----------------
+    // Catch-all trampoline for every unresolved import. Two-step
+    // decode of the caller's control flow so we recover the IAT
+    // slot VA that matches what the PE loader staged:
+    //
+    //   step A  (caller's `call qword [rip+rel32]` is actually
+    //            `call rel32` because MSVC emits 5-byte direct
+    //            CALLs to tiny 6-byte import "thunks", not the
+    //            `call [IAT]` pattern). So [rsp] - 4 gives the
+    //            rel32 of the CALL; adding it to [rsp] yields
+    //            the thunk's VA (e.g. 0x140004F4E).
+    //
+    //   step B  At the thunk, bytes are `FF 25 rel32_2` — an
+    //            indirect `jmp qword [rip+rel32_2]`. rel32_2 is
+    //            relative to the byte after the jmp, so
+    //            IAT_slot_VA = thunk + 6 + rel32_2.
+    //
+    // The kernel side looks up IAT_slot_VA in the per-process
+    // miss table populated at load time and logs the function
+    // name. Each call still returns 0 (same as the old stub).
+    //
+    // Regs: we clobber rax, rcx, rdi — all caller-saved under
+    // any Win64 callable we'd be substituted for, and the syscall
+    // path preserves the rest. No save/restore needed.
+    0x48, 0x8B, 0x04, 0x24,       // 0x246 mov rax, [rsp]               ; return addr (post-CALL)
+    0x48, 0x63, 0x48, 0xFC,       // 0x24A movsxd rcx, dword [rax-4]    ; CALL rel32
+    0x48, 0x01, 0xC1,             // 0x24E add rcx, rax                 ; rcx = thunk VA
+    0x48, 0x63, 0x41, 0x02,       // 0x251 movsxd rax, dword [rcx+2]    ; thunk's JMP rel32
+    0x48, 0x01, 0xC8,             // 0x255 add rax, rcx                 ; rax = thunk + rel32
+    0x48, 0x83, 0xC0, 0x06,       // 0x258 add rax, 6                   ; rax = IAT slot VA
+    0x48, 0x89, 0xC7,             // 0x25C mov rdi, rax                 ; arg0 = IAT slot VA
+    0xB8, 0x10, 0x00, 0x00, 0x00, // 0x25F mov eax, 16 (SYS_WIN32_MISS_LOG)
+    0xCD, 0x80,                   // 0x264 int 0x80
+    0x31, 0xC0,                   // 0x266 xor eax, eax
+    0xC3,                         // 0x268 ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x246, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0x269, "stub layout drifted; update kOff* constants");
 
 struct StubEntry
 {
@@ -1090,7 +1127,12 @@ bool Win32StubsLookupCatchAll(u64* out_va)
 {
     if (out_va == nullptr)
         return false;
-    *out_va = kWin32StubsVa + kOffReturnZero;
+    // Route through the miss-logger rather than the bare
+    // "xor eax,eax; ret" stub. Behaviourally identical at the
+    // call site (returns 0), but each call emits a
+    // [win32-miss] line so the boot log identifies, in real
+    // time, exactly which unstubbed import the PE just reached.
+    *out_va = kWin32StubsVa + kOffMissLogger;
     return true;
 }
 

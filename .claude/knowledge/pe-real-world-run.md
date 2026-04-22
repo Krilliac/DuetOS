@@ -94,6 +94,41 @@ Any failure logs the failing step (`FAIL MapSection idx=0x4`,
 `FAIL ResolveImports`, `FAIL stack frame alloc idx=0x9`, …). Makes
 the previously-silent "loader quietly rejected it" case unambiguous.
 
+## Runtime miss-logger
+
+Catch-all imports now route through a 35-byte trampoline at
+`kOffMissLogger` in the stubs page instead of the bare
+"xor eax,eax; ret". The trampoline decodes its caller's call
+sequence:
+
+  1. `[rsp]` is the return address after the PE's `call rel32`
+     into an MSVC import thunk.
+  2. `[rsp-4]` is the CALL's rel32 — thunk VA = `[rsp] + rel32`.
+  3. The thunk is `FF 25 rel32_2` (`jmp qword [rip+rel32_2]`);
+     IAT slot VA = `thunk + 6 + rel32_2`.
+
+The trampoline passes the IAT slot VA to
+`SYS_WIN32_MISS_LOG (16)`, which looks it up in
+`CurrentProcess()->win32_iat_misses[]` (populated at load time
+via `PeLoadDrainIatMisses`) and emits:
+
+```
+[win32-miss] slot=0x1400062c0 called fn="__p___argv"
+[win32-miss] slot=0x1400062c8 called fn="__p___argc"
+```
+
+First winkill run after the slice prints exactly those two
+lines before faulting at cr2=0 — the CRT is grabbing
+pointers-to-argc/argv from MSVC's `__p___argc` / `__p___argv`
+and dereferencing the zero they came back with. That's the
+next wall: implement those two to return pointers to valid
+argc/argv globals.
+
+Why this beats static analysis: it tells us the *order of
+calls*, so the first unimplemented import is always obvious
+from the top of the log. Binary search through 24+ catch-alls
+is not needed.
+
 ## Next walls (in execution order)
 
 The current winkill fault is inside the CRT at `rip=0x14000400b`:

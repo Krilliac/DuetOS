@@ -269,6 +269,25 @@ struct Process
     u8 abi_flavor;
     u8 _abi_pad[7];
 
+    // Win32 "catch-all" miss table. Populated during PeLoad for
+    // every import that didn't match a real stub and got routed
+    // through the shared miss-logger trampoline. When the PE calls
+    // the trampoline, the SYS_WIN32_MISS_LOG syscall looks up the
+    // caller's IAT slot VA here and logs the function name it
+    // maps to — telling us, in real time, which unstubbed import
+    // the CRT just tried to call. Cap at 128 entries: winkill has
+    // ~24 catch-alls, any PE with a full CRT will stay under 100.
+    struct Win32IatMiss
+    {
+        u64 slot_va;      // VA of the IAT slot (user-space).
+        const char* name; // kernel-direct-map pointer into the PE's
+                          // on-disk byte buffer (RAM-fs'd), valid
+                          // for the life of the Process.
+    };
+    static constexpr u64 kWin32IatMissCap = 128;
+    Win32IatMiss win32_iat_misses[kWin32IatMissCap];
+    u64 win32_iat_miss_count;
+
     u64 refcount;
 };
 
