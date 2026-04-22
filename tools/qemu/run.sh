@@ -54,27 +54,17 @@ else
     exit 1
 fi
 
-# Scratch NVMe image. 16 MiB GPT-formatted raw file with one data
-# partition at LBA 2048..(end-34). The first 8 bytes of that
-# partition carry a "CUSTOMOS" marker so both the NVMe self-test
-# (via the GPT parse in kernel/fs/gpt) and any future filesystem
-# slice has a grep-able success signal. Kept in the build
-# directory so it rebuilds per-preset and never pollutes the
-# source tree.
+# Scratch NVMe + SATA images. GPT-formatted raw files with one
+# FAT32 data partition seeded by make-gpt-image.py. The FS self-
+# tests mutate these images (fatwrite / fatappend / fatnew); an
+# image from a previous run would fail the "fresh fixture"
+# assertions (e.g. HELLO.TXT expected at 17 bytes, not 5017).
+# Regenerate on every invocation — build is seconds, trades off
+# nothing meaningful for determinism.
 NVME_IMAGE="${BUILD_DIR}/nvme0.img"
-if [[ ! -f "${NVME_IMAGE}" ]]; then
-    python3 "${SCRIPT_DIR}/make-gpt-image.py" "${NVME_IMAGE}"
-fi
-
-# Scratch SATA image. Same layout as the NVMe image — a small GPT
-# disk with a "CUSTOMOS" marker in the data partition — so the
-# AHCI self-test can assert the 0x55AA PMBR signature just like
-# NVMe. Kept as a separate file so writes on one backend never
-# bleed into the other's self-test.
 SATA_IMAGE="${BUILD_DIR}/sata0.img"
-if [[ ! -f "${SATA_IMAGE}" ]]; then
-    python3 "${SCRIPT_DIR}/make-gpt-image.py" "${SATA_IMAGE}"
-fi
+python3 "${SCRIPT_DIR}/make-gpt-image.py" "${NVME_IMAGE}"
+python3 "${SCRIPT_DIR}/make-gpt-image.py" "${SATA_IMAGE}"
 
 QEMU_ARGS=(
     -machine  q35

@@ -518,16 +518,17 @@ bool Fat32LookupPath(const Volume* v, const char* path, DirEntry* out)
     }
 
     // Component-by-component descent. We copy each component into
-    // a 13-byte local buffer (8.3 max = "FILENAME.EXT\0" = 13) so
-    // we never mutate the caller's path.
-    char comp[13];
+    // a 128-byte local buffer — matches DirEntry::name capacity
+    // since LFN entries can carry names up to 127 chars. Avoids
+    // mutating the caller's path.
+    char comp[128];
     while (*path != 0)
     {
         u32 n = 0;
         while (*path != 0 && *path != '/')
         {
             if (n >= sizeof(comp) - 1)
-                return false; // component longer than an 8.3 short name
+                return false; // component exceeds LFN cap
             comp[n++] = *path++;
         }
         comp[n] = 0;
@@ -937,6 +938,15 @@ using OnDiskSfnVisitor = bool (*)(u64 sector_lba, u32 off_in_sec, const u8* raw,
 
 bool WalkDirOnDisk(const Volume& v, u32 first_cluster, OnDiskSfnVisitor visit, void* ctx)
 {
+    // LFN accumulator — mirrors WalkDirChain so visitors see the
+    // long name in DirEntry.name when one is present. Without
+    // this, delete/truncate that target a long-named file would
+    // compare against the SFN fallback (e.g. "MIXEDC~1.MD") and
+    // never match the caller's long-form name.
+    char pending_long[260];
+    bool pending_any = false;
+    VZero(pending_long, sizeof(pending_long));
+
     u32 cluster = first_cluster;
     for (u32 step = 0; step < 64; ++step)
     {
@@ -953,16 +963,54 @@ bool WalkDirOnDisk(const Volume& v, u32 first_cluster, OnDiskSfnVisitor visit, v
                 if (e[0] == 0x00)
                     return true;
                 if (e[0] == 0xE5)
+                {
+                    pending_any = false;
                     continue;
+                }
                 const u8 attr = e[11];
                 if ((attr & kAttrLongName) == kAttrLongName)
+                {
+                    const u8 ord = static_cast<u8>(e[0] & 0x3F);
+                    if (ord == 0 || ord > 20)
+                    {
+                        pending_any = false;
+                        continue;
+                    }
+                    char chars[13];
+                    for (u32 i = 0; i < 13; ++i)
+                        chars[i] = 0;
+                    bool terminated = false;
+                    DecodeLfnChars(e, chars, &terminated);
+                    const u32 base = u32(ord - 1) * 13;
+                    for (u32 i = 0; i < 13; ++i)
+                        pending_long[base + i] = chars[i];
+                    pending_any = true;
                     continue;
+                }
                 if (attr & kAttrVolumeId)
+                {
+                    pending_any = false;
                     continue;
+                }
                 DirEntry decoded;
                 DecodeEntry(e, decoded);
                 if (IsDotEntry(decoded.name))
+                {
+                    pending_any = false;
                     continue;
+                }
+                if (pending_any)
+                {
+                    u32 n = 0;
+                    while (n + 1 < sizeof(decoded.name) && pending_long[n] != 0)
+                    {
+                        decoded.name[n] = pending_long[n];
+                        ++n;
+                    }
+                    decoded.name[n] = 0;
+                }
+                pending_any = false;
+                VZero(pending_long, sizeof(pending_long));
                 if (!visit(lba, off, e, decoded, ctx))
                     return true;
             }
@@ -1308,6 +1356,217 @@ i64 AppendInDir(const Volume* v, u32 dir_cluster, const char* name, const void* 
     return static_cast<i64>(written);
 }
 
+// Detects whether an input name requires an LFN sequence to
+// round-trip losslessly: any lowercase, any multi-dot, any
+// length > 8 base or > 3 ext, or any char outside the narrow SFN
+// character set. If this returns false, MakeSfn succeeds and the
+// input equals its 8.3 form (case-lost but spec-compliant).
+bool NeedsLfn(const char* name)
+{
+    if (name == nullptr || name[0] == 0)
+        return false;
+    u32 n = 0;
+    while (name[n] != 0)
+        ++n;
+    u32 dot_count = 0;
+    for (u32 i = 0; i < n; ++i)
+        if (name[i] == '.')
+            ++dot_count;
+    if (dot_count > 1)
+        return true;
+
+    // Any lowercase -> need LFN for case preservation.
+    for (u32 i = 0; i < n; ++i)
+        if (name[i] >= 'a' && name[i] <= 'z')
+            return true;
+
+    // Length check 8.3.
+    u32 dot_pos = 0xFFFFFFFFu;
+    for (u32 i = 0; i < n; ++i)
+        if (name[i] == '.')
+        {
+            dot_pos = i;
+            break;
+        }
+    const u32 base_len = (dot_pos == 0xFFFFFFFFu) ? n : dot_pos;
+    const u32 ext_len = (dot_pos == 0xFFFFFFFFu) ? 0 : (n - dot_pos - 1);
+    if (base_len > 8 || ext_len > 3)
+        return true;
+    return false;
+}
+
+// FAT LFN checksum of the 11-byte SFN. Spec algorithm — rotates
+// right then adds the byte.
+u8 SfnChecksum(const u8* sfn11)
+{
+    u8 sum = 0;
+    for (u32 i = 0; i < 11; ++i)
+    {
+        sum = static_cast<u8>((((sum & 1) ? 0x80 : 0) + (sum >> 1) + sfn11[i]) & 0xFF);
+    }
+    return sum;
+}
+
+// Generate a unique "BASE~N.EXT" short name for the given long
+// name within `dir_cluster`. Picks up to 6 SFN-legal characters
+// of the base and up to 3 of the extension, then tries numeric
+// tails 1..9. Returns false if no free tail in that range.
+bool GenerateUniqueSfn(const Volume& v, u32 dir_cluster, const char* long_name, u8* out_sfn_11)
+{
+    auto sfn_safe = [](char c) -> int
+    {
+        if (c >= 'a' && c <= 'z')
+            c = static_cast<char>(c - 32);
+        if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))
+            return static_cast<u8>(c);
+        const char kExtra[] = "!#$%&'()-@^_`{}~";
+        for (u32 i = 0; kExtra[i] != 0; ++i)
+            if (c == kExtra[i])
+                return static_cast<u8>(c);
+        return -1;
+    };
+
+    // Split long_name at the LAST '.'.
+    u32 n = 0;
+    while (long_name[n] != 0)
+        ++n;
+    u32 last_dot = 0xFFFFFFFFu;
+    for (u32 i = n; i-- > 0;)
+        if (long_name[i] == '.')
+        {
+            last_dot = i;
+            break;
+        }
+    const u32 base_end = (last_dot == 0xFFFFFFFFu) ? n : last_dot;
+
+    // Pack first 6 safe chars of base into out_sfn_11[0..5].
+    u8 base_chars[6];
+    u32 bi = 0;
+    for (u32 i = 0; i < base_end && bi < 6; ++i)
+    {
+        const int c = sfn_safe(long_name[i]);
+        if (c < 0)
+            continue;
+        base_chars[bi++] = static_cast<u8>(c);
+    }
+    // Ext: first 3 safe chars after last '.'.
+    u8 ext_chars[3] = {' ', ' ', ' '};
+    u32 ei = 0;
+    if (last_dot != 0xFFFFFFFFu)
+    {
+        for (u32 i = last_dot + 1; i < n && ei < 3; ++i)
+        {
+            const int c = sfn_safe(long_name[i]);
+            if (c < 0)
+                continue;
+            ext_chars[ei++] = static_cast<u8>(c);
+        }
+    }
+    if (bi == 0 && ei == 0)
+        return false; // nothing left after filtering — reject.
+
+    for (u32 tail = 1; tail <= 9; ++tail)
+    {
+        for (u32 i = 0; i < 11; ++i)
+            out_sfn_11[i] = ' ';
+        for (u32 i = 0; i < bi; ++i)
+            out_sfn_11[i] = base_chars[i];
+        out_sfn_11[bi] = '~';
+        out_sfn_11[bi + 1] = static_cast<u8>('0' + tail);
+        for (u32 i = 0; i < 3; ++i)
+            out_sfn_11[8 + i] = ext_chars[i];
+        // Check for duplicate. Render to human form for case-insensitive
+        // compare — the existing FindInDirByName wants that form.
+        char human[13];
+        FormatShortName(out_sfn_11, human);
+        DirEntry tmp;
+        if (!FindInDirByName(v, dir_cluster, human, &tmp))
+            return true; // unused tail found
+    }
+    return false;
+}
+
+// Find `count` consecutive unused entry slots in `dir_cluster`.
+// v0 only looks at the 0x00 end-of-dir marker and its trailing
+// 0x00 space; 0xE5 deleted slots in the middle are skipped. For
+// a test image with plenty of slack after the seeded entries,
+// this is a non-issue. Returns true + fills
+// `out_first_lba` / `out_first_off`; `count` slots are known to
+// be contiguous starting from that position. Caller is
+// responsible for not running off the end of the cluster.
+bool FindFreeRunInDir(const Volume& v, u32 dir_cluster, u32 count, u64* out_first_lba, u32* out_first_off)
+{
+    u32 cluster = dir_cluster;
+    for (u32 step = 0; step < 64; ++step)
+    {
+        if (cluster < 2 || cluster >= 0x0FFFFFF8u)
+            return false;
+        for (u32 sec = 0; sec < v.sectors_per_cluster; ++sec)
+        {
+            const u64 lba = u64(v.data_start_sector) + u64(cluster - 2) * u64(v.sectors_per_cluster) + sec;
+            if (drivers::storage::BlockDeviceRead(v.block_handle, lba, 1, g_scratch) != 0)
+                return false;
+            for (u32 off = 0; off + 32 <= v.bytes_per_sector; off += 32)
+            {
+                if (g_scratch[off] != 0x00)
+                    continue;
+                // Found start of 0x00 zone. Confirm `count` slots
+                // fit before end-of-cluster. v0 rejects runs that
+                // would span cluster boundaries (directory growth
+                // is a follow-up).
+                const u32 sector_cap = v.bytes_per_sector;
+                const u32 cluster_cap = v.sectors_per_cluster * v.bytes_per_sector;
+                const u32 pos_in_cluster = sec * v.bytes_per_sector + off;
+                if (pos_in_cluster + count * 32 > cluster_cap)
+                    return false;
+                (void)sector_cap;
+                *out_first_lba = lba;
+                *out_first_off = off;
+                return true;
+            }
+        }
+        cluster = ReadFatEntry(v, cluster);
+    }
+    return false;
+}
+
+// Encode one LFN fragment into `out_32`. `chunk` holds up to 13
+// ASCII chars; chunks shorter than 13 get a 0x0000 terminator at
+// position `chunk_len` and 0xFFFF padding beyond.
+void EncodeLfnFragment(const char* chunk, u32 chunk_len, u8 ordinal, bool is_last, u8 checksum, u8* out_32)
+{
+    VZero(out_32, 32);
+    out_32[0] = static_cast<u8>(is_last ? (ordinal | 0x40) : ordinal);
+    out_32[11] = 0x0F; // LFN attr
+    out_32[12] = 0;
+    out_32[13] = checksum;
+    out_32[26] = 0; // cluster must be 0
+    out_32[27] = 0;
+    static constexpr u32 kLfnOffs[13] = {1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30};
+    bool past_terminator = false;
+    for (u32 i = 0; i < 13; ++i)
+    {
+        const u32 o = kLfnOffs[i];
+        if (i < chunk_len)
+        {
+            const u8 c = static_cast<u8>(chunk[i]);
+            out_32[o] = c;
+            out_32[o + 1] = 0;
+        }
+        else if (!past_terminator && i == chunk_len)
+        {
+            out_32[o] = 0x00;
+            out_32[o + 1] = 0x00;
+            past_terminator = true;
+        }
+        else
+        {
+            out_32[o] = 0xFF;
+            out_32[o + 1] = 0xFF;
+        }
+    }
+}
+
 } // namespace
 
 i64 Fat32AppendInRoot(const Volume* v, const char* name, const void* buf, u64 len)
@@ -1339,29 +1598,62 @@ i64 CreateInDir(const Volume* v, u32 dir_cluster, const char* name, const void* 
     if (len > 0xFFFFFFFFu)
         return -1;
 
-    u8 sfn[11];
-    if (!MakeSfn(name, sfn))
-        return -1;
-
-    // Duplicate check via on-disk lookup — cached snapshot only
-    // reflects the root, so subdirs need a fresh walk anyway.
-    char human[13];
-    FormatShortName(sfn, human);
-    {
-        DirEntry tmp;
-        if (FindInDirByName(*v, dir_cluster, human, &tmp))
-            return -1;
-    }
-
-    u64 slot_lba = 0;
-    u32 slot_off = 0;
-    if (!FindFreeSlotInDir(*v, dir_cluster, &slot_lba, &slot_off))
-        return -1;
-
-    // Allocate and chain clusters for the content, if any.
     const u64 cluster_bytes = u64(v->sectors_per_cluster) * u64(v->bytes_per_sector);
     if (v->sectors_per_cluster > sizeof(g_scratch) / 512)
         return -1;
+
+    // Decide which directory-entry layout to use: plain SFN (fast
+    // path for clean 8.3 uppercase names) or LFN sequence + SFN
+    // fallback (long, mixed-case, or non-ASCII-safe names).
+    const bool use_lfn = NeedsLfn(name);
+    u8 sfn[11];
+    u32 lfn_frag_count = 0;
+    u32 long_len = 0;
+    if (!use_lfn)
+    {
+        if (!MakeSfn(name, sfn))
+            return -1;
+        char human[13];
+        FormatShortName(sfn, human);
+        DirEntry tmp;
+        if (FindInDirByName(*v, dir_cluster, human, &tmp))
+            return -1; // duplicate
+    }
+    else
+    {
+        while (name[long_len] != 0)
+            ++long_len;
+        if (long_len > 127)
+            return -1; // exceeds DirEntry::name capacity
+        // LFN duplicate check via full-name walk — walker already
+        // emits the long name in DirEntry.name.
+        DirEntry tmp;
+        if (FindInDirByName(*v, dir_cluster, name, &tmp))
+            return -1;
+        if (!GenerateUniqueSfn(*v, dir_cluster, name, sfn))
+            return -1;
+        lfn_frag_count = (long_len + 12) / 13;
+        if (lfn_frag_count == 0 || lfn_frag_count > 20)
+            return -1;
+    }
+
+    // Reserve (lfn_frag_count + 1) consecutive slots. For pure
+    // SFN path, one slot suffices.
+    u64 slot_lba = 0;
+    u32 slot_off = 0;
+    const u32 slots_needed = lfn_frag_count + 1;
+    if (slots_needed == 1)
+    {
+        if (!FindFreeSlotInDir(*v, dir_cluster, &slot_lba, &slot_off))
+            return -1;
+    }
+    else
+    {
+        if (!FindFreeRunInDir(*v, dir_cluster, slots_needed, &slot_lba, &slot_off))
+            return -1;
+    }
+
+    // Allocate + populate content clusters.
     u32 first_cluster = 0;
     if (len > 0)
     {
@@ -1385,10 +1677,6 @@ i64 CreateInDir(const Volume* v, u32 dir_cluster, const char* name, const void* 
             }
             else
             {
-                // Read-before-write so the cluster's trailing slack
-                // (zeroed by ZeroCluster) is preserved. Cheaper
-                // alternative: VZero scratch then copy. Do the
-                // cheaper thing since we just zeroed the cluster.
                 VZero(g_scratch, cluster_bytes);
                 for (u64 i = 0; i < chunk; ++i)
                     g_scratch[i] = src[written + i];
@@ -1411,19 +1699,38 @@ i64 CreateInDir(const Volume* v, u32 dir_cluster, const char* name, const void* 
         }
     }
 
-    // Write the SFN record into the chosen slot. Read the sector
-    // first — other entries in that sector must not be clobbered.
+    // Write the entry records. For LFN case, write `lfn_frag_count`
+    // fragments (highest ordinal first on disk) followed by the
+    // SFN; the SFN sits slot_off + lfn_frag_count * 32 bytes in.
+    // All records live inside one sector (guaranteed by
+    // FindFreeRunInDir for the common v0 case with ≤ 16 slots
+    // per sector).
     if (drivers::storage::BlockDeviceRead(v->block_handle, slot_lba, 1, g_scratch) != 0)
     {
         if (first_cluster != 0)
             FreeClusterChain(*v, first_cluster);
         return -1;
     }
-    u8* rec = g_scratch + slot_off;
-    // Remember whether this slot was the end-of-dir marker. If it
-    // was, we have to also bump the NEXT slot's first byte to 0x00
-    // so the enumerator still sees a terminator.
-    const bool was_eod = (rec[0] == 0x00);
+    const bool was_eod = (g_scratch[slot_off] == 0x00);
+    if (use_lfn)
+    {
+        const u8 chk = SfnChecksum(sfn);
+        // Fragments: ordinal N (highest, is_last=true) on disk first,
+        // ordinal 1 last — so on disk we walk from slot 0 to
+        // lfn_frag_count-1 placing ord=N, N-1, ..., 1.
+        for (u32 i = 0; i < lfn_frag_count; ++i)
+        {
+            const u32 ord = lfn_frag_count - i;
+            const bool is_last_piece = (i == 0); // physical-first = logical-last
+            const u32 chunk_start = (ord - 1) * 13;
+            u32 chunk_len = 0;
+            while (chunk_len < 13 && chunk_start + chunk_len < long_len)
+                ++chunk_len;
+            u8* rec = g_scratch + slot_off + i * 32;
+            EncodeLfnFragment(name + chunk_start, chunk_len, static_cast<u8>(ord), is_last_piece, chk, rec);
+        }
+    }
+    u8* rec = g_scratch + slot_off + lfn_frag_count * 32;
     VZero(rec, 32);
     for (u32 i = 0; i < 11; ++i)
         rec[i] = sfn[i];
@@ -1437,10 +1744,12 @@ i64 CreateInDir(const Volume* v, u32 dir_cluster, const char* name, const void* 
     rec[29] = static_cast<u8>((size32 >> 8) & 0xFF);
     rec[30] = static_cast<u8>((size32 >> 16) & 0xFF);
     rec[31] = static_cast<u8>((size32 >> 24) & 0xFF);
-    if (was_eod && slot_off + 32 < v->bytes_per_sector)
+    // If we consumed the end-of-dir slot, the next 32 B (if any)
+    // must still read as 0x00 to keep the enumerator honest.
+    const u32 past_end = slot_off + slots_needed * 32;
+    if (was_eod && past_end + 32 <= v->bytes_per_sector)
     {
-        // In-sector neighbour: zero it so iterator sees EOD there.
-        g_scratch[slot_off + 32] = 0x00;
+        g_scratch[past_end] = 0x00;
     }
     if (drivers::storage::BlockDeviceWrite(v->block_handle, slot_lba, 1, g_scratch) != 0)
     {
@@ -1448,11 +1757,6 @@ i64 CreateInDir(const Volume* v, u32 dir_cluster, const char* name, const void* 
             FreeClusterChain(*v, first_cluster);
         return -1;
     }
-    // If was_eod and the slot was the final entry of its sector,
-    // write the first byte of the FIRST entry of the next
-    // directory sector to 0x00 so enumeration doesn't read stale
-    // data. For v0 the directory lives in one cluster and our
-    // tests never reach that corner — skip.
 
     if (dir_cluster == v->root_cluster)
     {
@@ -2157,6 +2461,57 @@ void Fat32SelfTest()
         return;
     }
     SerialWrite("[fs/fat32] self-test OK (subdir CRUD on /SUB/CHILD.TXT)\n");
+
+    // Eleventh phase: LFN emission on create. Name "MixedCase.Report.md"
+    // triggers the LFN path (multi-dot, mixed case, > 8 base). The
+    // walker reads the long name back via its LFN accumulator; we
+    // verify both that the created file is findable by its long
+    // name AND that the SFN fallback is findable too.
+    const char* long_name = "MixedCase.Report.md";
+    const u8 long_body[] = "lfn create smoke\n";
+    const u64 long_body_len = 17;
+    if (Fat32CreateAtPath(v0, "/MixedCase.Report.md", long_body, long_body_len) != static_cast<i64>(long_body_len))
+    {
+        SerialWrite("[fs/fat32] self-test FAILED: create MixedCase.Report.md\n");
+        return;
+    }
+    DirEntry lng_create;
+    if (!Fat32LookupPath(v0, "/MixedCase.Report.md", &lng_create))
+    {
+        SerialWrite("[fs/fat32] self-test FAILED: long-name lookup post-create\n");
+        return;
+    }
+    // Exact long-name match in DirEntry.name proves the walker
+    // correctly accumulated our emitted LFN fragments.
+    for (u32 i = 0; long_name[i] != 0; ++i)
+    {
+        if (lng_create.name[i] != long_name[i])
+        {
+            SerialWrite("[fs/fat32] self-test FAILED: long-name round-trip mismatch\n");
+            return;
+        }
+    }
+    VZero(buf, sizeof(buf));
+    const i64 n8 = Fat32ReadFile(v0, &lng_create, buf, sizeof(buf));
+    if (n8 != static_cast<i64>(long_body_len))
+    {
+        SerialWrite("[fs/fat32] self-test FAILED: long-name body size\n");
+        return;
+    }
+    for (u32 i = 0; i < long_body_len; ++i)
+    {
+        if (buf[i] != long_body[i])
+        {
+            SerialWrite("[fs/fat32] self-test FAILED: long-name body mismatch\n");
+            return;
+        }
+    }
+    if (!Fat32DeleteAtPath(v0, "/MixedCase.Report.md"))
+    {
+        SerialWrite("[fs/fat32] self-test FAILED: delete long-name file\n");
+        return;
+    }
+    SerialWrite("[fs/fat32] self-test OK (LFN emitted + read back on create/delete)\n");
 }
 
 } // namespace customos::fs::fat32
