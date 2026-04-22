@@ -70,15 +70,28 @@ enum : u64
     kSysWrite = 1,
     kSysOpen = 2,
     kSysClose = 3,
+    kSysLseek = 8,
     kSysMmap = 9,
     kSysMunmap = 11,
     kSysBrk = 12,
+    kSysRtSigaction = 13,
+    kSysRtSigprocmask = 14,
+    kSysIoctl = 16,
+    kSysWritev = 20,
     kSysGetPid = 39,
     kSysExit = 60,
     kSysUname = 63,
+    kSysGetUid = 102,
+    kSysGetGid = 104,
+    kSysGetEuid = 107,
+    kSysGetEgid = 108,
     kSysArchPrctl = 158,
     kSysExitGroup = 231,
+    kSysSetTidAddress = 218,
 };
+
+constexpr i64 kESPIPE = -29;
+constexpr i64 kENOTTY = -25;
 
 // ARCH_* codes for arch_prctl (linux/arch/x86/include/uapi/asm/prctl.h).
 constexpr u64 kArchSetGs = 0x1001;
@@ -307,6 +320,152 @@ i64 DoRead(u64 fd, u64 user_buf, u64 len)
     return static_cast<i64>(to_copy);
 }
 
+// Linux: writev(fd, iov, iovcnt). Each iovec is two u64s: base
+// pointer + length. We call DoWrite on each in order, totaling
+// the byte count. Short writes (DoWrite returning less than
+// requested) stop the scatter early — same semantics as the
+// kernel's real writev.
+i64 DoWritev(u64 fd, u64 user_iov, u64 iovcnt)
+{
+    if (iovcnt == 0)
+        return 0;
+    if (iovcnt > 1024)
+        return kEINVAL; // sanity cap
+    i64 total = 0;
+    for (u64 i = 0; i < iovcnt; ++i)
+    {
+        struct
+        {
+            u64 base;
+            u64 len;
+        } iov;
+        if (!mm::CopyFromUser(&iov, reinterpret_cast<const void*>(user_iov + i * 16), sizeof(iov)))
+        {
+            return total > 0 ? total : kEFAULT;
+        }
+        if (iov.len == 0)
+            continue;
+        const i64 n = DoWrite(fd, iov.base, iov.len);
+        if (n < 0)
+        {
+            return total > 0 ? total : n;
+        }
+        total += n;
+        if (static_cast<u64>(n) < iov.len)
+            break; // partial write — stop per spec
+    }
+    return total;
+}
+
+// Linux: lseek(fd, offset, whence).
+//   whence 0 = SEEK_SET — absolute
+//   whence 1 = SEEK_CUR — relative to current
+//   whence 2 = SEEK_END — relative to file size
+// Only file fds support seek; tty fds return -ESPIPE so musl's
+// isatty() heuristic works without extra plumbing.
+i64 DoLseek(u64 fd, i64 offset, u64 whence)
+{
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr || fd >= 16)
+        return kEBADF;
+    if (p->linux_fds[fd].state == 1)
+        return kESPIPE; // tty: can't seek
+    if (p->linux_fds[fd].state != 2)
+        return kEBADF;
+
+    i64 new_off = 0;
+    switch (whence)
+    {
+    case 0:
+        new_off = offset;
+        break;
+    case 1:
+        new_off = static_cast<i64>(p->linux_fds[fd].offset) + offset;
+        break;
+    case 2:
+        new_off = static_cast<i64>(p->linux_fds[fd].size) + offset;
+        break;
+    default:
+        return kEINVAL;
+    }
+    if (new_off < 0)
+        return kEINVAL;
+    p->linux_fds[fd].offset = static_cast<u64>(new_off);
+    return new_off;
+}
+
+// Linux: ioctl(fd, cmd, arg). v0 stub — no device drivers
+// currently expose ioctls to Linux ABI. Return -ENOTTY for
+// anything on tty fds (matches glibc/musl probe behaviour), -EBADF
+// otherwise. Real implementations add specific cmd handling per
+// device.
+i64 DoIoctl(u64 fd, u64 cmd, u64 arg)
+{
+    (void)cmd;
+    (void)arg;
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr || fd >= 16)
+        return kEBADF;
+    if (p->linux_fds[fd].state == 1)
+        return kENOTTY;
+    if (p->linux_fds[fd].state == 0)
+        return kEBADF;
+    return kENOTTY;
+}
+
+// Linux: rt_sigaction / rt_sigprocmask / set_tid_address.
+// v0 stubs — accept + succeed without actually wiring signal
+// delivery or TID futex notification. musl calls these during
+// CRT init; refusing them would abort startup. Behavior: signals
+// are silently dropped (no delivery machinery yet); set_tid_address
+// returns the current task ID but the kernel never clears the
+// user memory on exit (no CLONE_CHILD_CLEARTID handling).
+i64 DoRtSigaction(u64 signum, u64 new_act, u64 old_act, u64 sigsetsize)
+{
+    (void)signum;
+    (void)new_act;
+    (void)old_act;
+    (void)sigsetsize;
+    return 0;
+}
+
+i64 DoRtSigprocmask(u64 how, u64 user_set, u64 user_oldset, u64 sigsetsize)
+{
+    (void)how;
+    (void)user_set;
+    (void)user_oldset;
+    (void)sigsetsize;
+    return 0;
+}
+
+i64 DoSetTidAddress(u64 user_tid_ptr)
+{
+    (void)user_tid_ptr;
+    return static_cast<i64>(sched::CurrentTaskId());
+}
+
+// Identity stubs. v0 presents every process as uid=0/gid=0 —
+// CustomOS doesn't have a user-account model yet. Returning 0
+// satisfies musl's libc.a startup without misleading it: programs
+// that check for root will see "yes you're root," which is
+// consistent with "there are no privilege boundaries here."
+i64 DoGetUid()
+{
+    return 0;
+}
+i64 DoGetGid()
+{
+    return 0;
+}
+i64 DoGetEuid()
+{
+    return 0;
+}
+i64 DoGetEgid()
+{
+    return 0;
+}
+
 // Page-align `x` up. Our cluster size is 4 KiB, matching FAT32's
 // native page; the mmap / brk paths map 4 KiB frames directly,
 // so all lengths round up to a 4 KiB boundary before allocation.
@@ -530,6 +689,36 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
         break;
     case kSysClose:
         rv = DoClose(frame->rdi);
+        break;
+    case kSysLseek:
+        rv = DoLseek(frame->rdi, static_cast<i64>(frame->rsi), frame->rdx);
+        break;
+    case kSysRtSigaction:
+        rv = DoRtSigaction(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysRtSigprocmask:
+        rv = DoRtSigprocmask(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysIoctl:
+        rv = DoIoctl(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysWritev:
+        rv = DoWritev(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysGetUid:
+        rv = DoGetUid();
+        break;
+    case kSysGetGid:
+        rv = DoGetGid();
+        break;
+    case kSysGetEuid:
+        rv = DoGetEuid();
+        break;
+    case kSysGetEgid:
+        rv = DoGetEgid();
+        break;
+    case kSysSetTidAddress:
+        rv = DoSetTidAddress(frame->rdi);
         break;
     case kSysBrk:
         rv = DoBrk(frame->rdi);
