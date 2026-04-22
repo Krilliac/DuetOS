@@ -2,8 +2,10 @@
 
 #include "../arch/x86_64/cpu.h"
 #include "../arch/x86_64/gdt.h"
+#include "../arch/x86_64/hpet.h"
 #include "../arch/x86_64/idt.h"
 #include "../arch/x86_64/serial.h"
+#include "../arch/x86_64/timer.h"
 #include "../arch/x86_64/traps.h"
 #include "../mm/frame_allocator.h"
 #include "../mm/kheap.h"
@@ -35,6 +37,20 @@ constinit u64 g_baseline_efer = 0;
 constinit u64 g_baseline_idt_hash = 0;
 constinit u64 g_baseline_gdt_hash = 0;
 constinit u64 g_baseline_text_spot_hash = 0;
+
+// Previous-scan values for monotonic counters. Each entry
+// should only ever grow; a scan that sees a smaller value
+// than last time flags `CounterWentBackwards` with the
+// counter's name. Zero-initialised; the first scan populates
+// baselines without reporting.
+constinit u64 g_prev_alloc_count = 0;
+constinit u64 g_prev_free_count = 0;
+constinit u64 g_prev_tasks_created = 0;
+constinit u64 g_prev_tasks_reaped = 0;
+constinit u64 g_prev_ctx_switches = 0;
+constinit u64 g_prev_hpet_counter = 0;
+constinit u64 g_prev_timer_ticks = 0;
+constinit bool g_prev_populated = false;
 
 constexpr u64 kCr0Wp = 1ULL << 16;
 constexpr u64 kCr4Smep = 1ULL << 20;
@@ -314,6 +330,89 @@ bool CheckKernelText()
     return true;
 }
 
+// Verify that a counter hasn't gone backwards between scans.
+// Logs the name so the operator sees WHICH counter drifted.
+void VerifyMonotonic(const char* name, u64 prev, u64 now, bool& any_backwards)
+{
+    if (now < prev)
+    {
+        arch::SerialWrite("[health] counter regressed: ");
+        arch::SerialWrite(name);
+        arch::SerialWrite(" prev=");
+        arch::SerialWriteHex(prev);
+        arch::SerialWrite(" now=");
+        arch::SerialWriteHex(now);
+        arch::SerialWrite("\n");
+        any_backwards = true;
+    }
+}
+
+bool CheckMonotonicCounters()
+{
+    const auto heap = mm::KernelHeapStatsRead();
+    const auto sched_stats = sched::SchedStatsRead();
+    const u64 hpet_now = arch::HpetReadCounter();
+    const u64 ticks_now = arch::TimerTicks();
+
+    if (!g_prev_populated)
+    {
+        // First scan — populate baselines, emit nothing.
+        g_prev_alloc_count = heap.alloc_count;
+        g_prev_free_count = heap.free_count;
+        g_prev_tasks_created = sched_stats.tasks_created;
+        g_prev_tasks_reaped = sched_stats.tasks_reaped;
+        g_prev_ctx_switches = sched_stats.context_switches;
+        g_prev_hpet_counter = hpet_now;
+        g_prev_timer_ticks = ticks_now;
+        g_prev_populated = true;
+        return true;
+    }
+
+    bool any_backwards = false;
+    VerifyMonotonic("heap.alloc_count", g_prev_alloc_count, heap.alloc_count, any_backwards);
+    VerifyMonotonic("heap.free_count", g_prev_free_count, heap.free_count, any_backwards);
+    VerifyMonotonic("sched.tasks_created", g_prev_tasks_created, sched_stats.tasks_created, any_backwards);
+    VerifyMonotonic("sched.tasks_reaped", g_prev_tasks_reaped, sched_stats.tasks_reaped, any_backwards);
+    VerifyMonotonic("sched.context_switches", g_prev_ctx_switches, sched_stats.context_switches, any_backwards);
+
+    bool ok = true;
+    if (any_backwards)
+    {
+        Report(HealthIssue::CounterWentBackwards);
+        ok = false;
+    }
+
+    // Clock stall detection — HPET should advance every
+    // nanosecond, timer ticks every 10 ms. If either is
+    // unchanged across a 5-second heartbeat, the timer IRQ
+    // path or the HPET MMIO window is broken.
+    if (hpet_now == g_prev_hpet_counter)
+    {
+        arch::SerialWrite("[health] HPET counter stalled at ");
+        arch::SerialWriteHex(hpet_now);
+        arch::SerialWrite("\n");
+        Report(HealthIssue::ClockStalled);
+        ok = false;
+    }
+    if (ticks_now == g_prev_timer_ticks)
+    {
+        arch::SerialWrite("[health] LAPIC tick counter stalled at ");
+        arch::SerialWriteHex(ticks_now);
+        arch::SerialWrite("\n");
+        Report(HealthIssue::ClockStalled);
+        ok = false;
+    }
+
+    g_prev_alloc_count = heap.alloc_count;
+    g_prev_free_count = heap.free_count;
+    g_prev_tasks_created = sched_stats.tasks_created;
+    g_prev_tasks_reaped = sched_stats.tasks_reaped;
+    g_prev_ctx_switches = sched_stats.context_switches;
+    g_prev_hpet_counter = hpet_now;
+    g_prev_timer_ticks = ticks_now;
+    return ok;
+}
+
 bool CheckIrqNesting()
 {
     if (arch::IrqNestMax() > kIrqNestingCeiling)
@@ -394,6 +493,10 @@ const char* HealthIssueName(HealthIssue i)
         return "task saved rsp outside [stack_base, stack_top) (control block scribbled)";
     case HealthIssue::IrqNestingExcessive:
         return "IRQ nesting depth exceeded ceiling (runaway re-entry or storm)";
+    case HealthIssue::CounterWentBackwards:
+        return "a monotonic counter regressed (arithmetic underflow or corruption)";
+    case HealthIssue::ClockStalled:
+        return "HPET or LAPIC tick counter didn't advance between scans";
     default:
         return "(unnamed issue)";
     }
@@ -443,6 +546,7 @@ u64 RuntimeCheckerScan()
     (void)CheckCanary();
     (void)CheckTaskStacks();
     (void)CheckIrqNesting();
+    (void)CheckMonotonicCounters();
     const u64 delta = g_report.issues_found_total - before;
     g_report.last_scan_issues = delta;
     return delta;

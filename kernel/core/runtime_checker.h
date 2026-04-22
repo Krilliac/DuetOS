@@ -120,6 +120,20 @@ enum class HealthIssue : u32
     // CPU faster than handlers can drain.
     IrqNestingExcessive,
 
+    // A monotonically-increasing counter went BACKWARDS between
+    // consecutive scans. The only way a u64 "goes backwards" in
+    // practice is arithmetic underflow in a decrement that the
+    // writer didn't bounds-check, or memory corruption.
+    // Reporting the counter ID with the finding lets the
+    // operator identify which subsystem regressed.
+    CounterWentBackwards,
+
+    // HPET or scheduler-tick clock stopped advancing across two
+    // consecutive scans despite the heartbeat firing. Means the
+    // timer IRQ path is broken or the HPET MMIO window is
+    // silently failing.
+    ClockStalled,
+
     // Count sentinel
     Count,
 };
