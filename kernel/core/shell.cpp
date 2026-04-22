@@ -35,6 +35,7 @@
 #include "../security/attack_sim.h"
 #include "../security/guard.h"
 #include "elf_loader.h"
+#include "hexdump.h"
 #include "klog.h"
 #include "process.h"
 #include "random.h"
@@ -299,6 +300,9 @@ void CmdHelp()
     ConsoleWriteln("  HEALTH       RUN RUNTIME INVARIANT SCAN (HEAP/FRAMES/SCHED/CRX)");
     ConsoleWriteln("  UUID [N]     GENERATE N V4 UUIDS FROM THE ENTROPY POOL");
     ConsoleWriteln("  ATTACKSIM    RUN RED-TEAM ATTACK SUITE (IDT/GDT/LSTAR/CANARY/LBA0)");
+    ConsoleWriteln("  MEMDUMP A [N]  HEX+ASCII DUMP OF KERNEL MEMORY -> SERIAL");
+    ConsoleWriteln("  INSTR A [N]  INSTRUCTION-BYTE DUMP AT ADDRESS -> SERIAL");
+    ConsoleWriteln("  DUMPSTATE    SNAPSHOT EVERY KERNEL SUBSYSTEM -> SERIAL");
     ConsoleWriteln("");
     ConsoleWriteln("RUNTIME CONTROL:");
     ConsoleWriteln("  LOGLEVEL [L] GET / SET KLOG THRESHOLD (D/I/W/E)");
@@ -1234,20 +1238,21 @@ void CmdFind(u32 argc, char** argv)
 // dispatched in Dispatch — keeping the two in sync is the
 // price of not having reflection.
 static const char* const kCommandSet[] = {
-    "help",    "about",   "version",  "clear",    "uptime",   "date",      "windows",    "mode",     "ls",
-    "cat",     "touch",   "rm",       "echo",     "cp",       "mv",        "wc",         "head",     "tail",
-    "dmesg",   "stats",   "mem",      "history",  "set",      "unset",     "env",        "alias",    "unalias",
-    "sysinfo", "source",  "man",      "grep",     "find",     "time",      "which",      "seq",      "sort",
-    "uniq",    "cpuid",   "cr",       "rflags",   "tsc",      "hpet",      "ticks",      "msr",      "lapic",
-    "smp",     "lspci",   "heap",     "paging",   "fb",       "kbdstats",  "mousestats", "loglevel", "logcolor",
-    "getenv",  "yield",   "reboot",   "halt",     "uname",    "whoami",    "hostname",   "pwd",      "true",
-    "false",   "mount",   "lsmod",    "lsblk",    "lsgpt",    "free",      "ps",         "spawn",    "readelf",
-    "hexdump", "stat",    "basename", "dirname",  "cal",      "sleep",     "reset",      "tac",      "nl",
-    "rev",     "expr",    "color",    "rand",     "flushtlb", "checksum",  "repeat",     "kill",     "exec",
-    "metrics", "trace",   "read",     "guard",    "top",      "fatcat",    "fatls",      "fatwrite", "fatappend",
-    "fatnew",  "fatrm",   "fattrunc", "fatmkdir", "fatrmdir", "linuxexec", "translate",  "smbios",   "power",
-    "battery", "thermal", "temp",     "gpu",      "lsgpu",    "nic",       "lsnic",      "ip",       "arp",
-    "ipv4",    "uuid",    "uuidgen",  "health",   "checkup",  "attacksim", "redteam",
+    "help",      "about",   "version",  "clear",    "uptime",   "date",      "windows",    "mode",     "ls",
+    "cat",       "touch",   "rm",       "echo",     "cp",       "mv",        "wc",         "head",     "tail",
+    "dmesg",     "stats",   "mem",      "history",  "set",      "unset",     "env",        "alias",    "unalias",
+    "sysinfo",   "source",  "man",      "grep",     "find",     "time",      "which",      "seq",      "sort",
+    "uniq",      "cpuid",   "cr",       "rflags",   "tsc",      "hpet",      "ticks",      "msr",      "lapic",
+    "smp",       "lspci",   "heap",     "paging",   "fb",       "kbdstats",  "mousestats", "loglevel", "logcolor",
+    "getenv",    "yield",   "reboot",   "halt",     "uname",    "whoami",    "hostname",   "pwd",      "true",
+    "false",     "mount",   "lsmod",    "lsblk",    "lsgpt",    "free",      "ps",         "spawn",    "readelf",
+    "hexdump",   "stat",    "basename", "dirname",  "cal",      "sleep",     "reset",      "tac",      "nl",
+    "rev",       "expr",    "color",    "rand",     "flushtlb", "checksum",  "repeat",     "kill",     "exec",
+    "metrics",   "trace",   "read",     "guard",    "top",      "fatcat",    "fatls",      "fatwrite", "fatappend",
+    "fatnew",    "fatrm",   "fattrunc", "fatmkdir", "fatrmdir", "linuxexec", "translate",  "smbios",   "power",
+    "battery",   "thermal", "temp",     "gpu",      "lsgpu",    "nic",       "lsnic",      "ip",       "arp",
+    "ipv4",      "uuid",    "uuidgen",  "health",   "checkup",  "attacksim", "redteam",    "memdump",  "instr",
+    "dumpstate",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -2311,6 +2316,153 @@ void CmdHealth(u32 argc, char** argv)
             ConsoleWriteln(customos::core::HealthIssueName(customos::core::HealthIssue(i)));
         }
     }
+}
+
+// Forward decl — definition is later in the file (used by FAT commands).
+bool ParseU64Str(const char* s, customos::u64* out);
+
+void CmdMemDump(u32 argc, char** argv)
+{
+    // memdump <hex-addr> [len]   — dump arbitrary kernel memory.
+    // Uses the SAFE variant: any line whose page is outside the
+    // known-mapped kernel ranges emits "<unreadable>" instead of
+    // faulting, so a typo'd address is a diagnostic, not a crash.
+    // Output is written to COM1 (serial) — too wide for the 80-col
+    // framebuffer console; the shell prompt confirms where to look.
+    if (argc < 2)
+    {
+        ConsoleWriteln("MEMDUMP: USAGE: MEMDUMP <HEX-ADDR> [LEN-BYTES]");
+        ConsoleWriteln("         OUTPUT GOES TO COM1 (SERIAL LOG)");
+        return;
+    }
+    customos::u64 addr = 0;
+    if (!ParseU64Str(argv[1], &addr))
+    {
+        ConsoleWriteln("MEMDUMP: BAD ADDRESS");
+        return;
+    }
+    customos::u64 len = 64;
+    if (argc >= 3 && !ParseU64Str(argv[2], &len))
+    {
+        ConsoleWriteln("MEMDUMP: BAD LENGTH");
+        return;
+    }
+    if (len == 0)
+    {
+        ConsoleWriteln("MEMDUMP: ZERO LENGTH");
+        return;
+    }
+    customos::core::DumpHexRegionSafe("memdump", addr, static_cast<customos::u32>(len), 0);
+    ConsoleWriteln("MEMDUMP: WROTE TO COM1");
+}
+
+void CmdInstr(u32 argc, char** argv)
+{
+    // instr <hex-addr> [len]   — dump instruction bytes at a code
+    // address. Single line. Useful for staring at a fault RIP after
+    // the fact, or for verifying a hot-patched function still has
+    // the bytes it should. Default 16 covers any single x86_64
+    // instruction (max length is 15).
+    if (argc < 2)
+    {
+        ConsoleWriteln("INSTR: USAGE: INSTR <HEX-ADDR> [LEN-BYTES]");
+        ConsoleWriteln("       OUTPUT GOES TO COM1 (SERIAL LOG)");
+        return;
+    }
+    customos::u64 addr = 0;
+    if (!ParseU64Str(argv[1], &addr))
+    {
+        ConsoleWriteln("INSTR: BAD ADDRESS");
+        return;
+    }
+    customos::u64 len = 16;
+    if (argc >= 3 && !ParseU64Str(argv[2], &len))
+    {
+        ConsoleWriteln("INSTR: BAD LENGTH");
+        return;
+    }
+    customos::core::DumpInstructionBytes("instr", addr, static_cast<customos::u32>(len));
+    ConsoleWriteln("INSTR: WROTE TO COM1");
+}
+
+void CmdDumpState()
+{
+    // Single-shot snapshot of every major kernel subsystem's
+    // counters. Lets an operator capture "what does this kernel
+    // think the world looks like right now" in one log entry —
+    // useful as a before/after when bisecting a flaky workload.
+    customos::arch::SerialWrite("\n=== CUSTOMOS DUMPSTATE ===\n");
+
+    {
+        const auto s = customos::mm::KernelHeapStatsRead();
+        customos::arch::SerialWrite("[heap] pool=");
+        customos::arch::SerialWriteHex(s.pool_bytes);
+        customos::arch::SerialWrite(" used=");
+        customos::arch::SerialWriteHex(s.used_bytes);
+        customos::arch::SerialWrite(" free=");
+        customos::arch::SerialWriteHex(s.free_bytes);
+        customos::arch::SerialWrite("\n[heap] alloc_count=");
+        customos::arch::SerialWriteHex(s.alloc_count);
+        customos::arch::SerialWrite(" free_count=");
+        customos::arch::SerialWriteHex(s.free_count);
+        customos::arch::SerialWrite(" largest_run=");
+        customos::arch::SerialWriteHex(s.largest_free_run);
+        customos::arch::SerialWrite(" free_chunks=");
+        customos::arch::SerialWriteHex(s.free_chunk_count);
+        customos::arch::SerialWrite("\n");
+    }
+
+    {
+        const auto s = customos::mm::PagingStatsRead();
+        customos::arch::SerialWrite("[paging] page_tables=");
+        customos::arch::SerialWriteHex(s.page_tables_allocated);
+        customos::arch::SerialWrite(" mapped=");
+        customos::arch::SerialWriteHex(s.mappings_installed);
+        customos::arch::SerialWrite(" unmapped=");
+        customos::arch::SerialWriteHex(s.mappings_removed);
+        customos::arch::SerialWrite(" mmio_used=");
+        customos::arch::SerialWriteHex(s.mmio_arena_used_bytes);
+        customos::arch::SerialWrite("\n");
+    }
+
+    {
+        const auto s = customos::sched::SchedStatsRead();
+        customos::arch::SerialWrite("[sched] ctx_switches=");
+        customos::arch::SerialWriteHex(s.context_switches);
+        customos::arch::SerialWrite(" live=");
+        customos::arch::SerialWriteHex(s.tasks_live);
+        customos::arch::SerialWrite(" sleeping=");
+        customos::arch::SerialWriteHex(s.tasks_sleeping);
+        customos::arch::SerialWrite(" blocked=");
+        customos::arch::SerialWriteHex(s.tasks_blocked);
+        customos::arch::SerialWrite("\n[sched] created=");
+        customos::arch::SerialWriteHex(s.tasks_created);
+        customos::arch::SerialWrite(" exited=");
+        customos::arch::SerialWriteHex(s.tasks_exited);
+        customos::arch::SerialWrite(" reaped=");
+        customos::arch::SerialWriteHex(s.tasks_reaped);
+        customos::arch::SerialWrite(" total_ticks=");
+        customos::arch::SerialWriteHex(s.total_ticks);
+        customos::arch::SerialWrite(" idle_ticks=");
+        customos::arch::SerialWriteHex(s.idle_ticks);
+        customos::arch::SerialWrite("\n");
+    }
+
+    {
+        const auto& h = customos::core::RuntimeCheckerStatusRead();
+        customos::arch::SerialWrite("[health] scans=");
+        customos::arch::SerialWriteHex(h.scans_run);
+        customos::arch::SerialWrite(" issues_total=");
+        customos::arch::SerialWriteHex(h.issues_found_total);
+        customos::arch::SerialWrite(" last_scan=");
+        customos::arch::SerialWriteHex(h.last_scan_issues);
+        customos::arch::SerialWrite(" baseline=");
+        customos::arch::SerialWrite(h.baseline_captured ? "yes" : "no");
+        customos::arch::SerialWrite("\n");
+    }
+
+    customos::arch::SerialWrite("=== END DUMPSTATE ===\n");
+    ConsoleWriteln("DUMPSTATE: WROTE TO COM1");
 }
 
 void CmdIpv4()
@@ -5872,6 +6024,21 @@ void Dispatch(char* line)
     if (StrEq(cmd, "attacksim") || StrEq(cmd, "redteam"))
     {
         CmdAttackSim();
+        return;
+    }
+    if (StrEq(cmd, "memdump"))
+    {
+        CmdMemDump(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "instr"))
+    {
+        CmdInstr(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "dumpstate"))
+    {
+        CmdDumpState();
         return;
     }
     if (StrEq(cmd, "logcolor"))

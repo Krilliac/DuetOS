@@ -22,6 +22,7 @@
 
 set(CUSTOMOS_KERNEL_SHARED_SOURCES
     core/heartbeat.cpp
+    core/hexdump.cpp
     core/klog.cpp
     core/main.cpp
     core/panic.cpp

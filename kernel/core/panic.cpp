@@ -6,6 +6,7 @@
 #include "../arch/x86_64/smp.h"
 #include "../arch/x86_64/timer.h"
 #include "../cpu/percpu.h"
+#include "hexdump.h"
 #include "klog.h"
 #include "symbols.h"
 
@@ -241,6 +242,10 @@ void DumpDiagnostics(u64 rip, u64 rsp, u64 rbp)
     arch::SerialWrite("  ist_canary : ");
     arch::SerialWrite(arch::IstStackCanariesIntact() ? "ok" : "CORRUPT");
     arch::SerialWrite("\n");
+    // Instruction bytes at RIP. Guards against faulting-page reads
+    // via PlausibleKernelAddress; a wild RIP simply emits a
+    // skipped-line and diagnostics continue.
+    DumpInstructionBytes("panic-rip", rip, 16);
     DumpBacktrace(rbp);
     DumpStack(rsp, 16);
     DumpLogRing();

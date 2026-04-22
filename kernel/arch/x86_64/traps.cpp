@@ -4,6 +4,7 @@
 #include "lapic.h"
 #include "serial.h"
 
+#include "../../core/hexdump.h"
 #include "../../core/panic.h"
 #include "../../core/symbols.h"
 #include "../../core/syscall.h"
@@ -276,6 +277,14 @@ extern "C" void TrapDispatch(TrapFrame* frame)
             SerialWriteHex(frame->error_code);
         }
         SerialWrite("\n");
+        // Instruction-at-RIP dump. Most user-mode faults are a wild
+        // jump into a garbage page or a malformed opcode the loader
+        // wrote; having the actual bytes in the log tells you which
+        // without re-running the program under a debugger. The
+        // plausibility check rejects user-space RIPs (< 1 GiB is
+        // plausible, but > 1 GiB user-space RIPs fall outside the
+        // PlausibleKernelAddress range and emit a skipped line).
+        core::DumpInstructionBytes("user-fault-rip", frame->rip, 16);
         // SchedExit must NOT run with IF=0 forever; it ends in a
         // Schedule() that waits for the reaper, and the reaper needs
         // timer IRQs to make progress. SchedYield/SchedExit internally
@@ -306,9 +315,11 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     WriteLabelled("rsp       ", frame->rsp);
     WriteLabelled("ss        ", frame->ss);
 
+    u64 cr2 = 0;
     if (frame->vector == 14) // #PF
     {
-        WriteLabelled("cr2       ", ReadCr2());
+        cr2 = ReadCr2();
+        WriteLabelled("cr2       ", cr2);
     }
 
     SerialWrite("  --\n");
@@ -327,6 +338,36 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     WriteLabelled("r13       ", frame->r13);
     WriteLabelled("r14       ", frame->r14);
     WriteLabelled("r15       ", frame->r15);
+
+    // Instruction bytes at RIP. Lets the operator eyeball the actual
+    // opcode that faulted without running objdump. x86_64 max
+    // instruction length is 15 bytes; we dump 16 so a clean prefix +
+    // opcode + ModRM + full displacement/immediate always fits.
+    SerialWrite("  --\n");
+    core::DumpInstructionBytes("fault-rip", frame->rip, 16);
+
+    // On #PF, dump the 64 bytes flanking CR2. The page containing
+    // CR2 is unmapped by definition (that's why the fault fired), so
+    // the safe variant skips it and emits only the neighbouring
+    // bytes — often enough to show whether the access was an
+    // off-by-one past a valid struct (you'll see the struct's bytes
+    // right up to the page boundary) or a wild dereference (you'll
+    // see <unreadable>).
+    if (frame->vector == 14)
+    {
+        // Align down 32 bytes + show 96, so a few lines before and
+        // after CR2 are dumped; the faulting page gets skipped
+        // automatically.
+        const u64 window_start = (cr2 - 32) & ~static_cast<u64>(0xF);
+        const u64 window_page = cr2 & ~static_cast<u64>(0xFFF);
+        core::DumpHexRegionSafe("cr2-window", window_start, 96, window_page);
+    }
+
+    // Stack window starting at RSP. Distinct from the RBP backtrace
+    // in DumpDiagnostics — this is raw quads on the stack, symbol-
+    // annotated so saved return addresses auto-label even when the
+    // RBP chain walked off into garbage. 16 quads = 128 bytes.
+    core::DumpStackWindow("fault-stack", frame->rsp, 16);
 
     // Rich diagnostics from the faulting frame — backtrace climbs
     // the stack from rbp AT THE POINT OF THE FAULT (not from the

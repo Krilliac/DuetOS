@@ -4,7 +4,9 @@
 **Type:** Observation
 **Status:** Active — live, runs every heartbeat + on shell
 `health` command. Covers heap, frames, scheduler, control
-registers, both stack-canary kinds.
+registers, both stack-canary kinds. Slice 79 added an
+enhanced dumping toolkit (instruction bytes, hex regions,
+stack windows) for both crash-time and normal-runtime use.
 
 ## Why this exists
 
@@ -252,6 +254,62 @@ post-mortem memory inspection needed.
 Kernel stayed alive, heartbeat kept ticking through and past
 the attack suite, scans returned clean after each heal. No
 panic, no DoS, every attack observable in the log.
+
+## Enhanced dumping toolkit (slice 79)
+
+The diff-dump pattern from slice 78 graduates into a generic
+`kernel/core/hexdump.{h,cpp}` helper used by:
+
+- The trap dispatcher — every kernel-mode exception now logs:
+  - 16 bytes of instruction at `frame->rip` (so the operator
+    sees the literal opcode that faulted without running
+    `objdump`).
+  - 96 bytes of memory around CR2 on `#PF`, with the faulting
+    page itself skipped (it's unmapped by definition).
+  - 16 quads of stack starting at `frame->rsp`, symbol-annotated.
+
+- The ring-3 task-kill path — same instruction-bytes dump for
+  the user RIP. The plausibility check intentionally REJECTS
+  user-mode addresses (any VA outside the higher-half kernel
+  region) so a wild user RIP becomes a `<skipped>` log line
+  instead of a kernel SMAP fault during the dump.
+
+- The panic path — `DumpDiagnostics` now emits the instruction
+  bytes at the panic call site, in addition to the existing
+  backtrace + stack dump.
+
+- The shell — three new commands for live inspection:
+  - `memdump <hex-addr> [len]` — hex+ASCII dump to COM1.
+  - `instr <hex-addr> [len]`   — single-line instruction dump.
+  - `dumpstate`                — every subsystem's stats, one record.
+
+### Why a separate plausibility check
+
+`PlausibleKernelAddress(va)` accepts only `[0xFFFFFFFF80000000,
+0xFFFFFFFFE0000000)` — direct map + MMIO arena. The low 1 GiB
+identity map is excluded even though it's mapped. Reason: under
+SMAP, a kernel read of a low-half VA that the current CR3 routes
+to a ring-3 page trips a #PF on the read. A naive "low half is
+fine, it's identity-mapped" check works pre-userland but turns
+the trap dumper into a fault generator the moment a ring-3 task
+faults with a sub-1-GiB RIP. Live boot showed exactly this
+regression on the first iteration; the fix took every kernel
+crash out of the boot smoke (recurring `arch/traps` #PF -> 0).
+
+### Safe-dump skip semantics
+
+`DumpHexRegionSafe(tag, addr, len, skip_page_va)` splits each
+16-byte line into one of three outcomes:
+
+| Outcome                     | When                                                |
+| --------------------------- | --------------------------------------------------- |
+| Hex + ASCII line emitted    | Line VA passes plausibility AND is not in skip page |
+| `<unreadable>`              | Line VA fails plausibility                          |
+| `<skipped: faulting page>`  | Line VA's page == `skip_page_va`'s page             |
+
+The skip-page parameter is what makes "dump 96 bytes around
+CR2" safe: pass `cr2 & ~0xFFF` and the helper walks past the
+faulting page without ever dereferencing it.
 
 ## Follow-ups
 
