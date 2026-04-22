@@ -74,6 +74,7 @@ constexpr u32 kOffRealloc = 0x238;            // batch 14 — 14 bytes
 constexpr u32 kOffMissLogger = 0x246;         // batch 15 — 24 bytes
 constexpr u32 kOffPArgc = 0x269;              // batch 16 —  6 bytes
 constexpr u32 kOffPArgv = 0x26F;              // batch 16 —  6 bytes
+constexpr u32 kOffPCommode = 0x275;           // batch 17 —  6 bytes
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -744,10 +745,24 @@ constexpr u8 kStubsBytes[] = {
     // kProcEnvVa + 0x08.
     0xB8, 0x08, 0x00, 0x00, 0x65, // 0x26F mov eax, 0x65000008
     0xC3,                         // 0x274 ret
+
+    // === Batch 17: UCRT stdio accessors =======================
+
+    // --- __p__commode (offset 0x275, 6 bytes) ------------------
+    // int* __p__commode(void) — returns a pointer to the
+    // `_commode` global, which encodes the default file-mode
+    // flags (0 = O_TEXT, _O_BINARY = 0x4000, …). Callers of
+    // _fmode / __p__commode read this value to pick buffered
+    // vs. line-buffered vs. binary I/O; they never write it
+    // in v0 workloads. We point at a zero int in the proc-env
+    // page — "default text mode" — which is what UCRT itself
+    // initialises it to.
+    0xB8, 0x00, 0x02, 0x00, 0x65, // 0x275 mov eax, 0x65000200
+    0xC3,                         // 0x27A ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x275, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0x27B, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -756,6 +771,7 @@ static_assert(sizeof(kStubsBytes) == 0x275, "stub layout drifted; update kOff* c
 static_assert(kProcEnvVa == 0x65000000ULL, "proc-env page VA no longer matches __p___argc stub bytes");
 static_assert(kProcEnvArgcOff == 0x00, "argc offset no longer matches __p___argc stub bytes");
 static_assert(kProcEnvArgvPtrOff == 0x08, "argv-ptr offset no longer matches __p___argv stub bytes");
+static_assert(kProcEnvCommodeOff == 0x200, "commode offset no longer matches __p__commode stub bytes");
 
 struct StubEntry
 {
@@ -1132,6 +1148,20 @@ constexpr StubEntry kStubsTable[] = {
     {"ucrtbase.dll", "__p___argv", kOffPArgv},
     {"msvcrt.dll", "__p___argc", kOffPArgc},
     {"msvcrt.dll", "__p___argv", kOffPArgv},
+
+    // Batch 17 — UCRT stdio accessors. `__p__commode` returns
+    // &_commode for callers that want the default-file-mode
+    // flags (every UCRT-linked program reads it during startup
+    // to pick text vs binary I/O). `_callnewh` is the C++
+    // new-handler trampoline; v0 always "no handler set" so
+    // the caller throws bad_alloc or returns failure — aliased
+    // to the shared return-zero stub.
+    {"api-ms-win-crt-stdio-l1-1-0.dll", "__p__commode", kOffPCommode},
+    {"ucrtbase.dll", "__p__commode", kOffPCommode},
+    {"msvcrt.dll", "__p__commode", kOffPCommode},
+    {"api-ms-win-crt-heap-l1-1-0.dll", "_callnewh", kOffReturnZero},
+    {"ucrtbase.dll", "_callnewh", kOffReturnZero},
+    {"msvcrt.dll", "_callnewh", kOffReturnZero},
 };
 
 // Case-insensitive strcmp for ASCII. Win32 DLL name
@@ -1178,6 +1208,16 @@ void Win32StubsPopulate(u8* dst)
         dst[i] = kStubsBytes[i];
 }
 
+namespace
+{
+// Write a little-endian u64 at `dst`.
+inline void StoreLeU64(u8* dst, u64 value)
+{
+    for (u64 b = 0; b < 8; ++b)
+        dst[b] = static_cast<u8>((value >> (b * 8)) & 0xFFULL);
+}
+} // namespace
+
 void Win32ProcEnvPopulate(u8* proc_env_page, const char* program_name)
 {
     if (proc_env_page == nullptr)
@@ -1197,8 +1237,7 @@ void Win32ProcEnvPopulate(u8* proc_env_page, const char* program_name)
     // argv = &proc_env_page[kProcEnvArgvArrayOff] expressed in
     // user VA. Little-endian u64 at offset 0x08.
     const u64 argv_user_va = kProcEnvVa + kProcEnvArgvArrayOff;
-    for (u64 b = 0; b < 8; ++b)
-        page[kProcEnvArgvPtrOff + b] = static_cast<u8>((argv_user_va >> (b * 8)) & 0xFFULL);
+    StoreLeU64(page + kProcEnvArgvPtrOff, argv_user_va);
 
     // Copy program_name into the string area (offset 0x40). Cap
     // at kProcEnvStringBudget - 1 to guarantee NUL termination.
@@ -1218,14 +1257,36 @@ void Win32ProcEnvPopulate(u8* proc_env_page, const char* program_name)
 
     // argv[0] = &proc_env_page[kProcEnvStringOff] in user VA.
     const u64 argv0_user_va = kProcEnvVa + kProcEnvStringOff;
-    for (u64 b = 0; b < 8; ++b)
-        page[kProcEnvArgvArrayOff + b] = static_cast<u8>((argv0_user_va >> (b * 8)) & 0xFFULL);
+    StoreLeU64(page + kProcEnvArgvArrayOff, argv0_user_va);
     // argv[1] = NULL — already zero, but set explicitly so the
     // contract is visible in the page dump. Any callers that
     // walk argv until NULL (Win32 CRT + most Unix main())
     // stop here.
-    for (u64 b = 0; b < 8; ++b)
-        page[kProcEnvArgvArrayOff + 8 + b] = 0;
+    StoreLeU64(page + kProcEnvArgvArrayOff + 8, 0);
+
+    // Data-miss "fake object". PE data imports whose names the
+    // stub table doesn't know (e.g. std::cout) get an IAT slot
+    // of `kProcEnvVa + kProcEnvDataMissOff`. Dereferenced as
+    // `mov rax, [cout_iat]`, the caller reads the u64 stored
+    // here — which we set to `kProcEnvVa + kProcEnvDataMissOff
+    // + 8`, a pointer into the same page, 8 bytes further in,
+    // where everything remains zero.
+    //
+    // The MSVC virtual-dispatch idiom (`mov rax, [this]; movslq
+    // rcx, [rax+4]; mov rdi, [rcx+this+0x48]; test rdi, rdi;
+    // jle ...`) then walks:
+    //
+    //   rax = [data_miss] = data_miss + 8     ; mapped
+    //   rcx = [rax + 4]   = 0                 ; zero-read
+    //   rdi = [this + 0x48] = 0               ; zero-read
+    //   test rdi, rdi -> jle TAKEN
+    //
+    // The caller takes its "uninitialised / empty-stream" error
+    // branch instead of faulting. Good enough for the first pass
+    // past an unstubbed `std::cout` — it doesn't print, but it
+    // stops crashing.
+    const u64 fake_obj_va = kProcEnvVa + kProcEnvDataMissOff + 8;
+    StoreLeU64(page + kProcEnvDataMissOff, fake_obj_va);
 }
 
 bool Win32StubsLookup(const char* dll, const char* func, u64* out_va)

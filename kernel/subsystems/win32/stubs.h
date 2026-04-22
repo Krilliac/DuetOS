@@ -59,6 +59,9 @@ inline constexpr u64 kProcEnvArgvPtrOff = 0x08;
 inline constexpr u64 kProcEnvArgvArrayOff = 0x20;
 inline constexpr u64 kProcEnvStringOff = 0x40;
 inline constexpr u64 kProcEnvStringBudget = 256;
+// _commode global — 4-byte int, value 0 for "default text mode".
+// UCRT's __p__commode returns a pointer to this location.
+inline constexpr u64 kProcEnvCommodeOff = 0x200;
 
 /*
  * Data-import catch-all landing pad.

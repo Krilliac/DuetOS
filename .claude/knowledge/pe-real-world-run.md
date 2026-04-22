@@ -236,6 +236,55 @@ setstate, flush, and four ostream::operator<< variants) stayed
 on the function catch-all because their MSVC mangling begins
 with `Q` (method) after `@@`, not `3`.
 
+## Slice 27 — fake-object data-miss + stdio accessors
+
+Two small additions that push winkill past the cout #PF and let
+it run to tick-budget exhaustion (no fault, no panic, no
+triple-fault) — a qualitative change from previous slices.
+
+1. **Fake object in the data-miss pad.** The data-miss slot now
+   stores `kProcEnvVa + kProcEnvDataMissOff + 8` — a pointer
+   into the same page, 8 bytes past itself — instead of a raw
+   zero. Rationale: MSVC's multiple-inheritance virtual dispatch
+   loads a vbtable pointer (`mov rax, [this]`) and then a
+   virtual-base offset (`movslq rcx, [rax+4]`). With the
+   previous zero pad, `[0+4]` #PFed at cr2=4. With the +8
+   pointer, `[fake_vtable+4]` reads mapped zero (rcx=0), the
+   next `[rcx+rsi+0x48]` reads zero, and the caller's
+   `test rdi, rdi; jle error_branch` takes its empty-stream
+   branch cleanly. No print, but no crash either.
+
+2. **`__p__commode` + `_callnewh`** — two low-cost MSVC runtime
+   accessors:
+   - `__p__commode` → `mov eax, 0x65000200; ret` (6 bytes at
+     stub offset `0x275`). Returns a pointer to a zero-filled
+     `int` in the proc-env page — UCRT's "default text mode".
+     Registered under the stdio apiset, ucrtbase, msvcrt.
+   - `_callnewh(size)` → aliased to `kOffReturnZero`. Returns
+     0 = "no new handler set; caller should fail or throw".
+     Registered under the heap apiset, ucrtbase, msvcrt.
+
+Observed effect on winkill after slice 27:
+
+```
+[ring3] task pid=0x18 entering ring 3 rip=0x140004070
+[win32-miss] slot=0x14000c196 called fn="<unmapped>"      ; x4
+[win32-miss] slot=0x14000c1ce called fn="<unmapped>"      ; x4
+[win32-miss] slot=0x14000c1b6 called fn="<unmapped>"      ; x4
+[sched/reaper] reaped task id val=0x18                    ; tick budget
+```
+
+No #PF, no #GP, no task-kill. Winkill progresses past the CRT
+cout init, runs its own code (the 3 cycling slots are a
+`_initterm`-style init loop — each pointer is unmapped in the
+image staging table and the decoder returns `<unmapped>`),
+and eventually the scheduler reaps it for tick-budget
+exhaustion. The `<unmapped>` name is a miss-logger decoder
+limitation, not a new wall: indirect calls (`call rax` / `call
+[reg+disp]`) don't match the `call rel32` pattern the decoder
+assumes, so `[rsp-4]` reads adjacent instruction bytes and
+yields a plausible-but-wrong slot VA. Fix is future polish.
+
 ## Next walls (in execution order)
 
 The current winkill fault is inside the CRT at `rip=0x14000400b`:
