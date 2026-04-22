@@ -5,6 +5,7 @@
 #include "../../core/klog.h"
 #include "../../core/process.h"
 #include "../../cpu/percpu.h"
+#include "../../fs/fat32.h"
 #include "../../mm/address_space.h"
 #include "../../mm/frame_allocator.h"
 #include "../../mm/page.h"
@@ -35,6 +36,11 @@ constexpr i64 kEBADF = -9;
 constexpr i64 kEFAULT = -14;
 constexpr i64 kENOMEM = -12;
 constexpr i64 kEINVAL = -22;
+constexpr i64 kENOENT = -2;
+constexpr i64 kEIO = -5;
+constexpr i64 kEMFILE = -24;
+constexpr i64 kEISDIR = -21;
+constexpr i64 kENAMETOOLONG = -36;
 
 // Linux mmap flag bits we care about (asm-generic definitions,
 // matches x86_64 too).
@@ -62,6 +68,8 @@ enum : u64
 {
     kSysRead = 0,
     kSysWrite = 1,
+    kSysOpen = 2,
+    kSysClose = 3,
     kSysMmap = 9,
     kSysMunmap = 11,
     kSysBrk = 12,
@@ -124,20 +132,179 @@ i64 DoWrite(u64 fd, u64 user_buf, u64 len)
     return static_cast<i64>(to_copy);
 }
 
-// Linux: read(fd, buf, count). v0 stub — returns 0 (EOF) on fd=0
-// (stdin). A real implementation would block on the keyboard FIFO
-// or pipe; returning 0 lets musl's CRT see "no input" and proceed
-// without blocking, which is what a non-interactive smoke wants.
-// Non-0 fds return -EBADF.
-i64 DoRead(u64 fd, u64 user_buf, u64 len)
+// Skip the `/fat/` mount prefix (or a bare leading slash) so what
+// we hand to Fat32LookupPath is volume-relative. musl and shell
+// callers both use absolute-looking paths; the FAT32 driver
+// doesn't understand mount-point naming.
+const char* StripFatPrefix(const char* p)
 {
-    (void)user_buf;
-    (void)len;
-    if (fd != 0)
+    while (*p == '/')
+        ++p;
+    if (p[0] == 'f' && p[1] == 'a' && p[2] == 't' && p[3] == '/')
+        return p + 4;
+    return p;
+}
+
+// Linux: open(path, flags, mode). v0 scope:
+//   - Read-only. Any write/create/truncate flag bits in `flags`
+//     are silently ignored; the FAT32 entry has to exist already.
+//   - Only FAT32 volume 0. Path may be absolute ("/HELLO.TXT"),
+//     mount-prefixed ("/fat/HELLO.TXT"), or bare ("HELLO.TXT").
+// Returns the new fd on success, -errno otherwise.
+i64 DoOpen(u64 user_path, u64 flags, u64 mode)
+{
+    (void)flags;
+    (void)mode;
+    // Copy the path into a fixed-size kernel buffer. 63-char cap
+    // covers v0's FAT32 path depth (basenames up to 128 chars are
+    // possible via LFN; restrict the `open` path here since the
+    // kernel scratch + syscall argument convention favour tight
+    // bounds anyway).
+    char path[64];
+    for (u32 i = 0; i < sizeof(path); ++i)
+        path[i] = 0;
+    if (!mm::CopyFromUser(path, reinterpret_cast<const void*>(user_path), sizeof(path) - 1))
+    {
+        return kEFAULT;
+    }
+    path[sizeof(path) - 1] = 0;
+    // Ensure there's a NUL somewhere in the copied region; a
+    // missing NUL means the caller passed an over-long string
+    // that'd spill past our buffer during matching.
+    bool has_nul = false;
+    for (u32 i = 0; i < sizeof(path); ++i)
+    {
+        if (path[i] == 0)
+        {
+            has_nul = true;
+            break;
+        }
+    }
+    if (!has_nul)
+    {
+        return kENAMETOOLONG;
+    }
+
+    const auto* v = fs::fat32::Fat32Volume(0);
+    if (v == nullptr)
+    {
+        return kENOENT;
+    }
+    fs::fat32::DirEntry entry;
+    const char* leaf = StripFatPrefix(path);
+    if (!fs::fat32::Fat32LookupPath(v, leaf, &entry))
+    {
+        return kENOENT;
+    }
+    if (entry.attributes & 0x10)
+    {
+        return kEISDIR;
+    }
+
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr)
+    {
+        return kEIO;
+    }
+    for (u32 i = 3; i < 16; ++i)
+    {
+        if (p->linux_fds[i].state == 0)
+        {
+            p->linux_fds[i].state = 2;
+            p->linux_fds[i].first_cluster = entry.first_cluster;
+            p->linux_fds[i].size = entry.size_bytes;
+            p->linux_fds[i].offset = 0;
+            return static_cast<i64>(i);
+        }
+    }
+    return kEMFILE;
+}
+
+// Linux: close(fd). Marks the slot unused. No destructor work —
+// FAT32 entries are snapshotted into the fd at open() time; a
+// close doesn't touch disk.
+i64 DoClose(u64 fd)
+{
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr || fd >= 16)
     {
         return kEBADF;
     }
+    // fd 0/1/2 are reserved-tty, never file handles; refuse close.
+    if (fd < 3 || p->linux_fds[fd].state == 0)
+    {
+        return kEBADF;
+    }
+    p->linux_fds[fd].state = 0;
+    p->linux_fds[fd].first_cluster = 0;
+    p->linux_fds[fd].size = 0;
+    p->linux_fds[fd].offset = 0;
     return 0;
+}
+
+// Linux: read(fd, buf, count).
+//   fd == 0 (stdin): always 0 (EOF). See earlier comment.
+//   fd == 1 / 2: -EBADF — you can't read stdout/stderr.
+//   fd >= 3 file handle: read from the current offset into the
+//     user buffer, advance the cursor, return the byte count.
+//     Implementation reads the ENTIRE file into scratch and
+//     slices — simple, bounded by 4 KiB (v0 file cap).
+i64 DoRead(u64 fd, u64 user_buf, u64 len)
+{
+    if (fd == 0)
+    {
+        return 0;
+    }
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr || fd >= 16)
+    {
+        return kEBADF;
+    }
+    if (p->linux_fds[fd].state != 2)
+    {
+        return kEBADF;
+    }
+    if (len == 0)
+    {
+        return 0;
+    }
+    const auto* v = fs::fat32::Fat32Volume(0);
+    if (v == nullptr)
+    {
+        return kEIO;
+    }
+
+    // Scratch read. 4 KiB accommodates HELLO.TXT / INNER.TXT /
+    // LongFile.txt; larger files will truncate here. A streaming
+    // read-with-offset helper in the FAT32 driver is the next
+    // iteration.
+    static u8 scratch[4096];
+    fs::fat32::DirEntry entry;
+    for (u64 i = 0; i < sizeof(entry.name); ++i)
+        entry.name[i] = 0;
+    entry.attributes = 0;
+    entry.first_cluster = p->linux_fds[fd].first_cluster;
+    entry.size_bytes = p->linux_fds[fd].size;
+    const i64 total = fs::fat32::Fat32ReadFile(v, &entry, scratch, sizeof(scratch));
+    if (total < 0)
+    {
+        return kEIO;
+    }
+    const u64 size = static_cast<u64>(total);
+    const u64 off = p->linux_fds[fd].offset;
+    if (off >= size)
+    {
+        return 0; // past-EOF
+    }
+    u64 to_copy = size - off;
+    if (to_copy > len)
+        to_copy = len;
+    if (!mm::CopyToUser(reinterpret_cast<void*>(user_buf), scratch + off, to_copy))
+    {
+        return kEFAULT;
+    }
+    p->linux_fds[fd].offset = off + to_copy;
+    return static_cast<i64>(to_copy);
 }
 
 // Page-align `x` up. Our cluster size is 4 KiB, matching FAT32's
@@ -357,6 +524,12 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
         break;
     case kSysRead:
         rv = DoRead(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysOpen:
+        rv = DoOpen(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysClose:
+        rv = DoClose(frame->rdi);
         break;
     case kSysBrk:
         rv = DoBrk(frame->rdi);

@@ -51,6 +51,17 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     p->heap_base = 0;        // PeLoad fills these when the PE has
     p->heap_pages = 0;       // imports — see subsystems/win32/heap.cpp
     p->heap_free_head = 0;
+    // Linux fd table: reserve stdin/stdout/stderr, mark rest unused.
+    for (u32 i = 0; i < 16; ++i)
+    {
+        p->linux_fds[i].state = (i < 3) ? 1 /* reserved-tty */ : 0;
+        p->linux_fds[i].first_cluster = 0;
+        p->linux_fds[i].size = 0;
+        p->linux_fds[i].offset = 0;
+        for (u32 j = 0; j < sizeof(p->linux_fds[i]._pad); ++j)
+            p->linux_fds[i]._pad[j] = 0;
+        p->linux_fds[i]._pad2 = 0;
+    }
     p->linux_brk_base = 0; // loader fills when abi_flavor = kAbiLinux
     p->linux_brk_current = 0;
     p->linux_mmap_cursor = 0;

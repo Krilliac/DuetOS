@@ -304,6 +304,234 @@ u64 BuildLinuxElf(u8* out_buf, u64 buf_cap)
 
 } // namespace
 
+// File-I/O smoke payload: open("HELLO.TXT", O_RDONLY, 0) ->
+// mmap a 4 KiB buf -> read(fd, buf, 32) -> write(1, buf, n) ->
+// close(fd) -> write(1, "done\n", 5) -> exit_group(0x42). Expected
+// stdout on boot: "hello from fat32\ndone\n".
+//
+// Byte layout:
+//   0..144  : instructions
+//   145..154: "HELLO.TXT\0"   (path, 10 bytes)
+//   155..159: "done\n"         (ok marker, 5 bytes)
+//
+// Both LEA displacements (0x85 and 0x1F) are RIP-relative so this
+// is position-independent — loader can place it at any VA.
+constexpr u8 kFilePayload[] = {
+    // open("HELLO.TXT", 0, 0)
+    0xB8,
+    0x02,
+    0x00,
+    0x00,
+    0x00, // mov eax, 2
+    0x48,
+    0x8D,
+    0x3D,
+    0x85,
+    0x00,
+    0x00,
+    0x00, // lea rdi, [rip+0x85] (path)
+    0x31,
+    0xF6, // xor esi, esi   (flags=0)
+    0x31,
+    0xD2, // xor edx, edx   (mode=0)
+    0x0F,
+    0x05, // syscall
+    0x49,
+    0x89,
+    0xC5, // mov r13, rax   (save fd)
+    // mmap(NULL, 4096, 3, 0x22, -1, 0)
+    0xB8,
+    0x09,
+    0x00,
+    0x00,
+    0x00, // mov eax, 9
+    0x31,
+    0xFF, // xor edi, edi
+    0xBE,
+    0x00,
+    0x10,
+    0x00,
+    0x00, // mov esi, 0x1000
+    0xBA,
+    0x03,
+    0x00,
+    0x00,
+    0x00, // mov edx, 3
+    0x41,
+    0xBA,
+    0x22,
+    0x00,
+    0x00,
+    0x00, // mov r10d, 0x22
+    0x41,
+    0xB8,
+    0xFF,
+    0xFF,
+    0xFF,
+    0xFF, // mov r8d, -1
+    0x45,
+    0x31,
+    0xC9, // xor r9d, r9d
+    0x0F,
+    0x05, // syscall
+    0x49,
+    0x89,
+    0xC4, // mov r12, rax (buf)
+    // read(fd, buf, 32)
+    0xB8,
+    0x00,
+    0x00,
+    0x00,
+    0x00, // mov eax, 0  (sys_read)
+    0x44,
+    0x89,
+    0xEF, // mov edi, r13d (fd)
+    0x4C,
+    0x89,
+    0xE6, // mov rsi, r12
+    0xBA,
+    0x20,
+    0x00,
+    0x00,
+    0x00, // mov edx, 32
+    0x0F,
+    0x05, // syscall
+    0x49,
+    0x89,
+    0xC6, // mov r14, rax (n bytes)
+    // write(1, buf, r14)
+    0xB8,
+    0x01,
+    0x00,
+    0x00,
+    0x00, // mov eax, 1
+    0xBF,
+    0x01,
+    0x00,
+    0x00,
+    0x00, // mov edi, 1
+    0x4C,
+    0x89,
+    0xE6, // mov rsi, r12
+    0x4C,
+    0x89,
+    0xF2, // mov rdx, r14
+    0x0F,
+    0x05, // syscall
+    // close(fd)
+    0xB8,
+    0x03,
+    0x00,
+    0x00,
+    0x00, // mov eax, 3  (sys_close)
+    0x44,
+    0x89,
+    0xEF, // mov edi, r13d
+    0x0F,
+    0x05, // syscall
+    // write(1, "done\n", 5)
+    0xB8,
+    0x01,
+    0x00,
+    0x00,
+    0x00, // mov eax, 1
+    0xBF,
+    0x01,
+    0x00,
+    0x00,
+    0x00, // mov edi, 1
+    0x48,
+    0x8D,
+    0x35,
+    0x1F,
+    0x00,
+    0x00,
+    0x00, // lea rsi, [rip+0x1F] (done)
+    0xBA,
+    0x05,
+    0x00,
+    0x00,
+    0x00, // mov edx, 5
+    0x0F,
+    0x05, // syscall
+    // exit_group(0x42)
+    0xB8,
+    0xE7,
+    0x00,
+    0x00,
+    0x00, // mov eax, 231
+    0xBF,
+    0x42,
+    0x00,
+    0x00,
+    0x00, // mov edi, 0x42
+    0x0F,
+    0x05, // syscall
+    0x0F,
+    0x0B, // ud2
+    // path: "HELLO.TXT\0"
+    'H',
+    'E',
+    'L',
+    'L',
+    'O',
+    '.',
+    'T',
+    'X',
+    'T',
+    0,
+    // done: "done\n"
+    'd',
+    'o',
+    'n',
+    'e',
+    '\n',
+};
+
+void SpawnRing3LinuxFileSmoke()
+{
+    KLOG_TRACE_SCOPE("linux/smoke", "SpawnRing3LinuxFileSmoke");
+
+    AddressSpace* as = AddressSpaceCreate(/*frame_budget=*/16);
+    if (as == nullptr)
+    {
+        core::Panic("linux/smoke", "AddressSpaceCreate failed");
+    }
+    const PhysAddr code_frame = AllocateFrame();
+    const PhysAddr stack_frame = AllocateFrame();
+    if (code_frame == mm::kNullFrame || stack_frame == mm::kNullFrame)
+    {
+        core::Panic("linux/smoke", "frame alloc failed");
+    }
+    auto* code_direct = static_cast<u8*>(mm::PhysToVirt(code_frame));
+    for (u64 i = 0; i < mm::kPageSize; ++i)
+        code_direct[i] = 0;
+    for (u64 i = 0; i < sizeof(kFilePayload); ++i)
+        code_direct[i] = kFilePayload[i];
+
+    // Different VA pair so this task doesn't collide with the
+    // existing hand-crafted Linux smoke.
+    const u64 code_va = 0x0000'6900'0000'0000ull;
+    const u64 stack_va = code_va + 0x10000;
+    AddressSpaceMapUserPage(as, code_va, code_frame, mm::kPagePresent | mm::kPageUser);
+    AddressSpaceMapUserPage(as, stack_va, stack_frame,
+                            mm::kPagePresent | mm::kPageWritable | mm::kPageUser | mm::kPageNoExecute);
+
+    Process* proc = ProcessCreate("linux-file-smoke", as, core::CapSetEmpty(), fs::RamfsSandboxRoot(), code_va,
+                                  stack_va, core::kTickBudgetSandbox);
+    if (proc == nullptr)
+    {
+        core::Panic("linux/smoke", "ProcessCreate failed");
+    }
+    proc->abi_flavor = kAbiLinux;
+    proc->linux_brk_base = code_va + 0x100'0000ull;
+    proc->linux_brk_current = proc->linux_brk_base;
+    proc->linux_mmap_cursor = 0x0000'7100'0000'0000ull;
+
+    arch::SerialWrite("[linux] queued ring3 file smoke: open+read+write+close\n");
+    sched::SchedCreateUser(&core::Ring3UserEntry, nullptr, "linux-file-smoke", proc);
+}
+
 void SpawnRing3LinuxElfSmoke()
 {
     KLOG_TRACE_SCOPE("linux/smoke", "SpawnRing3LinuxElfSmoke");

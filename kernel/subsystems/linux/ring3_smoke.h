@@ -36,4 +36,9 @@ void SpawnRing3LinuxSmoke();
 /// linux!\n" to COM1 before exit_group(0x42).
 void SpawnRing3LinuxElfSmoke();
 
+/// Open HELLO.TXT on FAT32 via sys_open, read 17 bytes into a
+/// mmap'd page, echo them to COM1 via sys_write, close the fd,
+/// exit. Exercises the sys_open/close/read path end-to-end.
+void SpawnRing3LinuxFileSmoke();
+
 } // namespace customos::subsystems::linux

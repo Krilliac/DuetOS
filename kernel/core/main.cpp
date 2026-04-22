@@ -1483,6 +1483,10 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // SpawnElfLinux — proves the loader + abi-flavor plumbing
     // works in an in-memory path.
     customos::subsystems::linux::SpawnRing3LinuxElfSmoke();
+    // sys_open/read/close exercise: open HELLO.TXT from FAT32
+    // via the Linux ABI and echo its contents back through
+    // sys_write. Validates the whole file-I/O chain end-to-end.
+    customos::subsystems::linux::SpawnRing3LinuxFileSmoke();
     // Real-binary path: read /fat/LINUX.ELF off the mounted
     // FAT32 volume and spawn it via SpawnElfLinux. Exercises
     // the AHCI -> GPT -> partition-block -> FAT32 -> ElfLoad

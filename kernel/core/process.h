@@ -202,6 +202,27 @@ struct Process
     u64 heap_pages;
     u64 heap_free_head;
 
+    // Linux-ABI file descriptor table. Meaningful only when
+    // abi_flavor == kAbiLinux. Slots 0 / 1 / 2 are reserved for
+    // stdin / stdout / stderr; slots 3+ are file handles opened
+    // via sys_open, each carrying the backing FAT32 entry's
+    // first-cluster + size + the current read offset.
+    //
+    // A fixed-size 16-entry table is plenty for smoke tests and
+    // the typical static-musl binary. Real programs (shells,
+    // dynamic linkers) need more; grow to a KMalloc'd array when
+    // a workload actually exceeds 16 open handles.
+    struct LinuxFd
+    {
+        u8 state; // 0=unused, 1=reserved-tty, 2=file
+        u8 _pad[3];
+        u32 first_cluster; // only meaningful for state=file
+        u32 size;          // only meaningful for state=file
+        u32 _pad2;
+        u64 offset; // read cursor; only meaningful for state=file
+    };
+    LinuxFd linux_fds[16];
+
     // Linux-ABI brk heap. Meaningful only when abi_flavor ==
     // kAbiLinux; untouched otherwise. `linux_brk_base` is the
     // start of the program's data segment end (v0 smoke hard-
