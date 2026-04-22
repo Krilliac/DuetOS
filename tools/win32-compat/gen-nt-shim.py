@@ -42,8 +42,8 @@ KNOWN_MAPPINGS = {
     "NtFreeVirtualMemory":         "SYS_HEAP_FREE",
     "NtQueryPerformanceCounter":   "SYS_PERF_COUNTER",
     "NtQuerySystemTime":           "SYS_GETTIME_FT",
+    "NtDelayExecution":            "SYS_SLEEP_MS",         # batch 22
     # Slice 81+ candidates (filled in as the SYS_* lands)
-    # "NtDelayExecution":          "SYS_SLEEP_MS",
     # "NtCreateFile":              "SYS_OPEN",
     # "NtReadFile":                "SYS_FREAD",
     # "NtClose":                   "SYS_FCLOSE",

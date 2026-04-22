@@ -167,6 +167,12 @@ __declspec(dllimport) BOOL __stdcall QueryPerformanceFrequency(LARGE_INTEGER* fr
 __declspec(dllimport) DWORD __stdcall GetTickCount(void);
 __declspec(dllimport) unsigned long long __stdcall GetTickCount64(void);
 
+// Batch 22 — Sleep + SwitchToThread. Sleep blocks the calling
+// thread for at least `dwMilliseconds`; SwitchToThread voluntarily
+// yields the remaining time slice to any other ready thread.
+__declspec(dllimport) void __stdcall Sleep(DWORD dwMilliseconds);
+__declspec(dllimport) BOOL __stdcall SwitchToThread(void);
+
 static const char kMsg[] = "[hello-winapi] printed via kernel32.WriteFile!\n";
 #define kMsgLen ((DWORD)(sizeof(kMsg) - 1))
 
@@ -473,6 +479,39 @@ void _start(void)
         WriteFile(out, b14_ok, sizeof(b14_ok) - 1, &b14w, 0);
     else
         WriteFile(out, b14_bad, sizeof(b14_bad) - 1, &b14w, 0);
+
+    // Batch 22 exercise — Sleep + SwitchToThread.
+    //
+    // Invariants checked:
+    //   * Sleep(50) blocks for at least 50 ms. Measured by QPC
+    //     (HPET-backed nanosecond clock); the elapsed must be
+    //     >= 50_000_000 ns. Upper bound is loose because
+    //     scheduler tick is 10 ms — actual sleep can land
+    //     anywhere in [50, 60] ms typical, more under load.
+    //   * Sleep(0) returns promptly (acts like SwitchToThread).
+    //   * SwitchToThread returns TRUE.
+    LARGE_INTEGER b22_t0 = {0};
+    LARGE_INTEGER b22_t1 = {0};
+    QueryPerformanceCounter(&b22_t0);
+    Sleep(50);
+    QueryPerformanceCounter(&b22_t1);
+    long long b22_elapsed_ns = b22_t1.QuadPart - b22_t0.QuadPart;
+
+    // Sleep(0) round-trip — should be near-instant. We don't
+    // assert a tight bound, just that it doesn't hang or fail.
+    Sleep(0);
+
+    volatile BOOL b22_yield_ok = SwitchToThread();
+    (void)b22_yield_ok;
+
+    const char b22_ok[] = "[batch22] Sleep + SwitchToThread OK\n";
+    const char b22_bad[] = "[batch22] Sleep undershot 50 ms FAILED\n";
+    BOOL b22_pass = b22_elapsed_ns >= 50000000LL && b22_yield_ok != 0;
+    DWORD b22w = 0;
+    if (b22_pass)
+        WriteFile(out, b22_ok, sizeof(b22_ok) - 1, &b22w, 0);
+    else
+        WriteFile(out, b22_bad, sizeof(b22_bad) - 1, &b22w, 0);
 
     // Batch 3 round-trip: store a distinctive value via
     // SetLastError, read it back via GetLastError, exit with

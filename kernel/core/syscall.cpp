@@ -376,6 +376,30 @@ void SyscallDispatch(arch::TrapFrame* frame)
         return;
     }
 
+    case SYS_SLEEP_MS:
+    {
+        // rdi = ms. ms == 0 -> equivalent to SchedYield. Otherwise
+        // convert to ticks (round up so a sub-tick request still
+        // sleeps at least one tick — Sleep is "at least", never
+        // "at most") and call SchedSleepTicks. Caller wakes when
+        // the timer has advanced past the deadline; spurious
+        // early wakes are not a thing in v0.
+        const u64 ms = frame->rdi;
+        if (ms == 0)
+        {
+            sched::SchedYield();
+        }
+        else
+        {
+            // 100 Hz tick = 10 ms per tick. Round up: (ms + 9) / 10.
+            constexpr u64 kMsPerTick = 10;
+            const u64 ticks = (ms + (kMsPerTick - 1)) / kMsPerTick;
+            sched::SchedSleepTicks(ticks);
+        }
+        frame->rax = 0;
+        return;
+    }
+
     case SYS_READ:
     {
         // rdi = user pointer to NUL-terminated path.

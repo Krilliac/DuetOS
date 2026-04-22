@@ -70,3 +70,6 @@ EXPORTS
     CreateRemoteThread
     ResumeThread
     GetExitCodeProcess
+    ; Batch 22 — timer + voluntary yield
+    Sleep
+    SwitchToThread

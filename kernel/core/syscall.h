@@ -171,6 +171,22 @@ enum SyscallNumber : u64
     // QueryPerformanceCounter stub for a sub-millisecond
     // high-resolution clock.
     SYS_NOW_NS = 18,
+
+    // SYS_SLEEP_MS: rdi = milliseconds to block. Returns 0 on
+    // wake. Special-cased: rdi == 0 behaves like SYS_YIELD (drop
+    // the current time slice, reschedule). Otherwise the caller
+    // is moved to the sleep queue and woken by the timer tick
+    // after at least `rdi` ms have elapsed.
+    //
+    // Resolution is bounded by the scheduler tick (100 Hz today
+    // = 10 ms grain). A request for 5 ms still sleeps a full
+    // tick — Sleep semantics are "at least", never "at most".
+    // Backs Win32 `Sleep` and `SleepEx`.
+    //
+    // Unprivileged. The only resource consumed is a slot on the
+    // sleep queue, which is per-process bounded by the existing
+    // task budget.
+    SYS_SLEEP_MS = 19,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit

@@ -85,6 +85,8 @@ constexpr u32 kOffHresultEFail = 0x29C;       // batch 19 —  6 bytes
 constexpr u32 kOffGetSysTimeFTReal = 0x2A2;   // batch 20 — 13 bytes
 constexpr u32 kOffQpcNs = 0x2AF;              // batch 21 — 13 bytes
 constexpr u32 kOffQpfNs = 0x2BC;              // batch 21 — 10 bytes
+constexpr u32 kOffSleep = 0x2CB;              // batch 22 — 12 bytes (push/pop rdi)
+constexpr u32 kOffSwitchToThread = 0x2D7;     // batch 22 — 10 bytes
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -902,10 +904,50 @@ constexpr u8 kStubsBytes[] = {
     0x48, 0xC7, 0x01, 0x00, 0xCA, 0x9A, 0x3B, // 0x2BE mov qword [rcx], 0x3B9ACA00
     0xB8, 0x01, 0x00, 0x00, 0x00,             // 0x2C5 mov eax, 1 (BOOL TRUE)
     0xC3,                                     // 0x2CA ret
+
+    // --- Sleep (offset 0x2CB, 12 bytes) ------------------------
+    // Win32: void Sleep(DWORD dwMilliseconds=ecx). Routes to
+    // SYS_SLEEP_MS. The kernel handles the ms==0 special case
+    // (yield instead of sleep) so we just forward the value.
+    //
+    // CRITICAL: RDI is CALLEE-SAVED in the Win32 x64 ABI. We
+    // clobber it to set up the SYS_SLEEP_MS arg, so we MUST
+    // push/pop it across the syscall — otherwise the caller's
+    // RDI-resident local (often a pointer or function pointer
+    // by MSVC/clang's register allocator) survives Sleep with
+    // value `dwMilliseconds`, and the next deref/call through
+    // that "pointer" #PFs at cr2 = ms. (Hit live during the
+    // Batch 22 bring-up: Sleep(50) → cr2=0x32.)
+    //
+    // `mov edi, ecx` is a 32-bit move — x86_64 zero-extends the
+    // upper half of rdi automatically, so a DWORD `ms` becomes a
+    // u64 with the high bits cleared, matching what SYS_SLEEP_MS
+    // expects in rdi.
+    0x57,                         // 0x2CB push rdi            ; save callee-saved
+    0x89, 0xCF,                   // 0x2CC mov edi, ecx        ; ms -> rdi
+    0xB8, 0x13, 0x00, 0x00, 0x00, // 0x2CE mov eax, 19         ; SYS_SLEEP_MS
+    0xCD, 0x80,                   // 0x2D3 int 0x80
+    0x5F,                         // 0x2D5 pop rdi             ; restore
+    0xC3,                         // 0x2D6 ret
+
+    // --- SwitchToThread (offset 0x2D7, 10 bytes) ---------------
+    // Win32: BOOL SwitchToThread(void). Returns nonzero if a
+    // thread switch happened, 0 if no other ready thread was
+    // available. Maps to SYS_YIELD; we return 1 (TRUE)
+    // optimistically — callers use the return as a hint, not a
+    // strict assertion of "another thread ran". The real check
+    // would require comparing scheduler tick counters before
+    // and after, which isn't worth the kernel-side complexity.
+    //
+    // No callee-saved regs touched — only RAX (caller-saved).
+    0xB8, 0x03, 0x00, 0x00, 0x00, // 0x2D7 mov eax, 3          ; SYS_YIELD
+    0xCD, 0x80,                   // 0x2DC int 0x80
+    0xB0, 0x01,                   // 0x2DE mov al, 1           ; BOOL TRUE
+    0xC3,                         // 0x2E0 ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x2CB, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0x2E1, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -1188,6 +1230,15 @@ constexpr StubEntry kStubsTable[] = {
     {"kernel32.dll", "QueryPerformanceFrequency", kOffQpfNs},
     {"kernel32.dll", "GetTickCount", kOffGetTickCount},
     {"kernel32.dll", "GetTickCount64", kOffGetTickCount},
+
+    // Batch 22 — Sleep + SwitchToThread (timer + voluntary yield).
+    // Sleep routes to SYS_SLEEP_MS; SwitchToThread routes to
+    // SYS_YIELD. SleepEx ignores its bAlertable arg and aliases
+    // to Sleep — no APC delivery in v0, so the alertable form
+    // would never actually fire user-mode APCs anyway.
+    {"kernel32.dll", "Sleep", kOffSleep},
+    {"kernel32.dll", "SleepEx", kOffSleep},
+    {"kernel32.dll", "SwitchToThread", kOffSwitchToThread},
 
     // Rtl* unwind (v0: empty / not-found sentinels)
     {"kernel32.dll", "RtlCaptureStackBackTrace", kOffReturnZero},
