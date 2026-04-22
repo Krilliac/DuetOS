@@ -3,8 +3,10 @@
 #include "../../arch/x86_64/serial.h"
 #include "../../arch/x86_64/traps.h"
 #include "../../core/klog.h"
+#include "../../core/process.h"
 #include "../../mm/paging.h"
 #include "../linux/syscall.h"
+#include "../win32/heap.h"
 
 namespace customos::subsystems::translation
 {
@@ -33,6 +35,20 @@ enum : u64
     kSysPrlimit64 = 302,
     kSysRseq = 334,
 };
+
+// Per-direction hit counters. Bucketed on syscall_nr & 0x3FF so
+// both dispatch tables fit (Linux ~0..400, native 0..30). Simple
+// static table — no dynamic growth needed at this scale.
+constinit HitTable g_linux_hits = {};
+constinit HitTable g_native_hits = {};
+
+void BumpHits(HitTable& t, u64 nr)
+{
+    if (t.buckets[nr & 0x3FF] != 0xFFFFFFFFu)
+    {
+        ++t.buckets[nr & 0x3FF];
+    }
+}
 
 // Log prefix so boot-log grep is easy.
 void LogTranslation(const char* origin, u64 nr, const char* target)
@@ -194,40 +210,167 @@ i64 TranslateRseq(arch::TrapFrame* /*f*/)
     return -38;
 }
 
+// ----- native → Linux/Win32 translations -----
+
+// Experimental native syscall numbers whose body we synthesise
+// by borrowing from Linux. The native dispatch table hasn't
+// committed to specific numbers for these, so we're picking
+// un-used ones well past the current SYS_* range. Any native
+// caller using them is doing so ahead of a formal primary
+// handler — useful in practice for kernel-side probes.
+enum : u64
+{
+    kNativeClockNs = 0x200,    // returns NowNs() directly in rax
+    kNativeGetRandom = 0x201,  // u64 buf, u64 count -> count (via xorshift)
+    kNativeWin32Alloc = 0x210, // u64 size -> user_ptr (via Win32 heap)
+    kNativeWin32Free = 0x211,  // u64 user_ptr -> 0
+};
+
+// Native: "give me monotonic nanoseconds" — trivially available
+// via the already-exposed LinuxNowNs helper.
+i64 NativeClockNs(arch::TrapFrame* /*f*/)
+{
+    return static_cast<i64>(linux::LinuxNowNs());
+}
+
+// Native: getrandom(buf, count) — not implemented in core/syscall,
+// but the Linux handler exists. Reinvoke via a synthetic inner
+// frame: stash the arguments where LinuxGetRandom would expect
+// them and call the existing helper.
+// Simpler: just inline the logic (xorshift64 seeded from rdtsc),
+// matching Linux's v0 getrandom.
+i64 NativeGetRandom(arch::TrapFrame* f)
+{
+    const u64 user_buf = f->rdi;
+    u64 count = f->rsi;
+    if (count == 0)
+        return 0;
+    if (count > 4096)
+        count = 4096;
+    u32 lo, hi;
+    asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    u64 state = ((static_cast<u64>(hi) << 32) | lo) ^ 0xDEADBEEFCAFEBABEull;
+    static u8 tmp[4096];
+    for (u64 i = 0; i < count; ++i)
+    {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        tmp[i] = static_cast<u8>(state >> 24);
+    }
+    if (!mm::CopyToUser(reinterpret_cast<void*>(user_buf), tmp, count))
+        return -14; // -EFAULT
+    return static_cast<i64>(count);
+}
+
+// Native: Win32HeapAlloc proxy — a non-Win32 process that wants
+// Win32-style heap semantics can reach it through the TU. Uses
+// the same per-process heap the Win32 PE loader sets up; caller
+// gets back an 8-aligned user pointer or 0 on failure.
+i64 NativeWin32Alloc(arch::TrapFrame* f)
+{
+    auto* p = core::CurrentProcess();
+    if (p == nullptr)
+        return 0;
+    return static_cast<i64>(win32::Win32HeapAlloc(p, f->rdi));
+}
+
+// Native: Win32HeapFree proxy.
+i64 NativeWin32Free(arch::TrapFrame* f)
+{
+    auto* p = core::CurrentProcess();
+    if (p == nullptr)
+        return 0;
+    win32::Win32HeapFree(p, f->rdi);
+    return 0;
+}
+
 } // namespace
+
+const HitTable& LinuxHitsRead()
+{
+    return g_linux_hits;
+}
+const HitTable& NativeHitsRead()
+{
+    return g_native_hits;
+}
 
 Result LinuxGapFill(arch::TrapFrame* frame)
 {
     KLOG_TRACE_SCOPE("translate", "LinuxGapFill");
     const u64 nr = frame->rax;
+    Result r{false, 0};
     switch (nr)
     {
     case kSysReadv:
         LogTranslation("linux", nr, "linux-self:loop-over-read");
-        return {true, TranslateReadv(frame)};
+        r = {true, TranslateReadv(frame)};
+        break;
     case kSysGettimeofday:
         LogTranslation("linux", nr, "linux-self:clock_gettime-reshape");
-        return {true, TranslateGettimeofday(frame)};
+        r = {true, TranslateGettimeofday(frame)};
+        break;
     case kSysSysinfo:
         LogTranslation("linux", nr, "synthetic:zeroed+uptime");
-        return {true, TranslateSysinfo(frame)};
+        r = {true, TranslateSysinfo(frame)};
+        break;
     case kSysPrlimit64:
         LogTranslation("linux", nr, "synthetic:rlim-infinity");
-        return {true, TranslatePrlimit64(frame)};
+        r = {true, TranslatePrlimit64(frame)};
+        break;
     case kSysFsync:
     case kSysFdatasync:
         LogTranslation("linux", nr, "noop:writes-unbuffered");
-        return {true, TranslateNoOp(frame)};
+        r = {true, TranslateNoOp(frame)};
+        break;
     case kSysMadvise:
         LogTranslation("linux", nr, "noop:advisory-hint");
-        return {true, TranslateNoOp(frame)};
+        r = {true, TranslateNoOp(frame)};
+        break;
     case kSysRseq:
         LogTranslation("linux", nr, "synthetic:enosys-deliberate");
-        return {true, TranslateRseq(frame)};
+        r = {true, TranslateRseq(frame)};
+        break;
     default:
         LogMiss("linux", nr);
-        return {false, 0};
+        break;
     }
+    if (r.handled)
+        BumpHits(g_linux_hits, nr);
+    return r;
+}
+
+Result NativeGapFill(arch::TrapFrame* frame)
+{
+    KLOG_TRACE_SCOPE("translate", "NativeGapFill");
+    const u64 nr = frame->rax;
+    Result r{false, 0};
+    switch (nr)
+    {
+    case kNativeClockNs:
+        LogTranslation("native", nr, "linux-self:NowNs");
+        r = {true, NativeClockNs(frame)};
+        break;
+    case kNativeGetRandom:
+        LogTranslation("native", nr, "synthetic:xorshift-from-rdtsc");
+        r = {true, NativeGetRandom(frame)};
+        break;
+    case kNativeWin32Alloc:
+        LogTranslation("native", nr, "win32:HeapAlloc");
+        r = {true, NativeWin32Alloc(frame)};
+        break;
+    case kNativeWin32Free:
+        LogTranslation("native", nr, "win32:HeapFree");
+        r = {true, NativeWin32Free(frame)};
+        break;
+    default:
+        LogMiss("native", nr);
+        break;
+    }
+    if (r.handled)
+        BumpHits(g_native_hits, nr);
+    return r;
 }
 
 } // namespace customos::subsystems::translation

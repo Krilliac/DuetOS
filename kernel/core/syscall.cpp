@@ -6,6 +6,7 @@
 #include "../fs/vfs.h"
 #include "../mm/paging.h"
 #include "../sched/sched.h"
+#include "../subsystems/translation/translate.h"
 #include "../subsystems/win32/heap.h"
 #include "klog.h"
 #include "process.h"
@@ -506,9 +507,8 @@ void SyscallDispatch(arch::TrapFrame* frame)
         // Inherit caps + root + trusted budgets. Later slices can
         // differentiate spawn from a sandboxed parent by dropping
         // caps after SpawnElfFile.
-        const u64 child_pid =
-            SpawnElfFile(kpath, n->file_bytes, n->file_size, proc->caps, proc->root,
-                         mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        const u64 child_pid = SpawnElfFile(kpath, n->file_bytes, n->file_size, proc->caps, proc->root,
+                                           mm::kFrameBudgetTrusted, kTickBudgetTrusted);
         if (child_pid == 0)
         {
             arch::SerialWrite("[sys] spawn fail pid=");
@@ -560,12 +560,25 @@ void SyscallDispatch(arch::TrapFrame* frame)
     }
 
     default:
+    {
+        // Offer to the translation unit before surfacing the
+        // "unknown syscall" warning. The TU may synthesise the
+        // call from Linux primitives or route through the Win32
+        // subsystem's kernel-side helpers (heap, etc.); its own
+        // log lines distinguish success from miss.
+        const auto t = subsystems::translation::NativeGapFill(frame);
+        if (t.handled)
+        {
+            frame->rax = static_cast<u64>(t.rv);
+            return;
+        }
         ReportUnknownSyscall(num, frame->rip);
         // Convention: -1 back to the caller for a bad syscall number.
         // Two's-complement cast keeps the rax payload machine-visible
         // as 0xFFFFFFFFFFFFFFFF rather than relying on enum promotion.
         frame->rax = static_cast<u64>(-1);
         return;
+    }
     }
 }
 

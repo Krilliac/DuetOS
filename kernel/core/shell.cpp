@@ -15,6 +15,7 @@
 #include "../drivers/video/framebuffer.h"
 #include "../drivers/video/widget.h"
 #include "../fs/fat32.h"
+#include "../subsystems/translation/translate.h"
 #include "../fs/gpt.h"
 #include "../fs/ramfs.h"
 #include "../fs/tmpfs.h"
@@ -311,6 +312,7 @@ void CmdHelp()
     ConsoleWriteln("  FATMKDIR PATH            CREATE A NEW DIRECTORY");
     ConsoleWriteln("  FATRMDIR PATH            REMOVE AN EMPTY DIRECTORY");
     ConsoleWriteln("  LINUXEXEC PATH           LOAD ELF FROM FAT32 AS A LINUX-ABI PROCESS");
+    ConsoleWriteln("  TRANSLATE                ABI TRANSLATION-UNIT HIT TABLE");
     ConsoleWriteln("  FREE         MEMORY USAGE (PHYS + HEAP)");
     ConsoleWriteln("  PS           LIST EVERY SCHEDULER TASK");
     ConsoleWriteln("  SPAWN KIND   LAUNCH A RING-3 TASK (hello/sandbox/jail/...)");
@@ -1223,7 +1225,7 @@ static const char* const kCommandSet[] = {
     "hexdump", "stat",   "basename", "dirname",  "cal",      "sleep",     "reset",      "tac",      "nl",
     "rev",     "expr",   "color",    "rand",     "flushtlb", "checksum",  "repeat",     "kill",     "exec",
     "metrics", "trace",  "read",     "guard",    "top",      "fatcat",    "fatls",      "fatwrite", "fatappend",
-    "fatnew",  "fatrm",  "fattrunc", "fatmkdir", "fatrmdir", "linuxexec",
+    "fatnew",  "fatrm",  "fattrunc", "fatmkdir", "fatrmdir", "linuxexec", "translate",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -2874,6 +2876,41 @@ void CmdLinuxexec(customos::u32 argc, char** argv)
     WriteU64Dec(pid);
     ConsoleWrite(" PATH=");
     ConsoleWriteln(path);
+}
+
+void CmdTranslate()
+{
+    // `translate` — print the ABI translation unit's hit tables.
+    // One row per bucket that has fired at least once, split by
+    // direction. Buckets are syscall_nr & 0x3FF; overlaps between
+    // Linux's wide numbering and native's narrow numbering are
+    // rare enough to keep the 1024-slot scheme.
+    namespace tx = customos::subsystems::translation;
+    const auto& linux = tx::LinuxHitsRead();
+    const auto& native = tx::NativeHitsRead();
+    ConsoleWriteln("TRANSLATION UNIT HIT TABLE");
+    ConsoleWriteln("  DIR     NR     HITS");
+    for (customos::u32 i = 0; i < 1024; ++i)
+    {
+        if (linux.buckets[i] == 0)
+            continue;
+        ConsoleWrite("  linux   0x");
+        WriteU64Hex(i, 3);
+        ConsoleWrite("  ");
+        WriteU64Dec(linux.buckets[i]);
+        ConsoleWriteln("");
+    }
+    for (customos::u32 i = 0; i < 1024; ++i)
+    {
+        if (native.buckets[i] == 0)
+            continue;
+        ConsoleWrite("  native  0x");
+        WriteU64Hex(i, 3);
+        ConsoleWrite("  ");
+        WriteU64Dec(native.buckets[i]);
+        ConsoleWriteln("");
+    }
+    ConsoleWriteln("-- end --");
 }
 
 void CmdRead(customos::u32 argc, char** argv)
@@ -5552,6 +5589,11 @@ void Dispatch(char* line)
     if (StrEq(cmd, "fatrmdir"))
     {
         CmdFatrmdir(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "translate"))
+    {
+        CmdTranslate();
         return;
     }
     if (StrEq(cmd, "linuxexec"))

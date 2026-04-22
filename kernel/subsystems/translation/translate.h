@@ -51,4 +51,22 @@ struct Result
 // the caller can decide whether to write rv into frame->rax.
 Result LinuxGapFill(arch::TrapFrame* frame);
 
+// Fill a native syscall the core dispatcher did not handle.
+// Symmetric counterpart of LinuxGapFill — translations run in
+// the OTHER direction: native ← Linux primitives / Win32 heap.
+// Arguments live in frame->rdi/rsi/rdx/etc; `frame->rax` carries
+// the native syscall number.
+Result NativeGapFill(arch::TrapFrame* frame);
+
+// Per-direction hit counters. Indexed by the lowest 10 bits of
+// the syscall number (covers both Linux's ~400-entry table and
+// native's ~30-entry table). Tracks "translation ran AND
+// succeeded." Expose for a shell diagnostic.
+struct HitTable
+{
+    u32 buckets[1024];
+};
+const HitTable& LinuxHitsRead();
+const HitTable& NativeHitsRead();
+
 } // namespace customos::subsystems::translation
