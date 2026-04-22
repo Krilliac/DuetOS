@@ -1,15 +1,22 @@
 #include "shell.h"
 
 #include "../arch/x86_64/cpu.h"
+#include "../arch/x86_64/cpu_info.h"
 #include "../arch/x86_64/hpet.h"
 #include "../arch/x86_64/lapic.h"
 #include "../arch/x86_64/rtc.h"
 #include "../arch/x86_64/serial.h"
+#include "../arch/x86_64/smbios.h"
 #include "../arch/x86_64/smp.h"
+#include "../arch/x86_64/thermal.h"
 #include "../arch/x86_64/timer.h"
+#include "../drivers/gpu/gpu.h"
 #include "../drivers/input/ps2kbd.h"
 #include "../drivers/input/ps2mouse.h"
+#include "../drivers/net/net.h"
 #include "../drivers/pci/pci.h"
+#include "../drivers/power/power.h"
+#include "../net/stack.h"
 #include "../drivers/storage/block.h"
 #include "../drivers/video/console.h"
 #include "../drivers/video/framebuffer.h"
@@ -279,6 +286,13 @@ void CmdHelp()
     ConsoleWriteln("  FB           FRAMEBUFFER GEOMETRY");
     ConsoleWriteln("  KBDSTATS     PS/2 KEYBOARD IRQ COUNTERS");
     ConsoleWriteln("  MOUSESTATS   PS/2 MOUSE IRQ COUNTERS");
+    ConsoleWriteln("  SMBIOS       BIOS / SYSTEM / CHASSIS INFO");
+    ConsoleWriteln("  POWER        AC / BATTERY / THERMAL SNAPSHOT");
+    ConsoleWriteln("  THERMAL      RE-READ MSR THERMAL SENSORS");
+    ConsoleWriteln("  GPU          LIST DISCOVERED GPUS");
+    ConsoleWriteln("  NIC          LIST NICS + MAC + LINK");
+    ConsoleWriteln("  ARP          ARP CACHE + STATS");
+    ConsoleWriteln("  IPV4         IPV4 RX COUNTERS");
     ConsoleWriteln("");
     ConsoleWriteln("RUNTIME CONTROL:");
     ConsoleWriteln("  LOGLEVEL [L] GET / SET KLOG THRESHOLD (D/I/W/E)");
@@ -1214,18 +1228,20 @@ void CmdFind(u32 argc, char** argv)
 // dispatched in Dispatch — keeping the two in sync is the
 // price of not having reflection.
 static const char* const kCommandSet[] = {
-    "help",    "about",  "version",  "clear",    "uptime",   "date",      "windows",    "mode",     "ls",
-    "cat",     "touch",  "rm",       "echo",     "cp",       "mv",        "wc",         "head",     "tail",
-    "dmesg",   "stats",  "mem",      "history",  "set",      "unset",     "env",        "alias",    "unalias",
-    "sysinfo", "source", "man",      "grep",     "find",     "time",      "which",      "seq",      "sort",
-    "uniq",    "cpuid",  "cr",       "rflags",   "tsc",      "hpet",      "ticks",      "msr",      "lapic",
-    "smp",     "lspci",  "heap",     "paging",   "fb",       "kbdstats",  "mousestats", "loglevel", "logcolor",
-    "getenv",  "yield",  "reboot",   "halt",     "uname",    "whoami",    "hostname",   "pwd",      "true",
-    "false",   "mount",  "lsmod",    "lsblk",    "lsgpt",    "free",      "ps",         "spawn",    "readelf",
-    "hexdump", "stat",   "basename", "dirname",  "cal",      "sleep",     "reset",      "tac",      "nl",
-    "rev",     "expr",   "color",    "rand",     "flushtlb", "checksum",  "repeat",     "kill",     "exec",
-    "metrics", "trace",  "read",     "guard",    "top",      "fatcat",    "fatls",      "fatwrite", "fatappend",
-    "fatnew",  "fatrm",  "fattrunc", "fatmkdir", "fatrmdir", "linuxexec", "translate",
+    "help",    "about",   "version",  "clear",    "uptime",   "date",      "windows",    "mode",     "ls",
+    "cat",     "touch",   "rm",       "echo",     "cp",       "mv",        "wc",         "head",     "tail",
+    "dmesg",   "stats",   "mem",      "history",  "set",      "unset",     "env",        "alias",    "unalias",
+    "sysinfo", "source",  "man",      "grep",     "find",     "time",      "which",      "seq",      "sort",
+    "uniq",    "cpuid",   "cr",       "rflags",   "tsc",      "hpet",      "ticks",      "msr",      "lapic",
+    "smp",     "lspci",   "heap",     "paging",   "fb",       "kbdstats",  "mousestats", "loglevel", "logcolor",
+    "getenv",  "yield",   "reboot",   "halt",     "uname",    "whoami",    "hostname",   "pwd",      "true",
+    "false",   "mount",   "lsmod",    "lsblk",    "lsgpt",    "free",      "ps",         "spawn",    "readelf",
+    "hexdump", "stat",    "basename", "dirname",  "cal",      "sleep",     "reset",      "tac",      "nl",
+    "rev",     "expr",    "color",    "rand",     "flushtlb", "checksum",  "repeat",     "kill",     "exec",
+    "metrics", "trace",   "read",     "guard",    "top",      "fatcat",    "fatls",      "fatwrite", "fatappend",
+    "fatnew",  "fatrm",   "fattrunc", "fatmkdir", "fatrmdir", "linuxexec", "translate",  "smbios",   "power",
+    "battery", "thermal", "temp",     "gpu",      "lsgpu",    "nic",       "lsnic",      "ip",       "arp",
+    "ipv4",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -2069,6 +2085,220 @@ void CmdMouseStats()
     ConsoleWriteChar('\n');
     ConsoleWrite("MOUSE DROPPED:  ");
     WriteU64Dec(s.bytes_dropped);
+    ConsoleWriteChar('\n');
+}
+
+// ------ slice 52: observability commands for the v0 subsystems ------
+
+void CmdSmbios()
+{
+    const auto& s = customos::arch::SmbiosGet();
+    if (!s.present)
+    {
+        ConsoleWriteln("SMBIOS: (no entry point found)");
+        return;
+    }
+    ConsoleWrite("BIOS:         ");
+    ConsoleWrite(s.bios_vendor);
+    ConsoleWrite(" ");
+    ConsoleWriteln(s.bios_version);
+    ConsoleWrite("SYSTEM:       ");
+    ConsoleWrite(s.system_manufacturer);
+    ConsoleWrite(" ");
+    ConsoleWrite(s.system_product);
+    ConsoleWrite(" v=");
+    ConsoleWriteln(s.system_version);
+    ConsoleWrite("CHASSIS:      ");
+    ConsoleWrite(customos::arch::ChassisTypeName(s.chassis_type));
+    ConsoleWriteln(customos::arch::SmbiosIsLaptopChassis() ? " (laptop-like)" : "");
+    ConsoleWrite("CPU:          ");
+    ConsoleWrite(s.cpu_manufacturer);
+    ConsoleWrite(" ");
+    ConsoleWriteln(s.cpu_version);
+}
+
+void CmdPower()
+{
+    const auto snap = customos::drivers::power::PowerSnapshotRead();
+    ConsoleWrite("CHASSIS:      ");
+    ConsoleWriteln(snap.chassis_is_laptop ? "laptop-like" : "desktop/server");
+    ConsoleWrite("AC:           ");
+    ConsoleWriteln(customos::drivers::power::AcStateName(snap.ac));
+    ConsoleWrite("BATTERY:      ");
+    ConsoleWriteln(customos::drivers::power::BatteryStateName(snap.battery.state));
+    ConsoleWrite("CPU TEMP:     ");
+    if (snap.cpu_temp_c != 0)
+    {
+        WriteU64Dec(snap.cpu_temp_c);
+        ConsoleWriteln("C");
+    }
+    else
+    {
+        ConsoleWriteln("(not available)");
+    }
+    ConsoleWrite("PACKAGE TEMP: ");
+    if (snap.package_temp_c != 0)
+    {
+        WriteU64Dec(snap.package_temp_c);
+        ConsoleWriteln("C");
+    }
+    else
+    {
+        ConsoleWriteln("(not available)");
+    }
+    ConsoleWrite("TJ MAX:       ");
+    WriteU64Dec(snap.tj_max_c);
+    ConsoleWriteln("C");
+    ConsoleWrite("THROTTLE HIT: ");
+    ConsoleWriteln(snap.thermal_throttle_hit ? "YES" : "NO");
+    if (snap.backend_is_stub)
+    {
+        ConsoleWriteln("(backend is a stub — AC/battery need AML interpreter; thermal is real)");
+    }
+}
+
+void CmdThermal()
+{
+    const auto r = customos::arch::ThermalRead();
+    if (!r.valid)
+    {
+        ConsoleWriteln("THERMAL: sensors report invalid (likely emulator)");
+        return;
+    }
+    ConsoleWrite("CORE TEMP:    ");
+    WriteU64Dec(r.core_temp_c);
+    ConsoleWriteln("C");
+    ConsoleWrite("PACKAGE TEMP: ");
+    WriteU64Dec(r.package_temp_c);
+    ConsoleWriteln("C");
+    ConsoleWrite("TJ MAX:       ");
+    WriteU64Dec(r.tj_max_c);
+    ConsoleWriteln("C");
+    ConsoleWrite("THROTTLE:     ");
+    ConsoleWriteln(r.thermal_throttle_hit ? "HIT" : "clear");
+}
+
+void CmdGpu()
+{
+    const u64 n = customos::drivers::gpu::GpuCount();
+    if (n == 0)
+    {
+        ConsoleWriteln("GPU: (none discovered)");
+        return;
+    }
+    for (u64 i = 0; i < n; ++i)
+    {
+        const auto& g = customos::drivers::gpu::Gpu(i);
+        ConsoleWrite("GPU ");
+        WriteU64Dec(i);
+        ConsoleWrite(": vid=");
+        WriteU64Hex(g.vendor_id, 4);
+        ConsoleWrite(" did=");
+        WriteU64Hex(g.device_id, 4);
+        ConsoleWrite("  vendor=");
+        ConsoleWrite(g.vendor);
+        ConsoleWrite(" tier=");
+        ConsoleWrite(g.tier);
+        if (g.family != nullptr)
+        {
+            ConsoleWrite(" family=");
+            ConsoleWrite(g.family);
+        }
+        ConsoleWriteChar('\n');
+    }
+}
+
+void CmdNic()
+{
+    const u64 n = customos::drivers::net::NicCount();
+    if (n == 0)
+    {
+        ConsoleWriteln("NIC: (none discovered)");
+        return;
+    }
+    for (u64 i = 0; i < n; ++i)
+    {
+        const auto& nic = customos::drivers::net::Nic(i);
+        ConsoleWrite("NIC ");
+        WriteU64Dec(i);
+        ConsoleWrite(": vid=");
+        WriteU64Hex(nic.vendor_id, 4);
+        ConsoleWrite(" did=");
+        WriteU64Hex(nic.device_id, 4);
+        ConsoleWrite("  vendor=");
+        ConsoleWrite(nic.vendor);
+        if (nic.family != nullptr)
+        {
+            ConsoleWrite(" family=");
+            ConsoleWrite(nic.family);
+        }
+        if (nic.mac_valid)
+        {
+            ConsoleWrite(" mac=");
+            for (u64 b = 0; b < 6; ++b)
+            {
+                if (b != 0)
+                    ConsoleWrite(":");
+                WriteU64Hex(nic.mac[b], 2);
+            }
+            ConsoleWrite(nic.link_up ? " link=UP" : " link=DOWN");
+        }
+        ConsoleWriteChar('\n');
+    }
+}
+
+void CmdArp()
+{
+    const auto s = customos::net::ArpStatsRead();
+    ConsoleWrite("ARP HITS:       ");
+    WriteU64Dec(s.lookups_hit);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("ARP MISSES:     ");
+    WriteU64Dec(s.lookups_miss);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("ARP INSERTS:    ");
+    WriteU64Dec(s.inserts);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("ARP EVICTIONS:  ");
+    WriteU64Dec(s.evictions);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("ARP RX:         ");
+    WriteU64Dec(s.rx_packets);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("ARP REJECTS:    ");
+    WriteU64Dec(s.rx_rejects);
+    ConsoleWriteChar('\n');
+}
+
+void CmdIpv4()
+{
+    const auto s = customos::net::Ipv4StatsRead();
+    ConsoleWrite("IPV4 RX:        ");
+    WriteU64Dec(s.rx_packets);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("IPV4 BAD VER:   ");
+    WriteU64Dec(s.rx_bad_version);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("IPV4 BAD IHL:   ");
+    WriteU64Dec(s.rx_bad_ihl);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("IPV4 BAD LEN:   ");
+    WriteU64Dec(s.rx_bad_length);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("IPV4 BAD CSUM:  ");
+    WriteU64Dec(s.rx_bad_checksum);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("IPV4 RX UDP:    ");
+    WriteU64Dec(s.rx_udp);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("IPV4 RX TCP:    ");
+    WriteU64Dec(s.rx_tcp);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("IPV4 RX ICMP:   ");
+    WriteU64Dec(s.rx_icmp);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("IPV4 RX OTHER:  ");
+    WriteU64Dec(s.rx_other_proto);
     ConsoleWriteChar('\n');
 }
 
@@ -5449,6 +5679,41 @@ void Dispatch(char* line)
     if (StrEq(cmd, "mousestats"))
     {
         CmdMouseStats();
+        return;
+    }
+    if (StrEq(cmd, "smbios"))
+    {
+        CmdSmbios();
+        return;
+    }
+    if (StrEq(cmd, "power") || StrEq(cmd, "battery"))
+    {
+        CmdPower();
+        return;
+    }
+    if (StrEq(cmd, "thermal") || StrEq(cmd, "temp"))
+    {
+        CmdThermal();
+        return;
+    }
+    if (StrEq(cmd, "gpu") || StrEq(cmd, "lsgpu"))
+    {
+        CmdGpu();
+        return;
+    }
+    if (StrEq(cmd, "nic") || StrEq(cmd, "lsnic") || StrEq(cmd, "ip"))
+    {
+        CmdNic();
+        return;
+    }
+    if (StrEq(cmd, "arp"))
+    {
+        CmdArp();
+        return;
+    }
+    if (StrEq(cmd, "ipv4"))
+    {
+        CmdIpv4();
         return;
     }
     if (StrEq(cmd, "logcolor"))
