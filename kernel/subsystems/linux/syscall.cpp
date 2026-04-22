@@ -70,6 +70,9 @@ enum : u64
     kSysWrite = 1,
     kSysOpen = 2,
     kSysClose = 3,
+    kSysStat = 4,
+    kSysFstat = 5,
+    kSysLstat = 6,
     kSysLseek = 8,
     kSysMmap = 9,
     kSysMunmap = 11,
@@ -318,6 +321,107 @@ i64 DoRead(u64 fd, u64 user_buf, u64 len)
     }
     p->linux_fds[fd].offset = off + to_copy;
     return static_cast<i64>(to_copy);
+}
+
+// Fill a Linux struct stat from the given FAT32 directory entry.
+// Layout matches uapi/asm-generic/stat.h for x86_64 (144 bytes).
+// Times are zeroed — no RTC integration yet.
+void FillStatFromEntry(const fs::fat32::DirEntry& e, u8* out_144)
+{
+    for (u64 i = 0; i < 144; ++i)
+        out_144[i] = 0;
+    auto put_u64 = [&](u64 off, u64 v)
+    {
+        for (u64 i = 0; i < 8; ++i)
+            out_144[off + i] = static_cast<u8>(v >> (i * 8));
+    };
+    auto put_u32 = [&](u64 off, u32 v)
+    {
+        for (u64 i = 0; i < 4; ++i)
+            out_144[off + i] = static_cast<u8>(v >> (i * 8));
+    };
+    // st_dev = 0 (no device namespace yet).
+    put_u64(0, 0);
+    // st_ino = first_cluster — stable identity per on-disk entry.
+    put_u64(8, e.first_cluster);
+    // st_nlink = 1 for files, 1 for dirs (no hard links).
+    put_u64(16, 1);
+    // st_mode: dir or regular file, default permissions rw-r--r-- / rwxr-xr-x.
+    const u32 mode = (e.attributes & 0x10) ? 0x41EDu  /* S_IFDIR | 0755 */
+                                           : 0x81A4u; /* S_IFREG | 0644 */
+    put_u32(24, mode);
+    // st_uid/gid/rdev = 0.
+    // st_size at offset 48.
+    put_u64(48, e.size_bytes);
+    // st_blksize at offset 56.
+    put_u64(56, 4096);
+    // st_blocks (in 512-byte units) at offset 64.
+    put_u64(64, (u64(e.size_bytes) + 511) / 512);
+    // times: all zero — RTC integration follows.
+}
+
+// Linux: stat(path, buf) / lstat(path, buf).
+// Looks up the path in FAT32 volume 0, fills a struct stat, copies
+// it to user. Treats symlinks as regular files (we have none).
+i64 DoStat(u64 user_path, u64 user_buf)
+{
+    char path[64];
+    for (u32 i = 0; i < sizeof(path); ++i)
+        path[i] = 0;
+    if (!mm::CopyFromUser(path, reinterpret_cast<const void*>(user_path), sizeof(path) - 1))
+        return kEFAULT;
+    path[sizeof(path) - 1] = 0;
+
+    const auto* v = fs::fat32::Fat32Volume(0);
+    if (v == nullptr)
+        return kENOENT;
+    fs::fat32::DirEntry entry;
+    if (!fs::fat32::Fat32LookupPath(v, StripFatPrefix(path), &entry))
+        return kENOENT;
+
+    u8 sbuf[144];
+    FillStatFromEntry(entry, sbuf);
+    if (!mm::CopyToUser(reinterpret_cast<void*>(user_buf), sbuf, sizeof(sbuf)))
+        return kEFAULT;
+    return 0;
+}
+
+// Linux: fstat(fd, buf). Synthesises a DirEntry from the fd's
+// cached state; doesn't re-read the directory.
+i64 DoFstat(u64 fd, u64 user_buf)
+{
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr || fd >= 16)
+        return kEBADF;
+    const auto state = p->linux_fds[fd].state;
+    fs::fat32::DirEntry entry;
+    for (u64 i = 0; i < sizeof(entry.name); ++i)
+        entry.name[i] = 0;
+    if (state == 1)
+    {
+        // tty — character-device-ish. Mode S_IFCHR | 0600 = 020600 = 0x2180.
+        u8 sbuf[144];
+        for (u64 i = 0; i < sizeof(sbuf); ++i)
+            sbuf[i] = 0;
+        // st_mode at 24:
+        sbuf[24] = 0x80;
+        sbuf[25] = 0x21;
+        // st_nlink=1 at 16:
+        sbuf[16] = 1;
+        if (!mm::CopyToUser(reinterpret_cast<void*>(user_buf), sbuf, sizeof(sbuf)))
+            return kEFAULT;
+        return 0;
+    }
+    if (state != 2)
+        return kEBADF;
+    entry.attributes = 0;
+    entry.first_cluster = p->linux_fds[fd].first_cluster;
+    entry.size_bytes = p->linux_fds[fd].size;
+    u8 sbuf[144];
+    FillStatFromEntry(entry, sbuf);
+    if (!mm::CopyToUser(reinterpret_cast<void*>(user_buf), sbuf, sizeof(sbuf)))
+        return kEFAULT;
+    return 0;
 }
 
 // Linux: writev(fd, iov, iovcnt). Each iovec is two u64s: base
@@ -689,6 +793,13 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
         break;
     case kSysClose:
         rv = DoClose(frame->rdi);
+        break;
+    case kSysStat:
+    case kSysLstat:
+        rv = DoStat(frame->rdi, frame->rsi);
+        break;
+    case kSysFstat:
+        rv = DoFstat(frame->rdi, frame->rsi);
         break;
     case kSysLseek:
         rv = DoLseek(frame->rdi, static_cast<i64>(frame->rsi), frame->rdx);
