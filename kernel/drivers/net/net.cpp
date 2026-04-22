@@ -51,6 +51,63 @@ const char* SubclassName(u8 subclass)
     }
 }
 
+// Intel e1000 / e1000e register offsets (subset).
+// See Intel 8254x / 8257x programmer's reference.
+constexpr u64 kE1000RegStatus = 0x00008; // Device Status
+constexpr u64 kE1000RegRal0 = 0x05400;   // Receive Address Low  (MAC [0..3])
+constexpr u64 kE1000RegRah0 = 0x05404;   // Receive Address High (MAC [4..5] + valid)
+constexpr u32 kE1000StatusLinkUp = 1u << 1;
+constexpr u32 kE1000RahAddressValid = 1u << 31;
+
+// Read a MMIO u32 from the NIC's mapped BAR 0. Offset is in bytes.
+u32 Mmio32(const NicInfo& n, u64 offset)
+{
+    if (n.mmio_virt == nullptr)
+        return 0;
+    auto* p = reinterpret_cast<volatile u32*>(static_cast<u8*>(n.mmio_virt) + offset);
+    return *p;
+}
+
+// Read the MAC + link state from an Intel e1000-family NIC. The
+// RAL/RAH registers are populated by the card from its EEPROM
+// during reset, so they're readable without any init work on
+// our side. This is the smallest useful real-hardware probe we
+// can do without ring setup.
+void ProbeE1000State(NicInfo& n)
+{
+    if (n.mmio_virt == nullptr)
+        return;
+    const u32 ral = Mmio32(n, kE1000RegRal0);
+    const u32 rah = Mmio32(n, kE1000RegRah0);
+    if ((rah & kE1000RahAddressValid) == 0)
+        return; // no populated MAC
+    n.mac[0] = static_cast<u8>(ral & 0xFF);
+    n.mac[1] = static_cast<u8>((ral >> 8) & 0xFF);
+    n.mac[2] = static_cast<u8>((ral >> 16) & 0xFF);
+    n.mac[3] = static_cast<u8>((ral >> 24) & 0xFF);
+    n.mac[4] = static_cast<u8>(rah & 0xFF);
+    n.mac[5] = static_cast<u8>((rah >> 8) & 0xFF);
+    n.mac_valid = true;
+    const u32 status = Mmio32(n, kE1000RegStatus);
+    n.link_up = (status & kE1000StatusLinkUp) != 0;
+}
+
+// True for chip families whose register layout matches the e1000
+// RAL/RAH/STATUS set. Covers e1000 (82540em), e1000e (82574,
+// 82579, i210, i217). ixgbe / i40e have different layouts.
+bool IsE1000CompatFamily(const char* family)
+{
+    if (family == nullptr)
+        return false;
+    // Prefix match — tags are strings like "e1000-82540em",
+    // "e1000e-82574", "e1000e-82579/i210/i217".
+    const char* p = family;
+    if (p[0] != 'e' || p[1] != '1' || p[2] != '0' || p[3] != '0' || p[4] != '0')
+        return false;
+    // Accept "e1000" or "e1000e" prefix; reject "e10000..." etc.
+    return p[5] == '\0' || p[5] == '-' || p[5] == 'e';
+}
+
 void RunVendorProbe(NicInfo& n)
 {
     const char* family = nullptr;
@@ -72,6 +129,10 @@ void RunVendorProbe(NicInfo& n)
         return;
     }
     n.family = family;
+    if (n.vendor_id == kVendorIntel && IsE1000CompatFamily(family))
+    {
+        ProbeE1000State(n);
+    }
     arch::SerialWrite("[net-probe] vid=");
     arch::SerialWriteHex(n.vendor_id);
     arch::SerialWrite(" did=");
@@ -79,6 +140,17 @@ void RunVendorProbe(NicInfo& n)
     arch::SerialWrite(" family=");
     arch::SerialWrite(family);
     arch::SerialWrite("  (stub OK — no packet I/O yet)\n");
+    if (n.mac_valid)
+    {
+        arch::SerialWrite("[net-probe]   mac=");
+        for (u64 i = 0; i < 6; ++i)
+        {
+            if (i != 0)
+                arch::SerialWrite(":");
+            arch::SerialWriteHex(n.mac[i]);
+        }
+        arch::SerialWrite(n.link_up ? "  link=up\n" : "  link=down\n");
+    }
 }
 
 void LogNic(const NicInfo& n)

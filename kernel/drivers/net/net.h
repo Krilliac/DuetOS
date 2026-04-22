@@ -63,6 +63,10 @@ struct NicInfo
     u64 mmio_phys;
     u64 mmio_size;
     void* mmio_virt;
+    u8 mac[6]; // all-zero if the vendor probe didn't read it
+    bool mac_valid;
+    bool link_up; // filled by the vendor probe; false on NICs
+                  // whose status register we don't read yet
 };
 
 /// Walk the PCI cache, register every network controller, run the

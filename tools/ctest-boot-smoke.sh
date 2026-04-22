@@ -95,6 +95,10 @@ expected=(
     '[gpu-probe] vid=0x0000000000001234 did=0x0000000000001111 family=qemu-bochs-vga'
     # Network discovery: QEMU q35 ships with an e1000e NIC.
     '[net-probe] vid=0x0000000000008086 did=0x00000000000010d3 family=e1000e-82574'
+    # Real MMIO read — the MAC must be populated (QEMU's default
+    # is 52:54:00:12:34:56) and the link must come up. Regression
+    # here means BAR 0 isn't decoded or RAL/RAH moved.
+    'link=up'
     # USB + audio shells always run, even on QEMU q35 which
     # exposes neither (both log "none found" warnings).
     'drivers/usb : discovered host controllers'
