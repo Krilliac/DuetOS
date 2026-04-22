@@ -6,6 +6,7 @@
 #include "../mm/frame_allocator.h"
 #include "../mm/kheap.h"
 #include "../sched/sched.h"
+#include "../security/guard.h"
 #include "klog.h"
 #include "panic.h"
 
@@ -72,6 +73,28 @@ u64 ReadMsr(u32 msr)
     return (u64(hi) << 32) | lo;
 }
 
+// Issues that indicate the system's security posture has been
+// degraded at the hardware level — a rootkit, a catastrophic
+// driver bug, or a DoS attempt. Escalate the guard to Enforce
+// on first observation so any subsequent image load is held to
+// the stricter policy. Irreversible until the next reboot.
+bool IsSecurityCritical(HealthIssue issue)
+{
+    switch (issue)
+    {
+    case HealthIssue::Cr0WpCleared:
+    case HealthIssue::Cr4SmepCleared:
+    case HealthIssue::Cr4SmapCleared:
+    case HealthIssue::EferNxeCleared:
+    case HealthIssue::IdtModified:
+    case HealthIssue::StackCanaryZero:
+    case HealthIssue::TaskStackOverflow:
+        return true;
+    default:
+        return false;
+    }
+}
+
 void Report(HealthIssue issue)
 {
     const u32 idx = u32(issue);
@@ -82,6 +105,15 @@ void Report(HealthIssue issue)
     ++g_report.issues_found_total;
     g_report.last_issue = issue;
     Log(LogLevel::Warn, "health", HealthIssueName(issue));
+
+    // Guard escalation. Any security-critical finding forces
+    // the guard into Enforce mode so the next image load is
+    // prompt-or-deny. A log line records the transition.
+    if (IsSecurityCritical(issue) && security::GuardMode() != security::Mode::Enforce)
+    {
+        arch::SerialWrite("[health] ESCALATE: guard -> Enforce (critical finding)\n");
+        security::SetGuardMode(security::Mode::Enforce);
+    }
 }
 
 bool CheckHeap()
