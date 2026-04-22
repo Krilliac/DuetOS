@@ -286,12 +286,6 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // corrupt code silently later.
     ProtectKernelImage();
 
-    // Capture control-register + EFER baseline AFTER paging has
-    // flipped every security bit we enforce. The runtime checker
-    // uses these baselines to detect silent bit-clears at any
-    // later scan.
-    customos::core::RuntimeCheckerInit();
-
     SerialWrite("[boot] Bringing up framebuffer (if present).\n");
     customos::drivers::video::FramebufferInit(multiboot_info);
     customos::drivers::video::FramebufferSelfTest();
@@ -1630,6 +1624,13 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // independent of worker-creation order.
     SerialWrite("[boot] Bringing up APs.\n");
     SmpStartAps();
+
+    // Runtime invariant checker baseline. Capture NOW, after
+    // every init that touches IDT / GDT / TSS / CR4 / EFER has
+    // run — so the hashes reflect the final steady-state view
+    // of those structures. Earlier capture would flag every
+    // subsequent IdtSetUserGate / TssSetRsp0 as "drift".
+    customos::core::RuntimeCheckerInit();
 
     customos::core::StartHeartbeatThread();
 

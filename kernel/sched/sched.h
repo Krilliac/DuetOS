@@ -240,14 +240,22 @@ struct SchedTaskInfo
 using SchedEnumCb = void (*)(const SchedTaskInfo& info, void* cookie);
 void SchedEnumerate(SchedEnumCb cb, void* cookie);
 
-/// Walk every live task and verify the 8-byte stack-overflow
-/// canary at `stack_base[0..7]` still matches the expected
-/// value (`0xC0DEB0B0CAFED00D`). Returns the number of tasks
-/// whose canary has been scribbled — a non-zero return means
-/// at least one kernel stack overflowed. The runtime checker
-/// calls this every scan so overflow is caught long before
-/// the reaper would notice at task exit.
-u64 SchedCheckStackCanaries();
+struct StackHealth
+{
+    u64 canary_broken;    // # tasks whose stack-bottom sentinel scribbled
+    u64 rsp_out_of_range; // # tasks whose saved rsp is outside their stack
+};
+
+/// Walk every live task and verify both the 8-byte stack-overflow
+/// canary at `stack_base[0..7]` AND the saved rsp against the
+/// task's [stack_base, stack_base + stack_size) bounds. Returns
+/// a breakdown of findings — a non-zero canary_broken means at
+/// least one kernel stack overflowed; a non-zero rsp_out_of_range
+/// means a wild store or uninitialized save corrupted a task's
+/// control block. The runtime checker calls this every scan so
+/// overflow / rsp drift is caught long before the reaper would
+/// notice at task exit.
+StackHealth SchedCheckTaskStacks();
 
 /// Result of a cross-task kill request.
 enum class KillResult : u8

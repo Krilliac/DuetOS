@@ -1186,24 +1186,31 @@ KillResult SchedKillByPid(u64 pid)
     return KillResult::Signaled;
 }
 
-// Walk every list that holds a Task and check the 8-byte
-// stack-bottom canary against the well-known value. A broken
-// canary is a confirmed kernel-stack overflow. Returns the
-// number of affected tasks; the runtime checker decides what
-// to do with the count (log each, panic on threshold, etc.).
-u64 SchedCheckStackCanaries()
+// Walk every list that holds a Task and check two invariants:
+//   1. The 8-byte stack-bottom canary at stack_base[0..7] still
+//      matches kStackCanary — a broken canary is a confirmed
+//      kernel-stack overflow.
+//   2. The saved rsp is inside [stack_base, stack_base + size) —
+//      an out-of-range rsp means the task's control block was
+//      scribbled or the switch primer got corrupted, and
+//      resuming it would triple-fault.
+//
+// Each finding is logged individually with the offending task's
+// identity. Returns both counts so the runtime checker can
+// surface them as distinct HealthIssue codes.
+StackHealth SchedCheckTaskStacks()
 {
-    u64 broken = 0;
-    auto check = [&broken](const Task* t)
+    StackHealth out = {};
+    auto check = [&out](const Task* t)
     {
         if (t == nullptr)
             return;
         if (t->stack_base == nullptr)
-            return; // boot/idle task — no canary planted
+            return; // boot/idle task — no stack to check
         const u64 got = *reinterpret_cast<const u64*>(t->stack_base);
         if (got != kStackCanary)
         {
-            ++broken;
+            ++out.canary_broken;
             arch::SerialWrite("[health] STACK OVERFLOW detected task=");
             arch::SerialWrite(t->name ? t->name : "<anon>");
             arch::SerialWrite(" id=");
@@ -1213,6 +1220,30 @@ u64 SchedCheckStackCanaries()
             arch::SerialWrite(" got=");
             arch::SerialWriteHex(got);
             arch::SerialWrite("\n");
+        }
+        // rsp of 0 means the task is currently running — its rsp
+        // lives in the CPU, not the control block, so skip the
+        // range check for it. Dead tasks on the zombie list also
+        // have rsp==0 after SchedExit blitzes the frame.
+        if (t->rsp != 0)
+        {
+            const u64 base = reinterpret_cast<u64>(t->stack_base);
+            const u64 top = base + t->stack_size;
+            if (t->rsp < base || t->rsp >= top)
+            {
+                ++out.rsp_out_of_range;
+                arch::SerialWrite("[health] RSP OUT OF RANGE task=");
+                arch::SerialWrite(t->name ? t->name : "<anon>");
+                arch::SerialWrite(" id=");
+                arch::SerialWriteHex(t->id);
+                arch::SerialWrite(" rsp=");
+                arch::SerialWriteHex(t->rsp);
+                arch::SerialWrite(" stack=[");
+                arch::SerialWriteHex(base);
+                arch::SerialWrite("..");
+                arch::SerialWriteHex(top);
+                arch::SerialWrite(")\n");
+            }
         }
     };
     arch::Cli();
@@ -1226,7 +1257,7 @@ u64 SchedCheckStackCanaries()
     for (Task* t = g_zombies; t != nullptr; t = t->next)
         check(t);
     arch::Sti();
-    return broken;
+    return out;
 }
 
 void SchedEnumerate(SchedEnumCb cb, void* cookie)

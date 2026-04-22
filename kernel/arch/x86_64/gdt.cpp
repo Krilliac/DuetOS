@@ -194,4 +194,43 @@ void TssSetRsp0(u64 rsp0)
     g_bsp_tss.rsp0 = rsp0;
 }
 
+u64 GdtHash()
+{
+    // FNV-1a over the code/data descriptors, with two
+    // legitimate CPU-mutated bits masked:
+    //
+    //   * Slots 3-4 are the TSS descriptor. LTR sets the BUSY
+    //     bit (access-byte bit 1); skip those slots entirely.
+    //   * Slots 1/2/5/6 are code/data descriptors. Any time the
+    //     CPU loads one into a segment register, it sets the
+    //     ACCESSED bit (access-byte bit 0 = descriptor bit 40).
+    //     Mask that bit before hashing so the hash reflects the
+    //     immutable-by-software state.
+    //
+    // A rootkit-style descriptor swap would have to mutate a
+    // code/data slot in a way beyond the A bit — replacing
+    // kernel CS with a ring-3 entry to escalate privilege, or
+    // planting a call gate in a user slot. That's the signal
+    // we want to catch.
+    constexpr u64 kFnvOffset = 0xcbf29ce484222325ULL;
+    constexpr u64 kFnvPrime = 0x100000001b3ULL;
+    constexpr u64 kSkipSlotStart = 3;
+    constexpr u64 kSkipSlotEnd = 5;              // [3, 5) excluded
+    constexpr u64 kAccessedBitMask = 1ULL << 40; // bit 40 = A
+    u64 h = kFnvOffset;
+    for (u64 slot = 0; slot < sizeof(g_gdt) / sizeof(g_gdt[0]); ++slot)
+    {
+        if (slot >= kSkipSlotStart && slot < kSkipSlotEnd)
+            continue;
+        const u64 v = g_gdt[slot] & ~kAccessedBitMask;
+        const auto* p = reinterpret_cast<const u8*>(&v);
+        for (u64 i = 0; i < sizeof(v); ++i)
+        {
+            h ^= p[i];
+            h *= kFnvPrime;
+        }
+    }
+    return h;
+}
+
 } // namespace customos::arch

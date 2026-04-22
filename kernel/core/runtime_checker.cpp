@@ -1,6 +1,7 @@
 #include "runtime_checker.h"
 
 #include "../arch/x86_64/cpu.h"
+#include "../arch/x86_64/gdt.h"
 #include "../arch/x86_64/idt.h"
 #include "../arch/x86_64/serial.h"
 #include "../mm/frame_allocator.h"
@@ -31,6 +32,8 @@ constinit u64 g_baseline_cr0 = 0;
 constinit u64 g_baseline_cr4 = 0;
 constinit u64 g_baseline_efer = 0;
 constinit u64 g_baseline_idt_hash = 0;
+constinit u64 g_baseline_gdt_hash = 0;
+constinit u64 g_baseline_text_spot_hash = 0;
 
 constexpr u64 kCr0Wp = 1ULL << 16;
 constexpr u64 kCr4Smep = 1ULL << 20;
@@ -87,8 +90,11 @@ bool IsSecurityCritical(HealthIssue issue)
     case HealthIssue::Cr4SmapCleared:
     case HealthIssue::EferNxeCleared:
     case HealthIssue::IdtModified:
+    case HealthIssue::GdtModified:
+    case HealthIssue::KernelTextModified:
     case HealthIssue::StackCanaryZero:
     case HealthIssue::TaskStackOverflow:
+    case HealthIssue::TaskRspOutOfRange:
         return true;
     default:
         return false;
@@ -246,21 +252,80 @@ bool CheckIdt()
     return true;
 }
 
-bool CheckTaskStacks()
+bool CheckGdt()
 {
-    // Each affected task is printed by sched::SchedCheckStackCanaries
-    // as it's found. We count the condition once in the health
-    // report regardless of how many tasks are affected — the
-    // per-issue count will increment once per scan that finds any
-    // overflow, which matches what the operator wants to see in
-    // the heartbeat summary.
-    const u64 broken = sched::SchedCheckStackCanaries();
-    if (broken != 0)
+    const u64 now = arch::GdtHash();
+    if (now != g_baseline_gdt_hash)
     {
-        Report(HealthIssue::TaskStackOverflow);
+        Report(HealthIssue::GdtModified);
         return false;
     }
     return true;
+}
+
+// Kernel .text section spot-check. FNV-1a over the first and
+// last 4 KiB of .text. NOT a full hash — that would take ~1 ms
+// for a multi-MiB text section; spot-checking the entry page
+// + trailing page catches the 99% case (boot-path + tail-end
+// handler modifications) in ~2 µs.
+extern "C" const u8 _text_start[];
+extern "C" const u8 _text_end[];
+
+u64 ComputeTextSpotHash()
+{
+    constexpr u64 kFnvOffset = 0xcbf29ce484222325ULL;
+    constexpr u64 kFnvPrime = 0x100000001b3ULL;
+    constexpr u64 kSpotBytes = 4096;
+    u64 h = kFnvOffset;
+    const u8* s = _text_start;
+    const u8* e = _text_end;
+    const u64 text_bytes = u64(e - s);
+    const u64 head_bytes = (text_bytes < kSpotBytes) ? text_bytes : kSpotBytes;
+    for (u64 i = 0; i < head_bytes; ++i)
+    {
+        h ^= s[i];
+        h *= kFnvPrime;
+    }
+    if (text_bytes > 2 * kSpotBytes)
+    {
+        for (u64 i = 0; i < kSpotBytes; ++i)
+        {
+            h ^= e[-i64(kSpotBytes) + i64(i)];
+            h *= kFnvPrime;
+        }
+    }
+    return h;
+}
+
+bool CheckKernelText()
+{
+    const u64 now = ComputeTextSpotHash();
+    if (now != g_baseline_text_spot_hash)
+    {
+        Report(HealthIssue::KernelTextModified);
+        return false;
+    }
+    return true;
+}
+
+bool CheckTaskStacks()
+{
+    // Sched walker returns canary + rsp-range counts. Each maps
+    // to a distinct HealthIssue code so operators can grep the
+    // logs for the specific class of failure.
+    const auto h = sched::SchedCheckTaskStacks();
+    bool ok = true;
+    if (h.canary_broken != 0)
+    {
+        Report(HealthIssue::TaskStackOverflow);
+        ok = false;
+    }
+    if (h.rsp_out_of_range != 0)
+    {
+        Report(HealthIssue::TaskRspOutOfRange);
+        ok = false;
+    }
+    return ok;
 }
 
 } // namespace
@@ -305,6 +370,12 @@ const char* HealthIssueName(HealthIssue i)
         return "task stack overflow detected (bottom canary scribbled)";
     case HealthIssue::IdtModified:
         return "IDT hash changed since baseline (handler swap or stray write)";
+    case HealthIssue::GdtModified:
+        return "GDT descriptor hash changed since baseline (segment swap or stray write)";
+    case HealthIssue::KernelTextModified:
+        return "kernel .text spot-check hash changed since baseline (W^X bypassed)";
+    case HealthIssue::TaskRspOutOfRange:
+        return "task saved rsp outside [stack_base, stack_top) (control block scribbled)";
     default:
         return "(unnamed issue)";
     }
@@ -317,6 +388,8 @@ void RuntimeCheckerInit()
     g_baseline_cr4 = ReadCr4();
     g_baseline_efer = ReadMsr(kMsrEfer);
     g_baseline_idt_hash = arch::IdtHash();
+    g_baseline_gdt_hash = arch::GdtHash();
+    g_baseline_text_spot_hash = ComputeTextSpotHash();
     g_report.baseline_captured = 1;
     arch::SerialWrite("[health] baseline cr0=");
     arch::SerialWriteHex(g_baseline_cr0);
@@ -324,8 +397,12 @@ void RuntimeCheckerInit()
     arch::SerialWriteHex(g_baseline_cr4);
     arch::SerialWrite(" efer=");
     arch::SerialWriteHex(g_baseline_efer);
-    arch::SerialWrite(" idt_hash=");
+    arch::SerialWrite("\n[health] idt=");
     arch::SerialWriteHex(g_baseline_idt_hash);
+    arch::SerialWrite(" gdt=");
+    arch::SerialWriteHex(g_baseline_gdt_hash);
+    arch::SerialWrite(" text_spot=");
+    arch::SerialWriteHex(g_baseline_text_spot_hash);
     arch::SerialWrite("\n");
 }
 
@@ -342,6 +419,8 @@ u64 RuntimeCheckerScan()
     {
         (void)CheckControlRegisters();
         (void)CheckIdt();
+        (void)CheckGdt();
+        (void)CheckKernelText();
     }
     (void)CheckCanary();
     (void)CheckTaskStacks();

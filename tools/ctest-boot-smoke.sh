@@ -111,6 +111,13 @@ expected=(
     'drivers/usb : discovered host controllers'
     'drivers/audio : discovered audio controllers'
     '[usb] class drivers registered: hid, msc, hub, video'
+    # Runtime invariant checker baseline + at least one heartbeat
+    # scan. Any drift in control registers / IDT / GDT / kernel
+    # .text / canary / task stacks would emit a `[health]` Warn
+    # line + escalate the guard; the smoke's forbidden-signature
+    # list catches ESCALATE, so reaching this point = clean scan.
+    '[health] baseline cr0='
+    '[I] kheartbeat : health_last_scan_issues   val=0x0 (0)'
 )
 
 # Forbidden signatures — anything indicating an unhandled
@@ -130,6 +137,11 @@ forbidden=(
     # sandbox-denial threshold) or task-kill fault signals a
     # regression in the Win32 subsystem / PE loader.
     'name="ring3-winkill" reason='
+    # Runtime health checker must stay clean on a normal boot.
+    # Any ESCALATE line means a CR-bit / IDT / GDT / .text /
+    # canary / stack-overflow finding fired — treat as a
+    # regression worth investigating.
+    '[health] ESCALATE:'
 )
 # Allowed UNRESOLVED sources: windows-kill.exe imports a pile
 # of dbghelp / advapi32 / vcruntime functions we don't stub

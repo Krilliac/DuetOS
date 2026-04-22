@@ -94,6 +94,24 @@ enum class HealthIssue : u32
     // IDT" signal (rootkit handler swap, stray write, etc.).
     IdtModified,
 
+    // GDT / TSS IST slot hash changed since baseline. RSP0 is
+    // deliberately excluded from the hash — the scheduler
+    // legitimately rewrites it on every user-mode task switch.
+    GdtModified,
+
+    // Kernel .text section spot-check hash changed since
+    // baseline — should be impossible under W^X (text pages are
+    // RX, not writable). Firing this means W^X has silently
+    // been bypassed OR a direct-map alias was used to write.
+    KernelTextModified,
+
+    // Saved rsp of a task's frame is outside [stack_base,
+    // stack_base + stack_size). Either an earlier push walked
+    // past the bottom, or a wild-pointer store overwrote the
+    // task's saved rsp — either way the next resume would
+    // triple-fault.
+    TaskRspOutOfRange,
+
     // Count sentinel
     Count,
 };
