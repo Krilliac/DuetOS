@@ -44,6 +44,47 @@ const VendorEntry* FindVendor(u16 vid)
     return nullptr;
 }
 
+// Run the vendor probe for a device. No-op for unknown vendors.
+// Each probe is a pure classifier today — it writes `family` into
+// the GpuInfo and emits a `[gpu-probe]` log line with the family
+// tag. A future vendor-driver slice replaces the body of each
+// probe with real engine init.
+void RunVendorProbe(GpuInfo& g)
+{
+    const char* family = nullptr;
+    switch (g.vendor_id)
+    {
+    case kVendorIntel:
+        family = IntelGenTag(g.device_id);
+        break;
+    case kVendorAmd:
+        family = AmdGenTag(g.device_id);
+        break;
+    case kVendorNvidia:
+        family = NvidiaGenTag(g.device_id);
+        break;
+    case kVendorQemuBochs:
+        family = "qemu-bochs-vga";
+        break;
+    case kVendorRedHatVirt:
+        family = "virtio-gpu";
+        break;
+    case kVendorVmware:
+        family = "vmware-svga-ii";
+        break;
+    default:
+        return; // no probe for unknown vendors
+    }
+    g.family = family;
+    arch::SerialWrite("[gpu-probe] vid=");
+    arch::SerialWriteHex(g.vendor_id);
+    arch::SerialWrite(" did=");
+    arch::SerialWriteHex(g.device_id);
+    arch::SerialWrite(" family=");
+    arch::SerialWrite(family);
+    arch::SerialWrite("  (stub OK — no engine init yet)\n");
+}
+
 // Pretty subclass name. Purely for logs.
 const char* SubclassName(u8 subclass)
 {
@@ -152,6 +193,7 @@ void GpuInit()
             g.mmio_virt = mm::MapMmio(bar0.address, map_bytes);
         }
 
+        RunVendorProbe(g);
         g_gpus[g_gpu_count++] = g;
     }
 
@@ -176,6 +218,74 @@ const GpuInfo& Gpu(u64 index)
 {
     KASSERT_WITH_VALUE(index < g_gpu_count, "drivers/gpu", "Gpu index out of range", index);
     return g_gpus[index];
+}
+
+// -------------------------------------------------------------------
+// Vendor device-id classifiers. Each walks a compact table and
+// returns a family tag. Tables are intentionally coarse — they
+// identify the GPU generation + codename, not the exact SKU.
+// A full driver slice would refine this via revision / subsystem
+// IDs and per-SKU feature bits.
+//
+// Ranges rather than explicit IDs because modern GPU families
+// ship with dozens of device IDs (retail, mobile, workstation,
+// server). The ranges come from the vendor Linux kernel drivers
+// (i915, amdgpu, nouveau/nvidia-open) as of 2025.
+// -------------------------------------------------------------------
+
+const char* IntelGenTag(u16 device_id)
+{
+    // Major Intel iGPU generations on PCI 0x8086. Integer ranges
+    // picked from i915 pci-id tables; not exhaustive — unknown IDs
+    // land on "intel-unknown".
+    if ((device_id >= 0x1900 && device_id <= 0x193B) || // Skylake
+        (device_id >= 0x5900 && device_id <= 0x593B))   // Kaby Lake
+        return "gen9-skylake/kabylake";
+    if (device_id >= 0x3E90 && device_id <= 0x3EA7)
+        return "gen9.5-coffeelake";
+    if ((device_id >= 0x8A50 && device_id <= 0x8A7C) || // Ice Lake
+        (device_id >= 0x9A40 && device_id <= 0x9A7F))   // Tiger Lake
+        return "gen11-12-icelake/tigerlake";
+    if (device_id >= 0x4680 && device_id <= 0x46AB)
+        return "gen13-alderlake";
+    if (device_id >= 0x5690 && device_id <= 0x56C1)
+        return "gen12.7-dg2-arc";
+    return "intel-unknown";
+}
+
+const char* AmdGenTag(u16 device_id)
+{
+    // AMDGPU generations on PCI 0x1002. GFX9 = Vega, GFX10 = RDNA1/2,
+    // GFX11 = RDNA3. Pre-GFX9 (GCN 1..4) are out of scope for the
+    // tier-1 roadmap; they report as "amd-pre-gfx9".
+    if (device_id >= 0x15DD && device_id <= 0x15DE)
+        return "gfx9-raven";
+    if (device_id >= 0x6860 && device_id <= 0x687F)
+        return "gfx9-vega";
+    if (device_id >= 0x7310 && device_id <= 0x7347)
+        return "gfx10-navi1x";
+    if (device_id >= 0x73A0 && device_id <= 0x73FF)
+        return "gfx10.3-navi2x";
+    if (device_id >= 0x7440 && device_id <= 0x747F)
+        return "gfx11-navi3x";
+    return "amd-pre-gfx9-or-unknown";
+}
+
+const char* NvidiaGenTag(u16 device_id)
+{
+    // NVIDIA generations on PCI 0x10DE. Classification is
+    // necessarily coarse — NVIDIA recycles device-id ranges across
+    // product lines. The modern-open-source window we target is
+    // Turing+ (TU10x, 0x1E..0x20 range).
+    if (device_id >= 0x1E00 && device_id <= 0x1F99)
+        return "turing-rtx-2000";
+    if (device_id >= 0x2180 && device_id <= 0x22BB)
+        return "ampere-rtx-3000";
+    if (device_id >= 0x2484 && device_id <= 0x25AF)
+        return "ampere-ga10x";
+    if (device_id >= 0x2680 && device_id <= 0x28E1)
+        return "ada-rtx-4000";
+    return "nvidia-pre-turing-or-unknown";
 }
 
 } // namespace customos::drivers::gpu

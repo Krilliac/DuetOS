@@ -64,6 +64,7 @@ struct GpuInfo
     u8 subclass;        // 0x00 VGA, 0x02 3D, ...
     const char* vendor; // short string ("Intel", "AMD", "QEMU-Bochs", ...)
     const char* tier;   // "tier1", "tier3-dev", "unknown"
+    const char* family; // vendor probe result ("gen9-skylake", ...) or nullptr
     u64 mmio_phys;      // BAR 0 physical base
     u64 mmio_size;      // BAR 0 size in bytes
     void* mmio_virt;    // kernel-mapped aperture, nullptr if not mapped
@@ -79,5 +80,30 @@ u64 GpuCount();
 
 /// Accessor for a discovered GPU record. Panics if `index >= GpuCount()`.
 const GpuInfo& Gpu(u64 index);
+
+// -------------------------------------------------------------------
+// Vendor-specific probe stubs. Each `*Probe(info)` is called by
+// `GpuInit` for every discovered device whose vendor matches — the
+// stub inspects the device_id, names the GPU family, and logs
+// "probe OK" with the generation tag. No driver logic yet; a real
+// vendor driver slice will replace the probe with actual init
+// (ring setup, power management, modeset, interrupt wiring).
+//
+// Grouping by function rather than per-file keeps the v0 surface
+// minimal — one file per driver namespace lives under
+// `kernel/drivers/gpu/<vendor>/` when that vendor's driver grows
+// past a page of code.
+// -------------------------------------------------------------------
+
+/// Classify an Intel iGPU by device_id. Returns the family tag
+/// ("gen9-skylake", "gen11-icelake", ...) or "unknown-intel-gpu".
+/// Pure string lookup; no register pokes.
+const char* IntelGenTag(u16 device_id);
+
+/// Classify an AMD Radeon by device_id. GFX9 / GFX10 / GFX11 tags.
+const char* AmdGenTag(u16 device_id);
+
+/// Classify an NVIDIA GPU by device_id. Turing / Ampere / Ada tags.
+const char* NvidiaGenTag(u16 device_id);
 
 } // namespace customos::drivers::gpu
