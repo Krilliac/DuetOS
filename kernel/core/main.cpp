@@ -53,8 +53,8 @@
 #include "klog.h"
 #include "panic.h"
 #include "process.h"
+#include "random.h"
 #include "ring3_smoke.h"
-#include "../fs/fat32.h"
 #include "../subsystems/linux/ring3_smoke.h"
 #include "../subsystems/linux/syscall.h"
 #include "shell.h"
@@ -224,6 +224,10 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
 
     SerialWrite("[boot] Reading MSR thermals.\n");
     customos::arch::ThermalProbe();
+
+    SerialWrite("[boot] Seeding kernel entropy pool.\n");
+    customos::core::RandomInit();
+    customos::core::RandomSelfTest();
 
     SerialWrite("[boot] Installing kernel GDT.\n");
     GdtInit();

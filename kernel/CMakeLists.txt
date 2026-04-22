@@ -30,6 +30,7 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     core/recovery.cpp
     core/elf_loader.cpp
     core/pe_loader.cpp
+    core/random.cpp
     core/ring3_smoke.cpp
     subsystems/graphics/graphics.cpp
     subsystems/linux/ring3_smoke.cpp
