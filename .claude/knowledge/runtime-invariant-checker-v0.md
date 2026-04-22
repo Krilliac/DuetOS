@@ -48,6 +48,9 @@ panic.
 | `IrqNestingExcessive`         | (stubbed 0 until per-task IRQ accounting lands)    |
 | `CounterWentBackwards`        | monotonic u64 counter (heap/sched) regressed      |
 | `ClockStalled`                | HPET or LAPIC tick didn't advance between scans    |
+| `SyscallMsrHijacked`          | LSTAR/STAR/CSTAR/SYSENTER drifted (rootkit hook)   |
+| `FeatureControlUnlocked`      | IA32_FEATURE_CONTROL lock bit cleared              |
+| `BootSectorModified`          | MBR/GPT hash changed (disk-persistence malware)    |
 
 ## Kernel-stack overflow detection
 
@@ -137,6 +140,45 @@ const HealthReport& RuntimeCheckerStatusRead();  // by reference (no memcpy)
 - Reports LOG at Warn level but do NOT panic. A follow-on slice
   can add escalation (e.g. panic on 2nd consecutive CR-drift
   since those are catastrophic).
+
+## Rootkit / bootkit-specific defenses
+
+The base invariant checker (heap / sched / control regs / IDT /
+GDT / .text / stacks / monotonic counters) plus these extensions
+give us a layered posture against real-world persistent malware:
+
+### Syscall-hook detection (MSR baseline)
+
+`IA32_LSTAR` / `STAR` / `CSTAR` / `SYSENTER_{CS,EIP}` captured
+at boot; any drift = confirmed syscall-table hijack (the
+dominant rootkit technique). `IA32_FEATURE_CONTROL` lock bit
+gated on CPUID.1.ECX[5] so it doesn't #GP on non-VMX boxes.
+
+### Bootkit / disk-persistence detection
+
+Per-device FNV-1a hash of LBA 0 (MBR / protective MBR) + LBA 1
+(GPT primary header) captured at RuntimeCheckerInit. Scan
+re-reads + compares; per-finding log line names the offending
+device + LBA. 16-device × 2-LBA cap = 32 u64 baselines.
+
+### Write-guard (defense in depth)
+
+`drivers::storage::BlockWriteGuardMode` — `Off / Advisory / Deny`.
+Boot arms rules for LBA 0 + LBA 1 per device + flips mode to
+Advisory. On any bootkit-indicator finding (`BootSectorModified`
+or `SyscallMsrHijacked`), the mode escalates to Deny: subsequent
+writes to guarded LBAs return -1 from `BlockDeviceWrite` without
+reaching the backend. Every backend (AHCI / NVMe / RAM) is
+covered because the gate is at the block-layer boundary.
+
+### Guard subsystem escalation
+
+The existing `security::SetGuardMode(Enforce)` escalation (added
+earlier) fires on every security-critical HealthIssue, tightening
+future image-load policy. The three new bootkit-specific codes
+(`SyscallMsrHijacked` / `FeatureControlUnlocked` /
+`BootSectorModified`) all inherit this path + additionally
+trigger the block write-guard escalation.
 
 ## Follow-ups
 
