@@ -115,6 +115,16 @@ struct Task
     // how SchedIdleTicks() can report system-wide idle fraction.
     u64 ticks_run;
     u64 schedin_tick;
+
+    // Linux-ABI FS.base (MSR_FS_BASE). Meaningful only for tasks
+    // whose process has abi_flavor == kAbiLinux — that's where
+    // musl plants its TLS anchor via arch_prctl(ARCH_SET_FS).
+    // Saved by the scheduler just before ContextSwitch and
+    // restored immediately after, so each Linux task sees its own
+    // TLS regardless of what other tasks ran in between. Kernel-
+    // only and native tasks leave this at 0 and never touch
+    // MSR_FS_BASE; the save/restore is a no-op for them.
+    u64 fs_base;
 };
 
 namespace
@@ -439,6 +449,7 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
     t->kill_reason = KillReason::TickBudget;
     t->ticks_run = 0;
     t->schedin_tick = 0;
+    t->fs_base = 0;
 
     // Build the initial stack. ContextSwitch pops r15, r14, r13, r12,
     // rbp, rbx and then rets. So from bottom to top of the pre-planted
@@ -685,9 +696,32 @@ void Schedule()
     // read stale TLB entries from prev's AS without the flip).
     mm::AddressSpaceActivate(next->as);
 
+    // FS_BASE snapshot. Linux tasks own MSR_FS_BASE (musl's TLS
+    // anchor); every context switch needs to stash the outgoing
+    // task's value and restore the incoming task's. No-op for
+    // kernel threads and native user tasks — they leave fs_base
+    // at 0 and don't touch the MSR.
+    constexpr u32 kMsrFsBase = 0xC0000100;
+    {
+        u32 lo, hi;
+        asm volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(kMsrFsBase));
+        prev->fs_base = (static_cast<u64>(hi) << 32) | lo;
+    }
+
     ContextSwitch(&prev->rsp, next->rsp);
-    // When we return here, `prev` is running again (it may have been
-    // scheduled out and back in an arbitrary number of times).
+    // When we return here, we're executing on a DIFFERENT task's
+    // stack — whichever task got switched in to run us. The local
+    // `prev` on our new stack was bound at THAT task's last
+    // Schedule() call and does NOT refer to "the task that just
+    // swapped to us." Use Current() instead — the scheduler wrote
+    // it to the incoming task BEFORE the stack flip, so Current()
+    // here is the task that just resumed.
+    {
+        const u64 v = Current()->fs_base;
+        const u32 lo = static_cast<u32>(v);
+        const u32 hi = static_cast<u32>(v >> 32);
+        asm volatile("wrmsr" : : "c"(kMsrFsBase), "a"(lo), "d"(hi));
+    }
 }
 
 void SchedYield()
