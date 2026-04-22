@@ -91,6 +91,11 @@ enum : u64
     kSysArchPrctl = 158,
     kSysExitGroup = 231,
     kSysSetTidAddress = 218,
+    kSysAccess = 21,
+    kSysGetcwd = 79,
+    kSysReadlink = 89,
+    kSysFutex = 202,
+    kSysGetRandom = 318,
 };
 
 constexpr i64 kESPIPE = -29;
@@ -579,6 +584,108 @@ i64 DoSetTidAddress(u64 user_tid_ptr)
     return static_cast<i64>(sched::CurrentTaskId());
 }
 
+// Linux: access(path, mode). v0 implements as a presence probe —
+// if FAT32LookupPath finds the entry, return 0 (success); else
+// -ENOENT. The `mode` bits (R_OK, W_OK, X_OK, F_OK) are ignored:
+// everything in FAT32 is effectively rwx from the Linux task's
+// perspective.
+i64 DoAccess(u64 user_path, u64 mode)
+{
+    (void)mode;
+    char path[64];
+    for (u32 i = 0; i < sizeof(path); ++i)
+        path[i] = 0;
+    if (!mm::CopyFromUser(path, reinterpret_cast<const void*>(user_path), sizeof(path) - 1))
+        return kEFAULT;
+    path[sizeof(path) - 1] = 0;
+    const auto* v = fs::fat32::Fat32Volume(0);
+    if (v == nullptr)
+        return kENOENT;
+    fs::fat32::DirEntry entry;
+    return fs::fat32::Fat32LookupPath(v, StripFatPrefix(path), &entry) ? 0 : kENOENT;
+}
+
+// Linux: readlink(path, buf, bufsiz). We don't have symlinks;
+// every path is a plain file or directory. Return -EINVAL per
+// POSIX's "path is not a symlink" semantics — musl's
+// realpath() fallback kicks in and uses the path as-is.
+i64 DoReadlink(u64 user_path, u64 user_buf, u64 bufsiz)
+{
+    (void)user_path;
+    (void)user_buf;
+    (void)bufsiz;
+    return kEINVAL;
+}
+
+// Linux: getcwd(buf, size). We don't have per-process cwd; the
+// closest equivalent is the process's ramfs root. Return "/"
+// for simplicity — matches what a chroot-like setup would
+// report. musl uses getcwd only for realpath resolution in
+// practice; a static "/" is enough for non-pathological programs.
+i64 DoGetcwd(u64 user_buf, u64 size)
+{
+    const char* cwd = "/";
+    const u64 len = 2; // "/" + NUL
+    if (size < len)
+        return kEINVAL;
+    if (!mm::CopyToUser(reinterpret_cast<void*>(user_buf), cwd, len))
+        return kEFAULT;
+    return static_cast<i64>(len);
+}
+
+// Linux: futex(uaddr, op, val, ...). v0 stub — single-threaded
+// processes don't contend, so the futex is always uncontended
+// when musl falls through to syscall. Returning 0 for FUTEX_WAIT
+// says "woke up spuriously" (caller re-checks + retries).
+// Returning 0 for FUTEX_WAKE says "woke zero waiters" (there are
+// none). Safe no-op for a single-thread world.
+i64 DoFutex(u64 uaddr, u64 op, u64 val, u64 timeout, u64 uaddr2, u64 val3)
+{
+    (void)uaddr;
+    (void)op;
+    (void)val;
+    (void)timeout;
+    (void)uaddr2;
+    (void)val3;
+    return 0;
+}
+
+// Read the CPU timestamp counter. Used as a seed for the tiny
+// PRNG below — not intended as a clock.
+u64 ReadTsc()
+{
+    u32 lo, hi;
+    asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    return (static_cast<u64>(hi) << 32) | lo;
+}
+
+// Linux: getrandom(buf, count, flags). Fills `count` bytes with
+// a non-cryptographic PRNG stream seeded from rdtsc on each
+// call. Good enough for musl's stack-cookie / pointer-mangling
+// init. Real crypto-quality entropy needs a proper RNG driver —
+// separate slice.
+i64 DoGetRandom(u64 user_buf, u64 count, u64 flags)
+{
+    (void)flags;
+    if (count == 0)
+        return 0;
+    if (count > 4096)
+        count = 4096; // cap per call, same as Linux default for unseeded
+    static u8 tmp[4096];
+    u64 state = ReadTsc() ^ 0xDEADBEEFCAFEBABEull;
+    for (u64 i = 0; i < count; ++i)
+    {
+        // xorshift64 — decent statistical mixing, not cryptographic.
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        tmp[i] = static_cast<u8>(state >> 24);
+    }
+    if (!mm::CopyToUser(reinterpret_cast<void*>(user_buf), tmp, count))
+        return kEFAULT;
+    return static_cast<i64>(count);
+}
+
 // Identity stubs. v0 presents every process as uid=0/gid=0 —
 // CustomOS doesn't have a user-account model yet. Returning 0
 // satisfies musl's libc.a startup without misleading it: programs
@@ -861,6 +968,21 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
         break;
     case kSysSetTidAddress:
         rv = DoSetTidAddress(frame->rdi);
+        break;
+    case kSysAccess:
+        rv = DoAccess(frame->rdi, frame->rsi);
+        break;
+    case kSysReadlink:
+        rv = DoReadlink(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysGetcwd:
+        rv = DoGetcwd(frame->rdi, frame->rsi);
+        break;
+    case kSysFutex:
+        rv = DoFutex(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8, frame->r9);
+        break;
+    case kSysGetRandom:
+        rv = DoGetRandom(frame->rdi, frame->rsi, frame->rdx);
         break;
     case kSysBrk:
         rv = DoBrk(frame->rdi);
