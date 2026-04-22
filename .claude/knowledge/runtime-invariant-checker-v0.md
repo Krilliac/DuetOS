@@ -180,6 +180,79 @@ future image-load policy. The three new bootkit-specific codes
 `BootSectorModified`) all inherit this path + additionally
 trigger the block write-guard escalation.
 
+## Tiered response system (slice 77)
+
+A detector firing used to always panic the kernel — which
+meant every detector was also a potential DoS primitive if an
+attacker could trip it. The response system addresses this by
+layering the reaction:
+
+```
+enum class HealthResponse { Heal, Isolate, LogOnly, Panic };
+HealthResponse ResponseFor(HealthIssue);
+```
+
+| Response  | When applied | Mechanism |
+| --------- | ------------ | --------- |
+| `Heal`    | Bytes whose correct value is known + immutable | Restore from golden baseline captured at init (`g_golden_idt[4096]`, `g_golden_gdt[7]`, baseline u64s for syscall MSRs + CR/EFER bits). Wrmsr-back or byte-copy. Log the finding + the heal outcome. |
+| `Isolate` | Corruption scoped to one task | Task walker kills the offending task; kernel continues. |
+| `LogOnly` | Not recoverable but not catastrophic | Just the Warn log line + counter bump. |
+| `Panic`   | Continued execution accumulates damage OR can't be trusted | Last resort. StackCanaryZero (we got lucky reaching Report), KernelTextModified (executing corrupt code), heap / frame bookkeeping drift. |
+
+The current mapping (see `ResponseFor` in runtime_checker.cpp):
+
+- **Heal**: IDT / GDT / LSTAR / STAR / CSTAR / SYSENTER / CR0.WP / CR4.SMEP / CR4.SMAP / EFER.NXE
+- **Isolate**: TaskStackOverflow / TaskRspOutOfRange
+- **LogOnly**: ClockStalled / CounterWentBackwards / FramesAllAllocated / HeapFragmentationHigh / BootSectorModified
+- **Panic**: StackCanaryZero / KernelTextModified / FeatureControlUnlocked / HeapPoolMismatch / HeapUnderflow / FramesOverflow
+
+### Important security properties preserved
+
+Even on successful heal:
+
+1. **Finding is always logged.** Audit trail intact.
+2. **Counter bumps.** The `health` shell command shows per-issue tallies — an attacker flooding with corruption attempts is visible.
+3. **Guard escalation still fires.** Security-critical findings still flip `security::SetGuardMode(Enforce)` so subsequent image loads hit the stricter policy.
+4. **Block write-guard still escalates.** Bootkit + syscall-MSR findings still flip blockguard to Deny.
+5. **Heal failure counter.** Split from success counter — rising `g_heal_failure_count` means an attacker is hammering a detector the kernel can't recover from.
+
+### Diff dumps (slice 78)
+
+When a detector fires, a `[health-diff]` line lists up to 8
+mismatching byte positions:
+
+```
+[health-diff] IDT byte[0x0] expected=0x70 got=0x8F
+[health-diff] GDT byte[0x35] expected=0xF2 got=0xF3
+```
+
+The operator sees which vector / descriptor the attacker
+targeted + the attacker's written value (which often identifies
+the attack tool — real rootkits write known magic). No
+post-mortem memory inspection needed.
+
+### Live red-team result with all three layers (detect / diff / heal)
+
+```
+[attacksim] --- IDT hijack ---
+[health-diff] IDT byte[0x0] expected=0x70 got=0x8F
+[health] IDT hash changed since baseline (handler swap or stray write)
+[health] ESCALATE: guard -> Enforce
+[health] HEAL: restored IDT ... from golden baseline
+[attacksim]   PASS
+
+[attacksim] Summary:
+  PASS  Bootkit LBA 0 write
+  PASS  IDT hijack
+  PASS  GDT descriptor swap
+  PASS  LSTAR syscall hook
+  passed=4 failed=0 skipped=0
+```
+
+Kernel stayed alive, heartbeat kept ticking through and past
+the attack suite, scans returned clean after each heal. No
+panic, no DoS, every attack observable in the log.
+
 ## Follow-ups
 
 1. **Guard subsystem escalation** — the security guard currently
