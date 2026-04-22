@@ -514,6 +514,11 @@ Task* SchedCreateUser(TaskEntry entry, void* arg, const char* name, core::Proces
 
     if (!customos::security::GateThread(customos::security::ImageKind::UserThread, name))
     {
+        // The caller handed us its Process reference expecting
+        // the Task to absorb it. No Task was created — the ref
+        // would leak (AS + Process struct + PID slot held forever)
+        // unless we release it here on the gate-denial exit path.
+        core::ProcessRelease(process);
         return nullptr;
     }
 

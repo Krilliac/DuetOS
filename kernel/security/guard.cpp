@@ -763,9 +763,22 @@ bool Gate(const ImageDescriptor& desc)
 
 bool GateThread(ImageKind kind, const char* name)
 {
-    // Threads have no image bytes — only name-based checks apply.
-    // Cheap: Inspect will run CheckNameDeny and short-circuit on
-    // the other heuristics (all guarded by `bytes != nullptr`).
+    // Kernel-internal threads (idle-bsp, reaper, smp-apN, future
+    // kworkers) are spawned by code we trust as axiomatically as
+    // the rest of the kernel. They have no image bytes to inspect
+    // and no attacker-controlled provenance — gating them serves
+    // no defensive purpose but CAN brick the boot if an operator
+    // misconfigures NAME_DENY (e.g. adds "reaper" by mistake,
+    // kernel then refuses to spawn its own reaper thread).
+    //
+    // Give kernel threads an unconditional pass. User threads
+    // (spawned by PE/ELF loaders for ring-3 tasks) still run
+    // through Inspect's name-deny path — that's the only thread
+    // class with attacker-controlled name input.
+    if (kind == ImageKind::KernelThread)
+    {
+        return true;
+    }
     ImageDescriptor d{kind, name != nullptr ? name : "(thread)", nullptr, 0};
     return Gate(d);
 }

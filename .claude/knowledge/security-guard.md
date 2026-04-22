@@ -87,18 +87,32 @@ class of finding we want to see before flipping Enforce.
 
 ## Known rough edges
 
-- **SHA-256 not implemented.** The hash denylist + allowlist use
-  FNV-1a as a placeholder. Real signatures need a crypto module.
-- **Idle-bsp + reaper gate BEFORE GuardInit runs** (scheduler
-  bootstrap precedes the security subsystem). Today they carry
-  Advisory defaults via `constinit Mode g_mode = Mode::Advisory`,
-  which always allows. If Enforce mode ever needs to be the
-  DEFAULT, those two need an explicit boot-allowlist entry.
-- **Enforce-mode thread deny leaks Process refs.** If `SchedCreateUser`
-  returns null, the caller's Process retain is orphaned. Advisory
-  sidesteps; fix before flipping Enforce.
+- **SHA-256 intentionally deferred.** The allowlist / denylist
+  use FNV-1a, which is fit-for-purpose: the allowlist is a content
+  fingerprint that an attacker who can swap the image bytes can
+  trivially also swap the tmpfs entry for, so cryptographic
+  collision resistance buys nothing in the current threat model.
+  Upgrade to SHA-256 when (a) a signed-image/secure-boot path
+  exists that makes the hash meaningful, and (b) a real crypto
+  module is wired in — writing SHA-256 longhand in freestanding
+  kernel C++ with no libc is ~150 lines of wheel-reinvention that
+  costs more than it buys today.
 - **Static denylists.** Hot-reload from a tmpfs policy file is a
   follow-up slice.
+
+### Fixed 2026-04-22
+
+- **Kernel threads are no longer gated.** `GateThread` short-
+  circuits with Allow when `kind == ImageKind::KernelThread` —
+  they're kernel control flow with no attacker-controlled input,
+  and passing them through Inspect risked an operator bricking the
+  boot by accidentally name-denying "reaper". User threads still
+  go through the full pipeline.
+- **Enforce-mode thread-deny process leak.** `SchedCreateUser`
+  now calls `core::ProcessRelease(process)` on the gate-denial
+  exit path, honouring the refcount contract the caller expects
+  (handed off ownership → absorbed-by-task on success → released
+  on failure).
 
 ## Anti-bloat footnote
 
