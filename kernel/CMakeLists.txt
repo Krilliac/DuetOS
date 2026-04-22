@@ -80,8 +80,11 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     drivers/video/menu.cpp
     drivers/video/taskbar.cpp
     drivers/video/widget.cpp
+    fs/exfat.cpp
+    fs/ext4.cpp
     fs/fat32.cpp
     fs/gpt.cpp
+    fs/ntfs.cpp
     fs/ramfs.cpp
     fs/tmpfs.cpp
     fs/vfs.cpp

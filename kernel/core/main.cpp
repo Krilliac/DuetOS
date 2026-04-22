@@ -22,8 +22,11 @@
 #include "../drivers/storage/ahci.h"
 #include "../drivers/storage/block.h"
 #include "../drivers/storage/nvme.h"
+#include "../fs/exfat.h"
+#include "../fs/ext4.h"
 #include "../fs/fat32.h"
 #include "../fs/gpt.h"
+#include "../fs/ntfs.h"
 #include "../apps/calculator.h"
 #include "../apps/clock.h"
 #include "../apps/files.h"
@@ -803,6 +806,11 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
 
     SerialWrite("[boot] Probing FAT32 on block devices.\n");
     customos::fs::fat32::Fat32SelfTest();
+
+    SerialWrite("[boot] Probing read-only FS shells (ext4 / NTFS / exFAT).\n");
+    customos::fs::ext4::Ext4ScanAll();
+    customos::fs::ntfs::NtfsScanAll();
+    customos::fs::exfat::ExfatScanAll();
 
     // Metrics checkpoint: everything above is bringup overhead; what
     // the system consumes from here on is steady-state.
