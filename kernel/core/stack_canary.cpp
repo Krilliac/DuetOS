@@ -1,5 +1,4 @@
 #include "panic.h"
-#include "random.h"
 #include "stack_canary.h"
 #include "types.h"
 
@@ -77,20 +76,58 @@ namespace customos::core
 {
 
 // Replace the boot-constant canary with a real entropy value.
-// MUST be called from a function-chain that won't unwind — every
-// function currently on the stack stashed the OLD cookie at its
-// prologue and would fail the epilogue check if we replace the
-// guard and they subsequently return. `kernel_main` never returns
-// (enters the scheduler), so it's a safe caller.
+// MUST be called from a function-chain that won't unwind —
+// every function currently on the stack stashed the OLD cookie
+// at its prologue and would fail the epilogue check if we
+// replace the guard and they subsequently return. `kernel_main`
+// never returns (enters the scheduler), so it's a safe caller.
 //
-// The function itself is `no_stack_protector` so that its own
-// prologue/epilogue doesn't trip on the update.
+// The function itself is `no_stack_protector`. We also avoid
+// any callee that might be protected: rather than calling
+// `RandomU64`, we inline RDSEED / RDRAND / RDTSC. That keeps
+// RandomizeStackCanary self-contained — no intermediate
+// stack frame can stash the old cookie and later check against
+// the new one.
+//
+// Interrupt-safety: callers invoke this BEFORE any IDT is
+// installed and BEFORE `sti` runs, so there's no possibility
+// of an IRQ handler being mid-flight with an OLD-cookie
+// stash pending verification.
 __attribute__((no_stack_protector)) void RandomizeStackCanary()
 {
-    const customos::u64 fresh = RandomU64();
+    customos::u64 fresh = 0;
+    unsigned char cf = 0;
+
+    // Try RDSEED up to 32 times. Falls through to RDRAND if the
+    // hardware doesn't have RDSEED or retries are exhausted.
+    for (int i = 0; i < 32; ++i)
+    {
+        asm volatile("rdseed %0; setc %1" : "=r"(fresh), "=r"(cf));
+        if (cf)
+            break;
+    }
+    if (!cf)
+    {
+        for (int i = 0; i < 10; ++i)
+        {
+            asm volatile("rdrand %0; setc %1" : "=r"(fresh), "=r"(cf));
+            if (cf)
+                break;
+        }
+    }
+    if (!cf)
+    {
+        // Last resort: TSC. Not cryptographic but still per-boot
+        // unique — an attacker who reads the disk image can't
+        // predict when we booted.
+        customos::u32 lo = 0;
+        customos::u32 hi = 0;
+        asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
+        fresh = (customos::u64(hi) << 32) | lo;
+    }
     // Keep at least one non-NUL byte — a canary of all zeros
-    // would still panic on corruption but looks suspicious in a
-    // dump. Mask in a guaranteed-set low byte.
+    // would still panic on corruption but looks suspicious in
+    // a dump.
     __stack_chk_guard = fresh | 1ULL;
 }
 

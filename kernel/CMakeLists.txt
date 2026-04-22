@@ -107,6 +107,18 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     sync/spinlock.cpp
 )
 
+# core/stack_canary.cpp provides __stack_chk_fail and the
+# RandomizeStackCanary helper. The latter updates the cookie at
+# runtime; if ANY function in this file gets compiled with stack
+# protection, the prologue/epilogue would sample __stack_chk_guard
+# before/after the update and mismatch. The source uses
+# __attribute__((no_stack_protector)) on the two functions that
+# care; -fno-stack-protector on the whole TU is belt + braces.
+set_source_files_properties(
+    core/stack_canary.cpp
+    PROPERTIES COMPILE_OPTIONS "-fno-stack-protector"
+)
+
 # ----------------------------------------------------------------------------
 # Host-side userland build: userland/apps/hello_pe/hello.c is compiled
 # with clang targeting x86_64-pc-windows-msvc and linked by lld-link
