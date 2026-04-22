@@ -73,6 +73,51 @@ FAT_INNER_CLUSTER = 5
 FAT_INNER_NAME = b"INNER   TXT"
 FAT_INNER_BODY = b"inner file\n"
 
+# Long-name seed so the kernel's LFN accumulator has a real entry
+# to decode. SFN fallback is LONGFI~1.TXT; long name is
+# LongFile.txt (12 chars, one LFN fragment).
+FAT_LONG_CLUSTER = 6
+FAT_LONG_SFN = b"LONGFI~1TXT"
+FAT_LONG_LONGNAME = "LongFile.txt"
+FAT_LONG_BODY = b"long filename file\n"
+
+
+def sfn_checksum(sfn11: bytes) -> int:
+    """FAT LFN 11-byte-SFN checksum (spec 7.2, Appendix A)."""
+    chk = 0
+    for b in sfn11:
+        chk = ((chk & 1) << 7) | (chk >> 1)
+        chk = (chk + b) & 0xFF
+    return chk
+
+
+def lfn_entry(ordinal: int, name_chunk: str, is_last: bool, chksum: int) -> bytes:
+    """One 32-byte LFN entry. name_chunk is up to 13 chars; shorter
+    chunks get a 0x0000 terminator + 0xFFFF padding per spec."""
+    e = bytearray(32)
+    e[0] = (ordinal | 0x40) if is_last else ordinal
+    e[11] = 0x0F                        # LFN attr
+    e[12] = 0                           # type
+    e[13] = chksum
+    e[26] = 0                           # cluster must be 0 in LFN
+    e[27] = 0
+    # Fill 13 UTF-16 code units at offsets (1..10), (14..25), (28..31).
+    offsets = [1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30]
+    padded = False
+    for i, off in enumerate(offsets):
+        if i < len(name_chunk):
+            wc = ord(name_chunk[i])
+            e[off] = wc & 0xFF
+            e[off + 1] = (wc >> 8) & 0xFF
+        elif not padded and i == len(name_chunk):
+            e[off] = 0x00
+            e[off + 1] = 0x00
+            padded = True
+        else:
+            e[off] = 0xFF
+            e[off + 1] = 0xFF
+    return bytes(e)
+
 
 def build_pmbr() -> bytearray:
     sec = bytearray(SECTOR)
@@ -192,6 +237,7 @@ def build_fat32(part_sector_count: int) -> bytearray:
     struct.pack_into("<I", fat, 3 * 4, 0x0FFFFFFF)  # HELLO.TXT EOC
     struct.pack_into("<I", fat, 4 * 4, 0x0FFFFFFF)  # /SUB directory EOC
     struct.pack_into("<I", fat, 5 * 4, 0x0FFFFFFF)  # /SUB/INNER.TXT EOC
+    struct.pack_into("<I", fat, 6 * 4, 0x0FFFFFFF)  # /LongFile.txt EOC
     fat1_off = FAT_RESERVED * SECTOR
     fat2_off = fat1_off + FAT_FATSZ * SECTOR
     buf[fat1_off:fat1_off + len(fat)] = fat
@@ -261,6 +307,26 @@ def build_fat32(part_sector_count: int) -> bytearray:
     inner_cluster_sector = data_start_sector + (FAT_INNER_CLUSTER - 2) * FAT_SPC
     inner_off = inner_cluster_sector * SECTOR
     buf[inner_off:inner_off + len(FAT_INNER_BODY)] = FAT_INNER_BODY
+
+    # LFN + SFN pair for LongFile.txt. LFN fragment comes FIRST in
+    # physical order (highest ordinal), then the SFN. Name is 12
+    # chars, fits in a single LFN entry at ordinal 1 | 0x40.
+    chk = sfn_checksum(FAT_LONG_SFN)
+    lfn = lfn_entry(1, FAT_LONG_LONGNAME, True, chk)
+    buf[root_off + 64:root_off + 96] = lfn
+
+    sfn = bytearray(32)
+    sfn[0:11] = FAT_LONG_SFN
+    sfn[11] = 0x20
+    struct.pack_into("<H", sfn, 20, 0)
+    struct.pack_into("<H", sfn, 26, FAT_LONG_CLUSTER)
+    struct.pack_into("<I", sfn, 28, len(FAT_LONG_BODY))
+    buf[root_off + 96:root_off + 128] = sfn
+
+    # /LongFile.txt data at cluster 6.
+    long_cluster_sector = data_start_sector + (FAT_LONG_CLUSTER - 2) * FAT_SPC
+    long_off = long_cluster_sector * SECTOR
+    buf[long_off:long_off + len(FAT_LONG_BODY)] = FAT_LONG_BODY
 
     return buf
 

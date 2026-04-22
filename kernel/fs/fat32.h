@@ -40,11 +40,13 @@ inline constexpr u32 kMaxVolumes = 16;
 /// on demand (follow-up slice).
 inline constexpr u32 kMaxDirEntries = 32;
 
-/// A single parsed directory entry. Short 8.3 name only in v0 —
-/// LFN fragments are skipped during the walk.
+/// A single parsed directory entry. `name` carries either the
+/// LFN-decoded long name (when a valid LFN sequence preceded the
+/// SFN in the directory) or the 8.3 short name. UTF-16 codepoints
+/// outside ASCII are replaced with '?' in v0 — no UTF-8 yet.
 struct DirEntry
 {
-    char name[12];     // 8.3 format with one '.' + NUL, e.g. "HELLO.TXT\0"
+    char name[128];    // either long name or 8.3, NUL-terminated
     u8 attributes;     // FAT attribute byte (0x20 = ARCHIVE, 0x10 = DIR, etc.)
     u32 first_cluster; // 0 for entries with no cluster (zero-length file)
     u32 size_bytes;    // size field; 0 for directories

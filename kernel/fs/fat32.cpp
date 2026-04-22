@@ -39,6 +39,18 @@ void VZero(void* p, u64 n)
         b[i] = 0;
 }
 
+// sizeof(DirEntry) is 144 bytes today; the compiler will lower a
+// plain struct-assignment at this size to a memcpy call against a
+// freestanding kernel with no libc. Route every DirEntry copy
+// through this volatile helper to keep link-time honest.
+void CopyEntry(DirEntry& dst, const DirEntry& src)
+{
+    auto* d = reinterpret_cast<volatile u8*>(&dst);
+    auto* s = reinterpret_cast<const volatile u8*>(&src);
+    for (u64 i = 0; i < sizeof(DirEntry); ++i)
+        d[i] = s[i];
+}
+
 // Little-endian readers straight off a byte buffer.
 u16 LeU16(const u8* p)
 {
@@ -169,17 +181,56 @@ void DecodeEntry(const u8* e, DirEntry& out)
 // keep walking, false to short-circuit. `ctx` is caller-opaque.
 using DirVisitor = bool (*)(const DirEntry& e, void* ctx);
 
+// Extract the 13 UTF-16 code units from a single LFN entry into
+// `out_chars` at offsets [0..12]. Stops writing on the first
+// 0x0000 terminator; `*did_terminate` reports whether the NUL was
+// hit inside this fragment. Non-ASCII codepoints collapse to '?'
+// — v0 is ASCII-friendly only.
+void DecodeLfnChars(const u8* e, char* out_chars, bool* did_terminate)
+{
+    *did_terminate = false;
+    // 13 positions: entry bytes (1..10) = 5 chars, (14..25) = 6 chars,
+    // (28..31) = 2 chars. Each char is a little-endian u16.
+    static constexpr u32 kLfnOffsets[13] = {1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30};
+    for (u32 i = 0; i < 13; ++i)
+    {
+        const u32 o = kLfnOffsets[i];
+        const u16 wc = static_cast<u16>(e[o] | (u16(e[o + 1]) << 8));
+        if (wc == 0x0000)
+        {
+            out_chars[i] = 0;
+            *did_terminate = true;
+            // Don't break — zero out remaining positions explicitly
+            // so the caller's concatenator sees a clean tail.
+            for (u32 j = i + 1; j < 13; ++j)
+                out_chars[j] = 0;
+            return;
+        }
+        if (wc > 0x7F)
+            out_chars[i] = '?';
+        else
+            out_chars[i] = static_cast<char>(wc);
+    }
+}
+
 // Walk a directory's cluster chain, decode each in-use entry, and
-// feed it to `visit`. LFN / deleted / volume-label / dot entries
-// are filtered. Returns true on clean completion (end-of-dir or
-// EOC), false on I/O error. A visitor that returns `false` also
-// ends the walk — the overall return is still true (not an error).
+// feed it to `visit`. LFN sequences are assembled into the DirEntry's
+// `name` field before the visitor is called on the SFN. Deleted /
+// volume-label / dot entries are filtered. Returns true on clean
+// completion (end-of-dir or EOC), false on I/O error. A visitor
+// returning false also ends the walk (still not an error).
 //
 // Reuses g_scratch for cluster data; the visitor MUST copy any
-// DirEntry fields it wants to keep before returning — the next
-// cluster read overwrites scratch.
+// DirEntry fields it wants to keep before returning.
 bool WalkDirChain(const Volume& v, u32 first_cluster, DirVisitor visit, void* ctx)
 {
+    // LFN accumulator. FAT32 spec allows up to 20 LFN fragments ×
+    // 13 UTF-16 chars = 260 chars; we truncate to DirEntry::name's
+    // 128-byte budget at copy-out time.
+    char pending_long[260];
+    bool pending_any = false;
+    VZero(pending_long, sizeof(pending_long));
+
     u32 cluster = first_cluster;
     for (u32 step = 0; step < 64; ++step)
     {
@@ -195,17 +246,61 @@ bool WalkDirChain(const Volume& v, u32 first_cluster, DirVisitor visit, void* ct
             if (e[0] == 0x00)
                 return true; // end of dir
             if (e[0] == 0xE5)
+            {
+                pending_any = false;
                 continue;
+            }
             const u8 attr = e[11];
             if ((attr & kAttrLongName) == kAttrLongName)
+            {
+                // LFN fragment. Ordinal low 6 bits = 1..20; bit 6
+                // set on the LAST (first-in-physical-order) entry.
+                const u8 ord = static_cast<u8>(e[0] & 0x3F);
+                if (ord == 0 || ord > 20)
+                {
+                    pending_any = false;
+                    continue;
+                }
+                char chars[13];
+                for (u32 i = 0; i < 13; ++i)
+                    chars[i] = 0;
+                bool terminated = false;
+                DecodeLfnChars(e, chars, &terminated);
+                const u32 base = u32(ord - 1) * 13;
+                for (u32 i = 0; i < 13; ++i)
+                    pending_long[base + i] = chars[i];
+                pending_any = true;
                 continue;
+            }
             if (attr & kAttrVolumeId)
+            {
+                pending_any = false;
                 continue;
+            }
 
             DirEntry decoded;
             DecodeEntry(e, decoded);
             if (IsDotEntry(decoded.name))
+            {
+                pending_any = false;
                 continue;
+            }
+            if (pending_any)
+            {
+                // Replace the 8.3 name with the assembled LFN.
+                // Trust the sequence; v0 doesn't validate the
+                // 11-byte SFN checksum at LFN byte 13.
+                u32 n = 0;
+                while (n + 1 < sizeof(decoded.name) && pending_long[n] != 0)
+                {
+                    decoded.name[n] = pending_long[n];
+                    ++n;
+                }
+                decoded.name[n] = 0;
+            }
+            pending_any = false;
+            VZero(pending_long, sizeof(pending_long));
+
             if (!visit(decoded, ctx))
                 return true;
         }
@@ -231,7 +326,7 @@ bool WalkRootIntoSnapshot(Volume& v, u32 first_cluster)
             auto* c = static_cast<Ctx*>(cx);
             if (c->v->root_entry_count >= kMaxDirEntries)
                 return false;
-            c->v->root_entries[c->v->root_entry_count++] = e;
+            CopyEntry(c->v->root_entries[c->v->root_entry_count++], e);
             return true;
         },
         &ctx);
@@ -368,7 +463,7 @@ u32 Fat32ListDirByCluster(const Volume* v, u32 first_cluster, DirEntry* out, u32
             auto* c = static_cast<Ctx*>(cx);
             if (c->n >= c->cap)
                 return false;
-            c->out[c->n++] = e;
+            CopyEntry(c->out[c->n++], e);
             return true;
         },
         &ctx);
@@ -391,7 +486,7 @@ bool FindVisitor(const DirEntry& e, void* cx)
     auto* c = static_cast<FindCtx*>(cx);
     if (NameIEqual(e.name, c->want))
     {
-        c->match = e;
+        CopyEntry(c->match, e);
         c->found = true;
         return false; // stop the walk
     }
@@ -418,7 +513,7 @@ bool Fat32LookupPath(const Volume* v, const char* path, DirEntry* out)
         ++path;
     if (*path == 0)
     {
-        *out = cur;
+        CopyEntry(*out, cur);
         return true;
     }
 
@@ -444,15 +539,18 @@ bool Fat32LookupPath(const Volume* v, const char* path, DirEntry* out)
         if ((cur.attributes & kAttrDirectory) == 0)
             return false; // walking INTO a regular file
 
-        FindCtx ctx{comp, {}, false};
+        FindCtx ctx;
+        ctx.want = comp;
+        ctx.found = false;
+        VZero(&ctx.match, sizeof(ctx.match));
         if (!WalkDirChain(*v, cur.first_cluster, &FindVisitor, &ctx))
             return false;
         if (!ctx.found)
             return false;
-        cur = ctx.match;
+        CopyEntry(cur, ctx.match);
     }
 
-    *out = cur;
+    CopyEntry(*out, cur);
     return true;
 }
 
@@ -660,6 +758,37 @@ void Fat32SelfTest()
         }
     }
     SerialWrite("[fs/fat32] self-test OK (/SUB/INNER.TXT path-walked + verified)\n");
+
+    // Third phase: LFN decoding. The image-builder seeds a file
+    // whose long name is "LongFile.txt" (SFN fallback LONGFI~1.TXT);
+    // the long name must survive the walker's accumulator and be
+    // lookup-able via the LFN path.
+    DirEntry lng;
+    if (!Fat32LookupPath(v0, "/LongFile.txt", &lng))
+    {
+        SerialWrite("[fs/fat32] self-test WARN: /LongFile.txt not resolved via LFN\n");
+        return;
+    }
+    VZero(buf, sizeof(buf));
+    const i64 n3 = Fat32ReadFile(v0, &lng, buf, sizeof(buf));
+    const char* expect3 = "long filename file\n";
+    u32 elen3 = 0;
+    while (expect3[elen3] != 0)
+        ++elen3;
+    if (n3 != static_cast<i64>(elen3))
+    {
+        SerialWrite("[fs/fat32] self-test FAILED: LongFile.txt wrong size\n");
+        return;
+    }
+    for (u32 i = 0; i < elen3; ++i)
+    {
+        if (buf[i] != static_cast<u8>(expect3[i]))
+        {
+            SerialWrite("[fs/fat32] self-test FAILED: LongFile.txt content mismatch\n");
+            return;
+        }
+    }
+    SerialWrite("[fs/fat32] self-test OK (LFN /LongFile.txt decoded + verified)\n");
 }
 
 } // namespace customos::fs::fat32
