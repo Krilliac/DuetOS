@@ -616,6 +616,113 @@ void SpawnRing3LinuxTranslateSmoke()
     sched::SchedCreateUser(&core::Ring3UserEntry, nullptr, "linux-translate-smoke", proc);
 }
 
+
+// Extend-write smoke. Opens HELLO.TXT, seeks to EOF, mmaps a
+// scratch page, writes "EXT\n" via sys_write's extend branch
+// (Fat32AppendAtPath), closes, exits with distinctive code 0x52.
+// The on-boot success signal is the exit_group log line:
+//   [linux] exit_group status=0x52
+// Any failure (open fail, lseek reject, short-write) either
+// doesn't reach exit_group or exits with a different path.
+//
+// Deliberately avoids a final write(1, "extended\n", ...) — the
+// extra LEA-displacement math after many syscall sequences is
+// error-prone to hand-encode; the exit code is a robust signal.
+//
+// Byte layout (150 bytes total):
+//   0..20   : open("HELLO.TXT", 0, 0)        (LEA rdi disp = 0x80)
+//   21..37  : lseek(fd, 0, SEEK_END)
+//   38..74  : mmap(NULL, 4096, ...) + mov r12, rax
+//   75..97  : store "EXT\n" into *r12
+//   98..115 : write(fd, r12, 4)  -- extend path
+//   116..125: close(fd)
+//   126..137: exit_group(0x52)
+//   138..139: ud2
+//   140..149: "HELLO.TXT\0"  (path — LEA disp = 140-12 = 128 = 0x80)
+constexpr u8 kExtendPayload[] = {
+    // open("HELLO.TXT", 0, 0)
+    0xB8, 0x02, 0x00, 0x00, 0x00,             // mov eax, 2
+    0x48, 0x8D, 0x3D, 0x80, 0x00, 0x00, 0x00, // lea rdi, [rip+0x80]
+    0x31, 0xF6,                               // xor esi, esi
+    0x31, 0xD2,                               // xor edx, edx
+    0x0F, 0x05,                               // syscall
+    0x49, 0x89, 0xC5,                         // mov r13, rax  (fd)
+    // lseek(r13, 0, SEEK_END=2)
+    0xB8, 0x08, 0x00, 0x00, 0x00, // mov eax, 8
+    0x44, 0x89, 0xEF,             // mov edi, r13d
+    0x31, 0xF6,                   // xor esi, esi
+    0xBA, 0x02, 0x00, 0x00, 0x00, // mov edx, 2
+    0x0F, 0x05,                   // syscall
+    // mmap(NULL, 4096, 3, 0x22, -1, 0) -> r12
+    0xB8, 0x09, 0x00, 0x00, 0x00,       // mov eax, 9
+    0x31, 0xFF,                         // xor edi, edi
+    0xBE, 0x00, 0x10, 0x00, 0x00,       // mov esi, 0x1000
+    0xBA, 0x03, 0x00, 0x00, 0x00,       // mov edx, 3
+    0x41, 0xBA, 0x22, 0x00, 0x00, 0x00, // mov r10d, 0x22
+    0x41, 0xB8, 0xFF, 0xFF, 0xFF, 0xFF, // mov r8d, -1
+    0x45, 0x31, 0xC9,                   // xor r9d, r9d
+    0x0F, 0x05,                         // syscall
+    0x49, 0x89, 0xC4,                   // mov r12, rax
+    // Store "EXT\n" into *r12
+    0x41, 0xC6, 0x04, 0x24, 0x45,       // [r12+0] = 'E'
+    0x41, 0xC6, 0x44, 0x24, 0x01, 0x58, // [r12+1] = 'X'
+    0x41, 0xC6, 0x44, 0x24, 0x02, 0x54, // [r12+2] = 'T'
+    0x41, 0xC6, 0x44, 0x24, 0x03, 0x0A, // [r12+3] = '\n'
+    // write(r13, r12, 4)  -- exercises extend path
+    0xB8, 0x01, 0x00, 0x00, 0x00, // mov eax, 1
+    0x44, 0x89, 0xEF,             // mov edi, r13d
+    0x4C, 0x89, 0xE6,             // mov rsi, r12
+    0xBA, 0x04, 0x00, 0x00, 0x00, // mov edx, 4
+    0x0F, 0x05,                   // syscall
+    // close(r13)
+    0xB8, 0x03, 0x00, 0x00, 0x00, // mov eax, 3
+    0x44, 0x89, 0xEF,             // mov edi, r13d
+    0x0F, 0x05,                   // syscall
+    // exit_group(0x52) — distinctive exit code
+    0xB8, 0xE7, 0x00, 0x00, 0x00, // mov eax, 231
+    0xBF, 0x52, 0x00, 0x00, 0x00, // mov edi, 0x52
+    0x0F, 0x05,                   // syscall
+    0x0F, 0x0B,                   // ud2
+    // "HELLO.TXT\0"
+    'H', 'E', 'L', 'L', 'O', '.', 'T', 'X', 'T', 0,
+};
+
+static_assert(sizeof(kExtendPayload) == 150, "kExtendPayload layout drifted");
+
+void SpawnRing3LinuxExtendSmoke()
+{
+    KLOG_TRACE_SCOPE("linux/smoke", "SpawnRing3LinuxExtendSmoke");
+
+    AddressSpace* as = AddressSpaceCreate(/*frame_budget=*/16);
+    if (as == nullptr)
+        core::Panic("linux/smoke", "AddressSpaceCreate failed");
+    const PhysAddr code_frame = AllocateFrame();
+    const PhysAddr stack_frame = AllocateFrame();
+    if (code_frame == mm::kNullFrame || stack_frame == mm::kNullFrame)
+        core::Panic("linux/smoke", "frame alloc failed");
+    auto* code_direct = static_cast<u8*>(mm::PhysToVirt(code_frame));
+    for (u64 i = 0; i < mm::kPageSize; ++i)
+        code_direct[i] = 0;
+    for (u64 i = 0; i < sizeof(kExtendPayload); ++i)
+        code_direct[i] = kExtendPayload[i];
+
+    const u64 code_va = 0x0000'6B00'0000'0000ull;
+    const u64 stack_va = code_va + 0x10000;
+    AddressSpaceMapUserPage(as, code_va, code_frame, mm::kPagePresent | mm::kPageUser);
+    AddressSpaceMapUserPage(as, stack_va, stack_frame,
+                            mm::kPagePresent | mm::kPageWritable | mm::kPageUser | mm::kPageNoExecute);
+    Process* proc = ProcessCreate("linux-extend-smoke", as, core::CapSetEmpty(), fs::RamfsSandboxRoot(), code_va,
+                                  stack_va, core::kTickBudgetSandbox);
+    if (proc == nullptr)
+        core::Panic("linux/smoke", "ProcessCreate failed");
+    proc->abi_flavor = kAbiLinux;
+    proc->linux_brk_base = code_va + 0x100'0000ull;
+    proc->linux_brk_current = proc->linux_brk_base;
+    proc->linux_mmap_cursor = 0x0000'7300'0000'0000ull;
+    arch::SerialWrite("[linux] queued ring3 extend smoke: open+lseek+write-past-EOF\n");
+    sched::SchedCreateUser(&core::Ring3UserEntry, nullptr, "linux-extend-smoke", proc);
+}
+
 void SpawnRing3LinuxSmoke()
 {
     KLOG_TRACE_SCOPE("linux/smoke", "SpawnRing3LinuxSmoke");

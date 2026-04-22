@@ -1492,6 +1492,11 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // deliberate -ENOSYS (rseq). Boot log shows [translate]
     // lines for each.
     customos::subsystems::linux::SpawnRing3LinuxTranslateSmoke();
+    // File-extend exerciser: opens HELLO.TXT, seeks to EOF,
+    // writes a few bytes (routes through Fat32AppendAtPath),
+    // closes, prints "extended\n" to stdout. Slot 12's
+    // untested-at-the-time extend path gets a boot-time check.
+    customos::subsystems::linux::SpawnRing3LinuxExtendSmoke();
     // Real-binary path: read /fat/LINUX.ELF off the mounted
     // FAT32 volume and spawn it via SpawnElfLinux. Exercises
     // the AHCI -> GPT -> partition-block -> FAT32 -> ElfLoad

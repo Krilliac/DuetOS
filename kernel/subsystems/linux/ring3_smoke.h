@@ -49,4 +49,11 @@ void SpawnRing3LinuxFileSmoke();
 ///   [translate] linux/0x14e -> synthetic:enosys-deliberate
 void SpawnRing3LinuxTranslateSmoke();
 
+/// Exercises the sys_write file-extend path (slice 12):
+/// opens HELLO.TXT, lseeks to SEEK_END, writes "EXT\n", closes.
+/// On success, prints "extended\n" to stdout so success is
+/// visible on every boot. Any failure (extend rejected, short
+/// write, I/O error) surfaces as a missing marker.
+void SpawnRing3LinuxExtendSmoke();
+
 } // namespace customos::subsystems::linux
