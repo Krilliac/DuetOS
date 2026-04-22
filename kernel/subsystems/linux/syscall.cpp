@@ -3,7 +3,11 @@
 #include "../../arch/x86_64/serial.h"
 #include "../../arch/x86_64/traps.h"
 #include "../../core/klog.h"
+#include "../../core/process.h"
 #include "../../cpu/percpu.h"
+#include "../../mm/address_space.h"
+#include "../../mm/frame_allocator.h"
+#include "../../mm/page.h"
 #include "../../mm/paging.h"
 #include "../../sched/sched.h"
 
@@ -28,6 +32,13 @@ constexpr u32 kMsrKernelGsBase = 0xC0000102; // swapgs source for kernel GS
 constexpr i64 kENOSYS = -38;
 constexpr i64 kEBADF = -9;
 constexpr i64 kEFAULT = -14;
+constexpr i64 kENOMEM = -12;
+constexpr i64 kEINVAL = -22;
+
+// Linux mmap flag bits we care about (asm-generic definitions,
+// matches x86_64 too).
+constexpr u64 kMapPrivate = 0x02;
+constexpr u64 kMapAnonymous = 0x20;
 
 // Per-process Linux fd cap on a single write/read. A real kernel
 // wouldn't impose this but musl's newline-buffered stdout rarely
@@ -50,6 +61,9 @@ enum : u64
 {
     kSysRead = 0,
     kSysWrite = 1,
+    kSysMmap = 9,
+    kSysMunmap = 11,
+    kSysBrk = 12,
     kSysGetPid = 39,
     kSysExit = 60,
     kSysExitGroup = 231,
@@ -117,6 +131,132 @@ i64 DoRead(u64 fd, u64 user_buf, u64 len)
     return 0;
 }
 
+// Page-align `x` up. Our cluster size is 4 KiB, matching FAT32's
+// native page; the mmap / brk paths map 4 KiB frames directly,
+// so all lengths round up to a 4 KiB boundary before allocation.
+u64 PageUp(u64 x)
+{
+    return (x + 0xFFFu) & ~0xFFFull;
+}
+
+// Linux: brk(addr). Three cases:
+//   addr == 0 -> return current brk (the `sbrk(0)` query path).
+//   addr < linux_brk_base -> ignore, return current. Linux
+//     doesn't shrink past the initial segment end.
+//   addr > linux_brk_current -> map fresh RW+U+NX pages to extend
+//     the heap; return the new brk on success. Allocation failure
+//     partway through is "treat as unchanged", which is what Linux
+//     does — the caller checks the return == the requested addr.
+i64 DoBrk(u64 new_brk)
+{
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr || p->abi_flavor != core::kAbiLinux)
+    {
+        return 0;
+    }
+    if (new_brk == 0)
+    {
+        return static_cast<i64>(p->linux_brk_current);
+    }
+    if (new_brk < p->linux_brk_base)
+    {
+        return static_cast<i64>(p->linux_brk_current);
+    }
+    const u64 cur_aligned = PageUp(p->linux_brk_current);
+    const u64 new_aligned = PageUp(new_brk);
+    if (new_aligned > cur_aligned)
+    {
+        for (u64 va = cur_aligned; va < new_aligned; va += mm::kPageSize)
+        {
+            const mm::PhysAddr frame = mm::AllocateFrame();
+            if (frame == mm::kNullFrame)
+            {
+                // Roll back to the last successfully-mapped page.
+                // Simplest: just don't update linux_brk_current
+                // past whatever we managed to materialise.
+                p->linux_brk_current = va;
+                return static_cast<i64>(p->linux_brk_current);
+            }
+            mm::AddressSpaceMapUserPage(p->as, va, frame,
+                                        mm::kPagePresent | mm::kPageWritable | mm::kPageUser | mm::kPageNoExecute);
+        }
+    }
+    p->linux_brk_current = new_brk;
+    arch::SerialWrite("[linux] brk -> ");
+    arch::SerialWriteHex(p->linux_brk_current);
+    arch::SerialWrite("\n");
+    return static_cast<i64>(p->linux_brk_current);
+}
+
+// Linux: mmap(addr, len, prot, flags, fd, offset). v0 supports
+// only anonymous + private mappings — the shape musl's malloc
+// and static CRT actually issue. prot is ignored (all pages are
+// mapped RW+NX); a real impl would respect PROT_READ-only and
+// PROT_EXEC separately.
+//
+// Returns the chosen VA as a u64 on success, -errno on failure.
+// `addr` (MAP_FIXED) is ignored in v0; we always pick from the
+// per-process bump cursor.
+i64 DoMmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off)
+{
+    (void)addr;
+    (void)prot;
+    (void)fd;
+    (void)off;
+    if ((flags & kMapAnonymous) == 0)
+    {
+        return kENOSYS; // file-backed mmap not yet supported
+    }
+    if ((flags & kMapPrivate) == 0)
+    {
+        return kEINVAL; // MAP_SHARED without a file is meaningless
+    }
+    if (len == 0)
+    {
+        return kEINVAL;
+    }
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr || p->abi_flavor != core::kAbiLinux)
+    {
+        return kENOSYS;
+    }
+    const u64 aligned = PageUp(len);
+    const u64 base = p->linux_mmap_cursor;
+    for (u64 va = base; va < base + aligned; va += mm::kPageSize)
+    {
+        const mm::PhysAddr frame = mm::AllocateFrame();
+        if (frame == mm::kNullFrame)
+        {
+            // Partial-map rollback would require tearing down the
+            // mappings we already installed. v0 leaks on OOM — the
+            // process is about to die anyway, and AS teardown on
+            // task death will reclaim everything.
+            return kENOMEM;
+        }
+        mm::AddressSpaceMapUserPage(p->as, va, frame,
+                                    mm::kPagePresent | mm::kPageWritable | mm::kPageUser | mm::kPageNoExecute);
+    }
+    p->linux_mmap_cursor += aligned;
+    arch::SerialWrite("[linux] mmap -> ");
+    arch::SerialWriteHex(base);
+    arch::SerialWrite(" len=");
+    arch::SerialWriteHex(aligned);
+    arch::SerialWrite("\n");
+    return static_cast<i64>(base);
+}
+
+// Linux: munmap(addr, len). v0 stub — page unmap requires tearing
+// down the AS entries, which the AS API doesn't yet expose. Return
+// 0 so musl's free() paths don't error out; the mappings persist
+// until the process dies (bounded leak — fine for short-lived
+// ring-3 tasks).
+i64 DoMunmap(u64 addr, u64 len)
+{
+    (void)addr;
+    (void)len;
+    return 0;
+}
+
 } // namespace
 
 extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
@@ -131,6 +271,16 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
         break;
     case kSysRead:
         rv = DoRead(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysBrk:
+        rv = DoBrk(frame->rdi);
+        break;
+    case kSysMmap:
+        // Linux: addr, len, prot, flags, fd, offset — rdi..r9.
+        rv = DoMmap(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8, frame->r9);
+        break;
+    case kSysMunmap:
+        rv = DoMunmap(frame->rdi, frame->rsi);
         break;
     case kSysExit:
     case kSysExitGroup:

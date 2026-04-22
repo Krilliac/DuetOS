@@ -277,7 +277,18 @@ void FrameAllocatorInit(uptr multiboot_info_phys)
         PanicFrame("no available region large enough for the bitmap");
     }
 
-    g_bitmap = reinterpret_cast<u8*>(home);
+    // Store the bitmap as a KERNEL-HALF VA, not the raw phys address.
+    // Reason: at boot the kernel runs on the boot PML4 which identity-
+    // maps the first 1 GiB, so `home` (a low phys addr) is a valid VA
+    // there. But per-process ASes (AddressSpaceCreate) zero PML4[0];
+    // the identity map disappears, and any kernel code running on a
+    // task's AS that dereferences g_bitmap would #PF. Routing through
+    // PhysToVirt puts the pointer in PML4[511] (the direct map) which
+    // IS copied into every AS, so AllocateFrame remains reachable from
+    // syscall context no matter which task is on-CPU. Triggered by
+    // the Linux sys_mmap path, which is the first kernel consumer to
+    // call AllocateFrame on an active user AS.
+    g_bitmap = static_cast<u8*>(PhysToVirt(home));
 
     // Default every bit to "used". Only explicit "available" regions flip
     // back to "free" below — anything the bootloader didn't describe stays

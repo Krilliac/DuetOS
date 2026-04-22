@@ -195,6 +195,22 @@ struct Process
     u64 heap_pages;
     u64 heap_free_head;
 
+    // Linux-ABI brk heap. Meaningful only when abi_flavor ==
+    // kAbiLinux; untouched otherwise. `linux_brk_base` is the
+    // start of the program's data segment end (v0 smoke hard-
+    // codes this; future ELF loader will set it from the highest
+    // PT_LOAD's p_vaddr + p_memsz). `linux_brk_current` tracks
+    // the top of the currently-mapped heap; brk() grows it by
+    // mapping fresh RW pages on demand.
+    u64 linux_brk_base;
+    u64 linux_brk_current;
+
+    // Linux-ABI mmap bump allocator. Anonymous private mmap()
+    // calls return page-aligned regions starting here and march
+    // forward. No reuse on munmap yet — v0 leaks mappings on
+    // munmap, which is fine for short-lived smoke tasks.
+    u64 linux_mmap_cursor;
+
     // ABI flavor — which kernel syscall entry path this process's
     // tasks will route through at ring-3 boundary.
     //   kAbiNative (0): int 0x80 -> core::SyscallDispatch. The
