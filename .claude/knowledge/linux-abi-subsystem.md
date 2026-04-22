@@ -1,8 +1,8 @@
 # Linux-ABI syscall subsystem
 
-**Last updated:** 2026-04-22 (post slice 14)
+**Last updated:** 2026-04-22 (post slice 19)
 **Type:** Observation
-**Status:** Active — four on-boot smoke tasks demonstrating the full stack; 34 syscalls implemented
+**Status:** Active — four on-boot smoke tasks demonstrating the full stack; 52 syscalls implemented
 
 ## Description
 
@@ -46,12 +46,12 @@ kernel/subsystems/linux/
 4. Entry stub pops TrapFrame → `iretq` (NOT sysret — CustomOS's
    GDT is incompatible with sysret's selector arithmetic)
 
-## Implemented syscalls (as of slice 14)
+## Implemented syscalls (as of slice 19)
 
 | #   | Name             | Status                                                        |
 |-----|------------------|---------------------------------------------------------------|
 | 0   | read             | Real — file fds from FAT32 via scratch+slice; stdin = EOF     |
-| 1   | write            | Real — fd 1/2 → COM1; file fds → Fat32WriteInPlace in-bounds  |
+| 1   | write            | Real — fd 1/2 → COM1; file fds → in-place + extend-via-append |
 | 2   | open             | Real — FAT32-backed, per-process fd table                     |
 | 3   | close            | Real — releases fd slot                                       |
 | 4   | stat             | Real — Fat32LookupPath + 144 B stat struct                    |
@@ -59,29 +59,47 @@ kernel/subsystems/linux/
 | 6   | lstat            | Aliases stat (no symlinks)                                    |
 | 8   | lseek            | Real — file fds only; tty fds return -ESPIPE                  |
 | 9   | mmap             | Real — anonymous private only; bump-allocator                 |
+| 10  | mprotect         | Stub — returns 0 (all user pages are RW+NX already)           |
 | 11  | munmap           | Stub — returns 0, doesn't tear down pages                     |
 | 12  | brk              | Real — grows RW+NX pages from Process::linux_brk_base         |
 | 13  | rt_sigaction     | Stub — returns 0, no signal delivery wired                    |
 | 14  | rt_sigprocmask   | Stub — returns 0                                              |
+| 15  | rt_sigreturn     | Kills on entry — no signal frame to unwind                    |
 | 16  | ioctl            | Stub — returns -ENOTTY / -EBADF                               |
+| 17  | pread64          | Real — save-restore offset around DoRead                      |
+| 18  | pwrite64         | Real — save-restore offset around DoWrite                     |
 | 20  | writev           | Real — iterates iovec array calling DoWrite                   |
 | 21  | access           | Real — Fat32LookupPath presence probe                         |
+| 24  | sched_yield      | Real — passes through to sched::SchedYield                    |
+| 32  | dup              | Real — copies fd state into lowest free slot                  |
+| 33  | dup2             | Real — overwrites target slot with source's state             |
 | 35  | nanosleep        | Real — rounds up to scheduler ticks, SchedSleepTicks          |
 | 39  | getpid           | Real — returns Task ID                                        |
 | 60  | exit             | Real — calls SchedExit                                        |
+| 62  | kill             | Self-only — SchedExit; other pids return -ESRCH               |
 | 63  | uname            | Real — static CustomOS / customos / 0.1 / ...                 |
+| 72  | fcntl            | Real — F_DUPFD / F_GETFD / F_SETFD / F_GETFL / F_SETFL        |
 | 79  | getcwd           | Stub — returns "/" always                                     |
+| 80  | chdir            | Stub — returns 0 (no per-process cwd)                         |
+| 81  | fchdir           | Stub — returns 0                                              |
 | 89  | readlink         | Stub — returns -EINVAL (no symlinks)                          |
 | 102 | getuid           | Stub — returns 0                                              |
 | 104 | getgid           | Stub — returns 0                                              |
 | 107 | geteuid          | Stub — returns 0                                              |
 | 108 | getegid          | Stub — returns 0                                              |
+| 109 | setpgid          | Stub — returns 0                                              |
+| 110 | getppid          | Stub — returns 1 (init-like)                                  |
+| 121 | getpgid          | Stub — returns 0                                              |
+| 124 | getsid           | Stub — returns 0                                              |
+| 131 | sigaltstack      | Stub — returns 0 (no signal delivery)                         |
 | 158 | arch_prctl       | Real — ARCH_SET_FS / ARCH_GET_FS; GS rejected                 |
+| 186 | gettid           | Real — returns Task ID (v0 tid == pid)                        |
 | 201 | time             | Real — seconds-since-boot via HPET                            |
 | 202 | futex            | Stub — returns 0 (no contention for single-threaded)          |
 | 218 | set_tid_address  | Stub — returns task ID, no CLONE_CHILD_CLEARTID               |
 | 228 | clock_gettime    | Real — HPET-backed; all clocks monotonic-since-boot           |
 | 231 | exit_group       | Real — calls SchedExit                                        |
+| 234 | tgkill           | Self-only — SchedExit; other tids return -ESRCH               |
 | 318 | getrandom        | Non-crypto — xorshift64 seeded from rdtsc, capped at 4 KiB    |
 
 Unknown syscalls return -ENOSYS with a log line identifying the
@@ -158,20 +176,17 @@ the shell.
 
 ## Known gaps
 
-- **No FS_BASE save/restore on context switch.** v0 runs at most
-  one Linux task at a time; OK for now. Adding it is per-Task
-  `fs_base` field + scheduler mirror, same shape as `kernel_rsp`.
 - **munmap doesn't tear down** — leaves pages mapped. Fine for
   short-lived tasks; AS teardown on process death reclaims.
 - **Signals don't deliver** — rt_sigaction/rt_sigprocmask accept
-  but are inert. No sigframe, no sigreturn.
+  but are inert. No sigframe, no sigreturn. A real impl would
+  add IRQ-return-path signal injection + a user-mode trampoline
+  that sysrets back through sigreturn (which we'd then wire to
+  a real unwind rather than the current "exit on entry").
 - **File I/O caps at 4 KiB** — DoRead reads whole file into
   scratch then slices. DoWrite (file fds) limits single-call
   size. Larger files need a streamed read-with-offset helper
   in the FAT32 driver.
-- **Writes don't extend files.** Fat32WriteInPlace covers
-  in-bounds only; growing a file needs the fd table to track
-  the basename so Fat32AppendInRoot can be reached. Follow-up.
 - **Calendar time is boot-relative.** clock_gettime returns
   monotonic ns since boot for every clock id. Needs RTC driver
   locking for real epoch time.
@@ -179,10 +194,34 @@ the shell.
   a multi-thread workload actually contends.
 - **No dynamic linking** — PT_INTERP is ignored. Only static
   binaries run.
+- **No getdents64** — directory enumeration. Needs the fd table
+  to accept directory handles (state=3) + Fat32ListDirByCluster
+  serialization.
+- **dup/dup2 copy the fd rather than sharing it.** Two fds
+  backing "the same file" end up with independent offsets.
+  Matters for programs that rely on shared-description
+  semantics (e.g. stdio redirection patterns).
+- **clone / fork / vfork / thread creation** — absent. A
+  dedicated slice per primitive; clone() is the biggest
+  architectural piece remaining on the Linux-ABI todo.
 - **Cryptographic getrandom** — the stream is xorshift64 from
   rdtsc. Good for stack cookies + pointer mangling; NOT
   suitable for seeding TLS / session keys. Needs a real RNG
   driver + entropy source.
+
+## Fixed since last session (2026-04-22 autopilot)
+
+- **Per-task FS_BASE save/restore.** Scheduler now rdmsr's
+  FS_BASE before ContextSwitch and wrmsr's the incoming task's
+  after. See sched.cpp's `Schedule()`. Unblocks running multiple
+  Linux tasks with independent TLS.
+- **sys_write extends files** via Fat32AppendAtPath when the
+  write crosses past EOF. Requires `char path[64]` on each
+  LinuxFd — stored at open() time.
+- **SpawnElfFile auto-detects ELFOSABI_LINUX** (byte 7 == 3)
+  and routes to SpawnElfLinux. Only catches binaries explicitly
+  marked Linux; SYSV-marked binaries (the common case) still go
+  through the native path.
 
 ## How to add a new syscall
 
