@@ -107,6 +107,13 @@ enum : u64
     kSysGetTid = 186,
     kSysTgkill = 234,
     kSysKill = 62,
+    kSysPread = 17,
+    kSysPwrite = 18,
+    kSysDup = 32,
+    kSysDup2 = 33,
+    kSysFcntl = 72,
+    kSysChdir = 80,
+    kSysFchdir = 81,
     kSysSetPgid = 109,
     kSysGetPpid = 110,
     kSysGetPgid = 121,
@@ -835,6 +842,154 @@ i64 DoNanosleep(u64 user_req, u64 user_rem)
     return 0;
 }
 
+// Linux: pread64(fd, buf, count, offset). Read at an explicit
+// offset without mutating the fd's position cursor. Implemented
+// as a save-restore around the existing offset — simplest way
+// to reuse DoRead without duplicating the FAT32 walk.
+i64 DoPread64(u64 fd, u64 user_buf, u64 len, i64 offset)
+{
+    if (fd >= 16)
+        return kEBADF;
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr)
+        return kEBADF;
+    if (offset < 0)
+        return kEINVAL;
+    const u64 saved = p->linux_fds[fd].offset;
+    p->linux_fds[fd].offset = static_cast<u64>(offset);
+    const i64 n = DoRead(fd, user_buf, len);
+    p->linux_fds[fd].offset = saved;
+    return n;
+}
+
+// Linux: pwrite64(fd, buf, count, offset). Mirror of pread64.
+i64 DoPwrite64(u64 fd, u64 user_buf, u64 len, i64 offset)
+{
+    if (fd >= 16)
+        return kEBADF;
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr)
+        return kEBADF;
+    if (offset < 0)
+        return kEINVAL;
+    const u64 saved = p->linux_fds[fd].offset;
+    p->linux_fds[fd].offset = static_cast<u64>(offset);
+    const i64 n = DoWrite(fd, user_buf, len);
+    p->linux_fds[fd].offset = saved;
+    return n;
+}
+
+// Copy one fd slot into another (same process). Used by dup /
+// dup2 / F_DUPFD. v0 semantics: the new fd is an INDEPENDENT
+// copy — state + first_cluster + size + offset + path all
+// mirrored. Real Linux dup() would share the file description
+// (one shared offset + flag set), but our workloads don't hit
+// the difference yet.
+void CopyFdSlot(const core::Process::LinuxFd& src, core::Process::LinuxFd& dst)
+{
+    dst.state = src.state;
+    dst.first_cluster = src.first_cluster;
+    dst.size = src.size;
+    dst.offset = src.offset;
+    for (u32 i = 0; i < sizeof(dst.path); ++i)
+        dst.path[i] = src.path[i];
+}
+
+// Linux: dup(fd). Allocate the lowest unused slot ≥ 3 and copy
+// the source fd into it. Returns the new fd or -EMFILE if full.
+i64 DoDup(u64 fd)
+{
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr || fd >= 16)
+        return kEBADF;
+    if (p->linux_fds[fd].state == 0)
+        return kEBADF;
+    for (u32 i = 3; i < 16; ++i)
+    {
+        if (p->linux_fds[i].state == 0)
+        {
+            CopyFdSlot(p->linux_fds[fd], p->linux_fds[i]);
+            return static_cast<i64>(i);
+        }
+    }
+    return kEMFILE;
+}
+
+// Linux: dup2(oldfd, newfd). If newfd == oldfd, returns newfd.
+// Else closes newfd if in use, then copies. Returns newfd.
+i64 DoDup2(u64 oldfd, u64 newfd)
+{
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr || oldfd >= 16 || newfd >= 16)
+        return kEBADF;
+    if (p->linux_fds[oldfd].state == 0)
+        return kEBADF;
+    if (oldfd == newfd)
+        return static_cast<i64>(newfd);
+    // newfd < 3 (stdin/stdout/stderr) — dup2 onto a tty slot is
+    // legal in Linux (shell redirection pattern). Since we track
+    // tty slots as state=1 (not a file), just overwrite.
+    CopyFdSlot(p->linux_fds[oldfd], p->linux_fds[newfd]);
+    return static_cast<i64>(newfd);
+}
+
+// Linux: fcntl(fd, cmd, arg). v0 supports:
+//   F_DUPFD (0)      — dup the fd, returning a slot >= arg.
+//   F_GETFD (1)      — returns 0 (no per-fd flags stored).
+//   F_SETFD (2)      — accepts + returns 0.
+//   F_GETFL (3)      — returns O_RDWR (2) for any live fd.
+//   F_SETFL (4)      — accepts + returns 0.
+// Everything else returns -EINVAL.
+i64 DoFcntl(u64 fd, u64 cmd, u64 arg)
+{
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr || fd >= 16)
+        return kEBADF;
+    if (p->linux_fds[fd].state == 0)
+        return kEBADF;
+    switch (cmd)
+    {
+    case 0: // F_DUPFD
+    {
+        const u32 start = (arg < 3) ? 3 : (arg >= 16 ? 16 : static_cast<u32>(arg));
+        for (u32 i = start; i < 16; ++i)
+        {
+            if (p->linux_fds[i].state == 0)
+            {
+                CopyFdSlot(p->linux_fds[fd], p->linux_fds[i]);
+                return static_cast<i64>(i);
+            }
+        }
+        return kEMFILE;
+    }
+    case 1: // F_GETFD
+        return 0;
+    case 2: // F_SETFD
+        return 0;
+    case 3:       // F_GETFL
+        return 2; // O_RDWR
+    case 4:       // F_SETFL
+        return 0;
+    default:
+        return kEINVAL;
+    }
+}
+
+// Linux: chdir(path) / fchdir(fd). v0 has no per-process cwd;
+// accept the call + succeed so musl's `realpath()` + shells
+// don't abort. When cwd lands, store the resolved directory's
+// cluster on Process.
+i64 DoChdir(u64 user_path)
+{
+    (void)user_path;
+    return 0;
+}
+i64 DoFchdir(u64 fd)
+{
+    (void)fd;
+    return 0;
+}
+
 // Linux: mprotect(addr, len, prot). v0 maps all user pages RW
 // and treats prot as advisory. Return 0 to satisfy callers;
 // actual flag updates wait for an MM-layer MapProtect helper.
@@ -1244,6 +1399,27 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
         break;
     case kSysMprotect:
         rv = DoMprotect(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysPread:
+        rv = DoPread64(frame->rdi, frame->rsi, frame->rdx, static_cast<i64>(frame->r10));
+        break;
+    case kSysPwrite:
+        rv = DoPwrite64(frame->rdi, frame->rsi, frame->rdx, static_cast<i64>(frame->r10));
+        break;
+    case kSysDup:
+        rv = DoDup(frame->rdi);
+        break;
+    case kSysDup2:
+        rv = DoDup2(frame->rdi, frame->rsi);
+        break;
+    case kSysFcntl:
+        rv = DoFcntl(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysChdir:
+        rv = DoChdir(frame->rdi);
+        break;
+    case kSysFchdir:
+        rv = DoFchdir(frame->rdi);
         break;
     case kSysRtSigreturn:
         rv = DoRtSigreturn();
