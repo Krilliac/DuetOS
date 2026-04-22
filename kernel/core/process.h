@@ -145,6 +145,13 @@ struct Process
     // the base.
     u64 user_code_va;
     u64 user_stack_va; // stack base; top = user_stack_va + kPageSize
+    // When non-zero, Ring3UserEntry enters ring 3 with rsp = this
+    // value instead of the default `user_stack_va + kPageSize`.
+    // Used by SpawnElfLinux to land the user task on a pre-
+    // populated argc/argv/envp/auxv region at the top of the
+    // stack page. 0 means "use the default" — keeps native + PE
+    // spawn paths unchanged.
+    u64 user_rsp_init;
 
     // CPU-tick budget. tick_budget is a hard cap; ticks_used is
     // incremented by the timer IRQ for every tick this process's

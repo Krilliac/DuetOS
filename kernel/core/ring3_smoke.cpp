@@ -368,7 +368,15 @@ void WriteUserCodeFrame(mm::PhysAddr frame, u64 code_va, u64 stack_va)
     // offsets inside the function prologue would #GP. Bias
     // rsp by -8 once, up front, so the ring-3 entry point
     // sees the same layout it would on a CALL.
-    const u64 stack_top = proc->user_stack_va + mm::kPageSize - 8;
+    //
+    // Linux-ABI tasks override this via proc->user_rsp_init —
+    // the loader has pre-populated argc/argv/envp/auxv at the
+    // top of the stack page and picked an rsp that lands user
+    // _start on `argc` (which satisfies its own 16-alignment
+    // requirement without the -8 bias, since the Linux initial
+    // stack shape has argc at a 16-aligned boundary).
+    const u64 stack_top = (proc->user_rsp_init != 0) ? proc->user_rsp_init
+                                                     : (proc->user_stack_va + mm::kPageSize - 8);
 
     SerialWrite("[ring3] task pid=");
     SerialWriteHex(sched::CurrentTaskId());
@@ -1604,6 +1612,35 @@ u64 SpawnElfLinux(const char* name, const u8* elf_bytes, u64 elf_len, CapSet cap
     proc->linux_brk_base = 0x0000'0000'1000'0000ull; // 256 MiB
     proc->linux_brk_current = proc->linux_brk_base;
     proc->linux_mmap_cursor = 0x0000'7000'0000'0000ull;
+
+    // Populate the top of the user stack with a minimal Linux-ABI
+    // initial layout:
+    //
+    //   [rsp_init +  0]: argc          = 0    (u64)
+    //   [rsp_init +  8]: argv[0]       = NULL (u64 — argv terminator)
+    //   [rsp_init + 16]: envp[0]       = NULL (u64 — envp terminator)
+    //   [rsp_init + 24]: auxv[0].a_type = AT_NULL = 0
+    //   [rsp_init + 32]: auxv[0].a_val  = 0
+    //   [rsp_init + 40]: padding        = 0    (keeps rsp_init 16-aligned)
+    //
+    // 48 bytes total, written into the highest 48 B of the stack
+    // page via the direct-map alias — we can't touch the user VA
+    // from kernel code without CR3 flipping, but the frame's
+    // kernel-half alias is always writable.
+    //
+    // Real static-musl binaries want auxv entries for AT_PHDR,
+    // AT_PAGESZ, AT_RANDOM etc.; v0 only supplies AT_NULL, which
+    // musl tolerates. Follow-up slice will populate the real ones
+    // when a binary actually needs them.
+    const PhysAddr stack_frame = AddressSpaceLookupUserFrame(as, r.stack_va);
+    if (stack_frame != kNullFrame)
+    {
+        auto* stack_direct = static_cast<u8*>(PhysToVirt(stack_frame));
+        const u64 offset_in_page = mm::kPageSize - 48;
+        for (u64 i = 0; i < 48; ++i)
+            stack_direct[offset_in_page + i] = 0; // argc=0, everything-else=NULL
+        proc->user_rsp_init = r.stack_top - 48;
+    }
 
     SerialWrite("[ring3] linux elf spawn name=\"");
     SerialWrite(name);

@@ -43,6 +43,7 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     p->root = root;
     p->user_code_va = user_code_va;
     p->user_stack_va = user_stack_va;
+    p->user_rsp_init = 0; // loader overrides if it wants a custom rsp
     p->tick_budget = tick_budget;
     p->ticks_used = 0;
     p->sandbox_denials = 0;
