@@ -61,6 +61,8 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
         for (u32 j = 0; j < sizeof(p->linux_fds[i]._pad); ++j)
             p->linux_fds[i]._pad[j] = 0;
         p->linux_fds[i]._pad2 = 0;
+        for (u32 j = 0; j < sizeof(p->linux_fds[i].path); ++j)
+            p->linux_fds[i].path[j] = 0;
     }
     p->linux_brk_base = 0; // loader fills when abi_flavor = kAbiLinux
     p->linux_brk_current = 0;

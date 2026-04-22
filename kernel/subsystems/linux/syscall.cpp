@@ -155,18 +155,18 @@ i64 DoWrite(u64 fd, u64 user_buf, u64 len)
     if (p == nullptr || p->linux_fds[fd].state != 2)
         return kEBADF;
 
-    // File write (in-place, no extend). Clip `len` to the bytes
-    // still within the file's declared size; anything past that
-    // would require either a Fat32AppendInRoot (needs the
-    // basename, which we don't track on the fd) or ENOSPC. v0
-    // returns a short write when clipped; musl's write-loop
-    // handles that naturally.
+    // File write. Three regions to consider:
+    //   [off, min(off+len, size))     — in-bounds: WriteInPlace
+    //   [max(off, size), off+len)     — extending: AppendAtPath
+    // When off > size (seek past EOF), v0 refuses — FAT32 has no
+    // sparse-file support and zeroing a gap would need an extra
+    // write path. musl's write-loop never seeks past EOF so this
+    // corner rarely matters.
+    const u64 size = p->linux_fds[fd].size;
     const u64 off = p->linux_fds[fd].offset;
-    if (off >= p->linux_fds[fd].size)
-        return 0; // at or past EOF, short-write 0
-    u64 to_copy = p->linux_fds[fd].size - off;
-    if (to_copy > len)
-        to_copy = len;
+    if (off > size)
+        return kEINVAL;
+    u64 to_copy = len;
     if (to_copy > kLinuxIoMax)
         to_copy = kLinuxIoMax;
     static u8 kbuf[kLinuxIoMax];
@@ -175,17 +175,48 @@ i64 DoWrite(u64 fd, u64 user_buf, u64 len)
     const auto* v = fs::fat32::Fat32Volume(0);
     if (v == nullptr)
         return kEIO;
-    fs::fat32::DirEntry entry;
-    for (u64 i = 0; i < sizeof(entry.name); ++i)
-        entry.name[i] = 0;
-    entry.attributes = 0;
-    entry.first_cluster = p->linux_fds[fd].first_cluster;
-    entry.size_bytes = p->linux_fds[fd].size;
-    const i64 n = fs::fat32::Fat32WriteInPlace(v, &entry, off, kbuf, to_copy);
-    if (n < 0)
-        return kEIO;
-    p->linux_fds[fd].offset = off + n;
-    return n;
+
+    u64 written = 0;
+    // In-bounds portion.
+    if (off < size)
+    {
+        const u64 in_bounds_len = (size - off < to_copy) ? (size - off) : to_copy;
+        fs::fat32::DirEntry entry;
+        for (u64 i = 0; i < sizeof(entry.name); ++i)
+            entry.name[i] = 0;
+        entry.attributes = 0;
+        entry.first_cluster = p->linux_fds[fd].first_cluster;
+        entry.size_bytes = size;
+        const i64 n = fs::fat32::Fat32WriteInPlace(v, &entry, off, kbuf, in_bounds_len);
+        if (n < 0)
+            return kEIO;
+        written = static_cast<u64>(n);
+        if (written < in_bounds_len)
+        {
+            p->linux_fds[fd].offset = off + written;
+            return static_cast<i64>(written);
+        }
+    }
+    // Extend portion.
+    if (written < to_copy)
+    {
+        const u64 extend_len = to_copy - written;
+        // Fat32AppendAtPath appends to end-of-file; caller's
+        // offset + written MUST equal the current on-disk size.
+        // (True by construction: in-bounds code wrote up to size.)
+        const i64 n = fs::fat32::Fat32AppendAtPath(v, p->linux_fds[fd].path, kbuf + written, extend_len);
+        if (n < 0)
+        {
+            p->linux_fds[fd].offset = off + written;
+            return written > 0 ? static_cast<i64>(written) : kEIO;
+        }
+        written += static_cast<u64>(n);
+        // Update the cached size — AppendAtPath just extended the
+        // on-disk size field; our cached copy needs to follow.
+        p->linux_fds[fd].size = static_cast<u32>(size + (to_copy - (size - off)));
+    }
+    p->linux_fds[fd].offset = off + written;
+    return static_cast<i64>(written);
 }
 
 // Skip the `/fat/` mount prefix (or a bare leading slash) so what
@@ -270,6 +301,15 @@ i64 DoOpen(u64 user_path, u64 flags, u64 mode)
             p->linux_fds[i].first_cluster = entry.first_cluster;
             p->linux_fds[i].size = entry.size_bytes;
             p->linux_fds[i].offset = 0;
+            // Remember the (stripped) volume-relative path so
+            // sys_write can call Fat32AppendAtPath on extend.
+            u32 pi = 0;
+            while (leaf[pi] != 0 && pi + 1 < sizeof(p->linux_fds[i].path))
+            {
+                p->linux_fds[i].path[pi] = leaf[pi];
+                ++pi;
+            }
+            p->linux_fds[i].path[pi] = 0;
             return static_cast<i64>(i);
         }
     }

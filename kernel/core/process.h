@@ -220,6 +220,12 @@ struct Process
         u32 size;          // only meaningful for state=file
         u32 _pad2;
         u64 offset; // read cursor; only meaningful for state=file
+        // Volume-relative path as passed to sys_open, NUL-
+        // terminated. Needed so sys_write's extend path can call
+        // Fat32AppendAtPath — the FAT32 writer walks the parent
+        // directory by name to update the entry's size field.
+        // Cap matches the sys_open copy buffer (63 chars + NUL).
+        char path[64];
     };
     LinuxFd linux_fds[16];
 
