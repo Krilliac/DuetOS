@@ -38,7 +38,9 @@
 #include "heartbeat.h"
 #include "klog.h"
 #include "panic.h"
+#include "process.h"
 #include "ring3_smoke.h"
+#include "../fs/fat32.h"
 #include "../subsystems/linux/ring3_smoke.h"
 #include "../subsystems/linux/syscall.h"
 #include "shell.h"
@@ -1479,9 +1481,38 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     customos::subsystems::linux::SpawnRing3LinuxSmoke();
     // Same payload wrapped in an ELF64 image loaded via
     // SpawnElfLinux — proves the loader + abi-flavor plumbing
-    // works, which is the path a real Linux ELF off disk will
-    // use once FAT32 exec wiring lands.
+    // works in an in-memory path.
     customos::subsystems::linux::SpawnRing3LinuxElfSmoke();
+    // Real-binary path: read /fat/LINUX.ELF off the mounted
+    // FAT32 volume and spawn it via SpawnElfLinux. Exercises
+    // the AHCI -> GPT -> partition-block -> FAT32 -> ElfLoad
+    // -> Linux-ABI chain end-to-end. Silent no-op when no FAT32
+    // volume is probed (e.g. when the self-test harness forgets
+    // to ship an image).
+    {
+        const auto* fat_vol = customos::fs::fat32::Fat32Volume(0);
+        if (fat_vol != nullptr)
+        {
+            customos::fs::fat32::DirEntry elf_entry;
+            if (customos::fs::fat32::Fat32LookupPath(fat_vol, "LINUX.ELF", &elf_entry))
+            {
+                static customos::u8 elf_buf[4096];
+                const customos::i64 n =
+                    customos::fs::fat32::Fat32ReadFile(fat_vol, &elf_entry, elf_buf, sizeof(elf_buf));
+                if (n > 0)
+                {
+                    SerialWrite("[boot] Spawning /fat/LINUX.ELF via SpawnElfLinux.\n");
+                    customos::core::SpawnElfLinux("fat-linux-elf", elf_buf, static_cast<customos::u64>(n),
+                                                  customos::core::CapSetEmpty(), customos::fs::RamfsSandboxRoot(),
+                                                  /*frame_budget=*/16, customos::core::kTickBudgetSandbox);
+                }
+                else
+                {
+                    SerialWrite("[boot] /fat/LINUX.ELF read failed — skipping autospawn.\n");
+                }
+            }
+        }
+    }
 
     // Bring up APs. SmpStartAps calls SchedSleepTicks(1) between
     // INIT and SIPI; the dedicated idle task installed at the top

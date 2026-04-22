@@ -310,6 +310,7 @@ void CmdHelp()
     ConsoleWriteln("  FATTRUNC NAME NEW_SIZE   SHRINK OR ZERO-GROW AN EXISTING FILE");
     ConsoleWriteln("  FATMKDIR PATH            CREATE A NEW DIRECTORY");
     ConsoleWriteln("  FATRMDIR PATH            REMOVE AN EMPTY DIRECTORY");
+    ConsoleWriteln("  LINUXEXEC PATH           LOAD ELF FROM FAT32 AS A LINUX-ABI PROCESS");
     ConsoleWriteln("  FREE         MEMORY USAGE (PHYS + HEAP)");
     ConsoleWriteln("  PS           LIST EVERY SCHEDULER TASK");
     ConsoleWriteln("  SPAWN KIND   LAUNCH A RING-3 TASK (hello/sandbox/jail/...)");
@@ -1211,18 +1212,18 @@ void CmdFind(u32 argc, char** argv)
 // dispatched in Dispatch — keeping the two in sync is the
 // price of not having reflection.
 static const char* const kCommandSet[] = {
-    "help",    "about",  "version",  "clear",    "uptime",   "date",     "windows",    "mode",     "ls",
-    "cat",     "touch",  "rm",       "echo",     "cp",       "mv",       "wc",         "head",     "tail",
-    "dmesg",   "stats",  "mem",      "history",  "set",      "unset",    "env",        "alias",    "unalias",
-    "sysinfo", "source", "man",      "grep",     "find",     "time",     "which",      "seq",      "sort",
-    "uniq",    "cpuid",  "cr",       "rflags",   "tsc",      "hpet",     "ticks",      "msr",      "lapic",
-    "smp",     "lspci",  "heap",     "paging",   "fb",       "kbdstats", "mousestats", "loglevel", "logcolor",
-    "getenv",  "yield",  "reboot",   "halt",     "uname",    "whoami",   "hostname",   "pwd",      "true",
-    "false",   "mount",  "lsmod",    "lsblk",    "lsgpt",    "free",     "ps",         "spawn",    "readelf",
-    "hexdump", "stat",   "basename", "dirname",  "cal",      "sleep",    "reset",      "tac",      "nl",
-    "rev",     "expr",   "color",    "rand",     "flushtlb", "checksum", "repeat",     "kill",     "exec",
-    "metrics", "trace",  "read",     "guard",    "top",      "fatcat",   "fatls",      "fatwrite", "fatappend",
-    "fatnew",  "fatrm",  "fattrunc", "fatmkdir", "fatrmdir",
+    "help",    "about",  "version",  "clear",    "uptime",   "date",      "windows",    "mode",     "ls",
+    "cat",     "touch",  "rm",       "echo",     "cp",       "mv",        "wc",         "head",     "tail",
+    "dmesg",   "stats",  "mem",      "history",  "set",      "unset",     "env",        "alias",    "unalias",
+    "sysinfo", "source", "man",      "grep",     "find",     "time",      "which",      "seq",      "sort",
+    "uniq",    "cpuid",  "cr",       "rflags",   "tsc",      "hpet",      "ticks",      "msr",      "lapic",
+    "smp",     "lspci",  "heap",     "paging",   "fb",       "kbdstats",  "mousestats", "loglevel", "logcolor",
+    "getenv",  "yield",  "reboot",   "halt",     "uname",    "whoami",    "hostname",   "pwd",      "true",
+    "false",   "mount",  "lsmod",    "lsblk",    "lsgpt",    "free",      "ps",         "spawn",    "readelf",
+    "hexdump", "stat",   "basename", "dirname",  "cal",      "sleep",     "reset",      "tac",      "nl",
+    "rev",     "expr",   "color",    "rand",     "flushtlb", "checksum",  "repeat",     "kill",     "exec",
+    "metrics", "trace",  "read",     "guard",    "top",      "fatcat",    "fatls",      "fatwrite", "fatappend",
+    "fatnew",  "fatrm",  "fattrunc", "fatmkdir", "fatrmdir", "linuxexec",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -2807,6 +2808,71 @@ void CmdFatrmdir(customos::u32 argc, char** argv)
         return;
     }
     ConsoleWrite("FATRMDIR: REMOVED ");
+    ConsoleWriteln(path);
+}
+
+void CmdLinuxexec(customos::u32 argc, char** argv)
+{
+    // `linuxexec <path>` — read an ELF file from FAT32 volume 0,
+    // hand the bytes to core::SpawnElfLinux, and queue the result
+    // as a ring-3 task. A simple way to run "any Linux binary the
+    // loader supports" once it's on disk. Accepts either a
+    // volume-relative ("LINUX.ELF") or mount-prefixed
+    // ("/fat/LINUX.ELF") path.
+    namespace fat = customos::fs::fat32;
+    if (argc < 2)
+    {
+        ConsoleWriteln("LINUXEXEC: USAGE: LINUXEXEC PATH");
+        return;
+    }
+    const char* path = argv[1];
+    if (const char* leaf = FatLeaf(path); leaf != nullptr && *leaf != '\0')
+    {
+        path = leaf;
+    }
+    else if (path[0] == '/')
+    {
+        ++path;
+    }
+    const fat::Volume* v = fat::Fat32Volume(0);
+    if (v == nullptr)
+    {
+        ConsoleWriteln("LINUXEXEC: FAT32 NOT MOUNTED");
+        return;
+    }
+    fat::DirEntry entry;
+    if (!fat::Fat32LookupPath(v, path, &entry))
+    {
+        ConsoleWrite("LINUXEXEC: NO SUCH FILE: ");
+        ConsoleWriteln(path);
+        return;
+    }
+    if (entry.attributes & 0x10)
+    {
+        ConsoleWriteln("LINUXEXEC: PATH IS A DIRECTORY");
+        return;
+    }
+    // 16 KiB cap fits the v0 smoke ELF (~260 B) with plenty of
+    // headroom. Larger binaries will hit the cap — expand once a
+    // non-trivial musl program needs more.
+    static customos::u8 elf_buf[16384];
+    const customos::i64 n = fat::Fat32ReadFile(v, &entry, elf_buf, sizeof(elf_buf));
+    if (n <= 0)
+    {
+        ConsoleWriteln("LINUXEXEC: READ ERROR OR EMPTY");
+        return;
+    }
+    const customos::u64 pid = customos::core::SpawnElfLinux(
+        "linuxexec", elf_buf, static_cast<customos::u64>(n), customos::core::CapSetEmpty(),
+        customos::fs::RamfsSandboxRoot(), /*frame_budget=*/16, customos::core::kTickBudgetSandbox);
+    if (pid == 0)
+    {
+        ConsoleWriteln("LINUXEXEC: SPAWNELFLINUX FAILED");
+        return;
+    }
+    ConsoleWrite("LINUXEXEC: SPAWNED PID=");
+    WriteU64Dec(pid);
+    ConsoleWrite(" PATH=");
     ConsoleWriteln(path);
 }
 
@@ -5486,6 +5552,11 @@ void Dispatch(char* line)
     if (StrEq(cmd, "fatrmdir"))
     {
         CmdFatrmdir(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "linuxexec"))
+    {
+        CmdLinuxexec(argc, argv);
         return;
     }
     if (StrEq(cmd, "free"))

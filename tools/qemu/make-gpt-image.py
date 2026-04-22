@@ -91,6 +91,107 @@ FAT_BIG_SFN = b"BIG     TXT"
 FAT_BIG_SIZE = 6000
 FAT_BIG_BODY = bytes((0x20 + (i % 95)) for i in range(FAT_BIG_SIZE))
 
+# Linux-ABI ELF binary. Exercises the "real binary off disk"
+# path: kernel reads this file from FAT32, passes the bytes to
+# SpawnElfLinux, which parses the ELF and creates a ring-3
+# Linux-ABI task. Same payload as subsystems/linux/ring3_smoke.cpp
+# — mmap 4 KiB, write "MOK\n" into it, write a static message,
+# exit_group(0x42). Kept in the image at cluster 9 (first free
+# cluster after the other seeded files).
+FAT_ELF_CLUSTER = 9
+FAT_ELF_SFN = b"LINUX   ELF"
+
+# Inline machine code — byte-identical to kPayload in
+# kernel/subsystems/linux/ring3_smoke.cpp. Any edit there must
+# be mirrored here (the kernel and the on-disk binary are
+# independent copies of the same bytes).
+LINUX_ELF_PAYLOAD = bytes([
+    # mmap(NULL, 4096, 3, 0x22, -1, 0)
+    0xB8, 0x09, 0x00, 0x00, 0x00,            # mov eax, 9
+    0x31, 0xFF,                              # xor edi, edi
+    0xBE, 0x00, 0x10, 0x00, 0x00,            # mov esi, 0x1000
+    0xBA, 0x03, 0x00, 0x00, 0x00,            # mov edx, 3
+    0x41, 0xBA, 0x22, 0x00, 0x00, 0x00,      # mov r10d, 0x22
+    0x41, 0xB8, 0xFF, 0xFF, 0xFF, 0xFF,      # mov r8d, -1
+    0x45, 0x31, 0xC9,                        # xor r9d, r9d
+    0x0F, 0x05,                              # syscall
+    0x49, 0x89, 0xC4,                        # mov r12, rax
+    0x41, 0xC6, 0x04, 0x24, 0x4D,            # mov [r12],   'M'
+    0x41, 0xC6, 0x44, 0x24, 0x01, 0x4F,      # mov [r12+1], 'O'
+    0x41, 0xC6, 0x44, 0x24, 0x02, 0x4B,      # mov [r12+2], 'K'
+    0x41, 0xC6, 0x44, 0x24, 0x03, 0x0A,      # mov [r12+3], '\n'
+    # write(1, r12, 4)
+    0xB8, 0x01, 0x00, 0x00, 0x00,
+    0xBF, 0x01, 0x00, 0x00, 0x00,
+    0x4C, 0x89, 0xE6,
+    0xBA, 0x04, 0x00, 0x00, 0x00,
+    0x0F, 0x05,
+    # write(1, msg, 13)
+    0xB8, 0x01, 0x00, 0x00, 0x00,
+    0xBF, 0x01, 0x00, 0x00, 0x00,
+    0x48, 0x8D, 0x35, 0x15, 0x00, 0x00, 0x00,  # lea rsi, [rip+0x15]
+    0xBA, 0x0D, 0x00, 0x00, 0x00,
+    0x0F, 0x05,
+    # exit_group(0x42)
+    0xB8, 0xE7, 0x00, 0x00, 0x00,
+    0xBF, 0x42, 0x00, 0x00, 0x00,
+    0x0F, 0x05,
+    0x0F, 0x0B,                              # ud2
+]) + b"hello fat32!\n"                       # msg (13 bytes, distinct from in-memory smoke)
+
+
+def build_linux_elf():
+    """Wrap LINUX_ELF_PAYLOAD in a minimal ELF64 image.
+
+    Mirrors kernel/subsystems/linux/ring3_smoke.cpp::BuildLinuxElf:
+      ehdr (64 B) + one PT_LOAD phdr (56 B) + payload.
+    p_vaddr = 0x400078, p_offset = 120 — both mod 0x1000 == 120,
+    so the kernel ElfLoader's alignment check passes without
+    padding the file to a real 4 KiB boundary.
+    """
+    ehdr_size = 64
+    phdr_size = 56
+    p_offset = ehdr_size + phdr_size     # 120
+    p_vaddr = 0x0000000000400078
+    payload = LINUX_ELF_PAYLOAD
+    buf = bytearray(ehdr_size + phdr_size + len(payload))
+
+    # ehdr
+    buf[0:4] = b"\x7FELF"
+    buf[4] = 2                           # ELFCLASS64
+    buf[5] = 1                           # ELFDATA2LSB
+    buf[6] = 1                           # EV_CURRENT
+    buf[7] = 0                           # ELFOSABI_SYSV
+    struct.pack_into("<H", buf, 16, 2)   # e_type = ET_EXEC
+    struct.pack_into("<H", buf, 18, 0x3E)# e_machine = EM_X86_64
+    struct.pack_into("<I", buf, 20, 1)   # e_version
+    struct.pack_into("<Q", buf, 24, p_vaddr)       # e_entry
+    struct.pack_into("<Q", buf, 32, ehdr_size)     # e_phoff
+    struct.pack_into("<Q", buf, 40, 0)             # e_shoff
+    struct.pack_into("<I", buf, 48, 0)             # e_flags
+    struct.pack_into("<H", buf, 52, ehdr_size)     # e_ehsize
+    struct.pack_into("<H", buf, 54, phdr_size)     # e_phentsize
+    struct.pack_into("<H", buf, 56, 1)             # e_phnum
+
+    # phdr at offset ehdr_size
+    base = ehdr_size
+    struct.pack_into("<I", buf, base + 0,  1)      # p_type = PT_LOAD
+    struct.pack_into("<I", buf, base + 4,  0x05)   # p_flags = PF_R | PF_X
+    struct.pack_into("<Q", buf, base + 8,  p_offset)
+    struct.pack_into("<Q", buf, base + 16, p_vaddr)
+    struct.pack_into("<Q", buf, base + 24, p_vaddr)
+    struct.pack_into("<Q", buf, base + 32, len(payload))  # p_filesz
+    struct.pack_into("<Q", buf, base + 40, len(payload))  # p_memsz
+    struct.pack_into("<Q", buf, base + 48, 0x1000)        # p_align
+
+    # payload
+    buf[p_offset:p_offset + len(payload)] = payload
+    return bytes(buf)
+
+
+FAT_ELF_BODY = build_linux_elf()
+FAT_ELF_SIZE = len(FAT_ELF_BODY)
+
 
 def sfn_checksum(sfn11: bytes) -> int:
     """FAT LFN 11-byte-SFN checksum (spec 7.2, Appendix A)."""
@@ -250,6 +351,7 @@ def build_fat32(part_sector_count: int) -> bytearray:
     struct.pack_into("<I", fat, 6 * 4, 0x0FFFFFFF)  # /LongFile.txt EOC
     struct.pack_into("<I", fat, 7 * 4, 8)           # /BIG.TXT cluster 7 -> 8
     struct.pack_into("<I", fat, 8 * 4, 0x0FFFFFFF)  # /BIG.TXT EOC
+    struct.pack_into("<I", fat, 9 * 4, 0x0FFFFFFF)  # /LINUX.ELF EOC
     fat1_off = FAT_RESERVED * SECTOR
     fat2_off = fat1_off + FAT_FATSZ * SECTOR
     buf[fat1_off:fat1_off + len(fat)] = fat
@@ -353,6 +455,20 @@ def build_fat32(part_sector_count: int) -> bytearray:
     big_cluster_sector = data_start_sector + (FAT_BIG_CLUSTER - 2) * FAT_SPC
     big_off = big_cluster_sector * SECTOR
     buf[big_off:big_off + len(FAT_BIG_BODY)] = FAT_BIG_BODY
+
+    # LINUX.ELF SFN entry in the root (5th non-dot entry).
+    elf_sfn = bytearray(32)
+    elf_sfn[0:11] = FAT_ELF_SFN
+    elf_sfn[11] = 0x20
+    struct.pack_into("<H", elf_sfn, 20, 0)
+    struct.pack_into("<H", elf_sfn, 26, FAT_ELF_CLUSTER)
+    struct.pack_into("<I", elf_sfn, 28, FAT_ELF_SIZE)
+    buf[root_off + 160:root_off + 192] = elf_sfn
+
+    # LINUX.ELF data at cluster 9.
+    elf_cluster_sector = data_start_sector + (FAT_ELF_CLUSTER - 2) * FAT_SPC
+    elf_off = elf_cluster_sector * SECTOR
+    buf[elf_off:elf_off + FAT_ELF_SIZE] = FAT_ELF_BODY
 
     return buf
 
