@@ -238,6 +238,23 @@ __declspec(dllimport) HANDLE __stdcall CreateMutexW(SECURITY_ATTRIBUTES* lpMutex
                                                     LPCWSTR lpName);
 __declspec(dllimport) BOOL __stdcall ReleaseMutex(HANDLE hMutex);
 
+// Batch 27 — console APIs. WriteConsoleW writes UTF-16 text
+// to a console handle (we route to stdout via SYS_WRITE after
+// stripping to ASCII low-bytes). GetConsoleMode returns a
+// plausible flag combo (VT processing on). GetConsoleCP
+// returns 65001 (CP_UTF8). OutputDebugStringW is a debugger-
+// notification no-op.
+__declspec(dllimport) BOOL __stdcall WriteConsoleW(HANDLE hConsoleOutput, const void* lpBuffer,
+                                                   DWORD nNumberOfCharsToWrite, LPDWORD lpNumberOfCharsWritten,
+                                                   void* lpReserved);
+__declspec(dllimport) BOOL __stdcall GetConsoleMode(HANDLE hConsoleHandle, LPDWORD lpMode);
+__declspec(dllimport) BOOL __stdcall SetConsoleMode(HANDLE hConsoleHandle, DWORD dwMode);
+__declspec(dllimport) unsigned int __stdcall GetConsoleCP(void);
+__declspec(dllimport) unsigned int __stdcall GetConsoleOutputCP(void);
+__declspec(dllimport) BOOL __stdcall SetConsoleCP(unsigned int wCodePageID);
+__declspec(dllimport) BOOL __stdcall SetConsoleOutputCP(unsigned int wCodePageID);
+__declspec(dllimport) void __stdcall OutputDebugStringW(LPCWSTR lpOutputString);
+
 static const char kMsg[] = "[hello-winapi] printed via kernel32.WriteFile!\n";
 #define kMsgLen ((DWORD)(sizeof(kMsg) - 1))
 
@@ -775,6 +792,47 @@ void _start(void)
         WriteFile(out, b26_ok, sizeof(b26_ok) - 1, &b26w, 0);
     else
         WriteFile(out, b26_bad, sizeof(b26_bad) - 1, &b26w, 0);
+
+    // Batch 27 exercise — console APIs.
+    //
+    // Invariants checked:
+    //   * WriteConsoleW prints the wide-stripped message to
+    //     stdout (visible in the serial log).
+    //   * WriteConsoleW writes back the wide-char count to
+    //     *lpCharsOut (should equal the input count).
+    //   * GetConsoleMode returns TRUE and writes a non-zero
+    //     mode (expect VT processing bit set = 0x7).
+    //   * SetConsoleMode returns TRUE (no-op).
+    //   * GetConsoleCP returns 65001 (CP_UTF8).
+    //   * GetConsoleOutputCP returns 65001.
+    //   * SetConsoleOutputCP returns TRUE.
+    //   * OutputDebugStringW doesn't crash (silent no-op).
+    static const WCHAR kConsoleMsg[] = {'[', 'b', 'a', 't', 'c', 'h', '2', '7', ']', ' ', 'W',  'r', 'i', 't',
+                                        'e', 'C', 'o', 'n', 's', 'o', 'l', 'e', 'W', ' ', 'h',  'e', 'l', 'l',
+                                        'o', ' ', 'U', 'n', 'i', 'c', 'o', 'd', 'e', '!', '\n', 0};
+    const DWORD kConsoleLen = 39; // excludes terminating NUL
+    DWORD b27_chars_written = 0;
+    BOOL b27_wc_ok = WriteConsoleW(out, kConsoleMsg, kConsoleLen, &b27_chars_written, 0);
+
+    DWORD b27_mode = 0;
+    BOOL b27_gm_ok = GetConsoleMode(out, &b27_mode);
+    BOOL b27_sm_ok = SetConsoleMode(out, b27_mode); // echo back
+    unsigned int b27_cp = GetConsoleCP();
+    unsigned int b27_ocp = GetConsoleOutputCP();
+    BOOL b27_scp_ok = SetConsoleOutputCP(65001);
+
+    static const WCHAR kDbgMsg[] = {'d', 'b', 'g', 0};
+    OutputDebugStringW(kDbgMsg); // silent, must not crash
+
+    const char b27_ok[] = "[batch27] console APIs OK\n";
+    const char b27_bad[] = "[batch27] console APIs FAILED invariants\n";
+    BOOL b27_pass = b27_wc_ok && b27_chars_written == kConsoleLen && b27_gm_ok && b27_mode != 0 && b27_sm_ok &&
+                    b27_cp == 65001 && b27_ocp == 65001 && b27_scp_ok;
+    DWORD b27w = 0;
+    if (b27_pass)
+        WriteFile(out, b27_ok, sizeof(b27_ok) - 1, &b27w, 0);
+    else
+        WriteFile(out, b27_bad, sizeof(b27_bad) - 1, &b27w, 0);
 
     // Batch 3 round-trip: store a distinctive value via
     // SetLastError, read it back via GetLastError, exit with

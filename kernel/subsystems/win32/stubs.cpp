@@ -99,6 +99,9 @@ constexpr u32 kOffGetModuleHandleW = 0x3AE;   // batch 25 — 17 bytes
 constexpr u32 kOffCreateMutexW = 0x3BF;       // batch 26 — 13 bytes
 constexpr u32 kOffWaitForObj = 0x3CC;         // batch 26 — 38 bytes (mutex-aware)
 constexpr u32 kOffReleaseMutex = 0x3F2;       // batch 26 — 24 bytes
+constexpr u32 kOffWriteConsoleW = 0x40A;      // batch 27 — 96 bytes (UTF-16 strip + SYS_WRITE)
+constexpr u32 kOffGetConsoleMode = 0x46A;     // batch 27 — 12 bytes
+constexpr u32 kOffGetConsoleCP = 0x476;       // batch 27 — 6 bytes
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -1197,10 +1200,88 @@ constexpr u8 kStubsBytes[] = {
     0x0F, 0xB6, 0xC1,             // 0x405 movzx eax, cl
     0x5F,                         // 0x408 pop rdi
     0xC3,                         // 0x409 ret
+
+    // === Batch 27: console APIs ================================
+
+    // --- WriteConsoleW (offset 0x40A, 96 bytes) ---------------
+    // Win32: BOOL WriteConsoleW(HANDLE rcx, const void* rdx,
+    //          DWORD nChars=r8, LPDWORD lpCharsOut=r9,
+    //          LPVOID lpReserved=[rsp+0x28]).
+    //
+    // Strips UTF-16LE to low-byte ASCII on a 512-byte stack
+    // buffer (capped — longer writes truncate), then routes
+    // through SYS_WRITE(fd=1). Stores wide-char count to
+    // *lpCharsOut if non-NULL. Returns TRUE always — SYS_WRITE
+    // to stdout is gated only by kCapSerialConsole, and a
+    // denial there is flagged upstream via the denial counter.
+    //
+    // Saves RDI / RSI / R12 / R13 — all callee-saved in Win32
+    // x64 ABI. R12/R13 used as scratch for count + out-ptr
+    // preservation across the syscall.
+    0x57,                                     // 0x40A push rdi
+    0x56,                                     // 0x40B push rsi
+    0x41, 0x54,                               // 0x40C push r12
+    0x41, 0x55,                               // 0x40E push r13
+    0x48, 0x81, 0xEC, 0x08, 0x02, 0x00, 0x00, // 0x410 sub rsp, 0x208  ; 512-byte ASCII buf + 8 pad
+    0x48, 0x89, 0xE7,                         // 0x417 mov rdi, rsp    ; dst
+    0x48, 0x89, 0xD6,                         // 0x41A mov rsi, rdx    ; src (wide)
+    0x4D, 0x89, 0xC4,                         // 0x41D mov r12, r8     ; nChars (save)
+    0x4D, 0x89, 0xCD,                         // 0x420 mov r13, r9     ; lpCharsOut (save)
+    0x31, 0xC9,                               // 0x423 xor ecx, ecx    ; i = 0
+    // .loop:
+    0x4C, 0x39, 0xE1,                         // 0x425 cmp rcx, r12    ; i < count?
+    0x73, 0x15,                               // 0x428 jae .done (+0x15)
+    0x48, 0x81, 0xF9, 0x00, 0x02, 0x00, 0x00, // 0x42A cmp rcx, 0x200  ; i < 512?
+    0x73, 0x0C,                               // 0x431 jae .done (+0x0C)
+    0x0F, 0xB7, 0x04, 0x4E,                   // 0x433 movzx eax, word [rsi+rcx*2]
+    0x88, 0x04, 0x0F,                         // 0x437 mov [rdi+rcx], al
+    0x48, 0xFF, 0xC1,                         // 0x43A inc rcx
+    0xEB, 0xE6,                               // 0x43D jmp .loop (-0x1A)
+    // .done: rcx = actual ASCII byte count
+    0x48, 0x89, 0xCA,             // 0x43F mov rdx, rcx    ; len for SYS_WRITE
+    0x48, 0x89, 0xFE,             // 0x442 mov rsi, rdi    ; buf = ASCII dst
+    0xBF, 0x01, 0x00, 0x00, 0x00, // 0x445 mov edi, 1      ; fd = stdout
+    0xB8, 0x02, 0x00, 0x00, 0x00, // 0x44A mov eax, 2      ; SYS_WRITE
+    0xCD, 0x80,                   // 0x44F int 0x80
+    0x4D, 0x85, 0xED,             // 0x451 test r13, r13   ; lpCharsOut != NULL?
+    0x74, 0x04,                   // 0x454 jz .skip (+4)
+    0x45, 0x89, 0x65, 0x00,       // 0x456 mov [r13+0], r12d   ; store wide-char count
+    // .skip:
+    0x48, 0x81, 0xC4, 0x08, 0x02, 0x00, 0x00, // 0x45A add rsp, 0x208
+    0x41, 0x5D,                               // 0x461 pop r13
+    0x41, 0x5C,                               // 0x463 pop r12
+    0x5E,                                     // 0x465 pop rsi
+    0x5F,                                     // 0x466 pop rdi
+    0xB0, 0x01,                               // 0x467 mov al, 1       ; BOOL TRUE
+    0xC3,                                     // 0x469 ret
+
+    // --- GetConsoleMode (offset 0x46A, 12 bytes) --------------
+    // Win32: BOOL GetConsoleMode(HANDLE rcx, DWORD* rdx).
+    // Returns a plausible flag combination —
+    //   ENABLE_PROCESSED_OUTPUT (0x1) | ENABLE_WRAP_AT_EOL (0x2) |
+    //   ENABLE_VIRTUAL_TERMINAL_PROCESSING (0x4) = 0x7.
+    // Callers that query-then-modify + SetConsoleMode round-trip
+    // see the mode they set (SetConsoleMode is kOffReturnOne, so
+    // the write is a no-op; the next Get returns the same
+    // constant). Good enough for v0 — modern terminal-aware
+    // tools see "VT processing is on, so emit escape codes" and
+    // that's what our serial sink wants anyway.
+    0xC7, 0x02, 0x07, 0x00, 0x00, 0x00, // 0x46A mov dword [rdx], 7
+    0xB8, 0x01, 0x00, 0x00, 0x00,       // 0x470 mov eax, 1 (BOOL TRUE)
+    0xC3,                               // 0x475 ret
+
+    // --- GetConsoleCP / GetConsoleOutputCP (offset 0x476, 6 bytes) --
+    // Win32: UINT GetConsoleCP(void). Returns the input code page.
+    // We report CP_UTF8 = 65001 = 0xFDE9, which matches modern
+    // Windows default (post-2019 "beta: use UTF-8") and tells
+    // callers their wide-char strings have already been decoded
+    // on our side. Aliased for GetConsoleOutputCP below.
+    0xB8, 0xE9, 0xFD, 0x00, 0x00, // 0x476 mov eax, 65001 (CP_UTF8)
+    0xC3,                         // 0x47B ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x40A, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0x47C, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -1395,6 +1476,27 @@ constexpr StubEntry kStubsTable[] = {
     {"kernel32.dll", "WaitForSingleObject", kOffWaitForObj},
     {"kernel32.dll", "WaitForSingleObjectEx", kOffWaitForObj},
     {"kernel32.dll", "ReleaseMutex", kOffReleaseMutex},
+
+    // Batch 27 — console APIs. WriteConsoleW is the major
+    // Unicode-output entry point; the stub UTF-16-strips to
+    // ASCII on a stack buffer and routes through SYS_WRITE
+    // (same path as WriteFile-to-stdout). GetConsoleMode /
+    // GetConsoleCP / GetConsoleOutputCP hand back plausible
+    // constants (VT processing enabled, UTF-8 code page). The
+    // Set* counterparts are no-ops that return TRUE.
+    {"kernel32.dll", "WriteConsoleW", kOffWriteConsoleW},
+    {"kernel32.dll", "GetConsoleMode", kOffGetConsoleMode},
+    {"kernel32.dll", "SetConsoleMode", kOffReturnOne},
+    {"kernel32.dll", "GetConsoleCP", kOffGetConsoleCP},
+    {"kernel32.dll", "GetConsoleOutputCP", kOffGetConsoleCP},
+    {"kernel32.dll", "SetConsoleCP", kOffReturnOne},
+    {"kernel32.dll", "SetConsoleOutputCP", kOffReturnOne},
+    // OutputDebugString* is a debugger-notification call. Real
+    // Windows silently drops when no debugger is attached. We
+    // do the same — kOffReturnZero returns 0 as a `void` sink
+    // (both signatures: LPCWSTR / LPCSTR, no return).
+    {"kernel32.dll", "OutputDebugStringW", kOffReturnZero},
+    {"kernel32.dll", "OutputDebugStringA", kOffReturnZero},
 
     // Batch 9 — Win32 process heap, backed by the per-process
     // 16-page region at 0x50000000 and SYS_HEAP_ALLOC /

@@ -93,3 +93,12 @@ EXPORTS
     ; Batch 26 — Win32 mutex (real waitqueue-backed)
     CreateMutexW
     ReleaseMutex
+    ; Batch 27 — console APIs
+    WriteConsoleW
+    GetConsoleMode
+    SetConsoleMode
+    GetConsoleCP
+    GetConsoleOutputCP
+    SetConsoleCP
+    SetConsoleOutputCP
+    OutputDebugStringW
