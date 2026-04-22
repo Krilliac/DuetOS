@@ -228,6 +228,12 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     SerialWrite("[boot] Seeding kernel entropy pool.\n");
     customos::core::RandomInit();
     customos::core::RandomSelfTest();
+    // NOTE: stack-canary randomization (RandomizeStackCanary) is
+    // not safe to invoke from here — a previous attempt tripped
+    // __stack_chk_fail because some function currently holding an
+    // OLD canary on its frame returns before kernel_main does.
+    // Keeping the compile-time constant for now; revisit once we
+    // have a "last function before scheduler-enter" callback.
 
     SerialWrite("[boot] Installing kernel GDT.\n");
     GdtInit();
