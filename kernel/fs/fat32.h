@@ -114,6 +114,19 @@ u32 Fat32ListDirByCluster(const Volume* v, u32 first_cluster, DirEntry* out, u32
 /// undefined-behaviour warnings clang emits at -O3.
 i64 Fat32ReadFile(const Volume* v, const DirEntry* e, void* out, u64 max);
 
+/// Callback signature for Fat32ReadFileStream. `data` points into
+/// internal scratch — valid only for the duration of the call.
+/// Returning false stops the stream cleanly.
+using ReadChunkCb = bool (*)(const u8* data, u64 len, void* ctx);
+
+/// Stream a file's contents cluster-by-cluster, calling `cb` once
+/// per cluster with the valid byte count (trimmed to the file's
+/// size on the last cluster). Good for piping to the console or
+/// a network socket without needing to allocate a size-of-file
+/// buffer. Returns true on clean completion OR when cb stops the
+/// walk; false on I/O error.
+bool Fat32ReadFileStream(const Volume* v, const DirEntry* e, ReadChunkCb cb, void* ctx);
+
 /// Boot-time self-test. Calls `Fat32Probe` on every registered
 /// block device; partitions that aren't FAT32 are expected to fail
 /// and are logged as "not FAT32" (no failure shout). PASS

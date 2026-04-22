@@ -2398,21 +2398,38 @@ void CmdFatcat(customos::u32 argc, char** argv)
         ConsoleWriteln(name);
         return;
     }
-    static customos::u8 buf[4096];
-    const customos::i64 n = fat::Fat32ReadFile(v, e, buf, sizeof(buf));
-    if (n < 0)
+    // Streamed; no size cap. Non-printable bytes collapse to '.'
+    // so operator-driven cat doesn't spray garbage on the console.
+    struct StreamCtx
+    {
+        u8 last_byte;
+        bool any;
+    };
+    StreamCtx ctx{0, false};
+    const bool ok = fat::Fat32ReadFileStream(
+        v, e,
+        [](const customos::u8* data, customos::u64 len, void* cx) -> bool
+        {
+            auto* s = static_cast<StreamCtx*>(cx);
+            for (customos::u64 i = 0; i < len; ++i)
+            {
+                const char c = static_cast<char>(data[i]);
+                ConsoleWriteChar((c >= 0x20 && c <= 0x7E) || c == '\n' || c == '\r' || c == '\t' ? c : '.');
+            }
+            if (len > 0)
+            {
+                s->last_byte = data[len - 1];
+                s->any = true;
+            }
+            return true;
+        },
+        &ctx);
+    if (!ok)
     {
         ConsoleWriteln("FATCAT: READ ERROR");
         return;
     }
-    for (customos::i64 i = 0; i < n; ++i)
-    {
-        const char c = static_cast<char>(buf[i]);
-        ConsoleWriteChar((c >= 0x20 && c <= 0x7E) || c == '\n' || c == '\r' || c == '\t' ? c : '.');
-    }
-    // Ensure the shell prompt starts on a fresh line even if the
-    // file didn't end with a newline.
-    if (n == 0 || buf[n - 1] != '\n')
+    if (!ctx.any || ctx.last_byte != '\n')
     {
         ConsoleWriteln("");
     }
@@ -4341,22 +4358,40 @@ void CmdCat(u32 argc, char** argv)
             ConsoleWriteln(path);
             return;
         }
-        // Reuse the 4 KiB static buffer pattern from `fatcat`; the
-        // shell only ever runs one command at a time so concurrent
-        // access isn't a concern. Files larger than 4 KiB get
-        // truncated — the streamed-read follow-up slice lifts this.
-        static u8 buf[4096];
-        const i64 n = fat::Fat32ReadFile(v, &entry, buf, sizeof(buf));
-        if (n < 0)
+        // Stream cluster-by-cluster so files larger than scratch
+        // (4 KiB) are not truncated. The driver streams 4 KiB per
+        // chunk; ConsoleWriteChar handles each byte synchronously,
+        // so the chunk pointer (into FAT scratch) stays valid
+        // for the whole callback.
+        struct StreamCtx
+        {
+            u8 last_byte;
+            bool any;
+        };
+        StreamCtx ctx{0, false};
+        const bool ok = fat::Fat32ReadFileStream(
+            v, &entry,
+            [](const customos::u8* data, customos::u64 len, void* cx) -> bool
+            {
+                auto* s = static_cast<StreamCtx*>(cx);
+                for (customos::u64 i = 0; i < len; ++i)
+                {
+                    ConsoleWriteChar(static_cast<char>(data[i]));
+                }
+                if (len > 0)
+                {
+                    s->last_byte = data[len - 1];
+                    s->any = true;
+                }
+                return true;
+            },
+            &ctx);
+        if (!ok)
         {
             ConsoleWriteln("CAT: READ ERROR");
             return;
         }
-        for (i64 i = 0; i < n; ++i)
-        {
-            ConsoleWriteChar(static_cast<char>(buf[i]));
-        }
-        if (n == 0 || buf[n - 1] != '\n')
+        if (!ctx.any || ctx.last_byte != '\n')
         {
             ConsoleWriteChar('\n');
         }

@@ -641,6 +641,44 @@ i64 Fat32ReadFile(const Volume* v, const DirEntry* e, void* out, u64 max)
     return static_cast<i64>(written);
 }
 
+bool Fat32ReadFileStream(const Volume* v, const DirEntry* e, ReadChunkCb cb, void* ctx)
+{
+    if (v == nullptr || e == nullptr || cb == nullptr)
+        return false;
+    if (e->size_bytes == 0 || e->first_cluster < 2)
+        return true;
+
+    const u64 cluster_bytes = u64(v->sectors_per_cluster) * u64(v->bytes_per_sector);
+    u64 remaining = e->size_bytes;
+    u32 cluster = e->first_cluster;
+
+    for (u32 step = 0; step < 65536; ++step)
+    {
+        if (cluster < 2 || cluster >= 0x0FFFFFF8u)
+            break;
+        if (remaining == 0)
+            break;
+        if (v->sectors_per_cluster > sizeof(g_scratch) / 512)
+            return false; // cluster bigger than our scratch page
+
+        const u64 lba = u64(v->data_start_sector) + u64(cluster - 2) * u64(v->sectors_per_cluster);
+        if (drivers::storage::BlockDeviceRead(v->block_handle, lba, v->sectors_per_cluster, g_scratch) != 0)
+        {
+            return false;
+        }
+        const u64 chunk = (remaining < cluster_bytes) ? remaining : cluster_bytes;
+        if (!cb(g_scratch, chunk, ctx))
+            return true; // caller asked us to stop — not an error
+        remaining -= chunk;
+        if (remaining == 0)
+            break;
+        // ReadFatEntry clobbers g_scratch; cb returned already so
+        // the just-streamed bytes are safe to overwrite.
+        cluster = ReadFatEntry(*v, cluster);
+    }
+    return true;
+}
+
 void Fat32SelfTest()
 {
     KLOG_TRACE_SCOPE("fs/fat32", "Fat32SelfTest");
@@ -789,6 +827,69 @@ void Fat32SelfTest()
         }
     }
     SerialWrite("[fs/fat32] self-test OK (LFN /LongFile.txt decoded + verified)\n");
+
+    // Fourth phase: streamed read across multiple clusters. The
+    // image-builder seeds /BIG.TXT as 6000 bytes of a printable-
+    // ASCII pattern spanning clusters 7+8.
+    DirEntry big;
+    if (!Fat32LookupPath(v0, "/BIG.TXT", &big))
+    {
+        SerialWrite("[fs/fat32] self-test WARN: /BIG.TXT not found\n");
+        return;
+    }
+    struct StreamCtx
+    {
+        u64 total;
+        u8 first_byte;
+        u8 last_byte;
+        u8 byte_4095;
+        u8 byte_4096;
+        bool captured_first;
+    };
+    StreamCtx sc{0, 0, 0, 0, 0, false};
+    const bool stream_ok = Fat32ReadFileStream(
+        v0, &big,
+        [](const u8* data, u64 len, void* ctx) -> bool
+        {
+            auto* s = static_cast<StreamCtx*>(ctx);
+            if (!s->captured_first && len > 0)
+            {
+                s->first_byte = data[0];
+                s->captured_first = true;
+            }
+            // Boundary bytes. `data` is this cluster's first byte,
+            // so the absolute offset of data[i] is `s->total + i`.
+            for (u64 i = 0; i < len; ++i)
+            {
+                const u64 abs = s->total + i;
+                if (abs == 4095)
+                    s->byte_4095 = data[i];
+                if (abs == 4096)
+                    s->byte_4096 = data[i];
+            }
+            s->total += len;
+            if (len > 0)
+                s->last_byte = data[len - 1];
+            return true;
+        },
+        &sc);
+    if (!stream_ok)
+    {
+        SerialWrite("[fs/fat32] self-test FAILED: /BIG.TXT stream read error\n");
+        return;
+    }
+    // Expected pattern: byte i = 0x20 + (i % 95).
+    const u8 exp_first = 0x20 + (0 % 95);
+    const u8 exp_4095 = 0x20 + (4095 % 95);
+    const u8 exp_4096 = 0x20 + (4096 % 95);
+    const u8 exp_last = 0x20 + (5999 % 95);
+    if (sc.total != 6000 || sc.first_byte != exp_first || sc.byte_4095 != exp_4095 || sc.byte_4096 != exp_4096 ||
+        sc.last_byte != exp_last)
+    {
+        SerialWrite("[fs/fat32] self-test FAILED: /BIG.TXT pattern mismatch\n");
+        return;
+    }
+    SerialWrite("[fs/fat32] self-test OK (streamed /BIG.TXT 6000 B across clusters)\n");
 }
 
 } // namespace customos::fs::fat32

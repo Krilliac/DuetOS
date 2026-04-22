@@ -81,6 +81,16 @@ FAT_LONG_SFN = b"LONGFI~1TXT"
 FAT_LONG_LONGNAME = "LongFile.txt"
 FAT_LONG_BODY = b"long filename file\n"
 
+# Multi-cluster file so the kernel's streamed-read exercises the
+# cluster-chain follow path. 6000 bytes spans clusters 7+8 at
+# 4 KiB per cluster. Content is deterministic printable-ASCII:
+# byte i = 0x20 + (i % 95). Self-test samples byte 0, byte 4095
+# (end of first cluster) and byte 5999 (final byte).
+FAT_BIG_CLUSTER = 7
+FAT_BIG_SFN = b"BIG     TXT"
+FAT_BIG_SIZE = 6000
+FAT_BIG_BODY = bytes((0x20 + (i % 95)) for i in range(FAT_BIG_SIZE))
+
 
 def sfn_checksum(sfn11: bytes) -> int:
     """FAT LFN 11-byte-SFN checksum (spec 7.2, Appendix A)."""
@@ -238,6 +248,8 @@ def build_fat32(part_sector_count: int) -> bytearray:
     struct.pack_into("<I", fat, 4 * 4, 0x0FFFFFFF)  # /SUB directory EOC
     struct.pack_into("<I", fat, 5 * 4, 0x0FFFFFFF)  # /SUB/INNER.TXT EOC
     struct.pack_into("<I", fat, 6 * 4, 0x0FFFFFFF)  # /LongFile.txt EOC
+    struct.pack_into("<I", fat, 7 * 4, 8)           # /BIG.TXT cluster 7 -> 8
+    struct.pack_into("<I", fat, 8 * 4, 0x0FFFFFFF)  # /BIG.TXT EOC
     fat1_off = FAT_RESERVED * SECTOR
     fat2_off = fat1_off + FAT_FATSZ * SECTOR
     buf[fat1_off:fat1_off + len(fat)] = fat
@@ -327,6 +339,20 @@ def build_fat32(part_sector_count: int) -> bytearray:
     long_cluster_sector = data_start_sector + (FAT_LONG_CLUSTER - 2) * FAT_SPC
     long_off = long_cluster_sector * SECTOR
     buf[long_off:long_off + len(FAT_LONG_BODY)] = FAT_LONG_BODY
+
+    # BIG.TXT SFN entry in the root (4th non-dot entry).
+    big_sfn = bytearray(32)
+    big_sfn[0:11] = FAT_BIG_SFN
+    big_sfn[11] = 0x20
+    struct.pack_into("<H", big_sfn, 20, 0)
+    struct.pack_into("<H", big_sfn, 26, FAT_BIG_CLUSTER)
+    struct.pack_into("<I", big_sfn, 28, FAT_BIG_SIZE)
+    buf[root_off + 128:root_off + 160] = big_sfn
+
+    # BIG.TXT data spans clusters 7 and 8.
+    big_cluster_sector = data_start_sector + (FAT_BIG_CLUSTER - 2) * FAT_SPC
+    big_off = big_cluster_sector * SECTOR
+    buf[big_off:big_off + len(FAT_BIG_BODY)] = FAT_BIG_BODY
 
     return buf
 
