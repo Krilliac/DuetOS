@@ -720,6 +720,264 @@ i64 Fat32WriteInPlace(const Volume* v, const DirEntry* e, u64 offset, const void
     return static_cast<i64>(written);
 }
 
+namespace
+{
+
+// Write a FAT32 entry, preserving the top 4 reserved bits from
+// whatever was there. Mirrors the update to BOTH FAT copies so
+// the on-disk mirror stays in sync. Returns true on success.
+bool WriteFatEntry(const Volume& v, u32 cluster, u32 value)
+{
+    const u32 byte_off = cluster * 4;
+    const u32 sec_off = byte_off / v.bytes_per_sector;
+    const u32 byte_in_sec = byte_off % v.bytes_per_sector;
+    for (u32 copy = 0; copy < v.num_fats; ++copy)
+    {
+        const u64 lba = u64(v.reserved_sectors) + u64(copy) * u64(v.fat_size_sectors) + sec_off;
+        if (drivers::storage::BlockDeviceRead(v.block_handle, lba, 1, g_scratch) != 0)
+            return false;
+        const u32 existing = LeU32(g_scratch + byte_in_sec);
+        const u32 merged = (existing & 0xF0000000u) | (value & 0x0FFFFFFFu);
+        g_scratch[byte_in_sec + 0] = static_cast<u8>(merged & 0xFF);
+        g_scratch[byte_in_sec + 1] = static_cast<u8>((merged >> 8) & 0xFF);
+        g_scratch[byte_in_sec + 2] = static_cast<u8>((merged >> 16) & 0xFF);
+        g_scratch[byte_in_sec + 3] = static_cast<u8>((merged >> 24) & 0xFF);
+        if (drivers::storage::BlockDeviceWrite(v.block_handle, lba, 1, g_scratch) != 0)
+            return false;
+    }
+    return true;
+}
+
+// Find the lowest-numbered free cluster (FAT entry == 0), mark it
+// as EOC in BOTH FAT copies, and return its number. Returns 0 on
+// full-disk or I/O error. Capped at 1,000,000 clusters scanned so
+// a pathological volume can't spin forever.
+u32 AllocateFreeCluster(const Volume& v)
+{
+    const u32 entries_per_sector = v.bytes_per_sector / 4;
+    const u32 max_fat_entries = v.fat_size_sectors * entries_per_sector;
+    const u32 hard_cap = max_fat_entries < 1000000u ? max_fat_entries : 1000000u;
+    for (u32 cluster = 2; cluster < hard_cap; ++cluster)
+    {
+        const u32 byte_off = cluster * 4;
+        const u32 sec_off = byte_off / v.bytes_per_sector;
+        const u32 byte_in_sec = byte_off % v.bytes_per_sector;
+        const u64 lba = u64(v.reserved_sectors) + sec_off;
+        if (drivers::storage::BlockDeviceRead(v.block_handle, lba, 1, g_scratch) != 0)
+            return 0;
+        const u32 entry = LeU32(g_scratch + byte_in_sec) & 0x0FFFFFFFu;
+        if (entry == 0)
+        {
+            if (!WriteFatEntry(v, cluster, 0x0FFFFFFFu))
+                return 0;
+            return cluster;
+        }
+    }
+    return 0;
+}
+
+// Overwrite a cluster's data sectors with zeros — called on newly
+// allocated clusters so slack bytes beyond the caller-written
+// region don't leak whatever was left on disk.
+bool ZeroCluster(const Volume& v, u32 cluster)
+{
+    if (cluster < 2)
+        return false;
+    const u64 lba = u64(v.data_start_sector) + u64(cluster - 2) * u64(v.sectors_per_cluster);
+    if (v.sectors_per_cluster > sizeof(g_scratch) / 512)
+        return false;
+    VZero(g_scratch, u64(v.sectors_per_cluster) * 512);
+    return drivers::storage::BlockDeviceWrite(v.block_handle, lba, v.sectors_per_cluster, g_scratch) == 0;
+}
+
+// Find a root-directory entry by name and patch its 32-bit size
+// field (bytes 28..31) with the new value, then write the
+// containing sector back. Returns true on success, false on miss
+// or I/O error. Only touches the size field — other fields
+// (first_cluster, attrs, times) are preserved.
+bool RootUpdateEntrySize(const Volume& v, const char* want, u32 new_size)
+{
+    u32 cluster = v.root_cluster;
+    // Bounded like the other walkers — 64 clusters covers any
+    // realistic root directory.
+    for (u32 step = 0; step < 64; ++step)
+    {
+        if (cluster < 2 || cluster >= 0x0FFFFFF8u)
+            return false;
+        const u32 bytes = v.sectors_per_cluster * v.bytes_per_sector;
+        // Read the cluster one sector at a time so we can find the
+        // entry, patch it in the scratch copy, and write JUST that
+        // sector back. Whole-cluster write would be wasteful and
+        // risk clobbering a concurrent writer's scratch staging
+        // (though v0 is single-threaded on the shell path).
+        for (u32 sec = 0; sec < v.sectors_per_cluster; ++sec)
+        {
+            const u64 lba = u64(v.data_start_sector) + u64(cluster - 2) * u64(v.sectors_per_cluster) + sec;
+            if (drivers::storage::BlockDeviceRead(v.block_handle, lba, 1, g_scratch) != 0)
+                return false;
+            const u32 bytes_in_sec = v.bytes_per_sector;
+            for (u32 off = 0; off + 32 <= bytes_in_sec; off += 32)
+            {
+                const u8* e = g_scratch + off;
+                if (e[0] == 0x00)
+                    return false; // end of dir — not found
+                if (e[0] == 0xE5)
+                    continue;
+                const u8 attr = e[11];
+                if ((attr & kAttrLongName) == kAttrLongName)
+                    continue;
+                if (attr & kAttrVolumeId)
+                    continue;
+                DirEntry decoded;
+                DecodeEntry(e, decoded);
+                if (IsDotEntry(decoded.name))
+                    continue;
+                // Match on the SFN only — LFN matching would need
+                // us to accumulate fragments here too, which v0
+                // append doesn't need (HELLO.TXT in the self-test
+                // has no LFN). Upgrade when a long-named callee
+                // needs resize.
+                if (NameIEqual(decoded.name, want))
+                {
+                    g_scratch[off + 28] = static_cast<u8>(new_size & 0xFF);
+                    g_scratch[off + 29] = static_cast<u8>((new_size >> 8) & 0xFF);
+                    g_scratch[off + 30] = static_cast<u8>((new_size >> 16) & 0xFF);
+                    g_scratch[off + 31] = static_cast<u8>((new_size >> 24) & 0xFF);
+                    return drivers::storage::BlockDeviceWrite(v.block_handle, lba, 1, g_scratch) == 0;
+                }
+            }
+            (void)bytes;
+        }
+        cluster = ReadFatEntry(v, cluster);
+    }
+    return false;
+}
+
+} // namespace
+
+i64 Fat32AppendInRoot(const Volume* v, const char* name, const void* buf, u64 len)
+{
+    if (v == nullptr || name == nullptr || buf == nullptr)
+        return -1;
+    if (len == 0)
+        return 0;
+
+    // Resolve the entry via the cached root snapshot so we can
+    // read its current first_cluster / size without a fresh walk.
+    const DirEntry* e = Fat32FindInRoot(v, name);
+    if (e == nullptr)
+        return -1;
+    if (e->attributes & kAttrDirectory)
+        return -1; // append-to-directory is nonsensical
+    if (e->first_cluster < 2)
+        return -1; // zero-byte files are not supported in v0
+
+    const u64 cluster_bytes = u64(v->sectors_per_cluster) * u64(v->bytes_per_sector);
+    if (v->sectors_per_cluster > sizeof(g_scratch) / 512)
+        return -1;
+    const u32 old_size = e->size_bytes;
+    const u64 new_size_u64 = u64(old_size) + len;
+    if (new_size_u64 > 0xFFFFFFFFull)
+        return -1; // FAT32 size field is 32-bit
+    const u32 new_size = static_cast<u32>(new_size_u64);
+
+    // Walk the existing chain to the tail cluster so we know
+    // where to append and whether the tail has slack bytes.
+    u32 tail = e->first_cluster;
+    while (true)
+    {
+        const u32 next = ReadFatEntry(*v, tail);
+        if (next < 2 || next >= 0x0FFFFFF8u)
+            break;
+        tail = next;
+    }
+    // Byte offset within the tail cluster where the NEXT byte of
+    // file content would land. If the file ends exactly on a
+    // cluster boundary, tail_off == 0 and we must allocate a new
+    // cluster immediately.
+    u64 tail_off = old_size % cluster_bytes;
+    if (tail_off == 0 && old_size > 0)
+    {
+        // File ended on a cluster boundary — the "tail" cluster
+        // has no slack; grab a fresh one before the write loop.
+        const u32 fresh = AllocateFreeCluster(*v);
+        if (fresh == 0)
+            return -1;
+        if (!ZeroCluster(*v, fresh))
+            return -1;
+        if (!WriteFatEntry(*v, tail, fresh))
+            return -1;
+        tail = fresh;
+        tail_off = 0;
+    }
+
+    const auto* src = static_cast<const u8*>(buf);
+    u64 written = 0;
+    while (written < len)
+    {
+        const u64 remain = len - written;
+        const u64 avail = cluster_bytes - tail_off;
+        const u64 chunk = (remain < avail) ? remain : avail;
+        const u64 lba = u64(v->data_start_sector) + u64(tail - 2) * u64(v->sectors_per_cluster);
+
+        if (tail_off == 0 && chunk == cluster_bytes)
+        {
+            // Full-cluster append, no read-modify-write.
+            for (u64 i = 0; i < chunk; ++i)
+                g_scratch[i] = src[written + i];
+            if (drivers::storage::BlockDeviceWrite(v->block_handle, lba, v->sectors_per_cluster, g_scratch) != 0)
+                return -1;
+        }
+        else
+        {
+            // Partial append: read cluster, patch tail portion,
+            // write back. Covers both the first-cluster-with-slack
+            // case and the final-cluster-partial case.
+            if (drivers::storage::BlockDeviceRead(v->block_handle, lba, v->sectors_per_cluster, g_scratch) != 0)
+                return -1;
+            for (u64 i = 0; i < chunk; ++i)
+                g_scratch[tail_off + i] = src[written + i];
+            if (drivers::storage::BlockDeviceWrite(v->block_handle, lba, v->sectors_per_cluster, g_scratch) != 0)
+                return -1;
+        }
+        written += chunk;
+        tail_off += chunk;
+        if (written == len)
+            break;
+        // Need another cluster. Allocate, zero, and chain.
+        const u32 fresh = AllocateFreeCluster(*v);
+        if (fresh == 0)
+            return -1;
+        if (!ZeroCluster(*v, fresh))
+            return -1;
+        if (!WriteFatEntry(*v, tail, fresh))
+            return -1;
+        tail = fresh;
+        tail_off = 0;
+    }
+
+    // Patch the on-disk directory entry's size field. Without this
+    // the appended bytes exist on disk but readers stop at the old
+    // size and never see them. Failure here is dangerous — the
+    // file's on-disk cluster chain is longer than its declared
+    // size. Log + fail hard; caller should treat the volume as
+    // potentially inconsistent (v0 has no journal to roll back).
+    if (!RootUpdateEntrySize(*v, name, new_size))
+    {
+        core::Log(core::LogLevel::Error, "fs/fat32", "append: cluster chain extended but dir entry size update failed");
+        return -1;
+    }
+
+    // Refresh the cached root snapshot so the next Fat32FindInRoot
+    // sees the new size + first_cluster. We just re-walk; the
+    // volume registry is non-const but the public handle is const
+    // — cast off constness, same as the self-test's write-back path.
+    Volume* vm = const_cast<Volume*>(v);
+    WalkRootIntoSnapshot(*vm, vm->root_cluster);
+
+    return static_cast<i64>(written);
+}
+
 bool Fat32ReadFileStream(const Volume* v, const DirEntry* e, ReadChunkCb cb, void* ctx)
 {
     if (v == nullptr || e == nullptr || cb == nullptr)
@@ -1006,6 +1264,72 @@ void Fat32SelfTest()
         return;
     }
     SerialWrite("[fs/fat32] self-test OK (HELLO.TXT in-place round-trip verified)\n");
+
+    // Sixth phase: append-and-grow. Take HELLO.TXT (17 B, single
+    // cluster) and extend it by 5000 bytes of pattern — forces
+    // allocation of a second cluster, FAT chaining, directory
+    // entry size update. Read back the whole thing and verify
+    // the original 17 B prefix + the 5000 B pattern tail.
+    const char* hello_name = "HELLO.TXT";
+    const u32 grow_by = 5000;
+    static u8 pattern[5000];
+    for (u32 i = 0; i < grow_by; ++i)
+        pattern[i] = static_cast<u8>(0x41 + (i % 26)); // A..Z repeating
+    const i64 appended = Fat32AppendInRoot(v0, hello_name, pattern, grow_by);
+    if (appended != static_cast<i64>(grow_by))
+    {
+        SerialWrite("[fs/fat32] self-test FAILED: append returned wrong count\n");
+        return;
+    }
+    const DirEntry* grown = Fat32FindInRoot(v0, hello_name);
+    if (grown == nullptr || grown->size_bytes != 17 + grow_by)
+    {
+        SerialWrite("[fs/fat32] self-test FAILED: grown HELLO.TXT size wrong\n");
+        return;
+    }
+    // Verify by streamed read — can't fit 5017 B in buf[64].
+    struct VerifyCtx
+    {
+        u64 total;
+        bool prefix_ok;
+        bool tail_ok;
+        bool tail_seen;
+    };
+    VerifyCtx vc{0, true, true, false};
+    Fat32ReadFileStream(
+        v0, grown,
+        [](const u8* data, u64 len, void* ctx) -> bool
+        {
+            auto* c = static_cast<VerifyCtx*>(ctx);
+            const char* prefix = "hello from fat32\n";
+            const u64 prefix_len = 17;
+            for (u64 i = 0; i < len; ++i)
+            {
+                const u64 abs = c->total + i;
+                if (abs < prefix_len)
+                {
+                    if (data[i] != static_cast<u8>(prefix[abs]))
+                        c->prefix_ok = false;
+                }
+                else
+                {
+                    const u64 off = abs - prefix_len;
+                    const u8 expect = static_cast<u8>(0x41 + (off % 26));
+                    if (data[i] != expect)
+                        c->tail_ok = false;
+                    c->tail_seen = true;
+                }
+            }
+            c->total += len;
+            return true;
+        },
+        &vc);
+    if (vc.total != 17 + grow_by || !vc.prefix_ok || !vc.tail_seen || !vc.tail_ok)
+    {
+        SerialWrite("[fs/fat32] self-test FAILED: grown HELLO.TXT read-back mismatch\n");
+        return;
+    }
+    SerialWrite("[fs/fat32] self-test OK (append grew HELLO.TXT 17 -> 5017 B)\n");
 }
 
 } // namespace customos::fs::fat32

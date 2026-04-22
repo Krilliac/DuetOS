@@ -304,6 +304,7 @@ void CmdHelp()
     ConsoleWriteln("  FATLS [VOL]  LIST ROOT DIR OF FAT32 VOLUME (default vol 0)");
     ConsoleWriteln("  FATCAT [VOL] NAME  READ FILE FROM FAT32 VOLUME TO CONSOLE");
     ConsoleWriteln("  FATWRITE PATH OFF BYTES  OVERWRITE EXISTING FILE BYTES IN-PLACE");
+    ConsoleWriteln("  FATAPPEND NAME BYTES     APPEND BYTES TO EXISTING ROOT-DIR FILE (GROWS)");
     ConsoleWriteln("  FREE         MEMORY USAGE (PHYS + HEAP)");
     ConsoleWriteln("  PS           LIST EVERY SCHEDULER TASK");
     ConsoleWriteln("  SPAWN KIND   LAUNCH A RING-3 TASK (hello/sandbox/jail/...)");
@@ -1215,7 +1216,7 @@ static const char* const kCommandSet[] = {
     "false",   "mount",  "lsmod",    "lsblk",   "lsgpt",    "free",     "ps",         "spawn",    "readelf",
     "hexdump", "stat",   "basename", "dirname", "cal",      "sleep",    "reset",      "tac",      "nl",
     "rev",     "expr",   "color",    "rand",    "flushtlb", "checksum", "repeat",     "kill",     "exec",
-    "metrics", "trace",  "read",     "guard",   "top",      "fatcat",   "fatls",      "fatwrite",
+    "metrics", "trace",  "read",     "guard",   "top",      "fatcat",   "fatls",      "fatwrite", "fatappend",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -2507,6 +2508,62 @@ void CmdFatwrite(customos::u32 argc, char** argv)
     ConsoleWrite(" BYTES AT OFFSET ");
     WriteU64Dec(off);
     ConsoleWriteln("");
+}
+
+void CmdFatappend(customos::u32 argc, char** argv)
+{
+    // `fatappend <name> <bytes...>` — append the trailing argv
+    // tokens (joined with single spaces) to the end of a file in
+    // FAT32 volume 0's root. Grows the file; allocates clusters as
+    // needed. v0 scope is root-dir only — no path walking, no
+    // subdirectory targets. The image rebuilds every boot-smoke,
+    // so any appends are ephemeral across test cycles.
+    namespace fat = customos::fs::fat32;
+    if (argc < 3)
+    {
+        ConsoleWriteln("FATAPPEND: USAGE: FATAPPEND NAME BYTES...");
+        return;
+    }
+    const char* name = argv[1];
+    // Strip a leading /fat/ if the operator gave a mount-rooted
+    // path, matching CmdFatwrite's convenience policy.
+    if (const char* leaf = FatLeaf(name); leaf != nullptr && *leaf != '\0')
+    {
+        name = leaf;
+    }
+    else if (name[0] == '/')
+    {
+        ++name;
+    }
+    static customos::u8 payload[1024];
+    customos::u64 plen = 0;
+    for (u32 i = 2; i < argc; ++i)
+    {
+        if (i > 2 && plen + 1 < sizeof(payload))
+        {
+            payload[plen++] = ' ';
+        }
+        for (u32 j = 0; argv[i][j] != 0 && plen + 1 < sizeof(payload); ++j)
+        {
+            payload[plen++] = static_cast<customos::u8>(argv[i][j]);
+        }
+    }
+    const fat::Volume* v = fat::Fat32Volume(0);
+    if (v == nullptr)
+    {
+        ConsoleWriteln("FATAPPEND: FAT32 NOT MOUNTED");
+        return;
+    }
+    const customos::i64 rc = fat::Fat32AppendInRoot(v, name, payload, plen);
+    if (rc < 0)
+    {
+        ConsoleWriteln("FATAPPEND: APPEND FAILED (backend RO? disk full? file not in root?)");
+        return;
+    }
+    ConsoleWrite("FATAPPEND: APPENDED ");
+    WriteU64Dec(static_cast<customos::u64>(rc));
+    ConsoleWrite(" BYTES TO ");
+    ConsoleWriteln(name);
 }
 
 void CmdRead(customos::u32 argc, char** argv)
@@ -5155,6 +5212,11 @@ void Dispatch(char* line)
     if (StrEq(cmd, "fatwrite"))
     {
         CmdFatwrite(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "fatappend"))
+    {
+        CmdFatappend(argc, argv);
         return;
     }
     if (StrEq(cmd, "free"))

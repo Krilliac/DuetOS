@@ -151,6 +151,25 @@ bool Fat32ReadFileStream(const Volume* v, const DirEntry* e, ReadChunkCb cb, voi
 /// read-only). FSInfo is not updated.
 i64 Fat32WriteInPlace(const Volume* v, const DirEntry* e, u64 offset, const void* buf, u64 len);
 
+/// Append `len` bytes to the END of a file that lives in the root
+/// directory. Allocates free clusters as needed, chains them to
+/// the existing tail, writes the caller's bytes into them, and
+/// patches the on-disk directory entry's size field in place.
+/// Returns the number of bytes appended (== len on success), or
+/// -1 on validation / allocation / I/O failure.
+///
+/// Mutates BOTH FAT copies to keep the mirror in sync. Does NOT
+/// update FSInfo (free_count / next_free are only hints; Linux
+/// and Windows rebuild them on mount if stale). Does NOT support
+/// appending to a zero-size file in v0 — use Fat32WriteInPlace
+/// for existing content, Fat32AppendInRoot once the file already
+/// has one cluster.
+///
+/// Only root-dir files are supported in v0; extending a file in
+/// a subdirectory needs the directory's entry LBA handed in,
+/// which the path walker doesn't yet expose. Follow-up slice.
+i64 Fat32AppendInRoot(const Volume* v, const char* name, const void* buf, u64 len);
+
 /// Boot-time self-test. Calls `Fat32Probe` on every registered
 /// block device; partitions that aren't FAT32 are expected to fail
 /// and are logged as "not FAT32" (no failure shout). PASS
