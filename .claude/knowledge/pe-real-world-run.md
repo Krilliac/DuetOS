@@ -1,10 +1,10 @@
 # Real-world PE execution — windows-kill.exe smoke
 
-**Last updated:** 2026-04-22
+**Last updated:** 2026-04-22 (post argc/argv slice)
 **Type:** Observation
-**Status:** Active — winkill now enters ring 3, runs CRT init, faults on
-first unstubbed import return value. Five previously silent loader-level
-gaps now visible + fixed.
+**Status:** Active — winkill enters ring 3, runs CRT init through the
+argc/argv read; the CRT now sees real pointers instead of dereferencing
+the catch-all's zero. Next wall moves further into CRT startup.
 
 ## What changed (this slice)
 
@@ -128,6 +128,62 @@ Why this beats static analysis: it tells us the *order of
 calls*, so the first unimplemented import is always obvious
 from the top of the log. Binary search through 24+ catch-alls
 is not needed.
+
+## Slice 25 — `__p___argc` / `__p___argv` + proc-env page
+
+Follow-on to the miss-logger slice. The first two `[win32-miss]`
+lines at every winkill boot were `__p___argv` and `__p___argc`;
+the CRT reads these, gets 0 back from the catch-all, then
+dereferences 0 and faults. This slice teaches the stubs to
+return real pointers:
+
+1. **Proc-env page** — new fixed VA `kProcEnvVa = 0x65000000`,
+   one page, R-W + NX, mapped only for PEs with imports (same
+   gate as the TEB page). Layout exposed via constants in
+   `subsystems/win32/stubs.h`:
+
+   ```
+   0x00  int   argc   = 1
+   0x08  char** argv  = kProcEnvVa + 0x20
+   0x20  char* argv[] = { program_name_va, NULL }
+   0x40  char  program_name[] = "a.exe\0"   (v0 placeholder)
+   ```
+
+   `Win32ProcEnvPopulate(page, name)` fills the layout. The PE
+   loader allocates + zeroes the frame, calls the populator,
+   and maps it between "step4b teb mapped" and "step5 imports
+   resolved":
+
+   ```
+   [pe-load] step4c proc-env mapped va=0x65000000
+   ```
+
+2. **`__p___argc` / `__p___argv` stubs** — two 6-byte shims
+   (`mov eax, imm32; ret`) at stub offsets `0x269` and `0x26F`.
+   Immediate operands encode `kProcEnvVa + kProcEnvArgcOff`
+   (= `0x65000000`) and `kProcEnvVa + kProcEnvArgvPtrOff`
+   (= `0x65000008`) respectively. The 32-bit dest form zero-
+   extends to rax — cheaper than a 10-byte movabs since both
+   addresses fit in 32 bits.
+
+3. **Registered under three DLL names** — the runtime apiset
+   (`api-ms-win-crt-runtime-l1-1-0.dll`), ucrtbase, and msvcrt,
+   covering the three link-path conventions the MSVC toolchain
+   can produce.
+
+4. **Layout static-asserted** — `static_assert`s in `stubs.cpp`
+   tie the hand-assembled stub bytes to the public
+   `kProcEnvVa / kProcEnvArgcOff / kProcEnvArgvPtrOff`
+   constants. Moving the page VA or the field offsets without
+   updating the stub bytes becomes a build-time error instead
+   of a boot-time #PF.
+
+The `a.exe` placeholder is deliberate v0. A future slice will
+plumb the spawn-time program name through `PeLoad` so argv[0]
+reflects the caller-specified name (`/bin/winkill.exe` etc.).
+Minimal change today because the CRT only needs argv[0] to be
+non-NULL + NUL-terminated; its contents matter only to code
+that inspects argv[0] directly (rare).
 
 ## Next walls (in execution order)
 

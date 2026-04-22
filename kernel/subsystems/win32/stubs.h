@@ -31,6 +31,43 @@ namespace customos::win32
 
 inline constexpr u64 kWin32StubsVa = 0x60000000ULL;
 
+/*
+ * Per-process "proc-env" page. Holds argc, argv, and the backing
+ * argv[] array + string data for the CRT's
+ * `__p___argc` / `__p___argv` accessors. One page, R-W + NX,
+ * mapped only for PEs with imports (same gate as the TEB page).
+ *
+ * Layout (offsets inside the page):
+ *
+ *   0x00  int  argc                      ; value, not pointer
+ *   0x08  char** argv                    ; = kProcEnvVa + kProcEnvArgvArrayOff
+ *   0x20  char* argv[2]                  ; argv[0], argv[1]=NULL
+ *   0x40  char  program_name[...]        ; NUL-terminated, argv[0] string
+ *
+ * The CRT reads `argc = *__p___argc()` and `argv = *__p___argv()`.
+ * `__p___argc` returns `kProcEnvVa + kProcEnvArgcOff` (type `int*`);
+ * `__p___argv` returns `kProcEnvVa + kProcEnvArgvPtrOff`
+ * (type `char***` — a pointer to `argv`, which itself is `char**`).
+ *
+ * v0 always reports argc=1; a future slice with a real
+ * argv-passing spawn API will extend the layout (more argv
+ * slots + a larger string area).
+ */
+inline constexpr u64 kProcEnvVa = 0x65000000ULL;
+inline constexpr u64 kProcEnvArgcOff = 0x00;
+inline constexpr u64 kProcEnvArgvPtrOff = 0x08;
+inline constexpr u64 kProcEnvArgvArrayOff = 0x20;
+inline constexpr u64 kProcEnvStringOff = 0x40;
+inline constexpr u64 kProcEnvStringBudget = 256;
+
+/// Populate a freshly-zeroed proc-env page. `proc_env_page` is
+/// the kernel-visible direct-map pointer to the 4 KiB frame that
+/// will be mapped at `kProcEnvVa`. `program_name` is copied into
+/// the page as `argv[0]`; additional args are not supported in
+/// v0 (argc always = 1). Truncates `program_name` to
+/// `kProcEnvStringBudget - 1` bytes if too long.
+void Win32ProcEnvPopulate(u8* proc_env_page, const char* program_name);
+
 /// Copy the compiled stub bytes into `dst`. Caller supplies a
 /// kPageSize buffer; we write exactly kWin32StubsCodeSize bytes
 /// starting at offset 0, leaving the rest zero. The page must

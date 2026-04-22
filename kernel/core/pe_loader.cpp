@@ -935,6 +935,32 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, customos::mm::AddressSpace* as
         SerialWrite("\n");
     }
 
+    // 4c. Proc-env page (Win32 PEs only). MSVC CRT startup
+    //     reads argc/argv via `__p___argc()` / `__p___argv()`
+    //     accessor functions; their stubs return addresses
+    //     inside this page. One page, R-W + NX. Populated with
+    //     argc=1, argv=[program_name, NULL], program_name="a.exe".
+    //     A future slice will plumb the real spawn-time program
+    //     name through here.
+    if (ps == PeStatus::ImportsPresent)
+    {
+        const PhysAddr env_frame = AllocateFrame();
+        if (env_frame == kNullFrame)
+        {
+            SerialWrite("[pe-load] FAIL proc-env frame alloc\n");
+            return r;
+        }
+        auto* env_direct = static_cast<u8*>(PhysToVirt(env_frame));
+        for (u64 i = 0; i < kPageSize; ++i)
+            env_direct[i] = 0;
+        win32::Win32ProcEnvPopulate(env_direct, "a.exe");
+        AddressSpaceMapUserPage(as, win32::kProcEnvVa, env_frame,
+                                kPagePresent | kPageUser | kPageWritable | kPageNoExecute);
+        SerialWrite("[pe-load] step4c proc-env mapped va=");
+        SerialWriteHex(win32::kProcEnvVa);
+        SerialWrite("\n");
+    }
+
     // 5. If imports are present, stand up the per-process
     //    Win32 stubs page + resolve every IAT entry.
     if (ps == PeStatus::ImportsPresent)

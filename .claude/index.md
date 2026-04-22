@@ -17,7 +17,7 @@ _Read this at every session start (after git sync). Each row links to a detailed
 | PE base-relocation support v0 — walk + apply, zero-delta in v0 | [knowledge/pe-base-reloc-v0.md](knowledge/pe-base-reloc-v0.md) | Observation | Active | 2026-04-21 |
 | Win32 subsystem v0 — import resolution + kernel32.ExitProcess stub | [knowledge/win32-subsystem-v0.md](knowledge/win32-subsystem-v0.md) | Observation | Active | 2026-04-21 |
 | Win32 heap — real HeapSize + HeapReAlloc / realloc (batch 14) | [knowledge/win32-subsystem-v0.md#batch-14--real-heapsize--heaprealloc](knowledge/win32-subsystem-v0.md) | Observation | Active | 2026-04-21 |
-| Real-world PE execution — winkill CRT entry + five loader gaps | [knowledge/pe-real-world-run.md](knowledge/pe-real-world-run.md) | Observation | Active | 2026-04-22 |
+| Real-world PE execution — winkill CRT entry + argc/argv + five loader gaps | [knowledge/pe-real-world-run.md](knowledge/pe-real-world-run.md) | Observation | Active | 2026-04-22 |
 | Hardware target matrix (CPU/GPU/IO tiers) | [knowledge/hardware-target-matrix.md](knowledge/hardware-target-matrix.md) | Decision | Active | 2026-04-20 |
 | Rust bring-up plan — trigger, layout, toolchain, CI | [knowledge/rust-bringup-plan.md](knowledge/rust-bringup-plan.md) | Decision | Active | 2026-04-21 |
 | Storage + Filesystem roadmap — block layer → NVMe/AHCI → GPT → FS | [knowledge/storage-and-filesystem-roadmap.md](knowledge/storage-and-filesystem-roadmap.md) | Decision | Active (stages 1–2, 4 landed) | 2026-04-21 |

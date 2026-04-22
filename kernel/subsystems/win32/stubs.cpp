@@ -72,6 +72,8 @@ constexpr u32 kOffHeapSize = 0x21F;           // batch 14 — 11 bytes
 constexpr u32 kOffHeapRealloc = 0x22A;        // batch 14 — 14 bytes
 constexpr u32 kOffRealloc = 0x238;            // batch 14 — 14 bytes
 constexpr u32 kOffMissLogger = 0x246;         // batch 15 — 24 bytes
+constexpr u32 kOffPArgc = 0x269;              // batch 16 —  6 bytes
+constexpr u32 kOffPArgv = 0x26F;              // batch 16 —  6 bytes
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -712,10 +714,48 @@ constexpr u8 kStubsBytes[] = {
     0xCD, 0x80,                   // 0x264 int 0x80
     0x31, 0xC0,                   // 0x266 xor eax, eax
     0xC3,                         // 0x268 ret
+
+    // === Batch 16: CRT argc / argv accessors ==================
+    //
+    // The MSVC CRT's `__scrt_common_main_seh` reads argc/argv via
+    // two accessor functions rather than touching globals directly:
+    //
+    //   int*     __p___argc(void);
+    //   char***  __p___argv(void);
+    //
+    // They return addresses into a process-wide storage block the
+    // CRT initialises during startup. In CustomOS that storage is
+    // the "proc-env" page at `kProcEnvVa` (0x65000000), populated
+    // by `Win32ProcEnvPopulate` during PE load with argc=1 and
+    // argv=[program_name, NULL].
+    //
+    // The absolute address fits in 32 bits (0x65000000 < 2^32), so
+    // `mov eax, imm32; ret` is 6 bytes — the upper 32 bits of RAX
+    // are zeroed by the x86-64 ABI for any 32-bit dest op, giving
+    // us the right 64-bit pointer without a 10-byte movabs.
+
+    // --- __p___argc (offset 0x269, 6 bytes) --------------------
+    // Returns &argc (int*). argc lives at kProcEnvVa + 0x00.
+    0xB8, 0x00, 0x00, 0x00, 0x65, // 0x269 mov eax, 0x65000000
+    0xC3,                         // 0x26E ret
+
+    // --- __p___argv (offset 0x26F, 6 bytes) --------------------
+    // Returns &argv (char***). argv (a char**) lives at
+    // kProcEnvVa + 0x08.
+    0xB8, 0x08, 0x00, 0x00, 0x65, // 0x26F mov eax, 0x65000008
+    0xC3,                         // 0x274 ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x269, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0x275, "stub layout drifted; update kOff* constants");
+// Keep the hand-assembled __p___argc / __p___argv addresses in
+// sync with the public proc-env layout constants. The stub
+// bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
+// moves the page VA or the argc / argv-ptr offsets, these
+// bytes must follow.
+static_assert(kProcEnvVa == 0x65000000ULL, "proc-env page VA no longer matches __p___argc stub bytes");
+static_assert(kProcEnvArgcOff == 0x00, "argc offset no longer matches __p___argc stub bytes");
+static_assert(kProcEnvArgvPtrOff == 0x08, "argv-ptr offset no longer matches __p___argv stub bytes");
 
 struct StubEntry
 {
@@ -1072,6 +1112,26 @@ constexpr StubEntry kStubsTable[] = {
     {"MSVCP140.dll", "?_Winerror_map@std@@YAHH@Z", kOffReturnZero},
     {"MSVCP140.dll", "?_Winerror_message@std@@YAKKPEADK@Z", kOffReturnZero},
     {"MSVCP140.dll", "?uncaught_exception@std@@YA_NXZ", kOffReturnZero},
+
+    // Batch 16 — MSVC CRT argc / argv accessors. These are the
+    // first real-valued reads the CRT's __scrt_common_main_seh
+    // makes during startup: `argc = *__p___argc()` and
+    // `argv = *__p___argv()`. Prior to this batch they landed on
+    // the catch-all NO-OP stub, returned 0, and the CRT faulted
+    // when it dereferenced the zero. Now they return pointers
+    // into the per-process proc-env page (kProcEnvVa), which the
+    // PE loader populates with argc=1 and argv=[program_name, NULL].
+    //
+    // Registered under every DLL the resolver might see the
+    // import under — api-ms-win-crt-runtime is the modern apiset,
+    // ucrtbase is where the code lives, msvcrt is the legacy
+    // name.
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "__p___argc", kOffPArgc},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "__p___argv", kOffPArgv},
+    {"ucrtbase.dll", "__p___argc", kOffPArgc},
+    {"ucrtbase.dll", "__p___argv", kOffPArgv},
+    {"msvcrt.dll", "__p___argc", kOffPArgc},
+    {"msvcrt.dll", "__p___argv", kOffPArgv},
 };
 
 // Case-insensitive strcmp for ASCII. Win32 DLL name
@@ -1116,6 +1176,56 @@ void Win32StubsPopulate(u8* dst)
         return;
     for (u64 i = 0; i < sizeof(kStubsBytes); ++i)
         dst[i] = kStubsBytes[i];
+}
+
+void Win32ProcEnvPopulate(u8* proc_env_page, const char* program_name)
+{
+    if (proc_env_page == nullptr)
+        return;
+
+    // Caller is expected to have zeroed the frame, but be
+    // defensive — populate only the specific fields we own,
+    // leaving the rest at its incoming value.
+    u8* const page = proc_env_page;
+
+    // argc = 1. Stored as a little-endian u32 at offset 0.
+    page[kProcEnvArgcOff + 0] = 0x01;
+    page[kProcEnvArgcOff + 1] = 0x00;
+    page[kProcEnvArgcOff + 2] = 0x00;
+    page[kProcEnvArgcOff + 3] = 0x00;
+
+    // argv = &proc_env_page[kProcEnvArgvArrayOff] expressed in
+    // user VA. Little-endian u64 at offset 0x08.
+    const u64 argv_user_va = kProcEnvVa + kProcEnvArgvArrayOff;
+    for (u64 b = 0; b < 8; ++b)
+        page[kProcEnvArgvPtrOff + b] = static_cast<u8>((argv_user_va >> (b * 8)) & 0xFFULL);
+
+    // Copy program_name into the string area (offset 0x40). Cap
+    // at kProcEnvStringBudget - 1 to guarantee NUL termination.
+    // A null / empty name becomes "a.exe" — Windows convention
+    // for a program with no recorded argv[0].
+    const char* name = (program_name != nullptr && program_name[0] != '\0') ? program_name : "a.exe";
+    u64 copied = 0;
+    while (copied + 1 < kProcEnvStringBudget)
+    {
+        const char c = name[copied];
+        if (c == '\0')
+            break;
+        page[kProcEnvStringOff + copied] = static_cast<u8>(c);
+        ++copied;
+    }
+    page[kProcEnvStringOff + copied] = 0;
+
+    // argv[0] = &proc_env_page[kProcEnvStringOff] in user VA.
+    const u64 argv0_user_va = kProcEnvVa + kProcEnvStringOff;
+    for (u64 b = 0; b < 8; ++b)
+        page[kProcEnvArgvArrayOff + b] = static_cast<u8>((argv0_user_va >> (b * 8)) & 0xFFULL);
+    // argv[1] = NULL — already zero, but set explicitly so the
+    // contract is visible in the page dump. Any callers that
+    // walk argv until NULL (Win32 CRT + most Unix main())
+    // stop here.
+    for (u64 b = 0; b < 8; ++b)
+        page[kProcEnvArgvArrayOff + 8 + b] = 0;
 }
 
 bool Win32StubsLookup(const char* dll, const char* func, u64* out_va)
