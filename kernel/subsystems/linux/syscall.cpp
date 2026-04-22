@@ -24,6 +24,7 @@ constexpr u32 kMsrStar = 0xC0000081;  // CS selectors for syscall/sysret
 constexpr u32 kMsrLstar = 0xC0000082; // entry RIP for 64-bit syscall
 // MSR_CSTAR (0xC0000083) is the compat-mode entry; we don't
 // plan to run 32-bit code, so leave it unprogrammed.
+constexpr u32 kMsrFsBase = 0xC0000100;       // user FS.base — musl TLS anchor
 constexpr u32 kMsrSfmask = 0xC0000084;       // RFLAGS mask applied at entry
 constexpr u32 kMsrKernelGsBase = 0xC0000102; // swapgs source for kernel GS
 
@@ -66,8 +67,16 @@ enum : u64
     kSysBrk = 12,
     kSysGetPid = 39,
     kSysExit = 60,
+    kSysUname = 63,
+    kSysArchPrctl = 158,
     kSysExitGroup = 231,
 };
+
+// ARCH_* codes for arch_prctl (linux/arch/x86/include/uapi/asm/prctl.h).
+constexpr u64 kArchSetGs = 0x1001;
+constexpr u64 kArchSetFs = 0x1002;
+constexpr u64 kArchGetFs = 0x1003;
+constexpr u64 kArchGetGs = 0x1004;
 
 i64 DoExitGroup(u64 status)
 {
@@ -257,6 +266,83 @@ i64 DoMunmap(u64 addr, u64 len)
     return 0;
 }
 
+// Linux: arch_prctl(code, addr). Used almost exclusively by musl's
+// CRT at _start to plant the thread-local-storage anchor in
+// FS.base: `arch_prctl(ARCH_SET_FS, &thread_block)`. Without this,
+// every %fs:[...] access in musl hits an unmapped VA and #PF.
+//
+// v0 scope:
+//   ARCH_SET_FS — write `addr` to MSR_FS_BASE.
+//   ARCH_GET_FS — read MSR_FS_BASE, write to *(u64*)addr.
+//   ARCH_SET_GS / GET_GS — return -EINVAL (we use MSR_GS_BASE
+//     for our own swapgs dance; exposing it to user mode would
+//     let a malicious task alias our per-CPU area).
+//
+// Note: we don't save/restore MSR_FS_BASE across context switches
+// yet. Works because v0 has at most one Linux-ABI task running at
+// a time (and kernel workers don't touch FS.base). Multi-Linux-
+// task support will need per-Task fs_base storage.
+i64 DoArchPrctl(u64 code, u64 addr)
+{
+    switch (code)
+    {
+    case kArchSetFs:
+        WriteMsr(kMsrFsBase, addr);
+        return 0;
+    case kArchGetFs:
+    {
+        u32 lo, hi;
+        asm volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(kMsrFsBase));
+        const u64 v = (static_cast<u64>(hi) << 32) | lo;
+        if (!mm::CopyToUser(reinterpret_cast<void*>(addr), &v, sizeof(v)))
+        {
+            return kEFAULT;
+        }
+        return 0;
+    }
+    case kArchSetGs:
+    case kArchGetGs:
+        return kEINVAL;
+    default:
+        return kEINVAL;
+    }
+}
+
+// Linux: uname(buf). Fills a struct utsname with six NUL-padded
+// 65-char fields: sysname, nodename, release, version, machine,
+// domainname. Total 6 * 65 = 390 bytes. musl reads this at
+// startup for diagnostics (`uname -a` etc.) and for platform
+// dispatch in a few places. Static response: a real kernel
+// would plumb nodename to a runtime-configurable hostname.
+i64 DoUname(u64 user_buf)
+{
+    constexpr u64 kFieldLen = 65;
+    constexpr u64 kFields = 6;
+    constexpr u64 kTotalLen = kFieldLen * kFields;
+    u8 kbuf[kTotalLen];
+    for (u64 i = 0; i < kTotalLen; ++i)
+        kbuf[i] = 0;
+    auto set_field = [&](u64 field_idx, const char* s)
+    {
+        u8* dst = kbuf + field_idx * kFieldLen;
+        for (u64 i = 0; s[i] != 0 && i < kFieldLen - 1; ++i)
+        {
+            dst[i] = static_cast<u8>(s[i]);
+        }
+    };
+    set_field(0, "CustomOS");
+    set_field(1, "customos");
+    set_field(2, "0.1");
+    set_field(3, "customos-v0 #1");
+    set_field(4, "x86_64");
+    set_field(5, "localdomain");
+    if (!mm::CopyToUser(reinterpret_cast<void*>(user_buf), kbuf, kTotalLen))
+    {
+        return kEFAULT;
+    }
+    return 0;
+}
+
 } // namespace
 
 extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
@@ -281,6 +367,12 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
         break;
     case kSysMunmap:
         rv = DoMunmap(frame->rdi, frame->rsi);
+        break;
+    case kSysArchPrctl:
+        rv = DoArchPrctl(frame->rdi, frame->rsi);
+        break;
+    case kSysUname:
+        rv = DoUname(frame->rdi);
         break;
     case kSysExit:
     case kSysExitGroup:
