@@ -86,45 +86,15 @@ constexpr u64 kPath2OffsetInCode = 0xB0;
 constexpr u64 kReadBufOffsetInStack = 0x800;
 constexpr u64 kStatOutOffsetInStack = 0xFF0;
 
-// Small, deterministic PRNG seeded from the TSC at boot. Not
-// cryptographic — the goal is "layouts differ across processes of
-// a single boot"; unpredictability across reboots falls out of
-// the TSC seed. splitmix64 per call is 2 arithmetic ops.
-u64 Splitmix64(u64& state)
-{
-    state += 0x9E3779B97F4A7C15ULL;
-    u64 z = state;
-    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
-    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
-    return z ^ (z >> 31);
-}
-
-u64 g_aslr_state = 0;
-
-void AslrInitIfNeeded()
-{
-    if (g_aslr_state != 0)
-    {
-        return;
-    }
-    u32 lo = 0, hi = 0;
-    asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
-    g_aslr_state = (static_cast<u64>(hi) << 32) | lo;
-    if (g_aslr_state == 0)
-    {
-        g_aslr_state = 0xDEADBEEFCAFEBABEULL; // TSC unavailable? use a
-                                              // fixed seed rather than
-                                              // 0 (which would skip
-                                              // randomisation entirely).
-    }
-}
-
 // Pick a fresh 16 MiB-aligned base in [kAslrMinBase, kAslrMaxBase).
+// Draws from the shared kernel entropy pool (RDSEED → RDRAND →
+// splitmix) rather than the old per-file TSC-seeded splitmix —
+// all consumers now share a single entropy source with
+// observable stats via `rand -s`.
 u64 AslrPickBase()
 {
-    AslrInitIfNeeded();
     const u64 range = (kAslrMaxBase - kAslrMinBase) / kAslrAlign;
-    const u64 r = Splitmix64(g_aslr_state) % range;
+    const u64 r = customos::core::RandomU64() % range;
     return kAslrMinBase + r * kAslrAlign;
 }
 
@@ -1672,20 +1642,13 @@ u64 SpawnElfLinux(const char* name, const u8* elf_bytes, u64 elf_len, CapSet cap
         put_u64(48, rsp_init + 72); // pointer (user VA) to random block
         put_u64(56, 0);             // AT_NULL
         put_u64(64, 0);             // terminator value
-        // Fill the 16-byte random block with xorshift64 seeded
-        // from rdtsc. Non-crypto but mixed — same quality as
-        // sys_getrandom's stub.
-        u32 lo, hi;
-        asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
-        u64 state = (static_cast<u64>(hi) << 32) | lo;
-        state ^= 0xA5A5A5A5A5A5A5A5ull;
-        for (u64 i = 0; i < 16; ++i)
-        {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            stack_direct[off + 72 + i] = static_cast<u8>(state >> 24);
-        }
+        // Fill the 16-byte AT_RANDOM block from the kernel
+        // entropy pool. Linux userland libc (glibc, musl)
+        // consumes these bytes for stack-cookie + pointer
+        // obfuscation at startup, so real entropy here gives
+        // a ported userland the same hardening it expects on
+        // bare Linux.
+        customos::core::RandomFillBytes(stack_direct + off + 72, 16);
         proc->user_rsp_init = rsp_init;
     }
 

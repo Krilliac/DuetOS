@@ -4,6 +4,7 @@
 #include "../../arch/x86_64/traps.h"
 #include "../../core/klog.h"
 #include "../../core/process.h"
+#include "../../core/random.h"
 #include "../../mm/paging.h"
 #include "../linux/syscall.h"
 #include "../win32/heap.h"
@@ -527,8 +528,9 @@ i64 NativeClockNs(arch::TrapFrame* /*f*/)
 // but the Linux handler exists. Reinvoke via a synthetic inner
 // frame: stash the arguments where LinuxGetRandom would expect
 // them and call the existing helper.
-// Simpler: just inline the logic (xorshift64 seeded from rdtsc),
-// matching Linux's v0 getrandom.
+// Routes through the shared kernel entropy pool
+// (`core::RandomFillBytes`) so user-mode callers get the same
+// RDSEED/RDRAND backing the rest of the kernel uses.
 i64 NativeGetRandom(arch::TrapFrame* f)
 {
     const u64 user_buf = f->rdi;
@@ -537,17 +539,8 @@ i64 NativeGetRandom(arch::TrapFrame* f)
         return 0;
     if (count > 4096)
         count = 4096;
-    u32 lo, hi;
-    asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
-    u64 state = ((static_cast<u64>(hi) << 32) | lo) ^ 0xDEADBEEFCAFEBABEull;
     static u8 tmp[4096];
-    for (u64 i = 0; i < count; ++i)
-    {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        tmp[i] = static_cast<u8>(state >> 24);
-    }
+    core::RandomFillBytes(tmp, count);
     if (!mm::CopyToUser(reinterpret_cast<void*>(user_buf), tmp, count))
         return -14; // -EFAULT
     return static_cast<i64>(count);

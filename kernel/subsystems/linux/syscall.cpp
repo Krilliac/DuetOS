@@ -5,6 +5,7 @@
 #include "../../arch/x86_64/traps.h"
 #include "../../core/klog.h"
 #include "../../core/process.h"
+#include "../../core/random.h"
 #include "../../cpu/percpu.h"
 #include "../../fs/fat32.h"
 #include "../../mm/address_space.h"
@@ -724,11 +725,12 @@ u64 ReadTsc()
     return (static_cast<u64>(hi) << 32) | lo;
 }
 
-// Linux: getrandom(buf, count, flags). Fills `count` bytes with
-// a non-cryptographic PRNG stream seeded from rdtsc on each
-// call. Good enough for musl's stack-cookie / pointer-mangling
-// init. Real crypto-quality entropy needs a proper RNG driver —
-// separate slice.
+// Linux: getrandom(buf, count, flags). Routes through the shared
+// kernel entropy pool (RDSEED → RDRAND → splitmix) so a Linux
+// userland's stack-cookie / pointer-mangling / crypto init get
+// the same hardware backing the rest of the kernel uses. Real
+// glibc / musl treat this syscall as cryptographic; we match
+// that contract when the CPU supports RDSEED/RDRAND.
 i64 DoGetRandom(u64 user_buf, u64 count, u64 flags)
 {
     (void)flags;
@@ -737,15 +739,7 @@ i64 DoGetRandom(u64 user_buf, u64 count, u64 flags)
     if (count > 4096)
         count = 4096; // cap per call, same as Linux default for unseeded
     static u8 tmp[4096];
-    u64 state = ReadTsc() ^ 0xDEADBEEFCAFEBABEull;
-    for (u64 i = 0; i < count; ++i)
-    {
-        // xorshift64 — decent statistical mixing, not cryptographic.
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        tmp[i] = static_cast<u8>(state >> 24);
-    }
+    core::RandomFillBytes(tmp, count);
     if (!mm::CopyToUser(reinterpret_cast<void*>(user_buf), tmp, count))
         return kEFAULT;
     return static_cast<i64>(count);
