@@ -73,6 +73,11 @@ expected=(
     # than zero-padded — the decimal `(48879)` that follows makes
     # the prefix unique to hello_winapi's sentinel exit code.
     "exit rc   val=0xbeef"
+    # winkill (real-world MSVC windows-kill.exe) runs to a clean
+    # ring-3 spawn. Combined with the forbidden
+    # `name="ring3-winkill" reason=` below, this asserts the PE
+    # both spawned AND was not force-killed later.
+    'pe spawn name="ring3-winkill"'
 )
 
 # Forbidden signatures — anything indicating an unhandled
@@ -85,6 +90,13 @@ forbidden=(
     "PANIC"
     "CUSTOMOS CRASH"
     "triple fault"
+    # Regression guard: as of slice 28 (2026-04-22), winkill
+    # (real-world MSVC windows-kill.exe) runs start-to-finish
+    # as a ring-3 process and exits via ExitProcess(0). Any
+    # scheduler-initiated kill of it (tick-budget exhaustion,
+    # sandbox-denial threshold) or task-kill fault signals a
+    # regression in the Win32 subsystem / PE loader.
+    'name="ring3-winkill" reason='
 )
 # Allowed UNRESOLVED sources: windows-kill.exe imports a pile
 # of dbghelp / advapi32 / vcruntime functions we don't stub

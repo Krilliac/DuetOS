@@ -1,10 +1,13 @@
 # Real-world PE execution — windows-kill.exe smoke
 
-**Last updated:** 2026-04-22 (post argc/argv slice)
+**Last updated:** 2026-04-22 (end-to-end exit)
 **Type:** Observation
-**Status:** Active — winkill enters ring 3, runs CRT init through the
-argc/argv read; the CRT now sees real pointers instead of dereferencing
-the catch-all's zero. Next wall moves further into CRT startup.
+**Status:** Active — **winkill runs to clean `SYS_EXIT(0)`**. Real-world
+80 KB MSVC PE (8 sections, 52 imports, SEH, TLS, resource dir) executes
+start-to-finish as a ring-3 process on CustomOS. No printed output (the
+cout path no-ops via the fake-object data-miss pad), but no #PF, no #GP,
+no panic, no task-kill — the CRT returns from main, runs atexit, and
+calls ExitProcess(0). Milestone.
 
 ## What changed (this slice)
 
@@ -235,6 +238,41 @@ signature. Eleven other `?` symbols (widen, sputn, _Osfx, put,
 setstate, flush, and four ostream::operator<< variants) stayed
 on the function catch-all because their MSVC mangling begins
 with `Q` (method) after `@@`, not `3`.
+
+## Slice 28 — miss-logger guard + end-to-end clean exit
+
+Adds a call-rel32 pattern guard to the miss-logger: the decoder
+now checks `[return_addr - 5] == 0xE8` before running the
+thunk decode + `SYS_WIN32_MISS_LOG`. Indirect calls (`call
+rax`, vtable dispatch) fall through straight to `xor eax, eax;
+ret` instead of emitting `<unmapped>` entries from garbage
+slot VAs. Log stays honest: "can't decode" is now silence, not
+fabricated data.
+
+Cost: +6 bytes for cmp + jne; shifts __p___argc /
+__p___argv / __p__commode by 6 bytes each; static_assert tied
+to the new 0x281 total.
+
+Observed outcome on winkill:
+
+```
+[ring3] task pid=0x18 entering ring 3 rip=0x140004070
+[t=1946.096ms] [I] sys : exit rc   val=0x0 (0)     ← clean exit
+[sched/reaper] reaped task id val=0x18
+```
+
+Winkill entered ring 3, ran its full CRT init, called main(),
+ran whatever main did (the `std::cout << "usage"` path silently
+no-oped via the fake-object data-miss pad — no print, no fault),
+returned from main, ran atexit, and called ExitProcess(0). The
+entire 80 KB MSVC PE (8 sections, 52 imports across 6 DLLs,
+SEH, TLS, resource directory) executed start-to-finish as a
+ring-3 process on CustomOS with zero crashes.
+
+This is a milestone. The walls listed in previous slices
+("TLS array, PEB, SEH unwind, kernel32/vcruntime stubs") were
+either covered by existing stubs or elided by winkill's specific
+code path. The first real Win32 program runs end-to-end.
 
 ## Slice 27 — fake-object data-miss + stdio accessors
 
