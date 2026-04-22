@@ -102,3 +102,7 @@ EXPORTS
     SetConsoleCP
     SetConsoleOutputCP
     OutputDebugStringW
+    ; Batch 28 — virtual memory
+    VirtualAlloc
+    VirtualFree
+    VirtualProtect

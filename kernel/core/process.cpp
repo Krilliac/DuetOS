@@ -81,6 +81,10 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
         p->win32_handles[i].node = nullptr;
         p->win32_handles[i].cursor = 0;
     }
+    // Win32 VirtualAlloc arena — bump-only for v0. Starts at
+    // Process::kWin32VmapBase with 0 pages consumed.
+    p->vmap_base = Process::kWin32VmapBase;
+    p->vmap_pages_used = 0;
     // Win32 mutex table — every slot starts free + unowned.
     for (u32 i = 0; i < Process::kWin32MutexCap; ++i)
     {

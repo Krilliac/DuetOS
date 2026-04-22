@@ -338,6 +338,28 @@ struct Process
     static constexpr u64 kWin32MutexBase = 0x200;
     Win32MutexHandle win32_mutexes[kWin32MutexCap];
 
+    // Win32 VirtualAlloc bump arena — backs VirtualAlloc /
+    // VirtualFree / VirtualProtect (batch 28). Each SYS_VMAP
+    // request rounds the size up to page multiples, allocates
+    // fresh frames via AllocateFrame, maps them RW + NX + User
+    // at the current cursor VA, then bumps the cursor.
+    //
+    // v0 is bump-only — VirtualFree is documented as a leak.
+    // A second slice adds a free list once a real workload
+    // proves the leak matters. The cap is generous enough for
+    // most CRT startups (heap fallback, TLS slot tables,
+    // __chkstk probe area) to fit without needing reclaim.
+    //
+    // vmap_base is 0x40000000 — below the Win32 heap (0x50000000)
+    // and distinct from the stubs page (0x60000000), proc-env
+    // (0x65000000), TEB (0x70000000), and ring-3 stack bottom
+    // (0x7FFFE000) — leaves 256 MiB of contiguous VA space so
+    // large requests have somewhere to go.
+    static constexpr u64 kWin32VmapBase = 0x40000000ULL;
+    static constexpr u64 kWin32VmapCapPages = 128; // 512 KiB max per process
+    u64 vmap_base;                                 // = kWin32VmapBase after PE load
+    u64 vmap_pages_used;                           // bump cursor in pages
+
     u64 refcount;
 };
 

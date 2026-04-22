@@ -7,6 +7,8 @@
 #include "../arch/x86_64/serial.h"
 #include "../arch/x86_64/timer.h"
 #include "../fs/vfs.h"
+#include "../mm/address_space.h"
+#include "../mm/frame_allocator.h"
 #include "../mm/paging.h"
 #include "../sched/sched.h"
 #include "../subsystems/translation/translate.h"
@@ -713,6 +715,98 @@ void SyscallDispatch(arch::TrapFrame* frame)
         m.owner = next;
         m.recursion = (next != nullptr) ? 1 : 0;
         arch::Sti();
+        frame->rax = 0;
+        return;
+    }
+
+    case SYS_VMAP:
+    {
+        // Bump-arena VirtualAlloc. Rounds size up to pages,
+        // allocates + maps fresh frames, bumps the cursor.
+        Process* proc = CurrentProcess();
+        if (proc == nullptr)
+        {
+            frame->rax = 0;
+            return;
+        }
+        const u64 bytes = frame->rdi;
+        if (bytes == 0)
+        {
+            frame->rax = 0;
+            return;
+        }
+        const u64 pages = (bytes + mm::kPageSize - 1) / mm::kPageSize;
+        if (pages == 0 || proc->vmap_pages_used + pages > Process::kWin32VmapCapPages)
+        {
+            arch::SerialWrite("[sys] vmap oom pid=");
+            arch::SerialWriteHex(proc->pid);
+            arch::SerialWrite(" bytes=");
+            arch::SerialWriteHex(bytes);
+            arch::SerialWrite(" pages=");
+            arch::SerialWriteHex(pages);
+            arch::SerialWrite(" used=");
+            arch::SerialWriteHex(proc->vmap_pages_used);
+            arch::SerialWrite("\n");
+            frame->rax = 0;
+            return;
+        }
+        const u64 base = proc->vmap_base + proc->vmap_pages_used * mm::kPageSize;
+        for (u64 i = 0; i < pages; ++i)
+        {
+            const mm::PhysAddr f = mm::AllocateFrame();
+            if (f == mm::kNullFrame)
+            {
+                // OOM partway through — frames already mapped
+                // stay mapped but their VA is unreachable to
+                // the caller since we bail here. Bump cursor
+                // anyway so the stranded VAs are never reused
+                // (simpler than unwinding; v0 accepts the leak).
+                proc->vmap_pages_used += i;
+                arch::SerialWrite("[sys] vmap partial-oom pid=");
+                arch::SerialWriteHex(proc->pid);
+                arch::SerialWrite(" mapped=");
+                arch::SerialWriteHex(i);
+                arch::SerialWrite("/");
+                arch::SerialWriteHex(pages);
+                arch::SerialWrite("\n");
+                frame->rax = 0;
+                return;
+            }
+            mm::AddressSpaceMapUserPage(proc->as, base + i * mm::kPageSize, f,
+                                        mm::kPagePresent | mm::kPageUser | mm::kPageWritable | mm::kPageNoExecute);
+        }
+        proc->vmap_pages_used += pages;
+        arch::SerialWrite("[sys] vmap ok pid=");
+        arch::SerialWriteHex(proc->pid);
+        arch::SerialWrite(" va=");
+        arch::SerialWriteHex(base);
+        arch::SerialWrite(" pages=");
+        arch::SerialWriteHex(pages);
+        arch::SerialWrite("\n");
+        frame->rax = base;
+        return;
+    }
+
+    case SYS_VUNMAP:
+    {
+        // v0: no-op with a range-validity check. A bump-only
+        // arena can't free individual regions without turning
+        // into a real allocator, so VirtualFree is documented
+        // as a leak. The check still catches obvious caller
+        // bugs (passing a pointer that was never VirtualAlloc'd).
+        Process* proc = CurrentProcess();
+        if (proc == nullptr)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        const u64 va = frame->rdi;
+        const u64 arena_end = proc->vmap_base + Process::kWin32VmapCapPages * mm::kPageSize;
+        if (va < proc->vmap_base || va >= arena_end)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
         frame->rax = 0;
         return;
     }

@@ -102,6 +102,9 @@ constexpr u32 kOffReleaseMutex = 0x3F2;       // batch 26 — 24 bytes
 constexpr u32 kOffWriteConsoleW = 0x40A;      // batch 27 — 96 bytes (UTF-16 strip + SYS_WRITE)
 constexpr u32 kOffGetConsoleMode = 0x46A;     // batch 27 — 12 bytes
 constexpr u32 kOffGetConsoleCP = 0x476;       // batch 27 — 6 bytes
+constexpr u32 kOffVirtualAlloc = 0x47C;       // batch 28 — 13 bytes
+constexpr u32 kOffVirtualFree = 0x489;        // batch 28 — 29 bytes
+constexpr u32 kOffVirtualProtect = 0x4A6;     // batch 28 — 18 bytes
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -1278,10 +1281,61 @@ constexpr u8 kStubsBytes[] = {
     // on our side. Aliased for GetConsoleOutputCP below.
     0xB8, 0xE9, 0xFD, 0x00, 0x00, // 0x476 mov eax, 65001 (CP_UTF8)
     0xC3,                         // 0x47B ret
+
+    // === Batch 28: virtual memory (VirtualAlloc/Free/Protect) ==
+
+    // --- VirtualAlloc (offset 0x47C, 13 bytes) ----------------
+    // Win32: LPVOID VirtualAlloc(LPVOID rcx, SIZE_T rdx,
+    //          DWORD flAllocationType=r8, DWORD flProtect=r9).
+    // v0 ignores rcx (caller's preferred address), r8, r9 —
+    // just forwards the size to SYS_VMAP which bump-allocates
+    // RW+NX+User pages. Kernel returns the VA; stub returns it
+    // verbatim (or 0 on arena exhaustion).
+    0x57,                         // 0x47C push rdi
+    0x48, 0x89, 0xD7,             // 0x47D mov rdi, rdx       ; size
+    0xB8, 0x1C, 0x00, 0x00, 0x00, // 0x480 mov eax, 28        ; SYS_VMAP
+    0xCD, 0x80,                   // 0x485 int 0x80
+    0x5F,                         // 0x487 pop rdi
+    0xC3,                         // 0x488 ret
+
+    // --- VirtualFree (offset 0x489, 29 bytes) -----------------
+    // Win32: BOOL VirtualFree(LPVOID rcx, SIZE_T rdx,
+    //          DWORD dwFreeType=r8).
+    // v0: no-op with range validation. Ignores rdx + r8;
+    // SYS_VUNMAP returns 0 if the VA is in the vmap arena, -1
+    // otherwise. BOOL = (rax == 0).
+    0x57,                         // 0x489 push rdi
+    0x56,                         // 0x48A push rsi
+    0x48, 0x89, 0xCF,             // 0x48B mov rdi, rcx       ; va
+    0x48, 0x89, 0xD6,             // 0x48E mov rsi, rdx       ; size
+    0xB8, 0x1D, 0x00, 0x00, 0x00, // 0x491 mov eax, 29        ; SYS_VUNMAP
+    0xCD, 0x80,                   // 0x496 int 0x80
+    0x31, 0xC9,                   // 0x498 xor ecx, ecx
+    0x48, 0x85, 0xC0,             // 0x49A test rax, rax
+    0x0F, 0x94, 0xC1,             // 0x49D sete cl
+    0x0F, 0xB6, 0xC1,             // 0x4A0 movzx eax, cl
+    0x5E,                         // 0x4A3 pop rsi
+    0x5F,                         // 0x4A4 pop rdi
+    0xC3,                         // 0x4A5 ret
+
+    // --- VirtualProtect (offset 0x4A6, 18 bytes) --------------
+    // Win32: BOOL VirtualProtect(LPVOID rcx, SIZE_T rdx,
+    //          DWORD flNewProtect=r8, PDWORD lpflOldProtect=r9).
+    // v0 is a no-op: every vmap page is RW+NX by construction
+    // (W^X policy — no W+X). If r9 is non-NULL we write
+    // PAGE_READWRITE (0x04) back as the "old" protection so
+    // MSVC CRT's VirtualProtect-probe round-trip sees a
+    // plausible value. Return TRUE.
+    0x4D, 0x85, 0xC9,                         // 0x4A6 test r9, r9
+    0x74, 0x07,                               // 0x4A9 jz .skip (+7)
+    0x41, 0xC7, 0x01, 0x04, 0x00, 0x00, 0x00, // 0x4AB mov dword [r9], 4 (PAGE_READWRITE)
+    // .skip:
+    0xB8, 0x01, 0x00, 0x00, 0x00, // 0x4B2 mov eax, 1 (BOOL TRUE)
+    0xC3,                         // 0x4B7 ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x47C, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0x4B8, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -1497,6 +1551,24 @@ constexpr StubEntry kStubsTable[] = {
     // (both signatures: LPCWSTR / LPCSTR, no return).
     {"kernel32.dll", "OutputDebugStringW", kOffReturnZero},
     {"kernel32.dll", "OutputDebugStringA", kOffReturnZero},
+
+    // Batch 28 — virtual memory. VirtualAlloc is the single
+    // most-requested Win32 memory primitive for non-trivial
+    // PEs (JIT, CoreCLR, TLS setup, custom allocators). Bump-
+    // only arena at 0x40000000..+512KiB per process.
+    // VirtualFree is a no-op (range-check only). VirtualProtect
+    // no-ops and echoes PAGE_READWRITE back — W^X forbids the
+    // RWX pages a JIT would actually want, so a second slice
+    // adds a separate "JIT image" mechanism when a real JIT
+    // workload needs it.
+    {"kernel32.dll", "VirtualAlloc", kOffVirtualAlloc},
+    {"kernel32.dll", "VirtualAllocEx", kOffVirtualAlloc}, // ignores the extra HANDLE arg
+    {"kernel32.dll", "VirtualFree", kOffVirtualFree},
+    {"kernel32.dll", "VirtualFreeEx", kOffVirtualFree},
+    {"kernel32.dll", "VirtualProtect", kOffVirtualProtect},
+    {"kernel32.dll", "VirtualProtectEx", kOffVirtualProtect},
+    {"kernel32.dll", "VirtualQuery", kOffReturnZero}, // v0 query returns 0 = failed
+    {"kernel32.dll", "VirtualQueryEx", kOffReturnZero},
 
     // Batch 9 — Win32 process heap, backed by the per-process
     // 16-page region at 0x50000000 and SYS_HEAP_ALLOC /

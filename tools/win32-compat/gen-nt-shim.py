@@ -51,7 +51,12 @@ KNOWN_MAPPINGS = {
     "NtCreateMutant":              "SYS_MUTEX_CREATE",     # batch 26
     "NtReleaseMutant":             "SYS_MUTEX_RELEASE",    # batch 26
     "NtWaitForSingleObject":       "SYS_MUTEX_WAIT",       # batch 26 (mutex handles)
-    # Slice 83+ candidates (filled in as the SYS_* lands)
+    # NtAllocateVirtualMemory is already mapped to SYS_HEAP_ALLOC above —
+    # keep that for now since HeapAlloc is the more common caller.
+    # SYS_VMAP (batch 28) has no direct bedrock NT analogue beyond
+    # NtAllocateVirtualMemory, which is already claimed. Coverage
+    # stays at 16/292 after this batch.
+    # Slice 84+ candidates (filled in as the SYS_* lands)
     # "NtSetInformationFile":      "SYS_FILE_SEEK",   (Position info class)
 }
 

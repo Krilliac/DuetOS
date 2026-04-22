@@ -267,6 +267,34 @@ enum SyscallNumber : u64
     // call returns WAIT_OBJECT_0 with the lock already theirs.
     // Backs Win32 ReleaseMutex.
     SYS_MUTEX_RELEASE = 27,
+
+    // SYS_VMAP: rdi = byte size (rounded up to next page).
+    // Allocates the next N = ceil(size / 4096) physical frames
+    // via AllocateFrame and maps them RW + NX + User into the
+    // caller's address space at Process::vmap_base +
+    // vmap_pages_used * 4096, then bumps vmap_pages_used.
+    // Returns the base VA of the allocation on success, or 0
+    // on failure (arena exhausted / OOM).
+    //
+    // v0 is bump-only — SYS_VUNMAP is a documented leak so
+    // there's no fragmentation/coalescing to worry about. A
+    // second slice can replace this with a region tracker
+    // when a workload genuinely needs reclaim.
+    //
+    // Unprivileged. Pages are mapped into the caller's own AS,
+    // bounded by kWin32VmapCapPages (128 = 512 KiB per process).
+    // Backs Win32 VirtualAlloc with flAllocationType covering
+    // MEM_COMMIT | MEM_RESERVE; flProtect is silently coerced
+    // to RW+NX (the CustomOS W^X policy — no W+X pages).
+    SYS_VMAP = 28,
+
+    // SYS_VUNMAP: rdi = VA, rsi = size. Returns 0 on success,
+    // u64(-1) on failure. v0 is a NO-OP that validates the VA
+    // falls inside the vmap arena + returns 0 — no physical
+    // reclaim. A leak, logged as such, but deterministic: the
+    // kernel's per-process frame budget eventually clamps a
+    // runaway allocator. Backs Win32 VirtualFree.
+    SYS_VUNMAP = 29,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit

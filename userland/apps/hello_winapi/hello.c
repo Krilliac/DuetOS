@@ -255,6 +255,20 @@ __declspec(dllimport) BOOL __stdcall SetConsoleCP(unsigned int wCodePageID);
 __declspec(dllimport) BOOL __stdcall SetConsoleOutputCP(unsigned int wCodePageID);
 __declspec(dllimport) void __stdcall OutputDebugStringW(LPCWSTR lpOutputString);
 
+// Batch 28 — virtual memory. VirtualAlloc bump-allocates RW+NX
+// pages in a per-process arena at 0x40000000..+512 KiB.
+// VirtualFree / VirtualProtect are no-ops with validation.
+#define MEM_COMMIT 0x1000UL
+#define MEM_RESERVE 0x2000UL
+#define MEM_RELEASE 0x8000UL
+#define PAGE_READWRITE 0x04UL
+#define PAGE_EXECUTE_READWRITE 0x40UL
+__declspec(dllimport) void* __stdcall VirtualAlloc(void* lpAddress, size_t dwSize, DWORD flAllocationType,
+                                                   DWORD flProtect);
+__declspec(dllimport) BOOL __stdcall VirtualFree(void* lpAddress, size_t dwSize, DWORD dwFreeType);
+__declspec(dllimport) BOOL __stdcall VirtualProtect(void* lpAddress, size_t dwSize, DWORD flNewProtect,
+                                                    DWORD* lpflOldProtect);
+
 static const char kMsg[] = "[hello-winapi] printed via kernel32.WriteFile!\n";
 #define kMsgLen ((DWORD)(sizeof(kMsg) - 1))
 
@@ -833,6 +847,46 @@ void _start(void)
         WriteFile(out, b27_ok, sizeof(b27_ok) - 1, &b27w, 0);
     else
         WriteFile(out, b27_bad, sizeof(b27_bad) - 1, &b27w, 0);
+
+    // Batch 28 exercise — virtual memory.
+    //
+    // Invariants checked:
+    //   * VirtualAlloc(NULL, 8192, RESERVE|COMMIT, PAGE_READWRITE)
+    //     returns a non-NULL VA in the vmap arena
+    //     (0x40000000..0x40080000).
+    //   * The returned page is writable — store a pattern and
+    //     read it back.
+    //   * A second VirtualAlloc returns a different (higher) VA
+    //     — the bump cursor is advancing per request.
+    //   * VirtualProtect on the allocation returns TRUE and
+    //     writes back 0x04 (PAGE_READWRITE) as the "old" flag.
+    //   * VirtualFree returns TRUE (no-op in v0, validation only).
+    //   * VirtualAlloc of zero bytes returns NULL.
+    void* b28_p1 = VirtualAlloc(0, 8192, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    BOOL b28_rw_ok = 0;
+    if (b28_p1 != 0)
+    {
+        unsigned int* u32p = (unsigned int*)b28_p1;
+        u32p[0] = 0xDEADBEEF;
+        u32p[2047] = 0xCAFEBABE; // last u32 of the 8 KiB region
+        b28_rw_ok = (u32p[0] == 0xDEADBEEF) && (u32p[2047] == 0xCAFEBABE);
+    }
+    void* b28_p2 = VirtualAlloc(0, 4096, MEM_COMMIT, PAGE_READWRITE);
+    DWORD b28_old_prot = 0;
+    BOOL b28_vp_ok = VirtualProtect(b28_p1, 4096, PAGE_READWRITE, &b28_old_prot);
+    BOOL b28_vf_ok = VirtualFree(b28_p2, 0, MEM_RELEASE);
+    void* b28_zero = VirtualAlloc(0, 0, MEM_COMMIT, PAGE_READWRITE);
+
+    const char b28_ok[] = "[batch28] VirtualAlloc + Protect + Free OK\n";
+    const char b28_bad[] = "[batch28] virtual memory FAILED invariants\n";
+    BOOL b28_pass = b28_p1 != 0 && (unsigned long long)b28_p1 >= 0x40000000ULL &&
+                    (unsigned long long)b28_p1 < 0x40080000ULL && b28_rw_ok && b28_p2 != 0 && b28_p2 != b28_p1 &&
+                    b28_vp_ok && b28_old_prot == PAGE_READWRITE && b28_vf_ok && b28_zero == 0;
+    DWORD b28w = 0;
+    if (b28_pass)
+        WriteFile(out, b28_ok, sizeof(b28_ok) - 1, &b28w, 0);
+    else
+        WriteFile(out, b28_bad, sizeof(b28_bad) - 1, &b28w, 0);
 
     // Batch 3 round-trip: store a distinctive value via
     // SetLastError, read it back via GetLastError, exit with
