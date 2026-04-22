@@ -79,6 +79,7 @@ constexpr u32 kOffSputn = 0x281;              // batch 18 — 19 bytes
 constexpr u32 kOffReturnThis = 0x294;         // batch 18 —  4 bytes
 constexpr u32 kOffWiden = 0x298;              // batch 18 —  4 bytes
 constexpr u32 kOffHresultEFail = 0x29C;       // batch 19 —  6 bytes
+constexpr u32 kOffGetSysTimeFTReal = 0x2A2;   // batch 20 — 13 bytes
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -843,10 +844,33 @@ constexpr u8 kStubsBytes[] = {
     // to rax; HRESULT is 32-bit so upper bits don't matter.
     0xB8, 0x05, 0x40, 0x00, 0x80, // 0x29C mov eax, 0x80004005
     0xC3,                         // 0x2A1 ret
+
+    // === Batch 20: real GetSystemTimeAsFileTime ===============
+    //
+    // Replaces the old `0x1DE` stub (which wrote 0 into *rcx).
+    // Issues SYS_GETTIME_FT (17) which samples the CMOS RTC and
+    // returns a Windows FILETIME (100 ns ticks since 1601-01-01).
+    // Then stores the result into *rcx (the caller's LPFILETIME).
+    //
+    // Register discipline:
+    //   - rcx must survive the int 0x80 so we can write *rcx at
+    //     the end. int 0x80 preserves all GPRs except rax, so we
+    //     don't need to save/restore rcx, but we push it anyway
+    //     as paranoia for any future syscall that might clobber
+    //     arguments.
+    //   - Nothing else matters (caller-saved under Win64 ABI).
+    //
+    // 13 bytes total.
+    0x51,                         // 0x2A2 push rcx
+    0xB8, 0x11, 0x00, 0x00, 0x00, // 0x2A3 mov eax, 17 (SYS_GETTIME_FT)
+    0xCD, 0x80,                   // 0x2A8 int 0x80                ; rax = FILETIME
+    0x59,                         // 0x2AA pop rcx
+    0x48, 0x89, 0x01,             // 0x2AB mov [rcx], rax
+    0xC3,                         // 0x2AE ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x2A2, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0x2AF, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -1090,9 +1114,12 @@ constexpr StubEntry kStubsTable[] = {
     // kernel32 — interlocked SList (zero-init an SList head).
     {"kernel32.dll", "InitializeSListHead", kOffInitSListHead},
 
-    // kernel32 — system time placeholder. Real impl needs
-    // a SYS_GETTIME backing syscall; deferred.
-    {"kernel32.dll", "GetSystemTimeAsFileTime", kOffGetSysTimeFT},
+    // kernel32 — system time. Reads the CMOS RTC via
+    // SYS_GETTIME_FT and writes the FILETIME into *rcx. The
+    // old kOffGetSysTimeFT stub at 0x1DE (writes 0) remains
+    // in the page as dead bytes — not worth restructuring the
+    // layout to reclaim 8 bytes.
+    {"kernel32.dll", "GetSystemTimeAsFileTime", kOffGetSysTimeFTReal},
 
     // kernel32 — process handles. OpenProcess returns the
     // PID as the handle (non-null iff PID != 0). Real

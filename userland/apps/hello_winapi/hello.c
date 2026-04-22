@@ -353,7 +353,7 @@ void _start(void)
     unsigned char slist[16] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
                                0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00};
     InitializeSListHead(slist);
-    unsigned char ft[8] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    unsigned char ft[8] = {0, 0, 0, 0, 0, 0, 0, 0};
     GetSystemTimeAsFileTime(ft);
     // Sink all results so the compiler can't DCE them.
     (void)opt_ok;
@@ -372,9 +372,16 @@ void _start(void)
     // could silently introduce.
     const char b10_ok[] = "[batch10] advapi32 + event/wait/time/proc OK\n";
     const char b10_bad[] = "[batch10] advapi32/event/wait FAILED invariants\n";
+    // GetSystemTimeAsFileTime now returns a real FILETIME from
+    // the CMOS RTC (SYS_GETTIME_FT); the v0 "write zeros" check
+    // has been replaced with "something non-zero got written".
+    // A FILETIME for any year >= 1601 is 100 ns ticks since the
+    // Windows epoch, which for any realistic date is > 2^60 and
+    // has several non-zero bytes in the upper half.
+    BOOL ft_nonzero = (ft[4] != 0) || (ft[5] != 0) || (ft[6] != 0) || (ft[7] != 0);
     BOOL b10_pass = token != 0 && se_debug.LowPart == 1 && se_debug.HighPart == 0 && evt != 0 && wait_rc == 0 &&
                     thr_exit == 0x103 && slist[0] == 0 && slist[8] == 0 // InitializeSListHead zeroed it
-                    && ft[0] == 0 && ft[7] == 0;                        // GetSystemTimeAsFileTime zeroed it
+                    && ft_nonzero;                                      // RTC-backed FILETIME is populated
     DWORD b10w = 0;
     if (b10_pass)
         WriteFile(out, b10_ok, sizeof(b10_ok) - 1, &b10w, 0);

@@ -155,6 +155,14 @@ enum SyscallNumber : u64
     // reached. Unprivileged — the trampoline is our own code
     // and the lookup reads only this process's own table.
     SYS_WIN32_MISS_LOG = 16,
+
+    // SYS_GETTIME_FT: returns the current wall-clock time as a
+    // Windows FILETIME — a u64 count of 100-nanosecond intervals
+    // since 1601-01-01 00:00:00 UTC. No arguments. Reads the
+    // CMOS RTC, converts, returns in rax. Used by the Win32
+    // `GetSystemTimeAsFileTime` stub to replace the old
+    // "write 0 and return" placeholder with a real timestamp.
+    SYS_GETTIME_FT = 17,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit

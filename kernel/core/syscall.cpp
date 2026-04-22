@@ -1,6 +1,7 @@
 #include "syscall.h"
 
 #include "../arch/x86_64/idt.h"
+#include "../arch/x86_64/rtc.h"
 #include "../arch/x86_64/serial.h"
 #include "../arch/x86_64/timer.h"
 #include "../fs/vfs.h"
@@ -51,6 +52,43 @@ void ReportUnknownSyscall(u64 num, u64 rip)
     arch::SerialWrite(" rip=");
     arch::SerialWriteHex(rip);
     arch::SerialWrite("\n");
+}
+
+// Convert an RtcTime (Gregorian date + UTC time-of-day) to a
+// Windows FILETIME — 100-nanosecond ticks since 1601-01-01
+// 00:00:00 UTC. Pure arithmetic; no MSR / HPET reads.
+//
+// Algorithm: day-of-Gregorian computation by the classic "civil
+// from days" family. We compute days since 1970-01-01 (Unix
+// epoch), then add the fixed 1970→1601 offset (134 774 days =
+// 369 years * 365 + 89 leap days between 1601..1969) to land
+// at the Windows epoch.
+u64 RtcToFileTime(const arch::RtcTime& t)
+{
+    // Leap years: divisible by 4, except those divisible by 100
+    // unless also by 400.
+    auto is_leap = [](u32 y) { return (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0); };
+    constexpr u32 kDaysBeforeMonth[12] = {0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334};
+
+    // Days from 1970-01-01 to (t.year - 1, 12, 31).
+    u64 days = 0;
+    for (u32 y = 1970; y < t.year; ++y)
+        days += is_leap(y) ? 366 : 365;
+    const u32 m = (t.month >= 1 && t.month <= 12) ? (t.month - 1) : 0;
+    days += kDaysBeforeMonth[m];
+    if (m >= 2 && is_leap(t.year))
+        days += 1;
+    days += (t.day >= 1) ? (t.day - 1) : 0;
+
+    // Shift the epoch from 1970-01-01 to 1601-01-01. The interval
+    // 1601-01-01 .. 1970-01-01 is 369 years = 269 non-leap +
+    // 100 leap days counted as 89 (century rule drops 3 of every
+    // 4) = 134774 days.
+    constexpr u64 k1970To1601Days = 134774;
+    const u64 total_days = days + k1970To1601Days;
+
+    const u64 seconds = total_days * 86400ULL + u64(t.hour) * 3600 + u64(t.minute) * 60 + u64(t.second);
+    return seconds * 10'000'000ULL; // 100-ns ticks per second
 }
 
 // SYS_WRITE body. Copies up to `len` bytes from the user buffer,
@@ -251,6 +289,17 @@ void SyscallDispatch(arch::TrapFrame* frame)
         // the Win32 QueryPerformanceCounter + GetTickCount
         // stubs.
         frame->rax = arch::TimerTicks();
+        return;
+    }
+
+    case SYS_GETTIME_FT:
+    {
+        // No args. Sample the CMOS RTC and return the current
+        // wall-clock as a Windows FILETIME (100 ns ticks since
+        // 1601-01-01 00:00:00 UTC) in rax.
+        arch::RtcTime t = {};
+        arch::RtcRead(&t);
+        frame->rax = RtcToFileTime(t);
         return;
     }
 
