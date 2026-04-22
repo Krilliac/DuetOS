@@ -112,6 +112,14 @@ enum class HealthIssue : u32
     // triple-fault.
     TaskRspOutOfRange,
 
+    // IRQ nesting depth exceeded the allowed ceiling. Normal
+    // nesting is 1 (handler) with an occasional 2 (NMI inside
+    // IRQ). Anything > 4 indicates a runaway re-entry — a
+    // handler that didn't mask properly before calling something
+    // that can interrupt again, or an IRQ storm flooding the
+    // CPU faster than handlers can drain.
+    IrqNestingExcessive,
+
     // Count sentinel
     Count,
 };

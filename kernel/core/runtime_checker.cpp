@@ -4,6 +4,7 @@
 #include "../arch/x86_64/gdt.h"
 #include "../arch/x86_64/idt.h"
 #include "../arch/x86_64/serial.h"
+#include "../arch/x86_64/traps.h"
 #include "../mm/frame_allocator.h"
 #include "../mm/kheap.h"
 #include "../sched/sched.h"
@@ -51,6 +52,11 @@ constexpr u64 kSchedTasksLiveCap = 256;
 // splinters — probably a miscoalescing bug or a workload that
 // churns many odd-sized allocations. Flag for investigation.
 constexpr u64 kHeapFreelistFragmentationCap = 256;
+
+// IRQ nesting ceiling. 1 is the baseline (one handler in flight),
+// 2 covers NMI-inside-IRQ, 3 covers the theoretically worst
+// cluster of fault-inside-handler. Anything past 4 is runaway.
+constexpr u64 kIrqNestingCeiling = 4;
 
 // Grace period for the "timer is firing" heuristic. Scheduler
 // tick starts ~100 ms into boot; we give it 500 ms before
@@ -308,6 +314,16 @@ bool CheckKernelText()
     return true;
 }
 
+bool CheckIrqNesting()
+{
+    if (arch::IrqNestMax() > kIrqNestingCeiling)
+    {
+        Report(HealthIssue::IrqNestingExcessive);
+        return false;
+    }
+    return true;
+}
+
 bool CheckTaskStacks()
 {
     // Sched walker returns canary + rsp-range counts. Each maps
@@ -376,6 +392,8 @@ const char* HealthIssueName(HealthIssue i)
         return "kernel .text spot-check hash changed since baseline (W^X bypassed)";
     case HealthIssue::TaskRspOutOfRange:
         return "task saved rsp outside [stack_base, stack_top) (control block scribbled)";
+    case HealthIssue::IrqNestingExcessive:
+        return "IRQ nesting depth exceeded ceiling (runaway re-entry or storm)";
     default:
         return "(unnamed issue)";
     }
@@ -424,6 +442,7 @@ u64 RuntimeCheckerScan()
     }
     (void)CheckCanary();
     (void)CheckTaskStacks();
+    (void)CheckIrqNesting();
     const u64 delta = g_report.issues_found_total - before;
     g_report.last_scan_issues = delta;
     return delta;

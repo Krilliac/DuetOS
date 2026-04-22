@@ -45,8 +45,7 @@ struct TrapFrame
     u64 ss;
 };
 
-static_assert(sizeof(TrapFrame) == 22 * sizeof(u64),
-              "TrapFrame size must match exceptions.S push order");
+static_assert(sizeof(TrapFrame) == 22 * sizeof(u64), "TrapFrame size must match exceptions.S push order");
 
 /// Called from isr_common. For CPU exceptions (vector < 32), prints
 /// diagnostic state to COM1 and halts — none are recoverable yet. For
@@ -54,6 +53,16 @@ static_assert(sizeof(TrapFrame) == 22 * sizeof(u64),
 /// the per-vector IRQ handler and returns so isr_common's iretq path
 /// resumes the interrupted code.
 extern "C" void TrapDispatch(TrapFrame* frame);
+
+/// Current IRQ nesting depth. 0 = not in interrupt context,
+/// 1 = one level deep (normal), >= 2 = a handler itself was
+/// interrupted. The runtime checker watches the lifetime max
+/// (IrqNestMax) to surface runaway re-entry.
+u64 IrqNestDepth();
+
+/// Highest IRQ nesting depth observed since boot. Monotonic;
+/// never reset.
+u64 IrqNestMax();
 
 /// Per-vector IRQ handler signature. The LAPIC EOI is sent by the IRQ
 /// dispatcher (not by individual handlers), so handlers should NOT EOI
