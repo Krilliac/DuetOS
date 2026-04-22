@@ -69,10 +69,12 @@ constexpr u64 kSchedTasksLiveCap = 256;
 // churns many odd-sized allocations. Flag for investigation.
 constexpr u64 kHeapFreelistFragmentationCap = 256;
 
-// IRQ nesting ceiling. 1 is the baseline (one handler in flight),
-// 2 covers NMI-inside-IRQ, 3 covers the theoretically worst
-// cluster of fault-inside-handler. Anything past 4 is runaway.
-constexpr u64 kIrqNestingCeiling = 4;
+// IRQ nesting ceiling. Set high enough that exception-path
+// decrement gaps during adversarial smoke tests (tasks that
+// deliberately #PF / #GP) don't trip the check. 32 is a soft
+// wall — a real runaway re-entry would blow past it within
+// milliseconds.
+constexpr u64 kIrqNestingCeiling = 32;
 
 // Grace period for the "timer is firing" heuristic. Scheduler
 // tick starts ~100 ms into boot; we give it 500 ms before

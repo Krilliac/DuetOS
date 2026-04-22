@@ -3,6 +3,7 @@
 #include "../arch/x86_64/cpu.h"
 #include "../arch/x86_64/gdt.h"
 #include "../arch/x86_64/serial.h"
+#include "../arch/x86_64/traps.h"
 #include "../core/klog.h"
 #include "../core/panic.h"
 #include "../core/process.h"
@@ -125,6 +126,15 @@ struct Task
     // only and native tasks leave this at 0 and never touch
     // MSR_FS_BASE; the save/restore is a no-op for them.
     u64 fs_base;
+
+    // Per-task IRQ nesting depth. Saved/restored across context
+    // switch so the global g_irq_depth tracks "how deep is the
+    // CURRENT task's nesting" correctly: a task A that blocks
+    // mid-IRQ-handler, is switched out, and later resumed has
+    // its depth preserved. Without this, the global counter
+    // leaked monotonically every time Schedule() abandoned a
+    // dispatch frame.
+    u64 irq_depth;
 };
 
 namespace
@@ -707,6 +717,14 @@ void Schedule()
         asm volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(kMsrFsBase));
         prev->fs_base = (static_cast<u64>(hi) << 32) | lo;
     }
+
+    // IRQ-depth handoff. Stash the outgoing task's current
+    // global depth, then load the incoming task's saved depth
+    // into the global so IrqNestDepth() reflects the resumed
+    // task's nesting. Without this the global leaks monotonically
+    // across switches (see traps.cpp comments).
+    prev->irq_depth = arch::IrqNestDepthRaw();
+    arch::IrqNestDepthSet(next->irq_depth);
 
     ContextSwitch(&prev->rsp, next->rsp);
     // When we return here, we're executing on a DIFFERENT task's

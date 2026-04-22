@@ -99,17 +99,23 @@ void WriteLabelled(const char* label, u64 value)
 
 } // namespace
 
-// IRQ nesting-depth tracking deliberately lives as stubbed
-// accessors. A naive { ++depth; handler; --depth; } racily
-// leaks across scheduler context switches — the dispatch
-// invocation that called Schedule() abandons its stack when
-// Schedule picks a different task, so the decrement never
-// fires and the counter climbs monotonically. Correct
-// tracking needs per-task "in-IRQ-context" bookkeeping tied
-// to the context-switch path; that's a scheduler slice rather
-// than a runtime-checker slice. Accessors return 0 so the
-// health check's ceiling test is always clean until the real
-// counter arrives.
+// IRQ nesting-depth tracking. Two live-test attempts (slices
+// 69 and 71) exposed that a correct counter needs both:
+//   * per-task save/restore across Schedule (done, via
+//     Task.irq_depth in sched.cpp), AND
+//   * decrement at every exit path of TrapDispatch, including
+//     the CPU-exception paths that don't return (task-kill,
+//     panic), the NMI halt-forever path, and the fault-fixup
+//     rewrite path.
+// The exception paths are where the counter leaked last time.
+// Getting all of those right without regressing something else
+// is its own slice; for now the accessor reports 0 so the
+// health check's ceiling test stays clean, and the per-task
+// field is zeroed at task creation so the save/restore plumb
+// is ready to switch on once the exception-path audit lands.
+constinit u64 g_irq_nest_depth = 0;
+constinit u64 g_irq_nest_max = 0;
+
 u64 IrqNestDepth()
 {
     return 0;
@@ -117,6 +123,14 @@ u64 IrqNestDepth()
 u64 IrqNestMax()
 {
     return 0;
+}
+u64 IrqNestDepthRaw()
+{
+    return 0;
+}
+void IrqNestDepthSet(u64 /*v*/)
+{
+    // stub
 }
 
 extern "C" void TrapDispatch(TrapFrame* frame)

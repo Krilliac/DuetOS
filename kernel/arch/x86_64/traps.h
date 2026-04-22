@@ -54,15 +54,24 @@ static_assert(sizeof(TrapFrame) == 22 * sizeof(u64), "TrapFrame size must match 
 /// resumes the interrupted code.
 extern "C" void TrapDispatch(TrapFrame* frame);
 
-/// Current IRQ nesting depth. 0 = not in interrupt context,
-/// 1 = one level deep (normal), >= 2 = a handler itself was
-/// interrupted. The runtime checker watches the lifetime max
-/// (IrqNestMax) to surface runaway re-entry.
+/// Current IRQ nesting depth for the running task. 0 = not in
+/// interrupt context, 1 = one level deep (normal), >= 2 = a
+/// handler itself was interrupted. The runtime checker watches
+/// the lifetime max (IrqNestMax) to surface runaway re-entry.
 u64 IrqNestDepth();
 
 /// Highest IRQ nesting depth observed since boot. Monotonic;
 /// never reset.
 u64 IrqNestMax();
+
+/// Direct accessor/mutator for the per-CPU depth counter. Used
+/// by the scheduler's context-switch path to save the outgoing
+/// task's nesting level and load the incoming task's. Mirrors
+/// the FS_BASE save/restore pattern — same location, same
+/// "stash-then-restore" shape. No public API beyond the
+/// scheduler; other callers should use IrqNestDepth/Max.
+u64 IrqNestDepthRaw();
+void IrqNestDepthSet(u64 v);
 
 /// Per-vector IRQ handler signature. The LAPIC EOI is sent by the IRQ
 /// dispatcher (not by individual handlers), so handlers should NOT EOI
