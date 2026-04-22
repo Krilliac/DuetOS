@@ -69,7 +69,10 @@ expected=(
     "[files] self-test OK"
     "[clock] self-test OK"
     "[block] self-test OK"
-    "exit rc   val=0x000000000000beef"
+    # klog's value formatter emits compact hex (`0xbeef`) rather
+    # than zero-padded — the decimal `(48879)` that follows makes
+    # the prefix unique to hello_winapi's sentinel exit code.
+    "exit rc   val=0xbeef"
 )
 
 # Forbidden signatures — anything indicating an unhandled
