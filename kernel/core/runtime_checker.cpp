@@ -37,6 +37,25 @@ constinit u64 g_baseline_efer = 0;
 constinit u64 g_baseline_idt_hash = 0;
 constinit u64 g_baseline_gdt_hash = 0;
 constinit u64 g_baseline_text_spot_hash = 0;
+// Syscall MSR baselines. These are the post-boot "golden"
+// values; any later change signals a syscall-hook rootkit.
+// LSTAR = Linux 64-bit SYSCALL entry (IA32_LSTAR, 0xC0000082)
+// STAR  = SYSCALL CS/SS pair      (IA32_STAR,  0xC0000081)
+// CSTAR = compat-mode SYSCALL     (IA32_CSTAR, 0xC0000083)
+// SYSENTER_EIP = 32-bit SYSENTER entry (0x176)
+// SYSENTER_CS  = 32-bit SYSENTER CS   (0x174)
+// FEATURE_CONTROL = IA32_FEATURE_CONTROL (0x3A, bit 0 = lock)
+constinit u64 g_baseline_lstar = 0;
+constinit u64 g_baseline_star = 0;
+constinit u64 g_baseline_cstar = 0;
+constinit u64 g_baseline_sysenter_eip = 0;
+constinit u64 g_baseline_sysenter_cs = 0;
+constinit u64 g_baseline_feature_control = 0;
+// Baseline valid only if the MSR was readable at init time.
+// A few MSRs #GP on platforms that don't implement them (old
+// AMD / VM without vmx). Track per-MSR so the checker can
+// skip silently.
+constinit bool g_baseline_feature_control_valid = false;
 
 // Previous-scan values for monotonic counters. Each entry
 // should only ever grow; a scan that sees a smaller value
@@ -56,6 +75,16 @@ constexpr u64 kCr0Wp = 1ULL << 16;
 constexpr u64 kCr4Smep = 1ULL << 20;
 constexpr u64 kCr4Smap = 1ULL << 21;
 constexpr u32 kMsrEfer = 0xC0000080;
+// Syscall-hook detection MSRs. Each is written at most once
+// during boot (SyscallInit for STAR/LSTAR/CSTAR, firmware for
+// SYSENTER, firmware for FEATURE_CONTROL lock).
+constexpr u32 kMsrIa32FeatureControl = 0x3A;
+constexpr u32 kMsrIa32SysenterCs = 0x174;
+constexpr u32 kMsrIa32SysenterEip = 0x176;
+constexpr u32 kMsrIa32Star = 0xC0000081;
+constexpr u32 kMsrIa32Lstar = 0xC0000082;
+constexpr u32 kMsrIa32Cstar = 0xC0000083;
+constexpr u64 kFeatureControlLockBit = 1ULL << 0;
 constexpr u64 kEferNxe = 1ULL << 11;
 
 // Sanity caps on scheduler state. Beyond these we flag the
@@ -119,6 +148,8 @@ bool IsSecurityCritical(HealthIssue issue)
     case HealthIssue::StackCanaryZero:
     case HealthIssue::TaskStackOverflow:
     case HealthIssue::TaskRspOutOfRange:
+    case HealthIssue::SyscallMsrHijacked:
+    case HealthIssue::FeatureControlUnlocked:
         return true;
     default:
         return false;
@@ -260,6 +291,53 @@ bool CheckCanary()
     if (__stack_chk_guard == 0)
     {
         Report(HealthIssue::StackCanaryZero);
+        return false;
+    }
+    return true;
+}
+
+// Syscall-MSR baseline check. Catches the dominant rootkit
+// persistence pattern: overwrite IA32_LSTAR (or STAR / CSTAR /
+// SYSENTER_EIP) with a hook that inspects every syscall before
+// routing to the real handler. None of these MSRs are
+// legitimately rewritten after SyscallInit; any drift is an
+// attack.
+bool CheckSyscallMsrs()
+{
+    bool ok = true;
+    auto check = [&ok](u32 msr, u64 baseline, const char* name)
+    {
+        const u64 now = ReadMsr(msr);
+        if (now != baseline)
+        {
+            arch::SerialWrite("[health] syscall MSR hijacked: ");
+            arch::SerialWrite(name);
+            arch::SerialWrite(" baseline=");
+            arch::SerialWriteHex(baseline);
+            arch::SerialWrite(" now=");
+            arch::SerialWriteHex(now);
+            arch::SerialWrite("\n");
+            Report(HealthIssue::SyscallMsrHijacked);
+            ok = false;
+        }
+    };
+    check(kMsrIa32Lstar, g_baseline_lstar, "IA32_LSTAR");
+    check(kMsrIa32Star, g_baseline_star, "IA32_STAR");
+    check(kMsrIa32Cstar, g_baseline_cstar, "IA32_CSTAR");
+    check(kMsrIa32SysenterEip, g_baseline_sysenter_eip, "IA32_SYSENTER_EIP");
+    check(kMsrIa32SysenterCs, g_baseline_sysenter_cs, "IA32_SYSENTER_CS");
+    return ok;
+}
+
+bool CheckFeatureControlLock()
+{
+    if (!g_baseline_feature_control_valid)
+        return true;
+    const u64 now = ReadMsr(kMsrIa32FeatureControl);
+    // If the baseline had the lock bit set, require it still set.
+    if ((g_baseline_feature_control & kFeatureControlLockBit) != 0 && (now & kFeatureControlLockBit) == 0)
+    {
+        Report(HealthIssue::FeatureControlUnlocked);
         return false;
     }
     return true;
@@ -499,6 +577,10 @@ const char* HealthIssueName(HealthIssue i)
         return "a monotonic counter regressed (arithmetic underflow or corruption)";
     case HealthIssue::ClockStalled:
         return "HPET or LAPIC tick counter didn't advance between scans";
+    case HealthIssue::SyscallMsrHijacked:
+        return "syscall MSR (LSTAR/STAR/CSTAR/SYSENTER) changed since baseline (rootkit hook)";
+    case HealthIssue::FeatureControlUnlocked:
+        return "IA32_FEATURE_CONTROL lock bit cleared since baseline (VMX-based attack setup)";
     default:
         return "(unnamed issue)";
     }
@@ -513,6 +595,23 @@ void RuntimeCheckerInit()
     g_baseline_idt_hash = arch::IdtHash();
     g_baseline_gdt_hash = arch::GdtHash();
     g_baseline_text_spot_hash = ComputeTextSpotHash();
+    g_baseline_lstar = ReadMsr(kMsrIa32Lstar);
+    g_baseline_star = ReadMsr(kMsrIa32Star);
+    g_baseline_cstar = ReadMsr(kMsrIa32Cstar);
+    g_baseline_sysenter_eip = ReadMsr(kMsrIa32SysenterEip);
+    g_baseline_sysenter_cs = ReadMsr(kMsrIa32SysenterCs);
+    // FEATURE_CONTROL only exists on VMX-capable CPUs. Gate on
+    // CPUID.1.ECX bit 5; reading it on a CPU that doesn't
+    // support VMX would #GP. On QEMU TCG + AuthenticAMD-TCG
+    // the bit is clear (VMX not advertised), so we skip the
+    // baseline entirely there.
+    u32 eax, ebx, ecx, edx;
+    asm volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(1));
+    if (ecx & (1u << 5)) // VMX supported
+    {
+        g_baseline_feature_control = ReadMsr(kMsrIa32FeatureControl);
+        g_baseline_feature_control_valid = true;
+    }
     g_report.baseline_captured = 1;
     arch::SerialWrite("[health] baseline cr0=");
     arch::SerialWriteHex(g_baseline_cr0);
@@ -526,6 +625,12 @@ void RuntimeCheckerInit()
     arch::SerialWriteHex(g_baseline_gdt_hash);
     arch::SerialWrite(" text_spot=");
     arch::SerialWriteHex(g_baseline_text_spot_hash);
+    arch::SerialWrite("\n[health] lstar=");
+    arch::SerialWriteHex(g_baseline_lstar);
+    arch::SerialWrite(" star=");
+    arch::SerialWriteHex(g_baseline_star);
+    arch::SerialWrite(" sysenter_eip=");
+    arch::SerialWriteHex(g_baseline_sysenter_eip);
     arch::SerialWrite("\n");
 }
 
@@ -549,6 +654,11 @@ u64 RuntimeCheckerScan()
     (void)CheckTaskStacks();
     (void)CheckIrqNesting();
     (void)CheckMonotonicCounters();
+    if (g_report.baseline_captured != 0)
+    {
+        (void)CheckSyscallMsrs();
+        (void)CheckFeatureControlLock();
+    }
     const u64 delta = g_report.issues_found_total - before;
     g_report.last_scan_issues = delta;
     return delta;

@@ -134,6 +134,22 @@ enum class HealthIssue : u32
     // silently failing.
     ClockStalled,
 
+    // A syscall-related MSR has changed since baseline. The
+    // three most rootkit-abused are IA32_LSTAR (SYSCALL entry
+    // RIP, Linux syscall target), IA32_STAR (SYSCALL CS/SS),
+    // and IA32_SYSENTER_EIP (SYSENTER entry). A modern rootkit
+    // hooks syscalls by overwriting these. Each is set once at
+    // boot and never legitimately rewritten — any scan-time
+    // drift is a confirmed attack or very serious bug.
+    SyscallMsrHijacked,
+
+    // IA32_FEATURE_CONTROL lock bit unexpectedly cleared.
+    // Firmware sets this bit at boot to prevent late changes
+    // to the VMX / SMRR controls it configured. A cleared lock
+    // bit indicates either firmware that didn't lock (rare) or
+    // a rogue write that's setting up for a VMX-based attack.
+    FeatureControlUnlocked,
+
     // Count sentinel
     Count,
 };
