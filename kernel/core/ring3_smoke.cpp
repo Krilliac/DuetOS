@@ -1533,6 +1533,17 @@ u64 SpawnElfFile(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps
     {
         return 0;
     }
+    // Auto-detect Linux-ABI binaries by EI_OSABI byte at ELF
+    // offset 7. ELFOSABI_LINUX = 3. Most gcc/clang output uses
+    // ELFOSABI_SYSV = 0 (which we treat as native); only binaries
+    // explicitly marked Linux route through SpawnElfLinux so the
+    // caller's intent is preserved for ambiguous inputs. When a
+    // richer discriminator lands (PT_INTERP sniffing,
+    // `.note.ABI-tag` parsing), add it here.
+    if (elf_len > 7 && elf_bytes[7] == 3)
+    {
+        return SpawnElfLinux(name, elf_bytes, elf_len, caps, root, frame_budget, tick_budget);
+    }
     AddressSpace* as = AddressSpaceCreate(frame_budget);
     if (as == nullptr)
     {
