@@ -1484,6 +1484,141 @@ void SpawnWriteFuzzProbeTask()
     sched::SchedCreateUser(&Ring3UserEntry, nullptr, "ring3-writefuzz-probe", proc);
 }
 
+// ---- bp-probe: ring-3 exercise of SYS_BP_INSTALL / SYS_BP_REMOVE. -----
+//
+// A trusted task that installs a HW execute breakpoint on an
+// instruction in its own code page, then executes that instruction
+// (a `nop` at code_va + kBpProbeTargetOffset), expects the kernel
+// to log `HW BP hit` for its pid, then removes the BP and prints
+// `[bp-probe] passed via HW BP`. Expected serial log sequence:
+//
+//   [ring3] queued bp-probe task pid=N
+//   [ring3] task pid=N entering ring 3 ...
+//   [I] debug/bp : HW BP installed   addr=<target>   id=<id>
+//   [I] debug/bp : HW BP hit   addr=<target>   hits=0x1 (1)
+//   [I] debug/bp : HW BP removed id   val=<id>
+//   [bp-probe] passed via HW BP
+//   [I] sys : exit rc val=0x0
+//   [proc] destroy pid=N name="ring3-bp-probe"
+//
+// Failure modes caught:
+//   * `SYS_BP_INSTALL` cap-gate bug → rax=-1 → probe still prints
+//     the passed-msg but the kernel log lacks the `HW BP hit` line.
+//   * Context-switch save/restore bug → BP misses on the specific
+//     CPU the task ended up running on → no `HW BP hit` line.
+//   * DR7 enable-bit pack bug → BP doesn't arm → no hit.
+//
+// clang-format off
+constexpr char kBpProbeMsg[] = "[bp-probe] passed via HW BP\n";
+constexpr u64 kBpProbeMsgOffset = 0x80;
+constexpr u64 kBpProbeMsgLen = sizeof(kBpProbeMsg) - 1;
+constexpr u64 kBpProbeTargetOffset = 0x19; // byte offset of the BP's `nop`
+
+constexpr u8 kBpProbeBytes[] = {
+    // ---- SYS_BP_INSTALL(va=<TARGET>, kind=1, len=1) ---------
+    0xB8, 0x26, 0x00, 0x00, 0x00,                                 // 0x00 mov eax, 38 (SYS_BP_INSTALL)
+    0xBF, 0x00, 0x00, 0x00, 0x00,                                 // 0x05 mov edi, <TARGET_VA>  (patched)
+    0xBE, 0x01, 0x00, 0x00, 0x00,                                 // 0x0A mov esi, 1 (HwExecute)
+    0xBA, 0x01, 0x00, 0x00, 0x00,                                 // 0x0F mov edx, 1 (len)
+    0xCD, 0x80,                                                   // 0x14 int 0x80 → rax = bp_id
+    0x49, 0x89, 0xC4,                                             // 0x16 mov r12, rax (save bp_id)
+
+    // ---- BP target: a single nop at code_va + kBpProbeTargetOffset.
+    // The kernel's #DB handler logs the hit; we just keep going.
+    0x90,                                                         // 0x19 nop  (HW BP fires here)
+
+    // ---- SYS_BP_REMOVE(id=r12) ------------------------------
+    0xB8, 0x27, 0x00, 0x00, 0x00,                                 // 0x1A mov eax, 39 (SYS_BP_REMOVE)
+    0x4C, 0x89, 0xE7,                                             // 0x1F mov rdi, r12
+    0xCD, 0x80,                                                   // 0x22 int 0x80
+
+    // ---- SYS_WRITE(1, code_va + MSG_OFFSET, MSG_LEN) --------
+    0xB8, 0x02, 0x00, 0x00, 0x00,                                 // 0x24 mov eax, 2 (SYS_WRITE)
+    0xBF, 0x01, 0x00, 0x00, 0x00,                                 // 0x29 mov edi, 1 (fd)
+    0xBE, 0x00, 0x00, 0x00, 0x00,                                 // 0x2E mov esi, <MSG_VA>  (patched)
+    0xBA, static_cast<u8>(kBpProbeMsgLen), 0x00, 0x00, 0x00,      // 0x33 mov edx, len
+    0xCD, 0x80,                                                   // 0x38 int 0x80
+
+    // ---- SYS_EXIT(0) ----------------------------------------
+    0x31, 0xC0,                                                   // 0x3A xor eax, eax
+    0x31, 0xFF,                                                   // 0x3C xor edi, edi
+    0xCD, 0x80,                                                   // 0x3E int 0x80
+    0x0F, 0x0B,                                                   // 0x40 ud2
+};
+// clang-format on
+static_assert(sizeof(kBpProbeBytes) <= kBpProbeMsgOffset, "bp-probe code overruns msg region");
+static_assert(kBpProbeMsgOffset + sizeof(kBpProbeMsg) <= mm::kPageSize, "bp-probe msg past end of page");
+
+// Imm32 patch offsets — hand-verified above. The byte immediately
+// preceding each imm32 MUST be the expected opcode (0xBF for
+// mov edi, 0xBE for mov esi); asserted in the spawn helper.
+constexpr u16 kBpProbeInstallTargetOffset = 0x06; // imm32 at 0x06 (opcode 0xBF at 0x05)
+constexpr u16 kBpProbeWriteSrcOffset = 0x2F;      // imm32 at 0x2F (opcode 0xBE at 0x2E)
+
+void SpawnBpProbeTask()
+{
+    using arch::SerialWrite;
+    using arch::SerialWriteHex;
+    using namespace customos::mm;
+
+    const u64 code_va = AslrPickBase();
+    const u64 stack_va = code_va + kStackOffsetFromCode;
+    KASSERT(code_va <= 0xFFFFFFFFULL, "core/ring3", "bp-probe code_va overflows imm32");
+
+    AddressSpace* as = AddressSpaceCreate(kFrameBudgetTrusted);
+    if (as == nullptr)
+    {
+        Panic("core/ring3", "AS create failed for bp-probe");
+    }
+
+    const PhysAddr code_frame = AllocateFrame();
+    if (code_frame == kNullFrame)
+    {
+        Panic("core/ring3", "code frame alloc failed for bp-probe");
+    }
+    auto* code_direct = static_cast<u8*>(PhysToVirt(code_frame));
+    for (u64 i = 0; i < mm::kPageSize; ++i)
+        code_direct[i] = 0;
+    for (u64 i = 0; i < sizeof(kBpProbeBytes); ++i)
+        code_direct[i] = kBpProbeBytes[i];
+    for (u64 i = 0; i < sizeof(kBpProbeMsg); ++i)
+        code_direct[kBpProbeMsgOffset + i] = static_cast<u8>(kBpProbeMsg[i]);
+
+    // Patch the install target and write-source VAs. Opcode
+    // sanity checks first — if the byte layout above ever gets
+    // shuffled, we want an explicit panic rather than a wrong
+    // address silently slipping through.
+    KASSERT(code_direct[kBpProbeInstallTargetOffset - 1] == 0xBF, "core/ring3",
+            "bp-probe patch: byte before install-target offset is not mov-edi-imm32 opcode");
+    KASSERT(code_direct[kBpProbeWriteSrcOffset - 1] == 0xBE, "core/ring3",
+            "bp-probe patch: byte before write-src offset is not mov-esi-imm32 opcode");
+    WriteImm32LE(code_direct, kBpProbeInstallTargetOffset, static_cast<u32>(code_va + kBpProbeTargetOffset));
+    WriteImm32LE(code_direct, kBpProbeWriteSrcOffset, static_cast<u32>(code_va + kBpProbeMsgOffset));
+
+    const PhysAddr stack_frame = AllocateFrame();
+    if (stack_frame == kNullFrame)
+    {
+        Panic("core/ring3", "stack frame alloc failed for bp-probe");
+    }
+    AddressSpaceMapUserPage(as, code_va, code_frame, kPagePresent | kPageUser);
+    AddressSpaceMapUserPage(as, stack_va, stack_frame, kPagePresent | kPageWritable | kPageUser | kPageNoExecute);
+
+    // Trusted caps include kCapSerialConsole (for the final
+    // SYS_WRITE) and kCapDebug (gating the new BP syscalls).
+    Process* proc = ProcessCreate("ring3-bp-probe", as, CapSetTrusted(), fs::RamfsTrustedRoot(), code_va, stack_va,
+                                  kTickBudgetTrusted);
+    if (proc == nullptr)
+    {
+        Panic("core/ring3", "ProcessCreate failed for bp-probe");
+    }
+    SerialWrite("[ring3] queued bp-probe task pid=");
+    SerialWriteHex(proc->pid);
+    SerialWrite(" code_va=");
+    SerialWriteHex(code_va);
+    SerialWrite(" (expect HW BP hit then [bp-probe] passed)\n");
+    sched::SchedCreateUser(&Ring3UserEntry, nullptr, "ring3-bp-probe", proc);
+}
+
 bool LocalStrEq(const char* a, const char* b)
 {
     for (u32 i = 0;; ++i)
@@ -1971,6 +2106,11 @@ void StartRing3SmokeTask()
     // pointers to SYS_STAT + SYS_READ. Proves `CopyToUser`
     // rejection path is robust — no byte ever lands at a bad VA.
     SpawnWriteFuzzProbeTask();
+    // Bp-probe: trusted task installs a HW execute breakpoint on
+    // its own nop via SYS_BP_INSTALL, fires it once, removes via
+    // SYS_BP_REMOVE. Proves per-task DR save/restore, the
+    // kCapDebug gate, and the syscall surface.
+    SpawnBpProbeTask();
     // First PE executable on the system. Freestanding, compiled
     // from userland/apps/hello_pe/hello.c by the host clang +
     // lld-link rule in kernel/CMakeLists.txt. Exercises the v0

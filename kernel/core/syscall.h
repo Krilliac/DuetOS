@@ -358,6 +358,22 @@ enum SyscallNumber : u64
     // is responsible for tracking which slots are live.
     // Backs Win32 TlsSetValue.
     SYS_TLS_SET = 37,
+
+    // SYS_BP_INSTALL: install a hardware breakpoint on the
+    // current task. rdi = va, rsi = BpKind (1=exec, 2=write,
+    // 3=read/write), rdx = length (1/2/4/8). Returns a non-
+    // zero breakpoint id on success, or u64(-1) on error.
+    // Requires kCapDebug on the caller's process. The BP
+    // rides per-task DR state, so context switches preserve
+    // it; other tasks running on other CPUs don't see it.
+    SYS_BP_INSTALL = 38,
+
+    // SYS_BP_REMOVE: remove a breakpoint previously returned
+    // by SYS_BP_INSTALL. rdi = id. Returns 0 on success,
+    // u64(-1) on unknown id. Requires kCapDebug. Removing a
+    // BP that belongs to a different process returns -1
+    // (BPs are scoped per-process).
+    SYS_BP_REMOVE = 39,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit

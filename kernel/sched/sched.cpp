@@ -135,6 +135,22 @@ struct Task
     // leaked monotonically every time Schedule() abandoned a
     // dispatch frame.
     u64 irq_depth;
+
+    // Per-task debug-register state (DR0..DR3 + DR7). Mirrors
+    // the fs_base idiom: saved from the CPU just before
+    // ContextSwitch, restored into the CPU right after so each
+    // task's breakpoint set follows it across switches. Tasks
+    // without any breakpoints leave these zero — the save/
+    // restore is one read + one write per register and costs a
+    // handful of cycles in the non-debug case. DR6 is not
+    // saved: it's a status register the CPU manages across
+    // #DB delivery, and the breakpoint handler writes it back
+    // to its init value before returning anyway.
+    u64 dr0;
+    u64 dr1;
+    u64 dr2;
+    u64 dr3;
+    u64 dr7;
 };
 
 namespace
@@ -460,6 +476,17 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
     t->ticks_run = 0;
     t->schedin_tick = 0;
     t->fs_base = 0;
+    t->irq_depth = 0;
+    // No breakpoints on a fresh task. DR7 = 0 disables every slot
+    // (the architecture's MBS bit 10 flips to 1 on the first real
+    // install via the breakpoint manager — at that point DR7 is
+    // no longer zero and the load on next context-switch-in will
+    // carry the real value).
+    t->dr0 = 0;
+    t->dr1 = 0;
+    t->dr2 = 0;
+    t->dr3 = 0;
+    t->dr7 = 0;
 
     // Build the initial stack. ContextSwitch pops r15, r14, r13, r12,
     // rbp, rbx and then rets. So from bottom to top of the pre-planted
@@ -725,6 +752,24 @@ void Schedule()
     // across switches (see traps.cpp comments).
     prev->irq_depth = arch::IrqNestDepthRaw();
     arch::IrqNestDepthSet(next->irq_depth);
+
+    // Debug-register handoff. Save outgoing task's DR0..DR3 + DR7
+    // from the CPU, then write the incoming task's values in.
+    // Tasks that never set a breakpoint leave these at zero (no
+    // slots enabled in DR7) so the load is a harmless "disable
+    // all four and clear addresses" sequence. See
+    // kernel/debug/breakpoints.h for the manager that drives
+    // the install path.
+    asm volatile("mov %%dr0, %0" : "=r"(prev->dr0));
+    asm volatile("mov %%dr1, %0" : "=r"(prev->dr1));
+    asm volatile("mov %%dr2, %0" : "=r"(prev->dr2));
+    asm volatile("mov %%dr3, %0" : "=r"(prev->dr3));
+    asm volatile("mov %%dr7, %0" : "=r"(prev->dr7));
+    asm volatile("mov %0, %%dr0" : : "r"(next->dr0));
+    asm volatile("mov %0, %%dr1" : : "r"(next->dr1));
+    asm volatile("mov %0, %%dr2" : : "r"(next->dr2));
+    asm volatile("mov %0, %%dr3" : : "r"(next->dr3));
+    asm volatile("mov %0, %%dr7" : : "r"(next->dr7));
 
     ContextSwitch(&prev->rsp, next->rsp);
     // When we return here, we're executing on a DIFFERENT task's

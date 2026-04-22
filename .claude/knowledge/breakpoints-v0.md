@@ -77,27 +77,104 @@ BP: ID KIND   ADDR              HITS
    2  HW-W   0xffffffff80200000  17
 ```
 
-## Phase 1 scope cuts
+## Phase 1 scope cuts (still in effect for SW BPs)
 
-- **Single-CPU only.** Install routines reject `SmpCpusOnline()
-  != 1` with `SmpUnsupported`. When SMP scheduler support lands,
-  DR writes need IPI-broadcast to all CPUs and SW patches need
-  either a quiesce-then-patch primitive or per-CPU per-core
-  invalidation. See `kernel/arch/x86_64/smp.h:8–29`.
-- **Kernel `.text` only for SW BPs.** Process-image patching +
-  per-task DR save/restore on context switch = phase 2.
-- **No ring-3 syscall.** User code has no way to install a BP
-  yet; the `bp` shell command is keyboard-only and runs in
-  ring 0 directly. Capability gating (`kCapDebug`?) lands with
-  the syscall in phase 2.
+- **Single-CPU only for SW BPs.** Install routines reject
+  `SmpCpusOnline() != 1` with `SmpUnsupported` on the SW path.
+  Still needed because SW patching writes to shared kernel
+  `.text` — another CPU fetching the page mid-patch would see
+  a torn instruction. HW BPs dropped this restriction in
+  phase 2a (see below).
+- **Kernel `.text` only for SW BPs.** Process-image patching
+  lands in phase 2b.
 - **One-shot reinsertion.** If a second SW BP hit arrives while
-  a reinsert is pending (which shouldn't happen in phase 1's
-  single-CPU no-reentrancy world), we log + drop. A proper
-  per-CPU pending queue is needed before nested debugging.
+  a reinsert is pending (shouldn't happen in phase 1's single-
+  CPU no-reentrancy world), we log + drop.
 - **No probe macros.** Phase 3 will add a `KBP_PROBE(reason)`
   macro sprinkled at panic paths, sandbox denials, scheduler
-  edge cases, etc. — lets an operator pre-arm the subsystem
-  to trap only on specific events.
+  edge cases, etc.
+
+## Phase 2a (2026-04-22) — per-task HW BPs + ring-3 syscall
+
+Adds:
+
+- **Per-task DR0..DR3 + DR7** on `sched::Task` (saved/restored
+  around every `ContextSwitch` in `Schedule()` — same pattern
+  the Linux `fs_base` save uses). Tasks without any BPs keep
+  DR7 = 0, so the save/restore is "zero the slots" on both
+  sides and costs a handful of cycles.
+- **`kCapDebug` (bit 3)** on `Process::caps`. Gates
+  `SYS_BP_INSTALL` / `SYS_BP_REMOVE`. `CapSetTrusted()` now
+  includes it by default; sandboxed tasks see `-1` and a
+  `[sys] denied syscall=SYS_BP_INSTALL cap=Debug` log line.
+- **`SYS_BP_INSTALL = 38`** — rdi=va, rsi=kind (1/2/3),
+  rdx=len (1/2/4/8). Returns bp_id on success, `u64(-1)` on
+  rejection. **`SYS_BP_REMOVE = 39`** — rdi=id. Returns 0
+  on success, `u64(-1)` on unknown-id or cross-owner attempt.
+- **Owner-pid stamping.** `BpInstallHardware` now takes an
+  `owner_pid` arg. `BpRemove` takes a `requester_pid` and
+  rejects the removal if the requester isn't the owner (or
+  isn't kernel-privileged via `requester_pid == 0`). Prevents
+  a ring-3 debugger from stomping another process's BPs.
+- **User-ring BP claim path.** The trap dispatcher now calls
+  `BpHandleBreakpoint` / `BpHandleDebug` BEFORE the per-ring
+  `TrapResponseFor` policy check. A user-mode #DB that
+  matches a per-task BP is handled + resumed cleanly instead
+  of being routed to `TrapResponse::IsolateTask` (which would
+  kill the task on every BP hit).
+- **SMP restriction lifted for HW BPs.** Because DR state now
+  rides the task through context switches, a HW BP fires on
+  whatever CPU the owning task ran on — no IPI shootdown
+  needed. SW BPs still assert single-CPU.
+
+Smoke test: `SpawnBpProbeTask()` in `kernel/core/ring3_smoke.cpp`.
+A trusted task issues `SYS_BP_INSTALL` on a `nop` in its own
+code page, executes the nop (fires #DB), removes the BP, and
+prints `[bp-probe] passed via HW BP`. Expected log sequence:
+
+```
+[ring3] queued bp-probe task pid=N code_va=...
+[I] debug/bp : HW BP installed   addr=0x46000019   id=0x3
+[I] debug/bp : HW BP hit   addr=0x46000019   hits=0x1
+[I] debug/bp : HW BP removed id   val=0x3
+[bp-probe] passed via HW BP
+[I] sys : exit rc val=0x0
+[proc] destroy pid=N name="ring3-bp-probe"
+```
+
+### Gotchas specific to phase 2a
+
+1. **User-mode #DB is normally IsolateTask.** The existing
+   `TrapResponseFor(vector=1, from_user=true)` returns
+   `IsolateTask` → kills the task. The BP subsystem has to
+   claim the trap BEFORE the policy check runs, not after —
+   the phase 1 hook was inside the `LogAndContinue` arm,
+   which is only entered for kernel-mode hits.
+2. **DR6.BD/BT bits** are CPU-set on kernel-privilege traps
+   (setting DR7 with GD=1, task-switch flag). We don't use
+   either; the handler masks to just BS + B0..B3, so those
+   stray bits never surface as phantom hits.
+3. **`ProcessCreate` assigning caps**: `CapSetTrusted()`
+   iterates `[1, kCapCount)`, so adding a new cap
+   automatically widens the trusted set. Sandboxed tasks
+   keep only the caps explicitly named — no phase 2a callsite
+   changes were needed for them.
+
+## Next phases
+
+- **Phase 2b:** SW breakpoints on user-process `.text` pages.
+  Requires the kernel to walk a target `AddressSpace` to find
+  the physical frame backing an instruction, temporarily
+  remap it writable in the kernel direct map, patch `0xCC`,
+  restore.
+- **Phase 3:** static `KBP_PROBE(event)` macros at panic
+  paths / sandbox denials / scheduler edge cases. Operator
+  can pre-arm the subsystem to trap only on specific events
+  (think Linux kprobes or DTrace).
+- **Phase 4:** remote debugger protocol (GDB stub over serial
+  or a custom TCP framing). Pairs with #suspend-on-hit + a
+  per-task "stopped" flag the scheduler honours. This is
+  what gets us to "Visual Studio F9 stops the program" levels.
 
 ## Gotchas discovered during bring-up
 

@@ -19,7 +19,7 @@ _Read this at every session start (after git sync). Each row links to a detailed
 | Win32 heap — real HeapSize + HeapReAlloc / realloc (batch 14) | [knowledge/win32-subsystem-v0.md#batch-14--real-heapsize--heaprealloc](knowledge/win32-subsystem-v0.md) | Observation | Active | 2026-04-21 |
 | Real-world PE execution — winkill CRT entry + argc/argv + five loader gaps | [knowledge/pe-real-world-run.md](knowledge/pe-real-world-run.md) | Observation | Active | 2026-04-22 |
 | Win32 stubs — callee-saved rdi/rsi ABI bug + fix pattern | [knowledge/win32-stubs-rdi-rsi-abi.md](knowledge/win32-stubs-rdi-rsi-abi.md) | Issue + Pattern | Active | 2026-04-22 |
-| Kernel breakpoint subsystem v0 (SW int3 + HW DR0..3) | [knowledge/breakpoints-v0.md](knowledge/breakpoints-v0.md) | Observation | Active | 2026-04-22 |
+| Kernel breakpoint subsystem v0 + phase 2a (per-task DR, ring-3 syscall, kCapDebug) | [knowledge/breakpoints-v0.md](knowledge/breakpoints-v0.md) | Observation | Active | 2026-04-22 |
 | Hardware target matrix (CPU/GPU/IO tiers) | [knowledge/hardware-target-matrix.md](knowledge/hardware-target-matrix.md) | Decision | Active | 2026-04-20 |
 | Rust bring-up plan — trigger, layout, toolchain, CI | [knowledge/rust-bringup-plan.md](knowledge/rust-bringup-plan.md) | Decision | Active | 2026-04-21 |
 | Storage + Filesystem roadmap — block layer → NVMe/AHCI → GPT → FS | [knowledge/storage-and-filesystem-roadmap.md](knowledge/storage-and-filesystem-roadmap.md) | Decision | Active (stages 1–2, 4 landed) | 2026-04-21 |

@@ -2526,7 +2526,8 @@ void CmdBp(u32 argc, char** argv)
             }
         }
         customos::debug::BpError err = customos::debug::BpError::None;
-        const customos::debug::BreakpointId id = customos::debug::BpInstallHardware(addr, kind, len, &err);
+        const customos::debug::BreakpointId id =
+            customos::debug::BpInstallHardware(addr, kind, len, /*owner_pid=*/0, &err);
         if (err != customos::debug::BpError::None)
         {
             ConsoleWrite("BP HW: ");
@@ -2552,7 +2553,8 @@ void CmdBp(u32 argc, char** argv)
             ConsoleWriteln("BP CLEAR: BAD ID");
             return;
         }
-        const customos::debug::BpError err = customos::debug::BpRemove({static_cast<customos::u32>(id_val)});
+        const customos::debug::BpError err =
+            customos::debug::BpRemove({static_cast<customos::u32>(id_val)}, /*requester_pid=*/0);
         ConsoleWrite("BP CLEAR: ");
         ConsoleWriteln(BpErrName(err));
         return;

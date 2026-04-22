@@ -240,6 +240,8 @@ const char* CapName(Cap c)
         return "SerialConsole";
     case kCapFsRead:
         return "FsRead";
+    case kCapDebug:
+        return "Debug";
     case kCapCount:
         return "<sentinel>";
     }

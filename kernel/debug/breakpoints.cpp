@@ -29,7 +29,8 @@ struct BpEntry
     u8 _pad[1];
     u64 address;
     u64 hit_count;
-    u8 orig_byte; // software BPs: the byte we overwrote with 0xCC
+    u64 owner_pid; // 0 = kernel-owned (shell / panic / self-test)
+    u8 orig_byte;  // software BPs: the byte we overwrote with 0xCC
     u8 _pad2[7];
 };
 
@@ -276,6 +277,7 @@ BreakpointId BpInstallSoftware(u64 kernel_va, BpError* err)
     slot->len = BpLen::One;
     slot->hw_slot = 0xFF;
     slot->address = kernel_va;
+    slot->owner_pid = 0; // SW BPs are kernel-scope only in phase 2a
     slot->orig_byte = PeekByte(kernel_va);
     slot->hit_count = 0;
     PokeByte(kernel_va, 0xCC);
@@ -284,7 +286,7 @@ BreakpointId BpInstallSoftware(u64 kernel_va, BpError* err)
     return {slot->id};
 }
 
-BreakpointId BpInstallHardware(u64 va, BpKind kind, BpLen len, BpError* err)
+BreakpointId BpInstallHardware(u64 va, BpKind kind, BpLen len, u64 owner_pid, BpError* err)
 {
     auto set_err = [&](BpError e)
     {
@@ -301,11 +303,9 @@ BreakpointId BpInstallHardware(u64 va, BpKind kind, BpLen len, BpError* err)
         set_err(BpError::BadKind);
         return kBpIdNone;
     }
-    if (arch::SmpCpusOnline() != 1)
-    {
-        set_err(BpError::SmpUnsupported);
-        return kBpIdNone;
-    }
+    // Phase 2: HW breakpoints ride per-task DR state through
+    // context switches, so SMP is safe without an IPI shootdown —
+    // each CPU re-loads the running task's DRs on every switch-in.
     sync::SpinLockGuard g(g_lock);
     int s = AllocHwSlot();
     if (s < 0)
@@ -336,6 +336,7 @@ BreakpointId BpInstallHardware(u64 va, BpKind kind, BpLen len, BpError* err)
     e->len = len;
     e->hw_slot = u8(s);
     e->address = va;
+    e->owner_pid = owner_pid;
     e->hit_count = 0;
     ApplyDrSlot(u8(s), va, KindToRw(kind), LenToDr7(len));
     KLOG_INFO_2V("debug/bp", "HW BP installed", "addr", va, "id", e->id);
@@ -343,7 +344,7 @@ BreakpointId BpInstallHardware(u64 va, BpKind kind, BpLen len, BpError* err)
     return {e->id};
 }
 
-BpError BpRemove(BreakpointId id)
+BpError BpRemove(BreakpointId id, u64 requester_pid)
 {
     if (id.value == 0)
         return BpError::NotInstalled;
@@ -351,6 +352,12 @@ BpError BpRemove(BreakpointId id)
     BpEntry* sw = FindSwById(id.value);
     if (sw != nullptr)
     {
+        // Cross-owner guard: a ring-3 caller (requester_pid != 0)
+        // cannot remove a BP it doesn't own. Kernel-scope removal
+        // (requester_pid == 0) is always allowed — that's the
+        // shell, the self-test, and process-exit cleanup.
+        if (requester_pid != 0 && sw->owner_pid != requester_pid)
+            return BpError::NotInstalled;
         PokeByte(sw->address, sw->orig_byte);
         KLOG_INFO_V("debug/bp", "SW BP removed id", sw->id);
         sw->id = 0;
@@ -359,6 +366,8 @@ BpError BpRemove(BreakpointId id)
     BpEntry* hw = FindHwById(id.value);
     if (hw != nullptr)
     {
+        if (requester_pid != 0 && hw->owner_pid != requester_pid)
+            return BpError::NotInstalled;
         ClearDrSlot(hw->hw_slot);
         KLOG_INFO_V("debug/bp", "HW BP removed id", hw->id);
         hw->id = 0;
@@ -383,6 +392,7 @@ usize BpList(BpInfo* out, usize cap)
         info.len = e.len;
         info.address = e.address;
         info.hit_count = e.hit_count;
+        info.owner_pid = e.owner_pid;
         info.hw_slot = e.hw_slot;
         // _pad[7] intentionally left uninitialised — callers don't
         // read it. Explicit zero-fill would compile to a memset
@@ -519,7 +529,7 @@ bool BpSelfTest()
         if (infos[i].id.value == sw_id.value)
             sw_hits = infos[i].hit_count;
     }
-    BpRemove(sw_id);
+    BpRemove(sw_id, /*requester_pid=*/0);
     if (sw_hits == 0)
     {
         KLOG_WARN("debug/bp", "self-test: SW BP never fired");
@@ -527,7 +537,9 @@ bool BpSelfTest()
     }
 
     // --- HW execute BP round-trip -----------------------------
-    BreakpointId hw_id = BpInstallHardware(target, BpKind::HwExecute, BpLen::One, &err);
+    // owner_pid = 0 → kernel-owned (self-test). Normal ring-3
+    // callers pass their own pid via the SYS_BP_INSTALL path.
+    BreakpointId hw_id = BpInstallHardware(target, BpKind::HwExecute, BpLen::One, /*owner_pid=*/0, &err);
     if (err != BpError::None)
     {
         KLOG_WARN_V("debug/bp", "self-test: HW install failed, err", static_cast<u64>(err));
@@ -541,7 +553,7 @@ bool BpSelfTest()
         if (infos[i].id.value == hw_id.value)
             hw_hits = infos[i].hit_count;
     }
-    BpRemove(hw_id);
+    BpRemove(hw_id, /*requester_pid=*/0);
     if (hw_hits == 0)
     {
         KLOG_WARN("debug/bp", "self-test: HW BP never fired");

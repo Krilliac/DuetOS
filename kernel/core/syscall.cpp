@@ -6,6 +6,7 @@
 #include "../arch/x86_64/rtc.h"
 #include "../arch/x86_64/serial.h"
 #include "../arch/x86_64/timer.h"
+#include "../debug/breakpoints.h"
 #include "../fs/vfs.h"
 #include "../mm/address_space.h"
 #include "../mm/frame_allocator.h"
@@ -992,6 +993,102 @@ void SyscallDispatch(arch::TrapFrame* frame)
         }
         proc->tls_slot_value[idx] = frame->rsi;
         frame->rax = 0;
+        return;
+    }
+
+    case SYS_BP_INSTALL:
+    {
+        // rdi = va, rsi = BpKind (1=exec, 2=write, 3=read/write),
+        // rdx = length (1/2/4/8). Returns bp_id > 0 on success,
+        // u64(-1) on any rejection (cap, bad args, no slot).
+        Process* proc = CurrentProcess();
+        if (proc == nullptr || !CapSetHas(proc->caps, kCapDebug))
+        {
+            const u64 pid = (proc != nullptr) ? proc->pid : 0;
+            RecordSandboxDenial(kCapDebug);
+            if (proc != nullptr && ShouldLogDenial(proc->sandbox_denials))
+            {
+                arch::SerialWrite("[sys] denied syscall=SYS_BP_INSTALL pid=");
+                arch::SerialWriteHex(pid);
+                arch::SerialWrite(" cap=");
+                arch::SerialWrite(CapName(kCapDebug));
+                arch::SerialWrite("\n");
+            }
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        const u64 va = frame->rdi;
+        const u64 kind_u = frame->rsi;
+        const u64 len_u = frame->rdx;
+        debug::BpKind kind = debug::BpKind::HwExecute;
+        switch (kind_u)
+        {
+        case 1:
+            kind = debug::BpKind::HwExecute;
+            break;
+        case 2:
+            kind = debug::BpKind::HwWrite;
+            break;
+        case 3:
+            kind = debug::BpKind::HwReadWrite;
+            break;
+        default:
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        debug::BpLen len = debug::BpLen::One;
+        switch (len_u)
+        {
+        case 1:
+            len = debug::BpLen::One;
+            break;
+        case 2:
+            len = debug::BpLen::Two;
+            break;
+        case 4:
+            len = debug::BpLen::Four;
+            break;
+        case 8:
+            len = debug::BpLen::Eight;
+            break;
+        default:
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        debug::BpError err = debug::BpError::None;
+        const debug::BreakpointId id = debug::BpInstallHardware(va, kind, len, proc->pid, &err);
+        if (err != debug::BpError::None || id.value == 0)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        frame->rax = static_cast<u64>(id.value);
+        return;
+    }
+
+    case SYS_BP_REMOVE:
+    {
+        // rdi = bp_id. Returns 0 on success, u64(-1) on unknown
+        // id or cross-owner attempt.
+        Process* proc = CurrentProcess();
+        if (proc == nullptr || !CapSetHas(proc->caps, kCapDebug))
+        {
+            const u64 pid = (proc != nullptr) ? proc->pid : 0;
+            RecordSandboxDenial(kCapDebug);
+            if (proc != nullptr && ShouldLogDenial(proc->sandbox_denials))
+            {
+                arch::SerialWrite("[sys] denied syscall=SYS_BP_REMOVE pid=");
+                arch::SerialWriteHex(pid);
+                arch::SerialWrite(" cap=");
+                arch::SerialWrite(CapName(kCapDebug));
+                arch::SerialWrite("\n");
+            }
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        const debug::BreakpointId id = {static_cast<u32>(frame->rdi)};
+        const debug::BpError err = debug::BpRemove(id, proc->pid);
+        frame->rax = (err == debug::BpError::None) ? 0ULL : static_cast<u64>(-1);
         return;
     }
 

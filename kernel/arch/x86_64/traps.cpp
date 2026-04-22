@@ -318,25 +318,29 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     //     Reserved for kernel-mode bugs where continued execution
     //     accumulates damage.
     const bool from_user = (frame->cs & 3) == 3;
+
+    // Breakpoint subsystem gets first refusal on #BP (vec 3) and
+    // #DB (vec 1), REGARDLESS of ring. A user-mode task that
+    // installed a BP via SYS_BP_INSTALL needs the same handler
+    // path a kernel BP would hit — otherwise the per-task DR
+    // hit would fall through to the ring-3 "IsolateTask" policy
+    // and kill the task every time its own BP fired. Only if
+    // the handler doesn't claim the trap (bare int3 in user
+    // code, #DB with no registered cause) do we proceed with
+    // the per-ring default policy below.
+    if (frame->vector == 3 && debug::BpHandleBreakpoint(frame))
+    {
+        return;
+    }
+    if (frame->vector == 1 && debug::BpHandleDebug(frame))
+    {
+        return;
+    }
+
     const TrapResponse policy = TrapResponseFor(frame->vector, from_user);
 
     if (policy == TrapResponse::LogAndContinue)
     {
-        // Let the breakpoint subsystem claim #BP (vec 3) and #DB
-        // (vec 1) hits first. If it matches a registered BP it
-        // handles the single-step-reinsert dance + logs a
-        // structured hit line; the generic "[trap] #BP
-        // (recoverable) rip=..." one-liner below is then the
-        // fallback for spurious int3 / #DB with no registered
-        // cause (stray int3 in a .rodata data byte, etc.).
-        if (frame->vector == 3 && debug::BpHandleBreakpoint(frame))
-        {
-            return;
-        }
-        if (frame->vector == 1 && debug::BpHandleDebug(frame))
-        {
-            return;
-        }
         SerialWrite("[trap] ");
         SerialWrite((frame->vector < 32) ? kVectorNames[frame->vector] : "vec-oor");
         SerialWrite(" (recoverable) rip=");

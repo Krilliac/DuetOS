@@ -92,7 +92,8 @@ struct BpInfo
     BpLen len;
     u64 address; // kernel VA
     u64 hit_count;
-    u8 hw_slot; // 0..3 for Hw*; 0xFF for Software
+    u64 owner_pid; // 0 = kernel-owned (shell / self-test)
+    u8 hw_slot;    // 0..3 for Hw*; 0xFF for Software
     u8 _pad[7];
 };
 
@@ -111,11 +112,17 @@ BreakpointId BpInstallSoftware(u64 kernel_va, BpError* err);
 /// Install a hardware breakpoint via the next free DR slot.
 /// `va` may be any canonical VA — data breakpoints work on any
 /// mapped page, execute breakpoints on any instruction address.
-BreakpointId BpInstallHardware(u64 va, BpKind kind, BpLen len, BpError* err);
+/// `owner_pid` stamps the BP with the installing process's pid
+/// so BpRemove can reject cross-process removal; pass 0 for
+/// kernel-owned BPs (shell, self-test).
+BreakpointId BpInstallHardware(u64 va, BpKind kind, BpLen len, u64 owner_pid, BpError* err);
 
-/// Remove a previously-installed breakpoint. Undoes the patch /
-/// clears the DR slot. Hit counts are discarded.
-BpError BpRemove(BreakpointId id);
+/// Remove a previously-installed breakpoint. `requester_pid` must
+/// match the BP's owner_pid (or be 0 for kernel-privileged
+/// removal — shell / panic paths). Cross-owner removals return
+/// BpError::NotInstalled so a ring-3 debugger can't stomp on
+/// another process's BPs.
+BpError BpRemove(BreakpointId id, u64 requester_pid);
 
 /// Snapshot up to `cap` entries into `out`. Returns the count
 /// actually written. No allocation — caller supplies the buffer.

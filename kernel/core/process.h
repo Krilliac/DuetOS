@@ -75,6 +75,16 @@ enum Cap : u32
     // reachable namespace; both layers compose.
     kCapFsRead = 2,
 
+    // Install / remove debug breakpoints on THIS process via
+    // SYS_BP_INSTALL / SYS_BP_REMOVE. Scoped to the caller — a
+    // process with this cap cannot set a BP in another process;
+    // the BP rides the caller's own task via per-task DR0..DR3
+    // save/restore on context switch. Withholding this cap is
+    // the default for untrusted code: a sandboxed process can
+    // still crash, but it cannot use the 4 hardware DRs as a
+    // side channel or stall the scheduler by pinning them.
+    kCapDebug = 3,
+
     // Sentinel: keep this as the last entry so kProfileTrusted can
     // be built by a loop that iterates [1 .. kCapCount). Do NOT
     // use kCapCount as a live cap — it's a boundary marker.
