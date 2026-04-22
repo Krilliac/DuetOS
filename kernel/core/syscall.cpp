@@ -1020,8 +1020,11 @@ void SyscallDispatch(arch::TrapFrame* frame)
         const u64 va = frame->rdi;
         const u64 kind_u = frame->rsi;
         const u64 len_u = frame->rdx;
+        // High bits of `kind` carry modifier flags so the syscall
+        // stays at 3 positional args. Bit 4 (0x10) = suspend-on-hit.
+        const bool suspend_on_hit = (kind_u & 0x10) != 0;
         debug::BpKind kind = debug::BpKind::HwExecute;
-        switch (kind_u)
+        switch (kind_u & 0xF)
         {
         case 1:
             kind = debug::BpKind::HwExecute;
@@ -1056,7 +1059,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
             return;
         }
         debug::BpError err = debug::BpError::None;
-        const debug::BreakpointId id = debug::BpInstallHardware(va, kind, len, proc->pid, &err);
+        const debug::BreakpointId id = debug::BpInstallHardware(va, kind, len, proc->pid, suspend_on_hit, &err);
         if (err != debug::BpError::None || id.value == 0)
         {
             frame->rax = static_cast<u64>(-1);

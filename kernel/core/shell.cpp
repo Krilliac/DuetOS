@@ -2396,22 +2396,106 @@ const char* BpErrName(customos::debug::BpError e)
     return "?";
 }
 
+// Consume a leading `--suspend` / `-s` flag from argv starting at
+// `start`. If present, set *suspend and slide argv left by one so
+// the remaining args are positional. Returns the new argc.
+u32 TakeSuspendFlag(u32 argc, char** argv, u32 start, bool* suspend)
+{
+    if (argc <= start || argv[start] == nullptr)
+        return argc;
+    if (StrEq(argv[start], "--suspend") || StrEq(argv[start], "-s"))
+    {
+        *suspend = true;
+        for (u32 i = start; i + 1 < argc; ++i)
+            argv[i] = argv[i + 1];
+        return argc - 1;
+    }
+    return argc;
+}
+
+void PrintBpRegs(const customos::arch::TrapFrame& f)
+{
+    // Keep this dense — the framebuffer is 80 cols and the TrapFrame
+    // has 15 GPRs + control. Group into rows the operator can scan.
+    ConsoleWrite("  rip=");
+    WriteU64Hex(f.rip, 16);
+    ConsoleWrite(" cs=");
+    WriteU64Hex(f.cs, 4);
+    ConsoleWrite(" flags=");
+    WriteU64Hex(f.rflags, 16);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("  rsp=");
+    WriteU64Hex(f.rsp, 16);
+    ConsoleWrite(" ss=");
+    WriteU64Hex(f.ss, 4);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("  rax=");
+    WriteU64Hex(f.rax, 16);
+    ConsoleWrite(" rbx=");
+    WriteU64Hex(f.rbx, 16);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("  rcx=");
+    WriteU64Hex(f.rcx, 16);
+    ConsoleWrite(" rdx=");
+    WriteU64Hex(f.rdx, 16);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("  rsi=");
+    WriteU64Hex(f.rsi, 16);
+    ConsoleWrite(" rdi=");
+    WriteU64Hex(f.rdi, 16);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("  rbp=");
+    WriteU64Hex(f.rbp, 16);
+    ConsoleWrite(" r8 =");
+    WriteU64Hex(f.r8, 16);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("  r9 =");
+    WriteU64Hex(f.r9, 16);
+    ConsoleWrite(" r10=");
+    WriteU64Hex(f.r10, 16);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("  r11=");
+    WriteU64Hex(f.r11, 16);
+    ConsoleWrite(" r12=");
+    WriteU64Hex(f.r12, 16);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("  r13=");
+    WriteU64Hex(f.r13, 16);
+    ConsoleWrite(" r14=");
+    WriteU64Hex(f.r14, 16);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("  r15=");
+    WriteU64Hex(f.r15, 16);
+    ConsoleWrite(" vec=");
+    WriteU64Hex(f.vector, 2);
+    ConsoleWriteChar('\n');
+}
+
 void CmdBp(u32 argc, char** argv)
 {
-    // bp list                     — dump installed breakpoints
-    // bp set <hex-addr>           — software BP at kernel .text addr
-    // bp hw <hex-addr> [x|w|rw] [len]
-    //                             — hardware BP: execute/write/read-write
-    // bp clear <id>               — remove BP by id
-    // bp test                     — round-trip self-test
+    // bp list                                 — list installed BPs
+    // bp set    [--suspend] <hex-addr>        — software BP
+    // bp hw     [--suspend] <hex-addr> [x|w|rw] [len]  — HW BP
+    // bp clear  <id>                          — remove BP
+    // bp test                                 — self-test
+    // bp stopped                              — list suspended tasks
+    // bp regs   <id>                          — dump stopped regs
+    // bp mem    <id> <hex-addr> [len]         — dump stopped memory
+    // bp resume <id>                          — resume stopped task
+    // bp step   <id>                          — single-step + re-suspend
     if (argc < 2)
     {
         ConsoleWriteln("BP: USAGE:");
         ConsoleWriteln("    BP LIST");
-        ConsoleWriteln("    BP SET <HEX-ADDR>               (SOFTWARE)");
-        ConsoleWriteln("    BP HW  <HEX-ADDR> [X|W|RW] [LEN] (HARDWARE)");
-        ConsoleWriteln("    BP CLEAR <ID>                    (REMOVE)");
-        ConsoleWriteln("    BP TEST                          (SELF-TEST)");
+        ConsoleWriteln("    BP SET    [--SUSPEND] <HEX-ADDR>               (SOFTWARE)");
+        ConsoleWriteln("    BP HW     [--SUSPEND] <HEX-ADDR> [X|W|RW] [LEN] (HARDWARE)");
+        ConsoleWriteln("    BP CLEAR  <ID>                                  (REMOVE)");
+        ConsoleWriteln("    BP TEST                                         (SELF-TEST)");
+        ConsoleWriteln("    BP STOPPED                                      (LIST SUSPENDED)");
+        ConsoleWriteln("    BP REGS   <ID>                                  (DUMP REGS)");
+        ConsoleWriteln("    BP MEM    <ID> <HEX-ADDR> [LEN]                 (DUMP USER MEM)");
+        ConsoleWriteln("    BP RESUME <ID>                                  (WAKE STOPPED)");
+        ConsoleWriteln("    BP STEP   <ID>                                  (STEP + RE-SUSPEND)");
         return;
     }
 
@@ -2426,7 +2510,7 @@ void CmdBp(u32 argc, char** argv)
             ConsoleWriteln("BP: NONE INSTALLED");
             return;
         }
-        ConsoleWriteln("BP: ID KIND  ADDR              HITS");
+        ConsoleWriteln("BP: ID KIND   ADDR              HITS  STATE");
         for (usize i = 0; i < n; ++i)
         {
             ConsoleWrite("  ");
@@ -2437,6 +2521,21 @@ void CmdBp(u32 argc, char** argv)
             WriteU64Hex(infos[i].address, 16);
             ConsoleWrite("  ");
             WriteU64Dec(infos[i].hit_count);
+            ConsoleWrite("  ");
+            if (infos[i].is_stopped)
+            {
+                ConsoleWrite("STOPPED(task=");
+                WriteU64Dec(infos[i].stopped_task_id);
+                ConsoleWriteChar(')');
+            }
+            else if (infos[i].suspend_on_hit)
+            {
+                ConsoleWrite("ARMED-SUSPEND");
+            }
+            else
+            {
+                ConsoleWrite("ARMED-LOG");
+            }
             ConsoleWriteChar('\n');
         }
         return;
@@ -2444,6 +2543,8 @@ void CmdBp(u32 argc, char** argv)
 
     if (StrEq(sub, "set"))
     {
+        bool suspend = false;
+        argc = TakeSuspendFlag(argc, argv, 2, &suspend);
         if (argc < 3)
         {
             ConsoleWriteln("BP SET: NEED <HEX-ADDR>");
@@ -2456,7 +2557,7 @@ void CmdBp(u32 argc, char** argv)
             return;
         }
         customos::debug::BpError err = customos::debug::BpError::None;
-        const customos::debug::BreakpointId id = customos::debug::BpInstallSoftware(addr, &err);
+        const customos::debug::BreakpointId id = customos::debug::BpInstallSoftware(addr, suspend, &err);
         if (err != customos::debug::BpError::None)
         {
             ConsoleWrite("BP SET: ");
@@ -2465,12 +2566,14 @@ void CmdBp(u32 argc, char** argv)
         }
         ConsoleWrite("BP SET: OK ID=");
         WriteU64Dec(id.value);
-        ConsoleWriteChar('\n');
+        ConsoleWriteln(suspend ? " (SUSPEND-ON-HIT)" : "");
         return;
     }
 
     if (StrEq(sub, "hw"))
     {
+        bool suspend = false;
+        argc = TakeSuspendFlag(argc, argv, 2, &suspend);
         if (argc < 3)
         {
             ConsoleWriteln("BP HW: NEED <HEX-ADDR> [X|W|RW] [LEN]");
@@ -2527,7 +2630,7 @@ void CmdBp(u32 argc, char** argv)
         }
         customos::debug::BpError err = customos::debug::BpError::None;
         const customos::debug::BreakpointId id =
-            customos::debug::BpInstallHardware(addr, kind, len, /*owner_pid=*/0, &err);
+            customos::debug::BpInstallHardware(addr, kind, len, /*owner_pid=*/0, suspend, &err);
         if (err != customos::debug::BpError::None)
         {
             ConsoleWrite("BP HW: ");
@@ -2536,7 +2639,7 @@ void CmdBp(u32 argc, char** argv)
         }
         ConsoleWrite("BP HW: OK ID=");
         WriteU64Dec(id.value);
-        ConsoleWriteChar('\n');
+        ConsoleWriteln(suspend ? " (SUSPEND-ON-HIT)" : "");
         return;
     }
 
@@ -2564,6 +2667,159 @@ void CmdBp(u32 argc, char** argv)
     {
         const bool ok = customos::debug::BpSelfTest();
         ConsoleWriteln(ok ? "BP TEST: OK" : "BP TEST: FAILED (SEE SERIAL LOG)");
+        return;
+    }
+
+    if (StrEq(sub, "stopped"))
+    {
+        customos::debug::BpInfo infos[32];
+        const usize n = customos::debug::BpList(infos, 32);
+        usize any = 0;
+        for (usize i = 0; i < n; ++i)
+        {
+            if (!infos[i].is_stopped)
+                continue;
+            if (any == 0)
+                ConsoleWriteln("BP STOPPED: BP-ID  TASK  ADDR");
+            ConsoleWrite("  ");
+            WriteU64Dec(infos[i].id.value);
+            ConsoleWrite("    ");
+            WriteU64Dec(infos[i].stopped_task_id);
+            ConsoleWrite("    ");
+            WriteU64Hex(infos[i].address, 16);
+            ConsoleWriteChar('\n');
+            ++any;
+        }
+        if (any == 0)
+            ConsoleWriteln("BP STOPPED: NONE");
+        return;
+    }
+
+    if (StrEq(sub, "regs"))
+    {
+        if (argc < 3)
+        {
+            ConsoleWriteln("BP REGS: NEED <ID>");
+            return;
+        }
+        customos::u64 id_val = 0;
+        if (!ParseU64Str(argv[2], &id_val))
+        {
+            ConsoleWriteln("BP REGS: BAD ID");
+            return;
+        }
+        customos::arch::TrapFrame f;
+        if (!customos::debug::BpReadRegs({static_cast<customos::u32>(id_val)}, &f))
+        {
+            ConsoleWriteln("BP REGS: NO TASK STOPPED ON THAT ID");
+            return;
+        }
+        ConsoleWrite("BP REGS ID=");
+        WriteU64Dec(id_val);
+        ConsoleWriteln(":");
+        PrintBpRegs(f);
+        return;
+    }
+
+    if (StrEq(sub, "mem"))
+    {
+        if (argc < 4)
+        {
+            ConsoleWriteln("BP MEM: NEED <ID> <HEX-ADDR> [LEN]");
+            return;
+        }
+        customos::u64 id_val = 0;
+        customos::u64 addr = 0;
+        if (!ParseU64Str(argv[2], &id_val) || !ParseU64Str(argv[3], &addr))
+        {
+            ConsoleWriteln("BP MEM: BAD ARGS");
+            return;
+        }
+        customos::u64 len = 64; // default
+        if (argc >= 5)
+        {
+            if (!ParseU64Str(argv[4], &len))
+            {
+                ConsoleWriteln("BP MEM: BAD LEN");
+                return;
+            }
+        }
+        if (len > 256)
+            len = 256; // shell cap — longer dumps belong on serial
+        customos::u8 buf[256];
+        const customos::u64 got = customos::debug::BpReadMem({static_cast<customos::u32>(id_val)}, addr, buf, len);
+        if (got == 0)
+        {
+            ConsoleWriteln("BP MEM: UNREADABLE (UNMAPPED OR NO STOPPED TASK)");
+            return;
+        }
+        // Hex + ASCII, 16 bytes per line.
+        for (customos::u64 off = 0; off < got; off += 16)
+        {
+            WriteU64Hex(addr + off, 16);
+            ConsoleWrite(": ");
+            for (customos::u64 i = 0; i < 16; ++i)
+            {
+                if (off + i < got)
+                {
+                    const customos::u8 b = buf[off + i];
+                    const char hi = static_cast<char>("0123456789abcdef"[(b >> 4) & 0xF]);
+                    const char lo = static_cast<char>("0123456789abcdef"[b & 0xF]);
+                    ConsoleWriteChar(hi);
+                    ConsoleWriteChar(lo);
+                }
+                else
+                {
+                    ConsoleWrite("  ");
+                }
+                ConsoleWriteChar(' ');
+            }
+            ConsoleWriteChar(' ');
+            for (customos::u64 i = 0; i < 16 && off + i < got; ++i)
+            {
+                const customos::u8 b = buf[off + i];
+                ConsoleWriteChar((b >= 0x20 && b < 0x7F) ? static_cast<char>(b) : '.');
+            }
+            ConsoleWriteChar('\n');
+        }
+        return;
+    }
+
+    if (StrEq(sub, "resume"))
+    {
+        if (argc < 3)
+        {
+            ConsoleWriteln("BP RESUME: NEED <ID>");
+            return;
+        }
+        customos::u64 id_val = 0;
+        if (!ParseU64Str(argv[2], &id_val))
+        {
+            ConsoleWriteln("BP RESUME: BAD ID");
+            return;
+        }
+        const customos::debug::BpError err = customos::debug::BpResume({static_cast<customos::u32>(id_val)});
+        ConsoleWrite("BP RESUME: ");
+        ConsoleWriteln(BpErrName(err));
+        return;
+    }
+
+    if (StrEq(sub, "step"))
+    {
+        if (argc < 3)
+        {
+            ConsoleWriteln("BP STEP: NEED <ID>");
+            return;
+        }
+        customos::u64 id_val = 0;
+        if (!ParseU64Str(argv[2], &id_val))
+        {
+            ConsoleWriteln("BP STEP: BAD ID");
+            return;
+        }
+        const customos::debug::BpError err = customos::debug::BpStep({static_cast<customos::u32>(id_val)});
+        ConsoleWrite("BP STEP: ");
+        ConsoleWriteln(BpErrName(err));
         return;
     }
 

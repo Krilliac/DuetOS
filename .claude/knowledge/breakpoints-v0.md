@@ -160,21 +160,107 @@ prints `[bp-probe] passed via HW BP`. Expected log sequence:
    keep only the caps explicitly named — no phase 2a callsite
    changes were needed for them.
 
-## Next phases
+## Phase 3 (2026-04-22) — suspend / inspect / resume / step
+
+Adds the "VS F9 stops a thread" semantics without freezing the
+whole OS:
+
+- **`suspend_on_hit` per BP.** Default off; set via
+  `bp set --suspend <addr>` / `bp hw --suspend <addr>` from the
+  shell, or via `rsi |= 0x10` on `SYS_BP_INSTALL`.
+- **When a user-mode hit lands on a suspend-on-hit BP:**
+  `BpHandleBreakpoint` / `BpHandleDebug` does the normal
+  bookkeeping (reinsert setup for SW, RF for HW exec), then
+  calls `MaybeSuspend(bp_id, frame)` which stashes the task's
+  `task_id` + `TrapFrame*` + `AddressSpace*` on the BP entry
+  and blocks the task on the BP's `sched::WaitQueue`. The
+  scheduler moves on to other ready tasks.
+- **Safety rail.** Kernel-mode hits with suspend_on_hit set
+  get a `[W] debug/bp : suspend-on-hit rejected: kernel-mode
+  hit` warning and fall through to log+resume. We can't
+  safely park a ring-0 task today because `IrqNestDepthRaw`
+  is stubbed (see `kernel/arch/x86_64/traps.cpp:161`) — a
+  BP fired while a spinlock is held would deadlock on
+  attempted resume. Phase 4 can relax this once that
+  telemetry is live.
+- **Shell commands (kernel/core/shell.cpp:CmdBp):**
+  - `bp stopped` — list tasks currently suspended
+  - `bp regs <id>` — dump the stopped task's saved trap frame
+  - `bp mem <id> <hex-addr> [len]` — hex+ASCII dump of the
+    stopped task's user memory (walks the captured AS)
+  - `bp resume <id>` — wake the task with rflags unchanged
+  - `bp step <id>` — set RFLAGS.TF, wake, mark this as a
+    stepping session; the next `#DB` re-suspends on the
+    same BP (one instruction forward)
+- **`BpRemove` auto-wake.** Removing a BP with a task parked
+  on its wait-queue calls `WaitQueueWakeAll` first so the
+  task isn't stranded; the returning task sees the entry's
+  id has changed and skips the stopped-state cleanup.
+
+### The stepping dance
+
+The tricky one. When `BpStep` is called:
+
+1. The stopped frame's `rflags |= 0x100` (TF).
+2. A single-slot `g_stepping { task_id, bp_id }` records the
+   session.
+3. `WaitQueueWakeOne` unblocks the task.
+4. Task resumes inside its handler, returns up through
+   `MaybeSuspend` → `TrapDispatch` → `iretq`.
+5. CPU runs one instruction, takes `#DB` with `DR6.BS = 1`.
+6. `BpHandleDebug`:
+   a. If `g_reinsert.pending` (we were stepping out of a SW
+      BP), re-patch `0xCC`, clear TF.
+   b. If `g_stepping.task_id` matches the current task, pluck
+      `bp_id`, clear the slot, clear TF, and re-enter
+      `MaybeSuspend(bp_id)`.
+7. Task parks again; operator inspects / steps / resumes.
+
+### Phase 3 syscall extension
+
+`SYS_BP_INSTALL`'s `rsi` now carries flags in the high bits:
+
+```
+rsi bits 0..3: kind (1=exec, 2=write, 3=read/write)
+rsi bit 4:     suspend_on_hit
+```
+
+`SpawnBpProbeTask` still passes `rsi = 1` (no suspend) — the
+probe only exercises the log-and-resume path. Suspend-on-hit
+is shell-driven today.
+
+### Manual test (no automated suspend smoke yet)
+
+1. Boot. Drop into shell.
+2. Identify a ring-3 instruction you can hit. Easiest: run
+   `ps` (or equivalent), find a long-running user task, note
+   its code VA from `[ring3] task ... rip=...`.
+3. `bp hw --suspend <addr> x` — BP armed with suspend.
+4. Wait for the task to execute that instruction. Kernel logs
+   `task suspended on BP bp_id=N task_id=M`.
+5. `bp stopped` — confirm the stop.
+6. `bp regs N` — dump frame.
+7. `bp mem N <user-va> 64` — dump user memory.
+8. `bp step N` — advance one instruction, re-stop.
+9. `bp resume N` — let it go.
+10. `bp clear N` — remove the BP.
+
+## Next phases (still planned)
 
 - **Phase 2b:** SW breakpoints on user-process `.text` pages.
-  Requires the kernel to walk a target `AddressSpace` to find
-  the physical frame backing an instruction, temporarily
-  remap it writable in the kernel direct map, patch `0xCC`,
-  restore.
-- **Phase 3:** static `KBP_PROBE(event)` macros at panic
-  paths / sandbox denials / scheduler edge cases. Operator
-  can pre-arm the subsystem to trap only on specific events
-  (think Linux kprobes or DTrace).
-- **Phase 4:** remote debugger protocol (GDB stub over serial
-  or a custom TCP framing). Pairs with #suspend-on-hit + a
-  per-task "stopped" flag the scheduler honours. This is
-  what gets us to "Visual Studio F9 stops the program" levels.
+  Walks target `AddressSpace`, remaps RW briefly, patches.
+- **Phase 3b:** automated suspend/resume/step smoke test —
+  a kernel driver task that spawns a target, waits for its
+  suspend, issues resume, verifies clean exit. Blocked on a
+  small amount of orchestration plumbing.
+- **Phase 4:** static `KBP_PROBE(event)` macros at panic /
+  sandbox-denial / scheduler edge cases (think kprobes).
+  Needs the kernel-mode suspend safety question settled
+  first (IrqNestDepth live + a "safe-to-block" check).
+- **Phase 5:** remote debugger protocol (GDB stub over serial
+  or custom TCP). With phase 3's suspend/inspect/step already
+  landed, most of the mechanism work is done — the stub is
+  mostly packet parsing.
 
 ## Gotchas discovered during bring-up
 

@@ -93,8 +93,10 @@ struct BpInfo
     u64 address; // kernel VA
     u64 hit_count;
     u64 owner_pid; // 0 = kernel-owned (shell / self-test)
-    u8 hw_slot;    // 0..3 for Hw*; 0xFF for Software
-    u8 _pad[7];
+    u64 stopped_task_id;
+    u8 hw_slot; // 0..3 for Hw*; 0xFF for Software
+    bool suspend_on_hit;
+    bool is_stopped; // a task is currently blocked on this BP's wait-queue
 };
 
 /// One-time init. Zeroes all DR registers, writes the DR6 reset
@@ -107,7 +109,15 @@ void BpInit();
 /// must lie inside the kernel .text range; the byte there is
 /// saved and overwritten with 0xCC. Returns a stable ID on
 /// success, or kBpIdNone + sets `*err` on failure.
-BreakpointId BpInstallSoftware(u64 kernel_va, BpError* err);
+///
+/// `suspend_on_hit` — when true, the task that hits this BP is
+/// parked on the BP's wait-queue and the scheduler picks another
+/// ready task. Use `BpResume` / `BpStep` to unblock. Only applies
+/// to user-mode hits today (kernel-mode hits are hard to suspend
+/// safely without an IRQ-depth accessor, which is still stubbed);
+/// a kernel hit with suspend_on_hit set logs + resumes with a
+/// "suspend rejected" warning.
+BreakpointId BpInstallSoftware(u64 kernel_va, bool suspend_on_hit, BpError* err);
 
 /// Install a hardware breakpoint via the next free DR slot.
 /// `va` may be any canonical VA — data breakpoints work on any
@@ -115,7 +125,10 @@ BreakpointId BpInstallSoftware(u64 kernel_va, BpError* err);
 /// `owner_pid` stamps the BP with the installing process's pid
 /// so BpRemove can reject cross-process removal; pass 0 for
 /// kernel-owned BPs (shell, self-test).
-BreakpointId BpInstallHardware(u64 va, BpKind kind, BpLen len, u64 owner_pid, BpError* err);
+///
+/// `suspend_on_hit` — see BpInstallSoftware; same semantics,
+/// same kernel-safety fallback.
+BreakpointId BpInstallHardware(u64 va, BpKind kind, BpLen len, u64 owner_pid, bool suspend_on_hit, BpError* err);
 
 /// Remove a previously-installed breakpoint. `requester_pid` must
 /// match the BP's owner_pid (or be 0 for kernel-privileged
@@ -143,5 +156,35 @@ bool BpHandleDebug(arch::TrapFrame* frame);      // #DB, vector 1
 /// hit counter, removes the BP, then does the same dance with a
 /// hardware execute BP. Returns true on success.
 bool BpSelfTest();
+
+// ------------------ Phase 3: suspend + inspect + resume ------
+
+/// Snapshot the saved trap frame of the task currently stopped on
+/// `id`. Returns true + fills `*out` if a task is suspended there,
+/// false otherwise. `out` must be non-null. The frame is a COPY —
+/// mutating it has no effect; use BpStep to change control flow.
+bool BpReadRegs(BreakpointId id, arch::TrapFrame* out);
+
+/// Read `len` bytes of the stopped task's user memory starting at
+/// `user_va` into `out`. Walks the target task's AddressSpace to
+/// find the backing frame(s); returns the number of bytes
+/// successfully copied (may be less than `len` if the page is
+/// unmapped). Safe to call from any non-trap context.
+u64 BpReadMem(BreakpointId id, u64 user_va, u8* out, u64 len);
+
+/// Resume the task stopped on `id`. The task's saved rflags keep
+/// their current TF bit — unchanged from whatever BpStep or the
+/// trap handler last set. Returns BpError::None on success,
+/// BpError::NotInstalled if no task is stopped on this BP.
+BpError BpResume(BreakpointId id);
+
+/// Resume the task with RFLAGS.TF = 1 so the CPU takes a
+/// single-step #DB after the next instruction. That #DB re-enters
+/// the BP subsystem and (if the BP was a SW BP with reinsert
+/// pending) re-patches 0xCC automatically, then — because the
+/// hit context is the same BP with suspend_on_hit set — parks
+/// the task again. Net effect: "step one instruction forward
+/// and stop."
+BpError BpStep(BreakpointId id);
 
 } // namespace customos::debug

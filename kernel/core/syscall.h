@@ -361,11 +361,20 @@ enum SyscallNumber : u64
 
     // SYS_BP_INSTALL: install a hardware breakpoint on the
     // current task. rdi = va, rsi = BpKind (1=exec, 2=write,
-    // 3=read/write), rdx = length (1/2/4/8). Returns a non-
-    // zero breakpoint id on success, or u64(-1) on error.
-    // Requires kCapDebug on the caller's process. The BP
-    // rides per-task DR state, so context switches preserve
-    // it; other tasks running on other CPUs don't see it.
+    // 3=read/write) OR'd with flags (bit 4 = suspend-on-hit),
+    // rdx = length (1/2/4/8). Returns a non-zero breakpoint id
+    // on success, or u64(-1) on error. Requires kCapDebug on
+    // the caller's process. The BP rides per-task DR state,
+    // so context switches preserve it; other tasks running on
+    // other CPUs don't see it.
+    //
+    // Suspend-on-hit (rsi |= 0x10): when this BP fires on a
+    // ring-3 instruction, the hitting task is parked on a
+    // wait-queue and the scheduler picks something else. An
+    // operator drives resume/step/inspect via the `bp` shell
+    // command (phase 3 has no ring-3 inspect syscall yet —
+    // the caller either suspends itself and waits for an
+    // external resumer, or a sibling task resumes it).
     SYS_BP_INSTALL = 38,
 
     // SYS_BP_REMOVE: remove a breakpoint previously returned
