@@ -1613,33 +1613,64 @@ u64 SpawnElfLinux(const char* name, const u8* elf_bytes, u64 elf_len, CapSet cap
     proc->linux_brk_current = proc->linux_brk_base;
     proc->linux_mmap_cursor = 0x0000'7000'0000'0000ull;
 
-    // Populate the top of the user stack with a minimal Linux-ABI
-    // initial layout:
+    // Populate the top of the user stack with a Linux-ABI initial
+    // layout. Musl's _start reads from rsp; the layout is
+    // (rsp -> higher addresses):
     //
-    //   [rsp_init +  0]: argc          = 0    (u64)
-    //   [rsp_init +  8]: argv[0]       = NULL (u64 — argv terminator)
-    //   [rsp_init + 16]: envp[0]       = NULL (u64 — envp terminator)
-    //   [rsp_init + 24]: auxv[0].a_type = AT_NULL = 0
-    //   [rsp_init + 32]: auxv[0].a_val  = 0
-    //   [rsp_init + 40]: padding        = 0    (keeps rsp_init 16-aligned)
+    //   [rsp_init +  0]: argc = 0
+    //   [rsp_init +  8]: argv[0] = NULL
+    //   [rsp_init + 16]: envp[0] = NULL
+    //   [rsp_init + 24]: AT_PAGESZ  = 6
+    //   [rsp_init + 32]: page size  = 4096
+    //   [rsp_init + 40]: AT_RANDOM  = 25
+    //   [rsp_init + 48]: rand_ptr   = rsp_init + 72
+    //   [rsp_init + 56]: AT_NULL    = 0
+    //   [rsp_init + 64]: auxv end   = 0
+    //   [rsp_init + 72]: 16 bytes of xorshift-mixed rdtsc entropy
+    //   [rsp_init + 88]: 8 bytes pad (keep rsp_init 16-aligned)
     //
-    // 48 bytes total, written into the highest 48 B of the stack
-    // page via the direct-map alias — we can't touch the user VA
-    // from kernel code without CR3 flipping, but the frame's
-    // kernel-half alias is always writable.
-    //
-    // Real static-musl binaries want auxv entries for AT_PHDR,
-    // AT_PAGESZ, AT_RANDOM etc.; v0 only supplies AT_NULL, which
-    // musl tolerates. Follow-up slice will populate the real ones
-    // when a binary actually needs them.
+    // 96 bytes total. musl uses AT_PAGESZ for mmap bookkeeping
+    // and AT_RANDOM as a stack-cookie / pointer-mangling seed.
+    // AT_PHDR / AT_EXECFN are not supplied; musl skips what it
+    // can't find and pulls program-header info from the ELF it
+    // loaded itself (works for static binaries).
     const PhysAddr stack_frame = AddressSpaceLookupUserFrame(as, r.stack_va);
     if (stack_frame != kNullFrame)
     {
         auto* stack_direct = static_cast<u8*>(PhysToVirt(stack_frame));
-        const u64 offset_in_page = mm::kPageSize - 48;
-        for (u64 i = 0; i < 48; ++i)
-            stack_direct[offset_in_page + i] = 0; // argc=0, everything-else=NULL
-        proc->user_rsp_init = r.stack_top - 48;
+        const u64 off = mm::kPageSize - 96;
+        for (u64 i = 0; i < 96; ++i)
+            stack_direct[off + i] = 0;
+        const u64 rsp_init = r.stack_top - 96;
+
+        auto put_u64 = [&](u64 at, u64 v)
+        {
+            for (u64 i = 0; i < 8; ++i)
+                stack_direct[off + at + i] = static_cast<u8>(v >> (i * 8));
+        };
+        // argc / argv[0] / envp[0] already zeroed.
+        // Aux vector.
+        put_u64(24, 6);                   // AT_PAGESZ
+        put_u64(32, 4096);                // page size
+        put_u64(40, 25);                  // AT_RANDOM
+        put_u64(48, rsp_init + 72);       // pointer (user VA) to random block
+        put_u64(56, 0);                   // AT_NULL
+        put_u64(64, 0);                   // terminator value
+        // Fill the 16-byte random block with xorshift64 seeded
+        // from rdtsc. Non-crypto but mixed — same quality as
+        // sys_getrandom's stub.
+        u32 lo, hi;
+        asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
+        u64 state = (static_cast<u64>(hi) << 32) | lo;
+        state ^= 0xA5A5A5A5A5A5A5A5ull;
+        for (u64 i = 0; i < 16; ++i)
+        {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            stack_direct[off + 72 + i] = static_cast<u8>(state >> 24);
+        }
+        proc->user_rsp_init = rsp_init;
     }
 
     SerialWrite("[ring3] linux elf spawn name=\"");
