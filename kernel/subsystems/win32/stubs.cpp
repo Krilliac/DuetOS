@@ -2464,6 +2464,84 @@ constexpr StubEntry kStubsTable[] = {
     {"kernel32.dll", "GetStringTypeExW", kOffReturnOne},
     {"kernel32.dll", "IsDBCSLeadByte", kOffReturnZero}, // FALSE — no DBCS
 
+    // === Batch 44 — shell32 / ole32 / winmm / shlwapi / psapi ==
+    //
+    // Another broad coverage sweep. All aliases to existing
+    // constant-return stubs. Most return "failure" or "empty
+    // result" so callers fall back cleanly.
+
+    // shell32 — folder paths + shell-execute.
+    {"shell32.dll", "SHGetFolderPathW", kOffReturnZero},
+    {"shell32.dll", "SHGetFolderPathA", kOffReturnZero},
+    {"shell32.dll", "SHGetKnownFolderPath", kOffReturnZero},
+    {"shell32.dll", "SHCreateDirectoryW", kOffReturnZero},
+    {"shell32.dll", "SHCreateDirectoryExW", kOffReturnZero},
+    {"shell32.dll", "SHGetPathFromIDListW", kOffReturnOne},
+    {"shell32.dll", "CommandLineToArgvW", kOffReturnZero},
+    {"shell32.dll", "ShellExecuteW", kOffReturnOne},
+    {"shell32.dll", "ShellExecuteExW", kOffReturnOne},
+    {"shell32.dll", "SHGetSpecialFolderPathW", kOffReturnOne},
+    {"shell32.dll", "SHFileOperationW", kOffReturnZero},
+    {"shell32.dll", "ExtractIconW", kOffReturnZero},
+    {"shell32.dll", "ExtractIconExW", kOffReturnZero},
+
+    // ole32 + oleaut32 — COM.
+    {"ole32.dll", "CoInitialize", kOffReturnZero},
+    {"ole32.dll", "CoInitializeEx", kOffReturnZero},
+    {"ole32.dll", "CoUninitialize", kOffCritSecNop},
+    {"ole32.dll", "CoCreateInstance", kOffHresultEFail},
+    {"ole32.dll", "CoCreateInstanceEx", kOffHresultEFail},
+    {"ole32.dll", "CoGetClassObject", kOffHresultEFail},
+    {"ole32.dll", "CoTaskMemAlloc", kOffReturnZero},
+    {"ole32.dll", "CoTaskMemFree", kOffCritSecNop},
+    {"ole32.dll", "CoTaskMemRealloc", kOffReturnZero},
+    {"ole32.dll", "OleInitialize", kOffReturnZero},
+    {"ole32.dll", "OleUninitialize", kOffCritSecNop},
+    {"ole32.dll", "CLSIDFromString", kOffHresultEFail},
+    {"ole32.dll", "CLSIDFromProgID", kOffHresultEFail},
+    {"ole32.dll", "StringFromCLSID", kOffHresultEFail},
+    {"ole32.dll", "IIDFromString", kOffHresultEFail},
+    {"oleaut32.dll", "SysAllocString", kOffReturnZero},
+    {"oleaut32.dll", "SysFreeString", kOffCritSecNop},
+    {"oleaut32.dll", "SysStringLen", kOffReturnZero},
+    {"oleaut32.dll", "VariantInit", kOffCritSecNop},
+    {"oleaut32.dll", "VariantClear", kOffReturnZero},
+
+    // winmm — timer + multimedia.
+    {"winmm.dll", "timeGetTime", kOffGetTickCount},
+    {"winmm.dll", "timeBeginPeriod", kOffReturnZero},
+    {"winmm.dll", "timeEndPeriod", kOffReturnZero},
+    {"winmm.dll", "timeGetDevCaps", kOffReturnZero},
+    {"winmm.dll", "PlaySoundW", kOffReturnOne},
+    {"winmm.dll", "mciSendStringW", kOffReturnZero},
+
+    // shlwapi — path / string helpers.
+    {"shlwapi.dll", "PathFileExistsW", kOffReturnZero},
+    {"shlwapi.dll", "PathFileExistsA", kOffReturnZero},
+    {"shlwapi.dll", "PathFindFileNameW", kOffReturnZero},
+    {"shlwapi.dll", "PathFindFileNameA", kOffReturnZero},
+    {"shlwapi.dll", "PathFindExtensionW", kOffReturnZero},
+    {"shlwapi.dll", "PathFindExtensionA", kOffReturnZero},
+    {"shlwapi.dll", "PathCombineW", kOffReturnZero},
+    {"shlwapi.dll", "PathIsDirectoryW", kOffReturnZero},
+    {"shlwapi.dll", "PathRemoveFileSpecW", kOffReturnZero},
+    {"shlwapi.dll", "PathStripPathW", kOffCritSecNop},
+    {"shlwapi.dll", "PathAppendW", kOffReturnZero},
+    {"shlwapi.dll", "PathAddBackslashW", kOffReturnZero},
+    {"shlwapi.dll", "StrStrW", kOffReturnZero},
+    {"shlwapi.dll", "StrStrIW", kOffReturnZero},
+    {"shlwapi.dll", "StrCmpNW", kOffReturnZero},
+    {"shlwapi.dll", "StrCmpW", kOffReturnZero},
+
+    // psapi — process/module enumeration.
+    {"psapi.dll", "EnumProcesses", kOffReturnZero},
+    {"psapi.dll", "EnumProcessModules", kOffReturnZero},
+    {"psapi.dll", "GetModuleBaseNameW", kOffReturnZero},
+    {"psapi.dll", "GetModuleFileNameExW", kOffReturnZero},
+    {"psapi.dll", "GetProcessMemoryInfo", kOffReturnZero},
+    {"psapi.dll", "GetMappedFileNameW", kOffReturnZero},
+    {"psapi.dll", "QueryWorkingSet", kOffReturnZero},
+
     // Batch 9 — Win32 process heap, backed by the per-process
     // 16-page region at 0x50000000 and SYS_HEAP_ALLOC /
     // SYS_HEAP_FREE. See kernel/subsystems/win32/heap.cpp.
