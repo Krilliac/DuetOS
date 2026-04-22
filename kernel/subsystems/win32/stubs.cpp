@@ -2099,6 +2099,47 @@ constexpr StubEntry kStubsTable[] = {
     {"kernel32.dll", "CreateDirectoryW", kOffReturnOne},
     {"kernel32.dll", "RemoveDirectoryW", kOffReturnOne},
 
+    // Batch 38 — locale / processor / time-zone probes. All
+    // aliases to existing constant-returning stubs; zero new
+    // stub bytes needed.
+    //   GetACP / GetOEMCP -> 65001 (CP_UTF8) via kOffGetConsoleCP.
+    //   IsValidCodePage -> TRUE.
+    //   GetThreadLocale / *DefaultLCID -> 0 (LOCALE_INVARIANT).
+    //   GetTimeZoneInformation -> 1 (TIME_ZONE_ID_STANDARD).
+    //   GetProcessTimes / GetThreadTimes -> FALSE ("couldn't
+    //     query — use fallback"), safer than TRUE + uninit out.
+    //   GetStartupInfoW -> kOffCritSecNop (void return, 1-byte ret).
+    //   VerifyVersionInfoW -> TRUE (version probe passes).
+    {"kernel32.dll", "GetACP", kOffGetConsoleCP},
+    {"kernel32.dll", "GetOEMCP", kOffGetConsoleCP},
+    {"kernel32.dll", "IsValidCodePage", kOffReturnOne},
+    {"kernel32.dll", "GetThreadLocale", kOffReturnZero},
+    {"kernel32.dll", "SetThreadLocale", kOffReturnOne},
+    {"kernel32.dll", "GetUserDefaultLCID", kOffReturnZero},
+    {"kernel32.dll", "GetSystemDefaultLCID", kOffReturnZero},
+    {"kernel32.dll", "GetUserDefaultUILanguage", kOffReturnZero},
+    {"kernel32.dll", "GetSystemDefaultUILanguage", kOffReturnZero},
+    {"kernel32.dll", "GetTimeZoneInformation", kOffReturnOne},
+    {"kernel32.dll", "GetDynamicTimeZoneInformation", kOffReturnOne},
+    {"kernel32.dll", "GetCurrentProcessorNumber", kOffReturnZero},
+    {"kernel32.dll", "GetProcessTimes", kOffReturnZero},
+    {"kernel32.dll", "GetThreadTimes", kOffReturnZero},
+    {"kernel32.dll", "GetStartupInfoW", kOffCritSecNop},
+    {"kernel32.dll", "GetStartupInfoA", kOffCritSecNop},
+    {"kernel32.dll", "VerSetConditionMask", kOffReturnZero},
+    {"kernel32.dll", "VerifyVersionInfoW", kOffReturnOne},
+    {"kernel32.dll", "VerifyVersionInfoA", kOffReturnOne},
+    // Paired with batch 10's InitializeSListHead — more InterlockedX
+    // SList ops all no-op (return NULL = empty list).
+    {"kernel32.dll", "InterlockedPushEntrySList", kOffReturnZero},
+    {"kernel32.dll", "InterlockedPopEntrySList", kOffReturnZero},
+    {"kernel32.dll", "InterlockedFlushSList", kOffReturnZero},
+    {"kernel32.dll", "QueryDepthSList", kOffReturnZero},
+    // Misc memory / CPU / numa probes.
+    {"kernel32.dll", "GlobalMemoryStatusEx", kOffReturnZero},
+    {"kernel32.dll", "GetSystemTimes", kOffReturnZero},
+    {"kernel32.dll", "GetNumaHighestNodeNumber", kOffReturnZero},
+
     // Batch 9 — Win32 process heap, backed by the per-process
     // 16-page region at 0x50000000 and SYS_HEAP_ALLOC /
     // SYS_HEAP_FREE. See kernel/subsystems/win32/heap.cpp.
