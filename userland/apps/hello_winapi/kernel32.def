@@ -121,3 +121,6 @@ EXPORTS
     GetModuleFileNameW
     GetCurrentDirectoryW
     SetCurrentDirectoryW
+    ; Batch 33 — encoding converters
+    MultiByteToWideChar
+    WideCharToMultiByte

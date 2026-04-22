@@ -302,6 +302,14 @@ __declspec(dllimport) DWORD __stdcall GetModuleFileNameW(HMODULE hModule, LPWSTR
 __declspec(dllimport) DWORD __stdcall GetCurrentDirectoryW(DWORD nBufferLength, LPWSTR lpBuffer);
 __declspec(dllimport) BOOL __stdcall SetCurrentDirectoryW(LPCWSTR lpPathName);
 
+// Batch 33 — encoding converters. v0 is byte-extend / byte-truncate
+// (correct for ASCII-range data, lossy for high-plane UTF-8).
+__declspec(dllimport) int __stdcall MultiByteToWideChar(unsigned int CodePage, DWORD dwFlags, LPCSTR lpMultiByteStr,
+                                                        int cbMultiByte, LPWSTR lpWideCharStr, int cchWideChar);
+__declspec(dllimport) int __stdcall WideCharToMultiByte(unsigned int CodePage, DWORD dwFlags, LPCWSTR lpWideCharStr,
+                                                        int cchWideChar, LPSTR lpMultiByteStr, int cbMultiByte,
+                                                        LPCSTR lpDefaultChar, BOOL* lpUsedDefaultChar);
+
 static const char kMsg[] = "[hello-winapi] printed via kernel32.WriteFile!\n";
 #define kMsgLen ((DWORD)(sizeof(kMsg) - 1))
 
@@ -1073,6 +1081,44 @@ void _start(void)
         WriteFile(out, b32_ok, sizeof(b32_ok) - 1, &b32w, 0);
     else
         WriteFile(out, b32_bad, sizeof(b32_bad) - 1, &b32w, 0);
+
+    // Batch 33 exercise — encoding converters.
+    //
+    // Invariants checked:
+    //   * MultiByteToWideChar("hello", 5, wbuf, 16) returns 5 and
+    //     wbuf contains L"hello" byte-extended (each char has
+    //     high byte 0x00).
+    //   * Size-query mode: MultiByteToWideChar("abc", 3, NULL, 0)
+    //     returns 3 (required wide-char count).
+    //   * WideCharToMultiByte(L"world", 5, bbuf, 16, ...)
+    //     returns 5 and bbuf contains "world" byte-truncated.
+    //   * Round-trip: WideCharToMultiByte(MultiByteToWideChar(src))
+    //     recovers src.
+    static const char kMbSrc[] = "hello";
+    WCHAR b33_wbuf[16];
+    for (int i = 0; i < 16; ++i)
+        b33_wbuf[i] = 0;
+    int b33_mb2wc = MultiByteToWideChar(65001, 0, kMbSrc, 5, b33_wbuf, 16);
+    int b33_mb2wc_q = MultiByteToWideChar(65001, 0, "abc", 3, 0, 0);
+    BOOL b33_wc_content =
+        b33_wbuf[0] == 'h' && b33_wbuf[1] == 'e' && b33_wbuf[2] == 'l' && b33_wbuf[3] == 'l' && b33_wbuf[4] == 'o';
+
+    static const WCHAR kWcSrc[] = {'w', 'o', 'r', 'l', 'd', 0};
+    char b33_bbuf[16];
+    for (int i = 0; i < 16; ++i)
+        b33_bbuf[i] = 0;
+    int b33_wc2mb = WideCharToMultiByte(65001, 0, kWcSrc, 5, b33_bbuf, 16, 0, 0);
+    BOOL b33_mb_content =
+        b33_bbuf[0] == 'w' && b33_bbuf[1] == 'o' && b33_bbuf[2] == 'r' && b33_bbuf[3] == 'l' && b33_bbuf[4] == 'd';
+
+    const char b33_ok[] = "[batch33] MultiByteToWideChar + WideCharToMultiByte OK\n";
+    const char b33_bad[] = "[batch33] encoding converters FAILED invariants\n";
+    BOOL b33_pass = b33_mb2wc == 5 && b33_mb2wc_q == 3 && b33_wc_content && b33_wc2mb == 5 && b33_mb_content;
+    DWORD b33w = 0;
+    if (b33_pass)
+        WriteFile(out, b33_ok, sizeof(b33_ok) - 1, &b33w, 0);
+    else
+        WriteFile(out, b33_bad, sizeof(b33_bad) - 1, &b33w, 0);
 
     // Batch 3 round-trip: store a distinctive value via
     // SetLastError, read it back via GetLastError, exit with

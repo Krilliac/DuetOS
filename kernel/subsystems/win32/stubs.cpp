@@ -115,6 +115,8 @@ constexpr u32 kOffLstrcmpA = 0x548;           // batch 31 — 37 bytes
 constexpr u32 kOffLstrcpyA = 0x56D;           // batch 31 — 26 bytes
 constexpr u32 kOffGetModFileNameW = 0x587;    // batch 32 — 24 bytes
 constexpr u32 kOffGetCurrentDirW = 0x59F;     // batch 32 — 31 bytes
+constexpr u32 kOffMBtoWC = 0x5BE;             // batch 33 — 49 bytes
+constexpr u32 kOffWCtoMB = 0x5EF;             // batch 33 — 48 bytes
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -1530,10 +1532,104 @@ constexpr u8 kStubsBytes[] = {
     0xC7, 0x42, 0x04, 0x5C, 0x00, 0x00, 0x00, // 0x5B1 mov dword [rdx+4], 0x0000005C
     0xB8, 0x03, 0x00, 0x00, 0x00,             // 0x5B8 mov eax, 3
     0xC3,                                     // 0x5BD ret
+
+    // === Batch 33: encoding converters =========================
+    //
+    // v0 treats both directions as simple byte-extend / byte-
+    // truncate. That's correct for 7-bit ASCII under any of the
+    // standard single-byte code pages + CP_UTF8 (which is itself
+    // ASCII-compatible for the low 128 code points). Non-ASCII
+    // UTF-8 sequences would need real decoding — not implemented,
+    // documented as v0 limitation.
+    //
+    // Stack-arg layout at entry, after `push rdi; push rsi`:
+    //   [rsp+0]   saved rsi
+    //   [rsp+8]   saved rdi
+    //   [rsp+16]  return address
+    //   [rsp+24]  shadow arg 1 (rcx spill slot)
+    //   [rsp+32]  shadow arg 2 (rdx spill slot)
+    //   [rsp+40]  shadow arg 3 (r8 spill slot)
+    //   [rsp+48]  shadow arg 4 (r9 spill slot)
+    //   [rsp+56]  arg 5 = output pointer
+    //   [rsp+64]  arg 6 = output capacity
+
+    // --- MultiByteToWideChar (offset 0x5BE, 49 bytes) ---------
+    // Win32: int MultiByteToWideChar(UINT CP=rcx, DWORD flags=rdx,
+    //          LPCCH lpMultiByteStr=r8, int cbMultiByte=r9,
+    //          LPWSTR dst=[rsp+0x28], int cchWideChar=[rsp+0x30]).
+    //
+    // v0 routes each source byte through `movzx r16, byte` and
+    // stores as wide char. Copies min(cbMultiByte, cchWideChar)
+    // chars, returns count written. If cchWideChar == 0, returns
+    // cbMultiByte (size-query mode). Caller is expected to pass
+    // an actual byte count (not -1); future slice handles the
+    // NUL-terminated variant.
+    0x57,                         // 0x5BE push rdi
+    0x56,                         // 0x5BF push rsi
+    0x48, 0x8B, 0x7C, 0x24, 0x38, // 0x5C0 mov rdi, [rsp+0x38]   ; dst (LPWSTR)
+    0x8B, 0x4C, 0x24, 0x40,       // 0x5C5 mov ecx, [rsp+0x40]   ; cchWideChar (dst_cap)
+    0x44, 0x89, 0xCE,             // 0x5C9 mov esi, r9d          ; cbMultiByte (src_len)
+    0x85, 0xC9,                   // 0x5CC test ecx, ecx
+    0x74, 0x1A,                   // 0x5CE jz .size_query (+0x1A)
+    0x31, 0xC0,                   // 0x5D0 xor eax, eax
+    // .loop:
+    0x39, 0xF0,                   // 0x5D2 cmp eax, esi
+    0x73, 0x11,                   // 0x5D4 jae .done (+0x11)
+    0x39, 0xC8,                   // 0x5D6 cmp eax, ecx
+    0x73, 0x0D,                   // 0x5D8 jae .done (+0x0D)
+    0x41, 0x0F, 0xB6, 0x14, 0x00, // 0x5DA movzx edx, byte [r8+rax*1]
+    0x66, 0x89, 0x14, 0x47,       // 0x5DF mov [rdi+rax*2], dx
+    0xFF, 0xC0,                   // 0x5E3 inc eax
+    0xEB, 0xEB,                   // 0x5E5 jmp .loop (-0x15)
+    // .done:
+    0x5E, // 0x5E7 pop rsi
+    0x5F, // 0x5E8 pop rdi
+    0xC3, // 0x5E9 ret
+    // .size_query:
+    0x89, 0xF0, // 0x5EA mov eax, esi
+    0x5E,       // 0x5EC pop rsi
+    0x5F,       // 0x5ED pop rdi
+    0xC3,       // 0x5EE ret
+
+    // --- WideCharToMultiByte (offset 0x5EF, 48 bytes) ---------
+    // Win32: int WideCharToMultiByte(UINT CP=rcx, DWORD flags=rdx,
+    //          LPCWCH lpWideCharStr=r8, int cchWideChar=r9,
+    //          LPSTR dst=[rsp+0x28], int cbMultiByte=[rsp+0x30],
+    //          LPCCH lpDefaultChar=[rsp+0x38]  (ignored),
+    //          LPBOOL lpUsedDefaultChar=[rsp+0x40]  (ignored)).
+    //
+    // v0 truncates each wide char to its low byte — correct for
+    // ASCII-range content, loses high-plane data otherwise.
+    0x57,                         // 0x5EF push rdi
+    0x56,                         // 0x5F0 push rsi
+    0x48, 0x8B, 0x7C, 0x24, 0x38, // 0x5F1 mov rdi, [rsp+0x38]   ; dst (LPSTR)
+    0x8B, 0x4C, 0x24, 0x40,       // 0x5F6 mov ecx, [rsp+0x40]   ; cbMultiByte (dst_cap)
+    0x44, 0x89, 0xCE,             // 0x5FA mov esi, r9d          ; cchWideChar (src_len)
+    0x85, 0xC9,                   // 0x5FD test ecx, ecx
+    0x74, 0x19,                   // 0x5FF jz .size_query (+0x19)
+    0x31, 0xC0,                   // 0x601 xor eax, eax
+    // .loop:
+    0x39, 0xF0,                   // 0x603 cmp eax, esi
+    0x73, 0x10,                   // 0x605 jae .done (+0x10)
+    0x39, 0xC8,                   // 0x607 cmp eax, ecx
+    0x73, 0x0C,                   // 0x609 jae .done (+0x0C)
+    0x41, 0x0F, 0xB7, 0x14, 0x40, // 0x60B movzx edx, word [r8+rax*2]
+    0x88, 0x14, 0x07,             // 0x610 mov [rdi+rax*1], dl
+    0xFF, 0xC0,                   // 0x613 inc eax
+    0xEB, 0xEC,                   // 0x615 jmp .loop (-0x14)
+    // .done:
+    0x5E, // 0x617 pop rsi
+    0x5F, // 0x618 pop rdi
+    0xC3, // 0x619 ret
+    // .size_query:
+    0x89, 0xF0, // 0x61A mov eax, esi
+    0x5E,       // 0x61C pop rsi
+    0x5F,       // 0x61D pop rdi
+    0xC3,       // 0x61E ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x5BE, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0x61F, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -1806,6 +1902,12 @@ constexpr StubEntry kStubsTable[] = {
     {"kernel32.dll", "GetCurrentDirectoryA", kOffGetCurrentDirW},
     {"kernel32.dll", "SetCurrentDirectoryW", kOffReturnOne}, // pretend success
     {"kernel32.dll", "SetCurrentDirectoryA", kOffReturnOne},
+
+    // Batch 33 — encoding converters. v0 handles ASCII-range
+    // content perfectly (byte-extend / byte-truncate); non-ASCII
+    // UTF-8 sequences lose high-plane data.
+    {"kernel32.dll", "MultiByteToWideChar", kOffMBtoWC},
+    {"kernel32.dll", "WideCharToMultiByte", kOffWCtoMB},
 
     // Batch 9 — Win32 process heap, backed by the per-process
     // 16-page region at 0x50000000 and SYS_HEAP_ALLOC /
