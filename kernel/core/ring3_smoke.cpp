@@ -16,6 +16,7 @@
 #include "../subsystems/win32/heap.h"
 #include "elf_loader.h"
 #include "klog.h"
+#include "random.h"
 #include "panic.h"
 #include "pe_loader.h"
 #include "process.h"
@@ -1750,7 +1751,18 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     {
         return 0;
     }
-    const PeLoadResult r = PeLoad(pe_bytes, pe_len, as, name);
+    // Per-process ASLR: pick a 64 KiB-aligned delta in [0, 64 MiB).
+    // 10 bits of entropy × 64 KiB = 1024 possible positions. Kept
+    // modest so the shifted ImageBase can't collide with the
+    // fixed-VA subsystem regions (win32 heap at 0x50000000, stubs
+    // at 0x60000000, proc-env at 0x65000000, TEB at 0x70000000,
+    // stack ending at 0x80000000). A PE's preferred base is
+    // typically 0x140000000 — well above those — so adding up to
+    // ~64 MiB keeps us safely in the 0x140000000..0x144000000
+    // band.
+    const u64 entropy = customos::core::RandomU64();
+    const u64 aslr_delta = (entropy & 0x3FF) * (64ULL * 1024);
+    const PeLoadResult r = PeLoad(pe_bytes, pe_len, as, name, aslr_delta);
     if (!r.ok)
     {
         AddressSpaceRelease(as);

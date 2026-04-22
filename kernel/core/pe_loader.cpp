@@ -783,7 +783,8 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, customos::
 
 } // namespace
 
-PeLoadResult PeLoad(const u8* file, u64 file_len, customos::mm::AddressSpace* as, const char* program_name)
+PeLoadResult PeLoad(const u8* file, u64 file_len, customos::mm::AddressSpace* as, const char* program_name,
+                    u64 aslr_delta)
 {
     KLOG_TRACE_SCOPE("pe-loader", "PeLoad");
     PeLoadResult r{};
@@ -841,8 +842,19 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, customos::mm::AddressSpace* as
     // "last breadcrumb wins" view of where a real-world PE like
     // windows-kill.exe drops out, without having to instrument
     // every helper.
+    // ASLR: shift the preferred ImageBase by the caller-supplied
+    // delta. All subsequent section mapping + relocation pointer
+    // fixups happen at the shifted VA. Must be 64 KiB aligned.
+    // Zero delta is the v0 path (no ASLR).
+    const u64 preferred_base = h.image_base;
+    h.image_base += aslr_delta;
+
     SerialWrite("[pe-load] begin status=");
     SerialWrite(PeStatusName(ps));
+    SerialWrite(" preferred_base=");
+    SerialWriteHex(preferred_base);
+    SerialWrite(" aslr_delta=");
+    SerialWriteHex(aslr_delta);
     SerialWrite(" image_base=");
     SerialWriteHex(h.image_base);
     SerialWrite(" sections=");
@@ -873,12 +885,11 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, customos::mm::AddressSpace* as
     }
     SerialWrite("[pe-load] step2 sections mapped\n");
 
-    // 3. Apply base relocations. v0 always loads at the preferred
-    //    ImageBase (no ASLR, no DLL collision handling), so delta
-    //    is 0 and the apply path is a no-op — the walk still runs
-    //    to reject a malformed .reloc section before ring-3 entry.
-    //    When ASLR lands, compute the actual_base delta here.
-    const u64 reloc_delta = 0;
+    // 3. Apply base relocations. The delta is the ASLR shift
+    //    from the preferred base. When delta == 0 the walk still
+    //    runs (to reject a malformed .reloc section before ring-3
+    //    entry) but the patch body is a no-op.
+    const u64 reloc_delta = aslr_delta;
     if (!ApplyRelocations(file, file_len, h, as, reloc_delta))
     {
         SerialWrite("[pe-load] FAIL ApplyRelocations\n");
