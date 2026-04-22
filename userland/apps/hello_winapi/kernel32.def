@@ -138,3 +138,9 @@ EXPORTS
     ; Batch 37 — file attributes (kernel32 half)
     GetFileAttributesW
     SetFileAttributesW
+    ; Batch 40 — interlocked atomics
+    InterlockedIncrement
+    InterlockedDecrement
+    InterlockedCompareExchange
+    InterlockedExchange
+    InterlockedExchangeAdd

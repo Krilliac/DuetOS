@@ -342,6 +342,16 @@ __declspec(dllimport) long __stdcall RegCloseKey(HKEY hKey);
 __declspec(dllimport) DWORD __stdcall GetFileAttributesW(LPCWSTR lpFileName);
 __declspec(dllimport) BOOL __stdcall SetFileAttributesW(LPCWSTR lpFileName, DWORD dwFileAttributes);
 
+// Batch 40 — Interlocked atomic operations (real LOCK-prefix
+// ops, correct even under SMP).
+typedef long LONG;
+__declspec(dllimport) LONG __stdcall InterlockedIncrement(LONG volatile* Addend);
+__declspec(dllimport) LONG __stdcall InterlockedDecrement(LONG volatile* Addend);
+__declspec(dllimport) LONG __stdcall InterlockedCompareExchange(LONG volatile* Destination, LONG Exchange,
+                                                                LONG Comparand);
+__declspec(dllimport) LONG __stdcall InterlockedExchange(LONG volatile* Target, LONG Value);
+__declspec(dllimport) LONG __stdcall InterlockedExchangeAdd(LONG volatile* Addend, LONG Value);
+
 static const char kMsg[] = "[hello-winapi] printed via kernel32.WriteFile!\n";
 #define kMsgLen ((DWORD)(sizeof(kMsg) - 1))
 
@@ -1278,6 +1288,40 @@ void _start(void)
         WriteFile(out, b37_ok, sizeof(b37_ok) - 1, &b37w, 0);
     else
         WriteFile(out, b37_bad, sizeof(b37_bad) - 1, &b37w, 0);
+
+    // Batch 40 exercise — real atomic operations.
+    //
+    // Invariants checked:
+    //   * InterlockedIncrement(&x=5) returns 6 and x == 6.
+    //   * InterlockedDecrement(&x=6) returns 5 and x == 5.
+    //   * InterlockedExchangeAdd(&x=5, 10) returns 5 (old); x == 15.
+    //   * InterlockedExchange(&x=15, 42) returns 15 (old); x == 42.
+    //   * InterlockedCompareExchange(&x=42, 99, 42) returns 42
+    //     (old matched); x == 99.
+    //   * InterlockedCompareExchange(&x=99, 0, 42) returns 99
+    //     (old didn't match); x stays 99.
+    volatile LONG b40_x = 5;
+    LONG b40_inc = InterlockedIncrement((LONG*)&b40_x);
+    LONG b40_dec = InterlockedDecrement((LONG*)&b40_x);
+    LONG b40_add_old = InterlockedExchangeAdd((LONG*)&b40_x, 10);
+    LONG b40_add_after = b40_x;
+    LONG b40_ex_old = InterlockedExchange((LONG*)&b40_x, 42);
+    LONG b40_ex_after = b40_x;
+    LONG b40_cx_hit = InterlockedCompareExchange((LONG*)&b40_x, 99, 42);
+    LONG b40_cx_after_hit = b40_x;
+    LONG b40_cx_miss = InterlockedCompareExchange((LONG*)&b40_x, 0, 42);
+    LONG b40_cx_after_miss = b40_x;
+
+    const char b40_ok[] = "[batch40] InterlockedInc/Dec/XAdd/Xchg/CmpXchg OK\n";
+    const char b40_bad[] = "[batch40] interlocked atomics FAILED invariants\n";
+    BOOL b40_pass = b40_inc == 6 && b40_dec == 5 && b40_add_old == 5 && b40_add_after == 15 && b40_ex_old == 15 &&
+                    b40_ex_after == 42 && b40_cx_hit == 42 && b40_cx_after_hit == 99 && b40_cx_miss == 99 &&
+                    b40_cx_after_miss == 99;
+    DWORD b40w = 0;
+    if (b40_pass)
+        WriteFile(out, b40_ok, sizeof(b40_ok) - 1, &b40w, 0);
+    else
+        WriteFile(out, b40_bad, sizeof(b40_bad) - 1, &b40w, 0);
 
     // Batch 3 round-trip: store a distinctive value via
     // SetLastError, read it back via GetLastError, exit with
