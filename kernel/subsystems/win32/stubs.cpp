@@ -108,6 +108,8 @@ constexpr u32 kOffVirtualProtect = 0x4A6;     // batch 28 — 18 bytes
 constexpr u32 kOffLstrlenW = 0x4B8;           // batch 29 — 15 bytes
 constexpr u32 kOffLstrcmpW = 0x4C7;           // batch 29 — 37 bytes
 constexpr u32 kOffLstrcpyW = 0x4EC;           // batch 29 — 27 bytes
+constexpr u32 kOffIsWow64 = 0x507;            // batch 30 — 17 bytes
+constexpr u32 kOffGetVersionExW = 0x518;      // batch 30 — 34 bytes
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -1391,10 +1393,50 @@ constexpr u8 kStubsBytes[] = {
     0xEB, 0xEC,                   // 0x504 jmp .loop (-0x14)
     // .done:
     0xC3, // 0x506 ret
+
+    // === Batch 30: system-info probes ==========================
+
+    // --- IsWow64Process (offset 0x507, 17 bytes) --------------
+    // Win32: BOOL IsWow64Process(HANDLE rcx, PBOOL rdx).
+    // Writes FALSE to *Wow64Process (we're a native x64 process;
+    // there's no 32-bit emulation subsystem in v0 anyway) and
+    // returns TRUE. If the out-ptr is NULL we skip the write —
+    // real Windows also tolerates this.
+    0x48, 0x85, 0xD2,                   // 0x507 test rdx, rdx
+    0x74, 0x06,                         // 0x50A jz .skip (+6)
+    0xC7, 0x02, 0x00, 0x00, 0x00, 0x00, // 0x50C mov dword [rdx], 0 (FALSE)
+    // .skip:
+    0xB8, 0x01, 0x00, 0x00, 0x00, // 0x512 mov eax, 1 (BOOL TRUE)
+    0xC3,                         // 0x517 ret
+
+    // --- GetVersionExW (offset 0x518, 34 bytes) ---------------
+    // Win32: BOOL GetVersionExW(POSVERSIONINFOW rcx).
+    //
+    // Layout of OSVERSIONINFOW:
+    //   0x00  dwOSVersionInfoSize  <- caller-set; we leave alone
+    //   0x04  dwMajorVersion       <- we write 10 (Win10)
+    //   0x08  dwMinorVersion       <- we write 0
+    //   0x0C  dwBuildNumber        <- we write 19041 (Win10 2004)
+    //   0x10  dwPlatformId         <- we write 2 (VER_PLATFORM_WIN32_NT)
+    //   0x14  szCSDVersion[128]    <- leave caller's zero-init
+    //
+    // 19041 = 0x4A61; fits in imm32 signed. Picked to look like a
+    // recent-ish Windows 10 build so feature-gate probes see a
+    // plausible "new enough" version.
+    //
+    // GetVersionEx (ANSI) aliases to this — the first five DWORDs
+    // are layout-identical; only szCSDVersion differs (ANSI vs
+    // wide), which we don't touch.
+    0xC7, 0x41, 0x04, 0x0A, 0x00, 0x00, 0x00, // 0x518 mov dword [rcx+0x04], 10    (major)
+    0xC7, 0x41, 0x08, 0x00, 0x00, 0x00, 0x00, // 0x51F mov dword [rcx+0x08], 0     (minor)
+    0xC7, 0x41, 0x0C, 0x61, 0x4A, 0x00, 0x00, // 0x526 mov dword [rcx+0x0C], 19041 (build)
+    0xC7, 0x41, 0x10, 0x02, 0x00, 0x00, 0x00, // 0x52D mov dword [rcx+0x10], 2     (NT platform)
+    0xB8, 0x01, 0x00, 0x00, 0x00,             // 0x534 mov eax, 1 (BOOL TRUE)
+    0xC3,                                     // 0x539 ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x507, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0x53A, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -1638,6 +1680,17 @@ constexpr StubEntry kStubsTable[] = {
     {"kernel32.dll", "lstrlenW", kOffLstrlenW},
     {"kernel32.dll", "lstrcmpW", kOffLstrcmpW},
     {"kernel32.dll", "lstrcpyW", kOffLstrcpyW},
+
+    // Batch 30 — system-info probes. IsWow64Process returns FALSE
+    // (native x64 process, no 32-bit emulation). GetVersionEx*
+    // reports Windows 10 build 19041 (2004 / 20H1) — a modern-
+    // enough version to pass most feature-gate checks without
+    // triggering "too new, not yet supported" fallbacks apps
+    // have for very recent builds.
+    {"kernel32.dll", "IsWow64Process", kOffIsWow64},
+    {"kernel32.dll", "IsWow64Process2", kOffIsWow64}, // fills similar PBOOL
+    {"kernel32.dll", "GetVersionExW", kOffGetVersionExW},
+    {"kernel32.dll", "GetVersionExA", kOffGetVersionExW}, // ASCII CSD left untouched
 
     // Batch 9 — Win32 process heap, backed by the per-process
     // 16-page region at 0x50000000 and SYS_HEAP_ALLOC /

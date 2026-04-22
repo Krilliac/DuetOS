@@ -276,6 +276,22 @@ __declspec(dllimport) int __stdcall lstrlenW(LPCWSTR lpString);
 __declspec(dllimport) int __stdcall lstrcmpW(LPCWSTR lpString1, LPCWSTR lpString2);
 __declspec(dllimport) LPWSTR __stdcall lstrcpyW(LPWSTR lpString1, LPCWSTR lpString2);
 
+// Batch 30 — system-info probes. IsWow64Process reports whether
+// a 32-bit process is running under WOW64 emulation (FALSE for
+// us — native x64 only). GetVersionExW reports Windows 10 build
+// 19041 so modern feature-gates pass.
+typedef struct
+{
+    DWORD dwOSVersionInfoSize;
+    DWORD dwMajorVersion;
+    DWORD dwMinorVersion;
+    DWORD dwBuildNumber;
+    DWORD dwPlatformId;
+    WCHAR szCSDVersion[128];
+} OSVERSIONINFOW;
+__declspec(dllimport) BOOL __stdcall IsWow64Process(HANDLE hProcess, BOOL* Wow64Process);
+__declspec(dllimport) BOOL __stdcall GetVersionExW(OSVERSIONINFOW* lpVersionInformation);
+
 static const char kMsg[] = "[hello-winapi] printed via kernel32.WriteFile!\n";
 #define kMsgLen ((DWORD)(sizeof(kMsg) - 1))
 
@@ -932,6 +948,46 @@ void _start(void)
         WriteFile(out, b29_ok, sizeof(b29_ok) - 1, &b29w, 0);
     else
         WriteFile(out, b29_bad, sizeof(b29_bad) - 1, &b29w, 0);
+
+    // Batch 30 exercise — system-info probes.
+    //
+    // Invariants checked:
+    //   * IsWow64Process returns TRUE and writes FALSE to the
+    //     out-param (we're a native x64 process, no WOW64).
+    //   * IsWow64Process with NULL out-param still returns TRUE
+    //     (documented tolerance).
+    //   * GetVersionExW returns TRUE and writes Win10 build
+    //     19041: major=10, minor=0, build=19041, platform=NT (2).
+    //   * The caller's dwOSVersionInfoSize is preserved (we
+    //     don't touch the field).
+    //   * szCSDVersion[0] is still the caller's pre-call value.
+    BOOL b30_wow64 = 1; // poison
+    BOOL b30_iw_ok = IsWow64Process(0, &b30_wow64);
+    BOOL b30_iw_null = IsWow64Process(0, 0); // null out-ptr tolerated
+
+    OSVERSIONINFOW ovi;
+    // Zero-init entire struct by hand (no memset on hand_-compiled
+    // freestanding build). 276 bytes / 8 = 35 u64 writes; do it
+    // as a simple loop.
+    {
+        unsigned char* z = (unsigned char*)&ovi;
+        for (unsigned int i = 0; i < sizeof(ovi); ++i)
+            z[i] = 0;
+    }
+    ovi.dwOSVersionInfoSize = (DWORD)sizeof(ovi);
+    ovi.szCSDVersion[0] = 'X'; // sentinel — stub must leave alone
+    BOOL b30_gv_ok = GetVersionExW(&ovi);
+
+    const char b30_ok[] = "[batch30] IsWow64Process + GetVersionExW OK\n";
+    const char b30_bad[] = "[batch30] system-info probes FAILED invariants\n";
+    BOOL b30_pass = b30_iw_ok && b30_wow64 == 0 && b30_iw_null && b30_gv_ok && ovi.dwOSVersionInfoSize == sizeof(ovi) &&
+                    ovi.dwMajorVersion == 10 && ovi.dwMinorVersion == 0 && ovi.dwBuildNumber == 19041 &&
+                    ovi.dwPlatformId == 2 && ovi.szCSDVersion[0] == 'X';
+    DWORD b30w = 0;
+    if (b30_pass)
+        WriteFile(out, b30_ok, sizeof(b30_ok) - 1, &b30w, 0);
+    else
+        WriteFile(out, b30_bad, sizeof(b30_bad) - 1, &b30w, 0);
 
     // Batch 3 round-trip: store a distinctive value via
     // SetLastError, read it back via GetLastError, exit with

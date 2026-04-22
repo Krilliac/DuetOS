@@ -110,3 +110,6 @@ EXPORTS
     lstrlenW
     lstrcmpW
     lstrcpyW
+    ; Batch 30 — system-info probes
+    IsWow64Process
+    GetVersionExW
