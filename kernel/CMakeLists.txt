@@ -34,6 +34,7 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     subsystems/linux/ring3_smoke.cpp
     subsystems/linux/syscall.cpp
     subsystems/linux/syscall_entry.S
+    subsystems/translation/translate.cpp
     subsystems/win32/heap.cpp
     subsystems/win32/stubs.cpp
     core/shell.cpp

@@ -50,8 +50,24 @@ void SyscallInit();
 /// syscall number; writes the return value back into
 /// `frame->rax` before the stub pops + sysretqs.
 ///
-/// Unknown syscalls return -ENOSYS (-38) as Linux does so
-/// musl's CRT sees a sensible error rather than a kernel oops.
+/// Unknown syscalls are first offered to the translation unit
+/// (subsystems/translation); anything that survives that step
+/// returns -ENOSYS (-38) so musl's CRT sees a sensible error
+/// rather than a kernel oops.
 extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame);
+
+// ---------------------------------------------------------------
+// Handler entry points exposed to the translation unit. These
+// are thin wrappers over the anonymous-namespace Do* helpers in
+// syscall.cpp; the translation unit synthesizes larger syscalls
+// (readv, gettimeofday, …) by stitching these together.
+//
+// NOT part of the stable external API — rename freely as the
+// internal handler set evolves.
+// ---------------------------------------------------------------
+i64 LinuxRead(u64 fd, u64 user_buf, u64 len);
+i64 LinuxWrite(u64 fd, u64 user_buf, u64 len);
+i64 LinuxClockGetTime(u64 clk_id, u64 user_ts);
+u64 LinuxNowNs();
 
 } // namespace customos::subsystems::linux

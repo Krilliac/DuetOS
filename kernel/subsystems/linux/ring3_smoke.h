@@ -41,4 +41,12 @@ void SpawnRing3LinuxElfSmoke();
 /// exit. Exercises the sys_open/close/read path end-to-end.
 void SpawnRing3LinuxFileSmoke();
 
+/// Exercises the ABI translation unit. Issues one syscall that
+/// the TU fills with a no-op (sys_madvise) and one it declines
+/// with a deliberate -ENOSYS (sys_rseq), then exits. Expected
+/// boot-log lines:
+///   [translate] linux/0x1c -> noop:advisory-hint
+///   [translate] linux/0x14e -> synthetic:enosys-deliberate
+void SpawnRing3LinuxTranslateSmoke();
+
 } // namespace customos::subsystems::linux

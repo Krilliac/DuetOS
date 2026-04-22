@@ -553,6 +553,69 @@ void SpawnRing3LinuxElfSmoke()
     }
 }
 
+// Translation-unit exerciser. Two syscalls that the primary Linux
+// dispatcher doesn't handle, so the TU gets a chance:
+//   sys_madvise(0x7f000000, 4096, 0)  -> no-op translation
+//   sys_rseq(0, 0, 0, 0)              -> deliberate -ENOSYS
+//   exit_group(0x42)
+// The boot log shows both [translate] lines; re-run shows the
+// same lines, making it easy to grep "[translate]" for the full
+// story of what's translated vs. missing.
+constexpr u8 kTranslatePayload[] = {
+    // sys_madvise(0x7F000000, 0x1000, 0)
+    0xB8, 0x1C, 0x00, 0x00, 0x00, // mov eax, 28
+    0xBF, 0x00, 0x00, 0x00, 0x7F, // mov edi, 0x7F000000
+    0xBE, 0x00, 0x10, 0x00, 0x00, // mov esi, 0x1000
+    0x31, 0xD2,                   // xor edx, edx
+    0x0F, 0x05,                   // syscall
+    // sys_rseq(0, 0, 0, 0)
+    0xB8, 0x4E, 0x01, 0x00, 0x00, // mov eax, 334
+    0x31, 0xFF,                   // xor edi, edi
+    0x31, 0xF6,                   // xor esi, esi
+    0x31, 0xD2,                   // xor edx, edx
+    0x0F, 0x05,                   // syscall
+    // exit_group(0x42)
+    0xB8, 0xE7, 0x00, 0x00, 0x00, // mov eax, 231
+    0xBF, 0x42, 0x00, 0x00, 0x00, // mov edi, 0x42
+    0x0F, 0x05,                   // syscall
+    0x0F, 0x0B,                   // ud2
+};
+
+void SpawnRing3LinuxTranslateSmoke()
+{
+    KLOG_TRACE_SCOPE("linux/smoke", "SpawnRing3LinuxTranslateSmoke");
+
+    AddressSpace* as = AddressSpaceCreate(/*frame_budget=*/16);
+    if (as == nullptr)
+        core::Panic("linux/smoke", "AddressSpaceCreate failed");
+    const PhysAddr code_frame = AllocateFrame();
+    const PhysAddr stack_frame = AllocateFrame();
+    if (code_frame == mm::kNullFrame || stack_frame == mm::kNullFrame)
+        core::Panic("linux/smoke", "frame alloc failed");
+    auto* code_direct = static_cast<u8*>(mm::PhysToVirt(code_frame));
+    for (u64 i = 0; i < mm::kPageSize; ++i)
+        code_direct[i] = 0;
+    for (u64 i = 0; i < sizeof(kTranslatePayload); ++i)
+        code_direct[i] = kTranslatePayload[i];
+
+    // Dedicated VA so this task doesn't collide with the others.
+    const u64 code_va = 0x0000'6A00'0000'0000ull;
+    const u64 stack_va = code_va + 0x10000;
+    AddressSpaceMapUserPage(as, code_va, code_frame, mm::kPagePresent | mm::kPageUser);
+    AddressSpaceMapUserPage(as, stack_va, stack_frame,
+                            mm::kPagePresent | mm::kPageWritable | mm::kPageUser | mm::kPageNoExecute);
+    Process* proc = ProcessCreate("linux-translate-smoke", as, core::CapSetEmpty(), fs::RamfsSandboxRoot(), code_va,
+                                  stack_va, core::kTickBudgetSandbox);
+    if (proc == nullptr)
+        core::Panic("linux/smoke", "ProcessCreate failed");
+    proc->abi_flavor = kAbiLinux;
+    proc->linux_brk_base = code_va + 0x100'0000ull;
+    proc->linux_brk_current = proc->linux_brk_base;
+    proc->linux_mmap_cursor = 0x0000'7200'0000'0000ull;
+    arch::SerialWrite("[linux] queued ring3 translate smoke: madvise + rseq + exit\n");
+    sched::SchedCreateUser(&core::Ring3UserEntry, nullptr, "linux-translate-smoke", proc);
+}
+
 void SpawnRing3LinuxSmoke()
 {
     KLOG_TRACE_SCOPE("linux/smoke", "SpawnRing3LinuxSmoke");

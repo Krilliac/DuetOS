@@ -1487,6 +1487,11 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // via the Linux ABI and echo its contents back through
     // sys_write. Validates the whole file-I/O chain end-to-end.
     customos::subsystems::linux::SpawnRing3LinuxFileSmoke();
+    // Translation-unit exercise: fire one syscall that the TU
+    // converts to a no-op (madvise) and one it declines with a
+    // deliberate -ENOSYS (rseq). Boot log shows [translate]
+    // lines for each.
+    customos::subsystems::linux::SpawnRing3LinuxTranslateSmoke();
     // Real-binary path: read /fat/LINUX.ELF off the mounted
     // FAT32 volume and spawn it via SpawnElfLinux. Exercises
     // the AHCI -> GPT -> partition-block -> FAT32 -> ElfLoad

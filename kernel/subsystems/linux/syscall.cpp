@@ -12,6 +12,7 @@
 #include "../../mm/page.h"
 #include "../../mm/paging.h"
 #include "../../sched/sched.h"
+#include "../translation/translate.h"
 
 extern "C" void linux_syscall_entry();
 
@@ -1317,6 +1318,29 @@ i64 DoUname(u64 user_buf)
 
 } // namespace
 
+// ---------------------------------------------------------------
+// Public wrappers exposed to the translation unit. The anonymous-
+// namespace Do* helpers have internal linkage; these forward to
+// them so another TU can compose larger syscalls from the
+// primitives (e.g. readv = iterate iovecs calling LinuxRead).
+// ---------------------------------------------------------------
+i64 LinuxRead(u64 fd, u64 user_buf, u64 len)
+{
+    return DoRead(fd, user_buf, len);
+}
+i64 LinuxWrite(u64 fd, u64 user_buf, u64 len)
+{
+    return DoWrite(fd, user_buf, len);
+}
+i64 LinuxClockGetTime(u64 clk_id, u64 user_ts)
+{
+    return DoClockGetTime(clk_id, user_ts);
+}
+u64 LinuxNowNs()
+{
+    return NowNs();
+}
+
 extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
 {
     KLOG_TRACE_SCOPE("linux/syscall", "LinuxSyscallDispatch");
@@ -1477,14 +1501,23 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
         rv = static_cast<i64>(sched::CurrentTaskId());
         break;
     default:
-        // Log the first unknown syscall per-process so we can
-        // see which musl expected but we haven't implemented
-        // yet. Noisy in the worst case — trim to per-PID dedup
-        // when the hello-world path starts hitting fifty.
-        arch::SerialWrite("[linux] unimplemented syscall nr=");
-        arch::SerialWriteHex(nr);
-        arch::SerialWrite("\n");
+    {
+        // Primary dispatch missed — offer to the translation unit
+        // before surfacing -ENOSYS. When the TU fills the gap it
+        // logs the specific translation; when it doesn't, it
+        // logs the miss + we fall through to ENOSYS behaviour.
+        const auto t = translation::LinuxGapFill(frame);
+        if (t.handled)
+        {
+            rv = t.rv;
+        }
+        // If the TU didn't handle it, rv is still the kENOSYS
+        // default from above, and the TU already logged the
+        // gap. No further log here — keeps the boot log clean
+        // while still being able to grep "[translate] ...
+        // unimplemented" for the full missing-syscall set.
         break;
+    }
     }
     frame->rax = static_cast<u64>(rv);
 }
