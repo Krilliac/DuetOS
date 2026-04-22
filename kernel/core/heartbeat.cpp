@@ -7,6 +7,7 @@
 #include "../sched/sched.h"
 #include "klog.h"
 #include "panic.h"
+#include "runtime_checker.h"
 
 namespace customos::core
 {
@@ -59,6 +60,15 @@ constexpr u64 kHeartbeatTicks = 500;
         const u64 total = sched_stats.total_ticks;
         const u64 busy_pct = (total > 0) ? ((total - sched_stats.idle_ticks) * 100u / total) : 0;
         LogWithValue(LogLevel::Info, "kheartbeat", "cpu_busy_pct", busy_pct);
+
+        // Runtime invariant scan. Each failing test emits its
+        // own Warn-level klog line via `Report`; we also surface
+        // the per-scan count + cumulative total here so the
+        // heartbeat line is self-contained for machine parsing.
+        RuntimeCheckerTick();
+        const auto& h = RuntimeCheckerStatusRead();
+        LogWithValue(LogLevel::Info, "kheartbeat", "health_last_scan_issues", h.last_scan_issues);
+        LogWithValue(LogLevel::Info, "kheartbeat", "health_issues_total", h.issues_found_total);
     }
 }
 

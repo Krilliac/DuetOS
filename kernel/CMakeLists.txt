@@ -32,6 +32,7 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     core/pe_loader.cpp
     core/random.cpp
     core/ring3_smoke.cpp
+    core/runtime_checker.cpp
     subsystems/graphics/graphics.cpp
     subsystems/linux/ring3_smoke.cpp
     subsystems/linux/syscall.cpp

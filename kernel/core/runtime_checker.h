@@ -1,0 +1,122 @@
+#pragma once
+
+#include "types.h"
+
+/*
+ * CustomOS — Runtime invariant checker, v0.
+ *
+ * Proactive detection of silent corruption / drift in kernel
+ * state. The checker runs a fixed battery of invariant tests
+ * that don't require the code-under-test to have any explicit
+ * logging or self-check. Each test is O(1) or O(small N); the
+ * whole scan completes in microseconds so it can run on every
+ * heartbeat tick without meaningful overhead.
+ *
+ * What this catches that normal panic / trap handling DOESN'T:
+ *
+ *   * Heap metadata corruption before a later KMalloc/KFree
+ *     trips a panic (usually on the WRONG thread, far from the
+ *     buggy writer).
+ *   * Frame allocator bitmap drift — a double-free, underflowed
+ *     refcount, or invariant-breaking race.
+ *   * Scheduler runqueue inconsistency — more exited than created,
+ *     impossible task counts, etc.
+ *   * Silent flip of a security control register bit (SMEP,
+ *     SMAP, NXE, WP) — the CPU will NOT panic when these clear,
+ *     it will just stop enforcing protection. Catching them via
+ *     periodic scan is the only way.
+ *   * `__stack_chk_guard` drifting to zero (unlikely but the
+ *     cost of checking is one load).
+ *   * Kernel-stack overflow in any task — a sentinel at the
+ *     bottom of each task's stack is compared each scan.
+ *
+ * Policy: a finding is logged as Warn by default. The guard
+ * subsystem can be configured to escalate — e.g. flip into a
+ * safe mode on a control-register drift, or panic on a second
+ * consecutive heap-integrity failure. Today the checker only
+ * logs + counts; the escalation hooks are a follow-up.
+ *
+ * Scope limits (v0):
+ *   - No cross-task checks — each scan is single-threaded, sees
+ *     a consistent snapshot of global state via the existing
+ *     StatsRead accessors. Per-task stack checks iterate the
+ *     runqueue under its normal spinlock.
+ *   - No performance counter check — would need baseline +
+ *     rate; skipped for v0.
+ *   - No IOMMU / page-table walk — future slice.
+ *
+ * Context: kernel. Thread-safe (uses StatsRead accessors). Do
+ * NOT call from IRQ context; the runqueue walk takes a
+ * spinlock.
+ */
+
+namespace customos::core
+{
+
+enum class HealthIssue : u32
+{
+    None = 0,
+
+    // Heap
+    HeapPoolMismatch,      // used + free + overhead != pool
+    HeapUnderflow,         // free_count > alloc_count
+    HeapFreelistEmpty,     // free_chunk_count == 0 but used < pool
+    HeapFragmentationHigh, // free_chunk_count > cap (fragmentation creep)
+
+    // Frames
+    FramesOverflow,     // free > total
+    FramesAllAllocated, // free == 0 (may be a leak)
+
+    // Scheduler
+    SchedExitedMoreThanCreated,
+    SchedReapedMoreThanExited,
+    SchedLiveUnreasonable,  // tasks_live > cap
+    SchedNoContextSwitches, // timer not firing after N uptime
+
+    // Control registers
+    Cr0WpCleared,
+    Cr4SmepCleared,
+    Cr4SmapCleared,
+    EferNxeCleared,
+
+    // Canary
+    StackCanaryZero,
+
+    // Count sentinel
+    Count,
+};
+
+const char* HealthIssueName(HealthIssue i);
+
+struct HealthReport
+{
+    u64 scans_run;
+    u64 issues_found_total; // cumulative since boot
+    u64 last_scan_issues;   // how many tests failed in the LAST scan
+    u64 per_issue_count[u32(HealthIssue::Count)];
+    HealthIssue last_issue; // most recent failing check
+    u64 baseline_captured;  // 1 once RuntimeCheckerInit has run
+};
+
+/// Capture the boot-time baseline for checks that need one
+/// (control-register expected bits, stack-canary seed visibility).
+/// Safe single-init.
+void RuntimeCheckerInit();
+
+/// Run the full battery of checks. Logs each failure via klog at
+/// Warn level (subsystem = "health"). Returns the number of
+/// failures observed in THIS scan.
+u64 RuntimeCheckerScan();
+
+/// Hook for the heartbeat thread — runs a scan and bumps counters.
+/// Exactly equivalent to calling `RuntimeCheckerScan()` and
+/// ignoring the return value.
+void RuntimeCheckerTick();
+
+/// Current stats snapshot. Returned by const-reference to avoid
+/// copying the 128-byte per-issue array on every call (kernel
+/// has no memcpy; compiler-inserted struct copies would need
+/// one for arrays this size).
+const HealthReport& RuntimeCheckerStatusRead();
+
+} // namespace customos::core

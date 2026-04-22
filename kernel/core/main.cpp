@@ -55,6 +55,7 @@
 #include "process.h"
 #include "random.h"
 #include "ring3_smoke.h"
+#include "runtime_checker.h"
 #include "../subsystems/linux/ring3_smoke.h"
 #include "../subsystems/linux/syscall.h"
 #include "shell.h"
@@ -284,6 +285,12 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // of them does, the fault will fire here at boot rather than
     // corrupt code silently later.
     ProtectKernelImage();
+
+    // Capture control-register + EFER baseline AFTER paging has
+    // flipped every security bit we enforce. The runtime checker
+    // uses these baselines to detect silent bit-clears at any
+    // later scan.
+    customos::core::RuntimeCheckerInit();
 
     SerialWrite("[boot] Bringing up framebuffer (if present).\n");
     customos::drivers::video::FramebufferInit(multiboot_info);

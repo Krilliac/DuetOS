@@ -39,6 +39,7 @@
 #include "random.h"
 #include "reboot.h"
 #include "ring3_smoke.h"
+#include "runtime_checker.h"
 
 namespace customos::core
 {
@@ -294,6 +295,8 @@ void CmdHelp()
     ConsoleWriteln("  NIC          LIST NICS + MAC + LINK");
     ConsoleWriteln("  ARP          ARP CACHE + STATS");
     ConsoleWriteln("  IPV4         IPV4 RX COUNTERS");
+    ConsoleWriteln("  HEALTH       RUN RUNTIME INVARIANT SCAN (HEAP/FRAMES/SCHED/CRX)");
+    ConsoleWriteln("  UUID [N]     GENERATE N V4 UUIDS FROM THE ENTROPY POOL");
     ConsoleWriteln("");
     ConsoleWriteln("RUNTIME CONTROL:");
     ConsoleWriteln("  LOGLEVEL [L] GET / SET KLOG THRESHOLD (D/I/W/E)");
@@ -1242,7 +1245,7 @@ static const char* const kCommandSet[] = {
     "metrics", "trace",   "read",     "guard",    "top",      "fatcat",    "fatls",      "fatwrite", "fatappend",
     "fatnew",  "fatrm",   "fattrunc", "fatmkdir", "fatrmdir", "linuxexec", "translate",  "smbios",   "power",
     "battery", "thermal", "temp",     "gpu",      "lsgpu",    "nic",       "lsnic",      "ip",       "arp",
-    "ipv4",    "uuid",    "uuidgen",
+    "ipv4",    "uuid",    "uuidgen",  "health",   "checkup",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -2269,6 +2272,43 @@ void CmdArp()
     ConsoleWrite("ARP REJECTS:    ");
     WriteU64Dec(s.rx_rejects);
     ConsoleWriteChar('\n');
+}
+
+void CmdHealth(u32 argc, char** argv)
+{
+    // Run a fresh scan (so the report reflects the current
+    // moment, not the last heartbeat), then print the full
+    // report: each issue kind with its cumulative count plus
+    // this-scan and total-since-boot summaries.
+    const u64 this_scan = customos::core::RuntimeCheckerScan();
+    const auto& h = customos::core::RuntimeCheckerStatusRead();
+    (void)argc;
+    (void)argv;
+    ConsoleWrite("SCANS RUN:        ");
+    WriteU64Dec(h.scans_run);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("THIS SCAN:        ");
+    WriteU64Dec(this_scan);
+    ConsoleWriteln(this_scan == 0 ? " issues (CLEAN)" : " issues");
+    ConsoleWrite("TOTAL ISSUES:     ");
+    WriteU64Dec(h.issues_found_total);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("BASELINE CAPTURED:");
+    ConsoleWriteln(h.baseline_captured ? " YES" : " NO");
+    if (h.issues_found_total > 0)
+    {
+        ConsoleWriteln("PER-ISSUE BREAKDOWN:");
+        for (u32 i = 1; i < u32(customos::core::HealthIssue::Count); ++i)
+        {
+            const u64 c = h.per_issue_count[i];
+            if (c == 0)
+                continue;
+            ConsoleWrite("  ");
+            WriteU64Dec(c);
+            ConsoleWrite(" x ");
+            ConsoleWriteln(customos::core::HealthIssueName(customos::core::HealthIssue(i)));
+        }
+    }
 }
 
 void CmdIpv4()
@@ -5793,6 +5833,11 @@ void Dispatch(char* line)
     if (StrEq(cmd, "ipv4"))
     {
         CmdIpv4();
+        return;
+    }
+    if (StrEq(cmd, "health") || StrEq(cmd, "checkup"))
+    {
+        CmdHealth(argc, argv);
         return;
     }
     if (StrEq(cmd, "uuid") || StrEq(cmd, "uuidgen"))
