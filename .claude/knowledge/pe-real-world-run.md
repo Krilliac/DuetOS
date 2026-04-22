@@ -185,6 +185,57 @@ Minimal change today because the CRT only needs argv[0] to be
 non-NULL + NUL-terminated; its contents matter only to code
 that inspects argv[0] directly (rare).
 
+## Slice 26 — data-import catch-all
+
+After argc/argv landed, winkill ran past the CRT and reached
+winkill's own `main()`. argc=1 → main takes the "no args"
+branch which calls `std::cout << "usage...\n"`. Pre-slice-26,
+`std::cout`'s IAT slot held the miss-logger's VA — reading
+`[cout_iat]` produced the miss-logger's opcode bytes
+(`0xfc48634824048b48`), which the CRT used as a vtable
+pointer, producing a non-canonical #PF at cr2 = that bytes
+value. Diagnosable only with a hex-to-asm rosetta sheet.
+
+This slice adds:
+
+1. **Data-import detection heuristic** in `subsystems/win32/stubs.h`:
+   `IsLikelyDataImport(name)` returns true iff the name looks
+   like MSVC's global-data mangling (`?name@scope@@3<type>...`).
+   Walks to the first `@@` and checks the following byte for
+   `'3'` (the storage-class letter for static-member/global).
+   Functions use different class letters (`Q`, `A`, `B`, …), so
+   they stay routed to the function miss-logger.
+
+2. **`Win32StubsLookupDataCatchAll`** — returns
+   `kProcEnvVa + kProcEnvDataMissOff = 0x65000800`. Dereferenced
+   as a pointer, reads 0 (the proc-env page's tail is left zero
+   by `Win32ProcEnvPopulate`). `[rax+offset]` then faults at
+   `cr2 = offset` — a textbook null-pointer deref.
+
+3. **PE loader routing** — `ResolveImports` picks
+   `Win32StubsLookupDataCatchAll` vs `Win32StubsLookupCatchAll`
+   based on the heuristic. Data imports do NOT stage an IAT-slot
+   mapping in the miss-logger table (they're never called, so
+   the translation table would be dead entries). Log line
+   reflects the flavour: `unknown import -> data-miss zero pad`
+   vs `unknown import -> catch-all NO-OP`.
+
+Observed on winkill post-slice:
+
+```
+[pe-resolve] unknown import -> data-miss zero pad   fn="?cout@std@@3V..."
+[task-kill] ring-3 task took #PF Page fault — terminating
+  pid  : 0x18
+  rip  : 0x14000142c                  ; same rip as before
+  cr2  : 0x0000000000000004          ; was 0xfc48634824048b4c
+```
+
+Same instruction as the wall; infinitely cleaner fault
+signature. Eleven other `?` symbols (widen, sputn, _Osfx, put,
+setstate, flush, and four ostream::operator<< variants) stayed
+on the function catch-all because their MSVC mangling begins
+with `Q` (method) after `@@`, not `3`.
+
 ## Next walls (in execution order)
 
 The current winkill fault is inside the CRT at `rip=0x14000400b`:

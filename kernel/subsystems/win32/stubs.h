@@ -60,6 +60,30 @@ inline constexpr u64 kProcEnvArgvArrayOff = 0x20;
 inline constexpr u64 kProcEnvStringOff = 0x40;
 inline constexpr u64 kProcEnvStringBudget = 256;
 
+/*
+ * Data-import catch-all landing pad.
+ *
+ * PE imports come in two flavours:
+ *   - function imports — the IAT slot's value is a function VA
+ *     the caller indirects through (`call [IAT+offset]`).
+ *   - data imports (e.g. `?cout@std@@3V...` — std::cout) — the
+ *     IAT slot's value is a pointer to a global object the
+ *     caller dereferences as data (`mov rax, [IAT+offset]; mov
+ *     rbx, [rax]; ...`).
+ *
+ * Prior to this landing pad, unresolved imports of either flavour
+ * landed on the miss-logger stub in the R-X stubs page. Data-flavour
+ * dereferences then read the miss-logger's opcode bytes as a
+ * pointer, yielding something like `0xfc48634824048b4c`, and faulted
+ * non-canonically a level or two down.
+ *
+ * With the landing pad, unresolved DATA imports get the VA of a
+ * zero-filled region inside the proc-env page. `mov rax, [data_iat]`
+ * now reads 0, and the subsequent `[rax+offset]` faults cleanly at
+ * `cr2 = offset` — diagnosable at a glance.
+ */
+inline constexpr u64 kProcEnvDataMissOff = 0x800;
+
 /// Populate a freshly-zeroed proc-env page. `proc_env_page` is
 /// the kernel-visible direct-map pointer to the 4 KiB frame that
 /// will be mapped at `kProcEnvVa`. `program_name` is copied into
@@ -94,17 +118,33 @@ bool Win32StubsLookup(const char* dll, const char* func, u64* out_va);
 /// same `out_va` is populated as the 3-arg form.
 bool Win32StubsLookupKind(const char* dll, const char* func, u64* out_va, bool* out_is_noop);
 
-/// Catch-all stub for any import the table doesn't know. Points at
-/// the shared "xor eax,eax; ret" thunk, so:
-///   - called as a function: returns 0 (the standard Win32 "failed
-///     but no-op") and the callsite either tolerates it or faults
-///     visibly further down;
-///   - dereferenced as a data import: reads the stub bytes (the
-///     page is mapped R-X, so no #PF), which is garbage but makes
-///     the ensuing misuse loud rather than a silent loader reject.
-/// Used by the PE loader when `Win32StubsLookupKind` misses, so a
-/// real-world PE never fails to load purely because an obscure
-/// import isn't yet implemented.
+/// Catch-all stub for any FUNCTION import the table doesn't know.
+/// Points at the shared miss-logger thunk, so called-as-a-function
+/// it returns 0 after emitting a `[win32-miss]` log line. Used for
+/// imports whose names look like functions (no heuristic match for
+/// the data pattern — see `IsLikelyDataImport`).
 bool Win32StubsLookupCatchAll(u64* out_va);
+
+/// Catch-all landing pad for any DATA import the table doesn't
+/// know. Returns the VA inside the proc-env page at
+/// `kProcEnvVa + kProcEnvDataMissOff`. Dereferencing the resulting
+/// IAT slot reads 0 (clean null), so the next-level `[ptr+offset]`
+/// faults at a diagnosable cr2 rather than reading the miss-logger
+/// opcode bytes as a pointer.
+///
+/// Used by the PE loader for imports whose mangled names match the
+/// MSVC global-data pattern (`?...@@3...`). Distinct from
+/// `Win32StubsLookupCatchAll` so function imports still log through
+/// the miss-logger and data imports don't.
+bool Win32StubsLookupDataCatchAll(u64* out_va);
+
+/// Heuristic: does the mangled import name look like a DATA import
+/// rather than a function import? Used by the PE loader to pick
+/// between the two catch-all helpers when an import name isn't in
+/// the stub table. True for names matching MSVC's global-variable
+/// mangling (`?name@...@@3<type>...`). False for everything else,
+/// including plain C names and MSVC function mangling
+/// (`?func@...@@QEAA...`).
+bool IsLikelyDataImport(const char* func);
 
 } // namespace customos::win32

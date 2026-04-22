@@ -1246,6 +1246,46 @@ bool Win32StubsLookupCatchAll(u64* out_va)
     return true;
 }
 
+bool Win32StubsLookupDataCatchAll(u64* out_va)
+{
+    if (out_va == nullptr)
+        return false;
+    // Point at a fixed offset inside the proc-env page, guaranteed
+    // to be zero-filled (Win32ProcEnvPopulate touches only
+    // 0x00..0x140). `mov rax, [data_iat]` then reads 0 instead of
+    // the miss-logger's opcode bytes.
+    *out_va = kProcEnvVa + kProcEnvDataMissOff;
+    return true;
+}
+
+bool IsLikelyDataImport(const char* func)
+{
+    if (func == nullptr || func[0] != '?')
+        return false;
+    // MSVC mangling for a static/global data symbol is
+    //   ?<name>@[<scope>@...]@@3<type-spec>[<type-modifiers>]
+    // The `3` after `@@` is the storage-class letter for
+    // "static data / global". Functions use storage classes
+    // like Q (public non-static), A/B (access), or encode the
+    // calling convention after `@@` — none of those is `3`.
+    //
+    // Walk to the first `@@` (end of qualified name) and inspect
+    // the byte that follows. Cap the scan at a defensive 256
+    // chars so a malformed name can't run off the end.
+    for (u64 i = 1; i < 256; ++i)
+    {
+        const char c0 = func[i];
+        if (c0 == '\0')
+            return false;
+        if (c0 != '@')
+            continue;
+        if (func[i + 1] != '@')
+            continue;
+        return func[i + 2] == '3';
+    }
+    return false;
+}
+
 bool Win32StubsLookupKind(const char* dll, const char* func, u64* out_va, bool* out_is_noop)
 {
     if (dll == nullptr || func == nullptr || out_va == nullptr)

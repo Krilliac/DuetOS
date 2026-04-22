@@ -711,21 +711,18 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, customos::
             bool is_noop_stub = false;
             if (!win32::Win32StubsLookupKind(dll_name, fn_name, &stub_va, &is_noop_stub))
             {
-                // Unresolved import — the PE calls (or imports as
-                // data) a symbol not in the stub table. Historically
-                // this was a hard load failure; to let real-world
-                // PEs like windows-kill.exe actually run far enough
-                // to exercise what IS stubbed, we fall back to the
-                // shared "return 0" stub and flag it prominently.
-                // Two consequences if the binary really uses it:
-                //   - Called as a function -> returns 0, call site
-                //     either tolerates it or crashes visibly.
-                //   - Dereferenced as a data global -> reads the
-                //     3-byte "xor eax,eax; ret" opcode (the page is
-                //     present R-X), which is garbage but not a #PF.
-                // Either outcome is louder than "loader silently
-                // refuses the entire image."
-                if (!win32::Win32StubsLookupCatchAll(&stub_va))
+                // Unresolved import. Two flavours land here:
+                //   - Functions -> miss-logger thunk (R-X). Called,
+                //     logs a `[win32-miss]` line + returns 0.
+                //   - Data (e.g. `?cout@std@@3V...`) -> data-miss
+                //     landing pad in the proc-env page (RW, zeros).
+                //     Dereferenced as a pointer, reads 0 cleanly.
+                // Picking the right bucket is a name-mangling
+                // heuristic (`?...@@3...` == MSVC global data).
+                const bool is_data = win32::IsLikelyDataImport(fn_name);
+                const bool ok =
+                    is_data ? win32::Win32StubsLookupDataCatchAll(&stub_va) : win32::Win32StubsLookupCatchAll(&stub_va);
+                if (!ok)
                 {
                     core::LogWithString(core::LogLevel::Error, "pe-resolve", "UNRESOLVED import (no catch-all)", "fn",
                                         fn_name);
@@ -733,15 +730,19 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, customos::
                     return false;
                 }
                 is_noop_stub = true;
-                core::LogWithString(core::LogLevel::Warn, "pe-resolve", "unknown import -> catch-all NO-OP", "fn",
-                                    fn_name);
+                const char* msg =
+                    is_data ? "unknown import -> data-miss zero pad" : "unknown import -> catch-all NO-OP";
+                core::LogWithString(core::LogLevel::Warn, "pe-resolve", msg, "fn", fn_name);
                 core::LogWithString(core::LogLevel::Warn, "pe-resolve", "  from", "dll", dll_name);
-                // Stage (slot_va, name) so the miss-logger syscall
-                // can translate a runtime call back to the function
-                // name. Slot VA computed a few lines below; do it
-                // now into a local so the record lines up.
-                const u64 iat_slot_va_for_miss = h.image_base + u64(first_thunk) + u64(fn_idx) * 8;
-                StagedMissAppend(iat_slot_va_for_miss, fn_name);
+                // Only FUNCTION catch-alls need an IAT-slot-name
+                // mapping in the miss-logger table — data imports
+                // aren't called, just dereferenced, and will never
+                // hit SYS_WIN32_MISS_LOG.
+                if (!is_data)
+                {
+                    const u64 iat_slot_va_for_miss = h.image_base + u64(first_thunk) + u64(fn_idx) * 8;
+                    StagedMissAppend(iat_slot_va_for_miss, fn_name);
+                }
             }
 
             // Patch the IAT slot. Slot VA = image_base +
