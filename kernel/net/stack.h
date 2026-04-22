@@ -151,4 +151,60 @@ void NetStackInit();
 /// interfaces (loopback, tun/tap) come online.
 u64 InterfaceCount();
 
+// -------------------------------------------------------------------
+// ARP cache — skeleton API.
+//
+// A full implementation maps IPv4 addresses to Ethernet MAC
+// addresses via ARP request/reply exchange. Today the state machine
+// is absent; we expose the cache surface so that a future L3 slice
+// can plumb lookups and, when a cache miss happens, punt to the L2
+// driver's transmit path (not yet wired either).
+//
+// Design constraints:
+//   - Fixed-capacity cache (no per-entry heap alloc in v0).
+//   - Entries carry an expiry tick — defaults to 60 seconds, refreshed
+//     on any ARP reply that matches.
+//   - Lookups are O(N) linear scan over the small cap. When we need
+//     more entries we'll swap in an open-addressing hash.
+// -------------------------------------------------------------------
+
+inline constexpr u64 kArpCacheCap = 32;
+inline constexpr u64 kArpEntryTtlTicks = 60ULL * 100; // 60 s at 100 Hz
+
+struct ArpEntry
+{
+    Ipv4Address ip;
+    MacAddress mac;
+    u64 expiry_ticks; // 0 = slot free
+    u32 iface_index;  // L2 interface the entry belongs to
+};
+
+/// Look up an ARP entry by IPv4 address on the given interface.
+/// Returns nullptr on miss or expired. On hit, returns a pointer
+/// into the cache (valid until the next mutating call).
+const ArpEntry* ArpLookup(u32 iface_index, Ipv4Address ip);
+
+/// Insert / refresh an ARP entry. Overwrites the matching slot if
+/// present; otherwise evicts the oldest entry on the same iface.
+void ArpInsert(u32 iface_index, Ipv4Address ip, MacAddress mac);
+
+/// Process an incoming ARP packet (Ethernet + ARP payload, 42
+/// bytes minimum). Skeleton: parses the header and, on a valid
+/// IPv4-over-Ethernet reply, inserts into the cache. Returns
+/// true if the cache was touched. The L2 RX path from the NIC
+/// driver will call this once a driver actually hands us packets.
+bool ArpHandleIncoming(u32 iface_index, const void* frame, u64 len);
+
+/// Snapshot counters — boot-log + shell reporting.
+struct ArpStats
+{
+    u64 lookups_hit;
+    u64 lookups_miss;
+    u64 inserts;
+    u64 evictions;
+    u64 rx_packets;
+    u64 rx_rejects;
+};
+ArpStats ArpStatsRead();
+
 } // namespace customos::net
