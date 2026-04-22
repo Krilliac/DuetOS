@@ -297,6 +297,11 @@ __declspec(dllimport) int __stdcall lstrlenA(LPCSTR lpString);
 __declspec(dllimport) int __stdcall lstrcmpA(LPCSTR lpString1, LPCSTR lpString2);
 __declspec(dllimport) LPSTR __stdcall lstrcpyA(LPSTR lpString1, LPCSTR lpString2);
 
+// Batch 32 — path-query stubs. v0 reports a fixed "X:\\" path.
+__declspec(dllimport) DWORD __stdcall GetModuleFileNameW(HMODULE hModule, LPWSTR lpFilename, DWORD nSize);
+__declspec(dllimport) DWORD __stdcall GetCurrentDirectoryW(DWORD nBufferLength, LPWSTR lpBuffer);
+__declspec(dllimport) BOOL __stdcall SetCurrentDirectoryW(LPCWSTR lpPathName);
+
 static const char kMsg[] = "[hello-winapi] printed via kernel32.WriteFile!\n";
 #define kMsgLen ((DWORD)(sizeof(kMsg) - 1))
 
@@ -1020,6 +1025,54 @@ void _start(void)
         WriteFile(out, b31_ok, sizeof(b31_ok) - 1, &b31w, 0);
     else
         WriteFile(out, b31_bad, sizeof(b31_bad) - 1, &b31w, 0);
+
+    // Batch 32 exercise — path-query stubs.
+    //
+    // Invariants checked:
+    //   * GetModuleFileNameW(NULL, buf, 16) returns 3 and writes
+    //     L"X:\\" (the v0 fixed path) followed by NUL.
+    //   * GetModuleFileNameW(NULL, buf, 0) returns 3 without
+    //     writing (nSize == 0 suppresses the copy).
+    //   * GetCurrentDirectoryW(16, buf) returns 3 and writes
+    //     L"X:\\" + NUL.
+    //   * GetCurrentDirectoryW(2, buf) returns 4 (required size
+    //     including NUL) without writing — "buffer too small"
+    //     path.
+    //   * SetCurrentDirectoryW(any) returns TRUE.
+    WCHAR b32_buf[16];
+    for (int i = 0; i < 16; ++i)
+        b32_buf[i] = (WCHAR)0xAAAA;
+    DWORD b32_mfn_ok = GetModuleFileNameW(0, b32_buf, 16);
+    BOOL b32_mfn_str = b32_buf[0] == 'X' && b32_buf[1] == ':' && b32_buf[2] == '\\' && b32_buf[3] == 0;
+
+    for (int i = 0; i < 16; ++i)
+        b32_buf[i] = (WCHAR)0xAAAA;
+    DWORD b32_mfn_nosize = GetModuleFileNameW(0, b32_buf, 0);
+    // With nSize = 0, buffer stays poison.
+    BOOL b32_mfn_unwritten = b32_buf[0] == (WCHAR)0xAAAA;
+
+    for (int i = 0; i < 16; ++i)
+        b32_buf[i] = (WCHAR)0xAAAA;
+    DWORD b32_cd_ok = GetCurrentDirectoryW(16, b32_buf);
+    BOOL b32_cd_str = b32_buf[0] == 'X' && b32_buf[1] == ':' && b32_buf[2] == '\\' && b32_buf[3] == 0;
+
+    for (int i = 0; i < 16; ++i)
+        b32_buf[i] = (WCHAR)0xAAAA;
+    DWORD b32_cd_small = GetCurrentDirectoryW(2, b32_buf); // too small
+    BOOL b32_cd_unwritten = b32_buf[0] == (WCHAR)0xAAAA;
+
+    static const WCHAR kSomePath[] = {'C', ':', '\\', 0};
+    BOOL b32_scd_ok = SetCurrentDirectoryW(kSomePath);
+
+    const char b32_ok[] = "[batch32] GetModuleFileNameW + CurrentDir OK\n";
+    const char b32_bad[] = "[batch32] path-query stubs FAILED invariants\n";
+    BOOL b32_pass = b32_mfn_ok == 3 && b32_mfn_str && b32_mfn_nosize == 3 && b32_mfn_unwritten && b32_cd_ok == 3 &&
+                    b32_cd_str && b32_cd_small == 4 && b32_cd_unwritten && b32_scd_ok != 0;
+    DWORD b32w = 0;
+    if (b32_pass)
+        WriteFile(out, b32_ok, sizeof(b32_ok) - 1, &b32w, 0);
+    else
+        WriteFile(out, b32_bad, sizeof(b32_bad) - 1, &b32w, 0);
 
     // Batch 3 round-trip: store a distinctive value via
     // SetLastError, read it back via GetLastError, exit with

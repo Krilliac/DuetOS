@@ -117,3 +117,7 @@ EXPORTS
     lstrlenA
     lstrcmpA
     lstrcpyA
+    ; Batch 32 — path-query stubs
+    GetModuleFileNameW
+    GetCurrentDirectoryW
+    SetCurrentDirectoryW

@@ -113,6 +113,8 @@ constexpr u32 kOffGetVersionExW = 0x518;      // batch 30 — 34 bytes
 constexpr u32 kOffLstrlenA = 0x53A;           // batch 31 — 14 bytes
 constexpr u32 kOffLstrcmpA = 0x548;           // batch 31 — 37 bytes
 constexpr u32 kOffLstrcpyA = 0x56D;           // batch 31 — 26 bytes
+constexpr u32 kOffGetModFileNameW = 0x587;    // batch 32 — 24 bytes
+constexpr u32 kOffGetCurrentDirW = 0x59F;     // batch 32 — 31 bytes
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -1487,10 +1489,51 @@ constexpr u8 kStubsBytes[] = {
     0xEB, 0xED,                   // 0x584 jmp .loop (-0x13)
     // .done:
     0xC3, // 0x586 ret
+
+    // === Batch 32: path-query stubs ============================
+    //
+    // All v0 paths report a single fixed "X:\" — the minimum
+    // legal Windows drive-qualified absolute path. Consumers
+    // that do literal path comparisons (DllMain "am I in
+    // System32?") see a non-NULL, well-formed path and don't
+    // crash; consumers that actually try to open the returned
+    // path get a normal not-found result from our VFS. Future
+    // slices can plumb the real PE path through when spawn
+    // actually knows it.
+    //
+    // Encoding: "X:\" is 3 wide chars + NUL = 8 bytes = 2 dwords:
+    //   dword 0 : 0x003A 0x0058 (': X' little-endian) = 0x003A0058
+    //   dword 1 : 0x0000 0x005C ('\0 \\' LE)          = 0x0000005C
+
+    // --- GetModuleFileNameW (offset 0x587, 24 bytes) ----------
+    // Win32: DWORD GetModuleFileNameW(HMODULE rcx, LPWSTR rdx, DWORD r8).
+    // Writes "X:\\\0" to rdx if r8 > 0, returns 3 (chars w/o NUL).
+    0x45, 0x85, 0xC0,                         // 0x587 test r8d, r8d
+    0x74, 0x0D,                               // 0x58A jz .skip (+0x0D) — past both mov-dword writes (6+7=13)
+    0xC7, 0x02, 0x58, 0x00, 0x3A, 0x00,       // 0x58C mov dword [rdx], 0x003A0058 (L'X:')
+    0xC7, 0x42, 0x04, 0x5C, 0x00, 0x00, 0x00, // 0x592 mov dword [rdx+4], 0x0000005C (L'\\\0')
+    // .skip:
+    0xB8, 0x03, 0x00, 0x00, 0x00, // 0x599 mov eax, 3
+    0xC3,                         // 0x59E ret
+
+    // --- GetCurrentDirectoryW (offset 0x59F, 31 bytes) --------
+    // Win32: DWORD GetCurrentDirectoryW(DWORD nBufferLength=rcx, LPWSTR lpBuffer=rdx).
+    // Returns 3 chars written (w/o NUL) if rcx >= 4; else returns
+    // 4 (required size INCLUDING NUL) without writing — standard
+    // Win32 convention for "buffer too small".
+    0x48, 0x83, 0xF9, 0x04,       // 0x59F cmp rcx, 4
+    0x73, 0x06,                   // 0x5A3 jae .copy (+6)
+    0xB8, 0x04, 0x00, 0x00, 0x00, // 0x5A5 mov eax, 4 (required incl. NUL)
+    0xC3,                         // 0x5AA ret
+    // .copy:
+    0xC7, 0x02, 0x58, 0x00, 0x3A, 0x00,       // 0x5AB mov dword [rdx], 0x003A0058
+    0xC7, 0x42, 0x04, 0x5C, 0x00, 0x00, 0x00, // 0x5B1 mov dword [rdx+4], 0x0000005C
+    0xB8, 0x03, 0x00, 0x00, 0x00,             // 0x5B8 mov eax, 3
+    0xC3,                                     // 0x5BD ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x587, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0x5BE, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -1751,6 +1794,18 @@ constexpr StubEntry kStubsTable[] = {
     {"kernel32.dll", "lstrlenA", kOffLstrlenA},
     {"kernel32.dll", "lstrcmpA", kOffLstrcmpA},
     {"kernel32.dll", "lstrcpyA", kOffLstrcpyA},
+
+    // Batch 32 — path-query stubs. All v0 paths report a single
+    // fixed "X:\\" — well-formed, absolute, drive-qualified —
+    // which is enough for literal path comparisons without
+    // crashing. Real spawn-path plumbing is a follow-up.
+    {"kernel32.dll", "GetModuleFileNameW", kOffGetModFileNameW},
+    {"kernel32.dll", "GetModuleFileNameA",
+     kOffGetModFileNameW}, // ASCII caller: single-byte chars happen to alias-ok for ASCII path
+    {"kernel32.dll", "GetCurrentDirectoryW", kOffGetCurrentDirW},
+    {"kernel32.dll", "GetCurrentDirectoryA", kOffGetCurrentDirW},
+    {"kernel32.dll", "SetCurrentDirectoryW", kOffReturnOne}, // pretend success
+    {"kernel32.dll", "SetCurrentDirectoryA", kOffReturnOne},
 
     // Batch 9 — Win32 process heap, backed by the per-process
     // 16-page region at 0x50000000 and SYS_HEAP_ALLOC /
