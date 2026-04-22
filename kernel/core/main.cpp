@@ -58,6 +58,7 @@
 #include "runtime_checker.h"
 #include "../subsystems/linux/ring3_smoke.h"
 #include "../subsystems/linux/syscall.h"
+#include "../subsystems/win32/stubs.h"
 #include "shell.h"
 #include "syscall.h"
 #include "../mm/kheap.h"
@@ -1639,6 +1640,14 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // of those structures. Earlier capture would flag every
     // subsequent IdtSetUserGate / TssSetRsp0 as "drift".
     customos::core::RuntimeCheckerInit();
+
+    // ntdll bedrock-coverage scoreboard. Cheap one-shot log line
+    // that records how many of the 292 universal NT calls
+    // (j00ru's table) we currently route to internal SYS_*. Lets
+    // the boot log act as a regression detector — if a future
+    // refactor breaks a SYS_* used in the mapping, the count
+    // drops and the change is visible.
+    customos::win32::Win32LogNtCoverage();
 
     customos::core::StartHeartbeatThread();
 

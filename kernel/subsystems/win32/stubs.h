@@ -150,4 +150,13 @@ bool Win32StubsLookupDataCatchAll(u64* out_va);
 /// (`?func@...@@QEAA...`).
 bool IsLikelyDataImport(const char* func);
 
+/// Emit a one-line "ntdll bedrock coverage: N/M (P%)" boot log
+/// using the auto-generated table in
+/// `subsystems/win32/nt_syscall_table_generated.h`. Lets the boot
+/// log tell us, at a glance, how much of the universal NT API
+/// surface CustomOS can route to internal SYS_* numbers — the
+/// scoreboard for any future ntdll shim. Called once from
+/// `kernel_main` after the Win32 stubs page is built.
+void Win32LogNtCoverage();
+
 } // namespace customos::win32
