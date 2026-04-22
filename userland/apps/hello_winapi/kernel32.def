@@ -106,3 +106,7 @@ EXPORTS
     VirtualAlloc
     VirtualFree
     VirtualProtect
+    ; Batch 29 — wide-string helpers
+    lstrlenW
+    lstrcmpW
+    lstrcpyW

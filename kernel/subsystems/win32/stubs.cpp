@@ -105,6 +105,9 @@ constexpr u32 kOffGetConsoleCP = 0x476;       // batch 27 — 6 bytes
 constexpr u32 kOffVirtualAlloc = 0x47C;       // batch 28 — 13 bytes
 constexpr u32 kOffVirtualFree = 0x489;        // batch 28 — 29 bytes
 constexpr u32 kOffVirtualProtect = 0x4A6;     // batch 28 — 18 bytes
+constexpr u32 kOffLstrlenW = 0x4B8;           // batch 29 — 15 bytes
+constexpr u32 kOffLstrcmpW = 0x4C7;           // batch 29 — 37 bytes
+constexpr u32 kOffLstrcpyW = 0x4EC;           // batch 29 — 27 bytes
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -1332,10 +1335,66 @@ constexpr u8 kStubsBytes[] = {
     // .skip:
     0xB8, 0x01, 0x00, 0x00, 0x00, // 0x4B2 mov eax, 1 (BOOL TRUE)
     0xC3,                         // 0x4B7 ret
+
+    // === Batch 29: wide-string helpers =========================
+
+    // --- lstrlenW (offset 0x4B8, 15 bytes) --------------------
+    // Win32: int lstrlenW(LPCWSTR rcx). Scans for a u16 zero and
+    // returns the wide-char count. No SEH, no CP check — just
+    // the classic strlen shape on 16-bit elements.
+    0x31, 0xC0, // 0x4B8 xor eax, eax
+    // .loop:
+    0x66, 0x83, 0x3C, 0x41, 0x00, // 0x4BA cmp word [rcx + rax*2], 0
+    0x74, 0x05,                   // 0x4BF je .done (+5)
+    0x48, 0xFF, 0xC0,             // 0x4C1 inc rax
+    0xEB, 0xF4,                   // 0x4C4 jmp .loop (-12)
+    // .done:
+    0xC3, // 0x4C6 ret
+
+    // --- lstrcmpW (offset 0x4C7, 37 bytes) --------------------
+    // Win32: int lstrcmpW(LPCWSTR rcx, LPCWSTR rdx).
+    // Returns 0 if equal, negative if s1 < s2, positive if s1 > s2.
+    // Pure compute — no locale folding (lstrcmpW is ordinal
+    // compare; lstrcmpiW would case-fold, which we don't stub).
+    0x31, 0xC0, // 0x4C7 xor eax, eax      ; i = 0
+    // .loop:
+    0x44, 0x0F, 0xB7, 0x04, 0x41, // 0x4C9 movzx r8d, word [rcx+rax*2]
+    0x44, 0x0F, 0xB7, 0x0C, 0x42, // 0x4CE movzx r9d, word [rdx+rax*2]
+    0x45, 0x39, 0xC8,             // 0x4D3 cmp r8d, r9d
+    0x75, 0x0D,                   // 0x4D6 jne .diff (+0x0D)
+    0x45, 0x85, 0xC0,             // 0x4D8 test r8d, r8d       ; both NUL?
+    0x74, 0x05,                   // 0x4DB je .equal (+5)
+    0x48, 0xFF, 0xC0,             // 0x4DD inc rax
+    0xEB, 0xE7,                   // 0x4E0 jmp .loop (-0x19)
+    // .equal:
+    0x31, 0xC0, // 0x4E2 xor eax, eax
+    0xC3,       // 0x4E4 ret
+    // .diff:
+    0x44, 0x89, 0xC0, // 0x4E5 mov eax, r8d     ; signed diff
+    0x44, 0x29, 0xC8, // 0x4E8 sub eax, r9d
+    0xC3,             // 0x4EB ret
+
+    // --- lstrcpyW (offset 0x4EC, 27 bytes) --------------------
+    // Win32: LPWSTR lstrcpyW(LPWSTR rcx, LPCWSTR rdx).
+    // Returns the destination pointer (rcx). Copies wide chars
+    // including the terminating NUL. Classic strcpy shape on
+    // 16-bit elements — no length check, caller's responsibility
+    // to size the destination.
+    0x48, 0x89, 0xC8, // 0x4EC mov rax, rcx    ; save dst for return
+    0x45, 0x31, 0xC0, // 0x4EF xor r8d, r8d    ; i = 0
+    // .loop:
+    0x46, 0x0F, 0xB7, 0x0C, 0x42, // 0x4F2 movzx r9d, word [rdx+r8*2]
+    0x66, 0x46, 0x89, 0x0C, 0x41, // 0x4F7 mov word [rcx+r8*2], r9w
+    0x45, 0x85, 0xC9,             // 0x4FC test r9d, r9d   ; copied NUL?
+    0x74, 0x05,                   // 0x4FF je .done (+5)
+    0x49, 0xFF, 0xC0,             // 0x501 inc r8
+    0xEB, 0xEC,                   // 0x504 jmp .loop (-0x14)
+    // .done:
+    0xC3, // 0x506 ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x4B8, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0x507, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -1569,6 +1628,16 @@ constexpr StubEntry kStubsTable[] = {
     {"kernel32.dll", "VirtualProtectEx", kOffVirtualProtect},
     {"kernel32.dll", "VirtualQuery", kOffReturnZero}, // v0 query returns 0 = failed
     {"kernel32.dll", "VirtualQueryEx", kOffReturnZero},
+
+    // Batch 29 — wide-string helpers. Pure-compute primitives
+    // heavily used by multilingual PEs and MSVC CRT. lstrcmpW
+    // is ordinal compare (no locale fold — lstrcmpiW would
+    // case-fold, not stubbed). lstrlen has a hard cap of
+    // effectively "until NUL" — a wild unterminated string
+    // scans forever, matching the documented Win32 behaviour.
+    {"kernel32.dll", "lstrlenW", kOffLstrlenW},
+    {"kernel32.dll", "lstrcmpW", kOffLstrcmpW},
+    {"kernel32.dll", "lstrcpyW", kOffLstrcpyW},
 
     // Batch 9 — Win32 process heap, backed by the per-process
     // 16-page region at 0x50000000 and SYS_HEAP_ALLOC /

@@ -269,6 +269,13 @@ __declspec(dllimport) BOOL __stdcall VirtualFree(void* lpAddress, size_t dwSize,
 __declspec(dllimport) BOOL __stdcall VirtualProtect(void* lpAddress, size_t dwSize, DWORD flNewProtect,
                                                     DWORD* lpflOldProtect);
 
+// Batch 29 — wide-string helpers. lstrlenW counts wide chars
+// until NUL. lstrcmpW is an ordinal compare (no locale fold).
+// lstrcpyW copies until NUL and returns dst.
+__declspec(dllimport) int __stdcall lstrlenW(LPCWSTR lpString);
+__declspec(dllimport) int __stdcall lstrcmpW(LPCWSTR lpString1, LPCWSTR lpString2);
+__declspec(dllimport) LPWSTR __stdcall lstrcpyW(LPWSTR lpString1, LPCWSTR lpString2);
+
 static const char kMsg[] = "[hello-winapi] printed via kernel32.WriteFile!\n";
 #define kMsgLen ((DWORD)(sizeof(kMsg) - 1))
 
@@ -887,6 +894,44 @@ void _start(void)
         WriteFile(out, b28_ok, sizeof(b28_ok) - 1, &b28w, 0);
     else
         WriteFile(out, b28_bad, sizeof(b28_bad) - 1, &b28w, 0);
+
+    // Batch 29 exercise — wide-string helpers.
+    //
+    // Invariants checked:
+    //   * lstrlenW(L"hello") == 5 (stops at NUL, not buffer len).
+    //   * lstrlenW(L"") == 0.
+    //   * lstrcmpW(L"abc", L"abc") == 0.
+    //   * lstrcmpW(L"abc", L"abd") < 0 ('c' < 'd').
+    //   * lstrcmpW(L"abd", L"abc") > 0.
+    //   * lstrcmpW(L"abc", L"abcd") < 0 (s1 shorter).
+    //   * lstrcpyW(dst, L"hello") writes 6 wide chars including
+    //     NUL and returns dst; round-trip lstrlenW(dst) == 5.
+    static const WCHAR kStrHello[6] = {'h', 'e', 'l', 'l', 'o', 0};
+    static const WCHAR kStrEmpty[1] = {0};
+    static const WCHAR kStrAbc[4] = {'a', 'b', 'c', 0};
+    static const WCHAR kStrAbd[4] = {'a', 'b', 'd', 0};
+    static const WCHAR kStrAbcd[5] = {'a', 'b', 'c', 'd', 0};
+    WCHAR b29_cpy[16];
+    for (int i = 0; i < 16; ++i)
+        b29_cpy[i] = 0xAAAA; // poison to prove the NUL was copied
+    int b29_len_hello = lstrlenW(kStrHello);
+    int b29_len_empty = lstrlenW(kStrEmpty);
+    int b29_cmp_eq = lstrcmpW(kStrAbc, kStrAbc);
+    int b29_cmp_lt = lstrcmpW(kStrAbc, kStrAbd);
+    int b29_cmp_gt = lstrcmpW(kStrAbd, kStrAbc);
+    int b29_cmp_pfx = lstrcmpW(kStrAbc, kStrAbcd);
+    LPWSTR b29_ret = lstrcpyW(b29_cpy, kStrHello);
+    int b29_cpy_len = lstrlenW(b29_cpy);
+
+    const char b29_ok[] = "[batch29] lstrlenW + lstrcmpW + lstrcpyW OK\n";
+    const char b29_bad[] = "[batch29] wide-string helpers FAILED invariants\n";
+    BOOL b29_pass = b29_len_hello == 5 && b29_len_empty == 0 && b29_cmp_eq == 0 && b29_cmp_lt < 0 && b29_cmp_gt > 0 &&
+                    b29_cmp_pfx < 0 && b29_ret == b29_cpy && b29_cpy_len == 5 && b29_cpy[5] == 0;
+    DWORD b29w = 0;
+    if (b29_pass)
+        WriteFile(out, b29_ok, sizeof(b29_ok) - 1, &b29w, 0);
+    else
+        WriteFile(out, b29_bad, sizeof(b29_bad) - 1, &b29w, 0);
 
     // Batch 3 round-trip: store a distinctive value via
     // SetLastError, read it back via GetLastError, exit with
