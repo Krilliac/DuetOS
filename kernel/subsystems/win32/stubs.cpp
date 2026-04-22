@@ -136,6 +136,10 @@ constexpr u32 kOffInterlockedCmpXchg64 = 0x711;  // batch 41 —  9 bytes
 constexpr u32 kOffInterlockedExchg64 = 0x71A;    // batch 41 —  7 bytes
 constexpr u32 kOffInterlockedExchgAdd64 = 0x721; // batch 41 —  9 bytes
 constexpr u32 kOffReturnStatusNotImpl = 0x72A;   // batch 42 —  6 bytes (STATUS_NOT_IMPLEMENTED)
+constexpr u32 kOffCreateEventReal = 0x730;       // batch 45 — 18 bytes (real event-backed)
+constexpr u32 kOffSetEventReal = 0x742;          // batch 45 — 15 bytes
+constexpr u32 kOffResetEventReal = 0x751;        // batch 45 — 15 bytes
+constexpr u32 kOffWaitForObj2 = 0x760;           // batch 45 — 66 bytes (mutex+event-aware)
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -1862,10 +1866,98 @@ constexpr u8 kStubsBytes[] = {
     // where v0 has no real impl.
     0xB8, 0xBB, 0x00, 0x00, 0xC0, // 0x72A mov eax, 0xC00000BB
     0xC3,                         // 0x72F ret
+
+    // === Batch 45: real event handles ==========================
+    //
+    // Replaces the slice-10 kOffReturnOne CreateEventW no-op
+    // with genuine per-process event state. Infrastructure
+    // parallels batch 26's mutex layer. Events have no owner,
+    // no recursion — just a signaled flag + waitqueue. Manual-
+    // vs. auto-reset differ only in whether SetEvent wakes all
+    // or one, and whether a successful wait clears the signal.
+
+    // --- CreateEventW (offset 0x730, 18 bytes) ----------------
+    // Win32: HANDLE CreateEventW(LPSECURITY_ATTRIBUTES rcx,
+    //          BOOL bManualReset=rdx, BOOL bInitialState=r8,
+    //          LPCWSTR lpName=r9).
+    // Attrs + name ignored in v0. Forwards bManualReset/
+    // bInitialState to SYS_EVENT_CREATE.
+    0x57,                         // 0x730 push rdi
+    0x56,                         // 0x731 push rsi
+    0x48, 0x89, 0xD7,             // 0x732 mov rdi, rdx       ; bManualReset
+    0x4C, 0x89, 0xC6,             // 0x735 mov rsi, r8        ; bInitialState
+    0xB8, 0x1E, 0x00, 0x00, 0x00, // 0x738 mov eax, 30        ; SYS_EVENT_CREATE
+    0xCD, 0x80,                   // 0x73D int 0x80
+    0x5E,                         // 0x73F pop rsi
+    0x5F,                         // 0x740 pop rdi
+    0xC3,                         // 0x741 ret
+
+    // --- SetEvent (offset 0x742, 15 bytes) --------------------
+    // Win32: BOOL SetEvent(HANDLE rcx). Routes to SYS_EVENT_SET.
+    // Returns TRUE (SYS_EVENT_SET succeeds for any valid handle).
+    0x57,                         // 0x742 push rdi
+    0x48, 0x89, 0xCF,             // 0x743 mov rdi, rcx
+    0xB8, 0x1F, 0x00, 0x00, 0x00, // 0x746 mov eax, 31        ; SYS_EVENT_SET
+    0xCD, 0x80,                   // 0x74B int 0x80
+    0xB0, 0x01,                   // 0x74D mov al, 1          ; BOOL TRUE
+    0x5F,                         // 0x74F pop rdi
+    0xC3,                         // 0x750 ret
+
+    // --- ResetEvent (offset 0x751, 15 bytes) ------------------
+    // Win32: BOOL ResetEvent(HANDLE rcx).
+    0x57,                         // 0x751 push rdi
+    0x48, 0x89, 0xCF,             // 0x752 mov rdi, rcx
+    0xB8, 0x20, 0x00, 0x00, 0x00, // 0x755 mov eax, 32        ; SYS_EVENT_RESET
+    0xCD, 0x80,                   // 0x75A int 0x80
+    0xB0, 0x01,                   // 0x75C mov al, 1
+    0x5F,                         // 0x75E pop rdi
+    0xC3,                         // 0x75F ret
+
+    // --- WaitForSingleObject v2 (offset 0x760, 66 bytes) ------
+    // Upgraded version of batch 26's WaitForSingleObject that
+    // dispatches THREE ranges:
+    //   * Mutex range (0x200..0x207): SYS_MUTEX_WAIT.
+    //   * Event range (0x300..0x307): SYS_EVENT_WAIT.
+    //   * Anything else: pseudo-signal (return WAIT_OBJECT_0),
+    //     preserving slice-10's "unknown handle is already
+    //     signaled" contract for batch 10's CreateEventW no-op
+    //     return value (= 1, outside both ranges).
+    //
+    // RDI / RSI saved + restored — Win32 ABI callee-saved.
+    0x57,                               // 0x760 push rdi
+    0x56,                               // 0x761 push rsi
+    0x48, 0x89, 0xC8,                   // 0x762 mov rax, rcx
+    0x48, 0x2D, 0x00, 0x02, 0x00, 0x00, // 0x765 sub rax, 0x200
+    0x48, 0x83, 0xF8, 0x08,             // 0x76B cmp rax, 8
+    0x72, 0x11,                         // 0x76F jb .mutex (+0x11 = 17)
+    0x48, 0x2D, 0x00, 0x01, 0x00, 0x00, // 0x771 sub rax, 0x100 (now 0x300..0x307 -> 0..7)
+    0x48, 0x83, 0xF8, 0x08,             // 0x777 cmp rax, 8
+    0x72, 0x15,                         // 0x77B jb .event (+0x15 = 21)
+    // .pseudo:
+    0x31, 0xC0, // 0x77D xor eax, eax (WAIT_OBJECT_0)
+    0x5E,       // 0x77F pop rsi
+    0x5F,       // 0x780 pop rdi
+    0xC3,       // 0x781 ret
+    // .mutex:
+    0x48, 0x89, 0xCF,             // 0x782 mov rdi, rcx
+    0x48, 0x89, 0xD6,             // 0x785 mov rsi, rdx
+    0xB8, 0x1A, 0x00, 0x00, 0x00, // 0x788 mov eax, 26 (SYS_MUTEX_WAIT)
+    0xCD, 0x80,                   // 0x78D int 0x80
+    0x5E,                         // 0x78F pop rsi
+    0x5F,                         // 0x790 pop rdi
+    0xC3,                         // 0x791 ret
+    // .event:
+    0x48, 0x89, 0xCF,             // 0x792 mov rdi, rcx
+    0x48, 0x89, 0xD6,             // 0x795 mov rsi, rdx
+    0xB8, 0x21, 0x00, 0x00, 0x00, // 0x798 mov eax, 33 (SYS_EVENT_WAIT)
+    0xCD, 0x80,                   // 0x79D int 0x80
+    0x5E,                         // 0x79F pop rsi
+    0x5F,                         // 0x7A0 pop rdi
+    0xC3,                         // 0x7A1 ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x730, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0x7A2, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -2057,9 +2149,19 @@ constexpr StubEntry kStubsTable[] = {
     {"kernel32.dll", "CreateMutexW", kOffCreateMutexW},
     {"kernel32.dll", "CreateMutexA", kOffCreateMutexW},
     {"kernel32.dll", "CreateMutexExW", kOffCreateMutexW}, // ignores extra Ex args
-    {"kernel32.dll", "WaitForSingleObject", kOffWaitForObj},
-    {"kernel32.dll", "WaitForSingleObjectEx", kOffWaitForObj},
+    {"kernel32.dll", "WaitForSingleObject", kOffWaitForObj2},
+    {"kernel32.dll", "WaitForSingleObjectEx", kOffWaitForObj2},
     {"kernel32.dll", "ReleaseMutex", kOffReleaseMutex},
+
+    // Batch 45 — real event handles. Replaces the kOffReturnOne
+    // no-op CreateEventW / SetEvent / ResetEvent from slice 10.
+    // Per-process event table at 0x300..0x307.
+    {"kernel32.dll", "CreateEventW", kOffCreateEventReal},
+    {"kernel32.dll", "CreateEventA", kOffCreateEventReal},
+    {"kernel32.dll", "CreateEventExW", kOffCreateEventReal}, // ignores extra Ex args
+    {"kernel32.dll", "CreateEventExA", kOffCreateEventReal},
+    {"kernel32.dll", "SetEvent", kOffSetEventReal},
+    {"kernel32.dll", "ResetEvent", kOffResetEventReal},
 
     // Batch 27 — console APIs. WriteConsoleW is the major
     // Unicode-output entry point; the stub UTF-16-strips to
@@ -2622,10 +2724,8 @@ constexpr StubEntry kStubsTable[] = {
     // kernel32 — event objects (v0: no real signalling, every
     // event is "always signaled"; CreateEventW returns a fake
     // non-null handle; SetEvent/ResetEvent return TRUE).
-    {"kernel32.dll", "CreateEventW", kOffReturnOne},
-    {"kernel32.dll", "CreateEventA", kOffReturnOne},
-    {"kernel32.dll", "SetEvent", kOffReturnOne},
-    {"kernel32.dll", "ResetEvent", kOffReturnOne},
+    // CreateEventW / SetEvent / ResetEvent now route to real
+    // event infrastructure — moved to batch 45 below.
 
     // kernel32 — wait (v0: immediate return with
     // WaitForSingleObject moved to batch 26 below — now mutex-aware.

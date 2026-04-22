@@ -51,6 +51,9 @@ KNOWN_MAPPINGS = {
     "NtCreateMutant":              "SYS_MUTEX_CREATE",     # batch 26
     "NtReleaseMutant":             "SYS_MUTEX_RELEASE",    # batch 26
     "NtWaitForSingleObject":       "SYS_MUTEX_WAIT",       # batch 26 (mutex handles)
+    "NtCreateEvent":               "SYS_EVENT_CREATE",     # batch 45
+    "NtSetEvent":                  "SYS_EVENT_SET",        # batch 45
+    "NtResetEvent":                "SYS_EVENT_RESET",      # batch 45
     # NtAllocateVirtualMemory is already mapped to SYS_HEAP_ALLOC above —
     # keep that for now since HeapAlloc is the more common caller.
     # SYS_VMAP (batch 28) has no direct bedrock NT analogue beyond

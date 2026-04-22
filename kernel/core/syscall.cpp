@@ -550,6 +550,19 @@ void SyscallDispatch(arch::TrapFrame* frame)
             m.in_use = false;
             arch::Sti();
         }
+        else if (handle >= Process::kWin32EventBase && handle < Process::kWin32EventBase + Process::kWin32EventCap)
+        {
+            const u64 slot = handle - Process::kWin32EventBase;
+            arch::Cli();
+            Process::Win32EventHandle& e = proc->win32_events[slot];
+            // Wake all waiters (they'll see in_use = false and
+            // return WAIT_ABANDONED-style from their wait; we
+            // just wake them so they don't block forever).
+            (void)sched::WaitQueueWakeAll(&e.waiters);
+            e.in_use = false;
+            e.signaled = false;
+            arch::Sti();
+        }
         frame->rax = 0;
         return;
     }
@@ -716,6 +729,170 @@ void SyscallDispatch(arch::TrapFrame* frame)
         m.recursion = (next != nullptr) ? 1 : 0;
         arch::Sti();
         frame->rax = 0;
+        return;
+    }
+
+    case SYS_EVENT_CREATE:
+    {
+        // Allocate an event slot. rdi = bManualReset, rsi = bInitialState.
+        Process* proc = CurrentProcess();
+        if (proc == nullptr)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        u64 slot = Process::kWin32EventCap;
+        arch::Cli();
+        for (u64 i = 0; i < Process::kWin32EventCap; ++i)
+        {
+            if (!proc->win32_events[i].in_use)
+            {
+                slot = i;
+                break;
+            }
+        }
+        if (slot == Process::kWin32EventCap)
+        {
+            arch::Sti();
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        Process::Win32EventHandle& e = proc->win32_events[slot];
+        e.in_use = true;
+        e.manual_reset = (frame->rdi != 0);
+        e.signaled = (frame->rsi != 0);
+        e.waiters.head = nullptr;
+        e.waiters.tail = nullptr;
+        arch::Sti();
+        const u64 handle = Process::kWin32EventBase + slot;
+        arch::SerialWrite("[sys] event_create ok pid=");
+        arch::SerialWriteHex(proc->pid);
+        arch::SerialWrite(" handle=");
+        arch::SerialWriteHex(handle);
+        arch::SerialWrite(" manual=");
+        arch::SerialWriteHex(e.manual_reset ? 1 : 0);
+        arch::SerialWrite(" signaled=");
+        arch::SerialWriteHex(e.signaled ? 1 : 0);
+        arch::SerialWrite("\n");
+        frame->rax = handle;
+        return;
+    }
+
+    case SYS_EVENT_SET:
+    {
+        Process* proc = CurrentProcess();
+        if (proc == nullptr)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        const u64 handle = frame->rdi;
+        if (handle < Process::kWin32EventBase || handle >= Process::kWin32EventBase + Process::kWin32EventCap)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        Process::Win32EventHandle& e = proc->win32_events[handle - Process::kWin32EventBase];
+        arch::Cli();
+        if (!e.in_use)
+        {
+            arch::Sti();
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        e.signaled = true;
+        if (e.manual_reset)
+        {
+            // Manual: wake ALL waiters; signal stays set.
+            (void)sched::WaitQueueWakeAll(&e.waiters);
+        }
+        else
+        {
+            // Auto: wake ONE; if woken, auto-clear signal.
+            sched::Task* next = sched::WaitQueueWakeOne(&e.waiters);
+            if (next != nullptr)
+                e.signaled = false;
+        }
+        arch::Sti();
+        frame->rax = 0;
+        return;
+    }
+
+    case SYS_EVENT_RESET:
+    {
+        Process* proc = CurrentProcess();
+        if (proc == nullptr)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        const u64 handle = frame->rdi;
+        if (handle < Process::kWin32EventBase || handle >= Process::kWin32EventBase + Process::kWin32EventCap)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        Process::Win32EventHandle& e = proc->win32_events[handle - Process::kWin32EventBase];
+        arch::Cli();
+        if (e.in_use)
+            e.signaled = false;
+        arch::Sti();
+        frame->rax = e.in_use ? 0 : static_cast<u64>(-1);
+        return;
+    }
+
+    case SYS_EVENT_WAIT:
+    {
+        constexpr u64 kInfiniteMs = 0xFFFFFFFFu;
+        constexpr u64 kWaitObject0 = 0;
+        constexpr u64 kWaitTimeout = 0x102;
+        Process* proc = CurrentProcess();
+        if (proc == nullptr)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        const u64 handle = frame->rdi;
+        if (handle < Process::kWin32EventBase || handle >= Process::kWin32EventBase + Process::kWin32EventCap)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        Process::Win32EventHandle& e = proc->win32_events[handle - Process::kWin32EventBase];
+        arch::Cli();
+        if (!e.in_use)
+        {
+            arch::Sti();
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        if (e.signaled)
+        {
+            // Already signaled. Auto-reset events clear the
+            // signal for us; manual-reset events keep it.
+            if (!e.manual_reset)
+                e.signaled = false;
+            arch::Sti();
+            frame->rax = kWaitObject0;
+            return;
+        }
+        // Not signaled — block.
+        const u64 timeout_ms = frame->rsi & 0xFFFFFFFFu;
+        if (timeout_ms == kInfiniteMs)
+        {
+            sched::WaitQueueBlock(&e.waiters);
+            // On wake, SYS_EVENT_SET has already cleared the
+            // signal for auto-reset events; manual-reset leaves
+            // it set so subsequent waits fall through.
+            arch::Sti();
+            frame->rax = kWaitObject0;
+            return;
+        }
+        constexpr u64 kMsPerTick = 10;
+        const u64 ticks = (timeout_ms + (kMsPerTick - 1)) / kMsPerTick;
+        const bool got = sched::WaitQueueBlockTimeout(&e.waiters, ticks);
+        arch::Sti();
+        frame->rax = got ? kWaitObject0 : kWaitTimeout;
         return;
     }
 

@@ -338,6 +338,28 @@ struct Process
     static constexpr u64 kWin32MutexBase = 0x200;
     Win32MutexHandle win32_mutexes[kWin32MutexCap];
 
+    // Win32 event table — backs CreateEventW / SetEvent /
+    // ResetEvent / WaitForSingleObject (batch 45). Simpler than
+    // mutexes: no owner, no recursion, just a signaled flag
+    // with a waitqueue. Manual-reset events stay signaled until
+    // ResetEvent; auto-reset events wake one waiter then clear
+    // themselves automatically.
+    //
+    // Handles run kWin32EventBase + idx (= 0x300..0x307),
+    // disjoint from the mutex and file handle ranges so
+    // CloseHandle / WaitForSingleObject dispatch by range.
+    struct Win32EventHandle
+    {
+        bool in_use;
+        bool manual_reset; // true = stays signaled until reset; false = auto-clears on wake
+        bool signaled;
+        u8 _pad[5];
+        sched::WaitQueue waiters; // tasks blocked in SYS_EVENT_WAIT
+    };
+    static constexpr u64 kWin32EventCap = 8;
+    static constexpr u64 kWin32EventBase = 0x300;
+    Win32EventHandle win32_events[kWin32EventCap];
+
     // Win32 VirtualAlloc bump arena — backs VirtualAlloc /
     // VirtualFree / VirtualProtect (batch 28). Each SYS_VMAP
     // request rounds the size up to page multiples, allocates

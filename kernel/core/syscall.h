@@ -295,6 +295,43 @@ enum SyscallNumber : u64
     // kernel's per-process frame budget eventually clamps a
     // runaway allocator. Backs Win32 VirtualFree.
     SYS_VUNMAP = 29,
+
+    // SYS_EVENT_CREATE: rdi = bManualReset (0 or 1),
+    // rsi = bInitialState (0 or 1). Allocates a per-process
+    // event slot and returns Process::kWin32EventBase + slot
+    // (= 0x300..0x307) on success, u64(-1) on slot exhaustion.
+    //
+    // Manual-reset events stay signaled after a wait succeeds;
+    // auto-reset events clear the signal on successful wait.
+    // Backs Win32 CreateEventW / CreateEventA / CreateEventExW.
+    SYS_EVENT_CREATE = 30,
+
+    // SYS_EVENT_SET: rdi = event handle. Marks the event
+    // signaled and wakes waiters:
+    //   * Manual-reset: wakes ALL waiters; signal stays set.
+    //   * Auto-reset: wakes ONE waiter; auto-clears the signal
+    //     if a waiter was woken (matches Win32 docs).
+    // Returns 0 on success, u64(-1) on bad handle. Backs Win32
+    // SetEvent.
+    SYS_EVENT_SET = 31,
+
+    // SYS_EVENT_RESET: rdi = event handle. Clears the signal.
+    // Returns 0 on success, u64(-1) on bad handle. Backs Win32
+    // ResetEvent. Mostly a no-op for auto-reset events (they
+    // auto-clear anyway).
+    SYS_EVENT_RESET = 32,
+
+    // SYS_EVENT_WAIT: rdi = event handle, rsi = timeout_ms.
+    // Returns WAIT_OBJECT_0 (0) on success, WAIT_TIMEOUT (0x102)
+    // on timeout, or u64(-1) on bad handle. Same shape as
+    // SYS_MUTEX_WAIT. Blocking semantics:
+    //   * Already signaled: return immediately; auto-reset events
+    //     clear the signal first.
+    //   * Not signaled: block on the event's waitqueue; timeout
+    //     via WaitQueueBlockTimeout.
+    //   * INFINITE timeout (0xFFFFFFFF): block forever via
+    //     WaitQueueBlock.
+    SYS_EVENT_WAIT = 33,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit

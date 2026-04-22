@@ -1323,6 +1323,52 @@ void _start(void)
     else
         WriteFile(out, b40_bad, sizeof(b40_bad) - 1, &b40w, 0);
 
+    // Batch 45 exercise — real event handles.
+    //
+    // Invariants checked (single-task process, so events never
+    // actually block — but all state transitions must be
+    // observable):
+    //   * Manual-reset event created signaled: wait returns
+    //     WAIT_OBJECT_0 immediately and signal STAYS set, so
+    //     a second wait also returns WAIT_OBJECT_0 immediately.
+    //   * ResetEvent clears the signal: subsequent wait with
+    //     a tiny timeout returns WAIT_TIMEOUT (0x102).
+    //   * SetEvent re-signals.
+    //   * Auto-reset event created signaled: first wait returns
+    //     WAIT_OBJECT_0 and clears the signal; second wait
+    //     with a tiny timeout returns WAIT_TIMEOUT.
+    //   * SetEvent on auto-reset event: next wait returns
+    //     WAIT_OBJECT_0, which clears the signal again.
+    //   * CloseHandle on event works (kernel SYS_FILE_CLOSE
+    //     dispatches event range too).
+    HANDLE b45_mrE = CreateEventW(0, 1, 1, 0); // manual, initial=signaled
+    DWORD b45_mr_w1 = WaitForSingleObject(b45_mrE, 0);
+    DWORD b45_mr_w2 = WaitForSingleObject(b45_mrE, 0); // still signaled (manual)
+    BOOL b45_mr_reset = ResetEvent(b45_mrE);
+    DWORD b45_mr_w3 = WaitForSingleObject(b45_mrE, 1); // timeout
+    BOOL b45_mr_set = SetEvent(b45_mrE);
+    DWORD b45_mr_w4 = WaitForSingleObject(b45_mrE, 0);
+    BOOL b45_mr_close = CloseHandle(b45_mrE);
+
+    HANDLE b45_arE = CreateEventW(0, 0, 1, 0);         // auto, initial=signaled
+    DWORD b45_ar_w1 = WaitForSingleObject(b45_arE, 0); // consumes signal
+    DWORD b45_ar_w2 = WaitForSingleObject(b45_arE, 1); // timeout — auto cleared
+    BOOL b45_ar_set = SetEvent(b45_arE);
+    DWORD b45_ar_w3 = WaitForSingleObject(b45_arE, 0); // signaled again
+    DWORD b45_ar_w4 = WaitForSingleObject(b45_arE, 1); // timeout — auto cleared
+    BOOL b45_ar_close = CloseHandle(b45_arE);
+
+    const char b45_ok[] = "[batch45] real Event CreateW/Set/Reset/Wait OK\n";
+    const char b45_bad[] = "[batch45] event semantics FAILED invariants\n";
+    BOOL b45_pass = b45_mrE != 0 && b45_mr_w1 == 0 && b45_mr_w2 == 0 && b45_mr_reset != 0 && b45_mr_w3 == 0x102 &&
+                    b45_mr_set != 0 && b45_mr_w4 == 0 && b45_mr_close != 0 && b45_arE != 0 && b45_ar_w1 == 0 &&
+                    b45_ar_w2 == 0x102 && b45_ar_set != 0 && b45_ar_w3 == 0 && b45_ar_w4 == 0x102 && b45_ar_close != 0;
+    DWORD b45w = 0;
+    if (b45_pass)
+        WriteFile(out, b45_ok, sizeof(b45_ok) - 1, &b45w, 0);
+    else
+        WriteFile(out, b45_bad, sizeof(b45_bad) - 1, &b45w, 0);
+
     // Batch 3 round-trip: store a distinctive value via
     // SetLastError, read it back via GetLastError, exit with
     // whatever came back. If the slot works, the kernel log

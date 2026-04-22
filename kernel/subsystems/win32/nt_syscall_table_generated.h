@@ -7,7 +7,7 @@
 // Source data: tools/win32-compat/nt-syscalls-x64.csv (j00ru/windows-syscalls)
 // Target Windows version: Windows 11 and Server (11 25H2)
 // Bedrock NT calls (present in every Windows XP→Win11 25H2): 292
-// CustomOS coverage: 16/292 = 5%
+// CustomOS coverage: 19/292 = 6%
 //
 // See tools/win32-compat/README.md for the legal + design rationale.
 
@@ -51,7 +51,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
     {"NtReplyWaitReceivePort", 0x000b, kSysNtNotImpl},
     {"NtReplyPort", 0x000c, kSysNtNotImpl},
     {"NtSetInformationThread", 0x000d, kSysNtNotImpl},
-    {"NtSetEvent", 0x000e, kSysNtNotImpl},
+    {"NtSetEvent", 0x000e, static_cast<u32>(::customos::core::SYS_EVENT_SET)},
     {"NtClose", 0x000f, static_cast<u32>(::customos::core::SYS_FILE_CLOSE)},
     {"NtQueryObject", 0x0010, kSysNtNotImpl},
     {"NtQueryInformationFile", 0x0011, static_cast<u32>(::customos::core::SYS_FILE_FSTAT)},
@@ -109,7 +109,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
     {"NtQueueApcThread", 0x0045, kSysNtNotImpl},
     {"NtYieldExecution", 0x0046, static_cast<u32>(::customos::core::SYS_YIELD)},
     {"NtAddAtom", 0x0047, kSysNtNotImpl},
-    {"NtCreateEvent", 0x0048, kSysNtNotImpl},
+    {"NtCreateEvent", 0x0048, static_cast<u32>(::customos::core::SYS_EVENT_CREATE)},
     {"NtQueryVolumeInformationFile", 0x0049, kSysNtNotImpl},
     {"NtCreateSection", 0x004a, kSysNtNotImpl},
     {"NtFlushBuffersFile", 0x004b, kSysNtNotImpl},
@@ -270,7 +270,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
     {"NtReplaceKey", 0x0183, kSysNtNotImpl},
     {"NtReplyWaitReplyPort", 0x0185, kSysNtNotImpl},
     {"NtRequestPort", 0x0186, kSysNtNotImpl},
-    {"NtResetEvent", 0x0187, kSysNtNotImpl},
+    {"NtResetEvent", 0x0187, static_cast<u32>(::customos::core::SYS_EVENT_RESET)},
     {"NtResetWriteWatch", 0x0188, kSysNtNotImpl},
     {"NtRestoreKey", 0x0189, kSysNtNotImpl},
     {"NtResumeProcess", 0x018a, kSysNtNotImpl},
@@ -335,6 +335,6 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
 inline constexpr u32 kBedrockNtSyscallCount =
     sizeof(kBedrockNtSyscalls) / sizeof(kBedrockNtSyscalls[0]);
 
-inline constexpr u32 kBedrockNtSyscallsCovered = 16;
+inline constexpr u32 kBedrockNtSyscallsCovered = 19;
 
 } // namespace customos::subsystems::win32
