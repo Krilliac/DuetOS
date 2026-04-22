@@ -1506,28 +1506,95 @@ bool FindFreeRunInDir(const Volume& v, u32 dir_cluster, u32 count, u64* out_firs
             const u64 lba = u64(v.data_start_sector) + u64(cluster - 2) * u64(v.sectors_per_cluster) + sec;
             if (drivers::storage::BlockDeviceRead(v.block_handle, lba, 1, g_scratch) != 0)
                 return false;
+            u32 first_zero = 0xFFFFFFFFu;
             for (u32 off = 0; off + 32 <= v.bytes_per_sector; off += 32)
             {
                 if (g_scratch[off] != 0x00)
                     continue;
-                // Found start of 0x00 zone. Confirm `count` slots
-                // fit before end-of-cluster. v0 rejects runs that
-                // would span cluster boundaries (directory growth
-                // is a follow-up).
-                const u32 sector_cap = v.bytes_per_sector;
-                const u32 cluster_cap = v.sectors_per_cluster * v.bytes_per_sector;
-                const u32 pos_in_cluster = sec * v.bytes_per_sector + off;
-                if (pos_in_cluster + count * 32 > cluster_cap)
-                    return false;
-                (void)sector_cap;
+                if (first_zero == 0xFFFFFFFFu)
+                    first_zero = off;
+                // Require the run to fit inside THIS single sector.
+                // PlantDirEntry / CreateInDir RMW one sector per
+                // entry install; a run crossing a sector boundary
+                // would silently truncate the half past byte 512.
+                if (off + count * 32 > v.bytes_per_sector)
+                    continue;
                 *out_first_lba = lba;
                 *out_first_off = off;
                 return true;
+            }
+            // Reached end-of-sector without placing the run, but
+            // there WAS a 0x00 slot in this sector. Walker treats
+            // 0x00 at first-byte as "no more entries" — orphaning
+            // everything we place in later sectors. Convert the
+            // 0x00 tail to 0xE5 ("deleted, but valid entries may
+            // follow") so the walker continues past. RMW the
+            // sector in place.
+            if (first_zero != 0xFFFFFFFFu)
+            {
+                bool dirtied = false;
+                for (u32 off = first_zero; off + 32 <= v.bytes_per_sector; off += 32)
+                {
+                    if (g_scratch[off] == 0x00)
+                    {
+                        g_scratch[off] = 0xE5;
+                        dirtied = true;
+                    }
+                }
+                if (dirtied)
+                {
+                    if (drivers::storage::BlockDeviceWrite(v.block_handle, lba, 1, g_scratch) != 0)
+                        return false;
+                }
             }
         }
         cluster = ReadFatEntry(v, cluster);
     }
     return false;
+}
+
+// Find-or-grow: if the directory has no contiguous run of
+// `count` free slots, allocate a new cluster, chain it to the
+// directory's FAT chain, and return a slot at byte 0 of the new
+// cluster. Cap: `count` must fit in one cluster — caller checks.
+// Used by PlantDirEntry for LFN-sequence reservations; pure-SFN
+// path still uses FindFreeSlotInDir (single-slot find never
+// overflows).
+bool ReserveRunInDir(const Volume& v, u32 dir_cluster, u32 count, u64* out_first_lba, u32* out_first_off)
+{
+    if (count == 0)
+        return false;
+    // Single-sector constraint: the write path RMWs one sector,
+    // so a run cannot straddle two. Our LFN cap (11 frags + 1 SFN
+    // = 12 slots = 384 bytes) fits trivially in a 512 B sector.
+    if (count * 32u > v.bytes_per_sector)
+        return false;
+    if (FindFreeRunInDir(v, dir_cluster, count, out_first_lba, out_first_off))
+        return true;
+
+    // Walk to tail cluster, allocate + zero + chain.
+    u32 tail = dir_cluster;
+    for (u32 step = 0; step < 64; ++step)
+    {
+        const u32 next = ReadFatEntry(v, tail);
+        if (next < 2 || next >= 0x0FFFFFF8u)
+            break;
+        tail = next;
+    }
+    const u32 fresh = AllocateFreeCluster(v);
+    if (fresh == 0)
+        return false;
+    if (!ZeroCluster(v, fresh))
+        return false;
+    if (!WriteFatEntry(v, tail, fresh))
+    {
+        // Best-effort rollback: mark the fresh cluster free again.
+        FreeClusterChain(v, fresh);
+        return false;
+    }
+    *out_first_lba = u64(v.data_start_sector) + u64(fresh - 2) * u64(v.sectors_per_cluster);
+    *out_first_off = 0;
+    return true;
 }
 
 // Encode one LFN fragment into `out_32`. `chunk` holds up to 13
@@ -1649,7 +1716,7 @@ i64 CreateInDir(const Volume* v, u32 dir_cluster, const char* name, const void* 
     }
     else
     {
-        if (!FindFreeRunInDir(*v, dir_cluster, slots_needed, &slot_lba, &slot_off))
+        if (!ReserveRunInDir(*v, dir_cluster, slots_needed, &slot_lba, &slot_off))
             return -1;
     }
 
@@ -1982,7 +2049,7 @@ bool PlantDirEntry(const Volume& v, u32 dir_cluster, const char* name, u32 first
     }
     else
     {
-        if (!FindFreeRunInDir(v, dir_cluster, slots_needed, &slot_lba, &slot_off))
+        if (!ReserveRunInDir(v, dir_cluster, slots_needed, &slot_lba, &slot_off))
             return false;
     }
     if (drivers::storage::BlockDeviceRead(v.block_handle, slot_lba, 1, g_scratch) != 0)
@@ -2795,6 +2862,91 @@ void Fat32SelfTest()
         return;
     }
     SerialWrite("[fs/fat32] self-test OK (mkdir + rmdir round-trip with empty-check)\n");
+
+    // Thirteenth phase: directory growth. Fill /SUB with enough
+    // long-named files to overflow its single 4 KiB cluster (128
+    // slots). Each LFN create takes 2 slots (1 frag + 1 SFN);
+    // 70 such files = 140 slots. With /SUB's existing "." / ".."
+    // + 1 INNER.TXT (3 slots), we need the driver to allocate
+    // a second cluster for /SUB and place later entries there.
+    //
+    // Create 70 LFN files, read back the 70th, delete all 70,
+    // verify /SUB looks unchanged afterward. If directory growth
+    // is working, this just succeeds; if not, ~62 creates in
+    // we run out of slots in the first cluster.
+    if (!Fat32MkdirAtPath(v0, "/SUB/GROWTEST"))
+    {
+        SerialWrite("[fs/fat32] self-test FAILED: mkdir /SUB/GROWTEST\n");
+        return;
+    }
+    const u32 grow_count = 70;
+    for (u32 i = 0; i < grow_count; ++i)
+    {
+        // Name forces LFN path: mixed case + long base.
+        char name[64];
+        const char* prefix = "/SUB/GROWTEST/LongEntry";
+        u32 w = 0;
+        while (prefix[w] != 0 && w + 8 < sizeof(name))
+        {
+            name[w] = prefix[w];
+            ++w;
+        }
+        // Append "NN.txt".
+        name[w++] = static_cast<char>('0' + (i / 10) % 10);
+        name[w++] = static_cast<char>('0' + i % 10);
+        name[w++] = '.';
+        name[w++] = 't';
+        name[w++] = 'x';
+        name[w++] = 't';
+        name[w] = 0;
+        const u8 body[2] = {'x', '\n'};
+        if (Fat32CreateAtPath(v0, name, body, 2) != 2)
+        {
+            SerialWrite("[fs/fat32] self-test FAILED: growth create at ");
+            SerialWrite(name);
+            SerialWrite("\n");
+            return;
+        }
+    }
+    // Verify the last-written file is readable + has expected body.
+    DirEntry last_ent;
+    if (!Fat32LookupPath(v0, "/SUB/GROWTEST/LongEntry69.txt", &last_ent) || last_ent.size_bytes != 2)
+    {
+        SerialWrite("[fs/fat32] self-test FAILED: growth last-entry read-back\n");
+        return;
+    }
+    // Tear down.
+    for (u32 i = 0; i < grow_count; ++i)
+    {
+        char name[64];
+        const char* prefix = "/SUB/GROWTEST/LongEntry";
+        u32 w = 0;
+        while (prefix[w] != 0 && w + 8 < sizeof(name))
+        {
+            name[w] = prefix[w];
+            ++w;
+        }
+        name[w++] = static_cast<char>('0' + (i / 10) % 10);
+        name[w++] = static_cast<char>('0' + i % 10);
+        name[w++] = '.';
+        name[w++] = 't';
+        name[w++] = 'x';
+        name[w++] = 't';
+        name[w] = 0;
+        if (!Fat32DeleteAtPath(v0, name))
+        {
+            SerialWrite("[fs/fat32] self-test FAILED: growth delete at ");
+            SerialWrite(name);
+            SerialWrite("\n");
+            return;
+        }
+    }
+    if (!Fat32RmdirAtPath(v0, "/SUB/GROWTEST"))
+    {
+        SerialWrite("[fs/fat32] self-test FAILED: rmdir /SUB/GROWTEST post-teardown\n");
+        return;
+    }
+    SerialWrite("[fs/fat32] self-test OK (dir growth handled 70 LFN entries + teardown)\n");
 }
 
 } // namespace customos::fs::fat32
