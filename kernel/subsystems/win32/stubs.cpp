@@ -72,78 +72,78 @@ constexpr u32 kOffQueryPerfCounter = 0x1F6;      // batch 11 — 16 bytes
 constexpr u32 kOffQueryPerfFreq = 0x206;         // batch 11 — 13 bytes
 constexpr u32 kOffGetTickCount = 0x213;          // batch 11 — 12 bytes (shared w/ GetTickCount64)
 constexpr u32 kOffHeapSize = 0x21F;              // batch 14 — 11 bytes
-constexpr u32 kOffHeapRealloc = 0x22A;           // batch 14 — 14 bytes
-constexpr u32 kOffRealloc = 0x238;               // batch 14 — 14 bytes
-constexpr u32 kOffMissLogger = 0x246;            // batch 15 — 41 bytes
-constexpr u32 kOffPArgc = 0x26F;                 // batch 16 —  6 bytes
-constexpr u32 kOffPArgv = 0x275;                 // batch 16 —  6 bytes
-constexpr u32 kOffPCommode = 0x27B;              // batch 17 —  6 bytes
-constexpr u32 kOffSputn = 0x281;                 // batch 18 — 19 bytes
-constexpr u32 kOffReturnThis = 0x294;            // batch 18 —  4 bytes
-constexpr u32 kOffWiden = 0x298;                 // batch 18 —  4 bytes
-constexpr u32 kOffHresultEFail = 0x29C;          // batch 19 —  6 bytes
-constexpr u32 kOffGetSysTimeFTReal = 0x2A2;      // batch 20 — 13 bytes
-constexpr u32 kOffQpcNs = 0x2AF;                 // batch 21 — 13 bytes
-constexpr u32 kOffQpfNs = 0x2BC;                 // batch 21 — 10 bytes
-constexpr u32 kOffSleep = 0x2CB;                 // batch 22 — 12 bytes (push/pop rdi)
-constexpr u32 kOffSwitchToThread = 0x2D7;        // batch 22 — 10 bytes
-constexpr u32 kOffGetCmdLineW = 0x2E1;           // batch 23 — 6 bytes
-constexpr u32 kOffGetCmdLineA = 0x2E7;           // batch 23 — 6 bytes
-constexpr u32 kOffGetEnvBlockW = 0x2ED;          // batch 23 — 6 bytes
-constexpr u32 kOffCreateFileW = 0x2F3;           // batch 24 — 59 bytes (UTF-16 strip + open)
-constexpr u32 kOffReadFile = 0x32E;              // batch 24 — 46 bytes
-constexpr u32 kOffCloseHandle = 0x35C;           // batch 24 — 15 bytes
-constexpr u32 kOffSetFilePtrEx = 0x36B;          // batch 24 — 38 bytes
-constexpr u32 kOffGetFileSizeEx = 0x391;         // batch 25 — 29 bytes
-constexpr u32 kOffGetModuleHandleW = 0x3AE;      // batch 25 — 17 bytes
-constexpr u32 kOffCreateMutexW = 0x3BF;          // batch 26 — 13 bytes
-constexpr u32 kOffWaitForObj = 0x3CC;            // batch 26 — 38 bytes (mutex-aware)
-constexpr u32 kOffReleaseMutex = 0x3F2;          // batch 26 — 24 bytes
-constexpr u32 kOffWriteConsoleW = 0x40A;         // batch 27 — 96 bytes (UTF-16 strip + SYS_WRITE)
-constexpr u32 kOffGetConsoleMode = 0x46A;        // batch 27 — 12 bytes
-constexpr u32 kOffGetConsoleCP = 0x476;          // batch 27 — 6 bytes
-constexpr u32 kOffVirtualAlloc = 0x47C;          // batch 28 — 13 bytes
-constexpr u32 kOffVirtualFree = 0x489;           // batch 28 — 29 bytes
-constexpr u32 kOffVirtualProtect = 0x4A6;        // batch 28 — 18 bytes
-constexpr u32 kOffLstrlenW = 0x4B8;              // batch 29 — 15 bytes
-constexpr u32 kOffLstrcmpW = 0x4C7;              // batch 29 — 37 bytes
-constexpr u32 kOffLstrcpyW = 0x4EC;              // batch 29 — 27 bytes
-constexpr u32 kOffIsWow64 = 0x507;               // batch 30 — 17 bytes
-constexpr u32 kOffGetVersionExW = 0x518;         // batch 30 — 34 bytes
-constexpr u32 kOffLstrlenA = 0x53A;              // batch 31 — 14 bytes
-constexpr u32 kOffLstrcmpA = 0x548;              // batch 31 — 37 bytes
-constexpr u32 kOffLstrcpyA = 0x56D;              // batch 31 — 26 bytes
-constexpr u32 kOffGetModFileNameW = 0x587;       // batch 32 — 24 bytes
-constexpr u32 kOffGetCurrentDirW = 0x59F;        // batch 32 — 31 bytes
-constexpr u32 kOffMBtoWC = 0x5BE;                // batch 33 — 49 bytes
-constexpr u32 kOffWCtoMB = 0x5EF;                // batch 33 — 48 bytes
-constexpr u32 kOffGetUserNameW = 0x61F;          // batch 34 — 47 bytes
-constexpr u32 kOffGetComputerNameW = 0x64E;      // batch 34 — 61 bytes
-constexpr u32 kOffGetWinDirW = 0x68B;            // batch 35 — 30 bytes (buf-first sig)
-constexpr u32 kOffGetLogicalDrives = 0x6A9;      // batch 36 — 6 bytes (returns 0x00800000, X: drive)
-constexpr u32 kOffGetDriveType = 0x6AF;          // batch 36 — 6 bytes (returns 3 = DRIVE_FIXED)
-constexpr u32 kOffReturnTwo = 0x6B5;             // batch 37 — 6 bytes (ERROR_FILE_NOT_FOUND / stream pos)
-constexpr u32 kOffReturnMinus1 = 0x6BB;          // batch 37 — 6 bytes (INVALID_FILE_ATTRIBUTES)
-constexpr u32 kOffReturnPrioNormal = 0x6C1;      // batch 39 — 6 bytes (0x20 = NORMAL_PRIORITY_CLASS)
-constexpr u32 kOffInterlockedInc = 0x6C7;        // batch 40 — 12 bytes
-constexpr u32 kOffInterlockedDec = 0x6D3;        // batch 40 — 12 bytes
-constexpr u32 kOffInterlockedCmpXchg = 0x6DF;    // batch 40 —  8 bytes
-constexpr u32 kOffInterlockedExchg = 0x6E7;      // batch 40 —  5 bytes
-constexpr u32 kOffInterlockedExchgAdd = 0x6EC;   // batch 40 —  7 bytes
-constexpr u32 kOffInterlockedInc64 = 0x6F3;      // batch 41 — 14 bytes
-constexpr u32 kOffInterlockedDec64 = 0x701;      // batch 41 — 16 bytes
-constexpr u32 kOffInterlockedCmpXchg64 = 0x711;  // batch 41 —  9 bytes
-constexpr u32 kOffInterlockedExchg64 = 0x71A;    // batch 41 —  7 bytes
-constexpr u32 kOffInterlockedExchgAdd64 = 0x721; // batch 41 —  9 bytes
-constexpr u32 kOffReturnStatusNotImpl = 0x72A;   // batch 42 —  6 bytes (STATUS_NOT_IMPLEMENTED)
-constexpr u32 kOffCreateEventReal = 0x730;       // batch 45 — 18 bytes (real event-backed)
-constexpr u32 kOffSetEventReal = 0x742;          // batch 45 — 15 bytes
-constexpr u32 kOffResetEventReal = 0x751;        // batch 45 — 15 bytes
-constexpr u32 kOffWaitForObj2 = 0x760;           // batch 45 — 66 bytes (mutex+event-aware)
-constexpr u32 kOffTlsAllocReal = 0x7A2;          // batch 46 —  8 bytes
-constexpr u32 kOffTlsFreeReal = 0x7AA;           // batch 46 — 24 bytes
-constexpr u32 kOffTlsGetValueReal = 0x7C2;       // batch 46 — 13 bytes
-constexpr u32 kOffTlsSetValueReal = 0x7CF;       // batch 46 — 20 bytes
+constexpr u32 kOffHeapRealloc = 0x22A;           // batch 14 — 16 bytes
+constexpr u32 kOffRealloc = 0x23A;               // batch 14 — 16 bytes
+constexpr u32 kOffMissLogger = 0x24A;            // batch 15 — 41 bytes
+constexpr u32 kOffPArgc = 0x273;                 // batch 16 —  6 bytes
+constexpr u32 kOffPArgv = 0x279;                 // batch 16 —  6 bytes
+constexpr u32 kOffPCommode = 0x27F;              // batch 17 —  6 bytes
+constexpr u32 kOffSputn = 0x285;                 // batch 18 — 19 bytes
+constexpr u32 kOffReturnThis = 0x298;            // batch 18 —  4 bytes
+constexpr u32 kOffWiden = 0x29C;                 // batch 18 —  4 bytes
+constexpr u32 kOffHresultEFail = 0x2A0;          // batch 19 —  6 bytes
+constexpr u32 kOffGetSysTimeFTReal = 0x2A6;      // batch 20 — 13 bytes
+constexpr u32 kOffQpcNs = 0x2B3;                 // batch 21 — 13 bytes
+constexpr u32 kOffQpfNs = 0x2C0;                 // batch 21 — 10 bytes
+constexpr u32 kOffSleep = 0x2CF;                 // batch 22 — 12 bytes (push/pop rdi)
+constexpr u32 kOffSwitchToThread = 0x2DB;        // batch 22 — 10 bytes
+constexpr u32 kOffGetCmdLineW = 0x2E5;           // batch 23 — 6 bytes
+constexpr u32 kOffGetCmdLineA = 0x2EB;           // batch 23 — 6 bytes
+constexpr u32 kOffGetEnvBlockW = 0x2F1;          // batch 23 — 6 bytes
+constexpr u32 kOffCreateFileW = 0x2F7;           // batch 24 — 59 bytes (UTF-16 strip + open)
+constexpr u32 kOffReadFile = 0x332;              // batch 24 — 46 bytes
+constexpr u32 kOffCloseHandle = 0x360;           // batch 24 — 15 bytes
+constexpr u32 kOffSetFilePtrEx = 0x36F;          // batch 24 — 38 bytes
+constexpr u32 kOffGetFileSizeEx = 0x395;         // batch 25 — 29 bytes
+constexpr u32 kOffGetModuleHandleW = 0x3B2;      // batch 25 — 17 bytes
+constexpr u32 kOffCreateMutexW = 0x3C3;          // batch 26 — 13 bytes
+constexpr u32 kOffWaitForObj = 0x3D0;            // batch 26 — 38 bytes (mutex-aware)
+constexpr u32 kOffReleaseMutex = 0x3F6;          // batch 26 — 24 bytes
+constexpr u32 kOffWriteConsoleW = 0x40E;         // batch 27 — 96 bytes (UTF-16 strip + SYS_WRITE)
+constexpr u32 kOffGetConsoleMode = 0x46E;        // batch 27 — 12 bytes
+constexpr u32 kOffGetConsoleCP = 0x47A;          // batch 27 — 6 bytes
+constexpr u32 kOffVirtualAlloc = 0x480;          // batch 28 — 13 bytes
+constexpr u32 kOffVirtualFree = 0x48D;           // batch 28 — 29 bytes
+constexpr u32 kOffVirtualProtect = 0x4AA;        // batch 28 — 18 bytes
+constexpr u32 kOffLstrlenW = 0x4BC;              // batch 29 — 15 bytes
+constexpr u32 kOffLstrcmpW = 0x4CB;              // batch 29 — 37 bytes
+constexpr u32 kOffLstrcpyW = 0x4F0;              // batch 29 — 27 bytes
+constexpr u32 kOffIsWow64 = 0x50B;               // batch 30 — 17 bytes
+constexpr u32 kOffGetVersionExW = 0x51C;         // batch 30 — 34 bytes
+constexpr u32 kOffLstrlenA = 0x53E;              // batch 31 — 14 bytes
+constexpr u32 kOffLstrcmpA = 0x54C;              // batch 31 — 37 bytes
+constexpr u32 kOffLstrcpyA = 0x571;              // batch 31 — 26 bytes
+constexpr u32 kOffGetModFileNameW = 0x58B;       // batch 32 — 24 bytes
+constexpr u32 kOffGetCurrentDirW = 0x5A3;        // batch 32 — 31 bytes
+constexpr u32 kOffMBtoWC = 0x5C2;                // batch 33 — 49 bytes
+constexpr u32 kOffWCtoMB = 0x5F3;                // batch 33 — 48 bytes
+constexpr u32 kOffGetUserNameW = 0x623;          // batch 34 — 47 bytes
+constexpr u32 kOffGetComputerNameW = 0x652;      // batch 34 — 61 bytes
+constexpr u32 kOffGetWinDirW = 0x68F;            // batch 35 — 30 bytes (buf-first sig)
+constexpr u32 kOffGetLogicalDrives = 0x6AD;      // batch 36 — 6 bytes (returns 0x00800000, X: drive)
+constexpr u32 kOffGetDriveType = 0x6B3;          // batch 36 — 6 bytes (returns 3 = DRIVE_FIXED)
+constexpr u32 kOffReturnTwo = 0x6B9;             // batch 37 — 6 bytes (ERROR_FILE_NOT_FOUND / stream pos)
+constexpr u32 kOffReturnMinus1 = 0x6BF;          // batch 37 — 6 bytes (INVALID_FILE_ATTRIBUTES)
+constexpr u32 kOffReturnPrioNormal = 0x6C5;      // batch 39 — 6 bytes (0x20 = NORMAL_PRIORITY_CLASS)
+constexpr u32 kOffInterlockedInc = 0x6CB;        // batch 40 — 12 bytes
+constexpr u32 kOffInterlockedDec = 0x6D7;        // batch 40 — 12 bytes
+constexpr u32 kOffInterlockedCmpXchg = 0x6E3;    // batch 40 —  8 bytes
+constexpr u32 kOffInterlockedExchg = 0x6EB;      // batch 40 —  5 bytes
+constexpr u32 kOffInterlockedExchgAdd = 0x6F0;   // batch 40 —  7 bytes
+constexpr u32 kOffInterlockedInc64 = 0x6F7;      // batch 41 — 14 bytes
+constexpr u32 kOffInterlockedDec64 = 0x705;      // batch 41 — 16 bytes
+constexpr u32 kOffInterlockedCmpXchg64 = 0x715;  // batch 41 —  9 bytes
+constexpr u32 kOffInterlockedExchg64 = 0x71E;    // batch 41 —  7 bytes
+constexpr u32 kOffInterlockedExchgAdd64 = 0x725; // batch 41 —  9 bytes
+constexpr u32 kOffReturnStatusNotImpl = 0x72E;   // batch 42 —  6 bytes (STATUS_NOT_IMPLEMENTED)
+constexpr u32 kOffCreateEventReal = 0x734;       // batch 45 — 18 bytes (real event-backed)
+constexpr u32 kOffSetEventReal = 0x746;          // batch 45 — 15 bytes
+constexpr u32 kOffResetEventReal = 0x755;        // batch 45 — 15 bytes
+constexpr u32 kOffWaitForObj2 = 0x764;           // batch 45 — 66 bytes (mutex+event-aware)
+constexpr u32 kOffTlsAllocReal = 0x7A6;          // batch 46 —  8 bytes
+constexpr u32 kOffTlsFreeReal = 0x7AE;           // batch 46 — 24 bytes
+constexpr u32 kOffTlsGetValueReal = 0x7C6;       // batch 46 — 13 bytes
+constexpr u32 kOffTlsSetValueReal = 0x7D3;       // batch 46 — 20 bytes
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -192,27 +192,41 @@ constexpr u8 kStubsBytes[] = {
     // the result count back into *lpWritten (clamped to 0 on
     // syscall error). Return BOOL = (rax >= 0).
     //
+    // Win64 ABI fix: rdi + rsi are callee-saved. Original stub
+    // wrote `mov edi, 1` / `mov rsi, rdx` directly — clobbered
+    // the caller's values. Now saved + restored via push/pop.
+    // `mov eax, 2` + `mov edi, 1` each compress to push-imm8 +
+    // pop-reg (3 bytes instead of 5), freeing 4 bytes to cover
+    // the 4-byte push/pop rdi+rsi cost. Stub stays at 44 bytes.
+    //
     // int 0x80 preserves all registers except RAX, so r9 (the
     // lpWritten pointer) survives the syscall and we can use
     // it to store the output count without saving.
-    0x48, 0x89, 0xD6,             // 0x0C mov rsi, rdx         ; buf
-    0x4C, 0x89, 0xC2,             // 0x0F mov rdx, r8          ; n
-    0xBF, 0x01, 0x00, 0x00, 0x00, // 0x12 mov edi, 1           ; fd = 1 (stdout)
-    0xB8, 0x02, 0x00, 0x00, 0x00, // 0x17 mov eax, 2           ; SYS_WRITE
-    0xCD, 0x80,                   // 0x1C int 0x80             ; rax = n or -1
+    0x56,             // 0x0C push rsi
+    0x57,             // 0x0D push rdi
+    0x48, 0x89, 0xD6, // 0x0E mov rsi, rdx         ; buf
+    0x4C, 0x89, 0xC2, // 0x11 mov rdx, r8          ; n
+    0x6A, 0x01,       // 0x14 push 1
+    0x5F,             // 0x16 pop rdi              ; fd = 1 (stdout)
+    0x6A, 0x02,       // 0x17 push 2
+    0x58,             // 0x19 pop rax              ; SYS_WRITE
+    0xCD, 0x80,       // 0x1A int 0x80             ; rax = n or -1
 
     // If lpWritten (r9) != NULL, store max(rax, 0) as DWORD.
-    0x4D, 0x85, 0xC9, // 0x1E test r9, r9
-    0x74, 0x0B,       // 0x21 je +0x0B -> 0x2E
-    0x31, 0xC9,       // 0x23 xor ecx, ecx
-    0x48, 0x85, 0xC0, // 0x25 test rax, rax
-    0x0F, 0x49, 0xC8, // 0x28 cmovns ecx, eax  ; ecx = rax if rax>=0, else 0
-    0x41, 0x89, 0x09, // 0x2B mov [r9], ecx
+    0x4D, 0x85, 0xC9, // 0x1C test r9, r9
+    0x74, 0x0B,       // 0x1F je +0x0B -> 0x2C
+    0x31, 0xC9,       // 0x21 xor ecx, ecx
+    0x48, 0x85, 0xC0, // 0x23 test rax, rax
+    0x0F, 0x49, 0xC8, // 0x26 cmovns ecx, eax  ; ecx = rax if rax>=0, else 0
+    0x41, 0x89, 0x09, // 0x29 mov [r9], ecx
 
-    // BOOL return: 1 if rax >= 0, else 0.
-    0x48, 0x85, 0xC0, // 0x2E test rax, rax
-    0x0F, 0x99, 0xC0, // 0x31 setns al
-    0x0F, 0xB6, 0xC0, // 0x34 movzx eax, al
+    // BOOL return: 1 if rax >= 0, else 0. Restore rdi + rsi
+    // (Win64 callee-saved) before returning.
+    0x48, 0x85, 0xC0, // 0x2C test rax, rax
+    0x0F, 0x99, 0xC0, // 0x2F setns al
+    0x0F, 0xB6, 0xC0, // 0x32 movzx eax, al
+    0x5F,             // 0x35 pop rdi
+    0x5E,             // 0x36 pop rsi
     0xC3,             // 0x37 ret
 
     // === Batch 2: process/thread lifecycle ====================
@@ -274,15 +288,22 @@ constexpr u8 kStubsBytes[] = {
     0xCD, 0x80,                   // 0x66 int 0x80
     0xC3,                         // 0x68 ret
 
-    // --- SetLastError (offset 0x69, 10 bytes) ------------------
+    // --- SetLastError (offset 0x69, 11 bytes) ------------------
     // Win32: void SetLastError(DWORD dwErrCode). Forwards
     // the code to SYS_SETLASTERROR = 10 via rdi. No return
     // value to massage — the Win32 prototype is void, so
     // whatever the syscall leaves in rax is fine.
-    0x48, 0x89, 0xCF,             // 0x69 mov rdi, rcx
-    0xB8, 0x0A, 0x00, 0x00, 0x00, // 0x6C mov eax, 10 (SYS_SETLASTERROR)
-    0xCD, 0x80,                   // 0x71 int 0x80
-    0xC3,                         // 0x73 ret
+    //
+    // Win64 ABI fix: save/restore rdi. `push 10; pop rax`
+    // (3 bytes) replaces `mov eax, 10` (5 bytes) to free the
+    // 2 bytes needed for push rdi / pop rdi.
+    0x57,             // 0x69 push rdi
+    0x48, 0x89, 0xCF, // 0x6A mov rdi, rcx
+    0x6A, 0x0A,       // 0x6D push 10
+    0x58,             // 0x6F pop rax
+    0xCD, 0x80,       // 0x70 int 0x80
+    0x5F,             // 0x72 pop rdi
+    0xC3,             // 0x73 ret
 
     // === Batch 4: critical sections (v0 no-ops) ===============
 
@@ -298,11 +319,18 @@ constexpr u8 kStubsBytes[] = {
     // when a multi-threading model lands.
     //
     // Assumes DF=0 on entry (Win64 ABI contract). Uses rdi
-    // (scratch, caller-saved), clobbers rcx (scratch), eax.
-    0x48, 0x89, 0xCF,             // 0x74 mov rdi, rcx
-    0xB9, 0x28, 0x00, 0x00, 0x00, // 0x77 mov ecx, 40
-    0x31, 0xC0,                   // 0x7C xor eax, eax
-    0xF3, 0xAA,                   // 0x7E rep stosb
+    // (scratch in SysV, but CALLEE-SAVED in Win64 — push/pop
+    // rdi around the rep stosb so the caller's rdi survives).
+    // `mov ecx, 40` compresses to `push 40; pop rcx` to free
+    // 2 bytes for the push/pop rdi pair; stub stays at 18
+    // bytes.
+    0x57,                         // 0x74 push rdi
+    0x48, 0x89, 0xCF,             // 0x75 mov rdi, rcx
+    0x6A, 0x28,                   // 0x78 push 40
+    0x59,                         // 0x7A pop rcx
+    0x31, 0xC0,                   // 0x7B xor eax, eax
+    0xF3, 0xAA,                   // 0x7D rep stosb
+    0x5F,                         // 0x7F pop rdi
     0xB8, 0x01, 0x00, 0x00, 0x00, // 0x80 mov eax, 1 (BOOL TRUE for Ex variants)
     0xC3,                         // 0x85 ret
 
@@ -527,10 +555,18 @@ constexpr u8 kStubsBytes[] = {
     // LPVOID HeapAlloc(HANDLE hHeap=rcx, DWORD dwFlags=rdx, SIZE_T dwBytes=r8).
     // v0: ignore hHeap + dwFlags. Pass dwBytes through to
     // SYS_HEAP_ALLOC. rax = returned VA or 0 on OOM.
-    0x4C, 0x89, 0xC7,             // 0x158 mov rdi, r8
-    0xB8, 0x0B, 0x00, 0x00, 0x00, // 0x15B mov eax, 11 (SYS_HEAP_ALLOC)
-    0xCD, 0x80,                   // 0x160 int 0x80
-    0xC3,                         // 0x162 ret
+    //
+    // Win64 ABI: rdi is callee-saved. Must save + restore
+    // around the `mov rdi, r8`. Fits in same 11 bytes by
+    // compressing `mov eax, 11` (5 bytes) to `push 11; pop rax`
+    // (3 bytes), freeing 2 bytes for the push/pop rdi pair.
+    0x57,             // 0x158 push rdi
+    0x4C, 0x89, 0xC7, // 0x159 mov rdi, r8
+    0x6A, 0x0B,       // 0x15C push 11
+    0x58,             // 0x15E pop rax
+    0xCD, 0x80,       // 0x15F int 0x80
+    0x5F,             // 0x161 pop rdi
+    0xC3,             // 0x162 ret
 
     // --- HeapFree (offset 0x163, 16 bytes) ---------------------
     // BOOL HeapFree(HANDLE hHeap=rcx, DWORD dwFlags=rdx, LPVOID lpMem=r8).
@@ -538,10 +574,18 @@ constexpr u8 kStubsBytes[] = {
     // Always return TRUE — the kernel side silently ignores
     // null/out-of-range pointers (Win32 contract: free(NULL)
     // is legal and should not fail).
-    0x4C, 0x89, 0xC7,             // 0x163 mov rdi, r8
-    0xB8, 0x0C, 0x00, 0x00, 0x00, // 0x166 mov eax, 12 (SYS_HEAP_FREE)
-    0xCD, 0x80,                   // 0x16B int 0x80
-    0xB8, 0x01, 0x00, 0x00, 0x00, // 0x16D mov eax, 1  ; BOOL TRUE
+    //
+    // Win64 ABI fix: save/restore rdi around the `mov rdi, r8`.
+    // `mov eax, 12` compresses to `push 12; pop rax` (3 bytes,
+    // saves 2) which covers the 2-byte push rdi / pop rdi pair.
+    // Keeps total size at 16.
+    0x57,                         // 0x163 push rdi
+    0x4C, 0x89, 0xC7,             // 0x164 mov rdi, r8
+    0x6A, 0x0C,                   // 0x167 push 12
+    0x58,                         // 0x169 pop rax
+    0xCD, 0x80,                   // 0x16A int 0x80
+    0x5F,                         // 0x16C pop rdi
+    0xB8, 0x01, 0x00, 0x00, 0x00, // 0x16D mov eax, 1       ; BOOL TRUE
     0xC3,                         // 0x172 ret
 
     // --- GetProcessHeap (offset 0x173, 8 bytes) ----------------
@@ -554,20 +598,34 @@ constexpr u8 kStubsBytes[] = {
     // --- malloc (offset 0x17B, 11 bytes) -----------------------
     // void* malloc(size_t size=rcx).
     // Identical to HeapAlloc but takes size in rcx (x64 ABI
-    // first arg position) instead of r8.
-    0x48, 0x89, 0xCF,             // 0x17B mov rdi, rcx
-    0xB8, 0x0B, 0x00, 0x00, 0x00, // 0x17E mov eax, 11 (SYS_HEAP_ALLOC)
-    0xCD, 0x80,                   // 0x183 int 0x80
-    0xC3,                         // 0x185 ret
+    // first arg position) instead of r8. Same Win64 ABI fix:
+    // save/restore rdi; compress `mov eax, 11` to fit.
+    0x57,             // 0x17B push rdi
+    0x48, 0x89, 0xCF, // 0x17C mov rdi, rcx
+    0x6A, 0x0B,       // 0x17F push 11
+    0x58,             // 0x181 pop rax
+    0xCD, 0x80,       // 0x182 int 0x80
+    0x5F,             // 0x184 pop rdi
+    0xC3,             // 0x185 ret
 
     // --- free (offset 0x186, 11 bytes) -------------------------
     // void free(void* ptr=rcx).
     // No return value; rax left as syscall result (0) which
-    // is fine — C "void" discards it.
-    0x48, 0x89, 0xCF,             // 0x186 mov rdi, rcx
-    0xB8, 0x0C, 0x00, 0x00, 0x00, // 0x189 mov eax, 12 (SYS_HEAP_FREE)
-    0xCD, 0x80,                   // 0x18E int 0x80
-    0xC3,                         // 0x190 ret
+    // is fine — C "void" discards it. Win64 ABI fix: preserve
+    // rdi across the `mov rdi, rcx`.
+    //
+    // CRITICAL: this stub was the root cause of the batch 48
+    // stress-test crash. A caller allocates rdi to hold the
+    // malloc IAT pointer, calls malloc, then calls free (which
+    // clobbered rdi), then tries to call malloc again via rdi —
+    // jumping to the freed block address (0x5000xxxx range).
+    0x57,             // 0x186 push rdi
+    0x48, 0x89, 0xCF, // 0x187 mov rdi, rcx
+    0x6A, 0x0C,       // 0x18A push 12
+    0x58,             // 0x18C pop rax
+    0xCD, 0x80,       // 0x18D int 0x80
+    0x5F,             // 0x18F pop rdi
+    0xC3,             // 0x190 ret
 
     // --- calloc (offset 0x191, 35 bytes) -----------------------
     // void* calloc(size_t count=rcx, size_t size=rdx).
@@ -580,20 +638,28 @@ constexpr u8 kStubsBytes[] = {
     //   SYS_HEAP_ALLOC preserves r9 (int 0x80 only writes rax).
     //   On success: rep stosb zeros [rdi, rdi+rcx); push/pop
     //   rax around the loop because stosb destroys rdi, rcx.
-    0x48, 0x0F, 0xAF, 0xCA,       // 0x191 imul rcx, rdx       ; rcx = count*size
-    0x48, 0x89, 0xCF,             // 0x195 mov rdi, rcx        ; arg: size
-    0x49, 0x89, 0xC9,             // 0x198 mov r9, rcx         ; save size for stosb
-    0xB8, 0x0B, 0x00, 0x00, 0x00, // 0x19B mov eax, 11 (SYS_HEAP_ALLOC)
-    0xCD, 0x80,                   // 0x1A0 int 0x80            ; rax = ptr or 0
-    0x48, 0x85, 0xC0,             // 0x1A2 test rax, rax
-    0x74, 0x0C,                   // 0x1A5 jz +12 -> 0x1B3 (ret)
-    0x48, 0x89, 0xC7,             // 0x1A7 mov rdi, rax        ; dst
-    0x4C, 0x89, 0xC9,             // 0x1AA mov rcx, r9         ; count
-    0x50,                         // 0x1AD push rax            ; preserve return
-    0x30, 0xC0,                   // 0x1AE xor al, al          ; zero byte
-    0xF3, 0xAA,                   // 0x1B0 rep stosb
-    0x58,                         // 0x1B2 pop rax
-    0xC3,                         // 0x1B3 ret
+    //
+    // Win64 ABI fix: save/restore rdi (callee-saved). Compressed
+    // `mov eax, 11` frees 2 bytes for push/pop rdi; stub stays
+    // at 35 bytes. The fail-path jz still skips 12 bytes (the
+    // zero-fill sequence) to land on the shared `pop rdi; ret`.
+    0x57,                   // 0x191 push rdi
+    0x48, 0x0F, 0xAF, 0xCA, // 0x192 imul rcx, rdx       ; rcx = count*size
+    0x48, 0x89, 0xCF,       // 0x196 mov rdi, rcx        ; arg: size
+    0x49, 0x89, 0xC9,       // 0x199 mov r9, rcx         ; save size for stosb
+    0x6A, 0x0B,             // 0x19C push 11 (SYS_HEAP_ALLOC)
+    0x58,                   // 0x19E pop rax
+    0xCD, 0x80,             // 0x19F int 0x80            ; rax = ptr or 0
+    0x48, 0x85, 0xC0,       // 0x1A1 test rax, rax
+    0x74, 0x0C,             // 0x1A4 jz +12 -> 0x1B2 (pop rdi; ret)
+    0x48, 0x89, 0xC7,       // 0x1A6 mov rdi, rax        ; dst
+    0x4C, 0x89, 0xC9,       // 0x1A9 mov rcx, r9         ; count
+    0x50,                   // 0x1AC push rax            ; preserve return
+    0x30, 0xC0,             // 0x1AD xor al, al          ; zero byte
+    0xF3, 0xAA,             // 0x1AF rep stosb
+    0x58,                   // 0x1B1 pop rax
+    0x5F,                   // 0x1B2 pop rdi
+    0xC3,                   // 0x1B3 ret
 
     // === Batch 10: advapi32 + kernel32 safe-ignore expansion ==
     //
@@ -721,33 +787,54 @@ constexpr u8 kStubsBytes[] = {
     // Ignores hHeap + dwFlags (v0 has one heap per process).
     // Pass lpMem through rdi to SYS_HEAP_SIZE = 14; kernel
     // returns the block's payload capacity in rax.
-    0x4C, 0x89, 0xC7,             // 0x21F mov rdi, r8
-    0xB8, 0x0E, 0x00, 0x00, 0x00, // 0x222 mov eax, 14 (SYS_HEAP_SIZE)
-    0xCD, 0x80,                   // 0x227 int 0x80
-    0xC3,                         // 0x229 ret
+    //
+    // Win64 ABI fix: save/restore rdi; compress mov eax imm.
+    0x57,             // 0x21F push rdi
+    0x4C, 0x89, 0xC7, // 0x220 mov rdi, r8
+    0x6A, 0x0E,       // 0x223 push 14
+    0x58,             // 0x225 pop rax
+    0xCD, 0x80,       // 0x226 int 0x80
+    0x5F,             // 0x228 pop rdi
+    0xC3,             // 0x229 ret
 
-    // --- HeapReAlloc (offset 0x22A, 14 bytes) ------------------
+    // --- HeapReAlloc (offset 0x22A, 16 bytes) ------------------
     // Win32: LPVOID HeapReAlloc(HANDLE hHeap=rcx, DWORD dwFlags=rdx,
     //                           LPVOID lpMem=r8, SIZE_T dwBytes=r9).
     // Translate to the two-arg SYS_HEAP_REALLOC = 15: rdi =
     // lpMem (r8), rsi = dwBytes (r9). hHeap + dwFlags ignored.
     // Return value in rax (new VA, or 0 on failure).
-    0x4C, 0x89, 0xC7,             // 0x22A mov rdi, r8
-    0x4C, 0x89, 0xCE,             // 0x22D mov rsi, r9
-    0xB8, 0x0F, 0x00, 0x00, 0x00, // 0x230 mov eax, 15 (SYS_HEAP_REALLOC)
-    0xCD, 0x80,                   // 0x235 int 0x80
-    0xC3,                         // 0x237 ret
+    //
+    // Win64 ABI fix: save/restore rdi AND rsi (both callee-saved).
+    // Compression of `mov eax, 15` covers only one of the two
+    // push/pop pairs; stub grows by +2 bytes (14 → 16).
+    0x57,             // 0x22A push rdi
+    0x56,             // 0x22B push rsi
+    0x4C, 0x89, 0xC7, // 0x22C mov rdi, r8
+    0x4C, 0x89, 0xCE, // 0x22F mov rsi, r9
+    0x6A, 0x0F,       // 0x232 push 15
+    0x58,             // 0x234 pop rax
+    0xCD, 0x80,       // 0x235 int 0x80
+    0x5E,             // 0x237 pop rsi
+    0x5F,             // 0x238 pop rdi
+    0xC3,             // 0x239 ret
 
-    // --- realloc (offset 0x238, 14 bytes) ----------------------
+    // --- realloc (offset 0x23A, 16 bytes) ----------------------
     // Win32/ucrt: void* realloc(void* ptr=rcx, size_t size=rdx).
     // Same syscall as HeapReAlloc but arguments come from
     // rcx / rdx (standard C calling convention position) —
     // shuffle into rdi / rsi and invoke.
-    0x48, 0x89, 0xCF,             // 0x238 mov rdi, rcx
-    0x48, 0x89, 0xD6,             // 0x23B mov rsi, rdx
-    0xB8, 0x0F, 0x00, 0x00, 0x00, // 0x23E mov eax, 15 (SYS_HEAP_REALLOC)
-    0xCD, 0x80,                   // 0x243 int 0x80
-    0xC3,                         // 0x245 ret
+    //
+    // Same Win64 ABI fix as HeapReAlloc. +2 bytes (14 → 16).
+    0x57,             // 0x23A push rdi
+    0x56,             // 0x23B push rsi
+    0x48, 0x89, 0xCF, // 0x23C mov rdi, rcx
+    0x48, 0x89, 0xD6, // 0x23F mov rsi, rdx
+    0x6A, 0x0F,       // 0x242 push 15
+    0x58,             // 0x244 pop rax
+    0xCD, 0x80,       // 0x245 int 0x80
+    0x5E,             // 0x247 pop rsi
+    0x5F,             // 0x248 pop rdi
+    0xC3,             // 0x249 ret
 
     // --- miss-logger (offset 0x246, 35 bytes) -----------------
     // Catch-all trampoline for every unresolved import. Two-step
@@ -866,12 +953,22 @@ constexpr u8 kStubsBytes[] = {
     // (256) and returns the actual count — so the caller's
     // count-check (`rv == n`) will match for small buffers and
     // trip on larger ones, which is the honest behaviour.
-    0x48, 0x89, 0xD6,             // 0x281 mov rsi, rdx        ; buf
-    0x4C, 0x89, 0xC2,             // 0x284 mov rdx, r8         ; n
-    0xBF, 0x01, 0x00, 0x00, 0x00, // 0x287 mov edi, 1          ; fd = stdout
-    0xB8, 0x02, 0x00, 0x00, 0x00, // 0x28C mov eax, 2 (SYS_WRITE)
-    0xCD, 0x80,                   // 0x291 int 0x80
-    0xC3,                         // 0x293 ret                 ; rax = count
+    //
+    // Win64 ABI fix: save/restore rdi + rsi. Compressed imm8
+    // loads free the 4 bytes needed for 2 push/pop pairs;
+    // stub stays at 19 bytes.
+    0x56,             // 0x281 push rsi
+    0x57,             // 0x282 push rdi
+    0x48, 0x89, 0xD6, // 0x283 mov rsi, rdx        ; buf
+    0x4C, 0x89, 0xC2, // 0x286 mov rdx, r8         ; n
+    0x6A, 0x01,       // 0x289 push 1
+    0x5F,             // 0x28B pop rdi             ; fd = stdout
+    0x6A, 0x02,       // 0x28C push 2
+    0x58,             // 0x28E pop rax             ; SYS_WRITE
+    0xCD, 0x80,       // 0x28F int 0x80
+    0x5F,             // 0x291 pop rdi
+    0x5E,             // 0x292 pop rsi
+    0xC3,             // 0x293 ret                 ; rax = count
 
     // --- return-this (offset 0x294, 4 bytes) -------------------
     // `basic_ostream& basic_ostream::flush()` and any Win32
@@ -2013,7 +2110,7 @@ constexpr u8 kStubsBytes[] = {
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x7E3, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0x7E7, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -2471,6 +2568,12 @@ constexpr StubEntry kStubsTable[] = {
     {"vcruntime140.dll", "_InterlockedCompareExchange", kOffInterlockedCmpXchg},
     {"vcruntime140.dll", "_InterlockedExchange", kOffInterlockedExchg},
     {"vcruntime140.dll", "_InterlockedExchangeAdd", kOffInterlockedExchgAdd},
+    // __chkstk: MSVC stack-probe helper for functions with
+    // frames > 4 KiB. CustomOS maps the full user stack up-
+    // front at PE load, so no probe is needed — just ret. RAX
+    // holds the requested size; we preserve it by doing nothing.
+    {"vcruntime140.dll", "__chkstk", kOffCritSecNop},
+    {"ntdll.dll", "__chkstk", kOffCritSecNop},
     // 64-bit variants (batch 41)
     {"kernel32.dll", "InterlockedIncrement64", kOffInterlockedInc64},
     {"kernel32.dll", "InterlockedDecrement64", kOffInterlockedDec64},

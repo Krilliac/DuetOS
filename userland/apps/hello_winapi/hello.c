@@ -1411,6 +1411,127 @@ void _start(void)
     else
         WriteFile(out, b46_bad, sizeof(b46_bad) - 1, &b46w, 0);
 
+    // Batch 48 exercise — multi-phase stress test.
+    const char b48_banner[] = "[batch48] stress: starting...\n";
+    DWORD b48_bw = 0;
+    WriteFile(out, b48_banner, sizeof(b48_banner) - 1, &b48_bw, 0);
+
+    HANDLE b48_muxes[4];
+    HANDLE b48_events[4];
+    DWORD b48_tls[8];
+    void* b48_vm[4];
+    void* b48_heap[4];
+    volatile LONG b48_counter = 0;
+    BOOL b48_init_ok = 1;
+    const char b48_pre[] = "[batch48] entering init loop\n";
+    DWORD b48_prew = 0;
+    WriteFile(out, b48_pre, sizeof(b48_pre) - 1, &b48_prew, 0);
+    for (int i = 0; i < 4; ++i)
+    {
+        b48_muxes[i] = CreateMutexW(0, 0, 0);
+        if (b48_muxes[i] == 0)
+            b48_init_ok = 0;
+        b48_events[i] = CreateEventW(0, 1, 0, 0);
+        if (b48_events[i] == 0)
+            b48_init_ok = 0;
+        b48_vm[i] = VirtualAlloc(0, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        if (b48_vm[i] == 0)
+            b48_init_ok = 0;
+        b48_heap[i] = HeapAlloc(heap, 0, 128);
+        if (b48_heap[i] == 0)
+            b48_init_ok = 0;
+    }
+    const char b48_post[] = "[batch48] init loop done\n";
+    DWORD b48_postw = 0;
+    WriteFile(out, b48_post, sizeof(b48_post) - 1, &b48_postw, 0);
+    for (int i = 0; i < 8; ++i)
+    {
+        b48_tls[i] = TlsAlloc();
+        if (b48_tls[i] == 0xFFFFFFFFUL)
+            b48_init_ok = 0;
+        TlsSetValue(b48_tls[i], (void*)(unsigned long long)(0x1000 + i));
+    }
+    const char b48_post2[] = "[batch48] tls loop done\n";
+    DWORD b48_post2w = 0;
+    WriteFile(out, b48_post2, sizeof(b48_post2) - 1, &b48_post2w, 0);
+
+    int b48_ops = 0;
+    for (int iter = 0; iter < 1000 && b48_init_ok; ++iter)
+    {
+        int mux = iter & 3;
+        int evt = iter & 3;
+        int tls = iter & 7;
+        int vm = iter & 3;
+        int hp = iter & 3;
+        InterlockedIncrement((LONG*)&b48_counter);
+        ++b48_ops;
+        unsigned long long v = (unsigned long long)TlsGetValue(b48_tls[tls]);
+        TlsSetValue(b48_tls[tls], (void*)(v + 1));
+        ++b48_ops;
+        DWORD* vp = (DWORD*)b48_vm[vm];
+        vp[iter & 0x3FF] = (DWORD)iter;
+        DWORD vread = vp[iter & 0x3FF];
+        (void)vread;
+        ++b48_ops;
+        unsigned char* hbp = (unsigned char*)b48_heap[hp];
+        hbp[iter & 0x7F] = (unsigned char)(iter & 0xFF);
+        ++b48_ops;
+        WaitForSingleObject(b48_muxes[mux], 0);
+        ReleaseMutex(b48_muxes[mux]);
+        ++b48_ops;
+        SetEvent(b48_events[evt]);
+        ResetEvent(b48_events[evt]);
+        ++b48_ops;
+    }
+
+    BOOL b48_counter_ok = b48_counter == 1000;
+    BOOL b48_tls_ok = 1;
+    for (int i = 0; i < 8; ++i)
+    {
+        unsigned long long expected = 0x1000 + i + 125;
+        unsigned long long got = (unsigned long long)TlsGetValue(b48_tls[i]);
+        if (got != expected)
+            b48_tls_ok = 0;
+    }
+    for (int i = 0; i < 4; ++i)
+    {
+        CloseHandle(b48_muxes[i]);
+        CloseHandle(b48_events[i]);
+        VirtualFree(b48_vm[i], 0, MEM_RELEASE);
+        HeapFree(heap, 0, b48_heap[i]);
+    }
+    for (int i = 0; i < 8; ++i)
+        TlsFree(b48_tls[i]);
+
+    const char b48_ok[] = "[batch48] stress 6000 ops OK — counter=1000, TLS+125/slot verified\n";
+    const char b48_bad[] = "[batch48] STRESS TEST FAILED\n";
+    BOOL b48_pass = b48_init_ok && b48_counter_ok && b48_tls_ok && b48_ops == 6000;
+    DWORD b48w = 0;
+    if (b48_pass)
+        WriteFile(out, b48_ok, sizeof(b48_ok) - 1, &b48w, 0);
+    else
+    {
+        WriteFile(out, b48_bad, sizeof(b48_bad) - 1, &b48w, 0);
+        // Diagnostic fields:
+        const char dbg[] = "[batch48-dbg] ";
+        WriteFile(out, dbg, sizeof(dbg) - 1, &b48w, 0);
+        char hex[20];
+        unsigned long long vals[4] = {(unsigned long long)b48_init_ok, (unsigned long long)b48_counter,
+                                      (unsigned long long)b48_tls_ok, (unsigned long long)b48_ops};
+        const char* names[4] = {"init=", " counter=", " tls_ok=", " ops="};
+        for (int i = 0; i < 4; ++i)
+        {
+            WriteFile(out, names[i], (DWORD)strlen(names[i]), &b48w, 0);
+            for (int d = 0; d < 16; ++d)
+            {
+                int nyb = (int)((vals[i] >> ((15 - d) * 4)) & 0xF);
+                hex[d] = (char)((nyb < 10) ? ('0' + nyb) : ('a' + nyb - 10));
+            }
+            hex[16] = '\n';
+            WriteFile(out, hex, (i == 3) ? 17 : 16, &b48w, 0);
+        }
+    }
+
     // Batch 3 round-trip: store a distinctive value via
     // SetLastError, read it back via GetLastError, exit with
     // whatever came back. If the slot works, the kernel log
