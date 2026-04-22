@@ -91,6 +91,7 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     mm/page.cpp
     mm/paging.cpp
     mm/user_copy.S
+    net/stack.cpp
     sched/context_switch.S
     sched/sched.cpp
     security/guard.cpp
