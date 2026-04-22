@@ -63,6 +63,16 @@ FAT_FILE_CLUSTER = 3
 FAT_FILE_NAME = b"HELLO   TXT"  # 8.3, space-padded, no dot
 FAT_FILE_BODY = b"hello from fat32\n"
 
+# Subdirectory seed so the kernel's multi-level path walk has
+# something to resolve. Layout:
+#   /SUB/          (directory, cluster 4)
+#   /SUB/INNER.TXT (file, cluster 5)
+FAT_SUBDIR_CLUSTER = 4
+FAT_SUBDIR_NAME = b"SUB        "
+FAT_INNER_CLUSTER = 5
+FAT_INNER_NAME = b"INNER   TXT"
+FAT_INNER_BODY = b"inner file\n"
+
 
 def build_pmbr() -> bytearray:
     sec = bytearray(SECTOR)
@@ -180,6 +190,8 @@ def build_fat32(part_sector_count: int) -> bytearray:
     struct.pack_into("<I", fat, 1 * 4, 0x0FFFFFFF)
     struct.pack_into("<I", fat, 2 * 4, 0x0FFFFFFF)  # root dir EOC
     struct.pack_into("<I", fat, 3 * 4, 0x0FFFFFFF)  # HELLO.TXT EOC
+    struct.pack_into("<I", fat, 4 * 4, 0x0FFFFFFF)  # /SUB directory EOC
+    struct.pack_into("<I", fat, 5 * 4, 0x0FFFFFFF)  # /SUB/INNER.TXT EOC
     fat1_off = FAT_RESERVED * SECTOR
     fat2_off = fat1_off + FAT_FATSZ * SECTOR
     buf[fat1_off:fat1_off + len(fat)] = fat
@@ -207,6 +219,48 @@ def build_fat32(part_sector_count: int) -> bytearray:
     file_cluster_sector = data_start_sector + (FAT_FILE_CLUSTER - 2) * FAT_SPC
     file_off = file_cluster_sector * SECTOR
     buf[file_off:file_off + len(FAT_FILE_BODY)] = FAT_FILE_BODY
+
+    # /SUB directory entry in the root.
+    sub_entry = bytearray(32)
+    sub_entry[0:11] = FAT_SUBDIR_NAME
+    sub_entry[11] = 0x10   # ATTR_DIRECTORY
+    struct.pack_into("<H", sub_entry, 20, 0)                       # cluster high
+    struct.pack_into("<H", sub_entry, 26, FAT_SUBDIR_CLUSTER)      # cluster low
+    struct.pack_into("<I", sub_entry, 28, 0)                       # size (dirs=0)
+    buf[root_off + 32:root_off + 64] = sub_entry
+
+    # /SUB cluster: has two synthetic entries ("." and "..") and
+    # the real INNER.TXT. Real FAT32 requires "." + ".." in every
+    # non-root directory — without them, Windows treats the dir
+    # as corrupt. Our walker skips attr & kAttrDirectory cluster 0
+    # sentinels naturally, so they don't fight the enumerator.
+    sub_cluster_sector = data_start_sector + (FAT_SUBDIR_CLUSTER - 2) * FAT_SPC
+    sub_off = sub_cluster_sector * SECTOR
+
+    dot = bytearray(32)
+    dot[0:11] = b".          "
+    dot[11] = 0x10
+    struct.pack_into("<H", dot, 26, FAT_SUBDIR_CLUSTER)            # "." = self
+    buf[sub_off:sub_off + 32] = dot
+
+    dotdot = bytearray(32)
+    dotdot[0:11] = b"..         "
+    dotdot[11] = 0x10
+    struct.pack_into("<H", dotdot, 26, 0)                          # ".." at root = 0
+    buf[sub_off + 32:sub_off + 64] = dotdot
+
+    inner = bytearray(32)
+    inner[0:11] = FAT_INNER_NAME
+    inner[11] = 0x20
+    struct.pack_into("<H", inner, 20, 0)
+    struct.pack_into("<H", inner, 26, FAT_INNER_CLUSTER)
+    struct.pack_into("<I", inner, 28, len(FAT_INNER_BODY))
+    buf[sub_off + 64:sub_off + 96] = inner
+
+    # /SUB/INNER.TXT data at cluster 5.
+    inner_cluster_sector = data_start_sector + (FAT_INNER_CLUSTER - 2) * FAT_SPC
+    inner_off = inner_cluster_sector * SECTOR
+    buf[inner_off:inner_off + len(FAT_INNER_BODY)] = FAT_INNER_BODY
 
     return buf
 

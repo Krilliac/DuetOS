@@ -81,6 +81,25 @@ const Volume* Fat32Volume(u32 index);
 /// form. Returns nullptr on miss.
 const DirEntry* Fat32FindInRoot(const Volume* v, const char* name);
 
+/// Multi-component path lookup. `path` is interpreted relative
+/// to the volume root; a leading '/' is tolerated. Components are
+/// separated by '/', each matched case-insensitively against the
+/// 8.3 name. Empty / "/" yields a synthesised "root" DirEntry.
+///
+/// On success fills `*out` and returns true. `out` is caller-
+/// owned storage, not a pointer into the volume; this path walks
+/// beyond the cached root snapshot, so no stable pointer exists.
+///
+/// Out scope (this slice): LFN decoding; symlinks. A miss on any
+/// component short-circuits and returns false.
+bool Fat32LookupPath(const Volume* v, const char* path, DirEntry* out);
+
+/// Enumerate a directory's entries into `out[0..cap-1]`, starting
+/// at `first_cluster`. Returns the number of filled entries. LFN
+/// fragments, deleted slots, volume-label entries, and the "."
+/// / ".." synthetic entries are skipped.
+u32 Fat32ListDirByCluster(const Volume* v, u32 first_cluster, DirEntry* out, u32 cap);
+
 /// Read up to `max` bytes of a file's contents into `out`. Returns
 /// the number of bytes actually written (0..file.size_bytes), or
 /// -1 on any I/O failure. Safe to call with max==0 (trivially

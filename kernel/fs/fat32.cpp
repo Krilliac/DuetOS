@@ -121,18 +121,66 @@ u32 ReadFatEntry(const Volume& v, u32 cluster)
     return LeU32(g_scratch + byte_in_sec) & 0x0FFFFFFFu;
 }
 
-// Walk the directory cluster chain starting at `first_cluster` and
-// fill `v.root_entries[]`. Stops at the first 0x00 entry, at an
-// EOC FAT value, or when the entry cap is hit. LFN entries (attr
-// == 0x0F) are skipped; so are deleted (byte 0 == 0xE5) and volume
-// label (attr & 0x08) entries.
-bool WalkDirectory(Volume& v, u32 first_cluster)
+// True if the formatted name is exactly "." or "..". Used by the
+// enumerators to suppress the self / parent pseudo-entries that
+// every non-root directory carries.
+bool IsDotEntry(const char* n)
 {
-    v.root_entry_count = 0;
+    if (n[0] != '.')
+        return false;
+    if (n[1] == 0)
+        return true;
+    if (n[1] == '.' && n[2] == 0)
+        return true;
+    return false;
+}
+
+// Case-insensitive ASCII compare of two NUL-terminated strings.
+bool NameIEqual(const char* a, const char* b)
+{
+    u32 i = 0;
+    for (; a[i] != 0 && b[i] != 0; ++i)
+    {
+        char ca = a[i];
+        char cb = b[i];
+        if (ca >= 'a' && ca <= 'z')
+            ca = static_cast<char>(ca - 32);
+        if (cb >= 'a' && cb <= 'z')
+            cb = static_cast<char>(cb - 32);
+        if (ca != cb)
+            return false;
+    }
+    return a[i] == 0 && b[i] == 0;
+}
+
+// Fill one DirEntry from the 32-byte on-disk record.
+void DecodeEntry(const u8* e, DirEntry& out)
+{
+    VZero(&out, sizeof(out));
+    FormatShortName(e, out.name);
+    out.attributes = e[11];
+    const u16 cl_lo = LeU16(e + 26);
+    const u16 cl_hi = LeU16(e + 20);
+    out.first_cluster = (u32(cl_hi) << 16) | u32(cl_lo);
+    out.size_bytes = LeU32(e + 28);
+}
+
+// Visitor type for the directory-cluster walker. Return true to
+// keep walking, false to short-circuit. `ctx` is caller-opaque.
+using DirVisitor = bool (*)(const DirEntry& e, void* ctx);
+
+// Walk a directory's cluster chain, decode each in-use entry, and
+// feed it to `visit`. LFN / deleted / volume-label / dot entries
+// are filtered. Returns true on clean completion (end-of-dir or
+// EOC), false on I/O error. A visitor that returns `false` also
+// ends the walk — the overall return is still true (not an error).
+//
+// Reuses g_scratch for cluster data; the visitor MUST copy any
+// DirEntry fields it wants to keep before returning — the next
+// cluster read overwrites scratch.
+bool WalkDirChain(const Volume& v, u32 first_cluster, DirVisitor visit, void* ctx)
+{
     u32 cluster = first_cluster;
-    // Bounded loop: FAT32 chains can be long on real disks, but
-    // we're filling a fixed-size snapshot. Cap at 64 clusters so
-    // a bogus self-loop in the FAT doesn't spin forever.
     for (u32 step = 0; step < 64; ++step)
     {
         if (cluster < 2 || cluster >= 0x0FFFFFF8u)
@@ -147,28 +195,46 @@ bool WalkDirectory(Volume& v, u32 first_cluster)
             if (e[0] == 0x00)
                 return true; // end of dir
             if (e[0] == 0xE5)
-                continue; // deleted
+                continue;
             const u8 attr = e[11];
             if ((attr & kAttrLongName) == kAttrLongName)
-                continue; // LFN fragment
+                continue;
             if (attr & kAttrVolumeId)
-                continue; // volume label, not a real file
+                continue;
 
-            if (v.root_entry_count >= kMaxDirEntries)
+            DirEntry decoded;
+            DecodeEntry(e, decoded);
+            if (IsDotEntry(decoded.name))
+                continue;
+            if (!visit(decoded, ctx))
                 return true;
-            DirEntry& out = v.root_entries[v.root_entry_count];
-            VZero(&out, sizeof(out));
-            FormatShortName(e, out.name);
-            out.attributes = attr;
-            const u16 cl_lo = LeU16(e + 26);
-            const u16 cl_hi = LeU16(e + 20);
-            out.first_cluster = (u32(cl_hi) << 16) | u32(cl_lo);
-            out.size_bytes = LeU32(e + 28);
-            ++v.root_entry_count;
         }
         cluster = ReadFatEntry(v, cluster);
     }
     return true;
+}
+
+// Probe-time root snapshot filler. Uses the generic walker with a
+// cookie that appends into v.root_entries[].
+bool WalkRootIntoSnapshot(Volume& v, u32 first_cluster)
+{
+    v.root_entry_count = 0;
+    struct Ctx
+    {
+        Volume* v;
+    };
+    Ctx ctx{&v};
+    return WalkDirChain(
+        v, first_cluster,
+        [](const DirEntry& e, void* cx) -> bool
+        {
+            auto* c = static_cast<Ctx*>(cx);
+            if (c->v->root_entry_count >= kMaxDirEntries)
+                return false;
+            c->v->root_entries[c->v->root_entry_count++] = e;
+            return true;
+        },
+        &ctx);
 }
 
 void LogEntry(const DirEntry& e)
@@ -256,7 +322,7 @@ bool Fat32Probe(u32 block_handle, u32* out_index)
     arch::SerialWriteHex(static_cast<u64>(v.data_start_sector));
     SerialWrite("\n");
 
-    if (!WalkDirectory(v, v.root_cluster))
+    if (!WalkRootIntoSnapshot(v, v.root_cluster))
     {
         core::Log(core::LogLevel::Error, "fs/fat32", "root directory walk failed");
         return false;
@@ -282,6 +348,112 @@ const Volume* Fat32Volume(u32 index)
     if (index >= g_volume_count)
         return nullptr;
     return &g_volumes[index];
+}
+
+u32 Fat32ListDirByCluster(const Volume* v, u32 first_cluster, DirEntry* out, u32 cap)
+{
+    if (v == nullptr || out == nullptr || cap == 0)
+        return 0;
+    struct Ctx
+    {
+        DirEntry* out;
+        u32 cap;
+        u32 n;
+    };
+    Ctx ctx{out, cap, 0};
+    WalkDirChain(
+        *v, first_cluster,
+        [](const DirEntry& e, void* cx) -> bool
+        {
+            auto* c = static_cast<Ctx*>(cx);
+            if (c->n >= c->cap)
+                return false;
+            c->out[c->n++] = e;
+            return true;
+        },
+        &ctx);
+    return ctx.n;
+}
+
+namespace
+{
+// Path walker context: "looking for `want`; when the visitor sees
+// it, stash the entry in `match` and stop."
+struct FindCtx
+{
+    const char* want;
+    DirEntry match;
+    bool found;
+};
+
+bool FindVisitor(const DirEntry& e, void* cx)
+{
+    auto* c = static_cast<FindCtx*>(cx);
+    if (NameIEqual(e.name, c->want))
+    {
+        c->match = e;
+        c->found = true;
+        return false; // stop the walk
+    }
+    return true;
+}
+} // namespace
+
+bool Fat32LookupPath(const Volume* v, const char* path, DirEntry* out)
+{
+    if (v == nullptr || path == nullptr || out == nullptr)
+        return false;
+
+    // Synthetic "root" entry: directory at v->root_cluster.
+    DirEntry cur;
+    VZero(&cur, sizeof(cur));
+    cur.name[0] = '/';
+    cur.name[1] = 0;
+    cur.attributes = kAttrDirectory;
+    cur.first_cluster = v->root_cluster;
+    cur.size_bytes = 0;
+
+    // Skip leading slashes. An empty/"/" path returns the root entry.
+    while (*path == '/')
+        ++path;
+    if (*path == 0)
+    {
+        *out = cur;
+        return true;
+    }
+
+    // Component-by-component descent. We copy each component into
+    // a 13-byte local buffer (8.3 max = "FILENAME.EXT\0" = 13) so
+    // we never mutate the caller's path.
+    char comp[13];
+    while (*path != 0)
+    {
+        u32 n = 0;
+        while (*path != 0 && *path != '/')
+        {
+            if (n >= sizeof(comp) - 1)
+                return false; // component longer than an 8.3 short name
+            comp[n++] = *path++;
+        }
+        comp[n] = 0;
+        if (n == 0)
+            continue; // consecutive '/'
+        while (*path == '/')
+            ++path;
+
+        if ((cur.attributes & kAttrDirectory) == 0)
+            return false; // walking INTO a regular file
+
+        FindCtx ctx{comp, {}, false};
+        if (!WalkDirChain(*v, cur.first_cluster, &FindVisitor, &ctx))
+            return false;
+        if (!ctx.found)
+            return false;
+        cur = ctx.match;
+    }
+
+    *out = cur;
+    return true;
 }
 
 const DirEntry* Fat32FindInRoot(const Volume* v, const char* name)
@@ -459,6 +631,35 @@ void Fat32SelfTest()
         }
     }
     SerialWrite("[fs/fat32] self-test OK (HELLO.TXT contents verified)\n");
+
+    // Second phase: prove the path walker resolves a nested entry.
+    // Image-builder seeds /SUB/INNER.TXT with body "inner file\n".
+    DirEntry inner;
+    if (!Fat32LookupPath(v0, "/SUB/INNER.TXT", &inner))
+    {
+        SerialWrite("[fs/fat32] self-test WARN: /SUB/INNER.TXT not found\n");
+        return;
+    }
+    VZero(buf, sizeof(buf));
+    const i64 n2 = Fat32ReadFile(v0, &inner, buf, sizeof(buf));
+    const char* expect2 = "inner file\n";
+    u32 elen2 = 0;
+    while (expect2[elen2] != 0)
+        ++elen2;
+    if (n2 != static_cast<i64>(elen2))
+    {
+        SerialWrite("[fs/fat32] self-test FAILED: /SUB/INNER.TXT wrong size\n");
+        return;
+    }
+    for (u32 i = 0; i < elen2; ++i)
+    {
+        if (buf[i] != static_cast<u8>(expect2[i]))
+        {
+            SerialWrite("[fs/fat32] self-test FAILED: /SUB/INNER.TXT content mismatch\n");
+            return;
+        }
+    }
+    SerialWrite("[fs/fat32] self-test OK (/SUB/INNER.TXT path-walked + verified)\n");
 }
 
 } // namespace customos::fs::fat32

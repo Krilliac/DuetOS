@@ -4178,7 +4178,9 @@ void CmdLs(u32 argc, char** argv)
         return;
     }
 
-    // FAT32 mount at /fat → volume 0's root directory.
+    // FAT32 mount at /fat → volume 0. `ls /fat[/subpath]` resolves
+    // the full path via Fat32LookupPath so arbitrarily deep
+    // directory trees work, not just the root.
     if (const char* fat_leaf = FatLeaf(path); fat_leaf != nullptr)
     {
         namespace fat = customos::fs::fat32;
@@ -4188,39 +4190,47 @@ void CmdLs(u32 argc, char** argv)
             ConsoleWriteln("LS: FAT32 NOT MOUNTED (no probed volume)");
             return;
         }
-        if (*fat_leaf == '\0')
-        {
-            // `ls /fat` — enumerate the root snapshot.
-            for (u32 i = 0; i < v->root_entry_count; ++i)
-            {
-                const fat::DirEntry& e = v->root_entries[i];
-                ConsoleWrite("  ");
-                ConsoleWrite(e.name);
-                if (e.attributes & 0x10)
-                {
-                    ConsoleWriteln("/");
-                }
-                else
-                {
-                    ConsoleWrite("   ");
-                    WriteU64Dec(e.size_bytes);
-                    ConsoleWriteln(" BYTES");
-                }
-            }
-            return;
-        }
-        // `ls /fat/NAME` — stat the single file.
-        const fat::DirEntry* e = fat::Fat32FindInRoot(v, fat_leaf);
-        if (e == nullptr)
+        fat::DirEntry entry;
+        if (!fat::Fat32LookupPath(v, fat_leaf, &entry))
         {
             ConsoleWrite("LS: NO SUCH PATH: ");
             ConsoleWriteln(path);
             return;
         }
-        ConsoleWrite(e->name);
-        ConsoleWrite("   ");
-        WriteU64Dec(e->size_bytes);
-        ConsoleWriteln(" BYTES");
+        if ((entry.attributes & 0x10) == 0)
+        {
+            // Regular file — POSIX-style: print the name and size.
+            ConsoleWrite(entry.name);
+            ConsoleWrite("   ");
+            WriteU64Dec(entry.size_bytes);
+            ConsoleWriteln(" BYTES");
+            return;
+        }
+        // Directory — enumerate. The on-disk walker returns a
+        // fresh snapshot each call; cap at 32 entries for v0.
+        static fat::DirEntry listing[32];
+        const u32 count = fat::Fat32ListDirByCluster(v, entry.first_cluster, listing, 32);
+        if (count == 0)
+        {
+            ConsoleWriteln("(EMPTY DIRECTORY)");
+            return;
+        }
+        for (u32 i = 0; i < count; ++i)
+        {
+            const fat::DirEntry& e = listing[i];
+            ConsoleWrite("  ");
+            ConsoleWrite(e.name);
+            if (e.attributes & 0x10)
+            {
+                ConsoleWriteln("/");
+            }
+            else
+            {
+                ConsoleWrite("   ");
+                WriteU64Dec(e.size_bytes);
+                ConsoleWriteln(" BYTES");
+            }
+        }
         return;
     }
 
@@ -4318,10 +4328,16 @@ void CmdCat(u32 argc, char** argv)
             ConsoleWriteln("CAT: FAT32 NOT MOUNTED");
             return;
         }
-        const fat::DirEntry* e = fat::Fat32FindInRoot(v, fat_leaf);
-        if (e == nullptr)
+        fat::DirEntry entry;
+        if (!fat::Fat32LookupPath(v, fat_leaf, &entry))
         {
             ConsoleWrite("CAT: NO SUCH FILE: ");
+            ConsoleWriteln(path);
+            return;
+        }
+        if (entry.attributes & 0x10)
+        {
+            ConsoleWrite("CAT: IS A DIRECTORY: ");
             ConsoleWriteln(path);
             return;
         }
@@ -4330,7 +4346,7 @@ void CmdCat(u32 argc, char** argv)
         // access isn't a concern. Files larger than 4 KiB get
         // truncated — the streamed-read follow-up slice lifts this.
         static u8 buf[4096];
-        const i64 n = fat::Fat32ReadFile(v, e, buf, sizeof(buf));
+        const i64 n = fat::Fat32ReadFile(v, &entry, buf, sizeof(buf));
         if (n < 0)
         {
             ConsoleWriteln("CAT: READ ERROR");
