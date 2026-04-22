@@ -795,11 +795,11 @@ bool ZeroCluster(const Volume& v, u32 cluster)
 // containing sector back. Returns true on success, false on miss
 // or I/O error. Only touches the size field — other fields
 // (first_cluster, attrs, times) are preserved.
-bool RootUpdateEntrySize(const Volume& v, const char* want, u32 new_size)
+bool UpdateEntrySizeInDir(const Volume& v, u32 first_cluster, const char* want, u32 new_size)
 {
-    u32 cluster = v.root_cluster;
+    u32 cluster = first_cluster;
     // Bounded like the other walkers — 64 clusters covers any
-    // realistic root directory.
+    // realistic directory.
     for (u32 step = 0; step < 64; ++step)
     {
         if (cluster < 2 || cluster >= 0x0FFFFFF8u)
@@ -935,9 +935,9 @@ bool MakeSfn(const char* name, u8* out_11)
 // address, which WalkDirChain intentionally hides.
 using OnDiskSfnVisitor = bool (*)(u64 sector_lba, u32 off_in_sec, const u8* raw, const DirEntry& e, void* ctx);
 
-bool WalkRootOnDisk(const Volume& v, OnDiskSfnVisitor visit, void* ctx)
+bool WalkDirOnDisk(const Volume& v, u32 first_cluster, OnDiskSfnVisitor visit, void* ctx)
 {
-    u32 cluster = v.root_cluster;
+    u32 cluster = first_cluster;
     for (u32 step = 0; step < 64; ++step)
     {
         if (cluster < 2 || cluster >= 0x0FFFFFF8u)
@@ -976,9 +976,9 @@ bool WalkRootOnDisk(const Volume& v, OnDiskSfnVisitor visit, void* ctx)
 //   (1) first 0xE5 (deleted) slot — reuses dir space.
 //   (2) the 0x00 end-of-dir slot — extends the dir one entry.
 // Returns true + fills sector/off when a slot is found.
-bool FindFreeRootSlot(const Volume& v, u64* out_lba, u32* out_off)
+bool FindFreeSlotInDir(const Volume& v, u32 first_cluster, u64* out_lba, u32* out_off)
 {
-    u32 cluster = v.root_cluster;
+    u32 cluster = first_cluster;
     for (u32 step = 0; step < 64; ++step)
     {
         if (cluster < 2 || cluster >= 0x0FFFFFF8u)
@@ -1007,7 +1007,7 @@ bool FindFreeRootSlot(const Volume& v, u64* out_lba, u32* out_off)
 // Find the sector LBA + offset of the root-dir SFN entry whose
 // decoded name matches `want` (case-insensitive). Returns false
 // if not found or on I/O error.
-bool FindEntryLba(const Volume& v, const char* want, u64* out_lba, u32* out_off)
+bool FindEntryLbaInDir(const Volume& v, u32 first_cluster, const char* want, u64* out_lba, u32* out_off)
 {
     struct Ctx
     {
@@ -1017,8 +1017,8 @@ bool FindEntryLba(const Volume& v, const char* want, u64* out_lba, u32* out_off)
         bool found;
     };
     Ctx ctx{want, 0, 0, false};
-    const bool walk_ok = WalkRootOnDisk(
-        v,
+    const bool walk_ok = WalkDirOnDisk(
+        v, first_cluster,
         [](u64 lba, u32 off, const u8* raw, const DirEntry& e, void* cx) -> bool
         {
             (void)raw;
@@ -1058,20 +1058,144 @@ bool FreeClusterChain(const Volume& v, u32 first_cluster)
     return true;
 }
 
+// Find an entry by name in `dir_cluster`, returning it by value.
+// Unlike Fat32FindInRoot (which reads the cached snapshot), this
+// walks fresh on-disk — subdirectories have no cache. Uses the
+// generic WalkDirChain so LFN names resolve too.
+bool FindInDirByName(const Volume& v, u32 dir_cluster, const char* want, DirEntry* out)
+{
+    struct Ctx
+    {
+        const char* want;
+        DirEntry match;
+        bool found;
+    };
+    Ctx ctx;
+    ctx.want = want;
+    ctx.found = false;
+    VZero(&ctx.match, sizeof(ctx.match));
+
+    WalkDirChain(
+        v, dir_cluster,
+        [](const DirEntry& e, void* cx) -> bool
+        {
+            auto* c = static_cast<Ctx*>(cx);
+            if (NameIEqual(e.name, c->want))
+            {
+                CopyEntry(c->match, e);
+                c->found = true;
+                return false;
+            }
+            return true;
+        },
+        &ctx);
+    if (!ctx.found)
+        return false;
+    CopyEntry(*out, ctx.match);
+    return true;
+}
+
+// Resolve the parent directory for a path. On success fills
+// `*out_parent_cluster` and copies the basename into `base_out`.
+// Fails when any intermediate component is missing, not a
+// directory, or the path is just "/" with no basename.
+// Forward decl — SplitPath's body sits below but is called here.
+bool SplitPath(const char* path, char* parent_out, u32 parent_cap, char* base_out, u32 base_cap);
+
+bool ResolveParentDir(const Volume& v, const char* path, u32* out_parent_cluster, char* base_out, u32 base_cap)
+{
+    char parent_path[128];
+    if (!SplitPath(path, parent_path, sizeof(parent_path), base_out, base_cap))
+        return false;
+    DirEntry parent;
+    if (!Fat32LookupPath(&v, parent_path, &parent))
+        return false;
+    if ((parent.attributes & kAttrDirectory) == 0)
+        return false;
+    // Synthetic root returned by Fat32LookupPath("") has
+    // first_cluster already set to v.root_cluster; subdirs carry
+    // their on-disk first_cluster. Either way this is the cluster
+    // we want for subsequent InDir ops.
+    *out_parent_cluster = parent.first_cluster;
+    return true;
+}
+
+// Split a volume-relative path into (parent_dir_path, basename).
+// Both outputs are written into caller-supplied buffers. Examples:
+//   "/FILE"          -> parent="",        base="FILE"
+//   "FILE"           -> parent="",        base="FILE"
+//   "/SUB/FILE"      -> parent="SUB",     base="FILE"
+//   "/A/B/FILE"      -> parent="A/B",     base="FILE"
+//   "/"              -> returns false (no basename)
+// Trailing slashes are stripped.
+bool SplitPath(const char* path, char* parent_out, u32 parent_cap, char* base_out, u32 base_cap)
+{
+    if (path == nullptr || parent_out == nullptr || base_out == nullptr)
+        return false;
+    // Skip leading slashes.
+    while (*path == '/')
+        ++path;
+    // Length without trailing slashes.
+    u32 n = 0;
+    while (path[n] != 0)
+        ++n;
+    while (n > 0 && path[n - 1] == '/')
+        --n;
+    if (n == 0)
+        return false;
+
+    // Find the last slash in [0..n).
+    u32 last_slash = 0xFFFFFFFFu;
+    for (u32 i = n; i-- > 0;)
+    {
+        if (path[i] == '/')
+        {
+            last_slash = i;
+            break;
+        }
+    }
+
+    u32 parent_len = 0;
+    u32 base_len = 0;
+    if (last_slash == 0xFFFFFFFFu)
+    {
+        base_len = n;
+        parent_len = 0;
+    }
+    else
+    {
+        parent_len = last_slash;
+        base_len = n - last_slash - 1;
+    }
+    if (parent_len + 1 > parent_cap || base_len + 1 > base_cap || base_len == 0)
+        return false;
+    for (u32 i = 0; i < parent_len; ++i)
+        parent_out[i] = path[i];
+    parent_out[parent_len] = 0;
+    for (u32 i = 0; i < base_len; ++i)
+        base_out[i] = path[last_slash + 1 + i];
+    base_out[base_len] = 0;
+    return true;
+}
+
 } // namespace
 
-i64 Fat32AppendInRoot(const Volume* v, const char* name, const void* buf, u64 len)
+namespace
+{
+// Internal worker used by Fat32AppendInRoot and Fat32AppendAtPath.
+// `dir_cluster` names the directory the entry lives in; the caller
+// has already resolved it.
+i64 AppendInDir(const Volume* v, u32 dir_cluster, const char* name, const void* buf, u64 len)
 {
     if (v == nullptr || name == nullptr || buf == nullptr)
         return -1;
     if (len == 0)
         return 0;
 
-    // Resolve the entry via the cached root snapshot so we can
-    // read its current first_cluster / size without a fresh walk.
-    const DirEntry* e = Fat32FindInRoot(v, name);
-    if (e == nullptr)
+    DirEntry e_val;
+    if (!FindInDirByName(*v, dir_cluster, name, &e_val))
         return -1;
+    const DirEntry* e = &e_val;
     if (e->attributes & kAttrDirectory)
         return -1; // append-to-directory is nonsensical
     if (e->first_cluster < 2)
@@ -1167,23 +1291,46 @@ i64 Fat32AppendInRoot(const Volume* v, const char* name, const void* buf, u64 le
     // file's on-disk cluster chain is longer than its declared
     // size. Log + fail hard; caller should treat the volume as
     // potentially inconsistent (v0 has no journal to roll back).
-    if (!RootUpdateEntrySize(*v, name, new_size))
+    if (!UpdateEntrySizeInDir(*v, dir_cluster, name, new_size))
     {
         core::Log(core::LogLevel::Error, "fs/fat32", "append: cluster chain extended but dir entry size update failed");
         return -1;
     }
 
-    // Refresh the cached root snapshot so the next Fat32FindInRoot
-    // sees the new size + first_cluster. We just re-walk; the
-    // volume registry is non-const but the public handle is const
-    // — cast off constness, same as the self-test's write-back path.
-    Volume* vm = const_cast<Volume*>(v);
-    WalkRootIntoSnapshot(*vm, vm->root_cluster);
+    // Refresh the cached root snapshot when the target IS the root
+    // — subdirs don't have a cache, so no-op there.
+    if (dir_cluster == v->root_cluster)
+    {
+        Volume* vm = const_cast<Volume*>(v);
+        WalkRootIntoSnapshot(*vm, vm->root_cluster);
+    }
 
     return static_cast<i64>(written);
 }
 
-i64 Fat32CreateInRoot(const Volume* v, const char* name, const void* buf, u64 len)
+} // namespace
+
+i64 Fat32AppendInRoot(const Volume* v, const char* name, const void* buf, u64 len)
+{
+    if (v == nullptr)
+        return -1;
+    return AppendInDir(v, v->root_cluster, name, buf, len);
+}
+
+i64 Fat32AppendAtPath(const Volume* v, const char* path, const void* buf, u64 len)
+{
+    if (v == nullptr || path == nullptr)
+        return -1;
+    u32 parent_cluster = 0;
+    char basename[64];
+    if (!ResolveParentDir(*v, path, &parent_cluster, basename, sizeof(basename)))
+        return -1;
+    return AppendInDir(v, parent_cluster, basename, buf, len);
+}
+
+namespace
+{
+i64 CreateInDir(const Volume* v, u32 dir_cluster, const char* name, const void* buf, u64 len)
 {
     if (v == nullptr || name == nullptr)
         return -1;
@@ -1196,17 +1343,19 @@ i64 Fat32CreateInRoot(const Volume* v, const char* name, const void* buf, u64 le
     if (!MakeSfn(name, sfn))
         return -1;
 
-    // Duplicate check — walking the cached snapshot is cheaper
-    // than a fresh on-disk walk and sufficient because our create
-    // immediately refreshes the snapshot at success.
+    // Duplicate check via on-disk lookup — cached snapshot only
+    // reflects the root, so subdirs need a fresh walk anyway.
     char human[13];
     FormatShortName(sfn, human);
-    if (Fat32FindInRoot(v, human) != nullptr)
-        return -1;
+    {
+        DirEntry tmp;
+        if (FindInDirByName(*v, dir_cluster, human, &tmp))
+            return -1;
+    }
 
     u64 slot_lba = 0;
     u32 slot_off = 0;
-    if (!FindFreeRootSlot(*v, &slot_lba, &slot_off))
+    if (!FindFreeSlotInDir(*v, dir_cluster, &slot_lba, &slot_off))
         return -1;
 
     // Allocate and chain clusters for the content, if any.
@@ -1305,13 +1454,37 @@ i64 Fat32CreateInRoot(const Volume* v, const char* name, const void* buf, u64 le
     // data. For v0 the directory lives in one cluster and our
     // tests never reach that corner — skip.
 
-    // Refresh cached snapshot.
-    Volume* vm = const_cast<Volume*>(v);
-    WalkRootIntoSnapshot(*vm, vm->root_cluster);
+    if (dir_cluster == v->root_cluster)
+    {
+        Volume* vm = const_cast<Volume*>(v);
+        WalkRootIntoSnapshot(*vm, vm->root_cluster);
+    }
     return static_cast<i64>(len);
 }
 
-bool Fat32DeleteInRoot(const Volume* v, const char* name)
+} // namespace
+
+i64 Fat32CreateInRoot(const Volume* v, const char* name, const void* buf, u64 len)
+{
+    if (v == nullptr)
+        return -1;
+    return CreateInDir(v, v->root_cluster, name, buf, len);
+}
+
+i64 Fat32CreateAtPath(const Volume* v, const char* path, const void* buf, u64 len)
+{
+    if (v == nullptr || path == nullptr)
+        return -1;
+    u32 parent_cluster = 0;
+    char basename[64];
+    if (!ResolveParentDir(*v, path, &parent_cluster, basename, sizeof(basename)))
+        return -1;
+    return CreateInDir(v, parent_cluster, basename, buf, len);
+}
+
+namespace
+{
+bool DeleteInDir(const Volume* v, u32 dir_cluster, const char* name)
 {
     if (v == nullptr || name == nullptr)
         return false;
@@ -1324,8 +1497,8 @@ bool Fat32DeleteInRoot(const Volume* v, const char* name)
         bool found;
     };
     FindCtx fc{name, 0, 0, 0, false};
-    WalkRootOnDisk(
-        *v,
+    WalkDirOnDisk(
+        *v, dir_cluster,
         [](u64 lba, u32 off, const u8* raw, const DirEntry& e, void* cx) -> bool
         {
             auto* c = static_cast<FindCtx*>(cx);
@@ -1362,21 +1535,47 @@ bool Fat32DeleteInRoot(const Volume* v, const char* name)
     if (drivers::storage::BlockDeviceWrite(v->block_handle, fc.lba, 1, g_scratch) != 0)
         return false;
 
-    Volume* vm = const_cast<Volume*>(v);
-    WalkRootIntoSnapshot(*vm, vm->root_cluster);
+    if (dir_cluster == v->root_cluster)
+    {
+        Volume* vm = const_cast<Volume*>(v);
+        WalkRootIntoSnapshot(*vm, vm->root_cluster);
+    }
     return true;
 }
 
-i64 Fat32TruncateInRoot(const Volume* v, const char* name, u64 new_size)
+} // namespace
+
+bool Fat32DeleteInRoot(const Volume* v, const char* name)
+{
+    if (v == nullptr)
+        return false;
+    return DeleteInDir(v, v->root_cluster, name);
+}
+
+bool Fat32DeleteAtPath(const Volume* v, const char* path)
+{
+    if (v == nullptr || path == nullptr)
+        return false;
+    u32 parent_cluster = 0;
+    char basename[64];
+    if (!ResolveParentDir(*v, path, &parent_cluster, basename, sizeof(basename)))
+        return false;
+    return DeleteInDir(v, parent_cluster, basename);
+}
+
+namespace
+{
+i64 TruncateInDir(const Volume* v, u32 dir_cluster, const char* name, u64 new_size)
 {
     if (v == nullptr || name == nullptr)
         return -1;
     if (new_size > 0xFFFFFFFFu)
         return -1;
 
-    const DirEntry* e = Fat32FindInRoot(v, name);
-    if (e == nullptr)
+    DirEntry e_val;
+    if (!FindInDirByName(*v, dir_cluster, name, &e_val))
         return -1;
+    const DirEntry* e = &e_val;
     if (e->attributes & kAttrDirectory)
         return -1;
     const u64 old_size = e->size_bytes;
@@ -1398,7 +1597,7 @@ i64 Fat32TruncateInRoot(const Volume* v, const char* name, u64 new_size)
         while (remain > 0)
         {
             const u64 chunk = (remain < sizeof(zeros)) ? remain : sizeof(zeros);
-            const i64 a = Fat32AppendInRoot(v, name, zeros, chunk);
+            const i64 a = AppendInDir(v, dir_cluster, name, zeros, chunk);
             if (a != static_cast<i64>(chunk))
                 return -1;
             remain -= chunk;
@@ -1413,9 +1612,7 @@ i64 Fat32TruncateInRoot(const Volume* v, const char* name, u64 new_size)
     if (new_size == 0)
     {
         // Free the whole chain, then patch the dir entry to
-        // size=0, first_cluster=0. Read-modify-write the sector
-        // containing the entry; touch ONLY bytes 20/21 (hi) and
-        // 26/27 (lo) for cluster + 28..31 for size.
+        // size=0, first_cluster=0.
         if (e->first_cluster >= 2)
         {
             if (!FreeClusterChain(*v, e->first_cluster))
@@ -1423,7 +1620,7 @@ i64 Fat32TruncateInRoot(const Volume* v, const char* name, u64 new_size)
         }
         u64 flba = 0;
         u32 foff = 0;
-        if (!FindEntryLba(*v, name, &flba, &foff))
+        if (!FindEntryLbaInDir(*v, dir_cluster, name, &flba, &foff))
             return -1;
         if (drivers::storage::BlockDeviceRead(v->block_handle, flba, 1, g_scratch) != 0)
             return -1;
@@ -1437,8 +1634,11 @@ i64 Fat32TruncateInRoot(const Volume* v, const char* name, u64 new_size)
         g_scratch[foff + 31] = 0;
         if (drivers::storage::BlockDeviceWrite(v->block_handle, flba, 1, g_scratch) != 0)
             return -1;
-        Volume* vm = const_cast<Volume*>(v);
-        WalkRootIntoSnapshot(*vm, vm->root_cluster);
+        if (dir_cluster == v->root_cluster)
+        {
+            Volume* vm = const_cast<Volume*>(v);
+            WalkRootIntoSnapshot(*vm, vm->root_cluster);
+        }
         return 0;
     }
 
@@ -1460,11 +1660,34 @@ i64 Fat32TruncateInRoot(const Volume* v, const char* name, u64 new_size)
         if (!FreeClusterChain(*v, first_to_free))
             return -1;
     }
-    Volume* vm = const_cast<Volume*>(v);
-    if (!RootUpdateEntrySize(*vm, name, static_cast<u32>(new_size)))
+    if (!UpdateEntrySizeInDir(*v, dir_cluster, name, static_cast<u32>(new_size)))
         return -1;
-    WalkRootIntoSnapshot(*vm, vm->root_cluster);
+    if (dir_cluster == v->root_cluster)
+    {
+        Volume* vm = const_cast<Volume*>(v);
+        WalkRootIntoSnapshot(*vm, vm->root_cluster);
+    }
     return static_cast<i64>(new_size);
+}
+
+} // namespace
+
+i64 Fat32TruncateInRoot(const Volume* v, const char* name, u64 new_size)
+{
+    if (v == nullptr)
+        return -1;
+    return TruncateInDir(v, v->root_cluster, name, new_size);
+}
+
+i64 Fat32TruncateAtPath(const Volume* v, const char* path, u64 new_size)
+{
+    if (v == nullptr || path == nullptr)
+        return -1;
+    u32 parent_cluster = 0;
+    char basename[64];
+    if (!ResolveParentDir(*v, path, &parent_cluster, basename, sizeof(basename)))
+        return -1;
+    return TruncateInDir(v, parent_cluster, basename, new_size);
 }
 
 bool Fat32ReadFileStream(const Volume* v, const DirEntry* e, ReadChunkCb cb, void* ctx)
@@ -1890,6 +2113,50 @@ void Fat32SelfTest()
         return;
     }
     SerialWrite("[fs/fat32] self-test OK (deleted NEW.TXT)\n");
+
+    // Tenth phase: create + read + delete a file in /SUB, using
+    // the path-based API. Exercises the parent-directory
+    // resolution step and the generic InDir primitives.
+    const u8 sub_body[] = "sub file\n";
+    const u64 sub_len = 9;
+    if (Fat32CreateAtPath(v0, "/SUB/CHILD.TXT", sub_body, sub_len) != static_cast<i64>(sub_len))
+    {
+        SerialWrite("[fs/fat32] self-test FAILED: create /SUB/CHILD.TXT\n");
+        return;
+    }
+    DirEntry child;
+    if (!Fat32LookupPath(v0, "/SUB/CHILD.TXT", &child) || child.size_bytes != sub_len)
+    {
+        SerialWrite("[fs/fat32] self-test FAILED: /SUB/CHILD.TXT not resolvable after create\n");
+        return;
+    }
+    VZero(buf, sizeof(buf));
+    const i64 n7 = Fat32ReadFile(v0, &child, buf, sizeof(buf));
+    if (n7 != static_cast<i64>(sub_len))
+    {
+        SerialWrite("[fs/fat32] self-test FAILED: /SUB/CHILD.TXT read-back wrong size\n");
+        return;
+    }
+    for (u32 i = 0; i < sub_len; ++i)
+    {
+        if (buf[i] != sub_body[i])
+        {
+            SerialWrite("[fs/fat32] self-test FAILED: /SUB/CHILD.TXT content mismatch\n");
+            return;
+        }
+    }
+    if (!Fat32DeleteAtPath(v0, "/SUB/CHILD.TXT"))
+    {
+        SerialWrite("[fs/fat32] self-test FAILED: delete /SUB/CHILD.TXT\n");
+        return;
+    }
+    DirEntry after_del;
+    if (Fat32LookupPath(v0, "/SUB/CHILD.TXT", &after_del))
+    {
+        SerialWrite("[fs/fat32] self-test FAILED: /SUB/CHILD.TXT still visible after delete\n");
+        return;
+    }
+    SerialWrite("[fs/fat32] self-test OK (subdir CRUD on /SUB/CHILD.TXT)\n");
 }
 
 } // namespace customos::fs::fat32

@@ -2558,7 +2558,17 @@ void CmdFatappend(customos::u32 argc, char** argv)
         ConsoleWriteln("FATAPPEND: FAT32 NOT MOUNTED");
         return;
     }
-    const customos::i64 rc = fat::Fat32AppendInRoot(v, name, payload, plen);
+    bool has_slash = false;
+    for (u32 i = 0; name[i] != 0; ++i)
+    {
+        if (name[i] == '/')
+        {
+            has_slash = true;
+            break;
+        }
+    }
+    const customos::i64 rc =
+        has_slash ? fat::Fat32AppendAtPath(v, name, payload, plen) : fat::Fat32AppendInRoot(v, name, payload, plen);
     if (rc < 0)
     {
         ConsoleWriteln("FATAPPEND: APPEND FAILED (backend RO? disk full? file not in root?)");
@@ -2609,7 +2619,17 @@ void CmdFatnew(customos::u32 argc, char** argv)
         ConsoleWriteln("FATNEW: FAT32 NOT MOUNTED");
         return;
     }
-    const customos::i64 rc = fat::Fat32CreateInRoot(v, name, payload, plen);
+    bool has_slash = false;
+    for (u32 i = 0; name[i] != 0; ++i)
+    {
+        if (name[i] == '/')
+        {
+            has_slash = true;
+            break;
+        }
+    }
+    const customos::i64 rc =
+        has_slash ? fat::Fat32CreateAtPath(v, name, payload, plen) : fat::Fat32CreateInRoot(v, name, payload, plen);
     if (rc < 0)
     {
         ConsoleWriteln("FATNEW: CREATE FAILED (bad name? exists? full dir? disk full?)");
@@ -2647,7 +2667,17 @@ void CmdFatrm(customos::u32 argc, char** argv)
         ConsoleWriteln("FATRM: FAT32 NOT MOUNTED");
         return;
     }
-    if (!fat::Fat32DeleteInRoot(v, name))
+    bool has_slash = false;
+    for (u32 i = 0; name[i] != 0; ++i)
+    {
+        if (name[i] == '/')
+        {
+            has_slash = true;
+            break;
+        }
+    }
+    const bool ok = has_slash ? fat::Fat32DeleteAtPath(v, name) : fat::Fat32DeleteInRoot(v, name);
+    if (!ok)
     {
         ConsoleWrite("FATRM: FAILED: ");
         ConsoleWriteln(name);
@@ -2688,7 +2718,17 @@ void CmdFattrunc(customos::u32 argc, char** argv)
         ConsoleWriteln("FATTRUNC: FAT32 NOT MOUNTED");
         return;
     }
-    const customos::i64 rc = fat::Fat32TruncateInRoot(v, name, new_size);
+    bool has_slash = false;
+    for (u32 i = 0; name[i] != 0; ++i)
+    {
+        if (name[i] == '/')
+        {
+            has_slash = true;
+            break;
+        }
+    }
+    const customos::i64 rc =
+        has_slash ? fat::Fat32TruncateAtPath(v, name, new_size) : fat::Fat32TruncateInRoot(v, name, new_size);
     if (rc < 0)
     {
         ConsoleWriteln("FATTRUNC: FAILED");

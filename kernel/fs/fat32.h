@@ -217,6 +217,21 @@ bool Fat32DeleteInRoot(const Volume* v, const char* name);
 /// Returns the new size on success, -1 on failure.
 i64 Fat32TruncateInRoot(const Volume* v, const char* name, u64 new_size);
 
+// ---------------------------------------------------------------
+// Path-based CRUD. These walk the path's parent directory, then
+// perform the same operation the InRoot versions do but against
+// any directory cluster, not just the root. `path` is
+// volume-relative (leading '/' tolerated). All fail with -1 /
+// false if an intermediate component doesn't exist, isn't a
+// directory, or the parent directory is unwritable (v0 rejects
+// growth of a full-cluster directory).
+// ---------------------------------------------------------------
+
+i64 Fat32CreateAtPath(const Volume* v, const char* path, const void* buf, u64 len);
+bool Fat32DeleteAtPath(const Volume* v, const char* path);
+i64 Fat32TruncateAtPath(const Volume* v, const char* path, u64 new_size);
+i64 Fat32AppendAtPath(const Volume* v, const char* path, const void* buf, u64 len);
+
 /// Boot-time self-test. Calls `Fat32Probe` on every registered
 /// block device; partitions that aren't FAT32 are expected to fail
 /// and are logged as "not FAT32" (no failure shout). PASS
