@@ -19,6 +19,7 @@ u64 g_interface_count = 0;
 // stack, and grows before the lookup cost matters.
 ArpEntry g_arp_cache[kArpCacheCap] = {};
 ArpStats g_arp_stats = {};
+Ipv4Stats g_ipv4_stats = {};
 
 bool IpEq(Ipv4Address a, Ipv4Address b)
 {
@@ -153,6 +154,62 @@ void NetStackInit()
             core::Log(core::LogLevel::Warn, "net/arp", "self-test: synthetic ARP reply rejected");
         }
     }
+
+    // IPv4 self-test. Build a minimal Ethernet + IPv4 frame
+    // carrying a 0-byte UDP payload and run it through
+    // Ipv4HandleIncoming. The checksum is computed
+    // programmatically so the test doesn't bake in magic
+    // numbers.
+    {
+        u8 frame[14 + 20 + 8] = {}; // eth + ip + udp
+        // Ethernet.
+        for (u64 i = 0; i < 6; ++i)
+            frame[i] = 0xFF; // dst = bcast
+        frame[6] = 0x52;
+        frame[7] = 0x54;
+        frame[8] = 0x00;
+        frame[9] = 0x12;
+        frame[10] = 0x34;
+        frame[11] = 0x56;
+        frame[12] = 0x08;
+        frame[13] = 0x00; // ether_type = IPv4
+        // IPv4 header (20 bytes, no options).
+        u8* ip = frame + 14;
+        ip[0] = 0x45; // version=4, IHL=5
+        ip[1] = 0x00; // TOS
+        ip[2] = 0x00;
+        ip[3] = 28; // total length = 20 + 8
+        ip[4] = 0x00;
+        ip[5] = 0x01; // ident
+        ip[6] = 0x00;
+        ip[7] = 0x00; // flags + frag off
+        ip[8] = 64;   // TTL
+        ip[9] = kIpProtoUdp;
+        // checksum left 0 initially
+        ip[12] = 10;
+        ip[13] = 0;
+        ip[14] = 2;
+        ip[15] = 2; // src 10.0.2.2
+        ip[16] = 10;
+        ip[17] = 0;
+        ip[18] = 2;
+        ip[19] = 15; // dst 10.0.2.15
+        const u16 csum = Ipv4HeaderChecksum(ip, 20);
+        ip[10] = u8(csum >> 8);
+        ip[11] = u8(csum & 0xFF);
+        // UDP header (8 bytes, payload 0 — won't be parsed in v0).
+        // Leave at zeros.
+        const bool ok = Ipv4HandleIncoming(0, frame, sizeof(frame));
+        const Ipv4Stats s = Ipv4StatsRead();
+        if (ok && s.rx_udp == 1)
+        {
+            arch::SerialWrite("[ipv4] self-test OK — UDP proto counted (rx_udp=1)\n");
+        }
+        else
+        {
+            core::Log(core::LogLevel::Warn, "net/ipv4", "self-test: synthetic IPv4/UDP frame did not classify");
+        }
+    }
 }
 
 u64 InterfaceCount()
@@ -274,6 +331,115 @@ bool ArpHandleIncoming(u32 iface_index, const void* frame, u64 len)
 ArpStats ArpStatsRead()
 {
     return g_arp_stats;
+}
+
+u16 Ipv4HeaderChecksum(const void* buf, u64 len)
+{
+    const auto* p = static_cast<const u8*>(buf);
+    u32 sum = 0;
+    u64 i = 0;
+    // 16-bit big-endian words.
+    while (i + 2 <= len)
+    {
+        const u16 word = (u16(p[i]) << 8) | u16(p[i + 1]);
+        sum += word;
+        i += 2;
+    }
+    if (i < len)
+    {
+        // Odd trailing byte — pad with 0 in the low half.
+        sum += u32(p[i]) << 8;
+    }
+    // Fold carry.
+    while (sum >> 16)
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    return u16(~sum & 0xFFFF);
+}
+
+bool Ipv4HeaderValid(const void* buf, u64 len)
+{
+    const auto* p = static_cast<const u8*>(buf);
+    if (len < sizeof(Ipv4Header))
+        return false;
+    const u8 version = p[0] >> 4;
+    const u8 ihl = p[0] & 0x0F;
+    if (version != 4)
+        return false;
+    if (ihl < 5)
+        return false;
+    const u64 header_bytes = u64(ihl) * 4;
+    if (header_bytes > len)
+        return false;
+    const u16 total_len = (u16(p[2]) << 8) | u16(p[3]);
+    if (total_len > len)
+        return false;
+    // A computed checksum of 0 means the stored checksum matches.
+    return Ipv4HeaderChecksum(p, header_bytes) == 0;
+}
+
+bool Ipv4HandleIncoming(u32 iface_index, const void* frame, u64 len)
+{
+    (void)iface_index;
+    ++g_ipv4_stats.rx_packets;
+    if (frame == nullptr || len < 14 + sizeof(Ipv4Header))
+    {
+        ++g_ipv4_stats.rx_bad_length;
+        return false;
+    }
+    const auto* eth = static_cast<const u8*>(frame);
+    const u16 ether_type = (u16(eth[12]) << 8) | u16(eth[13]);
+    if (ether_type != kEtherTypeIpv4)
+    {
+        ++g_ipv4_stats.rx_bad_length;
+        return false;
+    }
+    const u8* ip = eth + 14;
+    const u64 ip_len = len - 14;
+    const u8 version = ip[0] >> 4;
+    const u8 ihl = ip[0] & 0x0F;
+    if (version != 4)
+    {
+        ++g_ipv4_stats.rx_bad_version;
+        return false;
+    }
+    if (ihl < 5 || u64(ihl) * 4 > ip_len)
+    {
+        ++g_ipv4_stats.rx_bad_ihl;
+        return false;
+    }
+    const u16 total_len = (u16(ip[2]) << 8) | u16(ip[3]);
+    if (total_len > ip_len)
+    {
+        ++g_ipv4_stats.rx_bad_length;
+        return false;
+    }
+    if (Ipv4HeaderChecksum(ip, u64(ihl) * 4) != 0)
+    {
+        ++g_ipv4_stats.rx_bad_checksum;
+        return false;
+    }
+    const u8 proto = ip[9];
+    switch (proto)
+    {
+    case kIpProtoUdp:
+        ++g_ipv4_stats.rx_udp;
+        break;
+    case kIpProtoTcp:
+        ++g_ipv4_stats.rx_tcp;
+        break;
+    case kIpProtoIcmp:
+        ++g_ipv4_stats.rx_icmp;
+        break;
+    default:
+        ++g_ipv4_stats.rx_other_proto;
+        break;
+    }
+    return true;
+}
+
+Ipv4Stats Ipv4StatsRead()
+{
+    return g_ipv4_stats;
 }
 
 } // namespace customos::net

@@ -207,4 +207,47 @@ struct ArpStats
 };
 ArpStats ArpStatsRead();
 
+// -------------------------------------------------------------------
+// IPv4 header validation.
+//
+// Separate compute helper so both the L3 receive path and any unit
+// test can share the same bit manipulation. The checksum is the
+// classic 16-bit one's-complement sum over the header (options
+// included); the carry folds back into the low 16 bits.
+// -------------------------------------------------------------------
+
+/// Compute the RFC 1071 16-bit one's-complement sum over a byte
+/// buffer. `len` should typically be the IHL × 4 for an IPv4
+/// header. The checksum field of the header must be zero when the
+/// sum is computed over a packet we are generating; when validating
+/// a received packet, leaving the field in place and comparing the
+/// result to 0 is the correct check.
+u16 Ipv4HeaderChecksum(const void* buf, u64 len);
+
+/// Validate an IPv4 header: version=4, IHL>=5, total_length within
+/// the buffer, checksum matches. Returns true iff the header passes
+/// every gate. No payload parsing.
+bool Ipv4HeaderValid(const void* buf, u64 len);
+
+struct Ipv4Stats
+{
+    u64 rx_packets;
+    u64 rx_bad_version;
+    u64 rx_bad_ihl;
+    u64 rx_bad_length;
+    u64 rx_bad_checksum;
+    u64 rx_udp;
+    u64 rx_tcp;
+    u64 rx_icmp;
+    u64 rx_other_proto;
+};
+
+/// Process an incoming Ethernet+IPv4 frame. Returns true iff the
+/// L3 path touched a counter (valid or rejected). Skeleton: we
+/// validate the IPv4 header, classify the protocol, and increment
+/// per-proto counters. No actual UDP/TCP/ICMP handler exists yet.
+bool Ipv4HandleIncoming(u32 iface_index, const void* frame, u64 len);
+
+Ipv4Stats Ipv4StatsRead();
+
 } // namespace customos::net
