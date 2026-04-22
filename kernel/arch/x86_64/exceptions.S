@@ -126,14 +126,55 @@ ISR_NOERR 47                    /* IRQ15 — also the 8259 spurious slot */
 ISR_NOERR 128                   /* int 0x80 — user-mode syscall gate */
 
 /* -------------------------------------------------------------------------
+ * Spurious-vector stubs. Cover every IDT slot from 48..127 and
+ * 129..254 (skipping 128 = syscall and 255 = LAPIC spurious below).
+ *
+ * Without these, vectors above 47 are a zero IDT gate (Present=0)
+ * which makes the CPU cascade into #NP — losing the original
+ * vector number in favour of #NP's "selector that #NP'd" error
+ * code. Filling the IDT means a stray INT n / IPI / spurious
+ * device interrupt logs the actual vector and resumes, instead of
+ * #NP-cascading into a panic.
+ *
+ * Uses .altmacro + .rept to emit the 206 stubs without 206 lines
+ * of macro invocation. Each expansion is identical to ISR_NOERR
+ * for the corresponding vector number.
+ * ------------------------------------------------------------------------- */
+.altmacro
+.macro mkstub n
+    .align 16
+    .global isr_\n
+isr_\n:
+    endbr64
+    push    0
+    push    \n
+    jmp     isr_common
+.endm
+
+.set i, 48
+.rept 80                        /* 48..127 */
+    mkstub %i
+    .set i, i+1
+.endr
+
+.set i, 129
+.rept 126                       /* 129..254 */
+    mkstub %i
+    .set i, i+1
+.endr
+
+/* -------------------------------------------------------------------------
  * LAPIC spurious-interrupt vector. Per Intel SDM, the SVR's vector field
  * has the low 4 bits hard-wired to 1, so the spurious vector is conven-
- * tionally 0xFF. Exported by name so the LAPIC bring-up can install it
- * directly without extending isr_stub_table to 256 entries.
+ * tionally 0xFF. Exported under both names — `isr_spurious` for the
+ * historical lapic.cpp reference, `isr_255` for the IDT-fill loop's
+ * `.quad isr_N` symmetry.
  * ------------------------------------------------------------------------- */
 .align 16
 .global isr_spurious
+.global isr_255
 isr_spurious:
+isr_255:
     endbr64
     push    0                   /* fake error code      */
     push    0xFF                /* vector number        */
@@ -226,62 +267,30 @@ isr_common:
 
 
 /* -------------------------------------------------------------------------
- * Address table consumed by idt.cpp. One u64 per exception vector,
- * pointing at the corresponding stub. Kept in .rodata because nothing
- * writes to it after link.
+ * Address table consumed by idt.cpp. One u64 per IDT vector — full
+ * 256 slots so IdtInit can install every entry in a single loop.
+ * Slot 128 (syscall) gets re-installed with DPL=3 by SyscallInit;
+ * slot 255 (LAPIC spurious) gets re-installed by LapicInit. Both
+ * overrides are full SetGate writes, so the initial DPL=0 install
+ * is overwritten cleanly.
+ *
+ * Built via .altmacro + .rept for symmetry with the stub block
+ * above. Kept in .rodata because nothing writes to it after link.
  * ------------------------------------------------------------------------- */
 .section .rodata
 .align 8
+.altmacro
+.macro stubref n
+    .quad isr_\n
+.endm
+
 .global isr_stub_table
 isr_stub_table:
-    .quad   isr_0
-    .quad   isr_1
-    .quad   isr_2
-    .quad   isr_3
-    .quad   isr_4
-    .quad   isr_5
-    .quad   isr_6
-    .quad   isr_7
-    .quad   isr_8
-    .quad   isr_9
-    .quad   isr_10
-    .quad   isr_11
-    .quad   isr_12
-    .quad   isr_13
-    .quad   isr_14
-    .quad   isr_15
-    .quad   isr_16
-    .quad   isr_17
-    .quad   isr_18
-    .quad   isr_19
-    .quad   isr_20
-    .quad   isr_21
-    .quad   isr_22
-    .quad   isr_23
-    .quad   isr_24
-    .quad   isr_25
-    .quad   isr_26
-    .quad   isr_27
-    .quad   isr_28
-    .quad   isr_29
-    .quad   isr_30
-    .quad   isr_31
-    .quad   isr_32
-    .quad   isr_33
-    .quad   isr_34
-    .quad   isr_35
-    .quad   isr_36
-    .quad   isr_37
-    .quad   isr_38
-    .quad   isr_39
-    .quad   isr_40
-    .quad   isr_41
-    .quad   isr_42
-    .quad   isr_43
-    .quad   isr_44
-    .quad   isr_45
-    .quad   isr_46
-    .quad   isr_47
+.set i, 0
+.rept 256
+    stubref %i
+    .set i, i+1
+.endr
 
 /* Stack is NX — silence lld's PT_GNU_STACK warning. */
 .section .note.GNU-stack, "", @progbits

@@ -311,6 +311,60 @@ The skip-page parameter is what makes "dump 96 bytes around
 CR2" safe: pass `cr2 & ~0xFFF` and the helper walks past the
 faulting page without ever dereferencing it.
 
+## Universal IDT coverage + tiered trap response (slice 80)
+
+Two related improvements that close the "exception fell through to
+panic" gap:
+
+### Full 256-vector IDT install
+
+`IdtInit` now patches every IDT slot (0..255), backed by stubs for
+all 256 vectors in `exceptions.S`. Generated via `.altmacro` +
+`.rept` so 206 spurious-vector stubs (48..127, 129..254) take a
+dozen lines instead of 206. Slot 128 is the syscall gate
+(re-installed DPL=3 by `SyscallInit`); slot 255 is the LAPIC
+spurious vector (re-installed by `LapicInit`); both overrides are
+full SetGate writes, so the initial DPL=0 install is overwritten
+cleanly.
+
+A stray `INT n` / IPI / device-injected interrupt now logs
+`[idt] spurious vector 0xN rip=... cs=...` and `iretq`s. Before
+this slice, vectors > 47 had Present=0 IDT gates and the CPU
+cascaded delivery into #NP — losing the original vector number in
+favour of #NP's "selector that #NP'd" error code.
+
+### TrapResponse policy
+
+CPU exceptions (0..31) are now routed through a per-vector +
+per-ring policy table (`TrapResponseFor`):
+
+| Outcome           | When                                           |
+| ----------------- | ---------------------------------------------- |
+| `LogAndContinue`  | Kernel-mode #BP (3) or #DB (1)                |
+| `IsolateTask`     | Any user-mode hit (existing task-kill path)   |
+| `Panic`           | Kernel-mode anything else (existing crash dump) |
+
+The `LogAndContinue` outcome is what makes in-kernel `int3`
+breakpoints and hardware single-step usable without halting the
+box — the dispatcher emits one log line and `iretq`s. The
+`Panic` outcome is documented as a deliberate last-resort and
+matches the runtime-checker's tiered response from slice 77.
+
+### Live boot self-test
+
+`TrapsSelfTest()` runs from `kernel_main` right after `IdtInit`
++ `SyscallInit`. Issues `int3` (kernel-mode #BP) and `int 0x42`
+(spurious vector). Both must recover; if either regresses to
+panic, the boot log shows the cause instead of the self-test's
+OK line. Passing log:
+
+```
+[traps] self-test
+[trap] #BP Breakpoint (recoverable) rip=0xffffffff80140105 cs=0x8
+[idt] spurious vector 0x42 rip=0xffffffff80140107 cs=0x8
+[traps] self-test OK — #BP and spurious both recovered
+```
+
 ## Follow-ups
 
 1. **Guard subsystem escalation** — the security guard currently

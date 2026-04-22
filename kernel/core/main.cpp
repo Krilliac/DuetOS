@@ -241,7 +241,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     SerialWrite("[boot] Installing kernel GDT.\n");
     GdtInit();
 
-    SerialWrite("[boot] Installing IDT (vectors 0..31).\n");
+    SerialWrite("[boot] Installing IDT (all 256 vectors).\n");
     IdtInit();
 
     SerialWrite("[boot] Installing TSS + IST stacks (#DF / #MC / #NMI).\n");
@@ -252,6 +252,13 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
 
     SerialWrite("[boot] Installing syscall gate (int 0x80, DPL=3).\n");
     customos::core::SyscallInit();
+
+    // Slice-80 surface check. Issues an int3 (kernel-mode #BP, must
+    // recover via TrapResponse::LogAndContinue) and an int 0x42
+    // (spurious vector, must recover via TrapDispatch's spurious
+    // branch). If either regresses the kernel halts here and the
+    // boot log shows the cause.
+    TrapsSelfTest();
 
     SerialWrite("[boot] Parsing Multiboot2 memory map.\n");
     FrameAllocatorInit(multiboot_info);
