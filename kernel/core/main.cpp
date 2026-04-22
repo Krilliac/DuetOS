@@ -15,6 +15,7 @@
 #include "../arch/x86_64/smp.h"
 #include "../arch/x86_64/timer.h"
 #include "../cpu/percpu.h"
+#include "../debug/breakpoints.h"
 #include "../drivers/audio/audio.h"
 #include "../drivers/gpu/gpu.h"
 #include "../drivers/input/ps2kbd.h"
@@ -294,6 +295,17 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // of them does, the fault will fire here at boot rather than
     // corrupt code silently later.
     ProtectKernelImage();
+
+    // Breakpoint subsystem (int3 + DR0..DR3). Must run AFTER
+    // ProtectKernelImage so we know .text is at its final 4 KiB-
+    // granular protection and SetPteFlags4K can flip the W bit
+    // for a BP install. Runs BEFORE SMP bring-up so the single-
+    // CPU invariant the BP installer asserts is still true.
+    customos::debug::BpInit();
+    if (!customos::debug::BpSelfTest())
+    {
+        SerialWrite("[boot] WARN: breakpoint self-test failed — see serial log\n");
+    }
 
     SerialWrite("[boot] Bringing up framebuffer (if present).\n");
     customos::drivers::video::FramebufferInit(multiboot_info);

@@ -27,6 +27,7 @@
 #include "../fs/ramfs.h"
 #include "../fs/tmpfs.h"
 #include "../fs/vfs.h"
+#include "../debug/breakpoints.h"
 #include "../mm/address_space.h"
 #include "../mm/frame_allocator.h"
 #include "../mm/kheap.h"
@@ -302,6 +303,7 @@ void CmdHelp()
     ConsoleWriteln("  ATTACKSIM    RUN RED-TEAM ATTACK SUITE (IDT/GDT/LSTAR/CANARY/LBA0)");
     ConsoleWriteln("  MEMDUMP A [N]  HEX+ASCII DUMP OF KERNEL MEMORY -> SERIAL");
     ConsoleWriteln("  INSTR A [N]  INSTRUCTION-BYTE DUMP AT ADDRESS -> SERIAL");
+    ConsoleWriteln("  BP ...       KERNEL BREAKPOINTS (SOFTWARE + HARDWARE)");
     ConsoleWriteln("  DUMPSTATE    SNAPSHOT EVERY KERNEL SUBSYSTEM -> SERIAL");
     ConsoleWriteln("");
     ConsoleWriteln("RUNTIME CONTROL:");
@@ -1238,21 +1240,21 @@ void CmdFind(u32 argc, char** argv)
 // dispatched in Dispatch — keeping the two in sync is the
 // price of not having reflection.
 static const char* const kCommandSet[] = {
-    "help",      "about",   "version",  "clear",    "uptime",   "date",      "windows",    "mode",     "ls",
-    "cat",       "touch",   "rm",       "echo",     "cp",       "mv",        "wc",         "head",     "tail",
-    "dmesg",     "stats",   "mem",      "history",  "set",      "unset",     "env",        "alias",    "unalias",
-    "sysinfo",   "source",  "man",      "grep",     "find",     "time",      "which",      "seq",      "sort",
-    "uniq",      "cpuid",   "cr",       "rflags",   "tsc",      "hpet",      "ticks",      "msr",      "lapic",
-    "smp",       "lspci",   "heap",     "paging",   "fb",       "kbdstats",  "mousestats", "loglevel", "logcolor",
-    "getenv",    "yield",   "reboot",   "halt",     "uname",    "whoami",    "hostname",   "pwd",      "true",
-    "false",     "mount",   "lsmod",    "lsblk",    "lsgpt",    "free",      "ps",         "spawn",    "readelf",
-    "hexdump",   "stat",    "basename", "dirname",  "cal",      "sleep",     "reset",      "tac",      "nl",
-    "rev",       "expr",    "color",    "rand",     "flushtlb", "checksum",  "repeat",     "kill",     "exec",
-    "metrics",   "trace",   "read",     "guard",    "top",      "fatcat",    "fatls",      "fatwrite", "fatappend",
-    "fatnew",    "fatrm",   "fattrunc", "fatmkdir", "fatrmdir", "linuxexec", "translate",  "smbios",   "power",
-    "battery",   "thermal", "temp",     "gpu",      "lsgpu",    "nic",       "lsnic",      "ip",       "arp",
-    "ipv4",      "uuid",    "uuidgen",  "health",   "checkup",  "attacksim", "redteam",    "memdump",  "instr",
-    "dumpstate",
+    "help",      "about",   "version",    "clear",    "uptime",   "date",      "windows",    "mode",     "ls",
+    "cat",       "touch",   "rm",         "echo",     "cp",       "mv",        "wc",         "head",     "tail",
+    "dmesg",     "stats",   "mem",        "history",  "set",      "unset",     "env",        "alias",    "unalias",
+    "sysinfo",   "source",  "man",        "grep",     "find",     "time",      "which",      "seq",      "sort",
+    "uniq",      "cpuid",   "cr",         "rflags",   "tsc",      "hpet",      "ticks",      "msr",      "lapic",
+    "smp",       "lspci",   "heap",       "paging",   "fb",       "kbdstats",  "mousestats", "loglevel", "logcolor",
+    "getenv",    "yield",   "reboot",     "halt",     "uname",    "whoami",    "hostname",   "pwd",      "true",
+    "false",     "mount",   "lsmod",      "lsblk",    "lsgpt",    "free",      "ps",         "spawn",    "readelf",
+    "hexdump",   "stat",    "basename",   "dirname",  "cal",      "sleep",     "reset",      "tac",      "nl",
+    "rev",       "expr",    "color",      "rand",     "flushtlb", "checksum",  "repeat",     "kill",     "exec",
+    "metrics",   "trace",   "read",       "guard",    "top",      "fatcat",    "fatls",      "fatwrite", "fatappend",
+    "fatnew",    "fatrm",   "fattrunc",   "fatmkdir", "fatrmdir", "linuxexec", "translate",  "smbios",   "power",
+    "battery",   "thermal", "temp",       "gpu",      "lsgpu",    "nic",       "lsnic",      "ip",       "arp",
+    "ipv4",      "uuid",    "uuidgen",    "health",   "checkup",  "attacksim", "redteam",    "memdump",  "instr",
+    "dumpstate", "bp",      "breakpoint",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -2354,6 +2356,216 @@ void CmdMemDump(u32 argc, char** argv)
     }
     customos::core::DumpHexRegionSafe("memdump", addr, static_cast<customos::u32>(len), 0);
     ConsoleWriteln("MEMDUMP: WROTE TO COM1");
+}
+
+const char* BpKindName(customos::debug::BpKind k)
+{
+    switch (k)
+    {
+    case customos::debug::BpKind::Software:
+        return "SW";
+    case customos::debug::BpKind::HwExecute:
+        return "HW-X";
+    case customos::debug::BpKind::HwWrite:
+        return "HW-W";
+    case customos::debug::BpKind::HwReadWrite:
+        return "HW-RW";
+    }
+    return "?";
+}
+
+const char* BpErrName(customos::debug::BpError e)
+{
+    switch (e)
+    {
+    case customos::debug::BpError::None:
+        return "OK";
+    case customos::debug::BpError::InvalidAddress:
+        return "INVALID-ADDRESS";
+    case customos::debug::BpError::TableFull:
+        return "TABLE-FULL";
+    case customos::debug::BpError::NoHwSlot:
+        return "NO-HW-SLOT";
+    case customos::debug::BpError::BadKind:
+        return "BAD-KIND";
+    case customos::debug::BpError::NotInstalled:
+        return "NOT-INSTALLED";
+    case customos::debug::BpError::SmpUnsupported:
+        return "SMP-UNSUPPORTED";
+    }
+    return "?";
+}
+
+void CmdBp(u32 argc, char** argv)
+{
+    // bp list                     — dump installed breakpoints
+    // bp set <hex-addr>           — software BP at kernel .text addr
+    // bp hw <hex-addr> [x|w|rw] [len]
+    //                             — hardware BP: execute/write/read-write
+    // bp clear <id>               — remove BP by id
+    // bp test                     — round-trip self-test
+    if (argc < 2)
+    {
+        ConsoleWriteln("BP: USAGE:");
+        ConsoleWriteln("    BP LIST");
+        ConsoleWriteln("    BP SET <HEX-ADDR>               (SOFTWARE)");
+        ConsoleWriteln("    BP HW  <HEX-ADDR> [X|W|RW] [LEN] (HARDWARE)");
+        ConsoleWriteln("    BP CLEAR <ID>                    (REMOVE)");
+        ConsoleWriteln("    BP TEST                          (SELF-TEST)");
+        return;
+    }
+
+    const char* sub = argv[1];
+
+    if (StrEq(sub, "list"))
+    {
+        customos::debug::BpInfo infos[32];
+        const usize n = customos::debug::BpList(infos, 32);
+        if (n == 0)
+        {
+            ConsoleWriteln("BP: NONE INSTALLED");
+            return;
+        }
+        ConsoleWriteln("BP: ID KIND  ADDR              HITS");
+        for (usize i = 0; i < n; ++i)
+        {
+            ConsoleWrite("  ");
+            WriteU64Dec(infos[i].id.value);
+            ConsoleWrite("  ");
+            ConsoleWrite(BpKindName(infos[i].kind));
+            ConsoleWrite("  ");
+            WriteU64Hex(infos[i].address, 16);
+            ConsoleWrite("  ");
+            WriteU64Dec(infos[i].hit_count);
+            ConsoleWriteChar('\n');
+        }
+        return;
+    }
+
+    if (StrEq(sub, "set"))
+    {
+        if (argc < 3)
+        {
+            ConsoleWriteln("BP SET: NEED <HEX-ADDR>");
+            return;
+        }
+        customos::u64 addr = 0;
+        if (!ParseU64Str(argv[2], &addr))
+        {
+            ConsoleWriteln("BP SET: BAD ADDRESS");
+            return;
+        }
+        customos::debug::BpError err = customos::debug::BpError::None;
+        const customos::debug::BreakpointId id = customos::debug::BpInstallSoftware(addr, &err);
+        if (err != customos::debug::BpError::None)
+        {
+            ConsoleWrite("BP SET: ");
+            ConsoleWriteln(BpErrName(err));
+            return;
+        }
+        ConsoleWrite("BP SET: OK ID=");
+        WriteU64Dec(id.value);
+        ConsoleWriteChar('\n');
+        return;
+    }
+
+    if (StrEq(sub, "hw"))
+    {
+        if (argc < 3)
+        {
+            ConsoleWriteln("BP HW: NEED <HEX-ADDR> [X|W|RW] [LEN]");
+            return;
+        }
+        customos::u64 addr = 0;
+        if (!ParseU64Str(argv[2], &addr))
+        {
+            ConsoleWriteln("BP HW: BAD ADDRESS");
+            return;
+        }
+        customos::debug::BpKind kind = customos::debug::BpKind::HwExecute;
+        customos::debug::BpLen len = customos::debug::BpLen::One;
+        if (argc >= 4)
+        {
+            if (StrEq(argv[3], "x"))
+                kind = customos::debug::BpKind::HwExecute;
+            else if (StrEq(argv[3], "w"))
+                kind = customos::debug::BpKind::HwWrite;
+            else if (StrEq(argv[3], "rw"))
+                kind = customos::debug::BpKind::HwReadWrite;
+            else
+            {
+                ConsoleWriteln("BP HW: BAD KIND (USE X|W|RW)");
+                return;
+            }
+        }
+        if (argc >= 5 && kind != customos::debug::BpKind::HwExecute)
+        {
+            customos::u64 ln = 0;
+            if (!ParseU64Str(argv[4], &ln))
+            {
+                ConsoleWriteln("BP HW: BAD LEN");
+                return;
+            }
+            switch (ln)
+            {
+            case 1:
+                len = customos::debug::BpLen::One;
+                break;
+            case 2:
+                len = customos::debug::BpLen::Two;
+                break;
+            case 4:
+                len = customos::debug::BpLen::Four;
+                break;
+            case 8:
+                len = customos::debug::BpLen::Eight;
+                break;
+            default:
+                ConsoleWriteln("BP HW: LEN MUST BE 1/2/4/8");
+                return;
+            }
+        }
+        customos::debug::BpError err = customos::debug::BpError::None;
+        const customos::debug::BreakpointId id = customos::debug::BpInstallHardware(addr, kind, len, &err);
+        if (err != customos::debug::BpError::None)
+        {
+            ConsoleWrite("BP HW: ");
+            ConsoleWriteln(BpErrName(err));
+            return;
+        }
+        ConsoleWrite("BP HW: OK ID=");
+        WriteU64Dec(id.value);
+        ConsoleWriteChar('\n');
+        return;
+    }
+
+    if (StrEq(sub, "clear") || StrEq(sub, "rm"))
+    {
+        if (argc < 3)
+        {
+            ConsoleWriteln("BP CLEAR: NEED <ID>");
+            return;
+        }
+        customos::u64 id_val = 0;
+        if (!ParseU64Str(argv[2], &id_val))
+        {
+            ConsoleWriteln("BP CLEAR: BAD ID");
+            return;
+        }
+        const customos::debug::BpError err = customos::debug::BpRemove({static_cast<customos::u32>(id_val)});
+        ConsoleWrite("BP CLEAR: ");
+        ConsoleWriteln(BpErrName(err));
+        return;
+    }
+
+    if (StrEq(sub, "test"))
+    {
+        const bool ok = customos::debug::BpSelfTest();
+        ConsoleWriteln(ok ? "BP TEST: OK" : "BP TEST: FAILED (SEE SERIAL LOG)");
+        return;
+    }
+
+    ConsoleWriteln("BP: UNKNOWN SUBCOMMAND (HELP: BP WITHOUT ARGS)");
 }
 
 void CmdInstr(u32 argc, char** argv)
@@ -6029,6 +6241,11 @@ void Dispatch(char* line)
     if (StrEq(cmd, "memdump"))
     {
         CmdMemDump(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "bp") || StrEq(cmd, "breakpoint"))
+    {
+        CmdBp(argc, argv);
         return;
     }
     if (StrEq(cmd, "instr"))

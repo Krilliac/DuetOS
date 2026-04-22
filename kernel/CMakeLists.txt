@@ -70,6 +70,7 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     arch/x86_64/traps.cpp
     arch/x86_64/usermode.S
     cpu/percpu.cpp
+    debug/breakpoints.cpp
     drivers/input/ps2kbd.cpp
     drivers/input/ps2mouse.cpp
     drivers/audio/audio.cpp

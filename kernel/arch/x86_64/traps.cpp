@@ -8,6 +8,7 @@
 #include "../../core/panic.h"
 #include "../../core/symbols.h"
 #include "../../core/syscall.h"
+#include "../../debug/breakpoints.h"
 #include "../../sched/sched.h"
 
 // user_copy.S labels, exposed to the trap dispatcher for the
@@ -321,6 +322,21 @@ extern "C" void TrapDispatch(TrapFrame* frame)
 
     if (policy == TrapResponse::LogAndContinue)
     {
+        // Let the breakpoint subsystem claim #BP (vec 3) and #DB
+        // (vec 1) hits first. If it matches a registered BP it
+        // handles the single-step-reinsert dance + logs a
+        // structured hit line; the generic "[trap] #BP
+        // (recoverable) rip=..." one-liner below is then the
+        // fallback for spurious int3 / #DB with no registered
+        // cause (stray int3 in a .rodata data byte, etc.).
+        if (frame->vector == 3 && debug::BpHandleBreakpoint(frame))
+        {
+            return;
+        }
+        if (frame->vector == 1 && debug::BpHandleDebug(frame))
+        {
+            return;
+        }
         SerialWrite("[trap] ");
         SerialWrite((frame->vector < 32) ? kVectorNames[frame->vector] : "vec-oor");
         SerialWrite(" (recoverable) rip=");
