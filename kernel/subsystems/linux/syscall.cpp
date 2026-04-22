@@ -123,29 +123,60 @@ i64 DoExitGroup(u64 status)
 // gets bolted on when we need per-sandbox Linux policy.
 i64 DoWrite(u64 fd, u64 user_buf, u64 len)
 {
-    if (fd != 1 && fd != 2)
+    // fd 1/2 -> COM1 (unchanged from v0).
+    if (fd == 1 || fd == 2)
     {
+        const u64 to_copy = (len > kLinuxIoMax) ? kLinuxIoMax : len;
+        if (to_copy == 0)
+            return 0;
+        u8 kbuf[kLinuxIoMax];
+        if (!mm::CopyFromUser(kbuf, reinterpret_cast<const void*>(user_buf), to_copy))
+            return kEFAULT;
+        for (u64 i = 0; i < to_copy; ++i)
+        {
+            const char two[2] = {static_cast<char>(kbuf[i]), '\0'};
+            arch::SerialWrite(two);
+        }
+        return static_cast<i64>(to_copy);
+    }
+    // fd 0 (stdin) rejects write; unused fds too.
+    if (fd == 0 || fd >= 16)
         return kEBADF;
-    }
-    const u64 to_copy = (len > kLinuxIoMax) ? kLinuxIoMax : len;
-    if (to_copy == 0)
-    {
-        return 0;
-    }
-    u8 kbuf[kLinuxIoMax];
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr || p->linux_fds[fd].state != 2)
+        return kEBADF;
+
+    // File write (in-place, no extend). Clip `len` to the bytes
+    // still within the file's declared size; anything past that
+    // would require either a Fat32AppendInRoot (needs the
+    // basename, which we don't track on the fd) or ENOSPC. v0
+    // returns a short write when clipped; musl's write-loop
+    // handles that naturally.
+    const u64 off = p->linux_fds[fd].offset;
+    if (off >= p->linux_fds[fd].size)
+        return 0; // at or past EOF, short-write 0
+    u64 to_copy = p->linux_fds[fd].size - off;
+    if (to_copy > len)
+        to_copy = len;
+    if (to_copy > kLinuxIoMax)
+        to_copy = kLinuxIoMax;
+    static u8 kbuf[kLinuxIoMax];
     if (!mm::CopyFromUser(kbuf, reinterpret_cast<const void*>(user_buf), to_copy))
-    {
         return kEFAULT;
-    }
-    // Per-byte feed so any \0 in the payload forwards as a literal
-    // 0 rather than truncating the string. Same pattern as the
-    // native SYS_WRITE.
-    for (u64 i = 0; i < to_copy; ++i)
-    {
-        const char two[2] = {static_cast<char>(kbuf[i]), '\0'};
-        arch::SerialWrite(two);
-    }
-    return static_cast<i64>(to_copy);
+    const auto* v = fs::fat32::Fat32Volume(0);
+    if (v == nullptr)
+        return kEIO;
+    fs::fat32::DirEntry entry;
+    for (u64 i = 0; i < sizeof(entry.name); ++i)
+        entry.name[i] = 0;
+    entry.attributes = 0;
+    entry.first_cluster = p->linux_fds[fd].first_cluster;
+    entry.size_bytes = p->linux_fds[fd].size;
+    const i64 n = fs::fat32::Fat32WriteInPlace(v, &entry, off, kbuf, to_copy);
+    if (n < 0)
+        return kEIO;
+    p->linux_fds[fd].offset = off + n;
+    return n;
 }
 
 // Skip the `/fat/` mount prefix (or a bare leading slash) so what
