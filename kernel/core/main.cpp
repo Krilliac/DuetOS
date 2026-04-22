@@ -11,10 +11,13 @@
 #include "../arch/x86_64/smp.h"
 #include "../arch/x86_64/timer.h"
 #include "../cpu/percpu.h"
+#include "../drivers/audio/audio.h"
 #include "../drivers/gpu/gpu.h"
 #include "../drivers/input/ps2kbd.h"
 #include "../drivers/input/ps2mouse.h"
+#include "../drivers/net/net.h"
 #include "../drivers/pci/pci.h"
+#include "../drivers/usb/usb.h"
 #include "../drivers/storage/ahci.h"
 #include "../drivers/storage/block.h"
 #include "../drivers/storage/nvme.h"
@@ -762,6 +765,15 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
 
     SerialWrite("[boot] Detecting GPUs.\n");
     customos::drivers::gpu::GpuInit();
+
+    SerialWrite("[boot] Detecting NICs.\n");
+    customos::drivers::net::NetInit();
+
+    SerialWrite("[boot] Detecting USB host controllers.\n");
+    customos::drivers::usb::UsbInit();
+
+    SerialWrite("[boot] Detecting audio controllers.\n");
+    customos::drivers::audio::AudioInit();
 
     SerialWrite("[boot] Bringing up block device layer.\n");
     customos::drivers::storage::BlockLayerInit();

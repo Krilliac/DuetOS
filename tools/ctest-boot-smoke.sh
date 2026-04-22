@@ -90,6 +90,16 @@ expected=(
     # QEMU's Bochs VGA always appears here — a missing line means
     # GpuInit didn't run or the PCI device table regressed.
     'drivers/gpu : discovered GPUs'
+    # Vendor probe for Bochs: confirms the per-device probe
+    # dispatch runs.
+    '[gpu-probe] vid=0x0000000000001234 did=0x0000000000001111 family=qemu-bochs-vga'
+    # Network discovery: QEMU q35 ships with an e1000e NIC.
+    '[net-probe] vid=0x0000000000008086 did=0x00000000000010d3 family=e1000e-82574'
+    # USB + audio shells always run, even on QEMU q35 which
+    # exposes neither (both log "none found" warnings).
+    'drivers/usb : discovered host controllers'
+    'drivers/audio : discovered audio controllers'
+    '[usb] class drivers registered: hid, msc, hub, video'
 )
 
 # Forbidden signatures — anything indicating an unhandled
