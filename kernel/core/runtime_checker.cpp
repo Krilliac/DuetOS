@@ -201,6 +201,23 @@ bool CheckCanary()
     return true;
 }
 
+bool CheckTaskStacks()
+{
+    // Each affected task is printed by sched::SchedCheckStackCanaries
+    // as it's found. We count the condition once in the health
+    // report regardless of how many tasks are affected — the
+    // per-issue count will increment once per scan that finds any
+    // overflow, which matches what the operator wants to see in
+    // the heartbeat summary.
+    const u64 broken = sched::SchedCheckStackCanaries();
+    if (broken != 0)
+    {
+        Report(HealthIssue::TaskStackOverflow);
+        return false;
+    }
+    return true;
+}
+
 } // namespace
 
 const char* HealthIssueName(HealthIssue i)
@@ -239,6 +256,8 @@ const char* HealthIssueName(HealthIssue i)
         return "efer.NXE cleared since baseline (NX bit in PTEs now ignored)";
     case HealthIssue::StackCanaryZero:
         return "__stack_chk_guard is zero (canary defanged)";
+    case HealthIssue::TaskStackOverflow:
+        return "task stack overflow detected (bottom canary scribbled)";
     default:
         return "(unnamed issue)";
     }
@@ -274,6 +293,7 @@ u64 RuntimeCheckerScan()
         (void)CheckControlRegisters();
     }
     (void)CheckCanary();
+    (void)CheckTaskStacks();
     const u64 delta = g_report.issues_found_total - before;
     g_report.last_scan_issues = delta;
     return delta;

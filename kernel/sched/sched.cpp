@@ -1186,6 +1186,49 @@ KillResult SchedKillByPid(u64 pid)
     return KillResult::Signaled;
 }
 
+// Walk every list that holds a Task and check the 8-byte
+// stack-bottom canary against the well-known value. A broken
+// canary is a confirmed kernel-stack overflow. Returns the
+// number of affected tasks; the runtime checker decides what
+// to do with the count (log each, panic on threshold, etc.).
+u64 SchedCheckStackCanaries()
+{
+    u64 broken = 0;
+    auto check = [&broken](const Task* t)
+    {
+        if (t == nullptr)
+            return;
+        if (t->stack_base == nullptr)
+            return; // boot/idle task — no canary planted
+        const u64 got = *reinterpret_cast<const u64*>(t->stack_base);
+        if (got != kStackCanary)
+        {
+            ++broken;
+            arch::SerialWrite("[health] STACK OVERFLOW detected task=");
+            arch::SerialWrite(t->name ? t->name : "<anon>");
+            arch::SerialWrite(" id=");
+            arch::SerialWriteHex(t->id);
+            arch::SerialWrite(" expected=");
+            arch::SerialWriteHex(kStackCanary);
+            arch::SerialWrite(" got=");
+            arch::SerialWriteHex(got);
+            arch::SerialWrite("\n");
+        }
+    };
+    arch::Cli();
+    check(Current());
+    for (Task* t = g_run_head_normal; t != nullptr; t = t->next)
+        check(t);
+    for (Task* t = g_run_head_idle; t != nullptr; t = t->next)
+        check(t);
+    for (Task* t = g_sleep_head; t != nullptr; t = t->sleep_next)
+        check(t);
+    for (Task* t = g_zombies; t != nullptr; t = t->next)
+        check(t);
+    arch::Sti();
+    return broken;
+}
+
 void SchedEnumerate(SchedEnumCb cb, void* cookie)
 {
     if (cb == nullptr)

@@ -82,6 +82,12 @@ enum class HealthIssue : u32
     // Canary
     StackCanaryZero,
 
+    // Per-task kernel stack overflow (at least one task's bottom
+    // sentinel differs from kStackCanary). Each affected task is
+    // logged separately by the sched walker; this counter just
+    // surfaces the condition in the health report.
+    TaskStackOverflow,
+
     // Count sentinel
     Count,
 };
