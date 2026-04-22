@@ -32,6 +32,57 @@ AudioKind KindFromSubclass(u8 subclass)
     }
 }
 
+// Intel HDA register offsets (subset). See HDA spec §4.2.
+//
+//   GCAP   u16 at 0x00 — OSS/ISS/BSS counts, 64-bit addressing
+//   VMIN   u8  at 0x02 — minor version (typically 0x00)
+//   VMAJ   u8  at 0x03 — major version (typically 0x01)
+//   OUTPAY u16 at 0x04 — output payload capability (stream size)
+//   INPAY  u16 at 0x06 — input payload capability
+//   GCTL   u32 at 0x08 — global control (bit 0 = CRST, controller reset)
+u16 Mmio16(const AudioControllerInfo& a, u64 offset)
+{
+    if (a.mmio_virt == nullptr)
+        return 0;
+    auto* p = reinterpret_cast<volatile u16*>(static_cast<u8*>(a.mmio_virt) + offset);
+    return *p;
+}
+u8 Mmio8(const AudioControllerInfo& a, u64 offset)
+{
+    if (a.mmio_virt == nullptr)
+        return 0;
+    auto* p = reinterpret_cast<volatile u8*>(static_cast<u8*>(a.mmio_virt) + offset);
+    return *p;
+}
+
+void DecodeHdaCaps(const AudioControllerInfo& a)
+{
+    if (a.mmio_virt == nullptr)
+        return;
+    const u16 gcap = Mmio16(a, 0x00);
+    const u8 vmin = Mmio8(a, 0x02);
+    const u8 vmaj = Mmio8(a, 0x03);
+    const u16 outpay = Mmio16(a, 0x04);
+    const u16 inpay = Mmio16(a, 0x06);
+    arch::SerialWrite("[hda] ver=");
+    arch::SerialWriteHex(vmaj);
+    arch::SerialWrite(".");
+    arch::SerialWriteHex(vmin);
+    arch::SerialWrite(" gcap=");
+    arch::SerialWriteHex(gcap);
+    arch::SerialWrite(" (iss=");
+    arch::SerialWriteHex((gcap >> 8) & 0x0F);
+    arch::SerialWrite(" oss=");
+    arch::SerialWriteHex((gcap >> 12) & 0x0F);
+    arch::SerialWrite(" bss=");
+    arch::SerialWriteHex((gcap >> 3) & 0x1F);
+    arch::SerialWrite(") outpay=");
+    arch::SerialWriteHex(outpay);
+    arch::SerialWrite(" inpay=");
+    arch::SerialWriteHex(inpay);
+    arch::SerialWrite("\n");
+}
+
 void LogAc(const AudioControllerInfo& a)
 {
     arch::SerialWrite("  audio ");
@@ -121,6 +172,8 @@ void AudioInit()
     for (u64 i = 0; i < g_ac_count; ++i)
     {
         LogAc(g_acs[i]);
+        if (g_acs[i].kind == AudioKind::Hda)
+            DecodeHdaCaps(g_acs[i]);
     }
     if (g_ac_count == 0)
     {

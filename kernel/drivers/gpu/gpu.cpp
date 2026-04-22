@@ -44,6 +44,41 @@ const VendorEntry* FindVendor(u16 vid)
     return nullptr;
 }
 
+// QEMU Bochs VGA registers at BAR 0. Memory-mapped on modern
+// QEMU (the legacy I/O ports 0x01CE/0x01CF still work too).
+// VBE index register at offset 0x500 (little-endian u16).
+u16 Mmio16(const GpuInfo& g, u64 offset)
+{
+    if (g.mmio_virt == nullptr)
+        return 0;
+    auto* p = reinterpret_cast<volatile u16*>(static_cast<u8*>(g.mmio_virt) + offset);
+    return *p;
+}
+
+void DecodeBochsVbe(const GpuInfo& g)
+{
+    if (g.mmio_virt == nullptr)
+        return;
+    // VBE_DISPI_INDEX_ID: reading it with the VBE aperture
+    // enabled returns 0xB0C0 | version; on QEMU's stdvga with
+    // the default framebuffer, bar0 + 0x500 is the VBE register
+    // bank (qemu-project.org, hw/display/bochs_display.c).
+    constexpr u64 kVbeIndexIdReg = 0x500;
+    const u16 id = Mmio16(g, kVbeIndexIdReg);
+    arch::SerialWrite("[bochs] vbe_id_reg=");
+    arch::SerialWriteHex(id);
+    if ((id & 0xFF00) == 0xB000)
+    {
+        arch::SerialWrite("  (VBE 0xB0Cx family; version nibble=");
+        arch::SerialWriteHex(id & 0xFF);
+        arch::SerialWrite(")\n");
+    }
+    else
+    {
+        arch::SerialWrite("  (register aperture not decoded this way on this BAR layout)\n");
+    }
+}
+
 // Run the vendor probe for a device. No-op for unknown vendors.
 // Each probe is a pure classifier today — it writes `family` into
 // the GpuInfo and emits a `[gpu-probe]` log line with the family
@@ -83,6 +118,8 @@ void RunVendorProbe(GpuInfo& g)
     arch::SerialWrite(" family=");
     arch::SerialWrite(family);
     arch::SerialWrite("  (stub OK — no engine init yet)\n");
+    if (g.vendor_id == kVendorQemuBochs)
+        DecodeBochsVbe(g);
 }
 
 // Pretty subclass name. Purely for logs.

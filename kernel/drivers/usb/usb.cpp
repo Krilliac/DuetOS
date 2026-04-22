@@ -88,6 +88,46 @@ constexpr UsbClassDriver kClassDrivers[] = {
     {kUsbClassVideo, "video", VideoProbe},
 };
 
+// xHCI capability registers (offsets at the base of the
+// operational MMIO window). See xHCI spec §5.3.
+//
+//   CAPLENGTH      u8   — length of the capability regs (so
+//                         operational regs live at bar + CAPLENGTH)
+//   HCIVERSION     u16  — BCD, typically 0x0100 / 0x0110
+//   HCSPARAMS1     u32  — MaxPorts (bits 31:24), MaxIntrs (23:8), MaxSlots (7:0)
+//   HCCPARAMS1     u32  — 64-bit addressing, context size, xEC offset
+u32 Mmio32(const HostControllerInfo& h, u64 offset)
+{
+    if (h.mmio_virt == nullptr)
+        return 0;
+    auto* p = reinterpret_cast<volatile u32*>(static_cast<u8*>(h.mmio_virt) + offset);
+    return *p;
+}
+
+void DecodeXhciCaps(const HostControllerInfo& h)
+{
+    if (h.mmio_virt == nullptr)
+        return;
+    const u32 caplen_and_version = Mmio32(h, 0x00);
+    const u8 caplen = caplen_and_version & 0xFF;
+    const u16 hciver = u16(caplen_and_version >> 16);
+    const u32 hcsp1 = Mmio32(h, 0x04);
+    const u32 hccp1 = Mmio32(h, 0x10);
+    arch::SerialWrite("[xhci] caplen=");
+    arch::SerialWriteHex(caplen);
+    arch::SerialWrite(" hciver=");
+    arch::SerialWriteHex(hciver);
+    arch::SerialWrite(" max_slots=");
+    arch::SerialWriteHex(hcsp1 & 0xFF);
+    arch::SerialWrite(" max_intrs=");
+    arch::SerialWriteHex((hcsp1 >> 8) & 0x7FF);
+    arch::SerialWrite(" max_ports=");
+    arch::SerialWriteHex((hcsp1 >> 24) & 0xFF);
+    arch::SerialWrite(" hcc1=");
+    arch::SerialWriteHex(hccp1);
+    arch::SerialWrite("\n");
+}
+
 void LogHostController(const HostControllerInfo& h)
 {
     arch::SerialWrite("  usb ");
@@ -190,6 +230,13 @@ void UsbInit()
     for (u64 i = 0; i < g_hc_count; ++i)
     {
         LogHostController(g_hcs[i]);
+        // xHCI is the only host-controller variant whose capability
+        // register layout we decode in v0. EHCI / OHCI / UHCI have
+        // their own — decoders added when we actually target them.
+        if (g_hcs[i].kind == HciKind::Xhci)
+        {
+            DecodeXhciCaps(g_hcs[i]);
+        }
     }
     if (g_hc_count == 0)
     {
