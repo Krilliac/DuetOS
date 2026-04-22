@@ -7,6 +7,7 @@
 #include "../arch/x86_64/serial.h"
 #include "../arch/x86_64/timer.h"
 #include "../arch/x86_64/traps.h"
+#include "../drivers/storage/block.h"
 #include "../mm/frame_allocator.h"
 #include "../mm/kheap.h"
 #include "../sched/sched.h"
@@ -56,6 +57,18 @@ constinit u64 g_baseline_feature_control = 0;
 // AMD / VM without vmx). Track per-MSR so the checker can
 // skip silently.
 constinit bool g_baseline_feature_control_valid = false;
+
+// Per-block-device disk-image baseline. We hash LBA 0 (MBR /
+// GPT protective MBR) + LBA 1 (GPT primary header) on every
+// block device at init. 16 devices × 2 LBAs = 32 hashes max.
+// A drift on any of them = bootkit write.
+constexpr u64 kMaxBlockDevicesForHealth = 16;
+constinit u64 g_baseline_disk_hash[kMaxBlockDevicesForHealth][2] = {};
+constinit bool g_baseline_disk_valid[kMaxBlockDevicesForHealth][2] = {};
+// DMA scratch buffer — kernel stack isn't in the direct map,
+// so BlockDeviceRead requires a direct-mapped destination. 4 KiB
+// covers 8 × 512-byte sectors; we only ever read 1 at a time.
+alignas(16) constinit u8 g_health_scratch[4096] = {};
 
 // Previous-scan values for monotonic counters. Each entry
 // should only ever grow; a scan that sees a smaller value
@@ -150,6 +163,7 @@ bool IsSecurityCritical(HealthIssue issue)
     case HealthIssue::TaskRspOutOfRange:
     case HealthIssue::SyscallMsrHijacked:
     case HealthIssue::FeatureControlUnlocked:
+    case HealthIssue::BootSectorModified:
         return true;
     default:
         return false;
@@ -326,6 +340,77 @@ bool CheckSyscallMsrs()
     check(kMsrIa32Cstar, g_baseline_cstar, "IA32_CSTAR");
     check(kMsrIa32SysenterEip, g_baseline_sysenter_eip, "IA32_SYSENTER_EIP");
     check(kMsrIa32SysenterCs, g_baseline_sysenter_cs, "IA32_SYSENTER_CS");
+    return ok;
+}
+
+// FNV-1a over a 512-byte sector buffer. Same hash family as
+// the IDT/GDT/.text checkers so operators can cross-reference.
+u64 HashSector(const u8* p)
+{
+    constexpr u64 kFnvOffset = 0xcbf29ce484222325ULL;
+    constexpr u64 kFnvPrime = 0x100000001b3ULL;
+    u64 h = kFnvOffset;
+    for (u64 i = 0; i < 512; ++i)
+    {
+        h ^= p[i];
+        h *= kFnvPrime;
+    }
+    return h;
+}
+
+// Populate the per-device boot-sector hashes. Called from
+// RuntimeCheckerInit; skip devices that fail to read (e.g.
+// a ramfs-only boot where the "disk" is virtual and might
+// not respond to LBA 0).
+void CaptureDiskBaselines()
+{
+    const u32 n = drivers::storage::BlockDeviceCount();
+    const u32 cap = (n < kMaxBlockDevicesForHealth) ? n : u32(kMaxBlockDevicesForHealth);
+    for (u32 i = 0; i < cap; ++i)
+    {
+        for (u32 lba = 0; lba < 2; ++lba)
+        {
+            const i32 rc = drivers::storage::BlockDeviceRead(i, lba, 1, g_health_scratch);
+            if (rc == 0)
+            {
+                g_baseline_disk_hash[i][lba] = HashSector(g_health_scratch);
+                g_baseline_disk_valid[i][lba] = true;
+            }
+        }
+    }
+}
+
+bool CheckBootSectors()
+{
+    bool ok = true;
+    const u32 n = drivers::storage::BlockDeviceCount();
+    const u32 cap = (n < kMaxBlockDevicesForHealth) ? n : u32(kMaxBlockDevicesForHealth);
+    for (u32 i = 0; i < cap; ++i)
+    {
+        for (u32 lba = 0; lba < 2; ++lba)
+        {
+            if (!g_baseline_disk_valid[i][lba])
+                continue;
+            const i32 rc = drivers::storage::BlockDeviceRead(i, lba, 1, g_health_scratch);
+            if (rc != 0)
+                continue;
+            const u64 now = HashSector(g_health_scratch);
+            if (now != g_baseline_disk_hash[i][lba])
+            {
+                arch::SerialWrite("[health] boot sector modified: dev=");
+                arch::SerialWriteHex(i);
+                arch::SerialWrite(" lba=");
+                arch::SerialWriteHex(lba);
+                arch::SerialWrite(" baseline=");
+                arch::SerialWriteHex(g_baseline_disk_hash[i][lba]);
+                arch::SerialWrite(" now=");
+                arch::SerialWriteHex(now);
+                arch::SerialWrite("\n");
+                Report(HealthIssue::BootSectorModified);
+                ok = false;
+            }
+        }
+    }
     return ok;
 }
 
@@ -581,6 +666,8 @@ const char* HealthIssueName(HealthIssue i)
         return "syscall MSR (LSTAR/STAR/CSTAR/SYSENTER) changed since baseline (rootkit hook)";
     case HealthIssue::FeatureControlUnlocked:
         return "IA32_FEATURE_CONTROL lock bit cleared since baseline (VMX-based attack setup)";
+    case HealthIssue::BootSectorModified:
+        return "MBR or GPT header modified since baseline (bootkit / disk-persistence malware)";
     default:
         return "(unnamed issue)";
     }
@@ -612,6 +699,11 @@ void RuntimeCheckerInit()
         g_baseline_feature_control = ReadMsr(kMsrIa32FeatureControl);
         g_baseline_feature_control_valid = true;
     }
+
+    // Per-disk boot-sector baselines. Done last because it
+    // touches the block layer, which may not be ready until
+    // well into boot (we're past SmpStartAps so it is).
+    CaptureDiskBaselines();
     g_report.baseline_captured = 1;
     arch::SerialWrite("[health] baseline cr0=");
     arch::SerialWriteHex(g_baseline_cr0);
@@ -658,6 +750,7 @@ u64 RuntimeCheckerScan()
     {
         (void)CheckSyscallMsrs();
         (void)CheckFeatureControlLock();
+        (void)CheckBootSectors();
     }
     const u64 delta = g_report.issues_found_total - before;
     g_report.last_scan_issues = delta;

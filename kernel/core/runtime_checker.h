@@ -150,6 +150,13 @@ enum class HealthIssue : u32
     // a rogue write that's setting up for a VMX-based attack.
     FeatureControlUnlocked,
 
+    // MBR (LBA 0) or GPT header/backup has been modified since
+    // baseline. Disk-persistence malware (bootkits, ransomware
+    // payload) typically scribbles LBA 0 to install a shim that
+    // runs before the OS kernel; catching the drift at runtime
+    // means the shim doesn't survive to the next boot.
+    BootSectorModified,
+
     // Count sentinel
     Count,
 };
