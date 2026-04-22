@@ -142,4 +142,42 @@ u8 McfgStartBus();
 /// Last PCI bus covered by the MCFG region (inclusive).
 u8 McfgEndBus();
 
+// -------------------------------------------------------------------
+// DSDT + SSDT discovery. These are the ACPI tables that contain
+// AML bytecode (power-management methods, battery / thermal-zone
+// objects, embedded-controller regions, …). Today we only cache
+// the physical base + length; a future slice walks the bytecode to
+// find specific named objects (BAT0, AC, TZ0 …) or interprets the
+// methods via a minimal AML executor.
+// -------------------------------------------------------------------
+
+u64 DsdtAddress();
+u32 DsdtLength();
+
+/// Number of SSDT tables found (capped at 16 — beyond that, a Warn
+/// log at boot records the truncation).
+u64 SsdtCount();
+
+/// Physical base of the i-th SSDT. Returns 0 for out-of-range.
+u64 SsdtAddress(u64 index);
+
+/// Length (bytes) of the i-th SSDT's full table, header + AML.
+/// Returns 0 for out-of-range.
+u32 SsdtLength(u64 index);
+
+/// Scan the DSDT + every SSDT's AML bytecode for a 4-byte ASCII
+/// name. ACPI identifiers are 4 uppercase ASCII/digit chars stored
+/// verbatim in the bytecode, so naive substring search finds them
+/// with very low false-positive risk for device-class names like
+/// "BAT0" / "BAT1" / "ADP1" / "_TZ_" / "TZ0_".
+///
+/// `name4` must be exactly 4 bytes (no NUL terminator needed).
+/// Returns true iff the pattern appears in any cached AML blob.
+///
+/// Used by the power driver to decide "SMBIOS says laptop-like
+/// AND the DSDT declares BAT0 → battery really is present".
+/// Not a substitute for a real AML interpreter — you can't read
+/// the battery's current state this way, just its declaration.
+bool AmlContainsName(const char* name4);
+
 } // namespace customos::acpi

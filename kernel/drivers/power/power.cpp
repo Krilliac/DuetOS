@@ -1,5 +1,6 @@
 #include "power.h"
 
+#include "../../acpi/acpi.h"
 #include "../../arch/x86_64/serial.h"
 #include "../../arch/x86_64/smbios.h"
 #include "../../arch/x86_64/thermal.h"
@@ -35,11 +36,16 @@ void PowerInit()
     g_snapshot.backend_is_stub = true;
     g_snapshot.chassis_is_laptop = arch::SmbiosIsLaptopChassis();
 
-    // Without AML we can't read _PSR / _BIF / _BST, so the best
-    // we can do today is: if the chassis is laptop-like, assume
-    // battery HARDWARE is present but report "unknown" for its
-    // state. Desktop chassis → no battery, AC-online.
-    if (g_snapshot.chassis_is_laptop)
+    // Battery hardware detection. Combine SMBIOS chassis-type
+    // (gross signal) with a DSDT/SSDT AML bytecode scan (more
+    // direct: if the firmware declared `Device (BAT0) { ... }`
+    // then there's genuinely a battery device). Full state still
+    // needs an AML interpreter — see `AmlContainsName` docs.
+    const bool aml_declares_bat0 = acpi::AmlContainsName("BAT0") || acpi::AmlContainsName("BAT1");
+    const bool aml_declares_ac = acpi::AmlContainsName("ADP1") || acpi::AmlContainsName("AC__");
+    const bool battery_declared = aml_declares_bat0 || g_snapshot.chassis_is_laptop;
+
+    if (battery_declared)
     {
         g_snapshot.ac = kAcUnknown;
         g_snapshot.battery.state = kBatUnknown;
@@ -51,6 +57,7 @@ void PowerInit()
         g_snapshot.battery.state = kBatNotPresent;
         g_snapshot.battery.percent = 0;
     }
+    (void)aml_declares_ac; // reserved for when AC_STATE fires via AML
     g_snapshot.battery.rate_mw = 0;
     g_snapshot.battery.voltage_mv = 0;
     g_snapshot.battery.design_capacity_mwh = 0;
@@ -60,6 +67,10 @@ void PowerInit()
 
     arch::SerialWrite("[power] chassis=");
     arch::SerialWrite(g_snapshot.chassis_is_laptop ? "laptop-like" : "desktop/server");
+    arch::SerialWrite(" aml_bat=");
+    arch::SerialWrite(aml_declares_bat0 ? "declared" : "absent");
+    arch::SerialWrite(" aml_ac=");
+    arch::SerialWrite(aml_declares_ac ? "declared" : "absent");
     arch::SerialWrite(" ac=");
     arch::SerialWrite(AcStateName(g_snapshot.ac));
     arch::SerialWrite(" battery=");

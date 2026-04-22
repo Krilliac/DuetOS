@@ -252,6 +252,18 @@ constinit u64 g_mcfg_address = 0;
 constinit u8 g_mcfg_start_bus = 0;
 constinit u8 g_mcfg_end_bus = 0;
 
+// DSDT + SSDT cache. DSDT address is taken from FADT.dsdt (32-bit
+// legacy pointer — FADT.X_DSDT at offset 140 is the 64-bit form we
+// should prefer when available, but we don't parse FADT that deep
+// yet). SSDTs live as separate XSDT/RSDT entries with the "SSDT"
+// signature.
+constexpr u64 kMaxSsdts = 16;
+constinit u64 g_dsdt_address = 0;
+constinit u32 g_dsdt_length = 0;
+constinit u64 g_ssdt_address[kMaxSsdts] = {};
+constinit u32 g_ssdt_length[kMaxSsdts] = {};
+constinit u64 g_ssdt_count = 0;
+
 [[noreturn]] void PanicAcpi(const char* message)
 {
     core::Panic("acpi", message);
@@ -477,6 +489,71 @@ void ParseFadt(const Fadt& fadt)
         g_reset_reg = fadt.reset_reg;
         g_reset_value = fadt.reset_value;
     }
+    // DSDT pointer is a 32-bit physical address in the legacy FADT;
+    // modern firmware also populates X_DSDT (64-bit) further on.
+    // Cache the 32-bit form — on every x86_64 box we target it's
+    // below 4 GiB so the legacy field is valid. Read the DSDT
+    // header to get the length for the size log.
+    if (fadt.dsdt != 0)
+    {
+        g_dsdt_address = fadt.dsdt;
+        const auto* dsdt_hdr = static_cast<const SdtHeader*>(mm::PhysToVirt(fadt.dsdt));
+        if (dsdt_hdr != nullptr)
+        {
+            g_dsdt_length = dsdt_hdr->length;
+        }
+    }
+}
+
+// Cache a single SSDT table entry. `phys` is the physical base
+// (u32 or u64 per the XSDT / RSDT entry we came from); `length`
+// comes from the table header we've already validated lives in
+// the direct map. Bounded by kMaxSsdts; anything past that is
+// logged and dropped (no firmware we target ships more).
+void CacheSsdt(u64 phys, u32 length)
+{
+    if (g_ssdt_count >= kMaxSsdts)
+    {
+        core::Log(core::LogLevel::Warn, "acpi", "more SSDTs than cache capacity — truncating");
+        return;
+    }
+    g_ssdt_address[g_ssdt_count] = phys;
+    g_ssdt_length[g_ssdt_count] = length;
+    ++g_ssdt_count;
+}
+
+// Walk the XSDT (or RSDT) again, collecting every "SSDT" entry
+// into g_ssdt_*. `FindTable` returns on the first match; for
+// SSDTs we need all of them, hence the duplicated walker. Cheap:
+// tables are usually 5..15 entries.
+void CollectSsdts(const Rsdp& rsdp)
+{
+    if (rsdp.revision >= 2 && rsdp.xsdt_address != 0)
+    {
+        const auto* xsdt = PhysToHeader(rsdp.xsdt_address);
+        const u64 count = (xsdt->length - sizeof(SdtHeader)) / sizeof(u64);
+        const auto* entries = reinterpret_cast<const u64*>(reinterpret_cast<uptr>(xsdt) + sizeof(SdtHeader));
+        for (u64 i = 0; i < count; ++i)
+        {
+            const auto* h = PhysToHeader(entries[i]);
+            if (BytesEqual(h->signature, "SSDT", 4))
+            {
+                CacheSsdt(entries[i], h->length);
+            }
+        }
+        return;
+    }
+    const auto* rsdt = PhysToHeader(rsdp.rsdt_address);
+    const u64 count = (rsdt->length - sizeof(SdtHeader)) / sizeof(u32);
+    const auto* entries = reinterpret_cast<const u32*>(reinterpret_cast<uptr>(rsdt) + sizeof(SdtHeader));
+    for (u64 i = 0; i < count; ++i)
+    {
+        const auto* h = PhysToHeader(entries[i]);
+        if (BytesEqual(h->signature, "SSDT", 4))
+        {
+            CacheSsdt(entries[i], h->length);
+        }
+    }
 }
 
 void ParseHpet(const HpetTable& hpet)
@@ -593,6 +670,14 @@ void AcpiInit(uptr multiboot_info_phys)
         ParseHpet(*reinterpret_cast<const HpetTable*>(hpet_hdr));
     }
 
+    // DSDT was discovered via FADT.dsdt (above). SSDTs are
+    // separate XSDT/RSDT entries — walk once more and cache
+    // every one for the future AML interpreter. The interpreter
+    // itself is deferred (see .claude/knowledge/driver-shells-
+    // v0.md), but having the addresses surfaced at boot lets
+    // follow-on slices land without re-walking.
+    CollectSsdts(*rsdp);
+
     // MCFG is optional — QEMU q35 provides it, legacy platforms
     // without PCIe do not. PCI drivers use the cached base to enable
     // ECAM config access; missing means "fall back to port IO."
@@ -668,6 +753,31 @@ void AcpiInit(uptr multiboot_info_phys)
         SerialWrite("absent");
     }
     SerialWrite("\n");
+
+    SerialWrite("[acpi] dsdt=");
+    if (g_dsdt_address != 0)
+    {
+        SerialWriteHex(g_dsdt_address);
+        SerialWrite(" length=");
+        SerialWriteHex(g_dsdt_length);
+    }
+    else
+    {
+        SerialWrite("absent");
+    }
+    SerialWrite(" ssdts=");
+    SerialWriteHex(g_ssdt_count);
+    SerialWrite("\n");
+    for (u64 i = 0; i < g_ssdt_count; ++i)
+    {
+        SerialWrite("  ssdt[");
+        SerialWriteHex(i);
+        SerialWrite("] addr=");
+        SerialWriteHex(g_ssdt_address[i]);
+        SerialWrite(" length=");
+        SerialWriteHex(g_ssdt_length[i]);
+        SerialWrite("\n");
+    }
 
     for (u64 i = 0; i < g_lapic_count; ++i)
     {
@@ -798,6 +908,75 @@ u8 McfgStartBus()
 u8 McfgEndBus()
 {
     return g_mcfg_end_bus;
+}
+
+u64 DsdtAddress()
+{
+    return g_dsdt_address;
+}
+
+u32 DsdtLength()
+{
+    return g_dsdt_length;
+}
+
+u64 SsdtCount()
+{
+    return g_ssdt_count;
+}
+
+u64 SsdtAddress(u64 index)
+{
+    if (index >= g_ssdt_count)
+        return 0;
+    return g_ssdt_address[index];
+}
+
+u32 SsdtLength(u64 index)
+{
+    if (index >= g_ssdt_count)
+        return 0;
+    return g_ssdt_length[index];
+}
+
+namespace
+{
+
+// Scan a byte buffer for the 4-byte ASCII pattern `name4`.
+// Linear, naive — tables are small (DSDT typically < 64 KB,
+// SSDTs similar) so a 4-byte sliding compare is fine.
+bool ContainsName4(const u8* buf, u32 len, const char* name4)
+{
+    if (len < 4)
+        return false;
+    for (u32 i = 0; i + 4 <= len; ++i)
+    {
+        if (buf[i] == u8(name4[0]) && buf[i + 1] == u8(name4[1]) && buf[i + 2] == u8(name4[2]) &&
+            buf[i + 3] == u8(name4[3]))
+            return true;
+    }
+    return false;
+}
+
+} // namespace
+
+bool AmlContainsName(const char* name4)
+{
+    if (name4 == nullptr)
+        return false;
+    if (g_dsdt_address != 0 && g_dsdt_length > 0)
+    {
+        const auto* buf = static_cast<const u8*>(mm::PhysToVirt(g_dsdt_address));
+        if (buf != nullptr && ContainsName4(buf, g_dsdt_length, name4))
+            return true;
+    }
+    for (u64 i = 0; i < g_ssdt_count; ++i)
+    {
+        const auto* buf = static_cast<const u8*>(mm::PhysToVirt(g_ssdt_address[i]));
+        if (buf != nullptr && ContainsName4(buf, g_ssdt_length[i], name4))
+            return true;
+    }
+    return false;
 }
 
 bool AcpiReset()
