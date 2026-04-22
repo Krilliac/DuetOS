@@ -119,6 +119,7 @@ constexpr u32 kOffMBtoWC = 0x5BE;             // batch 33 — 49 bytes
 constexpr u32 kOffWCtoMB = 0x5EF;             // batch 33 — 48 bytes
 constexpr u32 kOffGetUserNameW = 0x61F;       // batch 34 — 47 bytes
 constexpr u32 kOffGetComputerNameW = 0x64E;   // batch 34 — 61 bytes
+constexpr u32 kOffGetWinDirW = 0x68B;         // batch 35 — 30 bytes (buf-first sig)
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -1675,10 +1676,37 @@ constexpr u8 kStubsBytes[] = {
     0xC7, 0x02, 0x09, 0x00, 0x00, 0x00, // 0x682 mov dword [rdx], 9 (required)
     0x31, 0xC0,                         // 0x688 xor eax, eax
     0xC3,                               // 0x68A ret
+
+    // === Batch 35: system-directory queries ====================
+    //
+    // GetWindowsDirectoryW / GetSystemDirectoryW have buffer-
+    // first signatures (rcx = buffer, rdx = size). We report
+    // the minimal "X:\\" path for both — same content as
+    // GetCurrentDirectoryW, but the args are in opposite order
+    // so a separate stub is needed. GetTempPathW has the SAME
+    // sig as GetCurrentDirectoryW (size first, buffer second),
+    // so it aliases to kOffGetCurrentDirW below.
+
+    // --- GetWindowsDirectoryW / GetSystemDirectoryW (offset 0x68B, 30 bytes) ---
+    // Win32: UINT GetWindowsDirectoryW(LPWSTR rcx, UINT rdx).
+    // UINT GetSystemDirectoryW(LPWSTR rcx, UINT rdx).
+    // Buffer-first sig: writes L"X:\\\0" if rdx >= 4, returns 3.
+    // Else returns 4 (required size incl NUL). Same content for
+    // both — CustomOS has no filesystem distinction between
+    // "Windows" dir and "System32" dir.
+    0x83, 0xFA, 0x04,                         // 0x68B cmp edx, 4
+    0x72, 0x13,                               // 0x68E jb .small (+0x13 = 19)
+    0xC7, 0x01, 0x58, 0x00, 0x3A, 0x00,       // 0x690 mov dword [rcx], 0x003A0058
+    0xC7, 0x41, 0x04, 0x5C, 0x00, 0x00, 0x00, // 0x696 mov dword [rcx+4], 0x0000005C
+    0xB8, 0x03, 0x00, 0x00, 0x00,             // 0x69D mov eax, 3
+    0xC3,                                     // 0x6A2 ret
+    // .small:
+    0xB8, 0x04, 0x00, 0x00, 0x00, // 0x6A3 mov eax, 4 (required incl NUL)
+    0xC3,                         // 0x6A8 ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x68B, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0x6A9, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -1967,6 +1995,20 @@ constexpr StubEntry kStubsTable[] = {
     {"advapi32.dll", "GetUserNameA", kOffGetUserNameW}, // ASCII caller gets ASCII-range bytes OK
     {"kernel32.dll", "GetComputerNameW", kOffGetComputerNameW},
     {"kernel32.dll", "GetComputerNameA", kOffGetComputerNameW},
+
+    // Batch 35 — system-directory queries. GetTempPathW shares
+    // GetCurrentDirectoryW's (size, buffer) signature so it
+    // aliases to that stub. GetWindowsDirectoryW /
+    // GetSystemDirectoryW have (buffer, size) — separate stub.
+    // All report "X:\\" as v0's single system path.
+    {"kernel32.dll", "GetTempPathW", kOffGetCurrentDirW}, // alias: same sig
+    {"kernel32.dll", "GetTempPathA", kOffGetCurrentDirW},
+    {"kernel32.dll", "GetWindowsDirectoryW", kOffGetWinDirW},
+    {"kernel32.dll", "GetWindowsDirectoryA", kOffGetWinDirW},
+    {"kernel32.dll", "GetSystemDirectoryW", kOffGetWinDirW},
+    {"kernel32.dll", "GetSystemDirectoryA", kOffGetWinDirW},
+    {"kernel32.dll", "GetSystemWindowsDirectoryW", kOffGetWinDirW},
+    {"kernel32.dll", "GetSystemWindowsDirectoryA", kOffGetWinDirW},
 
     // Batch 9 — Win32 process heap, backed by the per-process
     // 16-page region at 0x50000000 and SYS_HEAP_ALLOC /

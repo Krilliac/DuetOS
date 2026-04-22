@@ -315,6 +315,14 @@ __declspec(dllimport) int __stdcall WideCharToMultiByte(unsigned int CodePage, D
 __declspec(dllimport) BOOL __stdcall GetUserNameW(LPWSTR lpBuffer, LPDWORD pcbBuffer);
 __declspec(dllimport) BOOL __stdcall GetComputerNameW(LPWSTR lpBuffer, LPDWORD nSize);
 
+// Batch 35 — system-directory queries. Mixed signatures:
+// GetTempPathW takes (length, buffer) — like GetCurrentDirectoryW —
+// while GetWindowsDirectoryW / GetSystemDirectoryW take
+// (buffer, length) with UINT sizes.
+__declspec(dllimport) DWORD __stdcall GetTempPathW(DWORD nBufferLength, LPWSTR lpBuffer);
+__declspec(dllimport) unsigned int __stdcall GetWindowsDirectoryW(LPWSTR lpBuffer, unsigned int uSize);
+__declspec(dllimport) unsigned int __stdcall GetSystemDirectoryW(LPWSTR lpBuffer, unsigned int uSize);
+
 static const char kMsg[] = "[hello-winapi] printed via kernel32.WriteFile!\n";
 #define kMsgLen ((DWORD)(sizeof(kMsg) - 1))
 
@@ -1163,6 +1171,40 @@ void _start(void)
         WriteFile(out, b34_ok, sizeof(b34_ok) - 1, &b34w, 0);
     else
         WriteFile(out, b34_bad, sizeof(b34_bad) - 1, &b34w, 0);
+
+    // Batch 35 exercise — system-directory queries.
+    //
+    // All three should report L"X:\\" in v0.
+    WCHAR b35_tbuf[16];
+    for (int i = 0; i < 16; ++i)
+        b35_tbuf[i] = (WCHAR)0xAAAA;
+    DWORD b35_tp = GetTempPathW(16, b35_tbuf);
+    BOOL b35_tp_str = b35_tbuf[0] == 'X' && b35_tbuf[1] == ':' && b35_tbuf[2] == '\\' && b35_tbuf[3] == 0;
+
+    WCHAR b35_wbuf[16];
+    for (int i = 0; i < 16; ++i)
+        b35_wbuf[i] = (WCHAR)0xAAAA;
+    unsigned int b35_wd = GetWindowsDirectoryW(b35_wbuf, 16);
+    BOOL b35_wd_str = b35_wbuf[0] == 'X' && b35_wbuf[1] == ':' && b35_wbuf[2] == '\\' && b35_wbuf[3] == 0;
+
+    WCHAR b35_sbuf[16];
+    for (int i = 0; i < 16; ++i)
+        b35_sbuf[i] = (WCHAR)0xAAAA;
+    unsigned int b35_sd = GetSystemDirectoryW(b35_sbuf, 16);
+    BOOL b35_sd_str = b35_sbuf[0] == 'X' && b35_sbuf[1] == ':' && b35_sbuf[2] == '\\' && b35_sbuf[3] == 0;
+
+    // Buffer-too-small case for GetWindowsDirectoryW.
+    unsigned int b35_wd_small = GetWindowsDirectoryW(b35_wbuf, 2);
+
+    const char b35_ok[] = "[batch35] Temp/Windows/System directory OK\n";
+    const char b35_bad[] = "[batch35] directory queries FAILED invariants\n";
+    BOOL b35_pass =
+        b35_tp == 3 && b35_tp_str && b35_wd == 3 && b35_wd_str && b35_sd == 3 && b35_sd_str && b35_wd_small == 4;
+    DWORD b35w = 0;
+    if (b35_pass)
+        WriteFile(out, b35_ok, sizeof(b35_ok) - 1, &b35w, 0);
+    else
+        WriteFile(out, b35_bad, sizeof(b35_bad) - 1, &b35w, 0);
 
     // Batch 3 round-trip: store a distinctive value via
     // SetLastError, read it back via GetLastError, exit with

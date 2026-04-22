@@ -126,3 +126,7 @@ EXPORTS
     WideCharToMultiByte
     ; Batch 34 — identity queries (kernel32 half)
     GetComputerNameW
+    ; Batch 35 — system-directory queries
+    GetTempPathW
+    GetWindowsDirectoryW
+    GetSystemDirectoryW
