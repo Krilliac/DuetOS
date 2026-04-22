@@ -330,6 +330,18 @@ __declspec(dllimport) unsigned int __stdcall SetErrorMode(unsigned int uMode);
 __declspec(dllimport) DWORD __stdcall FormatMessageW(DWORD dwFlags, const void* lpSource, DWORD dwMessageId,
                                                      DWORD dwLanguageId, LPWSTR lpBuffer, DWORD nSize, void* Arguments);
 
+// Batch 37 — registry + file-attribute no-op stubs.
+typedef void* HKEY;
+typedef HKEY* PHKEY;
+#define ERROR_FILE_NOT_FOUND_VAL 2L
+__declspec(dllimport) long __stdcall RegOpenKeyExW(HKEY hKey, LPCWSTR lpSubKey, DWORD ulOptions, DWORD samDesired,
+                                                   PHKEY phkResult);
+__declspec(dllimport) long __stdcall RegQueryValueExW(HKEY hKey, LPCWSTR lpValueName, DWORD* lpReserved, DWORD* lpType,
+                                                      unsigned char* lpData, DWORD* lpcbData);
+__declspec(dllimport) long __stdcall RegCloseKey(HKEY hKey);
+__declspec(dllimport) DWORD __stdcall GetFileAttributesW(LPCWSTR lpFileName);
+__declspec(dllimport) BOOL __stdcall SetFileAttributesW(LPCWSTR lpFileName, DWORD dwFileAttributes);
+
 static const char kMsg[] = "[hello-winapi] printed via kernel32.WriteFile!\n";
 #define kMsgLen ((DWORD)(sizeof(kMsg) - 1))
 
@@ -1238,6 +1250,34 @@ void _start(void)
         WriteFile(out, b36_ok, sizeof(b36_ok) - 1, &b36w, 0);
     else
         WriteFile(out, b36_bad, sizeof(b36_bad) - 1, &b36w, 0);
+
+    // Batch 37 exercise — registry + file-attribute stubs.
+    //
+    // Invariants checked:
+    //   * RegOpenKeyExW returns 2 (ERROR_FILE_NOT_FOUND).
+    //   * RegQueryValueExW returns 2.
+    //   * RegCloseKey returns 0 (ERROR_SUCCESS).
+    //   * GetFileAttributesW returns 0xFFFFFFFF
+    //     (INVALID_FILE_ATTRIBUTES).
+    //   * SetFileAttributesW returns TRUE (no-op success).
+    HKEY b37_hk = 0;
+    static const WCHAR kSoftware[] = {'S', 'o', 'f', 't', 'w', 'a', 'r', 'e', 0};
+    long b37_open = RegOpenKeyExW(0, kSoftware, 0, 0x20019 /* KEY_READ */, &b37_hk);
+    long b37_query = RegQueryValueExW(0, kSoftware, 0, 0, 0, 0);
+    long b37_close = RegCloseKey(0);
+
+    static const WCHAR kSomeFile[] = {'f', 'o', 'o', '.', 't', 'x', 't', 0};
+    DWORD b37_attrs = GetFileAttributesW(kSomeFile);
+    BOOL b37_set = SetFileAttributesW(kSomeFile, 0);
+
+    const char b37_ok[] = "[batch37] Reg + FileAttributes no-ops OK\n";
+    const char b37_bad[] = "[batch37] reg/file-attr stubs FAILED invariants\n";
+    BOOL b37_pass = b37_open == 2 && b37_query == 2 && b37_close == 0 && b37_attrs == 0xFFFFFFFFUL && b37_set != 0;
+    DWORD b37w = 0;
+    if (b37_pass)
+        WriteFile(out, b37_ok, sizeof(b37_ok) - 1, &b37w, 0);
+    else
+        WriteFile(out, b37_bad, sizeof(b37_bad) - 1, &b37w, 0);
 
     // Batch 3 round-trip: store a distinctive value via
     // SetLastError, read it back via GetLastError, exit with

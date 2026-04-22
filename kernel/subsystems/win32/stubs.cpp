@@ -122,6 +122,8 @@ constexpr u32 kOffGetComputerNameW = 0x64E;   // batch 34 — 61 bytes
 constexpr u32 kOffGetWinDirW = 0x68B;         // batch 35 — 30 bytes (buf-first sig)
 constexpr u32 kOffGetLogicalDrives = 0x6A9;   // batch 36 — 6 bytes (returns 0x00800000, X: drive)
 constexpr u32 kOffGetDriveType = 0x6AF;       // batch 36 — 6 bytes (returns 3 = DRIVE_FIXED)
+constexpr u32 kOffReturnTwo = 0x6B5;          // batch 37 — 6 bytes (ERROR_FILE_NOT_FOUND / stream pos)
+constexpr u32 kOffReturnMinus1 = 0x6BB;       // batch 37 — 6 bytes (INVALID_FILE_ATTRIBUTES)
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -1721,10 +1723,27 @@ constexpr u8 kStubsBytes[] = {
     // "fixed" logical drive in CustomOS land.
     0xB8, 0x03, 0x00, 0x00, 0x00, // 0x6AF mov eax, 3 (DRIVE_FIXED)
     0xC3,                         // 0x6B4 ret
+
+    // === Batch 37: registry + file-attributes constant stubs ==
+
+    // --- return-two (offset 0x6B5, 6 bytes) -------------------
+    // Win32: typed as LSTATUS / LONG. Reg* APIs return
+    // ERROR_FILE_NOT_FOUND (2) when a key / value doesn't exist.
+    // Shared stub for all v0 registry queries.
+    0xB8, 0x02, 0x00, 0x00, 0x00, // 0x6B5 mov eax, 2
+    0xC3,                         // 0x6BA ret
+
+    // --- return-minus-1 (offset 0x6BB, 6 bytes) ---------------
+    // Win32 GetFileAttributesW returns INVALID_FILE_ATTRIBUTES
+    // (= 0xFFFFFFFF) when the path doesn't exist — caller's
+    // "file not present" fallback kicks in. Shared stub for any
+    // DWORD-returning API that signals "not found" with -1.
+    0xB8, 0xFF, 0xFF, 0xFF, 0xFF, // 0x6BB mov eax, 0xFFFFFFFF
+    0xC3,                         // 0x6C0 ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x6B5, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0x6C1, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -2042,6 +2061,43 @@ constexpr StubEntry kStubsTable[] = {
     {"kernel32.dll", "SetThreadErrorMode", kOffReturnOne}, // return TRUE, ignore mode
     {"kernel32.dll", "FormatMessageW", kOffReturnZero},
     {"kernel32.dll", "FormatMessageA", kOffReturnZero},
+
+    // Batch 37 — registry + file-attribute no-op stubs.
+    //   Reg open / read family returns ERROR_FILE_NOT_FOUND (2),
+    //     the standard "key doesn't exist" status.
+    //   Reg write / close family returns ERROR_SUCCESS (0).
+    //   GetFileAttributesW returns INVALID_FILE_ATTRIBUTES (-1)
+    //     — caller treats as "file not present".
+    //   SetFileAttributesW returns TRUE (pretend success).
+    {"advapi32.dll", "RegOpenKeyW", kOffReturnTwo},
+    {"advapi32.dll", "RegOpenKeyA", kOffReturnTwo},
+    {"advapi32.dll", "RegOpenKeyExW", kOffReturnTwo},
+    {"advapi32.dll", "RegOpenKeyExA", kOffReturnTwo},
+    {"advapi32.dll", "RegQueryValueW", kOffReturnTwo},
+    {"advapi32.dll", "RegQueryValueA", kOffReturnTwo},
+    {"advapi32.dll", "RegQueryValueExW", kOffReturnTwo},
+    {"advapi32.dll", "RegQueryValueExA", kOffReturnTwo},
+    {"advapi32.dll", "RegEnumKeyW", kOffReturnTwo},
+    {"advapi32.dll", "RegEnumKeyExW", kOffReturnTwo},
+    {"advapi32.dll", "RegEnumValueW", kOffReturnTwo},
+    {"advapi32.dll", "RegCreateKeyW", kOffReturnZero}, // pretend success
+    {"advapi32.dll", "RegCreateKeyExW", kOffReturnZero},
+    {"advapi32.dll", "RegSetValueW", kOffReturnZero},
+    {"advapi32.dll", "RegSetValueExW", kOffReturnZero},
+    {"advapi32.dll", "RegCloseKey", kOffReturnZero},
+    {"advapi32.dll", "RegDeleteKeyW", kOffReturnZero},
+    {"advapi32.dll", "RegDeleteValueW", kOffReturnZero},
+    {"kernel32.dll", "GetFileAttributesW", kOffReturnMinus1},
+    {"kernel32.dll", "GetFileAttributesA", kOffReturnMinus1},
+    {"kernel32.dll", "GetFileAttributesExW", kOffReturnZero}, // BOOL FALSE = "file not found"
+    {"kernel32.dll", "SetFileAttributesW", kOffReturnOne},    // pretend success
+    {"kernel32.dll", "SetFileAttributesA", kOffReturnOne},
+    {"kernel32.dll", "DeleteFileW", kOffReturnOne}, // pretend success
+    {"kernel32.dll", "DeleteFileA", kOffReturnOne},
+    {"kernel32.dll", "CopyFileW", kOffReturnOne},
+    {"kernel32.dll", "MoveFileW", kOffReturnOne},
+    {"kernel32.dll", "CreateDirectoryW", kOffReturnOne},
+    {"kernel32.dll", "RemoveDirectoryW", kOffReturnOne},
 
     // Batch 9 — Win32 process heap, backed by the per-process
     // 16-page region at 0x50000000 and SYS_HEAP_ALLOC /

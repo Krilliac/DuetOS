@@ -22,3 +22,7 @@ EXPORTS
     AdjustTokenPrivileges
     ; Batch 34 — identity queries
     GetUserNameW
+    ; Batch 37 — registry no-op stubs
+    RegOpenKeyExW
+    RegQueryValueExW
+    RegCloseKey

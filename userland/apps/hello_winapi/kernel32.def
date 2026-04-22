@@ -135,3 +135,6 @@ EXPORTS
     GetDriveTypeW
     SetErrorMode
     FormatMessageW
+    ; Batch 37 — file attributes (kernel32 half)
+    GetFileAttributesW
+    SetFileAttributesW
