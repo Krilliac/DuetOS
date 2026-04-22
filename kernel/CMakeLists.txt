@@ -60,7 +60,9 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     arch/x86_64/retpoline_thunks.S
     arch/x86_64/rtc.cpp
     arch/x86_64/serial.cpp
+    arch/x86_64/smbios.cpp
     arch/x86_64/smp.cpp
+    arch/x86_64/thermal.cpp
     arch/x86_64/timer.cpp
     arch/x86_64/traps.cpp
     arch/x86_64/usermode.S
@@ -71,6 +73,7 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     drivers/gpu/gpu.cpp
     drivers/net/net.cpp
     drivers/pci/pci.cpp
+    drivers/power/power.cpp
     drivers/storage/ahci.cpp
     drivers/storage/block.cpp
     drivers/storage/nvme.cpp

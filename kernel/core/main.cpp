@@ -3,6 +3,8 @@
 #include "../arch/x86_64/cpu.h"
 #include "../arch/x86_64/cpu_info.h"
 #include "../arch/x86_64/gdt.h"
+#include "../arch/x86_64/smbios.h"
+#include "../arch/x86_64/thermal.h"
 #include "../arch/x86_64/hpet.h"
 #include "../arch/x86_64/idt.h"
 #include "../arch/x86_64/ioapic.h"
@@ -19,6 +21,7 @@
 #include "../drivers/input/ps2mouse.h"
 #include "../drivers/net/net.h"
 #include "../drivers/pci/pci.h"
+#include "../drivers/power/power.h"
 #include "../drivers/usb/usb.h"
 #include "../net/stack.h"
 #include "../subsystems/graphics/graphics.h"
@@ -215,6 +218,12 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
 
     SerialWrite("[boot] Probing CPU features.\n");
     customos::arch::CpuInfoProbe();
+
+    SerialWrite("[boot] Probing SMBIOS.\n");
+    customos::arch::SmbiosInit();
+
+    SerialWrite("[boot] Reading MSR thermals.\n");
+    customos::arch::ThermalProbe();
 
     SerialWrite("[boot] Installing kernel GDT.\n");
     GdtInit();
@@ -805,6 +814,9 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
 
     SerialWrite("[boot] Detecting audio controllers.\n");
     customos::drivers::audio::AudioInit();
+
+    SerialWrite("[boot] Bringing up power / thermal shell.\n");
+    customos::drivers::power::PowerInit();
 
     SerialWrite("[boot] Bringing up network stack skeleton.\n");
     customos::net::NetStackInit();
