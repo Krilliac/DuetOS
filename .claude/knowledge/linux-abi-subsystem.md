@@ -1,8 +1,8 @@
 # Linux-ABI syscall subsystem
 
-**Last updated:** 2026-04-22
+**Last updated:** 2026-04-22 (post slice 14)
 **Type:** Observation
-**Status:** Active — five on-boot smoke tasks demonstrating the full stack; 20 syscalls implemented
+**Status:** Active — four on-boot smoke tasks demonstrating the full stack; 34 syscalls implemented
 
 ## Description
 
@@ -46,32 +46,43 @@ kernel/subsystems/linux/
 4. Entry stub pops TrapFrame → `iretq` (NOT sysret — CustomOS's
    GDT is incompatible with sysret's selector arithmetic)
 
-## Implemented syscalls (as of 2026-04-22)
+## Implemented syscalls (as of slice 14)
 
-| # | Name | Status |
-|---|------|--------|
-| 0 | read | Real — file fds read from FAT32 via scratch+slice; stdin = EOF |
-| 1 | write | Real — fd 1/2 to COM1; 4 KiB per-call cap |
-| 2 | open | Real — FAT32-backed, per-process fd table |
-| 3 | close | Real — releases fd slot |
-| 8 | lseek | Real — file fds only; tty fds return -ESPIPE |
-| 9 | mmap | Real — anonymous private only; bump-allocator at 0x7000_0000_0000 |
-| 11 | munmap | Stub — returns 0, doesn't tear down pages |
-| 12 | brk | Real — grows RW+NX pages on demand from Process::linux_brk_base |
-| 13 | rt_sigaction | Stub — returns 0, no signal delivery wired |
-| 14 | rt_sigprocmask | Stub — returns 0 |
-| 16 | ioctl | Stub — returns -ENOTTY / -EBADF |
-| 20 | writev | Real — iterates iovec array calling DoWrite |
-| 39 | getpid | Real — returns Task ID |
-| 60 | exit | Real — calls SchedExit |
-| 63 | uname | Real — static CustomOS/customos/0.1/... strings |
-| 102 | getuid | Stub — returns 0 |
-| 104 | getgid | Stub — returns 0 |
-| 107 | geteuid | Stub — returns 0 |
-| 108 | getegid | Stub — returns 0 |
-| 158 | arch_prctl | Real — ARCH_SET_FS / ARCH_GET_FS; GS rejected |
-| 218 | set_tid_address | Stub — returns task ID, doesn't clear on exit |
-| 231 | exit_group | Real — calls SchedExit |
+| #   | Name             | Status                                                        |
+|-----|------------------|---------------------------------------------------------------|
+| 0   | read             | Real — file fds from FAT32 via scratch+slice; stdin = EOF     |
+| 1   | write            | Real — fd 1/2 → COM1; file fds → Fat32WriteInPlace in-bounds  |
+| 2   | open             | Real — FAT32-backed, per-process fd table                     |
+| 3   | close            | Real — releases fd slot                                       |
+| 4   | stat             | Real — Fat32LookupPath + 144 B stat struct                    |
+| 5   | fstat            | Real — from fd's cached entry; tty fds → S_IFCHR              |
+| 6   | lstat            | Aliases stat (no symlinks)                                    |
+| 8   | lseek            | Real — file fds only; tty fds return -ESPIPE                  |
+| 9   | mmap             | Real — anonymous private only; bump-allocator                 |
+| 11  | munmap           | Stub — returns 0, doesn't tear down pages                     |
+| 12  | brk              | Real — grows RW+NX pages from Process::linux_brk_base         |
+| 13  | rt_sigaction     | Stub — returns 0, no signal delivery wired                    |
+| 14  | rt_sigprocmask   | Stub — returns 0                                              |
+| 16  | ioctl            | Stub — returns -ENOTTY / -EBADF                               |
+| 20  | writev           | Real — iterates iovec array calling DoWrite                   |
+| 21  | access           | Real — Fat32LookupPath presence probe                         |
+| 35  | nanosleep        | Real — rounds up to scheduler ticks, SchedSleepTicks          |
+| 39  | getpid           | Real — returns Task ID                                        |
+| 60  | exit             | Real — calls SchedExit                                        |
+| 63  | uname            | Real — static CustomOS / customos / 0.1 / ...                 |
+| 79  | getcwd           | Stub — returns "/" always                                     |
+| 89  | readlink         | Stub — returns -EINVAL (no symlinks)                          |
+| 102 | getuid           | Stub — returns 0                                              |
+| 104 | getgid           | Stub — returns 0                                              |
+| 107 | geteuid          | Stub — returns 0                                              |
+| 108 | getegid          | Stub — returns 0                                              |
+| 158 | arch_prctl       | Real — ARCH_SET_FS / ARCH_GET_FS; GS rejected                 |
+| 201 | time             | Real — seconds-since-boot via HPET                            |
+| 202 | futex            | Stub — returns 0 (no contention for single-threaded)          |
+| 218 | set_tid_address  | Stub — returns task ID, no CLONE_CHILD_CLEARTID               |
+| 228 | clock_gettime    | Real — HPET-backed; all clocks monotonic-since-boot           |
+| 231 | exit_group       | Real — calls SchedExit                                        |
+| 318 | getrandom        | Non-crypto — xorshift64 seeded from rdtsc, capped at 4 KiB    |
 
 Unknown syscalls return -ENOSYS with a log line identifying the
 number. Extend the `switch` in `LinuxSyscallDispatch` as new
@@ -96,20 +107,27 @@ Per-CPU (shared with entry stub via well-known offsets in
 
 ## Initial stack layout (SpawnElfLinux)
 
-After `ElfLoad`, populates the top 48 B of the stack page with:
+After `ElfLoad`, populates the top 96 B of the stack page with:
 
 ```
-offset  0: argc = 0        (u64)
-offset  8: argv[0] = NULL  (u64)
-offset 16: envp[0] = NULL  (u64)
-offset 24: auxv[0].type = AT_NULL = 0
-offset 32: auxv[0].val  = 0
-offset 40: pad = 0
+offset  0: argc = 0                    (u64)
+offset  8: argv[0] = NULL              (u64 — argv terminator)
+offset 16: envp[0] = NULL              (u64 — envp terminator)
+offset 24: AT_PAGESZ = 6                (u64 — auxv key)
+offset 32: 4096                          (u64 — auxv val)
+offset 40: AT_RANDOM = 25                (u64 — auxv key)
+offset 48: rand_ptr = rsp_init + 72    (u64 — auxv val: user VA)
+offset 56: AT_NULL = 0                  (u64 — auxv terminator key)
+offset 64: 0                             (u64 — auxv terminator val)
+offset 72: 16 B xorshift-mixed rdtsc entropy
+offset 88: 8 B pad
 ```
 
-Sets `proc->user_rsp_init = stack_top - 48`. Real static-musl
-wants more auxv entries (AT_PHDR, AT_PAGESZ, AT_RANDOM); v0
-provides AT_NULL only since musl tolerates a minimal vector.
+Sets `proc->user_rsp_init = stack_top - 96`. AT_PHDR / AT_EXECFN
+are NOT supplied — musl falls back to reading the ELF's own
+headers for program-header info, which works for static binaries.
+Dynamic linking (PT_INTERP resolution) would need AT_PHDR +
+AT_BASE + AT_ENTRY additionally.
 
 ## Boot-time smoke tasks
 
@@ -147,15 +165,24 @@ the shell.
   short-lived tasks; AS teardown on process death reclaims.
 - **Signals don't deliver** — rt_sigaction/rt_sigprocmask accept
   but are inert. No sigframe, no sigreturn.
-- **File reads cap at 4 KiB** — DoRead reads whole file into
-  scratch then slices. Larger files need a streamed
-  read-with-offset helper in the FAT32 driver.
-- **No write to files** — only read. Fat32WriteInPlace exists;
-  wiring to sys_write on a file fd is its own slice.
-- **No sys_stat / sys_fstat** — musl uses them for `isatty` /
-  `fstat` probes; not required yet by any on-boot smoke.
+- **File I/O caps at 4 KiB** — DoRead reads whole file into
+  scratch then slices. DoWrite (file fds) limits single-call
+  size. Larger files need a streamed read-with-offset helper
+  in the FAT32 driver.
+- **Writes don't extend files.** Fat32WriteInPlace covers
+  in-bounds only; growing a file needs the fd table to track
+  the basename so Fat32AppendInRoot can be reached. Follow-up.
+- **Calendar time is boot-relative.** clock_gettime returns
+  monotonic ns since boot for every clock id. Needs RTC driver
+  locking for real epoch time.
+- **futex is a no-op** — fine for single-threaded, broken once
+  a multi-thread workload actually contends.
 - **No dynamic linking** — PT_INTERP is ignored. Only static
   binaries run.
+- **Cryptographic getrandom** — the stream is xorshift64 from
+  rdtsc. Good for stack cookies + pointer mangling; NOT
+  suitable for seeding TLS / session keys. Needs a real RNG
+  driver + entropy source.
 
 ## How to add a new syscall
 
