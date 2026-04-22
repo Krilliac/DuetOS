@@ -42,6 +42,12 @@ panic.
 | `EferNxeCleared`              | NXE bit dropped silently                           |
 | `StackCanaryZero`             | `__stack_chk_guard` flipped to 0                   |
 | `TaskStackOverflow`           | any task's bottom-of-stack sentinel scribbled      |
+| `TaskRspOutOfRange`           | task's saved rsp outside its stack bounds          |
+| `GdtModified`                 | GDT code/data descriptors changed (A-bit masked)   |
+| `KernelTextModified`          | kernel .text spot-check hash changed               |
+| `IrqNestingExcessive`         | (stubbed 0 until per-task IRQ accounting lands)    |
+| `CounterWentBackwards`        | monotonic u64 counter (heap/sched) regressed      |
+| `ClockStalled`                | HPET or LAPIC tick didn't advance between scans    |
 
 ## Kernel-stack overflow detection
 
