@@ -78,6 +78,13 @@ expected=(
     # `name="ring3-winkill" reason=` below, this asserts the PE
     # both spawned AND was not force-killed later.
     'pe spawn name="ring3-winkill"'
+    # windows-kill.exe's very first std::cout output routes
+    # through our MSVCP140 sputn stub into SYS_WRITE(fd=1) and
+    # the text hits the serial console verbatim. This is the
+    # first real Windows PE output on CustomOS — regressing it
+    # would mean the iostream stubs or the proc-env pipeline
+    # got broken.
+    "Windows Kill "
 )
 
 # Forbidden signatures — anything indicating an unhandled

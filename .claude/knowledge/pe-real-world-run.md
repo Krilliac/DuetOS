@@ -2,12 +2,15 @@
 
 **Last updated:** 2026-04-22 (end-to-end exit)
 **Type:** Observation
-**Status:** Active — **winkill runs to clean `SYS_EXIT(0)`**. Real-world
-80 KB MSVC PE (8 sections, 52 imports, SEH, TLS, resource dir) executes
-start-to-finish as a ring-3 process on CustomOS. No printed output (the
-cout path no-ops via the fake-object data-miss pad), but no #PF, no #GP,
-no panic, no task-kill — the CRT returns from main, runs atexit, and
-calls ExitProcess(0). Milestone.
+**Status:** Active — **winkill prints "Windows Kill " to serial**, then
+faults deeper in its iostream loop. Real-world 80 KB MSVC PE (8
+sections, 52 imports, SEH, TLS, resource dir) executes far enough to
+emit real output via MSVCP140::sputn → SYS_WRITE. First Windows PE
+output on CustomOS. Subsequent cout operations (number formatting,
+chained strings) still fall through the zero-vtable path and
+eventually fault cleanly; winkill no longer exits to SYS_EXIT(0) on
+its own since the new sputn path now actually reaches more code
+that needs real iostream state.
 
 ## What changed (this slice)
 
@@ -238,6 +241,55 @@ signature. Eleven other `?` symbols (widen, sputn, _Osfx, put,
 setstate, flush, and four ostream::operator<< variants) stayed
 on the function catch-all because their MSVC mangling begins
 with `Q` (method) after `@@`, not `3`.
+
+## Slice 29 — iostream stubs + first Windows PE output
+
+Routes MSVCP140 iostream methods (imported by name) to real
+stubs that do the right ABI-level thing. Adds three new
+stub offsets inside the shared stubs page:
+
+  * `kOffSputn` (0x281, 19 bytes) — `basic_streambuf::sputn(s, n)`.
+    Direct SYS_WRITE(1, s, n); returns actual byte count. First
+    real output path for imported `std::cout << "string"`.
+  * `kOffReturnThis` (0x294, 4 bytes) — `mov rax, rcx; ret`.
+    Used for `flush()`, `put()`, and every `operator<<` variant
+    that returns `*this` (enables chaining without crashing).
+  * `kOffWiden` (0x298, 4 bytes) — `basic_ios::widen(char)` as
+    an identity function on char.
+
+Registered mangled names for: `?sputn`, `?put`, `?flush`,
+`?widen`, `?setstate` (→ CritSecNop), `?_Osfx` (→ CritSecNop),
+`?sputc` (→ ReturnZero), `??6(int)`, `??6(unsigned long)`,
+`??6(manipulator)`.
+
+Observed on winkill post-slice-29:
+
+```
+[ring3] task pid=0x18 entering ring 3 rip=0x140004070
+Windows Kill                          ← real MSVC PE output via sputn
+[task-kill] ring-3 task took #PF
+  rip=0x140001500
+  cr2=0x2073776f646e695b               ← "[Windows " in ASCII LE
+```
+
+The text "Windows Kill " (the version banner's first line) hits
+the serial console verbatim — the first real output from a
+Windows PE on CustomOS. The subsequent fault is `movslq rcx,
+[rax+4]` inside an inlined `operator<<(ostream&, const char*)`
+loop where `rax = [rsi] = "Windows "`. Another string from the
+version banner is being loaded through what it thinks is its
+vtable pointer; without a real cout / streambuf / ios vtable
+chain, the virtual-dispatch path still trips.
+
+Coverage gap: these stubs fire when a PE imports the methods
+BY NAME (IAT dispatch). They don't fire for virtual dispatch
+through a vtable we've zero-filled — that still needs a
+genuine std::cout / streambuf / vtable constructed in the
+proc-env page. Deferred; the first-print milestone is enough.
+
+Also extended `ctest-boot-smoke`: `"Windows Kill "` is now an
+expected signature, so a regression in the iostream stub chain
+or proc-env pipeline fails the smoke.
 
 ## Slice 28 — miss-logger guard + end-to-end clean exit
 

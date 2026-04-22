@@ -75,6 +75,9 @@ constexpr u32 kOffMissLogger = 0x246;         // batch 15 — 41 bytes
 constexpr u32 kOffPArgc = 0x26F;              // batch 16 —  6 bytes
 constexpr u32 kOffPArgv = 0x275;              // batch 16 —  6 bytes
 constexpr u32 kOffPCommode = 0x27B;           // batch 17 —  6 bytes
+constexpr u32 kOffSputn = 0x281;              // batch 18 — 19 bytes
+constexpr u32 kOffReturnThis = 0x294;         // batch 18 —  4 bytes
+constexpr u32 kOffWiden = 0x298;              // batch 18 —  4 bytes
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -772,10 +775,54 @@ constexpr u8 kStubsBytes[] = {
     // initialises it to.
     0xB8, 0x00, 0x02, 0x00, 0x65, // 0x27B mov eax, 0x65000200
     0xC3,                         // 0x280 ret
+
+    // === Batch 18: C++ iostream output ========================
+    //
+    // MSVCP140 virtual methods that would normally sit behind
+    // `std::cout.rdbuf()->sputn(...)` / `std::cout << x` virtual
+    // dispatch. When a PE imports these BY NAME (rather than
+    // through vtables loaded from MSVCP140 at runtime), these
+    // IAT-direct stubs let the output actually reach serial.
+    //
+    // Coverage note: winkill's own std::cout path today goes
+    // via virtual dispatch through a zero vtable (from the
+    // fake-object data-miss pad), so these stubs aren't called
+    // by winkill's current execution path. They unblock any
+    // future slice that constructs a real `std::cout` whose
+    // streambuf vtable points at kOffSputn etc., and they work
+    // immediately for programs that take the method's address
+    // directly (e.g. `auto f = &basic_streambuf::sputn`).
+
+    // --- sputn (offset 0x281, 19 bytes) ------------------------
+    // `streamsize basic_streambuf<char>::sputn(const char* s, streamsize n)`.
+    // Args: rcx=this (ignored), rdx=s, r8=n. Returns count in rax.
+    // Direct SYS_WRITE(1, s, n); kernel caps at kSyscallWriteMax
+    // (256) and returns the actual count — so the caller's
+    // count-check (`rv == n`) will match for small buffers and
+    // trip on larger ones, which is the honest behaviour.
+    0x48, 0x89, 0xD6,             // 0x281 mov rsi, rdx        ; buf
+    0x4C, 0x89, 0xC2,             // 0x284 mov rdx, r8         ; n
+    0xBF, 0x01, 0x00, 0x00, 0x00, // 0x287 mov edi, 1          ; fd = stdout
+    0xB8, 0x02, 0x00, 0x00, 0x00, // 0x28C mov eax, 2 (SYS_WRITE)
+    0xCD, 0x80,                   // 0x291 int 0x80
+    0xC3,                         // 0x293 ret                 ; rax = count
+
+    // --- return-this (offset 0x294, 4 bytes) -------------------
+    // `basic_ostream& basic_ostream::flush()` and any Win32
+    // method whose contract is "do nothing, return *this".
+    // Args: rcx=this. Returns rcx.
+    0x48, 0x89, 0xC8, // 0x294 mov rax, rcx
+    0xC3,             // 0x297 ret
+
+    // --- widen (offset 0x298, 4 bytes) -------------------------
+    // `char basic_ios<char>::widen(char c)`. Identity on char.
+    // Args: rcx=this (ignored), dl=c. Returns c in al.
+    0x0F, 0xB6, 0xC2, // 0x298 movzx eax, dl
+    0xC3,             // 0x29B ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x281, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0x29C, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -1175,6 +1222,54 @@ constexpr StubEntry kStubsTable[] = {
     {"api-ms-win-crt-heap-l1-1-0.dll", "_callnewh", kOffReturnZero},
     {"ucrtbase.dll", "_callnewh", kOffReturnZero},
     {"msvcrt.dll", "_callnewh", kOffReturnZero},
+
+    // Batch 18 — MSVCP140 iostream methods. Direct-call paths
+    // (via IAT) now do the right thing; virtual-dispatch paths
+    // still walk the fake-object data-miss pad. The mangled
+    // names are the MSVC x64 form (`?method@class@@Q..Z`).
+    //
+    // sputn → real SYS_WRITE; writes chars to serial and
+    // returns the count. Same for the `MSVCP140` and MSVCP110
+    // variants (older CRT link paths).
+    {"MSVCP140.dll", "?sputn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QEAA_JPEBD_J@Z", kOffSputn},
+    {"msvcp140.dll", "?sputn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QEAA_JPEBD_J@Z", kOffSputn},
+
+    // sputc → "can't usefully write one char without spilling
+    // to stack" in a hand-assembled stub. Fall through to the
+    // return-zero family for now; a PE that relies on sputc
+    // (rare — operator<< for char goes through put()) will see
+    // "0 chars written" and can degrade. Revisit if it matters.
+    {"MSVCP140.dll", "?sputc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QEAAHD@Z", kOffReturnZero},
+
+    // put → returns *this (chainable). Doesn't actually emit
+    // the char in v0 — the call still does its real work if
+    // the caller reads a buffer pointer off the return value
+    // (nobody does).
+    {"MSVCP140.dll", "?put@?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV12@D@Z", kOffReturnThis},
+
+    // flush → returns *this. No buffers to drain in v0.
+    {"MSVCP140.dll", "?flush@?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV12@XZ", kOffReturnThis},
+
+    // _Osfx (sentry epilog) → void, no-op.
+    {"MSVCP140.dll", "?_Osfx@?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAXXZ", kOffCritSecNop},
+
+    // setstate → void, no-op. (Silently drops the bits; any
+    // code that inspects rdstate() later sees goodbit.)
+    {"MSVCP140.dll", "?setstate@?$basic_ios@DU?$char_traits@D@std@@@std@@QEAAXH_N@Z", kOffCritSecNop},
+
+    // widen → char identity.
+    {"MSVCP140.dll", "?widen@?$basic_ios@DU?$char_traits@D@std@@@std@@QEBADD@Z", kOffWiden},
+
+    // operator<<(int) / operator<<(unsigned long) /
+    // operator<<(manipulator) — all three chain `*this` as
+    // the return value. The int/ulong forms also conceptually
+    // emit a formatted number; we don't format, but the
+    // chaining return lets `cout << x << y << z` typecheck +
+    // run past the first call site. Output is silent.
+    {"MSVCP140.dll", "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@H@Z", kOffReturnThis},
+    {"MSVCP140.dll", "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@K@Z", kOffReturnThis},
+    {"MSVCP140.dll", "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@P6AAEAV01@AEAV01@@Z@Z",
+     kOffReturnThis},
 };
 
 // Case-insensitive strcmp for ASCII. Win32 DLL name
