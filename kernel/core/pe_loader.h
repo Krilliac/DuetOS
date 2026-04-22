@@ -106,6 +106,10 @@ struct PeLoadResult
     u64 stack_top;         // rsp at ring-3 entry (stack_va + kPageSize).
     u64 image_base;
     u64 image_size;
+    u64 teb_va; // VA of the per-task TEB page (0 if PE has no
+                // imports — the freestanding hello.exe path).
+                // Non-zero value is the GSBASE to load before
+                // ring-3 entry.
 };
 
 /// Load a validated PE into `as`. On failure, the AS may hold

@@ -153,6 +153,14 @@ struct Process
     // spawn paths unchanged.
     u64 user_rsp_init;
 
+    // When non-zero, Ring3UserEntry enters ring 3 with GSBASE
+    // set to this VA instead of the zero default. Populated by
+    // SpawnPeFile with the TEB VA so Win32 PEs can resolve
+    // `gs:[0x30]` (TEB self-pointer), TLS slot reads, PEB
+    // pointer, etc. Non-PE tasks leave this at 0 — they never
+    // look at gs-relative addresses.
+    u64 user_gs_base;
+
     // CPU-tick budget. tick_budget is a hard cap; ticks_used is
     // incremented by the timer IRQ for every tick this process's
     // task(s) were currently-running. When ticks_used >= tick_budget,

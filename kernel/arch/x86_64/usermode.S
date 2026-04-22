@@ -36,6 +36,21 @@ EnterUserMode:
     /* Direct-call target from Ring3UserEntry, but emit endbr for
      * hygiene — cheap NOP on pre-CET CPUs. */
     endbr64
+    /* Tail into the 3-arg form with user_gs_base=0; zero GSBASE is
+     * what non-Win32 ring-3 tasks already ran with before the PE
+     * TEB slice landed. */
+    xor     edx, edx
+    jmp     EnterUserModeWithGs
+.size EnterUserMode, . - EnterUserMode
+
+.global EnterUserModeWithGs
+.type EnterUserModeWithGs, @function
+EnterUserModeWithGs:
+    /*   rdi = user_rip
+     *   rsi = user_rsp
+     *   rdx = user_gs_base (0 for non-PE tasks)
+     */
+    endbr64
     /* Disable interrupts from the moment we start setting up segments.
      * A timer tick between "mov ds, ax" and "iretq" would deliver onto
      * the current kernel stack with the data segments half-swapped;
@@ -67,6 +82,22 @@ EnterUserMode:
     mov     gs, ax
     /* SS is loaded by iretq from the frame — do NOT mov it here. */
 
+    /* Load the requested user GSBASE. `mov gs, ax` above zeroed
+     * GSBASE via the Intel-variant descriptor load; MSR_GS_BASE
+     * (0xC0000101) is the only way to set it to a non-descriptor
+     * value in long mode without requiring CR4.FSGSBASE. Skip the
+     * wrmsr if caller passed 0 — the `mov gs, ax` already set it
+     * to zero and wrmsr would just repeat that. Clobbers rax, rcx,
+     * rdx (all caller-saved; rdi, rsi preserved so we can push
+     * them below). */
+    test    rdx, rdx
+    jz      1f
+    mov     rax, rdx                /* low 32 */
+    shr     rdx, 32                 /* high 32 */
+    mov     ecx, 0xC0000101         /* MSR_GS_BASE */
+    wrmsr
+1:
+
     /* Build the iretq frame. In memory, lowest to highest:
      *   [rsp+0]  : RIP    <- user entry point
      *   [rsp+8]  : CS     <- kUserCodeSelector (0x2B)
@@ -81,13 +112,38 @@ EnterUserMode:
     push    0x2B                    /* CS = kUserCodeSelector */
     push    rdi                     /* user RIP */
 
+    /* Zero every GPR we can — hygiene. A freshly-started Windows
+     * PE entry point expects `void(void)` calling convention:
+     * the CRT doesn't meaningfully read any arg register, but real
+     * Win32 CRT code (and Linux _start) both contain code paths
+     * that dereference a GPR assuming it's 0 or a valid handle.
+     * Leaking kernel register state into ring 3 is both a spec
+     * violation and a predictable faults vector. Scrub rax, rbx,
+     * rcx, rdx, rbp, rsi, rdi, r8..r15 before iretq. rsp is set
+     * by the iretq frame itself. */
+    xor     eax, eax
+    xor     ebx, ebx
+    xor     ecx, ecx
+    xor     edx, edx
+    xor     ebp, ebp
+    xor     esi, esi
+    xor     edi, edi
+    xor     r8d,  r8d
+    xor     r9d,  r9d
+    xor     r10d, r10d
+    xor     r11d, r11d
+    xor     r12d, r12d
+    xor     r13d, r13d
+    xor     r14d, r14d
+    xor     r15d, r15d
+
     iretq
 
     /* Unreachable — iretq either enters user mode or #GPs. The ud2
      * is a belt-and-braces halt so an impossible fallthrough doesn't
      * silently execute whatever follows in the .text section. */
     ud2
-.size EnterUserMode, . - EnterUserMode
+.size EnterUserModeWithGs, . - EnterUserModeWithGs
 
 /* NX stack — silence lld's PT_GNU_STACK warning. */
 .section .note.GNU-stack, "", @progbits

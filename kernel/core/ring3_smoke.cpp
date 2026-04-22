@@ -375,8 +375,7 @@ void WriteUserCodeFrame(mm::PhysAddr frame, u64 code_va, u64 stack_va)
     // _start on `argc` (which satisfies its own 16-alignment
     // requirement without the -8 bias, since the Linux initial
     // stack shape has argc at a 16-aligned boundary).
-    const u64 stack_top = (proc->user_rsp_init != 0) ? proc->user_rsp_init
-                                                     : (proc->user_stack_va + mm::kPageSize - 8);
+    const u64 stack_top = (proc->user_rsp_init != 0) ? proc->user_rsp_init : (proc->user_stack_va + mm::kPageSize - 8);
 
     SerialWrite("[ring3] task pid=");
     SerialWriteHex(sched::CurrentTaskId());
@@ -384,9 +383,14 @@ void WriteUserCodeFrame(mm::PhysAddr frame, u64 code_va, u64 stack_va)
     SerialWriteHex(code_va);
     SerialWrite(" rsp=");
     SerialWriteHex(stack_top);
+    if (proc->user_gs_base != 0)
+    {
+        SerialWrite(" gs_base=");
+        SerialWriteHex(proc->user_gs_base);
+    }
     SerialWrite("\n");
 
-    arch::EnterUserMode(code_va, stack_top);
+    arch::EnterUserModeWithGs(code_va, stack_top, proc->user_gs_base);
 }
 
 namespace
@@ -1661,12 +1665,12 @@ u64 SpawnElfLinux(const char* name, const u8* elf_bytes, u64 elf_len, CapSet cap
         };
         // argc / argv[0] / envp[0] already zeroed.
         // Aux vector.
-        put_u64(24, 6);                   // AT_PAGESZ
-        put_u64(32, 4096);                // page size
-        put_u64(40, 25);                  // AT_RANDOM
-        put_u64(48, rsp_init + 72);       // pointer (user VA) to random block
-        put_u64(56, 0);                   // AT_NULL
-        put_u64(64, 0);                   // terminator value
+        put_u64(24, 6);             // AT_PAGESZ
+        put_u64(32, 4096);          // page size
+        put_u64(40, 25);            // AT_RANDOM
+        put_u64(48, rsp_init + 72); // pointer (user VA) to random block
+        put_u64(56, 0);             // AT_NULL
+        put_u64(64, 0);             // terminator value
         // Fill the 16-byte random block with xorshift64 seeded
         // from rdtsc. Non-crypto but mixed — same quality as
         // sys_getrandom's stub.
@@ -1732,7 +1736,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     // table, at which point ok=false and we fall through to
     // the generic "load failed" cleanup below.
     const PeStatus vs = PeValidate(pe_bytes, pe_len);
-    if (vs != PeStatus::Ok && vs != PeStatus::ImportsPresent)
+    if (vs != PeStatus::Ok && vs != PeStatus::ImportsPresent && vs != PeStatus::TlsPresent)
     {
         SerialWrite("[ring3] pe reject name=\"");
         SerialWrite(name);
@@ -1758,6 +1762,21 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         AddressSpaceRelease(as);
         return 0;
     }
+    // PE loader now maps a multi-page stack; Ring3UserEntry's
+    // default rsp = user_stack_va + PAGE - 8 would land at the
+    // BOTTOM of that range. Override with a Windows-ABI rsp
+    // near the top: the x64 Win64 ABI says at function entry
+    // rsp is of form `16n + 8` and [rsp] holds the return
+    // address with [rsp+8..rsp+0x28] being 32 bytes of caller-
+    // reserved shadow space the callee is free to spill argN
+    // into. MSVC's entry prolog does exactly that, so an rsp
+    // of stack_top - 8 faults immediately because rsp+8 is
+    // one byte above the mapped stack. Start at stack_top-0x48
+    // (72 bytes = 64 slack + 8) so the whole prolog window fits
+    // comfortably inside the top stack page. 0x48 mod 16 = 8,
+    // satisfying the 16n+8 rule.
+    proc->user_rsp_init = r.stack_top - 0x48;
+    proc->user_gs_base = r.teb_va;
     // Per-process Win32 heap. Only initialised for PEs that
     // actually imported anything — a freestanding PE like
     // /bin/hello.exe doesn't call HeapAlloc and shouldn't burn

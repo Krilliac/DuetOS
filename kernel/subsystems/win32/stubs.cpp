@@ -1086,6 +1086,14 @@ bool Win32StubsLookup(const char* dll, const char* func, u64* out_va)
     return Win32StubsLookupKind(dll, func, out_va, nullptr);
 }
 
+bool Win32StubsLookupCatchAll(u64* out_va)
+{
+    if (out_va == nullptr)
+        return false;
+    *out_va = kWin32StubsVa + kOffReturnZero;
+    return true;
+}
+
 bool Win32StubsLookupKind(const char* dll, const char* func, u64* out_va, bool* out_is_noop)
 {
     if (dll == nullptr || func == nullptr || out_va == nullptr)
