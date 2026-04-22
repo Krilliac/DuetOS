@@ -187,6 +187,44 @@ enum SyscallNumber : u64
     // sleep queue, which is per-process bounded by the existing
     // task budget.
     SYS_SLEEP_MS = 19,
+
+    // SYS_FILE_OPEN: rdi = user pointer to NUL-terminated ASCII
+    // path, rsi = path-length cap (caller-supplied to bound the
+    // CopyFromUser). Returns a Win32-shaped handle
+    // (Process::kWin32HandleBase + slot_idx, i.e. 0x100..0x10F)
+    // on success, or u64(-1) on any failure (cap missing, path
+    // out of jail, not a file, no free slot, bad user pointer).
+    // Gated on kCapFsRead — same gate as SYS_READ / SYS_STAT.
+    //
+    // The handle stays valid until SYS_FILE_CLOSE; reads via
+    // SYS_FILE_READ advance a per-handle cursor that starts at 0.
+    // Backs Win32 CreateFileA. CreateFileW does its own UTF-16
+    // → ASCII strip in the user-mode stub before issuing this
+    // syscall.
+    SYS_FILE_OPEN = 20,
+
+    // SYS_FILE_READ: rdi = handle (Win32-shaped), rsi = user dst
+    // buffer, rdx = byte count cap. Returns bytes actually
+    // copied (≤ both `rdx` and remaining bytes in the file from
+    // the cursor) on success, 0 at EOF, u64(-1) on failure
+    // (closed handle, bad user pointer). Advances the per-handle
+    // cursor by the returned count. Unprivileged — the caller
+    // already proved cap ownership at SYS_FILE_OPEN.
+    SYS_FILE_READ = 21,
+
+    // SYS_FILE_CLOSE: rdi = handle. Returns 0 on success or no-op
+    // (closing an already-closed / never-opened handle is a
+    // documented no-op in the Win32 contract). Frees the slot
+    // for re-use. Unprivileged.
+    SYS_FILE_CLOSE = 22,
+
+    // SYS_FILE_SEEK: rdi = handle, rsi = signed offset, rdx =
+    // whence (0 = SET, 1 = CUR, 2 = END). Returns the new
+    // cursor position (relative to file start) on success, or
+    // u64(-1) on failure. v0 clamps the cursor to [0, file_size]
+    // — seeking past EOF lands at file_size, seeking before
+    // start lands at 0. Backs Win32 SetFilePointerEx.
+    SYS_FILE_SEEK = 23,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit

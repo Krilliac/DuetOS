@@ -7,7 +7,7 @@
 // Source data: tools/win32-compat/nt-syscalls-x64.csv (j00ru/windows-syscalls)
 // Target Windows version: Windows 11 and Server (11 25H2)
 // Bedrock NT calls (present in every Windows XP→Win11 25H2): 292
-// CustomOS coverage: 8/292 = 2%
+// CustomOS coverage: 12/292 = 4%
 //
 // See tools/win32-compat/README.md for the legal + design rationale.
 
@@ -43,7 +43,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
     {"NtMapUserPhysicalPagesScatter", 0x0003, kSysNtNotImpl},
     {"NtWaitForSingleObject", 0x0004, kSysNtNotImpl},
     {"NtCallbackReturn", 0x0005, kSysNtNotImpl},
-    {"NtReadFile", 0x0006, kSysNtNotImpl},
+    {"NtReadFile", 0x0006, static_cast<u32>(::customos::core::SYS_FILE_READ)},
     {"NtDeviceIoControlFile", 0x0007, kSysNtNotImpl},
     {"NtWriteFile", 0x0008, static_cast<u32>(::customos::core::SYS_WRITE)},
     {"NtRemoveIoCompletion", 0x0009, kSysNtNotImpl},
@@ -52,7 +52,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
     {"NtReplyPort", 0x000c, kSysNtNotImpl},
     {"NtSetInformationThread", 0x000d, kSysNtNotImpl},
     {"NtSetEvent", 0x000e, kSysNtNotImpl},
-    {"NtClose", 0x000f, kSysNtNotImpl},
+    {"NtClose", 0x000f, static_cast<u32>(::customos::core::SYS_FILE_CLOSE)},
     {"NtQueryObject", 0x0010, kSysNtNotImpl},
     {"NtQueryInformationFile", 0x0011, kSysNtNotImpl},
     {"NtOpenKey", 0x0012, kSysNtNotImpl},
@@ -88,7 +88,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
     {"NtOpenProcessTokenEx", 0x0030, kSysNtNotImpl},
     {"NtQueryPerformanceCounter", 0x0031, static_cast<u32>(::customos::core::SYS_PERF_COUNTER)},
     {"NtEnumerateKey", 0x0032, kSysNtNotImpl},
-    {"NtOpenFile", 0x0033, kSysNtNotImpl},
+    {"NtOpenFile", 0x0033, static_cast<u32>(::customos::core::SYS_FILE_OPEN)},
     {"NtDelayExecution", 0x0034, static_cast<u32>(::customos::core::SYS_SLEEP_MS)},
     {"NtQueryDirectoryFile", 0x0035, kSysNtNotImpl},
     {"NtQuerySystemInformation", 0x0036, kSysNtNotImpl},
@@ -122,7 +122,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
     {"NtResumeThread", 0x0052, kSysNtNotImpl},
     {"NtTerminateThread", 0x0053, kSysNtNotImpl},
     {"NtReadRequestData", 0x0054, kSysNtNotImpl},
-    {"NtCreateFile", 0x0055, kSysNtNotImpl},
+    {"NtCreateFile", 0x0055, static_cast<u32>(::customos::core::SYS_FILE_OPEN)},
     {"NtQueryEvent", 0x0056, kSysNtNotImpl},
     {"NtWriteRequestData", 0x0057, kSysNtNotImpl},
     {"NtOpenDirectoryObject", 0x0058, kSysNtNotImpl},
@@ -335,6 +335,6 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
 inline constexpr u32 kBedrockNtSyscallCount =
     sizeof(kBedrockNtSyscalls) / sizeof(kBedrockNtSyscalls[0]);
 
-inline constexpr u32 kBedrockNtSyscallsCovered = 8;
+inline constexpr u32 kBedrockNtSyscallsCovered = 12;
 
 } // namespace customos::subsystems::win32

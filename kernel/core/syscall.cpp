@@ -376,6 +376,213 @@ void SyscallDispatch(arch::TrapFrame* frame)
         return;
     }
 
+    case SYS_FILE_OPEN:
+    {
+        // Path-based open backed by VfsLookup. Returns a Win32
+        // pseudo-handle (kWin32HandleBase + slot_idx) on success
+        // or u64(-1) on any failure. Cap-gated on kCapFsRead;
+        // the per-handle cursor lives on the Process struct.
+        Process* proc = CurrentProcess();
+        if (proc == nullptr || !CapSetHas(proc->caps, kCapFsRead))
+        {
+            const u64 pid = (proc != nullptr) ? proc->pid : 0;
+            RecordSandboxDenial(kCapFsRead);
+            if (proc != nullptr && ShouldLogDenial(proc->sandbox_denials))
+            {
+                arch::SerialWrite("[sys] denied syscall=SYS_FILE_OPEN pid=");
+                arch::SerialWriteHex(pid);
+                arch::SerialWrite(" cap=");
+                arch::SerialWrite(CapName(kCapFsRead));
+                arch::SerialWrite(" denial_idx=");
+                arch::SerialWriteHex(proc->sandbox_denials);
+                arch::SerialWrite("\n");
+            }
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+
+        u64 path_cap = frame->rsi;
+        if (path_cap >= kSyscallPathMax)
+            path_cap = kSyscallPathMax - 1;
+        if (path_cap == 0)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        char kpath[kSyscallPathMax];
+        if (!mm::CopyFromUser(kpath, reinterpret_cast<const void*>(frame->rdi), path_cap))
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        kpath[path_cap] = '\0';
+        kpath[kSyscallPathMax - 1] = '\0';
+
+        const fs::RamfsNode* n = fs::VfsLookup(proc->root, kpath, kSyscallPathMax);
+        if (n == nullptr || n->type != fs::RamfsNodeType::kFile)
+        {
+            arch::SerialWrite("[sys] file_open miss pid=");
+            arch::SerialWriteHex(proc->pid);
+            arch::SerialWrite(" path=\"");
+            arch::SerialWrite(kpath);
+            arch::SerialWrite("\"\n");
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+
+        // Find a free slot.
+        u64 slot = Process::kWin32HandleCap;
+        for (u64 i = 0; i < Process::kWin32HandleCap; ++i)
+        {
+            if (proc->win32_handles[i].node == nullptr)
+            {
+                slot = i;
+                break;
+            }
+        }
+        if (slot == Process::kWin32HandleCap)
+        {
+            arch::SerialWrite("[sys] file_open out-of-handles pid=");
+            arch::SerialWriteHex(proc->pid);
+            arch::SerialWrite("\n");
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        proc->win32_handles[slot].node = n;
+        proc->win32_handles[slot].cursor = 0;
+        const u64 handle = Process::kWin32HandleBase + slot;
+        arch::SerialWrite("[sys] file_open ok pid=");
+        arch::SerialWriteHex(proc->pid);
+        arch::SerialWrite(" path=\"");
+        arch::SerialWrite(kpath);
+        arch::SerialWrite("\" handle=");
+        arch::SerialWriteHex(handle);
+        arch::SerialWrite(" size=");
+        arch::SerialWriteHex(n->file_size);
+        arch::SerialWrite("\n");
+        frame->rax = handle;
+        return;
+    }
+
+    case SYS_FILE_READ:
+    {
+        // Read up to rdx bytes from the handle into rsi. Returns
+        // bytes copied (0 at EOF) or -1 on bad handle / bad user
+        // ptr. Cursor advances by the returned count.
+        Process* proc = CurrentProcess();
+        if (proc == nullptr)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        const u64 handle = frame->rdi;
+        if (handle < Process::kWin32HandleBase || handle >= Process::kWin32HandleBase + Process::kWin32HandleCap)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        const u64 slot = handle - Process::kWin32HandleBase;
+        Process::Win32FileHandle& h = proc->win32_handles[slot];
+        if (h.node == nullptr)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        const u64 cap_bytes = frame->rdx;
+        if (cap_bytes == 0)
+        {
+            frame->rax = 0;
+            return;
+        }
+        if (h.cursor >= h.node->file_size)
+        {
+            frame->rax = 0; // EOF
+            return;
+        }
+        const u64 remaining = h.node->file_size - h.cursor;
+        const u64 to_copy = (cap_bytes < remaining) ? cap_bytes : remaining;
+        if (!mm::CopyToUser(reinterpret_cast<void*>(frame->rsi), h.node->file_bytes + h.cursor, to_copy))
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        h.cursor += to_copy;
+        frame->rax = to_copy;
+        return;
+    }
+
+    case SYS_FILE_CLOSE:
+    {
+        // Free the handle slot. Closing an out-of-range or
+        // already-closed handle is a no-op (per Win32 contract).
+        Process* proc = CurrentProcess();
+        if (proc == nullptr)
+        {
+            frame->rax = 0;
+            return;
+        }
+        const u64 handle = frame->rdi;
+        if (handle >= Process::kWin32HandleBase && handle < Process::kWin32HandleBase + Process::kWin32HandleCap)
+        {
+            const u64 slot = handle - Process::kWin32HandleBase;
+            proc->win32_handles[slot].node = nullptr;
+            proc->win32_handles[slot].cursor = 0;
+        }
+        frame->rax = 0;
+        return;
+    }
+
+    case SYS_FILE_SEEK:
+    {
+        // SET / CUR / END seeking with clamp to [0, file_size].
+        // Returns the new cursor or -1 on bad handle.
+        Process* proc = CurrentProcess();
+        if (proc == nullptr)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        const u64 handle = frame->rdi;
+        if (handle < Process::kWin32HandleBase || handle >= Process::kWin32HandleBase + Process::kWin32HandleCap)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        const u64 slot = handle - Process::kWin32HandleBase;
+        Process::Win32FileHandle& h = proc->win32_handles[slot];
+        if (h.node == nullptr)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        const i64 offset = static_cast<i64>(frame->rsi);
+        const u64 whence = frame->rdx;
+        i64 base;
+        switch (whence)
+        {
+        case 0:
+            base = 0;
+            break;
+        case 1:
+            base = static_cast<i64>(h.cursor);
+            break;
+        case 2:
+            base = static_cast<i64>(h.node->file_size);
+            break;
+        default:
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        i64 newpos = base + offset;
+        if (newpos < 0)
+            newpos = 0;
+        if (static_cast<u64>(newpos) > h.node->file_size)
+            newpos = static_cast<i64>(h.node->file_size);
+        h.cursor = static_cast<u64>(newpos);
+        frame->rax = h.cursor;
+        return;
+    }
+
     case SYS_SLEEP_MS:
     {
         // rdi = ms. ms == 0 -> equivalent to SchedYield. Otherwise

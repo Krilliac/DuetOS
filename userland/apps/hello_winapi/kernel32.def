@@ -79,3 +79,8 @@ EXPORTS
     GetEnvironmentVariableW
     GetEnvironmentStringsW
     FreeEnvironmentStringsW
+    ; Batch 24 — file I/O (real handle table)
+    CreateFileW
+    ReadFile
+    CloseHandle
+    SetFilePointerEx

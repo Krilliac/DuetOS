@@ -90,6 +90,10 @@ constexpr u32 kOffSwitchToThread = 0x2D7;     // batch 22 — 10 bytes
 constexpr u32 kOffGetCmdLineW = 0x2E1;        // batch 23 — 6 bytes
 constexpr u32 kOffGetCmdLineA = 0x2E7;        // batch 23 — 6 bytes
 constexpr u32 kOffGetEnvBlockW = 0x2ED;       // batch 23 — 6 bytes
+constexpr u32 kOffCreateFileW = 0x2F3;        // batch 24 — 59 bytes (UTF-16 strip + open)
+constexpr u32 kOffReadFile = 0x32E;           // batch 24 — 46 bytes
+constexpr u32 kOffCloseHandle = 0x35C;        // batch 24 — 15 bytes
+constexpr u32 kOffSetFilePtrEx = 0x36B;       // batch 24 — 38 bytes
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -982,10 +986,118 @@ constexpr u8 kStubsBytes[] = {
     // hook — registered as a no-op (returns TRUE) below.
     0xB8, 0x00, 0x04, 0x00, 0x65, // 0x2ED mov eax, 0x65000400
     0xC3,                         // 0x2F2 ret
+
+    // === Batch 24: file I/O ===================================
+    //
+    // Win32 handle table lives on Process; SYS_FILE_OPEN /
+    // SYS_FILE_READ / SYS_FILE_CLOSE / SYS_FILE_SEEK route in.
+    // Handles returned to user mode are 0x100..0x10F (so they
+    // never collide with INVALID_HANDLE_VALUE = -1).
+
+    // --- CreateFileW (offset 0x2F3, 59 bytes) -----------------
+    // Win32: HANDLE CreateFileW(LPCWSTR lpFileName=rcx, DWORD
+    //          dwDesiredAccess, DWORD dwShareMode,
+    //          LPSECURITY_ATTRIBUTES lpSec, DWORD dwCreate,
+    //          DWORD dwFlags, HANDLE hTemplate);
+    //
+    // v0 ignores every flag — opens read-only no matter what.
+    // The wide path in rcx gets stripped to ASCII on a stack-
+    // local 256-byte buffer, then SYS_FILE_OPEN routes it to
+    // the kernel.
+    //
+    // RDI / RSI are CALLEE-SAVED in the Win32 x64 ABI — same
+    // bug class that bit Sleep in batch 22; both are saved+
+    // restored across the syscall.
+    0x57,                                     // 0x2F3 push rdi
+    0x56,                                     // 0x2F4 push rsi
+    0x48, 0x81, 0xEC, 0x08, 0x01, 0x00, 0x00, // 0x2F5 sub rsp, 0x108  ; 264-byte ASCII buf
+    0x48, 0x89, 0xE7,                         // 0x2FC mov rdi, rsp    ; rdi = ASCII dst
+    0x31, 0xD2,                               // 0x2FF xor edx, edx    ; idx = 0
+    // .loop:
+    0x83, 0xFA, 0xFF,       // 0x301 cmp edx, 0xFF    ; cap at 255
+    0x73, 0x10,             // 0x304 jae +0x10 (.done)
+    0x0F, 0xB7, 0x04, 0x51, // 0x306 movzx eax, word [rcx+rdx*2]  ; load wide char
+    0x66, 0x85, 0xC0,       // 0x30A test ax, ax      ; NUL?
+    0x74, 0x07,             // 0x30D jz +0x07 (.done)
+    0x88, 0x04, 0x17,       // 0x30F mov [rdi+rdx], al ; ASCII low byte
+    0xFF, 0xC2,             // 0x312 inc edx
+    0xEB, 0xEB,             // 0x314 jmp .loop (-0x15)
+    // .done:
+    0xC6, 0x04, 0x17, 0x00,                   // 0x316 mov byte [rdi+rdx], 0  ; NUL terminate
+    0x48, 0x89, 0xD6,                         // 0x31A mov rsi, rdx    ; len -> rsi (arg 1)
+    0xB8, 0x14, 0x00, 0x00, 0x00,             // 0x31D mov eax, 20     ; SYS_FILE_OPEN
+    0xCD, 0x80,                               // 0x322 int 0x80
+    0x48, 0x81, 0xC4, 0x08, 0x01, 0x00, 0x00, // 0x324 add rsp, 0x108  ; restore stack
+    0x5E,                                     // 0x32B pop rsi
+    0x5F,                                     // 0x32C pop rdi
+    0xC3,                                     // 0x32D ret
+
+    // --- ReadFile (offset 0x32E, 46 bytes) --------------------
+    // Win32: BOOL ReadFile(HANDLE rcx, LPVOID buf=rdx,
+    //          DWORD count=r8, LPDWORD lpRead=r9, LPOVERLAPPED).
+    // Maps to SYS_FILE_READ; stores byte count in *lpRead if
+    // non-NULL; returns TRUE on success (rax >= 0).
+    0x57,                         // 0x32E push rdi
+    0x56,                         // 0x32F push rsi
+    0x48, 0x89, 0xCF,             // 0x330 mov rdi, rcx     ; handle
+    0x48, 0x89, 0xD6,             // 0x333 mov rsi, rdx     ; buf
+    0x4C, 0x89, 0xC2,             // 0x336 mov rdx, r8      ; count
+    0xB8, 0x15, 0x00, 0x00, 0x00, // 0x339 mov eax, 21      ; SYS_FILE_READ
+    0xCD, 0x80,                   // 0x33E int 0x80
+    // *lpRead = max(rax, 0) if r9 != NULL
+    0x4D, 0x85, 0xC9, // 0x340 test r9, r9
+    0x74, 0x0B,       // 0x343 jz +0x0B
+    0x31, 0xC9,       // 0x345 xor ecx, ecx
+    0x48, 0x85, 0xC0, // 0x347 test rax, rax
+    0x0F, 0x49, 0xC8, // 0x34A cmovns ecx, eax
+    0x41, 0x89, 0x09, // 0x34D mov [r9], ecx
+    // BOOL = (rax >= 0)
+    0x48, 0x85, 0xC0, // 0x350 test rax, rax
+    0x0F, 0x99, 0xC0, // 0x353 setns al
+    0x0F, 0xB6, 0xC0, // 0x356 movzx eax, al
+    0x5E,             // 0x359 pop rsi
+    0x5F,             // 0x35A pop rdi
+    0xC3,             // 0x35B ret
+
+    // --- CloseHandle (offset 0x35C, 15 bytes) -----------------
+    // Win32: BOOL CloseHandle(HANDLE rcx). SYS_FILE_CLOSE
+    // tolerates non-file handles (no-op + return 0), so this
+    // also harmlessly handles the historical no-op CloseHandle
+    // call sites (e.g. CreateEventW pseudo-handles).
+    0x57,                         // 0x35C push rdi
+    0x48, 0x89, 0xCF,             // 0x35D mov rdi, rcx
+    0xB8, 0x16, 0x00, 0x00, 0x00, // 0x360 mov eax, 22      ; SYS_FILE_CLOSE
+    0xCD, 0x80,                   // 0x365 int 0x80
+    0xB0, 0x01,                   // 0x367 mov al, 1        ; BOOL TRUE
+    0x5F,                         // 0x369 pop rdi
+    0xC3,                         // 0x36A ret
+
+    // --- SetFilePointerEx (offset 0x36B, 38 bytes) ------------
+    // Win32: BOOL SetFilePointerEx(HANDLE rcx,
+    //          LARGE_INTEGER off=rdx, LARGE_INTEGER* newPos=r8,
+    //          DWORD dwMoveMethod=r9).
+    // Maps to SYS_FILE_SEEK; writes new position to *r8 if
+    // non-NULL; returns TRUE iff rax >= 0.
+    0x57,                         // 0x36B push rdi
+    0x56,                         // 0x36C push rsi
+    0x48, 0x89, 0xCF,             // 0x36D mov rdi, rcx     ; handle
+    0x48, 0x89, 0xD6,             // 0x370 mov rsi, rdx     ; offset
+    0x4C, 0x89, 0xCA,             // 0x373 mov rdx, r9      ; whence
+    0xB8, 0x17, 0x00, 0x00, 0x00, // 0x376 mov eax, 23      ; SYS_FILE_SEEK
+    0xCD, 0x80,                   // 0x37B int 0x80
+    0x4D, 0x85, 0xC0,             // 0x37D test r8, r8
+    0x74, 0x03,                   // 0x380 jz +0x03
+    0x49, 0x89, 0x00,             // 0x382 mov [r8], rax
+    0x48, 0x85, 0xC0,             // 0x385 test rax, rax
+    0x0F, 0x99, 0xC0,             // 0x388 setns al
+    0x0F, 0xB6, 0xC0,             // 0x38B movzx eax, al
+    0x5E,                         // 0x38E pop rsi
+    0x5F,                         // 0x38F pop rdi
+    0xC3,                         // 0x390 ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x2F3, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0x391, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -1129,10 +1241,18 @@ constexpr StubEntry kStubsTable[] = {
     {"kernel32.dll", "UnhandledExceptionFilter", kOffReturnZero},
 
     // Return-one family (returns TRUE / 1 = success):
-    //   CloseHandle          — pretend we closed it.
     //   SetConsoleCtrlHandler — pretend we registered.
-    {"kernel32.dll", "CloseHandle", kOffReturnOne},
     {"kernel32.dll", "SetConsoleCtrlHandler", kOffReturnOne},
+
+    // Batch 24 — file I/O. Real handle table on Process,
+    // backed by SYS_FILE_OPEN / SYS_FILE_READ / SYS_FILE_CLOSE
+    // / SYS_FILE_SEEK. CloseHandle is the file-close path —
+    // also harmlessly handles non-file handles (the kernel
+    // SYS_FILE_CLOSE returns 0 for an unrecognised handle).
+    {"kernel32.dll", "CreateFileW", kOffCreateFileW},
+    {"kernel32.dll", "ReadFile", kOffReadFile},
+    {"kernel32.dll", "CloseHandle", kOffCloseHandle},
+    {"kernel32.dll", "SetFilePointerEx", kOffSetFilePtrEx},
 
     // Batch 9 — Win32 process heap, backed by the per-process
     // 16-page region at 0x50000000 and SYS_HEAP_ALLOC /

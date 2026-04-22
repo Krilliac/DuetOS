@@ -288,6 +288,29 @@ struct Process
     Win32IatMiss win32_iat_misses[kWin32IatMissCap];
     u64 win32_iat_miss_count;
 
+    // Win32 file-handle table — backs CreateFileW / ReadFile /
+    // CloseHandle / SetFilePointerEx (batch 24). Each slot holds
+    // a pointer to the resolved RamfsNode plus the current read
+    // cursor; all access is read-only because ramfs is .rodata.
+    //
+    // Returned handles to user mode are `kWin32HandleBase + idx`
+    // (= 0x100 + 0..15) so they don't collide with Win32 pseudo-
+    // handles (-1 = INVALID_HANDLE_VALUE, -2 = current thread,
+    // ...) or NULL. The kernel unwraps via `idx = handle -
+    // kWin32HandleBase` and bounds-checks.
+    //
+    // 16 slots is plenty for v0 — typical console programs hold
+    // ~4 (stdin/stdout/stderr + one input file). Grow to a
+    // KMalloc'd table when a real workload needs more.
+    struct Win32FileHandle
+    {
+        const fs::RamfsNode* node; // nullptr = unused slot
+        u64 cursor;                // current read position in bytes
+    };
+    static constexpr u64 kWin32HandleCap = 16;
+    static constexpr u64 kWin32HandleBase = 0x100;
+    Win32FileHandle win32_handles[kWin32HandleCap];
+
     u64 refcount;
 };
 

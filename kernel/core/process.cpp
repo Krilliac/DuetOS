@@ -72,6 +72,15 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     p->abi_flavor = kAbiNative; // loaders flip to kAbiLinux if appropriate
     for (u32 i = 0; i < sizeof(p->_abi_pad); ++i)
         p->_abi_pad[i] = 0;
+    // Win32 file-handle table — every slot starts unused. Slot
+    // index 0 is fine; we distinguish "valid handle" from "unused"
+    // by the per-slot `node != nullptr` test, not by index 0
+    // sentinel.
+    for (u32 i = 0; i < Process::kWin32HandleCap; ++i)
+    {
+        p->win32_handles[i].node = nullptr;
+        p->win32_handles[i].cursor = 0;
+    }
     p->refcount = 1;
 
     ++g_live_processes;

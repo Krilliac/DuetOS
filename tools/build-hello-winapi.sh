@@ -85,6 +85,18 @@ done
 # v0 so no addresses actually change, but the walk catches a
 # malformed .reloc table up front and keeps the test fixture
 # shape aligned with real-world MSVC-linked PEs).
+#
+# Delete the prior EXE first so a silent link failure (e.g.
+# undefined import) doesn't leave the PREVIOUS exe in place
+# and trick the embed step into baking stale bytes into the
+# kernel. Caught a real bug during batch 24 bring-up where a
+# missing .def export silently re-shipped the old PE.
+rm -f "${EXE}"
+
+# Capture link output, filter the harmless /align noise, but
+# preserve the linker's exit status via PIPESTATUS so a real
+# error (undefined symbol, bad object) terminates the script.
+set +e
 "${LLD_LINK}" \
     /subsystem:console \
     /entry:_start \
@@ -92,7 +104,13 @@ done
     /base:0x140000000 \
     /out:"${EXE}" \
     "${OBJ}" \
-    "${GEN_LIBS[@]}" 2>&1 | grep -v "align specified without /driver" || true
+    "${GEN_LIBS[@]}" 2>&1 | grep -v "align specified without /driver"
+LINK_RC=${PIPESTATUS[0]}
+set -e
+if [[ ${LINK_RC} -ne 0 ]]; then
+    echo "build-hello-winapi.sh: lld-link failed (rc=${LINK_RC})" >&2
+    exit ${LINK_RC}
+fi
 
 if [[ ! -s "${EXE}" ]]; then
     echo "build-hello-winapi.sh: lld-link produced no output" >&2

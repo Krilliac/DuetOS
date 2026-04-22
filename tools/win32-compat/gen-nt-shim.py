@@ -43,10 +43,13 @@ KNOWN_MAPPINGS = {
     "NtQueryPerformanceCounter":   "SYS_PERF_COUNTER",
     "NtQuerySystemTime":           "SYS_GETTIME_FT",
     "NtDelayExecution":            "SYS_SLEEP_MS",         # batch 22
-    # Slice 81+ candidates (filled in as the SYS_* lands)
-    # "NtCreateFile":              "SYS_OPEN",
-    # "NtReadFile":                "SYS_FREAD",
-    # "NtClose":                   "SYS_FCLOSE",
+    "NtCreateFile":                "SYS_FILE_OPEN",        # batch 24
+    "NtOpenFile":                  "SYS_FILE_OPEN",        # batch 24 (read-only variant)
+    "NtReadFile":                  "SYS_FILE_READ",        # batch 24
+    "NtClose":                     "SYS_FILE_CLOSE",       # batch 24
+    # Slice 82+ candidates (filled in as the SYS_* lands)
+    # "NtSetInformationFile":      "SYS_FILE_SEEK",   (Position info class)
+    # "NtCreateMutant":            "SYS_MUTEX_*",
 }
 
 HEADER_TEMPLATE = """// AUTO-GENERATED — do not edit by hand.

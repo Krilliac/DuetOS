@@ -185,6 +185,33 @@ __declspec(dllimport) DWORD __stdcall GetEnvironmentVariableW(LPCWSTR lpName, LP
 __declspec(dllimport) LPWSTR __stdcall GetEnvironmentStringsW(void);
 __declspec(dllimport) BOOL __stdcall FreeEnvironmentStringsW(LPWSTR lpszEnvironmentBlock);
 
+// Batch 24 — file I/O. Real handle table backed by SYS_FILE_*
+// syscalls. CreateFileW takes the canonical Win32 7-arg form
+// (we ignore everything except the path); ReadFile streams
+// bytes via the per-handle cursor; CloseHandle frees the slot;
+// SetFilePointerEx seeks within the file.
+typedef struct
+{
+    DWORD nLength;
+    void* lpSecurityDescriptor;
+    BOOL bInheritHandle;
+} SECURITY_ATTRIBUTES;
+#define INVALID_HANDLE_VALUE ((HANDLE) - 1)
+#define GENERIC_READ 0x80000000UL
+#define FILE_SHARE_READ 0x00000001UL
+#define OPEN_EXISTING 3UL
+#define FILE_ATTRIBUTE_NORMAL 0x00000080UL
+#define FILE_BEGIN 0UL
+#define FILE_END 2UL
+__declspec(dllimport) HANDLE __stdcall CreateFileW(LPCWSTR lpFileName, DWORD dwDesiredAccess, DWORD dwShareMode,
+                                                   SECURITY_ATTRIBUTES* lpSec, DWORD dwCreationDisposition,
+                                                   DWORD dwFlagsAndAttributes, HANDLE hTemplateFile);
+__declspec(dllimport) BOOL __stdcall ReadFile(HANDLE hFile, void* lpBuffer, DWORD nNumberOfBytesToRead,
+                                              LPDWORD lpNumberOfBytesRead, void* lpOverlapped);
+__declspec(dllimport) BOOL __stdcall CloseHandle(HANDLE hObject);
+__declspec(dllimport) BOOL __stdcall SetFilePointerEx(HANDLE hFile, LARGE_INTEGER liDistanceToMove,
+                                                      LARGE_INTEGER* lpNewFilePointer, DWORD dwMoveMethod);
+
 static const char kMsg[] = "[hello-winapi] printed via kernel32.WriteFile!\n";
 #define kMsgLen ((DWORD)(sizeof(kMsg) - 1))
 
@@ -555,6 +582,58 @@ void _start(void)
         WriteFile(out, b23_ok, sizeof(b23_ok) - 1, &b23w, 0);
     else
         WriteFile(out, b23_bad, sizeof(b23_bad) - 1, &b23w, 0);
+
+    // Batch 24 exercise — file I/O via real handle table.
+    //
+    // Opens /etc/version (a 27-byte ramfs file containing
+    // "CustomOS v0 (ramfs-seeded)\n"), reads the first 32 bytes,
+    // seeks back to start, reads again, validates both reads
+    // returned the expected first 8 bytes, then closes.
+    //
+    // Invariants checked:
+    //   * CreateFileW returns a non-INVALID_HANDLE_VALUE handle.
+    //   * First ReadFile returns >= 27 bytes (entire file fits).
+    //   * Buffer starts with "CustomOS".
+    //   * SetFilePointerEx(0, FILE_BEGIN) returns 0 (new pos).
+    //   * Second ReadFile returns the same first 8 bytes.
+    //   * CloseHandle returns TRUE.
+    static const WCHAR kEtcVersion[14] = {'/', 'e', 't', 'c', '/', 'v', 'e', 'r', 's', 'i', 'o', 'n', 0, 0};
+    char b24_buf[64];
+    for (int i = 0; i < 64; ++i)
+        b24_buf[i] = 0;
+    HANDLE b24_h = CreateFileW(kEtcVersion, GENERIC_READ, FILE_SHARE_READ, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
+    DWORD b24_n = 0;
+    BOOL b24_read_ok = 0;
+    BOOL b24_seek_ok = 0;
+    DWORD b24_n2 = 0;
+    BOOL b24_read2_ok = 0;
+    BOOL b24_close_ok = 0;
+    char b24_buf2[16];
+    for (int i = 0; i < 16; ++i)
+        b24_buf2[i] = 0;
+    if (b24_h != INVALID_HANDLE_VALUE)
+    {
+        b24_read_ok = ReadFile(b24_h, b24_buf, 32, &b24_n, 0);
+        LARGE_INTEGER zero;
+        zero.QuadPart = 0;
+        LARGE_INTEGER newpos;
+        newpos.QuadPart = -1;
+        b24_seek_ok = SetFilePointerEx(b24_h, zero, &newpos, FILE_BEGIN);
+        b24_read2_ok = ReadFile(b24_h, b24_buf2, 8, &b24_n2, 0);
+        b24_close_ok = CloseHandle(b24_h);
+        (void)newpos;
+    }
+    BOOL b24_pass = b24_h != INVALID_HANDLE_VALUE && b24_read_ok && b24_n >= 27 && b24_buf[0] == 'C' &&
+                    b24_buf[1] == 'u' && b24_buf[2] == 's' && b24_buf[3] == 't' && b24_buf[4] == 'o' &&
+                    b24_buf[5] == 'm' && b24_buf[6] == 'O' && b24_buf[7] == 'S' && b24_seek_ok && b24_read2_ok &&
+                    b24_n2 == 8 && b24_buf2[0] == 'C' && b24_buf2[7] == 'S' && b24_close_ok;
+    const char b24_ok[] = "[batch24] CreateFileW + ReadFile + Seek + Close OK\n";
+    const char b24_bad[] = "[batch24] file I/O FAILED invariants\n";
+    DWORD b24w = 0;
+    if (b24_pass)
+        WriteFile(out, b24_ok, sizeof(b24_ok) - 1, &b24w, 0);
+    else
+        WriteFile(out, b24_bad, sizeof(b24_bad) - 1, &b24w, 0);
 
     // Batch 3 round-trip: store a distinctive value via
     // SetLastError, read it back via GetLastError, exit with
