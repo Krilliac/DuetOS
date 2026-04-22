@@ -135,6 +135,7 @@ constexpr u32 kOffInterlockedDec64 = 0x701;      // batch 41 — 16 bytes
 constexpr u32 kOffInterlockedCmpXchg64 = 0x711;  // batch 41 —  9 bytes
 constexpr u32 kOffInterlockedExchg64 = 0x71A;    // batch 41 —  7 bytes
 constexpr u32 kOffInterlockedExchgAdd64 = 0x721; // batch 41 —  9 bytes
+constexpr u32 kOffReturnStatusNotImpl = 0x72A;   // batch 42 —  6 bytes (STATUS_NOT_IMPLEMENTED)
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -1852,10 +1853,19 @@ constexpr u8 kStubsBytes[] = {
     0x48, 0x89, 0xD0,             // 0x721 mov rax, rdx
     0xF0, 0x48, 0x0F, 0xC1, 0x01, // 0x724 lock xadd [rcx], rax
     0xC3,                         // 0x729 ret
+
+    // --- return-status-not-implemented (offset 0x72A, 6 bytes) --
+    // NT-layer (ntdll) functions return NTSTATUS codes. 0xC00000BB
+    // = STATUS_NOT_IMPLEMENTED is the documented "this function
+    // isn't supported" code — callers either fall back or
+    // propagate the status up. Shared stub for ntdll bindings
+    // where v0 has no real impl.
+    0xB8, 0xBB, 0x00, 0x00, 0xC0, // 0x72A mov eax, 0xC00000BB
+    0xC3,                         // 0x72F ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x72A, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0x730, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -2308,6 +2318,79 @@ constexpr StubEntry kStubsTable[] = {
     {"vcruntime140.dll", "_InterlockedCompareExchange64", kOffInterlockedCmpXchg64},
     {"vcruntime140.dll", "_InterlockedExchange64", kOffInterlockedExchg64},
     {"vcruntime140.dll", "_InterlockedExchangeAdd64", kOffInterlockedExchgAdd64},
+
+    // === Batch 42 — ntdll.dll coverage =========================
+    //
+    // A PE that bypasses kernel32 and imports directly from ntdll
+    // (installers, anti-debug tooling, some Microsoft-shipped
+    // binaries) reaches this table. Most NT functions have
+    // signatures incompatible with their kernel32 analogues
+    // (NtWriteFile has 9 args vs kernel32 WriteFile's 5), so we
+    // can't cross-alias. Instead, most entries return
+    // STATUS_NOT_IMPLEMENTED (0xC00000BB) — callers either fall
+    // back or propagate the status up cleanly.
+    //
+    // Two exceptions where the signature matches perfectly:
+    //   * NtClose(HANDLE rcx) matches CloseHandle(HANDLE rcx),
+    //     so we alias to kOffCloseHandle — NtClose actually works.
+    //   * NtYieldExecution() takes no args; reuse kOffCritSecNop
+    //     (1-byte ret) since the return value (NTSTATUS 0 =
+    //     STATUS_SUCCESS) is what we'd emit anyway.
+    //
+    // Rtl* functions are mostly pure-compute user-mode helpers
+    // that don't cross the kernel boundary on real Windows.
+    // RtlGetLastWin32Error has the same sig as GetLastError →
+    // alias. RtlSetLastWin32Error aliases to SetLastError.
+    {"ntdll.dll", "NtClose", kOffCloseHandle},
+    {"ntdll.dll", "ZwClose", kOffCloseHandle}, // Zw == Nt in user mode
+    {"ntdll.dll", "NtYieldExecution", kOffCritSecNop},
+    {"ntdll.dll", "ZwYieldExecution", kOffCritSecNop},
+    {"ntdll.dll", "RtlGetLastWin32Error", kOffGetLastError},
+    {"ntdll.dll", "RtlSetLastWin32Error", kOffSetLastError},
+    {"ntdll.dll", "RtlNtStatusToDosError", kOffReturnZero}, // 0 = ERROR_SUCCESS
+    // Everything else returns STATUS_NOT_IMPLEMENTED.
+    {"ntdll.dll", "NtCreateFile", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "ZwCreateFile", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "NtOpenFile", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "ZwOpenFile", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "NtReadFile", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "ZwReadFile", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "NtWriteFile", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "ZwWriteFile", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "NtDeviceIoControlFile", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "NtQueryInformationFile", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "NtSetInformationFile", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "NtQueryVolumeInformationFile", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "NtAllocateVirtualMemory", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "NtFreeVirtualMemory", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "NtProtectVirtualMemory", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "NtQueryVirtualMemory", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "NtCreateEvent", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "NtSetEvent", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "NtResetEvent", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "NtCreateMutant", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "NtReleaseMutant", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "NtWaitForSingleObject", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "NtWaitForMultipleObjects", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "NtDelayExecution", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "NtQueryPerformanceCounter", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "NtQuerySystemTime", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "NtQuerySystemInformation", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "NtQueryInformationProcess", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "NtQueryInformationThread", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "NtSetInformationProcess", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "NtSetInformationThread", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "NtTerminateProcess", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "NtTerminateThread", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "NtContinue", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "NtOpenKey", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "NtQueryValueKey", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "NtQueryKey", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "NtEnumerateKey", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "NtEnumerateValueKey", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "NtCreateSection", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "NtMapViewOfSection", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "NtUnmapViewOfSection", kOffReturnStatusNotImpl},
 
     // Batch 9 — Win32 process heap, backed by the per-process
     // 16-page region at 0x50000000 and SYS_HEAP_ALLOC /
