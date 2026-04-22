@@ -195,12 +195,33 @@ struct Process
     u64 heap_pages;
     u64 heap_free_head;
 
+    // ABI flavor — which kernel syscall entry path this process's
+    // tasks will route through at ring-3 boundary.
+    //   kAbiNative (0): int 0x80 -> core::SyscallDispatch. The
+    //     CustomOS native ABI + Win32 PE subsystem both live
+    //     here (Win32 is a user-mode shim that trampolines
+    //     through the native ints).
+    //   kAbiLinux (1): syscall instruction -> linux::Dispatch.
+    //     Linux-ABI binaries (RAX=nr, RDI/RSI/RDX/R10/R8/R9 args,
+    //     sysret expected) reach a separate in-kernel table.
+    //
+    // Set by the loader at spawn time; read by the syscall entry
+    // path. A u8 is enough — we aren't planning more than a
+    // handful of peer subsystems.
+    u8 abi_flavor;
+    u8 _abi_pad[7];
+
     u64 refcount;
 };
 
+// Canonical ABI flavors. Enum-class would be cleaner but the
+// existing Process fields use plain u8/u32 for ABI stability.
+inline constexpr u8 kAbiNative = 0;
+inline constexpr u8 kAbiLinux = 1;
+
 // Canonical tick budgets. Timer runs at 100 Hz, so 1000 ticks ≈ 10 s.
-inline constexpr u64 kTickBudgetSandbox = 1000;          // 10 seconds at 100 Hz
-inline constexpr u64 kTickBudgetTrusted = 1ULL << 40;    // ~12 decades at 100 Hz = effectively unlimited
+inline constexpr u64 kTickBudgetSandbox = 1000;       // 10 seconds at 100 Hz
+inline constexpr u64 kTickBudgetTrusted = 1ULL << 40; // ~12 decades at 100 Hz = effectively unlimited
 
 // Threshold at which sandbox denials are treated as confirmed
 // malicious behaviour. 100 is generous — a well-written sandbox

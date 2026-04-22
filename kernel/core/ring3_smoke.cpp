@@ -3,6 +3,7 @@
 #include "../arch/x86_64/gdt.h"
 #include "../arch/x86_64/serial.h"
 #include "../arch/x86_64/usermode.h"
+#include "../cpu/percpu.h"
 #include "../fs/ramfs.h"
 #include "generated_hello_pe.h"
 #include "generated_hello_winapi.h"
@@ -132,7 +133,7 @@ u64 AslrPickBase()
 // matching byte in kUserCodeBytes too. The static_assert at the
 // bottom bounds the instruction region so a new instruction byte
 // can't silently overrun the first string.
-constexpr u64 kUserMessageOffset = 0x80; // "Hello from ring 3!\n"
+constexpr u64 kUserMessageOffset = 0x80;   // "Hello from ring 3!\n"
 constexpr u64 kUserStatPath1Offset = 0xA0; // "/etc/version"
 constexpr u64 kUserStatPath2Offset = 0xB0; // "/welcome.txt"
 
@@ -258,14 +259,14 @@ struct PayloadPatch
 // AFTER the mov opcode byte). e.g. the "BF A0 00 00 40" at bytecode
 // offset 0x09 has imm32 starting at 0x0A.
 constexpr PayloadPatch kPayloadPatches[] = {
-    {0x0A, kPath1OffsetInCode, PatchBase::kCode},      // SYS_STAT #1: path1
-    {0x0F, kStatOutOffsetInStack, PatchBase::kStack},  // SYS_STAT #1: statout
-    {0x1B, kPath2OffsetInCode, PatchBase::kCode},      // SYS_STAT #2: path2
-    {0x20, kStatOutOffsetInStack, PatchBase::kStack},  // SYS_STAT #2: statout
-    {0x2C, kPath1OffsetInCode, PatchBase::kCode},      // SYS_READ: path1
-    {0x31, kReadBufOffsetInStack, PatchBase::kStack},  // SYS_READ: readbuf
-    {0x4A, kReadBufOffsetInStack, PatchBase::kStack},  // SYS_WRITE (dyn): readbuf
-    {0x5B, kMsgOffsetInCode, PatchBase::kCode},        // SYS_WRITE (banner): msg
+    {0x0A, kPath1OffsetInCode, PatchBase::kCode},     // SYS_STAT #1: path1
+    {0x0F, kStatOutOffsetInStack, PatchBase::kStack}, // SYS_STAT #1: statout
+    {0x1B, kPath2OffsetInCode, PatchBase::kCode},     // SYS_STAT #2: path2
+    {0x20, kStatOutOffsetInStack, PatchBase::kStack}, // SYS_STAT #2: statout
+    {0x2C, kPath1OffsetInCode, PatchBase::kCode},     // SYS_READ: path1
+    {0x31, kReadBufOffsetInStack, PatchBase::kStack}, // SYS_READ: readbuf
+    {0x4A, kReadBufOffsetInStack, PatchBase::kStack}, // SYS_WRITE (dyn): readbuf
+    {0x5B, kMsgOffsetInCode, PatchBase::kCode},       // SYS_WRITE (banner): msg
 };
 
 // Write a little-endian u32 into `buf` at byte offset `off`. Asserts
@@ -325,7 +326,7 @@ void WriteUserCodeFrame(mm::PhysAddr frame, u64 code_va, u64 stack_va)
     }
 }
 
-} // namespace (close anon so Ring3UserEntry has external linkage)
+} // namespace
 
 // Entry point for every ring-3 task created via SchedCreateUser.
 // Runs in ring 0 on a fresh kernel stack with the task's own AS
@@ -347,6 +348,10 @@ void WriteUserCodeFrame(mm::PhysAddr frame, u64 code_va, u64 stack_va)
         Panic("core/ring3", "SchedCurrentKernelStackTop returned 0");
     }
     arch::TssSetRsp0(kstack_top);
+    // Mirror into the per-CPU slot used by the Linux-ABI syscall
+    // entry stub. See kernel/cpu/percpu.h for the field; same
+    // pattern as the scheduler's context-switch path.
+    cpu::CurrentCpu()->kernel_rsp = kstack_top;
 
     Process* proc = CurrentProcess();
     if (proc == nullptr)
@@ -376,7 +381,8 @@ void WriteUserCodeFrame(mm::PhysAddr frame, u64 code_va, u64 stack_va)
     arch::EnterUserMode(code_va, stack_top);
 }
 
-namespace { // reopen anon for the rest of the file
+namespace
+{ // reopen anon for the rest of the file
 
 // Build a ring-3 task: allocate AS, allocate + populate code page,
 // allocate stack page, install both into the AS, wrap the AS in a
@@ -504,8 +510,8 @@ struct DropcapsPatch
 // SYS_WRITE #2 starts at offset 36 (after SYS_WRITE #1 ends at 24
 // and SYS_DROPCAPS takes 12 more bytes), imm32 at 36+11 = 47.
 constexpr DropcapsPatch kDropcapsPatches[] = {
-    {0x0D, kDropcapsPreOffset},   // SYS_WRITE #1 msg ptr
-    {0x2F, kDropcapsPostOffset},  // SYS_WRITE #2 msg ptr
+    {0x0D, kDropcapsPreOffset},  // SYS_WRITE #1 msg ptr
+    {0x2F, kDropcapsPostOffset}, // SYS_WRITE #2 msg ptr
 };
 
 void SpawnDropcapsProbe()
@@ -1508,8 +1514,8 @@ bool LocalStrEq(const char* a, const char* b)
 
 } // namespace
 
-u64 SpawnElfFile(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps,
-                 const fs::RamfsNode* root, u64 frame_budget, u64 tick_budget)
+u64 SpawnElfFile(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps, const fs::RamfsNode* root,
+                 u64 frame_budget, u64 tick_budget)
 {
     using arch::SerialWrite;
     using arch::SerialWriteHex;
@@ -1649,16 +1655,15 @@ bool SpawnOnDemand(const char* kind)
         return false;
     if (LocalStrEq(kind, "hello"))
     {
-        SpawnRing3Task("ring3-cmd-hello", CapSetTrusted(), fs::RamfsTrustedRoot(),
-                       mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        SpawnRing3Task("ring3-cmd-hello", CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted,
+                       kTickBudgetTrusted);
         return true;
     }
     if (LocalStrEq(kind, "sandbox"))
     {
         CapSet caps = CapSetEmpty();
         CapSetAdd(caps, kCapFsRead);
-        SpawnRing3Task("ring3-cmd-sandbox", caps, fs::RamfsSandboxRoot(),
-                       mm::kFrameBudgetSandbox, kTickBudgetSandbox);
+        SpawnRing3Task("ring3-cmd-sandbox", caps, fs::RamfsSandboxRoot(), mm::kFrameBudgetSandbox, kTickBudgetSandbox);
         return true;
     }
     if (LocalStrEq(kind, "jail"))
@@ -1723,9 +1728,8 @@ bool SpawnOnDemand(const char* kind)
         // through the kernel-hosted stub page, exits with
         // code 42. "Exit rc=0x2a" in the serial log confirms
         // the full IAT resolution chain worked.
-        SpawnPeFile("ring3-hello-winapi", fs::generated::kBinHelloWinapiBytes,
-                    fs::generated::kBinHelloWinapiBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                    mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        SpawnPeFile("ring3-hello-winapi", fs::generated::kBinHelloWinapiBytes, fs::generated::kBinHelloWinapiBytes_len,
+                    CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
         return true;
     }
     if (LocalStrEq(kind, "winkill"))
@@ -1840,9 +1844,8 @@ void StartRing3SmokeTask()
     // by the kernel. Imports kernel32.dll!ExitProcess, hits
     // the stub page, exits with code 42. See
     // .claude/knowledge/win32-subsystem-v0.md.
-    SpawnPeFile("ring3-hello-winapi", fs::generated::kBinHelloWinapiBytes,
-                fs::generated::kBinHelloWinapiBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    SpawnPeFile("ring3-hello-winapi", fs::generated::kBinHelloWinapiBytes, fs::generated::kBinHelloWinapiBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     // Real-world Windows PE diagnostic attempt. Expected to
     // reject (most imports unresolved) — the value is the
     // PeReport log line showing the full import / reloc / TLS

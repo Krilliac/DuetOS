@@ -288,12 +288,20 @@ void PagingInit()
 
     // Enable EFER.NXE so PageNoExecute mappings are honoured. Without this
     // bit, setting bit 63 in any PTE causes a #GP.
+    //
+    // Also enable EFER.SCE (bit 0) so the `syscall` instruction is
+    // legal from ring 3. Without it, the Linux-ABI entry at
+    // MSR_LSTAR is never reached — the CPU raises #UD on the
+    // syscall opcode. MSR_LSTAR itself gets programmed separately
+    // by linux::SyscallInit once per-CPU data is up.
     constexpr u32 kEferMsr = 0xC0000080;
     constexpr u64 kEferNxeBit = 1ULL << 11;
+    constexpr u64 kEferSceBit = 1ULL << 0;
     const u64 efer = ReadMsr(kEferMsr);
-    if ((efer & kEferNxeBit) == 0)
+    const u64 efer_want = efer | kEferNxeBit | kEferSceBit;
+    if (efer != efer_want)
     {
-        WriteMsr(kEferMsr, efer | kEferNxeBit);
+        WriteMsr(kEferMsr, efer_want);
     }
 
     g_mmio_cursor = 0;

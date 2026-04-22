@@ -661,6 +661,11 @@ void Schedule()
     {
         const u64 rsp0 = reinterpret_cast<u64>(next->stack_base) + next->stack_size;
         arch::TssSetRsp0(rsp0);
+        // Mirror into the per-CPU slot that the Linux-ABI syscall
+        // entry stub reads. `syscall` doesn't consult the TSS, so
+        // the two entry paths need separate storage for the same
+        // "this task's kernel stack top" value.
+        cpu::CurrentCpu()->kernel_rsp = rsp0;
     }
 
     // Activate the next task's address space. nullptr means "kernel

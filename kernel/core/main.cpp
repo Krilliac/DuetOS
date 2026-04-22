@@ -39,6 +39,8 @@
 #include "klog.h"
 #include "panic.h"
 #include "ring3_smoke.h"
+#include "../subsystems/linux/ring3_smoke.h"
+#include "../subsystems/linux/syscall.h"
 #include "shell.h"
 #include "syscall.h"
 #include "../mm/kheap.h"
@@ -727,6 +729,9 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
 
     SerialWrite("[boot] Installing BSP per-CPU struct.\n");
     customos::cpu::PerCpuInitBsp();
+
+    SerialWrite("[boot] Programming Linux-ABI syscall MSRs.\n");
+    customos::subsystems::linux::SyscallInit();
 
     customos::sync::SpinLockSelfTest();
 
@@ -1467,6 +1472,11 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // boot sequence continues to make forward progress after the
     // iretq into user mode.
     customos::core::StartRing3SmokeTask();
+    // Linux-ABI proof-of-life. Reaches MSR_LSTAR entry stub →
+    // LinuxSyscallDispatch → sys_exit_group. A clean exit here
+    // proves the whole plumbing — EFER.SCE, MSR setup, swapgs
+    // dance, iretq return — works end-to-end.
+    customos::subsystems::linux::SpawnRing3LinuxSmoke();
 
     // Bring up APs. SmpStartAps calls SchedSleepTicks(1) between
     // INIT and SIPI; the dedicated idle task installed at the top

@@ -50,6 +50,9 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     p->heap_base = 0;        // PeLoad fills these when the PE has
     p->heap_pages = 0;       // imports — see subsystems/win32/heap.cpp
     p->heap_free_head = 0;
+    p->abi_flavor = kAbiNative; // loaders flip to kAbiLinux if appropriate
+    for (u32 i = 0; i < sizeof(p->_abi_pad); ++i)
+        p->_abi_pad[i] = 0;
     p->refcount = 1;
 
     ++g_live_processes;
