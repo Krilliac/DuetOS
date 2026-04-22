@@ -473,6 +473,7 @@ void CmdStats()
 // Forwards — these helpers live further down but are used by
 // the earlier command implementations / the Prompt helper.
 const char* TmpLeaf(const char* path);
+const char* FatLeaf(const char* path);
 struct EnvSlot;
 EnvSlot* EnvFind(const char* name);
 void Dispatch(char* line); // CmdTime + CmdSource recurse via this
@@ -4010,6 +4011,41 @@ const char* TmpLeaf(const char* path)
     return nullptr;
 }
 
+// Same shape as TmpLeaf, but for the FAT32 mount surfaced at /fat.
+// /fat          -> "" (list volume 0's root)
+// /fat/FILE     -> "FILE"   (look up FILE in volume 0's root)
+// anything else -> nullptr  (falls through to ramfs / tmpfs)
+//
+// Hard-coded to volume 0 for now: the shell has no syntax for
+// picking a different mount, and the first (and only) FAT32 volume
+// we probe in tests is at index 0. The `fatcat` raw command still
+// lets an operator poke any volume by index if they need to.
+const char* FatLeaf(const char* path)
+{
+    if (path == nullptr)
+    {
+        return nullptr;
+    }
+    const char prefix[] = "/fat";
+    u32 i = 0;
+    for (; prefix[i] != '\0'; ++i)
+    {
+        if (path[i] != prefix[i])
+        {
+            return nullptr;
+        }
+    }
+    if (path[i] == '\0')
+    {
+        return path + i; // ""
+    }
+    if (path[i] == '/')
+    {
+        return path + i + 1;
+    }
+    return nullptr;
+}
+
 void CmdEcho(u32 argc, char** argv)
 {
     // Scan for a ">" redirect token. If present, arguments
@@ -4142,6 +4178,52 @@ void CmdLs(u32 argc, char** argv)
         return;
     }
 
+    // FAT32 mount at /fat → volume 0's root directory.
+    if (const char* fat_leaf = FatLeaf(path); fat_leaf != nullptr)
+    {
+        namespace fat = customos::fs::fat32;
+        const fat::Volume* v = fat::Fat32Volume(0);
+        if (v == nullptr)
+        {
+            ConsoleWriteln("LS: FAT32 NOT MOUNTED (no probed volume)");
+            return;
+        }
+        if (*fat_leaf == '\0')
+        {
+            // `ls /fat` — enumerate the root snapshot.
+            for (u32 i = 0; i < v->root_entry_count; ++i)
+            {
+                const fat::DirEntry& e = v->root_entries[i];
+                ConsoleWrite("  ");
+                ConsoleWrite(e.name);
+                if (e.attributes & 0x10)
+                {
+                    ConsoleWriteln("/");
+                }
+                else
+                {
+                    ConsoleWrite("   ");
+                    WriteU64Dec(e.size_bytes);
+                    ConsoleWriteln(" BYTES");
+                }
+            }
+            return;
+        }
+        // `ls /fat/NAME` — stat the single file.
+        const fat::DirEntry* e = fat::Fat32FindInRoot(v, fat_leaf);
+        if (e == nullptr)
+        {
+            ConsoleWrite("LS: NO SUCH PATH: ");
+            ConsoleWriteln(path);
+            return;
+        }
+        ConsoleWrite(e->name);
+        ConsoleWrite("   ");
+        WriteU64Dec(e->size_bytes);
+        ConsoleWriteln(" BYTES");
+        return;
+    }
+
     const auto* root = customos::fs::RamfsTrustedRoot();
     const auto* node = customos::fs::VfsLookup(root, path, 128);
     if (node == nullptr)
@@ -4180,12 +4262,18 @@ void CmdLs(u32 argc, char** argv)
             ConsoleWriteln(" BYTES");
         }
     }
-    // If the caller asked for the root, also surface /tmp as a
-    // directory so it's discoverable without needing to know
-    // the tmpfs mount point is hard-coded.
+    // If the caller asked for the root, also surface /tmp and
+    // /fat as directories so both are discoverable without the
+    // operator needing to know the mount points are hard-coded.
+    // Only show /fat when a volume has actually been probed —
+    // don't advertise a mount that isn't there.
     if (StrEq(path, "/") || StrEq(path, ""))
     {
         ConsoleWriteln("  tmp/   (WRITABLE)");
+        if (customos::fs::fat32::Fat32VolumeCount() > 0)
+        {
+            ConsoleWriteln("  fat/   (READ-ONLY)");
+        }
     }
 }
 
@@ -4198,8 +4286,8 @@ void CmdCat(u32 argc, char** argv)
     }
     const char* path = argv[1];
 
-    // /tmp served from tmpfs; everything else from the read-
-    // only ramfs.
+    // /tmp served from tmpfs; /fat served from FAT32 volume 0;
+    // everything else from the read-only ramfs.
     if (const char* tmp_leaf = TmpLeaf(path); tmp_leaf != nullptr && *tmp_leaf != '\0')
     {
         const char* bytes = nullptr;
@@ -4215,6 +4303,44 @@ void CmdCat(u32 argc, char** argv)
             ConsoleWriteChar(bytes[i]);
         }
         if (len == 0 || bytes[len - 1] != '\n')
+        {
+            ConsoleWriteChar('\n');
+        }
+        return;
+    }
+
+    if (const char* fat_leaf = FatLeaf(path); fat_leaf != nullptr && *fat_leaf != '\0')
+    {
+        namespace fat = customos::fs::fat32;
+        const fat::Volume* v = fat::Fat32Volume(0);
+        if (v == nullptr)
+        {
+            ConsoleWriteln("CAT: FAT32 NOT MOUNTED");
+            return;
+        }
+        const fat::DirEntry* e = fat::Fat32FindInRoot(v, fat_leaf);
+        if (e == nullptr)
+        {
+            ConsoleWrite("CAT: NO SUCH FILE: ");
+            ConsoleWriteln(path);
+            return;
+        }
+        // Reuse the 4 KiB static buffer pattern from `fatcat`; the
+        // shell only ever runs one command at a time so concurrent
+        // access isn't a concern. Files larger than 4 KiB get
+        // truncated — the streamed-read follow-up slice lifts this.
+        static u8 buf[4096];
+        const i64 n = fat::Fat32ReadFile(v, e, buf, sizeof(buf));
+        if (n < 0)
+        {
+            ConsoleWriteln("CAT: READ ERROR");
+            return;
+        }
+        for (i64 i = 0; i < n; ++i)
+        {
+            ConsoleWriteChar(static_cast<char>(buf[i]));
+        }
+        if (n == 0 || buf[n - 1] != '\n')
         {
             ConsoleWriteChar('\n');
         }
