@@ -106,4 +106,23 @@ void IdtSetIst(u8 vector, u8 ist)
     g_idt[vector].ist = static_cast<u8>(ist & 0x7);
 }
 
+u64 IdtHash()
+{
+    // FNV-1a over the raw IDT bytes. 4096 bytes -> ~1 µs per
+    // call on modern CPUs. Not cryptographic (an attacker who
+    // wants to preserve the hash could pad collisions), but
+    // catches every accidental modification and every
+    // non-adversarial rootkit that doesn't bother re-hashing.
+    constexpr u64 kFnvOffset = 0xcbf29ce484222325ULL;
+    constexpr u64 kFnvPrime = 0x100000001b3ULL;
+    const auto* p = reinterpret_cast<const u8*>(g_idt);
+    u64 h = kFnvOffset;
+    for (u64 i = 0; i < sizeof(g_idt); ++i)
+    {
+        h ^= p[i];
+        h *= kFnvPrime;
+    }
+    return h;
+}
+
 } // namespace customos::arch

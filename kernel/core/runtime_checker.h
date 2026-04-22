@@ -88,6 +88,12 @@ enum class HealthIssue : u32
     // surfaces the condition in the health report.
     TaskStackOverflow,
 
+    // IDT descriptor table has been modified since baseline —
+    // no legitimate subsystem should touch it after boot. A
+    // non-matching hash is a strong "something scribbled on the
+    // IDT" signal (rootkit handler swap, stray write, etc.).
+    IdtModified,
+
     // Count sentinel
     Count,
 };

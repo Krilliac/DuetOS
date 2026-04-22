@@ -1,6 +1,7 @@
 #include "runtime_checker.h"
 
 #include "../arch/x86_64/cpu.h"
+#include "../arch/x86_64/idt.h"
 #include "../arch/x86_64/serial.h"
 #include "../mm/frame_allocator.h"
 #include "../mm/kheap.h"
@@ -28,6 +29,7 @@ HealthReport g_report = {};
 constinit u64 g_baseline_cr0 = 0;
 constinit u64 g_baseline_cr4 = 0;
 constinit u64 g_baseline_efer = 0;
+constinit u64 g_baseline_idt_hash = 0;
 
 constexpr u64 kCr0Wp = 1ULL << 16;
 constexpr u64 kCr4Smep = 1ULL << 20;
@@ -201,6 +203,17 @@ bool CheckCanary()
     return true;
 }
 
+bool CheckIdt()
+{
+    const u64 now = arch::IdtHash();
+    if (now != g_baseline_idt_hash)
+    {
+        Report(HealthIssue::IdtModified);
+        return false;
+    }
+    return true;
+}
+
 bool CheckTaskStacks()
 {
     // Each affected task is printed by sched::SchedCheckStackCanaries
@@ -258,6 +271,8 @@ const char* HealthIssueName(HealthIssue i)
         return "__stack_chk_guard is zero (canary defanged)";
     case HealthIssue::TaskStackOverflow:
         return "task stack overflow detected (bottom canary scribbled)";
+    case HealthIssue::IdtModified:
+        return "IDT hash changed since baseline (handler swap or stray write)";
     default:
         return "(unnamed issue)";
     }
@@ -269,6 +284,7 @@ void RuntimeCheckerInit()
     g_baseline_cr0 = ReadCr0();
     g_baseline_cr4 = ReadCr4();
     g_baseline_efer = ReadMsr(kMsrEfer);
+    g_baseline_idt_hash = arch::IdtHash();
     g_report.baseline_captured = 1;
     arch::SerialWrite("[health] baseline cr0=");
     arch::SerialWriteHex(g_baseline_cr0);
@@ -276,6 +292,8 @@ void RuntimeCheckerInit()
     arch::SerialWriteHex(g_baseline_cr4);
     arch::SerialWrite(" efer=");
     arch::SerialWriteHex(g_baseline_efer);
+    arch::SerialWrite(" idt_hash=");
+    arch::SerialWriteHex(g_baseline_idt_hash);
     arch::SerialWrite("\n");
 }
 
@@ -291,6 +309,7 @@ u64 RuntimeCheckerScan()
     if (g_report.baseline_captured != 0)
     {
         (void)CheckControlRegisters();
+        (void)CheckIdt();
     }
     (void)CheckCanary();
     (void)CheckTaskStacks();
