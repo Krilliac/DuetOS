@@ -121,7 +121,15 @@ struct PeLoadResult
 /// partial mappings — caller must AddressSpaceRelease. Mirror
 /// of ElfLoad in shape so SpawnPeFile can drop straight into
 /// the existing ring3 spawn plumbing.
-PeLoadResult PeLoad(const u8* file, u64 file_len, customos::mm::AddressSpace* as);
+///
+/// `program_name` is copied into the proc-env page as argv[0]
+/// when the PE has imports (see `Win32ProcEnvPopulate`). Pass
+/// the caller-facing name (`/bin/winkill.exe`, the
+/// SpawnRing3Task name, …); PeLoad will truncate to
+/// `kProcEnvStringBudget - 1` bytes. Null or empty falls back
+/// to "a.exe" — the conventional Windows "no name recorded"
+/// placeholder.
+PeLoadResult PeLoad(const u8* file, u64 file_len, customos::mm::AddressSpace* as, const char* program_name);
 
 /// Transfer any (IAT-slot-VA, function-name) pairs the loader
 /// staged for catch-all imports during the most recent PeLoad

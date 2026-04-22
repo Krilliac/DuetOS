@@ -1750,7 +1750,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     {
         return 0;
     }
-    const PeLoadResult r = PeLoad(pe_bytes, pe_len, as);
+    const PeLoadResult r = PeLoad(pe_bytes, pe_len, as, name);
     if (!r.ok)
     {
         AddressSpaceRelease(as);
