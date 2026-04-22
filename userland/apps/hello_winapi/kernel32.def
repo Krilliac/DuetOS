@@ -73,3 +73,9 @@ EXPORTS
     ; Batch 22 — timer + voluntary yield
     Sleep
     SwitchToThread
+    ; Batch 23 — command line + environment
+    GetCommandLineW
+    GetCommandLineA
+    GetEnvironmentVariableW
+    GetEnvironmentStringsW
+    FreeEnvironmentStringsW

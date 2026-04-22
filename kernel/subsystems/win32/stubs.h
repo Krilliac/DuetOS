@@ -63,6 +63,23 @@ inline constexpr u64 kProcEnvStringBudget = 256;
 // UCRT's __p__commode returns a pointer to this location.
 inline constexpr u64 kProcEnvCommodeOff = 0x200;
 
+// Wide command line. Win32 GetCommandLineW returns a LPCWSTR
+// pointing at this offset — a UTF-16LE NUL-terminated string
+// containing the program name (and, in v0, nothing else). Real
+// Windows cmdlines contain the full quoted argv joined with
+// spaces; CustomOS hello_winapi-class programs only ever see
+// argv[0] so this short-form is faithful enough.
+inline constexpr u64 kProcEnvCmdlineWOff = 0x300;
+// ANSI command line. Win32 GetCommandLineA returns this. Same
+// content as GetCommandLineW but in single-byte ASCII.
+inline constexpr u64 kProcEnvCmdlineAOff = 0x380;
+// Environment block. Win32 GetEnvironmentStringsW returns this
+// pointer; v0 is an empty block — just the two NUL bytes that
+// terminate an empty `KEY=VAL\0KEY=VAL\0...\0\0` list. Future
+// slices populate real entries (PATH, USERPROFILE, etc.) once a
+// process gets its own env namespace.
+inline constexpr u64 kProcEnvEnvBlockWOff = 0x400;
+
 /*
  * Data-import catch-all landing pad.
  *

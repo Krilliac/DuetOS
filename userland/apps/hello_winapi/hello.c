@@ -39,27 +39,24 @@ typedef int BOOL;
 typedef const void* LPCVOID;
 typedef DWORD* LPDWORD;
 
-#define STD_OUTPUT_HANDLE ((DWORD)-11)
+#define STD_OUTPUT_HANDLE ((DWORD) - 11)
 
 // Batch 1 — console I/O
 __declspec(dllimport) HANDLE __stdcall GetStdHandle(DWORD nStdHandle);
-__declspec(dllimport) BOOL   __stdcall WriteFile(HANDLE hFile,
-                                                 LPCVOID lpBuffer,
-                                                 DWORD nNumberOfBytesToWrite,
-                                                 LPDWORD lpNumberOfBytesWritten,
-                                                 void* lpOverlapped);
-__declspec(dllimport) void   __stdcall ExitProcess(unsigned int uExitCode);
+__declspec(dllimport) BOOL __stdcall WriteFile(HANDLE hFile, LPCVOID lpBuffer, DWORD nNumberOfBytesToWrite,
+                                               LPDWORD lpNumberOfBytesWritten, void* lpOverlapped);
+__declspec(dllimport) void __stdcall ExitProcess(unsigned int uExitCode);
 
 // Batch 2 — process/thread lifecycle
 __declspec(dllimport) HANDLE __stdcall GetCurrentProcess(void);
 __declspec(dllimport) HANDLE __stdcall GetCurrentThread(void);
-__declspec(dllimport) DWORD  __stdcall GetCurrentProcessId(void);
-__declspec(dllimport) DWORD  __stdcall GetCurrentThreadId(void);
-__declspec(dllimport) BOOL   __stdcall TerminateProcess(HANDLE hProcess, unsigned int uExitCode);
+__declspec(dllimport) DWORD __stdcall GetCurrentProcessId(void);
+__declspec(dllimport) DWORD __stdcall GetCurrentThreadId(void);
+__declspec(dllimport) BOOL __stdcall TerminateProcess(HANDLE hProcess, unsigned int uExitCode);
 
 // Batch 3 — last-error slot
 __declspec(dllimport) DWORD __stdcall GetLastError(void);
-__declspec(dllimport) void  __stdcall SetLastError(DWORD dwErrCode);
+__declspec(dllimport) void __stdcall SetLastError(DWORD dwErrCode);
 
 // Batch 4 — critical sections (v0 no-ops)
 // CRITICAL_SECTION is 40 bytes on x64: {PDEBUG_INFO, LONG,
@@ -139,8 +136,7 @@ typedef struct
     DWORD LowPart;
     int HighPart;
 } LUID;
-__declspec(dllimport) BOOL __stdcall OpenProcessToken(HANDLE ProcessHandle, DWORD DesiredAccess,
-                                                     HANDLE* TokenHandle);
+__declspec(dllimport) BOOL __stdcall OpenProcessToken(HANDLE ProcessHandle, DWORD DesiredAccess, HANDLE* TokenHandle);
 __declspec(dllimport) BOOL __stdcall LookupPrivilegeValueW(const unsigned short* SystemName, const unsigned short* Name,
                                                            LUID* Luid);
 __declspec(dllimport) BOOL __stdcall AdjustTokenPrivileges(HANDLE TokenHandle, BOOL DisableAll, void* NewState,
@@ -173,6 +169,22 @@ __declspec(dllimport) unsigned long long __stdcall GetTickCount64(void);
 __declspec(dllimport) void __stdcall Sleep(DWORD dwMilliseconds);
 __declspec(dllimport) BOOL __stdcall SwitchToThread(void);
 
+// Batch 23 — command line + environment. GetCommandLine{W,A}
+// return a pointer to the process command line; the W form is
+// UTF-16, the A form is ANSI. GetEnvironmentVariableW looks up
+// a single variable; v0 returns 0 (not found) for everything,
+// which is a documented success case for callers with defaults.
+typedef unsigned short WCHAR;
+typedef WCHAR* LPWSTR;
+typedef const WCHAR* LPCWSTR;
+typedef char* LPSTR;
+typedef const char* LPCSTR;
+__declspec(dllimport) LPWSTR __stdcall GetCommandLineW(void);
+__declspec(dllimport) LPSTR __stdcall GetCommandLineA(void);
+__declspec(dllimport) DWORD __stdcall GetEnvironmentVariableW(LPCWSTR lpName, LPWSTR lpBuffer, DWORD nSize);
+__declspec(dllimport) LPWSTR __stdcall GetEnvironmentStringsW(void);
+__declspec(dllimport) BOOL __stdcall FreeEnvironmentStringsW(LPWSTR lpszEnvironmentBlock);
+
 static const char kMsg[] = "[hello-winapi] printed via kernel32.WriteFile!\n";
 #define kMsgLen ((DWORD)(sizeof(kMsg) - 1))
 
@@ -192,9 +204,9 @@ void _start(void)
     // could drop the IAT entries as unused and we'd never
     // see the resolver log the new functions.
     volatile HANDLE p_sink = GetCurrentProcess();
-    volatile HANDLE t_sink   = GetCurrentThread();
-    volatile DWORD  pid_sink = GetCurrentProcessId();
-    volatile DWORD  tid_sink = GetCurrentThreadId();
+    volatile HANDLE t_sink = GetCurrentThread();
+    volatile DWORD pid_sink = GetCurrentProcessId();
+    volatile DWORD tid_sink = GetCurrentThreadId();
     (void)p_sink;
     (void)t_sink;
     (void)pid_sink;
@@ -239,21 +251,19 @@ void _start(void)
     // should return 0 and not crash. We OR the results so
     // the compiler can't DCE them, then discard via
     // volatile.
-    volatile int b6_sum =
-        _initialize_onexit_table((void*)0) |
-        _register_onexit_function((void*)0, (void*)0) |
-        _crt_atexit((void*)0) |
-        _configure_narrow_argv(2);
+    volatile int b6_sum = _initialize_onexit_table((void*)0) | _register_onexit_function((void*)0, (void*)0) |
+                          _crt_atexit((void*)0) | _configure_narrow_argv(2);
     (void)b6_sum;
     // Void-return shims — calling them must not crash.
     _set_app_type(0);
     _cexit();
     // No-return shims — function-pointer sinks keep the IAT
     // entries without actually exiting the process.
-    typedef void(*vfn_t)(void);
+    typedef void (*vfn_t)(void);
     volatile vfn_t ip_sink = _invalid_parameter_noinfo_noreturn;
     volatile vfn_t tm_sink = terminate;
-    (void)ip_sink; (void)tm_sink;
+    (void)ip_sink;
+    (void)tm_sink;
 
     // Batch 7 exercise — real string ops. Split into three
     // unconditional invocations (assignment to volatile
@@ -413,8 +423,8 @@ void _start(void)
     volatile unsigned long long ms64 = GetTickCount64();
     const char b11_ok[] = "[batch11] perf counter + tick count OK\n";
     const char b11_bad[] = "[batch11] perf counter + tick count FAILED\n";
-    BOOL b11_pass = freq.QuadPart == 1000000000LL && ctr1.QuadPart > 0 && ctr2.QuadPart >= ctr1.QuadPart && ms > 0 &&
-                    ms64 > 0;
+    BOOL b11_pass =
+        freq.QuadPart == 1000000000LL && ctr1.QuadPart > 0 && ctr2.QuadPart >= ctr1.QuadPart && ms > 0 && ms64 > 0;
     (void)ms;
     (void)ms64;
     DWORD b11w = 0;
@@ -512,6 +522,39 @@ void _start(void)
         WriteFile(out, b22_ok, sizeof(b22_ok) - 1, &b22w, 0);
     else
         WriteFile(out, b22_bad, sizeof(b22_bad) - 1, &b22w, 0);
+
+    // Batch 23 exercise — command line + environment.
+    //
+    // Invariants checked:
+    //   * GetCommandLineW returns a non-NULL pointer.
+    //   * The first wide char is non-zero (kernel populated the
+    //     proc-env page; if it returned a pointer to a zeroed
+    //     region, the cmdline would start with NUL).
+    //   * GetCommandLineA returns a non-NULL pointer.
+    //   * The first ANSI char is printable (low ASCII).
+    //   * GetEnvironmentVariableW("PATH", buf, 32) returns 0
+    //     (var-not-found is the v0 contract for every name).
+    //   * GetEnvironmentStringsW returns a non-NULL pointer
+    //     and the first wide char is the empty-block terminator
+    //     (NUL).
+    //   * FreeEnvironmentStringsW returns TRUE.
+    LPWSTR cmdline_w = GetCommandLineW();
+    LPSTR cmdline_a = GetCommandLineA();
+    static const WCHAR kPathName[5] = {'P', 'A', 'T', 'H', 0};
+    WCHAR envbuf[32] = {0};
+    DWORD env_rc = GetEnvironmentVariableW(kPathName, envbuf, 32);
+    LPWSTR envblock = GetEnvironmentStringsW();
+    BOOL free_ok = FreeEnvironmentStringsW(envblock);
+
+    const char b23_ok[] = "[batch23] cmdline + env OK\n";
+    const char b23_bad[] = "[batch23] cmdline / env FAILED invariants\n";
+    BOOL b23_pass = cmdline_w != 0 && cmdline_w[0] != 0 && cmdline_a != 0 && cmdline_a[0] >= 0x20 &&
+                    cmdline_a[0] <= 0x7E && env_rc == 0 && envblock != 0 && envblock[0] == 0 && free_ok != 0;
+    DWORD b23w = 0;
+    if (b23_pass)
+        WriteFile(out, b23_ok, sizeof(b23_ok) - 1, &b23w, 0);
+    else
+        WriteFile(out, b23_bad, sizeof(b23_bad) - 1, &b23w, 0);
 
     // Batch 3 round-trip: store a distinctive value via
     // SetLastError, read it back via GetLastError, exit with

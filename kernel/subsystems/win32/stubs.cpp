@@ -87,6 +87,9 @@ constexpr u32 kOffQpcNs = 0x2AF;              // batch 21 — 13 bytes
 constexpr u32 kOffQpfNs = 0x2BC;              // batch 21 — 10 bytes
 constexpr u32 kOffSleep = 0x2CB;              // batch 22 — 12 bytes (push/pop rdi)
 constexpr u32 kOffSwitchToThread = 0x2D7;     // batch 22 — 10 bytes
+constexpr u32 kOffGetCmdLineW = 0x2E1;        // batch 23 — 6 bytes
+constexpr u32 kOffGetCmdLineA = 0x2E7;        // batch 23 — 6 bytes
+constexpr u32 kOffGetEnvBlockW = 0x2ED;       // batch 23 — 6 bytes
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -944,10 +947,45 @@ constexpr u8 kStubsBytes[] = {
     0xCD, 0x80,                   // 0x2DC int 0x80
     0xB0, 0x01,                   // 0x2DE mov al, 1           ; BOOL TRUE
     0xC3,                         // 0x2E0 ret
+
+    // === Batch 23: command line + environment ================
+    //
+    // Each of these stubs returns a pointer into the proc-env
+    // page. The destination addresses live in the low 4 GiB
+    // (kProcEnvVa = 0x65000000), so a 32-bit `mov eax, imm32`
+    // followed by `ret` is enough — x86_64 zero-extends the
+    // upper half of rax automatically.
+    //
+    // Win32 contract: GetCommandLineW returns a non-NULL
+    // pointer to a wide cmdline string for the lifetime of the
+    // process. The CRT calls this exactly once during startup
+    // to populate __wargv; downstream callers see argv via
+    // __p___argv (already wired in batch 16).
+
+    // --- GetCommandLineW (offset 0x2E1, 6 bytes) ---------------
+    // Returns LPCWSTR = kProcEnvVa + kProcEnvCmdlineWOff
+    //                 = 0x65000300 (low 4 GiB).
+    0xB8, 0x00, 0x03, 0x00, 0x65, // 0x2E1 mov eax, 0x65000300
+    0xC3,                         // 0x2E6 ret
+
+    // --- GetCommandLineA (offset 0x2E7, 6 bytes) ---------------
+    // Returns LPCSTR = kProcEnvVa + kProcEnvCmdlineAOff
+    //                = 0x65000380.
+    0xB8, 0x80, 0x03, 0x00, 0x65, // 0x2E7 mov eax, 0x65000380
+    0xC3,                         // 0x2EC ret
+
+    // --- GetEnvironmentStringsW (offset 0x2ED, 6 bytes) --------
+    // Returns LPWCH = kProcEnvVa + kProcEnvEnvBlockWOff
+    //               = 0x65000400. The block is two NUL bytes
+    // (an empty env), so any caller that walks it stops
+    // immediately. FreeEnvironmentStringsW is a Win32 cleanup
+    // hook — registered as a no-op (returns TRUE) below.
+    0xB8, 0x00, 0x04, 0x00, 0x65, // 0x2ED mov eax, 0x65000400
+    0xC3,                         // 0x2F2 ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x2E1, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0x2F3, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -1239,6 +1277,26 @@ constexpr StubEntry kStubsTable[] = {
     {"kernel32.dll", "Sleep", kOffSleep},
     {"kernel32.dll", "SleepEx", kOffSleep},
     {"kernel32.dll", "SwitchToThread", kOffSwitchToThread},
+
+    // Batch 23 — command line + environment (proc-env page reads).
+    // GetCommandLineW / GetCommandLineA hand back pointers into
+    // the proc-env page populated by Win32ProcEnvPopulate at PE
+    // load. GetEnvironmentVariableW returns 0 (var-not-found)
+    // for every query in v0; that's a documented success-case
+    // outcome of the Win32 contract and cleanly degrades for
+    // any caller that has a default. GetEnvironmentStringsW
+    // returns a pointer to an empty block (two NUL bytes).
+    // FreeEnvironmentStringsW is a no-op returning TRUE.
+    {"kernel32.dll", "GetCommandLineW", kOffGetCmdLineW},
+    {"kernel32.dll", "GetCommandLineA", kOffGetCmdLineA},
+    {"kernel32.dll", "GetEnvironmentVariableW", kOffReturnZero},
+    {"kernel32.dll", "GetEnvironmentVariableA", kOffReturnZero},
+    {"kernel32.dll", "GetEnvironmentStringsW", kOffGetEnvBlockW},
+    {"kernel32.dll", "GetEnvironmentStrings", kOffGetEnvBlockW},
+    {"kernel32.dll", "FreeEnvironmentStringsW", kOffReturnOne},
+    {"kernel32.dll", "FreeEnvironmentStringsA", kOffReturnOne},
+    {"kernel32.dll", "SetEnvironmentVariableW", kOffReturnOne}, // pretend success
+    {"kernel32.dll", "SetEnvironmentVariableA", kOffReturnOne},
 
     // Rtl* unwind (v0: empty / not-found sentinels)
     {"kernel32.dll", "RtlCaptureStackBackTrace", kOffReturnZero},
@@ -1549,6 +1607,39 @@ void Win32ProcEnvPopulate(u8* proc_env_page, const char* program_name)
     // walk argv until NULL (Win32 CRT + most Unix main())
     // stop here.
     StoreLeU64(page + kProcEnvArgvArrayOff + 8, 0);
+
+    // Wide + ANSI command line. Both forms hold just the
+    // program name; multi-arg cmdlines arrive when a real spawn
+    // API plumbs argv through. Wide form is UTF-16LE — every
+    // ASCII byte becomes the same byte followed by a 0x00
+    // high-half byte; that covers every name we'd plausibly
+    // emit for a v0 PE.
+    {
+        u8* const w = page + kProcEnvCmdlineWOff;
+        u8* const a = page + kProcEnvCmdlineAOff;
+        for (u64 i = 0; i < copied; ++i)
+        {
+            // Both buffers fit comfortably (256 / 128 wide chars,
+            // 128 ascii); kProcEnvStringBudget already capped
+            // `copied` at 255 so neither overflows.
+            w[2 * i + 0] = static_cast<u8>(name[i]);
+            w[2 * i + 1] = 0;
+            a[i] = static_cast<u8>(name[i]);
+        }
+        // Wide NUL = 2 bytes of 0; ANSI NUL = 1 byte. Both
+        // already-zeroed by caller, but write explicitly for
+        // page-dump readability.
+        w[2 * copied + 0] = 0;
+        w[2 * copied + 1] = 0;
+        a[copied] = 0;
+    }
+
+    // Empty wide environment block. An env block is a
+    // contiguous run of UTF-16LE `KEY=VALUE\0` entries, plus a
+    // final extra NUL terminating the list. The minimum legal
+    // empty block is two zero bytes (`\0\0`). Already zeroed
+    // — touch nothing.
+    (void)kProcEnvEnvBlockWOff; // documented; no init needed for empty form
 
     // Data-miss "fake object". PE data imports whose names the
     // stub table doesn't know (e.g. std::cout) get an IAT slot
