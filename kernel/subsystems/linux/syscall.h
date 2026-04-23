@@ -70,6 +70,23 @@ i64 LinuxWrite(u64 fd, u64 user_buf, u64 len);
 i64 LinuxClockGetTime(u64 clk_id, u64 user_ts);
 u64 LinuxNowNs();
 
+// Additional wrappers exposed for the NT→Linux translator
+// (subsystems/translation/translate.cpp::NtTranslateToLinux).
+// Keep thin — the translator owns NTSTATUS ↔ errno and handle ↔
+// fd mapping, these forward straight to the matching Do* helper.
+i64 LinuxClose(u64 fd);
+i64 LinuxOpen(u64 user_path, u64 flags, u64 mode);
+i64 LinuxLseek(u64 fd, i64 offset, u64 whence);
+i64 LinuxFstat(u64 fd, u64 user_buf);
+i64 LinuxFsync(u64 fd);
+i64 LinuxNanosleep(u64 user_req, u64 user_rem);
+i64 LinuxSchedYield();
+[[noreturn]] void LinuxExit(u64 status);
+i64 LinuxGetPid();
+i64 LinuxMmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off);
+i64 LinuxMunmap(u64 addr, u64 len);
+i64 LinuxMprotect(u64 addr, u64 len, u64 prot);
+
 /// Print a one-line coverage scoreboard on COM1:
 /// "[linux] ABI coverage: <implemented>/<total> (<pct>%)"
 /// Reads the generated syscall table (linux_syscall_table_generated.h)

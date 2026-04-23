@@ -463,6 +463,30 @@ enum SyscallNumber : u64
     // v0 limitations documented at Process::Win32ThreadHandle.
     // Backs Win32 CreateThread / CreateRemoteThread-on-self.
     SYS_THREAD_CREATE = 45,
+
+    // SYS_NT_INVOKE: Windows NT syscall forwarding gateway.
+    // rdi = NT syscall number (e.g. 0x0F for NtClose).
+    // rsi..r9 carry up to five NT-ABI arguments.
+    // Returns the translated NTSTATUS in rax, or
+    // STATUS_NOT_IMPLEMENTED (0xC0000002) for any NT number not
+    // yet wired into the NT→Linux translator.
+    //
+    // Purpose: lets a user-mode ntdll.dll shim forward NT calls
+    // into the kernel without every individual NT stub needing
+    // its own SYS_* number. The kernel-side translator (in
+    // subsystems/translation/translate.cpp::NtTranslateToLinux)
+    // maps a small set of NT calls (NtClose, NtYieldExecution,
+    // NtDelayExecution, NtQueryPerformanceCounter,
+    // NtGetCurrentProcessorNumber, NtFlushBuffersFile,
+    // NtGetTickCount, NtQuerySystemTime, NtTerminateThread,
+    // NtTerminateProcess) onto matching Linux handlers in
+    // subsystems/linux/syscall.cpp.
+    //
+    // This is the Windows→Linux fallback path: anything a Win32
+    // subsystem needs that already has a Linux implementation
+    // can be reached via this bridge rather than reinvented on
+    // the native side.
+    SYS_NT_INVOKE = 46,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit

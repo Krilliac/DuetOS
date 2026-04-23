@@ -1,4 +1,4 @@
-# Linux syscall batch 55 — compat-stub + FAT32-backed gap fill
+# Linux syscall batches 55-56 + NT→Linux translator
 
 **Type**: Observation
 **Status**: Active
@@ -6,98 +6,145 @@
 
 ## What landed
 
-Forty new Linux x86_64 syscall handlers were added to
-`kernel/subsystems/linux/syscall.cpp`, lifting primary-dispatcher
-coverage from 76 → 116 handlers (29 % → 31 % of the 374-entry
-ABI table). The matrix in `docs/syscall-abi-matrix.csv` reflects
-the new state: `implemented` 115 → 155, `unimplemented` 756 →
-716.
+### Batch 55 (40 handlers)
 
-The batch breaks into two flavours:
+Lifted primary-dispatcher Linux coverage from 76 → 116 handlers
+(29 % → 31 %). Two flavours:
 
-### Compat-stub no-ops (subsystems v0 doesn't model)
+Compat-stub no-ops for subsystems v0 doesn't model:
+`lstat`, `mremap`, `msync`, `mincore`, `pause`, `flock`, `chmod`,
+`fchmod`, `chown`, `fchown`, `lchown`, `times`, `setuid`,
+`setgid`, `setreuid`, `setregid`, `getgroups`, `setgroups`,
+`setresuid`, `setresgid`, `getresuid`, `getresgid`, `setfsuid`,
+`setfsgid`, `capget`, `capset`, `utime`, `mknod` (-EPERM),
+`personality`, `getpriority`, `setpriority`, `mlock`, `munlock`,
+`mlockall`, `munlockall`.
 
-Permission, identity, scheduling-priority, and pinning calls
-all return success / sane defaults so static-musl + simple
-POSIX programs make forward progress instead of bailing on
-`-ENOSYS`.
+Real FAT32-backed FS ops:
+`truncate` / `ftruncate` (Fat32TruncateAtPath),
+`unlink` (Fat32DeleteAtPath),
+`mkdir` (Fat32MkdirAtPath),
+`rmdir` (Fat32RmdirAtPath).
 
-| Syscall(s)                                 | Behaviour                          |
-|--------------------------------------------|------------------------------------|
-| `lstat` (6)                                | Alias for `stat` (no symlinks)     |
-| `mremap` (25)                              | `-ENOMEM` (no remap support)       |
-| `msync` (26)                               | `0` (anon mmaps; nothing to flush) |
-| `mincore` (27)                             | Mark all pages resident            |
-| `pause` (34)                               | Sleep huge ticks forever           |
-| `flock` (73)                               | `0` (no concurrent FAT32 mounts)   |
-| `chmod` / `fchmod` (90/91)                 | `0` (no permission model)          |
-| `chown` / `fchown` / `lchown` (92/93/94)   | `0` (no uid/gid model)             |
-| `times` (100)                              | Tick count in all four slots       |
-| `setuid` / `setgid` (105/106)              | `0` (we are uid 0)                 |
-| `setreuid` / `setregid` (113/114)          | `0`                                |
-| `getgroups` / `setgroups` (115/116)        | `0` (no supplementary groups)      |
-| `setresuid` / `setresgid` (117/119)        | `0`                                |
-| `getresuid` / `getresgid` (118/120)        | Write `{0,0,0}`                    |
-| `setfsuid` / `setfsgid` (122/123)          | `0`                                |
-| `capget` / `capset` (125/126)              | `0` (no POSIX caps)                |
-| `utime` (132)                              | `0` (no atime/mtime tracking)      |
-| `mknod` (133)                              | `-EPERM` (no special files)        |
-| `personality` (135)                        | `0` (default persona only)         |
-| `getpriority` / `setpriority` (140/141)    | `0` (flat round-robin scheduler)   |
-| `mlock` / `munlock` (149/150)              | `0` (no swap; pages always pinned) |
-| `mlockall` / `munlockall` (151/152)        | `0`                                |
+### Batch 56 (33 handlers + NT bridge)
 
-### FAT32-backed FS ops (real implementations)
+Lifted Linux coverage to 142 handlers (37 %).
 
-| Syscall                | Routes through                  |
-|------------------------|---------------------------------|
-| `truncate` (76)        | `fs::fat32::Fat32TruncateAtPath`|
-| `ftruncate` (77)       | Same, by `linux_fds[fd].path`   |
-| `mkdir` (83)           | `fs::fat32::Fat32MkdirAtPath`   |
-| `rmdir` (84)           | `fs::fat32::Fat32RmdirAtPath`   |
-| `unlink` (87)          | `fs::fat32::Fat32DeleteAtPath`  |
+Process/session/accounting: `ptrace` (-EPERM), `syslog`, `setsid`,
+`vhangup`, `acct`, `mount`/`umount2` (-EPERM).
 
-Path bounce buffer + FAT32-prefix strip is shared via the new
-`CopyAndStripFatPath` helper.
+Cache flushing: `sync`, `syncfs` (no cache to flush in v0).
 
-## Pre-existing build-breakage that had to be fixed in scope
+Rename/link family (no fat32 primitives yet): `rename`, `link`,
+`symlink` all return -ENOSYS.
 
-`main` did not build: the dispatcher referenced
-`kLinuxSyscallHandlersImplementedPrimary` / `Effective` symbols
-the generator never emitted, and `translate.cpp` referenced an
-undefined `DumpSuppressedMissSummary`. Two minimal fixes:
+Thread-area (x86_32 LDT — 64-bit uses `arch_prctl`):
+`set_thread_area`, `get_thread_area` return -EINVAL.
 
-1. `tools/linux-compat/gen-linux-syscall-table.py` now emits the
-   two extra `Primary` / `Effective` constants alongside the
+I/O & scheduling priority: `ioprio_get`, `ioprio_set`,
+`sched_setaffinity`, `sched_getaffinity` (mask with CPU 0 only,
+BSP-only in v0).
+
+Clocks: `clock_getres` (10 ms), `clock_nanosleep` (routes to
+`nanosleep`), `getcpu` (returns 0).
+
+The *at family — mostly delegations to existing handlers when
+`dirfd == AT_FDCWD`, -EBADF otherwise:
+`mkdirat` → `mkdir`, `unlinkat` → `unlink`/`rmdir` by AT_REMOVEDIR,
+`linkat` → `link`, `symlinkat` → `symlink`, `renameat`/`renameat2`
+→ `rename`, `fchownat` → `chown`, `futimesat`/`utimensat` → 0,
+`fchmodat` → `chmod`, `faccessat`/`faccessat2` → `access`.
+
+### NT → Linux translator
+
+New architectural bridge: user-mode Win32 / future ntdll.dll
+code can forward any NT syscall through the kernel by way of the
+new `SYS_NT_INVOKE` (native syscall number 46).
+
+`rdi` carries the NT syscall number; `rsi`..`r9` carry up to
+five NT-ABI arguments. The kernel routes them through
+`subsystems::translation::NtTranslateToLinux(frame)`, which
+dispatches to the matching Linux `Do*` helper and maps the POSIX
+errno return back to an NTSTATUS.
+
+Wired NT calls (ten), with their Linux fallback:
+
+| NT call                          | Number  | Linux primitive            |
+|----------------------------------|---------|----------------------------|
+| NtClose                          | 0x000F  | `LinuxClose` (when fd-shaped) |
+| NtYieldExecution                 | 0x0046  | `LinuxSchedYield`          |
+| NtDelayExecution                 | 0x0034  | `sched::SchedSleepTicks`   |
+| NtQueryPerformanceCounter        | 0x0031  | `LinuxNowNs`               |
+| NtGetCurrentProcessorNumber      | 0x00DA  | synthetic zero (BSP-only)  |
+| NtFlushBuffersFile               | 0x004B  | `LinuxFsync`               |
+| NtGetTickCount                   | 0x0171  | `LinuxNowNs / 1_000_000`   |
+| NtQuerySystemTime                | 0x005A  | `LinuxNowNs` → FILETIME    |
+| NtTerminateThread                | 0x0053  | `LinuxExit` [[noreturn]]   |
+| NtTerminateProcess               | 0x002C  | `LinuxExit` [[noreturn]]   |
+
+Unwired NT calls return `STATUS_NOT_IMPLEMENTED` (0xC0000002)
+and log one `[nt-translate-miss]` line at the same sampling
+cadence as the Linux-miss path.
+
+The `tools/win32-compat/gen-nt-shim.py` generator now understands
+`SYS_NT_INVOKE` as a `customos_sys` value, so four bedrock NT
+calls in the generated NT mapping table (`NtFlushBuffersFile`,
+`NtGetTickCount`, `NtGetCurrentProcessorNumber`,
+`NtTerminateThread`) now report as covered.
+
+### Extended public Linux API
+
+Added to `subsystems::linux` for the NT translator:
+`LinuxClose`, `LinuxOpen`, `LinuxLseek`, `LinuxFstat`,
+`LinuxFsync`, `LinuxNanosleep`, `LinuxSchedYield`, `LinuxExit`
+(`[[noreturn]]`), `LinuxGetPid`, `LinuxMmap`, `LinuxMunmap`,
+`LinuxMprotect`.
+
+All are thin wrappers over anonymous-namespace `Do*` helpers;
+arg marshalling (NTSTATUS ↔ errno, FILE_HANDLE ↔ fd,
+LARGE_INTEGER ↔ timespec) stays in the translator.
+
+## Matrix deltas
+
+| Metric                  | Before batch 55 | After batch 56 + NT |
+|-------------------------|-----------------|---------------------|
+| implemented             | 115             | 189                 |
+| translated              | 42              | 45                  |
+| unimplemented           | 756             | 680                 |
+| Linux primary coverage  | 76 (20 %)       | 142 (37 %)          |
+| NT bedrock coverage     | 25/292 (8 %)    | 28/292 (9 %)        |
+
+## Pre-existing build-breakage fixed in scope
+
+`main` did not build — the dispatcher referenced two generated
+symbols the header never emitted, and `translate.cpp` called an
+undefined helper. Both fixed as part of batch 55:
+
+1. `tools/linux-compat/gen-linux-syscall-table.py` now emits
+   `kLinuxSyscallHandlersImplementedPrimary` and
+   `kLinuxSyscallHandlersImplementedEffective` alongside the
    single `kLinuxSyscallHandlersImplemented`.
-2. `kernel/subsystems/translation/translate.cpp` gained a
-   `DumpSuppressedMissSummary(origin, table)` helper that emits
+2. `translate.cpp` gained a `DumpSuppressedMissSummary(origin,
+   table)` helper that emits
    `[translate-miss-suppressed] <origin> cumulative=N delta=M
    emitted=K`.
 
-Without these, even the unmodified main branch fails to compile —
-the green build was an artefact of the regenerated header
-expecting symbols the previous generator version still emitted.
-
-## Wiring + classifier
-
-- All 40 handlers slot into the `LinuxSyscallDispatch(...)` switch
-  in syscall.cpp (no `default` fall-through to translator).
-- The generator's `Do<CamelCase>` heuristic auto-detected every
-  new handler — no `NAME_ALIASES` entries needed.
-- The ownership checker (`tools/linux-compat/check-syscall-ownership.py`)
-  is unaffected: none of the new numbers overlap with the
-  translation-unit-owned set
-  (`pipe`/`socket`/`fork`/`execve`/`umask`/`statfs`/`rseq`).
-
 ## Files touched
 
-- `kernel/subsystems/linux/syscall.cpp` — 40 new `Do*` handlers
-  + 40 dispatch cases + lstat split-out from stat alias.
-- `kernel/subsystems/translation/translate.cpp` — added
-  `DumpSuppressedMissSummary`.
+- `kernel/subsystems/linux/syscall.cpp` — batches 55 + 56
+  handlers + dispatch entries + Linux* wrapper exports.
+- `kernel/subsystems/linux/syscall.h` — public API additions.
+- `kernel/subsystems/translation/translate.cpp` —
+  `DumpSuppressedMissSummary`, `NtTranslateToLinux`, NTSTATUS
+  constants, per-NT translator helpers.
+- `kernel/subsystems/translation/translate.h` — declare
+  `NtTranslateToLinux`.
+- `kernel/core/syscall.h` — `SYS_NT_INVOKE = 46`.
+- `kernel/core/syscall.cpp` — dispatch case for `SYS_NT_INVOKE`.
 - `tools/linux-compat/gen-linux-syscall-table.py` — emit
-  `Primary` + `Effective` companion constants.
-- `kernel/subsystems/linux/linux_syscall_table_generated.h` —
-  regenerated.
-- `docs/syscall-abi-matrix.{csv,md,json}` — regenerated.
+  `Primary`/`Effective` constants.
+- `tools/win32-compat/gen-nt-shim.py` — four new NT→SYS_NT_INVOKE
+  mappings.
+- `kernel/subsystems/linux/linux_syscall_table_generated.h`,
+  `kernel/subsystems/win32/nt_syscall_table_generated.h`,
+  `docs/syscall-abi-matrix.{csv,md,json}` — regenerated.

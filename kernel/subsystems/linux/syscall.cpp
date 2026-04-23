@@ -213,6 +213,51 @@ enum : u64
     kSysMunlock = 150,
     kSysMlockall = 151,
     kSysMunlockall = 152,
+
+    // Batch 56 — additional compat stubs + *at-family delegations.
+    // Brings overall primary coverage further + gives common
+    // POSIX/glibc idioms a landing spot so they don't `-ENOSYS`.
+    //
+    // *at-family notes: we have no per-process CWD, so AT_FDCWD
+    // (the common case) resolves against the sandbox root exactly
+    // like the non-*at variants. Other dirfd values — -EBADF.
+    //
+    // FS-mutation stubs that would need filesystem primitives we
+    // don't have (rename, link, symlink) return -EPERM or -ENOSYS
+    // as appropriate rather than silently pretending to succeed.
+    kSysPtrace = 101,
+    kSysSyslog = 103,
+    kSysSetsid = 112,
+    kSysVhangup = 153,
+    kSysAcct = 163,
+    kSysMount = 165,
+    kSysUmount2 = 166,
+    kSysSync = 162,
+    kSysSyncfs = 306,
+    kSysRename = 82,
+    kSysLink = 86,
+    kSysSymlink = 88,
+    kSysSetThreadArea = 205,
+    kSysGetThreadArea = 211,
+    kSysIoprioGet = 252,
+    kSysIoprioSet = 251,
+    kSysSchedSetaffinity = 203,
+    kSysSchedGetaffinity = 204,
+    kSysClockGetres = 229,
+    kSysClockNanosleep = 230,
+    kSysGetcpu = 309,
+    kSysMkdirat = 258,
+    kSysUnlinkat = 263,
+    kSysLinkat = 265,
+    kSysSymlinkat = 266,
+    kSysRenameat = 264,
+    kSysRenameat2 = 316,
+    kSysFchownat = 260,
+    kSysFutimesat = 261,
+    kSysFchmodat = 268,
+    kSysFaccessat = 269,
+    kSysFaccessat2 = 439,
+    kSysUtimensat = 280,
 };
 
 // POSIX AT_FDCWD — used by the *at family to mean "resolve
@@ -2504,6 +2549,323 @@ i64 DoRmdir(u64 user_path)
     return 0;
 }
 
+// ---------------------------------------------------------------
+// Batch 56 — additional compat stubs + *at-family delegations.
+// ---------------------------------------------------------------
+
+// AT_REMOVEDIR flag for unlinkat.
+constexpr u64 kAtRemoveDir = 0x200;
+
+// Helper: for *at syscalls, v0 only supports AT_FDCWD. Returns
+// kEBADF for any other dirfd value, 0 otherwise. Logged so a
+// caller that happens to pass a real dirfd sees why the call
+// fails instead of chasing a phantom bug.
+i64 AtFdCwdOnly(i64 dirfd)
+{
+    if (dirfd == kAtFdCwd)
+        return 0;
+    arch::SerialWrite("[linux] *at-family: unsupported dirfd=");
+    arch::SerialWriteHex(static_cast<u64>(dirfd));
+    arch::SerialWrite(" (AT_FDCWD-only in v0)\n");
+    return kEBADF;
+}
+
+// ptrace(request, pid, addr, data): process tracing. v0 has no
+// ptrace machinery. -EPERM is the "tracing not permitted" return
+// Linux gives to unprivileged callers.
+i64 DoPtrace(u64 request, u64 pid, u64 addr, u64 data)
+{
+    (void)request;
+    (void)pid;
+    (void)addr;
+    (void)data;
+    return kEPERM;
+}
+
+// syslog(type, bufp, len): kernel log read/control. Every type
+// is a no-op success in v0 — kernel log lives on COM1, not in a
+// user-readable ring buffer. Returns 0 for "nothing written".
+i64 DoSyslog(u64 type, u64 bufp, u64 len)
+{
+    (void)type;
+    (void)bufp;
+    (void)len;
+    return 0;
+}
+
+// setsid: create a new session. v0 has no session/group model;
+// accept as no-op success. Linux returns the new sid; 0 is fine
+// as a stand-in.
+i64 DoSetsid()
+{
+    return 0;
+}
+
+// vhangup: revoke the controlling terminal. No tty model — 0.
+i64 DoVhangup()
+{
+    return 0;
+}
+
+// acct(filename): BSD process accounting. We do no accounting.
+i64 DoAcct(u64 filename)
+{
+    (void)filename;
+    return 0;
+}
+
+// mount(source, target, fstype, flags, data): mount a filesystem.
+// v0 mounts FAT32 volume 0 implicitly at boot and does not expose
+// a user-mode mount API. -EPERM is the appropriate return.
+i64 DoMount(u64 source, u64 target, u64 fstype, u64 flags, u64 data)
+{
+    (void)source;
+    (void)target;
+    (void)fstype;
+    (void)flags;
+    (void)data;
+    return kEPERM;
+}
+i64 DoUmount2(u64 target, u64 flags)
+{
+    (void)target;
+    (void)flags;
+    return kEPERM;
+}
+
+// sync / syncfs: flush cached writes to backing store. v0 FAT32
+// writes are synchronous (no page cache), so there's nothing to
+// flush.
+i64 DoSync()
+{
+    return 0;
+}
+i64 DoSyncfs(u64 fd)
+{
+    (void)fd;
+    return 0;
+}
+
+// rename(old, new) / link(old, new) / symlink(target, linkpath):
+// no rename / link primitive in fat32 v0. -ENOSYS tells musl
+// "this operation is not available on this kernel" — clearer
+// than an -EPERM "you're not allowed" lie.
+i64 DoRename(u64 old_path, u64 new_path)
+{
+    (void)old_path;
+    (void)new_path;
+    return kENOSYS;
+}
+i64 DoLink(u64 old_path, u64 new_path)
+{
+    (void)old_path;
+    (void)new_path;
+    return kENOSYS;
+}
+i64 DoSymlink(u64 target, u64 linkpath)
+{
+    (void)target;
+    (void)linkpath;
+    return kENOSYS;
+}
+
+// set_thread_area / get_thread_area: x86_32 LDT entry for TLS.
+// 64-bit code uses arch_prctl(ARCH_SET_FS) instead. Reject cleanly.
+i64 DoSetThreadArea(u64 u_info)
+{
+    (void)u_info;
+    return kEINVAL;
+}
+i64 DoGetThreadArea(u64 u_info)
+{
+    (void)u_info;
+    return kEINVAL;
+}
+
+// ioprio_get / ioprio_set: per-process I/O priority. Flat
+// scheduler; accept + return 0 (the default "BE / nice=4" level).
+i64 DoIoprioGet(u64 which, u64 who)
+{
+    (void)which;
+    (void)who;
+    return 0;
+}
+i64 DoIoprioSet(u64 which, u64 who, u64 ioprio)
+{
+    (void)which;
+    (void)who;
+    (void)ioprio;
+    return 0;
+}
+
+// sched_setaffinity(pid, cpusetsize, mask): pin to CPU set.
+// SMP is BSP-only in v0; CPU 0 is the only valid affinity.
+// Accept any mask; the call is a no-op.
+i64 DoSchedSetaffinity(u64 pid, u64 cpusetsize, u64 user_mask)
+{
+    (void)pid;
+    (void)cpusetsize;
+    (void)user_mask;
+    return 0;
+}
+
+// sched_getaffinity: return a mask with only CPU 0 set. Linux's
+// returns the number of bytes actually written (usually 8).
+i64 DoSchedGetaffinity(u64 pid, u64 cpusetsize, u64 user_mask)
+{
+    (void)pid;
+    if (user_mask == 0)
+        return kEFAULT;
+    // Write 8 bytes: bit 0 set for CPU 0, rest zero.
+    const u64 bytes = (cpusetsize < 8) ? cpusetsize : 8;
+    if (bytes == 0)
+        return kEINVAL;
+    u8 mask[8] = {0x01, 0, 0, 0, 0, 0, 0, 0};
+    if (!mm::CopyToUser(reinterpret_cast<void*>(user_mask), mask, bytes))
+        return kEFAULT;
+    return static_cast<i64>(bytes);
+}
+
+// clock_getres(clk_id, res): clock resolution. Scheduler tick is
+// 10 ms; HPET-backed clocks are ~70 ns (see DoClockGetTime comment).
+// Use the coarser scheduler grain as the reported resolution.
+i64 DoClockGetres(u64 clk_id, u64 user_res)
+{
+    (void)clk_id;
+    if (user_res == 0)
+        return 0;
+    struct
+    {
+        i64 tv_sec;
+        i64 tv_nsec;
+    } ts = {0, 10'000'000}; // 10 ms
+    if (!mm::CopyToUser(reinterpret_cast<void*>(user_res), &ts, sizeof(ts)))
+        return kEFAULT;
+    return 0;
+}
+
+// clock_nanosleep(clk_id, flags, req, rem): absolute or relative
+// sleep. Ignore flags (TIMER_ABSTIME would need monotonic-clock
+// diff math; we treat everything as relative for v0) and route
+// through DoNanosleep.
+i64 DoClockNanosleep(u64 clk_id, u64 flags, u64 user_req, u64 user_rem)
+{
+    (void)clk_id;
+    (void)flags;
+    return DoNanosleep(user_req, user_rem);
+}
+
+// getcpu(cpu, node, tcache): which CPU are we on. BSP-only — 0.
+i64 DoGetcpu(u64 user_cpu, u64 user_node, u64 user_tcache)
+{
+    (void)user_tcache;
+    const u32 zero = 0;
+    if (user_cpu != 0 && !mm::CopyToUser(reinterpret_cast<void*>(user_cpu), &zero, sizeof(zero)))
+        return kEFAULT;
+    if (user_node != 0 && !mm::CopyToUser(reinterpret_cast<void*>(user_node), &zero, sizeof(zero)))
+        return kEFAULT;
+    return 0;
+}
+
+// *at-family delegations. Every one of these routes through the
+// non-*at handler when dirfd == AT_FDCWD, or returns -EBADF.
+
+// mkdirat(dirfd, path, mode)
+i64 DoMkdirat(i64 dirfd, u64 user_path, u64 mode)
+{
+    if (const i64 rv = AtFdCwdOnly(dirfd); rv != 0)
+        return rv;
+    return DoMkdir(user_path, mode);
+}
+
+// unlinkat(dirfd, path, flags): flags & AT_REMOVEDIR -> rmdir.
+i64 DoUnlinkat(i64 dirfd, u64 user_path, u64 flags)
+{
+    if (const i64 rv = AtFdCwdOnly(dirfd); rv != 0)
+        return rv;
+    if (flags & kAtRemoveDir)
+        return DoRmdir(user_path);
+    return DoUnlink(user_path);
+}
+
+// linkat / symlinkat / renameat / renameat2 — all map onto the
+// non-*at stubs that already return -ENOSYS.
+i64 DoLinkat(i64 olddirfd, u64 oldpath, i64 newdirfd, u64 newpath, u64 flags)
+{
+    if (const i64 rv = AtFdCwdOnly(olddirfd); rv != 0)
+        return rv;
+    if (const i64 rv = AtFdCwdOnly(newdirfd); rv != 0)
+        return rv;
+    (void)flags;
+    return DoLink(oldpath, newpath);
+}
+i64 DoSymlinkat(u64 target, i64 newdirfd, u64 linkpath)
+{
+    if (const i64 rv = AtFdCwdOnly(newdirfd); rv != 0)
+        return rv;
+    return DoSymlink(target, linkpath);
+}
+i64 DoRenameat(i64 olddirfd, u64 oldpath, i64 newdirfd, u64 newpath)
+{
+    if (const i64 rv = AtFdCwdOnly(olddirfd); rv != 0)
+        return rv;
+    if (const i64 rv = AtFdCwdOnly(newdirfd); rv != 0)
+        return rv;
+    return DoRename(oldpath, newpath);
+}
+i64 DoRenameat2(i64 olddirfd, u64 oldpath, i64 newdirfd, u64 newpath, u64 flags)
+{
+    (void)flags;
+    return DoRenameat(olddirfd, oldpath, newdirfd, newpath);
+}
+
+// fchownat / futimesat / fchmodat / faccessat — identity/ACL
+// mutations the caller wants; v0 has no permission model, so
+// the non-*at versions are already no-ops. Delegate.
+i64 DoFchownat(i64 dirfd, u64 user_path, u64 uid, u64 gid, u64 flags)
+{
+    if (const i64 rv = AtFdCwdOnly(dirfd); rv != 0)
+        return rv;
+    (void)flags;
+    return DoChown(user_path, uid, gid);
+}
+i64 DoFutimesat(i64 dirfd, u64 user_path, u64 user_times)
+{
+    if (const i64 rv = AtFdCwdOnly(dirfd); rv != 0)
+        return rv;
+    return DoUtime(user_path, user_times);
+}
+i64 DoFchmodat(i64 dirfd, u64 user_path, u64 mode, u64 flags)
+{
+    if (const i64 rv = AtFdCwdOnly(dirfd); rv != 0)
+        return rv;
+    (void)flags;
+    return DoChmod(user_path, mode);
+}
+i64 DoFaccessat(i64 dirfd, u64 user_path, u64 mode, u64 flags)
+{
+    if (const i64 rv = AtFdCwdOnly(dirfd); rv != 0)
+        return rv;
+    (void)flags;
+    return DoAccess(user_path, mode);
+}
+i64 DoFaccessat2(i64 dirfd, u64 user_path, u64 mode, u64 flags)
+{
+    return DoFaccessat(dirfd, user_path, mode, flags);
+}
+
+// utimensat(dirfd, path, times, flags): set atime/mtime to
+// nanosecond-precision values. No time-tracking in v0 — 0.
+i64 DoUtimensat(i64 dirfd, u64 user_path, u64 user_times, u64 flags)
+{
+    if (dirfd != kAtFdCwd && user_path != 0)
+        return kEBADF;
+    (void)user_path;
+    (void)user_times;
+    (void)flags;
+    return 0;
+}
+
 } // namespace
 
 // ---------------------------------------------------------------
@@ -2527,6 +2889,66 @@ i64 LinuxClockGetTime(u64 clk_id, u64 user_ts)
 u64 LinuxNowNs()
 {
     return NowNs();
+}
+
+// Additional wrappers exposed for the NT→Linux translator. The
+// Do* primitives they call through are in the anonymous namespace
+// above, so cross-TU access has to go through these. Keep them
+// thin — arg marshalling (NTSTATUS → errno, FILE_HANDLE → fd,
+// LARGE_INTEGER → timespec) stays in the translator.
+i64 LinuxClose(u64 fd)
+{
+    return DoClose(fd);
+}
+i64 LinuxOpen(u64 user_path, u64 flags, u64 mode)
+{
+    return DoOpen(user_path, flags, mode);
+}
+i64 LinuxLseek(u64 fd, i64 offset, u64 whence)
+{
+    return DoLseek(fd, offset, whence);
+}
+i64 LinuxFstat(u64 fd, u64 user_buf)
+{
+    return DoFstat(fd, user_buf);
+}
+i64 LinuxFsync(u64 fd)
+{
+    return DoFsync(fd);
+}
+i64 LinuxNanosleep(u64 user_req, u64 user_rem)
+{
+    return DoNanosleep(user_req, user_rem);
+}
+i64 LinuxSchedYield()
+{
+    sched::SchedYield();
+    return 0;
+}
+[[noreturn]] void LinuxExit(u64 status)
+{
+    DoExitGroup(status);
+    // DoExitGroup calls sched::SchedExit which is [[noreturn]].
+    for (;;)
+    {
+        asm volatile("hlt");
+    }
+}
+i64 LinuxGetPid()
+{
+    return DoGetPid();
+}
+i64 LinuxMmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off)
+{
+    return DoMmap(addr, len, prot, flags, fd, off);
+}
+i64 LinuxMunmap(u64 addr, u64 len)
+{
+    return DoMunmap(addr, len);
+}
+i64 LinuxMprotect(u64 addr, u64 len, u64 prot)
+{
+    return DoMprotect(addr, len, prot);
 }
 
 extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
@@ -2873,6 +3295,107 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
         break;
     case kSysMunlockall:
         rv = DoMunlockall();
+        break;
+
+    // Batch 56 dispatch.
+    case kSysPtrace:
+        rv = DoPtrace(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysSyslog:
+        rv = DoSyslog(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysSetsid:
+        rv = DoSetsid();
+        break;
+    case kSysVhangup:
+        rv = DoVhangup();
+        break;
+    case kSysAcct:
+        rv = DoAcct(frame->rdi);
+        break;
+    case kSysMount:
+        rv = DoMount(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+        break;
+    case kSysUmount2:
+        rv = DoUmount2(frame->rdi, frame->rsi);
+        break;
+    case kSysSync:
+        rv = DoSync();
+        break;
+    case kSysSyncfs:
+        rv = DoSyncfs(frame->rdi);
+        break;
+    case kSysRename:
+        rv = DoRename(frame->rdi, frame->rsi);
+        break;
+    case kSysLink:
+        rv = DoLink(frame->rdi, frame->rsi);
+        break;
+    case kSysSymlink:
+        rv = DoSymlink(frame->rdi, frame->rsi);
+        break;
+    case kSysSetThreadArea:
+        rv = DoSetThreadArea(frame->rdi);
+        break;
+    case kSysGetThreadArea:
+        rv = DoGetThreadArea(frame->rdi);
+        break;
+    case kSysIoprioGet:
+        rv = DoIoprioGet(frame->rdi, frame->rsi);
+        break;
+    case kSysIoprioSet:
+        rv = DoIoprioSet(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysSchedSetaffinity:
+        rv = DoSchedSetaffinity(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysSchedGetaffinity:
+        rv = DoSchedGetaffinity(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysClockGetres:
+        rv = DoClockGetres(frame->rdi, frame->rsi);
+        break;
+    case kSysClockNanosleep:
+        rv = DoClockNanosleep(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysGetcpu:
+        rv = DoGetcpu(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysMkdirat:
+        rv = DoMkdirat(static_cast<i64>(frame->rdi), frame->rsi, frame->rdx);
+        break;
+    case kSysUnlinkat:
+        rv = DoUnlinkat(static_cast<i64>(frame->rdi), frame->rsi, frame->rdx);
+        break;
+    case kSysLinkat:
+        rv = DoLinkat(static_cast<i64>(frame->rdi), frame->rsi, static_cast<i64>(frame->rdx), frame->r10, frame->r8);
+        break;
+    case kSysSymlinkat:
+        rv = DoSymlinkat(frame->rdi, static_cast<i64>(frame->rsi), frame->rdx);
+        break;
+    case kSysRenameat:
+        rv = DoRenameat(static_cast<i64>(frame->rdi), frame->rsi, static_cast<i64>(frame->rdx), frame->r10);
+        break;
+    case kSysRenameat2:
+        rv = DoRenameat2(static_cast<i64>(frame->rdi), frame->rsi, static_cast<i64>(frame->rdx), frame->r10, frame->r8);
+        break;
+    case kSysFchownat:
+        rv = DoFchownat(static_cast<i64>(frame->rdi), frame->rsi, frame->rdx, frame->r10, frame->r8);
+        break;
+    case kSysFutimesat:
+        rv = DoFutimesat(static_cast<i64>(frame->rdi), frame->rsi, frame->rdx);
+        break;
+    case kSysFchmodat:
+        rv = DoFchmodat(static_cast<i64>(frame->rdi), frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysFaccessat:
+        rv = DoFaccessat(static_cast<i64>(frame->rdi), frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysFaccessat2:
+        rv = DoFaccessat2(static_cast<i64>(frame->rdi), frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysUtimensat:
+        rv = DoUtimensat(static_cast<i64>(frame->rdi), frame->rsi, frame->rdx, frame->r10);
         break;
 
     default:
