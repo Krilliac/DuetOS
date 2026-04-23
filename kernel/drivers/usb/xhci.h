@@ -122,6 +122,7 @@ struct ControllerInfo
     u32 descriptors_fetched; // count of successful GET_DESCRIPTOR(Device) transfers
     u32 configs_parsed;      // count of successful GET_DESCRIPTOR(Config) + parse
     u32 hid_keyboards_found; // count of ports that resolved to a HID boot keyboard
+    u32 hid_keyboards_bound; // count of ports that fully came up for HID polling
     u32 context_bytes;       // HCCPARAMS1.CSZ → 32 or 64
     PortRecord ports[kMaxXhciPortsPerController];
 };

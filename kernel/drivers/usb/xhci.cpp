@@ -5,6 +5,8 @@
 #include "../../core/result.h"
 #include "../../mm/frame_allocator.h"
 #include "../../mm/page.h"
+#include "../../sched/sched.h"
+#include "../input/ps2kbd.h"
 #include "usb.h"
 
 namespace customos::drivers::usb::xhci
@@ -195,9 +197,39 @@ struct DeviceState
     u32 ep0_cycle;
     mm::PhysAddr scratch_phys;
     u8* scratch_virt;
+    // HID keyboard state — set once the HID-keyboard bring-up
+    // finishes (SET_CONFIGURATION + Configure Endpoint succeeded).
+    // The polling task iterates the device table looking for
+    // `hid_ready`; the rest of the fields describe the endpoint
+    // ring + per-device report-diff state.
+    bool hid_ready;
+    u8 hid_ep_addr;        // e.g. 0x81 = EP1 IN
+    u8 hid_ep_xhci_idx;    // DCI for Input Context + doorbell target
+    u16 hid_ep_max_packet; // from the endpoint descriptor
+    mm::PhysAddr hid_ring_phys;
+    Trb* hid_ring;
+    u32 hid_ring_slots;
+    u32 hid_ring_idx;
+    u32 hid_ring_cycle;
+    mm::PhysAddr hid_buf_phys;
+    u8* hid_buf_virt;         // 8-byte HID boot keyboard report lands here
+    u8 hid_prev[8];           // previous report for press/release diff
+    u64 hid_outstanding_phys; // TRB phys addr we're waiting on, or 0
 };
 constinit DeviceState g_devices[kMaxDevicesTotal] = {};
 constinit u32 g_device_count = 0;
+
+// Byte-wise zero for arbitrary POD — the freestanding toolchain has
+// no libc memset and implicit struct zeroing (`x = {}`) on a large
+// struct lowers to a memset call the linker can't resolve. Keep
+// this local to the xHCI TU; a kernel-wide memset is a larger
+// design decision than "reset my driver's per-device record".
+void ZeroBytes(void* p, u64 n)
+{
+    auto* b = static_cast<volatile u8*>(p);
+    for (u64 i = 0; i < n; ++i)
+        b[i] = 0;
+}
 
 DeviceState* AllocDeviceSlot()
 {
@@ -205,7 +237,7 @@ DeviceState* AllocDeviceSlot()
     {
         if (!g_devices[i].in_use)
         {
-            g_devices[i] = {};
+            ZeroBytes(&g_devices[i], sizeof(DeviceState));
             g_devices[i].in_use = true;
             if (i >= g_device_count)
                 g_device_count = i + 1;
@@ -602,6 +634,57 @@ bool DoControlIn(Runtime& rt, DeviceState* dev, u8 bmRequestType, u8 bRequest, u
     return true;
 }
 
+// Generic USB control transfer with NO data stage. Used by
+// SET_CONFIGURATION + HID class-specific SET_PROTOCOL / SET_IDLE.
+// bmRequestType is HOST-to-device (bit 7 = 0). The status stage
+// for a no-data control transfer travels in the IN direction
+// (opposite of what would have been the data direction, which
+// for host-to-device is OUT — so status is IN).
+bool DoControlNoData(Runtime& rt, DeviceState* dev, u8 bmRequestType, u8 bRequest, u16 wValue, u16 wIndex,
+                     const char* diag)
+{
+    const u32 setup_lo = u32(bmRequestType) | (u32(bRequest) << 8) | (u32(wValue) << 16);
+    const u32 setup_hi = u32(wIndex); // wLength = 0 for no-data transfer
+    const u32 setup_status = 8u;
+    const u32 setup_ctl = (kTransferTypeNoData << 16) | kTrbCtlIdt;
+    const u64 setup_phys =
+        EnqueueRingTrb(dev->ep0_ring, dev->ep0_ring_phys, dev->ep0_slots, dev->ep0_idx, dev->ep0_cycle,
+                       kTrbTypeSetupStage, setup_lo, setup_hi, setup_status, setup_ctl);
+    (void)setup_phys;
+
+    // Status Stage IN (direction opposite of implied OUT data), IOC=1.
+    const u64 status_phys = EnqueueRingTrb(dev->ep0_ring, dev->ep0_ring_phys, dev->ep0_slots, dev->ep0_idx,
+                                           dev->ep0_cycle, kTrbTypeStatusStage, 0, 0, 0, kTrbCtlIoc | kTrbCtlDirIn);
+    if (status_phys == 0)
+        return false;
+
+    RingDoorbell(rt, dev->slot_id, 1);
+
+    Trb event{};
+    if (!WaitEvent(rt, status_phys, kTrbTypeTransferEvent, &event, 4'000'000))
+    {
+        arch::SerialWrite("[xhci]   control-NoData ");
+        arch::SerialWrite(diag);
+        arch::SerialWrite(" timed out slot=");
+        arch::SerialWriteHex(dev->slot_id);
+        arch::SerialWrite("\n");
+        return false;
+    }
+    const u32 code = (event.status >> 24) & 0xFF;
+    if (code != kCompletionCodeSuccess)
+    {
+        arch::SerialWrite("[xhci]   control-NoData ");
+        arch::SerialWrite(diag);
+        arch::SerialWrite(" failed code=");
+        arch::SerialWriteHex(code);
+        arch::SerialWrite(" slot=");
+        arch::SerialWriteHex(dev->slot_id);
+        arch::SerialWrite("\n");
+        return false;
+    }
+    return true;
+}
+
 bool FetchDeviceDescriptor(Runtime& rt, PortRecord& port)
 {
     DeviceState* dev = DeviceForSlot(port.slot_id);
@@ -715,6 +798,454 @@ bool FetchAndParseConfig(Runtime& rt, PortRecord& port)
     port.config_desc_bytes = want;
 
     return ParseConfigForHidKeyboard(dev->scratch_virt, want, port);
+}
+
+// ---------------------------------------------------------------
+// HID Boot Keyboard — SET_CONFIGURATION, Configure Endpoint,
+// interrupt-IN transfer ring, periodic Normal TRB submission,
+// report diff, KeyEvent injection.
+// ---------------------------------------------------------------
+
+// USB-standard request for SET_CONFIGURATION (§9.4.7).
+constexpr u8 kUsbReqSetConfiguration = 0x09;
+// xHCI Configure Endpoint command TRB type (§6.4.3.5).
+constexpr u32 kTrbTypeConfigureEndpoint = 12;
+// xHCI EP Type = Interrupt IN (§6.2.3, table 6-9).
+constexpr u32 kEpTypeInterruptIn = 7;
+
+// Translate a USB bEndpointAddress into the xHCI Device Context
+// Index (DCI) used for both the input-context layout and the
+// doorbell target. DCI = (ep_num * 2) + (direction==IN ? 1 : 0),
+// with EP0 occupying DCI 1 regardless of direction.
+u8 EndpointDci(u8 ep_addr)
+{
+    const u8 ep_num = ep_addr & 0x0F;
+    const bool is_in = (ep_addr & 0x80) != 0;
+    return u8((ep_num * 2) + (is_in ? 1 : 0));
+}
+
+// Translate raw USB bInterval (spec differs per speed) into the
+// xHCI Interval field (ep context DW0 bits 16..23), which is
+// always encoded as 2^interval × 125 µs. We map conservatively:
+// - Low/Full-speed interrupt: bInterval is in 1 ms units, so
+//   Interval = log2(bInterval * 8). Clip to [3, 15].
+// - High-speed and above: bInterval is already a log2 value
+//   in 125 µs microframes; Interval = bInterval - 1.
+// Keyboards send reports on change + at bInterval cadence; at
+// 16 ms (our worst-case) the ReadEvent loop still keeps up.
+u32 HidXhciInterval(u8 speed, u8 bInterval)
+{
+    if (bInterval == 0)
+        return 3; // spec-illegal for interrupt endpoints; pick sane default
+    if (speed >= 3)
+    {
+        // HS / SS / SS+: already log2-encoded in USB units.
+        u32 v = u32(bInterval - 1);
+        if (v > 15)
+            v = 15;
+        return v;
+    }
+    // LS / FS: linear ms. Walk up to log2(bInterval * 8).
+    u32 microframes = u32(bInterval) * 8;
+    u32 log = 0;
+    while ((1u << log) < microframes)
+        ++log;
+    if (log > 15)
+        log = 15;
+    return log;
+}
+
+bool SetConfiguration(Runtime& rt, DeviceState* dev, u8 config_value)
+{
+    return DoControlNoData(rt, dev, /*bmRequestType=*/0x00, kUsbReqSetConfiguration, /*wValue=*/u16(config_value),
+                           /*wIndex=*/0, "SET_CONFIGURATION");
+}
+
+// Build a Configure Endpoint Input Context for adding ONE new
+// endpoint on top of the EP0 context already established at
+// Address Device time. Slot Context is marked for update (A0) so
+// its context-entries field reflects the new DCI high-water mark.
+// The new endpoint's context is added via A(dci).
+void BuildConfigureEndpointInputContext(void* input_ctx_virt, u32 ctx_bytes, u8 port_num, u8 speed, u32 mps0,
+                                        u64 ep0_ring_phys, u8 new_dci, u32 new_ep_type, u32 new_mps, u32 new_interval,
+                                        u64 new_ring_phys)
+{
+    auto* base = static_cast<volatile u8*>(input_ctx_virt);
+    // Zero the range we'll touch (Input Control + Slot + up to new_dci endpoint ctx).
+    const u32 end = (new_dci + 1) * ctx_bytes;
+    for (u32 i = 0; i < end; ++i)
+        base[i] = 0;
+
+    volatile u32* icc = reinterpret_cast<volatile u32*>(base + 0 * ctx_bytes);
+    // Add flags — set A0 (slot) + A1 (EP0, keep) + A(new_dci).
+    icc[1] = (1u << 0) | (1u << 1) | (1u << new_dci);
+
+    // Slot Context — same pattern as Address Device but with
+    // context entries high-water raised to include new_dci.
+    volatile u32* slot = reinterpret_cast<volatile u32*>(base + 1 * ctx_bytes);
+    slot[0] = (u32(speed) << 20) | (u32(new_dci) << 27);
+    slot[1] = u32(port_num) << 16;
+
+    // EP0 Context — re-describe so the controller doesn't null it
+    // out when it consumes this Input Context (A1 set means
+    // "this is the new state of EP0").
+    volatile u32* ep0 = reinterpret_cast<volatile u32*>(base + 2 * ctx_bytes);
+    ep0[0] = 0;
+    ep0[1] = (3u << 1) | (4u << 3) | (mps0 << 16);
+    const u64 ep0_dcs = ep0_ring_phys | 1ull;
+    ep0[2] = u32(ep0_dcs);
+    ep0[3] = u32(ep0_dcs >> 32);
+    ep0[4] = 8;
+
+    // New endpoint context at index new_dci.
+    volatile u32* ep = reinterpret_cast<volatile u32*>(base + new_dci * ctx_bytes);
+    ep[0] = (new_interval & 0xFF) << 16;
+    ep[1] = (3u << 1) | (new_ep_type << 3) | (new_mps << 16);
+    const u64 ep_dcs = new_ring_phys | 1ull;
+    ep[2] = u32(ep_dcs);
+    ep[3] = u32(ep_dcs >> 32);
+    // Average TRB length — 8 bytes matches HID boot keyboard report size.
+    ep[4] = new_mps;
+}
+
+// Enqueue one Normal TRB on the HID transfer ring. The controller
+// reads `len` bytes into the buffer at `buf_phys`; we set IOC so
+// the completion lands as a Transfer Event we can diff against the
+// previous report.
+u64 HidEnqueueNormalTrb(DeviceState* dev, u64 buf_phys, u32 len)
+{
+    return EnqueueRingTrb(dev->hid_ring, dev->hid_ring_phys, dev->hid_ring_slots, dev->hid_ring_idx,
+                          dev->hid_ring_cycle, kTrbTypeNormal, u32(buf_phys), u32(buf_phys >> 32), len, kTrbCtlIoc);
+}
+
+// Bring a HID Boot Keyboard all the way up: allocate its
+// interrupt-IN transfer ring + 8-byte report buffer, build +
+// submit the Configure Endpoint command, seed the first Normal
+// TRB, mark the device hid_ready. The per-controller polling task
+// picks up from there.
+bool BringUpHidKeyboard(Runtime& rt, PortRecord& port)
+{
+    DeviceState* dev = DeviceForSlot(port.slot_id);
+    if (dev == nullptr)
+        return false;
+
+    // SET_CONFIGURATION first so the HID interface is selected.
+    if (!SetConfiguration(rt, dev, port.hid_config_value))
+        return false;
+
+    // Allocate the transfer ring + report buffer.
+    mm::PhysAddr ring_phys = 0;
+    void* ring_virt = nullptr;
+    if (!AllocZeroPage(&ring_phys, &ring_virt))
+        return false;
+    mm::PhysAddr buf_phys = 0;
+    void* buf_virt = nullptr;
+    if (!AllocZeroPage(&buf_phys, &buf_virt))
+        return false;
+
+    dev->hid_ring_phys = ring_phys;
+    dev->hid_ring = static_cast<Trb*>(ring_virt);
+    dev->hid_ring_slots = mm::kPageSize / sizeof(Trb);
+    dev->hid_ring_idx = 0;
+    dev->hid_ring_cycle = 1;
+    Trb& link = dev->hid_ring[dev->hid_ring_slots - 1];
+    link.param_lo = u32(ring_phys);
+    link.param_hi = u32(ring_phys >> 32);
+    link.status = 0;
+    link.control = (kTrbTypeLink << 10) | (1u << 1) | 1u;
+
+    dev->hid_buf_phys = buf_phys;
+    dev->hid_buf_virt = static_cast<u8*>(buf_virt);
+    dev->hid_ep_addr = port.hid_ep_addr;
+    dev->hid_ep_xhci_idx = EndpointDci(port.hid_ep_addr);
+    dev->hid_ep_max_packet = port.hid_ep_max_packet;
+
+    // Configure Endpoint command — uses the command ring, not EP0.
+    const u32 mps0 = DefaultMaxPacketSize0(dev->speed);
+    const u32 interval = HidXhciInterval(dev->speed, port.hid_ep_interval);
+    BuildConfigureEndpointInputContext(dev->input_ctx_virt, rt.ctx_bytes, dev->port_num, dev->speed, mps0,
+                                       dev->ep0_ring_phys, dev->hid_ep_xhci_idx, kEpTypeInterruptIn,
+                                       port.hid_ep_max_packet, interval, dev->hid_ring_phys);
+    const u64 cmd_phys = SubmitCmd(rt, kTrbTypeConfigureEndpoint, u32(dev->input_ctx_phys),
+                                   u32(dev->input_ctx_phys >> 32), 0, u32(dev->slot_id) << 24);
+    if (cmd_phys == 0)
+        return false;
+    u32 cc = 0;
+    u8 slot_out = 0;
+    if (!WaitCmdCompletion(rt, cmd_phys, &cc, &slot_out))
+    {
+        arch::SerialWrite("[xhci]   Configure Endpoint timed out slot=");
+        arch::SerialWriteHex(dev->slot_id);
+        arch::SerialWrite("\n");
+        return false;
+    }
+    const u32 code = (cc >> 24) & 0xFF;
+    if (code != kCompletionCodeSuccess)
+    {
+        arch::SerialWrite("[xhci]   Configure Endpoint failed code=");
+        arch::SerialWriteHex(code);
+        arch::SerialWrite(" slot=");
+        arch::SerialWriteHex(dev->slot_id);
+        arch::SerialWrite("\n");
+        return false;
+    }
+
+    // Seed the first Normal TRB + ring doorbell so the endpoint
+    // has a TRB to fill when the keyboard has something to report.
+    const u64 trb_phys = HidEnqueueNormalTrb(dev, dev->hid_buf_phys, dev->hid_ep_max_packet);
+    if (trb_phys == 0)
+        return false;
+    dev->hid_outstanding_phys = trb_phys;
+    for (u32 i = 0; i < 8; ++i)
+        dev->hid_prev[i] = 0;
+    RingDoorbell(rt, dev->slot_id, dev->hid_ep_xhci_idx);
+
+    dev->hid_ready = true;
+    return true;
+}
+
+// Translate a USB HID Keyboard/Keypad page usage ID (§10 of HUT
+// 1.4) to the KeyEvent `code` field the shell expects. Returns
+// ASCII when there's a direct printable mapping (letters, digits,
+// common punctuation) pre-shifted by the HID modifier byte; the
+// KeyCode enum for non-printable keys (arrows, F-keys, Esc /
+// Tab / Backspace / Enter). Unmapped usage → kKeyNone.
+u16 TranslateHidUsage(u8 usage, bool shift)
+{
+    if (usage >= 0x04 && usage <= 0x1D)
+    {
+        // A..Z
+        return shift ? u16('A' + (usage - 0x04)) : u16('a' + (usage - 0x04));
+    }
+    if (usage >= 0x1E && usage <= 0x27)
+    {
+        // 1..0 (0x27 is zero, not after nine)
+        static constexpr char kDigitsLower[] = "1234567890";
+        static constexpr char kDigitsUpper[] = "!@#$%^&*()";
+        const u32 i = (usage - 0x1E);
+        return shift ? u16(kDigitsUpper[i]) : u16(kDigitsLower[i]);
+    }
+    using namespace customos::drivers::input;
+    switch (usage)
+    {
+    case 0x28:
+        return u16(kKeyEnter);
+    case 0x29:
+        return u16(kKeyEsc);
+    case 0x2A:
+        return u16(kKeyBackspace);
+    case 0x2B:
+        return u16(kKeyTab);
+    case 0x2C:
+        return u16(' ');
+    case 0x2D:
+        return shift ? u16('_') : u16('-');
+    case 0x2E:
+        return shift ? u16('+') : u16('=');
+    case 0x2F:
+        return shift ? u16('{') : u16('[');
+    case 0x30:
+        return shift ? u16('}') : u16(']');
+    case 0x31:
+        return shift ? u16('|') : u16('\\');
+    case 0x33:
+        return shift ? u16(':') : u16(';');
+    case 0x34:
+        return shift ? u16('"') : u16('\'');
+    case 0x35:
+        return shift ? u16('~') : u16('`');
+    case 0x36:
+        return shift ? u16('<') : u16(',');
+    case 0x37:
+        return shift ? u16('>') : u16('.');
+    case 0x38:
+        return shift ? u16('?') : u16('/');
+    case 0x3A:
+        return u16(kKeyF1);
+    case 0x3B:
+        return u16(kKeyF2);
+    case 0x3C:
+        return u16(kKeyF3);
+    case 0x3D:
+        return u16(kKeyF4);
+    case 0x3E:
+        return u16(kKeyF5);
+    case 0x3F:
+        return u16(kKeyF6);
+    case 0x40:
+        return u16(kKeyF7);
+    case 0x41:
+        return u16(kKeyF8);
+    case 0x42:
+        return u16(kKeyF9);
+    case 0x43:
+        return u16(kKeyF10);
+    case 0x44:
+        return u16(kKeyF11);
+    case 0x45:
+        return u16(kKeyF12);
+    case 0x4F:
+        return u16(kKeyArrowRight);
+    case 0x50:
+        return u16(kKeyArrowLeft);
+    case 0x51:
+        return u16(kKeyArrowDown);
+    case 0x52:
+        return u16(kKeyArrowUp);
+    default:
+        return u16(customos::drivers::input::kKeyNone);
+    }
+}
+
+u8 TranslateHidModifiers(u8 hid_mod)
+{
+    using namespace customos::drivers::input;
+    u8 m = 0;
+    if (hid_mod & 0x11u) // LCtrl | RCtrl
+        m |= kKeyModCtrl;
+    if (hid_mod & 0x22u) // LShift | RShift
+        m |= kKeyModShift;
+    if (hid_mod & 0x44u) // LAlt | RAlt
+        m |= kKeyModAlt;
+    if (hid_mod & 0x88u) // LMeta | RMeta
+        m |= kKeyModMeta;
+    return m;
+}
+
+bool UsageInReport(u8 usage, const u8 report[8])
+{
+    for (u32 i = 2; i < 8; ++i)
+    {
+        if (report[i] == usage)
+            return true;
+    }
+    return false;
+}
+
+// Diff previous vs current HID boot keyboard report. Emit a
+// release KeyEvent for every usage in prev-not-in-curr, a press
+// for every usage in curr-not-in-prev. Modifier edges emit
+// modifier-only events (code=kKeyNone) so downstream can refresh
+// any "Ctrl held" UI cues without polling.
+void HidDiffAndInject(const u8 prev[8], const u8 curr[8])
+{
+    using namespace customos::drivers::input;
+    const u8 prev_mod = prev[0];
+    const u8 curr_mod = curr[0];
+    const bool shift = (curr_mod & 0x22u) != 0;
+    const u8 kernel_mods = TranslateHidModifiers(curr_mod);
+
+    // Modifier-only event on any modifier-byte change — mirrors
+    // what the PS/2 decoder emits on Shift / Ctrl / Alt / Meta
+    // edges so downstream "modifier held" cues update.
+    if (prev_mod != curr_mod)
+    {
+        KeyEvent ev{};
+        ev.code = kKeyNone;
+        ev.modifiers = kernel_mods;
+        ev.is_release = false;
+        KeyboardInjectEvent(ev);
+    }
+
+    // Release edges — usages in prev that aren't in curr.
+    for (u32 i = 2; i < 8; ++i)
+    {
+        const u8 u = prev[i];
+        if (u == 0 || u == 0x01 /* ErrorRollOver */)
+            continue;
+        if (UsageInReport(u, curr))
+            continue;
+        KeyEvent ev{};
+        ev.code = TranslateHidUsage(u, shift);
+        ev.modifiers = kernel_mods;
+        ev.is_release = true;
+        KeyboardInjectEvent(ev);
+    }
+    // Press edges — usages in curr that weren't in prev.
+    for (u32 i = 2; i < 8; ++i)
+    {
+        const u8 u = curr[i];
+        if (u == 0 || u == 0x01)
+            continue;
+        if (UsageInReport(u, prev))
+            continue;
+        KeyEvent ev{};
+        ev.code = TranslateHidUsage(u, shift);
+        ev.modifiers = kernel_mods;
+        ev.is_release = false;
+        KeyboardInjectEvent(ev);
+    }
+}
+
+// Non-blocking single-step of the event ring. If a valid TRB is
+// present under the current consumer cycle, copy it out + advance.
+// Returns false if the ring is empty.
+bool TryReadEvent(Runtime& rt, Trb* out)
+{
+    const Trb& e = rt.evt_ring[rt.evt_idx];
+    const bool valid = (e.control & 1u) == (rt.evt_cycle & 1u);
+    if (!valid)
+        return false;
+    if (out != nullptr)
+        *out = e;
+    AdvanceEventRing(rt);
+    return true;
+}
+
+// Per-controller polling task. Sleeps briefly between drains so
+// it doesn't starve other work on a single-CPU kernel. Runs
+// forever — xHCI shutdown / restart tears down the device table,
+// so the task's ready check comes up empty and it just idles.
+// One task per controller lets us keep event-ring ownership
+// simple: after boot, nothing else consumes events on this ring.
+struct PollTaskArg
+{
+    Runtime* rt;
+    ControllerInfo* info;
+};
+
+constinit PollTaskArg g_poll_args[kMaxControllers] = {};
+constinit Runtime g_poll_rt[kMaxControllers] = {};
+
+void HidPollEntry(void* raw)
+{
+    auto* arg = static_cast<PollTaskArg*>(raw);
+    Runtime& rt = *arg->rt;
+    for (;;)
+    {
+        // Drain every event currently available, then sleep.
+        Trb e{};
+        while (TryReadEvent(rt, &e))
+        {
+            const u32 type = (e.control >> 10) & 0x3F;
+            if (type != kTrbTypeTransferEvent)
+                continue;
+            const u64 ptr = (u64(e.param_hi) << 32) | u64(e.param_lo);
+            // Find which HID device this TRB belongs to.
+            for (u32 i = 0; i < kMaxDevicesTotal; ++i)
+            {
+                DeviceState& dev = g_devices[i];
+                if (!dev.in_use || !dev.hid_ready)
+                    continue;
+                if (dev.hid_outstanding_phys == 0 || dev.hid_outstanding_phys != ptr)
+                    continue;
+                // Parse + inject.
+                u8 curr[8] = {};
+                for (u32 b = 0; b < 8; ++b)
+                    curr[b] = dev.hid_buf_virt[b];
+                HidDiffAndInject(dev.hid_prev, curr);
+                for (u32 b = 0; b < 8; ++b)
+                    dev.hid_prev[b] = curr[b];
+                // Re-queue a Normal TRB + ring the endpoint doorbell.
+                const u64 trb = HidEnqueueNormalTrb(&dev, dev.hid_buf_phys, dev.hid_ep_max_packet);
+                dev.hid_outstanding_phys = trb;
+                if (trb != 0)
+                    RingDoorbell(rt, dev.slot_id, dev.hid_ep_xhci_idx);
+                break;
+            }
+        }
+        customos::sched::SchedSleepTicks(1);
+    }
 }
 
 bool InitOne(const HostControllerInfo& h, ControllerInfo& out)
@@ -1077,6 +1608,13 @@ bool InitOne(const HostControllerInfo& h, ControllerInfo& out)
             arch::SerialWrite(" config=");
             arch::SerialWriteHex(rec.hid_config_value);
             arch::SerialWrite("\n");
+            if (BringUpHidKeyboard(rt, rec))
+            {
+                ++out.hid_keyboards_bound;
+                arch::SerialWrite("[xhci]   HID-BOOT-KEYBOARD bound; polling task will pick up slot=");
+                arch::SerialWriteHex(rec.slot_id);
+                arch::SerialWrite("\n");
+            }
         }
     }
     arch::SerialWrite("[xhci] enumeration: addressed=");
@@ -1087,7 +1625,26 @@ bool InitOne(const HostControllerInfo& h, ControllerInfo& out)
     arch::SerialWriteHex(out.configs_parsed);
     arch::SerialWrite(" hid-keyboards=");
     arch::SerialWriteHex(out.hid_keyboards_found);
+    arch::SerialWrite(" hid-bound=");
+    arch::SerialWriteHex(out.hid_keyboards_bound);
     arch::SerialWrite("\n");
+
+    // Spawn the per-controller HID polling task if any device
+    // came up. The Runtime struct lives in our stack frame here;
+    // copy it into file-scope storage so the task's entry point
+    // has a stable pointer past this function's return.
+    if (out.hid_keyboards_bound > 0)
+    {
+        // Find our slot index into g_controllers by pointer.
+        const u32 idx = u32(&out - g_controllers);
+        if (idx < kMaxControllers)
+        {
+            g_poll_rt[idx] = rt;
+            g_poll_args[idx].rt = &g_poll_rt[idx];
+            g_poll_args[idx].info = &out;
+            customos::sched::SchedCreate(HidPollEntry, &g_poll_args[idx], "xhci-hid-poll");
+        }
+    }
 
     return true;
 }
@@ -1205,7 +1762,7 @@ void XhciInit()
     // teach the allocator to take them back after a full HCH
     // quiesce — intentional, matches the per-controller TODO above.
     for (u32 i = 0; i < kMaxDevicesTotal; ++i)
-        g_devices[i] = {};
+        ZeroBytes(&g_devices[i], sizeof(DeviceState));
     g_device_count = 0;
     arch::SerialWrite(any_stuck ? "[xhci] shutdown partial (some controllers wouldn't halt)\n"
                                 : "[xhci] shutdown ok — all controllers quiesced\n");

@@ -157,4 +157,16 @@ struct Ps2Stats
 };
 Ps2Stats Ps2KeyboardStats();
 
+/// External key-event injection — lets another input driver push
+/// pre-cooked KeyEvents into the same queue that PS/2 feeds. Used
+/// by the xHCI HID keyboard path, which produces KeyEvents
+/// directly (no scancodes). Thread-safe with respect to the PS/2
+/// IRQ: both paths append to a ring that Ps2KeyboardReadEvent
+/// drains first (before falling back to scancode decode).
+///
+/// Currently single-producer-per-caller; the HID polling task is
+/// the only external producer in v0. Overflow drops the oldest
+/// injected event.
+void KeyboardInjectEvent(const KeyEvent& ev);
+
 } // namespace customos::drivers::input
