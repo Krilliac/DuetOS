@@ -3,7 +3,10 @@
 #include "../../arch/x86_64/serial.h"
 #include "../../core/klog.h"
 #include "../../core/panic.h"
+#include "../../mm/frame_allocator.h"
+#include "../../mm/page.h"
 #include "../../mm/paging.h"
+#include "../../sched/sched.h"
 #include "../pci/pci.h"
 
 namespace customos::drivers::net
@@ -113,6 +116,425 @@ bool IsE1000CompatFamily(const char* family)
     return p[5] == '\0' || p[5] == '-' || p[5] == 'e';
 }
 
+// ---------------------------------------------------------------
+// Intel e1000 driver — full bring-up: reset, link up, RX/TX rings,
+// packet send + RX polling task. Covers 82540EM (QEMU's default),
+// 82545EM and the other "classic" e1000 variants; e1000e (PCIe
+// controllers 82571+) share most of the register file but diverge
+// enough (different PHY access, different flow control) that we
+// keep the real driver gated to kVendorIntel + classic e1000 IDs
+// for now. Wider coverage is a linear extension.
+// ---------------------------------------------------------------
+
+// Additional e1000 register offsets (CTRL / STATUS already above).
+constexpr u64 kE1000RegCtrl = 0x00000;
+constexpr u64 kE1000RegIcr = 0x000C0; // Interrupt Cause Read (RC)
+constexpr u64 kE1000RegImc = 0x000D8; // Interrupt Mask Clear
+// IMS (Interrupt Mask Set) is named for the MSI-X wiring that
+// comes later — polling-only today keeps every IRQ masked.
+[[maybe_unused]] constexpr u64 kE1000RegImsSet = 0x000D0;
+constexpr u64 kE1000RegRctl = 0x00100;  // Receive Control
+constexpr u64 kE1000RegTctl = 0x00400;  // Transmit Control
+constexpr u64 kE1000RegTipg = 0x00410;  // TX Inter-Packet Gap
+constexpr u64 kE1000RegRdbal = 0x02800; // RX Desc Base Addr Low
+constexpr u64 kE1000RegRdbah = 0x02804; // RX Desc Base Addr High
+constexpr u64 kE1000RegRdlen = 0x02808;
+constexpr u64 kE1000RegRdh = 0x02810;
+constexpr u64 kE1000RegRdt = 0x02818;
+constexpr u64 kE1000RegTdbal = 0x03800;
+constexpr u64 kE1000RegTdbah = 0x03804;
+constexpr u64 kE1000RegTdlen = 0x03808;
+constexpr u64 kE1000RegTdh = 0x03810;
+constexpr u64 kE1000RegTdt = 0x03818;
+constexpr u64 kE1000RegMta0 = 0x05200; // multicast table array base (128 × u32)
+
+// CTRL bits.
+constexpr u32 kE1000CtrlRst = 1u << 26; // Software reset
+constexpr u32 kE1000CtrlSlu = 1u << 6;  // Set Link Up
+constexpr u32 kE1000CtrlAsde = 1u << 5; // Auto-Speed Detect Enable
+
+// RCTL bits.
+constexpr u32 kE1000RctlEn = 1u << 1;     // Receiver Enable
+constexpr u32 kE1000RctlBam = 1u << 15;   // Broadcast Accept Mode
+constexpr u32 kE1000RctlSecrc = 1u << 26; // Strip Ethernet CRC
+// RCTL.BSIZE bits 16..17 = 0b00 for 2048-byte buffers (with BSEX=0).
+
+// TCTL bits.
+constexpr u32 kE1000TctlEn = 1u << 1;
+constexpr u32 kE1000TctlPsp = 1u << 3; // Pad Short Packets
+// CT (collision threshold) bits 4..11 = 0x10, COLD (collision dist) bits 12..21 = 0x40.
+
+// RX descriptor (16 bytes). Layout per 82540EM §3.2.3.
+struct alignas(16) E1000RxDesc
+{
+    u64 addr;
+    u16 length;
+    u16 checksum;
+    u8 status;
+    u8 errors;
+    u16 special;
+};
+static_assert(sizeof(E1000RxDesc) == 16, "e1000 RX descriptor must be 16 bytes");
+
+// TX descriptor (16 bytes). "Legacy" format — §3.3.3.1.
+struct alignas(16) E1000TxDesc
+{
+    u64 addr;
+    u16 length;
+    u8 cso;
+    u8 cmd;
+    u8 sta;
+    u8 css;
+    u16 special;
+};
+static_assert(sizeof(E1000TxDesc) == 16, "e1000 TX descriptor must be 16 bytes");
+
+// Ring sizes — one page each (4 KiB / 16 B = 256 descriptors).
+constexpr u32 kE1000RxRingSlots = 256;
+constexpr u32 kE1000TxRingSlots = 256;
+constexpr u32 kE1000RxBufBytes = 2048;
+
+// RX descriptor status bits.
+constexpr u8 kE1000RxStatusDd = 1u << 0; // Descriptor Done
+// End-Of-Packet flag — every complete frame on a 2 KiB buffer has
+// it set; we don't fragment-check today (short frames always
+// single-descriptor) but name the bit so the next slice's jumbo
+// frames / large-buffer handling doesn't have to rediscover it.
+[[maybe_unused]] constexpr u8 kE1000RxStatusEop = 1u << 1;
+
+// TX descriptor command bits.
+constexpr u8 kE1000TxCmdEop = 1u << 0;  // End Of Packet
+constexpr u8 kE1000TxCmdIfcs = 1u << 1; // Insert FCS
+constexpr u8 kE1000TxCmdRs = 1u << 3;   // Report Status
+
+struct E1000Ctx
+{
+    bool online;
+    volatile u8* mmio; // BAR 0 kernel-virtual
+    E1000RxDesc* rx_ring;
+    mm::PhysAddr rx_ring_phys;
+    mm::PhysAddr rx_buf_base_phys; // contiguous 256 × 2 KiB = 512 KiB
+    u8* rx_buf_base_virt;
+    u32 rx_tail;
+    E1000TxDesc* tx_ring;
+    mm::PhysAddr tx_ring_phys;
+    mm::PhysAddr tx_buf_base_phys; // contiguous 256 × 2 KiB = 512 KiB staging
+    u8* tx_buf_base_virt;
+    u32 tx_tail;
+    u64 rx_packets;
+    u64 rx_bytes;
+    u64 tx_packets;
+    u64 tx_bytes;
+    NicInfo* nic;
+};
+
+constinit E1000Ctx g_e1000 = {};
+
+void E1000Write(u64 off, u32 value)
+{
+    *reinterpret_cast<volatile u32*>(g_e1000.mmio + off) = value;
+}
+u32 E1000Read(u64 off)
+{
+    return *reinterpret_cast<volatile u32*>(g_e1000.mmio + off);
+}
+
+// Spin a small number of cycles so the controller sees our MMIO
+// writes complete before we poll related registers. 1 ms worth
+// of pauses is plenty on any real NIC.
+void E1000Delay()
+{
+    for (u32 i = 0; i < 1024; ++i)
+        asm volatile("pause" ::: "memory");
+}
+
+bool E1000Reset()
+{
+    // Mask all interrupts, read ICR to clear any pending, then reset.
+    E1000Write(kE1000RegImc, 0xFFFFFFFFu);
+    (void)E1000Read(kE1000RegIcr);
+    E1000Write(kE1000RegCtrl, E1000Read(kE1000RegCtrl) | kE1000CtrlRst);
+    // Reset takes ~1 ms; poll CTRL.RST to clear.
+    for (u32 i = 0; i < 100; ++i)
+    {
+        E1000Delay();
+        if ((E1000Read(kE1000RegCtrl) & kE1000CtrlRst) == 0)
+        {
+            // Mask IRQs again — reset may have re-enabled some.
+            E1000Write(kE1000RegImc, 0xFFFFFFFFu);
+            (void)E1000Read(kE1000RegIcr);
+            return true;
+        }
+    }
+    arch::SerialWrite("[e1000] reset timed out\n");
+    return false;
+}
+
+void E1000ClearMulticastTable()
+{
+    for (u32 i = 0; i < 128; ++i)
+        E1000Write(kE1000RegMta0 + u64(i) * 4, 0);
+}
+
+bool E1000SetupRxRing()
+{
+    // One 4 KiB frame for the RX descriptor ring (256 × 16 B).
+    const mm::PhysAddr ring_phys = mm::AllocateFrame();
+    if (ring_phys == mm::kNullFrame)
+        return false;
+    auto* ring_virt = static_cast<u8*>(mm::PhysToVirt(ring_phys));
+    for (u64 i = 0; i < mm::kPageSize; ++i)
+        ring_virt[i] = 0;
+    g_e1000.rx_ring_phys = ring_phys;
+    g_e1000.rx_ring = reinterpret_cast<E1000RxDesc*>(ring_virt);
+
+    // 256 × 2 KiB = 128 pages contiguous for RX buffers. Each
+    // descriptor points at buf_base + slot × 2048.
+    constexpr u32 kRxBufPages = (kE1000RxRingSlots * kE1000RxBufBytes) / mm::kPageSize;
+    const mm::PhysAddr buf_phys = mm::AllocateContiguousFrames(kRxBufPages);
+    if (buf_phys == mm::kNullFrame)
+    {
+        mm::FreeFrame(ring_phys);
+        return false;
+    }
+    g_e1000.rx_buf_base_phys = buf_phys;
+    g_e1000.rx_buf_base_virt = static_cast<u8*>(mm::PhysToVirt(buf_phys));
+    for (u32 i = 0; i < kE1000RxRingSlots; ++i)
+    {
+        g_e1000.rx_ring[i].addr = buf_phys + u64(i) * kE1000RxBufBytes;
+        g_e1000.rx_ring[i].status = 0;
+    }
+
+    E1000Write(kE1000RegRdbal, u32(ring_phys));
+    E1000Write(kE1000RegRdbah, u32(ring_phys >> 32));
+    E1000Write(kE1000RegRdlen, kE1000RxRingSlots * sizeof(E1000RxDesc));
+    E1000Write(kE1000RegRdh, 0);
+    E1000Write(kE1000RegRdt, kE1000RxRingSlots - 1);
+    g_e1000.rx_tail = kE1000RxRingSlots - 1;
+
+    // Enable receive: broadcast accept, strip CRC, 2 KiB buffers (BSIZE=00).
+    u32 rctl = kE1000RctlEn | kE1000RctlBam | kE1000RctlSecrc;
+    E1000Write(kE1000RegRctl, rctl);
+    return true;
+}
+
+bool E1000SetupTxRing()
+{
+    const mm::PhysAddr ring_phys = mm::AllocateFrame();
+    if (ring_phys == mm::kNullFrame)
+        return false;
+    auto* ring_virt = static_cast<u8*>(mm::PhysToVirt(ring_phys));
+    for (u64 i = 0; i < mm::kPageSize; ++i)
+        ring_virt[i] = 0;
+    g_e1000.tx_ring_phys = ring_phys;
+    g_e1000.tx_ring = reinterpret_cast<E1000TxDesc*>(ring_virt);
+
+    constexpr u32 kTxBufPages = (kE1000TxRingSlots * kE1000RxBufBytes) / mm::kPageSize;
+    const mm::PhysAddr buf_phys = mm::AllocateContiguousFrames(kTxBufPages);
+    if (buf_phys == mm::kNullFrame)
+    {
+        mm::FreeFrame(ring_phys);
+        return false;
+    }
+    g_e1000.tx_buf_base_phys = buf_phys;
+    g_e1000.tx_buf_base_virt = static_cast<u8*>(mm::PhysToVirt(buf_phys));
+
+    E1000Write(kE1000RegTdbal, u32(ring_phys));
+    E1000Write(kE1000RegTdbah, u32(ring_phys >> 32));
+    E1000Write(kE1000RegTdlen, kE1000RxRingSlots * sizeof(E1000TxDesc));
+    E1000Write(kE1000RegTdh, 0);
+    E1000Write(kE1000RegTdt, 0);
+    g_e1000.tx_tail = 0;
+
+    // TIPG: IPGT=10, IPGR1=8 (0xA << 10), IPGR2=6 (0x6 << 20).
+    // Canonical 0x0060200A for 82540EM.
+    E1000Write(kE1000RegTipg, 0x0060200AU);
+
+    // Enable transmit: PSP, CT=0x10 (bits 4..11), COLD=0x40 (bits 12..21).
+    u32 tctl = kE1000TctlEn | kE1000TctlPsp | (0x10u << 4) | (0x40u << 12);
+    E1000Write(kE1000RegTctl, tctl);
+    return true;
+}
+
+bool E1000Send(const u8* data, u32 len)
+{
+    if (!g_e1000.online || data == nullptr || len == 0)
+        return false;
+    if (len > kE1000RxBufBytes)
+        return false;
+
+    const u32 slot = g_e1000.tx_tail;
+    u8* buf = g_e1000.tx_buf_base_virt + u64(slot) * kE1000RxBufBytes;
+    for (u32 i = 0; i < len; ++i)
+        buf[i] = data[i];
+
+    E1000TxDesc& d = g_e1000.tx_ring[slot];
+    d.addr = g_e1000.tx_buf_base_phys + u64(slot) * kE1000RxBufBytes;
+    d.length = u16(len);
+    d.cso = 0;
+    d.cmd = kE1000TxCmdEop | kE1000TxCmdIfcs | kE1000TxCmdRs;
+    d.sta = 0;
+    d.css = 0;
+    d.special = 0;
+
+    const u32 next = (slot + 1) % kE1000TxRingSlots;
+    g_e1000.tx_tail = next;
+    E1000Write(kE1000RegTdt, next);
+    ++g_e1000.tx_packets;
+    g_e1000.tx_bytes += len;
+    return true;
+}
+
+// Drain every RX descriptor whose DD bit is set. For each valid
+// EOP descriptor log the first 32 bytes (ethernet dst+src+type +
+// a few payload bytes). A real TCP/IP stack would hand the frame
+// up to the protocol layer here; v0 just counts + logs.
+void E1000DrainRx()
+{
+    if (!g_e1000.online)
+        return;
+    for (u32 checked = 0; checked < kE1000RxRingSlots; ++checked)
+    {
+        const u32 slot = (g_e1000.rx_tail + 1) % kE1000RxRingSlots;
+        volatile E1000RxDesc& d = g_e1000.rx_ring[slot];
+        if ((d.status & kE1000RxStatusDd) == 0)
+            return;
+        const u16 len = d.length;
+        const u8* buf = g_e1000.rx_buf_base_virt + u64(slot) * kE1000RxBufBytes;
+        ++g_e1000.rx_packets;
+        g_e1000.rx_bytes += len;
+        arch::SerialWrite("[e1000] rx len=");
+        arch::SerialWriteHex(len);
+        arch::SerialWrite(" [");
+        const u32 dump = (len < 14) ? len : 14;
+        for (u32 i = 0; i < dump; ++i)
+        {
+            if (i != 0 && (i == 6 || i == 12))
+                arch::SerialWrite(" ");
+            arch::SerialWriteHex(buf[i]);
+        }
+        arch::SerialWrite("]\n");
+        // Release the descriptor back to the controller.
+        d.status = 0;
+        g_e1000.rx_tail = slot;
+        E1000Write(kE1000RegRdt, slot);
+    }
+}
+
+void E1000RxPollEntry(void*)
+{
+    for (;;)
+    {
+        E1000DrainRx();
+        customos::sched::SchedSleepTicks(1);
+    }
+}
+
+// Spec-defined broadcast address for the self-test ARP-like blast.
+constexpr u8 kBroadcastMac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+
+// Minimum ethernet payload is 46 bytes; controller will pad (PSP)
+// up to 60 + 4 CRC = 64-byte wire length. We ship 60 bytes of our
+// own content so the padding is deterministic.
+void E1000SelfTestTx(const NicInfo& n)
+{
+    u8 frame[60] = {};
+    // Dst = broadcast.
+    for (u32 i = 0; i < 6; ++i)
+        frame[i] = kBroadcastMac[i];
+    // Src = our MAC.
+    for (u32 i = 0; i < 6; ++i)
+        frame[6 + i] = n.mac[i];
+    // EtherType = 0x88B5 (IEEE Std 802 - Local Experimental Ethertype 1),
+    // a reserved value the stack will ignore when routed back.
+    frame[12] = 0x88;
+    frame[13] = 0xB5;
+    // Payload: a short recognizable marker so a tcpdump on the host
+    // netdev sees this frame clearly.
+    const char kMarker[] = "CUSTOMOS-E1000-SELFTEST";
+    for (u32 i = 0; i < sizeof(kMarker) - 1 && 14 + i < sizeof(frame); ++i)
+        frame[14 + i] = u8(kMarker[i]);
+
+    if (E1000Send(frame, sizeof(frame)))
+    {
+        arch::SerialWrite("[e1000] self-test TX: 60-byte broadcast marker emitted\n");
+    }
+    else
+    {
+        arch::SerialWrite("[e1000] self-test TX: submission failed\n");
+    }
+}
+
+bool E1000BringUp(NicInfo& n)
+{
+    if (n.mmio_virt == nullptr)
+        return false;
+    if (g_e1000.online)
+    {
+        // v0 supports a single e1000 controller; subsequent NICs
+        // stay at probe level.
+        return false;
+    }
+    g_e1000.mmio = static_cast<volatile u8*>(n.mmio_virt);
+    g_e1000.nic = &n;
+
+    if (!E1000Reset())
+        return false;
+
+    // Re-read MAC after reset (EEPROM reload populates RAL/RAH).
+    ProbeE1000State(n);
+
+    // Bring the link up + auto-speed-detect.
+    const u32 ctrl = (E1000Read(kE1000RegCtrl) | kE1000CtrlSlu | kE1000CtrlAsde) & ~u32(0);
+    E1000Write(kE1000RegCtrl, ctrl);
+    E1000ClearMulticastTable();
+
+    if (!E1000SetupRxRing())
+        return false;
+    if (!E1000SetupTxRing())
+        return false;
+
+    g_e1000.online = true;
+
+    // Re-read link state now that we've asserted SLU — can take a
+    // moment on real silicon, but QEMU brings it up instantly.
+    E1000Delay();
+    const u32 status = E1000Read(kE1000RegStatus);
+    n.link_up = (status & kE1000StatusLinkUp) != 0;
+
+    arch::SerialWrite("[e1000] online pci=");
+    arch::SerialWriteHex(n.bus);
+    arch::SerialWrite(":");
+    arch::SerialWriteHex(n.device);
+    arch::SerialWrite(".");
+    arch::SerialWriteHex(n.function);
+    arch::SerialWrite(" mac=");
+    for (u64 i = 0; i < 6; ++i)
+    {
+        if (i != 0)
+            arch::SerialWrite(":");
+        arch::SerialWriteHex(n.mac[i]);
+    }
+    arch::SerialWrite(n.link_up ? " link=up" : " link=down");
+    arch::SerialWrite(" rx_ring=");
+    arch::SerialWriteHex(g_e1000.rx_ring_phys);
+    arch::SerialWrite(" tx_ring=");
+    arch::SerialWriteHex(g_e1000.tx_ring_phys);
+    arch::SerialWrite("\n");
+
+    // Spawn RX polling task — the real interrupt path comes in the
+    // MSI-X wiring follow-up. Polling at 10 ms is plenty for v0
+    // (QEMU's user netdev generates no traffic unless the host
+    // initiates; on real hardware the tick cadence is unrelated to
+    // line rate since we're draining a batch per tick).
+    customos::sched::SchedCreate(E1000RxPollEntry, nullptr, "e1000-rx-poll");
+
+    // Self-test: emit one broadcast frame so a tcpdump on the host
+    // side can confirm the TX path works end-to-end.
+    E1000SelfTestTx(n);
+    return true;
+}
+
 void RunVendorProbe(NicInfo& n)
 {
     const char* family = nullptr;
@@ -134,9 +556,18 @@ void RunVendorProbe(NicInfo& n)
         return;
     }
     n.family = family;
+    bool brought_up = false;
     if (n.vendor_id == kVendorIntel && IsE1000CompatFamily(family))
     {
         ProbeE1000State(n);
+        // Classic e1000 (82540-family) gets a full driver bring-up —
+        // rings armed, RX polling task spawned, TX self-test. The
+        // e1000e PCIe variants share register layout but not the
+        // EEPROM/PHY access path we assume; they stay probe-only.
+        if (n.device_id >= 0x1000 && n.device_id <= 0x107F)
+        {
+            brought_up = E1000BringUp(n);
+        }
     }
     arch::SerialWrite("[net-probe] vid=");
     arch::SerialWriteHex(n.vendor_id);
@@ -144,7 +575,7 @@ void RunVendorProbe(NicInfo& n)
     arch::SerialWriteHex(n.device_id);
     arch::SerialWrite(" family=");
     arch::SerialWrite(family);
-    arch::SerialWrite("  (stub OK — no packet I/O yet)\n");
+    arch::SerialWrite(brought_up ? "  (driver online)\n" : "  (probe only — no packet I/O)\n");
     if (n.mac_valid)
     {
         arch::SerialWrite("[net-probe]   mac=");

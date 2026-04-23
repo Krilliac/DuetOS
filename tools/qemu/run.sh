@@ -144,6 +144,13 @@ QEMU_ARGS=(
     # eventually Address Device + descriptor fetch).
     -device   "qemu-xhci,id=xhci"
     -device   "usb-kbd,bus=xhci.0"
+    # Intel e1000 NIC on a user-mode netdev. QEMU's SLIRP stack
+    # gives us one-way connectivity to the outside + a loopback
+    # path that returns broadcast frames for self-test. Specify
+    # mac= so the driver's EEPROM-read path sees a stable value
+    # across reboots.
+    -netdev   "user,id=net0"
+    -device   "e1000,netdev=net0,mac=52:54:00:12:34:56"
     "${UEFI_ARGS[@]}"
     "${BOOT_SOURCE[@]}"
 )
