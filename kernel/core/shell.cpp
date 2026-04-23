@@ -29,6 +29,7 @@
 #include "../fs/vfs.h"
 #include "../debug/breakpoints.h"
 #include "../debug/probes.h"
+#include "../debug/syscall_scan.h"
 #include "../mm/address_space.h"
 #include "../mm/frame_allocator.h"
 #include "../mm/kheap.h"
@@ -304,6 +305,7 @@ void CmdHelp()
     ConsoleWriteln("  ATTACKSIM    RUN RED-TEAM ATTACK SUITE (IDT/GDT/LSTAR/CANARY/LBA0)");
     ConsoleWriteln("  MEMDUMP A [N]  HEX+ASCII DUMP OF KERNEL MEMORY -> SERIAL");
     ConsoleWriteln("  INSTR A [N]  INSTRUCTION-BYTE DUMP AT ADDRESS -> SERIAL");
+    ConsoleWriteln("  SYSSCAN K|P  SCAN KERNEL OR FILE FOR SYSCALL SITES -> SERIAL");
     ConsoleWriteln("  BP ...       KERNEL BREAKPOINTS (SOFTWARE + HARDWARE)");
     ConsoleWriteln("  DUMPSTATE    SNAPSHOT EVERY KERNEL SUBSYSTEM -> SERIAL");
     ConsoleWriteln("");
@@ -1255,7 +1257,7 @@ static const char* const kCommandSet[] = {
     "fatnew",    "fatrm",   "fattrunc",   "fatmkdir", "fatrmdir", "linuxexec", "translate",  "smbios",   "power",
     "battery",   "thermal", "temp",       "gpu",      "lsgpu",    "nic",       "lsnic",      "ip",       "arp",
     "ipv4",      "uuid",    "uuidgen",    "health",   "checkup",  "attacksim", "redteam",    "memdump",  "instr",
-    "dumpstate", "bp",      "breakpoint",
+    "dumpstate", "bp",      "breakpoint", "sysscan",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -2967,6 +2969,35 @@ void CmdInstr(u32 argc, char** argv)
     }
     customos::core::DumpInstructionBytes("instr", addr, static_cast<customos::u32>(len));
     ConsoleWriteln("INSTR: WROTE TO COM1");
+}
+
+void CmdSysscan(u32 argc, char** argv)
+{
+    // sysscan kernel     — scan the kernel's .text section.
+    // sysscan <path>     — scan a file on FAT32 volume 0, auto-
+    //                      detect PE / ELF / raw and walk the
+    //                      executable bytes.
+    // Output goes to COM1: one line per located syscall idiom +
+    // a summary line. Operator-triggered only — nothing pre-
+    // scans at load time.
+    if (argc < 2)
+    {
+        ConsoleWriteln("SYSSCAN: USAGE: SYSSCAN KERNEL | SYSSCAN <PATH>");
+        ConsoleWriteln("         OUTPUT GOES TO COM1 (SERIAL LOG)");
+        return;
+    }
+    if (StrEq(argv[1], "kernel"))
+    {
+        ConsoleWriteln("SYSSCAN: SCANNING KERNEL .TEXT (SEE COM1)");
+        (void)customos::debug::SyscallScanKernelText();
+        ConsoleWriteln("SYSSCAN: DONE");
+        return;
+    }
+    ConsoleWrite("SYSSCAN: SCANNING FILE \"");
+    ConsoleWrite(argv[1]);
+    ConsoleWriteln("\" (SEE COM1)");
+    (void)customos::debug::SyscallScanFile(argv[1]);
+    ConsoleWriteln("SYSSCAN: DONE");
 }
 
 void CmdDumpState()
@@ -6628,6 +6659,11 @@ void Dispatch(char* line)
     if (StrEq(cmd, "instr"))
     {
         CmdInstr(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "sysscan"))
+    {
+        CmdSysscan(argc, argv);
         return;
     }
     if (StrEq(cmd, "dumpstate"))

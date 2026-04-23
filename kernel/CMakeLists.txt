@@ -86,6 +86,7 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     cpu/percpu.cpp
     debug/breakpoints.cpp
     debug/probes.cpp
+    debug/syscall_scan.cpp
     drivers/input/ps2kbd.cpp
     drivers/input/ps2mouse.cpp
     drivers/audio/audio.cpp
