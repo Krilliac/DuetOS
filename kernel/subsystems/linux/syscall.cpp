@@ -216,11 +216,7 @@ i64 DoWrite(u64 fd, u64 user_buf, u64 len)
         u8 kbuf[kLinuxIoMax];
         if (!mm::CopyFromUser(kbuf, reinterpret_cast<const void*>(user_buf), to_copy))
             return kEFAULT;
-        for (u64 i = 0; i < to_copy; ++i)
-        {
-            const char two[2] = {static_cast<char>(kbuf[i]), '\0'};
-            arch::SerialWrite(two);
-        }
+        arch::SerialWriteN(reinterpret_cast<const char*>(kbuf), to_copy);
         return static_cast<i64>(to_copy);
     }
     // fd 0 (stdin) rejects write; unused fds too.
