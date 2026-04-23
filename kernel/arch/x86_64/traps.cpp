@@ -9,6 +9,7 @@
 #include "../../core/symbols.h"
 #include "../../core/syscall.h"
 #include "../../debug/breakpoints.h"
+#include "../../debug/extable.h"
 #include "../../debug/probes.h"
 #include "../../sched/sched.h"
 
@@ -265,37 +266,34 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         }
     }
 
-    // Extable / fault fixup for kernel-mode #PF inside the user-copy
-    // asm helpers. mm::CopyFromUser / CopyToUser delegate to byte
-    // loops in user_copy.S that are bracketed by paired labels
-    // (__copy_user_{from,to}_{start,end}). If a #PF fires while rip
-    // is inside either [start, end) range — because the user page
-    // vanished between our pre-walk and the actual byte copy (SMP,
-    // future demand paging) — the fault is RECOVERABLE: rewrite
-    // frame->rip to __copy_user_fault_fixup and iretq. The fixup
-    // emits `clac`, zeroes rax (return value = 0 = failure), and
-    // ret's back to the C++ caller, which sees `false` without the
-    // kernel ever panicking.
+    // Kernel-mode extable. Replaces the single hardcoded user-copy
+    // check with a generic lookup — any subsystem that wants scoped
+    // fault recovery registers (rip_start, rip_end, fixup) at init
+    // time and the handler redirects `frame->rip` to the fixup on
+    // any kernel-mode #PF / #GP that lands inside the range. The
+    // user-copy helpers are now one row in this table (see
+    // debug::KernelExtableRegisterUserCopy in extable.cpp's init).
     //
-    // Scoped narrowly to vector 14 (#PF) + ring 0 — a user-mode #PF
-    // at the SAME RIP wouldn't happen (user can't execute kernel
-    // asm), and non-#PF kernel exceptions inside the copy range are
-    // bugs we want to surface loudly.
-    if (frame->vector == 14 && (frame->cs & 3) == 0)
+    // Scoped to kernel-mode traps (ring 0) — a user-mode fault at
+    // a kernel RIP can't happen (user can't execute kernel code).
+    if ((frame->vector == 14 || frame->vector == 13) && (frame->cs & 3) == 0)
     {
-        const u64 rip = frame->rip;
-        const u64 from_s = reinterpret_cast<u64>(g_copy_user_from_start);
-        const u64 from_e = reinterpret_cast<u64>(g_copy_user_from_end);
-        const u64 to_s = reinterpret_cast<u64>(g_copy_user_to_start);
-        const u64 to_e = reinterpret_cast<u64>(g_copy_user_to_end);
-        if ((rip >= from_s && rip < from_e) || (rip >= to_s && rip < to_e))
+        const u64 fixup = ::customos::debug::KernelExtableFindFixup(frame->rip);
+        if (fixup != 0)
         {
-            SerialWrite("[extable] recovered kernel #PF in user-copy helper — rip=");
-            SerialWriteHex(rip);
-            SerialWrite(" cr2=");
-            SerialWriteHex(ReadCr2());
+            SerialWrite("[extable] recovered kernel trap vec=");
+            SerialWriteHex(frame->vector);
+            SerialWrite(" rip=");
+            SerialWriteHex(frame->rip);
+            if (frame->vector == 14)
+            {
+                SerialWrite(" cr2=");
+                SerialWriteHex(ReadCr2());
+            }
+            SerialWrite(" -> fixup=");
+            SerialWriteHex(fixup);
             SerialWrite("\n");
-            frame->rip = reinterpret_cast<u64>(g_copy_user_fault_fixup);
+            frame->rip = fixup;
             return;
         }
     }
@@ -513,6 +511,21 @@ void RaiseSelfTestBreakpoint()
     // ever stops halting. Halt explicitly in case that ever happens, so
     // the boot log doesn't quietly fall off the end.
     Halt();
+}
+
+// Register the extable entries that `traps.cpp` itself owns —
+// specifically the user-copy helpers that were previously
+// hardcoded in this file's kernel-#PF branch. Called once at
+// boot from main.cpp right after the IDT is loaded.
+void TrapsRegisterExtable()
+{
+    const u64 from_s = reinterpret_cast<u64>(g_copy_user_from_start);
+    const u64 from_e = reinterpret_cast<u64>(g_copy_user_from_end);
+    const u64 to_s = reinterpret_cast<u64>(g_copy_user_to_start);
+    const u64 to_e = reinterpret_cast<u64>(g_copy_user_to_end);
+    const u64 fixup = reinterpret_cast<u64>(g_copy_user_fault_fixup);
+    ::customos::debug::KernelExtableRegister(from_s, from_e, fixup, "mm/CopyFromUser");
+    ::customos::debug::KernelExtableRegister(to_s, to_e, fixup, "mm/CopyToUser");
 }
 
 void TrapsSelfTest()

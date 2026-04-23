@@ -23,6 +23,7 @@ _Read this at every session start (after git sync). Each row links to a detailed
 | Hardware target matrix (CPU/GPU/IO tiers) | [knowledge/hardware-target-matrix.md](knowledge/hardware-target-matrix.md) | Decision | Active | 2026-04-20 |
 | UEFI hybrid-ISO boot path — same ISO boots SeaBIOS + OVMF | [knowledge/uefi-hybrid-iso-v0.md](knowledge/uefi-hybrid-iso-v0.md) | Observation | Active | 2026-04-23 |
 | Result<T, E> — kernel exception-handling primitive (software side) | [knowledge/result-type-v0.md](knowledge/result-type-v0.md) | Decision + Pattern | Active | 2026-04-23 |
+| Kernel isolation v0 — extable + fault domains | [knowledge/kernel-isolation-v0.md](knowledge/kernel-isolation-v0.md) | Decision + Pattern | Active | 2026-04-23 |
 | Rust bring-up plan — trigger, layout, toolchain, CI | [knowledge/rust-bringup-plan.md](knowledge/rust-bringup-plan.md) | Decision | Active | 2026-04-21 |
 | Storage + Filesystem roadmap — block layer → NVMe/AHCI → GPT → FS | [knowledge/storage-and-filesystem-roadmap.md](knowledge/storage-and-filesystem-roadmap.md) | Decision | Active (stages 1–2, 4 landed) | 2026-04-21 |
 | NVMe driver v0 — polling admin + I/O queue, marker self-test | [knowledge/nvme-driver-v0.md](knowledge/nvme-driver-v0.md) | Observation | Active | 2026-04-21 |

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../../core/result.h"
 #include "../../core/types.h"
 
 /*
@@ -84,6 +85,19 @@ struct ControllerInfo
 /// init + NoOp round-trip; fill the per-controller record. Logs
 /// pass/fail per controller. Safe exactly once at boot.
 void XhciInit();
+
+/// Quiesce every brought-up controller: USBCMD.RS=0, wait for
+/// HCH=1, clear ring / DCBAA / ERST pointers so the next Init
+/// starts fresh. Does NOT free allocator pages — the physical
+/// frames stay held by the controller records until a subsequent
+/// Init re-uses them; re-init with a clean state is cheap.
+/// Returns Ok on full quiesce, BadState if any controller
+/// didn't halt within the deadline.
+::customos::core::Result<void> XhciShutdown();
+
+/// Shutdown + Init round-trip. Used by the fault-domain restart
+/// path and the `xhci restart` shell command.
+::customos::core::Result<void> XhciRestart();
 
 u32 XhciCount();
 const ControllerInfo* XhciControllerAt(u32 i);

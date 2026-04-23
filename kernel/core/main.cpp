@@ -18,6 +18,7 @@
 #include "../arch/x86_64/timer.h"
 #include "../cpu/percpu.h"
 #include "../debug/breakpoints.h"
+#include "../debug/extable.h"
 #include "../debug/probes.h"
 #include "../drivers/audio/audio.h"
 #include "../drivers/gpu/gpu.h"
@@ -62,6 +63,7 @@
 #include "panic.h"
 #include "process.h"
 #include "random.h"
+#include "fault_domain.h"
 #include "result.h"
 #include "ring3_smoke.h"
 #include "runtime_checker.h"
@@ -275,6 +277,18 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // branch). If either regresses the kernel halts here and the
     // boot log shows the cause.
     TrapsSelfTest();
+
+    // Kernel extable — scoped fault recovery. Register before any
+    // subsystem tries to install its own rows; the user-copy
+    // helpers are always entry 0 / 1.
+    SerialWrite("[boot] Bringing up kernel extable.\n");
+    customos::arch::TrapsRegisterExtable();
+    customos::debug::ExtableSelfTest();
+
+    // Fault-domain registry self-test. Registers a toy domain,
+    // restarts it twice, checks counters. Real driver domains are
+    // registered later in boot once their subsystems are up.
+    customos::core::FaultDomainSelfTest();
 
     SerialWrite("[boot] Parsing Multiboot2 memory map.\n");
     FrameAllocatorInit(multiboot_info);
@@ -889,6 +903,19 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     SerialWrite("[boot] Detecting USB host controllers.\n");
     customos::drivers::usb::UsbInit();
     customos::drivers::usb::xhci::XhciInit();
+    // Register xHCI as a restartable fault domain. Init() is
+    // already idempotent (early-return on g_init_done), so the
+    // domain's init hook just wraps it in a Result<void>.
+    {
+        auto xhci_init = []() -> customos::core::Result<void>
+        {
+            customos::drivers::usb::xhci::XhciInit();
+            return {};
+        };
+        auto xhci_teardown = []() -> customos::core::Result<void>
+        { return customos::drivers::usb::xhci::XhciShutdown(); };
+        customos::core::FaultDomainRegister("drivers/usb/xhci", xhci_init, xhci_teardown);
+    }
     customos::drivers::usb::hid::HidSelfTest();
     customos::drivers::usb::msc::MscSelfTest();
 

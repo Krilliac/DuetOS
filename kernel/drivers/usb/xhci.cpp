@@ -2,6 +2,7 @@
 
 #include "../../arch/x86_64/serial.h"
 #include "../../core/klog.h"
+#include "../../core/result.h"
 #include "../../mm/frame_allocator.h"
 #include "../../mm/page.h"
 #include "usb.h"
@@ -15,6 +16,11 @@ namespace
 constexpr u32 kMaxControllers = 4;
 constinit ControllerInfo g_controllers[kMaxControllers] = {};
 constinit u32 g_controller_count = 0;
+// File-scope "is Init live" flag so XhciShutdown can clear it and
+// a subsequent XhciInit re-runs. Previously this was a function-
+// static constinit bool that made Init idempotent; restartable
+// drivers need the flag to be rewindable.
+constinit bool g_init_done = false;
 
 // xHCI capability-reg offsets (xHCI 1.2 §5.3).
 constexpr u64 kCapHciVersion = 0x00; // u32 = caplen | (rsvd) | hciver
@@ -507,10 +513,9 @@ bool InitOne(const HostControllerInfo& h, ControllerInfo& out)
 void XhciInit()
 {
     KLOG_TRACE_SCOPE("drivers/usb/xhci", "XhciInit");
-    static constinit bool s_done = false;
-    if (s_done)
+    if (g_init_done)
         return;
-    s_done = true;
+    g_init_done = true;
 
     const u64 n = HostControllerCount();
     for (u64 i = 0; i < n && g_controller_count < kMaxControllers; ++i)
@@ -532,6 +537,98 @@ void XhciInit()
         arch::SerialWriteHex(g_controller_count);
         arch::SerialWrite("\n");
     }
+}
+
+::customos::core::Result<void> XhciShutdown()
+{
+    KLOG_TRACE_SCOPE("drivers/usb/xhci", "XhciShutdown");
+    using ::customos::core::Err;
+    using ::customos::core::ErrorCode;
+    // For each live controller: clear RUN/STOP, wait for HCH=1,
+    // write CRCR / DCBAAP / ERSTBA to 0 so the hardware forgets
+    // our ring addresses. The kernel frames behind the rings stay
+    // leaked in v0 (intentional — AllocateFrame can't safely take
+    // back a frame the controller might still DMA to until we've
+    // proven HCH latched; freeing them conservatively is a
+    // follow-up). g_controller_count resets so the next Init
+    // starts with fresh slot indices.
+    bool any_stuck = false;
+    for (u32 i = 0; i < g_controller_count; ++i)
+    {
+        ControllerInfo& c = g_controllers[i];
+        if (!c.init_ok)
+            continue;
+        // Re-derive MMIO base from the USB-driver record so we
+        // don't have to cache a volatile pointer on ControllerInfo.
+        const u64 pci_n = HostControllerCount();
+        volatile u8* mmio = nullptr;
+        for (u64 k = 0; k < pci_n; ++k)
+        {
+            const HostControllerInfo& h = HostController(k);
+            if (h.bus == c.bus && h.device == c.device && h.function == c.function && h.mmio_virt != nullptr)
+            {
+                mmio = static_cast<volatile u8*>(h.mmio_virt);
+                break;
+            }
+        }
+        if (mmio == nullptr)
+        {
+            any_stuck = true;
+            continue;
+        }
+        const u32 cap_word = ReadMmio32(mmio, kCapHciVersion);
+        const u8 caplen = u8(cap_word & 0xFF);
+        if (caplen < 0x20)
+        {
+            any_stuck = true;
+            continue;
+        }
+        volatile u8* op = mmio + caplen;
+        // Clear RUN/STOP then wait for HCH. Spec says this
+        // completes within 16 ms; cap at 1M iterations (~tens of ms
+        // on QEMU).
+        u32 cmd = ReadMmio32(op, kOpUsbCmd);
+        WriteMmio32(op, kOpUsbCmd, cmd & ~kCmdRunStop);
+        if (!PollUntil(op, kOpUsbSts, kStsHcHalted, kStsHcHalted, 1'000'000))
+        {
+            arch::SerialWrite("[xhci] shutdown: HCH never set on pci=");
+            arch::SerialWriteHex(c.bus);
+            arch::SerialWrite(":");
+            arch::SerialWriteHex(c.device);
+            arch::SerialWrite(".");
+            arch::SerialWriteHex(c.function);
+            arch::SerialWrite("\n");
+            any_stuck = true;
+            continue;
+        }
+        // Zero out the ring-pointer registers. New init will
+        // repopulate them with fresh frames.
+        WriteMmio64(op, kOpDcbaap, 0);
+        WriteMmio64(op, kOpCrcr, 0);
+        // Interrupter 0's ERSTBA / ERDP / ERSTSZ.
+        const u32 rtsoff = ReadMmio32(mmio, kCapRtsOff) & ~0x1Fu;
+        volatile u8* intr0 = mmio + rtsoff + 0x20;
+        WriteMmio32(intr0, /*kIntrErstSz=*/0x08, 0);
+        WriteMmio64(intr0, /*kIntrErdp=*/0x18, 0);
+        WriteMmio64(intr0, /*kIntrErstBa=*/0x10, 0);
+        c.init_ok = false;
+        c.noop_ok = false;
+    }
+    g_controller_count = 0;
+    g_init_done = false;
+    arch::SerialWrite(any_stuck ? "[xhci] shutdown partial (some controllers wouldn't halt)\n"
+                                : "[xhci] shutdown ok — all controllers quiesced\n");
+    if (any_stuck)
+        return Err{ErrorCode::BadState};
+    return {};
+}
+
+::customos::core::Result<void> XhciRestart()
+{
+    if (auto r = XhciShutdown(); !r)
+        return r;
+    XhciInit();
+    return {};
 }
 
 u32 XhciCount()

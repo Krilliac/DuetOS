@@ -51,9 +51,11 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     core/shell.cpp
     core/stack_canary.cpp
     core/symbols.cpp
+    core/fault_domain.cpp
     core/syscall.cpp
     core/time_syscall.cpp
     debug/bp_syscall.cpp
+    debug/extable.cpp
     acpi/acpi.cpp
     apps/calculator.cpp
     apps/clock.cpp
