@@ -124,6 +124,26 @@ bool ShouldLogMiss(MissSampleTable& t, u64 nr)
     return false;
 }
 
+// One-shot dump of a miss-sampling ring: how many miss lines made
+// it to the serial log vs how many were rate-limited and how much
+// backlog accrued since the last report. Used by the
+// `translate` / overhead-dump paths so an operator doesn't need
+// to grep the table definition to know what's been hidden.
+void DumpSuppressedMissSummary(const char* origin, MissSampleTable& t)
+{
+    const u64 new_suppressed = t.suppressed_total - t.suppressed_reported;
+    arch::SerialWrite("[translate-miss] ");
+    arch::SerialWrite(origin);
+    arch::SerialWrite(" emitted=");
+    arch::SerialWriteHex(t.emitted_total);
+    arch::SerialWrite(" suppressed_total=");
+    arch::SerialWriteHex(t.suppressed_total);
+    arch::SerialWrite(" suppressed_since_last=");
+    arch::SerialWriteHex(new_suppressed);
+    arch::SerialWrite("\n");
+    t.suppressed_reported = t.suppressed_total;
+}
+
 // Log prefix so boot-log grep is easy.
 void LogTranslation(const char* origin, u64 nr, const char* target)
 {

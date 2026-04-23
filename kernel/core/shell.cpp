@@ -38,7 +38,9 @@
 #include "../security/guard.h"
 #include "elf_loader.h"
 #include "hexdump.h"
+#include "auth.h"
 #include "klog.h"
+#include "login.h"
 #include "process.h"
 #include "random.h"
 #include "reboot.h"
@@ -313,6 +315,16 @@ void CmdHelp()
     ConsoleWriteln("  YIELD        FORCE A SCHEDULER YIELD");
     ConsoleWriteln("  REBOOT       RESET THE MACHINE (NO CONFIRM)");
     ConsoleWriteln("  HALT         STOP THE CPU (NO CONFIRM)");
+    ConsoleWriteln("");
+    ConsoleWriteln("ACCOUNTS / LOGIN:");
+    ConsoleWriteln("  USERS / WHO  LIST ACCOUNTS (* = CURRENT SESSION)");
+    ConsoleWriteln("  USERADD N P [ROLE]  CREATE ACCOUNT (ADMIN ONLY)");
+    ConsoleWriteln("  USERDEL N    DELETE ACCOUNT (ADMIN ONLY)");
+    ConsoleWriteln("  PASSWD OLD NEW           CHANGE OWN PASSWORD");
+    ConsoleWriteln("  PASSWD USER NEW --force  ADMIN FORCE-RESET");
+    ConsoleWriteln("  SU USER PW   SWITCH SESSION TO ANOTHER USER");
+    ConsoleWriteln("  LOGIN U P    LOG IN NON-INTERACTIVELY");
+    ConsoleWriteln("  LOGOUT       END SESSION + REOPEN LOGIN GATE");
     ConsoleWriteln("");
     ConsoleWriteln("COMPAT / IDENTITY:");
     ConsoleWriteln("  UNAME [-A]   KERNEL IDENTITY (-A VERBOSE)");
@@ -1255,7 +1267,8 @@ static const char* const kCommandSet[] = {
     "fatnew",    "fatrm",   "fattrunc",   "fatmkdir", "fatrmdir", "linuxexec", "translate",  "smbios",   "power",
     "battery",   "thermal", "temp",       "gpu",      "lsgpu",    "nic",       "lsnic",      "ip",       "arp",
     "ipv4",      "uuid",    "uuidgen",    "health",   "checkup",  "attacksim", "redteam",    "memdump",  "instr",
-    "dumpstate", "bp",      "breakpoint",
+    "dumpstate", "bp",      "breakpoint", "login",    "logout",   "passwd",    "useradd",    "userdel",  "users",
+    "who",       "su",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -3200,7 +3213,15 @@ void CmdUname(u32 argc, char** argv)
 
 void CmdWhoami()
 {
-    ConsoleWriteln("root");
+    const char* name = AuthCurrentUserName();
+    if (name[0] == '\0')
+    {
+        ConsoleWriteln("(no session)");
+    }
+    else
+    {
+        ConsoleWriteln(name);
+    }
 }
 
 void CmdHostname()
@@ -6127,6 +6148,208 @@ const char* HistoryExpand(const char* line)
     return HistoryAt(inv);
 }
 
+// ---------------------------------------------------------------
+// Account management commands — useradd / userdel / passwd /
+// users / login / logout / su. All thin wrappers around auth.h.
+// Admin-only paths are enforced here so the kernel-side API
+// stays pure data-access and callable from the login gate
+// without capability juggling.
+// ---------------------------------------------------------------
+
+const char* RoleName(AuthRole r)
+{
+    switch (r)
+    {
+    case AuthRole::Admin:
+        return "admin";
+    case AuthRole::User:
+        return "user";
+    case AuthRole::Guest:
+        return "guest";
+    }
+    return "?";
+}
+
+AuthRole RoleFromArg(const char* s)
+{
+    if (StrEq(s, "admin"))
+        return AuthRole::Admin;
+    if (StrEq(s, "guest"))
+        return AuthRole::Guest;
+    return AuthRole::User;
+}
+
+void CmdUsers()
+{
+    const u32 n = AuthAccountCount();
+    ConsoleWrite("USERS (");
+    WriteU64Dec(n);
+    ConsoleWriteln(" accounts)");
+    const char* active = AuthCurrentUserName();
+    for (u32 i = 0; i < n; ++i)
+    {
+        AccountView v = {};
+        if (!AuthAccountAt(i, &v))
+            continue;
+        ConsoleWrite("  ");
+        ConsoleWrite(v.username);
+        ConsoleWrite("  [");
+        ConsoleWrite(RoleName(v.role));
+        ConsoleWrite("]");
+        if (!v.has_password)
+        {
+            ConsoleWrite("  (no password)");
+        }
+        if (active[0] != '\0' && StrEq(active, v.username))
+        {
+            ConsoleWrite("  *");
+        }
+        ConsoleWriteChar('\n');
+    }
+}
+
+void CmdUseradd(u32 argc, char** argv)
+{
+    if (!AuthIsAdmin())
+    {
+        ConsoleWriteln("USERADD: PERMISSION DENIED (ADMIN ONLY)");
+        return;
+    }
+    if (argc < 3)
+    {
+        ConsoleWriteln("USERADD: USAGE: USERADD <NAME> <PASSWORD> [ROLE]");
+        ConsoleWriteln("  ROLE: admin | user (default) | guest");
+        return;
+    }
+    const AuthRole role = (argc >= 4) ? RoleFromArg(argv[3]) : AuthRole::User;
+    if (!AuthAddUser(argv[1], argv[2], role))
+    {
+        ConsoleWriteln("USERADD: FAILED (DUPLICATE, FULL TABLE, OR INVALID NAME/PASSWORD)");
+        return;
+    }
+    ConsoleWrite("USERADD: CREATED ");
+    ConsoleWrite(argv[1]);
+    ConsoleWrite(" [");
+    ConsoleWrite(RoleName(role));
+    ConsoleWriteln("]");
+}
+
+void CmdUserdel(u32 argc, char** argv)
+{
+    if (!AuthIsAdmin())
+    {
+        ConsoleWriteln("USERDEL: PERMISSION DENIED (ADMIN ONLY)");
+        return;
+    }
+    if (argc < 2)
+    {
+        ConsoleWriteln("USERDEL: USAGE: USERDEL <NAME>");
+        return;
+    }
+    if (!AuthDeleteUser(argv[1]))
+    {
+        ConsoleWriteln("USERDEL: FAILED (UNKNOWN USER OR LAST ADMIN)");
+        return;
+    }
+    ConsoleWrite("USERDEL: REMOVED ");
+    ConsoleWriteln(argv[1]);
+}
+
+void CmdPasswd(u32 argc, char** argv)
+{
+    // Self-service flow: `passwd <old> <new>` — change the
+    // current user's password. Admin flow: `passwd <name>
+    // <new>` — force-set another user's password. Without
+    // enough args, print usage.
+    const char* me = AuthCurrentUserName();
+    if (me[0] == '\0')
+    {
+        ConsoleWriteln("PASSWD: NO ACTIVE SESSION");
+        return;
+    }
+    if (argc == 3)
+    {
+        // Self-service: argv[1] = old, argv[2] = new
+        if (!AuthChangePassword(me, argv[1], argv[2]))
+        {
+            ConsoleWriteln("PASSWD: FAILED (WRONG OLD PASSWORD OR INVALID NEW PASSWORD)");
+            return;
+        }
+        ConsoleWriteln("PASSWD: PASSWORD UPDATED");
+        return;
+    }
+    if (argc == 4)
+    {
+        // Admin flow: argv[1] = user, argv[2] = new, argv[3] = "--force"
+        if (!AuthIsAdmin())
+        {
+            ConsoleWriteln("PASSWD: PERMISSION DENIED (ADMIN ONLY FOR FORCE RESET)");
+            return;
+        }
+        if (!StrEq(argv[3], "--force"))
+        {
+            ConsoleWriteln("PASSWD: USAGE: PASSWD <USER> <NEW_PW> --force");
+            return;
+        }
+        if (!AuthChangePassword(argv[1], nullptr, argv[2]))
+        {
+            ConsoleWriteln("PASSWD: FAILED (UNKNOWN USER OR INVALID PASSWORD)");
+            return;
+        }
+        ConsoleWrite("PASSWD: PASSWORD FOR ");
+        ConsoleWrite(argv[1]);
+        ConsoleWriteln(" UPDATED");
+        return;
+    }
+    ConsoleWriteln("PASSWD: USAGE:");
+    ConsoleWriteln("  PASSWD <OLD_PW> <NEW_PW>                (SELF-SERVICE)");
+    ConsoleWriteln("  PASSWD <USER> <NEW_PW> --force          (ADMIN RESET)");
+}
+
+void CmdLogout()
+{
+    if (!AuthIsAuthenticated())
+    {
+        ConsoleWriteln("LOGOUT: NO ACTIVE SESSION");
+        return;
+    }
+    ConsoleWrite("LOGOUT: GOODBYE, ");
+    ConsoleWriteln(AuthCurrentUserName());
+    LoginReopen();
+}
+
+void CmdSu(u32 argc, char** argv)
+{
+    if (argc < 3)
+    {
+        ConsoleWriteln("SU: USAGE: SU <USER> <PASSWORD>");
+        return;
+    }
+    if (!AuthLogin(argv[1], argv[2]))
+    {
+        ConsoleWriteln("SU: AUTHENTICATION FAILED");
+        return;
+    }
+    ConsoleWrite("SU: SWITCHED TO ");
+    ConsoleWriteln(argv[1]);
+}
+
+void CmdLoginCmd(u32 argc, char** argv)
+{
+    if (argc < 3)
+    {
+        ConsoleWriteln("LOGIN: USAGE: LOGIN <USER> <PASSWORD>");
+        return;
+    }
+    if (!AuthLogin(argv[1], argv[2]))
+    {
+        ConsoleWriteln("LOGIN: AUTHENTICATION FAILED");
+        return;
+    }
+    ConsoleWrite("LOGIN: WELCOME, ");
+    ConsoleWriteln(argv[1]);
+}
+
 void Dispatch(char* line)
 {
     // !N / !! history expansion — resolve before tokenizing so
@@ -6663,6 +6886,41 @@ void Dispatch(char* line)
     if (StrEq(cmd, "whoami"))
     {
         CmdWhoami();
+        return;
+    }
+    if (StrEq(cmd, "users") || StrEq(cmd, "who"))
+    {
+        CmdUsers();
+        return;
+    }
+    if (StrEq(cmd, "useradd"))
+    {
+        CmdUseradd(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "userdel"))
+    {
+        CmdUserdel(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "passwd"))
+    {
+        CmdPasswd(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "logout"))
+    {
+        CmdLogout();
+        return;
+    }
+    if (StrEq(cmd, "su"))
+    {
+        CmdSu(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "login"))
+    {
+        CmdLoginCmd(argc, argv);
         return;
     }
     if (StrEq(cmd, "hostname"))

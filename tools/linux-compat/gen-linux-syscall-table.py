@@ -87,6 +87,8 @@ inline constexpr const LinuxSyscallEntry* kLinuxSyscallByNumber[] = {{
 {index_rows}}};
 
 inline constexpr u32 kLinuxSyscallHandlersImplemented = {implemented};
+inline constexpr u32 kLinuxSyscallHandlersImplementedPrimary = {primary};
+inline constexpr u32 kLinuxSyscallHandlersImplementedEffective = {effective};
 
 /// Look up `nr` in the dense by-number index. Returns nullptr if unknown.
 inline const LinuxSyscallEntry* LinuxSyscallLookup(u64 nr)

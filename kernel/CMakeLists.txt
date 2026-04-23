@@ -21,9 +21,11 @@
 # The final image is what the ISO target packages. Stage 1 is a throwaway.
 
 set(CUSTOMOS_KERNEL_SHARED_SOURCES
+    core/auth.cpp
     core/heartbeat.cpp
     core/hexdump.cpp
     core/klog.cpp
+    core/login.cpp
     core/main.cpp
     core/panic.cpp
     core/process.cpp

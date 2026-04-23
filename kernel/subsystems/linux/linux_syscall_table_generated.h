@@ -7,9 +7,9 @@
 // Source data: tools/linux-compat/linux-syscalls-x86_64.csv
 // Total syscalls listed: 374
 // Primary handlers implemented in kernel/subsystems/linux/syscall.cpp: 69
-// Effective coverage (primary + LinuxGapFill in translation/translate.cpp): 69
+// Effective coverage (primary + LinuxGapFill in translation/translate.cpp): 82
 // Coverage (primary): 18%
-// Coverage (effective): 18%
+// Coverage (effective): 21%
 //
 // See tools/linux-compat/README.md for provenance.
 
@@ -887,6 +887,8 @@ inline constexpr const LinuxSyscallEntry* kLinuxSyscallByNumber[] = {
 };
 
 inline constexpr u32 kLinuxSyscallHandlersImplemented = 69;
+inline constexpr u32 kLinuxSyscallHandlersImplementedPrimary = 69;
+inline constexpr u32 kLinuxSyscallHandlersImplementedEffective = 82;
 
 /// Look up `nr` in the dense by-number index. Returns nullptr if unknown.
 inline const LinuxSyscallEntry* LinuxSyscallLookup(u64 nr)

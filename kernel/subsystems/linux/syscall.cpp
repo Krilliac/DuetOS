@@ -1023,7 +1023,7 @@ i64 DoFutex(u64 uaddr, u64 op, u64 val, u64 timeout, u64 uaddr2, u64 val3)
 
 // Read the CPU timestamp counter. Used as a seed for the tiny
 // PRNG below — not intended as a clock.
-u64 ReadTsc()
+[[maybe_unused]] u64 ReadTsc()
 {
     u32 lo, hi;
     asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
