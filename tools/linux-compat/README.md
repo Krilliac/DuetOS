@@ -43,15 +43,15 @@ that covers j00ru's NT table (see `../win32-compat/README.md`).
 ## Regenerating
 
 ```sh
-python3 tools/linux-compat/gen-linux-syscall-table.py \
-    --csv tools/linux-compat/linux-syscalls-x86_64.csv \
-    --mapped-from-dispatcher kernel/subsystems/linux/syscall.cpp \
-    --gap-fill-from-translator kernel/subsystems/translation/translate.cpp \
-    --out kernel/subsystems/linux/linux_syscall_table_generated.h
+tools/regenerate-syscall-artifacts.sh
 ```
 
-Commit both the CSV and the regenerated header. The build does
-NOT invoke Python; the header is checked in.
+This runs the Linux table generator, the NT table generator, and
+the unified ABI matrix generator so the docs stay in sync with
+the generated headers.
+
+Commit the updated CSV/header inputs and generated outputs. The
+build does NOT invoke Python; generated artifacts are checked in.
 
 ## Dispatcher vs translator ownership check
 

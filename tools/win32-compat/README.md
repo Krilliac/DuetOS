@@ -55,14 +55,14 @@ extract our own from a Windows install.
 ## Regenerating
 
 ```sh
-python3 tools/win32-compat/gen-nt-shim.py \
-    --csv tools/win32-compat/nt-syscalls-x64.csv \
-    --version "Windows 11 and Server (11 25H2)" \
-    --out kernel/subsystems/win32/nt_syscall_table_generated.h
+tools/regenerate-syscall-artifacts.sh
 ```
 
-Commit both the CSV and the regenerated header. The build does NOT invoke
-Python — the header is checked in.
+This runs Linux + NT table generation and also emits the unified
+ABI status matrix under `docs/` so ownership/status data stays current.
+
+Commit the CSV/header inputs and generated outputs. The build does NOT
+invoke Python — generated artifacts are checked in.
 
 ## Scoreboard
 
