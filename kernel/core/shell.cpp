@@ -11,6 +11,7 @@
 #include "../arch/x86_64/thermal.h"
 #include "../arch/x86_64/timer.h"
 #include "../acpi/acpi.h"
+#include "../drivers/audio/pcspk.h"
 #include "../drivers/gpu/bochs_vbe.h"
 #include "../drivers/gpu/gpu.h"
 #include "../drivers/input/ps2kbd.h"
@@ -324,6 +325,7 @@ void CmdHelp()
     ConsoleWriteln("  REBOOT       RESET THE MACHINE (NO CONFIRM)");
     ConsoleWriteln("  HALT         STOP THE CPU (NO CONFIRM)");
     ConsoleWriteln("  SHUTDOWN     ACPI SOFT-OFF VIA _S5 (QEMU EXITS; HALT ON FALLBACK)");
+    ConsoleWriteln("  BEEP [HZ [MS]]  PC SPEAKER TONE (DEFAULT 1000 HZ, 200 MS)");
     ConsoleWriteln("");
     ConsoleWriteln("ACCOUNTS / LOGIN:");
     ConsoleWriteln("  USERS / WHO  LIST ACCOUNTS (* = CURRENT SESSION)");
@@ -1278,6 +1280,7 @@ static const char* const kCommandSet[] = {
     "ipv4",      "uuid",    "uuidgen",    "health",   "checkup",  "attacksim", "redteam",    "memdump",  "instr",
     "dumpstate", "bp",      "breakpoint", "login",    "logout",   "passwd",    "useradd",    "userdel",  "users",
     "who",       "su",      "hwmon",      "vbe",      "ping",     "nslookup",  "ntp",        "http",     "shutdown",
+    "poweroff",  "beep",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -6053,6 +6056,42 @@ void CmdFree()
     customos::arch::Halt();
 }
 
+void CmdBeep(u32 argc, char** argv)
+{
+    u32 freq = 1000; // default 1 kHz
+    u32 ms = 200;    // default 200 ms
+    if (argc >= 2)
+    {
+        u16 f = 0;
+        if (!ParseU16Decimal(argv[1], &f))
+        {
+            ConsoleWriteln("BEEP: frequency must be decimal");
+            return;
+        }
+        freq = f;
+    }
+    if (argc >= 3)
+    {
+        u16 d = 0;
+        if (!ParseU16Decimal(argv[2], &d))
+        {
+            ConsoleWriteln("BEEP: duration must be decimal ms");
+            return;
+        }
+        ms = d;
+    }
+    if (!customos::drivers::audio::PcSpeakerBeep(freq, ms))
+    {
+        ConsoleWriteln("BEEP: frequency out of PIT divider range (20..1193181)");
+        return;
+    }
+    ConsoleWrite("BEEP: ");
+    WriteU64Dec(freq);
+    ConsoleWrite(" Hz for ");
+    WriteU64Dec(ms);
+    ConsoleWriteln(" ms");
+}
+
 [[noreturn]] void CmdShutdownNow()
 {
     ConsoleWriteln("SHUTDOWN: evaluating AML \\_S5 + writing PM1a...");
@@ -7718,6 +7757,11 @@ void Dispatch(char* line)
     {
         CmdShutdownNow();
         // unreachable
+    }
+    if (StrEq(cmd, "beep"))
+    {
+        CmdBeep(argc, argv);
+        return;
     }
     ConsoleWrite("COMMAND NOT FOUND: ");
     ConsoleWriteln(cmd);

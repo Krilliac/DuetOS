@@ -7,6 +7,7 @@
 #include "../../mm/paging.h"
 #include "../pci/pci.h"
 #include "bochs_vbe.h"
+#include "virtio_gpu.h"
 
 namespace customos::drivers::gpu
 {
@@ -149,6 +150,10 @@ void RunVendorProbe(GpuInfo& g)
         // MMIO-bank decode above is QEMU-specific + BAR-layout
         // dependent; VbeSelfTest is the canonical entry point.
         VbeSelfTest();
+    }
+    if (g.vendor_id == kVendorRedHatVirt && g.device_id == 0x1050)
+    {
+        VirtioGpuProbe(g.bus, g.device, g.function);
     }
 }
 

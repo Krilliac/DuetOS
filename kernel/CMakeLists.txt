@@ -91,8 +91,10 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     drivers/input/ps2kbd.cpp
     drivers/input/ps2mouse.cpp
     drivers/audio/audio.cpp
+    drivers/audio/pcspk.cpp
     drivers/gpu/bochs_vbe.cpp
     drivers/gpu/gpu.cpp
+    drivers/gpu/virtio_gpu.cpp
     drivers/net/net.cpp
     drivers/pci/pci.cpp
     drivers/power/power.cpp
