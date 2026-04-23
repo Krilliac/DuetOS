@@ -611,8 +611,12 @@ bool E1000BringUp(NicInfo& n)
     customos::net::MacAddress mac{};
     for (u64 i = 0; i < 6; ++i)
         mac.octets[i] = n.mac[i];
-    customos::net::Ipv4Address ip{{10, 0, 2, 15}};
+    // Start with the all-zero IP so DHCP's DISCOVER uses the
+    // correct src=0.0.0.0. The stack rebinds iface 0 to the
+    // leased IP on ACK.
+    customos::net::Ipv4Address ip{{0, 0, 0, 0}};
     customos::net::NetStackBindInterface(/*iface_index=*/0, mac, ip, tx_trampoline);
+    customos::net::DhcpStart(/*iface_index=*/0);
 
     // Self-test: emit one broadcast frame so a tcpdump on the host
     // side can confirm the TX path works end-to-end.

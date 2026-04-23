@@ -289,4 +289,76 @@ struct IcmpStats
 };
 IcmpStats IcmpStatsRead();
 
+// -------------------------------------------------------------------
+// UDP send + receive dispatch.
+//
+// v0 design: a small registration table (capped at kUdpBindingsMax)
+// maps local UDP ports to callbacks. `NetUdpBindRx` registers a
+// handler; `NetStackInjectRx → Ipv4HandleIncoming → UDP dispatch`
+// delivers every matching datagram. `NetUdpSend` builds an
+// ethernet+IPv4+UDP frame from the given fields and pushes it out
+// via the interface's bound TX trampoline. Checksums are computed
+// per RFC 768 (UDP; the UDP checksum field is optional over IPv4
+// but we always emit one for peers that require it).
+// -------------------------------------------------------------------
+
+inline constexpr u32 kUdpBindingsMax = 8;
+
+using UdpRxFn = void (*)(u32 iface_index, Ipv4Address src_ip, u16 src_port, u16 dst_port, const void* payload, u64 len);
+
+/// Bind a local UDP port to a receive handler. The handler fires
+/// from the driver's RX task context (never from IRQ). Returns
+/// false if the bindings table is full or the port is already
+/// claimed. A zero handler unbinds the port.
+bool NetUdpBindRx(u16 local_port, UdpRxFn handler);
+
+/// Build + transmit a UDP datagram. Fills in ethernet, IPv4, UDP
+/// headers from interface state + caller args, computes
+/// checksums, pushes via the interface's TX trampoline. `dst_mac`
+/// is used verbatim — caller resolves ARP or passes broadcast
+/// (0xFF × 6) for DHCP / link-local. Returns false if the
+/// interface isn't bound or the frame exceeds the wire MTU.
+bool NetUdpSend(u32 iface_index, const MacAddress& dst_mac, Ipv4Address dst_ip, u16 dst_port, Ipv4Address src_ip,
+                u16 src_port, const void* payload, u64 payload_len);
+
+struct UdpStats
+{
+    u64 rx_packets;
+    u64 rx_no_port;
+    u64 tx_packets;
+    u64 tx_failures;
+};
+UdpStats UdpStatsRead();
+
+// -------------------------------------------------------------------
+// DHCP client (RFC 2131, subset).
+//
+// Runs one DHCP transaction per interface on request:
+//   DISCOVER → (wait for OFFER) → REQUEST → (wait for ACK) → bind
+// On ACK, the interface's IP is rebound to the offered yiaddr and
+// the ARP cache is seeded with the server's MAC. No lease
+// renewal in v0 — the lease timer is recorded but not acted on.
+// -------------------------------------------------------------------
+
+struct DhcpLease
+{
+    bool valid;
+    Ipv4Address ip;
+    Ipv4Address router;
+    Ipv4Address dns;
+    Ipv4Address server;
+    u32 lease_secs;
+};
+
+/// Kick off a DHCP transaction on `iface_index`. Non-blocking —
+/// state advances inside the stack's UDP receive callbacks as
+/// OFFER / ACK arrive. Safe to call after `NetStackBindInterface`
+/// has run with a placeholder IP (typically 0.0.0.0). Returns
+/// false on already-in-progress or missing binding.
+bool DhcpStart(u32 iface_index);
+
+/// Current lease snapshot. `valid` is true only after a DHCP ACK
+/// successfully bound a new IP.
+DhcpLease DhcpLeaseRead();
+
 } // namespace customos::net
