@@ -636,11 +636,20 @@ void RunVendorProbe(NicInfo& n)
     if (n.vendor_id == kVendorIntel && IsE1000CompatFamily(family))
     {
         ProbeE1000State(n);
-        // Classic e1000 (82540-family) gets a full driver bring-up —
-        // rings armed, RX polling task spawned, TX self-test. The
-        // e1000e PCIe variants share register layout but not the
-        // EEPROM/PHY access path we assume; they stay probe-only.
-        if (n.device_id >= 0x1000 && n.device_id <= 0x107F)
+        // Accept classic e1000 (82540-family, 0x1000..0x107F), early
+        // e1000e PCIe variants (82571..82583, 0x10A4..0x10FF) and
+        // modern e1000e (i210/i217/i218/i219, 0x1500..0x15FF). The
+        // register layout the driver touches (CTRL, STATUS, RCTL,
+        // TCTL, RAL/RAH, RDBAL/TDBAL descriptor rings) is common
+        // across the family; PHY access + EEPROM differ but the
+        // v0 driver doesn't use either. MSI-X capability presence
+        // is detected at runtime via PciMsixBindSimple — the
+        // same code path succeeds on e1000e and falls back to
+        // polling on classic e1000.
+        const bool is_classic = (n.device_id >= 0x1000 && n.device_id <= 0x107F);
+        const bool is_e1000e_early = (n.device_id >= 0x10A4 && n.device_id <= 0x10FF);
+        const bool is_e1000e_modern = (n.device_id >= 0x1500 && n.device_id <= 0x15FF);
+        if (is_classic || is_e1000e_early || is_e1000e_modern)
         {
             brought_up = E1000BringUp(n);
         }
