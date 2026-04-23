@@ -32,12 +32,18 @@
  *     submit Address Device, then issue GET_DESCRIPTOR(Device) via
  *     a Setup/Data/Status three-TRB control transfer on EP0. Parse
  *     the 18-byte device descriptor + log VID/PID/class per port.
+ *   - GET_DESCRIPTOR(Config) in two phases — 9-byte header to
+ *     learn wTotalLength, then the full tree. Walk the tree for
+ *     HID (class=3) / Boot (subclass=1) / Keyboard (protocol=1)
+ *     interface descriptors; record the interface number, its
+ *     first interrupt-IN endpoint's address, wMaxPacketSize and
+ *     bInterval.
  *
  * Not in scope (this slice):
- *   - GET_DESCRIPTOR(Config), SET_CONFIGURATION, SET_PROTOCOL,
- *     Configure Endpoint, interrupt/bulk/isoch transfer rings.
- *     HID keyboard input path lands on top of these in the next
- *     slice.
+ *   - SET_CONFIGURATION, Configure Endpoint, interrupt-IN transfer
+ *     ring, HID polling task, keyboard-event injection. All of
+ *     those hang off the HID-keyboard fields populated here; the
+ *     next slice lights them up into actual keystrokes.
  *   - Scratchpad buffers (we panic-skip if the controller asks
  *     for any; QEMU's xHCI doesn't on q35).
  *   - MSI-X interrupt completion — every command + control
@@ -77,6 +83,20 @@ struct PortRecord
     u8 device_subclass;
     u8 device_protocol;
     u8 max_packet_size_0;
+    // Configuration-descriptor fields populated on successful
+    // GET_DESCRIPTOR(Config). Walked for HID Boot Keyboard; if
+    // found, hid_* fields record where the interrupt-IN endpoint
+    // sits and how often it wants to be polled. The next slice
+    // consumes these to submit SET_CONFIGURATION / Configure
+    // Endpoint / periodic Normal TRBs.
+    bool config_desc_ok;
+    u16 config_desc_bytes;
+    u8 hid_config_value; // bConfigurationValue from top-level Config desc
+    bool hid_keyboard;
+    u8 hid_interface_num;
+    u8 hid_ep_addr;        // bEndpointAddress: bit 7 = IN direction
+    u16 hid_ep_max_packet; // wMaxPacketSize of the HID int-IN endpoint
+    u8 hid_ep_interval;    // bInterval, raw (USB units)
 };
 
 /// Per-controller stats. One slot per discovered xHCI; populated
@@ -100,6 +120,8 @@ struct ControllerInfo
     u32 slots_enabled;       // count of successful Enable Slot commands
     u32 devices_addressed;   // count of successful Address Device commands
     u32 descriptors_fetched; // count of successful GET_DESCRIPTOR(Device) transfers
+    u32 configs_parsed;      // count of successful GET_DESCRIPTOR(Config) + parse
+    u32 hid_keyboards_found; // count of ports that resolved to a HID boot keyboard
     u32 context_bytes;       // HCCPARAMS1.CSZ → 32 or 64
     PortRecord ports[kMaxXhciPortsPerController];
 };
