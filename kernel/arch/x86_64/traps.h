@@ -45,15 +45,60 @@ struct TrapFrame
     u64 ss;
 };
 
-static_assert(sizeof(TrapFrame) == 22 * sizeof(u64),
-              "TrapFrame size must match exceptions.S push order");
+static_assert(sizeof(TrapFrame) == 22 * sizeof(u64), "TrapFrame size must match exceptions.S push order");
 
-/// Called from isr_common. For CPU exceptions (vector < 32), prints
-/// diagnostic state to COM1 and halts — none are recoverable yet. For
-/// IRQs (vector 32..47, plus the LAPIC spurious at 0xFF), routes through
-/// the per-vector IRQ handler and returns so isr_common's iretq path
-/// resumes the interrupted code.
+/// Called from isr_common. For CPU exceptions (vector < 32), looks
+/// up the per-vector response policy via `TrapResponseFor` and acts
+/// on it (LogAndContinue / IsolateTask / Panic). For IRQs
+/// (32..47, plus the LAPIC spurious at 0xFF), routes through the
+/// per-vector handler and returns. For spurious vectors (48..127,
+/// 129..254), logs the offending number and returns. The path that
+/// halts is the explicit `Panic` policy outcome — every other path
+/// is recoverable.
 extern "C" void TrapDispatch(TrapFrame* frame);
+
+/// Per-CPU-exception response policy. Mirrors `core::HealthResponse`
+/// from the runtime invariant checker — explicit per-class outcome
+/// instead of "everything panics" so a recoverable trap (#BP from
+/// an in-kernel breakpoint, #DB single-step) doesn't bring the
+/// kernel down. Ring-3 hits always become IsolateTask regardless
+/// of vector — the existing task-kill path remains the user-mode
+/// fault contract; this enum is the kernel-mode policy table.
+enum class TrapResponse : u8
+{
+    LogAndContinue, // Log + iretq. Used for #BP / #DB from kernel mode.
+    IsolateTask,    // Kill the offending task + reschedule. Ring-3 default.
+    Panic,          // Halt the kernel. Last resort for kernel-mode bugs.
+};
+
+/// Resolve a vector + ring to its policy. `from_user` is true iff
+/// the saved CS's RPL == 3.
+///   - User-mode (any vector): IsolateTask.
+///   - Kernel-mode #BP / #DB:  LogAndContinue.
+///   - Kernel-mode anything else: Panic.
+TrapResponse TrapResponseFor(u64 vector, bool from_user);
+
+/// Stable name for a TrapResponse value, for log lines.
+const char* TrapResponseName(TrapResponse r);
+
+/// Current IRQ nesting depth for the running task. 0 = not in
+/// interrupt context, 1 = one level deep (normal), >= 2 = a
+/// handler itself was interrupted. The runtime checker watches
+/// the lifetime max (IrqNestMax) to surface runaway re-entry.
+u64 IrqNestDepth();
+
+/// Highest IRQ nesting depth observed since boot. Monotonic;
+/// never reset.
+u64 IrqNestMax();
+
+/// Direct accessor/mutator for the per-CPU depth counter. Used
+/// by the scheduler's context-switch path to save the outgoing
+/// task's nesting level and load the incoming task's. Mirrors
+/// the FS_BASE save/restore pattern — same location, same
+/// "stash-then-restore" shape. No public API beyond the
+/// scheduler; other callers should use IrqNestDepth/Max.
+u64 IrqNestDepthRaw();
+void IrqNestDepthSet(u64 v);
 
 /// Per-vector IRQ handler signature. The LAPIC EOI is sent by the IRQ
 /// dispatcher (not by individual handlers), so handlers should NOT EOI
@@ -69,5 +114,22 @@ void IrqInstall(u8 vector, IrqHandler handler);
 /// Used only during early bring-up; remove from the boot sequence once
 /// there's real work to do after IdtInit().
 [[noreturn]] void RaiseSelfTestBreakpoint();
+
+/// Boot-time confidence check for the slice-80 trap surface:
+///   1. Issue `int3` from kernel mode. Verifies the dispatcher routes
+///      #BP through TrapResponse::LogAndContinue + iretq instead of
+///      halting. If the policy regresses, the kernel hangs here and
+///      the boot log shows the panic banner instead of the
+///      "[trap] #BP (recoverable)" line.
+///   2. Issue `int 0x42`. Verifies vector 66 has a real IDT gate
+///      installed by the spurious-vector stub block in exceptions.S
+///      and that TrapDispatch's spurious branch logs + returns
+///      instead of #NP-cascading or panicking.
+///
+/// Cheap (two interrupts), prints two log lines, returns. Call once
+/// from kernel_main after IdtInit. Kept in `arch::` so the runtime-
+/// checker can also invoke it on demand from the shell `health`
+/// command for live re-verification.
+void TrapsSelfTest();
 
 } // namespace customos::arch

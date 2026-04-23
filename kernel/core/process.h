@@ -2,6 +2,7 @@
 
 #include "../fs/ramfs.h"
 #include "../mm/address_space.h"
+#include "../sched/sched.h"
 #include "types.h"
 
 /*
@@ -73,6 +74,16 @@ enum Cap : u32
     // gates the syscall itself, while Process::root gates the
     // reachable namespace; both layers compose.
     kCapFsRead = 2,
+
+    // Install / remove debug breakpoints on THIS process via
+    // SYS_BP_INSTALL / SYS_BP_REMOVE. Scoped to the caller — a
+    // process with this cap cannot set a BP in another process;
+    // the BP rides the caller's own task via per-task DR0..DR3
+    // save/restore on context switch. Withholding this cap is
+    // the default for untrusted code: a sandboxed process can
+    // still crash, but it cannot use the 4 hardware DRs as a
+    // side channel or stall the scheduler by pinning them.
+    kCapDebug = 3,
 
     // Sentinel: keep this as the last entry so kProfileTrusted can
     // be built by a loop that iterates [1 .. kCapCount). Do NOT
@@ -287,6 +298,114 @@ struct Process
     static constexpr u64 kWin32IatMissCap = 128;
     Win32IatMiss win32_iat_misses[kWin32IatMissCap];
     u64 win32_iat_miss_count;
+
+    // Win32 file-handle table — backs CreateFileW / ReadFile /
+    // CloseHandle / SetFilePointerEx (batch 24). Each slot holds
+    // a pointer to the resolved RamfsNode plus the current read
+    // cursor; all access is read-only because ramfs is .rodata.
+    //
+    // Returned handles to user mode are `kWin32HandleBase + idx`
+    // (= 0x100 + 0..15) so they don't collide with Win32 pseudo-
+    // handles (-1 = INVALID_HANDLE_VALUE, -2 = current thread,
+    // ...) or NULL. The kernel unwraps via `idx = handle -
+    // kWin32HandleBase` and bounds-checks.
+    //
+    // 16 slots is plenty for v0 — typical console programs hold
+    // ~4 (stdin/stdout/stderr + one input file). Grow to a
+    // KMalloc'd table when a real workload needs more.
+    struct Win32FileHandle
+    {
+        const fs::RamfsNode* node; // nullptr = unused slot
+        u64 cursor;                // current read position in bytes
+    };
+    static constexpr u64 kWin32HandleCap = 16;
+    static constexpr u64 kWin32HandleBase = 0x100;
+    Win32FileHandle win32_handles[kWin32HandleCap];
+
+    // Win32 mutex table — backs CreateMutexW / WaitForSingleObject /
+    // ReleaseMutex (batch 26). Per-mutex owner pointer + recursion
+    // counter + waitqueue. Real blocking semantics; uses the
+    // existing sched::WaitQueue + WaitQueueBlockTimeout path.
+    //
+    // Handles run kWin32MutexBase + idx (= 0x200..0x207); the range
+    // is disjoint from kWin32HandleBase + idx (0x100..0x10F) so
+    // CloseHandle can dispatch by range without a tag bit.
+    //
+    // Win32 mutexes are RECURSIVE — the same owner can acquire
+    // multiple times, and must release the same number. The
+    // recursion counter tracks this; only on final release does
+    // the mutex become unowned + a waiter (if any) gets the
+    // hand-off.
+    struct Win32MutexHandle
+    {
+        bool in_use; // false = slot free
+        u8 _pad[3];
+        u32 recursion;            // # nested acquires by current owner
+        sched::Task* owner;       // nullptr = unowned
+        sched::WaitQueue waiters; // tasks blocked in WaitForSingleObject
+    };
+    static constexpr u64 kWin32MutexCap = 8;
+    static constexpr u64 kWin32MutexBase = 0x200;
+    Win32MutexHandle win32_mutexes[kWin32MutexCap];
+
+    // Win32 event table — backs CreateEventW / SetEvent /
+    // ResetEvent / WaitForSingleObject (batch 45). Simpler than
+    // mutexes: no owner, no recursion, just a signaled flag
+    // with a waitqueue. Manual-reset events stay signaled until
+    // ResetEvent; auto-reset events wake one waiter then clear
+    // themselves automatically.
+    //
+    // Handles run kWin32EventBase + idx (= 0x300..0x307),
+    // disjoint from the mutex and file handle ranges so
+    // CloseHandle / WaitForSingleObject dispatch by range.
+    struct Win32EventHandle
+    {
+        bool in_use;
+        bool manual_reset; // true = stays signaled until reset; false = auto-clears on wake
+        bool signaled;
+        u8 _pad[5];
+        sched::WaitQueue waiters; // tasks blocked in SYS_EVENT_WAIT
+    };
+    static constexpr u64 kWin32EventCap = 8;
+    static constexpr u64 kWin32EventBase = 0x300;
+    Win32EventHandle win32_events[kWin32EventCap];
+
+    // Win32 TLS (Thread-Local Storage) slots — backs TlsAlloc /
+    // TlsGetValue / TlsSetValue / TlsFree (batch 46). v0 is
+    // single-threaded per process, so "thread-local" is just
+    // "process-local" — but the slot allocator + per-slot
+    // storage give MSVC CRT's TLS-using startup paths (errno,
+    // locale, uncaught_exception tracking) something real to
+    // point at instead of TLS_OUT_OF_INDEXES.
+    //
+    // 64 slots is plenty for any CRT — typical MSVC CRT
+    // uses 3-5 TLS slots. FLS (Fiber-Local Storage) aliases
+    // to the same API in v0 since we have no fibers.
+    static constexpr u64 kWin32TlsCap = 64;
+    u64 tls_slot_in_use; // bitmap: bit N = slot N allocated
+    u64 tls_slot_value[kWin32TlsCap];
+
+    // Win32 VirtualAlloc bump arena — backs VirtualAlloc /
+    // VirtualFree / VirtualProtect (batch 28). Each SYS_VMAP
+    // request rounds the size up to page multiples, allocates
+    // fresh frames via AllocateFrame, maps them RW + NX + User
+    // at the current cursor VA, then bumps the cursor.
+    //
+    // v0 is bump-only — VirtualFree is documented as a leak.
+    // A second slice adds a free list once a real workload
+    // proves the leak matters. The cap is generous enough for
+    // most CRT startups (heap fallback, TLS slot tables,
+    // __chkstk probe area) to fit without needing reclaim.
+    //
+    // vmap_base is 0x40000000 — below the Win32 heap (0x50000000)
+    // and distinct from the stubs page (0x60000000), proc-env
+    // (0x65000000), TEB (0x70000000), and ring-3 stack bottom
+    // (0x7FFFE000) — leaves 256 MiB of contiguous VA space so
+    // large requests have somewhere to go.
+    static constexpr u64 kWin32VmapBase = 0x40000000ULL;
+    static constexpr u64 kWin32VmapCapPages = 128; // 512 KiB max per process
+    u64 vmap_base;                                 // = kWin32VmapBase after PE load
+    u64 vmap_pages_used;                           // bump cursor in pages
 
     u64 refcount;
 };

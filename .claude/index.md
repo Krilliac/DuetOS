@@ -17,7 +17,9 @@ _Read this at every session start (after git sync). Each row links to a detailed
 | PE base-relocation support v0 — walk + apply, zero-delta in v0 | [knowledge/pe-base-reloc-v0.md](knowledge/pe-base-reloc-v0.md) | Observation | Active | 2026-04-21 |
 | Win32 subsystem v0 — import resolution + kernel32.ExitProcess stub | [knowledge/win32-subsystem-v0.md](knowledge/win32-subsystem-v0.md) | Observation | Active | 2026-04-21 |
 | Win32 heap — real HeapSize + HeapReAlloc / realloc (batch 14) | [knowledge/win32-subsystem-v0.md#batch-14--real-heapsize--heaprealloc](knowledge/win32-subsystem-v0.md) | Observation | Active | 2026-04-21 |
-| Real-world PE execution — winkill CRT entry + five loader gaps | [knowledge/pe-real-world-run.md](knowledge/pe-real-world-run.md) | Observation | Active | 2026-04-22 |
+| Real-world PE execution — winkill CRT entry + argc/argv + five loader gaps | [knowledge/pe-real-world-run.md](knowledge/pe-real-world-run.md) | Observation | Active | 2026-04-22 |
+| Win32 stubs — callee-saved rdi/rsi ABI bug + fix pattern | [knowledge/win32-stubs-rdi-rsi-abi.md](knowledge/win32-stubs-rdi-rsi-abi.md) | Issue + Pattern | Active | 2026-04-22 |
+| Kernel breakpoint subsystem v0 + phase 2a (per-task DR, syscall, kCapDebug) + phase 3 (suspend/inspect/resume/step) + phase 4 (static KBP_PROBE macros) | [knowledge/breakpoints-v0.md](knowledge/breakpoints-v0.md) | Observation | Active | 2026-04-23 |
 | Hardware target matrix (CPU/GPU/IO tiers) | [knowledge/hardware-target-matrix.md](knowledge/hardware-target-matrix.md) | Decision | Active | 2026-04-20 |
 | Rust bring-up plan — trigger, layout, toolchain, CI | [knowledge/rust-bringup-plan.md](knowledge/rust-bringup-plan.md) | Decision | Active | 2026-04-21 |
 | Storage + Filesystem roadmap — block layer → NVMe/AHCI → GPT → FS | [knowledge/storage-and-filesystem-roadmap.md](knowledge/storage-and-filesystem-roadmap.md) | Decision | Active (stages 1–2, 4 landed) | 2026-04-21 |
@@ -51,13 +53,30 @@ _Read this at every session start (after git sync). Each row links to a detailed
 | SMP foundations v0 — spinlocks + per-CPU data | [knowledge/smp-foundations-v0.md](knowledge/smp-foundations-v0.md) | Observation | Active | 2026-04-20 |
 | Runtime recovery strategy — halt/restart/retry/reject taxonomy | [../docs/knowledge/runtime-recovery-strategy.md](../docs/knowledge/runtime-recovery-strategy.md) | Decision | Active | 2026-04-20 |
 | PCI enumeration v0 — legacy port-IO walk | [knowledge/pci-enum-v0.md](knowledge/pci-enum-v0.md) | Observation | Active | 2026-04-20 |
+| GPU discovery v0 — PCI classification + BAR map | [knowledge/gpu-discovery-v0.md](knowledge/gpu-discovery-v0.md) | Observation | Active | 2026-04-22 |
+| Driver shells v0 — net / usb / audio / gpu-probes | [knowledge/driver-shells-v0.md](knowledge/driver-shells-v0.md) | Observation | Active | 2026-04-22 |
+| Kernel entropy pool — RDSEED/RDRAND/splitmix tier | [knowledge/kernel-entropy-v0.md](knowledge/kernel-entropy-v0.md) | Observation | Active | 2026-04-22 |
+| Runtime invariant checker — heap/frames/sched/CRx/canary/stack-overflow | [knowledge/runtime-invariant-checker-v0.md](knowledge/runtime-invariant-checker-v0.md) | Observation | Active | 2026-04-22 |
 | Crash dump v0 — embedded symbol table + bracketed dump file | [knowledge/crash-dump-v0.md](knowledge/crash-dump-v0.md) | Observation | Active | 2026-04-20 |
 | Ring 3 first slice — GDT user segments + iretq entry + smoke task | [knowledge/ring3-first-slice-v0.md](knowledge/ring3-first-slice-v0.md) | Observation | Active | 2026-04-20 |
 | Ring-3 adversarial test suite — jail / nx / priv / badint / kread probes | [knowledge/pentest-ring3-adversarial-v0.md](knowledge/pentest-ring3-adversarial-v0.md) | Pattern | Active | 2026-04-21 |
 
 ## Quick Reference
 
-### Current Project State (2026-04-20)
+### Current Project State (2026-04-22)
+
+**Milestone (2026-04-22)**: `windows-kill.exe` — a real-world 80 KB MSVC
+PE with 8 sections, 52 imports across 6 DLLs, SEH, TLS, and a resource
+directory — runs end-to-end as a ring-3 process on CustomOS and exits
+via `SYS_EXIT(0)`. No #PF, no #GP, no panic, no task-kill. The CRT's
+`__p___argc` / `__p___argv` now return pointers into a per-process
+proc-env page; unresolved data imports (e.g. `std::cout`) route to a
+fake-object pad so MSVC's virtual-dispatch idiom walks mapped zeros
+instead of code bytes; the miss-logger decoder skips indirect-call
+patterns rather than fabricating `<unmapped>` entries. Programs don't
+yet PRINT (std::cout no-ops), but the full PE execution path is clean.
+
+### Prior Project State (2026-04-20)
 
 - **Repository**: kernel runs at `0xFFFFFFFF80000000` (higher-half), brings up GDT + IDT (vectors 0..47 + LAPIC spurious 0xFF), parses the Multiboot2 memory map, runs a bitmap-backed physical frame allocator with single + contiguous-run allocation, brings up a 2 MiB first-fit + coalescing kernel heap (`KMalloc`/`KFree`) over the higher-half direct map, adopts the boot PML4 with a 4-level managed paging API (`MapPage`/`UnmapPage`/`MapMmio` into a 512 MiB MMIO arena at `0xFFFFFFFFC0000000`, EFER.NXE on), masks the legacy 8259 PIC, brings up the BSP LAPIC, arms a PIT-calibrated periodic LAPIC timer at 100 Hz on vector 0x20, and runs a round-robin preemptive scheduler with kernel threads (`SchedCreate` / `SchedYield` / `SchedExit`) whose time slices are driven by the timer IRQ. Blocking primitives are online: `SchedSleepTicks` (tick-driven sleep queue), `WaitQueue` (event-driven FIFO), and `Mutex` with FIFO hand-off (built on `WaitQueue`). ACPI MADT is parsed at boot (RSDP → XSDT/RSDT → APIC) and the IOAPIC driver consumes it to map every controller's MMIO window, read the version register, and mask every pin; `IoApicRoute(gsi, vector, lapic_id, isa_irq)` / `IoApicMask` / `IoApicUnmask` are ready for drivers to program. MPS polarity + trigger flags from MADT overrides are honoured on ISA routes. PS/2 keyboard is online as the first real end-to-end IRQ-driven driver: ACPI → IOAPIC → IDT → dispatcher → driver → SPSC ring buffer → `WaitQueue` → scheduler — raw scan codes come out as `[kbd] scan=0xNN` on COM1. Both the panic path and the CPU-exception trap dispatcher now emit a bracketed, self-describing crash dump record (`=== CUSTOMOS CRASH DUMP BEGIN/END ===`) with every code address annotated inline by an embedded, build-time-generated function symbol table (`function+offset (file:line)`); trap dumps also carry all GPRs from the hardware TrapFrame. `tools/test-panic.sh` and `tools/test-trap.sh` extract each record into `build/<preset>/crash-dumps/<timestamp>.dump` and `<timestamp>-trap.dump` respectively, asserting the shape of each path. Design decisions are now tracked in a living log (`docs/knowledge/design-decisions-log.md`) with rationale + "revisit when" markers per slice. The GDT has been extended with DPL=3 user-code/user-data descriptors (slots 5–6); the BSP TSS gained a runtime-settable RSP0 slot that the scheduler now auto-publishes on every switch-in to a task with a kernel stack. `arch::EnterUserMode(rip, rsp)` builds an iretq frame into ring 3. The syscall ABI v0 is online via `int 0x80` (DPL=3 gate): `SYS_EXIT = 0`, `SYS_GETPID = 1`, `SYS_WRITE = 2`, `SYS_YIELD = 3`. SMEP + SMAP are enabled in `PagingInit` (CPUID-gated CR4 flips); `mm::CopyFromUser` / `mm::CopyToUser` validate pointers against the canonical low half, walk the PT to confirm every touched page is `Present | User`, and bracket the copy with stac/clac. Per-task user-VM regions are registered via `sched::RegisterUserVmRegion` and reaped (UnmapPage + FreeFrame) on task death, so nothing leaks across task boundaries. A `ring3-smoke` scheduler thread maps one code + one stack page with the U/S bit set, drops a 38-byte payload (pause; pause; SYS_WRITE("Hello from ring 3!\n"); SYS_YIELD; SYS_EXIT) into ring 3, registers both pages for reaper-driven cleanup, and is reaped cleanly by the kernel-side reaper after SYS_EXIT — the user pages are unmapped and the backing frames returned to the physical allocator. Boot ends with three worker threads contending on a demo mutex, a `kbd-reader` thread blocked on keyboard input, the BSP driving its idle task via `sti; hlt`, and APs halted in their trampoline. All self-tests pass. Next bites: SMP scheduler join (APs actually running), USB HID / xHCI (real-hardware input path), `__copy_user_fault_fixup` for copy-from-user #PF recovery, or per-process address spaces (unblocks a second ring-3 task without a VA collision).
 - **Default branch**: `main`.

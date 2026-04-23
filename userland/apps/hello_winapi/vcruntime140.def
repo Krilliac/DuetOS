@@ -28,3 +28,5 @@ EXPORTS
     __std_exception_copy
     __std_exception_destroy
     __vcrt_InitializeCriticalSectionEx
+    ; MSVC stack-probe helper (emitted when a frame > 4 KiB)
+    __chkstk

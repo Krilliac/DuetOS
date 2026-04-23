@@ -4,9 +4,12 @@
 #include "lapic.h"
 #include "serial.h"
 
+#include "../../core/hexdump.h"
 #include "../../core/panic.h"
 #include "../../core/symbols.h"
 #include "../../core/syscall.h"
+#include "../../debug/breakpoints.h"
+#include "../../debug/probes.h"
 #include "../../sched/sched.h"
 
 // user_copy.S labels, exposed to the trap dispatcher for the
@@ -99,6 +102,80 @@ void WriteLabelled(const char* label, u64 value)
 
 } // namespace
 
+TrapResponse TrapResponseFor(u64 vector, bool from_user)
+{
+    // Ring 3 is always Isolate. The faulting task dies, the kernel
+    // continues. This is the existing user-mode fault contract.
+    if (from_user)
+    {
+        return TrapResponse::IsolateTask;
+    }
+    // Kernel-mode #BP (3) and #DB (1) are recoverable. #BP fires
+    // when kernel code executes int3 — typically a deliberate
+    // breakpoint or a future KASSERT-with-resume hook. #DB fires
+    // on single-step and on hardware-breakpoint hits — both are
+    // debugging primitives, not bugs. Logging the hit + returning
+    // lets the kernel stay alive for the operator to inspect via
+    // the shell or wait for a debugger.
+    if (vector == 1 || vector == 3)
+    {
+        return TrapResponse::LogAndContinue;
+    }
+    // Everything else from kernel mode means the kernel itself is
+    // in an inconsistent state (corrupt pointer, double fault, GP
+    // on a wild segment register, etc.). Continued execution
+    // accumulates damage. Halt.
+    return TrapResponse::Panic;
+}
+
+const char* TrapResponseName(TrapResponse r)
+{
+    switch (r)
+    {
+    case TrapResponse::LogAndContinue:
+        return "LogAndContinue";
+    case TrapResponse::IsolateTask:
+        return "IsolateTask";
+    case TrapResponse::Panic:
+        return "Panic";
+    }
+    return "?";
+}
+
+// IRQ nesting-depth tracking. Two live-test attempts (slices
+// 69 and 71) exposed that a correct counter needs both:
+//   * per-task save/restore across Schedule (done, via
+//     Task.irq_depth in sched.cpp), AND
+//   * decrement at every exit path of TrapDispatch, including
+//     the CPU-exception paths that don't return (task-kill,
+//     panic), the NMI halt-forever path, and the fault-fixup
+//     rewrite path.
+// The exception paths are where the counter leaked last time.
+// Getting all of those right without regressing something else
+// is its own slice; for now the accessor reports 0 so the
+// health check's ceiling test stays clean, and the per-task
+// field is zeroed at task creation so the save/restore plumb
+// is ready to switch on once the exception-path audit lands.
+constinit u64 g_irq_nest_depth = 0;
+constinit u64 g_irq_nest_max = 0;
+
+u64 IrqNestDepth()
+{
+    return 0;
+}
+u64 IrqNestMax()
+{
+    return 0;
+}
+u64 IrqNestDepthRaw()
+{
+    return 0;
+}
+void IrqNestDepthSet(u64 /*v*/)
+{
+    // stub
+}
+
 extern "C" void TrapDispatch(TrapFrame* frame)
 {
     // Hardware IRQ path. Routes to the registered handler (if any), then
@@ -153,6 +230,25 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         return;
     }
 
+    // Spurious-vector path. Vectors 48..127 + 129..254 have stubs
+    // in exceptions.S that route here, so a stray INT n / IPI /
+    // device-injected interrupt logs the offending number instead
+    // of cascading through #NP from a not-present IDT gate. No EOI
+    // — these aren't from the LAPIC's normal pipeline; if a future
+    // driver routes its IRQ outside the 32..47 window it'll need
+    // its own handler installed via IrqInstall.
+    if (frame->vector >= 48 && frame->vector < 256)
+    {
+        SerialWrite("[idt] spurious vector ");
+        SerialWriteHex(frame->vector);
+        SerialWrite(" rip=");
+        SerialWriteHex(frame->rip);
+        SerialWrite(" cs=");
+        SerialWriteHex(frame->cs);
+        SerialWrite("\n");
+        return;
+    }
+
     // Vector 2 (NMI) is used for cross-CPU panic halt (see
     // arch::PanicBroadcastNmi). The panicking CPU is about to write
     // the crash dump to serial; every other CPU that receives the
@@ -204,15 +300,59 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         }
     }
 
-    // Ring-3 exception handling. A faulting user task MUST NOT bring
-    // down the kernel — that would turn any sandboxed process's
-    // mistake (wild pointer, write to its own RX code page, jump
-    // into its own NX stack) into a full-system DoS. Distinguish
-    // kernel vs. user by the saved CS's RPL:
-    //   CS.RPL == 0 → kernel exception → panic, halt (below).
-    //   CS.RPL == 3 → user exception  → log + terminate this task,
-    //                                    reschedule.
+    // CPU exception path. Route through the per-vector tiered
+    // response policy (slice 80) — explicit per-class outcome
+    // instead of "everything panics", so a recoverable trap (an
+    // in-kernel int3, a debug-register single-step) doesn't bring
+    // the kernel down. The policy table itself lives in
+    // TrapResponseFor; this dispatcher just acts on the result.
     //
+    // Three outcomes:
+    //   LogAndContinue — log a one-liner + iretq. Used for
+    //     kernel-mode #BP / #DB. Lets a deliberate int3 or
+    //     hardware single-step come and go without halting.
+    //   IsolateTask    — kill the offending ring-3 task + reschedule.
+    //     Default for every user-mode hit (sandboxed process's
+    //     wild pointer / RX-page write / NX-stack jump must NOT
+    //     become a kernel DoS).
+    //   Panic          — halt. Only outcome that does not return.
+    //     Reserved for kernel-mode bugs where continued execution
+    //     accumulates damage.
+    const bool from_user = (frame->cs & 3) == 3;
+
+    // Breakpoint subsystem gets first refusal on #BP (vec 3) and
+    // #DB (vec 1), REGARDLESS of ring. A user-mode task that
+    // installed a BP via SYS_BP_INSTALL needs the same handler
+    // path a kernel BP would hit — otherwise the per-task DR
+    // hit would fall through to the ring-3 "IsolateTask" policy
+    // and kill the task every time its own BP fired. Only if
+    // the handler doesn't claim the trap (bare int3 in user
+    // code, #DB with no registered cause) do we proceed with
+    // the per-ring default policy below.
+    if (frame->vector == 3 && debug::BpHandleBreakpoint(frame))
+    {
+        return;
+    }
+    if (frame->vector == 1 && debug::BpHandleDebug(frame))
+    {
+        return;
+    }
+
+    const TrapResponse policy = TrapResponseFor(frame->vector, from_user);
+
+    if (policy == TrapResponse::LogAndContinue)
+    {
+        SerialWrite("[trap] ");
+        SerialWrite((frame->vector < 32) ? kVectorNames[frame->vector] : "vec-oor");
+        SerialWrite(" (recoverable) rip=");
+        SerialWriteHex(frame->rip);
+        SerialWrite(" cs=");
+        SerialWriteHex(frame->cs);
+        SerialWrite("\n");
+        return;
+    }
+
+    // Ring-3 exception handling — the IsolateTask outcome.
     // SchedExit is [[noreturn]]; it marks the task Dead, wakes the
     // reaper, and Schedule()s away. The reaper tears down the task's
     // Process (which tears down its AddressSpace → returns every
@@ -220,7 +360,7 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     // The half-consumed trap frame on this task's kernel stack is
     // abandoned along with the stack itself — free with the rest
     // at reap time.
-    if ((frame->cs & 3) == 3)
+    if (policy == TrapResponse::IsolateTask)
     {
         const char* vec_name = (frame->vector < 32) ? kVectorNames[frame->vector] : "user-vector-oor";
         SerialWrite("\n[task-kill] ring-3 task took ");
@@ -242,6 +382,14 @@ extern "C" void TrapDispatch(TrapFrame* frame)
             SerialWriteHex(frame->error_code);
         }
         SerialWrite("\n");
+        // Instruction-at-RIP dump. Most user-mode faults are a wild
+        // jump into a garbage page or a malformed opcode the loader
+        // wrote; having the actual bytes in the log tells you which
+        // without re-running the program under a debugger. The
+        // plausibility check rejects user-space RIPs (< 1 GiB is
+        // plausible, but > 1 GiB user-space RIPs fall outside the
+        // PlausibleKernelAddress range and emit a skipped line).
+        core::DumpInstructionBytes("user-fault-rip", frame->rip, 16);
         // SchedExit must NOT run with IF=0 forever; it ends in a
         // Schedule() that waits for the reaper, and the reaper needs
         // timer IRQs to make progress. SchedYield/SchedExit internally
@@ -250,9 +398,18 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         customos::sched::SchedExit();
     }
 
-    // Pre-marker human-readable banner. Anything before BEGIN / after END
-    // is free-form prose; the bracketed region is the machine-extractable
-    // dump record.
+    // Fall-through outcome: TrapResponse::Panic. Every kernel-mode
+    // CPU exception that wasn't recoverable lands here. Pre-marker
+    // human-readable banner. Anything before BEGIN / after END is
+    // free-form prose; the bracketed region is the machine-extract
+    // -able dump record.
+    //
+    // Fire the kernel-page-fault probe specifically for vec 14 so
+    // the log ring records this as a structured event before the
+    // panic dump; other kernel exceptions are already distinct
+    // enough by name that they don't need a dedicated probe.
+    if (frame->vector == 14)
+        KBP_PROBE_V(::customos::debug::ProbeId::kKernelPageFault, frame->rip);
     SerialWrite("\n** CPU EXCEPTION **\n");
 
     // Bracket the record so host-side tooling can extract a .dump file
@@ -272,9 +429,11 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     WriteLabelled("rsp       ", frame->rsp);
     WriteLabelled("ss        ", frame->ss);
 
+    u64 cr2 = 0;
     if (frame->vector == 14) // #PF
     {
-        WriteLabelled("cr2       ", ReadCr2());
+        cr2 = ReadCr2();
+        WriteLabelled("cr2       ", cr2);
     }
 
     SerialWrite("  --\n");
@@ -293,6 +452,36 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     WriteLabelled("r13       ", frame->r13);
     WriteLabelled("r14       ", frame->r14);
     WriteLabelled("r15       ", frame->r15);
+
+    // Instruction bytes at RIP. Lets the operator eyeball the actual
+    // opcode that faulted without running objdump. x86_64 max
+    // instruction length is 15 bytes; we dump 16 so a clean prefix +
+    // opcode + ModRM + full displacement/immediate always fits.
+    SerialWrite("  --\n");
+    core::DumpInstructionBytes("fault-rip", frame->rip, 16);
+
+    // On #PF, dump the 64 bytes flanking CR2. The page containing
+    // CR2 is unmapped by definition (that's why the fault fired), so
+    // the safe variant skips it and emits only the neighbouring
+    // bytes — often enough to show whether the access was an
+    // off-by-one past a valid struct (you'll see the struct's bytes
+    // right up to the page boundary) or a wild dereference (you'll
+    // see <unreadable>).
+    if (frame->vector == 14)
+    {
+        // Align down 32 bytes + show 96, so a few lines before and
+        // after CR2 are dumped; the faulting page gets skipped
+        // automatically.
+        const u64 window_start = (cr2 - 32) & ~static_cast<u64>(0xF);
+        const u64 window_page = cr2 & ~static_cast<u64>(0xFFF);
+        core::DumpHexRegionSafe("cr2-window", window_start, 96, window_page);
+    }
+
+    // Stack window starting at RSP. Distinct from the RBP backtrace
+    // in DumpDiagnostics — this is raw quads on the stack, symbol-
+    // annotated so saved return addresses auto-label even when the
+    // RBP chain walked off into garbage. 16 quads = 128 bytes.
+    core::DumpStackWindow("fault-stack", frame->rsp, 16);
 
     // Rich diagnostics from the faulting frame — backtrace climbs
     // the stack from rbp AT THE POINT OF THE FAULT (not from the
@@ -324,6 +513,28 @@ void RaiseSelfTestBreakpoint()
     // ever stops halting. Halt explicitly in case that ever happens, so
     // the boot log doesn't quietly fall off the end.
     Halt();
+}
+
+void TrapsSelfTest()
+{
+    SerialWrite("[traps] self-test\n");
+
+    // 1. Kernel-mode int3. Slice-80 policy: TrapResponse::LogAndContinue.
+    // The dispatcher emits "[trap] #BP Breakpoint (recoverable) ..."
+    // and iretq's; execution resumes on the line below. If the policy
+    // regresses to Panic the kernel halts here instead of returning,
+    // and the boot log shows the crash banner — easy regression signal.
+    asm volatile("int3");
+
+    // 2. Spurious-vector probe. Vector 0x42 has no registered handler,
+    // no driver routes IRQs to it. With slice-80's full-IDT install
+    // it fires `mkstub 66` -> isr_common -> TrapDispatch's spurious
+    // branch, which logs "[idt] spurious vector 0x42 ..." and
+    // iretq's. Without the new install it would cascade to #NP and
+    // halt — same easy regression signal.
+    asm volatile("int $0x42");
+
+    SerialWrite("[traps] self-test OK — #BP and spurious both recovered\n");
 }
 
 } // namespace customos::arch

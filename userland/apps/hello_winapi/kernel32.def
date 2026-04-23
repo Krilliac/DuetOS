@@ -70,3 +70,82 @@ EXPORTS
     CreateRemoteThread
     ResumeThread
     GetExitCodeProcess
+    ; Batch 22 — timer + voluntary yield
+    Sleep
+    SwitchToThread
+    ; Batch 23 — command line + environment
+    GetCommandLineW
+    GetCommandLineA
+    GetEnvironmentVariableW
+    GetEnvironmentStringsW
+    FreeEnvironmentStringsW
+    ; Batch 24 — file I/O (real handle table)
+    CreateFileW
+    ReadFile
+    CloseHandle
+    SetFilePointerEx
+    ; Batch 25 — file stat + module lookup
+    GetFileSizeEx
+    GetModuleHandleW
+    LoadLibraryW
+    GetProcAddress
+    FreeLibrary
+    ; Batch 26 — Win32 mutex (real waitqueue-backed)
+    CreateMutexW
+    ReleaseMutex
+    ; Batch 27 — console APIs
+    WriteConsoleW
+    GetConsoleMode
+    SetConsoleMode
+    GetConsoleCP
+    GetConsoleOutputCP
+    SetConsoleCP
+    SetConsoleOutputCP
+    OutputDebugStringW
+    ; Batch 28 — virtual memory
+    VirtualAlloc
+    VirtualFree
+    VirtualProtect
+    ; Batch 29 — wide-string helpers
+    lstrlenW
+    lstrcmpW
+    lstrcpyW
+    ; Batch 30 — system-info probes
+    IsWow64Process
+    GetVersionExW
+    ; Batch 31 — ANSI-byte string helpers
+    lstrlenA
+    lstrcmpA
+    lstrcpyA
+    ; Batch 32 — path-query stubs
+    GetModuleFileNameW
+    GetCurrentDirectoryW
+    SetCurrentDirectoryW
+    ; Batch 33 — encoding converters
+    MultiByteToWideChar
+    WideCharToMultiByte
+    ; Batch 34 — identity queries (kernel32 half)
+    GetComputerNameW
+    ; Batch 35 — system-directory queries
+    GetTempPathW
+    GetWindowsDirectoryW
+    GetSystemDirectoryW
+    ; Batch 36 — misc drives/error/format
+    GetLogicalDrives
+    GetDriveTypeW
+    SetErrorMode
+    FormatMessageW
+    ; Batch 37 — file attributes (kernel32 half)
+    GetFileAttributesW
+    SetFileAttributesW
+    ; Batch 40 — interlocked atomics
+    InterlockedIncrement
+    InterlockedDecrement
+    InterlockedCompareExchange
+    InterlockedExchange
+    InterlockedExchangeAdd
+    ; Batch 46 — real TLS
+    TlsAlloc
+    TlsFree
+    TlsGetValue
+    TlsSetValue

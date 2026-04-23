@@ -3,11 +3,13 @@
 #include "../arch/x86_64/cpu.h"
 #include "../arch/x86_64/gdt.h"
 #include "../arch/x86_64/serial.h"
+#include "../arch/x86_64/traps.h"
 #include "../core/klog.h"
 #include "../core/panic.h"
 #include "../core/process.h"
 #include "../core/recovery.h"
 #include "../cpu/percpu.h"
+#include "../debug/probes.h"
 #include "../mm/address_space.h"
 #include "../mm/frame_allocator.h"
 #include "../security/guard.h"
@@ -125,6 +127,31 @@ struct Task
     // only and native tasks leave this at 0 and never touch
     // MSR_FS_BASE; the save/restore is a no-op for them.
     u64 fs_base;
+
+    // Per-task IRQ nesting depth. Saved/restored across context
+    // switch so the global g_irq_depth tracks "how deep is the
+    // CURRENT task's nesting" correctly: a task A that blocks
+    // mid-IRQ-handler, is switched out, and later resumed has
+    // its depth preserved. Without this, the global counter
+    // leaked monotonically every time Schedule() abandoned a
+    // dispatch frame.
+    u64 irq_depth;
+
+    // Per-task debug-register state (DR0..DR3 + DR7). Mirrors
+    // the fs_base idiom: saved from the CPU just before
+    // ContextSwitch, restored into the CPU right after so each
+    // task's breakpoint set follows it across switches. Tasks
+    // without any breakpoints leave these zero — the save/
+    // restore is one read + one write per register and costs a
+    // handful of cycles in the non-debug case. DR6 is not
+    // saved: it's a status register the CPU manages across
+    // #DB delivery, and the breakpoint handler writes it back
+    // to its init value before returning anyway.
+    u64 dr0;
+    u64 dr1;
+    u64 dr2;
+    u64 dr3;
+    u64 dr7;
 };
 
 namespace
@@ -450,6 +477,17 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
     t->ticks_run = 0;
     t->schedin_tick = 0;
     t->fs_base = 0;
+    t->irq_depth = 0;
+    // No breakpoints on a fresh task. DR7 = 0 disables every slot
+    // (the architecture's MBS bit 10 flips to 1 on the first real
+    // install via the breakpoint manager — at that point DR7 is
+    // no longer zero and the load on next context-switch-in will
+    // carry the real value).
+    t->dr0 = 0;
+    t->dr1 = 0;
+    t->dr2 = 0;
+    t->dr3 = 0;
+    t->dr7 = 0;
 
     // Build the initial stack. ContextSwitch pops r15, r14, r13, r12,
     // rbp, rbx and then rets. So from bottom to top of the pre-planted
@@ -535,6 +573,7 @@ Task* SchedCreateUser(TaskEntry entry, void* arg, const char* name, core::Proces
 
     Task* t = SchedCreateInternal(entry, arg, name, TaskPriority::Normal, process->as);
     t->process = process;
+    KBP_PROBE_V(::customos::debug::ProbeId::kRing3Spawn, process->pid);
     // Refcount discipline: ProcessCreate returned refcount=1 (one
     // for the creating caller). The caller hands that reference off
     // to this Task — no retain needed. Subsequent Tasks that want
@@ -708,6 +747,33 @@ void Schedule()
         prev->fs_base = (static_cast<u64>(hi) << 32) | lo;
     }
 
+    // IRQ-depth handoff. Stash the outgoing task's current
+    // global depth, then load the incoming task's saved depth
+    // into the global so IrqNestDepth() reflects the resumed
+    // task's nesting. Without this the global leaks monotonically
+    // across switches (see traps.cpp comments).
+    prev->irq_depth = arch::IrqNestDepthRaw();
+    arch::IrqNestDepthSet(next->irq_depth);
+
+    // Debug-register handoff. Save outgoing task's DR0..DR3 + DR7
+    // from the CPU, then write the incoming task's values in.
+    // Tasks that never set a breakpoint leave these at zero (no
+    // slots enabled in DR7) so the load is a harmless "disable
+    // all four and clear addresses" sequence. See
+    // kernel/debug/breakpoints.h for the manager that drives
+    // the install path.
+    asm volatile("mov %%dr0, %0" : "=r"(prev->dr0));
+    asm volatile("mov %%dr1, %0" : "=r"(prev->dr1));
+    asm volatile("mov %%dr2, %0" : "=r"(prev->dr2));
+    asm volatile("mov %%dr3, %0" : "=r"(prev->dr3));
+    asm volatile("mov %%dr7, %0" : "=r"(prev->dr7));
+    asm volatile("mov %0, %%dr0" : : "r"(next->dr0));
+    asm volatile("mov %0, %%dr1" : : "r"(next->dr1));
+    asm volatile("mov %0, %%dr2" : : "r"(next->dr2));
+    asm volatile("mov %0, %%dr3" : : "r"(next->dr3));
+    asm volatile("mov %0, %%dr7" : : "r"(next->dr7));
+
+    KBP_PROBE_V(::customos::debug::ProbeId::kSchedContextSwitch, next->id);
     ContextSwitch(&prev->rsp, next->rsp);
     // When we return here, we're executing on a DIFFERENT task's
     // stack — whichever task got switched in to run us. The local
@@ -1184,6 +1250,80 @@ KillResult SchedKillByPid(u64 pid)
     // hit Schedule() naturally and die there.
     arch::Sti();
     return KillResult::Signaled;
+}
+
+// Walk every list that holds a Task and check two invariants:
+//   1. The 8-byte stack-bottom canary at stack_base[0..7] still
+//      matches kStackCanary — a broken canary is a confirmed
+//      kernel-stack overflow.
+//   2. The saved rsp is inside [stack_base, stack_base + size) —
+//      an out-of-range rsp means the task's control block was
+//      scribbled or the switch primer got corrupted, and
+//      resuming it would triple-fault.
+//
+// Each finding is logged individually with the offending task's
+// identity. Returns both counts so the runtime checker can
+// surface them as distinct HealthIssue codes.
+StackHealth SchedCheckTaskStacks()
+{
+    StackHealth out = {};
+    auto check = [&out](const Task* t)
+    {
+        if (t == nullptr)
+            return;
+        if (t->stack_base == nullptr)
+            return; // boot/idle task — no stack to check
+        const u64 got = *reinterpret_cast<const u64*>(t->stack_base);
+        if (got != kStackCanary)
+        {
+            ++out.canary_broken;
+            arch::SerialWrite("[health] STACK OVERFLOW detected task=");
+            arch::SerialWrite(t->name ? t->name : "<anon>");
+            arch::SerialWrite(" id=");
+            arch::SerialWriteHex(t->id);
+            arch::SerialWrite(" expected=");
+            arch::SerialWriteHex(kStackCanary);
+            arch::SerialWrite(" got=");
+            arch::SerialWriteHex(got);
+            arch::SerialWrite("\n");
+        }
+        // rsp of 0 means the task is currently running — its rsp
+        // lives in the CPU, not the control block, so skip the
+        // range check for it. Dead tasks on the zombie list also
+        // have rsp==0 after SchedExit blitzes the frame.
+        if (t->rsp != 0)
+        {
+            const u64 base = reinterpret_cast<u64>(t->stack_base);
+            const u64 top = base + t->stack_size;
+            if (t->rsp < base || t->rsp >= top)
+            {
+                ++out.rsp_out_of_range;
+                arch::SerialWrite("[health] RSP OUT OF RANGE task=");
+                arch::SerialWrite(t->name ? t->name : "<anon>");
+                arch::SerialWrite(" id=");
+                arch::SerialWriteHex(t->id);
+                arch::SerialWrite(" rsp=");
+                arch::SerialWriteHex(t->rsp);
+                arch::SerialWrite(" stack=[");
+                arch::SerialWriteHex(base);
+                arch::SerialWrite("..");
+                arch::SerialWriteHex(top);
+                arch::SerialWrite(")\n");
+            }
+        }
+    };
+    arch::Cli();
+    check(Current());
+    for (Task* t = g_run_head_normal; t != nullptr; t = t->next)
+        check(t);
+    for (Task* t = g_run_head_idle; t != nullptr; t = t->next)
+        check(t);
+    for (Task* t = g_sleep_head; t != nullptr; t = t->sleep_next)
+        check(t);
+    for (Task* t = g_zombies; t != nullptr; t = t->next)
+        check(t);
+    arch::Sti();
+    return out;
 }
 
 void SchedEnumerate(SchedEnumCb cb, void* cookie)

@@ -161,6 +161,18 @@ void PagingSelfTest();
 /// won't run again.
 void ProtectKernelImage();
 
+/// Overwrite the 4 KiB PTE flags for the page containing `virt`,
+/// keeping the physical frame unchanged. Splits the parent 2 MiB
+/// PS page if the range is still in the boot-time coarse mapping.
+/// Always OR'd with `kPagePresent` on write; `virt` must be 4 KiB-
+/// aligned and the page must already be mapped (panics otherwise).
+///
+/// The one legitimate caller outside of boot-time kernel-image
+/// hardening is the debug subsystem: patching / unpatching 0xCC
+/// int3 breakpoints into .text needs a brief W toggle. Use with
+/// care — a long-lived writable .text is a W^X hole.
+void SetPteFlags4K(u64 virt, u64 new_flags);
+
 /*
  * User-pointer copy helpers.
  *

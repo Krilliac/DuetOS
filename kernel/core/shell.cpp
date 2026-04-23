@@ -1,15 +1,22 @@
 #include "shell.h"
 
 #include "../arch/x86_64/cpu.h"
+#include "../arch/x86_64/cpu_info.h"
 #include "../arch/x86_64/hpet.h"
 #include "../arch/x86_64/lapic.h"
 #include "../arch/x86_64/rtc.h"
 #include "../arch/x86_64/serial.h"
+#include "../arch/x86_64/smbios.h"
 #include "../arch/x86_64/smp.h"
+#include "../arch/x86_64/thermal.h"
 #include "../arch/x86_64/timer.h"
+#include "../drivers/gpu/gpu.h"
 #include "../drivers/input/ps2kbd.h"
 #include "../drivers/input/ps2mouse.h"
+#include "../drivers/net/net.h"
 #include "../drivers/pci/pci.h"
+#include "../drivers/power/power.h"
+#include "../net/stack.h"
 #include "../drivers/storage/block.h"
 #include "../drivers/video/console.h"
 #include "../drivers/video/framebuffer.h"
@@ -20,17 +27,23 @@
 #include "../fs/ramfs.h"
 #include "../fs/tmpfs.h"
 #include "../fs/vfs.h"
+#include "../debug/breakpoints.h"
+#include "../debug/probes.h"
 #include "../mm/address_space.h"
 #include "../mm/frame_allocator.h"
 #include "../mm/kheap.h"
 #include "../mm/paging.h"
 #include "../sched/sched.h"
+#include "../security/attack_sim.h"
 #include "../security/guard.h"
 #include "elf_loader.h"
+#include "hexdump.h"
 #include "klog.h"
 #include "process.h"
+#include "random.h"
 #include "reboot.h"
 #include "ring3_smoke.h"
+#include "runtime_checker.h"
 
 namespace customos::core
 {
@@ -279,6 +292,20 @@ void CmdHelp()
     ConsoleWriteln("  FB           FRAMEBUFFER GEOMETRY");
     ConsoleWriteln("  KBDSTATS     PS/2 KEYBOARD IRQ COUNTERS");
     ConsoleWriteln("  MOUSESTATS   PS/2 MOUSE IRQ COUNTERS");
+    ConsoleWriteln("  SMBIOS       BIOS / SYSTEM / CHASSIS INFO");
+    ConsoleWriteln("  POWER        AC / BATTERY / THERMAL SNAPSHOT");
+    ConsoleWriteln("  THERMAL      RE-READ MSR THERMAL SENSORS");
+    ConsoleWriteln("  GPU          LIST DISCOVERED GPUS");
+    ConsoleWriteln("  NIC          LIST NICS + MAC + LINK");
+    ConsoleWriteln("  ARP          ARP CACHE + STATS");
+    ConsoleWriteln("  IPV4         IPV4 RX COUNTERS");
+    ConsoleWriteln("  HEALTH       RUN RUNTIME INVARIANT SCAN (HEAP/FRAMES/SCHED/CRX)");
+    ConsoleWriteln("  UUID [N]     GENERATE N V4 UUIDS FROM THE ENTROPY POOL");
+    ConsoleWriteln("  ATTACKSIM    RUN RED-TEAM ATTACK SUITE (IDT/GDT/LSTAR/CANARY/LBA0)");
+    ConsoleWriteln("  MEMDUMP A [N]  HEX+ASCII DUMP OF KERNEL MEMORY -> SERIAL");
+    ConsoleWriteln("  INSTR A [N]  INSTRUCTION-BYTE DUMP AT ADDRESS -> SERIAL");
+    ConsoleWriteln("  BP ...       KERNEL BREAKPOINTS (SOFTWARE + HARDWARE)");
+    ConsoleWriteln("  DUMPSTATE    SNAPSHOT EVERY KERNEL SUBSYSTEM -> SERIAL");
     ConsoleWriteln("");
     ConsoleWriteln("RUNTIME CONTROL:");
     ConsoleWriteln("  LOGLEVEL [L] GET / SET KLOG THRESHOLD (D/I/W/E)");
@@ -1214,18 +1241,21 @@ void CmdFind(u32 argc, char** argv)
 // dispatched in Dispatch — keeping the two in sync is the
 // price of not having reflection.
 static const char* const kCommandSet[] = {
-    "help",    "about",  "version",  "clear",    "uptime",   "date",      "windows",    "mode",     "ls",
-    "cat",     "touch",  "rm",       "echo",     "cp",       "mv",        "wc",         "head",     "tail",
-    "dmesg",   "stats",  "mem",      "history",  "set",      "unset",     "env",        "alias",    "unalias",
-    "sysinfo", "source", "man",      "grep",     "find",     "time",      "which",      "seq",      "sort",
-    "uniq",    "cpuid",  "cr",       "rflags",   "tsc",      "hpet",      "ticks",      "msr",      "lapic",
-    "smp",     "lspci",  "heap",     "paging",   "fb",       "kbdstats",  "mousestats", "loglevel", "logcolor",
-    "getenv",  "yield",  "reboot",   "halt",     "uname",    "whoami",    "hostname",   "pwd",      "true",
-    "false",   "mount",  "lsmod",    "lsblk",    "lsgpt",    "free",      "ps",         "spawn",    "readelf",
-    "hexdump", "stat",   "basename", "dirname",  "cal",      "sleep",     "reset",      "tac",      "nl",
-    "rev",     "expr",   "color",    "rand",     "flushtlb", "checksum",  "repeat",     "kill",     "exec",
-    "metrics", "trace",  "read",     "guard",    "top",      "fatcat",    "fatls",      "fatwrite", "fatappend",
-    "fatnew",  "fatrm",  "fattrunc", "fatmkdir", "fatrmdir", "linuxexec", "translate",
+    "help",      "about",   "version",    "clear",    "uptime",   "date",      "windows",    "mode",     "ls",
+    "cat",       "touch",   "rm",         "echo",     "cp",       "mv",        "wc",         "head",     "tail",
+    "dmesg",     "stats",   "mem",        "history",  "set",      "unset",     "env",        "alias",    "unalias",
+    "sysinfo",   "source",  "man",        "grep",     "find",     "time",      "which",      "seq",      "sort",
+    "uniq",      "cpuid",   "cr",         "rflags",   "tsc",      "hpet",      "ticks",      "msr",      "lapic",
+    "smp",       "lspci",   "heap",       "paging",   "fb",       "kbdstats",  "mousestats", "loglevel", "logcolor",
+    "getenv",    "yield",   "reboot",     "halt",     "uname",    "whoami",    "hostname",   "pwd",      "true",
+    "false",     "mount",   "lsmod",      "lsblk",    "lsgpt",    "free",      "ps",         "spawn",    "readelf",
+    "hexdump",   "stat",    "basename",   "dirname",  "cal",      "sleep",     "reset",      "tac",      "nl",
+    "rev",       "expr",    "color",      "rand",     "flushtlb", "checksum",  "repeat",     "kill",     "exec",
+    "metrics",   "trace",   "read",       "guard",    "top",      "fatcat",    "fatls",      "fatwrite", "fatappend",
+    "fatnew",    "fatrm",   "fattrunc",   "fatmkdir", "fatrmdir", "linuxexec", "translate",  "smbios",   "power",
+    "battery",   "thermal", "temp",       "gpu",      "lsgpu",    "nic",       "lsnic",      "ip",       "arp",
+    "ipv4",      "uuid",    "uuidgen",    "health",   "checkup",  "attacksim", "redteam",    "memdump",  "instr",
+    "dumpstate", "bp",      "breakpoint",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -2069,6 +2099,985 @@ void CmdMouseStats()
     ConsoleWriteChar('\n');
     ConsoleWrite("MOUSE DROPPED:  ");
     WriteU64Dec(s.bytes_dropped);
+    ConsoleWriteChar('\n');
+}
+
+// ------ slice 52: observability commands for the v0 subsystems ------
+
+void CmdSmbios()
+{
+    const auto& s = customos::arch::SmbiosGet();
+    if (!s.present)
+    {
+        ConsoleWriteln("SMBIOS: (no entry point found)");
+        return;
+    }
+    ConsoleWrite("BIOS:         ");
+    ConsoleWrite(s.bios_vendor);
+    ConsoleWrite(" ");
+    ConsoleWriteln(s.bios_version);
+    ConsoleWrite("SYSTEM:       ");
+    ConsoleWrite(s.system_manufacturer);
+    ConsoleWrite(" ");
+    ConsoleWrite(s.system_product);
+    ConsoleWrite(" v=");
+    ConsoleWriteln(s.system_version);
+    ConsoleWrite("CHASSIS:      ");
+    ConsoleWrite(customos::arch::ChassisTypeName(s.chassis_type));
+    ConsoleWriteln(customos::arch::SmbiosIsLaptopChassis() ? " (laptop-like)" : "");
+    ConsoleWrite("CPU:          ");
+    ConsoleWrite(s.cpu_manufacturer);
+    ConsoleWrite(" ");
+    ConsoleWriteln(s.cpu_version);
+}
+
+void CmdPower()
+{
+    const auto snap = customos::drivers::power::PowerSnapshotRead();
+    ConsoleWrite("CHASSIS:      ");
+    ConsoleWriteln(snap.chassis_is_laptop ? "laptop-like" : "desktop/server");
+    ConsoleWrite("AC:           ");
+    ConsoleWriteln(customos::drivers::power::AcStateName(snap.ac));
+    ConsoleWrite("BATTERY:      ");
+    ConsoleWriteln(customos::drivers::power::BatteryStateName(snap.battery.state));
+    ConsoleWrite("CPU TEMP:     ");
+    if (snap.cpu_temp_c != 0)
+    {
+        WriteU64Dec(snap.cpu_temp_c);
+        ConsoleWriteln("C");
+    }
+    else
+    {
+        ConsoleWriteln("(not available)");
+    }
+    ConsoleWrite("PACKAGE TEMP: ");
+    if (snap.package_temp_c != 0)
+    {
+        WriteU64Dec(snap.package_temp_c);
+        ConsoleWriteln("C");
+    }
+    else
+    {
+        ConsoleWriteln("(not available)");
+    }
+    ConsoleWrite("TJ MAX:       ");
+    WriteU64Dec(snap.tj_max_c);
+    ConsoleWriteln("C");
+    ConsoleWrite("THROTTLE HIT: ");
+    ConsoleWriteln(snap.thermal_throttle_hit ? "YES" : "NO");
+    if (snap.backend_is_stub)
+    {
+        ConsoleWriteln("(backend is a stub — AC/battery need AML interpreter; thermal is real)");
+    }
+}
+
+void CmdThermal()
+{
+    const auto r = customos::arch::ThermalRead();
+    if (!r.valid)
+    {
+        ConsoleWriteln("THERMAL: sensors report invalid (likely emulator)");
+        return;
+    }
+    ConsoleWrite("CORE TEMP:    ");
+    WriteU64Dec(r.core_temp_c);
+    ConsoleWriteln("C");
+    ConsoleWrite("PACKAGE TEMP: ");
+    WriteU64Dec(r.package_temp_c);
+    ConsoleWriteln("C");
+    ConsoleWrite("TJ MAX:       ");
+    WriteU64Dec(r.tj_max_c);
+    ConsoleWriteln("C");
+    ConsoleWrite("THROTTLE:     ");
+    ConsoleWriteln(r.thermal_throttle_hit ? "HIT" : "clear");
+}
+
+void CmdGpu()
+{
+    const u64 n = customos::drivers::gpu::GpuCount();
+    if (n == 0)
+    {
+        ConsoleWriteln("GPU: (none discovered)");
+        return;
+    }
+    for (u64 i = 0; i < n; ++i)
+    {
+        const auto& g = customos::drivers::gpu::Gpu(i);
+        ConsoleWrite("GPU ");
+        WriteU64Dec(i);
+        ConsoleWrite(": vid=");
+        WriteU64Hex(g.vendor_id, 4);
+        ConsoleWrite(" did=");
+        WriteU64Hex(g.device_id, 4);
+        ConsoleWrite("  vendor=");
+        ConsoleWrite(g.vendor);
+        ConsoleWrite(" tier=");
+        ConsoleWrite(g.tier);
+        if (g.family != nullptr)
+        {
+            ConsoleWrite(" family=");
+            ConsoleWrite(g.family);
+        }
+        ConsoleWriteChar('\n');
+    }
+}
+
+void CmdNic()
+{
+    const u64 n = customos::drivers::net::NicCount();
+    if (n == 0)
+    {
+        ConsoleWriteln("NIC: (none discovered)");
+        return;
+    }
+    for (u64 i = 0; i < n; ++i)
+    {
+        const auto& nic = customos::drivers::net::Nic(i);
+        ConsoleWrite("NIC ");
+        WriteU64Dec(i);
+        ConsoleWrite(": vid=");
+        WriteU64Hex(nic.vendor_id, 4);
+        ConsoleWrite(" did=");
+        WriteU64Hex(nic.device_id, 4);
+        ConsoleWrite("  vendor=");
+        ConsoleWrite(nic.vendor);
+        if (nic.family != nullptr)
+        {
+            ConsoleWrite(" family=");
+            ConsoleWrite(nic.family);
+        }
+        if (nic.mac_valid)
+        {
+            ConsoleWrite(" mac=");
+            for (u64 b = 0; b < 6; ++b)
+            {
+                if (b != 0)
+                    ConsoleWrite(":");
+                WriteU64Hex(nic.mac[b], 2);
+            }
+            ConsoleWrite(nic.link_up ? " link=UP" : " link=DOWN");
+        }
+        ConsoleWriteChar('\n');
+    }
+}
+
+void CmdArp()
+{
+    const auto s = customos::net::ArpStatsRead();
+    ConsoleWrite("ARP HITS:       ");
+    WriteU64Dec(s.lookups_hit);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("ARP MISSES:     ");
+    WriteU64Dec(s.lookups_miss);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("ARP INSERTS:    ");
+    WriteU64Dec(s.inserts);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("ARP EVICTIONS:  ");
+    WriteU64Dec(s.evictions);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("ARP RX:         ");
+    WriteU64Dec(s.rx_packets);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("ARP REJECTS:    ");
+    WriteU64Dec(s.rx_rejects);
+    ConsoleWriteChar('\n');
+}
+
+void CmdHealth(u32 argc, char** argv)
+{
+    // Run a fresh scan (so the report reflects the current
+    // moment, not the last heartbeat), then print the full
+    // report: each issue kind with its cumulative count plus
+    // this-scan and total-since-boot summaries.
+    const u64 this_scan = customos::core::RuntimeCheckerScan();
+    const auto& h = customos::core::RuntimeCheckerStatusRead();
+    (void)argc;
+    (void)argv;
+    ConsoleWrite("SCANS RUN:        ");
+    WriteU64Dec(h.scans_run);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("THIS SCAN:        ");
+    WriteU64Dec(this_scan);
+    ConsoleWriteln(this_scan == 0 ? " issues (CLEAN)" : " issues");
+    ConsoleWrite("TOTAL ISSUES:     ");
+    WriteU64Dec(h.issues_found_total);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("BASELINE CAPTURED:");
+    ConsoleWriteln(h.baseline_captured ? " YES" : " NO");
+    if (h.issues_found_total > 0)
+    {
+        ConsoleWriteln("PER-ISSUE BREAKDOWN:");
+        for (u32 i = 1; i < u32(customos::core::HealthIssue::Count); ++i)
+        {
+            const u64 c = h.per_issue_count[i];
+            if (c == 0)
+                continue;
+            ConsoleWrite("  ");
+            WriteU64Dec(c);
+            ConsoleWrite(" x ");
+            ConsoleWriteln(customos::core::HealthIssueName(customos::core::HealthIssue(i)));
+        }
+    }
+}
+
+// Forward decl — definition is later in the file (used by FAT commands).
+bool ParseU64Str(const char* s, customos::u64* out);
+
+void CmdMemDump(u32 argc, char** argv)
+{
+    // memdump <hex-addr> [len]   — dump arbitrary kernel memory.
+    // Uses the SAFE variant: any line whose page is outside the
+    // known-mapped kernel ranges emits "<unreadable>" instead of
+    // faulting, so a typo'd address is a diagnostic, not a crash.
+    // Output is written to COM1 (serial) — too wide for the 80-col
+    // framebuffer console; the shell prompt confirms where to look.
+    if (argc < 2)
+    {
+        ConsoleWriteln("MEMDUMP: USAGE: MEMDUMP <HEX-ADDR> [LEN-BYTES]");
+        ConsoleWriteln("         OUTPUT GOES TO COM1 (SERIAL LOG)");
+        return;
+    }
+    customos::u64 addr = 0;
+    if (!ParseU64Str(argv[1], &addr))
+    {
+        ConsoleWriteln("MEMDUMP: BAD ADDRESS");
+        return;
+    }
+    customos::u64 len = 64;
+    if (argc >= 3 && !ParseU64Str(argv[2], &len))
+    {
+        ConsoleWriteln("MEMDUMP: BAD LENGTH");
+        return;
+    }
+    if (len == 0)
+    {
+        ConsoleWriteln("MEMDUMP: ZERO LENGTH");
+        return;
+    }
+    customos::core::DumpHexRegionSafe("memdump", addr, static_cast<customos::u32>(len), 0);
+    ConsoleWriteln("MEMDUMP: WROTE TO COM1");
+}
+
+const char* BpKindName(customos::debug::BpKind k)
+{
+    switch (k)
+    {
+    case customos::debug::BpKind::Software:
+        return "SW";
+    case customos::debug::BpKind::HwExecute:
+        return "HW-X";
+    case customos::debug::BpKind::HwWrite:
+        return "HW-W";
+    case customos::debug::BpKind::HwReadWrite:
+        return "HW-RW";
+    }
+    return "?";
+}
+
+const char* BpErrName(customos::debug::BpError e)
+{
+    switch (e)
+    {
+    case customos::debug::BpError::None:
+        return "OK";
+    case customos::debug::BpError::InvalidAddress:
+        return "INVALID-ADDRESS";
+    case customos::debug::BpError::TableFull:
+        return "TABLE-FULL";
+    case customos::debug::BpError::NoHwSlot:
+        return "NO-HW-SLOT";
+    case customos::debug::BpError::BadKind:
+        return "BAD-KIND";
+    case customos::debug::BpError::NotInstalled:
+        return "NOT-INSTALLED";
+    case customos::debug::BpError::SmpUnsupported:
+        return "SMP-UNSUPPORTED";
+    }
+    return "?";
+}
+
+// Consume a leading `--suspend` / `-s` flag from argv starting at
+// `start`. If present, set *suspend and slide argv left by one so
+// the remaining args are positional. Returns the new argc.
+u32 TakeSuspendFlag(u32 argc, char** argv, u32 start, bool* suspend)
+{
+    if (argc <= start || argv[start] == nullptr)
+        return argc;
+    if (StrEq(argv[start], "--suspend") || StrEq(argv[start], "-s"))
+    {
+        *suspend = true;
+        for (u32 i = start; i + 1 < argc; ++i)
+            argv[i] = argv[i + 1];
+        return argc - 1;
+    }
+    return argc;
+}
+
+void PrintBpRegs(const customos::arch::TrapFrame& f)
+{
+    // Keep this dense — the framebuffer is 80 cols and the TrapFrame
+    // has 15 GPRs + control. Group into rows the operator can scan.
+    ConsoleWrite("  rip=");
+    WriteU64Hex(f.rip, 16);
+    ConsoleWrite(" cs=");
+    WriteU64Hex(f.cs, 4);
+    ConsoleWrite(" flags=");
+    WriteU64Hex(f.rflags, 16);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("  rsp=");
+    WriteU64Hex(f.rsp, 16);
+    ConsoleWrite(" ss=");
+    WriteU64Hex(f.ss, 4);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("  rax=");
+    WriteU64Hex(f.rax, 16);
+    ConsoleWrite(" rbx=");
+    WriteU64Hex(f.rbx, 16);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("  rcx=");
+    WriteU64Hex(f.rcx, 16);
+    ConsoleWrite(" rdx=");
+    WriteU64Hex(f.rdx, 16);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("  rsi=");
+    WriteU64Hex(f.rsi, 16);
+    ConsoleWrite(" rdi=");
+    WriteU64Hex(f.rdi, 16);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("  rbp=");
+    WriteU64Hex(f.rbp, 16);
+    ConsoleWrite(" r8 =");
+    WriteU64Hex(f.r8, 16);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("  r9 =");
+    WriteU64Hex(f.r9, 16);
+    ConsoleWrite(" r10=");
+    WriteU64Hex(f.r10, 16);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("  r11=");
+    WriteU64Hex(f.r11, 16);
+    ConsoleWrite(" r12=");
+    WriteU64Hex(f.r12, 16);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("  r13=");
+    WriteU64Hex(f.r13, 16);
+    ConsoleWrite(" r14=");
+    WriteU64Hex(f.r14, 16);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("  r15=");
+    WriteU64Hex(f.r15, 16);
+    ConsoleWrite(" vec=");
+    WriteU64Hex(f.vector, 2);
+    ConsoleWriteChar('\n');
+}
+
+void CmdBp(u32 argc, char** argv)
+{
+    // bp list                                 — list installed BPs
+    // bp set    [--suspend] <hex-addr>        — software BP
+    // bp hw     [--suspend] <hex-addr> [x|w|rw] [len]  — HW BP
+    // bp clear  <id>                          — remove BP
+    // bp test                                 — self-test
+    // bp stopped                              — list suspended tasks
+    // bp regs   <id>                          — dump stopped regs
+    // bp mem    <id> <hex-addr> [len]         — dump stopped memory
+    // bp resume <id>                          — resume stopped task
+    // bp step   <id>                          — single-step + re-suspend
+    if (argc < 2)
+    {
+        ConsoleWriteln("BP: USAGE:");
+        ConsoleWriteln("    BP LIST");
+        ConsoleWriteln("    BP SET    [--SUSPEND] <HEX-ADDR>               (SOFTWARE)");
+        ConsoleWriteln("    BP HW     [--SUSPEND] <HEX-ADDR> [X|W|RW] [LEN] (HARDWARE)");
+        ConsoleWriteln("    BP CLEAR  <ID>                                  (REMOVE)");
+        ConsoleWriteln("    BP TEST                                         (SELF-TEST)");
+        ConsoleWriteln("    BP STOPPED                                      (LIST SUSPENDED)");
+        ConsoleWriteln("    BP REGS   <ID>                                  (DUMP REGS)");
+        ConsoleWriteln("    BP MEM    <ID> <HEX-ADDR> [LEN]                 (DUMP USER MEM)");
+        ConsoleWriteln("    BP RESUME <ID>                                  (WAKE STOPPED)");
+        ConsoleWriteln("    BP STEP   <ID>                                  (STEP + RE-SUSPEND)");
+        return;
+    }
+
+    const char* sub = argv[1];
+
+    if (StrEq(sub, "list"))
+    {
+        customos::debug::BpInfo infos[32];
+        const usize n = customos::debug::BpList(infos, 32);
+        if (n == 0)
+        {
+            ConsoleWriteln("BP: NONE INSTALLED");
+            return;
+        }
+        ConsoleWriteln("BP: ID KIND   ADDR              HITS  STATE");
+        for (usize i = 0; i < n; ++i)
+        {
+            ConsoleWrite("  ");
+            WriteU64Dec(infos[i].id.value);
+            ConsoleWrite("  ");
+            ConsoleWrite(BpKindName(infos[i].kind));
+            ConsoleWrite("  ");
+            WriteU64Hex(infos[i].address, 16);
+            ConsoleWrite("  ");
+            WriteU64Dec(infos[i].hit_count);
+            ConsoleWrite("  ");
+            if (infos[i].is_stopped)
+            {
+                ConsoleWrite("STOPPED(task=");
+                WriteU64Dec(infos[i].stopped_task_id);
+                ConsoleWriteChar(')');
+            }
+            else if (infos[i].suspend_on_hit)
+            {
+                ConsoleWrite("ARMED-SUSPEND");
+            }
+            else
+            {
+                ConsoleWrite("ARMED-LOG");
+            }
+            ConsoleWriteChar('\n');
+        }
+        return;
+    }
+
+    if (StrEq(sub, "set"))
+    {
+        bool suspend = false;
+        argc = TakeSuspendFlag(argc, argv, 2, &suspend);
+        if (argc < 3)
+        {
+            ConsoleWriteln("BP SET: NEED <HEX-ADDR>");
+            return;
+        }
+        customos::u64 addr = 0;
+        if (!ParseU64Str(argv[2], &addr))
+        {
+            ConsoleWriteln("BP SET: BAD ADDRESS");
+            return;
+        }
+        customos::debug::BpError err = customos::debug::BpError::None;
+        const customos::debug::BreakpointId id = customos::debug::BpInstallSoftware(addr, suspend, &err);
+        if (err != customos::debug::BpError::None)
+        {
+            ConsoleWrite("BP SET: ");
+            ConsoleWriteln(BpErrName(err));
+            return;
+        }
+        ConsoleWrite("BP SET: OK ID=");
+        WriteU64Dec(id.value);
+        ConsoleWriteln(suspend ? " (SUSPEND-ON-HIT)" : "");
+        return;
+    }
+
+    if (StrEq(sub, "hw"))
+    {
+        bool suspend = false;
+        argc = TakeSuspendFlag(argc, argv, 2, &suspend);
+        if (argc < 3)
+        {
+            ConsoleWriteln("BP HW: NEED <HEX-ADDR> [X|W|RW] [LEN]");
+            return;
+        }
+        customos::u64 addr = 0;
+        if (!ParseU64Str(argv[2], &addr))
+        {
+            ConsoleWriteln("BP HW: BAD ADDRESS");
+            return;
+        }
+        customos::debug::BpKind kind = customos::debug::BpKind::HwExecute;
+        customos::debug::BpLen len = customos::debug::BpLen::One;
+        if (argc >= 4)
+        {
+            if (StrEq(argv[3], "x"))
+                kind = customos::debug::BpKind::HwExecute;
+            else if (StrEq(argv[3], "w"))
+                kind = customos::debug::BpKind::HwWrite;
+            else if (StrEq(argv[3], "rw"))
+                kind = customos::debug::BpKind::HwReadWrite;
+            else
+            {
+                ConsoleWriteln("BP HW: BAD KIND (USE X|W|RW)");
+                return;
+            }
+        }
+        if (argc >= 5 && kind != customos::debug::BpKind::HwExecute)
+        {
+            customos::u64 ln = 0;
+            if (!ParseU64Str(argv[4], &ln))
+            {
+                ConsoleWriteln("BP HW: BAD LEN");
+                return;
+            }
+            switch (ln)
+            {
+            case 1:
+                len = customos::debug::BpLen::One;
+                break;
+            case 2:
+                len = customos::debug::BpLen::Two;
+                break;
+            case 4:
+                len = customos::debug::BpLen::Four;
+                break;
+            case 8:
+                len = customos::debug::BpLen::Eight;
+                break;
+            default:
+                ConsoleWriteln("BP HW: LEN MUST BE 1/2/4/8");
+                return;
+            }
+        }
+        customos::debug::BpError err = customos::debug::BpError::None;
+        const customos::debug::BreakpointId id =
+            customos::debug::BpInstallHardware(addr, kind, len, /*owner_pid=*/0, suspend, &err);
+        if (err != customos::debug::BpError::None)
+        {
+            ConsoleWrite("BP HW: ");
+            ConsoleWriteln(BpErrName(err));
+            return;
+        }
+        ConsoleWrite("BP HW: OK ID=");
+        WriteU64Dec(id.value);
+        ConsoleWriteln(suspend ? " (SUSPEND-ON-HIT)" : "");
+        return;
+    }
+
+    if (StrEq(sub, "clear") || StrEq(sub, "rm"))
+    {
+        if (argc < 3)
+        {
+            ConsoleWriteln("BP CLEAR: NEED <ID>");
+            return;
+        }
+        customos::u64 id_val = 0;
+        if (!ParseU64Str(argv[2], &id_val))
+        {
+            ConsoleWriteln("BP CLEAR: BAD ID");
+            return;
+        }
+        const customos::debug::BpError err =
+            customos::debug::BpRemove({static_cast<customos::u32>(id_val)}, /*requester_pid=*/0);
+        ConsoleWrite("BP CLEAR: ");
+        ConsoleWriteln(BpErrName(err));
+        return;
+    }
+
+    if (StrEq(sub, "test"))
+    {
+        const bool ok = customos::debug::BpSelfTest();
+        ConsoleWriteln(ok ? "BP TEST: OK" : "BP TEST: FAILED (SEE SERIAL LOG)");
+        return;
+    }
+
+    if (StrEq(sub, "stopped"))
+    {
+        customos::debug::BpInfo infos[32];
+        const usize n = customos::debug::BpList(infos, 32);
+        usize any = 0;
+        for (usize i = 0; i < n; ++i)
+        {
+            if (!infos[i].is_stopped)
+                continue;
+            if (any == 0)
+                ConsoleWriteln("BP STOPPED: BP-ID  TASK  ADDR");
+            ConsoleWrite("  ");
+            WriteU64Dec(infos[i].id.value);
+            ConsoleWrite("    ");
+            WriteU64Dec(infos[i].stopped_task_id);
+            ConsoleWrite("    ");
+            WriteU64Hex(infos[i].address, 16);
+            ConsoleWriteChar('\n');
+            ++any;
+        }
+        if (any == 0)
+            ConsoleWriteln("BP STOPPED: NONE");
+        return;
+    }
+
+    if (StrEq(sub, "regs"))
+    {
+        if (argc < 3)
+        {
+            ConsoleWriteln("BP REGS: NEED <ID>");
+            return;
+        }
+        customos::u64 id_val = 0;
+        if (!ParseU64Str(argv[2], &id_val))
+        {
+            ConsoleWriteln("BP REGS: BAD ID");
+            return;
+        }
+        customos::arch::TrapFrame f;
+        if (!customos::debug::BpReadRegs({static_cast<customos::u32>(id_val)}, &f))
+        {
+            ConsoleWriteln("BP REGS: NO TASK STOPPED ON THAT ID");
+            return;
+        }
+        ConsoleWrite("BP REGS ID=");
+        WriteU64Dec(id_val);
+        ConsoleWriteln(":");
+        PrintBpRegs(f);
+        return;
+    }
+
+    if (StrEq(sub, "mem"))
+    {
+        if (argc < 4)
+        {
+            ConsoleWriteln("BP MEM: NEED <ID> <HEX-ADDR> [LEN]");
+            return;
+        }
+        customos::u64 id_val = 0;
+        customos::u64 addr = 0;
+        if (!ParseU64Str(argv[2], &id_val) || !ParseU64Str(argv[3], &addr))
+        {
+            ConsoleWriteln("BP MEM: BAD ARGS");
+            return;
+        }
+        customos::u64 len = 64; // default
+        if (argc >= 5)
+        {
+            if (!ParseU64Str(argv[4], &len))
+            {
+                ConsoleWriteln("BP MEM: BAD LEN");
+                return;
+            }
+        }
+        if (len > 256)
+            len = 256; // shell cap — longer dumps belong on serial
+        customos::u8 buf[256];
+        const customos::u64 got = customos::debug::BpReadMem({static_cast<customos::u32>(id_val)}, addr, buf, len);
+        if (got == 0)
+        {
+            ConsoleWriteln("BP MEM: UNREADABLE (UNMAPPED OR NO STOPPED TASK)");
+            return;
+        }
+        // Hex + ASCII, 16 bytes per line.
+        for (customos::u64 off = 0; off < got; off += 16)
+        {
+            WriteU64Hex(addr + off, 16);
+            ConsoleWrite(": ");
+            for (customos::u64 i = 0; i < 16; ++i)
+            {
+                if (off + i < got)
+                {
+                    const customos::u8 b = buf[off + i];
+                    const char hi = static_cast<char>("0123456789abcdef"[(b >> 4) & 0xF]);
+                    const char lo = static_cast<char>("0123456789abcdef"[b & 0xF]);
+                    ConsoleWriteChar(hi);
+                    ConsoleWriteChar(lo);
+                }
+                else
+                {
+                    ConsoleWrite("  ");
+                }
+                ConsoleWriteChar(' ');
+            }
+            ConsoleWriteChar(' ');
+            for (customos::u64 i = 0; i < 16 && off + i < got; ++i)
+            {
+                const customos::u8 b = buf[off + i];
+                ConsoleWriteChar((b >= 0x20 && b < 0x7F) ? static_cast<char>(b) : '.');
+            }
+            ConsoleWriteChar('\n');
+        }
+        return;
+    }
+
+    if (StrEq(sub, "resume"))
+    {
+        if (argc < 3)
+        {
+            ConsoleWriteln("BP RESUME: NEED <ID>");
+            return;
+        }
+        customos::u64 id_val = 0;
+        if (!ParseU64Str(argv[2], &id_val))
+        {
+            ConsoleWriteln("BP RESUME: BAD ID");
+            return;
+        }
+        const customos::debug::BpError err = customos::debug::BpResume({static_cast<customos::u32>(id_val)});
+        ConsoleWrite("BP RESUME: ");
+        ConsoleWriteln(BpErrName(err));
+        return;
+    }
+
+    if (StrEq(sub, "step"))
+    {
+        if (argc < 3)
+        {
+            ConsoleWriteln("BP STEP: NEED <ID>");
+            return;
+        }
+        customos::u64 id_val = 0;
+        if (!ParseU64Str(argv[2], &id_val))
+        {
+            ConsoleWriteln("BP STEP: BAD ID");
+            return;
+        }
+        const customos::debug::BpError err = customos::debug::BpStep({static_cast<customos::u32>(id_val)});
+        ConsoleWrite("BP STEP: ");
+        ConsoleWriteln(BpErrName(err));
+        return;
+    }
+
+    ConsoleWriteln("BP: UNKNOWN SUBCOMMAND (HELP: BP WITHOUT ARGS)");
+}
+
+const char* ProbeArmName(customos::debug::ProbeArm a)
+{
+    switch (a)
+    {
+    case customos::debug::ProbeArm::Disarmed:
+        return "DISARMED";
+    case customos::debug::ProbeArm::ArmedLog:
+        return "ARMED-LOG";
+    case customos::debug::ProbeArm::ArmedSuspend:
+        return "ARMED-SUSPEND";
+    }
+    return "?";
+}
+
+void CmdProbe(u32 argc, char** argv)
+{
+    // probe list
+    // probe arm <name> [--suspend]      — ArmedLog (or ArmedSuspend)
+    // probe disarm <name>
+    // probe arm-all                     — arm every probe ArmedLog
+    // probe disarm-all                  — disarm everything
+    if (argc < 2)
+    {
+        ConsoleWriteln("PROBE: USAGE:");
+        ConsoleWriteln("    PROBE LIST                         LIST + COUNTS + ARM STATE");
+        ConsoleWriteln("    PROBE ARM <NAME> [--SUSPEND]       ARM ONE PROBE");
+        ConsoleWriteln("    PROBE DISARM <NAME>                DISARM ONE PROBE");
+        ConsoleWriteln("    PROBE ARM-ALL                      ARM-LOG EVERY PROBE (NOISY)");
+        ConsoleWriteln("    PROBE DISARM-ALL                   DISARM EVERYTHING");
+        return;
+    }
+    const char* sub = argv[1];
+    if (StrEq(sub, "list"))
+    {
+        customos::debug::ProbeInfo infos[16];
+        const customos::u64 n = customos::debug::ProbeList(infos, 16);
+        if (n == 0)
+        {
+            ConsoleWriteln("PROBE: NONE REGISTERED");
+            return;
+        }
+        ConsoleWriteln("PROBE: NAME                     ARM            FIRES");
+        for (customos::u64 i = 0; i < n; ++i)
+        {
+            ConsoleWrite("  ");
+            ConsoleWrite(infos[i].name);
+            // pad name to column
+            for (customos::u64 pad = 0; pad + 0 < 24; ++pad)
+            {
+                const char* p = infos[i].name;
+                customos::u64 len = 0;
+                while (p[len] != 0)
+                    ++len;
+                if (pad + len >= 24)
+                    break;
+                if (pad + len < 24)
+                {
+                    ConsoleWriteChar(' ');
+                }
+                if (pad + len + 1 >= 24)
+                    break;
+            }
+            ConsoleWrite(ProbeArmName(infos[i].arm));
+            ConsoleWrite("  ");
+            WriteU64Dec(infos[i].fire_count);
+            ConsoleWriteChar('\n');
+        }
+        return;
+    }
+    if (StrEq(sub, "arm") || StrEq(sub, "disarm"))
+    {
+        if (argc < 3)
+        {
+            ConsoleWriteln("PROBE: NEED <NAME>");
+            return;
+        }
+        const customos::debug::ProbeId id = customos::debug::ProbeByName(argv[2]);
+        if (id == customos::debug::ProbeId::kCount)
+        {
+            ConsoleWriteln("PROBE: UNKNOWN NAME (SEE `PROBE LIST`)");
+            return;
+        }
+        customos::debug::ProbeArm arm = customos::debug::ProbeArm::Disarmed;
+        if (StrEq(sub, "arm"))
+        {
+            arm = customos::debug::ProbeArm::ArmedLog;
+            if (argc >= 4 && (StrEq(argv[3], "--suspend") || StrEq(argv[3], "-s")))
+                arm = customos::debug::ProbeArm::ArmedSuspend;
+        }
+        customos::debug::ProbeSetArm(id, arm);
+        ConsoleWrite("PROBE ");
+        ConsoleWrite(argv[2]);
+        ConsoleWrite(": ");
+        ConsoleWriteln(ProbeArmName(arm));
+        return;
+    }
+    if (StrEq(sub, "arm-all"))
+    {
+        for (customos::u32 i = 0; i < static_cast<customos::u32>(customos::debug::ProbeId::kCount); ++i)
+            customos::debug::ProbeSetArm(static_cast<customos::debug::ProbeId>(i), customos::debug::ProbeArm::ArmedLog);
+        ConsoleWriteln("PROBE: ALL ARMED-LOG (MAY FLOOD LOG)");
+        return;
+    }
+    if (StrEq(sub, "disarm-all"))
+    {
+        for (customos::u32 i = 0; i < static_cast<customos::u32>(customos::debug::ProbeId::kCount); ++i)
+            customos::debug::ProbeSetArm(static_cast<customos::debug::ProbeId>(i), customos::debug::ProbeArm::Disarmed);
+        ConsoleWriteln("PROBE: ALL DISARMED");
+        return;
+    }
+    ConsoleWriteln("PROBE: UNKNOWN SUBCOMMAND");
+}
+
+void CmdInstr(u32 argc, char** argv)
+{
+    // instr <hex-addr> [len]   — dump instruction bytes at a code
+    // address. Single line. Useful for staring at a fault RIP after
+    // the fact, or for verifying a hot-patched function still has
+    // the bytes it should. Default 16 covers any single x86_64
+    // instruction (max length is 15).
+    if (argc < 2)
+    {
+        ConsoleWriteln("INSTR: USAGE: INSTR <HEX-ADDR> [LEN-BYTES]");
+        ConsoleWriteln("       OUTPUT GOES TO COM1 (SERIAL LOG)");
+        return;
+    }
+    customos::u64 addr = 0;
+    if (!ParseU64Str(argv[1], &addr))
+    {
+        ConsoleWriteln("INSTR: BAD ADDRESS");
+        return;
+    }
+    customos::u64 len = 16;
+    if (argc >= 3 && !ParseU64Str(argv[2], &len))
+    {
+        ConsoleWriteln("INSTR: BAD LENGTH");
+        return;
+    }
+    customos::core::DumpInstructionBytes("instr", addr, static_cast<customos::u32>(len));
+    ConsoleWriteln("INSTR: WROTE TO COM1");
+}
+
+void CmdDumpState()
+{
+    // Single-shot snapshot of every major kernel subsystem's
+    // counters. Lets an operator capture "what does this kernel
+    // think the world looks like right now" in one log entry —
+    // useful as a before/after when bisecting a flaky workload.
+    customos::arch::SerialWrite("\n=== CUSTOMOS DUMPSTATE ===\n");
+
+    {
+        const auto s = customos::mm::KernelHeapStatsRead();
+        customos::arch::SerialWrite("[heap] pool=");
+        customos::arch::SerialWriteHex(s.pool_bytes);
+        customos::arch::SerialWrite(" used=");
+        customos::arch::SerialWriteHex(s.used_bytes);
+        customos::arch::SerialWrite(" free=");
+        customos::arch::SerialWriteHex(s.free_bytes);
+        customos::arch::SerialWrite("\n[heap] alloc_count=");
+        customos::arch::SerialWriteHex(s.alloc_count);
+        customos::arch::SerialWrite(" free_count=");
+        customos::arch::SerialWriteHex(s.free_count);
+        customos::arch::SerialWrite(" largest_run=");
+        customos::arch::SerialWriteHex(s.largest_free_run);
+        customos::arch::SerialWrite(" free_chunks=");
+        customos::arch::SerialWriteHex(s.free_chunk_count);
+        customos::arch::SerialWrite("\n");
+    }
+
+    {
+        const auto s = customos::mm::PagingStatsRead();
+        customos::arch::SerialWrite("[paging] page_tables=");
+        customos::arch::SerialWriteHex(s.page_tables_allocated);
+        customos::arch::SerialWrite(" mapped=");
+        customos::arch::SerialWriteHex(s.mappings_installed);
+        customos::arch::SerialWrite(" unmapped=");
+        customos::arch::SerialWriteHex(s.mappings_removed);
+        customos::arch::SerialWrite(" mmio_used=");
+        customos::arch::SerialWriteHex(s.mmio_arena_used_bytes);
+        customos::arch::SerialWrite("\n");
+    }
+
+    {
+        const auto s = customos::sched::SchedStatsRead();
+        customos::arch::SerialWrite("[sched] ctx_switches=");
+        customos::arch::SerialWriteHex(s.context_switches);
+        customos::arch::SerialWrite(" live=");
+        customos::arch::SerialWriteHex(s.tasks_live);
+        customos::arch::SerialWrite(" sleeping=");
+        customos::arch::SerialWriteHex(s.tasks_sleeping);
+        customos::arch::SerialWrite(" blocked=");
+        customos::arch::SerialWriteHex(s.tasks_blocked);
+        customos::arch::SerialWrite("\n[sched] created=");
+        customos::arch::SerialWriteHex(s.tasks_created);
+        customos::arch::SerialWrite(" exited=");
+        customos::arch::SerialWriteHex(s.tasks_exited);
+        customos::arch::SerialWrite(" reaped=");
+        customos::arch::SerialWriteHex(s.tasks_reaped);
+        customos::arch::SerialWrite(" total_ticks=");
+        customos::arch::SerialWriteHex(s.total_ticks);
+        customos::arch::SerialWrite(" idle_ticks=");
+        customos::arch::SerialWriteHex(s.idle_ticks);
+        customos::arch::SerialWrite("\n");
+    }
+
+    {
+        const auto& h = customos::core::RuntimeCheckerStatusRead();
+        customos::arch::SerialWrite("[health] scans=");
+        customos::arch::SerialWriteHex(h.scans_run);
+        customos::arch::SerialWrite(" issues_total=");
+        customos::arch::SerialWriteHex(h.issues_found_total);
+        customos::arch::SerialWrite(" last_scan=");
+        customos::arch::SerialWriteHex(h.last_scan_issues);
+        customos::arch::SerialWrite(" baseline=");
+        customos::arch::SerialWrite(h.baseline_captured ? "yes" : "no");
+        customos::arch::SerialWrite("\n");
+    }
+
+    customos::arch::SerialWrite("=== END DUMPSTATE ===\n");
+    ConsoleWriteln("DUMPSTATE: WROTE TO COM1");
+}
+
+void CmdIpv4()
+{
+    const auto s = customos::net::Ipv4StatsRead();
+    ConsoleWrite("IPV4 RX:        ");
+    WriteU64Dec(s.rx_packets);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("IPV4 BAD VER:   ");
+    WriteU64Dec(s.rx_bad_version);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("IPV4 BAD IHL:   ");
+    WriteU64Dec(s.rx_bad_ihl);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("IPV4 BAD LEN:   ");
+    WriteU64Dec(s.rx_bad_length);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("IPV4 BAD CSUM:  ");
+    WriteU64Dec(s.rx_bad_checksum);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("IPV4 RX UDP:    ");
+    WriteU64Dec(s.rx_udp);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("IPV4 RX TCP:    ");
+    WriteU64Dec(s.rx_tcp);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("IPV4 RX ICMP:   ");
+    WriteU64Dec(s.rx_icmp);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("IPV4 RX OTHER:  ");
+    WriteU64Dec(s.rx_other_proto);
     ConsoleWriteChar('\n');
 }
 
@@ -3380,8 +4389,72 @@ void CmdColor(u32 argc, char** argv)
 
 void CmdRand(u32 argc, char** argv)
 {
-    // Simple splitmix64 seeded from the TSC. Not cryptographic.
-    // Count defaults to 1; max 100 to keep output bounded.
+    // Modes:
+    //   rand           - one u64 from the kernel entropy pool
+    //   rand N         - N u64s (cap 100)
+    //   rand -s        - show entropy-pool stats + current tier
+    //   rand -hex N    - N hex bytes (cap 512) on a single line
+    // The pool is seeded once at boot by RandomInit; each `rand`
+    // call drains fresh bytes (RDSEED/RDRAND/splitmix per tier).
+    if (argc >= 2 && argv[1][0] == '-' && argv[1][1] == 's' && argv[1][2] == '\0')
+    {
+        const auto s = customos::core::RandomStatsRead();
+        const auto t = customos::core::RandomCurrentTier();
+        ConsoleWrite("TIER:          ");
+        switch (t)
+        {
+        case customos::core::EntropyTier::Rdseed:
+            ConsoleWriteln("RDSEED (NIST TRNG)");
+            break;
+        case customos::core::EntropyTier::Rdrand:
+            ConsoleWriteln("RDRAND (NIST DRBG)");
+            break;
+        default:
+            ConsoleWriteln("splitmix64 (NOT cryptographic)");
+            break;
+        }
+        ConsoleWrite("RDSEED CALLS:  ");
+        WriteU64Dec(s.rdseed_calls);
+        ConsoleWriteChar('\n');
+        ConsoleWrite("RDSEED OKS:    ");
+        WriteU64Dec(s.rdseed_successes);
+        ConsoleWriteChar('\n');
+        ConsoleWrite("RDRAND CALLS:  ");
+        WriteU64Dec(s.rdrand_calls);
+        ConsoleWriteChar('\n');
+        ConsoleWrite("RDRAND OKS:    ");
+        WriteU64Dec(s.rdrand_successes);
+        ConsoleWriteChar('\n');
+        ConsoleWrite("SPLITMIX:      ");
+        WriteU64Dec(s.splitmix_calls);
+        ConsoleWriteChar('\n');
+        ConsoleWrite("BYTES OUT:     ");
+        WriteU64Dec(s.bytes_produced);
+        ConsoleWriteChar('\n');
+        return;
+    }
+    if (argc >= 3 && argv[1][0] == '-' && argv[1][1] == 'h' && argv[1][2] == 'e' && argv[1][3] == 'x' &&
+        argv[1][4] == '\0')
+    {
+        u32 bytes = 0;
+        for (u32 i = 0; argv[2][i] != '\0'; ++i)
+        {
+            if (argv[2][i] < '0' || argv[2][i] > '9')
+            {
+                ConsoleWriteln("RAND: BAD COUNT");
+                return;
+            }
+            bytes = bytes * 10 + u32(argv[2][i] - '0');
+        }
+        if (bytes > 512)
+            bytes = 512;
+        u8 buf[512];
+        customos::core::RandomFillBytes(buf, bytes);
+        for (u32 i = 0; i < bytes; ++i)
+            WriteU64Hex(buf[i], 2);
+        ConsoleWriteChar('\n');
+        return;
+    }
     u32 n = 1;
     if (argc >= 2)
     {
@@ -3400,24 +4473,60 @@ void CmdRand(u32 argc, char** argv)
     {
         n = 100;
     }
-    static u64 state = 0;
-    if (state == 0)
-    {
-        u32 lo, hi;
-        asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
-        state = (static_cast<u64>(hi) << 32) | lo;
-        if (state == 0)
-            state = 0xCAFEBABE12345678ULL;
-    }
     for (u32 i = 0; i < n; ++i)
     {
-        state += 0x9E3779B97F4A7C15ULL;
-        u64 z = state;
-        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
-        z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
-        z = z ^ (z >> 31);
-        WriteU64Hex(z);
+        WriteU64Hex(customos::core::RandomU64());
         ConsoleWriteChar('\n');
+    }
+}
+
+void CmdAttackSim()
+{
+    customos::security::AttackSimRun();
+    const auto& s = customos::security::AttackSimSummary();
+    ConsoleWrite("ATTACK SIM COMPLETE: ");
+    WriteU64Dec(s.passed);
+    ConsoleWrite(" passed, ");
+    WriteU64Dec(s.failed);
+    ConsoleWrite(" failed, ");
+    WriteU64Dec(s.skipped);
+    ConsoleWriteln(" skipped");
+    for (u64 i = 0; i < s.count; ++i)
+    {
+        ConsoleWrite("  [");
+        ConsoleWrite(customos::security::AttackOutcomeName(s.results[i].outcome));
+        ConsoleWrite("] ");
+        ConsoleWrite(s.results[i].name);
+        ConsoleWrite(" -> ");
+        ConsoleWriteln(s.results[i].detector);
+    }
+}
+
+void CmdUuid(u32 argc, char** argv)
+{
+    // Default: one UUID. `uuid N` prints N (cap 20).
+    u32 n = 1;
+    if (argc >= 2)
+    {
+        n = 0;
+        for (u32 i = 0; argv[1][i] != '\0'; ++i)
+        {
+            if (argv[1][i] < '0' || argv[1][i] > '9')
+            {
+                ConsoleWriteln("UUID: BAD COUNT");
+                return;
+            }
+            n = n * 10 + u32(argv[1][i] - '0');
+        }
+    }
+    if (n > 20)
+        n = 20;
+    char buf[37];
+    for (u32 i = 0; i < n; ++i)
+    {
+        const auto u = customos::core::UuidV4();
+        customos::core::UuidFormat(u, buf);
+        ConsoleWriteln(buf);
     }
 }
 
@@ -5449,6 +6558,81 @@ void Dispatch(char* line)
     if (StrEq(cmd, "mousestats"))
     {
         CmdMouseStats();
+        return;
+    }
+    if (StrEq(cmd, "smbios"))
+    {
+        CmdSmbios();
+        return;
+    }
+    if (StrEq(cmd, "power") || StrEq(cmd, "battery"))
+    {
+        CmdPower();
+        return;
+    }
+    if (StrEq(cmd, "thermal") || StrEq(cmd, "temp"))
+    {
+        CmdThermal();
+        return;
+    }
+    if (StrEq(cmd, "gpu") || StrEq(cmd, "lsgpu"))
+    {
+        CmdGpu();
+        return;
+    }
+    if (StrEq(cmd, "nic") || StrEq(cmd, "lsnic") || StrEq(cmd, "ip"))
+    {
+        CmdNic();
+        return;
+    }
+    if (StrEq(cmd, "arp"))
+    {
+        CmdArp();
+        return;
+    }
+    if (StrEq(cmd, "ipv4"))
+    {
+        CmdIpv4();
+        return;
+    }
+    if (StrEq(cmd, "health") || StrEq(cmd, "checkup"))
+    {
+        CmdHealth(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "uuid") || StrEq(cmd, "uuidgen"))
+    {
+        CmdUuid(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "attacksim") || StrEq(cmd, "redteam"))
+    {
+        CmdAttackSim();
+        return;
+    }
+    if (StrEq(cmd, "memdump"))
+    {
+        CmdMemDump(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "bp") || StrEq(cmd, "breakpoint"))
+    {
+        CmdBp(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "probe"))
+    {
+        CmdProbe(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "instr"))
+    {
+        CmdInstr(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "dumpstate"))
+    {
+        CmdDumpState();
         return;
     }
     if (StrEq(cmd, "logcolor"))

@@ -69,7 +69,55 @@ expected=(
     "[files] self-test OK"
     "[clock] self-test OK"
     "[block] self-test OK"
-    "exit rc   val=0x000000000000beef"
+    # klog's value formatter emits compact hex (`0xbeef`) rather
+    # than zero-padded — the decimal `(48879)` that follows makes
+    # the prefix unique to hello_winapi's sentinel exit code.
+    "exit rc   val=0xbeef"
+    # winkill (real-world MSVC windows-kill.exe) runs to a clean
+    # ring-3 spawn. Combined with the forbidden
+    # `name="ring3-winkill" reason=` below, this asserts the PE
+    # both spawned AND was not force-killed later.
+    'pe spawn name="ring3-winkill"'
+    # windows-kill.exe's very first std::cout output routes
+    # through our MSVCP140 sputn stub into SYS_WRITE(fd=1) and
+    # the text hits the serial console verbatim. This is the
+    # first real Windows PE output on CustomOS — regressing it
+    # would mean the iostream stubs or the proc-env pipeline
+    # got broken.
+    "Windows Kill "
+    # CPU probe: every machine must produce a vendor + feature
+    # list. QEMU TCG identifies as AuthenticAMD or GenuineIntel.
+    "[cpu] vendor=\""
+    "[cpu] features:"
+    # RTC readable at boot. Wall-clock is non-zero on any live
+    # machine; regression would mean CMOS access broke.
+    "[rtc] wall clock"
+    # GPU discovery: the drivers/gpu slice walks the PCI cache,
+    # classifies display controllers by vendor, and maps BAR 0.
+    # QEMU's Bochs VGA always appears here — a missing line means
+    # GpuInit didn't run or the PCI device table regressed.
+    'drivers/gpu : discovered GPUs'
+    # Vendor probe for Bochs: confirms the per-device probe
+    # dispatch runs.
+    '[gpu-probe] vid=0x0000000000001234 did=0x0000000000001111 family=qemu-bochs-vga'
+    # Network discovery: QEMU q35 ships with an e1000e NIC.
+    '[net-probe] vid=0x0000000000008086 did=0x00000000000010d3 family=e1000e-82574'
+    # Real MMIO read — the MAC must be populated (QEMU's default
+    # is 52:54:00:12:34:56) and the link must come up. Regression
+    # here means BAR 0 isn't decoded or RAL/RAH moved.
+    'link=up'
+    # USB + audio shells always run, even on QEMU q35 which
+    # exposes neither (both log "none found" warnings).
+    'drivers/usb : discovered host controllers'
+    'drivers/audio : discovered audio controllers'
+    '[usb] class drivers registered: hid, msc, hub, video'
+    # Runtime invariant checker baseline + at least one heartbeat
+    # scan. Any drift in control registers / IDT / GDT / kernel
+    # .text / canary / task stacks would emit a `[health]` Warn
+    # line + escalate the guard; the smoke's forbidden-signature
+    # list catches ESCALATE, so reaching this point = clean scan.
+    '[health] baseline cr0='
+    '[I] kheartbeat : health_last_scan_issues   val=0x0 (0)'
 )
 
 # Forbidden signatures — anything indicating an unhandled
@@ -82,6 +130,18 @@ forbidden=(
     "PANIC"
     "CUSTOMOS CRASH"
     "triple fault"
+    # Regression guard: as of slice 28 (2026-04-22), winkill
+    # (real-world MSVC windows-kill.exe) runs start-to-finish
+    # as a ring-3 process and exits via ExitProcess(0). Any
+    # scheduler-initiated kill of it (tick-budget exhaustion,
+    # sandbox-denial threshold) or task-kill fault signals a
+    # regression in the Win32 subsystem / PE loader.
+    'name="ring3-winkill" reason='
+    # Runtime health checker must stay clean on a normal boot.
+    # Any ESCALATE line means a CR-bit / IDT / GDT / .text /
+    # canary / stack-overflow finding fired — treat as a
+    # regression worth investigating.
+    '[health] ESCALATE:'
 )
 # Allowed UNRESOLVED sources: windows-kill.exe imports a pile
 # of dbghelp / advapi32 / vcruntime functions we don't stub

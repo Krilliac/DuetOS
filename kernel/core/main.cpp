@@ -1,24 +1,40 @@
 #include "types.h"
 #include "../acpi/acpi.h"
 #include "../arch/x86_64/cpu.h"
+#include "../arch/x86_64/cpu_info.h"
 #include "../arch/x86_64/gdt.h"
+#include "../arch/x86_64/smbios.h"
+#include "../arch/x86_64/thermal.h"
 #include "../arch/x86_64/hpet.h"
 #include "../arch/x86_64/idt.h"
 #include "../arch/x86_64/ioapic.h"
 #include "../arch/x86_64/lapic.h"
 #include "../arch/x86_64/pic.h"
+#include "../arch/x86_64/rtc.h"
 #include "../arch/x86_64/serial.h"
 #include "../arch/x86_64/smp.h"
 #include "../arch/x86_64/timer.h"
 #include "../cpu/percpu.h"
+#include "../debug/breakpoints.h"
+#include "../debug/probes.h"
+#include "../drivers/audio/audio.h"
+#include "../drivers/gpu/gpu.h"
 #include "../drivers/input/ps2kbd.h"
 #include "../drivers/input/ps2mouse.h"
+#include "../drivers/net/net.h"
 #include "../drivers/pci/pci.h"
+#include "../drivers/power/power.h"
+#include "../drivers/usb/usb.h"
+#include "../net/stack.h"
+#include "../subsystems/graphics/graphics.h"
 #include "../drivers/storage/ahci.h"
 #include "../drivers/storage/block.h"
 #include "../drivers/storage/nvme.h"
+#include "../fs/exfat.h"
+#include "../fs/ext4.h"
 #include "../fs/fat32.h"
 #include "../fs/gpt.h"
+#include "../fs/ntfs.h"
 #include "../apps/calculator.h"
 #include "../apps/clock.h"
 #include "../apps/files.h"
@@ -39,16 +55,19 @@
 #include "klog.h"
 #include "panic.h"
 #include "process.h"
+#include "random.h"
 #include "ring3_smoke.h"
-#include "../fs/fat32.h"
+#include "runtime_checker.h"
 #include "../subsystems/linux/ring3_smoke.h"
 #include "../subsystems/linux/syscall.h"
+#include "../subsystems/win32/stubs.h"
 #include "shell.h"
 #include "syscall.h"
 #include "../mm/kheap.h"
 #include "../mm/multiboot2.h"
 #include "../mm/paging.h"
 #include "../sched/sched.h"
+#include "../security/attack_sim.h"
 #include "../security/guard.h"
 
 /*
@@ -202,10 +221,30 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
         SerialWrite("[boot] WARNING: unexpected boot magic.\n");
     }
 
+    SerialWrite("[boot] Probing CPU features.\n");
+    customos::arch::CpuInfoProbe();
+
+    SerialWrite("[boot] Probing SMBIOS.\n");
+    customos::arch::SmbiosInit();
+
+    SerialWrite("[boot] Reading MSR thermals.\n");
+    customos::arch::ThermalProbe();
+
+    SerialWrite("[boot] Seeding kernel entropy pool.\n");
+    customos::core::RandomInit();
+    customos::core::RandomSelfTest();
+    // NOTE: The stack canary has already been randomized from RDTSC
+    // in boot.S before kernel_main was called. The C++ helper
+    // `RandomizeStackCanary` in stack_canary.cpp is kept as an API
+    // that future slices can use to re-randomize (e.g. per-task
+    // canary rotation) but it's NOT called from kernel_main —
+    // kernel_main is huge and its stashed prologue value would
+    // drift from any mid-function re-randomization attempt.
+
     SerialWrite("[boot] Installing kernel GDT.\n");
     GdtInit();
 
-    SerialWrite("[boot] Installing IDT (vectors 0..31).\n");
+    SerialWrite("[boot] Installing IDT (all 256 vectors).\n");
     IdtInit();
 
     SerialWrite("[boot] Installing TSS + IST stacks (#DF / #MC / #NMI).\n");
@@ -216,6 +255,13 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
 
     SerialWrite("[boot] Installing syscall gate (int 0x80, DPL=3).\n");
     customos::core::SyscallInit();
+
+    // Slice-80 surface check. Issues an int3 (kernel-mode #BP, must
+    // recover via TrapResponse::LogAndContinue) and an int 0x42
+    // (spurious vector, must recover via TrapDispatch's spurious
+    // branch). If either regresses the kernel halts here and the
+    // boot log shows the cause.
+    TrapsSelfTest();
 
     SerialWrite("[boot] Parsing Multiboot2 memory map.\n");
     FrameAllocatorInit(multiboot_info);
@@ -250,6 +296,22 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // of them does, the fault will fire here at boot rather than
     // corrupt code silently later.
     ProtectKernelImage();
+
+    // Breakpoint subsystem (int3 + DR0..DR3). Must run AFTER
+    // ProtectKernelImage so we know .text is at its final 4 KiB-
+    // granular protection and SetPteFlags4K can flip the W bit
+    // for a BP install. Runs BEFORE SMP bring-up so the single-
+    // CPU invariant the BP installer asserts is still true.
+    customos::debug::BpInit();
+    if (!customos::debug::BpSelfTest())
+    {
+        SerialWrite("[boot] WARN: breakpoint self-test failed — see serial log\n");
+    }
+    // Static probes — KBP_PROBE(...) call sites sprinkled across
+    // the kernel. Rare+useful events (panic, sandbox denial,
+    // Win32 stub miss, kernel #PF) are armed-log by default so
+    // the first boot shows activity without any arming.
+    customos::debug::ProbeInit();
 
     SerialWrite("[boot] Bringing up framebuffer (if present).\n");
     customos::drivers::video::FramebufferInit(multiboot_info);
@@ -729,6 +791,34 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     HpetInit();
     HpetSelfTest();
 
+    // Sample the CMOS RTC once at boot so the wall-clock time
+    // is visible in the boot log. A future slice wires this
+    // into the VFS stat path + Win32 GetSystemTimeAsFileTime.
+    {
+        customos::arch::RtcTime t = {};
+        customos::arch::RtcRead(&t);
+        SerialWrite("[rtc] wall clock ");
+        SerialWriteHex(t.year);
+        SerialWrite("-");
+        SerialWriteHex(t.month);
+        SerialWrite("-");
+        SerialWriteHex(t.day);
+        SerialWrite(" ");
+        SerialWriteHex(t.hour);
+        SerialWrite(":");
+        SerialWriteHex(t.minute);
+        SerialWrite(":");
+        SerialWriteHex(t.second);
+        SerialWrite(" (UTC)\n");
+    }
+
+    // CMOS is a 128-byte nvram that survives power-off; firmware
+    // stashes BIOS setup + POST diagnostic codes + (on some
+    // laptops) battery / thermal hints here. Dump it once at boot
+    // for observability — the hex grid is enough for a reader to
+    // cross-reference against vendor docs.
+    customos::arch::CmosDump();
+
     SerialWrite("[boot] Installing BSP per-CPU struct.\n");
     customos::cpu::PerCpuInitBsp();
 
@@ -759,6 +849,27 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     SerialWrite("[boot] Enumerating PCI bus.\n");
     customos::drivers::pci::PciEnumerate();
 
+    SerialWrite("[boot] Detecting GPUs.\n");
+    customos::drivers::gpu::GpuInit();
+
+    SerialWrite("[boot] Detecting NICs.\n");
+    customos::drivers::net::NetInit();
+
+    SerialWrite("[boot] Detecting USB host controllers.\n");
+    customos::drivers::usb::UsbInit();
+
+    SerialWrite("[boot] Detecting audio controllers.\n");
+    customos::drivers::audio::AudioInit();
+
+    SerialWrite("[boot] Bringing up power / thermal shell.\n");
+    customos::drivers::power::PowerInit();
+
+    SerialWrite("[boot] Bringing up network stack skeleton.\n");
+    customos::net::NetStackInit();
+
+    SerialWrite("[boot] Bringing up graphics ICD skeleton.\n");
+    customos::subsystems::graphics::GraphicsIcdInit();
+
     SerialWrite("[boot] Bringing up block device layer.\n");
     customos::drivers::storage::BlockLayerInit();
     customos::drivers::storage::BlockLayerSelfTest();
@@ -783,6 +894,11 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
 
     SerialWrite("[boot] Probing FAT32 on block devices.\n");
     customos::fs::fat32::Fat32SelfTest();
+
+    SerialWrite("[boot] Probing read-only FS shells (ext4 / NTFS / exFAT).\n");
+    customos::fs::ext4::Ext4ScanAll();
+    customos::fs::ntfs::NtfsScanAll();
+    customos::fs::exfat::ExfatScanAll();
 
     // Metrics checkpoint: everything above is bringup overhead; what
     // the system consumes from here on is steady-state.
@@ -1487,6 +1603,19 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // via the Linux ABI and echo its contents back through
     // sys_write. Validates the whole file-I/O chain end-to-end.
     customos::subsystems::linux::SpawnRing3LinuxFileSmoke();
+    // File-backed mmap exerciser: open HELLO.TXT, mmap 17 bytes
+    // PROT_READ + MAP_PRIVATE, write the mapped region to
+    // stdout. Proves the new file-backed branch in DoMmap works
+    // end-to-end — anonymous mmap was the only shape supported
+    // before this slice.
+    customos::subsystems::linux::SpawnRing3LinuxMmapSmoke();
+    // Real host-compiled static C ELF (userland/apps/synxtest) —
+    // exercises ~12 Linux syscalls and prints a pass/fail tag
+    // per call. This is the "compile and run an executable to
+    // see what works" probe; boot log shows which parts of the
+    // Linux ABI actually hold up when a non-hand-rolled binary
+    // does the asking.
+    customos::subsystems::linux::SpawnSynxTestElf();
     // Translation-unit exercise: fire one syscall that the TU
     // converts to a no-op (madvise) and one it declines with a
     // deliberate -ENOSYS (rseq). Boot log shows [translate]
@@ -1536,6 +1665,21 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     SerialWrite("[boot] Bringing up APs.\n");
     SmpStartAps();
 
+    // Runtime invariant checker baseline. Capture NOW, after
+    // every init that touches IDT / GDT / TSS / CR4 / EFER has
+    // run — so the hashes reflect the final steady-state view
+    // of those structures. Earlier capture would flag every
+    // subsequent IdtSetUserGate / TssSetRsp0 as "drift".
+    customos::core::RuntimeCheckerInit();
+
+    // ntdll bedrock-coverage scoreboard. Cheap one-shot log line
+    // that records how many of the 292 universal NT calls
+    // (j00ru's table) we currently route to internal SYS_*. Lets
+    // the boot log act as a regression detector — if a future
+    // refactor breaks a SYS_* used in the mapping, the count
+    // drops and the change is visible.
+    customos::win32::Win32LogNtCoverage();
+
     customos::core::StartHeartbeatThread();
 
     SerialWrite("[boot] All subsystems online. Entering idle loop.\n");
@@ -1551,6 +1695,18 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // doesn't (it ends in IdleLoop), so the epilogue-check would
     // never run if we inlined the smash here.
     CanarySmashDemo();
+#endif
+
+#ifdef CUSTOMOS_ATTACK_SIM
+    // Compile-time-gated red-team attack suite. Runs five
+    // in-kernel attack scenarios (IDT hijack, GDT swap, LSTAR
+    // syscall-hook, canary defang, LBA 0 bootkit write) and
+    // verifies the runtime invariant checker catches each one.
+    // OFF in normal builds because the simulations escalate the
+    // guard to Enforce + blockguard to Deny — stateful
+    // side-effects that would poison subsequent image loads /
+    // sensitive-LBA writes for the rest of the boot.
+    customos::security::AttackSimRun();
 #endif
 
 #ifdef CUSTOMOS_PANIC_DEMO

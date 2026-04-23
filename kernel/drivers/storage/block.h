@@ -108,8 +108,49 @@ bool BlockDeviceIsWritable(u32 handle);
 i32 BlockDeviceRead(u32 handle, u64 lba, u32 count, void* buf);
 
 /// Symmetric write. Returns -1 on read-only devices or on
-/// out-of-range lba.
+/// out-of-range lba. Write-guard rules are consulted before
+/// dispatch: a write covering any sensitive LBA gets logged
+/// (Advisory mode) or refused with -1 (Deny mode).
 i32 BlockDeviceWrite(u32 handle, u64 lba, u32 count, const void* buf);
+
+// -------------------------------------------------------------------
+// Write-guard for sensitive LBAs.
+//
+// Blocks writes to MBR (LBA 0), GPT primary header (LBA 1),
+// and any range explicitly armed by a caller. The gate applies
+// at the `BlockDeviceWrite` boundary so every backend (AHCI,
+// NVMe, RAM) is covered. A bootkit that writes via any of
+// those channels now hits the deny.
+//
+// Modes:
+//   Off      — no gating. Default at boot until armed.
+//   Advisory — log every sensitive-LBA write, let it through.
+//   Deny     — refuse every sensitive-LBA write; return -1.
+//              Flipped on by the health subsystem after any
+//              security-critical finding, or manually via the
+//              `blockguard deny` shell command.
+// -------------------------------------------------------------------
+
+enum class WriteGuardMode : u8
+{
+    Off = 0,
+    Advisory,
+    Deny,
+};
+
+/// Current write-guard mode. Cheap read.
+WriteGuardMode BlockWriteGuardMode();
+
+/// Flip the guard mode. Logs the transition.
+void BlockWriteGuardSetMode(WriteGuardMode m);
+
+/// Arm a rule: writes to [first_lba, first_lba + count) on
+/// `handle` (or kBlockHandleInvalid for "every device") are
+/// subject to the current guard mode. Up to 32 rules cached.
+void BlockWriteGuardAddRule(u32 handle, u64 first_lba, u32 count, const char* tag);
+
+/// How many writes have been refused since boot.
+u64 BlockWriteGuardDenyCount();
 
 // ---------------------------------------------------------------
 // Backends

@@ -45,4 +45,18 @@ void IdtSetUserGate(u8 vector, u64 handler);
 /// faults on the empty-stack dereference.
 void IdtSetIst(u8 vector, u8 ist);
 
+/// FNV-1a hash over every byte of the 256-entry IDT. Used by the
+/// runtime invariant checker to detect any silent modification
+/// of the descriptor table (rootkit-style handler swap, data-
+/// corruption bug, etc.) after baseline. Called from a stable
+/// point AFTER all IDT mutations — typically from
+/// `RuntimeCheckerInit`.
+u64 IdtHash();
+
+/// Raw byte base of the 4096-byte IDT table. The runtime-checker
+/// Heal path uses this to snapshot + restore the table verbatim
+/// when a hijack is detected. Not exposed to general callers —
+/// direct access bypasses IdtSetGate's validation.
+u8* IdtRawBase();
+
 } // namespace customos::arch

@@ -69,4 +69,16 @@ struct HitTable
 const HitTable& LinuxHitsRead();
 const HitTable& NativeHitsRead();
 
+/// Emit `[translate-overhead] linux …` + `native …` lines to the
+/// serial log. Each line carries raw TSC counts: calls, total
+/// cycles, average per call, max seen. Called by the kheartbeat
+/// loop so the numbers roll in on the same cadence as the other
+/// telemetry; a shell command can call it on demand too.
+///
+/// Why cycles and not nanoseconds: TSC frequency is CPU-specific;
+/// we don't have a reliable TSC→ns calibration in the kernel yet.
+/// Operators divide by the host CPU's TSC Hz (dmesg reports it)
+/// to convert, or just read the numbers as relative costs.
+void TranslatorOverheadDump();
+
 } // namespace customos::subsystems::translation

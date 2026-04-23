@@ -720,29 +720,6 @@ void SplitPsPage(u64 virt_2m_aligned)
     }
 }
 
-// Overwrite the PTE flags for one 4 KiB page (keeping the physical
-// base). Splits the parent 2 MiB PS if necessary. Panics if the
-// page isn't mapped yet — we don't create mappings here, only
-// adjust flags on existing ones.
-void SetPteFlags4K(u64 virt, u64 new_flags)
-{
-    if ((virt & kPageMask) != 0)
-    {
-        PanicPaging("SetPteFlags4K: unaligned virt", virt);
-    }
-    const u64 ps_base = virt & ~0x1FFFFFULL; // 2 MiB-aligned
-    SplitPsPage(ps_base);
-
-    u64* pte = WalkToPte(g_pml4, virt, /*create=*/false);
-    if (pte == nullptr || (*pte & kPagePresent) == 0)
-    {
-        PanicPaging("SetPteFlags4K: page not mapped", virt);
-    }
-    const u64 phys = *pte & kAddrMask;
-    *pte = phys | (new_flags | kPagePresent);
-    Invlpg(virt);
-}
-
 // Apply `flags` to every 4 KiB page in [va_start, va_end). Both
 // addresses must be 4 KiB-aligned on entry; the linker script uses
 // ALIGN(4K) after every section to ensure this.
@@ -769,6 +746,33 @@ void ProtectRange(u64 va_start, u64 va_end, u64 flags, const char* name)
 }
 
 } // namespace
+
+// Overwrite the PTE flags for one 4 KiB page (keeping the physical
+// base). Splits the parent 2 MiB PS if necessary. Panics if the
+// page isn't mapped yet — we don't create mappings here, only
+// adjust flags on existing ones.
+//
+// Lives at namespace scope (not in the anon block above) because
+// the debug subsystem patches int3 bytes into .text and needs to
+// flip per-page writability through this same API.
+void SetPteFlags4K(u64 virt, u64 new_flags)
+{
+    if ((virt & kPageMask) != 0)
+    {
+        PanicPaging("SetPteFlags4K: unaligned virt", virt);
+    }
+    const u64 ps_base = virt & ~0x1FFFFFULL; // 2 MiB-aligned
+    SplitPsPage(ps_base);
+
+    u64* pte = WalkToPte(g_pml4, virt, /*create=*/false);
+    if (pte == nullptr || (*pte & kPagePresent) == 0)
+    {
+        PanicPaging("SetPteFlags4K: page not mapped", virt);
+    }
+    const u64 phys = *pte & kAddrMask;
+    *pte = phys | (new_flags | kPagePresent);
+    Invlpg(virt);
+}
 
 void ProtectKernelImage()
 {

@@ -22,6 +22,7 @@
 
 set(CUSTOMOS_KERNEL_SHARED_SOURCES
     core/heartbeat.cpp
+    core/hexdump.cpp
     core/klog.cpp
     core/main.cpp
     core/panic.cpp
@@ -30,7 +31,10 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     core/recovery.cpp
     core/elf_loader.cpp
     core/pe_loader.cpp
+    core/random.cpp
     core/ring3_smoke.cpp
+    core/runtime_checker.cpp
+    subsystems/graphics/graphics.cpp
     subsystems/linux/ring3_smoke.cpp
     subsystems/linux/syscall.cpp
     subsystems/linux/syscall_entry.S
@@ -48,6 +52,7 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     apps/notes.cpp
     arch/x86_64/ap_trampoline.S
     arch/x86_64/boot.S
+    arch/x86_64/cpu_info.cpp
     arch/x86_64/exceptions.S
     arch/x86_64/gdt.cpp
     arch/x86_64/hpet.cpp
@@ -58,17 +63,26 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     arch/x86_64/retpoline_thunks.S
     arch/x86_64/rtc.cpp
     arch/x86_64/serial.cpp
+    arch/x86_64/smbios.cpp
     arch/x86_64/smp.cpp
+    arch/x86_64/thermal.cpp
     arch/x86_64/timer.cpp
     arch/x86_64/traps.cpp
     arch/x86_64/usermode.S
     cpu/percpu.cpp
+    debug/breakpoints.cpp
+    debug/probes.cpp
     drivers/input/ps2kbd.cpp
     drivers/input/ps2mouse.cpp
+    drivers/audio/audio.cpp
+    drivers/gpu/gpu.cpp
+    drivers/net/net.cpp
     drivers/pci/pci.cpp
+    drivers/power/power.cpp
     drivers/storage/ahci.cpp
     drivers/storage/block.cpp
     drivers/storage/nvme.cpp
+    drivers/usb/usb.cpp
     drivers/video/console.cpp
     drivers/video/cursor.cpp
     drivers/video/font8x8.cpp
@@ -76,8 +90,11 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     drivers/video/menu.cpp
     drivers/video/taskbar.cpp
     drivers/video/widget.cpp
+    fs/exfat.cpp
+    fs/ext4.cpp
     fs/fat32.cpp
     fs/gpt.cpp
+    fs/ntfs.cpp
     fs/ramfs.cpp
     fs/tmpfs.cpp
     fs/vfs.cpp
@@ -87,10 +104,24 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     mm/page.cpp
     mm/paging.cpp
     mm/user_copy.S
+    net/stack.cpp
     sched/context_switch.S
     sched/sched.cpp
+    security/attack_sim.cpp
     security/guard.cpp
     sync/spinlock.cpp
+)
+
+# core/stack_canary.cpp provides __stack_chk_fail and the
+# RandomizeStackCanary helper. The latter updates the cookie at
+# runtime; if ANY function in this file gets compiled with stack
+# protection, the prologue/epilogue would sample __stack_chk_guard
+# before/after the update and mismatch. The source uses
+# __attribute__((no_stack_protector)) on the two functions that
+# care; -fno-stack-protector on the whole TU is belt + braces.
+set_source_files_properties(
+    core/stack_canary.cpp
+    PROPERTIES COMPILE_OPTIONS "-fno-stack-protector"
 )
 
 # ----------------------------------------------------------------------------
@@ -290,6 +321,19 @@ option(CUSTOMOS_CANARY_DEMO "Insert a deliberate stack smash at end of kernel_ma
 if(CUSTOMOS_CANARY_DEMO)
     target_compile_definitions(customos-kernel          PRIVATE CUSTOMOS_CANARY_DEMO=1)
     target_compile_definitions(customos-kernel-stage1   PRIVATE CUSTOMOS_CANARY_DEMO=1)
+endif()
+
+# Red-team attack-simulation flag. Runs the AttackSim suite once
+# at the end of kernel_main, exercising every runtime-checker
+# detector by performing the attack a rootkit would and
+# verifying the detector catches it. OFF for normal boot — the
+# simulations escalate the security guard to Enforce mode and
+# the block write-guard to Deny, which would poison every
+# subsequent image load / sensitive-LBA write for the session.
+option(CUSTOMOS_ATTACK_SIM "Run the AttackSim red-team suite at end of kernel_main" OFF)
+if(CUSTOMOS_ATTACK_SIM)
+    target_compile_definitions(customos-kernel          PRIVATE CUSTOMOS_ATTACK_SIM=1)
+    target_compile_definitions(customos-kernel-stage1   PRIVATE CUSTOMOS_ATTACK_SIM=1)
 endif()
 
 

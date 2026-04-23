@@ -50,6 +50,22 @@ inline constexpr u8 kIstNmi = 3;
 /// before IdtInit(), because the IDT entries reference kKernelCodeSelector.
 void GdtInit();
 
+/// FNV-1a hash over the 7-entry GDT + the BSP TSS's critical
+/// fields (RSP0 + IST slots). Used by the runtime invariant
+/// checker to flag any silent modification — rootkit-style
+/// segment swap, stray write onto the descriptor table, etc.
+/// Baseline captured once at `RuntimeCheckerInit`. RSP0 is
+/// excluded: the scheduler legitimately rewrites it on every
+/// user-mode switch, so hashing it would flag every task
+/// switch as a "modification".
+u64 GdtHash();
+
+/// Raw pointer to the 7-entry GDT. The runtime-checker Heal
+/// path uses it to snapshot + restore the table verbatim when
+/// a descriptor swap is detected. NOT exposed as general API:
+/// writing to this bypasses every safety check GdtInit makes.
+u64* GdtRawBase();
+
 /// Fill the BSP's TSS descriptor + body, then `ltr` the task register.
 /// Must be called after GdtInit (the TSS occupies GDT slots 3-4) and
 /// BEFORE the IDT entries for #DF / #MC / #NMI are patched to reference

@@ -6,6 +6,8 @@
 #include "../arch/x86_64/smp.h"
 #include "../arch/x86_64/timer.h"
 #include "../cpu/percpu.h"
+#include "../debug/probes.h"
+#include "hexdump.h"
 #include "klog.h"
 #include "symbols.h"
 
@@ -241,6 +243,10 @@ void DumpDiagnostics(u64 rip, u64 rsp, u64 rbp)
     arch::SerialWrite("  ist_canary : ");
     arch::SerialWrite(arch::IstStackCanariesIntact() ? "ok" : "CORRUPT");
     arch::SerialWrite("\n");
+    // Instruction bytes at RIP. Guards against faulting-page reads
+    // via PlausibleKernelAddress; a wild RIP simply emits a
+    // skipped-line and diagnostics continue.
+    DumpInstructionBytes("panic-rip", rip, 16);
     DumpBacktrace(rbp);
     DumpStack(rsp, 16);
     DumpLogRing();
@@ -249,6 +255,11 @@ void DumpDiagnostics(u64 rip, u64 rsp, u64 rbp)
 
 void Panic(const char* subsystem, const char* message)
 {
+    // Probe before disabling interrupts so the log line hits the
+    // ring buffer with a valid timestamp. Armed-log by default —
+    // `[probe] panic.enter rip=...` tells you who called Panic.
+    KBP_PROBE(::customos::debug::ProbeId::kPanicEnter);
+
     // Disable interrupts before writing the banner so a pending IRQ
     // can't preempt us mid-message and scramble the output. Halt
     // itself also CLI+HLT loops, but getting the clean banner out

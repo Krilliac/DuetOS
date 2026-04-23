@@ -1,6 +1,7 @@
 #include "process.h"
 
 #include "../arch/x86_64/serial.h"
+#include "../debug/probes.h"
 #include "../mm/kheap.h"
 #include "../sched/sched.h"
 #include "klog.h"
@@ -72,6 +73,45 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     p->abi_flavor = kAbiNative; // loaders flip to kAbiLinux if appropriate
     for (u32 i = 0; i < sizeof(p->_abi_pad); ++i)
         p->_abi_pad[i] = 0;
+    // Win32 file-handle table — every slot starts unused. Slot
+    // index 0 is fine; we distinguish "valid handle" from "unused"
+    // by the per-slot `node != nullptr` test, not by index 0
+    // sentinel.
+    for (u32 i = 0; i < Process::kWin32HandleCap; ++i)
+    {
+        p->win32_handles[i].node = nullptr;
+        p->win32_handles[i].cursor = 0;
+    }
+    // Win32 VirtualAlloc arena — bump-only for v0. Starts at
+    // Process::kWin32VmapBase with 0 pages consumed.
+    p->vmap_base = Process::kWin32VmapBase;
+    p->vmap_pages_used = 0;
+    // Win32 mutex table — every slot starts free + unowned.
+    for (u32 i = 0; i < Process::kWin32MutexCap; ++i)
+    {
+        p->win32_mutexes[i].in_use = false;
+        for (u32 j = 0; j < sizeof(p->win32_mutexes[i]._pad); ++j)
+            p->win32_mutexes[i]._pad[j] = 0;
+        p->win32_mutexes[i].recursion = 0;
+        p->win32_mutexes[i].owner = nullptr;
+        p->win32_mutexes[i].waiters.head = nullptr;
+        p->win32_mutexes[i].waiters.tail = nullptr;
+    }
+    // Win32 event table — every slot starts free + unsignaled.
+    for (u32 i = 0; i < Process::kWin32EventCap; ++i)
+    {
+        p->win32_events[i].in_use = false;
+        p->win32_events[i].manual_reset = false;
+        p->win32_events[i].signaled = false;
+        for (u32 j = 0; j < sizeof(p->win32_events[i]._pad); ++j)
+            p->win32_events[i]._pad[j] = 0;
+        p->win32_events[i].waiters.head = nullptr;
+        p->win32_events[i].waiters.tail = nullptr;
+    }
+    // Win32 TLS — no slots allocated, all values zero.
+    p->tls_slot_in_use = 0;
+    for (u32 i = 0; i < Process::kWin32TlsCap; ++i)
+        p->tls_slot_value[i] = 0;
     p->refcount = 1;
 
     ++g_live_processes;
@@ -88,6 +128,7 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     arch::SerialWriteHex(user_stack_va);
     arch::SerialWrite("\n");
 
+    KBP_PROBE_V(::customos::debug::ProbeId::kProcessCreate, p->pid);
     return p;
 }
 
@@ -115,6 +156,8 @@ void ProcessRelease(Process* p)
     {
         return;
     }
+
+    KBP_PROBE_V(::customos::debug::ProbeId::kProcessDestroy, p->pid);
 
     arch::SerialWrite("[proc] destroy pid=");
     arch::SerialWriteHex(p->pid);
@@ -157,6 +200,15 @@ void RecordSandboxDenial(Cap cap)
         return; // kernel-only task hit a cap-denial — shouldn't happen
     }
     ++p->sandbox_denials;
+
+    // Fire the sandbox-denial probe at the same rate-limit the
+    // existing denial logger uses (first hit + every 32nd). Same
+    // motivation: a ring-3 hostile task can otherwise flood the
+    // probe log with thousands of identical lines per boot.
+    if (ShouldLogDenial(p->sandbox_denials))
+    {
+        KBP_PROBE_V(::customos::debug::ProbeId::kSandboxDenialCap, static_cast<u64>(cap));
+    }
 
     // Threshold-crossing: fire once at exactly kSandbox-
     // DenialKillThreshold and flag the task. Uses `==` so the
@@ -201,6 +253,8 @@ const char* CapName(Cap c)
         return "SerialConsole";
     case kCapFsRead:
         return "FsRead";
+    case kCapDebug:
+        return "Debug";
     case kCapCount:
         return "<sentinel>";
     }

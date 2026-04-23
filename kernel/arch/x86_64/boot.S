@@ -301,6 +301,36 @@ gdt64_descriptor:
 .global long_mode_entry
 .type long_mode_entry, @function
 long_mode_entry:
+    /* Randomize __stack_chk_guard with a per-boot-unique value
+     * BEFORE calling kernel_main. kernel_main's prologue samples
+     * __stack_chk_guard at entry; if we write the cookie here,
+     * every subsequent function gets the randomized value and
+     * nothing can drift between prologue/epilogue.
+     *
+     * Why here and not from C++: updating the cookie FROM within
+     * kernel_main (after its prologue has already stashed the
+     * compile-time constant) would cause __stack_chk_fail to
+     * trip the moment any wrapper returns — the stashed constant
+     * doesn't match the replaced current cookie. We sidestep
+     * that by doing it pre-kernel_main, in assembly with no
+     * protector overhead.
+     *
+     * Entropy source: RDTSC. TSC value at boot differs every
+     * power-on; across cold boots the variance is effectively
+     * the CPU uptime since the board powered on. An attacker
+     * with image access still can't predict the cookie without
+     * also knowing boot time down to the nanosecond. Hardware
+     * RNG (RDSEED/RDRAND) would be stronger but requires a
+     * CPUID gate to avoid #UD on pre-Ivy Bridge CPUs; deferred
+     * to a follow-on slice.
+     */
+    rdtsc
+    shl     rdx, 32
+    or      rax, rdx
+    or      rax, 1          /* keep the low byte non-NUL */
+    mov     rcx, offset __stack_chk_guard
+    mov     [rcx], rax
+
     call    kernel_main
 
     /* kernel_main should never return. If it does, halt deterministically. */

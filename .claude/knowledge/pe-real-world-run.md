@@ -1,10 +1,16 @@
 # Real-world PE execution — windows-kill.exe smoke
 
-**Last updated:** 2026-04-22
+**Last updated:** 2026-04-22 (end-to-end exit)
 **Type:** Observation
-**Status:** Active — winkill now enters ring 3, runs CRT init, faults on
-first unstubbed import return value. Five previously silent loader-level
-gaps now visible + fixed.
+**Status:** Active — **winkill prints "Windows Kill " to serial**, then
+faults deeper in its iostream loop. Real-world 80 KB MSVC PE (8
+sections, 52 imports, SEH, TLS, resource dir) executes far enough to
+emit real output via MSVCP140::sputn → SYS_WRITE. First Windows PE
+output on CustomOS. Subsequent cout operations (number formatting,
+chained strings) still fall through the zero-vtable path and
+eventually fault cleanly; winkill no longer exits to SYS_EXIT(0) on
+its own since the new sputn path now actually reaches more code
+that needs real iostream state.
 
 ## What changed (this slice)
 
@@ -128,6 +134,246 @@ Why this beats static analysis: it tells us the *order of
 calls*, so the first unimplemented import is always obvious
 from the top of the log. Binary search through 24+ catch-alls
 is not needed.
+
+## Slice 25 — `__p___argc` / `__p___argv` + proc-env page
+
+Follow-on to the miss-logger slice. The first two `[win32-miss]`
+lines at every winkill boot were `__p___argv` and `__p___argc`;
+the CRT reads these, gets 0 back from the catch-all, then
+dereferences 0 and faults. This slice teaches the stubs to
+return real pointers:
+
+1. **Proc-env page** — new fixed VA `kProcEnvVa = 0x65000000`,
+   one page, R-W + NX, mapped only for PEs with imports (same
+   gate as the TEB page). Layout exposed via constants in
+   `subsystems/win32/stubs.h`:
+
+   ```
+   0x00  int   argc   = 1
+   0x08  char** argv  = kProcEnvVa + 0x20
+   0x20  char* argv[] = { program_name_va, NULL }
+   0x40  char  program_name[] = "a.exe\0"   (v0 placeholder)
+   ```
+
+   `Win32ProcEnvPopulate(page, name)` fills the layout. The PE
+   loader allocates + zeroes the frame, calls the populator,
+   and maps it between "step4b teb mapped" and "step5 imports
+   resolved":
+
+   ```
+   [pe-load] step4c proc-env mapped va=0x65000000
+   ```
+
+2. **`__p___argc` / `__p___argv` stubs** — two 6-byte shims
+   (`mov eax, imm32; ret`) at stub offsets `0x269` and `0x26F`.
+   Immediate operands encode `kProcEnvVa + kProcEnvArgcOff`
+   (= `0x65000000`) and `kProcEnvVa + kProcEnvArgvPtrOff`
+   (= `0x65000008`) respectively. The 32-bit dest form zero-
+   extends to rax — cheaper than a 10-byte movabs since both
+   addresses fit in 32 bits.
+
+3. **Registered under three DLL names** — the runtime apiset
+   (`api-ms-win-crt-runtime-l1-1-0.dll`), ucrtbase, and msvcrt,
+   covering the three link-path conventions the MSVC toolchain
+   can produce.
+
+4. **Layout static-asserted** — `static_assert`s in `stubs.cpp`
+   tie the hand-assembled stub bytes to the public
+   `kProcEnvVa / kProcEnvArgcOff / kProcEnvArgvPtrOff`
+   constants. Moving the page VA or the field offsets without
+   updating the stub bytes becomes a build-time error instead
+   of a boot-time #PF.
+
+The `a.exe` placeholder is deliberate v0. A future slice will
+plumb the spawn-time program name through `PeLoad` so argv[0]
+reflects the caller-specified name (`/bin/winkill.exe` etc.).
+Minimal change today because the CRT only needs argv[0] to be
+non-NULL + NUL-terminated; its contents matter only to code
+that inspects argv[0] directly (rare).
+
+## Slice 26 — data-import catch-all
+
+After argc/argv landed, winkill ran past the CRT and reached
+winkill's own `main()`. argc=1 → main takes the "no args"
+branch which calls `std::cout << "usage...\n"`. Pre-slice-26,
+`std::cout`'s IAT slot held the miss-logger's VA — reading
+`[cout_iat]` produced the miss-logger's opcode bytes
+(`0xfc48634824048b48`), which the CRT used as a vtable
+pointer, producing a non-canonical #PF at cr2 = that bytes
+value. Diagnosable only with a hex-to-asm rosetta sheet.
+
+This slice adds:
+
+1. **Data-import detection heuristic** in `subsystems/win32/stubs.h`:
+   `IsLikelyDataImport(name)` returns true iff the name looks
+   like MSVC's global-data mangling (`?name@scope@@3<type>...`).
+   Walks to the first `@@` and checks the following byte for
+   `'3'` (the storage-class letter for static-member/global).
+   Functions use different class letters (`Q`, `A`, `B`, …), so
+   they stay routed to the function miss-logger.
+
+2. **`Win32StubsLookupDataCatchAll`** — returns
+   `kProcEnvVa + kProcEnvDataMissOff = 0x65000800`. Dereferenced
+   as a pointer, reads 0 (the proc-env page's tail is left zero
+   by `Win32ProcEnvPopulate`). `[rax+offset]` then faults at
+   `cr2 = offset` — a textbook null-pointer deref.
+
+3. **PE loader routing** — `ResolveImports` picks
+   `Win32StubsLookupDataCatchAll` vs `Win32StubsLookupCatchAll`
+   based on the heuristic. Data imports do NOT stage an IAT-slot
+   mapping in the miss-logger table (they're never called, so
+   the translation table would be dead entries). Log line
+   reflects the flavour: `unknown import -> data-miss zero pad`
+   vs `unknown import -> catch-all NO-OP`.
+
+Observed on winkill post-slice:
+
+```
+[pe-resolve] unknown import -> data-miss zero pad   fn="?cout@std@@3V..."
+[task-kill] ring-3 task took #PF Page fault — terminating
+  pid  : 0x18
+  rip  : 0x14000142c                  ; same rip as before
+  cr2  : 0x0000000000000004          ; was 0xfc48634824048b4c
+```
+
+Same instruction as the wall; infinitely cleaner fault
+signature. Eleven other `?` symbols (widen, sputn, _Osfx, put,
+setstate, flush, and four ostream::operator<< variants) stayed
+on the function catch-all because their MSVC mangling begins
+with `Q` (method) after `@@`, not `3`.
+
+## Slice 29 — iostream stubs + first Windows PE output
+
+Routes MSVCP140 iostream methods (imported by name) to real
+stubs that do the right ABI-level thing. Adds three new
+stub offsets inside the shared stubs page:
+
+  * `kOffSputn` (0x281, 19 bytes) — `basic_streambuf::sputn(s, n)`.
+    Direct SYS_WRITE(1, s, n); returns actual byte count. First
+    real output path for imported `std::cout << "string"`.
+  * `kOffReturnThis` (0x294, 4 bytes) — `mov rax, rcx; ret`.
+    Used for `flush()`, `put()`, and every `operator<<` variant
+    that returns `*this` (enables chaining without crashing).
+  * `kOffWiden` (0x298, 4 bytes) — `basic_ios::widen(char)` as
+    an identity function on char.
+
+Registered mangled names for: `?sputn`, `?put`, `?flush`,
+`?widen`, `?setstate` (→ CritSecNop), `?_Osfx` (→ CritSecNop),
+`?sputc` (→ ReturnZero), `??6(int)`, `??6(unsigned long)`,
+`??6(manipulator)`.
+
+Observed on winkill post-slice-29:
+
+```
+[ring3] task pid=0x18 entering ring 3 rip=0x140004070
+Windows Kill                          ← real MSVC PE output via sputn
+[task-kill] ring-3 task took #PF
+  rip=0x140001500
+  cr2=0x2073776f646e695b               ← "[Windows " in ASCII LE
+```
+
+The text "Windows Kill " (the version banner's first line) hits
+the serial console verbatim — the first real output from a
+Windows PE on CustomOS. The subsequent fault is `movslq rcx,
+[rax+4]` inside an inlined `operator<<(ostream&, const char*)`
+loop where `rax = [rsi] = "Windows "`. Another string from the
+version banner is being loaded through what it thinks is its
+vtable pointer; without a real cout / streambuf / ios vtable
+chain, the virtual-dispatch path still trips.
+
+Coverage gap: these stubs fire when a PE imports the methods
+BY NAME (IAT dispatch). They don't fire for virtual dispatch
+through a vtable we've zero-filled — that still needs a
+genuine std::cout / streambuf / vtable constructed in the
+proc-env page. Deferred; the first-print milestone is enough.
+
+Also extended `ctest-boot-smoke`: `"Windows Kill "` is now an
+expected signature, so a regression in the iostream stub chain
+or proc-env pipeline fails the smoke.
+
+## Slice 28 — miss-logger guard + end-to-end clean exit
+
+Adds a call-rel32 pattern guard to the miss-logger: the decoder
+now checks `[return_addr - 5] == 0xE8` before running the
+thunk decode + `SYS_WIN32_MISS_LOG`. Indirect calls (`call
+rax`, vtable dispatch) fall through straight to `xor eax, eax;
+ret` instead of emitting `<unmapped>` entries from garbage
+slot VAs. Log stays honest: "can't decode" is now silence, not
+fabricated data.
+
+Cost: +6 bytes for cmp + jne; shifts __p___argc /
+__p___argv / __p__commode by 6 bytes each; static_assert tied
+to the new 0x281 total.
+
+Observed outcome on winkill:
+
+```
+[ring3] task pid=0x18 entering ring 3 rip=0x140004070
+[t=1946.096ms] [I] sys : exit rc   val=0x0 (0)     ← clean exit
+[sched/reaper] reaped task id val=0x18
+```
+
+Winkill entered ring 3, ran its full CRT init, called main(),
+ran whatever main did (the `std::cout << "usage"` path silently
+no-oped via the fake-object data-miss pad — no print, no fault),
+returned from main, ran atexit, and called ExitProcess(0). The
+entire 80 KB MSVC PE (8 sections, 52 imports across 6 DLLs,
+SEH, TLS, resource directory) executed start-to-finish as a
+ring-3 process on CustomOS with zero crashes.
+
+This is a milestone. The walls listed in previous slices
+("TLS array, PEB, SEH unwind, kernel32/vcruntime stubs") were
+either covered by existing stubs or elided by winkill's specific
+code path. The first real Win32 program runs end-to-end.
+
+## Slice 27 — fake-object data-miss + stdio accessors
+
+Two small additions that push winkill past the cout #PF and let
+it run to tick-budget exhaustion (no fault, no panic, no
+triple-fault) — a qualitative change from previous slices.
+
+1. **Fake object in the data-miss pad.** The data-miss slot now
+   stores `kProcEnvVa + kProcEnvDataMissOff + 8` — a pointer
+   into the same page, 8 bytes past itself — instead of a raw
+   zero. Rationale: MSVC's multiple-inheritance virtual dispatch
+   loads a vbtable pointer (`mov rax, [this]`) and then a
+   virtual-base offset (`movslq rcx, [rax+4]`). With the
+   previous zero pad, `[0+4]` #PFed at cr2=4. With the +8
+   pointer, `[fake_vtable+4]` reads mapped zero (rcx=0), the
+   next `[rcx+rsi+0x48]` reads zero, and the caller's
+   `test rdi, rdi; jle error_branch` takes its empty-stream
+   branch cleanly. No print, but no crash either.
+
+2. **`__p__commode` + `_callnewh`** — two low-cost MSVC runtime
+   accessors:
+   - `__p__commode` → `mov eax, 0x65000200; ret` (6 bytes at
+     stub offset `0x275`). Returns a pointer to a zero-filled
+     `int` in the proc-env page — UCRT's "default text mode".
+     Registered under the stdio apiset, ucrtbase, msvcrt.
+   - `_callnewh(size)` → aliased to `kOffReturnZero`. Returns
+     0 = "no new handler set; caller should fail or throw".
+     Registered under the heap apiset, ucrtbase, msvcrt.
+
+Observed effect on winkill after slice 27:
+
+```
+[ring3] task pid=0x18 entering ring 3 rip=0x140004070
+[win32-miss] slot=0x14000c196 called fn="<unmapped>"      ; x4
+[win32-miss] slot=0x14000c1ce called fn="<unmapped>"      ; x4
+[win32-miss] slot=0x14000c1b6 called fn="<unmapped>"      ; x4
+[sched/reaper] reaped task id val=0x18                    ; tick budget
+```
+
+No #PF, no #GP, no task-kill. Winkill progresses past the CRT
+cout init, runs its own code (the 3 cycling slots are a
+`_initterm`-style init loop — each pointer is unmapped in the
+image staging table and the decoder returns `<unmapped>`),
+and eventually the scheduler reaps it for tick-budget
+exhaustion. The `<unmapped>` name is a miss-logger decoder
+limitation, not a new wall: indirect calls (`call rax` / `call
+[reg+disp]`) don't match the `call rel32` pattern the decoder
+assumes, so `[rsp-4]` reads adjacent instruction bytes and
+yields a plausible-but-wrong slot VA. Fix is future polish.
 
 ## Next walls (in execution order)
 
