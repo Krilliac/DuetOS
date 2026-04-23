@@ -3372,6 +3372,170 @@ constexpr StubEntry kStubsTable[] = {
     // stub rather than E_FAIL.
     {"d3d9.dll", "Direct3DCreate9", kOffReturnZero},
     {"d3d9.dll", "Direct3DCreate9Ex", kOffHresultEFail},
+
+    // -----------------------------------------------------------------
+    // GUI pass-through: user32 + gdi32 + a handful of kernel32/winmm
+    // gaps. Prior art: evmar/theseus pointed at these module groups
+    // (kernel32::nls / user32::message / user32::window / user32::
+    // resource / gdi32::{dc,bitmap,object}) as the surface you need
+    // to cover to run a non-console Windows PE. Every entry below
+    // aliases to one of the shared canned stubs — kOffReturnZero
+    // (xor eax,eax; ret) or kOffReturnOne (mov eax, 1; ret) — so no
+    // new stub bytes land; the file's static_assert on kStubsBytes
+    // size stays valid.
+    //
+    // Semantics chosen per MSDN so a well-behaved PE sees "call
+    // succeeded but nothing happened":
+    //   - CreateWindowExW -> non-zero (caller treats 0 as failure).
+    //   - GetMessageW     -> 0 (signals WM_QUIT; main loop exits
+    //                         cleanly instead of spinning forever).
+    //   - DefWindowProc*  -> 0 (most messages ignore the return).
+    //   - GDI object/DC handles -> non-zero so SelectObject /
+    //                         DeleteObject later don't hit ERROR_
+    //                         INVALID_HANDLE paths.
+    //
+    // Pointer-output APIs that *populate a struct* (GetSystemTime,
+    // GetLocalTime, SystemTimeToFileTime, etc.) need real stub
+    // bytes — those are a follow-up; returning 0/1 alone would
+    // leave a zero struct and the CRT often treats that as a
+    // sentinel anyway.
+
+    // kernel32: locale / code-page sanity probes.
+    {"kernel32.dll", "IsValidLocale", kOffReturnOne},
+    {"kernel32.dll", "GetCPInfo", kOffReturnOne},
+    {"kernel32.dll", "GetCPInfoExA", kOffReturnOne},
+    {"kernel32.dll", "GetCPInfoExW", kOffReturnOne},
+
+    // winmm: multimedia-timer — fake a valid timer ID + silent kill.
+    {"winmm.dll", "timeSetEvent", kOffReturnOne},
+    {"winmm.dll", "timeKillEvent", kOffReturnZero},
+
+    // user32: window class + window lifecycle.
+    {"user32.dll", "RegisterClassA", kOffReturnOne},
+    {"user32.dll", "RegisterClassW", kOffReturnOne},
+    {"user32.dll", "RegisterClassExA", kOffReturnOne},
+    {"user32.dll", "RegisterClassExW", kOffReturnOne},
+    {"user32.dll", "UnregisterClassA", kOffReturnOne},
+    {"user32.dll", "UnregisterClassW", kOffReturnOne},
+    {"user32.dll", "CreateWindowExA", kOffReturnOne},
+    {"user32.dll", "CreateWindowExW", kOffReturnOne},
+    {"user32.dll", "DestroyWindow", kOffReturnOne},
+    {"user32.dll", "DefWindowProcA", kOffReturnZero},
+    {"user32.dll", "DefWindowProcW", kOffReturnZero},
+    {"user32.dll", "CallWindowProcA", kOffReturnZero},
+    {"user32.dll", "CallWindowProcW", kOffReturnZero},
+    {"user32.dll", "ShowWindow", kOffReturnZero},
+    {"user32.dll", "UpdateWindow", kOffReturnOne},
+    {"user32.dll", "GetClientRect", kOffReturnOne},
+    {"user32.dll", "GetWindowRect", kOffReturnOne},
+    {"user32.dll", "MoveWindow", kOffReturnOne},
+    {"user32.dll", "SetWindowPos", kOffReturnOne},
+    {"user32.dll", "InvalidateRect", kOffReturnOne},
+
+    // user32: message loop. GetMessage returns 0 so the canonical
+    // `while (GetMessage(...)) DispatchMessage(...)` loop sees
+    // WM_QUIT on the first iteration and exits cleanly. PeekMessage
+    // returns 0 (no message available) for the variant that spins.
+    {"user32.dll", "GetMessageA", kOffReturnZero},
+    {"user32.dll", "GetMessageW", kOffReturnZero},
+    {"user32.dll", "PeekMessageA", kOffReturnZero},
+    {"user32.dll", "PeekMessageW", kOffReturnZero},
+    {"user32.dll", "DispatchMessageA", kOffReturnZero},
+    {"user32.dll", "DispatchMessageW", kOffReturnZero},
+    {"user32.dll", "TranslateMessage", kOffReturnZero},
+    {"user32.dll", "TranslateAcceleratorA", kOffReturnZero},
+    {"user32.dll", "TranslateAcceleratorW", kOffReturnZero},
+    {"user32.dll", "PostMessageA", kOffReturnOne},
+    {"user32.dll", "PostMessageW", kOffReturnOne},
+    {"user32.dll", "SendMessageA", kOffReturnZero},
+    {"user32.dll", "SendMessageW", kOffReturnZero},
+    {"user32.dll", "PostQuitMessage", kOffReturnZero},
+    {"user32.dll", "PostThreadMessageA", kOffReturnOne},
+    {"user32.dll", "PostThreadMessageW", kOffReturnOne},
+
+    // user32: resource loaders — fake non-zero HICON/HCURSOR/HBITMAP.
+    {"user32.dll", "LoadIconA", kOffReturnOne},
+    {"user32.dll", "LoadIconW", kOffReturnOne},
+    {"user32.dll", "LoadCursorA", kOffReturnOne},
+    {"user32.dll", "LoadCursorW", kOffReturnOne},
+    {"user32.dll", "LoadImageA", kOffReturnOne},
+    {"user32.dll", "LoadImageW", kOffReturnOne},
+    {"user32.dll", "LoadBitmapA", kOffReturnOne},
+    {"user32.dll", "LoadBitmapW", kOffReturnOne},
+    {"user32.dll", "LoadMenuA", kOffReturnOne},
+    {"user32.dll", "LoadMenuW", kOffReturnOne},
+    {"user32.dll", "LoadAcceleratorsA", kOffReturnOne},
+    {"user32.dll", "LoadAcceleratorsW", kOffReturnOne},
+    {"user32.dll", "LoadStringA", kOffReturnZero},
+    {"user32.dll", "LoadStringW", kOffReturnZero},
+
+    // user32: cursor + caret + misc — most callers treat non-zero
+    // as "ok, previous state returned".
+    {"user32.dll", "SetCursor", kOffReturnZero},
+    {"user32.dll", "ShowCursor", kOffReturnZero},
+    {"user32.dll", "GetCursorPos", kOffReturnOne},
+    {"user32.dll", "SetCursorPos", kOffReturnOne},
+    {"user32.dll", "ClipCursor", kOffReturnOne},
+    {"user32.dll", "GetSystemMetrics", kOffReturnZero},
+    {"user32.dll", "MessageBoxA", kOffReturnOne},
+    {"user32.dll", "MessageBoxW", kOffReturnOne},
+    {"user32.dll", "MessageBoxExA", kOffReturnOne},
+    {"user32.dll", "MessageBoxExW", kOffReturnOne},
+
+    // gdi32: device contexts — fake non-zero HDCs.
+    {"gdi32.dll", "GetDC", kOffReturnOne},
+    {"gdi32.dll", "GetWindowDC", kOffReturnOne},
+    {"gdi32.dll", "ReleaseDC", kOffReturnOne},
+    {"gdi32.dll", "CreateCompatibleDC", kOffReturnOne},
+    {"gdi32.dll", "DeleteDC", kOffReturnOne},
+    {"gdi32.dll", "SaveDC", kOffReturnOne},
+    {"gdi32.dll", "RestoreDC", kOffReturnOne},
+
+    // gdi32: object table — SelectObject / DeleteObject round-trip
+    // must work so a PE that creates + destroys a brush/bitmap
+    // doesn't think it leaked.
+    {"gdi32.dll", "SelectObject", kOffReturnOne},
+    {"gdi32.dll", "DeleteObject", kOffReturnOne},
+    {"gdi32.dll", "GetStockObject", kOffReturnOne},
+    {"gdi32.dll", "GetObjectA", kOffReturnOne},
+    {"gdi32.dll", "GetObjectW", kOffReturnOne},
+
+    // gdi32: bitmap + brush creation.
+    {"gdi32.dll", "CreateBitmap", kOffReturnOne},
+    {"gdi32.dll", "CreateCompatibleBitmap", kOffReturnOne},
+    {"gdi32.dll", "CreateDIBitmap", kOffReturnOne},
+    {"gdi32.dll", "CreateDIBSection", kOffReturnOne},
+    {"gdi32.dll", "CreateSolidBrush", kOffReturnOne},
+    {"gdi32.dll", "CreateBrushIndirect", kOffReturnOne},
+    {"gdi32.dll", "CreatePen", kOffReturnOne},
+    {"gdi32.dll", "CreateFontA", kOffReturnOne},
+    {"gdi32.dll", "CreateFontW", kOffReturnOne},
+    {"gdi32.dll", "CreateFontIndirectA", kOffReturnOne},
+    {"gdi32.dll", "CreateFontIndirectW", kOffReturnOne},
+
+    // gdi32: drawing primitives — all boolean, return TRUE so the
+    // caller's "draw succeeded" flag is set.
+    {"gdi32.dll", "BitBlt", kOffReturnOne},
+    {"gdi32.dll", "StretchBlt", kOffReturnOne},
+    {"gdi32.dll", "MoveToEx", kOffReturnOne},
+    {"gdi32.dll", "LineTo", kOffReturnOne},
+    {"gdi32.dll", "Rectangle", kOffReturnOne},
+    {"gdi32.dll", "Ellipse", kOffReturnOne},
+    {"gdi32.dll", "Polygon", kOffReturnOne},
+    {"gdi32.dll", "Polyline", kOffReturnOne},
+    {"gdi32.dll", "FillRect", kOffReturnOne},
+    {"gdi32.dll", "FrameRect", kOffReturnOne},
+    {"gdi32.dll", "TextOutA", kOffReturnOne},
+    {"gdi32.dll", "TextOutW", kOffReturnOne},
+    {"gdi32.dll", "ExtTextOutA", kOffReturnOne},
+    {"gdi32.dll", "ExtTextOutW", kOffReturnOne},
+    {"gdi32.dll", "DrawTextA", kOffReturnOne},
+    {"gdi32.dll", "DrawTextW", kOffReturnOne},
+    {"gdi32.dll", "SetBkMode", kOffReturnOne},
+    {"gdi32.dll", "SetBkColor", kOffReturnZero},
+    {"gdi32.dll", "SetTextColor", kOffReturnZero},
+    {"gdi32.dll", "SetMapMode", kOffReturnOne},
+    {"gdi32.dll", "SetTextAlign", kOffReturnZero},
 };
 
 // Case-insensitive strcmp for ASCII. Win32 DLL name
