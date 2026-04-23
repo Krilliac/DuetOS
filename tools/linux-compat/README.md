@@ -26,6 +26,8 @@ unimplemented.
 | ----------------------------------- | ----------------------------------------------------------- |
 | `linux-syscalls-x86_64.csv`         | Canonical x86_64 syscall table: `number,name,args`          |
 | `gen-linux-syscall-table.py`        | Generator that emits `linux_syscall_table_generated.h`      |
+| `check-gapfill-overlap.py`          | Fails when dispatch + translator both claim same syscall nr |
+| `gapfill-overlap-allowlist.txt`     | Explicit temporary overlap allowlist for the check script   |
 
 ## Provenance
 
@@ -51,9 +53,32 @@ the generated headers.
 Commit the updated CSV/header inputs and generated outputs. The
 build does NOT invoke Python; generated artifacts are checked in.
 
+## Dispatcher vs translator ownership check
+
+`kernel/subsystems/linux/syscall.cpp` is the primary owner for
+implemented Linux ABI behavior. `kernel/subsystems/translation/translate.cpp`
+must only synthesize unresolved misses.
+
+Run this in CI (or locally) to prevent overlap drift:
+
+```sh
+python3 tools/linux-compat/check-gapfill-overlap.py
+```
+
+If overlap is deliberate and temporary, add the syscall number (or
+`kSys*` symbol) to `tools/linux-compat/gapfill-overlap-allowlist.txt`
+with a comment explaining why.
+
 ## Scoreboard
 
-The generator tallies how many syscalls have a live mapping to a
-`Do*` handler in `syscall.cpp` (by name match). A boot-time
-log line prints "linux ABI coverage: N/M" once the dispatcher
-pulls the new table in.
+The generator emits two explicit coverage metrics:
+
+1. **primary** — syscalls with a live `Do*` handler in
+   `kernel/subsystems/linux/syscall.cpp` (name-matched).
+2. **effective** — primary coverage plus syscall numbers handled by
+   `translation::LinuxGapFill(...)` in
+   `kernel/subsystems/translation/translate.cpp`.
+
+Both metrics are written into the generated header preamble and are
+printed by the Linux boot log coverage line with explicit
+`primary`/`effective` labels.
