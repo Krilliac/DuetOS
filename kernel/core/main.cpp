@@ -1683,6 +1683,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // refactor breaks a SYS_* used in the mapping, the count
     // drops and the change is visible.
     customos::win32::Win32LogNtCoverage();
+    customos::subsystems::linux::LinuxLogAbiCoverage();
 
     customos::core::StartHeartbeatThread();
 

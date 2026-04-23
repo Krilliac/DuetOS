@@ -1,5 +1,7 @@
 #include "syscall.h"
 
+#include "linux_syscall_table_generated.h"
+
 #include "../../arch/x86_64/hpet.h"
 #include "../../arch/x86_64/serial.h"
 #include "../../arch/x86_64/traps.h"
@@ -2117,6 +2119,27 @@ void SyscallInit()
     SerialWrite(", kernel_gs@");
     arch::SerialWriteHex(percpu_addr);
     SerialWrite(")\n");
+}
+
+void LinuxLogAbiCoverage()
+{
+    // Re-walk the generated table at boot so a future refactor that
+    // renames a Do* handler out of classifier reach is visible in the
+    // boot log (count drops). kLinuxSyscallHandlersImplemented is the
+    // compile-time count baked in by the generator.
+    u32 implemented = 0;
+    for (u32 i = 0; i < kLinuxSyscallCount; ++i)
+    {
+        if (kLinuxSyscalls[i].state == HandlerState::Implemented)
+            ++implemented;
+    }
+    arch::SerialWrite("[linux] ABI coverage: ");
+    arch::SerialWriteHex(implemented);
+    arch::SerialWrite(" / ");
+    arch::SerialWriteHex(kLinuxSyscallCount);
+    arch::SerialWrite(" implemented (generated count = ");
+    arch::SerialWriteHex(kLinuxSyscallHandlersImplemented);
+    arch::SerialWrite(")\n");
 }
 
 } // namespace customos::subsystems::linux

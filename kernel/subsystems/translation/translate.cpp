@@ -6,8 +6,10 @@
 #include "../../core/process.h"
 #include "../../core/random.h"
 #include "../../mm/paging.h"
+#include "../linux/linux_syscall_table_generated.h"
 #include "../linux/syscall.h"
 #include "../win32/heap.h"
+#include "../win32/nt_syscall_table_generated.h"
 
 namespace customos::subsystems::translation
 {
@@ -109,117 +111,11 @@ void LogTranslation(const char* origin, u64 nr, const char* target)
     arch::SerialWrite("\n");
 }
 
-// Linux syscall-number-to-name table. Covers:
-//   - everything the primary dispatcher implements (so a regression
-//     that accidentally routes a known call through the miss path
-//     still prints a recognisable name),
-//   - everything the TU implements,
-//   - a curated set of common-but-unimplemented calls a real Linux
-//     binary is likely to hit (openat, getdents64, clone, epoll_*,
-//     poll/select, fork/execve/wait4, etc.).
-// Entries are sorted by nr for linear-scan legibility but the lookup
-// is O(n). Table currently ~80 entries — dwarfed by the serial cost
-// of actually emitting the miss line, so speed is not the concern.
-struct LinuxSysName
-{
-    u64 nr;
-    const char* name;
-};
-constexpr LinuxSysName kLinuxNames[] = {
-    {0, "read"},
-    {1, "write"},
-    {2, "open"},
-    {3, "close"},
-    {4, "stat"},
-    {5, "fstat"},
-    {6, "lstat"},
-    {7, "poll"},
-    {8, "lseek"},
-    {9, "mmap"},
-    {10, "mprotect"},
-    {11, "munmap"},
-    {12, "brk"},
-    {13, "rt_sigaction"},
-    {14, "rt_sigprocmask"},
-    {15, "rt_sigreturn"},
-    {16, "ioctl"},
-    {17, "pread64"},
-    {18, "pwrite64"},
-    {19, "readv"},
-    {20, "writev"},
-    {21, "access"},
-    {22, "pipe"},
-    {23, "select"},
-    {24, "sched_yield"},
-    {25, "mremap"},
-    {28, "madvise"},
-    {32, "dup"},
-    {33, "dup2"},
-    {35, "nanosleep"},
-    {39, "getpid"},
-    {41, "socket"},
-    {56, "clone"},
-    {57, "fork"},
-    {58, "vfork"},
-    {59, "execve"},
-    {60, "exit"},
-    {61, "wait4"},
-    {62, "kill"},
-    {63, "uname"},
-    {72, "fcntl"},
-    {74, "fsync"},
-    {75, "fdatasync"},
-    {78, "getdents"},
-    {79, "getcwd"},
-    {80, "chdir"},
-    {81, "fchdir"},
-    {82, "rename"},
-    {83, "mkdir"},
-    {84, "rmdir"},
-    {87, "unlink"},
-    {89, "readlink"},
-    {90, "chmod"},
-    {95, "umask"},
-    {96, "gettimeofday"},
-    {97, "getrlimit"},
-    {99, "sysinfo"},
-    {102, "getuid"},
-    {104, "getgid"},
-    {107, "geteuid"},
-    {108, "getegid"},
-    {109, "setpgid"},
-    {110, "getppid"},
-    {111, "getpgrp"},
-    {121, "getpgid"},
-    {124, "getsid"},
-    {131, "sigaltstack"},
-    {137, "statfs"},
-    {138, "fstatfs"},
-    {158, "arch_prctl"},
-    {160, "setrlimit"},
-    {186, "gettid"},
-    {201, "time"},
-    {202, "futex"},
-    {217, "getdents64"},
-    {218, "set_tid_address"},
-    {228, "clock_gettime"},
-    {231, "exit_group"},
-    {232, "epoll_wait"},
-    {233, "epoll_ctl"},
-    {234, "tgkill"},
-    {257, "openat"},
-    {262, "newfstatat"},
-    {263, "unlinkat"},
-    {269, "faccessat"},
-    {281, "epoll_pwait"},
-    {291, "epoll_create1"},
-    {293, "pipe2"},
-    {302, "prlimit64"},
-    {318, "getrandom"},
-    {334, "rseq"},
-    {435, "clone3"},
-    {439, "faccessat2"},
-};
+// Linux syscall-number-to-name lookup now comes from
+// `linux_syscall_table_generated.h` (374 entries covering the full
+// x86_64 ABI: 0..334 + 424..462). The generator flags which numbers
+// have a live Do* handler in syscall.cpp so the miss-path log line
+// can distinguish "known, unimplemented" from "unknown number".
 
 struct NativeSysName
 {
@@ -250,15 +146,15 @@ constexpr NativeSysName kNativeNames[] = {
     {0x211, "NativeWin32Free"},
 };
 
-const char* LinuxName(u64 nr)
+// Full per-call state (known/implemented/unknown) for the more
+// informative miss-path log. Returns HandlerState::Unknown for
+// numbers outside the generated table.
+::customos::subsystems::linux::HandlerState LinuxState(u64 nr)
 {
-    for (const auto& e : kLinuxNames)
-    {
-        if (e.nr == nr)
-            return e.name;
-    }
-    return nullptr;
+    const auto* entry = ::customos::subsystems::linux::LinuxSyscallLookup(nr);
+    return (entry != nullptr) ? entry->state : ::customos::subsystems::linux::HandlerState::Unknown;
 }
+
 const char* NativeName(u64 nr)
 {
     for (const auto& e : kNativeNames)
@@ -289,7 +185,29 @@ void LogMiss(const char* origin, arch::TrapFrame* f, const char* name)
     SerialWriteHex(f->rax);
     SerialWrite(" name=\"");
     SerialWrite(name ? name : "<unknown>");
-    SerialWrite("\" rip=");
+    SerialWrite("\"");
+    // For Linux misses, append the handler state so it's obvious
+    // from the log whether this was an unknown ABI number or a known-
+    // but-unimplemented syscall.
+    if (origin != nullptr && origin[0] == 'l' && origin[1] == 'i') // "linux"
+    {
+        using ::customos::subsystems::linux::HandlerState;
+        const HandlerState st = LinuxState(f->rax);
+        SerialWrite(" state=");
+        switch (st)
+        {
+        case HandlerState::Implemented:
+            SerialWrite("implemented");
+            break;
+        case HandlerState::Unimplemented:
+            SerialWrite("unimplemented");
+            break;
+        case HandlerState::Unknown:
+            SerialWrite("unknown-nr");
+            break;
+        }
+    }
+    SerialWrite(" rip=");
     SerialWriteHex(f->rip);
     SerialWrite(" args=[");
     SerialWriteHex(f->rdi);
@@ -592,7 +510,7 @@ i64 NativeWin32Alloc(arch::TrapFrame* f)
     auto* p = core::CurrentProcess();
     if (p == nullptr)
         return 0;
-    return static_cast<i64>(win32::Win32HeapAlloc(p, f->rdi));
+    return static_cast<i64>(::customos::win32::Win32HeapAlloc(p, f->rdi));
 }
 
 // Native: Win32HeapFree proxy.
@@ -601,11 +519,28 @@ i64 NativeWin32Free(arch::TrapFrame* f)
     auto* p = core::CurrentProcess();
     if (p == nullptr)
         return 0;
-    win32::Win32HeapFree(p, f->rdi);
+    ::customos::win32::Win32HeapFree(p, f->rdi);
     return 0;
 }
 
 } // namespace
+
+// Public name-lookup helpers — the generated Linux + NT syscall
+// tables compile in here, so any subsystem that wants to log a
+// syscall by name comes through these single entry points.
+const char* LinuxName(u64 nr)
+{
+    const auto* entry = ::customos::subsystems::linux::LinuxSyscallLookup(nr);
+    return (entry != nullptr) ? entry->name : nullptr;
+}
+
+const char* NtName(u64 nr)
+{
+    if (nr > 0xFFFF)
+        return nullptr;
+    const auto* entry = ::customos::subsystems::win32::NtSyscallByNumber(u16(nr));
+    return (entry != nullptr) ? entry->nt_name : nullptr;
+}
 
 const HitTable& LinuxHitsRead()
 {

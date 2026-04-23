@@ -1,0 +1,198 @@
+#!/usr/bin/env python3
+"""
+Emit a comprehensive Linux x86_64 syscall-number -> name table.
+
+Consumes `linux-syscalls-x86_64.csv` (columns: number, name, args)
+and produces a C++ header with a sorted `kLinuxSyscalls` array that
+the translator + dispatcher include for name lookup.
+
+The optional `--mapped-from-dispatcher` argument points at
+`kernel/subsystems/linux/syscall.cpp`; any syscall whose matching
+`Do<Name>` handler appears there is flagged with
+`linux::HandlerState::Implemented` in the generated header. The
+remaining syscalls (which the dispatcher returns -ENOSYS for)
+flag as `HandlerState::Unimplemented`. That gives the translator
+a cheap "implemented vs not" snapshot without duplicating the
+logic inside the dispatcher.
+
+Usage:
+    python3 gen-linux-syscall-table.py \\
+        --csv tools/linux-compat/linux-syscalls-x86_64.csv \\
+        --mapped-from-dispatcher kernel/subsystems/linux/syscall.cpp \\
+        --out kernel/subsystems/linux/linux_syscall_table_generated.h
+"""
+
+import argparse
+import csv
+import re
+import sys
+from pathlib import Path
+
+
+HEADER_TEMPLATE = """// AUTO-GENERATED — do not edit by hand.
+// Regenerate via: python3 tools/linux-compat/gen-linux-syscall-table.py
+//                 --csv tools/linux-compat/linux-syscalls-x86_64.csv
+//                 --mapped-from-dispatcher kernel/subsystems/linux/syscall.cpp
+//                 --out kernel/subsystems/linux/linux_syscall_table_generated.h
+//
+// Source data: tools/linux-compat/linux-syscalls-x86_64.csv
+// Total syscalls listed: {total}
+// Handlers implemented in kernel/subsystems/linux/syscall.cpp: {implemented}
+// Coverage: {pct}%
+//
+// See tools/linux-compat/README.md for provenance.
+
+#pragma once
+
+#include "../../core/types.h"
+
+namespace customos::subsystems::linux
+{{
+
+enum class HandlerState : u8
+{{
+    Unknown = 0,     // number outside the known ABI range
+    Unimplemented,   // known name, no Do* in syscall.cpp
+    Implemented,     // known name, matching Do* handler exists
+}};
+
+struct LinuxSyscallEntry
+{{
+    u16 number;
+    u8 args;            // 0..6
+    HandlerState state;
+    const char* name;
+}};
+
+/// Dense-by-number, sorted table of every known x86_64 Linux
+/// syscall. Linear scan for now; the table is small (< 500) and
+/// every miss walks it exactly once per failed syscall.
+inline constexpr LinuxSyscallEntry kLinuxSyscalls[] = {{
+{rows}}};
+
+inline constexpr u32 kLinuxSyscallCount =
+    sizeof(kLinuxSyscalls) / sizeof(kLinuxSyscalls[0]);
+
+inline constexpr u32 kLinuxSyscallHandlersImplemented = {implemented};
+
+/// Look up `nr` in `kLinuxSyscalls`. Returns nullptr if unknown.
+/// Linear scan — callers typically hit this on a miss path, where
+/// the log line it's building is orders of magnitude more expensive
+/// than the walk.
+inline const LinuxSyscallEntry* LinuxSyscallLookup(u64 nr)
+{{
+    for (const auto& e : kLinuxSyscalls)
+    {{
+        if (e.number == nr)
+            return &e;
+    }}
+    return nullptr;
+}}
+
+}} // namespace customos::subsystems::linux
+"""
+
+
+# Manual name translation for cases where the dispatcher function is
+# named differently from the canonical syscall (e.g. the dispatcher
+# prefixes with "Do" and camel-cases). The heuristic below converts
+# snake_case -> DoCamelCase and looks for it in the source; when a
+# name needs an explicit override (different spelling entirely) add
+# it here.
+NAME_ALIASES = {
+    # syscall name          : dispatcher symbol in syscall.cpp
+    "rt_sigaction":         "DoRtSigaction",
+    "rt_sigprocmask":       "DoRtSigprocmask",
+    "rt_sigreturn":         "DoRtSigreturn",
+    "set_tid_address":      "DoSetTidAddress",
+    "set_robust_list":      "DoSetRobustList",
+    "set_mempolicy_home_node": "DoSetMempolicyHomeNode",
+    "clock_gettime":        "DoClockGettime",
+    "exit_group":           "DoExitGroup",
+    "newfstatat":           "DoNewFstatat",
+    "getdents64":           "DoGetdents64",
+    "arch_prctl":           "DoArchPrctl",
+    "prlimit64":            "DoPrlimit64",
+    "pipe2":                "DoPipe2",
+    "dup3":                 "DoDup3",
+    "epoll_pwait":          "DoEpollPwait",
+    "epoll_create1":        "DoEpollCreate1",
+    "epoll_wait":           "DoEpollWait",
+    "epoll_ctl":            "DoEpollCtl",
+}
+
+
+def snake_to_camel(name):
+    return "".join(p.capitalize() for p in name.split("_"))
+
+
+def build_dispatcher_symbols(source_text):
+    # Every handler body in syscall.cpp is declared as
+    # `i64 DoFoo(...)`. Grep them out.
+    return set(re.findall(r"\bi64\s+(Do[A-Za-z0-9_]+)\s*\(", source_text))
+
+
+def classify(name, dispatcher_symbols):
+    sym = NAME_ALIASES.get(name)
+    if sym and sym in dispatcher_symbols:
+        return "Implemented"
+    sym = f"Do{snake_to_camel(name)}"
+    if sym in dispatcher_symbols:
+        return "Implemented"
+    return "Unimplemented"
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--csv", required=True, type=Path)
+    ap.add_argument("--mapped-from-dispatcher", type=Path, default=None)
+    ap.add_argument("--out", required=True, type=Path)
+    args = ap.parse_args()
+
+    dispatcher_symbols = set()
+    if args.mapped_from_dispatcher is not None:
+        dispatcher_symbols = build_dispatcher_symbols(
+            args.mapped_from_dispatcher.read_text()
+        )
+
+    rows = []
+    with args.csv.open() as f:
+        reader = csv.DictReader(f)
+        for r in reader:
+            nr = int(r["number"])
+            name = r["name"].strip()
+            try:
+                args_n = int(r.get("args", "0"))
+            except ValueError:
+                args_n = 0
+            state = classify(name, dispatcher_symbols)
+            rows.append((nr, name, args_n, state))
+
+    rows.sort(key=lambda r: r[0])
+
+    implemented = sum(1 for _, _, _, s in rows if s == "Implemented")
+    total = len(rows)
+    pct = (100 * implemented // total) if total else 0
+
+    row_lines = []
+    for nr, name, args_n, state in rows:
+        row_lines.append(
+            f'    {{{nr}, {args_n}, HandlerState::{state}, "{name}"}},'
+        )
+
+    args.out.write_text(
+        HEADER_TEMPLATE.format(
+            total=total,
+            implemented=implemented,
+            pct=pct,
+            rows="\n".join(row_lines) + ("\n" if row_lines else ""),
+        )
+    )
+    print(f"wrote {args.out}")
+    print(f"  total syscalls : {total}")
+    print(f"  implemented    : {implemented} ({pct}%)")
+    print(f"  unimplemented  : {total - implemented}")
+
+
+if __name__ == "__main__":
+    main()

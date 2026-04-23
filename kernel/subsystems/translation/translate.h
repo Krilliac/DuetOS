@@ -81,4 +81,21 @@ const HitTable& NativeHitsRead();
 /// to convert, or just read the numbers as relative costs.
 void TranslatorOverheadDump();
 
+// Public name-lookup helpers — the generated Linux + NT syscall
+// tables are compiled into this TU, so any subsystem that wants
+// to log a syscall by name (PE loader miss-logger, shell "trace"
+// command, security-guard telemetry) routes through here instead
+// of duplicating the tables.
+
+/// x86_64 Linux syscall number -> canonical name, e.g. 0 -> "read",
+/// 435 -> "clone3". Returns nullptr for numbers outside the known
+/// ABI table (374 entries covering 0..334 + 424..462).
+const char* LinuxName(u64 nr);
+
+/// NT syscall number (Win11 25H2 numbering) -> name, e.g. 0x18 ->
+/// "NtAllocateVirtualMemory". Returns nullptr for unknown numbers.
+/// Covers 489 NT calls — the complete j00ru table for the target
+/// Windows version.
+const char* NtName(u64 nr);
+
 } // namespace customos::subsystems::translation

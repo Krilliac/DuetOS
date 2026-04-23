@@ -3624,10 +3624,10 @@ bool Win32StubsLookupKind(const char* dll, const char* func, u64* out_va, bool* 
 
 void Win32LogNtCoverage()
 {
-    // Re-walk the generated table at boot to print the scoreboard.
+    // Re-walk the generated tables at boot to print the scoreboard.
     // The compile-time `kBedrockNtSyscallsCovered` already has the
     // count, but doing one runtime sweep here also confirms the
-    // table linked correctly into the kernel binary (catches a
+    // tables linked correctly into the kernel binary (catches a
     // future "header included but not referenced anywhere" rot).
     using namespace ::customos::subsystems::win32;
     u32 covered = 0;
@@ -3643,6 +3643,9 @@ void Win32LogNtCoverage()
     arch::SerialWrite(" (generated table = ");
     arch::SerialWriteHex(kBedrockNtSyscallsCovered);
     arch::SerialWrite(")\n");
+    arch::SerialWrite("[win32] ntdll full-table entries: ");
+    arch::SerialWriteHex(kAllNtSyscallCount);
+    arch::SerialWrite(" (every NT syscall known on the target Windows version)\n");
 }
 
 } // namespace customos::win32
