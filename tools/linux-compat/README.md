@@ -71,14 +71,9 @@ with a comment explaining why.
 
 ## Scoreboard
 
-The generator emits two explicit coverage metrics:
-
-1. **primary** — syscalls with a live `Do*` handler in
-   `kernel/subsystems/linux/syscall.cpp` (name-matched).
-2. **effective** — primary coverage plus syscall numbers handled by
-   `translation::LinuxGapFill(...)` in
-   `kernel/subsystems/translation/translate.cpp`.
-
-Both metrics are written into the generated header preamble and are
-printed by the Linux boot log coverage line with explicit
-`primary`/`effective` labels.
+The generator tallies how many syscalls have a live mapping to a
+`Do*` handler in `syscall.cpp` (by name match). The emitted header
+contains both the sorted syscall row table and a dense by-number
+index (`nullptr` for unknown holes), so `LinuxSyscallLookup(nr)`
+is O(1) on both hit and miss paths. A boot-time log line prints
+"linux ABI coverage: N/M" once the dispatcher pulls the new table in.
