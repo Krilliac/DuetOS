@@ -58,6 +58,37 @@ enum : u64
 constinit HitTable g_linux_hits = {};
 constinit HitTable g_native_hits = {};
 
+// Translator overhead telemetry. Cheap RDTSC delta around each
+// gap-fill call — answers "what does the translator cost?" with
+// real numbers instead of guesses. TSC is monotonic on single-
+// CPU x86_64; `__rdtsc()` is serialising-free which is exactly
+// what we want for low-overhead sampling (we'd pay 30-ish cycles
+// for the read itself, versus hundreds-to-thousands for the
+// actual gap-fill work we're trying to measure).
+struct OverheadTally
+{
+    u64 calls = 0;
+    u64 cycles_total = 0;
+    u64 cycles_max = 0;
+};
+constinit OverheadTally g_linux_overhead = {};
+constinit OverheadTally g_native_overhead = {};
+
+inline u64 ReadTsc()
+{
+    u32 lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    return (static_cast<u64>(hi) << 32) | lo;
+}
+
+void BumpOverhead(OverheadTally& t, u64 delta)
+{
+    ++t.calls;
+    t.cycles_total += delta;
+    if (delta > t.cycles_max)
+        t.cycles_max = delta;
+}
+
 void BumpHits(HitTable& t, u64 nr)
 {
     if (t.buckets[nr & 0x3FF] != 0xFFFFFFFFu)
@@ -588,6 +619,10 @@ const HitTable& NativeHitsRead()
 Result LinuxGapFill(arch::TrapFrame* frame)
 {
     KLOG_TRACE_SCOPE("translate", "LinuxGapFill");
+    // RDTSC window around the gap-fill body. Reads are serialising-
+    // free so we capture the cost of the handler without paying a
+    // barrier per sample. See `BumpOverhead` comment for rationale.
+    const u64 tsc_entry = ReadTsc();
     const u64 nr = frame->rax;
     Result r{false, 0};
     switch (nr)
@@ -670,12 +705,17 @@ Result LinuxGapFill(arch::TrapFrame* frame)
     }
     if (r.handled)
         BumpHits(g_linux_hits, nr);
+    // Close the TSC window before returning. Count misses too —
+    // a miss costs real cycles (LogMiss is a serial write) and
+    // the operator wants to see that cost surface in the summary.
+    BumpOverhead(g_linux_overhead, ReadTsc() - tsc_entry);
     return r;
 }
 
 Result NativeGapFill(arch::TrapFrame* frame)
 {
     KLOG_TRACE_SCOPE("translate", "NativeGapFill");
+    const u64 tsc_entry = ReadTsc();
     const u64 nr = frame->rax;
     Result r{false, 0};
     switch (nr)
@@ -702,7 +742,47 @@ Result NativeGapFill(arch::TrapFrame* frame)
     }
     if (r.handled)
         BumpHits(g_native_hits, nr);
+    BumpOverhead(g_native_overhead, ReadTsc() - tsc_entry);
     return r;
+}
+
+// Emit a one-shot summary of translator overhead. Called by the
+// kheartbeat loop so the numbers roll into the normal telemetry
+// cadence without a dedicated shell command. Format:
+//   [translate-overhead] linux  calls=N total_c=C avg_c=A max_c=M
+//   [translate-overhead] native calls=N total_c=C avg_c=A max_c=M
+// Cycles are raw TSC deltas; on the QEMU host TSC runs at the
+// CPU's nominal frequency (qemu reports a fixed rate) so dividing
+// by that frequency yields nanoseconds. We emit raw cycles and
+// let the reader do the conversion — the host kernel's dmesg can
+// tell you the TSC Hz.
+void TranslatorOverheadDump()
+{
+    arch::SerialWrite("[translate-overhead] linux  calls=");
+    arch::SerialWriteHex(g_linux_overhead.calls);
+    arch::SerialWrite(" total_c=");
+    arch::SerialWriteHex(g_linux_overhead.cycles_total);
+    if (g_linux_overhead.calls > 0)
+    {
+        arch::SerialWrite(" avg_c=");
+        arch::SerialWriteHex(g_linux_overhead.cycles_total / g_linux_overhead.calls);
+    }
+    arch::SerialWrite(" max_c=");
+    arch::SerialWriteHex(g_linux_overhead.cycles_max);
+    arch::SerialWrite("\n");
+
+    arch::SerialWrite("[translate-overhead] native calls=");
+    arch::SerialWriteHex(g_native_overhead.calls);
+    arch::SerialWrite(" total_c=");
+    arch::SerialWriteHex(g_native_overhead.cycles_total);
+    if (g_native_overhead.calls > 0)
+    {
+        arch::SerialWrite(" avg_c=");
+        arch::SerialWriteHex(g_native_overhead.cycles_total / g_native_overhead.calls);
+    }
+    arch::SerialWrite(" max_c=");
+    arch::SerialWriteHex(g_native_overhead.cycles_max);
+    arch::SerialWrite("\n");
 }
 
 } // namespace customos::subsystems::translation

@@ -186,6 +186,82 @@ void _start(void) {
     TAG("[exe] getgid rc=");
     FMTI(sc1(104 /*getgid*/, 0));
 
+    // === tier 3: new primary-dispatch syscalls (this slice) ===
+    //
+    // openat(AT_FDCWD=-100, "HELLO.TXT", O_RDONLY=0, 0)
+    i64 fd2 = sc6(257 /*openat*/, (u64)-100, (u64)"HELLO.TXT", 0, 0, 0, 0);
+    TAG("[exe] openat rc=");
+    FMTI(fd2);
+    if (fd2 >= 0) {
+        // newfstatat(fd2, "", stbuf, AT_EMPTY_PATH=0x1000)
+        char st[144] = {0};
+        TAG("[exe] newfstatat(AT_EMPTY_PATH) rc=");
+        FMTI(sc6(262 /*newfstatat*/, (u64)fd2, (u64)"", (u64)st, 0x1000, 0, 0));
+
+        // dup3(fd2, fd3=11, 0) — duplicate onto a specific fd slot
+        TAG("[exe] dup3 rc=");
+        FMTI(sc3(292 /*dup3*/, fd2, 11, 0));
+
+        sc1(3 /*close*/, 11);
+        sc1(3 /*close*/, fd2);
+    }
+
+    // newfstatat(AT_FDCWD, "HELLO.TXT", stbuf, 0) — path form
+    {
+        char st[144] = {0};
+        TAG("[exe] newfstatat(path) rc=");
+        FMTI(sc6(262 /*newfstatat*/, (u64)-100, (u64)"HELLO.TXT", (u64)st, 0, 0, 0));
+    }
+
+    // getrusage(RUSAGE_SELF=0, &ru)
+    {
+        char ru[144] = {0};
+        TAG("[exe] getrusage rc=");
+        FMTI(sc2(98 /*getrusage*/, 0, (u64)ru));
+    }
+
+    // poll: one pollfd for stdin wanting POLLIN. The stub marks
+    // it ready immediately (tty "ready to read" forever semantics).
+    {
+        struct { int fd; short events; short revents; } pfd = {0, 0x0001 /*POLLIN*/, 0};
+        TAG("[exe] poll(nfds=1,stdin) rc=");
+        FMTI(sc3(7 /*poll*/, (u64)&pfd, 1, 0));
+    }
+
+    // select: all fd_sets NULL, nfds=0, timeout=NULL — the stub
+    // returns 0 regardless.
+    TAG("[exe] select rc=");
+    FMTI(sc6(23 /*select*/, 0, 0, 0, 0, 0, 0));
+
+    // getdents64(fd, buf, sizeof(buf)) — stub returns 0 (=EOF).
+    {
+        char dbuf[256];
+        i64 df = sc3(2 /*open*/, (u64)"HELLO.TXT", 0, 0); // can't open a dir yet; reuse a file fd
+        if (df >= 0) {
+            TAG("[exe] getdents64 rc=");
+            FMTI(sc3(217 /*getdents64*/, (u64)df, (u64)dbuf, sizeof(dbuf)));
+            sc1(3, df);
+        }
+    }
+
+    // set_robust_list: accepting + no-op
+    TAG("[exe] set_robust_list rc=");
+    FMTI(sc2(273 /*set_robust_list*/, 0, 24));
+
+    // === tier 4: deliberately unimplemented (should -ENOSYS via translator) ===
+    // fork / vfork / clone / clone3 / execve / wait4 — all route
+    // through the translator's synthetic:enosys-no-process-create
+    // branch (added previous slice). Verify they still come back
+    // with -ENOSYS = -38.
+    TAG("[exe] vfork rc=");
+    FMTI(sc1(58 /*vfork*/, 0));
+    TAG("[exe] clone rc=");
+    FMTI(sc6(56 /*clone*/, 0, 0, 0, 0, 0, 0));
+    TAG("[exe] execve rc=");
+    FMTI(sc3(59 /*execve*/, (u64)"HELLO.TXT", 0, 0));
+    TAG("[exe] wait4 rc=");
+    FMTI(sc6(61 /*wait4*/, (u64)-1, 0, 0, 0, 0, 0));
+
     // exit_group(0x55)
     TAG("[exe] all done, exit 0x55\n");
     sc1(231 /*exit_group*/, 0x55);

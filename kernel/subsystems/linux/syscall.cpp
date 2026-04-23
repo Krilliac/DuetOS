@@ -120,7 +120,31 @@ enum : u64
     kSysGetPpid = 110,
     kSysGetPgid = 121,
     kSysGetSid = 124,
+    // Batch 54 — modern *at-family + directory + poll/select + rusage.
+    // Everything here routes through an existing primary handler
+    // (openat → DoOpen with AT_FDCWD treatment, newfstatat → DoStat
+    // / DoFstat, dup3 → DoDup2) or is a structural stub (poll /
+    // select / getdents64 / getrusage returning valid-shaped
+    // results so callers can progress instead of -ENOSYS-crashing).
+    kSysPoll = 7,
+    kSysSelect = 23,
+    kSysGetrusage = 98,
+    kSysGetdents64 = 217,
+    kSysOpenat = 257,
+    kSysNewFstatat = 262,
+    kSysDup3 = 292,
+    // set_robust_list / get_robust_list — musl calls set_robust_list
+    // at thread init. Accepting + no-op is the usual glibc-compat
+    // move (we have no robust-futex machinery).
+    kSysSetRobustList = 273,
+    kSysGetRobustList = 274,
 };
+
+// POSIX AT_FDCWD — used by the *at family to mean "resolve
+// relative to the caller's CWD". v0 has no per-process CWD
+// yet, so AT_FDCWD always resolves to the sandbox root; any
+// other dirfd is -EBADF until per-fd CWDs land.
+constexpr i64 kAtFdCwd = -100;
 
 constexpr i64 kESRCH = -3;
 
@@ -1325,6 +1349,184 @@ i64 DoMunmap(u64 addr, u64 len)
     return 0;
 }
 
+// Linux: openat(dirfd, pathname, flags, mode). Modern glibc's
+// `open()` is usually `openat(AT_FDCWD, ...)` under the hood —
+// this handler is what real compiled-C binaries actually hit.
+// v0 only honours AT_FDCWD; any other dirfd is -EBADF until
+// per-fd directory state lands (same limitation fchdir has).
+i64 DoOpenat(i64 dirfd, u64 user_path, u64 flags, u64 mode)
+{
+    if (dirfd != kAtFdCwd)
+        return kEBADF;
+    return DoOpen(user_path, flags, mode);
+}
+
+// Linux: newfstatat(dirfd, pathname, statbuf, flags).
+// Shape: if AT_EMPTY_PATH (0x1000) is set + dirfd is a valid fd,
+// stat the fd (≡ fstat). Else resolve `pathname` relative to
+// dirfd (we only accept AT_FDCWD for now). No-follow-symlink
+// flag (0x100) is accepted + ignored — we have no symlinks.
+i64 DoNewFstatat(i64 dirfd, u64 user_path, u64 user_buf, u64 flags)
+{
+    constexpr u64 kAtEmptyPath = 0x1000;
+    if ((flags & kAtEmptyPath) != 0)
+    {
+        if (dirfd < 0)
+            return kEBADF;
+        return DoFstat(static_cast<u64>(dirfd), user_buf);
+    }
+    if (dirfd != kAtFdCwd)
+        return kEBADF;
+    return DoStat(user_path, user_buf);
+}
+
+// Linux: dup3(oldfd, newfd, flags). Same as dup2 but requires
+// oldfd != newfd (else -EINVAL) and optionally takes O_CLOEXEC
+// (0x80000). We don't track CLOEXEC so the flag is accepted but
+// a no-op. Everything else is DoDup2.
+i64 DoDup3(u64 oldfd, u64 newfd, u64 flags)
+{
+    if (oldfd == newfd)
+        return kEINVAL;
+    constexpr u64 kOCloexec = 0x80000;
+    if ((flags & ~kOCloexec) != 0)
+        return kEINVAL;
+    return DoDup2(oldfd, newfd);
+}
+
+// Linux: getrusage(who, usage). Returns resource-usage stats
+// for self/children/thread. v0 has no per-task CPU-time
+// accounting exposed here — zero the struct so any `usage.ru_*`
+// read by the caller sees a well-defined 0 rather than garbage.
+// Struct layout (144 bytes): {ru_utime:16, ru_stime:16, 14×u64}.
+i64 DoGetrusage(u64 who, u64 user_buf)
+{
+    (void)who;
+    if (user_buf == 0)
+        return kEFAULT;
+    u8 zeros[144];
+    for (u64 i = 0; i < sizeof(zeros); ++i)
+        zeros[i] = 0;
+    if (!mm::CopyToUser(reinterpret_cast<void*>(user_buf), zeros, sizeof(zeros)))
+        return kEFAULT;
+    return 0;
+}
+
+// Linux: poll(fds, nfds, timeout_ms). Returns count of fds that
+// are ready. v0 has no event-driven fd machinery (all fds are
+// either ttys that "block" on read and return immediately on
+// write, or regular files that are always "ready" for read
+// with available bytes). Matching caller expectations:
+//   - If any pollfd has POLLIN/POLLOUT requested for a live
+//     fd, mark it ready in revents and count it. That's what a
+//     caller like "wait until stdin has input" would see on a
+//     tty — immediately ready, non-blocking.
+//   - A zero-nfds poll with a non-negative timeout is a
+//     Linux-idiomatic nanosleep; we accept + return 0.
+// All edge cases (POLLHUP, POLLERR, negative timeout = "wait
+// forever") are returned as 0 revents (=no event), which is
+// honest — we'd need a proper wait-queue per fd to do more.
+constexpr i64 kPollIn = 0x0001;
+constexpr i64 kPollOut = 0x0004;
+i64 DoPoll(u64 user_fds, u64 nfds, i64 timeout_ms)
+{
+    (void)timeout_ms;
+    if (nfds == 0)
+        return 0;
+    if (user_fds == 0)
+        return kEFAULT;
+    // Cap at 16 — matches our per-process fd table; larger polls
+    // are surely bogus until we support more. Each pollfd is
+    // 8 bytes: {int fd, short events, short revents}.
+    if (nfds > 16)
+        return kEINVAL;
+
+    struct PollFd
+    {
+        i32 fd;
+        i16 events;
+        i16 revents;
+    } fds[16];
+    if (!mm::CopyFromUser(&fds[0], reinterpret_cast<const void*>(user_fds), nfds * sizeof(PollFd)))
+        return kEFAULT;
+
+    core::Process* p = core::CurrentProcess();
+    i64 ready = 0;
+    for (u64 i = 0; i < nfds; ++i)
+    {
+        fds[i].revents = 0;
+        if (fds[i].fd < 0 || fds[i].fd >= 16)
+            continue;
+        if (p == nullptr)
+            continue;
+        const u8 state = p->linux_fds[static_cast<u64>(fds[i].fd)].state;
+        if (state == 0)
+        {
+            // Closed slot — POSIX says revents=POLLNVAL (0x20).
+            fds[i].revents = 0x20;
+            ++ready;
+            continue;
+        }
+        if ((fds[i].events & kPollIn) != 0 || (fds[i].events & kPollOut) != 0)
+        {
+            fds[i].revents = fds[i].events & (kPollIn | kPollOut);
+            ++ready;
+        }
+    }
+    if (!mm::CopyToUser(reinterpret_cast<void*>(user_fds), &fds[0], nfds * sizeof(PollFd)))
+        return kEFAULT;
+    return ready;
+}
+
+// Linux: select(nfds, readfds, writefds, exceptfds, timeout).
+// Boundary-probe stub — we don't implement real fd bitmap
+// dispatch. Return "0 ready" which tells the caller "your
+// timeout expired without any event" — harmless, lets the
+// caller loop or move on. Real implementations rarely reach
+// select() anymore (poll/epoll dominate); synxtest probes it
+// to show the stub is present.
+i64 DoSelect(u64 nfds, u64 rfds, u64 wfds, u64 efds, u64 timeout)
+{
+    (void)nfds;
+    (void)rfds;
+    (void)wfds;
+    (void)efds;
+    (void)timeout;
+    return 0;
+}
+
+// Linux: getdents64(fd, dirp, count). Read directory entries
+// into the user buffer. v0 has no readable per-fd directory
+// state — when we get a dirfd we don't know where we are in
+// the enumeration. Returning 0 means "end of directory", which
+// makes `ls` print nothing rather than looping. Honest partial
+// implementation; a real one requires a per-fd cursor into the
+// FAT32 root, which the existing fd state doesn't carry.
+i64 DoGetdents64(u64 fd, u64 user_buf, u64 count)
+{
+    (void)fd;
+    (void)user_buf;
+    (void)count;
+    return 0;
+}
+
+// Linux: set_robust_list(head, len). musl's thread init calls
+// this. We have no robust-futex wake-on-exit machinery, so
+// accepting + no-op is the honest glibc-compat move.
+i64 DoSetRobustList(u64 head, u64 len)
+{
+    (void)head;
+    (void)len;
+    return 0;
+}
+i64 DoGetRobustList(u64 pid, u64 user_head_ptr, u64 user_len_ptr)
+{
+    (void)pid;
+    (void)user_head_ptr;
+    (void)user_len_ptr;
+    return 0;
+}
+
 // Linux: arch_prctl(code, addr). Used almost exclusively by musl's
 // CRT at _start to plant the thread-local-storage anchor in
 // FS.base: `arch_prctl(ARCH_SET_FS, &thread_block)`. Without this,
@@ -1560,6 +1762,33 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
         break;
     case kSysSetPgid:
         rv = DoSetPgid(frame->rdi, frame->rsi);
+        break;
+    case kSysOpenat:
+        rv = DoOpenat(static_cast<i64>(frame->rdi), frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysNewFstatat:
+        rv = DoNewFstatat(static_cast<i64>(frame->rdi), frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysDup3:
+        rv = DoDup3(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysGetrusage:
+        rv = DoGetrusage(frame->rdi, frame->rsi);
+        break;
+    case kSysPoll:
+        rv = DoPoll(frame->rdi, frame->rsi, static_cast<i64>(frame->rdx));
+        break;
+    case kSysSelect:
+        rv = DoSelect(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+        break;
+    case kSysGetdents64:
+        rv = DoGetdents64(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysSetRobustList:
+        rv = DoSetRobustList(frame->rdi, frame->rsi);
+        break;
+    case kSysGetRobustList:
+        rv = DoGetRobustList(frame->rdi, frame->rsi, frame->rdx);
         break;
     case kSysBrk:
         rv = DoBrk(frame->rdi);
