@@ -71,9 +71,11 @@ const HitTable& NativeHitsRead();
 
 /// Emit `[translate-overhead] linux …` + `native …` lines to the
 /// serial log. Each line carries raw TSC counts: calls, total
-/// cycles, average per call, max seen. Called by the kheartbeat
-/// loop so the numbers roll in on the same cadence as the other
-/// telemetry; a shell command can call it on demand too.
+/// cycles, average per call, max seen. Also emits
+/// `[translate-miss-suppressed]` lines with cumulative + delta
+/// counts for sampled miss logs. Called by the kheartbeat loop so
+/// the numbers roll in on the same cadence as the other telemetry;
+/// a shell command can call it on demand too.
 ///
 /// Why cycles and not nanoseconds: TSC frequency is CPU-specific;
 /// we don't have a reliable TSC→ns calibration in the kernel yet.

@@ -27,6 +27,10 @@ void SerialWriteByte(u8 byte);
 /// Write a NUL-terminated string to COM1.
 void SerialWrite(const char* str);
 
+/// Write exactly `len` bytes to COM1 from `data`.
+/// Mirrors SerialWrite's LF->CRLF behavior and ignores embedded NUL bytes.
+void SerialWriteN(const char* data, u64 len);
+
 /// Write a 64-bit value as "0x" + 16 hex digits, no newline.
 void SerialWriteHex(u64 value);
 
