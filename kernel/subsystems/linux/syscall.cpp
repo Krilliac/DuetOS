@@ -24,6 +24,14 @@ namespace customos::subsystems::linux
 
 namespace
 {
+// Hot-path tracing gate for LinuxSyscallDispatch. Debug keeps
+// full trace scopes; release compiles them fully out so each
+// syscall pays no trace RAII construction/destruction overhead.
+#if defined(NDEBUG)
+inline constexpr bool kTraceLinuxSyscallDispatch = false;
+#else
+inline constexpr bool kTraceLinuxSyscallDispatch = true;
+#endif
 
 // Linux x86_64 MSR numbers.
 constexpr u32 kMsrStar = 0xC0000081;  // CS selectors for syscall/sysret
@@ -2031,9 +2039,11 @@ u64 LinuxNowNs()
 
 extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
 {
-    KLOG_TRACE_SCOPE("linux/syscall", "LinuxSyscallDispatch");
-    // Ownership: primary owner of implemented Linux ABI behavior.
-    // Translation is only for unresolved syscall-number misses.
+    if constexpr (kTraceLinuxSyscallDispatch)
+    {
+        KLOG_TRACE_SCOPE("linux/syscall", "LinuxSyscallDispatch");
+    }
+
     const u64 nr = frame->rax;
     i64 rv = kENOSYS;
     switch (nr)
