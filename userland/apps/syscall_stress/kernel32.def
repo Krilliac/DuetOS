@@ -26,3 +26,5 @@ EXPORTS
     GetNativeSystemInfo
     FormatMessageA
     GetConsoleScreenBufferInfo
+    DecodePointer
+    EncodePointer

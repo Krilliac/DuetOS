@@ -173,6 +173,10 @@ constexpr u32 kOffOutputDebugStringW = 0x941;         // batch 52 — 13 bytes (
 constexpr u32 kOffFormatMessageA = 0x94E;             // batch 52 — 32 bytes
 constexpr u32 kOffGetConsoleScreenBufferInfo = 0x96E; // batch 52 — 54 bytes
 
+// === Batch 53: RaiseException / DecodePointer / EncodePointer.
+constexpr u32 kOffRaiseException = 0x9A4; // batch 53 — 9 bytes (noreturn)
+constexpr u32 kOffDecodePointer = 0x9AD;  // batch 53 — 4 bytes (identity)
+
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
     // Windows x64 ABI: first arg (uExitCode) in RCX.
@@ -2524,10 +2528,32 @@ constexpr u8 kStubsBytes[] = {
     0xC3,                                     // 0x9A0 ret
     0x31, 0xC0,                               // 0x9A1 xor eax, eax
     0xC3,                                     // 0x9A3 ret
+
+    // === Batch 53 =============================================
+
+    // --- RaiseException (offset 0x9A4, 9 bytes) ---------------
+    // Win32:
+    //   void RaiseException(DWORD dwExceptionCode, DWORD flags,
+    //                       DWORD nArgs, const ULONG_PTR *args);
+    // v0 has no SEH, so any RaiseException is fatal — route to
+    // SYS_EXIT with rcx (exception code) as the exit code.
+    0x48, 0x89, 0xCF, // 0x9A4 mov rdi, rcx
+    0x31, 0xC0,       // 0x9A7 xor eax, eax
+    0xCD, 0x80,       // 0x9A9 int 0x80
+    0x0F, 0x0B,       // 0x9AB ud2 ; [[noreturn]]
+
+    // --- DecodePointer / EncodePointer (offset 0x9AD, 4 bytes) --
+    // Win32: PVOID DecodePointer(PVOID Ptr); EncodePointer same.
+    // Windows uses these for process-wide XOR-with-a-secret
+    // obfuscation of function pointers (ASLR defense-in-depth).
+    // v0 has no process-wide secret → identity preserves the
+    // Encode/Decode round-trip used by MSVC's CRT.
+    0x48, 0x89, 0xC8, // 0x9AD mov rax, rcx
+    0xC3,             // 0x9B0 ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x9A4, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0x9B1, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -2980,6 +3006,13 @@ constexpr StubEntry kStubsTable[] = {
     // Batch 51: WaitForMultipleObjects via SYS_WAIT_MULTI.
     {"kernel32.dll", "WaitForMultipleObjects", kOffWaitForMultipleObjects},
     {"kernel32.dll", "WaitForMultipleObjectsEx", kOffWaitForMultipleObjects},
+    // Batch 53: RaiseException → SYS_EXIT. DecodePointer /
+    // EncodePointer → identity (round-trip preserved).
+    {"kernel32.dll", "RaiseException", kOffRaiseException},
+    {"kernel32.dll", "DecodePointer", kOffDecodePointer},
+    {"kernel32.dll", "EncodePointer", kOffDecodePointer},
+    {"kernel32.dll", "RtlDecodePointer", kOffDecodePointer},
+    {"kernel32.dll", "RtlEncodePointer", kOffDecodePointer},
     // Tls/Fls now route through real per-process storage —
     // moved to batch 46 below.
     {"kernel32.dll", "SetEndOfFile", kOffReturnOne},

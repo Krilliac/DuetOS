@@ -132,6 +132,8 @@ __declspec(dllimport) void __stdcall OutputDebugStringW(const unsigned short* lp
 __declspec(dllimport) DWORD __stdcall FormatMessageA(DWORD flags, const void* src, DWORD msgId, DWORD lang, char* buf,
                                                      DWORD nSize, void* args);
 __declspec(dllimport) BOOL __stdcall GetConsoleScreenBufferInfo(HANDLE hOut, CONSOLE_SCREEN_BUFFER_INFO* p);
+__declspec(dllimport) void* __stdcall DecodePointer(void* Ptr);
+__declspec(dllimport) void* __stdcall EncodePointer(void* Ptr);
 
 static HANDLE g_events[2];
 
@@ -298,6 +300,17 @@ int __stdcall _start(void)
     {
         WriteString("[syscall-stress] FAIL GetConsoleScreenBufferInfo bad size\n");
         ExitProcess(12);
+    }
+
+    // === Batch 53 coverage: Decode/Encode round-trip ===
+    WriteString("[syscall-stress] main: Decode/Encode round-trip\n");
+    void* p_in = (void*)0xDEADBEEFCAFEBABEULL;
+    void* p_enc = EncodePointer(p_in);
+    void* p_dec = DecodePointer(p_enc);
+    if (p_dec != p_in)
+    {
+        WriteString("[syscall-stress] FAIL Encode/Decode didn't round-trip\n");
+        ExitProcess(13);
     }
 
     WriteString("[syscall-stress] main: PASS\n");
