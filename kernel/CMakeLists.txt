@@ -120,6 +120,7 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     mm/address_space.cpp
     mm/frame_allocator.cpp
     mm/kheap.cpp
+    mm/kstack.cpp
     mm/page.cpp
     mm/paging.cpp
     mm/user_copy.S

@@ -12,6 +12,7 @@
 #include "../../debug/breakpoints.h"
 #include "../../debug/extable.h"
 #include "../../debug/probes.h"
+#include "../../mm/kstack.h"
 #include "../../sched/sched.h"
 
 // user_copy.S labels, exposed to the trap dispatcher for the
@@ -264,6 +265,28 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         for (;;)
         {
             asm volatile("cli; hlt");
+        }
+    }
+
+    // Kernel-stack guard-page hit. Runs BEFORE the extable lookup so
+    // a stray fault-fixup entry that happened to register a RIP
+    // range around this site can't shadow a real overflow. Scoped
+    // to kernel-mode #PF — userland can't reach the kernel-half
+    // arena, and any fault delivered to ring 0 with CR2 inside the
+    // arena's guard band IS an overflow.
+    if (frame->vector == 14 && (frame->cs & 3) == 0)
+    {
+        const u64 cr2 = ReadCr2();
+        if (mm::IsKernelStackGuardFault(cr2))
+        {
+            SerialWrite("\n** KERNEL STACK OVERFLOW **\n  task id : ");
+            SerialWriteHex(customos::sched::CurrentTaskId());
+            SerialWrite("\n  cr2     : ");
+            SerialWriteHex(cr2);
+            SerialWrite("\n  rip     : ");
+            SerialWriteHex(frame->rip);
+            SerialWrite("\n");
+            core::PanicWithValue("sched/kstack", "guard-page hit — kernel stack overflow", cr2);
         }
     }
 
