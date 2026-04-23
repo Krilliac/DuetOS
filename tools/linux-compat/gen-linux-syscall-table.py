@@ -15,6 +15,12 @@ flag as `HandlerState::Unimplemented`. That gives the translator
 a cheap "implemented vs not" snapshot without duplicating the
 logic inside the dispatcher.
 
+The optional `--gap-fill-from-translator` argument points at
+`kernel/subsystems/translation/translate.cpp`; syscall numbers
+handled by `LinuxGapFill(...)` there are counted toward an
+"effective" coverage metric (primary dispatcher + translator
+gap-fill).
+
 Usage:
     python3 gen-linux-syscall-table.py \\
         --csv tools/linux-compat/linux-syscalls-x86_64.csv \\
@@ -37,8 +43,10 @@ HEADER_TEMPLATE = """// AUTO-GENERATED — do not edit by hand.
 //
 // Source data: tools/linux-compat/linux-syscalls-x86_64.csv
 // Total syscalls listed: {total}
-// Handlers implemented in kernel/subsystems/linux/syscall.cpp: {implemented}
-// Coverage: {pct}%
+// Primary handlers implemented in kernel/subsystems/linux/syscall.cpp: {primary}
+// Effective coverage (primary + LinuxGapFill in translation/translate.cpp): {effective}
+// Coverage (primary): {primary_pct}%
+// Coverage (effective): {effective_pct}%
 //
 // See tools/linux-compat/README.md for provenance.
 
@@ -64,29 +72,28 @@ struct LinuxSyscallEntry
     const char* name;
 }};
 
-/// Dense-by-number, sorted table of every known x86_64 Linux
-/// syscall. Linear scan for now; the table is small (< 500) and
-/// every miss walks it exactly once per failed syscall.
+/// Dense-by-number, sorted table of every known x86_64 Linux syscall.
 inline constexpr LinuxSyscallEntry kLinuxSyscalls[] = {{
 {rows}}};
 
 inline constexpr u32 kLinuxSyscallCount =
     sizeof(kLinuxSyscalls) / sizeof(kLinuxSyscalls[0]);
 
+inline constexpr u32 kLinuxSyscallMaxNumber = {max_nr};
+
+/// Dense index by syscall number. Unknown numbers map to nullptr.
+/// This keeps lookup O(1) while preserving the historical API.
+inline constexpr const LinuxSyscallEntry* kLinuxSyscallByNumber[] = {{
+{index_rows}}};
+
 inline constexpr u32 kLinuxSyscallHandlersImplemented = {implemented};
 
-/// Look up `nr` in `kLinuxSyscalls`. Returns nullptr if unknown.
-/// Linear scan — callers typically hit this on a miss path, where
-/// the log line it's building is orders of magnitude more expensive
-/// than the walk.
+/// Look up `nr` in the dense by-number index. Returns nullptr if unknown.
 inline const LinuxSyscallEntry* LinuxSyscallLookup(u64 nr)
 {{
-    for (const auto& e : kLinuxSyscalls)
-    {{
-        if (e.number == nr)
-            return &e;
-    }}
-    return nullptr;
+    if (nr > kLinuxSyscallMaxNumber)
+        return nullptr;
+    return kLinuxSyscallByNumber[static_cast<u32>(nr)];
 }}
 
 }} // namespace customos::subsystems::linux
@@ -153,10 +160,50 @@ def classify(name, dispatcher_symbols):
     return "Unimplemented"
 
 
+def parse_translator_constants(source_text):
+    constants = {}
+    for name, value in re.findall(r"\b(kSys[A-Za-z0-9_]+)\s*=\s*([0-9]+)\s*,", source_text):
+        constants[name] = int(value)
+    return constants
+
+
+def parse_linux_gap_fill_numbers(source_text):
+    fn_match = re.search(r"Result\s+LinuxGapFill\s*\([^)]*\)\s*\{", source_text)
+    if not fn_match:
+        return set()
+    body_start = fn_match.end() - 1
+    depth = 0
+    body_end = None
+    for i in range(body_start, len(source_text)):
+        ch = source_text[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                body_end = i
+                break
+    if body_end is None:
+        return set()
+    body = source_text[body_start + 1:body_end]
+    switch_match = re.search(r"switch\s*\(\s*nr\s*\)\s*\{(?P<switch>.*?)\n\s*default\s*:", body, re.S)
+    if not switch_match:
+        return set()
+    switch_body = switch_match.group("switch")
+    constants = parse_translator_constants(source_text)
+    out = set()
+    for case_name in re.findall(r"\bcase\s+(kSys[A-Za-z0-9_]+)\s*:", switch_body):
+        value = constants.get(case_name)
+        if value is not None:
+            out.add(value)
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--csv", required=True, type=Path)
     ap.add_argument("--mapped-from-dispatcher", type=Path, default=None)
+    ap.add_argument("--gap-fill-from-translator", type=Path, default=None)
     ap.add_argument("--out", required=True, type=Path)
     args = ap.parse_args()
 
@@ -164,6 +211,12 @@ def main():
     if args.mapped_from_dispatcher is not None:
         dispatcher_symbols = build_dispatcher_symbols(
             args.mapped_from_dispatcher.read_text()
+        )
+
+    gap_fill_numbers = set()
+    if args.gap_fill_from_translator is not None:
+        gap_fill_numbers = parse_linux_gap_fill_numbers(
+            args.gap_fill_from_translator.read_text()
         )
 
     rows = []
@@ -181,28 +234,43 @@ def main():
 
     rows.sort(key=lambda r: r[0])
 
-    implemented = sum(1 for _, _, _, s in rows if s == "Implemented")
+    primary = sum(1 for _, _, _, s in rows if s == "Implemented")
+    effective = sum(1 for nr, _, _, s in rows if (s == "Implemented") or (nr in gap_fill_numbers))
     total = len(rows)
+    max_nr = max((nr for nr, _, _, _ in rows), default=0)
     pct = (100 * implemented // total) if total else 0
 
     row_lines = []
-    for nr, name, args_n, state in rows:
+    number_to_row_index = {}
+    for idx, (nr, name, args_n, state) in enumerate(rows):
         row_lines.append(
             f'    {{{nr}, {args_n}, HandlerState::{state}, "{name}"}},'
         )
+        number_to_row_index[nr] = idx
+
+    index_row_lines = []
+    for nr in range(max_nr + 1):
+        row_index = number_to_row_index.get(nr)
+        if row_index is None:
+            index_row_lines.append("    nullptr,")
+        else:
+            index_row_lines.append(f"    &kLinuxSyscalls[{row_index}],")
 
     args.out.write_text(
         HEADER_TEMPLATE.format(
             total=total,
             implemented=implemented,
             pct=pct,
+            max_nr=max_nr,
             rows="\n".join(row_lines) + ("\n" if row_lines else ""),
+            index_rows="\n".join(index_row_lines) + ("\n" if index_row_lines else ""),
         )
     )
     print(f"wrote {args.out}")
     print(f"  total syscalls : {total}")
-    print(f"  implemented    : {implemented} ({pct}%)")
-    print(f"  unimplemented  : {total - implemented}")
+    print(f"  primary        : {primary} ({primary_pct}%)")
+    print(f"  effective      : {effective} ({effective_pct}%)")
+    print(f"  unimplemented  : {total - primary}")
 
 
 if __name__ == "__main__":

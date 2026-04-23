@@ -9,16 +9,16 @@ namespace
 {
 
 /* 16550 register offsets from the base port. */
-constexpr u16 kRegData           = 0;   // DLAB=0: RBR/THR
-constexpr u16 kRegInterruptEn    = 1;   // DLAB=0: IER
-constexpr u16 kRegFifoControl    = 2;   // FCR (write-only)
-constexpr u16 kRegLineControl    = 3;   // LCR
-constexpr u16 kRegModemControl   = 4;   // MCR
-constexpr u16 kRegLineStatus     = 5;   // LSR
+constexpr u16 kRegData = 0;         // DLAB=0: RBR/THR
+constexpr u16 kRegInterruptEn = 1;  // DLAB=0: IER
+constexpr u16 kRegFifoControl = 2;  // FCR (write-only)
+constexpr u16 kRegLineControl = 3;  // LCR
+constexpr u16 kRegModemControl = 4; // MCR
+constexpr u16 kRegLineStatus = 5;   // LSR
 
-constexpr u8  kLsrTransmitEmpty  = 1u << 5;
-constexpr u8  kLcrDlab           = 1u << 7;
-constexpr u8  kLcr8N1            = 0b00000011;
+constexpr u8 kLsrTransmitEmpty = 1u << 5;
+constexpr u8 kLcrDlab = 1u << 7;
+constexpr u8 kLcr8N1 = 0b00000011;
 
 } // namespace
 
@@ -31,7 +31,7 @@ void SerialInit()
     Outb(kCom1Port + kRegLineControl, kLcrDlab);
 
     // 115200 baud: divisor = 115200 / 115200 = 1.
-    Outb(kCom1Port + kRegData,        0x01);
+    Outb(kCom1Port + kRegData, 0x01);
     Outb(kCom1Port + kRegInterruptEn, 0x00);
 
     // 8 data bits, no parity, 1 stop bit. Clears DLAB in the same write.
@@ -71,6 +71,33 @@ void SerialWrite(const char* str)
             SerialWriteByte('\r');
         }
         SerialWriteByte(static_cast<u8>(*p));
+    }
+}
+
+void SerialWriteN(const char* data, u64 len)
+{
+    if (data == nullptr || len == 0)
+    {
+        return;
+    }
+
+    for (u64 i = 0; i < len; ++i)
+    {
+        const char ch = data[i];
+
+        // Keep parity with SerialWrite(const char*): embedded NUL bytes
+        // are treated as non-printing and skipped.
+        if (ch == '\0')
+        {
+            continue;
+        }
+
+        // Upgrade LF to CRLF for terminal-friendly line breaks.
+        if (ch == '\n')
+        {
+            SerialWriteByte('\r');
+        }
+        SerialWriteByte(static_cast<u8>(ch));
     }
 }
 

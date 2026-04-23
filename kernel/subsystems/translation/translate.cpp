@@ -69,6 +69,21 @@ struct OverheadTally
 constinit OverheadTally g_linux_overhead = {};
 constinit OverheadTally g_native_overhead = {};
 
+// Miss-log sampling state. Hot probe paths can call unknown numbers
+// thousands of times; writing every miss to COM1 dominates runtime.
+// Keep the first few misses fully visible, then sample at powers of
+// two (1,2,3,4,8,16,...) so long runs still show progress.
+struct MissSampleTable
+{
+    u32 seen[1024] = {};
+    u32 suppressed[1024] = {};
+    u64 emitted_total = 0;
+    u64 suppressed_total = 0;
+    u64 suppressed_reported = 0;
+};
+constinit MissSampleTable g_linux_miss_sampling = {};
+constinit MissSampleTable g_native_miss_sampling = {};
+
 inline u64 ReadTsc()
 {
     u32 lo, hi;
@@ -90,6 +105,23 @@ void BumpHits(HitTable& t, u64 nr)
     {
         ++t.buckets[nr & 0x3FF];
     }
+}
+
+bool ShouldLogMiss(MissSampleTable& t, u64 nr)
+{
+    constexpr u32 kFirstAlways = 3;
+    const u64 idx = nr & 0x3FF;
+    const u32 seen = ++t.seen[idx];
+    if (seen <= kFirstAlways || (seen & (seen - 1u)) == 0u)
+    {
+        ++t.emitted_total;
+        return true;
+    }
+
+    if (t.suppressed[idx] != 0xFFFFFFFFu)
+        ++t.suppressed[idx];
+    ++t.suppressed_total;
+    return false;
 }
 
 // Log prefix so boot-log grep is easy.
@@ -384,6 +416,7 @@ const HitTable& NativeHitsRead()
 Result LinuxGapFill(arch::TrapFrame* frame)
 {
     KLOG_TRACE_SCOPE("translate", "LinuxGapFill");
+    // Ownership: this path is for unresolved dispatcher misses only.
     // RDTSC window around the gap-fill body. Reads are serialising-
     // free so we capture the cost of the handler without paying a
     // barrier per sample. See `BumpOverhead` comment for rationale.
@@ -428,7 +461,8 @@ Result LinuxGapFill(arch::TrapFrame* frame)
         r = {true, TranslateDeliberateEnosys(frame)};
         break;
     default:
-        LogMiss("linux", frame, LinuxName(nr));
+        if (ShouldLogMiss(g_linux_miss_sampling, nr))
+            LogMiss("linux", frame, LinuxName(nr));
         break;
     }
     if (r.handled)
@@ -465,7 +499,8 @@ Result NativeGapFill(arch::TrapFrame* frame)
         r = {true, NativeWin32Free(frame)};
         break;
     default:
-        LogMiss("native", frame, NativeName(nr));
+        if (ShouldLogMiss(g_native_miss_sampling, nr))
+            LogMiss("native", frame, NativeName(nr));
         break;
     }
     if (r.handled)
@@ -511,6 +546,9 @@ void TranslatorOverheadDump()
     arch::SerialWrite(" max_c=");
     arch::SerialWriteHex(g_native_overhead.cycles_max);
     arch::SerialWrite("\n");
+
+    DumpSuppressedMissSummary("linux", g_linux_miss_sampling);
+    DumpSuppressedMissSummary("native", g_native_miss_sampling);
 }
 
 } // namespace customos::subsystems::translation
