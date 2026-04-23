@@ -5,6 +5,7 @@
 #include "../../core/panic.h"
 #include "../../mm/paging.h"
 #include "../pci/pci.h"
+#include "hid_descriptor.h"
 
 namespace customos::drivers::usb
 {
@@ -41,13 +42,21 @@ HciKind KindFromProgIf(u8 prog_if)
 // over by changing the return value. They're registered in the
 // table below.
 
+// HID class driver. v0 does not claim the device yet (the host
+// controller can't hand us a descriptor to parse), but when a
+// future xHCI slice starts delivering descriptors we'll feed them
+// straight into hid::HidParseDescriptor. The parser itself is
+// reachable today via HidSelfTest at boot and is exercised by the
+// boot-keyboard + boot-mouse golden descriptors. Logged prog_if
+// values: 0x00 boot-interface, 0x01 keyboard-boot, 0x02 mouse-
+// boot.
 bool HidProbe(u8 subclass, u8 prog_if)
 {
     arch::SerialWrite("[usb-hid] probe subclass=");
     arch::SerialWriteHex(subclass);
     arch::SerialWrite(" prog_if=");
     arch::SerialWriteHex(prog_if);
-    arch::SerialWrite("  (stub — not claimed)\n");
+    arch::SerialWrite(" parser=ready  (not claimed — bus enumeration pending)\n");
     return false;
 }
 

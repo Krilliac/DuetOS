@@ -407,6 +407,27 @@ struct Process
     u64 vmap_base;                                 // = kWin32VmapBase after PE load
     u64 vmap_pages_used;                           // bump cursor in pages
 
+    // Linux signal-handler table — backs rt_sigaction. Each slot
+    // records the user-space handler VA + flags + mask. v0 does
+    // NOT deliver signals (no trampoline, no pending queue), but
+    // storing the sigaction means musl's init-time "install SIGPIPE
+    // = SIG_IGN" pattern at least persists — a subsequent
+    // rt_sigaction with nullptr new_act returns the previous one,
+    // matching glibc's observed behaviour during CRT bring-up.
+    //
+    // POSIX defines 64 signals (SIGRTMAX = 64). We size to 65 so
+    // signum 1..64 indexes directly.
+    static constexpr u64 kLinuxSignalCount = 65;
+    struct LinuxSigAction
+    {
+        u64 handler_va; // 0 = SIG_DFL, 1 = SIG_IGN, other = user VA
+        u64 flags;      // SA_RESTART, SA_SIGINFO, ... (opaque to us)
+        u64 restorer_va;
+        u64 mask; // blocked-signals bitmask during handler
+    };
+    LinuxSigAction linux_sigactions[kLinuxSignalCount];
+    u64 linux_signal_mask; // per-process blocked-signal bitmask (rt_sigprocmask)
+
     u64 refcount;
 };
 

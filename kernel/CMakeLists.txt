@@ -82,6 +82,7 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     drivers/storage/ahci.cpp
     drivers/storage/block.cpp
     drivers/storage/nvme.cpp
+    drivers/usb/hid_descriptor.cpp
     drivers/usb/usb.cpp
     drivers/video/console.cpp
     drivers/video/cursor.cpp

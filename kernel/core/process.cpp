@@ -112,6 +112,16 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     p->tls_slot_in_use = 0;
     for (u32 i = 0; i < Process::kWin32TlsCap; ++i)
         p->tls_slot_value[i] = 0;
+    // Linux signal-handler table — every signal starts at SIG_DFL
+    // (handler_va == 0), no flags, no mask.
+    for (u32 i = 0; i < Process::kLinuxSignalCount; ++i)
+    {
+        p->linux_sigactions[i].handler_va = 0;
+        p->linux_sigactions[i].flags = 0;
+        p->linux_sigactions[i].restorer_va = 0;
+        p->linux_sigactions[i].mask = 0;
+    }
+    p->linux_signal_mask = 0;
     p->refcount = 1;
 
     ++g_live_processes;

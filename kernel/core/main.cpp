@@ -24,6 +24,7 @@
 #include "../drivers/net/net.h"
 #include "../drivers/pci/pci.h"
 #include "../drivers/power/power.h"
+#include "../drivers/usb/hid_descriptor.h"
 #include "../drivers/usb/usb.h"
 #include "../net/stack.h"
 #include "../subsystems/graphics/graphics.h"
@@ -857,6 +858,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
 
     SerialWrite("[boot] Detecting USB host controllers.\n");
     customos::drivers::usb::UsbInit();
+    customos::drivers::usb::hid::HidSelfTest();
 
     SerialWrite("[boot] Detecting audio controllers.\n");
     customos::drivers::audio::AudioInit();

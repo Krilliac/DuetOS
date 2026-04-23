@@ -38,10 +38,42 @@ inline constexpr u32 kMaxVolumes = 8;
 inline constexpr u16 kSuperblockMagic = 0xEF53;
 inline constexpr u64 kSuperblockLba = 2; // 1024 bytes = 2 × 512-byte sectors
 
+// Group descriptor (classic 32-byte; 64-bit FS has a 64-byte
+// variant). We pull the low-half pointers and the free counters.
+struct GroupDesc
+{
+    u32 block_bitmap_block;
+    u32 inode_bitmap_block;
+    u32 inode_table_block;
+    u16 free_blocks_count;
+    u16 free_inodes_count;
+    u16 used_dirs_count;
+};
+
+// Subset of an ext4 inode. We pull mode + size + link count + a
+// tag indicating whether the data area is an extent tree (ext4)
+// or the legacy block-pointer array (ext2/3).
+struct InodeInfo
+{
+    u16 mode; // file type in high 4 bits + perms
+    u16 uid;
+    u64 size_bytes; // i_size (low 32 + upper 32 when 64-bit)
+    u32 atime;
+    u32 ctime;
+    u32 mtime;
+    u16 gid;
+    u16 links_count;
+    u32 blocks_lo; // in 512-byte units
+    u32 flags;
+    bool uses_extents; // EXT4_EXTENTS_FL (0x80000) set
+    u16 block0_magic;  // if uses_extents: low u16 of i_block[0] = 0xF30A
+};
+
 struct Volume
 {
     u32 block_handle;
     u32 block_size; // 1024 << s_log_block_size
+    u16 inode_size; // s_inode_size; 128 for ext2, 256 for ext3/4
     u64 inode_count;
     u64 block_count;
     u32 blocks_per_group;
@@ -52,6 +84,12 @@ struct Volume
     u32 feature_ro_compat;
     u32 rev_level;  // 0 = "good old", 1 = "dynamic"
     char label[17]; // s_volume_name + NUL
+
+    bool group0_valid;
+    GroupDesc group0;
+
+    bool root_inode_valid;
+    InodeInfo root_inode;
 };
 
 /// Probe the block device at `handle`. If the superblock magic
