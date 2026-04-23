@@ -21,35 +21,23 @@ namespace
 // see consistent numbers regardless of which path they came in
 // through.
 constexpr i64 kEFAULT = -14;
-constexpr i64 kEINVAL = -22;
 
-// Linux syscall numbers we recognise here. Keep in sync with the
-// primary dispatcher's enum — this is a PEER table for syscalls
-// the primary doesn't handle, so overlap is fine but silent
-// redundancy is waste.
+// Linux syscall numbers we recognise here.
+// Ownership: translator handles only unresolved/missing-number
+// synthesis after linux::LinuxSyscallDispatch misses.
 enum : u64
 {
     kSysPipe = 22,
-    kSysReadv = 19,
-    kSysMadvise = 28,
     kSysSocket = 41,
     kSysClone = 56,
     kSysFork = 57,
     kSysVfork = 58,
     kSysExecve = 59,
     kSysWait4 = 61,
-    kSysFsync = 74,
-    kSysFdatasync = 75,
     kSysUmask = 95,
-    kSysGettimeofday = 96,
-    kSysGetrlimit = 97,
-    kSysSysinfo = 99,
-    kSysGetpgrp = 111,
     kSysStatfs = 137,
     kSysFstatfs = 138,
-    kSysSetrlimit = 160,
     kSysPipe2 = 293,
-    kSysPrlimit64 = 302,
     kSysClone3 = 435,
     kSysRseq = 334,
 };
@@ -224,133 +212,6 @@ void LogMiss(const char* origin, arch::TrapFrame* f, const char* name)
     SerialWrite("]\n");
 }
 
-// readv(fd, iov, iovcnt) — the same shape as writev. The primary
-// Linux dispatcher has writev but never shipped readv; synthesise
-// by iterating iovecs and calling LinuxRead per entry.
-i64 TranslateReadv(arch::TrapFrame* f)
-{
-    const u64 fd = f->rdi;
-    const u64 iov_ptr = f->rsi;
-    const u64 iovcnt = f->rdx;
-    if (iovcnt > 1024)
-        return kEINVAL;
-    i64 total = 0;
-    for (u64 i = 0; i < iovcnt; ++i)
-    {
-        struct
-        {
-            u64 base;
-            u64 len;
-        } iov;
-        if (!mm::CopyFromUser(&iov, reinterpret_cast<const void*>(iov_ptr + i * 16), sizeof(iov)))
-        {
-            return total > 0 ? total : kEFAULT;
-        }
-        if (iov.len == 0)
-            continue;
-        const i64 n = linux::LinuxRead(fd, iov.base, iov.len);
-        if (n < 0)
-            return total > 0 ? total : n;
-        total += n;
-        if (static_cast<u64>(n) < iov.len)
-            break;
-    }
-    return total;
-}
-
-// gettimeofday(tv, tz) — older than clock_gettime but still used
-// by legacy libc paths and autotools-style probes. Synthesize
-// from LinuxNowNs(); ignore the timezone argument (modern
-// kernels do the same — tz is always NULL in practice).
-i64 TranslateGettimeofday(arch::TrapFrame* f)
-{
-    const u64 user_tv = f->rdi;
-    (void)f->rsi; // tz is obsolete per Linux uapi comments
-    if (user_tv == 0)
-        return 0; // caller wants nothing
-    const u64 ns = linux::LinuxNowNs();
-    struct
-    {
-        i64 tv_sec;
-        i64 tv_usec;
-    } tv;
-    tv.tv_sec = static_cast<i64>(ns / 1'000'000'000ull);
-    tv.tv_usec = static_cast<i64>((ns / 1000ull) % 1'000'000ull);
-    if (!mm::CopyToUser(reinterpret_cast<void*>(user_tv), &tv, sizeof(tv)))
-        return kEFAULT;
-    return 0;
-}
-
-// sysinfo(info) — uptime + memory stats + load averages. v0
-// fills a zeroed struct (52 bytes on x86_64 with padding) with
-// the one field we can fake meaningfully: uptime. musl uses
-// this mostly for uptime + totalram in diagnostic paths.
-i64 TranslateSysinfo(arch::TrapFrame* f)
-{
-    const u64 user_info = f->rdi;
-    if (user_info == 0)
-        return kEFAULT;
-    struct Info
-    {
-        i64 uptime;   // seconds since boot
-        u64 loads[3]; // 1/5/15 min load averages (all 0)
-        u64 totalram;
-        u64 freeram;
-        u64 sharedram;
-        u64 bufferram;
-        u64 totalswap;
-        u64 freeswap;
-        u16 procs;
-        u16 _pad;
-        u64 totalhigh;
-        u64 freehigh;
-        u32 mem_unit;
-        u8 _pad2[4];
-    };
-    Info info;
-    for (u64 i = 0; i < sizeof(info); ++i)
-        reinterpret_cast<u8*>(&info)[i] = 0;
-    info.uptime = static_cast<i64>(linux::LinuxNowNs() / 1'000'000'000ull);
-    info.procs = 1;
-    info.mem_unit = 1;
-    if (!mm::CopyToUser(reinterpret_cast<void*>(user_info), &info, sizeof(info)))
-        return kEFAULT;
-    return 0;
-}
-
-// prlimit64(pid, resource, new, old) — resource limit query.
-// v0 returns infinite limits ({RLIM64_INFINITY, RLIM64_INFINITY})
-// for old if non-null, no-ops new if non-null. Fine for anything
-// that only consults the getter.
-i64 TranslatePrlimit64(arch::TrapFrame* f)
-{
-    (void)f->rdi; // pid; always current-process in v0
-    (void)f->rsi; // resource id; treated uniformly
-    const u64 user_old = f->r10;
-    if (user_old != 0)
-    {
-        constexpr u64 kRlimInfinity = 0xFFFFFFFFFFFFFFFFull;
-        struct
-        {
-            u64 cur;
-            u64 max;
-        } old{kRlimInfinity, kRlimInfinity};
-        if (!mm::CopyToUser(reinterpret_cast<void*>(user_old), &old, sizeof(old)))
-            return kEFAULT;
-    }
-    // new limits ignored.
-    return 0;
-}
-
-// Plain-accept no-ops. Their common pattern is "the kernel should
-// do something but v0 doesn't need to — return success so the
-// caller keeps going." fsync / fdatasync: we don't buffer writes,
-// so they're always durable. madvise: hints are advisory.
-i64 TranslateNoOp(arch::TrapFrame* /*f*/)
-{
-    return 0;
-}
-
 // umask(mask) — returns the OLD umask. Linux-standard default is
 // 022. We have no permission model so nothing actually enforces
 // it; the value is purely for compat with programs that track +
@@ -358,42 +219,6 @@ i64 TranslateNoOp(arch::TrapFrame* /*f*/)
 i64 TranslateUmask(arch::TrapFrame* /*f*/)
 {
     return 022;
-}
-
-// getpgrp() — process group id of the calling process. v0 has no
-// job-control model; return 0 (same as getpgid(0)).
-i64 TranslateGetpgrp(arch::TrapFrame* /*f*/)
-{
-    return 0;
-}
-
-// getrlimit(resource, rlimit*) / setrlimit(resource, rlimit*) —
-// older shape than prlimit64. We use the same "infinite limits"
-// story for both: reads return RLIM_INFINITY, writes accepted
-// but ignored.
-i64 TranslateGetrlimit(arch::TrapFrame* f)
-{
-    (void)f->rdi;
-    const u64 user_old = f->rsi;
-    if (user_old == 0)
-        return kEFAULT;
-    constexpr u64 kRlimInfinity = 0xFFFFFFFFFFFFFFFFull;
-    struct
-    {
-        u64 cur;
-        u64 max;
-    } old{kRlimInfinity, kRlimInfinity};
-    if (!mm::CopyToUser(reinterpret_cast<void*>(user_old), &old, sizeof(old)))
-        return kEFAULT;
-    return 0;
-}
-
-i64 TranslateSetrlimit(arch::TrapFrame* /*f*/)
-{
-    // Accept + no-op. Writing rlim values against our no-limits
-    // model would be storage-only; skip until a consumer reads
-    // back its own set value.
-    return 0;
 }
 
 // statfs(path, buf) / fstatfs(fd, buf) — filesystem statistics.
@@ -554,6 +379,7 @@ const HitTable& NativeHitsRead()
 Result LinuxGapFill(arch::TrapFrame* frame)
 {
     KLOG_TRACE_SCOPE("translate", "LinuxGapFill");
+    // Ownership: this path is for unresolved dispatcher misses only.
     // RDTSC window around the gap-fill body. Reads are serialising-
     // free so we capture the cost of the handler without paying a
     // barrier per sample. See `BumpOverhead` comment for rationale.
@@ -562,31 +388,6 @@ Result LinuxGapFill(arch::TrapFrame* frame)
     Result r{false, 0};
     switch (nr)
     {
-    case kSysReadv:
-        LogTranslation("linux", nr, "linux-self:loop-over-read");
-        r = {true, TranslateReadv(frame)};
-        break;
-    case kSysGettimeofday:
-        LogTranslation("linux", nr, "linux-self:clock_gettime-reshape");
-        r = {true, TranslateGettimeofday(frame)};
-        break;
-    case kSysSysinfo:
-        LogTranslation("linux", nr, "synthetic:zeroed+uptime");
-        r = {true, TranslateSysinfo(frame)};
-        break;
-    case kSysPrlimit64:
-        LogTranslation("linux", nr, "synthetic:rlim-infinity");
-        r = {true, TranslatePrlimit64(frame)};
-        break;
-    case kSysFsync:
-    case kSysFdatasync:
-        LogTranslation("linux", nr, "noop:writes-unbuffered");
-        r = {true, TranslateNoOp(frame)};
-        break;
-    case kSysMadvise:
-        LogTranslation("linux", nr, "noop:advisory-hint");
-        r = {true, TranslateNoOp(frame)};
-        break;
     case kSysRseq:
         LogTranslation("linux", nr, "synthetic:enosys-deliberate");
         r = {true, TranslateRseq(frame)};
@@ -594,18 +395,6 @@ Result LinuxGapFill(arch::TrapFrame* frame)
     case kSysUmask:
         LogTranslation("linux", nr, "synthetic:022-default");
         r = {true, TranslateUmask(frame)};
-        break;
-    case kSysGetpgrp:
-        LogTranslation("linux", nr, "synthetic:pgrp=0");
-        r = {true, TranslateGetpgrp(frame)};
-        break;
-    case kSysGetrlimit:
-        LogTranslation("linux", nr, "synthetic:rlim-infinity");
-        r = {true, TranslateGetrlimit(frame)};
-        break;
-    case kSysSetrlimit:
-        LogTranslation("linux", nr, "noop:limits-unenforced");
-        r = {true, TranslateSetrlimit(frame)};
         break;
     case kSysStatfs:
     case kSysFstatfs:
