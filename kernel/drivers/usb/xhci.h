@@ -93,6 +93,7 @@ struct PortRecord
     u16 config_desc_bytes;
     u8 hid_config_value; // bConfigurationValue from top-level Config desc
     bool hid_keyboard;
+    bool hid_mouse;
     u8 hid_interface_num;
     u8 hid_ep_addr;        // bEndpointAddress: bit 7 = IN direction
     u16 hid_ep_max_packet; // wMaxPacketSize of the HID int-IN endpoint
@@ -123,6 +124,8 @@ struct ControllerInfo
     u32 configs_parsed;      // count of successful GET_DESCRIPTOR(Config) + parse
     u32 hid_keyboards_found; // count of ports that resolved to a HID boot keyboard
     u32 hid_keyboards_bound; // count of ports that fully came up for HID polling
+    u32 hid_mice_found;      // count of ports that resolved to a HID boot mouse
+    u32 hid_mice_bound;      // count of ports that fully came up for HID polling
     u32 context_bytes;       // HCCPARAMS1.CSZ → 32 or 64
     PortRecord ports[kMaxXhciPortsPerController];
 };

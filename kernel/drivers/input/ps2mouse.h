@@ -68,9 +68,9 @@ constexpr u8 kMouseButtonMiddle = 1U << 2;
 
 struct MousePacket
 {
-    i32 dx;       // pixels, positive = right
-    i32 dy;       // pixels, positive = down (screen-space convention)
-    u8 buttons;   // bitmask of kMouseButton*
+    i32 dx;     // pixels, positive = right
+    i32 dy;     // pixels, positive = down (screen-space convention)
+    u8 buttons; // bitmask of kMouseButton*
     u8 _pad[3];
 };
 
@@ -99,5 +99,11 @@ struct Ps2MouseStats
     u64 bytes_dropped;   // bytes lost to desync or overflow
 };
 Ps2MouseStats Ps2MouseStatsRead();
+
+/// External packet injection — analogous to `KeyboardInjectEvent`.
+/// Lets the xHCI HID mouse polling task push packets into the
+/// same ring `Ps2MouseReadPacket` consumes. Thread-safe under
+/// the same Cli-bracketed discipline the IRQ path uses.
+void MouseInjectPacket(const MousePacket& p);
 
 } // namespace customos::drivers::input

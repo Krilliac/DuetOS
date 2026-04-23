@@ -396,4 +396,14 @@ Ps2MouseStats Ps2MouseStatsRead()
     };
 }
 
+void MouseInjectPacket(const MousePacket& p)
+{
+    // Bracket with Cli/Sti so the IRQ-time PushPacket can't
+    // race us on head/tail. The internal push handles the
+    // drop-oldest policy when the ring is full.
+    arch::Cli();
+    PushPacket(p);
+    arch::Sti();
+}
+
 } // namespace customos::drivers::input

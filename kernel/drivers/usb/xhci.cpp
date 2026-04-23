@@ -8,6 +8,7 @@
 #include "../../mm/page.h"
 #include "../../sched/sched.h"
 #include "../input/ps2kbd.h"
+#include "../input/ps2mouse.h"
 #include "../pci/pci.h"
 #include "usb.h"
 
@@ -107,13 +108,14 @@ constexpr u8 kDescTypeInterface = 0x04;
 constexpr u8 kDescTypeEndpoint = 0x05;
 [[maybe_unused]] constexpr u8 kDescTypeHid = 0x21;
 
-// Interface class 3 = HID; subclass 1 = Boot Interface; protocol 1 =
-// Keyboard. Finding this triple in a config descriptor means the
-// device will speak the 8-byte HID Boot Keyboard report format
-// without needing a report-descriptor parse.
+// Interface class 3 = HID; subclass 1 = Boot Interface; protocol
+// 1 = Keyboard, 2 = Mouse. Finding the boot triple lets us skip
+// HID report-descriptor parsing: both devices use fixed report
+// formats (8 bytes keyboard, 3 bytes mouse).
 constexpr u8 kIfaceClassHid = 0x03;
 constexpr u8 kIfaceSubclassBoot = 0x01;
 constexpr u8 kIfaceProtocolKeyboard = 0x01;
+constexpr u8 kIfaceProtocolMouse = 0x02;
 
 // Endpoint descriptor bmAttributes bits 0..1 = transfer type
 // (0=control, 1=iso, 2=bulk, 3=interrupt). bEndpointAddress bit 7
@@ -207,12 +209,13 @@ struct DeviceState
     u32 ep0_cycle;
     mm::PhysAddr scratch_phys;
     u8* scratch_virt;
-    // HID keyboard state — set once the HID-keyboard bring-up
-    // finishes (SET_CONFIGURATION + Configure Endpoint succeeded).
-    // The polling task iterates the device table looking for
-    // `hid_ready`; the rest of the fields describe the endpoint
-    // ring + per-device report-diff state.
+    // HID boot state — set once the HID bring-up finishes
+    // (SET_CONFIGURATION + Configure Endpoint succeeded). The
+    // polling task iterates the device table looking for
+    // `hid_ready`; `hid_is_mouse` decides which report parser
+    // to invoke (3-byte mouse vs 8-byte keyboard).
     bool hid_ready;
+    bool hid_is_mouse;
     u8 hid_ep_addr;        // e.g. 0x81 = EP1 IN
     u8 hid_ep_xhci_idx;    // DCI for Input Context + doorbell target
     u16 hid_ep_max_packet; // from the endpoint descriptor
@@ -222,8 +225,8 @@ struct DeviceState
     u32 hid_ring_idx;
     u32 hid_ring_cycle;
     mm::PhysAddr hid_buf_phys;
-    u8* hid_buf_virt;         // 8-byte HID boot keyboard report lands here
-    u8 hid_prev[8];           // previous report for press/release diff
+    u8* hid_buf_virt;         // report buffer (8 bytes keyboard, 3 bytes mouse)
+    u8 hid_prev[8];           // keyboard: previous report (mouse is stateless on keys)
     u64 hid_outstanding_phys; // TRB phys addr we're waiting on, or 0
 };
 constinit DeviceState g_devices[kMaxDevicesTotal] = {};
@@ -725,16 +728,16 @@ bool FetchDeviceDescriptor(Runtime& rt, PortRecord& port)
 // flat stream of sub-descriptors each prefixed with {bLength,
 // bDescriptorType}). Populates port fields iff a keyboard is found.
 // Returns true on keyboard found.
-bool ParseConfigForHidKeyboard(const u8* buf, u32 len, PortRecord& port)
+bool ParseConfigForHidBoot(const u8* buf, u32 len, PortRecord& port)
 {
     if (len < kConfigDescriptorHeaderBytes)
         return false;
     // Top-level Configuration descriptor: byte 5 = bConfigurationValue
-    // (the argument we'll pass to SET_CONFIGURATION in the next slice).
+    // (the argument we'll pass to SET_CONFIGURATION below).
     port.hid_config_value = buf[5];
 
     u32 off = buf[0]; // skip the Configuration descriptor itself
-    bool in_kbd_iface = false;
+    bool in_hid_iface = false;
     while (off + 2 <= len)
     {
         const u8 dlen = buf[off];
@@ -747,15 +750,24 @@ bool ParseConfigForHidKeyboard(const u8* buf, u32 len, PortRecord& port)
             const u8 bInterfaceClass = buf[off + 5];
             const u8 bInterfaceSubClass = buf[off + 6];
             const u8 bInterfaceProtocol = buf[off + 7];
-            in_kbd_iface = (bInterfaceClass == kIfaceClassHid && bInterfaceSubClass == kIfaceSubclassBoot &&
-                            bInterfaceProtocol == kIfaceProtocolKeyboard);
-            if (in_kbd_iface)
+            in_hid_iface = false;
+            if (bInterfaceClass == kIfaceClassHid && bInterfaceSubClass == kIfaceSubclassBoot)
             {
-                port.hid_interface_num = bInterfaceNumber;
-                port.hid_keyboard = true;
+                if (bInterfaceProtocol == kIfaceProtocolKeyboard && !port.hid_keyboard)
+                {
+                    port.hid_interface_num = bInterfaceNumber;
+                    port.hid_keyboard = true;
+                    in_hid_iface = true;
+                }
+                else if (bInterfaceProtocol == kIfaceProtocolMouse && !port.hid_mouse)
+                {
+                    port.hid_interface_num = bInterfaceNumber;
+                    port.hid_mouse = true;
+                    in_hid_iface = true;
+                }
             }
         }
-        else if (in_kbd_iface && dtype == kDescTypeEndpoint && dlen >= 7 && port.hid_ep_addr == 0)
+        else if (in_hid_iface && dtype == kDescTypeEndpoint && dlen >= 7 && port.hid_ep_addr == 0)
         {
             const u8 bEndpointAddress = buf[off + 2];
             const u8 bmAttributes = buf[off + 3];
@@ -770,7 +782,7 @@ bool ParseConfigForHidKeyboard(const u8* buf, u32 len, PortRecord& port)
         }
         off += dlen;
     }
-    return port.hid_keyboard && port.hid_ep_addr != 0;
+    return (port.hid_keyboard || port.hid_mouse) && port.hid_ep_addr != 0;
 }
 
 // Fetch the Configuration descriptor in two phases: first the
@@ -807,7 +819,7 @@ bool FetchAndParseConfig(Runtime& rt, PortRecord& port)
     port.config_desc_ok = true;
     port.config_desc_bytes = want;
 
-    return ParseConfigForHidKeyboard(dev->scratch_virt, want, port);
+    return ParseConfigForHidBoot(dev->scratch_virt, want, port);
 }
 
 // ---------------------------------------------------------------
@@ -966,6 +978,7 @@ bool BringUpHidKeyboard(Runtime& rt, PortRecord& port)
     dev->hid_ep_addr = port.hid_ep_addr;
     dev->hid_ep_xhci_idx = EndpointDci(port.hid_ep_addr);
     dev->hid_ep_max_packet = port.hid_ep_max_packet;
+    dev->hid_is_mouse = port.hid_mouse;
 
     // Configure Endpoint command — uses the command ring, not EP0.
     const u32 interval = HidXhciInterval(dev->speed, port.hid_ep_interval);
@@ -1130,6 +1143,34 @@ bool UsageInReport(u8 usage, const u8 report[8])
 
 // Diff previous vs current HID boot keyboard report. Emit a
 // release KeyEvent for every usage in prev-not-in-curr, a press
+// Parse a 3-byte HID Boot Mouse report. Layout:
+//   byte 0 = buttons (bit 0 = left, 1 = right, 2 = middle, rest
+//            reserved)
+//   byte 1 = signed dx in mickeys (device-defined units; QEMU
+//            treats them as pixels on the host display)
+//   byte 2 = signed dy (positive = down; matches our
+//            Ps2KeyboardReadPacket convention)
+// Inject one MousePacket per report. Boot mouse reports come
+// in every tick even when nothing moves; we do NOT filter
+// zero-motion reports so a driver looking for button edges
+// still sees the right stream.
+void HidMouseInject(const u8 report[3])
+{
+    using namespace customos::drivers::input;
+    MousePacket p{};
+    p.buttons = 0;
+    if (report[0] & 0x01)
+        p.buttons |= kMouseButtonLeft;
+    if (report[0] & 0x02)
+        p.buttons |= kMouseButtonRight;
+    if (report[0] & 0x04)
+        p.buttons |= kMouseButtonMiddle;
+    // Sign-extend the int8 deltas into our int32 fields.
+    p.dx = static_cast<i32>(static_cast<i8>(report[1]));
+    p.dy = static_cast<i32>(static_cast<i8>(report[2]));
+    MouseInjectPacket(p);
+}
+
 // for every usage in curr-not-in-prev. Modifier edges emit
 // modifier-only events (code=kKeyNone) so downstream can refresh
 // any "Ctrl held" UI cues without polling.
@@ -1306,13 +1347,27 @@ void HidPollEntry(void* raw)
                     continue;
                 if (dev.hid_outstanding_phys == 0 || dev.hid_outstanding_phys != ptr)
                     continue;
-                // Parse + inject.
-                u8 curr[8] = {};
-                for (u32 b = 0; b < 8; ++b)
-                    curr[b] = dev.hid_buf_virt[b];
-                HidDiffAndInject(dev.hid_prev, curr);
-                for (u32 b = 0; b < 8; ++b)
-                    dev.hid_prev[b] = curr[b];
+                // Parse + inject. Mice skip the diff state — each
+                // report is a standalone delta + button snapshot,
+                // so we push the packet as-is.
+                if (dev.hid_is_mouse)
+                {
+                    u8 mouse_rep[3] = {
+                        dev.hid_buf_virt[0],
+                        dev.hid_buf_virt[1],
+                        dev.hid_buf_virt[2],
+                    };
+                    HidMouseInject(mouse_rep);
+                }
+                else
+                {
+                    u8 curr[8] = {};
+                    for (u32 b = 0; b < 8; ++b)
+                        curr[b] = dev.hid_buf_virt[b];
+                    HidDiffAndInject(dev.hid_prev, curr);
+                    for (u32 b = 0; b < 8; ++b)
+                        dev.hid_prev[b] = curr[b];
+                }
                 // Re-queue a Normal TRB + ring the endpoint doorbell.
                 const u64 trb = HidEnqueueNormalTrb(&dev, dev.hid_buf_phys, dev.hid_ep_max_packet);
                 dev.hid_outstanding_phys = trb;
@@ -1694,10 +1749,16 @@ bool InitOne(const HostControllerInfo& h, ControllerInfo& out)
         {
             ++out.configs_parsed;
         }
-        if (rec.hid_keyboard)
+        if (rec.hid_keyboard || rec.hid_mouse)
         {
-            ++out.hid_keyboards_found;
-            arch::SerialWrite("[xhci]   HID-BOOT-KEYBOARD port=");
+            const char* kind_tag = rec.hid_mouse ? "HID-BOOT-MOUSE" : "HID-BOOT-KEYBOARD";
+            if (rec.hid_keyboard)
+                ++out.hid_keyboards_found;
+            if (rec.hid_mouse)
+                ++out.hid_mice_found;
+            arch::SerialWrite("[xhci]   ");
+            arch::SerialWrite(kind_tag);
+            arch::SerialWrite(" port=");
             arch::SerialWriteHex(rec.port_num);
             arch::SerialWrite(" iface=");
             arch::SerialWriteHex(rec.hid_interface_num);
@@ -1712,8 +1773,13 @@ bool InitOne(const HostControllerInfo& h, ControllerInfo& out)
             arch::SerialWrite("\n");
             if (BringUpHidKeyboard(rt, rec))
             {
-                ++out.hid_keyboards_bound;
-                arch::SerialWrite("[xhci]   HID-BOOT-KEYBOARD bound; polling task will pick up slot=");
+                if (rec.hid_keyboard)
+                    ++out.hid_keyboards_bound;
+                if (rec.hid_mouse)
+                    ++out.hid_mice_bound;
+                arch::SerialWrite("[xhci]   ");
+                arch::SerialWrite(kind_tag);
+                arch::SerialWrite(" bound; polling task will pick up slot=");
                 arch::SerialWriteHex(rec.slot_id);
                 arch::SerialWrite("\n");
             }
@@ -1725,10 +1791,14 @@ bool InitOne(const HostControllerInfo& h, ControllerInfo& out)
     arch::SerialWriteHex(out.descriptors_fetched);
     arch::SerialWrite(" configs=");
     arch::SerialWriteHex(out.configs_parsed);
-    arch::SerialWrite(" hid-keyboards=");
+    arch::SerialWrite(" kbd-found=");
     arch::SerialWriteHex(out.hid_keyboards_found);
-    arch::SerialWrite(" hid-bound=");
+    arch::SerialWrite(" kbd-bound=");
     arch::SerialWriteHex(out.hid_keyboards_bound);
+    arch::SerialWrite(" mouse-found=");
+    arch::SerialWriteHex(out.hid_mice_found);
+    arch::SerialWrite(" mouse-bound=");
+    arch::SerialWriteHex(out.hid_mice_bound);
     arch::SerialWrite("\n");
 
     // Spawn the per-controller HID polling task if any device
@@ -1739,7 +1809,7 @@ bool InitOne(const HostControllerInfo& h, ControllerInfo& out)
     // on a wait queue the IRQ handler signals instead of polling
     // at tick cadence — order matters, the task has to see the
     // final irq_vector when it first runs.
-    if (out.hid_keyboards_bound > 0)
+    if (out.hid_keyboards_bound + out.hid_mice_bound > 0)
     {
         const u32 idx = u32(&out - g_controllers);
         if (idx < kMaxControllers)

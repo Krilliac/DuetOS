@@ -144,6 +144,7 @@ QEMU_ARGS=(
     # eventually Address Device + descriptor fetch).
     -device   "qemu-xhci,id=xhci"
     -device   "usb-kbd,bus=xhci.0"
+    -device   "usb-mouse,bus=xhci.0"
     # Intel e1000e (82574L) NIC on a user-mode netdev. QEMU's
     # SLIRP stack gives us one-way connectivity to the outside +
     # a loopback path that returns broadcast frames for self-test.
