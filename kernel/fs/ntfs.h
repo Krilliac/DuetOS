@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../core/result.h"
 #include "../core/types.h"
 
 /*
@@ -68,7 +69,9 @@ struct Volume
     MftEntry system_records[kMaxMftRecords];
 };
 
-bool NtfsProbe(u32 block_handle, u32* out_index);
+/// Probe the block device at `handle`. On success returns the
+/// registry slot index; errors as for Ext4Probe.
+::customos::core::Result<u32> NtfsProbe(u32 block_handle);
 u32 NtfsVolumeCount();
 const Volume* NtfsVolumeByIndex(u32 index);
 void NtfsScanAll();

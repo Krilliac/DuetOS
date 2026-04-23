@@ -402,22 +402,24 @@ void ReadGroup0AndRootInode(Volume& v)
 
 } // namespace
 
-bool Ext4Probe(u32 block_handle, u32* out_index)
+::customos::core::Result<u32> Ext4Probe(u32 block_handle)
 {
+    using ::customos::core::Err;
+    using ::customos::core::ErrorCode;
     if (g_volume_count >= kMaxVolumes)
-        return false;
+        return Err{ErrorCode::BadState};
     // Read the 1024-byte superblock. ext4 superblock lives at byte
     // 1024 regardless of block size — LBA 2 on a 512-byte-sector
     // device. We read 2 sectors (1024 bytes) into the static
     // scratch.
     const i32 rc = drivers::storage::BlockDeviceRead(block_handle, kSuperblockLba, 2, g_scratch);
     if (rc < 0)
-        return false;
+        return Err{ErrorCode::IoError};
     const u8* sb = g_scratch;
 
     const u16 magic = LeU16(sb + kSbOffMagic);
     if (magic != kSuperblockMagic)
-        return false;
+        return Err{ErrorCode::NotFound};
 
     Volume& v = g_volumes[g_volume_count];
     ByteZero(&v, sizeof(v));
@@ -441,9 +443,7 @@ bool Ext4Probe(u32 block_handle, u32* out_index)
         v.label[i] = char(sb[kSbOffVolumeName + i]);
     v.label[16] = '\0';
 
-    if (out_index != nullptr)
-        *out_index = g_volume_count;
-    ++g_volume_count;
+    const u32 idx = g_volume_count++;
 
     const char* variant = ClassifyExt(v.feature_incompat, v.feature_compat);
     arch::SerialWrite("[ext4] probe OK handle=");
@@ -479,7 +479,7 @@ bool Ext4Probe(u32 block_handle, u32* out_index)
     arch::SerialWrite("\n");
 
     ReadGroup0AndRootInode(v);
-    return true;
+    return idx;
 }
 
 u32 Ext4VolumeCount()
@@ -500,8 +500,19 @@ void Ext4ScanAll()
     const u32 n = drivers::storage::BlockDeviceCount();
     for (u32 i = 0; i < n; ++i)
     {
-        u32 idx = 0;
-        (void)Ext4Probe(i, &idx);
+        // Probe every block device. NotFound is the expected "this
+        // isn't an ext4 volume" outcome — silent. IoError or
+        // BadState (registry full) bubble up as one-line logs so a
+        // failing disk or bumped kMaxVolumes ceiling is visible.
+        auto r = Ext4Probe(i);
+        if (!r && r.error() != ::customos::core::ErrorCode::NotFound)
+        {
+            arch::SerialWrite("[ext4] handle=");
+            arch::SerialWriteHex(i);
+            arch::SerialWrite(" probe error=");
+            arch::SerialWrite(::customos::core::ErrorCodeName(r.error()));
+            arch::SerialWrite("\n");
+        }
     }
     core::LogWithValue(core::LogLevel::Info, "fs/ext4", "ext4 volumes found", g_volume_count);
 }

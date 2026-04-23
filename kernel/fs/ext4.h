@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../core/result.h"
 #include "../core/types.h"
 
 /*
@@ -108,10 +109,13 @@ struct Volume
     Ext4DirEntry root_dir_entries[kMaxRootDirEntries];
 };
 
-/// Probe the block device at `handle`. If the superblock magic
-/// matches, populate a Volume record, log it, and return true
-/// via `*out_index` = array slot. Returns false otherwise.
-bool Ext4Probe(u32 block_handle, u32* out_index);
+/// Probe the block device at `handle`. On success, allocates a
+/// registry slot, fills its Volume record, logs it, and returns
+/// the slot index. Errors:
+///   IoError    — BlockDeviceRead failed.
+///   NotFound   — magic mismatch (not an ext2/3/4 volume).
+///   BadState   — volume registry full.
+::customos::core::Result<u32> Ext4Probe(u32 block_handle);
 
 u32 Ext4VolumeCount();
 const Volume* Ext4VolumeByIndex(u32 index);

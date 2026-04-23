@@ -218,18 +218,20 @@ void WalkRootDir(Volume& v)
 
 } // namespace
 
-bool ExfatProbe(u32 block_handle, u32* out_index)
+::customos::core::Result<u32> ExfatProbe(u32 block_handle)
 {
+    using ::customos::core::Err;
+    using ::customos::core::ErrorCode;
     if (g_volume_count >= kMaxVolumes)
-        return false;
+        return Err{ErrorCode::BadState};
     const i32 rc = drivers::storage::BlockDeviceRead(block_handle, kBootSectorLba, 1, g_scratch);
     if (rc < 0)
-        return false;
+        return Err{ErrorCode::IoError};
     const u8* sect = g_scratch;
     if (sect[kOffBootSig] != 0x55 || sect[kOffBootSig + 1] != 0xAA)
-        return false;
+        return Err{ErrorCode::NotFound};
     if (!MatchesFsName(sect))
-        return false;
+        return Err{ErrorCode::NotFound};
 
     // Build the volume record directly in its registry slot — avoids
     // a whole-struct copy (kMaxDirEntries × sizeof(DirEntry) would
@@ -261,10 +263,7 @@ bool ExfatProbe(u32 block_handle, u32* out_index)
 
     WalkRootDir(v);
 
-    if (out_index != nullptr)
-        *out_index = g_volume_count;
-    ++g_volume_count;
-    return true;
+    return g_volume_count++;
 }
 
 u32 ExfatVolumeCount()
@@ -285,8 +284,15 @@ void ExfatScanAll()
     const u32 n = drivers::storage::BlockDeviceCount();
     for (u32 i = 0; i < n; ++i)
     {
-        u32 idx = 0;
-        (void)ExfatProbe(i, &idx);
+        auto r = ExfatProbe(i);
+        if (!r && r.error() != ::customos::core::ErrorCode::NotFound)
+        {
+            arch::SerialWrite("[exfat] handle=");
+            arch::SerialWriteHex(i);
+            arch::SerialWrite(" probe error=");
+            arch::SerialWrite(::customos::core::ErrorCodeName(r.error()));
+            arch::SerialWrite("\n");
+        }
     }
     core::LogWithValue(core::LogLevel::Info, "fs/exfat", "exFAT volumes found", g_volume_count);
 }

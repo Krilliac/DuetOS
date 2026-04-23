@@ -217,18 +217,20 @@ void WalkSystemRecords(Volume& v)
 
 } // namespace
 
-bool NtfsProbe(u32 block_handle, u32* out_index)
+::customos::core::Result<u32> NtfsProbe(u32 block_handle)
 {
+    using ::customos::core::Err;
+    using ::customos::core::ErrorCode;
     if (g_volume_count >= kMaxVolumes)
-        return false;
+        return Err{ErrorCode::BadState};
     const i32 rc = drivers::storage::BlockDeviceRead(block_handle, kBootSectorLba, 1, g_scratch);
     if (rc < 0)
-        return false;
+        return Err{ErrorCode::IoError};
     const u8* sect = g_scratch;
     if (sect[kOffBootSig] != 0x55 || sect[kOffBootSig + 1] != 0xAA)
-        return false;
+        return Err{ErrorCode::NotFound};
     if (!MatchesOem(sect))
-        return false;
+        return Err{ErrorCode::NotFound};
 
     Volume& v = g_volumes[g_volume_count];
     ByteZero(&v, sizeof(v));
@@ -255,10 +257,7 @@ bool NtfsProbe(u32 block_handle, u32* out_index)
 
     WalkSystemRecords(v);
 
-    if (out_index != nullptr)
-        *out_index = g_volume_count;
-    ++g_volume_count;
-    return true;
+    return g_volume_count++;
 }
 
 u32 NtfsVolumeCount()
@@ -279,8 +278,15 @@ void NtfsScanAll()
     const u32 n = drivers::storage::BlockDeviceCount();
     for (u32 i = 0; i < n; ++i)
     {
-        u32 idx = 0;
-        (void)NtfsProbe(i, &idx);
+        auto r = NtfsProbe(i);
+        if (!r && r.error() != ::customos::core::ErrorCode::NotFound)
+        {
+            arch::SerialWrite("[ntfs] handle=");
+            arch::SerialWriteHex(i);
+            arch::SerialWrite(" probe error=");
+            arch::SerialWrite(::customos::core::ErrorCodeName(r.error()));
+            arch::SerialWrite("\n");
+        }
     }
     core::LogWithValue(core::LogLevel::Info, "fs/ntfs", "NTFS volumes found", g_volume_count);
 }

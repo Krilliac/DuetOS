@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../core/result.h"
 #include "../core/types.h"
 
 /*
@@ -72,7 +73,9 @@ struct Volume
     DirEntry root_entries[kMaxDirEntries];
 };
 
-bool ExfatProbe(u32 block_handle, u32* out_index);
+/// Probe the block device at `handle`. On success returns the
+/// registry slot index; errors as for Ext4Probe.
+::customos::core::Result<u32> ExfatProbe(u32 block_handle);
 u32 ExfatVolumeCount();
 const Volume* ExfatVolumeByIndex(u32 index);
 void ExfatScanAll();

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../../core/result.h"
 #include "../../core/types.h"
 
 /*
@@ -107,11 +108,32 @@ bool BlockDeviceIsWritable(u32 handle);
 /// count against sector_count before dispatch.
 i32 BlockDeviceRead(u32 handle, u64 lba, u32 count, void* buf);
 
+/// Result-shaped sibling of `BlockDeviceRead`. Maps the legacy
+/// -1 return to `ErrorCode::IoError`; success is `Result<void>`.
+inline ::customos::core::Result<void> TryBlockDeviceRead(u32 handle, u64 lba, u32 count, void* buf)
+{
+    if (BlockDeviceRead(handle, lba, count, buf) < 0)
+        return ::customos::core::Err{::customos::core::ErrorCode::IoError};
+    return {};
+}
+
 /// Symmetric write. Returns -1 on read-only devices or on
 /// out-of-range lba. Write-guard rules are consulted before
 /// dispatch: a write covering any sensitive LBA gets logged
 /// (Advisory mode) or refused with -1 (Deny mode).
 i32 BlockDeviceWrite(u32 handle, u64 lba, u32 count, const void* buf);
+
+/// Result-shaped sibling of `BlockDeviceWrite`. `-1` becomes
+/// `IoError`. A more specific code (PermissionDenied when the
+/// write-guard denies, BadState for read-only devices) is a
+/// follow-up once `BlockDeviceWrite` itself returns a typed
+/// failure internally.
+inline ::customos::core::Result<void> TryBlockDeviceWrite(u32 handle, u64 lba, u32 count, const void* buf)
+{
+    if (BlockDeviceWrite(handle, lba, count, buf) < 0)
+        return ::customos::core::Err{::customos::core::ErrorCode::IoError};
+    return {};
+}
 
 // -------------------------------------------------------------------
 // Write-guard for sensitive LBAs.
