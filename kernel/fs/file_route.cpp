@@ -254,6 +254,128 @@ u64 ReadForProcess(::customos::core::Process* proc, u64 handle, void* dst, u64 l
     return u64(got);
 }
 
+u64 WriteForProcess(::customos::core::Process* proc, u64 handle, const void* src, u64 len)
+{
+    using ::customos::core::Process;
+    if (proc == nullptr || src == nullptr)
+        return u64(-1);
+    const u64 slot = HandleToSlot(handle);
+    if (slot == u64(-1))
+        return u64(-1);
+    Process::Win32FileHandle& h = proc->win32_handles[slot];
+    if (h.kind == Process::FsBackingKind::None)
+        return u64(-1);
+    if (len == 0)
+        return 0;
+
+    if (h.kind == Process::FsBackingKind::Ramfs)
+        return u64(-1); // ramfs is .rodata
+
+    // Fat32 backing. v0 is in-place only — past-EOF writes need
+    // append + dir-entry-size update which Fat32WriteInPlace
+    // refuses. Cap `len` at remaining bytes; signal short-write
+    // by returning the actual count (matches POSIX ssize_t).
+    const u64 size = h.fat32_entry.size_bytes;
+    if (h.cursor >= size)
+        return u64(-1); // EOF — no growth in this slice
+    const u64 remaining = size - h.cursor;
+    const u64 take = (len < remaining) ? len : remaining;
+
+    const fat32::Volume* vol = fat32::Fat32Volume(h.fat32_volume_idx);
+    if (vol == nullptr)
+        return u64(-1);
+    const i64 wrote = fat32::Fat32WriteInPlace(vol, &h.fat32_entry, h.cursor, src, take);
+    if (wrote < 0)
+        return u64(-1);
+    h.cursor += u64(wrote);
+    return u64(wrote);
+}
+
+u64 CreateForProcess(::customos::core::Process* proc, const char* path, const void* init_bytes, u64 init_len)
+{
+    using arch::SerialWrite;
+    using arch::SerialWriteHex;
+    using ::customos::core::Process;
+    if (proc == nullptr || path == nullptr)
+        return u64(-1);
+    if (init_len > 0 && init_bytes == nullptr)
+        return u64(-1);
+
+    u32 disk_idx = 0;
+    const char* disk_rest = nullptr;
+    if (!ParseDiskPath(path, &disk_idx, &disk_rest))
+    {
+        SerialWrite("[fs/route] create: ramfs path rejected (read-only) \"");
+        SerialWrite(path);
+        SerialWrite("\"\n");
+        return u64(-1);
+    }
+
+    const fat32::Volume* vol = fat32::Fat32Volume(disk_idx);
+    if (vol == nullptr)
+    {
+        SerialWrite("[fs/route] create: no fat32 volume idx=");
+        SerialWriteHex(disk_idx);
+        SerialWrite("\n");
+        return u64(-1);
+    }
+
+    // Allocate the slot BEFORE the on-disk plant so a slot-table
+    // failure doesn't leave a freshly-created file orphaned in
+    // the directory. If the plant fails the slot returns to
+    // FsBackingKind::None below.
+    const u64 slot = FindFreeSlot(proc);
+    if (slot == Process::kWin32HandleCap)
+    {
+        SerialWrite("[fs/route] create out-of-handles pid=");
+        SerialWriteHex(proc->pid);
+        SerialWrite("\n");
+        return u64(-1);
+    }
+    Process::Win32FileHandle& h = proc->win32_handles[slot];
+
+    const i64 created = fat32::Fat32CreateAtPath(vol, disk_rest, init_bytes, init_len);
+    if (created < 0)
+    {
+        SerialWrite("[fs/route] create: Fat32CreateAtPath failed path=\"");
+        SerialWrite(disk_rest);
+        SerialWrite("\"\n");
+        return u64(-1);
+    }
+
+    // Re-look up the newly-planted entry to get the canonical
+    // DirEntry (first_cluster + size populated by the FS) so the
+    // handle's read/write paths can address it.
+    fat32::DirEntry entry;
+    ZeroDirEntry(entry);
+    if (!fat32::Fat32LookupPath(vol, disk_rest, &entry))
+    {
+        SerialWrite("[fs/route] create: post-plant lookup miss \"");
+        SerialWrite(disk_rest);
+        SerialWrite("\"\n");
+        return u64(-1);
+    }
+
+    h.kind = Process::FsBackingKind::Fat32;
+    h.ramfs_node = nullptr;
+    h.fat32_volume_idx = disk_idx;
+    CopyDirEntry(h.fat32_entry, entry);
+    h.cursor = 0;
+    const u64 handle = Process::kWin32HandleBase + slot;
+    SerialWrite("[fs/route] create ok pid=");
+    SerialWriteHex(proc->pid);
+    SerialWrite(" path=\"");
+    SerialWrite(path);
+    SerialWrite("\" backing=fat32 vol=");
+    SerialWriteHex(disk_idx);
+    SerialWrite(" handle=");
+    SerialWriteHex(handle);
+    SerialWrite(" size=");
+    SerialWriteHex(entry.size_bytes);
+    SerialWrite("\n");
+    return handle;
+}
+
 u64 SeekForProcess(::customos::core::Process* proc, u64 handle, i64 offset, u32 whence)
 {
     using ::customos::core::Process;
@@ -462,7 +584,96 @@ void SelfTest()
         ::customos::core::Panic("fs/route", "SelfTest close did not free slot");
     }
 
-    SerialWrite("[fs/route-selftest] PASS (open + size + read + EOF + seek + close on /disk/0/HELLO.TXT)\n");
+    // Write + read-back round-trip on HELLO.TXT. Use uppercase
+    // "HELLO" to mirror the existing Fat32SelfTest in-place pattern;
+    // restore to lowercase at the end so the on-disk fixture matches
+    // what the next boot would see (the image is rebuilt every run,
+    // but a clean tail keeps the self-test deterministic on reruns
+    // against a persistent disk).
+    const u64 wh = OpenForProcess(&s_test_proc, "/disk/0/HELLO.TXT");
+    if (wh == u64(-1))
+        ::customos::core::Panic("fs/route", "SelfTest reopen for write failed");
+    const char kUpper[5] = {'H', 'E', 'L', 'L', 'O'};
+    if (WriteForProcess(&s_test_proc, wh, kUpper, 5) != 5)
+    {
+        SerialWrite("[fs/route-selftest] FAIL: write returned wrong count\n");
+        ::customos::core::Panic("fs/route", "SelfTest write count mismatch");
+    }
+    if (SeekForProcess(&s_test_proc, wh, 0, /*SET=*/0) != 0)
+        ::customos::core::Panic("fs/route", "SelfTest post-write seek failed");
+    char vbuf[6];
+    for (u64 i = 0; i < sizeof(vbuf); ++i)
+        vbuf[i] = 0;
+    if (ReadForProcess(&s_test_proc, wh, vbuf, 5) != 5 || vbuf[0] != 'H' || vbuf[4] != 'O')
+    {
+        SerialWrite("[fs/route-selftest] FAIL: post-write readback mismatch\n");
+        ::customos::core::Panic("fs/route", "SelfTest post-write readback");
+    }
+    // Restore so the on-disk content matches the seed prefix.
+    if (SeekForProcess(&s_test_proc, wh, 0, /*SET=*/0) != 0)
+        ::customos::core::Panic("fs/route", "SelfTest restore seek failed");
+    const char kLower[5] = {'h', 'e', 'l', 'l', 'o'};
+    if (WriteForProcess(&s_test_proc, wh, kLower, 5) != 5)
+        ::customos::core::Panic("fs/route", "SelfTest restore write failed");
+    CloseForProcess(&s_test_proc, wh);
+
+    // Past-EOF write must fail without growing the file. Open
+    // HELLO.TXT, seek past end, attempt write — expect u64(-1).
+    const u64 eh = OpenForProcess(&s_test_proc, "/disk/0/HELLO.TXT");
+    if (eh == u64(-1))
+        ::customos::core::Panic("fs/route", "SelfTest open-for-eof-write failed");
+    u64 esize = 0;
+    if (FstatForProcess(&s_test_proc, eh, &esize) != 0)
+        ::customos::core::Panic("fs/route", "SelfTest fstat-for-eof failed");
+    if (SeekForProcess(&s_test_proc, eh, 0, /*END=*/2) != esize)
+        ::customos::core::Panic("fs/route", "SelfTest seek-end before eof-write failed");
+    if (WriteForProcess(&s_test_proc, eh, "x", 1) != u64(-1))
+    {
+        SerialWrite("[fs/route-selftest] FAIL: past-EOF write should fail\n");
+        ::customos::core::Panic("fs/route", "SelfTest past-EOF write should fail");
+    }
+    CloseForProcess(&s_test_proc, eh);
+
+    // Create + write + readback + delete a brand-new file. The
+    // path is unique per boot so a persistent disk doesn't collide
+    // across runs — though the FAT32 image is rebuilt each boot in
+    // the QEMU smoke today.
+    const char* new_path = "/disk/0/RTNEW.TXT";
+    const char kSeed[7] = {'r', 'o', 'u', 't', 'i', 'n', 'g'};
+    const u64 ch = CreateForProcess(&s_test_proc, new_path, kSeed, 7);
+    if (ch == u64(-1))
+    {
+        SerialWrite("[fs/route-selftest] FAIL: create RTNEW.TXT\n");
+        ::customos::core::Panic("fs/route", "SelfTest create failed");
+    }
+    u64 csz = 0;
+    if (FstatForProcess(&s_test_proc, ch, &csz) != 0 || csz != 7)
+    {
+        SerialWrite("[fs/route-selftest] FAIL: created file size != 7\n");
+        ::customos::core::Panic("fs/route", "SelfTest created size mismatch");
+    }
+    char rbuf[8];
+    for (u64 i = 0; i < sizeof(rbuf); ++i)
+        rbuf[i] = 0;
+    if (ReadForProcess(&s_test_proc, ch, rbuf, 7) != 7 || rbuf[0] != 'r' || rbuf[6] != 'g')
+    {
+        SerialWrite("[fs/route-selftest] FAIL: created file readback mismatch\n");
+        ::customos::core::Panic("fs/route", "SelfTest created readback mismatch");
+    }
+    CloseForProcess(&s_test_proc, ch);
+
+    // Tidy up so reruns find a clean tree. Delete uses the
+    // existing Fat32 path-CRUD API directly — the routing layer
+    // doesn't expose Delete in this slice (it would just be a
+    // syscall thunk — Fat32 already has the implementation).
+    if (!fat32::Fat32DeleteAtPath(fat32::Fat32Volume(0), "/RTNEW.TXT"))
+    {
+        SerialWrite("[fs/route-selftest] WARN: cleanup delete of RTNEW.TXT failed\n");
+        // not fatal — the disk is rebuilt each boot
+    }
+
+    SerialWrite("[fs/route-selftest] PASS (open + read + EOF + seek + close + write + create + readback "
+                "on /disk/0/HELLO.TXT and /disk/0/RTNEW.TXT)\n");
 }
 
 } // namespace customos::fs::routing

@@ -196,4 +196,119 @@ void DoFileFstat(arch::TrapFrame* frame)
     frame->rax = 0;
 }
 
+void DoFileWrite(arch::TrapFrame* frame)
+{
+    // Write up to rdx bytes from rsi into the handle at its
+    // current cursor. Cap-gated on kCapFsWrite. Backing dispatch
+    // (ramfs refused; fat32 in-place) lives in fs::routing.
+    core::Process* proc = core::CurrentProcess();
+    if (proc == nullptr || !core::CapSetHas(proc->caps, core::kCapFsWrite))
+    {
+        const u64 pid = (proc != nullptr) ? proc->pid : 0;
+        core::RecordSandboxDenial(core::kCapFsWrite);
+        if (proc != nullptr && core::ShouldLogDenial(proc->sandbox_denials))
+        {
+            arch::SerialWrite("[sys] denied syscall=SYS_FILE_WRITE pid=");
+            arch::SerialWriteHex(pid);
+            arch::SerialWrite(" cap=");
+            arch::SerialWrite(core::CapName(core::kCapFsWrite));
+            arch::SerialWrite("\n");
+        }
+        frame->rax = static_cast<u64>(-1);
+        return;
+    }
+    const u64 handle = frame->rdi;
+    u64 cap_bytes = frame->rdx;
+    if (cap_bytes == 0)
+    {
+        frame->rax = 0;
+        return;
+    }
+    constexpr u64 kStageBytes = 4096;
+    if (cap_bytes > kStageBytes)
+        cap_bytes = kStageBytes;
+    static u8 s_stage[kStageBytes];
+    if (!mm::CopyFromUser(s_stage, reinterpret_cast<const void*>(frame->rsi), cap_bytes))
+    {
+        frame->rax = static_cast<u64>(-1);
+        return;
+    }
+    const u64 wrote = fs::routing::WriteForProcess(proc, handle, s_stage, cap_bytes);
+    frame->rax = wrote;
+}
+
+void DoFileCreate(arch::TrapFrame* frame)
+{
+    // CreateFileW(CREATE_NEW). rdi = path, rsi = path_cap,
+    // rdx = init bytes (user pointer, may be 0), r10 = init len.
+    // Returns a Win32 pseudo-handle on success or u64(-1).
+    // Cap-gated on kCapFsWrite (the cap also implies create
+    // privilege — splitting create into its own cap would just
+    // bloat the sandbox profile without buying anything today).
+    core::Process* proc = core::CurrentProcess();
+    if (proc == nullptr || !core::CapSetHas(proc->caps, core::kCapFsWrite))
+    {
+        const u64 pid = (proc != nullptr) ? proc->pid : 0;
+        core::RecordSandboxDenial(core::kCapFsWrite);
+        if (proc != nullptr && core::ShouldLogDenial(proc->sandbox_denials))
+        {
+            arch::SerialWrite("[sys] denied syscall=SYS_FILE_CREATE pid=");
+            arch::SerialWriteHex(pid);
+            arch::SerialWrite(" cap=");
+            arch::SerialWrite(core::CapName(core::kCapFsWrite));
+            arch::SerialWrite("\n");
+        }
+        frame->rax = static_cast<u64>(-1);
+        return;
+    }
+
+    u64 path_cap = frame->rsi;
+    if (path_cap >= core::kSyscallPathMax)
+        path_cap = core::kSyscallPathMax - 1;
+    if (path_cap == 0)
+    {
+        frame->rax = static_cast<u64>(-1);
+        return;
+    }
+    char kpath[core::kSyscallPathMax];
+    if (!mm::CopyFromUser(kpath, reinterpret_cast<const void*>(frame->rdi), path_cap))
+    {
+        frame->rax = static_cast<u64>(-1);
+        return;
+    }
+    kpath[path_cap] = '\0';
+    kpath[core::kSyscallPathMax - 1] = '\0';
+
+    // Initial-content payload — optional, capped at 4 KiB for
+    // the same staging-buffer reasons as DoFileWrite. Larger
+    // initial files would loop SYS_FILE_WRITE after create.
+    u64 init_len = frame->r10;
+    constexpr u64 kStageBytes = 4096;
+    if (init_len > kStageBytes)
+    {
+        // Reject rather than silently truncate — a Win32 caller
+        // expecting a 100 KiB file from a single CreateFile would
+        // be surprised to find a 4 KiB stub. The create + N
+        // SYS_FILE_WRITE calls path keeps semantics honest.
+        frame->rax = static_cast<u64>(-1);
+        return;
+    }
+    static u8 s_init_stage[kStageBytes];
+    if (init_len > 0)
+    {
+        if (frame->rdx == 0)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        if (!mm::CopyFromUser(s_init_stage, reinterpret_cast<const void*>(frame->rdx), init_len))
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+    }
+
+    frame->rax = fs::routing::CreateForProcess(proc, kpath, init_len > 0 ? s_init_stage : nullptr, init_len);
+}
+
 } // namespace customos::subsystems::win32

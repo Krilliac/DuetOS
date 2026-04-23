@@ -86,6 +86,17 @@ enum Cap : u32
     // side channel or stall the scheduler by pinning them.
     kCapDebug = 3,
 
+    // Mutate the on-disk filesystem (SYS_FILE_WRITE,
+    // SYS_FILE_CREATE). Read still requires kCapFsRead — a
+    // typical writer holds both. Sandboxed profiles withhold
+    // this cap by default; trusted profiles inherit it via the
+    // [1..kCapCount) loop in `kProfileTrusted`. The cap covers
+    // every backing the routing layer reaches today (ramfs is
+    // read-only; fat32 honours the cap for Fat32WriteInPlace +
+    // Fat32CreateAtPath); future backings (ext4 r/w, native FS)
+    // share the same gate.
+    kCapFsWrite = 4,
+
     // Sentinel: keep this as the last entry so kProfileTrusted can
     // be built by a loop that iterates [1 .. kCapCount). Do NOT
     // use kCapCount as a live cap — it's a boundary marker.

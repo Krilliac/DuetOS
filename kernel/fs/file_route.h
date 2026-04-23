@@ -54,6 +54,23 @@ u64 OpenForProcess(::customos::core::Process* proc, const char* path);
 /// on bad handle / I/O failure.
 u64 ReadForProcess(::customos::core::Process* proc, u64 handle, void* dst, u64 len);
 
+/// Write up to `len` bytes from the kernel-space buffer `src` to
+/// the handle's backing store at the current cursor. Advances
+/// the cursor by the bytes-written count. Returns bytes written
+/// (0..len) or u64(-1) on bad handle / read-only backing /
+/// past-EOF (no growth in this slice) / I/O failure. Performs
+/// NO capability check — caller (syscall layer) is responsible.
+u64 WriteForProcess(::customos::core::Process* proc, u64 handle, const void* src, u64 len);
+
+/// Resolve `path` and create a new file with `init_len` bytes of
+/// initial content (`init_bytes` may be nullptr iff init_len==0).
+/// On success allocates a handle slot pointing at the freshly-
+/// created file and returns its id; on failure returns u64(-1).
+/// Ramfs paths always fail (read-only). Fat32 paths route through
+/// `Fat32CreateAtPath` then `Fat32LookupPath` to obtain the new
+/// `DirEntry` snapshot. Performs NO capability check.
+u64 CreateForProcess(::customos::core::Process* proc, const char* path, const void* init_bytes, u64 init_len);
+
 /// Move the cursor. `whence`: 0 = SET (offset is absolute),
 /// 1 = CUR (offset is signed delta from current), 2 = END
 /// (offset is signed delta from end-of-file). Result is clamped

@@ -266,6 +266,8 @@ const char* CapName(Cap c)
         return "FsRead";
     case kCapDebug:
         return "Debug";
+    case kCapFsWrite:
+        return "FsWrite";
     case kCapCount:
         return "<sentinel>";
     }

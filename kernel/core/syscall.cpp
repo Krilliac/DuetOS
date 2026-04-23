@@ -375,6 +375,12 @@ void SyscallDispatch(arch::TrapFrame* frame)
     case SYS_FILE_FSTAT:
         subsystems::win32::DoFileFstat(frame);
         return;
+    case SYS_FILE_WRITE:
+        subsystems::win32::DoFileWrite(frame);
+        return;
+    case SYS_FILE_CREATE:
+        subsystems::win32::DoFileCreate(frame);
+        return;
 
     case SYS_SLEEP_MS:
     {

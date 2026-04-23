@@ -1,18 +1,22 @@
 #pragma once
 
 /*
- * Win32 file-handle syscall handlers — backs CreateFileW /
- * ReadFile / SetFilePointerEx / GetFileSizeEx / CloseHandle (file
- * arm). Ramfs-backed; per-handle cursor on Process::win32_handles.
+ * Win32 file-handle syscall handlers — back CreateFileW /
+ * ReadFile / WriteFile / SetFilePointerEx / GetFileSizeEx /
+ * CloseHandle (file arm). Backing dispatch (ramfs vs fat32 by
+ * /disk/<idx>/ prefix) lives in fs::routing; per-handle cursor
+ * on Process::win32_handles.
  *
- *   SYS_FILE_OPEN   (20..23 range; see syscall.h) — path lookup +
- *                    slot assignment. Cap-gated on kCapFsRead.
- *   SYS_FILE_READ
- *   SYS_FILE_CLOSE  — generic CloseHandle; also handles mutex +
- *                    event handle ranges because real Win32
- *                    CloseHandle dispatches by handle value.
- *   SYS_FILE_SEEK
- *   SYS_FILE_FSTAT
+ *   SYS_FILE_OPEN   (20) — path lookup + slot assignment.
+ *                    Cap-gated on kCapFsRead.
+ *   SYS_FILE_READ   (21)
+ *   SYS_FILE_CLOSE  (22) — generic CloseHandle; also handles
+ *                    mutex + event handle ranges because real
+ *                    Win32 CloseHandle dispatches by handle value.
+ *   SYS_FILE_SEEK   (23)
+ *   SYS_FILE_FSTAT  (24)
+ *   SYS_FILE_WRITE  (43) — cap-gated on kCapFsWrite.
+ *   SYS_FILE_CREATE (44) — cap-gated on kCapFsWrite.
  */
 
 namespace customos::arch
@@ -28,5 +32,7 @@ void DoFileRead(arch::TrapFrame* frame);
 void DoFileClose(arch::TrapFrame* frame);
 void DoFileSeek(arch::TrapFrame* frame);
 void DoFileFstat(arch::TrapFrame* frame);
+void DoFileWrite(arch::TrapFrame* frame);
+void DoFileCreate(arch::TrapFrame* frame);
 
 } // namespace customos::subsystems::win32

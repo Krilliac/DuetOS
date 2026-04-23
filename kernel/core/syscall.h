@@ -408,6 +408,44 @@ enum SyscallNumber : u64
     // rsi = user pointer to an output SYSTEMTIME. Reverse of
     // SYS_ST_TO_FT. Backs Win32 FileTimeToSystemTime.
     SYS_FT_TO_ST = 42,
+
+    // SYS_FILE_WRITE: rdi = handle (Win32-shaped, 0x100..0x10F),
+    // rsi = user pointer to source bytes, rdx = byte count.
+    // Writes `rdx` bytes at the handle's current cursor and
+    // advances the cursor by the bytes-written count. Returns
+    // bytes written (0..rdx) or u64(-1) on bad handle / bad
+    // user pointer / EOF-no-grow / I/O failure / cap denied.
+    //
+    // Cap-gated on kCapFsWrite. Backing dispatch:
+    //   Ramfs  → -1 (ramfs is .rodata, refuses writes).
+    //   Fat32  → Fat32WriteInPlace within [cursor..min(cursor+rdx,
+    //            file_size)]. Past EOF the call fails — file
+    //            growth requires SYS_FILE_CREATE / append paths
+    //            that the routing layer hasn't exposed yet.
+    //
+    // Backs Win32 WriteFile / WriteFileEx for handle-based I/O.
+    SYS_FILE_WRITE = 43,
+
+    // SYS_FILE_CREATE: rdi = user pointer to NUL-terminated
+    // ASCII path, rsi = path-buffer cap (bytes), rdx = user
+    // pointer to initial bytes (may be 0/null for empty file),
+    // r10 = initial byte count. Creates the file at `path` with
+    // `r10` bytes of initial content; returns a Win32 pseudo-
+    // handle (kWin32HandleBase + slot_idx) on success, u64(-1)
+    // on failure (bad path / cap denied / parent-dir missing /
+    // duplicate name / OOM / I/O failure).
+    //
+    // Cap-gated on kCapFsWrite. Path routing follows the same
+    // /disk/<idx>/<rest> convention as SYS_FILE_OPEN; ramfs
+    // paths fail (no create on read-only backing). Fat32 paths
+    // call Fat32CreateAtPath under the hood, then look up the
+    // freshly-planted entry and allocate a handle pointing at
+    // it — so the caller can immediately write/read the new
+    // file via the same handle.
+    //
+    // Backs Win32 CreateFileW with dwCreationDisposition =
+    // CREATE_NEW or CREATE_ALWAYS.
+    SYS_FILE_CREATE = 44,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit
