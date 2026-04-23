@@ -134,6 +134,9 @@ __declspec(dllimport) DWORD __stdcall FormatMessageA(DWORD flags, const void* sr
 __declspec(dllimport) BOOL __stdcall GetConsoleScreenBufferInfo(HANDLE hOut, CONSOLE_SCREEN_BUFFER_INFO* p);
 __declspec(dllimport) void* __stdcall DecodePointer(void* Ptr);
 __declspec(dllimport) void* __stdcall EncodePointer(void* Ptr);
+__declspec(dllimport) HANDLE __stdcall CreateSemaphoreW(void* attrs, int lInitial, int lMax,
+                                                        const unsigned short* name);
+__declspec(dllimport) BOOL __stdcall ReleaseSemaphore(HANDLE hSem, int lReleaseCount, int* lpPrev);
 
 static HANDLE g_events[2];
 
@@ -311,6 +314,45 @@ int __stdcall _start(void)
     {
         WriteString("[syscall-stress] FAIL Encode/Decode didn't round-trip\n");
         ExitProcess(13);
+    }
+
+    // === Batch 54 coverage: Semaphore create + wait + release ===
+    WriteString("[syscall-stress] main: CreateSemaphoreW(initial=1, max=4)\n");
+    HANDLE hSem = CreateSemaphoreW(0, 1, 4, 0);
+    if (hSem == 0)
+    {
+        WriteString("[syscall-stress] FAIL CreateSemaphoreW returned NULL\n");
+        ExitProcess(14);
+    }
+    // Wait immediately — count=1 so should succeed without blocking.
+    WriteString("[syscall-stress] main: WaitForSingleObject(sem, 0)\n");
+    DWORD wrc = WaitForSingleObject(hSem, 0);
+    if (wrc != WAIT_OBJECT_0)
+    {
+        WriteString("[syscall-stress] FAIL sem wait didn't get immediate ownership\n");
+        WriteHex64(wrc);
+        ExitProcess(15);
+    }
+    // Now count=0. Release 2 back — prev should be 0.
+    WriteString("[syscall-stress] main: ReleaseSemaphore(2)\n");
+    int sem_prev = -1;
+    if (!ReleaseSemaphore(hSem, 2, &sem_prev))
+    {
+        WriteString("[syscall-stress] FAIL ReleaseSemaphore returned FALSE\n");
+        ExitProcess(16);
+    }
+    if (sem_prev != 0)
+    {
+        WriteString("[syscall-stress] FAIL ReleaseSemaphore lpPreviousCount != 0\n");
+        WriteHex64((unsigned long long)sem_prev);
+        ExitProcess(17);
+    }
+    // Count is now 2. Overflow: release 3 more would be count=5 > max=4.
+    WriteString("[syscall-stress] main: ReleaseSemaphore overflow (expect FALSE)\n");
+    if (ReleaseSemaphore(hSem, 3, 0))
+    {
+        WriteString("[syscall-stress] FAIL overflow release succeeded\n");
+        ExitProcess(18);
     }
 
     WriteString("[syscall-stress] main: PASS\n");

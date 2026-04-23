@@ -449,6 +449,34 @@ struct Process
     static constexpr u64 kWin32ThreadBase = 0x400;
     Win32ThreadHandle win32_threads[kWin32ThreadCap];
 
+    // Win32 counting-semaphore table — backs CreateSemaphoreW /
+    // ReleaseSemaphore / WaitForSingleObject on a semaphore handle
+    // (batch 54). Handles run kWin32SemaphoreBase + idx
+    // (= 0x500..0x507), disjoint from every other Win32 range.
+    //
+    // Semantics:
+    //   - `count` is the current semaphore value. A wait that sees
+    //     count > 0 decrements it and returns WAIT_OBJECT_0
+    //     immediately. A wait that sees count == 0 blocks on
+    //     `waiters` until a release bumps count back above zero.
+    //   - `max_count` caps the count. Release-past-max is an
+    //     error (returns FALSE, Win32 semantics — count stays at
+    //     max_count, no-one wakes).
+    //   - ReleaseSemaphore(handle, N) bumps count by N and wakes
+    //     up to N waiters (one per unit of count increase).
+    struct Win32SemaphoreHandle
+    {
+        bool in_use;
+        u8 _pad[3];
+        i32 count;     // current count; 0 = no resources
+        i32 max_count; // upper limit
+        u8 _pad2[4];
+        sched::WaitQueue waiters;
+    };
+    static constexpr u64 kWin32SemaphoreCap = 8;
+    static constexpr u64 kWin32SemaphoreBase = 0x500;
+    Win32SemaphoreHandle win32_semaphores[kWin32SemaphoreCap];
+
     // Per-process cursor for thread-stack allocation. Each new
     // thread carves kV0ThreadStackPages pages off this bump
     // cursor. The base sits above the main task's stack and

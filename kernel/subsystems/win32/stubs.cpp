@@ -140,19 +140,24 @@ constexpr u32 kOffReturnStatusNotImpl = 0x72E;   // batch 42 —  6 bytes (STATU
 constexpr u32 kOffCreateEventReal = 0x734;       // batch 45 — 18 bytes (real event-backed)
 constexpr u32 kOffSetEventReal = 0x746;          // batch 45 — 15 bytes
 constexpr u32 kOffResetEventReal = 0x755;        // batch 45 — 15 bytes
-constexpr u32 kOffWaitForObj2 = 0x764;           // batch 45 — 66 bytes (mutex+event-aware)
-constexpr u32 kOffTlsAllocReal = 0x7A6;          // batch 46 —  8 bytes
-constexpr u32 kOffTlsFreeReal = 0x7AE;           // batch 46 — 24 bytes
-constexpr u32 kOffTlsGetValueReal = 0x7C6;       // batch 46 — 13 bytes
-constexpr u32 kOffTlsSetValueReal = 0x7D3;       // batch 46 — 20 bytes
-constexpr u32 kOffNtAllocateVirtualMemory = 0x7E7; // batch 47 — 36 bytes
-constexpr u32 kOffNtFreeVirtualMemory = 0x80B;     // batch 47 — 33 bytes
-constexpr u32 kOffGetSystemTimeSt = 0x82C;         // batch 48 — 11 bytes
-constexpr u32 kOffSystemTimeToFileTime = 0x837;    // batch 48 — 14 bytes
-constexpr u32 kOffFileTimeToSystemTime = 0x845;    // batch 48 — 14 bytes
-constexpr u32 kOffNtQuerySystemTimeReal = 0x853;   // batch 49 — 16 bytes
-constexpr u32 kOffNtQueryPerfCounterReal = 0x863;  // batch 49 — 28 bytes
-constexpr u32 kOffCreateThreadReal = 0x87F;        // batch 50 — 39 bytes (saves rdi+rsi)
+// NOTE: kOffWaitForObj2 is retired as of batch 54. All imports
+// now route through kOffWaitForObj3 which adds the semaphore
+// range. The v2 bytes remain inside kStubsBytes (dead code) for
+// a future slice that wants to diff the two; unused constant is
+// marked [[maybe_unused]] to suppress the warning.
+[[maybe_unused]] constexpr u32 kOffWaitForObj2 = 0x764; // batch 45 — 66 bytes (mutex+event-aware)
+constexpr u32 kOffTlsAllocReal = 0x7A6;                 // batch 46 —  8 bytes
+constexpr u32 kOffTlsFreeReal = 0x7AE;                  // batch 46 — 24 bytes
+constexpr u32 kOffTlsGetValueReal = 0x7C6;              // batch 46 — 13 bytes
+constexpr u32 kOffTlsSetValueReal = 0x7D3;              // batch 46 — 20 bytes
+constexpr u32 kOffNtAllocateVirtualMemory = 0x7E7;      // batch 47 — 36 bytes
+constexpr u32 kOffNtFreeVirtualMemory = 0x80B;          // batch 47 — 33 bytes
+constexpr u32 kOffGetSystemTimeSt = 0x82C;              // batch 48 — 11 bytes
+constexpr u32 kOffSystemTimeToFileTime = 0x837;         // batch 48 — 14 bytes
+constexpr u32 kOffFileTimeToSystemTime = 0x845;         // batch 48 — 14 bytes
+constexpr u32 kOffNtQuerySystemTimeReal = 0x853;        // batch 49 — 16 bytes
+constexpr u32 kOffNtQueryPerfCounterReal = 0x863;       // batch 49 — 28 bytes
+constexpr u32 kOffCreateThreadReal = 0x87F;             // batch 50 — 39 bytes (saves rdi+rsi)
 // ThreadExitTramp: offset 0x8A6, 6 bytes. Public VA exported as
 // customos::win32::kWin32ThreadExitTrampVa in stubs.h — keep in sync.
 
@@ -176,6 +181,12 @@ constexpr u32 kOffGetConsoleScreenBufferInfo = 0x96E; // batch 52 — 54 bytes
 // === Batch 53: RaiseException / DecodePointer / EncodePointer.
 constexpr u32 kOffRaiseException = 0x9A4; // batch 53 — 9 bytes (noreturn)
 constexpr u32 kOffDecodePointer = 0x9AD;  // batch 53 — 4 bytes (identity)
+
+// === Batch 54: Semaphore family + upgraded WaitForSingleObject v3.
+constexpr u32 kOffCreateSemaphoreW = 0x9B1; // batch 54 — 27 bytes (saves rdi+rsi)
+constexpr u32 kOffReleaseSemaphore = 0x9CC; // batch 54 — 29 bytes (saves rdi+rsi)
+constexpr u32 kOffWaitForObj3 = 0x9E9;      // batch 54 — 94 bytes
+                                            // (v2 + semaphore range 0x500..0x507)
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -2550,10 +2561,103 @@ constexpr u8 kStubsBytes[] = {
     // Encode/Decode round-trip used by MSVC's CRT.
     0x48, 0x89, 0xC8, // 0x9AD mov rax, rcx
     0xC3,             // 0x9B0 ret
+
+    // === Batch 54 =============================================
+
+    // --- CreateSemaphoreW (offset 0x9B1, 27 bytes) ------------
+    // Win32:
+    //   HANDLE CreateSemaphoreW(LPSECURITY_ATTRIBUTES, // rcx (ignored)
+    //                            LONG lInitial,        // rdx
+    //                            LONG lMaximum,        // r8
+    //                            LPCWSTR lpName);      // r9 (ignored)
+    // Maps to SYS_SEM_CREATE(initial, max). Translates kernel
+    // -1 to Win32 NULL handle. CreateSemaphoreA + CreateSemaphoreExW
+    // are wired to the same stub.
+    0x57,                         // 0x9B1 push rdi
+    0x56,                         // 0x9B2 push rsi
+    0x48, 0x89, 0xD7,             // 0x9B3 mov rdi, rdx     ; initial
+    0x4C, 0x89, 0xC6,             // 0x9B6 mov rsi, r8      ; max
+    0xB8, 0x33, 0x00, 0x00, 0x00, // 0x9B9 mov eax, 51      ; SYS_SEM_CREATE
+    0xCD, 0x80,                   // 0x9BE int 0x80
+    0x48, 0x83, 0xF8, 0xFF,       // 0x9C0 cmp rax, -1
+    0x75, 0x03,                   // 0x9C4 jne +3 -> 0x9C9 (pop rsi)
+    0x31, 0xC0,                   // 0x9C6 xor eax, eax
+    0x90,                         // 0x9C8 nop (padding so jne target lands at 0x9C9)
+    0x5E,                         // 0x9C9 pop rsi
+    0x5F,                         // 0x9CA pop rdi
+    0xC3,                         // 0x9CB ret
+
+    // --- ReleaseSemaphore (offset 0x9CC, 29 bytes) ------------
+    // Win32:
+    //   BOOL ReleaseSemaphore(HANDLE hSem,           // rcx
+    //                          LONG lReleaseCount,    // rdx
+    //                          LPLONG lpPreviousCount // r8 (optional)
+    //                          );
+    // int 0x80 preserves r8 (isr_common pushes/pops all GPRs)
+    // so we can still read it after the syscall without a save.
+    0x57,                         // 0x9CC push rdi
+    0x56,                         // 0x9CD push rsi
+    0x48, 0x89, 0xCF,             // 0x9CE mov rdi, rcx
+    0x48, 0x89, 0xD6,             // 0x9D1 mov rsi, rdx
+    0xB8, 0x34, 0x00, 0x00, 0x00, // 0x9D4 mov eax, 52      ; SYS_SEM_RELEASE
+    0xCD, 0x80,                   // 0x9D9 int 0x80
+    0x4D, 0x85, 0xC0,             // 0x9DB test r8, r8      ; lpPreviousCount != NULL?
+    0x74, 0x03,                   // 0x9DE je +3 -> 0x9E3 (inc rax)
+    0x41, 0x89, 0x00,             // 0x9E0 mov [r8], eax
+    0x48, 0xFF, 0xC0,             // 0x9E3 inc rax          ; -1 -> 0 FALSE; prev -> prev+1 TRUE
+    0x5E,                         // 0x9E6 pop rsi
+    0x5F,                         // 0x9E7 pop rdi
+    0xC3,                         // 0x9E8 ret
+
+    // --- WaitForSingleObject v3 (offset 0x9E9, 94 bytes) ------
+    // v2 + semaphore range (0x500..0x507 → SYS_SEM_WAIT).
+    // Bumps the `kOffWaitForObj2` aliases over to v3 via the
+    // import table so every caller gets semaphore-aware wait.
+    0x57,                               // 0x9E9 push rdi
+    0x56,                               // 0x9EA push rsi
+    0x48, 0x89, 0xC8,                   // 0x9EB mov rax, rcx
+    0x48, 0x2D, 0x00, 0x02, 0x00, 0x00, // 0x9EE sub rax, 0x200
+    0x48, 0x83, 0xF8, 0x08,             // 0x9F4 cmp rax, 8
+    0x72, 0x1D,                         // 0x9F8 jb .mutex (+29 -> 0xA17)
+    0x48, 0x2D, 0x00, 0x01, 0x00, 0x00, // 0x9FA sub rax, 0x100 (total 0x300 relative)
+    0x48, 0x83, 0xF8, 0x08,             // 0xA00 cmp rax, 8
+    0x72, 0x21,                         // 0xA04 jb .event (+33 -> 0xA27)
+    0x48, 0x2D, 0x00, 0x02, 0x00, 0x00, // 0xA06 sub rax, 0x200 (total 0x500 relative)
+    0x48, 0x83, 0xF8, 0x08,             // 0xA0C cmp rax, 8
+    0x72, 0x25,                         // 0xA10 jb .sem (+37 -> 0xA37)
+    // .pseudo path (handle not in any known range)
+    0x31, 0xC0, // 0xA12 xor eax, eax   ; WAIT_OBJECT_0 for unknown
+    0x5E,       // 0xA14 pop rsi
+    0x5F,       // 0xA15 pop rdi
+    0xC3,       // 0xA16 ret
+    // .mutex (offset 0xA17)
+    0x48, 0x89, 0xCF,             // 0xA17 mov rdi, rcx
+    0x48, 0x89, 0xD6,             // 0xA1A mov rsi, rdx
+    0xB8, 0x1A, 0x00, 0x00, 0x00, // 0xA1D mov eax, 26 (SYS_MUTEX_WAIT)
+    0xCD, 0x80,                   // 0xA22 int 0x80
+    0x5E,                         // 0xA24 pop rsi
+    0x5F,                         // 0xA25 pop rdi
+    0xC3,                         // 0xA26 ret
+    // .event (offset 0xA27)
+    0x48, 0x89, 0xCF,             // 0xA27 mov rdi, rcx
+    0x48, 0x89, 0xD6,             // 0xA2A mov rsi, rdx
+    0xB8, 0x21, 0x00, 0x00, 0x00, // 0xA2D mov eax, 33 (SYS_EVENT_WAIT)
+    0xCD, 0x80,                   // 0xA32 int 0x80
+    0x5E,                         // 0xA34 pop rsi
+    0x5F,                         // 0xA35 pop rdi
+    0xC3,                         // 0xA36 ret
+    // .sem (offset 0xA37)
+    0x48, 0x89, 0xCF,             // 0xA37 mov rdi, rcx
+    0x48, 0x89, 0xD6,             // 0xA3A mov rsi, rdx
+    0xB8, 0x35, 0x00, 0x00, 0x00, // 0xA3D mov eax, 53 (SYS_SEM_WAIT)
+    0xCD, 0x80,                   // 0xA42 int 0x80
+    0x5E,                         // 0xA44 pop rsi
+    0x5F,                         // 0xA45 pop rdi
+    0xC3,                         // 0xA46 ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x9B1, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0xA47, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -2744,9 +2848,9 @@ constexpr StubEntry kStubsTable[] = {
     // dispatch in SYS_FILE_CLOSE.
     {"kernel32.dll", "CreateMutexW", kOffCreateMutexW},
     {"kernel32.dll", "CreateMutexA", kOffCreateMutexW},
-    {"kernel32.dll", "CreateMutexExW", kOffCreateMutexW}, // ignores extra Ex args
-    {"kernel32.dll", "WaitForSingleObject", kOffWaitForObj2},
-    {"kernel32.dll", "WaitForSingleObjectEx", kOffWaitForObj2},
+    {"kernel32.dll", "CreateMutexExW", kOffCreateMutexW},     // ignores extra Ex args
+    {"kernel32.dll", "WaitForSingleObject", kOffWaitForObj3}, // batch 54 upgrade
+    {"kernel32.dll", "WaitForSingleObjectEx", kOffWaitForObj3},
     {"kernel32.dll", "ReleaseMutex", kOffReleaseMutex},
 
     // Batch 45 — real event handles. Replaces the kOffReturnOne
@@ -3013,6 +3117,15 @@ constexpr StubEntry kStubsTable[] = {
     {"kernel32.dll", "EncodePointer", kOffDecodePointer},
     {"kernel32.dll", "RtlDecodePointer", kOffDecodePointer},
     {"kernel32.dll", "RtlEncodePointer", kOffDecodePointer},
+    // Batch 54: Semaphore family — CreateSemaphore(W/A/ExW) route
+    // through SYS_SEM_CREATE; ReleaseSemaphore through SYS_SEM_RELEASE;
+    // WaitForSingleObject on a semaphore handle is dispatched by
+    // the new v3 stub to SYS_SEM_WAIT.
+    {"kernel32.dll", "CreateSemaphoreW", kOffCreateSemaphoreW},
+    {"kernel32.dll", "CreateSemaphoreA", kOffCreateSemaphoreW},
+    {"kernel32.dll", "CreateSemaphoreExW", kOffCreateSemaphoreW},
+    {"kernel32.dll", "CreateSemaphoreExA", kOffCreateSemaphoreW},
+    {"kernel32.dll", "ReleaseSemaphore", kOffReleaseSemaphore},
     // Tls/Fls now route through real per-process storage —
     // moved to batch 46 below.
     {"kernel32.dll", "SetEndOfFile", kOffReturnOne},
@@ -3355,8 +3468,8 @@ constexpr StubEntry kStubsTable[] = {
     {"kernelbase.dll", "VirtualFree", kOffVirtualFree},
     {"kernelbase.dll", "VirtualProtect", kOffVirtualProtect},
     {"kernelbase.dll", "CreateMutexW", kOffCreateMutexW},
-    {"kernelbase.dll", "WaitForSingleObject", kOffWaitForObj2},
-    {"kernelbase.dll", "WaitForSingleObjectEx", kOffWaitForObj2},
+    {"kernelbase.dll", "WaitForSingleObject", kOffWaitForObj3},
+    {"kernelbase.dll", "WaitForSingleObjectEx", kOffWaitForObj3},
     {"kernelbase.dll", "ReleaseMutex", kOffReleaseMutex},
     {"kernelbase.dll", "CreateEventW", kOffCreateEventReal},
     {"kernelbase.dll", "SetEvent", kOffSetEventReal},

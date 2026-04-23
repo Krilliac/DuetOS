@@ -539,6 +539,28 @@ enum SyscallNumber : u64
     // kCapSerialConsole (same as SYS_DEBUG_PRINT). Backs
     // Win32 OutputDebugStringW.
     SYS_DEBUG_PRINTW = 50,
+
+    // SYS_SEM_CREATE: rdi = initial count, rsi = max count.
+    // Allocates a per-process semaphore slot and returns
+    // kWin32SemaphoreBase + slot (= 0x500..0x507) on success,
+    // u64(-1) on slot exhaustion or bad args (initial > max).
+    // Backs Win32 CreateSemaphoreW / CreateSemaphoreA.
+    SYS_SEM_CREATE = 51,
+
+    // SYS_SEM_RELEASE: rdi = handle, rsi = release count.
+    // Bumps count by rsi, wakes up to rsi waiters (one per unit
+    // of the bump). Returns the PREVIOUS count on success, or
+    // u64(-1) on bad handle or if the bump would exceed
+    // max_count. Backs Win32 ReleaseSemaphore.
+    SYS_SEM_RELEASE = 52,
+
+    // SYS_SEM_WAIT: rdi = handle, rsi = timeout_ms (INFINITE =
+    // 0xFFFFFFFF). If count > 0, decrements and returns 0
+    // (WAIT_OBJECT_0). If count == 0, blocks on the semaphore's
+    // waitqueue with the given timeout. Returns WAIT_TIMEOUT
+    // (0x102) on timeout, u64(-1) on bad handle. Dispatched by
+    // the semaphore range in WaitForSingleObject v3.
+    SYS_SEM_WAIT = 53,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit

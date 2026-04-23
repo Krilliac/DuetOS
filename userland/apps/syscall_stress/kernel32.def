@@ -28,3 +28,5 @@ EXPORTS
     GetConsoleScreenBufferInfo
     DecodePointer
     EncodePointer
+    CreateSemaphoreW
+    ReleaseSemaphore

@@ -610,6 +610,151 @@ void SyscallDispatch(arch::TrapFrame* frame)
         return;
     }
 
+    case SYS_SEM_CREATE:
+    {
+        // rdi = initial count, rsi = max count.
+        const i64 initial = static_cast<i64>(frame->rdi);
+        const i64 max_val = static_cast<i64>(frame->rsi);
+        Process* proc = CurrentProcess();
+        if (proc == nullptr || max_val <= 0 || initial < 0 || initial > max_val)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        u64 slot = Process::kWin32SemaphoreCap;
+        arch::Cli();
+        for (u64 i = 0; i < Process::kWin32SemaphoreCap; ++i)
+        {
+            if (!proc->win32_semaphores[i].in_use)
+            {
+                slot = i;
+                break;
+            }
+        }
+        if (slot == Process::kWin32SemaphoreCap)
+        {
+            arch::Sti();
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        auto& s = proc->win32_semaphores[slot];
+        s.in_use = true;
+        s.count = static_cast<i32>(initial);
+        s.max_count = static_cast<i32>(max_val);
+        s.waiters.head = nullptr;
+        s.waiters.tail = nullptr;
+        arch::Sti();
+        const u64 handle = Process::kWin32SemaphoreBase + slot;
+        arch::SerialWrite("[sys] sem_create ok pid=");
+        arch::SerialWriteHex(proc->pid);
+        arch::SerialWrite(" handle=");
+        arch::SerialWriteHex(handle);
+        arch::SerialWrite(" init=");
+        arch::SerialWriteHex(static_cast<u64>(initial));
+        arch::SerialWrite(" max=");
+        arch::SerialWriteHex(static_cast<u64>(max_val));
+        arch::SerialWrite("\n");
+        frame->rax = handle;
+        return;
+    }
+
+    case SYS_SEM_RELEASE:
+    {
+        const u64 handle = frame->rdi;
+        const i64 release_count = static_cast<i64>(frame->rsi);
+        Process* proc = CurrentProcess();
+        if (proc == nullptr || handle < Process::kWin32SemaphoreBase ||
+            handle >= Process::kWin32SemaphoreBase + Process::kWin32SemaphoreCap || release_count <= 0)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        auto& s = proc->win32_semaphores[handle - Process::kWin32SemaphoreBase];
+        arch::Cli();
+        if (!s.in_use)
+        {
+            arch::Sti();
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        const i32 prev = s.count;
+        const i64 new_count = static_cast<i64>(s.count) + release_count;
+        if (new_count > s.max_count)
+        {
+            arch::Sti();
+            frame->rax = static_cast<u64>(-1); // ERROR_TOO_MANY_POSTS
+            return;
+        }
+        s.count = static_cast<i32>(new_count);
+        // Wake up to `release_count` waiters.
+        for (i64 i = 0; i < release_count; ++i)
+        {
+            sched::Task* woken = sched::WaitQueueWakeOne(&s.waiters);
+            if (woken == nullptr)
+                break;
+            // The waiter will decrement count when it resumes
+            // and runs through its SYS_SEM_WAIT return path —
+            // see SYS_SEM_WAIT below.
+        }
+        arch::Sti();
+        frame->rax = static_cast<u64>(prev);
+        return;
+    }
+
+    case SYS_SEM_WAIT:
+    {
+        const u64 handle = frame->rdi;
+        const u64 timeout_ms = frame->rsi & 0xFFFFFFFFu;
+        Process* proc = CurrentProcess();
+        if (proc == nullptr || handle < Process::kWin32SemaphoreBase ||
+            handle >= Process::kWin32SemaphoreBase + Process::kWin32SemaphoreCap)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        auto& s = proc->win32_semaphores[handle - Process::kWin32SemaphoreBase];
+        constexpr u64 kInfiniteMs = 0xFFFFFFFFu;
+        constexpr u64 kWaitTimeout = 0x102;
+        constexpr u64 kMsPerTick = 10;
+        arch::Cli();
+        if (!s.in_use)
+        {
+            arch::Sti();
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        // Loop: if count > 0, grab one; else block and retry.
+        // Wrapping the decrement inside a loop handles the race
+        // where two waiters wake from the same release and one
+        // of them loses the count-grab.
+        for (;;)
+        {
+            if (s.count > 0)
+            {
+                --s.count;
+                arch::Sti();
+                frame->rax = 0; // WAIT_OBJECT_0
+                return;
+            }
+            // count == 0 — block.
+            if (timeout_ms == kInfiniteMs)
+            {
+                sched::WaitQueueBlock(&s.waiters);
+                // WaitQueueBlock re-locks the CLI gate.
+                continue;
+            }
+            const u64 ticks = (timeout_ms + (kMsPerTick - 1)) / kMsPerTick;
+            const bool got = sched::WaitQueueBlockTimeout(&s.waiters, ticks);
+            if (!got)
+            {
+                arch::Sti();
+                frame->rax = kWaitTimeout;
+                return;
+            }
+            // Woken — retry the grab.
+        }
+    }
+
     case SYS_WAIT_MULTI:
     {
         // rdi = count, rsi = user handle array, rdx = wait_all,
@@ -678,6 +823,17 @@ void SyscallDispatch(arch::TrapFrame* frame)
                         const u64 slot = h - Process::kWin32ThreadBase;
                         const auto& th = proc->win32_threads[slot];
                         if (th.in_use && sched::TaskIsDead(th.task))
+                            sig = true;
+                    }
+                    else if (h >= Process::kWin32SemaphoreBase &&
+                             h < Process::kWin32SemaphoreBase + Process::kWin32SemaphoreCap)
+                    {
+                        // Semaphores are signaled iff count > 0. Wait-all
+                        // via poll doesn't consume the count — a fully
+                        // race-free multi-wait is a future slice.
+                        const u64 slot = h - Process::kWin32SemaphoreBase;
+                        const auto& s = proc->win32_semaphores[slot];
+                        if (s.in_use && s.count > 0)
                             sig = true;
                     }
                     // Mutex handles: v0 doesn't try-acquire here —
