@@ -40,13 +40,20 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     subsystems/linux/syscall.cpp
     subsystems/linux/syscall_entry.S
     subsystems/translation/translate.cpp
+    subsystems/win32/event_syscall.cpp
+    subsystems/win32/file_syscall.cpp
     subsystems/win32/heap.cpp
+    subsystems/win32/heap_syscall.cpp
+    subsystems/win32/mutex_syscall.cpp
     subsystems/win32/stubs.cpp
+    subsystems/win32/tls_syscall.cpp
+    subsystems/win32/vmap_syscall.cpp
     core/shell.cpp
     core/stack_canary.cpp
     core/symbols.cpp
     core/syscall.cpp
     core/time_syscall.cpp
+    debug/bp_syscall.cpp
     acpi/acpi.cpp
     apps/calculator.cpp
     apps/clock.cpp

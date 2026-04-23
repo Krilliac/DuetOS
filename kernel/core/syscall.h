@@ -412,6 +412,11 @@ enum SyscallNumber : u64
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit
 /// (the IDT must already be loaded) and before any ring-3 entry.
+/// Upper bound on path-argument length for SYS_STAT / SYS_FILE_OPEN
+/// / SYS_READ etc. Bounds the on-kernel-stack bounce buffer the
+/// copy-in path uses so there's no unbounded user-controlled copy.
+inline constexpr u64 kSyscallPathMax = 256;
+
 void SyscallInit();
 
 /// Called from arch::TrapDispatch when frame->vector == 0x80. Examines
