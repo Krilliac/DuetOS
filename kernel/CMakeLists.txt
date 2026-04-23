@@ -281,6 +281,34 @@ add_custom_command(
 
 list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_THREAD_STRESS_HEADER}")
 
+# ----------------------------------------------------------------------------
+# Fifth PE fixture: syscall_stress.exe — exercises the batch-51
+# Win32 API additions: OutputDebugStringA, ExitThread,
+# GetProcessTimes / GetThreadTimes / GetSystemTimes,
+# GlobalMemoryStatusEx, WaitForMultipleObjects.
+# ----------------------------------------------------------------------------
+set(CUSTOMOS_SYSCALL_STRESS_SRC "${CMAKE_SOURCE_DIR}/userland/apps/syscall_stress/hello.c")
+file(GLOB CUSTOMOS_SYSCALL_STRESS_DEFS
+    "${CMAKE_SOURCE_DIR}/userland/apps/syscall_stress/*.def")
+set(CUSTOMOS_SYSCALL_STRESS_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_syscall_stress.h")
+set(CUSTOMOS_SYSCALL_STRESS_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-syscall-stress.sh")
+
+add_custom_command(
+    OUTPUT "${CUSTOMOS_SYSCALL_STRESS_HEADER}"
+    COMMAND "${CUSTOMOS_SYSCALL_STRESS_SCRIPT}"
+            "${CMAKE_SOURCE_DIR}"
+            "${CUSTOMOS_SYSCALL_STRESS_HEADER}"
+    DEPENDS
+        "${CUSTOMOS_SYSCALL_STRESS_SRC}"
+        ${CUSTOMOS_SYSCALL_STRESS_DEFS}
+        "${CUSTOMOS_SYSCALL_STRESS_SCRIPT}"
+        "${CUSTOMOS_EMBED_BLOB_SCRIPT}"
+    COMMENT "Compiling + embedding /bin/syscall_stress.exe (batch 51 API coverage)"
+    VERBATIM
+)
+
+list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_SYSCALL_STRESS_HEADER}")
+
 set(CUSTOMOS_KERNEL_LINKER_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/arch/x86_64/linker.ld")
 
 # Shared link flags — applied identically to both stages so the symbol

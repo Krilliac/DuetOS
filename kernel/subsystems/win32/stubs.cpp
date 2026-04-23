@@ -152,9 +152,19 @@ constexpr u32 kOffSystemTimeToFileTime = 0x837;    // batch 48 — 14 bytes
 constexpr u32 kOffFileTimeToSystemTime = 0x845;    // batch 48 — 14 bytes
 constexpr u32 kOffNtQuerySystemTimeReal = 0x853;   // batch 49 — 16 bytes
 constexpr u32 kOffNtQueryPerfCounterReal = 0x863;  // batch 49 — 28 bytes
-constexpr u32 kOffCreateThreadReal = 0x87F;        // batch 50 — 35 bytes
-// ThreadExitTramp: offset 0x8A2, 6 bytes. Public VA exported as
+constexpr u32 kOffCreateThreadReal = 0x87F;        // batch 50 — 39 bytes (saves rdi+rsi)
+// ThreadExitTramp: offset 0x8A6, 6 bytes. Public VA exported as
 // customos::win32::kWin32ThreadExitTrampVa in stubs.h — keep in sync.
+
+// === Batch 51: ExitThread + OutputDebugStringA + GetProcessTimes
+// + GetThreadTimes + GetSystemTimes + GlobalMemoryStatusEx +
+// WaitForMultipleObjects.
+constexpr u32 kOffExitThread = 0x8AC;             // batch 51 — 9 bytes (noreturn, no save)
+constexpr u32 kOffOutputDebugStringA = 0x8B5;     // batch 51 — 13 bytes (saves rdi)
+constexpr u32 kOffGetProcessTimes = 0x8C2;        // batch 51 — 44 bytes (also GetThreadTimes)
+constexpr u32 kOffGetSystemTimes = 0x8EE;         // batch 51 — 30 bytes
+constexpr u32 kOffGlobalMemoryStatusEx = 0x90C;   // batch 51 — 16 bytes (saves rdi)
+constexpr u32 kOffWaitForMultipleObjects = 0x91C; // batch 51 — 24 bytes (saves rdi+rsi)
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -2284,25 +2294,36 @@ constexpr u8 kStubsBytes[] = {
     // failure. The Win32 contract is "handle or NULL on fail" —
     // we translate -1 to 0 at the tail.
     //
-    // --- CreateThread (offset 0x87F, 35 bytes) -----------------
-    0x4C, 0x89, 0xC7,             // 0x87F mov rdi, r8          ; start
-    0x4C, 0x89, 0xCE,             // 0x882 mov rsi, r9          ; param
-    0xB8, 0x2D, 0x00, 0x00, 0x00, // 0x885 mov eax, 45          ; SYS_THREAD_CREATE
-    0xCD, 0x80,                   // 0x88A int 0x80             ; rax = handle or -1
-    // If lpThreadId (at [rsp+0x30]) is non-NULL, stash rax low32.
-    0x48, 0x8B, 0x4C, 0x24, 0x30, // 0x88C mov rcx, [rsp+0x30]
-    0x48, 0x85, 0xC9,             // 0x891 test rcx, rcx
-    0x74, 0x02,                   // 0x894 je  +2 -> 0x898
-    0x89, 0x01,                   // 0x896 mov [rcx], eax
+    // --- CreateThread (offset 0x87F, 39 bytes) -----------------
+    // Win64 ABI: rdi + rsi are callee-saved — save/restore around
+    // the syscall so callers that hold IAT slots in rdi (which
+    // MSVC's code generator routinely does) survive the call.
+    // Added after syscall_stress.exe hit a latent bug from batch 50
+    // where rdi was clobbered and main jumped through the wrecked
+    // rdi into the thread proc directly.
+    0x57,                         // 0x87F push rdi
+    0x56,                         // 0x880 push rsi
+    0x4C, 0x89, 0xC7,             // 0x881 mov rdi, r8          ; start
+    0x4C, 0x89, 0xCE,             // 0x884 mov rsi, r9          ; param
+    0xB8, 0x2D, 0x00, 0x00, 0x00, // 0x887 mov eax, 45          ; SYS_THREAD_CREATE
+    0xCD, 0x80,                   // 0x88C int 0x80             ; rax = handle or -1
+    // We pushed 16 bytes, so lpThreadId (originally at [rsp+0x30])
+    // is now at [rsp+0x40].
+    0x48, 0x8B, 0x4C, 0x24, 0x40, // 0x88E mov rcx, [rsp+0x40]
+    0x48, 0x85, 0xC9,             // 0x893 test rcx, rcx
+    0x74, 0x02,                   // 0x896 je  +2 -> 0x89A
+    0x89, 0x01,                   // 0x898 mov [rcx], eax
     // Translate -1 (any high bits set) to 0 for Win32 "NULL" handle
-    // semantics. cmp al with 0 — too coarse; use cmp rax, -1.
-    0x48, 0x83, 0xF8, 0xFF, // 0x898 cmp rax, -1
-    0x75, 0x03,             // 0x89C jne +3 -> 0x8A1
-    0x31, 0xC0,             // 0x89E xor eax, eax
-    0x90,                   // 0x8A0 nop (padding so cmp/jne/xor lands exactly 3 bytes)
-    0xC3,                   // 0x8A1 ret
+    // semantics.
+    0x48, 0x83, 0xF8, 0xFF, // 0x89A cmp rax, -1
+    0x75, 0x03,             // 0x89E jne +3 -> 0x8A3
+    0x31, 0xC0,             // 0x8A0 xor eax, eax
+    0x90,                   // 0x8A2 nop (padding so cmp/jne/xor lands exactly 3 bytes)
+    0x5E,                   // 0x8A3 pop rsi
+    0x5F,                   // 0x8A4 pop rdi
+    0xC3,                   // 0x8A5 ret
 
-    // --- ThreadExitTramp (offset 0x8A2, 6 bytes) ---------------
+    // --- ThreadExitTramp (offset 0x8A6, 6 bytes) ---------------
     // Landing site when a Win32 thread proc returns. DoThreadCreate
     // writes (kWin32StubsVa + 0x8A2) to [stack_top - 8] so the
     // thread proc's final `ret` pops this VA into RIP. The thread
@@ -2310,13 +2331,117 @@ constexpr u8 kStubsBytes[] = {
     // copy it to EDI (SYS_EXIT's first arg) then issue SYS_EXIT(0).
     // SYS_EXIT kills just this task — the process's other threads
     // (e.g. main waiting on the event) are unaffected. Noreturn.
-    0x89, 0xC7, // 0x8A2 mov edi, eax     ; thread retcode
-    0x31, 0xC0, // 0x8A4 xor eax, eax    ; SYS_EXIT = 0
-    0xCD, 0x80, // 0x8A6 int 0x80        ; noreturn
+    0x89, 0xC7, // 0x8A6 mov edi, eax     ; thread retcode
+    0x31, 0xC0, // 0x8A8 xor eax, eax    ; SYS_EXIT = 0
+    0xCD, 0x80, // 0x8AA int 0x80        ; noreturn
+
+    // === Batch 51 =============================================
+
+    // --- ExitThread (offset 0x8AC, 9 bytes) -------------------
+    // Win32: void ExitThread(DWORD dwExitCode).  rcx = exit code.
+    // Maps to SYS_EXIT — kills only the calling task (just like
+    // the ThreadExitTramp fallback) without disturbing the rest
+    // of the process.
+    0x48, 0x89, 0xCF, // 0x8AC mov rdi, rcx       ; exit code
+    0x31, 0xC0,       // 0x8AF xor eax, eax       ; SYS_EXIT
+    0xCD, 0x80,       // 0x8B1 int 0x80
+    0x0F, 0x0B,       // 0x8B3 ud2                ; [[noreturn]]
+
+    // --- OutputDebugStringA (offset 0x8B5, 13 bytes) ----------
+    // Win32: void OutputDebugStringA(LPCSTR lpOutputString).
+    // rcx = NUL-terminated ASCII string. Maps to SYS_DEBUG_PRINT
+    // which does the strlen + bounce + serial emit kernel-side.
+    // Win64 ABI: rdi is callee-saved — push/pop around the
+    // syscall to preserve the caller's rdi.
+    0x57,                         // 0x8B5 push rdi
+    0x48, 0x89, 0xCF,             // 0x8B6 mov rdi, rcx      ; str
+    0xB8, 0x2E, 0x00, 0x00, 0x00, // 0x8B9 mov eax, 46       ; SYS_DEBUG_PRINT
+    0xCD, 0x80,                   // 0x8BE int 0x80
+    0x5F,                         // 0x8C0 pop rdi
+    0xC3,                         // 0x8C1 ret
+
+    // --- GetProcessTimes (offset 0x8C2, 44 bytes) -------------
+    // Win32:
+    //   BOOL GetProcessTimes(HANDLE hProcess,             // rcx ignored
+    //                        LPFILETIME CreationTime,     // rdx
+    //                        LPFILETIME ExitTime,         // r8
+    //                        LPFILETIME KernelTime,       // r9
+    //                        LPFILETIME UserTime);        // [rsp+0x28]
+    // Aliased by GetThreadTimes (same shape). v0 just zeros all
+    // four FILETIMEs and returns BOOL TRUE — callers that only
+    // want to detect "API exists" proceed cleanly, callers that
+    // divide-by-zero get the same garbage they'd get from a real
+    // machine that hadn't run long enough.
+    // Assumes each output pointer is non-NULL (Win32 doesn't spec
+    // NULL-tolerance on these args); real callers always pass
+    // valid FILETIMEs.
+    0x48, 0xC7, 0x02, 0x00, 0x00, 0x00, 0x00, // 0x8C2 mov qword [rdx], 0
+    0x49, 0xC7, 0x00, 0x00, 0x00, 0x00, 0x00, // 0x8C9 mov qword [r8], 0
+    0x49, 0xC7, 0x01, 0x00, 0x00, 0x00, 0x00, // 0x8D0 mov qword [r9], 0
+    0x48, 0x8B, 0x4C, 0x24, 0x28,             // 0x8D7 mov rcx, [rsp+0x28]
+    0x48, 0x85, 0xC9,                         // 0x8DC test rcx, rcx
+    0x74, 0x07,                               // 0x8DF je +7  -> 0x8E8
+    0x48, 0xC7, 0x01, 0x00, 0x00, 0x00, 0x00, // 0x8E1 mov qword [rcx], 0
+    0xB8, 0x01, 0x00, 0x00, 0x00,             // 0x8E8 mov eax, 1 (BOOL TRUE)
+    0xC3,                                     // 0x8ED ret
+
+    // --- GetSystemTimes (offset 0x8EE, 30 bytes) --------------
+    // Win32:
+    //   BOOL GetSystemTimes(PFILETIME IdleTime,       // rcx
+    //                       PFILETIME KernelTime,     // rdx
+    //                       PFILETIME UserTime);      // r8
+    // v0 zeros rcx and rdx pointers when non-null, returns BOOL
+    // TRUE. r8 (UserTime) is left untouched — stub-size budget,
+    // and UserTime is less commonly consulted than Idle/Kernel.
+    0x48, 0x85, 0xC9,                         // 0x8EE test rcx, rcx
+    0x74, 0x07,                               // 0x8F1 je +7 -> 0x8FA
+    0x48, 0xC7, 0x01, 0x00, 0x00, 0x00, 0x00, // 0x8F3 mov qword [rcx], 0
+    0x48, 0x85, 0xD2,                         // 0x8FA test rdx, rdx
+    0x74, 0x07,                               // 0x8FD je +7 -> 0x906
+    0x48, 0xC7, 0x02, 0x00, 0x00, 0x00, 0x00, // 0x8FF mov qword [rdx], 0
+    0xB8, 0x01, 0x00, 0x00, 0x00,             // 0x906 mov eax, 1 (BOOL TRUE)
+    0xC3,                                     // 0x90B ret
+
+    // --- GlobalMemoryStatusEx (offset 0x90C, 16 bytes) --------
+    // Win32: BOOL GlobalMemoryStatusEx(LPMEMORYSTATUSEX lpBuffer).
+    // rcx = user pointer. Maps to SYS_MEM_STATUS which does the
+    // struct validation + populate server-side. Returns BOOL
+    // TRUE on syscall success (rax=0), FALSE on failure (rax=-1).
+    // The `inc rax` flips 0↔1 and -1↔0, which is exactly the
+    // Win32 BOOL mapping we want. Saves rdi across the syscall
+    // (callee-saved in Win64 ABI).
+    0x57,                         // 0x90C push rdi
+    0x48, 0x89, 0xCF,             // 0x90D mov rdi, rcx
+    0xB8, 0x2F, 0x00, 0x00, 0x00, // 0x910 mov eax, 47 ; SYS_MEM_STATUS
+    0xCD, 0x80,                   // 0x915 int 0x80
+    0x48, 0xFF, 0xC0,             // 0x917 inc rax     ; 0→1, -1→0
+    0x5F,                         // 0x91A pop rdi
+    0xC3,                         // 0x91B ret
+
+    // --- WaitForMultipleObjects (offset 0x91C, 24 bytes) ------
+    // Win32:
+    //   DWORD WaitForMultipleObjects(DWORD nCount,       // rcx
+    //                                const HANDLE *,     // rdx
+    //                                BOOL bWaitAll,      // r8
+    //                                DWORD dwMs);        // r9
+    // CustomOS: SYS_WAIT_MULTI with count=rdi, arr=rsi,
+    // waitAll=rdx, timeout_ms=r10. Saves rdi+rsi across the
+    // syscall (both callee-saved in Win64 ABI).
+    0x57,                         // 0x91C push rdi
+    0x56,                         // 0x91D push rsi
+    0x48, 0x89, 0xCF,             // 0x91E mov rdi, rcx  ; count
+    0x48, 0x89, 0xD6,             // 0x921 mov rsi, rdx  ; handle array
+    0x4C, 0x89, 0xC2,             // 0x924 mov rdx, r8   ; waitAll
+    0x4D, 0x89, 0xCA,             // 0x927 mov r10, r9   ; timeout
+    0xB8, 0x30, 0x00, 0x00, 0x00, // 0x92A mov eax, 48   ; SYS_WAIT_MULTI
+    0xCD, 0x80,                   // 0x92F int 0x80
+    0x5E,                         // 0x931 pop rsi
+    0x5F,                         // 0x932 pop rdi
+    0xC3,                         // 0x933 ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x8A8, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0x934, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -2552,8 +2677,11 @@ constexpr StubEntry kStubsTable[] = {
     // Windows silently drops when no debugger is attached. We
     // do the same — kOffReturnZero returns 0 as a `void` sink
     // (both signatures: LPCWSTR / LPCSTR, no return).
+    // Batch 51: OutputDebugStringA → real kernel debug-print syscall.
+    // OutputDebugStringW unchanged for now (UTF-16 → ASCII strip in
+    // a follow-up; most real callers use the A form).
     {"kernel32.dll", "OutputDebugStringW", kOffReturnZero},
-    {"kernel32.dll", "OutputDebugStringA", kOffReturnZero},
+    {"kernel32.dll", "OutputDebugStringA", kOffOutputDebugStringA},
 
     // Batch 28 — virtual memory. VirtualAlloc is the single
     // most-requested Win32 memory primitive for non-trivial
@@ -2717,8 +2845,9 @@ constexpr StubEntry kStubsTable[] = {
     {"kernel32.dll", "GetTimeZoneInformation", kOffReturnOne},
     {"kernel32.dll", "GetDynamicTimeZoneInformation", kOffReturnOne},
     {"kernel32.dll", "GetCurrentProcessorNumber", kOffReturnZero},
-    {"kernel32.dll", "GetProcessTimes", kOffReturnZero},
-    {"kernel32.dll", "GetThreadTimes", kOffReturnZero},
+    // Batch 51: GetProcessTimes / GetThreadTimes → zero-fill stubs.
+    {"kernel32.dll", "GetProcessTimes", kOffGetProcessTimes},
+    {"kernel32.dll", "GetThreadTimes", kOffGetProcessTimes}, // same shape
     {"kernel32.dll", "GetStartupInfoW", kOffCritSecNop},
     {"kernel32.dll", "GetStartupInfoA", kOffCritSecNop},
     {"kernel32.dll", "VerSetConditionMask", kOffReturnZero},
@@ -2731,8 +2860,10 @@ constexpr StubEntry kStubsTable[] = {
     {"kernel32.dll", "InterlockedFlushSList", kOffReturnZero},
     {"kernel32.dll", "QueryDepthSList", kOffReturnZero},
     // Misc memory / CPU / numa probes.
-    {"kernel32.dll", "GlobalMemoryStatusEx", kOffReturnZero},
-    {"kernel32.dll", "GetSystemTimes", kOffReturnZero},
+    // Batch 51: GlobalMemoryStatusEx → real SYS_MEM_STATUS;
+    // GetSystemTimes → zero-fill stub.
+    {"kernel32.dll", "GlobalMemoryStatusEx", kOffGlobalMemoryStatusEx},
+    {"kernel32.dll", "GetSystemTimes", kOffGetSystemTimes},
     {"kernel32.dll", "GetNumaHighestNodeNumber", kOffReturnZero},
 
     // Batch 39 — process priority / TLS / file-type aliases.
@@ -2748,6 +2879,14 @@ constexpr StubEntry kStubsTable[] = {
     {"kernel32.dll", "SetThreadPriority", kOffReturnOne},
     {"kernel32.dll", "CreateThread", kOffCreateThreadReal}, // batch 50 — real spawn via SYS_THREAD_CREATE
     {"kernel32.dll", "CreateRemoteThread", kOffReturnZero}, // batch-24 fallback stays (no cross-proc v0)
+    // Batch 51: ExitThread routes to SYS_EXIT (kills just this
+    // task). FreeLibraryAndExitThread aliases to ExitThread — the
+    // FreeLibrary half is a no-op in v0 (no DLL unload path).
+    {"kernel32.dll", "ExitThread", kOffExitThread},
+    {"kernel32.dll", "FreeLibraryAndExitThread", kOffExitThread},
+    // Batch 51: WaitForMultipleObjects via SYS_WAIT_MULTI.
+    {"kernel32.dll", "WaitForMultipleObjects", kOffWaitForMultipleObjects},
+    {"kernel32.dll", "WaitForMultipleObjectsEx", kOffWaitForMultipleObjects},
     // Tls/Fls now route through real per-process storage —
     // moved to batch 46 below.
     {"kernel32.dll", "SetEndOfFile", kOffReturnOne},

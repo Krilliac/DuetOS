@@ -17,6 +17,7 @@
 // -> int 0x80 SYS_EXIT.
 #include "generated_hello_winapi.h"
 #include "generated_thread_stress.h"
+#include "generated_syscall_stress.h"
 
 // A real 3rd-party Windows PE embedded verbatim from
 // userland/apps/windows_kill/windows-kill.exe. 79 KiB, 12 DLL
@@ -316,9 +317,17 @@ constinit RamfsNode k_trusted_bin_thread_stress = {
     .file_size = generated::kBinThreadStressBytes_len,
 };
 
+constinit RamfsNode k_trusted_bin_syscall_stress = {
+    .name = "syscall_stress.exe",
+    .type = RamfsNodeType::kFile,
+    .children = nullptr,
+    .file_bytes = generated::kBinSyscallStressBytes,
+    .file_size = generated::kBinSyscallStressBytes_len,
+};
+
 constinit const RamfsNode* const k_trusted_bin_children[] = {
-    &k_trusted_bin_hello,   &k_trusted_bin_exit_elf,     &k_trusted_bin_hello_pe,     &k_trusted_bin_winkill,
-    &k_trusted_bin_hello_winapi, &k_trusted_bin_thread_stress, nullptr,
+    &k_trusted_bin_hello,        &k_trusted_bin_exit_elf,      &k_trusted_bin_hello_pe,       &k_trusted_bin_winkill,
+    &k_trusted_bin_hello_winapi, &k_trusted_bin_thread_stress, &k_trusted_bin_syscall_stress, nullptr,
 };
 
 constinit RamfsNode k_trusted_bin_dir = {

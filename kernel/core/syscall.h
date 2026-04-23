@@ -463,6 +463,55 @@ enum SyscallNumber : u64
     // v0 limitations documented at Process::Win32ThreadHandle.
     // Backs Win32 CreateThread / CreateRemoteThread-on-self.
     SYS_THREAD_CREATE = 45,
+
+    // SYS_DEBUG_PRINT: rdi = user pointer to NUL-terminated ASCII
+    // string. No length arg — kernel scans up to
+    // kSyscallDebugPrintMax bytes for the terminator. Emits a
+    // single "[odbg] ..." line on the serial console. Returns 0
+    // always (void-shaped in user space). Cap-gated on
+    // kCapSerialConsole — the same gate SYS_WRITE uses for fd=1.
+    //
+    // Backs Win32 OutputDebugStringA. OutputDebugStringW converts
+    // UTF-16 → ASCII in a user stub before calling this syscall
+    // (or a future SYS_DEBUG_PRINTW).
+    SYS_DEBUG_PRINT = 46,
+
+    // SYS_MEM_STATUS: rdi = user pointer to a 64-byte Win32
+    // MEMORYSTATUSEX struct. Kernel populates the fields with a
+    // snapshot of the frame allocator's totals/free + a synthetic
+    // virtual-address-space figure derived from the process's
+    // mapped region count. Returns 0 on success, u64(-1) on
+    // bad user pointer or wrong struct size (dwLength).
+    //
+    // Backs Win32 GlobalMemoryStatusEx. Unprivileged — every
+    // process can observe its own memory envelope.
+    SYS_MEM_STATUS = 47,
+
+    // SYS_WAIT_MULTI: rdi = count, rsi = user pointer to a
+    // count-sized array of Win32 handles (u64 each), rdx =
+    // bWaitAll (0 = any, 1 = all), r10 = timeout_ms
+    // (0xFFFFFFFF = INFINITE).
+    //
+    // Return values track Win32 WaitForMultipleObjects:
+    //   WAIT_OBJECT_0 + i (0 + 0..count-1) — handle i signaled
+    //                                         (wait-any) or all
+    //                                         handles signaled
+    //                                         (wait-all — returns
+    //                                         WAIT_OBJECT_0)
+    //   WAIT_TIMEOUT  (0x102)               — timeout elapsed
+    //   WAIT_FAILED   (u64(-1))             — bad args / bad handle /
+    //                                         count > kMaxObjects
+    //
+    // v0: poll-and-yield implementation. Loops through the handle
+    // array inspecting each handle's signaled state; if the wait
+    // isn't satisfied, issues SchedYield (or SchedSleepTicks for a
+    // timed wait) and retries. Not wake-driven — adequate for the
+    // common "wait on N events" pattern but spins a timeslice per
+    // iteration under contention. A future slice will thread
+    // multi-waiters through the event/mutex waitqueues directly.
+    //
+    // Unprivileged (same as the single-object waits).
+    SYS_WAIT_MULTI = 48,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit
@@ -471,6 +520,16 @@ enum SyscallNumber : u64
 /// / SYS_READ etc. Bounds the on-kernel-stack bounce buffer the
 /// copy-in path uses so there's no unbounded user-controlled copy.
 inline constexpr u64 kSyscallPathMax = 256;
+
+/// Upper bound on the NUL-terminated string SYS_DEBUG_PRINT will
+/// scan/emit. Matches kSyscallWriteMax so the kernel-stack bounce
+/// buffer reuses the same ceiling.
+inline constexpr u64 kSyscallDebugPrintMax = 256;
+
+/// Cap on the number of handles a single SYS_WAIT_MULTI call may
+/// pass. Matches the Win32 MAXIMUM_WAIT_OBJECTS (64). Bounds the
+/// kernel-stack bounce array the syscall uses.
+inline constexpr u64 kSyscallWaitMultiMax = 64;
 
 void SyscallInit();
 

@@ -35,7 +35,7 @@ inline constexpr u64 kWin32StubsVa = 0x60000000ULL;
 // SYS_THREAD_CREATE handlers write this to [user_rsp] so a Win32
 // thread proc that `ret`s off its entry point lands on the trampoline
 // (which issues SYS_EXIT(retcode)) rather than #PF'ing at rip=0.
-inline constexpr u64 kWin32ThreadExitTrampVa = kWin32StubsVa + 0x8A2ULL;
+inline constexpr u64 kWin32ThreadExitTrampVa = kWin32StubsVa + 0x8A6ULL;
 
 /*
  * Per-process "proc-env" page. Holds argc, argv, and the backing

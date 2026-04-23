@@ -7,6 +7,7 @@
 #include "../fs/ramfs.h"
 #include "generated_hello_pe.h"
 #include "generated_hello_winapi.h"
+#include "generated_syscall_stress.h"
 #include "generated_thread_stress.h"
 #include "generated_winkill_pe.h"
 #include "../mm/address_space.h"
@@ -2141,6 +2142,13 @@ void StartRing3SmokeTask()
     // SYS_THREAD_CREATE path. Expected exit: 0xABCDE on success.
     SpawnPeFile("ring3-thread-stress", fs::generated::kBinThreadStressBytes, fs::generated::kBinThreadStressBytes_len,
                 CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    // Syscall-stress PE: batch-51 coverage — OutputDebugStringA,
+    // ExitThread, GetProcessTimes/GetThreadTimes/GetSystemTimes,
+    // GlobalMemoryStatusEx, WaitForMultipleObjects. Expected exit:
+    // 0xCAFE on success.
+    SpawnPeFile("ring3-syscall-stress", fs::generated::kBinSyscallStressBytes,
+                fs::generated::kBinSyscallStressBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     // Real-world Windows PE diagnostic attempt. Expected to
     // reject (most imports unresolved) — the value is the
     // PeReport log line showing the full import / reloc / TLS
@@ -2149,7 +2157,7 @@ void StartRing3SmokeTask()
                 fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     Log(LogLevel::Info, "core/ring3",
         "ring3 smoke tasks queued (incl cpu-hog + hostile + dropcaps + priv + badint + kread + "
-        "ptrfuzz + writefuzz + hellope + winkill-report + thread-stress)");
+        "ptrfuzz + writefuzz + hellope + winkill-report + thread-stress + syscall-stress)");
 }
 
 } // namespace customos::core
