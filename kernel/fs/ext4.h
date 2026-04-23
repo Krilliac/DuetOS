@@ -44,6 +44,13 @@ struct Volume
     u32 block_size; // 1024 << s_log_block_size
     u64 inode_count;
     u64 block_count;
+    u32 blocks_per_group;
+    u32 inodes_per_group;
+    u32 first_data_block; // 0 for 4KiB blocks, 1 for 1KiB
+    u32 feature_compat;
+    u32 feature_incompat;
+    u32 feature_ro_compat;
+    u32 rev_level;  // 0 = "good old", 1 = "dynamic"
     char label[17]; // s_volume_name + NUL
 };
 

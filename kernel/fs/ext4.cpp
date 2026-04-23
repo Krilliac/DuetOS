@@ -33,9 +33,31 @@ inline u32 LeU32(const u8* p)
 // the LBA start). See include/linux/ext4_fs.h / e2fsprogs.
 constexpr u64 kSbOffInodeCount = 0x00;
 constexpr u64 kSbOffBlockCountLo = 0x04;
+constexpr u64 kSbOffFirstDataBlock = 0x14;
 constexpr u64 kSbOffLogBlockSize = 0x18; // block_size = 1024 << this
+constexpr u64 kSbOffBlocksPerGroup = 0x20;
+constexpr u64 kSbOffInodesPerGroup = 0x28;
 constexpr u64 kSbOffMagic = 0x38;
+constexpr u64 kSbOffRevLevel = 0x4C;
+constexpr u64 kSbOffFeatureCompat = 0x5C;
+constexpr u64 kSbOffFeatureIncompat = 0x60;
+constexpr u64 kSbOffFeatureRoCompat = 0x64;
 constexpr u64 kSbOffVolumeName = 0x78; // 16 bytes
+
+// Classify a probe result as ext2 / ext3 / ext4 from feature bits.
+// FEATURE_INCOMPAT_EXTENTS (0x40) is the ext4 signature;
+// FEATURE_COMPAT_HAS_JOURNAL (0x04) upgrades ext2 -> ext3.
+constexpr u32 kFeatureIncompatExtents = 0x40;
+constexpr u32 kFeatureCompatHasJournal = 0x04;
+
+const char* ClassifyExt(u32 feature_incompat, u32 feature_compat)
+{
+    if (feature_incompat & kFeatureIncompatExtents)
+        return "ext4";
+    if (feature_compat & kFeatureCompatHasJournal)
+        return "ext3";
+    return "ext2";
+}
 
 } // namespace
 
@@ -61,6 +83,13 @@ bool Ext4Probe(u32 block_handle, u32* out_index)
     v.block_size = u32(1024) << LeU32(sb + kSbOffLogBlockSize);
     v.block_count = LeU32(sb + kSbOffBlockCountLo);
     v.inode_count = LeU32(sb + kSbOffInodeCount);
+    v.first_data_block = LeU32(sb + kSbOffFirstDataBlock);
+    v.blocks_per_group = LeU32(sb + kSbOffBlocksPerGroup);
+    v.inodes_per_group = LeU32(sb + kSbOffInodesPerGroup);
+    v.rev_level = LeU32(sb + kSbOffRevLevel);
+    v.feature_compat = LeU32(sb + kSbOffFeatureCompat);
+    v.feature_incompat = LeU32(sb + kSbOffFeatureIncompat);
+    v.feature_ro_compat = LeU32(sb + kSbOffFeatureRoCompat);
     for (u32 i = 0; i < 16; ++i)
         v.label[i] = char(sb[kSbOffVolumeName + i]);
     v.label[16] = '\0';
@@ -70,13 +99,36 @@ bool Ext4Probe(u32 block_handle, u32* out_index)
         *out_index = g_volume_count;
     ++g_volume_count;
 
+    const char* variant = ClassifyExt(v.feature_incompat, v.feature_compat);
     arch::SerialWrite("[ext4] probe OK handle=");
     arch::SerialWriteHex(block_handle);
+    arch::SerialWrite(" variant=");
+    arch::SerialWrite(variant);
     arch::SerialWrite(" block_size=");
     arch::SerialWriteHex(v.block_size);
     arch::SerialWrite(" label=\"");
     arch::SerialWrite(v.label);
-    arch::SerialWrite("\" (mount path deferred)\n");
+    arch::SerialWrite("\"\n");
+    arch::SerialWrite("[ext4]   blocks=");
+    arch::SerialWriteHex(v.block_count);
+    arch::SerialWrite(" inodes=");
+    arch::SerialWriteHex(v.inode_count);
+    arch::SerialWrite(" blocks/grp=");
+    arch::SerialWriteHex(v.blocks_per_group);
+    arch::SerialWrite(" inodes/grp=");
+    arch::SerialWriteHex(v.inodes_per_group);
+    arch::SerialWrite(" first_data=");
+    arch::SerialWriteHex(v.first_data_block);
+    arch::SerialWrite(" rev=");
+    arch::SerialWriteHex(v.rev_level);
+    arch::SerialWrite("\n");
+    arch::SerialWrite("[ext4]   feat_compat=");
+    arch::SerialWriteHex(v.feature_compat);
+    arch::SerialWrite(" feat_incompat=");
+    arch::SerialWriteHex(v.feature_incompat);
+    arch::SerialWrite(" feat_ro_compat=");
+    arch::SerialWriteHex(v.feature_ro_compat);
+    arch::SerialWrite(" (mount path deferred)\n");
     return true;
 }
 

@@ -79,6 +79,17 @@ void DecodeBochsVbe(const GpuInfo& g)
     }
 }
 
+// Classify a virtio device by modern device_id. Modern virtio-over-
+// PCI uses 0x1040 + device_type. virtio-gpu is type 0x10, so
+// modern device_id = 0x1050. QEMU's -vga virtio exposes exactly
+// that. Pre-modern ("transitional") virtio-gpu did not exist.
+const char* VirtioGpuTag(u16 device_id)
+{
+    if (device_id == 0x1050)
+        return "virtio-gpu";
+    return "virtio-other-display";
+}
+
 // Run the vendor probe for a device. No-op for unknown vendors.
 // Each probe is a pure classifier today — it writes `family` into
 // the GpuInfo and emits a `[gpu-probe]` log line with the family
@@ -102,7 +113,7 @@ void RunVendorProbe(GpuInfo& g)
         family = "qemu-bochs-vga";
         break;
     case kVendorRedHatVirt:
-        family = "virtio-gpu";
+        family = VirtioGpuTag(g.device_id);
         break;
     case kVendorVmware:
         family = "vmware-svga-ii";
@@ -120,6 +131,42 @@ void RunVendorProbe(GpuInfo& g)
     arch::SerialWrite("  (stub OK — no engine init yet)\n");
     if (g.vendor_id == kVendorQemuBochs)
         DecodeBochsVbe(g);
+}
+
+// Read and log every populated BAR on a GPU. Useful diagnostic
+// for real-hardware bring-up: Intel BAR0 = regs (~2 MiB),
+// BAR2 = GMADR / GTT aperture (128 MiB–1 GiB); AMD BAR0 = VRAM
+// framebuffer (up to many GiB), BAR2 = doorbell, BAR5 = regs;
+// NVIDIA BAR0 = regs (16 MiB), BAR1 = framebuffer (256 MiB–16 GiB).
+// Size-probing is non-destructive. We only map BAR 0 in GpuInit;
+// this scan reads and logs the rest without mapping them, so the
+// MMIO arena stays intact.
+void LogBarLayout(const GpuInfo& g)
+{
+    pci::DeviceAddress addr = {};
+    addr.bus = g.bus;
+    addr.device = g.device;
+    addr.function = g.function;
+    for (u8 i = 0; i < 6; ++i)
+    {
+        const pci::Bar b = pci::PciReadBar(addr, i);
+        if (b.size == 0)
+            continue;
+        arch::SerialWrite("[gpu]   bar");
+        arch::SerialWriteHex(i);
+        arch::SerialWrite(b.is_io ? " io=" : " mmio=");
+        arch::SerialWriteHex(b.address);
+        arch::SerialWrite("/");
+        arch::SerialWriteHex(b.size);
+        if (b.is_64bit)
+            arch::SerialWrite(" 64b");
+        if (b.is_prefetchable)
+            arch::SerialWrite(" pf");
+        arch::SerialWrite("\n");
+        // 64-bit BAR consumes the next slot; skip it.
+        if (b.is_64bit)
+            ++i;
+    }
 }
 
 // Pretty subclass name. Purely for logs.
@@ -238,6 +285,7 @@ void GpuInit()
     for (u64 i = 0; i < g_gpu_count; ++i)
     {
         LogGpu(g_gpus[i]);
+        LogBarLayout(g_gpus[i]);
     }
     if (g_gpu_count == 0)
     {
