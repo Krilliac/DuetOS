@@ -7,6 +7,7 @@
 #include "../../core/panic.h"
 #include "../../core/process.h"
 #include "../../core/ring3_smoke.h"
+#include "../../core/generated_synxtest_elf.h"
 #include "../../cpu/percpu.h"
 #include "../../fs/ramfs.h"
 #include "../../mm/address_space.h"
@@ -745,6 +746,34 @@ void SpawnRing3LinuxElfSmoke()
     if (pid == 0)
     {
         arch::SerialWrite("[linux] SpawnElfLinux FAILED for linux-elf-smoke\n");
+    }
+}
+
+void SpawnSynxTestElf()
+{
+    KLOG_TRACE_SCOPE("linux/smoke", "SpawnSynxTestElf");
+
+    // A real host-compiled static Linux ELF (no libc, just inline
+    // syscall asm). Source: userland/apps/synxtest/synxtest.c.
+    // Exercises ~12 Linux syscalls and prints a `[exe] <name> ok`
+    // / `FAIL` line per syscall so the boot log shows exactly
+    // which parts of the Linux ABI surface work end-to-end when
+    // invoked by a non-hand-rolled binary.
+    //
+    // Frame budget is generous — a static gcc ELF can have 3+
+    // PT_LOAD segments (note + text + rodata + eh_frame) each
+    // on its own 4 KiB alignment, so it needs more user frames
+    // than the hand-rolled smokes.
+    const u64 pid =
+        core::SpawnElfLinux("synxtest", fs::generated::kBinSynxtestElfBytes, fs::generated::kBinSynxtestElfBytes_len,
+                            core::CapSetEmpty(), fs::RamfsSandboxRoot(), /*frame_budget=*/32, core::kTickBudgetSandbox);
+    if (pid == 0)
+    {
+        arch::SerialWrite("[linux] SpawnElfLinux FAILED for synxtest — see [elf-loader] / [pe] lines above\n");
+    }
+    else
+    {
+        arch::SerialWrite("[linux] queued synxtest: compiled-C Linux-ABI exerciser, expect [exe] lines\n");
     }
 }
 

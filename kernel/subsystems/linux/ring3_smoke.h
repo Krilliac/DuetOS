@@ -48,6 +48,13 @@ void SpawnRing3LinuxFileSmoke();
 /// `[linux] mmap file fd=… -> …` from the kernel-side handler.
 void SpawnRing3LinuxMmapSmoke();
 
+/// Host-compiled static C binary that exercises a spread of Linux
+/// syscalls and prints a pass/fail tag for each. Source lives in
+/// userland/apps/synxtest/synxtest.c; the compiled ELF is embedded
+/// into the kernel image via kernel/core/generated_synxtest_elf.h
+/// (rebuild via tools/embed-blob.py if the source changes).
+void SpawnSynxTestElf();
+
 /// Exercises the ABI translation unit. Issues one syscall that
 /// the TU fills with a no-op (sys_madvise) and one it declines
 /// with a deliberate -ENOSYS (sys_rseq), then exits. Expected

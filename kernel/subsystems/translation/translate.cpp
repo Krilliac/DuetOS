@@ -31,6 +31,11 @@ enum : u64
     kSysReadv = 19,
     kSysMadvise = 28,
     kSysSocket = 41,
+    kSysClone = 56,
+    kSysFork = 57,
+    kSysVfork = 58,
+    kSysExecve = 59,
+    kSysWait4 = 61,
     kSysFsync = 74,
     kSysFdatasync = 75,
     kSysUmask = 95,
@@ -43,6 +48,7 @@ enum : u64
     kSysSetrlimit = 160,
     kSysPipe2 = 293,
     kSysPrlimit64 = 302,
+    kSysClone3 = 435,
     kSysRseq = 334,
 };
 
@@ -640,6 +646,22 @@ Result LinuxGapFill(arch::TrapFrame* frame)
     case kSysPipe2:
     case kSysSocket:
         LogTranslation("linux", nr, "synthetic:enosys-no-ipc");
+        r = {true, TranslateDeliberateEnosys(frame)};
+        break;
+    case kSysFork:
+    case kSysVfork:
+    case kSysClone:
+    case kSysClone3:
+    case kSysExecve:
+    case kSysWait4:
+        // Process creation / wait: v0 CustomOS has no fork, no
+        // clone, no wait. Cleanly reject at the translator so
+        // these don't fall through to `[linux-miss]` noise in
+        // the log on every compiled-C binary that links to a
+        // CRT that probes for fork before deciding not to use
+        // it. A real implementation needs AS-clone + fd-table-
+        // clone + scheduler hooks — well beyond v0 scope.
+        LogTranslation("linux", nr, "synthetic:enosys-no-process-create");
         r = {true, TranslateDeliberateEnosys(frame)};
         break;
     default:

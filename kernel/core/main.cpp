@@ -1609,6 +1609,13 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // end-to-end — anonymous mmap was the only shape supported
     // before this slice.
     customos::subsystems::linux::SpawnRing3LinuxMmapSmoke();
+    // Real host-compiled static C ELF (userland/apps/synxtest) —
+    // exercises ~12 Linux syscalls and prints a pass/fail tag
+    // per call. This is the "compile and run an executable to
+    // see what works" probe; boot log shows which parts of the
+    // Linux ABI actually hold up when a non-hand-rolled binary
+    // does the asking.
+    customos::subsystems::linux::SpawnSynxTestElf();
     // Translation-unit exercise: fire one syscall that the TU
     // converts to a no-op (madvise) and one it declines with a
     // deliberate -ENOSYS (rseq). Boot log shows [translate]
