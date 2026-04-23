@@ -64,29 +64,28 @@ struct LinuxSyscallEntry
     const char* name;
 }};
 
-/// Dense-by-number, sorted table of every known x86_64 Linux
-/// syscall. Linear scan for now; the table is small (< 500) and
-/// every miss walks it exactly once per failed syscall.
+/// Dense-by-number, sorted table of every known x86_64 Linux syscall.
 inline constexpr LinuxSyscallEntry kLinuxSyscalls[] = {{
 {rows}}};
 
 inline constexpr u32 kLinuxSyscallCount =
     sizeof(kLinuxSyscalls) / sizeof(kLinuxSyscalls[0]);
 
+inline constexpr u32 kLinuxSyscallMaxNumber = {max_nr};
+
+/// Dense index by syscall number. Unknown numbers map to nullptr.
+/// This keeps lookup O(1) while preserving the historical API.
+inline constexpr const LinuxSyscallEntry* kLinuxSyscallByNumber[] = {{
+{index_rows}}};
+
 inline constexpr u32 kLinuxSyscallHandlersImplemented = {implemented};
 
-/// Look up `nr` in `kLinuxSyscalls`. Returns nullptr if unknown.
-/// Linear scan — callers typically hit this on a miss path, where
-/// the log line it's building is orders of magnitude more expensive
-/// than the walk.
+/// Look up `nr` in the dense by-number index. Returns nullptr if unknown.
 inline const LinuxSyscallEntry* LinuxSyscallLookup(u64 nr)
 {{
-    for (const auto& e : kLinuxSyscalls)
-    {{
-        if (e.number == nr)
-            return &e;
-    }}
-    return nullptr;
+    if (nr > kLinuxSyscallMaxNumber)
+        return nullptr;
+    return kLinuxSyscallByNumber[static_cast<u32>(nr)];
 }}
 
 }} // namespace customos::subsystems::linux
@@ -183,20 +182,33 @@ def main():
 
     implemented = sum(1 for _, _, _, s in rows if s == "Implemented")
     total = len(rows)
+    max_nr = max((nr for nr, _, _, _ in rows), default=0)
     pct = (100 * implemented // total) if total else 0
 
     row_lines = []
-    for nr, name, args_n, state in rows:
+    number_to_row_index = {}
+    for idx, (nr, name, args_n, state) in enumerate(rows):
         row_lines.append(
             f'    {{{nr}, {args_n}, HandlerState::{state}, "{name}"}},'
         )
+        number_to_row_index[nr] = idx
+
+    index_row_lines = []
+    for nr in range(max_nr + 1):
+        row_index = number_to_row_index.get(nr)
+        if row_index is None:
+            index_row_lines.append("    nullptr,")
+        else:
+            index_row_lines.append(f"    &kLinuxSyscalls[{row_index}],")
 
     args.out.write_text(
         HEADER_TEMPLATE.format(
             total=total,
             implemented=implemented,
             pct=pct,
+            max_nr=max_nr,
             rows="\n".join(row_lines) + ("\n" if row_lines else ""),
+            index_rows="\n".join(index_row_lines) + ("\n" if index_row_lines else ""),
         )
     )
     print(f"wrote {args.out}")
