@@ -38,8 +38,8 @@ KNOWN_MAPPINGS = {
     "NtTerminateProcess":          "SYS_EXIT",            # ExitProcess maps here too via kernel32
     "NtWriteFile":                 "SYS_WRITE",           # path-based today; close enough for handle-on-stdout
     "NtYieldExecution":            "SYS_YIELD",
-    "NtAllocateVirtualMemory":     "SYS_HEAP_ALLOC",      # HeapAlloc-shape; not 1:1 but a route exists
-    "NtFreeVirtualMemory":         "SYS_HEAP_FREE",
+    "NtAllocateVirtualMemory":     "SYS_VMAP",            # page-grain — matches kernel32.VirtualAlloc backing
+    "NtFreeVirtualMemory":         "SYS_VUNMAP",
     "NtQueryPerformanceCounter":   "SYS_PERF_COUNTER",
     "NtQuerySystemTime":           "SYS_GETTIME_FT",
     "NtDelayExecution":            "SYS_SLEEP_MS",         # batch 22
@@ -54,11 +54,15 @@ KNOWN_MAPPINGS = {
     "NtCreateEvent":               "SYS_EVENT_CREATE",     # batch 45
     "NtSetEvent":                  "SYS_EVENT_SET",        # batch 45
     "NtResetEvent":                "SYS_EVENT_RESET",      # batch 45
-    # NtAllocateVirtualMemory is already mapped to SYS_HEAP_ALLOC above —
-    # keep that for now since HeapAlloc is the more common caller.
-    # SYS_VMAP (batch 28) has no direct bedrock NT analogue beyond
-    # NtAllocateVirtualMemory, which is already claimed. Coverage
-    # stays at 16/292 after this batch.
+    # NtAllocateVirtualMemory / NtFreeVirtualMemory now route to
+    # SYS_VMAP / SYS_VUNMAP — page-grain semantics matching the
+    # kernel32!VirtualAlloc trampoline (batch 28). The earlier
+    # SYS_HEAP_ALLOC mapping was a smaller-scope shortcut that
+    # would have lied about page granularity to any caller that
+    # actually invoked the Nt primitive (rather than going through
+    # kernel32.HeapAlloc). The runtime trampolines for these two
+    # NT calls live in stubs.cpp at kOff{NtAllocate,NtFree}-
+    # VirtualMemory (batch 47).
     # Slice 84+ candidates (filled in as the SYS_* lands)
     # "NtSetInformationFile":      "SYS_FILE_SEEK",   (Position info class)
 }

@@ -33,117 +33,119 @@ namespace
 // Stub offsets. Kept as named constants so the table below
 // stays readable and so two exports (WriteFile + WriteConsoleA)
 // can alias to the same offset without duplicating the code.
-constexpr u32 kOffExitProcess = 0x00;            // batch 1 — 9 bytes
-constexpr u32 kOffGetStdHandle = 0x09;           // batch 1 — 3 bytes
-constexpr u32 kOffWriteFile = 0x0C;              // batch 1 — 44 bytes
-constexpr u32 kOffGetCurrentProcess = 0x38;      // batch 2 — 8 bytes
-constexpr u32 kOffGetCurrentThread = 0x40;       // batch 2 — 8 bytes
-constexpr u32 kOffGetCurrentProcessId = 0x48;    // batch 2 — 8 bytes
-constexpr u32 kOffGetCurrentThreadId = 0x50;     // batch 2 — 8 bytes
-constexpr u32 kOffTerminateProcess = 0x58;       // batch 2 — 9 bytes
-constexpr u32 kOffGetLastError = 0x61;           // batch 3 — 8 bytes
-constexpr u32 kOffSetLastError = 0x69;           // batch 3 — 10 bytes
-constexpr u32 kOffInitCritSec = 0x74;            // batch 4 — 18 bytes
-constexpr u32 kOffCritSecNop = 0x86;             // batch 4 — 1 byte (ret)
-constexpr u32 kOffMemmove = 0x87;                // batch 5 — 45 bytes (memcpy aliases)
-constexpr u32 kOffMemset = 0xB4;                 // batch 5 — 19 bytes
-constexpr u32 kOffReturnZero = 0xC7;             // batch 6 — 3 bytes  (shared "xor eax,eax; ret")
-constexpr u32 kOffTerminate = 0xCA;              // batch 6 — 11 bytes (SYS_EXIT(3))
-constexpr u32 kOffInvalidParam = 0xD5;           // batch 6 — 11 bytes (SYS_EXIT(0xC0000417))
-constexpr u32 kOffStrcmp = 0xE0;                 // batch 7 — 29 bytes
-constexpr u32 kOffStrlen = 0xFD;                 // batch 7 — 17 bytes
-constexpr u32 kOffWcslen = 0x10E;                // batch 7 — 22 bytes
-constexpr u32 kOffStrchr = 0x124;                // batch 7 — 23 bytes
-constexpr u32 kOffStrcpy = 0x13B;                // batch 7 — 23 bytes
-constexpr u32 kOffReturnOne = 0x152;             // batch 8 — 6 bytes (shared "mov eax, 1; ret")
-constexpr u32 kOffHeapAlloc = 0x158;             // batch 9 — 11 bytes
-constexpr u32 kOffHeapFree = 0x163;              // batch 9 — 16 bytes
-constexpr u32 kOffGetProcessHeap = 0x173;        // batch 9 — 8 bytes
-constexpr u32 kOffMalloc = 0x17B;                // batch 9 — 11 bytes
-constexpr u32 kOffFree = 0x186;                  // batch 9 — 11 bytes
-constexpr u32 kOffCalloc = 0x191;                // batch 9 — 35 bytes
-constexpr u32 kOffOpenProcessToken = 0x1B4;      // batch 10 — 13 bytes
-constexpr u32 kOffLookupPrivVal = 0x1C1;         // batch 10 — 13 bytes
-constexpr u32 kOffInitSListHead = 0x1CE;         // batch 10 — 16 bytes
-constexpr u32 kOffGetSysTimeFT = 0x1DE;          // batch 10 — 8 bytes
-constexpr u32 kOffOpenProcess = 0x1E6;           // batch 10 — 4 bytes
-constexpr u32 kOffGetExitCodeThread = 0x1EA;     // batch 10 — 12 bytes
-constexpr u32 kOffQueryPerfCounter = 0x1F6;      // batch 11 — 16 bytes
-constexpr u32 kOffQueryPerfFreq = 0x206;         // batch 11 — 13 bytes
-constexpr u32 kOffGetTickCount = 0x213;          // batch 11 — 12 bytes (shared w/ GetTickCount64)
-constexpr u32 kOffHeapSize = 0x21F;              // batch 14 — 11 bytes
-constexpr u32 kOffHeapRealloc = 0x22A;           // batch 14 — 16 bytes
-constexpr u32 kOffRealloc = 0x23A;               // batch 14 — 16 bytes
-constexpr u32 kOffMissLogger = 0x24A;            // batch 15 — 41 bytes
-constexpr u32 kOffPArgc = 0x273;                 // batch 16 —  6 bytes
-constexpr u32 kOffPArgv = 0x279;                 // batch 16 —  6 bytes
-constexpr u32 kOffPCommode = 0x27F;              // batch 17 —  6 bytes
-constexpr u32 kOffSputn = 0x285;                 // batch 18 — 19 bytes
-constexpr u32 kOffReturnThis = 0x298;            // batch 18 —  4 bytes
-constexpr u32 kOffWiden = 0x29C;                 // batch 18 —  4 bytes
-constexpr u32 kOffHresultEFail = 0x2A0;          // batch 19 —  6 bytes
-constexpr u32 kOffGetSysTimeFTReal = 0x2A6;      // batch 20 — 13 bytes
-constexpr u32 kOffQpcNs = 0x2B3;                 // batch 21 — 13 bytes
-constexpr u32 kOffQpfNs = 0x2C0;                 // batch 21 — 10 bytes
-constexpr u32 kOffSleep = 0x2CF;                 // batch 22 — 12 bytes (push/pop rdi)
-constexpr u32 kOffSwitchToThread = 0x2DB;        // batch 22 — 10 bytes
-constexpr u32 kOffGetCmdLineW = 0x2E5;           // batch 23 — 6 bytes
-constexpr u32 kOffGetCmdLineA = 0x2EB;           // batch 23 — 6 bytes
-constexpr u32 kOffGetEnvBlockW = 0x2F1;          // batch 23 — 6 bytes
-constexpr u32 kOffCreateFileW = 0x2F7;           // batch 24 — 59 bytes (UTF-16 strip + open)
-constexpr u32 kOffReadFile = 0x332;              // batch 24 — 46 bytes
-constexpr u32 kOffCloseHandle = 0x360;           // batch 24 — 15 bytes
-constexpr u32 kOffSetFilePtrEx = 0x36F;          // batch 24 — 38 bytes
-constexpr u32 kOffGetFileSizeEx = 0x395;         // batch 25 — 29 bytes
-constexpr u32 kOffGetModuleHandleW = 0x3B2;      // batch 25 — 17 bytes
-constexpr u32 kOffCreateMutexW = 0x3C3;          // batch 26 — 13 bytes
-constexpr u32 kOffWaitForObj = 0x3D0;            // batch 26 — 38 bytes (mutex-aware)
-constexpr u32 kOffReleaseMutex = 0x3F6;          // batch 26 — 24 bytes
-constexpr u32 kOffWriteConsoleW = 0x40E;         // batch 27 — 96 bytes (UTF-16 strip + SYS_WRITE)
-constexpr u32 kOffGetConsoleMode = 0x46E;        // batch 27 — 12 bytes
-constexpr u32 kOffGetConsoleCP = 0x47A;          // batch 27 — 6 bytes
-constexpr u32 kOffVirtualAlloc = 0x480;          // batch 28 — 13 bytes
-constexpr u32 kOffVirtualFree = 0x48D;           // batch 28 — 29 bytes
-constexpr u32 kOffVirtualProtect = 0x4AA;        // batch 28 — 18 bytes
-constexpr u32 kOffLstrlenW = 0x4BC;              // batch 29 — 15 bytes
-constexpr u32 kOffLstrcmpW = 0x4CB;              // batch 29 — 37 bytes
-constexpr u32 kOffLstrcpyW = 0x4F0;              // batch 29 — 27 bytes
-constexpr u32 kOffIsWow64 = 0x50B;               // batch 30 — 17 bytes
-constexpr u32 kOffGetVersionExW = 0x51C;         // batch 30 — 34 bytes
-constexpr u32 kOffLstrlenA = 0x53E;              // batch 31 — 14 bytes
-constexpr u32 kOffLstrcmpA = 0x54C;              // batch 31 — 37 bytes
-constexpr u32 kOffLstrcpyA = 0x571;              // batch 31 — 26 bytes
-constexpr u32 kOffGetModFileNameW = 0x58B;       // batch 32 — 24 bytes
-constexpr u32 kOffGetCurrentDirW = 0x5A3;        // batch 32 — 31 bytes
-constexpr u32 kOffMBtoWC = 0x5C2;                // batch 33 — 49 bytes
-constexpr u32 kOffWCtoMB = 0x5F3;                // batch 33 — 48 bytes
-constexpr u32 kOffGetUserNameW = 0x623;          // batch 34 — 47 bytes
-constexpr u32 kOffGetComputerNameW = 0x652;      // batch 34 — 61 bytes
-constexpr u32 kOffGetWinDirW = 0x68F;            // batch 35 — 30 bytes (buf-first sig)
-constexpr u32 kOffGetLogicalDrives = 0x6AD;      // batch 36 — 6 bytes (returns 0x00800000, X: drive)
-constexpr u32 kOffGetDriveType = 0x6B3;          // batch 36 — 6 bytes (returns 3 = DRIVE_FIXED)
-constexpr u32 kOffReturnTwo = 0x6B9;             // batch 37 — 6 bytes (ERROR_FILE_NOT_FOUND / stream pos)
-constexpr u32 kOffReturnMinus1 = 0x6BF;          // batch 37 — 6 bytes (INVALID_FILE_ATTRIBUTES)
-constexpr u32 kOffReturnPrioNormal = 0x6C5;      // batch 39 — 6 bytes (0x20 = NORMAL_PRIORITY_CLASS)
-constexpr u32 kOffInterlockedInc = 0x6CB;        // batch 40 — 12 bytes
-constexpr u32 kOffInterlockedDec = 0x6D7;        // batch 40 — 12 bytes
-constexpr u32 kOffInterlockedCmpXchg = 0x6E3;    // batch 40 —  8 bytes
-constexpr u32 kOffInterlockedExchg = 0x6EB;      // batch 40 —  5 bytes
-constexpr u32 kOffInterlockedExchgAdd = 0x6F0;   // batch 40 —  7 bytes
-constexpr u32 kOffInterlockedInc64 = 0x6F7;      // batch 41 — 14 bytes
-constexpr u32 kOffInterlockedDec64 = 0x705;      // batch 41 — 16 bytes
-constexpr u32 kOffInterlockedCmpXchg64 = 0x715;  // batch 41 —  9 bytes
-constexpr u32 kOffInterlockedExchg64 = 0x71E;    // batch 41 —  7 bytes
-constexpr u32 kOffInterlockedExchgAdd64 = 0x725; // batch 41 —  9 bytes
-constexpr u32 kOffReturnStatusNotImpl = 0x72E;   // batch 42 —  6 bytes (STATUS_NOT_IMPLEMENTED)
-constexpr u32 kOffCreateEventReal = 0x734;       // batch 45 — 18 bytes (real event-backed)
-constexpr u32 kOffSetEventReal = 0x746;          // batch 45 — 15 bytes
-constexpr u32 kOffResetEventReal = 0x755;        // batch 45 — 15 bytes
-constexpr u32 kOffWaitForObj2 = 0x764;           // batch 45 — 66 bytes (mutex+event-aware)
-constexpr u32 kOffTlsAllocReal = 0x7A6;          // batch 46 —  8 bytes
-constexpr u32 kOffTlsFreeReal = 0x7AE;           // batch 46 — 24 bytes
-constexpr u32 kOffTlsGetValueReal = 0x7C6;       // batch 46 — 13 bytes
-constexpr u32 kOffTlsSetValueReal = 0x7D3;       // batch 46 — 20 bytes
+constexpr u32 kOffExitProcess = 0x00;              // batch 1 — 9 bytes
+constexpr u32 kOffGetStdHandle = 0x09;             // batch 1 — 3 bytes
+constexpr u32 kOffWriteFile = 0x0C;                // batch 1 — 44 bytes
+constexpr u32 kOffGetCurrentProcess = 0x38;        // batch 2 — 8 bytes
+constexpr u32 kOffGetCurrentThread = 0x40;         // batch 2 — 8 bytes
+constexpr u32 kOffGetCurrentProcessId = 0x48;      // batch 2 — 8 bytes
+constexpr u32 kOffGetCurrentThreadId = 0x50;       // batch 2 — 8 bytes
+constexpr u32 kOffTerminateProcess = 0x58;         // batch 2 — 9 bytes
+constexpr u32 kOffGetLastError = 0x61;             // batch 3 — 8 bytes
+constexpr u32 kOffSetLastError = 0x69;             // batch 3 — 10 bytes
+constexpr u32 kOffInitCritSec = 0x74;              // batch 4 — 18 bytes
+constexpr u32 kOffCritSecNop = 0x86;               // batch 4 — 1 byte (ret)
+constexpr u32 kOffMemmove = 0x87;                  // batch 5 — 45 bytes (memcpy aliases)
+constexpr u32 kOffMemset = 0xB4;                   // batch 5 — 19 bytes
+constexpr u32 kOffReturnZero = 0xC7;               // batch 6 — 3 bytes  (shared "xor eax,eax; ret")
+constexpr u32 kOffTerminate = 0xCA;                // batch 6 — 11 bytes (SYS_EXIT(3))
+constexpr u32 kOffInvalidParam = 0xD5;             // batch 6 — 11 bytes (SYS_EXIT(0xC0000417))
+constexpr u32 kOffStrcmp = 0xE0;                   // batch 7 — 29 bytes
+constexpr u32 kOffStrlen = 0xFD;                   // batch 7 — 17 bytes
+constexpr u32 kOffWcslen = 0x10E;                  // batch 7 — 22 bytes
+constexpr u32 kOffStrchr = 0x124;                  // batch 7 — 23 bytes
+constexpr u32 kOffStrcpy = 0x13B;                  // batch 7 — 23 bytes
+constexpr u32 kOffReturnOne = 0x152;               // batch 8 — 6 bytes (shared "mov eax, 1; ret")
+constexpr u32 kOffHeapAlloc = 0x158;               // batch 9 — 11 bytes
+constexpr u32 kOffHeapFree = 0x163;                // batch 9 — 16 bytes
+constexpr u32 kOffGetProcessHeap = 0x173;          // batch 9 — 8 bytes
+constexpr u32 kOffMalloc = 0x17B;                  // batch 9 — 11 bytes
+constexpr u32 kOffFree = 0x186;                    // batch 9 — 11 bytes
+constexpr u32 kOffCalloc = 0x191;                  // batch 9 — 35 bytes
+constexpr u32 kOffOpenProcessToken = 0x1B4;        // batch 10 — 13 bytes
+constexpr u32 kOffLookupPrivVal = 0x1C1;           // batch 10 — 13 bytes
+constexpr u32 kOffInitSListHead = 0x1CE;           // batch 10 — 16 bytes
+constexpr u32 kOffGetSysTimeFT = 0x1DE;            // batch 10 — 8 bytes
+constexpr u32 kOffOpenProcess = 0x1E6;             // batch 10 — 4 bytes
+constexpr u32 kOffGetExitCodeThread = 0x1EA;       // batch 10 — 12 bytes
+constexpr u32 kOffQueryPerfCounter = 0x1F6;        // batch 11 — 16 bytes
+constexpr u32 kOffQueryPerfFreq = 0x206;           // batch 11 — 13 bytes
+constexpr u32 kOffGetTickCount = 0x213;            // batch 11 — 12 bytes (shared w/ GetTickCount64)
+constexpr u32 kOffHeapSize = 0x21F;                // batch 14 — 11 bytes
+constexpr u32 kOffHeapRealloc = 0x22A;             // batch 14 — 16 bytes
+constexpr u32 kOffRealloc = 0x23A;                 // batch 14 — 16 bytes
+constexpr u32 kOffMissLogger = 0x24A;              // batch 15 — 41 bytes
+constexpr u32 kOffPArgc = 0x273;                   // batch 16 —  6 bytes
+constexpr u32 kOffPArgv = 0x279;                   // batch 16 —  6 bytes
+constexpr u32 kOffPCommode = 0x27F;                // batch 17 —  6 bytes
+constexpr u32 kOffSputn = 0x285;                   // batch 18 — 19 bytes
+constexpr u32 kOffReturnThis = 0x298;              // batch 18 —  4 bytes
+constexpr u32 kOffWiden = 0x29C;                   // batch 18 —  4 bytes
+constexpr u32 kOffHresultEFail = 0x2A0;            // batch 19 —  6 bytes
+constexpr u32 kOffGetSysTimeFTReal = 0x2A6;        // batch 20 — 13 bytes
+constexpr u32 kOffQpcNs = 0x2B3;                   // batch 21 — 13 bytes
+constexpr u32 kOffQpfNs = 0x2C0;                   // batch 21 — 10 bytes
+constexpr u32 kOffSleep = 0x2CF;                   // batch 22 — 12 bytes (push/pop rdi)
+constexpr u32 kOffSwitchToThread = 0x2DB;          // batch 22 — 10 bytes
+constexpr u32 kOffGetCmdLineW = 0x2E5;             // batch 23 — 6 bytes
+constexpr u32 kOffGetCmdLineA = 0x2EB;             // batch 23 — 6 bytes
+constexpr u32 kOffGetEnvBlockW = 0x2F1;            // batch 23 — 6 bytes
+constexpr u32 kOffCreateFileW = 0x2F7;             // batch 24 — 59 bytes (UTF-16 strip + open)
+constexpr u32 kOffReadFile = 0x332;                // batch 24 — 46 bytes
+constexpr u32 kOffCloseHandle = 0x360;             // batch 24 — 15 bytes
+constexpr u32 kOffSetFilePtrEx = 0x36F;            // batch 24 — 38 bytes
+constexpr u32 kOffGetFileSizeEx = 0x395;           // batch 25 — 29 bytes
+constexpr u32 kOffGetModuleHandleW = 0x3B2;        // batch 25 — 17 bytes
+constexpr u32 kOffCreateMutexW = 0x3C3;            // batch 26 — 13 bytes
+constexpr u32 kOffWaitForObj = 0x3D0;              // batch 26 — 38 bytes (mutex-aware)
+constexpr u32 kOffReleaseMutex = 0x3F6;            // batch 26 — 24 bytes
+constexpr u32 kOffWriteConsoleW = 0x40E;           // batch 27 — 96 bytes (UTF-16 strip + SYS_WRITE)
+constexpr u32 kOffGetConsoleMode = 0x46E;          // batch 27 — 12 bytes
+constexpr u32 kOffGetConsoleCP = 0x47A;            // batch 27 — 6 bytes
+constexpr u32 kOffVirtualAlloc = 0x480;            // batch 28 — 13 bytes
+constexpr u32 kOffVirtualFree = 0x48D;             // batch 28 — 29 bytes
+constexpr u32 kOffVirtualProtect = 0x4AA;          // batch 28 — 18 bytes
+constexpr u32 kOffLstrlenW = 0x4BC;                // batch 29 — 15 bytes
+constexpr u32 kOffLstrcmpW = 0x4CB;                // batch 29 — 37 bytes
+constexpr u32 kOffLstrcpyW = 0x4F0;                // batch 29 — 27 bytes
+constexpr u32 kOffIsWow64 = 0x50B;                 // batch 30 — 17 bytes
+constexpr u32 kOffGetVersionExW = 0x51C;           // batch 30 — 34 bytes
+constexpr u32 kOffLstrlenA = 0x53E;                // batch 31 — 14 bytes
+constexpr u32 kOffLstrcmpA = 0x54C;                // batch 31 — 37 bytes
+constexpr u32 kOffLstrcpyA = 0x571;                // batch 31 — 26 bytes
+constexpr u32 kOffGetModFileNameW = 0x58B;         // batch 32 — 24 bytes
+constexpr u32 kOffGetCurrentDirW = 0x5A3;          // batch 32 — 31 bytes
+constexpr u32 kOffMBtoWC = 0x5C2;                  // batch 33 — 49 bytes
+constexpr u32 kOffWCtoMB = 0x5F3;                  // batch 33 — 48 bytes
+constexpr u32 kOffGetUserNameW = 0x623;            // batch 34 — 47 bytes
+constexpr u32 kOffGetComputerNameW = 0x652;        // batch 34 — 61 bytes
+constexpr u32 kOffGetWinDirW = 0x68F;              // batch 35 — 30 bytes (buf-first sig)
+constexpr u32 kOffGetLogicalDrives = 0x6AD;        // batch 36 — 6 bytes (returns 0x00800000, X: drive)
+constexpr u32 kOffGetDriveType = 0x6B3;            // batch 36 — 6 bytes (returns 3 = DRIVE_FIXED)
+constexpr u32 kOffReturnTwo = 0x6B9;               // batch 37 — 6 bytes (ERROR_FILE_NOT_FOUND / stream pos)
+constexpr u32 kOffReturnMinus1 = 0x6BF;            // batch 37 — 6 bytes (INVALID_FILE_ATTRIBUTES)
+constexpr u32 kOffReturnPrioNormal = 0x6C5;        // batch 39 — 6 bytes (0x20 = NORMAL_PRIORITY_CLASS)
+constexpr u32 kOffInterlockedInc = 0x6CB;          // batch 40 — 12 bytes
+constexpr u32 kOffInterlockedDec = 0x6D7;          // batch 40 — 12 bytes
+constexpr u32 kOffInterlockedCmpXchg = 0x6E3;      // batch 40 —  8 bytes
+constexpr u32 kOffInterlockedExchg = 0x6EB;        // batch 40 —  5 bytes
+constexpr u32 kOffInterlockedExchgAdd = 0x6F0;     // batch 40 —  7 bytes
+constexpr u32 kOffInterlockedInc64 = 0x6F7;        // batch 41 — 14 bytes
+constexpr u32 kOffInterlockedDec64 = 0x705;        // batch 41 — 16 bytes
+constexpr u32 kOffInterlockedCmpXchg64 = 0x715;    // batch 41 —  9 bytes
+constexpr u32 kOffInterlockedExchg64 = 0x71E;      // batch 41 —  7 bytes
+constexpr u32 kOffInterlockedExchgAdd64 = 0x725;   // batch 41 —  9 bytes
+constexpr u32 kOffReturnStatusNotImpl = 0x72E;     // batch 42 —  6 bytes (STATUS_NOT_IMPLEMENTED)
+constexpr u32 kOffCreateEventReal = 0x734;         // batch 45 — 18 bytes (real event-backed)
+constexpr u32 kOffSetEventReal = 0x746;            // batch 45 — 15 bytes
+constexpr u32 kOffResetEventReal = 0x755;          // batch 45 — 15 bytes
+constexpr u32 kOffWaitForObj2 = 0x764;             // batch 45 — 66 bytes (mutex+event-aware)
+constexpr u32 kOffTlsAllocReal = 0x7A6;            // batch 46 —  8 bytes
+constexpr u32 kOffTlsFreeReal = 0x7AE;             // batch 46 — 24 bytes
+constexpr u32 kOffTlsGetValueReal = 0x7C6;         // batch 46 — 13 bytes
+constexpr u32 kOffTlsSetValueReal = 0x7D3;         // batch 46 — 20 bytes
+constexpr u32 kOffNtAllocateVirtualMemory = 0x7E7; // batch 47 — 36 bytes
+constexpr u32 kOffNtFreeVirtualMemory = 0x80B;     // batch 47 — 33 bytes
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -2107,10 +2109,86 @@ constexpr u8 kStubsBytes[] = {
     0x5E,                         // 0x7E0 pop rsi
     0x5F,                         // 0x7E1 pop rdi
     0xC3,                         // 0x7E2 ret
+
+    // === Batch 47: ntdll virtual-memory primitives =============
+    //
+    // Until this batch, the import resolver mapped both
+    // `ntdll!NtAllocateVirtualMemory` and `NtFreeVirtualMemory`
+    // to `kOffReturnStatusNotImpl` — a 6-byte stub returning
+    // `STATUS_NOT_IMPLEMENTED`. PE binaries that bypass kernel32
+    // (CRT internals, anti-debug, JITs) and call the Nt
+    // primitives directly would fail. Now they actually allocate
+    // and free pages by routing through the same SYS_VMAP /
+    // SYS_VUNMAP that backs `kernel32!VirtualAlloc` / `VirtualFree`.
+    //
+    // Win64 ABI for both: rcx, rdx, r8, r9 are arg regs; rsi
+    // and rdi are callee-saved (so we push/pop them).
+    // STATUS_NOT_IMPLEMENTED is 0xC00000BB; STATUS_NO_MEMORY is
+    // 0xC0000017; STATUS_INVALID_PARAMETER is 0xC000000D.
+
+    // --- NtAllocateVirtualMemory (offset 0x7E7, 36 bytes) ----
+    // Win64: NTSTATUS NtAllocateVirtualMemory(
+    //          HANDLE       rcx,        // ProcessHandle (ignored — must be self)
+    //          PVOID*       rdx,        // BaseAddress (in/out)
+    //          ULONG_PTR    r8,         // ZeroBits (ignored)
+    //          PSIZE_T      r9,         // RegionSize (in/out)
+    //          ULONG        [rsp+0x28], // AllocationType (ignored — always commit)
+    //          ULONG        [rsp+0x30]) // Protect (ignored — RW+NX)
+    //
+    // Stub semantics: read *RegionSize, hand it to SYS_VMAP,
+    // write the returned VA to *BaseAddress, leave *RegionSize
+    // alone (kernel rounds up internally; v0 reports the
+    // requested size). Returns STATUS_SUCCESS or STATUS_NO_MEMORY.
+    0x57,                         // 0x7E7 push rdi
+    0x56,                         // 0x7E8 push rsi
+    0x49, 0x8B, 0x39,             // 0x7E9 mov rdi, [r9]      ; size from *RegionSize
+    0xB8, 0x1C, 0x00, 0x00, 0x00, // 0x7EC mov eax, 28        ; SYS_VMAP
+    0xCD, 0x80,                   // 0x7F1 int 0x80
+    0x48, 0x85, 0xC0,             // 0x7F3 test rax, rax      ; 0 = OOM
+    0x74, 0x0B,                   // 0x7F6 jz .fail (+11)
+    0x48, 0x89, 0x02,             // 0x7F8 mov [rdx], rax     ; *BaseAddress = VA
+    0x49, 0x89, 0x39,             // 0x7FB mov [r9], rdi      ; echo size back
+    0x31, 0xC0,                   // 0x7FE xor eax, eax       ; STATUS_SUCCESS
+    0x5E,                         // 0x800 pop rsi
+    0x5F,                         // 0x801 pop rdi
+    0xC3,                         // 0x802 ret
+    // .fail:
+    0xB8, 0x17, 0x00, 0x00, 0xC0, // 0x803 mov eax, 0xC0000017 ; STATUS_NO_MEMORY
+    0x5E,                         // 0x808 pop rsi
+    0x5F,                         // 0x809 pop rdi
+    0xC3,                         // 0x80A ret
+
+    // --- NtFreeVirtualMemory (offset 0x80B, 33 bytes) --------
+    // Win64: NTSTATUS NtFreeVirtualMemory(
+    //          HANDLE       rcx,    // ProcessHandle (ignored)
+    //          PVOID*       rdx,    // BaseAddress (in/out)
+    //          PSIZE_T      r8,     // RegionSize (in/out)
+    //          ULONG        r9)     // FreeType (ignored — always release)
+    //
+    // Stub semantics: read *BaseAddress and *RegionSize, hand
+    // them to SYS_VUNMAP. Kernel returns 0 on success or non-
+    // zero if the VA isn't in the per-process vmap arena.
+    0x57,                         // 0x80B push rdi
+    0x56,                         // 0x80C push rsi
+    0x48, 0x8B, 0x3A,             // 0x80D mov rdi, [rdx]     ; VA from *BaseAddress
+    0x49, 0x8B, 0x30,             // 0x810 mov rsi, [r8]      ; size from *RegionSize
+    0xB8, 0x1D, 0x00, 0x00, 0x00, // 0x813 mov eax, 29        ; SYS_VUNMAP
+    0xCD, 0x80,                   // 0x818 int 0x80
+    0x48, 0x85, 0xC0,             // 0x81A test rax, rax
+    0x75, 0x05,                   // 0x81D jnz .fail (+5)
+    0x31, 0xC0,                   // 0x81F xor eax, eax       ; STATUS_SUCCESS
+    0x5E,                         // 0x821 pop rsi
+    0x5F,                         // 0x822 pop rdi
+    0xC3,                         // 0x823 ret
+    // .fail:
+    0xB8, 0x0D, 0x00, 0x00, 0xC0, // 0x824 mov eax, 0xC000000D ; STATUS_INVALID_PARAMETER
+    0x5E,                         // 0x829 pop rsi
+    0x5F,                         // 0x82A pop rdi
+    0xC3,                         // 0x82B ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x7E7, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0x82C, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -2628,8 +2706,13 @@ constexpr StubEntry kStubsTable[] = {
     {"ntdll.dll", "NtQueryInformationFile", kOffReturnStatusNotImpl},
     {"ntdll.dll", "NtSetInformationFile", kOffReturnStatusNotImpl},
     {"ntdll.dll", "NtQueryVolumeInformationFile", kOffReturnStatusNotImpl},
-    {"ntdll.dll", "NtAllocateVirtualMemory", kOffReturnStatusNotImpl},
-    {"ntdll.dll", "NtFreeVirtualMemory", kOffReturnStatusNotImpl},
+    // batch 47: real NtAllocateVirtualMemory / NtFreeVirtualMemory
+    // trampolines that route to SYS_VMAP / SYS_VUNMAP (the same
+    // page-grain allocator backing kernel32.VirtualAlloc/Free).
+    // Was kOffReturnStatusNotImpl before — every PE that bypassed
+    // kernel32 and called these from ntdll directly used to fail.
+    {"ntdll.dll", "NtAllocateVirtualMemory", kOffNtAllocateVirtualMemory},
+    {"ntdll.dll", "NtFreeVirtualMemory", kOffNtFreeVirtualMemory},
     {"ntdll.dll", "NtProtectVirtualMemory", kOffReturnStatusNotImpl},
     {"ntdll.dll", "NtQueryVirtualMemory", kOffReturnStatusNotImpl},
     {"ntdll.dll", "NtCreateEvent", kOffReturnStatusNotImpl},
