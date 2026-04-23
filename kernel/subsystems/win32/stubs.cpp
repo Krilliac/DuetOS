@@ -2748,9 +2748,13 @@ constexpr StubEntry kStubsTable[] = {
     {"ntdll.dll", "NtWriteFile", kOffReturnStatusNotImpl},
     {"ntdll.dll", "ZwWriteFile", kOffReturnStatusNotImpl},
     {"ntdll.dll", "NtDeviceIoControlFile", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "ZwDeviceIoControlFile", kOffReturnStatusNotImpl},
     {"ntdll.dll", "NtQueryInformationFile", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "ZwQueryInformationFile", kOffReturnStatusNotImpl},
     {"ntdll.dll", "NtSetInformationFile", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "ZwSetInformationFile", kOffReturnStatusNotImpl},
     {"ntdll.dll", "NtQueryVolumeInformationFile", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "ZwQueryVolumeInformationFile", kOffReturnStatusNotImpl},
     // batch 47: real NtAllocateVirtualMemory / NtFreeVirtualMemory
     // trampolines that route to SYS_VMAP / SYS_VUNMAP (the same
     // page-grain allocator backing kernel32.VirtualAlloc/Free).
@@ -2759,33 +2763,73 @@ constexpr StubEntry kStubsTable[] = {
     {"ntdll.dll", "NtAllocateVirtualMemory", kOffNtAllocateVirtualMemory},
     {"ntdll.dll", "NtFreeVirtualMemory", kOffNtFreeVirtualMemory},
     {"ntdll.dll", "NtProtectVirtualMemory", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "ZwProtectVirtualMemory", kOffReturnStatusNotImpl},
     {"ntdll.dll", "NtQueryVirtualMemory", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "ZwQueryVirtualMemory", kOffReturnStatusNotImpl},
     {"ntdll.dll", "NtCreateEvent", kOffReturnStatusNotImpl},
-    {"ntdll.dll", "NtSetEvent", kOffReturnStatusNotImpl},
-    {"ntdll.dll", "NtResetEvent", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "ZwCreateEvent", kOffReturnStatusNotImpl},
+    // Signature-compatible enough with SetEvent/ResetEvent:
+    // Nt* variants carry an optional "previous state" out-pointer
+    // in rdx that our v0 ignores.
+    {"ntdll.dll", "NtSetEvent", kOffSetEventReal},
+    {"ntdll.dll", "ZwSetEvent", kOffSetEventReal},
+    {"ntdll.dll", "NtResetEvent", kOffResetEventReal},
+    {"ntdll.dll", "ZwResetEvent", kOffResetEventReal},
     {"ntdll.dll", "NtCreateMutant", kOffReturnStatusNotImpl},
-    {"ntdll.dll", "NtReleaseMutant", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "ZwCreateMutant", kOffReturnStatusNotImpl},
+    // NtReleaseMutant(handle, prevCount*) is close enough to
+    // ReleaseMutex(handle) for v0; prevCount is ignored.
+    {"ntdll.dll", "NtReleaseMutant", kOffReleaseMutex},
+    {"ntdll.dll", "ZwReleaseMutant", kOffReleaseMutex},
     {"ntdll.dll", "NtWaitForSingleObject", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "ZwWaitForSingleObject", kOffReturnStatusNotImpl},
     {"ntdll.dll", "NtWaitForMultipleObjects", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "ZwWaitForMultipleObjects", kOffReturnStatusNotImpl},
     {"ntdll.dll", "NtDelayExecution", kOffReturnStatusNotImpl},
-    {"ntdll.dll", "NtQueryPerformanceCounter", kOffReturnStatusNotImpl},
-    {"ntdll.dll", "NtQuerySystemTime", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "ZwDelayExecution", kOffReturnStatusNotImpl},
+    // NtQueryPerformanceCounter(counter*, freq*) — we fill the
+    // counter via the high-resolution QPC stub and ignore freq.
+    {"ntdll.dll", "NtQueryPerformanceCounter", kOffQpcNs},
+    {"ntdll.dll", "ZwQueryPerformanceCounter", kOffQpcNs},
+    // NtQuerySystemTime(ticks*) returns a FILETIME-shaped 64-bit
+    // tick value. Alias to GetSystemTimeAsFileTime's real backend.
+    {"ntdll.dll", "NtQuerySystemTime", kOffGetSysTimeFTReal},
+    {"ntdll.dll", "ZwQuerySystemTime", kOffGetSysTimeFTReal},
     {"ntdll.dll", "NtQuerySystemInformation", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "ZwQuerySystemInformation", kOffReturnStatusNotImpl},
     {"ntdll.dll", "NtQueryInformationProcess", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "ZwQueryInformationProcess", kOffReturnStatusNotImpl},
     {"ntdll.dll", "NtQueryInformationThread", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "ZwQueryInformationThread", kOffReturnStatusNotImpl},
     {"ntdll.dll", "NtSetInformationProcess", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "ZwSetInformationProcess", kOffReturnStatusNotImpl},
     {"ntdll.dll", "NtSetInformationThread", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "ZwSetInformationThread", kOffReturnStatusNotImpl},
     {"ntdll.dll", "NtTerminateProcess", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "ZwTerminateProcess", kOffReturnStatusNotImpl},
     {"ntdll.dll", "NtTerminateThread", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "ZwTerminateThread", kOffReturnStatusNotImpl},
     {"ntdll.dll", "NtContinue", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "ZwContinue", kOffReturnStatusNotImpl},
     {"ntdll.dll", "NtOpenKey", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "ZwOpenKey", kOffReturnStatusNotImpl},
     {"ntdll.dll", "NtQueryValueKey", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "ZwQueryValueKey", kOffReturnStatusNotImpl},
     {"ntdll.dll", "NtQueryKey", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "ZwQueryKey", kOffReturnStatusNotImpl},
     {"ntdll.dll", "NtEnumerateKey", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "ZwEnumerateKey", kOffReturnStatusNotImpl},
     {"ntdll.dll", "NtEnumerateValueKey", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "ZwEnumerateValueKey", kOffReturnStatusNotImpl},
     {"ntdll.dll", "NtCreateSection", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "ZwCreateSection", kOffReturnStatusNotImpl},
     {"ntdll.dll", "NtMapViewOfSection", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "ZwMapViewOfSection", kOffReturnStatusNotImpl},
     {"ntdll.dll", "NtUnmapViewOfSection", kOffReturnStatusNotImpl},
+    {"ntdll.dll", "ZwUnmapViewOfSection", kOffReturnStatusNotImpl},
+    // Zw aliases for already-routed Nt VM calls.
+    {"ntdll.dll", "ZwAllocateVirtualMemory", kOffNtAllocateVirtualMemory},
+    {"ntdll.dll", "ZwFreeVirtualMemory", kOffNtFreeVirtualMemory},
 
     // === Batch 43 — UI / locale / clipboard / mapping ==========
     //

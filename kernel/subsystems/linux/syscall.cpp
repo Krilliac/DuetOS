@@ -84,8 +84,10 @@ enum : u64
     kSysBrk = 12,
     kSysRtSigaction = 13,
     kSysRtSigprocmask = 14,
+    kSysReadv = 19,
     kSysIoctl = 16,
     kSysWritev = 20,
+    kSysMadvise = 28,
     kSysGetPid = 39,
     kSysExit = 60,
     kSysUname = 63,
@@ -115,13 +117,21 @@ enum : u64
     kSysPwrite = 18,
     kSysDup = 32,
     kSysDup2 = 33,
+    kSysFsync = 74,
+    kSysFdatasync = 75,
     kSysFcntl = 72,
+    kSysGettimeofday = 96,
+    kSysGetrlimit = 97,
+    kSysSysinfo = 99,
     kSysChdir = 80,
     kSysFchdir = 81,
     kSysSetPgid = 109,
     kSysGetPpid = 110,
+    kSysGetpgrp = 111,
     kSysGetPgid = 121,
     kSysGetSid = 124,
+    kSysSetrlimit = 160,
+    kSysPrlimit64 = 302,
     // Batch 54 — modern *at-family + directory + poll/select + rusage.
     // Everything here routes through an existing primary handler
     // (openat → DoOpen with AT_FDCWD treatment, newfstatat → DoStat
@@ -169,6 +179,23 @@ i64 DoExitGroup(u64 status)
     sched::SchedExit();
     // sched::SchedExit is [[noreturn]]; this line is unreachable.
     return 0;
+}
+
+// Linux exit(status) has process-wide semantics for a single-thread
+// process, which is exactly all we support in v0. Route it through
+// exit_group so both numbers share the same teardown path.
+i64 DoExit(u64 status)
+{
+    return DoExitGroup(status);
+}
+
+// Linux getpid() / gettid() on our current single-thread-per-process
+// model both map to the scheduler task ID. Keep them separate helpers
+// anyway so the dispatch table names track the Linux ABI directly and
+// the syscall coverage generator can see a concrete DoGetPid handler.
+i64 DoGetPid()
+{
+    return static_cast<i64>(sched::CurrentTaskId());
 }
 
 // Linux: write(fd, buf, count). v0 implements fd=1 (stdout) and
@@ -585,6 +612,38 @@ i64 DoWritev(u64 fd, u64 user_iov, u64 iovcnt)
         total += n;
         if (static_cast<u64>(n) < iov.len)
             break; // partial write — stop per spec
+    }
+    return total;
+}
+
+// Linux: readv(fd, iov, iovcnt). Symmetric with writev; streams each
+// iovec through DoRead and stops on short read / error.
+i64 DoReadv(u64 fd, u64 user_iov, u64 iovcnt)
+{
+    if (iovcnt == 0)
+        return 0;
+    if (iovcnt > 1024)
+        return kEINVAL;
+    i64 total = 0;
+    for (u64 i = 0; i < iovcnt; ++i)
+    {
+        struct
+        {
+            u64 base;
+            u64 len;
+        } iov;
+        if (!mm::CopyFromUser(&iov, reinterpret_cast<const void*>(user_iov + i * 16), sizeof(iov)))
+        {
+            return total > 0 ? total : kEFAULT;
+        }
+        if (iov.len == 0)
+            continue;
+        const i64 n = DoRead(fd, iov.base, iov.len);
+        if (n < 0)
+            return total > 0 ? total : n;
+        total += n;
+        if (static_cast<u64>(n) < iov.len)
+            break;
     }
     return total;
 }
@@ -1027,6 +1086,114 @@ i64 DoClockGetTime(u64 clk_id, u64 user_ts)
     if (!mm::CopyToUser(reinterpret_cast<void*>(user_ts), &ts, sizeof(ts)))
         return kEFAULT;
     return 0;
+}
+
+// Linux: gettimeofday(tv, tz). tz is obsolete and ignored by modern
+// kernels; we follow that contract and only fill timeval if non-null.
+i64 DoGettimeofday(u64 user_tv, u64 user_tz)
+{
+    (void)user_tz;
+    if (user_tv == 0)
+        return 0;
+    const u64 ns = NowNs();
+    struct
+    {
+        i64 tv_sec;
+        i64 tv_usec;
+    } tv;
+    tv.tv_sec = static_cast<i64>(ns / 1'000'000'000ull);
+    tv.tv_usec = static_cast<i64>((ns / 1000ull) % 1'000'000ull);
+    if (!mm::CopyToUser(reinterpret_cast<void*>(user_tv), &tv, sizeof(tv)))
+        return kEFAULT;
+    return 0;
+}
+
+i64 DoSysinfo(u64 user_info)
+{
+    if (user_info == 0)
+        return kEFAULT;
+    struct Info
+    {
+        i64 uptime;
+        u64 loads[3];
+        u64 totalram;
+        u64 freeram;
+        u64 sharedram;
+        u64 bufferram;
+        u64 totalswap;
+        u64 freeswap;
+        u16 procs;
+        u16 pad;
+        u64 totalhigh;
+        u64 freehigh;
+        u32 mem_unit;
+        u8 pad2[4];
+    } info = {};
+    info.uptime = static_cast<i64>(NowNs() / 1'000'000'000ull);
+    info.procs = 1;
+    info.mem_unit = 1;
+    if (!mm::CopyToUser(reinterpret_cast<void*>(user_info), &info, sizeof(info)))
+        return kEFAULT;
+    return 0;
+}
+
+i64 DoNoOp()
+{
+    return 0;
+}
+
+i64 DoFsync(u64 fd)
+{
+    (void)fd;
+    return DoNoOp();
+}
+
+i64 DoFdatasync(u64 fd)
+{
+    (void)fd;
+    return DoNoOp();
+}
+
+i64 DoMadvise(u64 addr, u64 len, u64 advice)
+{
+    (void)addr;
+    (void)len;
+    (void)advice;
+    return DoNoOp();
+}
+
+i64 DoGetpgrp()
+{
+    return 0;
+}
+
+i64 DoGetrlimit(u64 user_old)
+{
+    if (user_old == 0)
+        return kEFAULT;
+    constexpr u64 kRlimInfinity = 0xFFFFFFFFFFFFFFFFull;
+    struct
+    {
+        u64 cur;
+        u64 max;
+    } old{kRlimInfinity, kRlimInfinity};
+    if (!mm::CopyToUser(reinterpret_cast<void*>(user_old), &old, sizeof(old)))
+        return kEFAULT;
+    return 0;
+}
+
+i64 DoPrlimit64(u64 user_old)
+{
+    if (user_old == 0)
+        return 0;
+    return DoGetrlimit(user_old);
+}
+
+i64 DoSetrlimit(u64 resource, u64 user_new)
+{
+    (void)resource;
+    (void)user_new;
+    return DoNoOp();
 }
 
 // Linux: time(tloc). Returns seconds-since-epoch; if tloc is
@@ -1904,6 +2071,9 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
     case kSysIoctl:
         rv = DoIoctl(frame->rdi, frame->rsi, frame->rdx);
         break;
+    case kSysReadv:
+        rv = DoReadv(frame->rdi, frame->rsi, frame->rdx);
+        break;
     case kSysWritev:
         rv = DoWritev(frame->rdi, frame->rsi, frame->rdx);
         break;
@@ -1940,6 +2110,12 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
     case kSysClockGetTime:
         rv = DoClockGetTime(frame->rdi, frame->rsi);
         break;
+    case kSysGettimeofday:
+        rv = DoGettimeofday(frame->rdi, frame->rsi);
+        break;
+    case kSysSysinfo:
+        rv = DoSysinfo(frame->rdi);
+        break;
     case kSysTime:
         rv = DoTime(frame->rdi);
         break;
@@ -1963,6 +2139,24 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
         break;
     case kSysFcntl:
         rv = DoFcntl(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysFsync:
+        rv = DoFsync(frame->rdi);
+        break;
+    case kSysFdatasync:
+        rv = DoFdatasync(frame->rdi);
+        break;
+    case kSysMadvise:
+        rv = DoMadvise(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysGetrlimit:
+        rv = DoGetrlimit(frame->rsi);
+        break;
+    case kSysSetrlimit:
+        rv = DoSetrlimit(frame->rdi, frame->rsi);
+        break;
+    case kSysPrlimit64:
+        rv = DoPrlimit64(frame->r10);
         break;
     case kSysChdir:
         rv = DoChdir(frame->rdi);
@@ -1990,6 +2184,9 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
         break;
     case kSysGetPpid:
         rv = DoGetPpid();
+        break;
+    case kSysGetpgrp:
+        rv = DoGetpgrp();
         break;
     case kSysGetPgid:
         rv = DoGetPgid(frame->rdi);
@@ -2044,13 +2241,17 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
         rv = DoUname(frame->rdi);
         break;
     case kSysExit:
+        DoExit(frame->rdi);
+        // Exit paths don't return; keep the compiler happy.
+        rv = 0;
+        break;
     case kSysExitGroup:
         DoExitGroup(frame->rdi);
         // Exit paths don't return; keep the compiler happy.
         rv = 0;
         break;
     case kSysGetPid:
-        rv = static_cast<i64>(sched::CurrentTaskId());
+        rv = DoGetPid();
         break;
     default:
     {
