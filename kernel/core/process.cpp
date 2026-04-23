@@ -109,6 +109,16 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
         p->win32_events[i].waiters.head = nullptr;
         p->win32_events[i].waiters.tail = nullptr;
     }
+    // Win32 thread table — every slot starts free.
+    for (u32 i = 0; i < Process::kWin32ThreadCap; ++i)
+    {
+        p->win32_threads[i].in_use = false;
+        for (u32 j = 0; j < sizeof(p->win32_threads[i]._pad); ++j)
+            p->win32_threads[i]._pad[j] = 0;
+        p->win32_threads[i].task = nullptr;
+        p->win32_threads[i].user_stack_va = 0;
+    }
+    p->thread_stack_cursor = Process::kV0ThreadStackArenaBase;
     // Win32 TLS — no slots allocated, all values zero.
     p->tls_slot_in_use = 0;
     for (u32 i = 0; i < Process::kWin32TlsCap; ++i)
@@ -268,6 +278,8 @@ const char* CapName(Cap c)
         return "Debug";
     case kCapFsWrite:
         return "FsWrite";
+    case kCapSpawnThread:
+        return "SpawnThread";
     case kCapCount:
         return "<sentinel>";
     }

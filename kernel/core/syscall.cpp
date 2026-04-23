@@ -19,6 +19,7 @@
 #include "../subsystems/win32/vmap_syscall.h"
 #include "../subsystems/win32/tls_syscall.h"
 #include "../subsystems/win32/file_syscall.h"
+#include "../subsystems/win32/thread_syscall.h"
 #include "../subsystems/win32/mutex_syscall.h"
 #include "../subsystems/win32/event_syscall.h"
 #include "../subsystems/win32/heap.h"
@@ -380,6 +381,9 @@ void SyscallDispatch(arch::TrapFrame* frame)
         return;
     case SYS_FILE_CREATE:
         subsystems::win32::DoFileCreate(frame);
+        return;
+    case SYS_THREAD_CREATE:
+        subsystems::win32::DoThreadCreate(frame);
         return;
 
     case SYS_SLEEP_MS:

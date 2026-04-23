@@ -145,5 +145,71 @@ EnterUserModeWithGs:
     ud2
 .size EnterUserModeWithGs, . - EnterUserModeWithGs
 
+
+/* EnterUserModeThread: 4-arg sibling of EnterUserModeWithGs. Used
+ * by SYS_THREAD_CREATE to start a ring-3 Task with RCX = thread
+ * param (Win32 x64 calling convention's first arg). All other
+ * segment + GSBASE + RFLAGS setup is identical. The only
+ * difference vs the 3-arg form is the final register-scrub step:
+ * we load RCX from the 4th arg instead of zeroing it.
+ *
+ *   rdi = user_rip
+ *   rsi = user_rsp
+ *   rdx = user_gs_base
+ *   rcx = user_rcx (stashed into r15 immediately; restored to
+ *         rcx just before iretq)
+ */
+.global EnterUserModeThread
+.type EnterUserModeThread, @function
+EnterUserModeThread:
+    endbr64
+    mov     r15, rcx                /* stash user_rcx; r15 is scrubbed below anyway */
+
+    cli
+    swapgs
+
+    mov     ax, 0x33
+    mov     ds, ax
+    mov     es, ax
+    mov     fs, ax
+    mov     gs, ax
+
+    test    rdx, rdx
+    jz      2f
+    mov     rax, rdx
+    shr     rdx, 32
+    mov     ecx, 0xC0000101         /* MSR_GS_BASE */
+    wrmsr
+2:
+
+    push    0x33
+    push    rsi
+    push    0x202
+    push    0x2B
+    push    rdi
+
+    /* Zero every GPR except rcx — load rcx from the stashed r15.
+     * This is the one difference from EnterUserModeWithGs. */
+    xor     eax, eax
+    xor     ebx, ebx
+    mov     rcx, r15
+    xor     edx, edx
+    xor     ebp, ebp
+    xor     esi, esi
+    xor     edi, edi
+    xor     r8d,  r8d
+    xor     r9d,  r9d
+    xor     r10d, r10d
+    xor     r11d, r11d
+    xor     r12d, r12d
+    xor     r13d, r13d
+    xor     r14d, r14d
+    xor     r15d, r15d
+
+    iretq
+
+    ud2
+.size EnterUserModeThread, . - EnterUserModeThread
+
 /* NX stack — silence lld's PT_GNU_STACK warning. */
 .section .note.GNU-stack, "", @progbits

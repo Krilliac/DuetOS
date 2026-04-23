@@ -446,6 +446,23 @@ enum SyscallNumber : u64
     // Backs Win32 CreateFileW with dwCreationDisposition =
     // CREATE_NEW or CREATE_ALWAYS.
     SYS_FILE_CREATE = 44,
+
+    // SYS_THREAD_CREATE: rdi = user-mode start VA (thread
+    // proc), rsi = user-mode parameter (passed as RCX on
+    // thread entry per Win32 x64 calling convention). Spawns
+    // a new Task sharing the caller's Process + AddressSpace +
+    // cap set; allocates kV0ThreadStackPages of user stack at
+    // the process's `thread_stack_cursor` and bumps it.
+    //
+    // Returns a Win32 pseudo-handle (kWin32ThreadBase +
+    // slot_idx, i.e. 0x400..0x407) on success, u64(-1) on bad
+    // start VA / cap denied / slot-table full / stack-arena
+    // exhausted / Task-creation failure. Cap-gated on
+    // kCapSpawnThread.
+    //
+    // v0 limitations documented at Process::Win32ThreadHandle.
+    // Backs Win32 CreateThread / CreateRemoteThread-on-self.
+    SYS_THREAD_CREATE = 45,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit

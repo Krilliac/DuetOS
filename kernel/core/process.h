@@ -97,6 +97,15 @@ enum Cap : u32
     // share the same gate.
     kCapFsWrite = 4,
 
+    // Spawn an additional ring-3 Task inside the caller's
+    // Process (SYS_THREAD_CREATE). The new Task shares the
+    // Process's AddressSpace, cap set, and handle tables, and
+    // gets its own kernel stack + user stack. Withholding this
+    // cap from a sandboxed profile keeps an untrusted PE
+    // single-threaded regardless of its own intent. Trusted
+    // profiles inherit it via the kProfileTrusted loop.
+    kCapSpawnThread = 5,
+
     // Sentinel: keep this as the last entry so kProfileTrusted can
     // be built by a loop that iterates [1 .. kCapCount). Do NOT
     // use kCapCount as a live cap — it's a boundary marker.
@@ -404,6 +413,51 @@ struct Process
     static constexpr u64 kWin32EventCap = 8;
     static constexpr u64 kWin32EventBase = 0x300;
     Win32EventHandle win32_events[kWin32EventCap];
+
+    // Win32 thread table — backs CreateThread (batch ~47). Each
+    // slot carries a pointer to the scheduler Task that was
+    // spawned for the thread + a small bit of lifecycle state.
+    // Handles run kWin32ThreadBase + idx (= 0x400..0x407),
+    // disjoint from every other Win32 handle range so a single
+    // CloseHandle dispatch can pick the right table by value.
+    //
+    // v0 SCOPE (honest about what's not done):
+    //   - All threads share the Process's single TEB page
+    //     (kV0TebVa). Real Windows gives each thread its own
+    //     TEB with per-thread TLS slots; that's a follow-up.
+    //     Multi-threaded Win32 apps that key per-thread state
+    //     off gs:[...] will see cross-thread bleeding. Apps
+    //     that just want concurrent worker tasks over shared
+    //     memory (the common case) work today.
+    //   - No join / wait-for-thread primitive yet. CloseHandle
+    //     frees the slot but doesn't block for exit. A future
+    //     SYS_THREAD_JOIN / WaitForSingleObject(thread_handle)
+    //     path lands the blocking side.
+    //   - Thread exit is via SYS_EXIT (same as process exit);
+    //     the scheduler's single-task-dies-cleanly path handles
+    //     it. Exiting the LAST task in the process implicitly
+    //     tears the process down; the ordering is the
+    //     scheduler's existing reaper contract.
+    struct Win32ThreadHandle
+    {
+        bool in_use;
+        u8 _pad[7];
+        sched::Task* task; // scheduler Task spawned for this thread
+        u64 user_stack_va; // base VA of the thread's user stack
+    };
+    static constexpr u64 kWin32ThreadCap = 8;
+    static constexpr u64 kWin32ThreadBase = 0x400;
+    Win32ThreadHandle win32_threads[kWin32ThreadCap];
+
+    // Per-process cursor for thread-stack allocation. Each new
+    // thread carves kV0ThreadStackPages pages off this bump
+    // cursor. The base sits above the main task's stack and
+    // below the Win32 stubs region so collisions with mapped
+    // images remain off-limits. Threads don't free their stacks
+    // on exit in v0 — same leak profile as the vmap arena.
+    static constexpr u64 kV0ThreadStackArenaBase = 0x68000000ULL;
+    static constexpr u64 kV0ThreadStackPages = 4; // 16 KiB per thread
+    u64 thread_stack_cursor;
 
     // Win32 TLS (Thread-Local Storage) slots — backs TlsAlloc /
     // TlsGetValue / TlsSetValue / TlsFree (batch 46). v0 is

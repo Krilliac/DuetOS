@@ -46,6 +46,7 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     subsystems/win32/heap_syscall.cpp
     subsystems/win32/mutex_syscall.cpp
     subsystems/win32/stubs.cpp
+    subsystems/win32/thread_syscall.cpp
     subsystems/win32/tls_syscall.cpp
     subsystems/win32/vmap_syscall.cpp
     core/shell.cpp
