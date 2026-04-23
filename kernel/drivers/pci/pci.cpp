@@ -2,6 +2,7 @@
 
 #include "../../acpi/acpi.h"
 #include "../../arch/x86_64/cpu.h"
+#include "../../arch/x86_64/lapic.h"
 #include "../../arch/x86_64/serial.h"
 #include "../../core/klog.h"
 #include "../../core/panic.h"
@@ -334,6 +335,38 @@ void PciMsixFunctionUnmask(DeviceAddress addr)
     u16 msg_ctrl = static_cast<u16>(word >> 16);
     msg_ctrl &= ~(1U << 14);
     PciConfigWrite32(addr, static_cast<u8>(cap + 0), (word & 0x0000FFFFu) | (static_cast<u32>(msg_ctrl) << 16));
+}
+
+::customos::core::Result<u8> PciMsixBindSimple(DeviceAddress addr, u16 entry_index,
+                                               ::customos::arch::IrqHandler handler, MsixRoute* out_route)
+{
+    using ::customos::core::Err;
+    using ::customos::core::ErrorCode;
+    if (handler == nullptr)
+        return Err{ErrorCode::InvalidArgument};
+
+    const u8 vector = ::customos::arch::IrqAllocVector();
+    if (vector == 0)
+        return Err{ErrorCode::OutOfMemory};
+
+    // BSP LAPIC ID = LAPIC register 0x20 bits 24..31 (APIC-ID field).
+    const u32 apic_id_reg = ::customos::arch::LapicRead(0x20);
+    const u8 lapic_id = static_cast<u8>((apic_id_reg >> 24) & 0xFF);
+
+    // Register the C handler BEFORE enabling the MSI-X entry so a
+    // fast-arriving interrupt finds a real callback instead of the
+    // dispatcher's "unhandled vector" log path.
+    ::customos::arch::IrqInstall(vector, handler);
+
+    auto r = PciMsixRouteSimple(addr, entry_index, lapic_id, vector);
+    if (!r.has_value())
+    {
+        ::customos::arch::IrqInstall(vector, nullptr);
+        return Err{r.error()};
+    }
+    if (out_route != nullptr)
+        *out_route = r.value();
+    return vector;
 }
 
 ::customos::core::Result<MsixRoute> PciMsixRouteSimple(DeviceAddress addr, u16 entry_index, u8 lapic_id, u8 vector)
