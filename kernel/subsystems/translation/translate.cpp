@@ -124,6 +124,25 @@ bool ShouldLogMiss(MissSampleTable& t, u64 nr)
     return false;
 }
 
+// One-shot summary of misses we've suppressed (sampled out)
+// since the last dump. Reports cumulative + delta so the
+// telemetry consumer can both see history and watch the rate.
+void DumpSuppressedMissSummary(const char* origin, MissSampleTable& t)
+{
+    const u64 cum = t.suppressed_total;
+    const u64 delta = cum - t.suppressed_reported;
+    t.suppressed_reported = cum;
+    arch::SerialWrite("[translate-miss-suppressed] ");
+    arch::SerialWrite(origin);
+    arch::SerialWrite(" cumulative=");
+    arch::SerialWriteHex(cum);
+    arch::SerialWrite(" delta=");
+    arch::SerialWriteHex(delta);
+    arch::SerialWrite(" emitted=");
+    arch::SerialWriteHex(t.emitted_total);
+    arch::SerialWrite("\n");
+}
+
 // Log prefix so boot-log grep is easy.
 void LogTranslation(const char* origin, u64 nr, const char* target)
 {

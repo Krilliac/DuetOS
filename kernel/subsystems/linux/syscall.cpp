@@ -4,6 +4,7 @@
 
 #include "../../arch/x86_64/hpet.h"
 #include "../../arch/x86_64/serial.h"
+#include "../../arch/x86_64/timer.h"
 #include "../../arch/x86_64/traps.h"
 #include "../../core/klog.h"
 #include "../../core/process.h"
@@ -158,6 +159,60 @@ enum : u64
     // move (we have no robust-futex machinery).
     kSysSetRobustList = 273,
     kSysGetRobustList = 274,
+
+    // Batch 55 — fill out the most commonly-probed unimplemented
+    // syscalls. Two flavours:
+    //
+    //   * No-op compat stubs — calls whose v0 semantics are
+    //     "we don't model that subsystem (permissions, uids,
+    //     priorities, mlock, etc.); return success / sane
+    //     default so static-musl + simple POSIX programs make
+    //     forward progress instead of bailing on -ENOSYS."
+    //
+    //   * Real-ish FS ops — `truncate` / `ftruncate` / `unlink` /
+    //     `mkdir` / `rmdir` route through the existing FAT32
+    //     primitives (Fat32TruncateAtPath / Fat32DeleteAtPath /
+    //     Fat32MkdirAtPath / Fat32RmdirAtPath). lstat aliases stat
+    //     since we have no symlinks — see DoLstat below.
+    kSysMremap = 25,
+    kSysMsync = 26,
+    kSysMincore = 27,
+    kSysPause = 34,
+    kSysFlock = 73,
+    kSysTruncate = 76,
+    kSysFtruncate = 77,
+    kSysMkdir = 83,
+    kSysRmdir = 84,
+    kSysUnlink = 87,
+    kSysChmod = 90,
+    kSysFchmod = 91,
+    kSysChown = 92,
+    kSysFchown = 93,
+    kSysLchown = 94,
+    kSysTimes = 100,
+    kSysSetuid = 105,
+    kSysSetgid = 106,
+    kSysSetreuid = 113,
+    kSysSetregid = 114,
+    kSysGetgroups = 115,
+    kSysSetgroups = 116,
+    kSysSetresuid = 117,
+    kSysGetresuid = 118,
+    kSysSetresgid = 119,
+    kSysGetresgid = 120,
+    kSysSetfsuid = 122,
+    kSysSetfsgid = 123,
+    kSysCapget = 125,
+    kSysCapset = 126,
+    kSysUtime = 132,
+    kSysMknod = 133,
+    kSysPersonality = 135,
+    kSysGetpriority = 140,
+    kSysSetpriority = 141,
+    kSysMlock = 149,
+    kSysMunlock = 150,
+    kSysMlockall = 151,
+    kSysMunlockall = 152,
 };
 
 // POSIX AT_FDCWD — used by the *at family to mean "resolve
@@ -2012,6 +2067,443 @@ i64 DoUname(u64 user_buf)
     return 0;
 }
 
+// ---------------------------------------------------------------
+// Batch 55 — compat-stub + FAT32-backed handlers for the most-
+// commonly-probed unimplemented syscalls. See the kSys* enum
+// block at the top for the list and rationale.
+// ---------------------------------------------------------------
+
+constexpr i64 kEPERM = -1;
+constexpr i64 kENOMEM_ = -12; // shadow-named to avoid collision with kENOMEM above
+
+// lstat is identical to stat in v0 — there are no symlinks.
+i64 DoLstat(u64 user_path, u64 user_buf)
+{
+    return DoStat(user_path, user_buf);
+}
+
+// pause(): suspend until a signal arrives. v0 has no signal
+// delivery, so this would block forever. Sleep in big chunks
+// instead of a tight yield loop so the scheduler isn't burning
+// cycles on us. Returns -EINTR conventionally on wake; since we
+// never wake, the return is unreachable.
+i64 DoPause()
+{
+    constexpr u64 kHugeTicks = 1ull << 30; // ~3.4 yrs at 100 Hz
+    for (;;)
+    {
+        sched::SchedSleepTicks(kHugeTicks);
+    }
+    return 0;
+}
+
+// mremap(): we have no remap-in-place machinery. -ENOMEM is the
+// canonical "couldn't grow your mapping" return; callers fall
+// back to alloc-new + memcpy + unmap, which already works via
+// mmap/munmap.
+i64 DoMremap(u64 old_addr, u64 old_len, u64 new_len, u64 flags, u64 new_addr)
+{
+    (void)old_addr;
+    (void)old_len;
+    (void)new_len;
+    (void)flags;
+    (void)new_addr;
+    return kENOMEM_;
+}
+
+// msync(): write-back of a memory mapping. v0 mmap is anonymous-
+// only; there's nothing to flush. Return success so MAP_SHARED
+// emulation doesn't fail.
+i64 DoMsync(u64 addr, u64 len, u64 flags)
+{
+    (void)addr;
+    (void)len;
+    (void)flags;
+    return 0;
+}
+
+// mincore(addr, len, vec): mark every page in [addr, addr+len)
+// as resident by writing 1 to each byte of the user vec. v0
+// has no swap and no page reclaim, so every mapped page IS
+// resident. Bad address surfaces as EFAULT.
+i64 DoMincore(u64 addr, u64 len, u64 user_vec)
+{
+    (void)addr;
+    if (user_vec == 0)
+        return kEFAULT;
+    const u64 pages = (len + 0xFFFu) / 0x1000u;
+    if (pages == 0)
+        return 0;
+    // Cap at a reasonable batch so a hostile huge `len` doesn't
+    // make us copy a multi-MiB byte vector. 4096 pages = 16 MiB
+    // of mapping covered per call; larger ranges chunk caller-side.
+    constexpr u64 kMaxPages = 4096;
+    const u64 to_mark = (pages > kMaxPages) ? kMaxPages : pages;
+    static u8 ones[kMaxPages];
+    for (u64 i = 0; i < to_mark; ++i)
+        ones[i] = 1;
+    if (!mm::CopyToUser(reinterpret_cast<void*>(user_vec), ones, to_mark))
+        return kEFAULT;
+    return 0;
+}
+
+// flock(fd, op): advisory file lock. v0 is single-process for
+// the FAT32 mount; advisory locks are no-ops by definition.
+i64 DoFlock(u64 fd, u64 op)
+{
+    (void)fd;
+    (void)op;
+    return 0;
+}
+
+// chmod / fchmod / chown / fchown / lchown: v0 has no permission
+// model and no uid/gid model. Return 0 so install scripts and
+// build tools (which routinely chmod +x their outputs) don't bail.
+i64 DoChmod(u64 user_path, u64 mode)
+{
+    (void)user_path;
+    (void)mode;
+    return 0;
+}
+i64 DoFchmod(u64 fd, u64 mode)
+{
+    (void)fd;
+    (void)mode;
+    return 0;
+}
+i64 DoChown(u64 user_path, u64 uid, u64 gid)
+{
+    (void)user_path;
+    (void)uid;
+    (void)gid;
+    return 0;
+}
+i64 DoFchown(u64 fd, u64 uid, u64 gid)
+{
+    (void)fd;
+    (void)uid;
+    (void)gid;
+    return 0;
+}
+i64 DoLchown(u64 user_path, u64 uid, u64 gid)
+{
+    return DoChown(user_path, uid, gid);
+}
+
+// times(buf): fill struct tms with user/system/cuser/csys clock
+// counts. v0 has no per-process accounting, so the same monotonic
+// tick count goes in all four slots; the return value is the
+// canonical "ticks since boot" Linux defines.
+i64 DoTimes(u64 user_buf)
+{
+    const u64 t = arch::TimerTicks();
+    if (user_buf != 0)
+    {
+        struct
+        {
+            u64 utime;
+            u64 stime;
+            u64 cutime;
+            u64 cstime;
+        } tms = {t, t, 0, 0};
+        if (!mm::CopyToUser(reinterpret_cast<void*>(user_buf), &tms, sizeof(tms)))
+            return kEFAULT;
+    }
+    return static_cast<i64>(t);
+}
+
+// setuid / setgid / setreuid / setregid / setresuid / setresgid:
+// v0 is uid 0 / gid 0 across the board. Accept the call as a
+// no-op so setuid-root daemons started under us don't fail.
+i64 DoSetuid(u64 uid)
+{
+    (void)uid;
+    return 0;
+}
+i64 DoSetgid(u64 gid)
+{
+    (void)gid;
+    return 0;
+}
+i64 DoSetreuid(u64 ruid, u64 euid)
+{
+    (void)ruid;
+    (void)euid;
+    return 0;
+}
+i64 DoSetregid(u64 rgid, u64 egid)
+{
+    (void)rgid;
+    (void)egid;
+    return 0;
+}
+i64 DoSetresuid(u64 ruid, u64 euid, u64 suid)
+{
+    (void)ruid;
+    (void)euid;
+    (void)suid;
+    return 0;
+}
+i64 DoSetresgid(u64 rgid, u64 egid, u64 sgid)
+{
+    (void)rgid;
+    (void)egid;
+    (void)sgid;
+    return 0;
+}
+
+// getresuid / getresgid (id_t* ruid, id_t* euid, id_t* suid):
+// write three u32 zeros so the caller sees a consistent uid/gid
+// triple. Bad pointers surface as EFAULT.
+i64 DoGetresuid(u64 user_r, u64 user_e, u64 user_s)
+{
+    const u32 zero = 0;
+    if (user_r != 0 && !mm::CopyToUser(reinterpret_cast<void*>(user_r), &zero, sizeof(zero)))
+        return kEFAULT;
+    if (user_e != 0 && !mm::CopyToUser(reinterpret_cast<void*>(user_e), &zero, sizeof(zero)))
+        return kEFAULT;
+    if (user_s != 0 && !mm::CopyToUser(reinterpret_cast<void*>(user_s), &zero, sizeof(zero)))
+        return kEFAULT;
+    return 0;
+}
+i64 DoGetresgid(u64 user_r, u64 user_e, u64 user_s)
+{
+    return DoGetresuid(user_r, user_e, user_s);
+}
+
+// setfsuid / setfsgid: returns the PREVIOUS fsuid/fsgid, which
+// is always 0 in v0.
+i64 DoSetfsuid(u64 uid)
+{
+    (void)uid;
+    return 0;
+}
+i64 DoSetfsgid(u64 gid)
+{
+    (void)gid;
+    return 0;
+}
+
+// getgroups(size, list): return the supplementary group list.
+// v0 has none; return 0 (count of groups in the list). Linux
+// allows size=0 as a "how many groups would there be" probe;
+// our answer is still 0.
+i64 DoGetgroups(u64 size, u64 user_list)
+{
+    (void)size;
+    (void)user_list;
+    return 0;
+}
+// setgroups(size, list): accept as no-op. Refusing would break
+// setuid-style binaries that drop their groups before privsep.
+i64 DoSetgroups(u64 size, u64 user_list)
+{
+    (void)size;
+    (void)user_list;
+    return 0;
+}
+
+// capget / capset: POSIX capabilities. v0 has no Linux-style
+// capability model (we have our own CapSet, but it's not the
+// same shape). Accept the call as a no-op so libcap-using
+// programs initialise without complaining.
+i64 DoCapget(u64 user_hdr, u64 user_data)
+{
+    (void)user_hdr;
+    (void)user_data;
+    return 0;
+}
+i64 DoCapset(u64 user_hdr, u64 user_data)
+{
+    (void)user_hdr;
+    (void)user_data;
+    return 0;
+}
+
+// utime(path, buf): set atime/mtime on a file. v0 doesn't track
+// either, so accept as no-op.
+i64 DoUtime(u64 user_path, u64 user_buf)
+{
+    (void)user_path;
+    (void)user_buf;
+    return 0;
+}
+
+// mknod(path, mode, dev): create a special file (FIFO, char,
+// block, etc.). v0 has none of these. -EPERM is the standard
+// "you don't have CAP_MKNOD" return; honest enough.
+i64 DoMknod(u64 user_path, u64 mode, u64 dev)
+{
+    (void)user_path;
+    (void)mode;
+    (void)dev;
+    return kEPERM;
+}
+
+// personality(persona): query/set the process's execution
+// personality (32-bit emulation, address-space layout quirks,
+// etc.). v0 only ever runs as the default Linux personality;
+// return 0 as both "current persona" and "set succeeded".
+i64 DoPersonality(u64 persona)
+{
+    (void)persona;
+    return 0;
+}
+
+// getpriority / setpriority: nice-value query/set. v0 scheduler
+// is a flat round-robin with no priority levels. Return 0 (the
+// neutral nice value) on get; accept any set as a no-op.
+i64 DoGetpriority(u64 which, u64 who)
+{
+    (void)which;
+    (void)who;
+    return 0;
+}
+i64 DoSetpriority(u64 which, u64 who, u64 prio)
+{
+    (void)which;
+    (void)who;
+    (void)prio;
+    return 0;
+}
+
+// mlock / munlock / mlockall / munlockall: pin pages in RAM.
+// v0 has no swap and no page reclaim — every mapped page is
+// already pinned. Accept as no-op success.
+i64 DoMlock(u64 addr, u64 len)
+{
+    (void)addr;
+    (void)len;
+    return 0;
+}
+i64 DoMunlock(u64 addr, u64 len)
+{
+    (void)addr;
+    (void)len;
+    return 0;
+}
+i64 DoMlockall(u64 flags)
+{
+    (void)flags;
+    return 0;
+}
+i64 DoMunlockall()
+{
+    return 0;
+}
+
+// FAT32-backed filesystem ops. All four route through the
+// existing Fat32*AtPath primitives. Path strip mirrors DoOpen:
+// musl uses absolute paths, FAT32 wants volume-relative.
+
+// Helper: copy a user path into a 64-byte kernel buffer +
+// strip the FAT32 mount prefix. Returns true on success, false
+// if the copy failed or the path is unterminated. Out points
+// inside `kbuf`; lifetime tracks `kbuf`.
+bool CopyAndStripFatPath(u64 user_path, char (&kbuf)[64], const char*& out_leaf)
+{
+    for (u32 i = 0; i < sizeof(kbuf); ++i)
+        kbuf[i] = 0;
+    if (!mm::CopyFromUser(kbuf, reinterpret_cast<const void*>(user_path), sizeof(kbuf) - 1))
+        return false;
+    kbuf[sizeof(kbuf) - 1] = 0;
+    bool has_nul = false;
+    for (u32 i = 0; i < sizeof(kbuf); ++i)
+    {
+        if (kbuf[i] == 0)
+        {
+            has_nul = true;
+            break;
+        }
+    }
+    if (!has_nul)
+        return false;
+    out_leaf = StripFatPrefix(kbuf);
+    return true;
+}
+
+// truncate(path, length): shrink/grow a file to `length` bytes.
+i64 DoTruncate(u64 user_path, u64 length)
+{
+    char kbuf[64];
+    const char* leaf = nullptr;
+    if (!CopyAndStripFatPath(user_path, kbuf, leaf))
+        return kEFAULT;
+    const auto* v = fs::fat32::Fat32Volume(0);
+    if (v == nullptr)
+        return kENOENT;
+    const i64 rc = fs::fat32::Fat32TruncateAtPath(v, leaf, length);
+    if (rc < 0)
+        return kEIO;
+    return 0;
+}
+
+// ftruncate(fd, length): same as truncate but by fd. Use the
+// cached path on the LinuxFd entry.
+i64 DoFtruncate(u64 fd, u64 length)
+{
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr || fd >= 16 || p->linux_fds[fd].state != 2)
+        return kEBADF;
+    const auto* v = fs::fat32::Fat32Volume(0);
+    if (v == nullptr)
+        return kENOENT;
+    const i64 rc = fs::fat32::Fat32TruncateAtPath(v, p->linux_fds[fd].path, length);
+    if (rc < 0)
+        return kEIO;
+    // Keep the cached size in sync — a future read/write needs it.
+    p->linux_fds[fd].size = static_cast<u32>(length);
+    return 0;
+}
+
+// unlink(path): delete a file. Returns 0 on success, -ENOENT
+// if the file doesn't exist.
+i64 DoUnlink(u64 user_path)
+{
+    char kbuf[64];
+    const char* leaf = nullptr;
+    if (!CopyAndStripFatPath(user_path, kbuf, leaf))
+        return kEFAULT;
+    const auto* v = fs::fat32::Fat32Volume(0);
+    if (v == nullptr)
+        return kENOENT;
+    if (!fs::fat32::Fat32DeleteAtPath(v, leaf))
+        return kENOENT;
+    return 0;
+}
+
+// mkdir(path, mode): create a directory. Mode is ignored (no
+// permission model).
+i64 DoMkdir(u64 user_path, u64 mode)
+{
+    (void)mode;
+    char kbuf[64];
+    const char* leaf = nullptr;
+    if (!CopyAndStripFatPath(user_path, kbuf, leaf))
+        return kEFAULT;
+    const auto* v = fs::fat32::Fat32Volume(0);
+    if (v == nullptr)
+        return kENOENT;
+    if (!fs::fat32::Fat32MkdirAtPath(v, leaf))
+        return kEIO;
+    return 0;
+}
+
+// rmdir(path): remove an empty directory.
+i64 DoRmdir(u64 user_path)
+{
+    char kbuf[64];
+    const char* leaf = nullptr;
+    if (!CopyAndStripFatPath(user_path, kbuf, leaf))
+        return kEFAULT;
+    const auto* v = fs::fat32::Fat32Volume(0);
+    if (v == nullptr)
+        return kENOENT;
+    if (!fs::fat32::Fat32RmdirAtPath(v, leaf))
+        return kEIO;
+    return 0;
+}
+
 } // namespace
 
 // ---------------------------------------------------------------
@@ -2061,8 +2553,10 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
         rv = DoClose(frame->rdi);
         break;
     case kSysStat:
-    case kSysLstat:
         rv = DoStat(frame->rdi, frame->rsi);
+        break;
+    case kSysLstat:
+        rv = DoLstat(frame->rdi, frame->rsi);
         break;
     case kSysFstat:
         rv = DoFstat(frame->rdi, frame->rsi);
@@ -2261,6 +2755,126 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
     case kSysGetPid:
         rv = DoGetPid();
         break;
+
+    // Batch 55 dispatch — compat stubs + FAT32-backed FS ops.
+    case kSysPause:
+        rv = DoPause();
+        break;
+    case kSysMremap:
+        rv = DoMremap(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+        break;
+    case kSysMsync:
+        rv = DoMsync(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysMincore:
+        rv = DoMincore(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysFlock:
+        rv = DoFlock(frame->rdi, frame->rsi);
+        break;
+    case kSysTruncate:
+        rv = DoTruncate(frame->rdi, frame->rsi);
+        break;
+    case kSysFtruncate:
+        rv = DoFtruncate(frame->rdi, frame->rsi);
+        break;
+    case kSysMkdir:
+        rv = DoMkdir(frame->rdi, frame->rsi);
+        break;
+    case kSysRmdir:
+        rv = DoRmdir(frame->rdi);
+        break;
+    case kSysUnlink:
+        rv = DoUnlink(frame->rdi);
+        break;
+    case kSysChmod:
+        rv = DoChmod(frame->rdi, frame->rsi);
+        break;
+    case kSysFchmod:
+        rv = DoFchmod(frame->rdi, frame->rsi);
+        break;
+    case kSysChown:
+        rv = DoChown(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysFchown:
+        rv = DoFchown(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysLchown:
+        rv = DoLchown(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysTimes:
+        rv = DoTimes(frame->rdi);
+        break;
+    case kSysSetuid:
+        rv = DoSetuid(frame->rdi);
+        break;
+    case kSysSetgid:
+        rv = DoSetgid(frame->rdi);
+        break;
+    case kSysSetreuid:
+        rv = DoSetreuid(frame->rdi, frame->rsi);
+        break;
+    case kSysSetregid:
+        rv = DoSetregid(frame->rdi, frame->rsi);
+        break;
+    case kSysGetgroups:
+        rv = DoGetgroups(frame->rdi, frame->rsi);
+        break;
+    case kSysSetgroups:
+        rv = DoSetgroups(frame->rdi, frame->rsi);
+        break;
+    case kSysSetresuid:
+        rv = DoSetresuid(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysGetresuid:
+        rv = DoGetresuid(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysSetresgid:
+        rv = DoSetresgid(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysGetresgid:
+        rv = DoGetresgid(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysSetfsuid:
+        rv = DoSetfsuid(frame->rdi);
+        break;
+    case kSysSetfsgid:
+        rv = DoSetfsgid(frame->rdi);
+        break;
+    case kSysCapget:
+        rv = DoCapget(frame->rdi, frame->rsi);
+        break;
+    case kSysCapset:
+        rv = DoCapset(frame->rdi, frame->rsi);
+        break;
+    case kSysUtime:
+        rv = DoUtime(frame->rdi, frame->rsi);
+        break;
+    case kSysMknod:
+        rv = DoMknod(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysPersonality:
+        rv = DoPersonality(frame->rdi);
+        break;
+    case kSysGetpriority:
+        rv = DoGetpriority(frame->rdi, frame->rsi);
+        break;
+    case kSysSetpriority:
+        rv = DoSetpriority(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysMlock:
+        rv = DoMlock(frame->rdi, frame->rsi);
+        break;
+    case kSysMunlock:
+        rv = DoMunlock(frame->rdi, frame->rsi);
+        break;
+    case kSysMlockall:
+        rv = DoMlockall(frame->rdi);
+        break;
+    case kSysMunlockall:
+        rv = DoMunlockall();
+        break;
+
     default:
     {
         // Primary dispatch missed — offer to the translation unit

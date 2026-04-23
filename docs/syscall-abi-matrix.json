@@ -51,9 +51,9 @@
     "abi": "linux",
     "number": 6,
     "name": "lstat",
-    "status": "unimplemented",
-    "owner": "kernel/subsystems/linux/syscall.cpp::DispatchSyscall",
-    "fallback": "-ENOSYS"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
@@ -203,25 +203,25 @@
     "abi": "linux",
     "number": 25,
     "name": "mremap",
-    "status": "unimplemented",
-    "owner": "kernel/subsystems/linux/syscall.cpp::DispatchSyscall",
-    "fallback": "-ENOSYS"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
     "number": 26,
     "name": "msync",
-    "status": "unimplemented",
-    "owner": "kernel/subsystems/linux/syscall.cpp::DispatchSyscall",
-    "fallback": "-ENOSYS"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
     "number": 27,
     "name": "mincore",
-    "status": "unimplemented",
-    "owner": "kernel/subsystems/linux/syscall.cpp::DispatchSyscall",
-    "fallback": "-ENOSYS"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
@@ -275,9 +275,9 @@
     "abi": "linux",
     "number": 34,
     "name": "pause",
-    "status": "unimplemented",
-    "owner": "kernel/subsystems/linux/syscall.cpp::DispatchSyscall",
-    "fallback": "-ENOSYS"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
@@ -587,9 +587,9 @@
     "abi": "linux",
     "number": 73,
     "name": "flock",
-    "status": "unimplemented",
-    "owner": "kernel/subsystems/linux/syscall.cpp::DispatchSyscall",
-    "fallback": "-ENOSYS"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
@@ -611,17 +611,17 @@
     "abi": "linux",
     "number": 76,
     "name": "truncate",
-    "status": "unimplemented",
-    "owner": "kernel/subsystems/linux/syscall.cpp::DispatchSyscall",
-    "fallback": "-ENOSYS"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
     "number": 77,
     "name": "ftruncate",
-    "status": "unimplemented",
-    "owner": "kernel/subsystems/linux/syscall.cpp::DispatchSyscall",
-    "fallback": "-ENOSYS"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
@@ -667,17 +667,17 @@
     "abi": "linux",
     "number": 83,
     "name": "mkdir",
-    "status": "unimplemented",
-    "owner": "kernel/subsystems/linux/syscall.cpp::DispatchSyscall",
-    "fallback": "-ENOSYS"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
     "number": 84,
     "name": "rmdir",
-    "status": "unimplemented",
-    "owner": "kernel/subsystems/linux/syscall.cpp::DispatchSyscall",
-    "fallback": "-ENOSYS"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
@@ -699,9 +699,9 @@
     "abi": "linux",
     "number": 87,
     "name": "unlink",
-    "status": "unimplemented",
-    "owner": "kernel/subsystems/linux/syscall.cpp::DispatchSyscall",
-    "fallback": "-ENOSYS"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
@@ -723,41 +723,41 @@
     "abi": "linux",
     "number": 90,
     "name": "chmod",
-    "status": "unimplemented",
-    "owner": "kernel/subsystems/linux/syscall.cpp::DispatchSyscall",
-    "fallback": "-ENOSYS"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
     "number": 91,
     "name": "fchmod",
-    "status": "unimplemented",
-    "owner": "kernel/subsystems/linux/syscall.cpp::DispatchSyscall",
-    "fallback": "-ENOSYS"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
     "number": 92,
     "name": "chown",
-    "status": "unimplemented",
-    "owner": "kernel/subsystems/linux/syscall.cpp::DispatchSyscall",
-    "fallback": "-ENOSYS"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
     "number": 93,
     "name": "fchown",
-    "status": "unimplemented",
-    "owner": "kernel/subsystems/linux/syscall.cpp::DispatchSyscall",
-    "fallback": "-ENOSYS"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
     "number": 94,
     "name": "lchown",
-    "status": "unimplemented",
-    "owner": "kernel/subsystems/linux/syscall.cpp::DispatchSyscall",
-    "fallback": "-ENOSYS"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
@@ -803,9 +803,9 @@
     "abi": "linux",
     "number": 100,
     "name": "times",
-    "status": "unimplemented",
-    "owner": "kernel/subsystems/linux/syscall.cpp::DispatchSyscall",
-    "fallback": "-ENOSYS"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
@@ -843,17 +843,17 @@
     "abi": "linux",
     "number": 105,
     "name": "setuid",
-    "status": "unimplemented",
-    "owner": "kernel/subsystems/linux/syscall.cpp::DispatchSyscall",
-    "fallback": "-ENOSYS"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
     "number": 106,
     "name": "setgid",
-    "status": "unimplemented",
-    "owner": "kernel/subsystems/linux/syscall.cpp::DispatchSyscall",
-    "fallback": "-ENOSYS"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
@@ -907,65 +907,65 @@
     "abi": "linux",
     "number": 113,
     "name": "setreuid",
-    "status": "unimplemented",
-    "owner": "kernel/subsystems/linux/syscall.cpp::DispatchSyscall",
-    "fallback": "-ENOSYS"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
     "number": 114,
     "name": "setregid",
-    "status": "unimplemented",
-    "owner": "kernel/subsystems/linux/syscall.cpp::DispatchSyscall",
-    "fallback": "-ENOSYS"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
     "number": 115,
     "name": "getgroups",
-    "status": "unimplemented",
-    "owner": "kernel/subsystems/linux/syscall.cpp::DispatchSyscall",
-    "fallback": "-ENOSYS"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
     "number": 116,
     "name": "setgroups",
-    "status": "unimplemented",
-    "owner": "kernel/subsystems/linux/syscall.cpp::DispatchSyscall",
-    "fallback": "-ENOSYS"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
     "number": 117,
     "name": "setresuid",
-    "status": "unimplemented",
-    "owner": "kernel/subsystems/linux/syscall.cpp::DispatchSyscall",
-    "fallback": "-ENOSYS"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
     "number": 118,
     "name": "getresuid",
-    "status": "unimplemented",
-    "owner": "kernel/subsystems/linux/syscall.cpp::DispatchSyscall",
-    "fallback": "-ENOSYS"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
     "number": 119,
     "name": "setresgid",
-    "status": "unimplemented",
-    "owner": "kernel/subsystems/linux/syscall.cpp::DispatchSyscall",
-    "fallback": "-ENOSYS"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
     "number": 120,
     "name": "getresgid",
-    "status": "unimplemented",
-    "owner": "kernel/subsystems/linux/syscall.cpp::DispatchSyscall",
-    "fallback": "-ENOSYS"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
@@ -979,17 +979,17 @@
     "abi": "linux",
     "number": 122,
     "name": "setfsuid",
-    "status": "unimplemented",
-    "owner": "kernel/subsystems/linux/syscall.cpp::DispatchSyscall",
-    "fallback": "-ENOSYS"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
     "number": 123,
     "name": "setfsgid",
-    "status": "unimplemented",
-    "owner": "kernel/subsystems/linux/syscall.cpp::DispatchSyscall",
-    "fallback": "-ENOSYS"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
@@ -1003,17 +1003,17 @@
     "abi": "linux",
     "number": 125,
     "name": "capget",
-    "status": "unimplemented",
-    "owner": "kernel/subsystems/linux/syscall.cpp::DispatchSyscall",
-    "fallback": "-ENOSYS"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
     "number": 126,
     "name": "capset",
-    "status": "unimplemented",
-    "owner": "kernel/subsystems/linux/syscall.cpp::DispatchSyscall",
-    "fallback": "-ENOSYS"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
@@ -1059,17 +1059,17 @@
     "abi": "linux",
     "number": 132,
     "name": "utime",
-    "status": "unimplemented",
-    "owner": "kernel/subsystems/linux/syscall.cpp::DispatchSyscall",
-    "fallback": "-ENOSYS"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
     "number": 133,
     "name": "mknod",
-    "status": "unimplemented",
-    "owner": "kernel/subsystems/linux/syscall.cpp::DispatchSyscall",
-    "fallback": "-ENOSYS"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
@@ -1083,9 +1083,9 @@
     "abi": "linux",
     "number": 135,
     "name": "personality",
-    "status": "unimplemented",
-    "owner": "kernel/subsystems/linux/syscall.cpp::DispatchSyscall",
-    "fallback": "-ENOSYS"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
@@ -1123,17 +1123,17 @@
     "abi": "linux",
     "number": 140,
     "name": "getpriority",
-    "status": "unimplemented",
-    "owner": "kernel/subsystems/linux/syscall.cpp::DispatchSyscall",
-    "fallback": "-ENOSYS"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
     "number": 141,
     "name": "setpriority",
-    "status": "unimplemented",
-    "owner": "kernel/subsystems/linux/syscall.cpp::DispatchSyscall",
-    "fallback": "-ENOSYS"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
@@ -1195,33 +1195,33 @@
     "abi": "linux",
     "number": 149,
     "name": "mlock",
-    "status": "unimplemented",
-    "owner": "kernel/subsystems/linux/syscall.cpp::DispatchSyscall",
-    "fallback": "-ENOSYS"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
     "number": 150,
     "name": "munlock",
-    "status": "unimplemented",
-    "owner": "kernel/subsystems/linux/syscall.cpp::DispatchSyscall",
-    "fallback": "-ENOSYS"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
     "number": 151,
     "name": "mlockall",
-    "status": "unimplemented",
-    "owner": "kernel/subsystems/linux/syscall.cpp::DispatchSyscall",
-    "fallback": "-ENOSYS"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
     "number": 152,
     "name": "munlockall",
-    "status": "unimplemented",
-    "owner": "kernel/subsystems/linux/syscall.cpp::DispatchSyscall",
-    "fallback": "-ENOSYS"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
