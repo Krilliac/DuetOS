@@ -1,9 +1,9 @@
 #include "syscall_scan.h"
 
 #include "../arch/x86_64/serial.h"
-#include "../fs/fat32.h"
 #include "../subsystems/linux/linux_syscall_table_generated.h"
 #include "../subsystems/translation/translate.h"
+#include "inspect.h"
 
 namespace customos::debug
 {
@@ -162,7 +162,7 @@ void LogSite(const SyscallSite& site)
 {
     using arch::SerialWrite;
     using arch::SerialWriteHex;
-    SerialWrite("[sysscan] site va=");
+    SerialWrite("[inspect-sc] site va=");
     SerialWriteHex(site.va);
     SerialWrite(" kind=");
     switch (site.kind)
@@ -261,7 +261,7 @@ void LogSummary(const SyscallScanReport& r)
 {
     using arch::SerialWrite;
     using arch::SerialWriteHex;
-    SerialWrite("[sysscan] summary base=");
+    SerialWrite("[inspect-sc] summary base=");
     SerialWriteHex(r.region_base_va);
     SerialWrite(" size=");
     SerialWriteHex(r.region_size);
@@ -281,7 +281,7 @@ void LogSummary(const SyscallScanReport& r)
     SerialWriteHex(r.impl_native);
     SerialWrite(") unknown=");
     SerialWriteHex(r.unknown);
-    SerialWrite("\n[sysscan] summary kinds: syscall=");
+    SerialWrite("\n[inspect-sc] summary kinds: syscall=");
     SerialWriteHex(r.kind_syscall);
     SerialWrite(" int80=");
     SerialWriteHex(r.kind_int80);
@@ -307,7 +307,7 @@ SyscallScanReport SyscallScanRegion(const u8* bytes, u64 size, u64 base_va)
     if (bytes == nullptr || size < 2)
         return r;
 
-    arch::SerialWrite("[sysscan] begin base=");
+    arch::SerialWrite("[inspect-sc] begin base=");
     arch::SerialWriteHex(base_va);
     arch::SerialWrite(" size=");
     arch::SerialWriteHex(size);
@@ -371,215 +371,41 @@ SyscallScanReport SyscallScanKernelText()
     const u64 end = reinterpret_cast<u64>(_text_end);
     if (end <= base)
     {
-        arch::SerialWrite("[sysscan] kernel text region invalid\n");
+        arch::SerialWrite("[inspect-sc] kernel text region invalid\n");
         return SyscallScanReport{};
     }
     return SyscallScanRegion(_text_start, end - base, base);
 }
 
-namespace
-{
-
-// Trivial little-endian readers for PE / ELF header parsing.
-u16 Rd16(const u8* p)
-{
-    return static_cast<u16>(p[0]) | (static_cast<u16>(p[1]) << 8);
-}
-u32 Rd32(const u8* p)
-{
-    return static_cast<u32>(p[0]) | (static_cast<u32>(p[1]) << 8) | (static_cast<u32>(p[2]) << 16) |
-           (static_cast<u32>(p[3]) << 24);
-}
-u64 Rd64(const u8* p)
-{
-    return static_cast<u64>(Rd32(p)) | (static_cast<u64>(Rd32(p + 4)) << 32);
-}
-
-// Strip a leading /fat/ mount prefix or a bare leading slash so
-// the raw FAT32 lookup path is volume-relative.
-const char* StripFatPrefix(const char* p)
-{
-    while (*p == '/')
-        ++p;
-    if (p[0] == 'f' && p[1] == 'a' && p[2] == 't' && p[3] == '/')
-        return p + 4;
-    return p;
-}
-
-// Scratch buffer for file contents. Sized to fit a small PE or
-// ELF — real programs can exceed this, and bytes past the cap
-// are truncated with a log note (short scan is still better than
-// no scan).
-constexpr u64 kFileScratchCap = 128 * 1024;
-u8 g_file_scratch[kFileScratchCap];
-
-// Try to locate a PE's executable .text section inside the loaded
-// buffer. Returns {offset, size} on success, zeros on failure.
-// Because we're scanning the on-disk layout (not the in-memory
-// image), VA ↔ file-offset translation needs care: we use the
-// section's PointerToRawData as the file offset, and return the
-// image-base + VirtualAddress as the reported base_va so log
-// lines match where the code would actually land.
-struct SectionSpan
-{
-    u64 file_off;
-    u64 size;
-    u64 base_va;
-};
-bool FindPeTextSection(const u8* file, u64 len, SectionSpan* out)
-{
-    if (len < 0x40)
-        return false;
-    if (file[0] != 'M' || file[1] != 'Z')
-        return false;
-    const u32 pe_off = Rd32(file + 0x3C);
-    if (pe_off + 4 >= len)
-        return false;
-    if (file[pe_off] != 'P' || file[pe_off + 1] != 'E' || file[pe_off + 2] != 0 || file[pe_off + 3] != 0)
-        return false;
-    const u8* coff = file + pe_off + 4;
-    if (pe_off + 24 >= len)
-        return false;
-    const u16 num_sections = Rd16(coff + 2);
-    const u16 opt_size = Rd16(coff + 16);
-    const u8* opt = coff + 20;
-    if ((opt + opt_size) >= (file + len))
-        return false;
-    u64 image_base = 0;
-    if (opt_size >= 24)
-    {
-        // PE32+ (magic 0x20B) stores ImageBase at offset 24 as u64;
-        // PE32 (magic 0x10B) at offset 28 as u32.
-        const u16 magic = Rd16(opt);
-        if (magic == 0x20B && opt_size >= 32)
-        {
-            image_base = Rd64(opt + 24);
-        }
-        else if (magic == 0x10B && opt_size >= 32)
-        {
-            image_base = Rd32(opt + 28);
-        }
-    }
-    const u8* sections = opt + opt_size;
-    for (u16 i = 0; i < num_sections; ++i)
-    {
-        const u8* s = sections + i * 40;
-        if (s + 40 > file + len)
-            break;
-        const u32 virt_size = Rd32(s + 8);
-        const u32 virt_addr = Rd32(s + 12);
-        const u32 raw_size = Rd32(s + 16);
-        const u32 raw_ptr = Rd32(s + 20);
-        const u32 chars = Rd32(s + 36);
-        // IMAGE_SCN_MEM_EXECUTE = 0x20000000.
-        if ((chars & 0x20000000u) == 0)
-            continue;
-        const u64 size_on_disk = (raw_size < virt_size) ? raw_size : virt_size;
-        if (raw_ptr + size_on_disk > len)
-            continue;
-        out->file_off = raw_ptr;
-        out->size = size_on_disk;
-        out->base_va = image_base + virt_addr;
-        return true;
-    }
-    return false;
-}
-
-// Find the first executable PT_LOAD in a 64-bit ELF. Returns
-// {file_off, size, p_vaddr} on success.
-bool FindElfTextSegment(const u8* file, u64 len, SectionSpan* out)
-{
-    if (len < 64)
-        return false;
-    if (file[0] != 0x7F || file[1] != 'E' || file[2] != 'L' || file[3] != 'F')
-        return false;
-    if (file[4] != 2) // must be 64-bit
-        return false;
-    const u64 e_phoff = Rd64(file + 32);
-    const u16 e_phentsize = Rd16(file + 54);
-    const u16 e_phnum = Rd16(file + 56);
-    if (e_phoff + static_cast<u64>(e_phentsize) * e_phnum > len)
-        return false;
-    for (u16 i = 0; i < e_phnum; ++i)
-    {
-        const u8* ph = file + e_phoff + static_cast<u64>(e_phentsize) * i;
-        const u32 p_type = Rd32(ph);
-        if (p_type != 1) // PT_LOAD
-            continue;
-        const u32 p_flags = Rd32(ph + 4);
-        if ((p_flags & 0x1) == 0) // PF_X
-            continue;
-        const u64 p_offset = Rd64(ph + 8);
-        const u64 p_vaddr = Rd64(ph + 16);
-        const u64 p_filesz = Rd64(ph + 32);
-        if (p_offset + p_filesz > len)
-            continue;
-        out->file_off = p_offset;
-        out->size = p_filesz;
-        out->base_va = p_vaddr;
-        return true;
-    }
-    return false;
-}
-
-} // namespace
-
 SyscallScanReport SyscallScanFile(const char* path)
 {
     using arch::SerialWrite;
     SyscallScanReport r{};
-    if (path == nullptr || path[0] == 0)
-    {
-        SerialWrite("[sysscan] file: empty path\n");
+
+    const u8* bytes = nullptr;
+    u64 len = 0;
+    if (!InspectReadFatFile(path, &bytes, &len))
         return r;
-    }
-    const auto* v = fs::fat32::Fat32Volume(0);
-    if (v == nullptr)
+
+    // Auto-detect using the shared PE / ELF locators.
+    InspectSection sec{};
+    if (InspectFindPeText(bytes, len, &sec))
     {
-        SerialWrite("[sysscan] file: no fat32 volume 0\n");
-        return r;
-    }
-    fs::fat32::DirEntry entry;
-    const char* leaf = StripFatPrefix(path);
-    if (!fs::fat32::Fat32LookupPath(v, leaf, &entry))
-    {
-        SerialWrite("[sysscan] file: lookup failed: ");
-        SerialWrite(path);
-        SerialWrite("\n");
-        return r;
-    }
-    const i64 rc = fs::fat32::Fat32ReadFile(v, &entry, g_file_scratch, kFileScratchCap);
-    if (rc <= 0)
-    {
-        SerialWrite("[sysscan] file: read failed\n");
-        return r;
-    }
-    const u64 len = static_cast<u64>(rc);
-    if (len == kFileScratchCap && entry.size_bytes > kFileScratchCap)
-    {
-        SerialWrite("[sysscan] file: truncated at scratch cap (");
-        arch::SerialWriteHex(kFileScratchCap);
-        SerialWrite(" bytes); scanning prefix only\n");
-    }
-    // Auto-detect.
-    SectionSpan sec{};
-    if (FindPeTextSection(g_file_scratch, len, &sec))
-    {
-        SerialWrite("[sysscan] file: PE, scanning .text rva+=");
+        SerialWrite("[inspect-sc] file: PE, scanning .text va=");
         arch::SerialWriteHex(sec.base_va);
         SerialWrite("\n");
-        return SyscallScanRegion(g_file_scratch + sec.file_off, sec.size, sec.base_va);
+        return SyscallScanRegion(bytes + sec.file_off, sec.size, sec.base_va);
     }
-    if (FindElfTextSegment(g_file_scratch, len, &sec))
+    if (InspectFindElfText(bytes, len, &sec))
     {
-        SerialWrite("[sysscan] file: ELF, scanning PT_LOAD (X) vaddr=");
+        SerialWrite("[inspect-sc] file: ELF, scanning PT_LOAD (X) vaddr=");
         arch::SerialWriteHex(sec.base_va);
         SerialWrite("\n");
-        return SyscallScanRegion(g_file_scratch + sec.file_off, sec.size, sec.base_va);
+        return SyscallScanRegion(bytes + sec.file_off, sec.size, sec.base_va);
     }
     // Raw bytes — scan the whole file with base_va=0.
-    SerialWrite("[sysscan] file: no PE/ELF header, scanning raw bytes\n");
-    return SyscallScanRegion(g_file_scratch, len, 0);
+    SerialWrite("[inspect-sc] file: no PE/ELF header, scanning raw bytes\n");
+    return SyscallScanRegion(bytes, len, 0);
 }
 
 } // namespace customos::debug

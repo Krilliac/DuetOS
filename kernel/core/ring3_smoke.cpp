@@ -4,6 +4,7 @@
 #include "../arch/x86_64/serial.h"
 #include "../arch/x86_64/usermode.h"
 #include "../cpu/percpu.h"
+#include "../debug/inspect.h"
 #include "../fs/ramfs.h"
 #include "generated_hello_pe.h"
 #include "generated_hello_winapi.h"
@@ -1654,6 +1655,9 @@ u64 SpawnElfFile(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps
     {
         return SpawnElfLinux(name, elf_bytes, elf_len, caps, root, frame_budget, tick_budget);
     }
+    // Fire the `inspect arm` latch if the operator armed it
+    // before spawning. No-op when unarmed; one-shot when armed.
+    customos::debug::InspectOnSpawn(name, elf_bytes, elf_len);
     AddressSpace* as = AddressSpaceCreate(frame_budget);
     if (as == nullptr)
     {
@@ -1698,6 +1702,7 @@ u64 SpawnElfLinux(const char* name, const u8* elf_bytes, u64 elf_len, CapSet cap
     {
         return 0;
     }
+    customos::debug::InspectOnSpawn(name, elf_bytes, elf_len);
     AddressSpace* as = AddressSpaceCreate(frame_budget);
     if (as == nullptr)
     {
@@ -1818,6 +1823,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     {
         return 0;
     }
+    customos::debug::InspectOnSpawn(name, pe_bytes, pe_len);
     // Diagnostic pre-pass — always runs, always logs. A PE we
     // reject below still gets a full report: sections, imports,
     // relocs, TLS. That's how we know what a real Win32

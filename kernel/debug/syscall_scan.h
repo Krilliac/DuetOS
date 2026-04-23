@@ -18,8 +18,10 @@
  * we'd handle them" at triage time, not byte-perfect semantic
  * analysis.
  *
- * Trigger: operator types `sysscan` at the shell. Nothing runs
- * automatically — a PE/ELF load does not pre-scan.
+ * Trigger: operator types `inspect syscalls ...` at the shell
+ * (see `kernel/debug/inspect.h` for the umbrella). Nothing runs
+ * automatically unless the `inspect arm` latch is set, which
+ * targets the opcodes scanner rather than this one.
  */
 
 namespace customos::debug
