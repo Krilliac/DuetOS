@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../../core/result.h"
 #include "../../core/types.h"
 
 /*
@@ -71,9 +72,14 @@ struct GpuInfo
 };
 
 /// Discover every display-class PCI device, map each one's primary
-/// MMIO BAR, and log the result. Runs once at boot after
-/// `PciEnumerate`. Double-init is a KASSERT.
+/// MMIO BAR, and log the result. Idempotent — early-returns until
+/// `GpuShutdown` clears the live flag.
 void GpuInit();
+
+/// Drop every GPU record + clear the live flag so the next
+/// `GpuInit` re-walks PCI. Always succeeds. MMIO mappings are
+/// retained (same v0 trade-off as drivers/net).
+::customos::core::Result<void> GpuShutdown();
 
 /// Count of GPUs found by the most recent `GpuInit` call.
 u64 GpuCount();

@@ -15,6 +15,10 @@ namespace
 AudioControllerInfo g_acs[kMaxAudioControllers] = {};
 u64 g_ac_count = 0;
 
+// Module-scope so `AudioShutdown` can clear it and the next
+// `AudioInit` re-walks PCI.
+constinit bool g_init_done = false;
+
 AudioKind KindFromSubclass(u8 subclass)
 {
     switch (subclass)
@@ -206,9 +210,9 @@ const char* AudioKindName(AudioKind k)
 void AudioInit()
 {
     KLOG_TRACE_SCOPE("drivers/audio", "AudioInit");
-    static constinit bool s_done = false;
-    KASSERT(!s_done, "drivers/audio", "AudioInit called twice");
-    s_done = true;
+    if (g_init_done)
+        return;
+    g_init_done = true;
 
     const u64 n = pci::PciDeviceCount();
     for (u64 i = 0; i < n && g_ac_count < kMaxAudioControllers; ++i)
@@ -251,6 +255,18 @@ void AudioInit()
     {
         core::Log(core::LogLevel::Warn, "drivers/audio", "no PCI audio controllers found (QEMU default q35 is silent)");
     }
+}
+
+::customos::core::Result<void> AudioShutdown()
+{
+    KLOG_TRACE_SCOPE("drivers/audio", "AudioShutdown");
+    const u64 dropped = g_ac_count;
+    g_ac_count = 0;
+    g_init_done = false;
+    arch::SerialWrite("[drivers/audio] shutdown: dropped ");
+    arch::SerialWriteHex(dropped);
+    arch::SerialWrite(" controller records (MMIO mappings retained)\n");
+    return {};
 }
 
 u64 AudioControllerCount()

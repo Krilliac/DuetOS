@@ -19,6 +19,10 @@ namespace
 GpuInfo g_gpus[kMaxGpus] = {};
 u64 g_gpu_count = 0;
 
+// Module-scope so `GpuShutdown` can clear it and the next
+// `GpuInit` re-walks PCI.
+constinit bool g_init_done = false;
+
 struct VendorEntry
 {
     u16 vendor_id;
@@ -240,9 +244,9 @@ void LogGpu(const GpuInfo& g)
 void GpuInit()
 {
     KLOG_TRACE_SCOPE("drivers/gpu", "GpuInit");
-    static constinit bool s_done = false;
-    KASSERT(!s_done, "drivers/gpu", "GpuInit called twice");
-    s_done = true;
+    if (g_init_done)
+        return;
+    g_init_done = true;
 
     const u64 n = pci::PciDeviceCount();
     for (u64 i = 0; i < n && g_gpu_count < kMaxGpus; ++i)
@@ -299,6 +303,18 @@ void GpuInit()
         core::Log(core::LogLevel::Warn, "drivers/gpu",
                   "no PCI display controllers found (headless or unsupported board)");
     }
+}
+
+::customos::core::Result<void> GpuShutdown()
+{
+    KLOG_TRACE_SCOPE("drivers/gpu", "GpuShutdown");
+    const u64 dropped = g_gpu_count;
+    g_gpu_count = 0;
+    g_init_done = false;
+    arch::SerialWrite("[drivers/gpu] shutdown: dropped ");
+    arch::SerialWriteHex(dropped);
+    arch::SerialWrite(" GPU records (MMIO mappings retained)\n");
+    return {};
 }
 
 u64 GpuCount()

@@ -15,6 +15,12 @@ namespace
 constinit AmlNamespaceEntry g_entries[kMaxAmlNsEntries] = {};
 constinit u32 g_entry_count = 0;
 
+// Module-scope so `AmlNamespaceShutdown` can clear it and a
+// subsequent `AmlNamespaceBuild` re-runs the walk. Was a
+// function-local `static constinit` while this subsystem was
+// init-once; lifted out for the fault-domain restart path.
+constinit bool g_built = false;
+
 // Top-level AML opcodes we recognise. Anything not on this list
 // terminates the current TermList (the caller advances to its
 // PkgLength end and continues).
@@ -634,9 +640,9 @@ const char* AmlObjectKindName(AmlObjectKind k)
 void AmlNamespaceBuild()
 {
     KLOG_TRACE_SCOPE("acpi/aml", "AmlNamespaceBuild");
-    static constinit bool s_done = false;
-    KASSERT(!s_done, "acpi/aml", "AmlNamespaceBuild called twice");
-    s_done = true;
+    if (g_built)
+        return;
+    g_built = true;
 
     const u64 dsdt_phys = DsdtAddress();
     const u32 dsdt_len = DsdtLength();
@@ -677,6 +683,18 @@ void AmlNamespaceBuild()
     arch::SerialWrite(" cpus=");
     arch::SerialWriteHex(AmlNamespaceCountByKind(AmlObjectKind::Processor));
     arch::SerialWrite("\n");
+}
+
+::customos::core::Result<void> AmlNamespaceShutdown()
+{
+    KLOG_TRACE_SCOPE("acpi/aml", "AmlNamespaceShutdown");
+    const u32 dropped = g_entry_count;
+    g_entry_count = 0;
+    g_built = false;
+    arch::SerialWrite("[acpi/aml] shutdown: dropped ");
+    arch::SerialWriteHex(dropped);
+    arch::SerialWrite(" namespace entries\n");
+    return {};
 }
 
 u32 AmlNamespaceCount()

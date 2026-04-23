@@ -46,26 +46,53 @@ namespace customos::debug
 
 inline constexpr u32 kMaxExtableEntries = 32;
 
+// Sentinel for `ExtableEntry::domain_id` meaning "no fault domain
+// attached to this row." Mirrors `core::kFaultDomainInvalid` but
+// declared here as a plain u32 so this header doesn't have to
+// pull in `core/fault_domain.h` (which would create an awkward
+// debug → core dependency loop for the trap-handler include).
+inline constexpr u32 kExtableNoDomain = 0xFFFFFFFFu;
+
 struct ExtableEntry
 {
     u64 rip_start;   // inclusive
     u64 rip_end;     // exclusive
     u64 fixup_rip;   // where to redirect frame->rip on a match
     const char* tag; // short label for log lines
+    u32 domain_id;   // FaultDomainId or kExtableNoDomain. When
+                     // set, the trap handler also marks the
+                     // domain for deferred restart via
+                     // `FaultDomainMarkRestart` — the immediate
+                     // fixup gives the synchronous caller a
+                     // failure path; the watchdog re-init's the
+                     // subsystem so future calls succeed.
 };
 
-/// Register a (start, end, fixup) triple. Returns false if the
-/// table is full or the input is malformed (start >= end, fixup
-/// not inside the range is allowed — the fixup typically lives
-/// in a different function than the faulting code). Safe to call
-/// from any context that isn't already the trap handler.
+/// Register a (start, end, fixup) triple with no associated
+/// fault domain. Returns false if the table is full or the input
+/// is malformed (start >= end, fixup_rip == 0). Safe to call from
+/// any context that isn't already the trap handler.
 bool KernelExtableRegister(u64 rip_start, u64 rip_end, u64 fixup_rip, const char* tag);
+
+/// Same as `KernelExtableRegister`, plus binds the row to a
+/// fault-domain id. On match the trap handler iretq's to
+/// `fixup_rip` AND calls `FaultDomainMarkRestart(domain_id)`,
+/// which the watchdog drains on the next heartbeat. Use when a
+/// driver entry point should both fail-fast for the immediate
+/// caller AND auto-recover for future callers.
+bool KernelExtableRegisterWithDomain(u64 rip_start, u64 rip_end, u64 fixup_rip, const char* tag, u32 domain_id);
 
 /// Trap-handler hook: given a faulting RIP, return the matching
 /// fixup target or 0 if no row matches. Linear scan; expected to
 /// run under interrupts disabled inside the trap handler. Safe
 /// to call before any registrations (returns 0 for everything).
 u64 KernelExtableFindFixup(u64 rip);
+
+/// Trap-handler hook (richer): same lookup as `FindFixup`, but
+/// returns the full entry pointer so the caller can also read
+/// the attached `domain_id`. Returns nullptr on miss. Same
+/// re-entry guard as `FindFixup`.
+const ExtableEntry* KernelExtableFindEntry(u64 rip);
 
 /// Entry-count snapshot for diagnostics. Not safe to read
 /// atomically with a concurrent register on SMP — used only by

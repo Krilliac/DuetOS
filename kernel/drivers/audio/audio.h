@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../../core/result.h"
 #include "../../core/types.h"
 
 /*
@@ -61,7 +62,14 @@ struct AudioControllerInfo
 };
 
 /// Walk PCI, register each audio controller, log the result.
+/// Idempotent — early-returns until `AudioShutdown` clears the
+/// live flag.
 void AudioInit();
+
+/// Drop every controller record + clear the live flag so the next
+/// `AudioInit` re-walks PCI. Always succeeds. MMIO mappings are
+/// retained (same v0 trade-off as drivers/net).
+::customos::core::Result<void> AudioShutdown();
 
 u64 AudioControllerCount();
 const AudioControllerInfo& AudioController(u64 index);

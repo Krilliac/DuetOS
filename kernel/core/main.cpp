@@ -822,6 +822,15 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     customos::acpi::AcpiInit(multiboot_info);
     SerialWrite("[boot] Building AML namespace from DSDT/SSDT.\n");
     customos::acpi::AmlNamespaceBuild();
+    {
+        auto aml_init = []() -> customos::core::Result<void>
+        {
+            customos::acpi::AmlNamespaceBuild();
+            return {};
+        };
+        auto aml_teardown = []() -> customos::core::Result<void> { return customos::acpi::AmlNamespaceShutdown(); };
+        customos::core::FaultDomainRegister("acpi/aml", aml_init, aml_teardown);
+    }
 
     SerialWrite("[boot] Disabling 8259 PIC.\n");
     PicDisable();
@@ -896,9 +905,27 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
 
     SerialWrite("[boot] Detecting GPUs.\n");
     customos::drivers::gpu::GpuInit();
+    {
+        auto gpu_init = []() -> customos::core::Result<void>
+        {
+            customos::drivers::gpu::GpuInit();
+            return {};
+        };
+        auto gpu_teardown = []() -> customos::core::Result<void> { return customos::drivers::gpu::GpuShutdown(); };
+        customos::core::FaultDomainRegister("drivers/gpu", gpu_init, gpu_teardown);
+    }
 
     SerialWrite("[boot] Detecting NICs.\n");
     customos::drivers::net::NetInit();
+    {
+        auto net_init = []() -> customos::core::Result<void>
+        {
+            customos::drivers::net::NetInit();
+            return {};
+        };
+        auto net_teardown = []() -> customos::core::Result<void> { return customos::drivers::net::NetShutdown(); };
+        customos::core::FaultDomainRegister("drivers/net", net_init, net_teardown);
+    }
 
     SerialWrite("[boot] Detecting USB host controllers.\n");
     customos::drivers::usb::UsbInit();
@@ -921,6 +948,16 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
 
     SerialWrite("[boot] Detecting audio controllers.\n");
     customos::drivers::audio::AudioInit();
+    {
+        auto audio_init = []() -> customos::core::Result<void>
+        {
+            customos::drivers::audio::AudioInit();
+            return {};
+        };
+        auto audio_teardown = []() -> customos::core::Result<void>
+        { return customos::drivers::audio::AudioShutdown(); };
+        customos::core::FaultDomainRegister("drivers/audio", audio_init, audio_teardown);
+    }
 
     SerialWrite("[boot] Bringing up power / thermal shell.\n");
     customos::drivers::power::PowerInit();

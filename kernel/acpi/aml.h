@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../core/result.h"
 #include "../core/types.h"
 
 /*
@@ -76,9 +77,14 @@ struct AmlNamespaceEntry
 };
 
 /// Walk every cached DSDT + SSDT, populate the namespace table,
-/// log a one-line summary. Safe to call exactly once after
-/// AcpiInit; double-init is a KASSERT.
+/// log a one-line summary. Idempotent — second call returns early
+/// until `AmlNamespaceShutdown` has cleared the live flag.
 void AmlNamespaceBuild();
+
+/// Drop every entry, clear the "built" flag so the next
+/// `AmlNamespaceBuild` re-walks DSDT/SSDT. Always succeeds — this
+/// subsystem has no external resources to surrender.
+::customos::core::Result<void> AmlNamespaceShutdown();
 
 /// Number of named objects discovered. 0 until AmlNamespaceBuild()
 /// has run.

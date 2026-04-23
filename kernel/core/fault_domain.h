@@ -55,6 +55,12 @@ struct FaultDomain
     u32 restart_count;          // lifetime restart events
     u64 last_restart_ticks;     // scheduler-tick of the most recent restart
     bool alive;                 // false iff teardown ran and init hasn't yet
+    bool restart_pending;       // set from trap-handler context via
+                                // `FaultDomainMarkRestart`; drained by
+                                // `FaultDomainTick` from kheartbeat,
+                                // which is allowed to take locks +
+                                // allocate memory (the trap handler
+                                // is not).
 };
 
 /// Register a domain. Returns the assigned id, or
@@ -78,9 +84,25 @@ FaultDomainId FaultDomainFind(const char* name);
 /// phase.
 Result<void> FaultDomainRestart(FaultDomainId id);
 
+/// Mark a domain for deferred restart. Cheap (one bool write)
+/// and safe to call from contexts that cannot take locks or
+/// allocate (trap handlers, IRQs, NMI). The actual restart runs
+/// on the next `FaultDomainTick` from the heartbeat thread.
+/// Out-of-range or invalid id is silently ignored — there's no
+/// useful action a trap handler can take with the failure.
+void FaultDomainMarkRestart(FaultDomainId id);
+
+/// Watchdog tick. Drains any `restart_pending` flags by calling
+/// `FaultDomainRestart` for each marked domain, in registration
+/// order. Logs the result of every drained restart. Cheap when
+/// no flags are set — one linear scan over the registry.
+/// Called from `kheartbeat` on every beat.
+void FaultDomainTick();
+
 /// Boot-time sanity test — registers a toy domain with trivial
-/// hooks + counters, restarts it twice, verifies the bookkeeping.
-/// Panics on mismatch.
+/// hooks + counters, restarts it twice, exercises the
+/// MarkRestart + Tick path, verifies the bookkeeping. Panics on
+/// mismatch.
 void FaultDomainSelfTest();
 
 } // namespace customos::core

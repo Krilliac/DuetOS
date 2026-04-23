@@ -15,6 +15,11 @@ namespace
 NicInfo g_nics[kMaxNics] = {};
 u64 g_nic_count = 0;
 
+// Module-scope so `NetShutdown` can clear it and the next
+// `NetInit` re-walks PCI. Was a function-local `static constinit`
+// while this subsystem was init-once.
+constinit bool g_init_done = false;
+
 struct VendorEntry
 {
     u16 vendor_id;
@@ -189,9 +194,9 @@ void LogNic(const NicInfo& n)
 void NetInit()
 {
     KLOG_TRACE_SCOPE("drivers/net", "NetInit");
-    static constinit bool s_done = false;
-    KASSERT(!s_done, "drivers/net", "NetInit called twice");
-    s_done = true;
+    if (g_init_done)
+        return;
+    g_init_done = true;
 
     const u64 n = pci::PciDeviceCount();
     for (u64 i = 0; i < n && g_nic_count < kMaxNics; ++i)
@@ -235,6 +240,18 @@ void NetInit()
     {
         core::Log(core::LogLevel::Warn, "drivers/net", "no PCI network controllers found");
     }
+}
+
+::customos::core::Result<void> NetShutdown()
+{
+    KLOG_TRACE_SCOPE("drivers/net", "NetShutdown");
+    const u64 dropped = g_nic_count;
+    g_nic_count = 0;
+    g_init_done = false;
+    arch::SerialWrite("[drivers/net] shutdown: dropped ");
+    arch::SerialWriteHex(dropped);
+    arch::SerialWrite(" NIC records (MMIO mappings retained)\n");
+    return {};
 }
 
 u64 NicCount()

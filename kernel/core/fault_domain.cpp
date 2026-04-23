@@ -47,6 +47,7 @@ FaultDomainId FaultDomainRegister(const char* name, Result<void> (*init)(), Resu
     d.restart_count = 0;
     d.last_restart_ticks = 0;
     d.alive = true; // assume the subsystem's own Init ran already
+    d.restart_pending = false;
     arch::SerialWrite("[fault-domain] register id=");
     arch::SerialWriteHex(id);
     arch::SerialWrite(" name=");
@@ -117,6 +118,7 @@ Result<void> FaultDomainRestart(FaultDomainId id)
     }
 
     d.alive = true;
+    d.restart_pending = false;
     ++d.restart_count;
     d.last_restart_ticks = sched::SchedNowTicks();
     arch::SerialWrite("[fault-domain] restart ok name=");
@@ -125,6 +127,48 @@ Result<void> FaultDomainRestart(FaultDomainId id)
     arch::SerialWriteHex(d.restart_count);
     arch::SerialWrite("\n");
     return {};
+}
+
+void FaultDomainMarkRestart(FaultDomainId id)
+{
+    if (id >= g_domain_count)
+        return;
+    // One bool write — explicitly NOT taking a lock or logging
+    // here. Trap-handler context only allows the cheapest
+    // possible bookkeeping; the watchdog drains this from a
+    // sane process context.
+    g_domains[id].restart_pending = true;
+}
+
+void FaultDomainTick()
+{
+    // Linear scan; the registry is bounded at kMaxFaultDomains
+    // (16). The common-case cost is one branch per domain, so the
+    // beat-rate cost is negligible. We only emit a log line when
+    // something actually fires.
+    for (u32 i = 0; i < g_domain_count; ++i)
+    {
+        if (!g_domains[i].restart_pending)
+            continue;
+        // Clear FIRST so a second trap landing during the
+        // restart's own teardown/init can re-arm us instead of
+        // being lost to a "already pending, ignore" race. The
+        // restart_pending field is reset again at the end of
+        // FaultDomainRestart on success.
+        g_domains[i].restart_pending = false;
+        arch::SerialWrite("[fault-domain-tick] draining pending restart name=");
+        arch::SerialWrite(g_domains[i].name);
+        arch::SerialWrite("\n");
+        const auto r = FaultDomainRestart(i);
+        if (!r)
+        {
+            arch::SerialWrite("[fault-domain-tick] restart FAILED name=");
+            arch::SerialWrite(g_domains[i].name);
+            arch::SerialWrite(" err=");
+            arch::SerialWrite(ErrorCodeName(r.error()));
+            arch::SerialWrite("\n");
+        }
+    }
 }
 
 // ----------------------------------------------------------------
@@ -188,9 +232,27 @@ void FaultDomainSelfTest()
     Expect(FaultDomainFind("selftest.synth") == id, "find by name round-trip");
     Expect(FaultDomainFind("nonexistent") == kFaultDomainInvalid, "missing name -> invalid");
 
+    // Mark + Tick path: simulate a trap-handler MarkRestart, then
+    // verify the watchdog drains it and bumps the counter.
+    FaultDomainMarkRestart(id);
+    Expect(FaultDomainGet(id)->restart_pending, "mark sets pending");
+    FaultDomainTick();
+    Expect(!FaultDomainGet(id)->restart_pending, "tick clears pending");
+    Expect(FaultDomainGet(id)->restart_count == 3, "domain.restart_count == 3 after tick");
+    Expect(g_selftest_teardown_calls == 3, "teardown count after tick");
+    Expect(g_selftest_init_calls == 3, "init count after tick");
+
+    // Tick with no pending flags is a no-op.
+    FaultDomainTick();
+    Expect(FaultDomainGet(id)->restart_count == 3, "second tick is no-op");
+
+    // Out-of-range MarkRestart is silently ignored (trap-handler
+    // contract: never panic from inside the handler).
+    FaultDomainMarkRestart(kFaultDomainInvalid);
+
     arch::SerialWrite("[fault-domain-selftest] PASS (");
     arch::SerialWriteHex(g_domain_count);
-    arch::SerialWrite(" domains; toy restarted 2x)\n");
+    arch::SerialWrite(" domains; toy restarted 3x; tick path verified)\n");
 }
 
 } // namespace customos::core

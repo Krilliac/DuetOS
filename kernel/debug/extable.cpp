@@ -22,7 +22,7 @@ constinit bool g_in_lookup = false;
 
 } // namespace
 
-bool KernelExtableRegister(u64 rip_start, u64 rip_end, u64 fixup_rip, const char* tag)
+bool KernelExtableRegisterWithDomain(u64 rip_start, u64 rip_end, u64 fixup_rip, const char* tag, u32 domain_id)
 {
     if (rip_start >= rip_end || fixup_rip == 0)
         return false;
@@ -38,6 +38,7 @@ bool KernelExtableRegister(u64 rip_start, u64 rip_end, u64 fixup_rip, const char
     e.rip_end = rip_end;
     e.fixup_rip = fixup_rip;
     e.tag = (tag != nullptr) ? tag : "?";
+    e.domain_id = domain_id;
     arch::SerialWrite("[extable] register tag=");
     arch::SerialWrite(e.tag);
     arch::SerialWrite(" rip=[");
@@ -46,27 +47,43 @@ bool KernelExtableRegister(u64 rip_start, u64 rip_end, u64 fixup_rip, const char
     arch::SerialWriteHex(rip_end);
     arch::SerialWrite(") fixup=");
     arch::SerialWriteHex(fixup_rip);
+    if (domain_id != kExtableNoDomain)
+    {
+        arch::SerialWrite(" domain=");
+        arch::SerialWriteHex(domain_id);
+    }
     arch::SerialWrite("\n");
     return true;
 }
 
+bool KernelExtableRegister(u64 rip_start, u64 rip_end, u64 fixup_rip, const char* tag)
+{
+    return KernelExtableRegisterWithDomain(rip_start, rip_end, fixup_rip, tag, kExtableNoDomain);
+}
+
 u64 KernelExtableFindFixup(u64 rip)
 {
+    const ExtableEntry* e = KernelExtableFindEntry(rip);
+    return (e != nullptr) ? e->fixup_rip : 0;
+}
+
+const ExtableEntry* KernelExtableFindEntry(u64 rip)
+{
     if (g_in_lookup)
-        return 0; // double-fault guard
+        return nullptr; // double-fault guard
     g_in_lookup = true;
-    u64 target = 0;
+    const ExtableEntry* hit = nullptr;
     for (u32 i = 0; i < g_entry_count; ++i)
     {
         const ExtableEntry& e = g_entries[i];
         if (rip >= e.rip_start && rip < e.rip_end)
         {
-            target = e.fixup_rip;
+            hit = &e;
             break;
         }
     }
     g_in_lookup = false;
-    return target;
+    return hit;
 }
 
 u32 KernelExtableEntryCount()
@@ -119,7 +136,32 @@ void ExtableSelfTest()
     if (g_entry_count == before + 1)
         g_entry_count = before;
 
-    arch::SerialWrite("[extable-selftest] PASS (register + hit + miss; ");
+    // Domain-id round-trip: a row registered with a domain id
+    // should report that id back via FindEntry. Use 0x12345678 —
+    // an obviously-synthetic FaultDomainId that no real domain
+    // will ever take (FaultDomainRegister hands out small
+    // sequential ids).
+    const u64 dom_start = 0xFFFFFFFF8DEADC0DULL;
+    const u64 dom_end = dom_start + 0x10;
+    const u64 dom_fixup = 0xFFFFFFFF8C0DEF80ULL;
+    const u32 dom_id = 0x12345678;
+    if (!KernelExtableRegisterWithDomain(dom_start, dom_end, dom_fixup, "selftest.dom", dom_id))
+    {
+        core::PanicWithValue("debug/extable", "SelfTest: register-with-domain failed", g_entry_count);
+    }
+    const ExtableEntry* found = KernelExtableFindEntry(dom_start + 4);
+    if (found == nullptr)
+    {
+        core::PanicWithValue("debug/extable", "SelfTest: domain row not found", 0);
+    }
+    if (found->domain_id != dom_id)
+    {
+        core::PanicWithValue("debug/extable", "SelfTest: domain_id round-trip mismatch", found->domain_id);
+    }
+    if (g_entry_count == before + 1)
+        g_entry_count = before;
+
+    arch::SerialWrite("[extable-selftest] PASS (register + hit + miss + domain-id; ");
     arch::SerialWriteHex(g_entry_count);
     arch::SerialWrite(" entries live)\n");
 }

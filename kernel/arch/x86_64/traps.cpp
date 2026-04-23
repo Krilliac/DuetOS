@@ -4,6 +4,7 @@
 #include "lapic.h"
 #include "serial.h"
 
+#include "../../core/fault_domain.h"
 #include "../../core/hexdump.h"
 #include "../../core/panic.h"
 #include "../../core/symbols.h"
@@ -278,8 +279,8 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     // a kernel RIP can't happen (user can't execute kernel code).
     if ((frame->vector == 14 || frame->vector == 13) && (frame->cs & 3) == 0)
     {
-        const u64 fixup = ::customos::debug::KernelExtableFindFixup(frame->rip);
-        if (fixup != 0)
+        const ::customos::debug::ExtableEntry* hit = ::customos::debug::KernelExtableFindEntry(frame->rip);
+        if (hit != nullptr)
         {
             SerialWrite("[extable] recovered kernel trap vec=");
             SerialWriteHex(frame->vector);
@@ -291,9 +292,24 @@ extern "C" void TrapDispatch(TrapFrame* frame)
                 SerialWriteHex(ReadCr2());
             }
             SerialWrite(" -> fixup=");
-            SerialWriteHex(fixup);
+            SerialWriteHex(hit->fixup_rip);
+            SerialWrite(" tag=");
+            SerialWrite(hit->tag);
             SerialWrite("\n");
-            frame->rip = fixup;
+            // If the row is bound to a fault domain, hand off
+            // the recovery to the watchdog. The fixup runs first
+            // and gives the synchronous caller a clean error
+            // path; the watchdog then teardown+re-init's the
+            // subsystem so future calls succeed. MarkRestart is
+            // one bool write — safe from trap context.
+            if (hit->domain_id != ::customos::debug::kExtableNoDomain)
+            {
+                ::customos::core::FaultDomainMarkRestart(hit->domain_id);
+                SerialWrite("[extable] marked domain for deferred restart id=");
+                SerialWriteHex(hit->domain_id);
+                SerialWrite("\n");
+            }
+            frame->rip = hit->fixup_rip;
             return;
         }
     }
