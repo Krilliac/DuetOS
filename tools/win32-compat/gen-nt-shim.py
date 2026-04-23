@@ -135,14 +135,29 @@ inline constexpr u32 kAllNtSyscallCount =
 
 /// Look up an NT syscall number on the target version and return
 /// the corresponding NtSyscallMapping, or nullptr if it's outside
-/// the table. Linear scan; the miss-log path is the only caller.
+/// the table. Binary search over the sorted `kAllNtSyscalls` table.
 inline const NtSyscallMapping* NtSyscallByNumber(u16 nr)
 {{
-    for (const auto& e : kAllNtSyscalls)
+    u32 lo = 0;
+    u32 hi = kAllNtSyscallCount;
+
+    while (lo < hi)
     {{
-        if (e.nt_number == nr)
-            return &e;
+        const u32 mid = lo + ((hi - lo) >> 1);
+        const NtSyscallMapping& e = kAllNtSyscalls[mid];
+        if (e.nt_number < nr)
+        {{
+            lo = mid + 1;
+            continue;
+        }}
+        if (e.nt_number > nr)
+        {{
+            hi = mid;
+            continue;
+        }}
+        return &e;
     }}
+
     return nullptr;
 }}
 
