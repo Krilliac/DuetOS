@@ -42,7 +42,25 @@ constexpr u32 kStsCnr = 1u << 11;
 // TRB types (in TRB control field bits 15:10).
 constexpr u32 kTrbTypeNoOp = 23; // command-ring NoOp
 constexpr u32 kTrbTypeLink = 6;
+constexpr u32 kTrbTypeEnableSlot = 9;
 constexpr u32 kTrbTypeCmdCompletion = 33;
+constexpr u32 kTrbTypePortStatusChange = 34;
+
+// PORTSC bit layout we care about.
+constexpr u32 kPortScCcs = 1u << 0; // current-connect status (RO)
+constexpr u32 kPortScPed = 1u << 1; // port enabled/disabled (RW1C)
+constexpr u32 kPortScPr = 1u << 4;  // port reset (RW1S)
+
+// PORTSC RW1C bits (PED + the 7 change bits at 17..23). When we
+// modify PORTSC we mask these out of our writeback so a status-
+// change bit that the controller has set doesn't get cleared as
+// a side effect of "I just wanted to write PR=1".
+constexpr u32 kPortScRw1cMask = (1u << 1) | (0x7Fu << 17);
+
+// Command Completion event: status bits 31:24 carry a completion
+// code; 1 = success. Bits 23:16 carry the slot ID for commands that
+// allocate one (Enable Slot in particular).
+constexpr u32 kCompletionCodeSuccess = 1;
 
 // One TRB = 16 bytes: { u32 param_lo, u32 param_hi, u32 status, u32 control }.
 struct alignas(16) Trb
@@ -268,41 +286,103 @@ bool InitOne(const HostControllerInfo& h, ControllerInfo& out)
     }
     out.init_ok = true;
 
-    // Build a NoOp TRB at command ring slot 0 with Cycle=1.
-    Trb& noop = cmd_ring[0];
-    noop.param_lo = 0;
-    noop.param_hi = 0;
-    noop.status = 0;
-    noop.control = (kTrbTypeNoOp << 10) | 1u;
+    // Generic command submit/complete state. We never wrap the
+    // command ring during boot (≤ a few dozen commands across
+    // every controller), so the panic-on-wrap below is fine for
+    // v0; the proper Link-TRB cycle-toggle happens when the first
+    // real workload actually fills 255 slots.
+    auto* evt_ring = static_cast<Trb*>(evt_virt);
+    constexpr u32 kRingSlotsLocal = mm::kPageSize / sizeof(Trb);
+    u32 cmd_producer_idx = 0;
+    u32 cmd_producer_cycle = 1;
+    u32 evt_consumer_idx = 0;
+    u32 evt_consumer_cycle = 1;
 
-    // Doorbell 0 = command ring; written value = stream/target.
-    // For the command ring you just write 0 to ring it.
     const u32 dboff = ReadMmio32(mmio, kCapDbOff) & ~0x3u;
     volatile u32* db0 = reinterpret_cast<volatile u32*>(mmio + dboff);
-    *db0 = 0;
 
-    // Poll the event ring for a Command Completion event whose
-    // CommandTRB pointer points to our noop's physical address.
-    auto* evt_ring = static_cast<Trb*>(evt_virt);
-    const u64 noop_phys = cmd_phys; // slot 0
-    bool got = false;
-    for (u64 i = 0; i < 2'000'000; ++i)
+    auto submit_cmd = [&](u32 type, u32 param_lo, u32 param_hi, u32 status_field, u32 extra_control) -> u64
     {
-        const Trb& e = evt_ring[0];
-        const bool valid_cycle = (e.control & 1u) == 1u;
-        const u32 type = (e.control >> 10) & 0x3F;
-        if (valid_cycle && type == kTrbTypeCmdCompletion)
+        if (cmd_producer_idx >= kRingSlotsLocal - 1)
         {
-            const u64 cmd_ptr = (u64(e.param_hi) << 32) | u64(e.param_lo);
-            if (cmd_ptr == noop_phys)
-            {
-                got = true;
-                break;
-            }
+            arch::SerialWrite("[xhci] command ring exhausted (link-TRB wrap not implemented for v0)\n");
+            return 0;
         }
-        asm volatile("pause" : : : "memory");
+        Trb& slot = cmd_ring[cmd_producer_idx];
+        slot.param_lo = param_lo;
+        slot.param_hi = param_hi;
+        slot.status = status_field;
+        slot.control = (type << 10) | (extra_control & ~1u) | (cmd_producer_cycle & 1u);
+        const u64 phys = cmd_phys + u64(cmd_producer_idx) * sizeof(Trb);
+        ++cmd_producer_idx;
+        // Doorbell write: target=0 (command ring) is bits 7..0; bits
+        // 23..16 = stream-id (unused for cmd ring).
+        *db0 = 0;
+        return phys;
+    };
+
+    // Wait for a Command Completion event whose CommandTRB pointer
+    // matches `expect_phys`. On success returns true and writes the
+    // 32-bit completion-status word + the slot ID extracted from
+    // bits 23:16 of that word into `*out_slot_id`.
+    auto wait_completion = [&](u64 expect_phys, u32* out_status, u8* out_slot_id) -> bool
+    {
+        for (u64 i = 0; i < 4'000'000; ++i)
+        {
+            const Trb& e = evt_ring[evt_consumer_idx];
+            const bool valid = (e.control & 1u) == (evt_consumer_cycle & 1u);
+            if (valid)
+            {
+                const u32 type = (e.control >> 10) & 0x3F;
+                if (type == kTrbTypeCmdCompletion)
+                {
+                    const u64 ptr = (u64(e.param_hi) << 32) | u64(e.param_lo);
+                    if (ptr == expect_phys)
+                    {
+                        if (out_status != nullptr)
+                            *out_status = e.status;
+                        if (out_slot_id != nullptr)
+                            *out_slot_id = u8((e.control >> 24) & 0xFF);
+                        ++evt_consumer_idx;
+                        if (evt_consumer_idx >= kRingSlotsLocal)
+                        {
+                            evt_consumer_idx = 0;
+                            evt_consumer_cycle ^= 1;
+                        }
+                        // Advance ERDP: bit 3 = "Event Handler Busy"
+                        // (write 1 to clear). Pointer goes in
+                        // bits 63:4.
+                        const u64 erdp = evt_phys + u64(evt_consumer_idx) * sizeof(Trb);
+                        WriteMmio64(intr0, /*kIntrErdpLo=*/0x18, erdp | (1ull << 3));
+                        return true;
+                    }
+                }
+                // Some other (non-matching) event came in. Drop it
+                // and advance — we don't care about port-status
+                // change events as side effects of the reset.
+                ++evt_consumer_idx;
+                if (evt_consumer_idx >= kRingSlotsLocal)
+                {
+                    evt_consumer_idx = 0;
+                    evt_consumer_cycle ^= 1;
+                }
+                const u64 erdp = evt_phys + u64(evt_consumer_idx) * sizeof(Trb);
+                WriteMmio64(intr0, /*kIntrErdpLo=*/0x18, erdp | (1ull << 3));
+                continue;
+            }
+            asm volatile("pause" : : : "memory");
+        }
+        return false;
+    };
+
+    // NoOp roundtrip — proves the submit/complete plumbing works
+    // before we issue commands that allocate state on the controller.
+    {
+        const u64 noop_phys = submit_cmd(kTrbTypeNoOp, 0, 0, 0, 0);
+        u32 status = 0;
+        u8 slot = 0;
+        out.noop_ok = (noop_phys != 0) && wait_completion(noop_phys, &status, &slot);
     }
-    out.noop_ok = got;
 
     arch::SerialWrite("[xhci] init pci=");
     arch::SerialWriteHex(h.bus);
@@ -326,6 +406,99 @@ bool InitOne(const HostControllerInfo& h, ControllerInfo& out)
     arch::SerialWrite(out.noop_ok ? "[xhci] NoOp roundtrip PASS\n"
                                   : "[xhci] NoOp roundtrip FAIL — no Command Completion event\n");
 
+    if (!out.noop_ok)
+        return true;
+
+    // Walk PORTSC for every port. Per-port PORTSC starts at
+    // opbase + 0x400 + (port_idx * 0x10). For each port that
+    // shows CCS=1: kick PR=1 if not already enabled, wait for
+    // PED=1, then issue Enable Slot Command.
+    out.ports_connected = 0;
+    out.slots_enabled = 0;
+    const u8 ports_to_scan = (out.max_ports < kMaxXhciPortsPerController) ? out.max_ports : kMaxXhciPortsPerController;
+    for (u8 i = 0; i < ports_to_scan; ++i)
+    {
+        const u64 portsc_off = 0x400 + u64(i) * 0x10;
+        u32 portsc = ReadMmio32(op, portsc_off);
+        PortRecord& rec = out.ports[i];
+        rec.port_num = u8(i + 1);
+        rec.connected = (portsc & kPortScCcs) != 0;
+        rec.portsc_at_scan = portsc;
+        rec.speed = (portsc >> 10) & 0xF;
+        if (!rec.connected)
+            continue;
+        ++out.ports_connected;
+
+        // Reset only if PED is not already set. USB 3 ports usually
+        // self-train and arrive with PED=1; USB 2 ports require PR=1.
+        if ((portsc & kPortScPed) == 0)
+        {
+            const u32 wr = (portsc & ~kPortScRw1cMask) | kPortScPr;
+            WriteMmio32(op, portsc_off, wr);
+            // Wait for PR to clear (reset done) and PED to set.
+            for (u64 j = 0; j < 1'000'000; ++j)
+            {
+                const u32 cur = ReadMmio32(op, portsc_off);
+                if ((cur & kPortScPr) == 0 && (cur & kPortScPed) != 0)
+                {
+                    portsc = cur;
+                    break;
+                }
+                asm volatile("pause" : : : "memory");
+            }
+        }
+        rec.reset_ok = (ReadMmio32(op, portsc_off) & kPortScPed) != 0;
+        if (!rec.reset_ok)
+        {
+            arch::SerialWrite("[xhci]   port ");
+            arch::SerialWriteHex(rec.port_num);
+            arch::SerialWrite(" connected but PED never set after reset\n");
+            continue;
+        }
+
+        // Send Enable Slot Command. param_lo/hi/status all zero.
+        const u64 cmd_p = submit_cmd(kTrbTypeEnableSlot, 0, 0, 0, 0);
+        u32 cs = 0;
+        u8 slot_id = 0;
+        if (cmd_p != 0 && wait_completion(cmd_p, &cs, &slot_id))
+        {
+            const u32 code = (cs >> 24) & 0xFF;
+            if (code == kCompletionCodeSuccess && slot_id != 0)
+            {
+                rec.slot_ok = true;
+                rec.slot_id = slot_id;
+                ++out.slots_enabled;
+            }
+            else
+            {
+                arch::SerialWrite("[xhci]   port ");
+                arch::SerialWriteHex(rec.port_num);
+                arch::SerialWrite(" Enable Slot completed with code=");
+                arch::SerialWriteHex(code);
+                arch::SerialWrite("\n");
+            }
+        }
+        else
+        {
+            arch::SerialWrite("[xhci]   port ");
+            arch::SerialWriteHex(rec.port_num);
+            arch::SerialWrite(" Enable Slot timed out\n");
+        }
+
+        arch::SerialWrite("[xhci]   port ");
+        arch::SerialWriteHex(rec.port_num);
+        arch::SerialWrite(" connected speed=");
+        arch::SerialWriteHex(rec.speed);
+        arch::SerialWrite(rec.slot_ok ? " slot_id=" : " slot=fail");
+        if (rec.slot_ok)
+            arch::SerialWriteHex(rec.slot_id);
+        arch::SerialWrite("\n");
+    }
+    arch::SerialWrite("[xhci] port scan: connected=");
+    arch::SerialWriteHex(out.ports_connected);
+    arch::SerialWrite(" slots_enabled=");
+    arch::SerialWriteHex(out.slots_enabled);
+    arch::SerialWrite("\n");
     return true;
 }
 

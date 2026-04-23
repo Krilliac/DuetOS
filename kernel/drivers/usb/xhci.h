@@ -44,6 +44,20 @@
 namespace customos::drivers::usb::xhci
 {
 
+inline constexpr u32 kMaxXhciPortsPerController = 16;
+
+/// One slot's worth of per-port state captured at port-scan time.
+struct PortRecord
+{
+    u8 port_num;    // 1-based xHCI port number
+    bool connected; // CCS at scan time
+    bool reset_ok;  // PRESET sequence completed (PED set)
+    bool slot_ok;   // Enable Slot succeeded
+    u8 slot_id;     // valid iff slot_ok
+    u8 speed;       // PORTSC bits 13:10 (1=full, 2=low, 3=high, 4=super, 5=super+)
+    u32 portsc_at_scan;
+};
+
 /// Per-controller stats. One slot per discovered xHCI; populated
 /// during init.
 struct ControllerInfo
@@ -61,6 +75,9 @@ struct ControllerInfo
     u64 cmd_ring_phys;   // physical base of command ring
     u64 event_ring_phys; // physical base of event ring
     u64 erst_phys;       // physical base of ERST
+    u32 ports_connected; // count of ports with a device at scan time
+    u32 slots_enabled;   // count of successful Enable Slot commands
+    PortRecord ports[kMaxXhciPortsPerController];
 };
 
 /// Walk drivers::usb::HostController() entries; for each xHCI run

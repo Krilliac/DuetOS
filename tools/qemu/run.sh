@@ -115,10 +115,11 @@ QEMU_ARGS=(
     -device   "ide-hd,bus=ahci1.0,drive=sata0"
     # xHCI host controller. q35 doesn't ship with one by default,
     # so explicitly attach so the USB stack has something to bring
-    # up. No devices behind it for now — the controller-init self-
-    # test runs through capability-reg decode + reset + ring setup
-    # + a single NOOP command without any attached device.
+    # up. We also park one usb-kbd on the bus so the port-scan
+    # path has a real connected device to enumerate (Enable Slot,
+    # eventually Address Device + descriptor fetch).
     -device   "qemu-xhci,id=xhci"
+    -device   "usb-kbd,bus=xhci.0"
     "${UEFI_ARGS[@]}"
     "${BOOT_SOURCE[@]}"
 )
