@@ -863,12 +863,13 @@ bool SetConfiguration(Runtime& rt, DeviceState* dev, u8 config_value)
 
 // Build a Configure Endpoint Input Context for adding ONE new
 // endpoint on top of the EP0 context already established at
-// Address Device time. Slot Context is marked for update (A0) so
-// its context-entries field reflects the new DCI high-water mark.
-// The new endpoint's context is added via A(dci).
-void BuildConfigureEndpointInputContext(void* input_ctx_virt, u32 ctx_bytes, u8 port_num, u8 speed, u32 mps0,
-                                        u64 ep0_ring_phys, u8 new_dci, u32 new_ep_type, u32 new_mps, u32 new_interval,
-                                        u64 new_ring_phys)
+// Address Device time. Only the slot context (A0) and the new
+// endpoint (A_dci) are flagged — EP0 stays untouched because
+// it's already in Running state from Address Device. Marking A1
+// here would try to reconfigure a live EP0 and the controller
+// rejects it as TRB Error.
+void BuildConfigureEndpointInputContext(void* input_ctx_virt, u32 ctx_bytes, u8 port_num, u8 speed, u8 new_dci,
+                                        u32 new_ep_type, u32 new_mps, u32 new_interval, u64 new_ring_phys)
 {
     auto* base = static_cast<volatile u8*>(input_ctx_virt);
     // Zero the range we'll touch (Input Control + Slot + up to new_dci endpoint ctx).
@@ -877,35 +878,31 @@ void BuildConfigureEndpointInputContext(void* input_ctx_virt, u32 ctx_bytes, u8 
         base[i] = 0;
 
     volatile u32* icc = reinterpret_cast<volatile u32*>(base + 0 * ctx_bytes);
-    // Add flags — set A0 (slot) + A1 (EP0, keep) + A(new_dci).
-    icc[1] = (1u << 0) | (1u << 1) | (1u << new_dci);
+    // Add flags — A0 (slot context has new context-entries
+    // high-water) + A(new_dci) (the endpoint we're adding).
+    // A1 deliberately NOT set: re-flagging a running EP0 fails.
+    icc[1] = (1u << 0) | (1u << new_dci);
 
-    // Slot Context — same pattern as Address Device but with
-    // context entries high-water raised to include new_dci.
+    // Slot Context — context-entries high-water raised to new_dci.
     volatile u32* slot = reinterpret_cast<volatile u32*>(base + 1 * ctx_bytes);
     slot[0] = (u32(speed) << 20) | (u32(new_dci) << 27);
     slot[1] = u32(port_num) << 16;
 
-    // EP0 Context — re-describe so the controller doesn't null it
-    // out when it consumes this Input Context (A1 set means
-    // "this is the new state of EP0").
-    volatile u32* ep0 = reinterpret_cast<volatile u32*>(base + 2 * ctx_bytes);
-    ep0[0] = 0;
-    ep0[1] = (3u << 1) | (4u << 3) | (mps0 << 16);
-    const u64 ep0_dcs = ep0_ring_phys | 1ull;
-    ep0[2] = u32(ep0_dcs);
-    ep0[3] = u32(ep0_dcs >> 32);
-    ep0[4] = 8;
-
     // New endpoint context at index new_dci.
     volatile u32* ep = reinterpret_cast<volatile u32*>(base + new_dci * ctx_bytes);
+    // DW0: Interval in bits 16..23 (xHCI encoding, 2^N × 125 µs).
     ep[0] = (new_interval & 0xFF) << 16;
+    // DW1: CErr=3, EP Type, Max Packet Size.
     ep[1] = (3u << 1) | (new_ep_type << 3) | (new_mps << 16);
     const u64 ep_dcs = new_ring_phys | 1ull;
     ep[2] = u32(ep_dcs);
     ep[3] = u32(ep_dcs >> 32);
-    // Average TRB length — 8 bytes matches HID boot keyboard report size.
-    ep[4] = new_mps;
+    // DW4: Average TRB Length (bits 0..15) + Max ESIT Payload Lo
+    // (bits 16..31). Periodic endpoints MUST set MaxESITPayload or
+    // the controller rejects Configure Endpoint as TRB Error. For
+    // HID Boot Keyboard: MPS × Max Burst Size = 8 × 1 = 8, which
+    // is also a fine value for Average TRB Length.
+    ep[4] = (new_mps & 0xFFFFu) | (new_mps << 16);
 }
 
 // Enqueue one Normal TRB on the HID transfer ring. The controller
@@ -961,11 +958,10 @@ bool BringUpHidKeyboard(Runtime& rt, PortRecord& port)
     dev->hid_ep_max_packet = port.hid_ep_max_packet;
 
     // Configure Endpoint command — uses the command ring, not EP0.
-    const u32 mps0 = DefaultMaxPacketSize0(dev->speed);
     const u32 interval = HidXhciInterval(dev->speed, port.hid_ep_interval);
-    BuildConfigureEndpointInputContext(dev->input_ctx_virt, rt.ctx_bytes, dev->port_num, dev->speed, mps0,
-                                       dev->ep0_ring_phys, dev->hid_ep_xhci_idx, kEpTypeInterruptIn,
-                                       port.hid_ep_max_packet, interval, dev->hid_ring_phys);
+    BuildConfigureEndpointInputContext(dev->input_ctx_virt, rt.ctx_bytes, dev->port_num, dev->speed,
+                                       dev->hid_ep_xhci_idx, kEpTypeInterruptIn, port.hid_ep_max_packet, interval,
+                                       dev->hid_ring_phys);
     const u64 cmd_phys = SubmitCmd(rt, kTrbTypeConfigureEndpoint, u32(dev->input_ctx_phys),
                                    u32(dev->input_ctx_phys >> 32), 0, u32(dev->slot_id) << 24);
     if (cmd_phys == 0)
