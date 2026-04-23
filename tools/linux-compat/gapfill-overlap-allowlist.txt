@@ -1,0 +1,6 @@
+# Linux syscall numbers allowed to intentionally overlap between
+# LinuxSyscallDispatch and translation::LinuxGapFill.
+#
+# Entries may be either numeric syscall numbers (e.g. 96) or
+# syscall enum symbols (e.g. kSysGettimeofday).
+# Keep this empty unless a temporary overlap is deliberate.

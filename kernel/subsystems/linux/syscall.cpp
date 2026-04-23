@@ -2036,6 +2036,8 @@ u64 LinuxNowNs()
 extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
 {
     KLOG_TRACE_SCOPE("linux/syscall", "LinuxSyscallDispatch");
+    // Ownership: primary owner of implemented Linux ABI behavior.
+    // Translation is only for unresolved syscall-number misses.
     const u64 nr = frame->rax;
     i64 rv = kENOSYS;
     switch (nr)
