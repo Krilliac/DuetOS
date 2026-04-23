@@ -88,6 +88,7 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     drivers/usb/msc_scsi.cpp
     drivers/usb/usb.cpp
     drivers/usb/xhci.cpp
+    drivers/video/calendar.cpp
     drivers/video/console.cpp
     drivers/video/cursor.cpp
     drivers/video/font8x8.cpp

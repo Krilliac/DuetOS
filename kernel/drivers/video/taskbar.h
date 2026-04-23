@@ -56,4 +56,9 @@ bool TaskbarContains(u32 x, u32 y);
 /// non-null out pointer; all four may be null to skip.
 void TaskbarStartBounds(u32* x, u32* y, u32* w, u32* h);
 
+/// Bounds of the clock / date widget on the right edge. Lets a
+/// caller hit-test a click on the clock so it can toggle the
+/// calendar popup. Populated after TaskbarRedraw.
+void TaskbarClockBounds(u32* x, u32* y, u32* w, u32* h);
+
 } // namespace customos::drivers::video

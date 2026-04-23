@@ -1,6 +1,9 @@
 #include "taskbar.h"
 
 #include "../../arch/x86_64/rtc.h"
+#include "../../drivers/net/net.h"
+#include "../../drivers/power/power.h"
+#include "../../mm/frame_allocator.h"
 #include "../../sched/sched.h"
 #include "framebuffer.h"
 #include "widget.h"
@@ -17,6 +20,13 @@ constinit u32 g_bg = 0x00202020;
 constinit u32 g_fg = 0x00FFFFFF;
 constinit u32 g_accent = 0x00406080;
 constinit bool g_ready = false;
+
+// Cached clock-widget bounds (recomputed every redraw). Exposed
+// via TaskbarClockBounds for the mouse reader's calendar-toggle.
+constinit u32 g_clock_x = 0;
+constinit u32 g_clock_y = 0;
+constinit u32 g_clock_w = 0;
+constinit u32 g_clock_h = 0;
 
 // Last-painted tab layout. Updated by TaskbarRedraw; consumed by
 // TaskbarTabAt. Capacity matches kMaxWindows so tabs and window
@@ -158,37 +168,152 @@ void TaskbarRedraw()
         tab_x += tab_w + tab_gap;
     }
 
-    // Right-anchored wall clock. RtcRead returns decoded 24-hour
-    // fields; we format "HH:MM:SS" with leading zeros so column
-    // width stays constant across minute / hour rollover. A
-    // trailing "  UP NNNNs" keeps the scheduler uptime visible
-    // alongside wall time — useful for boot-latency sanity.
+    // --- Right edge: system tray + date + clock + uptime. ---
+    //
+    // Layout right-to-left from the framebuffer's right edge so
+    // new widgets can land left of existing ones without shifting
+    // the clock:
+    //
+    //   [ ...tabs ... ]  [NET][CPU][MEM]  MON 23 APR 2026  HH:MM:SS  UP Ns
+    //
+    // Clock bounds are captured into g_clock_* so the mouse reader
+    // can toggle the calendar popup on click.
+
     customos::arch::RtcTime rtc{};
     customos::arch::RtcRead(&rtc);
-    char buf[32];
-    u32 off = 0;
-    buf[off++] = static_cast<char>('0' + (rtc.hour / 10));
-    buf[off++] = static_cast<char>('0' + (rtc.hour % 10));
-    buf[off++] = ':';
-    buf[off++] = static_cast<char>('0' + (rtc.minute / 10));
-    buf[off++] = static_cast<char>('0' + (rtc.minute % 10));
-    buf[off++] = ':';
-    buf[off++] = static_cast<char>('0' + (rtc.second / 10));
-    buf[off++] = static_cast<char>('0' + (rtc.second % 10));
-    buf[off++] = ' ';
-    buf[off++] = ' ';
-    buf[off++] = 'U';
-    buf[off++] = 'P';
-    buf[off++] = ' ';
+
+    // Uptime goes at the far right; the clock gets its own rect
+    // so the mouse reader has a tight hit-test target.
+    char upbuf[16];
+    u32 up_off = 0;
+    upbuf[up_off++] = 'U';
+    upbuf[up_off++] = 'P';
+    upbuf[up_off++] = ' ';
     const u64 ticks = customos::sched::SchedNowTicks();
     const u64 secs = ticks / 100;
-    off += FormatU64Dec(secs, buf + off, sizeof(buf) - off - 2);
-    buf[off++] = 'S';
-    buf[off] = '\0';
+    up_off += FormatU64Dec(secs, upbuf + up_off, sizeof(upbuf) - up_off - 2);
+    upbuf[up_off++] = 's';
+    upbuf[up_off] = '\0';
+    const u32 up_text_w = up_off * 8;
+    const u32 up_x = (fbw > up_text_w + 8) ? fbw - up_text_w - 8 : 0;
+    FramebufferDrawString(up_x, text_y, upbuf, g_fg, g_bg);
 
-    const u32 text_w = off * 8;
-    const u32 text_x = (fbw > text_w + 8) ? fbw - text_w - 8 : 0;
-    FramebufferDrawString(text_x, text_y, buf, g_fg, g_bg);
+    // Wall clock left of the uptime.
+    char clk[9];
+    clk[0] = char('0' + rtc.hour / 10);
+    clk[1] = char('0' + rtc.hour % 10);
+    clk[2] = ':';
+    clk[3] = char('0' + rtc.minute / 10);
+    clk[4] = char('0' + rtc.minute % 10);
+    clk[5] = ':';
+    clk[6] = char('0' + rtc.second / 10);
+    clk[7] = char('0' + rtc.second % 10);
+    clk[8] = '\0';
+    const u32 clk_text_w = 8 * 8;
+    const u32 clk_x = (up_x > clk_text_w + 12) ? up_x - clk_text_w - 12 : 0;
+    FramebufferDrawString(clk_x, text_y, clk, g_fg, g_bg);
+    // Publish a whole-cell hit-test rect around the clock so a
+    // user can click anywhere vertically on the widget and have
+    // the calendar pop up.
+    g_clock_x = (clk_x >= 4) ? clk_x - 4 : 0;
+    g_clock_y = g_y + 4;
+    g_clock_w = clk_text_w + 8;
+    g_clock_h = (g_h > 8) ? g_h - 8 : g_h;
+
+    // Date display left of the clock, format "WWW DD MMM YYYY".
+    // Three-letter weekday (derived from a Zeller-ish computation
+    // rather than requiring the RTC to provide one; QEMU's RTC
+    // doesn't populate .weekday reliably).
+    static const char* kWd[7] = {"SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"};
+    static const char* kMo[13] = {"???", "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+                                  "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"};
+    u32 wy = rtc.year;
+    u32 wm = rtc.month;
+    const u32 wd_day = rtc.day;
+    if (wm < 1 || wm > 12)
+        wm = 1;
+    if (wm < 3)
+    {
+        wm += 12;
+        --wy;
+    }
+    const u32 K = wy % 100;
+    const u32 J = wy / 100;
+    const u32 h_zeller = (wd_day + (13 * (wm + 1)) / 5 + K + K / 4 + J / 4 + 5 * J) % 7;
+    const u32 dow = (h_zeller + 6) % 7;
+    const u32 mo_for_name = (rtc.month >= 1 && rtc.month <= 12) ? rtc.month : 0;
+    char date[16];
+    u32 d = 0;
+    date[d++] = kWd[dow][0];
+    date[d++] = kWd[dow][1];
+    date[d++] = kWd[dow][2];
+    date[d++] = ' ';
+    date[d++] = char('0' + rtc.day / 10);
+    date[d++] = char('0' + rtc.day % 10);
+    date[d++] = ' ';
+    date[d++] = kMo[mo_for_name][0];
+    date[d++] = kMo[mo_for_name][1];
+    date[d++] = kMo[mo_for_name][2];
+    date[d++] = ' ';
+    date[d++] = char('0' + (rtc.year / 1000) % 10);
+    date[d++] = char('0' + (rtc.year / 100) % 10);
+    date[d++] = char('0' + (rtc.year / 10) % 10);
+    date[d++] = char('0' + rtc.year % 10);
+    date[d] = '\0';
+    const u32 date_text_w = d * 8;
+    const u32 date_x = (clk_x > date_text_w + 12) ? clk_x - date_text_w - 12 : 0;
+    FramebufferDrawString(date_x, text_y, date, g_fg, g_bg);
+
+    // --- System tray: left of the date. Three tiny cells 20×20
+    // each with a label + status colour, laid out right-to-left.
+    constexpr u32 tray_cell = 20;
+    constexpr u32 tray_gap = 6;
+    const u32 tray_y = g_y + (g_h > tray_cell ? (g_h - tray_cell) / 2 : 0);
+    u32 tray_right = (date_x > tray_gap + 4) ? date_x - tray_gap : 0;
+
+    auto draw_tray_cell = [&](const char* label, u32 body_rgb)
+    {
+        if (tray_right < tray_cell + 4)
+            return;
+        const u32 cx = tray_right - tray_cell;
+        FramebufferFillRect(cx, tray_y, tray_cell, tray_cell, body_rgb);
+        FramebufferDrawRect(cx, tray_y, tray_cell, tray_cell, 0x00101828, 1);
+        // 3-char label centred ~ (20 - 8)/2, but we only have
+        // 8x8 glyphs so we place one glyph for 1-char labels and
+        // stack two glyphs for 2-char ones.
+        const u32 len = (label[0] == '\0' ? 0 : label[1] == '\0' ? 1 : 2);
+        const u32 tw = len * 8;
+        const u32 tx = cx + (tray_cell - tw) / 2;
+        const u32 ty = tray_y + (tray_cell - 8) / 2;
+        FramebufferDrawString(tx, ty, label, 0x00FFFFFF, body_rgb);
+        tray_right = (cx >= tray_gap) ? cx - tray_gap : 0;
+    };
+
+    // MEM: green once the allocator has > 1024 free frames
+    // (4 MiB) — a rough "we're not starving" threshold. Turns red
+    // when free frames drop below that as a gross pressure signal.
+    {
+        const u64 free_frames = customos::mm::FreeFramesCount();
+        const bool healthy = free_frames > 1024;
+        draw_tray_cell("M", healthy ? 0x0040803C : 0x00C04040);
+    }
+    // CPU: always green while scheduler is running.
+    draw_tray_cell("C", 0x0040803C);
+    // NET: green if at least one NIC was discovered.
+    {
+        const bool have_nic = customos::drivers::net::NicCount() > 0;
+        draw_tray_cell("N", have_nic ? 0x0040803C : 0x00505058);
+    }
+    // Battery (only shown if power driver decided a battery is
+    // present — laptops; skipped on desktops).
+    {
+        const auto snap = customos::drivers::power::PowerSnapshotRead();
+        if (snap.battery.state != customos::drivers::power::kBatNotPresent)
+        {
+            const u32 colour = (snap.ac == customos::drivers::power::kAcOnline) ? 0x003C9060 : 0x00C09040;
+            draw_tray_cell("B", colour);
+        }
+    }
 }
 
 u32 TaskbarTabAt(u32 x, u32 y)
@@ -216,6 +341,18 @@ bool TaskbarContains(u32 x, u32 y)
     }
     (void)x;
     return y >= g_y && y < g_y + g_h;
+}
+
+void TaskbarClockBounds(u32* x_out, u32* y_out, u32* w_out, u32* h_out)
+{
+    if (x_out)
+        *x_out = g_clock_x;
+    if (y_out)
+        *y_out = g_clock_y;
+    if (w_out)
+        *w_out = g_clock_w;
+    if (h_out)
+        *h_out = g_clock_h;
 }
 
 void TaskbarStartBounds(u32* x_out, u32* y_out, u32* w_out, u32* h_out)

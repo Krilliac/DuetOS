@@ -47,6 +47,7 @@
 #include "../drivers/video/console.h"
 #include "../drivers/video/cursor.h"
 #include "../drivers/video/framebuffer.h"
+#include "../drivers/video/calendar.h"
 #include "../drivers/video/menu.h"
 #include "../drivers/video/taskbar.h"
 #include "../drivers/video/widget.h"
@@ -730,6 +731,11 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
 #endif
     }
 
+    // demo-calendar=1 opens the calendar popup at boot so a headless
+    // screenshot can capture the widget without needing to inject a
+    // mouse click. No effect on normal boots.
+    const bool demo_calendar = CmdlineMatches(cmdline, "demo-calendar", "1");
+
     if (want_tty)
     {
         customos::drivers::video::SetDisplayMode(customos::drivers::video::DisplayMode::Tty);
@@ -741,6 +747,17 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     {
         customos::drivers::video::DesktopCompose(kDesktopTeal, "WELCOME TO CUSTOMOS   BOOT OK");
         customos::drivers::video::CursorInit(kDesktopTeal);
+        if (demo_calendar)
+        {
+            customos::u32 kx = 0, ky = 0, kw = 0, kh = 0;
+            customos::drivers::video::TaskbarClockBounds(&kx, &ky, &kw, &kh);
+            const customos::u32 ph = customos::drivers::video::CalendarPanelHeight();
+            const customos::u32 pw = customos::drivers::video::CalendarPanelWidth();
+            const customos::u32 ax = (kx + kw > pw) ? (kx + kw - pw) : 0;
+            const customos::u32 ay = (ky > ph) ? ky - ph : 0;
+            customos::drivers::video::CalendarOpen(ax, ay);
+            customos::drivers::video::DesktopCompose(kDesktopTeal, "WELCOME TO CUSTOMOS   BOOT OK");
+        }
     }
 
     SerialWrite("[boot] Seeding ramfs + VFS self-test.\n");
@@ -1401,6 +1418,43 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                 }
                 customos::drivers::video::MenuClose();
                 menu_handled = true;
+            }
+
+            // Click on the clock/date widget toggles the calendar
+            // popup. Tested BEFORE the start-menu branch because
+            // the clock lives on the opposite side of the
+            // taskbar; a hit here can never overlap the START
+            // rect.
+            if (press_edge && !menu_handled && !drag.active)
+            {
+                customos::u32 kx = 0, ky = 0, kw = 0, kh = 0;
+                customos::drivers::video::TaskbarClockBounds(&kx, &ky, &kw, &kh);
+                if (kw > 0 && cx >= kx && cx < kx + kw && cy >= ky && cy < ky + kh)
+                {
+                    if (customos::drivers::video::CalendarIsOpen())
+                    {
+                        customos::drivers::video::CalendarClose();
+                    }
+                    else
+                    {
+                        // Anchor upper-left so the popup sits
+                        // flush above the taskbar's top edge.
+                        const customos::u32 ph = customos::drivers::video::CalendarPanelHeight();
+                        const customos::u32 pw = customos::drivers::video::CalendarPanelWidth();
+                        const customos::u32 ax = (kx + kw > pw) ? (kx + kw - pw) : 0;
+                        const customos::u32 ay = (ky > ph) ? ky - ph : 0;
+                        customos::drivers::video::CalendarOpen(ax, ay);
+                        SerialWrite("[ui] calendar open\n");
+                    }
+                    menu_handled = true;
+                }
+            }
+
+            // Clicking outside an open calendar dismisses it.
+            if (press_edge && !menu_handled && customos::drivers::video::CalendarIsOpen() &&
+                !customos::drivers::video::CalendarContains(cx, cy))
+            {
+                customos::drivers::video::CalendarClose();
             }
 
             // START button press opens (or closes) the menu.
