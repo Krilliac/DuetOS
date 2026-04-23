@@ -14,6 +14,7 @@
 #include "../mm/frame_allocator.h"
 #include "../security/guard.h"
 #include "../mm/kheap.h"
+#include "../mm/kstack.h"
 #include "../mm/paging.h"
 #include "../sync/spinlock.h"
 
@@ -447,16 +448,22 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
         PanicSched("KMalloc failed for Task");
     }
 
-    auto* stack = static_cast<u8*>(mm::KMalloc(kKernelStackBytes));
+    // Kernel stacks come from the guard-paged arena, not the heap:
+    // a 4 KiB unmapped page sits just below every slot's usable
+    // range so overflow #PFs immediately instead of scribbling the
+    // next heap chunk. See mm/kstack.h for the arena layout.
+    static_assert(kKernelStackBytes == mm::kKernelStackUsableBytes,
+                  "sched kernel stack size must match kstack arena slot");
+    auto* stack = static_cast<u8*>(mm::AllocateKernelStack(kKernelStackBytes));
     if (stack == nullptr)
     {
-        PanicSched("KMalloc failed for kernel stack");
+        PanicSched("AllocateKernelStack failed for kernel stack");
     }
 
-    // Plant the canary at the low edge of the stack BEFORE priming
-    // the entry frame at the top. No part of the stack primer reaches
-    // down this far, so writing the canary here is never redundant
-    // with the per-task context the trampoline reads.
+    // Plant the canary at the low edge of the (usable) stack BEFORE
+    // priming the entry frame at the top. The guard page sits below
+    // THIS address; a spill that reaches the canary but not the guard
+    // page is an unlikely large-frame-skip but cheap to keep covered.
     *reinterpret_cast<u64*>(stack) = kStackCanary;
 
     t->id = g_next_task_id++;
@@ -1443,8 +1450,8 @@ namespace
             // defensive null-check even though task 0 should never
             // exit. Every other task got a canary planted at
             // stack_base in SchedCreate — verify before freeing so
-            // stack overflow surfaces as a named panic here instead
-            // of as downstream heap-magic corruption later.
+            // any overflow that stayed above the guard page still
+            // surfaces here as a named panic.
             if (dead->stack_base != nullptr)
             {
                 const u64 canary = *reinterpret_cast<const u64*>(dead->stack_base);
@@ -1452,7 +1459,7 @@ namespace
                 {
                     core::PanicWithValue("sched/reaper", "stack canary corrupted (task overflow?)", canary);
                 }
-                mm::KFree(dead->stack_base);
+                mm::FreeKernelStack(dead->stack_base, dead->stack_size);
             }
             mm::KFree(dead);
             ++g_tasks_reaped;

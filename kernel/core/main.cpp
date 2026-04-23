@@ -74,6 +74,7 @@
 #include "shell.h"
 #include "syscall.h"
 #include "../mm/kheap.h"
+#include "../mm/kstack.h"
 #include "../mm/multiboot2.h"
 #include "../mm/paging.h"
 #include "../sched/sched.h"
@@ -312,6 +313,11 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     SerialWrite("[boot] Bringing up paging.\n");
     PagingInit();
     PagingSelfTest();
+
+    // Kernel-stack guard-paged arena — runs here because it needs
+    // the managed paging API (PagingInit) for MapPage / UnmapPage
+    // but must be online before any SchedCreate call uses it.
+    customos::mm::KernelStackSelfTest();
     // Kernel-image W^X / DEP — split the 2 MiB PS direct map covering
     // the kernel image into 4 KiB pages, then apply per-section flags:
     //   .text  → R + X   (writes to .text now #PF)
