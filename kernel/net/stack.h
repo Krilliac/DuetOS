@@ -361,4 +361,33 @@ bool DhcpStart(u32 iface_index);
 /// successfully bound a new IP.
 DhcpLease DhcpLeaseRead();
 
+// -------------------------------------------------------------------
+// TCP (passive-listen, single-connection, no retransmit) — v0.
+//
+// Scope: accept one incoming connection on a bound port; on any
+// received data, reply with a canned payload + FIN; close on the
+// peer's FIN. No retransmit, no sliding window, no out-of-order
+// reassembly, no TCP options past MSS. Enough to serve a one-shot
+// "hello" response to a browser or netcat, which is the v0 bar.
+// -------------------------------------------------------------------
+
+struct TcpStats
+{
+    u64 rx_packets;
+    u64 rx_out_of_state;
+    u64 syn_ack_tx;
+    u64 data_ack_tx;
+    u64 data_tx;
+    u64 fin_tx;
+    u64 rst_tx;
+};
+TcpStats TcpStatsRead();
+
+/// Bind a single TCP port to reply with `canned_reply` bytes on
+/// the first data segment of an accepted connection, then close.
+/// Only one listen slot in v0; a second call replaces the first.
+/// Returns false if `canned_len` exceeds kTcpMaxCannedReply.
+inline constexpr u32 kTcpMaxCannedReply = 512;
+bool TcpListen(u16 local_port, const u8* canned_reply, u32 canned_len);
+
 } // namespace customos::net

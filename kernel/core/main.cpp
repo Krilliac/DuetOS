@@ -991,6 +991,19 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
 
     SerialWrite("[boot] Bringing up network stack skeleton.\n");
     customos::net::NetStackInit();
+    {
+        // Park a canned reply on TCP port 7777. Any connection
+        // that lands with a data segment gets this body + FIN.
+        // Handy to smoke-test the TCP state machine from the
+        // host with `nc 10.0.2.15 7777` (given appropriate
+        // hostfwd) or `curl http://.../` once HTTP lands.
+        static const char kHello[] = "HTTP/1.0 200 OK\r\n"
+                                     "Content-Type: text/plain\r\n"
+                                     "Content-Length: 24\r\n"
+                                     "\r\n"
+                                     "Hello from CustomOS!\r\n\r\n";
+        customos::net::TcpListen(7777, reinterpret_cast<const customos::u8*>(kHello), sizeof(kHello) - 1);
+    }
 
     SerialWrite("[boot] Bringing up graphics ICD skeleton.\n");
     customos::subsystems::graphics::GraphicsIcdInit();
