@@ -417,6 +417,8 @@ const char* PeStatusName(PeStatus s)
         return "RelocsNonEmpty";
     case PeStatus::TlsPresent:
         return "TlsPresent";
+    case PeStatus::TlsCallbacksUnsupported:
+        return "TlsCallbacksUnsupported";
     case PeStatus::StubsPageAllocFail:
         return "StubsPageAllocFail";
     }
@@ -478,6 +480,58 @@ void StagedMissAppend(u64 slot_va, const char* name)
     g_staged_misses[g_staged_miss_count].slot_va = slot_va;
     g_staged_misses[g_staged_miss_count].name = name;
     ++g_staged_miss_count;
+}
+
+// Count non-null TLS callback VAs in the callbacks array
+// pointed at by the TLS directory's `AddressOfCallBacks` field.
+// Returns 0 for an empty / absent callback array, (-1) when the
+// callbacks VA points outside any mapped section (caller treats
+// this as malformed; fail the load).
+//
+// The callback array is a NULL-terminated array of u64 VAs. We
+// walk at most `kMaxCb` entries — a hostile TLS directory with
+// a missing terminator can't then spin the loader forever.
+//
+// Reads through the FILE image (not the mapped image) because
+// this runs before the thunk that would actually invoke the
+// callbacks exists. The TLS directory's `AddressOfCallBacks` is
+// a VA in the mapped image; we convert back via
+// `(VA - ImageBase) → RVA → file offset`. That round-trip is
+// identical to `ReportTls` in the same file — v0 could share
+// helpers, but this call path has to be cheap (it runs once per
+// spawn) so we open-code it.
+u64 CountTlsCallbacks(const u8* file, u64 file_len, const PeHeaders& h)
+{
+    const PeDataDir tls = ReadDataDir(file, h, kDirEntryTls);
+    if (tls.rva == 0 || tls.size == 0)
+        return 0;
+    const u64 tls_off = RvaToFile(file, h, tls.rva);
+    if (tls_off == ~u64(0) || tls_off + 40 > file_len)
+        return 0;
+    const u64 cb_va = LeU64(file + tls_off + 24);
+    // The preferred base still lives in h.image_base (set by
+    // ParseHeaders); callers that applied an aslr_delta already
+    // updated h.image_base at that point too, but we normalise
+    // here against whatever h.image_base happens to hold.
+    if (cb_va == 0 || cb_va < h.image_base)
+        return 0;
+    const u32 cb_rva = static_cast<u32>(cb_va - h.image_base);
+    const u64 cb_off = RvaToFile(file, h, cb_rva);
+    if (cb_off == ~u64(0))
+        return 0;
+    constexpr u32 kMaxCb = 16;
+    u32 count = 0;
+    for (u32 i = 0; i < kMaxCb; ++i)
+    {
+        const u64 ent_off = cb_off + u64(i) * 8;
+        if (ent_off + 8 > file_len)
+            break;
+        const u64 ent = LeU64(file + ent_off);
+        if (ent == 0)
+            break;
+        ++count;
+    }
+    return count;
 }
 
 // Walk the base-relocation directory and apply each entry to
@@ -896,6 +950,40 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, customos::mm::AddressSpace* as
         return r;
     }
     SerialWrite("[pe-load] step3 relocs applied\n");
+
+    // 3b. TLS callback gate. MSVC-built PEs frequently ship a
+    //     .tls section with an EMPTY callback array — the CRT
+    //     reserves the directory for "just in case" TLS callback
+    //     registration but the binary we're loading doesn't
+    //     actually register any. We let those through (the
+    //     callback array walk below finds 0 entries and PeLoad
+    //     proceeds to entry).
+    //
+    //     Non-empty callback arrays, by contrast, mean the PE is
+    //     relying on code that runs BEFORE its main entry point
+    //     — TLS static initializers, static destructors-by-way-of
+    //     DllMain, Microsoft's /GS cookie init, etc. Running them
+    //     correctly requires a per-process x64 thunk that calls
+    //     each with (rcx=image_base, rdx=DLL_PROCESS_ATTACH,
+    //     r8=nullptr) and 32 bytes of shadow space, then jumps to
+    //     the real entry. That thunk is a separate slice. Until
+    //     it lands, silently skipping the callbacks would mean
+    //     the PE's main() could dereference an uninitialized
+    //     static and crash with a misleading traceback. Reject
+    //     with a clear diagnostic instead.
+    const PeDataDir tls_dir = ReadDataDir(file, h, kDirEntryTls);
+    const bool tls_directory_present = (tls_dir.rva != 0 && tls_dir.size != 0);
+    const u64 tls_cb_count = tls_directory_present ? CountTlsCallbacks(file, file_len, h) : 0;
+    if (tls_cb_count > 0)
+    {
+        SerialWrite("[pe-load] FAIL TlsCallbacksUnsupported count=");
+        SerialWriteHex(tls_cb_count);
+        SerialWrite(" — v0 cannot invoke TLS callbacks; a future slice "
+                    "injects a per-process thunk to call them before entry\n");
+        return r;
+    }
+    if (tls_directory_present)
+        SerialWrite("[pe-load] step3b tls directory present, callbacks=0 (ok)\n");
 
     // 4. Stack: kV0StackPages pages, writable + NX, mapped
     //    ending at kV0StackTop. MSVC's __chkstk probes the
