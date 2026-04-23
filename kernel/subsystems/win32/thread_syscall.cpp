@@ -15,6 +15,7 @@
 #include "../../mm/page.h"
 #include "../../mm/paging.h"
 #include "../../sched/sched.h"
+#include "stubs.h"
 
 namespace customos::subsystems::win32
 {
@@ -142,6 +143,7 @@ void DoThreadCreate(arch::TrapFrame* frame)
     // so rsp starts at (base + N*4096 - 8).
     const u64 stack_base_va = proc->thread_stack_cursor;
     const u64 stack_pages = Process::kV0ThreadStackPages;
+    mm::PhysAddr top_frame_phys = mm::kNullFrame;
     for (u64 p = 0; p < stack_pages; ++p)
     {
         const mm::PhysAddr frame_phys = mm::AllocateFrame();
@@ -156,6 +158,8 @@ void DoThreadCreate(arch::TrapFrame* frame)
         const u64 page_va = stack_base_va + p * mm::kPageSize;
         mm::AddressSpaceMapUserPage(proc->as, page_va, frame_phys,
                                     mm::kPagePresent | mm::kPageUser | mm::kPageWritable | mm::kPageNoExecute);
+        if (p == stack_pages - 1)
+            top_frame_phys = frame_phys;
     }
     proc->thread_stack_cursor += stack_pages * mm::kPageSize;
     const u64 stack_top = stack_base_va + stack_pages * mm::kPageSize;
@@ -164,6 +168,17 @@ void DoThreadCreate(arch::TrapFrame* frame)
     // bias rsp by -8 before entry — same pattern as the main
     // Ring3UserEntry path.
     const u64 user_rsp = stack_top - 8;
+
+    // Plant the thread-exit trampoline VA at [user_rsp]. When the
+    // thread proc returns, `ret` pops this value into rip and the
+    // trampoline issues SYS_EXIT(retcode). Without this the thread
+    // would `ret` into rip=0 and eat a #PF. We write via the
+    // direct-map image of the top stack frame — the page isn't
+    // mapped into any AS we currently own a CR3 for, but the
+    // direct-map gives every frame a kernel-writable alias.
+    auto* top_page_kva = static_cast<u8*>(mm::PhysToVirt(top_frame_phys));
+    auto* retaddr_slot = reinterpret_cast<u64*>(top_page_kva + mm::kPageSize - 8);
+    *retaddr_slot = ::customos::win32::kWin32ThreadExitTrampVa;
 
     // Build the kernel-heap ThreadDesc that Ring3ThreadEntry
     // will consume. Heap-allocated so the ring-0 stack frame

@@ -252,6 +252,35 @@ add_custom_command(
 
 list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_HELLO_WINAPI_HEADER}")
 
+# ----------------------------------------------------------------------------
+# Fourth PE fixture: thread_stress.exe — exercises CreateThread,
+# CreateEventW, SetEvent, WaitForSingleObject round-trip. Verifies
+# the batch-50 SYS_THREAD_CREATE wiring works end-to-end: main
+# creates a child thread, child writes a sentinel + signals an
+# event, main wakes + checks the sentinel.
+# ----------------------------------------------------------------------------
+set(CUSTOMOS_THREAD_STRESS_SRC "${CMAKE_SOURCE_DIR}/userland/apps/thread_stress/hello.c")
+file(GLOB CUSTOMOS_THREAD_STRESS_DEFS
+    "${CMAKE_SOURCE_DIR}/userland/apps/thread_stress/*.def")
+set(CUSTOMOS_THREAD_STRESS_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_thread_stress.h")
+set(CUSTOMOS_THREAD_STRESS_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-thread-stress.sh")
+
+add_custom_command(
+    OUTPUT "${CUSTOMOS_THREAD_STRESS_HEADER}"
+    COMMAND "${CUSTOMOS_THREAD_STRESS_SCRIPT}"
+            "${CMAKE_SOURCE_DIR}"
+            "${CUSTOMOS_THREAD_STRESS_HEADER}"
+    DEPENDS
+        "${CUSTOMOS_THREAD_STRESS_SRC}"
+        ${CUSTOMOS_THREAD_STRESS_DEFS}
+        "${CUSTOMOS_THREAD_STRESS_SCRIPT}"
+        "${CUSTOMOS_EMBED_BLOB_SCRIPT}"
+    COMMENT "Compiling + embedding /bin/thread_stress.exe (CreateThread path)"
+    VERBATIM
+)
+
+list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_THREAD_STRESS_HEADER}")
+
 set(CUSTOMOS_KERNEL_LINKER_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/arch/x86_64/linker.ld")
 
 # Shared link flags — applied identically to both stages so the symbol

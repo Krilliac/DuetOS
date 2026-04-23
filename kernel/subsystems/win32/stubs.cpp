@@ -152,6 +152,9 @@ constexpr u32 kOffSystemTimeToFileTime = 0x837;    // batch 48 — 14 bytes
 constexpr u32 kOffFileTimeToSystemTime = 0x845;    // batch 48 — 14 bytes
 constexpr u32 kOffNtQuerySystemTimeReal = 0x853;   // batch 49 — 16 bytes
 constexpr u32 kOffNtQueryPerfCounterReal = 0x863;  // batch 49 — 28 bytes
+constexpr u32 kOffCreateThreadReal = 0x87F;        // batch 50 — 35 bytes
+// ThreadExitTramp: offset 0x8A2, 6 bytes. Public VA exported as
+// customos::win32::kWin32ThreadExitTrampVa in stubs.h — keep in sync.
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -2265,10 +2268,55 @@ constexpr u8 kStubsBytes[] = {
     // .done:
     0x31, 0xC0, // 0x87C xor eax, eax   ; STATUS_SUCCESS
     0xC3,       // 0x87E ret
+
+    // === Batch 50: real CreateThread via SYS_THREAD_CREATE =====
+    //
+    // Win32: HANDLE CreateThread(
+    //     LPSECURITY_ATTRIBUTES  lpThreadAttributes,  // rcx  (ignored)
+    //     SIZE_T                 dwStackSize,          // rdx  (ignored — kernel picks)
+    //     LPTHREAD_START_ROUTINE lpStartAddress,       // r8
+    //     LPVOID                 lpParameter,          // r9
+    //     DWORD                  dwCreationFlags,      // [rsp+0x28]  (ignored — always-run)
+    //     LPDWORD                lpThreadId);          // [rsp+0x30]  (optional out)
+    //
+    // CustomOS: SYS_THREAD_CREATE (45) with start_va in rdi,
+    // param in rsi. Returns handle or 0xFFFFFFFFFFFFFFFF on
+    // failure. The Win32 contract is "handle or NULL on fail" —
+    // we translate -1 to 0 at the tail.
+    //
+    // --- CreateThread (offset 0x87F, 35 bytes) -----------------
+    0x4C, 0x89, 0xC7,             // 0x87F mov rdi, r8          ; start
+    0x4C, 0x89, 0xCE,             // 0x882 mov rsi, r9          ; param
+    0xB8, 0x2D, 0x00, 0x00, 0x00, // 0x885 mov eax, 45          ; SYS_THREAD_CREATE
+    0xCD, 0x80,                   // 0x88A int 0x80             ; rax = handle or -1
+    // If lpThreadId (at [rsp+0x30]) is non-NULL, stash rax low32.
+    0x48, 0x8B, 0x4C, 0x24, 0x30, // 0x88C mov rcx, [rsp+0x30]
+    0x48, 0x85, 0xC9,             // 0x891 test rcx, rcx
+    0x74, 0x02,                   // 0x894 je  +2 -> 0x898
+    0x89, 0x01,                   // 0x896 mov [rcx], eax
+    // Translate -1 (any high bits set) to 0 for Win32 "NULL" handle
+    // semantics. cmp al with 0 — too coarse; use cmp rax, -1.
+    0x48, 0x83, 0xF8, 0xFF, // 0x898 cmp rax, -1
+    0x75, 0x03,             // 0x89C jne +3 -> 0x8A1
+    0x31, 0xC0,             // 0x89E xor eax, eax
+    0x90,                   // 0x8A0 nop (padding so cmp/jne/xor lands exactly 3 bytes)
+    0xC3,                   // 0x8A1 ret
+
+    // --- ThreadExitTramp (offset 0x8A2, 6 bytes) ---------------
+    // Landing site when a Win32 thread proc returns. DoThreadCreate
+    // writes (kWin32StubsVa + 0x8A2) to [stack_top - 8] so the
+    // thread proc's final `ret` pops this VA into RIP. The thread
+    // proc's return value is still in EAX (Win32 __stdcall). We
+    // copy it to EDI (SYS_EXIT's first arg) then issue SYS_EXIT(0).
+    // SYS_EXIT kills just this task — the process's other threads
+    // (e.g. main waiting on the event) are unaffected. Noreturn.
+    0x89, 0xC7, // 0x8A2 mov edi, eax     ; thread retcode
+    0x31, 0xC0, // 0x8A4 xor eax, eax    ; SYS_EXIT = 0
+    0xCD, 0x80, // 0x8A6 int 0x80        ; noreturn
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x87F, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0x8A8, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -2698,8 +2746,8 @@ constexpr StubEntry kStubsTable[] = {
     {"kernel32.dll", "SetPriorityClass", kOffReturnOne},
     {"kernel32.dll", "GetThreadPriority", kOffReturnZero}, // 0 = NORMAL
     {"kernel32.dll", "SetThreadPriority", kOffReturnOne},
-    {"kernel32.dll", "CreateThread", kOffReturnZero},       // NULL — can't spawn in v0
-    {"kernel32.dll", "CreateRemoteThread", kOffReturnZero}, // already batch-24 fallback
+    {"kernel32.dll", "CreateThread", kOffCreateThreadReal}, // batch 50 — real spawn via SYS_THREAD_CREATE
+    {"kernel32.dll", "CreateRemoteThread", kOffReturnZero}, // batch-24 fallback stays (no cross-proc v0)
     // Tls/Fls now route through real per-process storage —
     // moved to batch 46 below.
     {"kernel32.dll", "SetEndOfFile", kOffReturnOne},

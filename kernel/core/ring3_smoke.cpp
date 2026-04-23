@@ -7,6 +7,7 @@
 #include "../fs/ramfs.h"
 #include "generated_hello_pe.h"
 #include "generated_hello_winapi.h"
+#include "generated_thread_stress.h"
 #include "generated_winkill_pe.h"
 #include "../mm/address_space.h"
 #include "../mm/frame_allocator.h"
@@ -2017,6 +2018,16 @@ bool SpawnOnDemand(const char* kind)
                     CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
         return true;
     }
+    if (LocalStrEq(kind, "threads"))
+    {
+        // thread_stress.exe — exercises CreateThread +
+        // CreateEventW + SetEvent + WaitForSingleObject.
+        // Expected exit: 0xABCDE on success.
+        SpawnPeFile("ring3-thread-stress", fs::generated::kBinThreadStressBytes,
+                    fs::generated::kBinThreadStressBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                    mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        return true;
+    }
     return false;
 }
 
@@ -2125,6 +2136,11 @@ void StartRing3SmokeTask()
     // .claude/knowledge/win32-subsystem-v0.md.
     SpawnPeFile("ring3-hello-winapi", fs::generated::kBinHelloWinapiBytes, fs::generated::kBinHelloWinapiBytes_len,
                 CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    // Thread-stress PE: CreateThread + CreateEventW + SetEvent +
+    // WaitForSingleObject round-trip. Exercises the Win32 →
+    // SYS_THREAD_CREATE path. Expected exit: 0xABCDE on success.
+    SpawnPeFile("ring3-thread-stress", fs::generated::kBinThreadStressBytes, fs::generated::kBinThreadStressBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     // Real-world Windows PE diagnostic attempt. Expected to
     // reject (most imports unresolved) — the value is the
     // PeReport log line showing the full import / reloc / TLS
@@ -2133,7 +2149,7 @@ void StartRing3SmokeTask()
                 fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     Log(LogLevel::Info, "core/ring3",
         "ring3 smoke tasks queued (incl cpu-hog + hostile + dropcaps + priv + badint + kread + "
-        "ptrfuzz + writefuzz + hellope + winkill-report)");
+        "ptrfuzz + writefuzz + hellope + winkill-report + thread-stress)");
 }
 
 } // namespace customos::core
