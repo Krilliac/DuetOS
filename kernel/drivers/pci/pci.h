@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../../core/result.h"
 #include "../../core/types.h"
 
 /*
@@ -242,14 +243,22 @@ void PciMsixFunctionUnmask(DeviceAddress addr);
 //
 // becomes:
 //
-//     pci::MsixRoute r;
-//     if (!pci::PciMsixRouteSimple(addr, /*entry=*/0, lapic, vector, &r))
-//         goto legacy_intx;
+//     RESULT_TRY_ASSIGN(pci::MsixRoute r,
+//                       pci::PciMsixRouteSimple(addr, 0, lapic, vector));
 //
-// `r` carries the mapped table base + table_size so the caller can
-// later mask / unmask vectors without re-walking config space.
-// Returns false (and leaves the device untouched) if the function
-// doesn't expose MSI-X or BAR mapping fails.
+// Or for callers that want to handle the error inline:
+//
+//     auto r = pci::PciMsixRouteSimple(addr, 0, lapic, vector);
+//     if (!r) goto legacy_intx;
+//     pci::MsixRoute route = r.take();
+//
+// `MsixRoute` carries the mapped table base + table_size so the
+// caller can later mask / unmask vectors without re-walking config
+// space. Error codes returned:
+//   Unsupported      — function doesn't expose MSI-X
+//   InvalidArgument  — entry_index >= table_size
+//   IoError          — table BAR is I/O-space (shouldn't happen)
+//   OutOfMemory      — MapMmio couldn't claim a spot in the arena
 // -----------------------------------------------------------------
 
 struct MsixRoute
@@ -261,7 +270,7 @@ struct MsixRoute
     MsixInfo info;             // capability snapshot
 };
 
-bool PciMsixRouteSimple(DeviceAddress addr, u16 entry_index, u8 lapic_id, u8 vector, MsixRoute* out);
+::customos::core::Result<MsixRoute> PciMsixRouteSimple(DeviceAddress addr, u16 entry_index, u8 lapic_id, u8 vector);
 
 // -----------------------------------------------------------------
 // Class-code string for diagnostic logs. Returns a stable pointer to

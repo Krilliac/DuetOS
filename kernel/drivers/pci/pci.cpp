@@ -336,46 +336,45 @@ void PciMsixFunctionUnmask(DeviceAddress addr)
     PciConfigWrite32(addr, static_cast<u8>(cap + 0), (word & 0x0000FFFFu) | (static_cast<u32>(msg_ctrl) << 16));
 }
 
-bool PciMsixRouteSimple(DeviceAddress addr, u16 entry_index, u8 lapic_id, u8 vector, MsixRoute* out)
+::customos::core::Result<MsixRoute> PciMsixRouteSimple(DeviceAddress addr, u16 entry_index, u8 lapic_id, u8 vector)
 {
-    if (out == nullptr)
-        return false;
-    out->table_base = nullptr;
-    out->table_phys = 0;
-    out->table_size = 0;
-    out->entry_index = entry_index;
+    using ::customos::core::Err;
+    using ::customos::core::ErrorCode;
 
-    if (!PciMsixFind(addr, &out->info))
-        return false;
-    if (entry_index >= out->info.table_size)
-        return false;
+    MsixRoute out{};
+    out.entry_index = entry_index;
 
-    const Bar bar = PciReadBar(addr, out->info.table_bir);
+    if (!PciMsixFind(addr, &out.info))
+        return Err{ErrorCode::Unsupported};
+    if (entry_index >= out.info.table_size)
+        return Err{ErrorCode::InvalidArgument};
+
+    const Bar bar = PciReadBar(addr, out.info.table_bir);
     if (bar.size == 0 || bar.is_io)
-        return false;
+        return Err{ErrorCode::IoError};
 
     // We only need the table region itself, not the whole BAR. Map
     // exactly table_size × 16-byte entries from (bar.address +
     // table_offset). Pad up to a 4 KiB page so MapMmio is happy
     // (its alignment guard rounds to page granularity anyway).
     constexpr u64 kPageMask = 0xFFFu;
-    const u64 region_phys = bar.address + out->info.table_offset;
-    u64 region_bytes = u64(out->info.table_size) * sizeof(MsixEntry);
+    const u64 region_phys = bar.address + out.info.table_offset;
+    u64 region_bytes = u64(out.info.table_size) * sizeof(MsixEntry);
     const u64 region_phys_aligned = region_phys & ~kPageMask;
     const u64 leading_pad = region_phys - region_phys_aligned;
     region_bytes = (region_bytes + leading_pad + kPageMask) & ~kPageMask;
     void* virt = mm::MapMmio(region_phys_aligned, region_bytes);
     if (virt == nullptr)
-        return false;
+        return Err{ErrorCode::OutOfMemory};
     auto* table = reinterpret_cast<volatile u8*>(virt) + leading_pad;
-    out->table_base = table;
-    out->table_phys = region_phys;
-    out->table_size = out->info.table_size;
+    out.table_base = table;
+    out.table_phys = region_phys;
+    out.table_size = out.info.table_size;
 
-    PciMsixSetEntry(out->table_base, out->table_size, entry_index, lapic_id, vector);
-    PciMsixUnmaskEntry(out->table_base, out->table_size, entry_index);
+    PciMsixSetEntry(out.table_base, out.table_size, entry_index, lapic_id, vector);
+    PciMsixUnmaskEntry(out.table_base, out.table_size, entry_index);
     PciMsixEnable(addr);
-    return true;
+    return out;
 }
 
 u8 PciFindCapability(DeviceAddress addr, u8 cap_id)

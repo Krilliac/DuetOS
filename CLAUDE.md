@@ -88,7 +88,7 @@ These are **guidelines for when to pause and think**, not absolute rules. A clea
 
 ## Coding Standards
 
-- **C++23** for kernel and most subsystems (`constexpr`, `enum class`, `std::expected`-style results, concepts, `if consteval`). No RTTI, no exceptions in kernel code — results go through an explicit `Result<T, E>` type.
+- **C++23** for kernel and most subsystems (`constexpr`, `enum class`, `std::expected`-style results, concepts, `if consteval`). No RTTI, no exceptions in kernel code — results go through `customos::core::Result<T, E>` (see `kernel/core/result.h`). Prefer `return Err{ErrorCode::Foo};` + `RESULT_TRY` / `RESULT_TRY_ASSIGN` at call sites over `return -1 / false / nullptr` sentinels.
 - **Rust** permitted for greenfield subsystems where memory-safety vs. C++ lifetime invariants matter (filesystem drivers, USB stack, network stack). If you reach for Rust, the subsystem must stand alone — no Rust-in-the-middle of a C++ call chain.
 - **ASM**: NASM (Intel syntax) for x86_64 boot, trap frames, context switch. Keep hand-written assembly to the smallest possible surface.
 - **Ownership**: `std::unique_ptr` / `UniquePtr` owning, raw pointers non-owning. In kernel, use the project's own smart pointer primitives — `std::` is user-land only.

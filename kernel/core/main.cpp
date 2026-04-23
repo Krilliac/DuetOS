@@ -62,6 +62,7 @@
 #include "panic.h"
 #include "process.h"
 #include "random.h"
+#include "result.h"
 #include "ring3_smoke.h"
 #include "runtime_checker.h"
 #include "../subsystems/linux/ring3_smoke.h"
@@ -238,6 +239,9 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
 
     SerialWrite("[boot] Reading MSR thermals.\n");
     customos::arch::ThermalProbe();
+
+    SerialWrite("[boot] Exercising Result<T,E> + TRY primitives.\n");
+    customos::core::ResultSelfTest();
 
     SerialWrite("[boot] Seeding kernel entropy pool.\n");
     customos::core::RandomInit();
