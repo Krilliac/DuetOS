@@ -286,8 +286,67 @@ struct IcmpStats
     u64 echo_requests_rx;
     u64 echo_replies_tx;
     u64 tx_failures;
+    u64 echo_requests_tx;
+    u64 echo_replies_rx;
 };
 IcmpStats IcmpStatsRead();
+
+/// Send one ICMP echo request to `dst_ip` via `iface_index`. Uses
+/// the ARP cache to resolve the peer's MAC — fails if the cache
+/// doesn't have an entry (caller should arrange learning first;
+/// every IPv4 RX auto-inserts, so pinging something we've already
+/// received a packet from always succeeds). `id` + `seq` are
+/// echoed back by the peer so the sender can match the reply.
+/// Payload is 32 bytes of 0xA5 for easy visual identification.
+bool NetIcmpSendEcho(u32 iface_index, Ipv4Address dst_ip, u16 id, u16 seq);
+
+struct PingResult
+{
+    bool replied;
+    u64 rtt_ticks; // scheduler ticks between send + reply
+    Ipv4Address from;
+};
+
+/// Record the outgoing ID/seq so the RX path can match a reply.
+/// Intended as a one-shot — caller sends, sleeps, reads.
+void NetPingArm(u16 id, u16 seq);
+
+/// Poll the pending-reply state set by NetPingArm + an incoming
+/// echo reply. `replied` is true iff NetPingArm was called and
+/// a matching reply landed.
+PingResult NetPingRead();
+
+// -------------------------------------------------------------------
+// DNS client (RFC 1035 subset — A-record queries only).
+//
+// Single in-flight query at a time. `NetDnsQueryA` sends a UDP
+// packet to the configured resolver and registers an ephemeral
+// port callback; the RX path parses the answer section for the
+// first A-record + stashes it. `NetDnsResultRead` polls the
+// resolution state.
+// -------------------------------------------------------------------
+
+inline constexpr u32 kDnsMaxName = 253;
+
+struct DnsResult
+{
+    bool resolved;
+    Ipv4Address ip;
+};
+
+/// Send a DNS A-record query for `name` (NUL-terminated, max
+/// kDnsMaxName chars) via `iface_index`. `resolver_ip` is the
+/// DNS server (typically the DHCP-supplied value or 10.0.2.3 for
+/// QEMU SLIRP). Returns false on oversized name, malformed
+/// labels, interface missing, or ARP cache miss for the
+/// resolver's gateway.
+bool NetDnsQueryA(u32 iface_index, Ipv4Address resolver_ip, const char* name);
+
+/// Snapshot of the latest DNS query state. `resolved` is true
+/// iff the RX path parsed a matching A-record since the last
+/// NetDnsQueryA. Callers should read this after polling for
+/// reply arrival.
+DnsResult NetDnsResultRead();
 
 // -------------------------------------------------------------------
 // UDP send + receive dispatch.

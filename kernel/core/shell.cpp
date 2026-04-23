@@ -303,6 +303,8 @@ void CmdHelp()
     ConsoleWriteln("  VBE [W H [B]]  QUERY / SET BOCHS-VBE DISPLAY MODE");
     ConsoleWriteln("  NIC          LIST NICS + MAC + LINK");
     ConsoleWriteln("  ARP          ARP CACHE + STATS");
+    ConsoleWriteln("  PING IP      ICMP ECHO REQUEST + WAIT 1S FOR REPLY");
+    ConsoleWriteln("  NSLOOKUP NAME DNS A-RECORD LOOKUP (RESOLVER 10.0.2.3)");
     ConsoleWriteln("  IPV4         IPV4 RX COUNTERS");
     ConsoleWriteln("  HEALTH       RUN RUNTIME INVARIANT SCAN (HEAP/FRAMES/SCHED/CRX)");
     ConsoleWriteln("  UUID [N]     GENERATE N V4 UUIDS FROM THE ENTROPY POOL");
@@ -1271,7 +1273,7 @@ static const char* const kCommandSet[] = {
     "battery",   "thermal", "temp",       "gpu",      "lsgpu",    "nic",       "lsnic",      "ip",       "arp",
     "ipv4",      "uuid",    "uuidgen",    "health",   "checkup",  "attacksim", "redteam",    "memdump",  "instr",
     "dumpstate", "bp",      "breakpoint", "login",    "logout",   "passwd",    "useradd",    "userdel",  "users",
-    "who",       "su",      "hwmon",      "vbe",
+    "who",       "su",      "hwmon",      "vbe",      "ping",     "nslookup",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -2425,11 +2427,170 @@ void CmdVbe(u32 argc, char** argv)
         ConsoleWrite("x");
         WriteU64Dec(bpp);
         ConsoleWriteln("");
+
+        // Rebind the kernel framebuffer driver to the Bochs-
+        // stdvga BAR0 at the new dimensions so subsequent
+        // paints land at the requested resolution. Find the
+        // Bochs GPU in the discovery cache — BAR0 is the
+        // linear framebuffer aperture.
+        u64 lfb_phys = 0;
+        const u64 gn = customos::drivers::gpu::GpuCount();
+        for (u64 i = 0; i < gn; ++i)
+        {
+            const auto& g = customos::drivers::gpu::Gpu(i);
+            if (g.vendor_id == customos::drivers::gpu::kVendorQemuBochs && g.mmio_phys != 0)
+            {
+                lfb_phys = g.mmio_phys;
+                break;
+            }
+        }
+        if (lfb_phys == 0)
+        {
+            ConsoleWriteln("VBE: hardware programmed, but no Bochs BAR0 found — fb not rebound");
+            return;
+        }
+        const u32 pitch = static_cast<u32>(width) * 4;
+        if (customos::drivers::video::FramebufferRebind(lfb_phys, width, height, pitch, static_cast<u8>(bpp)))
+        {
+            customos::drivers::video::FramebufferClear(0);
+            ConsoleWriteln("VBE: framebuffer rebound; next recompose paints at the new size");
+            ConsoleWriteln("     (overlay widgets retain boot-time positions — known limitation)");
+        }
+        else
+        {
+            ConsoleWriteln("VBE: hardware programmed, but framebuffer rebind failed");
+        }
     }
     else
     {
         ConsoleWriteln("VBE: mode-set rejected (dimensions exceed max, bpp unsupported, or no BGA)");
     }
+}
+
+// Parse dotted-quad `a.b.c.d`. Returns true on exact 4-octet match.
+bool ParseIpv4(const char* s, customos::net::Ipv4Address* out)
+{
+    u32 parts[4] = {};
+    u32 idx = 0;
+    u32 cur = 0;
+    bool had_digit = false;
+    for (u32 i = 0;; ++i)
+    {
+        const char c = s[i];
+        if (c == '\0' || c == '.')
+        {
+            if (!had_digit)
+                return false;
+            if (idx >= 4)
+                return false;
+            parts[idx++] = cur;
+            cur = 0;
+            had_digit = false;
+            if (c == '\0')
+                break;
+            continue;
+        }
+        if (c < '0' || c > '9')
+            return false;
+        cur = cur * 10 + u32(c - '0');
+        if (cur > 255)
+            return false;
+        had_digit = true;
+    }
+    if (idx != 4)
+        return false;
+    for (u32 i = 0; i < 4; ++i)
+        out->octets[i] = u8(parts[i]);
+    return true;
+}
+
+void CmdPing(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("PING: usage: ping <ipv4>");
+        return;
+    }
+    customos::net::Ipv4Address dst = {};
+    if (!ParseIpv4(argv[1], &dst))
+    {
+        ConsoleWriteln("PING: malformed IPv4 (expected dotted-quad)");
+        return;
+    }
+    // Pick a deterministic id/seq so repeats are diagnosable from
+    // a pcap — id changes per ping cycle, seq stays 1.
+    static u16 next_id = 0x0100;
+    const u16 id = next_id++;
+    const u16 seq = 1;
+    customos::net::NetPingArm(id, seq);
+    if (!customos::net::NetIcmpSendEcho(/*iface_index=*/0, dst, id, seq))
+    {
+        ConsoleWriteln("PING: send failed (ARP cache miss? try reaching a peer first)");
+        return;
+    }
+    // Wait up to ~1 second (100 ticks at 100 Hz) for a reply.
+    // The ICMP RX path runs from the e1000 RX polling task, so
+    // we just yield + poll.
+    for (u32 i = 0; i < 100; ++i)
+    {
+        customos::sched::SchedSleepTicks(1);
+        const auto r = customos::net::NetPingRead();
+        if (r.replied)
+        {
+            ConsoleWrite("PING: reply from ");
+            for (u64 j = 0; j < 4; ++j)
+            {
+                if (j != 0)
+                    ConsoleWriteChar('.');
+                WriteU64Dec(r.from.octets[j]);
+            }
+            ConsoleWrite("  rtt~=");
+            WriteU64Dec(r.rtt_ticks * 10); // 100 Hz tick = 10 ms
+            ConsoleWriteln("ms");
+            return;
+        }
+    }
+    ConsoleWriteln("PING: no reply within 1s");
+}
+
+void CmdNslookup(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("NSLOOKUP: usage: nslookup <name> [resolver_ip]");
+        return;
+    }
+    customos::net::Ipv4Address resolver{{10, 0, 2, 3}}; // QEMU SLIRP default
+    if (argc >= 3 && !ParseIpv4(argv[2], &resolver))
+    {
+        ConsoleWriteln("NSLOOKUP: malformed resolver IP");
+        return;
+    }
+    if (!customos::net::NetDnsQueryA(/*iface_index=*/0, resolver, argv[1]))
+    {
+        ConsoleWriteln("NSLOOKUP: send failed (ARP miss, name too long, or no iface)");
+        return;
+    }
+    for (u32 i = 0; i < 200; ++i) // wait up to ~2 seconds
+    {
+        customos::sched::SchedSleepTicks(1);
+        const auto r = customos::net::NetDnsResultRead();
+        if (r.resolved)
+        {
+            ConsoleWrite("NSLOOKUP: ");
+            ConsoleWrite(argv[1]);
+            ConsoleWrite(" -> ");
+            for (u64 j = 0; j < 4; ++j)
+            {
+                if (j != 0)
+                    ConsoleWriteChar('.');
+                WriteU64Dec(r.ip.octets[j]);
+            }
+            ConsoleWriteln("");
+            return;
+        }
+    }
+    ConsoleWriteln("NSLOOKUP: no response within 2s (NXDOMAIN, no route, or server down)");
 }
 
 void CmdNic()
@@ -7008,6 +7169,16 @@ void Dispatch(char* line)
     if (StrEq(cmd, "vbe"))
     {
         CmdVbe(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "ping"))
+    {
+        CmdPing(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "nslookup"))
+    {
+        CmdNslookup(argc, argv);
         return;
     }
     if (StrEq(cmd, "nic") || StrEq(cmd, "lsnic") || StrEq(cmd, "ip"))

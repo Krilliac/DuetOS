@@ -22,6 +22,18 @@ ArpStats g_arp_stats = {};
 Ipv4Stats g_ipv4_stats = {};
 IcmpStats g_icmp_stats = {};
 
+// Ping state — single-outstanding in v0. NetPingArm captures the
+// id/seq + send tick; the ICMP path in Ipv4HandleIncoming stamps
+// the reply tick + flips g_ping_replied when a matching reply
+// lands.
+constinit bool g_ping_pending = false;
+constinit bool g_ping_replied = false;
+constinit u16 g_ping_id = 0;
+constinit u16 g_ping_seq = 0;
+constinit u64 g_ping_send_ticks = 0;
+constinit u64 g_ping_reply_ticks = 0;
+constinit Ipv4Address g_ping_reply_ip = {};
+
 // Per-interface binding populated by NetStackBindInterface.
 // Keyed by iface_index; cap matches kMaxNics so every discovered
 // NIC has a slot. Zero-valued `tx` marks an unbound slot —
@@ -653,6 +665,19 @@ bool Ipv4HandleIncoming(u32 iface_index, const void* frame, u64 len)
         ++g_ipv4_stats.rx_bad_checksum;
         return false;
     }
+    // Auto-learn the ARP cache from every valid IPv4 frame: the
+    // ethernet src MAC + IPv4 src IP are always consistent with
+    // the sender. Saves us from issuing an explicit ARP request
+    // before pinging a peer that just talked to us.
+    {
+        MacAddress src_mac = {};
+        for (u64 i = 0; i < 6; ++i)
+            src_mac.octets[i] = eth[6 + i];
+        Ipv4Address src_ip = {};
+        for (u64 i = 0; i < 4; ++i)
+            src_ip.octets[i] = ip[12 + i];
+        ArpInsert(iface_index, src_ip, src_mac);
+    }
     const u8 proto = ip[9];
     switch (proto)
     {
@@ -715,6 +740,27 @@ bool Ipv4HandleIncoming(u32 iface_index, const void* frame, u64 len)
         if (total_len < ip_header_bytes + 8)
             break; // ICMP header alone is 8 bytes
         const u8* icmp = ip + ip_header_bytes;
+
+        // Echo Reply (type=0) — match against the pending ping
+        // request. If id + seq match, stash the reply arrival
+        // tick so the shell's wait loop can print the RTT.
+        if (icmp[0] == 0x00 && g_ping_pending)
+        {
+            const u16 id = (u16(icmp[4]) << 8) | u16(icmp[5]);
+            const u16 seq = (u16(icmp[6]) << 8) | u16(icmp[7]);
+            if (id == g_ping_id && seq == g_ping_seq)
+            {
+                Ipv4Address src_ip = {};
+                for (u64 i = 0; i < 4; ++i)
+                    src_ip.octets[i] = ip[12 + i];
+                g_ping_reply_ticks = NowTicks();
+                g_ping_reply_ip = src_ip;
+                g_ping_replied = true;
+                ++g_icmp_stats.echo_replies_rx;
+            }
+            break;
+        }
+
         if (icmp[0] != 0x08 /* Echo Request */)
             break;
 
@@ -1529,6 +1575,310 @@ bool TcpListen(u16 local_port, const u8* canned_reply, u32 canned_len)
         g_tcp_canned[i] = canned_reply[i];
     g_tcp_conn = {};
     return true;
+}
+
+// ---------------------------------------------------------------
+// ICMP echo-request (ping) sender + wait-state accessors.
+// ---------------------------------------------------------------
+
+bool NetIcmpSendEcho(u32 iface_index, Ipv4Address dst_ip, u16 id, u16 seq)
+{
+    if (iface_index >= kMaxInterfaces || !g_interfaces[iface_index].bound)
+        return false;
+    const Interface& ifc = g_interfaces[iface_index];
+    const ArpEntry* arp = ArpLookup(iface_index, dst_ip);
+    if (arp == nullptr)
+        return false;
+
+    // Build ethernet + IPv4 + ICMP echo request (14 + 20 + 8 + 32).
+    constexpr u32 kPayloadBytes = 32;
+    u8 frame[14 + 20 + 8 + kPayloadBytes];
+    // Ethernet.
+    for (u64 i = 0; i < 6; ++i)
+        frame[i] = arp->mac.octets[i];
+    for (u64 i = 0; i < 6; ++i)
+        frame[6 + i] = ifc.mac.octets[i];
+    frame[12] = 0x08;
+    frame[13] = 0x00;
+    // IPv4.
+    u8* ip = frame + 14;
+    ip[0] = 0x45;
+    ip[1] = 0x00;
+    const u16 total_len = u16(20 + 8 + kPayloadBytes);
+    ip[2] = u8(total_len >> 8);
+    ip[3] = u8(total_len & 0xFF);
+    ip[4] = 0x00;
+    ip[5] = 0x01;
+    ip[6] = 0x00;
+    ip[7] = 0x00;
+    ip[8] = 64;
+    ip[9] = kIpProtoIcmp;
+    ip[10] = 0;
+    ip[11] = 0;
+    for (u64 i = 0; i < 4; ++i)
+        ip[12 + i] = ifc.ip.octets[i];
+    for (u64 i = 0; i < 4; ++i)
+        ip[16 + i] = dst_ip.octets[i];
+    const u16 ip_ck = Ipv4HeaderChecksum(ip, 20);
+    ip[10] = u8(ip_ck >> 8);
+    ip[11] = u8(ip_ck & 0xFF);
+    // ICMP.
+    u8* icmp = ip + 20;
+    icmp[0] = 0x08; // echo request
+    icmp[1] = 0x00; // code
+    icmp[2] = 0;    // checksum placeholder
+    icmp[3] = 0;
+    icmp[4] = u8(id >> 8);
+    icmp[5] = u8(id & 0xFF);
+    icmp[6] = u8(seq >> 8);
+    icmp[7] = u8(seq & 0xFF);
+    for (u32 i = 0; i < kPayloadBytes; ++i)
+        icmp[8 + i] = 0xA5;
+    const u16 icmp_ck = Ipv4HeaderChecksum(icmp, 8 + kPayloadBytes);
+    icmp[2] = u8(icmp_ck >> 8);
+    icmp[3] = u8(icmp_ck & 0xFF);
+
+    if (!ifc.tx(iface_index, frame, sizeof(frame)))
+    {
+        ++g_icmp_stats.tx_failures;
+        return false;
+    }
+    ++g_icmp_stats.echo_requests_tx;
+    return true;
+}
+
+void NetPingArm(u16 id, u16 seq)
+{
+    g_ping_pending = true;
+    g_ping_replied = false;
+    g_ping_id = id;
+    g_ping_seq = seq;
+    g_ping_send_ticks = NowTicks();
+    g_ping_reply_ticks = 0;
+}
+
+PingResult NetPingRead()
+{
+    PingResult r = {};
+    r.replied = g_ping_replied;
+    r.rtt_ticks = g_ping_replied ? (g_ping_reply_ticks - g_ping_send_ticks) : 0;
+    r.from = g_ping_reply_ip;
+    return r;
+}
+
+// ---------------------------------------------------------------
+// DNS client — single in-flight query, A-record only.
+// ---------------------------------------------------------------
+
+namespace
+{
+
+constinit bool g_dns_pending = false;
+constinit bool g_dns_resolved = false;
+constinit u16 g_dns_xid = 0;
+constinit Ipv4Address g_dns_result_ip = {};
+constexpr u16 kDnsEphemeralPort = 54321;
+
+// Skip over a DNS name in the RR stream. Handles both raw label
+// sequences + RFC 1035 §4.1.4 name-compression pointers (top two
+// bits of a byte = 11 means "this byte + next one together form
+// a 14-bit offset into the packet"). Returns the offset after
+// the name, or `len` on truncation.
+u64 DnsSkipName(const u8* buf, u64 offset, u64 len)
+{
+    for (u32 guard = 0; guard < 1024 && offset < len; ++guard)
+    {
+        const u8 b = buf[offset];
+        if (b == 0)
+            return offset + 1;
+        if ((b & 0xC0) == 0xC0)
+            return (offset + 2 <= len) ? (offset + 2) : len;
+        if (b > 63)
+            return len; // invalid label length
+        if (offset + 1 + b > len)
+            return len;
+        offset += 1 + b;
+    }
+    return len;
+}
+
+void DnsOnUdp(u32 iface_index, Ipv4Address src_ip, u16 src_port, u16 dst_port, const void* payload, u64 len)
+{
+    (void)iface_index;
+    (void)src_ip;
+    (void)src_port;
+    (void)dst_port;
+    if (!g_dns_pending)
+        return;
+    if (len < 12)
+        return;
+    const auto* b = static_cast<const u8*>(payload);
+    const u16 xid = (u16(b[0]) << 8) | u16(b[1]);
+    if (xid != g_dns_xid)
+        return;
+    // Flags bit 15 == 1 (response). Flags bits 3..0 = RCODE.
+    const u16 flags = (u16(b[2]) << 8) | u16(b[3]);
+    if ((flags & 0x8000) == 0)
+        return;
+    if ((flags & 0x000F) != 0)
+    {
+        // RCODE non-zero — server says no. Leave g_dns_resolved
+        // false; the shell's polling loop will time out.
+        return;
+    }
+    const u16 qdcount = (u16(b[4]) << 8) | u16(b[5]);
+    const u16 ancount = (u16(b[6]) << 8) | u16(b[7]);
+    if (ancount == 0)
+        return;
+    // Skip QDCOUNT questions.
+    u64 off = 12;
+    for (u32 i = 0; i < qdcount && off < len; ++i)
+    {
+        off = DnsSkipName(b, off, len);
+        off += 4; // QTYPE + QCLASS
+    }
+    // Walk answers looking for an A record.
+    for (u32 i = 0; i < ancount && off + 10 <= len; ++i)
+    {
+        off = DnsSkipName(b, off, len);
+        if (off + 10 > len)
+            return;
+        const u16 type = (u16(b[off]) << 8) | u16(b[off + 1]);
+        const u16 rdlen = (u16(b[off + 8]) << 8) | u16(b[off + 9]);
+        off += 10;
+        if (off + rdlen > len)
+            return;
+        if (type == 0x0001 /* A */ && rdlen == 4)
+        {
+            Ipv4Address ip = {};
+            for (u64 k = 0; k < 4; ++k)
+                ip.octets[k] = b[off + k];
+            g_dns_result_ip = ip;
+            g_dns_resolved = true;
+            return;
+        }
+        off += rdlen;
+    }
+}
+
+// Encode `name` ("www.example.com") into DNS label format: each
+// dot-separated component becomes a length byte followed by the
+// component bytes; terminates with a 0 byte. Returns bytes
+// written (including the terminator), or 0 on invalid input.
+u32 EncodeDnsName(const char* name, u8* out, u32 cap)
+{
+    u32 w = 0;
+    u32 label_start = w;
+    out[w++] = 0; // placeholder for first length byte
+    u32 label_len = 0;
+    for (u32 i = 0;; ++i)
+    {
+        const char c = name[i];
+        if (c == 0)
+        {
+            out[label_start] = u8(label_len);
+            if (w >= cap)
+                return 0;
+            out[w++] = 0;
+            return w;
+        }
+        if (c == '.')
+        {
+            if (label_len == 0 || label_len > 63)
+                return 0;
+            out[label_start] = u8(label_len);
+            label_start = w;
+            if (w >= cap)
+                return 0;
+            out[w++] = 0; // placeholder
+            label_len = 0;
+            continue;
+        }
+        if (w >= cap)
+            return 0;
+        out[w++] = u8(c);
+        ++label_len;
+        if (label_len > 63)
+            return 0;
+    }
+}
+
+} // namespace
+
+bool NetDnsQueryA(u32 iface_index, Ipv4Address resolver_ip, const char* name)
+{
+    if (iface_index >= kMaxInterfaces || !g_interfaces[iface_index].bound || name == nullptr)
+        return false;
+    const Interface& ifc = g_interfaces[iface_index];
+
+    // Resolve the L2 destination. SLIRP assigns the same vendor
+    // MAC to every virtual host in the 10.0.2.0/24 subnet, so
+    // the gateway's MAC works for any same-subnet peer we
+    // haven't talked to yet. On real hardware this becomes
+    // "ARP request + wait" — a future slice.
+    const ArpEntry* arp = ArpLookup(iface_index, resolver_ip);
+    MacAddress dst_mac = {};
+    if (arp != nullptr)
+    {
+        dst_mac = arp->mac;
+    }
+    else
+    {
+        Ipv4Address gw{{resolver_ip.octets[0], resolver_ip.octets[1], resolver_ip.octets[2], 2}};
+        const ArpEntry* gw_entry = ArpLookup(iface_index, gw);
+        if (gw_entry == nullptr)
+            return false;
+        dst_mac = gw_entry->mac;
+    }
+
+    // Build query.
+    u8 qbuf[12 + kDnsMaxName + 2 + 4];
+    // Transaction ID — xor the name's first few bytes so repeats
+    // against the same name don't collide with each other's
+    // in-flight answers (prev landing in current's pending slot
+    // would resolve wrong).
+    u16 xid = 0x1000 ^ u16(name[0]) ^ (u16(name[1]) << 4);
+    if (xid == 0)
+        xid = 0x1234;
+    qbuf[0] = u8(xid >> 8);
+    qbuf[1] = u8(xid & 0xFF);
+    // Flags: RD=1 (request recursion), everything else 0.
+    qbuf[2] = 0x01;
+    qbuf[3] = 0x00;
+    // QDCOUNT = 1, others 0.
+    qbuf[4] = 0;
+    qbuf[5] = 1;
+    qbuf[6] = 0;
+    qbuf[7] = 0;
+    qbuf[8] = 0;
+    qbuf[9] = 0;
+    qbuf[10] = 0;
+    qbuf[11] = 0;
+    const u32 name_bytes = EncodeDnsName(name, qbuf + 12, kDnsMaxName);
+    if (name_bytes == 0)
+        return false;
+    u32 qpos = 12 + name_bytes;
+    // QTYPE = 1 (A), QCLASS = 1 (IN).
+    qbuf[qpos++] = 0;
+    qbuf[qpos++] = 1;
+    qbuf[qpos++] = 0;
+    qbuf[qpos++] = 1;
+
+    g_dns_pending = true;
+    g_dns_resolved = false;
+    g_dns_xid = xid;
+    g_dns_result_ip = {};
+    NetUdpBindRx(kDnsEphemeralPort, DnsOnUdp);
+
+    return NetUdpSend(iface_index, dst_mac, resolver_ip, /*dst_port=*/53, ifc.ip, kDnsEphemeralPort, qbuf, qpos);
+}
+
+DnsResult NetDnsResultRead()
+{
+    DnsResult r = {};
+    r.resolved = g_dns_resolved;
+    r.ip = g_dns_result_ip;
+    return r;
 }
 
 bool NetStackBindInterface(u32 iface_index, MacAddress mac, Ipv4Address ip, NetTxFn tx)
