@@ -1603,6 +1603,12 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // via the Linux ABI and echo its contents back through
     // sys_write. Validates the whole file-I/O chain end-to-end.
     customos::subsystems::linux::SpawnRing3LinuxFileSmoke();
+    // File-backed mmap exerciser: open HELLO.TXT, mmap 17 bytes
+    // PROT_READ + MAP_PRIVATE, write the mapped region to
+    // stdout. Proves the new file-backed branch in DoMmap works
+    // end-to-end — anonymous mmap was the only shape supported
+    // before this slice.
+    customos::subsystems::linux::SpawnRing3LinuxMmapSmoke();
     // Translation-unit exercise: fire one syscall that the TU
     // converts to a no-op (madvise) and one it declines with a
     // deliberate -ENOSYS (rseq). Boot log shows [translate]

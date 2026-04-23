@@ -532,6 +532,201 @@ void SpawnRing3LinuxFileSmoke()
     sched::SchedCreateUser(&core::Ring3UserEntry, nullptr, "linux-file-smoke", proc);
 }
 
+// File-backed mmap smoke. Hand-rolled x86_64 payload:
+//
+//   fd  = open("HELLO.TXT", O_RDONLY=0, mode=0)        ; nr=2
+//   ptr = mmap(NULL, 17, PROT_READ=1, MAP_PRIVATE=2,
+//              fd, off=0)                              ; nr=9
+//   write(1, ptr, 17)                                  ; nr=1
+//   close(fd)                                          ; nr=3
+//   exit_group(0x44)                                   ; nr=231
+//   ud2                                                ; trap if reached
+//
+// ABI: rdi rsi rdx r10 r8 r9 (R10 not RCX — `syscall` clobbers
+// rcx/r11). r12 holds the mmap'd ptr across the write call,
+// r13 holds the fd across mmap+write+close.
+//
+// HELLO.TXT lives in the FAT32 sandbox volume and contains the
+// 17-byte ASCII string "hello from fat32\n" (verified by
+// fs/fat32 self-test). If the mmap path works the operator
+// sees that exact line on the serial console; the kernel-side
+// `[linux] mmap file fd=…` line confirms the kernel went down
+// the new file-backed branch instead of the anonymous one.
+constexpr u8 kMmapFilePayload[] = {
+    // open("HELLO.TXT", 0, 0)
+    0xB8,
+    0x02,
+    0x00,
+    0x00,
+    0x00, // mov eax, 2     (sys_open)
+    0x48,
+    0x8D,
+    0x3D,
+    0x57,
+    0x00,
+    0x00,
+    0x00, // lea rdi, [rip+0x57]  (path; resolved below)
+    0x31,
+    0xF6, // xor esi, esi   (O_RDONLY)
+    0x31,
+    0xD2, // xor edx, edx   (mode=0)
+    0x0F,
+    0x05, // syscall
+    0x49,
+    0x89,
+    0xC5, // mov r13, rax   (save fd)
+
+    // mmap(NULL, 17, PROT_READ=1, MAP_PRIVATE=2, fd=r13, 0)
+    0xB8,
+    0x09,
+    0x00,
+    0x00,
+    0x00, // mov eax, 9     (sys_mmap)
+    0x31,
+    0xFF, // xor edi, edi
+    0xBE,
+    0x11,
+    0x00,
+    0x00,
+    0x00, // mov esi, 17    (len)
+    0xBA,
+    0x01,
+    0x00,
+    0x00,
+    0x00, // mov edx, 1     (PROT_READ)
+    0x41,
+    0xBA,
+    0x02,
+    0x00,
+    0x00,
+    0x00, // mov r10d, 2  (MAP_PRIVATE)
+    0x4D,
+    0x89,
+    0xE8, // mov r8, r13    (fd)
+    0x45,
+    0x31,
+    0xC9, // xor r9d, r9d   (offset=0)
+    0x0F,
+    0x05, // syscall
+    0x49,
+    0x89,
+    0xC4, // mov r12, rax   (save ptr)
+
+    // write(1, ptr, 17)
+    0xB8,
+    0x01,
+    0x00,
+    0x00,
+    0x00, // mov eax, 1     (sys_write)
+    0xBF,
+    0x01,
+    0x00,
+    0x00,
+    0x00, // mov edi, 1     (stdout)
+    0x4C,
+    0x89,
+    0xE6, // mov rsi, r12
+    0xBA,
+    0x11,
+    0x00,
+    0x00,
+    0x00, // mov edx, 17
+    0x0F,
+    0x05, // syscall
+
+    // close(fd)
+    0xB8,
+    0x03,
+    0x00,
+    0x00,
+    0x00, // mov eax, 3     (sys_close)
+    0x4C,
+    0x89,
+    0xEF, // mov rdi, r13
+    0x0F,
+    0x05, // syscall
+
+    // exit_group(0x44)
+    0xB8,
+    0xE7,
+    0x00,
+    0x00,
+    0x00, // mov eax, 231   (sys_exit_group)
+    0xBF,
+    0x44,
+    0x00,
+    0x00,
+    0x00, // mov edi, 0x44  (distinct rc — not 0x42 nor 0x43)
+    0x0F,
+    0x05, // syscall
+
+    0x0F,
+    0x0B, // ud2 — fail loud if execution falls through
+
+    // 0x63: "HELLO.TXT\0" — path string. The lea above uses
+    // disp32=0x57 which is (this offset 0x63) - (rip after lea =
+    // offset 0x0C) = 0x57. If you change the code above, fix
+    // both the lea displacement AND the static_assert below.
+    'H',
+    'E',
+    'L',
+    'L',
+    'O',
+    '.',
+    'T',
+    'X',
+    'T',
+    0,
+};
+static_assert(sizeof(kMmapFilePayload) == 0x63 + 10, "kMmapFilePayload layout drifted — fix lea disp32");
+
+void SpawnRing3LinuxMmapSmoke()
+{
+    KLOG_TRACE_SCOPE("linux/smoke", "SpawnRing3LinuxMmapSmoke");
+
+    AddressSpace* as = AddressSpaceCreate(/*frame_budget=*/16);
+    if (as == nullptr)
+    {
+        core::Panic("linux/smoke", "AddressSpaceCreate failed");
+    }
+    const PhysAddr code_frame = AllocateFrame();
+    const PhysAddr stack_frame = AllocateFrame();
+    if (code_frame == mm::kNullFrame || stack_frame == mm::kNullFrame)
+    {
+        core::Panic("linux/smoke", "frame alloc failed");
+    }
+    auto* code_direct = static_cast<u8*>(mm::PhysToVirt(code_frame));
+    for (u64 i = 0; i < mm::kPageSize; ++i)
+        code_direct[i] = 0;
+    for (u64 i = 0; i < sizeof(kMmapFilePayload); ++i)
+        code_direct[i] = kMmapFilePayload[i];
+
+    // Distinct VA so this task doesn't collide with the file-
+    // smoke (0x6900...) or the original linux smoke.
+    const u64 code_va = 0x0000'6A00'0000'0000ull;
+    const u64 stack_va = code_va + 0x10000;
+    AddressSpaceMapUserPage(as, code_va, code_frame, mm::kPagePresent | mm::kPageUser);
+    AddressSpaceMapUserPage(as, stack_va, stack_frame,
+                            mm::kPagePresent | mm::kPageWritable | mm::kPageUser | mm::kPageNoExecute);
+
+    Process* proc = ProcessCreate("linux-mmap-smoke", as, core::CapSetEmpty(), fs::RamfsSandboxRoot(), code_va,
+                                  stack_va, core::kTickBudgetSandbox);
+    if (proc == nullptr)
+    {
+        core::Panic("linux/smoke", "ProcessCreate failed");
+    }
+    proc->abi_flavor = kAbiLinux;
+    proc->linux_brk_base = code_va + 0x100'0000ull;
+    proc->linux_brk_current = proc->linux_brk_base;
+    // mmap cursor must not collide with the code/stack VAs — we
+    // already use 0x6A00... for code, so park the cursor far past.
+    proc->linux_mmap_cursor = 0x0000'7200'0000'0000ull;
+
+    arch::SerialWrite("[linux] queued ring3 mmap smoke: open+mmap+write+close (expect "
+                      "\"hello from fat32\" then exit 0x44)\n");
+    sched::SchedCreateUser(&core::Ring3UserEntry, nullptr, "linux-mmap-smoke", proc);
+}
+
 void SpawnRing3LinuxElfSmoke()
 {
     KLOG_TRACE_SCOPE("linux/smoke", "SpawnRing3LinuxElfSmoke");

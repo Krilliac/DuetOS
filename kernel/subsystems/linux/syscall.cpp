@@ -1165,10 +1165,18 @@ i64 DoBrk(u64 new_brk)
 }
 
 // Linux: mmap(addr, len, prot, flags, fd, offset). v0 supports
-// only anonymous + private mappings — the shape musl's malloc
-// and static CRT actually issue. prot is ignored (all pages are
-// mapped RW+NX); a real impl would respect PROT_READ-only and
-// PROT_EXEC separately.
+// two cases:
+//   1. Anonymous + private (musl malloc, static CRT bss growth).
+//      Bumps a per-process VA cursor, allocates frames lazily,
+//      maps RW+NX. PROT is ignored.
+//   2. File-backed + private (MAP_PRIVATE without MAP_ANONYMOUS,
+//      a regular fd). Loads the requested file extent into a
+//      private writable copy — semantics matching Linux's
+//      MAP_PRIVATE: writes go to the copy, never back to the
+//      file. The reader's PROT_READ vs PROT_EXEC is honoured to
+//      the extent the kernel can: PROT_EXEC clears the NX bit.
+//      MAP_SHARED for files isn't supported — would need page-
+//      cache + writeback we don't have.
 //
 // Returns the chosen VA as a u64 on success, -errno on failure.
 // `addr` (MAP_FIXED) is ignored in v0; we always pick from the
@@ -1176,16 +1184,12 @@ i64 DoBrk(u64 new_brk)
 i64 DoMmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off)
 {
     (void)addr;
-    (void)prot;
-    (void)fd;
-    (void)off;
-    if ((flags & kMapAnonymous) == 0)
-    {
-        return kENOSYS; // file-backed mmap not yet supported
-    }
     if ((flags & kMapPrivate) == 0)
     {
-        return kEINVAL; // MAP_SHARED without a file is meaningless
+        // MAP_SHARED without MAP_ANONYMOUS would need a page cache.
+        // MAP_SHARED with MAP_ANONYMOUS would need shared frames.
+        // Neither shape appears in our v0 workloads.
+        return kEINVAL;
     }
     if (len == 0)
     {
@@ -1196,27 +1200,115 @@ i64 DoMmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off)
     {
         return kENOSYS;
     }
+
     const u64 aligned = PageUp(len);
     const u64 base = p->linux_mmap_cursor;
-    for (u64 va = base; va < base + aligned; va += mm::kPageSize)
+
+    // PTE flags: always present + user. Writable for anonymous
+    // (callers expect to write to anonymous pages — that's what
+    // they're for). For file-backed MAP_PRIVATE we still want
+    // writable so MAP_PRIVATE write-fault semantics work as
+    // "writes go to the private copy" without a CoW machinery —
+    // we just hand out a writable private copy from the start.
+    // NX is cleared only when PROT_EXEC is requested.
+    u64 pte_flags = mm::kPagePresent | mm::kPageUser | mm::kPageWritable;
+    constexpr u64 kProtExec = 0x4;
+    if ((prot & kProtExec) == 0)
+        pte_flags |= mm::kPageNoExecute;
+
+    if ((flags & kMapAnonymous) != 0)
     {
+        // Anonymous path — frames come up zero-filled (the frame
+        // allocator scrubs them).
+        for (u64 va = base; va < base + aligned; va += mm::kPageSize)
+        {
+            const mm::PhysAddr frame = mm::AllocateFrame();
+            if (frame == mm::kNullFrame)
+            {
+                // Partial-map rollback would require tearing down the
+                // mappings we already installed. v0 leaks on OOM —
+                // the process is about to die, AS teardown reclaims.
+                return kENOMEM;
+            }
+            mm::AddressSpaceMapUserPage(p->as, va, frame, pte_flags);
+        }
+        p->linux_mmap_cursor += aligned;
+        arch::SerialWrite("[linux] mmap anon -> ");
+        arch::SerialWriteHex(base);
+        arch::SerialWrite(" len=");
+        arch::SerialWriteHex(aligned);
+        arch::SerialWrite("\n");
+        return static_cast<i64>(base);
+    }
+
+    // File-backed: validate the fd is open against a regular
+    // FAT32 file (state == 2). Special tty fds (state == 1) and
+    // closed slots (state == 0) reject with -EBADF / -EACCES.
+    if (fd >= 16)
+        return kEBADF;
+    // state==1 is a tty fd, state==0 is a closed slot. Both
+    // invalid for mmap; collapse to -EBADF (real Linux returns
+    // -EACCES for ttys, -EBADF for closed — we don't carry an
+    // errno distinct enough to be worth a dedicated constant).
+    if (p->linux_fds[fd].state != 2)
+        return kEBADF;
+
+    const auto* v = fs::fat32::Fat32Volume(0);
+    if (v == nullptr)
+        return kEIO;
+
+    // Read the file. The existing DoRead path streams through a
+    // 4 KiB scratch; for mmap we pull the whole file (up to a v0
+    // cap matching the read scratch) so we can copy slices into
+    // each freshly-allocated frame at the requested offset.
+    static u8 file_scratch[4096];
+    fs::fat32::DirEntry entry;
+    for (u64 i = 0; i < sizeof(entry.name); ++i)
+        entry.name[i] = 0;
+    entry.attributes = 0;
+    entry.first_cluster = p->linux_fds[fd].first_cluster;
+    entry.size_bytes = p->linux_fds[fd].size;
+    const i64 read_total = fs::fat32::Fat32ReadFile(v, &entry, file_scratch, sizeof(file_scratch));
+    if (read_total < 0)
+        return kEIO;
+    const u64 file_size = static_cast<u64>(read_total);
+
+    // Walk the requested range page by page. Each page is freshly
+    // allocated (so this is a private copy), then either:
+    //   - filled from file_scratch[off + page_off ..]   (in-range), or
+    //   - left zero (if the page is past EOF — Linux MAP_PRIVATE
+    //     pads past-EOF pages with zeros; the fault sees zero,
+    //     a SIGBUS would only happen mid-page-of-EOF on real
+    //     Linux, which we don't replicate at v0).
+    for (u64 page_idx = 0; page_idx * mm::kPageSize < aligned; ++page_idx)
+    {
+        const u64 va = base + page_idx * mm::kPageSize;
         const mm::PhysAddr frame = mm::AllocateFrame();
         if (frame == mm::kNullFrame)
-        {
-            // Partial-map rollback would require tearing down the
-            // mappings we already installed. v0 leaks on OOM — the
-            // process is about to die anyway, and AS teardown on
-            // task death will reclaim everything.
             return kENOMEM;
+        // Frame allocator zeros the frame; we only need to copy
+        // the bytes that fall inside the file.
+        u8* dst = static_cast<u8*>(mm::PhysToVirt(frame));
+        const u64 page_off_in_file = off + page_idx * mm::kPageSize;
+        if (page_off_in_file < file_size)
+        {
+            u64 to_copy = file_size - page_off_in_file;
+            if (to_copy > mm::kPageSize)
+                to_copy = mm::kPageSize;
+            for (u64 i = 0; i < to_copy; ++i)
+                dst[i] = file_scratch[page_off_in_file + i];
         }
-        mm::AddressSpaceMapUserPage(p->as, va, frame,
-                                    mm::kPagePresent | mm::kPageWritable | mm::kPageUser | mm::kPageNoExecute);
+        mm::AddressSpaceMapUserPage(p->as, va, frame, pte_flags);
     }
     p->linux_mmap_cursor += aligned;
-    arch::SerialWrite("[linux] mmap -> ");
+    arch::SerialWrite("[linux] mmap file fd=");
+    arch::SerialWriteHex(fd);
+    arch::SerialWrite(" -> ");
     arch::SerialWriteHex(base);
     arch::SerialWrite(" len=");
     arch::SerialWriteHex(aligned);
+    arch::SerialWrite(" off=");
+    arch::SerialWriteHex(off);
     arch::SerialWrite("\n");
     return static_cast<i64>(base);
 }
