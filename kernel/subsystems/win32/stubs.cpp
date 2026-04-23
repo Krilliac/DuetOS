@@ -3672,6 +3672,77 @@ constexpr StubEntry kStubsTable[] = {
     {"kernel32.dll", "FileTimeToSystemTime", kOffFileTimeToSystemTime},
 };
 
+struct StubHashEntry
+{
+    u64 key_hash;
+    u32 stub_index;
+};
+
+constexpr char AsciiToLower(char c)
+{
+    if (c >= 'A' && c <= 'Z')
+        return static_cast<char>(c - 'A' + 'a');
+    return c;
+}
+
+constexpr u64 Fnv1a64Append(u64 hash, char c)
+{
+    constexpr u64 kFnvPrime = 1099511628211ULL;
+    return (hash ^ static_cast<u8>(c)) * kFnvPrime;
+}
+
+constexpr u64 StubLookupHash(const char* dll, const char* func)
+{
+    constexpr u64 kFnvOffsetBasis = 14695981039346656037ULL;
+    u64 hash = kFnvOffsetBasis;
+    if (dll != nullptr)
+    {
+        for (u64 i = 0; dll[i] != '\0'; ++i)
+            hash = Fnv1a64Append(hash, AsciiToLower(dll[i]));
+    }
+    hash = Fnv1a64Append(hash, '!');
+    if (func != nullptr)
+    {
+        for (u64 i = 0; func[i] != '\0'; ++i)
+            hash = Fnv1a64Append(hash, func[i]);
+    }
+    return hash;
+}
+
+template <u64 N> struct StubHashTable
+{
+    StubHashEntry entries[N];
+};
+
+template <u64 N> consteval StubHashTable<N> BuildStubHashTable(const StubEntry (&table)[N])
+{
+    StubHashTable<N> sorted{};
+    for (u64 i = 0; i < N; ++i)
+    {
+        sorted.entries[i].key_hash = StubLookupHash(table[i].dll, table[i].func);
+        sorted.entries[i].stub_index = static_cast<u32>(i);
+    }
+
+    // Small-table insertion sort at compile time keeps runtime lookup
+    // branch-light and cache-friendly.
+    for (u64 i = 1; i < N; ++i)
+    {
+        StubHashEntry value = sorted.entries[i];
+        u64 j = i;
+        while (j > 0 && sorted.entries[j - 1].key_hash > value.key_hash)
+        {
+            sorted.entries[j] = sorted.entries[j - 1];
+            --j;
+        }
+        sorted.entries[j] = value;
+    }
+    return sorted;
+}
+
+constexpr auto kSortedStubHashes = BuildStubHashTable(kStubsTable);
+constexpr u64 kSortedStubHashCount = sizeof(kSortedStubHashes.entries) / sizeof(kSortedStubHashes.entries[0]);
+static_assert(kSortedStubHashCount == (sizeof(kStubsTable) / sizeof(kStubsTable[0])), "hash table size mismatch");
+
 // Case-insensitive strcmp for ASCII. Win32 DLL name
 // capitalisation is inconsistent (lld-link writes
 // "kernel32.dll", MSVC's linker writes "KERNEL32.dll"); we
@@ -3704,6 +3775,60 @@ bool AsciiEqual(const char* a, const char* b)
             return false;
     }
     return *a == 0 && *b == 0;
+}
+
+#if defined(CUSTOMOS_WIN32_STUBS_VALIDATE_LINEAR)
+bool Win32StubsLookupLinear(const char* dll, const char* func, u64* out_va, bool* out_is_noop)
+{
+    for (const StubEntry& e : kStubsTable)
+    {
+        if (!AsciiCaseEqual(e.dll, dll))
+            continue;
+        if (!AsciiEqual(e.func, func))
+            continue;
+        *out_va = kWin32StubsVa + e.offset;
+        if (out_is_noop != nullptr)
+        {
+            *out_is_noop = (e.offset == kOffReturnZero) || (e.offset == kOffReturnOne) ||
+                           (e.offset == kOffCritSecNop) || (e.offset == kOffGetProcessHeap);
+        }
+        return true;
+    }
+    return false;
+}
+#endif
+
+bool Win32StubsLookupHashed(const char* dll, const char* func, u64* out_va, bool* out_is_noop)
+{
+    const u64 key_hash = StubLookupHash(dll, func);
+    u64 lo = 0;
+    u64 hi = kSortedStubHashCount;
+    while (lo < hi)
+    {
+        const u64 mid = lo + ((hi - lo) / 2);
+        if (kSortedStubHashes.entries[mid].key_hash < key_hash)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+
+    for (u64 i = lo; i < kSortedStubHashCount; ++i)
+    {
+        const StubHashEntry& probe = kSortedStubHashes.entries[i];
+        if (probe.key_hash != key_hash)
+            break;
+        const StubEntry& e = kStubsTable[probe.stub_index];
+        if (!AsciiCaseEqual(e.dll, dll) || !AsciiEqual(e.func, func))
+            continue;
+        *out_va = kWin32StubsVa + e.offset;
+        if (out_is_noop != nullptr)
+        {
+            *out_is_noop = (e.offset == kOffReturnZero) || (e.offset == kOffReturnOne) ||
+                           (e.offset == kOffCritSecNop) || (e.offset == kOffGetProcessHeap);
+        }
+        return true;
+    }
+    return false;
 }
 
 } // namespace
@@ -3897,27 +4022,29 @@ bool Win32StubsLookupKind(const char* dll, const char* func, u64* out_va, bool* 
 {
     if (dll == nullptr || func == nullptr || out_va == nullptr)
         return false;
-    for (const StubEntry& e : kStubsTable)
+    const bool found_hashed = Win32StubsLookupHashed(dll, func, out_va, out_is_noop);
+#if defined(CUSTOMOS_WIN32_STUBS_VALIDATE_LINEAR)
+    u64 linear_va = 0;
+    bool linear_noop = false;
+    const bool found_linear = Win32StubsLookupLinear(dll, func, &linear_va, &linear_noop);
+    if (found_hashed != found_linear ||
+        (found_hashed && ((*out_va != linear_va) || ((out_is_noop != nullptr) && (*out_is_noop != linear_noop)))))
     {
-        if (!AsciiCaseEqual(e.dll, dll))
-            continue;
-        if (!AsciiEqual(e.func, func))
-            continue;
-        *out_va = kWin32StubsVa + e.offset;
-        if (out_is_noop != nullptr)
+        arch::SerialWrite("[win32] lookup mismatch hash-vs-linear for ");
+        arch::SerialWrite(dll);
+        arch::SerialWrite("!");
+        arch::SerialWrite(func);
+        arch::SerialWrite("\n");
+        if (found_linear)
         {
-            // "No-op / safe-ignore" stubs are the ones whose
-            // entire implementation is a constant return. They
-            // silently succeed but never actually do the thing
-            // the Win32 contract asks for. Flag the exact
-            // offsets so a reader of the boot log can tell
-            // which imports land on real syscalls vs. shims.
-            *out_is_noop = (e.offset == kOffReturnZero) || (e.offset == kOffReturnOne) ||
-                           (e.offset == kOffCritSecNop) || (e.offset == kOffGetProcessHeap);
+            *out_va = linear_va;
+            if (out_is_noop != nullptr)
+                *out_is_noop = linear_noop;
         }
-        return true;
+        return found_linear;
     }
-    return false;
+#endif
+    return found_hashed;
 }
 
 void Win32LogNtCoverage()
