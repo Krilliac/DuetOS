@@ -46,6 +46,7 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     core/stack_canary.cpp
     core/symbols.cpp
     core/syscall.cpp
+    core/time_syscall.cpp
     acpi/acpi.cpp
     apps/calculator.cpp
     apps/clock.cpp

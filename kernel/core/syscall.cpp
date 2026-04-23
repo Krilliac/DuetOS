@@ -18,6 +18,7 @@
 #include "klog.h"
 #include "process.h"
 #include "ring3_smoke.h"
+#include "time_syscall.h"
 
 // Defined in exceptions.S (via `ISR_NOERR 128`) — the .global label for
 // the int-0x80 stub. SyscallInit installs its address into the IDT with
@@ -58,43 +59,6 @@ void ReportUnknownSyscall(u64 num, u64 rip)
     arch::SerialWrite(" rip=");
     arch::SerialWriteHex(rip);
     arch::SerialWrite("\n");
-}
-
-// Convert an RtcTime (Gregorian date + UTC time-of-day) to a
-// Windows FILETIME — 100-nanosecond ticks since 1601-01-01
-// 00:00:00 UTC. Pure arithmetic; no MSR / HPET reads.
-//
-// Algorithm: day-of-Gregorian computation by the classic "civil
-// from days" family. We compute days since 1970-01-01 (Unix
-// epoch), then add the fixed 1970→1601 offset (134 774 days =
-// 369 years * 365 + 89 leap days between 1601..1969) to land
-// at the Windows epoch.
-u64 RtcToFileTime(const arch::RtcTime& t)
-{
-    // Leap years: divisible by 4, except those divisible by 100
-    // unless also by 400.
-    auto is_leap = [](u32 y) { return (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0); };
-    constexpr u32 kDaysBeforeMonth[12] = {0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334};
-
-    // Days from 1970-01-01 to (t.year - 1, 12, 31).
-    u64 days = 0;
-    for (u32 y = 1970; y < t.year; ++y)
-        days += is_leap(y) ? 366 : 365;
-    const u32 m = (t.month >= 1 && t.month <= 12) ? (t.month - 1) : 0;
-    days += kDaysBeforeMonth[m];
-    if (m >= 2 && is_leap(t.year))
-        days += 1;
-    days += (t.day >= 1) ? (t.day - 1) : 0;
-
-    // Shift the epoch from 1970-01-01 to 1601-01-01. The interval
-    // 1601-01-01 .. 1970-01-01 is 369 years = 269 non-leap +
-    // 100 leap days counted as 89 (century rule drops 3 of every
-    // 4) = 134774 days.
-    constexpr u64 k1970To1601Days = 134774;
-    const u64 total_days = days + k1970To1601Days;
-
-    const u64 seconds = total_days * 86400ULL + u64(t.hour) * 3600 + u64(t.minute) * 60 + u64(t.second);
-    return seconds * 10'000'000ULL; // 100-ns ticks per second
 }
 
 // SYS_WRITE body. Copies up to `len` bytes from the user buffer,
@@ -288,208 +252,28 @@ void SyscallDispatch(arch::TrapFrame* frame)
         return;
     }
 
+    // Time family: handlers live in kernel/core/time_syscall.cpp
+    // so the dispatcher is a thin router. Same ABI, same rax
+    // contract — the extraction only moves code, not behaviour.
     case SYS_PERF_COUNTER:
-    {
-        // No args. Return the kernel tick counter —
-        // monotonically increasing u64 at 100 Hz. Used by
-        // the Win32 QueryPerformanceCounter + GetTickCount
-        // stubs.
-        frame->rax = arch::TimerTicks();
+        DoPerfCounter(frame);
         return;
-    }
-
     case SYS_NOW_NS:
-    {
-        // No args. Return HPET counter × period_fs / 1'000'000
-        // = nanoseconds since boot. HPET is in use as the high-
-        // res clocksource; the LAPIC tick counter is still the
-        // scheduler's time-slice driver.
-        const u64 counter = arch::HpetReadCounter();
-        const u64 period_fs = arch::HpetPeriodFemtoseconds();
-        // fs / 1e6 == ns. Overflow window: counter × period_fs
-        // fits in u64 for any realistic uptime — 64-bit counter
-        // at 14.3 MHz with 70k fs period saturates after ~10^16
-        // ticks = ~22 billion years. Safe.
-        frame->rax = (counter * period_fs) / 1'000'000ULL;
+        DoNowNs(frame);
         return;
-    }
-
     case SYS_GETTIME_FT:
-    {
-        // No args. Sample the CMOS RTC and return the current
-        // wall-clock as a Windows FILETIME (100 ns ticks since
-        // 1601-01-01 00:00:00 UTC) in rax.
-        arch::RtcTime t = {};
-        arch::RtcRead(&t);
-        frame->rax = RtcToFileTime(t);
+        DoGetTimeFt(frame);
         return;
-    }
-
     case SYS_GETTIME_ST:
-    {
-        // rdi = user pointer to 16-byte SYSTEMTIME. Fill it from
-        // the CMOS RTC + a Zeller-derived day-of-week so a Win32
-        // caller sees {year, month, dow, day, hour, min, sec, ms}.
-        arch::RtcTime t = {};
-        arch::RtcRead(&t);
-        // SYSTEMTIME is 8 WORDs — write field by field.
-        struct alignas(2) SystemTime
-        {
-            u16 year;
-            u16 month;
-            u16 day_of_week;
-            u16 day;
-            u16 hour;
-            u16 minute;
-            u16 second;
-            u16 milliseconds;
-        } st = {};
-        st.year = t.year;
-        st.month = t.month;
-        st.day = t.day;
-        st.hour = t.hour;
-        st.minute = t.minute;
-        st.second = t.second;
-        st.milliseconds = 0;
-        // Day of week via Zeller's congruence (matches the taskbar
-        // date widget's derivation; gives Sun=0 .. Sat=6 which is
-        // what SYSTEMTIME.wDayOfWeek wants).
-        u32 wy = t.year;
-        u32 wm = t.month;
-        if (wm >= 1 && wm <= 12)
-        {
-            if (wm < 3)
-            {
-                wm += 12;
-                --wy;
-            }
-            const u32 K = wy % 100;
-            const u32 J = wy / 100;
-            const u32 h = (u32(t.day) + (13 * (wm + 1)) / 5 + K + K / 4 + J / 4 + 5 * J) % 7;
-            st.day_of_week = u16((h + 6) % 7);
-        }
-        if (!mm::CopyToUser(reinterpret_cast<void*>(frame->rdi), &st, sizeof(st)))
-        {
-            frame->rax = static_cast<u64>(-1);
-            return;
-        }
-        frame->rax = 0;
+        DoGetTimeSt(frame);
         return;
-    }
-
     case SYS_ST_TO_FT:
-    {
-        // rdi = user SYSTEMTIME* in, rsi = user FILETIME* out.
-        struct alignas(2) SystemTime
-        {
-            u16 year, month, dow, day, hour, minute, second, ms;
-        } st = {};
-        if (!mm::CopyFromUser(&st, reinterpret_cast<const void*>(frame->rdi), sizeof(st)))
-        {
-            frame->rax = static_cast<u64>(-1);
-            return;
-        }
-        if (st.year < 1601 || st.month == 0 || st.month > 12 || st.day == 0 || st.day > 31)
-        {
-            frame->rax = static_cast<u64>(-1);
-            return;
-        }
-        arch::RtcTime t = {};
-        t.year = st.year;
-        t.month = u8(st.month);
-        t.day = u8(st.day);
-        t.hour = u8(st.hour);
-        t.minute = u8(st.minute);
-        t.second = u8(st.second);
-        const u64 ft = RtcToFileTime(t) + u64(st.ms) * 10'000ULL; // ms → 100-ns ticks
-        if (!mm::CopyToUser(reinterpret_cast<void*>(frame->rsi), &ft, sizeof(ft)))
-        {
-            frame->rax = static_cast<u64>(-1);
-            return;
-        }
-        frame->rax = 0;
+        DoStToFt(frame);
         return;
-    }
-
     case SYS_FT_TO_ST:
-    {
-        // rdi = user FILETIME* in, rsi = user SYSTEMTIME* out.
-        u64 ft = 0;
-        if (!mm::CopyFromUser(&ft, reinterpret_cast<const void*>(frame->rdi), sizeof(ft)))
-        {
-            frame->rax = static_cast<u64>(-1);
-            return;
-        }
-        // FILETIME is 100-ns ticks since 1601-01-01 UTC. Unwind:
-        //   seconds_total = ft / 10'000'000
-        //   ms            = (ft % 10'000'000) / 10'000
-        //   days          = seconds_total / 86400
-        //   time-of-day   = seconds_total % 86400
-        const u64 ticks_per_sec = 10'000'000ULL;
-        const u64 ms = (ft % ticks_per_sec) / 10'000ULL;
-        const u64 seconds_total = ft / ticks_per_sec;
-        const u64 days_from_1601 = seconds_total / 86400ULL;
-        const u64 tod = seconds_total % 86400ULL;
-        const u32 hour = u32(tod / 3600);
-        const u32 minute = u32((tod % 3600) / 60);
-        const u32 second = u32(tod % 60);
-
-        // Walk days→(y, m, d). Gregorian calendar; leap rule
-        // exactly as RtcToFileTime uses it.
-        auto is_leap = [](u32 y) { return (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0); };
-        u32 year = 1601;
-        u64 remaining = days_from_1601;
-        while (true)
-        {
-            const u32 year_days = is_leap(year) ? 366 : 365;
-            if (remaining < year_days)
-                break;
-            remaining -= year_days;
-            ++year;
-            // Cap on pathological inputs; FILETIME's u64 space
-            // extends to year ~30828, but we never expect that.
-            if (year > 9999)
-                break;
-        }
-        // days_from_year_start = remaining. Walk months.
-        static const u32 kDaysInMonthCommon[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
-        u32 month = 1;
-        for (; month <= 12; ++month)
-        {
-            u32 md = kDaysInMonthCommon[month - 1];
-            if (month == 2 && is_leap(year))
-                md = 29;
-            if (remaining < md)
-                break;
-            remaining -= md;
-        }
-        if (month > 12)
-            month = 12;
-        const u32 day = u32(remaining) + 1;
-
-        // Day-of-week: 1601-01-01 was a Monday (dow=1, Sun=0).
-        const u32 dow = u32((days_from_1601 + 1) % 7);
-
-        struct alignas(2) SystemTime
-        {
-            u16 year, month, dow, day, hour, minute, second, ms;
-        } st = {};
-        st.year = u16(year);
-        st.month = u16(month);
-        st.dow = u16(dow);
-        st.day = u16(day);
-        st.hour = u16(hour);
-        st.minute = u16(minute);
-        st.second = u16(second);
-        st.ms = u16(ms);
-        if (!mm::CopyToUser(reinterpret_cast<void*>(frame->rsi), &st, sizeof(st)))
-        {
-            frame->rax = static_cast<u64>(-1);
-            return;
-        }
-        frame->rax = 0;
+        DoFtToSt(frame);
         return;
-    }
+
 
     case SYS_WIN32_MISS_LOG:
     {
