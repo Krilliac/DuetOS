@@ -32,6 +32,7 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     core/elf_loader.cpp
     core/pe_loader.cpp
     core/random.cpp
+    core/result.cpp
     core/ring3_smoke.cpp
     core/runtime_checker.cpp
     subsystems/graphics/graphics.cpp
@@ -39,12 +40,23 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     subsystems/linux/syscall.cpp
     subsystems/linux/syscall_entry.S
     subsystems/translation/translate.cpp
+    subsystems/win32/event_syscall.cpp
+    subsystems/win32/file_syscall.cpp
     subsystems/win32/heap.cpp
+    subsystems/win32/heap_syscall.cpp
+    subsystems/win32/mutex_syscall.cpp
     subsystems/win32/stubs.cpp
+    subsystems/win32/thread_syscall.cpp
+    subsystems/win32/tls_syscall.cpp
+    subsystems/win32/vmap_syscall.cpp
     core/shell.cpp
     core/stack_canary.cpp
     core/symbols.cpp
+    core/fault_domain.cpp
     core/syscall.cpp
+    core/time_syscall.cpp
+    debug/bp_syscall.cpp
+    debug/extable.cpp
     acpi/acpi.cpp
     apps/calculator.cpp
     apps/clock.cpp
@@ -52,7 +64,9 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     apps/notes.cpp
     arch/x86_64/ap_trampoline.S
     arch/x86_64/boot.S
+    acpi/aml.cpp
     arch/x86_64/cpu_info.cpp
+    arch/x86_64/hypervisor.cpp
     arch/x86_64/exceptions.S
     arch/x86_64/gdt.cpp
     arch/x86_64/hpet.cpp
@@ -82,7 +96,11 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     drivers/storage/ahci.cpp
     drivers/storage/block.cpp
     drivers/storage/nvme.cpp
+    drivers/usb/hid_descriptor.cpp
+    drivers/usb/msc_scsi.cpp
     drivers/usb/usb.cpp
+    drivers/usb/xhci.cpp
+    drivers/video/calendar.cpp
     drivers/video/console.cpp
     drivers/video/cursor.cpp
     drivers/video/font8x8.cpp
@@ -93,6 +111,7 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     fs/exfat.cpp
     fs/ext4.cpp
     fs/fat32.cpp
+    fs/file_route.cpp
     fs/gpt.cpp
     fs/ntfs.cpp
     fs/ramfs.cpp

@@ -42,4 +42,13 @@ extern "C" [[noreturn]] void EnterUserMode(u64 user_rip, u64 user_rsp);
 // legal (makes this equivalent to the 2-arg form).
 extern "C" [[noreturn]] void EnterUserModeWithGs(u64 user_rip, u64 user_rsp, u64 user_gs_base);
 
+// Thread-entry variant: identical to EnterUserModeWithGs but loads
+// `user_rcx` into RCX before iretq instead of zero-scrubbing it.
+// Used by SYS_THREAD_CREATE: Win32 x64 calling convention passes
+// the thread's "param" argument in RCX, so the entry point of a
+// thread started via CreateThread sees it there on first
+// instruction. Everything else (segment selector hygiene, GSBASE
+// setup via MSR, RFLAGS.IF=1) is identical to the 3-arg form.
+extern "C" [[noreturn]] void EnterUserModeThread(u64 user_rip, u64 user_rsp, u64 user_gs_base, u64 user_rcx);
+
 } // namespace customos::arch

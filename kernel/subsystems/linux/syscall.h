@@ -70,4 +70,10 @@ i64 LinuxWrite(u64 fd, u64 user_buf, u64 len);
 i64 LinuxClockGetTime(u64 clk_id, u64 user_ts);
 u64 LinuxNowNs();
 
+/// Print a one-line coverage scoreboard on COM1:
+/// "[linux] ABI coverage: <implemented>/<total> (<pct>%)"
+/// Reads the generated syscall table (linux_syscall_table_generated.h)
+/// so the numbers stay honest when a new Do* handler lands.
+void LinuxLogAbiCoverage();
+
 } // namespace customos::subsystems::linux

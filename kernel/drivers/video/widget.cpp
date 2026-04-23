@@ -5,6 +5,7 @@
 #include "console.h"
 #include "cursor.h"
 #include "framebuffer.h"
+#include "calendar.h"
 #include "menu.h"
 #include "taskbar.h"
 
@@ -137,7 +138,7 @@ namespace
 struct RegisteredWindow
 {
     WindowChrome chrome;
-    const char* title; // caller-owned string, stored by reference
+    const char* title;          // caller-owned string, stored by reference
     WindowContentFn content_fn; // nullable per-window content drawer
     void* content_cookie;
     bool alive;
@@ -573,6 +574,7 @@ void DesktopCompose(u32 desktop_rgb, const char* banner)
     }
     TaskbarRedraw();
     MenuRedraw();
+    CalendarRedraw();
 }
 
 DisplayMode GetDisplayMode()

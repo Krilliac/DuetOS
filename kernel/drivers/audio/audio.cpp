@@ -15,6 +15,10 @@ namespace
 AudioControllerInfo g_acs[kMaxAudioControllers] = {};
 u64 g_ac_count = 0;
 
+// Module-scope so `AudioShutdown` can clear it and the next
+// `AudioInit` re-walks PCI.
+constinit bool g_init_done = false;
+
 AudioKind KindFromSubclass(u8 subclass)
 {
     switch (subclass)
@@ -34,17 +38,32 @@ AudioKind KindFromSubclass(u8 subclass)
 
 // Intel HDA register offsets (subset). See HDA spec §4.2.
 //
-//   GCAP   u16 at 0x00 — OSS/ISS/BSS counts, 64-bit addressing
-//   VMIN   u8  at 0x02 — minor version (typically 0x00)
-//   VMAJ   u8  at 0x03 — major version (typically 0x01)
-//   OUTPAY u16 at 0x04 — output payload capability (stream size)
-//   INPAY  u16 at 0x06 — input payload capability
-//   GCTL   u32 at 0x08 — global control (bit 0 = CRST, controller reset)
+//   GCAP    u16 at 0x00 — OSS/ISS/BSS counts, 64-bit addressing
+//   VMIN    u8  at 0x02 — minor version (typically 0x00)
+//   VMAJ    u8  at 0x03 — major version (typically 0x01)
+//   OUTPAY  u16 at 0x04 — output payload capability (stream size)
+//   INPAY   u16 at 0x06 — input payload capability
+//   GCTL    u32 at 0x08 — global control (bit 0 = CRST; 1 = out of reset)
+//   WAKEEN  u16 at 0x0C — codec wake-enable bits, one per SDI
+//   STATESTS u16 at 0x0E — codec state change status (bits set if codec present)
+//   INTCTL  u32 at 0x20 — interrupt control
+//   INTSTS  u32 at 0x24 — interrupt status
+//
+// v0 probing here is read-only. A real driver would clear STATESTS
+// after latching, program CORB/RIRB base addresses, and run codec
+// discovery through the command/response rings. None of that yet.
 u16 Mmio16(const AudioControllerInfo& a, u64 offset)
 {
     if (a.mmio_virt == nullptr)
         return 0;
     auto* p = reinterpret_cast<volatile u16*>(static_cast<u8*>(a.mmio_virt) + offset);
+    return *p;
+}
+u32 Mmio32(const AudioControllerInfo& a, u64 offset)
+{
+    if (a.mmio_virt == nullptr)
+        return 0;
+    auto* p = reinterpret_cast<volatile u32*>(static_cast<u8*>(a.mmio_virt) + offset);
     return *p;
 }
 u8 Mmio8(const AudioControllerInfo& a, u64 offset)
@@ -55,15 +74,29 @@ u8 Mmio8(const AudioControllerInfo& a, u64 offset)
     return *p;
 }
 
+// HDA register offsets.
+constexpr u64 kHdaRegGcap = 0x00;
+constexpr u64 kHdaRegVmin = 0x02;
+constexpr u64 kHdaRegVmaj = 0x03;
+constexpr u64 kHdaRegOutpay = 0x04;
+constexpr u64 kHdaRegInpay = 0x06;
+constexpr u64 kHdaRegGctl = 0x08;
+constexpr u64 kHdaRegWakeen = 0x0C;
+constexpr u64 kHdaRegStatests = 0x0E;
+constexpr u64 kHdaRegIntctl = 0x20;
+constexpr u64 kHdaRegIntsts = 0x24;
+
+constexpr u32 kHdaGctlCrst = 1u << 0;
+
 void DecodeHdaCaps(const AudioControllerInfo& a)
 {
     if (a.mmio_virt == nullptr)
         return;
-    const u16 gcap = Mmio16(a, 0x00);
-    const u8 vmin = Mmio8(a, 0x02);
-    const u8 vmaj = Mmio8(a, 0x03);
-    const u16 outpay = Mmio16(a, 0x04);
-    const u16 inpay = Mmio16(a, 0x06);
+    const u16 gcap = Mmio16(a, kHdaRegGcap);
+    const u8 vmin = Mmio8(a, kHdaRegVmin);
+    const u8 vmaj = Mmio8(a, kHdaRegVmaj);
+    const u16 outpay = Mmio16(a, kHdaRegOutpay);
+    const u16 inpay = Mmio16(a, kHdaRegInpay);
     arch::SerialWrite("[hda] ver=");
     arch::SerialWriteHex(vmaj);
     arch::SerialWrite(".");
@@ -81,6 +114,49 @@ void DecodeHdaCaps(const AudioControllerInfo& a)
     arch::SerialWrite(" inpay=");
     arch::SerialWriteHex(inpay);
     arch::SerialWrite("\n");
+
+    // Controller state + codec presence. STATESTS is a sticky bit
+    // per SDI line that the controller sets when a codec signals
+    // "state changed" after power-up — the hardware latches this
+    // for us the first time BIOS/UEFI brings the controller out of
+    // reset. Reading it is non-destructive.
+    const u32 gctl = Mmio32(a, kHdaRegGctl);
+    const u16 statests = Mmio16(a, kHdaRegStatests);
+    const u16 wakeen = Mmio16(a, kHdaRegWakeen);
+    const u32 intctl = Mmio32(a, kHdaRegIntctl);
+    const u32 intsts = Mmio32(a, kHdaRegIntsts);
+    arch::SerialWrite("[hda]   gctl=");
+    arch::SerialWriteHex(gctl);
+    arch::SerialWrite((gctl & kHdaGctlCrst) ? " (out-of-reset)" : " (in-reset)");
+    arch::SerialWrite(" statests=");
+    arch::SerialWriteHex(statests);
+    arch::SerialWrite(" wakeen=");
+    arch::SerialWriteHex(wakeen);
+    arch::SerialWrite(" intctl=");
+    arch::SerialWriteHex(intctl);
+    arch::SerialWrite(" intsts=");
+    arch::SerialWriteHex(intsts);
+    arch::SerialWrite("\n");
+
+    // Decode STATESTS per-slot. The HDA spec allows up to 15 SDI
+    // lines but real chipsets wire 3–4. A bit set means a codec
+    // replied at that address and is ready to be addressed over
+    // CORB/RIRB. We only log; we don't clear.
+    u32 codec_count = 0;
+    for (u32 slot = 0; slot < 15; ++slot)
+    {
+        if ((statests & (1u << slot)) == 0)
+            continue;
+        ++codec_count;
+        arch::SerialWrite("[hda]   codec-present slot=");
+        arch::SerialWriteHex(slot);
+        arch::SerialWrite("\n");
+    }
+    if (codec_count == 0)
+    {
+        arch::SerialWrite("[hda]   no codecs reported by STATESTS (controller "
+                          "may still be in reset)\n");
+    }
 }
 
 void LogAc(const AudioControllerInfo& a)
@@ -134,9 +210,9 @@ const char* AudioKindName(AudioKind k)
 void AudioInit()
 {
     KLOG_TRACE_SCOPE("drivers/audio", "AudioInit");
-    static constinit bool s_done = false;
-    KASSERT(!s_done, "drivers/audio", "AudioInit called twice");
-    s_done = true;
+    if (g_init_done)
+        return;
+    g_init_done = true;
 
     const u64 n = pci::PciDeviceCount();
     for (u64 i = 0; i < n && g_ac_count < kMaxAudioControllers; ++i)
@@ -179,6 +255,18 @@ void AudioInit()
     {
         core::Log(core::LogLevel::Warn, "drivers/audio", "no PCI audio controllers found (QEMU default q35 is silent)");
     }
+}
+
+::customos::core::Result<void> AudioShutdown()
+{
+    KLOG_TRACE_SCOPE("drivers/audio", "AudioShutdown");
+    const u64 dropped = g_ac_count;
+    g_ac_count = 0;
+    g_init_done = false;
+    arch::SerialWrite("[drivers/audio] shutdown: dropped ");
+    arch::SerialWriteHex(dropped);
+    arch::SerialWrite(" controller records (MMIO mappings retained)\n");
+    return {};
 }
 
 u64 AudioControllerCount()

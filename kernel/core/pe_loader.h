@@ -62,21 +62,31 @@ namespace customos::core
 enum class PeStatus : u8
 {
     Ok = 0,
-    TooSmall,             // Buffer can't hold a DOS stub.
-    BadDosMagic,          // First two bytes are not "MZ".
-    BadLfanewBounds,      // e_lfanew points past end-of-file.
-    BadNtSignature,       // Not "PE\0\0".
-    BadMachine,           // Not IMAGE_FILE_MACHINE_AMD64.
-    NotPe32Plus,          // OptionalHeader.Magic != 0x20B.
-    SectionAlignUnsup,    // SectionAlignment != 4096.
-    FileAlignUnsup,       // FileAlignment not a power-of-2 in [512, 4096].
-    SectionCountZero,     // No sections to load.
-    OptHeaderOutOfBounds, // SizeOfOptionalHeader shorter than required.
-    SectionOutOfBounds,   // Section raw data extends past end-of-file.
-    ImportsPresent,       // Imports non-empty AND at least one unresolved stub.
-    RelocsNonEmpty,       // Base Reloc Directory is non-empty (v0 unsupported).
-    TlsPresent,           // TLS Directory is non-empty (v0 unsupported).
-    StubsPageAllocFail,   // Could not allocate the Win32 stubs page during load.
+    TooSmall,                // Buffer can't hold a DOS stub.
+    BadDosMagic,             // First two bytes are not "MZ".
+    BadLfanewBounds,         // e_lfanew points past end-of-file.
+    BadNtSignature,          // Not "PE\0\0".
+    BadMachine,              // Not IMAGE_FILE_MACHINE_AMD64.
+    NotPe32Plus,             // OptionalHeader.Magic != 0x20B.
+    SectionAlignUnsup,       // SectionAlignment != 4096.
+    FileAlignUnsup,          // FileAlignment not a power-of-2 in [512, 4096].
+    SectionCountZero,        // No sections to load.
+    OptHeaderOutOfBounds,    // SizeOfOptionalHeader shorter than required.
+    SectionOutOfBounds,      // Section raw data extends past end-of-file.
+    ImportsPresent,          // Imports non-empty AND at least one unresolved stub.
+    RelocsNonEmpty,          // Base Reloc Directory is non-empty (v0 unsupported).
+    TlsPresent,              // TLS Directory is non-empty. Callback array may be
+                             // empty (MSVC's placeholder .tls section) or carry
+                             // actual process-startup callbacks. PeLoad tolerates
+                             // the former and rejects the latter via
+                             // `TlsCallbacksUnsupported` below.
+    TlsCallbacksUnsupported, // TLS Directory has >= 1 non-null callback VA in
+                             // its callbacks array. v0 does not execute them
+                             // (the ring-3 thunk that'd call each callback
+                             // before entry is a separate slice). Failing the
+                             // load beats silently skipping init a real
+                             // Windows PE's main() might depend on.
+    StubsPageAllocFail,      // Could not allocate the Win32 stubs page during load.
 };
 
 const char* PeStatusName(PeStatus s);

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../core/result.h"
 #include "../core/types.h"
 
 /*
@@ -26,10 +27,10 @@ namespace customos::mm
 
 using PhysAddr = u64;
 
-inline constexpr u64 kPageSize     = 4096;
+inline constexpr u64 kPageSize = 4096;
 inline constexpr u64 kPageSizeLog2 = 12;
 
-inline constexpr PhysAddr kNullFrame = 0;  // The zero frame is always reserved.
+inline constexpr PhysAddr kNullFrame = 0; // The zero frame is always reserved.
 
 /// Parse the Multiboot2 memory map, place the bitmap, mark reserved regions
 /// (kernel image, bitmap itself, Multiboot2 info page, everything below 1 MiB).
@@ -37,6 +38,17 @@ void FrameAllocatorInit(uptr multiboot_info_phys);
 
 /// Allocate one 4 KiB frame. Returns kNullFrame on out-of-memory.
 PhysAddr AllocateFrame();
+
+/// Result-shaped sibling of `AllocateFrame`. Returns
+/// `ErrorCode::OutOfMemory` on allocator exhaustion; success wraps
+/// the same PhysAddr. Prefer this in new code.
+inline ::customos::core::Result<PhysAddr> TryAllocateFrame()
+{
+    const PhysAddr f = AllocateFrame();
+    if (f == kNullFrame)
+        return ::customos::core::Err{::customos::core::ErrorCode::OutOfMemory};
+    return f;
+}
 
 /// Allocate `count` physically-contiguous 4 KiB frames. Returns the base
 /// physical address of the run, or kNullFrame if no run of that length is
@@ -46,6 +58,19 @@ PhysAddr AllocateFrame();
 /// the static higher-half direct map) and any future driver that needs a
 /// contiguous DMA buffer.
 PhysAddr AllocateContiguousFrames(u64 count);
+
+/// Result-shaped sibling of `AllocateContiguousFrames`. Maps the
+/// null-frame sentinel to `ErrorCode::OutOfMemory` (run not
+/// available) and `count==0` to `ErrorCode::InvalidArgument`.
+inline ::customos::core::Result<PhysAddr> TryAllocateContiguousFrames(u64 count)
+{
+    if (count == 0)
+        return ::customos::core::Err{::customos::core::ErrorCode::InvalidArgument};
+    const PhysAddr f = AllocateContiguousFrames(count);
+    if (f == kNullFrame)
+        return ::customos::core::Err{::customos::core::ErrorCode::OutOfMemory};
+    return f;
+}
 
 /// Return a previously-allocated frame to the pool.
 void FreeFrame(PhysAddr frame);

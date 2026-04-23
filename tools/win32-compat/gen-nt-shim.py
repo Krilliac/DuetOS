@@ -76,6 +76,7 @@ HEADER_TEMPLATE = """// AUTO-GENERATED — do not edit by hand.
 // Source data: tools/win32-compat/nt-syscalls-x64.csv (j00ru/windows-syscalls)
 // Target Windows version: {version}
 // Bedrock NT calls (present in every Windows XP→Win11 25H2): {bedrock_count}
+// All known NT calls on the target version: {all_count}
 // CustomOS coverage: {covered_count}/{bedrock_count} = {pct}%
 //
 // See tools/win32-compat/README.md for the legal + design rationale.
@@ -113,6 +114,31 @@ inline constexpr u32 kBedrockNtSyscallCount =
     sizeof(kBedrockNtSyscalls) / sizeof(kBedrockNtSyscalls[0]);
 
 inline constexpr u32 kBedrockNtSyscallsCovered = {covered_count};
+
+/// Every NT syscall known on the target Windows version — superset
+/// of `kBedrockNtSyscalls`. Includes version-specific additions
+/// (NtCreateUserProcess only exists post-Vista, NtAlertThreadByThreadId
+/// only exists post-Win8, ...). Use this for diagnostic name lookup
+/// when a PE binary targeting a specific Windows build calls a syscall
+/// number we never mapped. Sorted by nt_number.
+inline constexpr NtSyscallMapping kAllNtSyscalls[] = {{
+{all_rows}}};
+
+inline constexpr u32 kAllNtSyscallCount =
+    sizeof(kAllNtSyscalls) / sizeof(kAllNtSyscalls[0]);
+
+/// Look up an NT syscall number on the target version and return
+/// the corresponding NtSyscallMapping, or nullptr if it's outside
+/// the table. Linear scan; the miss-log path is the only caller.
+inline const NtSyscallMapping* NtSyscallByNumber(u16 nr)
+{{
+    for (const auto& e : kAllNtSyscalls)
+    {{
+        if (e.nt_number == nr)
+            return &e;
+    }}
+    return nullptr;
+}}
 
 }} // namespace customos::subsystems::win32
 """
@@ -153,48 +179,57 @@ def main():
         version_col = header.index(args.version)
 
         bedrock = []  # list of (name, nt_number_on_target)
+        all_syscalls = []  # list of (name, nt_number_on_target) — every row with a number
         for row in reader:
             if not row or not row[0]:
                 continue
             name = row[0]
-            # Universal-bedrock filter: every per-version column non-empty.
-            if any(not c.strip() for c in row[1:]):
-                continue
             nt_num = parse_hex_or_dec(row[version_col])
             if nt_num is None:
+                # Missing on the target version — skip entirely.
                 continue
-            bedrock.append((name, nt_num))
+            all_syscalls.append((name, nt_num))
+            # Universal-bedrock filter: every per-version column non-empty.
+            if not any(not c.strip() for c in row[1:]):
+                bedrock.append((name, nt_num))
 
-    # Sort by NT number so the C++ table is binary-searchable.
+    # Sort by NT number so the C++ tables are binary-searchable.
     bedrock.sort(key=lambda x: x[1])
+    all_syscalls.sort(key=lambda x: x[1])
 
-    rows_out = []
-    covered = 0
-    for name, num in bedrock:
-        sys_enum = KNOWN_MAPPINGS.get(name)
-        if sys_enum is None:
-            mapping_expr = "kSysNtNotImpl"
-        else:
-            mapping_expr = f"static_cast<u32>(::customos::core::{sys_enum})"
-            covered += 1
-        rows_out.append(
-            f'    {{"{name}", 0x{num:04x}, {mapping_expr}}},'
-        )
+    def emit(entries):
+        out = []
+        covered = 0
+        for name, num in entries:
+            sys_enum = KNOWN_MAPPINGS.get(name)
+            if sys_enum is None:
+                mapping_expr = "kSysNtNotImpl"
+            else:
+                mapping_expr = f"static_cast<u32>(::customos::core::{sys_enum})"
+                covered += 1
+            out.append(f'    {{"{name}", 0x{num:04x}, {mapping_expr}}},')
+        return out, covered
 
-    pct = (100 * covered // len(bedrock)) if bedrock else 0
+    bedrock_rows, bedrock_covered = emit(bedrock)
+    all_rows, _ = emit(all_syscalls)
+
+    pct = (100 * bedrock_covered // len(bedrock)) if bedrock else 0
     text = HEADER_TEMPLATE.format(
         version=args.version,
         bedrock_count=len(bedrock),
-        covered_count=covered,
+        all_count=len(all_syscalls),
+        covered_count=bedrock_covered,
         pct=pct,
-        rows="\n".join(rows_out) + ("\n" if rows_out else ""),
+        rows="\n".join(bedrock_rows) + ("\n" if bedrock_rows else ""),
+        all_rows="\n".join(all_rows) + ("\n" if all_rows else ""),
     )
     args.out.write_text(text)
 
     print(f"wrote {args.out}")
     print(f"  bedrock NT calls   : {len(bedrock)}")
-    print(f"  CustomOS-mapped    : {covered} ({pct}%)")
-    print(f"  unmapped           : {len(bedrock) - covered} (route to kSysNtNotImpl)")
+    print(f"  all NT calls       : {len(all_syscalls)}")
+    print(f"  CustomOS-mapped    : {bedrock_covered} ({pct}%)")
+    print(f"  unmapped           : {len(bedrock) - bedrock_covered} (route to kSysNtNotImpl)")
 
 
 if __name__ == "__main__":

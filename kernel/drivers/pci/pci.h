@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../../core/result.h"
 #include "../../core/types.h"
 
 /*
@@ -225,6 +226,51 @@ void PciMsixEnable(DeviceAddress addr);
 /// programmed them. Useful for quiescing a device at reset time.
 void PciMsixFunctionMask(DeviceAddress addr);
 void PciMsixFunctionUnmask(DeviceAddress addr);
+
+// -----------------------------------------------------------------
+// All-in-one MSI-X routing helper.
+//
+// Replaces the boilerplate every driver writes when it just wants
+// "fire vector V on LAPIC L when I'm done with this transfer":
+//
+//     pci::MsixInfo info;
+//     pci::PciMsixFind(addr, &info);
+//     pci::Bar bar = pci::PciReadBar(addr, info.table_bir);
+//     void* tbl = mm::MapMmio(bar.address + info.table_offset, ...);
+//     pci::PciMsixSetEntry(tbl, info.table_size, 0, lapic, vector);
+//     pci::PciMsixUnmaskEntry(tbl, info.table_size, 0);
+//     pci::PciMsixEnable(addr);
+//
+// becomes:
+//
+//     RESULT_TRY_ASSIGN(pci::MsixRoute r,
+//                       pci::PciMsixRouteSimple(addr, 0, lapic, vector));
+//
+// Or for callers that want to handle the error inline:
+//
+//     auto r = pci::PciMsixRouteSimple(addr, 0, lapic, vector);
+//     if (!r) goto legacy_intx;
+//     pci::MsixRoute route = r.take();
+//
+// `MsixRoute` carries the mapped table base + table_size so the
+// caller can later mask / unmask vectors without re-walking config
+// space. Error codes returned:
+//   Unsupported      — function doesn't expose MSI-X
+//   InvalidArgument  — entry_index >= table_size
+//   IoError          — table BAR is I/O-space (shouldn't happen)
+//   OutOfMemory      — MapMmio couldn't claim a spot in the arena
+// -----------------------------------------------------------------
+
+struct MsixRoute
+{
+    volatile void* table_base; // mapped MMIO; valid for the kernel's lifetime
+    u64 table_phys;            // physical base of the mapped region
+    u16 table_size;            // entry count
+    u16 entry_index;           // entry the helper programmed
+    MsixInfo info;             // capability snapshot
+};
+
+::customos::core::Result<MsixRoute> PciMsixRouteSimple(DeviceAddress addr, u16 entry_index, u8 lapic_id, u8 vector);
 
 // -----------------------------------------------------------------
 // Class-code string for diagnostic logs. Returns a stable pointer to

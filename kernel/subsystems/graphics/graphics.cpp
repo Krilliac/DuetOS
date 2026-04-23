@@ -12,6 +12,56 @@ namespace
 
 u64 g_next_handle = 0x1000;
 
+// Tracked handle tables. Small fixed-size arrays so teardown is
+// allocation-free. Each Create returns a handle in a distinct
+// range so Destroy can validate by range.
+constexpr u64 kInstanceBase = 0x1'0000;
+constexpr u64 kDeviceBase = 0x2'0000;
+constexpr u64 kD3dDeviceBase = 0x3'0000;
+constexpr u64 kDxgiFactoryBase = 0x4'0000;
+constexpr u64 kMaxPerKind = 8;
+
+struct HandleTable
+{
+    u64 live_bitmap; // bit N = slot N live
+    u32 live_count;
+    u32 total_created;
+    u32 total_destroyed;
+};
+HandleTable g_instances{};
+HandleTable g_devices{};
+HandleTable g_d3d_devices{};
+HandleTable g_dxgi_factories{};
+
+u64 AllocSlot(HandleTable& t, u64 base)
+{
+    for (u32 i = 0; i < kMaxPerKind; ++i)
+    {
+        const u64 bit = 1ULL << i;
+        if ((t.live_bitmap & bit) == 0)
+        {
+            t.live_bitmap |= bit;
+            ++t.live_count;
+            ++t.total_created;
+            return base + i;
+        }
+    }
+    return 0; // table full
+}
+
+bool FreeSlot(HandleTable& t, u64 base, u64 handle)
+{
+    if (handle < base || handle >= base + kMaxPerKind)
+        return false;
+    const u64 bit = 1ULL << (handle - base);
+    if ((t.live_bitmap & bit) == 0)
+        return false;
+    t.live_bitmap &= ~bit;
+    --t.live_count;
+    ++t.total_destroyed;
+    return true;
+}
+
 // Rate-limit per-entry-point logs. Bitset keyed by a small enum.
 enum EntryPointId
 {
@@ -82,10 +132,15 @@ void GraphicsIcdInit()
 VkResult VkCreateInstance(VkInstance* out)
 {
     LogOnce(EpVkCreateInstance, "vkCreateInstance");
+    const u64 h = AllocSlot(g_instances, kInstanceBase);
+    if (h == 0)
+        return VkResult::ErrorOutOfHostMemory;
     if (out != nullptr)
-        *out = NewHandle();
-    // Tell the caller there's no real driver so their fallback
-    // path activates cleanly. A real ICD returns Success here.
+        *out = h;
+    // Handle is real + tracked but there's no driver underneath, so
+    // the result is still ErrorIncompatibleDriver — a caller that
+    // ignores the return but later DestroyInstance's the handle
+    // sees a matching free.
     return VkResult::ErrorIncompatibleDriver;
 }
 
@@ -110,8 +165,11 @@ VkResult VkCreateDevice(VkPhysicalDevice phys, VkDevice* out)
 {
     LogOnce(EpVkCreateDevice, "vkCreateDevice");
     (void)phys;
+    const u64 h = AllocSlot(g_devices, kDeviceBase);
+    if (h == 0)
+        return VkResult::ErrorOutOfHostMemory;
     if (out != nullptr)
-        *out = NewHandle();
+        *out = h;
     return VkResult::ErrorIncompatibleDriver;
 }
 
@@ -136,18 +194,20 @@ VkResult VkQueueSubmit(VkQueue q)
 void VkDestroyInstance(VkInstance inst)
 {
     LogOnce(EpVkDestroyInstance, "vkDestroyInstance");
-    (void)inst;
+    (void)FreeSlot(g_instances, kInstanceBase, inst);
 }
 
 void VkDestroyDevice(VkDevice dev)
 {
     LogOnce(EpVkDestroyDevice, "vkDestroyDevice");
-    (void)dev;
+    (void)FreeSlot(g_devices, kDeviceBase, dev);
 }
 
 // -------------------------------------------------------------------
-// D3D translation stubs. Return the common Win32 HRESULT E_FAIL
-// (0x80004005) so a caller's fallback-to-software path activates.
+// D3D translation stubs. Return E_FAIL (0x80004005) — the caller's
+// fallback-to-software path activates. The handle allocation is
+// tracked so Destroy-side symmetry works if a future slice starts
+// honouring these calls.
 // -------------------------------------------------------------------
 
 constexpr u32 kHresultEFail = 0x80004005;
@@ -155,19 +215,38 @@ constexpr u32 kHresultEFail = 0x80004005;
 u32 D3D11CreateDeviceStub()
 {
     LogOnce(EpD3d11Create, "D3D11CreateDevice");
+    (void)AllocSlot(g_d3d_devices, kD3dDeviceBase); // counted even on
+                                                    // E_FAIL so stats
+                                                    // reflect call rate
     return kHresultEFail;
 }
 
 u32 D3D12CreateDeviceStub()
 {
     LogOnce(EpD3d12Create, "D3D12CreateDevice");
+    (void)AllocSlot(g_d3d_devices, kD3dDeviceBase);
     return kHresultEFail;
 }
 
 u32 DxgiCreateFactoryStub()
 {
     LogOnce(EpDxgiCreate, "CreateDXGIFactory");
+    (void)AllocSlot(g_dxgi_factories, kDxgiFactoryBase);
     return kHresultEFail;
+}
+
+GraphicsStats GraphicsStatsRead()
+{
+    return GraphicsStats{
+        .vk_instances_live = g_instances.live_count,
+        .vk_instances_created = g_instances.total_created,
+        .vk_instances_destroyed = g_instances.total_destroyed,
+        .vk_devices_live = g_devices.live_count,
+        .vk_devices_created = g_devices.total_created,
+        .vk_devices_destroyed = g_devices.total_destroyed,
+        .d3d_create_calls = g_d3d_devices.total_created,
+        .dxgi_create_calls = g_dxgi_factories.total_created,
+    };
 }
 
 } // namespace customos::subsystems::graphics

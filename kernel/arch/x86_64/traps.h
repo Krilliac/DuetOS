@@ -132,4 +132,9 @@ void IrqInstall(u8 vector, IrqHandler handler);
 /// command for live re-verification.
 void TrapsSelfTest();
 
+/// Register the fault-fixup ranges this TU owns (user-copy
+/// helpers) with the kernel extable. Call once at boot after
+/// the IDT is loaded and after KernelExtable is usable.
+void TrapsRegisterExtable();
+
 } // namespace customos::arch

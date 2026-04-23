@@ -146,6 +146,9 @@ constexpr u32 kOffTlsGetValueReal = 0x7C6;         // batch 46 — 13 bytes
 constexpr u32 kOffTlsSetValueReal = 0x7D3;         // batch 46 — 20 bytes
 constexpr u32 kOffNtAllocateVirtualMemory = 0x7E7; // batch 47 — 36 bytes
 constexpr u32 kOffNtFreeVirtualMemory = 0x80B;     // batch 47 — 33 bytes
+constexpr u32 kOffGetSystemTimeSt = 0x82C;         // batch 48 — 11 bytes
+constexpr u32 kOffSystemTimeToFileTime = 0x837;    // batch 48 — 14 bytes
+constexpr u32 kOffFileTimeToSystemTime = 0x845;    // batch 48 — 14 bytes
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -2185,10 +2188,52 @@ constexpr u8 kStubsBytes[] = {
     0x5E,                         // 0x829 pop rsi
     0x5F,                         // 0x82A pop rdi
     0xC3,                         // 0x82B ret
+
+    // === Batch 48: SYSTEMTIME / FILETIME pointer-output APIs =====
+    //
+    // The previous commit (8a8ce9b) deliberately skipped these:
+    // a `mov eax,1; ret` stub leaves a caller-allocated SYSTEMTIME
+    // uninitialised, and CRTs that consume it treat year=0 as a
+    // sentinel that breaks date math. Real stub bytes now bridge
+    // the Win64 calling convention (rcx, rdx) to our kernel
+    // syscall ABI (rdi, rsi) via int 0x80 with SYS_GETTIME_ST (40),
+    // SYS_ST_TO_FT (41), SYS_FT_TO_ST (42).
+
+    // --- GetSystemTime / GetLocalTime (offset 0x82C, 11 bytes) -----
+    // Win32 ABI: void GetSystemTime(LPSYSTEMTIME=rcx).
+    //   GetLocalTime aliases to the same stub — we have no timezone
+    //   database yet, so local == UTC.
+    0x48, 0x89, 0xCF,             // 0x82C mov rdi, rcx   ; SYSTEMTIME* out
+    0xB8, 0x28, 0x00, 0x00, 0x00, // 0x82F mov eax, 40    ; SYS_GETTIME_ST
+    0xCD, 0x80,                   // 0x834 int 0x80
+    0xC3,                         // 0x836 ret
+
+    // --- SystemTimeToFileTime (offset 0x837, 14 bytes) -----------
+    // Win32 ABI: BOOL SystemTimeToFileTime(const SYSTEMTIME* = rcx,
+    //                                       LPFILETIME        = rdx).
+    // Kernel returns 0 on success in rax — matches Win32 TRUE
+    // (non-zero). On EFAULT or invalid input, kernel writes
+    // u64(-1) which is also non-zero; the caller can't tell the
+    // difference at v0 granularity, but a well-behaved input
+    // always succeeds.
+    0x48, 0x89, 0xCF,             // 0x837 mov rdi, rcx
+    0x48, 0x89, 0xD6,             // 0x83A mov rsi, rdx
+    0xB8, 0x29, 0x00, 0x00, 0x00, // 0x83D mov eax, 41    ; SYS_ST_TO_FT
+    0xCD, 0x80,                   // 0x842 int 0x80
+    0xC3,                         // 0x844 ret
+
+    // --- FileTimeToSystemTime (offset 0x845, 14 bytes) -----------
+    // Win32 ABI: BOOL FileTimeToSystemTime(const FILETIME* = rcx,
+    //                                       LPSYSTEMTIME   = rdx).
+    0x48, 0x89, 0xCF,             // 0x845 mov rdi, rcx
+    0x48, 0x89, 0xD6,             // 0x848 mov rsi, rdx
+    0xB8, 0x2A, 0x00, 0x00, 0x00, // 0x84B mov eax, 42    ; SYS_FT_TO_ST
+    0xCD, 0x80,                   // 0x850 int 0x80
+    0xC3,                         // 0x852 ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x82C, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0x853, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -3372,6 +3417,183 @@ constexpr StubEntry kStubsTable[] = {
     // stub rather than E_FAIL.
     {"d3d9.dll", "Direct3DCreate9", kOffReturnZero},
     {"d3d9.dll", "Direct3DCreate9Ex", kOffHresultEFail},
+
+    // -----------------------------------------------------------------
+    // GUI pass-through: user32 + gdi32 + a handful of kernel32/winmm
+    // gaps. Prior art: evmar/theseus pointed at these module groups
+    // (kernel32::nls / user32::message / user32::window / user32::
+    // resource / gdi32::{dc,bitmap,object}) as the surface you need
+    // to cover to run a non-console Windows PE. Every entry below
+    // aliases to one of the shared canned stubs — kOffReturnZero
+    // (xor eax,eax; ret) or kOffReturnOne (mov eax, 1; ret) — so no
+    // new stub bytes land; the file's static_assert on kStubsBytes
+    // size stays valid.
+    //
+    // Semantics chosen per MSDN so a well-behaved PE sees "call
+    // succeeded but nothing happened":
+    //   - CreateWindowExW -> non-zero (caller treats 0 as failure).
+    //   - GetMessageW     -> 0 (signals WM_QUIT; main loop exits
+    //                         cleanly instead of spinning forever).
+    //   - DefWindowProc*  -> 0 (most messages ignore the return).
+    //   - GDI object/DC handles -> non-zero so SelectObject /
+    //                         DeleteObject later don't hit ERROR_
+    //                         INVALID_HANDLE paths.
+    //
+    // Pointer-output APIs that *populate a struct* (GetSystemTime,
+    // GetLocalTime, SystemTimeToFileTime, etc.) need real stub
+    // bytes — those are a follow-up; returning 0/1 alone would
+    // leave a zero struct and the CRT often treats that as a
+    // sentinel anyway.
+
+    // kernel32: locale / code-page sanity probes.
+    {"kernel32.dll", "IsValidLocale", kOffReturnOne},
+    {"kernel32.dll", "GetCPInfo", kOffReturnOne},
+    {"kernel32.dll", "GetCPInfoExA", kOffReturnOne},
+    {"kernel32.dll", "GetCPInfoExW", kOffReturnOne},
+
+    // winmm: multimedia-timer — fake a valid timer ID + silent kill.
+    {"winmm.dll", "timeSetEvent", kOffReturnOne},
+    {"winmm.dll", "timeKillEvent", kOffReturnZero},
+
+    // user32: window class + window lifecycle.
+    {"user32.dll", "RegisterClassA", kOffReturnOne},
+    {"user32.dll", "RegisterClassW", kOffReturnOne},
+    {"user32.dll", "RegisterClassExA", kOffReturnOne},
+    {"user32.dll", "RegisterClassExW", kOffReturnOne},
+    {"user32.dll", "UnregisterClassA", kOffReturnOne},
+    {"user32.dll", "UnregisterClassW", kOffReturnOne},
+    {"user32.dll", "CreateWindowExA", kOffReturnOne},
+    {"user32.dll", "CreateWindowExW", kOffReturnOne},
+    {"user32.dll", "DestroyWindow", kOffReturnOne},
+    {"user32.dll", "DefWindowProcA", kOffReturnZero},
+    {"user32.dll", "DefWindowProcW", kOffReturnZero},
+    {"user32.dll", "CallWindowProcA", kOffReturnZero},
+    {"user32.dll", "CallWindowProcW", kOffReturnZero},
+    {"user32.dll", "ShowWindow", kOffReturnZero},
+    {"user32.dll", "UpdateWindow", kOffReturnOne},
+    {"user32.dll", "GetClientRect", kOffReturnOne},
+    {"user32.dll", "GetWindowRect", kOffReturnOne},
+    {"user32.dll", "MoveWindow", kOffReturnOne},
+    {"user32.dll", "SetWindowPos", kOffReturnOne},
+    {"user32.dll", "InvalidateRect", kOffReturnOne},
+
+    // user32: message loop. GetMessage returns 0 so the canonical
+    // `while (GetMessage(...)) DispatchMessage(...)` loop sees
+    // WM_QUIT on the first iteration and exits cleanly. PeekMessage
+    // returns 0 (no message available) for the variant that spins.
+    {"user32.dll", "GetMessageA", kOffReturnZero},
+    {"user32.dll", "GetMessageW", kOffReturnZero},
+    {"user32.dll", "PeekMessageA", kOffReturnZero},
+    {"user32.dll", "PeekMessageW", kOffReturnZero},
+    {"user32.dll", "DispatchMessageA", kOffReturnZero},
+    {"user32.dll", "DispatchMessageW", kOffReturnZero},
+    {"user32.dll", "TranslateMessage", kOffReturnZero},
+    {"user32.dll", "TranslateAcceleratorA", kOffReturnZero},
+    {"user32.dll", "TranslateAcceleratorW", kOffReturnZero},
+    {"user32.dll", "PostMessageA", kOffReturnOne},
+    {"user32.dll", "PostMessageW", kOffReturnOne},
+    {"user32.dll", "SendMessageA", kOffReturnZero},
+    {"user32.dll", "SendMessageW", kOffReturnZero},
+    {"user32.dll", "PostQuitMessage", kOffReturnZero},
+    {"user32.dll", "PostThreadMessageA", kOffReturnOne},
+    {"user32.dll", "PostThreadMessageW", kOffReturnOne},
+
+    // user32: resource loaders — fake non-zero HICON/HCURSOR/HBITMAP.
+    {"user32.dll", "LoadIconA", kOffReturnOne},
+    {"user32.dll", "LoadIconW", kOffReturnOne},
+    {"user32.dll", "LoadCursorA", kOffReturnOne},
+    {"user32.dll", "LoadCursorW", kOffReturnOne},
+    {"user32.dll", "LoadImageA", kOffReturnOne},
+    {"user32.dll", "LoadImageW", kOffReturnOne},
+    {"user32.dll", "LoadBitmapA", kOffReturnOne},
+    {"user32.dll", "LoadBitmapW", kOffReturnOne},
+    {"user32.dll", "LoadMenuA", kOffReturnOne},
+    {"user32.dll", "LoadMenuW", kOffReturnOne},
+    {"user32.dll", "LoadAcceleratorsA", kOffReturnOne},
+    {"user32.dll", "LoadAcceleratorsW", kOffReturnOne},
+    {"user32.dll", "LoadStringA", kOffReturnZero},
+    {"user32.dll", "LoadStringW", kOffReturnZero},
+
+    // user32: cursor + caret + misc — most callers treat non-zero
+    // as "ok, previous state returned".
+    {"user32.dll", "SetCursor", kOffReturnZero},
+    {"user32.dll", "ShowCursor", kOffReturnZero},
+    {"user32.dll", "GetCursorPos", kOffReturnOne},
+    {"user32.dll", "SetCursorPos", kOffReturnOne},
+    {"user32.dll", "ClipCursor", kOffReturnOne},
+    {"user32.dll", "GetSystemMetrics", kOffReturnZero},
+    {"user32.dll", "MessageBoxA", kOffReturnOne},
+    {"user32.dll", "MessageBoxW", kOffReturnOne},
+    {"user32.dll", "MessageBoxExA", kOffReturnOne},
+    {"user32.dll", "MessageBoxExW", kOffReturnOne},
+
+    // gdi32: device contexts — fake non-zero HDCs.
+    {"gdi32.dll", "GetDC", kOffReturnOne},
+    {"gdi32.dll", "GetWindowDC", kOffReturnOne},
+    {"gdi32.dll", "ReleaseDC", kOffReturnOne},
+    {"gdi32.dll", "CreateCompatibleDC", kOffReturnOne},
+    {"gdi32.dll", "DeleteDC", kOffReturnOne},
+    {"gdi32.dll", "SaveDC", kOffReturnOne},
+    {"gdi32.dll", "RestoreDC", kOffReturnOne},
+
+    // gdi32: object table — SelectObject / DeleteObject round-trip
+    // must work so a PE that creates + destroys a brush/bitmap
+    // doesn't think it leaked.
+    {"gdi32.dll", "SelectObject", kOffReturnOne},
+    {"gdi32.dll", "DeleteObject", kOffReturnOne},
+    {"gdi32.dll", "GetStockObject", kOffReturnOne},
+    {"gdi32.dll", "GetObjectA", kOffReturnOne},
+    {"gdi32.dll", "GetObjectW", kOffReturnOne},
+
+    // gdi32: bitmap + brush creation.
+    {"gdi32.dll", "CreateBitmap", kOffReturnOne},
+    {"gdi32.dll", "CreateCompatibleBitmap", kOffReturnOne},
+    {"gdi32.dll", "CreateDIBitmap", kOffReturnOne},
+    {"gdi32.dll", "CreateDIBSection", kOffReturnOne},
+    {"gdi32.dll", "CreateSolidBrush", kOffReturnOne},
+    {"gdi32.dll", "CreateBrushIndirect", kOffReturnOne},
+    {"gdi32.dll", "CreatePen", kOffReturnOne},
+    {"gdi32.dll", "CreateFontA", kOffReturnOne},
+    {"gdi32.dll", "CreateFontW", kOffReturnOne},
+    {"gdi32.dll", "CreateFontIndirectA", kOffReturnOne},
+    {"gdi32.dll", "CreateFontIndirectW", kOffReturnOne},
+
+    // gdi32: drawing primitives — all boolean, return TRUE so the
+    // caller's "draw succeeded" flag is set.
+    {"gdi32.dll", "BitBlt", kOffReturnOne},
+    {"gdi32.dll", "StretchBlt", kOffReturnOne},
+    {"gdi32.dll", "MoveToEx", kOffReturnOne},
+    {"gdi32.dll", "LineTo", kOffReturnOne},
+    {"gdi32.dll", "Rectangle", kOffReturnOne},
+    {"gdi32.dll", "Ellipse", kOffReturnOne},
+    {"gdi32.dll", "Polygon", kOffReturnOne},
+    {"gdi32.dll", "Polyline", kOffReturnOne},
+    {"gdi32.dll", "FillRect", kOffReturnOne},
+    {"gdi32.dll", "FrameRect", kOffReturnOne},
+    {"gdi32.dll", "TextOutA", kOffReturnOne},
+    {"gdi32.dll", "TextOutW", kOffReturnOne},
+    {"gdi32.dll", "ExtTextOutA", kOffReturnOne},
+    {"gdi32.dll", "ExtTextOutW", kOffReturnOne},
+    {"gdi32.dll", "DrawTextA", kOffReturnOne},
+    {"gdi32.dll", "DrawTextW", kOffReturnOne},
+    {"gdi32.dll", "SetBkMode", kOffReturnOne},
+    {"gdi32.dll", "SetBkColor", kOffReturnZero},
+    {"gdi32.dll", "SetTextColor", kOffReturnZero},
+    {"gdi32.dll", "SetMapMode", kOffReturnOne},
+    {"gdi32.dll", "SetTextAlign", kOffReturnZero},
+
+    // -----------------------------------------------------------------
+    // Batch 48: real stubs for pointer-output time APIs — the ones
+    // deliberately skipped by the previous GUI batch because a 0/1
+    // return leaves their caller-allocated output struct
+    // uninitialised. These bridge Win64 ABI -> int 0x80 with the
+    // new SYS_GETTIME_ST / SYS_ST_TO_FT / SYS_FT_TO_ST syscalls
+    // (40..42).
+    // -----------------------------------------------------------------
+    {"kernel32.dll", "GetSystemTime", kOffGetSystemTimeSt},
+    {"kernel32.dll", "GetLocalTime", kOffGetSystemTimeSt},
+    {"kernel32.dll", "SystemTimeToFileTime", kOffSystemTimeToFileTime},
+    {"kernel32.dll", "FileTimeToSystemTime", kOffFileTimeToSystemTime},
 };
 
 // Case-insensitive strcmp for ASCII. Win32 DLL name
@@ -3624,10 +3846,10 @@ bool Win32StubsLookupKind(const char* dll, const char* func, u64* out_va, bool* 
 
 void Win32LogNtCoverage()
 {
-    // Re-walk the generated table at boot to print the scoreboard.
+    // Re-walk the generated tables at boot to print the scoreboard.
     // The compile-time `kBedrockNtSyscallsCovered` already has the
     // count, but doing one runtime sweep here also confirms the
-    // table linked correctly into the kernel binary (catches a
+    // tables linked correctly into the kernel binary (catches a
     // future "header included but not referenced anywhere" rot).
     using namespace ::customos::subsystems::win32;
     u32 covered = 0;
@@ -3643,6 +3865,9 @@ void Win32LogNtCoverage()
     arch::SerialWrite(" (generated table = ");
     arch::SerialWriteHex(kBedrockNtSyscallsCovered);
     arch::SerialWrite(")\n");
+    arch::SerialWrite("[win32] ntdll full-table entries: ");
+    arch::SerialWriteHex(kAllNtSyscallCount);
+    arch::SerialWrite(" (every NT syscall known on the target Windows version)\n");
 }
 
 } // namespace customos::win32

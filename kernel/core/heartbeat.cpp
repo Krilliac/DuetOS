@@ -6,6 +6,7 @@
 #include "../mm/kheap.h"
 #include "../sched/sched.h"
 #include "../subsystems/translation/translate.h"
+#include "fault_domain.h"
 #include "klog.h"
 #include "panic.h"
 #include "runtime_checker.h"
@@ -74,6 +75,13 @@ constexpr u64 kHeartbeatTicks = 500;
         const auto& h = RuntimeCheckerStatusRead();
         LogWithValue(LogLevel::Info, "kheartbeat", "health_last_scan_issues", h.last_scan_issues);
         LogWithValue(LogLevel::Info, "kheartbeat", "health_issues_total", h.issues_found_total);
+
+        // Drain any fault-domain restart requests posted from the
+        // trap handler since the previous beat. Cheap when no
+        // flags are set — one linear scan over the bounded
+        // registry.
+        FaultDomainTick();
+        LogWithValue(LogLevel::Info, "kheartbeat", "fault_domains_count", FaultDomainCount());
     }
 }
 

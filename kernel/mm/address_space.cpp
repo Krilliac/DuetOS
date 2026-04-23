@@ -340,6 +340,67 @@ void AddressSpaceMapUserPage(AddressSpace* as, u64 virt, PhysAddr frame, u64 fla
     ++as->region_count;
 }
 
+bool AddressSpaceUnmapUserPage(AddressSpace* as, u64 virt)
+{
+    if (as == nullptr)
+    {
+        return false;
+    }
+    if ((virt & 0xFFF) != 0)
+    {
+        PanicAs("AddressSpaceUnmapUserPage: unaligned virt", virt);
+    }
+    // Find the region. Linear scan over region_count — typical
+    // region_count is small (≤128), and munmap is infrequent; this
+    // stays cheaper than building an index.
+    u8 found = u8(-1);
+    for (u8 i = 0; i < as->region_count; ++i)
+    {
+        if (as->regions[i].vaddr == virt)
+        {
+            found = i;
+            break;
+        }
+    }
+    if (found == u8(-1))
+    {
+        return false;
+    }
+    const PhysAddr frame = as->regions[found].frame;
+
+    // Clear the leaf PTE. If the walk can't find one the tables
+    // are corrupt relative to the region table — panic so the gap
+    // is visible, rather than silently leaving the region list out
+    // of sync with the page tables.
+    u64* pte = WalkToPteIn(as->pml4_virt, virt, /*create=*/false);
+    if (pte == nullptr || (*pte & kPagePresent) == 0)
+    {
+        PanicAs("AddressSpaceUnmapUserPage: region table claims mapping but PTE absent", virt);
+    }
+    *pte = 0;
+
+    // TLB flush only when the touched AS is the one live on this
+    // CPU; other CPUs pick up the change at their next CR3 load
+    // (no cross-CPU shootdown in v0 — SMP activation is pending).
+    if (AddressSpaceCurrent() == as)
+    {
+        Invlpg(virt);
+    }
+
+    // Compact the region table — swap the dying slot with the last
+    // in-use slot. Order doesn't matter; destroy walks `region_count`
+    // entries.
+    const u8 last = u8(as->region_count - 1);
+    if (found != last)
+    {
+        as->regions[found] = as->regions[last];
+    }
+    --as->region_count;
+
+    FreeFrame(frame);
+    return true;
+}
+
 void AddressSpaceActivate(AddressSpace* as)
 {
     cpu::PerCpu* p = cpu::CurrentCpu();

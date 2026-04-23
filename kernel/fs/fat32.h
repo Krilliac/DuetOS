@@ -114,6 +114,15 @@ u32 Fat32ListDirByCluster(const Volume* v, u32 first_cluster, DirEntry* out, u32
 /// undefined-behaviour warnings clang emits at -O3.
 i64 Fat32ReadFile(const Volume* v, const DirEntry* e, void* out, u64 max);
 
+/// Offset-aware read for syscall-driven cursors. Reads up to `len`
+/// bytes starting at byte `offset` into `out`. Returns the number
+/// of bytes copied (0 at EOF, capped to file size - offset), or
+/// -1 on I/O failure. Walks the cluster chain to skip past
+/// `offset`, then resumes the standard cluster-by-cluster read
+/// path. Used by the Win32 file syscalls' `DoFileRead` to back
+/// FAT32-routed handles whose `cursor` advances per call.
+i64 Fat32ReadAt(const Volume* v, const DirEntry* e, u64 offset, void* out, u64 len);
+
 /// Callback signature for Fat32ReadFileStream. `data` points into
 /// internal scratch — valid only for the duration of the call.
 /// Returning false stops the stream cleanly.

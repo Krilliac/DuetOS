@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../fs/fat32.h"
 #include "../fs/ramfs.h"
 #include "../mm/address_space.h"
 #include "../sched/sched.h"
@@ -84,6 +85,26 @@ enum Cap : u32
     // still crash, but it cannot use the 4 hardware DRs as a
     // side channel or stall the scheduler by pinning them.
     kCapDebug = 3,
+
+    // Mutate the on-disk filesystem (SYS_FILE_WRITE,
+    // SYS_FILE_CREATE). Read still requires kCapFsRead — a
+    // typical writer holds both. Sandboxed profiles withhold
+    // this cap by default; trusted profiles inherit it via the
+    // [1..kCapCount) loop in `kProfileTrusted`. The cap covers
+    // every backing the routing layer reaches today (ramfs is
+    // read-only; fat32 honours the cap for Fat32WriteInPlace +
+    // Fat32CreateAtPath); future backings (ext4 r/w, native FS)
+    // share the same gate.
+    kCapFsWrite = 4,
+
+    // Spawn an additional ring-3 Task inside the caller's
+    // Process (SYS_THREAD_CREATE). The new Task shares the
+    // Process's AddressSpace, cap set, and handle tables, and
+    // gets its own kernel stack + user stack. Withholding this
+    // cap from a sandboxed profile keeps an untrusted PE
+    // single-threaded regardless of its own intent. Trusted
+    // profiles inherit it via the kProfileTrusted loop.
+    kCapSpawnThread = 5,
 
     // Sentinel: keep this as the last entry so kProfileTrusted can
     // be built by a loop that iterates [1 .. kCapCount). Do NOT
@@ -300,9 +321,23 @@ struct Process
     u64 win32_iat_miss_count;
 
     // Win32 file-handle table — backs CreateFileW / ReadFile /
-    // CloseHandle / SetFilePointerEx (batch 24). Each slot holds
-    // a pointer to the resolved RamfsNode plus the current read
-    // cursor; all access is read-only because ramfs is .rodata.
+    // CloseHandle / SetFilePointerEx (batch 24). Each slot is
+    // tagged by `kind`: a Ramfs-backed slot stores a pointer to
+    // the resolved `.rodata` RamfsNode; a Fat32-backed slot
+    // stores a (volume_index, dir_entry) snapshot so reads can
+    // walk the cluster chain through `Fat32ReadAt`. Both share
+    // the byte cursor.
+    //
+    // Routing is path-prefix driven in `DoFileOpen`:
+    //
+    //   "/disk/<idx>/<rest>"  →  Fat32, volume <idx>, lookup <rest>
+    //   anything else         →  Ramfs, lookup against `proc->root`
+    //
+    // The "/disk/" prefix is the smallest credible mount-table
+    // stand-in: it lets a Win32 PE name a real on-disk file
+    // without yet building a real mount table or drive-letter
+    // resolver. A future slice replaces this with named mounts
+    // (`/mnt/<name>/...`) once those exist.
     //
     // Returned handles to user mode are `kWin32HandleBase + idx`
     // (= 0x100 + 0..15) so they don't collide with Win32 pseudo-
@@ -313,10 +348,19 @@ struct Process
     // 16 slots is plenty for v0 — typical console programs hold
     // ~4 (stdin/stdout/stderr + one input file). Grow to a
     // KMalloc'd table when a real workload needs more.
+    enum class FsBackingKind : u8
+    {
+        None = 0, // slot is free
+        Ramfs,
+        Fat32,
+    };
     struct Win32FileHandle
     {
-        const fs::RamfsNode* node; // nullptr = unused slot
-        u64 cursor;                // current read position in bytes
+        FsBackingKind kind;              // None = free; otherwise selects which fields below are valid
+        const fs::RamfsNode* ramfs_node; // valid iff kind == Ramfs
+        u32 fat32_volume_idx;            // valid iff kind == Fat32
+        fs::fat32::DirEntry fat32_entry; // valid iff kind == Fat32 (snapshot at open time)
+        u64 cursor;                      // current read position in bytes
     };
     static constexpr u64 kWin32HandleCap = 16;
     static constexpr u64 kWin32HandleBase = 0x100;
@@ -370,6 +414,51 @@ struct Process
     static constexpr u64 kWin32EventBase = 0x300;
     Win32EventHandle win32_events[kWin32EventCap];
 
+    // Win32 thread table — backs CreateThread (batch ~47). Each
+    // slot carries a pointer to the scheduler Task that was
+    // spawned for the thread + a small bit of lifecycle state.
+    // Handles run kWin32ThreadBase + idx (= 0x400..0x407),
+    // disjoint from every other Win32 handle range so a single
+    // CloseHandle dispatch can pick the right table by value.
+    //
+    // v0 SCOPE (honest about what's not done):
+    //   - All threads share the Process's single TEB page
+    //     (kV0TebVa). Real Windows gives each thread its own
+    //     TEB with per-thread TLS slots; that's a follow-up.
+    //     Multi-threaded Win32 apps that key per-thread state
+    //     off gs:[...] will see cross-thread bleeding. Apps
+    //     that just want concurrent worker tasks over shared
+    //     memory (the common case) work today.
+    //   - No join / wait-for-thread primitive yet. CloseHandle
+    //     frees the slot but doesn't block for exit. A future
+    //     SYS_THREAD_JOIN / WaitForSingleObject(thread_handle)
+    //     path lands the blocking side.
+    //   - Thread exit is via SYS_EXIT (same as process exit);
+    //     the scheduler's single-task-dies-cleanly path handles
+    //     it. Exiting the LAST task in the process implicitly
+    //     tears the process down; the ordering is the
+    //     scheduler's existing reaper contract.
+    struct Win32ThreadHandle
+    {
+        bool in_use;
+        u8 _pad[7];
+        sched::Task* task; // scheduler Task spawned for this thread
+        u64 user_stack_va; // base VA of the thread's user stack
+    };
+    static constexpr u64 kWin32ThreadCap = 8;
+    static constexpr u64 kWin32ThreadBase = 0x400;
+    Win32ThreadHandle win32_threads[kWin32ThreadCap];
+
+    // Per-process cursor for thread-stack allocation. Each new
+    // thread carves kV0ThreadStackPages pages off this bump
+    // cursor. The base sits above the main task's stack and
+    // below the Win32 stubs region so collisions with mapped
+    // images remain off-limits. Threads don't free their stacks
+    // on exit in v0 — same leak profile as the vmap arena.
+    static constexpr u64 kV0ThreadStackArenaBase = 0x68000000ULL;
+    static constexpr u64 kV0ThreadStackPages = 4; // 16 KiB per thread
+    u64 thread_stack_cursor;
+
     // Win32 TLS (Thread-Local Storage) slots — backs TlsAlloc /
     // TlsGetValue / TlsSetValue / TlsFree (batch 46). v0 is
     // single-threaded per process, so "thread-local" is just
@@ -406,6 +495,27 @@ struct Process
     static constexpr u64 kWin32VmapCapPages = 128; // 512 KiB max per process
     u64 vmap_base;                                 // = kWin32VmapBase after PE load
     u64 vmap_pages_used;                           // bump cursor in pages
+
+    // Linux signal-handler table — backs rt_sigaction. Each slot
+    // records the user-space handler VA + flags + mask. v0 does
+    // NOT deliver signals (no trampoline, no pending queue), but
+    // storing the sigaction means musl's init-time "install SIGPIPE
+    // = SIG_IGN" pattern at least persists — a subsequent
+    // rt_sigaction with nullptr new_act returns the previous one,
+    // matching glibc's observed behaviour during CRT bring-up.
+    //
+    // POSIX defines 64 signals (SIGRTMAX = 64). We size to 65 so
+    // signum 1..64 indexes directly.
+    static constexpr u64 kLinuxSignalCount = 65;
+    struct LinuxSigAction
+    {
+        u64 handler_va; // 0 = SIG_DFL, 1 = SIG_IGN, other = user VA
+        u64 flags;      // SA_RESTART, SA_SIGINFO, ... (opaque to us)
+        u64 restorer_va;
+        u64 mask; // blocked-signals bitmask during handler
+    };
+    LinuxSigAction linux_sigactions[kLinuxSignalCount];
+    u64 linux_signal_mask; // per-process blocked-signal bitmask (rt_sigprocmask)
 
     u64 refcount;
 };

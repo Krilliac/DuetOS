@@ -154,6 +154,19 @@ AddressSpace* AddressSpaceCreate(u64 frame_budget);
 /// switching the child task in.
 void AddressSpaceMapUserPage(AddressSpace* as, u64 virt, PhysAddr frame, u64 flags);
 
+/// Reverse of MapUserPage. Finds the `(virt, frame)` pair in the
+/// regions table, clears the leaf PTE, returns the backing frame
+/// to the physical allocator, and drops the region bookkeeping
+/// entry. Returns true if the page was mapped in this AS and has
+/// been released, false if `virt` was not one of this AS's
+/// user-region entries (already unmapped, never mapped, or belongs
+/// to a different AS). `virt` must be 4 KiB-aligned.
+///
+/// Safe to call on `as` whether or not it's currently active: the
+/// kernel direct-map alias writes the PTE; TLB invalidation is
+/// emitted only for the active CPU when `as` is the active AS.
+bool AddressSpaceUnmapUserPage(AddressSpace* as, u64 virt);
+
 /// Reverse of MapUserPage: given a user VA, return the physical
 /// frame backing its containing page, or kNullFrame if unmapped.
 /// Walks the AS's `regions` array (small N, linear scan). Used

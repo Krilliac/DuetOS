@@ -1,5 +1,7 @@
 #include "syscall.h"
 
+#include "linux_syscall_table_generated.h"
+
 #include "../../arch/x86_64/hpet.h"
 #include "../../arch/x86_64/serial.h"
 #include "../../arch/x86_64/traps.h"
@@ -624,47 +626,195 @@ i64 DoLseek(u64 fd, i64 offset, u64 whence)
     return new_off;
 }
 
-// Linux: ioctl(fd, cmd, arg). v0 stub — no device drivers
-// currently expose ioctls to Linux ABI. Return -ENOTTY for
-// anything on tty fds (matches glibc/musl probe behaviour), -EBADF
-// otherwise. Real implementations add specific cmd handling per
-// device.
+// Linux: ioctl(fd, cmd, arg). Handle the three ioctls musl's
+// stdio actually reaches under a CRT bring-up:
+//   TCGETS      (0x5401) — "is this a tty?" probe. Returns a
+//                         populated termios struct so isatty(fd)
+//                         returns true; line-edit features are
+//                         effectively disabled via the c_lflag
+//                         bits we clear.
+//   TCSETS      (0x5402) — swallow — we don't honour the
+//                         settings, but returning success avoids
+//                         aborting callers that set RAW mode.
+//   TIOCGWINSZ  (0x5413) — report a fake 80×24 terminal so
+//                         curses-style programs stop asking.
+// Anything else on a tty fd: -EINVAL. On a non-tty fd: -ENOTTY.
+// On a closed slot: -EBADF.
 i64 DoIoctl(u64 fd, u64 cmd, u64 arg)
 {
-    (void)cmd;
-    (void)arg;
+    constexpr u64 kTCGETS = 0x5401;
+    constexpr u64 kTCSETS = 0x5402;
+    constexpr u64 kTCSETSW = 0x5403;
+    constexpr u64 kTCSETSF = 0x5404;
+    constexpr u64 kTIOCGWINSZ = 0x5413;
+    constexpr u64 kTIOCGPGRP = 0x540F;
     core::Process* p = core::CurrentProcess();
     if (p == nullptr || fd >= 16)
         return kEBADF;
-    if (p->linux_fds[fd].state == 1)
-        return kENOTTY;
     if (p->linux_fds[fd].state == 0)
         return kEBADF;
-    return kENOTTY;
+    const bool is_tty = (p->linux_fds[fd].state == 1);
+    if (!is_tty)
+        return kENOTTY;
+    switch (cmd)
+    {
+    case kTCGETS:
+    {
+        // Linux kernel-ABI termios: 4×u32 flags + 1×u8 c_line +
+        // 19×u8 c_cc + pad to 36 bytes. Emit a sensible baseline:
+        // ICRNL on input, OPOST on output, CS8 + CREAD + B38400 on
+        // control, and ISIG|ICANON|ECHO on lflag so isatty probes
+        // that look for "tty with sane defaults" pass.
+        struct Termios
+        {
+            u32 c_iflag;
+            u32 c_oflag;
+            u32 c_cflag;
+            u32 c_lflag;
+            u8 c_line;
+            u8 c_cc[19];
+        } t{};
+        static_assert(sizeof(Termios) == 36, "Linux termios ABI is 36 bytes");
+        t.c_iflag = 0x100;              // ICRNL
+        t.c_oflag = 0x01;               // OPOST
+        t.c_cflag = 0x30 | 0x80 | 0x0F; // CS8 | CREAD | B38400 baud
+        t.c_lflag = 0x01 | 0x02 | 0x08; // ISIG | ICANON | ECHO
+        t.c_line = 0;
+        // c_cc: common control chars. VINTR=^C, VQUIT=^\, VERASE=^?,
+        // VKILL=^U, VEOF=^D.
+        t.c_cc[0] = 0x03; // VINTR
+        t.c_cc[1] = 0x1C; // VQUIT
+        t.c_cc[2] = 0x7F; // VERASE
+        t.c_cc[3] = 0x15; // VKILL
+        t.c_cc[4] = 0x04; // VEOF
+        if (!mm::CopyToUser(reinterpret_cast<void*>(arg), &t, sizeof(t)))
+            return kEFAULT;
+        return 0;
+    }
+    case kTCSETS:
+    case kTCSETSW:
+    case kTCSETSF:
+        // Accept + ignore. The cooked-mode / raw-mode distinction
+        // has no observable effect on a serial-only tty today.
+        (void)arg;
+        return 0;
+    case kTIOCGWINSZ:
+    {
+        struct WinSize
+        {
+            u16 ws_row;
+            u16 ws_col;
+            u16 ws_xpixel;
+            u16 ws_ypixel;
+        } w{};
+        w.ws_row = 24;
+        w.ws_col = 80;
+        if (!mm::CopyToUser(reinterpret_cast<void*>(arg), &w, sizeof(w)))
+            return kEFAULT;
+        return 0;
+    }
+    case kTIOCGPGRP:
+    {
+        // There's no process-group concept in v0; report pid back
+        // as the foreground pgid so shells' "am I in the fg?" test
+        // resolves to yes.
+        const i32 pgid = i32(p->pid);
+        if (!mm::CopyToUser(reinterpret_cast<void*>(arg), &pgid, sizeof(pgid)))
+            return kEFAULT;
+        return 0;
+    }
+    default:
+        return kEINVAL;
+    }
 }
 
-// Linux: rt_sigaction / rt_sigprocmask / set_tid_address.
-// v0 stubs — accept + succeed without actually wiring signal
-// delivery or TID futex notification. musl calls these during
-// CRT init; refusing them would abort startup. Behavior: signals
-// are silently dropped (no delivery machinery yet); set_tid_address
-// returns the current task ID but the kernel never clears the
-// user memory on exit (no CLONE_CHILD_CLEARTID handling).
+// Linux: rt_sigaction. Store the requested handler + mask + flags
+// in the per-process signal table so a subsequent rt_sigaction
+// with a nullptr new_act returns the value we just persisted.
+// Signal DELIVERY is still not wired (no user-mode trampoline, no
+// pending queue) but musl's CRT init relies on readback to decide
+// whether SIGPIPE is SIG_IGN'd — returning the previous value
+// matters even though we never actually raise a signal.
+//
+// Linux sigaction layout (offsets into the user struct):
+//   0x00  sa_handler (u64) or sa_sigaction
+//   0x08  sa_flags (u64)
+//   0x10  sa_restorer (u64)
+//   0x18  sa_mask (u64, first u64 of the sigset)
 i64 DoRtSigaction(u64 signum, u64 new_act, u64 old_act, u64 sigsetsize)
 {
-    (void)signum;
-    (void)new_act;
-    (void)old_act;
-    (void)sigsetsize;
+    (void)sigsetsize; // we always store a single u64 mask
+    if (signum == 0 || signum >= core::Process::kLinuxSignalCount)
+        return kEINVAL;
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr)
+        return kEINVAL;
+
+    core::Process::LinuxSigAction& slot = p->linux_sigactions[signum];
+
+    // Emit the previous value first — the syscall contract is
+    // "atomic" so the oldact captures state from BEFORE the new
+    // one is applied.
+    if (old_act != 0)
+    {
+        u64 out[4] = {slot.handler_va, slot.flags, slot.restorer_va, slot.mask};
+        if (!mm::CopyToUser(reinterpret_cast<void*>(old_act), out, sizeof(out)))
+            return kEFAULT;
+    }
+    if (new_act != 0)
+    {
+        u64 in[4] = {0, 0, 0, 0};
+        if (!mm::CopyFromUser(in, reinterpret_cast<const void*>(new_act), sizeof(in)))
+            return kEFAULT;
+        slot.handler_va = in[0];
+        slot.flags = in[1];
+        slot.restorer_va = in[2];
+        slot.mask = in[3];
+    }
     return 0;
 }
 
+// Linux: rt_sigprocmask(how, set, oldset, sigsetsize).
+//   how == 0 SIG_BLOCK   — mask |= set
+//   how == 1 SIG_UNBLOCK — mask &= ~set
+//   how == 2 SIG_SETMASK — mask  = set
+// No delivery yet; we just persist the mask so a subsequent
+// rt_sigprocmask with set=NULL returns the value we stored.
 i64 DoRtSigprocmask(u64 how, u64 user_set, u64 user_oldset, u64 sigsetsize)
 {
-    (void)how;
-    (void)user_set;
-    (void)user_oldset;
     (void)sigsetsize;
+    constexpr u64 kSigBlock = 0;
+    constexpr u64 kSigUnblock = 1;
+    constexpr u64 kSigSetMask = 2;
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr)
+        return kEINVAL;
+    const u64 prev = p->linux_signal_mask;
+    if (user_oldset != 0)
+    {
+        if (!mm::CopyToUser(reinterpret_cast<void*>(user_oldset), &prev, sizeof(prev)))
+            return kEFAULT;
+    }
+    if (user_set != 0)
+    {
+        u64 set = 0;
+        if (!mm::CopyFromUser(&set, reinterpret_cast<const void*>(user_set), sizeof(set)))
+            return kEFAULT;
+        switch (how)
+        {
+        case kSigBlock:
+            p->linux_signal_mask = prev | set;
+            break;
+        case kSigUnblock:
+            p->linux_signal_mask = prev & ~set;
+            break;
+        case kSigSetMask:
+            p->linux_signal_mask = set;
+            break;
+        default:
+            return kEINVAL;
+        }
+    }
     return 0;
 }
 
@@ -695,16 +845,56 @@ i64 DoAccess(u64 user_path, u64 mode)
     return fs::fat32::Fat32LookupPath(v, StripFatPrefix(path), &entry) ? 0 : kENOENT;
 }
 
-// Linux: readlink(path, buf, bufsiz). We don't have symlinks;
-// every path is a plain file or directory. Return -EINVAL per
-// POSIX's "path is not a symlink" semantics — musl's
-// realpath() fallback kicks in and uses the path as-is.
+// Linux: readlink(path, buf, bufsiz). We don't have real symlinks
+// yet, but musl / glibc query /proc/self/exe (and /proc/PID/exe)
+// during CRT init to recover the program path. Special-case that
+// to return the current process's name with a leading "/", which
+// is enough for argv[0] / dlopen's relative-path resolution to
+// work. Everything else: -EINVAL ("not a symlink").
 i64 DoReadlink(u64 user_path, u64 user_buf, u64 bufsiz)
 {
-    (void)user_path;
-    (void)user_buf;
-    (void)bufsiz;
-    return kEINVAL;
+    char path[64];
+    for (u32 i = 0; i < sizeof(path); ++i)
+        path[i] = 0;
+    if (!mm::CopyFromUser(path, reinterpret_cast<const void*>(user_path), sizeof(path) - 1))
+        return kEFAULT;
+    path[sizeof(path) - 1] = 0;
+
+    // Match exactly "/proc/self/exe". /proc/<PID>/exe is not
+    // recognised yet — glibc's fallback uses /proc/self/exe too.
+    const char kSelf[] = "/proc/self/exe";
+    bool matches = true;
+    for (u32 i = 0; i < sizeof(kSelf); ++i)
+    {
+        if (path[i] != kSelf[i])
+        {
+            matches = false;
+            break;
+        }
+    }
+    if (!matches)
+        return kEINVAL;
+
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr || p->name == nullptr)
+        return kEINVAL;
+
+    char out[64];
+    u64 out_len = 0;
+    out[out_len++] = '/';
+    const char* n = p->name;
+    while (*n != '\0' && out_len + 1 < sizeof(out))
+    {
+        out[out_len++] = *n++;
+    }
+    if (bufsiz == 0)
+        return 0;
+    const u64 to_copy = (out_len < bufsiz) ? out_len : bufsiz;
+    if (!mm::CopyToUser(reinterpret_cast<void*>(user_buf), out, to_copy))
+        return kEFAULT;
+    // readlink does not write a trailing NUL; the return value is
+    // the byte count the caller uses to terminate.
+    return i64(to_copy);
 }
 
 // Linux: getcwd(buf, size). We don't have per-process cwd; the
@@ -723,21 +913,49 @@ i64 DoGetcwd(u64 user_buf, u64 size)
     return static_cast<i64>(len);
 }
 
-// Linux: futex(uaddr, op, val, ...). v0 stub — single-threaded
-// processes don't contend, so the futex is always uncontended
-// when musl falls through to syscall. Returning 0 for FUTEX_WAIT
-// says "woke up spuriously" (caller re-checks + retries).
-// Returning 0 for FUTEX_WAKE says "woke zero waiters" (there are
-// none). Safe no-op for a single-thread world.
+// Linux: futex(uaddr, op, val, ...).
+//
+// Single-threaded processes have no contention, so we never
+// actually block. The real Linux semantics we respect:
+//   FUTEX_WAIT (0): if *uaddr != val, return -EAGAIN — tells the
+//                   caller "the value already changed, try again".
+//                   Otherwise return 0 (spurious wakeup — musl
+//                   retries the condition).
+//   FUTEX_WAKE (1): return 0 (no waiters, nothing to wake).
+//
+// FUTEX_PRIVATE_FLAG (0x80) masks off — it's a hint to the kernel
+// about shared-memory scope, and for our single-address-space
+// case it's a no-op.
 i64 DoFutex(u64 uaddr, u64 op, u64 val, u64 timeout, u64 uaddr2, u64 val3)
 {
-    (void)uaddr;
-    (void)op;
-    (void)val;
     (void)timeout;
     (void)uaddr2;
     (void)val3;
-    return 0;
+    constexpr u64 kFutexWait = 0;
+    constexpr u64 kFutexWake = 1;
+    constexpr u64 kFutexOpMask = 0x7F;
+    const u64 base_op = op & kFutexOpMask;
+    if (base_op == kFutexWait)
+    {
+        // Validate the caller's pointer and compare against `val`.
+        // Copy fails with -EFAULT so a buggy program (e.g. null
+        // uaddr) gets a specific error instead of a silent zero.
+        u32 cur = 0;
+        if (!mm::CopyFromUser(&cur, reinterpret_cast<const void*>(uaddr), sizeof(cur)))
+            return kEFAULT;
+        if (cur != u32(val))
+            return -11; // -EAGAIN
+        return 0;       // "spurious" wake — caller retries
+    }
+    if (base_op == kFutexWake)
+    {
+        return 0; // no waiters in single-thread v0
+    }
+    // Unknown op — reject so a test-suite like LTP gets -EINVAL
+    // rather than silent success.
+    (void)uaddr;
+    (void)val;
+    return kEINVAL;
 }
 
 // Read the CPU timestamp counter. Used as a seed for the tiny
@@ -1337,15 +1555,34 @@ i64 DoMmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off)
     return static_cast<i64>(base);
 }
 
-// Linux: munmap(addr, len). v0 stub — page unmap requires tearing
-// down the AS entries, which the AS API doesn't yet expose. Return
-// 0 so musl's free() paths don't error out; the mappings persist
-// until the process dies (bounded leak — fine for short-lived
-// ring-3 tasks).
+// Linux: munmap(addr, len). Walks every 4 KiB page in
+// [addr, addr+len) and asks the AS to release it. Pages that
+// weren't mapped by mmap() (or were already unmapped) are silently
+// ignored — matches Linux's relaxed behaviour where munmap of an
+// un-mapped range is a no-op rather than -EINVAL.
 i64 DoMunmap(u64 addr, u64 len)
 {
-    (void)addr;
-    (void)len;
+    if (len == 0)
+        return 0;
+    if ((addr & 0xFFF) != 0)
+        return kEINVAL;
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr || p->as == nullptr)
+        return kEINVAL;
+    const u64 aligned_len = (len + 0xFFF) & ~u64(0xFFF);
+    u64 freed = 0;
+    for (u64 off = 0; off < aligned_len; off += mm::kPageSize)
+    {
+        if (mm::AddressSpaceUnmapUserPage(p->as, addr + off))
+            ++freed;
+    }
+    arch::SerialWrite("[linux] munmap addr=");
+    arch::SerialWriteHex(addr);
+    arch::SerialWrite(" len=");
+    arch::SerialWriteHex(aligned_len);
+    arch::SerialWrite(" pages_released=");
+    arch::SerialWriteHex(freed);
+    arch::SerialWrite("\n");
     return 0;
 }
 
@@ -1882,6 +2119,27 @@ void SyscallInit()
     SerialWrite(", kernel_gs@");
     arch::SerialWriteHex(percpu_addr);
     SerialWrite(")\n");
+}
+
+void LinuxLogAbiCoverage()
+{
+    // Re-walk the generated table at boot so a future refactor that
+    // renames a Do* handler out of classifier reach is visible in the
+    // boot log (count drops). kLinuxSyscallHandlersImplemented is the
+    // compile-time count baked in by the generator.
+    u32 implemented = 0;
+    for (u32 i = 0; i < kLinuxSyscallCount; ++i)
+    {
+        if (kLinuxSyscalls[i].state == HandlerState::Implemented)
+            ++implemented;
+    }
+    arch::SerialWrite("[linux] ABI coverage: ");
+    arch::SerialWriteHex(implemented);
+    arch::SerialWrite(" / ");
+    arch::SerialWriteHex(kLinuxSyscallCount);
+    arch::SerialWrite(" implemented (generated count = ");
+    arch::SerialWriteHex(kLinuxSyscallHandlersImplemented);
+    arch::SerialWrite(")\n");
 }
 
 } // namespace customos::subsystems::linux

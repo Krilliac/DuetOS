@@ -383,10 +383,95 @@ enum SyscallNumber : u64
     // BP that belongs to a different process returns -1
     // (BPs are scoped per-process).
     SYS_BP_REMOVE = 39,
+
+    // SYS_GETTIME_ST: rdi = user pointer to a 16-byte SYSTEMTIME
+    // struct. Samples the RTC and fills the struct in place with
+    // year/month/dayOfWeek/day/hour/minute/second/milliseconds.
+    // Returns 0 on success, u64(-1) on EFAULT.
+    //
+    // Companion to SYS_GETTIME_FT (17): FT returns a u64 FILETIME
+    // in rax; ST writes a SYSTEMTIME into the caller's buffer.
+    // The Win32 GetSystemTime / GetLocalTime stubs route through
+    // this; LocalTime is the same as SystemTime until we have a
+    // timezone database.
+    SYS_GETTIME_ST = 40,
+
+    // SYS_ST_TO_FT: rdi = user pointer to an input SYSTEMTIME,
+    // rsi = user pointer to an output FILETIME. Converts the 8
+    // WORD calendar fields to a 100-ns-tick count since
+    // 1601-01-01 UTC. Returns 0 on success; u64(-1) on EFAULT
+    // or on out-of-range input (year < 1601, month 0 or > 12,
+    // day 0 or > 31). Backs Win32 SystemTimeToFileTime.
+    SYS_ST_TO_FT = 41,
+
+    // SYS_FT_TO_ST: rdi = user pointer to an input FILETIME,
+    // rsi = user pointer to an output SYSTEMTIME. Reverse of
+    // SYS_ST_TO_FT. Backs Win32 FileTimeToSystemTime.
+    SYS_FT_TO_ST = 42,
+
+    // SYS_FILE_WRITE: rdi = handle (Win32-shaped, 0x100..0x10F),
+    // rsi = user pointer to source bytes, rdx = byte count.
+    // Writes `rdx` bytes at the handle's current cursor and
+    // advances the cursor by the bytes-written count. Returns
+    // bytes written (0..rdx) or u64(-1) on bad handle / bad
+    // user pointer / EOF-no-grow / I/O failure / cap denied.
+    //
+    // Cap-gated on kCapFsWrite. Backing dispatch:
+    //   Ramfs  → -1 (ramfs is .rodata, refuses writes).
+    //   Fat32  → Fat32WriteInPlace within [cursor..min(cursor+rdx,
+    //            file_size)]. Past EOF the call fails — file
+    //            growth requires SYS_FILE_CREATE / append paths
+    //            that the routing layer hasn't exposed yet.
+    //
+    // Backs Win32 WriteFile / WriteFileEx for handle-based I/O.
+    SYS_FILE_WRITE = 43,
+
+    // SYS_FILE_CREATE: rdi = user pointer to NUL-terminated
+    // ASCII path, rsi = path-buffer cap (bytes), rdx = user
+    // pointer to initial bytes (may be 0/null for empty file),
+    // r10 = initial byte count. Creates the file at `path` with
+    // `r10` bytes of initial content; returns a Win32 pseudo-
+    // handle (kWin32HandleBase + slot_idx) on success, u64(-1)
+    // on failure (bad path / cap denied / parent-dir missing /
+    // duplicate name / OOM / I/O failure).
+    //
+    // Cap-gated on kCapFsWrite. Path routing follows the same
+    // /disk/<idx>/<rest> convention as SYS_FILE_OPEN; ramfs
+    // paths fail (no create on read-only backing). Fat32 paths
+    // call Fat32CreateAtPath under the hood, then look up the
+    // freshly-planted entry and allocate a handle pointing at
+    // it — so the caller can immediately write/read the new
+    // file via the same handle.
+    //
+    // Backs Win32 CreateFileW with dwCreationDisposition =
+    // CREATE_NEW or CREATE_ALWAYS.
+    SYS_FILE_CREATE = 44,
+
+    // SYS_THREAD_CREATE: rdi = user-mode start VA (thread
+    // proc), rsi = user-mode parameter (passed as RCX on
+    // thread entry per Win32 x64 calling convention). Spawns
+    // a new Task sharing the caller's Process + AddressSpace +
+    // cap set; allocates kV0ThreadStackPages of user stack at
+    // the process's `thread_stack_cursor` and bumps it.
+    //
+    // Returns a Win32 pseudo-handle (kWin32ThreadBase +
+    // slot_idx, i.e. 0x400..0x407) on success, u64(-1) on bad
+    // start VA / cap denied / slot-table full / stack-arena
+    // exhausted / Task-creation failure. Cap-gated on
+    // kCapSpawnThread.
+    //
+    // v0 limitations documented at Process::Win32ThreadHandle.
+    // Backs Win32 CreateThread / CreateRemoteThread-on-self.
+    SYS_THREAD_CREATE = 45,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit
 /// (the IDT must already be loaded) and before any ring-3 entry.
+/// Upper bound on path-argument length for SYS_STAT / SYS_FILE_OPEN
+/// / SYS_READ etc. Bounds the on-kernel-stack bounce buffer the
+/// copy-in path uses so there's no unbounded user-controlled copy.
+inline constexpr u64 kSyscallPathMax = 256;
+
 void SyscallInit();
 
 /// Called from arch::TrapDispatch when frame->vector == 0x80. Examines

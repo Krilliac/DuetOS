@@ -112,6 +112,18 @@ void UnmapPage(uptr virt);
 /// that `result + (phys & 0xFFF)` reaches the requested register address.
 void* MapMmio(PhysAddr phys, u64 bytes);
 
+/// Result-shaped sibling of `MapMmio`. `OutOfMemory` on arena
+/// exhaustion; `InvalidArgument` if bytes is zero.
+inline ::customos::core::Result<void*> TryMapMmio(PhysAddr phys, u64 bytes)
+{
+    if (bytes == 0)
+        return ::customos::core::Err{::customos::core::ErrorCode::InvalidArgument};
+    void* p = MapMmio(phys, bytes);
+    if (p == nullptr)
+        return ::customos::core::Err{::customos::core::ErrorCode::OutOfMemory};
+    return p;
+}
+
 /// Tear down a previous MapMmio allocation. The caller passes back the
 /// virtual address MapMmio returned and the same byte count. Page tables
 /// are left in place (see UnmapPage); the virtual range is not recycled.

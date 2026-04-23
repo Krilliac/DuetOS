@@ -19,7 +19,11 @@
 # it waiting for gdb on :1234.
 #
 # Requires (on Ubuntu):
-#   sudo apt-get install -y qemu-system-x86 grub-common grub-pc-bin xorriso mtools
+#   sudo apt-get install -y qemu-system-x86 grub-common grub-pc-bin grub-efi-amd64-bin xorriso mtools ovmf
+#
+# OVMF is required because UEFI is the default boot firmware
+# (see UEFI_MODE below). Set CUSTOMOS_LEGACY=1 to boot via
+# SeaBIOS instead and skip the OVMF requirement.
 
 set -euo pipefail
 
@@ -32,11 +36,58 @@ ISO_IMAGE="${BUILD_DIR}/customos.iso"
 KERNEL_ELF="${BUILD_DIR}/kernel/customos-kernel.elf"
 DISPLAY_MODE="${CUSTOMOS_DISPLAY:-none}"
 TIMEOUT_SECS="${CUSTOMOS_TIMEOUT:-}"
+# Boot firmware: UEFI (OVMF) by default, SeaBIOS when
+# CUSTOMOS_LEGACY=1. UEFI is the primary target for commodity
+# PC hardware post-2010; SeaBIOS stays available for
+# legacy-BIOS regression tests and for hosts where OVMF isn't
+# installed. The hybrid ISO carries both boot records
+# (grub-mkrescue embeds El Torito entries for both), so the
+# same image works with either firmware.
+#
+# Historical: this flag was introduced as opt-in (CUSTOMOS_UEFI=1).
+# Flipped to default 2026-04 once every self-test ran clean
+# under OVMF — "boots on commodity PC hardware" is a project
+# pillar, and SeaBIOS is not what modern machines ship.
+LEGACY_MODE="${CUSTOMOS_LEGACY:-0}"
+if [[ -n "${CUSTOMOS_UEFI:-}" ]]; then
+    # Back-compat: honor an explicit CUSTOMOS_UEFI setting. UEFI=0
+    # means "force legacy"; UEFI=1 is redundant (it's already the
+    # default) but harmless.
+    if [[ "${CUSTOMOS_UEFI}" == "0" ]]; then
+        LEGACY_MODE=1
+    fi
+fi
+UEFI_MODE=1
+if [[ "${LEGACY_MODE}" == "1" ]]; then
+    UEFI_MODE=0
+fi
 
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "error: qemu-system-x86_64 is not installed." >&2
     echo "       sudo apt-get install -y qemu-system-x86" >&2
     exit 1
+fi
+
+UEFI_ARGS=()
+if [[ "${UEFI_MODE}" == "1" ]]; then
+    OVMF_CODE="${CUSTOMOS_OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
+    OVMF_VARS_TEMPLATE="${CUSTOMOS_OVMF_VARS:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
+    if [[ ! -f "${OVMF_CODE}" || ! -f "${OVMF_VARS_TEMPLATE}" ]]; then
+        echo "error: UEFI is the default boot firmware but OVMF isn't installed." >&2
+        echo "       Option A (recommended): sudo apt-get install -y ovmf" >&2
+        echo "       Option B (skip UEFI, use SeaBIOS): CUSTOMOS_LEGACY=1 $0 ..." >&2
+        echo "       expected: ${OVMF_CODE} and ${OVMF_VARS_TEMPLATE}" >&2
+        exit 1
+    fi
+    # Per-run writable copy of OVMF NVRAM (BootOrder / boot entries).
+    # Discarded on each invocation so a previous run can't sabotage
+    # the next one with a Boot#### that points at a stale path.
+    OVMF_VARS_COPY="${BUILD_DIR}/ovmf-vars.fd"
+    cp "${OVMF_VARS_TEMPLATE}" "${OVMF_VARS_COPY}"
+    UEFI_ARGS=(
+        -drive "if=pflash,format=raw,readonly=on,file=${OVMF_CODE}"
+        -drive "if=pflash,format=raw,file=${OVMF_VARS_COPY}"
+    )
 fi
 
 if [[ -f "${ISO_IMAGE}" ]]; then
@@ -86,6 +137,14 @@ QEMU_ARGS=(
     -device   "ahci,id=ahci1"
     -drive    "file=${SATA_IMAGE},if=none,id=sata0,format=raw"
     -device   "ide-hd,bus=ahci1.0,drive=sata0"
+    # xHCI host controller. q35 doesn't ship with one by default,
+    # so explicitly attach so the USB stack has something to bring
+    # up. We also park one usb-kbd on the bus so the port-scan
+    # path has a real connected device to enumerate (Enable Slot,
+    # eventually Address Device + descriptor fetch).
+    -device   "qemu-xhci,id=xhci"
+    -device   "usb-kbd,bus=xhci.0"
+    "${UEFI_ARGS[@]}"
     "${BOOT_SOURCE[@]}"
 )
 

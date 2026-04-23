@@ -128,4 +128,21 @@ u32 D3D12CreateDeviceStub();
 /// DXGI: `HRESULT CreateDXGIFactory(REFIID, void**)`.
 u32 DxgiCreateFactoryStub();
 
+/// Diagnostic snapshot — handle-table counters for every kind of
+/// object the ICD hands out. Covers a gap left by the logger-only
+/// pattern: a future unit test of the vkCreate/vkDestroy round
+/// trip can now assert that live counts return to zero.
+struct GraphicsStats
+{
+    u32 vk_instances_live;
+    u32 vk_instances_created;
+    u32 vk_instances_destroyed;
+    u32 vk_devices_live;
+    u32 vk_devices_created;
+    u32 vk_devices_destroyed;
+    u32 d3d_create_calls;
+    u32 dxgi_create_calls;
+};
+GraphicsStats GraphicsStatsRead();
+
 } // namespace customos::subsystems::graphics

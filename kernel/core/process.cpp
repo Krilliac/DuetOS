@@ -73,13 +73,14 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     p->abi_flavor = kAbiNative; // loaders flip to kAbiLinux if appropriate
     for (u32 i = 0; i < sizeof(p->_abi_pad); ++i)
         p->_abi_pad[i] = 0;
-    // Win32 file-handle table — every slot starts unused. Slot
-    // index 0 is fine; we distinguish "valid handle" from "unused"
-    // by the per-slot `node != nullptr` test, not by index 0
-    // sentinel.
+    // Win32 file-handle table — every slot starts unused. The
+    // `kind == None` sentinel distinguishes free slots; the
+    // ramfs / fat32 fields are valid only when kind matches.
     for (u32 i = 0; i < Process::kWin32HandleCap; ++i)
     {
-        p->win32_handles[i].node = nullptr;
+        p->win32_handles[i].kind = Process::FsBackingKind::None;
+        p->win32_handles[i].ramfs_node = nullptr;
+        p->win32_handles[i].fat32_volume_idx = 0;
         p->win32_handles[i].cursor = 0;
     }
     // Win32 VirtualAlloc arena — bump-only for v0. Starts at
@@ -108,10 +109,30 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
         p->win32_events[i].waiters.head = nullptr;
         p->win32_events[i].waiters.tail = nullptr;
     }
+    // Win32 thread table — every slot starts free.
+    for (u32 i = 0; i < Process::kWin32ThreadCap; ++i)
+    {
+        p->win32_threads[i].in_use = false;
+        for (u32 j = 0; j < sizeof(p->win32_threads[i]._pad); ++j)
+            p->win32_threads[i]._pad[j] = 0;
+        p->win32_threads[i].task = nullptr;
+        p->win32_threads[i].user_stack_va = 0;
+    }
+    p->thread_stack_cursor = Process::kV0ThreadStackArenaBase;
     // Win32 TLS — no slots allocated, all values zero.
     p->tls_slot_in_use = 0;
     for (u32 i = 0; i < Process::kWin32TlsCap; ++i)
         p->tls_slot_value[i] = 0;
+    // Linux signal-handler table — every signal starts at SIG_DFL
+    // (handler_va == 0), no flags, no mask.
+    for (u32 i = 0; i < Process::kLinuxSignalCount; ++i)
+    {
+        p->linux_sigactions[i].handler_va = 0;
+        p->linux_sigactions[i].flags = 0;
+        p->linux_sigactions[i].restorer_va = 0;
+        p->linux_sigactions[i].mask = 0;
+    }
+    p->linux_signal_mask = 0;
     p->refcount = 1;
 
     ++g_live_processes;
@@ -255,6 +276,10 @@ const char* CapName(Cap c)
         return "FsRead";
     case kCapDebug:
         return "Debug";
+    case kCapFsWrite:
+        return "FsWrite";
+    case kCapSpawnThread:
+        return "SpawnThread";
     case kCapCount:
         return "<sentinel>";
     }

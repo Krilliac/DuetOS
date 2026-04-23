@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../../core/result.h"
 #include "../../core/types.h"
 
 /*
@@ -70,8 +71,16 @@ struct NicInfo
 };
 
 /// Walk the PCI cache, register every network controller, run the
-/// vendor-specific probe. Once per boot.
+/// vendor-specific probe. Idempotent — early-returns until the
+/// matching `NetShutdown` has cleared the live flag.
 void NetInit();
+
+/// Drop every NIC record + clear the live flag so the next
+/// `NetInit` re-walks PCI. Always succeeds. The MMIO mappings
+/// established by the previous Init are NOT torn down (would burn
+/// the MMIO arena on every restart cycle); a follow-up slice that
+/// caches `(bus,dev,fn) → mmio_virt` can fix that.
+::customos::core::Result<void> NetShutdown();
 
 /// Number of NICs discovered.
 u64 NicCount();

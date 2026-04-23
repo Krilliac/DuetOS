@@ -1,7 +1,9 @@
 #include "types.h"
 #include "../acpi/acpi.h"
+#include "../acpi/aml.h"
 #include "../arch/x86_64/cpu.h"
 #include "../arch/x86_64/cpu_info.h"
+#include "../arch/x86_64/hypervisor.h"
 #include "../arch/x86_64/gdt.h"
 #include "../arch/x86_64/smbios.h"
 #include "../arch/x86_64/thermal.h"
@@ -16,6 +18,7 @@
 #include "../arch/x86_64/timer.h"
 #include "../cpu/percpu.h"
 #include "../debug/breakpoints.h"
+#include "../debug/extable.h"
 #include "../debug/probes.h"
 #include "../drivers/audio/audio.h"
 #include "../drivers/gpu/gpu.h"
@@ -24,7 +27,10 @@
 #include "../drivers/net/net.h"
 #include "../drivers/pci/pci.h"
 #include "../drivers/power/power.h"
+#include "../drivers/usb/hid_descriptor.h"
+#include "../drivers/usb/msc_scsi.h"
 #include "../drivers/usb/usb.h"
+#include "../drivers/usb/xhci.h"
 #include "../net/stack.h"
 #include "../subsystems/graphics/graphics.h"
 #include "../drivers/storage/ahci.h"
@@ -33,6 +39,7 @@
 #include "../fs/exfat.h"
 #include "../fs/ext4.h"
 #include "../fs/fat32.h"
+#include "../fs/file_route.h"
 #include "../fs/gpt.h"
 #include "../fs/ntfs.h"
 #include "../apps/calculator.h"
@@ -42,6 +49,7 @@
 #include "../drivers/video/console.h"
 #include "../drivers/video/cursor.h"
 #include "../drivers/video/framebuffer.h"
+#include "../drivers/video/calendar.h"
 #include "../drivers/video/menu.h"
 #include "../drivers/video/taskbar.h"
 #include "../drivers/video/widget.h"
@@ -56,6 +64,8 @@
 #include "panic.h"
 #include "process.h"
 #include "random.h"
+#include "fault_domain.h"
+#include "result.h"
 #include "ring3_smoke.h"
 #include "runtime_checker.h"
 #include "../subsystems/linux/ring3_smoke.h"
@@ -224,11 +234,17 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     SerialWrite("[boot] Probing CPU features.\n");
     customos::arch::CpuInfoProbe();
 
+    SerialWrite("[boot] Detecting hypervisor.\n");
+    customos::arch::HypervisorProbe();
+
     SerialWrite("[boot] Probing SMBIOS.\n");
     customos::arch::SmbiosInit();
 
     SerialWrite("[boot] Reading MSR thermals.\n");
     customos::arch::ThermalProbe();
+
+    SerialWrite("[boot] Exercising Result<T,E> + TRY primitives.\n");
+    customos::core::ResultSelfTest();
 
     SerialWrite("[boot] Seeding kernel entropy pool.\n");
     customos::core::RandomInit();
@@ -262,6 +278,18 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // branch). If either regresses the kernel halts here and the
     // boot log shows the cause.
     TrapsSelfTest();
+
+    // Kernel extable — scoped fault recovery. Register before any
+    // subsystem tries to install its own rows; the user-copy
+    // helpers are always entry 0 / 1.
+    SerialWrite("[boot] Bringing up kernel extable.\n");
+    customos::arch::TrapsRegisterExtable();
+    customos::debug::ExtableSelfTest();
+
+    // Fault-domain registry self-test. Registers a toy domain,
+    // restarts it twice, checks counters. Real driver domains are
+    // registered later in boot once their subsystems are up.
+    customos::core::FaultDomainSelfTest();
 
     SerialWrite("[boot] Parsing Multiboot2 memory map.\n");
     FrameAllocatorInit(multiboot_info);
@@ -722,6 +750,11 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
 #endif
     }
 
+    // demo-calendar=1 opens the calendar popup at boot so a headless
+    // screenshot can capture the widget without needing to inject a
+    // mouse click. No effect on normal boots.
+    const bool demo_calendar = CmdlineMatches(cmdline, "demo-calendar", "1");
+
     if (want_tty)
     {
         customos::drivers::video::SetDisplayMode(customos::drivers::video::DisplayMode::Tty);
@@ -733,6 +766,17 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     {
         customos::drivers::video::DesktopCompose(kDesktopTeal, "WELCOME TO CUSTOMOS   BOOT OK");
         customos::drivers::video::CursorInit(kDesktopTeal);
+        if (demo_calendar)
+        {
+            customos::u32 kx = 0, ky = 0, kw = 0, kh = 0;
+            customos::drivers::video::TaskbarClockBounds(&kx, &ky, &kw, &kh);
+            const customos::u32 ph = customos::drivers::video::CalendarPanelHeight();
+            const customos::u32 pw = customos::drivers::video::CalendarPanelWidth();
+            const customos::u32 ax = (kx + kw > pw) ? (kx + kw - pw) : 0;
+            const customos::u32 ay = (ky > ph) ? ky - ph : 0;
+            customos::drivers::video::CalendarOpen(ax, ay);
+            customos::drivers::video::DesktopCompose(kDesktopTeal, "WELCOME TO CUSTOMOS   BOOT OK");
+        }
     }
 
     SerialWrite("[boot] Seeding ramfs + VFS self-test.\n");
@@ -777,6 +821,17 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
 
     SerialWrite("[boot] Parsing ACPI tables.\n");
     customos::acpi::AcpiInit(multiboot_info);
+    SerialWrite("[boot] Building AML namespace from DSDT/SSDT.\n");
+    customos::acpi::AmlNamespaceBuild();
+    {
+        auto aml_init = []() -> customos::core::Result<void>
+        {
+            customos::acpi::AmlNamespaceBuild();
+            return {};
+        };
+        auto aml_teardown = []() -> customos::core::Result<void> { return customos::acpi::AmlNamespaceShutdown(); };
+        customos::core::FaultDomainRegister("acpi/aml", aml_init, aml_teardown);
+    }
 
     SerialWrite("[boot] Disabling 8259 PIC.\n");
     PicDisable();
@@ -851,15 +906,59 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
 
     SerialWrite("[boot] Detecting GPUs.\n");
     customos::drivers::gpu::GpuInit();
+    {
+        auto gpu_init = []() -> customos::core::Result<void>
+        {
+            customos::drivers::gpu::GpuInit();
+            return {};
+        };
+        auto gpu_teardown = []() -> customos::core::Result<void> { return customos::drivers::gpu::GpuShutdown(); };
+        customos::core::FaultDomainRegister("drivers/gpu", gpu_init, gpu_teardown);
+    }
 
     SerialWrite("[boot] Detecting NICs.\n");
     customos::drivers::net::NetInit();
+    {
+        auto net_init = []() -> customos::core::Result<void>
+        {
+            customos::drivers::net::NetInit();
+            return {};
+        };
+        auto net_teardown = []() -> customos::core::Result<void> { return customos::drivers::net::NetShutdown(); };
+        customos::core::FaultDomainRegister("drivers/net", net_init, net_teardown);
+    }
 
     SerialWrite("[boot] Detecting USB host controllers.\n");
     customos::drivers::usb::UsbInit();
+    customos::drivers::usb::xhci::XhciInit();
+    // Register xHCI as a restartable fault domain. Init() is
+    // already idempotent (early-return on g_init_done), so the
+    // domain's init hook just wraps it in a Result<void>.
+    {
+        auto xhci_init = []() -> customos::core::Result<void>
+        {
+            customos::drivers::usb::xhci::XhciInit();
+            return {};
+        };
+        auto xhci_teardown = []() -> customos::core::Result<void>
+        { return customos::drivers::usb::xhci::XhciShutdown(); };
+        customos::core::FaultDomainRegister("drivers/usb/xhci", xhci_init, xhci_teardown);
+    }
+    customos::drivers::usb::hid::HidSelfTest();
+    customos::drivers::usb::msc::MscSelfTest();
 
     SerialWrite("[boot] Detecting audio controllers.\n");
     customos::drivers::audio::AudioInit();
+    {
+        auto audio_init = []() -> customos::core::Result<void>
+        {
+            customos::drivers::audio::AudioInit();
+            return {};
+        };
+        auto audio_teardown = []() -> customos::core::Result<void>
+        { return customos::drivers::audio::AudioShutdown(); };
+        customos::core::FaultDomainRegister("drivers/audio", audio_init, audio_teardown);
+    }
 
     SerialWrite("[boot] Bringing up power / thermal shell.\n");
     customos::drivers::power::PowerInit();
@@ -894,6 +993,9 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
 
     SerialWrite("[boot] Probing FAT32 on block devices.\n");
     customos::fs::fat32::Fat32SelfTest();
+
+    SerialWrite("[boot] Routing Win32 file syscalls through FAT32.\n");
+    customos::fs::routing::SelfTest();
 
     SerialWrite("[boot] Probing read-only FS shells (ext4 / NTFS / exFAT).\n");
     customos::fs::ext4::Ext4ScanAll();
@@ -1390,6 +1492,43 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                 menu_handled = true;
             }
 
+            // Click on the clock/date widget toggles the calendar
+            // popup. Tested BEFORE the start-menu branch because
+            // the clock lives on the opposite side of the
+            // taskbar; a hit here can never overlap the START
+            // rect.
+            if (press_edge && !menu_handled && !drag.active)
+            {
+                customos::u32 kx = 0, ky = 0, kw = 0, kh = 0;
+                customos::drivers::video::TaskbarClockBounds(&kx, &ky, &kw, &kh);
+                if (kw > 0 && cx >= kx && cx < kx + kw && cy >= ky && cy < ky + kh)
+                {
+                    if (customos::drivers::video::CalendarIsOpen())
+                    {
+                        customos::drivers::video::CalendarClose();
+                    }
+                    else
+                    {
+                        // Anchor upper-left so the popup sits
+                        // flush above the taskbar's top edge.
+                        const customos::u32 ph = customos::drivers::video::CalendarPanelHeight();
+                        const customos::u32 pw = customos::drivers::video::CalendarPanelWidth();
+                        const customos::u32 ax = (kx + kw > pw) ? (kx + kw - pw) : 0;
+                        const customos::u32 ay = (ky > ph) ? ky - ph : 0;
+                        customos::drivers::video::CalendarOpen(ax, ay);
+                        SerialWrite("[ui] calendar open\n");
+                    }
+                    menu_handled = true;
+                }
+            }
+
+            // Clicking outside an open calendar dismisses it.
+            if (press_edge && !menu_handled && customos::drivers::video::CalendarIsOpen() &&
+                !customos::drivers::video::CalendarContains(cx, cy))
+            {
+                customos::drivers::video::CalendarClose();
+            }
+
             // START button press opens (or closes) the menu.
             if (press_edge && !menu_handled && !drag.active)
             {
@@ -1679,6 +1818,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // refactor breaks a SYS_* used in the mapping, the count
     // drops and the change is visible.
     customos::win32::Win32LogNtCoverage();
+    customos::subsystems::linux::LinuxLogAbiCoverage();
 
     customos::core::StartHeartbeatThread();
 

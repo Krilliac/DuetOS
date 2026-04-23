@@ -642,6 +642,56 @@ i64 Fat32ReadFile(const Volume* v, const DirEntry* e, void* out, u64 max)
     return static_cast<i64>(written);
 }
 
+i64 Fat32ReadAt(const Volume* v, const DirEntry* e, u64 offset, void* out, u64 len)
+{
+    if (v == nullptr || e == nullptr || out == nullptr)
+        return -1;
+    if (len == 0)
+        return 0;
+    if (offset >= e->size_bytes || e->first_cluster < 2)
+        return 0;
+
+    const u64 max_readable = u64(e->size_bytes) - offset;
+    const u64 want = (max_readable < len) ? max_readable : len;
+    const u64 cluster_bytes = u64(v->sectors_per_cluster) * u64(v->bytes_per_sector);
+    if (cluster_bytes == 0 || v->sectors_per_cluster > sizeof(g_scratch) / 512)
+        return -1;
+
+    // Walk the FAT chain forward to the cluster containing `offset`.
+    // The skip loop is bounded by the same 65536 ceiling the bulk
+    // read uses — a corrupt self-loop can't spin forever.
+    const u64 skip_clusters = offset / cluster_bytes;
+    u32 cluster = e->first_cluster;
+    for (u64 i = 0; i < skip_clusters; ++i)
+    {
+        if (cluster < 2 || cluster >= 0x0FFFFFF8u)
+            return -1;
+        cluster = ReadFatEntry(*v, cluster);
+    }
+
+    auto* dst = static_cast<u8*>(out);
+    u64 written = 0;
+    u64 in_cluster_off = offset % cluster_bytes;
+
+    for (u32 step = 0; step < 65536 && written < want; ++step)
+    {
+        if (cluster < 2 || cluster >= 0x0FFFFFF8u)
+            break;
+        const u64 lba = u64(v->data_start_sector) + u64(cluster - 2) * u64(v->sectors_per_cluster);
+        if (drivers::storage::BlockDeviceRead(v->block_handle, lba, v->sectors_per_cluster, g_scratch) != 0)
+            return -1;
+        const u64 avail_in_cluster = cluster_bytes - in_cluster_off;
+        const u64 need = want - written;
+        const u64 take = (avail_in_cluster < need) ? avail_in_cluster : need;
+        for (u64 i = 0; i < take; ++i)
+            dst[written + i] = g_scratch[in_cluster_off + i];
+        written += take;
+        in_cluster_off = 0;
+        cluster = ReadFatEntry(*v, cluster);
+    }
+    return static_cast<i64>(written);
+}
+
 i64 Fat32WriteInPlace(const Volume* v, const DirEntry* e, u64 offset, const void* buf, u64 len)
 {
     if (v == nullptr || e == nullptr || buf == nullptr)
