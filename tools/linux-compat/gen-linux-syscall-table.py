@@ -15,6 +15,12 @@ flag as `HandlerState::Unimplemented`. That gives the translator
 a cheap "implemented vs not" snapshot without duplicating the
 logic inside the dispatcher.
 
+The optional `--gap-fill-from-translator` argument points at
+`kernel/subsystems/translation/translate.cpp`; syscall numbers
+handled by `LinuxGapFill(...)` there are counted toward an
+"effective" coverage metric (primary dispatcher + translator
+gap-fill).
+
 Usage:
     python3 gen-linux-syscall-table.py \\
         --csv tools/linux-compat/linux-syscalls-x86_64.csv \\
@@ -37,8 +43,10 @@ HEADER_TEMPLATE = """// AUTO-GENERATED — do not edit by hand.
 //
 // Source data: tools/linux-compat/linux-syscalls-x86_64.csv
 // Total syscalls listed: {total}
-// Handlers implemented in kernel/subsystems/linux/syscall.cpp: {implemented}
-// Coverage: {pct}%
+// Primary handlers implemented in kernel/subsystems/linux/syscall.cpp: {primary}
+// Effective coverage (primary + LinuxGapFill in translation/translate.cpp): {effective}
+// Coverage (primary): {primary_pct}%
+// Coverage (effective): {effective_pct}%
 //
 // See tools/linux-compat/README.md for provenance.
 
@@ -152,10 +160,50 @@ def classify(name, dispatcher_symbols):
     return "Unimplemented"
 
 
+def parse_translator_constants(source_text):
+    constants = {}
+    for name, value in re.findall(r"\b(kSys[A-Za-z0-9_]+)\s*=\s*([0-9]+)\s*,", source_text):
+        constants[name] = int(value)
+    return constants
+
+
+def parse_linux_gap_fill_numbers(source_text):
+    fn_match = re.search(r"Result\s+LinuxGapFill\s*\([^)]*\)\s*\{", source_text)
+    if not fn_match:
+        return set()
+    body_start = fn_match.end() - 1
+    depth = 0
+    body_end = None
+    for i in range(body_start, len(source_text)):
+        ch = source_text[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                body_end = i
+                break
+    if body_end is None:
+        return set()
+    body = source_text[body_start + 1:body_end]
+    switch_match = re.search(r"switch\s*\(\s*nr\s*\)\s*\{(?P<switch>.*?)\n\s*default\s*:", body, re.S)
+    if not switch_match:
+        return set()
+    switch_body = switch_match.group("switch")
+    constants = parse_translator_constants(source_text)
+    out = set()
+    for case_name in re.findall(r"\bcase\s+(kSys[A-Za-z0-9_]+)\s*:", switch_body):
+        value = constants.get(case_name)
+        if value is not None:
+            out.add(value)
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--csv", required=True, type=Path)
     ap.add_argument("--mapped-from-dispatcher", type=Path, default=None)
+    ap.add_argument("--gap-fill-from-translator", type=Path, default=None)
     ap.add_argument("--out", required=True, type=Path)
     args = ap.parse_args()
 
@@ -163,6 +211,12 @@ def main():
     if args.mapped_from_dispatcher is not None:
         dispatcher_symbols = build_dispatcher_symbols(
             args.mapped_from_dispatcher.read_text()
+        )
+
+    gap_fill_numbers = set()
+    if args.gap_fill_from_translator is not None:
+        gap_fill_numbers = parse_linux_gap_fill_numbers(
+            args.gap_fill_from_translator.read_text()
         )
 
     rows = []
@@ -180,7 +234,8 @@ def main():
 
     rows.sort(key=lambda r: r[0])
 
-    implemented = sum(1 for _, _, _, s in rows if s == "Implemented")
+    primary = sum(1 for _, _, _, s in rows if s == "Implemented")
+    effective = sum(1 for nr, _, _, s in rows if (s == "Implemented") or (nr in gap_fill_numbers))
     total = len(rows)
     max_nr = max((nr for nr, _, _, _ in rows), default=0)
     pct = (100 * implemented // total) if total else 0
@@ -213,8 +268,9 @@ def main():
     )
     print(f"wrote {args.out}")
     print(f"  total syscalls : {total}")
-    print(f"  implemented    : {implemented} ({pct}%)")
-    print(f"  unimplemented  : {total - implemented}")
+    print(f"  primary        : {primary} ({primary_pct}%)")
+    print(f"  effective      : {effective} ({effective_pct}%)")
+    print(f"  unimplemented  : {total - primary}")
 
 
 if __name__ == "__main__":

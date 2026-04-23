@@ -26,6 +26,8 @@ unimplemented.
 | ----------------------------------- | ----------------------------------------------------------- |
 | `linux-syscalls-x86_64.csv`         | Canonical x86_64 syscall table: `number,name,args`          |
 | `gen-linux-syscall-table.py`        | Generator that emits `linux_syscall_table_generated.h`      |
+| `check-gapfill-overlap.py`          | Fails when dispatch + translator both claim same syscall nr |
+| `gapfill-overlap-allowlist.txt`     | Explicit temporary overlap allowlist for the check script   |
 
 ## Provenance
 
@@ -41,13 +43,31 @@ that covers j00ru's NT table (see `../win32-compat/README.md`).
 ## Regenerating
 
 ```sh
-python3 tools/linux-compat/gen-linux-syscall-table.py \
-    --csv tools/linux-compat/linux-syscalls-x86_64.csv \
-    --out kernel/subsystems/linux/linux_syscall_table_generated.h
+tools/regenerate-syscall-artifacts.sh
 ```
 
-Commit both the CSV and the regenerated header. The build does
-NOT invoke Python; the header is checked in.
+This runs the Linux table generator, the NT table generator, and
+the unified ABI matrix generator so the docs stay in sync with
+the generated headers.
+
+Commit the updated CSV/header inputs and generated outputs. The
+build does NOT invoke Python; generated artifacts are checked in.
+
+## Dispatcher vs translator ownership check
+
+`kernel/subsystems/linux/syscall.cpp` is the primary owner for
+implemented Linux ABI behavior. `kernel/subsystems/translation/translate.cpp`
+must only synthesize unresolved misses.
+
+Run this in CI (or locally) to prevent overlap drift:
+
+```sh
+python3 tools/linux-compat/check-gapfill-overlap.py
+```
+
+If overlap is deliberate and temporary, add the syscall number (or
+`kSys*` symbol) to `tools/linux-compat/gapfill-overlap-allowlist.txt`
+with a comment explaining why.
 
 ## Scoreboard
 

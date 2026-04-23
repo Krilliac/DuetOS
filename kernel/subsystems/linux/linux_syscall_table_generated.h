@@ -6,8 +6,10 @@
 //
 // Source data: tools/linux-compat/linux-syscalls-x86_64.csv
 // Total syscalls listed: 374
-// Handlers implemented in kernel/subsystems/linux/syscall.cpp: 69
-// Coverage: 18%
+// Primary handlers implemented in kernel/subsystems/linux/syscall.cpp: 69
+// Effective coverage (primary + LinuxGapFill in translation/translate.cpp): 82
+// Coverage (primary): 18%
+// Coverage (effective): 21%
 //
 // See tools/linux-compat/README.md for provenance.
 

@@ -21,35 +21,23 @@ namespace
 // see consistent numbers regardless of which path they came in
 // through.
 constexpr i64 kEFAULT = -14;
-constexpr i64 kEINVAL = -22;
 
-// Linux syscall numbers we recognise here. Keep in sync with the
-// primary dispatcher's enum — this is a PEER table for syscalls
-// the primary doesn't handle, so overlap is fine but silent
-// redundancy is waste.
+// Linux syscall numbers we recognise here.
+// Ownership: translator handles only unresolved/missing-number
+// synthesis after linux::LinuxSyscallDispatch misses.
 enum : u64
 {
     kSysPipe = 22,
-    kSysReadv = 19,
-    kSysMadvise = 28,
     kSysSocket = 41,
     kSysClone = 56,
     kSysFork = 57,
     kSysVfork = 58,
     kSysExecve = 59,
     kSysWait4 = 61,
-    kSysFsync = 74,
-    kSysFdatasync = 75,
     kSysUmask = 95,
-    kSysGettimeofday = 96,
-    kSysGetrlimit = 97,
-    kSysSysinfo = 99,
-    kSysGetpgrp = 111,
     kSysStatfs = 137,
     kSysFstatfs = 138,
-    kSysSetrlimit = 160,
     kSysPipe2 = 293,
-    kSysPrlimit64 = 302,
     kSysClone3 = 435,
     kSysRseq = 334,
 };
@@ -76,6 +64,21 @@ struct OverheadTally
 constinit OverheadTally g_linux_overhead = {};
 constinit OverheadTally g_native_overhead = {};
 
+// Miss-log sampling state. Hot probe paths can call unknown numbers
+// thousands of times; writing every miss to COM1 dominates runtime.
+// Keep the first few misses fully visible, then sample at powers of
+// two (1,2,3,4,8,16,...) so long runs still show progress.
+struct MissSampleTable
+{
+    u32 seen[1024] = {};
+    u32 suppressed[1024] = {};
+    u64 emitted_total = 0;
+    u64 suppressed_total = 0;
+    u64 suppressed_reported = 0;
+};
+constinit MissSampleTable g_linux_miss_sampling = {};
+constinit MissSampleTable g_native_miss_sampling = {};
+
 inline u64 ReadTsc()
 {
     u32 lo, hi;
@@ -97,6 +100,23 @@ void BumpHits(HitTable& t, u64 nr)
     {
         ++t.buckets[nr & 0x3FF];
     }
+}
+
+bool ShouldLogMiss(MissSampleTable& t, u64 nr)
+{
+    constexpr u32 kFirstAlways = 3;
+    const u64 idx = nr & 0x3FF;
+    const u32 seen = ++t.seen[idx];
+    if (seen <= kFirstAlways || (seen & (seen - 1u)) == 0u)
+    {
+        ++t.emitted_total;
+        return true;
+    }
+
+    if (t.suppressed[idx] != 0xFFFFFFFFu)
+        ++t.suppressed[idx];
+    ++t.suppressed_total;
+    return false;
 }
 
 // Log prefix so boot-log grep is easy.
@@ -222,6 +242,22 @@ void LogMiss(const char* origin, arch::TrapFrame* f, const char* name)
     SerialWrite(",");
     SerialWriteHex(f->r9);
     SerialWrite("]\n");
+}
+
+void DumpSuppressedMissSummary(const char* origin, MissSampleTable& t)
+{
+    const u64 delta = t.suppressed_total - t.suppressed_reported;
+    t.suppressed_reported = t.suppressed_total;
+
+    arch::SerialWrite("[translate-miss-suppressed] ");
+    arch::SerialWrite(origin);
+    arch::SerialWrite(" total=");
+    arch::SerialWriteHex(t.suppressed_total);
+    arch::SerialWrite(" delta=");
+    arch::SerialWriteHex(delta);
+    arch::SerialWrite(" logged=");
+    arch::SerialWriteHex(t.emitted_total);
+    arch::SerialWrite("\n");
 }
 
 // readv(fd, iov, iovcnt) — the same shape as writev. The primary
@@ -358,42 +394,6 @@ i64 TranslateNoOp(arch::TrapFrame* /*f*/)
 i64 TranslateUmask(arch::TrapFrame* /*f*/)
 {
     return 022;
-}
-
-// getpgrp() — process group id of the calling process. v0 has no
-// job-control model; return 0 (same as getpgid(0)).
-i64 TranslateGetpgrp(arch::TrapFrame* /*f*/)
-{
-    return 0;
-}
-
-// getrlimit(resource, rlimit*) / setrlimit(resource, rlimit*) —
-// older shape than prlimit64. We use the same "infinite limits"
-// story for both: reads return RLIM_INFINITY, writes accepted
-// but ignored.
-i64 TranslateGetrlimit(arch::TrapFrame* f)
-{
-    (void)f->rdi;
-    const u64 user_old = f->rsi;
-    if (user_old == 0)
-        return kEFAULT;
-    constexpr u64 kRlimInfinity = 0xFFFFFFFFFFFFFFFFull;
-    struct
-    {
-        u64 cur;
-        u64 max;
-    } old{kRlimInfinity, kRlimInfinity};
-    if (!mm::CopyToUser(reinterpret_cast<void*>(user_old), &old, sizeof(old)))
-        return kEFAULT;
-    return 0;
-}
-
-i64 TranslateSetrlimit(arch::TrapFrame* /*f*/)
-{
-    // Accept + no-op. Writing rlim values against our no-limits
-    // model would be storage-only; skip until a consumer reads
-    // back its own set value.
-    return 0;
 }
 
 // statfs(path, buf) / fstatfs(fd, buf) — filesystem statistics.
@@ -554,6 +554,7 @@ const HitTable& NativeHitsRead()
 Result LinuxGapFill(arch::TrapFrame* frame)
 {
     KLOG_TRACE_SCOPE("translate", "LinuxGapFill");
+    // Ownership: this path is for unresolved dispatcher misses only.
     // RDTSC window around the gap-fill body. Reads are serialising-
     // free so we capture the cost of the handler without paying a
     // barrier per sample. See `BumpOverhead` comment for rationale.
@@ -562,31 +563,6 @@ Result LinuxGapFill(arch::TrapFrame* frame)
     Result r{false, 0};
     switch (nr)
     {
-    case kSysReadv:
-        LogTranslation("linux", nr, "linux-self:loop-over-read");
-        r = {true, TranslateReadv(frame)};
-        break;
-    case kSysGettimeofday:
-        LogTranslation("linux", nr, "linux-self:clock_gettime-reshape");
-        r = {true, TranslateGettimeofday(frame)};
-        break;
-    case kSysSysinfo:
-        LogTranslation("linux", nr, "synthetic:zeroed+uptime");
-        r = {true, TranslateSysinfo(frame)};
-        break;
-    case kSysPrlimit64:
-        LogTranslation("linux", nr, "synthetic:rlim-infinity");
-        r = {true, TranslatePrlimit64(frame)};
-        break;
-    case kSysFsync:
-    case kSysFdatasync:
-        LogTranslation("linux", nr, "noop:writes-unbuffered");
-        r = {true, TranslateNoOp(frame)};
-        break;
-    case kSysMadvise:
-        LogTranslation("linux", nr, "noop:advisory-hint");
-        r = {true, TranslateNoOp(frame)};
-        break;
     case kSysRseq:
         LogTranslation("linux", nr, "synthetic:enosys-deliberate");
         r = {true, TranslateRseq(frame)};
@@ -594,18 +570,6 @@ Result LinuxGapFill(arch::TrapFrame* frame)
     case kSysUmask:
         LogTranslation("linux", nr, "synthetic:022-default");
         r = {true, TranslateUmask(frame)};
-        break;
-    case kSysGetpgrp:
-        LogTranslation("linux", nr, "synthetic:pgrp=0");
-        r = {true, TranslateGetpgrp(frame)};
-        break;
-    case kSysGetrlimit:
-        LogTranslation("linux", nr, "synthetic:rlim-infinity");
-        r = {true, TranslateGetrlimit(frame)};
-        break;
-    case kSysSetrlimit:
-        LogTranslation("linux", nr, "noop:limits-unenforced");
-        r = {true, TranslateSetrlimit(frame)};
         break;
     case kSysStatfs:
     case kSysFstatfs:
@@ -635,7 +599,8 @@ Result LinuxGapFill(arch::TrapFrame* frame)
         r = {true, TranslateDeliberateEnosys(frame)};
         break;
     default:
-        LogMiss("linux", frame, LinuxName(nr));
+        if (ShouldLogMiss(g_linux_miss_sampling, nr))
+            LogMiss("linux", frame, LinuxName(nr));
         break;
     }
     if (r.handled)
@@ -672,7 +637,8 @@ Result NativeGapFill(arch::TrapFrame* frame)
         r = {true, NativeWin32Free(frame)};
         break;
     default:
-        LogMiss("native", frame, NativeName(nr));
+        if (ShouldLogMiss(g_native_miss_sampling, nr))
+            LogMiss("native", frame, NativeName(nr));
         break;
     }
     if (r.handled)
@@ -718,6 +684,9 @@ void TranslatorOverheadDump()
     arch::SerialWrite(" max_c=");
     arch::SerialWriteHex(g_native_overhead.cycles_max);
     arch::SerialWrite("\n");
+
+    DumpSuppressedMissSummary("linux", g_linux_miss_sampling);
+    DumpSuppressedMissSummary("native", g_native_miss_sampling);
 }
 
 } // namespace customos::subsystems::translation
