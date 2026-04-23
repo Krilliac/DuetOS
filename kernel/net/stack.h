@@ -243,11 +243,50 @@ struct Ipv4Stats
 };
 
 /// Process an incoming Ethernet+IPv4 frame. Returns true iff the
-/// L3 path touched a counter (valid or rejected). Skeleton: we
-/// validate the IPv4 header, classify the protocol, and increment
-/// per-proto counters. No actual UDP/TCP/ICMP handler exists yet.
+/// L3 path touched a counter (valid or rejected). Validates the
+/// IPv4 header, classifies the protocol, updates per-proto
+/// counters, and for ICMP echo requests builds + transmits a
+/// matching echo reply via the registered TX hook.
 bool Ipv4HandleIncoming(u32 iface_index, const void* frame, u64 len);
 
 Ipv4Stats Ipv4StatsRead();
+
+// -------------------------------------------------------------------
+// NIC driver interface.
+//
+// Drivers call `NetStackBindInterface` once per NIC at bring-up
+// time, passing their MAC, an IPv4 address to advertise, and a
+// transmit trampoline. The stack then owns L2/L3 protocol
+// handling: the driver's RX path just forwards raw ethernet
+// frames via `NetStackInjectRx`, and protocol handlers reply
+// through the bound TX trampoline.
+//
+// `NetTxFn` must be safe to call from the driver's RX task
+// context (not from IRQ). Returns true on successful
+// enqueue, false on ring-full / driver-not-ready.
+// -------------------------------------------------------------------
+
+using NetTxFn = bool (*)(u32 iface_index, const void* frame, u64 len);
+
+/// Bind a NIC to the stack. `iface_index` must be < InterfaceCount().
+/// `tx` is the driver's send trampoline. `mac` is the local MAC
+/// (used as Ethernet src on every transmitted frame). `ip` is the
+/// IPv4 address the stack will respond to for ARP / ICMP. Returns
+/// false if iface_index is out of range or tx is null.
+bool NetStackBindInterface(u32 iface_index, MacAddress mac, Ipv4Address ip, NetTxFn tx);
+
+/// Inject a raw ethernet frame received by the NIC. The stack
+/// parses the ethertype and dispatches to ARP or IPv4. Safe to
+/// call from the driver's RX task. No-op when iface_index isn't
+/// bound or no handler matches.
+void NetStackInjectRx(u32 iface_index, const void* frame, u64 len);
+
+struct IcmpStats
+{
+    u64 echo_requests_rx;
+    u64 echo_replies_tx;
+    u64 tx_failures;
+};
+IcmpStats IcmpStatsRead();
 
 } // namespace customos::net

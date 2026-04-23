@@ -7,6 +7,7 @@
 #include "../../mm/frame_allocator.h"
 #include "../../mm/page.h"
 #include "../../mm/paging.h"
+#include "../../net/stack.h"
 #include "../../sched/sched.h"
 #include "../pci/pci.h"
 
@@ -412,20 +413,13 @@ void E1000DrainRx()
         if ((d.status & kE1000RxStatusDd) == 0)
             return;
         const u16 len = d.length;
-        const u8* buf = g_e1000.rx_buf_base_virt + u64(slot) * kE1000RxBufBytes;
+        u8* buf = g_e1000.rx_buf_base_virt + u64(slot) * kE1000RxBufBytes;
         ++g_e1000.rx_packets;
         g_e1000.rx_bytes += len;
-        arch::SerialWrite("[e1000] rx len=");
-        arch::SerialWriteHex(len);
-        arch::SerialWrite(" [");
-        const u32 dump = (len < 14) ? len : 14;
-        for (u32 i = 0; i < dump; ++i)
-        {
-            if (i != 0 && (i == 6 || i == 12))
-                arch::SerialWrite(" ");
-            arch::SerialWriteHex(buf[i]);
-        }
-        arch::SerialWrite("]\n");
+        // Hand the frame up the stack — ARP / IPv4 dispatch
+        // lives in net/stack.cpp. Interface index 0 matches
+        // the NetStackBindInterface call in E1000BringUp.
+        customos::net::NetStackInjectRx(/*iface_index=*/0, buf, len);
         // Release the descriptor back to the controller.
         d.status = 0;
         g_e1000.rx_tail = slot;
@@ -604,6 +598,21 @@ bool E1000BringUp(NicInfo& n)
     // initiates; on real hardware the tick cadence is unrelated to
     // line rate since we're draining a batch per tick).
     customos::sched::SchedCreate(E1000RxPollEntry, nullptr, "e1000-rx-poll");
+
+    // Bind to the network stack. Static IP 10.0.2.15 matches
+    // QEMU's default SLIRP DHCP lease so the host can ping us
+    // without manual configuration. Real hardware will want a
+    // DHCP client or a cmdline override — follow-up slice.
+    auto tx_trampoline = [](u32 iface_index, const void* frame, u64 len) -> bool
+    {
+        (void)iface_index;
+        return E1000Send(static_cast<const u8*>(frame), u32(len));
+    };
+    customos::net::MacAddress mac{};
+    for (u64 i = 0; i < 6; ++i)
+        mac.octets[i] = n.mac[i];
+    customos::net::Ipv4Address ip{{10, 0, 2, 15}};
+    customos::net::NetStackBindInterface(/*iface_index=*/0, mac, ip, tx_trampoline);
 
     // Self-test: emit one broadcast frame so a tcpdump on the host
     // side can confirm the TX path works end-to-end.
