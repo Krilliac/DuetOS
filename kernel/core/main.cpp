@@ -39,6 +39,7 @@
 #include "../fs/exfat.h"
 #include "../fs/ext4.h"
 #include "../fs/fat32.h"
+#include "../fs/file_route.h"
 #include "../fs/gpt.h"
 #include "../fs/ntfs.h"
 #include "../apps/calculator.h"
@@ -992,6 +993,9 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
 
     SerialWrite("[boot] Probing FAT32 on block devices.\n");
     customos::fs::fat32::Fat32SelfTest();
+
+    SerialWrite("[boot] Routing Win32 file syscalls through FAT32.\n");
+    customos::fs::routing::SelfTest();
 
     SerialWrite("[boot] Probing read-only FS shells (ext4 / NTFS / exFAT).\n");
     customos::fs::ext4::Ext4ScanAll();

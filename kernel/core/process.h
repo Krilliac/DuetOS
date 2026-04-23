@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../fs/fat32.h"
 #include "../fs/ramfs.h"
 #include "../mm/address_space.h"
 #include "../sched/sched.h"
@@ -300,9 +301,23 @@ struct Process
     u64 win32_iat_miss_count;
 
     // Win32 file-handle table — backs CreateFileW / ReadFile /
-    // CloseHandle / SetFilePointerEx (batch 24). Each slot holds
-    // a pointer to the resolved RamfsNode plus the current read
-    // cursor; all access is read-only because ramfs is .rodata.
+    // CloseHandle / SetFilePointerEx (batch 24). Each slot is
+    // tagged by `kind`: a Ramfs-backed slot stores a pointer to
+    // the resolved `.rodata` RamfsNode; a Fat32-backed slot
+    // stores a (volume_index, dir_entry) snapshot so reads can
+    // walk the cluster chain through `Fat32ReadAt`. Both share
+    // the byte cursor.
+    //
+    // Routing is path-prefix driven in `DoFileOpen`:
+    //
+    //   "/disk/<idx>/<rest>"  →  Fat32, volume <idx>, lookup <rest>
+    //   anything else         →  Ramfs, lookup against `proc->root`
+    //
+    // The "/disk/" prefix is the smallest credible mount-table
+    // stand-in: it lets a Win32 PE name a real on-disk file
+    // without yet building a real mount table or drive-letter
+    // resolver. A future slice replaces this with named mounts
+    // (`/mnt/<name>/...`) once those exist.
     //
     // Returned handles to user mode are `kWin32HandleBase + idx`
     // (= 0x100 + 0..15) so they don't collide with Win32 pseudo-
@@ -313,10 +328,19 @@ struct Process
     // 16 slots is plenty for v0 — typical console programs hold
     // ~4 (stdin/stdout/stderr + one input file). Grow to a
     // KMalloc'd table when a real workload needs more.
+    enum class FsBackingKind : u8
+    {
+        None = 0, // slot is free
+        Ramfs,
+        Fat32,
+    };
     struct Win32FileHandle
     {
-        const fs::RamfsNode* node; // nullptr = unused slot
-        u64 cursor;                // current read position in bytes
+        FsBackingKind kind;              // None = free; otherwise selects which fields below are valid
+        const fs::RamfsNode* ramfs_node; // valid iff kind == Ramfs
+        u32 fat32_volume_idx;            // valid iff kind == Fat32
+        fs::fat32::DirEntry fat32_entry; // valid iff kind == Fat32 (snapshot at open time)
+        u64 cursor;                      // current read position in bytes
     };
     static constexpr u64 kWin32HandleCap = 16;
     static constexpr u64 kWin32HandleBase = 0x100;

@@ -73,13 +73,14 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     p->abi_flavor = kAbiNative; // loaders flip to kAbiLinux if appropriate
     for (u32 i = 0; i < sizeof(p->_abi_pad); ++i)
         p->_abi_pad[i] = 0;
-    // Win32 file-handle table — every slot starts unused. Slot
-    // index 0 is fine; we distinguish "valid handle" from "unused"
-    // by the per-slot `node != nullptr` test, not by index 0
-    // sentinel.
+    // Win32 file-handle table — every slot starts unused. The
+    // `kind == None` sentinel distinguishes free slots; the
+    // ramfs / fat32 fields are valid only when kind matches.
     for (u32 i = 0; i < Process::kWin32HandleCap; ++i)
     {
-        p->win32_handles[i].node = nullptr;
+        p->win32_handles[i].kind = Process::FsBackingKind::None;
+        p->win32_handles[i].ramfs_node = nullptr;
+        p->win32_handles[i].fat32_volume_idx = 0;
         p->win32_handles[i].cursor = 0;
     }
     // Win32 VirtualAlloc arena — bump-only for v0. Starts at
