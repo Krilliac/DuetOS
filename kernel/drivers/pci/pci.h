@@ -227,6 +227,43 @@ void PciMsixFunctionMask(DeviceAddress addr);
 void PciMsixFunctionUnmask(DeviceAddress addr);
 
 // -----------------------------------------------------------------
+// All-in-one MSI-X routing helper.
+//
+// Replaces the boilerplate every driver writes when it just wants
+// "fire vector V on LAPIC L when I'm done with this transfer":
+//
+//     pci::MsixInfo info;
+//     pci::PciMsixFind(addr, &info);
+//     pci::Bar bar = pci::PciReadBar(addr, info.table_bir);
+//     void* tbl = mm::MapMmio(bar.address + info.table_offset, ...);
+//     pci::PciMsixSetEntry(tbl, info.table_size, 0, lapic, vector);
+//     pci::PciMsixUnmaskEntry(tbl, info.table_size, 0);
+//     pci::PciMsixEnable(addr);
+//
+// becomes:
+//
+//     pci::MsixRoute r;
+//     if (!pci::PciMsixRouteSimple(addr, /*entry=*/0, lapic, vector, &r))
+//         goto legacy_intx;
+//
+// `r` carries the mapped table base + table_size so the caller can
+// later mask / unmask vectors without re-walking config space.
+// Returns false (and leaves the device untouched) if the function
+// doesn't expose MSI-X or BAR mapping fails.
+// -----------------------------------------------------------------
+
+struct MsixRoute
+{
+    volatile void* table_base; // mapped MMIO; valid for the kernel's lifetime
+    u64 table_phys;            // physical base of the mapped region
+    u16 table_size;            // entry count
+    u16 entry_index;           // entry the helper programmed
+    MsixInfo info;             // capability snapshot
+};
+
+bool PciMsixRouteSimple(DeviceAddress addr, u16 entry_index, u8 lapic_id, u8 vector, MsixRoute* out);
+
+// -----------------------------------------------------------------
 // Class-code string for diagnostic logs. Returns a stable pointer to
 // a short label ("mass storage", "network", "display", "bridge", ...)
 // or "unknown" for codes we haven't named yet.
