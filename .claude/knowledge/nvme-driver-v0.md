@@ -1,8 +1,8 @@
 # NVMe driver v0 — polling I/O via admin + one I/O queue
 
-**Last updated:** 2026-04-21
+**Last updated:** 2026-04-23
 **Type:** Observation
-**Status:** Active
+**Status:** Active (real-hardware hardening batch)
 
 ## Description
 
@@ -150,3 +150,73 @@ mismatch logs `FAILED`.
     Rust).
   - `pci-enum-v0.md` — device discovery primitives this driver
     consumes.
+
+## 2026-04-23 — real-hardware hardening batch
+
+Changes in this batch make the driver viable on real NVMe silicon
+rather than QEMU-only. QEMU doesn't enforce the things this fixes,
+so local boots look identical; the difference shows up on a real SSD
+where the controller rejects out-of-spec configuration.
+
+- **CAP.MPSMIN / MPSMAX validation.** Controllers publish the page-
+  size range they accept (`CAP.MPSMIN..CAP.MPSMAX`, both log2
+  encoded relative to 4 KiB). The host-side page size — always 4 KiB
+  in this codebase — is checked against that range before CC is
+  programmed. `CC.MPS` is now explicitly set from
+  `kHostMpsEncoding` (0 = 4 KiB) via the spec-defined bit field
+  rather than being left at the post-reset default.
+
+- **CAP.TO-driven completion deadlines.** `WaitReady` and
+  `SubmitAndWait` both derive their upper bound from
+  `CAP.TO * 500 ms` (the spec's wall-clock limit on controller
+  responsiveness) via the HPET counter. Old code used a fixed
+  `50 M` pause-loop budget that happened to be ~1 s on fast CPUs
+  and indefinite on slow ones. Graceful fallback to the pause
+  budget if HPET isn't online.
+
+- **Queue depth now driven by CAP.MQES.** Admin queue stays at 8
+  (only serves bring-up). I/O queue grows from 8 → 64 entries,
+  clipped to `CAP.MQES + 1` when the controller reports less. Both
+  still fit on a single 4 KiB page each (64-byte SQ entries /
+  16-byte CQ entries).
+
+- **PRP list support.** `NvmeDoIo` can now transfer up to 16 pages
+  (64 KiB) per command:
+  - `byte_count <= 4 KiB`    → PRP1 only.
+  - `4 < byte_count <= 8 KiB` → PRP1 + PRP2 points at page 2.
+  - `byte_count > 8 KiB`      → PRP1 + PRP2 points at a
+    single-level PRP list page (up to 512 entries = 2 MiB reach).
+  The staging buffer is a 16-page contiguous allocation made via
+  `AllocateContiguousFrames(16)` and freed symmetrically on
+  registration failure. A single PRP list page is allocated
+  alongside it — always valid, populated on demand.
+
+- **MDTS cap from Identify Controller.** Translated to bytes
+  against the host page size and used as the per-command ceiling
+  alongside the staging buffer size. MDTS = 0 (unlimited) leaves
+  the staging cap as the only bound.
+
+- **Status propagation.** Completion queue entries with non-zero
+  status are now decoded into `SC` (status code, bits 0..7) and
+  `SCT` (status code type, bits 8..10) and logged via
+  `LogWith2Values`. Enough information to tell a real-disk error
+  apart from a software bug without attaching a bus analyser.
+
+- **New init-time controller fields** (on `Controller`):
+  `admin_queue_entries`, `io_queue_entries`, `mps_min`, `mps_max`,
+  `mdts_max_bytes`, `prp_list_phys`, `prp_list_virt`. The init log
+  emits MPS/MDTS/timeout/queue-size as four bracketed lines so a
+  boot-log grep for `drivers/nvme` tells you the runtime shape.
+
+- **What this batch still doesn't do.** No MSI-X — polling remains.
+  No multi-command pipelining, no per-CPU queues, no Flush
+  command, no FUA flag, no namespace != 1. MSI-X comes later and
+  needs a broader vector-allocation / IOAPIC-glue subsystem; the
+  rest can land incrementally with concrete callers.
+
+- **How to tell it works.** On QEMU `-device nvme` the boot log
+  should now carry a `page-size support mps_min=0 mps_max=0`
+  line and a `MDTS max bytes` line, and the self-test still
+  round-trips LBA 0 with the `0x55AA` signature. On real hardware
+  the only observable difference from QEMU is that boot no longer
+  aborts on controllers that enforce MPS / MQES.
