@@ -1,5 +1,6 @@
 #include "gpu.h"
 
+#include "../../arch/x86_64/hypervisor.h"
 #include "../../arch/x86_64/serial.h"
 #include "../../core/klog.h"
 #include "../../core/panic.h"
@@ -129,7 +130,13 @@ void RunVendorProbe(GpuInfo& g)
     arch::SerialWrite(" family=");
     arch::SerialWrite(family);
     arch::SerialWrite("  (stub OK — no engine init yet)\n");
-    if (g.vendor_id == kVendorQemuBochs)
+    // Bochs VBE aperture is a QEMU-only detail — probing it on bare
+    // metal would be addressing a device that doesn't exist. The
+    // vendor-id 0x1234 gate already covers the QEMU-std-VGA path,
+    // but the HV check makes the emulator-specific nature of this
+    // register peek explicit and paves the way for real-hardware
+    // vendor probes (Intel/AMD/NVIDIA) to land alongside it.
+    if (g.vendor_id == kVendorQemuBochs && ::customos::arch::IsEmulator())
         DecodeBochsVbe(g);
 }
 

@@ -1,9 +1,11 @@
 #include "pci.h"
 
+#include "../../acpi/acpi.h"
 #include "../../arch/x86_64/cpu.h"
 #include "../../arch/x86_64/serial.h"
 #include "../../core/klog.h"
 #include "../../core/panic.h"
+#include "../../mm/paging.h"
 #include "../../sync/spinlock.h"
 
 namespace customos::drivers::pci
@@ -12,9 +14,9 @@ namespace customos::drivers::pci
 namespace
 {
 
-// Configuration Mechanism #1 (the only one anyone implements on
-// modern hardware). Write a 32-bit address to 0xCF8, then read/write
-// the matching 32-bit word at 0xCFC.
+// Configuration Mechanism #1 — legacy port-IO fallback. Write a
+// 32-bit address to 0xCF8, then read/write the matching 32-bit word
+// at 0xCFC.
 //
 // The address-then-data dance is NOT atomic — between the outl to
 // 0xCF8 and the outl/inl to 0xCFC, a peer CPU could write its own
@@ -30,6 +32,21 @@ constinit sync::SpinLock g_pci_config_lock{};
 constinit Device g_devices[kMaxDevices] = {};
 constinit u64 g_device_count = 0;
 
+// MCFG / ECAM state. Populated by PciEnumerateInit() if the ACPI
+// MCFG table was found. When non-null, every PciConfigRead*/Write
+// routes through the MMIO region instead of 0xCF8/0xCFC; this is
+// the only way to see devices on bus numbers >= 1 on real PCIe
+// hardware (legacy port IO supports bus 0 only on many boards, and
+// even on q35 the port-IO path races the config-address register
+// on SMP while ECAM is per-function addressable).
+//
+// Bounds: we map McfgEndBus() - McfgStartBus() + 1 buses × 256
+// devices × 8 functions × 4 KiB = (end-start+1) × 1 MiB.
+constinit u64 g_ecam_mmio_phys = 0;
+constinit volatile u8* g_ecam_mmio_virt = nullptr;
+constinit u8 g_ecam_start_bus = 0;
+constinit u8 g_ecam_end_bus = 0;
+
 inline u32 MakeAddress(DeviceAddress addr, u8 offset)
 {
     // offset must be 4-byte aligned for legacy port IO — the low 2 bits
@@ -38,10 +55,32 @@ inline u32 MakeAddress(DeviceAddress addr, u8 offset)
            (static_cast<u32>(addr.function & 0x07) << 8) | (static_cast<u32>(offset & 0xFC));
 }
 
+// ECAM offset within the mapped MMIO aperture. PCIe spec §7.2.2:
+// per-bus (relative to start_bus) stride 1 MiB, per-device 32 KiB,
+// per-function 4 KiB, per-register byte-addressable up to 4 KiB.
+inline u64 EcamOffset(DeviceAddress addr, u16 offset)
+{
+    const u32 rel_bus = u32(addr.bus) - u32(g_ecam_start_bus);
+    return (u64(rel_bus) << 20) | (u64(addr.device & 0x1F) << 15) | (u64(addr.function & 0x07) << 12) |
+           u64(offset & 0xFFF);
+}
+
+inline bool EcamCovers(DeviceAddress addr)
+{
+    return g_ecam_mmio_virt != nullptr && addr.bus >= g_ecam_start_bus && addr.bus <= g_ecam_end_bus;
+}
+
 } // namespace
 
 u32 PciConfigRead32(DeviceAddress addr, u8 offset)
 {
+    if (EcamCovers(addr))
+    {
+        // ECAM is MMIO — the spec guarantees naturally-aligned 32-bit
+        // accesses are atomic per-function, so no lock needed.
+        const u64 off = EcamOffset(addr, u16(offset) & 0xFFCu);
+        return *reinterpret_cast<const volatile u32*>(g_ecam_mmio_virt + off);
+    }
     const u32 address = MakeAddress(addr, offset);
     sync::SpinLockGuard guard(g_pci_config_lock);
     asm volatile("outl %0, %w1" : : "a"(address), "Nd"(kConfigAddressPort));
@@ -66,6 +105,12 @@ u8 PciConfigRead8(DeviceAddress addr, u8 offset)
 
 void PciConfigWrite32(DeviceAddress addr, u8 offset, u32 value)
 {
+    if (EcamCovers(addr))
+    {
+        const u64 off = EcamOffset(addr, u16(offset) & 0xFFCu);
+        *reinterpret_cast<volatile u32*>(g_ecam_mmio_virt + off) = value;
+        return;
+    }
     u32 address = MakeAddress(addr, offset);
     sync::SpinLockGuard guard(g_pci_config_lock);
     asm volatile("outl %0, %w1" : : "a"(address), "Nd"(kConfigAddressPort));
@@ -422,6 +467,72 @@ bool Probe(u8 bus, u8 dev, u8 fn)
     return true;
 }
 
+// Forward-declare for recursive bus descent through PCI-to-PCI
+// bridges: a type-1 header exposes primary/secondary/subordinate
+// bus numbers and all buses in [secondary, subordinate] live behind
+// that bridge. We probe those buses immediately so single-pass
+// enumeration covers the full tree regardless of declaration order.
+void EnumerateBus(u8 bus, u8& highest_bus_seen);
+
+void EnumerateFunction(u8 bus, u8 dev, u8 fn, u8& highest_bus_seen)
+{
+    const DeviceAddress addr{.bus = bus, .device = dev, .function = fn, ._pad = 0};
+    if (!Probe(bus, dev, fn))
+        return;
+    const u32 cls_word = PciConfigRead32(addr, 0x08);
+    const u8 base_class = u8(cls_word >> 24);
+    const u8 sub_class = u8(cls_word >> 16);
+    const u8 header = PciConfigRead8(addr, 0x0E) & 0x7F;
+
+    // Type-1 header + class 0x06/0x04 = PCI-to-PCI bridge. Read the
+    // secondary-bus field (offset 0x19) and descend if it's non-zero
+    // and we haven't already visited it. BIOS/UEFI sets up the bus
+    // numbers before boot — we trust them on a first pass. A real
+    // driver would ALSO be prepared to rewrite them if
+    // primary==secondary==0 (unconfigured), but that's a later slice.
+    if (header == 0x01 && base_class == 0x06 && sub_class == 0x04)
+    {
+        const u8 secondary = PciConfigRead8(addr, 0x19);
+        if (secondary != 0 && secondary != bus)
+        {
+            arch::SerialWrite("  pci: descending P2P bridge ");
+            arch::SerialWriteHex(bus);
+            arch::SerialWrite(":");
+            arch::SerialWriteHex(dev);
+            arch::SerialWrite(".");
+            arch::SerialWriteHex(fn);
+            arch::SerialWrite(" -> secondary bus ");
+            arch::SerialWriteHex(secondary);
+            arch::SerialWrite("\n");
+            EnumerateBus(secondary, highest_bus_seen);
+        }
+    }
+}
+
+void EnumerateBus(u8 bus, u8& highest_bus_seen)
+{
+    if (g_device_count >= kMaxDevices)
+        return;
+    if (bus > highest_bus_seen)
+        highest_bus_seen = bus;
+    for (u8 dev = 0; dev < 32; ++dev)
+    {
+        const DeviceAddress fn0{.bus = bus, .device = dev, .function = 0, ._pad = 0};
+        const u32 vd = PciConfigRead32(fn0, 0x00);
+        if ((vd & 0xFFFF) == 0xFFFF)
+            continue;
+        EnumerateFunction(bus, dev, 0, highest_bus_seen);
+        const u8 hdr = PciConfigRead8(fn0, 0x0E);
+        if ((hdr & 0x80) != 0)
+        {
+            for (u8 fn = 1; fn < 8; ++fn)
+                EnumerateFunction(bus, dev, fn, highest_bus_seen);
+        }
+        if (g_device_count >= kMaxDevices)
+            break;
+    }
+}
+
 } // namespace
 
 void PciEnumerate()
@@ -431,32 +542,69 @@ void PciEnumerate()
     KASSERT(!s_done, "drivers/pci", "PciEnumerate called twice");
     s_done = true;
 
-    // v0: bus 0..3 is plenty for QEMU q35 + any other board we'd realistically
-    // boot today. Recursive bridge walking lands when we actually meet a
-    // board whose interesting devices are behind a bridge (not q35).
-    for (u32 bus = 0; bus < 4; ++bus)
+    // If ACPI parsed an MCFG table, map the ECAM aperture into the
+    // kernel MMIO arena. ECAM covers (end_bus - start_bus + 1) MiB
+    // of physical space; cap the mapping at the MMIO arena budget
+    // so a firmware reporting 256 MiB doesn't burn the entire
+    // arena on a bus range we'll never fully populate.
+    const u64 mcfg_base = ::customos::acpi::McfgAddress();
+    const u8 mcfg_start = ::customos::acpi::McfgStartBus();
+    const u8 mcfg_end = ::customos::acpi::McfgEndBus();
+    if (mcfg_base != 0 && mcfg_end >= mcfg_start)
     {
-        for (u8 dev = 0; dev < 32; ++dev)
+        const u64 bus_count = u64(mcfg_end - mcfg_start) + 1;
+        constexpr u64 kMaxEcamBytes = 16ULL * 1024 * 1024; // 16 MiB = 16 buses
+        u64 wanted = bus_count << 20;                      // 1 MiB per bus
+        if (wanted > kMaxEcamBytes)
+            wanted = kMaxEcamBytes;
+        void* virt = mm::MapMmio(mcfg_base, wanted);
+        if (virt != nullptr)
         {
-            const DeviceAddress fn0{.bus = static_cast<u8>(bus), .device = dev, .function = 0, ._pad = 0};
-            const u32 vendor_device = PciConfigRead32(fn0, 0x00);
-            if ((vendor_device & 0xFFFF) == 0xFFFF)
-            {
-                continue; // no device at this slot
-            }
+            g_ecam_mmio_phys = mcfg_base;
+            g_ecam_mmio_virt = static_cast<volatile u8*>(virt);
+            g_ecam_start_bus = mcfg_start;
+            // Recompute end_bus if the aperture was clamped; we
+            // can only reach (wanted / 1 MiB) buses from start_bus.
+            const u64 mapped_buses = wanted >> 20;
+            g_ecam_end_bus = u8(mcfg_start + mapped_buses - 1);
+            arch::SerialWrite("[pci] ECAM online base=");
+            arch::SerialWriteHex(mcfg_base);
+            arch::SerialWrite(" buses=");
+            arch::SerialWriteHex(u32(g_ecam_start_bus));
+            arch::SerialWrite("..");
+            arch::SerialWriteHex(u32(g_ecam_end_bus));
+            arch::SerialWrite(" virt=");
+            arch::SerialWriteHex(reinterpret_cast<u64>(virt));
+            arch::SerialWrite("\n");
+        }
+        else
+        {
+            arch::SerialWrite("[pci] MCFG present but MapMmio failed, falling back to port-IO\n");
+        }
+    }
+    else
+    {
+        arch::SerialWrite("[pci] no MCFG — using legacy port-IO (bus 0 only)\n");
+    }
 
-            // Function 0 always exists; cache it. Then check the multi-function
-            // bit (header_type bit 7) to decide if we need to scan functions
-            // 1..7.
-            Probe(static_cast<u8>(bus), dev, 0);
-            const u8 header = PciConfigRead8(fn0, 0x0E);
-            if ((header & 0x80) != 0)
-            {
-                for (u8 fn = 1; fn < 8; ++fn)
-                {
-                    Probe(static_cast<u8>(bus), dev, fn);
-                }
-            }
+    // Walk bus 0 first; recursive bridge descent picks up the rest
+    // of the tree. When ECAM is online we cap at its end_bus; with
+    // port-IO only, stick to bus 0 (the actual reachable range).
+    u8 highest = 0;
+    EnumerateBus(0, highest);
+    // Some firmwares publish devices on buses reachable via MCFG
+    // that aren't behind a bridge we can find (multi-root, NUMA
+    // hot-add, buggy ACPI). If ECAM is live, sweep every declared
+    // bus as a safety net — empty slots return 0xFFFF instantly so
+    // the cost is (end_bus - start_bus + 1) × 32 MMIO reads.
+    if (g_ecam_mmio_virt != nullptr)
+    {
+        for (u32 bus = u32(g_ecam_start_bus); bus <= u32(g_ecam_end_bus); ++bus)
+        {
+            if (bus == 0)
+                continue; // already walked
+            u8 stub = 0;
+            EnumerateBus(u8(bus), stub);
         }
     }
 

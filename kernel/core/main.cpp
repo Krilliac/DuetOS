@@ -2,6 +2,7 @@
 #include "../acpi/acpi.h"
 #include "../arch/x86_64/cpu.h"
 #include "../arch/x86_64/cpu_info.h"
+#include "../arch/x86_64/hypervisor.h"
 #include "../arch/x86_64/gdt.h"
 #include "../arch/x86_64/smbios.h"
 #include "../arch/x86_64/thermal.h"
@@ -225,6 +226,9 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
 
     SerialWrite("[boot] Probing CPU features.\n");
     customos::arch::CpuInfoProbe();
+
+    SerialWrite("[boot] Detecting hypervisor.\n");
+    customos::arch::HypervisorProbe();
 
     SerialWrite("[boot] Probing SMBIOS.\n");
     customos::arch::SmbiosInit();
