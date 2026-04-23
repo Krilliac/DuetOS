@@ -155,9 +155,9 @@
     "abi": "linux",
     "number": 19,
     "name": "readv",
-    "status": "translated",
-    "owner": "kernel/subsystems/translation/translate.cpp::TranslateReadv",
-    "fallback": "linux-self:loop-over-read"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
@@ -227,9 +227,9 @@
     "abi": "linux",
     "number": 28,
     "name": "madvise",
-    "status": "translated",
-    "owner": "kernel/subsystems/translation/translate.cpp::TranslateNoOp",
-    "fallback": "noop:advisory-hint"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
@@ -595,17 +595,17 @@
     "abi": "linux",
     "number": 74,
     "name": "fsync",
-    "status": "translated",
-    "owner": "kernel/subsystems/translation/translate.cpp::TranslateNoOp",
-    "fallback": "noop:writes-unbuffered"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
     "number": 75,
     "name": "fdatasync",
-    "status": "translated",
-    "owner": "kernel/subsystems/translation/translate.cpp::TranslateNoOp",
-    "fallback": "noop:writes-unbuffered"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
@@ -771,17 +771,17 @@
     "abi": "linux",
     "number": 96,
     "name": "gettimeofday",
-    "status": "translated",
-    "owner": "kernel/subsystems/translation/translate.cpp::TranslateGettimeofday",
-    "fallback": "linux-self:clock_gettime-reshape"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
     "number": 97,
     "name": "getrlimit",
-    "status": "translated",
-    "owner": "kernel/subsystems/translation/translate.cpp::TranslateGetrlimit",
-    "fallback": "synthetic:rlim-infinity"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
@@ -795,9 +795,9 @@
     "abi": "linux",
     "number": 99,
     "name": "sysinfo",
-    "status": "translated",
-    "owner": "kernel/subsystems/translation/translate.cpp::TranslateSysinfo",
-    "fallback": "synthetic:zeroed+uptime"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
@@ -891,9 +891,9 @@
     "abi": "linux",
     "number": 111,
     "name": "getpgrp",
-    "status": "translated",
-    "owner": "kernel/subsystems/translation/translate.cpp::TranslateGetpgrp",
-    "fallback": "synthetic:pgrp=0"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
@@ -1283,9 +1283,9 @@
     "abi": "linux",
     "number": 160,
     "name": "setrlimit",
-    "status": "translated",
-    "owner": "kernel/subsystems/translation/translate.cpp::TranslateSetrlimit",
-    "fallback": "noop:limits-unenforced"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",
@@ -2419,9 +2419,9 @@
     "abi": "linux",
     "number": 302,
     "name": "prlimit64",
-    "status": "translated",
-    "owner": "kernel/subsystems/translation/translate.cpp::TranslatePrlimit64",
-    "fallback": "synthetic:rlim-infinity"
+    "status": "implemented",
+    "owner": "kernel/subsystems/linux/syscall.cpp::Do*",
+    "fallback": "none (handled in linux dispatcher)"
   },
   {
     "abi": "linux",

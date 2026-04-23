@@ -238,7 +238,8 @@ def main():
     effective = sum(1 for nr, _, _, s in rows if (s == "Implemented") or (nr in gap_fill_numbers))
     total = len(rows)
     max_nr = max((nr for nr, _, _, _ in rows), default=0)
-    pct = (100 * implemented // total) if total else 0
+    primary_pct = (100 * primary // total) if total else 0
+    effective_pct = (100 * effective // total) if total else 0
 
     row_lines = []
     number_to_row_index = {}
@@ -259,8 +260,11 @@ def main():
     args.out.write_text(
         HEADER_TEMPLATE.format(
             total=total,
-            implemented=implemented,
-            pct=pct,
+            primary=primary,
+            effective=effective,
+            primary_pct=primary_pct,
+            effective_pct=effective_pct,
+            implemented=primary,
             max_nr=max_nr,
             rows="\n".join(row_lines) + ("\n" if row_lines else ""),
             index_rows="\n".join(index_row_lines) + ("\n" if index_row_lines else ""),
