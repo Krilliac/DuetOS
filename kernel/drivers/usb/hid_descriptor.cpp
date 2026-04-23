@@ -254,10 +254,16 @@ bool HidParseDescriptor(const u8* buf, u32 len, HidReportSummary* out)
             case kMainFeature:
             {
                 const u32 bits = gs.report_size * gs.report_count;
+                // HID main-item data byte bit 0 = Constant. A Constant
+                // Input is padding / filler, not a real report field —
+                // it does NOT represent a usage even if the current
+                // usage page is e.g. Button. Count only data (non-Cnst)
+                // items as button fields.
+                const bool is_constant = (data & 0x01) != 0;
                 if (tag == kMainInput)
                 {
                     out->input_bits_total += bits;
-                    if (gs.usage_page == kUsagePageButton)
+                    if (!is_constant && gs.usage_page == kUsagePageButton)
                         ++out->button_field_count;
                 }
                 else if (tag == kMainOutput)
