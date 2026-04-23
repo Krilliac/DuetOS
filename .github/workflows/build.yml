@@ -109,7 +109,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y qemu-system-x86 grub-common grub-pc-bin \
-                                  xorriso mtools ovmf
+                                  grub-efi-amd64-bin xorriso mtools ovmf
       - name: Download kernel artifact
         uses: actions/download-artifact@v4
         with:
