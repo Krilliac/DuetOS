@@ -146,6 +146,9 @@ constexpr u32 kOffTlsGetValueReal = 0x7C6;         // batch 46 — 13 bytes
 constexpr u32 kOffTlsSetValueReal = 0x7D3;         // batch 46 — 20 bytes
 constexpr u32 kOffNtAllocateVirtualMemory = 0x7E7; // batch 47 — 36 bytes
 constexpr u32 kOffNtFreeVirtualMemory = 0x80B;     // batch 47 — 33 bytes
+constexpr u32 kOffGetSystemTimeSt = 0x82C;         // batch 48 — 11 bytes
+constexpr u32 kOffSystemTimeToFileTime = 0x837;    // batch 48 — 14 bytes
+constexpr u32 kOffFileTimeToSystemTime = 0x845;    // batch 48 — 14 bytes
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -2185,10 +2188,52 @@ constexpr u8 kStubsBytes[] = {
     0x5E,                         // 0x829 pop rsi
     0x5F,                         // 0x82A pop rdi
     0xC3,                         // 0x82B ret
+
+    // === Batch 48: SYSTEMTIME / FILETIME pointer-output APIs =====
+    //
+    // The previous commit (8a8ce9b) deliberately skipped these:
+    // a `mov eax,1; ret` stub leaves a caller-allocated SYSTEMTIME
+    // uninitialised, and CRTs that consume it treat year=0 as a
+    // sentinel that breaks date math. Real stub bytes now bridge
+    // the Win64 calling convention (rcx, rdx) to our kernel
+    // syscall ABI (rdi, rsi) via int 0x80 with SYS_GETTIME_ST (40),
+    // SYS_ST_TO_FT (41), SYS_FT_TO_ST (42).
+
+    // --- GetSystemTime / GetLocalTime (offset 0x82C, 11 bytes) -----
+    // Win32 ABI: void GetSystemTime(LPSYSTEMTIME=rcx).
+    //   GetLocalTime aliases to the same stub — we have no timezone
+    //   database yet, so local == UTC.
+    0x48, 0x89, 0xCF,             // 0x82C mov rdi, rcx   ; SYSTEMTIME* out
+    0xB8, 0x28, 0x00, 0x00, 0x00, // 0x82F mov eax, 40    ; SYS_GETTIME_ST
+    0xCD, 0x80,                   // 0x834 int 0x80
+    0xC3,                         // 0x836 ret
+
+    // --- SystemTimeToFileTime (offset 0x837, 14 bytes) -----------
+    // Win32 ABI: BOOL SystemTimeToFileTime(const SYSTEMTIME* = rcx,
+    //                                       LPFILETIME        = rdx).
+    // Kernel returns 0 on success in rax — matches Win32 TRUE
+    // (non-zero). On EFAULT or invalid input, kernel writes
+    // u64(-1) which is also non-zero; the caller can't tell the
+    // difference at v0 granularity, but a well-behaved input
+    // always succeeds.
+    0x48, 0x89, 0xCF,             // 0x837 mov rdi, rcx
+    0x48, 0x89, 0xD6,             // 0x83A mov rsi, rdx
+    0xB8, 0x29, 0x00, 0x00, 0x00, // 0x83D mov eax, 41    ; SYS_ST_TO_FT
+    0xCD, 0x80,                   // 0x842 int 0x80
+    0xC3,                         // 0x844 ret
+
+    // --- FileTimeToSystemTime (offset 0x845, 14 bytes) -----------
+    // Win32 ABI: BOOL FileTimeToSystemTime(const FILETIME* = rcx,
+    //                                       LPSYSTEMTIME   = rdx).
+    0x48, 0x89, 0xCF,             // 0x845 mov rdi, rcx
+    0x48, 0x89, 0xD6,             // 0x848 mov rsi, rdx
+    0xB8, 0x2A, 0x00, 0x00, 0x00, // 0x84B mov eax, 42    ; SYS_FT_TO_ST
+    0xCD, 0x80,                   // 0x850 int 0x80
+    0xC3,                         // 0x852 ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x82C, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0x853, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -3536,6 +3581,19 @@ constexpr StubEntry kStubsTable[] = {
     {"gdi32.dll", "SetTextColor", kOffReturnZero},
     {"gdi32.dll", "SetMapMode", kOffReturnOne},
     {"gdi32.dll", "SetTextAlign", kOffReturnZero},
+
+    // -----------------------------------------------------------------
+    // Batch 48: real stubs for pointer-output time APIs — the ones
+    // deliberately skipped by the previous GUI batch because a 0/1
+    // return leaves their caller-allocated output struct
+    // uninitialised. These bridge Win64 ABI -> int 0x80 with the
+    // new SYS_GETTIME_ST / SYS_ST_TO_FT / SYS_FT_TO_ST syscalls
+    // (40..42).
+    // -----------------------------------------------------------------
+    {"kernel32.dll", "GetSystemTime", kOffGetSystemTimeSt},
+    {"kernel32.dll", "GetLocalTime", kOffGetSystemTimeSt},
+    {"kernel32.dll", "SystemTimeToFileTime", kOffSystemTimeToFileTime},
+    {"kernel32.dll", "FileTimeToSystemTime", kOffFileTimeToSystemTime},
 };
 
 // Case-insensitive strcmp for ASCII. Win32 DLL name

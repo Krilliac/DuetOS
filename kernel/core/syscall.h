@@ -383,6 +383,31 @@ enum SyscallNumber : u64
     // BP that belongs to a different process returns -1
     // (BPs are scoped per-process).
     SYS_BP_REMOVE = 39,
+
+    // SYS_GETTIME_ST: rdi = user pointer to a 16-byte SYSTEMTIME
+    // struct. Samples the RTC and fills the struct in place with
+    // year/month/dayOfWeek/day/hour/minute/second/milliseconds.
+    // Returns 0 on success, u64(-1) on EFAULT.
+    //
+    // Companion to SYS_GETTIME_FT (17): FT returns a u64 FILETIME
+    // in rax; ST writes a SYSTEMTIME into the caller's buffer.
+    // The Win32 GetSystemTime / GetLocalTime stubs route through
+    // this; LocalTime is the same as SystemTime until we have a
+    // timezone database.
+    SYS_GETTIME_ST = 40,
+
+    // SYS_ST_TO_FT: rdi = user pointer to an input SYSTEMTIME,
+    // rsi = user pointer to an output FILETIME. Converts the 8
+    // WORD calendar fields to a 100-ns-tick count since
+    // 1601-01-01 UTC. Returns 0 on success; u64(-1) on EFAULT
+    // or on out-of-range input (year < 1601, month 0 or > 12,
+    // day 0 or > 31). Backs Win32 SystemTimeToFileTime.
+    SYS_ST_TO_FT = 41,
+
+    // SYS_FT_TO_ST: rdi = user pointer to an input FILETIME,
+    // rsi = user pointer to an output SYSTEMTIME. Reverse of
+    // SYS_ST_TO_FT. Backs Win32 FileTimeToSystemTime.
+    SYS_FT_TO_ST = 42,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit
