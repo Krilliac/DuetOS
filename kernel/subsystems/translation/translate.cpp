@@ -21,35 +21,23 @@ namespace
 // see consistent numbers regardless of which path they came in
 // through.
 constexpr i64 kEFAULT = -14;
-constexpr i64 kEINVAL = -22;
 
-// Linux syscall numbers we recognise here. Keep in sync with the
-// primary dispatcher's enum — this is a PEER table for syscalls
-// the primary doesn't handle, so overlap is fine but silent
-// redundancy is waste.
+// Linux syscall numbers we recognise here.
+// Ownership: translator handles only unresolved/missing-number
+// synthesis after linux::LinuxSyscallDispatch misses.
 enum : u64
 {
     kSysPipe = 22,
-    kSysReadv = 19,
-    kSysMadvise = 28,
     kSysSocket = 41,
     kSysClone = 56,
     kSysFork = 57,
     kSysVfork = 58,
     kSysExecve = 59,
     kSysWait4 = 61,
-    kSysFsync = 74,
-    kSysFdatasync = 75,
     kSysUmask = 95,
-    kSysGettimeofday = 96,
-    kSysGetrlimit = 97,
-    kSysSysinfo = 99,
-    kSysGetpgrp = 111,
     kSysStatfs = 137,
     kSysFstatfs = 138,
-    kSysSetrlimit = 160,
     kSysPipe2 = 293,
-    kSysPrlimit64 = 302,
     kSysClone3 = 435,
     kSysRseq = 334,
 };
@@ -408,42 +396,6 @@ i64 TranslateUmask(arch::TrapFrame* /*f*/)
     return 022;
 }
 
-// getpgrp() — process group id of the calling process. v0 has no
-// job-control model; return 0 (same as getpgid(0)).
-i64 TranslateGetpgrp(arch::TrapFrame* /*f*/)
-{
-    return 0;
-}
-
-// getrlimit(resource, rlimit*) / setrlimit(resource, rlimit*) —
-// older shape than prlimit64. We use the same "infinite limits"
-// story for both: reads return RLIM_INFINITY, writes accepted
-// but ignored.
-i64 TranslateGetrlimit(arch::TrapFrame* f)
-{
-    (void)f->rdi;
-    const u64 user_old = f->rsi;
-    if (user_old == 0)
-        return kEFAULT;
-    constexpr u64 kRlimInfinity = 0xFFFFFFFFFFFFFFFFull;
-    struct
-    {
-        u64 cur;
-        u64 max;
-    } old{kRlimInfinity, kRlimInfinity};
-    if (!mm::CopyToUser(reinterpret_cast<void*>(user_old), &old, sizeof(old)))
-        return kEFAULT;
-    return 0;
-}
-
-i64 TranslateSetrlimit(arch::TrapFrame* /*f*/)
-{
-    // Accept + no-op. Writing rlim values against our no-limits
-    // model would be storage-only; skip until a consumer reads
-    // back its own set value.
-    return 0;
-}
-
 // statfs(path, buf) / fstatfs(fd, buf) — filesystem statistics.
 // Fill a zeroed struct statfs with sensible-looking FAT32 totals
 // (we don't track exact block counts per-mount) so musl's `df`
@@ -602,6 +554,7 @@ const HitTable& NativeHitsRead()
 Result LinuxGapFill(arch::TrapFrame* frame)
 {
     KLOG_TRACE_SCOPE("translate", "LinuxGapFill");
+    // Ownership: this path is for unresolved dispatcher misses only.
     // RDTSC window around the gap-fill body. Reads are serialising-
     // free so we capture the cost of the handler without paying a
     // barrier per sample. See `BumpOverhead` comment for rationale.
@@ -610,31 +563,6 @@ Result LinuxGapFill(arch::TrapFrame* frame)
     Result r{false, 0};
     switch (nr)
     {
-    case kSysReadv:
-        LogTranslation("linux", nr, "linux-self:loop-over-read");
-        r = {true, TranslateReadv(frame)};
-        break;
-    case kSysGettimeofday:
-        LogTranslation("linux", nr, "linux-self:clock_gettime-reshape");
-        r = {true, TranslateGettimeofday(frame)};
-        break;
-    case kSysSysinfo:
-        LogTranslation("linux", nr, "synthetic:zeroed+uptime");
-        r = {true, TranslateSysinfo(frame)};
-        break;
-    case kSysPrlimit64:
-        LogTranslation("linux", nr, "synthetic:rlim-infinity");
-        r = {true, TranslatePrlimit64(frame)};
-        break;
-    case kSysFsync:
-    case kSysFdatasync:
-        LogTranslation("linux", nr, "noop:writes-unbuffered");
-        r = {true, TranslateNoOp(frame)};
-        break;
-    case kSysMadvise:
-        LogTranslation("linux", nr, "noop:advisory-hint");
-        r = {true, TranslateNoOp(frame)};
-        break;
     case kSysRseq:
         LogTranslation("linux", nr, "synthetic:enosys-deliberate");
         r = {true, TranslateRseq(frame)};
@@ -642,18 +570,6 @@ Result LinuxGapFill(arch::TrapFrame* frame)
     case kSysUmask:
         LogTranslation("linux", nr, "synthetic:022-default");
         r = {true, TranslateUmask(frame)};
-        break;
-    case kSysGetpgrp:
-        LogTranslation("linux", nr, "synthetic:pgrp=0");
-        r = {true, TranslateGetpgrp(frame)};
-        break;
-    case kSysGetrlimit:
-        LogTranslation("linux", nr, "synthetic:rlim-infinity");
-        r = {true, TranslateGetrlimit(frame)};
-        break;
-    case kSysSetrlimit:
-        LogTranslation("linux", nr, "noop:limits-unenforced");
-        r = {true, TranslateSetrlimit(frame)};
         break;
     case kSysStatfs:
     case kSysFstatfs:
