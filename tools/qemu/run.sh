@@ -113,6 +113,12 @@ QEMU_ARGS=(
     -device   "ahci,id=ahci1"
     -drive    "file=${SATA_IMAGE},if=none,id=sata0,format=raw"
     -device   "ide-hd,bus=ahci1.0,drive=sata0"
+    # xHCI host controller. q35 doesn't ship with one by default,
+    # so explicitly attach so the USB stack has something to bring
+    # up. No devices behind it for now — the controller-init self-
+    # test runs through capability-reg decode + reset + ring setup
+    # + a single NOOP command without any attached device.
+    -device   "qemu-xhci,id=xhci"
     "${UEFI_ARGS[@]}"
     "${BOOT_SOURCE[@]}"
 )

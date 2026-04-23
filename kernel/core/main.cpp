@@ -29,6 +29,7 @@
 #include "../drivers/usb/hid_descriptor.h"
 #include "../drivers/usb/msc_scsi.h"
 #include "../drivers/usb/usb.h"
+#include "../drivers/usb/xhci.h"
 #include "../net/stack.h"
 #include "../subsystems/graphics/graphics.h"
 #include "../drivers/storage/ahci.h"
@@ -866,6 +867,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
 
     SerialWrite("[boot] Detecting USB host controllers.\n");
     customos::drivers::usb::UsbInit();
+    customos::drivers::usb::xhci::XhciInit();
     customos::drivers::usb::hid::HidSelfTest();
     customos::drivers::usb::msc::MscSelfTest();
 
