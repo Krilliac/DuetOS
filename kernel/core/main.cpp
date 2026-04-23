@@ -1,5 +1,6 @@
 #include "types.h"
 #include "../acpi/acpi.h"
+#include "../acpi/aml.h"
 #include "../arch/x86_64/cpu.h"
 #include "../arch/x86_64/cpu_info.h"
 #include "../arch/x86_64/hypervisor.h"
@@ -783,6 +784,8 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
 
     SerialWrite("[boot] Parsing ACPI tables.\n");
     customos::acpi::AcpiInit(multiboot_info);
+    SerialWrite("[boot] Building AML namespace from DSDT/SSDT.\n");
+    customos::acpi::AmlNamespaceBuild();
 
     SerialWrite("[boot] Disabling 8259 PIC.\n");
     PicDisable();
