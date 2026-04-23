@@ -1,5 +1,6 @@
 #include "net.h"
 
+#include "../../arch/x86_64/cpu.h"
 #include "../../arch/x86_64/serial.h"
 #include "../../core/klog.h"
 #include "../../core/panic.h"
@@ -128,16 +129,14 @@ bool IsE1000CompatFamily(const char* family)
 
 // Additional e1000 register offsets (CTRL / STATUS already above).
 constexpr u64 kE1000RegCtrl = 0x00000;
-constexpr u64 kE1000RegIcr = 0x000C0; // Interrupt Cause Read (RC)
-constexpr u64 kE1000RegImc = 0x000D8; // Interrupt Mask Clear
-// IMS (Interrupt Mask Set) is named for the MSI-X wiring that
-// comes later — polling-only today keeps every IRQ masked.
-[[maybe_unused]] constexpr u64 kE1000RegImsSet = 0x000D0;
-constexpr u64 kE1000RegRctl = 0x00100;  // Receive Control
-constexpr u64 kE1000RegTctl = 0x00400;  // Transmit Control
-constexpr u64 kE1000RegTipg = 0x00410;  // TX Inter-Packet Gap
-constexpr u64 kE1000RegRdbal = 0x02800; // RX Desc Base Addr Low
-constexpr u64 kE1000RegRdbah = 0x02804; // RX Desc Base Addr High
+constexpr u64 kE1000RegIcr = 0x000C0;    // Interrupt Cause Read (RC)
+constexpr u64 kE1000RegImc = 0x000D8;    // Interrupt Mask Clear
+constexpr u64 kE1000RegImsSet = 0x000D0; // Interrupt Mask Set
+constexpr u64 kE1000RegRctl = 0x00100;   // Receive Control
+constexpr u64 kE1000RegTctl = 0x00400;   // Transmit Control
+constexpr u64 kE1000RegTipg = 0x00410;   // TX Inter-Packet Gap
+constexpr u64 kE1000RegRdbal = 0x02800;  // RX Desc Base Addr Low
+constexpr u64 kE1000RegRdbah = 0x02804;  // RX Desc Base Addr High
 constexpr u64 kE1000RegRdlen = 0x02808;
 constexpr u64 kE1000RegRdh = 0x02810;
 constexpr u64 kE1000RegRdt = 0x02818;
@@ -207,6 +206,13 @@ constexpr u8 kE1000TxCmdEop = 1u << 0;  // End Of Packet
 constexpr u8 kE1000TxCmdIfcs = 1u << 1; // Insert FCS
 constexpr u8 kE1000TxCmdRs = 1u << 3;   // Report Status
 
+// IMS / ICR bits that matter for RX-driven wakeups.
+constexpr u32 kE1000IntTxdw = 1u << 0;   // TX Desc Written Back
+constexpr u32 kE1000IntLsc = 1u << 2;    // Link Status Change
+constexpr u32 kE1000IntRxdmt0 = 1u << 4; // RX Desc Min Threshold
+constexpr u32 kE1000IntRxo = 1u << 6;    // RX Overrun
+constexpr u32 kE1000IntRxt0 = 1u << 7;   // RX Timer (desc done)
+
 struct E1000Ctx
 {
     bool online;
@@ -226,6 +232,12 @@ struct E1000Ctx
     u64 tx_packets;
     u64 tx_bytes;
     NicInfo* nic;
+    // MSI-X state. `irq_vector` is non-zero when binding
+    // succeeded; in that case the RX polling task blocks on
+    // `rx_wait` and the handler wakes it on RX/link events
+    // instead of running at tick cadence.
+    u8 irq_vector;
+    customos::sched::WaitQueue rx_wait;
 };
 
 constinit E1000Ctx g_e1000 = {};
@@ -421,12 +433,45 @@ void E1000DrainRx()
     }
 }
 
+// MSI-X / MSI handler. ICR (Interrupt Cause Read) clear-on-read:
+// the single read below acknowledges every pending bit in one
+// shot. We don't act on the specific cause (RXT0 / RXO / LSC /
+// TXDW) — the RX task drains the ring unconditionally and any
+// rare link-status change is picked up the next time we look at
+// the status register. Waking is enough.
+void E1000IrqHandler()
+{
+    if (g_e1000.mmio == nullptr)
+        return;
+    (void)E1000Read(kE1000RegIcr);
+    customos::sched::WaitQueueWakeOne(&g_e1000.rx_wait);
+}
+
 void E1000RxPollEntry(void*)
 {
+    const bool have_msix = (g_e1000.irq_vector != 0);
     for (;;)
     {
         E1000DrainRx();
-        customos::sched::SchedSleepTicks(1);
+        if (have_msix)
+        {
+            // Block until IRQ wakes us. Same lost-wakeup guard
+            // pattern as NVMe/xHCI: under Cli, re-check whether
+            // the next RX descriptor is marked DD; if so we
+            // skip blocking and loop to drain.
+            customos::arch::Cli();
+            const u32 slot = (g_e1000.rx_tail + 1) % kE1000RxRingSlots;
+            if ((g_e1000.rx_ring[slot].status & kE1000RxStatusDd) != 0)
+            {
+                customos::arch::Sti();
+                continue;
+            }
+            customos::sched::WaitQueueBlock(&g_e1000.rx_wait);
+        }
+        else
+        {
+            customos::sched::SchedSleepTicks(1);
+        }
     }
 }
 
@@ -495,6 +540,37 @@ bool E1000BringUp(NicInfo& n)
         return false;
 
     g_e1000.online = true;
+
+    // MSI-X bring-up. Classic 82540EM (QEMU's `-device e1000`)
+    // only exposes legacy MSI (cap 0x05), not MSI-X (0x11), so
+    // PciMsixBindSimple will return Unsupported and we fall
+    // back to polling. Real hardware + e1000e variants do
+    // advertise MSI-X; the wiring lights up automatically there.
+    {
+        pci::DeviceAddress addr{};
+        addr.bus = n.bus;
+        addr.device = n.device;
+        addr.function = n.function;
+        auto r = pci::PciMsixBindSimple(addr, /*entry_index=*/0, E1000IrqHandler, /*out_route=*/nullptr);
+        if (r.has_value())
+        {
+            g_e1000.irq_vector = r.value();
+            // Enable RX + link + TX-writeback IRQ sources. Writing
+            // to IMS (Interrupt Mask SET) turns bits on; IMC
+            // (clear) takes them off. Read ICR once to clear any
+            // pending state before we unmask.
+            (void)E1000Read(kE1000RegIcr);
+            const u32 mask = kE1000IntRxt0 | kE1000IntRxdmt0 | kE1000IntRxo | kE1000IntLsc | kE1000IntTxdw;
+            E1000Write(kE1000RegImsSet, mask);
+            arch::SerialWrite("[e1000] MSI-X bound vector=");
+            arch::SerialWriteHex(g_e1000.irq_vector);
+            arch::SerialWrite("\n");
+        }
+        else
+        {
+            arch::SerialWrite("[e1000] MSI-X unavailable — RX task will tick-poll\n");
+        }
+    }
 
     // Re-read link state now that we've asserted SLU — can take a
     // moment on real silicon, but QEMU brings it up instantly.
