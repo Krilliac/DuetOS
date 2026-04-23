@@ -26,6 +26,7 @@ constinit bool g_init_done = false;
 constexpr u64 kCapHciVersion = 0x00; // u32 = caplen | (rsvd) | hciver
 constexpr u64 kCapHcsParams1 = 0x04;
 constexpr u64 kCapHcsParams2 = 0x08;
+constexpr u64 kCapHccParams1 = 0x10;
 constexpr u64 kCapDbOff = 0x14;
 constexpr u64 kCapRtsOff = 0x18;
 
@@ -45,12 +46,42 @@ constexpr u32 kCmdHcReset = 1u << 1;
 constexpr u32 kStsHcHalted = 1u << 0;
 constexpr u32 kStsCnr = 1u << 11;
 
-// TRB types (in TRB control field bits 15:10).
-constexpr u32 kTrbTypeNoOp = 23; // command-ring NoOp
+// HCCPARAMS1 bits.
+constexpr u32 kHccParams1Csz = 1u << 2; // context size: 0=32 B, 1=64 B
+
+// TRB types (control field bits 15:10). xHCI 1.2 §6.4.
+// kTrbTypeNormal / kTrbTypePortStatusChange aren't emitted or
+// matched against by this slice but are real spec-defined types
+// the next slice (HID transfers) will consume — keep them named.
+[[maybe_unused]] constexpr u32 kTrbTypeNormal = 1;
+constexpr u32 kTrbTypeSetupStage = 2;
+constexpr u32 kTrbTypeDataStage = 3;
+constexpr u32 kTrbTypeStatusStage = 4;
 constexpr u32 kTrbTypeLink = 6;
 constexpr u32 kTrbTypeEnableSlot = 9;
+constexpr u32 kTrbTypeAddressDevice = 11;
+constexpr u32 kTrbTypeNoOp = 23; // command-ring NoOp
+constexpr u32 kTrbTypeTransferEvent = 32;
 constexpr u32 kTrbTypeCmdCompletion = 33;
-constexpr u32 kTrbTypePortStatusChange = 34;
+[[maybe_unused]] constexpr u32 kTrbTypePortStatusChange = 34;
+
+// Setup Stage TRB control bits.
+constexpr u32 kTrbCtlIdt = 1u << 6; // Immediate Data (setup packet is inline)
+constexpr u32 kTrbCtlIoc = 1u << 5; // Interrupt On Completion
+// "Transfer Type" field in Setup/Status Stage control bits 17:16.
+// Only In-Data is emitted this slice; the other three are kept
+// named for the Config-descriptor / SET_CONFIGURATION slice.
+[[maybe_unused]] constexpr u32 kTransferTypeNoData = 0;
+[[maybe_unused]] constexpr u32 kTransferTypeReservedBulk = 1; // invalid for control
+[[maybe_unused]] constexpr u32 kTransferTypeOutData = 2;
+constexpr u32 kTransferTypeInData = 3;
+// Data/Status Stage "DIR" bit is bit 16 (1 = IN, 0 = OUT).
+constexpr u32 kTrbCtlDirIn = 1u << 16;
+
+// USB standard setup packet fields.
+constexpr u8 kUsbReqGetDescriptor = 0x06;
+constexpr u16 kUsbDescriptorDevice = 0x0100; // type=1, index=0
+constexpr u32 kDeviceDescriptorBytes = 18;
 
 // PORTSC bit layout we care about.
 constexpr u32 kPortScCcs = 1u << 0; // current-connect status (RO)
@@ -85,6 +116,78 @@ struct alignas(16) ErstEntry
     u32 _rsvd;
 };
 
+// Per-controller submit/complete state. Lives in the stack frame of
+// InitOne but gets passed by reference to the command / transfer
+// helpers so they don't have to close over lambdas.
+struct Runtime
+{
+    volatile u8* mmio;
+    volatile u8* op;
+    volatile u8* intr0;
+    volatile u32* db_base; // &DB[0]; DB[n] is db_base + n
+
+    Trb* cmd_ring;
+    u64 cmd_phys;
+    u32 cmd_slots;
+    u32 cmd_idx;
+    u32 cmd_cycle;
+
+    Trb* evt_ring;
+    u64 evt_phys;
+    u32 evt_slots;
+    u32 evt_idx;
+    u32 evt_cycle;
+
+    u64* dcbaa;    // kernel-virtual pointer to the DCBAA page
+    u32 ctx_bytes; // 32 or 64, from HCCPARAMS1.CSZ
+    u8 max_slots;  // for bounds
+    ControllerInfo* info;
+};
+
+// Per-device state allocated at Address Device time. We only keep
+// as many as fit in the fixed-size table below; extra ports beyond
+// the cap silently skip enumeration. Tuned high enough to cover the
+// kMaxXhciPortsPerController * kMaxControllers product so a real
+// box with every port populated still fits.
+constexpr u32 kMaxDevicesTotal = 32;
+
+struct DeviceState
+{
+    bool in_use;
+    u8 slot_id;
+    u8 port_num;
+    u8 speed;
+    u8 ctrlr_idx; // index into g_controllers
+    mm::PhysAddr device_ctx_phys;
+    mm::PhysAddr input_ctx_phys;
+    void* input_ctx_virt;
+    mm::PhysAddr ep0_ring_phys;
+    Trb* ep0_ring;
+    u32 ep0_slots;
+    u32 ep0_idx;
+    u32 ep0_cycle;
+    mm::PhysAddr scratch_phys;
+    u8* scratch_virt;
+};
+constinit DeviceState g_devices[kMaxDevicesTotal] = {};
+constinit u32 g_device_count = 0;
+
+DeviceState* AllocDeviceSlot()
+{
+    for (u32 i = 0; i < kMaxDevicesTotal; ++i)
+    {
+        if (!g_devices[i].in_use)
+        {
+            g_devices[i] = {};
+            g_devices[i].in_use = true;
+            if (i >= g_device_count)
+                g_device_count = i + 1;
+            return &g_devices[i];
+        }
+    }
+    return nullptr;
+}
+
 inline volatile u8* OpBase(const HostControllerInfo& h, u8 caplen)
 {
     return static_cast<volatile u8*>(h.mmio_virt) + caplen;
@@ -98,7 +201,7 @@ inline void WriteMmio32(volatile u8* base, u64 offset, u32 value)
 {
     *reinterpret_cast<volatile u32*>(base + offset) = value;
 }
-inline u64 ReadMmio64(volatile u8* base, u64 offset)
+[[maybe_unused]] inline u64 ReadMmio64(volatile u8* base, u64 offset)
 {
     return *reinterpret_cast<volatile u64*>(base + offset);
 }
@@ -142,6 +245,355 @@ bool PollUntil(volatile u8* base, u64 reg_off, u32 mask, u32 match, u64 iters)
         asm volatile("pause" : : : "memory");
     }
     return false;
+}
+
+// Doorbell write. xHCI DB[0] rings the command ring; DB[slot_id] rings
+// a device's endpoints. `target` is the DB Target field (bits 0..7);
+// stream_id is 0 for non-stream endpoints.
+void RingDoorbell(Runtime& rt, u32 db_index, u32 target, u32 stream_id = 0)
+{
+    rt.db_base[db_index] = (stream_id << 16) | (target & 0xFF);
+}
+
+// Enqueue one TRB into a ring and return the physical address of the
+// enqueued slot. Caller supplies the final value of the cycle bit
+// IN LOWEST BIT of `control` (we OR in the producer cycle). The
+// command ring has a trailing Link TRB so we reserve one slot. For
+// v0 we never wrap — a boot session issues tens of commands / ctl
+// transfers total — so ring-exhaustion logs and returns 0.
+u64 EnqueueRingTrb(Trb* ring, u64 ring_phys, u32 slots, u32& idx, u32& cycle, u32 type, u32 param_lo, u32 param_hi,
+                   u32 status, u32 extra_control)
+{
+    if (idx >= slots - 1)
+    {
+        arch::SerialWrite("[xhci] ring exhausted (link-TRB wrap not implemented for v0)\n");
+        return 0;
+    }
+    Trb& slot = ring[idx];
+    slot.param_lo = param_lo;
+    slot.param_hi = param_hi;
+    slot.status = status;
+    slot.control = (type << 10) | (extra_control & ~1u) | (cycle & 1u);
+    const u64 phys = ring_phys + u64(idx) * sizeof(Trb);
+    ++idx;
+    return phys;
+}
+
+u64 SubmitCmd(Runtime& rt, u32 type, u32 param_lo, u32 param_hi, u32 status, u32 extra_control)
+{
+    const u64 phys = EnqueueRingTrb(rt.cmd_ring, rt.cmd_phys, rt.cmd_slots, rt.cmd_idx, rt.cmd_cycle, type, param_lo,
+                                    param_hi, status, extra_control);
+    if (phys == 0)
+        return 0;
+    RingDoorbell(rt, 0, 0);
+    return phys;
+}
+
+// Advance the consumer side of the event ring and push the updated
+// dequeue pointer back to ERDP (with the "event handler busy" bit
+// cleared — write 1 to clear per spec).
+void AdvanceEventRing(Runtime& rt)
+{
+    ++rt.evt_idx;
+    if (rt.evt_idx >= rt.evt_slots)
+    {
+        rt.evt_idx = 0;
+        rt.evt_cycle ^= 1;
+    }
+    const u64 erdp = rt.evt_phys + u64(rt.evt_idx) * sizeof(Trb);
+    WriteMmio64(rt.intr0, /*kIntrErdpLo=*/0x18, erdp | (1ull << 3));
+}
+
+// Drain events until one whose TRB pointer equals `expect_phys` and
+// whose type matches `expect_type` lands in the consumer slot.
+// Irrelevant events are consumed + dropped (port-status changes, etc.).
+// `out` captures the matching TRB by value. Returns false on timeout.
+bool WaitEvent(Runtime& rt, u64 expect_phys, u32 expect_type, Trb* out, u64 iters)
+{
+    for (u64 i = 0; i < iters; ++i)
+    {
+        const Trb& e = rt.evt_ring[rt.evt_idx];
+        const bool valid = (e.control & 1u) == (rt.evt_cycle & 1u);
+        if (!valid)
+        {
+            asm volatile("pause" : : : "memory");
+            continue;
+        }
+        const u32 type = (e.control >> 10) & 0x3F;
+        const u64 ptr = (u64(e.param_hi) << 32) | u64(e.param_lo);
+        if (type == expect_type && ptr == expect_phys)
+        {
+            if (out != nullptr)
+                *out = e;
+            AdvanceEventRing(rt);
+            return true;
+        }
+        // Non-matching event — drop it. A Port Status Change event
+        // can land between an Enable Slot completion and the next
+        // command; we don't care.
+        AdvanceEventRing(rt);
+    }
+    return false;
+}
+
+bool WaitCmdCompletion(Runtime& rt, u64 expect_phys, u32* out_status, u8* out_slot_id)
+{
+    Trb e{};
+    if (!WaitEvent(rt, expect_phys, kTrbTypeCmdCompletion, &e, 4'000'000))
+        return false;
+    if (out_status != nullptr)
+        *out_status = e.status;
+    if (out_slot_id != nullptr)
+        *out_slot_id = u8((e.control >> 24) & 0xFF);
+    return true;
+}
+
+// ---------------------------------------------------------------
+// Device enumeration: Address Device + GET_DESCRIPTOR(Device).
+// ---------------------------------------------------------------
+
+// EP0 max-packet-size default derived from PORTSC-reported speed.
+// Low/Full: 8. High: 64. Super+: 512. These are the values the xHCI
+// spec recommends using in the Input Context before the device's
+// actual descriptor is available — the controller will either
+// accept them outright or ask us to re-submit with the corrected
+// value (which we handle lazily in v0: if a device needs a
+// different MPS0, the GET_DESCRIPTOR read of 18 bytes still works
+// because MPS0 just bounds the per-packet payload).
+u32 DefaultMaxPacketSize0(u8 speed)
+{
+    switch (speed)
+    {
+    case 4: // Super Speed
+    case 5: // Super Speed+
+        return 512;
+    case 3: // High Speed
+        return 64;
+    default: // Low / Full / unknown
+        return 8;
+    }
+}
+
+// Build Input Context for Address Device. ctx_bytes is 32 or 64 per
+// HCCPARAMS1.CSZ. Layout (indexes are 0-based in units of ctx_bytes):
+//   [0] Input Control Context — A0|A1 set (add slot + EP0)
+//   [1] Slot Context          — root-hub port, speed, ctx entries=1
+//   [2] EP0 Endpoint Context  — EP type=Control, MPS, TR deq ptr
+// EP2..31 stay zero (not being added).
+void BuildAddressDeviceInputContext(void* input_ctx_virt, u32 ctx_bytes, u8 port_num, u8 speed, u32 mps0,
+                                    u64 ep0_ring_phys)
+{
+    auto* base = static_cast<volatile u8*>(input_ctx_virt);
+    // Zero the whole region we'll touch (control + slot + EP0 contexts).
+    for (u32 i = 0; i < 3 * ctx_bytes; ++i)
+        base[i] = 0;
+
+    volatile u32* icc = reinterpret_cast<volatile u32*>(base + 0 * ctx_bytes);
+    // D0 (drop) = 0, D1 = 0. A0 = add slot context, A1 = add EP0
+    // context. xHCI 1.2 §6.2.5.1.
+    icc[1] = (1u << 0) | (1u << 1);
+
+    volatile u32* slot = reinterpret_cast<volatile u32*>(base + 1 * ctx_bytes);
+    // DW0: route string (bits 0..19) = 0, speed (bits 20..23),
+    // context entries (bits 27..31) = 1 (just EP0).
+    slot[0] = (u32(speed) << 20) | (1u << 27);
+    // DW1: root hub port number (bits 16..23).
+    slot[1] = u32(port_num) << 16;
+
+    volatile u32* ep0 = reinterpret_cast<volatile u32*>(base + 2 * ctx_bytes);
+    // DW0: EP State (bits 0..2) = 0 (Disabled initial).
+    ep0[0] = 0;
+    // DW1: EP Type = 4 (Control) in bits 3..5. CErr (error count) =
+    // 3 in bits 1..2. Max Packet Size in bits 16..31.
+    ep0[1] = (3u << 1) | (4u << 3) | (mps0 << 16);
+    // DW2/DW3: TR Dequeue Pointer (64-bit, bit 0 = Dequeue Cycle
+    // State = 1 on first use).
+    const u64 tr_dcs = ep0_ring_phys | 1ull;
+    ep0[2] = u32(tr_dcs);
+    ep0[3] = u32(tr_dcs >> 32);
+    // DW4: Average TRB Length (bits 0..15) — we guess 8 for control
+    // since every packet is an 8-byte setup packet or small status.
+    ep0[4] = 8;
+}
+
+bool AddressDevice(Runtime& rt, PortRecord& port)
+{
+    DeviceState* dev = AllocDeviceSlot();
+    if (dev == nullptr)
+    {
+        arch::SerialWrite("[xhci]   device table full, skipping port ");
+        arch::SerialWriteHex(port.port_num);
+        arch::SerialWrite("\n");
+        return false;
+    }
+    dev->slot_id = port.slot_id;
+    dev->port_num = port.port_num;
+    dev->speed = port.speed;
+
+    // Device Context — sized ctx_bytes per entry, 32 entries, must
+    // be 64-byte aligned. One 4 KiB page covers both 32B and 64B
+    // contexts with room to spare.
+    void* devctx_virt = nullptr;
+    if (!AllocZeroPage(&dev->device_ctx_phys, &devctx_virt))
+        return false;
+
+    // Input Context — 1 control + 32 context slots.
+    if (!AllocZeroPage(&dev->input_ctx_phys, &dev->input_ctx_virt))
+        return false;
+
+    // EP0 transfer ring — one page of Trb entries.
+    void* ep0_virt = nullptr;
+    if (!AllocZeroPage(&dev->ep0_ring_phys, &ep0_virt))
+        return false;
+    dev->ep0_ring = static_cast<Trb*>(ep0_virt);
+    dev->ep0_slots = mm::kPageSize / sizeof(Trb);
+    dev->ep0_idx = 0;
+    dev->ep0_cycle = 1;
+    // Install a trailing Link TRB so a future workload that fills
+    // the ring doesn't crash — we don't expect to wrap during boot
+    // but the structure should match spec.
+    Trb& link = dev->ep0_ring[dev->ep0_slots - 1];
+    link.param_lo = u32(dev->ep0_ring_phys);
+    link.param_hi = u32(dev->ep0_ring_phys >> 32);
+    link.status = 0;
+    link.control = (kTrbTypeLink << 10) | (1u << 1) | 1u;
+
+    // Scratch page for descriptor reads.
+    void* scratch_virt = nullptr;
+    if (!AllocZeroPage(&dev->scratch_phys, &scratch_virt))
+        return false;
+    dev->scratch_virt = static_cast<u8*>(scratch_virt);
+
+    // Hand the device context to the controller via DCBAA[slot_id].
+    rt.dcbaa[dev->slot_id] = dev->device_ctx_phys;
+
+    // Build Input Context + submit Address Device.
+    const u32 mps0 = DefaultMaxPacketSize0(dev->speed);
+    BuildAddressDeviceInputContext(dev->input_ctx_virt, rt.ctx_bytes, dev->port_num, dev->speed, mps0,
+                                   dev->ep0_ring_phys);
+
+    // Address Device TRB: param = input_ctx_phys, control extra =
+    // (slot_id << 24). BSR (Block Set Address Request) bit 9 is 0 —
+    // we want the controller to both enable the slot AND issue the
+    // SET_ADDRESS request in one shot.
+    const u64 cmd_phys = SubmitCmd(rt, kTrbTypeAddressDevice, u32(dev->input_ctx_phys), u32(dev->input_ctx_phys >> 32),
+                                   0, u32(dev->slot_id) << 24);
+    if (cmd_phys == 0)
+        return false;
+    u32 status = 0;
+    u8 slot_out = 0;
+    if (!WaitCmdCompletion(rt, cmd_phys, &status, &slot_out))
+    {
+        arch::SerialWrite("[xhci]   Address Device timed out for slot ");
+        arch::SerialWriteHex(dev->slot_id);
+        arch::SerialWrite("\n");
+        return false;
+    }
+    const u32 code = (status >> 24) & 0xFF;
+    if (code != kCompletionCodeSuccess)
+    {
+        arch::SerialWrite("[xhci]   Address Device failed code=");
+        arch::SerialWriteHex(code);
+        arch::SerialWrite(" slot=");
+        arch::SerialWriteHex(dev->slot_id);
+        arch::SerialWrite("\n");
+        return false;
+    }
+    port.addressed = true;
+    return true;
+}
+
+bool FetchDeviceDescriptor(Runtime& rt, PortRecord& port)
+{
+    // Find the DeviceState for this port — allocated by
+    // AddressDevice, indexed by slot_id.
+    DeviceState* dev = nullptr;
+    for (u32 i = 0; i < kMaxDevicesTotal; ++i)
+    {
+        if (g_devices[i].in_use && g_devices[i].slot_id == port.slot_id)
+        {
+            dev = &g_devices[i];
+            break;
+        }
+    }
+    if (dev == nullptr)
+        return false;
+
+    // Zero the scratch bytes we'll compare against.
+    for (u32 i = 0; i < kDeviceDescriptorBytes; ++i)
+        dev->scratch_virt[i] = 0;
+
+    // Three-TRB control transfer on EP0.
+    //
+    // Setup Stage — the 8-byte USB SETUP packet packed into the
+    // TRB's first two u32 fields (IDT=1 means the data is
+    // immediate, no buffer pointer needed):
+    //   bmRequestType = 0x80   (Device-to-Host, Standard, Device)
+    //   bRequest      = 0x06   (GET_DESCRIPTOR)
+    //   wValue        = 0x0100 (Descriptor type 1 = Device, index 0)
+    //   wIndex        = 0x0000
+    //   wLength       = 18
+    const u32 setup_lo = 0x80u | (u32(kUsbReqGetDescriptor) << 8) | (u32(kUsbDescriptorDevice) << 16);
+    const u32 setup_hi = u32(kDeviceDescriptorBytes) << 16; // wIndex=0, wLength=18
+    // Setup Stage status: interrupt target = 0, TRB transfer length = 8.
+    const u32 setup_status = 8u;
+    // Setup Stage control: type << 10 | Transfer Type | IDT.
+    const u32 setup_ctl = (kTransferTypeInData << 16) | kTrbCtlIdt;
+    const u64 setup_phys =
+        EnqueueRingTrb(dev->ep0_ring, dev->ep0_ring_phys, dev->ep0_slots, dev->ep0_idx, dev->ep0_cycle,
+                       kTrbTypeSetupStage, setup_lo, setup_hi, setup_status, setup_ctl);
+    (void)setup_phys;
+
+    // Data Stage — IN direction, points at the scratch page.
+    const u32 data_ctl = kTrbCtlDirIn;
+    const u64 data_phys = EnqueueRingTrb(dev->ep0_ring, dev->ep0_ring_phys, dev->ep0_slots, dev->ep0_idx,
+                                         dev->ep0_cycle, kTrbTypeDataStage, u32(dev->scratch_phys),
+                                         u32(dev->scratch_phys >> 32), kDeviceDescriptorBytes, data_ctl);
+    (void)data_phys;
+
+    // Status Stage — direction OPPOSITE of data (so OUT here) with
+    // IOC set so the event ring reports completion. Param/Status
+    // are zero. This is the TRB whose physical address we'll
+    // match in the Transfer Event.
+    const u64 status_phys = EnqueueRingTrb(dev->ep0_ring, dev->ep0_ring_phys, dev->ep0_slots, dev->ep0_idx,
+                                           dev->ep0_cycle, kTrbTypeStatusStage, 0, 0, 0, kTrbCtlIoc);
+    if (status_phys == 0)
+        return false;
+
+    // Ring the EP0 doorbell on this slot. DB target 1 = EP0
+    // bidirectional control.
+    RingDoorbell(rt, dev->slot_id, 1);
+
+    // Wait for the Transfer Event whose pointer matches status_phys.
+    Trb event{};
+    if (!WaitEvent(rt, status_phys, kTrbTypeTransferEvent, &event, 4'000'000))
+    {
+        arch::SerialWrite("[xhci]   GET_DESCRIPTOR(Device) timed out for slot ");
+        arch::SerialWriteHex(dev->slot_id);
+        arch::SerialWrite("\n");
+        return false;
+    }
+    const u32 xfer_code = (event.status >> 24) & 0xFF;
+    if (xfer_code != kCompletionCodeSuccess)
+    {
+        arch::SerialWrite("[xhci]   GET_DESCRIPTOR(Device) failed code=");
+        arch::SerialWriteHex(xfer_code);
+        arch::SerialWrite(" slot=");
+        arch::SerialWriteHex(dev->slot_id);
+        arch::SerialWrite("\n");
+        return false;
+    }
+
+    // Parse the 18-byte USB device descriptor.
+    const u8* d = dev->scratch_virt;
+    port.max_packet_size_0 = d[7];
+    port.vendor_id = u16(d[8]) | (u16(d[9]) << 8);
+    port.product_id = u16(d[10]) | (u16(d[11]) << 8);
+    port.device_class = d[4];
+    port.device_subclass = d[5];
+    port.device_protocol = d[6];
+    port.descriptor_ok = true;
+    return true;
 }
 
 bool InitOne(const HostControllerInfo& h, ControllerInfo& out)
@@ -274,10 +726,10 @@ bool InitOne(const HostControllerInfo& h, ControllerInfo& out)
     // mmio + RTSOFF; per-interrupter stride 32 B starting at +0x20.
     const u32 rtsoff = ReadMmio32(mmio, kCapRtsOff) & ~0x1Fu;
     volatile u8* intr0 = mmio + rtsoff + 0x20;
-    constexpr u64 kIntrErstSz = 0x08;   // u32
-    constexpr u64 kIntrErstBaLo = 0x10; // u32 (low half of u64)
-    constexpr u64 kIntrErstBaHi = 0x14;
-    constexpr u64 kIntrErdpLo = 0x18; // u64
+    constexpr u64 kIntrErstSz = 0x08;                    // u32
+    constexpr u64 kIntrErstBaLo = 0x10;                  // u32 (low half of u64)
+    [[maybe_unused]] constexpr u64 kIntrErstBaHi = 0x14; // high half; paired WriteMmio64 writes both
+    constexpr u64 kIntrErdpLo = 0x18;                    // u64
     WriteMmio32(intr0, kIntrErstSz, 1);
     // ERDP must be written BEFORE ERSTBA per spec §4.9.4.
     WriteMmio64(intr0, kIntrErdpLo, evt_phys);
@@ -292,102 +744,42 @@ bool InitOne(const HostControllerInfo& h, ControllerInfo& out)
     }
     out.init_ok = true;
 
-    // Generic command submit/complete state. We never wrap the
-    // command ring during boot (≤ a few dozen commands across
-    // every controller), so the panic-on-wrap below is fine for
-    // v0; the proper Link-TRB cycle-toggle happens when the first
-    // real workload actually fills 255 slots.
-    auto* evt_ring = static_cast<Trb*>(evt_virt);
+    // Pack the ring / doorbell / interrupter state into a Runtime
+    // so helpers (SubmitCmd, WaitCmdCompletion, WaitEvent) don't
+    // have to close over lambdas. Context-size bit governs whether
+    // device / input contexts are 32 or 64 bytes per element.
     constexpr u32 kRingSlotsLocal = mm::kPageSize / sizeof(Trb);
-    u32 cmd_producer_idx = 0;
-    u32 cmd_producer_cycle = 1;
-    u32 evt_consumer_idx = 0;
-    u32 evt_consumer_cycle = 1;
-
+    const u32 hcc1 = ReadMmio32(mmio, kCapHccParams1);
     const u32 dboff = ReadMmio32(mmio, kCapDbOff) & ~0x3u;
-    volatile u32* db0 = reinterpret_cast<volatile u32*>(mmio + dboff);
 
-    auto submit_cmd = [&](u32 type, u32 param_lo, u32 param_hi, u32 status_field, u32 extra_control) -> u64
-    {
-        if (cmd_producer_idx >= kRingSlotsLocal - 1)
-        {
-            arch::SerialWrite("[xhci] command ring exhausted (link-TRB wrap not implemented for v0)\n");
-            return 0;
-        }
-        Trb& slot = cmd_ring[cmd_producer_idx];
-        slot.param_lo = param_lo;
-        slot.param_hi = param_hi;
-        slot.status = status_field;
-        slot.control = (type << 10) | (extra_control & ~1u) | (cmd_producer_cycle & 1u);
-        const u64 phys = cmd_phys + u64(cmd_producer_idx) * sizeof(Trb);
-        ++cmd_producer_idx;
-        // Doorbell write: target=0 (command ring) is bits 7..0; bits
-        // 23..16 = stream-id (unused for cmd ring).
-        *db0 = 0;
-        return phys;
-    };
-
-    // Wait for a Command Completion event whose CommandTRB pointer
-    // matches `expect_phys`. On success returns true and writes the
-    // 32-bit completion-status word + the slot ID extracted from
-    // bits 23:16 of that word into `*out_slot_id`.
-    auto wait_completion = [&](u64 expect_phys, u32* out_status, u8* out_slot_id) -> bool
-    {
-        for (u64 i = 0; i < 4'000'000; ++i)
-        {
-            const Trb& e = evt_ring[evt_consumer_idx];
-            const bool valid = (e.control & 1u) == (evt_consumer_cycle & 1u);
-            if (valid)
-            {
-                const u32 type = (e.control >> 10) & 0x3F;
-                if (type == kTrbTypeCmdCompletion)
-                {
-                    const u64 ptr = (u64(e.param_hi) << 32) | u64(e.param_lo);
-                    if (ptr == expect_phys)
-                    {
-                        if (out_status != nullptr)
-                            *out_status = e.status;
-                        if (out_slot_id != nullptr)
-                            *out_slot_id = u8((e.control >> 24) & 0xFF);
-                        ++evt_consumer_idx;
-                        if (evt_consumer_idx >= kRingSlotsLocal)
-                        {
-                            evt_consumer_idx = 0;
-                            evt_consumer_cycle ^= 1;
-                        }
-                        // Advance ERDP: bit 3 = "Event Handler Busy"
-                        // (write 1 to clear). Pointer goes in
-                        // bits 63:4.
-                        const u64 erdp = evt_phys + u64(evt_consumer_idx) * sizeof(Trb);
-                        WriteMmio64(intr0, /*kIntrErdpLo=*/0x18, erdp | (1ull << 3));
-                        return true;
-                    }
-                }
-                // Some other (non-matching) event came in. Drop it
-                // and advance — we don't care about port-status
-                // change events as side effects of the reset.
-                ++evt_consumer_idx;
-                if (evt_consumer_idx >= kRingSlotsLocal)
-                {
-                    evt_consumer_idx = 0;
-                    evt_consumer_cycle ^= 1;
-                }
-                const u64 erdp = evt_phys + u64(evt_consumer_idx) * sizeof(Trb);
-                WriteMmio64(intr0, /*kIntrErdpLo=*/0x18, erdp | (1ull << 3));
-                continue;
-            }
-            asm volatile("pause" : : : "memory");
-        }
-        return false;
-    };
+    Runtime rt{};
+    rt.mmio = mmio;
+    rt.op = op;
+    rt.intr0 = intr0;
+    rt.db_base = reinterpret_cast<volatile u32*>(mmio + dboff);
+    rt.cmd_ring = cmd_ring;
+    rt.cmd_phys = cmd_phys;
+    rt.cmd_slots = kRingSlotsLocal;
+    rt.cmd_idx = 0;
+    rt.cmd_cycle = 1;
+    rt.evt_ring = static_cast<Trb*>(evt_virt);
+    rt.evt_phys = evt_phys;
+    rt.evt_slots = kRingSlotsLocal;
+    rt.evt_idx = 0;
+    rt.evt_cycle = 1;
+    rt.dcbaa = static_cast<u64*>(dcbaa_virt);
+    rt.ctx_bytes = (hcc1 & kHccParams1Csz) ? 64 : 32;
+    rt.max_slots = out.max_slots;
+    rt.info = &out;
+    out.context_bytes = rt.ctx_bytes;
 
     // NoOp roundtrip — proves the submit/complete plumbing works
     // before we issue commands that allocate state on the controller.
     {
-        const u64 noop_phys = submit_cmd(kTrbTypeNoOp, 0, 0, 0, 0);
+        const u64 noop_phys = SubmitCmd(rt, kTrbTypeNoOp, 0, 0, 0, 0);
         u32 status = 0;
         u8 slot = 0;
-        out.noop_ok = (noop_phys != 0) && wait_completion(noop_phys, &status, &slot);
+        out.noop_ok = (noop_phys != 0) && WaitCmdCompletion(rt, noop_phys, &status, &slot);
     }
 
     arch::SerialWrite("[xhci] init pci=");
@@ -463,10 +855,10 @@ bool InitOne(const HostControllerInfo& h, ControllerInfo& out)
         }
 
         // Send Enable Slot Command. param_lo/hi/status all zero.
-        const u64 cmd_p = submit_cmd(kTrbTypeEnableSlot, 0, 0, 0, 0);
+        const u64 cmd_p = SubmitCmd(rt, kTrbTypeEnableSlot, 0, 0, 0, 0);
         u32 cs = 0;
         u8 slot_id = 0;
-        if (cmd_p != 0 && wait_completion(cmd_p, &cs, &slot_id))
+        if (cmd_p != 0 && WaitCmdCompletion(rt, cmd_p, &cs, &slot_id))
         {
             const u32 code = (cs >> 24) & 0xFF;
             if (code == kCompletionCodeSuccess && slot_id != 0)
@@ -505,6 +897,46 @@ bool InitOne(const HostControllerInfo& h, ControllerInfo& out)
     arch::SerialWrite(" slots_enabled=");
     arch::SerialWriteHex(out.slots_enabled);
     arch::SerialWrite("\n");
+
+    // Enumerate every successfully-enabled slot: assign a USB
+    // address, then read its 18-byte device descriptor. Each
+    // success bumps the matching counter on ControllerInfo so the
+    // boot log has a one-shot "devices online" signal.
+    for (u8 i = 0; i < ports_to_scan; ++i)
+    {
+        PortRecord& rec = out.ports[i];
+        if (!rec.slot_ok)
+            continue;
+        if (!AddressDevice(rt, rec))
+            continue;
+        ++out.devices_addressed;
+        if (!FetchDeviceDescriptor(rt, rec))
+            continue;
+        ++out.descriptors_fetched;
+        arch::SerialWrite("[xhci]   device port=");
+        arch::SerialWriteHex(rec.port_num);
+        arch::SerialWrite(" slot=");
+        arch::SerialWriteHex(rec.slot_id);
+        arch::SerialWrite(" vid=");
+        arch::SerialWriteHex(rec.vendor_id);
+        arch::SerialWrite(" pid=");
+        arch::SerialWriteHex(rec.product_id);
+        arch::SerialWrite(" class=");
+        arch::SerialWriteHex(rec.device_class);
+        arch::SerialWrite("/");
+        arch::SerialWriteHex(rec.device_subclass);
+        arch::SerialWrite("/");
+        arch::SerialWriteHex(rec.device_protocol);
+        arch::SerialWrite(" mps0=");
+        arch::SerialWriteHex(rec.max_packet_size_0);
+        arch::SerialWrite("\n");
+    }
+    arch::SerialWrite("[xhci] enumeration: addressed=");
+    arch::SerialWriteHex(out.devices_addressed);
+    arch::SerialWrite(" descriptors=");
+    arch::SerialWriteHex(out.descriptors_fetched);
+    arch::SerialWrite("\n");
+
     return true;
 }
 
@@ -616,6 +1048,13 @@ void XhciInit()
     }
     g_controller_count = 0;
     g_init_done = false;
+    // Reset the device table so a subsequent XhciInit re-allocates
+    // slots cleanly. Frames behind the rings are leaked until we
+    // teach the allocator to take them back after a full HCH
+    // quiesce — intentional, matches the per-controller TODO above.
+    for (u32 i = 0; i < kMaxDevicesTotal; ++i)
+        g_devices[i] = {};
+    g_device_count = 0;
     arch::SerialWrite(any_stuck ? "[xhci] shutdown partial (some controllers wouldn't halt)\n"
                                 : "[xhci] shutdown ok — all controllers quiesced\n");
     if (any_stuck)
