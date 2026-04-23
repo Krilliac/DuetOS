@@ -213,7 +213,7 @@ correctness can only be proven at runtime:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y qemu-system-x86 grub-common grub-pc-bin xorriso mtools ovmf
+sudo apt-get install -y qemu-system-x86 grub-common grub-pc-bin grub-efi-amd64-bin xorriso mtools ovmf
 ```
 
 Count as "legitimately requires":

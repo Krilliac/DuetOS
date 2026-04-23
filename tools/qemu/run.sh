@@ -32,11 +32,38 @@ ISO_IMAGE="${BUILD_DIR}/customos.iso"
 KERNEL_ELF="${BUILD_DIR}/kernel/customos-kernel.elf"
 DISPLAY_MODE="${CUSTOMOS_DISPLAY:-none}"
 TIMEOUT_SECS="${CUSTOMOS_TIMEOUT:-}"
+# CUSTOMOS_UEFI=1 boots the same hybrid ISO through OVMF firmware
+# instead of SeaBIOS. This exercises the UEFI El Torito boot record
+# (efi.img) that grub-mkrescue embeds when grub-efi-amd64-bin is
+# installed. The kernel itself runs identically post-handoff —
+# everything before the GRUB menu differs.
+UEFI_MODE="${CUSTOMOS_UEFI:-0}"
 
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
     echo "error: qemu-system-x86_64 is not installed." >&2
     echo "       sudo apt-get install -y qemu-system-x86" >&2
     exit 1
+fi
+
+UEFI_ARGS=()
+if [[ "${UEFI_MODE}" == "1" ]]; then
+    OVMF_CODE="${CUSTOMOS_OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
+    OVMF_VARS_TEMPLATE="${CUSTOMOS_OVMF_VARS:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
+    if [[ ! -f "${OVMF_CODE}" || ! -f "${OVMF_VARS_TEMPLATE}" ]]; then
+        echo "error: CUSTOMOS_UEFI=1 set but OVMF firmware not found." >&2
+        echo "       sudo apt-get install -y ovmf" >&2
+        echo "       expected: ${OVMF_CODE} and ${OVMF_VARS_TEMPLATE}" >&2
+        exit 1
+    fi
+    # Per-run writable copy of OVMF NVRAM (BootOrder / boot entries).
+    # Discarded on each invocation so a previous run can't sabotage
+    # the next one with a Boot#### that points at a stale path.
+    OVMF_VARS_COPY="${BUILD_DIR}/ovmf-vars.fd"
+    cp "${OVMF_VARS_TEMPLATE}" "${OVMF_VARS_COPY}"
+    UEFI_ARGS=(
+        -drive "if=pflash,format=raw,readonly=on,file=${OVMF_CODE}"
+        -drive "if=pflash,format=raw,file=${OVMF_VARS_COPY}"
+    )
 fi
 
 if [[ -f "${ISO_IMAGE}" ]]; then
@@ -86,6 +113,7 @@ QEMU_ARGS=(
     -device   "ahci,id=ahci1"
     -drive    "file=${SATA_IMAGE},if=none,id=sata0,format=raw"
     -device   "ide-hd,bus=ahci1.0,drive=sata0"
+    "${UEFI_ARGS[@]}"
     "${BOOT_SOURCE[@]}"
 )
 
