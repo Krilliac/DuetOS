@@ -2326,20 +2326,32 @@ void LinuxLogAbiCoverage()
 {
     // Re-walk the generated table at boot so a future refactor that
     // renames a Do* handler out of classifier reach is visible in the
-    // boot log (count drops). kLinuxSyscallHandlersImplemented is the
-    // compile-time count baked in by the generator.
-    u32 implemented = 0;
+    // boot log (count drops). The generated header also bakes compile-
+    // time primary/effective counts so drift is obvious at boot.
+    u32 primary = 0;
+    u32 effective = 0;
     for (u32 i = 0; i < kLinuxSyscallCount; ++i)
     {
         if (kLinuxSyscalls[i].state == HandlerState::Implemented)
-            ++implemented;
+        {
+            ++primary;
+        }
     }
+    effective = kLinuxSyscallHandlersImplementedEffective;
+
     arch::SerialWrite("[linux] ABI coverage: ");
-    arch::SerialWriteHex(implemented);
+    arch::SerialWrite("primary=");
+    arch::SerialWriteHex(primary);
     arch::SerialWrite(" / ");
     arch::SerialWriteHex(kLinuxSyscallCount);
-    arch::SerialWrite(" implemented (generated count = ");
-    arch::SerialWriteHex(kLinuxSyscallHandlersImplemented);
+    arch::SerialWrite(", effective=");
+    arch::SerialWriteHex(effective);
+    arch::SerialWrite(" / ");
+    arch::SerialWriteHex(kLinuxSyscallCount);
+    arch::SerialWrite(" (generated primary=");
+    arch::SerialWriteHex(kLinuxSyscallHandlersImplementedPrimary);
+    arch::SerialWrite(", generated effective=");
+    arch::SerialWriteHex(kLinuxSyscallHandlersImplementedEffective);
     arch::SerialWrite(")\n");
 }
 
