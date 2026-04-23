@@ -43,6 +43,8 @@ that covers j00ru's NT table (see `../win32-compat/README.md`).
 ```sh
 python3 tools/linux-compat/gen-linux-syscall-table.py \
     --csv tools/linux-compat/linux-syscalls-x86_64.csv \
+    --mapped-from-dispatcher kernel/subsystems/linux/syscall.cpp \
+    --gap-fill-from-translator kernel/subsystems/translation/translate.cpp \
     --out kernel/subsystems/linux/linux_syscall_table_generated.h
 ```
 
@@ -51,7 +53,14 @@ NOT invoke Python; the header is checked in.
 
 ## Scoreboard
 
-The generator tallies how many syscalls have a live mapping to a
-`Do*` handler in `syscall.cpp` (by name match). A boot-time
-log line prints "linux ABI coverage: N/M" once the dispatcher
-pulls the new table in.
+The generator emits two explicit coverage metrics:
+
+1. **primary** — syscalls with a live `Do*` handler in
+   `kernel/subsystems/linux/syscall.cpp` (name-matched).
+2. **effective** — primary coverage plus syscall numbers handled by
+   `translation::LinuxGapFill(...)` in
+   `kernel/subsystems/translation/translate.cpp`.
+
+Both metrics are written into the generated header preamble and are
+printed by the Linux boot log coverage line with explicit
+`primary`/`effective` labels.
