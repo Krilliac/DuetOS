@@ -26,8 +26,7 @@ unimplemented.
 | ----------------------------------- | ----------------------------------------------------------- |
 | `linux-syscalls-x86_64.csv`         | Canonical x86_64 syscall table: `number,name,args`          |
 | `gen-linux-syscall-table.py`        | Generator that emits `linux_syscall_table_generated.h`      |
-| `check-gapfill-overlap.py`          | Fails when dispatch + translator both claim same syscall nr |
-| `gapfill-overlap-allowlist.txt`     | Explicit temporary overlap allowlist for the check script   |
+| `check-syscall-ownership.py`        | Fails if translator owns numbers already implemented in primary |
 
 ## Provenance
 
@@ -72,8 +71,29 @@ with a comment explaining why.
 ## Scoreboard
 
 The generator tallies how many syscalls have a live mapping to a
-`Do*` handler in `syscall.cpp` (by name match). The emitted header
-contains both the sorted syscall row table and a dense by-number
-index (`nullptr` for unknown holes), so `LinuxSyscallLookup(nr)`
-is O(1) on both hit and miss paths. A boot-time log line prints
-"linux ABI coverage: N/M" once the dispatcher pulls the new table in.
+`Do*` handler in `syscall.cpp` (by name match). A boot-time
+log line prints "linux ABI coverage: N/M" once the dispatcher
+pulls the new table in.
+
+## Syscall ownership policy
+
+Runtime ownership is intentionally single-path:
+
+1. **Primary Linux dispatcher owns implemented handlers.**
+2. **Translator owns miss-path gap fill only.**
+3. **Any overlap is rejected unless explicitly allowlisted.**
+
+Check ownership drift with:
+
+```sh
+python3 tools/linux-compat/check-syscall-ownership.py
+```
+
+The script compares:
+
+- `HandlerState::Implemented` rows in
+  `kernel/subsystems/linux/linux_syscall_table_generated.h`
+- Linux `kSys*` ownership constants in
+  `kernel/subsystems/translation/translate.cpp`
+
+and exits non-zero if a non-allowlisted overlap appears.

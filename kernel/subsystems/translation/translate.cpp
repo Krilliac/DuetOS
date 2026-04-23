@@ -22,9 +22,14 @@ namespace
 // through.
 constexpr i64 kEFAULT = -14;
 
-// Linux syscall numbers we recognise here.
-// Ownership: translator handles only unresolved/missing-number
-// synthesis after linux::LinuxSyscallDispatch misses.
+// Linux syscall numbers owned by the translation unit.
+//
+// Ownership policy:
+//   - Primary Linux dispatcher owns every syscall with a live Do*
+//     handler in kernel/subsystems/linux/syscall.cpp.
+//   - Translation unit owns miss-path gap filling only.
+//   - Deliberate overlaps are forbidden unless explicitly allowlisted
+//     in tools/linux-compat/check-syscall-ownership.py.
 enum : u64
 {
     kSysPipe = 22,
@@ -242,149 +247,6 @@ void LogMiss(const char* origin, arch::TrapFrame* f, const char* name)
     SerialWrite(",");
     SerialWriteHex(f->r9);
     SerialWrite("]\n");
-}
-
-void DumpSuppressedMissSummary(const char* origin, MissSampleTable& t)
-{
-    const u64 delta = t.suppressed_total - t.suppressed_reported;
-    t.suppressed_reported = t.suppressed_total;
-
-    arch::SerialWrite("[translate-miss-suppressed] ");
-    arch::SerialWrite(origin);
-    arch::SerialWrite(" total=");
-    arch::SerialWriteHex(t.suppressed_total);
-    arch::SerialWrite(" delta=");
-    arch::SerialWriteHex(delta);
-    arch::SerialWrite(" logged=");
-    arch::SerialWriteHex(t.emitted_total);
-    arch::SerialWrite("\n");
-}
-
-// readv(fd, iov, iovcnt) — the same shape as writev. The primary
-// Linux dispatcher has writev but never shipped readv; synthesise
-// by iterating iovecs and calling LinuxRead per entry.
-i64 TranslateReadv(arch::TrapFrame* f)
-{
-    const u64 fd = f->rdi;
-    const u64 iov_ptr = f->rsi;
-    const u64 iovcnt = f->rdx;
-    if (iovcnt > 1024)
-        return kEINVAL;
-    i64 total = 0;
-    for (u64 i = 0; i < iovcnt; ++i)
-    {
-        struct
-        {
-            u64 base;
-            u64 len;
-        } iov;
-        if (!mm::CopyFromUser(&iov, reinterpret_cast<const void*>(iov_ptr + i * 16), sizeof(iov)))
-        {
-            return total > 0 ? total : kEFAULT;
-        }
-        if (iov.len == 0)
-            continue;
-        const i64 n = linux::LinuxRead(fd, iov.base, iov.len);
-        if (n < 0)
-            return total > 0 ? total : n;
-        total += n;
-        if (static_cast<u64>(n) < iov.len)
-            break;
-    }
-    return total;
-}
-
-// gettimeofday(tv, tz) — older than clock_gettime but still used
-// by legacy libc paths and autotools-style probes. Synthesize
-// from LinuxNowNs(); ignore the timezone argument (modern
-// kernels do the same — tz is always NULL in practice).
-i64 TranslateGettimeofday(arch::TrapFrame* f)
-{
-    const u64 user_tv = f->rdi;
-    (void)f->rsi; // tz is obsolete per Linux uapi comments
-    if (user_tv == 0)
-        return 0; // caller wants nothing
-    const u64 ns = linux::LinuxNowNs();
-    struct
-    {
-        i64 tv_sec;
-        i64 tv_usec;
-    } tv;
-    tv.tv_sec = static_cast<i64>(ns / 1'000'000'000ull);
-    tv.tv_usec = static_cast<i64>((ns / 1000ull) % 1'000'000ull);
-    if (!mm::CopyToUser(reinterpret_cast<void*>(user_tv), &tv, sizeof(tv)))
-        return kEFAULT;
-    return 0;
-}
-
-// sysinfo(info) — uptime + memory stats + load averages. v0
-// fills a zeroed struct (52 bytes on x86_64 with padding) with
-// the one field we can fake meaningfully: uptime. musl uses
-// this mostly for uptime + totalram in diagnostic paths.
-i64 TranslateSysinfo(arch::TrapFrame* f)
-{
-    const u64 user_info = f->rdi;
-    if (user_info == 0)
-        return kEFAULT;
-    struct Info
-    {
-        i64 uptime;   // seconds since boot
-        u64 loads[3]; // 1/5/15 min load averages (all 0)
-        u64 totalram;
-        u64 freeram;
-        u64 sharedram;
-        u64 bufferram;
-        u64 totalswap;
-        u64 freeswap;
-        u16 procs;
-        u16 _pad;
-        u64 totalhigh;
-        u64 freehigh;
-        u32 mem_unit;
-        u8 _pad2[4];
-    };
-    Info info;
-    for (u64 i = 0; i < sizeof(info); ++i)
-        reinterpret_cast<u8*>(&info)[i] = 0;
-    info.uptime = static_cast<i64>(linux::LinuxNowNs() / 1'000'000'000ull);
-    info.procs = 1;
-    info.mem_unit = 1;
-    if (!mm::CopyToUser(reinterpret_cast<void*>(user_info), &info, sizeof(info)))
-        return kEFAULT;
-    return 0;
-}
-
-// prlimit64(pid, resource, new, old) — resource limit query.
-// v0 returns infinite limits ({RLIM64_INFINITY, RLIM64_INFINITY})
-// for old if non-null, no-ops new if non-null. Fine for anything
-// that only consults the getter.
-i64 TranslatePrlimit64(arch::TrapFrame* f)
-{
-    (void)f->rdi; // pid; always current-process in v0
-    (void)f->rsi; // resource id; treated uniformly
-    const u64 user_old = f->r10;
-    if (user_old != 0)
-    {
-        constexpr u64 kRlimInfinity = 0xFFFFFFFFFFFFFFFFull;
-        struct
-        {
-            u64 cur;
-            u64 max;
-        } old{kRlimInfinity, kRlimInfinity};
-        if (!mm::CopyToUser(reinterpret_cast<void*>(user_old), &old, sizeof(old)))
-            return kEFAULT;
-    }
-    // new limits ignored.
-    return 0;
-}
-
-// Plain-accept no-ops. Their common pattern is "the kernel should
-// do something but v0 doesn't need to — return success so the
-// caller keeps going." fsync / fdatasync: we don't buffer writes,
-// so they're always durable. madvise: hints are advisory.
-i64 TranslateNoOp(arch::TrapFrame* /*f*/)
-{
-    return 0;
 }
 
 // umask(mask) — returns the OLD umask. Linux-standard default is
