@@ -10,6 +10,7 @@
 #include "../arch/x86_64/smp.h"
 #include "../arch/x86_64/thermal.h"
 #include "../arch/x86_64/timer.h"
+#include "../drivers/gpu/bochs_vbe.h"
 #include "../drivers/gpu/gpu.h"
 #include "../drivers/input/ps2kbd.h"
 #include "../drivers/input/ps2mouse.h"
@@ -299,6 +300,7 @@ void CmdHelp()
     ConsoleWriteln("  THERMAL      RE-READ MSR THERMAL SENSORS");
     ConsoleWriteln("  HWMON        UNIFIED SENSORS VIEW (SMBIOS + THERMAL + POWER + FANS)");
     ConsoleWriteln("  GPU          LIST DISCOVERED GPUS");
+    ConsoleWriteln("  VBE [W H [B]]  QUERY / SET BOCHS-VBE DISPLAY MODE");
     ConsoleWriteln("  NIC          LIST NICS + MAC + LINK");
     ConsoleWriteln("  ARP          ARP CACHE + STATS");
     ConsoleWriteln("  IPV4         IPV4 RX COUNTERS");
@@ -1269,7 +1271,7 @@ static const char* const kCommandSet[] = {
     "battery",   "thermal", "temp",       "gpu",      "lsgpu",    "nic",       "lsnic",      "ip",       "arp",
     "ipv4",      "uuid",    "uuidgen",    "health",   "checkup",  "attacksim", "redteam",    "memdump",  "instr",
     "dumpstate", "bp",      "breakpoint", "login",    "logout",   "passwd",    "useradd",    "userdel",  "users",
-    "who",       "su",      "hwmon",
+    "who",       "su",      "hwmon",      "vbe",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -2338,6 +2340,95 @@ void CmdGpu()
             ConsoleWrite(g.family);
         }
         ConsoleWriteChar('\n');
+    }
+}
+
+// Parse a decimal u32 from `s` into `*out`. Returns true on full
+// success. Accepts 1..5 digits (0..65535), which covers every
+// reasonable display dimension.
+bool ParseU16Decimal(const char* s, u16* out)
+{
+    if (s == nullptr || *s == '\0')
+        return false;
+    u32 v = 0;
+    for (u32 i = 0; s[i] != '\0'; ++i)
+    {
+        if (s[i] < '0' || s[i] > '9')
+            return false;
+        v = v * 10 + u32(s[i] - '0');
+        if (v > 0xFFFFu)
+            return false;
+    }
+    *out = u16(v);
+    return true;
+}
+
+void CmdVbe(u32 argc, char** argv)
+{
+    using customos::drivers::gpu::VbeCaps;
+    using customos::drivers::gpu::VbeQuery;
+    using customos::drivers::gpu::VbeSetMode;
+
+    if (argc == 1)
+    {
+        const VbeCaps c = VbeQuery();
+        if (!c.present)
+        {
+            ConsoleWriteln("VBE: not present (no Bochs / BGA-compatible GPU found)");
+            return;
+        }
+        ConsoleWrite("VBE: id=0xB0C");
+        WriteU64Hex(c.version, 1);
+        ConsoleWrite("  current=");
+        WriteU64Dec(c.cur_xres);
+        ConsoleWrite("x");
+        WriteU64Dec(c.cur_yres);
+        ConsoleWrite("x");
+        WriteU64Dec(c.cur_bpp);
+        ConsoleWrite(c.enabled ? " LIVE" : " DISABLED");
+        ConsoleWrite("  max=");
+        WriteU64Dec(c.max_xres);
+        ConsoleWrite("x");
+        WriteU64Dec(c.max_yres);
+        ConsoleWrite("x");
+        WriteU64Dec(c.max_bpp);
+        ConsoleWriteChar('\n');
+        ConsoleWriteln("Usage: vbe <width> <height> [bpp]   — set mode (bpp defaults to 32)");
+        ConsoleWriteln("       vbe                          — show current + max");
+        ConsoleWriteln("NOTE: mode-set programs the controller; the framebuffer driver");
+        ConsoleWriteln("      keeps its original layout until the compositor rewires.");
+        return;
+    }
+
+    if (argc < 3)
+    {
+        ConsoleWriteln("VBE: usage: vbe [width height [bpp]]");
+        return;
+    }
+    u16 width = 0, height = 0, bpp = 32;
+    if (!ParseU16Decimal(argv[1], &width) || !ParseU16Decimal(argv[2], &height))
+    {
+        ConsoleWriteln("VBE: width/height must be decimal integers");
+        return;
+    }
+    if (argc >= 4 && !ParseU16Decimal(argv[3], &bpp))
+    {
+        ConsoleWriteln("VBE: bpp must be decimal (8, 15, 16, 24, or 32)");
+        return;
+    }
+    if (VbeSetMode(width, height, bpp))
+    {
+        ConsoleWrite("VBE: mode set OK — ");
+        WriteU64Dec(width);
+        ConsoleWrite("x");
+        WriteU64Dec(height);
+        ConsoleWrite("x");
+        WriteU64Dec(bpp);
+        ConsoleWriteln("");
+    }
+    else
+    {
+        ConsoleWriteln("VBE: mode-set rejected (dimensions exceed max, bpp unsupported, or no BGA)");
     }
 }
 
@@ -6912,6 +7003,11 @@ void Dispatch(char* line)
     if (StrEq(cmd, "gpu") || StrEq(cmd, "lsgpu"))
     {
         CmdGpu();
+        return;
+    }
+    if (StrEq(cmd, "vbe"))
+    {
+        CmdVbe(argc, argv);
         return;
     }
     if (StrEq(cmd, "nic") || StrEq(cmd, "lsnic") || StrEq(cmd, "ip"))

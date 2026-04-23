@@ -6,6 +6,7 @@
 #include "../../core/panic.h"
 #include "../../mm/paging.h"
 #include "../pci/pci.h"
+#include "bochs_vbe.h"
 
 namespace customos::drivers::gpu
 {
@@ -141,7 +142,14 @@ void RunVendorProbe(GpuInfo& g)
     // register peek explicit and paves the way for real-hardware
     // vendor probes (Intel/AMD/NVIDIA) to land alongside it.
     if (g.vendor_id == kVendorQemuBochs && ::customos::arch::IsEmulator())
+    {
         DecodeBochsVbe(g);
+        // Real driver-level query — talks to the device via the
+        // legacy port pair (works regardless of BAR mapping). The
+        // MMIO-bank decode above is QEMU-specific + BAR-layout
+        // dependent; VbeSelfTest is the canonical entry point.
+        VbeSelfTest();
+    }
 }
 
 // Read and log every populated BAR on a GPU. Useful diagnostic
