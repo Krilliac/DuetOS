@@ -524,6 +524,92 @@ void SyscallDispatch(arch::TrapFrame* frame)
         return;
     }
 
+    case SYS_SYSTEM_INFO:
+    {
+        // rdi = user pointer to SYSTEM_INFO (48 bytes).
+        struct __attribute__((packed)) SystemInfo
+        {
+            u16 wProcessorArchitecture;
+            u16 wReserved;
+            u32 dwPageSize;
+            u64 lpMinimumApplicationAddress;
+            u64 lpMaximumApplicationAddress;
+            u64 dwActiveProcessorMask;
+            u32 dwNumberOfProcessors;
+            u32 dwProcessorType;
+            u32 dwAllocationGranularity;
+            u16 wProcessorLevel;
+            u16 wProcessorRevision;
+        };
+        static_assert(sizeof(SystemInfo) == 48, "SYSTEM_INFO must be 48 bytes");
+
+        SystemInfo si;
+        for (u64 i = 0; i < sizeof(si); ++i)
+            reinterpret_cast<volatile u8*>(&si)[i] = 0;
+        si.wProcessorArchitecture = 9; // AMD64
+        si.dwPageSize = 4096;
+        si.lpMinimumApplicationAddress = 0x10000ULL;
+        si.lpMaximumApplicationAddress = 0x7FFFFFFE0000ULL;
+        si.dwActiveProcessorMask = 1;
+        si.dwNumberOfProcessors = 1;
+        si.dwProcessorType = 8664; // PROCESSOR_AMD_X8664
+        si.dwAllocationGranularity = 0x10000;
+        si.wProcessorLevel = 6;
+        si.wProcessorRevision = 0;
+
+        if (!mm::CopyToUser(reinterpret_cast<void*>(frame->rdi), &si, sizeof(si)))
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        frame->rax = 0;
+        return;
+    }
+
+    case SYS_DEBUG_PRINTW:
+    {
+        // rdi = user ptr to NUL-terminated UTF-16LE string. Cap
+        // gate mirrors SYS_DEBUG_PRINT.
+        Process* proc = CurrentProcess();
+        if (proc == nullptr || !CapSetHas(proc->caps, kCapSerialConsole))
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+
+        // Read up to kSyscallDebugPrintMax wide-chars (2 bytes each).
+        u16 wbuf[kSyscallDebugPrintMax + 1];
+        for (u64 i = 0; i < kSyscallDebugPrintMax + 1; ++i)
+            wbuf[i] = 0;
+        if (!mm::CopyFromUser(wbuf, reinterpret_cast<const void*>(frame->rdi), kSyscallDebugPrintMax * sizeof(u16)))
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        wbuf[kSyscallDebugPrintMax] = 0;
+
+        // Strip to ASCII — non-ASCII → '?'. Single-pass, stops at
+        // first NUL wide-char.
+        char abuf[kSyscallDebugPrintMax + 1];
+        u64 n = 0;
+        for (; n < kSyscallDebugPrintMax; ++n)
+        {
+            const u16 w = wbuf[n];
+            if (w == 0)
+                break;
+            abuf[n] = (w < 0x80) ? static_cast<char>(w) : '?';
+        }
+        abuf[n] = '\0';
+
+        arch::SerialWrite("[odbgw] ");
+        arch::SerialWrite(abuf);
+        if (n == 0 || abuf[n - 1] != '\n')
+            arch::SerialWrite("\n");
+
+        frame->rax = 0;
+        return;
+    }
+
     case SYS_WAIT_MULTI:
     {
         // rdi = count, rsi = user handle array, rdx = wait_all,

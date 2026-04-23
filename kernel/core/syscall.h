@@ -512,6 +512,33 @@ enum SyscallNumber : u64
     //
     // Unprivileged (same as the single-object waits).
     SYS_WAIT_MULTI = 48,
+
+    // SYS_SYSTEM_INFO: rdi = user pointer to a Win32 SYSTEM_INFO
+    // struct (48 bytes). Kernel populates with constants describing
+    // the host CPU + address-space topology:
+    //   wProcessorArchitecture   = 9 (PROCESSOR_ARCHITECTURE_AMD64)
+    //   dwPageSize               = 4096
+    //   lpMinimumApplicationAddress = 0x10000
+    //   lpMaximumApplicationAddress = 0x7FFFFFFE0000
+    //   dwActiveProcessorMask    = 1
+    //   dwNumberOfProcessors     = 1
+    //   dwProcessorType          = 8664 (PROCESSOR_AMD_X8664)
+    //   dwAllocationGranularity  = 0x10000
+    //   wProcessorLevel          = 6
+    //   wProcessorRevision       = 0
+    // Returns 0 on success, u64(-1) on bad user pointer. Backs
+    // Win32 GetSystemInfo / GetNativeSystemInfo (WoW64 distinction
+    // doesn't apply — we're native x86_64).
+    SYS_SYSTEM_INFO = 49,
+
+    // SYS_DEBUG_PRINTW: rdi = user pointer to NUL-terminated
+    // UTF-16LE string. Kernel reads up to
+    // kSyscallDebugPrintMax wide-characters (each 2 bytes), strips
+    // high byte to produce ASCII (non-ASCII chars replaced with '?'),
+    // and emits "[odbgw] ..." on serial. Returns 0. Cap-gated on
+    // kCapSerialConsole (same as SYS_DEBUG_PRINT). Backs
+    // Win32 OutputDebugStringW.
+    SYS_DEBUG_PRINTW = 50,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit

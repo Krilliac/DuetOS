@@ -56,6 +56,47 @@ typedef struct _MEMORYSTATUSEX
     ULONGLONG ullAvailExtendedVirtual;
 } MEMORYSTATUSEX, *LPMEMORYSTATUSEX;
 
+typedef unsigned short WORD;
+typedef short SHORT;
+
+typedef struct _SYSTEM_INFO
+{
+    WORD wProcessorArchitecture;
+    WORD wReserved;
+    DWORD dwPageSize;
+    void* lpMinimumApplicationAddress;
+    void* lpMaximumApplicationAddress;
+    unsigned long long dwActiveProcessorMask;
+    DWORD dwNumberOfProcessors;
+    DWORD dwProcessorType;
+    DWORD dwAllocationGranularity;
+    WORD wProcessorLevel;
+    WORD wProcessorRevision;
+} SYSTEM_INFO, *LPSYSTEM_INFO;
+
+typedef struct _COORD
+{
+    SHORT X;
+    SHORT Y;
+} COORD;
+
+typedef struct _SMALL_RECT
+{
+    SHORT Left;
+    SHORT Top;
+    SHORT Right;
+    SHORT Bottom;
+} SMALL_RECT;
+
+typedef struct _CONSOLE_SCREEN_BUFFER_INFO
+{
+    COORD dwSize;
+    COORD dwCursorPosition;
+    WORD wAttributes;
+    SMALL_RECT srWindow;
+    COORD dwMaximumWindowSize;
+} CONSOLE_SCREEN_BUFFER_INFO;
+
 #define STD_OUTPUT_HANDLE ((DWORD) - 11)
 #define INFINITE 0xFFFFFFFFu
 #define WAIT_OBJECT_0 0x00000000
@@ -85,6 +126,12 @@ __declspec(dllimport) BOOL __stdcall GetThreadTimes(HANDLE hThread, LPFILETIME c
                                                     LPFILETIME ut);
 __declspec(dllimport) BOOL __stdcall GetSystemTimes(PFILETIME idle, PFILETIME kernel_t, PFILETIME user);
 __declspec(dllimport) BOOL __stdcall GlobalMemoryStatusEx(LPMEMORYSTATUSEX lpBuffer);
+__declspec(dllimport) void __stdcall GetSystemInfo(LPSYSTEM_INFO lpSystemInfo);
+__declspec(dllimport) void __stdcall GetNativeSystemInfo(LPSYSTEM_INFO lpSystemInfo);
+__declspec(dllimport) void __stdcall OutputDebugStringW(const unsigned short* lpOutputString);
+__declspec(dllimport) DWORD __stdcall FormatMessageA(DWORD flags, const void* src, DWORD msgId, DWORD lang, char* buf,
+                                                     DWORD nSize, void* args);
+__declspec(dllimport) BOOL __stdcall GetConsoleScreenBufferInfo(HANDLE hOut, CONSOLE_SCREEN_BUFFER_INFO* p);
 
 static HANDLE g_events[2];
 
@@ -199,6 +246,58 @@ int __stdcall _start(void)
         WriteString("[syscall-stress] FAIL WaitForMultipleObjects returned unexpected code\n");
         WriteHex64(rc);
         ExitProcess(7);
+    }
+
+    // === Batch 52 coverage ===
+    WriteString("[syscall-stress] main: GetSystemInfo\n");
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    if (si.dwPageSize != 4096 || si.dwNumberOfProcessors == 0 || si.wProcessorArchitecture != 9)
+    {
+        WriteString("[syscall-stress] FAIL GetSystemInfo returned bad fields\n");
+        ExitProcess(8);
+    }
+    WriteString("[syscall-stress] main: si.dwNumberOfProcessors=\n");
+    WriteHex64(si.dwNumberOfProcessors);
+
+    WriteString("[syscall-stress] main: GetNativeSystemInfo\n");
+    SYSTEM_INFO nsi;
+    GetNativeSystemInfo(&nsi);
+    if (nsi.dwPageSize != 4096)
+    {
+        WriteString("[syscall-stress] FAIL GetNativeSystemInfo returned bad page size\n");
+        ExitProcess(9);
+    }
+
+    WriteString("[syscall-stress] main: OutputDebugStringW\n");
+    static const unsigned short wmsg[] = {'w', 'i', 'd', 'e', ' ', 'h', 'e', 'l', 'l', 'o', 0};
+    OutputDebugStringW(wmsg);
+
+    WriteString("[syscall-stress] main: FormatMessageA\n");
+    char fmbuf[64];
+    fmbuf[0] = 'x'; // sentinel
+    DWORD fmrc = FormatMessageA(0, 0, 0x12345, 0, fmbuf, sizeof(fmbuf), 0);
+    if (fmrc == 0 || fmbuf[0] != 'E')
+    {
+        WriteString("[syscall-stress] FAIL FormatMessageA didn't write buffer\n");
+        WriteHex64(fmrc);
+        ExitProcess(10);
+    }
+    WriteString("[syscall-stress] main: FormatMessageA wrote: ");
+    WriteString(fmbuf);
+
+    WriteString("[syscall-stress] main: GetConsoleScreenBufferInfo\n");
+    CONSOLE_SCREEN_BUFFER_INFO csbi;
+    csbi.dwSize.X = 0; // sentinel
+    if (!GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &csbi))
+    {
+        WriteString("[syscall-stress] FAIL GetConsoleScreenBufferInfo returned FALSE\n");
+        ExitProcess(11);
+    }
+    if (csbi.dwSize.X != 80 || csbi.dwSize.Y != 25)
+    {
+        WriteString("[syscall-stress] FAIL GetConsoleScreenBufferInfo bad size\n");
+        ExitProcess(12);
     }
 
     WriteString("[syscall-stress] main: PASS\n");

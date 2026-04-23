@@ -15,9 +15,14 @@ EXPORTS
     WaitForSingleObject
     WaitForMultipleObjects
     OutputDebugStringA
+    OutputDebugStringW
     GetProcessTimes
     GetThreadTimes
     GetSystemTimes
     GlobalMemoryStatusEx
     GetCurrentProcess
     GetCurrentThread
+    GetSystemInfo
+    GetNativeSystemInfo
+    FormatMessageA
+    GetConsoleScreenBufferInfo

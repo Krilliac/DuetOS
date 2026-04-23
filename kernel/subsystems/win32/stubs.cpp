@@ -166,6 +166,13 @@ constexpr u32 kOffGetSystemTimes = 0x8EE;         // batch 51 — 30 bytes
 constexpr u32 kOffGlobalMemoryStatusEx = 0x90C;   // batch 51 — 16 bytes (saves rdi)
 constexpr u32 kOffWaitForMultipleObjects = 0x91C; // batch 51 — 24 bytes (saves rdi+rsi)
 
+// === Batch 52: GetSystemInfo / OutputDebugStringW / FormatMessageA /
+// GetConsoleScreenBufferInfo.
+constexpr u32 kOffGetSystemInfo = 0x934;              // batch 52 — 13 bytes (saves rdi)
+constexpr u32 kOffOutputDebugStringW = 0x941;         // batch 52 — 13 bytes (saves rdi)
+constexpr u32 kOffFormatMessageA = 0x94E;             // batch 52 — 32 bytes
+constexpr u32 kOffGetConsoleScreenBufferInfo = 0x96E; // batch 52 — 54 bytes
+
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
     // Windows x64 ABI: first arg (uExitCode) in RCX.
@@ -2438,10 +2445,89 @@ constexpr u8 kStubsBytes[] = {
     0x5E,                         // 0x931 pop rsi
     0x5F,                         // 0x932 pop rdi
     0xC3,                         // 0x933 ret
+
+    // === Batch 52 =============================================
+
+    // --- GetSystemInfo (offset 0x934, 13 bytes) ---------------
+    // Win32: void GetSystemInfo(LPSYSTEM_INFO lpSystemInfo).
+    // rcx = user ptr. Maps to SYS_SYSTEM_INFO. Aliased by
+    // GetNativeSystemInfo (same shape; WoW64 distinction doesn't
+    // apply — we're native x86_64 already).
+    0x57,                         // 0x934 push rdi
+    0x48, 0x89, 0xCF,             // 0x935 mov rdi, rcx
+    0xB8, 0x31, 0x00, 0x00, 0x00, // 0x938 mov eax, 49 ; SYS_SYSTEM_INFO
+    0xCD, 0x80,                   // 0x93D int 0x80
+    0x5F,                         // 0x93F pop rdi
+    0xC3,                         // 0x940 ret
+
+    // --- OutputDebugStringW (offset 0x941, 13 bytes) ---------
+    // Win32: void OutputDebugStringW(LPCWSTR lpOutputString).
+    // rcx = NUL-terminated UTF-16LE string. Maps to
+    // SYS_DEBUG_PRINTW (kernel strips to ASCII + emits).
+    0x57,                         // 0x941 push rdi
+    0x48, 0x89, 0xCF,             // 0x942 mov rdi, rcx
+    0xB8, 0x32, 0x00, 0x00, 0x00, // 0x945 mov eax, 50 ; SYS_DEBUG_PRINTW
+    0xCD, 0x80,                   // 0x94A int 0x80
+    0x5F,                         // 0x94C pop rdi
+    0xC3,                         // 0x94D ret
+
+    // --- FormatMessageA (offset 0x94E, 32 bytes) --------------
+    // Win32:
+    //   DWORD FormatMessageA(DWORD flags, LPCVOID src, DWORD msgId,
+    //                        DWORD lang, LPSTR buf, DWORD nSize,
+    //                        va_list *args);
+    // v0: writes "Error.\n\0" (7 chars + NUL) into lpBuffer if
+    // non-NULL, returns 7. If lpBuffer is NULL, returns 0.
+    // This lets callers that print the buffer see a stable
+    // placeholder instead of random memory, and callers that
+    // gate on "non-zero return means message decoded" take the
+    // happy path. No flag handling — a follow-up can add
+    // FORMAT_MESSAGE_ALLOCATE_BUFFER + hex-formatting of msgId.
+    0x48, 0x8B, 0x44, 0x24, 0x28, // 0x94E mov rax, [rsp+0x28]   ; lpBuffer
+    0x48, 0x85, 0xC0,             // 0x953 test rax, rax
+    0x74, 0x13,                   // 0x956 je +19 -> 0x96B (null_buf)
+    // Write "Erro" (0x6F727245) then "r.\n\0" (0x000A2E72) at [rax+4]
+    0xC7, 0x00, 0x45, 0x72, 0x72, 0x6F,       // 0x958 mov dword [rax], 0x6F727245
+    0xC7, 0x40, 0x04, 0x72, 0x2E, 0x0A, 0x00, // 0x95E mov dword [rax+4], 0x000A2E72
+    0xB8, 0x07, 0x00, 0x00, 0x00,             // 0x965 mov eax, 7 (chars written)
+    0xC3,                                     // 0x96A ret
+    // null_buf path
+    0x31, 0xC0, // 0x96B xor eax, eax
+    0xC3,       // 0x96D ret
+
+    // --- GetConsoleScreenBufferInfo (offset 0x96E, 54 bytes) --
+    // Win32:
+    //   BOOL GetConsoleScreenBufferInfo(HANDLE hOut,
+    //                                    PCONSOLE_SCREEN_BUFFER_INFO p);
+    // rdx = buffer. 22-byte layout:
+    //   0x00 COORD dwSize (80, 25)
+    //   0x04 COORD dwCursorPosition (0, 0)
+    //   0x08 WORD  wAttributes (0x07 white-on-black)
+    //   0x0A SMALL_RECT srWindow (L=0, T=0, R=79, B=24)
+    //   0x12 COORD dwMaximumWindowSize (80, 25)
+    // Returns TRUE unless rdx is NULL.
+    0x48, 0x85, 0xD2, // 0x96E test rdx, rdx
+    0x74, 0x2E,       // 0x971 je +46 -> 0x9A1 (fail)
+    // dwSize at [rdx] = (X=80, Y=25) -> 0x00190050
+    0xC7, 0x02, 0x50, 0x00, 0x19, 0x00, // 0x973 mov dword [rdx], 0x00190050
+    // dwCursorPosition at [rdx+4] = 0
+    0xC7, 0x42, 0x04, 0x00, 0x00, 0x00, 0x00, // 0x979 mov dword [rdx+4], 0
+    // wAttributes at [rdx+8] = 0x0007
+    0x66, 0xC7, 0x42, 0x08, 0x07, 0x00, // 0x980 mov word [rdx+8], 7
+    // srWindow L,T at [rdx+10] = 0
+    0xC7, 0x42, 0x0A, 0x00, 0x00, 0x00, 0x00, // 0x986 mov dword [rdx+10], 0
+    // srWindow R,B at [rdx+14] = (79, 24) -> 0x0018004F
+    0xC7, 0x42, 0x0E, 0x4F, 0x00, 0x18, 0x00, // 0x98D mov dword [rdx+14], 0x0018004F
+    // dwMaximumWindowSize at [rdx+18] = (80, 25) -> 0x00190050
+    0xC7, 0x42, 0x12, 0x50, 0x00, 0x19, 0x00, // 0x994 mov dword [rdx+18], 0x00190050
+    0xB8, 0x01, 0x00, 0x00, 0x00,             // 0x99B mov eax, 1 (BOOL TRUE)
+    0xC3,                                     // 0x9A0 ret
+    0x31, 0xC0,                               // 0x9A1 xor eax, eax
+    0xC3,                                     // 0x9A3 ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0x934, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0x9A4, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -2680,7 +2766,7 @@ constexpr StubEntry kStubsTable[] = {
     // Batch 51: OutputDebugStringA → real kernel debug-print syscall.
     // OutputDebugStringW unchanged for now (UTF-16 → ASCII strip in
     // a follow-up; most real callers use the A form).
-    {"kernel32.dll", "OutputDebugStringW", kOffReturnZero},
+    {"kernel32.dll", "OutputDebugStringW", kOffOutputDebugStringW},
     {"kernel32.dll", "OutputDebugStringA", kOffOutputDebugStringA},
 
     // Batch 28 — virtual memory. VirtualAlloc is the single
@@ -2782,8 +2868,11 @@ constexpr StubEntry kStubsTable[] = {
     {"kernel32.dll", "SetErrorMode", kOffReturnZero},
     {"kernel32.dll", "GetErrorMode", kOffReturnZero},
     {"kernel32.dll", "SetThreadErrorMode", kOffReturnOne}, // return TRUE, ignore mode
+    // FormatMessageW stays NO-OP: our v0 stub writes ASCII bytes
+    // which would corrupt a WCHAR* buffer. A proper UTF-16 variant
+    // is a follow-up.
     {"kernel32.dll", "FormatMessageW", kOffReturnZero},
-    {"kernel32.dll", "FormatMessageA", kOffReturnZero},
+    {"kernel32.dll", "FormatMessageA", kOffFormatMessageA},
 
     // Batch 37 — registry + file-attribute no-op stubs.
     //   Reg open / read family returns ERROR_FILE_NOT_FOUND (2),
@@ -2864,6 +2953,10 @@ constexpr StubEntry kStubsTable[] = {
     // GetSystemTimes → zero-fill stub.
     {"kernel32.dll", "GlobalMemoryStatusEx", kOffGlobalMemoryStatusEx},
     {"kernel32.dll", "GetSystemTimes", kOffGetSystemTimes},
+    // Batch 52: GetSystemInfo / GetNativeSystemInfo populate a
+    // Win32 SYSTEM_INFO struct with x86_64 constants.
+    {"kernel32.dll", "GetSystemInfo", kOffGetSystemInfo},
+    {"kernel32.dll", "GetNativeSystemInfo", kOffGetSystemInfo},
     {"kernel32.dll", "GetNumaHighestNodeNumber", kOffReturnZero},
 
     // Batch 39 — process priority / TLS / file-type aliases.
@@ -3096,7 +3189,7 @@ constexpr StubEntry kStubsTable[] = {
     {"kernel32.dll", "GetEnvironmentStringsA", kOffReturnZero},
     {"kernel32.dll", "FreeEnvironmentStringsA", kOffReturnOne},
     {"kernel32.dll", "SetStdHandle", kOffReturnOne},
-    {"kernel32.dll", "GetConsoleScreenBufferInfo", kOffReturnZero}, // FALSE
+    {"kernel32.dll", "GetConsoleScreenBufferInfo", kOffGetConsoleScreenBufferInfo},
     {"kernel32.dll", "GetNumberOfConsoleInputEvents", kOffReturnZero},
     {"kernel32.dll", "PeekConsoleInputW", kOffReturnZero},
     {"kernel32.dll", "ReadConsoleInputW", kOffReturnZero},
