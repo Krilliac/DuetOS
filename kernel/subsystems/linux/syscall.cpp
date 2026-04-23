@@ -624,23 +624,106 @@ i64 DoLseek(u64 fd, i64 offset, u64 whence)
     return new_off;
 }
 
-// Linux: ioctl(fd, cmd, arg). v0 stub — no device drivers
-// currently expose ioctls to Linux ABI. Return -ENOTTY for
-// anything on tty fds (matches glibc/musl probe behaviour), -EBADF
-// otherwise. Real implementations add specific cmd handling per
-// device.
+// Linux: ioctl(fd, cmd, arg). Handle the three ioctls musl's
+// stdio actually reaches under a CRT bring-up:
+//   TCGETS      (0x5401) — "is this a tty?" probe. Returns a
+//                         populated termios struct so isatty(fd)
+//                         returns true; line-edit features are
+//                         effectively disabled via the c_lflag
+//                         bits we clear.
+//   TCSETS      (0x5402) — swallow — we don't honour the
+//                         settings, but returning success avoids
+//                         aborting callers that set RAW mode.
+//   TIOCGWINSZ  (0x5413) — report a fake 80×24 terminal so
+//                         curses-style programs stop asking.
+// Anything else on a tty fd: -EINVAL. On a non-tty fd: -ENOTTY.
+// On a closed slot: -EBADF.
 i64 DoIoctl(u64 fd, u64 cmd, u64 arg)
 {
-    (void)cmd;
-    (void)arg;
+    constexpr u64 kTCGETS = 0x5401;
+    constexpr u64 kTCSETS = 0x5402;
+    constexpr u64 kTCSETSW = 0x5403;
+    constexpr u64 kTCSETSF = 0x5404;
+    constexpr u64 kTIOCGWINSZ = 0x5413;
+    constexpr u64 kTIOCGPGRP = 0x540F;
     core::Process* p = core::CurrentProcess();
     if (p == nullptr || fd >= 16)
         return kEBADF;
-    if (p->linux_fds[fd].state == 1)
-        return kENOTTY;
     if (p->linux_fds[fd].state == 0)
         return kEBADF;
-    return kENOTTY;
+    const bool is_tty = (p->linux_fds[fd].state == 1);
+    if (!is_tty)
+        return kENOTTY;
+    switch (cmd)
+    {
+    case kTCGETS:
+    {
+        // Linux kernel-ABI termios: 4×u32 flags + 1×u8 c_line +
+        // 19×u8 c_cc + pad to 36 bytes. Emit a sensible baseline:
+        // ICRNL on input, OPOST on output, CS8 + CREAD + B38400 on
+        // control, and ISIG|ICANON|ECHO on lflag so isatty probes
+        // that look for "tty with sane defaults" pass.
+        struct Termios
+        {
+            u32 c_iflag;
+            u32 c_oflag;
+            u32 c_cflag;
+            u32 c_lflag;
+            u8 c_line;
+            u8 c_cc[19];
+        } t{};
+        static_assert(sizeof(Termios) == 36, "Linux termios ABI is 36 bytes");
+        t.c_iflag = 0x100;              // ICRNL
+        t.c_oflag = 0x01;               // OPOST
+        t.c_cflag = 0x30 | 0x80 | 0x0F; // CS8 | CREAD | B38400 baud
+        t.c_lflag = 0x01 | 0x02 | 0x08; // ISIG | ICANON | ECHO
+        t.c_line = 0;
+        // c_cc: common control chars. VINTR=^C, VQUIT=^\, VERASE=^?,
+        // VKILL=^U, VEOF=^D.
+        t.c_cc[0] = 0x03; // VINTR
+        t.c_cc[1] = 0x1C; // VQUIT
+        t.c_cc[2] = 0x7F; // VERASE
+        t.c_cc[3] = 0x15; // VKILL
+        t.c_cc[4] = 0x04; // VEOF
+        if (!mm::CopyToUser(reinterpret_cast<void*>(arg), &t, sizeof(t)))
+            return kEFAULT;
+        return 0;
+    }
+    case kTCSETS:
+    case kTCSETSW:
+    case kTCSETSF:
+        // Accept + ignore. The cooked-mode / raw-mode distinction
+        // has no observable effect on a serial-only tty today.
+        (void)arg;
+        return 0;
+    case kTIOCGWINSZ:
+    {
+        struct WinSize
+        {
+            u16 ws_row;
+            u16 ws_col;
+            u16 ws_xpixel;
+            u16 ws_ypixel;
+        } w{};
+        w.ws_row = 24;
+        w.ws_col = 80;
+        if (!mm::CopyToUser(reinterpret_cast<void*>(arg), &w, sizeof(w)))
+            return kEFAULT;
+        return 0;
+    }
+    case kTIOCGPGRP:
+    {
+        // There's no process-group concept in v0; report pid back
+        // as the foreground pgid so shells' "am I in the fg?" test
+        // resolves to yes.
+        const i32 pgid = i32(p->pid);
+        if (!mm::CopyToUser(reinterpret_cast<void*>(arg), &pgid, sizeof(pgid)))
+            return kEFAULT;
+        return 0;
+    }
+    default:
+        return kEINVAL;
+    }
 }
 
 // Linux: rt_sigaction. Store the requested handler + mask + flags
@@ -788,21 +871,49 @@ i64 DoGetcwd(u64 user_buf, u64 size)
     return static_cast<i64>(len);
 }
 
-// Linux: futex(uaddr, op, val, ...). v0 stub — single-threaded
-// processes don't contend, so the futex is always uncontended
-// when musl falls through to syscall. Returning 0 for FUTEX_WAIT
-// says "woke up spuriously" (caller re-checks + retries).
-// Returning 0 for FUTEX_WAKE says "woke zero waiters" (there are
-// none). Safe no-op for a single-thread world.
+// Linux: futex(uaddr, op, val, ...).
+//
+// Single-threaded processes have no contention, so we never
+// actually block. The real Linux semantics we respect:
+//   FUTEX_WAIT (0): if *uaddr != val, return -EAGAIN — tells the
+//                   caller "the value already changed, try again".
+//                   Otherwise return 0 (spurious wakeup — musl
+//                   retries the condition).
+//   FUTEX_WAKE (1): return 0 (no waiters, nothing to wake).
+//
+// FUTEX_PRIVATE_FLAG (0x80) masks off — it's a hint to the kernel
+// about shared-memory scope, and for our single-address-space
+// case it's a no-op.
 i64 DoFutex(u64 uaddr, u64 op, u64 val, u64 timeout, u64 uaddr2, u64 val3)
 {
-    (void)uaddr;
-    (void)op;
-    (void)val;
     (void)timeout;
     (void)uaddr2;
     (void)val3;
-    return 0;
+    constexpr u64 kFutexWait = 0;
+    constexpr u64 kFutexWake = 1;
+    constexpr u64 kFutexOpMask = 0x7F;
+    const u64 base_op = op & kFutexOpMask;
+    if (base_op == kFutexWait)
+    {
+        // Validate the caller's pointer and compare against `val`.
+        // Copy fails with -EFAULT so a buggy program (e.g. null
+        // uaddr) gets a specific error instead of a silent zero.
+        u32 cur = 0;
+        if (!mm::CopyFromUser(&cur, reinterpret_cast<const void*>(uaddr), sizeof(cur)))
+            return kEFAULT;
+        if (cur != u32(val))
+            return -11; // -EAGAIN
+        return 0;       // "spurious" wake — caller retries
+    }
+    if (base_op == kFutexWake)
+    {
+        return 0; // no waiters in single-thread v0
+    }
+    // Unknown op — reject so a test-suite like LTP gets -EINVAL
+    // rather than silent success.
+    (void)uaddr;
+    (void)val;
+    return kEINVAL;
 }
 
 // Read the CPU timestamp counter. Used as a seed for the tiny
