@@ -28,6 +28,7 @@
 #include "../fs/tmpfs.h"
 #include "../fs/vfs.h"
 #include "../debug/breakpoints.h"
+#include "../debug/probes.h"
 #include "../mm/address_space.h"
 #include "../mm/frame_allocator.h"
 #include "../mm/kheap.h"
@@ -2824,6 +2825,119 @@ void CmdBp(u32 argc, char** argv)
     }
 
     ConsoleWriteln("BP: UNKNOWN SUBCOMMAND (HELP: BP WITHOUT ARGS)");
+}
+
+const char* ProbeArmName(customos::debug::ProbeArm a)
+{
+    switch (a)
+    {
+    case customos::debug::ProbeArm::Disarmed:
+        return "DISARMED";
+    case customos::debug::ProbeArm::ArmedLog:
+        return "ARMED-LOG";
+    case customos::debug::ProbeArm::ArmedSuspend:
+        return "ARMED-SUSPEND";
+    }
+    return "?";
+}
+
+void CmdProbe(u32 argc, char** argv)
+{
+    // probe list
+    // probe arm <name> [--suspend]      — ArmedLog (or ArmedSuspend)
+    // probe disarm <name>
+    // probe arm-all                     — arm every probe ArmedLog
+    // probe disarm-all                  — disarm everything
+    if (argc < 2)
+    {
+        ConsoleWriteln("PROBE: USAGE:");
+        ConsoleWriteln("    PROBE LIST                         LIST + COUNTS + ARM STATE");
+        ConsoleWriteln("    PROBE ARM <NAME> [--SUSPEND]       ARM ONE PROBE");
+        ConsoleWriteln("    PROBE DISARM <NAME>                DISARM ONE PROBE");
+        ConsoleWriteln("    PROBE ARM-ALL                      ARM-LOG EVERY PROBE (NOISY)");
+        ConsoleWriteln("    PROBE DISARM-ALL                   DISARM EVERYTHING");
+        return;
+    }
+    const char* sub = argv[1];
+    if (StrEq(sub, "list"))
+    {
+        customos::debug::ProbeInfo infos[16];
+        const customos::u64 n = customos::debug::ProbeList(infos, 16);
+        if (n == 0)
+        {
+            ConsoleWriteln("PROBE: NONE REGISTERED");
+            return;
+        }
+        ConsoleWriteln("PROBE: NAME                     ARM            FIRES");
+        for (customos::u64 i = 0; i < n; ++i)
+        {
+            ConsoleWrite("  ");
+            ConsoleWrite(infos[i].name);
+            // pad name to column
+            for (customos::u64 pad = 0; pad + 0 < 24; ++pad)
+            {
+                const char* p = infos[i].name;
+                customos::u64 len = 0;
+                while (p[len] != 0)
+                    ++len;
+                if (pad + len >= 24)
+                    break;
+                if (pad + len < 24)
+                {
+                    ConsoleWriteChar(' ');
+                }
+                if (pad + len + 1 >= 24)
+                    break;
+            }
+            ConsoleWrite(ProbeArmName(infos[i].arm));
+            ConsoleWrite("  ");
+            WriteU64Dec(infos[i].fire_count);
+            ConsoleWriteChar('\n');
+        }
+        return;
+    }
+    if (StrEq(sub, "arm") || StrEq(sub, "disarm"))
+    {
+        if (argc < 3)
+        {
+            ConsoleWriteln("PROBE: NEED <NAME>");
+            return;
+        }
+        const customos::debug::ProbeId id = customos::debug::ProbeByName(argv[2]);
+        if (id == customos::debug::ProbeId::kCount)
+        {
+            ConsoleWriteln("PROBE: UNKNOWN NAME (SEE `PROBE LIST`)");
+            return;
+        }
+        customos::debug::ProbeArm arm = customos::debug::ProbeArm::Disarmed;
+        if (StrEq(sub, "arm"))
+        {
+            arm = customos::debug::ProbeArm::ArmedLog;
+            if (argc >= 4 && (StrEq(argv[3], "--suspend") || StrEq(argv[3], "-s")))
+                arm = customos::debug::ProbeArm::ArmedSuspend;
+        }
+        customos::debug::ProbeSetArm(id, arm);
+        ConsoleWrite("PROBE ");
+        ConsoleWrite(argv[2]);
+        ConsoleWrite(": ");
+        ConsoleWriteln(ProbeArmName(arm));
+        return;
+    }
+    if (StrEq(sub, "arm-all"))
+    {
+        for (customos::u32 i = 0; i < static_cast<customos::u32>(customos::debug::ProbeId::kCount); ++i)
+            customos::debug::ProbeSetArm(static_cast<customos::debug::ProbeId>(i), customos::debug::ProbeArm::ArmedLog);
+        ConsoleWriteln("PROBE: ALL ARMED-LOG (MAY FLOOD LOG)");
+        return;
+    }
+    if (StrEq(sub, "disarm-all"))
+    {
+        for (customos::u32 i = 0; i < static_cast<customos::u32>(customos::debug::ProbeId::kCount); ++i)
+            customos::debug::ProbeSetArm(static_cast<customos::debug::ProbeId>(i), customos::debug::ProbeArm::Disarmed);
+        ConsoleWriteln("PROBE: ALL DISARMED");
+        return;
+    }
+    ConsoleWriteln("PROBE: UNKNOWN SUBCOMMAND");
 }
 
 void CmdInstr(u32 argc, char** argv)
@@ -6504,6 +6618,11 @@ void Dispatch(char* line)
     if (StrEq(cmd, "bp") || StrEq(cmd, "breakpoint"))
     {
         CmdBp(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "probe"))
+    {
+        CmdProbe(argc, argv);
         return;
     }
     if (StrEq(cmd, "instr"))

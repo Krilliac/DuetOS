@@ -16,6 +16,7 @@
 #include "../arch/x86_64/timer.h"
 #include "../cpu/percpu.h"
 #include "../debug/breakpoints.h"
+#include "../debug/probes.h"
 #include "../drivers/audio/audio.h"
 #include "../drivers/gpu/gpu.h"
 #include "../drivers/input/ps2kbd.h"
@@ -306,6 +307,11 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     {
         SerialWrite("[boot] WARN: breakpoint self-test failed — see serial log\n");
     }
+    // Static probes — KBP_PROBE(...) call sites sprinkled across
+    // the kernel. Rare+useful events (panic, sandbox denial,
+    // Win32 stub miss, kernel #PF) are armed-log by default so
+    // the first boot shows activity without any arming.
+    customos::debug::ProbeInit();
 
     SerialWrite("[boot] Bringing up framebuffer (if present).\n");
     customos::drivers::video::FramebufferInit(multiboot_info);

@@ -245,6 +245,81 @@ is shell-driven today.
 9. `bp resume N` — let it go.
 10. `bp clear N` — remove the BP.
 
+## Phase 4 (2026-04-23) — static `KBP_PROBE` macros
+
+A sibling subsystem to breakpoints, intentionally separate in
+`kernel/debug/probes.{h,cpp}`. Each probe is a static call site
+baked into the kernel image (a `KBP_PROBE(tag)` macro); runtime
+arming is a per-entry byte the operator can flip from the
+`probe` shell command.
+
+### Probes sprinkled (8 sites)
+
+| Probe                     | Site                              | Default      |
+|---------------------------|-----------------------------------|--------------|
+| `panic.enter`             | first line of `core::Panic`       | ArmedLog     |
+| `sandbox.denial`          | `RecordSandboxDenial` (throttled) | ArmedLog     |
+| `win32.stub_miss`         | `SYS_WIN32_MISS_LOG`              | ArmedLog     |
+| `mm.kernel_pagefault`     | vec-14 panic path in traps.cpp    | ArmedLog     |
+| `ring3.spawn`             | `SchedCreateUser` tail            | Disarmed     |
+| `proc.create`             | `ProcessCreate` tail              | Disarmed     |
+| `proc.destroy`            | `ProcessDestroy` body             | Disarmed     |
+| `sched.context_switch`    | `Schedule` right before ContextSw | Disarmed     |
+
+Output format:
+`[t=<ms>] [I] debug/probes : <name> rip=<caller> val=<u64>`.
+The `rip` is captured via `__builtin_return_address(0)` so the
+probe site self-identifies in the log even without symbols.
+
+### First-boot observation
+
+Default arming on a clean boot produces:
+- 1× `probe subsystem online` (init message)
+- ~9× `sandbox.denial` (ring-3 hostile-syscall probe hammering
+  a denied SYS_WRITE — rate-limited to "first + every 32nd"
+  via `ShouldLogDenial`, same gate the existing denial logger
+  uses so probe lines don't flood beyond existing cadence).
+- No `panic.enter` / `mm.kernel_pagefault` / `win32.stub_miss`
+  — boot path is clean.
+
+Operator-driven arming for the rest:
+
+```
+probe list                       # show all + fire counts
+probe arm ring3.spawn            # armed-log each spawn
+probe arm sched.context_switch   # WARNING: floods log
+probe disarm ring3.spawn
+probe arm-all                    # ArmedLog every probe (loud)
+probe disarm-all                 # disarm everything
+```
+
+### Relationship to breakpoints
+
+Probes are cheaper than live breakpoints — no DR slot, no
+`.text` patch, no trap. Fast path when disarmed: load a u8,
+compare, branch. Probes and BPs are complementary:
+- Probes: pre-chosen sites, cheap, cumulative fire counts,
+  toggle on/off at runtime.
+- Breakpoints: arbitrary address, more expensive, can suspend
+  the hitting task.
+
+`ProbeArm::ArmedSuspend` is reserved but not yet implemented —
+a probe fires from a plain call context (not a trap), so
+parking requires a primitive distinct from the trap-handler
+suspend. Current ArmedSuspend behavior is "log + warn the
+operator it didn't suspend". Phase 4b territory.
+
+### Gotchas
+
+1. **Never `clang-format` a CMakeLists.txt.** It gets mangled
+   badly. Restrict formatting runs to `.cpp` / `.h` / `.c`.
+2. **`ProbeArm` function vs. `ProbeArm` enum.** Same namespace,
+   resolved by renaming the function to `ProbeSetArm`; the
+   enum keeps the natural name.
+3. **Init order.** `ProbeInit` runs right after
+   `BpInit` + `BpSelfTest` in main.cpp so the panic probe can
+   fire for any early panic after that point.
+
 ## Next phases (still planned)
 
 - **Phase 2b:** SW breakpoints on user-process `.text` pages.
@@ -253,10 +328,9 @@ is shell-driven today.
   a kernel driver task that spawns a target, waits for its
   suspend, issues resume, verifies clean exit. Blocked on a
   small amount of orchestration plumbing.
-- **Phase 4:** static `KBP_PROBE(event)` macros at panic /
-  sandbox-denial / scheduler edge cases (think kprobes).
-  Needs the kernel-mode suspend safety question settled
-  first (IrqNestDepth live + a "safe-to-block" check).
+- **Phase 4b:** `ArmedSuspend` for probes — needs a
+  "suspend-from-plain-call" primitive separate from the
+  trap-handler path.
 - **Phase 5:** remote debugger protocol (GDB stub over serial
   or custom TCP). With phase 3's suspend/inspect/step already
   landed, most of the mechanism work is done — the stub is

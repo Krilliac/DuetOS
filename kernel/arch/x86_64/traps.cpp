@@ -9,6 +9,7 @@
 #include "../../core/symbols.h"
 #include "../../core/syscall.h"
 #include "../../debug/breakpoints.h"
+#include "../../debug/probes.h"
 #include "../../sched/sched.h"
 
 // user_copy.S labels, exposed to the trap dispatcher for the
@@ -402,6 +403,13 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     // human-readable banner. Anything before BEGIN / after END is
     // free-form prose; the bracketed region is the machine-extract
     // -able dump record.
+    //
+    // Fire the kernel-page-fault probe specifically for vec 14 so
+    // the log ring records this as a structured event before the
+    // panic dump; other kernel exceptions are already distinct
+    // enough by name that they don't need a dedicated probe.
+    if (frame->vector == 14)
+        KBP_PROBE_V(::customos::debug::ProbeId::kKernelPageFault, frame->rip);
     SerialWrite("\n** CPU EXCEPTION **\n");
 
     // Bracket the record so host-side tooling can extract a .dump file

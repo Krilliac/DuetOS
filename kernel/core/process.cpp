@@ -1,6 +1,7 @@
 #include "process.h"
 
 #include "../arch/x86_64/serial.h"
+#include "../debug/probes.h"
 #include "../mm/kheap.h"
 #include "../sched/sched.h"
 #include "klog.h"
@@ -127,6 +128,7 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     arch::SerialWriteHex(user_stack_va);
     arch::SerialWrite("\n");
 
+    KBP_PROBE_V(::customos::debug::ProbeId::kProcessCreate, p->pid);
     return p;
 }
 
@@ -154,6 +156,8 @@ void ProcessRelease(Process* p)
     {
         return;
     }
+
+    KBP_PROBE_V(::customos::debug::ProbeId::kProcessDestroy, p->pid);
 
     arch::SerialWrite("[proc] destroy pid=");
     arch::SerialWriteHex(p->pid);
@@ -196,6 +200,15 @@ void RecordSandboxDenial(Cap cap)
         return; // kernel-only task hit a cap-denial — shouldn't happen
     }
     ++p->sandbox_denials;
+
+    // Fire the sandbox-denial probe at the same rate-limit the
+    // existing denial logger uses (first hit + every 32nd). Same
+    // motivation: a ring-3 hostile task can otherwise flood the
+    // probe log with thousands of identical lines per boot.
+    if (ShouldLogDenial(p->sandbox_denials))
+    {
+        KBP_PROBE_V(::customos::debug::ProbeId::kSandboxDenialCap, static_cast<u64>(cap));
+    }
 
     // Threshold-crossing: fire once at exactly kSandbox-
     // DenialKillThreshold and flag the task. Uses `==` so the

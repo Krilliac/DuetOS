@@ -9,6 +9,7 @@
 #include "../core/process.h"
 #include "../core/recovery.h"
 #include "../cpu/percpu.h"
+#include "../debug/probes.h"
 #include "../mm/address_space.h"
 #include "../mm/frame_allocator.h"
 #include "../security/guard.h"
@@ -572,6 +573,7 @@ Task* SchedCreateUser(TaskEntry entry, void* arg, const char* name, core::Proces
 
     Task* t = SchedCreateInternal(entry, arg, name, TaskPriority::Normal, process->as);
     t->process = process;
+    KBP_PROBE_V(::customos::debug::ProbeId::kRing3Spawn, process->pid);
     // Refcount discipline: ProcessCreate returned refcount=1 (one
     // for the creating caller). The caller hands that reference off
     // to this Task — no retain needed. Subsequent Tasks that want
@@ -771,6 +773,7 @@ void Schedule()
     asm volatile("mov %0, %%dr3" : : "r"(next->dr3));
     asm volatile("mov %0, %%dr7" : : "r"(next->dr7));
 
+    KBP_PROBE_V(::customos::debug::ProbeId::kSchedContextSwitch, next->id);
     ContextSwitch(&prev->rsp, next->rsp);
     // When we return here, we're executing on a DIFFERENT task's
     // stack — whichever task got switched in to run us. The local

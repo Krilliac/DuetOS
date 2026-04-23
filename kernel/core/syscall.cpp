@@ -7,6 +7,7 @@
 #include "../arch/x86_64/serial.h"
 #include "../arch/x86_64/timer.h"
 #include "../debug/breakpoints.h"
+#include "../debug/probes.h"
 #include "../fs/vfs.h"
 #include "../mm/address_space.h"
 #include "../mm/frame_allocator.h"
@@ -326,6 +327,8 @@ void SyscallDispatch(arch::TrapFrame* frame)
 
     case SYS_WIN32_MISS_LOG:
     {
+        KBP_PROBE_V(::customos::debug::ProbeId::kWin32StubMiss, frame->rdi);
+
         // rdi = IAT slot VA that the miss-logger trampoline
         // decoded from its caller's `call [rip+disp32]`.
         // Search CurrentProcess()->win32_iat_misses; if found,
