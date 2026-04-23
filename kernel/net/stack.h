@@ -349,6 +349,34 @@ bool NetDnsQueryA(u32 iface_index, Ipv4Address resolver_ip, const char* name);
 DnsResult NetDnsResultRead();
 
 // -------------------------------------------------------------------
+// NTP client (RFC 5905 subset — one-shot Transmit Timestamp read).
+//
+// Sends a 48-byte NTP v3 client packet and on reply captures the
+// server's Transmit Timestamp. Converted from NTP epoch (1900) to
+// Unix epoch (1970) by subtracting 2208988800. Does not attempt
+// to write the RTC hardware — the result is exposed for callers
+// that want a wall-clock synchronization source.
+// -------------------------------------------------------------------
+
+struct NtpResult
+{
+    bool synced;
+    u64 unix_secs;       // seconds since 1970-01-01 UTC
+    u32 fractional_secs; // NTP fraction (u32 fixed-point)
+    u8 stratum;
+};
+
+/// Send one NTP v3 client query to `server_ip:123`. Binds an
+/// ephemeral UDP port for the reply. Returns false on iface
+/// binding miss or ARP resolution failure for the server's
+/// gateway.
+bool NetNtpQuery(u32 iface_index, Ipv4Address server_ip);
+
+/// Snapshot of the latest NTP transaction. `synced` is true iff
+/// the server replied with a non-zero Transmit Timestamp.
+NtpResult NetNtpResultRead();
+
+// -------------------------------------------------------------------
 // UDP send + receive dispatch.
 //
 // v0 design: a small registration table (capped at kUdpBindingsMax)
@@ -448,5 +476,40 @@ TcpStats TcpStatsRead();
 /// Returns false if `canned_len` exceeds kTcpMaxCannedReply.
 inline constexpr u32 kTcpMaxCannedReply = 512;
 bool TcpListen(u16 local_port, const u8* canned_reply, u32 canned_len);
+
+// -------------------------------------------------------------------
+// TCP active connect (single-shot, same slot as passive listen).
+//
+// Sends a SYN to `dst_ip:dst_port`, and once the handshake
+// completes, transmits `request` bytes as data. Captures the
+// peer's response into an internal buffer that
+// `NetTcpActiveRead` exposes. Hands the socket close on FIN.
+// Mutually exclusive with TcpListen — v0 has one slot, first
+// come wins.
+// -------------------------------------------------------------------
+
+inline constexpr u32 kTcpActiveBufBytes = 2048;
+
+struct TcpActiveSnapshot
+{
+    bool in_use;
+    bool established;       // we received SYN+ACK from the server
+    bool response_complete; // server sent FIN
+    u32 response_len;       // bytes in the RX buffer (caller reads via NetTcpActiveRead)
+};
+
+/// Kick off an active connect. `request` is sent after the
+/// three-way handshake completes; `request_len` must be
+/// <= kTcpMaxCannedReply. Returns false on slot-busy /
+/// oversize / ARP miss for gateway.
+bool NetTcpConnect(u32 iface_index, Ipv4Address dst_ip, u16 dst_port, const u8* request, u32 request_len);
+
+/// Copy up to `cap` bytes of the RX buffer into `out`, returns
+/// bytes copied. Safe to call during or after the response; reads
+/// are idempotent (buffer isn't consumed). Set `out = nullptr` to
+/// just snapshot the length.
+u32 NetTcpActiveRead(u8* out, u32 cap);
+
+TcpActiveSnapshot NetTcpActiveSnapshot();
 
 } // namespace customos::net

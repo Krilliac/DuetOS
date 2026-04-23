@@ -1307,15 +1307,28 @@ enum class TcpState : u8
 {
     Closed = 0,
     Listen,
-    SynRcvd,
+    SynSent, // active connect: we sent SYN, waiting for SYN+ACK
+    SynRcvd, // passive: we sent SYN+ACK, waiting for peer's ACK
     Established,
     LastAck, // we sent FIN, awaiting peer's final ACK
+};
+
+// Active-connect-specific role: tells the state machine whether
+// this slot was started from TcpListen or TcpConnect. The Bochs-
+// clean separation isn't strictly needed by the protocol but it
+// keeps the shell's TcpActiveSnapshot readable.
+enum class TcpRole : u8
+{
+    None = 0,
+    Server, // TcpListen
+    Client, // TcpConnect
 };
 
 struct TcpConn
 {
     bool in_use;
     TcpState state;
+    TcpRole role;
     u32 iface_index;
     MacAddress peer_mac;
     Ipv4Address peer_ip;
@@ -1324,6 +1337,13 @@ struct TcpConn
     u32 snd_next; // our next seq to transmit
     u32 rcv_next; // next peer seq we expect
     bool payload_sent;
+    // Client path: request queued for after the handshake + RX
+    // buffer for the server's response.
+    u32 pending_request_len;
+    u8 pending_request[kTcpMaxCannedReply];
+    u32 rx_len;
+    u8 rx_buf[kTcpActiveBufBytes];
+    bool response_complete;
 };
 
 TcpConn g_tcp_conn = {};
@@ -1331,6 +1351,17 @@ TcpStats g_tcp_stats = {};
 u8 g_tcp_canned[kTcpMaxCannedReply] = {};
 u32 g_tcp_canned_len = 0;
 u16 g_tcp_listen_port = 0;
+constexpr u32 kTcpClientIsn = 0xC001FACE;
+
+// `TcpConn = {}` would lower to a libc memset on the big struct
+// (kTcpActiveBufBytes + kTcpMaxCannedReply is > 2.5 KiB). The
+// freestanding kernel has no memset, so we do a byte loop.
+void TcpConnClear()
+{
+    auto* b = reinterpret_cast<volatile u8*>(&g_tcp_conn);
+    for (u64 i = 0; i < sizeof(TcpConn); ++i)
+        b[i] = 0;
+}
 
 // RFC 793 checksum: pseudo-header + TCP header + payload, 16-bit
 // one's-complement sum. pseudo = src_ip, dst_ip, zero, proto,
@@ -1457,15 +1488,19 @@ void TcpOnSegment(u32 iface_index, const MacAddress& peer_mac, Ipv4Address peer_
     if (data_off < 20 || data_off > tcp_len)
         return;
     const u64 payload_len = tcp_len - data_off;
+    const u8* payload = tcp + data_off;
     (void)ack;
-    // Payload bytes are not consumed by the v0 state machine —
-    // we only care that there WERE some in the established
-    // state so we can kick the canned-reply path.
+    // Server path ignores payload bytes (only cares there were
+    // some). Client path captures them into rx_buf.
 
-    if (dst_port != g_tcp_listen_port || g_tcp_listen_port == 0)
+    // Two legitimate destinations: the globally bound listen port,
+    // or the ephemeral port an active connect chose. Anything
+    // else gets RST.
+    const bool is_listen_port = (g_tcp_listen_port != 0 && dst_port == g_tcp_listen_port);
+    const bool is_active_client_port =
+        g_tcp_conn.in_use && g_tcp_conn.role == TcpRole::Client && dst_port == g_tcp_conn.local_port;
+    if (!is_listen_port && !is_active_client_port)
     {
-        // Nothing listens on this port; reply with RST so the
-        // peer doesn't keep retransmitting.
         TcpSendRst(iface_index, peer_mac, peer_ip, src_port, dst_port, seq);
         return;
     }
@@ -1483,9 +1518,10 @@ void TcpOnSegment(u32 iface_index, const MacAddress& peer_mac, Ipv4Address peer_
             TcpSendRst(iface_index, peer_mac, peer_ip, src_port, dst_port, seq);
             return;
         }
-        g_tcp_conn = {};
+        TcpConnClear();
         g_tcp_conn.in_use = true;
         g_tcp_conn.state = TcpState::SynRcvd;
+        g_tcp_conn.role = TcpRole::Server;
         g_tcp_conn.iface_index = iface_index;
         g_tcp_conn.peer_mac = peer_mac;
         g_tcp_conn.peer_ip = peer_ip;
@@ -1506,35 +1542,74 @@ void TcpOnSegment(u32 iface_index, const MacAddress& peer_mac, Ipv4Address peer_
         return;
     }
 
-    // Handshake completion: final ACK after our SYN+ACK.
+    // Client side: SYN+ACK arrives while we're in SynSent → ACK
+    // the handshake, transition to Established, ship the queued
+    // request as the first data segment. The server's own ACK of
+    // the request arrives later, which we'll see as a stale ACK
+    // + optional data; both paths just update state.
+    if (g_tcp_conn.state == TcpState::SynSent && (flags & kTcpFlagSynBit) != 0 && (flags & kTcpFlagAckBit) != 0)
+    {
+        g_tcp_conn.rcv_next = seq + 1;
+        // snd_next already = kTcpClientIsn + 1 (SYN consumed ISN).
+        // Send ACK to complete the three-way handshake.
+        TcpSend(iface_index, peer_mac, peer_ip, src_port, our_ip, dst_port, kTcpFlagAckBit, g_tcp_conn.snd_next,
+                g_tcp_conn.rcv_next, nullptr, 0);
+        g_tcp_conn.state = TcpState::Established;
+        // Ship the queued request.
+        if (g_tcp_conn.pending_request_len > 0)
+        {
+            ++g_tcp_stats.data_tx;
+            TcpSend(iface_index, peer_mac, peer_ip, src_port, our_ip, dst_port, kTcpFlagAckBit | kTcpFlagPshBit,
+                    g_tcp_conn.snd_next, g_tcp_conn.rcv_next, g_tcp_conn.pending_request,
+                    g_tcp_conn.pending_request_len);
+            g_tcp_conn.snd_next += g_tcp_conn.pending_request_len;
+            g_tcp_conn.payload_sent = true;
+        }
+        return;
+    }
+
+    // Handshake completion (server path): final ACK after our SYN+ACK.
     if (g_tcp_conn.state == TcpState::SynRcvd && (flags & kTcpFlagAckBit) != 0)
     {
         g_tcp_conn.state = TcpState::Established;
         // Fall through — the peer might bundle data with the ACK.
     }
 
-    // Data: ACK it and ship the canned payload + FIN if we haven't yet.
+    // Data: ACK it. Server path ships the canned reply; client
+    // path captures bytes into the RX buffer for the shell to
+    // read.
     if (g_tcp_conn.state == TcpState::Established && payload_len > 0)
     {
         g_tcp_conn.rcv_next = seq + u32(payload_len);
         ++g_tcp_stats.data_ack_tx;
-        // Pure ACK for the received data.
-        TcpSend(iface_index, peer_mac, peer_ip, src_port, our_ip, dst_port, kTcpFlagAckBit, g_tcp_conn.snd_next,
-                g_tcp_conn.rcv_next, nullptr, 0);
-        if (!g_tcp_conn.payload_sent && g_tcp_canned_len > 0)
+        if (g_tcp_conn.role == TcpRole::Client)
         {
-            ++g_tcp_stats.data_tx;
-            TcpSend(iface_index, peer_mac, peer_ip, src_port, our_ip, dst_port, kTcpFlagAckBit | kTcpFlagPshBit,
-                    g_tcp_conn.snd_next, g_tcp_conn.rcv_next, g_tcp_canned, g_tcp_canned_len);
-            g_tcp_conn.snd_next += g_tcp_canned_len;
-            g_tcp_conn.payload_sent = true;
+            const u32 room = kTcpActiveBufBytes - g_tcp_conn.rx_len;
+            const u32 take = u32(payload_len) < room ? u32(payload_len) : room;
+            for (u32 i = 0; i < take; ++i)
+                g_tcp_conn.rx_buf[g_tcp_conn.rx_len + i] = payload[i];
+            g_tcp_conn.rx_len += take;
+            TcpSend(iface_index, peer_mac, peer_ip, src_port, our_ip, dst_port, kTcpFlagAckBit, g_tcp_conn.snd_next,
+                    g_tcp_conn.rcv_next, nullptr, 0);
+        }
+        else
+        {
+            TcpSend(iface_index, peer_mac, peer_ip, src_port, our_ip, dst_port, kTcpFlagAckBit, g_tcp_conn.snd_next,
+                    g_tcp_conn.rcv_next, nullptr, 0);
+            if (!g_tcp_conn.payload_sent && g_tcp_canned_len > 0)
+            {
+                ++g_tcp_stats.data_tx;
+                TcpSend(iface_index, peer_mac, peer_ip, src_port, our_ip, dst_port, kTcpFlagAckBit | kTcpFlagPshBit,
+                        g_tcp_conn.snd_next, g_tcp_conn.rcv_next, g_tcp_canned, g_tcp_canned_len);
+                g_tcp_conn.snd_next += g_tcp_canned_len;
+                g_tcp_conn.payload_sent = true;
 
-            // Announce end of data.
-            ++g_tcp_stats.fin_tx;
-            TcpSend(iface_index, peer_mac, peer_ip, src_port, our_ip, dst_port, kTcpFlagAckBit | kTcpFlagFinBit,
-                    g_tcp_conn.snd_next, g_tcp_conn.rcv_next, nullptr, 0);
-            g_tcp_conn.snd_next += 1;
-            g_tcp_conn.state = TcpState::LastAck;
+                ++g_tcp_stats.fin_tx;
+                TcpSend(iface_index, peer_mac, peer_ip, src_port, our_ip, dst_port, kTcpFlagAckBit | kTcpFlagFinBit,
+                        g_tcp_conn.snd_next, g_tcp_conn.rcv_next, nullptr, 0);
+                g_tcp_conn.snd_next += 1;
+                g_tcp_conn.state = TcpState::LastAck;
+            }
         }
     }
 
@@ -1555,9 +1630,83 @@ void TcpOnSegment(u32 iface_index, const MacAddress& peer_mac, Ipv4Address peer_
             TcpSend(iface_index, peer_mac, peer_ip, src_port, our_ip, dst_port, kTcpFlagAckBit, g_tcp_conn.snd_next,
                     g_tcp_conn.rcv_next, nullptr, 0);
         }
+        g_tcp_conn.response_complete = true;
         g_tcp_conn.state = TcpState::Closed;
-        g_tcp_conn.in_use = false;
+        // Leave in_use=true so NetTcpActiveRead can still read
+        // the final captured bytes. Next TcpListen / TcpConnect
+        // resets the slot.
     }
+}
+
+bool NetTcpConnect(u32 iface_index, Ipv4Address dst_ip, u16 dst_port, const u8* request, u32 request_len)
+{
+    if (iface_index >= kMaxInterfaces || !g_interfaces[iface_index].bound)
+        return false;
+    if (request_len > kTcpMaxCannedReply)
+        return false;
+    // Can't share the slot with an active listener or an
+    // in-flight connection.
+    if (g_tcp_conn.in_use && g_tcp_conn.state != TcpState::Closed)
+        return false;
+
+    const Interface& ifc = g_interfaces[iface_index];
+    const ArpEntry* arp = ArpLookup(iface_index, dst_ip);
+    MacAddress dst_mac = {};
+    if (arp != nullptr)
+    {
+        dst_mac = arp->mac;
+    }
+    else
+    {
+        Ipv4Address gw{{dst_ip.octets[0], dst_ip.octets[1], dst_ip.octets[2], 2}};
+        const ArpEntry* gw_entry = ArpLookup(iface_index, gw);
+        if (gw_entry == nullptr)
+            return false;
+        dst_mac = gw_entry->mac;
+    }
+
+    TcpConnClear();
+    g_tcp_conn.in_use = true;
+    g_tcp_conn.state = TcpState::SynSent;
+    g_tcp_conn.role = TcpRole::Client;
+    g_tcp_conn.iface_index = iface_index;
+    g_tcp_conn.peer_mac = dst_mac;
+    g_tcp_conn.peer_ip = dst_ip;
+    g_tcp_conn.peer_port = dst_port;
+    // Pick an ephemeral local port — high-enough range to avoid
+    // conflicting with our TcpListen slot (7777 / etc).
+    g_tcp_conn.local_port = 49152;
+    g_tcp_conn.snd_next = kTcpClientIsn + 1; // SYN consumes ISN
+    g_tcp_conn.pending_request_len = request_len;
+    for (u32 i = 0; i < request_len; ++i)
+        g_tcp_conn.pending_request[i] = request[i];
+
+    // Send SYN.
+    TcpSend(iface_index, dst_mac, dst_ip, dst_port, ifc.ip, g_tcp_conn.local_port, kTcpFlagSynBit, kTcpClientIsn, 0,
+            nullptr, 0);
+    return true;
+}
+
+u32 NetTcpActiveRead(u8* out, u32 cap)
+{
+    const u32 n = g_tcp_conn.rx_len;
+    if (out == nullptr)
+        return n;
+    const u32 take = n < cap ? n : cap;
+    for (u32 i = 0; i < take; ++i)
+        out[i] = g_tcp_conn.rx_buf[i];
+    return take;
+}
+
+TcpActiveSnapshot NetTcpActiveSnapshot()
+{
+    TcpActiveSnapshot s = {};
+    s.in_use = g_tcp_conn.in_use;
+    s.established = (g_tcp_conn.state == TcpState::Established || g_tcp_conn.state == TcpState::Closed) &&
+                    g_tcp_conn.role == TcpRole::Client;
+    s.response_complete = g_tcp_conn.response_complete;
+    s.response_len = g_tcp_conn.rx_len;
+    return s;
 }
 
 TcpStats TcpStatsRead()
@@ -1573,7 +1722,7 @@ bool TcpListen(u16 local_port, const u8* canned_reply, u32 canned_len)
     g_tcp_canned_len = canned_len;
     for (u32 i = 0; i < canned_len; ++i)
         g_tcp_canned[i] = canned_reply[i];
-    g_tcp_conn = {};
+    TcpConnClear();
     return true;
 }
 
@@ -1879,6 +2028,95 @@ DnsResult NetDnsResultRead()
     r.resolved = g_dns_resolved;
     r.ip = g_dns_result_ip;
     return r;
+}
+
+// ---------------------------------------------------------------
+// NTP client — one-shot query, capture Transmit Timestamp.
+// ---------------------------------------------------------------
+
+namespace
+{
+
+constinit bool g_ntp_pending = false;
+constinit bool g_ntp_synced = false;
+constinit NtpResult g_ntp_result = {};
+constexpr u16 kNtpEphemeralPort = 32123;
+// NTP epoch (1900-01-01) → Unix epoch (1970-01-01) offset in
+// seconds. 70 years × 365.25 × 86400 rounded to the right value.
+constexpr u64 kNtpToUnixEpochOffset = 2208988800ULL;
+
+void NtpOnUdp(u32 iface_index, Ipv4Address src_ip, u16 src_port, u16 dst_port, const void* payload, u64 len)
+{
+    (void)iface_index;
+    (void)src_ip;
+    (void)src_port;
+    (void)dst_port;
+    if (!g_ntp_pending || len < 48)
+        return;
+    const auto* b = static_cast<const u8*>(payload);
+    // byte 0 low 3 bits = Mode; server replies are Mode 4.
+    const u8 mode = b[0] & 0x07;
+    if (mode != 4)
+        return;
+    const u8 stratum = b[1];
+    // Transmit Timestamp — bytes 40..47. Top 32 bits = NTP seconds
+    // since 1900, bottom 32 bits = fractional seconds.
+    u64 ntp_secs = 0;
+    for (u32 i = 0; i < 4; ++i)
+        ntp_secs = (ntp_secs << 8) | u64(b[40 + i]);
+    u32 ntp_frac = 0;
+    for (u32 i = 0; i < 4; ++i)
+        ntp_frac = (ntp_frac << 8) | u32(b[44 + i]);
+    if (ntp_secs == 0)
+        return; // unsynchronized server
+
+    g_ntp_result.synced = true;
+    g_ntp_result.unix_secs = ntp_secs - kNtpToUnixEpochOffset;
+    g_ntp_result.fractional_secs = ntp_frac;
+    g_ntp_result.stratum = stratum;
+    g_ntp_synced = true;
+}
+
+} // namespace
+
+bool NetNtpQuery(u32 iface_index, Ipv4Address server_ip)
+{
+    if (iface_index >= kMaxInterfaces || !g_interfaces[iface_index].bound)
+        return false;
+    const Interface& ifc = g_interfaces[iface_index];
+
+    const ArpEntry* arp = ArpLookup(iface_index, server_ip);
+    MacAddress dst_mac = {};
+    if (arp != nullptr)
+    {
+        dst_mac = arp->mac;
+    }
+    else
+    {
+        Ipv4Address gw{{server_ip.octets[0], server_ip.octets[1], server_ip.octets[2], 2}};
+        const ArpEntry* gw_entry = ArpLookup(iface_index, gw);
+        if (gw_entry == nullptr)
+            return false;
+        dst_mac = gw_entry->mac;
+    }
+
+    // 48-byte NTP v3 client packet. Only byte 0 matters for a
+    // query: LI=0, VN=3, Mode=3 (client) → 0x1B. Everything else
+    // zero — the server ignores them.
+    u8 pkt[48] = {};
+    pkt[0] = 0x1B;
+
+    g_ntp_pending = true;
+    g_ntp_synced = false;
+    g_ntp_result = {};
+    NetUdpBindRx(kNtpEphemeralPort, NtpOnUdp);
+
+    return NetUdpSend(iface_index, dst_mac, server_ip, /*dst_port=*/123, ifc.ip, kNtpEphemeralPort, pkt, sizeof(pkt));
+}
+
+NtpResult NetNtpResultRead()
+{
+    return g_ntp_result;
 }
 
 bool NetStackBindInterface(u32 iface_index, MacAddress mac, Ipv4Address ip, NetTxFn tx)

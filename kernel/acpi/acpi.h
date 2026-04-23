@@ -112,6 +112,24 @@ u16 SciVector();
 /// fault in that case.
 bool AcpiReset();
 
+/// PM1a / PM1b control block I/O port addresses from FADT.
+/// Returns 0 when the FADT didn't populate the block. Used by
+/// the shutdown path: writing `(SLP_TYP << 10) | SLP_EN` to
+/// PM1a — with SLP_TYP taken from AML `\_S5` — triggers ACPI
+/// soft-off on compliant hardware + QEMU.
+u32 Pm1aControlPort();
+u32 Pm1bControlPort();
+
+/// Trigger ACPI soft-off (S5) by reading SLP_TYP from AML `\_S5`
+/// and writing `(SLP_TYP << 10) | SLP_EN` to PM1a (and PM1b if
+/// present). On full-ACPI-compliant hardware this powers the
+/// machine off; on QEMU it exits the guest cleanly. Returns
+/// false on missing `\_S5`, missing PM1 block, or if execution
+/// continued past the write (spec-compliant firmware would have
+/// honoured it, but the full path requires _PTS / _GTS method
+/// execution we don't do yet).
+bool AcpiShutdown();
+
 /// HPET event-timer-block physical address from the ACPI HPET
 /// table. Returns 0 if no HPET table was present (in which case
 /// drivers should fall back to PIT or LAPIC timers only).

@@ -10,6 +10,7 @@
 #include "../arch/x86_64/smp.h"
 #include "../arch/x86_64/thermal.h"
 #include "../arch/x86_64/timer.h"
+#include "../acpi/acpi.h"
 #include "../drivers/gpu/bochs_vbe.h"
 #include "../drivers/gpu/gpu.h"
 #include "../drivers/input/ps2kbd.h"
@@ -305,6 +306,8 @@ void CmdHelp()
     ConsoleWriteln("  ARP          ARP CACHE + STATS");
     ConsoleWriteln("  PING IP      ICMP ECHO REQUEST + WAIT 1S FOR REPLY");
     ConsoleWriteln("  NSLOOKUP NAME DNS A-RECORD LOOKUP (RESOLVER 10.0.2.3)");
+    ConsoleWriteln("  NTP [IP]     NTP QUERY (DEFAULT 216.239.35.0 — GOOGLE TIME1)");
+    ConsoleWriteln("  HTTP IP [P [PATH]] TCP CONNECT + GET / AND PRINT 16 LINES");
     ConsoleWriteln("  IPV4         IPV4 RX COUNTERS");
     ConsoleWriteln("  HEALTH       RUN RUNTIME INVARIANT SCAN (HEAP/FRAMES/SCHED/CRX)");
     ConsoleWriteln("  UUID [N]     GENERATE N V4 UUIDS FROM THE ENTROPY POOL");
@@ -320,6 +323,7 @@ void CmdHelp()
     ConsoleWriteln("  YIELD        FORCE A SCHEDULER YIELD");
     ConsoleWriteln("  REBOOT       RESET THE MACHINE (NO CONFIRM)");
     ConsoleWriteln("  HALT         STOP THE CPU (NO CONFIRM)");
+    ConsoleWriteln("  SHUTDOWN     ACPI SOFT-OFF VIA _S5 (QEMU EXITS; HALT ON FALLBACK)");
     ConsoleWriteln("");
     ConsoleWriteln("ACCOUNTS / LOGIN:");
     ConsoleWriteln("  USERS / WHO  LIST ACCOUNTS (* = CURRENT SESSION)");
@@ -1273,7 +1277,7 @@ static const char* const kCommandSet[] = {
     "battery",   "thermal", "temp",       "gpu",      "lsgpu",    "nic",       "lsnic",      "ip",       "arp",
     "ipv4",      "uuid",    "uuidgen",    "health",   "checkup",  "attacksim", "redteam",    "memdump",  "instr",
     "dumpstate", "bp",      "breakpoint", "login",    "logout",   "passwd",    "useradd",    "userdel",  "users",
-    "who",       "su",      "hwmon",      "vbe",      "ping",     "nslookup",
+    "who",       "su",      "hwmon",      "vbe",      "ping",     "nslookup",  "ntp",        "http",     "shutdown",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -2551,6 +2555,146 @@ void CmdPing(u32 argc, char** argv)
         }
     }
     ConsoleWriteln("PING: no reply within 1s");
+}
+
+void CmdHttp(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("HTTP: usage: http <ipv4> [port [path]]");
+        return;
+    }
+    customos::net::Ipv4Address dst = {};
+    if (!ParseIpv4(argv[1], &dst))
+    {
+        ConsoleWriteln("HTTP: malformed IPv4");
+        return;
+    }
+    u16 port = 80;
+    if (argc >= 3)
+    {
+        u16 p = 0;
+        if (!ParseU16Decimal(argv[2], &p))
+        {
+            ConsoleWriteln("HTTP: malformed port");
+            return;
+        }
+        port = p;
+    }
+    const char* path = "/";
+    if (argc >= 4)
+        path = argv[3];
+
+    // Build GET request. Host header uses the dotted-quad string
+    // the caller passed in since we don't (yet) track reverse
+    // DNS. Minimal HTTP/1.0 so we don't need keep-alive handling.
+    char req[512];
+    u32 ri = 0;
+    auto put = [&](const char* s)
+    {
+        while (*s && ri + 1 < sizeof(req))
+            req[ri++] = *s++;
+    };
+    put("GET ");
+    put(path);
+    put(" HTTP/1.0\r\nHost: ");
+    put(argv[1]);
+    put("\r\nConnection: close\r\n\r\n");
+
+    if (!customos::net::NetTcpConnect(/*iface_index=*/0, dst, port, reinterpret_cast<const u8*>(req), ri))
+    {
+        ConsoleWriteln("HTTP: connect failed (slot busy / ARP miss / oversized req)");
+        return;
+    }
+    ConsoleWrite("HTTP: connecting to ");
+    ConsoleWrite(argv[1]);
+    ConsoleWriteln(" ...");
+
+    // Poll up to 4 s for the response to arrive + FIN.
+    for (u32 i = 0; i < 400; ++i)
+    {
+        customos::sched::SchedSleepTicks(1);
+        const auto s = customos::net::NetTcpActiveSnapshot();
+        if (s.response_complete)
+        {
+            // Print the captured bytes.
+            u8 buf[2048];
+            const u32 n = customos::net::NetTcpActiveRead(buf, sizeof(buf));
+            ConsoleWrite("HTTP: ");
+            WriteU64Dec(n);
+            ConsoleWriteln(" bytes received");
+            // Print the first ~16 lines of the response so the
+            // user can see headers + a bit of body.
+            u32 lines = 0;
+            for (u32 j = 0; j < n && lines < 16; ++j)
+            {
+                const char c = static_cast<char>(buf[j]);
+                if (c == '\n')
+                    ++lines;
+                if (c == '\r')
+                    continue;
+                if (c == '\n' || (c >= 0x20 && c <= 0x7E))
+                    ConsoleWriteChar(c);
+            }
+            ConsoleWriteln("");
+            return;
+        }
+    }
+    ConsoleWriteln("HTTP: no complete response within 4s");
+}
+
+void CmdNtp(u32 argc, char** argv)
+{
+    // QEMU SLIRP doesn't run its own NTP server; callers pointing
+    // here need an IP SLIRP will forward to. Public stratum-1/2
+    // servers on UDP/123 work when SLIRP's outbound-UDP path is
+    // open (the default).
+    customos::net::Ipv4Address server{{216, 239, 35, 0}}; // Google time1.google.com
+    if (argc >= 2 && !ParseIpv4(argv[1], &server))
+    {
+        ConsoleWriteln("NTP: malformed server IP");
+        return;
+    }
+    if (!customos::net::NetNtpQuery(/*iface_index=*/0, server))
+    {
+        ConsoleWriteln("NTP: send failed (ARP miss for server + gateway)");
+        return;
+    }
+    for (u32 i = 0; i < 200; ++i) // up to ~2 s
+    {
+        customos::sched::SchedSleepTicks(1);
+        const auto r = customos::net::NetNtpResultRead();
+        if (r.synced)
+        {
+            ConsoleWrite("NTP: unix_secs=");
+            WriteU64Dec(r.unix_secs);
+            ConsoleWrite("  stratum=");
+            WriteU64Dec(r.stratum);
+            ConsoleWriteln("");
+            // Rough UTC decode — pure second division; no month /
+            // leap-year handling. Proves the epoch is sane enough
+            // to surface a recognisable time.
+            const u64 rem = r.unix_secs % 86400;
+            const u64 h = rem / 3600;
+            const u64 m = (rem / 60) % 60;
+            const u64 s = rem % 60;
+            ConsoleWrite("NTP: ~ ");
+            if (h < 10)
+                ConsoleWriteChar('0');
+            WriteU64Dec(h);
+            ConsoleWriteChar(':');
+            if (m < 10)
+                ConsoleWriteChar('0');
+            WriteU64Dec(m);
+            ConsoleWriteChar(':');
+            if (s < 10)
+                ConsoleWriteChar('0');
+            WriteU64Dec(s);
+            ConsoleWriteln(" UTC (time-of-day)");
+            return;
+        }
+    }
+    ConsoleWriteln("NTP: no response within 2s (SLIRP UDP/123 blocked? server down?)");
 }
 
 void CmdNslookup(u32 argc, char** argv)
@@ -5909,6 +6053,25 @@ void CmdFree()
     customos::arch::Halt();
 }
 
+[[noreturn]] void CmdShutdownNow()
+{
+    ConsoleWriteln("SHUTDOWN: evaluating AML \\_S5 + writing PM1a...");
+    customos::arch::SerialWrite("[shell] user invoked shutdown\n");
+    // Flush any last bytes by driving a dummy serial write
+    // before the PM1 write that may cut power mid-instruction.
+    if (customos::acpi::AcpiShutdown())
+    {
+        // AcpiShutdown returns true only on never-reached paths;
+        // v0 implementation always returns after the write. Fall
+        // through.
+    }
+    // Firmware didn't honour S5 (most common on QEMU TCG unless
+    // -machine pc / q35 + the _PTS method runs, which we skip).
+    // Fall back to reboot, then halt if that also fails.
+    ConsoleWriteln("SHUTDOWN: S5 not honoured; falling back to halt.");
+    customos::arch::Halt();
+}
+
 void CmdHistory()
 {
     if (g_history_count == 0)
@@ -7181,6 +7344,16 @@ void Dispatch(char* line)
         CmdNslookup(argc, argv);
         return;
     }
+    if (StrEq(cmd, "ntp"))
+    {
+        CmdNtp(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "http"))
+    {
+        CmdHttp(argc, argv);
+        return;
+    }
     if (StrEq(cmd, "nic") || StrEq(cmd, "lsnic") || StrEq(cmd, "ip"))
     {
         CmdNic();
@@ -7539,6 +7712,11 @@ void Dispatch(char* line)
     if (StrEq(cmd, "halt"))
     {
         CmdHaltNow();
+        // unreachable
+    }
+    if (StrEq(cmd, "shutdown") || StrEq(cmd, "poweroff"))
+    {
+        CmdShutdownNow();
         // unreachable
     }
     ConsoleWrite("COMMAND NOT FOUND: ");

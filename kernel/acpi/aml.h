@@ -101,4 +101,13 @@ const AmlNamespaceEntry* AmlNamespaceFind(const char* path);
 /// and quick "do I have any thermal zones declared?" predicates.
 u32 AmlNamespaceCountByKind(AmlObjectKind k);
 
+/// Decode the `\_S5` (soft-off) sleep-state values from AML.
+/// Populates `*slp_typa` / `*slp_typb` with the first two
+/// elements of the `Package { SLP_TYPa, SLP_TYPb, ... }`
+/// declaration. Returns false on missing name, unexpected
+/// opcode, or element encodings outside v0's supported subset
+/// (ZeroOp / OneOp / BytePrefix). Callers on false stay in
+/// "ACPI shutdown unsupported" — we don't guess bits.
+bool AmlReadS5(u8* slp_typa, u8* slp_typb);
+
 } // namespace customos::acpi
