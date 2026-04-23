@@ -1,5 +1,6 @@
 #include "xhci.h"
 
+#include "../../arch/x86_64/cpu.h"
 #include "../../arch/x86_64/serial.h"
 #include "../../core/klog.h"
 #include "../../core/result.h"
@@ -7,6 +8,7 @@
 #include "../../mm/page.h"
 #include "../../sched/sched.h"
 #include "../input/ps2kbd.h"
+#include "../pci/pci.h"
 #include "usb.h"
 
 namespace customos::drivers::usb::xhci
@@ -43,6 +45,14 @@ constexpr u64 kOpConfig = 0x38;
 // USBCMD bits.
 constexpr u32 kCmdRunStop = 1u << 0;
 constexpr u32 kCmdHcReset = 1u << 1;
+constexpr u32 kCmdIntrEnable = 1u << 2; // Interrupter Enable — gates all MSI/MSI-X delivery
+
+// Interrupter register block (offset 0x00 of each interrupter at
+// rt_base + 0x20 * N). IMAN: bit 0 = IP (interrupt pending, RW1C),
+// bit 1 = IE (interrupt enable).
+constexpr u64 kIntrIman = 0x00;
+constexpr u32 kImanIp = 1u << 0;
+constexpr u32 kImanIe = 1u << 1;
 
 // USBSTS bits.
 constexpr u32 kStsHcHalted = 1u << 0;
@@ -1188,25 +1198,96 @@ bool TryReadEvent(Runtime& rt, Trb* out)
     return true;
 }
 
-// Per-controller polling task. Sleeps briefly between drains so
-// it doesn't starve other work on a single-CPU kernel. Runs
-// forever — xHCI shutdown / restart tears down the device table,
-// so the task's ready check comes up empty and it just idles.
-// One task per controller lets us keep event-ring ownership
-// simple: after boot, nothing else consumes events on this ring.
+// Per-controller polling task state. With MSI-X bound the task
+// blocks on `wait` and the device's IRQ handler wakes it; without
+// MSI-X it falls back to tick-cadence polling so a controller that
+// doesn't expose the capability still functions.
 struct PollTaskArg
 {
     Runtime* rt;
     ControllerInfo* info;
+    customos::sched::WaitQueue wait;
+    u8 irq_vector; // 0 == MSI-X not bound, polling fallback
 };
 
 constinit PollTaskArg g_poll_args[kMaxControllers] = {};
 constinit Runtime g_poll_rt[kMaxControllers] = {};
 
+// Acknowledge interrupter 0's IMAN.IP (the device-side pending
+// bit). LAPIC EOI is handled by the generic IRQ dispatcher; this
+// clears the xHCI-internal pending bit so a subsequent event
+// re-asserts the line instead of being coalesced into the
+// already-pending state. Keeps IE set so future events still
+// trigger interrupts.
+void XhciAckInterrupter(Runtime& rt)
+{
+    if (rt.intr0 == nullptr)
+        return;
+    const u32 iman = ReadMmio32(rt.intr0, kIntrIman);
+    WriteMmio32(rt.intr0, kIntrIman, (iman & ~kImanIp) | kImanIp | kImanIe);
+}
+
+// One C handler per controller so the generic IrqHandler signature
+// (no context) can still route to the right wait queue. The max
+// controller count is small; explicit stamps are clearer than
+// building a vector → controller-idx map.
+void XhciIrq0()
+{
+    XhciAckInterrupter(g_poll_rt[0]);
+    customos::sched::WaitQueueWakeOne(&g_poll_args[0].wait);
+}
+void XhciIrq1()
+{
+    XhciAckInterrupter(g_poll_rt[1]);
+    customos::sched::WaitQueueWakeOne(&g_poll_args[1].wait);
+}
+void XhciIrq2()
+{
+    XhciAckInterrupter(g_poll_rt[2]);
+    customos::sched::WaitQueueWakeOne(&g_poll_args[2].wait);
+}
+void XhciIrq3()
+{
+    XhciAckInterrupter(g_poll_rt[3]);
+    customos::sched::WaitQueueWakeOne(&g_poll_args[3].wait);
+}
+
+static_assert(kMaxControllers == 4, "per-controller IRQ stamps must match kMaxControllers");
+constexpr ::customos::arch::IrqHandler kXhciIrqStamps[kMaxControllers] = {&XhciIrq0, &XhciIrq1, &XhciIrq2, &XhciIrq3};
+
+// Attempt MSI-X bring-up for one controller. On success the
+// controller fires IRQs at `vector` whenever an event is posted
+// to interrupter 0. On failure the caller falls back to
+// tick-cadence polling.
+bool XhciBindMsix(Runtime& rt, const HostControllerInfo& h, u32 ctrlr_idx, u8* out_vector)
+{
+    using namespace customos::drivers::pci;
+    DeviceAddress addr{};
+    addr.bus = h.bus;
+    addr.device = h.device;
+    addr.function = h.function;
+    auto r = PciMsixBindSimple(addr, /*entry_index=*/0, kXhciIrqStamps[ctrlr_idx], /*out_route=*/nullptr);
+    if (!r.has_value())
+        return false;
+    const u8 vector = r.value();
+
+    // Enable the device's interrupt machinery:
+    //   - USBCMD.INTE so the controller delivers MSI at all.
+    //   - IMAN.IE on interrupter 0 so its event ring raises the
+    //     vector we just bound. Clear any stale IP bit in the same
+    //     write (bit 0 is RW1C).
+    WriteMmio32(rt.op, kOpUsbCmd, ReadMmio32(rt.op, kOpUsbCmd) | kCmdIntrEnable);
+    WriteMmio32(rt.intr0, kIntrIman, kImanIe | kImanIp);
+
+    *out_vector = vector;
+    return true;
+}
+
 void HidPollEntry(void* raw)
 {
     auto* arg = static_cast<PollTaskArg*>(raw);
     Runtime& rt = *arg->rt;
+    const bool have_msix = (arg->irq_vector != 0);
     for (;;)
     {
         // Drain every event currently available, then sleep.
@@ -1240,7 +1321,32 @@ void HidPollEntry(void* raw)
                 break;
             }
         }
-        customos::sched::SchedSleepTicks(1);
+        if (have_msix)
+        {
+            // Block until the IRQ handler signals us. WaitQueueBlock
+            // requires interrupts disabled on entry; the scheduler
+            // re-enables them across the context switch. Spurious
+            // wakes are fine — the drain-loop above handles them.
+            //
+            // Lost-wakeup guard: if an event arrived between the
+            // above `while (TryReadEvent)` returning false and our
+            // Cli, the handler's WakeOne fired into an unparked
+            // task. Re-check the event ring once under Cli before
+            // committing to the block. If something's there we
+            // fall through to the next iteration, Sti-free (the
+            // scheduler's Schedule path re-enables on switch).
+            customos::arch::Cli();
+            if ((rt.evt_ring[rt.evt_idx].control & 1u) == (rt.evt_cycle & 1u))
+            {
+                customos::arch::Sti();
+                continue;
+            }
+            customos::sched::WaitQueueBlock(&arg->wait);
+        }
+        else
+        {
+            customos::sched::SchedSleepTicks(1);
+        }
     }
 }
 
@@ -1628,16 +1734,39 @@ bool InitOne(const HostControllerInfo& h, ControllerInfo& out)
     // Spawn the per-controller HID polling task if any device
     // came up. The Runtime struct lives in our stack frame here;
     // copy it into file-scope storage so the task's entry point
-    // has a stable pointer past this function's return.
+    // has a stable pointer past this function's return. We also
+    // try to bind MSI-X interrupter 0 here so the task can block
+    // on a wait queue the IRQ handler signals instead of polling
+    // at tick cadence — order matters, the task has to see the
+    // final irq_vector when it first runs.
     if (out.hid_keyboards_bound > 0)
     {
-        // Find our slot index into g_controllers by pointer.
         const u32 idx = u32(&out - g_controllers);
         if (idx < kMaxControllers)
         {
             g_poll_rt[idx] = rt;
             g_poll_args[idx].rt = &g_poll_rt[idx];
             g_poll_args[idx].info = &out;
+            g_poll_args[idx].wait = {};
+            g_poll_args[idx].irq_vector = 0;
+
+            u8 bound_vec = 0;
+            if (XhciBindMsix(g_poll_rt[idx], h, idx, &bound_vec))
+            {
+                g_poll_args[idx].irq_vector = bound_vec;
+                arch::SerialWrite("[xhci] MSI-X bound ctrlr=");
+                arch::SerialWriteHex(idx);
+                arch::SerialWrite(" vector=");
+                arch::SerialWriteHex(bound_vec);
+                arch::SerialWrite("\n");
+            }
+            else
+            {
+                arch::SerialWrite("[xhci] MSI-X unavailable ctrlr=");
+                arch::SerialWriteHex(idx);
+                arch::SerialWrite(" — falling back to tick-cadence polling\n");
+            }
+
             customos::sched::SchedCreate(HidPollEntry, &g_poll_args[idx], "xhci-hid-poll");
         }
     }
