@@ -843,16 +843,56 @@ i64 DoAccess(u64 user_path, u64 mode)
     return fs::fat32::Fat32LookupPath(v, StripFatPrefix(path), &entry) ? 0 : kENOENT;
 }
 
-// Linux: readlink(path, buf, bufsiz). We don't have symlinks;
-// every path is a plain file or directory. Return -EINVAL per
-// POSIX's "path is not a symlink" semantics — musl's
-// realpath() fallback kicks in and uses the path as-is.
+// Linux: readlink(path, buf, bufsiz). We don't have real symlinks
+// yet, but musl / glibc query /proc/self/exe (and /proc/PID/exe)
+// during CRT init to recover the program path. Special-case that
+// to return the current process's name with a leading "/", which
+// is enough for argv[0] / dlopen's relative-path resolution to
+// work. Everything else: -EINVAL ("not a symlink").
 i64 DoReadlink(u64 user_path, u64 user_buf, u64 bufsiz)
 {
-    (void)user_path;
-    (void)user_buf;
-    (void)bufsiz;
-    return kEINVAL;
+    char path[64];
+    for (u32 i = 0; i < sizeof(path); ++i)
+        path[i] = 0;
+    if (!mm::CopyFromUser(path, reinterpret_cast<const void*>(user_path), sizeof(path) - 1))
+        return kEFAULT;
+    path[sizeof(path) - 1] = 0;
+
+    // Match exactly "/proc/self/exe". /proc/<PID>/exe is not
+    // recognised yet — glibc's fallback uses /proc/self/exe too.
+    const char kSelf[] = "/proc/self/exe";
+    bool matches = true;
+    for (u32 i = 0; i < sizeof(kSelf); ++i)
+    {
+        if (path[i] != kSelf[i])
+        {
+            matches = false;
+            break;
+        }
+    }
+    if (!matches)
+        return kEINVAL;
+
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr || p->name == nullptr)
+        return kEINVAL;
+
+    char out[64];
+    u64 out_len = 0;
+    out[out_len++] = '/';
+    const char* n = p->name;
+    while (*n != '\0' && out_len + 1 < sizeof(out))
+    {
+        out[out_len++] = *n++;
+    }
+    if (bufsiz == 0)
+        return 0;
+    const u64 to_copy = (out_len < bufsiz) ? out_len : bufsiz;
+    if (!mm::CopyToUser(reinterpret_cast<void*>(user_buf), out, to_copy))
+        return kEFAULT;
+    // readlink does not write a trailing NUL; the return value is
+    // the byte count the caller uses to terminate.
+    return i64(to_copy);
 }
 
 // Linux: getcwd(buf, size). We don't have per-process cwd; the

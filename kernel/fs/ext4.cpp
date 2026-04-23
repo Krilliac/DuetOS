@@ -149,6 +149,11 @@ bool DecodeInode(const u8* buf, u16 ino_size, u32 feature_ro_compat, InodeInfo* 
     out->flags = LeU32(buf + kInoFlags);
     out->uses_extents = (out->flags & kInodeFlagExtents) != 0;
     out->block0_magic = LeU16(buf + kInoBlock0);
+    // Capture the full 60-byte i_block[15] region so a subsequent
+    // directory or inline-data walk doesn't need to re-read the
+    // inode from disk.
+    for (u32 i = 0; i < 60; ++i)
+        out->i_block[i] = buf[kInoBlock0 + i];
     return true;
 }
 
@@ -173,6 +178,140 @@ const char* InodeModeType(u16 mode)
         return "sock";
     default:
         return "?";
+    }
+}
+
+const char* Ext4FileTypeName(u8 ft)
+{
+    switch (ft)
+    {
+    case 1:
+        return "reg";
+    case 2:
+        return "dir";
+    case 3:
+        return "chr";
+    case 4:
+        return "blk";
+    case 5:
+        return "fifo";
+    case 6:
+        return "sock";
+    case 7:
+        return "lnk";
+    default:
+        return "?";
+    }
+}
+
+// Extent header / entry offsets.
+constexpr u64 kEhMagic = 0x00;
+constexpr u64 kEhEntries = 0x02;
+constexpr u64 kEhMax = 0x04;
+constexpr u64 kEhDepth = 0x06;
+// Extent-entry fields. (kEeLogical at offset 0 — tracked in the
+// comment but we only need length + phys for a single-extent walk.)
+constexpr u64 kEeLength = 0x04;
+constexpr u64 kEePhysHi = 0x06;
+constexpr u64 kEePhysLo = 0x08;
+
+// Parse one directory block's worth of linux_dirent records into
+// `out_entries[]`. `block` points to the start of the block;
+// `block_size` is its byte length. Returns the number of entries
+// appended.
+u32 ParseDirBlock(const u8* block, u32 block_size, Ext4DirEntry* out_entries, u32 cap, u32 already)
+{
+    u32 produced = already;
+    u32 off = 0;
+    while (off + 8 <= block_size && produced < cap)
+    {
+        const u32 inode = LeU32(block + off + 0);
+        const u16 rec_len = LeU16(block + off + 4);
+        const u8 name_len = block[off + 6];
+        const u8 file_type = block[off + 7];
+        if (rec_len < 8 || rec_len + off > block_size || (rec_len & 0x3) != 0)
+            break;
+        // inode==0 means "unused slot" — skip its name but honour rec_len.
+        if (inode != 0 && name_len > 0)
+        {
+            Ext4DirEntry& e = out_entries[produced++];
+            e.inode = inode;
+            e.file_type = file_type;
+            const u32 copy = (name_len < sizeof(e.name) - 1) ? name_len : u32(sizeof(e.name) - 1);
+            for (u32 i = 0; i < copy; ++i)
+                e.name[i] = char(block[off + 8 + i]);
+            e.name[copy] = '\0';
+        }
+        off += rec_len;
+    }
+    return produced;
+}
+
+// Walk the root-directory data block. Requires `v.root_inode_valid`
+// and that the root inode uses the extent tree (the common ext4
+// layout). Handles a single-extent, depth-0 extent tree; for the
+// typical freshly-formatted volume the root directory fits in one
+// block, so this covers the common case. Multi-extent / multi-
+// block directories log a note and bail.
+void WalkRootDir(Volume& v)
+{
+    if (!v.root_inode_valid || !v.root_inode.uses_extents)
+        return;
+    const u8* ib = v.root_inode.i_block;
+    if (LeU16(ib + kEhMagic) != kExtentHeaderMagic)
+    {
+        arch::SerialWrite("[ext4]   root-dir extent header magic mismatch\n");
+        return;
+    }
+    const u16 entries = LeU16(ib + kEhEntries);
+    const u16 max_entries = LeU16(ib + kEhMax);
+    const u16 depth = LeU16(ib + kEhDepth);
+    if (entries == 0 || max_entries == 0)
+        return;
+    if (depth != 0)
+    {
+        arch::SerialWrite("[ext4]   root-dir extent tree has depth>0 — walk deferred\n");
+        return;
+    }
+
+    const u8* first_extent = ib + 12; // header is 12 bytes
+    const u16 len_blocks = LeU16(first_extent + kEeLength);
+    const u64 phys = (u64(LeU16(first_extent + kEePhysHi)) << 32) | LeU32(first_extent + kEePhysLo);
+    if (len_blocks == 0 || phys == 0)
+        return;
+
+    const u32 sector_size = drivers::storage::BlockDeviceSectorSize(v.block_handle);
+    if (sector_size == 0)
+        return;
+    const u64 lba = phys * v.block_size / sector_size;
+
+    // Read the FIRST data block of the directory. A directory that
+    // spans multiple blocks will have more entries in subsequent
+    // blocks — we cap at one block of parsing in v0.
+    if (!ReadIntoBlockScratch(v.block_handle, lba, sector_size, v.block_size))
+    {
+        arch::SerialWrite("[ext4]   root-dir data block read failed\n");
+        return;
+    }
+
+    v.root_dir_entry_count = ParseDirBlock(g_block_scratch, v.block_size, v.root_dir_entries, kMaxRootDirEntries, 0);
+    arch::SerialWrite("[ext4]   root-dir entries: ");
+    arch::SerialWriteHex(v.root_dir_entry_count);
+    arch::SerialWrite(" (extent phys=");
+    arch::SerialWriteHex(phys);
+    arch::SerialWrite(" len_blocks=");
+    arch::SerialWriteHex(len_blocks);
+    arch::SerialWrite(")\n");
+    for (u32 i = 0; i < v.root_dir_entry_count; ++i)
+    {
+        const Ext4DirEntry& e = v.root_dir_entries[i];
+        arch::SerialWrite("[ext4]     ");
+        arch::SerialWrite(e.name);
+        arch::SerialWrite("  inode=");
+        arch::SerialWriteHex(e.inode);
+        arch::SerialWrite(" type=");
+        arch::SerialWrite(Ext4FileTypeName(e.file_type));
+        arch::SerialWrite("\n");
     }
 }
 
@@ -257,6 +396,8 @@ void ReadGroup0AndRootInode(Volume& v)
         arch::SerialWrite(v.root_inode.block0_magic == kExtentHeaderMagic ? " (valid)" : " (unexpected)");
     }
     arch::SerialWrite("\n");
+
+    WalkRootDir(v);
 }
 
 } // namespace

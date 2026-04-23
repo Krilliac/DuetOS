@@ -60,13 +60,18 @@ bool HidProbe(u8 subclass, u8 prog_if)
     return false;
 }
 
+// MSC class driver. Byte-level CBW/CSW + SCSI CDB builders +
+// response parsers are live (see msc_scsi.{h,cpp}); the BBB wire
+// protocol can be driven as soon as a bulk-transfer path exists.
+// v0 refuses the attach — a future xHCI slice flips this to true
+// and adds the bulk-in / bulk-out transfer wiring.
 bool MscProbe(u8 subclass, u8 prog_if)
 {
     arch::SerialWrite("[usb-msc] probe subclass=");
     arch::SerialWriteHex(subclass);
     arch::SerialWrite(" prog_if=");
     arch::SerialWriteHex(prog_if);
-    arch::SerialWrite("  (stub — not claimed)\n");
+    arch::SerialWrite(" cbw_csw=ready  (not claimed — bulk transfer pending)\n");
     return false;
 }
 

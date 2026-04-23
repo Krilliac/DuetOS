@@ -52,7 +52,9 @@ struct GroupDesc
 
 // Subset of an ext4 inode. We pull mode + size + link count + a
 // tag indicating whether the data area is an extent tree (ext4)
-// or the legacy block-pointer array (ext2/3).
+// or the legacy block-pointer array (ext2/3). The full 60-byte
+// `i_block` area is retained so a directory / small-file walk
+// can interpret it without re-reading the inode.
 struct InodeInfo
 {
     u16 mode; // file type in high 4 bits + perms
@@ -67,7 +69,18 @@ struct InodeInfo
     u32 flags;
     bool uses_extents; // EXT4_EXTENTS_FL (0x80000) set
     u16 block0_magic;  // if uses_extents: low u16 of i_block[0] = 0xF30A
+    u8 i_block[60];    // raw i_block area: extent tree or block ptrs
 };
+
+// Parsed ext4 directory entry.
+struct Ext4DirEntry
+{
+    u32 inode;
+    u8 file_type;   // 0=unknown, 1=reg, 2=dir, 3=chr, 4=blk, 5=fifo, 6=sock, 7=lnk
+    char name[128]; // NUL-terminated; truncated for entries >127
+};
+
+inline constexpr u32 kMaxRootDirEntries = 32;
 
 struct Volume
 {
@@ -90,6 +103,9 @@ struct Volume
 
     bool root_inode_valid;
     InodeInfo root_inode;
+
+    u32 root_dir_entry_count;
+    Ext4DirEntry root_dir_entries[kMaxRootDirEntries];
 };
 
 /// Probe the block device at `handle`. If the superblock magic
