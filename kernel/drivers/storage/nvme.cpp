@@ -1,5 +1,6 @@
 #include "nvme.h"
 
+#include "../../arch/x86_64/cpu.h"
 #include "../../arch/x86_64/hpet.h"
 #include "../../arch/x86_64/serial.h"
 #include "../../core/klog.h"
@@ -7,6 +8,7 @@
 #include "../../mm/frame_allocator.h"
 #include "../../mm/page.h"
 #include "../../mm/paging.h"
+#include "../../sched/sched.h"
 #include "../pci/pci.h"
 #include "block.h"
 
@@ -147,6 +149,13 @@ struct Controller
     u64* prp_list_virt;
     u32 block_handle;
     bool online;
+    // MSI-X state. `irq_vector` is non-zero when
+    // `PciMsixBindSimple` succeeded; in that case the I/O CQ is
+    // created with IEN=1 and SubmitAndWait blocks on `cq_wait`
+    // between polls instead of burning CPU. Polling-only fallback
+    // preserved for controllers that don't expose MSI-X.
+    u8 irq_vector;
+    customos::sched::WaitQueue cq_wait;
 };
 
 constinit Controller g_ctrl = {};
@@ -382,7 +391,29 @@ bool SubmitAndWait(Queue& q, SqEntry entry)
             core::Log(core::LogLevel::Error, "drivers/nvme", "completion timed out (no HPET)");
             return false;
         }
-        CpuPause();
+
+        // When MSI-X is bound AND we're on the I/O queue, block on
+        // the IRQ-signalled wait queue instead of burning CPU. The
+        // admin queue stays strictly polled — it's only used for
+        // bring-up, and blocking on a wait queue before the task
+        // scheduler is fully running would deadlock. Lost-wakeup
+        // guard: re-check the phase bit under Cli before blocking.
+        if (g_ctrl.irq_vector != 0 && q.id != 0)
+        {
+            customos::arch::Cli();
+            const u32 dw3_recheck = cq_slot.cid_phase_status;
+            const u32 phase_recheck = (dw3_recheck >> 16) & 0x1;
+            if (phase_recheck == q.expected_phase)
+            {
+                customos::arch::Sti();
+                continue;
+            }
+            customos::sched::WaitQueueBlock(&g_ctrl.cq_wait);
+        }
+        else
+        {
+            CpuPause();
+        }
     }
 }
 
@@ -552,6 +583,19 @@ bool IdentifyNamespaceOne()
     return ok;
 }
 
+// MSI-X IRQ handler. Hardware asserts the vector whenever an
+// entry lands on the I/O CQ with its phase bit flipped; the
+// handler's only job is to wake any task blocked in
+// SubmitAndWait. Acknowledgement happens on the CQ side via the
+// head-doorbell write the completion-processing path already
+// does. NVMe has no device-level "IRQ pending" register to clear
+// (unlike xHCI's IMAN.IP); the head-doorbell + CQ phase bits are
+// the only state.
+void NvmeIrqHandler()
+{
+    customos::sched::WaitQueueWakeOne(&g_ctrl.cq_wait);
+}
+
 bool CreateIoQueues()
 {
     if (g_ctrl.io_queue_entries < 2)
@@ -573,8 +617,18 @@ bool CreateIoQueues()
     cq_cmd.prp1 = g_ctrl.io.cq_phys;
     // DW10: bits 0..15 = QID, bits 16..31 = Queue Size (0-based).
     cq_cmd.cdw10 = (1 & 0xFFFF) | (qs0 << 16);
-    // DW11: bit 0 = PC (physically contiguous); IEN=0 (no IRQ); IV=0.
+    // DW11: bit 0 = PC (physically contiguous); bit 1 = IEN
+    // (Interrupt Enable); bits 16..31 = IV (Interrupt Vector,
+    // index into the MSI-X table we programmed). Arm IEN + IV=0
+    // only when we successfully bound a vector; otherwise leave
+    // IEN clear so the controller never generates MSIs we can't
+    // receive.
     cq_cmd.cdw11 = 0x1;
+    if (g_ctrl.irq_vector != 0)
+    {
+        cq_cmd.cdw11 |= (1u << 1); // IEN
+        // IV already 0 (we use MSI-X table entry 0).
+    }
     if (!SubmitAndWait(g_ctrl.admin, cq_cmd))
     {
         return false;
@@ -843,6 +897,26 @@ void NvmeInit()
     {
         core::Log(core::LogLevel::Error, "drivers/nvme", "namespace reports zero geometry");
         return;
+    }
+
+    // MSI-X for the I/O CQ — bind BEFORE CreateIoQueues so the
+    // Create I/O CQ command can flip IEN=1 with IV=0 from the
+    // outset. Failure falls back to polling.
+    {
+        pci::DeviceAddress pci_addr{};
+        pci_addr.bus = dev->addr.bus;
+        pci_addr.device = dev->addr.device;
+        pci_addr.function = dev->addr.function;
+        auto r = pci::PciMsixBindSimple(pci_addr, /*entry_index=*/0, NvmeIrqHandler, /*out_route=*/nullptr);
+        if (r.has_value())
+        {
+            g_ctrl.irq_vector = r.value();
+            core::LogWithValue(core::LogLevel::Info, "drivers/nvme", "MSI-X bound vector", g_ctrl.irq_vector);
+        }
+        else
+        {
+            core::Log(core::LogLevel::Info, "drivers/nvme", "MSI-X unavailable — polling I/O completion");
+        }
     }
 
     if (!CreateIoQueues())
