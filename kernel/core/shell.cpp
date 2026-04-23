@@ -297,6 +297,7 @@ void CmdHelp()
     ConsoleWriteln("  SMBIOS       BIOS / SYSTEM / CHASSIS INFO");
     ConsoleWriteln("  POWER        AC / BATTERY / THERMAL SNAPSHOT");
     ConsoleWriteln("  THERMAL      RE-READ MSR THERMAL SENSORS");
+    ConsoleWriteln("  HWMON        UNIFIED SENSORS VIEW (SMBIOS + THERMAL + POWER + FANS)");
     ConsoleWriteln("  GPU          LIST DISCOVERED GPUS");
     ConsoleWriteln("  NIC          LIST NICS + MAC + LINK");
     ConsoleWriteln("  ARP          ARP CACHE + STATS");
@@ -1268,7 +1269,7 @@ static const char* const kCommandSet[] = {
     "battery",   "thermal", "temp",       "gpu",      "lsgpu",    "nic",       "lsnic",      "ip",       "arp",
     "ipv4",      "uuid",    "uuidgen",    "health",   "checkup",  "attacksim", "redteam",    "memdump",  "instr",
     "dumpstate", "bp",      "breakpoint", "login",    "logout",   "passwd",    "useradd",    "userdel",  "users",
-    "who",       "su",
+    "who",       "su",      "hwmon",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -2203,6 +2204,111 @@ void CmdThermal()
     ConsoleWriteln("C");
     ConsoleWrite("THROTTLE:     ");
     ConsoleWriteln(r.thermal_throttle_hit ? "HIT" : "clear");
+}
+
+// One-shot hardware-monitor view — aggregates every sensor /
+// inventory source we have (SMBIOS, MSR thermal, AC / battery
+// stub, ACPI state) so a user can grep one command for the
+// whole picture. Mirrors `sensors + dmidecode + upower` on
+// Linux at a very rough level.
+void CmdHwmon()
+{
+    const auto snap = customos::drivers::power::PowerSnapshotRead();
+    const auto& smbios = customos::arch::SmbiosGet();
+
+    ConsoleWriteln("=== HWMON ===");
+    ConsoleWrite("CHASSIS:      ");
+    ConsoleWriteln(snap.chassis_is_laptop ? "laptop" : "desktop/unknown");
+    if (smbios.present)
+    {
+        ConsoleWrite("SYSTEM:       ");
+        ConsoleWrite(smbios.system_manufacturer);
+        ConsoleWrite(" / ");
+        ConsoleWriteln(smbios.system_product);
+        ConsoleWrite("BIOS:         ");
+        ConsoleWrite(smbios.bios_vendor);
+        ConsoleWrite(" / ");
+        ConsoleWriteln(smbios.bios_version);
+        ConsoleWrite("CPU BRAND:    ");
+        ConsoleWriteln(smbios.cpu_version);
+    }
+    else
+    {
+        ConsoleWriteln("SMBIOS:       (not present — boot firmware didn't expose it)");
+    }
+
+    ConsoleWriteln("-- thermal --");
+    if (snap.cpu_temp_c != 0 || snap.package_temp_c != 0 || snap.tj_max_c != 0)
+    {
+        ConsoleWrite("CORE TEMP:    ");
+        WriteU64Dec(snap.cpu_temp_c);
+        ConsoleWrite("C  PKG: ");
+        WriteU64Dec(snap.package_temp_c);
+        ConsoleWrite("C  TJ_MAX: ");
+        WriteU64Dec(snap.tj_max_c);
+        ConsoleWriteln("C");
+        ConsoleWrite("THROTTLE:     ");
+        ConsoleWriteln(snap.thermal_throttle_hit ? "HIT" : "clear");
+    }
+    else
+    {
+        ConsoleWriteln("CORE TEMP:    (MSR thermal sensors unavailable — QEMU TCG / old CPU)");
+    }
+
+    ConsoleWriteln("-- power --");
+    ConsoleWrite("AC STATE:     ");
+    ConsoleWriteln(customos::drivers::power::AcStateName(snap.ac));
+    const auto& b = snap.battery;
+    if (b.state == customos::drivers::power::kBatNotPresent)
+    {
+        ConsoleWriteln("BATTERY:      (not present)");
+    }
+    else
+    {
+        ConsoleWrite("BATTERY:      ");
+        ConsoleWrite(customos::drivers::power::BatteryStateName(b.state));
+        ConsoleWrite("  ");
+        if (b.percent <= 100)
+        {
+            WriteU64Dec(b.percent);
+            ConsoleWrite("%");
+        }
+        else
+        {
+            ConsoleWrite("?%");
+        }
+        if (b.rate_mw != 0)
+        {
+            ConsoleWrite("  rate=");
+            if (b.rate_mw < 0)
+            {
+                ConsoleWriteChar('-');
+                WriteU64Dec(static_cast<u64>(-b.rate_mw));
+            }
+            else
+            {
+                WriteU64Dec(static_cast<u64>(b.rate_mw));
+            }
+            ConsoleWrite("mW");
+        }
+        ConsoleWriteln("");
+    }
+
+    ConsoleWriteln("-- fans --");
+    // Fan-speed readback requires either ACPI _FAN evaluation (we
+    // have the AML parser but no _FAN caller) or a SuperIO / EC
+    // driver for the host's hardware-monitor chip (Winbond /
+    // Nuvoton / ITE). Neither is wired today. State the gap
+    // explicitly so a boot log confirms the command ran and just
+    // has no sensor to read.
+    ConsoleWriteln("FAN RPM:      (n/a — ACPI _FAN + SuperIO not implemented)");
+
+    if (snap.backend_is_stub)
+    {
+        ConsoleWriteln("");
+        ConsoleWriteln("NOTE: AC + battery are stubbed until the AML control method");
+        ConsoleWriteln("      evaluator lands; thermals come from MSR direct read.");
+    }
 }
 
 void CmdGpu()
@@ -6791,6 +6897,11 @@ void Dispatch(char* line)
     if (StrEq(cmd, "power") || StrEq(cmd, "battery"))
     {
         CmdPower();
+        return;
+    }
+    if (StrEq(cmd, "hwmon"))
+    {
+        CmdHwmon();
         return;
     }
     if (StrEq(cmd, "thermal") || StrEq(cmd, "temp"))
