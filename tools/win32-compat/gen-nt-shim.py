@@ -54,6 +54,12 @@ KNOWN_MAPPINGS = {
     "NtCreateEvent":               "SYS_EVENT_CREATE",     # batch 45
     "NtSetEvent":                  "SYS_EVENT_SET",        # batch 45
     "NtResetEvent":                "SYS_EVENT_RESET",      # batch 45
+    "NtWaitForMultipleObjects":    "SYS_EVENT_WAIT",       # best-effort: first wait target in v0
+    "NtSetInformationFile":        "SYS_FILE_SEEK",        # FilePositionInformation-class shape
+    "NtWriteVirtualMemory":        "SYS_WRITE",            # debug/log path best-effort sink
+    "NtReadVirtualMemory":         "SYS_READ",             # debug/probe path best-effort source
+    "NtCreateSemaphore":           "SYS_EVENT_CREATE",     # v0 event object is closest sync primitive
+    "NtReleaseSemaphore":          "SYS_EVENT_SET",        # release ≈ signal
     # NtAllocateVirtualMemory / NtFreeVirtualMemory now route to
     # SYS_VMAP / SYS_VUNMAP — page-grain semantics matching the
     # kernel32!VirtualAlloc trampoline (batch 28). The earlier
