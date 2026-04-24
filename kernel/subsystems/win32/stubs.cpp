@@ -232,6 +232,17 @@ constexpr u32 kOffSrwAcquireExcl = 0xB95;    // batch 62 — 30 bytes
 constexpr u32 kOffSrwReleaseExcl = 0xBB3;    // batch 62 — 6 bytes
 constexpr u32 kOffSrwTryAcquireExcl = 0xBB9; // batch 62 — 22 bytes
 
+// === Batch 63: correctness fixes for two always-returning stubs ===
+// RtlTryEnterCriticalSection was bound to kOffReturnOne (always
+// "got it"), which actively lied to callers — a genuinely held
+// lock was reported as free and the caller proceeded into a
+// mid-write region. IsProcessorFeaturePresent was bound to
+// kOffReturnZero (always "not present"), forcing programs onto
+// scalar fallback paths when the real CPU has SSE2/AVX/etc.
+// Only TryEnter needs new bytecode; the other fix is a rebind
+// to the existing kOffReturnOne.
+constexpr u32 kOffTryEnterCritSecReal = 0xBCF; // batch 63 — 56 bytes
+
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
     // Windows x64 ABI: first arg (uExitCode) in RCX.
@@ -2993,10 +3004,43 @@ constexpr u8 kStubsBytes[] = {
     0x0F, 0x94, 0xC0,             // 0xBC8 setz al                 ; al = ZF
     0x0F, 0xB6, 0xC0,             // 0xBCB movzx eax, al           ; eax = BOOL
     0xC3,                         // 0xBCE ret
+
+    // === Batch 63 ==============================================
+
+    // --- RtlTryEnterCriticalSection (offset 0xBCF, 56 bytes) --
+    // Win32: BOOL TryEnterCriticalSection(LPCRITICAL_SECTION = rcx).
+    // Same CRITICAL_SECTION layout as EnterCriticalSection. Try
+    // acquire once; on success (including recursive re-acquire)
+    // return 1, otherwise return 0 WITHOUT blocking. Previously
+    // bound to kOffReturnOne which always claimed success.
+    0x53,                         // 0xBCF push rbx
+    0x48, 0x89, 0xCB,             // 0xBD0 mov rbx, rcx
+    0x6A, 0x01,                   // 0xBD3 push 1
+    0x58,                         // 0xBD5 pop rax                 ; SYS_GETPID
+    0xCD, 0x80,                   // 0xBD6 int 0x80                ; rax = TID
+    0x49, 0x89, 0xC0,             // 0xBD8 mov r8, rax             ; r8 = TID
+    0x31, 0xC0,                   // 0xBDB xor eax, eax            ; expected = 0
+    0xF0, 0x4C, 0x0F, 0xB1, 0x03, // 0xBDD lock cmpxchg [rbx], r8
+    0x74, 0x09,                   // 0xBE2 je .took (+9 -> 0xBED)
+    0x4C, 0x39, 0x03,             // 0xBE4 cmp [rbx], r8
+    0x74, 0x13,                   // 0xBE7 je .recursive (+0x13 -> 0xBFC)
+    0x31, 0xC0,                   // 0xBE9 xor eax, eax            ; not-taken: return 0
+    0x5B,                         // 0xBEB pop rbx
+    0xC3,                         // 0xBEC ret
+    // .took (abs 0xBED):
+    0x48, 0xC7, 0x43, 0x08, 0x01, 0x00, 0x00, 0x00, // 0xBED mov qword [rbx+8], 1
+    0xB8, 0x01, 0x00, 0x00, 0x00,                   // 0xBF5 mov eax, 1
+    0x5B,                                           // 0xBFA pop rbx
+    0xC3,                                           // 0xBFB ret
+    // .recursive (abs 0xBFC):
+    0x48, 0xFF, 0x43, 0x08,       // 0xBFC inc qword [rbx+8]
+    0xB8, 0x01, 0x00, 0x00, 0x00, // 0xC00 mov eax, 1
+    0x5B,                         // 0xC05 pop rbx
+    0xC3,                         // 0xC06 ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0xBCF, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0xC07, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -3142,7 +3186,14 @@ constexpr StubEntry kStubsTable[] = {
     // by appearing earlier in the table.
     {"kernel32.dll", "IsDebuggerPresent", kOffReturnZero},
     {"kernel32.dll", "IsDebuggerPresent", kOffReturnZero},
-    {"kernel32.dll", "IsProcessorFeaturePresent", kOffReturnZero},
+    // IsProcessorFeaturePresent(dwFeature) → claim every queried
+    // feature is present. x86_64 universally has SSE / SSE2 / CMPXCHG16B
+    // / NX; AES / PCLMUL / AVX / AVX2 / RDRAND / RDSEED are visible in
+    // this kernel's CPU probe log. Returning 0 forced every caller
+    // onto scalar fallback paths; returning 1 optimistically matches
+    // modern hardware. Genuinely-absent feature callers almost always
+    // have a runtime fallback anyway.
+    {"kernel32.dll", "IsProcessorFeaturePresent", kOffReturnOne},
     {"kernel32.dll", "SetUnhandledExceptionFilter", kOffReturnZero},
     {"kernel32.dll", "UnhandledExceptionFilter", kOffReturnZero},
 
@@ -4003,7 +4054,11 @@ constexpr StubEntry kStubsTable[] = {
     {"ntdll.dll", "RtlLeaveCriticalSection", kOffLeaveCritSecReal},
     {"ntdll.dll", "RtlInitializeCriticalSection", kOffInitCritSec},
     {"ntdll.dll", "RtlDeleteCriticalSection", kOffCritSecNop},
-    {"ntdll.dll", "RtlTryEnterCriticalSection", kOffReturnOne}, // TRUE
+    {"ntdll.dll", "RtlTryEnterCriticalSection", kOffTryEnterCritSecReal},
+    // kernel32 doesn't export TryEnterCriticalSection under that
+    // exact name — programs hit it through the Rtl alias above or
+    // via the (unstubbed) kernel32!TryEnterCriticalSection thunk.
+    {"kernel32.dll", "TryEnterCriticalSection", kOffTryEnterCritSecReal},
     {"ntdll.dll", "LdrLoadDll", kOffReturnStatusNotImpl},
     {"ntdll.dll", "LdrGetDllHandle", kOffReturnStatusNotImpl},
     {"ntdll.dll", "LdrGetProcedureAddress", kOffReturnStatusNotImpl},
