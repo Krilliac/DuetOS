@@ -11,6 +11,7 @@
 #include "generated_comctl32_dll.h"
 #include "generated_comdlg32_dll.h"
 #include "generated_crypt32_dll.h"
+#include "generated_dwmapi_dll.h"
 #include "generated_customdll.h"
 #include "generated_customdll2.h"
 #include "generated_customdll_test.h"
@@ -30,15 +31,20 @@
 #include "generated_psapi_dll.h"
 #include "generated_shell32_dll.h"
 #include "generated_shlwapi_dll.h"
+#include "generated_iphlpapi_dll.h"
+#include "generated_secur32_dll.h"
 #include "generated_setupapi_dll.h"
 #include "generated_ucrtbase_dll.h"
 #include "generated_user32_dll.h"
+#include "generated_userenv_dll.h"
+#include "generated_uxtheme_dll.h"
 #include "generated_vcruntime140_dll.h"
 #include "generated_version_dll.h"
 #include "generated_winhttp_dll.h"
 #include "generated_wininet_dll.h"
 #include "generated_winmm_dll.h"
 #include "generated_ws2_32_dll.h"
+#include "generated_wtsapi32_dll.h"
 #include "generated_hello_pe.h"
 #include "generated_hello_winapi.h"
 #include "generated_syscall_stress.h"
@@ -1917,7 +1923,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     // here is a one-line append once the blob is embedded via
     // CMake. `kPreloadSlotCap` caps the stack-local array size;
     // bump if the list grows past it.
-    constexpr u64 kPreloadSlotCap = 32;
+    constexpr u64 kPreloadSlotCap = 48;
     struct PreloadDllEntry
     {
         const char* label; // diagnostic name for boot-log
@@ -2010,6 +2016,14 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         {"comdlg32.dll", fs::generated::kBinComdlg32DllBytes, fs::generated::kBinComdlg32DllBytes_len},
         {"version.dll", fs::generated::kBinVersionDllBytes, fs::generated::kBinVersionDllBytes_len},
         {"setupapi.dll", fs::generated::kBinSetupapiDllBytes, fs::generated::kBinSetupapiDllBytes_len},
+        // Stage-2 slice 33: six more support DLLs — IP helper,
+        // user env, terminal services, DWM, theming, SSPI.
+        {"iphlpapi.dll", fs::generated::kBinIphlpapiDllBytes, fs::generated::kBinIphlpapiDllBytes_len},
+        {"userenv.dll", fs::generated::kBinUserenvDllBytes, fs::generated::kBinUserenvDllBytes_len},
+        {"wtsapi32.dll", fs::generated::kBinWtsapi32DllBytes, fs::generated::kBinWtsapi32DllBytes_len},
+        {"dwmapi.dll", fs::generated::kBinDwmapiDllBytes, fs::generated::kBinDwmapiDllBytes_len},
+        {"uxtheme.dll", fs::generated::kBinUxthemeDllBytes, fs::generated::kBinUxthemeDllBytes_len},
+        {"secur32.dll", fs::generated::kBinSecur32DllBytes, fs::generated::kBinSecur32DllBytes_len},
     };
     constexpr u64 kPreloadEntryCount = sizeof(preload_set) / sizeof(preload_set[0]);
     static_assert(kPreloadEntryCount <= kPreloadSlotCap, "Preload DLL list exceeds stack-local cap");

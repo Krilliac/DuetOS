@@ -101,6 +101,10 @@ set +e
     /export:isalpha /export:isdigit /export:isspace /export:isprint /export:isalnum \
     /export:toupper /export:tolower \
     /export:qsort /export:bsearch \
+    /export:sscanf /export:vsscanf \
+    /export:rand /export:srand \
+    /export:getenv /export:_putenv /export:_putenv_s \
+    /export:_errno \
     /out:"${DLL}" \
     "${OBJ}" 2>&1 | grep -v "align specified without /driver"
 LINK_RC=${PIPESTATUS[0]}

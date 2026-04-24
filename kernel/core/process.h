@@ -343,7 +343,7 @@ struct Process
     // image bytes must stay alive for the Process's lifetime —
     // which they do, because ramfs blobs are static constexpr
     // arrays in the kernel ELF.
-    static constexpr u64 kDllImageCap = 32;
+    static constexpr u64 kDllImageCap = 48;
     DllImage dll_images[kDllImageCap];
     u64 dll_image_count;
 

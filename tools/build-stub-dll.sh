@@ -57,6 +57,12 @@ case "${DLL_NAME}" in
     comdlg32)  SYMBOL_NAME=kBinComdlg32DllBytes ;;
     version)   SYMBOL_NAME=kBinVersionDllBytes ;;
     setupapi)  SYMBOL_NAME=kBinSetupapiDllBytes ;;
+    iphlpapi)  SYMBOL_NAME=kBinIphlpapiDllBytes ;;
+    userenv)   SYMBOL_NAME=kBinUserenvDllBytes ;;
+    wtsapi32)  SYMBOL_NAME=kBinWtsapi32DllBytes ;;
+    dwmapi)    SYMBOL_NAME=kBinDwmapiDllBytes ;;
+    uxtheme)   SYMBOL_NAME=kBinUxthemeDllBytes ;;
+    secur32)   SYMBOL_NAME=kBinSecur32DllBytes ;;
     *)         ;; # leave whatever ${DLL_NAME^} produced
 esac
 

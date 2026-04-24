@@ -1036,3 +1036,245 @@ __declspec(dllexport) void* bsearch(const void* key, const void* base, size_t n,
     }
     return (void*) 0;
 }
+
+/* ------------------------------------------------------------------
+ * Minimal sscanf (slice 33)
+ *
+ * Handles %d / %u / %x / %s / %c / %% with optional width.
+ * No floating point, no %n, no character classes. Suitable
+ * for parsing integers + tokens from plain ASCII input —
+ * enough for most config-file consumers.
+ *
+ * Returns the number of fields successfully parsed, or -1 on
+ * end-of-input before any match (glibc sscanf convention).
+ * ------------------------------------------------------------------ */
+
+static int ssc_is_space(int c)
+{
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
+}
+
+static int ssc_digit(int c, int base)
+{
+    int v;
+    if (c >= '0' && c <= '9')
+        v = c - '0';
+    else if (c >= 'a' && c <= 'z')
+        v = c - 'a' + 10;
+    else if (c >= 'A' && c <= 'Z')
+        v = c - 'A' + 10;
+    else
+        return -1;
+    return v < base ? v : -1;
+}
+
+static int vsscanf_impl(const char* buf, const char* fmt, va_list ap)
+{
+    int matches = 0;
+    const char* p = buf;
+    while (*fmt)
+    {
+        if (ssc_is_space(*fmt))
+        {
+            while (ssc_is_space(*fmt))
+                ++fmt;
+            while (ssc_is_space(*p))
+                ++p;
+            continue;
+        }
+        if (*fmt != '%')
+        {
+            if (*p != *fmt)
+                return matches;
+            ++p;
+            ++fmt;
+            continue;
+        }
+        ++fmt;
+        /* Optional suppress with '*' */
+        int suppress = 0;
+        if (*fmt == '*')
+        {
+            suppress = 1;
+            ++fmt;
+        }
+        /* Width */
+        int width = 0;
+        while (*fmt >= '0' && *fmt <= '9')
+            width = width * 10 + (*fmt++ - '0');
+        /* Length mod */
+        int mod = 0;
+        if (*fmt == 'l')
+        {
+            mod = 1;
+            ++fmt;
+            if (*fmt == 'l')
+            {
+                mod = 2;
+                ++fmt;
+            }
+        }
+        char spec = *fmt++;
+        if (spec == 0)
+            break;
+        /* Skip leading whitespace for numeric specs */
+        if (spec != 'c' && spec != '%')
+            while (ssc_is_space(*p))
+                ++p;
+        if (!*p && spec != '%')
+            return matches == 0 ? -1 : matches;
+        switch (spec)
+        {
+        case 'd':
+        case 'i':
+        case 'u':
+        case 'x':
+        case 'X':
+        {
+            int               base = (spec == 'x' || spec == 'X') ? 16 : 10;
+            int               neg  = 0;
+            unsigned long long v   = 0;
+            int                any = 0;
+            if (spec != 'u' && spec != 'x' && spec != 'X')
+            {
+                if (*p == '-')
+                {
+                    neg = 1;
+                    ++p;
+                }
+                else if (*p == '+')
+                    ++p;
+            }
+            int dv;
+            int consumed = 0;
+            while ((dv = ssc_digit(*p, base)) >= 0 && (width == 0 || consumed < width))
+            {
+                v = v * (unsigned) base + (unsigned) dv;
+                ++p;
+                ++consumed;
+                any = 1;
+            }
+            if (!any)
+                return matches;
+            if (!suppress)
+            {
+                if (mod == 2)
+                    *va_arg_ptr(ap, long long*) = neg ? -(long long) v : (long long) v;
+                else if (mod == 1)
+                    *va_arg_ptr(ap, long*) = neg ? -(long) v : (long) v;
+                else
+                    *va_arg_ptr(ap, int*) = neg ? -(int) v : (int) v;
+                ++matches;
+            }
+            break;
+        }
+        case 's':
+        {
+            char* out = suppress ? (char*) 0 : va_arg_ptr(ap, char*);
+            int   n   = 0;
+            while (*p && !ssc_is_space(*p) && (width == 0 || n < width - 1))
+            {
+                if (out)
+                    out[n] = *p;
+                ++p;
+                ++n;
+            }
+            if (out)
+                out[n] = 0;
+            if (!suppress)
+                ++matches;
+            break;
+        }
+        case 'c':
+        {
+            int n = width > 0 ? width : 1;
+            char* out = suppress ? (char*) 0 : va_arg_ptr(ap, char*);
+            for (int i = 0; i < n && *p; ++i)
+            {
+                if (out)
+                    out[i] = *p;
+                ++p;
+            }
+            if (!suppress)
+                ++matches;
+            break;
+        }
+        case '%':
+            if (*p == '%')
+                ++p;
+            else
+                return matches;
+            break;
+        default:
+            return matches;
+        }
+    }
+    return matches;
+}
+
+__declspec(dllexport) int vsscanf(const char* buf, const char* fmt, va_list ap)
+{
+    return vsscanf_impl(buf, fmt, ap);
+}
+
+__declspec(dllexport) int sscanf(const char* buf, const char* fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsscanf_impl(buf, fmt, ap);
+    va_end(ap);
+    return n;
+}
+
+/* ------------------------------------------------------------------
+ * rand / srand (slice 33) — SPLITMIX64 (deterministic).
+ * ------------------------------------------------------------------ */
+
+static unsigned long long g_rand_state = 0xDEADBEEFCAFEBABEULL;
+
+__declspec(dllexport) void srand(unsigned int seed)
+{
+    g_rand_state = 0x9E3779B97F4A7C15ULL ^ ((unsigned long long) seed << 32) ^ seed;
+}
+
+__declspec(dllexport) int rand(void)
+{
+    g_rand_state = g_rand_state * 6364136223846793005ULL + 1442695040888963407ULL;
+    /* RAND_MAX = 32767 per MSVC. */
+    return (int) ((g_rand_state >> 33) & 0x7FFF);
+}
+
+/* ------------------------------------------------------------------
+ * getenv / _putenv (slice 33) — v0 has no env block. All lookups
+ * report "not found"; _putenv silently succeeds.
+ * ------------------------------------------------------------------ */
+
+__declspec(dllexport) char* getenv(const char* name)
+{
+    (void) name;
+    return (char*) 0;
+}
+
+__declspec(dllexport) int _putenv(const char* entry)
+{
+    (void) entry;
+    return 0;
+}
+
+__declspec(dllexport) int _putenv_s(const char* name, const char* value)
+{
+    (void) name;
+    (void) value;
+    return 0;
+}
+
+__declspec(dllexport) unsigned long _errno_dummy(void) { return 0; } /* placeholder */
+
+/* _errno() returns a pointer to the thread's errno slot.
+ * Single-thread in v0; return the address of a global. */
+static int g_errno = 0;
+
+__declspec(dllexport) int* _errno(void)
+{
+    return &g_errno;
+}
