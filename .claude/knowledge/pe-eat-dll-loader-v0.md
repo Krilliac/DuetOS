@@ -1,6 +1,6 @@
 # PE EAT parser + DLL loader — stage 2 kickoff
 
-**Type:** Observation · **Status:** Active (stage-2 slices 1-17 landed; ~70% of flat stubs retired) · **Last updated:** 2026-04-24
+**Type:** Observation · **Status:** Active (stage-2 slices 1-23 landed; ~99% of flat stubs retired) · **Last updated:** 2026-04-24
 
 ## Context
 
@@ -994,6 +994,84 @@ Win32-imports process. Comfortable headroom in
 - **`/dll /noentry` is the right invocation** for
   freestanding DLLs without a `_DllMainCRTStartup`. Lets
   lld-link skip the default entry-point reference.
+
+## Slices 18-23 — final retirement wave (consolidated)
+
+Slices 11-17 took us to ~70%. Slices 18-23 pushed to ~99% of
+retirable flat-stub rows.
+
+### Added to `kernel32.dll` (slices 18-23)
+
+- **Slice 18** — VirtualAlloc/Free/Protect (+Ex), lstrlenA/W,
+  lstrcmpA/W, lstrcmpiA/W, lstrcpyA/W.
+- **Slice 19** — WriteFile, WriteConsoleA, WriteConsoleW,
+  CloseHandle, CreateFileW, ReadFile, SetFilePointerEx,
+  GetFileSizeEx, GetFileSize.
+- **Slice 20** — GetSystemTimeAsFileTime, QueryPerformanceCounter,
+  QueryPerformanceFrequency, GetProcessHeap, HeapAlloc, HeapFree,
+  HeapSize, HeapReAlloc, HeapCreate, HeapDestroy, GetACP,
+  GetOEMCP, IsValidCodePage, MultiByteToWideChar,
+  WideCharToMultiByte.
+- **Slice 21** — TlsAlloc/Free/GetValue/SetValue, CreateMutexW/A,
+  ReleaseMutex, CreateEventW/A, SetEvent, ResetEvent,
+  CreateSemaphoreW/A, ReleaseSemaphore, WaitForSingleObject,
+  WaitForSingleObjectEx.
+- **Slice 22** — InitializeCriticalSection (+Ex, +AndSpinCount),
+  DeleteCriticalSection, Enter/Leave/TryEnterCriticalSection,
+  InitializeSRWLock, Acquire/Release/TryAcquireSRWLockExclusive,
+  Acquire/Release/TryAcquireSRWLockShared, InitOnceExecuteOnce.
+- **Slice 23** — CreateThread, ResumeThread, GetExitCodeThread,
+  ExitThread, GetExitCodeProcess.
+
+### Final DLL inventory
+
+| DLL | Exports | Notes |
+|-----|---------|-------|
+| `customdll.dll` | 4 | Test fixture |
+| `customdll2.dll` | 1 | Test fixture |
+| `kernel32.dll` | **123** | Process/thread, sync, I/O, VM, locale, time, Interlocked*, CS/SRW, InitOnce |
+| `vcruntime140.dll` | 3 | memset/memcpy/memmove |
+| `msvcrt.dll` | 8 | String + wide string intrinsics |
+| `ucrtbase.dll` | 25 | Heap, exit, CRT startup, string, conversions, terminators |
+
+**Total: 164 exports across 6 DLLs.**
+
+### Build-system findings (new ones from slices 18-23)
+
+- **`/wcs*/` in C block comments is a trap.** The `*/`
+  inside terminates the block. Already tripped us twice
+  (slice 14 + slice 18). Write `str / wcs intrinsics`
+  instead.
+- **Caller-owned CAS targets**. `__atomic_compare_exchange_n`
+  on a `long long volatile*` produced directly from the user
+  pointer works cleanly; clang emits a `lock cmpxchg`.
+- **`(long long)` casts everywhere** — MSVC's LLP64 means
+  `long` = 32 bits; any syscall arg that's a pointer or a
+  size needs `long long`. The inline-asm constraints `"a"`,
+  `"D"`, `"S"`, `"d"` all require matching operand widths.
+
+### What's still on the flat stubs
+
+The deliberately-deferred set (stateful / complex / very
+specialised):
+
+- **SEH helpers** — `__C_specific_handler`, `__CxxFrameHandler3`,
+  `_CxxThrowException`, `RtlCaptureContext`, `RtlVirtualUnwind`,
+  `RtlLookupFunctionEntry`. Need real `.pdata` / `.xdata`
+  unwind-table walking.
+- **C++ std runtime** — `?_Xbad_alloc@std@@YAXXZ` etc.
+  Hundreds of mangled throw helpers in msvcp140.
+- **dbghelp** — `SymInitialize`, `SymCleanup`, `SymFromAddr`.
+  Debug-info parsing.
+- **ntdll Rtl\*** — some forwarded aliases.
+- **Miscellaneous** — CreateToolhelp32Snapshot,
+  Process32FirstW, CreateRemoteThread, OpenProcess,
+  GenerateConsoleCtrlEvent, SetUnhandledExceptionFilter /
+  UnhandledExceptionFilter (already upgraded to `Real`
+  variants in the flat stubs; not a no-op).
+
+A real `msvcp140.dll` + `dbghelp.dll` would take another few
+slices. SEH is a multi-slice undertaking on its own.
 
 ## Boot-time visibility
 
