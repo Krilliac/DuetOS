@@ -102,7 +102,7 @@ void VZero(void* p, u64 n)
 }
 
 // Volatile byte-copy. Same reasoning.
-void VCopy(void* dst, const void* src, u64 n)
+[[maybe_unused]] void VCopy(void* dst, const void* src, u64 n)
 {
     auto* d = reinterpret_cast<volatile u8*>(dst);
     const auto* s = reinterpret_cast<const u8*>(src);

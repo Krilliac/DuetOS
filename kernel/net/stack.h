@@ -243,11 +243,273 @@ struct Ipv4Stats
 };
 
 /// Process an incoming Ethernet+IPv4 frame. Returns true iff the
-/// L3 path touched a counter (valid or rejected). Skeleton: we
-/// validate the IPv4 header, classify the protocol, and increment
-/// per-proto counters. No actual UDP/TCP/ICMP handler exists yet.
+/// L3 path touched a counter (valid or rejected). Validates the
+/// IPv4 header, classifies the protocol, updates per-proto
+/// counters, and for ICMP echo requests builds + transmits a
+/// matching echo reply via the registered TX hook.
 bool Ipv4HandleIncoming(u32 iface_index, const void* frame, u64 len);
 
 Ipv4Stats Ipv4StatsRead();
+
+// -------------------------------------------------------------------
+// NIC driver interface.
+//
+// Drivers call `NetStackBindInterface` once per NIC at bring-up
+// time, passing their MAC, an IPv4 address to advertise, and a
+// transmit trampoline. The stack then owns L2/L3 protocol
+// handling: the driver's RX path just forwards raw ethernet
+// frames via `NetStackInjectRx`, and protocol handlers reply
+// through the bound TX trampoline.
+//
+// `NetTxFn` must be safe to call from the driver's RX task
+// context (not from IRQ). Returns true on successful
+// enqueue, false on ring-full / driver-not-ready.
+// -------------------------------------------------------------------
+
+using NetTxFn = bool (*)(u32 iface_index, const void* frame, u64 len);
+
+/// Bind a NIC to the stack. `iface_index` must be < InterfaceCount().
+/// `tx` is the driver's send trampoline. `mac` is the local MAC
+/// (used as Ethernet src on every transmitted frame). `ip` is the
+/// IPv4 address the stack will respond to for ARP / ICMP. Returns
+/// false if iface_index is out of range or tx is null.
+bool NetStackBindInterface(u32 iface_index, MacAddress mac, Ipv4Address ip, NetTxFn tx);
+
+/// Inject a raw ethernet frame received by the NIC. The stack
+/// parses the ethertype and dispatches to ARP or IPv4. Safe to
+/// call from the driver's RX task. No-op when iface_index isn't
+/// bound or no handler matches.
+void NetStackInjectRx(u32 iface_index, const void* frame, u64 len);
+
+struct IcmpStats
+{
+    u64 echo_requests_rx;
+    u64 echo_replies_tx;
+    u64 tx_failures;
+    u64 echo_requests_tx;
+    u64 echo_replies_rx;
+};
+IcmpStats IcmpStatsRead();
+
+/// Send one ICMP echo request to `dst_ip` via `iface_index`. Uses
+/// the ARP cache to resolve the peer's MAC — fails if the cache
+/// doesn't have an entry (caller should arrange learning first;
+/// every IPv4 RX auto-inserts, so pinging something we've already
+/// received a packet from always succeeds). `id` + `seq` are
+/// echoed back by the peer so the sender can match the reply.
+/// Payload is 32 bytes of 0xA5 for easy visual identification.
+bool NetIcmpSendEcho(u32 iface_index, Ipv4Address dst_ip, u16 id, u16 seq);
+
+struct PingResult
+{
+    bool replied;
+    u64 rtt_ticks; // scheduler ticks between send + reply
+    Ipv4Address from;
+};
+
+/// Record the outgoing ID/seq so the RX path can match a reply.
+/// Intended as a one-shot — caller sends, sleeps, reads.
+void NetPingArm(u16 id, u16 seq);
+
+/// Poll the pending-reply state set by NetPingArm + an incoming
+/// echo reply. `replied` is true iff NetPingArm was called and
+/// a matching reply landed.
+PingResult NetPingRead();
+
+// -------------------------------------------------------------------
+// DNS client (RFC 1035 subset — A-record queries only).
+//
+// Single in-flight query at a time. `NetDnsQueryA` sends a UDP
+// packet to the configured resolver and registers an ephemeral
+// port callback; the RX path parses the answer section for the
+// first A-record + stashes it. `NetDnsResultRead` polls the
+// resolution state.
+// -------------------------------------------------------------------
+
+inline constexpr u32 kDnsMaxName = 253;
+
+struct DnsResult
+{
+    bool resolved;
+    Ipv4Address ip;
+};
+
+/// Send a DNS A-record query for `name` (NUL-terminated, max
+/// kDnsMaxName chars) via `iface_index`. `resolver_ip` is the
+/// DNS server (typically the DHCP-supplied value or 10.0.2.3 for
+/// QEMU SLIRP). Returns false on oversized name, malformed
+/// labels, interface missing, or ARP cache miss for the
+/// resolver's gateway.
+bool NetDnsQueryA(u32 iface_index, Ipv4Address resolver_ip, const char* name);
+
+/// Snapshot of the latest DNS query state. `resolved` is true
+/// iff the RX path parsed a matching A-record since the last
+/// NetDnsQueryA. Callers should read this after polling for
+/// reply arrival.
+DnsResult NetDnsResultRead();
+
+// -------------------------------------------------------------------
+// NTP client (RFC 5905 subset — one-shot Transmit Timestamp read).
+//
+// Sends a 48-byte NTP v3 client packet and on reply captures the
+// server's Transmit Timestamp. Converted from NTP epoch (1900) to
+// Unix epoch (1970) by subtracting 2208988800. Does not attempt
+// to write the RTC hardware — the result is exposed for callers
+// that want a wall-clock synchronization source.
+// -------------------------------------------------------------------
+
+struct NtpResult
+{
+    bool synced;
+    u64 unix_secs;       // seconds since 1970-01-01 UTC
+    u32 fractional_secs; // NTP fraction (u32 fixed-point)
+    u8 stratum;
+};
+
+/// Send one NTP v3 client query to `server_ip:123`. Binds an
+/// ephemeral UDP port for the reply. Returns false on iface
+/// binding miss or ARP resolution failure for the server's
+/// gateway.
+bool NetNtpQuery(u32 iface_index, Ipv4Address server_ip);
+
+/// Snapshot of the latest NTP transaction. `synced` is true iff
+/// the server replied with a non-zero Transmit Timestamp.
+NtpResult NetNtpResultRead();
+
+// -------------------------------------------------------------------
+// UDP send + receive dispatch.
+//
+// v0 design: a small registration table (capped at kUdpBindingsMax)
+// maps local UDP ports to callbacks. `NetUdpBindRx` registers a
+// handler; `NetStackInjectRx → Ipv4HandleIncoming → UDP dispatch`
+// delivers every matching datagram. `NetUdpSend` builds an
+// ethernet+IPv4+UDP frame from the given fields and pushes it out
+// via the interface's bound TX trampoline. Checksums are computed
+// per RFC 768 (UDP; the UDP checksum field is optional over IPv4
+// but we always emit one for peers that require it).
+// -------------------------------------------------------------------
+
+inline constexpr u32 kUdpBindingsMax = 8;
+
+using UdpRxFn = void (*)(u32 iface_index, Ipv4Address src_ip, u16 src_port, u16 dst_port, const void* payload, u64 len);
+
+/// Bind a local UDP port to a receive handler. The handler fires
+/// from the driver's RX task context (never from IRQ). Returns
+/// false if the bindings table is full or the port is already
+/// claimed. A zero handler unbinds the port.
+bool NetUdpBindRx(u16 local_port, UdpRxFn handler);
+
+/// Build + transmit a UDP datagram. Fills in ethernet, IPv4, UDP
+/// headers from interface state + caller args, computes
+/// checksums, pushes via the interface's TX trampoline. `dst_mac`
+/// is used verbatim — caller resolves ARP or passes broadcast
+/// (0xFF × 6) for DHCP / link-local. Returns false if the
+/// interface isn't bound or the frame exceeds the wire MTU.
+bool NetUdpSend(u32 iface_index, const MacAddress& dst_mac, Ipv4Address dst_ip, u16 dst_port, Ipv4Address src_ip,
+                u16 src_port, const void* payload, u64 payload_len);
+
+struct UdpStats
+{
+    u64 rx_packets;
+    u64 rx_no_port;
+    u64 tx_packets;
+    u64 tx_failures;
+};
+UdpStats UdpStatsRead();
+
+// -------------------------------------------------------------------
+// DHCP client (RFC 2131, subset).
+//
+// Runs one DHCP transaction per interface on request:
+//   DISCOVER → (wait for OFFER) → REQUEST → (wait for ACK) → bind
+// On ACK, the interface's IP is rebound to the offered yiaddr and
+// the ARP cache is seeded with the server's MAC. No lease
+// renewal in v0 — the lease timer is recorded but not acted on.
+// -------------------------------------------------------------------
+
+struct DhcpLease
+{
+    bool valid;
+    Ipv4Address ip;
+    Ipv4Address router;
+    Ipv4Address dns;
+    Ipv4Address server;
+    u32 lease_secs;
+};
+
+/// Kick off a DHCP transaction on `iface_index`. Non-blocking —
+/// state advances inside the stack's UDP receive callbacks as
+/// OFFER / ACK arrive. Safe to call after `NetStackBindInterface`
+/// has run with a placeholder IP (typically 0.0.0.0). Returns
+/// false on already-in-progress or missing binding.
+bool DhcpStart(u32 iface_index);
+
+/// Current lease snapshot. `valid` is true only after a DHCP ACK
+/// successfully bound a new IP.
+DhcpLease DhcpLeaseRead();
+
+// -------------------------------------------------------------------
+// TCP (passive-listen, single-connection, no retransmit) — v0.
+//
+// Scope: accept one incoming connection on a bound port; on any
+// received data, reply with a canned payload + FIN; close on the
+// peer's FIN. No retransmit, no sliding window, no out-of-order
+// reassembly, no TCP options past MSS. Enough to serve a one-shot
+// "hello" response to a browser or netcat, which is the v0 bar.
+// -------------------------------------------------------------------
+
+struct TcpStats
+{
+    u64 rx_packets;
+    u64 rx_out_of_state;
+    u64 syn_ack_tx;
+    u64 data_ack_tx;
+    u64 data_tx;
+    u64 fin_tx;
+    u64 rst_tx;
+};
+TcpStats TcpStatsRead();
+
+/// Bind a single TCP port to reply with `canned_reply` bytes on
+/// the first data segment of an accepted connection, then close.
+/// Only one listen slot in v0; a second call replaces the first.
+/// Returns false if `canned_len` exceeds kTcpMaxCannedReply.
+inline constexpr u32 kTcpMaxCannedReply = 512;
+bool TcpListen(u16 local_port, const u8* canned_reply, u32 canned_len);
+
+// -------------------------------------------------------------------
+// TCP active connect (single-shot, same slot as passive listen).
+//
+// Sends a SYN to `dst_ip:dst_port`, and once the handshake
+// completes, transmits `request` bytes as data. Captures the
+// peer's response into an internal buffer that
+// `NetTcpActiveRead` exposes. Hands the socket close on FIN.
+// Mutually exclusive with TcpListen — v0 has one slot, first
+// come wins.
+// -------------------------------------------------------------------
+
+inline constexpr u32 kTcpActiveBufBytes = 2048;
+
+struct TcpActiveSnapshot
+{
+    bool in_use;
+    bool established;       // we received SYN+ACK from the server
+    bool response_complete; // server sent FIN
+    u32 response_len;       // bytes in the RX buffer (caller reads via NetTcpActiveRead)
+};
+
+/// Kick off an active connect. `request` is sent after the
+/// three-way handshake completes; `request_len` must be
+/// <= kTcpMaxCannedReply. Returns false on slot-busy /
+/// oversize / ARP miss for gateway.
+bool NetTcpConnect(u32 iface_index, Ipv4Address dst_ip, u16 dst_port, const u8* request, u32 request_len);
+
+/// Copy up to `cap` bytes of the RX buffer into `out`, returns
+/// bytes copied. Safe to call during or after the response; reads
+/// are idempotent (buffer isn't consumed). Set `out = nullptr` to
+/// just snapshot the length.
+u32 NetTcpActiveRead(u8* out, u32 cap);
+
+TcpActiveSnapshot NetTcpActiveSnapshot();
 
 } // namespace customos::net

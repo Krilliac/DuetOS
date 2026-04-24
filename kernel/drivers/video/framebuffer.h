@@ -53,12 +53,12 @@ namespace customos::drivers::video
 
 struct FramebufferInfo
 {
-    void* virt;   // kernel-virtual pointer into the MMIO arena
-    u64 phys;     // physical base the firmware handed us
-    u32 width;    // pixels
-    u32 height;   // pixels
-    u32 pitch;    // bytes per scanline (>= width * bytes_per_pixel)
-    u8 bpp;       // bits per pixel (we only support 32 today)
+    void* virt; // kernel-virtual pointer into the MMIO arena
+    u64 phys;   // physical base the firmware handed us
+    u32 width;  // pixels
+    u32 height; // pixels
+    u32 pitch;  // bytes per scanline (>= width * bytes_per_pixel)
+    u8 bpp;     // bits per pixel (we only support 32 today)
     u8 _pad[3];
 };
 
@@ -113,5 +113,19 @@ void FramebufferDrawString(u32 x, u32 y, const char* text, u32 fg, u32 bg);
 /// firmware handoff + Mmio map + pixel store all work end-to-end.
 /// No-op if !Available().
 void FramebufferSelfTest();
+
+/// Re-bind the framebuffer driver to a new physical base +
+/// dimensions. Called after a GPU-side mode-set (Bochs VBE,
+/// future Intel/AMD/NVIDIA modeset) so the compositor paints at
+/// the new resolution. MapMmios a fresh virtual alias — the old
+/// mapping is leaked (arena is a bump allocator, 512 MiB wide,
+/// cheap). Rejects non-32-bpp modes + insane pitches. Returns
+/// false on validation failure or MMIO-arena exhaustion.
+///
+/// Does NOT re-initialize overlay widgets (taskbar Y position,
+/// cursor/clock placement) — they stay at their boot-time
+/// coordinates. Callers that care about chrome alignment need
+/// to rebuild it explicitly after this call succeeds.
+bool FramebufferRebind(u64 phys, u32 width, u32 height, u32 pitch, u8 bpp);
 
 } // namespace customos::drivers::video

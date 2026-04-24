@@ -1,0 +1,43 @@
+; userland/apps/syscall_stress/kernel32.def
+;
+; Imports for the batch-51 Win32 API stress test.
+
+LIBRARY kernel32.dll
+
+EXPORTS
+    ExitProcess
+    GetStdHandle
+    WriteFile
+    CreateThread
+    ExitThread
+    CreateEventW
+    SetEvent
+    WaitForSingleObject
+    WaitForMultipleObjects
+    OutputDebugStringA
+    OutputDebugStringW
+    GetProcessTimes
+    GetThreadTimes
+    GetSystemTimes
+    GlobalMemoryStatusEx
+    GetCurrentProcess
+    GetCurrentThread
+    GetSystemInfo
+    GetNativeSystemInfo
+    FormatMessageA
+    GetConsoleScreenBufferInfo
+    DecodePointer
+    EncodePointer
+    CreateSemaphoreW
+    ReleaseSemaphore
+    InitializeSRWLock
+    AcquireSRWLockExclusive
+    ReleaseSRWLockExclusive
+    TryAcquireSRWLockExclusive
+    InitOnceInitialize
+    InitOnceExecuteOnce
+    GetStartupInfoW
+    GetExitCodeThread
+    InterlockedAnd
+    InterlockedOr
+    InterlockedXor

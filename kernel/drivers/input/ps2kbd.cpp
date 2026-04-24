@@ -85,6 +85,32 @@ constinit u64 g_irqs_seen = 0;
 constinit u64 g_bytes_buffered = 0;
 constinit u64 g_bytes_dropped = 0;
 
+// External key-event injection ring. KeyboardInjectEvent pushes
+// pre-cooked events here; Ps2KeyboardReadEvent drains this ring
+// before falling back to the scancode path. Kept small — the HID
+// polling task emits at most 6 events per report cycle + modifier
+// edges (call it ~12), and the reader consumes promptly.
+constexpr u64 kInjectRingSize = 32;
+static_assert((kInjectRingSize & (kInjectRingSize - 1)) == 0, "inject ring size must be power of two");
+constexpr u64 kInjectRingMask = kInjectRingSize - 1;
+constinit KeyEvent g_inject_ring[kInjectRingSize] = {};
+constinit u64 g_inject_head = 0;
+constinit u64 g_inject_tail = 0;
+
+bool InjectRingEmpty()
+{
+    return g_inject_head == g_inject_tail;
+}
+
+bool InjectRingPop(KeyEvent* out)
+{
+    if (InjectRingEmpty())
+        return false;
+    *out = g_inject_ring[g_inject_tail & kInjectRingMask];
+    ++g_inject_tail;
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // Scan code set 1 → ASCII translation.
 //
@@ -482,13 +508,23 @@ void Ps2KeyboardInit()
 u8 Ps2KeyboardRead()
 {
     arch::Cli();
-    while (g_ring_head == g_ring_tail)
+    // Block until EITHER the scancode ring or the injection ring
+    // has something. Scancode set 1 never encodes a make byte of
+    // 0, so we can use 0 as a sentinel meaning "woke up for an
+    // injected event; no scancode to return" — ReadEvent handles
+    // the sentinel by looping back to the inject-ring drain.
+    while (g_ring_head == g_ring_tail && InjectRingEmpty())
     {
         customos::sched::WaitQueueBlock(&g_readers);
         // When we come back, interrupts are still disabled (we never
         // Sti'd), and a byte MAY be available. Could also have been a
         // spurious wake once we add broadcast-wake primitives, so
         // re-check the condition.
+    }
+    if (g_ring_head == g_ring_tail)
+    {
+        arch::Sti();
+        return 0; // sentinel: injection pending, no scancode
     }
     const u8 byte = g_ring[g_ring_tail & kRingMask];
     ++g_ring_tail;
@@ -689,7 +725,25 @@ KeyEvent Ps2KeyboardReadEvent()
 {
     for (;;)
     {
+        // Priority 1 — injected events (HID keyboard, future
+        // drivers). Check under Cli so an IRQ-time producer (were
+        // we to have one) doesn't race the head/tail read.
+        {
+            arch::Cli();
+            KeyEvent injected{};
+            const bool got = InjectRingPop(&injected);
+            arch::Sti();
+            if (got)
+                return injected;
+        }
+
         const u8 sc = Ps2KeyboardRead();
+        if (sc == 0)
+        {
+            // Woke up because an injected event landed after we
+            // released the lock above. Loop back to drain it.
+            continue;
+        }
 
         if (sc == kScanExtendedPrefix)
         {
@@ -841,6 +895,24 @@ Ps2Stats Ps2KeyboardStats()
         .bytes_buffered = g_bytes_buffered,
         .bytes_dropped = g_bytes_dropped,
     };
+}
+
+void KeyboardInjectEvent(const KeyEvent& ev)
+{
+    arch::Cli();
+    // Full-ring policy: drop the oldest event so the newest
+    // always lands. The HID keyboard's state-diff path relies on
+    // every press/release edge making it through; losing the
+    // freshest edge (typical "drop newest" policy) would leave a
+    // key permanently stuck down from the reader's perspective.
+    if (g_inject_head - g_inject_tail >= kInjectRingSize)
+    {
+        ++g_inject_tail;
+    }
+    g_inject_ring[g_inject_head & kInjectRingMask] = ev;
+    ++g_inject_head;
+    arch::Sti();
+    customos::sched::WaitQueueWakeOne(&g_readers);
 }
 
 } // namespace customos::drivers::input

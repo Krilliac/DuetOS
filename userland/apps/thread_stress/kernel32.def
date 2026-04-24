@@ -1,0 +1,16 @@
+; userland/apps/thread_stress/kernel32.def
+;
+; Minimal surface the thread_stress test imports. Far smaller
+; than hello_winapi's kernel32.def since we only call a handful
+; of APIs. Matches entries in kernel/subsystems/win32/stubs.cpp.
+
+LIBRARY kernel32.dll
+
+EXPORTS
+    ExitProcess
+    GetStdHandle
+    WriteFile
+    CreateThread
+    CreateEventW
+    SetEvent
+    WaitForSingleObject

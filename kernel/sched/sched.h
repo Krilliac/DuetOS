@@ -96,6 +96,13 @@ Task* SchedCreateUser(TaskEntry entry, void* arg, const char* name, core::Proces
 /// handlers via `core::CurrentProcess()` to cap-check.
 core::Process* TaskProcess(Task* t);
 
+/// True iff the task's state is Dead. Used by syscalls that track
+/// thread-handle signaling (WaitForSingleObject on a CreateThread
+/// handle, WaitForMultipleObjects, GetExitCodeThread) — the
+/// scheduler's zombie list is the single source of truth for
+/// "this thread has exited." Safe against a null pointer.
+bool TaskIsDead(const Task* t);
+
 /// Canonical reasons a kernel subsystem can request task
 /// termination via `FlagCurrentForKill(reason)`. Used by
 /// Schedule() for the single-line reason log when it converts

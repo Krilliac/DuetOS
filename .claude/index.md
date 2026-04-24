@@ -32,6 +32,8 @@ _Read this at every session start (after git sync). Each row links to a detailed
 | klog overhaul — Trace + scopes + metrics + sinks + colour | [knowledge/klog-overhaul.md](knowledge/klog-overhaul.md) | Observation | Active | 2026-04-21 |
 | Security guard — image-load protection | [knowledge/security-guard.md](knowledge/security-guard.md) | Decision | Active | 2026-04-21 |
 | Linux-ABI syscall subsystem | [knowledge/linux-abi-subsystem.md](knowledge/linux-abi-subsystem.md) | Observation | Active | 2026-04-22 |
+| Linux syscall batches 55-56 + NT→Linux translator (SYS_NT_INVOKE) | [knowledge/linux-syscall-batch-55.md](knowledge/linux-syscall-batch-55.md) | Observation | Active | 2026-04-23 |
+| `inspect` umbrella v0 — `syscalls` / `opcodes` / `arm` subcommands | [knowledge/inspect-umbrella-v0.md](knowledge/inspect-umbrella-v0.md) | Observation | Active | 2026-04-23 |
 | ABI translation unit (Linux gap-fill) | [knowledge/abi-translation-unit.md](knowledge/abi-translation-unit.md) | Observation | Active | 2026-04-22 |
 | Native CustomOS apps v0 — pattern for in-kernel applications | [knowledge/native-apps-v0.md](knowledge/native-apps-v0.md) | Pattern | Active | 2026-04-21 |
 | Kernel bring-up v0 (Multiboot2 → long mode → `kernel_main`) | [knowledge/kernel-bringup-v0.md](knowledge/kernel-bringup-v0.md) | Observation | Active | 2026-04-20 |
@@ -59,6 +61,9 @@ _Read this at every session start (after git sync). Each row links to a detailed
 | PCI enumeration v0 — legacy port-IO walk | [knowledge/pci-enum-v0.md](knowledge/pci-enum-v0.md) | Observation | Active | 2026-04-20 |
 | GPU discovery v0 — PCI classification + BAR map | [knowledge/gpu-discovery-v0.md](knowledge/gpu-discovery-v0.md) | Observation | Active | 2026-04-22 |
 | Driver shells v0 — net / usb / audio / gpu-probes | [knowledge/driver-shells-v0.md](knowledge/driver-shells-v0.md) | Observation | Active | 2026-04-22 |
+| xHCI enumeration v0 — Address Device + GET_DESCRIPTOR(Device) | [knowledge/xhci-enumeration-v0.md](knowledge/xhci-enumeration-v0.md) | Observation | Active | 2026-04-23 |
+| xHCI HID boot keyboard — end-to-end USB keyboard input | [knowledge/xhci-hid-keyboard-v0.md](knowledge/xhci-hid-keyboard-v0.md) | Observation | Active | 2026-04-23 |
+| Intel e1000 NIC driver — real packet I/O on commodity wired gigabit | [knowledge/e1000-driver-v0.md](knowledge/e1000-driver-v0.md) | Observation | Active | 2026-04-23 |
 | Kernel entropy pool — RDSEED/RDRAND/splitmix tier | [knowledge/kernel-entropy-v0.md](knowledge/kernel-entropy-v0.md) | Observation | Active | 2026-04-22 |
 | Runtime invariant checker — heap/frames/sched/CRx/canary/stack-overflow | [knowledge/runtime-invariant-checker-v0.md](knowledge/runtime-invariant-checker-v0.md) | Observation | Active | 2026-04-22 |
 | Crash dump v0 — embedded symbol table + bracketed dump file | [knowledge/crash-dump-v0.md](knowledge/crash-dump-v0.md) | Observation | Active | 2026-04-20 |

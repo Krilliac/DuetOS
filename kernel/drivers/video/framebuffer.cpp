@@ -143,6 +143,48 @@ bool FramebufferAvailable()
     return g_available;
 }
 
+bool FramebufferRebind(u64 phys, u32 width, u32 height, u32 pitch, u8 bpp)
+{
+    if (bpp != 32)
+    {
+        SerialWrite("[video/fb] rebind rejected: unsupported bpp=");
+        SerialWriteHex(bpp);
+        SerialWrite("\n");
+        return false;
+    }
+    if (pitch < width * 4 || (pitch & 3) != 0 || width == 0 || height == 0)
+    {
+        SerialWrite("[video/fb] rebind rejected: invalid pitch/width/height\n");
+        return false;
+    }
+    const u64 bytes = static_cast<u64>(pitch) * height;
+    void* virt = mm::MapMmio(phys, bytes);
+    if (virt == nullptr)
+    {
+        SerialWrite("[video/fb] rebind MapMmio failed — MMIO arena exhausted?\n");
+        return false;
+    }
+    g_info.virt = virt;
+    g_info.phys = phys;
+    g_info.width = width;
+    g_info.height = height;
+    g_info.pitch = pitch;
+    g_info.bpp = bpp;
+    g_available = true;
+    SerialWrite("[video/fb] rebound phys=");
+    SerialWriteHex(phys);
+    SerialWrite(" virt=");
+    SerialWriteHex(reinterpret_cast<u64>(virt));
+    SerialWrite(" ");
+    SerialWriteHex(width);
+    SerialWrite("x");
+    SerialWriteHex(height);
+    SerialWrite(" pitch=");
+    SerialWriteHex(pitch);
+    SerialWrite("\n");
+    return true;
+}
+
 FramebufferInfo FramebufferGet()
 {
     return g_info;
@@ -158,7 +200,8 @@ void FramebufferPutPixel(u32 x, u32 y, u32 rgb)
     {
         return;
     }
-    auto* row = reinterpret_cast<volatile u32*>(reinterpret_cast<u8*>(g_info.virt) + static_cast<u64>(y) * g_info.pitch);
+    auto* row =
+        reinterpret_cast<volatile u32*>(reinterpret_cast<u8*>(g_info.virt) + static_cast<u64>(y) * g_info.pitch);
     row[x] = rgb;
 }
 
@@ -249,10 +292,10 @@ void FramebufferDrawRect(u32 x, u32 y, u32 w, u32 h, u32 rgb, u32 thickness)
     {
         thickness = (cap == 0) ? 1 : cap;
     }
-    FramebufferFillRect(x, y, w, thickness, rgb);                        // top
-    FramebufferFillRect(x, y + h - thickness, w, thickness, rgb);        // bottom
-    FramebufferFillRect(x, y, thickness, h, rgb);                        // left
-    FramebufferFillRect(x + w - thickness, y, thickness, h, rgb);        // right
+    FramebufferFillRect(x, y, w, thickness, rgb);                 // top
+    FramebufferFillRect(x, y + h - thickness, w, thickness, rgb); // bottom
+    FramebufferFillRect(x, y, thickness, h, rgb);                 // left
+    FramebufferFillRect(x + w - thickness, y, thickness, h, rgb); // right
 }
 
 void FramebufferSelfTest()
@@ -275,19 +318,19 @@ void FramebufferSelfTest()
     // channel order (R top-left, G top-right, B bottom-left, white
     // bottom-right).
     constexpr u32 kSwatch = 64;
-    FramebufferFillRect(0, 0, kSwatch, kSwatch, 0x00FF0000);                                                // red
-    FramebufferFillRect(g_info.width - kSwatch, 0, kSwatch, kSwatch, 0x0000FF00);                           // green
-    FramebufferFillRect(0, g_info.height - kSwatch, kSwatch, kSwatch, 0x000000FF);                          // blue
-    FramebufferFillRect(g_info.width - kSwatch, g_info.height - kSwatch, kSwatch, kSwatch, 0x00FFFFFF);     // white
+    FramebufferFillRect(0, 0, kSwatch, kSwatch, 0x00FF0000);                                            // red
+    FramebufferFillRect(g_info.width - kSwatch, 0, kSwatch, kSwatch, 0x0000FF00);                       // green
+    FramebufferFillRect(0, g_info.height - kSwatch, kSwatch, kSwatch, 0x000000FF);                      // blue
+    FramebufferFillRect(g_info.width - kSwatch, g_info.height - kSwatch, kSwatch, kSwatch, 0x00FFFFFF); // white
 
     // 2-pixel framing rectangle along the outer edge. Top + bottom
     // bands cover the corners of the side bands, which is fine —
     // the colour is the same.
     constexpr u32 kFrame = 2;
-    FramebufferFillRect(0, 0, g_info.width, kFrame, 0x0080A0FF);                             // top
-    FramebufferFillRect(0, g_info.height - kFrame, g_info.width, kFrame, 0x0080A0FF);        // bottom
-    FramebufferFillRect(0, 0, kFrame, g_info.height, 0x0080A0FF);                            // left
-    FramebufferFillRect(g_info.width - kFrame, 0, kFrame, g_info.height, 0x0080A0FF);        // right
+    FramebufferFillRect(0, 0, g_info.width, kFrame, 0x0080A0FF);                      // top
+    FramebufferFillRect(0, g_info.height - kFrame, g_info.width, kFrame, 0x0080A0FF); // bottom
+    FramebufferFillRect(0, 0, kFrame, g_info.height, 0x0080A0FF);                     // left
+    FramebufferFillRect(g_info.width - kFrame, 0, kFrame, g_info.height, 0x0080A0FF); // right
 
     SerialWrite("[video/fb] self-test OK\n");
 }

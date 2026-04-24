@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../../arch/x86_64/traps.h"
 #include "../../core/result.h"
 #include "../../core/types.h"
 
@@ -271,6 +272,21 @@ struct MsixRoute
 };
 
 ::customos::core::Result<MsixRoute> PciMsixRouteSimple(DeviceAddress addr, u16 entry_index, u8 lapic_id, u8 vector);
+
+/// One-shot MSI-X setup for a single-vector device. Allocates an
+/// IRQ vector from the kernel pool (`IrqAllocVector`), installs
+/// `handler` on it, calls `PciMsixRouteSimple` to program the
+/// device's MSI-X entry `entry_index` routed to the BSP's LAPIC.
+/// Returns the allocated vector on success so the caller can enable
+/// device-specific interrupt-generation bits (USBCMD.IE, NVMe CQ
+/// IEN, etc.) that live OUTSIDE the PCI capability. The mapped
+/// table base is written into `*out_route` if non-null.
+///
+/// Failure modes: device lacks MSI-X capability → `Unsupported`;
+/// BAR missing / I/O → `IoError`; vector pool exhausted →
+/// `OutOfMemory`; table map failed → `OutOfMemory`.
+::customos::core::Result<u8> PciMsixBindSimple(DeviceAddress addr, u16 entry_index,
+                                               ::customos::arch::IrqHandler handler, MsixRoute* out_route);
 
 // -----------------------------------------------------------------
 // Class-code string for diagnostic logs. Returns a stable pointer to

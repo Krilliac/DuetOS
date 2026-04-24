@@ -463,6 +463,88 @@ enum SyscallNumber : u64
     // v0 limitations documented at Process::Win32ThreadHandle.
     // Backs Win32 CreateThread / CreateRemoteThread-on-self.
     SYS_THREAD_CREATE = 45,
+
+    // SYS_DEBUG_PRINT: rdi = user pointer to NUL-terminated ASCII
+    // string. Emits "[odbg] ..." on serial. Cap-gated on
+    // kCapSerialConsole. Backs Win32 OutputDebugStringA.
+    SYS_DEBUG_PRINT = 46,
+
+    // SYS_MEM_STATUS: rdi = user pointer to a 64-byte Win32
+    // MEMORYSTATUSEX struct. Populates from frame allocator
+    // stats. Backs Win32 GlobalMemoryStatusEx.
+    SYS_MEM_STATUS = 47,
+
+    // SYS_WAIT_MULTI: rdi = count, rsi = user pointer to handle
+    // array, rdx = bWaitAll, r10 = timeout_ms. Returns
+    // WAIT_OBJECT_0+i / WAIT_TIMEOUT / WAIT_FAILED.
+    // Backs Win32 WaitForMultipleObjects.
+    SYS_WAIT_MULTI = 48,
+
+    // SYS_SYSTEM_INFO: rdi = user pointer to Win32 SYSTEM_INFO
+    // (48 bytes). Populates with x86_64 constants. Backs
+    // GetSystemInfo / GetNativeSystemInfo.
+    SYS_SYSTEM_INFO = 49,
+
+    // SYS_DEBUG_PRINTW: rdi = user pointer to NUL-terminated
+    // UTF-16LE string. Strips to ASCII, emits "[odbgw] ...".
+    // Backs Win32 OutputDebugStringW.
+    SYS_DEBUG_PRINTW = 50,
+
+    // SYS_SEM_CREATE: rdi = initial count, rsi = max count.
+    // Returns Win32SemaphoreHandle (0x500..0x507) or -1.
+    // Backs Win32 CreateSemaphoreW / CreateSemaphoreA.
+    SYS_SEM_CREATE = 51,
+
+    // SYS_SEM_RELEASE: rdi = handle, rsi = release count.
+    // Returns PREVIOUS count on success. Wakes up to rsi
+    // waiters. Backs Win32 ReleaseSemaphore.
+    SYS_SEM_RELEASE = 52,
+
+    // SYS_SEM_WAIT: rdi = handle, rsi = timeout_ms. Blocks
+    // until count > 0, decrements, returns 0 (WAIT_OBJECT_0).
+    // Dispatched by the semaphore range in WaitForSingleObject v3.
+    SYS_SEM_WAIT = 53,
+
+    // SYS_THREAD_WAIT: rdi = thread handle (0x400..0x407),
+    // rsi = timeout_ms. Polls exit_code until != STILL_ACTIVE.
+    // Dispatched by the thread range in WaitForSingleObject v4.
+    SYS_THREAD_WAIT = 54,
+
+    // SYS_THREAD_EXIT_CODE: rdi = thread handle (0x400..0x407).
+    // Returns the recorded exit code (u32) as u64, or 0x103
+    // (STILL_ACTIVE) if the thread is still running. Returns
+    // u64(-1) on bad handle. The kernel writes this slot from
+    // SYS_EXIT when a Win32 thread task dies (batch 59).
+    // Backs Win32 GetExitCodeThread.
+    SYS_THREAD_EXIT_CODE = 55,
+
+    // SYS_NT_INVOKE: Windows NT syscall forwarding gateway.
+    // rdi = NT syscall number (e.g. 0x0F for NtClose).
+    // rsi..r9 carry up to five NT-ABI arguments.
+    // Returns the translated NTSTATUS in rax, or
+    // STATUS_NOT_IMPLEMENTED (0xC0000002) for any NT number not
+    // yet wired into the NT→Linux translator.
+    //
+    // Purpose: lets a user-mode ntdll.dll shim forward NT calls
+    // into the kernel without every individual NT stub needing
+    // its own SYS_* number. The kernel-side translator (in
+    // subsystems/translation/translate.cpp::NtTranslateToLinux)
+    // maps a small set of NT calls (NtClose, NtYieldExecution,
+    // NtDelayExecution, NtQueryPerformanceCounter,
+    // NtGetCurrentProcessorNumber, NtFlushBuffersFile,
+    // NtGetTickCount, NtQuerySystemTime, NtTerminateThread,
+    // NtTerminateProcess) onto matching Linux handlers in
+    // subsystems/linux/syscall.cpp.
+    //
+    // This is the Windows→Linux fallback path: anything a Win32
+    // subsystem needs that already has a Linux implementation
+    // can be reached via this bridge rather than reinvented on
+    // the native side.
+    //
+    // Moved to 56 from the original 46 during the merge of
+    // claude/refactor-inspect-command into the win32 batch-51-60
+    // branch — the win32 batches had already published 46..55.
+    SYS_NT_INVOKE = 56,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit
@@ -471,6 +553,16 @@ enum SyscallNumber : u64
 /// / SYS_READ etc. Bounds the on-kernel-stack bounce buffer the
 /// copy-in path uses so there's no unbounded user-controlled copy.
 inline constexpr u64 kSyscallPathMax = 256;
+
+/// Upper bound on the NUL-terminated string SYS_DEBUG_PRINT will
+/// scan/emit. Matches kSyscallWriteMax so the kernel-stack bounce
+/// buffer reuses the same ceiling.
+inline constexpr u64 kSyscallDebugPrintMax = 256;
+
+/// Cap on the number of handles a single SYS_WAIT_MULTI call may
+/// pass. Matches the Win32 MAXIMUM_WAIT_OBJECTS (64). Bounds the
+/// kernel-stack bounce array the syscall uses.
+inline constexpr u64 kSyscallWaitMultiMax = 64;
 
 void SyscallInit();
 

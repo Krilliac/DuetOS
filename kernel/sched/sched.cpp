@@ -598,6 +598,11 @@ core::Process* TaskProcess(Task* t)
     return t->process;
 }
 
+bool TaskIsDead(const Task* t)
+{
+    return t != nullptr && t->state == TaskState::Dead;
+}
+
 void FlagCurrentForKill(KillReason reason)
 {
     Task* t = Current();

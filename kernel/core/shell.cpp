@@ -10,6 +10,9 @@
 #include "../arch/x86_64/smp.h"
 #include "../arch/x86_64/thermal.h"
 #include "../arch/x86_64/timer.h"
+#include "../acpi/acpi.h"
+#include "../drivers/audio/pcspk.h"
+#include "../drivers/gpu/bochs_vbe.h"
 #include "../drivers/gpu/gpu.h"
 #include "../drivers/input/ps2kbd.h"
 #include "../drivers/input/ps2mouse.h"
@@ -29,6 +32,7 @@
 #include "../fs/vfs.h"
 #include "../debug/breakpoints.h"
 #include "../debug/probes.h"
+#include "../debug/inspect.h"
 #include "../mm/address_space.h"
 #include "../mm/frame_allocator.h"
 #include "../mm/kheap.h"
@@ -38,7 +42,9 @@
 #include "../security/guard.h"
 #include "elf_loader.h"
 #include "hexdump.h"
+#include "auth.h"
 #include "klog.h"
+#include "login.h"
 #include "process.h"
 #include "random.h"
 #include "reboot.h"
@@ -295,15 +301,22 @@ void CmdHelp()
     ConsoleWriteln("  SMBIOS       BIOS / SYSTEM / CHASSIS INFO");
     ConsoleWriteln("  POWER        AC / BATTERY / THERMAL SNAPSHOT");
     ConsoleWriteln("  THERMAL      RE-READ MSR THERMAL SENSORS");
+    ConsoleWriteln("  HWMON        UNIFIED SENSORS VIEW (SMBIOS + THERMAL + POWER + FANS)");
     ConsoleWriteln("  GPU          LIST DISCOVERED GPUS");
+    ConsoleWriteln("  VBE [W H [B]]  QUERY / SET BOCHS-VBE DISPLAY MODE");
     ConsoleWriteln("  NIC          LIST NICS + MAC + LINK");
     ConsoleWriteln("  ARP          ARP CACHE + STATS");
+    ConsoleWriteln("  PING IP      ICMP ECHO REQUEST + WAIT 1S FOR REPLY");
+    ConsoleWriteln("  NSLOOKUP NAME DNS A-RECORD LOOKUP (RESOLVER 10.0.2.3)");
+    ConsoleWriteln("  NTP [IP]     NTP QUERY (DEFAULT 216.239.35.0 — GOOGLE TIME1)");
+    ConsoleWriteln("  HTTP IP [P [PATH]] TCP CONNECT + GET / AND PRINT 16 LINES");
     ConsoleWriteln("  IPV4         IPV4 RX COUNTERS");
     ConsoleWriteln("  HEALTH       RUN RUNTIME INVARIANT SCAN (HEAP/FRAMES/SCHED/CRX)");
     ConsoleWriteln("  UUID [N]     GENERATE N V4 UUIDS FROM THE ENTROPY POOL");
     ConsoleWriteln("  ATTACKSIM    RUN RED-TEAM ATTACK SUITE (IDT/GDT/LSTAR/CANARY/LBA0)");
     ConsoleWriteln("  MEMDUMP A [N]  HEX+ASCII DUMP OF KERNEL MEMORY -> SERIAL");
     ConsoleWriteln("  INSTR A [N]  INSTRUCTION-BYTE DUMP AT ADDRESS -> SERIAL");
+    ConsoleWriteln("  INSPECT ...  RE / TRIAGE UMBRELLA (SYSCALLS|OPCODES|ARM) -> SERIAL");
     ConsoleWriteln("  BP ...       KERNEL BREAKPOINTS (SOFTWARE + HARDWARE)");
     ConsoleWriteln("  DUMPSTATE    SNAPSHOT EVERY KERNEL SUBSYSTEM -> SERIAL");
     ConsoleWriteln("");
@@ -313,6 +326,18 @@ void CmdHelp()
     ConsoleWriteln("  YIELD        FORCE A SCHEDULER YIELD");
     ConsoleWriteln("  REBOOT       RESET THE MACHINE (NO CONFIRM)");
     ConsoleWriteln("  HALT         STOP THE CPU (NO CONFIRM)");
+    ConsoleWriteln("  SHUTDOWN     ACPI SOFT-OFF VIA _S5 (QEMU EXITS; HALT ON FALLBACK)");
+    ConsoleWriteln("  BEEP [HZ [MS]]  PC SPEAKER TONE (DEFAULT 1000 HZ, 200 MS)");
+    ConsoleWriteln("");
+    ConsoleWriteln("ACCOUNTS / LOGIN:");
+    ConsoleWriteln("  USERS / WHO  LIST ACCOUNTS (* = CURRENT SESSION)");
+    ConsoleWriteln("  USERADD N P [ROLE]  CREATE ACCOUNT (ADMIN ONLY)");
+    ConsoleWriteln("  USERDEL N    DELETE ACCOUNT (ADMIN ONLY)");
+    ConsoleWriteln("  PASSWD OLD NEW           CHANGE OWN PASSWORD");
+    ConsoleWriteln("  PASSWD USER NEW --force  ADMIN FORCE-RESET");
+    ConsoleWriteln("  SU USER PW   SWITCH SESSION TO ANOTHER USER");
+    ConsoleWriteln("  LOGIN U P    LOG IN NON-INTERACTIVELY");
+    ConsoleWriteln("  LOGOUT       END SESSION + REOPEN LOGIN GATE");
     ConsoleWriteln("");
     ConsoleWriteln("COMPAT / IDENTITY:");
     ConsoleWriteln("  UNAME [-A]   KERNEL IDENTITY (-A VERBOSE)");
@@ -1255,7 +1280,9 @@ static const char* const kCommandSet[] = {
     "fatnew",    "fatrm",   "fattrunc",   "fatmkdir", "fatrmdir", "linuxexec", "translate",  "smbios",   "power",
     "battery",   "thermal", "temp",       "gpu",      "lsgpu",    "nic",       "lsnic",      "ip",       "arp",
     "ipv4",      "uuid",    "uuidgen",    "health",   "checkup",  "attacksim", "redteam",    "memdump",  "instr",
-    "dumpstate", "bp",      "breakpoint",
+    "dumpstate", "bp",      "breakpoint", "login",    "logout",   "passwd",    "useradd",    "userdel",  "users",
+    "who",       "su",      "hwmon",      "vbe",      "ping",     "nslookup",  "ntp",        "http",     "shutdown",
+    "poweroff",  "beep",    "inspect",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -2192,6 +2219,111 @@ void CmdThermal()
     ConsoleWriteln(r.thermal_throttle_hit ? "HIT" : "clear");
 }
 
+// One-shot hardware-monitor view — aggregates every sensor /
+// inventory source we have (SMBIOS, MSR thermal, AC / battery
+// stub, ACPI state) so a user can grep one command for the
+// whole picture. Mirrors `sensors + dmidecode + upower` on
+// Linux at a very rough level.
+void CmdHwmon()
+{
+    const auto snap = customos::drivers::power::PowerSnapshotRead();
+    const auto& smbios = customos::arch::SmbiosGet();
+
+    ConsoleWriteln("=== HWMON ===");
+    ConsoleWrite("CHASSIS:      ");
+    ConsoleWriteln(snap.chassis_is_laptop ? "laptop" : "desktop/unknown");
+    if (smbios.present)
+    {
+        ConsoleWrite("SYSTEM:       ");
+        ConsoleWrite(smbios.system_manufacturer);
+        ConsoleWrite(" / ");
+        ConsoleWriteln(smbios.system_product);
+        ConsoleWrite("BIOS:         ");
+        ConsoleWrite(smbios.bios_vendor);
+        ConsoleWrite(" / ");
+        ConsoleWriteln(smbios.bios_version);
+        ConsoleWrite("CPU BRAND:    ");
+        ConsoleWriteln(smbios.cpu_version);
+    }
+    else
+    {
+        ConsoleWriteln("SMBIOS:       (not present — boot firmware didn't expose it)");
+    }
+
+    ConsoleWriteln("-- thermal --");
+    if (snap.cpu_temp_c != 0 || snap.package_temp_c != 0 || snap.tj_max_c != 0)
+    {
+        ConsoleWrite("CORE TEMP:    ");
+        WriteU64Dec(snap.cpu_temp_c);
+        ConsoleWrite("C  PKG: ");
+        WriteU64Dec(snap.package_temp_c);
+        ConsoleWrite("C  TJ_MAX: ");
+        WriteU64Dec(snap.tj_max_c);
+        ConsoleWriteln("C");
+        ConsoleWrite("THROTTLE:     ");
+        ConsoleWriteln(snap.thermal_throttle_hit ? "HIT" : "clear");
+    }
+    else
+    {
+        ConsoleWriteln("CORE TEMP:    (MSR thermal sensors unavailable — QEMU TCG / old CPU)");
+    }
+
+    ConsoleWriteln("-- power --");
+    ConsoleWrite("AC STATE:     ");
+    ConsoleWriteln(customos::drivers::power::AcStateName(snap.ac));
+    const auto& b = snap.battery;
+    if (b.state == customos::drivers::power::kBatNotPresent)
+    {
+        ConsoleWriteln("BATTERY:      (not present)");
+    }
+    else
+    {
+        ConsoleWrite("BATTERY:      ");
+        ConsoleWrite(customos::drivers::power::BatteryStateName(b.state));
+        ConsoleWrite("  ");
+        if (b.percent <= 100)
+        {
+            WriteU64Dec(b.percent);
+            ConsoleWrite("%");
+        }
+        else
+        {
+            ConsoleWrite("?%");
+        }
+        if (b.rate_mw != 0)
+        {
+            ConsoleWrite("  rate=");
+            if (b.rate_mw < 0)
+            {
+                ConsoleWriteChar('-');
+                WriteU64Dec(static_cast<u64>(-b.rate_mw));
+            }
+            else
+            {
+                WriteU64Dec(static_cast<u64>(b.rate_mw));
+            }
+            ConsoleWrite("mW");
+        }
+        ConsoleWriteln("");
+    }
+
+    ConsoleWriteln("-- fans --");
+    // Fan-speed readback requires either ACPI _FAN evaluation (we
+    // have the AML parser but no _FAN caller) or a SuperIO / EC
+    // driver for the host's hardware-monitor chip (Winbond /
+    // Nuvoton / ITE). Neither is wired today. State the gap
+    // explicitly so a boot log confirms the command ran and just
+    // has no sensor to read.
+    ConsoleWriteln("FAN RPM:      (n/a — ACPI _FAN + SuperIO not implemented)");
+
+    if (snap.backend_is_stub)
+    {
+        ConsoleWriteln("");
+        ConsoleWriteln("NOTE: AC + battery are stubbed until the AML control method");
+        ConsoleWriteln("      evaluator lands; thermals come from MSR direct read.");
+    }
+}
+
 void CmdGpu()
 {
     const u64 n = customos::drivers::gpu::GpuCount();
@@ -2220,6 +2352,394 @@ void CmdGpu()
         }
         ConsoleWriteChar('\n');
     }
+}
+
+// Parse a decimal u32 from `s` into `*out`. Returns true on full
+// success. Accepts 1..5 digits (0..65535), which covers every
+// reasonable display dimension.
+bool ParseU16Decimal(const char* s, u16* out)
+{
+    if (s == nullptr || *s == '\0')
+        return false;
+    u32 v = 0;
+    for (u32 i = 0; s[i] != '\0'; ++i)
+    {
+        if (s[i] < '0' || s[i] > '9')
+            return false;
+        v = v * 10 + u32(s[i] - '0');
+        if (v > 0xFFFFu)
+            return false;
+    }
+    *out = u16(v);
+    return true;
+}
+
+void CmdVbe(u32 argc, char** argv)
+{
+    using customos::drivers::gpu::VbeCaps;
+    using customos::drivers::gpu::VbeQuery;
+    using customos::drivers::gpu::VbeSetMode;
+
+    if (argc == 1)
+    {
+        const VbeCaps c = VbeQuery();
+        if (!c.present)
+        {
+            ConsoleWriteln("VBE: not present (no Bochs / BGA-compatible GPU found)");
+            return;
+        }
+        ConsoleWrite("VBE: id=0xB0C");
+        WriteU64Hex(c.version, 1);
+        ConsoleWrite("  current=");
+        WriteU64Dec(c.cur_xres);
+        ConsoleWrite("x");
+        WriteU64Dec(c.cur_yres);
+        ConsoleWrite("x");
+        WriteU64Dec(c.cur_bpp);
+        ConsoleWrite(c.enabled ? " LIVE" : " DISABLED");
+        ConsoleWrite("  max=");
+        WriteU64Dec(c.max_xres);
+        ConsoleWrite("x");
+        WriteU64Dec(c.max_yres);
+        ConsoleWrite("x");
+        WriteU64Dec(c.max_bpp);
+        ConsoleWriteChar('\n');
+        ConsoleWriteln("Usage: vbe <width> <height> [bpp]   — set mode (bpp defaults to 32)");
+        ConsoleWriteln("       vbe                          — show current + max");
+        ConsoleWriteln("NOTE: mode-set programs the controller; the framebuffer driver");
+        ConsoleWriteln("      keeps its original layout until the compositor rewires.");
+        return;
+    }
+
+    if (argc < 3)
+    {
+        ConsoleWriteln("VBE: usage: vbe [width height [bpp]]");
+        return;
+    }
+    u16 width = 0, height = 0, bpp = 32;
+    if (!ParseU16Decimal(argv[1], &width) || !ParseU16Decimal(argv[2], &height))
+    {
+        ConsoleWriteln("VBE: width/height must be decimal integers");
+        return;
+    }
+    if (argc >= 4 && !ParseU16Decimal(argv[3], &bpp))
+    {
+        ConsoleWriteln("VBE: bpp must be decimal (8, 15, 16, 24, or 32)");
+        return;
+    }
+    if (VbeSetMode(width, height, bpp))
+    {
+        ConsoleWrite("VBE: mode set OK — ");
+        WriteU64Dec(width);
+        ConsoleWrite("x");
+        WriteU64Dec(height);
+        ConsoleWrite("x");
+        WriteU64Dec(bpp);
+        ConsoleWriteln("");
+
+        // Rebind the kernel framebuffer driver to the Bochs-
+        // stdvga BAR0 at the new dimensions so subsequent
+        // paints land at the requested resolution. Find the
+        // Bochs GPU in the discovery cache — BAR0 is the
+        // linear framebuffer aperture.
+        u64 lfb_phys = 0;
+        const u64 gn = customos::drivers::gpu::GpuCount();
+        for (u64 i = 0; i < gn; ++i)
+        {
+            const auto& g = customos::drivers::gpu::Gpu(i);
+            if (g.vendor_id == customos::drivers::gpu::kVendorQemuBochs && g.mmio_phys != 0)
+            {
+                lfb_phys = g.mmio_phys;
+                break;
+            }
+        }
+        if (lfb_phys == 0)
+        {
+            ConsoleWriteln("VBE: hardware programmed, but no Bochs BAR0 found — fb not rebound");
+            return;
+        }
+        const u32 pitch = static_cast<u32>(width) * 4;
+        if (customos::drivers::video::FramebufferRebind(lfb_phys, width, height, pitch, static_cast<u8>(bpp)))
+        {
+            customos::drivers::video::FramebufferClear(0);
+            ConsoleWriteln("VBE: framebuffer rebound; next recompose paints at the new size");
+            ConsoleWriteln("     (overlay widgets retain boot-time positions — known limitation)");
+        }
+        else
+        {
+            ConsoleWriteln("VBE: hardware programmed, but framebuffer rebind failed");
+        }
+    }
+    else
+    {
+        ConsoleWriteln("VBE: mode-set rejected (dimensions exceed max, bpp unsupported, or no BGA)");
+    }
+}
+
+// Parse dotted-quad `a.b.c.d`. Returns true on exact 4-octet match.
+bool ParseIpv4(const char* s, customos::net::Ipv4Address* out)
+{
+    u32 parts[4] = {};
+    u32 idx = 0;
+    u32 cur = 0;
+    bool had_digit = false;
+    for (u32 i = 0;; ++i)
+    {
+        const char c = s[i];
+        if (c == '\0' || c == '.')
+        {
+            if (!had_digit)
+                return false;
+            if (idx >= 4)
+                return false;
+            parts[idx++] = cur;
+            cur = 0;
+            had_digit = false;
+            if (c == '\0')
+                break;
+            continue;
+        }
+        if (c < '0' || c > '9')
+            return false;
+        cur = cur * 10 + u32(c - '0');
+        if (cur > 255)
+            return false;
+        had_digit = true;
+    }
+    if (idx != 4)
+        return false;
+    for (u32 i = 0; i < 4; ++i)
+        out->octets[i] = u8(parts[i]);
+    return true;
+}
+
+void CmdPing(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("PING: usage: ping <ipv4>");
+        return;
+    }
+    customos::net::Ipv4Address dst = {};
+    if (!ParseIpv4(argv[1], &dst))
+    {
+        ConsoleWriteln("PING: malformed IPv4 (expected dotted-quad)");
+        return;
+    }
+    // Pick a deterministic id/seq so repeats are diagnosable from
+    // a pcap — id changes per ping cycle, seq stays 1.
+    static u16 next_id = 0x0100;
+    const u16 id = next_id++;
+    const u16 seq = 1;
+    customos::net::NetPingArm(id, seq);
+    if (!customos::net::NetIcmpSendEcho(/*iface_index=*/0, dst, id, seq))
+    {
+        ConsoleWriteln("PING: send failed (ARP cache miss? try reaching a peer first)");
+        return;
+    }
+    // Wait up to ~1 second (100 ticks at 100 Hz) for a reply.
+    // The ICMP RX path runs from the e1000 RX polling task, so
+    // we just yield + poll.
+    for (u32 i = 0; i < 100; ++i)
+    {
+        customos::sched::SchedSleepTicks(1);
+        const auto r = customos::net::NetPingRead();
+        if (r.replied)
+        {
+            ConsoleWrite("PING: reply from ");
+            for (u64 j = 0; j < 4; ++j)
+            {
+                if (j != 0)
+                    ConsoleWriteChar('.');
+                WriteU64Dec(r.from.octets[j]);
+            }
+            ConsoleWrite("  rtt~=");
+            WriteU64Dec(r.rtt_ticks * 10); // 100 Hz tick = 10 ms
+            ConsoleWriteln("ms");
+            return;
+        }
+    }
+    ConsoleWriteln("PING: no reply within 1s");
+}
+
+void CmdHttp(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("HTTP: usage: http <ipv4> [port [path]]");
+        return;
+    }
+    customos::net::Ipv4Address dst = {};
+    if (!ParseIpv4(argv[1], &dst))
+    {
+        ConsoleWriteln("HTTP: malformed IPv4");
+        return;
+    }
+    u16 port = 80;
+    if (argc >= 3)
+    {
+        u16 p = 0;
+        if (!ParseU16Decimal(argv[2], &p))
+        {
+            ConsoleWriteln("HTTP: malformed port");
+            return;
+        }
+        port = p;
+    }
+    const char* path = "/";
+    if (argc >= 4)
+        path = argv[3];
+
+    // Build GET request. Host header uses the dotted-quad string
+    // the caller passed in since we don't (yet) track reverse
+    // DNS. Minimal HTTP/1.0 so we don't need keep-alive handling.
+    char req[512];
+    u32 ri = 0;
+    auto put = [&](const char* s)
+    {
+        while (*s && ri + 1 < sizeof(req))
+            req[ri++] = *s++;
+    };
+    put("GET ");
+    put(path);
+    put(" HTTP/1.0\r\nHost: ");
+    put(argv[1]);
+    put("\r\nConnection: close\r\n\r\n");
+
+    if (!customos::net::NetTcpConnect(/*iface_index=*/0, dst, port, reinterpret_cast<const u8*>(req), ri))
+    {
+        ConsoleWriteln("HTTP: connect failed (slot busy / ARP miss / oversized req)");
+        return;
+    }
+    ConsoleWrite("HTTP: connecting to ");
+    ConsoleWrite(argv[1]);
+    ConsoleWriteln(" ...");
+
+    // Poll up to 4 s for the response to arrive + FIN.
+    for (u32 i = 0; i < 400; ++i)
+    {
+        customos::sched::SchedSleepTicks(1);
+        const auto s = customos::net::NetTcpActiveSnapshot();
+        if (s.response_complete)
+        {
+            // Print the captured bytes.
+            u8 buf[2048];
+            const u32 n = customos::net::NetTcpActiveRead(buf, sizeof(buf));
+            ConsoleWrite("HTTP: ");
+            WriteU64Dec(n);
+            ConsoleWriteln(" bytes received");
+            // Print the first ~16 lines of the response so the
+            // user can see headers + a bit of body.
+            u32 lines = 0;
+            for (u32 j = 0; j < n && lines < 16; ++j)
+            {
+                const char c = static_cast<char>(buf[j]);
+                if (c == '\n')
+                    ++lines;
+                if (c == '\r')
+                    continue;
+                if (c == '\n' || (c >= 0x20 && c <= 0x7E))
+                    ConsoleWriteChar(c);
+            }
+            ConsoleWriteln("");
+            return;
+        }
+    }
+    ConsoleWriteln("HTTP: no complete response within 4s");
+}
+
+void CmdNtp(u32 argc, char** argv)
+{
+    // QEMU SLIRP doesn't run its own NTP server; callers pointing
+    // here need an IP SLIRP will forward to. Public stratum-1/2
+    // servers on UDP/123 work when SLIRP's outbound-UDP path is
+    // open (the default).
+    customos::net::Ipv4Address server{{216, 239, 35, 0}}; // Google time1.google.com
+    if (argc >= 2 && !ParseIpv4(argv[1], &server))
+    {
+        ConsoleWriteln("NTP: malformed server IP");
+        return;
+    }
+    if (!customos::net::NetNtpQuery(/*iface_index=*/0, server))
+    {
+        ConsoleWriteln("NTP: send failed (ARP miss for server + gateway)");
+        return;
+    }
+    for (u32 i = 0; i < 200; ++i) // up to ~2 s
+    {
+        customos::sched::SchedSleepTicks(1);
+        const auto r = customos::net::NetNtpResultRead();
+        if (r.synced)
+        {
+            ConsoleWrite("NTP: unix_secs=");
+            WriteU64Dec(r.unix_secs);
+            ConsoleWrite("  stratum=");
+            WriteU64Dec(r.stratum);
+            ConsoleWriteln("");
+            // Rough UTC decode — pure second division; no month /
+            // leap-year handling. Proves the epoch is sane enough
+            // to surface a recognisable time.
+            const u64 rem = r.unix_secs % 86400;
+            const u64 h = rem / 3600;
+            const u64 m = (rem / 60) % 60;
+            const u64 s = rem % 60;
+            ConsoleWrite("NTP: ~ ");
+            if (h < 10)
+                ConsoleWriteChar('0');
+            WriteU64Dec(h);
+            ConsoleWriteChar(':');
+            if (m < 10)
+                ConsoleWriteChar('0');
+            WriteU64Dec(m);
+            ConsoleWriteChar(':');
+            if (s < 10)
+                ConsoleWriteChar('0');
+            WriteU64Dec(s);
+            ConsoleWriteln(" UTC (time-of-day)");
+            return;
+        }
+    }
+    ConsoleWriteln("NTP: no response within 2s (SLIRP UDP/123 blocked? server down?)");
+}
+
+void CmdNslookup(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("NSLOOKUP: usage: nslookup <name> [resolver_ip]");
+        return;
+    }
+    customos::net::Ipv4Address resolver{{10, 0, 2, 3}}; // QEMU SLIRP default
+    if (argc >= 3 && !ParseIpv4(argv[2], &resolver))
+    {
+        ConsoleWriteln("NSLOOKUP: malformed resolver IP");
+        return;
+    }
+    if (!customos::net::NetDnsQueryA(/*iface_index=*/0, resolver, argv[1]))
+    {
+        ConsoleWriteln("NSLOOKUP: send failed (ARP miss, name too long, or no iface)");
+        return;
+    }
+    for (u32 i = 0; i < 200; ++i) // wait up to ~2 seconds
+    {
+        customos::sched::SchedSleepTicks(1);
+        const auto r = customos::net::NetDnsResultRead();
+        if (r.resolved)
+        {
+            ConsoleWrite("NSLOOKUP: ");
+            ConsoleWrite(argv[1]);
+            ConsoleWrite(" -> ");
+            for (u64 j = 0; j < 4; ++j)
+            {
+                if (j != 0)
+                    ConsoleWriteChar('.');
+                WriteU64Dec(r.ip.octets[j]);
+            }
+            ConsoleWriteln("");
+            return;
+        }
+    }
+    ConsoleWriteln("NSLOOKUP: no response within 2s (NXDOMAIN, no route, or server down)");
 }
 
 void CmdNic()
@@ -2969,6 +3489,119 @@ void CmdInstr(u32 argc, char** argv)
     ConsoleWriteln("INSTR: WROTE TO COM1");
 }
 
+void CmdInspectHelp()
+{
+    ConsoleWriteln("INSPECT: RE / TRIAGE UMBRELLA (SEE COM1 FOR REPORTS)");
+    ConsoleWriteln("  INSPECT SYSCALLS KERNEL | <PATH>  FIND SYSCALL SITES + COVERAGE");
+    ConsoleWriteln("  INSPECT OPCODES <PATH>            FIRST-BYTE HISTOGRAM + CLASS TALLY");
+    ConsoleWriteln("  INSPECT ARM ON|OFF|STATUS         ONE-SHOT OPCODES SCAN ON NEXT SPAWN");
+    ConsoleWriteln("  INSPECT HELP                      THIS LIST");
+}
+
+void CmdInspectSyscalls(u32 argc, char** argv)
+{
+    // argv[0]=inspect, argv[1]=syscalls, argv[2]=<target>
+    if (argc < 3)
+    {
+        ConsoleWriteln("INSPECT SYSCALLS: USAGE: INSPECT SYSCALLS KERNEL | <PATH>");
+        return;
+    }
+    if (StrEq(argv[2], "kernel"))
+    {
+        ConsoleWriteln("INSPECT SYSCALLS: SCANNING KERNEL .TEXT (SEE COM1)");
+        (void)customos::debug::SyscallScanKernelText();
+        ConsoleWriteln("INSPECT SYSCALLS: DONE");
+        return;
+    }
+    ConsoleWrite("INSPECT SYSCALLS: SCANNING FILE \"");
+    ConsoleWrite(argv[2]);
+    ConsoleWriteln("\" (SEE COM1)");
+    (void)customos::debug::SyscallScanFile(argv[2]);
+    ConsoleWriteln("INSPECT SYSCALLS: DONE");
+}
+
+void CmdInspectOpcodes(u32 argc, char** argv)
+{
+    // argv[0]=inspect, argv[1]=opcodes, argv[2]=<path>
+    if (argc < 3)
+    {
+        ConsoleWriteln("INSPECT OPCODES: USAGE: INSPECT OPCODES <PATH>");
+        return;
+    }
+    ConsoleWrite("INSPECT OPCODES: SCANNING FILE \"");
+    ConsoleWrite(argv[2]);
+    ConsoleWriteln("\" (SEE COM1)");
+    customos::debug::OpcodeScanFile(argv[2]);
+    ConsoleWriteln("INSPECT OPCODES: DONE");
+}
+
+void CmdInspectArm(u32 argc, char** argv)
+{
+    // argv[0]=inspect, argv[1]=arm, argv[2]=on|off|status
+    if (argc < 3)
+    {
+        ConsoleWriteln("INSPECT ARM: USAGE: INSPECT ARM ON|OFF|STATUS");
+        return;
+    }
+    if (StrEq(argv[2], "on"))
+    {
+        customos::debug::InspectArmSet(true);
+        ConsoleWriteln("INSPECT ARM: ARMED - OPCODES SCAN WILL FIRE ON NEXT SPAWN");
+        return;
+    }
+    if (StrEq(argv[2], "off"))
+    {
+        customos::debug::InspectArmSet(false);
+        ConsoleWriteln("INSPECT ARM: DISARMED");
+        return;
+    }
+    if (StrEq(argv[2], "status"))
+    {
+        ConsoleWriteln(customos::debug::InspectArmActive() ? "INSPECT ARM: STATE=ON (ONE-SHOT)" //
+                                                           : "INSPECT ARM: STATE=OFF");
+        return;
+    }
+    ConsoleWriteln("INSPECT ARM: UNKNOWN MODE (USE ON/OFF/STATUS)");
+}
+
+void CmdInspect(u32 argc, char** argv)
+{
+    // inspect <sub> ...
+    // Thin dispatcher — each subcommand handler parses its own
+    // argv[2..]. Keeps subcommands independent so `inspect
+    // opcodes /bin/foo.exe` can't be broken by a change to
+    // `inspect syscalls`.
+    if (argc < 2)
+    {
+        CmdInspectHelp();
+        return;
+    }
+    if (StrEq(argv[1], "syscalls"))
+    {
+        CmdInspectSyscalls(argc, argv);
+        return;
+    }
+    if (StrEq(argv[1], "opcodes"))
+    {
+        CmdInspectOpcodes(argc, argv);
+        return;
+    }
+    if (StrEq(argv[1], "arm"))
+    {
+        CmdInspectArm(argc, argv);
+        return;
+    }
+    if (StrEq(argv[1], "help"))
+    {
+        CmdInspectHelp();
+        return;
+    }
+    ConsoleWrite("INSPECT: UNKNOWN SUBCOMMAND \"");
+    ConsoleWrite(argv[1]);
+    ConsoleWriteln("\"");
+    CmdInspectHelp();
+}
+
 void CmdDumpState()
 {
     // Single-shot snapshot of every major kernel subsystem's
@@ -3200,7 +3833,15 @@ void CmdUname(u32 argc, char** argv)
 
 void CmdWhoami()
 {
-    ConsoleWriteln("root");
+    const char* name = AuthCurrentUserName();
+    if (name[0] == '\0')
+    {
+        ConsoleWriteln("(no session)");
+    }
+    else
+    {
+        ConsoleWriteln(name);
+    }
 }
 
 void CmdHostname()
@@ -5530,6 +6171,61 @@ void CmdFree()
     customos::arch::Halt();
 }
 
+void CmdBeep(u32 argc, char** argv)
+{
+    u32 freq = 1000; // default 1 kHz
+    u32 ms = 200;    // default 200 ms
+    if (argc >= 2)
+    {
+        u16 f = 0;
+        if (!ParseU16Decimal(argv[1], &f))
+        {
+            ConsoleWriteln("BEEP: frequency must be decimal");
+            return;
+        }
+        freq = f;
+    }
+    if (argc >= 3)
+    {
+        u16 d = 0;
+        if (!ParseU16Decimal(argv[2], &d))
+        {
+            ConsoleWriteln("BEEP: duration must be decimal ms");
+            return;
+        }
+        ms = d;
+    }
+    if (!customos::drivers::audio::PcSpeakerBeep(freq, ms))
+    {
+        ConsoleWriteln("BEEP: frequency out of PIT divider range (20..1193181)");
+        return;
+    }
+    ConsoleWrite("BEEP: ");
+    WriteU64Dec(freq);
+    ConsoleWrite(" Hz for ");
+    WriteU64Dec(ms);
+    ConsoleWriteln(" ms");
+}
+
+[[noreturn]] void CmdShutdownNow()
+{
+    ConsoleWriteln("SHUTDOWN: evaluating AML \\_S5 + writing PM1a...");
+    customos::arch::SerialWrite("[shell] user invoked shutdown\n");
+    // Flush any last bytes by driving a dummy serial write
+    // before the PM1 write that may cut power mid-instruction.
+    if (customos::acpi::AcpiShutdown())
+    {
+        // AcpiShutdown returns true only on never-reached paths;
+        // v0 implementation always returns after the write. Fall
+        // through.
+    }
+    // Firmware didn't honour S5 (most common on QEMU TCG unless
+    // -machine pc / q35 + the _PTS method runs, which we skip).
+    // Fall back to reboot, then halt if that also fails.
+    ConsoleWriteln("SHUTDOWN: S5 not honoured; falling back to halt.");
+    customos::arch::Halt();
+}
+
 void CmdHistory()
 {
     if (g_history_count == 0)
@@ -6127,6 +6823,208 @@ const char* HistoryExpand(const char* line)
     return HistoryAt(inv);
 }
 
+// ---------------------------------------------------------------
+// Account management commands — useradd / userdel / passwd /
+// users / login / logout / su. All thin wrappers around auth.h.
+// Admin-only paths are enforced here so the kernel-side API
+// stays pure data-access and callable from the login gate
+// without capability juggling.
+// ---------------------------------------------------------------
+
+const char* RoleName(AuthRole r)
+{
+    switch (r)
+    {
+    case AuthRole::Admin:
+        return "admin";
+    case AuthRole::User:
+        return "user";
+    case AuthRole::Guest:
+        return "guest";
+    }
+    return "?";
+}
+
+AuthRole RoleFromArg(const char* s)
+{
+    if (StrEq(s, "admin"))
+        return AuthRole::Admin;
+    if (StrEq(s, "guest"))
+        return AuthRole::Guest;
+    return AuthRole::User;
+}
+
+void CmdUsers()
+{
+    const u32 n = AuthAccountCount();
+    ConsoleWrite("USERS (");
+    WriteU64Dec(n);
+    ConsoleWriteln(" accounts)");
+    const char* active = AuthCurrentUserName();
+    for (u32 i = 0; i < n; ++i)
+    {
+        AccountView v = {};
+        if (!AuthAccountAt(i, &v))
+            continue;
+        ConsoleWrite("  ");
+        ConsoleWrite(v.username);
+        ConsoleWrite("  [");
+        ConsoleWrite(RoleName(v.role));
+        ConsoleWrite("]");
+        if (!v.has_password)
+        {
+            ConsoleWrite("  (no password)");
+        }
+        if (active[0] != '\0' && StrEq(active, v.username))
+        {
+            ConsoleWrite("  *");
+        }
+        ConsoleWriteChar('\n');
+    }
+}
+
+void CmdUseradd(u32 argc, char** argv)
+{
+    if (!AuthIsAdmin())
+    {
+        ConsoleWriteln("USERADD: PERMISSION DENIED (ADMIN ONLY)");
+        return;
+    }
+    if (argc < 3)
+    {
+        ConsoleWriteln("USERADD: USAGE: USERADD <NAME> <PASSWORD> [ROLE]");
+        ConsoleWriteln("  ROLE: admin | user (default) | guest");
+        return;
+    }
+    const AuthRole role = (argc >= 4) ? RoleFromArg(argv[3]) : AuthRole::User;
+    if (!AuthAddUser(argv[1], argv[2], role))
+    {
+        ConsoleWriteln("USERADD: FAILED (DUPLICATE, FULL TABLE, OR INVALID NAME/PASSWORD)");
+        return;
+    }
+    ConsoleWrite("USERADD: CREATED ");
+    ConsoleWrite(argv[1]);
+    ConsoleWrite(" [");
+    ConsoleWrite(RoleName(role));
+    ConsoleWriteln("]");
+}
+
+void CmdUserdel(u32 argc, char** argv)
+{
+    if (!AuthIsAdmin())
+    {
+        ConsoleWriteln("USERDEL: PERMISSION DENIED (ADMIN ONLY)");
+        return;
+    }
+    if (argc < 2)
+    {
+        ConsoleWriteln("USERDEL: USAGE: USERDEL <NAME>");
+        return;
+    }
+    if (!AuthDeleteUser(argv[1]))
+    {
+        ConsoleWriteln("USERDEL: FAILED (UNKNOWN USER OR LAST ADMIN)");
+        return;
+    }
+    ConsoleWrite("USERDEL: REMOVED ");
+    ConsoleWriteln(argv[1]);
+}
+
+void CmdPasswd(u32 argc, char** argv)
+{
+    // Self-service flow: `passwd <old> <new>` — change the
+    // current user's password. Admin flow: `passwd <name>
+    // <new>` — force-set another user's password. Without
+    // enough args, print usage.
+    const char* me = AuthCurrentUserName();
+    if (me[0] == '\0')
+    {
+        ConsoleWriteln("PASSWD: NO ACTIVE SESSION");
+        return;
+    }
+    if (argc == 3)
+    {
+        // Self-service: argv[1] = old, argv[2] = new
+        if (!AuthChangePassword(me, argv[1], argv[2]))
+        {
+            ConsoleWriteln("PASSWD: FAILED (WRONG OLD PASSWORD OR INVALID NEW PASSWORD)");
+            return;
+        }
+        ConsoleWriteln("PASSWD: PASSWORD UPDATED");
+        return;
+    }
+    if (argc == 4)
+    {
+        // Admin flow: argv[1] = user, argv[2] = new, argv[3] = "--force"
+        if (!AuthIsAdmin())
+        {
+            ConsoleWriteln("PASSWD: PERMISSION DENIED (ADMIN ONLY FOR FORCE RESET)");
+            return;
+        }
+        if (!StrEq(argv[3], "--force"))
+        {
+            ConsoleWriteln("PASSWD: USAGE: PASSWD <USER> <NEW_PW> --force");
+            return;
+        }
+        if (!AuthChangePassword(argv[1], nullptr, argv[2]))
+        {
+            ConsoleWriteln("PASSWD: FAILED (UNKNOWN USER OR INVALID PASSWORD)");
+            return;
+        }
+        ConsoleWrite("PASSWD: PASSWORD FOR ");
+        ConsoleWrite(argv[1]);
+        ConsoleWriteln(" UPDATED");
+        return;
+    }
+    ConsoleWriteln("PASSWD: USAGE:");
+    ConsoleWriteln("  PASSWD <OLD_PW> <NEW_PW>                (SELF-SERVICE)");
+    ConsoleWriteln("  PASSWD <USER> <NEW_PW> --force          (ADMIN RESET)");
+}
+
+void CmdLogout()
+{
+    if (!AuthIsAuthenticated())
+    {
+        ConsoleWriteln("LOGOUT: NO ACTIVE SESSION");
+        return;
+    }
+    ConsoleWrite("LOGOUT: GOODBYE, ");
+    ConsoleWriteln(AuthCurrentUserName());
+    LoginReopen();
+}
+
+void CmdSu(u32 argc, char** argv)
+{
+    if (argc < 3)
+    {
+        ConsoleWriteln("SU: USAGE: SU <USER> <PASSWORD>");
+        return;
+    }
+    if (!AuthLogin(argv[1], argv[2]))
+    {
+        ConsoleWriteln("SU: AUTHENTICATION FAILED");
+        return;
+    }
+    ConsoleWrite("SU: SWITCHED TO ");
+    ConsoleWriteln(argv[1]);
+}
+
+void CmdLoginCmd(u32 argc, char** argv)
+{
+    if (argc < 3)
+    {
+        ConsoleWriteln("LOGIN: USAGE: LOGIN <USER> <PASSWORD>");
+        return;
+    }
+    if (!AuthLogin(argv[1], argv[2]))
+    {
+        ConsoleWriteln("LOGIN: AUTHENTICATION FAILED");
+        return;
+    }
+    ConsoleWrite("LOGIN: WELCOME, ");
+    ConsoleWriteln(argv[1]);
+}
+
 void Dispatch(char* line)
 {
     // !N / !! history expansion — resolve before tokenizing so
@@ -6570,6 +7468,11 @@ void Dispatch(char* line)
         CmdPower();
         return;
     }
+    if (StrEq(cmd, "hwmon"))
+    {
+        CmdHwmon();
+        return;
+    }
     if (StrEq(cmd, "thermal") || StrEq(cmd, "temp"))
     {
         CmdThermal();
@@ -6578,6 +7481,31 @@ void Dispatch(char* line)
     if (StrEq(cmd, "gpu") || StrEq(cmd, "lsgpu"))
     {
         CmdGpu();
+        return;
+    }
+    if (StrEq(cmd, "vbe"))
+    {
+        CmdVbe(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "ping"))
+    {
+        CmdPing(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "nslookup"))
+    {
+        CmdNslookup(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "ntp"))
+    {
+        CmdNtp(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "http"))
+    {
+        CmdHttp(argc, argv);
         return;
     }
     if (StrEq(cmd, "nic") || StrEq(cmd, "lsnic") || StrEq(cmd, "ip"))
@@ -6630,6 +7558,11 @@ void Dispatch(char* line)
         CmdInstr(argc, argv);
         return;
     }
+    if (StrEq(cmd, "inspect"))
+    {
+        CmdInspect(argc, argv);
+        return;
+    }
     if (StrEq(cmd, "dumpstate"))
     {
         CmdDumpState();
@@ -6663,6 +7596,41 @@ void Dispatch(char* line)
     if (StrEq(cmd, "whoami"))
     {
         CmdWhoami();
+        return;
+    }
+    if (StrEq(cmd, "users") || StrEq(cmd, "who"))
+    {
+        CmdUsers();
+        return;
+    }
+    if (StrEq(cmd, "useradd"))
+    {
+        CmdUseradd(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "userdel"))
+    {
+        CmdUserdel(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "passwd"))
+    {
+        CmdPasswd(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "logout"))
+    {
+        CmdLogout();
+        return;
+    }
+    if (StrEq(cmd, "su"))
+    {
+        CmdSu(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "login"))
+    {
+        CmdLoginCmd(argc, argv);
         return;
     }
     if (StrEq(cmd, "hostname"))
@@ -6904,6 +7872,16 @@ void Dispatch(char* line)
     {
         CmdHaltNow();
         // unreachable
+    }
+    if (StrEq(cmd, "shutdown") || StrEq(cmd, "poweroff"))
+    {
+        CmdShutdownNow();
+        // unreachable
+    }
+    if (StrEq(cmd, "beep"))
+    {
+        CmdBeep(argc, argv);
+        return;
     }
     ConsoleWrite("COMMAND NOT FOUND: ");
     ConsoleWriteln(cmd);

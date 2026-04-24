@@ -21,9 +21,11 @@
 # The final image is what the ISO target packages. Stage 1 is a throwaway.
 
 set(CUSTOMOS_KERNEL_SHARED_SOURCES
+    core/auth.cpp
     core/heartbeat.cpp
     core/hexdump.cpp
     core/klog.cpp
+    core/login.cpp
     core/main.cpp
     core/panic.cpp
     core/process.cpp
@@ -85,11 +87,16 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     arch/x86_64/usermode.S
     cpu/percpu.cpp
     debug/breakpoints.cpp
+    debug/inspect.cpp
     debug/probes.cpp
+    debug/syscall_scan.cpp
     drivers/input/ps2kbd.cpp
     drivers/input/ps2mouse.cpp
     drivers/audio/audio.cpp
+    drivers/audio/pcspk.cpp
+    drivers/gpu/bochs_vbe.cpp
     drivers/gpu/gpu.cpp
+    drivers/gpu/virtio_gpu.cpp
     drivers/net/net.cpp
     drivers/pci/pci.cpp
     drivers/power/power.cpp
@@ -246,6 +253,63 @@ add_custom_command(
 )
 
 list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_HELLO_WINAPI_HEADER}")
+
+# ----------------------------------------------------------------------------
+# Fourth PE fixture: thread_stress.exe — exercises CreateThread,
+# CreateEventW, SetEvent, WaitForSingleObject round-trip. Verifies
+# the batch-50 SYS_THREAD_CREATE wiring works end-to-end: main
+# creates a child thread, child writes a sentinel + signals an
+# event, main wakes + checks the sentinel.
+# ----------------------------------------------------------------------------
+set(CUSTOMOS_THREAD_STRESS_SRC "${CMAKE_SOURCE_DIR}/userland/apps/thread_stress/hello.c")
+file(GLOB CUSTOMOS_THREAD_STRESS_DEFS
+    "${CMAKE_SOURCE_DIR}/userland/apps/thread_stress/*.def")
+set(CUSTOMOS_THREAD_STRESS_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_thread_stress.h")
+set(CUSTOMOS_THREAD_STRESS_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-thread-stress.sh")
+
+add_custom_command(
+    OUTPUT "${CUSTOMOS_THREAD_STRESS_HEADER}"
+    COMMAND "${CUSTOMOS_THREAD_STRESS_SCRIPT}"
+            "${CMAKE_SOURCE_DIR}"
+            "${CUSTOMOS_THREAD_STRESS_HEADER}"
+    DEPENDS
+        "${CUSTOMOS_THREAD_STRESS_SRC}"
+        ${CUSTOMOS_THREAD_STRESS_DEFS}
+        "${CUSTOMOS_THREAD_STRESS_SCRIPT}"
+        "${CUSTOMOS_EMBED_BLOB_SCRIPT}"
+    COMMENT "Compiling + embedding /bin/thread_stress.exe (CreateThread path)"
+    VERBATIM
+)
+
+list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_THREAD_STRESS_HEADER}")
+
+# ----------------------------------------------------------------------------
+# Fifth PE fixture: syscall_stress.exe — exercises the batch-51
+# Win32 API additions: OutputDebugStringA, ExitThread,
+# GetProcessTimes / GetThreadTimes / GetSystemTimes,
+# GlobalMemoryStatusEx, WaitForMultipleObjects.
+# ----------------------------------------------------------------------------
+set(CUSTOMOS_SYSCALL_STRESS_SRC "${CMAKE_SOURCE_DIR}/userland/apps/syscall_stress/hello.c")
+file(GLOB CUSTOMOS_SYSCALL_STRESS_DEFS
+    "${CMAKE_SOURCE_DIR}/userland/apps/syscall_stress/*.def")
+set(CUSTOMOS_SYSCALL_STRESS_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_syscall_stress.h")
+set(CUSTOMOS_SYSCALL_STRESS_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-syscall-stress.sh")
+
+add_custom_command(
+    OUTPUT "${CUSTOMOS_SYSCALL_STRESS_HEADER}"
+    COMMAND "${CUSTOMOS_SYSCALL_STRESS_SCRIPT}"
+            "${CMAKE_SOURCE_DIR}"
+            "${CUSTOMOS_SYSCALL_STRESS_HEADER}"
+    DEPENDS
+        "${CUSTOMOS_SYSCALL_STRESS_SRC}"
+        ${CUSTOMOS_SYSCALL_STRESS_DEFS}
+        "${CUSTOMOS_SYSCALL_STRESS_SCRIPT}"
+        "${CUSTOMOS_EMBED_BLOB_SCRIPT}"
+    COMMENT "Compiling + embedding /bin/syscall_stress.exe (batch 51 API coverage)"
+    VERBATIM
+)
+
+list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_SYSCALL_STRESS_HEADER}")
 
 set(CUSTOMOS_KERNEL_LINKER_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/arch/x86_64/linker.ld")
 

@@ -58,6 +58,23 @@ Result LinuxGapFill(arch::TrapFrame* frame);
 // the native syscall number.
 Result NativeGapFill(arch::TrapFrame* frame);
 
+// Translate an NT (Windows kernel) syscall invocation to a Linux
+// primitive. Used by the native SYS_NT_INVOKE handler — a future
+// user-mode ntdll.dll shim issues SYS_NT_INVOKE with
+//   rdi = NT syscall number
+//   rsi..r9 = up to five NT-ABI arguments
+// and this function dispatches to the nearest Linux handler,
+// translating POSIX errno returns to NTSTATUS on the way out.
+// `nt_nr` is read from `frame->rdi`; the remaining registers
+// are re-interpreted by each NT-specific translator. Returns
+// `{true, ntstatus}` on handled, `{false, 0}` to let the caller
+// log-and-bail with STATUS_NOT_IMPLEMENTED.
+//
+// Deliberately small: only the NT calls with a clean 1:1 Linux
+// mapping are wired today. Expand alongside the ntdll shim as
+// specific Windows binaries reach for specific NT calls.
+Result NtTranslateToLinux(arch::TrapFrame* frame);
+
 // Per-direction hit counters. Indexed by the lowest 10 bits of
 // the syscall number (covers both Linux's ~400-entry table and
 // native's ~30-entry table). Tracks "translation ran AND

@@ -6,6 +6,7 @@
 #include "../../core/process.h"
 #include "../../core/random.h"
 #include "../../mm/paging.h"
+#include "../../sched/sched.h"
 #include "../linux/linux_syscall_table_generated.h"
 #include "../linux/syscall.h"
 #include "../win32/heap.h"
@@ -21,6 +22,21 @@ namespace
 // see consistent numbers regardless of which path they came in
 // through.
 constexpr i64 kEFAULT = -14;
+
+// NTSTATUS values we produce for the NT→Linux translator. Only
+// the handful we actually need; Windows defines many more.
+//   STATUS_SUCCESS              (0)          — fall-through success
+//   STATUS_NOT_IMPLEMENTED      (0xC0000002) — no translation
+//   STATUS_INVALID_HANDLE       (0xC0000008) — bad FILE_HANDLE
+//   STATUS_INVALID_PARAMETER    (0xC000000D) — bad arg shape
+//   STATUS_ACCESS_DENIED        (0xC0000022) — cap denied
+//   STATUS_UNSUCCESSFUL         (0xC0000001) — catch-all failure
+constexpr i64 kStatusSuccess = 0;
+constexpr i64 kStatusNotImplemented = static_cast<i64>(0xC0000002ll);
+constexpr i64 kStatusInvalidHandle = static_cast<i64>(0xC0000008ll);
+constexpr i64 kStatusInvalidParam = static_cast<i64>(0xC000000Dll);
+constexpr i64 kStatusAccessDenied = static_cast<i64>(0xC0000022ll);
+constexpr i64 kStatusUnsuccessful = static_cast<i64>(0xC0000001ll);
 
 // Linux syscall numbers owned by the translation unit.
 //
@@ -122,6 +138,25 @@ bool ShouldLogMiss(MissSampleTable& t, u64 nr)
         ++t.suppressed[idx];
     ++t.suppressed_total;
     return false;
+}
+
+// One-shot summary of misses we've suppressed (sampled out)
+// since the last dump. Reports cumulative + delta so the
+// telemetry consumer can both see history and watch the rate.
+void DumpSuppressedMissSummary(const char* origin, MissSampleTable& t)
+{
+    const u64 cum = t.suppressed_total;
+    const u64 delta = cum - t.suppressed_reported;
+    t.suppressed_reported = cum;
+    arch::SerialWrite("[translate-miss-suppressed] ");
+    arch::SerialWrite(origin);
+    arch::SerialWrite(" cumulative=");
+    arch::SerialWriteHex(cum);
+    arch::SerialWrite(" delta=");
+    arch::SerialWriteHex(delta);
+    arch::SerialWrite(" emitted=");
+    arch::SerialWriteHex(t.emitted_total);
+    arch::SerialWrite("\n");
 }
 
 // Log prefix so boot-log grep is easy.
@@ -385,6 +420,218 @@ i64 NativeWin32Free(arch::TrapFrame* f)
     return 0;
 }
 
+// ---------------------------------------------------------------
+// NT → Linux translator.
+//
+// Each NtDo<Name> handler reads NT-ABI arguments out of the
+// trap frame (rsi..r9 — remember rdi carries the NT number
+// for SYS_NT_INVOKE), fabricates the Linux-ABI arg shape the
+// matching Linux* wrapper expects, and maps the POSIX errno
+// return to an NTSTATUS.
+//
+// Signature convention: each NtDo<Name> returns the final
+// NTSTATUS directly; the SYS_NT_INVOKE dispatcher writes that
+// into frame->rax as the caller-visible return.
+// ---------------------------------------------------------------
+
+// Bedrock NT syscall numbers we translate. Kept as a handful
+// with clean 1:1 Linux mappings — expand as real ntdll-shim
+// demand arrives.
+enum : u64
+{
+    kNtClose = 0x000F,
+    kNtYieldExecution = 0x0046,
+    kNtDelayExecution = 0x0034,
+    kNtQueryPerformanceCounter = 0x0031,
+    kNtGetCurrentProcessorNumber = 0x00DA,
+    kNtTerminateThread = 0x0053,
+    kNtTerminateProcess = 0x002C,
+    kNtFlushBuffersFile = 0x004B,
+    kNtGetTickCount = 0x0171,
+    kNtQuerySystemTime = 0x005A,
+};
+
+// POSIX errno (Linux helpers return negative) → NTSTATUS.
+i64 ErrnoToNtStatus(i64 posix_rv)
+{
+    if (posix_rv >= 0)
+        return kStatusSuccess;
+    switch (-posix_rv)
+    {
+    case 9: // EBADF
+        return kStatusInvalidHandle;
+    case 13: // EACCES
+    case 1:  // EPERM
+        return kStatusAccessDenied;
+    case 14: // EFAULT
+    case 22: // EINVAL
+        return kStatusInvalidParam;
+    case 38: // ENOSYS
+        return kStatusNotImplemented;
+    default:
+        return kStatusUnsuccessful;
+    }
+}
+
+// NtClose(HANDLE). In v0 every Win32 handle comes from our own
+// stable numbering; FAT32 fds (linux-ABI) occupy [3, 16). Forward
+// to LinuxClose when the argument looks like an fd; for the
+// Win32-shaped handle ranges, return success (the Win32
+// file-close path is SYS_FILE_CLOSE and ntdll should route there
+// separately).
+i64 NtDoClose(arch::TrapFrame* f)
+{
+    const u64 h = f->rsi;
+    if (h >= 3 && h < 16)
+    {
+        const i64 rv = ::customos::subsystems::linux::LinuxClose(h);
+        return ErrnoToNtStatus(rv);
+    }
+    // Out-of-our-range handle: treat as already-closed success.
+    // Win32 CloseHandle is defined to succeed on previously-
+    // closed handles anyway.
+    return kStatusSuccess;
+}
+
+// NtYieldExecution(): drop the remaining time slice.
+i64 NtDoYieldExecution(arch::TrapFrame* /*f*/)
+{
+    ::customos::subsystems::linux::LinuxSchedYield();
+    return kStatusSuccess;
+}
+
+// NtDelayExecution(BOOLEAN Alertable, PLARGE_INTEGER Interval).
+// Interval is in 100 ns units, negative means relative.
+// Translate to a Linux timespec and call LinuxNanosleep.
+i64 NtDoDelayExecution(arch::TrapFrame* f)
+{
+    const u64 user_interval = f->rdx;
+    if (user_interval == 0)
+        return kStatusInvalidParam;
+    // Read the LARGE_INTEGER (i64) from user space.
+    i64 interval = 0;
+    if (!mm::CopyFromUser(&interval, reinterpret_cast<const void*>(user_interval), sizeof(interval)))
+        return kStatusInvalidParam;
+    // Negative = relative (the common case for Sleep(ms)).
+    // Positive = absolute since 1601 — we don't do absolute;
+    // just diff from NowNs for an approximation.
+    u64 ns = 0;
+    if (interval < 0)
+    {
+        ns = static_cast<u64>(-interval) * 100ull;
+    }
+    else
+    {
+        // Approximate: compute now in Win FILETIME units, diff.
+        // Good enough for v0; precise absolute wait arrives with
+        // the RTC integration.
+        const u64 now_ns = ::customos::subsystems::linux::LinuxNowNs();
+        const u64 abs_ns = static_cast<u64>(interval) * 100ull;
+        ns = (abs_ns > now_ns) ? (abs_ns - now_ns) : 0;
+    }
+    struct
+    {
+        i64 tv_sec;
+        i64 tv_nsec;
+    } req{static_cast<i64>(ns / 1'000'000'000ull), static_cast<i64>(ns % 1'000'000'000ull)};
+    // Build a temporary bounce buffer in kernel — user_rem=0.
+    // LinuxNanosleep reads via CopyFromUser, so we need a user-
+    // accessible address. Instead, call the internal helper
+    // directly by faking: for v0 we just compute the tick count
+    // and SchedSleepTicks. Simpler than round-tripping.
+    const u64 total_ns = static_cast<u64>(req.tv_sec) * 1'000'000'000ull + static_cast<u64>(req.tv_nsec);
+    const u64 ticks = (total_ns + 9'999'999ull) / 10'000'000ull; // 10 ms/tick
+    if (ticks > 0)
+        sched::SchedSleepTicks(ticks);
+    return kStatusSuccess;
+}
+
+// NtQueryPerformanceCounter(PLARGE_INTEGER Counter, PLARGE_INTEGER
+// Frequency): counter = NowNs(), freq = 1_000_000_000 (1 GHz virtual).
+i64 NtDoQueryPerformanceCounter(arch::TrapFrame* f)
+{
+    const u64 user_counter = f->rsi;
+    const u64 user_freq = f->rdx;
+    if (user_counter == 0)
+        return kStatusInvalidParam;
+    const i64 counter = static_cast<i64>(::customos::subsystems::linux::LinuxNowNs());
+    if (!mm::CopyToUser(reinterpret_cast<void*>(user_counter), &counter, sizeof(counter)))
+        return kStatusInvalidParam;
+    if (user_freq != 0)
+    {
+        const i64 freq = 1'000'000'000;
+        if (!mm::CopyToUser(reinterpret_cast<void*>(user_freq), &freq, sizeof(freq)))
+            return kStatusInvalidParam;
+    }
+    return kStatusSuccess;
+}
+
+// NtGetCurrentProcessorNumber(): BSP-only → 0.
+i64 NtDoGetCurrentProcessorNumber(arch::TrapFrame* /*f*/)
+{
+    return 0;
+}
+
+// NtTerminateThread(HANDLE Thread, NTSTATUS ExitStatus): we have
+// one task per process in v0, so this behaves like exit.
+[[noreturn]] void NtDoTerminateThread(arch::TrapFrame* f)
+{
+    const u64 exit_status = f->rdx;
+    ::customos::subsystems::linux::LinuxExit(exit_status);
+}
+
+// NtTerminateProcess(HANDLE Process, NTSTATUS ExitStatus): same as
+// above for single-task-per-process. A proper implementation would
+// null-check the handle (NULL = current) and reap all threads.
+[[noreturn]] void NtDoTerminateProcess(arch::TrapFrame* f)
+{
+    const u64 exit_status = f->rdx;
+    ::customos::subsystems::linux::LinuxExit(exit_status);
+}
+
+// NtFlushBuffersFile(HANDLE, PIO_STATUS_BLOCK): forward to fsync
+// when the handle looks like an fd.
+i64 NtDoFlushBuffersFile(arch::TrapFrame* f)
+{
+    const u64 h = f->rsi;
+    if (h < 3 || h >= 16)
+        return kStatusInvalidHandle;
+    const i64 rv = ::customos::subsystems::linux::LinuxFsync(h);
+    return ErrnoToNtStatus(rv);
+}
+
+// NtGetTickCount(): milliseconds since boot.
+i64 NtDoGetTickCount(arch::TrapFrame* /*f*/)
+{
+    const u64 ns = ::customos::subsystems::linux::LinuxNowNs();
+    return static_cast<i64>(ns / 1'000'000ull);
+}
+
+// NtQuerySystemTime(PLARGE_INTEGER Time): current time as FILETIME
+// (100 ns ticks since 1601). We only know ns-since-boot — report
+// that directly (FILETIME semantics will fall out once the RTC
+// integration provides a real epoch).
+i64 NtDoQuerySystemTime(arch::TrapFrame* f)
+{
+    const u64 user_time = f->rsi;
+    if (user_time == 0)
+        return kStatusInvalidParam;
+    const i64 ft = static_cast<i64>(::customos::subsystems::linux::LinuxNowNs() / 100ull);
+    if (!mm::CopyToUser(reinterpret_cast<void*>(user_time), &ft, sizeof(ft)))
+        return kStatusInvalidParam;
+    return kStatusSuccess;
+}
+
+// Log an NT-translation entry so the boot log is grep-able.
+void LogNtTranslation(u64 nt_nr, const char* target)
+{
+    arch::SerialWrite("[nt-translate] ");
+    arch::SerialWriteHex(nt_nr);
+    arch::SerialWrite(" -> ");
+    arch::SerialWrite(target);
+    arch::SerialWrite("\n");
+}
+
 } // namespace
 
 // Public name-lookup helpers — the generated Linux + NT syscall
@@ -506,6 +753,77 @@ Result NativeGapFill(arch::TrapFrame* frame)
     if (r.handled)
         BumpHits(g_native_hits, nr);
     BumpOverhead(g_native_overhead, ReadTsc() - tsc_entry);
+    return r;
+}
+
+// Translate an NT syscall invocation into a call on a Linux
+// primitive. See translate.h for the ABI. NT-number lives in
+// frame->rdi (SYS_NT_INVOKE convention); each handler re-reads
+// rsi..r9 for its specific NT-ABI arguments.
+Result NtTranslateToLinux(arch::TrapFrame* frame)
+{
+    KLOG_TRACE_SCOPE("translate", "NtTranslateToLinux");
+    const u64 nt_nr = frame->rdi;
+    Result r{false, 0};
+    switch (nt_nr)
+    {
+    case kNtClose:
+        LogNtTranslation(nt_nr, "linux:close");
+        r = {true, NtDoClose(frame)};
+        break;
+    case kNtYieldExecution:
+        LogNtTranslation(nt_nr, "linux:sched_yield");
+        r = {true, NtDoYieldExecution(frame)};
+        break;
+    case kNtDelayExecution:
+        LogNtTranslation(nt_nr, "linux:nanosleep");
+        r = {true, NtDoDelayExecution(frame)};
+        break;
+    case kNtQueryPerformanceCounter:
+        LogNtTranslation(nt_nr, "linux:clock_gettime");
+        r = {true, NtDoQueryPerformanceCounter(frame)};
+        break;
+    case kNtGetCurrentProcessorNumber:
+        LogNtTranslation(nt_nr, "synthetic:zero");
+        r = {true, NtDoGetCurrentProcessorNumber(frame)};
+        break;
+    case kNtFlushBuffersFile:
+        LogNtTranslation(nt_nr, "linux:fsync");
+        r = {true, NtDoFlushBuffersFile(frame)};
+        break;
+    case kNtGetTickCount:
+        LogNtTranslation(nt_nr, "linux:now-ns/ms");
+        r = {true, NtDoGetTickCount(frame)};
+        break;
+    case kNtQuerySystemTime:
+        LogNtTranslation(nt_nr, "linux:now-ns->filetime");
+        r = {true, NtDoQuerySystemTime(frame)};
+        break;
+    case kNtTerminateThread:
+        LogNtTranslation(nt_nr, "linux:exit");
+        NtDoTerminateThread(frame); // [[noreturn]]
+        break;
+    case kNtTerminateProcess:
+        LogNtTranslation(nt_nr, "linux:exit_group");
+        NtDoTerminateProcess(frame); // [[noreturn]]
+        break;
+    default:
+        // Nothing wired for this NT number — let the caller see
+        // STATUS_NOT_IMPLEMENTED so the ntdll shim can bail
+        // cleanly. Log once at the same sampling cadence as the
+        // Linux-miss path.
+        if (ShouldLogMiss(g_native_miss_sampling, nt_nr))
+        {
+            arch::SerialWrite("[nt-translate-miss] nt_nr=");
+            arch::SerialWriteHex(nt_nr);
+            arch::SerialWrite(" name=\"");
+            const char* name = NtName(nt_nr);
+            arch::SerialWrite(name ? name : "<unknown>");
+            arch::SerialWrite("\"\n");
+        }
+        r = {false, kStatusNotImplemented};
+        break;
+    }
     return r;
 }
 

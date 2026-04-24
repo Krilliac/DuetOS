@@ -40,23 +40,38 @@ constexpr customos::u8* g_copy_user_to_start = ::__copy_user_to_start;
 constexpr customos::u8* g_copy_user_to_end = ::__copy_user_to_end;
 constexpr customos::u8* g_copy_user_fault_fixup = ::__copy_user_fault_fixup;
 
-// Per-vector IRQ handler table. Entries 0..15 cover IRQ vectors 32..47;
-// entry 16 is the LAPIC spurious vector (0xFF). nullptr means "no handler
-// registered" — the dispatcher logs and EOIs but takes no other action.
-constinit IrqHandler g_irq_handlers[17] = {};
+// Per-vector IRQ handler table. Indexed directly by vector number.
+// Vectors 0..31 are CPU exceptions (unused here — those dispatch
+// through the CPU-exception branches later in this file). Vectors
+// 32..47 are the ISA IRQ range (IOAPIC). Vectors 48..239 are the
+// MSI-X pool (PCIe devices allocate through IrqAllocVector).
+// 0xFF is the LAPIC spurious vector. nullptr means "no handler
+// registered" — the dispatcher logs and EOIs but takes no other
+// action.
+constinit IrqHandler g_irq_handlers[256] = {};
 
 constexpr u8 kIrqVectorBase = 32;
-constexpr u8 kIrqVectorCount = 16;
+constexpr u8 kMsixVectorBase = 48;
+constexpr u8 kMsixVectorMax = 239; // leave 240..254 reserved for future (IPIs, debug)
 constexpr u8 kSpuriousVector = 0xFF;
-constexpr u8 kSpuriousSlot = 16;
 
-inline u8 IrqSlot(u64 vector)
+// Monotonic pool cursor for IrqAllocVector. No reclaim in v0 —
+// drivers never release vectors, and we have 192 of them.
+constinit u8 g_msix_next_vector = kMsixVectorBase;
+
+// Syscall gate vector is claimed by SyscallDispatch below, not by
+// the generic IRQ path — exclude it from the dispatch predicate.
+constexpr u8 kSyscallVector = 0x80;
+
+inline bool IsDispatchedVector(u64 vector)
 {
     if (vector == kSpuriousVector)
-    {
-        return kSpuriousSlot;
-    }
-    return static_cast<u8>(vector - kIrqVectorBase);
+        return true;
+    if (vector == kSyscallVector)
+        return false;
+    if (vector >= kIrqVectorBase && vector <= kMsixVectorMax)
+        return true;
+    return false;
 }
 
 constexpr const char* kVectorNames[32] = {
@@ -185,28 +200,29 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     // EOIs the LAPIC and returns to isr_common's iretq, which resumes the
     // interrupted code. No diagnostic spew per IRQ — the timer alone fires
     // hundreds of times a second.
-    if ((frame->vector >= kIrqVectorBase && frame->vector < kIrqVectorBase + kIrqVectorCount) ||
-        frame->vector == kSpuriousVector)
+    if (IsDispatchedVector(frame->vector))
     {
-        const u8 slot = IrqSlot(frame->vector);
-        if (g_irq_handlers[slot] != nullptr)
+        const u8 v = static_cast<u8>(frame->vector);
+        const IrqHandler h = g_irq_handlers[v];
+        if (h != nullptr)
         {
-            g_irq_handlers[slot]();
+            h();
+            // Only EOI for vectors with a registered handler. Software-
+            // triggered `int n` (boot self-test at vector 0x42, debug
+            // probes, etc.) arrives with no LAPIC ISR bit set — EOIing
+            // those would dismiss some other genuinely in-flight IRQ.
+            // LAPIC spurious (0xFF) ALSO skips EOI per Intel SDM:
+            // the CPU doesn't advance the In-Service Register for it.
+            if (frame->vector != kSpuriousVector)
+            {
+                LapicEoi();
+            }
         }
         else
         {
             SerialWrite("[irq] unhandled vector ");
             SerialWriteHex(frame->vector);
             SerialWrite("\n");
-        }
-
-        // The LAPIC spurious vector (0xFF) is special: per Intel SDM, the
-        // CPU does NOT advance the In-Service Register for it, so EOI must
-        // NOT be sent. Sending one would acknowledge whichever real
-        // interrupt is currently in service and cause it to be lost.
-        if (frame->vector != kSpuriousVector)
-        {
-            LapicEoi();
         }
 
         // Preemption point. EOI happens first so a task we switch to can
@@ -533,15 +549,27 @@ extern "C" void TrapDispatch(TrapFrame* frame)
 
 void IrqInstall(u8 vector, IrqHandler handler)
 {
-    if ((vector < kIrqVectorBase || vector >= kIrqVectorBase + kIrqVectorCount) && vector != kSpuriousVector)
+    if (!IsDispatchedVector(vector))
     {
         SerialWrite("[irq] IrqInstall: vector out of range ");
         SerialWriteHex(vector);
         SerialWrite("\n");
         Halt();
     }
-    g_irq_handlers[IrqSlot(vector)] = handler;
+    g_irq_handlers[vector] = handler;
 }
+
+u8 IrqAllocVector()
+{
+    if (g_msix_next_vector == 0 || g_msix_next_vector > kMsixVectorMax)
+    {
+        return 0;
+    }
+    const u8 v = g_msix_next_vector;
+    ++g_msix_next_vector;
+    return v;
+}
+
 
 void RaiseSelfTestBreakpoint()
 {

@@ -156,6 +156,23 @@ void SyscallDispatch(arch::TrapFrame* frame)
     {
         const u64 code = frame->rdi;
         LogWithValue(LogLevel::Info, "sys", "exit rc", code);
+        // Batch 59: if the exiting task owns a Win32 thread-handle
+        // slot in its Process, record the exit code there so
+        // GetExitCodeThread on that handle can return a real
+        // value instead of STILL_ACTIVE.
+        Process* proc = CurrentProcess();
+        sched::Task* self = sched::CurrentTask();
+        if (proc != nullptr && self != nullptr)
+        {
+            for (u32 i = 0; i < Process::kWin32ThreadCap; ++i)
+            {
+                if (proc->win32_threads[i].in_use && proc->win32_threads[i].task == self)
+                {
+                    proc->win32_threads[i].exit_code = static_cast<u32>(code & 0xFFFFFFFFu);
+                    break;
+                }
+            }
+        }
         // SchedExit is [[noreturn]] — it marks the current task Dead,
         // wakes the reaper, and Schedule()s away forever. The trap
         // frame on this task's kernel stack becomes orphaned and
@@ -385,6 +402,609 @@ void SyscallDispatch(arch::TrapFrame* frame)
     case SYS_THREAD_CREATE:
         subsystems::win32::DoThreadCreate(frame);
         return;
+
+    case SYS_NT_INVOKE:
+    {
+        // Forward to the NT→Linux translator. The handler reads
+        // frame->rdi for the NT number + frame->rsi..r9 for NT-
+        // ABI arguments; its return value is the final NTSTATUS
+        // that goes back to the caller.
+        const auto t = subsystems::translation::NtTranslateToLinux(frame);
+        frame->rax = static_cast<u64>(t.rv);
+        return;
+    }
+
+    case SYS_DEBUG_PRINT:
+    {
+        // rdi = user ptr to NUL-terminated ASCII string. Cap-gated
+        // on kCapSerialConsole (same gate as SYS_WRITE fd=1).
+        // Unknown caller / no cap → silent -1 on the first call,
+        // then rate-limited denial log like SYS_WRITE.
+        Process* proc = CurrentProcess();
+        if (proc == nullptr || !CapSetHas(proc->caps, kCapSerialConsole))
+        {
+            const u64 pid = (proc != nullptr) ? proc->pid : 0;
+            RecordSandboxDenial(kCapSerialConsole);
+            if (proc != nullptr && ShouldLogDenial(proc->sandbox_denials))
+            {
+                arch::SerialWrite("[sys] denied syscall=SYS_DEBUG_PRINT pid=");
+                arch::SerialWriteHex(pid);
+                arch::SerialWrite(" cap=");
+                arch::SerialWrite(CapName(kCapSerialConsole));
+                arch::SerialWrite("\n");
+            }
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+
+        // Bounce buffer on kernel stack, +1 for the hard terminator
+        // so a user string that exactly fills the ceiling still
+        // prints bounded.
+        char kbuf[kSyscallDebugPrintMax + 1];
+        // Freestanding: no memset, so clear via byte loop.
+        for (u64 i = 0; i < sizeof(kbuf); ++i)
+            kbuf[i] = 0;
+        if (!mm::CopyFromUser(kbuf, reinterpret_cast<const void*>(frame->rdi), kSyscallDebugPrintMax))
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        kbuf[kSyscallDebugPrintMax] = '\0';
+
+        arch::SerialWrite("[odbg] ");
+        arch::SerialWrite(kbuf);
+        // Append newline if the user string didn't end with one — a
+        // Win32 OutputDebugString call is one "event" so the serial
+        // log should show one line per call.
+        u64 len = 0;
+        while (len < kSyscallDebugPrintMax && kbuf[len] != '\0')
+            ++len;
+        if (len == 0 || kbuf[len - 1] != '\n')
+            arch::SerialWrite("\n");
+
+        frame->rax = 0;
+        return;
+    }
+
+    case SYS_MEM_STATUS:
+    {
+        // rdi = user pointer to a Win32 MEMORYSTATUSEX struct (64
+        // bytes). Layout (offsets in bytes):
+        //   0x00 DWORD dwLength            — caller-set (must be 64)
+        //   0x04 DWORD dwMemoryLoad        — 0..100
+        //   0x08 ULONGLONG ullTotalPhys
+        //   0x10 ULONGLONG ullAvailPhys
+        //   0x18 ULONGLONG ullTotalPageFile
+        //   0x20 ULONGLONG ullAvailPageFile
+        //   0x28 ULONGLONG ullTotalVirtual
+        //   0x30 ULONGLONG ullAvailVirtual
+        //   0x38 ULONGLONG ullAvailExtendedVirtual
+        struct __attribute__((packed)) MemoryStatusEx
+        {
+            u32 dwLength;
+            u32 dwMemoryLoad;
+            u64 ullTotalPhys;
+            u64 ullAvailPhys;
+            u64 ullTotalPageFile;
+            u64 ullAvailPageFile;
+            u64 ullTotalVirtual;
+            u64 ullAvailVirtual;
+            u64 ullAvailExtendedVirtual;
+        };
+        static_assert(sizeof(MemoryStatusEx) == 64, "MEMORYSTATUSEX must be 64 bytes");
+
+        // Validate dwLength field before filling — Win32 contract
+        // says the caller sets dwLength = sizeof(MEMORYSTATUSEX) as
+        // a version discriminator. We refuse other sizes so a
+        // miscompiled caller gets a deterministic error rather than
+        // a partially-populated struct.
+        u32 user_len = 0;
+        if (!mm::CopyFromUser(&user_len, reinterpret_cast<const void*>(frame->rdi), sizeof(user_len)))
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        if (user_len != sizeof(MemoryStatusEx))
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+
+        MemoryStatusEx st;
+        // Freestanding kernel: no memset, no implicit zero-init via = {}.
+        // Byte-loop clear via a volatile write so the optimizer won't
+        // convert this back into memset.
+        for (u64 i = 0; i < sizeof(st); ++i)
+            reinterpret_cast<volatile u8*>(&st)[i] = 0;
+        st.dwLength = sizeof(MemoryStatusEx);
+        const u64 total_pages = mm::TotalFrames();
+        const u64 free_pages = mm::FreeFramesCount();
+        const u64 used_pages = (total_pages >= free_pages) ? (total_pages - free_pages) : 0;
+        st.ullTotalPhys = total_pages * mm::kPageSize;
+        st.ullAvailPhys = free_pages * mm::kPageSize;
+        // No pagefile — report same totals (Win32 convention when
+        // there's no backing file: total == phys, avail == phys).
+        st.ullTotalPageFile = st.ullTotalPhys;
+        st.ullAvailPageFile = st.ullAvailPhys;
+        // User-virtual range is the canonical lower half (first
+        // 128 TiB). Avail is a synthetic figure: total minus the
+        // sum of the caller's mapped user regions.
+        constexpr u64 kUserVirtualBytes = 1ULL << 47; // 128 TiB
+        st.ullTotalVirtual = kUserVirtualBytes;
+        u64 mapped_bytes = 0;
+        Process* proc = CurrentProcess();
+        if (proc != nullptr && proc->as != nullptr)
+        {
+            for (u8 i = 0; i < proc->as->region_count; ++i)
+                mapped_bytes += mm::kPageSize;
+        }
+        st.ullAvailVirtual = (kUserVirtualBytes >= mapped_bytes) ? (kUserVirtualBytes - mapped_bytes) : 0;
+        st.ullAvailExtendedVirtual = 0;
+        // Memory load = used/total * 100. Guard against divide-by-zero.
+        st.dwMemoryLoad = (total_pages == 0) ? 0 : static_cast<u32>((used_pages * 100) / total_pages);
+
+        if (!mm::CopyToUser(reinterpret_cast<void*>(frame->rdi), &st, sizeof(st)))
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        frame->rax = 0;
+        return;
+    }
+
+    case SYS_SYSTEM_INFO:
+    {
+        // rdi = user pointer to SYSTEM_INFO (48 bytes).
+        struct __attribute__((packed)) SystemInfo
+        {
+            u16 wProcessorArchitecture;
+            u16 wReserved;
+            u32 dwPageSize;
+            u64 lpMinimumApplicationAddress;
+            u64 lpMaximumApplicationAddress;
+            u64 dwActiveProcessorMask;
+            u32 dwNumberOfProcessors;
+            u32 dwProcessorType;
+            u32 dwAllocationGranularity;
+            u16 wProcessorLevel;
+            u16 wProcessorRevision;
+        };
+        static_assert(sizeof(SystemInfo) == 48, "SYSTEM_INFO must be 48 bytes");
+
+        SystemInfo si;
+        for (u64 i = 0; i < sizeof(si); ++i)
+            reinterpret_cast<volatile u8*>(&si)[i] = 0;
+        si.wProcessorArchitecture = 9; // AMD64
+        si.dwPageSize = 4096;
+        si.lpMinimumApplicationAddress = 0x10000ULL;
+        si.lpMaximumApplicationAddress = 0x7FFFFFFE0000ULL;
+        si.dwActiveProcessorMask = 1;
+        si.dwNumberOfProcessors = 1;
+        si.dwProcessorType = 8664; // PROCESSOR_AMD_X8664
+        si.dwAllocationGranularity = 0x10000;
+        si.wProcessorLevel = 6;
+        si.wProcessorRevision = 0;
+
+        if (!mm::CopyToUser(reinterpret_cast<void*>(frame->rdi), &si, sizeof(si)))
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        frame->rax = 0;
+        return;
+    }
+
+    case SYS_DEBUG_PRINTW:
+    {
+        // rdi = user ptr to NUL-terminated UTF-16LE string. Cap
+        // gate mirrors SYS_DEBUG_PRINT.
+        Process* proc = CurrentProcess();
+        if (proc == nullptr || !CapSetHas(proc->caps, kCapSerialConsole))
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+
+        // Read up to kSyscallDebugPrintMax wide-chars (2 bytes each).
+        u16 wbuf[kSyscallDebugPrintMax + 1];
+        for (u64 i = 0; i < kSyscallDebugPrintMax + 1; ++i)
+            wbuf[i] = 0;
+        if (!mm::CopyFromUser(wbuf, reinterpret_cast<const void*>(frame->rdi), kSyscallDebugPrintMax * sizeof(u16)))
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        wbuf[kSyscallDebugPrintMax] = 0;
+
+        // Strip to ASCII — non-ASCII → '?'. Single-pass, stops at
+        // first NUL wide-char.
+        char abuf[kSyscallDebugPrintMax + 1];
+        u64 n = 0;
+        for (; n < kSyscallDebugPrintMax; ++n)
+        {
+            const u16 w = wbuf[n];
+            if (w == 0)
+                break;
+            abuf[n] = (w < 0x80) ? static_cast<char>(w) : '?';
+        }
+        abuf[n] = '\0';
+
+        arch::SerialWrite("[odbgw] ");
+        arch::SerialWrite(abuf);
+        if (n == 0 || abuf[n - 1] != '\n')
+            arch::SerialWrite("\n");
+
+        frame->rax = 0;
+        return;
+    }
+
+    case SYS_SEM_CREATE:
+    {
+        // rdi = initial count, rsi = max count.
+        const i64 initial = static_cast<i64>(frame->rdi);
+        const i64 max_val = static_cast<i64>(frame->rsi);
+        Process* proc = CurrentProcess();
+        if (proc == nullptr || max_val <= 0 || initial < 0 || initial > max_val)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        u64 slot = Process::kWin32SemaphoreCap;
+        arch::Cli();
+        for (u64 i = 0; i < Process::kWin32SemaphoreCap; ++i)
+        {
+            if (!proc->win32_semaphores[i].in_use)
+            {
+                slot = i;
+                break;
+            }
+        }
+        if (slot == Process::kWin32SemaphoreCap)
+        {
+            arch::Sti();
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        auto& s = proc->win32_semaphores[slot];
+        s.in_use = true;
+        s.count = static_cast<i32>(initial);
+        s.max_count = static_cast<i32>(max_val);
+        s.waiters.head = nullptr;
+        s.waiters.tail = nullptr;
+        arch::Sti();
+        const u64 handle = Process::kWin32SemaphoreBase + slot;
+        arch::SerialWrite("[sys] sem_create ok pid=");
+        arch::SerialWriteHex(proc->pid);
+        arch::SerialWrite(" handle=");
+        arch::SerialWriteHex(handle);
+        arch::SerialWrite(" init=");
+        arch::SerialWriteHex(static_cast<u64>(initial));
+        arch::SerialWrite(" max=");
+        arch::SerialWriteHex(static_cast<u64>(max_val));
+        arch::SerialWrite("\n");
+        frame->rax = handle;
+        return;
+    }
+
+    case SYS_SEM_RELEASE:
+    {
+        const u64 handle = frame->rdi;
+        const i64 release_count = static_cast<i64>(frame->rsi);
+        Process* proc = CurrentProcess();
+        if (proc == nullptr || handle < Process::kWin32SemaphoreBase ||
+            handle >= Process::kWin32SemaphoreBase + Process::kWin32SemaphoreCap || release_count <= 0)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        auto& s = proc->win32_semaphores[handle - Process::kWin32SemaphoreBase];
+        arch::Cli();
+        if (!s.in_use)
+        {
+            arch::Sti();
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        const i32 prev = s.count;
+        const i64 new_count = static_cast<i64>(s.count) + release_count;
+        if (new_count > s.max_count)
+        {
+            arch::Sti();
+            frame->rax = static_cast<u64>(-1); // ERROR_TOO_MANY_POSTS
+            return;
+        }
+        s.count = static_cast<i32>(new_count);
+        // Wake up to `release_count` waiters.
+        for (i64 i = 0; i < release_count; ++i)
+        {
+            sched::Task* woken = sched::WaitQueueWakeOne(&s.waiters);
+            if (woken == nullptr)
+                break;
+            // The waiter will decrement count when it resumes
+            // and runs through its SYS_SEM_WAIT return path —
+            // see SYS_SEM_WAIT below.
+        }
+        arch::Sti();
+        frame->rax = static_cast<u64>(prev);
+        return;
+    }
+
+    case SYS_SEM_WAIT:
+    {
+        const u64 handle = frame->rdi;
+        const u64 timeout_ms = frame->rsi & 0xFFFFFFFFu;
+        Process* proc = CurrentProcess();
+        if (proc == nullptr || handle < Process::kWin32SemaphoreBase ||
+            handle >= Process::kWin32SemaphoreBase + Process::kWin32SemaphoreCap)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        auto& s = proc->win32_semaphores[handle - Process::kWin32SemaphoreBase];
+        constexpr u64 kInfiniteMs = 0xFFFFFFFFu;
+        constexpr u64 kWaitTimeout = 0x102;
+        constexpr u64 kMsPerTick = 10;
+        arch::Cli();
+        if (!s.in_use)
+        {
+            arch::Sti();
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        // Loop: if count > 0, grab one; else block and retry.
+        // Wrapping the decrement inside a loop handles the race
+        // where two waiters wake from the same release and one
+        // of them loses the count-grab.
+        for (;;)
+        {
+            if (s.count > 0)
+            {
+                --s.count;
+                arch::Sti();
+                frame->rax = 0; // WAIT_OBJECT_0
+                return;
+            }
+            // count == 0 — block.
+            if (timeout_ms == kInfiniteMs)
+            {
+                sched::WaitQueueBlock(&s.waiters);
+                // WaitQueueBlock re-locks the CLI gate.
+                continue;
+            }
+            const u64 ticks = (timeout_ms + (kMsPerTick - 1)) / kMsPerTick;
+            const bool got = sched::WaitQueueBlockTimeout(&s.waiters, ticks);
+            if (!got)
+            {
+                arch::Sti();
+                frame->rax = kWaitTimeout;
+                return;
+            }
+            // Woken — retry the grab.
+        }
+    }
+
+    case SYS_THREAD_EXIT_CODE:
+    {
+        // Win32 contract: GetExitCodeThread on an unknown or
+        // foreign handle (e.g. a process pseudo-handle passed by
+        // mistake) should still succeed with BOOL TRUE and a
+        // benign STILL_ACTIVE (0x103) payload — that's what the
+        // batch-10 stub did before this batch, and the
+        // hello_winapi test pins this behavior. So: return
+        // STILL_ACTIVE for any handle outside our own thread
+        // range, return the real exit_code only for handles we
+        // actually own.
+        constexpr u64 kStillActive = 0x103;
+        const u64 handle = frame->rdi;
+        Process* proc = CurrentProcess();
+        if (proc == nullptr || handle < Process::kWin32ThreadBase ||
+            handle >= Process::kWin32ThreadBase + Process::kWin32ThreadCap)
+        {
+            frame->rax = kStillActive;
+            return;
+        }
+        const u64 slot = handle - Process::kWin32ThreadBase;
+        if (!proc->win32_threads[slot].in_use)
+        {
+            frame->rax = kStillActive;
+            return;
+        }
+        frame->rax = static_cast<u64>(proc->win32_threads[slot].exit_code);
+        return;
+    }
+
+    case SYS_THREAD_WAIT:
+    {
+        const u64 handle = frame->rdi;
+        const u64 timeout_ms = frame->rsi & 0xFFFFFFFFu;
+        Process* proc = CurrentProcess();
+        if (proc == nullptr || handle < Process::kWin32ThreadBase ||
+            handle >= Process::kWin32ThreadBase + Process::kWin32ThreadCap)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        const u64 slot = handle - Process::kWin32ThreadBase;
+        const auto& th = proc->win32_threads[slot];
+        if (!th.in_use)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        // Use exit_code != STILL_ACTIVE as the authoritative
+        // "thread is done" signal instead of dereferencing
+        // th.task, which the reaper may have KFree'd already
+        // after the task died. The SYS_EXIT path writes the
+        // real exit code into this slot before SchedExit runs,
+        // so the slot is valid as long as in_use remains true.
+        constexpr u64 kStillActive = 0x103;
+        constexpr u64 kInfinite = 0xFFFFFFFFu;
+        const u64 start = sched::SchedNowTicks();
+        const u64 deadline = (timeout_ms == kInfinite) ? u64(-1) : start + ((timeout_ms + 9) / 10);
+        for (;;)
+        {
+            if (th.exit_code != kStillActive)
+            {
+                frame->rax = 0; // WAIT_OBJECT_0
+                return;
+            }
+            if (timeout_ms != kInfinite && sched::SchedNowTicks() >= deadline)
+            {
+                frame->rax = 0x102; // WAIT_TIMEOUT
+                return;
+            }
+            if (timeout_ms == kInfinite)
+                sched::SchedYield();
+            else
+                sched::SchedSleepTicks(1);
+        }
+    }
+
+    case SYS_WAIT_MULTI:
+    {
+        // rdi = count, rsi = user handle array, rdx = wait_all,
+        // r10 = timeout_ms. v0 polls + yields.
+        const u64 count = frame->rdi;
+        const u64 user_handles_va = frame->rsi;
+        const u64 wait_all = frame->rdx;
+        const u64 timeout_ms = frame->r10;
+
+        if (count == 0 || count > kSyscallWaitMultiMax)
+        {
+            frame->rax = static_cast<u64>(-1); // WAIT_FAILED
+            return;
+        }
+
+        u64 handles[kSyscallWaitMultiMax];
+        for (u64 i = 0; i < kSyscallWaitMultiMax; ++i)
+            handles[i] = 0;
+        if (!mm::CopyFromUser(handles, reinterpret_cast<const void*>(user_handles_va), count * sizeof(u64)))
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+
+        // Poll-and-yield loop. Budget: kMaxIterations iterations of
+        // SchedYield for infinite waits, or deadline_ticks for timed
+        // waits. 10 ms per tick means a 100-ms wait is ~10 iters.
+        constexpr u64 kInfinite = 0xFFFFFFFFULL;
+        const u64 now_ticks = sched::SchedNowTicks();
+        const u64 deadline = (timeout_ms == kInfinite) ? u64(-1) : now_ticks + ((timeout_ms + 9) / 10); // 10 ms/tick
+
+        for (;;)
+        {
+            // Poll each handle's signaled state. Supported handle
+            // families:
+            //   * Events (0x300..): query Process.win32_events[slot].signaled
+            //   * Mutexes (0x200..): try a non-blocking acquire
+            //   * Threads (0x400..): signaled iff the task is Dead
+            //   * Anything else: never signaled → contributes FALSE
+            u64 signaled_count = 0;
+            u64 first_signaled = u64(-1);
+            Process* proc = CurrentProcess();
+            for (u64 i = 0; i < count; ++i)
+            {
+                const u64 h = handles[i];
+                bool sig = false;
+                if (proc != nullptr)
+                {
+                    if (h >= Process::kWin32EventBase && h < Process::kWin32EventBase + Process::kWin32EventCap)
+                    {
+                        const u64 slot = h - Process::kWin32EventBase;
+                        const auto& ev = proc->win32_events[slot];
+                        if (ev.in_use && ev.signaled)
+                        {
+                            sig = true;
+                            // Auto-reset: clear only when we're
+                            // ACTUALLY going to wake (wait-any
+                            // picks this slot, or wait-all
+                            // completes with this satisfied).
+                            // Handled below, after we know the
+                            // whole wait is satisfied.
+                        }
+                    }
+                    else if (h >= Process::kWin32ThreadBase && h < Process::kWin32ThreadBase + Process::kWin32ThreadCap)
+                    {
+                        // Use exit_code (set by SYS_EXIT) instead
+                        // of TaskIsDead (th.task may be a reaped
+                        // pointer). Valid as long as in_use holds.
+                        const u64 slot = h - Process::kWin32ThreadBase;
+                        const auto& th = proc->win32_threads[slot];
+                        if (th.in_use && th.exit_code != 0x103)
+                            sig = true;
+                    }
+                    else if (h >= Process::kWin32SemaphoreBase &&
+                             h < Process::kWin32SemaphoreBase + Process::kWin32SemaphoreCap)
+                    {
+                        // Semaphores are signaled iff count > 0. Wait-all
+                        // via poll doesn't consume the count — a fully
+                        // race-free multi-wait is a future slice.
+                        const u64 slot = h - Process::kWin32SemaphoreBase;
+                        const auto& s = proc->win32_semaphores[slot];
+                        if (s.in_use && s.count > 0)
+                            sig = true;
+                    }
+                    // Mutex handles: v0 doesn't try-acquire here —
+                    // would need to thread the owner through. Skip
+                    // for now; callers wait on events + threads
+                    // (the common pattern).
+                }
+                if (sig)
+                {
+                    ++signaled_count;
+                    if (first_signaled == u64(-1))
+                        first_signaled = i;
+                }
+            }
+
+            const bool satisfied = (wait_all != 0) ? (signaled_count == count) : (signaled_count > 0);
+            if (satisfied)
+            {
+                // Auto-reset events we're waking on: clear the
+                // signal. For wait-any, only the winning handle;
+                // for wait-all, every auto-reset event in the set.
+                if (proc != nullptr)
+                {
+                    for (u64 i = 0; i < count; ++i)
+                    {
+                        const u64 h = handles[i];
+                        if (h >= Process::kWin32EventBase && h < Process::kWin32EventBase + Process::kWin32EventCap)
+                        {
+                            const u64 slot = h - Process::kWin32EventBase;
+                            auto& ev = proc->win32_events[slot];
+                            if (!ev.in_use || !ev.manual_reset)
+                                continue;
+                            // Manual-reset: leave signaled. Skip.
+                        }
+                        if (h >= Process::kWin32EventBase && h < Process::kWin32EventBase + Process::kWin32EventCap)
+                        {
+                            const u64 slot = h - Process::kWin32EventBase;
+                            auto& ev = proc->win32_events[slot];
+                            if (!ev.manual_reset && ev.signaled && (wait_all != 0 || i == first_signaled))
+                                ev.signaled = false;
+                        }
+                    }
+                }
+                frame->rax = (wait_all != 0) ? 0 : first_signaled; // WAIT_OBJECT_0 + i
+                return;
+            }
+
+            // Check deadline.
+            if (timeout_ms != kInfinite && sched::SchedNowTicks() >= deadline)
+            {
+                frame->rax = 0x102; // WAIT_TIMEOUT
+                return;
+            }
+
+            // Give up a slice. SchedYield if no timeout pressure;
+            // SchedSleepTicks(1) for a timed wait so we don't
+            // re-enter the loop faster than the timer tick.
+            if (timeout_ms == kInfinite)
+                sched::SchedYield();
+            else
+                sched::SchedSleepTicks(1);
+        }
+    }
 
     case SYS_SLEEP_MS:
     {

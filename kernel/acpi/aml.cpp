@@ -739,4 +739,97 @@ u32 AmlNamespaceCountByKind(AmlObjectKind k)
     return n;
 }
 
+// Read the two-byte SLP_TYP values encoded in a Name ( _S5,
+// Package (4) { SLP_TYPa, SLP_TYPb, ... } ) declaration. The
+// namespace builder already registered the Name node; we find it,
+// step past the 4-byte "_S5_" name string and the Package opcode
+// + length, then decode two AML ByteConst / ZeroOp / OneOp items.
+//
+// Returns true on a clean extract. On any shape deviation the
+// caller stays in "shutdown unsupported" — we don't guess bits.
+bool AmlReadS5(u8* slp_typa, u8* slp_typb)
+{
+    const AmlNamespaceEntry* entry = AmlNamespaceFind("\\_S5_");
+    if (entry == nullptr)
+        entry = AmlNamespaceFind("\\_S5");
+    if (entry == nullptr || entry->kind != AmlObjectKind::Name)
+        return false;
+
+    const u8* aml = nullptr;
+    u32 aml_len = 0;
+    if (entry->source_table_idx == 0)
+    {
+        const u64 dsdt_phys = DsdtAddress();
+        if (dsdt_phys == 0)
+            return false;
+        const auto* hdr = static_cast<const u8*>(mm::PhysToVirt(dsdt_phys));
+        aml = hdr + 36; // skip SdtHeader
+        aml_len = DsdtLength() - 36;
+    }
+    else
+    {
+        const u32 idx = entry->source_table_idx - 1;
+        if (idx >= SsdtCount())
+            return false;
+        const u64 ssdt_phys = SsdtAddress(idx);
+        if (ssdt_phys == 0)
+            return false;
+        const auto* hdr = static_cast<const u8*>(mm::PhysToVirt(ssdt_phys));
+        aml = hdr + 36;
+        aml_len = SsdtLength(idx) - 36;
+    }
+
+    if (entry->aml_offset + 4 > aml_len)
+        return false;
+    u32 p = entry->aml_offset + 4; // past the 4-char "_S5_" name
+    if (p + 2 > aml_len || aml[p] != 0x12 /* PackageOp */)
+        return false;
+    ++p;
+    // PkgLength: top two bits of the first byte = how many extra
+    // bytes follow. For _S5 the package is tiny so usually just
+    // 1 byte total.
+    if (p >= aml_len)
+        return false;
+    const u8 pkg_lead = aml[p];
+    const u32 pkg_extra = pkg_lead >> 6;
+    p += 1 + pkg_extra;
+    if (p + 1 > aml_len)
+        return false;
+    // NumElements (expect >= 2).
+    if (aml[p++] < 2)
+        return false;
+
+    // Helper: decode a single AML byte-sized integer element.
+    auto read_byte = [&](u8* out) -> bool
+    {
+        if (p >= aml_len)
+            return false;
+        const u8 op = aml[p++];
+        if (op == 0x00)
+        {
+            *out = 0;
+            return true;
+        } // ZeroOp
+        if (op == 0x01)
+        {
+            *out = 1;
+            return true;
+        } // OneOp
+        if (op == 0x0A)
+        {
+            if (p >= aml_len)
+                return false;
+            *out = aml[p++];
+            return true;
+        } // BytePrefix
+        return false; // Other encodings not supported in v0
+    };
+
+    if (!read_byte(slp_typa))
+        return false;
+    if (!read_byte(slp_typb))
+        return false;
+    return true;
+}
+
 } // namespace customos::acpi

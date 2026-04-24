@@ -59,8 +59,10 @@
 #include "../mm/address_space.h"
 #include "../mm/frame_allocator.h"
 #include "../sync/spinlock.h"
+#include "auth.h"
 #include "heartbeat.h"
 #include "klog.h"
+#include "login.h"
 #include "panic.h"
 #include "process.h"
 #include "random.h"
@@ -716,6 +718,13 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     customos::drivers::video::ConsoleWriteln("");
     customos::drivers::video::ConsoleWriteln("READY.  TRY DRAGGING A WINDOW BY ITS TITLE BAR.");
 
+    // Account subsystem — seed the built-in admin/guest
+    // accounts, run the verify/reject self-test, then arm the
+    // login gate below. Order matters: the gate consults the
+    // account table, so AuthInit must precede LoginStart.
+    customos::core::AuthInit();
+    customos::core::AuthSelfTest();
+
     // Shell welcome + initial prompt. Landing here after every
     // subsystem init line keeps the boot log visible above the
     // prompt — the user sees the tail end of the kernel's own
@@ -783,6 +792,17 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
             customos::drivers::video::CalendarOpen(ax, ay);
             customos::drivers::video::DesktopCompose(kDesktopTeal, "WELCOME TO CUSTOMOS   BOOT OK");
         }
+    }
+
+    // Login gate — blocks keyboard input from reaching the shell
+    // until a valid session is open. TTY mode prints a classic
+    // `username:` / `password:` banner; desktop mode paints a
+    // winlogon-style welcome panel over the framebuffer. The
+    // kbd-reader thread routes keys to LoginFeedKey while the
+    // gate is up.
+    {
+        const auto mode = want_tty ? customos::core::LoginMode::Tty : customos::core::LoginMode::Gui;
+        customos::core::LoginStart(mode);
     }
 
     SerialWrite("[boot] Seeding ramfs + VFS self-test.\n");
@@ -971,6 +991,19 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
 
     SerialWrite("[boot] Bringing up network stack skeleton.\n");
     customos::net::NetStackInit();
+    {
+        // Park a canned reply on TCP port 7777. Any connection
+        // that lands with a data segment gets this body + FIN.
+        // Handy to smoke-test the TCP state machine from the
+        // host with `nc 10.0.2.15 7777` (given appropriate
+        // hostfwd) or `curl http://.../` once HTTP lands.
+        static const char kHello[] = "HTTP/1.0 200 OK\r\n"
+                                     "Content-Type: text/plain\r\n"
+                                     "Content-Length: 24\r\n"
+                                     "\r\n"
+                                     "Hello from CustomOS!\r\n\r\n";
+        customos::net::TcpListen(7777, reinterpret_cast<const customos::u8*>(kHello), sizeof(kHello) - 1);
+    }
 
     SerialWrite("[boot] Bringing up graphics ICD skeleton.\n");
     customos::subsystems::graphics::GraphicsIcdInit();
@@ -1055,6 +1088,39 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
             const bool alt = (ev.modifiers & kKeyModAlt) != 0;
             const bool ctrl = (ev.modifiers & kKeyModCtrl) != 0;
             bool dirty = false;
+
+            // Login gate takes absolute priority — while a
+            // session isn't open, EVERY keystroke is an auth
+            // input. Modifier-held shortcuts (Ctrl+Alt+T, Alt+Tab,
+            // ^C) are ignored here so a user can't side-step the
+            // prompt by opening a window manager shortcut. The
+            // gate draws its own framebuffer output; we bracket
+            // with CompositorLock so it races neither the ui-
+            // ticker nor the mouse reader.
+            if (customos::core::LoginIsActive())
+            {
+                customos::drivers::video::CompositorLock();
+                const bool still_active = customos::core::LoginFeedKey(ev.code);
+                if (!still_active)
+                {
+                    // Login succeeded — wipe the login panel and
+                    // paint the full desktop (or TTY) underneath.
+                    const bool is_tty =
+                        (customos::drivers::video::GetDisplayMode() == customos::drivers::video::DisplayMode::Tty);
+                    if (is_tty)
+                    {
+                        customos::drivers::video::DesktopCompose(0x00000000, nullptr);
+                    }
+                    else
+                    {
+                        customos::drivers::video::CursorHide();
+                        customos::drivers::video::DesktopCompose(kDesktopTealLocal, "WELCOME TO CUSTOMOS   BOOT OK");
+                        customos::drivers::video::CursorShow();
+                    }
+                }
+                customos::drivers::video::CompositorUnlock();
+                continue;
+            }
 
             // Ctrl+C latches the shell interrupt flag. No
             // DesktopCompose here — the long-running command
@@ -1295,6 +1361,16 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
         {
             customos::sched::SchedSleepTicks(100);
             customos::drivers::video::CompositorLock();
+            // While the login gate is up the full-screen login
+            // panel owns the framebuffer. Repaint it from its
+            // own canonical state so the 1 Hz compose doesn't
+            // clobber the field bounds / title bar.
+            if (customos::core::LoginIsActive() && customos::core::LoginCurrentMode() == customos::core::LoginMode::Gui)
+            {
+                customos::core::LoginRepaint();
+                customos::drivers::video::CompositorUnlock();
+                continue;
+            }
             if (customos::drivers::video::GetDisplayMode() == customos::drivers::video::DisplayMode::Tty)
             {
                 customos::drivers::video::DesktopCompose(0x00000000, nullptr);

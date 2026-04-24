@@ -6,6 +6,7 @@
 #include "../core/panic.h"
 #include "../mm/multiboot2.h"
 #include "../mm/page.h"
+#include "aml.h"
 
 namespace customos::acpi
 {
@@ -239,6 +240,9 @@ constinit u16 g_sci_vector = 9;
 constinit bool g_reset_supported = false;
 constinit GenericAddress g_reset_reg{};
 constinit u8 g_reset_value = 0;
+constinit u32 g_pm1a_cnt = 0;
+constinit u32 g_pm1b_cnt = 0;
+constinit u8 g_pm1_cnt_len = 0;
 
 // HPET-derived cache. All zero if no HPET table was present — the
 // HPET driver treats that as "no HPET, fall back to PIT/LAPIC."
@@ -489,6 +493,9 @@ void ParseFadt(const Fadt& fadt)
         g_reset_reg = fadt.reset_reg;
         g_reset_value = fadt.reset_value;
     }
+    g_pm1a_cnt = fadt.pm1a_cnt_blk;
+    g_pm1b_cnt = fadt.pm1b_cnt_blk;
+    g_pm1_cnt_len = fadt.pm1_cnt_len;
     // DSDT pointer is a 32-bit physical address in the legacy FADT;
     // modern firmware also populates X_DSDT (64-bit) further on.
     // Cache the 32-bit form — on every x86_64 box we target it's
@@ -1001,6 +1008,50 @@ bool AcpiReset()
     default:
         return false;
     }
+}
+
+u32 Pm1aControlPort()
+{
+    return g_pm1a_cnt;
+}
+
+u32 Pm1bControlPort()
+{
+    return g_pm1b_cnt;
+}
+
+bool AcpiShutdown()
+{
+    u8 slp_typa = 0;
+    u8 slp_typb = 0;
+    if (!::customos::acpi::AmlReadS5(&slp_typa, &slp_typb))
+    {
+        return false;
+    }
+    if (g_pm1a_cnt == 0)
+    {
+        return false;
+    }
+    // PM1 control register: bit 13 = SLP_EN (write-only, write 1
+    // to initiate the sleep transition), bits 10..12 = SLP_TYP.
+    // Per ACPI §4.8.3.2.1.
+    constexpr u16 kSlpEn = 1U << 13;
+    const u16 pm1a_val = static_cast<u16>(((slp_typa & 0x7) << 10) | kSlpEn);
+    const u16 pm1b_val = static_cast<u16>(((slp_typb & 0x7) << 10) | kSlpEn);
+    // Write is 16-bit on every FADT we've seen (pm1_cnt_len == 2).
+    arch::Outw(static_cast<u16>(g_pm1a_cnt), pm1a_val);
+    if (g_pm1b_cnt != 0)
+    {
+        arch::Outw(static_cast<u16>(g_pm1b_cnt), pm1b_val);
+    }
+    // If we're still executing, the transition didn't take
+    // effect (real hardware requires the OS to have executed
+    // _PTS, _GTS etc. first). Return false so the caller knows
+    // to fall back to a harder method (reset, hlt loop, triple
+    // fault).
+    for (u32 i = 0; i < 1'000'000; ++i)
+        asm volatile("pause" ::: "memory");
+    return false;
 }
 
 } // namespace customos::acpi

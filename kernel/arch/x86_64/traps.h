@@ -105,10 +105,19 @@ void IrqNestDepthSet(u64 v);
 /// themselves — doing so twice loses an interrupt.
 using IrqHandler = void (*)();
 
-/// Install (or replace) a handler for IRQ vector `vector` (32..47) or the
-/// LAPIC spurious vector (0xFF). Passing `nullptr` clears the handler;
-/// the dispatcher then logs a one-line "unhandled IRQ" message.
+/// Install (or replace) a handler for IRQ vector `vector`. Valid range
+/// is [32, 254] — the ISA range 32..47, the MSI-X pool 48..239, plus
+/// the LAPIC spurious vector (0xFF). Passing `nullptr` clears the
+/// handler; the dispatcher then logs a one-line "unhandled IRQ"
+/// message.
 void IrqInstall(u8 vector, IrqHandler handler);
+
+/// Allocate the next unused MSI-X vector from the pool [48, 239].
+/// Returns 0 when the pool is exhausted — caller must check. The
+/// allocator is monotonic (no reclaim in v0); real hardware fans
+/// out fewer than a hundred MSI-X lines so the pool is wide enough
+/// for the lifetime of a boot.
+u8 IrqAllocVector();
 
 /// Deliberately trigger int3 to verify the IDT path is wired up correctly.
 /// Used only during early bring-up; remove from the boot sequence once
