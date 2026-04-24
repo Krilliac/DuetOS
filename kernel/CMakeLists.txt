@@ -372,6 +372,34 @@ add_custom_command(
 list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_CUSTOMDLL2_HEADER}")
 
 # ----------------------------------------------------------------------------
+# Userland kernel32.dll — stage-2 slice 10 kicks off the
+# retirement of flat-stubs-page entries into real userland
+# code. First export: GetCurrentProcessId. Future slices
+# extend kernel32.c with more entry points; every addition
+# retires the matching stub (which stays compiled as a
+# fallback but becomes unreachable via slice-6's via-DLL
+# priority).
+# ----------------------------------------------------------------------------
+set(CUSTOMOS_KERNEL32_SRC "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/kernel32.c")
+set(CUSTOMOS_KERNEL32_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_kernel32_dll.h")
+set(CUSTOMOS_KERNEL32_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-kernel32-dll.sh")
+
+add_custom_command(
+    OUTPUT "${CUSTOMOS_KERNEL32_HEADER}"
+    COMMAND "${CUSTOMOS_KERNEL32_SCRIPT}"
+            "${CMAKE_SOURCE_DIR}"
+            "${CUSTOMOS_KERNEL32_HEADER}"
+    DEPENDS
+        "${CUSTOMOS_KERNEL32_SRC}"
+        "${CUSTOMOS_KERNEL32_SCRIPT}"
+        "${CUSTOMOS_EMBED_BLOB_SCRIPT}"
+    COMMENT "Compiling + embedding kernel32.dll (first stub retirement)"
+    VERBATIM
+)
+
+list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_KERNEL32_HEADER}")
+
+# ----------------------------------------------------------------------------
 # Sixth PE fixture: customdll_test.exe — first userland program
 # that imports from a real loaded DLL (customdll.dll) rather
 # than from the flat stubs page. Exercises stage-2 slice 6's

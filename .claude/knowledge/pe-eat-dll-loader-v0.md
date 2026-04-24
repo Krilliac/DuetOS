@@ -1,6 +1,6 @@
 # PE EAT parser + DLL loader — stage 2 kickoff
 
-**Type:** Observation · **Status:** Active (stage-2 slices 1-9 landed) · **Last updated:** 2026-04-24
+**Type:** Observation · **Status:** Active (stage-2 slices 1-10 landed) · **Last updated:** 2026-04-24
 
 ## Context
 
@@ -832,6 +832,97 @@ The `[ring3] registered 0x2` line confirms the
 table is populated for `GetProcAddress` even though the
 PE's IAT lookups happen at load time.
 
+## Slice 10 — first stub retirement into real userland `kernel32.dll`
+
+Slices 1-9 built the full infrastructure for loading DLLs and
+resolving imports through them, but every DLL so far was a
+test fixture (`customdll.dll`, `customdll2.dll`). Slice 10
+kicks off the retirement of flat-stubs-page entries into
+real userland code: a shipped `kernel32.dll` whose exports
+replace the hand-assembled trampolines in
+`kernel/subsystems/win32/stubs.cpp`.
+
+### Slice 10 scope — exactly one export
+
+`GetCurrentProcessId`. Chosen as the first retirement because:
+
+- **Trivially equivalent to the existing flat stub**. Both
+  are 8 bytes: `mov eax, 8; int 0x80; ret`. Verified via
+  `llvm-objdump`:
+
+  ```
+  10021000 <GetCurrentProcessId>:
+  10021000:  movl $0x8, %eax
+  10021005:  int  $0x80
+  10021007:  retq
+  ```
+
+  Byte-identical to the stub at `0x60000048`. Zero chance
+  of register-clobber regression.
+
+- **DLL matches the import name**. PEs reference this
+  function as `kernel32.dll!GetCurrentProcessId`; our DLL's
+  Export Directory also names itself `kernel32.dll` (via the
+  `/out:kernel32.dll` lld-link flag). Slice 6's via-DLL path
+  matches on CI DLL name, so the IAT is patched to the DLL
+  address BEFORE `Win32StubsLookupKind` is consulted.
+
+### Effect on existing PEs
+
+Any PE that imports `kernel32.dll!GetCurrentProcessId`
+(hello_winapi.exe, windows-kill.exe, ...) now has its IAT
+slot patched to `0x10021000` (the DLL's entry) instead of
+`0x60000048` (the stub). The boot log emits:
+
+```
+[pe-resolve] via-dll kernel32.dll!GetCurrentProcessId -> 0x10021000
+```
+
+At ring-3 call time, the PE's indirect call through the IAT
+lands in the DLL's 8-byte function, which issues the same
+`int 0x80` SYS_GETPROCID as the stub. The stub at
+`kOffGetCurrentProcessId` is now dead code — still present
+in `kStubsBytes` and still registered in `kStubsTable`, but
+unreachable for this specific `{dll, func}` pair.
+
+### Why keep the flat stub around as dead code?
+
+Two reasons:
+
+1. **Fallback safety**. If a future slice breaks the DLL
+   preload path (frame shortage, cycle, CMake drift), the
+   flat stub still works — slice 6's via-DLL path misses
+   and `Win32StubsLookupKind` runs. Existing PEs keep
+   working during the transition.
+2. **Narrow slice discipline**. Removing the stub now would
+   couple "retire into DLL" with "delete dead code" — two
+   orthogonal changes. A later sweep-slice deletes all dead
+   kStubsTable entries once the retirement train has
+   stabilised.
+
+### Per-spawn frame cost
+
+Three DLLs now preloaded per Win32-imports spawn:
+`customdll.dll` (3 pages) + `customdll2.dll` (3 pages) +
+`kernel32.dll` (3 pages) = 9 frames per process. Comfortably
+within the kFrameBudgetTrusted envelope (256 frames); real
+production workloads will push this much higher, at which
+point the preload set becomes per-PE or per-image-descriptor
+instead of the current global-constant list.
+
+### Retirement roadmap
+
+Each future slice should retire functions in
+ABI-compatible groups — e.g. "all Interlocked*" in one
+slice, "string intrinsics (strlen/strcmp/strcpy)" in
+another. The stubs.cpp header comment listing the ~122
+current entries becomes the retirement backlog.
+
+For rough order-of-magnitude: `kStubsTable` has ~122 entries
+across ~14 DLL names. Retiring everything into shipped DLLs
+is ~30-100 slices of this granularity, most of them simple
+syscall trampolines or return-constant shims.
+
 ## Boot-time visibility
 
 `PeReport` now appends an `exports:` block to the diagnostic it
@@ -875,6 +966,11 @@ first real DLL embedded in ramfs will light up the full dump:
    N-entry preload array in SpawnPeFile; second test DLL
    `customdll2.dll` with a disjoint `CustomDouble` export
    exercises the walk-past-first-DLL path.
+9. ~~First stub retirement into real `kernel32.dll`.~~
+   **Landed in slice 10** — `GetCurrentProcessId` now
+   resolves to ring-3 code in `userland/libs/kernel32/`
+   via the slice-6 preload path. Stub stays as dead-code
+   fallback.
 3. **Recursive import resolution.** Walk the DLL's own Import
    Directory, look up each target DLL in the table (load if
    absent, detect circular dependencies), then patch the DLL's

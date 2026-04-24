@@ -9,6 +9,7 @@
 #include "generated_customdll.h"
 #include "generated_customdll2.h"
 #include "generated_customdll_test.h"
+#include "generated_kernel32_dll.h"
 #include "generated_hello_pe.h"
 #include "generated_hello_winapi.h"
 #include "generated_syscall_stress.h"
@@ -1897,6 +1898,16 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     const PreloadDllEntry preload_set[] = {
         {"customdll.dll", fs::generated::kBinCustomDllBytes, fs::generated::kBinCustomDllBytes_len},
         {"customdll2.dll", fs::generated::kBinCustomDll2Bytes, fs::generated::kBinCustomDll2Bytes_len},
+        // Stage-2 slice 10: first retirement — kernel32.dll now
+        // exports GetCurrentProcessId from real ring-3 code.
+        // The via-DLL path in ResolveImports matches
+        // `kernel32.dll!GetCurrentProcessId` here BEFORE
+        // falling through to the hand-assembled stub at
+        // kOffGetCurrentProcessId, which now runs as dead code
+        // for imports of that specific function. The stub
+        // stays compiled as a fallback for any caller that
+        // somehow bypasses the preload (shouldn't happen today).
+        {"kernel32.dll", fs::generated::kBinKernel32DllBytes, fs::generated::kBinKernel32DllBytes_len},
     };
     constexpr u64 kPreloadEntryCount = sizeof(preload_set) / sizeof(preload_set[0]);
     static_assert(kPreloadEntryCount <= kPreloadSlotCap, "Preload DLL list exceeds stack-local cap");
