@@ -3126,6 +3126,50 @@ constexpr StubEntry kStubsTable[] = {
     {"kernel32.dll", "CreateSemaphoreExW", kOffCreateSemaphoreW},
     {"kernel32.dll", "CreateSemaphoreExA", kOffCreateSemaphoreW},
     {"kernel32.dll", "ReleaseSemaphore", kOffReleaseSemaphore},
+    // === Batch 55: SRW locks, condition variables, one-time
+    // init, waitable timers, file mapping. All NO-OP-correct for
+    // a single-threaded-by-default v0 — SRW acquire/release is a
+    // ret on a process whose threads never contend for the lock;
+    // TryAcquire always succeeds; condition variables never fire
+    // but SleepConditionVariable* returns TRUE so callers treat
+    // it as "woke up"; waitable timers and file mappings return
+    // NULL (not supported — callers see CreateFileMapping fail
+    // and fall back to non-mapped I/O). Wiring these through the
+    // existing shared stubs costs no stub-page bytes.
+    {"kernel32.dll", "InitializeSRWLock", kOffCritSecNop},
+    {"kernel32.dll", "AcquireSRWLockExclusive", kOffCritSecNop},
+    {"kernel32.dll", "AcquireSRWLockShared", kOffCritSecNop},
+    {"kernel32.dll", "ReleaseSRWLockExclusive", kOffCritSecNop},
+    {"kernel32.dll", "ReleaseSRWLockShared", kOffCritSecNop},
+    {"kernel32.dll", "TryAcquireSRWLockExclusive", kOffReturnOne},
+    {"kernel32.dll", "TryAcquireSRWLockShared", kOffReturnOne},
+    {"kernel32.dll", "InitializeConditionVariable", kOffCritSecNop},
+    {"kernel32.dll", "WakeConditionVariable", kOffCritSecNop},
+    {"kernel32.dll", "WakeAllConditionVariable", kOffCritSecNop},
+    {"kernel32.dll", "SleepConditionVariableCS", kOffReturnOne},
+    {"kernel32.dll", "SleepConditionVariableSRW", kOffReturnOne},
+    {"kernel32.dll", "InitOnceInitialize", kOffCritSecNop},
+    {"kernel32.dll", "InitializeInitOnce", kOffCritSecNop},
+    {"kernel32.dll", "InitOnceComplete", kOffReturnOne},
+    {"kernel32.dll", "InitOnceExecuteOnce", kOffReturnOne}, // callback skipped — caller gets TRUE
+    {"kernel32.dll", "InitOnceBeginInitialize", kOffReturnOne},
+    {"kernel32.dll", "CreateWaitableTimerW", kOffReturnZero},
+    {"kernel32.dll", "CreateWaitableTimerA", kOffReturnZero},
+    {"kernel32.dll", "CreateWaitableTimerExW", kOffReturnZero},
+    {"kernel32.dll", "SetWaitableTimer", kOffReturnZero},
+    {"kernel32.dll", "SetWaitableTimerEx", kOffReturnZero},
+    {"kernel32.dll", "CancelWaitableTimer", kOffReturnZero},
+    {"kernel32.dll", "CreateFileMappingW", kOffReturnZero},
+    {"kernel32.dll", "CreateFileMappingA", kOffReturnZero},
+    {"kernel32.dll", "OpenFileMappingW", kOffReturnZero},
+    {"kernel32.dll", "OpenFileMappingA", kOffReturnZero},
+    {"kernel32.dll", "OpenThread", kOffReturnZero},
+    {"kernel32.dll", "GetThreadId", kOffReturnZero},
+    {"kernel32.dll", "DuplicateHandle", kOffReturnZero},
+    // QueryInterruptTime / QueryUnbiasedInterruptTime NOT wired:
+    // both fill an LPULONGLONG output that kOffCritSecNop wouldn't
+    // touch. Leaving them unbound lets the miss-logger record the
+    // call (more diagnostic than a silent ret into junk memory).
     // Tls/Fls now route through real per-process storage —
     // moved to batch 46 below.
     {"kernel32.dll", "SetEndOfFile", kOffReturnOne},

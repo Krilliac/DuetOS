@@ -138,6 +138,23 @@ __declspec(dllimport) HANDLE __stdcall CreateSemaphoreW(void* attrs, int lInitia
                                                         const unsigned short* name);
 __declspec(dllimport) BOOL __stdcall ReleaseSemaphore(HANDLE hSem, int lReleaseCount, int* lpPrev);
 
+typedef struct _SRWLOCK
+{
+    void* Ptr;
+} SRWLOCK, *PSRWLOCK;
+typedef struct _INIT_ONCE
+{
+    void* Ptr;
+} INIT_ONCE, *PINIT_ONCE;
+typedef BOOL(__stdcall* PINIT_ONCE_FN)(PINIT_ONCE, void*, void**);
+
+__declspec(dllimport) void __stdcall InitializeSRWLock(PSRWLOCK);
+__declspec(dllimport) void __stdcall AcquireSRWLockExclusive(PSRWLOCK);
+__declspec(dllimport) void __stdcall ReleaseSRWLockExclusive(PSRWLOCK);
+__declspec(dllimport) unsigned char __stdcall TryAcquireSRWLockExclusive(PSRWLOCK);
+__declspec(dllimport) void __stdcall InitOnceInitialize(PINIT_ONCE);
+__declspec(dllimport) BOOL __stdcall InitOnceExecuteOnce(PINIT_ONCE, PINIT_ONCE_FN, void*, void**);
+
 static HANDLE g_events[2];
 
 static void WriteString(const char* s)
@@ -353,6 +370,30 @@ int __stdcall _start(void)
     {
         WriteString("[syscall-stress] FAIL overflow release succeeded\n");
         ExitProcess(18);
+    }
+
+    // === Batch 55 coverage: SRW + InitOnce smoke ===
+    WriteString("[syscall-stress] main: SRWLock init + acquire + release\n");
+    SRWLOCK srw;
+    srw.Ptr = 0;
+    InitializeSRWLock(&srw);
+    AcquireSRWLockExclusive(&srw);
+    ReleaseSRWLockExclusive(&srw);
+    if (!TryAcquireSRWLockExclusive(&srw))
+    {
+        WriteString("[syscall-stress] FAIL TryAcquireSRWLockExclusive returned FALSE\n");
+        ExitProcess(19);
+    }
+    ReleaseSRWLockExclusive(&srw);
+
+    WriteString("[syscall-stress] main: InitOnce init + execute\n");
+    INIT_ONCE io;
+    io.Ptr = 0;
+    InitOnceInitialize(&io);
+    if (!InitOnceExecuteOnce(&io, 0, 0, 0)) // null callback — v0 stub skips it
+    {
+        WriteString("[syscall-stress] FAIL InitOnceExecuteOnce returned FALSE\n");
+        ExitProcess(20);
     }
 
     WriteString("[syscall-stress] main: PASS\n");

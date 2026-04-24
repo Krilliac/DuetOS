@@ -30,3 +30,9 @@ EXPORTS
     EncodePointer
     CreateSemaphoreW
     ReleaseSemaphore
+    InitializeSRWLock
+    AcquireSRWLockExclusive
+    ReleaseSRWLockExclusive
+    TryAcquireSRWLockExclusive
+    InitOnceInitialize
+    InitOnceExecuteOnce
