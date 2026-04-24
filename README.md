@@ -125,6 +125,9 @@ tools/qemu/screenshot.sh docs/screenshots/01-login-screen.png
 tools/qemu/screenshot-theme.sh 5 docs/screenshots/02-desktop-classic.png
 tools/qemu/screenshot-theme.sh 6 docs/screenshots/03-desktop-slate10.png
 tools/qemu/screenshot-theme.sh 2 docs/screenshots/04-terminal-tty.png
+
+# Native pixel-render demo (longer settle so the gfxdemo window paints fully)
+DUETOS_SETTLE=20 tools/qemu/screenshot-theme.sh 5 docs/screenshots/08-gfxdemo-pixel-render.png
 ```
 
 | Login gate | Terminal (TTY) |
@@ -136,6 +139,30 @@ tools/qemu/screenshot-theme.sh 2 docs/screenshots/04-terminal-tty.png
 |---------------------------------|---------------------------------|
 | ![classic theme](docs/screenshots/02-desktop-classic.png) | ![slate10 theme](docs/screenshots/03-desktop-slate10.png) |
 | Calculator, Notepad, Files, Task Manager, Kernel Log, Clock widget, taskbar with Start button + pinned apps + tray + clock. | Same compose, Slate10 theme — dark charcoal chrome, flat Win10-blue accent. `Ctrl+Alt+Y` cycles themes at runtime. |
+
+### Native pixel rendering — gfxdemo + DirectX v0 path
+
+![native pixel render](docs/screenshots/08-gfxdemo-pixel-render.png)
+
+The **GFX DEMO** window in the upper right is a native DuetOS app
+(`kernel/apps/gfxdemo.cpp`) whose content-draw callback computes
+**every pixel** of its client area on each compose: a diagonal
+RGB gradient (red on the X axis, green on the Y, blue on the
+anti-diagonal) with a soft 16-pixel quilt shimmer, three concentric
+outline rings traced by an integer sine LUT (white / cyan / magenta),
+and a yellow sine-wave overlay across the mid-Y row. Two centred 8x8
+text strips identify the path. Same compose, same compositor, same
+SYS_GDI_BITBLT pipeline as the Calculator / Notepad / Files / Task
+Manager / Kernel Log / Clock / WINDOWED HELLO windows around it —
+just with the client filled by computed pixels rather than glyphs
+or chrome fills.
+
+The same `FramebufferPutPixel` / `FramebufferFillRect` / `FillRgba`
+primitive set is what the DirectX v0 DLLs (`d3d9` / `d3d11` /
+`d3d12` / `dxgi`) call into when an MSVC PE goes
+`D3D11CreateDeviceAndSwapChain → ClearRenderTargetView → Present`.
+See [`.claude/knowledge/directx-v0.md`](.claude/knowledge/directx-v0.md)
+for the COM-vtable layout and the Clear-and-Present plumbing.
 
 ### Windows PE on the serial console
 
@@ -199,9 +226,16 @@ keyboard/mouse routing to the target window (input still goes to the
 native console).
 
 Networking — `ws2_32!socket` returns `INVALID_SOCKET`; the kernel
-net stack is a skeleton. DirectX — returns `E_NOTIMPL`; no Vulkan
-ICD yet. COM — returns `CLASS_E_CLASSNOTAVAILABLE`. Each of those
-is its own multi-slice implementation track; the DLL surface is the
+net stack is a skeleton. DirectX v0 — `D3D11CreateDeviceAndSwapChain`,
+`IDXGIFactory*::CreateSwapChain*`, `D3D12CreateDevice`,
+`Direct3DCreate9` all hand out real COM objects with vtables;
+`ClearRenderTargetView` fills a BGRA8 back buffer in user-mode
+memory and `Present` BitBlts it to the owning HWND via
+`SYS_GDI_BITBLT`. Higher-level drawing (vertex/pixel shaders,
+real `Draw*` calls, fence-driven GPU sync, cross-DLL DXGI ↔ D3D11/12
+swap-chain marriage) is `E_NOTIMPL`. No Vulkan ICD yet. COM —
+returns `CLASS_E_CLASSNOTAVAILABLE`. Each of those is its own
+multi-slice implementation track; the DLL surface is the
 scaffolding that makes them possible.
 
 See [`docs/HISTORY.md`](docs/HISTORY.md) for how the project got to

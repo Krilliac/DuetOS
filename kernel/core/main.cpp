@@ -46,6 +46,7 @@
 #include "../apps/calculator.h"
 #include "../apps/clock.h"
 #include "../apps/files.h"
+#include "../apps/gfxdemo.h"
 #include "../apps/notes.h"
 #include "../drivers/video/console.h"
 #include "../drivers/video/cursor.h"
@@ -652,6 +653,24 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     duetos::drivers::video::ThemeRegisterWindow(Role::Clock, clock_handle);
     duetos::apps::clock::ClockInit(clock_handle);
     duetos::apps::clock::ClockSelfTest();
+
+    // GFX DEMO — native graphics demonstration. Renders a per-
+    // pixel computed image (RGB gradient + sine-wave overlay +
+    // concentric rings) into its window's client area, exercising
+    // the same FramebufferPutPixel / FramebufferFillRect /
+    // FramebufferDrawString primitives that the DirectX v0 path
+    // uses internally. Visible proof that the kernel's pixel
+    // pipeline produces real graphical output, not just glyphs.
+    duetos::drivers::video::WindowChrome gfx_chrome = theme_chrome(Role::GfxDemo);
+    gfx_chrome.x = 900;
+    gfx_chrome.y = 40;
+    gfx_chrome.w = 340;
+    gfx_chrome.h = 280;
+    const duetos::drivers::video::WindowHandle gfx_handle =
+        duetos::drivers::video::WindowRegister(gfx_chrome, "GFX DEMO");
+    duetos::drivers::video::ThemeRegisterWindow(Role::GfxDemo, gfx_handle);
+    duetos::apps::gfxdemo::GfxDemoInit(gfx_handle);
+    duetos::apps::gfxdemo::GfxDemoSelfTest();
 
     // Framebuffer text console. 80x40 chars of boot log at the
     // bottom of the desktop, under the windows in z-order. Dragging
