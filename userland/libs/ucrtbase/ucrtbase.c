@@ -1373,9 +1373,65 @@ __declspec(dllexport) int rand(void)
  * report "not found"; _putenv silently succeeds.
  * ------------------------------------------------------------------ */
 
+/* Static environment block. Real Windows programs consult
+ * these during CRT init (PATH for spawn, TEMP for temp files,
+ * USERNAME for profile lookup). Keeping them here as file-local
+ * constants means even a no-libc freestanding PE can call
+ * getenv() meaningfully.
+ *
+ * The return-pointer storage is the literal string data —
+ * callers must not mutate. Real MSVC ucrt does the same
+ * (getenv returns pointer into a per-process env block). */
+
+static const struct
+{
+    const char* name;
+    const char* value;
+} k_env_vars[] = {
+    {"PATH", "X:\\;X:\\System;X:\\bin"},
+    {"PATHEXT", ".EXE;.COM;.BAT"},
+    {"TEMP", "X:\\Temp"},
+    {"TMP", "X:\\Temp"},
+    {"USERNAME", "user"},
+    {"USERDOMAIN", "CUSTOMOS"},
+    {"USERPROFILE", "X:\\Users\\user"},
+    {"COMPUTERNAME", "CUSTOMOS"},
+    {"SYSTEMROOT", "X:\\"},
+    {"WINDIR", "X:\\"},
+    {"OS", "CustomOS_NT"},
+    {"PROCESSOR_ARCHITECTURE", "AMD64"},
+    {"NUMBER_OF_PROCESSORS", "1"},
+    {"APPDATA", "X:\\Users\\user\\AppData\\Roaming"},
+    {"LOCALAPPDATA", "X:\\Users\\user\\AppData\\Local"},
+    {"PROGRAMFILES", "X:\\Program Files"},
+    {"COMSPEC", "X:\\cmd.exe"},
+};
+
+static int env_name_eq(const char* a, const char* b)
+{
+    /* Windows env var names are case-insensitive. */
+    while (*a && *b)
+    {
+        char ca = *a, cb = *b;
+        if (ca >= 'a' && ca <= 'z')
+            ca = (char) (ca - ('a' - 'A'));
+        if (cb >= 'a' && cb <= 'z')
+            cb = (char) (cb - ('a' - 'A'));
+        if (ca != cb)
+            return 0;
+        ++a;
+        ++b;
+    }
+    return *a == 0 && *b == 0;
+}
+
 __declspec(dllexport) char* getenv(const char* name)
 {
-    (void) name;
+    if (!name)
+        return (char*) 0;
+    for (size_t i = 0; i < sizeof(k_env_vars) / sizeof(k_env_vars[0]); ++i)
+        if (env_name_eq(k_env_vars[i].name, name))
+            return (char*) k_env_vars[i].value;
     return (char*) 0;
 }
 
