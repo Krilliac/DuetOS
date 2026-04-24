@@ -1,6 +1,6 @@
 # PE EAT parser + DLL loader — stage 2 kickoff
 
-**Type:** Observation · **Status:** Active (stage-2 slices 1-8 landed) · **Last updated:** 2026-04-24
+**Type:** Observation · **Status:** Active (stage-2 slices 1-9 landed) · **Last updated:** 2026-04-24
 
 ## Context
 
@@ -745,6 +745,93 @@ Both `via-dll` and `via-dll-fwd` paths land on the same
 same VA as `CustomAdd`'s. The chase runs exactly once at
 load time; runtime calls are indistinguishable.
 
+## Slice 9 — multi-DLL preload
+
+Slices 5–8 all ran with exactly one pre-loaded DLL
+(`customdll.dll`). The array parameter to `PeLoad` was
+plumbed but only ever held one entry. Slice 9 generalises the
+preload slot to N DLLs and ships a second test DLL
+(`customdll2.dll`) with a disjoint export set so every lookup
+path gets a real walk-past-the-first-DLL exercise.
+
+### What changed in `SpawnPeFile`
+
+A single-entry DllImage local becomes a 4-slot stack array +
+a mirrored table of source blobs:
+
+```cpp
+struct PreloadDllEntry { const char* label; const u8* bytes; u64 len; };
+const PreloadDllEntry preload_set[] = {
+    {"customdll.dll",  kBinCustomDllBytes,  kBinCustomDllBytes_len},
+    {"customdll2.dll", kBinCustomDll2Bytes, kBinCustomDll2Bytes_len},
+};
+DllImage preloaded_dlls[kPreloadSlotCap];  // kPreloadSlotCap = 4
+u64      preloaded_count = 0;
+for each entry:
+    DllLoad(... into `as` ...);
+    preloaded_dlls[preloaded_count++] = dll.image;
+PeLoad(... preloaded_dlls, preloaded_count ...);
+// post-ProcessCreate: loop ProcessRegisterDllImage
+```
+
+Adding a third DLL is a one-line append to `preload_set[]`
+once the blob is embedded via CMake.
+
+### Why the array is NOT zero-initialised
+
+Plain `DllImage arr[4]{}` value-initialises ~400 bytes; clang
+lowers that to `memset`, which the kernel doesn't link. The
+array stays uninitialised; we only read indices
+`[0..preloaded_count)` and every such slot is fully assigned
+before the increment — no uninitialised-read hazard.
+
+### New fixture — `customdll2.dll`
+
+| File | Role |
+|------|------|
+| `userland/libs/customdll2/customdll2.c` | `__declspec(dllexport) int CustomDouble(int n) { return n*2; }`. One function, disjoint from customdll.dll. |
+| `tools/build-customdll2.sh` | `clang --target=...msvc -c` → `.obj`, `lld-link /dll /noentry /base:0x10010000 /export:CustomDouble` → DLL. Embed as `generated_customdll2.h`. |
+| `kernel/CMakeLists.txt` | `add_custom_command` for the new blob; header folded into both stages. |
+
+Load base `0x10010000` = 1 MiB above `customdll.dll`'s
+`0x10000000` — plenty of headroom for customdll's 3 pages;
+no VA collision.
+
+### Test PE update — `customdll_test.exe`
+
+- Extra `.def` (`customdll_test/customdll2.def`) tells
+  llvm-dlltool to produce a `customdll2.lib` so lld-link can
+  resolve `__imp_CustomDouble`.
+- `hello.c` imports + calls `CustomDouble(0x55)` = `0xAA` and
+  cross-checks. Success gate now requires FIVE values to
+  line up: `CustomAdd` (direct), `CustomAddFwd` (forwarded),
+  `CustomMul` + `CustomVersion` (direct), `CustomDouble`
+  (from second DLL).
+
+`llvm-readobj` confirms the PE's Import Directory carries
+three DLLs: customdll.dll (4 imports), customdll2.dll (1
+import), kernel32.dll (ExitProcess).
+
+### Boot-log signature on success
+
+```
+[ring3] pre-loaded customdll.dll  base=0x10000000 (pre-PeLoad — visible to ResolveImports)
+[ring3] pre-loaded customdll2.dll base=0x10010000 (pre-PeLoad — visible to ResolveImports)
+[pe-resolve] via-dll     customdll.dll!CustomAdd         -> 0x10001000
+[pe-resolve] via-dll-fwd customdll.dll!CustomAddFwd -> customdll.CustomAdd -> 0x10001000
+[pe-resolve] via-dll     customdll.dll!CustomMul         -> 0x10001010
+[pe-resolve] via-dll     customdll.dll!CustomVersion     -> 0x10001020
+[pe-resolve] via-dll     customdll2.dll!CustomDouble     -> 0x10011000
+[ring3] registered 0x2 DLL(s) pid=0xN
+...
+[I] sys : exit rc val=0x1234
+```
+
+The `[ring3] registered 0x2` line confirms the
+`ProcessRegisterDllImage` loop ran for both DLLs — the DLL
+table is populated for `GetProcAddress` even though the
+PE's IAT lookups happen at load time.
+
 ## Boot-time visibility
 
 `PeReport` now appends an `exports:` block to the diagnostic it
@@ -784,6 +871,10 @@ first real DLL embedded in ramfs will light up the full dump:
    `ParseForwarder` + bounded recursion in
    `TryResolveViaPreloadedDlls`. `CustomAddFwd` forwarder
    exercises the chase end-to-end.
+8. ~~Multi-DLL preload.~~ **Landed in slice 9** —
+   N-entry preload array in SpawnPeFile; second test DLL
+   `customdll2.dll` with a disjoint `CustomDouble` export
+   exercises the walk-past-first-DLL path.
 3. **Recursive import resolution.** Walk the DLL's own Import
    Directory, look up each target DLL in the table (load if
    absent, detect circular dependencies), then patch the DLL's

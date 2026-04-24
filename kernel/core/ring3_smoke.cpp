@@ -7,6 +7,7 @@
 #include "../debug/inspect.h"
 #include "../fs/ramfs.h"
 #include "generated_customdll.h"
+#include "generated_customdll2.h"
 #include "generated_customdll_test.h"
 #include "generated_hello_pe.h"
 #include "generated_hello_winapi.h"
@@ -1872,41 +1873,71 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     const u64 entropy = customos::core::RandomU64();
     const u64 aslr_delta = (entropy & 0x3FF) * (64ULL * 1024);
 
-    // Stage-2 slice 6 — pre-load customdll.dll into `as` BEFORE
-    // PeLoad runs so ResolveImports can consult its EAT. The
-    // DllImage lives on this stack frame for the duration of
-    // PeLoad; after ProcessCreate we copy it into the Process's
-    // permanent dll_images[] table. Only preload when the PE
-    // actually has imports (PeValidate == ImportsPresent) —
-    // freestanding PEs don't need it and would pay 3 frames for
-    // nothing.
-    DllImage preloaded_dll{};
-    bool have_preloaded_dll = false;
+    // Stage-2 slice 6/9 — pre-load the per-spawn DLL set into
+    // `as` BEFORE PeLoad runs so ResolveImports can consult
+    // their EATs. Each DllImage lives on this stack frame for
+    // the duration of PeLoad; after ProcessCreate we copy them
+    // into the Process's permanent dll_images[] table. Only
+    // preload when the PE has imports (vs == ImportsPresent) —
+    // freestanding PEs don't need DLLs and would pay the frame
+    // cost for nothing.
+    //
+    // The table below is the authoritative list of DLLs that
+    // every Win32-imports PE gets pre-loaded. Adding a new DLL
+    // here is a one-line append once the blob is embedded via
+    // CMake. `kPreloadSlotCap` caps the stack-local array size;
+    // bump if the list grows past it.
+    constexpr u64 kPreloadSlotCap = 4;
+    struct PreloadDllEntry
+    {
+        const char* label; // diagnostic name for boot-log
+        const u8* bytes;   // kernel direct-map pointer to the blob
+        u64 len;           // blob size in bytes
+    };
+    const PreloadDllEntry preload_set[] = {
+        {"customdll.dll", fs::generated::kBinCustomDllBytes, fs::generated::kBinCustomDllBytes_len},
+        {"customdll2.dll", fs::generated::kBinCustomDll2Bytes, fs::generated::kBinCustomDll2Bytes_len},
+    };
+    constexpr u64 kPreloadEntryCount = sizeof(preload_set) / sizeof(preload_set[0]);
+    static_assert(kPreloadEntryCount <= kPreloadSlotCap, "Preload DLL list exceeds stack-local cap");
+
+    // Intentionally NOT value-initialised: zero-init of a 4-entry
+    // DllImage array (~400 bytes) makes clang emit memset, which
+    // the kernel doesn't link. We only ever read entries
+    // [0..preloaded_count); each slot we read is fully assigned
+    // just above the increment.
+    DllImage preloaded_dlls[kPreloadSlotCap];
+    u64 preloaded_count = 0;
     if (vs == PeStatus::ImportsPresent)
     {
-        const DllLoadResult dll =
-            DllLoad(fs::generated::kBinCustomDllBytes, fs::generated::kBinCustomDllBytes_len, as, /*aslr_delta=*/0);
-        if (dll.status == DllLoadStatus::Ok)
+        for (u64 i = 0; i < kPreloadEntryCount; ++i)
         {
-            preloaded_dll = dll.image;
-            have_preloaded_dll = true;
-            SerialWrite("[ring3] pre-loaded customdll.dll base=");
-            SerialWriteHex(preloaded_dll.base_va);
-            SerialWrite(" (pre-PeLoad — visible to ResolveImports)\n");
-        }
-        else
-        {
-            SerialWrite("[ring3] customdll DllLoad failed for \"");
-            SerialWrite(name);
-            SerialWrite("\" status=");
-            SerialWrite(DllLoadStatusName(dll.status));
-            SerialWrite(" — falling back to flat stubs only\n");
+            const DllLoadResult dll = DllLoad(preload_set[i].bytes, preload_set[i].len, as, /*aslr_delta=*/0);
+            if (dll.status == DllLoadStatus::Ok)
+            {
+                preloaded_dlls[preloaded_count] = dll.image;
+                ++preloaded_count;
+                SerialWrite("[ring3] pre-loaded ");
+                SerialWrite(preload_set[i].label);
+                SerialWrite(" base=");
+                SerialWriteHex(dll.image.base_va);
+                SerialWrite(" (pre-PeLoad — visible to ResolveImports)\n");
+            }
+            else
+            {
+                SerialWrite("[ring3] ");
+                SerialWrite(preload_set[i].label);
+                SerialWrite(" DllLoad failed for \"");
+                SerialWrite(name);
+                SerialWrite("\" status=");
+                SerialWrite(DllLoadStatusName(dll.status));
+                SerialWrite(" — this DLL's exports won't be resolvable via-DLL\n");
+            }
         }
     }
 
-    const DllImage* dll_array = have_preloaded_dll ? &preloaded_dll : nullptr;
-    const u64 dll_count = have_preloaded_dll ? 1 : 0;
-    const PeLoadResult r = PeLoad(pe_bytes, pe_len, as, name, aslr_delta, dll_array, dll_count);
+    const DllImage* dll_array = preloaded_count > 0 ? preloaded_dlls : nullptr;
+    const PeLoadResult r = PeLoad(pe_bytes, pe_len, as, name, aslr_delta, dll_array, preloaded_count);
     if (!r.ok)
     {
         AddressSpaceRelease(as);
@@ -1953,28 +1984,31 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
             AddressSpaceRelease(as);
             return 0;
         }
-        // Stage-2 slice 6 — the DLL was pre-loaded BEFORE PeLoad
-        // so ResolveImports could consult its EAT. Now that the
-        // Process exists, copy the DllImage into its permanent
-        // `dll_images[]` table so SYS_DLL_PROC_ADDRESS /
-        // ProcessResolveDllExportByBase can reach it too. The
-        // pre-PeLoad slot is a stack local that's about to go
-        // out of scope; the per-Process copy is the long-lived
-        // record.
-        if (have_preloaded_dll)
+        // Stage-2 slice 6/9 — the DLLs were pre-loaded BEFORE
+        // PeLoad so ResolveImports could consult their EATs. Now
+        // that the Process exists, copy each DllImage into its
+        // permanent `dll_images[]` table so
+        // SYS_DLL_PROC_ADDRESS / ProcessResolveDllExportByBase
+        // can reach them too. The pre-PeLoad slots are stack
+        // locals about to go out of scope; the per-Process copies
+        // are the long-lived record.
+        for (u64 i = 0; i < preloaded_count; ++i)
         {
-            if (!ProcessRegisterDllImage(proc, preloaded_dll))
+            if (!ProcessRegisterDllImage(proc, preloaded_dlls[i]))
             {
-                SerialWrite("[ring3] customdll register failed for \"");
+                SerialWrite("[ring3] DLL register failed for \"");
                 SerialWrite(name);
                 SerialWrite("\" (table full?)\n");
+                break;
             }
-            else
-            {
-                SerialWrite("[ring3] registered customdll.dll pid=");
-                SerialWriteHex(proc->pid);
-                SerialWrite("\n");
-            }
+        }
+        if (preloaded_count > 0)
+        {
+            SerialWrite("[ring3] registered ");
+            SerialWriteHex(preloaded_count);
+            SerialWrite(" DLL(s) pid=");
+            SerialWriteHex(proc->pid);
+            SerialWrite("\n");
         }
     }
     SerialWrite("[ring3] pe spawn name=\"");

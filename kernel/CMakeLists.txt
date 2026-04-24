@@ -346,6 +346,32 @@ add_custom_command(
 list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_CUSTOMDLL_HEADER}")
 
 # ----------------------------------------------------------------------------
+# Second test DLL for the stage-2 slice 9 multi-DLL preload path.
+# Exports CustomDouble(int) -> int at load base 0x10010000.
+# Deliberately disjoint exports from customdll.dll so a call to
+# CustomDouble HAS to reach the second entry in the preload
+# array — proves the resolver walks past the first DLL on miss.
+# ----------------------------------------------------------------------------
+set(CUSTOMOS_CUSTOMDLL2_SRC "${CMAKE_SOURCE_DIR}/userland/libs/customdll2/customdll2.c")
+set(CUSTOMOS_CUSTOMDLL2_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_customdll2.h")
+set(CUSTOMOS_CUSTOMDLL2_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-customdll2.sh")
+
+add_custom_command(
+    OUTPUT "${CUSTOMOS_CUSTOMDLL2_HEADER}"
+    COMMAND "${CUSTOMOS_CUSTOMDLL2_SCRIPT}"
+            "${CMAKE_SOURCE_DIR}"
+            "${CUSTOMOS_CUSTOMDLL2_HEADER}"
+    DEPENDS
+        "${CUSTOMOS_CUSTOMDLL2_SRC}"
+        "${CUSTOMOS_CUSTOMDLL2_SCRIPT}"
+        "${CUSTOMOS_EMBED_BLOB_SCRIPT}"
+    COMMENT "Compiling + embedding customdll2.dll (multi-DLL preload fixture)"
+    VERBATIM
+)
+
+list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_CUSTOMDLL2_HEADER}")
+
+# ----------------------------------------------------------------------------
 # Sixth PE fixture: customdll_test.exe — first userland program
 # that imports from a real loaded DLL (customdll.dll) rather
 # than from the flat stubs page. Exercises stage-2 slice 6's
