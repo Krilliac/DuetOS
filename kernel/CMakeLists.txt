@@ -560,6 +560,37 @@ add_custom_command(
 list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_ADVAPI32_HEADER}")
 
 # ----------------------------------------------------------------------------
+# Stage-2 slice 28 — seven small stub DLLs built via a generic
+# helper (tools/build-stub-dll.sh). Each DLL has a small hand-
+# written .c source + an export list passed on the CMake cmd-
+# line.
+# ----------------------------------------------------------------------------
+set(CUSTOMOS_STUB_DLL_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-stub-dll.sh")
+
+macro(customos_stub_dll name base_va exports)
+    set(_src "${CMAKE_SOURCE_DIR}/userland/libs/${name}/${name}.c")
+    set(_header "${CMAKE_CURRENT_BINARY_DIR}/generated_${name}_dll.h")
+    add_custom_command(
+        OUTPUT "${_header}"
+        COMMAND "${CUSTOMOS_STUB_DLL_SCRIPT}"
+                "${CMAKE_SOURCE_DIR}" "${_header}" "${name}" "${base_va}" "${exports}"
+        DEPENDS "${_src}" "${CUSTOMOS_STUB_DLL_SCRIPT}" "${CUSTOMOS_EMBED_BLOB_SCRIPT}"
+        COMMENT "Compiling + embedding ${name}.dll"
+        VERBATIM
+    )
+    list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${_header}")
+    set(CUSTOMOS_${name}_HEADER "${_header}" PARENT_SCOPE_UNUSED)
+endmacro()
+
+customos_stub_dll(shlwapi 0x100B0000 "PathAddBackslashW,PathAppendW,PathCombineW,PathFileExistsA,PathFileExistsW,PathFindExtensionA,PathFindExtensionW,PathFindFileNameA,PathFindFileNameW,PathIsDirectoryW,PathRemoveFileSpecW,PathStripPathW,StrCmpNW,StrCmpW,StrStrIW,StrStrW")
+customos_stub_dll(shell32 0x100C0000 "CommandLineToArgvW,ExtractIconW,ExtractIconExW,SHCreateDirectoryW,SHCreateDirectoryExW,SHFileOperationW,SHGetFolderPathA,SHGetFolderPathW,SHGetKnownFolderPath,SHGetPathFromIDListW,SHGetSpecialFolderPathW,ShellExecuteW,ShellExecuteExW")
+customos_stub_dll(ole32 0x100D0000 "CoInitialize,CoInitializeEx,CoUninitialize,OleInitialize,OleUninitialize,CoCreateInstance,CoCreateInstanceEx,CoGetClassObject,CLSIDFromString,CLSIDFromProgID,IIDFromString,StringFromCLSID,CoTaskMemAlloc,CoTaskMemFree,CoTaskMemRealloc")
+customos_stub_dll(oleaut32 0x100E0000 "VariantInit,VariantClear,SysAllocString,SysFreeString,SysStringLen")
+customos_stub_dll(winmm 0x100F0000 "timeGetTime,timeBeginPeriod,timeEndPeriod,timeGetDevCaps,timeSetEvent,timeKillEvent,PlaySoundW,mciSendStringW")
+customos_stub_dll(bcrypt 0x10100000 "BCryptOpenAlgorithmProvider,BCryptCloseAlgorithmProvider,BCryptCreateHash,BCryptHashData,BCryptFinishHash,BCryptDestroyHash,BCryptGetProperty,BCryptGenRandom")
+customos_stub_dll(psapi 0x10110000 "EnumProcesses,EnumProcessModules,GetMappedFileNameW,GetModuleBaseNameW,GetModuleFileNameExW,GetProcessMemoryInfo,QueryWorkingSet")
+
+# ----------------------------------------------------------------------------
 # Userland ucrtbase.dll — stage-2 slice 15. Retires the
 # UCRT runtime stubs: heap alloc (malloc/free/calloc/realloc
 # /_aligned_*), terminators (exit/_exit), CRT startup shims

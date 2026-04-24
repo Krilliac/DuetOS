@@ -7,6 +7,7 @@
 #include "../debug/inspect.h"
 #include "../fs/ramfs.h"
 #include "generated_advapi32_dll.h"
+#include "generated_bcrypt_dll.h"
 #include "generated_customdll.h"
 #include "generated_customdll2.h"
 #include "generated_customdll_test.h"
@@ -16,8 +17,14 @@
 #include "generated_msvcp140_dll.h"
 #include "generated_msvcrt_dll.h"
 #include "generated_ntdll_dll.h"
+#include "generated_ole32_dll.h"
+#include "generated_oleaut32_dll.h"
+#include "generated_psapi_dll.h"
+#include "generated_shell32_dll.h"
+#include "generated_shlwapi_dll.h"
 #include "generated_ucrtbase_dll.h"
 #include "generated_vcruntime140_dll.h"
+#include "generated_winmm_dll.h"
 #include "generated_hello_pe.h"
 #include "generated_hello_winapi.h"
 #include "generated_syscall_stress.h"
@@ -1896,7 +1903,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     // here is a one-line append once the blob is embedded via
     // CMake. `kPreloadSlotCap` caps the stack-local array size;
     // bump if the list grows past it.
-    constexpr u64 kPreloadSlotCap = 16;
+    constexpr u64 kPreloadSlotCap = 32;
     struct PreloadDllEntry
     {
         const char* label; // diagnostic name for boot-log
@@ -1956,6 +1963,16 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         // token/privilege (success), GetUserName* (constant),
         // SystemFunction036 (deterministic RNG). 25 exports.
         {"advapi32.dll", fs::generated::kBinAdvapi32DllBytes, fs::generated::kBinAdvapi32DllBytes_len},
+        // Stage-2 slice 28: small stub DLLs for misc support
+        // surface. Most return "not found" / success sentinels;
+        // CoTaskMem* + SysAllocString alias the process heap.
+        {"shlwapi.dll", fs::generated::kBinShlwapiDllBytes, fs::generated::kBinShlwapiDllBytes_len},
+        {"shell32.dll", fs::generated::kBinShell32DllBytes, fs::generated::kBinShell32DllBytes_len},
+        {"ole32.dll", fs::generated::kBinOle32DllBytes, fs::generated::kBinOle32DllBytes_len},
+        {"oleaut32.dll", fs::generated::kBinOleaut32DllBytes, fs::generated::kBinOleaut32DllBytes_len},
+        {"winmm.dll", fs::generated::kBinWinmmDllBytes, fs::generated::kBinWinmmDllBytes_len},
+        {"bcrypt.dll", fs::generated::kBinBcryptDllBytes, fs::generated::kBinBcryptDllBytes_len},
+        {"psapi.dll", fs::generated::kBinPsapiDllBytes, fs::generated::kBinPsapiDllBytes_len},
     };
     constexpr u64 kPreloadEntryCount = sizeof(preload_set) / sizeof(preload_set[0]);
     static_assert(kPreloadEntryCount <= kPreloadSlotCap, "Preload DLL list exceeds stack-local cap");
