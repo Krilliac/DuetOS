@@ -219,6 +219,19 @@ constexpr u32 kOffInterlockedXor64 = 0xB3F; // batch 60 — 17 bytes
 constexpr u32 kOffEnterCritSecReal = 0xB50; // batch 61 — 49 bytes
 constexpr u32 kOffLeaveCritSecReal = 0xB81; // batch 61 — 14 bytes
 
+// === Batch 62: real SRWLOCKs (exclusive-only; shared aliases to exclusive) ===
+// Win32 SRWLOCK is a single pointer-sized (8 byte) word. Layout
+// we impose: [rcx+0] u64 owner_tid (0 = unheld). Acquire/release
+// is a straight `lock cmpxchg` on the slot; shared operations
+// degrade to exclusive because we don't track reader counts yet.
+// That's suboptimal for reader-heavy workloads but preserves
+// correctness — the prior binding (NO-OP for shared) allowed
+// readers to observe mid-write state.
+constexpr u32 kOffSrwInit = 0xB8F;           // batch 62 — 6 bytes
+constexpr u32 kOffSrwAcquireExcl = 0xB95;    // batch 62 — 30 bytes
+constexpr u32 kOffSrwReleaseExcl = 0xBB3;    // batch 62 — 6 bytes
+constexpr u32 kOffSrwTryAcquireExcl = 0xBB9; // batch 62 — 22 bytes
+
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
     // Windows x64 ABI: first arg (uExitCode) in RCX.
@@ -2920,10 +2933,70 @@ constexpr u8 kStubsBytes[] = {
     0x48, 0xC7, 0x01, 0x00, 0x00, 0x00, 0x00, // 0xB87 mov qword [rcx], 0
     // .done (abs 0xB8E):
     0xC3, // 0xB8E ret
+
+    // === Batch 62 ==============================================
+
+    // --- InitializeSRWLock (offset 0xB8F, 6 bytes) ------------
+    // Win32: void InitializeSRWLock(PSRWLOCK = rcx). Zero the
+    // 8-byte slot. Critical even though SRWLOCKs are sometimes
+    // static-init'd to zero — stack-allocated SRWLOCKs hold
+    // garbage until explicitly initialised.
+    0x31, 0xC0,       // 0xB8F xor eax, eax
+    0x48, 0x89, 0x01, // 0xB91 mov qword [rcx], rax
+    0xC3,             // 0xB94 ret
+
+    // --- AcquireSRWLockExclusive (offset 0xB95, 30 bytes) -----
+    // Win32: void AcquireSRWLockExclusive(PSRWLOCK = rcx). Same
+    // spin-yield pattern as EnterCriticalSection but no
+    // recursion tracking — SRW locks are NOT reentrant. If a
+    // thread tries to acquire the same SRWLOCK twice the second
+    // call deadlocks. That's the documented Win32 contract.
+    0x53,             // 0xB95 push rbx
+    0x48, 0x89, 0xCB, // 0xB96 mov rbx, rcx
+    0x6A, 0x01,       // 0xB99 push 1
+    0x58,             // 0xB9B pop rax                 ; SYS_GETPID
+    0xCD, 0x80,       // 0xB9C int 0x80                ; rax = TID
+    0x49, 0x89, 0xC0, // 0xB9E mov r8, rax             ; r8 = our TID
+    // .retry (abs 0xBA1):
+    0x31, 0xC0,                   // 0xBA1 xor eax, eax            ; expected = 0
+    0xF0, 0x4C, 0x0F, 0xB1, 0x03, // 0xBA3 lock cmpxchg [rbx], r8
+    0x74, 0x07,                   // 0xBA8 je .done (+7 -> 0xBB1)
+    0x6A, 0x03,                   // 0xBAA push 3
+    0x58,                         // 0xBAC pop rax                 ; SYS_YIELD
+    0xCD, 0x80,                   // 0xBAD int 0x80
+    0xEB, 0xF0,                   // 0xBAF jmp .retry (-16 -> 0xBA1)
+    // .done (abs 0xBB1):
+    0x5B, // 0xBB1 pop rbx
+    0xC3, // 0xBB2 ret
+
+    // --- ReleaseSRWLockExclusive (offset 0xBB3, 6 bytes) ------
+    // Win32: void ReleaseSRWLockExclusive(PSRWLOCK = rcx). Zero
+    // the slot so the next acquirer wins the cmpxchg. `mov` is
+    // atomic on aligned 8-byte stores on x86_64; no `lock`
+    // prefix needed.
+    0x31, 0xC0,       // 0xBB3 xor eax, eax
+    0x48, 0x89, 0x01, // 0xBB5 mov qword [rcx], rax
+    0xC3,             // 0xBB8 ret
+
+    // --- TryAcquireSRWLockExclusive (offset 0xBB9, 22 bytes) --
+    // Win32: BOOLEAN TryAcquireSRWLockExclusive(PSRWLOCK = rcx).
+    // Single cmpxchg; no spin. Returns 1 on success, 0 on
+    // contention. Uses setz to materialise ZF as the low byte of
+    // rax; the existing binding to kOffReturnOne (always 1) was
+    // dishonest and masked real contention.
+    0x6A, 0x01,                   // 0xBB9 push 1
+    0x58,                         // 0xBBB pop rax                 ; SYS_GETPID
+    0xCD, 0x80,                   // 0xBBC int 0x80                ; rax = TID
+    0x49, 0x89, 0xC0,             // 0xBBE mov r8, rax             ; r8 = our TID
+    0x31, 0xC0,                   // 0xBC1 xor eax, eax            ; expected = 0
+    0xF0, 0x4C, 0x0F, 0xB1, 0x01, // 0xBC3 lock cmpxchg [rcx], r8
+    0x0F, 0x94, 0xC0,             // 0xBC8 setz al                 ; al = ZF
+    0x0F, 0xB6, 0xC0,             // 0xBCB movzx eax, al           ; eax = BOOL
+    0xC3,                         // 0xBCE ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0xB8F, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0xBCF, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -3410,13 +3483,17 @@ constexpr StubEntry kStubsTable[] = {
     // NULL (not supported — callers see CreateFileMapping fail
     // and fall back to non-mapped I/O). Wiring these through the
     // existing shared stubs costs no stub-page bytes.
-    {"kernel32.dll", "InitializeSRWLock", kOffCritSecNop},
-    {"kernel32.dll", "AcquireSRWLockExclusive", kOffCritSecNop},
-    {"kernel32.dll", "AcquireSRWLockShared", kOffCritSecNop},
-    {"kernel32.dll", "ReleaseSRWLockExclusive", kOffCritSecNop},
-    {"kernel32.dll", "ReleaseSRWLockShared", kOffCritSecNop},
-    {"kernel32.dll", "TryAcquireSRWLockExclusive", kOffReturnOne},
-    {"kernel32.dll", "TryAcquireSRWLockShared", kOffReturnOne},
+    {"kernel32.dll", "InitializeSRWLock", kOffSrwInit},
+    {"kernel32.dll", "AcquireSRWLockExclusive", kOffSrwAcquireExcl},
+    // Shared variants degrade to exclusive acquire in v0 — we
+    // don't track reader counts yet, so letting concurrent
+    // readers through would violate the reader/writer barrier
+    // against an exclusive holder. Correctness > throughput.
+    {"kernel32.dll", "AcquireSRWLockShared", kOffSrwAcquireExcl},
+    {"kernel32.dll", "ReleaseSRWLockExclusive", kOffSrwReleaseExcl},
+    {"kernel32.dll", "ReleaseSRWLockShared", kOffSrwReleaseExcl},
+    {"kernel32.dll", "TryAcquireSRWLockExclusive", kOffSrwTryAcquireExcl},
+    {"kernel32.dll", "TryAcquireSRWLockShared", kOffSrwTryAcquireExcl},
     {"kernel32.dll", "InitializeConditionVariable", kOffCritSecNop},
     {"kernel32.dll", "WakeConditionVariable", kOffCritSecNop},
     {"kernel32.dll", "WakeAllConditionVariable", kOffCritSecNop},
