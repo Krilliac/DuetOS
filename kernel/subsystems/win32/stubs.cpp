@@ -198,6 +198,16 @@ constexpr u32 kOffGetStartupInfo = 0xAC1; // batch 58 — 24 bytes (zero-fill + 
 // === Batch 59: real GetExitCodeThread (exit-code tracking).
 constexpr u32 kOffGetExitCodeThreadReal = 0xAD9; // batch 59 — 20 bytes (saves rdi)
 
+// === Batch 60: Interlocked{And,Or,Xor} (+64-bit). LOCK CMPXCHG
+// loops so SMP future-proofing + timer-tick preemption safety
+// hold today.
+constexpr u32 kOffInterlockedAnd = 0xAED;   // batch 60 — 16 bytes
+constexpr u32 kOffInterlockedOr = 0xAFD;    // batch 60 — 16 bytes
+constexpr u32 kOffInterlockedXor = 0xB0D;   // batch 60 — 16 bytes
+constexpr u32 kOffInterlockedAnd64 = 0xB1D; // batch 60 — 17 bytes
+constexpr u32 kOffInterlockedOr64 = 0xB2E;  // batch 60 — 17 bytes
+constexpr u32 kOffInterlockedXor64 = 0xB3F; // batch 60 — 17 bytes
+
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
     // Windows x64 ABI: first arg (uExitCode) in RCX.
@@ -2781,10 +2791,68 @@ constexpr u8 kStubsBytes[] = {
     0xB8, 0x01, 0x00, 0x00, 0x00, // 0xAE6 mov eax, 1 (BOOL TRUE)
     0x5F,                         // 0xAEB pop rdi
     0xC3,                         // 0xAEC ret
+
+    // === Batch 60 =============================================
+
+    // --- InterlockedAnd (offset 0xAED, 16 bytes) --------------
+    // Win32: LONG InterlockedAnd(LONG volatile *Target=rcx,
+    //                             LONG Value=edx).
+    // Returns the ORIGINAL value of *Target. Standard CAS loop:
+    //   do { old = *t; new = old & v; } while (!cas(t, old, new));
+    // LOCK CMPXCHG is serialised across CPUs and acts as a full
+    // barrier — correct under both SMP and single-CPU with a
+    // preemptive timer interrupt.
+    0x8B, 0x01,                   // 0xAED mov eax, [rcx]       ; old
+    0x41, 0x89, 0xC0,             // 0xAEF mov r8d, eax         ; new = old
+    0x41, 0x21, 0xD0,             // 0xAF2 and r8d, edx         ; new &= value
+    0xF0, 0x44, 0x0F, 0xB1, 0x01, // 0xAF5 lock cmpxchg [rcx], r8d
+    0x75, 0xF1,                   // 0xAFA jne -15 -> 0xAED (retry)
+    0xC3,                         // 0xAFC ret
+
+    // --- InterlockedOr (offset 0xAFD, 16 bytes) ---------------
+    0x8B, 0x01,                   // 0xAFD mov eax, [rcx]
+    0x41, 0x89, 0xC0,             // 0xAFF mov r8d, eax
+    0x41, 0x09, 0xD0,             // 0xB02 or r8d, edx
+    0xF0, 0x44, 0x0F, 0xB1, 0x01, // 0xB05 lock cmpxchg [rcx], r8d
+    0x75, 0xF1,                   // 0xB0A jne -15 -> 0xAFD
+    0xC3,                         // 0xB0C ret
+
+    // --- InterlockedXor (offset 0xB0D, 16 bytes) --------------
+    0x8B, 0x01,                   // 0xB0D mov eax, [rcx]
+    0x41, 0x89, 0xC0,             // 0xB0F mov r8d, eax
+    0x41, 0x31, 0xD0,             // 0xB12 xor r8d, edx
+    0xF0, 0x44, 0x0F, 0xB1, 0x01, // 0xB15 lock cmpxchg [rcx], r8d
+    0x75, 0xF1,                   // 0xB1A jne -15 -> 0xB0D
+    0xC3,                         // 0xB1C ret
+
+    // --- InterlockedAnd64 (offset 0xB1D, 17 bytes) ------------
+    // 64-bit operand — REX.W on all four instructions.
+    0x48, 0x8B, 0x01,             // 0xB1D mov rax, [rcx]
+    0x49, 0x89, 0xC0,             // 0xB20 mov r8, rax
+    0x49, 0x21, 0xD0,             // 0xB23 and r8, rdx
+    0xF0, 0x4C, 0x0F, 0xB1, 0x01, // 0xB26 lock cmpxchg [rcx], r8
+    0x75, 0xF0,                   // 0xB2B jne -16 -> 0xB1D
+    0xC3,                         // 0xB2D ret
+
+    // --- InterlockedOr64 (offset 0xB2E, 17 bytes) -------------
+    0x48, 0x8B, 0x01,             // 0xB2E mov rax, [rcx]
+    0x49, 0x89, 0xC0,             // 0xB31 mov r8, rax
+    0x49, 0x09, 0xD0,             // 0xB34 or r8, rdx
+    0xF0, 0x4C, 0x0F, 0xB1, 0x01, // 0xB37 lock cmpxchg [rcx], r8
+    0x75, 0xF0,                   // 0xB3C jne -16 -> 0xB2E
+    0xC3,                         // 0xB3E ret
+
+    // --- InterlockedXor64 (offset 0xB3F, 17 bytes) ------------
+    0x48, 0x8B, 0x01,             // 0xB3F mov rax, [rcx]
+    0x49, 0x89, 0xC0,             // 0xB42 mov r8, rax
+    0x49, 0x31, 0xD0,             // 0xB45 xor r8, rdx
+    0xF0, 0x4C, 0x0F, 0xB1, 0x01, // 0xB48 lock cmpxchg [rcx], r8
+    0x75, 0xF0,                   // 0xB4D jne -16 -> 0xB3F
+    0xC3,                         // 0xB4F ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0xAED, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0xB50, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -3392,6 +3460,16 @@ constexpr StubEntry kStubsTable[] = {
     {"kernel32.dll", "InterlockedCompareExchange64", kOffInterlockedCmpXchg64},
     {"kernel32.dll", "InterlockedExchange64", kOffInterlockedExchg64},
     {"kernel32.dll", "InterlockedExchangeAdd64", kOffInterlockedExchgAdd64},
+    // Batch 60: Interlocked{And,Or,Xor} 32 + 64. CAS-loop stubs
+    // backed by LOCK CMPXCHG — correct under SMP + timer-tick
+    // preemption. Return the ORIGINAL pre-modify value per Win32
+    // contract.
+    {"kernel32.dll", "InterlockedAnd", kOffInterlockedAnd},
+    {"kernel32.dll", "InterlockedOr", kOffInterlockedOr},
+    {"kernel32.dll", "InterlockedXor", kOffInterlockedXor},
+    {"kernel32.dll", "InterlockedAnd64", kOffInterlockedAnd64},
+    {"kernel32.dll", "InterlockedOr64", kOffInterlockedOr64},
+    {"kernel32.dll", "InterlockedXor64", kOffInterlockedXor64},
     {"vcruntime140.dll", "_InterlockedIncrement64", kOffInterlockedInc64},
     {"vcruntime140.dll", "_InterlockedDecrement64", kOffInterlockedDec64},
     {"vcruntime140.dll", "_InterlockedCompareExchange64", kOffInterlockedCmpXchg64},

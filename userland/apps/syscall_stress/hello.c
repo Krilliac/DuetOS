@@ -173,6 +173,9 @@ typedef struct _STARTUPINFOW
 } STARTUPINFOW;
 __declspec(dllimport) void __stdcall GetStartupInfoW(STARTUPINFOW* p);
 __declspec(dllimport) BOOL __stdcall GetExitCodeThread(HANDLE hThread, DWORD* lpExitCode);
+__declspec(dllimport) long __stdcall InterlockedAnd(volatile long* t, long v);
+__declspec(dllimport) long __stdcall InterlockedOr(volatile long* t, long v);
+__declspec(dllimport) long __stdcall InterlockedXor(volatile long* t, long v);
 
 static HANDLE g_events[2];
 
@@ -372,6 +375,34 @@ int __stdcall _start(void)
         WriteString("[syscall-stress] FAIL GetExitCodeThread got wrong code\n");
         WriteHex64(childA_rc);
         ExitProcess(24);
+    }
+
+    // === Batch 60 coverage: InterlockedAnd/Or/Xor ===
+    // Start with 0b11110000 (0xF0). And with 0b10101010 (0xAA) → 0xA0.
+    // Or with 0b00001111 (0x0F) → 0xAF. Xor with 0xFF → 0x50.
+    // Each call returns the ORIGINAL value before modification.
+    WriteString("[syscall-stress] main: Interlocked And/Or/Xor\n");
+    volatile long il_val = 0xF0;
+    long il_prev;
+    il_prev = InterlockedAnd(&il_val, 0xAA);
+    if (il_prev != 0xF0 || il_val != 0xA0)
+    {
+        WriteString("[syscall-stress] FAIL InterlockedAnd wrong result\n");
+        WriteHex64((unsigned long long)il_prev);
+        WriteHex64((unsigned long long)il_val);
+        ExitProcess(25);
+    }
+    il_prev = InterlockedOr(&il_val, 0x0F);
+    if (il_prev != 0xA0 || il_val != 0xAF)
+    {
+        WriteString("[syscall-stress] FAIL InterlockedOr wrong result\n");
+        ExitProcess(26);
+    }
+    il_prev = InterlockedXor(&il_val, 0xFF);
+    if (il_prev != 0xAF || il_val != 0x50)
+    {
+        WriteString("[syscall-stress] FAIL InterlockedXor wrong result\n");
+        ExitProcess(27);
     }
 
     // === Batch 53 coverage: Decode/Encode round-trip ===

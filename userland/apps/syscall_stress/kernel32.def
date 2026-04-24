@@ -38,3 +38,6 @@ EXPORTS
     InitOnceExecuteOnce
     GetStartupInfoW
     GetExitCodeThread
+    InterlockedAnd
+    InterlockedOr
+    InterlockedXor

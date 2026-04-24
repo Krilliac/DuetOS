@@ -820,12 +820,19 @@ void SyscallDispatch(arch::TrapFrame* frame)
             frame->rax = static_cast<u64>(-1);
             return;
         }
+        // Use exit_code != STILL_ACTIVE as the authoritative
+        // "thread is done" signal instead of dereferencing
+        // th.task, which the reaper may have KFree'd already
+        // after the task died. The SYS_EXIT path writes the
+        // real exit code into this slot before SchedExit runs,
+        // so the slot is valid as long as in_use remains true.
+        constexpr u64 kStillActive = 0x103;
         constexpr u64 kInfinite = 0xFFFFFFFFu;
         const u64 start = sched::SchedNowTicks();
         const u64 deadline = (timeout_ms == kInfinite) ? u64(-1) : start + ((timeout_ms + 9) / 10);
         for (;;)
         {
-            if (sched::TaskIsDead(th.task))
+            if (th.exit_code != kStillActive)
             {
                 frame->rax = 0; // WAIT_OBJECT_0
                 return;
@@ -907,9 +914,12 @@ void SyscallDispatch(arch::TrapFrame* frame)
                     }
                     else if (h >= Process::kWin32ThreadBase && h < Process::kWin32ThreadBase + Process::kWin32ThreadCap)
                     {
+                        // Use exit_code (set by SYS_EXIT) instead
+                        // of TaskIsDead (th.task may be a reaped
+                        // pointer). Valid as long as in_use holds.
                         const u64 slot = h - Process::kWin32ThreadBase;
                         const auto& th = proc->win32_threads[slot];
-                        if (th.in_use && sched::TaskIsDead(th.task))
+                        if (th.in_use && th.exit_code != 0x103)
                             sig = true;
                     }
                     else if (h >= Process::kWin32SemaphoreBase &&
