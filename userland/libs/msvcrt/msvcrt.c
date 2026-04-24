@@ -17,7 +17,7 @@
  */
 
 typedef unsigned long long size_t;
-typedef unsigned short     wchar_t16; /* Win32 wchar_t is UTF-16, 16 bits */
+typedef unsigned short wchar_t16; /* Win32 wchar_t is UTF-16, 16 bits */
 
 /* Clang recognises a subset of the str* builtins but not every
  * wcs* name (wcscpy / wcschr aren't in its builtin list). Only
@@ -47,25 +47,27 @@ __declspec(dllexport) NO_BUILTIN_STR int strcmp(const char* a, const char* b)
     }
     /* Compare as unsigned to match real Windows msvcrt's
      * contract (byte-lexicographic). */
-    return (int) (unsigned char) *a - (int) (unsigned char) *b;
+    return (int)(unsigned char)*a - (int)(unsigned char)*b;
 }
 
 __declspec(dllexport) NO_BUILTIN_STR char* strcpy(char* dst, const char* src)
 {
     char* d = dst;
-    while ((*d++ = *src++) != 0) { /* copy including NUL */ }
+    while ((*d++ = *src++) != 0)
+    { /* copy including NUL */
+    }
     return dst;
 }
 
 __declspec(dllexport) NO_BUILTIN_STR char* strchr(const char* s, int c)
 {
-    const char ch = (char) c;
+    const char ch = (char)c;
     for (;; ++s)
     {
         if (*s == ch)
-            return (char*) s; /* per POSIX: strchr may match the NUL */
+            return (char*)s; /* per POSIX: strchr may match the NUL */
         if (*s == 0)
-            return (char*) 0;
+            return (char*)0;
     }
 }
 
@@ -89,13 +91,15 @@ __declspec(dllexport) NO_BUILTIN_WCS int wcscmp(const wchar_t16* a, const wchar_
         ++b;
     }
     /* u16 difference cast to int (matches MS wcscmp). */
-    return (int) *a - (int) *b;
+    return (int)*a - (int)*b;
 }
 
 __declspec(dllexport) NO_BUILTIN_WCS wchar_t16* wcscpy(wchar_t16* dst, const wchar_t16* src)
 {
     wchar_t16* d = dst;
-    while ((*d++ = *src++) != 0) { /* copy including NUL16 */ }
+    while ((*d++ = *src++) != 0)
+    { /* copy including NUL16 */
+    }
     return dst;
 }
 
@@ -104,8 +108,8 @@ __declspec(dllexport) NO_BUILTIN_WCS wchar_t16* wcschr(const wchar_t16* s, wchar
     for (;; ++s)
     {
         if (*s == c)
-            return (wchar_t16*) s;
+            return (wchar_t16*)s;
         if (*s == 0)
-            return (wchar_t16*) 0;
+            return (wchar_t16*)0;
     }
 }

@@ -9,8 +9,10 @@
 #include "../../drivers/video/framebuffer.h"
 #include "../../drivers/video/theme.h"
 #include "../../drivers/video/widget.h"
+#include "../../mm/kheap.h"
 #include "../../mm/paging.h"
 #include "../../sched/sched.h"
+#include "gdi_objects.h"
 
 namespace duetos::subsystems::win32
 {
@@ -423,11 +425,29 @@ u32 ColorRefToRgb(u64 colorref)
     return (r << 16) | (g << 8) | b;
 }
 
+bool CopyMsgToUser(const duetos::drivers::video::WindowMsg& m, u64 user_ptr)
+{
+    if (user_ptr == 0)
+    {
+        return false;
+    }
+    UserMsg out{};
+    out.hwnd = static_cast<u64>(m.hwnd_biased);
+    out.message = m.message;
+    out.wparam = m.wparam;
+    out.lparam = m.lparam;
+    return duetos::mm::CopyToUser(reinterpret_cast<void*>(user_ptr), &out, sizeof(out));
+}
+
+} // namespace
+
 // Resolve a user-supplied biased HWND to a compositor handle AND
 // verify it belongs to the calling process. Prevents a ring-3
 // PE from reading/writing another process's message queue. For
 // v0 this also refuses pid == 0 (kernel-owned boot windows) so
-// a PE can't PostMessage to the Calculator.
+// a PE can't PostMessage to the Calculator. Declared in
+// window_syscall.h so other subsystem modules (GDI object
+// handlers in gdi_objects.cpp) can share it.
 u32 HwndToCompositorHandleForCaller(u64 hwnd_biased, u64 pid)
 {
     using namespace duetos::drivers::video;
@@ -446,22 +466,6 @@ u32 HwndToCompositorHandleForCaller(u64 hwnd_biased, u64 pid)
     }
     return h_comp;
 }
-
-bool CopyMsgToUser(const duetos::drivers::video::WindowMsg& m, u64 user_ptr)
-{
-    if (user_ptr == 0)
-    {
-        return false;
-    }
-    UserMsg out{};
-    out.hwnd = static_cast<u64>(m.hwnd_biased);
-    out.message = m.message;
-    out.wparam = m.wparam;
-    out.lparam = m.lparam;
-    return duetos::mm::CopyToUser(reinterpret_cast<void*>(user_ptr), &out, sizeof(out));
-}
-
-} // namespace
 
 void DoWinPeekMsg(arch::TrapFrame* frame)
 {
@@ -711,19 +715,135 @@ void DoGdiTextOut(arch::TrapFrame* frame)
         }
         text[copy_len] = '\0';
     }
-    CompositorLock();
-    const u32 h_comp = HwndToCompositorHandleForCaller(frame->rdi, proc->pid);
+    // Dispatch by HDC handle tag — memDC target paints the glyphs
+    // into the selected bitmap (8x8 font), otherwise treat the HDC
+    // as an HWND and record a TextOut display-list primitive.
+    const i32 x = static_cast<i32>(frame->rsi);
+    const i32 y = static_cast<i32>(frame->rdx);
+    const u32 rgb = ColorRefToRgb(frame->r9);
+    const u64 hdc = frame->rdi;
+    const u64 tag = hdc & kGdiTagMask;
     bool ok = false;
-    if (h_comp != kWindowInvalid)
+    if (tag == kGdiTagMemDC)
     {
-        const i32 x = static_cast<i32>(frame->rsi);
-        const i32 y = static_cast<i32>(frame->rdx);
-        WindowClientTextOut(h_comp, x, y, text, ColorRefToRgb(frame->r9));
-        const Theme& theme = ThemeCurrent();
-        DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
-        ok = true;
+        MemDC* dc = GdiLookupMemDC(hdc);
+        if (dc != nullptr && dc->selected_bitmap != 0)
+        {
+            Bitmap* bmp = GdiLookupBitmap(dc->selected_bitmap);
+            if (bmp != nullptr)
+            {
+                // For memDC targets the syscall's r9 carries the
+                // TextOutA fallback colour (white from the IAT stub)
+                // which we ignore in favour of the DC's SetTextColor
+                // state. bk_mode=OPAQUE fills the glyph cell
+                // background with bk_color; TRANSPARENT leaves it
+                // unchanged.
+                const bool opaque = (dc->bk_mode == kBkModeOpaque);
+                GdiPaintTextOnBitmap(bmp, x, y, text, dc->text_color, dc->bk_color, opaque);
+                ok = true;
+            }
+        }
     }
-    CompositorUnlock();
+    else
+    {
+        // Window HDC — consult per-window DC state for text colour
+        // if the app called SetTextColor; otherwise fall back to
+        // the syscall's colour arg (which came from the IAT stub's
+        // default-white for TextOutA, or the caller's explicit
+        // COLORREF for the native SYS_GDI_TEXT_OUT path).
+        u32 paint_rgb = rgb;
+        WindowDcState* s = GdiWindowDcState(static_cast<u32>(hdc));
+        if (s != nullptr && s->text_color != 0)
+            paint_rgb = s->text_color;
+        CompositorLock();
+        const u32 h_comp = HwndToCompositorHandleForCaller(hdc, proc->pid);
+        if (h_comp != kWindowInvalid)
+        {
+            WindowClientTextOut(h_comp, x, y, text, paint_rgb);
+            const Theme& theme = ThemeCurrent();
+            DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+            ok = true;
+        }
+        CompositorUnlock();
+    }
+    frame->rax = ok ? 1 : 0;
+}
+
+void DoGdiTextOutW(arch::TrapFrame* frame)
+{
+    using namespace duetos::drivers::video;
+
+    duetos::core::Process* proc = duetos::core::CurrentProcess();
+    if (proc == nullptr)
+    {
+        frame->rax = 0;
+        return;
+    }
+    // UTF-16 copy-in + high-byte strip. Each wchar_t (u16) becomes
+    // one char. Non-ASCII (> 0x7F) falls back to '?' so the glyph
+    // lookup gets a valid placeholder.
+    char text[kWinTextOutMax + 1];
+    for (u32 i = 0; i < sizeof(text); ++i)
+        text[i] = '\0';
+    const u64 user_text = frame->r10;
+    const u64 user_len_wchars = frame->r8;
+    if (user_text != 0 && user_len_wchars > 0)
+    {
+        const u64 clamp = (user_len_wchars > kWinTextOutMax) ? kWinTextOutMax : user_len_wchars;
+        // Copy the UTF-16 source into a small on-stack buffer, then
+        // walk it byte-by-byte to produce ASCII. Stack-bounce is
+        // kWinTextOutMax * 2 = 96 bytes at kWinTextOutMax=47.
+        u16 wbuf[kWinTextOutMax];
+        if (!duetos::mm::CopyFromUser(wbuf, reinterpret_cast<const void*>(user_text), clamp * 2))
+        {
+            frame->rax = 0;
+            return;
+        }
+        for (u64 i = 0; i < clamp; ++i)
+        {
+            const u16 wc = wbuf[i];
+            text[i] = (wc < 0x80) ? static_cast<char>(wc) : '?';
+        }
+        text[clamp] = '\0';
+    }
+    // Dispatch — identical to DoGdiTextOut from here on.
+    const i32 x = static_cast<i32>(frame->rsi);
+    const i32 y = static_cast<i32>(frame->rdx);
+    const u32 rgb = ColorRefToRgb(frame->r9);
+    const u64 hdc = frame->rdi;
+    const u64 tag = hdc & kGdiTagMask;
+    bool ok = false;
+    if (tag == kGdiTagMemDC)
+    {
+        MemDC* dc = GdiLookupMemDC(hdc);
+        if (dc != nullptr && dc->selected_bitmap != 0)
+        {
+            Bitmap* bmp = GdiLookupBitmap(dc->selected_bitmap);
+            if (bmp != nullptr)
+            {
+                const bool opaque = (dc->bk_mode == kBkModeOpaque);
+                GdiPaintTextOnBitmap(bmp, x, y, text, dc->text_color, dc->bk_color, opaque);
+                ok = true;
+            }
+        }
+    }
+    else
+    {
+        u32 paint_rgb = rgb;
+        WindowDcState* s = GdiWindowDcState(static_cast<u32>(hdc));
+        if (s != nullptr && s->text_color != 0)
+            paint_rgb = s->text_color;
+        CompositorLock();
+        const u32 h_comp = HwndToCompositorHandleForCaller(hdc, proc->pid);
+        if (h_comp != kWindowInvalid)
+        {
+            WindowClientTextOut(h_comp, x, y, text, paint_rgb);
+            const Theme& theme = ThemeCurrent();
+            DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+            ok = true;
+        }
+        CompositorUnlock();
+    }
     frame->rax = ok ? 1 : 0;
 }
 
@@ -1014,6 +1134,70 @@ void DoGdiSetPixel(arch::TrapFrame* frame)
     frame->rax = ok ? 1 : 0;
 }
 
+void DoGdiBitBlt(arch::TrapFrame* frame)
+{
+    using namespace duetos::drivers::video;
+
+    duetos::core::Process* proc = duetos::core::CurrentProcess();
+    if (proc == nullptr)
+    {
+        frame->rax = 0;
+        return;
+    }
+    const i32 dst_x = static_cast<i32>(frame->rsi);
+    const i32 dst_y = static_cast<i32>(frame->rdx);
+    const u32 src_w = static_cast<u32>(frame->r10);
+    const u32 src_h = static_cast<u32>(frame->r8);
+    const u64 user_src = frame->r9;
+
+    // Reject empty / absurd sizes up front; cap against the pool
+    // so a malicious caller can't burn kheap on a huge allocation.
+    if (src_w == 0 || src_h == 0 || user_src == 0)
+    {
+        frame->rax = 0;
+        return;
+    }
+    const u64 bytes64 = static_cast<u64>(src_w) * static_cast<u64>(src_h) * 4;
+    if (bytes64 > kWinBlitPoolBytes)
+    {
+        frame->rax = 0;
+        return;
+    }
+    const u32 bytes = static_cast<u32>(bytes64);
+
+    // Stage pixels in a kheap bounce buffer. Two copies (user →
+    // staging → blit pool) but bounded by pool size = 16 KiB, so
+    // cheap; avoids holding the compositor lock while we touch
+    // user memory.
+    u32* staging = static_cast<u32*>(duetos::mm::KMalloc(bytes));
+    if (staging == nullptr)
+    {
+        frame->rax = 0;
+        return;
+    }
+    if (!duetos::mm::CopyFromUser(staging, reinterpret_cast<const void*>(user_src), bytes))
+    {
+        duetos::mm::KFree(staging);
+        frame->rax = 0;
+        return;
+    }
+
+    CompositorLock();
+    const u32 h_comp = HwndToCompositorHandleForCaller(frame->rdi, proc->pid);
+    bool ok = false;
+    if (h_comp != kWindowInvalid)
+    {
+        WindowClientBitBlt(h_comp, dst_x, dst_y, staging, src_w, src_h);
+        const Theme& theme = ThemeCurrent();
+        DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+        ok = true;
+    }
+    CompositorUnlock();
+
+    duetos::mm::KFree(staging);
+    frame->rax = ok ? 1 : 0;
+}
+
 // --- Async input state + cursor + capture -------------------------
 
 void DoWinGetKeyState(arch::TrapFrame* frame)
@@ -1205,6 +1389,348 @@ void DoWinInvalidate(arch::TrapFrame* frame)
         CompositorUnlock();
     }
     frame->rax = ok ? 1 : 0;
+}
+
+// Win32 PAINTSTRUCT layout. Lays out 72 B which matches the Win32
+// SDK across 64-bit builds (hdc=8, fErase=4, rcPaint=16, fRestore=4,
+// fIncUpdate=4, rgbReserved=32 + 4 trailing = padded to 72 due to
+// 8-byte alignment on the leading pointer). Written whole-struct
+// via CopyToUser so stale user-side bytes don't leak into later
+// reads. No memcpy is emitted: struct is built on the kernel stack
+// and filled field by field.
+struct Win32PaintStruct
+{
+    u64 hdc;
+    u32 fErase;
+    i32 rcPaint_left;
+    i32 rcPaint_top;
+    i32 rcPaint_right;
+    i32 rcPaint_bottom;
+    u32 fRestore;
+    u32 fIncUpdate;
+    u8 rgbReserved[32];
+};
+static_assert(sizeof(Win32PaintStruct) == 72, "PAINTSTRUCT size must be 72 B for Win32 ABI");
+
+void DoWinBeginPaint(arch::TrapFrame* frame)
+{
+    using namespace duetos::drivers::video;
+
+    duetos::core::Process* proc = duetos::core::CurrentProcess();
+    if (proc == nullptr)
+    {
+        frame->rax = 0;
+        return;
+    }
+    const u64 hwnd_biased = frame->rdi;
+    const u64 user_ps_ptr = frame->rsi;
+    if (user_ps_ptr == 0)
+    {
+        frame->rax = 0;
+        return;
+    }
+
+    CompositorLock();
+    const u32 h_comp = HwndToCompositorHandleForCaller(hwnd_biased, proc->pid);
+    bool ok = false;
+    Win32PaintStruct ps{};
+    ps.hdc = hwnd_biased; // HDC == HWND in v0 (no separate DC handle table)
+    if (h_comp != kWindowInvalid)
+    {
+        u32 wx = 0, wy = 0, ww = 0, wh = 0;
+        if (WindowGetBounds(h_comp, &wx, &wy, &ww, &wh))
+        {
+            const u32 tbh = 22; // matches widget chrome default
+            ps.rcPaint_left = 0;
+            ps.rcPaint_top = 0;
+            ps.rcPaint_right = static_cast<i32>((ww > 4) ? ww - 4 : 0);
+            ps.rcPaint_bottom = static_cast<i32>((wh > tbh + 4) ? wh - tbh - 4 : 0);
+            ps.fErase = WindowIsDirty(h_comp) ? 1u : 0u;
+            ps.fRestore = 0;
+            ps.fIncUpdate = 0;
+            for (u32 i = 0; i < sizeof(ps.rgbReserved); ++i)
+                ps.rgbReserved[i] = 0;
+            // Win32: BeginPaint implicitly validates the dirty
+            // region. Our WindowValidate clears the whole-window
+            // dirty bit — matches v1 behaviour (no partial-region
+            // tracking).
+            WindowValidate(h_comp);
+            ok = true;
+        }
+    }
+    CompositorUnlock();
+
+    if (!ok)
+    {
+        frame->rax = 0;
+        return;
+    }
+    if (!duetos::mm::CopyToUser(reinterpret_cast<void*>(user_ps_ptr), &ps, sizeof(ps)))
+    {
+        frame->rax = 0;
+        return;
+    }
+    frame->rax = hwnd_biased; // HDC == HWND
+}
+
+void DoWinEndPaint(arch::TrapFrame* frame)
+{
+    // BeginPaint already validated the window; EndPaint is a no-op
+    // modulo returning TRUE, matching Win32 semantics for our v1
+    // whole-client repaint model.
+    (void)frame->rdi;
+    (void)frame->rsi;
+    frame->rax = 1;
+}
+
+void DoGdiFillRectUser(arch::TrapFrame* frame)
+{
+    using namespace duetos::drivers::video;
+
+    duetos::core::Process* proc = duetos::core::CurrentProcess();
+    if (proc == nullptr)
+    {
+        frame->rax = 0;
+        return;
+    }
+    const u64 user_rect = frame->rsi;
+    if (user_rect == 0)
+    {
+        frame->rax = 0;
+        return;
+    }
+    i32 rect[4] = {0, 0, 0, 0};
+    if (!duetos::mm::CopyFromUser(rect, reinterpret_cast<const void*>(user_rect), sizeof(rect)))
+    {
+        frame->rax = 0;
+        return;
+    }
+    // Win32 RECT: (left, top, right, bottom). Convert to (x, y, w, h).
+    const i32 x = rect[0];
+    const i32 y = rect[1];
+    const i32 r = rect[2];
+    const i32 b = rect[3];
+    if (r <= x || b <= y)
+    {
+        frame->rax = 1; // empty rect is a valid no-op
+        return;
+    }
+    const i32 w = r - x;
+    const i32 h = b - y;
+    const u32 rgb = ColorRefToRgb(frame->rdx);
+
+    // Dispatch by handle tag: memDC targets paint directly into
+    // the selected bitmap; window targets record a FillRect prim
+    // that the compositor replays.
+    const u64 hdc = frame->rdi;
+    const u64 tag = hdc & kGdiTagMask;
+    bool ok = false;
+    if (tag == kGdiTagMemDC)
+    {
+        MemDC* dc = GdiLookupMemDC(hdc);
+        if (dc != nullptr && dc->selected_bitmap != 0)
+        {
+            Bitmap* bmp = GdiLookupBitmap(dc->selected_bitmap);
+            if (bmp != nullptr)
+            {
+                GdiPaintRectOnBitmap(bmp, x, y, w, h, rgb);
+                ok = true;
+            }
+        }
+    }
+    else
+    {
+        CompositorLock();
+        const u32 h_comp = HwndToCompositorHandleForCaller(hdc, proc->pid);
+        if (h_comp != kWindowInvalid)
+        {
+            WindowClientFillRect(h_comp, x, y, w, h, rgb);
+            const Theme& theme = ThemeCurrent();
+            DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+            ok = true;
+        }
+        CompositorUnlock();
+    }
+    frame->rax = ok ? 1 : 0;
+}
+
+// DrawTextA format flags (Win32 subset).
+namespace
+{
+constexpr u32 kDtLeft = 0x00000000;
+[[maybe_unused]] constexpr u32 kDtTop = 0x00000000;
+constexpr u32 kDtCenter = 0x00000001;
+constexpr u32 kDtRight = 0x00000002;
+constexpr u32 kDtVCenter = 0x00000004;
+[[maybe_unused]] constexpr u32 kDtBottom = 0x00000008;
+constexpr u32 kDtSingleLine = 0x00000020;
+} // namespace
+
+// Shared core for DrawTextA / DrawTextW after the source text has
+// been copied in + decoded to ASCII. `copy_len` is the ASCII
+// length (not counting NUL). Returns the painted text height
+// (in px) on success, 0 on failure — same contract as Win32
+// DrawText's return value.
+static u64 DrawTextAsciiOnDc(u64 hdc, const char* text, u64 copy_len, u64 user_rect, u32 format,
+                             duetos::core::Process* proc)
+{
+    using namespace duetos::drivers::video;
+
+    i32 rect[4] = {0, 0, 0, 0};
+    if (!duetos::mm::CopyFromUser(rect, reinterpret_cast<const void*>(user_rect), sizeof(rect)))
+        return 0;
+    const i32 rx = rect[0];
+    const i32 ry = rect[1];
+    const i32 rr = rect[2];
+    const i32 rb = rect[3];
+    if (rr <= rx || rb <= ry)
+        return 0;
+    const i32 rw = rr - rx;
+    const i32 rh = rb - ry;
+
+    const i32 text_w = static_cast<i32>(copy_len) * 8;
+    const i32 text_h = 8;
+    (void)kDtSingleLine;
+
+    i32 px = rx;
+    i32 py = ry;
+    if (format & kDtCenter)
+        px = rx + (rw - text_w) / 2;
+    else if (format & kDtRight)
+        px = rr - text_w;
+    else
+        (void)kDtLeft;
+
+    if (format & kDtVCenter)
+        py = ry + (rh - text_h) / 2;
+
+    const u64 tag = hdc & kGdiTagMask;
+    bool ok = false;
+    if (tag == kGdiTagMemDC)
+    {
+        MemDC* dc = GdiLookupMemDC(hdc);
+        if (dc != nullptr && dc->selected_bitmap != 0)
+        {
+            Bitmap* bmp = GdiLookupBitmap(dc->selected_bitmap);
+            if (bmp != nullptr)
+            {
+                const bool opaque = (dc->bk_mode == kBkModeOpaque);
+                GdiPaintTextOnBitmap(bmp, px, py, text, dc->text_color, dc->bk_color, opaque);
+                ok = true;
+            }
+        }
+    }
+    else if (tag == 0)
+    {
+        u32 fg = 0x00FFFFFF;
+        WindowDcState* s = GdiWindowDcState(static_cast<u32>(hdc));
+        if (s != nullptr && s->text_color != 0)
+            fg = s->text_color;
+        CompositorLock();
+        const u32 h_comp = HwndToCompositorHandleForCaller(hdc, proc->pid);
+        if (h_comp != kWindowInvalid)
+        {
+            WindowClientTextOut(h_comp, px, py, text, fg);
+            const Theme& theme = ThemeCurrent();
+            DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+            ok = true;
+        }
+        CompositorUnlock();
+    }
+    return ok ? static_cast<u64>(text_h) : 0;
+}
+
+void DoGdiDrawText(arch::TrapFrame* frame)
+{
+    duetos::core::Process* proc = duetos::core::CurrentProcess();
+    if (proc == nullptr)
+    {
+        frame->rax = 0;
+        return;
+    }
+    const u64 hdc = frame->rdi;
+    const u64 user_text = frame->rsi;
+    const i64 len_in = static_cast<i64>(frame->rdx);
+    const u64 user_rect = frame->r10;
+    const u32 format = static_cast<u32>(frame->r8);
+    if (user_text == 0 || user_rect == 0)
+    {
+        frame->rax = 0;
+        return;
+    }
+
+    constexpr u64 kDrawTextMax = 127;
+    char text[kDrawTextMax + 1];
+    for (u32 i = 0; i < sizeof(text); ++i)
+        text[i] = '\0';
+    u64 copy_len = (len_in < 0) ? kDrawTextMax : static_cast<u64>(len_in);
+    if (copy_len > kDrawTextMax)
+        copy_len = kDrawTextMax;
+    if (!duetos::mm::CopyFromUser(text, reinterpret_cast<const void*>(user_text), copy_len))
+    {
+        frame->rax = 0;
+        return;
+    }
+    text[copy_len] = '\0';
+    if (len_in < 0)
+    {
+        for (u64 i = 0; i < copy_len; ++i)
+        {
+            if (text[i] == '\0')
+            {
+                copy_len = i;
+                break;
+            }
+        }
+    }
+    frame->rax = DrawTextAsciiOnDc(hdc, text, copy_len, user_rect, format, proc);
+}
+
+void DoGdiDrawTextW(arch::TrapFrame* frame)
+{
+    duetos::core::Process* proc = duetos::core::CurrentProcess();
+    if (proc == nullptr)
+    {
+        frame->rax = 0;
+        return;
+    }
+    const u64 hdc = frame->rdi;
+    const u64 user_text = frame->rsi;
+    const i64 len_in = static_cast<i64>(frame->rdx);
+    const u64 user_rect = frame->r10;
+    const u32 format = static_cast<u32>(frame->r8);
+    if (user_text == 0 || user_rect == 0)
+    {
+        frame->rax = 0;
+        return;
+    }
+
+    constexpr u64 kDrawTextMax = 127;
+    char text[kDrawTextMax + 1];
+    for (u32 i = 0; i < sizeof(text); ++i)
+        text[i] = '\0';
+    // UTF-16 copy-in + strip to ASCII. Negative `len_in` (-1) means
+    // NUL-terminated — walk the u16 stream until we hit a 0.
+    u64 copy_len = 0;
+    {
+        u16 wbuf[kDrawTextMax];
+        const u64 cap = (len_in < 0) ? kDrawTextMax : static_cast<u64>(len_in);
+        const u64 clamp = (cap > kDrawTextMax) ? kDrawTextMax : cap;
+        if (clamp > 0 && !duetos::mm::CopyFromUser(wbuf, reinterpret_cast<const void*>(user_text), clamp * 2))
+        {
+            frame->rax = 0;
+            return;
+        }
+        for (u64 i = 0; i < clamp; ++i)
+        {
+            const u16 wc = wbuf[i];
+            if (len_in < 0 && wc == 0)
+                break;
+            text[copy_len++] = (wc < 0x80) ? static_cast<char>(wc) : '?';
+        }
+        text[copy_len] = '\0';
+    }
+    frame->rax = DrawTextAsciiOnDc(hdc, text, copy_len, user_rect, format, proc);
 }
 
 void DoWinValidate(arch::TrapFrame* frame)

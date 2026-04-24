@@ -30,9 +30,9 @@ inline constexpr u32 kSysNtNotImpl = 0xFFFFFFFFu;
 /// SYS_*. Sorted by `nt_number` so the shim can binary-search.
 struct NtSyscallMapping
 {
-    const char* nt_name;     // e.g. "NtCreateFile"
-    u16 nt_number;           // syscall number on the target Windows version
-    u32 duetos_sys;        // matching SYS_* enumerator value, or kSysNtNotImpl
+    const char* nt_name; // e.g. "NtCreateFile"
+    u16 nt_number;       // syscall number on the target Windows version
+    u32 duetos_sys;      // matching SYS_* enumerator value, or kSysNtNotImpl
 };
 
 /// Bedrock NT syscalls — present in every Windows version from XP SP1
@@ -333,8 +333,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
     {"NtWaitLowEventPair", 0x01e8, kSysNtNotImpl},
 };
 
-inline constexpr u32 kBedrockNtSyscallCount =
-    sizeof(kBedrockNtSyscalls) / sizeof(kBedrockNtSyscalls[0]);
+inline constexpr u32 kBedrockNtSyscallCount = sizeof(kBedrockNtSyscalls) / sizeof(kBedrockNtSyscalls[0]);
 
 inline constexpr u32 kBedrockNtSyscallsCovered = 28;
 
@@ -836,8 +835,7 @@ inline constexpr NtSyscallMapping kAllNtSyscalls[] = {
     {"NtWaitLowEventPair", 0x01e8, kSysNtNotImpl},
 };
 
-inline constexpr u32 kAllNtSyscallCount =
-    sizeof(kAllNtSyscalls) / sizeof(kAllNtSyscalls[0]);
+inline constexpr u32 kAllNtSyscallCount = sizeof(kAllNtSyscalls) / sizeof(kAllNtSyscalls[0]);
 
 /// Look up an NT syscall number on the target version and return
 /// the corresponding NtSyscallMapping, or nullptr if it's outside

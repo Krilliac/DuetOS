@@ -34,19 +34,13 @@ typedef long long i64;
 static inline i64 sys_write(i64 fd, const char* buf, i64 len)
 {
     i64 ret;
-    __asm__ volatile("int $0x80"
-                     : "=a"(ret)
-                     : "a"((i64)2), "D"(fd), "S"(buf), "d"(len)
-                     : "memory");
+    __asm__ volatile("int $0x80" : "=a"(ret) : "a"((i64)2), "D"(fd), "S"(buf), "d"(len) : "memory");
     return ret;
 }
 
 static inline void sys_exit(i64 code)
 {
-    __asm__ volatile("int $0x80"
-                     :
-                     : "a"((i64)0), "D"(code)
-                     : "memory");
+    __asm__ volatile("int $0x80" : : "a"((i64)0), "D"(code) : "memory");
     __builtin_unreachable();
 }
 

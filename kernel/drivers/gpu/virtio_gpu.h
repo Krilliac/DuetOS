@@ -62,4 +62,111 @@ VirtioGpuLayout VirtioGpuProbe(u8 bus, u8 device, u8 function);
 /// `present == false` before VirtioGpuProbe runs.
 VirtioGpuLayout VirtioGpuLastLayout();
 
+// virtio-gpu v1: controlq + GET_DISPLAY_INFO
+//
+// virtio-gpu §5.7 defines two virtqueues — controlq (0) for 2D/3D
+// commands and cursorq (1) for low-latency cursor moves. To discover
+// scanout geometry we only need controlq. v1 scope:
+//   - Negotiate features (accept none), flip DRIVER_OK.
+//   - Allocate desc/avail/used rings as physically-contiguous pages.
+//   - Program queue 0 via common_cfg (queue_desc/driver/device,
+//     queue_size, queue_enable).
+//   - Build a descriptor chain for VIRTIO_GPU_CMD_GET_DISPLAY_INFO,
+//     push it, notify the device, poll the used ring.
+//   - Parse the response into `VirtioDisplayInfo`.
+//
+// Scope (future):
+//   - RESOURCE_CREATE_2D + ATTACH_BACKING + SET_SCANOUT +
+//     TRANSFER_TO_HOST_2D + RESOURCE_FLUSH — the full blit cycle.
+//   - MSI-X interrupt-driven completion (today we poll the used ring).
+//   - cursorq for hardware cursor.
+//   - virgl 3D path (requires VIRTIO_GPU_F_VIRGL feature + context init).
+
+struct VirtioDisplayRect
+{
+    u32 x;
+    u32 y;
+    u32 width;
+    u32 height;
+};
+
+inline constexpr u32 kVirtioGpuMaxScanouts = 16;
+
+struct VirtioDisplayInfo
+{
+    bool valid;          // false iff the command did not return RESP_OK_DISPLAY_INFO
+    u32 active_scanouts; // number of pmodes with enabled != 0
+    VirtioDisplayRect rects[kVirtioGpuMaxScanouts];
+    u32 enabled[kVirtioGpuMaxScanouts]; // enabled bit per scanout (0/1)
+    u32 flags[kVirtioGpuMaxScanouts];   // vendor flag bits per scanout
+};
+
+/// Complete the ACK → DRIVER → FEATURES_OK → queue setup → DRIVER_OK
+/// handshake for the last probed virtio-gpu. Returns false if any
+/// step fails (device not present, features rejected, queue-size
+/// unreasonable, allocator exhausted). Idempotent — skips work if
+/// already done.
+bool VirtioGpuBringUp();
+
+/// Send VIRTIO_GPU_CMD_GET_DISPLAY_INFO and return a reference to the
+/// cached result. Safe to call multiple times — reuses the same
+/// request/response pages. `valid == false` if the device didn't
+/// respond with RESP_OK_DISPLAY_INFO. Caller must have run
+/// `VirtioGpuBringUp()`. Returned reference is valid for the
+/// lifetime of the kernel.
+const VirtioDisplayInfo& VirtioGpuGetDisplayInfo();
+
+/// Most recent GET_DISPLAY_INFO result (for the shell `gpu` command
+/// to surface). `valid == false` before GetDisplayInfo has run.
+const VirtioDisplayInfo& VirtioGpuLastDisplayInfo();
+
+// virtio-gpu v2: RESOURCE_CREATE_2D + ATTACH_BACKING + SET_SCANOUT +
+// TRANSFER_TO_HOST_2D + RESOURCE_FLUSH
+//
+// v2 completes the minimal 2D display path: guest-owned pixel buffer
+// → GPU resource → scanout. After `VirtioGpuSetupScanout(...)` the
+// kernel owns a contiguous BGRA8888 backing buffer at
+// `VirtioGpuScanoutBackingVa()`. Writes to that buffer don't
+// automatically appear on screen; the guest must call
+// `VirtioGpuFlushScanout()` to issue TRANSFER_TO_HOST_2D +
+// RESOURCE_FLUSH, at which point the host composites + presents.
+//
+// Only scanout 0 is supported in v2. Resource id 1 is reserved for
+// the scanout-0 image; id 0 is reserved by spec. Backing allocation
+// is one physically-contiguous run (single virtio_gpu_mem_entry);
+// max size is bounded by the frame allocator's largest free run.
+// 1024x768x4 = 3 MiB = 768 pages; 640x480x4 = 1.2 MiB = 300 pages.
+
+struct VirtioScanoutInfo
+{
+    bool ready;      // true iff setup completed end-to-end
+    u32 scanout_id;  // always 0 in v2
+    u32 resource_id; // always 1 in v2
+    u32 width;       // pixels
+    u32 height;      // pixels
+    u32 pitch;       // bytes per row (= width * 4)
+    u64 backing_phys;
+    u64 backing_bytes;
+    void* backing_va; // kernel-VA of the backing; writeable
+};
+
+/// Create a scanout-backed 2D resource:
+///   RESOURCE_CREATE_2D(id=1, BGRA8888, w, h)
+///   RESOURCE_ATTACH_BACKING(id=1, [contiguous (phys, w*h*4)])
+///   SET_SCANOUT(scanout=0, resource=1, rect=(0,0,w,h))
+/// Allocates `ceil(w*h*4 / 4096)` contiguous frames for the backing.
+/// Returns false if any step fails; logs which step. Idempotent —
+/// subsequent calls are no-ops if the previous setup is live.
+bool VirtioGpuSetupScanout(u32 width, u32 height);
+
+/// Kernel-VA + geometry of the current scanout backing, if any.
+/// `ready == false` before `VirtioGpuSetupScanout` has run.
+const VirtioScanoutInfo& VirtioGpuScanoutInfo();
+
+/// Issue TRANSFER_TO_HOST_2D + RESOURCE_FLUSH for the scanout
+/// resource. `x`,`y`,`w`,`h` is the dirty rect in pixel coords; the
+/// full resource is `(0,0,width,height)`. Returns false if the
+/// scanout isn't set up or either command timed out.
+bool VirtioGpuFlushScanout(u32 x, u32 y, u32 w, u32 h);
+
 } // namespace duetos::drivers::gpu

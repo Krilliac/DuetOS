@@ -1,5 +1,7 @@
 #pragma once
 
+#include "../../core/types.h"
+
 /*
  * Win32 windowing-syscall handlers.
  *
@@ -32,6 +34,13 @@ struct TrapFrame;
 namespace duetos::subsystems::win32
 {
 
+/// Resolve a ring-3-supplied biased Win32 HWND to a compositor
+/// handle, asserting ownership belongs to the caller. Returns
+/// `duetos::drivers::video::kWindowInvalid` on bad handle, dead
+/// window, or cross-process attempt. Exposed for other subsystem
+/// modules (GDI object handlers) that also need to translate HWNDs.
+u32 HwndToCompositorHandleForCaller(u64 hwnd_biased, u64 pid);
+
 void DoWinCreate(arch::TrapFrame* frame);
 void DoWinDestroy(arch::TrapFrame* frame);
 void DoWinShow(arch::TrapFrame* frame);
@@ -56,6 +65,13 @@ void DoWinTimerKill(arch::TrapFrame* frame);
 void DoGdiLine(arch::TrapFrame* frame);
 void DoGdiEllipse(arch::TrapFrame* frame);
 void DoGdiSetPixel(arch::TrapFrame* frame);
+void DoGdiBitBlt(arch::TrapFrame* frame);
+void DoGdiFillRectUser(arch::TrapFrame* frame);
+void DoGdiDrawText(arch::TrapFrame* frame);
+void DoGdiTextOutW(arch::TrapFrame* frame);
+void DoGdiDrawTextW(arch::TrapFrame* frame);
+void DoWinBeginPaint(arch::TrapFrame* frame);
+void DoWinEndPaint(arch::TrapFrame* frame);
 
 void DoWinGetKeyState(arch::TrapFrame* frame);
 void DoWinGetCursor(arch::TrapFrame* frame);

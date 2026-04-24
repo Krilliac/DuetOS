@@ -69,6 +69,16 @@ struct GpuInfo
     u64 mmio_phys;      // BAR 0 physical base
     u64 mmio_size;      // BAR 0 size in bytes
     void* mmio_virt;    // kernel-mapped aperture, nullptr if not mapped
+
+    // Register-level probe result. Populated by `RunVendorProbe`
+    // after the BAR is mapped. What goes in `probe_reg` depends on
+    // vendor: NVIDIA = PMC_BOOT_0 (BAR0+0); Intel = BAR0 dword 0
+    // (architecture-specific; currently just a liveness read); AMD
+    // GFX9+ = 0 (registers live at BAR5, not mapped in v0). All
+    // other vendors leave it 0.
+    u32 probe_reg;
+    bool mmio_live;   // true iff BAR0 MMIO read returned != 0xFFFFFFFF
+    const char* arch; // decoded architecture name (NVIDIA only today), or nullptr
 };
 
 /// Discover every display-class PCI device, map each one's primary

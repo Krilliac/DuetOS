@@ -920,6 +920,221 @@ enum SyscallNumber : u64
     //   rax = 1 if played, 0 if the speaker isn't usable.
     // Backs Win32 MessageBeep + Beep.
     SYS_WIN_BEEP = 100,
+
+    // SYS_GFX_D3D_STUB — trace + return E_FAIL from a D3D/DXGI IAT
+    // stub. rdi = kind:
+    //   1 = D3D11CreateDevice / D3D11CreateDeviceAndSwapChain
+    //   2 = D3D12CreateDevice / D3D12GetDebugInterface /
+    //       D3D12SerializeRootSignature
+    //   3 = CreateDXGIFactory / CreateDXGIFactory1 / 2
+    // rax = HRESULT (0x80004005 for any valid kind; 0 on bad kind).
+    // Routes to subsystems::graphics::D3D11CreateDeviceStub /
+    // D3D12CreateDeviceStub / DxgiCreateFactoryStub so the graphics
+    // ICD's handle-table counters tick every time a PE invokes one
+    // of these entry points — visible via the `gfx` shell command.
+    SYS_GFX_D3D_STUB = 101,
+
+    // SYS_GDI_BITBLT — record a BitBlt into a window's display list.
+    //   rdi = HWND (biased Win32 handle, same convention as the
+    //         other SYS_GDI_* syscalls)
+    //   rsi = dst_x (client-relative, i32)
+    //   rdx = dst_y
+    //   r10 = src_w (pixels, must be <= kWinBlitMaxPx / src_h)
+    //   r8  = src_h
+    //   r9  = user VA of `src_w * src_h` BGRA8888 pixels (row-major,
+    //         no padding)
+    // rax = 1 on success, 0 on bad handle / pool full / copy-from-
+    // user fault / too large. Pixel data is copied into the kernel
+    // compositor's per-window blit pool immediately; the user
+    // buffer can be freed on return. Replayed by the compositor at
+    // DesktopCompose time.
+    SYS_GDI_BITBLT = 102,
+
+    // SYS_WIN_BEGIN_PAINT — Win32 BeginPaint.
+    //   rdi = HWND (biased)
+    //   rsi = user VA of PAINTSTRUCT (72 B) to fill. Layout must
+    //         match Win32:
+    //             off 0 : HDC hdc (set to hwnd cast as HDC)
+    //             off 8 : BOOL fErase (set to 1 if dirty)
+    //             off 12: RECT rcPaint (set to client-rect
+    //                     (0, 0, client_w, client_h))
+    //             off 28: BOOL fRestore (zeroed)
+    //             off 32: BOOL fIncUpdate (zeroed)
+    //             off 36: BYTE rgbReserved[32] (zeroed)
+    //   rax = HDC on success, 0 on bad handle / copy-to-user fault.
+    // Side effect: clears the window's dirty flag (equivalent to an
+    // implicit ValidateRect at BeginPaint time, matching Win32).
+    SYS_WIN_BEGIN_PAINT = 103,
+
+    // SYS_WIN_END_PAINT — Win32 EndPaint.
+    //   rdi = HWND (biased). rsi = PAINTSTRUCT* (ignored).
+    //   rax = 1. v0 no-op; dirty clear already happened at BeginPaint.
+    SYS_WIN_END_PAINT = 104,
+
+    // SYS_GDI_FILL_RECT_USER — Win32 FillRect equivalent with user-
+    // mode RECT pointer.
+    //   rdi = HWND (biased)
+    //   rsi = user VA of RECT { i32 left, top, right, bottom }
+    //   rdx = colour (treated as RGB u32; HBRUSH handles from
+    //         GetStockObject map poorly but the rect still paints)
+    //   rax = 1 on success, 0 on bad handle / copy-from-user fault.
+    // Recomposes the desktop after recording.
+    SYS_GDI_FILL_RECT_USER = 105,
+
+    // SYS_GDI_CREATE_COMPAT_DC — CreateCompatibleDC. rdi = hdc_src
+    // (ignored in v0). rax = new memory HDC (tagged handle) or 0.
+    SYS_GDI_CREATE_COMPAT_DC = 106,
+
+    // SYS_GDI_CREATE_COMPAT_BITMAP — CreateCompatibleBitmap.
+    // rdi = hdc (ignored), rsi = width, rdx = height.
+    // rax = HBITMAP (tagged) or 0. Pixels are KMalloc'd BGRA8888,
+    // row-major, pitch = width*4.
+    SYS_GDI_CREATE_COMPAT_BITMAP = 107,
+
+    // SYS_GDI_CREATE_SOLID_BRUSH — CreateSolidBrush.
+    // rdi = COLORREF (0x00BBGGRR Win32 layout). rax = HBRUSH.
+    SYS_GDI_CREATE_SOLID_BRUSH = 108,
+
+    // SYS_GDI_GET_STOCK_OBJECT — GetStockObject.
+    // rdi = stock index (0..5 for brushes; others return 0 in v0).
+    // rax = stable HBRUSH handle, or 0 for unsupported index.
+    SYS_GDI_GET_STOCK_OBJECT = 109,
+
+    // SYS_GDI_SELECT_OBJECT — SelectObject.
+    // rdi = HDC, rsi = HGDIOBJ. Returns previously-selected object
+    // in rax. For memory DCs we currently only track the selected
+    // HBITMAP; brush/pen selections are a no-op pass-through (the
+    // handle comes back unchanged).
+    SYS_GDI_SELECT_OBJECT = 110,
+
+    // SYS_GDI_DELETE_DC — DeleteDC.
+    // rdi = HDC. Frees a memory DC; no-op (returns 1) on window DCs
+    // or invalid handles. rax = 1/0.
+    SYS_GDI_DELETE_DC = 111,
+
+    // SYS_GDI_DELETE_OBJECT — DeleteObject.
+    // rdi = HGDIOBJ. Frees a bitmap's pixel buffer or drops a
+    // non-stock brush. Stock brushes are a safe no-op. rax = 1/0.
+    SYS_GDI_DELETE_OBJECT = 112,
+
+    // SYS_GDI_SET_TEXT_COLOR — SetTextColor on a memDC.
+    //   rdi = HDC, rsi = COLORREF (0x00BBGGRR).
+    //   rax = previous COLORREF. For window HDCs the call is a
+    //   round-trip: returns `rsi` unchanged so SetTextColor /
+    //   GetTextColor pairs keep their Win32 semantics, but the
+    //   window-DC value doesn't actually take effect anywhere.
+    SYS_GDI_SET_TEXT_COLOR = 114,
+
+    // SYS_GDI_SET_BK_COLOR — SetBkColor. Same shape as SET_TEXT_COLOR.
+    SYS_GDI_SET_BK_COLOR = 115,
+
+    // SYS_GDI_SET_BK_MODE — SetBkMode. rdi = HDC, rsi = mode
+    //   (1 = TRANSPARENT, 2 = OPAQUE). rax = previous mode.
+    SYS_GDI_SET_BK_MODE = 116,
+
+    // SYS_GDI_STRETCH_BLT_DC — Win32 StretchBlt (11-arg). `rdi`
+    // points at a user-stack struct of 11 u64 slots in this order:
+    //   +0x00 HDC hdcDst        +0x38 int src_x
+    //   +0x08 int dst_x         +0x40 int src_y
+    //   +0x10 int dst_y         +0x48 int src_w
+    //   +0x18 int dst_w         +0x50 int src_h
+    //   +0x20 int dst_h         +0x58 DWORD rop
+    //   +0x28 HDC hdcSrc
+    // Scales `src_w × src_h` down / up to `dst_w × dst_h` via
+    // nearest-neighbor sampling. Capped at `kWinBlitMaxPx` on the
+    // destination. SRCCOPY-equivalent; ROP ignored in v0.
+    SYS_GDI_STRETCH_BLT_DC = 117,
+
+    // SYS_GDI_CREATE_PEN — Win32 CreatePen.
+    //   rdi = style (ignored in v0), rsi = width, rdx = COLORREF.
+    //   rax = HPEN (tagged). v0 only supports solid pens.
+    SYS_GDI_CREATE_PEN = 118,
+
+    // SYS_GDI_MOVE_TO_EX — Win32 MoveToEx.
+    //   rdi = HDC, rsi = x, rdx = y, r10 = user LPPOINT (may be 0).
+    //   If `r10` != 0, writes the previous cur pos as { LONG, LONG }.
+    //   rax = 1 on success, 0 on invalid HDC / copy-to-user fault.
+    SYS_GDI_MOVE_TO_EX = 119,
+
+    // SYS_GDI_LINE_TO — Win32 LineTo.
+    //   rdi = HDC, rsi = x1 (end), rdx = y1. Reads DC cur pos,
+    //   draws a 1-px line to (x1, y1) in the DC's selected pen
+    //   colour (BLACK_PEN implicit if none), updates cur pos.
+    //   Works on both memDCs (Bresenham into bitmap) and window
+    //   HDCs (display-list line prim + recompose).
+    SYS_GDI_LINE_TO = 120,
+
+    // SYS_GDI_DRAW_TEXT_USER — Win32 DrawTextA.
+    //   rdi = HDC
+    //   rsi = user text pointer
+    //   rdx = text length (-1 for NUL-terminated)
+    //   r10 = user LPRECT (bounding RECT in client coords)
+    //   r8  = format flags (DT_SINGLELINE / DT_CENTER / DT_VCENTER /
+    //                       DT_RIGHT / DT_LEFT / DT_TOP)
+    //   rax = height of the drawn text in pixels on success, or 0
+    //         on bad handle / copy-from-user fault. Single-line
+    //         only in v0.
+    SYS_GDI_DRAW_TEXT_USER = 121,
+
+    // SYS_GDI_RECTANGLE_FILLED — fill + outline a rect using the
+    // DC's currently-selected brush (fill) + pen (outline).
+    //   rdi = HDC, rsi = x, rdx = y, r10 = w, r8 = h.
+    //   rax = 1 / 0. v0: window path records two display-list
+    //   primitives (FillRect + Rectangle); memDC path paints
+    //   bitmap + draws four Bresenham edges.
+    SYS_GDI_RECTANGLE_FILLED = 122,
+
+    // SYS_GDI_ELLIPSE_FILLED — Win32 Ellipse. Same arg shape as
+    // SYS_GDI_RECTANGLE_FILLED. v0: memDC path fills via
+    // bounding-box ellipse scan (integer math, no sqrt); window
+    // path records the outline only (filled-ellipse display-list
+    // prim is a future slice).
+    SYS_GDI_ELLIPSE_FILLED = 123,
+
+    // SYS_GDI_PAT_BLT — fill a rect with the DC's current brush.
+    // ROP is ignored in v0 (treated as PATCOPY).
+    //   rdi = HDC, rsi = x, rdx = y, r10 = w, r8 = h.
+    SYS_GDI_PAT_BLT = 124,
+
+    // SYS_GDI_TEXT_OUT_W — UTF-16 sibling of SYS_GDI_TEXT_OUT.
+    // Same arg shape; `r8` is the length in wchar_t units (not
+    // bytes). Kernel copies in, strips each u16 to ASCII (> 0x7F
+    // becomes '?'), then feeds the ASCII path.
+    SYS_GDI_TEXT_OUT_W = 125,
+
+    // SYS_GDI_DRAW_TEXT_W — UTF-16 sibling of SYS_GDI_DRAW_TEXT_USER.
+    // Same shape; `rdx` (len) is in wchar_ts (-1 = NUL-terminated).
+    SYS_GDI_DRAW_TEXT_W = 126,
+
+    // SYS_GDI_GET_SYS_COLOR — Win32 GetSysColor.
+    //   rdi = nIndex (COLOR_WINDOW=5, COLOR_BTNFACE=15, etc.)
+    //   rax = COLORREF for that palette slot, or 0x00C0C0C0
+    //         (classic grey) for unknown indices.
+    SYS_GDI_GET_SYS_COLOR = 127,
+
+    // SYS_GDI_GET_SYS_COLOR_BRUSH — Win32 GetSysColorBrush.
+    //   rdi = nIndex. rax = HBRUSH pre-registered at boot time
+    //         for the matching colour, or 0 for unknown indices.
+    // Never needs DeleteObject (stock-like — app must not free).
+    SYS_GDI_GET_SYS_COLOR_BRUSH = 128,
+
+    // SYS_GDI_BITBLT_DC — Win32 BitBlt (9-arg). `rdi` points at a
+    // user-stack-resident struct of 9 u64 slots in this order:
+    //   +0x00  HDC   hdcDst
+    //   +0x08  int   x      (low 32 meaningful; upper ignored)
+    //   +0x10  int   y
+    //   +0x18  int   cx
+    //   +0x20  int   cy
+    //   +0x28  HDC   hdcSrc
+    //   +0x30  int   x1
+    //   +0x38  int   y1
+    //   +0x40  DWORD rop    (treated as SRCCOPY for any value in v0)
+    // Effect: the pixels from `hdcSrc`'s selected HBITMAP, subrect
+    // `(x1, y1, cx, cy)`, are blitted into `hdcDst` (a window HWND)
+    // at `(x, y)` as a Blit display-list primitive. Recomposes.
+    // rax = 1 on success, 0 on any validation failure.
+    // Capped at `kWinBlitMaxPx` total pixels per call.
+    SYS_GDI_BITBLT_DC = 113,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit

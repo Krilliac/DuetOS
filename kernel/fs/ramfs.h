@@ -47,7 +47,7 @@ enum class RamfsNodeType : u8
 
 struct RamfsNode
 {
-    const char* name;      // NUL-terminated basename; empty for root
+    const char* name; // NUL-terminated basename; empty for root
     RamfsNodeType type;
     // For kDir: children is a null-terminated array of child nodes.
     //          file_bytes / file_size are unused.

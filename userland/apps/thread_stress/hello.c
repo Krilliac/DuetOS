@@ -40,10 +40,10 @@ __declspec(dllimport) BOOL __stdcall WriteFile(HANDLE hFile, LPCVOID lpBuffer, D
                                                LPDWORD lpNumberOfBytesWritten, void* lpOverlapped);
 __declspec(dllimport) void __stdcall ExitProcess(unsigned int uExitCode);
 __declspec(dllimport) HANDLE __stdcall CreateThread(void* lpThreadAttributes, SIZE_T dwStackSize,
-                                                     LPTHREAD_START_ROUTINE lpStartAddress, LPVOID lpParameter,
-                                                     DWORD dwCreationFlags, LPDWORD lpThreadId);
+                                                    LPTHREAD_START_ROUTINE lpStartAddress, LPVOID lpParameter,
+                                                    DWORD dwCreationFlags, LPDWORD lpThreadId);
 __declspec(dllimport) HANDLE __stdcall CreateEventW(void* lpEventAttributes, BOOL bManualReset, BOOL bInitialState,
-                                                     const unsigned short* lpName);
+                                                    const unsigned short* lpName);
 __declspec(dllimport) BOOL __stdcall SetEvent(HANDLE hEvent);
 __declspec(dllimport) DWORD __stdcall WaitForSingleObject(HANDLE hHandle, DWORD dwMilliseconds);
 

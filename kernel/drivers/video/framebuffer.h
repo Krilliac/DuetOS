@@ -96,6 +96,16 @@ void FramebufferFillRect(u32 x, u32 y, u32 w, u32 h, u32 rgb);
 /// Clipped; no-op on empty dimensions or !Available().
 void FramebufferDrawRect(u32 x, u32 y, u32 w, u32 h, u32 rgb, u32 thickness);
 
+/// Copy `src_w × src_h` BGRA8888 pixels into the framebuffer at
+/// `(dst_x, dst_y)`. `src` is a kernel-side pointer to a row-major
+/// pixel buffer with `src_pitch_px` u32-pixels per row (allowing a
+/// clipped subrect of a larger source). Out-of-range destination
+/// coordinates are clipped; an entirely off-screen blit is a silent
+/// no-op. No-op if `!Available()` or `src == nullptr`. The
+/// compositor uses this to replay a window's recorded BitBlt
+/// primitives; user code reaches it via SYS_GDI_BITBLT.
+void FramebufferBlit(u32 dst_x, u32 dst_y, const u32* src, u32 src_w, u32 src_h, u32 src_pitch_px);
+
 /// Draw one 8x8 glyph at (x, y) using the built-in bitmap font.
 /// `fg` is the ink colour; `bg` is painted behind the glyph cell
 /// so text appears on a clean background rather than alpha-blended.
@@ -127,5 +137,26 @@ void FramebufferSelfTest();
 /// coordinates. Callers that care about chrome alignment need
 /// to rebuild it explicitly after this call succeeds.
 bool FramebufferRebind(u64 phys, u32 width, u32 height, u32 pitch, u8 bpp);
+
+/// Rebind to an already-mapped kernel VA — the external-memory
+/// variant. Unlike `FramebufferRebind` this doesn't call `MapMmio`
+/// (the caller already has the VA), so it's the right primitive for
+/// a framebuffer that lives in ordinary RAM (virtio-gpu backing,
+/// future guest-owned double-buffer, etc.). `virt` must remain
+/// valid for the lifetime of the framebuffer. Returns false on
+/// invalid geometry.
+bool FramebufferRebindExternal(void* virt, u64 phys, u32 width, u32 height, u32 pitch, u8 bpp);
+
+// Present hook. A backend driver (today: virtio-gpu) can register a
+// function that runs at the end of `FramebufferPresent()`; the
+// compositor calls that function as the last step of every
+// `DesktopCompose` pass. For in-place framebuffers (firmware
+// handoff, Bochs VBE) there's nothing to do — the hook stays null
+// and `FramebufferPresent()` is a no-op. For virtio-gpu the hook
+// runs TRANSFER_TO_HOST_2D + RESOURCE_FLUSH so the host sees the
+// new guest pixels.
+using FramebufferPresentFn = void (*)();
+void FramebufferSetPresentHook(FramebufferPresentFn fn);
+void FramebufferPresent();
 
 } // namespace duetos::drivers::video

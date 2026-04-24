@@ -21,7 +21,7 @@
  * Build: tools/build-ucrtbase-dll.sh at /base:0x10050000.
  */
 
-typedef unsigned int       UINT;
+typedef unsigned int UINT;
 typedef unsigned long long size_t;
 
 #define UCRT_NORETURN __attribute__((noreturn))
@@ -36,27 +36,27 @@ typedef unsigned long long size_t;
 __declspec(dllexport) void* malloc(size_t size)
 {
     long long rv;
-    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long) 11), "D"((long long) size) : "memory");
-    return (void*) rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)11), "D"((long long)size) : "memory");
+    return (void*)rv;
 }
 
 __declspec(dllexport) void free(void* ptr)
 {
-    if (ptr == (void*) 0)
+    if (ptr == (void*)0)
         return;
     long long discard;
-    __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long) 12), "D"((long long) ptr) : "memory");
+    __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long)12), "D"((long long)ptr) : "memory");
 }
 
 __declspec(dllexport) NO_BUILTIN_MEM void* calloc(size_t n, size_t size)
 {
     const size_t total = n * size;
-    void*        p     = malloc(total);
-    if (p == (void*) 0)
-        return (void*) 0;
+    void* p = malloc(total);
+    if (p == (void*)0)
+        return (void*)0;
     /* Zero-fill the returned region. Byte loop keeps clang
      * from recognising this as memset and calling itself. */
-    unsigned char* b = (unsigned char*) p;
+    unsigned char* b = (unsigned char*)p;
     for (size_t i = 0; i < total; ++i)
         b[i] = 0;
     return p;
@@ -65,11 +65,8 @@ __declspec(dllexport) NO_BUILTIN_MEM void* calloc(size_t n, size_t size)
 __declspec(dllexport) void* realloc(void* ptr, size_t size)
 {
     long long rv;
-    __asm__ volatile("int $0x80"
-                     : "=a"(rv)
-                     : "a"((long long) 15), "D"((long long) ptr), "S"((long long) size)
-                     : "memory");
-    return (void*) rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)15), "D"((long long)ptr), "S"((long long)size) : "memory");
+    return (void*)rv;
 }
 
 /* _aligned_malloc / _aligned_free — v0 ignores the alignment
@@ -81,7 +78,7 @@ __declspec(dllexport) void* realloc(void* ptr, size_t size)
  * pointer. */
 __declspec(dllexport) void* _aligned_malloc(size_t size, size_t alignment)
 {
-    (void) alignment;
+    (void)alignment;
     return malloc(size);
 }
 
@@ -96,13 +93,13 @@ __declspec(dllexport) void _aligned_free(void* ptr)
 
 __declspec(dllexport) UCRT_NORETURN void exit(int code)
 {
-    __asm__ volatile("int $0x80" : : "a"((long) 0), "D"((long) code));
+    __asm__ volatile("int $0x80" : : "a"((long)0), "D"((long)code));
     __builtin_unreachable();
 }
 
 __declspec(dllexport) UCRT_NORETURN void _exit(int code)
 {
-    __asm__ volatile("int $0x80" : : "a"((long) 0), "D"((long) code));
+    __asm__ volatile("int $0x80" : : "a"((long)0), "D"((long)code));
     __builtin_unreachable();
 }
 
@@ -123,8 +120,8 @@ __declspec(dllexport) UCRT_NORETURN void _exit(int code)
  * it. Preserve the flat-stub behaviour (no-op) for now. */
 __declspec(dllexport) void _initterm(void** first, void** last)
 {
-    (void) first;
-    (void) last;
+    (void)first;
+    (void)last;
 }
 
 /* int _initterm_e(PVFV first, PVFV last); — like _initterm
@@ -132,29 +129,25 @@ __declspec(dllexport) void _initterm(void** first, void** last)
  * Return 0 (success). */
 __declspec(dllexport) int _initterm_e(void** first, void** last)
 {
-    (void) first;
-    (void) last;
+    (void)first;
+    (void)last;
     return 0;
 }
 
-__declspec(dllexport) void _cexit(void)
-{
-}
-__declspec(dllexport) void _c_exit(void)
-{
-}
+__declspec(dllexport) void _cexit(void) {}
+__declspec(dllexport) void _c_exit(void) {}
 __declspec(dllexport) void _set_app_type(int t)
 {
-    (void) t;
+    (void)t;
 }
 __declspec(dllexport) int __setusermatherr(void* handler)
 {
-    (void) handler;
+    (void)handler;
     return 0;
 }
 __declspec(dllexport) int _configthreadlocale(int per_thread)
 {
-    (void) per_thread;
+    (void)per_thread;
     return 0;
 }
 
@@ -180,25 +173,27 @@ __declspec(dllexport) NO_BUILTIN_STR int strcmp(const char* a, const char* b)
         ++a;
         ++b;
     }
-    return (int) (unsigned char) *a - (int) (unsigned char) *b;
+    return (int)(unsigned char)*a - (int)(unsigned char)*b;
 }
 
 __declspec(dllexport) NO_BUILTIN_STR char* strcpy(char* dst, const char* src)
 {
     char* d = dst;
-    while ((*d++ = *src++) != 0) { }
+    while ((*d++ = *src++) != 0)
+    {
+    }
     return dst;
 }
 
 __declspec(dllexport) NO_BUILTIN_STR char* strchr(const char* s, int c)
 {
-    const char ch = (char) c;
+    const char ch = (char)c;
     for (;; ++s)
     {
         if (*s == ch)
-            return (char*) s;
+            return (char*)s;
         if (*s == 0)
-            return (char*) 0;
+            return (char*)0;
     }
 }
 
@@ -215,8 +210,8 @@ __declspec(dllexport) NO_BUILTIN_STR char* strchr(const char* s, int c)
  *   long long     = 64-bit
  * ------------------------------------------------------------------ */
 
-typedef int           atoi_int;
-typedef long          atoi_long; /* MSVC long = 32-bit */
+typedef int atoi_int;
+typedef long atoi_long; /* MSVC long = 32-bit */
 typedef unsigned long atoi_ulong;
 
 static int is_space(int c)
@@ -262,7 +257,7 @@ __declspec(dllexport) atoi_int atoi(const char* s)
 __declspec(dllexport) atoi_long atol(const char* s)
 {
     /* atol returns long (32-bit on MSVC); reuse atoi body. */
-    return (atoi_long) atoi(s);
+    return (atoi_long)atoi(s);
 }
 
 __declspec(dllexport) atoi_long strtol(const char* s, char** endptr, int base)
@@ -297,15 +292,15 @@ __declspec(dllexport) atoi_long strtol(const char* s, char** endptr, int base)
     else if (base == 16 && p[0] == '0' && (p[1] == 'x' || p[1] == 'X'))
         p += 2;
 
-    atoi_long v  = 0;
-    int       dv;
+    atoi_long v = 0;
+    int dv;
     while ((dv = digit_value(*p, base)) >= 0)
     {
         v = v * base + dv;
         ++p;
     }
-    if (endptr != (char**) 0)
-        *endptr = (char*) p;
+    if (endptr != (char**)0)
+        *endptr = (char*)p;
     return neg ? -v : v;
 }
 
@@ -344,15 +339,15 @@ __declspec(dllexport) atoi_ulong strtoul(const char* s, char** endptr, int base)
         p += 2;
 
     atoi_ulong v = 0;
-    int        dv;
+    int dv;
     while ((dv = digit_value(*p, base)) >= 0)
     {
-        v = v * (atoi_ulong) base + (atoi_ulong) dv;
+        v = v * (atoi_ulong)base + (atoi_ulong)dv;
         ++p;
     }
-    if (endptr != (char**) 0)
-        *endptr = (char*) p;
-    return neg ? (atoi_ulong) (-(atoi_long) v) : v;
+    if (endptr != (char**)0)
+        *endptr = (char*)p;
+    return neg ? (atoi_ulong)(-(atoi_long)v) : v;
 }
 
 /* ------------------------------------------------------------------
@@ -366,13 +361,13 @@ __declspec(dllexport) atoi_ulong strtoul(const char* s, char** endptr, int base)
 __declspec(dllexport) UCRT_NORETURN void terminate(void)
 {
     /* MSVC's convention: exit code 3 after abort-signal. */
-    __asm__ volatile("int $0x80" : : "a"((long long) 0), "D"((long long) 3));
+    __asm__ volatile("int $0x80" : : "a"((long long)0), "D"((long long)3));
     __builtin_unreachable();
 }
 
 __declspec(dllexport) UCRT_NORETURN void _invalid_parameter_noinfo_noreturn(void)
 {
-    __asm__ volatile("int $0x80" : : "a"((long long) 0), "D"((long long) 0xC000000D)); /* STATUS_INVALID_PARAMETER */
+    __asm__ volatile("int $0x80" : : "a"((long long)0), "D"((long long)0xC000000D)); /* STATUS_INVALID_PARAMETER */
     __builtin_unreachable();
 }
 
@@ -415,7 +410,7 @@ static void emit_pad(char* buf, size_t cap, size_t* pos, int width, int printed,
 static int fmt_int(char* tmp, unsigned long long v, int base, int upper)
 {
     /* Writes digits backward into tmp[32], returns length. */
-    int         n      = 0;
+    int n = 0;
     const char* digits = upper ? "0123456789ABCDEF" : "0123456789abcdef";
     if (v == 0)
     {
@@ -424,8 +419,8 @@ static int fmt_int(char* tmp, unsigned long long v, int base, int upper)
     }
     while (v)
     {
-        tmp[n++] = digits[v % (unsigned) base];
-        v /= (unsigned) base;
+        tmp[n++] = digits[v % (unsigned)base];
+        v /= (unsigned)base;
     }
     return n;
 }
@@ -433,9 +428,9 @@ static int fmt_int(char* tmp, unsigned long long v, int base, int upper)
 /* __builtin_va_list integrates with SysV ABI va_args; on
  * Windows x64 ABI the compiler handles the register<->memory
  * shuffle itself. We just read through the built-in macros. */
-#define va_list    __builtin_va_list
-#define va_start   __builtin_va_start
-#define va_end     __builtin_va_end
+#define va_list __builtin_va_list
+#define va_start __builtin_va_start
+#define va_end __builtin_va_end
 #define va_arg_ptr(ap, type) (__builtin_va_arg(ap, type))
 
 static int vfmt(char* buf, size_t cap, const char* fmt, va_list ap)
@@ -485,7 +480,7 @@ static int vfmt(char* buf, size_t cap, const char* fmt, va_list ap)
         {
         case 'c':
         {
-            char c = (char) va_arg_ptr(ap, int);
+            char c = (char)va_arg_ptr(ap, int);
             emit_pad(buf, cap, &pos, width, 1, pad);
             emit_char(buf, cap, &pos, c);
             break;
@@ -498,7 +493,7 @@ static int vfmt(char* buf, size_t cap, const char* fmt, va_list ap)
             size_t n = 0;
             while (s[n])
                 ++n;
-            emit_pad(buf, cap, &pos, width, (int) n, pad);
+            emit_pad(buf, cap, &pos, width, (int)n, pad);
             emit_str(buf, cap, &pos, s, n);
             break;
         }
@@ -509,7 +504,7 @@ static int vfmt(char* buf, size_t cap, const char* fmt, va_list ap)
             if (mod == 2)
                 v = va_arg_ptr(ap, long long);
             else if (mod == 3)
-                v = (long long) va_arg_ptr(ap, size_t);
+                v = (long long)va_arg_ptr(ap, size_t);
             else if (mod == 1)
                 v = va_arg_ptr(ap, long);
             else
@@ -519,11 +514,11 @@ static int vfmt(char* buf, size_t cap, const char* fmt, va_list ap)
             if (v < 0)
             {
                 neg = 1;
-                u   = (unsigned long long) (-v);
+                u = (unsigned long long)(-v);
             }
             else
-                u = (unsigned long long) v;
-            int n     = fmt_int(tmp, u, 10, 0);
+                u = (unsigned long long)v;
+            int n = fmt_int(tmp, u, 10, 0);
             int total = n + (neg ? 1 : 0);
             emit_pad(buf, cap, &pos, width, total, pad);
             if (neg)
@@ -545,9 +540,9 @@ static int vfmt(char* buf, size_t cap, const char* fmt, va_list ap)
                 v = va_arg_ptr(ap, unsigned long);
             else
                 v = va_arg_ptr(ap, unsigned int);
-            int base  = (spec == 'u') ? 10 : 16;
+            int base = (spec == 'u') ? 10 : 16;
             int upper = (spec == 'X');
-            int n     = fmt_int(tmp, v, base, upper);
+            int n = fmt_int(tmp, v, base, upper);
             emit_pad(buf, cap, &pos, width, n, pad);
             for (int i = n - 1; i >= 0; --i)
                 emit_char(buf, cap, &pos, tmp[i]);
@@ -555,7 +550,7 @@ static int vfmt(char* buf, size_t cap, const char* fmt, va_list ap)
         }
         case 'p':
         {
-            unsigned long long v = (unsigned long long) va_arg_ptr(ap, void*);
+            unsigned long long v = (unsigned long long)va_arg_ptr(ap, void*);
             emit_str(buf, cap, &pos, "0x", 2);
             int n = fmt_int(tmp, v, 16, 0);
             for (int i = n - 1; i >= 0; --i)
@@ -574,7 +569,7 @@ static int vfmt(char* buf, size_t cap, const char* fmt, va_list ap)
     }
     if (buf && cap > 0)
         buf[pos < cap ? pos : cap - 1] = 0;
-    return (int) pos;
+    return (int)pos;
 }
 
 __declspec(dllexport) int vsnprintf(char* buf, size_t cap, const char* fmt, va_list ap)
@@ -613,23 +608,22 @@ static void sys_write_bytes(const char* p, size_t n)
     long long discard;
     __asm__ volatile("int $0x80"
                      : "=a"(discard)
-                     : "a"((long long) 2),   /* SYS_WRITE */
-                       "D"((long long) 1),   /* fd=1 */
-                       "S"((long long) p),
-                       "d"((long long) n)
+                     : "a"((long long)2), /* SYS_WRITE */
+                       "D"((long long)1), /* fd=1 */
+                       "S"((long long)p), "d"((long long)n)
                      : "memory");
 }
 
 __declspec(dllexport) int printf(const char* fmt, ...)
 {
-    char    buf[1024];
+    char buf[1024];
     va_list ap;
     va_start(ap, fmt);
     int n = vfmt(buf, sizeof(buf), fmt, ap);
     va_end(ap);
-    if (n > (int) sizeof(buf) - 1)
-        n = (int) sizeof(buf) - 1;
-    sys_write_bytes(buf, (size_t) n);
+    if (n > (int)sizeof(buf) - 1)
+        n = (int)sizeof(buf) - 1;
+    sys_write_bytes(buf, (size_t)n);
     return n;
 }
 
@@ -642,12 +636,12 @@ __declspec(dllexport) int puts(const char* s)
         ++n;
     sys_write_bytes(s, n);
     sys_write_bytes("\n", 1);
-    return (int) n + 1;
+    return (int)n + 1;
 }
 
 __declspec(dllexport) int putchar(int c)
 {
-    char b = (char) c;
+    char b = (char)c;
     sys_write_bytes(&b, 1);
     return c;
 }
@@ -668,12 +662,12 @@ __declspec(dllexport) int putchar(int c)
 
 typedef struct ucrt_FILE
 {
-    long long handle;  /* Win32 handle (kernel32 file-handle range, or stdio sentinel) */
-    int       eof;
-    int       err;
+    long long handle; /* Win32 handle (kernel32 file-handle range, or stdio sentinel) */
+    int eof;
+    int err;
 } FILE;
 
-static FILE g_stdin  = {-10LL, 0, 0};
+static FILE g_stdin = {-10LL, 0, 0};
 static FILE g_stdout = {-11LL, 0, 0};
 static FILE g_stderr = {-12LL, 0, 0};
 
@@ -693,7 +687,7 @@ __declspec(dllexport) FILE* __acrt_iob_func(unsigned int index)
     case 2:
         return &g_stderr;
     default:
-        return (FILE*) 0;
+        return (FILE*)0;
     }
 }
 
@@ -712,21 +706,21 @@ static FILE* alloc_FILE_wrapping(long long handle)
     /* Heap-allocate the 24-byte FILE struct so fclose can free
      * it. SYS_HEAP_ALLOC = 11. */
     long long rv;
-    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long) 11), "D"((long long) sizeof(FILE)) : "memory");
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)11), "D"((long long)sizeof(FILE)) : "memory");
     if (rv == 0)
-        return (FILE*) 0;
-    FILE* f   = (FILE*) rv;
+        return (FILE*)0;
+    FILE* f = (FILE*)rv;
     f->handle = handle;
-    f->eof    = 0;
-    f->err    = 0;
+    f->eof = 0;
+    f->err = 0;
     return f;
 }
 
 __declspec(dllexport) FILE* fopen(const char* path, const char* mode)
 {
     if (!path)
-        return (FILE*) 0;
-    (void) mode;
+        return (FILE*)0;
+    (void)mode;
     /* Compute length. */
     long long n = 0;
     while (path[n])
@@ -734,12 +728,12 @@ __declspec(dllexport) FILE* fopen(const char* path, const char* mode)
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
-                     : "a"((long long) 20),   /* SYS_FILE_OPEN */
-                       "D"((long long) path), /* rdi = path */
-                       "S"(n)                 /* rsi = length */
+                     : "a"((long long)20),   /* SYS_FILE_OPEN */
+                       "D"((long long)path), /* rdi = path */
+                       "S"(n)                /* rsi = length */
                      : "memory");
     if (rv < 0x100 || rv >= 0x110)
-        return (FILE*) 0; /* out-of-range = failure */
+        return (FILE*)0; /* out-of-range = failure */
     return alloc_FILE_wrapping(rv);
 }
 
@@ -747,18 +741,18 @@ typedef unsigned short _ucrt_wchar_t;
 __declspec(dllexport) FILE* _wfopen(const _ucrt_wchar_t* path, const _ucrt_wchar_t* mode)
 {
     if (!path)
-        return (FILE*) 0;
-    (void) mode;
+        return (FILE*)0;
+    (void)mode;
     /* UTF-16 -> ASCII strip on stack. */
-    char      ascii[256];
+    char ascii[256];
     long long n = 0;
     while (n < 255 && path[n])
     {
-        ascii[n] = (char) (path[n] & 0xFF);
+        ascii[n] = (char)(path[n] & 0xFF);
         ++n;
     }
     ascii[n] = 0;
-    return fopen(ascii, (const char*) 0);
+    return fopen(ascii, (const char*)0);
 }
 
 __declspec(dllexport) int fclose(FILE* f)
@@ -770,11 +764,11 @@ __declspec(dllexport) int fclose(FILE* f)
     if (f->handle >= 0x100 && f->handle < 0x110)
     {
         long long discard;
-        __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long) 22), "D"(f->handle) : "memory");
+        __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long)22), "D"(f->handle) : "memory");
     }
     /* Free the FILE struct back to the heap. SYS_HEAP_FREE = 12. */
     long long discard2;
-    __asm__ volatile("int $0x80" : "=a"(discard2) : "a"((long long) 12), "D"((long long) f) : "memory");
+    __asm__ volatile("int $0x80" : "=a"(discard2) : "a"((long long)12), "D"((long long)f) : "memory");
     return 0;
 }
 
@@ -786,7 +780,7 @@ __declspec(dllexport) size_t fwrite(const void* ptr, size_t sz, size_t nmemb, FI
      * handle; anything else returns 0 (no real files in v0). */
     if (f->handle == -11LL || f->handle == -12LL)
     {
-        sys_write_bytes((const char*) ptr, sz * nmemb);
+        sys_write_bytes((const char*)ptr, sz * nmemb);
         return nmemb;
     }
     return 0;
@@ -802,14 +796,14 @@ __declspec(dllexport) size_t fread(void* ptr, size_t sz, size_t nmemb, FILE* f)
         f->eof = 1;
         return 0;
     }
-    size_t    total = sz * nmemb;
+    size_t total = sz * nmemb;
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
-                     : "a"((long long) 21),    /* SYS_FILE_READ */
-                       "D"(f->handle),         /* rdi = handle */
-                       "S"((long long) ptr),   /* rsi = buf */
-                       "d"((long long) total)  /* rdx = count */
+                     : "a"((long long)21),   /* SYS_FILE_READ */
+                       "D"(f->handle),       /* rdi = handle */
+                       "S"((long long)ptr),  /* rsi = buf */
+                       "d"((long long)total) /* rdx = count */
                      : "memory");
     if (rv <= 0)
     {
@@ -817,14 +811,14 @@ __declspec(dllexport) size_t fread(void* ptr, size_t sz, size_t nmemb, FILE* f)
         return 0;
     }
     /* Partial read = EOF on next call. */
-    if ((size_t) rv < total)
+    if ((size_t)rv < total)
         f->eof = 1;
-    return (size_t) rv / sz;
+    return (size_t)rv / sz;
 }
 
 __declspec(dllexport) int fflush(FILE* f)
 {
-    (void) f;
+    (void)f;
     return 0;
 }
 
@@ -849,7 +843,7 @@ __declspec(dllexport) int fputc(int c, FILE* f)
         return -1;
     if (f->handle == -11LL || f->handle == -12LL)
     {
-        char b = (char) c;
+        char b = (char)c;
         sys_write_bytes(&b, 1);
         return c;
     }
@@ -863,11 +857,11 @@ __declspec(dllexport) int fputc(int c, FILE* f)
 __declspec(dllexport) char* fgets(char* buf, int n, FILE* f)
 {
     if (!buf || n <= 1 || !f)
-        return (char*) 0;
+        return (char*)0;
     int i = 0;
     while (i < n - 1)
     {
-        char   c;
+        char c;
         size_t got = fread(&c, 1, 1, f);
         if (got == 0)
             break;
@@ -876,7 +870,7 @@ __declspec(dllexport) char* fgets(char* buf, int n, FILE* f)
             break;
     }
     if (i == 0)
-        return (char*) 0;
+        return (char*)0;
     buf[i] = 0;
     return buf;
 }
@@ -884,10 +878,10 @@ __declspec(dllexport) char* fgets(char* buf, int n, FILE* f)
 __declspec(dllexport) int fgetc(FILE* f)
 {
     unsigned char c;
-    size_t        got = fread(&c, 1, 1, f);
+    size_t got = fread(&c, 1, 1, f);
     if (got == 0)
         return -1; /* EOF */
-    return (int) c;
+    return (int)c;
 }
 
 /* fseek: SYS_FILE_SEEK = 23, rdi=handle, rsi=offset, rdx=whence.
@@ -900,10 +894,8 @@ __declspec(dllexport) int fseek(FILE* f, long off, int whence)
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
-                     : "a"((long long) 23),   /* SYS_FILE_SEEK */
-                       "D"(f->handle),
-                       "S"((long long) off),
-                       "d"((long long) whence)
+                     : "a"((long long)23), /* SYS_FILE_SEEK */
+                       "D"(f->handle), "S"((long long)off), "d"((long long)whence)
                      : "memory");
     if (rv < 0)
         return -1;
@@ -922,12 +914,11 @@ __declspec(dllexport) long ftell(FILE* f)
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
-                     : "a"((long long) 23),   /* SYS_FILE_SEEK */
-                       "D"(f->handle),
-                       "S"((long long) 0),    /* offset 0 */
-                       "d"((long long) 1)     /* SEEK_CUR */
+                     : "a"((long long)23),                /* SYS_FILE_SEEK */
+                       "D"(f->handle), "S"((long long)0), /* offset 0 */
+                       "d"((long long)1)                  /* SEEK_CUR */
                      : "memory");
-    return rv < 0 ? -1L : (long) rv;
+    return rv < 0 ? -1L : (long)rv;
 }
 
 __declspec(dllexport) int feof(FILE* f)
@@ -942,34 +933,34 @@ __declspec(dllexport) int ferror(FILE* f)
 
 __declspec(dllexport) int fprintf(FILE* f, const char* fmt, ...)
 {
-    char    buf[1024];
+    char buf[1024];
     va_list ap;
     va_start(ap, fmt);
     int n = vfmt(buf, sizeof(buf), fmt, ap);
     va_end(ap);
-    if (n > (int) sizeof(buf) - 1)
-        n = (int) sizeof(buf) - 1;
-    fwrite(buf, 1, (size_t) n, f);
+    if (n > (int)sizeof(buf) - 1)
+        n = (int)sizeof(buf) - 1;
+    fwrite(buf, 1, (size_t)n, f);
     return n;
 }
 
 __declspec(dllexport) int vfprintf(FILE* f, const char* fmt, va_list ap)
 {
     char buf[1024];
-    int  n = vfmt(buf, sizeof(buf), fmt, ap);
-    if (n > (int) sizeof(buf) - 1)
-        n = (int) sizeof(buf) - 1;
-    fwrite(buf, 1, (size_t) n, f);
+    int n = vfmt(buf, sizeof(buf), fmt, ap);
+    if (n > (int)sizeof(buf) - 1)
+        n = (int)sizeof(buf) - 1;
+    fwrite(buf, 1, (size_t)n, f);
     return n;
 }
 
 __declspec(dllexport) int vprintf(const char* fmt, va_list ap)
 {
     char buf[1024];
-    int  n = vfmt(buf, sizeof(buf), fmt, ap);
-    if (n > (int) sizeof(buf) - 1)
-        n = (int) sizeof(buf) - 1;
-    sys_write_bytes(buf, (size_t) n);
+    int n = vfmt(buf, sizeof(buf), fmt, ap);
+    if (n > (int)sizeof(buf) - 1)
+        n = (int)sizeof(buf) - 1;
+    sys_write_bytes(buf, (size_t)n);
     return n;
 }
 
@@ -981,10 +972,10 @@ __declspec(dllexport) NO_BUILTIN_STR int strncmp(const char* a, const char* b, s
 {
     for (size_t i = 0; i < n; ++i)
     {
-        unsigned char ca = (unsigned char) a[i];
-        unsigned char cb = (unsigned char) b[i];
+        unsigned char ca = (unsigned char)a[i];
+        unsigned char cb = (unsigned char)b[i];
         if (ca != cb)
-            return (int) ca - (int) cb;
+            return (int)ca - (int)cb;
         if (!ca)
             return 0;
     }
@@ -1028,15 +1019,15 @@ __declspec(dllexport) int _stricmp(const char* a, const char* b)
     {
         char ca = *a, cb = *b;
         if (ca >= 'A' && ca <= 'Z')
-            ca = (char) (ca + ('a' - 'A'));
+            ca = (char)(ca + ('a' - 'A'));
         if (cb >= 'A' && cb <= 'Z')
-            cb = (char) (cb + ('a' - 'A'));
+            cb = (char)(cb + ('a' - 'A'));
         if (ca != cb)
-            return (int) (unsigned char) ca - (int) (unsigned char) cb;
+            return (int)(unsigned char)ca - (int)(unsigned char)cb;
         ++a;
         ++b;
     }
-    return (int) (unsigned char) *a - (int) (unsigned char) *b;
+    return (int)(unsigned char)*a - (int)(unsigned char)*b;
 }
 
 __declspec(dllexport) int _strnicmp(const char* a, const char* b, size_t n)
@@ -1045,11 +1036,11 @@ __declspec(dllexport) int _strnicmp(const char* a, const char* b, size_t n)
     {
         char ca = a[i], cb = b[i];
         if (ca >= 'A' && ca <= 'Z')
-            ca = (char) (ca + ('a' - 'A'));
+            ca = (char)(ca + ('a' - 'A'));
         if (cb >= 'A' && cb <= 'Z')
-            cb = (char) (cb + ('a' - 'A'));
+            cb = (char)(cb + ('a' - 'A'));
         if (ca != cb)
-            return (int) (unsigned char) ca - (int) (unsigned char) cb;
+            return (int)(unsigned char)ca - (int)(unsigned char)cb;
         if (!a[i])
             return 0;
     }
@@ -1122,7 +1113,7 @@ typedef int (*qsort_cmp_t)(const void*, const void*);
 
 __declspec(dllexport) NO_BUILTIN_MEM void qsort(void* base, size_t n, size_t sz, qsort_cmp_t cmp)
 {
-    unsigned char* arr = (unsigned char*) base;
+    unsigned char* arr = (unsigned char*)base;
     for (size_t i = 1; i < n; ++i)
     {
         for (size_t j = i; j > 0; --j)
@@ -1135,8 +1126,8 @@ __declspec(dllexport) NO_BUILTIN_MEM void qsort(void* base, size_t n, size_t sz,
             for (size_t k = 0; k < sz; ++k)
             {
                 unsigned char t = a[k];
-                a[k]            = b[k];
-                b[k]            = t;
+                a[k] = b[k];
+                b[k] = t;
             }
         }
     }
@@ -1144,21 +1135,21 @@ __declspec(dllexport) NO_BUILTIN_MEM void qsort(void* base, size_t n, size_t sz,
 
 __declspec(dllexport) void* bsearch(const void* key, const void* base, size_t n, size_t sz, qsort_cmp_t cmp)
 {
-    const unsigned char* arr = (const unsigned char*) base;
-    size_t               lo  = 0;
-    size_t               hi  = n;
+    const unsigned char* arr = (const unsigned char*)base;
+    size_t lo = 0;
+    size_t hi = n;
     while (lo < hi)
     {
         size_t mid = lo + (hi - lo) / 2;
-        int    c   = cmp(key, arr + mid * sz);
+        int c = cmp(key, arr + mid * sz);
         if (c == 0)
-            return (void*) (arr + mid * sz);
+            return (void*)(arr + mid * sz);
         if (c < 0)
             hi = mid;
         else
             lo = mid + 1;
     }
-    return (void*) 0;
+    return (void*)0;
 }
 
 /* ------------------------------------------------------------------
@@ -1255,10 +1246,10 @@ static int vsscanf_impl(const char* buf, const char* fmt, va_list ap)
         case 'x':
         case 'X':
         {
-            int               base = (spec == 'x' || spec == 'X') ? 16 : 10;
-            int               neg  = 0;
-            unsigned long long v   = 0;
-            int                any = 0;
+            int base = (spec == 'x' || spec == 'X') ? 16 : 10;
+            int neg = 0;
+            unsigned long long v = 0;
+            int any = 0;
             if (spec != 'u' && spec != 'x' && spec != 'X')
             {
                 if (*p == '-')
@@ -1273,7 +1264,7 @@ static int vsscanf_impl(const char* buf, const char* fmt, va_list ap)
             int consumed = 0;
             while ((dv = ssc_digit(*p, base)) >= 0 && (width == 0 || consumed < width))
             {
-                v = v * (unsigned) base + (unsigned) dv;
+                v = v * (unsigned)base + (unsigned)dv;
                 ++p;
                 ++consumed;
                 any = 1;
@@ -1283,19 +1274,19 @@ static int vsscanf_impl(const char* buf, const char* fmt, va_list ap)
             if (!suppress)
             {
                 if (mod == 2)
-                    *va_arg_ptr(ap, long long*) = neg ? -(long long) v : (long long) v;
+                    *va_arg_ptr(ap, long long*) = neg ? -(long long)v : (long long)v;
                 else if (mod == 1)
-                    *va_arg_ptr(ap, long*) = neg ? -(long) v : (long) v;
+                    *va_arg_ptr(ap, long*) = neg ? -(long)v : (long)v;
                 else
-                    *va_arg_ptr(ap, int*) = neg ? -(int) v : (int) v;
+                    *va_arg_ptr(ap, int*) = neg ? -(int)v : (int)v;
                 ++matches;
             }
             break;
         }
         case 's':
         {
-            char* out = suppress ? (char*) 0 : va_arg_ptr(ap, char*);
-            int   n   = 0;
+            char* out = suppress ? (char*)0 : va_arg_ptr(ap, char*);
+            int n = 0;
             while (*p && !ssc_is_space(*p) && (width == 0 || n < width - 1))
             {
                 if (out)
@@ -1312,7 +1303,7 @@ static int vsscanf_impl(const char* buf, const char* fmt, va_list ap)
         case 'c':
         {
             int n = width > 0 ? width : 1;
-            char* out = suppress ? (char*) 0 : va_arg_ptr(ap, char*);
+            char* out = suppress ? (char*)0 : va_arg_ptr(ap, char*);
             for (int i = 0; i < n && *p; ++i)
             {
                 if (out)
@@ -1358,14 +1349,14 @@ static unsigned long long g_rand_state = 0xDEADBEEFCAFEBABEULL;
 
 __declspec(dllexport) void srand(unsigned int seed)
 {
-    g_rand_state = 0x9E3779B97F4A7C15ULL ^ ((unsigned long long) seed << 32) ^ seed;
+    g_rand_state = 0x9E3779B97F4A7C15ULL ^ ((unsigned long long)seed << 32) ^ seed;
 }
 
 __declspec(dllexport) int rand(void)
 {
     g_rand_state = g_rand_state * 6364136223846793005ULL + 1442695040888963407ULL;
     /* RAND_MAX = 32767 per MSVC. */
-    return (int) ((g_rand_state >> 33) & 0x7FFF);
+    return (int)((g_rand_state >> 33) & 0x7FFF);
 }
 
 /* ------------------------------------------------------------------
@@ -1414,9 +1405,9 @@ static int env_name_eq(const char* a, const char* b)
     {
         char ca = *a, cb = *b;
         if (ca >= 'a' && ca <= 'z')
-            ca = (char) (ca - ('a' - 'A'));
+            ca = (char)(ca - ('a' - 'A'));
         if (cb >= 'a' && cb <= 'z')
-            cb = (char) (cb - ('a' - 'A'));
+            cb = (char)(cb - ('a' - 'A'));
         if (ca != cb)
             return 0;
         ++a;
@@ -1428,27 +1419,30 @@ static int env_name_eq(const char* a, const char* b)
 __declspec(dllexport) char* getenv(const char* name)
 {
     if (!name)
-        return (char*) 0;
+        return (char*)0;
     for (size_t i = 0; i < sizeof(k_env_vars) / sizeof(k_env_vars[0]); ++i)
         if (env_name_eq(k_env_vars[i].name, name))
-            return (char*) k_env_vars[i].value;
-    return (char*) 0;
+            return (char*)k_env_vars[i].value;
+    return (char*)0;
 }
 
 __declspec(dllexport) int _putenv(const char* entry)
 {
-    (void) entry;
+    (void)entry;
     return 0;
 }
 
 __declspec(dllexport) int _putenv_s(const char* name, const char* value)
 {
-    (void) name;
-    (void) value;
+    (void)name;
+    (void)value;
     return 0;
 }
 
-__declspec(dllexport) unsigned long _errno_dummy(void) { return 0; } /* placeholder */
+__declspec(dllexport) unsigned long _errno_dummy(void)
+{
+    return 0;
+} /* placeholder */
 
 /* _errno() returns a pointer to the thread's errno slot.
  * Single-thread in v0; return the address of a global. */

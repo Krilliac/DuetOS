@@ -4,6 +4,7 @@
 #include "../../arch/x86_64/serial.h"
 #include "../../core/klog.h"
 #include "../../core/panic.h"
+#include "../../drivers/video/framebuffer.h"
 #include "../../mm/paging.h"
 #include "../pci/pci.h"
 #include "bochs_vbe.h"
@@ -60,6 +61,118 @@ u16 Mmio16(const GpuInfo& g, u64 offset)
         return 0;
     auto* p = reinterpret_cast<volatile u16*>(static_cast<u8*>(g.mmio_virt) + offset);
     return *p;
+}
+
+u32 Mmio32(const GpuInfo& g, u64 offset)
+{
+    if (g.mmio_virt == nullptr || offset + 4 > g.mmio_size)
+        return 0xFFFFFFFFu;
+    auto* p = reinterpret_cast<volatile u32*>(static_cast<u8*>(g.mmio_virt) + offset);
+    return *p;
+}
+
+// NVIDIA PMC_BOOT_0 is at BAR0 + 0x000000, 4 bytes, on every
+// NVIDIA GPU since NV4 (1998). Format (from open-gpu-kernel-modules
+// and nouveau's nvkm/engine/device/base.c):
+//   bits 27:20 = chipset / architecture id
+//   bits 19:16 = implementation
+//   bits 15:8  = reserved
+//   bits  7:0  = revision (major:minor nibbles)
+//
+// We map the architecture nibble to a short name for boot-log
+// readability; unknown values land on nullptr so the log shows the
+// raw value instead.
+const char* NvidiaArchName(u8 arch)
+{
+    switch (arch)
+    {
+    case 0x40:
+        return "NV40-curie";
+    case 0x50:
+        return "NV50-tesla";
+    case 0xC0:
+        return "GF100-fermi";
+    case 0xE0:
+        return "GK-kepler";
+    case 0x10:
+        return "GM10x-maxwell";
+    case 0x11:
+        return "GM20x-maxwell";
+    case 0x12:
+        return "GP10x-pascal";
+    case 0x13:
+        return "GV10x-volta";
+    case 0x14:
+        return "TU10x-turing";
+    case 0x15:
+        return "GA10x-ampere";
+    case 0x16:
+        return "GH10x-hopper";
+    case 0x17:
+        return "AD10x-ada";
+    case 0x18:
+        return "GB10x-blackwell";
+    default:
+        return nullptr;
+    }
+}
+
+void ProbeNvidiaRegisters(GpuInfo& g)
+{
+    constexpr u64 kPmcBoot0 = 0x000000;
+    const u32 boot0 = Mmio32(g, kPmcBoot0);
+    g.probe_reg = boot0;
+    g.mmio_live = (boot0 != 0xFFFFFFFFu);
+    if (!g.mmio_live)
+    {
+        arch::SerialWrite("[gpu-probe] nvidia: BAR0 read returned 0xFFFFFFFF (MMIO decode failed)\n");
+        return;
+    }
+    const u8 arch_nib = static_cast<u8>((boot0 >> 20) & 0xFF);
+    const u8 impl = static_cast<u8>((boot0 >> 16) & 0xF);
+    const u8 rev = static_cast<u8>(boot0 & 0xFF);
+    g.arch = NvidiaArchName(arch_nib);
+    arch::SerialWrite("[gpu-probe] nvidia: PMC_BOOT_0=");
+    arch::SerialWriteHex(boot0);
+    arch::SerialWrite(" arch=");
+    arch::SerialWriteHex(arch_nib);
+    if (g.arch != nullptr)
+    {
+        arch::SerialWrite(" (");
+        arch::SerialWrite(g.arch);
+        arch::SerialWrite(")");
+    }
+    arch::SerialWrite(" impl=");
+    arch::SerialWriteHex(impl);
+    arch::SerialWrite(" rev=");
+    arch::SerialWriteHex(rev);
+    arch::SerialWrite("\n");
+}
+
+// Intel iGPU: BAR0 is the MMIO register aperture on every Gen we
+// target (Gen9+). There isn't a single "chip id" register that
+// works across every Gen — the canonical GT revision register moves
+// between 0x0 (GEN_INFO) and 0x9130 (GT_CAPABILITY) depending on
+// generation. For v0, we only perform a liveness read and log the
+// first dword. A full-driver slice will decode per-Gen registers.
+void ProbeIntelRegisters(GpuInfo& g)
+{
+    const u32 dword0 = Mmio32(g, 0);
+    g.probe_reg = dword0;
+    g.mmio_live = (dword0 != 0xFFFFFFFFu);
+    arch::SerialWrite("[gpu-probe] intel: BAR0[0]=");
+    arch::SerialWriteHex(dword0);
+    arch::SerialWrite(g.mmio_live ? " (MMIO live)\n" : " (MMIO decode failed)\n");
+}
+
+// AMD Radeon GFX9+: BAR0 is VRAM framebuffer, BAR2 is doorbell, and
+// BAR5 is the MMIO register aperture. We only map BAR0 in GpuInit
+// today, so we cannot reach AMD register ids. A full AMD slice will
+// probe and map BAR5, then read e.g. mmGRBM_STATUS (0x8010).
+void ProbeAmdRegisters(GpuInfo& g)
+{
+    (void)g;
+    arch::SerialWrite("[gpu-probe] amd: no register read — registers at BAR5, not mapped in v0\n");
 }
 
 void DecodeBochsVbe(const GpuInfo& g)
@@ -135,7 +248,32 @@ void RunVendorProbe(GpuInfo& g)
     arch::SerialWriteHex(g.device_id);
     arch::SerialWrite(" family=");
     arch::SerialWrite(family);
-    arch::SerialWrite("  (stub OK — no engine init yet)\n");
+    arch::SerialWrite("\n");
+
+    // Vendor-specific register reads from the mapped BAR0. Each
+    // probe is non-destructive (reads only) and populates
+    // `probe_reg`, `mmio_live`, and optionally `arch` on the
+    // GpuInfo. These are the first reads that actually talk to
+    // the hardware past PCI config-space — a failing read here
+    // means the BAR map is broken or the controller is dead.
+    if (g.mmio_virt != nullptr)
+    {
+        switch (g.vendor_id)
+        {
+        case kVendorNvidia:
+            ProbeNvidiaRegisters(g);
+            break;
+        case kVendorIntel:
+            ProbeIntelRegisters(g);
+            break;
+        case kVendorAmd:
+            ProbeAmdRegisters(g);
+            break;
+        default:
+            break;
+        }
+    }
+
     // Bochs VBE aperture is a QEMU-only detail — probing it on bare
     // metal would be addressing a device that doesn't exist. The
     // vendor-id 0x1234 gate already covers the QEMU-std-VGA path,
@@ -154,6 +292,89 @@ void RunVendorProbe(GpuInfo& g)
     if (g.vendor_id == kVendorRedHatVirt && g.device_id == 0x1050)
     {
         VirtioGpuProbe(g.bus, g.device, g.function);
+        // v1: complete the ACK→DRIVER→FEATURES_OK→DRIVER_OK
+        // handshake, set up controlq, issue GET_DISPLAY_INFO. All
+        // three steps are independently guarded; a failure in
+        // bring-up leaves us with the probe data still visible.
+        if (VirtioGpuBringUp())
+        {
+            const auto& info = VirtioGpuGetDisplayInfo();
+            // v2: if at least one scanout is active, allocate a 2D
+            // resource backed by a guest-owned contiguous buffer,
+            // attach it, bind it to scanout 0, paint a boot test
+            // pattern (diagonal gradient + corner swatches), and
+            // flush. If the host is QEMU with -vga virtio the
+            // pattern lands on the display; this is the first real
+            // bring-up proof that our 2D command pipeline works.
+            //
+            // Cap dimensions to avoid an outsized contiguous
+            // allocation: 1024x768x4 = 3 MiB = 768 frames, well
+            // within what the frame allocator can satisfy at boot.
+            if (info.valid && info.active_scanouts != 0)
+            {
+                u32 w = info.rects[0].width;
+                u32 h = info.rects[0].height;
+                if (w == 0 || h == 0)
+                {
+                    w = 640;
+                    h = 480;
+                }
+                constexpr u32 kScanoutMaxW = 1024;
+                constexpr u32 kScanoutMaxH = 768;
+                if (w > kScanoutMaxW)
+                    w = kScanoutMaxW;
+                if (h > kScanoutMaxH)
+                    h = kScanoutMaxH;
+
+                if (VirtioGpuSetupScanout(w, h))
+                {
+                    const auto& sc = VirtioGpuScanoutInfo();
+                    // Rebind the kernel framebuffer to the virtio-gpu
+                    // backing. BGRA8888 is compatible with the video
+                    // driver's 32-bpp pixel format (little-endian
+                    // layout puts B,G,R,A in memory, which the host
+                    // interprets correctly). Register a present hook
+                    // so the compositor's end-of-compose step pushes
+                    // the new pixels to the host via TRANSFER_TO_HOST_2D
+                    // + RESOURCE_FLUSH. On QEMU `-vga virtio` this
+                    // turns the virtio-gpu into our primary display.
+                    ::duetos::drivers::video::FramebufferRebindExternal(sc.backing_va, sc.backing_phys, sc.width,
+                                                                        sc.height, sc.pitch, 32);
+                    ::duetos::drivers::video::FramebufferSetPresentHook(
+                        []() {
+                            (void)VirtioGpuFlushScanout(0, 0, VirtioGpuScanoutInfo().width,
+                                                        VirtioGpuScanoutInfo().height);
+                        });
+                    // Paint a boot-proof test pattern straight into
+                    // the backing (now also the kernel framebuffer)
+                    // and flush once so the host sees something
+                    // before the first DesktopCompose runs.
+                    auto* px = static_cast<u32*>(sc.backing_va);
+                    for (u32 yy = 0; yy < sc.height; ++yy)
+                    {
+                        for (u32 xx = 0; xx < sc.width; ++xx)
+                        {
+                            const u8 r = static_cast<u8>((xx * 255) / sc.width);
+                            const u8 g_ = static_cast<u8>((yy * 255) / sc.height);
+                            const u8 b = static_cast<u8>(((xx + yy) * 255) / (sc.width + sc.height));
+                            px[yy * sc.width + xx] = (u32(0xFF) << 24) | (u32(r) << 16) | (u32(g_) << 8) | u32(b);
+                        }
+                    }
+                    constexpr u32 kSw = 16;
+                    auto fill_box = [&](u32 x0, u32 y0, u32 rgb)
+                    {
+                        for (u32 yy = y0; yy < y0 + kSw && yy < sc.height; ++yy)
+                            for (u32 xx = x0; xx < x0 + kSw && xx < sc.width; ++xx)
+                                px[yy * sc.width + xx] = rgb;
+                    };
+                    fill_box(0, 0, 0xFFFF0000);                            // top-left red
+                    fill_box(sc.width - kSw, 0, 0xFF00FF00);               // top-right green
+                    fill_box(0, sc.height - kSw, 0xFF0000FF);              // bottom-left blue
+                    fill_box(sc.width - kSw, sc.height - kSw, 0xFFFFFFFF); // bottom-right white
+                    (void)VirtioGpuFlushScanout(0, 0, sc.width, sc.height);
+                }
+            }
+        }
     }
 }
 

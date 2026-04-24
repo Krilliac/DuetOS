@@ -337,8 +337,8 @@ void PciMsixFunctionUnmask(DeviceAddress addr)
     PciConfigWrite32(addr, static_cast<u8>(cap + 0), (word & 0x0000FFFFu) | (static_cast<u32>(msg_ctrl) << 16));
 }
 
-::duetos::core::Result<u8> PciMsixBindSimple(DeviceAddress addr, u16 entry_index,
-                                               ::duetos::arch::IrqHandler handler, MsixRoute* out_route)
+::duetos::core::Result<u8> PciMsixBindSimple(DeviceAddress addr, u16 entry_index, ::duetos::arch::IrqHandler handler,
+                                             MsixRoute* out_route)
 {
     using ::duetos::core::Err;
     using ::duetos::core::ErrorCode;

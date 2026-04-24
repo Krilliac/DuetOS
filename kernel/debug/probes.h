@@ -119,12 +119,12 @@ void ProbeInit();
 #define KBP_PROBE(probe_id)                                                                                            \
     do                                                                                                                 \
     {                                                                                                                  \
-        ::duetos::debug::ProbeFire((probe_id), reinterpret_cast<::duetos::u64>(__builtin_return_address(0)), 0);   \
+        ::duetos::debug::ProbeFire((probe_id), reinterpret_cast<::duetos::u64>(__builtin_return_address(0)), 0);       \
     } while (0)
 
 #define KBP_PROBE_V(probe_id, value)                                                                                   \
     do                                                                                                                 \
     {                                                                                                                  \
-        ::duetos::debug::ProbeFire((probe_id), reinterpret_cast<::duetos::u64>(__builtin_return_address(0)),       \
-                                     static_cast<::duetos::u64>(value));                                             \
+        ::duetos::debug::ProbeFire((probe_id), reinterpret_cast<::duetos::u64>(__builtin_return_address(0)),           \
+                                   static_cast<::duetos::u64>(value));                                                 \
     } while (0)

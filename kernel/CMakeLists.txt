@@ -47,6 +47,7 @@ set(DUETOS_KERNEL_SHARED_SOURCES
     subsystems/translation/translate.cpp
     subsystems/win32/event_syscall.cpp
     subsystems/win32/file_syscall.cpp
+    subsystems/win32/gdi_objects.cpp
     subsystems/win32/heap.cpp
     subsystems/win32/heap_syscall.cpp
     subsystems/win32/mutex_syscall.cpp

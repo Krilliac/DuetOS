@@ -14,7 +14,9 @@
 #include "../mm/frame_allocator.h"
 #include "../mm/paging.h"
 #include "../sched/sched.h"
+#include "../subsystems/graphics/graphics.h"
 #include "../subsystems/translation/translate.h"
+#include "../subsystems/win32/gdi_objects.h"
 #include "../subsystems/win32/heap_syscall.h"
 #include "../subsystems/win32/vmap_syscall.h"
 #include "../subsystems/win32/tls_syscall.h"
@@ -1436,6 +1438,114 @@ void SyscallDispatch(arch::TrapFrame* frame)
     case SYS_WIN_BEEP:
         subsystems::win32::DoWinBeep(frame);
         return;
+
+    case SYS_GDI_BITBLT:
+        subsystems::win32::DoGdiBitBlt(frame);
+        return;
+    case SYS_WIN_BEGIN_PAINT:
+        subsystems::win32::DoWinBeginPaint(frame);
+        return;
+    case SYS_WIN_END_PAINT:
+        subsystems::win32::DoWinEndPaint(frame);
+        return;
+    case SYS_GDI_FILL_RECT_USER:
+        subsystems::win32::DoGdiFillRectUser(frame);
+        return;
+    case SYS_GDI_CREATE_COMPAT_DC:
+        subsystems::win32::DoGdiCreateCompatibleDC(frame);
+        return;
+    case SYS_GDI_CREATE_COMPAT_BITMAP:
+        subsystems::win32::DoGdiCreateCompatibleBitmap(frame);
+        return;
+    case SYS_GDI_CREATE_SOLID_BRUSH:
+        subsystems::win32::DoGdiCreateSolidBrush(frame);
+        return;
+    case SYS_GDI_GET_STOCK_OBJECT:
+        subsystems::win32::DoGdiGetStockObject(frame);
+        return;
+    case SYS_GDI_SELECT_OBJECT:
+        subsystems::win32::DoGdiSelectObject(frame);
+        return;
+    case SYS_GDI_DELETE_DC:
+        subsystems::win32::DoGdiDeleteDC(frame);
+        return;
+    case SYS_GDI_DELETE_OBJECT:
+        subsystems::win32::DoGdiDeleteObject(frame);
+        return;
+    case SYS_GDI_BITBLT_DC:
+        subsystems::win32::DoGdiBitBltDC(frame);
+        return;
+    case SYS_GDI_STRETCH_BLT_DC:
+        subsystems::win32::DoGdiStretchBltDC(frame);
+        return;
+    case SYS_GDI_CREATE_PEN:
+        subsystems::win32::DoGdiCreatePen(frame);
+        return;
+    case SYS_GDI_MOVE_TO_EX:
+        subsystems::win32::DoGdiMoveToEx(frame);
+        return;
+    case SYS_GDI_LINE_TO:
+        subsystems::win32::DoGdiLineTo(frame);
+        return;
+    case SYS_GDI_DRAW_TEXT_USER:
+        subsystems::win32::DoGdiDrawText(frame);
+        return;
+    case SYS_GDI_RECTANGLE_FILLED:
+        subsystems::win32::DoGdiRectangleFilled(frame);
+        return;
+    case SYS_GDI_ELLIPSE_FILLED:
+        subsystems::win32::DoGdiEllipseFilled(frame);
+        return;
+    case SYS_GDI_PAT_BLT:
+        subsystems::win32::DoGdiPatBlt(frame);
+        return;
+    case SYS_GDI_TEXT_OUT_W:
+        subsystems::win32::DoGdiTextOutW(frame);
+        return;
+    case SYS_GDI_DRAW_TEXT_W:
+        subsystems::win32::DoGdiDrawTextW(frame);
+        return;
+    case SYS_GDI_GET_SYS_COLOR:
+        subsystems::win32::DoGdiGetSysColor(frame);
+        return;
+    case SYS_GDI_GET_SYS_COLOR_BRUSH:
+        subsystems::win32::DoGdiGetSysColorBrush(frame);
+        return;
+    case SYS_GDI_SET_TEXT_COLOR:
+        subsystems::win32::DoGdiSetTextColor(frame);
+        return;
+    case SYS_GDI_SET_BK_COLOR:
+        subsystems::win32::DoGdiSetBkColor(frame);
+        return;
+    case SYS_GDI_SET_BK_MODE:
+        subsystems::win32::DoGdiSetBkMode(frame);
+        return;
+
+    case SYS_GFX_D3D_STUB:
+    {
+        // rdi = kind (1 = D3D11, 2 = D3D12, 3 = DXGI). Forward to
+        // the graphics ICD's counter-backed stubs so the `gfx`
+        // shell command sees create-call activity; each returns
+        // HRESULT E_FAIL (0x80004005) which we pass back unchanged.
+        u32 hr = 0;
+        switch (frame->rdi)
+        {
+        case 1:
+            hr = subsystems::graphics::D3D11CreateDeviceStub();
+            break;
+        case 2:
+            hr = subsystems::graphics::D3D12CreateDeviceStub();
+            break;
+        case 3:
+            hr = subsystems::graphics::DxgiCreateFactoryStub();
+            break;
+        default:
+            hr = 0; // bad kind = S_OK surface would confuse callers; leave 0
+            break;
+        }
+        frame->rax = hr;
+        return;
+    }
 
     case SYS_DLL_PROC_ADDRESS:
     {

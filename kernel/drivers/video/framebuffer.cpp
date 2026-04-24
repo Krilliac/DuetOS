@@ -185,6 +185,50 @@ bool FramebufferRebind(u64 phys, u32 width, u32 height, u32 pitch, u8 bpp)
     return true;
 }
 
+bool FramebufferRebindExternal(void* virt, u64 phys, u32 width, u32 height, u32 pitch, u8 bpp)
+{
+    if (bpp != 32 || virt == nullptr || pitch < width * 4 || (pitch & 3) != 0 || width == 0 || height == 0)
+    {
+        SerialWrite("[video/fb] rebind-ext rejected (bad geometry or null virt)\n");
+        return false;
+    }
+    g_info.virt = virt;
+    g_info.phys = phys;
+    g_info.width = width;
+    g_info.height = height;
+    g_info.pitch = pitch;
+    g_info.bpp = bpp;
+    g_available = true;
+    SerialWrite("[video/fb] rebound-ext virt=");
+    SerialWriteHex(reinterpret_cast<u64>(virt));
+    SerialWrite(" phys=");
+    SerialWriteHex(phys);
+    SerialWrite(" ");
+    SerialWriteHex(width);
+    SerialWrite("x");
+    SerialWriteHex(height);
+    SerialWrite(" pitch=");
+    SerialWriteHex(pitch);
+    SerialWrite("\n");
+    return true;
+}
+
+namespace
+{
+constinit FramebufferPresentFn g_present_hook = nullptr;
+} // namespace
+
+void FramebufferSetPresentHook(FramebufferPresentFn fn)
+{
+    g_present_hook = fn;
+}
+
+void FramebufferPresent()
+{
+    if (g_present_hook != nullptr)
+        g_present_hook();
+}
+
 FramebufferInfo FramebufferGet()
 {
     return g_info;
@@ -227,6 +271,31 @@ void FramebufferFillRect(u32 x, u32 y, u32 w, u32 h, u32 rgb)
         for (u32 xi = x; xi < x_end; ++xi)
         {
             row[xi] = rgb;
+        }
+    }
+}
+
+void FramebufferBlit(u32 dst_x, u32 dst_y, const u32* src, u32 src_w, u32 src_h, u32 src_pitch_px)
+{
+    if (!g_available || src == nullptr || src_w == 0 || src_h == 0)
+    {
+        return;
+    }
+    if (dst_x >= g_info.width || dst_y >= g_info.height)
+    {
+        return;
+    }
+    const u32 x_end = (dst_x + src_w > g_info.width) ? g_info.width : dst_x + src_w;
+    const u32 y_end = (dst_y + src_h > g_info.height) ? g_info.height : dst_y + src_h;
+
+    auto* fb_bytes = reinterpret_cast<u8*>(g_info.virt);
+    for (u32 yi = dst_y; yi < y_end; ++yi)
+    {
+        auto* row = reinterpret_cast<volatile u32*>(fb_bytes + static_cast<u64>(yi) * g_info.pitch);
+        const u32* src_row = src + static_cast<u64>(yi - dst_y) * src_pitch_px;
+        for (u32 xi = dst_x; xi < x_end; ++xi)
+        {
+            row[xi] = src_row[xi - dst_x];
         }
     }
 }

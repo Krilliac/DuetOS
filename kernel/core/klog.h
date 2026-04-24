@@ -247,20 +247,20 @@ void DumpLogRingToFiltered(LogTee writer, LogLevel min_level);
 #define KLOG_TRACE(subsys, msg)                                                                                        \
     do                                                                                                                 \
     {                                                                                                                  \
-        if constexpr (static_cast<::duetos::u8>(::duetos::core::LogLevel::Trace) >=                                \
-                      static_cast<::duetos::u8>(::duetos::core::kKlogMinLevel))                                    \
+        if constexpr (static_cast<::duetos::u8>(::duetos::core::LogLevel::Trace) >=                                    \
+                      static_cast<::duetos::u8>(::duetos::core::kKlogMinLevel))                                        \
         {                                                                                                              \
-            ::duetos::core::Log(::duetos::core::LogLevel::Trace, (subsys), (msg));                                 \
+            ::duetos::core::Log(::duetos::core::LogLevel::Trace, (subsys), (msg));                                     \
         }                                                                                                              \
     } while (0)
 
 #define KLOG_TRACE_V(subsys, msg, val)                                                                                 \
     do                                                                                                                 \
     {                                                                                                                  \
-        if constexpr (static_cast<::duetos::u8>(::duetos::core::LogLevel::Trace) >=                                \
-                      static_cast<::duetos::u8>(::duetos::core::kKlogMinLevel))                                    \
+        if constexpr (static_cast<::duetos::u8>(::duetos::core::LogLevel::Trace) >=                                    \
+                      static_cast<::duetos::u8>(::duetos::core::kKlogMinLevel))                                        \
         {                                                                                                              \
-            ::duetos::core::LogWithValue(::duetos::core::LogLevel::Trace, (subsys), (msg), (val));                 \
+            ::duetos::core::LogWithValue(::duetos::core::LogLevel::Trace, (subsys), (msg), (val));                     \
         }                                                                                                              \
     } while (0)
 
@@ -288,76 +288,76 @@ void DumpLogRingToFiltered(LogTee writer, LogLevel min_level);
 #define KLOG_METRICS(subsys, label)                                                                                    \
     do                                                                                                                 \
     {                                                                                                                  \
-        ::duetos::core::LogMetrics(::duetos::core::LogLevel::Info, (subsys), (label));                             \
+        ::duetos::core::LogMetrics(::duetos::core::LogLevel::Info, (subsys), (label));                                 \
     } while (0)
 
 #define KLOG_DEBUG(subsys, msg)                                                                                        \
     do                                                                                                                 \
     {                                                                                                                  \
-        ::duetos::core::Log(::duetos::core::LogLevel::Debug, (subsys), (msg));                                     \
+        ::duetos::core::Log(::duetos::core::LogLevel::Debug, (subsys), (msg));                                         \
     } while (0)
 
 #define KLOG_INFO(subsys, msg)                                                                                         \
     do                                                                                                                 \
     {                                                                                                                  \
-        ::duetos::core::Log(::duetos::core::LogLevel::Info, (subsys), (msg));                                      \
+        ::duetos::core::Log(::duetos::core::LogLevel::Info, (subsys), (msg));                                          \
     } while (0)
 
 #define KLOG_WARN(subsys, msg)                                                                                         \
     do                                                                                                                 \
     {                                                                                                                  \
-        ::duetos::core::Log(::duetos::core::LogLevel::Warn, (subsys), (msg));                                      \
+        ::duetos::core::Log(::duetos::core::LogLevel::Warn, (subsys), (msg));                                          \
     } while (0)
 
 #define KLOG_ERROR(subsys, msg)                                                                                        \
     do                                                                                                                 \
     {                                                                                                                  \
-        ::duetos::core::Log(::duetos::core::LogLevel::Error, (subsys), (msg));                                     \
+        ::duetos::core::Log(::duetos::core::LogLevel::Error, (subsys), (msg));                                         \
     } while (0)
 
 // "With value" forms — one u64 appended as hex.
 #define KLOG_INFO_V(subsys, msg, val)                                                                                  \
     do                                                                                                                 \
     {                                                                                                                  \
-        ::duetos::core::LogWithValue(::duetos::core::LogLevel::Info, (subsys), (msg), (val));                      \
+        ::duetos::core::LogWithValue(::duetos::core::LogLevel::Info, (subsys), (msg), (val));                          \
     } while (0)
 
 #define KLOG_WARN_V(subsys, msg, val)                                                                                  \
     do                                                                                                                 \
     {                                                                                                                  \
-        ::duetos::core::LogWithValue(::duetos::core::LogLevel::Warn, (subsys), (msg), (val));                      \
+        ::duetos::core::LogWithValue(::duetos::core::LogLevel::Warn, (subsys), (msg), (val));                          \
     } while (0)
 
 #define KLOG_ERROR_V(subsys, msg, val)                                                                                 \
     do                                                                                                                 \
     {                                                                                                                  \
-        ::duetos::core::LogWithValue(::duetos::core::LogLevel::Error, (subsys), (msg), (val));                     \
+        ::duetos::core::LogWithValue(::duetos::core::LogLevel::Error, (subsys), (msg), (val));                         \
     } while (0)
 
 // "With string" forms — one labelled C-string appended.
 #define KLOG_INFO_S(subsys, msg, label, s)                                                                             \
     do                                                                                                                 \
     {                                                                                                                  \
-        ::duetos::core::LogWithString(::duetos::core::LogLevel::Info, (subsys), (msg), (label), (s));              \
+        ::duetos::core::LogWithString(::duetos::core::LogLevel::Info, (subsys), (msg), (label), (s));                  \
     } while (0)
 
 #define KLOG_WARN_S(subsys, msg, label, s)                                                                             \
     do                                                                                                                 \
     {                                                                                                                  \
-        ::duetos::core::LogWithString(::duetos::core::LogLevel::Warn, (subsys), (msg), (label), (s));              \
+        ::duetos::core::LogWithString(::duetos::core::LogLevel::Warn, (subsys), (msg), (label), (s));                  \
     } while (0)
 
 // "With two values" forms — two labelled u64 values on one line.
 #define KLOG_INFO_2V(subsys, msg, la, a, lb, b)                                                                        \
     do                                                                                                                 \
     {                                                                                                                  \
-        ::duetos::core::LogWith2Values(::duetos::core::LogLevel::Info, (subsys), (msg), (la), (a), (lb), (b));     \
+        ::duetos::core::LogWith2Values(::duetos::core::LogLevel::Info, (subsys), (msg), (la), (a), (lb), (b));         \
     } while (0)
 
 #define KLOG_WARN_2V(subsys, msg, la, a, lb, b)                                                                        \
     do                                                                                                                 \
     {                                                                                                                  \
-        ::duetos::core::LogWith2Values(::duetos::core::LogLevel::Warn, (subsys), (msg), (la), (a), (lb), (b));     \
+        ::duetos::core::LogWith2Values(::duetos::core::LogLevel::Warn, (subsys), (msg), (la), (a), (lb), (b));         \
     } while (0)
 
 // Once-firing variants — each call site emits at most once per boot.
@@ -372,7 +372,7 @@ void DumpLogRingToFiltered(LogTee writer, LogLevel min_level);
         if (!_klog_once)                                                                                               \
         {                                                                                                              \
             _klog_once = true;                                                                                         \
-            ::duetos::core::Log(::duetos::core::LogLevel::Info, (subsys), (msg));                                  \
+            ::duetos::core::Log(::duetos::core::LogLevel::Info, (subsys), (msg));                                      \
         }                                                                                                              \
     } while (0)
 
@@ -383,6 +383,6 @@ void DumpLogRingToFiltered(LogTee writer, LogLevel min_level);
         if (!_klog_once)                                                                                               \
         {                                                                                                              \
             _klog_once = true;                                                                                         \
-            ::duetos::core::Log(::duetos::core::LogLevel::Warn, (subsys), (msg));                                  \
+            ::duetos::core::Log(::duetos::core::LogLevel::Warn, (subsys), (msg));                                      \
         }                                                                                                              \
     } while (0)
