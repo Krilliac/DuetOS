@@ -49,6 +49,14 @@ case "${DLL_NAME}" in
     dxgi)      SYMBOL_NAME=kBinDxgiDllBytes ;;
     user32)    SYMBOL_NAME=kBinUser32DllBytes ;;
     gdi32)     SYMBOL_NAME=kBinGdi32DllBytes ;;
+    ws2_32)    SYMBOL_NAME=kBinWs2_32DllBytes ;;
+    wininet)   SYMBOL_NAME=kBinWininetDllBytes ;;
+    winhttp)   SYMBOL_NAME=kBinWinhttpDllBytes ;;
+    crypt32)   SYMBOL_NAME=kBinCrypt32DllBytes ;;
+    comctl32)  SYMBOL_NAME=kBinComctl32DllBytes ;;
+    comdlg32)  SYMBOL_NAME=kBinComdlg32DllBytes ;;
+    version)   SYMBOL_NAME=kBinVersionDllBytes ;;
+    setupapi)  SYMBOL_NAME=kBinSetupapiDllBytes ;;
     *)         ;; # leave whatever ${DLL_NAME^} produced
 esac
 

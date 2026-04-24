@@ -8,6 +8,9 @@
 #include "../fs/ramfs.h"
 #include "generated_advapi32_dll.h"
 #include "generated_bcrypt_dll.h"
+#include "generated_comctl32_dll.h"
+#include "generated_comdlg32_dll.h"
+#include "generated_crypt32_dll.h"
 #include "generated_customdll.h"
 #include "generated_customdll2.h"
 #include "generated_customdll_test.h"
@@ -27,10 +30,15 @@
 #include "generated_psapi_dll.h"
 #include "generated_shell32_dll.h"
 #include "generated_shlwapi_dll.h"
+#include "generated_setupapi_dll.h"
 #include "generated_ucrtbase_dll.h"
 #include "generated_user32_dll.h"
 #include "generated_vcruntime140_dll.h"
+#include "generated_version_dll.h"
+#include "generated_winhttp_dll.h"
+#include "generated_wininet_dll.h"
 #include "generated_winmm_dll.h"
+#include "generated_ws2_32_dll.h"
 #include "generated_hello_pe.h"
 #include "generated_hello_winapi.h"
 #include "generated_syscall_stress.h"
@@ -1990,6 +1998,18 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         {"dxgi.dll", fs::generated::kBinDxgiDllBytes, fs::generated::kBinDxgiDllBytes_len},
         {"user32.dll", fs::generated::kBinUser32DllBytes, fs::generated::kBinUser32DllBytes_len},
         {"gdi32.dll", fs::generated::kBinGdi32DllBytes, fs::generated::kBinGdi32DllBytes_len},
+        // Stage-2 slice 31: networking / crypto / common UI /
+        // version / setup. All stubs — real Windows programs
+        // that import these typically check returns and
+        // gracefully fall back.
+        {"ws2_32.dll", fs::generated::kBinWs2_32DllBytes, fs::generated::kBinWs2_32DllBytes_len},
+        {"wininet.dll", fs::generated::kBinWininetDllBytes, fs::generated::kBinWininetDllBytes_len},
+        {"winhttp.dll", fs::generated::kBinWinhttpDllBytes, fs::generated::kBinWinhttpDllBytes_len},
+        {"crypt32.dll", fs::generated::kBinCrypt32DllBytes, fs::generated::kBinCrypt32DllBytes_len},
+        {"comctl32.dll", fs::generated::kBinComctl32DllBytes, fs::generated::kBinComctl32DllBytes_len},
+        {"comdlg32.dll", fs::generated::kBinComdlg32DllBytes, fs::generated::kBinComdlg32DllBytes_len},
+        {"version.dll", fs::generated::kBinVersionDllBytes, fs::generated::kBinVersionDllBytes_len},
+        {"setupapi.dll", fs::generated::kBinSetupapiDllBytes, fs::generated::kBinSetupapiDllBytes_len},
     };
     constexpr u64 kPreloadEntryCount = sizeof(preload_set) / sizeof(preload_set[0]);
     static_assert(kPreloadEntryCount <= kPreloadSlotCap, "Preload DLL list exceeds stack-local cap");
