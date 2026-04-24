@@ -1243,22 +1243,30 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
     }
 
     // 5. If imports are present, stand up the per-process
-    //    Win32 stubs page + resolve every IAT entry.
+    //    Win32 stubs region + resolve every IAT entry.
+    //
+    // The stub byte table has outgrown a single 4 KiB page (render
+    // work: filled Rectangle/Ellipse + UTF-16 paint + message loop
+    // etc.), so we now allocate two contiguous frames and map both
+    // R-X. `Win32StubsPopulate` writes the full `sizeof(kStubsBytes)`
+    // into the direct-map window; any trailing bytes in the second
+    // page beyond the stub table stay zeroed from the pre-clear.
     if (ps == PeStatus::ImportsPresent)
     {
-        const PhysAddr stubs_frame = AllocateFrame();
+        const PhysAddr stubs_frame = AllocateContiguousFrames(2);
         if (stubs_frame == kNullFrame)
         {
-            SerialWrite("[pe-load] FAIL stubs frame alloc\n");
+            SerialWrite("[pe-load] FAIL stubs frames alloc (need 2)\n");
             return r;
         }
         auto* stubs_direct = static_cast<u8*>(PhysToVirt(stubs_frame));
-        for (u64 i = 0; i < kPageSize; ++i)
+        for (u64 i = 0; i < 2 * kPageSize; ++i)
             stubs_direct[i] = 0;
         win32::Win32StubsPopulate(stubs_direct);
-        // R-X: no kPageWritable (W^X), no kPageNoExecute. The
-        // AS layer enforces W^X and will panic if both are set.
+        // R-X on both pages: no kPageWritable (W^X), no kPageNoExecute.
         AddressSpaceMapUserPage(as, win32::kWin32StubsVa, stubs_frame, kPagePresent | kPageUser);
+        AddressSpaceMapUserPage(as, win32::kWin32StubsVa + kPageSize, stubs_frame + kPageSize,
+                                kPagePresent | kPageUser);
 
         if (!ResolveImports(file, file_len, h, as, preloaded_dlls, preloaded_dll_count))
         {

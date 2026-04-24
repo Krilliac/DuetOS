@@ -68,6 +68,7 @@ struct MemDC
     bool alive;
     u64 selected_bitmap; // HBITMAP handle (with tag) or 0 = none
     u64 selected_pen;    // HPEN handle (with tag) or 0 = use BLACK_PEN implicitly
+    u64 selected_brush;  // HBRUSH handle (with tag) or 0 = use WHITE_BRUSH implicitly
     u32 text_color;      // 0x00RRGGBB (unpacked from COLORREF on set)
     u32 bk_color;        // 0x00RRGGBB
     u8 bk_mode;          // kBkModeTransparent (default) or kBkModeOpaque
@@ -179,6 +180,7 @@ struct WindowDcState
     u32 bk_color;
     u8 bk_mode;
     u64 selected_pen;
+    u64 selected_brush;
     i32 cur_x;
     i32 cur_y;
 };
@@ -212,5 +214,19 @@ void DoGdiSetBkMode(arch::TrapFrame* frame);
 void DoGdiCreatePen(arch::TrapFrame* frame);
 void DoGdiMoveToEx(arch::TrapFrame* frame);
 void DoGdiLineTo(arch::TrapFrame* frame);
+void DoGdiRectangleFilled(arch::TrapFrame* frame);
+void DoGdiEllipseFilled(arch::TrapFrame* frame);
+void DoGdiPatBlt(arch::TrapFrame* frame);
+void DoGdiGetSysColor(arch::TrapFrame* frame);
+void DoGdiGetSysColorBrush(arch::TrapFrame* frame);
+
+// System palette — Win32 COLOR_* indices 0..30. Returns a
+// Classic-theme COLORREF or 0x00C0C0C0 for unknown indices.
+u32 GdiSysColor(u32 index);
+
+/// HBRUSH for a sys-colour index. Pre-allocated at GdiInit time
+/// and shared across processes (stock-like semantics — the
+/// handle is never freed even if DeleteObject is called on it).
+u64 GdiSysColorBrush(u32 index);
 
 } // namespace duetos::subsystems::win32

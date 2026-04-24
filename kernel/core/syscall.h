@@ -1076,6 +1076,48 @@ enum SyscallNumber : u64
     //         only in v0.
     SYS_GDI_DRAW_TEXT_USER = 121,
 
+    // SYS_GDI_RECTANGLE_FILLED — fill + outline a rect using the
+    // DC's currently-selected brush (fill) + pen (outline).
+    //   rdi = HDC, rsi = x, rdx = y, r10 = w, r8 = h.
+    //   rax = 1 / 0. v0: window path records two display-list
+    //   primitives (FillRect + Rectangle); memDC path paints
+    //   bitmap + draws four Bresenham edges.
+    SYS_GDI_RECTANGLE_FILLED = 122,
+
+    // SYS_GDI_ELLIPSE_FILLED — Win32 Ellipse. Same arg shape as
+    // SYS_GDI_RECTANGLE_FILLED. v0: memDC path fills via
+    // bounding-box ellipse scan (integer math, no sqrt); window
+    // path records the outline only (filled-ellipse display-list
+    // prim is a future slice).
+    SYS_GDI_ELLIPSE_FILLED = 123,
+
+    // SYS_GDI_PAT_BLT — fill a rect with the DC's current brush.
+    // ROP is ignored in v0 (treated as PATCOPY).
+    //   rdi = HDC, rsi = x, rdx = y, r10 = w, r8 = h.
+    SYS_GDI_PAT_BLT = 124,
+
+    // SYS_GDI_TEXT_OUT_W — UTF-16 sibling of SYS_GDI_TEXT_OUT.
+    // Same arg shape; `r8` is the length in wchar_t units (not
+    // bytes). Kernel copies in, strips each u16 to ASCII (> 0x7F
+    // becomes '?'), then feeds the ASCII path.
+    SYS_GDI_TEXT_OUT_W = 125,
+
+    // SYS_GDI_DRAW_TEXT_W — UTF-16 sibling of SYS_GDI_DRAW_TEXT_USER.
+    // Same shape; `rdx` (len) is in wchar_ts (-1 = NUL-terminated).
+    SYS_GDI_DRAW_TEXT_W = 126,
+
+    // SYS_GDI_GET_SYS_COLOR — Win32 GetSysColor.
+    //   rdi = nIndex (COLOR_WINDOW=5, COLOR_BTNFACE=15, etc.)
+    //   rax = COLORREF for that palette slot, or 0x00C0C0C0
+    //         (classic grey) for unknown indices.
+    SYS_GDI_GET_SYS_COLOR = 127,
+
+    // SYS_GDI_GET_SYS_COLOR_BRUSH — Win32 GetSysColorBrush.
+    //   rdi = nIndex. rax = HBRUSH pre-registered at boot time
+    //         for the matching colour, or 0 for unknown indices.
+    // Never needs DeleteObject (stock-like — app must not free).
+    SYS_GDI_GET_SYS_COLOR_BRUSH = 128,
+
     // SYS_GDI_BITBLT_DC — Win32 BitBlt (9-arg). `rdi` points at a
     // user-stack-resident struct of 9 u64 slots in this order:
     //   +0x00  HDC   hdcDst

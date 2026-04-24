@@ -769,6 +769,84 @@ void DoGdiTextOut(arch::TrapFrame* frame)
     frame->rax = ok ? 1 : 0;
 }
 
+void DoGdiTextOutW(arch::TrapFrame* frame)
+{
+    using namespace duetos::drivers::video;
+
+    duetos::core::Process* proc = duetos::core::CurrentProcess();
+    if (proc == nullptr)
+    {
+        frame->rax = 0;
+        return;
+    }
+    // UTF-16 copy-in + high-byte strip. Each wchar_t (u16) becomes
+    // one char. Non-ASCII (> 0x7F) falls back to '?' so the glyph
+    // lookup gets a valid placeholder.
+    char text[kWinTextOutMax + 1];
+    for (u32 i = 0; i < sizeof(text); ++i)
+        text[i] = '\0';
+    const u64 user_text = frame->r10;
+    const u64 user_len_wchars = frame->r8;
+    if (user_text != 0 && user_len_wchars > 0)
+    {
+        const u64 clamp = (user_len_wchars > kWinTextOutMax) ? kWinTextOutMax : user_len_wchars;
+        // Copy the UTF-16 source into a small on-stack buffer, then
+        // walk it byte-by-byte to produce ASCII. Stack-bounce is
+        // kWinTextOutMax * 2 = 96 bytes at kWinTextOutMax=47.
+        u16 wbuf[kWinTextOutMax];
+        if (!duetos::mm::CopyFromUser(wbuf, reinterpret_cast<const void*>(user_text), clamp * 2))
+        {
+            frame->rax = 0;
+            return;
+        }
+        for (u64 i = 0; i < clamp; ++i)
+        {
+            const u16 wc = wbuf[i];
+            text[i] = (wc < 0x80) ? static_cast<char>(wc) : '?';
+        }
+        text[clamp] = '\0';
+    }
+    // Dispatch — identical to DoGdiTextOut from here on.
+    const i32 x = static_cast<i32>(frame->rsi);
+    const i32 y = static_cast<i32>(frame->rdx);
+    const u32 rgb = ColorRefToRgb(frame->r9);
+    const u64 hdc = frame->rdi;
+    const u64 tag = hdc & kGdiTagMask;
+    bool ok = false;
+    if (tag == kGdiTagMemDC)
+    {
+        MemDC* dc = GdiLookupMemDC(hdc);
+        if (dc != nullptr && dc->selected_bitmap != 0)
+        {
+            Bitmap* bmp = GdiLookupBitmap(dc->selected_bitmap);
+            if (bmp != nullptr)
+            {
+                const bool opaque = (dc->bk_mode == kBkModeOpaque);
+                GdiPaintTextOnBitmap(bmp, x, y, text, dc->text_color, dc->bk_color, opaque);
+                ok = true;
+            }
+        }
+    }
+    else
+    {
+        u32 paint_rgb = rgb;
+        WindowDcState* s = GdiWindowDcState(static_cast<u32>(hdc));
+        if (s != nullptr && s->text_color != 0)
+            paint_rgb = s->text_color;
+        CompositorLock();
+        const u32 h_comp = HwndToCompositorHandleForCaller(hdc, proc->pid);
+        if (h_comp != kWindowInvalid)
+        {
+            WindowClientTextOut(h_comp, x, y, text, paint_rgb);
+            const Theme& theme = ThemeCurrent();
+            DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+            ok = true;
+        }
+        CompositorUnlock();
+    }
+    frame->rax = ok ? 1 : 0;
+}
+
 void DoGdiClear(arch::TrapFrame* frame)
 {
     using namespace duetos::drivers::video;
@@ -1488,81 +1566,32 @@ constexpr u32 kDtVCenter = 0x00000004;
 constexpr u32 kDtSingleLine = 0x00000020;
 } // namespace
 
-void DoGdiDrawText(arch::TrapFrame* frame)
+// Shared core for DrawTextA / DrawTextW after the source text has
+// been copied in + decoded to ASCII. `copy_len` is the ASCII
+// length (not counting NUL). Returns the painted text height
+// (in px) on success, 0 on failure — same contract as Win32
+// DrawText's return value.
+static u64 DrawTextAsciiOnDc(u64 hdc, const char* text, u64 copy_len, u64 user_rect, u32 format,
+                             duetos::core::Process* proc)
 {
     using namespace duetos::drivers::video;
 
-    duetos::core::Process* proc = duetos::core::CurrentProcess();
-    if (proc == nullptr)
-    {
-        frame->rax = 0;
-        return;
-    }
-    const u64 hdc = frame->rdi;
-    const u64 user_text = frame->rsi;
-    const i64 len_in = static_cast<i64>(frame->rdx);
-    const u64 user_rect = frame->r10;
-    const u32 format = static_cast<u32>(frame->r8);
-    if (user_text == 0 || user_rect == 0)
-    {
-        frame->rax = 0;
-        return;
-    }
-
-    // Bounded string copy. The 8x8 font + single-line scope makes
-    // 127 characters plenty (~1016 px wide at 8 px/glyph).
-    constexpr u64 kDrawTextMax = 127;
-    char text[kDrawTextMax + 1];
-    for (u32 i = 0; i < sizeof(text); ++i)
-        text[i] = '\0';
-    u64 copy_len = (len_in < 0) ? kDrawTextMax : static_cast<u64>(len_in);
-    if (copy_len > kDrawTextMax)
-        copy_len = kDrawTextMax;
-    if (!duetos::mm::CopyFromUser(text, reinterpret_cast<const void*>(user_text), copy_len))
-    {
-        frame->rax = 0;
-        return;
-    }
-    text[copy_len] = '\0';
-    // NUL-terminate early if len_in was -1 and the user string is
-    // shorter than copy_len.
-    if (len_in < 0)
-    {
-        for (u64 i = 0; i < copy_len; ++i)
-        {
-            if (text[i] == '\0')
-            {
-                copy_len = i;
-                break;
-            }
-        }
-    }
-
     i32 rect[4] = {0, 0, 0, 0};
     if (!duetos::mm::CopyFromUser(rect, reinterpret_cast<const void*>(user_rect), sizeof(rect)))
-    {
-        frame->rax = 0;
-        return;
-    }
+        return 0;
     const i32 rx = rect[0];
     const i32 ry = rect[1];
     const i32 rr = rect[2];
     const i32 rb = rect[3];
     if (rr <= rx || rb <= ry)
-    {
-        frame->rax = 0;
-        return;
-    }
+        return 0;
     const i32 rw = rr - rx;
     const i32 rh = rb - ry;
 
-    // Measure the text — 8 px per glyph, no kerning / no proportional
-    // font, so width is just length × 8.
     const i32 text_w = static_cast<i32>(copy_len) * 8;
     const i32 text_h = 8;
-    (void)kDtSingleLine; // single-line is the only shape v0 supports
+    (void)kDtSingleLine;
 
-    // Compute paint origin.
     i32 px = rx;
     i32 py = ry;
     if (format & kDtCenter)
@@ -1570,11 +1599,10 @@ void DoGdiDrawText(arch::TrapFrame* frame)
     else if (format & kDtRight)
         px = rr - text_w;
     else
-        (void)kDtLeft; // default: left
+        (void)kDtLeft;
 
     if (format & kDtVCenter)
         py = ry + (rh - text_h) / 2;
-    // DT_TOP / DT_BOTTOM default to top in v0.
 
     const u64 tag = hdc & kGdiTagMask;
     bool ok = false;
@@ -1594,7 +1622,7 @@ void DoGdiDrawText(arch::TrapFrame* frame)
     }
     else if (tag == 0)
     {
-        u32 fg = 0x00FFFFFF; // fallback for window HDCs without state
+        u32 fg = 0x00FFFFFF;
         WindowDcState* s = GdiWindowDcState(static_cast<u32>(hdc));
         if (s != nullptr && s->text_color != 0)
             fg = s->text_color;
@@ -1609,7 +1637,100 @@ void DoGdiDrawText(arch::TrapFrame* frame)
         }
         CompositorUnlock();
     }
-    frame->rax = ok ? static_cast<u64>(text_h) : 0;
+    return ok ? static_cast<u64>(text_h) : 0;
+}
+
+void DoGdiDrawText(arch::TrapFrame* frame)
+{
+    duetos::core::Process* proc = duetos::core::CurrentProcess();
+    if (proc == nullptr)
+    {
+        frame->rax = 0;
+        return;
+    }
+    const u64 hdc = frame->rdi;
+    const u64 user_text = frame->rsi;
+    const i64 len_in = static_cast<i64>(frame->rdx);
+    const u64 user_rect = frame->r10;
+    const u32 format = static_cast<u32>(frame->r8);
+    if (user_text == 0 || user_rect == 0)
+    {
+        frame->rax = 0;
+        return;
+    }
+
+    constexpr u64 kDrawTextMax = 127;
+    char text[kDrawTextMax + 1];
+    for (u32 i = 0; i < sizeof(text); ++i)
+        text[i] = '\0';
+    u64 copy_len = (len_in < 0) ? kDrawTextMax : static_cast<u64>(len_in);
+    if (copy_len > kDrawTextMax)
+        copy_len = kDrawTextMax;
+    if (!duetos::mm::CopyFromUser(text, reinterpret_cast<const void*>(user_text), copy_len))
+    {
+        frame->rax = 0;
+        return;
+    }
+    text[copy_len] = '\0';
+    if (len_in < 0)
+    {
+        for (u64 i = 0; i < copy_len; ++i)
+        {
+            if (text[i] == '\0')
+            {
+                copy_len = i;
+                break;
+            }
+        }
+    }
+    frame->rax = DrawTextAsciiOnDc(hdc, text, copy_len, user_rect, format, proc);
+}
+
+void DoGdiDrawTextW(arch::TrapFrame* frame)
+{
+    duetos::core::Process* proc = duetos::core::CurrentProcess();
+    if (proc == nullptr)
+    {
+        frame->rax = 0;
+        return;
+    }
+    const u64 hdc = frame->rdi;
+    const u64 user_text = frame->rsi;
+    const i64 len_in = static_cast<i64>(frame->rdx);
+    const u64 user_rect = frame->r10;
+    const u32 format = static_cast<u32>(frame->r8);
+    if (user_text == 0 || user_rect == 0)
+    {
+        frame->rax = 0;
+        return;
+    }
+
+    constexpr u64 kDrawTextMax = 127;
+    char text[kDrawTextMax + 1];
+    for (u32 i = 0; i < sizeof(text); ++i)
+        text[i] = '\0';
+    // UTF-16 copy-in + strip to ASCII. Negative `len_in` (-1) means
+    // NUL-terminated — walk the u16 stream until we hit a 0.
+    u64 copy_len = 0;
+    {
+        u16 wbuf[kDrawTextMax];
+        const u64 cap = (len_in < 0) ? kDrawTextMax : static_cast<u64>(len_in);
+        const u64 clamp = (cap > kDrawTextMax) ? kDrawTextMax : cap;
+        if (clamp > 0 && !duetos::mm::CopyFromUser(wbuf, reinterpret_cast<const void*>(user_text), clamp * 2))
+        {
+            frame->rax = 0;
+            return;
+        }
+        for (u64 i = 0; i < clamp; ++i)
+        {
+            const u16 wc = wbuf[i];
+            if (len_in < 0 && wc == 0)
+                break;
+            text[copy_len++] = (wc < 0x80) ? static_cast<char>(wc) : '?';
+        }
+        text[copy_len] = '\0';
+    }
+    frame->rax = DrawTextAsciiOnDc(hdc, text, copy_len, user_rect, format, proc);
 }
 
 void DoWinValidate(arch::TrapFrame* frame)

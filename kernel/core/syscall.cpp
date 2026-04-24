@@ -1490,6 +1490,27 @@ void SyscallDispatch(arch::TrapFrame* frame)
     case SYS_GDI_DRAW_TEXT_USER:
         subsystems::win32::DoGdiDrawText(frame);
         return;
+    case SYS_GDI_RECTANGLE_FILLED:
+        subsystems::win32::DoGdiRectangleFilled(frame);
+        return;
+    case SYS_GDI_ELLIPSE_FILLED:
+        subsystems::win32::DoGdiEllipseFilled(frame);
+        return;
+    case SYS_GDI_PAT_BLT:
+        subsystems::win32::DoGdiPatBlt(frame);
+        return;
+    case SYS_GDI_TEXT_OUT_W:
+        subsystems::win32::DoGdiTextOutW(frame);
+        return;
+    case SYS_GDI_DRAW_TEXT_W:
+        subsystems::win32::DoGdiDrawTextW(frame);
+        return;
+    case SYS_GDI_GET_SYS_COLOR:
+        subsystems::win32::DoGdiGetSysColor(frame);
+        return;
+    case SYS_GDI_GET_SYS_COLOR_BRUSH:
+        subsystems::win32::DoGdiGetSysColorBrush(frame);
+        return;
     case SYS_GDI_SET_TEXT_COLOR:
         subsystems::win32::DoGdiSetTextColor(frame);
         return;

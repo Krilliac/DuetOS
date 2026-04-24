@@ -68,6 +68,8 @@ void DoGdiSetPixel(arch::TrapFrame* frame);
 void DoGdiBitBlt(arch::TrapFrame* frame);
 void DoGdiFillRectUser(arch::TrapFrame* frame);
 void DoGdiDrawText(arch::TrapFrame* frame);
+void DoGdiTextOutW(arch::TrapFrame* frame);
+void DoGdiDrawTextW(arch::TrapFrame* frame);
 void DoWinBeginPaint(arch::TrapFrame* frame);
 void DoWinEndPaint(arch::TrapFrame* frame);
 
