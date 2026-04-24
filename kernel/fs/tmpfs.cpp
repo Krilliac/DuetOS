@@ -1,5 +1,6 @@
 #include "tmpfs.h"
 
+#include "../arch/x86_64/serial.h"
 #include "../core/klog.h"
 
 namespace duetos::fs
@@ -209,6 +210,216 @@ void TmpFsEnumerate(TmpFsEnumCb cb, void* cookie)
         {
             cb(g_slots[i].name, g_slots[i].length, cookie);
         }
+    }
+}
+
+void TmpFsSelfTest()
+{
+    using duetos::arch::SerialWrite;
+
+    // Walk every slot once, recording which slots were already
+    // live before we ran so we can leave them untouched. The
+    // self-test is intended to run at boot before the shell /
+    // pipe path start populating tmpfs, but a stale slot from
+    // a repeated self-test call shouldn't wedge the system.
+    bool pre_in_use[kTmpFsSlotCount];
+    u32 pre_live = 0;
+    for (u32 i = 0; i < kTmpFsSlotCount; ++i)
+    {
+        pre_in_use[i] = g_slots[i].in_use;
+        if (g_slots[i].in_use)
+        {
+            ++pre_live;
+        }
+    }
+
+    bool pass = true;
+    u32 failed_step = 0;
+    auto mark_fail = [&](u32 step)
+    {
+        if (pass)
+        {
+            pass = false;
+            failed_step = step;
+        }
+    };
+
+    // A stable set of names owned by this test. Chosen to not
+    // collide with any well-known boot-time tmpfs user ("__pipe__").
+    const char* const kNameA = "__selftest_a";
+    const char* const kNameB = "__selftest_b";
+    const char* kNameC = "__selftest_c";
+
+    const char* out_bytes = nullptr;
+    u32 out_len = 0;
+
+    // 1. Touch on a fresh name creates an empty file.
+    if (!TmpFsTouch(kNameA))
+        mark_fail(1);
+    if (pass && (!TmpFsRead(kNameA, &out_bytes, &out_len) || out_len != 0))
+        mark_fail(1);
+
+    // 2. Touch on an existing name is a no-op success.
+    if (pass && !TmpFsTouch(kNameA))
+        mark_fail(2);
+
+    // 3. Write overwrites and sets length.
+    if (pass)
+    {
+        const char payload[] = "hello";
+        if (!TmpFsWrite(kNameA, payload, 5))
+            mark_fail(3);
+        if (pass &&
+            (!TmpFsRead(kNameA, &out_bytes, &out_len) || out_len != 5 || out_bytes[0] != 'h' || out_bytes[4] != 'o'))
+            mark_fail(3);
+    }
+
+    // 4. Append grows length and preserves the prefix.
+    if (pass)
+    {
+        const char payload[] = "!world";
+        if (!TmpFsAppend(kNameA, payload, 6))
+            mark_fail(4);
+        if (pass && (!TmpFsRead(kNameA, &out_bytes, &out_len) || out_len != 11 || out_bytes[5] != '!'))
+            mark_fail(4);
+    }
+
+    // 5. Append truncates at kTmpFsContentMax and reports bytes_written>0
+    // on partial writes; a fully-full file refuses further appends.
+    if (pass)
+    {
+        if (!TmpFsWrite(kNameB, nullptr, 0))
+            mark_fail(5);
+        // Fill to cap in large chunks of a single byte pattern.
+        char chunk[128];
+        for (u32 i = 0; i < sizeof(chunk); ++i)
+            chunk[i] = 'x';
+        u32 filled = 0;
+        while (filled < kTmpFsContentMax)
+        {
+            u32 want = kTmpFsContentMax - filled;
+            if (want > sizeof(chunk))
+                want = sizeof(chunk);
+            if (!TmpFsAppend(kNameB, chunk, want))
+            {
+                mark_fail(5);
+                break;
+            }
+            filled += want;
+        }
+        if (pass && (!TmpFsRead(kNameB, &out_bytes, &out_len) || out_len != kTmpFsContentMax))
+            mark_fail(5);
+        // Further append should return false (zero bytes written).
+        if (pass && TmpFsAppend(kNameB, "overflow", 8))
+            mark_fail(5);
+    }
+
+    // 6. Oversized Write truncates to the cap.
+    if (pass)
+    {
+        // Use a stack-cap chunk sized so it doesn't blow the
+        // kernel boot stack: kTmpFsContentMax is 512 bytes.
+        char oversized[kTmpFsContentMax + 16];
+        for (u32 i = 0; i < sizeof(oversized); ++i)
+            oversized[i] = 'z';
+        if (!TmpFsWrite(kNameC, oversized, sizeof(oversized)))
+            mark_fail(6);
+        if (pass && (!TmpFsRead(kNameC, &out_bytes, &out_len) || out_len != kTmpFsContentMax))
+            mark_fail(6);
+    }
+
+    // 7. Enumerate sees each of our three files + whatever was
+    // there pre-test. Use a small context cookie that counts
+    // hits for the three known names.
+    if (pass)
+    {
+        struct Ctx
+        {
+            const char* a;
+            const char* b;
+            const char* c;
+            u32 hits_a;
+            u32 hits_b;
+            u32 hits_c;
+            u32 total;
+        };
+        Ctx ctx = {kNameA, kNameB, kNameC, 0, 0, 0, 0};
+        auto cb = [](const char* name, u32 /*len*/, void* cookie_v)
+        {
+            auto* c = static_cast<Ctx*>(cookie_v);
+            ++c->total;
+            if (NameEq(name, c->a))
+                ++c->hits_a;
+            if (NameEq(name, c->b))
+                ++c->hits_b;
+            if (NameEq(name, c->c))
+                ++c->hits_c;
+        };
+        TmpFsEnumerate(cb, &ctx);
+        if (ctx.hits_a != 1 || ctx.hits_b != 1 || ctx.hits_c != 1 || ctx.total != pre_live + 3)
+            mark_fail(7);
+    }
+
+    // 8. Unlink removes the file; subsequent Read fails.
+    if (pass)
+    {
+        if (!TmpFsUnlink(kNameA))
+            mark_fail(8);
+        if (pass && TmpFsRead(kNameA, nullptr, nullptr))
+            mark_fail(8);
+        // Double-unlink reports false.
+        if (pass && TmpFsUnlink(kNameA))
+            mark_fail(8);
+    }
+
+    // 9. Name validation — empty / slash / whitespace / null
+    // are all rejected.
+    if (pass)
+    {
+        if (TmpFsTouch("") || TmpFsTouch("a/b") || TmpFsTouch("with space") || TmpFsTouch(nullptr))
+            mark_fail(9);
+    }
+
+    // Clean up our two remaining test files so pre_in_use ==
+    // post state.
+    TmpFsUnlink(kNameB);
+    TmpFsUnlink(kNameC);
+
+    // 10. Post-condition: no additional slots should be live.
+    if (pass)
+    {
+        u32 post_live = 0;
+        for (u32 i = 0; i < kTmpFsSlotCount; ++i)
+        {
+            if (g_slots[i].in_use)
+                ++post_live;
+        }
+        if (post_live != pre_live)
+            mark_fail(10);
+        // Every pre-existing slot must still be in use.
+        for (u32 i = 0; i < kTmpFsSlotCount && pass; ++i)
+        {
+            if (pre_in_use[i] && !g_slots[i].in_use)
+                mark_fail(10);
+        }
+    }
+
+    if (pass)
+    {
+        SerialWrite("[tmpfs] self-test OK (touch+write+append+read+enum+unlink+validate)\n");
+    }
+    else
+    {
+        char msg[64] = "[tmpfs] self-test FAILED at step ";
+        u32 o = 33;
+        if (failed_step >= 10)
+        {
+            msg[o++] = static_cast<char>('0' + (failed_step / 10));
+        }
+        msg[o++] = static_cast<char>('0' + (failed_step % 10));
+        msg[o++] = '\n';
+        msg[o] = '\0';
+        SerialWrite(msg);
     }
 }
 

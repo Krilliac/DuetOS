@@ -1,5 +1,6 @@
 #include "theme.h"
 
+#include "../../arch/x86_64/serial.h"
 #include "console.h"
 #include "cursor.h"
 #include "taskbar.h"
@@ -91,6 +92,54 @@ constexpr Theme kClassic = {
     .console_bg = 0x00181028,
 };
 
+// Amber is a deliberate retro exercise — a single-hue amber palette
+// inspired by 1980s IBM / Wyse monochrome terminals. Every surface
+// is a shade of warm amber on near-black, with the brightest hues
+// reserved for the focus points (taskbar accent, banner, console
+// ink, Notes title). Useful both as a distinctive third option and
+// as a stress test for the theme system: anything that hard-coded a
+// multi-hue assumption (e.g. "title must contrast with client") will
+// break visibly here first.
+constexpr Theme kAmber = {
+    .name = "amber",
+
+    .desktop_bg = 0x000A0500,
+    .banner_fg = 0x00FFB040,
+
+    .taskbar_bg = 0x00140A00,
+    .taskbar_fg = 0x00E09030,
+    .taskbar_accent = 0x00FF9020,
+    .taskbar_tab_inactive = 0x001A1004,
+    .taskbar_border = 0x00402010,
+
+    .window_border = 0x00603018,
+    .window_close = 0x00E05020, // amber-red — still distinguishable as "close"
+
+    .role_title =
+        {
+            0x00804020, // Calculator
+            0x00A06830, // Notes — brightest title; the focus app
+            0x00703018, // TaskManager
+            0x00502010, // LogView
+            0x00805030, // Files
+            0x00402010, // Clock
+            0x00A06030, // GfxDemo
+        },
+    .role_client =
+        {
+            0x00100800, // Calculator
+            0x001A0E00, // Notes — slightly lifted so amber ink reads
+            0x00100800, // TaskManager
+            0x00080400, // LogView — deepest so amber log colours pop
+            0x00100800, // Files
+            0x00050200, // Clock — near-black ground for "LEDs"
+            0x00000000, // GfxDemo — black; overpainted every frame
+        },
+
+    .console_fg = 0x00FFA830,
+    .console_bg = 0x00080400,
+};
+
 constexpr Theme kSlate10 = {
     .name = "slate10",
 
@@ -144,6 +193,7 @@ constexpr Theme kSlate10 = {
 const Theme* const kThemes[static_cast<u32>(ThemeId::kCount)] = {
     &kClassic,
     &kSlate10,
+    &kAmber,
 };
 
 // ---------------------------------------------------------------
@@ -234,6 +284,113 @@ void ThemeApplyToAll()
     TaskbarSetColours(t.taskbar_bg, t.taskbar_fg, t.taskbar_accent, t.taskbar_tab_inactive, t.taskbar_border);
     ConsoleSetColours(t.console_fg, t.console_bg);
     CursorSetDesktopBackground(t.desktop_bg);
+}
+
+void ThemeSelfTest()
+{
+    using duetos::arch::SerialWrite;
+
+    const ThemeId saved = g_current;
+    bool pass = true;
+    u32 failed_step = 0;
+    auto mark_fail = [&](u32 step)
+    {
+        if (pass)
+        {
+            pass = false;
+            failed_step = step;
+        }
+    };
+
+    // 1. Every id maps to a non-null Theme with a non-null name.
+    for (u32 i = 0; i < static_cast<u32>(ThemeId::kCount); ++i)
+    {
+        if (kThemes[i] == nullptr)
+        {
+            mark_fail(1);
+            break;
+        }
+        if (kThemes[i]->name == nullptr || kThemes[i]->name[0] == '\0')
+        {
+            mark_fail(1);
+            break;
+        }
+    }
+
+    // 2. ThemeIdName is in-range for every id and returns the
+    // matching palette's .name.
+    if (pass)
+    {
+        for (u32 i = 0; i < static_cast<u32>(ThemeId::kCount); ++i)
+        {
+            const auto id = static_cast<ThemeId>(i);
+            const char* n = ThemeIdName(id);
+            if (n == nullptr || !StrEqCi(n, kThemes[i]->name))
+            {
+                mark_fail(2);
+                break;
+            }
+        }
+    }
+
+    // 3. ThemeIdFromName round-trips every registered name.
+    if (pass)
+    {
+        for (u32 i = 0; i < static_cast<u32>(ThemeId::kCount); ++i)
+        {
+            ThemeId got = ThemeId::Classic;
+            if (!ThemeIdFromName(kThemes[i]->name, &got) || static_cast<u32>(got) != i)
+            {
+                mark_fail(3);
+                break;
+            }
+        }
+    }
+
+    // 4. ThemeIdFromName rejects unknown strings.
+    if (pass)
+    {
+        ThemeId dummy = ThemeId::Classic;
+        if (ThemeIdFromName("not-a-theme", &dummy) || ThemeIdFromName(nullptr, &dummy))
+        {
+            mark_fail(4);
+        }
+    }
+
+    // 5. ThemeCycle visits every id exactly once over kCount
+    // calls, returning to the starting point. Use a bit-mask
+    // to detect duplicates or missed ids.
+    if (pass)
+    {
+        g_current = ThemeId::Classic;
+        u32 seen = 0;
+        for (u32 i = 0; i < static_cast<u32>(ThemeId::kCount); ++i)
+        {
+            seen |= (1u << static_cast<u32>(g_current));
+            ThemeCycle();
+        }
+        const u32 expected = (1u << static_cast<u32>(ThemeId::kCount)) - 1u;
+        if (seen != expected || g_current != ThemeId::Classic)
+        {
+            mark_fail(5);
+        }
+    }
+
+    g_current = saved;
+
+    if (pass)
+    {
+        SerialWrite("[theme] self-test OK (palette table + name round-trip + cycle)\n");
+    }
+    else
+    {
+        char msg[64] = "[theme] self-test FAILED at step ";
+        u32 o = 33;
+        msg[o++] = static_cast<char>('0' + (failed_step % 10));
+        msg[o++] = '\n';
+        msg[o] = '\0';
+        SerialWrite(msg);
+    }
 }
 
 } // namespace duetos::drivers::video

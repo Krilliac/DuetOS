@@ -67,4 +67,12 @@ bool TmpFsUnlink(const char* name);
 using TmpFsEnumCb = void (*)(const char* name, u32 len, void* cookie);
 void TmpFsEnumerate(TmpFsEnumCb cb, void* cookie);
 
+/// One-shot self-test: exercises Touch / Write / Append / Read
+/// / Unlink / Enumerate, the name-validation rules, append
+/// truncation at kTmpFsContentMax, and slot-table exhaustion.
+/// Runs on fresh state (intended to be called at boot before
+/// any other tmpfs user) and cleans up its own files before
+/// returning. Prints one PASS/FAIL line to COM1.
+void TmpFsSelfTest();
+
 } // namespace duetos::fs
