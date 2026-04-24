@@ -1,6 +1,6 @@
 # PE EAT parser + DLL loader — stage 2 kickoff
 
-**Type:** Observation · **Status:** Active (stage-2 slices 1-23 landed; ~99% of flat stubs retired) · **Last updated:** 2026-04-24
+**Type:** Observation · **Status:** Active (stage-2 slices 1-29 landed; 15 userland DLLs shipped, ~317 flat-stub rows retired) · **Last updated:** 2026-04-24
 
 ## Context
 
@@ -1072,6 +1072,83 @@ specialised):
 
 A real `msvcp140.dll` + `dbghelp.dll` would take another few
 slices. SEH is a multi-slice undertaking on its own.
+
+## Slices 24-29 — extend to 15 userland DLLs
+
+The retirement wave continued past kernel32 + CRT into the
+full Win32 userland surface. By slice 29 the preload set
+covers 24 DLL slots (some are fixtures / forwarders).
+
+### Full DLL inventory (15 userland DLLs)
+
+| Slice | DLL | Base VA | Exports | Role |
+|-------|-----|---------|---------|------|
+| 10-23 | kernel32.dll | `0x10020000` | 123 | Process/thread/sync/I/O/VM/locale/time/Interlocked/CS/SRW/InitOnce |
+| 13 | vcruntime140.dll | `0x10030000` | 3 | memset/memcpy/memmove |
+| 14 | msvcrt.dll | `0x10040000` | 8 | strlen/strcmp/strcpy/strchr + wide |
+| 15 | ucrtbase.dll | `0x10050000` | 25 | Heap, exit, CRT startup, conversions |
+| 24 | ntdll.dll | `0x10060000` | 108 | Nt\* + Zw\* + Rtl\* + Ldr\* + __chkstk |
+| 25 | dbghelp.dll | `0x10070000` | 11 | Sym\*, StackWalk, MiniDumpWriteDump |
+| 26 | msvcp140.dll | `0x10080000` | 17 | C++ std throw + ostream helpers |
+| 27 | kernelbase.dll | `0x10090000` | 44 | Forwarders to kernel32 |
+| 27 | advapi32.dll | `0x100A0000` | 25 | Reg\* / token / GetUserName / RtlGenRandom |
+| 28 | shlwapi.dll | `0x100B0000` | 16 | Path\* / Str\* string helpers |
+| 28 | shell32.dll | `0x100C0000` | 13 | Shell/CommandLine/Extract/Open |
+| 28 | ole32.dll | `0x100D0000` | 15 | CoInit + CoTaskMem heap aliases |
+| 28 | oleaut32.dll | `0x100E0000` | 5 | BSTR (real) + VARIANT zeroing |
+| 28 | winmm.dll | `0x100F0000` | 8 | Timer + audio stubs |
+| 28 | bcrypt.dll | `0x10100000` | 8 | CNG stubs + deterministic RNG |
+| 28 | psapi.dll | `0x10110000` | 7 | Process/module enumeration |
+| 29 | d3d9/11/12.dll | `0x10120/130/140` | 2/2/3 | DirectX — E_NOTIMPL |
+| 29 | dxgi.dll | `0x10150000` | 3 | DXGI factory — E_NOTIMPL |
+| 29 | user32.dll | `0x10160000` | 73 | Window manager — no-op stubs |
+| 29 | gdi32.dll | `0x10180000` | 44 | GDI — no-op stubs |
+
+**Total: ~560 exports across 15 userland DLLs.** Plus the 2
+test fixtures (customdll.dll, customdll2.dll).
+
+Per-spawn frame cost: ~72 frames per Win32-imports PE — well
+within `kFrameBudgetTrusted`'s 256.
+
+### New patterns from slices 24-29
+
+- **Cross-DLL forwarders** (slice 27 kernelbase.dll) —
+  proved the slice-8 chaser works on real 44-entry forwarder
+  tables. `.def` syntax `Name = targetdll.TargetName`
+  generates forwarder RVAs pointing back into the export
+  directory.
+- **Mangled C++ name exports** (slice 26 msvcp140.dll) — use
+  `.def` file with `Exported = InternalName` aliasing so the
+  C source carries plain identifiers; lld-link puts the
+  mangled name in the export table.
+- **Same-DLL forwarders** (slice 24 ntdll.dll Zw* aliases) —
+  `/export:ZwXxx=NtXxx` on the lld-link cmdline. One function,
+  two export names.
+- **Centralised NOT_IMPL sink** — a single `NtReturnNotImpl`
+  function with ~42 exports aliasing to it. Cheap way to
+  retire big STATUS_NOT_IMPLEMENTED batches without writing
+  42 copies.
+- **Generic stub-DLL builder** (`tools/build-stub-dll.sh`) —
+  takes (name, base VA, comma-separated exports) + a
+  per-DLL C source. Slices 28-29 shipped 13 DLLs through
+  this one helper.
+
+### What remains on the flat stubs
+
+After slice 29, `kStubsTable` still has rows for:
+
+- **SEH unwind** — `__C_specific_handler`, `__CxxFrameHandler3`,
+  `_CxxThrowException`, `RtlCaptureContext`, `RtlVirtualUnwind`,
+  `RtlLookupFunctionEntry`. Real .pdata / .xdata traversal
+  work; multi-slice undertaking.
+- **Process32First/Next, CreateRemoteThread, OpenProcess,
+  GenerateConsoleCtrlEvent** — a handful in kernel32 that
+  need new kernel syscalls to implement meaningfully.
+- **Real \_initterm / \_cexit etc.** that iterate function-
+  pointer tables — current stub + DLL both no-op rather
+  than actually calling; need the recursive-DLL-load work.
+
+Everything else is covered.
 
 ## Boot-time visibility
 
