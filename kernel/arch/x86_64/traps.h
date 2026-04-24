@@ -154,4 +154,21 @@ void TrapsRegisterExtable();
 /// a no-op returning 0.
 u64 IrqCountForVector(u8 v);
 
+/// Cumulative CPU-exception fault counts by category. Bumped
+/// each time a fault dump runs (either user task-kill or
+/// kernel panic). Used by diagnostic commands and health
+/// telemetry to show "the system has had N access violations
+/// since boot" without grepping the serial log.
+struct FaultCounts
+{
+    u64 access_violation; // non-present #PF (read / write / exec)
+    u64 nx_violation;     // present #PF with instr-fetch bit
+    u64 write_to_ro;      // present #PF with write bit
+    u64 stack_overflow;   // #PF with cr2 just below rsp
+    u64 reserved_bit;     // page-table entry with reserved bit set
+    u64 gp;               // #GP count
+    u64 ud;               // #UD count
+};
+FaultCounts FaultCountsSnapshot();
+
 } // namespace customos::arch

@@ -59,6 +59,93 @@ constinit IrqHandler g_irq_handlers[256] = {};
 // through this table are independent slots.
 constinit u64 g_irq_counts[256] = {};
 
+// Global fault counters by category. Bumped on every CPU
+// exception dump (user-mode task-kill or kernel panic). Read
+// only by diagnostic paths (shell health command / log prints);
+// no hot-path dependency on these.
+constinit u64 g_fault_access_violation = 0; // non-present #PF
+constinit u64 g_fault_nx_violation = 0;     // present + instr fetch
+constinit u64 g_fault_write_to_ro = 0;      // present + write
+constinit u64 g_fault_stack_overflow = 0;   // #PF cr2 near rsp
+constinit u64 g_fault_reserved_bit = 0;     // page-table poison
+constinit u64 g_fault_gp = 0;               // #GP
+constinit u64 g_fault_ud = 0;               // #UD
+
+// Classify a page fault into a short mnemonic the dump header
+// can show prominently. `err` is the hardware-pushed error code
+// (Intel SDM Vol 3 Table 4-15); `cr2` is the faulting VA;
+// `rsp` is the current stack pointer (used for the stack-
+// overflow heuristic). Result is a static string literal —
+// the caller does not free.
+const char* ClassifyPageFault(u64 err, u64 cr2, u64 rsp, bool from_user)
+{
+    const bool present = (err & 0x01) != 0;
+    const bool write = (err & 0x02) != 0;
+    const bool rsvd = (err & 0x08) != 0;
+    const bool instr = (err & 0x10) != 0;
+
+    if (rsvd)
+    {
+        ++g_fault_reserved_bit;
+        return "PT_RESERVED_BIT_SET";
+    }
+
+    // Stack-overflow heuristic. A push (or a call) that steps
+    // past the stack's low edge will #PF with cr2 = rsp - k for
+    // small k. The window is wide enough to catch single-frame
+    // spills (up to ~one page below rsp) without aliasing random
+    // dereferences.
+    if (!present && cr2 < rsp && (rsp - cr2) < 0x2000)
+    {
+        ++g_fault_stack_overflow;
+        return from_user ? "STACK_OVERFLOW_USER" : "STACK_OVERFLOW_KERNEL";
+    }
+
+    if (!present)
+    {
+        ++g_fault_access_violation;
+        if (instr)
+            return "ACCESS_VIOLATION_EXECUTE";
+        if (write)
+            return "ACCESS_VIOLATION_WRITE";
+        return "ACCESS_VIOLATION_READ";
+    }
+
+    // Present but faulted — protection violation on the PTE.
+    if (instr)
+    {
+        ++g_fault_nx_violation;
+        return "NX_VIOLATION";
+    }
+    if (write)
+    {
+        ++g_fault_write_to_ro;
+        return "WRITE_TO_RO_PAGE";
+    }
+    return "PROTECTION_FAULT";
+}
+
+// Emit the raw #PF error-code bits as a human-readable flag
+// list. Follows the SDM layout: P (bit 0), W/R (1), U/S (2),
+// RSVD (3), I/D (4), PK (5), SS (6). Newer bits (e.g. SGX bit
+// 15) are noted generically.
+void DumpPageFaultFlags(u64 err)
+{
+    SerialWrite("[");
+    SerialWrite((err & 0x01) ? "present" : "notpresent");
+    SerialWrite((err & 0x02) ? "|write" : "|read");
+    SerialWrite((err & 0x04) ? "|user" : "|kernel");
+    if (err & 0x08)
+        SerialWrite("|rsvd");
+    if (err & 0x10)
+        SerialWrite("|instr");
+    if (err & 0x20)
+        SerialWrite("|pkey");
+    if (err & 0x40)
+        SerialWrite("|ss");
+    SerialWrite("]");
+}
+
 constexpr u8 kIrqVectorBase = 32;
 constexpr u8 kMsixVectorBase = 48;
 constexpr u8 kMsixVectorMax = 239; // leave 240..254 reserved for future (IPIs, debug)
@@ -437,6 +524,29 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         SerialWrite("\n[task-kill] ring-3 task took ");
         SerialWrite(vec_name);
         SerialWrite(" — terminating\n");
+        // Category / reason label — BSOD-style one-liner that
+        // tells the operator what shape the fault has before
+        // they read hex values. Only meaningful for #PF / #GP /
+        // #UD; other vectors skip the label.
+        if (frame->vector == 14)
+        {
+            const u64 cr2 = ReadCr2();
+            SerialWrite("  reason : ");
+            SerialWrite(ClassifyPageFault(frame->error_code, cr2, frame->rsp, /*from_user=*/true));
+            SerialWrite(" ");
+            DumpPageFaultFlags(frame->error_code);
+            SerialWrite("\n");
+        }
+        else if (frame->vector == 13)
+        {
+            ++g_fault_gp;
+            SerialWrite("  reason : PROTECTION_FAULT_USER\n");
+        }
+        else if (frame->vector == 6)
+        {
+            ++g_fault_ud;
+            SerialWrite("  reason : INVALID_OPCODE\n");
+        }
         SerialWrite("  pid  : ");
         SerialWriteHex(customos::sched::CurrentTaskId());
         SerialWrite("\n  rip  : ");
@@ -510,6 +620,24 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     {
         cr2 = ReadCr2();
         WriteLabelled("cr2       ", cr2);
+        // BSOD-style reason line. Classifies the fault into an
+        // ACCESS_VIOLATION_* / NX_VIOLATION / STACK_OVERFLOW_*
+        // category and breaks the raw err bits into flags.
+        SerialWrite("  reason    : ");
+        SerialWrite(ClassifyPageFault(frame->error_code, cr2, frame->rsp, /*from_user=*/false));
+        SerialWrite(" ");
+        DumpPageFaultFlags(frame->error_code);
+        SerialWrite("\n");
+    }
+    else if (frame->vector == 13)
+    {
+        ++g_fault_gp;
+        SerialWrite("  reason    : PROTECTION_FAULT_KERNEL\n");
+    }
+    else if (frame->vector == 6)
+    {
+        ++g_fault_ud;
+        SerialWrite("  reason    : INVALID_OPCODE\n");
     }
 
     SerialWrite("  --\n");
@@ -573,6 +701,19 @@ extern "C" void TrapDispatch(TrapFrame* frame)
 u64 IrqCountForVector(u8 v)
 {
     return g_irq_counts[v];
+}
+
+FaultCounts FaultCountsSnapshot()
+{
+    FaultCounts s;
+    s.access_violation = g_fault_access_violation;
+    s.nx_violation = g_fault_nx_violation;
+    s.write_to_ro = g_fault_write_to_ro;
+    s.stack_overflow = g_fault_stack_overflow;
+    s.reserved_bit = g_fault_reserved_bit;
+    s.gp = g_fault_gp;
+    s.ud = g_fault_ud;
+    return s;
 }
 
 void IrqInstall(u8 vector, IrqHandler handler)
