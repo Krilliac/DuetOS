@@ -375,3 +375,664 @@ __declspec(dllexport) UCRT_NORETURN void _invalid_parameter_noinfo_noreturn(void
     __asm__ volatile("int $0x80" : : "a"((long long) 0), "D"((long long) 0xC000000D)); /* STATUS_INVALID_PARAMETER */
     __builtin_unreachable();
 }
+
+/* ------------------------------------------------------------------
+ * Minimal printf family (slice 30)
+ *
+ * Supports: %d, %i, %u, %x, %X, %p, %s, %c, %%, with optional
+ * width (unpadded or 0-padded) and long/long-long modifiers
+ * (l, ll, z). Enough for ~95% of real programs' format strings.
+ *
+ * No floating-point (%f, %g). No %n (security). No locale.
+ * vsnprintf is the base; others forward to it.
+ * ------------------------------------------------------------------ */
+
+typedef unsigned long long va_list_slot;
+
+static int emit_char(char* buf, size_t cap, size_t* pos, char c)
+{
+    if (buf && *pos + 1 < cap)
+        buf[*pos] = c;
+    (*pos)++;
+    return 1;
+}
+
+static void emit_str(char* buf, size_t cap, size_t* pos, const char* s, size_t n)
+{
+    for (size_t i = 0; i < n; ++i)
+        emit_char(buf, cap, pos, s[i]);
+}
+
+static void emit_pad(char* buf, size_t cap, size_t* pos, int width, int printed, char fill)
+{
+    while (printed < width)
+    {
+        emit_char(buf, cap, pos, fill);
+        ++printed;
+    }
+}
+
+static int fmt_int(char* tmp, unsigned long long v, int base, int upper)
+{
+    /* Writes digits backward into tmp[32], returns length. */
+    int         n      = 0;
+    const char* digits = upper ? "0123456789ABCDEF" : "0123456789abcdef";
+    if (v == 0)
+    {
+        tmp[n++] = '0';
+        return n;
+    }
+    while (v)
+    {
+        tmp[n++] = digits[v % (unsigned) base];
+        v /= (unsigned) base;
+    }
+    return n;
+}
+
+/* __builtin_va_list integrates with SysV ABI va_args; on
+ * Windows x64 ABI the compiler handles the register<->memory
+ * shuffle itself. We just read through the built-in macros. */
+#define va_list    __builtin_va_list
+#define va_start   __builtin_va_start
+#define va_end     __builtin_va_end
+#define va_arg_ptr(ap, type) (__builtin_va_arg(ap, type))
+
+static int vfmt(char* buf, size_t cap, const char* fmt, va_list ap)
+{
+    size_t pos = 0;
+    while (*fmt)
+    {
+        if (*fmt != '%')
+        {
+            emit_char(buf, cap, &pos, *fmt++);
+            continue;
+        }
+        ++fmt;
+        /* Flags */
+        char pad = ' ';
+        if (*fmt == '0')
+        {
+            pad = '0';
+            ++fmt;
+        }
+        /* Width (decimal). */
+        int width = 0;
+        while (*fmt >= '0' && *fmt <= '9')
+            width = width * 10 + (*fmt++ - '0');
+        /* Length modifier. 0 = int, 1 = long (32 on MSVC), 2 = long long, 3 = size_t */
+        int mod = 0;
+        if (*fmt == 'l')
+        {
+            mod = 1;
+            ++fmt;
+            if (*fmt == 'l')
+            {
+                mod = 2;
+                ++fmt;
+            }
+        }
+        else if (*fmt == 'z')
+        {
+            mod = 3;
+            ++fmt;
+        }
+        char spec = *fmt++;
+        if (spec == 0)
+            break;
+        char tmp[32];
+        switch (spec)
+        {
+        case 'c':
+        {
+            char c = (char) va_arg_ptr(ap, int);
+            emit_pad(buf, cap, &pos, width, 1, pad);
+            emit_char(buf, cap, &pos, c);
+            break;
+        }
+        case 's':
+        {
+            const char* s = va_arg_ptr(ap, const char*);
+            if (!s)
+                s = "(null)";
+            size_t n = 0;
+            while (s[n])
+                ++n;
+            emit_pad(buf, cap, &pos, width, (int) n, pad);
+            emit_str(buf, cap, &pos, s, n);
+            break;
+        }
+        case 'd':
+        case 'i':
+        {
+            long long v;
+            if (mod == 2)
+                v = va_arg_ptr(ap, long long);
+            else if (mod == 3)
+                v = (long long) va_arg_ptr(ap, size_t);
+            else if (mod == 1)
+                v = va_arg_ptr(ap, long);
+            else
+                v = va_arg_ptr(ap, int);
+            int neg = 0;
+            unsigned long long u;
+            if (v < 0)
+            {
+                neg = 1;
+                u   = (unsigned long long) (-v);
+            }
+            else
+                u = (unsigned long long) v;
+            int n     = fmt_int(tmp, u, 10, 0);
+            int total = n + (neg ? 1 : 0);
+            emit_pad(buf, cap, &pos, width, total, pad);
+            if (neg)
+                emit_char(buf, cap, &pos, '-');
+            for (int i = n - 1; i >= 0; --i)
+                emit_char(buf, cap, &pos, tmp[i]);
+            break;
+        }
+        case 'u':
+        case 'x':
+        case 'X':
+        {
+            unsigned long long v;
+            if (mod == 2)
+                v = va_arg_ptr(ap, unsigned long long);
+            else if (mod == 3)
+                v = va_arg_ptr(ap, size_t);
+            else if (mod == 1)
+                v = va_arg_ptr(ap, unsigned long);
+            else
+                v = va_arg_ptr(ap, unsigned int);
+            int base  = (spec == 'u') ? 10 : 16;
+            int upper = (spec == 'X');
+            int n     = fmt_int(tmp, v, base, upper);
+            emit_pad(buf, cap, &pos, width, n, pad);
+            for (int i = n - 1; i >= 0; --i)
+                emit_char(buf, cap, &pos, tmp[i]);
+            break;
+        }
+        case 'p':
+        {
+            unsigned long long v = (unsigned long long) va_arg_ptr(ap, void*);
+            emit_str(buf, cap, &pos, "0x", 2);
+            int n = fmt_int(tmp, v, 16, 0);
+            for (int i = n - 1; i >= 0; --i)
+                emit_char(buf, cap, &pos, tmp[i]);
+            break;
+        }
+        case '%':
+            emit_char(buf, cap, &pos, '%');
+            break;
+        default:
+            /* Unknown spec — emit literally for visibility. */
+            emit_char(buf, cap, &pos, '%');
+            emit_char(buf, cap, &pos, spec);
+            break;
+        }
+    }
+    if (buf && cap > 0)
+        buf[pos < cap ? pos : cap - 1] = 0;
+    return (int) pos;
+}
+
+__declspec(dllexport) int vsnprintf(char* buf, size_t cap, const char* fmt, va_list ap)
+{
+    return vfmt(buf, cap, fmt, ap);
+}
+
+__declspec(dllexport) int snprintf(char* buf, size_t cap, const char* fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vfmt(buf, cap, fmt, ap);
+    va_end(ap);
+    return n;
+}
+
+__declspec(dllexport) int sprintf(char* buf, const char* fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vfmt(buf, 0x7FFFFFFF, fmt, ap);
+    va_end(ap);
+    return n;
+}
+
+__declspec(dllexport) int _vsnprintf(char* buf, size_t cap, const char* fmt, va_list ap)
+{
+    return vfmt(buf, cap, fmt, ap);
+}
+
+/* printf family — direct to stdout via SYS_WRITE. Uses a
+ * 1 KiB stack buffer; truncates silently if longer. */
+
+static void sys_write_bytes(const char* p, size_t n)
+{
+    long long discard;
+    __asm__ volatile("int $0x80"
+                     : "=a"(discard)
+                     : "a"((long long) 2),   /* SYS_WRITE */
+                       "D"((long long) 1),   /* fd=1 */
+                       "S"((long long) p),
+                       "d"((long long) n)
+                     : "memory");
+}
+
+__declspec(dllexport) int printf(const char* fmt, ...)
+{
+    char    buf[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vfmt(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    if (n > (int) sizeof(buf) - 1)
+        n = (int) sizeof(buf) - 1;
+    sys_write_bytes(buf, (size_t) n);
+    return n;
+}
+
+__declspec(dllexport) int puts(const char* s)
+{
+    if (!s)
+        s = "(null)";
+    size_t n = 0;
+    while (s[n])
+        ++n;
+    sys_write_bytes(s, n);
+    sys_write_bytes("\n", 1);
+    return (int) n + 1;
+}
+
+__declspec(dllexport) int putchar(int c)
+{
+    char b = (char) c;
+    sys_write_bytes(&b, 1);
+    return c;
+}
+
+/* ------------------------------------------------------------------
+ * File streams (slice 30)
+ *
+ * v0 represents FILE* as a Win32 HANDLE wrapped in a 24-byte
+ * struct allocated on the process heap (to match fopen() ->
+ * fclose() lifetime). The struct stores {handle, eof_flag,
+ * err_flag}. All fwrite/fread/fputs etc. route through the
+ * Win32 read/write calls in kernel32.dll's stub page.
+ *
+ * stdin / stdout / stderr live in the data section as three
+ * preallocated FILE structs with synthetic handles -10/-11/-12
+ * (Win32 STD_INPUT/OUTPUT/ERROR_HANDLE DWORDs).
+ * ------------------------------------------------------------------ */
+
+typedef struct ucrt_FILE
+{
+    long long handle;  /* Win32 handle (kernel32 file-handle range, or stdio sentinel) */
+    int       eof;
+    int       err;
+} FILE;
+
+static FILE g_stdin  = {-10LL, 0, 0};
+static FILE g_stdout = {-11LL, 0, 0};
+static FILE g_stderr = {-12LL, 0, 0};
+
+/* MSVC exports stdin/stdout/stderr via accessor functions
+ * (__acrt_iob_func, _iob_func) and via the symbols
+ * __iob_func. The flat stubs don't mention them; we expose
+ * both the symbols and the accessor so future PEs can
+ * link either shape. */
+__declspec(dllexport) FILE* __acrt_iob_func(unsigned int index)
+{
+    switch (index)
+    {
+    case 0:
+        return &g_stdin;
+    case 1:
+        return &g_stdout;
+    case 2:
+        return &g_stderr;
+    default:
+        return (FILE*) 0;
+    }
+}
+
+__declspec(dllexport) FILE* fopen(const char* path, const char* mode)
+{
+    (void) path;
+    (void) mode;
+    return (FILE*) 0; /* v0: no on-disk open — NULL */
+}
+
+typedef unsigned short _ucrt_wchar_t;
+__declspec(dllexport) FILE* _wfopen(const _ucrt_wchar_t* path, const _ucrt_wchar_t* mode)
+{
+    (void) path;
+    (void) mode;
+    return (FILE*) 0;
+}
+
+__declspec(dllexport) int fclose(FILE* f)
+{
+    (void) f;
+    return 0;
+}
+
+__declspec(dllexport) size_t fwrite(const void* ptr, size_t sz, size_t nmemb, FILE* f)
+{
+    if (!f)
+        return 0;
+    /* Route to stdout/stderr via SYS_WRITE(1) for any stdio
+     * handle; anything else returns 0 (no real files in v0). */
+    if (f->handle == -11LL || f->handle == -12LL)
+    {
+        sys_write_bytes((const char*) ptr, sz * nmemb);
+        return nmemb;
+    }
+    return 0;
+}
+
+__declspec(dllexport) size_t fread(void* ptr, size_t sz, size_t nmemb, FILE* f)
+{
+    (void) ptr;
+    (void) sz;
+    (void) nmemb;
+    if (f)
+        f->eof = 1; /* Immediate EOF */
+    return 0;
+}
+
+__declspec(dllexport) int fflush(FILE* f)
+{
+    (void) f;
+    return 0;
+}
+
+__declspec(dllexport) int fputs(const char* s, FILE* f)
+{
+    if (!s || !f)
+        return -1;
+    if (f->handle == -11LL || f->handle == -12LL)
+    {
+        size_t n = 0;
+        while (s[n])
+            ++n;
+        sys_write_bytes(s, n);
+        return 0;
+    }
+    return -1;
+}
+
+__declspec(dllexport) int fputc(int c, FILE* f)
+{
+    if (!f)
+        return -1;
+    if (f->handle == -11LL || f->handle == -12LL)
+    {
+        char b = (char) c;
+        sys_write_bytes(&b, 1);
+        return c;
+    }
+    return -1;
+}
+
+__declspec(dllexport) char* fgets(char* buf, int n, FILE* f)
+{
+    (void) buf;
+    (void) n;
+    if (f)
+        f->eof = 1;
+    return (char*) 0;
+}
+
+__declspec(dllexport) int fgetc(FILE* f)
+{
+    if (f)
+        f->eof = 1;
+    return -1; /* EOF */
+}
+
+__declspec(dllexport) int fseek(FILE* f, long off, int whence)
+{
+    (void) f;
+    (void) off;
+    (void) whence;
+    return -1;
+}
+
+__declspec(dllexport) long ftell(FILE* f)
+{
+    (void) f;
+    return -1L;
+}
+
+__declspec(dllexport) int feof(FILE* f)
+{
+    return f ? f->eof : 1;
+}
+
+__declspec(dllexport) int ferror(FILE* f)
+{
+    return f ? f->err : 1;
+}
+
+__declspec(dllexport) int fprintf(FILE* f, const char* fmt, ...)
+{
+    char    buf[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vfmt(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    if (n > (int) sizeof(buf) - 1)
+        n = (int) sizeof(buf) - 1;
+    fwrite(buf, 1, (size_t) n, f);
+    return n;
+}
+
+__declspec(dllexport) int vfprintf(FILE* f, const char* fmt, va_list ap)
+{
+    char buf[1024];
+    int  n = vfmt(buf, sizeof(buf), fmt, ap);
+    if (n > (int) sizeof(buf) - 1)
+        n = (int) sizeof(buf) - 1;
+    fwrite(buf, 1, (size_t) n, f);
+    return n;
+}
+
+__declspec(dllexport) int vprintf(const char* fmt, va_list ap)
+{
+    char buf[1024];
+    int  n = vfmt(buf, sizeof(buf), fmt, ap);
+    if (n > (int) sizeof(buf) - 1)
+        n = (int) sizeof(buf) - 1;
+    sys_write_bytes(buf, (size_t) n);
+    return n;
+}
+
+/* ------------------------------------------------------------------
+ * Extended string / memory intrinsics (slice 30)
+ * ------------------------------------------------------------------ */
+
+__declspec(dllexport) NO_BUILTIN_STR int strncmp(const char* a, const char* b, size_t n)
+{
+    for (size_t i = 0; i < n; ++i)
+    {
+        unsigned char ca = (unsigned char) a[i];
+        unsigned char cb = (unsigned char) b[i];
+        if (ca != cb)
+            return (int) ca - (int) cb;
+        if (!ca)
+            return 0;
+    }
+    return 0;
+}
+
+__declspec(dllexport) NO_BUILTIN_STR char* strncpy(char* dst, const char* src, size_t n)
+{
+    size_t i = 0;
+    for (; i < n && src[i]; ++i)
+        dst[i] = src[i];
+    for (; i < n; ++i)
+        dst[i] = 0;
+    return dst;
+}
+
+__declspec(dllexport) NO_BUILTIN_STR char* strcat(char* dst, const char* src)
+{
+    char* d = dst;
+    while (*d)
+        ++d;
+    while ((*d++ = *src++))
+        ;
+    return dst;
+}
+
+__declspec(dllexport) NO_BUILTIN_STR char* strncat(char* dst, const char* src, size_t n)
+{
+    char* d = dst;
+    while (*d)
+        ++d;
+    for (size_t i = 0; i < n && src[i]; ++i)
+        *d++ = src[i];
+    *d = 0;
+    return dst;
+}
+
+__declspec(dllexport) int _stricmp(const char* a, const char* b)
+{
+    while (*a && *b)
+    {
+        char ca = *a, cb = *b;
+        if (ca >= 'A' && ca <= 'Z')
+            ca = (char) (ca + ('a' - 'A'));
+        if (cb >= 'A' && cb <= 'Z')
+            cb = (char) (cb + ('a' - 'A'));
+        if (ca != cb)
+            return (int) (unsigned char) ca - (int) (unsigned char) cb;
+        ++a;
+        ++b;
+    }
+    return (int) (unsigned char) *a - (int) (unsigned char) *b;
+}
+
+__declspec(dllexport) int _strnicmp(const char* a, const char* b, size_t n)
+{
+    for (size_t i = 0; i < n; ++i)
+    {
+        char ca = a[i], cb = b[i];
+        if (ca >= 'A' && ca <= 'Z')
+            ca = (char) (ca + ('a' - 'A'));
+        if (cb >= 'A' && cb <= 'Z')
+            cb = (char) (cb + ('a' - 'A'));
+        if (ca != cb)
+            return (int) (unsigned char) ca - (int) (unsigned char) cb;
+        if (!a[i])
+            return 0;
+    }
+    return 0;
+}
+
+/* ------------------------------------------------------------------
+ * abs, isdigit / isalpha family (slice 30)
+ *
+ * Trivial — ASCII-only, fine for v0.
+ * ------------------------------------------------------------------ */
+
+__declspec(dllexport) int abs(int v)
+{
+    return v < 0 ? -v : v;
+}
+
+__declspec(dllexport) long labs(long v)
+{
+    return v < 0 ? -v : v;
+}
+
+__declspec(dllexport) long long llabs(long long v)
+{
+    return v < 0 ? -v : v;
+}
+
+__declspec(dllexport) int isalpha(int c)
+{
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+}
+
+__declspec(dllexport) int isdigit(int c)
+{
+    return c >= '0' && c <= '9';
+}
+
+__declspec(dllexport) int isspace(int c)
+{
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
+}
+
+__declspec(dllexport) int isprint(int c)
+{
+    return c >= 0x20 && c <= 0x7E;
+}
+
+__declspec(dllexport) int isalnum(int c)
+{
+    return isalpha(c) || isdigit(c);
+}
+
+__declspec(dllexport) int toupper(int c)
+{
+    return (c >= 'a' && c <= 'z') ? c - ('a' - 'A') : c;
+}
+
+__declspec(dllexport) int tolower(int c)
+{
+    return (c >= 'A' && c <= 'Z') ? c + ('a' - 'A') : c;
+}
+
+/* ------------------------------------------------------------------
+ * qsort — standard library sort, implemented as insertion sort
+ * for simplicity. Adequate for small arrays; real quicksort
+ * can replace this when someone needs to sort millions of items.
+ * ------------------------------------------------------------------ */
+
+typedef int (*qsort_cmp_t)(const void*, const void*);
+
+__declspec(dllexport) NO_BUILTIN_MEM void qsort(void* base, size_t n, size_t sz, qsort_cmp_t cmp)
+{
+    unsigned char* arr = (unsigned char*) base;
+    for (size_t i = 1; i < n; ++i)
+    {
+        for (size_t j = i; j > 0; --j)
+        {
+            unsigned char* a = arr + (j - 1) * sz;
+            unsigned char* b = arr + j * sz;
+            if (cmp(a, b) <= 0)
+                break;
+            /* swap sz bytes */
+            for (size_t k = 0; k < sz; ++k)
+            {
+                unsigned char t = a[k];
+                a[k]            = b[k];
+                b[k]            = t;
+            }
+        }
+    }
+}
+
+__declspec(dllexport) void* bsearch(const void* key, const void* base, size_t n, size_t sz, qsort_cmp_t cmp)
+{
+    const unsigned char* arr = (const unsigned char*) base;
+    size_t               lo  = 0;
+    size_t               hi  = n;
+    while (lo < hi)
+    {
+        size_t mid = lo + (hi - lo) / 2;
+        int    c   = cmp(key, arr + mid * sz);
+        if (c == 0)
+            return (void*) (arr + mid * sz);
+        if (c < 0)
+            hi = mid;
+        else
+            lo = mid + 1;
+    }
+    return (void*) 0;
+}

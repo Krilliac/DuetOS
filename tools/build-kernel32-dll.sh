@@ -185,6 +185,25 @@ set +e
     /export:GetExitCodeThread \
     /export:ExitThread \
     /export:GetExitCodeProcess \
+    /export:FindFirstFileA /export:FindFirstFileW \
+    /export:FindNextFileA /export:FindNextFileW /export:FindClose \
+    /export:CopyFileA /export:CopyFileW \
+    /export:MoveFileA /export:MoveFileW \
+    /export:DeleteFileA /export:DeleteFileW \
+    /export:GetFileAttributesA /export:GetFileAttributesW \
+    /export:SetFileAttributesA /export:SetFileAttributesW \
+    /export:CreateDirectoryA /export:CreateDirectoryW \
+    /export:RemoveDirectoryA /export:RemoveDirectoryW \
+    /export:FlushFileBuffers \
+    /export:GetTempPathA /export:GetTempPathW \
+    /export:GetTempFileNameA /export:GetTempFileNameW \
+    /export:GetCurrentDirectoryA \
+    /export:SetCurrentDirectoryA /export:SetCurrentDirectoryW \
+    /export:CreateToolhelp32Snapshot \
+    /export:Process32FirstW /export:Process32NextW \
+    /export:Process32First /export:Process32Next \
+    /export:OpenProcess \
+    /export:GenerateConsoleCtrlEvent \
     /out:"${DLL}" \
     "${OBJ}" 2>&1 | grep -v "align specified without /driver"
 LINK_RC=${PIPESTATUS[0]}

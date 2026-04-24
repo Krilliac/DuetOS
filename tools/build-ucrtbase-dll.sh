@@ -87,6 +87,20 @@ set +e
     /export:strtoul \
     /export:terminate \
     /export:_invalid_parameter_noinfo_noreturn \
+    /export:vsnprintf /export:snprintf /export:sprintf /export:_vsnprintf \
+    /export:printf /export:puts /export:putchar \
+    /export:vprintf /export:vfprintf /export:fprintf \
+    /export:__acrt_iob_func \
+    /export:fopen /export:_wfopen /export:fclose \
+    /export:fread /export:fwrite /export:fflush \
+    /export:fputs /export:fputc /export:fgets /export:fgetc \
+    /export:fseek /export:ftell /export:feof /export:ferror \
+    /export:strncmp /export:strncpy /export:strcat /export:strncat \
+    /export:_stricmp /export:_strnicmp \
+    /export:abs /export:labs /export:llabs \
+    /export:isalpha /export:isdigit /export:isspace /export:isprint /export:isalnum \
+    /export:toupper /export:tolower \
+    /export:qsort /export:bsearch \
     /out:"${DLL}" \
     "${OBJ}" 2>&1 | grep -v "align specified without /driver"
 LINK_RC=${PIPESTATUS[0]}

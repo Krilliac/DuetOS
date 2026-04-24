@@ -1500,3 +1500,262 @@ __declspec(dllexport) BOOL GetExitCodeProcess(HANDLE hProcess, DWORD* lpExitCode
         *lpExitCode = 0x103; /* STILL_ACTIVE */
     return 1;
 }
+
+/* ------------------------------------------------------------------
+ * File system (slice 30) — Find*, Copy/Move/Delete, dir ops.
+ * All report "not found" / ACCESS_DENIED to keep real programs
+ * on their graceful-failure paths.
+ * ------------------------------------------------------------------ */
+
+__declspec(dllexport) HANDLE FindFirstFileA(const char* path, void* find_data)
+{
+    (void) path;
+    (void) find_data;
+    return (HANDLE) (long long) -1; /* INVALID_HANDLE_VALUE — "no files" */
+}
+
+__declspec(dllexport) HANDLE FindFirstFileW(const wchar_t16* path, void* find_data)
+{
+    (void) path;
+    (void) find_data;
+    return (HANDLE) (long long) -1;
+}
+
+__declspec(dllexport) BOOL FindNextFileA(HANDLE h, void* find_data)
+{
+    (void) h;
+    (void) find_data;
+    return 0; /* No more files */
+}
+
+__declspec(dllexport) BOOL FindNextFileW(HANDLE h, void* find_data)
+{
+    (void) h;
+    (void) find_data;
+    return 0;
+}
+
+__declspec(dllexport) BOOL FindClose(HANDLE h)
+{
+    (void) h;
+    return 1;
+}
+
+__declspec(dllexport) BOOL CopyFileA(const char* src, const char* dst, BOOL fail_if_exists)
+{
+    (void) src;
+    (void) dst;
+    (void) fail_if_exists;
+    return 0;
+}
+
+__declspec(dllexport) BOOL CopyFileW(const wchar_t16* src, const wchar_t16* dst, BOOL fail_if_exists)
+{
+    (void) src;
+    (void) dst;
+    (void) fail_if_exists;
+    return 0;
+}
+
+__declspec(dllexport) BOOL MoveFileA(const char* src, const char* dst)
+{
+    (void) src;
+    (void) dst;
+    return 0;
+}
+
+__declspec(dllexport) BOOL MoveFileW(const wchar_t16* src, const wchar_t16* dst)
+{
+    (void) src;
+    (void) dst;
+    return 0;
+}
+
+__declspec(dllexport) BOOL DeleteFileA(const char* path)
+{
+    (void) path;
+    return 0;
+}
+
+__declspec(dllexport) BOOL DeleteFileW(const wchar_t16* path)
+{
+    (void) path;
+    return 0;
+}
+
+__declspec(dllexport) DWORD GetFileAttributesA(const char* path)
+{
+    (void) path;
+    return 0xFFFFFFFFu; /* INVALID_FILE_ATTRIBUTES — "not found" */
+}
+
+__declspec(dllexport) DWORD GetFileAttributesW(const wchar_t16* path)
+{
+    (void) path;
+    return 0xFFFFFFFFu;
+}
+
+__declspec(dllexport) BOOL SetFileAttributesA(const char* path, DWORD attrs)
+{
+    (void) path;
+    (void) attrs;
+    return 0;
+}
+
+__declspec(dllexport) BOOL SetFileAttributesW(const wchar_t16* path, DWORD attrs)
+{
+    (void) path;
+    (void) attrs;
+    return 0;
+}
+
+__declspec(dllexport) BOOL CreateDirectoryA(const char* path, void* sec)
+{
+    (void) path;
+    (void) sec;
+    return 0;
+}
+
+__declspec(dllexport) BOOL CreateDirectoryW(const wchar_t16* path, void* sec)
+{
+    (void) path;
+    (void) sec;
+    return 0;
+}
+
+__declspec(dllexport) BOOL RemoveDirectoryA(const char* path)
+{
+    (void) path;
+    return 0;
+}
+
+__declspec(dllexport) BOOL RemoveDirectoryW(const wchar_t16* path)
+{
+    (void) path;
+    return 0;
+}
+
+__declspec(dllexport) BOOL FlushFileBuffers(HANDLE h)
+{
+    (void) h;
+    return 1;
+}
+
+/* GetTempPath / GetTempFileName — return /tmp and a fixed name.
+ * Matches behaviour of Linux-hosted builds. */
+__declspec(dllexport) DWORD GetTempPathA(DWORD cb, char* out)
+{
+    static const char path[] = "/tmp/";
+    DWORD             want   = sizeof(path);
+    if (!out || cb < want)
+        return want;
+    for (DWORD i = 0; i < want; ++i)
+        out[i] = path[i];
+    return want - 1;
+}
+
+__declspec(dllexport) DWORD GetTempPathW(DWORD cb, wchar_t16* out)
+{
+    static const char path[] = "/tmp/";
+    DWORD             want   = sizeof(path);
+    if (!out || cb < want)
+        return want;
+    for (DWORD i = 0; i < want; ++i)
+        out[i] = (wchar_t16) (unsigned char) path[i];
+    return want - 1;
+}
+
+__declspec(dllexport) UINT GetTempFileNameA(const char* dir, const char* prefix, UINT unique, char* out)
+{
+    (void) dir;
+    (void) prefix;
+    (void) unique;
+    if (out)
+        out[0] = 0;
+    return 0;
+}
+
+__declspec(dllexport) UINT GetTempFileNameW(const wchar_t16* dir, const wchar_t16* prefix, UINT unique, wchar_t16* out)
+{
+    (void) dir;
+    (void) prefix;
+    (void) unique;
+    if (out)
+        out[0] = 0;
+    return 0;
+}
+
+__declspec(dllexport) DWORD GetCurrentDirectoryA(DWORD cb, char* out)
+{
+    static const char dir[] = "C:\\";
+    DWORD             want  = sizeof(dir);
+    if (!out || cb < want)
+        return want;
+    for (DWORD i = 0; i < want; ++i)
+        out[i] = dir[i];
+    return want - 1;
+}
+
+__declspec(dllexport) BOOL SetCurrentDirectoryA(const char* path)
+{
+    (void) path;
+    return 1;
+}
+
+__declspec(dllexport) BOOL SetCurrentDirectoryW(const wchar_t16* path)
+{
+    (void) path;
+    return 1;
+}
+
+/* Process32First/Next — report empty process list. The
+ * existing flat stubs are registered under ntdll's NOT_IMPL
+ * tier; for completeness let's add these so PE startup
+ * snapshots don't error. */
+__declspec(dllexport) HANDLE CreateToolhelp32Snapshot(DWORD flags, DWORD pid)
+{
+    (void) flags;
+    (void) pid;
+    /* Return a non-INVALID sentinel so callers Close it later
+     * (CloseHandle on an unknown handle is already a no-op). */
+    return (HANDLE) 0x1001;
+}
+
+__declspec(dllexport) BOOL Process32FirstW(HANDLE h, void* entry)
+{
+    (void) h;
+    (void) entry;
+    return 0; /* Empty snapshot */
+}
+
+__declspec(dllexport) BOOL Process32NextW(HANDLE h, void* entry)
+{
+    (void) h;
+    (void) entry;
+    return 0;
+}
+
+__declspec(dllexport) BOOL Process32First(HANDLE h, void* entry)
+{
+    return Process32FirstW(h, entry);
+}
+
+__declspec(dllexport) BOOL Process32Next(HANDLE h, void* entry)
+{
+    return Process32NextW(h, entry);
+}
+
+__declspec(dllexport) HANDLE OpenProcess(DWORD access, BOOL inherit, DWORD pid)
+{
+    (void) access;
+    (void) inherit;
+    (void) pid;
+    return (HANDLE) 0; /* Access denied — keep callers on fallback */
+}
+
+__declspec(dllexport) BOOL GenerateConsoleCtrlEvent(DWORD event, DWORD group)
+{
+    (void) event;
+    (void) group;
+    return 0;
+}
