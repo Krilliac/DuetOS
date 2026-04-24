@@ -180,6 +180,11 @@ set +e
     /export:ReleaseSRWLockShared \
     /export:TryAcquireSRWLockShared \
     /export:InitOnceExecuteOnce \
+    /export:CreateThread \
+    /export:ResumeThread \
+    /export:GetExitCodeThread \
+    /export:ExitThread \
+    /export:GetExitCodeProcess \
     /out:"${DLL}" \
     "${OBJ}" 2>&1 | grep -v "align specified without /driver"
 LINK_RC=${PIPESTATUS[0]}

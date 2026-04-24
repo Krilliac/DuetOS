@@ -1415,3 +1415,88 @@ __declspec(dllexport) BOOL InitOnceExecuteOnce(void* InitOnce, InitOnceFn InitFn
         syscall_yield();
     return 1;
 }
+
+/* ------------------------------------------------------------------
+ * Thread management (slice 23)
+ *
+ * SYS_THREAD_CREATE = 45 (rdi=start_va, rsi=param) -> handle
+ * SYS_THREAD_EXIT_CODE = 55 (rdi=handle) -> exit code
+ * SYS_EXIT = 0 (rdi=code, [[noreturn]])
+ *
+ * ResumeThread is registered as kOffReturnZero in the flat
+ * stubs (we don't pause threads at create time today, so
+ * Resume is a no-op). Same here.
+ * ------------------------------------------------------------------ */
+
+typedef DWORD (*ThreadStartFn)(void*);
+
+__declspec(dllexport) HANDLE CreateThread(void* lpThreadAttributes, SIZE_T dwStackSize, ThreadStartFn lpStartAddress,
+                                          void* lpParameter, DWORD dwCreationFlags, DWORD* lpThreadId)
+{
+    (void) lpThreadAttributes;
+    (void) dwStackSize;
+    (void) dwCreationFlags;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long) 45),
+                       "D"((long long) lpStartAddress),
+                       "S"((long long) lpParameter)
+                     : "memory");
+    /* Win32 contract: NULL on failure. The kernel returns -1
+     * (cast as u64 = 0xFF..F) on failure; translate. */
+    if (rv == -1)
+    {
+        if (lpThreadId != (DWORD*) 0)
+            *lpThreadId = 0;
+        return (HANDLE) 0;
+    }
+    if (lpThreadId != (DWORD*) 0)
+        *lpThreadId = (DWORD) rv;
+    return (HANDLE) rv;
+}
+
+__declspec(dllexport) DWORD ResumeThread(HANDLE hThread)
+{
+    (void) hThread;
+    /* No suspended-thread state in v0 — every CreateThread runs
+     * immediately. Return 0 (= "thread was not previously
+     * suspended"), matching the flat stub's behaviour. */
+    return 0;
+}
+
+__declspec(dllexport) BOOL GetExitCodeThread(HANDLE hThread, DWORD* lpExitCode)
+{
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long) 55), "D"((long long) hThread)
+                     : "memory");
+    /* SYS_THREAD_EXIT_CODE returns u64(-1) on bad handle and
+     * the actual exit code (or STILL_ACTIVE = 0x103) otherwise.
+     * Win32 contract: BOOL TRUE on success regardless of
+     * STILL_ACTIVE; we always claim success (matches flat
+     * stub's optimism). */
+    if (lpExitCode != (DWORD*) 0)
+        *lpExitCode = (rv == -1) ? 0x103 : (DWORD) rv;
+    return 1;
+}
+
+__declspec(dllexport) WIN32_NORETURN void ExitThread(DWORD dwExitCode)
+{
+    /* For our single-thread-per-process model ExitThread ==
+     * ExitProcess. Match the flat stub's behaviour. */
+    __asm__ volatile("int $0x80" : : "a"((long long) 0), "D"((long long) dwExitCode));
+    __builtin_unreachable();
+}
+
+__declspec(dllexport) BOOL GetExitCodeProcess(HANDLE hProcess, DWORD* lpExitCode)
+{
+    /* No cross-process query in v0 — pretend the queried
+     * process is still running. Matches the flat stub's
+     * STILL_ACTIVE behaviour. */
+    (void) hProcess;
+    if (lpExitCode != (DWORD*) 0)
+        *lpExitCode = 0x103; /* STILL_ACTIVE */
+    return 1;
+}
