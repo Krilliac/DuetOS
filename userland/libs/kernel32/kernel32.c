@@ -3,49 +3,170 @@
  *
  * Freestanding CustomOS kernel32.dll — ring-3 code that
  * implements Win32 entry points by issuing native int 0x80
- * syscalls, running OUTSIDE the kernel. This is the first
- * "real" userland DLL in the project: a PE import of
- * `kernel32.dll!GetCurrentProcessId` now resolves via
- * stage-2 slice-6's via-DLL path to code in THIS file
- * rather than to a hand-assembled stub in
- * kernel/subsystems/win32/stubs.cpp.
+ * syscalls + returning sentinel constants where appropriate.
+ * This is the live userland replacement for the matching
+ * entries in kernel/subsystems/win32/stubs.cpp.
  *
- * Stage-2 slice 10 scope — a single entry point:
+ * Every function exported here retires the corresponding
+ * `{"kernel32.dll", "<name>", kOff<name>}` row in
+ * kStubsTable. The flat stub stays compiled as a fallback
+ * (slice-6's via-DLL path runs first; the stub is only
+ * reached if preload fails). A later sweep-slice deletes
+ * the dead rows.
  *
- *     DWORD GetCurrentProcessId(void)   -> SYS_GETPROCID (8)
+ * Build: tools/build-kernel32-dll.sh
+ *   clang --target=x86_64-pc-windows-msvc + lld-link /dll
+ *   /noentry /nodefaultlib /base:0x10020000 + one /export:
+ *   line per function. No CRT, no imports.
  *
- * Chosen as the first retirement because:
- *   - Trivially equivalent to the existing 8-byte flat stub
- *     (`mov eax, 8; int 0x80; ret`). The C compiler produces
- *     bit-identical-in-effect code, so every PE that already
- *     calls GetCurrentProcessId (hello_winapi, windows-kill,
- *     etc.) continues to return the same pid.
- *   - Exercises the multi-DLL preload path with a DLL whose
- *     own name (`kernel32.dll`) actually matches incoming
- *     import references — so slice-6's via-DLL-name match
- *     fires and the IAT is patched to point here.
+ * Native syscall ABI (all exports below rely on this):
+ *     int 0x80
+ *     rax = syscall number, rdi/rsi/rdx/r10/r8/r9 = args
+ *     rax = return value on exit
  *
- * Future slices add more entry points. Every addition is a
- * net retirement: the stub in kernel/subsystems/win32/stubs.cpp
- * for the same DLL+function becomes dead code (still present
- * as a fallback but never reached because the via-DLL path
- * runs first). A later refactor will sweep dead stubs once
- * the retirement train is rolling.
- *
- * Build: see tools/build-kernel32-dll.sh. The DLL is linked
- * with /dll /noentry /nodefaultlib /base:0x10020000 — 1 MiB
- * above customdll2.dll (no VA collision with either of the
- * earlier test DLLs or with any PE ImageBase we hand out).
+ * The kernel's SYS_* handlers preserve every register except
+ * rax, so "int 0x80" in an inline asm with only `"=a"(rv)`
+ * output and `"a"(num)` / `"D"(arg)` / ... inputs is safe —
+ * the compiler tracks rdi / rsi / rdx as clobbered only when
+ * we use them as input operands, and those are the exact
+ * registers the syscall reads.
  */
 
-typedef unsigned int DWORD;
+typedef unsigned int       DWORD;
+typedef unsigned int       UINT;
+typedef int                BOOL;
+typedef void*              HANDLE;
+typedef unsigned long      ULONG;
+typedef unsigned long long UINT_PTR; /* 64-bit on x64 windows-msvc; DWORD is 32 */
 
+#define WIN32_NORETURN __attribute__((noreturn))
+
+/* ------------------------------------------------------------------
+ * Process / thread identity (syscall-backed)
+ * ------------------------------------------------------------------ */
+
+/* SYS_GETPROCID = 8 — kernel returns CurrentProcess()->pid. */
 __declspec(dllexport) DWORD GetCurrentProcessId(void)
 {
-    /* SYS_GETPROCID = 8. Kernel returns CurrentProcess()->pid
-     * in rax. We truncate to DWORD (low 32 bits) to match the
-     * Win32 GetCurrentProcessId prototype. */
     long rv;
     __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long) 8) : "memory");
     return (DWORD) rv;
+}
+
+/* SYS_GETPID = 1 — kernel returns the scheduler task id.
+ * This is "thread id" in the Win32 sense: per-thread, distinct
+ * from the process id. Matches what the existing flat stub
+ * (kOffGetCurrentThreadId) does. */
+__declspec(dllexport) DWORD GetCurrentThreadId(void)
+{
+    long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long) 1) : "memory");
+    return (DWORD) rv;
+}
+
+/* ------------------------------------------------------------------
+ * Pseudo-handles (constant returns)
+ * Real Windows also returns these literal values; any receiver
+ * checks for the sentinel rather than going through the handle
+ * table.
+ * ------------------------------------------------------------------ */
+
+__declspec(dllexport) HANDLE GetCurrentProcess(void)
+{
+    return (HANDLE) (long) -1;
+}
+
+__declspec(dllexport) HANDLE GetCurrentThread(void)
+{
+    return (HANDLE) (long) -2;
+}
+
+/* ------------------------------------------------------------------
+ * Last-error slot (syscall-backed)
+ * Per-process u32 stored in Process.win32_last_error.
+ * ------------------------------------------------------------------ */
+
+/* SYS_GETLASTERROR = 9 */
+__declspec(dllexport) DWORD GetLastError(void)
+{
+    long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long) 9) : "memory");
+    return (DWORD) rv;
+}
+
+/* SYS_SETLASTERROR = 10 — rdi = new error code. */
+__declspec(dllexport) void SetLastError(DWORD err)
+{
+    long discard;
+    __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long) 10), "D"((long) err) : "memory");
+}
+
+/* ------------------------------------------------------------------
+ * Noreturn terminators (SYS_EXIT = 0, rdi = exit code)
+ * ------------------------------------------------------------------ */
+
+__declspec(dllexport) WIN32_NORETURN void ExitProcess(UINT uExitCode)
+{
+    __asm__ volatile("int $0x80" : : "a"((long) 0), "D"((long) uExitCode));
+    __builtin_unreachable();
+}
+
+/* TerminateProcess(hProcess, uExitCode) — hProcess is ignored
+ * (single-process semantics match the existing stub). uExitCode
+ * goes to SYS_EXIT same as ExitProcess. */
+__declspec(dllexport) WIN32_NORETURN BOOL TerminateProcess(HANDLE hProcess, UINT uExitCode)
+{
+    (void) hProcess;
+    __asm__ volatile("int $0x80" : : "a"((long) 0), "D"((long) uExitCode));
+    __builtin_unreachable();
+}
+
+/* ------------------------------------------------------------------
+ * "Safe-ignore" return-constant shims
+ * Semantically equivalent to the flat-stubs kOffReturnZero /
+ * kOffReturnOne family for these specific Win32 contracts.
+ * ------------------------------------------------------------------ */
+
+__declspec(dllexport) BOOL IsDebuggerPresent(void)
+{
+    return 0; /* No debugger attached (this OS has no debug API yet). */
+}
+
+__declspec(dllexport) BOOL IsProcessorFeaturePresent(DWORD feature)
+{
+    (void) feature;
+    /* Optimistically claim every queried feature is present —
+     * x86_64 universally has SSE / SSE2 / CMPXCHG16B / NX, and
+     * AES / AVX / RDRAND are all visible in our CPU probe log.
+     * Returning 0 forced every caller onto scalar-only fallback
+     * paths; returning 1 matches modern hardware. */
+    return 1;
+}
+
+__declspec(dllexport) BOOL SetConsoleCtrlHandler(void* handler, BOOL add)
+{
+    (void) handler;
+    (void) add;
+    /* We have no console Ctrl-C dispatcher yet — pretend we
+     * registered. Matches the flat stub's kOffReturnOne
+     * behaviour. */
+    return 1;
+}
+
+/* ------------------------------------------------------------------
+ * Stdio handle
+ * Win32: HANDLE GetStdHandle(DWORD nStdHandle).
+ * The downstream WriteFile path ignores the handle and always
+ * uses fd=1 (stdout). Pass-through is faithful enough for every
+ * "hello world" caller today.
+ * ------------------------------------------------------------------ */
+
+__declspec(dllexport) HANDLE GetStdHandle(DWORD nStdHandle)
+{
+    /* Zero-extend DWORD to HANDLE (pointer-sized on x64).
+     * STD_OUTPUT_HANDLE = -11 as DWORD = 0xFFFFFFF5 becomes
+     * 0x00000000FFFFFFF5 as a HANDLE — same as the flat stub's
+     * `mov eax, ecx; ret`. UINT_PTR is 64-bit so the cast-
+     * chain stays warning-clean under MSVC's LLP64 layout. */
+    return (HANDLE) (UINT_PTR) nStdHandle;
 }

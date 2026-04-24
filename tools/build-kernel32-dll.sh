@@ -65,6 +65,17 @@ set +e
     /nodefaultlib \
     /base:0x10020000 \
     /export:GetCurrentProcessId \
+    /export:GetCurrentThreadId \
+    /export:GetCurrentProcess \
+    /export:GetCurrentThread \
+    /export:GetLastError \
+    /export:SetLastError \
+    /export:ExitProcess \
+    /export:TerminateProcess \
+    /export:IsDebuggerPresent \
+    /export:IsProcessorFeaturePresent \
+    /export:SetConsoleCtrlHandler \
+    /export:GetStdHandle \
     /out:"${DLL}" \
     "${OBJ}" 2>&1 | grep -v "align specified without /driver"
 LINK_RC=${PIPESTATUS[0]}
