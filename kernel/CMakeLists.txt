@@ -400,6 +400,31 @@ add_custom_command(
 list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_KERNEL32_HEADER}")
 
 # ----------------------------------------------------------------------------
+# Userland vcruntime140.dll — stage-2 slice 13. Retires the
+# batch-5 memset/memcpy/memmove flat stubs. Every MSVC-built
+# PE calls these routinely (struct copy / zero-init / CRT
+# startup), so the via-DLL path fires heavily.
+# ----------------------------------------------------------------------------
+set(CUSTOMOS_VCRUNTIME140_SRC "${CMAKE_SOURCE_DIR}/userland/libs/vcruntime140/vcruntime140.c")
+set(CUSTOMOS_VCRUNTIME140_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_vcruntime140_dll.h")
+set(CUSTOMOS_VCRUNTIME140_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-vcruntime140-dll.sh")
+
+add_custom_command(
+    OUTPUT "${CUSTOMOS_VCRUNTIME140_HEADER}"
+    COMMAND "${CUSTOMOS_VCRUNTIME140_SCRIPT}"
+            "${CMAKE_SOURCE_DIR}"
+            "${CUSTOMOS_VCRUNTIME140_HEADER}"
+    DEPENDS
+        "${CUSTOMOS_VCRUNTIME140_SRC}"
+        "${CUSTOMOS_VCRUNTIME140_SCRIPT}"
+        "${CUSTOMOS_EMBED_BLOB_SCRIPT}"
+    COMMENT "Compiling + embedding vcruntime140.dll (memset/memcpy/memmove retirement)"
+    VERBATIM
+)
+
+list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_VCRUNTIME140_HEADER}")
+
+# ----------------------------------------------------------------------------
 # Sixth PE fixture: customdll_test.exe — first userland program
 # that imports from a real loaded DLL (customdll.dll) rather
 # than from the flat stubs page. Exercises stage-2 slice 6's

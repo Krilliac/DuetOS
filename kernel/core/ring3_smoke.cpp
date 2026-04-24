@@ -10,6 +10,7 @@
 #include "generated_customdll2.h"
 #include "generated_customdll_test.h"
 #include "generated_kernel32_dll.h"
+#include "generated_vcruntime140_dll.h"
 #include "generated_hello_pe.h"
 #include "generated_hello_winapi.h"
 #include "generated_syscall_stress.h"
@@ -1888,7 +1889,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     // here is a one-line append once the blob is embedded via
     // CMake. `kPreloadSlotCap` caps the stack-local array size;
     // bump if the list grows past it.
-    constexpr u64 kPreloadSlotCap = 4;
+    constexpr u64 kPreloadSlotCap = 8;
     struct PreloadDllEntry
     {
         const char* label; // diagnostic name for boot-log
@@ -1898,16 +1899,21 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     const PreloadDllEntry preload_set[] = {
         {"customdll.dll", fs::generated::kBinCustomDllBytes, fs::generated::kBinCustomDllBytes_len},
         {"customdll2.dll", fs::generated::kBinCustomDll2Bytes, fs::generated::kBinCustomDll2Bytes_len},
-        // Stage-2 slice 10: first retirement — kernel32.dll now
-        // exports GetCurrentProcessId from real ring-3 code.
-        // The via-DLL path in ResolveImports matches
-        // `kernel32.dll!GetCurrentProcessId` here BEFORE
-        // falling through to the hand-assembled stub at
-        // kOffGetCurrentProcessId, which now runs as dead code
-        // for imports of that specific function. The stub
-        // stays compiled as a fallback for any caller that
-        // somehow bypasses the preload (shouldn't happen today).
+        // Stage-2 slice 10: kernel32.dll retirement DLL —
+        // now 32 exports across slices 10-12 (process/thread
+        // identity, pseudo-handles, last-error, terminators,
+        // safe-ignore shims, GetStdHandle, Sleep/
+        // SwitchToThread / GetTickCount(64), full Interlocked*
+        // family 32+64-bit). The via-DLL path in
+        // ResolveImports matches kernel32.dll BEFORE falling
+        // through to the hand-assembled stubs page. Stubs stay
+        // as dead-code fallback; sweep-slice later.
         {"kernel32.dll", fs::generated::kBinKernel32DllBytes, fs::generated::kBinKernel32DllBytes_len},
+        // Stage-2 slice 13: vcruntime140.dll — memset / memcpy
+        // / memmove. Every MSVC-built PE calls these for
+        // struct copy / zero-init / CRT startup. The via-DLL
+        // path now fires for each.
+        {"vcruntime140.dll", fs::generated::kBinVcruntime140DllBytes, fs::generated::kBinVcruntime140DllBytes_len},
     };
     constexpr u64 kPreloadEntryCount = sizeof(preload_set) / sizeof(preload_set[0]);
     static_assert(kPreloadEntryCount <= kPreloadSlotCap, "Preload DLL list exceeds stack-local cap");
