@@ -335,14 +335,60 @@ __declspec(dllexport) BOOL GetConsoleMode(HANDLE hConsole, DWORD* lpMode)
     return 1;
 }
 
+/* Code pages: report CP_UTF8 (65001). Callers that serialise
+ * via WriteConsoleW don't actually care; callers that ASK
+ * expect a sane answer, and UTF-8 is closer to our actual
+ * "pass through" stdout than OEM 437. batch27 of
+ * hello_winapi.exe pins this at 65001. */
 __declspec(dllexport) UINT GetConsoleCP(void)
 {
-    return 437; /* OEM code page — what cmd.exe uses by default. */
+    return 65001;
 }
 
 __declspec(dllexport) UINT GetConsoleOutputCP(void)
 {
-    return 437;
+    return 65001;
+}
+
+__declspec(dllexport) BOOL SetConsoleMode(HANDLE hConsole, DWORD mode)
+{
+    (void) hConsole;
+    (void) mode;
+    return 1;
+}
+
+__declspec(dllexport) BOOL SetConsoleOutputCP(UINT cp)
+{
+    (void) cp;
+    return 1;
+}
+
+/* OutputDebugStringA/W — route to SYS_DEBUG_PRINT (46) which
+ * emits `[odbg] <text>` to COM1. Silently tolerates NULL. */
+__declspec(dllexport) void OutputDebugStringA(const char* str)
+{
+    if (!str)
+        return;
+    long long discard;
+    __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long) 46), "D"((long long) str) : "memory");
+}
+
+typedef unsigned short WCHAR_t;
+__declspec(dllexport) void OutputDebugStringW(const WCHAR_t* wstr)
+{
+    if (!wstr)
+        return;
+    /* Strip to ASCII into a 256-byte stack buffer. */
+    char   buf[256];
+    size_t i = 0;
+    while (i < 255 && wstr[i])
+    {
+        buf[i] = (char) (wstr[i] & 0xFF);
+        ++i;
+    }
+    buf[i] = 0;
+    long long discard;
+    __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long) 46), "D"((long long) buf) : "memory");
 }
 
 __declspec(dllexport) DWORD GetLogicalDrives(void)

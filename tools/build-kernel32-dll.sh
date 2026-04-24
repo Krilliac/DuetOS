@@ -97,8 +97,12 @@ set +e
     /export:InterlockedOr64 \
     /export:InterlockedXor64 \
     /export:GetConsoleMode \
+    /export:SetConsoleMode \
     /export:GetConsoleCP \
     /export:GetConsoleOutputCP \
+    /export:SetConsoleOutputCP \
+    /export:OutputDebugStringA \
+    /export:OutputDebugStringW \
     /export:GetLogicalDrives \
     /export:GetDriveTypeA \
     /export:GetDriveTypeW \
