@@ -11,7 +11,12 @@
 #include "generated_customdll.h"
 #include "generated_customdll2.h"
 #include "generated_customdll_test.h"
+#include "generated_d3d11_dll.h"
+#include "generated_d3d12_dll.h"
+#include "generated_d3d9_dll.h"
 #include "generated_dbghelp_dll.h"
+#include "generated_dxgi_dll.h"
+#include "generated_gdi32_dll.h"
 #include "generated_kernel32_dll.h"
 #include "generated_kernelbase_dll.h"
 #include "generated_msvcp140_dll.h"
@@ -23,6 +28,7 @@
 #include "generated_shell32_dll.h"
 #include "generated_shlwapi_dll.h"
 #include "generated_ucrtbase_dll.h"
+#include "generated_user32_dll.h"
 #include "generated_vcruntime140_dll.h"
 #include "generated_winmm_dll.h"
 #include "generated_hello_pe.h"
@@ -1973,6 +1979,17 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         {"winmm.dll", fs::generated::kBinWinmmDllBytes, fs::generated::kBinWinmmDllBytes_len},
         {"bcrypt.dll", fs::generated::kBinBcryptDllBytes, fs::generated::kBinBcryptDllBytes_len},
         {"psapi.dll", fs::generated::kBinPsapiDllBytes, fs::generated::kBinPsapiDllBytes_len},
+        // Stage-2 slice 29: DirectX + user32/gdi32 return-
+        // constant tier. Every DirectX entry returns E_NOTIMPL;
+        // GetDC returns a sentinel so windowed programs don't
+        // null-check-fail at HDC acquisition. Full GUI/drawing
+        // stack remains deferred.
+        {"d3d9.dll", fs::generated::kBinD3d9DllBytes, fs::generated::kBinD3d9DllBytes_len},
+        {"d3d11.dll", fs::generated::kBinD3d11DllBytes, fs::generated::kBinD3d11DllBytes_len},
+        {"d3d12.dll", fs::generated::kBinD3d12DllBytes, fs::generated::kBinD3d12DllBytes_len},
+        {"dxgi.dll", fs::generated::kBinDxgiDllBytes, fs::generated::kBinDxgiDllBytes_len},
+        {"user32.dll", fs::generated::kBinUser32DllBytes, fs::generated::kBinUser32DllBytes_len},
+        {"gdi32.dll", fs::generated::kBinGdi32DllBytes, fs::generated::kBinGdi32DllBytes_len},
     };
     constexpr u64 kPreloadEntryCount = sizeof(preload_set) / sizeof(preload_set[0]);
     static_assert(kPreloadEntryCount <= kPreloadSlotCap, "Preload DLL list exceeds stack-local cap");

@@ -43,6 +43,12 @@ case "${DLL_NAME}" in
     winmm)     SYMBOL_NAME=kBinWinmmDllBytes ;;
     bcrypt)    SYMBOL_NAME=kBinBcryptDllBytes ;;
     psapi)     SYMBOL_NAME=kBinPsapiDllBytes ;;
+    d3d9)      SYMBOL_NAME=kBinD3d9DllBytes ;;
+    d3d11)     SYMBOL_NAME=kBinD3d11DllBytes ;;
+    d3d12)     SYMBOL_NAME=kBinD3d12DllBytes ;;
+    dxgi)      SYMBOL_NAME=kBinDxgiDllBytes ;;
+    user32)    SYMBOL_NAME=kBinUser32DllBytes ;;
+    gdi32)     SYMBOL_NAME=kBinGdi32DllBytes ;;
     *)         ;; # leave whatever ${DLL_NAME^} produced
 esac
 

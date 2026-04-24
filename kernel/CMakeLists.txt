@@ -590,6 +590,14 @@ customos_stub_dll(winmm 0x100F0000 "timeGetTime,timeBeginPeriod,timeEndPeriod,ti
 customos_stub_dll(bcrypt 0x10100000 "BCryptOpenAlgorithmProvider,BCryptCloseAlgorithmProvider,BCryptCreateHash,BCryptHashData,BCryptFinishHash,BCryptDestroyHash,BCryptGetProperty,BCryptGenRandom")
 customos_stub_dll(psapi 0x10110000 "EnumProcesses,EnumProcessModules,GetMappedFileNameW,GetModuleBaseNameW,GetModuleFileNameExW,GetProcessMemoryInfo,QueryWorkingSet")
 
+# --- Stage-2 slice 29 — DirectX + user32/gdi32 stub tier ---
+customos_stub_dll(d3d9 0x10120000 "Direct3DCreate9,Direct3DCreate9Ex")
+customos_stub_dll(d3d11 0x10130000 "D3D11CreateDevice,D3D11CreateDeviceAndSwapChain")
+customos_stub_dll(d3d12 0x10140000 "D3D12CreateDevice,D3D12GetDebugInterface,D3D12SerializeRootSignature")
+customos_stub_dll(dxgi 0x10150000 "CreateDXGIFactory,CreateDXGIFactory1,CreateDXGIFactory2")
+customos_stub_dll(user32 0x10160000 "CallWindowProcA,CallWindowProcW,CharLowerW,CharUpperW,ClipCursor,CloseClipboard,CreateWindowExA,CreateWindowExW,DefWindowProcA,DefWindowProcW,DestroyWindow,DispatchMessageA,DispatchMessageW,EmptyClipboard,GetActiveWindow,GetClientRect,GetClipboardData,GetCursorPos,GetDesktopWindow,GetForegroundWindow,GetMessageA,GetMessageW,GetProcessWindowStation,GetSysColor,GetSystemMetrics,GetWindowRect,InvalidateRect,IsWindow,LoadAcceleratorsA,LoadAcceleratorsW,LoadBitmapA,LoadBitmapW,LoadCursorA,LoadCursorW,LoadIconA,LoadIconW,LoadImageA,LoadImageW,LoadMenuA,LoadMenuW,LoadStringA,LoadStringW,MessageBoxA,MessageBoxExA,MessageBoxExW,MessageBoxW,MoveWindow,OpenClipboard,PeekMessageA,PeekMessageW,PostMessageA,PostMessageW,PostQuitMessage,PostThreadMessageA,PostThreadMessageW,RegisterClassA,RegisterClassExA,RegisterClassExW,RegisterClassW,SendMessageA,SendMessageW,SetClipboardData,SetCursor,SetCursorPos,SetWindowPos,ShowCursor,ShowWindow,TranslateAcceleratorA,TranslateAcceleratorW,TranslateMessage,UnregisterClassA,UnregisterClassW,UpdateWindow")
+customos_stub_dll(gdi32 0x10180000 "BitBlt,CreateBitmap,CreateBrushIndirect,CreateCompatibleBitmap,CreateCompatibleDC,CreateDIBSection,CreateDIBitmap,CreateFontA,CreateFontIndirectA,CreateFontIndirectW,CreateFontW,CreatePen,CreateSolidBrush,DeleteDC,DeleteObject,DrawTextA,DrawTextW,Ellipse,ExtTextOutA,ExtTextOutW,FillRect,FrameRect,GetDC,GetObjectA,GetObjectW,GetStockObject,GetWindowDC,LineTo,MoveToEx,Polygon,Polyline,Rectangle,ReleaseDC,RestoreDC,SaveDC,SelectObject,SetBkColor,SetBkMode,SetMapMode,SetTextAlign,SetTextColor,StretchBlt,TextOutA,TextOutW")
+
 # ----------------------------------------------------------------------------
 # Userland ucrtbase.dll — stage-2 slice 15. Retires the
 # UCRT runtime stubs: heap alloc (malloc/free/calloc/realloc
