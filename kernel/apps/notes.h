@@ -71,4 +71,10 @@ bool NotesFeedChar(char c);
 /// MUST be called with the compositor lock held.
 bool NotesFeedKey(duetos::u16 keycode);
 
+/// One-shot self-test: exercises insert / backspace / delete
+/// and every navigation binding on a scratch state, asserts
+/// each step, then restores the pre-test buffer. Prints one
+/// PASS/FAIL line to COM1. Safe to call after NotesInit.
+void NotesSelfTest();
+
 } // namespace duetos::apps::notes

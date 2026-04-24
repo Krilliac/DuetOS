@@ -431,6 +431,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         duetos::drivers::video::WindowRegister(win_b_chrome, "NOTEPAD");
     duetos::drivers::video::ThemeRegisterWindow(Role::Notes, notes_handle);
     duetos::apps::notes::NotesInit(notes_handle);
+    duetos::apps::notes::NotesSelfTest();
 
     // Task Manager window — a window whose content drawer
     // prints live scheduler + memory stats. The ui-ticker's
