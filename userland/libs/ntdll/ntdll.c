@@ -581,3 +581,86 @@ __declspec(dllexport) NTSTATUS RtlRunOnceExecuteOnce(void* RunOnce, RtlRunOnceFn
         ntdll_syscall_yield();
     return NTSTATUS_SUCCESS;
 }
+
+/* ------------------------------------------------------------------
+ * SEH unwind helpers (slice 32)
+ *
+ * Real ntdll walks .pdata RUNTIME_FUNCTION tables to support
+ * unwinding and stack traces. v0 has no unwind machinery; all
+ * of these return "no match" / zero so callers (typically CRT
+ * crash handlers) gracefully give up.
+ * ------------------------------------------------------------------ */
+
+__declspec(dllexport) void* RtlLookupFunctionEntry(unsigned long long ControlPc, unsigned long long* ImageBase,
+                                                   void* HistoryTable)
+{
+    (void) ControlPc;
+    (void) HistoryTable;
+    if (ImageBase != (unsigned long long*) 0)
+        *ImageBase = 0;
+    return (void*) 0; /* No RUNTIME_FUNCTION found. */
+}
+
+__declspec(dllexport) void* RtlVirtualUnwind(unsigned long HandlerType, unsigned long long ImageBase,
+                                            unsigned long long ControlPc, void* FunctionEntry, void* ContextRecord,
+                                            void** HandlerData, unsigned long long* EstablisherFrame,
+                                            void* ContextPointers)
+{
+    (void) HandlerType;
+    (void) ImageBase;
+    (void) ControlPc;
+    (void) FunctionEntry;
+    (void) ContextRecord;
+    (void) ContextPointers;
+    if (HandlerData != (void**) 0)
+        *HandlerData = (void*) 0;
+    if (EstablisherFrame != (unsigned long long*) 0)
+        *EstablisherFrame = 0;
+    return (void*) 0; /* No exception handler found. */
+}
+
+/* RtlCaptureContext captures the current thread's register
+ * state to a CONTEXT struct (1232 bytes on x64). We zero the
+ * caller's struct; crash handlers that walk it see an "empty"
+ * context. */
+__declspec(dllexport) void RtlCaptureContext(void* ContextRecord)
+{
+    if (ContextRecord == (void*) 0)
+        return;
+    unsigned char* b = (unsigned char*) ContextRecord;
+    for (int i = 0; i < 1232; ++i)
+        b[i] = 0;
+}
+
+__declspec(dllexport) unsigned short RtlCaptureStackBackTrace(unsigned long FramesToSkip, unsigned long FramesToCapture,
+                                                              void** BackTrace, unsigned long* BackTraceHash)
+{
+    (void) FramesToSkip;
+    (void) FramesToCapture;
+    (void) BackTrace;
+    if (BackTraceHash != (unsigned long*) 0)
+        *BackTraceHash = 0;
+    return 0; /* No frames captured. */
+}
+
+__declspec(dllexport) void RtlUnwind(void* TargetFrame, void* TargetIp, void* ExceptionRecord, void* ReturnValue)
+{
+    (void) TargetFrame;
+    (void) TargetIp;
+    (void) ExceptionRecord;
+    (void) ReturnValue;
+    /* Can't unwind; terminate. */
+    __asm__ volatile("int $0x80" : : "a"((long long) 0), "D"((long long) 3));
+}
+
+__declspec(dllexport) void RtlUnwindEx(void* TargetFrame, void* TargetIp, void* ExceptionRecord, void* ReturnValue,
+                                      void* ContextRecord, void* HistoryTable)
+{
+    (void) TargetFrame;
+    (void) TargetIp;
+    (void) ExceptionRecord;
+    (void) ReturnValue;
+    (void) ContextRecord;
+    (void) HistoryTable;
+    __asm__ volatile("int $0x80" : : "a"((long long) 0), "D"((long long) 3));
+}

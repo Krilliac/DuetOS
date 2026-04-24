@@ -67,6 +67,18 @@ set +e
     /export:memset \
     /export:memcpy \
     /export:memmove \
+    /export:memcmp \
+    /export:memchr \
+    /export:__C_specific_handler \
+    /export:__CxxFrameHandler3 \
+    /export:__CxxFrameHandler4 \
+    /export:_CxxThrowException \
+    /export:_purecall \
+    /export:__std_terminate \
+    /export:__std_exception_copy \
+    /export:__std_exception_destroy \
+    /export:__vcrt_InitializeCriticalSectionEx \
+    /export:__CxxUnwind \
     /out:"${DLL}" \
     "${OBJ}" 2>&1 | grep -v "align specified without /driver"
 LINK_RC=${PIPESTATUS[0]}

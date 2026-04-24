@@ -171,6 +171,12 @@ set +e
     /export:RtlLeaveCriticalSection \
     /export:RtlTryEnterCriticalSection \
     /export:RtlRunOnceExecuteOnce \
+    /export:RtlLookupFunctionEntry \
+    /export:RtlVirtualUnwind \
+    /export:RtlCaptureContext \
+    /export:RtlCaptureStackBackTrace \
+    /export:RtlUnwind \
+    /export:RtlUnwindEx \
     /out:"${DLL}" \
     "${OBJ}" 2>&1 | grep -v "align specified without /driver"
 LINK_RC=${PIPESTATUS[0]}
