@@ -1,11 +1,12 @@
 #include "widget.h"
 
+#include "../../arch/x86_64/cpu.h"
 #include "../../drivers/input/ps2mouse.h"
 #include "../../sched/sched.h"
+#include "calendar.h"
 #include "console.h"
 #include "cursor.h"
 #include "framebuffer.h"
-#include "calendar.h"
 #include "menu.h"
 #include "taskbar.h"
 
@@ -146,7 +147,12 @@ struct WindowMsgRing
 struct RegisteredWindow
 {
     WindowChrome chrome;
-    const char* title;          // caller-owned string, stored by reference
+    // Title pointer always points at `mut_title` on this same
+    // struct (register-time copy from the caller's string);
+    // SetWindowText overwrites the buffer in place so the
+    // pointer stays stable.
+    const char* title;
+    char mut_title[kWindowTitleStorage];
     WindowContentFn content_fn; // nullable per-window content drawer
     void* content_cookie;
     u64 owner_pid; // 0 = kernel-owned boot window, >0 = ring-3 pid
@@ -154,7 +160,8 @@ struct RegisteredWindow
     WinGdiPrim prims[kWinDisplayListDepth];
     u32 prim_count;
     bool alive;
-    u8 _pad[3];
+    bool visible;
+    u8 _pad[2];
 };
 
 constinit RegisteredWindow g_windows[kMaxWindows] = {};
@@ -172,6 +179,14 @@ constinit u32 g_z_order[kMaxWindows] = {};
 // before any Cursor* / Window* / Widget* / DesktopCompose call,
 // so concurrent typing-while-dragging is race-free.
 constinit duetos::sched::Mutex g_compositor_mutex{};
+
+// Global message wait queue. Any task blocked in
+// SYS_WIN_GET_MSG parks here until PostMessage (or an input
+// router) calls WindowMsgWakeAll. Single queue is sufficient
+// for v1 — one wake broadcast per post, each blocker re-checks
+// its own per-window ring. Upgrades to per-process queues when
+// a workload has many concurrent message pumps.
+constinit duetos::sched::WaitQueue g_msg_wq{};
 
 // Currently-active (focused) window — the one with the brightly
 // painted title bar. Follows the topmost z-order slot: WindowRaise
@@ -240,6 +255,27 @@ void WindowDraw(const WindowChrome& w)
     }
 }
 
+namespace
+{
+// Sanitise + bounded-copy an ASCII title into a window's stable
+// storage slot. Non-ASCII bytes become '?'. Result is always
+// NUL-terminated.
+void StoreTitle(RegisteredWindow& w, const char* src)
+{
+    u32 i = 0;
+    if (src != nullptr)
+    {
+        for (; i + 1 < kWindowTitleStorage && src[i] != '\0'; ++i)
+        {
+            const char c = src[i];
+            w.mut_title[i] = (c >= 0x20 && c < 0x7F) ? c : '?';
+        }
+    }
+    w.mut_title[i] = '\0';
+    w.title = w.mut_title;
+}
+} // namespace
+
 WindowHandle WindowRegister(const WindowChrome& chrome, const char* title)
 {
     if (g_window_count >= kMaxWindows)
@@ -248,8 +284,9 @@ WindowHandle WindowRegister(const WindowChrome& chrome, const char* title)
     }
     const WindowHandle h = g_window_count;
     g_windows[h].chrome = chrome;
-    g_windows[h].title = title;
+    StoreTitle(g_windows[h], title);
     g_windows[h].alive = true;
+    g_windows[h].visible = true;
     g_windows[h].owner_pid = 0;
     g_windows[h].msgs.head = 0;
     g_windows[h].msgs.tail = 0;
@@ -401,7 +438,7 @@ WindowHandle WindowTopmostAt(u32 x, u32 y)
     for (u32 i = g_window_count; i > 0; --i)
     {
         const WindowHandle h = g_z_order[i - 1];
-        if (!g_windows[h].alive)
+        if (!g_windows[h].alive || !g_windows[h].visible)
             continue;
         const auto& c = g_windows[h].chrome;
         if (x >= c.x && x < c.x + c.w && y >= c.y && y < c.y + c.h)
@@ -506,7 +543,7 @@ void WindowDrawAllOrdered()
     for (u32 i = 0; i < g_window_count; ++i)
     {
         const WindowHandle h = g_z_order[i];
-        if (!g_windows[h].alive)
+        if (!g_windows[h].alive || !g_windows[h].visible)
             continue;
         const bool is_active = (h == g_active_window);
         // Use the window's registered title colour when active,
@@ -876,7 +913,27 @@ u32 WindowReapByOwner(u64 pid)
             ++reaped;
         }
     }
+    // A process going away could have been holding a pump open
+    // in a sibling thread. Wake any GetMessage blockers so they
+    // re-check and either dequeue a pending WM_QUIT or exit
+    // naturally when their own pid no longer owns any windows.
+    if (reaped > 0)
+    {
+        WindowMsgWakeAll();
+    }
     return reaped;
+}
+
+void WindowMsgWaitBlockTimeout(u64 timeout_ticks)
+{
+    (void)duetos::sched::WaitQueueBlockTimeout(&g_msg_wq, timeout_ticks);
+}
+
+void WindowMsgWakeAll()
+{
+    duetos::arch::Cli();
+    (void)duetos::sched::WaitQueueWakeAll(&g_msg_wq);
+    duetos::arch::Sti();
 }
 
 namespace
@@ -969,6 +1026,78 @@ void WindowClearDisplayList(WindowHandle h)
         return;
     }
     g_windows[h].prim_count = 0;
+}
+
+bool WindowIsVisible(WindowHandle h)
+{
+    return WindowValid(h) && g_windows[h].visible;
+}
+
+void WindowSetVisible(WindowHandle h, bool visible)
+{
+    if (!WindowValid(h))
+    {
+        return;
+    }
+    g_windows[h].visible = visible;
+    // If we just hid the active window, promote the next
+    // visible + alive window so focus doesn't dangle on a
+    // hidden slot.
+    if (!visible && g_active_window == h)
+    {
+        g_active_window = kWindowInvalid;
+        for (u32 i = g_window_count; i > 0; --i)
+        {
+            const WindowHandle candidate = g_z_order[i - 1];
+            if (candidate != h && WindowValid(candidate) && g_windows[candidate].visible)
+            {
+                g_active_window = candidate;
+                break;
+            }
+        }
+    }
+}
+
+bool WindowSetTitle(WindowHandle h, const char* ascii_src)
+{
+    if (!WindowValid(h))
+    {
+        return false;
+    }
+    StoreTitle(g_windows[h], ascii_src);
+    return true;
+}
+
+void WindowResizeTo(WindowHandle h, u32 w, u32 hgt)
+{
+    if (!WindowValid(h))
+    {
+        return;
+    }
+    const auto info = FramebufferGet();
+    const u32 fb_w = info.width ? info.width : 1024;
+    const u32 fb_h = info.height ? info.height : 768;
+    auto& c = g_windows[h].chrome;
+    if (w > 0)
+    {
+        if (w > fb_w)
+            w = fb_w;
+        if (c.x + w > fb_w)
+        {
+            c.x = (fb_w > w) ? fb_w - w : 0;
+        }
+        c.w = w;
+    }
+    if (hgt > 0)
+    {
+        if (hgt > fb_h)
+            hgt = fb_h;
+        if (c.y + hgt > fb_h)
+        {
+            c.y = (fb_h > hgt) ? fb_h - hgt : 0;
+        }
+        c.h = hgt;
+    }
 }
 
 } // namespace duetos::drivers::video

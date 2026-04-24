@@ -1340,6 +1340,10 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                         duetos::drivers::video::WindowPostMessage(active_pe, kWmChar, 0x08, 1);
                     }
                     duetos::drivers::video::CompositorUnlock();
+                    // Wake any GetMessage blocker — broadcasts
+                    // to every process; each re-checks its own
+                    // per-window ring.
+                    duetos::drivers::video::WindowMsgWakeAll();
                     // No screen repaint required — PEs own their
                     // display list and update on next compose when
                     // their pump calls InvalidateRect / GDI calls
@@ -1583,6 +1587,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
             const bool right_down = (p.buttons & duetos::drivers::input::kMouseButtonRight) != 0;
             const bool right_press = right_down && !prev_right;
+            const bool right_release = !right_down && prev_right;
             prev_right = right_down;
 
             // Right-click opens a context menu. Different item set
@@ -1791,10 +1796,27 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 {
                     if (duetos::drivers::video::WindowPointInCloseBox(hit, cx, cy))
                     {
-                        duetos::drivers::video::WindowClose(hit);
-                        SerialWrite("[ui] close window=");
-                        SerialWriteHex(hit);
-                        SerialWrite("\n");
+                        // PE-owned windows receive WM_CLOSE and
+                        // decide whether to DestroyWindow (or
+                        // ignore). Kernel-owned boot windows
+                        // still close immediately — no PE to
+                        // delegate to.
+                        if (duetos::drivers::video::WindowOwnerPid(hit) > 0)
+                        {
+                            constexpr duetos::u32 kWmClose = 0x0010;
+                            duetos::drivers::video::WindowPostMessage(hit, kWmClose, 0, 0);
+                            duetos::drivers::video::WindowMsgWakeAll();
+                            SerialWrite("[ui] post WM_CLOSE window=");
+                            SerialWriteHex(hit);
+                            SerialWrite("\n");
+                        }
+                        else
+                        {
+                            duetos::drivers::video::WindowClose(hit);
+                            SerialWrite("[ui] close window=");
+                            SerialWriteHex(hit);
+                            SerialWrite("\n");
+                        }
                     }
                     else
                     {
@@ -1830,6 +1852,72 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 SerialWriteHex(drag.window);
                 SerialWrite("\n");
                 drag.active = false;
+            }
+
+            // Mouse-message routing to PE windows. Posts
+            // WM_MOUSEMOVE / WM_LBUTTONDOWN / WM_LBUTTONUP to the
+            // topmost PE window under the cursor, with
+            // lParam = MAKELONG(client_x, client_y). Skipped in
+            // the obvious compositor-owned states (menu open,
+            // mid-drag, over the taskbar / calendar) so a PE
+            // doesn't see stray clicks that the shell consumed.
+            // Close-box presses on a PE re-route to WM_CLOSE
+            // (already handled in the press-edge block below).
+            if (!drag.active && !menu_handled && !duetos::drivers::video::TaskbarContains(cx, cy) &&
+                !duetos::drivers::video::MenuIsOpen() && !duetos::drivers::video::CalendarContains(cx, cy))
+            {
+                const auto pe_hit = duetos::drivers::video::WindowTopmostAt(cx, cy);
+                const duetos::u64 pe_pid = (pe_hit != duetos::drivers::video::kWindowInvalid)
+                                               ? duetos::drivers::video::WindowOwnerPid(pe_hit)
+                                               : 0;
+                if (pe_pid > 0)
+                {
+                    constexpr duetos::u32 kWmMouseMove = 0x0200;
+                    constexpr duetos::u32 kWmLButtonDown = 0x0201;
+                    constexpr duetos::u32 kWmLButtonUp = 0x0202;
+                    constexpr duetos::u32 kWmRButtonDown = 0x0204;
+                    constexpr duetos::u32 kWmRButtonUp = 0x0205;
+                    constexpr duetos::u64 kMkLButton = 0x0001;
+                    constexpr duetos::u64 kMkRButton = 0x0002;
+                    duetos::u32 wx = 0, wy = 0;
+                    duetos::drivers::video::WindowGetBounds(pe_hit, &wx, &wy, nullptr, nullptr);
+                    // Client-local coords. title bar is 22 px by
+                    // default + 2 px top border; widget chrome
+                    // uses these constants internally.
+                    const duetos::i32 client_x = static_cast<duetos::i32>(cx) - static_cast<duetos::i32>(wx) - 2;
+                    const duetos::i32 client_y = static_cast<duetos::i32>(cy) - static_cast<duetos::i32>(wy) - 22 - 2;
+                    const duetos::u64 lparam = (static_cast<duetos::u64>(client_x) & 0xFFFF) |
+                                               ((static_cast<duetos::u64>(client_y) & 0xFFFF) << 16);
+                    duetos::u64 wparam = 0;
+                    if (left_down)
+                        wparam |= kMkLButton;
+                    if (right_down)
+                        wparam |= kMkRButton;
+                    // WM_MOUSEMOVE on every packet that actually
+                    // moved — dx/dy are signed byte deltas in
+                    // the PS/2 packet.
+                    if (p.dx != 0 || p.dy != 0)
+                    {
+                        duetos::drivers::video::WindowPostMessage(pe_hit, kWmMouseMove, wparam, lparam);
+                    }
+                    if (press_edge)
+                    {
+                        duetos::drivers::video::WindowPostMessage(pe_hit, kWmLButtonDown, wparam, lparam);
+                    }
+                    if (release_edge)
+                    {
+                        duetos::drivers::video::WindowPostMessage(pe_hit, kWmLButtonUp, wparam, lparam);
+                    }
+                    if (right_press)
+                    {
+                        duetos::drivers::video::WindowPostMessage(pe_hit, kWmRButtonDown, wparam, lparam);
+                    }
+                    if (right_release)
+                    {
+                        duetos::drivers::video::WindowPostMessage(pe_hit, kWmRButtonUp, wparam, lparam);
+                    }
+                    duetos::drivers::video::WindowMsgWakeAll();
+                }
             }
 
             if (drag.active)

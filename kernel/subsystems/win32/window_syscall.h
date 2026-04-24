@@ -46,4 +46,8 @@ void DoGdiTextOut(arch::TrapFrame* frame);
 void DoGdiRectangle(arch::TrapFrame* frame);
 void DoGdiClear(arch::TrapFrame* frame);
 
+void DoWinMove(arch::TrapFrame* frame);
+void DoWinGetRect(arch::TrapFrame* frame);
+void DoWinSetText(arch::TrapFrame* frame);
+
 } // namespace duetos::subsystems::win32

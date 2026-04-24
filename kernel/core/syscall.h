@@ -709,6 +709,37 @@ enum SyscallNumber : u64
     //   rdi = HWND (biased)
     //   rax = 1 on success, 0 on invalid handle.
     SYS_GDI_CLEAR = 68,
+
+    // SYS_WIN_MOVE — reposition + optionally resize a window.
+    //   rdi = HWND (biased)
+    //   rsi = x (u32, framebuffer coord) — ignored if r9 bit 0
+    //   rdx = y (u32)                     — ignored if r9 bit 0
+    //   r10 = w (u32; 0 = "don't change")
+    //   r8  = h (u32; 0 = "don't change")
+    //   r9  = flags: bit 0 = nomove (SWP_NOMOVE), bit 1 = nosize
+    //         (SWP_NOSIZE). Neither set = move + resize.
+    //   rax = 1 on success, 0 on invalid handle.
+    // Backs Win32 MoveWindow / SetWindowPos.
+    SYS_WIN_MOVE = 69,
+
+    // SYS_WIN_GET_RECT — read back a window's geometry.
+    //   rdi = HWND (biased)
+    //   rsi = rect selector: 0 = window rect (outer bounds,
+    //         framebuffer coords), 1 = client rect (local,
+    //         origin always 0,0; right/bottom = client w/h).
+    //   rdx = user pointer to a 16-byte RECT (left, top, right,
+    //         bottom; int32 each).
+    //   rax = 1 on success, 0 on bad handle / bad user pointer.
+    // Backs Win32 GetWindowRect + GetClientRect.
+    SYS_WIN_GET_RECT = 70,
+
+    // SYS_WIN_SET_TEXT — overwrite a window's title in place.
+    //   rdi = HWND (biased)
+    //   rsi = user pointer to ASCII text (NUL-terminated)
+    //   rax = 1 on success, 0 on invalid handle / bad pointer.
+    // Backs Win32 SetWindowTextA; SetWindowTextW does its own
+    // UTF-16 → ASCII strip on the user side first.
+    SYS_WIN_SET_TEXT = 71,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit

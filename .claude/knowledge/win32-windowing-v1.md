@@ -111,6 +111,63 @@ Verified end-to-end in QEMU:
 | `userland/libs/user32/user32.c` | Real `GetMessage` / `PeekMessage` / `PostMessage` / `PostQuitMessage` |
 | `userland/libs/gdi32/gdi32.c` | Real `FillRect` / `TextOut*` / `Rectangle` / `FrameRect` / `DrawTextA` |
 
+## v1.1 follow-up — mouse routing + blocking GetMessage + SW_HIDE + real geometry
+
+A second pass on the same branch landed:
+
+### Mouse message routing
+
+The mouse reader in `core/main.cpp` now posts
+`WM_MOUSEMOVE` / `WM_LBUTTONDOWN` / `WM_LBUTTONUP` /
+`WM_RBUTTONDOWN` / `WM_RBUTTONUP` to the topmost PE window
+under the cursor. Coordinates are client-local; `lParam` packs
+`MAKELONG(x, y)`; `wParam` carries `MK_LBUTTON` /
+`MK_RBUTTON`. Skipped in the obvious shell-owned states (menu
+open, drag active, over taskbar / calendar). Close-box clicks
+on a PE-owned window now post `WM_CLOSE` instead of firing
+`WindowClose` directly — the PE decides whether to call
+`DestroyWindow`. Kernel-owned boot windows (Calculator,
+Notepad, ...) still close immediately (no PE to delegate to).
+
+### Blocking GetMessage with WaitQueue + timeout
+
+`SYS_WIN_GET_MSG` now blocks on a global `sched::WaitQueue`
+(`g_msg_wq`) via `WindowMsgWaitBlockTimeout(1)` instead of
+polling `SchedSleepTicks(1)`. The keyboard reader, mouse
+reader, and `SYS_WIN_POST_MSG` all broadcast
+`WindowMsgWakeAll()` after appending a message. The 1-tick
+(10 ms) timeout on the block is a safety net against a lost
+wake in the narrow window between "check queue empty" and
+"enter wait queue" — a proper condvar fix would require holding
+the wait-queue lock while dropping the compositor lock (larger
+refactor). In practice wakes are near-immediate; the poll is
+only the safety backstop.
+
+### SW_HIDE is now re-showable
+
+`RegisteredWindow` gains a `visible` bit; `WindowDrawAllOrdered`
+and `WindowTopmostAt` skip invisible windows; `SW_HIDE`
+(cmd == 0) now calls `WindowSetVisible(h, false)` instead of
+closing the slot. A follow-up `ShowWindow(h, SW_SHOW)` sets
+visible again and raises the window. `ShowWindow` also now
+returns the previous visibility state as its `BOOL` per Win32.
+
+### Real window geometry + title — SYS 69 / 70 / 71
+
+| Syscall | # | Backs |
+|---------|---|-------|
+| `SYS_WIN_MOVE`     | 69 | `user32!MoveWindow` + `SetWindowPos` (x/y/w/h + flags) |
+| `SYS_WIN_GET_RECT` | 70 | `user32!GetWindowRect` / `GetClientRect` / `IsWindow` |
+| `SYS_WIN_SET_TEXT` | 71 | `user32!SetWindowTextA` / `SetWindowTextW` |
+
+Windows now copy their title into a per-window `mut_title[64]`
+buffer at register time (replaces the by-reference v0 contract
++ external `g_title_arena`); `SetWindowText` overwrites the
+same buffer so the pointer stays stable. `IsWindow` piggybacks
+on `SYS_WIN_GET_RECT` — the syscall returns 0 iff the handle
+is either unknown or owned by a different process, which is
+exactly the Win32 IsWindow contract.
+
 ## What this does NOT do yet
 
 - **WndProc dispatch.** `DispatchMessageA/W` still returns 0 —
@@ -123,13 +180,6 @@ Verified end-to-end in QEMU:
 - **WM_PAINT.** The compositor doesn't send it; programs that
   key redraws off WM_PAINT see nothing. `TextOut` calls made
   from the main loop directly do work.
-- **Mouse-message routing.** No `WM_LBUTTONDOWN` /
-  `WM_MOUSEMOVE` / `WM_CLOSE` posted to PE windows yet. The
-  close-button X still routes through `WindowClose` directly
-  (no `WM_CLOSE` round-trip to user code).
-- **GetMessage is a poll, not a real wake.** 10 ms worst-case
-  latency per message. Upgrading to `sched::WaitQueue` per
-  process wakes immediately on PostMessage.
 - **Cross-process PostMessage.** Refused at the kernel — the
   HWND must be owned by the caller. Win32 allows cross-process
   in limited circumstances; a future IPC gate can enable it.
@@ -139,6 +189,10 @@ Verified end-to-end in QEMU:
   not the z-order occluders above. Fine for topmost windows
   (the common case); a future slice redraws windows' primitives
   only inside their visible region.
+- **Mouse capture (SetCapture / ReleaseCapture).** Not
+  implemented — mouse messages always route to the topmost
+  window under the cursor even if a PE wanted to track drags
+  outside its bounds.
 
 ## Storage shape
 

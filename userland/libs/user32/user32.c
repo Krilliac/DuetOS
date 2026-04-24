@@ -39,6 +39,9 @@ typedef void* HANDLE;
 #define SYS_WIN_PEEK_MSG 62
 #define SYS_WIN_GET_MSG 63
 #define SYS_WIN_POST_MSG 64
+#define SYS_WIN_MOVE 69
+#define SYS_WIN_GET_RECT 70
+#define SYS_WIN_SET_TEXT 71
 
 /* Selected message IDs the pump + DispatchMessage care about. The
  * kernel doesn't interpret these numbers — it passes them through
@@ -390,31 +393,54 @@ __declspec(dllexport) BOOL InvalidateRect(HANDLE h, const void* r, BOOL erase)
     (void)erase;
     return 1;
 }
+/* SYS_WIN_MOVE flags. Match the kernel-side enum used by
+ * DoWinMove. Bit 0 = nomove, bit 1 = nosize. */
+#define WIN_MOVE_NOMOVE 0x1
+#define WIN_MOVE_NOSIZE 0x2
+
+static BOOL user32_move_core(HANDLE h, int x, int y, int w, int ht, unsigned flags)
+{
+    register long long r10_w asm("r10") = (long long)(unsigned)w;
+    register long long r8_h asm("r8") = (long long)(unsigned)ht;
+    register long long r9_f asm("r9") = (long long)flags;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_WIN_MOVE), "D"((long long)(unsigned long long)h), "S"((long long)(unsigned)x),
+                       "d"((long long)(unsigned)y), "r"(r10_w), "r"(r8_h), "r"(r9_f)
+                     : "memory");
+    return rv ? 1 : 0;
+}
+
 __declspec(dllexport) BOOL MoveWindow(HANDLE h, int x, int y, int w, int ht, BOOL repaint)
 {
-    (void)h;
-    (void)x;
-    (void)y;
-    (void)w;
-    (void)ht;
-    (void)repaint;
-    return 1;
+    (void)repaint; /* kernel always composes on success */
+    return user32_move_core(h, x, y, w, ht, 0);
 }
+
+/* Common SetWindowPos flags (subset). */
+#define SWP_NOMOVE 0x0002
+#define SWP_NOSIZE 0x0001
+
 __declspec(dllexport) BOOL SetWindowPos(HANDLE h, HANDLE after, int x, int y, int w, int ht, UINT flags)
 {
-    (void)h;
-    (void)after;
-    (void)x;
-    (void)y;
-    (void)w;
-    (void)ht;
-    (void)flags;
-    return 1;
+    (void)after; /* z-order management beyond raise-on-show is v2 */
+    unsigned k_flags = 0;
+    if (flags & SWP_NOMOVE)
+        k_flags |= WIN_MOVE_NOMOVE;
+    if (flags & SWP_NOSIZE)
+        k_flags |= WIN_MOVE_NOSIZE;
+    return user32_move_core(h, x, y, w, ht, k_flags);
 }
+static BOOL user32_getrect_core(HANDLE h, unsigned selector, void* r);
+
 __declspec(dllexport) BOOL IsWindow(HANDLE h)
 {
-    (void)h;
-    return 0;
+    /* A biased compositor index whose owner matches the caller's
+     * pid is a valid window; SYS_WIN_GET_RECT succeeds iff both
+     * of those hold, which is exactly the Win32 IsWindow contract. */
+    int local_rect[4];
+    return user32_getrect_core(h, 0, local_rect);
 }
 __declspec(dllexport) HANDLE GetActiveWindow(void)
 {
@@ -428,20 +454,58 @@ __declspec(dllexport) HANDLE GetDesktopWindow(void)
 {
     return (HANDLE)0;
 }
+static BOOL user32_getrect_core(HANDLE h, unsigned selector, void* r)
+{
+    if (!r)
+        return 0;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_WIN_GET_RECT), "D"((long long)(unsigned long long)h),
+                       "S"((long long)selector), "d"((long long)(unsigned long long)r)
+                     : "memory");
+    return rv ? 1 : 0;
+}
+
 __declspec(dllexport) BOOL GetClientRect(HANDLE h, void* r)
 {
-    (void)h;
-    if (r)
-    {
-        unsigned char* b = (unsigned char*)r;
-        for (int i = 0; i < 16; ++i)
-            b[i] = 0;
-    }
-    return 1;
+    return user32_getrect_core(h, 1, r);
 }
 __declspec(dllexport) BOOL GetWindowRect(HANDLE h, void* r)
 {
-    return GetClientRect(h, r);
+    return user32_getrect_core(h, 0, r);
+}
+
+__declspec(dllexport) BOOL SetWindowTextA(HANDLE h, const char* text)
+{
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_WIN_SET_TEXT), "D"((long long)(unsigned long long)h),
+                       "S"((long long)(unsigned long long)text)
+                     : "memory");
+    return rv ? 1 : 0;
+}
+__declspec(dllexport) BOOL SetWindowTextW(HANDLE h, const wchar_t16* text)
+{
+    char ascii[WIN_TITLE_MAX];
+    win32_w_to_ascii(text, ascii, WIN_TITLE_MAX);
+    return SetWindowTextA(h, ascii);
+}
+
+__declspec(dllexport) int GetWindowTextA(HANDLE h, char* buf, int len)
+{
+    (void)h;
+    if (buf && len > 0)
+        buf[0] = 0;
+    return 0; /* no get-path yet; Win32 returns 0 on empty */
+}
+__declspec(dllexport) int GetWindowTextW(HANDLE h, wchar_t16* buf, int len)
+{
+    (void)h;
+    if (buf && len > 0)
+        buf[0] = 0;
+    return 0;
 }
 __declspec(dllexport) HANDLE GetProcessWindowStation(void)
 {

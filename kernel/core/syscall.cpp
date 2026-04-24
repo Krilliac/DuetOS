@@ -1340,6 +1340,15 @@ void SyscallDispatch(arch::TrapFrame* frame)
     case SYS_GDI_CLEAR:
         subsystems::win32::DoGdiClear(frame);
         return;
+    case SYS_WIN_MOVE:
+        subsystems::win32::DoWinMove(frame);
+        return;
+    case SYS_WIN_GET_RECT:
+        subsystems::win32::DoWinGetRect(frame);
+        return;
+    case SYS_WIN_SET_TEXT:
+        subsystems::win32::DoWinSetText(frame);
+        return;
 
     case SYS_DLL_PROC_ADDRESS:
     {

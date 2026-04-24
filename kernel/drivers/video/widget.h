@@ -102,6 +102,12 @@ constexpr u32 kMaxWindows = 16;
 
 using WindowHandle = u32;
 
+/// Maximum ASCII bytes stored in a window's mutable title buffer
+/// (NUL included). Matches the syscall-side `kWinTitleMax` but
+/// kept independent so this header has no dependency on
+/// `core/syscall.h`.
+constexpr u32 kWindowTitleStorage = 64;
+
 struct WindowChrome
 {
     u32 x, y, w, h;
@@ -298,6 +304,23 @@ bool WindowAnyMessagePending(u64 pid);
 /// pid == 0 (would close every kernel-owned boot window).
 u32 WindowReapByOwner(u64 pid);
 
+/// Block the current task on the global message wait queue for
+/// up to `timeout_ticks` (10 ms per tick). Returns when woken
+/// by `WindowMsgWakeAll` OR when the timeout expires. Caller
+/// must hold interrupts disabled across the "queue empty check"
+/// and this call — same contract as `sched::WaitQueueBlockTimeout`.
+/// Wakes are broadcast: every blocker re-checks its own queue
+/// after return, so spurious wakes are expected and the caller
+/// must loop. The timeout is also a safety net against a lost
+/// wake landing in the narrow window between "check queue
+/// empty" and "enter wait queue".
+void WindowMsgWaitBlockTimeout(u64 timeout_ticks);
+
+/// Wake every task blocked in `WindowMsgWaitBlockTimeout`.
+/// Called from the PostMessage syscall and the keyboard / mouse
+/// routers after appending a message. Safe from IRQ context.
+void WindowMsgWakeAll();
+
 /// Append a solid fill primitive to `h`'s display list. Coords
 /// are in window-client-local pixels (origin = top-left of the
 /// client area, just below the title bar). Overflow evicts the
@@ -319,6 +342,36 @@ void WindowClearDisplayList(WindowHandle h);
 /// whether to post to the window's queue (PE-owned, pid > 0) or
 /// fall through to the native shell (pid == 0).
 u64 WindowOwnerPid(WindowHandle h);
+
+// ---------------------------------------------------------------
+// Visibility (SW_HIDE re-showable) + mutable title (SetWindowText)
+// + sizing (MoveWindow).
+//
+// Newly-registered windows start visible. SW_HIDE clears the bit
+// (the compositor stops drawing + hit-testing the window, but
+// the slot stays alive and the HWND keeps its identity). SW_SHOW
+// sets it again. Distinct from WindowClose which actually reaps
+// the slot.
+// ---------------------------------------------------------------
+
+/// True iff `h` is alive AND currently visible.
+bool WindowIsVisible(WindowHandle h);
+
+/// Set the visible bit. No redraw — callers trigger the next
+/// DesktopCompose themselves.
+void WindowSetVisible(WindowHandle h, bool visible);
+
+/// Bounded-copy a new ASCII title into the window's arena slot.
+/// Non-ASCII bytes become '?'. Returns false for invalid handle
+/// or a window the kernel didn't arena-allocate for (boot
+/// windows whose title lives in .rodata — refuse to mutate).
+/// A successful call updates the stored title pointer's CONTENT
+/// in place; the pointer itself doesn't change.
+bool WindowSetTitle(WindowHandle h, const char* ascii_src);
+
+/// Resize in-place. Width/height are clamped against the
+/// framebuffer. (0 = "don't change" for each dimension.)
+void WindowResizeTo(WindowHandle h, u32 w, u32 hgt);
 
 /// Paint every registered window in z-order (bottom first, top
 /// last) + render the stored title string across each title bar
