@@ -100,14 +100,14 @@ void DllLoaderSelfTest()
         SerialWrite("\"\n");
         return;
     }
-    if (!Expect(exp.num_funcs == 3, "num_funcs==3"))
+    if (!Expect(exp.num_funcs == 4, "num_funcs==4"))
     {
         SerialWrite("  got=");
         SerialWriteHex(exp.num_funcs);
         SerialWrite("\n");
         return;
     }
-    if (!Expect(exp.num_names == 3, "num_names==3"))
+    if (!Expect(exp.num_names == 4, "num_names==4"))
         return;
 
     PeExport e_add{};
