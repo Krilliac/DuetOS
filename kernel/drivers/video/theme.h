@@ -152,4 +152,13 @@ void ThemeRegisterWindow(ThemeRole role, WindowHandle h);
 /// registered (no-ops the window loop).
 void ThemeApplyToAll();
 
+/// One-shot self-test: walks the palette table asserting that
+/// (a) every ThemeId maps to a non-null Theme with a non-null
+/// name, (b) ThemeIdFromName / ThemeIdName round-trip every id,
+/// and (c) ThemeCycle visits every id exactly once across
+/// kCount calls. Saves and restores the active theme. Prints
+/// one PASS/FAIL line to COM1. Called from main.cpp right after
+/// ThemeSet is wired up at boot.
+void ThemeSelfTest();
+
 } // namespace duetos::drivers::video

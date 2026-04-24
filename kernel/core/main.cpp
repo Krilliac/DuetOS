@@ -386,6 +386,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             }
         }
     }
+    duetos::drivers::video::ThemeSelfTest();
     const auto& theme0 = duetos::drivers::video::ThemeCurrent();
 
     // CALCULATOR — native DuetOS app. Window chrome first,
