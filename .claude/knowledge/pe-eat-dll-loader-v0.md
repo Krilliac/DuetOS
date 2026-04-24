@@ -1,6 +1,6 @@
 # PE EAT parser + DLL loader — stage 2 kickoff
 
-**Type:** Observation · **Status:** Active (stage-2 slices 1-4 landed) · **Last updated:** 2026-04-24
+**Type:** Observation · **Status:** Active (stage-2 slices 1-5 landed) · **Last updated:** 2026-04-24
 
 ## Context
 
@@ -410,6 +410,79 @@ DLL lands. For now: `windows-kill.exe` still calls
 GetProcAddress but all DLLs are empty, so the result is 0 —
 same as before slice 4.
 
+## Slice 5 — pre-load `customdll.dll` into every Win32-imports PE
+
+Slice 4 made the `SYS_DLL_PROC_ADDRESS` syscall real, but no
+process yet had any DLL registered — so every call still
+returned 0, just through a different code path. Slice 5 closes
+that gap for the test fixture: `SpawnPeFile` now calls
+`DllLoad` + `ProcessRegisterDllImage` on `customdll.dll`
+immediately after `Win32HeapInit`, inside the existing
+`r.imports_resolved` gate.
+
+### Where it hooks
+
+`kernel/core/ring3_smoke.cpp::SpawnPeFile` — right after the
+Win32 heap stands up for a PE that had imports. Reuses the
+same gate: freestanding PEs (e.g. `hello.exe`) neither get a
+heap nor a DLL, keeping their frame footprint unchanged.
+
+```cpp
+if (r.imports_resolved) {
+    Win32HeapInit(proc);
+    DllLoad(kBinCustomDllBytes, len, as, /*aslr_delta=*/0);
+    ProcessRegisterDllImage(proc, dll.image);
+    // [ring3] pre-loaded customdll.dll base=0x10000000 pid=0xN
+}
+```
+
+### Behavioural delta
+
+- **Every Win32-imports PE now has `customdll.dll` mapped at
+  VA `0x10000000`** (three pages: headers, `.text`, `.rdata`).
+  No collision with existing fixed VAs (win32 heap at
+  `0x50000000`, stubs at `0x60000000`, proc-env at
+  `0x65000000`, TEB at `0x70000000`, stack ending at
+  `0x80000000`, typical PE ImageBase `0x140000000+ASLR`).
+- **No existing PE changes behaviour.** None of
+  `hello_winapi`, `thread_stress`, `syscall_stress`, or
+  `windows-kill` imports anything from `customdll.dll`, so
+  the IAT is unaffected and their code paths are identical.
+- **`GetProcAddress(hmod=<customdll_base>, "CustomAdd")` now
+  resolves.** This is the first end-to-end proof that the
+  stage-2 pipeline works from user mode all the way through
+  the kernel DLL table to the mapped export.
+
+### Why preload into EVERY Win32-imports process, not opt-in?
+
+- **Regression canary.** Every spawn that has imports exercises
+  `DllLoad` + register + AS mapping. A frame-allocator
+  regression, a paging bug, or an AS-region-bookkeeping drift
+  would surface on the next boot.
+- **No per-PE metadata to read.** An opt-in design needs
+  either a CMake-side flag per PE fixture or a "needs
+  customdll" marker in the PE itself. Neither is cheaper
+  than the 3 frames a preload costs.
+- **Non-fatal on failure.** If `DllLoad` fails (e.g. frame
+  budget tight for a specific workload), we log loudly but
+  let the spawn proceed. Promote to fatal the first time a
+  real PE depends on the DLL being loaded.
+
+### Boot-log shape
+
+For every Win32-imports PE:
+
+```
+[ring3] pe spawn name="ring3-hello-winapi" pid=0xN ...
+[dll-load] begin base_va=0x10000000 size=0x3000 sections=0x2 chars=0x2022
+[dll-load] OK entry_rva=0x0 has_exports=0x1
+[ring3] pre-loaded customdll.dll base=0x10000000 pid=0xN
+```
+
+Freestanding PEs (`hello.exe`) emit no `[dll-load]` /
+`[ring3] pre-loaded` lines — the `r.imports_resolved` gate
+keeps them untouched.
+
 ## Boot-time visibility
 
 `PeReport` now appends an `exports:` block to the diagnostic it
@@ -427,7 +500,7 @@ first real DLL embedded in ramfs will light up the full dump:
     [0x0003] CustomName -> forwarder="KERNEL32.GetCommandLineA"
 ```
 
-## What's next (stage 2 slice 5+)
+## What's next (stage 2 slice 6+)
 
 1. ~~Real test DLL.~~ **Landed in slice 2** —
    `userland/libs/customdll/`, boot-time `DllLoaderSelfTest`.
@@ -437,6 +510,8 @@ first real DLL embedded in ramfs will light up the full dump:
 3. ~~Real GetProcAddress.~~ **Landed in slice 4** —
    `SYS_DLL_PROC_ADDRESS` (57), `ProcessResolveDllExportByBase`,
    real stub at `kOffGetProcAddressReal`.
+4. ~~Preload customdll.dll.~~ **Landed in slice 5** —
+   every Win32-imports spawn maps + registers the DLL.
 3. **Recursive import resolution.** Walk the DLL's own Import
    Directory, look up each target DLL in the table (load if
    absent, detect circular dependencies), then patch the DLL's

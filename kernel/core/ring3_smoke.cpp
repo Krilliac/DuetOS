@@ -6,6 +6,7 @@
 #include "../cpu/percpu.h"
 #include "../debug/inspect.h"
 #include "../fs/ramfs.h"
+#include "generated_customdll.h"
 #include "generated_hello_pe.h"
 #include "generated_hello_winapi.h"
 #include "generated_syscall_stress.h"
@@ -17,6 +18,7 @@
 #include "../mm/paging.h"
 #include "../sched/sched.h"
 #include "../subsystems/win32/heap.h"
+#include "dll_loader.h"
 #include "elf_loader.h"
 #include "klog.h"
 #include "random.h"
@@ -1914,6 +1916,53 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
             SerialWrite("\"\n");
             AddressSpaceRelease(as);
             return 0;
+        }
+        // Stage-2 slice 5 — pre-load customdll.dll into every
+        // Win32-imports process's address space and register it
+        // in the DLL image table. This is the first production
+        // use of DllLoad / ProcessRegisterDllImage: any PE that
+        // subsequently calls GetProcAddress(hmod, "CustomAdd"/
+        // "CustomMul"/"CustomVersion") will now get a real VA
+        // back instead of the slice-3 era 0.
+        //
+        // No existing ramfs PE imports from customdll.dll, so
+        // this is purely a capability — it doesn't change any
+        // current PE's behaviour. The preload doubles as a
+        // regression canary: if DllLoad starts failing (e.g. a
+        // frame-budget shortfall, a paging regression), every
+        // Win32-imports spawn logs the failure.
+        //
+        // A DllLoad failure here is non-fatal — we proceed with
+        // the spawn but log loudly. Once a real workload
+        // depends on customdll.dll exports, promote to fatal.
+        {
+            const DllLoadResult dll =
+                DllLoad(fs::generated::kBinCustomDllBytes, fs::generated::kBinCustomDllBytes_len, as, /*aslr_delta=*/0);
+            if (dll.status == DllLoadStatus::Ok)
+            {
+                if (!ProcessRegisterDllImage(proc, dll.image))
+                {
+                    SerialWrite("[ring3] customdll register failed for \"");
+                    SerialWrite(name);
+                    SerialWrite("\" (table full?)\n");
+                }
+                else
+                {
+                    SerialWrite("[ring3] pre-loaded customdll.dll base=");
+                    SerialWriteHex(dll.image.base_va);
+                    SerialWrite(" pid=");
+                    SerialWriteHex(proc->pid);
+                    SerialWrite("\n");
+                }
+            }
+            else
+            {
+                SerialWrite("[ring3] customdll DllLoad failed for \"");
+                SerialWrite(name);
+                SerialWrite("\" status=");
+                SerialWrite(DllLoadStatusName(dll.status));
+                SerialWrite("\n");
+            }
         }
     }
     SerialWrite("[ring3] pe spawn name=\"");
