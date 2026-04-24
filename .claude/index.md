@@ -69,6 +69,7 @@ _Read this at every session start (after git sync). Each row links to a detailed
 | Driver shells v0 — net / usb / audio / gpu-probes | [knowledge/driver-shells-v0.md](knowledge/driver-shells-v0.md) | Observation | Active | 2026-04-22 |
 | render/drivers v1 — virtio-gpu bring-up + D3D IAT routing + vendor MMIO reads | [knowledge/render-drivers-v1.md](knowledge/render-drivers-v1.md) | Observation + Pattern | Active | 2026-04-24 |
 | render/drivers v2 — virtio-gpu 2D cycle + SYS_GDI_BITBLT + real paint IAT | [knowledge/render-drivers-v2.md](knowledge/render-drivers-v2.md) | Observation + Pattern | Active | 2026-04-24 |
+| render/drivers v3 — virtio-gpu kernel FB + TextOutA + GDI object table + real BitBlt | [knowledge/render-drivers-v3.md](knowledge/render-drivers-v3.md) | Observation + Decision | Active | 2026-04-24 |
 | xHCI enumeration v0 — Address Device + GET_DESCRIPTOR(Device) | [knowledge/xhci-enumeration-v0.md](knowledge/xhci-enumeration-v0.md) | Observation | Active | 2026-04-23 |
 | xHCI HID boot keyboard — end-to-end USB keyboard input | [knowledge/xhci-hid-keyboard-v0.md](knowledge/xhci-hid-keyboard-v0.md) | Observation | Active | 2026-04-23 |
 | Intel e1000 NIC driver — real packet I/O on commodity wired gigabit | [knowledge/e1000-driver-v0.md](knowledge/e1000-driver-v0.md) | Observation | Active | 2026-04-23 |
