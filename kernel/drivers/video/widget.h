@@ -256,6 +256,9 @@ enum class WinGdiPrimKind : u8
     FillRect,  // x,y,w,h,colour → solid fill relative to client origin
     TextOut,   // x,y,colour,text → 8x8 ASCII glyphs
     Rectangle, // x,y,w,h,colour → 1-px outline
+    Line,      // x,y,w,h,colour — (x,y) → (x+w, y+h) Bresenham line
+    Ellipse,   // x,y,w,h,colour — 1-px outline, midpoint algorithm
+    Pixel,     // x,y,colour — single client-local pixel
 };
 
 struct WinGdiPrim
@@ -334,6 +337,16 @@ void WindowClientRectangle(WindowHandle h, i32 x, i32 y, i32 w, i32 hgt, u32 rgb
 /// to `kWinTextOutMax` ASCII bytes, non-ASCII bytes stored as '?').
 void WindowClientTextOut(WindowHandle h, i32 x, i32 y, const char* text, u32 rgb);
 
+/// Append a Bresenham line primitive from (x, y) to (x2, y2).
+void WindowClientLine(WindowHandle h, i32 x, i32 y, i32 x2, i32 y2, u32 rgb);
+
+/// Append a 1-pixel ellipse outline primitive inside the
+/// bounding box (x, y, w, hgt).
+void WindowClientEllipse(WindowHandle h, i32 x, i32 y, i32 w, i32 hgt, u32 rgb);
+
+/// Append a single-pixel primitive.
+void WindowClientPixel(WindowHandle h, i32 x, i32 y, u32 rgb);
+
 /// Drop every recorded GDI primitive for `h` (WM_PAINT with
 /// bErase = TRUE support).
 void WindowClearDisplayList(WindowHandle h);
@@ -372,6 +385,98 @@ bool WindowSetTitle(WindowHandle h, const char* ascii_src);
 /// Resize in-place. Width/height are clamped against the
 /// framebuffer. (0 = "don't change" for each dimension.)
 void WindowResizeTo(WindowHandle h, u32 w, u32 hgt);
+
+// ---------------------------------------------------------------
+// Async input-state cache + mouse capture + text clipboard.
+//
+// Async keyboard state: maintained by the kbd reader via
+// `WindowInputTrackKey` on every press/release edge. Backs Win32
+// `GetKeyState` / `GetAsyncKeyState` — returns true iff the
+// key code is currently held.
+//
+// Mouse capture: one HWND per system ("ownership"). When non-
+// invalid, subsequent mouse-message routing targets THIS window
+// regardless of the cursor position. Backs Win32 SetCapture /
+// ReleaseCapture / GetCapture.
+//
+// Clipboard: a single bounded ASCII text buffer. Backs Win32
+// SetClipboardData(CF_TEXT) / GetClipboardData(CF_TEXT) via
+// the user32 wrappers.
+// ---------------------------------------------------------------
+
+constexpr u32 kWindowVkStateSize = 256;
+
+/// Record a key press/release edge. `code` can be a raw VK /
+/// char code (<256) or an extended key (arrows, F-keys). Only
+/// the low 8 bits are retained; extended codes wrap but collide
+/// only with keys we don't otherwise expose.
+void WindowInputTrackKey(u16 code, bool down);
+
+/// True iff `code` is currently down. Always false for codes
+/// outside the tracked range.
+bool WindowKeyIsDown(u16 code);
+
+/// Current cursor position in framebuffer coordinates. Pointers
+/// may be null to skip writing that axis.
+void WindowGetCursor(u32* x_out, u32* y_out);
+
+/// Move the cursor. Backing call is `CursorHide` / move /
+/// `CursorShow`, all under the compositor lock owned by the
+/// caller.
+void WindowSetCursor(u32 x, u32 y);
+
+/// Set the captured window. Returns the previously captured
+/// handle (kWindowInvalid if none). Passing kWindowInvalid
+/// releases capture (same as `WindowReleaseCapture`).
+WindowHandle WindowSetCapture(WindowHandle h);
+
+/// Release capture. No-op if no window is captured.
+void WindowReleaseCapture();
+
+/// Current captured window or kWindowInvalid.
+WindowHandle WindowGetCapture();
+
+constexpr u32 kWindowClipboardMax = 1024;
+
+/// Replace the clipboard text. `text` is copied in bounded to
+/// `kWindowClipboardMax` ASCII bytes (non-ASCII stored as '?').
+/// A null pointer clears the clipboard.
+void WindowClipboardSetText(const char* text);
+
+/// Copy current clipboard text into `dst` (cap = buffer size
+/// including NUL). Returns the stored length (bytes without
+/// NUL), always ≤ cap - 1 once the call returns.
+u32 WindowClipboardGetText(char* dst, u32 cap);
+
+// ---------------------------------------------------------------
+// Per-window timer table. `SetTimer` registers (hwnd, timer_id,
+// interval_ms); the kernel's timer-ticker thread posts WM_TIMER
+// to the target HWND every `interval_ms`. Per-process budget is
+// bounded by `kWindowTimersMax`.
+// ---------------------------------------------------------------
+
+constexpr u32 kWindowTimersMax = 32;
+
+/// Install or update a timer. Returns true on success. `hwnd`
+/// must be alive + owned by `pid` (the syscall's caller). If a
+/// timer with the same (hwnd, timer_id) already exists its
+/// interval is updated; otherwise a free slot is consumed.
+/// Returns false if the timer table is full.
+bool WindowTimerSet(u64 pid, WindowHandle hwnd, u32 timer_id, u32 interval_ms);
+
+/// Remove a timer. Returns true on success, false if unknown.
+bool WindowTimerKill(u64 pid, WindowHandle hwnd, u32 timer_id);
+
+/// Drop all timers for a given (pid, hwnd) — called by the
+/// process reaper so dead windows don't keep posting.
+void WindowTimerReap(u64 pid, WindowHandle hwnd);
+
+/// Advance every registered timer by one scheduler tick. Posts
+/// WM_TIMER into the target window's queue when a timer's
+/// remaining counter reaches 0 and resets it to `interval`.
+/// Intended to be called from a dedicated timer-ticker thread
+/// under the compositor lock.
+void WindowTimerTick();
 
 /// Paint every registered window in z-order (bottom first, top
 /// last) + render the stored title string across each title bar

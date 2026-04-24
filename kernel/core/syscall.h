@@ -740,6 +740,83 @@ enum SyscallNumber : u64
     // Backs Win32 SetWindowTextA; SetWindowTextW does its own
     // UTF-16 → ASCII strip on the user side first.
     SYS_WIN_SET_TEXT = 71,
+
+    // SYS_WIN_TIMER_SET — install or update a per-window timer.
+    //   rdi = HWND (biased)
+    //   rsi = timer_id (u32; caller-assigned)
+    //   rdx = interval in ms (rounds up to scheduler ticks)
+    //   rax = timer_id on success, 0 on failure (bad handle,
+    //         timer table full, or interval == 0).
+    // Backs Win32 SetTimer. Timer ticker posts WM_TIMER
+    // (wParam = timer_id) to the window every interval.
+    SYS_WIN_TIMER_SET = 72,
+
+    // SYS_WIN_TIMER_KILL — remove a timer.
+    //   rdi = HWND (biased)
+    //   rsi = timer_id
+    //   rax = 1 on success, 0 if unknown. Backs Win32 KillTimer.
+    SYS_WIN_TIMER_KILL = 73,
+
+    // SYS_GDI_LINE — record a Bresenham line primitive.
+    //   rdi = HWND (biased)
+    //   rsi = x0, rdx = y0, r10 = x1, r8 = y1 (i32 client-local)
+    //   r9  = COLORREF. Backs Win32 LineTo + MoveToEx+LineTo.
+    SYS_GDI_LINE = 74,
+
+    // SYS_GDI_ELLIPSE — 1-px outline inside a bounding box.
+    //   Same arg shape as SYS_GDI_FILL_RECT. Backs Win32 Ellipse.
+    SYS_GDI_ELLIPSE = 75,
+
+    // SYS_GDI_SET_PIXEL — single-pixel primitive.
+    //   rdi = HWND, rsi = x, rdx = y, r10 = COLORREF.
+    //   Backs Win32 SetPixel / SetPixelV.
+    SYS_GDI_SET_PIXEL = 76,
+
+    // SYS_WIN_GET_KEYSTATE — async keyboard state query.
+    //   rdi = virtual-key / character code (low 8 bits used).
+    //   rax = Win32-style short: high bit set iff currently
+    //         held; low bit set iff toggled (v1: toggled bit
+    //         not tracked — always 0). Backs Win32 GetKeyState
+    //         + GetAsyncKeyState.
+    SYS_WIN_GET_KEYSTATE = 77,
+
+    // SYS_WIN_GET_CURSOR — read cursor position.
+    //   rdi = user pointer to a 2×i32 POINT (x, y).
+    //   rax = 1 on success, 0 on bad pointer. Backs
+    //         GetCursorPos.
+    SYS_WIN_GET_CURSOR = 78,
+
+    // SYS_WIN_SET_CURSOR — move cursor.
+    //   rdi = x, rsi = y (framebuffer coords; clamped).
+    //   rax = 1 on success. Backs SetCursorPos.
+    SYS_WIN_SET_CURSOR = 79,
+
+    // SYS_WIN_SET_CAPTURE — grab mouse for `HWND`.
+    //   rdi = HWND.
+    //   rax = previously-captured HWND (biased; 0 if none).
+    //         Backs Win32 SetCapture.
+    SYS_WIN_SET_CAPTURE = 80,
+
+    // SYS_WIN_RELEASE_CAPTURE — release capture. No args.
+    //   rax = 1 always. Backs Win32 ReleaseCapture.
+    SYS_WIN_RELEASE_CAPTURE = 81,
+
+    // SYS_WIN_GET_CAPTURE — query captured HWND. No args.
+    //   rax = biased HWND, or 0 if none. Backs Win32 GetCapture.
+    SYS_WIN_GET_CAPTURE = 82,
+
+    // SYS_WIN_CLIP_SET_TEXT — replace clipboard text.
+    //   rdi = user pointer to NUL-terminated ASCII (nullable).
+    //   rax = 1 always. Backs Win32 SetClipboardData(CF_TEXT)
+    //         via the user32 wrapper.
+    SYS_WIN_CLIP_SET_TEXT = 83,
+
+    // SYS_WIN_CLIP_GET_TEXT — read clipboard text.
+    //   rdi = user buffer pointer, rsi = buffer capacity.
+    //   rax = stored length in bytes (0 if empty / bad
+    //         pointer / zero cap). Backs Win32
+    //         GetClipboardData(CF_TEXT).
+    SYS_WIN_CLIP_GET_TEXT = 84,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit

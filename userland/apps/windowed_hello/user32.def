@@ -13,5 +13,12 @@ LIBRARY user32.dll
 
 EXPORTS
     CreateWindowExA
-    ShowWindow
+    DestroyWindow
+    DispatchMessageA
+    GetMessageA
+    KillTimer
     MessageBoxA
+    PeekMessageA
+    SetTimer
+    ShowWindow
+    TranslateMessage

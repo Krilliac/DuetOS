@@ -19,6 +19,7 @@ _Read this at every session start (after git sync). Each row links to a detailed
 | PE EAT parser + DLL loader skeleton (stage 2 slice 1) | [knowledge/pe-eat-dll-loader-v0.md](knowledge/pe-eat-dll-loader-v0.md) | Observation | Active | 2026-04-24 |
 | Win32 windowing v0 — user32 → SYS_WIN_* → compositor | [knowledge/win32-windowing-v0.md](knowledge/win32-windowing-v0.md) | Observation + Decision | Active | 2026-04-24 |
 | Win32 windowing v1 — per-window msg queues + GDI + input + reaper | [knowledge/win32-windowing-v1.md](knowledge/win32-windowing-v1.md) | Observation + Decision | Active | 2026-04-24 |
+| Win32 windowing v1.2 — lifecycle msgs + timers + GDI prims + async input + capture + clipboard | [knowledge/win32-windowing-v1.2.md](knowledge/win32-windowing-v1.2.md) | Observation + Decision | Active | 2026-04-24 |
 | Win32 heap — real HeapSize + HeapReAlloc / realloc (batch 14) | [knowledge/win32-subsystem-v0.md#batch-14--real-heapsize--heaprealloc](knowledge/win32-subsystem-v0.md) | Observation | Active | 2026-04-21 |
 | Real-world PE execution — winkill CRT entry + argc/argv + five loader gaps | [knowledge/pe-real-world-run.md](knowledge/pe-real-world-run.md) | Observation | Active | 2026-04-22 |
 | Win32 stubs — callee-saved rdi/rsi ABI bug + fix pattern | [knowledge/win32-stubs-rdi-rsi-abi.md](knowledge/win32-stubs-rdi-rsi-abi.md) | Issue + Pattern | Active | 2026-04-22 |

@@ -1349,6 +1349,45 @@ void SyscallDispatch(arch::TrapFrame* frame)
     case SYS_WIN_SET_TEXT:
         subsystems::win32::DoWinSetText(frame);
         return;
+    case SYS_WIN_TIMER_SET:
+        subsystems::win32::DoWinTimerSet(frame);
+        return;
+    case SYS_WIN_TIMER_KILL:
+        subsystems::win32::DoWinTimerKill(frame);
+        return;
+    case SYS_GDI_LINE:
+        subsystems::win32::DoGdiLine(frame);
+        return;
+    case SYS_GDI_ELLIPSE:
+        subsystems::win32::DoGdiEllipse(frame);
+        return;
+    case SYS_GDI_SET_PIXEL:
+        subsystems::win32::DoGdiSetPixel(frame);
+        return;
+    case SYS_WIN_GET_KEYSTATE:
+        subsystems::win32::DoWinGetKeyState(frame);
+        return;
+    case SYS_WIN_GET_CURSOR:
+        subsystems::win32::DoWinGetCursor(frame);
+        return;
+    case SYS_WIN_SET_CURSOR:
+        subsystems::win32::DoWinSetCursor(frame);
+        return;
+    case SYS_WIN_SET_CAPTURE:
+        subsystems::win32::DoWinSetCapture(frame);
+        return;
+    case SYS_WIN_RELEASE_CAPTURE:
+        subsystems::win32::DoWinReleaseCapture(frame);
+        return;
+    case SYS_WIN_GET_CAPTURE:
+        subsystems::win32::DoWinGetCapture(frame);
+        return;
+    case SYS_WIN_CLIP_SET_TEXT:
+        subsystems::win32::DoWinClipSetText(frame);
+        return;
+    case SYS_WIN_CLIP_GET_TEXT:
+        subsystems::win32::DoWinClipGetText(frame);
+        return;
 
     case SYS_DLL_PROC_ADDRESS:
     {

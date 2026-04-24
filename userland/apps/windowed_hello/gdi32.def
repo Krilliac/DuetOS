@@ -1,0 +1,20 @@
+; userland/apps/windowed_hello/gdi32.def
+;
+; gdi32 imports used by the client-area paint pass — exercises
+; FillRect, Rectangle, Ellipse, LineTo/MoveToEx, TextOutA,
+; SetPixel bridging into the kernel compositor's display list.
+
+LIBRARY gdi32.dll
+
+EXPORTS
+    CreateSolidBrush
+    DeleteObject
+    Ellipse
+    FillRect
+    GetDC
+    LineTo
+    MoveToEx
+    Rectangle
+    ReleaseDC
+    SetPixel
+    TextOutA

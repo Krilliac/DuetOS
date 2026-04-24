@@ -188,6 +188,42 @@ constinit duetos::sched::Mutex g_compositor_mutex{};
 // a workload has many concurrent message pumps.
 constinit duetos::sched::WaitQueue g_msg_wq{};
 
+// Async keyboard state — 1 bit per VK code. The kbd-reader
+// toggles bits on every press/release edge before dispatching
+// the event; `WindowKeyIsDown` reads the bit. Covers both raw
+// ASCII chars (0x20..0x7E) and extended codes (arrows, F-keys)
+// up to 255. Kernel apps don't need this — they consume events
+// from the ring directly — so this table is effectively a Win32
+// compat shim.
+constinit u8 g_vk_state[kWindowVkStateSize / 8] = {};
+
+// Mouse capture — one system-wide HWND that gets all mouse
+// events regardless of cursor position, or kWindowInvalid when
+// no capture is active.
+constinit WindowHandle g_mouse_capture = kWindowInvalid;
+
+// Text clipboard — CF_TEXT only for v1. Not split per-process:
+// matches Win32 in that the clipboard is a system singleton.
+constinit char g_clipboard[kWindowClipboardMax] = {};
+constinit u32 g_clipboard_len = 0;
+
+// Per-process timer table. `remaining_ticks` counts down each
+// scheduler tick; on zero, a WM_TIMER is posted to `hwnd` with
+// wParam = timer_id, and `remaining_ticks` is reset to
+// `interval_ticks`. 32 slots is enough for many simultaneous
+// SetTimer callers — upgrade to a dynamic table when needed.
+struct WindowTimerSlot
+{
+    bool in_use;
+    u8 _pad[3];
+    u32 timer_id;
+    u64 owner_pid;
+    WindowHandle hwnd;
+    u32 interval_ticks;
+    u32 remaining_ticks;
+};
+constinit WindowTimerSlot g_timers[kWindowTimersMax] = {};
+
 // Currently-active (focused) window — the one with the brightly
 // painted title bar. Follows the topmost z-order slot: WindowRaise
 // sets it; WindowClose may clear it. kWindowInvalid when no
@@ -646,6 +682,136 @@ void WindowDrawAllOrdered()
                 }
                 break;
             }
+            case WinGdiPrimKind::Line:
+            {
+                // Bresenham: (ax, ay) = start; endpoint =
+                // (client_x + pr.x + pr.w, client_y + pr.y + pr.h).
+                // Clamp both endpoints to the client rect rather
+                // than clipping the line analytically.
+                const i32 cx_max = static_cast<i32>(max_x);
+                const i32 cy_max = static_cast<i32>(max_y);
+                const i32 cx_min = static_cast<i32>(client_x);
+                const i32 cy_min = static_cast<i32>(client_y);
+                i32 x0 = ax;
+                i32 y0 = ay;
+                i32 x1 = ax + pr.w;
+                i32 y1 = ay + pr.h;
+                // Bresenham, symmetric in all 8 octants.
+                const i32 dx_l = (x1 >= x0) ? (x1 - x0) : (x0 - x1);
+                const i32 sx = (x1 >= x0) ? 1 : -1;
+                const i32 dy_l = -((y1 >= y0) ? (y1 - y0) : (y0 - y1));
+                const i32 sy = (y1 >= y0) ? 1 : -1;
+                i32 err = dx_l + dy_l;
+                // Safety cap on iterations so a malicious line
+                // with huge coords can't spin the compositor.
+                const u32 kMaxLinePixels = 4096;
+                for (u32 step = 0; step < kMaxLinePixels; ++step)
+                {
+                    if (x0 >= cx_min && x0 < cx_max && y0 >= cy_min && y0 < cy_max)
+                    {
+                        FramebufferPutPixel(static_cast<u32>(x0), static_cast<u32>(y0), pr.colour_rgb);
+                    }
+                    if (x0 == x1 && y0 == y1)
+                        break;
+                    const i32 e2 = 2 * err;
+                    if (e2 >= dy_l)
+                    {
+                        err += dy_l;
+                        x0 += sx;
+                    }
+                    if (e2 <= dx_l)
+                    {
+                        err += dx_l;
+                        y0 += sy;
+                    }
+                }
+                break;
+            }
+            case WinGdiPrimKind::Ellipse:
+            {
+                // Midpoint ellipse over axis-aligned bounding
+                // box (ax, ay, pw, ph). Degenerate when either
+                // dimension is under 2 — fall back to a pixel /
+                // line.
+                if (pw < 2 || ph < 2)
+                {
+                    if (pw > 0 && ph > 0)
+                    {
+                        FramebufferPutPixel(static_cast<u32>(ax), static_cast<u32>(ay), pr.colour_rgb);
+                    }
+                    break;
+                }
+                const i32 a = static_cast<i32>(pw / 2);
+                const i32 b = static_cast<i32>(ph / 2);
+                const i32 xc = ax + a;
+                const i32 yc = ay + b;
+                const i64 a2 = static_cast<i64>(a) * a;
+                const i64 b2 = static_cast<i64>(b) * b;
+                auto plot4 = [&](i32 x_off, i32 y_off)
+                {
+                    const i32 px_pts[4] = {xc + x_off, xc - x_off, xc + x_off, xc - x_off};
+                    const i32 py_pts[4] = {yc + y_off, yc + y_off, yc - y_off, yc - y_off};
+                    for (u32 k = 0; k < 4; ++k)
+                    {
+                        if (px_pts[k] >= static_cast<i32>(client_x) && px_pts[k] < static_cast<i32>(max_x) &&
+                            py_pts[k] >= static_cast<i32>(client_y) && py_pts[k] < static_cast<i32>(max_y))
+                        {
+                            FramebufferPutPixel(static_cast<u32>(px_pts[k]), static_cast<u32>(py_pts[k]),
+                                                pr.colour_rgb);
+                        }
+                    }
+                };
+                // Region 1.
+                i64 x = 0;
+                i64 y = b;
+                i64 d1 = b2 - a2 * b + a2 / 4;
+                i64 dx = 2 * b2 * x;
+                i64 dy = 2 * a2 * y;
+                while (dx < dy)
+                {
+                    plot4(static_cast<i32>(x), static_cast<i32>(y));
+                    if (d1 < 0)
+                    {
+                        x++;
+                        dx += 2 * b2;
+                        d1 += dx + b2;
+                    }
+                    else
+                    {
+                        x++;
+                        y--;
+                        dx += 2 * b2;
+                        dy -= 2 * a2;
+                        d1 += dx - dy + b2;
+                    }
+                }
+                // Region 2.
+                i64 d2 = b2 * (2 * x + 1) * (2 * x + 1) / 4 + a2 * (y - 1) * (y - 1) - a2 * b2;
+                while (y >= 0)
+                {
+                    plot4(static_cast<i32>(x), static_cast<i32>(y));
+                    if (d2 > 0)
+                    {
+                        y--;
+                        dy -= 2 * a2;
+                        d2 += a2 - dy;
+                    }
+                    else
+                    {
+                        y--;
+                        x++;
+                        dx += 2 * b2;
+                        dy -= 2 * a2;
+                        d2 += dx - dy + a2;
+                    }
+                }
+                break;
+            }
+            case WinGdiPrimKind::Pixel:
+                // Single pixel at (ax, ay). Already clipped by
+                // the outer max-x/max-y guard above.
+                FramebufferPutPixel(static_cast<u32>(ax), static_cast<u32>(ay), pr.colour_rgb);
+                break;
             case WinGdiPrimKind::None:
                 break;
             }
@@ -909,9 +1075,15 @@ u32 WindowReapByOwner(u64 pid)
     {
         if (g_windows[i].alive && g_windows[i].owner_pid == pid)
         {
+            WindowTimerReap(pid, static_cast<WindowHandle>(i));
             WindowClose(static_cast<WindowHandle>(i));
             ++reaped;
         }
+    }
+    // If the dying process held mouse capture, release it.
+    if (WindowGetCapture() != kWindowInvalid && WindowOwnerPid(WindowGetCapture()) == pid)
+    {
+        WindowReleaseCapture();
     }
     // A process going away could have been holding a pump open
     // in a sibling thread. Wake any GetMessage blockers so they
@@ -1019,6 +1191,56 @@ void WindowClientTextOut(WindowHandle h, i32 x, i32 y, const char* text, u32 rgb
     PrimListAppend(g_windows[h], p);
 }
 
+void WindowClientLine(WindowHandle h, i32 x, i32 y, i32 x2, i32 y2, u32 rgb)
+{
+    if (!WindowValid(h))
+    {
+        return;
+    }
+    WinGdiPrim p{};
+    p.kind = WinGdiPrimKind::Line;
+    p.x = x;
+    p.y = y;
+    // Encode endpoint as (w, h) deltas so the struct stays the
+    // same shape as FillRect/Rectangle.
+    p.w = x2 - x;
+    p.h = y2 - y;
+    p.colour_rgb = rgb;
+    PrimListAppend(g_windows[h], p);
+}
+
+void WindowClientEllipse(WindowHandle h, i32 x, i32 y, i32 w, i32 hgt, u32 rgb)
+{
+    if (!WindowValid(h))
+    {
+        return;
+    }
+    WinGdiPrim p{};
+    p.kind = WinGdiPrimKind::Ellipse;
+    p.x = x;
+    p.y = y;
+    p.w = w;
+    p.h = hgt;
+    p.colour_rgb = rgb;
+    PrimListAppend(g_windows[h], p);
+}
+
+void WindowClientPixel(WindowHandle h, i32 x, i32 y, u32 rgb)
+{
+    if (!WindowValid(h))
+    {
+        return;
+    }
+    WinGdiPrim p{};
+    p.kind = WinGdiPrimKind::Pixel;
+    p.x = x;
+    p.y = y;
+    p.w = 1;
+    p.h = 1;
+    p.colour_rgb = rgb;
+    PrimListAppend(g_windows[h], p);
+}
+
 void WindowClearDisplayList(WindowHandle h)
 {
     if (!WindowValid(h))
@@ -1066,6 +1288,246 @@ bool WindowSetTitle(WindowHandle h, const char* ascii_src)
     }
     StoreTitle(g_windows[h], ascii_src);
     return true;
+}
+
+// --- Async keyboard state -----------------------------------------
+
+void WindowInputTrackKey(u16 code, bool down)
+{
+    const u32 idx = code & 0xFF;
+    const u32 byte = idx / 8;
+    const u32 bit = idx % 8;
+    if (down)
+    {
+        g_vk_state[byte] |= static_cast<u8>(1u << bit);
+    }
+    else
+    {
+        g_vk_state[byte] &= static_cast<u8>(~(1u << bit));
+    }
+}
+
+bool WindowKeyIsDown(u16 code)
+{
+    const u32 idx = code & 0xFF;
+    const u32 byte = idx / 8;
+    const u32 bit = idx % 8;
+    return (g_vk_state[byte] & (1u << bit)) != 0;
+}
+
+// --- Cursor accessors ---------------------------------------------
+
+void WindowGetCursor(u32* x_out, u32* y_out)
+{
+    u32 cx = 0, cy = 0;
+    CursorPosition(&cx, &cy);
+    if (x_out)
+        *x_out = cx;
+    if (y_out)
+        *y_out = cy;
+}
+
+void WindowSetCursor(u32 x, u32 y)
+{
+    u32 cx = 0, cy = 0;
+    CursorPosition(&cx, &cy);
+    const i32 dx = static_cast<i32>(x) - static_cast<i32>(cx);
+    const i32 dy = static_cast<i32>(y) - static_cast<i32>(cy);
+    CursorHide();
+    CursorMove(static_cast<i8>((dx > 127)    ? 127
+                               : (dx < -128) ? -128
+                                             : dx),
+               static_cast<i8>((dy > 127)    ? 127
+                               : (dy < -128) ? -128
+                                             : dy));
+    CursorShow();
+}
+
+// --- Mouse capture ------------------------------------------------
+
+WindowHandle WindowSetCapture(WindowHandle h)
+{
+    const WindowHandle prev = g_mouse_capture;
+    if (h == kWindowInvalid || !WindowValid(h))
+    {
+        g_mouse_capture = kWindowInvalid;
+    }
+    else
+    {
+        g_mouse_capture = h;
+    }
+    return prev;
+}
+
+void WindowReleaseCapture()
+{
+    g_mouse_capture = kWindowInvalid;
+}
+
+WindowHandle WindowGetCapture()
+{
+    if (g_mouse_capture != kWindowInvalid && !WindowValid(g_mouse_capture))
+    {
+        // Capture owner died without releasing. Reset so we
+        // don't keep routing to a dead slot.
+        g_mouse_capture = kWindowInvalid;
+    }
+    return g_mouse_capture;
+}
+
+// --- Clipboard ----------------------------------------------------
+
+void WindowClipboardSetText(const char* text)
+{
+    u32 i = 0;
+    if (text != nullptr)
+    {
+        for (; i + 1 < kWindowClipboardMax && text[i] != '\0'; ++i)
+        {
+            const char c = text[i];
+            g_clipboard[i] = (c >= 0x20 && c < 0x7F) ? c : '?';
+        }
+    }
+    g_clipboard[i] = '\0';
+    g_clipboard_len = i;
+}
+
+u32 WindowClipboardGetText(char* dst, u32 cap)
+{
+    if (dst == nullptr || cap == 0)
+    {
+        return 0;
+    }
+    u32 n = g_clipboard_len;
+    if (n > cap - 1)
+        n = cap - 1;
+    for (u32 i = 0; i < n; ++i)
+    {
+        dst[i] = g_clipboard[i];
+    }
+    dst[n] = '\0';
+    return n;
+}
+
+// --- Timer table --------------------------------------------------
+
+namespace
+{
+
+// Resolve an existing (pid, hwnd, timer_id) slot index or
+// `kWindowTimersMax` if none. Linear scan — N is 32.
+u32 FindTimerSlot(u64 pid, WindowHandle hwnd, u32 timer_id)
+{
+    for (u32 i = 0; i < kWindowTimersMax; ++i)
+    {
+        const auto& s = g_timers[i];
+        if (s.in_use && s.owner_pid == pid && s.hwnd == hwnd && s.timer_id == timer_id)
+        {
+            return i;
+        }
+    }
+    return kWindowTimersMax;
+}
+
+u32 AllocTimerSlot()
+{
+    for (u32 i = 0; i < kWindowTimersMax; ++i)
+    {
+        if (!g_timers[i].in_use)
+        {
+            return i;
+        }
+    }
+    return kWindowTimersMax;
+}
+
+} // namespace
+
+bool WindowTimerSet(u64 pid, WindowHandle hwnd, u32 timer_id, u32 interval_ms)
+{
+    if (pid == 0 || !WindowValid(hwnd) || g_windows[hwnd].owner_pid != pid)
+    {
+        return false;
+    }
+    // Tick period is 100 Hz — 10 ms per tick. Round UP so a
+    // `SetTimer(.., 15)` ticks every 2 ticks = 20 ms (Win32's
+    // minimum is USER_TIMER_MINIMUM = 10 ms; we bottom out at
+    // one tick).
+    const u32 ticks = (interval_ms == 0) ? 1 : ((interval_ms + 9) / 10);
+    u32 slot = FindTimerSlot(pid, hwnd, timer_id);
+    if (slot == kWindowTimersMax)
+    {
+        slot = AllocTimerSlot();
+        if (slot == kWindowTimersMax)
+        {
+            return false;
+        }
+        g_timers[slot].in_use = true;
+        g_timers[slot].owner_pid = pid;
+        g_timers[slot].hwnd = hwnd;
+        g_timers[slot].timer_id = timer_id;
+    }
+    g_timers[slot].interval_ticks = ticks;
+    g_timers[slot].remaining_ticks = ticks;
+    return true;
+}
+
+bool WindowTimerKill(u64 pid, WindowHandle hwnd, u32 timer_id)
+{
+    const u32 slot = FindTimerSlot(pid, hwnd, timer_id);
+    if (slot == kWindowTimersMax)
+    {
+        return false;
+    }
+    g_timers[slot].in_use = false;
+    return true;
+}
+
+void WindowTimerReap(u64 pid, WindowHandle hwnd)
+{
+    for (u32 i = 0; i < kWindowTimersMax; ++i)
+    {
+        if (g_timers[i].in_use && g_timers[i].owner_pid == pid && g_timers[i].hwnd == hwnd)
+        {
+            g_timers[i].in_use = false;
+        }
+    }
+}
+
+void WindowTimerTick()
+{
+    constexpr u32 kWmTimer = 0x0113;
+    bool any_posted = false;
+    for (u32 i = 0; i < kWindowTimersMax; ++i)
+    {
+        auto& s = g_timers[i];
+        if (!s.in_use)
+            continue;
+        if (!WindowValid(s.hwnd) || g_windows[s.hwnd].owner_pid != s.owner_pid)
+        {
+            // Target died out from under us — drop the timer.
+            s.in_use = false;
+            continue;
+        }
+        if (s.remaining_ticks == 0)
+        {
+            s.remaining_ticks = s.interval_ticks;
+        }
+        else
+        {
+            --s.remaining_ticks;
+            if (s.remaining_ticks == 0)
+            {
+                WindowPostMessage(s.hwnd, kWmTimer, s.timer_id, 0);
+                s.remaining_ticks = s.interval_ticks;
+                any_posted = true;
+            }
+        }
+    }
+    if (any_posted)
+    {
+        WindowMsgWakeAll();
+    }
 }
 
 void WindowResizeTo(WindowHandle h, u32 w, u32 hgt)

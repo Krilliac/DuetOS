@@ -1123,6 +1123,12 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         for (;;)
         {
             const KeyEvent ev = Ps2KeyboardReadEvent();
+            // Track async keyboard state BEFORE the early
+            // release / kKeyNone filter so release edges are
+            // recorded. `ev.code` wraps to the low 8 bits of
+            // the VK cache so ext keys collide gracefully with
+            // unmapped slots.
+            duetos::drivers::video::WindowInputTrackKey(static_cast<duetos::u16>(ev.code), !ev.is_release);
             if (ev.is_release || ev.code == kKeyNone)
             {
                 continue;
@@ -1320,24 +1326,32 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                                                : 0;
                 if (pe_pid > 0)
                 {
-                    // WM_KEYDOWN = 0x0100; WM_CHAR = 0x0102.
-                    // wParam = virtual-key code (use raw scan/char
-                    // code for v0 — we don't have a VK table yet).
-                    // lParam = 1 (repeat count), top bits reserved.
+                    // Alt held = WM_SYSKEYDOWN (0x0104) /
+                    // WM_SYSCHAR (0x0106); otherwise
+                    // WM_KEYDOWN (0x0100) / WM_CHAR (0x0102).
+                    // lParam layout: bit 29 set iff Alt (context
+                    // code) — mirrors Win32.
                     constexpr duetos::u32 kWmKeyDown = 0x0100;
                     constexpr duetos::u32 kWmChar = 0x0102;
-                    duetos::drivers::video::WindowPostMessage(active_pe, kWmKeyDown, ev.code, 1);
+                    constexpr duetos::u32 kWmSysKeyDown = 0x0104;
+                    constexpr duetos::u32 kWmSysChar = 0x0106;
+                    const bool alt_held = (ev.modifiers & kKeyModAlt) != 0;
+                    const duetos::u64 lp_base = 1; // repeat count = 1
+                    const duetos::u64 lp = alt_held ? (lp_base | (1ull << 29)) : lp_base;
+                    const duetos::u32 keydown_msg = alt_held ? kWmSysKeyDown : kWmKeyDown;
+                    const duetos::u32 char_msg = alt_held ? kWmSysChar : kWmChar;
+                    duetos::drivers::video::WindowPostMessage(active_pe, keydown_msg, ev.code, lp);
                     if (ev.code >= 0x20 && ev.code <= 0x7E)
                     {
-                        duetos::drivers::video::WindowPostMessage(active_pe, kWmChar, ev.code, 1);
+                        duetos::drivers::video::WindowPostMessage(active_pe, char_msg, ev.code, lp);
                     }
                     else if (ev.code == kKeyEnter)
                     {
-                        duetos::drivers::video::WindowPostMessage(active_pe, kWmChar, '\r', 1);
+                        duetos::drivers::video::WindowPostMessage(active_pe, char_msg, '\r', lp);
                     }
                     else if (ev.code == kKeyBackspace)
                     {
-                        duetos::drivers::video::WindowPostMessage(active_pe, kWmChar, 0x08, 1);
+                        duetos::drivers::video::WindowPostMessage(active_pe, char_msg, 0x08, lp);
                     }
                     duetos::drivers::video::CompositorUnlock();
                     // Wake any GetMessage blocker — broadcasts
@@ -1856,17 +1870,20 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
             // Mouse-message routing to PE windows. Posts
             // WM_MOUSEMOVE / WM_LBUTTONDOWN / WM_LBUTTONUP to the
-            // topmost PE window under the cursor, with
-            // lParam = MAKELONG(client_x, client_y). Skipped in
-            // the obvious compositor-owned states (menu open,
-            // mid-drag, over the taskbar / calendar) so a PE
-            // doesn't see stray clicks that the shell consumed.
-            // Close-box presses on a PE re-route to WM_CLOSE
-            // (already handled in the press-edge block below).
+            // topmost PE window under the cursor — unless a
+            // window has SetCapture'd the mouse, in which case
+            // events always go to the captured window regardless
+            // of cursor location. Skipped in the obvious
+            // compositor-owned states (menu open, mid-drag, over
+            // the taskbar / calendar). Close-box presses on a PE
+            // re-route to WM_CLOSE (already handled below).
             if (!drag.active && !menu_handled && !duetos::drivers::video::TaskbarContains(cx, cy) &&
                 !duetos::drivers::video::MenuIsOpen() && !duetos::drivers::video::CalendarContains(cx, cy))
             {
-                const auto pe_hit = duetos::drivers::video::WindowTopmostAt(cx, cy);
+                const auto captured = duetos::drivers::video::WindowGetCapture();
+                const auto pe_hit = (captured != duetos::drivers::video::kWindowInvalid)
+                                        ? captured
+                                        : duetos::drivers::video::WindowTopmostAt(cx, cy);
                 const duetos::u64 pe_pid = (pe_hit != duetos::drivers::video::kWindowInvalid)
                                                ? duetos::drivers::video::WindowOwnerPid(pe_hit)
                                                : 0;
@@ -1965,6 +1982,23 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         }
     };
     duetos::sched::SchedCreate(mouse_reader, nullptr, "mouse-reader");
+
+    // Win32 timer ticker: walks the per-window timer table every
+    // scheduler tick (10 ms) and posts WM_TIMER when a timer
+    // elapses. SYS_WIN_TIMER_SET / KILL mutate the table
+    // directly. Runs under the compositor lock so it serialises
+    // with the input readers + GetMessage blockers.
+    auto win_timer_ticker = [](void*)
+    {
+        for (;;)
+        {
+            duetos::sched::SchedSleepTicks(1);
+            duetos::drivers::video::CompositorLock();
+            duetos::drivers::video::WindowTimerTick();
+            duetos::drivers::video::CompositorUnlock();
+        }
+    };
+    duetos::sched::SchedCreate(win_timer_ticker, nullptr, "win-timer");
 
     // Scheduler self-test: three kernel threads that each bump a shared
     // counter five times under a mutex. If the mutex serialises them

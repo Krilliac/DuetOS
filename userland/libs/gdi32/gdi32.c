@@ -38,6 +38,9 @@ typedef struct
 #define SYS_GDI_TEXT_OUT 66
 #define SYS_GDI_RECTANGLE 67
 #define SYS_GDI_CLEAR 68
+#define SYS_GDI_LINE 74
+#define SYS_GDI_ELLIPSE 75
+#define SYS_GDI_SET_PIXEL 76
 
 /* Encode the HWND inside the HDC pointer so later GDI calls can
  * recover it. Bit layout: HDC == (HWND | GDI_TAG). GDI_TAG keeps
@@ -447,33 +450,80 @@ __declspec(dllexport) INT FrameRect(HDC dc, const void* r, HBRUSH br)
     COLORREF col = gdi32_brush_colour(br);
     return gdi32_rect_core(SYS_GDI_RECTANGLE, hwnd, rc->left, rc->top, w, h, col) ? 1 : 0;
 }
-__declspec(dllexport) BOOL LineTo(HDC dc, INT x, INT y)
+/* DC current-point state. Real GDI stores (x, y) per DC; v1
+ * uses a single module-global — good enough when programs only
+ * paint on one DC at a time. Concurrent DCs share the cursor;
+ * documented limitation. */
+static INT g_cur_x = 0;
+static INT g_cur_y = 0;
+
+typedef struct
 {
-    (void)dc;
-    (void)x;
-    (void)y;
-    return 1;
+    INT x;
+    INT y;
+} POINT;
+
+static BOOL gdi32_line_core(HANDLE hwnd, INT x0, INT y0, INT x1, INT y1, COLORREF col)
+{
+    register long long r10_x1 asm("r10") = (long long)x1;
+    register long long r8_y1 asm("r8") = (long long)y1;
+    register long long r9_c asm("r9") = (long long)(unsigned long long)col;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_GDI_LINE), "D"((long long)(unsigned long long)hwnd), "S"((long long)x0),
+                       "d"((long long)y0), "r"(r10_x1), "r"(r8_y1), "r"(r9_c)
+                     : "memory");
+    return rv ? 1 : 0;
 }
+
 __declspec(dllexport) BOOL MoveToEx(HDC dc, INT x, INT y, void* prev)
 {
     (void)dc;
-    (void)x;
-    (void)y;
-    (void)prev;
+    if (prev)
+    {
+        POINT* p = (POINT*)prev;
+        p->x = g_cur_x;
+        p->y = g_cur_y;
+    }
+    g_cur_x = x;
+    g_cur_y = y;
+    return 1;
+}
+__declspec(dllexport) BOOL LineTo(HDC dc, INT x, INT y)
+{
+    HANDLE hwnd = gdi32_hwnd_from_hdc(dc);
+    if (!hwnd)
+        return 0;
+    BOOL rv = gdi32_line_core(hwnd, g_cur_x, g_cur_y, x, y, 0);
+    g_cur_x = x;
+    g_cur_y = y;
+    return rv;
+}
+__declspec(dllexport) BOOL Polyline(HDC dc, const void* pts, INT n)
+{
+    if (!pts || n < 2)
+        return 0;
+    HANDLE hwnd = gdi32_hwnd_from_hdc(dc);
+    if (!hwnd)
+        return 0;
+    const POINT* p = (const POINT*)pts;
+    for (INT i = 0; i + 1 < n; ++i)
+    {
+        (void)gdi32_line_core(hwnd, p[i].x, p[i].y, p[i + 1].x, p[i + 1].y, 0);
+    }
     return 1;
 }
 __declspec(dllexport) BOOL Polygon(HDC dc, const void* pts, INT n)
 {
-    (void)dc;
-    (void)pts;
-    (void)n;
-    return 1;
-}
-__declspec(dllexport) BOOL Polyline(HDC dc, const void* pts, INT n)
-{
-    (void)dc;
-    (void)pts;
-    (void)n;
+    if (!pts || n < 2)
+        return 0;
+    HANDLE hwnd = gdi32_hwnd_from_hdc(dc);
+    if (!hwnd)
+        return 0;
+    const POINT* p = (const POINT*)pts;
+    Polyline(dc, pts, n);
+    (void)gdi32_line_core(hwnd, p[n - 1].x, p[n - 1].y, p[0].x, p[0].y, 0);
     return 1;
 }
 /* Win32 Rectangle paints a bordered outline + fills the interior
@@ -492,12 +542,44 @@ __declspec(dllexport) BOOL Rectangle(HDC dc, INT l, INT t, INT r, INT b)
 }
 __declspec(dllexport) BOOL Ellipse(HDC dc, INT l, INT t, INT r, INT b)
 {
+    HANDLE hwnd = gdi32_hwnd_from_hdc(dc);
+    if (!hwnd)
+        return 0;
+    INT w = r - l;
+    INT h = b - t;
+    if (w <= 0 || h <= 0)
+        return 1;
+    return gdi32_rect_core(SYS_GDI_ELLIPSE, hwnd, l, t, w, h, 0);
+}
+
+__declspec(dllexport) COLORREF SetPixel(HDC dc, INT x, INT y, COLORREF col)
+{
+    HANDLE hwnd = gdi32_hwnd_from_hdc(dc);
+    if (!hwnd)
+        return (COLORREF)-1;
+    register long long r10_c asm("r10") = (long long)(unsigned long long)col;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_GDI_SET_PIXEL), "D"((long long)(unsigned long long)hwnd), "S"((long long)x),
+                       "d"((long long)y), "r"(r10_c)
+                     : "memory");
+    return rv ? col : (COLORREF)-1;
+}
+__declspec(dllexport) BOOL SetPixelV(HDC dc, INT x, INT y, COLORREF col)
+{
+    return SetPixel(dc, x, y, col) != (COLORREF)-1;
+}
+__declspec(dllexport) COLORREF GetPixel(HDC dc, INT x, INT y)
+{
     (void)dc;
-    (void)l;
-    (void)t;
-    (void)r;
-    (void)b;
-    return 1;
+    (void)x;
+    (void)y;
+    /* No framebuffer read-back syscall in v1 — return CLR_INVALID
+     * so callers that check for it take the "couldn't query"
+     * path. Most programs use GetPixel for hit-testing which
+     * has other paths. */
+    return (COLORREF)-1;
 }
 
 /* --- DC state setters (return "previous value", all 0) --- */

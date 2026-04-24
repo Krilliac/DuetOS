@@ -42,6 +42,16 @@ typedef void* HANDLE;
 #define SYS_WIN_MOVE 69
 #define SYS_WIN_GET_RECT 70
 #define SYS_WIN_SET_TEXT 71
+#define SYS_WIN_TIMER_SET 72
+#define SYS_WIN_TIMER_KILL 73
+#define SYS_WIN_GET_KEYSTATE 77
+#define SYS_WIN_GET_CURSOR 78
+#define SYS_WIN_SET_CURSOR 79
+#define SYS_WIN_SET_CAPTURE 80
+#define SYS_WIN_RELEASE_CAPTURE 81
+#define SYS_WIN_GET_CAPTURE 82
+#define SYS_WIN_CLIP_SET_TEXT 83
+#define SYS_WIN_CLIP_GET_TEXT 84
 
 /* Selected message IDs the pump + DispatchMessage care about. The
  * kernel doesn't interpret these numbers — it passes them through
@@ -698,19 +708,23 @@ __declspec(dllexport) BOOL ClipCursor(const void* r)
 }
 __declspec(dllexport) BOOL GetCursorPos(void* p)
 {
-    if (p)
-    {
-        int* i = (int*)p;
-        i[0] = 0;
-        i[1] = 0;
-    }
-    return 1;
+    if (!p)
+        return 0;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_WIN_GET_CURSOR), "D"((long long)(unsigned long long)p)
+                     : "memory");
+    return rv ? 1 : 0;
 }
 __declspec(dllexport) BOOL SetCursorPos(int x, int y)
 {
-    (void)x;
-    (void)y;
-    return 1;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_WIN_SET_CURSOR), "D"((long long)(unsigned)x), "S"((long long)(unsigned)y)
+                     : "memory");
+    return rv ? 1 : 0;
 }
 __declspec(dllexport) HANDLE SetCursor(HANDLE h)
 {
@@ -722,10 +736,18 @@ __declspec(dllexport) int ShowCursor(BOOL show)
     (void)show;
     return 0;
 }
+
+/* --- Clipboard --- */
+/* v1: Win32's OpenClipboard / Close / Empty pattern is
+ * effectively stateless — we don't reference-count owners, so
+ * Open always "succeeds" and Empty wipes the text. Only the
+ * CF_TEXT format is bridged; other formats return null. */
+#define CF_TEXT 1
+
 __declspec(dllexport) BOOL OpenClipboard(HANDLE owner)
 {
     (void)owner;
-    return 0;
+    return 1;
 }
 __declspec(dllexport) BOOL CloseClipboard(void)
 {
@@ -733,18 +755,108 @@ __declspec(dllexport) BOOL CloseClipboard(void)
 }
 __declspec(dllexport) BOOL EmptyClipboard(void)
 {
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_WIN_CLIP_SET_TEXT), "D"((long long)(unsigned long long)"")
+                     : "memory");
+    (void)rv;
     return 1;
 }
+/* GetClipboardData returns an HGLOBAL that points at a buffer
+ * the caller can read. v1 synthesises a thread-local 1-KiB
+ * buffer and fills it from the kernel's copy; callers are
+ * expected to copy out before any subsequent GetClipboardData
+ * call (matches Win32's "don't free this handle" convention). */
+static char s_clipboard_shadow[1024];
 __declspec(dllexport) HANDLE GetClipboardData(UINT fmt)
 {
-    (void)fmt;
-    return (HANDLE)0;
+    if (fmt != CF_TEXT)
+        return (HANDLE)0;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_WIN_CLIP_GET_TEXT), "D"((long long)(unsigned long long)s_clipboard_shadow),
+                       "S"((long long)sizeof(s_clipboard_shadow))
+                     : "memory");
+    (void)rv;
+    /* Always return the shadow — empty clipboard reads as an
+     * empty C string, which most callers handle via strlen. */
+    return (HANDLE)s_clipboard_shadow;
 }
 __declspec(dllexport) HANDLE SetClipboardData(UINT fmt, HANDLE h)
 {
-    (void)fmt;
-    (void)h;
-    return (HANDLE)0;
+    if (fmt != CF_TEXT || !h)
+        return (HANDLE)0;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_WIN_CLIP_SET_TEXT), "D"((long long)(unsigned long long)h)
+                     : "memory");
+    (void)rv;
+    return h;
+}
+
+/* --- Keyboard state --- */
+__declspec(dllexport) short GetKeyState(int vk)
+{
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_WIN_GET_KEYSTATE), "D"((long long)(unsigned)vk)
+                     : "memory");
+    return (short)rv;
+}
+__declspec(dllexport) short GetAsyncKeyState(int vk)
+{
+    return GetKeyState(vk);
+}
+
+/* --- Mouse capture --- */
+__declspec(dllexport) HANDLE SetCapture(HANDLE h)
+{
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_WIN_SET_CAPTURE), "D"((long long)(unsigned long long)h)
+                     : "memory");
+    return (HANDLE)(unsigned long long)rv;
+}
+__declspec(dllexport) BOOL ReleaseCapture(void)
+{
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)SYS_WIN_RELEASE_CAPTURE) : "memory");
+    return rv ? 1 : 0;
+}
+__declspec(dllexport) HANDLE GetCapture(void)
+{
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)SYS_WIN_GET_CAPTURE) : "memory");
+    return (HANDLE)(unsigned long long)rv;
+}
+
+/* --- Timers --- */
+/* UINT_PTR on x64 is 64-bit; v1 collapses to u32 in the kernel
+ * table which is enough for any reasonable SetTimer caller. */
+__declspec(dllexport) unsigned long long SetTimer(HANDLE h, unsigned long long id, UINT elapse, void* cb)
+{
+    (void)cb; /* no timer-callback dispatch; WM_TIMER only */
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_WIN_TIMER_SET), "D"((long long)(unsigned long long)h), "S"((long long)id),
+                       "d"((long long)elapse)
+                     : "memory");
+    return (unsigned long long)rv;
+}
+__declspec(dllexport) BOOL KillTimer(HANDLE h, unsigned long long id)
+{
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_WIN_TIMER_KILL), "D"((long long)(unsigned long long)h), "S"((long long)id)
+                     : "memory");
+    return rv ? 1 : 0;
 }
 
 /* --- Char helpers --- */

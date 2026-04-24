@@ -50,4 +50,22 @@ void DoWinMove(arch::TrapFrame* frame);
 void DoWinGetRect(arch::TrapFrame* frame);
 void DoWinSetText(arch::TrapFrame* frame);
 
+void DoWinTimerSet(arch::TrapFrame* frame);
+void DoWinTimerKill(arch::TrapFrame* frame);
+
+void DoGdiLine(arch::TrapFrame* frame);
+void DoGdiEllipse(arch::TrapFrame* frame);
+void DoGdiSetPixel(arch::TrapFrame* frame);
+
+void DoWinGetKeyState(arch::TrapFrame* frame);
+void DoWinGetCursor(arch::TrapFrame* frame);
+void DoWinSetCursor(arch::TrapFrame* frame);
+
+void DoWinSetCapture(arch::TrapFrame* frame);
+void DoWinReleaseCapture(arch::TrapFrame* frame);
+void DoWinGetCapture(arch::TrapFrame* frame);
+
+void DoWinClipSetText(arch::TrapFrame* frame);
+void DoWinClipGetText(arch::TrapFrame* frame);
+
 } // namespace duetos::subsystems::win32
