@@ -112,7 +112,7 @@ Target tags in use:
 
 ## Win32 integration
 
-Win32 in CustomOS is a user-mode shim — each PE gets `ntdll` /
+Win32 in DuetOS is a user-mode shim — each PE gets `ntdll` /
 `kernel32` equivalents patched into its IAT, and those stubs
 trampoline through native int-0x80 syscalls. So there's no peer
 kernel dispatch to consult; what the TU exposes instead is

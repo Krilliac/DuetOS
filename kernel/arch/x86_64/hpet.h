@@ -3,7 +3,7 @@
 #include "../../core/types.h"
 
 /*
- * CustomOS — HPET (High Precision Event Timer) driver, v0.
+ * DuetOS — HPET (High Precision Event Timer) driver, v0.
  *
  * Wraps the MMIO window described by the ACPI HPET table:
  *   - Capabilities register at +0x00 (read-only).
@@ -35,7 +35,7 @@
  * Context: kernel. Run once after AcpiInit + PagingInit.
  */
 
-namespace customos::arch
+namespace duetos::arch
 {
 
 /// Map the HPET MMIO window, log capabilities, enable the main
@@ -59,4 +59,4 @@ u32 HpetPeriodFemtoseconds();
 /// wasn't called successfully.
 void HpetSelfTest();
 
-} // namespace customos::arch
+} // namespace duetos::arch

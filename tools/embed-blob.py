@@ -29,8 +29,8 @@ def main() -> int:
     p.add_argument("input", type=Path, help="Binary file to embed")
     p.add_argument("output", type=Path, help="Output .h file")
     p.add_argument("symbol", help="C++ symbol name for the array (e.g. kBinHelloPeBytes)")
-    p.add_argument("--namespace", default="customos::fs::generated",
-                   help="Namespace to wrap the symbol in (default: customos::fs::generated)")
+    p.add_argument("--namespace", default="duetos::fs::generated",
+                   help="Namespace to wrap the symbol in (default: duetos::fs::generated)")
     args = p.parse_args()
 
     if not args.input.is_file():

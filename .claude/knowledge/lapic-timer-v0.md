@@ -196,7 +196,7 @@ land on the dev host. The exact LAPIC tick count is host/CPU dependent.)
 
 ```bash
 cmake --build build/x86_64-debug
-CUSTOMOS_TIMEOUT=10 tools/qemu/run.sh
+DUETOS_TIMEOUT=10 tools/qemu/run.sh
 ```
 
 Smoke checks:

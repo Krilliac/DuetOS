@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tools/ctest-boot-smoke.sh
 #
-# ctest driver for the CustomOS boot smoke test. Boots the debug
+# ctest driver for the DuetOS boot smoke test. Boots the debug
 # kernel in QEMU, captures its serial output, and asserts:
 #
 #   * every "expected" signature line appears (ring3 smoke probes
@@ -47,9 +47,9 @@ rm -f "${SERIAL_LOG}"
 
 # Boot. `|| true` so a non-zero exit from QEMU (e.g. timeout —
 # the kernel has no orderly shutdown path and run.sh will time
-# out after CUSTOMOS_TIMEOUT seconds) doesn't mask our own
+# out after DUETOS_TIMEOUT seconds) doesn't mask our own
 # assertions. run.sh exits 124 on timeout.
-CUSTOMOS_TIMEOUT="${CUSTOMOS_TIMEOUT:-30}" "${RUN_SCRIPT}" \
+DUETOS_TIMEOUT="${DUETOS_TIMEOUT:-30}" "${RUN_SCRIPT}" \
     > "${SERIAL_LOG}" 2>&1 || true
 
 # Expected signatures — every ring3 smoke probe prints its own
@@ -81,7 +81,7 @@ expected=(
     # windows-kill.exe's very first std::cout output routes
     # through our MSVCP140 sputn stub into SYS_WRITE(fd=1) and
     # the text hits the serial console verbatim. This is the
-    # first real Windows PE output on CustomOS — regressing it
+    # first real Windows PE output on DuetOS — regressing it
     # would mean the iostream stubs or the proc-env pipeline
     # got broken.
     "Windows Kill "
@@ -128,7 +128,7 @@ expected=(
 # probe). We whitelist those.
 forbidden=(
     "PANIC"
-    "CUSTOMOS CRASH"
+    "DUETOS CRASH"
     "triple fault"
     # Regression guard: as of slice 28 (2026-04-22), winkill
     # (real-world MSVC windows-kill.exe) runs start-to-finish

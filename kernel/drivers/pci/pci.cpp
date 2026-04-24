@@ -9,7 +9,7 @@
 #include "../../mm/paging.h"
 #include "../../sync/spinlock.h"
 
-namespace customos::drivers::pci
+namespace duetos::drivers::pci
 {
 
 namespace
@@ -337,31 +337,31 @@ void PciMsixFunctionUnmask(DeviceAddress addr)
     PciConfigWrite32(addr, static_cast<u8>(cap + 0), (word & 0x0000FFFFu) | (static_cast<u32>(msg_ctrl) << 16));
 }
 
-::customos::core::Result<u8> PciMsixBindSimple(DeviceAddress addr, u16 entry_index,
-                                               ::customos::arch::IrqHandler handler, MsixRoute* out_route)
+::duetos::core::Result<u8> PciMsixBindSimple(DeviceAddress addr, u16 entry_index,
+                                               ::duetos::arch::IrqHandler handler, MsixRoute* out_route)
 {
-    using ::customos::core::Err;
-    using ::customos::core::ErrorCode;
+    using ::duetos::core::Err;
+    using ::duetos::core::ErrorCode;
     if (handler == nullptr)
         return Err{ErrorCode::InvalidArgument};
 
-    const u8 vector = ::customos::arch::IrqAllocVector();
+    const u8 vector = ::duetos::arch::IrqAllocVector();
     if (vector == 0)
         return Err{ErrorCode::OutOfMemory};
 
     // BSP LAPIC ID = LAPIC register 0x20 bits 24..31 (APIC-ID field).
-    const u32 apic_id_reg = ::customos::arch::LapicRead(0x20);
+    const u32 apic_id_reg = ::duetos::arch::LapicRead(0x20);
     const u8 lapic_id = static_cast<u8>((apic_id_reg >> 24) & 0xFF);
 
     // Register the C handler BEFORE enabling the MSI-X entry so a
     // fast-arriving interrupt finds a real callback instead of the
     // dispatcher's "unhandled vector" log path.
-    ::customos::arch::IrqInstall(vector, handler);
+    ::duetos::arch::IrqInstall(vector, handler);
 
     auto r = PciMsixRouteSimple(addr, entry_index, lapic_id, vector);
     if (!r.has_value())
     {
-        ::customos::arch::IrqInstall(vector, nullptr);
+        ::duetos::arch::IrqInstall(vector, nullptr);
         return Err{r.error()};
     }
     if (out_route != nullptr)
@@ -369,10 +369,10 @@ void PciMsixFunctionUnmask(DeviceAddress addr)
     return vector;
 }
 
-::customos::core::Result<MsixRoute> PciMsixRouteSimple(DeviceAddress addr, u16 entry_index, u8 lapic_id, u8 vector)
+::duetos::core::Result<MsixRoute> PciMsixRouteSimple(DeviceAddress addr, u16 entry_index, u8 lapic_id, u8 vector)
 {
-    using ::customos::core::Err;
-    using ::customos::core::ErrorCode;
+    using ::duetos::core::Err;
+    using ::duetos::core::ErrorCode;
 
     MsixRoute out{};
     out.entry_index = entry_index;
@@ -621,9 +621,9 @@ void PciEnumerate()
     // of physical space; cap the mapping at the MMIO arena budget
     // so a firmware reporting 256 MiB doesn't burn the entire
     // arena on a bus range we'll never fully populate.
-    const u64 mcfg_base = ::customos::acpi::McfgAddress();
-    const u8 mcfg_start = ::customos::acpi::McfgStartBus();
-    const u8 mcfg_end = ::customos::acpi::McfgEndBus();
+    const u64 mcfg_base = ::duetos::acpi::McfgAddress();
+    const u8 mcfg_start = ::duetos::acpi::McfgStartBus();
+    const u8 mcfg_end = ::duetos::acpi::McfgEndBus();
     if (mcfg_base != 0 && mcfg_end >= mcfg_start)
     {
         const u64 bus_count = u64(mcfg_end - mcfg_start) + 1;
@@ -744,4 +744,4 @@ void PciEnumerate()
     }
 }
 
-} // namespace customos::drivers::pci
+} // namespace duetos::drivers::pci

@@ -3,7 +3,7 @@
 #include "../../core/types.h"
 
 /*
- * CustomOS — hypervisor / emulator detection, v0.
+ * DuetOS — hypervisor / emulator detection, v0.
  *
  * CPUID leaf 0x00000001 bit ECX[31] — "hypervisor present" — is
  * set by every modern VMM (KVM, QEMU/TCG, VirtualBox, VMware,
@@ -27,7 +27,7 @@
  * is a cached read.
  */
 
-namespace customos::arch
+namespace duetos::arch
 {
 
 enum class HypervisorKind : u8
@@ -69,4 +69,4 @@ const HypervisorInfo& HypervisorInfoGet();
 bool IsBareMetal();
 bool IsEmulator();
 
-} // namespace customos::arch
+} // namespace duetos::arch

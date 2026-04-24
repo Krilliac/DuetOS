@@ -14,9 +14,9 @@
  * spurious vector (re-installed by LapicInit). Every IDT entry has
  * a real handler — a stray vector never cascades through #NP.
  */
-extern "C" customos::u64 isr_stub_table[256];
+extern "C" duetos::u64 isr_stub_table[256];
 
-namespace customos::arch
+namespace duetos::arch
 {
 
 namespace
@@ -140,4 +140,4 @@ u64 IdtHash()
     return h;
 }
 
-} // namespace customos::arch
+} // namespace duetos::arch

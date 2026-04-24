@@ -15,7 +15,7 @@
 extern "C" char _kernel_start_phys[];
 extern "C" char _kernel_end_phys[];
 
-namespace customos::mm
+namespace duetos::mm
 {
 
 namespace
@@ -597,4 +597,4 @@ void FrameAllocatorSelfTest()
     SerialWrite("[mm] frame allocator self-test OK\n");
 }
 
-} // namespace customos::mm
+} // namespace duetos::mm

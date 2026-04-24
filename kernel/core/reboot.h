@@ -1,7 +1,7 @@
 #pragma once
 
 /*
- * CustomOS — kernel reboot.
+ * DuetOS — kernel reboot.
  *
  * Try the firmware-defined ACPI reset register first (FADT
  * RESET_REG / RESET_VALUE, wired via `acpi::AcpiReset()`), fall
@@ -20,9 +20,9 @@
  * when AML support lands.
  */
 
-namespace customos::core
+namespace duetos::core
 {
 
 [[noreturn]] void KernelReboot();
 
-} // namespace customos::core
+} // namespace duetos::core

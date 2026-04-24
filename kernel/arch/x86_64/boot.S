@@ -1,5 +1,5 @@
 /*
- * CustomOS x86_64 boot entry.
+ * DuetOS x86_64 boot entry.
  *
  * A Multiboot2-compatible bootloader (e.g. GRUB) loads this image in 32-bit
  * protected mode. This file brings the CPU up to long mode, installs both an

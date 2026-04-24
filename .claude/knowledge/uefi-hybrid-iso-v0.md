@@ -25,17 +25,17 @@ amd64 GRUB build.
 
 ## Boot helper
 
-`tools/qemu/run.sh` grew a `CUSTOMOS_UEFI=1` mode that swaps in an
+`tools/qemu/run.sh` grew a `DUETOS_UEFI=1` mode that swaps in an
 OVMF firmware pflash pair:
 
 ```
-CUSTOMOS_UEFI=1 tools/qemu/run.sh
+DUETOS_UEFI=1 tools/qemu/run.sh
 ```
 
 The script makes a per-run writable copy of `OVMF_VARS_4M.fd` so a
 previous boot's NVRAM (BootOrder, Boot####) can't sabotage the next
-invocation. Override paths via `CUSTOMOS_OVMF_CODE` /
-`CUSTOMOS_OVMF_VARS` if the OVMF package layout differs.
+invocation. Override paths via `DUETOS_OVMF_CODE` /
+`DUETOS_OVMF_VARS` if the OVMF package layout differs.
 
 ## Why this matters for real hardware
 
@@ -83,7 +83,7 @@ self-tests PASS, no panics, heartbeat runs cleanly to timeout.
 ## References
 
 - `tools/qemu/run.sh` — boot helper.
-- `kernel/CMakeLists.txt` — `customos-iso` target, picks up
+- `kernel/CMakeLists.txt` — `duetos-iso` target, picks up
   `grub-efi-amd64-bin` automatically when present.
 - `boot/grub/grub.cfg` — menuentries (unchanged across firmwares).
 - `kernel/acpi/acpi.cpp::ParseMcfg` — MCFG parser that handled the

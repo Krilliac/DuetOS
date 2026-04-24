@@ -1,7 +1,7 @@
 /*
  * userland/libs/ucrtbase/ucrtbase.c
  *
- * Freestanding CustomOS ucrtbase.dll. Retires the batch-6 / 9
+ * Freestanding DuetOS ucrtbase.dll. Retires the batch-6 / 9
  * UCRT runtime stubs in kernel/subsystems/win32/stubs.cpp.
  *
  * Covers:
@@ -1393,12 +1393,12 @@ static const struct
     {"TEMP", "X:\\Temp"},
     {"TMP", "X:\\Temp"},
     {"USERNAME", "user"},
-    {"USERDOMAIN", "CUSTOMOS"},
+    {"USERDOMAIN", "DUETOS"},
     {"USERPROFILE", "X:\\Users\\user"},
-    {"COMPUTERNAME", "CUSTOMOS"},
+    {"COMPUTERNAME", "DUETOS"},
     {"SYSTEMROOT", "X:\\"},
     {"WINDIR", "X:\\"},
-    {"OS", "CustomOS_NT"},
+    {"OS", "DuetOS_NT"},
     {"PROCESSOR_ARCHITECTURE", "AMD64"},
     {"NUMBER_OF_PROCESSORS", "1"},
     {"APPDATA", "X:\\Users\\user\\AppData\\Roaming"},

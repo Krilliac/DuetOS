@@ -21,7 +21,7 @@
  * after PicDisable (so the 8259 can't sneak an IRQ in during bring-up).
  */
 
-namespace customos::arch
+namespace duetos::arch
 {
 
 /// LAPIC register offsets in the MMIO window. Each register is 32 bits but
@@ -62,4 +62,4 @@ void LapicWrite(u64 reg_offset, u32 value);
 /// panic path) and need to avoid poking an un-mapped LAPIC window.
 bool LapicIsReady();
 
-} // namespace customos::arch
+} // namespace duetos::arch

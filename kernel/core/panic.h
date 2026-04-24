@@ -3,7 +3,7 @@
 #include "types.h"
 
 /*
- * CustomOS — unified kernel panic / assert infrastructure.
+ * DuetOS — unified kernel panic / assert infrastructure.
  *
  * Before this module every subsystem reimplemented its own local
  * `PanicFoo(msg)` — serial-write a tag, serial-write the message,
@@ -33,7 +33,7 @@
  * and calls arch::Halt, which never returns.
  */
 
-namespace customos::core
+namespace duetos::core
 {
 
 /// Write the panic banner + diagnostic dump + message to COM1, then
@@ -56,7 +56,7 @@ namespace customos::core
 /// dispatcher's own frame. Does NOT halt — caller halts.
 void DumpDiagnostics(u64 rip, u64 rsp, u64 rbp);
 
-/// Emit `=== CUSTOMOS CRASH DUMP BEGIN ===` + the dump header
+/// Emit `=== DUETOS CRASH DUMP BEGIN ===` + the dump header
 /// (schema version, subsystem, message, optional value, symbol-table
 /// entry count). Callers then emit their own body and finish with
 /// EndCrashDump so host-side tooling can extract the bracketed
@@ -65,10 +65,10 @@ void DumpDiagnostics(u64 rip, u64 rsp, u64 rbp);
 void BeginCrashDump(const char* subsystem, const char* message, const u64* optional_value);
 
 /// Close the dump record started with BeginCrashDump by emitting the
-/// `=== CUSTOMOS CRASH DUMP END ===` marker.
+/// `=== DUETOS CRASH DUMP END ===` marker.
 void EndCrashDump();
 
-} // namespace customos::core
+} // namespace duetos::core
 
 // ---------------------------------------------------------------------------
 // KASSERT — compile-in-always assert. Not conditionally compiled out in
@@ -81,7 +81,7 @@ void EndCrashDump();
     {                                                                                                                  \
         if (!(cond))                                                                                                   \
         {                                                                                                              \
-            ::customos::core::Panic((subsys), "KASSERT failed: " msg);                                                 \
+            ::duetos::core::Panic((subsys), "KASSERT failed: " msg);                                                 \
         }                                                                                                              \
     } while (0)
 
@@ -93,6 +93,6 @@ void EndCrashDump();
     {                                                                                                                  \
         if (!(cond))                                                                                                   \
         {                                                                                                              \
-            ::customos::core::PanicWithValue((subsys), "KASSERT failed: " msg, (value));                               \
+            ::duetos::core::PanicWithValue((subsys), "KASSERT failed: " msg, (value));                               \
         }                                                                                                              \
     } while (0)

@@ -3,7 +3,7 @@
 #include "../../core/types.h"
 
 /*
- * CustomOS — PC Speaker driver, v0.
+ * DuetOS — PC Speaker driver, v0.
  *
  * Classic 8253/8254 PIT channel 2 driving the motherboard
  * speaker gate at I/O port 0x61. Present on every x86 since
@@ -27,7 +27,7 @@
  * Context: kernel. Callable from task context only.
  */
 
-namespace customos::drivers::audio
+namespace duetos::drivers::audio
 {
 
 /// Emit a tone at `freq_hz` (10..20000 sensible) for
@@ -40,4 +40,4 @@ bool PcSpeakerBeep(u32 freq_hz, u32 duration_ms);
 /// speaker gate bits in port 0x61. Safe from IRQ context.
 void PcSpeakerStop();
 
-} // namespace customos::drivers::audio
+} // namespace duetos::drivers::audio

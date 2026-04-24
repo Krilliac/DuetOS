@@ -4,7 +4,7 @@
 #include "../../mm/paging.h"
 #include "../pci/pci.h"
 
-namespace customos::drivers::gpu
+namespace duetos::drivers::gpu
 {
 
 namespace
@@ -186,4 +186,4 @@ VirtioGpuLayout VirtioGpuLastLayout()
     return g_last;
 }
 
-} // namespace customos::drivers::gpu
+} // namespace duetos::drivers::gpu

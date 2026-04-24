@@ -4,7 +4,7 @@
 #include "../drivers/video/widget.h"
 
 /*
- * CustomOS Clock — v0.
+ * DuetOS Clock — v0.
  *
  * A wall-clock window that renders HH:MM:SS in 7-segment
  * style digits instead of the 8x8 text glyphs the other apps
@@ -22,16 +22,16 @@
  * Context: kernel. Draw is called under the compositor lock.
  */
 
-namespace customos::apps::clock
+namespace duetos::apps::clock
 {
 
 /// Install the content-draw callback on `handle`. No other
 /// state — the time is fetched from RtcRead on every paint.
-void ClockInit(customos::drivers::video::WindowHandle handle);
+void ClockInit(duetos::drivers::video::WindowHandle handle);
 
 /// Handle of the clock window. Present for symmetry with the
 /// other apps; not used by input routers (clock takes no input).
-customos::drivers::video::WindowHandle ClockWindow();
+duetos::drivers::video::WindowHandle ClockWindow();
 
 /// Boot-time self-test: verifies the digit-segment table is
 /// consistent (every digit 0-9 resolves to a non-zero mask,
@@ -39,4 +39,4 @@ customos::drivers::video::WindowHandle ClockWindow();
 /// PASS/FAIL line to COM1.
 void ClockSelfTest();
 
-} // namespace customos::apps::clock
+} // namespace duetos::apps::clock

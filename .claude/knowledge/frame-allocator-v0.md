@@ -112,7 +112,7 @@ The 276-frame gap between total and free splits as: low 1 MiB (256) + kernel ima
 
 ```bash
 cmake --build build/x86_64-debug
-CUSTOMOS_TIMEOUT=10 tools/qemu/run.sh
+DUETOS_TIMEOUT=10 tools/qemu/run.sh
 ```
 
 Canary for "the thing is broken":

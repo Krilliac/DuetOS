@@ -12,7 +12,7 @@
 #     tools/qemu/run.sh 2>&1 | tools/symbolize.sh
 #
 # If KERNEL_ELF is omitted, defaults to
-#     build/x86_64-debug/kernel/customos-kernel.elf
+#     build/x86_64-debug/kernel/duetos-kernel.elf
 #
 # Requires llvm-symbolizer (preferred) or addr2line (binutils fallback).
 #
@@ -29,7 +29,7 @@ set -euo pipefail
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-KERNEL_ELF="${1:-${REPO_ROOT}/build/x86_64-debug/kernel/customos-kernel.elf}"
+KERNEL_ELF="${1:-${REPO_ROOT}/build/x86_64-debug/kernel/duetos-kernel.elf}"
 
 if [[ ! -f "${KERNEL_ELF}" ]]; then
     echo "error: kernel ELF not found: ${KERNEL_ELF}" >&2

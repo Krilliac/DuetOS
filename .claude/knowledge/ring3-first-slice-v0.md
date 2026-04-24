@@ -25,7 +25,7 @@ syscalls or per-process address spaces:
   `[[noreturn]]` because ring-3 returns to the kernel only via
   traps/IRQs. Loads user DS/ES/FS/GS before iretq — iretq itself
   loads SS/CS from the frame.
-- **`customos::core::StartRing3SmokeTask()`** spawns a dedicated
+- **`duetos::core::StartRing3SmokeTask()`** spawns a dedicated
   scheduler thread that maps a user code page + user stack page,
   publishes RSP0, and iretq's into ring 3. The user payload was
   originally four bytes (`pause; jmp short -4`); it is now 13

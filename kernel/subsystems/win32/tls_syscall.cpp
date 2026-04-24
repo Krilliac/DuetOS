@@ -4,7 +4,7 @@
 #include "../../arch/x86_64/traps.h"
 #include "../../core/process.h"
 
-namespace customos::subsystems::win32
+namespace duetos::subsystems::win32
 {
 
 void DoTlsAlloc(arch::TrapFrame* frame)
@@ -101,4 +101,4 @@ void DoTlsSet(arch::TrapFrame* frame)
     frame->rax = 0;
 }
 
-} // namespace customos::subsystems::win32
+} // namespace duetos::subsystems::win32

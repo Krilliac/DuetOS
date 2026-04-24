@@ -5,7 +5,7 @@
 #include "paging.h"
 
 /*
- * CustomOS per-process address space — v0.
+ * DuetOS per-process address space — v0.
  *
  * An `AddressSpace` owns a PML4 frame and the user-half (PML4 entries
  * 0..255) page-table tree underneath it. The kernel half (entries
@@ -70,7 +70,7 @@
  * with interrupts disabled.
  */
 
-namespace customos::mm
+namespace duetos::mm
 {
 
 // Max user-page mappings per address space. Bumped from 32 → 128
@@ -223,4 +223,4 @@ AddressSpaceStats AddressSpaceStatsRead();
 /// at boot today).
 void AddressSpaceSelfTest();
 
-} // namespace customos::mm
+} // namespace duetos::mm

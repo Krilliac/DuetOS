@@ -3,7 +3,7 @@
 #include "../arch/x86_64/serial.h"
 #include "../drivers/video/framebuffer.h"
 
-namespace customos::apps::calculator
+namespace duetos::apps::calculator
 {
 
 namespace
@@ -56,7 +56,7 @@ KeyColours ColoursFor(char k)
 
 struct State
 {
-    customos::drivers::video::WindowHandle handle;
+    duetos::drivers::video::WindowHandle handle;
     // Displayed string — always NUL-terminated; length <= kDisplayCap.
     char display[kDisplayCap + 1];
     u32 display_len;
@@ -71,7 +71,7 @@ struct State
     bool error;       // sticky — cleared by 'C'
 };
 
-constinit State g_state = {customos::drivers::video::kWindowInvalid, {}, 0, 0, 0, false, true, false};
+constinit State g_state = {duetos::drivers::video::kWindowInvalid, {}, 0, 0, 0, false, true, false};
 
 // Copy a literal NUL-terminated string into the display.
 void SetDisplayLiteral(const char* s)
@@ -271,9 +271,9 @@ void DispatchKey(char k)
 // client fill naturally.
 void DrawFn(u32 cx, u32 cy, u32 cw, u32 /*ch*/, void* /*cookie*/)
 {
-    using customos::drivers::video::FramebufferDrawRect;
-    using customos::drivers::video::FramebufferDrawString;
-    using customos::drivers::video::FramebufferFillRect;
+    using duetos::drivers::video::FramebufferDrawRect;
+    using duetos::drivers::video::FramebufferDrawString;
+    using duetos::drivers::video::FramebufferFillRect;
     constexpr u32 kDisplayPadY = 4;
     constexpr u32 kDisplayH = 28;
     if (cw <= 16 || kDisplayH + 2 * kDisplayPadY > 80)
@@ -300,11 +300,11 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 /*ch*/, void* /*cookie*/)
 
 } // namespace
 
-void CalculatorInit(customos::drivers::video::WindowHandle handle)
+void CalculatorInit(duetos::drivers::video::WindowHandle handle)
 {
     g_state.handle = handle;
     HandleClear();
-    customos::drivers::video::WindowSetContentDraw(handle, DrawFn, nullptr);
+    duetos::drivers::video::WindowSetContentDraw(handle, DrawFn, nullptr);
 
     // Register 16 buttons as a 4x4 grid inside the window. Each
     // button's `owner` field is `handle` so the widget layer
@@ -317,7 +317,7 @@ void CalculatorInit(customos::drivers::video::WindowHandle handle)
         const u32 col = i % 4;
         const char key = kButtonKeys[i];
         const KeyColours cols = ColoursFor(key);
-        customos::drivers::video::ButtonWidget b{};
+        duetos::drivers::video::ButtonWidget b{};
         b.id = kIdBase + i;
         b.owner = handle;
         b.x = kGridLeftOffset + col * (kBtnW + kBtnGap);
@@ -401,11 +401,11 @@ void CalculatorInit(customos::drivers::video::WindowHandle handle)
             b.label = nullptr;
             break;
         }
-        customos::drivers::video::WidgetRegisterButton(b);
+        duetos::drivers::video::WidgetRegisterButton(b);
     }
 }
 
-customos::drivers::video::WindowHandle CalculatorWindow()
+duetos::drivers::video::WindowHandle CalculatorWindow()
 {
     return g_state.handle;
 }
@@ -441,7 +441,7 @@ bool CalculatorFeedChar(char c)
 
 void CalculatorSelfTest()
 {
-    using customos::arch::SerialWrite;
+    using duetos::arch::SerialWrite;
     struct Case
     {
         const char* keys;
@@ -473,4 +473,4 @@ void CalculatorSelfTest()
     SerialWrite(all_pass ? "[calc] self-test OK (2+3=5, 9-4=5, 6*7=42)\n" : "[calc] self-test FAILED\n");
 }
 
-} // namespace customos::apps::calculator
+} // namespace duetos::apps::calculator

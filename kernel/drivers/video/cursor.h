@@ -35,7 +35,7 @@
  * Context: kernel. Init after FramebufferInit.
  */
 
-namespace customos::drivers::video
+namespace duetos::drivers::video
 {
 
 /// Remember `desktop_rgb` as the fallback "background" colour and
@@ -73,4 +73,4 @@ void CursorShow();
 /// repaints over the new desktop fill rather than the old one.
 void CursorSetDesktopBackground(u32 rgb);
 
-} // namespace customos::drivers::video
+} // namespace duetos::drivers::video

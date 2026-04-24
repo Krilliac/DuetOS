@@ -3,7 +3,7 @@
 #include "../../core/types.h"
 
 /*
- * CustomOS — USB driver shell, v0.
+ * DuetOS — USB driver shell, v0.
  *
  * Discovery + classification for USB host controllers. Walks the
  * `pci::Device` cache for serial-bus-controller / USB entries
@@ -39,7 +39,7 @@
  * `PciEnumerate`.
  */
 
-namespace customos::drivers::usb
+namespace duetos::drivers::usb
 {
 
 inline constexpr u8 kPciClassSerialBus = 0x0C;
@@ -130,4 +130,4 @@ struct UsbClassDriver
 u64 ClassDriverCount();
 const UsbClassDriver& ClassDriver(u64 index);
 
-} // namespace customos::drivers::usb
+} // namespace duetos::drivers::usb

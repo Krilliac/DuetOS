@@ -11,7 +11,7 @@
 #include "pe_exports.h"
 #include "process.h"
 
-namespace customos::core
+namespace duetos::core
 {
 
 namespace
@@ -79,7 +79,7 @@ constexpr u64 kDirEntryTls = 9;
 // explicit override at spawn time (path not wired yet).
 constexpr u64 kV0StackTop = 0x80000000ULL;
 constexpr u64 kV0StackPages = 16;
-constexpr u64 kV0StackVa = kV0StackTop - kV0StackPages * customos::mm::kPageSize;
+constexpr u64 kV0StackVa = kV0StackTop - kV0StackPages * duetos::mm::kPageSize;
 constexpr u64 kPageMask = kPageAlign - 1;
 
 // Minimal TEB (Thread Environment Block) page for Win32 PEs.
@@ -292,9 +292,9 @@ PeStatus ParseHeaders(const u8* file, u64 file_len, PeHeaders& out)
 //     file[PointerToRawData..] into memory at
 //     ImageBase + VirtualAddress.
 //   - Characteristics bits pick the mapping flags.
-bool MapSection(const u8* file, const u8* sec, u64 image_base, customos::mm::AddressSpace* as)
+bool MapSection(const u8* file, const u8* sec, u64 image_base, duetos::mm::AddressSpace* as)
 {
-    using namespace customos::mm;
+    using namespace duetos::mm;
     const u32 virt_addr = LeU32(sec + kSectionHeaderVirtualAddress);
     const u32 virt_size = LeU32(sec + kSectionHeaderVirtualSize);
     const u32 raw_size = LeU32(sec + kSectionHeaderSizeOfRawData);
@@ -358,9 +358,9 @@ bool MapSection(const u8* file, const u8* sec, u64 image_base, customos::mm::Add
 // keeps the image layout at runtime isomorphic to the on-disk
 // layout — important for a future slice that runs a DLL
 // resolver.
-bool MapHeaders(const u8* file, u64 sizeof_headers, u64 image_base, customos::mm::AddressSpace* as)
+bool MapHeaders(const u8* file, u64 sizeof_headers, u64 image_base, duetos::mm::AddressSpace* as)
 {
-    using namespace customos::mm;
+    using namespace duetos::mm;
     const u64 start = image_base & ~kPageMask;
     const u64 end = (image_base + sizeof_headers + kPageMask) & ~kPageMask;
     if (end <= start)
@@ -558,7 +558,7 @@ u64 CountTlsCallbacks(const u8* file, u64 file_len, const PeHeaders& h)
 // boundary needs two `AddressSpaceLookupUserFrame` lookups. The
 // apply path handles that correctly; the zero-delta pass never
 // touches memory so the split case is invisible there.
-bool ApplyRelocations(const u8* file, u64 file_len, const PeHeaders& h, customos::mm::AddressSpace* as, u64 delta)
+bool ApplyRelocations(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm::AddressSpace* as, u64 delta)
 {
     using arch::SerialWrite;
     using arch::SerialWriteHex;
@@ -820,7 +820,7 @@ bool TryResolveViaPreloadedDlls(const char* dll_name, const char* fn_name, const
     return TryResolveViaPreloadedDllsImpl(dll_name, fn_name, dlls, count, /*depth=*/0, out_va);
 }
 
-bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, customos::mm::AddressSpace* as,
+bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm::AddressSpace* as,
                     const DllImage* preloaded_dlls, u64 preloaded_dll_count)
 {
     KLOG_TRACE_SCOPE("pe-resolve", "ResolveImports");
@@ -1018,7 +1018,7 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, customos::
 
 } // namespace
 
-PeLoadResult PeLoad(const u8* file, u64 file_len, customos::mm::AddressSpace* as, const char* program_name,
+PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, const char* program_name,
                     u64 aslr_delta, const DllImage* preloaded_dlls, u64 preloaded_dll_count)
 {
     KLOG_TRACE_SCOPE("pe-loader", "PeLoad");
@@ -1031,8 +1031,8 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, customos::mm::AddressSpace* as
     // (CreateRemoteThread + WriteProcessMemory), the suspicious-API
     // multi-match, and packed/no-import PEs. Advisory mode (default)
     // always allows; Enforce mode prompts the user.
-    customos::security::ImageDescriptor gd{customos::security::ImageKind::WindowsPE, "(pe)", file, file_len};
-    if (!customos::security::Gate(gd))
+    duetos::security::ImageDescriptor gd{duetos::security::ImageKind::WindowsPE, "(pe)", file, file_len};
+    if (!duetos::security::Gate(gd))
     {
         arch::SerialWrite("[pe-loader] security guard blocked PE load\n");
         return r;
@@ -1067,7 +1067,7 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, customos::mm::AddressSpace* as
     if (ps != PeStatus::Ok && ps != PeStatus::ImportsPresent && ps != PeStatus::TlsPresent)
         return r;
 
-    using namespace customos::mm;
+    using namespace duetos::mm;
     using arch::SerialWrite;
     using arch::SerialWriteHex;
 
@@ -1607,4 +1607,4 @@ void PeReport(const u8* file, u64 file_len)
     }
 }
 
-} // namespace customos::core
+} // namespace duetos::core

@@ -3,7 +3,7 @@
 #include "../core/types.h"
 
 /*
- * CustomOS — static kernel probes.
+ * DuetOS — static kernel probes.
  *
  * A `KBP_PROBE(tag)` macro sprinkled at interesting sites in
  * the kernel. Each probe is a named enum entry with a per-entry
@@ -32,7 +32,7 @@
  * log". No locks, no blocking.
  */
 
-namespace customos::debug
+namespace duetos::debug
 {
 
 // Each probe is an enum entry in a fixed table. Adding a new
@@ -104,7 +104,7 @@ u64 ProbeList(ProbeInfo* out, u64 cap);
 /// arm states per the `kProbeTable` declaration.
 void ProbeInit();
 
-} // namespace customos::debug
+} // namespace duetos::debug
 
 // Fire a probe. The `do {} while (0)` is so the macro works in
 // `if (x) KBP_PROBE(foo); else y;` without dangling-else footguns.
@@ -119,12 +119,12 @@ void ProbeInit();
 #define KBP_PROBE(probe_id)                                                                                            \
     do                                                                                                                 \
     {                                                                                                                  \
-        ::customos::debug::ProbeFire((probe_id), reinterpret_cast<::customos::u64>(__builtin_return_address(0)), 0);   \
+        ::duetos::debug::ProbeFire((probe_id), reinterpret_cast<::duetos::u64>(__builtin_return_address(0)), 0);   \
     } while (0)
 
 #define KBP_PROBE_V(probe_id, value)                                                                                   \
     do                                                                                                                 \
     {                                                                                                                  \
-        ::customos::debug::ProbeFire((probe_id), reinterpret_cast<::customos::u64>(__builtin_return_address(0)),       \
-                                     static_cast<::customos::u64>(value));                                             \
+        ::duetos::debug::ProbeFire((probe_id), reinterpret_cast<::duetos::u64>(__builtin_return_address(0)),       \
+                                     static_cast<::duetos::u64>(value));                                             \
     } while (0)

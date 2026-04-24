@@ -3,7 +3,7 @@
 #include "../../core/types.h"
 
 /*
- * CustomOS — MSR-based CPU thermal readouts, v0.
+ * DuetOS — MSR-based CPU thermal readouts, v0.
  *
  * Reads Intel / AMD "digital thermal sensor" MSRs:
  *
@@ -35,7 +35,7 @@
  * Context: kernel. Non-privileged MSRs; rdmsr in ring 0 is fine.
  */
 
-namespace customos::arch
+namespace duetos::arch
 {
 
 struct ThermalReading
@@ -59,4 +59,4 @@ ThermalReading ThermalRead();
 /// unavailable; logs a Warn line.
 void ThermalProbe();
 
-} // namespace customos::arch
+} // namespace duetos::arch

@@ -1,5 +1,5 @@
 /*
- * CustomOS — ring-0 → ring-3 transition.
+ * DuetOS — ring-0 → ring-3 transition.
  *
  *   [[noreturn]] void EnterUserMode(u64 user_rip, u64 user_rsp);
  *

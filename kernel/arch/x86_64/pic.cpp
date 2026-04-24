@@ -5,7 +5,7 @@
 
 #include "../../core/klog.h"
 
-namespace customos::arch
+namespace duetos::arch
 {
 
 namespace
@@ -66,4 +66,4 @@ void PicDisable()
     core::Log(core::LogLevel::Info, "arch/pic", "8259 remapped (0x20..0x2F) and fully masked");
 }
 
-} // namespace customos::arch
+} // namespace duetos::arch

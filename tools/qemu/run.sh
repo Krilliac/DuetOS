@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Launch the freshly-built CustomOS kernel in QEMU.
+# Launch the freshly-built DuetOS kernel in QEMU.
 #
 # Default boot path:  ISO + GRUB + Multiboot2.
 # Reasoning:          QEMU's `-kernel` flag speaks Multiboot 1, but our
@@ -13,7 +13,7 @@
 #   -no-shutdown           : leave QEMU alive so `info registers` works
 #   -d int,cpu_reset       : trace interrupts + reset causes
 #   -D qemu.log            : dump that trace to qemu.log
-#   -display none          : headless (override by exporting CUSTOMOS_DISPLAY=gtk)
+#   -display none          : headless (override by exporting DUETOS_DISPLAY=gtk)
 #
 # Extra argv is forwarded to QEMU, so `tools/qemu/run.sh -s -S` will start
 # it waiting for gdb on :1234.
@@ -22,7 +22,7 @@
 #   sudo apt-get install -y qemu-system-x86 grub-common grub-pc-bin grub-efi-amd64-bin xorriso mtools ovmf
 #
 # OVMF is required because UEFI is the default boot firmware
-# (see UEFI_MODE below). Set CUSTOMOS_LEGACY=1 to boot via
+# (see UEFI_MODE below). Set DUETOS_LEGACY=1 to boot via
 # SeaBIOS instead and skip the OVMF requirement.
 
 set -euo pipefail
@@ -30,30 +30,30 @@ set -euo pipefail
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-PRESET="${CUSTOMOS_PRESET:-x86_64-debug}"
+PRESET="${DUETOS_PRESET:-x86_64-debug}"
 BUILD_DIR="${REPO_ROOT}/build/${PRESET}"
-ISO_IMAGE="${BUILD_DIR}/customos.iso"
-KERNEL_ELF="${BUILD_DIR}/kernel/customos-kernel.elf"
-DISPLAY_MODE="${CUSTOMOS_DISPLAY:-none}"
-TIMEOUT_SECS="${CUSTOMOS_TIMEOUT:-}"
+ISO_IMAGE="${BUILD_DIR}/duetos.iso"
+KERNEL_ELF="${BUILD_DIR}/kernel/duetos-kernel.elf"
+DISPLAY_MODE="${DUETOS_DISPLAY:-none}"
+TIMEOUT_SECS="${DUETOS_TIMEOUT:-}"
 # Boot firmware: UEFI (OVMF) by default, SeaBIOS when
-# CUSTOMOS_LEGACY=1. UEFI is the primary target for commodity
+# DUETOS_LEGACY=1. UEFI is the primary target for commodity
 # PC hardware post-2010; SeaBIOS stays available for
 # legacy-BIOS regression tests and for hosts where OVMF isn't
 # installed. The hybrid ISO carries both boot records
 # (grub-mkrescue embeds El Torito entries for both), so the
 # same image works with either firmware.
 #
-# Historical: this flag was introduced as opt-in (CUSTOMOS_UEFI=1).
+# Historical: this flag was introduced as opt-in (DUETOS_UEFI=1).
 # Flipped to default 2026-04 once every self-test ran clean
 # under OVMF — "boots on commodity PC hardware" is a project
 # pillar, and SeaBIOS is not what modern machines ship.
-LEGACY_MODE="${CUSTOMOS_LEGACY:-0}"
-if [[ -n "${CUSTOMOS_UEFI:-}" ]]; then
-    # Back-compat: honor an explicit CUSTOMOS_UEFI setting. UEFI=0
+LEGACY_MODE="${DUETOS_LEGACY:-0}"
+if [[ -n "${DUETOS_UEFI:-}" ]]; then
+    # Back-compat: honor an explicit DUETOS_UEFI setting. UEFI=0
     # means "force legacy"; UEFI=1 is redundant (it's already the
     # default) but harmless.
-    if [[ "${CUSTOMOS_UEFI}" == "0" ]]; then
+    if [[ "${DUETOS_UEFI}" == "0" ]]; then
         LEGACY_MODE=1
     fi
 fi
@@ -70,12 +70,12 @@ fi
 
 UEFI_ARGS=()
 if [[ "${UEFI_MODE}" == "1" ]]; then
-    OVMF_CODE="${CUSTOMOS_OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
-    OVMF_VARS_TEMPLATE="${CUSTOMOS_OVMF_VARS:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
+    OVMF_CODE="${DUETOS_OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
+    OVMF_VARS_TEMPLATE="${DUETOS_OVMF_VARS:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
     if [[ ! -f "${OVMF_CODE}" || ! -f "${OVMF_VARS_TEMPLATE}" ]]; then
         echo "error: UEFI is the default boot firmware but OVMF isn't installed." >&2
         echo "       Option A (recommended): sudo apt-get install -y ovmf" >&2
-        echo "       Option B (skip UEFI, use SeaBIOS): CUSTOMOS_LEGACY=1 $0 ..." >&2
+        echo "       Option B (skip UEFI, use SeaBIOS): DUETOS_LEGACY=1 $0 ..." >&2
         echo "       expected: ${OVMF_CODE} and ${OVMF_VARS_TEMPLATE}" >&2
         exit 1
     fi

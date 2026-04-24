@@ -5,7 +5,7 @@
 
 #include "../../core/panic.h"
 
-namespace customos::arch
+namespace duetos::arch
 {
 
 namespace
@@ -200,7 +200,7 @@ bool NmiWatchdogHandleNmi()
             SerialWrite(" across ");
             SerialWriteHex(u64(g_consecutive_unpetted));
             SerialWrite(" intervals\n");
-            ::customos::core::Panic("nmi-watchdog", "kernel wedged (timer IRQ not firing)");
+            ::duetos::core::Panic("nmi-watchdog", "kernel wedged (timer IRQ not firing)");
             // Panic is [[noreturn]]; unreachable below.
         }
     }
@@ -211,4 +211,4 @@ bool NmiWatchdogHandleNmi()
     return true;
 }
 
-} // namespace customos::arch
+} // namespace duetos::arch

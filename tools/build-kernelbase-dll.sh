@@ -64,6 +64,6 @@ python3 "${EMBED}" \
     "${DLL}" \
     "${OUT_HEADER}" \
     kBinKernelbaseDllBytes \
-    --namespace "customos::fs::generated"
+    --namespace "duetos::fs::generated"
 
 echo "build-kernelbase-dll.sh: wrote ${OUT_HEADER} (DLL $(stat -c%s "${DLL}") bytes)"

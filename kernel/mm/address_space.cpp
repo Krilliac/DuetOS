@@ -9,7 +9,7 @@
 #include "kheap.h"
 #include "page.h"
 
-namespace customos::mm
+namespace duetos::mm
 {
 
 namespace
@@ -574,4 +574,4 @@ void AddressSpaceSelfTest()
     arch::SerialWrite("[mm/as] isolation self-test OK\n");
 }
 
-} // namespace customos::mm
+} // namespace duetos::mm

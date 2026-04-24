@@ -4,7 +4,7 @@
 #include "frame_allocator.h"
 
 /*
- * CustomOS managed page-table API — v0.
+ * DuetOS managed page-table API — v0.
  *
  * Sits on top of the boot PML4 installed by boot.S. Adds 4 KiB-granular
  * mapping for kernel virtual addresses outside the static higher-half
@@ -37,7 +37,7 @@
  * are then safe from any kernel code that is NOT in IRQ context.
  */
 
-namespace customos::mm
+namespace duetos::mm
 {
 
 /// Page-table entry flags (Intel SDM Vol. 3A §4.5).
@@ -114,13 +114,13 @@ void* MapMmio(PhysAddr phys, u64 bytes);
 
 /// Result-shaped sibling of `MapMmio`. `OutOfMemory` on arena
 /// exhaustion; `InvalidArgument` if bytes is zero.
-inline ::customos::core::Result<void*> TryMapMmio(PhysAddr phys, u64 bytes)
+inline ::duetos::core::Result<void*> TryMapMmio(PhysAddr phys, u64 bytes)
 {
     if (bytes == 0)
-        return ::customos::core::Err{::customos::core::ErrorCode::InvalidArgument};
+        return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
     void* p = MapMmio(phys, bytes);
     if (p == nullptr)
-        return ::customos::core::Err{::customos::core::ErrorCode::OutOfMemory};
+        return ::duetos::core::Err{::duetos::core::ErrorCode::OutOfMemory};
     return p;
 }
 
@@ -213,4 +213,4 @@ void SetPteFlags4K(u64 virt, u64 new_flags);
 bool CopyFromUser(void* kernel_dst, const void* user_src, u64 len);
 bool CopyToUser(void* user_dst, const void* kernel_src, u64 len);
 
-} // namespace customos::mm
+} // namespace duetos::mm

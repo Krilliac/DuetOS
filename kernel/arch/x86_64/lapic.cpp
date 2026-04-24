@@ -13,7 +13,7 @@
 // would be wasted on a single extra slot.
 extern "C" void isr_spurious();
 
-namespace customos::arch
+namespace duetos::arch
 {
 
 namespace
@@ -89,7 +89,7 @@ void LapicInit()
     // Read the LAPIC base from MSR. The default is 0xFEE00000 but firmware
     // can relocate it; trust the MSR.
     u64 apic_base_msr = ReadMsr(kIa32ApicBaseMsr);
-    const customos::mm::PhysAddr base_phys = apic_base_msr & kApicBaseAddrMask;
+    const duetos::mm::PhysAddr base_phys = apic_base_msr & kApicBaseAddrMask;
 
     // Set the global enable bit (writing the MSR back also locks-in any
     // hardware-default settings the firmware may have left clear).
@@ -102,7 +102,7 @@ void LapicInit()
     // Map the 4 KiB register window with cache-disable. Cached MMIO would
     // turn EOIs into NOPs and timer-init writes into "delivered eventually
     // when the line gets evicted" — i.e. nothing would work.
-    void* mmio = customos::mm::MapMmio(base_phys, 0x1000);
+    void* mmio = duetos::mm::MapMmio(base_phys, 0x1000);
     if (mmio == nullptr)
     {
         PanicLapic("MapMmio failed for LAPIC window");
@@ -123,4 +123,4 @@ void LapicInit()
     core::LogWithValue(core::LogLevel::Info, "arch/lapic", "version", LapicRead(kLapicRegVersion));
 }
 
-} // namespace customos::arch
+} // namespace duetos::arch

@@ -1,6 +1,6 @@
 #include "vfs.h"
 
-namespace customos::fs
+namespace duetos::fs
 {
 
 namespace
@@ -115,4 +115,4 @@ const RamfsNode* VfsLookup(const RamfsNode* root, const char* path, u64 path_max
     return cur;
 }
 
-} // namespace customos::fs
+} // namespace duetos::fs

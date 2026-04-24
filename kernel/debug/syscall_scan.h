@@ -3,13 +3,13 @@
 #include "../core/types.h"
 
 /*
- * CustomOS — operator-driven syscall scanner.
+ * DuetOS — operator-driven syscall scanner.
  *
  * Walks a byte range looking for x86_64 syscall idioms
  * (`syscall`, `int 0x80`, `int 0x2E`, `sysenter`), decodes the
  * immediately-preceding `mov eax, imm32` when present to
  * recover the syscall number, and cross-references the number
- * against the NT / Linux / native CustomOS syscall tables for
+ * against the NT / Linux / native DuetOS syscall tables for
  * naming + coverage status.
  *
  * This is NOT a full disassembler. It is a focused pattern
@@ -24,7 +24,7 @@
  * targets the opcodes scanner rather than this one.
  */
 
-namespace customos::debug
+namespace duetos::debug
 {
 
 /// The kind of syscall-issuing instruction that was found.
@@ -32,7 +32,7 @@ enum class SyscallSiteKind : u8
 {
     Unknown = 0,
     Syscall,  // `syscall`  (0F 05) — Linux / NT x86_64 ABI
-    Int80,    // `int 0x80` (CD 80) — native CustomOS ABI
+    Int80,    // `int 0x80` (CD 80) — native DuetOS ABI
     Int2E,    // `int 0x2E` (CD 2E) — legacy NT ABI
     Sysenter, // `sysenter` (0F 34) — 32-bit fast path (rare)
 };
@@ -42,7 +42,7 @@ struct SiteCoverage
 {
     bool known_linux = false;  // Linux table has a name for this number
     bool known_nt = false;     // NT table has a name for this number
-    bool known_native = false; // CustomOS native SYS_* has this number
+    bool known_native = false; // DuetOS native SYS_* has this number
     bool impl_linux = false;   // Linux primary dispatcher has a Do* handler
     bool impl_native = false;  // Matched a known native SYS_*
     const char* linux_name = nullptr;
@@ -104,4 +104,4 @@ SyscallScanReport SyscallScanKernelText();
 /// a zeroed report on any parse / read failure.
 SyscallScanReport SyscallScanFile(const char* path);
 
-} // namespace customos::debug
+} // namespace duetos::debug

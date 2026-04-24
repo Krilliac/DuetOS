@@ -4,7 +4,7 @@
 #include "../arch/x86_64/serial.h"
 #include "../drivers/video/framebuffer.h"
 
-namespace customos::apps::clock
+namespace duetos::apps::clock
 {
 
 namespace
@@ -50,13 +50,13 @@ constexpr u32 kSegOn = 0x0020FF40;
 constexpr u32 kSegOff = 0x00102818;
 constexpr u32 kBg = 0x00081008;
 
-constinit customos::drivers::video::WindowHandle g_handle = customos::drivers::video::kWindowInvalid;
+constinit duetos::drivers::video::WindowHandle g_handle = duetos::drivers::video::kWindowInvalid;
 
 // Paint one segment of a digit. `x` / `y` is the digit's
 // top-left. `on` chooses colour.
 void PaintSegment(u32 x, u32 y, u8 seg, bool on)
 {
-    using customos::drivers::video::FramebufferFillRect;
+    using duetos::drivers::video::FramebufferFillRect;
     const u32 c = on ? kSegOn : kSegOff;
     switch (seg)
     {
@@ -99,7 +99,7 @@ void PaintDigit(u32 x, u32 y, u8 value)
 
 void PaintColon(u32 x, u32 y)
 {
-    using customos::drivers::video::FramebufferFillRect;
+    using duetos::drivers::video::FramebufferFillRect;
     // Two small squares at vertical thirds of the digit height.
     const u32 sz = kSegT + 1;
     const u32 cx = x + (kColonW - sz) / 2;
@@ -111,14 +111,14 @@ void PaintColon(u32 x, u32 y)
 
 void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
 {
-    using customos::drivers::video::FramebufferDrawString;
-    using customos::drivers::video::FramebufferFillRect;
+    using duetos::drivers::video::FramebufferDrawString;
+    using duetos::drivers::video::FramebufferFillRect;
     // Solid background — keeps the previous frame's glow from
     // leaking through on the inactive-segment colour.
     FramebufferFillRect(cx, cy, cw, ch, kBg);
 
-    customos::arch::RtcTime rtc{};
-    customos::arch::RtcRead(&rtc);
+    duetos::arch::RtcTime rtc{};
+    duetos::arch::RtcRead(&rtc);
     const u8 digits[6] = {
         static_cast<u8>(rtc.hour / 10),   static_cast<u8>(rtc.hour % 10),   static_cast<u8>(rtc.minute / 10),
         static_cast<u8>(rtc.minute % 10), static_cast<u8>(rtc.second / 10), static_cast<u8>(rtc.second % 10),
@@ -173,20 +173,20 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
 
 } // namespace
 
-void ClockInit(customos::drivers::video::WindowHandle handle)
+void ClockInit(duetos::drivers::video::WindowHandle handle)
 {
     g_handle = handle;
-    customos::drivers::video::WindowSetContentDraw(handle, DrawFn, nullptr);
+    duetos::drivers::video::WindowSetContentDraw(handle, DrawFn, nullptr);
 }
 
-customos::drivers::video::WindowHandle ClockWindow()
+duetos::drivers::video::WindowHandle ClockWindow()
 {
     return g_handle;
 }
 
 void ClockSelfTest()
 {
-    using customos::arch::SerialWrite;
+    using duetos::arch::SerialWrite;
     bool pass = true;
     // Every digit 0-9 should resolve to a non-zero mask.
     for (u32 d = 0; d < 10; ++d)
@@ -210,4 +210,4 @@ void ClockSelfTest()
     SerialWrite(pass ? "[clock] self-test OK (digit mask + row fit)\n" : "[clock] self-test FAILED\n");
 }
 
-} // namespace customos::apps::clock
+} // namespace duetos::apps::clock

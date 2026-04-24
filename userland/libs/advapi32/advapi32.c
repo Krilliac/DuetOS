@@ -1,7 +1,7 @@
 /*
  * userland/libs/advapi32/advapi32.c
  *
- * Freestanding CustomOS advapi32.dll. Stage-2 slice 34
+ * Freestanding DuetOS advapi32.dll. Stage-2 slice 34
  * upgrades this from the all-stubs slice-27 version to a real
  * in-memory registry:
  *
@@ -12,7 +12,7 @@
  *   - A static tree of well-known keys + values that real-world
  *     PEs frequently query:
  *       HKLM\Software\Microsoft\Windows NT\CurrentVersion
- *         ProductName      = "CustomOS"
+ *         ProductName      = "DuetOS"
  *         CurrentVersion   = "10.0"
  *         CurrentBuild     = "19041"
  *         CurrentBuildNumber = "19041"
@@ -110,11 +110,11 @@ static DWORD g_reg_dword_proxy_enable = 0;
 static DWORD g_reg_dword_version_major = 10;
 
 static const RegValue k_hklm_winnt_values[] = {
-    {"ProductName",        REG_SZ,    "CustomOS\0",         9,  0},
+    {"ProductName",        REG_SZ,    "DuetOS\0",         9,  0},
     {"CurrentVersion",     REG_SZ,    "10.0\0",             5,  0},
     {"CurrentBuild",       REG_SZ,    "19041\0",            6,  0},
     {"CurrentBuildNumber", REG_SZ,    "19041\0",            6,  0},
-    {"BuildLab",           REG_SZ,    "19041.customos\0",   15, 0},
+    {"BuildLab",           REG_SZ,    "19041.duetos\0",   15, 0},
     {"InstallationType",   REG_SZ,    "Client\0",           7,  0},
     {"ReleaseId",          REG_SZ,    "2004\0",             5,  0},
     {"EditionID",          REG_SZ,    "Professional\0",     13, 0},
@@ -127,7 +127,7 @@ static const RegValue k_hkcu_internet_values[] = {
 
 static const RegValue k_hkcu_volatile_env_values[] = {
     {"USERNAME", REG_SZ, "user\0", 5, 0},
-    {"USERDOMAIN", REG_SZ, "CUSTOMOS\0", 9, 0},
+    {"USERDOMAIN", REG_SZ, "DUETOS\0", 9, 0},
 };
 
 static const RegKey k_reg_keys[] = {

@@ -3,7 +3,7 @@
 #include "types.h"
 
 /*
- * CustomOS — user accounts + authentication, v0.
+ * DuetOS — user accounts + authentication, v0.
  *
  * Fixed-size in-memory account table. Passwords are stored as
  * salt + iterated FNV-1a 64-bit hashes — not cryptographic, but
@@ -31,7 +31,7 @@
  * kbd-reader sequencing). Never called from IRQ.
  */
 
-namespace customos::core
+namespace duetos::core
 {
 
 constexpr u32 kAuthMaxAccounts = 16;
@@ -120,4 +120,4 @@ bool AuthAccountByName(const char* username, AccountView* view);
 /// breakage is unacceptable).
 void AuthSelfTest();
 
-} // namespace customos::core
+} // namespace duetos::core

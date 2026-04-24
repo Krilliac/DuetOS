@@ -1,7 +1,7 @@
 /*
  * userland/libs/kernel32/kernel32.c
  *
- * Freestanding CustomOS kernel32.dll — ring-3 code that
+ * Freestanding DuetOS kernel32.dll — ring-3 code that
  * implements Win32 entry points by issuing native int 0x80
  * syscalls + returning sentinel constants where appropriate.
  * This is the live userland replacement for the matching

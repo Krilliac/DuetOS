@@ -1,4 +1,4 @@
-; msvcp140.def — export table for CustomOS's msvcp140.dll.
+; msvcp140.def — export table for DuetOS's msvcp140.dll.
 ;
 ; Maps 17 mangled C++ std:: names to the six plain-C internal
 ; helpers in msvcp140.c. lld-link processes this via /def: and

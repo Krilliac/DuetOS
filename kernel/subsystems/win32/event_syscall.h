@@ -12,12 +12,12 @@
  *   SYS_EVENT_WAIT   (33) — rdi=handle, rsi=timeout_ms.
  */
 
-namespace customos::arch
+namespace duetos::arch
 {
 struct TrapFrame;
 }
 
-namespace customos::subsystems::win32
+namespace duetos::subsystems::win32
 {
 
 void DoEventCreate(arch::TrapFrame* frame);
@@ -25,4 +25,4 @@ void DoEventSet(arch::TrapFrame* frame);
 void DoEventReset(arch::TrapFrame* frame);
 void DoEventWait(arch::TrapFrame* frame);
 
-} // namespace customos::subsystems::win32
+} // namespace duetos::subsystems::win32

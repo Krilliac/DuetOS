@@ -6,11 +6,11 @@
 
 ## Description
 
-Running Windows PE executables natively is one of CustomOS's two defining goals. This entry records the **high-level architectural decisions** about how the Win32/NT subsystem fits into the OS. Implementation details belong in headers and per-subsystem READMEs once they exist — this entry is the contract everything else has to honor.
+Running Windows PE executables natively is one of DuetOS's two defining goals. This entry records the **high-level architectural decisions** about how the Win32/NT subsystem fits into the OS. Implementation details belong in headers and per-subsystem READMEs once they exist — this entry is the contract everything else has to honor.
 
 ## Context
 
-Applies to everything under `subsystems/win32/` (planned), the PE/COFF loader, the NT syscall layer, and any driver surface (GDI, DirectX) that Windows binaries expect. Also constrains how the **native** CustomOS ABI evolves — the two must stay peers, not one layered on top of the other.
+Applies to everything under `subsystems/win32/` (planned), the PE/COFF loader, the NT syscall layer, and any driver surface (GDI, DirectX) that Windows binaries expect. Also constrains how the **native** DuetOS ABI evolves — the two must stay peers, not one layered on top of the other.
 
 ---
 
@@ -18,13 +18,13 @@ Applies to everything under `subsystems/win32/` (planned), the PE/COFF loader, t
 
 ### Decision 1 — The Win32 subsystem is a peer, not a shim
 
-The NT syscall interface is implemented **directly in the kernel**, alongside the native CustomOS syscall interface. Both dispatch tables live in `kernel/syscall/` and both are first-class.
+The NT syscall interface is implemented **directly in the kernel**, alongside the native DuetOS syscall interface. Both dispatch tables live in `kernel/syscall/` and both are first-class.
 
 Rationale:
 - A shim-over-native design (the "Wine model" of translating every Win32 call into host calls) is slower and leaks semantics that are hard to match without kernel cooperation (reparse points, async I/O, APCs, structured exceptions).
 - Kernel-level implementation lets us honor NT semantics exactly where they matter most — object handles, wait semantics, I/O completion ports, thread suspension/resume — instead of approximating them in user space.
 
-Constraint: the native CustomOS syscall ABI must not be defined in a way that prevents the NT ABI from being peer-equal. No accidental "the real ABI is ours and Win32 is second-class."
+Constraint: the native DuetOS syscall ABI must not be defined in a way that prevents the NT ABI from being peer-equal. No accidental "the real ABI is ours and Win32 is second-class."
 
 ### Decision 2 — User-mode Windows DLLs are reimplementations, not imports
 
@@ -63,7 +63,7 @@ Rationale:
 
 ### Decision 6 — Compatibility is measured in "does the .exe run," not percentages
 
-We don't ship a "97% compatible" marketing number. A binary either runs end-to-end on CustomOS or it doesn't. The test suite is a set of real applications (a game, a compiler, a shell, a well-known benchmark) with pass/fail per binary.
+We don't ship a "97% compatible" marketing number. A binary either runs end-to-end on DuetOS or it doesn't. The test suite is a set of real applications (a game, a compiler, a shell, a well-known benchmark) with pass/fail per binary.
 
 Rationale:
 - Partial compatibility numbers drive effort toward "pad the metric," not "fix the next real user-visible bug."
@@ -85,7 +85,7 @@ Rationale:
 - **Not a Wine fork.** Wine is prior art. We do not vendor it, link against it, or track its releases.
 - **Not a ReactOS rewrite.** ReactOS is a reference for NT semantics. We do not fork it.
 - **Not a Linux compatibility layer.** POSIX support, if added, is a separate subsystem with its own plan.
-- **No guarantee of driver compatibility.** A Windows `.sys` driver will not run on CustomOS. Hardware support comes from our own kernel drivers.
+- **No guarantee of driver compatibility.** A Windows `.sys` driver will not run on DuetOS. Hardware support comes from our own kernel drivers.
 - **No Windows Store / UWP / WinRT support in v1.** Classic Win32 first, everything else later (if at all).
 
 ---

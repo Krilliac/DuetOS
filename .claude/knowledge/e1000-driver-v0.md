@@ -36,7 +36,7 @@ Covered:
   RDT.
 - TX self-test: one 60-byte broadcast frame with ethertype
   `0x88B5` ("LocalExperimental1") and the marker
-  `CUSTOMOS-E1000-SELFTEST` so a host-side `tcpdump` can pick
+  `DUETOS-E1000-SELFTEST` so a host-side `tcpdump` can pick
   the frame out of the netdev.
 
 Deliberately not in scope:

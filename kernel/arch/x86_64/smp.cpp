@@ -16,11 +16,11 @@
 // Linker-emitted symbols for the trampoline image (see ap_trampoline.S).
 // Declared at file scope (outside any namespace) so the linker matches
 // the unmangled .S labels; qualified types because `u8` lives inside
-// customos::.
-extern "C" const customos::u8 ap_trampoline_start[];
-extern "C" const customos::u8 ap_trampoline_end[];
+// duetos::.
+extern "C" const duetos::u8 ap_trampoline_start[];
+extern "C" const duetos::u8 ap_trampoline_end[];
 
-namespace customos::arch
+namespace duetos::arch
 {
 
 namespace
@@ -35,7 +35,7 @@ constexpr u64 kOffEntry = 0xFE0;
 constexpr u64 kOffStack = 0xFE8;
 constexpr u64 kOffPml4 = 0xFF0;
 
-constexpr customos::mm::PhysAddr kTrampolinePhys = 0x8000;
+constexpr duetos::mm::PhysAddr kTrampolinePhys = 0x8000;
 constexpr u32 kMaxAps = acpi::kMaxCpus - 1;
 
 // Per-AP persistent state, indexed by cpu_id (1..N). BSP is slot 0
@@ -326,4 +326,4 @@ u64 SmpStartAps()
     return aps_started;
 }
 
-} // namespace customos::arch
+} // namespace duetos::arch

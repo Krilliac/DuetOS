@@ -3,7 +3,7 @@
 #include "../../arch/x86_64/cpu.h"
 #include "../../arch/x86_64/hpet.h"
 
-namespace customos::drivers::audio
+namespace duetos::drivers::audio
 {
 
 namespace
@@ -82,4 +82,4 @@ void PcSpeakerStop()
     arch::Outb(kSpeakerPort, prev & static_cast<u8>(~(kSpeakerGate | kSpeakerData)));
 }
 
-} // namespace customos::drivers::audio
+} // namespace duetos::drivers::audio

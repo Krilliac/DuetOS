@@ -52,5 +52,5 @@ if [[ ${LINK_RC} -ne 0 ]]; then
     exit ${LINK_RC}
 fi
 
-python3 "${EMBED}" "${DLL}" "${OUT_HEADER}" kBinAdvapi32DllBytes --namespace "customos::fs::generated"
+python3 "${EMBED}" "${DLL}" "${OUT_HEADER}" kBinAdvapi32DllBytes --namespace "duetos::fs::generated"
 echo "build-advapi32-dll.sh: wrote ${OUT_HEADER} (DLL $(stat -c%s "${DLL}") bytes)"

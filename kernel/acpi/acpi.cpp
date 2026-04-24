@@ -8,7 +8,7 @@
 #include "../mm/page.h"
 #include "aml.h"
 
-namespace customos::acpi
+namespace duetos::acpi
 {
 
 namespace
@@ -1024,7 +1024,7 @@ bool AcpiShutdown()
 {
     u8 slp_typa = 0;
     u8 slp_typb = 0;
-    if (!::customos::acpi::AmlReadS5(&slp_typa, &slp_typb))
+    if (!::duetos::acpi::AmlReadS5(&slp_typa, &slp_typb))
     {
         return false;
     }
@@ -1054,4 +1054,4 @@ bool AcpiShutdown()
     return false;
 }
 
-} // namespace customos::acpi
+} // namespace duetos::acpi

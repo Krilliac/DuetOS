@@ -5,7 +5,7 @@
 #include "../../mm/paging.h"
 #include "font8x8.h"
 
-namespace customos::drivers::video
+namespace duetos::drivers::video
 {
 
 namespace
@@ -335,4 +335,4 @@ void FramebufferSelfTest()
     SerialWrite("[video/fb] self-test OK\n");
 }
 
-} // namespace customos::drivers::video
+} // namespace duetos::drivers::video

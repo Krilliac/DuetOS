@@ -9,7 +9,7 @@
 #include "menu.h"
 #include "taskbar.h"
 
-namespace customos::drivers::video
+namespace duetos::drivers::video
 {
 
 namespace
@@ -159,7 +159,7 @@ constinit u32 g_z_order[kMaxWindows] = {};
 // and keyboard reader (typing into the console) both acquire it
 // before any Cursor* / Window* / Widget* / DesktopCompose call,
 // so concurrent typing-while-dragging is race-free.
-constinit customos::sched::Mutex g_compositor_mutex{};
+constinit duetos::sched::Mutex g_compositor_mutex{};
 
 // Currently-active (focused) window — the one with the brightly
 // painted title bar. Follows the topmost z-order slot: WindowRaise
@@ -537,12 +537,12 @@ void WindowDrawAllOrdered()
 
 void CompositorLock()
 {
-    customos::sched::MutexLock(&g_compositor_mutex);
+    duetos::sched::MutexLock(&g_compositor_mutex);
 }
 
 void CompositorUnlock()
 {
-    customos::sched::MutexUnlock(&g_compositor_mutex);
+    duetos::sched::MutexUnlock(&g_compositor_mutex);
 }
 
 void DesktopCompose(u32 desktop_rgb, const char* banner)
@@ -643,4 +643,4 @@ u32 WidgetRouteMouse(u32 cursor_x, u32 cursor_y, u8 button_mask)
     return kWidgetInvalid;
 }
 
-} // namespace customos::drivers::video
+} // namespace duetos::drivers::video

@@ -3,7 +3,7 @@
 #include "../arch/x86_64/serial.h"
 #include "symbols.h"
 
-namespace customos::core
+namespace duetos::core
 {
 
 namespace
@@ -188,4 +188,4 @@ void DumpStackWindow(const char* tag, u64 rsp, u32 quad_count)
     }
 }
 
-} // namespace customos::core
+} // namespace duetos::core

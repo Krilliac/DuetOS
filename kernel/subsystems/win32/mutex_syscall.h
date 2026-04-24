@@ -11,16 +11,16 @@
  *   SYS_MUTEX_RELEASE (27) — rdi = handle.
  */
 
-namespace customos::arch
+namespace duetos::arch
 {
 struct TrapFrame;
 }
 
-namespace customos::subsystems::win32
+namespace duetos::subsystems::win32
 {
 
 void DoMutexCreate(arch::TrapFrame* frame);
 void DoMutexWait(arch::TrapFrame* frame);
 void DoMutexRelease(arch::TrapFrame* frame);
 
-} // namespace customos::subsystems::win32
+} // namespace duetos::subsystems::win32

@@ -195,6 +195,6 @@ python3 "${EMBED}" \
     "${DLL}" \
     "${OUT_HEADER}" \
     kBinNtdllDllBytes \
-    --namespace "customos::fs::generated"
+    --namespace "duetos::fs::generated"
 
 echo "build-ntdll-dll.sh: wrote ${OUT_HEADER} (DLL $(stat -c%s "${DLL}") bytes)"

@@ -7,7 +7,7 @@
 #include "../security/guard.h"
 #include "klog.h"
 
-namespace customos::core
+namespace duetos::core
 {
 
 namespace
@@ -221,7 +221,7 @@ constexpr u64 kV0StackVa = 0x7FFFE000ULL;
 struct LoadCtx
 {
     const u8* file;
-    customos::mm::AddressSpace* as;
+    duetos::mm::AddressSpace* as;
     bool ok;
 };
 
@@ -230,7 +230,7 @@ struct LoadCtx
 // failure path is one clear bail-out instead of nested loops.
 void LoadSegment(LoadCtx& ctx, const ElfSegment& seg)
 {
-    using namespace customos::mm;
+    using namespace duetos::mm;
     if (!ctx.ok)
         return; // a prior segment already failed; fall through
 
@@ -292,7 +292,7 @@ void LoadSegment(LoadCtx& ctx, const ElfSegment& seg)
 
 } // namespace
 
-ElfLoadResult ElfLoad(const u8* file, u64 file_len, customos::mm::AddressSpace* as)
+ElfLoadResult ElfLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as)
 {
     KLOG_TRACE_SCOPE("elf-loader", "ElfLoad");
     ElfLoadResult r;
@@ -309,8 +309,8 @@ ElfLoadResult ElfLoad(const u8* file, u64 file_len, customos::mm::AddressSpace* 
     // mapping a single page. In Advisory mode (the default) the
     // gate always returns true but the scan + log lines run so
     // operators can spot heuristic fires before flipping Enforce.
-    customos::security::ImageDescriptor gd{customos::security::ImageKind::NativeElf, "(elf)", file, file_len};
-    if (!customos::security::Gate(gd))
+    duetos::security::ImageDescriptor gd{duetos::security::ImageKind::NativeElf, "(elf)", file, file_len};
+    if (!duetos::security::Gate(gd))
     {
         KLOG_WARN("elf-loader", "security guard blocked ELF load");
         return r;
@@ -334,7 +334,7 @@ ElfLoadResult ElfLoad(const u8* file, u64 file_len, customos::mm::AddressSpace* 
 
     // Stack page. Writable + NX + User. Caller has already populated
     // the code segment(s); the stack goes at the fixed v0 VA.
-    using namespace customos::mm;
+    using namespace duetos::mm;
     const PhysAddr stack_frame = AllocateFrame();
     if (stack_frame == kNullFrame)
     {
@@ -350,4 +350,4 @@ ElfLoadResult ElfLoad(const u8* file, u64 file_len, customos::mm::AddressSpace* 
     return r;
 }
 
-} // namespace customos::core
+} // namespace duetos::core

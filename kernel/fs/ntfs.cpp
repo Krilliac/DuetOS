@@ -4,7 +4,7 @@
 #include "../core/klog.h"
 #include "../drivers/storage/block.h"
 
-namespace customos::fs::ntfs
+namespace duetos::fs::ntfs
 {
 
 namespace
@@ -217,10 +217,10 @@ void WalkSystemRecords(Volume& v)
 
 } // namespace
 
-::customos::core::Result<u32> NtfsProbe(u32 block_handle)
+::duetos::core::Result<u32> NtfsProbe(u32 block_handle)
 {
-    using ::customos::core::Err;
-    using ::customos::core::ErrorCode;
+    using ::duetos::core::Err;
+    using ::duetos::core::ErrorCode;
     if (g_volume_count >= kMaxVolumes)
         return Err{ErrorCode::BadState};
     const i32 rc = drivers::storage::BlockDeviceRead(block_handle, kBootSectorLba, 1, g_scratch);
@@ -279,16 +279,16 @@ void NtfsScanAll()
     for (u32 i = 0; i < n; ++i)
     {
         auto r = NtfsProbe(i);
-        if (!r && r.error() != ::customos::core::ErrorCode::NotFound)
+        if (!r && r.error() != ::duetos::core::ErrorCode::NotFound)
         {
             arch::SerialWrite("[ntfs] handle=");
             arch::SerialWriteHex(i);
             arch::SerialWrite(" probe error=");
-            arch::SerialWrite(::customos::core::ErrorCodeName(r.error()));
+            arch::SerialWrite(::duetos::core::ErrorCodeName(r.error()));
             arch::SerialWrite("\n");
         }
     }
     core::LogWithValue(core::LogLevel::Info, "fs/ntfs", "NTFS volumes found", g_volume_count);
 }
 
-} // namespace customos::fs::ntfs
+} // namespace duetos::fs::ntfs

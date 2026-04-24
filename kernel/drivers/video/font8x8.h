@@ -25,7 +25,7 @@
  * table read, safe from any context.
  */
 
-namespace customos::drivers::video
+namespace duetos::drivers::video
 {
 
 constexpr u32 kGlyphWidth = 8;
@@ -36,4 +36,4 @@ constexpr u32 kGlyphHeight = 8;
 /// codes return a "filled box" placeholder. Never returns nullptr.
 const u8* Font8x8Lookup(char ch);
 
-} // namespace customos::drivers::video
+} // namespace duetos::drivers::video

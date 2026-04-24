@@ -4,7 +4,7 @@
 #include "../core/types.h"
 
 /*
- * CustomOS — NTFS driver, v0 probe + $MFT system-record walk.
+ * DuetOS — NTFS driver, v0 probe + $MFT system-record walk.
  *
  * Reads LBA 0 (the boot sector) of a block device and validates
  * the NTFS signature: "NTFS    " at offset 3 plus 0x55AA at offset
@@ -38,7 +38,7 @@
  * Context: kernel, polling-synchronous block reads only.
  */
 
-namespace customos::fs::ntfs
+namespace duetos::fs::ntfs
 {
 
 inline constexpr u32 kMaxVolumes = 8;
@@ -71,9 +71,9 @@ struct Volume
 
 /// Probe the block device at `handle`. On success returns the
 /// registry slot index; errors as for Ext4Probe.
-::customos::core::Result<u32> NtfsProbe(u32 block_handle);
+::duetos::core::Result<u32> NtfsProbe(u32 block_handle);
 u32 NtfsVolumeCount();
 const Volume* NtfsVolumeByIndex(u32 index);
 void NtfsScanAll();
 
-} // namespace customos::fs::ntfs
+} // namespace duetos::fs::ntfs

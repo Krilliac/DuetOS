@@ -3,7 +3,7 @@
 #include "../core/types.h"
 
 /*
- * CustomOS security guard — v0 (advisory mode).
+ * DuetOS security guard — v0 (advisory mode).
  *
  * Every loadable image — native ELF, Windows PE, kernel thread,
  * user thread — passes through `Gate()` before it gets to run.
@@ -33,7 +33,7 @@
  * softirq context; task-context only.
  */
 
-namespace customos::security
+namespace duetos::security
 {
 
 enum class ImageKind : u8
@@ -150,4 +150,4 @@ void GuardInit();
 /// Prints PASS/FAIL to COM1.
 void GuardSelfTest();
 
-} // namespace customos::security
+} // namespace duetos::security

@@ -2,7 +2,7 @@
 
 #include "cpu.h"
 
-namespace customos::arch
+namespace duetos::arch
 {
 
 namespace
@@ -114,4 +114,4 @@ void SerialWriteHex(u64 value)
     }
 }
 
-} // namespace customos::arch
+} // namespace duetos::arch

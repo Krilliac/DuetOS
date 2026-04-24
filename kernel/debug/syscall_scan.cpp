@@ -5,13 +5,13 @@
 #include "../subsystems/translation/translate.h"
 #include "inspect.h"
 
-namespace customos::debug
+namespace duetos::debug
 {
 
 namespace
 {
 
-// Native CustomOS SYS_* table lookup — the translation unit owns
+// Native DuetOS SYS_* table lookup — the translation unit owns
 // the authoritative name table (for logging) but exposes only the
 // Linux + NT lookups. Keep a small local mirror of the native
 // names, indexed by number, so the scanner can classify `int 0x80`
@@ -408,4 +408,4 @@ SyscallScanReport SyscallScanFile(const char* path)
     return SyscallScanRegion(bytes, len, 0);
 }
 
-} // namespace customos::debug
+} // namespace duetos::debug

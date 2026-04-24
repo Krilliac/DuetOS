@@ -12,7 +12,7 @@
 #include "../pci/pci.h"
 #include "block.h"
 
-namespace customos::drivers::storage
+namespace duetos::drivers::storage
 {
 
 namespace
@@ -155,7 +155,7 @@ struct Controller
     // between polls instead of burning CPU. Polling-only fallback
     // preserved for controllers that don't expose MSI-X.
     u8 irq_vector;
-    customos::sched::WaitQueue cq_wait;
+    duetos::sched::WaitQueue cq_wait;
 };
 
 constinit Controller g_ctrl = {};
@@ -400,15 +400,15 @@ bool SubmitAndWait(Queue& q, SqEntry entry)
         // guard: re-check the phase bit under Cli before blocking.
         if (g_ctrl.irq_vector != 0 && q.id != 0)
         {
-            customos::arch::Cli();
+            duetos::arch::Cli();
             const u32 dw3_recheck = cq_slot.cid_phase_status;
             const u32 phase_recheck = (dw3_recheck >> 16) & 0x1;
             if (phase_recheck == q.expected_phase)
             {
-                customos::arch::Sti();
+                duetos::arch::Sti();
                 continue;
             }
-            customos::sched::WaitQueueBlock(&g_ctrl.cq_wait);
+            duetos::sched::WaitQueueBlock(&g_ctrl.cq_wait);
         }
         else
         {
@@ -593,7 +593,7 @@ bool IdentifyNamespaceOne()
 // the only state.
 void NvmeIrqHandler()
 {
-    customos::sched::WaitQueueWakeOne(&g_ctrl.cq_wait);
+    duetos::sched::WaitQueueWakeOne(&g_ctrl.cq_wait);
 }
 
 bool CreateIoQueues()
@@ -972,4 +972,4 @@ void NvmeSelfTest()
     SerialWrite("[nvme] self-test OK (LBA 0 read + 0x55AA signature present)\n");
 }
 
-} // namespace customos::drivers::storage
+} // namespace duetos::drivers::storage

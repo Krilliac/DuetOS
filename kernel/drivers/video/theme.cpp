@@ -5,7 +5,7 @@
 #include "taskbar.h"
 #include "widget.h"
 
-namespace customos::drivers::video
+namespace duetos::drivers::video
 {
 
 namespace
@@ -232,4 +232,4 @@ void ThemeApplyToAll()
     CursorSetDesktopBackground(t.desktop_bg);
 }
 
-} // namespace customos::drivers::video
+} // namespace duetos::drivers::video

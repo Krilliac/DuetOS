@@ -10,7 +10,7 @@ First real hardware-backed block device. `kernel/drivers/storage/nvme.cpp`
 brings up an NVMe controller end-to-end from PCI discovery through
 a working `BlockDevice` that the block layer can read/write sectors
 against. The boot self-test asserts that LBA 0 of the QEMU scratch
-image round-trips the `"CUSTOMOS"` marker `tools/qemu/run.sh`
+image round-trips the `"DUETOS"` marker `tools/qemu/run.sh`
 seeds into `build/<preset>/nvme0.img`.
 
 Completes **stage 2** of `.claude/knowledge/storage-and-filesystem-roadmap.md`.
@@ -113,7 +113,7 @@ grows a "buffer must be direct-map + 4 KiB-aligned" contract.
 ### Boot self-test
 
 `NvmeSelfTest` reads LBA 0 (one sector) into a stack buffer and
-asserts the first 8 bytes equal `"CUSTOMOS"` — the marker
+asserts the first 8 bytes equal `"DUETOS"` — the marker
 `tools/qemu/run.sh` seeds into `build/<preset>/nvme0.img` on
 first launch. A missing controller logs `"skipped"`; a marker
 mismatch logs `FAILED`.

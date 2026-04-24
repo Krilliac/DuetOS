@@ -26,12 +26,12 @@ The tier is logged at boot:
 ## Public API
 
 ```cpp
-customos::core::RandomInit();                // seed + probe + log
-customos::core::RandomCurrentTier();         // EntropyTier enum
-customos::core::RandomFillBytes(buf, len);   // bulk
-customos::core::RandomU64();                 // one u64
-customos::core::RandomStatsRead();           // call/success/byte counters
-customos::core::RandomSelfTest();            // boot-time sanity
+duetos::core::RandomInit();                // seed + probe + log
+duetos::core::RandomCurrentTier();         // EntropyTier enum
+duetos::core::RandomFillBytes(buf, len);   // bulk
+duetos::core::RandomU64();                 // one u64
+duetos::core::RandomStatsRead();           // call/success/byte counters
+duetos::core::RandomSelfTest();            // boot-time sanity
 ```
 
 Consumers gate on `RandomCurrentTier() != EntropyTier::Splitmix`

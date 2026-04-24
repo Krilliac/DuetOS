@@ -29,7 +29,7 @@
  * concerns provided the caller holds the compositor mutex.
  */
 
-namespace customos::drivers::video
+namespace duetos::drivers::video
 {
 
 /// Position + chrome. `tab_inactive_rgb` fills idle window tabs;
@@ -71,4 +71,4 @@ void TaskbarStartBounds(u32* x, u32* y, u32* w, u32* h);
 /// calendar popup. Populated after TaskbarRedraw.
 void TaskbarClockBounds(u32* x, u32* y, u32* w, u32* h);
 
-} // namespace customos::drivers::video
+} // namespace duetos::drivers::video

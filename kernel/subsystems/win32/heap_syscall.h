@@ -14,12 +14,12 @@
  * fit allocator in heap.cpp.
  */
 
-namespace customos::arch
+namespace duetos::arch
 {
 struct TrapFrame;
 }
 
-namespace customos::subsystems::win32
+namespace duetos::subsystems::win32
 {
 
 void DoHeapAlloc(arch::TrapFrame* frame);
@@ -27,4 +27,4 @@ void DoHeapFree(arch::TrapFrame* frame);
 void DoHeapSize(arch::TrapFrame* frame);
 void DoHeapRealloc(arch::TrapFrame* frame);
 
-} // namespace customos::subsystems::win32
+} // namespace duetos::subsystems::win32

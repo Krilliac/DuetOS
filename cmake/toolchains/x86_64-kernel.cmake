@@ -1,4 +1,4 @@
-# CustomOS freestanding x86_64 kernel toolchain.
+# DuetOS freestanding x86_64 kernel toolchain.
 #
 # Compiles kernel TUs with clang targeting a bare-metal ELF64 image.
 # No hosted libc. No exceptions. No RTTI. No SSE/MMX/x87 in kernel code —
@@ -26,10 +26,10 @@ set(CMAKE_CXX_COMPILER_WORKS 1)
 set(CMAKE_LINKER lld)
 
 # Target triple: plain ELF, no OS.
-set(CUSTOMOS_KERNEL_TARGET "x86_64-unknown-none-elf")
+set(DUETOS_KERNEL_TARGET "x86_64-unknown-none-elf")
 
-set(CUSTOMOS_KERNEL_C_FLAGS
-    "--target=${CUSTOMOS_KERNEL_TARGET}"
+set(DUETOS_KERNEL_C_FLAGS
+    "--target=${DUETOS_KERNEL_TARGET}"
     -ffreestanding
     # Stack canaries: compiler emits a per-function prologue that plants
     # a cookie from __stack_chk_guard and an epilogue that verifies it
@@ -102,8 +102,8 @@ set(CUSTOMOS_KERNEL_C_FLAGS
     -Wshadow
 )
 
-set(CUSTOMOS_KERNEL_CXX_FLAGS
-    ${CUSTOMOS_KERNEL_C_FLAGS}
+set(DUETOS_KERNEL_CXX_FLAGS
+    ${DUETOS_KERNEL_C_FLAGS}
     -fno-exceptions
     -fno-rtti
     -fno-threadsafe-statics
@@ -111,12 +111,12 @@ set(CUSTOMOS_KERNEL_CXX_FLAGS
     -std=c++23
 )
 
-set(CUSTOMOS_KERNEL_ASM_FLAGS
-    "--target=${CUSTOMOS_KERNEL_TARGET}"
+set(DUETOS_KERNEL_ASM_FLAGS
+    "--target=${DUETOS_KERNEL_TARGET}"
 )
 
-set(CUSTOMOS_KERNEL_LINK_FLAGS
-    "--target=${CUSTOMOS_KERNEL_TARGET}"
+set(DUETOS_KERNEL_LINK_FLAGS
+    "--target=${DUETOS_KERNEL_TARGET}"
     -fuse-ld=lld
     -nostdlib
     -static
@@ -127,10 +127,10 @@ set(CUSTOMOS_KERNEL_LINK_FLAGS
 
 # Expose as cached strings so per-target CMakeLists.txt files can consume them
 # without re-deriving.
-string(REPLACE ";" " " _kernel_c_flags   "${CUSTOMOS_KERNEL_C_FLAGS}")
-string(REPLACE ";" " " _kernel_cxx_flags "${CUSTOMOS_KERNEL_CXX_FLAGS}")
-string(REPLACE ";" " " _kernel_asm_flags "${CUSTOMOS_KERNEL_ASM_FLAGS}")
-string(REPLACE ";" " " _kernel_ld_flags  "${CUSTOMOS_KERNEL_LINK_FLAGS}")
+string(REPLACE ";" " " _kernel_c_flags   "${DUETOS_KERNEL_C_FLAGS}")
+string(REPLACE ";" " " _kernel_cxx_flags "${DUETOS_KERNEL_CXX_FLAGS}")
+string(REPLACE ";" " " _kernel_asm_flags "${DUETOS_KERNEL_ASM_FLAGS}")
+string(REPLACE ";" " " _kernel_ld_flags  "${DUETOS_KERNEL_LINK_FLAGS}")
 
 set(CMAKE_C_FLAGS_INIT           "${_kernel_c_flags}"    CACHE STRING "" FORCE)
 set(CMAKE_CXX_FLAGS_INIT         "${_kernel_cxx_flags}"  CACHE STRING "" FORCE)

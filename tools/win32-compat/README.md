@@ -2,11 +2,11 @@
 
 Reference data + generators that map between **NT syscall numbers** (the
 `ntdll!Nt*` ABI that real Windows binaries see when they bypass
-`kernel32`) and the CustomOS internal `SYS_*` enum (`kernel/core/syscall.h`).
+`kernel32`) and the DuetOS internal `SYS_*` enum (`kernel/core/syscall.h`).
 
 ## Why this exists
 
-CustomOS already runs Win32 PE binaries by patching their Import Address
+DuetOS already runs Win32 PE binaries by patching their Import Address
 Table to redirect `kernel32!CreateFileW`, `kernel32!WriteFile`, etc. to
 per-process stubs that issue our internal `SYS_*` numbers via `int 0x80`.
 That works for any PE that actually links against `kernel32.dll`.
@@ -66,7 +66,7 @@ invoke Python — generated artifacts are checked in.
 
 ## Scoreboard
 
-The generated header tracks which NT bedrock calls have a CustomOS
+The generated header tracks which NT bedrock calls have a DuetOS
 mapping vs which are still `kSysNtNotImpl`. A boot-time log line will
 print "ntdll bedrock coverage: N/M" once the shim is wired in (slice TBD).
 

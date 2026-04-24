@@ -4,7 +4,7 @@
 #include "frame_allocator.h"
 
 /*
- * CustomOS kernel-stack arena — v0.
+ * DuetOS kernel-stack arena — v0.
  *
  * Every task spawned via SchedCreate needs a 16 KiB kernel stack.
  * Before this module, those stacks came from the kernel heap
@@ -65,7 +65,7 @@
  * the reaper.
  */
 
-namespace customos::mm
+namespace duetos::mm
 {
 
 /// Base of the kernel-stack arena. Picked from the "reserved"
@@ -173,4 +173,4 @@ KernelStackStats KernelStackStatsRead();
 /// Intended for boot-time use only.
 void KernelStackSelfTest();
 
-} // namespace customos::mm
+} // namespace duetos::mm

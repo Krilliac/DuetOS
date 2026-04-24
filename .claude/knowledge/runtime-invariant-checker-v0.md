@@ -107,7 +107,7 @@ shell.cpp:
 ## Public API
 
 ```cpp
-namespace customos::core {
+namespace duetos::core {
 
 enum class HealthIssue : u32 { None, HeapPoolMismatch, ... };
 const char* HealthIssueName(HealthIssue);

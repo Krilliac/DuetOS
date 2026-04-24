@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Capture a screenshot of CustomOS booted with a specific GRUB
+# Capture a screenshot of DuetOS booted with a specific GRUB
 # menu entry. Written for the theme demo so we can produce one
 # PNG per theme without shuffling grub.cfg's default= line.
 #
@@ -27,13 +27,13 @@ fi
 
 DOWN_COUNT="$1"
 OUT_PNG="$2"
-PRESET="${CUSTOMOS_PRESET:-x86_64-debug}"
+PRESET="${DUETOS_PRESET:-x86_64-debug}"
 BUILD_DIR="${REPO_ROOT}/build/${PRESET}"
-ISO_IMAGE="${BUILD_DIR}/customos.iso"
+ISO_IMAGE="${BUILD_DIR}/duetos.iso"
 SERIAL_LOG="${BUILD_DIR}/screen.serial.log"
 PPM_OUT="${BUILD_DIR}/screen.ppm"
 MON_SOCK="${BUILD_DIR}/qemu-mon.sock"
-SETTLE="${CUSTOMOS_SETTLE:-6}"
+SETTLE="${DUETOS_SETTLE:-6}"
 
 if [[ ! -f "${ISO_IMAGE}" ]]; then
     echo "error: ISO not built: ${ISO_IMAGE}" >&2

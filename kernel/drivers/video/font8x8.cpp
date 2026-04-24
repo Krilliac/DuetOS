@@ -1,6 +1,6 @@
 #include "font8x8.h"
 
-namespace customos::drivers::video
+namespace duetos::drivers::video
 {
 
 namespace
@@ -211,4 +211,4 @@ const u8* Font8x8Lookup(char ch)
     }
 }
 
-} // namespace customos::drivers::video
+} // namespace duetos::drivers::video

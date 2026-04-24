@@ -3,7 +3,7 @@
 #include "../core/types.h"
 
 /*
- * CustomOS — Kernel network stack, v0 skeleton.
+ * DuetOS — Kernel network stack, v0 skeleton.
  *
  * This is the empty surface the NIC drivers (drivers/net/) plug
  * into. No packet I/O, no state machines — just the types, the
@@ -32,7 +32,7 @@
  * read-only after.
  */
 
-namespace customos::net
+namespace duetos::net
 {
 
 // -------------------------------------------------------------------
@@ -512,4 +512,4 @@ u32 NetTcpActiveRead(u8* out, u32 cap);
 
 TcpActiveSnapshot NetTcpActiveSnapshot();
 
-} // namespace customos::net
+} // namespace duetos::net

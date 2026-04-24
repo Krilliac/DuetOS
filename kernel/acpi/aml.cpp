@@ -6,7 +6,7 @@
 #include "../mm/page.h"
 #include "acpi.h"
 
-namespace customos::acpi
+namespace duetos::acpi
 {
 
 namespace
@@ -685,7 +685,7 @@ void AmlNamespaceBuild()
     arch::SerialWrite("\n");
 }
 
-::customos::core::Result<void> AmlNamespaceShutdown()
+::duetos::core::Result<void> AmlNamespaceShutdown()
 {
     KLOG_TRACE_SCOPE("acpi/aml", "AmlNamespaceShutdown");
     const u32 dropped = g_entry_count;
@@ -832,4 +832,4 @@ bool AmlReadS5(u8* slp_typa, u8* slp_typb)
     return true;
 }
 
-} // namespace customos::acpi
+} // namespace duetos::acpi

@@ -1,7 +1,7 @@
 /*
  * userland/libs/vcruntime140/vcruntime140.c
  *
- * Freestanding CustomOS vcruntime140.dll — memory intrinsics
+ * Freestanding DuetOS vcruntime140.dll — memory intrinsics
  * (memset / memcpy / memmove). Retires the batch-5 flat stubs
  * in kernel/subsystems/win32/stubs.cpp.
  *

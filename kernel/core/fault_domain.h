@@ -4,7 +4,7 @@
 #include "types.h"
 
 /*
- * CustomOS — fault domains + restartable subsystems, v0.
+ * DuetOS — fault domains + restartable subsystems, v0.
  *
  * A "fault domain" is a named subsystem that registers a
  *   (teardown, init)
@@ -38,7 +38,7 @@
  * subsystem owns).
  */
 
-namespace customos::core
+namespace duetos::core
 {
 
 inline constexpr u32 kMaxFaultDomains = 16;
@@ -105,4 +105,4 @@ void FaultDomainTick();
 /// mismatch.
 void FaultDomainSelfTest();
 
-} // namespace customos::core
+} // namespace duetos::core

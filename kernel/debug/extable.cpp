@@ -4,7 +4,7 @@
 #include "../core/klog.h"
 #include "../core/panic.h"
 
-namespace customos::debug
+namespace duetos::debug
 {
 
 namespace
@@ -166,4 +166,4 @@ void ExtableSelfTest()
     arch::SerialWrite(" entries live)\n");
 }
 
-} // namespace customos::debug
+} // namespace duetos::debug

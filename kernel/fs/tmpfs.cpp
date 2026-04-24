@@ -2,7 +2,7 @@
 
 #include "../core/klog.h"
 
-namespace customos::fs
+namespace duetos::fs
 {
 
 namespace
@@ -212,4 +212,4 @@ void TmpFsEnumerate(TmpFsEnumCb cb, void* cookie)
     }
 }
 
-} // namespace customos::fs
+} // namespace duetos::fs

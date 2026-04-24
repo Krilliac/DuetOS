@@ -1,5 +1,5 @@
 /*
- * CustomOS — CPU exception stubs for vectors 0..31.
+ * DuetOS — CPU exception stubs for vectors 0..31.
  *
  * Each stub normalizes the interrupt frame so the C++ dispatcher sees a
  * uniform TrapFrame regardless of whether the CPU pushed an error code.
@@ -90,7 +90,7 @@ ISR_NOERR 31                    /* Reserved                 */
  * exception subset architecturally does), so they all use the NOERR macro.
  * The dispatcher distinguishes IRQ from exception by frame->vector >= 32.
  *
- * In a CustomOS system the legacy 8259 PIC is masked (see pic.cpp); these
+ * In a DuetOS system the legacy 8259 PIC is masked (see pic.cpp); these
  * vectors are driven by the LAPIC and, when enabled, the IOAPIC.
  * ------------------------------------------------------------------------- */
 ISR_NOERR 32                    /* IRQ0  — LAPIC timer (periodic tick) */

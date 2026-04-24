@@ -4,7 +4,7 @@
 #include "../../core/klog.h"
 #include "../../mm/kheap.h"
 
-namespace customos::drivers::storage
+namespace duetos::drivers::storage
 {
 
 namespace
@@ -461,4 +461,4 @@ void BlockLayerSelfTest()
     SerialWrite("[block] self-test OK (RAM device write + read + OOB reject)\n");
 }
 
-} // namespace customos::drivers::storage
+} // namespace duetos::drivers::storage

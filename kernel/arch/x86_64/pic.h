@@ -5,7 +5,7 @@
 /*
  * 8259A Programmable Interrupt Controller — disable.
  *
- * CustomOS uses the LAPIC + (eventually) IOAPIC, not the legacy 8259 PIC.
+ * DuetOS uses the LAPIC + (eventually) IOAPIC, not the legacy 8259 PIC.
  * The PIC must still be programmed at boot for two reasons:
  *
  *   1. Its default vector base on a PC is 0x08..0x0F (master) and
@@ -25,10 +25,10 @@
  * source is enabled.
  */
 
-namespace customos::arch
+namespace duetos::arch
 {
 
 /// Remap and mask the master + slave 8259. Idempotent.
 void PicDisable();
 
-} // namespace customos::arch
+} // namespace duetos::arch

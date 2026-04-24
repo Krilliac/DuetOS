@@ -1,14 +1,14 @@
 /*
  * userland/apps/hello_pe/hello.c
  *
- * The first CustomOS userland program shipped as a real
+ * The first DuetOS userland program shipped as a real
  * Windows PE/COFF executable, compiled by clang + lld-link
  * on the host and embedded into the boot image as
  * /bin/hello.exe.
  *
  * Freestanding: no libc, no Windows DLLs, no imports. The
  * compiled PE's Import Directory is empty. The entry point
- * talks to the CustomOS native syscall ABI directly:
+ * talks to the DuetOS native syscall ABI directly:
  *
  *     int 0x80
  *     rax = syscall number   (0 = SYS_EXIT, 2 = SYS_WRITE)

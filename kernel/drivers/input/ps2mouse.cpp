@@ -15,7 +15,7 @@
 // isr_33 (kbd, IRQ 1); both follow the same isr_common path.
 extern "C" void isr_44();
 
-namespace customos::drivers::input
+namespace duetos::drivers::input
 {
 
 namespace
@@ -79,7 +79,7 @@ constinit u64 g_ring_tail = 0;
 constinit u8 g_packet_cursor = 0;
 constinit u8 g_packet_bytes[3] = {0, 0, 0};
 
-constinit customos::sched::WaitQueue g_readers{};
+constinit duetos::sched::WaitQueue g_readers{};
 
 constinit u64 g_irqs_seen = 0;
 constinit u64 g_packets_decoded = 0;
@@ -284,7 +284,7 @@ void IrqHandler()
         }
     }
 
-    customos::sched::WaitQueueWakeOne(&g_readers);
+    duetos::sched::WaitQueueWakeOne(&g_readers);
 }
 
 } // namespace
@@ -350,10 +350,10 @@ void Ps2MouseInit()
 
     g_available = true;
 
-    customos::core::LogWithValue(customos::core::LogLevel::Info, "drivers/ps2mouse", "routed isa_irq", kMouseIsaIrq);
-    customos::core::LogWithValue(customos::core::LogLevel::Info, "drivers/ps2mouse", "  gsi", gsi);
-    customos::core::LogWithValue(customos::core::LogLevel::Info, "drivers/ps2mouse", "  vector", kMouseVector);
-    customos::core::LogWithValue(customos::core::LogLevel::Info, "drivers/ps2mouse", "  lapic_id", bsp_id);
+    duetos::core::LogWithValue(duetos::core::LogLevel::Info, "drivers/ps2mouse", "routed isa_irq", kMouseIsaIrq);
+    duetos::core::LogWithValue(duetos::core::LogLevel::Info, "drivers/ps2mouse", "  gsi", gsi);
+    duetos::core::LogWithValue(duetos::core::LogLevel::Info, "drivers/ps2mouse", "  vector", kMouseVector);
+    duetos::core::LogWithValue(duetos::core::LogLevel::Info, "drivers/ps2mouse", "  lapic_id", bsp_id);
 }
 
 MousePacket Ps2MouseReadPacket()
@@ -361,7 +361,7 @@ MousePacket Ps2MouseReadPacket()
     arch::Cli();
     while (g_ring_head == g_ring_tail)
     {
-        customos::sched::WaitQueueBlock(&g_readers);
+        duetos::sched::WaitQueueBlock(&g_readers);
     }
     const MousePacket p = g_ring[g_ring_tail & kRingMask];
     ++g_ring_tail;
@@ -406,4 +406,4 @@ void MouseInjectPacket(const MousePacket& p)
     arch::Sti();
 }
 
-} // namespace customos::drivers::input
+} // namespace duetos::drivers::input

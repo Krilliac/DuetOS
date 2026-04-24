@@ -25,7 +25,7 @@
  * clock bounds.
  */
 
-namespace customos::drivers::video
+namespace duetos::drivers::video
 {
 
 /// Open the calendar popup anchored with `ax, ay` as its
@@ -51,4 +51,4 @@ bool CalendarContains(u32 x, u32 y);
 u32 CalendarPanelWidth();
 u32 CalendarPanelHeight();
 
-} // namespace customos::drivers::video
+} // namespace duetos::drivers::video

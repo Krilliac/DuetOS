@@ -89,6 +89,6 @@ python3 "${EMBED}" \
     "${EXE}" \
     "${OUT_HEADER}" \
     kBinSyscallStressBytes \
-    --namespace "customos::fs::generated"
+    --namespace "duetos::fs::generated"
 
 echo "build-syscall-stress.sh: wrote ${OUT_HEADER} (PE $(stat -c%s "${EXE}") bytes)"

@@ -16,21 +16,21 @@
 #include "../../mm/paging.h"
 #include "../../sched/sched.h"
 
-namespace customos::subsystems::linux
+namespace duetos::subsystems::linux
 {
 
 namespace
 {
 
-using customos::core::CurrentProcess;
-using customos::core::kAbiLinux;
-using customos::core::Process;
-using customos::core::ProcessCreate;
-using customos::mm::AddressSpace;
-using customos::mm::AddressSpaceCreate;
-using customos::mm::AddressSpaceMapUserPage;
-using customos::mm::AllocateFrame;
-using customos::mm::PhysAddr;
+using duetos::core::CurrentProcess;
+using duetos::core::kAbiLinux;
+using duetos::core::Process;
+using duetos::core::ProcessCreate;
+using duetos::mm::AddressSpace;
+using duetos::mm::AddressSpaceCreate;
+using duetos::mm::AddressSpaceMapUserPage;
+using duetos::mm::AllocateFrame;
+using duetos::mm::PhysAddr;
 
 // Raw machine code for the smoke task. Tests the full Linux-ABI
 // I/O + memory path in one ring-3 task:
@@ -1122,4 +1122,4 @@ void SpawnRing3LinuxSmoke()
     sched::SchedCreateUser(&core::Ring3UserEntry, nullptr, "linux-smoke", proc);
 }
 
-} // namespace customos::subsystems::linux
+} // namespace duetos::subsystems::linux

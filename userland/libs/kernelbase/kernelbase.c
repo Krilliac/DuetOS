@@ -1,7 +1,7 @@
 /*
  * userland/libs/kernelbase/kernelbase.c
  *
- * CustomOS kernelbase.dll — a pure forwarder DLL. Every export
+ * DuetOS kernelbase.dll — a pure forwarder DLL. Every export
  * is a cross-DLL forwarder (via msvcp140.dll-style .def) to
  * the matching kernel32.dll entry. The stage-2 slice-8
  * forwarder chaser in kernel/core/pe_loader.cpp recurses

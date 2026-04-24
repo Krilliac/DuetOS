@@ -3,18 +3,18 @@
 #include "dll_loader.h"
 #include "types.h"
 
-namespace customos::mm
+namespace duetos::mm
 {
 struct AddressSpace;
 }
 
-namespace customos::core
+namespace duetos::core
 {
 struct Process;
 }
 
 /*
- * CustomOS PE/COFF loader — v0.
+ * DuetOS PE/COFF loader — v0.
  *
  * Pillar #1 of the project is "run Windows PE executables
  * natively." This is the v0 slice of that: enough of the loader
@@ -57,7 +57,7 @@ struct Process;
  * AS creation lock.
  */
 
-namespace customos::core
+namespace duetos::core
 {
 
 enum class PeStatus : u8
@@ -159,14 +159,14 @@ struct PeLoadResult
 /// bypassing the trampoline page. Misses fall through to
 /// Win32StubsLookup so existing PEs are unaffected. Pass
 /// nullptr / 0 to disable (the pre-slice-6 behaviour).
-PeLoadResult PeLoad(const u8* file, u64 file_len, customos::mm::AddressSpace* as, const char* program_name,
+PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, const char* program_name,
                     u64 aslr_delta, const DllImage* preloaded_dlls = nullptr, u64 preloaded_dll_count = 0);
 
 /// Transfer any (IAT-slot-VA, function-name) pairs the loader
 /// staged for catch-all imports during the most recent PeLoad
 /// into `proc->win32_iat_misses`. Call once right after
 /// ProcessCreate. Idempotent: drains the staging buffer to empty.
-void PeLoadDrainIatMisses(customos::core::Process* proc);
+void PeLoadDrainIatMisses(duetos::core::Process* proc);
 
 // IMAGE_SCN_* bits exposed for any caller that wants to decode
 // section flags on its own (readelf-style tools later).
@@ -175,4 +175,4 @@ inline constexpr u32 kScnMemExecute = 0x20000000;
 inline constexpr u32 kScnMemRead = 0x40000000;
 inline constexpr u32 kScnMemWrite = 0x80000000;
 
-} // namespace customos::core
+} // namespace duetos::core

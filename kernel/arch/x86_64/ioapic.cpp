@@ -9,7 +9,7 @@
 #include "../../core/panic.h"
 #include "../../mm/paging.h"
 
-namespace customos::arch
+namespace duetos::arch
 {
 
 namespace
@@ -119,7 +119,7 @@ void IoApicInit()
     {
         const acpi::IoApicRecord& rec = acpi::IoApic(i);
 
-        void* mmio = customos::mm::MapMmio(rec.address, 0x1000);
+        void* mmio = duetos::mm::MapMmio(rec.address, 0x1000);
         if (mmio == nullptr)
         {
             PanicIoApic("MapMmio failed for IOAPIC window");
@@ -229,4 +229,4 @@ void IoApicUnmask(u32 gsi)
     WriteRedir(*io, entry, v);
 }
 
-} // namespace customos::arch
+} // namespace duetos::arch

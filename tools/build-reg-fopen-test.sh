@@ -4,7 +4,7 @@
 # Build the stage-2 slice 34 end-to-end test PE. Imports from
 # advapi32 (real registry) + ucrtbase (real fopen) + kernel32
 # (ExitProcess). Verifies HKLM\Software\Microsoft\Windows NT\
-# CurrentVersion\ProductName == "CustomOS" and /bin/hello.exe
+# CurrentVersion\ProductName == "DuetOS" and /bin/hello.exe
 # first two bytes == "MZ".
 
 set -euo pipefail
@@ -61,5 +61,5 @@ if [[ ${LINK_RC} -ne 0 ]]; then
     exit ${LINK_RC}
 fi
 
-python3 "${EMBED}" "${EXE}" "${OUT_HEADER}" kBinRegFopenTestBytes --namespace "customos::fs::generated"
+python3 "${EMBED}" "${EXE}" "${OUT_HEADER}" kBinRegFopenTestBytes --namespace "duetos::fs::generated"
 echo "build-reg-fopen-test.sh: wrote ${OUT_HEADER} (PE $(stat -c%s "${EXE}") bytes)"

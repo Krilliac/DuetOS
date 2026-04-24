@@ -3,7 +3,7 @@
 #include "../../core/types.h"
 
 /*
- * CustomOS Win32 process heap — v0.
+ * DuetOS Win32 process heap — v0.
  *
  * Per-process free-list allocator. Allocations are served out
  * of a fixed-size user-VA region mapped RW+NX when a PE with
@@ -40,12 +40,12 @@
  * stub).
  */
 
-namespace customos::core
+namespace duetos::core
 {
 struct Process;
 }
 
-namespace customos::win32
+namespace duetos::win32
 {
 
 // Fixed user VA for the heap region. Chosen to sit between the
@@ -70,21 +70,21 @@ inline constexpr u64 kWin32HeapPages = 16;
 /// mapping fails), leaves proc->heap_* at zero and returns
 /// false — the caller (PeLoad) treats this as a fatal load
 /// error and tears down the AS.
-bool Win32HeapInit(customos::core::Process* proc);
+bool Win32HeapInit(duetos::core::Process* proc);
 
 /// Allocate `size` bytes from `proc`'s heap. Returns a user VA
 /// or 0 on failure. The returned VA is 8-byte aligned and the
 /// first 8 bytes of memory BEFORE the returned pointer hold
 /// the allocated block's header (size in bytes, including the
 /// header).
-u64 Win32HeapAlloc(customos::core::Process* proc, u64 size);
+u64 Win32HeapAlloc(duetos::core::Process* proc, u64 size);
 
 /// Free a pointer previously returned by Win32HeapAlloc.
 /// Silent on a null pointer (Win32 contract). Silent on an
 /// out-of-range pointer too — v0 does no double-free
 /// detection or arena-bounds checking beyond "VA is inside
 /// [heap_base, heap_base + heap_pages * 4096)".
-void Win32HeapFree(customos::core::Process* proc, u64 user_ptr);
+void Win32HeapFree(duetos::core::Process* proc, u64 user_ptr);
 
 /// Report the payload capacity in bytes of a block previously
 /// returned by Win32HeapAlloc. Returns 0 for a null pointer
@@ -93,7 +93,7 @@ void Win32HeapFree(customos::core::Process* proc, u64 user_ptr);
 /// header — callers observe the full space the allocator
 /// reserved, not the original requested size. Backs Win32
 /// HeapSize.
-u64 Win32HeapSize(customos::core::Process* proc, u64 user_ptr);
+u64 Win32HeapSize(duetos::core::Process* proc, u64 user_ptr);
 
 /// Resize a heap block. Semantics mirror ucrt realloc:
 ///   * user_ptr == 0         -> equivalent to Win32HeapAlloc(new_size).
@@ -109,6 +109,6 @@ u64 Win32HeapSize(customos::core::Process* proc, u64 user_ptr);
 /// therefore cannot grow a block into an adjacent free
 /// region. The copy path walks the heap one page-chunk at
 /// a time through the AS lookup used by PeekU64/PokeU64.
-u64 Win32HeapRealloc(customos::core::Process* proc, u64 user_ptr, u64 new_size);
+u64 Win32HeapRealloc(duetos::core::Process* proc, u64 user_ptr, u64 new_size);
 
-} // namespace customos::win32
+} // namespace duetos::win32

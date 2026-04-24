@@ -2,7 +2,7 @@
 ;
 ; Minimal .def for privilege/token/security functions. All
 ; three exports here are stubbed as "return success, do
-; nothing" in v0 — a running process on CustomOS has no real
+; nothing" in v0 — a running process on DuetOS has no real
 ; security model (no user accounts, no ACLs, no token
 ; granularity), so pretending to succeed is both honest and
 ; safe. Programs that check the BOOL return to gate real

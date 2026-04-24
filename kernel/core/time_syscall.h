@@ -4,7 +4,7 @@
 #include "types.h"
 
 /*
- * CustomOS — time-family syscall handlers, v0.
+ * DuetOS — time-family syscall handlers, v0.
  *
  * Extracted from kernel/core/syscall.cpp so the dispatcher
  * switch stays a thin router and time logic (calendar math,
@@ -28,12 +28,12 @@
  * legacy IO and bounded.
  */
 
-namespace customos::arch
+namespace duetos::arch
 {
 struct TrapFrame;
 }
 
-namespace customos::core
+namespace duetos::core
 {
 
 // Pure-math helper exposed for reuse (tests, the taskbar's date
@@ -49,4 +49,4 @@ void DoGetTimeSt(arch::TrapFrame* frame);
 void DoStToFt(arch::TrapFrame* frame);
 void DoFtToSt(arch::TrapFrame* frame);
 
-} // namespace customos::core
+} // namespace duetos::core

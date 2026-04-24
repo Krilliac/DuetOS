@@ -3,7 +3,7 @@
 #include "../../core/types.h"
 
 /*
- * CustomOS — virtio-gpu discovery, v0.
+ * DuetOS — virtio-gpu discovery, v0.
  *
  * Modern paravirtualized GPU exposed by QEMU's `-vga virtio` and
  * every virtio-GPU-compatible hypervisor (KVM, Xen HVM, Cloud
@@ -32,7 +32,7 @@
  * probe pass in drivers/gpu/gpu.cpp.
  */
 
-namespace customos::drivers::gpu
+namespace duetos::drivers::gpu
 {
 
 struct VirtioGpuLayout
@@ -62,4 +62,4 @@ VirtioGpuLayout VirtioGpuProbe(u8 bus, u8 device, u8 function);
 /// `present == false` before VirtioGpuProbe runs.
 VirtioGpuLayout VirtioGpuLastLayout();
 
-} // namespace customos::drivers::gpu
+} // namespace duetos::drivers::gpu

@@ -1,7 +1,7 @@
 #pragma once
 
 /*
- * CustomOS — kernel stats heartbeat thread.
+ * DuetOS — kernel stats heartbeat thread.
  *
  * A minimal observability primitive. Spawns a kernel thread that wakes
  * every N timer ticks and dumps scheduler + heap + frame-allocator
@@ -21,7 +21,7 @@
  * Context: kernel. Spawned once from kernel_main after SchedInit.
  */
 
-namespace customos::core
+namespace duetos::core
 {
 
 /// Start the kernel heartbeat thread. Exactly once. Panics if called
@@ -29,4 +29,4 @@ namespace customos::core
 /// stats, which is both wasteful and log-spammy).
 void StartHeartbeatThread();
 
-} // namespace customos::core
+} // namespace duetos::core

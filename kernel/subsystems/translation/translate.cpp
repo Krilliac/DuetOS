@@ -12,7 +12,7 @@
 #include "../win32/heap.h"
 #include "../win32/nt_syscall_table_generated.h"
 
-namespace customos::subsystems::translation
+namespace duetos::subsystems::translation
 {
 
 namespace
@@ -209,10 +209,10 @@ constexpr NativeSysName kNativeNames[] = {
 // Full per-call state (known/implemented/unknown) for the more
 // informative miss-path log. Returns HandlerState::Unknown for
 // numbers outside the generated table.
-::customos::subsystems::linux::HandlerState LinuxState(u64 nr)
+::duetos::subsystems::linux::HandlerState LinuxState(u64 nr)
 {
-    const auto* entry = ::customos::subsystems::linux::LinuxSyscallLookup(nr);
-    return (entry != nullptr) ? entry->state : ::customos::subsystems::linux::HandlerState::Unknown;
+    const auto* entry = ::duetos::subsystems::linux::LinuxSyscallLookup(nr);
+    return (entry != nullptr) ? entry->state : ::duetos::subsystems::linux::HandlerState::Unknown;
 }
 
 const char* NativeName(u64 nr)
@@ -251,7 +251,7 @@ void LogMiss(const char* origin, arch::TrapFrame* f, const char* name)
     // but-unimplemented syscall.
     if (origin != nullptr && origin[0] == 'l' && origin[1] == 'i') // "linux"
     {
-        using ::customos::subsystems::linux::HandlerState;
+        using ::duetos::subsystems::linux::HandlerState;
         const HandlerState st = LinuxState(f->rax);
         SerialWrite(" state=");
         switch (st)
@@ -407,7 +407,7 @@ i64 NativeWin32Alloc(arch::TrapFrame* f)
     auto* p = core::CurrentProcess();
     if (p == nullptr)
         return 0;
-    return static_cast<i64>(::customos::win32::Win32HeapAlloc(p, f->rdi));
+    return static_cast<i64>(::duetos::win32::Win32HeapAlloc(p, f->rdi));
 }
 
 // Native: Win32HeapFree proxy.
@@ -416,7 +416,7 @@ i64 NativeWin32Free(arch::TrapFrame* f)
     auto* p = core::CurrentProcess();
     if (p == nullptr)
         return 0;
-    ::customos::win32::Win32HeapFree(p, f->rdi);
+    ::duetos::win32::Win32HeapFree(p, f->rdi);
     return 0;
 }
 
@@ -484,7 +484,7 @@ i64 NtDoClose(arch::TrapFrame* f)
     const u64 h = f->rsi;
     if (h >= 3 && h < 16)
     {
-        const i64 rv = ::customos::subsystems::linux::LinuxClose(h);
+        const i64 rv = ::duetos::subsystems::linux::LinuxClose(h);
         return ErrnoToNtStatus(rv);
     }
     // Out-of-our-range handle: treat as already-closed success.
@@ -496,7 +496,7 @@ i64 NtDoClose(arch::TrapFrame* f)
 // NtYieldExecution(): drop the remaining time slice.
 i64 NtDoYieldExecution(arch::TrapFrame* /*f*/)
 {
-    ::customos::subsystems::linux::LinuxSchedYield();
+    ::duetos::subsystems::linux::LinuxSchedYield();
     return kStatusSuccess;
 }
 
@@ -525,7 +525,7 @@ i64 NtDoDelayExecution(arch::TrapFrame* f)
         // Approximate: compute now in Win FILETIME units, diff.
         // Good enough for v0; precise absolute wait arrives with
         // the RTC integration.
-        const u64 now_ns = ::customos::subsystems::linux::LinuxNowNs();
+        const u64 now_ns = ::duetos::subsystems::linux::LinuxNowNs();
         const u64 abs_ns = static_cast<u64>(interval) * 100ull;
         ns = (abs_ns > now_ns) ? (abs_ns - now_ns) : 0;
     }
@@ -554,7 +554,7 @@ i64 NtDoQueryPerformanceCounter(arch::TrapFrame* f)
     const u64 user_freq = f->rdx;
     if (user_counter == 0)
         return kStatusInvalidParam;
-    const i64 counter = static_cast<i64>(::customos::subsystems::linux::LinuxNowNs());
+    const i64 counter = static_cast<i64>(::duetos::subsystems::linux::LinuxNowNs());
     if (!mm::CopyToUser(reinterpret_cast<void*>(user_counter), &counter, sizeof(counter)))
         return kStatusInvalidParam;
     if (user_freq != 0)
@@ -577,7 +577,7 @@ i64 NtDoGetCurrentProcessorNumber(arch::TrapFrame* /*f*/)
 [[noreturn]] void NtDoTerminateThread(arch::TrapFrame* f)
 {
     const u64 exit_status = f->rdx;
-    ::customos::subsystems::linux::LinuxExit(exit_status);
+    ::duetos::subsystems::linux::LinuxExit(exit_status);
 }
 
 // NtTerminateProcess(HANDLE Process, NTSTATUS ExitStatus): same as
@@ -586,7 +586,7 @@ i64 NtDoGetCurrentProcessorNumber(arch::TrapFrame* /*f*/)
 [[noreturn]] void NtDoTerminateProcess(arch::TrapFrame* f)
 {
     const u64 exit_status = f->rdx;
-    ::customos::subsystems::linux::LinuxExit(exit_status);
+    ::duetos::subsystems::linux::LinuxExit(exit_status);
 }
 
 // NtFlushBuffersFile(HANDLE, PIO_STATUS_BLOCK): forward to fsync
@@ -596,14 +596,14 @@ i64 NtDoFlushBuffersFile(arch::TrapFrame* f)
     const u64 h = f->rsi;
     if (h < 3 || h >= 16)
         return kStatusInvalidHandle;
-    const i64 rv = ::customos::subsystems::linux::LinuxFsync(h);
+    const i64 rv = ::duetos::subsystems::linux::LinuxFsync(h);
     return ErrnoToNtStatus(rv);
 }
 
 // NtGetTickCount(): milliseconds since boot.
 i64 NtDoGetTickCount(arch::TrapFrame* /*f*/)
 {
-    const u64 ns = ::customos::subsystems::linux::LinuxNowNs();
+    const u64 ns = ::duetos::subsystems::linux::LinuxNowNs();
     return static_cast<i64>(ns / 1'000'000ull);
 }
 
@@ -616,7 +616,7 @@ i64 NtDoQuerySystemTime(arch::TrapFrame* f)
     const u64 user_time = f->rsi;
     if (user_time == 0)
         return kStatusInvalidParam;
-    const i64 ft = static_cast<i64>(::customos::subsystems::linux::LinuxNowNs() / 100ull);
+    const i64 ft = static_cast<i64>(::duetos::subsystems::linux::LinuxNowNs() / 100ull);
     if (!mm::CopyToUser(reinterpret_cast<void*>(user_time), &ft, sizeof(ft)))
         return kStatusInvalidParam;
     return kStatusSuccess;
@@ -639,7 +639,7 @@ void LogNtTranslation(u64 nt_nr, const char* target)
 // syscall by name comes through these single entry points.
 const char* LinuxName(u64 nr)
 {
-    const auto* entry = ::customos::subsystems::linux::LinuxSyscallLookup(nr);
+    const auto* entry = ::duetos::subsystems::linux::LinuxSyscallLookup(nr);
     return (entry != nullptr) ? entry->name : nullptr;
 }
 
@@ -647,7 +647,7 @@ const char* NtName(u64 nr)
 {
     if (nr > 0xFFFF)
         return nullptr;
-    const auto* entry = ::customos::subsystems::win32::NtSyscallByNumber(u16(nr));
+    const auto* entry = ::duetos::subsystems::win32::NtSyscallByNumber(u16(nr));
     return (entry != nullptr) ? entry->nt_name : nullptr;
 }
 
@@ -697,7 +697,7 @@ Result LinuxGapFill(arch::TrapFrame* frame)
     case kSysClone3:
     case kSysExecve:
     case kSysWait4:
-        // Process creation / wait: v0 CustomOS has no fork, no
+        // Process creation / wait: v0 DuetOS has no fork, no
         // clone, no wait. Cleanly reject at the translator so
         // these don't fall through to `[linux-miss]` noise in
         // the log on every compiled-C binary that links to a
@@ -869,4 +869,4 @@ void TranslatorOverheadDump()
     DumpSuppressedMissSummary("native", g_native_miss_sampling);
 }
 
-} // namespace customos::subsystems::translation
+} // namespace duetos::subsystems::translation

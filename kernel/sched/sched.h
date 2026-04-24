@@ -2,18 +2,18 @@
 
 #include "../core/types.h"
 
-namespace customos::mm
+namespace duetos::mm
 {
 struct AddressSpace; // forward decl; defined in kernel/mm/address_space.h
 }
 
-namespace customos::core
+namespace duetos::core
 {
 struct Process; // forward decl; defined in kernel/core/process.h
 }
 
 /*
- * CustomOS kernel scheduler — v0.
+ * DuetOS kernel scheduler — v0.
  *
  * Round-robin, single CPU, kernel-mode threads only. Drives context
  * switches off the 100 Hz LAPIC timer tick plus explicit SchedYield()
@@ -33,7 +33,7 @@ struct Process; // forward decl; defined in kernel/core/process.h
  * kernel subsystem can SchedCreate a worker thread.
  */
 
-namespace customos::sched
+namespace duetos::sched
 {
 
 using TaskEntry = void (*)(void* arg);
@@ -423,4 +423,4 @@ void CondvarSignal(Condvar* cv);
 /// Wake every task on `cv`. Returns the number of tasks woken.
 u64 CondvarBroadcast(Condvar* cv);
 
-} // namespace customos::sched
+} // namespace duetos::sched

@@ -9,7 +9,7 @@
  * there is no out-of-line state. Safe to call at any interrupt level.
  */
 
-namespace customos::arch
+namespace duetos::arch
 {
 
 inline void Outb(u16 port, u8 value)
@@ -144,4 +144,4 @@ inline u64 ReadEfer()
     return (static_cast<u64>(hi) << 32) | lo;
 }
 
-} // namespace customos::arch
+} // namespace duetos::arch

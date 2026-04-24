@@ -4,7 +4,7 @@
 #include "../arch/x86_64/cpu.h"
 #include "klog.h"
 
-namespace customos::core
+namespace duetos::core
 {
 
 namespace
@@ -86,4 +86,4 @@ void SpinShortDelay()
     arch::Halt();
 }
 
-} // namespace customos::core
+} // namespace duetos::core

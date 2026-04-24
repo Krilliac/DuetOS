@@ -11,7 +11,7 @@
  * before SMP is online.
  */
 
-namespace customos::arch
+namespace duetos::arch
 {
 
 /// COM1 I/O base port on standard PC hardware.
@@ -34,4 +34,4 @@ void SerialWriteN(const char* data, u64 len);
 /// Write a 64-bit value as "0x" + 16 hex digits, no newline.
 void SerialWriteHex(u64 value);
 
-} // namespace customos::arch
+} // namespace duetos::arch

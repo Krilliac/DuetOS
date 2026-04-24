@@ -12,15 +12,15 @@
  * pattern the file/stat handlers use).
  */
 
-namespace customos::arch
+namespace duetos::arch
 {
 struct TrapFrame;
 }
 
-namespace customos::debug
+namespace duetos::debug
 {
 
 void DoBpInstall(arch::TrapFrame* frame);
 void DoBpRemove(arch::TrapFrame* frame);
 
-} // namespace customos::debug
+} // namespace duetos::debug

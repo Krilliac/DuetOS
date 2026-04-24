@@ -87,7 +87,7 @@ and log one `[nt-translate-miss]` line at the same sampling
 cadence as the Linux-miss path.
 
 The `tools/win32-compat/gen-nt-shim.py` generator now understands
-`SYS_NT_INVOKE` as a `customos_sys` value, so four bedrock NT
+`SYS_NT_INVOKE` as a `duetos_sys` value, so four bedrock NT
 calls in the generated NT mapping table (`NtFlushBuffersFile`,
 `NtGetTickCount`, `NtGetCurrentProcessorNumber`,
 `NtTerminateThread`) now report as covered.

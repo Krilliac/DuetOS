@@ -4,7 +4,7 @@
 #include "../drivers/video/widget.h"
 
 /*
- * CustomOS Notes — v0.
+ * DuetOS Notes — v0.
  *
  * The first user-facing application in the tree. A simple
  * notepad: a ring-free linear text buffer, a content-draw
@@ -31,18 +31,18 @@
  * DesktopCompose. No reentrancy concerns.
  */
 
-namespace customos::apps::notes
+namespace duetos::apps::notes
 {
 
 /// Install the content-draw callback on `handle` and seed the
 /// buffer with a short greeting. Called once at boot after the
 /// notes window is registered.
-void NotesInit(customos::drivers::video::WindowHandle handle);
+void NotesInit(duetos::drivers::video::WindowHandle handle);
 
 /// Handle of the notes window, or `kWindowInvalid` until Init.
 /// Used by the keyboard router to decide when to redirect keys
 /// from the shell into the notes buffer.
-customos::drivers::video::WindowHandle NotesWindow();
+duetos::drivers::video::WindowHandle NotesWindow();
 
 /// Feed one character into the notes buffer. Accepts printable
 /// ASCII (0x20-0x7E), newline (0x0A), and backspace (0x08).
@@ -55,4 +55,4 @@ customos::drivers::video::WindowHandle NotesWindow();
 /// DesktopCompose under the same lock.
 bool NotesFeedChar(char c);
 
-} // namespace customos::apps::notes
+} // namespace duetos::apps::notes

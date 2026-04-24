@@ -5,21 +5,21 @@ cmake_minimum_required(VERSION 3.25)
 # to build kernel code with the host toolchain.
 if(NOT CMAKE_TOOLCHAIN_FILE)
     message(FATAL_ERROR
-        "CustomOS must be configured via a preset.\n"
+        "DuetOS must be configured via a preset.\n"
         "  cmake --preset x86_64-debug    # or x86_64-release\n"
         "Plain `cmake -B build` is not supported — the kernel is freestanding.")
 endif()
 
-project(CustomOS
+project(DuetOS
     VERSION   0.0.1
     LANGUAGES C CXX ASM
-    DESCRIPTION "CustomOS — from-scratch x86_64 OS with native PE execution")
+    DESCRIPTION "DuetOS — from-scratch x86_64 OS with native PE execution")
 
 # Pinned by the active preset. Today x86_64 is the only value; aarch64 lands
 # behind its own preset + toolchain file when that tier opens up.
-set(CUSTOMOS_ARCH "x86_64" CACHE STRING "Target architecture")
-if(NOT CUSTOMOS_ARCH STREQUAL "x86_64")
-    message(FATAL_ERROR "Unsupported CUSTOMOS_ARCH: ${CUSTOMOS_ARCH}")
+set(DUETOS_ARCH "x86_64" CACHE STRING "Target architecture")
+if(NOT DUETOS_ARCH STREQUAL "x86_64")
+    message(FATAL_ERROR "Unsupported DUETOS_ARCH: ${DUETOS_ARCH}")
 endif()
 
 # Turn on folder organization in multi-config generators.
@@ -32,7 +32,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Sub-projects append their output into this, so the top-level build
 # driver can produce the disk image.
-set(CUSTOMOS_ARTIFACTS "" CACHE INTERNAL "Accumulated build artifacts")
+set(DUETOS_ARTIFACTS "" CACHE INTERNAL "Accumulated build artifacts")
 
 add_subdirectory(kernel)
 
@@ -51,19 +51,19 @@ add_subdirectory(kernel)
 # ----------------------------------------------------------------------------
 enable_testing()
 
-set(CUSTOMOS_QEMU_RUN "${CMAKE_SOURCE_DIR}/tools/qemu/run.sh")
-set(CUSTOMOS_SMOKE_DRIVER "${CMAKE_SOURCE_DIR}/tools/ctest-boot-smoke.sh")
+set(DUETOS_QEMU_RUN "${CMAKE_SOURCE_DIR}/tools/qemu/run.sh")
+set(DUETOS_SMOKE_DRIVER "${CMAKE_SOURCE_DIR}/tools/ctest-boot-smoke.sh")
 
-add_test(NAME customos-boot-smoke
-    COMMAND "${CUSTOMOS_SMOKE_DRIVER}" "${CMAKE_BINARY_DIR}"
+add_test(NAME duetos-boot-smoke
+    COMMAND "${DUETOS_SMOKE_DRIVER}" "${CMAKE_BINARY_DIR}"
 )
-set_tests_properties(customos-boot-smoke PROPERTIES
+set_tests_properties(duetos-boot-smoke PROPERTIES
     LABELS "smoke;boot;win32"
     TIMEOUT 60
 )
 
 message(STATUS "")
-message(STATUS "CustomOS configured.")
+message(STATUS "DuetOS configured.")
 message(STATUS "  Build type : ${CMAKE_BUILD_TYPE}")
 message(STATUS "  Toolchain  : ${CMAKE_TOOLCHAIN_FILE}")
 message(STATUS "  C compiler : ${CMAKE_C_COMPILER}")

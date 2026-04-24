@@ -7,7 +7,7 @@
 #include "klog.h"
 #include "panic.h"
 
-namespace customos::core
+namespace duetos::core
 {
 
 namespace
@@ -266,4 +266,4 @@ void RandomSelfTest()
     }
 }
 
-} // namespace customos::core
+} // namespace duetos::core

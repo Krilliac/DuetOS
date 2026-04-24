@@ -9,11 +9,11 @@
  * define the three external linkage symbols referenced below.
  */
 
-namespace customos::core
+namespace duetos::core
 {
 
-extern "C" const SymbolEntry g_customos_symtab_entries[];
-extern "C" const u64 g_customos_symtab_count;
+extern "C" const SymbolEntry g_duetos_symtab_entries[];
+extern "C" const u64 g_duetos_symtab_count;
 
 namespace
 {
@@ -74,7 +74,7 @@ bool ResolveAddress(u64 addr, SymbolResolution* out)
     out->entry = nullptr;
     out->offset = 0;
 
-    const u64 count = g_customos_symtab_count;
+    const u64 count = g_duetos_symtab_count;
     if (count == 0)
     {
         return false;
@@ -87,7 +87,7 @@ bool ResolveAddress(u64 addr, SymbolResolution* out)
     while (lo < hi)
     {
         const u64 mid = lo + (hi - lo) / 2;
-        if (g_customos_symtab_entries[mid].addr <= addr)
+        if (g_duetos_symtab_entries[mid].addr <= addr)
         {
             lo = mid + 1;
         }
@@ -101,7 +101,7 @@ bool ResolveAddress(u64 addr, SymbolResolution* out)
         return false; // query is below the lowest symbol
     }
 
-    const SymbolEntry& cand = g_customos_symtab_entries[lo - 1];
+    const SymbolEntry& cand = g_duetos_symtab_entries[lo - 1];
     const u64 offset = addr - cand.addr;
 
     // A size of 0 means "unknown extent" — only match if the query is
@@ -132,7 +132,7 @@ bool ResolveAddress(u64 addr, SymbolResolution* out)
 
 u64 SymbolTableSize()
 {
-    return g_customos_symtab_count;
+    return g_duetos_symtab_count;
 }
 
 void WriteResolvedAddress(const SymbolResolution& resolution)
@@ -165,4 +165,4 @@ void WriteAddressWithSymbol(u64 addr)
     }
 }
 
-} // namespace customos::core
+} // namespace duetos::core

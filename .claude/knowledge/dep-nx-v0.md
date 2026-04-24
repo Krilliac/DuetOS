@@ -11,7 +11,7 @@ enforcing "no page is ever both Writable and Executable" (W^X), you
 get: a writable page cannot be executed, and an executable page cannot
 be written. That's the whole game.
 
-## Enforcement layers on CustomOS
+## Enforcement layers on DuetOS
 
 ### CPU-level enable
 

@@ -41,7 +41,7 @@
  * Context: kernel. Init runs once, after IoApicInit + SchedInit.
  */
 
-namespace customos::drivers::input
+namespace duetos::drivers::input
 {
 
 /// Route ISA IRQ 1 through the IOAPIC to vector 0x21, drain the 8042
@@ -169,4 +169,4 @@ Ps2Stats Ps2KeyboardStats();
 /// injected event.
 void KeyboardInjectEvent(const KeyEvent& ev);
 
-} // namespace customos::drivers::input
+} // namespace duetos::drivers::input

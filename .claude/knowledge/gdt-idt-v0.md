@@ -97,7 +97,7 @@ Initial attempt was `constinit GdtPointer g_gdt_pointer = { ..., reinterpret_cas
 
 ```bash
 cmake --build build/x86_64-debug
-CUSTOMOS_TIMEOUT=10 tools/qemu/run.sh
+DUETOS_TIMEOUT=10 tools/qemu/run.sh
 ```
 
 Expected output ends with the `** CPU EXCEPTION **` block above. If instead you see:

@@ -1,7 +1,7 @@
 /*
  * userland/libs/msvcp140/msvcp140.c
  *
- * Freestanding CustomOS msvcp140.dll — the C++ std:: runtime
+ * Freestanding DuetOS msvcp140.dll — the C++ std:: runtime
  * DLL. Retires 17 batch-13a flat-stub rows.
  *
  * Real MSVCP140 is huge (thousands of exports). This v0 covers

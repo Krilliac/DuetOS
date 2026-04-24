@@ -5,7 +5,7 @@
 #include "klog.h"
 #include "panic.h"
 
-namespace customos::core
+namespace duetos::core
 {
 
 namespace
@@ -255,4 +255,4 @@ void FaultDomainSelfTest()
     arch::SerialWrite(" domains; toy restarted 3x; tick path verified)\n");
 }
 
-} // namespace customos::core
+} // namespace duetos::core

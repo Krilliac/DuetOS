@@ -1,4 +1,4 @@
-# CustomOS
+# DuetOS
 
 A general-purpose operating system, written from scratch, that runs
 Windows PE executables natively — not via a VM, not via Wine, not as an
@@ -17,7 +17,7 @@ Not enough argument. Use -h for help.
 
 That's a real MSVC-built third-party Windows PE printing to our serial
 console after going through our PE loader, our 29 userland DLLs, our
-scheduler, and our syscalls. Bits as shipped, running on CustomOS.
+scheduler, and our syscalls. Bits as shipped, running on DuetOS.
 
 ---
 
@@ -62,7 +62,7 @@ Windows PE applications
         ↓ imports
 Win32 translator DLLs  (userland/libs/, 29 DLLs)
         ↓ int 0x80
-Native CustomOS kernel
+Native DuetOS kernel
         ↓
 Kernel-mode drivers (PCIe, NVMe, AHCI, USB, NIC, GPU, audio, input)
 ```
@@ -85,7 +85,7 @@ cmake --preset x86_64-debug
 cmake --build build/x86_64-debug --parallel $(nproc)
 
 # Boot in QEMU — watches the serial log on stdout
-CUSTOMOS_TIMEOUT=30 tools/qemu/run.sh build/x86_64-debug/customos.iso
+DUETOS_TIMEOUT=30 tools/qemu/run.sh build/x86_64-debug/duetos.iso
 ```
 
 Tools required for the ISO path:
@@ -98,7 +98,7 @@ A healthy boot ends with something like:
 
 ```
 [ring3] registered 0x26 DLL(s) pid=0x13
-[reg-fopen-test] ProductName="CustomOS" (type=1, size=9)
+[reg-fopen-test] ProductName="DuetOS" (type=1, size=9)
 [reg-fopen-test] /bin/hello.exe first two bytes: 0x4d 0x5a
 [reg-fopen-test] all checks passed
 Windows Kill 1.1.4 | Windows Kill Library 3.1.3

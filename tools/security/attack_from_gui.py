@@ -2,7 +2,7 @@
 """
 attack_from_gui.py — Red-team harness.
 
-Boots CustomOS headlessly in QEMU, drives the GUI login screen, logs in
+Boots DuetOS headlessly in QEMU, drives the GUI login screen, logs in
 as a user, and then runs a battery of attack probes through the shell
 that the keyboard reader forwards to. Every probe is designed to answer
 ONE question: "what happens if an interactive user with this role does
@@ -142,7 +142,7 @@ def wait_for_serial_line(serial_log: Path, marker: str, timeout: float) -> bool:
 
 def launch_qemu(preset: str, workdir: Path) -> subprocess.Popen:
     build_dir = REPO_ROOT / "build" / preset
-    iso = build_dir / "customos.iso"
+    iso = build_dir / "duetos.iso"
     if not iso.is_file():
         raise SystemExit(f"ISO not built: {iso}")
     serial_log = workdir / "serial.log"

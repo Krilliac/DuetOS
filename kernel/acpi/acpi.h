@@ -3,7 +3,7 @@
 #include "../core/types.h"
 
 /*
- * CustomOS — ACPI discovery (v0).
+ * DuetOS — ACPI discovery (v0).
  *
  * Walks the Multiboot2 info to locate the RSDP, validates its checksums,
  * walks the RSDT/XSDT to find the MADT ("APIC" signature), and caches
@@ -34,7 +34,7 @@
  * safe to use) and BEFORE LapicInit (the LAPIC base comes from MADT).
  */
 
-namespace customos::acpi
+namespace duetos::acpi
 {
 
 constexpr u64 kMaxIoapics = 4;
@@ -198,4 +198,4 @@ u32 SsdtLength(u64 index);
 /// the battery's current state this way, just its declaration.
 bool AmlContainsName(const char* name4);
 
-} // namespace customos::acpi
+} // namespace duetos::acpi

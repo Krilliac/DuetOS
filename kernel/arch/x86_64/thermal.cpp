@@ -4,7 +4,7 @@
 #include "../../arch/x86_64/serial.h"
 #include "../../core/klog.h"
 
-namespace customos::arch
+namespace duetos::arch
 {
 
 namespace
@@ -102,4 +102,4 @@ void ThermalProbe()
     arch::SerialWrite(r.thermal_throttle_hit ? " throttle=HIT\n" : " throttle=clear\n");
 }
 
-} // namespace customos::arch
+} // namespace duetos::arch

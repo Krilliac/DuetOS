@@ -5,7 +5,7 @@
 **Last updated:** 2026-04-20
 **Branch that shipped this:** `claude/add-process-sandboxing-e0pnT`
 
-This is the consolidated story of how CustomOS isolates processes
+This is the consolidated story of how DuetOS isolates processes
 today. Every point below is implemented, live-boot verified under
 QEMU, and defended by a panic or a denial-log line if it regresses.
 
@@ -15,7 +15,7 @@ affect anything outside its box.**
 
 ## Layered defenses
 
-An untrusted process running on CustomOS today is bounded by **five
+An untrusted process running on DuetOS today is bounded by **five
 orthogonal walls**, any one of which would be sufficient against a
 narrow class of attack, and which compose so that compromising any
 single one does not break the others:
@@ -295,7 +295,7 @@ trusted-A  pid=1 caps=FsRead+SerialConsole root=trusted
   stat ok /etc/version (0x1b)
   stat miss /welcome.txt              <- trusted can't name sandbox files
   read ok /etc/version (0x1b)
-  CustomOS v0 (ramfs-seeded)          <- actual file content via SYS_WRITE
+  DuetOS v0 (ramfs-seeded)          <- actual file content via SYS_WRITE
   Hello from ring 3!
 
 trusted-B  pid=2   (identical behaviour in a DIFFERENT AS)
@@ -337,7 +337,7 @@ The sandboxing work landed in the following commits on
 | 688ea51 | 10b | Kernel-image W^X via PS-split + per-section PTE flags |
 | fcc92c2 | 11 | Per-process ASLR for user code/stack VAs |
 | c21d7a0 | 12 | Stack canaries (`-fstack-protector-strong`) |
-| 6af0a4a | 13 | CET/IBT CFI via `endbr64` + CUSTOMOS_CANARY_DEMO |
+| 6af0a4a | 13 | CET/IBT CFI via `endbr64` + DUETOS_CANARY_DEMO |
 | a8fa853 | 14a | Per-process CPU-tick budget infrastructure |
 | 5ff1894 | 14b | kboot boot-stack race fix + cpu-hog live-fire |
 | b629cb9 | 15  | `__copy_user_fault_fixup` — kernel #PF recovery |

@@ -1,4 +1,4 @@
-# Native CustomOS apps v0 — pattern for in-kernel applications
+# Native DuetOS apps v0 — pattern for in-kernel applications
 
 **Last updated:** 2026-04-21
 **Type:** Pattern
@@ -6,7 +6,7 @@
 
 ## Description
 
-CustomOS has an in-kernel widget system (windows, buttons,
+DuetOS has an in-kernel widget system (windows, buttons,
 taskbar, content-draw callbacks, 1 Hz compositor tick). This
 entry documents the **pattern** an in-kernel "app" follows so
 new apps slot in cleanly without bespoke wiring each time.
@@ -23,7 +23,7 @@ Lives under `kernel/apps/`. Current occupants:
 - `calculator.{h,cpp}`      — 4x4 keypad, keyboard + mouse.
 
 Build-system plumbing: each app adds one line to the
-`CUSTOMOS_KERNEL_SHARED_SOURCES` list in `kernel/CMakeLists.txt`
+`DUETOS_KERNEL_SHARED_SOURCES` list in `kernel/CMakeLists.txt`
 (alphabetised within the `apps/` section).
 
 ## Approach
@@ -44,7 +44,7 @@ promote it into a neutral helper header first.
 ### 2. Public API shape
 
 ```cpp
-namespace customos::apps::<appname>
+namespace duetos::apps::<appname>
 {
 
 /// One-shot init: bind to a window handle, install content-

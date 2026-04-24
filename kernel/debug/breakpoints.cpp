@@ -11,7 +11,7 @@
 #include "../sync/spinlock.h"
 #include "dr.h"
 
-namespace customos::debug
+namespace duetos::debug
 {
 
 namespace
@@ -829,4 +829,4 @@ bool BpSelfTest()
     return true;
 }
 
-} // namespace customos::debug
+} // namespace duetos::debug

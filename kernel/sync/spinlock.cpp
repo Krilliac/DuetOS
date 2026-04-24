@@ -6,7 +6,7 @@
 #include "../core/panic.h"
 #include "../cpu/percpu.h"
 
-namespace customos::sync
+namespace duetos::sync
 {
 
 namespace
@@ -142,4 +142,4 @@ void SpinLockSelfTest()
     arch::SerialWrite("[sync] spinlock self-test OK\n");
 }
 
-} // namespace customos::sync
+} // namespace duetos::sync

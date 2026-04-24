@@ -4,7 +4,7 @@
 #include "../../core/klog.h"
 #include "../../core/panic.h"
 
-namespace customos::drivers::usb::msc
+namespace duetos::drivers::usb::msc
 {
 
 namespace
@@ -338,4 +338,4 @@ void MscSelfTest()
     arch::SerialWrite("[msc-selftest] PASS (CBW build + CSW parse + INQUIRY + READ CAPACITY)\n");
 }
 
-} // namespace customos::drivers::usb::msc
+} // namespace duetos::drivers::usb::msc

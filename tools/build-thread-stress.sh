@@ -13,7 +13,7 @@
 #     want the produced PE to look like a real-world Windows
 #     executable, not an oddly-aligned test fixture.
 #
-# The CustomOS kernel PE loader then parses the Import
+# The DuetOS kernel PE loader then parses the Import
 # Directory, resolves ExitProcess through the Win32 stubs
 # table (see kernel/subsystems/win32/stubs.{h,cpp}), patches
 # the IAT slot with the stub VA, and transfers control to
@@ -125,6 +125,6 @@ python3 "${EMBED}" \
     "${EXE}" \
     "${OUT_HEADER}" \
     kBinThreadStressBytes \
-    --namespace "customos::fs::generated"
+    --namespace "duetos::fs::generated"
 
 echo "build-hello-winapi.sh: wrote ${OUT_HEADER} (PE $(stat -c%s "${EXE}") bytes)"

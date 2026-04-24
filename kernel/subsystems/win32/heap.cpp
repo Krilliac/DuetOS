@@ -8,7 +8,7 @@
 #include "../../mm/page.h"
 #include "../../mm/paging.h"
 
-namespace customos::win32
+namespace duetos::win32
 {
 
 namespace
@@ -42,13 +42,13 @@ constexpr u64 kMinSplitPayload = 16;
 // the heap-management code only touches the first 16 bytes of
 // each block, and headers are 16-byte-aligned, so we never
 // cross a page boundary.
-u64 PeekU64(const customos::core::Process* proc, u64 user_va)
+u64 PeekU64(const duetos::core::Process* proc, u64 user_va)
 {
     const u64 page_va = user_va & ~0xFFFULL;
-    const customos::mm::PhysAddr frame = customos::mm::AddressSpaceLookupUserFrame(proc->as, page_va);
-    if (frame == customos::mm::kNullFrame)
+    const duetos::mm::PhysAddr frame = duetos::mm::AddressSpaceLookupUserFrame(proc->as, page_va);
+    if (frame == duetos::mm::kNullFrame)
         return 0;
-    const auto* direct = static_cast<const u8*>(customos::mm::PhysToVirt(frame));
+    const auto* direct = static_cast<const u8*>(duetos::mm::PhysToVirt(frame));
     const u64 off = user_va - page_va;
     u64 v = 0;
     for (u64 b = 0; b < 8; ++b)
@@ -56,13 +56,13 @@ u64 PeekU64(const customos::core::Process* proc, u64 user_va)
     return v;
 }
 
-void PokeU64(customos::core::Process* proc, u64 user_va, u64 value)
+void PokeU64(duetos::core::Process* proc, u64 user_va, u64 value)
 {
     const u64 page_va = user_va & ~0xFFFULL;
-    const customos::mm::PhysAddr frame = customos::mm::AddressSpaceLookupUserFrame(proc->as, page_va);
-    if (frame == customos::mm::kNullFrame)
+    const duetos::mm::PhysAddr frame = duetos::mm::AddressSpaceLookupUserFrame(proc->as, page_va);
+    if (frame == duetos::mm::kNullFrame)
         return;
-    auto* direct = static_cast<u8*>(customos::mm::PhysToVirt(frame));
+    auto* direct = static_cast<u8*>(duetos::mm::PhysToVirt(frame));
     const u64 off = user_va - page_va;
     for (u64 b = 0; b < 8; ++b)
         direct[off + b] = static_cast<u8>((value >> (b * 8)) & 0xFF);
@@ -81,10 +81,10 @@ u64 RoundRequestToBlockSize(u64 requested)
 
 } // namespace
 
-bool Win32HeapInit(customos::core::Process* proc)
+bool Win32HeapInit(duetos::core::Process* proc)
 {
     KLOG_TRACE_SCOPE("win32/heap", "Win32HeapInit");
-    using namespace customos::mm;
+    using namespace duetos::mm;
     using arch::SerialWrite;
     using arch::SerialWriteHex;
 
@@ -125,7 +125,7 @@ bool Win32HeapInit(customos::core::Process* proc)
     return true;
 }
 
-u64 Win32HeapAlloc(customos::core::Process* proc, u64 size)
+u64 Win32HeapAlloc(duetos::core::Process* proc, u64 size)
 {
     if (proc == nullptr || proc->heap_free_head == 0)
         return 0;
@@ -186,7 +186,7 @@ u64 Win32HeapAlloc(customos::core::Process* proc, u64 size)
     return 0;
 }
 
-void Win32HeapFree(customos::core::Process* proc, u64 user_ptr)
+void Win32HeapFree(duetos::core::Process* proc, u64 user_ptr)
 {
     if (proc == nullptr || user_ptr == 0)
         return; // Win32: free(NULL) is a no-op.
@@ -194,7 +194,7 @@ void Win32HeapFree(customos::core::Process* proc, u64 user_ptr)
     // Bounds-check: block must be inside the heap region.
     if (block_hdr < proc->heap_base)
         return;
-    if (block_hdr >= proc->heap_base + proc->heap_pages * customos::mm::kPageSize)
+    if (block_hdr >= proc->heap_base + proc->heap_pages * duetos::mm::kPageSize)
         return;
     // Prepend to the free list. O(1) insertion, no coalescing.
     // The header's `size` field is preserved from allocation;
@@ -203,14 +203,14 @@ void Win32HeapFree(customos::core::Process* proc, u64 user_ptr)
     proc->heap_free_head = block_hdr;
 }
 
-u64 Win32HeapSize(customos::core::Process* proc, u64 user_ptr)
+u64 Win32HeapSize(duetos::core::Process* proc, u64 user_ptr)
 {
     if (proc == nullptr || user_ptr == 0)
         return 0;
     const u64 block_hdr = user_ptr - kHeaderSize;
     if (block_hdr < proc->heap_base)
         return 0;
-    if (block_hdr >= proc->heap_base + proc->heap_pages * customos::mm::kPageSize)
+    if (block_hdr >= proc->heap_base + proc->heap_pages * duetos::mm::kPageSize)
         return 0;
     const u64 block_size = PeekU64(proc, block_hdr + 0);
     if (block_size < kHeaderSize)
@@ -218,7 +218,7 @@ u64 Win32HeapSize(customos::core::Process* proc, u64 user_ptr)
     return block_size - kHeaderSize;
 }
 
-u64 Win32HeapRealloc(customos::core::Process* proc, u64 user_ptr, u64 new_size)
+u64 Win32HeapRealloc(duetos::core::Process* proc, u64 user_ptr, u64 new_size)
 {
     if (proc == nullptr)
         return 0;
@@ -242,7 +242,7 @@ u64 Win32HeapRealloc(customos::core::Process* proc, u64 user_ptr, u64 new_size)
     const u64 block_hdr = user_ptr - kHeaderSize;
     if (block_hdr < proc->heap_base)
         return 0;
-    if (block_hdr >= proc->heap_base + proc->heap_pages * customos::mm::kPageSize)
+    if (block_hdr >= proc->heap_base + proc->heap_pages * duetos::mm::kPageSize)
         return 0;
     const u64 old_block_size = PeekU64(proc, block_hdr + 0);
     if (old_block_size < kHeaderSize)
@@ -273,9 +273,9 @@ u64 Win32HeapRealloc(customos::core::Process* proc, u64 user_ptr, u64 new_size)
     {
         const u64 src_page = src_va & ~0xFFFULL;
         const u64 dst_page = dst_va & ~0xFFFULL;
-        const customos::mm::PhysAddr src_frame = customos::mm::AddressSpaceLookupUserFrame(proc->as, src_page);
-        const customos::mm::PhysAddr dst_frame = customos::mm::AddressSpaceLookupUserFrame(proc->as, dst_page);
-        if (src_frame == customos::mm::kNullFrame || dst_frame == customos::mm::kNullFrame)
+        const duetos::mm::PhysAddr src_frame = duetos::mm::AddressSpaceLookupUserFrame(proc->as, src_page);
+        const duetos::mm::PhysAddr dst_frame = duetos::mm::AddressSpaceLookupUserFrame(proc->as, dst_page);
+        if (src_frame == duetos::mm::kNullFrame || dst_frame == duetos::mm::kNullFrame)
         {
             // Shouldn't happen — both VAs come from our own
             // heap region, which PeLoad mapped every page of.
@@ -286,15 +286,15 @@ u64 Win32HeapRealloc(customos::core::Process* proc, u64 user_ptr, u64 new_size)
         }
         const u64 src_off = src_va - src_page;
         const u64 dst_off = dst_va - dst_page;
-        const u64 src_room = customos::mm::kPageSize - src_off;
-        const u64 dst_room = customos::mm::kPageSize - dst_off;
+        const u64 src_room = duetos::mm::kPageSize - src_off;
+        const u64 dst_room = duetos::mm::kPageSize - dst_off;
         u64 chunk = remaining;
         if (chunk > src_room)
             chunk = src_room;
         if (chunk > dst_room)
             chunk = dst_room;
-        const auto* src = static_cast<const u8*>(customos::mm::PhysToVirt(src_frame)) + src_off;
-        auto* dst = static_cast<u8*>(customos::mm::PhysToVirt(dst_frame)) + dst_off;
+        const auto* src = static_cast<const u8*>(duetos::mm::PhysToVirt(src_frame)) + src_off;
+        auto* dst = static_cast<u8*>(duetos::mm::PhysToVirt(dst_frame)) + dst_off;
         for (u64 i = 0; i < chunk; ++i)
             dst[i] = src[i];
         src_va += chunk;
@@ -305,4 +305,4 @@ u64 Win32HeapRealloc(customos::core::Process* proc, u64 user_ptr, u64 new_size)
     return new_ptr;
 }
 
-} // namespace customos::win32
+} // namespace duetos::win32

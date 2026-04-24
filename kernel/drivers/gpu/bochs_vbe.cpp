@@ -4,7 +4,7 @@
 #include "../../arch/x86_64/serial.h"
 #include "../../core/klog.h"
 
-namespace customos::drivers::gpu
+namespace duetos::drivers::gpu
 {
 
 namespace
@@ -43,14 +43,14 @@ u16 Read(u16 index)
     // want to read a different register. No atomicity guarantee
     // across CPUs; we're single-CPU at the kernel-driver layer
     // so the write-then-read sequence is race-free here.
-    ::customos::arch::Outw(kVbeIndexPort, index);
-    return ::customos::arch::Inw(kVbeDataPort);
+    ::duetos::arch::Outw(kVbeIndexPort, index);
+    return ::duetos::arch::Inw(kVbeDataPort);
 }
 
 void Write(u16 index, u16 value)
 {
-    ::customos::arch::Outw(kVbeIndexPort, index);
-    ::customos::arch::Outw(kVbeDataPort, value);
+    ::duetos::arch::Outw(kVbeIndexPort, index);
+    ::duetos::arch::Outw(kVbeDataPort, value);
 }
 
 bool IdIsBochs(u16 id)
@@ -159,4 +159,4 @@ void VbeSelfTest()
     arch::SerialWrite("\n");
 }
 
-} // namespace customos::drivers::gpu
+} // namespace duetos::drivers::gpu

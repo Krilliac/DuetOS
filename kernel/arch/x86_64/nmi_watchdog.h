@@ -3,7 +3,7 @@
 #include "../../core/types.h"
 
 /*
- * CustomOS — NMI watchdog.
+ * DuetOS — NMI watchdog.
  *
  * Detects a wedged kernel — one that's stuck hard enough that the
  * normal scheduler tick (and therefore the health scan) has
@@ -46,7 +46,7 @@
  * in IRQ context. Init runs once at boot after TimerInit.
  */
 
-namespace customos::arch
+namespace duetos::arch
 {
 
 /// One-time init. Gated on architectural-perfmon support; silently
@@ -69,4 +69,4 @@ void NmiWatchdogPet();
 /// while the crash dump is being written. Idempotent.
 void NmiWatchdogDisable();
 
-} // namespace customos::arch
+} // namespace duetos::arch

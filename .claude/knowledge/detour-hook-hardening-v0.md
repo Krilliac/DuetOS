@@ -5,7 +5,7 @@
 **Last updated:** 2026-04-20
 **Branch:** `claude/add-process-sandboxing-e0pnT`
 
-Summary of how CustomOS defends against the family of attacks that
+Summary of how DuetOS defends against the family of attacks that
 Windows malware / rootkits have historically used: inline hooks,
 IAT/PLT detours, vtable hijacking, SSDT hooking, and ROP. Every
 defensive layer below is implemented and live-boot-verified.
@@ -27,7 +27,7 @@ modifying it statically. Common mechanisms:
 5. **SSDT / IDT hook**: overwrite a kernel dispatch table so
    syscall/interrupt delivery lands at attacker code.
 
-## Defenses in CustomOS (all live as of this branch)
+## Defenses in DuetOS (all live as of this branch)
 
 ### Write-side (can the attacker modify code?)
 

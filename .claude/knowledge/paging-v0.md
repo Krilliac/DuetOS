@@ -153,7 +153,7 @@ PT cost 0 additional table allocations.
 
 ```bash
 cmake --build build/x86_64-debug
-CUSTOMOS_TIMEOUT=10 tools/qemu/run.sh
+DUETOS_TIMEOUT=10 tools/qemu/run.sh
 ```
 
 Smoke checks:

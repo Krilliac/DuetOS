@@ -4,7 +4,7 @@
 #include "../../core/types.h"
 
 /*
- * CustomOS — xHCI USB host-controller driver, v0.
+ * DuetOS — xHCI USB host-controller driver, v0.
  *
  * Brings each xHCI controller found by drivers/usb/usb.cpp out of
  * reset, programs the minimum data structures the spec demands
@@ -57,7 +57,7 @@
  * time self-tests log.
  */
 
-namespace customos::drivers::usb::xhci
+namespace duetos::drivers::usb::xhci
 {
 
 inline constexpr u32 kMaxXhciPortsPerController = 16;
@@ -142,13 +142,13 @@ void XhciInit();
 /// Init re-uses them; re-init with a clean state is cheap.
 /// Returns Ok on full quiesce, BadState if any controller
 /// didn't halt within the deadline.
-::customos::core::Result<void> XhciShutdown();
+::duetos::core::Result<void> XhciShutdown();
 
 /// Shutdown + Init round-trip. Used by the fault-domain restart
 /// path and the `xhci restart` shell command.
-::customos::core::Result<void> XhciRestart();
+::duetos::core::Result<void> XhciRestart();
 
 u32 XhciCount();
 const ControllerInfo* XhciControllerAt(u32 i);
 
-} // namespace customos::drivers::usb::xhci
+} // namespace duetos::drivers::usb::xhci

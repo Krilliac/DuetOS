@@ -3,7 +3,7 @@
 #include "../../core/types.h"
 
 /*
- * CustomOS x86_64 Global Descriptor Table + TSS.
+ * DuetOS x86_64 Global Descriptor Table + TSS.
  *
  * The boot.S handoff leaves us on a temporary 3-entry GDT (null / kcode /
  * kdata). `GdtInit()` replaces it with the persistent kernel GDT and
@@ -28,7 +28,7 @@
  * Context: kernel, called exactly once during early bring-up.
  */
 
-namespace customos::arch
+namespace duetos::arch
 {
 
 inline constexpr u16 kKernelCodeSelector = 0x08;
@@ -93,4 +93,4 @@ void TssSetRsp0(u64 rsp0);
 /// instead of mystery heap / data corruption.
 bool IstStackCanariesIntact();
 
-} // namespace customos::arch
+} // namespace duetos::arch

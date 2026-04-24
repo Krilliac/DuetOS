@@ -3,7 +3,7 @@
 #include "types.h"
 
 /*
- * CustomOS shell — v0.
+ * DuetOS shell — v0.
  *
  * A minimal Linux/macOS-flavoured command prompt on top of the
  * framebuffer console. Accepts printable chars into a line-edit
@@ -12,7 +12,7 @@
  *
  *   help      — list available commands
  *   about     — project banner
- *   version   — CustomOS version tag
+ *   version   — DuetOS version tag
  *   clear     — wipe the console and show a fresh prompt
  *   uptime    — seconds since the scheduler came online
  *   date      — current wall time + date from the CMOS RTC
@@ -36,7 +36,7 @@
  * Context: kernel. Called from the keyboard reader task.
  */
 
-namespace customos::core
+namespace duetos::core
 {
 
 /// Print the welcome banner + first prompt. Called once after
@@ -90,4 +90,4 @@ bool ShellInterruptRequested();
 u32 ShellHistoryCount();
 const char* ShellHistoryGet(u32 n);
 
-} // namespace customos::core
+} // namespace duetos::core

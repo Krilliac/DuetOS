@@ -229,6 +229,6 @@ python3 "${EMBED}" \
     "${DLL}" \
     "${OUT_HEADER}" \
     kBinKernel32DllBytes \
-    --namespace "customos::fs::generated"
+    --namespace "duetos::fs::generated"
 
 echo "build-kernel32-dll.sh: wrote ${OUT_HEADER} (DLL $(stat -c%s "${DLL}") bytes)"

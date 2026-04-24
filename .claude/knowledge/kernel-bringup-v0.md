@@ -74,15 +74,15 @@ cmake --preset x86_64-debug
 cmake --build build/x86_64-debug --parallel $(nproc)
 
 # Check Multiboot2 header (expect d6 52 50 e8 at offset 0x100000):
-llvm-objdump -s --section=.multiboot2 build/x86_64-debug/kernel/customos-kernel.elf
+llvm-objdump -s --section=.multiboot2 build/x86_64-debug/kernel/duetos-kernel.elf
 
 # Entry must be at 0x101000 (start of .text.boot):
-llvm-readelf -h build/x86_64-debug/kernel/customos-kernel.elf | grep Entry
+llvm-readelf -h build/x86_64-debug/kernel/duetos-kernel.elf | grep Entry
 
 # When qemu-system-x86_64 is installed:
 tools/qemu/run.sh
 # Expected serial output:
-#   [boot] CustomOS kernel reached long mode.
+#   [boot] DuetOS kernel reached long mode.
 #   [boot] Multiboot2 handoff verified.
 #   [boot] Halting CPU.
 ```

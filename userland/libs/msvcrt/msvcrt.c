@@ -1,7 +1,7 @@
 /*
  * userland/libs/msvcrt/msvcrt.c
  *
- * Freestanding CustomOS msvcrt.dll — string intrinsics
+ * Freestanding DuetOS msvcrt.dll — string intrinsics
  * (strlen, strcmp, strcpy, strchr, wcslen, wcscmp, wcscpy,
  * wcschr). Retires the batch-7 + 29/31 flat stubs in
  * kernel/subsystems/win32/stubs.cpp.

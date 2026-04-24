@@ -123,6 +123,6 @@ python3 "${EMBED}" \
     "${DLL}" \
     "${OUT_HEADER}" \
     kBinUcrtbaseDllBytes \
-    --namespace "customos::fs::generated"
+    --namespace "duetos::fs::generated"
 
 echo "build-ucrtbase-dll.sh: wrote ${OUT_HEADER} (DLL $(stat -c%s "${DLL}") bytes)"

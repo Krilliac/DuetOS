@@ -6,7 +6,7 @@
 
 ## Description
 
-CustomOS is C++23 / ASM today. CLAUDE.md permits Rust for
+DuetOS is C++23 / ASM today. CLAUDE.md permits Rust for
 **greenfield subsystems where memory-safety vs. C++ lifetime
 invariants matter** — explicitly called out: filesystem drivers,
 USB stack, network stack. This entry locks in WHEN that first
@@ -193,7 +193,7 @@ target_include_directories(customfs INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/include)
 ```
 
-Kernel CMakeLists gains `target_link_libraries(customos-kernel
+Kernel CMakeLists gains `target_link_libraries(duetos-kernel
 PRIVATE customfs)`. The `.a` links into the kernel ELF
 alongside the C++ object files; `lld` resolves the C FFI
 symbols.
@@ -208,9 +208,9 @@ calls:
 // fs/customfs/include/customfs.h  (hand-written)
 
 // Kernel functions the Rust side calls.
-extern void  customos_klog_info (const char* tag, const char* msg);
-extern void* customos_kmalloc   (unsigned long n);
-extern void  customos_kfree     (void* p);
+extern void  duetos_klog_info (const char* tag, const char* msg);
+extern void* duetos_kmalloc   (unsigned long n);
+extern void  duetos_kfree     (void* p);
 
 // Rust functions the kernel calls.
 extern int   customfs_mount  (const void* blob, unsigned long len);
@@ -228,13 +228,13 @@ Rust side in `src/lib.rs`:
 use core::panic::PanicInfo;
 
 extern "C" {
-    fn customos_klog_info(tag: *const u8, msg: *const u8);
+    fn duetos_klog_info(tag: *const u8, msg: *const u8);
 }
 
 #[panic_handler]
 fn on_panic(_info: &PanicInfo) -> ! {
     // SAFETY: string literals are C-compatible NUL-terminated.
-    unsafe { customos_klog_info(b"customfs\0".as_ptr(),
+    unsafe { duetos_klog_info(b"customfs\0".as_ptr(),
                                 b"rust panic\0".as_ptr()); }
     loop { core::hint::spin_loop(); }
 }

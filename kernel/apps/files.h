@@ -4,7 +4,7 @@
 #include "../drivers/video/widget.h"
 
 /*
- * CustomOS File Browser — v0.
+ * DuetOS File Browser — v0.
  *
  * Lists the children of the ramfs trusted root in a scrollable
  * column. Each row shows:
@@ -29,17 +29,17 @@
  * lock, same discipline as Notes and Calculator.
  */
 
-namespace customos::apps::files
+namespace duetos::apps::files
 {
 
 /// Install the File Browser on `handle`. Sets the content-draw
 /// callback, loads the trusted root's children as the initial
 /// listing, prints a boot-time self-test confirming at least
 /// one child was discovered.
-void FilesInit(customos::drivers::video::WindowHandle handle);
+void FilesInit(duetos::drivers::video::WindowHandle handle);
 
 /// Handle of the Files window.
-customos::drivers::video::WindowHandle FilesWindow();
+duetos::drivers::video::WindowHandle FilesWindow();
 
 /// Keyboard handler. Consumes:
 ///   - Enter           — descend into the selected directory,
@@ -60,4 +60,4 @@ bool FilesFeedArrow(bool up);
 /// to that directory's children. Prints PASS/FAIL to COM1.
 void FilesSelfTest();
 
-} // namespace customos::apps::files
+} // namespace duetos::apps::files

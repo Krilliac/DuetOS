@@ -5,7 +5,7 @@
 #include "../../core/panic.h"
 #include "../../mm/page.h"
 
-namespace customos::arch
+namespace duetos::arch
 {
 
 namespace
@@ -335,4 +335,4 @@ const char* ChassisTypeName(u8 t)
     }
 }
 
-} // namespace customos::arch
+} // namespace duetos::arch

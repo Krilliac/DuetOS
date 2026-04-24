@@ -38,7 +38,7 @@
  * if the DLL loader becomes load-bearing.
  */
 
-namespace customos::core
+namespace duetos::core
 {
 
 namespace
@@ -77,8 +77,8 @@ void DllLoaderSelfTest()
     using arch::SerialWrite;
     using arch::SerialWriteHex;
 
-    const u8* bytes = customos::fs::generated::kBinCustomDllBytes;
-    const u64 len = customos::fs::generated::kBinCustomDllBytes_len;
+    const u8* bytes = duetos::fs::generated::kBinCustomDllBytes;
+    const u64 len = duetos::fs::generated::kBinCustomDllBytes_len;
 
     SerialWrite("[dll-test] begin customdll.dll bytes=");
     SerialWriteHex(len);
@@ -150,7 +150,7 @@ void DllLoaderSelfTest()
     // page + one header page + one reloc patch page is the
     // ceiling. 16 frames is a safety margin.
     constexpr u64 kScratchBudget = 16;
-    customos::mm::AddressSpace* as = customos::mm::AddressSpaceCreate(kScratchBudget);
+    duetos::mm::AddressSpace* as = duetos::mm::AddressSpaceCreate(kScratchBudget);
     if (!Expect(as != nullptr, "AddressSpaceCreate"))
         return;
 
@@ -161,12 +161,12 @@ void DllLoaderSelfTest()
         SerialWrite("  status=");
         SerialWrite(DllLoadStatusName(r.status));
         SerialWrite("\n");
-        customos::mm::AddressSpaceRelease(as);
+        duetos::mm::AddressSpaceRelease(as);
         return;
     }
     if (!Expect(r.image.has_exports, "image.has_exports"))
     {
-        customos::mm::AddressSpaceRelease(as);
+        duetos::mm::AddressSpaceRelease(as);
         return;
     }
 
@@ -203,10 +203,10 @@ void DllLoaderSelfTest()
     // release it on ProcessRelease, which is fine: the table
     // test is purely about whether `ProcessRegisterDllImage` +
     // `ProcessResolveDllExport` round-trip correctly.
-    auto* proc = static_cast<Process*>(customos::mm::KMalloc(sizeof(Process)));
+    auto* proc = static_cast<Process*>(duetos::mm::KMalloc(sizeof(Process)));
     if (!Expect(proc != nullptr, "scratch Process KMalloc"))
     {
-        customos::mm::AddressSpaceRelease(as);
+        duetos::mm::AddressSpaceRelease(as);
         return;
     }
     // Zero every byte — ProcessRegisterDllImage only reads
@@ -220,14 +220,14 @@ void DllLoaderSelfTest()
     // Register once — first slot should be filled.
     if (!Expect(ProcessRegisterDllImage(proc, r.image), "ProcessRegisterDllImage"))
     {
-        customos::mm::KFree(proc);
-        customos::mm::AddressSpaceRelease(as);
+        duetos::mm::KFree(proc);
+        duetos::mm::AddressSpaceRelease(as);
         return;
     }
     if (!Expect(proc->dll_image_count == 1, "dll_image_count == 1"))
     {
-        customos::mm::KFree(proc);
-        customos::mm::AddressSpaceRelease(as);
+        duetos::mm::KFree(proc);
+        duetos::mm::AddressSpaceRelease(as);
         return;
     }
 
@@ -271,8 +271,8 @@ void DllLoaderSelfTest()
 
     SerialWrite("[dll-test] ProcessResolveDllExportByBase OK (SYS_DLL_PROC_ADDRESS backing)\n");
 
-    customos::mm::KFree(proc);
-    customos::mm::AddressSpaceRelease(as);
+    duetos::mm::KFree(proc);
+    duetos::mm::AddressSpaceRelease(as);
 }
 
-} // namespace customos::core
+} // namespace duetos::core

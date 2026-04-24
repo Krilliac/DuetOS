@@ -1,12 +1,12 @@
-# CustomOS Roadmap — From Current Kernel Bring-up to Full GUI Desktop
+# DuetOS Roadmap — From Current Kernel Bring-up to Full GUI Desktop
 
 _Last updated: 2026-04-20_
 
 ## Purpose
 
-This document is the **single source roadmap** for taking CustomOS from the current early kernel state to a usable graphical desktop that can run:
+This document is the **single source roadmap** for taking DuetOS from the current early kernel state to a usable graphical desktop that can run:
 
-- native CustomOS applications, and
+- native DuetOS applications, and
 - Windows PE applications via the first-class Win32 subsystem.
 
 This is intentionally thorough and front-loads decisions so implementation work can execute quickly and in sequence.

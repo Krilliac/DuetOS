@@ -11,7 +11,7 @@
 #include "../../mm/paging.h"
 #include "../../sched/sched.h"
 
-namespace customos::subsystems::win32
+namespace duetos::subsystems::win32
 {
 
 void DoFileOpen(arch::TrapFrame* frame)
@@ -320,4 +320,4 @@ void DoFileCreate(arch::TrapFrame* frame)
     frame->rax = fs::routing::CreateForProcess(proc, kpath, init_len > 0 ? s_init_stage : nullptr, init_len);
 }
 
-} // namespace customos::subsystems::win32
+} // namespace duetos::subsystems::win32

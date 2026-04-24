@@ -3,7 +3,7 @@
 #include "../arch/x86_64/serial.h"
 #include "../fs/fat32.h"
 
-namespace customos::debug
+namespace duetos::debug
 {
 
 // ---------- Shared loader helpers ----------
@@ -525,4 +525,4 @@ void InspectOnSpawn(const char* name, const u8* bytes, u64 size)
     OpcodeScanRegion(bytes, size, 0);
 }
 
-} // namespace customos::debug
+} // namespace duetos::debug

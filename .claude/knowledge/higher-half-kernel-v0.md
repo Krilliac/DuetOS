@@ -120,7 +120,7 @@ Fix: `FindBitmapHome` now takes `info_size` and places the bitmap above `max(ker
 ### Verified boot output
 
 ```
-[boot] CustomOS kernel reached long mode.
+[boot] DuetOS kernel reached long mode.
 [boot] Multiboot2 handoff verified.
 [boot] Installing kernel GDT.
 [boot] Installing IDT (vectors 0..31).
@@ -145,12 +145,12 @@ The free-frame count is slightly lower than the pre-move baseline (`0x1FEC9` vs 
 
 ```bash
 cmake --build build/x86_64-debug
-CUSTOMOS_TIMEOUT=10 tools/qemu/run.sh
+DUETOS_TIMEOUT=10 tools/qemu/run.sh
 ```
 
 Smoke tests:
 - `[mm] frame allocator self-test OK` still prints end-to-end.
-- `readelf -SW build/x86_64-debug/kernel/customos-kernel.elf` shows `.text`, `.rodata`, `.data`, `.bss` with VirtAddr in the `0xffffffff80...` range and Off/size matching a low-LMA load.
+- `readelf -SW build/x86_64-debug/kernel/duetos-kernel.elf` shows `.text`, `.rodata`, `.data`, `.bss` with VirtAddr in the `0xffffffff80...` range and Off/size matching a low-LMA load.
 - `llvm-nm` shows `long_mode_entry` at `0xffffffff801xxxxx` and `long_mode_trampoline` at a low physical address (e.g. `0x101xxx`).
 
 Canaries for "the move regressed":

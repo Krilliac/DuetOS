@@ -3,7 +3,7 @@
 #include "../core/types.h"
 
 /*
- * CustomOS FAT32 driver — v0 (read-only BPB parse + root-dir walk).
+ * DuetOS FAT32 driver — v0 (read-only BPB parse + root-dir walk).
  *
  * Scope:
  *   - Recognise a FAT32 volume by reading LBA 0 of a block-device
@@ -28,7 +28,7 @@
  * which is polling-mode synchronous).
  */
 
-namespace customos::fs::fat32
+namespace duetos::fs::fat32
 {
 
 /// Max volumes we track. One per partition-block handle is plenty —
@@ -270,4 +270,4 @@ bool Fat32RmdirAtPath(const Volume* v, const char* path);
 /// builder wrote it.
 void Fat32SelfTest();
 
-} // namespace customos::fs::fat32
+} // namespace duetos::fs::fat32

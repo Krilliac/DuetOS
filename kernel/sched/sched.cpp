@@ -18,7 +18,7 @@
 #include "../mm/paging.h"
 #include "../sync/spinlock.h"
 
-namespace customos::sched
+namespace duetos::sched
 {
 
 // ContextSwitch is defined in context_switch.S. Signature: save callee-
@@ -556,7 +556,7 @@ Task* SchedCreate(TaskEntry entry, void* arg, const char* name, TaskPriority pri
     // layer — that happens in the loader before entry is ever
     // handed to the scheduler — so this catches only filename
     // denylist hits. Returns a null Task if the guard denies.
-    if (!customos::security::GateThread(customos::security::ImageKind::KernelThread, name))
+    if (!duetos::security::GateThread(duetos::security::ImageKind::KernelThread, name))
     {
         return nullptr;
     }
@@ -568,7 +568,7 @@ Task* SchedCreateUser(TaskEntry entry, void* arg, const char* name, core::Proces
     KASSERT(process != nullptr, "sched", "SchedCreateUser without Process");
     KASSERT(process->as != nullptr, "sched", "SchedCreateUser Process has no AS");
 
-    if (!customos::security::GateThread(customos::security::ImageKind::UserThread, name))
+    if (!duetos::security::GateThread(duetos::security::ImageKind::UserThread, name))
     {
         // The caller handed us its Process reference expecting
         // the Task to absorb it. No Task was created — the ref
@@ -580,7 +580,7 @@ Task* SchedCreateUser(TaskEntry entry, void* arg, const char* name, core::Proces
 
     Task* t = SchedCreateInternal(entry, arg, name, TaskPriority::Normal, process->as);
     t->process = process;
-    KBP_PROBE_V(::customos::debug::ProbeId::kRing3Spawn, process->pid);
+    KBP_PROBE_V(::duetos::debug::ProbeId::kRing3Spawn, process->pid);
     // Refcount discipline: ProcessCreate returned refcount=1 (one
     // for the creating caller). The caller hands that reference off
     // to this Task — no retain needed. Subsequent Tasks that want
@@ -785,7 +785,7 @@ void Schedule()
     asm volatile("mov %0, %%dr3" : : "r"(next->dr3));
     asm volatile("mov %0, %%dr7" : : "r"(next->dr7));
 
-    KBP_PROBE_V(::customos::debug::ProbeId::kSchedContextSwitch, next->id);
+    KBP_PROBE_V(::duetos::debug::ProbeId::kSchedContextSwitch, next->id);
     ContextSwitch(&prev->rsp, next->rsp);
     // When we return here, we're executing on a DIFFERENT task's
     // stack — whichever task got switched in to run us. The local
@@ -1921,9 +1921,9 @@ u64 CondvarBroadcast(Condvar* cv)
     return WaitQueueWakeAll(&cv->waiters);
 }
 
-} // namespace customos::sched
+} // namespace duetos::sched
 
 extern "C" [[noreturn]] void SchedExitC()
 {
-    customos::sched::SchedExit();
+    duetos::sched::SchedExit();
 }

@@ -1,7 +1,7 @@
 #pragma once
 
 /*
- * CustomOS — Linux-ABI ring-3 smoke test.
+ * DuetOS — Linux-ABI ring-3 smoke test.
  *
  * Companion to core/ring3_smoke.cpp. Constructs a minimal ring-3
  * task whose payload is a raw `syscall` instruction sequence:
@@ -21,7 +21,7 @@
  * linux::SyscallInit and SchedInit.
  */
 
-namespace customos::subsystems::linux
+namespace duetos::subsystems::linux
 {
 
 /// Spawn the Linux-ABI ring-3 smoke task. Returns when the task is
@@ -70,4 +70,4 @@ void SpawnRing3LinuxTranslateSmoke();
 /// write, I/O error) surfaces as a missing marker.
 void SpawnRing3LinuxExtendSmoke();
 
-} // namespace customos::subsystems::linux
+} // namespace duetos::subsystems::linux

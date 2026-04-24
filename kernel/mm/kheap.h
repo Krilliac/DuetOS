@@ -3,7 +3,7 @@
 #include "../core/types.h"
 
 /*
- * CustomOS kernel heap — v0.
+ * DuetOS kernel heap — v0.
  *
  * A first-fit + coalescing freelist allocator over a single contiguous pool
  * carved out of the physical frame allocator at boot. Backed by the static
@@ -26,7 +26,7 @@
  * in CLAUDE.md).
  */
 
-namespace customos::mm
+namespace duetos::mm
 {
 
 /// Minimum payload alignment guaranteed by KMalloc. Doubles as the unit of
@@ -70,4 +70,4 @@ KernelHeapStats KernelHeapStatsRead();
 /// on any inconsistency. Intended for use during boot only.
 void KernelHeapSelfTest();
 
-} // namespace customos::mm
+} // namespace duetos::mm

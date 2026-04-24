@@ -3,7 +3,7 @@
 # CPU-exception regression test.
 #
 # Companion to tools/test-panic.sh. Builds the kernel with
-# -DCUSTOMOS_TRAP_DEMO=ON (compiles in a deliberate `ud2` at the end
+# -DDUETOS_TRAP_DEMO=ON (compiles in a deliberate `ud2` at the end
 # of kernel_main), boots in QEMU, captures the serial output, then
 # verifies the trap dispatcher produces the same extractable crash
 # dump shape as core::Panic.
@@ -16,9 +16,9 @@
 #
 # Crash-dump file layout:
 #   Trap dumps are bracketed identically to Panic dumps:
-#       === CUSTOMOS CRASH DUMP BEGIN ===
+#       === DUETOS CRASH DUMP BEGIN ===
 #       ...
-#       === CUSTOMOS CRASH DUMP END ===
+#       === DUETOS CRASH DUMP END ===
 #   so the same awk-based extractor works. Dumps land in
 #       build/<preset>/crash-dumps/YYYYMMDD-HHMMSS-trap.dump
 #   (the `-trap` suffix distinguishes them from panic dumps).
@@ -46,7 +46,7 @@ set -euo pipefail
 
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-readonly PRESET="${CUSTOMOS_PRESET:-x86_64-debug}"
+readonly PRESET="${DUETOS_PRESET:-x86_64-debug}"
 readonly BUILD_DIR="${REPO_ROOT}/build/${PRESET}"
 readonly DUMP_DIR="${BUILD_DIR}/crash-dumps"
 
@@ -67,20 +67,20 @@ done
 # Guarantee the flag is reset on exit so subsequent normal builds don't
 # inherit the deliberate fault.
 cleanup() {
-    cmake --preset "${PRESET}" -DCUSTOMOS_TRAP_DEMO=OFF >/dev/null 2>&1 || true
-    cmake --build "${BUILD_DIR}" --target customos-kernel -- >/dev/null 2>&1 || true
+    cmake --preset "${PRESET}" -DDUETOS_TRAP_DEMO=OFF >/dev/null 2>&1 || true
+    cmake --build "${BUILD_DIR}" --target duetos-kernel -- >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
-echo "[test-trap] configuring with CUSTOMOS_TRAP_DEMO=ON"
-cmake --preset "${PRESET}" -DCUSTOMOS_TRAP_DEMO=ON >/dev/null
+echo "[test-trap] configuring with DUETOS_TRAP_DEMO=ON"
+cmake --preset "${PRESET}" -DDUETOS_TRAP_DEMO=ON >/dev/null
 
 echo "[test-trap] building"
 cmake --build "${BUILD_DIR}" >/dev/null
 
 echo "[test-trap] booting (10 s timeout)"
 LOG="$(mktemp)"
-CUSTOMOS_TIMEOUT=10 "${REPO_ROOT}/tools/qemu/run.sh" >"${LOG}" 2>&1 || true
+DUETOS_TIMEOUT=10 "${REPO_ROOT}/tools/qemu/run.sh" >"${LOG}" 2>&1 || true
 
 # ---- dump extraction ----------------------------------------------------
 
@@ -88,9 +88,9 @@ mkdir -p "${DUMP_DIR}"
 DUMP_FILE="${DUMP_DIR}/$(date -u +%Y%m%d-%H%M%S)-trap.dump"
 
 awk '
-    /=== CUSTOMOS CRASH DUMP BEGIN ===/ { inside = 1 }
+    /=== DUETOS CRASH DUMP BEGIN ===/ { inside = 1 }
     inside                              { print }
-    /=== CUSTOMOS CRASH DUMP END ===/   { inside = 0 }
+    /=== DUETOS CRASH DUMP END ===/   { inside = 0 }
 ' "${LOG}" > "${DUMP_FILE}"
 
 if [[ ! -s "${DUMP_FILE}" ]]; then
@@ -115,8 +115,8 @@ assert_contains() {
 
 # Full-log assertions.
 assert_contains '\*\* CPU EXCEPTION \*\*'           "CPU exception banner"
-assert_contains '=== CUSTOMOS CRASH DUMP BEGIN ===' "dump begin marker"
-assert_contains '=== CUSTOMOS CRASH DUMP END ==='   "dump end marker"
+assert_contains '=== DUETOS CRASH DUMP BEGIN ===' "dump begin marker"
+assert_contains '=== DUETOS CRASH DUMP END ==='   "dump end marker"
 assert_contains '\[panic\] Halting CPU'             "halt banner"
 
 # Dump-file assertions — extractable record contract.

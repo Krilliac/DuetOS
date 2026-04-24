@@ -4,7 +4,7 @@
 #include "../core/types.h"
 
 /*
- * CustomOS — exFAT driver, v0 probe + root-directory walk.
+ * DuetOS — exFAT driver, v0 probe + root-directory walk.
  *
  * exFAT boot sector (sector 0) signature is "EXFAT   " (EXFAT +
  * 3 spaces) at offset 3. Unlike FAT32 and NTFS, exFAT uses a
@@ -34,7 +34,7 @@
  * Context: kernel, polling synchronous.
  */
 
-namespace customos::fs::exfat
+namespace duetos::fs::exfat
 {
 
 inline constexpr u32 kMaxVolumes = 8;
@@ -75,9 +75,9 @@ struct Volume
 
 /// Probe the block device at `handle`. On success returns the
 /// registry slot index; errors as for Ext4Probe.
-::customos::core::Result<u32> ExfatProbe(u32 block_handle);
+::duetos::core::Result<u32> ExfatProbe(u32 block_handle);
 u32 ExfatVolumeCount();
 const Volume* ExfatVolumeByIndex(u32 index);
 void ExfatScanAll();
 
-} // namespace customos::fs::exfat
+} // namespace duetos::fs::exfat

@@ -2,7 +2,7 @@
 
 #include "klog.h"
 
-namespace customos::core
+namespace duetos::core
 {
 
 namespace
@@ -58,4 +58,4 @@ void OnTaskExited()
     // For now, no-op — the reaper gets woken by sched::SchedExit.
 }
 
-} // namespace customos::core
+} // namespace duetos::core

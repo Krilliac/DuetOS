@@ -3,7 +3,7 @@
 #include "../core/types.h"
 
 /*
- * CustomOS GPT partition parser — v0.
+ * DuetOS GPT partition parser — v0.
  *
  * Reads the Protective MBR + primary GPT header + partition entry
  * array from a block device and records every non-empty partition.
@@ -31,7 +31,7 @@
  * I/O which is currently polling-mode synchronous.
  */
 
-namespace customos::fs::gpt
+namespace duetos::fs::gpt
 {
 
 /// Size of a GPT GUID in bytes. Binary form — byte order is little-
@@ -98,4 +98,4 @@ const Disk* GptDisk(u32 index);
 /// a legitimate state for ramtest0; the LOG is the signal.
 void GptSelfTest();
 
-} // namespace customos::fs::gpt
+} // namespace duetos::fs::gpt

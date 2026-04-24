@@ -32,7 +32,7 @@
  * and AcpiInit (needs IOAPIC records + ISA overrides).
  */
 
-namespace customos::arch
+namespace duetos::arch
 {
 
 /// Bring up every IOAPIC the MADT described. Maps MMIO, logs version +
@@ -59,4 +59,4 @@ void IoApicRoute(u32 gsi, u8 vector, u8 lapic_id, u8 isa_irq);
 void IoApicMask(u32 gsi);
 void IoApicUnmask(u32 gsi);
 
-} // namespace customos::arch
+} // namespace duetos::arch

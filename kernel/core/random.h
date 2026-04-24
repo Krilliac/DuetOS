@@ -3,7 +3,7 @@
 #include "types.h"
 
 /*
- * CustomOS — kernel entropy source, v0.
+ * DuetOS — kernel entropy source, v0.
  *
  * Three-stage entropy pool:
  *
@@ -28,7 +28,7 @@
  * Context: kernel.
  */
 
-namespace customos::core
+namespace duetos::core
 {
 
 enum class EntropyTier : u8
@@ -98,4 +98,4 @@ Uuid UuidV4();
 /// have capacity for at least 37 bytes (36 chars + NUL).
 void UuidFormat(const Uuid& uuid, char* out);
 
-} // namespace customos::core
+} // namespace duetos::core

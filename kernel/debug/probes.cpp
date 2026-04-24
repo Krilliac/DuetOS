@@ -2,7 +2,7 @@
 
 #include "../core/klog.h"
 
-namespace customos::debug
+namespace duetos::debug
 {
 
 namespace
@@ -150,4 +150,4 @@ u64 ProbeList(ProbeInfo* out, u64 cap)
     return lim;
 }
 
-} // namespace customos::debug
+} // namespace duetos::debug

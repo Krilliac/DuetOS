@@ -9,7 +9,7 @@
 #include "bochs_vbe.h"
 #include "virtio_gpu.h"
 
-namespace customos::drivers::gpu
+namespace duetos::drivers::gpu
 {
 
 namespace
@@ -142,7 +142,7 @@ void RunVendorProbe(GpuInfo& g)
     // but the HV check makes the emulator-specific nature of this
     // register peek explicit and paves the way for real-hardware
     // vendor probes (Intel/AMD/NVIDIA) to land alongside it.
-    if (g.vendor_id == kVendorQemuBochs && ::customos::arch::IsEmulator())
+    if (g.vendor_id == kVendorQemuBochs && ::duetos::arch::IsEmulator())
     {
         DecodeBochsVbe(g);
         // Real driver-level query — talks to the device via the
@@ -318,7 +318,7 @@ void GpuInit()
     }
 }
 
-::customos::core::Result<void> GpuShutdown()
+::duetos::core::Result<void> GpuShutdown()
 {
     KLOG_TRACE_SCOPE("drivers/gpu", "GpuShutdown");
     const u64 dropped = g_gpu_count;
@@ -409,4 +409,4 @@ const char* NvidiaGenTag(u16 device_id)
     return "nvidia-pre-turing-or-unknown";
 }
 
-} // namespace customos::drivers::gpu
+} // namespace duetos::drivers::gpu

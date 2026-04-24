@@ -3,7 +3,7 @@
 #include "../../core/types.h"
 
 /*
- * CustomOS — Linux-ABI syscall subsystem (v0).
+ * DuetOS — Linux-ABI syscall subsystem (v0).
  *
  * Peer of subsystems/win32/. Lets statically-linked Linux ELF
  * binaries reach kernel services through the canonical x86_64
@@ -17,7 +17,7 @@
  *   - Exit:   `sysretq` — restores user CS/SS, RIP=RCX, RFLAGS=R11.
  *
  * The in-kernel dispatch table is separate from core::SyscallDispatch
- * (which is the native CustomOS table reached via int 0x80). A
+ * (which is the native DuetOS table reached via int 0x80). A
  * process's `abi_flavor` field (core/process.h) is set by the
  * loader at spawn time and determines which entry path its ring-3
  * task will use — the Win32 PE subsystem stays on int 0x80
@@ -29,12 +29,12 @@
  * during entry).
  */
 
-namespace customos::arch
+namespace duetos::arch
 {
 struct TrapFrame;
 }
 
-namespace customos::subsystems::linux
+namespace duetos::subsystems::linux
 {
 
 /// Program MSR_STAR / MSR_LSTAR / MSR_SFMASK / MSR_KERNEL_GS_BASE
@@ -93,4 +93,4 @@ i64 LinuxMprotect(u64 addr, u64 len, u64 prot);
 /// so the numbers stay honest when a new Do* handler lands.
 void LinuxLogAbiCoverage();
 
-} // namespace customos::subsystems::linux
+} // namespace duetos::subsystems::linux

@@ -1,4 +1,4 @@
-# CustomOS — architecture
+# DuetOS — architecture
 
 For the evolution story, see [`HISTORY.md`](HISTORY.md). This document is
 the layering model — what calls what, who owns which subsystem, and how
@@ -8,7 +8,7 @@ Windows binaries actually run.
 
 ## One stack, two ABIs
 
-CustomOS is **not** two parallel operating systems. It is one kernel
+DuetOS is **not** two parallel operating systems. It is one kernel
 with one set of drivers and one real implementation of each subsystem,
 reachable from ring 3 through two ABIs:
 
@@ -36,7 +36,7 @@ reachable from ring 3 through two ABIs:
                 │ rdi / rsi / rdx / r10 / r8 / r9 = args
                 ↓
 ┌──────────────────────────────────────────────────────────────┐
-│  Native CustomOS kernel                                         │
+│  Native DuetOS kernel                                         │
 │  One TCP stack. One compositor. One FS VFS. One registry.      │
 │  One GPU ICD. One scheduler. No "Windows parallels."           │
 └──────────────────────────────────────────────────────────────┘
@@ -82,7 +82,7 @@ Travels as follows:
    driver, which writes the TX ring and lets the NIC DMA out.
 
 There is one and only one TCP stack at step 4. A native program calling
-`socket()` via the CustomOS syscall directly hits the same stack at the
+`socket()` via the DuetOS syscall directly hits the same stack at the
 same entry point.
 
 The same pattern applies to:
@@ -227,7 +227,7 @@ cmake --build build/x86_64-debug --parallel $(nproc)
 
 # Boot in QEMU (requires qemu-system-x86 + OVMF + xorriso +
 # grub-common + grub-pc-bin + grub-efi-amd64-bin + mtools).
-CUSTOMOS_TIMEOUT=30 tools/qemu/run.sh build/x86_64-debug/customos.iso
+DUETOS_TIMEOUT=30 tools/qemu/run.sh build/x86_64-debug/duetos.iso
 ```
 
 The boot log comes out on stdout. On a healthy boot you see the DLL

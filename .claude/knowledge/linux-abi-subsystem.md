@@ -7,7 +7,7 @@
 ## Description
 
 Peer of `subsystems/win32/`. Runs Linux ELF binaries natively on
-CustomOS by routing the x86_64 `syscall` instruction into a
+DuetOS by routing the x86_64 `syscall` instruction into a
 dedicated in-kernel dispatcher, parallel to the native int-0x80
 path that Win32 PE binaries use.
 
@@ -43,7 +43,7 @@ kernel/subsystems/linux/
    - Call `LinuxSyscallDispatch(frame)`
 3. C++ dispatcher switches on `frame->rax`, populates
    `frame->rax` with the return value
-4. Entry stub pops TrapFrame → `iretq` (NOT sysret — CustomOS's
+4. Entry stub pops TrapFrame → `iretq` (NOT sysret — DuetOS's
    GDT is incompatible with sysret's selector arithmetic)
 
 ## Implemented syscalls (as of slice 19)
@@ -77,7 +77,7 @@ kernel/subsystems/linux/
 | 39  | getpid           | Real — returns Task ID                                        |
 | 60  | exit             | Real — calls SchedExit                                        |
 | 62  | kill             | Self-only — SchedExit; other pids return -ESRCH               |
-| 63  | uname            | Real — static CustomOS / customos / 0.1 / ...                 |
+| 63  | uname            | Real — static DuetOS / duetos / 0.1 / ...                 |
 | 72  | fcntl            | Real — F_DUPFD / F_GETFD / F_SETFD / F_GETFL / F_SETFL        |
 | 79  | getcwd           | Stub — returns "/" always                                     |
 | 80  | chdir            | Stub — returns 0 (no per-process cwd)                         |

@@ -4,7 +4,7 @@
 #include "panic.h"
 #include "random.h"
 
-namespace customos::core
+namespace duetos::core
 {
 
 namespace
@@ -421,4 +421,4 @@ void AuthSelfTest()
     KLOG_INFO("auth", "self-test OK");
 }
 
-} // namespace customos::core
+} // namespace duetos::core

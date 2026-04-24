@@ -4,7 +4,7 @@
 #include "../../core/types.h"
 
 /*
- * CustomOS — Audio driver shell, v0.
+ * DuetOS — Audio driver shell, v0.
  *
  * Discovery + classification for PCI audio controllers. Walks the
  * `pci::Device` cache for class 0x04 (multimedia controller) and
@@ -25,7 +25,7 @@
  * `PciEnumerate`.
  */
 
-namespace customos::drivers::audio
+namespace duetos::drivers::audio
 {
 
 inline constexpr u8 kPciClassMultimedia = 0x04;
@@ -69,9 +69,9 @@ void AudioInit();
 /// Drop every controller record + clear the live flag so the next
 /// `AudioInit` re-walks PCI. Always succeeds. MMIO mappings are
 /// retained (same v0 trade-off as drivers/net).
-::customos::core::Result<void> AudioShutdown();
+::duetos::core::Result<void> AudioShutdown();
 
 u64 AudioControllerCount();
 const AudioControllerInfo& AudioController(u64 index);
 
-} // namespace customos::drivers::audio
+} // namespace duetos::drivers::audio

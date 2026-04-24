@@ -179,7 +179,7 @@ and `grub-mkrescue` are installed on the dev host — see project index.)
 
 ```bash
 cmake --build build/x86_64-debug
-CUSTOMOS_TIMEOUT=10 tools/qemu/run.sh   # once QEMU is installed
+DUETOS_TIMEOUT=10 tools/qemu/run.sh   # once QEMU is installed
 ```
 
 Smoke checks:

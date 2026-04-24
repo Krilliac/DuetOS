@@ -4,12 +4,12 @@
 ; (via llvm-dlltool). The resulting .lib lets lld-link satisfy
 ; __imp_ExitProcess without needing the real kernel32.dll or
 ; the Windows SDK. The kernel32.dll reference in the produced
-; PE is a runtime concern — resolved by the CustomOS PE loader
+; PE is a runtime concern — resolved by the DuetOS PE loader
 ; against its internal stub table.
 
 LIBRARY kernel32.dll
 
-; v0 Win32 surface CustomOS's kernel32 stub page resolves.
+; v0 Win32 surface DuetOS's kernel32 stub page resolves.
 ; Every name listed here must have a matching entry in
 ; kernel/subsystems/win32/stubs.cpp:kStubsTable. Keep the
 ; two lists in sync or the import resolver will reject the

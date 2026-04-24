@@ -3,7 +3,7 @@
 #include "types.h"
 
 /*
- * CustomOS — Result<T, E> + ErrorCode — v0 exception-handling primitive.
+ * DuetOS — Result<T, E> + ErrorCode — v0 exception-handling primitive.
  *
  * CLAUDE.md mandates: "No RTTI, no exceptions in kernel code —
  * results go through an explicit Result<T, E> type." This file is
@@ -28,7 +28,7 @@
  *
  *   Result<u64> ReadCount() {
  *       if (...)
- *           return ::customos::core::Err{ErrorCode::IoError};
+ *           return ::duetos::core::Err{ErrorCode::IoError};
  *       return 42;
  *   }
  *
@@ -51,7 +51,7 @@
  * Context: usable in kernel and userland code alike. Arch-neutral.
  */
 
-namespace customos::core
+namespace duetos::core
 {
 
 enum class ErrorCode : u32
@@ -151,7 +151,7 @@ template <typename E> class Result<void, E>
 // line on COM1 otherwise.
 void ResultSelfTest();
 
-} // namespace customos::core
+} // namespace duetos::core
 
 // -------------------------------------------------------------------
 // Early-return helpers. Must live at the call site so they can use
@@ -167,7 +167,7 @@ void ResultSelfTest();
     {                                                                                                                  \
         auto _res_try = (expr);                                                                                        \
         if (!_res_try)                                                                                                 \
-            return ::customos::core::Err{_res_try.error()};                                                            \
+            return ::duetos::core::Err{_res_try.error()};                                                            \
     } while (0)
 
 // `RESULT_TRY_ASSIGN(decl, expr)` — evaluates `expr`, returns its
@@ -178,5 +178,5 @@ void ResultSelfTest();
 #define RESULT_TRY_ASSIGN(decl, expr)                                                                                  \
     auto _resta_##__LINE__ = (expr);                                                                                   \
     if (!_resta_##__LINE__)                                                                                            \
-        return ::customos::core::Err{_resta_##__LINE__.error()};                                                       \
+        return ::duetos::core::Err{_resta_##__LINE__.error()};                                                       \
     decl = _resta_##__LINE__.take()

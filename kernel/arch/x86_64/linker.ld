@@ -1,5 +1,5 @@
 /*
- * CustomOS x86_64 kernel linker script.
+ * DuetOS x86_64 kernel linker script.
  *
  * Layout:
  *   - Multiboot2 header and the 32-bit/64-bit boot trampoline (.text.boot,

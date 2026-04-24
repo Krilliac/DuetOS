@@ -7,7 +7,7 @@
 #include "klog.h"
 #include "panic.h"
 
-namespace customos::core
+namespace duetos::core
 {
 
 namespace
@@ -181,7 +181,7 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     arch::SerialWriteHex(user_stack_va);
     arch::SerialWrite("\n");
 
-    KBP_PROBE_V(::customos::debug::ProbeId::kProcessCreate, p->pid);
+    KBP_PROBE_V(::duetos::debug::ProbeId::kProcessCreate, p->pid);
     return p;
 }
 
@@ -210,7 +210,7 @@ void ProcessRelease(Process* p)
         return;
     }
 
-    KBP_PROBE_V(::customos::debug::ProbeId::kProcessDestroy, p->pid);
+    KBP_PROBE_V(::duetos::debug::ProbeId::kProcessDestroy, p->pid);
 
     arch::SerialWrite("[proc] destroy pid=");
     arch::SerialWriteHex(p->pid);
@@ -260,7 +260,7 @@ void RecordSandboxDenial(Cap cap)
     // probe log with thousands of identical lines per boot.
     if (ShouldLogDenial(p->sandbox_denials))
     {
-        KBP_PROBE_V(::customos::debug::ProbeId::kSandboxDenialCap, static_cast<u64>(cap));
+        KBP_PROBE_V(::duetos::debug::ProbeId::kSandboxDenialCap, static_cast<u64>(cap));
     }
 
     // Threshold-crossing: fire once at exactly kSandbox-
@@ -413,4 +413,4 @@ u64 ProcessResolveDllExportByBase(const Process* proc, u64 base_va, const char* 
     return 0;
 }
 
-} // namespace customos::core
+} // namespace duetos::core
