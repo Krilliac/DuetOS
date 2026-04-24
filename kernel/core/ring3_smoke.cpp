@@ -1870,7 +1870,42 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     // band.
     const u64 entropy = customos::core::RandomU64();
     const u64 aslr_delta = (entropy & 0x3FF) * (64ULL * 1024);
-    const PeLoadResult r = PeLoad(pe_bytes, pe_len, as, name, aslr_delta);
+
+    // Stage-2 slice 6 — pre-load customdll.dll into `as` BEFORE
+    // PeLoad runs so ResolveImports can consult its EAT. The
+    // DllImage lives on this stack frame for the duration of
+    // PeLoad; after ProcessCreate we copy it into the Process's
+    // permanent dll_images[] table. Only preload when the PE
+    // actually has imports (PeValidate == ImportsPresent) —
+    // freestanding PEs don't need it and would pay 3 frames for
+    // nothing.
+    DllImage preloaded_dll{};
+    bool have_preloaded_dll = false;
+    if (vs == PeStatus::ImportsPresent)
+    {
+        const DllLoadResult dll =
+            DllLoad(fs::generated::kBinCustomDllBytes, fs::generated::kBinCustomDllBytes_len, as, /*aslr_delta=*/0);
+        if (dll.status == DllLoadStatus::Ok)
+        {
+            preloaded_dll = dll.image;
+            have_preloaded_dll = true;
+            SerialWrite("[ring3] pre-loaded customdll.dll base=");
+            SerialWriteHex(preloaded_dll.base_va);
+            SerialWrite(" (pre-PeLoad — visible to ResolveImports)\n");
+        }
+        else
+        {
+            SerialWrite("[ring3] customdll DllLoad failed for \"");
+            SerialWrite(name);
+            SerialWrite("\" status=");
+            SerialWrite(DllLoadStatusName(dll.status));
+            SerialWrite(" — falling back to flat stubs only\n");
+        }
+    }
+
+    const DllImage* dll_array = have_preloaded_dll ? &preloaded_dll : nullptr;
+    const u64 dll_count = have_preloaded_dll ? 1 : 0;
+    const PeLoadResult r = PeLoad(pe_bytes, pe_len, as, name, aslr_delta, dll_array, dll_count);
     if (!r.ok)
     {
         AddressSpaceRelease(as);
@@ -1917,50 +1952,26 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
             AddressSpaceRelease(as);
             return 0;
         }
-        // Stage-2 slice 5 — pre-load customdll.dll into every
-        // Win32-imports process's address space and register it
-        // in the DLL image table. This is the first production
-        // use of DllLoad / ProcessRegisterDllImage: any PE that
-        // subsequently calls GetProcAddress(hmod, "CustomAdd"/
-        // "CustomMul"/"CustomVersion") will now get a real VA
-        // back instead of the slice-3 era 0.
-        //
-        // No existing ramfs PE imports from customdll.dll, so
-        // this is purely a capability — it doesn't change any
-        // current PE's behaviour. The preload doubles as a
-        // regression canary: if DllLoad starts failing (e.g. a
-        // frame-budget shortfall, a paging regression), every
-        // Win32-imports spawn logs the failure.
-        //
-        // A DllLoad failure here is non-fatal — we proceed with
-        // the spawn but log loudly. Once a real workload
-        // depends on customdll.dll exports, promote to fatal.
+        // Stage-2 slice 6 — the DLL was pre-loaded BEFORE PeLoad
+        // so ResolveImports could consult its EAT. Now that the
+        // Process exists, copy the DllImage into its permanent
+        // `dll_images[]` table so SYS_DLL_PROC_ADDRESS /
+        // ProcessResolveDllExportByBase can reach it too. The
+        // pre-PeLoad slot is a stack local that's about to go
+        // out of scope; the per-Process copy is the long-lived
+        // record.
+        if (have_preloaded_dll)
         {
-            const DllLoadResult dll =
-                DllLoad(fs::generated::kBinCustomDllBytes, fs::generated::kBinCustomDllBytes_len, as, /*aslr_delta=*/0);
-            if (dll.status == DllLoadStatus::Ok)
+            if (!ProcessRegisterDllImage(proc, preloaded_dll))
             {
-                if (!ProcessRegisterDllImage(proc, dll.image))
-                {
-                    SerialWrite("[ring3] customdll register failed for \"");
-                    SerialWrite(name);
-                    SerialWrite("\" (table full?)\n");
-                }
-                else
-                {
-                    SerialWrite("[ring3] pre-loaded customdll.dll base=");
-                    SerialWriteHex(dll.image.base_va);
-                    SerialWrite(" pid=");
-                    SerialWriteHex(proc->pid);
-                    SerialWrite("\n");
-                }
+                SerialWrite("[ring3] customdll register failed for \"");
+                SerialWrite(name);
+                SerialWrite("\" (table full?)\n");
             }
             else
             {
-                SerialWrite("[ring3] customdll DllLoad failed for \"");
-                SerialWrite(name);
-                SerialWrite("\" status=");
-                SerialWrite(DllLoadStatusName(dll.status));
+                SerialWrite("[ring3] registered customdll.dll pid=");
+                SerialWriteHex(proc->pid);
                 SerialWrite("\n");
             }
         }

@@ -1,6 +1,6 @@
 # PE EAT parser + DLL loader — stage 2 kickoff
 
-**Type:** Observation · **Status:** Active (stage-2 slices 1-5 landed) · **Last updated:** 2026-04-24
+**Type:** Observation · **Status:** Active (stage-2 slices 1-6 landed) · **Last updated:** 2026-04-24
 
 ## Context
 
@@ -483,6 +483,118 @@ Freestanding PEs (`hello.exe`) emit no `[dll-load]` /
 `[ring3] pre-loaded` lines — the `r.imports_resolved` gate
 keeps them untouched.
 
+## Slice 6 — `ResolveImports` consults the DLL table
+
+Slice 5 registered the DLL on `Process` AFTER `PeLoad` finished,
+so the IAT walk inside `ResolveImports` never saw it. Slice 6
+turns the order around: `SpawnPeFile` now `DllLoad`s
+`customdll.dll` BEFORE `PeLoad` and threads the resulting
+`DllImage` array through to `ResolveImports`, which consults
+the DLL table BEFORE falling through to the flat
+`Win32StubsLookup` / catch-all path.
+
+On hit, the IAT slot is patched with the DLL's export VA
+directly. No trampoline page. No `int 0x80` round-trip. The
+PE's indirect call lands straight in the DLL's code.
+
+### New PeLoad signature
+
+```cpp
+PeLoadResult PeLoad(const u8* file, u64 file_len, AddressSpace* as,
+                    const char* program_name, u64 aslr_delta,
+                    const DllImage* preloaded_dlls = nullptr,
+                    u64 preloaded_dll_count = 0);
+```
+
+The defaulted tail keeps every prior call site source-
+compatible: only `SpawnPeFile` passes a real array today.
+
+### New helper in pe_loader.cpp (anon namespace)
+
+```cpp
+bool TryResolveViaPreloadedDlls(const char* dll_name, const char* fn_name,
+                                const DllImage* dlls, u64 count, u64* out_va);
+```
+
+Walks the array, matches the import's `dll_name` case-insensitively
+against each DLL's embedded Export Directory name, looks up
+`fn_name` via `PeExportLookupName`. Returns the absolute VA on
+hit (= `base_va + export.rva`), `false` on miss.
+Forwarder exports: skipped silently, falls through to the
+flat stubs — forwarder chasing still deferred.
+
+### ResolveImports walk — new order
+
+```text
+for each import {dll, fn}:
+    stub_va = 0
+    if TryResolveViaPreloadedDlls(dll, fn, ...):
+        # Direct-to-DLL path (slice 6).
+        # [pe-resolve] via-dll customdll.dll!CustomAdd -> 0x10001000
+    elif Win32StubsLookupKind(dll, fn, ...):
+        # Flat stubs path — existing batches 0-65.
+    else:
+        # Catch-all: miss-logger trampoline or data landing pad.
+    patch IAT slot at (image_base + first_thunk + fn_idx*8) = stub_va
+```
+
+A DLL-resolved import is never a no-op shim, so the familiar
+`[pe-resolve] import resolved to NO-OP stub` Warn line stays
+quiet for those slots.
+
+### SpawnPeFile order-of-operations (before → after slice 6)
+
+| Step | Before slice 6 | After slice 6 |
+|---|---|---|
+| AddressSpaceCreate | 1 | 1 |
+| DllLoad customdll | — (or: 7, post-ProcessCreate in slice 5) | 2 (pre-PeLoad) |
+| PeLoad | 2 | 3 (now carries the DLL array) |
+| ProcessCreate | 3 | 4 |
+| Win32HeapInit | 4 | 5 |
+| ProcessRegisterDllImage | 5 (slice 5) | 6 (copies the slice-2 stack local) |
+
+The DllImage lives on SpawnPeFile's stack frame for the
+duration of the call; `ProcessRegisterDllImage` copies the
+struct into the Process's permanent `dll_images[]` slot, so
+the stack local can go out of scope safely on return.
+
+### Why only customdll.dll today?
+
+The order-of-operations plumbing is generic — `preloaded_dlls`
+is an array, not a single DLL. Slice 6 only populates one
+entry because that's all we have a blob for. Adding more
+fixtures is purely a build-system task: drop a new
+`userland/libs/X/` + `tools/build-X.sh` + `CMake` entry, then
+extend the pre-PeLoad block in `SpawnPeFile` to DllLoad
+every blob before building the array.
+
+### Behavioural delta on existing PEs
+
+None. `customdll.dll` exports `CustomAdd` / `CustomMul` /
+`CustomVersion`; no existing ramfs PE (hello_winapi,
+thread_stress, syscall_stress, windows-kill) imports from
+`customdll.dll`, so `TryResolveViaPreloadedDlls` misses for
+every import and the flat-stubs path runs exactly as before.
+
+The path is provably live: add a PE that imports
+`CustomAdd`, watch the boot log for:
+
+```
+[pe-resolve] via-dll customdll.dll!CustomAdd -> 0x10001000
+```
+
+### Next slice candidates
+
+- **Retire kernel32-via-DLL**: write a real `userland/libs/kernel32/`
+  that provides a handful of entry points (e.g. `GetTickCount`,
+  `Sleep`) as native code. When lld-linked as a DLL, PEs that
+  import those names will resolve via the DLL path instead of
+  the flat stubs page — the first genuine retirement of
+  `kStubsTable` entries.
+- **Forwarder chasing**: populate the `forwarder` branch of
+  `TryResolveViaPreloadedDlls` — when an entry is a forwarder,
+  parse `"Dll.Func"`, look up that DLL in the array, recurse.
+
 ## Boot-time visibility
 
 `PeReport` now appends an `exports:` block to the diagnostic it
@@ -512,6 +624,9 @@ first real DLL embedded in ramfs will light up the full dump:
    real stub at `kOffGetProcAddressReal`.
 4. ~~Preload customdll.dll.~~ **Landed in slice 5** —
    every Win32-imports spawn maps + registers the DLL.
+5. ~~ResolveImports consults DLL table.~~ **Landed in slice 6** —
+   PeLoad accepts a DllImage array; SpawnPeFile loads
+   customdll pre-PeLoad; direct-to-DLL IAT patching.
 3. **Recursive import resolution.** Walk the DLL's own Import
    Directory, look up each target DLL in the table (load if
    absent, detect circular dependencies), then patch the DLL's

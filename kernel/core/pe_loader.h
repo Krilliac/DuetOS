@@ -1,5 +1,6 @@
 #pragma once
 
+#include "dll_loader.h"
 #include "types.h"
 
 namespace customos::mm
@@ -147,8 +148,19 @@ struct PeLoadResult
 /// responsible for not picking a delta that pushes the image into
 /// reserved VA regions (stack at 0x7FFF0000, win32 heap at
 /// 0x50000000, etc.).
+///
+/// Stage-2 slice 6 — `preloaded_dlls` / `preloaded_dll_count`:
+/// optional array of DLL images the caller has ALREADY loaded
+/// into `as` via `DllLoad`. ResolveImports consults this array
+/// BEFORE the flat `Win32StubsLookup` table: for every
+/// {dll_name, fn_name} import, if a preloaded DLL matches the
+/// import's dll_name (case-insensitive) and exports fn_name,
+/// the IAT slot is patched with the DLL's export VA directly —
+/// bypassing the trampoline page. Misses fall through to
+/// Win32StubsLookup so existing PEs are unaffected. Pass
+/// nullptr / 0 to disable (the pre-slice-6 behaviour).
 PeLoadResult PeLoad(const u8* file, u64 file_len, customos::mm::AddressSpace* as, const char* program_name,
-                    u64 aslr_delta);
+                    u64 aslr_delta, const DllImage* preloaded_dlls = nullptr, u64 preloaded_dll_count = 0);
 
 /// Transfer any (IAT-slot-VA, function-name) pairs the loader
 /// staged for catch-all imports during the most recent PeLoad
