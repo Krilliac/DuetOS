@@ -149,6 +149,22 @@ set +e
     /export:IsValidCodePage \
     /export:MultiByteToWideChar \
     /export:WideCharToMultiByte \
+    /export:TlsAlloc \
+    /export:TlsFree \
+    /export:TlsGetValue \
+    /export:TlsSetValue \
+    /export:CreateMutexW \
+    /export:CreateMutexA \
+    /export:ReleaseMutex \
+    /export:CreateEventW \
+    /export:CreateEventA \
+    /export:SetEvent \
+    /export:ResetEvent \
+    /export:CreateSemaphoreW \
+    /export:CreateSemaphoreA \
+    /export:ReleaseSemaphore \
+    /export:WaitForSingleObject \
+    /export:WaitForSingleObjectEx \
     /out:"${DLL}" \
     "${OBJ}" 2>&1 | grep -v "align specified without /driver"
 LINK_RC=${PIPESTATUS[0]}

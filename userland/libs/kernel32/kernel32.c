@@ -1034,3 +1034,178 @@ __declspec(dllexport) int WideCharToMultiByte(UINT codepage, DWORD dwFlags, cons
         lpMultiByteStr[i] = (char) (lpWideCharStr[i] & 0xFF);
     return copy;
 }
+
+/* ------------------------------------------------------------------
+ * TLS slots (slice 21)
+ *
+ * SYS_TLS_ALLOC = 34 / FREE = 35 / GET = 36 / SET = 37.
+ * Per-process TLS table backs all four. TLS_OUT_OF_INDEXES =
+ * 0xFFFFFFFF returned on alloc failure / invalid slot.
+ * ------------------------------------------------------------------ */
+
+__declspec(dllexport) DWORD TlsAlloc(void)
+{
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long) 34) : "memory");
+    /* Kernel returns u32(-1) on failure; pass through. */
+    return (DWORD) rv;
+}
+
+__declspec(dllexport) BOOL TlsFree(DWORD slot)
+{
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long) 35), "D"((long long) slot) : "memory");
+    return rv == 0 ? 1 : 0;
+}
+
+__declspec(dllexport) void* TlsGetValue(DWORD slot)
+{
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long) 36), "D"((long long) slot) : "memory");
+    return (void*) rv;
+}
+
+__declspec(dllexport) BOOL TlsSetValue(DWORD slot, void* value)
+{
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long) 37), "D"((long long) slot), "S"((long long) value)
+                     : "memory");
+    return rv == 0 ? 1 : 0;
+}
+
+/* ------------------------------------------------------------------
+ * Win32 sync primitives — handle-based (slice 21)
+ *
+ * Kernel state lives in Process tables (mutex, event,
+ * semaphore, thread). Handles are kWin32{Mutex,Event,Sem,Thread}
+ * Base + slot index. Each Create/Release/Wait routes to the
+ * matching SYS_* call.
+ * ------------------------------------------------------------------ */
+
+__declspec(dllexport) HANDLE CreateMutexW(void* sec, BOOL bInitialOwner, const wchar_t16* name)
+{
+    (void) sec;
+    (void) name;
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long) 25), "D"((long long) bInitialOwner) : "memory");
+    return (HANDLE) rv;
+}
+
+__declspec(dllexport) HANDLE CreateMutexA(void* sec, BOOL bInitialOwner, const char* name)
+{
+    (void) name;
+    return CreateMutexW(sec, bInitialOwner, (const wchar_t16*) 0);
+}
+
+__declspec(dllexport) BOOL ReleaseMutex(HANDLE h)
+{
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long) 27), "D"((long long) h) : "memory");
+    return rv == 0 ? 1 : 0;
+}
+
+__declspec(dllexport) HANDLE CreateEventW(void* sec, BOOL bManualReset, BOOL bInitialState, const wchar_t16* name)
+{
+    (void) sec;
+    (void) name;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long) 30), "D"((long long) bManualReset), "S"((long long) bInitialState)
+                     : "memory");
+    return (HANDLE) rv;
+}
+
+__declspec(dllexport) HANDLE CreateEventA(void* sec, BOOL bManualReset, BOOL bInitialState, const char* name)
+{
+    (void) name;
+    return CreateEventW(sec, bManualReset, bInitialState, (const wchar_t16*) 0);
+}
+
+__declspec(dllexport) BOOL SetEvent(HANDLE h)
+{
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long) 31), "D"((long long) h) : "memory");
+    return rv == 0 ? 1 : 0;
+}
+
+__declspec(dllexport) BOOL ResetEvent(HANDLE h)
+{
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long) 32), "D"((long long) h) : "memory");
+    return rv == 0 ? 1 : 0;
+}
+
+__declspec(dllexport) HANDLE CreateSemaphoreW(void* sec, long initial, long maximum, const wchar_t16* name)
+{
+    (void) sec;
+    (void) name;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long) 51), "D"((long long) initial), "S"((long long) maximum)
+                     : "memory");
+    return (HANDLE) rv;
+}
+
+__declspec(dllexport) HANDLE CreateSemaphoreA(void* sec, long initial, long maximum, const char* name)
+{
+    (void) name;
+    return CreateSemaphoreW(sec, initial, maximum, (const wchar_t16*) 0);
+}
+
+__declspec(dllexport) BOOL ReleaseSemaphore(HANDLE h, long releaseCount, long* lpPreviousCount)
+{
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long) 52), "D"((long long) h), "S"((long long) releaseCount)
+                     : "memory");
+    if (lpPreviousCount != (long*) 0)
+        *lpPreviousCount = 0; /* v0 doesn't track previous count. */
+    return rv == 0 ? 1 : 0;
+}
+
+/* ------------------------------------------------------------------
+ * WaitForSingleObject — dispatch by handle range
+ *
+ * Mutex (0x200..0x207)    -> SYS_MUTEX_WAIT (26)
+ * Event (0x300..0x307)    -> SYS_EVENT_WAIT (33)
+ * Semaphore (0x500..0x507) -> SYS_SEM_WAIT (53)
+ * Thread (0x400..0x407)   -> SYS_THREAD_WAIT (54)
+ * Anything else            -> WAIT_OBJECT_0 (0) — pseudo-signal
+ *                             (matches the flat-stub fallback)
+ * ------------------------------------------------------------------ */
+
+#define WAIT_OBJECT_0 0u
+#define WAIT_TIMEOUT  0x102u
+
+__declspec(dllexport) DWORD WaitForSingleObject(HANDLE h, DWORD timeout_ms)
+{
+    unsigned long long handle = (unsigned long long) h;
+    long long rv;
+    long long syscall_num;
+    if (handle >= 0x200 && handle < 0x208)
+        syscall_num = 26; /* SYS_MUTEX_WAIT */
+    else if (handle >= 0x300 && handle < 0x308)
+        syscall_num = 33; /* SYS_EVENT_WAIT */
+    else if (handle >= 0x500 && handle < 0x508)
+        syscall_num = 53; /* SYS_SEM_WAIT */
+    else if (handle >= 0x400 && handle < 0x408)
+        syscall_num = 54; /* SYS_THREAD_WAIT */
+    else
+        return WAIT_OBJECT_0; /* Unknown handle — pseudo-signal. */
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"(syscall_num), "D"((long long) h), "S"((long long) timeout_ms)
+                     : "memory");
+    return (DWORD) rv;
+}
+
+__declspec(dllexport) DWORD WaitForSingleObjectEx(HANDLE h, DWORD timeout_ms, BOOL bAlertable)
+{
+    (void) bAlertable; /* APCs not supported in v0. */
+    return WaitForSingleObject(h, timeout_ms);
+}
