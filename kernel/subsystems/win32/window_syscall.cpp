@@ -12,6 +12,7 @@
 #include "../../mm/kheap.h"
 #include "../../mm/paging.h"
 #include "../../sched/sched.h"
+#include "gdi_objects.h"
 
 namespace duetos::subsystems::win32
 {
@@ -714,19 +715,48 @@ void DoGdiTextOut(arch::TrapFrame* frame)
         }
         text[copy_len] = '\0';
     }
-    CompositorLock();
-    const u32 h_comp = HwndToCompositorHandleForCaller(frame->rdi, proc->pid);
+    // Dispatch by HDC handle tag — memDC target paints the glyphs
+    // into the selected bitmap (8x8 font), otherwise treat the HDC
+    // as an HWND and record a TextOut display-list primitive.
+    const i32 x = static_cast<i32>(frame->rsi);
+    const i32 y = static_cast<i32>(frame->rdx);
+    const u32 rgb = ColorRefToRgb(frame->r9);
+    const u64 hdc = frame->rdi;
+    const u64 tag = hdc & kGdiTagMask;
     bool ok = false;
-    if (h_comp != kWindowInvalid)
+    if (tag == kGdiTagMemDC)
     {
-        const i32 x = static_cast<i32>(frame->rsi);
-        const i32 y = static_cast<i32>(frame->rdx);
-        WindowClientTextOut(h_comp, x, y, text, ColorRefToRgb(frame->r9));
-        const Theme& theme = ThemeCurrent();
-        DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
-        ok = true;
+        MemDC* dc = GdiLookupMemDC(hdc);
+        if (dc != nullptr && dc->selected_bitmap != 0)
+        {
+            Bitmap* bmp = GdiLookupBitmap(dc->selected_bitmap);
+            if (bmp != nullptr)
+            {
+                // For memDC targets the syscall's r9 carries the
+                // TextOutA fallback colour (white from the IAT stub)
+                // which we ignore in favour of the DC's SetTextColor
+                // state. bk_mode=OPAQUE fills the glyph cell
+                // background with bk_color; TRANSPARENT leaves it
+                // unchanged.
+                const bool opaque = (dc->bk_mode == kBkModeOpaque);
+                GdiPaintTextOnBitmap(bmp, x, y, text, dc->text_color, dc->bk_color, opaque);
+                ok = true;
+            }
+        }
     }
-    CompositorUnlock();
+    else
+    {
+        CompositorLock();
+        const u32 h_comp = HwndToCompositorHandleForCaller(hdc, proc->pid);
+        if (h_comp != kWindowInvalid)
+        {
+            WindowClientTextOut(h_comp, x, y, text, rgb);
+            const Theme& theme = ThemeCurrent();
+            DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+            ok = true;
+        }
+        CompositorUnlock();
+    }
     frame->rax = ok ? 1 : 0;
 }
 
@@ -1400,18 +1430,40 @@ void DoGdiFillRectUser(arch::TrapFrame* frame)
     }
     const i32 w = r - x;
     const i32 h = b - y;
+    const u32 rgb = ColorRefToRgb(frame->rdx);
 
-    CompositorLock();
-    const u32 h_comp = HwndToCompositorHandleForCaller(frame->rdi, proc->pid);
+    // Dispatch by handle tag: memDC targets paint directly into
+    // the selected bitmap; window targets record a FillRect prim
+    // that the compositor replays.
+    const u64 hdc = frame->rdi;
+    const u64 tag = hdc & kGdiTagMask;
     bool ok = false;
-    if (h_comp != kWindowInvalid)
+    if (tag == kGdiTagMemDC)
     {
-        WindowClientFillRect(h_comp, x, y, w, h, ColorRefToRgb(frame->rdx));
-        const Theme& theme = ThemeCurrent();
-        DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
-        ok = true;
+        MemDC* dc = GdiLookupMemDC(hdc);
+        if (dc != nullptr && dc->selected_bitmap != 0)
+        {
+            Bitmap* bmp = GdiLookupBitmap(dc->selected_bitmap);
+            if (bmp != nullptr)
+            {
+                GdiPaintRectOnBitmap(bmp, x, y, w, h, rgb);
+                ok = true;
+            }
+        }
     }
-    CompositorUnlock();
+    else
+    {
+        CompositorLock();
+        const u32 h_comp = HwndToCompositorHandleForCaller(hdc, proc->pid);
+        if (h_comp != kWindowInvalid)
+        {
+            WindowClientFillRect(h_comp, x, y, w, h, rgb);
+            const Theme& theme = ThemeCurrent();
+            DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+            ok = true;
+        }
+        CompositorUnlock();
+    }
     frame->rax = ok ? 1 : 0;
 }
 

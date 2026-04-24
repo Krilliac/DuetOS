@@ -1017,6 +1017,34 @@ enum SyscallNumber : u64
     // non-stock brush. Stock brushes are a safe no-op. rax = 1/0.
     SYS_GDI_DELETE_OBJECT = 112,
 
+    // SYS_GDI_SET_TEXT_COLOR — SetTextColor on a memDC.
+    //   rdi = HDC, rsi = COLORREF (0x00BBGGRR).
+    //   rax = previous COLORREF. For window HDCs the call is a
+    //   round-trip: returns `rsi` unchanged so SetTextColor /
+    //   GetTextColor pairs keep their Win32 semantics, but the
+    //   window-DC value doesn't actually take effect anywhere.
+    SYS_GDI_SET_TEXT_COLOR = 114,
+
+    // SYS_GDI_SET_BK_COLOR — SetBkColor. Same shape as SET_TEXT_COLOR.
+    SYS_GDI_SET_BK_COLOR = 115,
+
+    // SYS_GDI_SET_BK_MODE — SetBkMode. rdi = HDC, rsi = mode
+    //   (1 = TRANSPARENT, 2 = OPAQUE). rax = previous mode.
+    SYS_GDI_SET_BK_MODE = 116,
+
+    // SYS_GDI_STRETCH_BLT_DC — Win32 StretchBlt (11-arg). `rdi`
+    // points at a user-stack struct of 11 u64 slots in this order:
+    //   +0x00 HDC hdcDst        +0x38 int src_x
+    //   +0x08 int dst_x         +0x40 int src_y
+    //   +0x10 int dst_y         +0x48 int src_w
+    //   +0x18 int dst_w         +0x50 int src_h
+    //   +0x20 int dst_h         +0x58 DWORD rop
+    //   +0x28 HDC hdcSrc
+    // Scales `src_w × src_h` down / up to `dst_w × dst_h` via
+    // nearest-neighbor sampling. Capped at `kWinBlitMaxPx` on the
+    // destination. SRCCOPY-equivalent; ROP ignored in v0.
+    SYS_GDI_STRETCH_BLT_DC = 117,
+
     // SYS_GDI_BITBLT_DC — Win32 BitBlt (9-arg). `rdi` points at a
     // user-stack-resident struct of 9 u64 slots in this order:
     //   +0x00  HDC   hdcDst

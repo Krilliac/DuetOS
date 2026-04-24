@@ -2,6 +2,7 @@
 
 #include "../../arch/x86_64/serial.h"
 #include "../../core/process.h"
+#include "../../drivers/video/font8x8.h"
 #include "../../drivers/video/framebuffer.h"
 #include "../../drivers/video/theme.h"
 #include "../../drivers/video/widget.h"
@@ -106,6 +107,14 @@ u64 GdiCreateCompatibleDC()
         {
             g_mem_dcs[i].alive = true;
             g_mem_dcs[i].selected_bitmap = 0;
+            // Win32 DC defaults: text = black, bk = white, bk_mode =
+            // OPAQUE. (Our boot-time compositor paints glyphs white
+            // on transparent, but the real Win32 default is the
+            // opposite — black on white opaque. Match Win32 so PEs
+            // that skip SetTextColor still render readably.)
+            g_mem_dcs[i].text_color = 0x00000000;
+            g_mem_dcs[i].bk_color = 0x00FFFFFF;
+            g_mem_dcs[i].bk_mode = kBkModeOpaque;
             return MakeHandle(kGdiTagMemDC, i);
         }
     }
@@ -169,6 +178,38 @@ u64 GdiGetStockObject(u32 index)
     return MakeHandle(kGdiTagBrush, index);
 }
 
+u32 GdiSetTextColor(u64 hdc, u32 rgb)
+{
+    MemDC* dc = GdiLookupMemDC(hdc);
+    if (dc == nullptr)
+        return rgb; // window-DC: round-trip the value
+    const u32 prev = dc->text_color;
+    dc->text_color = rgb;
+    return prev;
+}
+
+u32 GdiSetBkColor(u64 hdc, u32 rgb)
+{
+    MemDC* dc = GdiLookupMemDC(hdc);
+    if (dc == nullptr)
+        return rgb;
+    const u32 prev = dc->bk_color;
+    dc->bk_color = rgb;
+    return prev;
+}
+
+u8 GdiSetBkMode(u64 hdc, u8 mode)
+{
+    if (mode != kBkModeTransparent && mode != kBkModeOpaque)
+        return 0;
+    MemDC* dc = GdiLookupMemDC(hdc);
+    if (dc == nullptr)
+        return mode;
+    const u8 prev = dc->bk_mode;
+    dc->bk_mode = mode;
+    return prev;
+}
+
 u64 GdiSelectObject(u64 hdc, u64 hobj)
 {
     MemDC* dc = GdiLookupMemDC(hdc);
@@ -225,6 +266,117 @@ bool GdiDeleteObject(u64 hobj)
         return true;
     }
     return false;
+}
+
+// --- Bitmap paint helpers ----------------------------------------
+//
+// These routines write raw pixels into a bitmap's BGRA8888 buffer.
+// They're the "memDC" equivalent of the compositor's display-list
+// replay — same output, just landing in a guest-owned off-screen
+// buffer rather than the framebuffer.
+
+void GdiPaintRectOnBitmap(Bitmap* bmp, i32 x, i32 y, i32 w, i32 h, u32 rgb)
+{
+    if (bmp == nullptr || bmp->pixels == nullptr || w <= 0 || h <= 0)
+        return;
+    // Clip against bitmap extents. Use i64 math so `x + w` can't
+    // wrap for bad inputs. Negative starts are advanced to 0.
+    i64 x0 = x;
+    i64 y0 = y;
+    i64 x1 = static_cast<i64>(x) + w;
+    i64 y1 = static_cast<i64>(y) + h;
+    if (x0 < 0)
+        x0 = 0;
+    if (y0 < 0)
+        y0 = 0;
+    if (x1 > static_cast<i64>(bmp->width))
+        x1 = bmp->width;
+    if (y1 > static_cast<i64>(bmp->height))
+        y1 = bmp->height;
+    if (x1 <= x0 || y1 <= y0)
+        return;
+
+    const u32 stride = bmp->pitch / 4;
+    for (i64 yy = y0; yy < y1; ++yy)
+    {
+        u32* row = bmp->pixels + static_cast<u64>(yy) * stride;
+        for (i64 xx = x0; xx < x1; ++xx)
+            row[xx] = rgb;
+    }
+}
+
+void GdiPaintTextOnBitmap(Bitmap* bmp, i32 x, i32 y, const char* text, u32 fg, u32 bg, bool opaque)
+{
+    if (bmp == nullptr || bmp->pixels == nullptr || text == nullptr)
+        return;
+    using namespace duetos::drivers::video;
+    const u32 stride = bmp->pitch / 4;
+    i32 cur_x = x;
+    for (u32 i = 0; text[i] != '\0'; ++i)
+    {
+        if (cur_x + static_cast<i32>(kGlyphWidth) <= 0 || cur_x >= static_cast<i32>(bmp->width))
+            break;
+        const u8* glyph = Font8x8Lookup(text[i]);
+        for (u32 row = 0; row < kGlyphHeight; ++row)
+        {
+            const i32 py = y + static_cast<i32>(row);
+            if (py < 0 || py >= static_cast<i32>(bmp->height))
+                continue;
+            const u8 bits = glyph[row];
+            u32* dst_row = bmp->pixels + static_cast<u64>(py) * stride;
+            for (u32 col = 0; col < kGlyphWidth; ++col)
+            {
+                const i32 px = cur_x + static_cast<i32>(col);
+                if (px < 0 || px >= static_cast<i32>(bmp->width))
+                    continue;
+                const bool on = (bits & (0x80u >> col)) != 0;
+                if (on)
+                    dst_row[px] = fg;
+                else if (opaque)
+                    dst_row[px] = bg;
+            }
+        }
+        cur_x += static_cast<i32>(kGlyphWidth);
+    }
+}
+
+void GdiBlitIntoBitmap(Bitmap* bmp, i32 dst_x, i32 dst_y, const u32* src, u32 src_w, u32 src_h, u32 src_pitch_px)
+{
+    if (bmp == nullptr || bmp->pixels == nullptr || src == nullptr || src_w == 0 || src_h == 0)
+        return;
+    i64 dx0 = dst_x;
+    i64 dy0 = dst_y;
+    i64 dx1 = static_cast<i64>(dst_x) + src_w;
+    i64 dy1 = static_cast<i64>(dst_y) + src_h;
+    // Track the src offset implied by left/top clipping so we walk
+    // the correct source row even when dst_x/dst_y are negative.
+    i64 sx_off = 0;
+    i64 sy_off = 0;
+    if (dx0 < 0)
+    {
+        sx_off = -dx0;
+        dx0 = 0;
+    }
+    if (dy0 < 0)
+    {
+        sy_off = -dy0;
+        dy0 = 0;
+    }
+    if (dx1 > static_cast<i64>(bmp->width))
+        dx1 = bmp->width;
+    if (dy1 > static_cast<i64>(bmp->height))
+        dy1 = bmp->height;
+    if (dx1 <= dx0 || dy1 <= dy0)
+        return;
+
+    const u32 stride = bmp->pitch / 4;
+    for (i64 yy = dy0; yy < dy1; ++yy)
+    {
+        const u32* src_row = src + static_cast<u64>(yy - dy0 + sy_off) * src_pitch_px + static_cast<u64>(sx_off);
+        u32* dst_row = bmp->pixels + static_cast<u64>(yy) * stride;
+        for (i64 xx = dx0; xx < dx1; ++xx)
+            dst_row[xx] = src_row[xx - dx0];
+    }
 }
 
 // --- Syscall dispatchers -----------------------------------------
@@ -289,6 +441,31 @@ struct BitBltArgs
     u64 y1;
     u64 rop;
 };
+
+void DoGdiSetTextColor(arch::TrapFrame* frame)
+{
+    // rdi = HDC, rsi = COLORREF
+    const u32 cr = static_cast<u32>(frame->rsi);
+    const u32 rgb = ((cr & 0xFF) << 16) | (((cr >> 8) & 0xFF) << 8) | ((cr >> 16) & 0xFF);
+    const u32 prev_rgb = GdiSetTextColor(frame->rdi, rgb);
+    // Return value is a COLORREF (Win32 layout). Re-pack.
+    const u32 prev_cr = ((prev_rgb & 0xFF) << 16) | (((prev_rgb >> 8) & 0xFF) << 8) | ((prev_rgb >> 16) & 0xFF);
+    frame->rax = prev_cr;
+}
+
+void DoGdiSetBkColor(arch::TrapFrame* frame)
+{
+    const u32 cr = static_cast<u32>(frame->rsi);
+    const u32 rgb = ((cr & 0xFF) << 16) | (((cr >> 8) & 0xFF) << 8) | ((cr >> 16) & 0xFF);
+    const u32 prev_rgb = GdiSetBkColor(frame->rdi, rgb);
+    const u32 prev_cr = ((prev_rgb & 0xFF) << 16) | (((prev_rgb >> 8) & 0xFF) << 8) | ((prev_rgb >> 16) & 0xFF);
+    frame->rax = prev_cr;
+}
+
+void DoGdiSetBkMode(arch::TrapFrame* frame)
+{
+    frame->rax = GdiSetBkMode(frame->rdi, static_cast<u8>(frame->rsi));
+}
 
 void DoGdiBitBltDC(arch::TrapFrame* frame)
 {
@@ -376,18 +553,175 @@ void DoGdiBitBltDC(arch::TrapFrame* frame)
     }
     (void)args.rop; // SRCCOPY assumed in v0
 
-    // Destination must be a window HWND — in v0 a memory-DC-to-
-    // memory-DC blit would need us to also track the dest bitmap
-    // and write pixels back into it, which isn't plumbed yet.
+    // Destination can be either a window HWND (display-list Blit
+    // prim + compose) or a memDC with a selected bitmap (direct
+    // write into the bitmap buffer). Dispatch by handle tag.
     const u64 dst_tag = args.hdc_dst & kGdiTagMask;
     bool ok = false;
-    if (dst_tag == 0)
+    if (dst_tag == kGdiTagMemDC)
+    {
+        MemDC* dst_dc = GdiLookupMemDC(args.hdc_dst);
+        if (dst_dc != nullptr && dst_dc->selected_bitmap != 0)
+        {
+            Bitmap* dst_bmp = GdiLookupBitmap(dst_dc->selected_bitmap);
+            if (dst_bmp != nullptr)
+            {
+                GdiBlitIntoBitmap(dst_bmp, dst_x, dst_y, staging, static_cast<u32>(cx), static_cast<u32>(cy),
+                                  static_cast<u32>(cx));
+                ok = true;
+            }
+        }
+    }
+    else if (dst_tag == 0)
     {
         CompositorLock();
         const u32 h_comp = HwndToCompositorHandleForCaller(args.hdc_dst, proc->pid);
         if (h_comp != kWindowInvalid)
         {
             WindowClientBitBlt(h_comp, dst_x, dst_y, staging, static_cast<u32>(cx), static_cast<u32>(cy));
+            const Theme& theme = ThemeCurrent();
+            DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+            ok = true;
+        }
+        CompositorUnlock();
+    }
+
+    duetos::mm::KFree(staging);
+    frame->rax = ok ? 1 : 0;
+}
+
+// Packed 11-arg StretchBlt struct — same convention as BitBltArgs.
+struct StretchBltArgs
+{
+    u64 hdc_dst;
+    u64 dst_x;
+    u64 dst_y;
+    u64 dst_w;
+    u64 dst_h;
+    u64 hdc_src;
+    u64 src_x;
+    u64 src_y;
+    u64 src_w;
+    u64 src_h;
+    u64 rop;
+};
+
+void DoGdiStretchBltDC(arch::TrapFrame* frame)
+{
+    using namespace duetos::drivers::video;
+
+    duetos::core::Process* proc = duetos::core::CurrentProcess();
+    if (proc == nullptr)
+    {
+        frame->rax = 0;
+        return;
+    }
+    const u64 user_args = frame->rdi;
+    if (user_args == 0)
+    {
+        frame->rax = 0;
+        return;
+    }
+    StretchBltArgs args{};
+    if (!duetos::mm::CopyFromUser(&args, reinterpret_cast<const void*>(user_args), sizeof(args)))
+    {
+        frame->rax = 0;
+        return;
+    }
+
+    const i32 dst_x = static_cast<i32>(static_cast<u32>(args.dst_x));
+    const i32 dst_y = static_cast<i32>(static_cast<u32>(args.dst_y));
+    const i32 dst_w = static_cast<i32>(static_cast<u32>(args.dst_w));
+    const i32 dst_h = static_cast<i32>(static_cast<u32>(args.dst_h));
+    const i32 src_x = static_cast<i32>(static_cast<u32>(args.src_x));
+    const i32 src_y = static_cast<i32>(static_cast<u32>(args.src_y));
+    const i32 src_w = static_cast<i32>(static_cast<u32>(args.src_w));
+    const i32 src_h = static_cast<i32>(static_cast<u32>(args.src_h));
+
+    if (dst_w <= 0 || dst_h <= 0 || src_w <= 0 || src_h <= 0)
+    {
+        frame->rax = 0;
+        return;
+    }
+    if (static_cast<u64>(dst_w) * static_cast<u64>(dst_h) > kWinBlitMaxPx)
+    {
+        frame->rax = 0;
+        return;
+    }
+
+    // Source must be a memDC + selected bitmap.
+    MemDC* src_dc = GdiLookupMemDC(args.hdc_src);
+    if (src_dc == nullptr || src_dc->selected_bitmap == 0)
+    {
+        frame->rax = 0;
+        return;
+    }
+    Bitmap* src_bmp = GdiLookupBitmap(src_dc->selected_bitmap);
+    if (src_bmp == nullptr || src_bmp->pixels == nullptr)
+    {
+        frame->rax = 0;
+        return;
+    }
+    if (src_x < 0 || src_y < 0 || static_cast<u32>(src_x) + static_cast<u32>(src_w) > src_bmp->width ||
+        static_cast<u32>(src_y) + static_cast<u32>(src_h) > src_bmp->height)
+    {
+        frame->rax = 0;
+        return;
+    }
+
+    const u32 bytes = static_cast<u32>(dst_w) * static_cast<u32>(dst_h) * 4;
+    u32* staging = static_cast<u32*>(duetos::mm::KMalloc(bytes));
+    if (staging == nullptr)
+    {
+        frame->rax = 0;
+        return;
+    }
+
+    // Nearest-neighbor scale: for each dst pixel (ox, oy), sample
+    // src at `(src_x + ox * src_w / dst_w, src_y + oy * src_h /
+    // dst_h)`. Using u64 intermediates keeps the multiplication
+    // from overflowing for large src dimensions.
+    const u32 src_stride = src_bmp->pitch / 4;
+    const u32* src_rows = src_bmp->pixels;
+    for (i32 oy = 0; oy < dst_h; ++oy)
+    {
+        const u32 sy = static_cast<u32>(src_y) +
+                       static_cast<u32>((static_cast<u64>(oy) * static_cast<u64>(src_h)) / static_cast<u64>(dst_h));
+        const u32* src_row = src_rows + sy * src_stride;
+        u32* dst_row = staging + static_cast<u32>(oy) * static_cast<u32>(dst_w);
+        for (i32 ox = 0; ox < dst_w; ++ox)
+        {
+            const u32 sx = static_cast<u32>(src_x) +
+                           static_cast<u32>((static_cast<u64>(ox) * static_cast<u64>(src_w)) / static_cast<u64>(dst_w));
+            dst_row[ox] = src_row[sx];
+        }
+    }
+    (void)args.rop;
+
+    // Dispatch by dst handle tag — same shape as BitBlt.
+    const u64 dst_tag = args.hdc_dst & kGdiTagMask;
+    bool ok = false;
+    if (dst_tag == kGdiTagMemDC)
+    {
+        MemDC* dst_dc = GdiLookupMemDC(args.hdc_dst);
+        if (dst_dc != nullptr && dst_dc->selected_bitmap != 0)
+        {
+            Bitmap* dst_bmp = GdiLookupBitmap(dst_dc->selected_bitmap);
+            if (dst_bmp != nullptr)
+            {
+                GdiBlitIntoBitmap(dst_bmp, dst_x, dst_y, staging, static_cast<u32>(dst_w), static_cast<u32>(dst_h),
+                                  static_cast<u32>(dst_w));
+                ok = true;
+            }
+        }
+    }
+    else if (dst_tag == 0)
+    {
+        CompositorLock();
+        const u32 h_comp = HwndToCompositorHandleForCaller(args.hdc_dst, proc->pid);
+        if (h_comp != kWindowInvalid)
+        {
+            WindowClientBitBlt(h_comp, dst_x, dst_y, staging, static_cast<u32>(dst_w), static_cast<u32>(dst_h));
             const Theme& theme = ThemeCurrent();
             DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
             ok = true;

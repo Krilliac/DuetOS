@@ -57,10 +57,17 @@ inline constexpr u32 kMaxBrushes = 64;
 // a handful of <= window-sized bitmaps.
 inline constexpr u32 kMaxBitmapPixels = 1024 * 1024;
 
+// Background mode constants — Win32 SetBkMode values.
+inline constexpr u8 kBkModeTransparent = 1;
+inline constexpr u8 kBkModeOpaque = 2;
+
 struct MemDC
 {
     bool alive;
     u64 selected_bitmap; // HBITMAP handle (with tag) or 0 = none
+    u32 text_color;      // 0x00RRGGBB (unpacked from COLORREF on set)
+    u32 bk_color;        // 0x00RRGGBB
+    u8 bk_mode;          // kBkModeTransparent (default) or kBkModeOpaque
 };
 
 struct Bitmap
@@ -112,6 +119,31 @@ u64 GdiSelectObject(u64 hdc, u64 hobj); // returns previous selection (0 if none
 bool GdiDeleteDC(u64 hdc);
 bool GdiDeleteObject(u64 hobj); // works on any GDI object kind
 
+// Bitmap paint helpers. Each writes into the bitmap's pixel buffer
+// (not any display list) with its own clipping; callers pass the
+// already-looked-up Bitmap*. Source rects from user land must be
+// bounds-checked BEFORE calling — these helpers clip to the
+// bitmap extents but do not reject arbitrary inputs.
+void GdiPaintRectOnBitmap(Bitmap* bmp, i32 x, i32 y, i32 w, i32 h, u32 rgb);
+
+/// Paint NUL-terminated ASCII into `bmp` using the 8x8 bitmap font.
+/// `fg` inks glyph pixels; `bg` paints the glyph cell background if
+/// `opaque` is true. Stops at the first NUL or when the next glyph
+/// cell would exit the bitmap horizontally.
+void GdiPaintTextOnBitmap(Bitmap* bmp, i32 x, i32 y, const char* text, u32 fg, u32 bg, bool opaque);
+
+/// Copy `src_w × src_h` BGRA pixels from `src` into `bmp` at
+/// `(dst_x, dst_y)`. `src_pitch_px` is the source stride in pixels
+/// (allowing a clipped subrect of a larger source).
+void GdiBlitIntoBitmap(Bitmap* bmp, i32 dst_x, i32 dst_y, const u32* src, u32 src_w, u32 src_h, u32 src_pitch_px);
+
+// DC colour state (memDC only in v0; window-DC variants are no-op
+// pass-throughs that return the supplied value so
+// SetTextColor/GetTextColor round-trips don't break).
+u32 GdiSetTextColor(u64 hdc, u32 rgb); // returns previous
+u32 GdiSetBkColor(u64 hdc, u32 rgb);   // returns previous
+u8 GdiSetBkMode(u64 hdc, u8 mode);     // returns previous
+
 // Syscall dispatchers.
 void DoGdiCreateCompatibleDC(arch::TrapFrame* frame);
 void DoGdiCreateCompatibleBitmap(arch::TrapFrame* frame);
@@ -121,5 +153,9 @@ void DoGdiSelectObject(arch::TrapFrame* frame);
 void DoGdiDeleteDC(arch::TrapFrame* frame);
 void DoGdiDeleteObject(arch::TrapFrame* frame);
 void DoGdiBitBltDC(arch::TrapFrame* frame);
+void DoGdiStretchBltDC(arch::TrapFrame* frame);
+void DoGdiSetTextColor(arch::TrapFrame* frame);
+void DoGdiSetBkColor(arch::TrapFrame* frame);
+void DoGdiSetBkMode(arch::TrapFrame* frame);
 
 } // namespace duetos::subsystems::win32

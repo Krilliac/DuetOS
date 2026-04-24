@@ -1475,6 +1475,18 @@ void SyscallDispatch(arch::TrapFrame* frame)
     case SYS_GDI_BITBLT_DC:
         subsystems::win32::DoGdiBitBltDC(frame);
         return;
+    case SYS_GDI_STRETCH_BLT_DC:
+        subsystems::win32::DoGdiStretchBltDC(frame);
+        return;
+    case SYS_GDI_SET_TEXT_COLOR:
+        subsystems::win32::DoGdiSetTextColor(frame);
+        return;
+    case SYS_GDI_SET_BK_COLOR:
+        subsystems::win32::DoGdiSetBkColor(frame);
+        return;
+    case SYS_GDI_SET_BK_MODE:
+        subsystems::win32::DoGdiSetBkMode(frame);
+        return;
 
     case SYS_GFX_D3D_STUB:
     {

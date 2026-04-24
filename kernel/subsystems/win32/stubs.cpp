@@ -299,6 +299,13 @@ constexpr u32 kOffGdiDeleteDC = 0xD66;         // render/drivers — 11 bytes
 constexpr u32 kOffGdiDeleteObject = 0xD71;     // render/drivers — 11 bytes
 constexpr u32 kOffGdiBitBltDC = 0xD7C;         // render/drivers — 103 bytes
 
+// DC colour state setters.
+constexpr u32 kOffGdiSetTextColor = 0xDE3; // render/drivers — 14 bytes
+constexpr u32 kOffGdiSetBkColor = 0xDF1;   // render/drivers — 14 bytes
+constexpr u32 kOffGdiSetBkMode = 0xDFF;    // render/drivers — 14 bytes
+
+constexpr u32 kOffGdiStretchBltDC = 0xE0D; // render/drivers — 129 bytes
+
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
     // Windows x64 ABI: first arg (uExitCode) in RCX.
@@ -3414,10 +3421,71 @@ constexpr u8 kStubsBytes[] = {
     0xCD, 0x80,                         // 0xDDC int 0x80
     0x48, 0x83, 0xC4, 0x48,             // 0xDDE add rsp, 72
     0xC3,                               // 0xDE2 ret
+
+    // === DC colour state setters ================================
+
+    // --- SetTextColor (offset 0xDE3, 14 bytes) ------------------
+    // Win32: COLORREF SetTextColor(HDC=rcx, COLORREF=rdx).
+    // DuetOS: SYS_GDI_SET_TEXT_COLOR (114). rax = previous colour.
+    0x48, 0x89, 0xCF,             // 0xDE3 mov rdi, rcx     ; HDC
+    0x48, 0x89, 0xD6,             // 0xDE6 mov rsi, rdx     ; COLORREF
+    0xB8, 0x72, 0x00, 0x00, 0x00, // 0xDE9 mov eax, 114     ; SYS_GDI_SET_TEXT_COLOR
+    0xCD, 0x80,                   // 0xDEE int 0x80
+    0xC3,                         // 0xDF0 ret
+
+    // --- SetBkColor (offset 0xDF1, 14 bytes) --------------------
+    0x48, 0x89, 0xCF,             // 0xDF1 mov rdi, rcx     ; HDC
+    0x48, 0x89, 0xD6,             // 0xDF4 mov rsi, rdx     ; COLORREF
+    0xB8, 0x73, 0x00, 0x00, 0x00, // 0xDF7 mov eax, 115     ; SYS_GDI_SET_BK_COLOR
+    0xCD, 0x80,                   // 0xDFC int 0x80
+    0xC3,                         // 0xDFE ret
+
+    // --- SetBkMode (offset 0xDFF, 14 bytes) ---------------------
+    // Win32: int SetBkMode(HDC=rcx, int mode=edx). OPAQUE=2, TRANSPARENT=1.
+    0x48, 0x89, 0xCF,             // 0xDFF mov rdi, rcx     ; HDC
+    0x48, 0x89, 0xD6,             // 0xE02 mov rsi, rdx     ; mode
+    0xB8, 0x74, 0x00, 0x00, 0x00, // 0xE05 mov eax, 116     ; SYS_GDI_SET_BK_MODE
+    0xCD, 0x80,                   // 0xE0A int 0x80
+    0xC3,                         // 0xE0C ret
+
+    // --- StretchBlt (offset 0xE0D, 129 bytes) -------------------
+    // Win32: BOOL StretchBlt(HDC hdcDst=rcx, int xDst=edx,
+    //                        int yDst=r8d, int wDst=r9d,
+    //                        int hDst=[rsp+40], HDC hdcSrc=[rsp+48],
+    //                        int xSrc=[rsp+56], int ySrc=[rsp+64],
+    //                        int wSrc=[rsp+72], int hSrc=[rsp+80],
+    //                        DWORD rop=[rsp+88]).
+    // Pack 11 u64s into a stack-resident struct (88 B), pass
+    // pointer via rdi to SYS_GDI_STRETCH_BLT_DC (117). Stack args
+    // are read from [rsp+88+40 .. rsp+88+88] after the sub.
+    0x48, 0x83, 0xEC, 0x58,                         // 0xE0D sub rsp, 88
+    0x48, 0x89, 0x0C, 0x24,                         // 0xE11 mov [rsp+0], rcx   ; hdcDst
+    0x48, 0x89, 0x54, 0x24, 0x08,                   // 0xE15 mov [rsp+8], rdx   ; xDst
+    0x4C, 0x89, 0x44, 0x24, 0x10,                   // 0xE1A mov [rsp+16], r8   ; yDst
+    0x4C, 0x89, 0x4C, 0x24, 0x18,                   // 0xE1F mov [rsp+24], r9   ; wDst
+    0x48, 0x8B, 0x84, 0x24, 0x80, 0x00, 0x00, 0x00, // 0xE24 mov rax, [rsp+128] ; hDst
+    0x48, 0x89, 0x44, 0x24, 0x20,                   // 0xE2C mov [rsp+32], rax
+    0x48, 0x8B, 0x84, 0x24, 0x88, 0x00, 0x00, 0x00, // 0xE31 mov rax, [rsp+136] ; hdcSrc
+    0x48, 0x89, 0x44, 0x24, 0x28,                   // 0xE39 mov [rsp+40], rax
+    0x48, 0x8B, 0x84, 0x24, 0x90, 0x00, 0x00, 0x00, // 0xE3E mov rax, [rsp+144] ; xSrc
+    0x48, 0x89, 0x44, 0x24, 0x30,                   // 0xE46 mov [rsp+48], rax
+    0x48, 0x8B, 0x84, 0x24, 0x98, 0x00, 0x00, 0x00, // 0xE4B mov rax, [rsp+152] ; ySrc
+    0x48, 0x89, 0x44, 0x24, 0x38,                   // 0xE53 mov [rsp+56], rax
+    0x48, 0x8B, 0x84, 0x24, 0xA0, 0x00, 0x00, 0x00, // 0xE58 mov rax, [rsp+160] ; wSrc
+    0x48, 0x89, 0x44, 0x24, 0x40,                   // 0xE60 mov [rsp+64], rax
+    0x48, 0x8B, 0x84, 0x24, 0xA8, 0x00, 0x00, 0x00, // 0xE65 mov rax, [rsp+168] ; hSrc
+    0x48, 0x89, 0x44, 0x24, 0x48,                   // 0xE6D mov [rsp+72], rax
+    0x48, 0x8B, 0x84, 0x24, 0xB0, 0x00, 0x00, 0x00, // 0xE72 mov rax, [rsp+176] ; rop
+    0x48, 0x89, 0x44, 0x24, 0x50,                   // 0xE7A mov [rsp+80], rax
+    0x48, 0x89, 0xE7,                               // 0xE7F mov rdi, rsp
+    0xB8, 0x75, 0x00, 0x00, 0x00,                   // 0xE82 mov eax, 117       ; SYS_GDI_STRETCH_BLT_DC
+    0xCD, 0x80,                                     // 0xE87 int 0x80
+    0x48, 0x83, 0xC4, 0x58,                         // 0xE89 add rsp, 88
+    0xC3,                                           // 0xE8D ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0xDE3, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0xE8E, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -4977,7 +5045,7 @@ constexpr StubEntry kStubsTable[] = {
     // gdi32: drawing primitives — all boolean, return TRUE so the
     // caller's "draw succeeded" flag is set.
     {"gdi32.dll", "BitBlt", kOffGdiBitBltDC},
-    {"gdi32.dll", "StretchBlt", kOffReturnOne},
+    {"gdi32.dll", "StretchBlt", kOffGdiStretchBltDC},
     {"gdi32.dll", "MoveToEx", kOffReturnOne},
     {"gdi32.dll", "LineTo", kOffReturnOne},
     {"gdi32.dll", "Rectangle", kOffReturnOne},
@@ -4995,9 +5063,9 @@ constexpr StubEntry kStubsTable[] = {
     {"gdi32.dll", "ExtTextOutW", kOffReturnOne},
     {"gdi32.dll", "DrawTextA", kOffReturnOne},
     {"gdi32.dll", "DrawTextW", kOffReturnOne},
-    {"gdi32.dll", "SetBkMode", kOffReturnOne},
-    {"gdi32.dll", "SetBkColor", kOffReturnZero},
-    {"gdi32.dll", "SetTextColor", kOffReturnZero},
+    {"gdi32.dll", "SetBkMode", kOffGdiSetBkMode},
+    {"gdi32.dll", "SetBkColor", kOffGdiSetBkColor},
+    {"gdi32.dll", "SetTextColor", kOffGdiSetTextColor},
     {"gdi32.dll", "SetMapMode", kOffReturnOne},
     {"gdi32.dll", "SetTextAlign", kOffReturnZero},
 
