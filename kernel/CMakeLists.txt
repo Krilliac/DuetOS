@@ -473,6 +473,29 @@ add_custom_command(
 list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_NTDLL_HEADER}")
 
 # ----------------------------------------------------------------------------
+# Userland dbghelp.dll — stage-2 slice 25. 11 Sym* / StackWalk
+# / MiniDumpWriteDump no-ops; callers always check return.
+# ----------------------------------------------------------------------------
+set(CUSTOMOS_DBGHELP_SRC "${CMAKE_SOURCE_DIR}/userland/libs/dbghelp/dbghelp.c")
+set(CUSTOMOS_DBGHELP_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_dbghelp_dll.h")
+set(CUSTOMOS_DBGHELP_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-dbghelp-dll.sh")
+
+add_custom_command(
+    OUTPUT "${CUSTOMOS_DBGHELP_HEADER}"
+    COMMAND "${CUSTOMOS_DBGHELP_SCRIPT}"
+            "${CMAKE_SOURCE_DIR}"
+            "${CUSTOMOS_DBGHELP_HEADER}"
+    DEPENDS
+        "${CUSTOMOS_DBGHELP_SRC}"
+        "${CUSTOMOS_DBGHELP_SCRIPT}"
+        "${CUSTOMOS_EMBED_BLOB_SCRIPT}"
+    COMMENT "Compiling + embedding dbghelp.dll (Sym* no-ops)"
+    VERBATIM
+)
+
+list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_DBGHELP_HEADER}")
+
+# ----------------------------------------------------------------------------
 # Userland ucrtbase.dll — stage-2 slice 15. Retires the
 # UCRT runtime stubs: heap alloc (malloc/free/calloc/realloc
 # /_aligned_*), terminators (exit/_exit), CRT startup shims

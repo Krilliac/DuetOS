@@ -9,6 +9,7 @@
 #include "generated_customdll.h"
 #include "generated_customdll2.h"
 #include "generated_customdll_test.h"
+#include "generated_dbghelp_dll.h"
 #include "generated_kernel32_dll.h"
 #include "generated_msvcrt_dll.h"
 #include "generated_ntdll_dll.h"
@@ -1936,6 +1937,10 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         // Nt*; STATUS_NOT_IMPLEMENTED aliases centralise on
         // NtReturnNotImpl.
         {"ntdll.dll", fs::generated::kBinNtdllDllBytes, fs::generated::kBinNtdllDllBytes_len},
+        // Stage-2 slice 25: dbghelp.dll — 11 Sym* / StackWalk /
+        // MiniDumpWriteDump no-ops. Callers check returns; v0
+        // has no PDB parser or stack walker.
+        {"dbghelp.dll", fs::generated::kBinDbghelpDllBytes, fs::generated::kBinDbghelpDllBytes_len},
     };
     constexpr u64 kPreloadEntryCount = sizeof(preload_set) / sizeof(preload_set[0]);
     static_assert(kPreloadEntryCount <= kPreloadSlotCap, "Preload DLL list exceeds stack-local cap");
