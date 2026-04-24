@@ -755,6 +755,46 @@ void SyscallDispatch(arch::TrapFrame* frame)
         }
     }
 
+    case SYS_THREAD_WAIT:
+    {
+        const u64 handle = frame->rdi;
+        const u64 timeout_ms = frame->rsi & 0xFFFFFFFFu;
+        Process* proc = CurrentProcess();
+        if (proc == nullptr || handle < Process::kWin32ThreadBase ||
+            handle >= Process::kWin32ThreadBase + Process::kWin32ThreadCap)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        const u64 slot = handle - Process::kWin32ThreadBase;
+        const auto& th = proc->win32_threads[slot];
+        if (!th.in_use)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        constexpr u64 kInfinite = 0xFFFFFFFFu;
+        const u64 start = sched::SchedNowTicks();
+        const u64 deadline = (timeout_ms == kInfinite) ? u64(-1) : start + ((timeout_ms + 9) / 10);
+        for (;;)
+        {
+            if (sched::TaskIsDead(th.task))
+            {
+                frame->rax = 0; // WAIT_OBJECT_0
+                return;
+            }
+            if (timeout_ms != kInfinite && sched::SchedNowTicks() >= deadline)
+            {
+                frame->rax = 0x102; // WAIT_TIMEOUT
+                return;
+            }
+            if (timeout_ms == kInfinite)
+                sched::SchedYield();
+            else
+                sched::SchedSleepTicks(1);
+        }
+    }
+
     case SYS_WAIT_MULTI:
     {
         // rdi = count, rsi = user handle array, rdx = wait_all,

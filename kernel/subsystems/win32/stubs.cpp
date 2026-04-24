@@ -183,10 +183,14 @@ constexpr u32 kOffRaiseException = 0x9A4; // batch 53 — 9 bytes (noreturn)
 constexpr u32 kOffDecodePointer = 0x9AD;  // batch 53 — 4 bytes (identity)
 
 // === Batch 54: Semaphore family + upgraded WaitForSingleObject v3.
-constexpr u32 kOffCreateSemaphoreW = 0x9B1; // batch 54 — 27 bytes (saves rdi+rsi)
-constexpr u32 kOffReleaseSemaphore = 0x9CC; // batch 54 — 29 bytes (saves rdi+rsi)
-constexpr u32 kOffWaitForObj3 = 0x9E9;      // batch 54 — 94 bytes
-                                            // (v2 + semaphore range 0x500..0x507)
+constexpr u32 kOffCreateSemaphoreW = 0x9B1;             // batch 54 — 27 bytes (saves rdi+rsi)
+constexpr u32 kOffReleaseSemaphore = 0x9CC;             // batch 54 — 29 bytes (saves rdi+rsi)
+[[maybe_unused]] constexpr u32 kOffWaitForObj3 = 0x9E9; // batch 54 — 94 bytes
+                                                        // Retired in batch 57 — see kOffWaitForObj4.
+
+// === Batch 57: real thread-handle wait + 4-range WaitForSingleObject v4.
+constexpr u32 kOffWaitForObj4 = 0xA47; // batch 57 — 122 bytes
+                                       // (v3 + thread range 0x400..0x407 → SYS_THREAD_WAIT)
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -2654,10 +2658,74 @@ constexpr u8 kStubsBytes[] = {
     0x5E,                         // 0xA44 pop rsi
     0x5F,                         // 0xA45 pop rdi
     0xC3,                         // 0xA46 ret
+
+    // === Batch 57 =============================================
+
+    // --- WaitForSingleObject v4 (offset 0xA47, 122 bytes) -----
+    // v3 + a fourth range (0x400..0x407, thread handles) that
+    // dispatches to SYS_THREAD_WAIT. Now WaitForSingleObject on
+    // a CreateThread handle actually blocks until the thread
+    // exits rather than the v3 pseudo-signaled fast path.
+    //
+    // Dispatch order is still "cheapest first": mutex, event,
+    // thread, semaphore. Unknown handles fall through to the
+    // pseudo-signaled path for backward compatibility.
+    0x57,                               // 0xA47 push rdi
+    0x56,                               // 0xA48 push rsi
+    0x48, 0x89, 0xC8,                   // 0xA49 mov rax, rcx
+    0x48, 0x2D, 0x00, 0x02, 0x00, 0x00, // 0xA4C sub rax, 0x200
+    0x48, 0x83, 0xF8, 0x08,             // 0xA52 cmp rax, 8
+    0x72, 0x29,                         // 0xA56 jb .mutex (+41 -> 0xA81)
+    0x48, 0x2D, 0x00, 0x01, 0x00, 0x00, // 0xA58 sub rax, 0x100 (H - 0x300)
+    0x48, 0x83, 0xF8, 0x08,             // 0xA5E cmp rax, 8
+    0x72, 0x2D,                         // 0xA62 jb .event (+45 -> 0xA91)
+    0x48, 0x2D, 0x00, 0x01, 0x00, 0x00, // 0xA64 sub rax, 0x100 (H - 0x400)
+    0x48, 0x83, 0xF8, 0x08,             // 0xA6A cmp rax, 8
+    0x72, 0x31,                         // 0xA6E jb .thread (+49 -> 0xAA1)
+    0x48, 0x2D, 0x00, 0x01, 0x00, 0x00, // 0xA70 sub rax, 0x100 (H - 0x500)
+    0x48, 0x83, 0xF8, 0x08,             // 0xA76 cmp rax, 8
+    0x72, 0x35,                         // 0xA7A jb .sem (+53 -> 0xAB1)
+    // .pseudo: unknown handle -> WAIT_OBJECT_0
+    0x31, 0xC0, // 0xA7C xor eax, eax
+    0x5E,       // 0xA7E pop rsi
+    0x5F,       // 0xA7F pop rdi
+    0xC3,       // 0xA80 ret
+    // .mutex (offset 0xA81)
+    0x48, 0x89, 0xCF,             // 0xA81 mov rdi, rcx
+    0x48, 0x89, 0xD6,             // 0xA84 mov rsi, rdx
+    0xB8, 0x1A, 0x00, 0x00, 0x00, // 0xA87 mov eax, 26 (SYS_MUTEX_WAIT)
+    0xCD, 0x80,                   // 0xA8C int 0x80
+    0x5E,                         // 0xA8E pop rsi
+    0x5F,                         // 0xA8F pop rdi
+    0xC3,                         // 0xA90 ret
+    // .event (offset 0xA91)
+    0x48, 0x89, 0xCF,             // 0xA91 mov rdi, rcx
+    0x48, 0x89, 0xD6,             // 0xA94 mov rsi, rdx
+    0xB8, 0x21, 0x00, 0x00, 0x00, // 0xA97 mov eax, 33 (SYS_EVENT_WAIT)
+    0xCD, 0x80,                   // 0xA9C int 0x80
+    0x5E,                         // 0xA9E pop rsi
+    0x5F,                         // 0xA9F pop rdi
+    0xC3,                         // 0xAA0 ret
+    // .thread (offset 0xAA1)
+    0x48, 0x89, 0xCF,             // 0xAA1 mov rdi, rcx
+    0x48, 0x89, 0xD6,             // 0xAA4 mov rsi, rdx
+    0xB8, 0x36, 0x00, 0x00, 0x00, // 0xAA7 mov eax, 54 (SYS_THREAD_WAIT)
+    0xCD, 0x80,                   // 0xAAC int 0x80
+    0x5E,                         // 0xAAE pop rsi
+    0x5F,                         // 0xAAF pop rdi
+    0xC3,                         // 0xAB0 ret
+    // .sem (offset 0xAB1)
+    0x48, 0x89, 0xCF,             // 0xAB1 mov rdi, rcx
+    0x48, 0x89, 0xD6,             // 0xAB4 mov rsi, rdx
+    0xB8, 0x35, 0x00, 0x00, 0x00, // 0xAB7 mov eax, 53 (SYS_SEM_WAIT)
+    0xCD, 0x80,                   // 0xABC int 0x80
+    0x5E,                         // 0xABE pop rsi
+    0x5F,                         // 0xABF pop rdi
+    0xC3,                         // 0xAC0 ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0xA47, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0xAC1, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -2849,8 +2917,8 @@ constexpr StubEntry kStubsTable[] = {
     {"kernel32.dll", "CreateMutexW", kOffCreateMutexW},
     {"kernel32.dll", "CreateMutexA", kOffCreateMutexW},
     {"kernel32.dll", "CreateMutexExW", kOffCreateMutexW},     // ignores extra Ex args
-    {"kernel32.dll", "WaitForSingleObject", kOffWaitForObj3}, // batch 54 upgrade
-    {"kernel32.dll", "WaitForSingleObjectEx", kOffWaitForObj3},
+    {"kernel32.dll", "WaitForSingleObject", kOffWaitForObj4}, // batch 54 upgrade
+    {"kernel32.dll", "WaitForSingleObjectEx", kOffWaitForObj4},
     {"kernel32.dll", "ReleaseMutex", kOffReleaseMutex},
 
     // Batch 45 — real event handles. Replaces the kOffReturnOne
@@ -3565,8 +3633,8 @@ constexpr StubEntry kStubsTable[] = {
     {"kernelbase.dll", "VirtualFree", kOffVirtualFree},
     {"kernelbase.dll", "VirtualProtect", kOffVirtualProtect},
     {"kernelbase.dll", "CreateMutexW", kOffCreateMutexW},
-    {"kernelbase.dll", "WaitForSingleObject", kOffWaitForObj3},
-    {"kernelbase.dll", "WaitForSingleObjectEx", kOffWaitForObj3},
+    {"kernelbase.dll", "WaitForSingleObject", kOffWaitForObj4},
+    {"kernelbase.dll", "WaitForSingleObjectEx", kOffWaitForObj4},
     {"kernelbase.dll", "ReleaseMutex", kOffReleaseMutex},
     {"kernelbase.dll", "CreateEventW", kOffCreateEventReal},
     {"kernelbase.dll", "SetEvent", kOffSetEventReal},

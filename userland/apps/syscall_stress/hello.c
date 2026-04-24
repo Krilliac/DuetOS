@@ -322,6 +322,21 @@ int __stdcall _start(void)
         ExitProcess(12);
     }
 
+    // === Batch 57 coverage: WaitForSingleObject on a thread handle ===
+    // Both child threads have already completed (the WaitForMultipleObjects
+    // above returned only after both signaled + child code reached
+    // ExitThread). So a WaitForSingleObject on hA should return
+    // WAIT_OBJECT_0 essentially immediately via the thread-dead
+    // branch of SYS_THREAD_WAIT.
+    WriteString("[syscall-stress] main: WaitForSingleObject(thread, INFINITE)\n");
+    DWORD twrc = WaitForSingleObject(hA, INFINITE);
+    if (twrc != WAIT_OBJECT_0)
+    {
+        WriteString("[syscall-stress] FAIL thread-handle wait didn't return WAIT_OBJECT_0\n");
+        WriteHex64(twrc);
+        ExitProcess(21);
+    }
+
     // === Batch 53 coverage: Decode/Encode round-trip ===
     WriteString("[syscall-stress] main: Decode/Encode round-trip\n");
     void* p_in = (void*)0xDEADBEEFCAFEBABEULL;

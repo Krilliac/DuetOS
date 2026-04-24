@@ -561,6 +561,15 @@ enum SyscallNumber : u64
     // (0x102) on timeout, u64(-1) on bad handle. Dispatched by
     // the semaphore range in WaitForSingleObject v3.
     SYS_SEM_WAIT = 53,
+
+    // SYS_THREAD_WAIT: rdi = handle (Win32ThreadHandle range,
+    // 0x400..0x407), rsi = timeout_ms (0xFFFFFFFF = INFINITE).
+    // Poll-and-yield wait for the task behind the handle to
+    // reach TaskState::Dead. Returns 0 (WAIT_OBJECT_0) on exit,
+    // 0x102 (WAIT_TIMEOUT) on timeout, u64(-1) on bad handle.
+    // Dispatched by the thread range in WaitForSingleObject v4.
+    // Unprivileged — the caller owns the thread.
+    SYS_THREAD_WAIT = 54,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit
