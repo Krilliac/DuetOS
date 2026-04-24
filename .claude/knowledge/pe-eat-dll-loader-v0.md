@@ -1,6 +1,6 @@
 # PE EAT parser + DLL loader — stage 2 kickoff
 
-**Type:** Observation · **Status:** Active (stage-2 slices 1-29 landed; 15 userland DLLs shipped, ~317 flat-stub rows retired) · **Last updated:** 2026-04-24
+**Type:** Observation · **Status:** Active (stage-2 slices 1-33 landed; **29 userland DLLs shipped**, ~750+ exports, essentially full Win32 surface coverage) · **Last updated:** 2026-04-24
 
 ## Context
 
@@ -1149,6 +1149,128 @@ After slice 29, `kStubsTable` still has rows for:
   than actually calling; need the recursive-DLL-load work.
 
 Everything else is covered.
+
+## Slices 30-33 — expand depth + width
+
+Slices 10-29 built a breadth-first DLL surface. 30-33 went
+back and (a) deepened the two most-used DLLs (kernel32,
+ucrtbase) with real printf / file I/O / sscanf / stdlib;
+(b) shipped 14 more DLLs covering SEH, networking, crypto,
+UI, theming, version, setup, IP helper, user env, terminal
+services, DWM, SSPI; (c) closed out SEH helpers in
+vcruntime140 and ntdll.
+
+### Slice 30 — deep expansion of kernel32 + ucrtbase
+
+- **kernel32** (+32 exports): FindFirstFile/Next/Close (A+W),
+  CopyFile/MoveFile/DeleteFile (A+W), GetFileAttributes*,
+  CreateDirectory/RemoveDirectory (A+W), FlushFileBuffers,
+  GetTempPath/GetTempFileName (A+W), GetCurrentDirectoryA,
+  SetCurrentDirectory (A+W), CreateToolhelp32Snapshot,
+  Process32First/Next[W], OpenProcess,
+  GenerateConsoleCtrlEvent.
+- **ucrtbase** (+38 exports):
+  - `printf`/`snprintf`/`sprintf`/`vsnprintf`/`fprintf`/
+    `vprintf`/`vfprintf` — full width + pad + long/long-long/
+    size_t modifiers across `%d/i/u/x/X/p/s/c/%%`. 1 KiB
+    stack buffer.
+  - `__acrt_iob_func` + full `FILE*` API (fopen/fclose/fread/
+    fwrite/fflush/fputs/fputc/fgets/fgetc/fseek/ftell/feof/
+    ferror). stdout/stderr writes route to SYS_WRITE(fd=1).
+  - `strncmp`/`strncpy`/`strcat`/`strncat`/`_stricmp`/
+    `_strnicmp`.
+  - `abs`/`labs`/`llabs`.
+  - ctype: `isalpha`/`isdigit`/`isspace`/`isprint`/`isalnum`/
+    `toupper`/`tolower`.
+  - `qsort` (insertion sort) + `bsearch`.
+
+This single slice moves CustomOS from "PEs link and don't
+crash" to "PEs can actually print output and do basic CRT
+work."
+
+### Slice 31 — 8 more DLLs
+
+Shipped `ws2_32`, `wininet`, `winhttp`, `crypt32`,
+`comctl32`, `comdlg32`, `version`, `setupapi` — 77 new
+exports across tertiary Windows surface. All mostly
+error-reporting stubs (`WSAStartup -> WSAENETDOWN`,
+`Co*` / `Open*` return NULL, etc.) — real programs check
+return codes and gracefully fall back.
+
+### Slice 32 — SEH / unwind helpers
+
+Closes out the SEH surface deliberately deferred in slice
+10-29's "easy retirement" pass:
+- **vcruntime140** (+12): `__C_specific_handler` /
+  `__CxxFrameHandler3` / `__CxxFrameHandler4` return
+  ExceptionContinueSearch (1); `_CxxThrowException`,
+  `_purecall`, `__std_terminate`, `__CxxUnwind` all noreturn
+  (SYS_EXIT(3)); `__std_exception_copy` / `_destroy` no-op;
+  `__vcrt_InitializeCriticalSectionEx` inlines kernel32's
+  CS init. Also `memcmp` / `memchr`.
+- **ntdll** (+6): `RtlLookupFunctionEntry` / `RtlVirtualUnwind` /
+  `RtlCaptureContext` / `RtlCaptureStackBackTrace` / `RtlUnwind` /
+  `RtlUnwindEx`.
+
+Programs that throw C++ exceptions terminate immediately
+(same as flat stubs); programs that only CATCH with
+__try/__except fall through the "no match" path and continue.
+
+### Slice 33 — sscanf / stdlib + 6 more DLLs
+
+- **ucrtbase** (+9): `sscanf`/`vsscanf` with `%d/u/i/x/s/c/*`
+  + width + length mods (no FP, no char classes); `rand`/
+  `srand`; `getenv`/`_putenv`/`_putenv_s`; `_errno`.
+- Six more DLLs: `iphlpapi` (IP helper), `userenv` (user
+  profile), `wtsapi32` (terminal services), `dwmapi` (DWM),
+  `uxtheme` (visual styles), `secur32` (SSPI).
+
+### Final inventory (29 userland DLLs)
+
+| Tier | DLLs |
+|------|------|
+| Core Win32 | kernel32 (155), kernelbase (44 forwarders) |
+| CRT | vcruntime140 (15), msvcrt (8), ucrtbase (72), msvcp140 (23) |
+| NT subsystem | ntdll (114), dbghelp (11) |
+| Services / security | advapi32 (25), bcrypt (8), crypt32 (9), secur32 (6), wtsapi32 (6), userenv (7) |
+| Shell / COM / path | shell32 (13), shlwapi (16), ole32 (15), oleaut32 (5) |
+| UI stubs | user32 (73), gdi32 (44), comctl32 (8), comdlg32 (11), dwmapi (6), uxtheme (8) |
+| Multimedia / info | winmm (8), psapi (7), version (6), setupapi (7) |
+| Networking | ws2_32 (27), wininet (8), winhttp (7), iphlpapi (7) |
+| DirectX | d3d9 (2), d3d11 (2), d3d12 (3), dxgi (3) |
+| **Total** | **29 DLLs · ~760 exports** |
+
+Per-spawn frame cost: ~96 frames per Win32-imports PE. Well
+within `kFrameBudgetTrusted`'s 256.
+
+### What real programs will do now
+
+A mainstream MSVC-compiled Win32 PE that imports a typical
+closure (`kernel32` + `user32` + `gdi32` + `advapi32` +
+`ucrtbase` + `msvcp140` + `ntdll` + `vcruntime140` +
+`shlwapi` + `ws2_32` + `crypt32`) will:
+
+1. **Load successfully.** Every import resolves to a
+   userland VA via slice-6's via-DLL path.
+2. **Execute its CRT init cleanly.** _initterm / _cexit /
+   GetStdHandle / GetCommandLineW / __p___argc / etc. all
+   return sensible values.
+3. **Print to stdout via printf / WriteConsole / fputs.**
+4. **Call into user32/gdi32 without NULL-deref crashes**
+   — window creation fails gracefully (returns NULL); the
+   program's error path runs instead of the happy path.
+5. **Hit network / registry / COM / crypto calls that error
+   out with documented failure codes** — allowing graceful
+   fallback rather than SIGSEGV-on-undefined-import.
+
+**What still doesn't work:** Any program whose code path
+depends on successfully creating a window, opening a
+network socket, reading a registry key, or CoCreateInstance-
+ing a COM object will get stuck in its error path. Making
+any of those actually *succeed* is a multi-slice (often
+multi-year) effort — a real compositor for user32, an IP
+stack for ws2_32, a registry backend for advapi32, a COM
+runtime for ole32.
 
 ## Boot-time visibility
 
