@@ -192,6 +192,9 @@ constexpr u32 kOffReleaseSemaphore = 0x9CC;             // batch 54 — 29 bytes
 constexpr u32 kOffWaitForObj4 = 0xA47; // batch 57 — 122 bytes
                                        // (v3 + thread range 0x400..0x407 → SYS_THREAD_WAIT)
 
+// === Batch 58: real GetStartupInfo stub.
+constexpr u32 kOffGetStartupInfo = 0xAC1; // batch 58 — 24 bytes (zero-fill + cb=104)
+
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
     // Windows x64 ABI: first arg (uExitCode) in RCX.
@@ -2722,10 +2725,39 @@ constexpr u8 kStubsBytes[] = {
     0x5E,                         // 0xABE pop rsi
     0x5F,                         // 0xABF pop rdi
     0xC3,                         // 0xAC0 ret
+
+    // === Batch 58 =============================================
+
+    // --- GetStartupInfo{W,A} (offset 0xAC1, 24 bytes) ---------
+    // Win32: void GetStartupInfo{A,W}(LPSTARTUPINFO{A,W} p).
+    // STARTUPINFO is 104 bytes (both A and W) with cb at offset
+    // 0. v0 populates a zero-filled struct with cb = 104 and
+    // leaves every other field zero — programs that gate reads
+    // on dwFlags (= 0 → no STARTF_USESTDHANDLES, etc.) see a
+    // consistent "no startup info" state and don't read stale
+    // stack memory. Previously aliased to kOffCritSecNop which
+    // left the caller's buffer uninitialised — real Windows
+    // code crashes reading lpDesktop / hStdInput as a wild
+    // pointer.
+    //
+    // Win64: rdi is callee-saved; saved + restored around the
+    // rep stosq. rcx is caller-saved, but we pop it back into
+    // rcx after the rep stosq so [rcx] can write cb — cheaper
+    // than holding it in rsi.
+    0x57,                               // 0xAC1 push rdi
+    0x48, 0x89, 0xCF,                   // 0xAC2 mov rdi, rcx
+    0x51,                               // 0xAC5 push rcx
+    0x31, 0xC0,                         // 0xAC6 xor eax, eax
+    0xB9, 0x0D, 0x00, 0x00, 0x00,       // 0xAC8 mov ecx, 13  ; 104/8 qwords
+    0xF3, 0x48, 0xAB,                   // 0xACD rep stosq
+    0x59,                               // 0xAD0 pop rcx
+    0xC7, 0x01, 0x68, 0x00, 0x00, 0x00, // 0xAD1 mov dword [rcx], 104 (cb)
+    0x5F,                               // 0xAD7 pop rdi
+    0xC3,                               // 0xAD8 ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0xAC1, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0xAD9, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -3135,8 +3167,12 @@ constexpr StubEntry kStubsTable[] = {
     // Batch 51: GetProcessTimes / GetThreadTimes → zero-fill stubs.
     {"kernel32.dll", "GetProcessTimes", kOffGetProcessTimes},
     {"kernel32.dll", "GetThreadTimes", kOffGetProcessTimes}, // same shape
-    {"kernel32.dll", "GetStartupInfoW", kOffCritSecNop},
-    {"kernel32.dll", "GetStartupInfoA", kOffCritSecNop},
+    // Batch 58: GetStartupInfo{W,A} now zero-fill the caller's
+    // 104-byte STARTUPINFO and set cb = 104 (the nop previously
+    // here left the buffer uninitialised — callers read a wild
+    // pointer from lpDesktop / hStdInput and faulted).
+    {"kernel32.dll", "GetStartupInfoW", kOffGetStartupInfo},
+    {"kernel32.dll", "GetStartupInfoA", kOffGetStartupInfo},
     {"kernel32.dll", "VerSetConditionMask", kOffReturnZero},
     {"kernel32.dll", "VerifyVersionInfoW", kOffReturnOne},
     {"kernel32.dll", "VerifyVersionInfoA", kOffReturnOne},

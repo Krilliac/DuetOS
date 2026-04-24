@@ -36,3 +36,4 @@ EXPORTS
     TryAcquireSRWLockExclusive
     InitOnceInitialize
     InitOnceExecuteOnce
+    GetStartupInfoW

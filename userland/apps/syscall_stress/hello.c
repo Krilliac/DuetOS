@@ -155,6 +155,24 @@ __declspec(dllimport) unsigned char __stdcall TryAcquireSRWLockExclusive(PSRWLOC
 __declspec(dllimport) void __stdcall InitOnceInitialize(PINIT_ONCE);
 __declspec(dllimport) BOOL __stdcall InitOnceExecuteOnce(PINIT_ONCE, PINIT_ONCE_FN, void*, void**);
 
+typedef struct _STARTUPINFOW
+{
+    DWORD cb;
+    unsigned short* lpReserved;
+    unsigned short* lpDesktop;
+    unsigned short* lpTitle;
+    DWORD dwX, dwY;
+    DWORD dwXSize, dwYSize;
+    DWORD dwXCountChars, dwYCountChars;
+    DWORD dwFillAttribute;
+    DWORD dwFlags;
+    unsigned short wShowWindow;
+    unsigned short cbReserved2;
+    unsigned char* lpReserved2;
+    HANDLE hStdInput, hStdOutput, hStdError;
+} STARTUPINFOW;
+__declspec(dllimport) void __stdcall GetStartupInfoW(STARTUPINFOW* p);
+
 static HANDLE g_events[2];
 
 static void WriteString(const char* s)
@@ -409,6 +427,20 @@ int __stdcall _start(void)
     {
         WriteString("[syscall-stress] FAIL InitOnceExecuteOnce returned FALSE\n");
         ExitProcess(20);
+    }
+
+    // === Batch 58 coverage: GetStartupInfoW fills cb ===
+    WriteString("[syscall-stress] main: GetStartupInfoW\n");
+    STARTUPINFOW sui;
+    // Deliberately fill with 0xCC to detect real zeroing.
+    for (int i = 0; i < (int)sizeof(sui); ++i)
+        ((unsigned char*)&sui)[i] = 0xCC;
+    GetStartupInfoW(&sui);
+    if (sui.cb != 104 || sui.dwFlags != 0 || sui.lpDesktop != 0)
+    {
+        WriteString("[syscall-stress] FAIL GetStartupInfoW didn't zero-fill or set cb\n");
+        WriteHex64(sui.cb);
+        ExitProcess(22);
     }
 
     WriteString("[syscall-stress] main: PASS\n");
