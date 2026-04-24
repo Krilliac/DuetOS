@@ -403,6 +403,17 @@ void SyscallDispatch(arch::TrapFrame* frame)
         subsystems::win32::DoThreadCreate(frame);
         return;
 
+    case SYS_NT_INVOKE:
+    {
+        // Forward to the NT→Linux translator. The handler reads
+        // frame->rdi for the NT number + frame->rsi..r9 for NT-
+        // ABI arguments; its return value is the final NTSTATUS
+        // that goes back to the caller.
+        const auto t = subsystems::translation::NtTranslateToLinux(frame);
+        frame->rax = static_cast<u64>(t.rv);
+        return;
+    }
+
     case SYS_DEBUG_PRINT:
     {
         // rdi = user ptr to NUL-terminated ASCII string. Cap-gated

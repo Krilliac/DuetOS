@@ -60,6 +60,16 @@ KNOWN_MAPPINGS = {
     "NtReadVirtualMemory":         "SYS_READ",             # debug/probe path best-effort source
     "NtCreateSemaphore":           "SYS_EVENT_CREATE",     # v0 event object is closest sync primitive
     "NtReleaseSemaphore":          "SYS_EVENT_SET",        # release ≈ signal
+    # Batch 56 — NT→Linux fallback via SYS_NT_INVOKE. These NT
+    # calls don't have dedicated SYS_* numbers; the shim forwards
+    # them through the generic SYS_NT_INVOKE gateway, which routes
+    # into the NtTranslateToLinux translator. See
+    # translate.cpp::NtTranslateToLinux for the actual Linux
+    # primitives each of these falls back on.
+    "NtFlushBuffersFile":          "SYS_NT_INVOKE",        # linux:fsync
+    "NtGetTickCount":              "SYS_NT_INVOKE",        # linux:now_ns/ms
+    "NtGetCurrentProcessorNumber": "SYS_NT_INVOKE",        # synthetic:zero (BSP-only)
+    "NtTerminateThread":           "SYS_NT_INVOKE",        # linux:exit
     # NtAllocateVirtualMemory / NtFreeVirtualMemory now route to
     # SYS_VMAP / SYS_VUNMAP — page-grain semantics matching the
     # kernel32!VirtualAlloc trampoline (batch 28). The earlier

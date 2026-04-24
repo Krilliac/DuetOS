@@ -465,110 +465,49 @@ enum SyscallNumber : u64
     SYS_THREAD_CREATE = 45,
 
     // SYS_DEBUG_PRINT: rdi = user pointer to NUL-terminated ASCII
-    // string. No length arg — kernel scans up to
-    // kSyscallDebugPrintMax bytes for the terminator. Emits a
-    // single "[odbg] ..." line on the serial console. Returns 0
-    // always (void-shaped in user space). Cap-gated on
-    // kCapSerialConsole — the same gate SYS_WRITE uses for fd=1.
-    //
-    // Backs Win32 OutputDebugStringA. OutputDebugStringW converts
-    // UTF-16 → ASCII in a user stub before calling this syscall
-    // (or a future SYS_DEBUG_PRINTW).
+    // string. Emits "[odbg] ..." on serial. Cap-gated on
+    // kCapSerialConsole. Backs Win32 OutputDebugStringA.
     SYS_DEBUG_PRINT = 46,
 
     // SYS_MEM_STATUS: rdi = user pointer to a 64-byte Win32
-    // MEMORYSTATUSEX struct. Kernel populates the fields with a
-    // snapshot of the frame allocator's totals/free + a synthetic
-    // virtual-address-space figure derived from the process's
-    // mapped region count. Returns 0 on success, u64(-1) on
-    // bad user pointer or wrong struct size (dwLength).
-    //
-    // Backs Win32 GlobalMemoryStatusEx. Unprivileged — every
-    // process can observe its own memory envelope.
+    // MEMORYSTATUSEX struct. Populates from frame allocator
+    // stats. Backs Win32 GlobalMemoryStatusEx.
     SYS_MEM_STATUS = 47,
 
-    // SYS_WAIT_MULTI: rdi = count, rsi = user pointer to a
-    // count-sized array of Win32 handles (u64 each), rdx =
-    // bWaitAll (0 = any, 1 = all), r10 = timeout_ms
-    // (0xFFFFFFFF = INFINITE).
-    //
-    // Return values track Win32 WaitForMultipleObjects:
-    //   WAIT_OBJECT_0 + i (0 + 0..count-1) — handle i signaled
-    //                                         (wait-any) or all
-    //                                         handles signaled
-    //                                         (wait-all — returns
-    //                                         WAIT_OBJECT_0)
-    //   WAIT_TIMEOUT  (0x102)               — timeout elapsed
-    //   WAIT_FAILED   (u64(-1))             — bad args / bad handle /
-    //                                         count > kMaxObjects
-    //
-    // v0: poll-and-yield implementation. Loops through the handle
-    // array inspecting each handle's signaled state; if the wait
-    // isn't satisfied, issues SchedYield (or SchedSleepTicks for a
-    // timed wait) and retries. Not wake-driven — adequate for the
-    // common "wait on N events" pattern but spins a timeslice per
-    // iteration under contention. A future slice will thread
-    // multi-waiters through the event/mutex waitqueues directly.
-    //
-    // Unprivileged (same as the single-object waits).
+    // SYS_WAIT_MULTI: rdi = count, rsi = user pointer to handle
+    // array, rdx = bWaitAll, r10 = timeout_ms. Returns
+    // WAIT_OBJECT_0+i / WAIT_TIMEOUT / WAIT_FAILED.
+    // Backs Win32 WaitForMultipleObjects.
     SYS_WAIT_MULTI = 48,
 
-    // SYS_SYSTEM_INFO: rdi = user pointer to a Win32 SYSTEM_INFO
-    // struct (48 bytes). Kernel populates with constants describing
-    // the host CPU + address-space topology:
-    //   wProcessorArchitecture   = 9 (PROCESSOR_ARCHITECTURE_AMD64)
-    //   dwPageSize               = 4096
-    //   lpMinimumApplicationAddress = 0x10000
-    //   lpMaximumApplicationAddress = 0x7FFFFFFE0000
-    //   dwActiveProcessorMask    = 1
-    //   dwNumberOfProcessors     = 1
-    //   dwProcessorType          = 8664 (PROCESSOR_AMD_X8664)
-    //   dwAllocationGranularity  = 0x10000
-    //   wProcessorLevel          = 6
-    //   wProcessorRevision       = 0
-    // Returns 0 on success, u64(-1) on bad user pointer. Backs
-    // Win32 GetSystemInfo / GetNativeSystemInfo (WoW64 distinction
-    // doesn't apply — we're native x86_64).
+    // SYS_SYSTEM_INFO: rdi = user pointer to Win32 SYSTEM_INFO
+    // (48 bytes). Populates with x86_64 constants. Backs
+    // GetSystemInfo / GetNativeSystemInfo.
     SYS_SYSTEM_INFO = 49,
 
     // SYS_DEBUG_PRINTW: rdi = user pointer to NUL-terminated
-    // UTF-16LE string. Kernel reads up to
-    // kSyscallDebugPrintMax wide-characters (each 2 bytes), strips
-    // high byte to produce ASCII (non-ASCII chars replaced with '?'),
-    // and emits "[odbgw] ..." on serial. Returns 0. Cap-gated on
-    // kCapSerialConsole (same as SYS_DEBUG_PRINT). Backs
-    // Win32 OutputDebugStringW.
+    // UTF-16LE string. Strips to ASCII, emits "[odbgw] ...".
+    // Backs Win32 OutputDebugStringW.
     SYS_DEBUG_PRINTW = 50,
 
     // SYS_SEM_CREATE: rdi = initial count, rsi = max count.
-    // Allocates a per-process semaphore slot and returns
-    // kWin32SemaphoreBase + slot (= 0x500..0x507) on success,
-    // u64(-1) on slot exhaustion or bad args (initial > max).
+    // Returns Win32SemaphoreHandle (0x500..0x507) or -1.
     // Backs Win32 CreateSemaphoreW / CreateSemaphoreA.
     SYS_SEM_CREATE = 51,
 
     // SYS_SEM_RELEASE: rdi = handle, rsi = release count.
-    // Bumps count by rsi, wakes up to rsi waiters (one per unit
-    // of the bump). Returns the PREVIOUS count on success, or
-    // u64(-1) on bad handle or if the bump would exceed
-    // max_count. Backs Win32 ReleaseSemaphore.
+    // Returns PREVIOUS count on success. Wakes up to rsi
+    // waiters. Backs Win32 ReleaseSemaphore.
     SYS_SEM_RELEASE = 52,
 
-    // SYS_SEM_WAIT: rdi = handle, rsi = timeout_ms (INFINITE =
-    // 0xFFFFFFFF). If count > 0, decrements and returns 0
-    // (WAIT_OBJECT_0). If count == 0, blocks on the semaphore's
-    // waitqueue with the given timeout. Returns WAIT_TIMEOUT
-    // (0x102) on timeout, u64(-1) on bad handle. Dispatched by
-    // the semaphore range in WaitForSingleObject v3.
+    // SYS_SEM_WAIT: rdi = handle, rsi = timeout_ms. Blocks
+    // until count > 0, decrements, returns 0 (WAIT_OBJECT_0).
+    // Dispatched by the semaphore range in WaitForSingleObject v3.
     SYS_SEM_WAIT = 53,
 
-    // SYS_THREAD_WAIT: rdi = handle (Win32ThreadHandle range,
-    // 0x400..0x407), rsi = timeout_ms (0xFFFFFFFF = INFINITE).
-    // Poll-and-yield wait for the task behind the handle to
-    // reach TaskState::Dead. Returns 0 (WAIT_OBJECT_0) on exit,
-    // 0x102 (WAIT_TIMEOUT) on timeout, u64(-1) on bad handle.
+    // SYS_THREAD_WAIT: rdi = thread handle (0x400..0x407),
+    // rsi = timeout_ms. Polls exit_code until != STILL_ACTIVE.
     // Dispatched by the thread range in WaitForSingleObject v4.
-    // Unprivileged — the caller owns the thread.
     SYS_THREAD_WAIT = 54,
 
     // SYS_THREAD_EXIT_CODE: rdi = thread handle (0x400..0x407).
@@ -578,6 +517,34 @@ enum SyscallNumber : u64
     // SYS_EXIT when a Win32 thread task dies (batch 59).
     // Backs Win32 GetExitCodeThread.
     SYS_THREAD_EXIT_CODE = 55,
+
+    // SYS_NT_INVOKE: Windows NT syscall forwarding gateway.
+    // rdi = NT syscall number (e.g. 0x0F for NtClose).
+    // rsi..r9 carry up to five NT-ABI arguments.
+    // Returns the translated NTSTATUS in rax, or
+    // STATUS_NOT_IMPLEMENTED (0xC0000002) for any NT number not
+    // yet wired into the NT→Linux translator.
+    //
+    // Purpose: lets a user-mode ntdll.dll shim forward NT calls
+    // into the kernel without every individual NT stub needing
+    // its own SYS_* number. The kernel-side translator (in
+    // subsystems/translation/translate.cpp::NtTranslateToLinux)
+    // maps a small set of NT calls (NtClose, NtYieldExecution,
+    // NtDelayExecution, NtQueryPerformanceCounter,
+    // NtGetCurrentProcessorNumber, NtFlushBuffersFile,
+    // NtGetTickCount, NtQuerySystemTime, NtTerminateThread,
+    // NtTerminateProcess) onto matching Linux handlers in
+    // subsystems/linux/syscall.cpp.
+    //
+    // This is the Windows→Linux fallback path: anything a Win32
+    // subsystem needs that already has a Linux implementation
+    // can be reached via this bridge rather than reinvented on
+    // the native side.
+    //
+    // Moved to 56 from the original 46 during the merge of
+    // claude/refactor-inspect-command into the win32 batch-51-60
+    // branch — the win32 batches had already published 46..55.
+    SYS_NT_INVOKE = 56,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit

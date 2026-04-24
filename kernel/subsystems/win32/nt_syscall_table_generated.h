@@ -8,7 +8,7 @@
 // Target Windows version: Windows 11 and Server (11 25H2)
 // Bedrock NT calls (present in every Windows XP→Win11 25H2): 292
 // All known NT calls on the target version: 489
-// CustomOS coverage: 25/292 = 8%
+// CustomOS coverage: 28/292 = 9%
 //
 // See tools/win32-compat/README.md for the legal + design rationale.
 
@@ -113,7 +113,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
     {"NtCreateEvent", 0x0048, static_cast<u32>(::customos::core::SYS_EVENT_CREATE)},
     {"NtQueryVolumeInformationFile", 0x0049, kSysNtNotImpl},
     {"NtCreateSection", 0x004a, kSysNtNotImpl},
-    {"NtFlushBuffersFile", 0x004b, kSysNtNotImpl},
+    {"NtFlushBuffersFile", 0x004b, static_cast<u32>(::customos::core::SYS_NT_INVOKE)},
     {"NtApphelpCacheControl", 0x004c, kSysNtNotImpl},
     {"NtCreateProcessEx", 0x004d, kSysNtNotImpl},
     {"NtCreateThread", 0x004e, kSysNtNotImpl},
@@ -121,7 +121,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
     {"NtProtectVirtualMemory", 0x0050, kSysNtNotImpl},
     {"NtQuerySection", 0x0051, kSysNtNotImpl},
     {"NtResumeThread", 0x0052, kSysNtNotImpl},
-    {"NtTerminateThread", 0x0053, kSysNtNotImpl},
+    {"NtTerminateThread", 0x0053, static_cast<u32>(::customos::core::SYS_NT_INVOKE)},
     {"NtReadRequestData", 0x0054, kSysNtNotImpl},
     {"NtCreateFile", 0x0055, static_cast<u32>(::customos::core::SYS_FILE_OPEN)},
     {"NtQueryEvent", 0x0056, kSysNtNotImpl},
@@ -196,7 +196,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
     {"NtFlushWriteBuffer", 0x00f5, kSysNtNotImpl},
     {"NtFreeUserPhysicalPages", 0x00f6, kSysNtNotImpl},
     {"NtGetContextThread", 0x00fb, kSysNtNotImpl},
-    {"NtGetCurrentProcessorNumber", 0x00fc, kSysNtNotImpl},
+    {"NtGetCurrentProcessorNumber", 0x00fc, static_cast<u32>(::customos::core::SYS_NT_INVOKE)},
     {"NtGetDevicePowerState", 0x00fe, kSysNtNotImpl},
     {"NtGetWriteWatch", 0x0104, kSysNtNotImpl},
     {"NtImpersonateAnonymousToken", 0x0105, kSysNtNotImpl},
@@ -336,7 +336,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
 inline constexpr u32 kBedrockNtSyscallCount =
     sizeof(kBedrockNtSyscalls) / sizeof(kBedrockNtSyscalls[0]);
 
-inline constexpr u32 kBedrockNtSyscallsCovered = 25;
+inline constexpr u32 kBedrockNtSyscallsCovered = 28;
 
 /// Every NT syscall known on the target Windows version — superset
 /// of `kBedrockNtSyscalls`. Includes version-specific additions
@@ -420,7 +420,7 @@ inline constexpr NtSyscallMapping kAllNtSyscalls[] = {
     {"NtCreateEvent", 0x0048, static_cast<u32>(::customos::core::SYS_EVENT_CREATE)},
     {"NtQueryVolumeInformationFile", 0x0049, kSysNtNotImpl},
     {"NtCreateSection", 0x004a, kSysNtNotImpl},
-    {"NtFlushBuffersFile", 0x004b, kSysNtNotImpl},
+    {"NtFlushBuffersFile", 0x004b, static_cast<u32>(::customos::core::SYS_NT_INVOKE)},
     {"NtApphelpCacheControl", 0x004c, kSysNtNotImpl},
     {"NtCreateProcessEx", 0x004d, kSysNtNotImpl},
     {"NtCreateThread", 0x004e, kSysNtNotImpl},
@@ -428,7 +428,7 @@ inline constexpr NtSyscallMapping kAllNtSyscalls[] = {
     {"NtProtectVirtualMemory", 0x0050, kSysNtNotImpl},
     {"NtQuerySection", 0x0051, kSysNtNotImpl},
     {"NtResumeThread", 0x0052, kSysNtNotImpl},
-    {"NtTerminateThread", 0x0053, kSysNtNotImpl},
+    {"NtTerminateThread", 0x0053, static_cast<u32>(::customos::core::SYS_NT_INVOKE)},
     {"NtReadRequestData", 0x0054, kSysNtNotImpl},
     {"NtCreateFile", 0x0055, static_cast<u32>(::customos::core::SYS_FILE_OPEN)},
     {"NtQueryEvent", 0x0056, kSysNtNotImpl},
@@ -597,7 +597,7 @@ inline constexpr NtSyscallMapping kAllNtSyscalls[] = {
     {"NtGetCachedSigningLevel", 0x00f9, kSysNtNotImpl},
     {"NtGetCompleteWnfStateSubscription", 0x00fa, kSysNtNotImpl},
     {"NtGetContextThread", 0x00fb, kSysNtNotImpl},
-    {"NtGetCurrentProcessorNumber", 0x00fc, kSysNtNotImpl},
+    {"NtGetCurrentProcessorNumber", 0x00fc, static_cast<u32>(::customos::core::SYS_NT_INVOKE)},
     {"NtGetCurrentProcessorNumberEx", 0x00fd, kSysNtNotImpl},
     {"NtGetDevicePowerState", 0x00fe, kSysNtNotImpl},
     {"NtGetMUIRegistryInfo", 0x00ff, kSysNtNotImpl},

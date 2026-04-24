@@ -32,6 +32,7 @@
 #include "../fs/vfs.h"
 #include "../debug/breakpoints.h"
 #include "../debug/probes.h"
+#include "../debug/inspect.h"
 #include "../mm/address_space.h"
 #include "../mm/frame_allocator.h"
 #include "../mm/kheap.h"
@@ -315,6 +316,7 @@ void CmdHelp()
     ConsoleWriteln("  ATTACKSIM    RUN RED-TEAM ATTACK SUITE (IDT/GDT/LSTAR/CANARY/LBA0)");
     ConsoleWriteln("  MEMDUMP A [N]  HEX+ASCII DUMP OF KERNEL MEMORY -> SERIAL");
     ConsoleWriteln("  INSTR A [N]  INSTRUCTION-BYTE DUMP AT ADDRESS -> SERIAL");
+    ConsoleWriteln("  INSPECT ...  RE / TRIAGE UMBRELLA (SYSCALLS|OPCODES|ARM) -> SERIAL");
     ConsoleWriteln("  BP ...       KERNEL BREAKPOINTS (SOFTWARE + HARDWARE)");
     ConsoleWriteln("  DUMPSTATE    SNAPSHOT EVERY KERNEL SUBSYSTEM -> SERIAL");
     ConsoleWriteln("");
@@ -1280,7 +1282,7 @@ static const char* const kCommandSet[] = {
     "ipv4",      "uuid",    "uuidgen",    "health",   "checkup",  "attacksim", "redteam",    "memdump",  "instr",
     "dumpstate", "bp",      "breakpoint", "login",    "logout",   "passwd",    "useradd",    "userdel",  "users",
     "who",       "su",      "hwmon",      "vbe",      "ping",     "nslookup",  "ntp",        "http",     "shutdown",
-    "poweroff",  "beep",
+    "poweroff",  "beep",    "inspect",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -3485,6 +3487,119 @@ void CmdInstr(u32 argc, char** argv)
     }
     customos::core::DumpInstructionBytes("instr", addr, static_cast<customos::u32>(len));
     ConsoleWriteln("INSTR: WROTE TO COM1");
+}
+
+void CmdInspectHelp()
+{
+    ConsoleWriteln("INSPECT: RE / TRIAGE UMBRELLA (SEE COM1 FOR REPORTS)");
+    ConsoleWriteln("  INSPECT SYSCALLS KERNEL | <PATH>  FIND SYSCALL SITES + COVERAGE");
+    ConsoleWriteln("  INSPECT OPCODES <PATH>            FIRST-BYTE HISTOGRAM + CLASS TALLY");
+    ConsoleWriteln("  INSPECT ARM ON|OFF|STATUS         ONE-SHOT OPCODES SCAN ON NEXT SPAWN");
+    ConsoleWriteln("  INSPECT HELP                      THIS LIST");
+}
+
+void CmdInspectSyscalls(u32 argc, char** argv)
+{
+    // argv[0]=inspect, argv[1]=syscalls, argv[2]=<target>
+    if (argc < 3)
+    {
+        ConsoleWriteln("INSPECT SYSCALLS: USAGE: INSPECT SYSCALLS KERNEL | <PATH>");
+        return;
+    }
+    if (StrEq(argv[2], "kernel"))
+    {
+        ConsoleWriteln("INSPECT SYSCALLS: SCANNING KERNEL .TEXT (SEE COM1)");
+        (void)customos::debug::SyscallScanKernelText();
+        ConsoleWriteln("INSPECT SYSCALLS: DONE");
+        return;
+    }
+    ConsoleWrite("INSPECT SYSCALLS: SCANNING FILE \"");
+    ConsoleWrite(argv[2]);
+    ConsoleWriteln("\" (SEE COM1)");
+    (void)customos::debug::SyscallScanFile(argv[2]);
+    ConsoleWriteln("INSPECT SYSCALLS: DONE");
+}
+
+void CmdInspectOpcodes(u32 argc, char** argv)
+{
+    // argv[0]=inspect, argv[1]=opcodes, argv[2]=<path>
+    if (argc < 3)
+    {
+        ConsoleWriteln("INSPECT OPCODES: USAGE: INSPECT OPCODES <PATH>");
+        return;
+    }
+    ConsoleWrite("INSPECT OPCODES: SCANNING FILE \"");
+    ConsoleWrite(argv[2]);
+    ConsoleWriteln("\" (SEE COM1)");
+    customos::debug::OpcodeScanFile(argv[2]);
+    ConsoleWriteln("INSPECT OPCODES: DONE");
+}
+
+void CmdInspectArm(u32 argc, char** argv)
+{
+    // argv[0]=inspect, argv[1]=arm, argv[2]=on|off|status
+    if (argc < 3)
+    {
+        ConsoleWriteln("INSPECT ARM: USAGE: INSPECT ARM ON|OFF|STATUS");
+        return;
+    }
+    if (StrEq(argv[2], "on"))
+    {
+        customos::debug::InspectArmSet(true);
+        ConsoleWriteln("INSPECT ARM: ARMED - OPCODES SCAN WILL FIRE ON NEXT SPAWN");
+        return;
+    }
+    if (StrEq(argv[2], "off"))
+    {
+        customos::debug::InspectArmSet(false);
+        ConsoleWriteln("INSPECT ARM: DISARMED");
+        return;
+    }
+    if (StrEq(argv[2], "status"))
+    {
+        ConsoleWriteln(customos::debug::InspectArmActive() ? "INSPECT ARM: STATE=ON (ONE-SHOT)" //
+                                                           : "INSPECT ARM: STATE=OFF");
+        return;
+    }
+    ConsoleWriteln("INSPECT ARM: UNKNOWN MODE (USE ON/OFF/STATUS)");
+}
+
+void CmdInspect(u32 argc, char** argv)
+{
+    // inspect <sub> ...
+    // Thin dispatcher — each subcommand handler parses its own
+    // argv[2..]. Keeps subcommands independent so `inspect
+    // opcodes /bin/foo.exe` can't be broken by a change to
+    // `inspect syscalls`.
+    if (argc < 2)
+    {
+        CmdInspectHelp();
+        return;
+    }
+    if (StrEq(argv[1], "syscalls"))
+    {
+        CmdInspectSyscalls(argc, argv);
+        return;
+    }
+    if (StrEq(argv[1], "opcodes"))
+    {
+        CmdInspectOpcodes(argc, argv);
+        return;
+    }
+    if (StrEq(argv[1], "arm"))
+    {
+        CmdInspectArm(argc, argv);
+        return;
+    }
+    if (StrEq(argv[1], "help"))
+    {
+        CmdInspectHelp();
+        return;
+    }
+    ConsoleWrite("INSPECT: UNKNOWN SUBCOMMAND \"");
+    ConsoleWrite(argv[1]);
+    ConsoleWriteln("\"");
+    CmdInspectHelp();
 }
 
 void CmdDumpState()
@@ -7441,6 +7556,11 @@ void Dispatch(char* line)
     if (StrEq(cmd, "instr"))
     {
         CmdInstr(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "inspect"))
+    {
+        CmdInspect(argc, argv);
         return;
     }
     if (StrEq(cmd, "dumpstate"))
