@@ -2,6 +2,7 @@
 
 #include "../arch/x86_64/cpu.h"
 #include "../arch/x86_64/gdt.h"
+#include "../arch/x86_64/nmi_watchdog.h"
 #include "../arch/x86_64/serial.h"
 #include "../arch/x86_64/smp.h"
 #include "../arch/x86_64/timer.h"
@@ -265,6 +266,12 @@ void Panic(const char* subsystem, const char* message)
     // itself also CLI+HLT loops, but getting the clean banner out
     // first matters for diagnosis.
     arch::Cli();
+    // Silence the NMI watchdog. The crash-dump path can take
+    // longer than one watchdog interval (serial write is slow,
+    // symbol resolution walks the embedded table) and we don't
+    // want a PMI overflow re-entering the trap dispatcher while
+    // DumpDiagnostics is writing.
+    arch::NmiWatchdogDisable();
 
     // Broadcast NMI to peer CPUs so they stop fighting for the
     // serial line / executing against potentially-corrupt shared
@@ -293,6 +300,7 @@ void Panic(const char* subsystem, const char* message)
 void PanicWithValue(const char* subsystem, const char* message, u64 value)
 {
     arch::Cli();
+    arch::NmiWatchdogDisable();
     arch::PanicBroadcastNmi();
 
     arch::SerialWrite("\n[panic] ");

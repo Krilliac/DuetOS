@@ -2,6 +2,7 @@
 
 #include "cpu.h"
 #include "lapic.h"
+#include "nmi_watchdog.h"
 #include "serial.h"
 
 #include "../../core/fault_domain.h"
@@ -280,16 +281,21 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         return;
     }
 
-    // Vector 2 (NMI) is used for cross-CPU panic halt (see
-    // arch::PanicBroadcastNmi). The panicking CPU is about to write
-    // the crash dump to serial; every other CPU that receives the
-    // broadcast NMI comes through here and must halt quietly so it
-    // doesn't fight for the serial line. If NMI ever grows a real
-    // consumer (chipset error, power button, watchdog), route it
-    // before this early-halt — today the default posture is "NMI
-    // means stop and stay stopped."
+    // Vector 2 (NMI). Two legitimate sources feed this entry:
+    //   * The NMI watchdog — PMU counter overflow via LVT Perf.
+    //     Consumed by NmiWatchdogHandleNmi; if the pet counter
+    //     has advanced, the handler re-arms and returns so we
+    //     iretq back to the interrupted code.
+    //   * Cross-CPU panic broadcast (see PanicBroadcastNmi).
+    //     Peers arrive here and must halt quietly so they don't
+    //     fight the panicking CPU for the serial line.
+    // Any non-watchdog NMI (external NMI pin, firmware-injected
+    // chipset error, etc.) also falls through to the halt path —
+    // conservative default: if we don't know why NMI fired, stop.
     if (frame->vector == 2)
     {
+        if (NmiWatchdogHandleNmi())
+            return;
         for (;;)
         {
             asm volatile("cli; hlt");
@@ -475,6 +481,11 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     // enough by name that they don't need a dedicated probe.
     if (frame->vector == 14)
         KBP_PROBE_V(::customos::debug::ProbeId::kKernelPageFault, frame->rip);
+    // Quiet the NMI watchdog before the dump. DumpDiagnostics +
+    // symbol resolution + serial I/O can easily exceed one
+    // watchdog interval; a PMI overflow during the dump would
+    // re-enter the trap dispatcher and scramble the output.
+    NmiWatchdogDisable();
     SerialWrite("\n** CPU EXCEPTION **\n");
 
     // Bracket the record so host-side tooling can extract a .dump file

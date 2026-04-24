@@ -36,6 +36,12 @@ inline constexpr u64 kLapicRegLvtTimer = 0x320;
 inline constexpr u64 kLapicRegTimerInit = 0x380;
 inline constexpr u64 kLapicRegTimerCount = 0x390;
 inline constexpr u64 kLapicRegTimerDivide = 0x3E0;
+// Performance monitoring counter LVT entry. When a PMU counter
+// overflows, the LAPIC checks this entry and delivers the
+// configured interrupt. NMI delivery (bits 10:8 = 0b100) lets
+// a PMU overflow fire even while IF is cleared — the basis of
+// the NMI watchdog.
+inline constexpr u64 kLapicRegLvtPerf = 0x340;
 
 /// Detect the LAPIC, map its MMIO window with cache-disable, set the
 /// spurious-vector register (vector 0xFF), and globally enable. Panics if

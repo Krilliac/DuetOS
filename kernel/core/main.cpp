@@ -11,6 +11,7 @@
 #include "../arch/x86_64/idt.h"
 #include "../arch/x86_64/ioapic.h"
 #include "../arch/x86_64/lapic.h"
+#include "../arch/x86_64/nmi_watchdog.h"
 #include "../arch/x86_64/pic.h"
 #include "../arch/x86_64/rtc.h"
 #include "../arch/x86_64/serial.h"
@@ -1964,6 +1965,16 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // of those structures. Earlier capture would flag every
     // subsequent IdtSetUserGate / TssSetRsp0 as "drift".
     customos::core::RuntimeCheckerInit();
+
+    // NMI watchdog. Arms a PMU counter to fire NMI every few
+    // seconds of real execution; if the timer IRQ stops
+    // incrementing its pet counter across consecutive NMIs the
+    // kernel is declared wedged. Silently no-ops if the CPU
+    // doesn't advertise architectural perfmon (typical on
+    // QEMU TCG). Called AFTER TimerInit so the pet-from-IRQ
+    // path is already live — otherwise the very first overflow
+    // would find a zero pet counter and immediately strike.
+    customos::arch::NmiWatchdogInit();
 
     // ntdll bedrock-coverage scoreboard. Cheap one-shot log line
     // that records how many of the 292 universal NT calls
