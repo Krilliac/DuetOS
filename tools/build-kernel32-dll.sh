@@ -165,6 +165,21 @@ set +e
     /export:ReleaseSemaphore \
     /export:WaitForSingleObject \
     /export:WaitForSingleObjectEx \
+    /export:InitializeCriticalSection \
+    /export:InitializeCriticalSectionEx \
+    /export:InitializeCriticalSectionAndSpinCount \
+    /export:DeleteCriticalSection \
+    /export:EnterCriticalSection \
+    /export:LeaveCriticalSection \
+    /export:TryEnterCriticalSection \
+    /export:InitializeSRWLock \
+    /export:AcquireSRWLockExclusive \
+    /export:ReleaseSRWLockExclusive \
+    /export:TryAcquireSRWLockExclusive \
+    /export:AcquireSRWLockShared \
+    /export:ReleaseSRWLockShared \
+    /export:TryAcquireSRWLockShared \
+    /export:InitOnceExecuteOnce \
     /out:"${DLL}" \
     "${OBJ}" 2>&1 | grep -v "align specified without /driver"
 LINK_RC=${PIPESTATUS[0]}

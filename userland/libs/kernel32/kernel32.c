@@ -1209,3 +1209,209 @@ __declspec(dllexport) DWORD WaitForSingleObjectEx(HANDLE h, DWORD timeout_ms, BO
     (void) bAlertable; /* APCs not supported in v0. */
     return WaitForSingleObject(h, timeout_ms);
 }
+
+/* ------------------------------------------------------------------
+ * CriticalSection (slice 22)
+ *
+ * CRITICAL_SECTION is a 40-byte caller-owned struct. v0 uses the
+ * first 16 bytes as:
+ *   [cs + 0]: owner TID (0 = unowned)
+ *   [cs + 8]: recursion count
+ *
+ * Same TID = SYS_GETPID (1). Spin-CAS with SYS_YIELD on
+ * contention. Recursive re-entry just bumps the count.
+ * Matches the flat-stub semantics at kOffEnterCritSecReal.
+ * ------------------------------------------------------------------ */
+
+typedef long long volatile* CritSecPtr;
+
+static long long syscall_get_tid(void)
+{
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long) 1) : "memory");
+    return rv;
+}
+
+static void syscall_yield(void)
+{
+    long long discard;
+    __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long) 3) : "memory");
+}
+
+__declspec(dllexport) BOOL InitializeCriticalSection(void* cs)
+{
+    /* Zero the 40-byte CRITICAL_SECTION. Byte loop keeps this
+     * independent of memset. */
+    if (cs != (void*) 0)
+    {
+        unsigned char* b = (unsigned char*) cs;
+        for (int i = 0; i < 40; ++i)
+            b[i] = 0;
+    }
+    return 1;
+}
+
+__declspec(dllexport) BOOL InitializeCriticalSectionEx(void* cs, DWORD spin, DWORD flags)
+{
+    (void) spin;
+    (void) flags;
+    return InitializeCriticalSection(cs);
+}
+
+__declspec(dllexport) BOOL InitializeCriticalSectionAndSpinCount(void* cs, DWORD spin)
+{
+    (void) spin;
+    return InitializeCriticalSection(cs);
+}
+
+__declspec(dllexport) void DeleteCriticalSection(void* cs)
+{
+    (void) cs;
+    /* No allocations to free; flat stub is also a no-op. */
+}
+
+__declspec(dllexport) void EnterCriticalSection(void* cs)
+{
+    long long  tid     = syscall_get_tid();
+    CritSecPtr owner   = (CritSecPtr) cs;
+    long long volatile* recur = (long long volatile*) cs + 1;
+    for (;;)
+    {
+        long long expected = 0;
+        if (__atomic_compare_exchange_n(owner, &expected, tid, /*weak=*/0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
+        {
+            /* First acquire: recursion := 1. */
+            *recur = 1;
+            return;
+        }
+        if (expected == tid)
+        {
+            /* Already held by us — bump recursion. */
+            *recur = *recur + 1;
+            return;
+        }
+        /* Contended — yield and retry. */
+        syscall_yield();
+    }
+}
+
+__declspec(dllexport) void LeaveCriticalSection(void* cs)
+{
+    CritSecPtr owner   = (CritSecPtr) cs;
+    long long volatile* recur = (long long volatile*) cs + 1;
+    long long           next  = *recur - 1;
+    *recur                    = next;
+    if (next == 0)
+        *owner = 0; /* Release: next acquirer's CAS wins. */
+}
+
+__declspec(dllexport) BOOL TryEnterCriticalSection(void* cs)
+{
+    long long  tid     = syscall_get_tid();
+    CritSecPtr owner   = (CritSecPtr) cs;
+    long long volatile* recur = (long long volatile*) cs + 1;
+    long long           expected = 0;
+    if (__atomic_compare_exchange_n(owner, &expected, tid, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
+    {
+        *recur = 1;
+        return 1;
+    }
+    if (expected == tid)
+    {
+        *recur = *recur + 1;
+        return 1;
+    }
+    return 0; /* Contended; do NOT spin. */
+}
+
+/* ------------------------------------------------------------------
+ * SRWLock — single 8-byte slot, exclusive only (slice 22)
+ *
+ * v0 collapses shared/exclusive to exclusive. Real Win32 SRW
+ * locks are NOT reentrant — second acquire from the same thread
+ * deadlocks. We preserve that contract.
+ * ------------------------------------------------------------------ */
+
+__declspec(dllexport) void InitializeSRWLock(void* lock)
+{
+    if (lock != (void*) 0)
+        *(long long volatile*) lock = 0;
+}
+
+__declspec(dllexport) void AcquireSRWLockExclusive(void* lock)
+{
+    long long           tid = syscall_get_tid();
+    long long volatile* p   = (long long volatile*) lock;
+    for (;;)
+    {
+        long long expected = 0;
+        if (__atomic_compare_exchange_n(p, &expected, tid, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
+            return;
+        syscall_yield();
+    }
+}
+
+__declspec(dllexport) void ReleaseSRWLockExclusive(void* lock)
+{
+    if (lock != (void*) 0)
+        *(long long volatile*) lock = 0;
+}
+
+__declspec(dllexport) BOOL TryAcquireSRWLockExclusive(void* lock)
+{
+    long long           tid      = syscall_get_tid();
+    long long volatile* p        = (long long volatile*) lock;
+    long long           expected = 0;
+    if (__atomic_compare_exchange_n(p, &expected, tid, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
+        return 1;
+    return 0;
+}
+
+/* SRW shared aliases collapse to exclusive in v0. */
+__declspec(dllexport) void AcquireSRWLockShared(void* lock)
+{
+    AcquireSRWLockExclusive(lock);
+}
+
+__declspec(dllexport) void ReleaseSRWLockShared(void* lock)
+{
+    ReleaseSRWLockExclusive(lock);
+}
+
+__declspec(dllexport) BOOL TryAcquireSRWLockShared(void* lock)
+{
+    return TryAcquireSRWLockExclusive(lock);
+}
+
+/* ------------------------------------------------------------------
+ * InitOnceExecuteOnce (slice 22)
+ *
+ * INIT_ONCE is an 8-byte slot we interpret as:
+ *     0 = untouched
+ *     1 = initialiser running
+ *     2 = done
+ *
+ * Single CAS 0->1 picks the initialiser; losers spin-yield
+ * until the slot reaches 2. Null InitFn legitimately marks
+ * "complete without running anything".
+ * ------------------------------------------------------------------ */
+
+typedef BOOL (*InitOnceFn)(void* InitOnce, void* Parameter, void** Context);
+
+__declspec(dllexport) BOOL InitOnceExecuteOnce(void* InitOnce, InitOnceFn InitFn, void* Parameter, void** Context)
+{
+    long long volatile* slot     = (long long volatile*) InitOnce;
+    long long           expected = 0;
+    if (__atomic_compare_exchange_n(slot, &expected, 1LL, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
+    {
+        /* We won the CAS — run the initialiser (if any). */
+        if (InitFn != (InitOnceFn) 0)
+            InitFn(InitOnce, Parameter, Context);
+        *slot = 2; /* Mark done. */
+        return 1;
+    }
+    /* Lost the CAS — wait for the winner to mark it done. */
+    while (__atomic_load_n(slot, __ATOMIC_SEQ_CST) != 2)
+        syscall_yield();
+    return 1;
+}
