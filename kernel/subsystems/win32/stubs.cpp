@@ -243,6 +243,18 @@ constexpr u32 kOffSrwTryAcquireExcl = 0xBB9; // batch 62 — 22 bytes
 // to the existing kOffReturnOne.
 constexpr u32 kOffTryEnterCritSecReal = 0xBCF; // batch 63 — 56 bytes
 
+// === Batch 64: real SetUnhandledExceptionFilter round-trip ===
+// The old bindings were kOffReturnZero for both — SetUnhandled
+// always claimed "no previous filter" and UnhandledException
+// always returned 0 (EXCEPTION_CONTINUE_SEARCH), which is the
+// wrong default. Now we stash the caller-supplied filter in a
+// per-process proc-env slot (kProcEnvUnhandledFilterOff) and
+// tail-call it on invocation; if the slot is zero we return
+// EXCEPTION_EXECUTE_HANDLER (1) — the Windows-default when no
+// top-level filter was ever installed.
+constexpr u32 kOffSetUnhandledFilter = 0xC07; // batch 64 — 12 bytes
+constexpr u32 kOffUnhandledFilter = 0xC13;    // batch 64 — 21 bytes
+
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
     // Windows x64 ABI: first arg (uExitCode) in RCX.
@@ -3037,10 +3049,45 @@ constexpr u8 kStubsBytes[] = {
     0xB8, 0x01, 0x00, 0x00, 0x00, // 0xC00 mov eax, 1
     0x5B,                         // 0xC05 pop rbx
     0xC3,                         // 0xC06 ret
+
+    // === Batch 64 ==============================================
+
+    // --- SetUnhandledExceptionFilter (offset 0xC07, 12 bytes) -
+    // Win32: LPTOP_LEVEL_EXCEPTION_FILTER SetUnhandledExceptionFilter(
+    //          LPTOP_LEVEL_EXCEPTION_FILTER newFilter = rcx);
+    // Returns the previous filter. xchg on a memory operand is
+    // implicitly `lock`ed on x86, so this is a single atomic swap:
+    // caller's rcx lands in the proc-env slot; the previous value
+    // ends up in rcx, which we copy into rax to return.
+    //
+    // The imm32 0x65000600 fits in 32 bits and `mov eax, imm32`
+    // zero-extends to rax — saves 5 bytes vs `mov rax, imm64`.
+    0xB8, 0x00, 0x06, 0x00, 0x65, // 0xC07 mov eax, 0x65000600 ; &proc_env.unhandled
+    0x48, 0x87, 0x08,             // 0xC0C xchg qword [rax], rcx
+    0x48, 0x89, 0xC8,             // 0xC0F mov rax, rcx          ; return old
+    0xC3,                         // 0xC12 ret
+
+    // --- UnhandledExceptionFilter (offset 0xC13, 21 bytes) ----
+    // Win32: LONG UnhandledExceptionFilter(EXCEPTION_POINTERS* = rcx).
+    // Load the stored filter; if non-null, TAIL-call it (the
+    // filter's signature matches ours exactly, and tail-call
+    // inherits our caller's shadow space + doesn't grow the
+    // stack). If null, return EXCEPTION_EXECUTE_HANDLER (= 1),
+    // Windows's documented "no top-level filter" default — the
+    // caller (CRT's _seh_filter_exe or similar) then proceeds
+    // to terminate the process via the standard SEH path.
+    0xB8, 0x00, 0x06, 0x00, 0x65, // 0xC13 mov eax, 0x65000600
+    0x48, 0x8B, 0x00,             // 0xC18 mov rax, [rax]        ; load filter
+    0x48, 0x85, 0xC0,             // 0xC1B test rax, rax
+    0x74, 0x02,                   // 0xC1E jz .default (+2 -> 0xC22)
+    0xFF, 0xE0,                   // 0xC20 jmp rax              ; tail-call filter
+    // .default (abs 0xC22):
+    0xB8, 0x01, 0x00, 0x00, 0x00, // 0xC22 mov eax, 1           ; EXCEPTION_EXECUTE_HANDLER
+    0xC3,                         // 0xC27 ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0xC07, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0xC28, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -3050,6 +3097,8 @@ static_assert(kProcEnvVa == 0x65000000ULL, "proc-env page VA no longer matches _
 static_assert(kProcEnvArgcOff == 0x00, "argc offset no longer matches __p___argc stub bytes");
 static_assert(kProcEnvArgvPtrOff == 0x08, "argv-ptr offset no longer matches __p___argv stub bytes");
 static_assert(kProcEnvCommodeOff == 0x200, "commode offset no longer matches __p__commode stub bytes");
+static_assert(kProcEnvUnhandledFilterOff == 0x600,
+              "unhandled-filter offset no longer matches SetUnhandledExceptionFilter stub bytes");
 
 struct StubEntry
 {
@@ -3194,8 +3243,8 @@ constexpr StubEntry kStubsTable[] = {
     // modern hardware. Genuinely-absent feature callers almost always
     // have a runtime fallback anyway.
     {"kernel32.dll", "IsProcessorFeaturePresent", kOffReturnOne},
-    {"kernel32.dll", "SetUnhandledExceptionFilter", kOffReturnZero},
-    {"kernel32.dll", "UnhandledExceptionFilter", kOffReturnZero},
+    {"kernel32.dll", "SetUnhandledExceptionFilter", kOffSetUnhandledFilter},
+    {"kernel32.dll", "UnhandledExceptionFilter", kOffUnhandledFilter},
 
     // Return-one family (returns TRUE / 1 = success):
     //   SetConsoleCtrlHandler — pretend we registered.
