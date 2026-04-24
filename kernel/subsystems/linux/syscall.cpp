@@ -420,6 +420,10 @@ const char* StripFatPrefix(const char* p)
     return p;
 }
 
+// Forward declaration so chmod/chown/utime up top can call the
+// volume-relative copy helper that's defined further down.
+bool CopyAndStripFatPath(u64 user_path, char (&kbuf)[64], const char*& out_leaf);
+
 // Linux: open(path, flags, mode). v0 scope:
 //   - Read-only. Any write/create/truncate flag bits in `flags`
 //     are silently ignored; the FAT32 entry has to exist already.
@@ -2486,33 +2490,43 @@ i64 DoFlock(u64 fd, u64 op)
 }
 
 // chmod / fchmod / chown / fchown / lchown: v0 has no permission
-// model and no uid/gid model. Return 0 so install scripts and
-// build tools (which routinely chmod +x their outputs) don't bail.
+// model and no uid/gid model. Accept the call but verify the
+// target exists — install scripts that chmod a missing file
+// expect -ENOENT, not silent success that masks a typo'd path.
 i64 DoChmod(u64 user_path, u64 mode)
 {
-    (void)user_path;
     (void)mode;
+    char kbuf[64];
+    const char* leaf = nullptr;
+    if (!CopyAndStripFatPath(user_path, kbuf, leaf))
+        return kEFAULT;
+    const auto* v = fs::fat32::Fat32Volume(0);
+    if (v == nullptr)
+        return 0;
+    fs::fat32::DirEntry probe;
+    if (!fs::fat32::Fat32LookupPath(v, leaf, &probe))
+        return kENOENT;
     return 0;
 }
 i64 DoFchmod(u64 fd, u64 mode)
 {
-    (void)fd;
     (void)mode;
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr || fd >= 16 || p->linux_fds[fd].state == 0)
+        return kEBADF;
     return 0;
 }
 i64 DoChown(u64 user_path, u64 uid, u64 gid)
 {
-    (void)user_path;
     (void)uid;
     (void)gid;
-    return 0;
+    return DoChmod(user_path, 0);
 }
 i64 DoFchown(u64 fd, u64 uid, u64 gid)
 {
-    (void)fd;
     (void)uid;
     (void)gid;
-    return 0;
+    return DoFchmod(fd, 0);
 }
 i64 DoLchown(u64 user_path, u64 uid, u64 gid)
 {
@@ -2650,11 +2664,22 @@ i64 DoCapset(u64 user_hdr, u64 user_data)
 }
 
 // utime(path, buf): set atime/mtime on a file. v0 doesn't track
-// either, so accept as no-op.
+// either, so accept as no-op — but verify the path is real before
+// pretending success. A program that utimes a nonexistent file
+// expects -ENOENT, not silent success.
 i64 DoUtime(u64 user_path, u64 user_buf)
 {
-    (void)user_path;
     (void)user_buf;
+    char kbuf[64];
+    const char* leaf = nullptr;
+    if (!CopyAndStripFatPath(user_path, kbuf, leaf))
+        return kEFAULT;
+    const auto* v = fs::fat32::Fat32Volume(0);
+    if (v == nullptr)
+        return 0; // No FAT32 — pretend success (path may be ramfs).
+    fs::fat32::DirEntry probe;
+    if (!fs::fat32::Fat32LookupPath(v, leaf, &probe))
+        return kENOENT;
     return 0;
 }
 
