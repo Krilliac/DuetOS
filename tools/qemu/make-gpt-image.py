@@ -296,7 +296,7 @@ def build_fat32(part_sector_count: int) -> bytearray:
     # BPB.
     bs = bytearray(SECTOR)
     bs[0:3] = b"\xEB\x58\x90"          # JMP short + NOP
-    bs[3:11] = b"DUETOS"             # OEM name (8 bytes)
+    bs[3:11] = b"DUETOS  "             # OEM name (8 bytes, space-padded)
     struct.pack_into("<H", bs, 11, SECTOR)          # bytes_per_sector
     bs[13] = FAT_SPC                                # sectors_per_cluster
     struct.pack_into("<H", bs, 14, FAT_RESERVED)    # reserved_sectors
@@ -320,7 +320,7 @@ def build_fat32(part_sector_count: int) -> bytearray:
     bs[65] = 0                                      # reserved
     bs[66] = 0x29                                   # boot_sig
     struct.pack_into("<I", bs, 67, 0xCAFEBABE)      # volume_id
-    bs[71:82] = b"DUETOS   "                      # volume_label (11 bytes)
+    bs[71:82] = b"DUETOS     "                    # volume_label (11 bytes, space-padded)
     bs[82:90] = b"FAT32   "                         # fs_type (8 bytes)
     bs[510] = 0x55
     bs[511] = 0xAA

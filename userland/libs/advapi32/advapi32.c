@@ -110,11 +110,11 @@ static DWORD g_reg_dword_proxy_enable = 0;
 static DWORD g_reg_dword_version_major = 10;
 
 static const RegValue k_hklm_winnt_values[] = {
-    {"ProductName",        REG_SZ,    "DuetOS\0",         9,  0},
+    {"ProductName",        REG_SZ,    "DuetOS\0",           7,  0},
     {"CurrentVersion",     REG_SZ,    "10.0\0",             5,  0},
     {"CurrentBuild",       REG_SZ,    "19041\0",            6,  0},
     {"CurrentBuildNumber", REG_SZ,    "19041\0",            6,  0},
-    {"BuildLab",           REG_SZ,    "19041.duetos\0",   15, 0},
+    {"BuildLab",           REG_SZ,    "19041.duetos\0",    13, 0},
     {"InstallationType",   REG_SZ,    "Client\0",           7,  0},
     {"ReleaseId",          REG_SZ,    "2004\0",             5,  0},
     {"EditionID",          REG_SZ,    "Professional\0",     13, 0},
@@ -127,7 +127,7 @@ static const RegValue k_hkcu_internet_values[] = {
 
 static const RegValue k_hkcu_volatile_env_values[] = {
     {"USERNAME", REG_SZ, "user\0", 5, 0},
-    {"USERDOMAIN", REG_SZ, "DUETOS\0", 9, 0},
+    {"USERDOMAIN", REG_SZ, "DUETOS\0", 7, 0},
 };
 
 static const RegKey k_reg_keys[] = {

@@ -197,7 +197,7 @@ opens `HKLM\Software\Microsoft\Windows NT\CurrentVersion`, queries
 step via `printf` with `%s`/`%u`/`%02x` formatting. Boot log:
 
 ```
-[reg-fopen-test] ProductName="DuetOS" (type=1, size=9)
+[reg-fopen-test] ProductName="DuetOS" (type=1, size=7)
 [reg-fopen-test] /bin/hello.exe first two bytes: 0x4d 0x5a
 [reg-fopen-test] all checks passed
 ```
