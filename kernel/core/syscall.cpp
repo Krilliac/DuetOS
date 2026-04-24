@@ -1319,6 +1319,27 @@ void SyscallDispatch(arch::TrapFrame* frame)
     case SYS_WIN_MSGBOX:
         subsystems::win32::DoWinMsgBox(frame);
         return;
+    case SYS_WIN_PEEK_MSG:
+        subsystems::win32::DoWinPeekMsg(frame);
+        return;
+    case SYS_WIN_GET_MSG:
+        subsystems::win32::DoWinGetMsg(frame);
+        return;
+    case SYS_WIN_POST_MSG:
+        subsystems::win32::DoWinPostMsg(frame);
+        return;
+    case SYS_GDI_FILL_RECT:
+        subsystems::win32::DoGdiFillRect(frame);
+        return;
+    case SYS_GDI_TEXT_OUT:
+        subsystems::win32::DoGdiTextOut(frame);
+        return;
+    case SYS_GDI_RECTANGLE:
+        subsystems::win32::DoGdiRectangle(frame);
+        return;
+    case SYS_GDI_CLEAR:
+        subsystems::win32::DoGdiClear(frame);
+        return;
 
     case SYS_DLL_PROC_ADDRESS:
     {

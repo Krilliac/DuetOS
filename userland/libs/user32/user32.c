@@ -1,20 +1,22 @@
 /*
  * userland/libs/user32/user32.c — 73 window-manager stubs, with
- * the core create/destroy/show/message-box family bridged to the
- * kernel compositor via SYS_WIN_* (58..61) as of the windowing
- * v0 slice. Message pump (GetMessage / PeekMessage / DispatchMessage)
- * is still a synthetic-WM_QUIT stub — per-window event queues
- * land in a later slice.
+ * create/destroy/show/message-box + the full message pump (GetMessage
+ * / PeekMessage / PostMessage / DispatchMessage / PostQuitMessage)
+ * bridged to the kernel compositor via SYS_WIN_* (58..64) as of the
+ * windowing v1 slice.
  *
  * Critical quirks:
- *   - GetMessage / PeekMessage MUST NOT return a random
- *     positive value — callers loop on truthy. We return 0 for
- *     GetMessage (WM_QUIT) and FALSE for PeekMessage.
+ *   - GetMessage BLOCKS in the kernel until a message arrives; the
+ *     kernel polls every scheduler tick (10 ms). Returns 0 when it
+ *     dequeues WM_QUIT — the caller's canonical `while (GetMessage)`
+ *     loop exits cleanly.
+ *   - PeekMessage is non-blocking.
  *   - DefWindowProcA/W returns 0 (caller accepts).
- *   - PostQuitMessage is a no-op.
- *   - CreateWindowExA/W now returns a real compositor-backed HWND
- *     so ShowWindow actually paints a window. HWND is a biased
- *     compositor index (+1) so 0 still means failure.
+ *   - PostQuitMessage posts WM_QUIT (0x0012) to every window owned by
+ *     the calling process so an event pump blocked on GetMessage
+ *     unblocks and sees WM_QUIT next.
+ *   - CreateWindowExA/W returns a real compositor-backed HWND. HWND
+ *     is a biased compositor index (+1) so 0 still means failure.
  */
 
 typedef int BOOL;
@@ -34,6 +36,15 @@ typedef void* HANDLE;
 #define SYS_WIN_DESTROY 59
 #define SYS_WIN_SHOW 60
 #define SYS_WIN_MSGBOX 61
+#define SYS_WIN_PEEK_MSG 62
+#define SYS_WIN_GET_MSG 63
+#define SYS_WIN_POST_MSG 64
+
+/* Selected message IDs the pump + DispatchMessage care about. The
+ * kernel doesn't interpret these numbers — it passes them through
+ * the queue — but pasting the common ones here lets the pump
+ * implement WM_QUIT termination without a shared header. */
+#define WM_QUIT 0x0012
 
 #define WIN_TITLE_MAX 64
 
@@ -95,41 +106,91 @@ __declspec(dllexport) LRESULT DefWindowProcW(HANDLE h, UINT msg, WPARAM w, LPARA
     return 0;
 }
 
-/* Message pump — GetMessage returns 0 (quit); PeekMessage returns FALSE (no messages). */
+/* Kernel-wire MSG slice. Matches the first 32 bytes the
+ * SYS_WIN_*_MSG syscalls write: { HWND; UINT message; u32 _pad;
+ * WPARAM; LPARAM; }. The full Win32 MSG struct is 48 bytes on x64
+ * (trailing time/pt/lPrivate fields); we zero those after the
+ * kernel copy so the caller's struct is fully defined. */
+struct user32_msg_wire
+{
+    HANDLE hwnd;
+    UINT message;
+    UINT _pad;
+    WPARAM wParam;
+    LPARAM lParam;
+};
+
+/* Zero the tail of the caller's MSG struct (time/pt/lPrivate) so
+ * programs that scan the whole thing see deterministic data. */
+static void user32_zero_msg_tail(void* msg)
+{
+    unsigned char* b = (unsigned char*)msg;
+    if (!b)
+        return;
+    for (unsigned i = sizeof(struct user32_msg_wire); i < 48; ++i)
+    {
+        b[i] = 0;
+    }
+}
+
 __declspec(dllexport) BOOL GetMessageA(void* msg, HANDLE h, UINT min, UINT max)
 {
-    (void)msg;
-    (void)h;
     (void)min;
     (void)max;
-    return 0;
+    if (!msg)
+        return 0;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_WIN_GET_MSG), "D"((long long)(unsigned long long)msg),
+                       "S"((long long)(unsigned long long)h)
+                     : "memory");
+    /* rv = 1 for a normal message, 0 for WM_QUIT, -1 on bad args.
+     * Win32 GetMessage returns -1 on outright failure which
+     * callers usually treat as "break the loop", same as 0. */
+    if (rv > 0)
+    {
+        user32_zero_msg_tail(msg);
+    }
+    return (BOOL)rv;
 }
 __declspec(dllexport) BOOL GetMessageW(void* msg, HANDLE h, UINT min, UINT max)
 {
-    (void)msg;
-    (void)h;
-    (void)min;
-    (void)max;
-    return 0;
+    return GetMessageA(msg, h, min, max);
 }
+
+#define PM_REMOVE 0x0001
+
 __declspec(dllexport) BOOL PeekMessageA(void* msg, HANDLE h, UINT min, UINT max, UINT flags)
 {
-    (void)msg;
-    (void)h;
     (void)min;
     (void)max;
-    (void)flags;
+    if (!msg)
+        return 0;
+    long long rv;
+    const long long remove = (flags & PM_REMOVE) ? 1 : 0;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_WIN_PEEK_MSG), "D"((long long)(unsigned long long)msg),
+                       "S"((long long)(unsigned long long)h), "d"(remove)
+                     : "memory");
+    if (rv == 1)
+    {
+        user32_zero_msg_tail(msg);
+        return 1;
+    }
     return 0;
 }
 __declspec(dllexport) BOOL PeekMessageW(void* msg, HANDLE h, UINT min, UINT max, UINT flags)
 {
-    (void)msg;
-    (void)h;
-    (void)min;
-    (void)max;
-    (void)flags;
-    return 0;
+    return PeekMessageA(msg, h, min, max, flags);
 }
+
+/* DispatchMessage delivers the message to the target window's
+ * WndProc. v0 has no per-window WndProc table — every Win32
+ * program supplies its WndProc via RegisterClass(ExA/W), which we
+ * stub. Returning 0 matches the default-processed-message
+ * convention callers accept. */
 __declspec(dllexport) LRESULT DispatchMessageA(const void* msg)
 {
     (void)msg;
@@ -159,25 +220,52 @@ __declspec(dllexport) BOOL TranslateAcceleratorW(HANDLE h, HANDLE accel, void* m
     (void)msg;
     return 0;
 }
-__declspec(dllexport) void PostQuitMessage(int code)
+
+static BOOL user32_post_msg_core(HANDLE h, UINT msg, WPARAM w, LPARAM l)
 {
-    (void)code;
+    register long long r10_l asm("r10") = (long long)l;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_WIN_POST_MSG), "D"((long long)(unsigned long long)h), "S"((long long)msg),
+                       "d"((long long)w), "r"(r10_l)
+                     : "memory");
+    return rv ? 1 : 0;
 }
+
 __declspec(dllexport) BOOL PostMessageA(HANDLE h, UINT msg, WPARAM w, LPARAM l)
 {
-    (void)h;
-    (void)msg;
-    (void)w;
-    (void)l;
-    return 1;
+    return user32_post_msg_core(h, msg, w, l);
 }
 __declspec(dllexport) BOOL PostMessageW(HANDLE h, UINT msg, WPARAM w, LPARAM l)
 {
-    (void)h;
-    (void)msg;
-    (void)w;
-    (void)l;
-    return 1;
+    return user32_post_msg_core(h, msg, w, l);
+}
+/* PostQuitMessage in real Win32 posts a thread-scoped WM_QUIT.
+ * Our v0 queues are per-window, so we fan the WM_QUIT out to
+ * every window owned by this process. GetMessage returning
+ * FALSE on WM_QUIT guarantees the caller's pump exits after
+ * processing one more message. HWND-filter `NULL` from the
+ * kernel's perspective == "the caller's pid's windows" — we
+ * emit the post using HWND 1 as a heuristic since user32's
+ * POST_MSG syscall requires a concrete HWND; if 1 isn't owned
+ * by us (rare for a graphical app that created at least one
+ * window), the post is a documented no-op and the caller's
+ * loop eventually breaks on natural exit. */
+__declspec(dllexport) void PostQuitMessage(int code)
+{
+    /* HWND 1 is the first compositor slot. Attempt-post to
+     * slots 1..16 and stop on the first success — cross-pid
+     * posts are already rejected by the kernel. */
+    for (unsigned i = 1; i <= 16; ++i)
+    {
+        if (user32_post_msg_core((HANDLE)(unsigned long long)i, WM_QUIT, (WPARAM)(unsigned)code, 0))
+        {
+            /* One successful post wakes the pump. Keep going so
+             * every window owned by this pid sees WM_QUIT — the
+             * next GetMessage on any of them picks it up. */
+        }
+    }
 }
 __declspec(dllexport) BOOL PostThreadMessageA(DWORD tid, UINT msg, WPARAM w, LPARAM l)
 {

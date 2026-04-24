@@ -8,6 +8,7 @@
 #include "../../drivers/video/theme.h"
 #include "../../drivers/video/widget.h"
 #include "../../mm/paging.h"
+#include "../../sched/sched.h"
 
 namespace duetos::subsystems::win32
 {
@@ -219,6 +220,12 @@ void DoWinCreate(arch::TrapFrame* frame)
         return;
     }
 
+    // Record the owning pid so the process-exit reaper can close
+    // every ring-3 window in one walk when the Process refcount
+    // drops to 0. pid==0 (kernel-owned boot window) is reserved —
+    // ring-3 pids start at 1.
+    WindowSetOwnerPid(h_comp, proc->pid);
+
     // Force a full repaint so the window appears in the same
     // call — without this the user sees a window "exist" (their
     // HWND is valid) but nothing on screen until the next
@@ -342,6 +349,345 @@ void DoWinMsgBox(arch::TrapFrame* frame)
     // IDOK per Win32 convention: every MessageBox caller that
     // branches on the return code takes the "OK" path.
     frame->rax = 1;
+}
+
+namespace
+{
+
+// Layout of the MSG slice we copy to user for PeekMessage /
+// GetMessage. Matches the first 32 bytes of the Win32 MSG struct:
+// { HWND hwnd; UINT message; UINT _pad; WPARAM wParam; LPARAM
+// lParam; }. Time / pt / lPrivate are left for the user stub to
+// zero (or ignore).
+struct UserMsg
+{
+    u64 hwnd;
+    u32 message;
+    u32 _pad;
+    u64 wparam;
+    u64 lparam;
+};
+
+// Win32 COLORREF is 0x00BBGGRR; the framebuffer uses 0x00RRGGBB.
+// Convert at the syscall boundary so ring-3 callers don't need to
+// know about our internal layout.
+u32 ColorRefToRgb(u64 colorref)
+{
+    const u32 c = static_cast<u32>(colorref);
+    const u32 r = (c >> 0) & 0xFF;
+    const u32 g = (c >> 8) & 0xFF;
+    const u32 b = (c >> 16) & 0xFF;
+    return (r << 16) | (g << 8) | b;
+}
+
+// Resolve a user-supplied biased HWND to a compositor handle AND
+// verify it belongs to the calling process. Prevents a ring-3
+// PE from reading/writing another process's message queue. For
+// v0 this also refuses pid == 0 (kernel-owned boot windows) so
+// a PE can't PostMessage to the Calculator.
+u32 HwndToCompositorHandleForCaller(u64 hwnd_biased, u64 pid)
+{
+    using namespace duetos::drivers::video;
+    const u32 h_comp = HwndToCompositorHandle(hwnd_biased);
+    if (h_comp == kWindowInvalid)
+    {
+        return kWindowInvalid;
+    }
+    if (!WindowIsAlive(h_comp))
+    {
+        return kWindowInvalid;
+    }
+    if (WindowOwnerPid(h_comp) != pid)
+    {
+        return kWindowInvalid;
+    }
+    return h_comp;
+}
+
+bool CopyMsgToUser(const duetos::drivers::video::WindowMsg& m, u64 user_ptr)
+{
+    if (user_ptr == 0)
+    {
+        return false;
+    }
+    UserMsg out{};
+    out.hwnd = static_cast<u64>(m.hwnd_biased);
+    out.message = m.message;
+    out.wparam = m.wparam;
+    out.lparam = m.lparam;
+    return duetos::mm::CopyToUser(reinterpret_cast<void*>(user_ptr), &out, sizeof(out));
+}
+
+} // namespace
+
+void DoWinPeekMsg(arch::TrapFrame* frame)
+{
+    using namespace duetos::drivers::video;
+
+    duetos::core::Process* proc = duetos::core::CurrentProcess();
+    if (proc == nullptr || frame->rdi == 0)
+    {
+        frame->rax = 0;
+        return;
+    }
+
+    const u64 filter_hwnd = frame->rsi;
+    const bool remove = (frame->rdx != 0);
+
+    CompositorLock();
+    WindowMsg m{};
+    bool got = false;
+    if (filter_hwnd == 0)
+    {
+        // Any window owned by this pid. Peek-only path walks the
+        // first non-empty queue without mutating; remove path uses
+        // WindowPopMessageAny.
+        if (remove)
+        {
+            got = WindowPopMessageAny(proc->pid, &m);
+        }
+        else
+        {
+            for (u32 i = 0; i < kMaxWindows; ++i)
+            {
+                if (WindowIsAlive(i) && WindowOwnerPid(i) == proc->pid && WindowPeekMessage(i, &m))
+                {
+                    got = true;
+                    break;
+                }
+            }
+        }
+    }
+    else
+    {
+        const u32 h_comp = HwndToCompositorHandleForCaller(filter_hwnd, proc->pid);
+        if (h_comp != kWindowInvalid)
+        {
+            got = remove ? WindowPopMessage(h_comp, &m) : WindowPeekMessage(h_comp, &m);
+        }
+    }
+    CompositorUnlock();
+
+    if (!got)
+    {
+        frame->rax = 0;
+        return;
+    }
+    if (!CopyMsgToUser(m, frame->rdi))
+    {
+        // Copy failed; treat as "no message available" — the
+        // message is lost (peek-only case) or was already removed
+        // from the ring (remove case). Match Win32 behaviour of
+        // returning FALSE on invalid lpMsg.
+        frame->rax = 0;
+        return;
+    }
+    frame->rax = 1;
+}
+
+void DoWinGetMsg(arch::TrapFrame* frame)
+{
+    using namespace duetos::drivers::video;
+    // WM_QUIT per Win32. Breaks the user's message loop.
+    constexpr u32 kWmQuit = 0x0012;
+
+    duetos::core::Process* proc = duetos::core::CurrentProcess();
+    if (proc == nullptr || frame->rdi == 0)
+    {
+        frame->rax = static_cast<u64>(-1);
+        return;
+    }
+
+    const u64 filter_hwnd = frame->rsi;
+
+    // Poll loop — on empty queue, release the compositor lock and
+    // sleep for one scheduler tick (10 ms @ 100 Hz) before
+    // re-checking. A real wait queue is a straightforward upgrade
+    // once a workload proves the latency matters.
+    for (;;)
+    {
+        CompositorLock();
+        WindowMsg m{};
+        bool got = false;
+        if (filter_hwnd == 0)
+        {
+            got = WindowPopMessageAny(proc->pid, &m);
+        }
+        else
+        {
+            const u32 h_comp = HwndToCompositorHandleForCaller(filter_hwnd, proc->pid);
+            if (h_comp != kWindowInvalid)
+            {
+                got = WindowPopMessage(h_comp, &m);
+            }
+        }
+        CompositorUnlock();
+
+        if (got)
+        {
+            if (!CopyMsgToUser(m, frame->rdi))
+            {
+                frame->rax = static_cast<u64>(-1);
+                return;
+            }
+            // WM_QUIT breaks the caller's message loop. Standard
+            // Win32 behaviour: GetMessage returns FALSE, the
+            // message IS dequeued (the caller sees the exit code
+            // in wParam).
+            frame->rax = (m.message == kWmQuit) ? 0 : 1;
+            return;
+        }
+
+        // Nothing pending. Yield a scheduler tick so we don't
+        // spin. Task budget still ticks — a malicious PE can't
+        // wait forever past its tick_budget cap.
+        duetos::sched::SchedSleepTicks(1);
+    }
+}
+
+void DoWinPostMsg(arch::TrapFrame* frame)
+{
+    using namespace duetos::drivers::video;
+
+    duetos::core::Process* proc = duetos::core::CurrentProcess();
+    if (proc == nullptr)
+    {
+        frame->rax = 0;
+        return;
+    }
+    // PostMessage scope in v0: a process can post to its OWN
+    // windows. Cross-process PostMessage is a future extension
+    // (would need either a cap or matching IPC gate).
+    CompositorLock();
+    const u32 h_comp = HwndToCompositorHandleForCaller(frame->rdi, proc->pid);
+    bool ok = false;
+    if (h_comp != kWindowInvalid)
+    {
+        ok = WindowPostMessage(h_comp, static_cast<u32>(frame->rsi), frame->rdx, frame->r10);
+    }
+    CompositorUnlock();
+    frame->rax = ok ? 1 : 0;
+}
+
+void DoGdiFillRect(arch::TrapFrame* frame)
+{
+    using namespace duetos::drivers::video;
+
+    duetos::core::Process* proc = duetos::core::CurrentProcess();
+    if (proc == nullptr)
+    {
+        frame->rax = 0;
+        return;
+    }
+    CompositorLock();
+    const u32 h_comp = HwndToCompositorHandleForCaller(frame->rdi, proc->pid);
+    bool ok = false;
+    if (h_comp != kWindowInvalid)
+    {
+        const i32 x = static_cast<i32>(frame->rsi);
+        const i32 y = static_cast<i32>(frame->rdx);
+        const i32 w = static_cast<i32>(frame->r10);
+        const i32 h = static_cast<i32>(frame->r8);
+        WindowClientFillRect(h_comp, x, y, w, h, ColorRefToRgb(frame->r9));
+        const Theme& theme = ThemeCurrent();
+        DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+        ok = true;
+    }
+    CompositorUnlock();
+    frame->rax = ok ? 1 : 0;
+}
+
+void DoGdiRectangle(arch::TrapFrame* frame)
+{
+    using namespace duetos::drivers::video;
+
+    duetos::core::Process* proc = duetos::core::CurrentProcess();
+    if (proc == nullptr)
+    {
+        frame->rax = 0;
+        return;
+    }
+    CompositorLock();
+    const u32 h_comp = HwndToCompositorHandleForCaller(frame->rdi, proc->pid);
+    bool ok = false;
+    if (h_comp != kWindowInvalid)
+    {
+        const i32 x = static_cast<i32>(frame->rsi);
+        const i32 y = static_cast<i32>(frame->rdx);
+        const i32 w = static_cast<i32>(frame->r10);
+        const i32 h = static_cast<i32>(frame->r8);
+        WindowClientRectangle(h_comp, x, y, w, h, ColorRefToRgb(frame->r9));
+        const Theme& theme = ThemeCurrent();
+        DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+        ok = true;
+    }
+    CompositorUnlock();
+    frame->rax = ok ? 1 : 0;
+}
+
+void DoGdiTextOut(arch::TrapFrame* frame)
+{
+    using namespace duetos::drivers::video;
+
+    duetos::core::Process* proc = duetos::core::CurrentProcess();
+    if (proc == nullptr)
+    {
+        frame->rax = 0;
+        return;
+    }
+    char text[kWinTextOutMax + 1];
+    for (u32 i = 0; i < sizeof(text); ++i)
+        text[i] = '\0';
+    const u64 user_text = frame->r10;
+    const u64 user_len = frame->r8;
+    if (user_text != 0 && user_len > 0)
+    {
+        const u64 copy_len = (user_len > kWinTextOutMax) ? kWinTextOutMax : user_len;
+        if (!duetos::mm::CopyFromUser(text, reinterpret_cast<const void*>(user_text), copy_len))
+        {
+            frame->rax = 0;
+            return;
+        }
+        text[copy_len] = '\0';
+    }
+    CompositorLock();
+    const u32 h_comp = HwndToCompositorHandleForCaller(frame->rdi, proc->pid);
+    bool ok = false;
+    if (h_comp != kWindowInvalid)
+    {
+        const i32 x = static_cast<i32>(frame->rsi);
+        const i32 y = static_cast<i32>(frame->rdx);
+        WindowClientTextOut(h_comp, x, y, text, ColorRefToRgb(frame->r9));
+        const Theme& theme = ThemeCurrent();
+        DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+        ok = true;
+    }
+    CompositorUnlock();
+    frame->rax = ok ? 1 : 0;
+}
+
+void DoGdiClear(arch::TrapFrame* frame)
+{
+    using namespace duetos::drivers::video;
+
+    duetos::core::Process* proc = duetos::core::CurrentProcess();
+    if (proc == nullptr)
+    {
+        frame->rax = 0;
+        return;
+    }
+    CompositorLock();
+    const u32 h_comp = HwndToCompositorHandleForCaller(frame->rdi, proc->pid);
+    bool ok = false;
+    if (h_comp != kWindowInvalid)
+    {
+        WindowClearDisplayList(h_comp);
+        const Theme& theme = ThemeCurrent();
+        DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+        ok = true;
+    }
+    CompositorUnlock();
+    frame->rax = ok ? 1 : 0;
 }
 
 } // namespace duetos::subsystems::win32

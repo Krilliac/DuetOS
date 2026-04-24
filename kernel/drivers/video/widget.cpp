@@ -135,14 +135,26 @@ void WidgetDrawAll()
 namespace
 {
 
+struct WindowMsgRing
+{
+    WindowMsg buf[kWinMsgQueueDepth];
+    u32 head; // next read
+    u32 tail; // next write
+    u32 count;
+};
+
 struct RegisteredWindow
 {
     WindowChrome chrome;
     const char* title;          // caller-owned string, stored by reference
     WindowContentFn content_fn; // nullable per-window content drawer
     void* content_cookie;
+    u64 owner_pid; // 0 = kernel-owned boot window, >0 = ring-3 pid
+    WindowMsgRing msgs;
+    WinGdiPrim prims[kWinDisplayListDepth];
+    u32 prim_count;
     bool alive;
-    u8 _pad[7];
+    u8 _pad[3];
 };
 
 constinit RegisteredWindow g_windows[kMaxWindows] = {};
@@ -238,6 +250,13 @@ WindowHandle WindowRegister(const WindowChrome& chrome, const char* title)
     g_windows[h].chrome = chrome;
     g_windows[h].title = title;
     g_windows[h].alive = true;
+    g_windows[h].owner_pid = 0;
+    g_windows[h].msgs.head = 0;
+    g_windows[h].msgs.tail = 0;
+    g_windows[h].msgs.count = 0;
+    g_windows[h].prim_count = 0;
+    g_windows[h].content_fn = nullptr;
+    g_windows[h].content_cookie = nullptr;
     g_z_order[g_window_count] = h;
     ++g_window_count;
     // The latest-registered window lands on top of z-order and
@@ -517,20 +536,91 @@ void WindowDrawAllOrdered()
                 PaintButton(g_widgets[j]);
             }
         }
+        // Client-area rectangle — primitives + content_fn consume
+        // it (origin is just inside the 2-px border, under the
+        // title bar).
+        const auto& cc = drawn;
+        const u32 tbh_c = (cc.title_height == 0) ? 22 : cc.title_height;
+        const u32 tbh_eff_c = (tbh_c > cc.h) ? cc.h : tbh_c;
+        const u32 client_x = cc.x + 2;
+        const u32 client_y = cc.y + tbh_eff_c + 2;
+        const u32 client_w = (cc.w > 4) ? cc.w - 4 : 0;
+        const u32 client_h = (cc.h > tbh_eff_c + 4) ? cc.h - tbh_eff_c - 4 : 0;
+
+        // Replay GDI display list. Ring-3 PEs record primitives
+        // via SYS_GDI_* syscalls; the compositor paints them here
+        // on every compose. Coords are client-local; out-of-rect
+        // primitives clamp to zero size.
+        for (u32 p = 0; p < g_windows[h].prim_count; ++p)
+        {
+            const WinGdiPrim& pr = g_windows[h].prims[p];
+            if (pr.kind == WinGdiPrimKind::None)
+                continue;
+            const i32 ax = static_cast<i32>(client_x) + pr.x;
+            const i32 ay = static_cast<i32>(client_y) + pr.y;
+            if (ax < 0 || ay < 0 || client_w == 0 || client_h == 0)
+                continue;
+            // Clamp to client rect.
+            const u32 max_x = client_x + client_w;
+            const u32 max_y = client_y + client_h;
+            if (static_cast<u32>(ax) >= max_x || static_cast<u32>(ay) >= max_y)
+                continue;
+            u32 pw = static_cast<u32>(pr.w < 0 ? 0 : pr.w);
+            u32 ph = static_cast<u32>(pr.h < 0 ? 0 : pr.h);
+            if (static_cast<u32>(ax) + pw > max_x)
+                pw = max_x - static_cast<u32>(ax);
+            if (static_cast<u32>(ay) + ph > max_y)
+                ph = max_y - static_cast<u32>(ay);
+            switch (pr.kind)
+            {
+            case WinGdiPrimKind::FillRect:
+                if (pw > 0 && ph > 0)
+                {
+                    FramebufferFillRect(static_cast<u32>(ax), static_cast<u32>(ay), pw, ph, pr.colour_rgb);
+                }
+                break;
+            case WinGdiPrimKind::Rectangle:
+                if (pw > 0 && ph > 0)
+                {
+                    FramebufferDrawRect(static_cast<u32>(ax), static_cast<u32>(ay), pw, ph, pr.colour_rgb, 1);
+                }
+                break;
+            case WinGdiPrimKind::TextOut:
+            {
+                // TextOut has no w/h in the record; glyph width
+                // is computed from the stored string. Clip by
+                // trailing NUL or by remaining client-rect room.
+                const u32 px = static_cast<u32>(ax);
+                const u32 py = static_cast<u32>(ay);
+                if (py + 8 > max_y)
+                    break; // no vertical room for one 8x8 glyph row
+                const u32 avail_cols = (max_x > px) ? (max_x - px) / 8 : 0;
+                char clipped[kWinTextOutMax + 1];
+                u32 n = 0;
+                while (n < avail_cols && n < kWinTextOutMax && pr.text[n] != '\0')
+                {
+                    clipped[n] = pr.text[n];
+                    ++n;
+                }
+                clipped[n] = '\0';
+                if (n > 0)
+                {
+                    FramebufferDrawString(px, py, clipped, pr.colour_rgb, cc.colour_client);
+                }
+                break;
+            }
+            case WinGdiPrimKind::None:
+                break;
+            }
+        }
+
         // Dynamic content drawer — runs after chrome + widgets
         // so live text (e.g. task-manager stats) overlays the
         // static client-area fill. Given the client rect so
         // the drawer doesn't need to know about the title bar.
         if (g_windows[h].content_fn != nullptr)
         {
-            const auto& c = drawn;
-            const u32 tbh = (c.title_height == 0) ? 22 : c.title_height;
-            const u32 tbh_eff = (tbh > c.h) ? c.h : tbh;
-            const u32 cx = c.x + 2;
-            const u32 cy = c.y + tbh_eff + 2;
-            const u32 cw = (c.w > 4) ? c.w - 4 : 0;
-            const u32 ch = (c.h > tbh_eff + 4) ? c.h - tbh_eff - 4 : 0;
-            g_windows[h].content_fn(cx, cy, cw, ch, g_windows[h].content_cookie);
+            g_windows[h].content_fn(client_x, client_y, client_w, client_h, g_windows[h].content_cookie);
         }
     }
 }
@@ -641,6 +731,244 @@ u32 WidgetRouteMouse(u32 cursor_x, u32 cursor_y, u8 button_mask)
         }
     }
     return kWidgetInvalid;
+}
+
+// --- Owner pid / message queue / display list --------------------
+
+void WindowSetOwnerPid(WindowHandle h, u64 pid)
+{
+    if (!WindowValid(h))
+    {
+        return;
+    }
+    g_windows[h].owner_pid = pid;
+}
+
+u64 WindowOwnerPid(WindowHandle h)
+{
+    if (!WindowValid(h))
+    {
+        return 0;
+    }
+    return g_windows[h].owner_pid;
+}
+
+namespace
+{
+
+constexpr u32 kWindowHwndBias = 1; // mirrors window_syscall.cpp kHwndBias
+
+bool MsgRingPop(WindowMsgRing& r, WindowMsg* out)
+{
+    if (r.count == 0)
+    {
+        return false;
+    }
+    *out = r.buf[r.head];
+    r.head = (r.head + 1) % kWinMsgQueueDepth;
+    --r.count;
+    return true;
+}
+
+void MsgRingPush(WindowMsgRing& r, const WindowMsg& m)
+{
+    if (r.count == kWinMsgQueueDepth)
+    {
+        // Evict oldest — standard "drop-oldest" policy for a
+        // bounded input queue. Caller's syscall still reports
+        // success because the message landed (the victim was
+        // already stale).
+        r.head = (r.head + 1) % kWinMsgQueueDepth;
+        --r.count;
+    }
+    r.buf[r.tail] = m;
+    r.tail = (r.tail + 1) % kWinMsgQueueDepth;
+    ++r.count;
+}
+
+} // namespace
+
+bool WindowPostMessage(WindowHandle h, u32 message, u64 wparam, u64 lparam)
+{
+    if (!WindowValid(h))
+    {
+        return false;
+    }
+    WindowMsg m{};
+    m.hwnd_biased = h + kWindowHwndBias;
+    m.message = message;
+    m.wparam = wparam;
+    m.lparam = lparam;
+    MsgRingPush(g_windows[h].msgs, m);
+    return true;
+}
+
+bool WindowPopMessage(WindowHandle h, WindowMsg* out)
+{
+    if (!WindowValid(h) || out == nullptr)
+    {
+        return false;
+    }
+    return MsgRingPop(g_windows[h].msgs, out);
+}
+
+bool WindowPeekMessage(WindowHandle h, WindowMsg* out)
+{
+    if (!WindowValid(h) || out == nullptr)
+    {
+        return false;
+    }
+    WindowMsgRing& r = g_windows[h].msgs;
+    if (r.count == 0)
+    {
+        return false;
+    }
+    *out = r.buf[r.head];
+    return true;
+}
+
+bool WindowPopMessageAny(u64 pid, WindowMsg* out)
+{
+    if (pid == 0 || out == nullptr)
+    {
+        return false;
+    }
+    for (u32 i = 0; i < g_window_count; ++i)
+    {
+        if (!g_windows[i].alive || g_windows[i].owner_pid != pid)
+            continue;
+        if (MsgRingPop(g_windows[i].msgs, out))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool WindowAnyMessagePending(u64 pid)
+{
+    if (pid == 0)
+    {
+        return false;
+    }
+    for (u32 i = 0; i < g_window_count; ++i)
+    {
+        if (g_windows[i].alive && g_windows[i].owner_pid == pid && g_windows[i].msgs.count > 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+u32 WindowReapByOwner(u64 pid)
+{
+    if (pid == 0)
+    {
+        return 0; // refuse to reap kernel-owned windows
+    }
+    u32 reaped = 0;
+    for (u32 i = 0; i < g_window_count; ++i)
+    {
+        if (g_windows[i].alive && g_windows[i].owner_pid == pid)
+        {
+            WindowClose(static_cast<WindowHandle>(i));
+            ++reaped;
+        }
+    }
+    return reaped;
+}
+
+namespace
+{
+
+void CopyAsciiClamped(char* dst, u32 cap, const char* src)
+{
+    u32 i = 0;
+    if (src != nullptr)
+    {
+        for (; i + 1 < cap && src[i] != '\0'; ++i)
+        {
+            const char c = src[i];
+            dst[i] = (c >= 0x20 && c < 0x7F) ? c : '?';
+        }
+    }
+    dst[i] = '\0';
+}
+
+// Append a primitive, evicting oldest on overflow — mirrors
+// message-ring overflow policy so long-running redrawers don't
+// panic on fullness.
+void PrimListAppend(RegisteredWindow& w, const WinGdiPrim& p)
+{
+    if (w.prim_count == kWinDisplayListDepth)
+    {
+        for (u32 i = 1; i < kWinDisplayListDepth; ++i)
+        {
+            w.prims[i - 1] = w.prims[i];
+        }
+        w.prim_count = kWinDisplayListDepth - 1;
+    }
+    w.prims[w.prim_count] = p;
+    ++w.prim_count;
+}
+
+} // namespace
+
+void WindowClientFillRect(WindowHandle h, i32 x, i32 y, i32 w, i32 hgt, u32 rgb)
+{
+    if (!WindowValid(h))
+    {
+        return;
+    }
+    WinGdiPrim p{};
+    p.kind = WinGdiPrimKind::FillRect;
+    p.x = x;
+    p.y = y;
+    p.w = w;
+    p.h = hgt;
+    p.colour_rgb = rgb;
+    PrimListAppend(g_windows[h], p);
+}
+
+void WindowClientRectangle(WindowHandle h, i32 x, i32 y, i32 w, i32 hgt, u32 rgb)
+{
+    if (!WindowValid(h))
+    {
+        return;
+    }
+    WinGdiPrim p{};
+    p.kind = WinGdiPrimKind::Rectangle;
+    p.x = x;
+    p.y = y;
+    p.w = w;
+    p.h = hgt;
+    p.colour_rgb = rgb;
+    PrimListAppend(g_windows[h], p);
+}
+
+void WindowClientTextOut(WindowHandle h, i32 x, i32 y, const char* text, u32 rgb)
+{
+    if (!WindowValid(h))
+    {
+        return;
+    }
+    WinGdiPrim p{};
+    p.kind = WinGdiPrimKind::TextOut;
+    p.x = x;
+    p.y = y;
+    p.colour_rgb = rgb;
+    CopyAsciiClamped(p.text, sizeof(p.text), text);
+    PrimListAppend(g_windows[h], p);
+}
+
+void WindowClearDisplayList(WindowHandle h)
+{
+    if (!WindowValid(h))
+    {
+        return;
+    }
+    g_windows[h].prim_count = 0;
 }
 
 } // namespace duetos::drivers::video

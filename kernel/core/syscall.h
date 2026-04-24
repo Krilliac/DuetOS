@@ -632,6 +632,83 @@ enum SyscallNumber : u64
     //         (bounded to kWinTitleMax; nullable → "MessageBox")
     //   rax = 1 (IDOK)
     SYS_WIN_MSGBOX = 61,
+
+    // SYS_WIN_PEEK_MSG — non-blocking dequeue of one pending
+    // message for the current process.
+    //   rdi = user pointer to a 4×u64 output slot:
+    //         [hwnd_biased, message, wparam, lparam]
+    //   rsi = HWND filter (biased) — 0 = any window owned by
+    //         the caller's pid. Non-zero restricts to that one
+    //         window's queue.
+    //   rdx = bRemove (0 = peek only, non-zero = dequeue).
+    //   rax = 1 if a message was available (and, if bRemove,
+    //         removed from the queue), 0 if nothing pending.
+    // Backs Win32 PeekMessageA / PeekMessageW.
+    SYS_WIN_PEEK_MSG = 62,
+
+    // SYS_WIN_GET_MSG — blocking dequeue of one pending message.
+    //   rdi = user pointer to a 4×u64 output slot (same layout
+    //         as PEEK_MSG).
+    //   rsi = HWND filter (biased) — 0 = any.
+    //   rax = 1 for a regular message, 0 if the message was
+    //         WM_QUIT (caller breaks its message loop), u64(-1)
+    //         on bad user pointer.
+    // v0 implementation polls + SchedSleepTicks(1) when the
+    // queue is empty — 10 ms latency to an incoming message.
+    // Backs Win32 GetMessageA / GetMessageW.
+    SYS_WIN_GET_MSG = 63,
+
+    // SYS_WIN_POST_MSG — enqueue a message to a window.
+    //   rdi = HWND (biased)
+    //   rsi = message code (UINT — WM_* id)
+    //   rdx = wParam
+    //   r10 = lParam
+    //   rax = 1 on success, 0 on invalid handle.
+    // The message is appended to the target window's ring;
+    // overflow drops the oldest and the call still reports
+    // success (classic input-queue policy).
+    // Backs Win32 PostMessageA / PostMessageW.
+    SYS_WIN_POST_MSG = 64,
+
+    // SYS_GDI_FILL_RECT — record a solid-fill primitive in a
+    // window's client-area display list. The compositor replays
+    // the list after chrome on every DesktopCompose.
+    //   rdi = HWND (biased)
+    //   rsi = x (i32 client-local)
+    //   rdx = y (i32 client-local)
+    //   r10 = w (i32)
+    //   r8  = h (i32)
+    //   r9  = COLORREF in Win32 0x00BBGGRR form; the kernel
+    //         re-packs to the framebuffer's 0x00RRGGBB layout
+    //         before storage.
+    //   rax = 1 on success, 0 on invalid handle.
+    // Backs Win32 gdi32 FillRect + Rectangle's fill path.
+    SYS_GDI_FILL_RECT = 65,
+
+    // SYS_GDI_TEXT_OUT — record an ASCII TextOut primitive.
+    //   rdi = HWND (biased)
+    //   rsi = x (i32 client-local)
+    //   rdx = y (i32 client-local)
+    //   r10 = user pointer to text (bounded to kWinTextOutMax
+    //         bytes, non-ASCII stored as '?')
+    //   r8  = text length (bytes; truncated to cap)
+    //   r9  = COLORREF (0x00BBGGRR; repacked like FILL_RECT)
+    //   rax = 1 on success, 0 on bad handle / bad user pointer.
+    // Backs Win32 gdi32 TextOutA / TextOutW.
+    SYS_GDI_TEXT_OUT = 66,
+
+    // SYS_GDI_RECTANGLE — record a 1-px outline primitive.
+    //   rdi..r9 same as SYS_GDI_FILL_RECT.
+    // Backs Win32 gdi32 Rectangle (outline half only in v0 —
+    // fill is the caller's job via FillRect first).
+    SYS_GDI_RECTANGLE = 67,
+
+    // SYS_GDI_CLEAR — drop every recorded primitive for a
+    // window (backs WM_PAINT with bErase = TRUE +
+    // InvalidateRect / BeginPaint reset).
+    //   rdi = HWND (biased)
+    //   rax = 1 on success, 0 on invalid handle.
+    SYS_GDI_CLEAR = 68,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit

@@ -205,6 +205,121 @@ const char* WindowTitle(WindowHandle h);
 using WindowContentFn = void (*)(u32 x, u32 y, u32 w, u32 h, void* cookie);
 void WindowSetContentDraw(WindowHandle handle, WindowContentFn fn, void* cookie);
 
+// ---------------------------------------------------------------
+// Per-window ownership + message queue + GDI display list.
+//
+// Ring-3 windows registered via SYS_WIN_CREATE carry the owning
+// process's pid so the process-exit reaper can close every window
+// belonging to a dying process in one walk. Kernel-owned boot
+// windows (Calculator, Notepad, ...) use owner_pid == 0 so the
+// reaper never touches them.
+//
+// Each window owns a small fixed-size message ring that
+// SYS_WIN_POST_MSG enqueues into and SYS_WIN_GET/PEEK_MSG
+// dequeues from. Overflow drops the oldest message (standard
+// finite-queue policy for input events).
+//
+// Each window also owns a small display list of GDI primitives —
+// FillRect / TextOut / Rectangle recordings — that the compositor
+// replays after chrome paint on every DesktopCompose. Display-list
+// overflow drops oldest; callers that want a clean slate call
+// WindowClearDisplayList first (backing WM_PAINT / InvalidateRect
+// with bErase = TRUE).
+// ---------------------------------------------------------------
+
+/// Maximum messages queued per window. Oldest-dropped on overflow.
+constexpr u32 kWinMsgQueueDepth = 32;
+
+/// Maximum recorded GDI primitives per window. Oldest-dropped.
+constexpr u32 kWinDisplayListDepth = 32;
+
+/// Maximum ASCII text length stored per TextOut primitive.
+constexpr u32 kWinTextOutMax = 47; // + NUL = 48
+
+struct WindowMsg
+{
+    u32 hwnd_biased; // HWND as seen by user32 (biased +1)
+    u32 message;     // WM_KEYDOWN / WM_CHAR / WM_CLOSE / WM_QUIT / ...
+    u64 wparam;
+    u64 lparam;
+};
+
+enum class WinGdiPrimKind : u8
+{
+    None = 0,
+    FillRect,  // x,y,w,h,colour → solid fill relative to client origin
+    TextOut,   // x,y,colour,text → 8x8 ASCII glyphs
+    Rectangle, // x,y,w,h,colour → 1-px outline
+};
+
+struct WinGdiPrim
+{
+    WinGdiPrimKind kind;
+    u8 _pad[3];
+    i32 x, y;
+    i32 w, h; // Rectangle interprets these as width / height
+    u32 colour_rgb;
+    char text[kWinTextOutMax + 1]; // NUL-terminated ASCII (TextOut only)
+};
+
+/// Set the owning pid on `h`. Ring-3-created windows call this
+/// from the SYS_WIN_CREATE handler; boot-time windows leave it at
+/// the default 0 (kernel-owned, never reaped).
+void WindowSetOwnerPid(WindowHandle h, u64 pid);
+
+/// Enqueue a message on `h`. Returns false if the handle is
+/// invalid; on queue full the oldest message is evicted and the
+/// call still returns true.
+bool WindowPostMessage(WindowHandle h, u32 message, u64 wparam, u64 lparam);
+
+/// Dequeue a message from `h` (FIFO). Returns false if the queue
+/// is empty or the handle is invalid. Sets `*out` on success.
+bool WindowPopMessage(WindowHandle h, WindowMsg* out);
+
+/// Peek the head message without removing it. Returns false on
+/// empty / invalid handle.
+bool WindowPeekMessage(WindowHandle h, WindowMsg* out);
+
+/// Pop the first pending message across ANY alive window owned
+/// by `pid`. Matches Win32 GetMessage(hWnd=NULL) semantics scoped
+/// to the calling process. Returns false if no queued message
+/// exists across every window owned by `pid`.
+bool WindowPopMessageAny(u64 pid, WindowMsg* out);
+
+/// True iff at least one alive window owned by `pid` has a
+/// non-empty message queue. Non-blocking — the caller's message
+/// pump polls this, yields on false, and re-enters GetMessage.
+bool WindowAnyMessagePending(u64 pid);
+
+/// Close every alive window whose owner_pid matches `pid`. Called
+/// from `ProcessRelease` when the last task holding a Process
+/// drops its reference — guarantees that a ring-3 PE that exited
+/// without DestroyWindow never leaks a compositor slot. No-op for
+/// pid == 0 (would close every kernel-owned boot window).
+u32 WindowReapByOwner(u64 pid);
+
+/// Append a solid fill primitive to `h`'s display list. Coords
+/// are in window-client-local pixels (origin = top-left of the
+/// client area, just below the title bar). Overflow evicts the
+/// oldest primitive so long-running redrawers don't leak.
+void WindowClientFillRect(WindowHandle h, i32 x, i32 y, i32 w, i32 hgt, u32 rgb);
+
+/// Append a 1-pixel rectangle outline primitive.
+void WindowClientRectangle(WindowHandle h, i32 x, i32 y, i32 w, i32 hgt, u32 rgb);
+
+/// Append a TextOut primitive. `text` is copied by value (truncated
+/// to `kWinTextOutMax` ASCII bytes, non-ASCII bytes stored as '?').
+void WindowClientTextOut(WindowHandle h, i32 x, i32 y, const char* text, u32 rgb);
+
+/// Drop every recorded GDI primitive for `h` (WM_PAINT with
+/// bErase = TRUE support).
+void WindowClearDisplayList(WindowHandle h);
+
+/// Read the owning pid — used by the keyboard router to decide
+/// whether to post to the window's queue (PE-owned, pid > 0) or
+/// fall through to the native shell (pid == 0).
+u64 WindowOwnerPid(WindowHandle h);
+
 /// Paint every registered window in z-order (bottom first, top
 /// last) + render the stored title string across each title bar
 /// in the default ink colour. Intended as part of a full-desktop

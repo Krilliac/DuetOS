@@ -1304,6 +1304,52 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 continue;
             }
 
+            // PE-routed keystrokes. When the active window belongs
+            // to a ring-3 process (owner_pid > 0), post WM_KEYDOWN
+            // + WM_CHAR to its message queue and skip both the
+            // kernel-app routing and shell paths. PE pumps blocked
+            // on GetMessage wake on the next scheduler tick and
+            // dequeue the message. Modifiers already handled above
+            // (Alt+Tab / Alt+F4 / Ctrl+Alt+*) take precedence and
+            // never reach this block because they `continue` out.
+            {
+                duetos::drivers::video::CompositorLock();
+                const auto active_pe = duetos::drivers::video::WindowActive();
+                const duetos::u64 pe_pid = (active_pe != duetos::drivers::video::kWindowInvalid)
+                                               ? duetos::drivers::video::WindowOwnerPid(active_pe)
+                                               : 0;
+                if (pe_pid > 0)
+                {
+                    // WM_KEYDOWN = 0x0100; WM_CHAR = 0x0102.
+                    // wParam = virtual-key code (use raw scan/char
+                    // code for v0 — we don't have a VK table yet).
+                    // lParam = 1 (repeat count), top bits reserved.
+                    constexpr duetos::u32 kWmKeyDown = 0x0100;
+                    constexpr duetos::u32 kWmChar = 0x0102;
+                    duetos::drivers::video::WindowPostMessage(active_pe, kWmKeyDown, ev.code, 1);
+                    if (ev.code >= 0x20 && ev.code <= 0x7E)
+                    {
+                        duetos::drivers::video::WindowPostMessage(active_pe, kWmChar, ev.code, 1);
+                    }
+                    else if (ev.code == kKeyEnter)
+                    {
+                        duetos::drivers::video::WindowPostMessage(active_pe, kWmChar, '\r', 1);
+                    }
+                    else if (ev.code == kKeyBackspace)
+                    {
+                        duetos::drivers::video::WindowPostMessage(active_pe, kWmChar, 0x08, 1);
+                    }
+                    duetos::drivers::video::CompositorUnlock();
+                    // No screen repaint required — PEs own their
+                    // display list and update on next compose when
+                    // their pump calls InvalidateRect / GDI calls
+                    // directly. A future slice ties WM_PAINT to
+                    // compose.
+                    continue;
+                }
+                duetos::drivers::video::CompositorUnlock();
+            }
+
             // App-routed keystrokes. When the active window is an
             // app that registered a typed-input surface (Notes,
             // Calculator), feed it here and skip the shell path

@@ -2,6 +2,8 @@
 
 #include "../arch/x86_64/serial.h"
 #include "../debug/probes.h"
+#include "../drivers/video/theme.h"
+#include "../drivers/video/widget.h"
 #include "../mm/kheap.h"
 #include "../sched/sched.h"
 #include "klog.h"
@@ -211,6 +213,30 @@ void ProcessRelease(Process* p)
     }
 
     KBP_PROBE_V(::duetos::debug::ProbeId::kProcessDestroy, p->pid);
+
+    // Reap any windows this process registered but never
+    // DestroyWindow'd. Walks the compositor registry under the
+    // compositor lock so it serialises cleanly with the input
+    // threads + ui ticker that also draw. Triggered on the LAST
+    // reference-drop, so multi-threaded processes reap exactly
+    // once (when the final thread exits). `WindowReapByOwner`
+    // refuses pid==0 (kernel-owned boot windows) as a safety
+    // belt.
+    {
+        duetos::drivers::video::CompositorLock();
+        const u32 reaped = duetos::drivers::video::WindowReapByOwner(p->pid);
+        if (reaped > 0)
+        {
+            const duetos::drivers::video::Theme& theme = duetos::drivers::video::ThemeCurrent();
+            duetos::drivers::video::DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+            arch::SerialWrite("[proc] reap-windows pid=");
+            arch::SerialWriteHex(p->pid);
+            arch::SerialWrite(" count=");
+            arch::SerialWriteHex(reaped);
+            arch::SerialWrite("\n");
+        }
+        duetos::drivers::video::CompositorUnlock();
+    }
 
     arch::SerialWrite("[proc] destroy pid=");
     arch::SerialWriteHex(p->pid);
