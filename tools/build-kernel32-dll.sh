@@ -134,6 +134,21 @@ set +e
     /export:SetFilePointerEx \
     /export:GetFileSizeEx \
     /export:GetFileSize \
+    /export:GetSystemTimeAsFileTime \
+    /export:QueryPerformanceCounter \
+    /export:QueryPerformanceFrequency \
+    /export:GetProcessHeap \
+    /export:HeapAlloc \
+    /export:HeapFree \
+    /export:HeapSize \
+    /export:HeapReAlloc \
+    /export:HeapCreate \
+    /export:HeapDestroy \
+    /export:GetACP \
+    /export:GetOEMCP \
+    /export:IsValidCodePage \
+    /export:MultiByteToWideChar \
+    /export:WideCharToMultiByte \
     /out:"${DLL}" \
     "${OBJ}" 2>&1 | grep -v "align specified without /driver"
 LINK_RC=${PIPESTATUS[0]}

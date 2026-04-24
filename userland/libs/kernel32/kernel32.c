@@ -828,3 +828,209 @@ __declspec(dllexport) DWORD GetFileSize(HANDLE h, DWORD* lpFileSizeHigh)
         *lpFileSizeHigh = (DWORD) (size >> 32);
     return (DWORD) (size & 0xFFFFFFFFu);
 }
+
+/* ------------------------------------------------------------------
+ * Time queries (slice 20)
+ *
+ * SYS_GETTIME_FT = 17 — Windows FILETIME (100 ns ticks since 1601).
+ * SYS_NOW_NS     = 18 — nanoseconds since boot (HPET-backed).
+ *
+ * QueryPerformanceFrequency reports 1 GHz so QPC/QPF division
+ * yields seconds with ~70 ns granularity.
+ * ------------------------------------------------------------------ */
+
+__declspec(dllexport) void GetSystemTimeAsFileTime(long long* lpFileTime)
+{
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long) 17) : "memory");
+    if (lpFileTime != (long long*) 0)
+        *lpFileTime = rv;
+}
+
+__declspec(dllexport) BOOL QueryPerformanceCounter(long long* lpPerformanceCount)
+{
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long) 18) : "memory");
+    if (lpPerformanceCount != (long long*) 0)
+        *lpPerformanceCount = rv;
+    return 1;
+}
+
+__declspec(dllexport) BOOL QueryPerformanceFrequency(long long* lpFrequency)
+{
+    /* 1 GHz — pairs with QPC's nanosecond return so subtraction
+     * + division yields seconds. */
+    if (lpFrequency != (long long*) 0)
+        *lpFrequency = 1000000000LL;
+    return 1;
+}
+
+/* ------------------------------------------------------------------
+ * Heap aliases (slice 20)
+ *
+ * These all alias to the per-process heap via SYS_HEAP_*.
+ * GetProcessHeap returns a sentinel; HeapAlloc/Free/Size/ReAlloc
+ * ignore the heap handle (single-heap-per-process v0). HeapCreate /
+ * HeapDestroy pretend to succeed.
+ * ------------------------------------------------------------------ */
+
+__declspec(dllexport) HANDLE GetProcessHeap(void)
+{
+    /* Sentinel — same value as the flat stub returned, matching
+     * the per-process heap base. */
+    return (HANDLE) 0x50000000ULL;
+}
+
+__declspec(dllexport) void* HeapAlloc(HANDLE hHeap, DWORD dwFlags, SIZE_T dwBytes)
+{
+    (void) hHeap;
+    (void) dwFlags;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long) 11), "D"((long long) dwBytes)
+                     : "memory");
+    return (void*) rv;
+}
+
+__declspec(dllexport) BOOL HeapFree(HANDLE hHeap, DWORD dwFlags, void* lpMem)
+{
+    (void) hHeap;
+    (void) dwFlags;
+    if (lpMem == (void*) 0)
+        return 1;
+    long long discard;
+    __asm__ volatile("int $0x80"
+                     : "=a"(discard)
+                     : "a"((long long) 12), "D"((long long) lpMem)
+                     : "memory");
+    return 1;
+}
+
+__declspec(dllexport) SIZE_T HeapSize(HANDLE hHeap, DWORD dwFlags, const void* lpMem)
+{
+    (void) hHeap;
+    (void) dwFlags;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long) 14), "D"((long long) lpMem)
+                     : "memory");
+    return (SIZE_T) rv;
+}
+
+__declspec(dllexport) void* HeapReAlloc(HANDLE hHeap, DWORD dwFlags, void* lpMem, SIZE_T dwBytes)
+{
+    (void) hHeap;
+    (void) dwFlags;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long) 15), "D"((long long) lpMem), "S"((long long) dwBytes)
+                     : "memory");
+    return (void*) rv;
+}
+
+__declspec(dllexport) HANDLE HeapCreate(DWORD flOptions, SIZE_T dwInitialSize, SIZE_T dwMaximumSize)
+{
+    (void) flOptions;
+    (void) dwInitialSize;
+    (void) dwMaximumSize;
+    /* All heaps collapse to the per-process default. Return the
+     * sentinel from GetProcessHeap. */
+    return (HANDLE) 0x50000000ULL;
+}
+
+__declspec(dllexport) BOOL HeapDestroy(HANDLE hHeap)
+{
+    (void) hHeap;
+    return 1; /* Pretend success — we don't refcount heaps. */
+}
+
+/* ------------------------------------------------------------------
+ * Locale / code page (slice 20)
+ *
+ * v0 reports a US-English / Latin-1 locale across the board.
+ * Programs that branch on these mostly just want a sane default.
+ * ------------------------------------------------------------------ */
+
+__declspec(dllexport) UINT GetACP(void)
+{
+    return 1252; /* Western European Latin-1 ANSI code page. */
+}
+
+__declspec(dllexport) UINT GetOEMCP(void)
+{
+    return 437; /* Same as GetConsoleCP. */
+}
+
+__declspec(dllexport) BOOL IsValidCodePage(UINT codepage)
+{
+    /* Accept 437 / 1252 (the two we report) and 65001 (UTF-8). */
+    return (codepage == 437 || codepage == 1252 || codepage == 65001) ? 1 : 0;
+}
+
+/* ------------------------------------------------------------------
+ * MultiByteToWideChar / WideCharToMultiByte (slice 20)
+ *
+ * v0 only supports a 1:1 byte-to-wchar conversion (low byte of
+ * the wchar = the source byte). Sufficient for ASCII and
+ * passable for Latin-1; ignores codepage entirely. The flat
+ * stubs at kOffMBtoWC / kOffWCtoMB do the same.
+ * ------------------------------------------------------------------ */
+
+__declspec(dllexport) int MultiByteToWideChar(UINT codepage, DWORD dwFlags, const char* lpMultiByteStr, int cbMultiByte,
+                                              wchar_t16* lpWideCharStr, int cchWideChar)
+{
+    (void) codepage;
+    (void) dwFlags;
+    if (lpMultiByteStr == (const char*) 0)
+        return 0;
+    /* cbMultiByte == -1 means "input is NUL-terminated; include
+     * the terminator in the output". Compute length first. */
+    int in_len;
+    if (cbMultiByte < 0)
+    {
+        int n = 0;
+        while (lpMultiByteStr[n] != 0)
+            ++n;
+        in_len = n + 1; /* include the NUL */
+    }
+    else
+        in_len = cbMultiByte;
+    if (cchWideChar == 0 || lpWideCharStr == (wchar_t16*) 0)
+        return in_len; /* Caller is asking for required size. */
+    int copy = in_len < cchWideChar ? in_len : cchWideChar;
+    for (int i = 0; i < copy; ++i)
+        lpWideCharStr[i] = (wchar_t16) (unsigned char) lpMultiByteStr[i];
+    return copy;
+}
+
+__declspec(dllexport) int WideCharToMultiByte(UINT codepage, DWORD dwFlags, const wchar_t16* lpWideCharStr,
+                                              int cchWideChar, char* lpMultiByteStr, int cbMultiByte,
+                                              const char* lpDefaultChar, BOOL* lpUsedDefaultChar)
+{
+    (void) codepage;
+    (void) dwFlags;
+    (void) lpDefaultChar;
+    if (lpUsedDefaultChar != (BOOL*) 0)
+        *lpUsedDefaultChar = 0;
+    if (lpWideCharStr == (const wchar_t16*) 0)
+        return 0;
+    int in_len;
+    if (cchWideChar < 0)
+    {
+        int n = 0;
+        while (lpWideCharStr[n] != 0)
+            ++n;
+        in_len = n + 1;
+    }
+    else
+        in_len = cchWideChar;
+    if (cbMultiByte == 0 || lpMultiByteStr == (char*) 0)
+        return in_len;
+    int copy = in_len < cbMultiByte ? in_len : cbMultiByte;
+    for (int i = 0; i < copy; ++i)
+        lpMultiByteStr[i] = (char) (lpWideCharStr[i] & 0xFF);
+    return copy;
+}
