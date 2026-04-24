@@ -1,8 +1,10 @@
 #include "dll_loader.h"
 #include "pe_exports.h"
+#include "process.h"
 
 #include "../arch/x86_64/serial.h"
 #include "../mm/address_space.h"
+#include "../mm/kheap.h"
 
 #include "generated_customdll.h"
 
@@ -189,6 +191,69 @@ void DllLoaderSelfTest()
     SerialWriteHex(va_add);
     SerialWrite("\n");
 
+    // --- 3. Per-process DLL table (slice 3) ---
+    // Zero-initialise a scratch Process — we don't go through
+    // ProcessCreate because we only care about the DLL-table
+    // fields, and a full ProcessCreate would drag in the AS
+    // ownership transfer (the scratch AS was already released
+    // above is NOT true — we hold it through this step).
+    //
+    // Wait — we still hold `as` here; release happens below. A
+    // full ProcessCreate would take ownership of `as` and
+    // release it on ProcessRelease, which is fine: the table
+    // test is purely about whether `ProcessRegisterDllImage` +
+    // `ProcessResolveDllExport` round-trip correctly.
+    auto* proc = static_cast<Process*>(customos::mm::KMalloc(sizeof(Process)));
+    if (!Expect(proc != nullptr, "scratch Process KMalloc"))
+    {
+        customos::mm::AddressSpaceRelease(as);
+        return;
+    }
+    // Zero every byte — ProcessRegisterDllImage only reads
+    // dll_image_count + pid, ProcessResolveDllExport only reads
+    // dll_image_count + dll_images. Everything else stays zero.
+    auto* proc_bytes = reinterpret_cast<u8*>(proc);
+    for (u64 i = 0; i < sizeof(Process); ++i)
+        proc_bytes[i] = 0;
+    proc->pid = 0xD11; // visible in any [proc] dll-table FULL log line
+
+    // Register once — first slot should be filled.
+    if (!Expect(ProcessRegisterDllImage(proc, r.image), "ProcessRegisterDllImage"))
+    {
+        customos::mm::KFree(proc);
+        customos::mm::AddressSpaceRelease(as);
+        return;
+    }
+    if (!Expect(proc->dll_image_count == 1, "dll_image_count == 1"))
+    {
+        customos::mm::KFree(proc);
+        customos::mm::AddressSpaceRelease(as);
+        return;
+    }
+
+    // Case A: resolve with explicit DLL name — exact match.
+    const u64 va_add_viaproc = ProcessResolveDllExport(proc, "customdll.dll", "CustomAdd");
+    Expect(va_add_viaproc == va_add, "resolve via proc (exact dll match)");
+
+    // Case B: resolve with mixed-case DLL name — case-insensitive.
+    const u64 va_mul_viaproc = ProcessResolveDllExport(proc, "CUSTOMDLL.DLL", "CustomMul");
+    Expect(va_mul_viaproc == va_mul, "resolve via proc (ci dll match)");
+
+    // Case C: resolve with NULL dll_name — any registered DLL.
+    const u64 va_ver_viaproc = ProcessResolveDllExport(proc, nullptr, "CustomVersion");
+    Expect(va_ver_viaproc == va_ver, "resolve via proc (any dll)");
+
+    // Case D: unknown DLL name → miss even if func name matches.
+    const u64 va_wrongdll = ProcessResolveDllExport(proc, "kernel32.dll", "CustomAdd");
+    Expect(va_wrongdll == 0, "resolve via proc (wrong dll)");
+
+    // Case E: unknown function → miss.
+    const u64 va_wrongfunc = ProcessResolveDllExport(proc, "customdll.dll", "DoesNotExist");
+    Expect(va_wrongfunc == 0, "resolve via proc (wrong func)");
+
+    SerialWrite("[dll-test] ProcessRegisterDllImage + ProcessResolveDllExport OK\n");
+
+    customos::mm::KFree(proc);
     customos::mm::AddressSpaceRelease(as);
 }
 

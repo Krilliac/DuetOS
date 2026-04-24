@@ -1,6 +1,6 @@
 # PE EAT parser + DLL loader — stage 2 kickoff
 
-**Type:** Observation · **Status:** Active (stage-2 slices 1 + 2 landed) · **Last updated:** 2026-04-24
+**Type:** Observation · **Status:** Active (stage-2 slices 1-3 landed) · **Last updated:** 2026-04-24
 
 ## Context
 
@@ -236,6 +236,83 @@ common bugs:
    diverge from their ENT indices only if the parser honours
    the EOT indirection correctly.
 
+## Slice 3 — per-process DLL table
+
+Slice 2 left `DllLoad` standing alone: it returned a
+`DllImage` that callers had to hold themselves. Slice 3 wires
+the image into the per-process state so a future
+`GetProcAddress` / import-resolver rewrite can walk all DLLs
+registered on the caller's `Process` without a separate
+out-of-band table.
+
+New surface in `kernel/core/process.{h,cpp}`:
+
+```cpp
+struct Process {
+    // ... existing fields ...
+
+    static constexpr u64 kDllImageCap = 16;
+    DllImage dll_images[kDllImageCap];
+    u64      dll_image_count;
+};
+
+bool ProcessRegisterDllImage(Process* proc, const DllImage& image);
+u64  ProcessResolveDllExport(const Process* proc,
+                             const char* dll_name, const char* func_name);
+```
+
+`ProcessRegisterDllImage` copies the image into the next free
+slot and bumps the count. Returns false when the table is full
+— a hard cap of 16 DLLs per process (ample for the Win32
+closure that `windows-kill.exe` touches: ntdll + kernel32 +
+user32 + advapi32 + msvcp140 + vcruntime140 + ~7 UCRT
+apisets).
+
+`ProcessResolveDllExport` walks the registered images and
+returns the absolute VA on the first name hit, or 0 on miss.
+Key behaviours:
+
+- **DLL-name filter.** `dll_name == nullptr` searches every
+  registered DLL. A non-null `dll_name` restricts to the
+  matching DLL (case-insensitive on the DLL's own Export
+  Directory name — Win32 convention).
+- **Function-name match is case-sensitive** — delegates to
+  `PeExportLookupName`, which mirrors `GetProcAddress` on
+  real Windows.
+- **Forwarder exports return 0.** Caller must chase
+  forwarders through logic it controls; the v0 DLL cache
+  doesn't yet have the cross-DLL bookkeeping required.
+
+`ProcessCreate` zero-initialises the table. No other Win32
+tables (mutexes, events, threads, …) needed changes — the DLL
+table lives next to them and follows the same slot-reuse
+pattern the rest of the Process uses.
+
+### Self-test extension
+
+`DllLoaderSelfTest` now covers the table end-to-end: it
+`KMalloc`s a scratch `Process`, zeroes it, registers the
+loaded `DllImage`, and runs five resolve probes:
+
+| Probe | Intent |
+|-------|--------|
+| `resolve via proc (exact dll match)` | `dll="customdll.dll"` hits the slot and returns CustomAdd's VA. |
+| `resolve via proc (ci dll match)`     | `dll="CUSTOMDLL.DLL"` hits despite case mismatch — verifies the `DllNameEq` path. |
+| `resolve via proc (any dll)`          | `dll=nullptr` still finds the function because every DLL is searched. |
+| `resolve via proc (wrong dll)`        | `dll="kernel32.dll"` misses even though `CustomAdd` would otherwise match — DLL filter honoured. |
+| `resolve via proc (wrong func)`       | Valid DLL, bogus function name → clean 0 return. |
+
+### Why keep the Process zeroed manually instead of ProcessCreate?
+
+`ProcessCreate` takes ownership of an `AddressSpace`, a root
+`RamfsNode`, caps, etc. The selftest only exercises the DLL
+table fields; pushing everything else through the real
+construction path would pull in KPI surface (root nodes,
+caps) unrelated to what we're verifying. `KMalloc` + manual
+zero-init is the narrowest possible test setup and matches
+the style used by `FrameAllocatorSelfTest` /
+`KernelHeapSelfTest` for their own scratch state.
+
 ## Boot-time visibility
 
 `PeReport` now appends an `exports:` block to the diagnostic it
@@ -253,13 +330,13 @@ first real DLL embedded in ramfs will light up the full dump:
     [0x0003] CustomName -> forwarder="KERNEL32.GetCommandLineA"
 ```
 
-## What's next (stage 2 slice 3+)
+## What's next (stage 2 slice 4+)
 
 1. ~~Real test DLL.~~ **Landed in slice 2** —
    `userland/libs/customdll/`, boot-time `DllLoaderSelfTest`.
-2. **Per-process DLL table.** `Process::dll_images[]` with a
-   fixed cap; `DllLoad` registers into it, `DllResolveExport`
-   walks it first for dependency resolution.
+2. ~~Per-process DLL table.~~ **Landed in slice 3** —
+   `Process::dll_images[]`, `ProcessRegisterDllImage`,
+   `ProcessResolveDllExport`.
 3. **Recursive import resolution.** Walk the DLL's own Import
    Directory, look up each target DLL in the table (load if
    absent, detect circular dependencies), then patch the DLL's

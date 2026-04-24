@@ -47,6 +47,22 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     p->user_rsp_init = 0; // loader overrides if it wants a custom rsp
     p->user_gs_base = 0;  // PE loader sets this to the TEB VA
     p->win32_iat_miss_count = 0;
+    // DLL image table — every slot starts empty. `has_exports`
+    // = false marks a free slot (matches DllLoad's post-state
+    // on failure), and `ProcessRegisterDllImage` always writes
+    // an image with has_exports = true. Walk condition in
+    // `ProcessResolveDllExport` stops at `dll_image_count`,
+    // so the intervening bytes only need to be zero-ish.
+    for (u32 i = 0; i < Process::kDllImageCap; ++i)
+    {
+        p->dll_images[i].file = nullptr;
+        p->dll_images[i].file_len = 0;
+        p->dll_images[i].base_va = 0;
+        p->dll_images[i].size = 0;
+        p->dll_images[i].entry_rva = 0;
+        p->dll_images[i].has_exports = false;
+    }
+    p->dll_image_count = 0;
     p->tick_budget = tick_budget;
     p->ticks_used = 0;
     p->sandbox_denials = 0;
@@ -300,6 +316,80 @@ const char* CapName(Cap c)
         return "<sentinel>";
     }
     return "<unknown>";
+}
+
+namespace
+{
+
+// ASCII to-lower. Kernel has no stdlib; this keeps DLL name
+// matching case-insensitive without pulling in <cctype>.
+inline char AsciiToLower(char c)
+{
+    if (c >= 'A' && c <= 'Z')
+        return static_cast<char>(c + ('a' - 'A'));
+    return c;
+}
+
+// Case-insensitive strcmp for DLL names. Matches Win32
+// convention — lld-link emits "CUSTOMDLL.dll" or
+// "customdll.dll" inconsistently across toolchains.
+bool DllNameEq(const char* a, const char* b)
+{
+    if (a == nullptr || b == nullptr)
+        return a == b;
+    while (*a && *b)
+    {
+        if (AsciiToLower(*a) != AsciiToLower(*b))
+            return false;
+        ++a;
+        ++b;
+    }
+    return *a == *b;
+}
+
+} // namespace
+
+bool ProcessRegisterDllImage(Process* proc, const DllImage& image)
+{
+    if (proc == nullptr)
+        return false;
+    if (proc->dll_image_count >= Process::kDllImageCap)
+    {
+        arch::SerialWrite("[proc] dll-table FULL pid=");
+        arch::SerialWriteHex(proc->pid);
+        arch::SerialWrite(" cap=");
+        arch::SerialWriteHex(Process::kDllImageCap);
+        arch::SerialWrite("\n");
+        return false;
+    }
+    proc->dll_images[proc->dll_image_count] = image;
+    ++proc->dll_image_count;
+    return true;
+}
+
+u64 ProcessResolveDllExport(const Process* proc, const char* dll_name, const char* func_name)
+{
+    if (proc == nullptr || func_name == nullptr)
+        return 0;
+    for (u64 i = 0; i < proc->dll_image_count; ++i)
+    {
+        const DllImage& img = proc->dll_images[i];
+        if (!img.has_exports)
+            continue;
+        if (dll_name != nullptr)
+        {
+            const char* name = PeExportsDllName(img.exports);
+            if (!DllNameEq(name, dll_name))
+                continue;
+        }
+        PeExport e{};
+        if (!PeExportLookupName(img.exports, func_name, e))
+            continue;
+        if (e.is_forwarder)
+            return 0; // forwarder chasing: not yet implemented
+        return img.base_va + static_cast<u64>(e.rva);
+    }
+    return 0;
 }
 
 } // namespace customos::core

@@ -4,6 +4,7 @@
 #include "../fs/ramfs.h"
 #include "../mm/address_space.h"
 #include "../sched/sched.h"
+#include "dll_loader.h"
 #include "types.h"
 
 /*
@@ -323,6 +324,29 @@ struct Process
     Win32IatMiss win32_iat_misses[kWin32IatMissCap];
     u64 win32_iat_miss_count;
 
+    // Stage-2 DLL image table. Holds the loader metadata (base
+    // VA, parsed EAT, borrowed file bytes) for every DLL the
+    // loader has mapped into this process's address space.
+    //
+    // Populated by `ProcessRegisterDllImage` right after a
+    // successful `DllLoad`; walked by `ProcessResolveDllExport`
+    // to turn a {dll-opt, name} pair into an absolute VA.
+    //
+    // 16 slots is the v0 ceiling — enough for a typical Win32
+    // PE's transitive DLL closure (ntdll + kernel32 + user32 +
+    // a handful of apisets). Grow to a KMalloc'd list when a
+    // real workload pushes past this.
+    //
+    // Lookup today is name-match only (case-insensitive on the
+    // DLL name to mirror Win32 convention). The `DllImage`
+    // copies its own `file`/`file_len` borrows, so the kernel
+    // image bytes must stay alive for the Process's lifetime —
+    // which they do, because ramfs blobs are static constexpr
+    // arrays in the kernel ELF.
+    static constexpr u64 kDllImageCap = 16;
+    DllImage dll_images[kDllImageCap];
+    u64 dll_image_count;
+
     // Win32 file-handle table — backs CreateFileW / ReadFile /
     // CloseHandle / SetFilePointerEx (batch 24). Each slot is
     // tagged by `kind`: a Ramfs-backed slot stores a pointer to
@@ -623,5 +647,29 @@ void RecordSandboxDenial(Cap cap);
 /// threshold-kill still fires at exactly 100. Returns true for
 /// the 1st denial, then the 32nd, 64th, 96th, and so on.
 bool ShouldLogDenial(u64 denial_index);
+
+/// Register a loaded DLL image on `proc`. Copies `image` into
+/// the next free slot of `proc->dll_images[]` and bumps
+/// `dll_image_count`. Returns false if the table is full — the
+/// caller should treat that as a load failure (a DLL that
+/// can't be found via `ProcessResolveDllExport` is worse than
+/// not loaded, because the mapping is already in the AS).
+///
+/// `proc` must be non-null. `image` must come from a successful
+/// `DllLoad(... proc->as ...)` — the image's `base_va`/`exports`
+/// reference bytes mapped in that AS and parsed from the
+/// backing buffer; the buffer must stay alive for the Process's
+/// lifetime.
+bool ProcessRegisterDllImage(Process* proc, const DllImage& image);
+
+/// Resolve an export name against every DLL registered on
+/// `proc`. Returns the absolute VA on the first hit, or 0 on
+/// miss. When `dll_name` is non-null, only the matching DLL's
+/// EAT is consulted (case-insensitive match on the DLL's own
+/// name embedded in its Export Directory); when `dll_name` is
+/// null, every registered DLL is searched in registration
+/// order. Forwarder exports currently return 0 — the caller
+/// must handle forwarder chasing (not yet implemented).
+u64 ProcessResolveDllExport(const Process* proc, const char* dll_name, const char* func_name);
 
 } // namespace customos::core
