@@ -19,7 +19,7 @@
  *     client fill, border, close-btn     (main.cpp, via ThemeRoleChrome)
  *   - framebuffer console ink + bg       (main.cpp, via ConsoleSetColours)
  *
- * Two themes ship today:
+ * Three themes ship today:
  *
  *   - Classic : the teal / slate blue palette the first GUI slice
  *               hardcoded (preserved bit-for-bit so a user who
@@ -31,12 +31,20 @@
  *               close button. Title bars stay role-coloured so
  *               individual apps are still distinguishable at a
  *               glance, just in a much flatter / darker register.
+ *   - Amber   : a single-hue retro-CRT tribute. Every surface is a
+ *               shade of warm amber on near-black, in the spirit of
+ *               1980s IBM / Wyse monochrome terminals. Doubles as a
+ *               stress test for the theme system — any code that
+ *               silently assumes multi-hue contrast shows up here
+ *               first.
  *
- * Switching themes is a runtime operation (Ctrl+Alt+Y cycles, or
- * `theme=slate10` / `theme=classic` on the kernel cmdline picks
- * at boot). ThemeApplyToAll re-publishes every chrome colour
- * into the window registry + taskbar + console + cursor backing,
- * then the caller triggers a DesktopCompose to paint the result.
+ * Switching themes is a runtime operation (Ctrl+Alt+Y cycles, the
+ * `theme` shell command switches or cycles by name, or
+ * `theme=slate10` / `theme=classic` / `theme=amber` on the kernel
+ * cmdline picks at boot). ThemeApplyToAll re-publishes every chrome
+ * colour into the window registry + taskbar + console + cursor
+ * backing, then the caller triggers a DesktopCompose to paint the
+ * result.
  *
  * Context: kernel. Not thread-safe on its own — the switch path
  * is called from the keyboard-reader thread inside a
@@ -50,7 +58,8 @@ enum class ThemeId : u8
 {
     Classic = 0,
     Slate10 = 1,
-    kCount = 2,
+    Amber = 2,
+    kCount = 3,
 };
 
 /// Stable role tag for each application window whose chrome is

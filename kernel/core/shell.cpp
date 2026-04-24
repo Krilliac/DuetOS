@@ -23,7 +23,9 @@
 #include "../net/stack.h"
 #include "../drivers/storage/block.h"
 #include "../drivers/video/console.h"
+#include "../drivers/video/cursor.h"
 #include "../drivers/video/framebuffer.h"
+#include "../drivers/video/theme.h"
 #include "../drivers/video/widget.h"
 #include "../fs/fat32.h"
 #include "../subsystems/graphics/graphics.h"
@@ -275,6 +277,7 @@ void CmdHelp()
     ConsoleWriteln("  UPTIME       SECONDS SINCE BOOT");
     ConsoleWriteln("  DATE         WALL TIME + DATE");
     ConsoleWriteln("  WINDOWS      LIST REGISTERED WINDOWS");
+    ConsoleWriteln("  THEME [N|LIST|NEXT]  SHOW / SWITCH / CYCLE DESKTOP THEME");
     ConsoleWriteln("  MODE         SHOW CURRENT DISPLAY MODE");
     ConsoleWriteln("  LS [PATH]    LIST DIRECTORY CONTENTS");
     ConsoleWriteln("  CAT PATH     PRINT FILE CONTENTS");
@@ -474,6 +477,89 @@ void CmdWindows()
         const char* t = WindowTitle(h);
         ConsoleWriteln((t != nullptr) ? t : "(UNTITLED)");
     }
+}
+
+// Apply a theme change + repaint. Mirrors the Ctrl+Alt+Y hotkey
+// path in main.cpp: take the compositor lock, publish the new
+// palette to every chrome surface, and force one DesktopCompose
+// so the switch is visible in the same call. Separated so both
+// the "name" and "next" branches share identical repaint logic.
+void ApplyThemeAndRepaint()
+{
+    using namespace duetos::drivers::video;
+    CompositorLock();
+    ThemeApplyToAll();
+    const bool is_tty = (GetDisplayMode() == DisplayMode::Tty);
+    if (is_tty)
+    {
+        DesktopCompose(0x00000000, nullptr);
+    }
+    else
+    {
+        CursorHide();
+        DesktopCompose(ThemeCurrent().desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+        CursorShow();
+    }
+    CompositorUnlock();
+}
+
+// `theme`                 — print the current theme.
+// `theme list`            — list every registered theme, mark the current.
+// `theme next` / `cycle`  — advance to the next theme and repaint.
+// `theme <name>`          — switch by name (case-insensitive); no-op +
+//                           error if the name doesn't match a registered
+//                           theme.
+void CmdTheme(u32 argc, char** argv)
+{
+    using namespace duetos::drivers::video;
+
+    if (argc < 2)
+    {
+        ConsoleWrite("CURRENT THEME: ");
+        ConsoleWriteln(ThemeIdName(ThemeCurrentId()));
+        return;
+    }
+
+    const char* arg = argv[1];
+    if (StrEq(arg, "list") || StrEq(arg, "-l"))
+    {
+        const ThemeId current = ThemeCurrentId();
+        ConsoleWriteln("AVAILABLE THEMES:");
+        for (u32 i = 0; i < static_cast<u32>(ThemeId::kCount); ++i)
+        {
+            const auto id = static_cast<ThemeId>(i);
+            ConsoleWrite((id == current) ? "  * " : "    ");
+            ConsoleWriteln(ThemeIdName(id));
+        }
+        return;
+    }
+    if (StrEq(arg, "next") || StrEq(arg, "cycle"))
+    {
+        ThemeCycle();
+        ApplyThemeAndRepaint();
+        ConsoleWrite("THEME -> ");
+        ConsoleWriteln(ThemeIdName(ThemeCurrentId()));
+        return;
+    }
+
+    ThemeId id;
+    if (!ThemeIdFromName(arg, &id))
+    {
+        ConsoleWrite("THEME: UNKNOWN NAME '");
+        ConsoleWrite(arg);
+        ConsoleWriteln("' (try: theme list)");
+        return;
+    }
+    if (id == ThemeCurrentId())
+    {
+        ConsoleWrite("THEME ALREADY ");
+        ConsoleWriteln(ThemeIdName(id));
+        return;
+    }
+    ThemeSet(id);
+    ApplyThemeAndRepaint();
+    ConsoleWrite("THEME -> ");
+    ConsoleWriteln(ThemeIdName(ThemeCurrentId()));
 }
 
 void CmdDmesg(duetos::u32 argc, char** argv)
@@ -1306,7 +1392,7 @@ static const char* const kCommandSet[] = {
     "arp",      "ipv4",      "uuid",     "uuidgen",    "health",   "checkup",   "attacksim",  "redteam",  "memdump",
     "instr",    "dumpstate", "bp",       "breakpoint", "login",    "logout",    "passwd",     "useradd",  "userdel",
     "users",    "who",       "su",       "hwmon",      "vbe",      "ping",      "nslookup",   "ntp",      "http",
-    "shutdown", "poweroff",  "beep",     "inspect",
+    "shutdown", "poweroff",  "beep",     "inspect",    "theme",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -7400,6 +7486,11 @@ void Dispatch(char* line)
     if (StrEq(cmd, "windows"))
     {
         CmdWindows();
+        return;
+    }
+    if (StrEq(cmd, "theme"))
+    {
+        CmdTheme(argc, argv);
         return;
     }
     if (StrEq(cmd, "mode"))

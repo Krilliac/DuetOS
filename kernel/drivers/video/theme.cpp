@@ -91,6 +91,54 @@ constexpr Theme kClassic = {
     .console_bg = 0x00181028,
 };
 
+// Amber is a deliberate retro exercise — a single-hue amber palette
+// inspired by 1980s IBM / Wyse monochrome terminals. Every surface
+// is a shade of warm amber on near-black, with the brightest hues
+// reserved for the focus points (taskbar accent, banner, console
+// ink, Notes title). Useful both as a distinctive third option and
+// as a stress test for the theme system: anything that hard-coded a
+// multi-hue assumption (e.g. "title must contrast with client") will
+// break visibly here first.
+constexpr Theme kAmber = {
+    .name = "amber",
+
+    .desktop_bg = 0x000A0500,
+    .banner_fg = 0x00FFB040,
+
+    .taskbar_bg = 0x00140A00,
+    .taskbar_fg = 0x00E09030,
+    .taskbar_accent = 0x00FF9020,
+    .taskbar_tab_inactive = 0x001A1004,
+    .taskbar_border = 0x00402010,
+
+    .window_border = 0x00603018,
+    .window_close = 0x00E05020, // amber-red — still distinguishable as "close"
+
+    .role_title =
+        {
+            0x00804020, // Calculator
+            0x00A06830, // Notes — brightest title; the focus app
+            0x00703018, // TaskManager
+            0x00502010, // LogView
+            0x00805030, // Files
+            0x00402010, // Clock
+            0x00A06030, // GfxDemo
+        },
+    .role_client =
+        {
+            0x00100800, // Calculator
+            0x001A0E00, // Notes — slightly lifted so amber ink reads
+            0x00100800, // TaskManager
+            0x00080400, // LogView — deepest so amber log colours pop
+            0x00100800, // Files
+            0x00050200, // Clock — near-black ground for "LEDs"
+            0x00000000, // GfxDemo — black; overpainted every frame
+        },
+
+    .console_fg = 0x00FFA830,
+    .console_bg = 0x00080400,
+};
+
 constexpr Theme kSlate10 = {
     .name = "slate10",
 
@@ -144,6 +192,7 @@ constexpr Theme kSlate10 = {
 const Theme* const kThemes[static_cast<u32>(ThemeId::kCount)] = {
     &kClassic,
     &kSlate10,
+    &kAmber,
 };
 
 // ---------------------------------------------------------------
