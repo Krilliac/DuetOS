@@ -425,6 +425,30 @@ add_custom_command(
 list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_VCRUNTIME140_HEADER}")
 
 # ----------------------------------------------------------------------------
+# Userland msvcrt.dll — stage-2 slice 14. Retires the string
+# intrinsics (strlen / strcmp / strcpy / strchr + wide
+# variants) from the flat stubs.
+# ----------------------------------------------------------------------------
+set(CUSTOMOS_MSVCRT_SRC "${CMAKE_SOURCE_DIR}/userland/libs/msvcrt/msvcrt.c")
+set(CUSTOMOS_MSVCRT_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_msvcrt_dll.h")
+set(CUSTOMOS_MSVCRT_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-msvcrt-dll.sh")
+
+add_custom_command(
+    OUTPUT "${CUSTOMOS_MSVCRT_HEADER}"
+    COMMAND "${CUSTOMOS_MSVCRT_SCRIPT}"
+            "${CMAKE_SOURCE_DIR}"
+            "${CUSTOMOS_MSVCRT_HEADER}"
+    DEPENDS
+        "${CUSTOMOS_MSVCRT_SRC}"
+        "${CUSTOMOS_MSVCRT_SCRIPT}"
+        "${CUSTOMOS_EMBED_BLOB_SCRIPT}"
+    COMMENT "Compiling + embedding msvcrt.dll (string intrinsics retirement)"
+    VERBATIM
+)
+
+list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_MSVCRT_HEADER}")
+
+# ----------------------------------------------------------------------------
 # Sixth PE fixture: customdll_test.exe — first userland program
 # that imports from a real loaded DLL (customdll.dll) rather
 # than from the flat stubs page. Exercises stage-2 slice 6's

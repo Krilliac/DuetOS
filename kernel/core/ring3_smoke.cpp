@@ -10,6 +10,7 @@
 #include "generated_customdll2.h"
 #include "generated_customdll_test.h"
 #include "generated_kernel32_dll.h"
+#include "generated_msvcrt_dll.h"
 #include "generated_vcruntime140_dll.h"
 #include "generated_hello_pe.h"
 #include "generated_hello_winapi.h"
@@ -1914,6 +1915,10 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         // struct copy / zero-init / CRT startup. The via-DLL
         // path now fires for each.
         {"vcruntime140.dll", fs::generated::kBinVcruntime140DllBytes, fs::generated::kBinVcruntime140DllBytes_len},
+        // Stage-2 slice 14: msvcrt.dll — string intrinsics
+        // (strlen / strcmp / strcpy / strchr + wide variants).
+        // Retires the batch-7 + 29/31 flat stubs.
+        {"msvcrt.dll", fs::generated::kBinMsvcrtDllBytes, fs::generated::kBinMsvcrtDllBytes_len},
     };
     constexpr u64 kPreloadEntryCount = sizeof(preload_set) / sizeof(preload_set[0]);
     static_assert(kPreloadEntryCount <= kPreloadSlotCap, "Preload DLL list exceeds stack-local cap");
