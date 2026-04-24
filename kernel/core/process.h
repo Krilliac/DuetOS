@@ -578,6 +578,19 @@ struct Process
     LinuxSigAction linux_sigactions[kLinuxSignalCount];
     u64 linux_signal_mask; // per-process blocked-signal bitmask (rt_sigprocmask)
 
+    // Linux current-working-directory. `chdir(path)` copies the
+    // (resolved-or-not) path into this buffer; `getcwd` reads it
+    // back. v0 stores the path verbatim — no canonicalisation, no
+    // ".." collapsing — because every FAT32 path strip already
+    // happens at open-time. The default is "/" so a fresh process
+    // matches the value DoGetcwd previously hard-coded.
+    //
+    // Cap matches Linux's PATH_MAX-light: 256 bytes is enough for
+    // every path the v0 FAT32 driver and ramfs accept (their copy
+    // bounce buffers are 64 bytes), with headroom for future growth.
+    static constexpr u64 kLinuxCwdCap = 256;
+    char linux_cwd[kLinuxCwdCap];
+
     u64 refcount;
 };
 

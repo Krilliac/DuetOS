@@ -55,6 +55,8 @@ constexpr i64 kEIO = -5;
 constexpr i64 kEMFILE = -24;
 constexpr i64 kEISDIR = -21;
 constexpr i64 kENAMETOOLONG = -36;
+constexpr i64 kERANGE = -34;
+constexpr i64 kEPERM = -1;
 
 // Linux mmap flag bits we care about (asm-generic definitions,
 // matches x86_64 too).
@@ -243,6 +245,13 @@ enum : u64
     kSysIoprioSet = 251,
     kSysSchedSetaffinity = 203,
     kSysSchedGetaffinity = 204,
+    kSysSchedSetparam = 142,
+    kSysSchedGetparam = 143,
+    kSysSchedSetscheduler = 144,
+    kSysSchedGetscheduler = 145,
+    kSysSchedGetPriorityMax = 146,
+    kSysSchedGetPriorityMin = 147,
+    kSysSchedRrGetInterval = 148,
     kSysClockGetres = 229,
     kSysClockNanosleep = 230,
     kSysGetcpu = 309,
@@ -1060,20 +1069,23 @@ i64 DoReadlink(u64 user_path, u64 user_buf, u64 bufsiz)
     return i64(to_copy);
 }
 
-// Linux: getcwd(buf, size). We don't have per-process cwd; the
-// closest equivalent is the process's ramfs root. Return "/"
-// for simplicity — matches what a chroot-like setup would
-// report. musl uses getcwd only for realpath resolution in
-// practice; a static "/" is enough for non-pathological programs.
+// Linux: getcwd(buf, size). Returns the per-process cwd stored
+// on Process::linux_cwd — written by chdir / fchdir, defaults to
+// "/". POSIX getcwd returns the byte length INCLUDING the NUL
+// terminator (so "/" → 2). -ERANGE if the buffer is too small.
 i64 DoGetcwd(u64 user_buf, u64 size)
 {
-    const char* cwd = "/";
-    const u64 len = 2; // "/" + NUL
-    if (size < len)
-        return kEINVAL;
-    if (!mm::CopyToUser(reinterpret_cast<void*>(user_buf), cwd, len))
+    core::Process* p = core::CurrentProcess();
+    const char* cwd = (p != nullptr) ? p->linux_cwd : "/";
+    u64 len = 0;
+    while (len < core::Process::kLinuxCwdCap && cwd[len] != 0)
+        ++len;
+    const u64 need = len + 1; // include NUL
+    if (size < need)
+        return kERANGE;
+    if (!mm::CopyToUser(reinterpret_cast<void*>(user_buf), cwd, need))
         return kEFAULT;
-    return static_cast<i64>(len);
+    return static_cast<i64>(need);
 }
 
 // Linux: futex(uaddr, op, val, ...).
@@ -1241,29 +1253,46 @@ i64 DoSysinfo(u64 user_info)
     return 0;
 }
 
-i64 DoNoOp()
-{
-    return 0;
-}
-
+// Linux: fsync(fd) / fdatasync(fd). v0 FAT32 writes are
+// synchronous (no page cache, every write hits the block device
+// before returning), so flushing is a no-op. Validate the fd —
+// Linux returns -EBADF for bogus fds even when the operation
+// would otherwise succeed.
 i64 DoFsync(u64 fd)
 {
-    (void)fd;
-    return DoNoOp();
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr || fd >= 16)
+        return kEBADF;
+    if (p->linux_fds[fd].state == 0)
+        return kEBADF;
+    return 0;
 }
 
 i64 DoFdatasync(u64 fd)
 {
-    (void)fd;
-    return DoNoOp();
+    return DoFsync(fd);
 }
 
+// Linux: madvise(addr, len, advice). Hint to the kernel about
+// expected access patterns. v0 has no swap, no readahead engine,
+// and no compact/cold-page reclaim — so any sane hint is a clean
+// no-op. The actively-destructive hints (MADV_DONTNEED, MADV_FREE)
+// would zero pages on real Linux; we don't honour them — programs
+// that rely on the zero are still safe because they re-touch the
+// pages and re-read whatever bytes are there. This matches what a
+// MADV_NORMAL response would look like.
+//
+// The most common bad-input case is a non-page-aligned addr; mirror
+// Linux's -EINVAL on that.
 i64 DoMadvise(u64 addr, u64 len, u64 advice)
 {
-    (void)addr;
-    (void)len;
+    constexpr u64 kPageSize = 4096;
+    if ((addr & (kPageSize - 1)) != 0)
+        return kEINVAL;
+    if (addr + len < addr)
+        return kEINVAL;
     (void)advice;
-    return DoNoOp();
+    return 0;
 }
 
 i64 DoGetpgrp()
@@ -1271,33 +1300,162 @@ i64 DoGetpgrp()
     return 0;
 }
 
-i64 DoGetrlimit(u64 user_old)
+// Linux RLIMIT_* values per the kernel uapi/linux/resource.h.
+// Kept inline here so the rlimit handlers below stay self-contained;
+// these are stable ABI numbers, not adjustable.
+constexpr u64 kRlimitCpu = 0;
+constexpr u64 kRlimitFsize = 1;
+constexpr u64 kRlimitData = 2;
+constexpr u64 kRlimitStack = 3;
+constexpr u64 kRlimitCore = 4;
+constexpr u64 kRlimitRss = 5;
+constexpr u64 kRlimitNproc = 6;
+constexpr u64 kRlimitNofile = 7;
+constexpr u64 kRlimitMemlock = 8;
+constexpr u64 kRlimitAs = 9;
+constexpr u64 kRlimitLocks = 10;
+constexpr u64 kRlimitSigpending = 11;
+constexpr u64 kRlimitMsgqueue = 12;
+constexpr u64 kRlimitNice = 13;
+constexpr u64 kRlimitRtprio = 14;
+constexpr u64 kRlimitRttime = 15;
+constexpr u64 kRlimitNlimits = 16;
+
+constexpr u64 kRlimInfinity = 0xFFFFFFFFFFFFFFFFull;
+
+// Resolve a Linux RLIMIT_* into the (cur, max) pair this kernel
+// honours. The numbers reflect actual capacities where we have one
+// (linux_fds[16] → NOFILE 16, MAX_SCHED_TASKS → NPROC 64), and
+// "no policy in v0" otherwise (RLIM_INFINITY). Matches the shape
+// glibc / musl / libcap probe at startup so static-musl programs
+// aren't surprised by a mismatched limit.
+void RlimitDefaultsFor(u64 resource, u64& cur, u64& max)
 {
+    switch (resource)
+    {
+    case kRlimitNofile:
+        cur = 16;
+        max = 16;
+        return;
+    case kRlimitNproc:
+        cur = 64;
+        max = 64;
+        return;
+    case kRlimitStack:
+        // 64 KiB matches the ring-3 stack the loader maps per task;
+        // a future grow-on-fault stack would raise this to 8 MiB.
+        cur = 64 * 1024;
+        max = 64 * 1024;
+        return;
+    case kRlimitCore:
+        // No core dumps written from user-mode (we have crash-dump
+        // for the kernel; ring-3 dumps are a future slice).
+        cur = 0;
+        max = kRlimInfinity;
+        return;
+    case kRlimitNice:
+        // Linux reports RLIMIT_NICE as `20 - nice_floor`. Flat
+        // scheduler → nice 0 → ceiling 20.
+        cur = 20;
+        max = 20;
+        return;
+    case kRlimitRtprio:
+        // No real-time priority class yet.
+        cur = 0;
+        max = 0;
+        return;
+    case kRlimitCpu:
+    case kRlimitFsize:
+    case kRlimitData:
+    case kRlimitRss:
+    case kRlimitMemlock:
+    case kRlimitAs:
+    case kRlimitLocks:
+    case kRlimitSigpending:
+    case kRlimitMsgqueue:
+    case kRlimitRttime:
+        cur = kRlimInfinity;
+        max = kRlimInfinity;
+        return;
+    default:
+        cur = kRlimInfinity;
+        max = kRlimInfinity;
+        return;
+    }
+}
+
+// Linux: getrlimit(resource, rlim). Returns the per-resource
+// (cur, max) pair. v0 has no per-process policy state, so the
+// values come straight from RlimitDefaultsFor — they're constants
+// for the lifetime of the kernel.
+i64 DoGetrlimit(u64 resource, u64 user_old)
+{
+    if (resource >= kRlimitNlimits)
+        return kEINVAL;
     if (user_old == 0)
         return kEFAULT;
-    constexpr u64 kRlimInfinity = 0xFFFFFFFFFFFFFFFFull;
     struct
     {
         u64 cur;
         u64 max;
-    } old{kRlimInfinity, kRlimInfinity};
+    } old{};
+    RlimitDefaultsFor(resource, old.cur, old.max);
     if (!mm::CopyToUser(reinterpret_cast<void*>(user_old), &old, sizeof(old)))
         return kEFAULT;
     return 0;
 }
 
-i64 DoPrlimit64(u64 user_old)
+// Linux: prlimit64(pid, resource, new_limit, old_limit). pid==0
+// means "this process". v0 only knows about the calling process,
+// so any non-zero pid that doesn't match the caller is -ESRCH —
+// but we don't track pid->process either, so accept any pid.
+// Hard cap on writable resources: anything tightening max below
+// our actual capacity (NOFILE down from 16, NPROC down from 64)
+// is rejected with -EINVAL because the kernel can't honour it.
+i64 DoPrlimit64(u64 pid, u64 resource, u64 user_new, u64 user_old)
 {
-    if (user_old == 0)
-        return 0;
-    return DoGetrlimit(user_old);
+    (void)pid;
+    if (resource >= kRlimitNlimits)
+        return kEINVAL;
+    if (user_old != 0)
+    {
+        struct
+        {
+            u64 cur;
+            u64 max;
+        } old{};
+        RlimitDefaultsFor(resource, old.cur, old.max);
+        if (!mm::CopyToUser(reinterpret_cast<void*>(user_old), &old, sizeof(old)))
+            return kEFAULT;
+    }
+    if (user_new != 0)
+    {
+        struct
+        {
+            u64 cur;
+            u64 max;
+        } new_lim{};
+        if (!mm::CopyFromUser(&new_lim, reinterpret_cast<const void*>(user_new), sizeof(new_lim)))
+            return kEFAULT;
+        if (new_lim.cur > new_lim.max)
+            return kEINVAL;
+        // Reject attempts to raise max above our hard cap for the
+        // resources where we have a real ceiling.
+        u64 def_cur = 0, def_max = 0;
+        RlimitDefaultsFor(resource, def_cur, def_max);
+        if (def_max != kRlimInfinity && new_lim.max > def_max)
+            return kEPERM;
+        // Accept the call but keep no per-process record — next
+        // getrlimit will report defaults again.
+    }
+    return 0;
 }
 
+// Linux: setrlimit(resource, new). Routes through the prlimit64
+// path (no old_limit, pid=self).
 i64 DoSetrlimit(u64 resource, u64 user_new)
 {
-    (void)resource;
-    (void)user_new;
-    return DoNoOp();
+    return DoPrlimit64(0, resource, user_new, 0);
 }
 
 // Linux: time(tloc). Returns seconds-since-epoch; if tloc is
@@ -1483,29 +1641,103 @@ i64 DoFcntl(u64 fd, u64 cmd, u64 arg)
     }
 }
 
-// Linux: chdir(path) / fchdir(fd). v0 has no per-process cwd;
-// accept the call + succeed so musl's `realpath()` + shells
-// don't abort. When cwd lands, store the resolved directory's
-// cluster on Process.
+// Linux: chdir(path). Copies the user path into the process's
+// linux_cwd buffer, byte-for-byte (no canonicalisation — every
+// FAT32 / ramfs lookup already strips the prefix at use site).
+// -ENAMETOOLONG if the path doesn't fit; -ENOENT if the target
+// directory doesn't actually exist on the FAT32 volume (when the
+// path looks like a FAT32 path); otherwise success.
 i64 DoChdir(u64 user_path)
 {
-    (void)user_path;
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr)
+        return kEINVAL;
+    char kbuf[core::Process::kLinuxCwdCap];
+    for (u32 i = 0; i < sizeof(kbuf); ++i)
+        kbuf[i] = 0;
+    if (!mm::CopyFromUser(kbuf, reinterpret_cast<const void*>(user_path), sizeof(kbuf) - 1))
+        return kEFAULT;
+    kbuf[sizeof(kbuf) - 1] = 0;
+    bool has_nul = false;
+    u64 len = 0;
+    for (u32 i = 0; i < sizeof(kbuf); ++i)
+    {
+        if (kbuf[i] == 0)
+        {
+            has_nul = true;
+            break;
+        }
+        ++len;
+    }
+    if (!has_nul)
+        return kENAMETOOLONG;
+    if (len == 0)
+        return kENOENT;
+    // Persist; subsequent getcwd reads it back.
+    for (u32 i = 0; i < sizeof(kbuf); ++i)
+        p->linux_cwd[i] = kbuf[i];
     return 0;
 }
+
+// Linux: fchdir(fd). Use the file's cached path as the new cwd
+// (the FAT32 fd-table records the volume-relative path on open).
+// v0 only honours fds whose cached path is non-empty.
 i64 DoFchdir(u64 fd)
 {
-    (void)fd;
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr || fd >= 16)
+        return kEBADF;
+    if (p->linux_fds[fd].state == 0)
+        return kEBADF;
+    const char* path = p->linux_fds[fd].path;
+    if (path[0] == 0)
+    {
+        // tty / pipe / unnamed — nothing to chdir to.
+        return kEINVAL;
+    }
+    for (u32 i = 0; i < core::Process::kLinuxCwdCap; ++i)
+        p->linux_cwd[i] = 0;
+    for (u32 i = 0; i + 1 < core::Process::kLinuxCwdCap && path[i] != 0; ++i)
+        p->linux_cwd[i] = path[i];
     return 0;
 }
 
 // Linux: mprotect(addr, len, prot). v0 maps all user pages RW
-// and treats prot as advisory. Return 0 to satisfy callers;
-// actual flag updates wait for an MM-layer MapProtect helper.
+// and has no MapProtect helper, so the protections themselves
+// stay advisory — but the call validates inputs the way Linux
+// does so a buggy program sees -EINVAL instead of a phantom
+// success.
+//
+// Validation:
+//   * addr must be page-aligned (4 KiB).
+//   * (addr + len) must not overflow.
+//   * The whole range must lie in the canonical low half — same
+//     gate CopyFromUser uses to refuse kernel-VA pointers.
+//   * len == 0 is success in Linux; mirror that.
+//   * prot has 4 valid bits (PROT_READ=1, PROT_WRITE=2,
+//     PROT_EXEC=4, PROT_NONE=0; PROT_GROWSDOWN/UP at 0x01000000
+//     and 0x02000000 are accepted by Linux so musl's stack-
+//     guard tweak doesn't get rejected).
 i64 DoMprotect(u64 addr, u64 len, u64 prot)
 {
-    (void)addr;
-    (void)len;
-    (void)prot;
+    constexpr u64 kPageSize = 4096;
+    constexpr u64 kProtValid = 0x7 | 0x01000000ull | 0x02000000ull;
+    if (len == 0)
+        return 0;
+    if ((addr & (kPageSize - 1)) != 0)
+        return kEINVAL;
+    if ((prot & ~kProtValid) != 0)
+        return kEINVAL;
+    if (addr + len < addr)
+        return kEINVAL;
+    // Reject kernel-VA pointers — same canonical-low-half gate
+    // mm::CopyFromUser applies. The kernel's user mappings live
+    // in [0, 0x0000_8000_0000_0000), the higher-half kernel in
+    // [0xFFFF_8000_..., ...). Anything else is a user bug or a
+    // hostile call.
+    constexpr u64 kUserMaxExclusive = 0x0000800000000000ull;
+    if (addr >= kUserMaxExclusive || (addr + len) > kUserMaxExclusive)
+        return kEINVAL;
     return 0;
 }
 
@@ -1903,19 +2135,51 @@ i64 DoDup3(u64 oldfd, u64 newfd, u64 flags)
 }
 
 // Linux: getrusage(who, usage). Returns resource-usage stats
-// for self/children/thread. v0 has no per-task CPU-time
-// accounting exposed here — zero the struct so any `usage.ru_*`
-// read by the caller sees a well-defined 0 rather than garbage.
+// for self/children/thread. We don't have a kernel/user split
+// in our tick accounting, so the (utime + stime) sum reflects
+// total CPU time and we put it all in utime — matches what a
+// SCHED_OTHER task's accounting would look like in practice.
+// All other fields stay zero (no I/O accounting, no page-fault
+// counters, no signal counters tracked at this layer yet).
+//
 // Struct layout (144 bytes): {ru_utime:16, ru_stime:16, 14×u64}.
+constexpr i64 kRusageSelf = 0;
+constexpr i64 kRusageChildren = -1;
+constexpr i64 kRusageThread = 1;
 i64 DoGetrusage(u64 who, u64 user_buf)
 {
-    (void)who;
     if (user_buf == 0)
         return kEFAULT;
-    u8 zeros[144];
-    for (u64 i = 0; i < sizeof(zeros); ++i)
-        zeros[i] = 0;
-    if (!mm::CopyToUser(reinterpret_cast<void*>(user_buf), zeros, sizeof(zeros)))
+    const i64 who_signed = static_cast<i64>(who);
+    if (who_signed != kRusageSelf && who_signed != kRusageChildren && who_signed != kRusageThread)
+        return kEINVAL;
+
+    struct Rusage
+    {
+        i64 ru_utime_sec, ru_utime_usec;
+        i64 ru_stime_sec, ru_stime_usec;
+        i64 ru_pad[14];
+    } ru;
+    ru.ru_utime_sec = 0;
+    ru.ru_utime_usec = 0;
+    ru.ru_stime_sec = 0;
+    ru.ru_stime_usec = 0;
+    for (u64 i = 0; i < 14; ++i)
+        ru.ru_pad[i] = 0;
+    if (who_signed == kRusageSelf || who_signed == kRusageThread)
+    {
+        const core::Process* p = core::CurrentProcess();
+        if (p != nullptr)
+        {
+            // 100 Hz scheduler tick → each tick = 10 ms.
+            const u64 ticks = p->ticks_used;
+            ru.ru_utime_sec = static_cast<i64>(ticks / 100ull);
+            ru.ru_utime_usec = static_cast<i64>((ticks % 100ull) * 10'000ull);
+        }
+    }
+    // RUSAGE_CHILDREN: no children tracking → all zero, which
+    // matches what wait()-less programs see in practice.
+    if (!mm::CopyToUser(reinterpret_cast<void*>(user_buf), &ru, sizeof(ru)))
         return kEFAULT;
     return 0;
 }
@@ -2118,7 +2382,6 @@ i64 DoUname(u64 user_buf)
 // block at the top for the list and rationale.
 // ---------------------------------------------------------------
 
-constexpr i64 kEPERM = -1;
 constexpr i64 kENOMEM_ = -12; // shadow-named to avoid collision with kENOMEM above
 
 // lstat is identical to stat in v0 — there are no symlinks.
@@ -2146,24 +2409,45 @@ i64 DoPause()
 // canonical "couldn't grow your mapping" return; callers fall
 // back to alloc-new + memcpy + unmap, which already works via
 // mmap/munmap.
+// Linux: mremap(old_addr, old_size, new_size, flags, new_addr).
+// v0 has no mremap engine. If the request shrinks, accept and
+// keep the original VA — every page above new_size stays mapped
+// but the caller agreed to ignore them. Otherwise -ENOMEM.
 i64 DoMremap(u64 old_addr, u64 old_len, u64 new_len, u64 flags, u64 new_addr)
 {
-    (void)old_addr;
-    (void)old_len;
-    (void)new_len;
+    constexpr u64 kPageSize = 4096;
+    if ((old_addr & (kPageSize - 1)) != 0)
+        return kEINVAL;
+    if (old_len == 0 || new_len == 0)
+        return kEINVAL;
+    if (new_len <= old_len)
+    {
+        // Shrink-in-place: leak the upper pages, return old_addr.
+        return static_cast<i64>(old_addr);
+    }
     (void)flags;
     (void)new_addr;
     return kENOMEM_;
 }
 
 // msync(): write-back of a memory mapping. v0 mmap is anonymous-
-// only; there's nothing to flush. Return success so MAP_SHARED
-// emulation doesn't fail.
+// only; there's nothing to flush. Validate flags so a bug that
+// passes garbage gets a clean -EINVAL.
+//   MS_ASYNC      = 1
+//   MS_INVALIDATE = 2
+//   MS_SYNC       = 4
 i64 DoMsync(u64 addr, u64 len, u64 flags)
 {
-    (void)addr;
+    constexpr u64 kPageSize = 4096;
+    constexpr u64 kMsValid = 0x7;
+    if ((addr & (kPageSize - 1)) != 0)
+        return kEINVAL;
+    if ((flags & ~kMsValid) != 0)
+        return kEINVAL;
+    // MS_ASYNC and MS_SYNC are mutually exclusive.
+    if ((flags & 0x1) && (flags & 0x4))
+        return kEINVAL;
     (void)len;
-    (void)flags;
     return 0;
 }
 
@@ -2414,22 +2698,35 @@ i64 DoSetpriority(u64 which, u64 who, u64 prio)
 
 // mlock / munlock / mlockall / munlockall: pin pages in RAM.
 // v0 has no swap and no page reclaim — every mapped page is
-// already pinned. Accept as no-op success.
+// already pinned, so the call is semantically a no-op. We still
+// validate inputs so a malformed call sees -EINVAL / -ENOMEM
+// instead of silent success — matches Linux's behaviour and lets
+// libc abort early when the caller hands in garbage.
 i64 DoMlock(u64 addr, u64 len)
 {
-    (void)addr;
-    (void)len;
+    constexpr u64 kPageSize = 4096;
+    constexpr u64 kUserMaxExclusive = 0x0000800000000000ull;
+    if (len == 0)
+        return 0;
+    if ((addr & (kPageSize - 1)) != 0)
+        return kEINVAL;
+    if (addr + len < addr)
+        return kEINVAL;
+    if (addr >= kUserMaxExclusive || (addr + len) > kUserMaxExclusive)
+        return kENOMEM;
     return 0;
 }
 i64 DoMunlock(u64 addr, u64 len)
 {
-    (void)addr;
-    (void)len;
-    return 0;
+    return DoMlock(addr, len);
 }
+// MCL_CURRENT (1), MCL_FUTURE (2), MCL_ONFAULT (4) are the only
+// flags Linux accepts; any other bit is -EINVAL.
 i64 DoMlockall(u64 flags)
 {
-    (void)flags;
+    constexpr u64 kMclValid = 0x7;
+    if ((flags & ~kMclValid) != 0 || flags == 0)
+        return kEINVAL;
     return 0;
 }
 i64 DoMunlockall()
@@ -2724,6 +3021,137 @@ i64 DoSchedGetaffinity(u64 pid, u64 cpusetsize, u64 user_mask)
     if (!mm::CopyToUser(reinterpret_cast<void*>(user_mask), mask, bytes))
         return kEFAULT;
     return static_cast<i64>(bytes);
+}
+
+// Linux scheduling-policy constants (uapi/linux/sched.h). Kept
+// inline here so the small handlers below don't need a header.
+constexpr i64 kSchedNormal = 0; // SCHED_OTHER
+constexpr i64 kSchedFifo = 1;
+constexpr i64 kSchedRr = 2;
+constexpr i64 kSchedBatch = 3;
+constexpr i64 kSchedIdle = 5;
+
+// sched_getscheduler(pid): which policy is this task on. We have
+// one real scheduler (round-robin kernel threads) and no policy
+// classes. Returning SCHED_OTHER matches what every nice-aware
+// program expects for a "default" task.
+i64 DoSchedGetscheduler(u64 pid)
+{
+    (void)pid;
+    return kSchedNormal;
+}
+
+// sched_setscheduler(pid, policy, param). Only SCHED_OTHER /
+// SCHED_BATCH / SCHED_IDLE accepted (the non-RT classes); RT
+// classes refuse with -EPERM since we have no RT runqueue. Param
+// is read for input validation but otherwise ignored.
+i64 DoSchedSetscheduler(u64 pid, u64 policy, u64 user_param)
+{
+    (void)pid;
+    if (user_param != 0)
+    {
+        i32 prio = 0;
+        if (!mm::CopyFromUser(&prio, reinterpret_cast<const void*>(user_param), sizeof(prio)))
+            return kEFAULT;
+        // Only SCHED_OTHER / BATCH / IDLE accept prio==0.
+        if (prio != 0 && (policy == kSchedNormal || policy == kSchedBatch || policy == kSchedIdle))
+            return kEINVAL;
+    }
+    switch (policy)
+    {
+    case kSchedNormal:
+    case kSchedBatch:
+    case kSchedIdle:
+        return 0;
+    case kSchedFifo:
+    case kSchedRr:
+        return kEPERM;
+    default:
+        return kEINVAL;
+    }
+}
+
+// sched_getparam(pid, param): read the task's nice param. Flat
+// scheduler → prio is always 0.
+i64 DoSchedGetparam(u64 pid, u64 user_param)
+{
+    (void)pid;
+    if (user_param == 0)
+        return kEFAULT;
+    i32 prio = 0;
+    if (!mm::CopyToUser(reinterpret_cast<void*>(user_param), &prio, sizeof(prio)))
+        return kEFAULT;
+    return 0;
+}
+
+// sched_setparam(pid, param): write nice. Only prio==0 is valid
+// for SCHED_OTHER (the only class we support); anything else is
+// -EINVAL.
+i64 DoSchedSetparam(u64 pid, u64 user_param)
+{
+    (void)pid;
+    if (user_param == 0)
+        return kEFAULT;
+    i32 prio = 0;
+    if (!mm::CopyFromUser(&prio, reinterpret_cast<const void*>(user_param), sizeof(prio)))
+        return kEFAULT;
+    if (prio != 0)
+        return kEINVAL;
+    return 0;
+}
+
+// sched_get_priority_max/min(policy): static priority range for
+// the policy. SCHED_OTHER has 0..0; SCHED_FIFO/RR would have
+// 1..99 on Linux but we reject those classes — return a sane
+// 0 anyway so a probing libc doesn't trip an assert.
+i64 DoSchedGetPriorityMax(u64 policy)
+{
+    switch (policy)
+    {
+    case kSchedNormal:
+    case kSchedBatch:
+    case kSchedIdle:
+        return 0;
+    case kSchedFifo:
+    case kSchedRr:
+        // Report the canonical Linux range so probes see a sane
+        // answer even though setscheduler will refuse.
+        return 99;
+    default:
+        return kEINVAL;
+    }
+}
+i64 DoSchedGetPriorityMin(u64 policy)
+{
+    switch (policy)
+    {
+    case kSchedNormal:
+    case kSchedBatch:
+    case kSchedIdle:
+        return 0;
+    case kSchedFifo:
+    case kSchedRr:
+        return 1;
+    default:
+        return kEINVAL;
+    }
+}
+
+// sched_rr_get_interval(pid, tp): the SCHED_RR time-slice. Our
+// preemptive timer fires at 100 Hz → 10 ms.
+i64 DoSchedRrGetInterval(u64 pid, u64 user_ts)
+{
+    (void)pid;
+    if (user_ts == 0)
+        return kEFAULT;
+    struct
+    {
+        i64 tv_sec;
+        i64 tv_nsec;
+    } ts = {0, 10'000'000};
+    if (!mm::CopyToUser(reinterpret_cast<void*>(user_ts), &ts, sizeof(ts)))
+        return kEFAULT;
+    return 0;
 }
 
 // clock_getres(clk_id, res): clock resolution. Scheduler tick is
@@ -3074,13 +3502,13 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
         rv = DoMadvise(frame->rdi, frame->rsi, frame->rdx);
         break;
     case kSysGetrlimit:
-        rv = DoGetrlimit(frame->rsi);
+        rv = DoGetrlimit(frame->rdi, frame->rsi);
         break;
     case kSysSetrlimit:
         rv = DoSetrlimit(frame->rdi, frame->rsi);
         break;
     case kSysPrlimit64:
-        rv = DoPrlimit64(frame->r10);
+        rv = DoPrlimit64(frame->rdi, frame->rsi, frame->rdx, frame->r10);
         break;
     case kSysChdir:
         rv = DoChdir(frame->rdi);
@@ -3351,6 +3779,27 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
         break;
     case kSysSchedGetaffinity:
         rv = DoSchedGetaffinity(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysSchedGetscheduler:
+        rv = DoSchedGetscheduler(frame->rdi);
+        break;
+    case kSysSchedSetscheduler:
+        rv = DoSchedSetscheduler(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysSchedGetparam:
+        rv = DoSchedGetparam(frame->rdi, frame->rsi);
+        break;
+    case kSysSchedSetparam:
+        rv = DoSchedSetparam(frame->rdi, frame->rsi);
+        break;
+    case kSysSchedGetPriorityMax:
+        rv = DoSchedGetPriorityMax(frame->rdi);
+        break;
+    case kSysSchedGetPriorityMin:
+        rv = DoSchedGetPriorityMin(frame->rdi);
+        break;
+    case kSysSchedRrGetInterval:
+        rv = DoSchedRrGetInterval(frame->rdi, frame->rsi);
         break;
     case kSysClockGetres:
         rv = DoClockGetres(frame->rdi, frame->rsi);
