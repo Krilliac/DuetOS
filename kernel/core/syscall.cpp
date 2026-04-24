@@ -1438,6 +1438,19 @@ void SyscallDispatch(arch::TrapFrame* frame)
         subsystems::win32::DoWinBeep(frame);
         return;
 
+    case SYS_GDI_BITBLT:
+        subsystems::win32::DoGdiBitBlt(frame);
+        return;
+    case SYS_WIN_BEGIN_PAINT:
+        subsystems::win32::DoWinBeginPaint(frame);
+        return;
+    case SYS_WIN_END_PAINT:
+        subsystems::win32::DoWinEndPaint(frame);
+        return;
+    case SYS_GDI_FILL_RECT_USER:
+        subsystems::win32::DoGdiFillRectUser(frame);
+        return;
+
     case SYS_GFX_D3D_STUB:
     {
         // rdi = kind (1 = D3D11, 2 = D3D12, 3 = DXGI). Forward to

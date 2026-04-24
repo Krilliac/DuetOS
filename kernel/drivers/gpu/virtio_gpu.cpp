@@ -510,6 +510,90 @@ void ResetLastDisplay()
     }
 }
 
+// Generic command submission over controlq. Builds a two-descriptor
+// chain (device-read of req, device-write of resp), kicks the
+// device, polls the used ring with a bounded spin, returns true on
+// a timely completion. `resp_bytes_out` (optional) captures the
+// used-ring len field so callers can verify a variable-length
+// response shape.
+//
+// Supports up to one request + one response per call — enough for
+// every GPU command whose backing list fits in the req_buf page
+// (which is the case for every 2D-cycle command since ATTACH_BACKING
+// only needs a handful of mem_entry records for single-chunk
+// resources).
+bool SubmitControlq(u32 req_len, u32 resp_len, u32* resp_bytes_out)
+{
+    if (!g_cq.up)
+        return false;
+    if (req_len > 4096 || resp_len > 4096)
+        return false;
+
+    // Descriptor 0: device-read of request.
+    g_cq.desc[0].addr = g_cq.req_phys;
+    g_cq.desc[0].len = req_len;
+    g_cq.desc[0].flags = kDescNext;
+    g_cq.desc[0].next = 1;
+
+    // Descriptor 1: device-write of response.
+    g_cq.desc[1].addr = g_cq.resp_phys;
+    g_cq.desc[1].len = resp_len;
+    g_cq.desc[1].flags = kDescWrite;
+    g_cq.desc[1].next = 0;
+
+    const u16 slot = g_cq.next_avail % g_cq.queue_size;
+    g_cq.avail_ring[slot] = 0; // head descriptor index
+    asm volatile("" ::: "memory");
+    g_cq.next_avail = static_cast<u16>(g_cq.next_avail + 1);
+    g_cq.avail_hdr->idx = g_cq.next_avail;
+
+    asm volatile("" ::: "memory");
+
+    *reinterpret_cast<volatile u16*>(g_cq.notify_reg) = 0;
+
+    u64 spins = 0;
+    while (g_cq.used_hdr->idx == g_cq.last_used_idx)
+    {
+        asm volatile("pause" ::: "memory");
+        if (++spins > 1'000'000)
+        {
+            arch::SerialWrite("[virtio-gpu] submit: timeout waiting for used ring\n");
+            return false;
+        }
+    }
+    const u16 used_slot = g_cq.last_used_idx % g_cq.queue_size;
+    const u32 resp_bytes = g_cq.used_ring[used_slot].len;
+    g_cq.last_used_idx = static_cast<u16>(g_cq.last_used_idx + 1);
+
+    asm volatile("" ::: "memory");
+
+    if (resp_bytes_out != nullptr)
+        *resp_bytes_out = resp_bytes;
+    return true;
+}
+
+// Zero the request + response buffers (no memset on freestanding
+// link) up to the given lengths — caller populates req after.
+void ClearIoBuffers(u32 req_len, u32 resp_len)
+{
+    for (u32 i = 0; i < req_len; ++i)
+        g_cq.req_buf[i] = 0;
+    for (u32 i = 0; i < resp_len; ++i)
+        g_cq.resp_buf[i] = 0;
+}
+
+void FillCtrlHdr(volatile GpuCtrlHdr* h, u32 type)
+{
+    h->type = type;
+    h->flags = 0;
+    h->fence_id = 0;
+    h->ctx_id = 0;
+    h->ring_idx = 0;
+    h->padding[0] = 0;
+    h->padding[1] = 0;
+    h->padding[2] = 0;
+}
+
 const VirtioDisplayInfo& VirtioGpuGetDisplayInfo()
 {
     ResetLastDisplay();
@@ -519,68 +603,12 @@ const VirtioDisplayInfo& VirtioGpuGetDisplayInfo()
         return g_last_display;
     }
 
-    // Build request in req_buf. GET_DISPLAY_INFO is just the header
-    // with type=0x0100; no body.
-    auto* req = reinterpret_cast<volatile GpuCtrlHdr*>(g_cq.req_buf);
-    req->type = kCmdGetDisplayInfo;
-    req->flags = 0;
-    req->fence_id = 0;
-    req->ctx_id = 0;
-    req->ring_idx = 0;
-    req->padding[0] = 0;
-    req->padding[1] = 0;
-    req->padding[2] = 0;
+    ClearIoBuffers(sizeof(GpuCtrlHdr), sizeof(GpuRespDisplayInfo));
+    FillCtrlHdr(reinterpret_cast<volatile GpuCtrlHdr*>(g_cq.req_buf), kCmdGetDisplayInfo);
 
-    // Clear response area so we can tell parsed-vs-stale.
-    {
-        u8* r = g_cq.resp_buf;
-        for (u64 i = 0; i < sizeof(GpuRespDisplayInfo); ++i)
-            r[i] = 0;
-    }
-
-    // Descriptor 0: device-read of req header (24 bytes).
-    g_cq.desc[0].addr = g_cq.req_phys;
-    g_cq.desc[0].len = sizeof(GpuCtrlHdr);
-    g_cq.desc[0].flags = kDescNext;
-    g_cq.desc[0].next = 1;
-
-    // Descriptor 1: device-write of response.
-    g_cq.desc[1].addr = g_cq.resp_phys;
-    g_cq.desc[1].len = sizeof(GpuRespDisplayInfo);
-    g_cq.desc[1].flags = kDescWrite;
-    g_cq.desc[1].next = 0;
-
-    // Publish on avail ring.
-    const u16 slot = g_cq.next_avail % g_cq.queue_size;
-    g_cq.avail_ring[slot] = 0; // head descriptor index
-    asm volatile("" ::: "memory");
-    g_cq.next_avail = static_cast<u16>(g_cq.next_avail + 1);
-    g_cq.avail_hdr->idx = g_cq.next_avail;
-
-    asm volatile("" ::: "memory");
-
-    // Kick the device. virtio-pci modern: write the queue index as
-    // u16 to the notify register.
-    *reinterpret_cast<volatile u16*>(g_cq.notify_reg) = 0;
-
-    // Poll the used ring. GET_DISPLAY_INFO is synchronous on QEMU
-    // (a few µs). Bound the spin so a broken device doesn't wedge
-    // the kernel forever — ~1M pause iterations is plenty.
-    u64 spins = 0;
-    while (g_cq.used_hdr->idx == g_cq.last_used_idx)
-    {
-        asm volatile("pause" ::: "memory");
-        if (++spins > 1'000'000)
-        {
-            arch::SerialWrite("[virtio-gpu] GET_DISPLAY_INFO: timeout waiting for used ring\n");
-            return g_last_display;
-        }
-    }
-    const u16 used_slot = g_cq.last_used_idx % g_cq.queue_size;
-    const u32 resp_bytes = g_cq.used_ring[used_slot].len;
-    g_cq.last_used_idx = static_cast<u16>(g_cq.last_used_idx + 1);
-
-    asm volatile("" ::: "memory");
+    u32 resp_bytes = 0;
+    if (!SubmitControlq(sizeof(GpuCtrlHdr), sizeof(GpuRespDisplayInfo), &resp_bytes))
+        return g_last_display;
 
     auto* resp = reinterpret_cast<const GpuRespDisplayInfo*>(g_cq.resp_buf);
     if (resp->hdr.type != kRespOkDisplayInfo)
@@ -635,6 +663,286 @@ const VirtioDisplayInfo& VirtioGpuGetDisplayInfo()
 const VirtioDisplayInfo& VirtioGpuLastDisplayInfo()
 {
     return g_last_display;
+}
+
+// ======================================================================
+// virtio-gpu v2 — 2D resource + scanout + transfer + flush
+// ======================================================================
+
+namespace
+{
+
+// Command numbers (virtio 1.0 §5.7.6.7).
+constexpr u32 kCmdResourceCreate2d = 0x0101;
+[[maybe_unused]] constexpr u32 kCmdResourceUnref = 0x0102;
+constexpr u32 kCmdSetScanout = 0x0103;
+constexpr u32 kCmdResourceFlush = 0x0104;
+constexpr u32 kCmdTransferToHost2d = 0x0105;
+constexpr u32 kCmdResourceAttachBacking = 0x0106;
+
+// Success response for every command below.
+constexpr u32 kRespOkNoData = 0x1100;
+
+// Pixel format (virtio 1.0 §5.7.5).
+constexpr u32 kFmtB8G8R8A8Unorm = 1;
+
+// Command bodies (virtio 1.0 §5.7.6.x).
+
+struct GpuRect
+{
+    u32 x;
+    u32 y;
+    u32 width;
+    u32 height;
+};
+
+struct ResCreate2d
+{
+    GpuCtrlHdr hdr;
+    u32 resource_id;
+    u32 format;
+    u32 width;
+    u32 height;
+};
+
+struct ResUnref
+{
+    GpuCtrlHdr hdr;
+    u32 resource_id;
+    u32 padding;
+};
+
+struct SetScanout
+{
+    GpuCtrlHdr hdr;
+    GpuRect r;
+    u32 scanout_id;
+    u32 resource_id;
+};
+
+struct ResourceFlush
+{
+    GpuCtrlHdr hdr;
+    GpuRect r;
+    u32 resource_id;
+    u32 padding;
+};
+
+struct TransferToHost2d
+{
+    GpuCtrlHdr hdr;
+    GpuRect r;
+    u64 offset;
+    u32 resource_id;
+    u32 padding;
+};
+
+struct MemEntry
+{
+    u64 addr;
+    u32 length;
+    u32 padding;
+};
+
+// ATTACH_BACKING request: header + (resource_id, nr_entries) + entries[].
+// We always use a single contiguous entry in v2.
+struct ResourceAttachBacking
+{
+    GpuCtrlHdr hdr;
+    u32 resource_id;
+    u32 nr_entries;
+    MemEntry entries[1]; // nr_entries = 1 in v2
+};
+
+constinit VirtioScanoutInfo g_scanout = {};
+
+// Issue one header-returning command with a prebuilt request. Logs
+// a failure line and returns false if the response type isn't
+// RESP_OK_NODATA. `label` is purely for log clarity.
+bool SubmitHeaderCommand(u32 req_len, const char* label)
+{
+    u32 resp_bytes = 0;
+    if (!SubmitControlq(req_len, sizeof(GpuCtrlHdr), &resp_bytes))
+        return false;
+    auto* resp = reinterpret_cast<const GpuCtrlHdr*>(g_cq.resp_buf);
+    if (resp->type != kRespOkNoData)
+    {
+        arch::SerialWrite("[virtio-gpu] ");
+        arch::SerialWrite(label);
+        arch::SerialWrite(": unexpected resp_type=");
+        arch::SerialWriteHex(resp->type);
+        arch::SerialWrite(" (expected 0x1100)\n");
+        return false;
+    }
+    return true;
+}
+
+constexpr u32 kScanoutResourceId = 1;
+constexpr u32 kScanoutId = 0;
+constexpr u64 kPageSize = 4096;
+
+} // namespace
+
+bool VirtioGpuSetupScanout(u32 width, u32 height)
+{
+    if (g_scanout.ready && g_scanout.width == width && g_scanout.height == height)
+        return true;
+    if (g_scanout.ready)
+    {
+        arch::SerialWrite("[virtio-gpu] setup-scanout: already set up at a different size; "
+                          "re-setup not supported in v2\n");
+        return false;
+    }
+    if (!g_cq.up)
+    {
+        arch::SerialWrite("[virtio-gpu] setup-scanout: bring-up has not run\n");
+        return false;
+    }
+    if (width == 0 || height == 0 || width > 4096 || height > 4096)
+    {
+        arch::SerialWrite("[virtio-gpu] setup-scanout: invalid dimensions\n");
+        return false;
+    }
+
+    const u64 pitch = static_cast<u64>(width) * 4;
+    const u64 bytes = pitch * height;
+    const u64 pages = (bytes + kPageSize - 1) / kPageSize;
+    const ::duetos::mm::PhysAddr base = ::duetos::mm::AllocateContiguousFrames(pages);
+    if (base == ::duetos::mm::kNullFrame)
+    {
+        arch::SerialWrite("[virtio-gpu] setup-scanout: could not allocate ");
+        arch::SerialWriteHex(pages);
+        arch::SerialWrite(" contiguous frames for backing\n");
+        return false;
+    }
+    void* backing_va = ::duetos::mm::PhysToVirt(base);
+    // Zero the backing so the first flush shows a predictable colour
+    // rather than stale kernel memory.
+    for (u64 i = 0; i < bytes; ++i)
+        static_cast<u8*>(backing_va)[i] = 0;
+
+    // 1) RESOURCE_CREATE_2D
+    {
+        ClearIoBuffers(sizeof(ResCreate2d), sizeof(GpuCtrlHdr));
+        auto* req = reinterpret_cast<volatile ResCreate2d*>(g_cq.req_buf);
+        FillCtrlHdr(&req->hdr, kCmdResourceCreate2d);
+        req->resource_id = kScanoutResourceId;
+        req->format = kFmtB8G8R8A8Unorm;
+        req->width = width;
+        req->height = height;
+        if (!SubmitHeaderCommand(sizeof(ResCreate2d), "RESOURCE_CREATE_2D"))
+            return false;
+    }
+
+    // 2) RESOURCE_ATTACH_BACKING (single contiguous entry).
+    {
+        ClearIoBuffers(sizeof(ResourceAttachBacking), sizeof(GpuCtrlHdr));
+        auto* req = reinterpret_cast<volatile ResourceAttachBacking*>(g_cq.req_buf);
+        FillCtrlHdr(&req->hdr, kCmdResourceAttachBacking);
+        req->resource_id = kScanoutResourceId;
+        req->nr_entries = 1;
+        req->entries[0].addr = base;
+        req->entries[0].length = static_cast<u32>(bytes);
+        req->entries[0].padding = 0;
+        if (!SubmitHeaderCommand(sizeof(ResourceAttachBacking), "RESOURCE_ATTACH_BACKING"))
+            return false;
+    }
+
+    // 3) SET_SCANOUT
+    {
+        ClearIoBuffers(sizeof(SetScanout), sizeof(GpuCtrlHdr));
+        auto* req = reinterpret_cast<volatile SetScanout*>(g_cq.req_buf);
+        FillCtrlHdr(&req->hdr, kCmdSetScanout);
+        req->r.x = 0;
+        req->r.y = 0;
+        req->r.width = width;
+        req->r.height = height;
+        req->scanout_id = kScanoutId;
+        req->resource_id = kScanoutResourceId;
+        if (!SubmitHeaderCommand(sizeof(SetScanout), "SET_SCANOUT"))
+            return false;
+    }
+
+    g_scanout.ready = true;
+    g_scanout.scanout_id = kScanoutId;
+    g_scanout.resource_id = kScanoutResourceId;
+    g_scanout.width = width;
+    g_scanout.height = height;
+    g_scanout.pitch = static_cast<u32>(pitch);
+    g_scanout.backing_phys = base;
+    g_scanout.backing_bytes = bytes;
+    g_scanout.backing_va = backing_va;
+
+    arch::SerialWrite("[virtio-gpu] setup-scanout OK  res=");
+    arch::SerialWriteHex(kScanoutResourceId);
+    arch::SerialWrite(" scanout=");
+    arch::SerialWriteHex(kScanoutId);
+    arch::SerialWrite(" ");
+    arch::SerialWriteHex(width);
+    arch::SerialWrite("x");
+    arch::SerialWriteHex(height);
+    arch::SerialWrite("  backing phys=");
+    arch::SerialWriteHex(base);
+    arch::SerialWrite("/");
+    arch::SerialWriteHex(bytes);
+    arch::SerialWrite(" va=");
+    arch::SerialWriteHex(reinterpret_cast<u64>(backing_va));
+    arch::SerialWrite("\n");
+    return true;
+}
+
+const VirtioScanoutInfo& VirtioGpuScanoutInfo()
+{
+    return g_scanout;
+}
+
+bool VirtioGpuFlushScanout(u32 x, u32 y, u32 w, u32 h)
+{
+    if (!g_scanout.ready)
+        return false;
+    // Clip to the resource extent — the host rejects rects outside.
+    if (x >= g_scanout.width || y >= g_scanout.height)
+        return false;
+    if (x + w > g_scanout.width)
+        w = g_scanout.width - x;
+    if (y + h > g_scanout.height)
+        h = g_scanout.height - y;
+    if (w == 0 || h == 0)
+        return true; // nothing to flush
+
+    // 1) TRANSFER_TO_HOST_2D — copy dirty rect from guest backing
+    //    into host resource.
+    {
+        ClearIoBuffers(sizeof(TransferToHost2d), sizeof(GpuCtrlHdr));
+        auto* req = reinterpret_cast<volatile TransferToHost2d*>(g_cq.req_buf);
+        FillCtrlHdr(&req->hdr, kCmdTransferToHost2d);
+        req->r.x = x;
+        req->r.y = y;
+        req->r.width = w;
+        req->r.height = h;
+        req->offset = static_cast<u64>(y) * g_scanout.pitch + static_cast<u64>(x) * 4;
+        req->resource_id = g_scanout.resource_id;
+        req->padding = 0;
+        if (!SubmitHeaderCommand(sizeof(TransferToHost2d), "TRANSFER_TO_HOST_2D"))
+            return false;
+    }
+
+    // 2) RESOURCE_FLUSH — tell the host to composite the resource
+    //    to the scanout's display surface.
+    {
+        ClearIoBuffers(sizeof(ResourceFlush), sizeof(GpuCtrlHdr));
+        auto* req = reinterpret_cast<volatile ResourceFlush*>(g_cq.req_buf);
+        FillCtrlHdr(&req->hdr, kCmdResourceFlush);
+        req->r.x = x;
+        req->r.y = y;
+        req->r.width = w;
+        req->r.height = h;
+        req->resource_id = g_scanout.resource_id;
+        req->padding = 0;
+        if (!SubmitHeaderCommand(sizeof(ResourceFlush), "RESOURCE_FLUSH"))
+            return false;
+    }
+    return true;
 }
 
 } // namespace duetos::drivers::gpu

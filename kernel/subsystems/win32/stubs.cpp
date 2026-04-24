@@ -278,6 +278,16 @@ constexpr u32 kOffD3d11CreateStub = 0xC91; // render/drivers — 13 bytes
 constexpr u32 kOffD3d12CreateStub = 0xC9E; // render/drivers — 13 bytes
 constexpr u32 kOffDxgiCreateStub = 0xCAB;  // render/drivers — 13 bytes
 
+// Paint lifecycle + FillRect — real implementations routing through
+// dedicated syscalls. See core/syscall.h for the per-syscall ABI.
+constexpr u32 kOffWinBeginPaint = 0xCB8;     // render/drivers — 14 bytes
+constexpr u32 kOffWinEndPaint = 0xCC6;       // render/drivers — 11 bytes
+constexpr u32 kOffWinInvalidateRect = 0xCD1; // render/drivers — 14 bytes
+constexpr u32 kOffWinUpdateWindow = 0xCDF;   // render/drivers — 13 bytes
+constexpr u32 kOffWinGetDC = 0xCEC;          // render/drivers —  4 bytes
+constexpr u32 kOffWinReleaseDC = 0xCF0;      // render/drivers —  6 bytes
+constexpr u32 kOffGdiFillRectUser = 0xCF6;   // render/drivers — 17 bytes
+
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
     // Windows x64 ABI: first arg (uExitCode) in RCX.
@@ -3216,10 +3226,74 @@ constexpr u8 kStubsBytes[] = {
     0xB8, 0x65, 0x00, 0x00, 0x00, // 0xCB0 mov eax, 101     ; SYS_GFX_D3D_STUB
     0xCD, 0x80,                   // 0xCB5 int 0x80
     0xC3,                         // 0xCB7 ret
+
+    // === Render/drivers: real paint-lifecycle + FillRect =========
+
+    // --- BeginPaint (offset 0xCB8, 14 bytes) ---------------------
+    // Win32: HDC BeginPaint(HWND hwnd=rcx, LPPAINTSTRUCT lpPaint=rdx).
+    // DuetOS: SYS_WIN_BEGIN_PAINT (103) with rdi=hwnd, rsi=ps ptr.
+    // Kernel fills the 72-B PAINTSTRUCT + validates dirty.
+    0x48, 0x89, 0xCF,             // 0xCB8 mov rdi, rcx     ; hwnd
+    0x48, 0x89, 0xD6,             // 0xCBB mov rsi, rdx     ; PAINTSTRUCT*
+    0xB8, 0x67, 0x00, 0x00, 0x00, // 0xCBE mov eax, 103     ; SYS_WIN_BEGIN_PAINT
+    0xCD, 0x80,                   // 0xCC3 int 0x80
+    0xC3,                         // 0xCC5 ret
+
+    // --- EndPaint (offset 0xCC6, 11 bytes) -----------------------
+    // Win32: BOOL EndPaint(HWND=rcx, const PAINTSTRUCT*=rdx).
+    // DuetOS: SYS_WIN_END_PAINT (104). No-op + returns 1.
+    0x48, 0x89, 0xCF,             // 0xCC6 mov rdi, rcx     ; hwnd
+    0xB8, 0x68, 0x00, 0x00, 0x00, // 0xCC9 mov eax, 104     ; SYS_WIN_END_PAINT
+    0xCD, 0x80,                   // 0xCCE int 0x80
+    0xC3,                         // 0xCD0 ret
+
+    // --- InvalidateRect (offset 0xCD1, 14 bytes) -----------------
+    // Win32: BOOL InvalidateRect(HWND=rcx, RECT*=rdx, BOOL bErase=r8).
+    // DuetOS: SYS_WIN_INVALIDATE (87). lpRect is ignored in v1 —
+    // the whole client repaints on every compose.
+    0x48, 0x89, 0xCF,             // 0xCD1 mov rdi, rcx     ; hwnd
+    0x4C, 0x89, 0xC6,             // 0xCD4 mov rsi, r8      ; bErase
+    0xB8, 0x57, 0x00, 0x00, 0x00, // 0xCD7 mov eax, 87      ; SYS_WIN_INVALIDATE
+    0xCD, 0x80,                   // 0xCDC int 0x80
+    0xC3,                         // 0xCDE ret
+
+    // --- UpdateWindow (offset 0xCDF, 13 bytes) -------------------
+    // Win32: BOOL UpdateWindow(HWND=rcx). Posts WM_PAINT if dirty.
+    // DuetOS: SYS_WIN_INVALIDATE (87) with bErase=0 — same drain
+    // path as InvalidateRect.
+    0x48, 0x89, 0xCF,             // 0xCDF mov rdi, rcx     ; hwnd
+    0x31, 0xF6,                   // 0xCE2 xor esi, esi     ; bErase = 0
+    0xB8, 0x57, 0x00, 0x00, 0x00, // 0xCE4 mov eax, 87      ; SYS_WIN_INVALIDATE
+    0xCD, 0x80,                   // 0xCE9 int 0x80
+    0xC3,                         // 0xCEB ret
+
+    // --- GetDC (offset 0xCEC, 4 bytes) ---------------------------
+    // Win32: HDC GetDC(HWND=rcx). We alias HDC to HWND — the only
+    // GDI entry points we route through syscalls take the hwnd
+    // back, so a pass-through return is semantically correct.
+    0x48, 0x89, 0xC8, // 0xCEC mov rax, rcx     ; HDC = HWND
+    0xC3,             // 0xCEF ret
+
+    // --- ReleaseDC (offset 0xCF0, 6 bytes) -----------------------
+    // Win32: int ReleaseDC(HWND, HDC). No state to release — always
+    // returns 1 (success).
+    0xB8, 0x01, 0x00, 0x00, 0x00, // 0xCF0 mov eax, 1
+    0xC3,                         // 0xCF5 ret
+
+    // --- FillRect (offset 0xCF6, 17 bytes) -----------------------
+    // Win32: int FillRect(HDC hdc=rcx, const RECT*=rdx, HBRUSH=r8).
+    // DuetOS: SYS_GDI_FILL_RECT_USER (105) — rdi=hwnd/hdc,
+    // rsi=user RECT*, rdx=brush (treated as COLORREF).
+    0x48, 0x89, 0xCF,             // 0xCF6 mov rdi, rcx     ; hdc/hwnd
+    0x48, 0x89, 0xD6,             // 0xCF9 mov rsi, rdx     ; RECT*
+    0x4C, 0x89, 0xC2,             // 0xCFC mov rdx, r8      ; brush → colour
+    0xB8, 0x69, 0x00, 0x00, 0x00, // 0xCFF mov eax, 105     ; SYS_GDI_FILL_RECT_USER
+    0xCD, 0x80,                   // 0xD04 int 0x80
+    0xC3,                         // 0xD06 ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0xCB8, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0xD07, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -4680,12 +4754,16 @@ constexpr StubEntry kStubsTable[] = {
     {"user32.dll", "CallWindowProcA", kOffReturnZero},
     {"user32.dll", "CallWindowProcW", kOffReturnZero},
     {"user32.dll", "ShowWindow", kOffReturnZero},
-    {"user32.dll", "UpdateWindow", kOffReturnOne},
+    {"user32.dll", "UpdateWindow", kOffWinUpdateWindow},
     {"user32.dll", "GetClientRect", kOffReturnOne},
     {"user32.dll", "GetWindowRect", kOffReturnOne},
     {"user32.dll", "MoveWindow", kOffReturnOne},
     {"user32.dll", "SetWindowPos", kOffReturnOne},
-    {"user32.dll", "InvalidateRect", kOffReturnOne},
+    {"user32.dll", "InvalidateRect", kOffWinInvalidateRect},
+    {"user32.dll", "BeginPaint", kOffWinBeginPaint},
+    {"user32.dll", "EndPaint", kOffWinEndPaint},
+    {"user32.dll", "GetDC", kOffWinGetDC},
+    {"user32.dll", "ReleaseDC", kOffWinReleaseDC},
 
     // user32: message loop. GetMessage returns 0 so the canonical
     // `while (GetMessage(...)) DispatchMessage(...)` loop sees
@@ -4778,7 +4856,10 @@ constexpr StubEntry kStubsTable[] = {
     {"gdi32.dll", "Ellipse", kOffReturnOne},
     {"gdi32.dll", "Polygon", kOffReturnOne},
     {"gdi32.dll", "Polyline", kOffReturnOne},
-    {"gdi32.dll", "FillRect", kOffReturnOne},
+    // FillRect is technically a user32 export (not gdi32) in real
+    // Windows, but we honour whichever DLL a PE imports it from.
+    {"gdi32.dll", "FillRect", kOffGdiFillRectUser},
+    {"user32.dll", "FillRect", kOffGdiFillRectUser},
     {"gdi32.dll", "FrameRect", kOffReturnOne},
     {"gdi32.dll", "TextOutA", kOffReturnOne},
     {"gdi32.dll", "TextOutW", kOffReturnOne},

@@ -259,6 +259,7 @@ enum class WinGdiPrimKind : u8
     Line,      // x,y,w,h,colour — (x,y) → (x+w, y+h) Bresenham line
     Ellipse,   // x,y,w,h,colour — 1-px outline, midpoint algorithm
     Pixel,     // x,y,colour — single client-local pixel
+    Blit,      // x,y,w,h,pool_off → BGRA8888 rect from the window's blit pool
 };
 
 struct WinGdiPrim
@@ -266,10 +267,18 @@ struct WinGdiPrim
     WinGdiPrimKind kind;
     u8 _pad[3];
     i32 x, y;
-    i32 w, h; // Rectangle interprets these as width / height
+    i32 w, h; // Rectangle / FillRect / Blit: width/height; Line: dx/dy
     u32 colour_rgb;
+    u32 pool_off;                  // Blit only: byte offset into RegisteredWindow::blit_pool
     char text[kWinTextOutMax + 1]; // NUL-terminated ASCII (TextOut only)
 };
+
+// Per-window staging pool for BitBlt-style pixel data. Each Blit
+// primitive references a byte range inside this pool. 16 KiB holds
+// 4 KiB px at 32 bpp — up to a 64×64 blit, or four 32×32 blits.
+// The pool resets every time `prim_count` resets (i.e. on every
+// fresh frame the window records); see `PrimListAppend`.
+inline constexpr u32 kWinBlitPoolBytes = 16 * 1024;
 
 /// Set the owning pid on `h`. Ring-3-created windows call this
 /// from the SYS_WIN_CREATE handler; boot-time windows leave it at
@@ -346,6 +355,21 @@ void WindowClientEllipse(WindowHandle h, i32 x, i32 y, i32 w, i32 hgt, u32 rgb);
 
 /// Append a single-pixel primitive.
 void WindowClientPixel(WindowHandle h, i32 x, i32 y, u32 rgb);
+
+/// Append a BitBlt primitive. `src_pixels` is a kernel-side pointer
+/// to `src_w * src_h` BGRA8888 u32 pixels in row-major order with
+/// no padding. `dst_x`/`dst_y` is the destination relative to the
+/// client origin. Pixels are copied into the window's blit pool;
+/// the caller's buffer can be freed immediately after the call.
+/// Silently no-ops on invalid handle, zero dimensions, or a blit
+/// that would exceed the remaining pool capacity for this frame.
+void WindowClientBitBlt(WindowHandle h, i32 dst_x, i32 dst_y, const u32* src_pixels, u32 src_w, u32 src_h);
+
+/// Max single-blit rect the pool can hold (in pixels). Callers that
+/// accept unbounded-size BitBlt requests from user mode should clip
+/// to these before issuing — anything larger is rejected by the
+/// compositor and never shows.
+inline constexpr u32 kWinBlitMaxPx = kWinBlitPoolBytes / 4;
 
 /// Drop every recorded GDI primitive for `h` (WM_PAINT with
 /// bErase = TRUE support).

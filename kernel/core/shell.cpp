@@ -2454,6 +2454,24 @@ void CmdGpu()
         {
             ConsoleWriteln("virtio-gpu displays: GET_DISPLAY_INFO not issued or failed");
         }
+
+        const auto& sc = duetos::drivers::gpu::VirtioGpuScanoutInfo();
+        if (sc.ready)
+        {
+            ConsoleWrite("virtio-gpu scanout ");
+            WriteU64Dec(sc.scanout_id);
+            ConsoleWrite(": resource=");
+            WriteU64Dec(sc.resource_id);
+            ConsoleWrite(" ");
+            WriteU64Dec(sc.width);
+            ConsoleWrite("x");
+            WriteU64Dec(sc.height);
+            ConsoleWrite("x32 BGRA  backing phys=");
+            WriteU64Hex(sc.backing_phys, 0);
+            ConsoleWrite(" / ");
+            WriteU64Dec(sc.backing_bytes);
+            ConsoleWriteln(" B");
+        }
     }
 }
 

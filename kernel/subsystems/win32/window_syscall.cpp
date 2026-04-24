@@ -9,6 +9,7 @@
 #include "../../drivers/video/framebuffer.h"
 #include "../../drivers/video/theme.h"
 #include "../../drivers/video/widget.h"
+#include "../../mm/kheap.h"
 #include "../../mm/paging.h"
 #include "../../sched/sched.h"
 
@@ -1014,6 +1015,70 @@ void DoGdiSetPixel(arch::TrapFrame* frame)
     frame->rax = ok ? 1 : 0;
 }
 
+void DoGdiBitBlt(arch::TrapFrame* frame)
+{
+    using namespace duetos::drivers::video;
+
+    duetos::core::Process* proc = duetos::core::CurrentProcess();
+    if (proc == nullptr)
+    {
+        frame->rax = 0;
+        return;
+    }
+    const i32 dst_x = static_cast<i32>(frame->rsi);
+    const i32 dst_y = static_cast<i32>(frame->rdx);
+    const u32 src_w = static_cast<u32>(frame->r10);
+    const u32 src_h = static_cast<u32>(frame->r8);
+    const u64 user_src = frame->r9;
+
+    // Reject empty / absurd sizes up front; cap against the pool
+    // so a malicious caller can't burn kheap on a huge allocation.
+    if (src_w == 0 || src_h == 0 || user_src == 0)
+    {
+        frame->rax = 0;
+        return;
+    }
+    const u64 bytes64 = static_cast<u64>(src_w) * static_cast<u64>(src_h) * 4;
+    if (bytes64 > kWinBlitPoolBytes)
+    {
+        frame->rax = 0;
+        return;
+    }
+    const u32 bytes = static_cast<u32>(bytes64);
+
+    // Stage pixels in a kheap bounce buffer. Two copies (user →
+    // staging → blit pool) but bounded by pool size = 16 KiB, so
+    // cheap; avoids holding the compositor lock while we touch
+    // user memory.
+    u32* staging = static_cast<u32*>(duetos::mm::KMalloc(bytes));
+    if (staging == nullptr)
+    {
+        frame->rax = 0;
+        return;
+    }
+    if (!duetos::mm::CopyFromUser(staging, reinterpret_cast<const void*>(user_src), bytes))
+    {
+        duetos::mm::KFree(staging);
+        frame->rax = 0;
+        return;
+    }
+
+    CompositorLock();
+    const u32 h_comp = HwndToCompositorHandleForCaller(frame->rdi, proc->pid);
+    bool ok = false;
+    if (h_comp != kWindowInvalid)
+    {
+        WindowClientBitBlt(h_comp, dst_x, dst_y, staging, src_w, src_h);
+        const Theme& theme = ThemeCurrent();
+        DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+        ok = true;
+    }
+    CompositorUnlock();
+
+    duetos::mm::KFree(staging);
+    frame->rax = ok ? 1 : 0;
+}
+
 // --- Async input state + cursor + capture -------------------------
 
 void DoWinGetKeyState(arch::TrapFrame* frame)
@@ -1204,6 +1269,147 @@ void DoWinInvalidate(arch::TrapFrame* frame)
         (void)WindowDrainPaints();
         CompositorUnlock();
     }
+    frame->rax = ok ? 1 : 0;
+}
+
+// Win32 PAINTSTRUCT layout. Lays out 72 B which matches the Win32
+// SDK across 64-bit builds (hdc=8, fErase=4, rcPaint=16, fRestore=4,
+// fIncUpdate=4, rgbReserved=32 + 4 trailing = padded to 72 due to
+// 8-byte alignment on the leading pointer). Written whole-struct
+// via CopyToUser so stale user-side bytes don't leak into later
+// reads. No memcpy is emitted: struct is built on the kernel stack
+// and filled field by field.
+struct Win32PaintStruct
+{
+    u64 hdc;
+    u32 fErase;
+    i32 rcPaint_left;
+    i32 rcPaint_top;
+    i32 rcPaint_right;
+    i32 rcPaint_bottom;
+    u32 fRestore;
+    u32 fIncUpdate;
+    u8 rgbReserved[32];
+};
+static_assert(sizeof(Win32PaintStruct) == 72, "PAINTSTRUCT size must be 72 B for Win32 ABI");
+
+void DoWinBeginPaint(arch::TrapFrame* frame)
+{
+    using namespace duetos::drivers::video;
+
+    duetos::core::Process* proc = duetos::core::CurrentProcess();
+    if (proc == nullptr)
+    {
+        frame->rax = 0;
+        return;
+    }
+    const u64 hwnd_biased = frame->rdi;
+    const u64 user_ps_ptr = frame->rsi;
+    if (user_ps_ptr == 0)
+    {
+        frame->rax = 0;
+        return;
+    }
+
+    CompositorLock();
+    const u32 h_comp = HwndToCompositorHandleForCaller(hwnd_biased, proc->pid);
+    bool ok = false;
+    Win32PaintStruct ps{};
+    ps.hdc = hwnd_biased; // HDC == HWND in v0 (no separate DC handle table)
+    if (h_comp != kWindowInvalid)
+    {
+        u32 wx = 0, wy = 0, ww = 0, wh = 0;
+        if (WindowGetBounds(h_comp, &wx, &wy, &ww, &wh))
+        {
+            const u32 tbh = 22; // matches widget chrome default
+            ps.rcPaint_left = 0;
+            ps.rcPaint_top = 0;
+            ps.rcPaint_right = static_cast<i32>((ww > 4) ? ww - 4 : 0);
+            ps.rcPaint_bottom = static_cast<i32>((wh > tbh + 4) ? wh - tbh - 4 : 0);
+            ps.fErase = WindowIsDirty(h_comp) ? 1u : 0u;
+            ps.fRestore = 0;
+            ps.fIncUpdate = 0;
+            for (u32 i = 0; i < sizeof(ps.rgbReserved); ++i)
+                ps.rgbReserved[i] = 0;
+            // Win32: BeginPaint implicitly validates the dirty
+            // region. Our WindowValidate clears the whole-window
+            // dirty bit — matches v1 behaviour (no partial-region
+            // tracking).
+            WindowValidate(h_comp);
+            ok = true;
+        }
+    }
+    CompositorUnlock();
+
+    if (!ok)
+    {
+        frame->rax = 0;
+        return;
+    }
+    if (!duetos::mm::CopyToUser(reinterpret_cast<void*>(user_ps_ptr), &ps, sizeof(ps)))
+    {
+        frame->rax = 0;
+        return;
+    }
+    frame->rax = hwnd_biased; // HDC == HWND
+}
+
+void DoWinEndPaint(arch::TrapFrame* frame)
+{
+    // BeginPaint already validated the window; EndPaint is a no-op
+    // modulo returning TRUE, matching Win32 semantics for our v1
+    // whole-client repaint model.
+    (void)frame->rdi;
+    (void)frame->rsi;
+    frame->rax = 1;
+}
+
+void DoGdiFillRectUser(arch::TrapFrame* frame)
+{
+    using namespace duetos::drivers::video;
+
+    duetos::core::Process* proc = duetos::core::CurrentProcess();
+    if (proc == nullptr)
+    {
+        frame->rax = 0;
+        return;
+    }
+    const u64 user_rect = frame->rsi;
+    if (user_rect == 0)
+    {
+        frame->rax = 0;
+        return;
+    }
+    i32 rect[4] = {0, 0, 0, 0};
+    if (!duetos::mm::CopyFromUser(rect, reinterpret_cast<const void*>(user_rect), sizeof(rect)))
+    {
+        frame->rax = 0;
+        return;
+    }
+    // Win32 RECT: (left, top, right, bottom). Convert to (x, y, w, h).
+    const i32 x = rect[0];
+    const i32 y = rect[1];
+    const i32 r = rect[2];
+    const i32 b = rect[3];
+    if (r <= x || b <= y)
+    {
+        frame->rax = 1; // empty rect is a valid no-op
+        return;
+    }
+    const i32 w = r - x;
+    const i32 h = b - y;
+
+    CompositorLock();
+    const u32 h_comp = HwndToCompositorHandleForCaller(frame->rdi, proc->pid);
+    bool ok = false;
+    if (h_comp != kWindowInvalid)
+    {
+        WindowClientFillRect(h_comp, x, y, w, h, ColorRefToRgb(frame->rdx));
+        const Theme& theme = ThemeCurrent();
+        DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+        ok = true;
+    }
+    CompositorUnlock();
     frame->rax = ok ? 1 : 0;
 }
 

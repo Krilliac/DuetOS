@@ -933,6 +933,53 @@ enum SyscallNumber : u64
     // ICD's handle-table counters tick every time a PE invokes one
     // of these entry points — visible via the `gfx` shell command.
     SYS_GFX_D3D_STUB = 101,
+
+    // SYS_GDI_BITBLT — record a BitBlt into a window's display list.
+    //   rdi = HWND (biased Win32 handle, same convention as the
+    //         other SYS_GDI_* syscalls)
+    //   rsi = dst_x (client-relative, i32)
+    //   rdx = dst_y
+    //   r10 = src_w (pixels, must be <= kWinBlitMaxPx / src_h)
+    //   r8  = src_h
+    //   r9  = user VA of `src_w * src_h` BGRA8888 pixels (row-major,
+    //         no padding)
+    // rax = 1 on success, 0 on bad handle / pool full / copy-from-
+    // user fault / too large. Pixel data is copied into the kernel
+    // compositor's per-window blit pool immediately; the user
+    // buffer can be freed on return. Replayed by the compositor at
+    // DesktopCompose time.
+    SYS_GDI_BITBLT = 102,
+
+    // SYS_WIN_BEGIN_PAINT — Win32 BeginPaint.
+    //   rdi = HWND (biased)
+    //   rsi = user VA of PAINTSTRUCT (72 B) to fill. Layout must
+    //         match Win32:
+    //             off 0 : HDC hdc (set to hwnd cast as HDC)
+    //             off 8 : BOOL fErase (set to 1 if dirty)
+    //             off 12: RECT rcPaint (set to client-rect
+    //                     (0, 0, client_w, client_h))
+    //             off 28: BOOL fRestore (zeroed)
+    //             off 32: BOOL fIncUpdate (zeroed)
+    //             off 36: BYTE rgbReserved[32] (zeroed)
+    //   rax = HDC on success, 0 on bad handle / copy-to-user fault.
+    // Side effect: clears the window's dirty flag (equivalent to an
+    // implicit ValidateRect at BeginPaint time, matching Win32).
+    SYS_WIN_BEGIN_PAINT = 103,
+
+    // SYS_WIN_END_PAINT — Win32 EndPaint.
+    //   rdi = HWND (biased). rsi = PAINTSTRUCT* (ignored).
+    //   rax = 1. v0 no-op; dirty clear already happened at BeginPaint.
+    SYS_WIN_END_PAINT = 104,
+
+    // SYS_GDI_FILL_RECT_USER — Win32 FillRect equivalent with user-
+    // mode RECT pointer.
+    //   rdi = HWND (biased)
+    //   rsi = user VA of RECT { i32 left, top, right, bottom }
+    //   rdx = colour (treated as RGB u32; HBRUSH handles from
+    //         GetStockObject map poorly but the rect still paints)
+    //   rax = 1 on success, 0 on bad handle / copy-from-user fault.
+    // Recomposes the desktop after recording.
+    SYS_GDI_FILL_RECT_USER = 105,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit

@@ -159,6 +159,8 @@ struct RegisteredWindow
     WindowMsgRing msgs;
     WinGdiPrim prims[kWinDisplayListDepth];
     u32 prim_count;
+    u8 blit_pool[kWinBlitPoolBytes];
+    u32 blit_pool_used; // bytes consumed since the last list reset
     // Per-window Win32 longs — backs SetWindowLongPtr /
     // GetWindowLongPtr for GWLP_WNDPROC, GWLP_USERDATA, and
     // two extras.
@@ -348,6 +350,7 @@ WindowHandle WindowRegister(const WindowChrome& chrome, const char* title)
     g_windows[h].msgs.tail = 0;
     g_windows[h].msgs.count = 0;
     g_windows[h].prim_count = 0;
+    g_windows[h].blit_pool_used = 0;
     g_windows[h].content_fn = nullptr;
     g_windows[h].content_cookie = nullptr;
     for (u32 i = 0; i < kWinLongSlots; ++i)
@@ -836,6 +839,31 @@ void WindowDrawAllOrdered()
                 // the outer max-x/max-y guard above.
                 FramebufferPutPixel(static_cast<u32>(ax), static_cast<u32>(ay), pr.colour_rgb);
                 break;
+            case WinGdiPrimKind::Blit:
+            {
+                // Source pixels live in this window's blit_pool at
+                // pr.pool_off; pr.w × pr.h is the dimension. Clip
+                // against the client rect before handing to
+                // FramebufferBlit (which clips against the surface).
+                if (pr.w <= 0 || pr.h <= 0 || pr.pool_off >= kWinBlitPoolBytes)
+                    break;
+                const u64 bytes = static_cast<u64>(pr.w) * static_cast<u64>(pr.h) * 4;
+                if (pr.pool_off + bytes > kWinBlitPoolBytes)
+                    break;
+                u32 w_use = static_cast<u32>(pr.w);
+                u32 h_use = static_cast<u32>(pr.h);
+                if (ax < static_cast<i32>(client_x) || ay < static_cast<i32>(client_y))
+                    break; // don't paint over chrome
+                if (static_cast<u32>(ax) + w_use > max_x)
+                    w_use = max_x - static_cast<u32>(ax);
+                if (static_cast<u32>(ay) + h_use > max_y)
+                    h_use = max_y - static_cast<u32>(ay);
+                if (w_use == 0 || h_use == 0)
+                    break;
+                const auto* src = reinterpret_cast<const u32*>(g_windows[h].blit_pool + pr.pool_off);
+                FramebufferBlit(static_cast<u32>(ax), static_cast<u32>(ay), src, w_use, h_use, static_cast<u32>(pr.w));
+                break;
+            }
             case WinGdiPrimKind::None:
                 break;
             }
@@ -1276,6 +1304,42 @@ void WindowClientPixel(WindowHandle h, i32 x, i32 y, u32 rgb)
     PrimListAppend(g_windows[h], p);
 }
 
+void WindowClientBitBlt(WindowHandle h, i32 dst_x, i32 dst_y, const u32* src_pixels, u32 src_w, u32 src_h)
+{
+    if (!WindowValid(h) || src_pixels == nullptr || src_w == 0 || src_h == 0)
+    {
+        return;
+    }
+    RegisteredWindow& w = g_windows[h];
+    const u64 bytes64 = static_cast<u64>(src_w) * static_cast<u64>(src_h) * 4;
+    if (bytes64 > kWinBlitPoolBytes)
+    {
+        return; // too large — caller should have clipped to kWinBlitMaxPx
+    }
+    const u32 bytes = static_cast<u32>(bytes64);
+    if (w.blit_pool_used + bytes > kWinBlitPoolBytes)
+    {
+        // Pool full for this frame; drop — a real composite reset
+        // on the next prim_count clear will reclaim space.
+        return;
+    }
+    const u32 off = w.blit_pool_used;
+    u8* dst = w.blit_pool + off;
+    const u8* src = reinterpret_cast<const u8*>(src_pixels);
+    for (u32 i = 0; i < bytes; ++i)
+        dst[i] = src[i];
+    w.blit_pool_used += bytes;
+
+    WinGdiPrim p{};
+    p.kind = WinGdiPrimKind::Blit;
+    p.x = dst_x;
+    p.y = dst_y;
+    p.w = static_cast<i32>(src_w);
+    p.h = static_cast<i32>(src_h);
+    p.pool_off = off;
+    PrimListAppend(w, p);
+}
+
 void WindowClearDisplayList(WindowHandle h)
 {
     if (!WindowValid(h))
@@ -1283,6 +1347,7 @@ void WindowClearDisplayList(WindowHandle h)
         return;
     }
     g_windows[h].prim_count = 0;
+    g_windows[h].blit_pool_used = 0;
 }
 
 bool WindowIsVisible(WindowHandle h)

@@ -120,4 +120,53 @@ const VirtioDisplayInfo& VirtioGpuGetDisplayInfo();
 /// to surface). `valid == false` before GetDisplayInfo has run.
 const VirtioDisplayInfo& VirtioGpuLastDisplayInfo();
 
+// virtio-gpu v2: RESOURCE_CREATE_2D + ATTACH_BACKING + SET_SCANOUT +
+// TRANSFER_TO_HOST_2D + RESOURCE_FLUSH
+//
+// v2 completes the minimal 2D display path: guest-owned pixel buffer
+// → GPU resource → scanout. After `VirtioGpuSetupScanout(...)` the
+// kernel owns a contiguous BGRA8888 backing buffer at
+// `VirtioGpuScanoutBackingVa()`. Writes to that buffer don't
+// automatically appear on screen; the guest must call
+// `VirtioGpuFlushScanout()` to issue TRANSFER_TO_HOST_2D +
+// RESOURCE_FLUSH, at which point the host composites + presents.
+//
+// Only scanout 0 is supported in v2. Resource id 1 is reserved for
+// the scanout-0 image; id 0 is reserved by spec. Backing allocation
+// is one physically-contiguous run (single virtio_gpu_mem_entry);
+// max size is bounded by the frame allocator's largest free run.
+// 1024x768x4 = 3 MiB = 768 pages; 640x480x4 = 1.2 MiB = 300 pages.
+
+struct VirtioScanoutInfo
+{
+    bool ready;      // true iff setup completed end-to-end
+    u32 scanout_id;  // always 0 in v2
+    u32 resource_id; // always 1 in v2
+    u32 width;       // pixels
+    u32 height;      // pixels
+    u32 pitch;       // bytes per row (= width * 4)
+    u64 backing_phys;
+    u64 backing_bytes;
+    void* backing_va; // kernel-VA of the backing; writeable
+};
+
+/// Create a scanout-backed 2D resource:
+///   RESOURCE_CREATE_2D(id=1, BGRA8888, w, h)
+///   RESOURCE_ATTACH_BACKING(id=1, [contiguous (phys, w*h*4)])
+///   SET_SCANOUT(scanout=0, resource=1, rect=(0,0,w,h))
+/// Allocates `ceil(w*h*4 / 4096)` contiguous frames for the backing.
+/// Returns false if any step fails; logs which step. Idempotent —
+/// subsequent calls are no-ops if the previous setup is live.
+bool VirtioGpuSetupScanout(u32 width, u32 height);
+
+/// Kernel-VA + geometry of the current scanout backing, if any.
+/// `ready == false` before `VirtioGpuSetupScanout` has run.
+const VirtioScanoutInfo& VirtioGpuScanoutInfo();
+
+/// Issue TRANSFER_TO_HOST_2D + RESOURCE_FLUSH for the scanout
+/// resource. `x`,`y`,`w`,`h` is the dirty rect in pixel coords; the
+/// full resource is `(0,0,width,height)`. Returns false if the
+/// scanout isn't set up or either command timed out.
+bool VirtioGpuFlushScanout(u32 x, u32 y, u32 w, u32 h);
+
 } // namespace duetos::drivers::gpu

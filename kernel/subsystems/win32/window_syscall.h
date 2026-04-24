@@ -56,6 +56,10 @@ void DoWinTimerKill(arch::TrapFrame* frame);
 void DoGdiLine(arch::TrapFrame* frame);
 void DoGdiEllipse(arch::TrapFrame* frame);
 void DoGdiSetPixel(arch::TrapFrame* frame);
+void DoGdiBitBlt(arch::TrapFrame* frame);
+void DoGdiFillRectUser(arch::TrapFrame* frame);
+void DoWinBeginPaint(arch::TrapFrame* frame);
+void DoWinEndPaint(arch::TrapFrame* frame);
 
 void DoWinGetKeyState(arch::TrapFrame* frame);
 void DoWinGetCursor(arch::TrapFrame* frame);

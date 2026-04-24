@@ -296,7 +296,74 @@ void RunVendorProbe(GpuInfo& g)
         // three steps are independently guarded; a failure in
         // bring-up leaves us with the probe data still visible.
         if (VirtioGpuBringUp())
-            (void)VirtioGpuGetDisplayInfo();
+        {
+            const auto& info = VirtioGpuGetDisplayInfo();
+            // v2: if at least one scanout is active, allocate a 2D
+            // resource backed by a guest-owned contiguous buffer,
+            // attach it, bind it to scanout 0, paint a boot test
+            // pattern (diagonal gradient + corner swatches), and
+            // flush. If the host is QEMU with -vga virtio the
+            // pattern lands on the display; this is the first real
+            // bring-up proof that our 2D command pipeline works.
+            //
+            // Cap dimensions to avoid an outsized contiguous
+            // allocation: 1024x768x4 = 3 MiB = 768 frames, well
+            // within what the frame allocator can satisfy at boot.
+            if (info.valid && info.active_scanouts != 0)
+            {
+                u32 w = info.rects[0].width;
+                u32 h = info.rects[0].height;
+                if (w == 0 || h == 0)
+                {
+                    w = 640;
+                    h = 480;
+                }
+                constexpr u32 kScanoutMaxW = 1024;
+                constexpr u32 kScanoutMaxH = 768;
+                if (w > kScanoutMaxW)
+                    w = kScanoutMaxW;
+                if (h > kScanoutMaxH)
+                    h = kScanoutMaxH;
+
+                if (VirtioGpuSetupScanout(w, h))
+                {
+                    const auto& sc = VirtioGpuScanoutInfo();
+                    // Diagonal gradient + three corner swatches.
+                    // BGRA8888: pixel = 0xAARRGGBB? No — virtio-gpu
+                    // B8G8R8A8_UNORM means first byte is B, then G,
+                    // R, A. We just write a u32 = (A<<24)|(R<<16)|
+                    // (G<<8)|B which on little-endian x86 lays out
+                    // B,G,R,A in memory — exactly the format the
+                    // host expects.
+                    auto* px = static_cast<u32*>(sc.backing_va);
+                    for (u32 yy = 0; yy < sc.height; ++yy)
+                    {
+                        for (u32 xx = 0; xx < sc.width; ++xx)
+                        {
+                            const u8 r = static_cast<u8>((xx * 255) / sc.width);
+                            const u8 g_ = static_cast<u8>((yy * 255) / sc.height);
+                            const u8 b = static_cast<u8>(((xx + yy) * 255) / (sc.width + sc.height));
+                            px[yy * sc.width + xx] = (u32(0xFF) << 24) | (u32(r) << 16) | (u32(g_) << 8) | u32(b);
+                        }
+                    }
+                    // Corner swatches (16×16) to confirm coordinate
+                    // orientation at a glance.
+                    constexpr u32 kSw = 16;
+                    auto fill_box = [&](u32 x0, u32 y0, u32 rgb)
+                    {
+                        for (u32 yy = y0; yy < y0 + kSw && yy < sc.height; ++yy)
+                            for (u32 xx = x0; xx < x0 + kSw && xx < sc.width; ++xx)
+                                px[yy * sc.width + xx] = rgb;
+                    };
+                    fill_box(0, 0, 0xFFFF0000);                            // top-left red
+                    fill_box(sc.width - kSw, 0, 0xFF00FF00);               // top-right green
+                    fill_box(0, sc.height - kSw, 0xFF0000FF);              // bottom-left blue
+                    fill_box(sc.width - kSw, sc.height - kSw, 0xFFFFFFFF); // bottom-right white
+
+                    (void)VirtioGpuFlushScanout(0, 0, sc.width, sc.height);
+                }
+            }
+        }
     }
 }
 

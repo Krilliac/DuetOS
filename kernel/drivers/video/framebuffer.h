@@ -96,6 +96,16 @@ void FramebufferFillRect(u32 x, u32 y, u32 w, u32 h, u32 rgb);
 /// Clipped; no-op on empty dimensions or !Available().
 void FramebufferDrawRect(u32 x, u32 y, u32 w, u32 h, u32 rgb, u32 thickness);
 
+/// Copy `src_w × src_h` BGRA8888 pixels into the framebuffer at
+/// `(dst_x, dst_y)`. `src` is a kernel-side pointer to a row-major
+/// pixel buffer with `src_pitch_px` u32-pixels per row (allowing a
+/// clipped subrect of a larger source). Out-of-range destination
+/// coordinates are clipped; an entirely off-screen blit is a silent
+/// no-op. No-op if `!Available()` or `src == nullptr`. The
+/// compositor uses this to replay a window's recorded BitBlt
+/// primitives; user code reaches it via SYS_GDI_BITBLT.
+void FramebufferBlit(u32 dst_x, u32 dst_y, const u32* src, u32 src_w, u32 src_h, u32 src_pitch_px);
+
 /// Draw one 8x8 glyph at (x, y) using the built-in bitmap font.
 /// `fg` is the ink colour; `bg` is painted behind the glyph cell
 /// so text appears on a clean background rather than alpha-blended.

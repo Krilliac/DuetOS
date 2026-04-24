@@ -231,6 +231,31 @@ void FramebufferFillRect(u32 x, u32 y, u32 w, u32 h, u32 rgb)
     }
 }
 
+void FramebufferBlit(u32 dst_x, u32 dst_y, const u32* src, u32 src_w, u32 src_h, u32 src_pitch_px)
+{
+    if (!g_available || src == nullptr || src_w == 0 || src_h == 0)
+    {
+        return;
+    }
+    if (dst_x >= g_info.width || dst_y >= g_info.height)
+    {
+        return;
+    }
+    const u32 x_end = (dst_x + src_w > g_info.width) ? g_info.width : dst_x + src_w;
+    const u32 y_end = (dst_y + src_h > g_info.height) ? g_info.height : dst_y + src_h;
+
+    auto* fb_bytes = reinterpret_cast<u8*>(g_info.virt);
+    for (u32 yi = dst_y; yi < y_end; ++yi)
+    {
+        auto* row = reinterpret_cast<volatile u32*>(fb_bytes + static_cast<u64>(yi) * g_info.pitch);
+        const u32* src_row = src + static_cast<u64>(yi - dst_y) * src_pitch_px;
+        for (u32 xi = dst_x; xi < x_end; ++xi)
+        {
+            row[xi] = src_row[xi - dst_x];
+        }
+    }
+}
+
 void FramebufferClear(u32 rgb)
 {
     if (!g_available)
