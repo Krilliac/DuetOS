@@ -6,11 +6,13 @@
 #include "../cpu/percpu.h"
 #include "../debug/inspect.h"
 #include "../fs/ramfs.h"
+#include "generated_advapi32_dll.h"
 #include "generated_customdll.h"
 #include "generated_customdll2.h"
 #include "generated_customdll_test.h"
 #include "generated_dbghelp_dll.h"
 #include "generated_kernel32_dll.h"
+#include "generated_kernelbase_dll.h"
 #include "generated_msvcp140_dll.h"
 #include "generated_msvcrt_dll.h"
 #include "generated_ntdll_dll.h"
@@ -1946,6 +1948,14 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         // throw helpers + ostream stubs via mangled-name .def
         // aliases. Throw paths terminate with SYS_EXIT(3).
         {"msvcp140.dll", fs::generated::kBinMsvcp140DllBytes, fs::generated::kBinMsvcp140DllBytes_len},
+        // Stage-2 slice 27: kernelbase.dll — pure forwarders
+        // to kernel32.dll (44 entries). Resolved at IAT-patch
+        // time via the slice-8 forwarder chaser.
+        {"kernelbase.dll", fs::generated::kBinKernelbaseDllBytes, fs::generated::kBinKernelbaseDllBytes_len},
+        // Stage-2 slice 27: advapi32.dll — Reg* (not-found),
+        // token/privilege (success), GetUserName* (constant),
+        // SystemFunction036 (deterministic RNG). 25 exports.
+        {"advapi32.dll", fs::generated::kBinAdvapi32DllBytes, fs::generated::kBinAdvapi32DllBytes_len},
     };
     constexpr u64 kPreloadEntryCount = sizeof(preload_set) / sizeof(preload_set[0]);
     static_assert(kPreloadEntryCount <= kPreloadSlotCap, "Preload DLL list exceeds stack-local cap");

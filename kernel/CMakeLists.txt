@@ -521,6 +521,45 @@ add_custom_command(
 list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_MSVCP140_HEADER}")
 
 # ----------------------------------------------------------------------------
+# Userland kernelbase.dll — stage-2 slice 27. Forwarder-only
+# DLL: every export cross-forwards to kernel32.dll via the
+# slice-8 chaser in the kernel loader.
+# ----------------------------------------------------------------------------
+set(CUSTOMOS_KERNELBASE_SRC "${CMAKE_SOURCE_DIR}/userland/libs/kernelbase/kernelbase.c")
+set(CUSTOMOS_KERNELBASE_DEF "${CMAKE_SOURCE_DIR}/userland/libs/kernelbase/kernelbase.def")
+set(CUSTOMOS_KERNELBASE_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_kernelbase_dll.h")
+set(CUSTOMOS_KERNELBASE_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-kernelbase-dll.sh")
+
+add_custom_command(
+    OUTPUT "${CUSTOMOS_KERNELBASE_HEADER}"
+    COMMAND "${CUSTOMOS_KERNELBASE_SCRIPT}" "${CMAKE_SOURCE_DIR}" "${CUSTOMOS_KERNELBASE_HEADER}"
+    DEPENDS "${CUSTOMOS_KERNELBASE_SRC}" "${CUSTOMOS_KERNELBASE_DEF}" "${CUSTOMOS_KERNELBASE_SCRIPT}" "${CUSTOMOS_EMBED_BLOB_SCRIPT}"
+    COMMENT "Compiling + embedding kernelbase.dll (forwarders -> kernel32)"
+    VERBATIM
+)
+
+list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_KERNELBASE_HEADER}")
+
+# ----------------------------------------------------------------------------
+# Userland advapi32.dll — stage-2 slice 27. 25 exports: Reg*
+# (all return "not found"), token/privilege (pretend success),
+# GetUserName* (constant), SystemFunction036 (deterministic).
+# ----------------------------------------------------------------------------
+set(CUSTOMOS_ADVAPI32_SRC "${CMAKE_SOURCE_DIR}/userland/libs/advapi32/advapi32.c")
+set(CUSTOMOS_ADVAPI32_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_advapi32_dll.h")
+set(CUSTOMOS_ADVAPI32_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-advapi32-dll.sh")
+
+add_custom_command(
+    OUTPUT "${CUSTOMOS_ADVAPI32_HEADER}"
+    COMMAND "${CUSTOMOS_ADVAPI32_SCRIPT}" "${CMAKE_SOURCE_DIR}" "${CUSTOMOS_ADVAPI32_HEADER}"
+    DEPENDS "${CUSTOMOS_ADVAPI32_SRC}" "${CUSTOMOS_ADVAPI32_SCRIPT}" "${CUSTOMOS_EMBED_BLOB_SCRIPT}"
+    COMMENT "Compiling + embedding advapi32.dll (Reg* / token / GetUserName / RtlGenRandom)"
+    VERBATIM
+)
+
+list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_ADVAPI32_HEADER}")
+
+# ----------------------------------------------------------------------------
 # Userland ucrtbase.dll — stage-2 slice 15. Retires the
 # UCRT runtime stubs: heap alloc (malloc/free/calloc/realloc
 # /_aligned_*), terminators (exit/_exit), CRT startup shims
