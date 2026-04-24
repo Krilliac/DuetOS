@@ -452,3 +452,185 @@ __declspec(dllexport) void InitializeSListHead(void* head)
             b[i] = 0;
     }
 }
+
+/* ------------------------------------------------------------------
+ * Virtual memory (slice 18)
+ *
+ * SYS_VMAP   = 28 — bump-allocate `size` bytes (page-rounded)
+ *              from the per-process vmap arena, return VA.
+ * SYS_VUNMAP = 29 — release a (va, size) range; returns 0 on
+ *              hit, -1 if outside the arena.
+ *
+ * Both ignore Win32's lpAddress / flAllocationType / flProtect
+ * args today. v0 vmap pages are always RW+NX (W^X), so
+ * VirtualProtect is a no-op that just round-trips the previous
+ * protection value to keep CRT-startup probe round-trips happy.
+ * ------------------------------------------------------------------ */
+
+typedef unsigned long long SIZE_T;
+typedef unsigned int       PROT;
+
+__declspec(dllexport) void* VirtualAlloc(void* lpAddress, SIZE_T dwSize, DWORD flAllocationType, DWORD flProtect)
+{
+    (void) lpAddress;
+    (void) flAllocationType;
+    (void) flProtect;
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long) 28), "D"((long long) dwSize) : "memory");
+    return (void*) rv;
+}
+
+/* VirtualAllocEx ignores the extra HANDLE arg in v0 (the flat
+ * stub aliases this to VirtualAlloc — same here). */
+__declspec(dllexport) void* VirtualAllocEx(HANDLE hProcess, void* lpAddress, SIZE_T dwSize, DWORD flAllocationType,
+                                           DWORD flProtect)
+{
+    (void) hProcess;
+    return VirtualAlloc(lpAddress, dwSize, flAllocationType, flProtect);
+}
+
+__declspec(dllexport) BOOL VirtualFree(void* lpAddress, SIZE_T dwSize, DWORD dwFreeType)
+{
+    (void) dwFreeType;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long) 29), "D"((long long) lpAddress), "S"((long long) dwSize)
+                     : "memory");
+    /* SYS_VUNMAP returns 0 on hit, -1 on miss; Win32 wants
+     * BOOL TRUE on hit. */
+    return rv == 0 ? 1 : 0;
+}
+
+__declspec(dllexport) BOOL VirtualFreeEx(HANDLE hProcess, void* lpAddress, SIZE_T dwSize, DWORD dwFreeType)
+{
+    (void) hProcess;
+    return VirtualFree(lpAddress, dwSize, dwFreeType);
+}
+
+__declspec(dllexport) BOOL VirtualProtect(void* lpAddress, SIZE_T dwSize, DWORD flNewProtect, DWORD* lpflOldProtect)
+{
+    (void) lpAddress;
+    (void) dwSize;
+    (void) flNewProtect;
+    /* Every vmap page is RW+NX by construction (W^X). Round-
+     * trip PAGE_READWRITE (= 0x04) as the "previous" protection
+     * so MSVC CRT's probe path sees a plausible value. */
+    if (lpflOldProtect != (DWORD*) 0)
+        *lpflOldProtect = 0x04;
+    return 1;
+}
+
+__declspec(dllexport) BOOL VirtualProtectEx(HANDLE hProcess, void* lpAddress, SIZE_T dwSize, DWORD flNewProtect,
+                                            DWORD* lpflOldProtect)
+{
+    (void) hProcess;
+    return VirtualProtect(lpAddress, dwSize, flNewProtect, lpflOldProtect);
+}
+
+/* ------------------------------------------------------------------
+ * lstr* family (slice 18) — Windows' historic string helpers,
+ * still imported by older / port-compat code paths in real
+ * MSVC PEs. Same semantics as str / wcs intrinsics without
+ * the SEH wrappers real Windows applies on top.
+ * ------------------------------------------------------------------ */
+
+#define NO_BUILTIN_LSTR __attribute__((no_builtin("strlen", "strcmp", "strcpy")))
+
+__declspec(dllexport) NO_BUILTIN_LSTR int lstrlenA(const char* s)
+{
+    if (s == (const char*) 0)
+        return 0; /* lstrlenA NUL-input returns 0, not crash */
+    int n = 0;
+    while (s[n])
+        ++n;
+    return n;
+}
+
+__declspec(dllexport) NO_BUILTIN_LSTR int lstrcmpA(const char* a, const char* b)
+{
+    if (a == (const char*) 0 || b == (const char*) 0)
+        return (a == b) ? 0 : (a == (const char*) 0 ? -1 : 1);
+    while (*a && *a == *b)
+    {
+        ++a;
+        ++b;
+    }
+    return (int) (unsigned char) *a - (int) (unsigned char) *b;
+}
+
+__declspec(dllexport) NO_BUILTIN_LSTR int lstrcmpiA(const char* a, const char* b)
+{
+    if (a == (const char*) 0 || b == (const char*) 0)
+        return (a == b) ? 0 : (a == (const char*) 0 ? -1 : 1);
+    for (;; ++a, ++b)
+    {
+        char ca = *a;
+        char cb = *b;
+        if (ca >= 'A' && ca <= 'Z')
+            ca = (char) (ca + ('a' - 'A'));
+        if (cb >= 'A' && cb <= 'Z')
+            cb = (char) (cb + ('a' - 'A'));
+        if (!ca || ca != cb)
+            return (int) (unsigned char) ca - (int) (unsigned char) cb;
+    }
+}
+
+__declspec(dllexport) NO_BUILTIN_LSTR char* lstrcpyA(char* dst, const char* src)
+{
+    if (dst == (char*) 0 || src == (const char*) 0)
+        return dst;
+    char* d = dst;
+    while ((*d++ = *src++) != 0) { }
+    return dst;
+}
+
+typedef unsigned short wchar_t16; /* Win32 wchar_t is UTF-16 */
+
+__declspec(dllexport) int lstrlenW(const wchar_t16* s)
+{
+    if (s == (const wchar_t16*) 0)
+        return 0;
+    int n = 0;
+    while (s[n])
+        ++n;
+    return n;
+}
+
+__declspec(dllexport) int lstrcmpW(const wchar_t16* a, const wchar_t16* b)
+{
+    if (a == (const wchar_t16*) 0 || b == (const wchar_t16*) 0)
+        return (a == b) ? 0 : (a == (const wchar_t16*) 0 ? -1 : 1);
+    while (*a && *a == *b)
+    {
+        ++a;
+        ++b;
+    }
+    return (int) *a - (int) *b;
+}
+
+__declspec(dllexport) int lstrcmpiW(const wchar_t16* a, const wchar_t16* b)
+{
+    if (a == (const wchar_t16*) 0 || b == (const wchar_t16*) 0)
+        return (a == b) ? 0 : (a == (const wchar_t16*) 0 ? -1 : 1);
+    for (;; ++a, ++b)
+    {
+        wchar_t16 ca = *a;
+        wchar_t16 cb = *b;
+        if (ca >= 'A' && ca <= 'Z')
+            ca = (wchar_t16) (ca + ('a' - 'A'));
+        if (cb >= 'A' && cb <= 'Z')
+            cb = (wchar_t16) (cb + ('a' - 'A'));
+        if (!ca || ca != cb)
+            return (int) ca - (int) cb;
+    }
+}
+
+__declspec(dllexport) wchar_t16* lstrcpyW(wchar_t16* dst, const wchar_t16* src)
+{
+    if (dst == (wchar_t16*) 0 || src == (const wchar_t16*) 0)
+        return dst;
+    wchar_t16* d = dst;
+    while ((*d++ = *src++) != 0) { }
+    return dst;
+}

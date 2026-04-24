@@ -111,6 +111,20 @@ set +e
     /export:InterlockedPopEntrySList \
     /export:InterlockedFlushSList \
     /export:InitializeSListHead \
+    /export:VirtualAlloc \
+    /export:VirtualAllocEx \
+    /export:VirtualFree \
+    /export:VirtualFreeEx \
+    /export:VirtualProtect \
+    /export:VirtualProtectEx \
+    /export:lstrlenA \
+    /export:lstrcmpA \
+    /export:lstrcmpiA \
+    /export:lstrcpyA \
+    /export:lstrlenW \
+    /export:lstrcmpW \
+    /export:lstrcmpiW \
+    /export:lstrcpyW \
     /out:"${DLL}" \
     "${OBJ}" 2>&1 | grep -v "align specified without /driver"
 LINK_RC=${PIPESTATUS[0]}
