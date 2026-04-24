@@ -1087,6 +1087,8 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     duetos::security::GuardInit();
     duetos::security::GuardSelfTest();
 
+    duetos::fs::TmpFsSelfTest();
+
     SerialWrite("[boot] Probing GPT on block devices.\n");
     duetos::fs::gpt::GptSelfTest();
 
