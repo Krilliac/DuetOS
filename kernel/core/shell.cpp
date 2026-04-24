@@ -14,6 +14,7 @@
 #include "../drivers/audio/pcspk.h"
 #include "../drivers/gpu/bochs_vbe.h"
 #include "../drivers/gpu/gpu.h"
+#include "../drivers/gpu/virtio_gpu.h"
 #include "../drivers/input/ps2kbd.h"
 #include "../drivers/input/ps2mouse.h"
 #include "../drivers/net/net.h"
@@ -25,6 +26,7 @@
 #include "../drivers/video/framebuffer.h"
 #include "../drivers/video/widget.h"
 #include "../fs/fat32.h"
+#include "../subsystems/graphics/graphics.h"
 #include "../subsystems/translation/translate.h"
 #include "../fs/gpt.h"
 #include "../fs/ramfs.h"
@@ -1288,23 +1290,23 @@ void CmdFind(u32 argc, char** argv)
 // dispatched in Dispatch — keeping the two in sync is the
 // price of not having reflection.
 static const char* const kCommandSet[] = {
-    "help",      "about",   "version",    "clear",    "uptime",   "date",      "windows",    "mode",     "ls",
-    "cat",       "touch",   "rm",         "echo",     "cp",       "mv",        "wc",         "head",     "tail",
-    "dmesg",     "stats",   "mem",        "history",  "set",      "unset",     "env",        "alias",    "unalias",
-    "sysinfo",   "source",  "man",        "grep",     "find",     "time",      "which",      "seq",      "sort",
-    "uniq",      "cpuid",   "cr",         "rflags",   "tsc",      "hpet",      "ticks",      "msr",      "lapic",
-    "smp",       "lspci",   "heap",       "paging",   "fb",       "kbdstats",  "mousestats", "loglevel", "logcolor",
-    "getenv",    "yield",   "reboot",     "halt",     "uname",    "whoami",    "hostname",   "pwd",      "true",
-    "false",     "mount",   "lsmod",      "lsblk",    "lsgpt",    "free",      "ps",         "spawn",    "readelf",
-    "hexdump",   "stat",    "basename",   "dirname",  "cal",      "sleep",     "reset",      "tac",      "nl",
-    "rev",       "expr",    "color",      "rand",     "flushtlb", "checksum",  "repeat",     "kill",     "exec",
-    "metrics",   "trace",   "read",       "guard",    "top",      "fatcat",    "fatls",      "fatwrite", "fatappend",
-    "fatnew",    "fatrm",   "fattrunc",   "fatmkdir", "fatrmdir", "linuxexec", "translate",  "smbios",   "power",
-    "battery",   "thermal", "temp",       "gpu",      "lsgpu",    "nic",       "lsnic",      "ip",       "arp",
-    "ipv4",      "uuid",    "uuidgen",    "health",   "checkup",  "attacksim", "redteam",    "memdump",  "instr",
-    "dumpstate", "bp",      "breakpoint", "login",    "logout",   "passwd",    "useradd",    "userdel",  "users",
-    "who",       "su",      "hwmon",      "vbe",      "ping",     "nslookup",  "ntp",        "http",     "shutdown",
-    "poweroff",  "beep",    "inspect",
+    "help",     "about",     "version",  "clear",      "uptime",   "date",      "windows",    "mode",     "ls",
+    "cat",      "touch",     "rm",       "echo",       "cp",       "mv",        "wc",         "head",     "tail",
+    "dmesg",    "stats",     "mem",      "history",    "set",      "unset",     "env",        "alias",    "unalias",
+    "sysinfo",  "source",    "man",      "grep",       "find",     "time",      "which",      "seq",      "sort",
+    "uniq",     "cpuid",     "cr",       "rflags",     "tsc",      "hpet",      "ticks",      "msr",      "lapic",
+    "smp",      "lspci",     "heap",     "paging",     "fb",       "kbdstats",  "mousestats", "loglevel", "logcolor",
+    "getenv",   "yield",     "reboot",   "halt",       "uname",    "whoami",    "hostname",   "pwd",      "true",
+    "false",    "mount",     "lsmod",    "lsblk",      "lsgpt",    "free",      "ps",         "spawn",    "readelf",
+    "hexdump",  "stat",      "basename", "dirname",    "cal",      "sleep",     "reset",      "tac",      "nl",
+    "rev",      "expr",      "color",    "rand",       "flushtlb", "checksum",  "repeat",     "kill",     "exec",
+    "metrics",  "trace",     "read",     "guard",      "top",      "fatcat",    "fatls",      "fatwrite", "fatappend",
+    "fatnew",   "fatrm",     "fattrunc", "fatmkdir",   "fatrmdir", "linuxexec", "translate",  "smbios",   "power",
+    "battery",  "thermal",   "temp",     "gpu",        "lsgpu",    "gfx",       "nic",        "lsnic",    "ip",
+    "arp",      "ipv4",      "uuid",     "uuidgen",    "health",   "checkup",   "attacksim",  "redteam",  "memdump",
+    "instr",    "dumpstate", "bp",       "breakpoint", "login",    "logout",    "passwd",     "useradd",  "userdel",
+    "users",    "who",       "su",       "hwmon",      "vbe",      "ping",      "nslookup",   "ntp",      "http",
+    "shutdown", "poweroff",  "beep",     "inspect",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -1651,8 +1653,8 @@ void CmdSysinfo()
     WriteU64Dec(alive);
     ConsoleWriteln(" ALIVE");
     ConsoleWrite("MODE:    ");
-    ConsoleWriteln(
-        duetos::drivers::video::GetDisplayMode() == duetos::drivers::video::DisplayMode::Tty ? "TTY" : "DESKTOP");
+    ConsoleWriteln(duetos::drivers::video::GetDisplayMode() == duetos::drivers::video::DisplayMode::Tty ? "TTY"
+                                                                                                        : "DESKTOP");
 }
 
 void CmdEnv()
@@ -2354,6 +2356,7 @@ void CmdGpu()
         ConsoleWriteln("GPU: (none discovered)");
         return;
     }
+    bool saw_virtio = false;
     for (u64 i = 0; i < n; ++i)
     {
         const auto& g = duetos::drivers::gpu::Gpu(i);
@@ -2373,7 +2376,66 @@ void CmdGpu()
             ConsoleWrite(g.family);
         }
         ConsoleWriteChar('\n');
+        if (g.vendor_id == duetos::drivers::gpu::kVendorRedHatVirt && g.device_id == 0x1050)
+            saw_virtio = true;
     }
+
+    if (saw_virtio)
+    {
+        const auto v = duetos::drivers::gpu::VirtioGpuLastLayout();
+        if (v.present)
+        {
+            ConsoleWriteln("virtio-gpu layout:");
+            ConsoleWrite("  common_cfg phys=");
+            WriteU64Hex(v.common_cfg_phys, 0);
+            ConsoleWrite("  num_queues=");
+            WriteU64Dec(v.num_queues);
+            ConsoleWrite("  device_features_lo=");
+            WriteU64Hex(v.device_features_lo, 8);
+            ConsoleWrite("  status_after_reset=");
+            WriteU64Hex(v.device_status_after_reset, 2);
+            ConsoleWriteChar('\n');
+        }
+        else
+        {
+            ConsoleWriteln("virtio-gpu: device present but probe incomplete (no common_cfg)");
+        }
+    }
+}
+
+void CmdGfx()
+{
+    // Surfaces the graphics ICD handle-table counters. The ICD is
+    // a trace-only skeleton today (see subsystems/graphics/graphics.h),
+    // so in the steady state all counts are zero unless something
+    // has exercised the Vk*/D3D*/DXGI entry points.
+    const auto s = duetos::subsystems::graphics::GraphicsStatsRead();
+    ConsoleWriteln("Graphics ICD (skeleton — no real driver)");
+    ConsoleWrite("  Vulkan instances: live=");
+    WriteU64Dec(s.vk_instances_live);
+    ConsoleWrite(" created=");
+    WriteU64Dec(s.vk_instances_created);
+    ConsoleWrite(" destroyed=");
+    WriteU64Dec(s.vk_instances_destroyed);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("  Vulkan devices:   live=");
+    WriteU64Dec(s.vk_devices_live);
+    ConsoleWrite(" created=");
+    WriteU64Dec(s.vk_devices_created);
+    ConsoleWrite(" destroyed=");
+    WriteU64Dec(s.vk_devices_destroyed);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("  D3D create calls: ");
+    WriteU64Dec(s.d3d_create_calls);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("  DXGI create calls: ");
+    WriteU64Dec(s.dxgi_create_calls);
+    ConsoleWriteChar('\n');
+
+    const u64 ngpu = duetos::drivers::gpu::GpuCount();
+    ConsoleWrite("  Physical devices visible to ICD: ");
+    WriteU64Dec(ngpu);
+    ConsoleWriteChar('\n');
 }
 
 // Parse a decimal u32 from `s` into `*out`. Returns true on full
@@ -3580,7 +3642,7 @@ void CmdInspectArm(u32 argc, char** argv)
     if (StrEq(argv[2], "status"))
     {
         ConsoleWriteln(duetos::debug::InspectArmActive() ? "INSPECT ARM: STATE=ON (ONE-SHOT)" //
-                                                           : "INSPECT ARM: STATE=OFF");
+                                                         : "INSPECT ARM: STATE=OFF");
         return;
     }
     ConsoleWriteln("INSPECT ARM: UNKNOWN MODE (USE ON/OFF/STATUS)");
@@ -4549,9 +4611,9 @@ void CmdLinuxexec(duetos::u32 argc, char** argv)
         ConsoleWriteln("LINUXEXEC: READ ERROR OR EMPTY");
         return;
     }
-    const duetos::u64 pid = duetos::core::SpawnElfLinux(
-        "linuxexec", elf_buf, static_cast<duetos::u64>(n), duetos::core::CapSetEmpty(),
-        duetos::fs::RamfsSandboxRoot(), /*frame_budget=*/16, duetos::core::kTickBudgetSandbox);
+    const duetos::u64 pid = duetos::core::SpawnElfLinux("linuxexec", elf_buf, static_cast<duetos::u64>(n),
+                                                        duetos::core::CapSetEmpty(), duetos::fs::RamfsSandboxRoot(),
+                                                        /*frame_budget=*/16, duetos::core::kTickBudgetSandbox);
     if (pid == 0)
     {
         ConsoleWriteln("LINUXEXEC: SPAWNELFLINUX FAILED");
@@ -5888,9 +5950,9 @@ void CmdExec(u32 argc, char** argv)
     // now — every manually-exec'd binary gets trusted caps +
     // the trusted ramfs root. When SYS_SPAWN arrives, ring-3
     // callers will inherit their own.
-    const u64 new_pid = duetos::core::SpawnElfFile(
-        argv[1], file, n, duetos::core::CapSetTrusted(), duetos::fs::RamfsTrustedRoot(),
-        duetos::mm::kFrameBudgetTrusted, duetos::core::kTickBudgetTrusted);
+    const u64 new_pid =
+        duetos::core::SpawnElfFile(argv[1], file, n, duetos::core::CapSetTrusted(), duetos::fs::RamfsTrustedRoot(),
+                                   duetos::mm::kFrameBudgetTrusted, duetos::core::kTickBudgetTrusted);
     if (new_pid == 0)
     {
         ConsoleWriteln("EXEC: SPAWN FAILED (OOM or bad ELF layout).");
@@ -6310,7 +6372,7 @@ void CmdMode()
     const auto mode = duetos::drivers::video::GetDisplayMode();
     ConsoleWrite("CURRENT MODE: ");
     ConsoleWriteln(mode == duetos::drivers::video::DisplayMode::Tty ? "TTY (FULLSCREEN CONSOLE)"
-                                                                      : "DESKTOP (WINDOWED SHELL)");
+                                                                    : "DESKTOP (WINDOWED SHELL)");
     ConsoleWriteln("PRESS CTRL+ALT+T TO TOGGLE.");
 }
 
@@ -7518,6 +7580,11 @@ void Dispatch(char* line)
     if (StrEq(cmd, "gpu") || StrEq(cmd, "lsgpu"))
     {
         CmdGpu();
+        return;
+    }
+    if (StrEq(cmd, "gfx"))
+    {
+        CmdGfx();
         return;
     }
     if (StrEq(cmd, "vbe"))
