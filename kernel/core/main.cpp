@@ -1396,13 +1396,21 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 const auto active = duetos::drivers::video::WindowActive();
                 if (active != duetos::drivers::video::kWindowInvalid)
                 {
-                    // Arrow-key routing — only Files consumes these
-                    // today, but the block is shaped so future apps
-                    // can add their own arrow handlers.
+                    // Non-ASCII navigation keys — routed per app.
+                    // Files takes Up/Down for selection; Notes takes
+                    // the full arrow cluster plus Home/End/Delete
+                    // for its cursor.
                     if (active == duetos::apps::files::FilesWindow() &&
                         (ev.code == kKeyArrowUp || ev.code == kKeyArrowDown))
                     {
                         app_consumed = duetos::apps::files::FilesFeedArrow(ev.code == kKeyArrowUp);
+                    }
+                    else if (active == duetos::apps::notes::NotesWindow() &&
+                             (ev.code == kKeyArrowUp || ev.code == kKeyArrowDown || ev.code == kKeyArrowLeft ||
+                              ev.code == kKeyArrowRight || ev.code == kKeyHome || ev.code == kKeyEnd ||
+                              ev.code == kKeyDelete))
+                    {
+                        app_consumed = duetos::apps::notes::NotesFeedKey(ev.code);
                     }
                     else
                     {
