@@ -74,6 +74,7 @@ constexpr Theme kClassic = {
             0x00407080, // LogView
             0x00606020, // Files
             0x00203040, // Clock
+            0x00702070, // GfxDemo — magenta to flag "this paints pixels"
         },
     .role_client =
         {
@@ -83,6 +84,7 @@ constexpr Theme kClassic = {
             0x00101020, // LogView
             0x00101828, // Files
             0x00081008, // Clock
+            0x00000000, // GfxDemo — black; the demo overpaints every pixel
         },
 
     .console_fg = 0x0080F088,
@@ -122,6 +124,7 @@ constexpr Theme kSlate10 = {
             0x00008CBA, // LogView      — VSCode-ish teal
             0x008B6914, // Files        — dark amber / goldenrod
             0x002D2D33, // Clock        — flat dark slate
+            0x008B2C8B, // GfxDemo      — magenta accent
         },
     .role_client =
         {
@@ -131,6 +134,7 @@ constexpr Theme kSlate10 = {
             0x001A1A20, // LogView — deepest Slate so log colours pop
             0x00252529, // Files
             0x00101014, // Clock — near-black so 7-seg reads bright
+            0x00000000, // GfxDemo — black ground (overpainted)
         },
 
     .console_fg = 0x00D4D4D4, // VSCode default editor ink

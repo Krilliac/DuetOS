@@ -66,7 +66,8 @@ enum class ThemeRole : u8
     LogView = 3,
     Files = 4,
     Clock = 5,
-    kCount = 6,
+    GfxDemo = 6,
+    kCount = 7,
 };
 
 struct Theme
