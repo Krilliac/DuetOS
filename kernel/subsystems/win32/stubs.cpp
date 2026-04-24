@@ -764,11 +764,12 @@ constexpr u8 kStubsBytes[] = {
 
     // --- GetSystemTimeAsFileTime (offset 0x1DE, 8 bytes) -------
     // Win32: void GetSystemTimeAsFileTime(LPFILETIME=rcx).
-    // FILETIME is {u32 low; u32 high} = 8 bytes representing
-    // 100ns ticks since 1601-01-01. v0 returns 0 — programs
-    // that use this for logging timestamps will see 1601 for
-    // every log line. Real implementation would need
-    // SYS_GETTIME. Deferred.
+    // Superseded — the IAT binding table now routes
+    // GetSystemTimeAsFileTime to kOffGetSysTimeFTReal (batch 20,
+    // offset 0x2A6) which issues SYS_GETTIME_FT to sample the
+    // CMOS RTC and return a real FILETIME. The zero-writing
+    // bytes below remain so the layout of earlier batches stays
+    // frozen; no import lands here.
     0x48, 0xC7, 0x01, 0x00, 0x00, 0x00, 0x00, // 0x1DE mov qword [rcx], 0
     0xC3,                                     // 0x1E5 ret
 
