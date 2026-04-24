@@ -74,6 +74,11 @@ void DoEventSet(arch::TrapFrame* frame)
     if (handle < core::Process::kWin32EventBase ||
         handle >= core::Process::kWin32EventBase + core::Process::kWin32EventCap)
     {
+        arch::SerialWrite("[sys] event_set bad_handle pid=");
+        arch::SerialWriteHex(proc->pid);
+        arch::SerialWrite(" handle=");
+        arch::SerialWriteHex(handle);
+        arch::SerialWrite("\n");
         frame->rax = static_cast<u64>(-1);
         return;
     }
@@ -82,6 +87,11 @@ void DoEventSet(arch::TrapFrame* frame)
     if (!e.in_use)
     {
         arch::Sti();
+        arch::SerialWrite("[sys] event_set closed_handle pid=");
+        arch::SerialWriteHex(proc->pid);
+        arch::SerialWrite(" handle=");
+        arch::SerialWriteHex(handle);
+        arch::SerialWrite("\n");
         frame->rax = static_cast<u64>(-1);
         return;
     }
@@ -114,15 +124,29 @@ void DoEventReset(arch::TrapFrame* frame)
     if (handle < core::Process::kWin32EventBase ||
         handle >= core::Process::kWin32EventBase + core::Process::kWin32EventCap)
     {
+        arch::SerialWrite("[sys] event_reset bad_handle pid=");
+        arch::SerialWriteHex(proc->pid);
+        arch::SerialWrite(" handle=");
+        arch::SerialWriteHex(handle);
+        arch::SerialWrite("\n");
         frame->rax = static_cast<u64>(-1);
         return;
     }
     core::Process::Win32EventHandle& e = proc->win32_events[handle - core::Process::kWin32EventBase];
     arch::Cli();
-    if (e.in_use)
+    const bool was_in_use = e.in_use;
+    if (was_in_use)
         e.signaled = false;
     arch::Sti();
-    frame->rax = e.in_use ? 0 : static_cast<u64>(-1);
+    if (!was_in_use)
+    {
+        arch::SerialWrite("[sys] event_reset closed_handle pid=");
+        arch::SerialWriteHex(proc->pid);
+        arch::SerialWrite(" handle=");
+        arch::SerialWriteHex(handle);
+        arch::SerialWrite("\n");
+    }
+    frame->rax = was_in_use ? 0 : static_cast<u64>(-1);
 }
 
 void DoEventWait(arch::TrapFrame* frame)
@@ -137,6 +161,11 @@ void DoEventWait(arch::TrapFrame* frame)
     if (handle < core::Process::kWin32EventBase ||
         handle >= core::Process::kWin32EventBase + core::Process::kWin32EventCap)
     {
+        arch::SerialWrite("[sys] event_wait bad_handle pid=");
+        arch::SerialWriteHex(proc->pid);
+        arch::SerialWrite(" handle=");
+        arch::SerialWriteHex(handle);
+        arch::SerialWrite("\n");
         frame->rax = static_cast<u64>(-1);
         return;
     }
@@ -145,6 +174,11 @@ void DoEventWait(arch::TrapFrame* frame)
     if (!e.in_use)
     {
         arch::Sti();
+        arch::SerialWrite("[sys] event_wait closed_handle pid=");
+        arch::SerialWriteHex(proc->pid);
+        arch::SerialWrite(" handle=");
+        arch::SerialWriteHex(handle);
+        arch::SerialWrite("\n");
         frame->rax = static_cast<u64>(-1);
         return;
     }
