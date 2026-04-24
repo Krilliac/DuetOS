@@ -26,6 +26,7 @@ enum : u8
     kPxFill = 2,    // drawn as white
 };
 
+// clang-format off
 constinit const u8 kCursorMask[kCursorHeight][kCursorWidth] = {
     {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, // row 0  #
     {1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, //        ##
@@ -48,6 +49,7 @@ constinit const u8 kCursorMask[kCursorHeight][kCursorWidth] = {
     {0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0},
     {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
 };
+// clang-format on
 
 constexpr u32 kColourOutline = 0x00000000;
 constexpr u32 kColourFill = 0x00FFFFFF;
@@ -242,6 +244,11 @@ void CursorShow()
     SaveAt(g_x, g_y);
     DrawAt(g_x, g_y);
     g_ready = true;
+}
+
+void CursorSetDesktopBackground(u32 rgb)
+{
+    g_desktop_rgb = rgb;
 }
 
 } // namespace customos::drivers::video

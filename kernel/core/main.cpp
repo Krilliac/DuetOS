@@ -52,6 +52,7 @@
 #include "../drivers/video/calendar.h"
 #include "../drivers/video/menu.h"
 #include "../drivers/video/taskbar.h"
+#include "../drivers/video/theme.h"
 #include "../drivers/video/widget.h"
 #include "../fs/ramfs.h"
 #include "../fs/tmpfs.h"
@@ -363,79 +364,93 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // Wrapped in a file-scope helper so both the initial boot
     // paint AND the window-drag path (mouse reader thread) can
     // repaint the whole surface with one call.
-    constexpr customos::u32 kDesktopTeal = 0x00204868;
+    //
+    // Initial theme selection honours the kernel cmdline
+    // (theme=classic / theme=slate10); default is the classic
+    // teal palette the first GUI slice shipped. Ctrl+Alt+Y
+    // cycles at runtime.
+    {
+        const char* early_cmdline = FindBootCmdline(multiboot_info);
+        for (int i = 0; i < static_cast<int>(customos::drivers::video::ThemeId::kCount); ++i)
+        {
+            const auto id = static_cast<customos::drivers::video::ThemeId>(i);
+            if (CmdlineMatches(early_cmdline, "theme", customos::drivers::video::ThemeIdName(id)))
+            {
+                customos::drivers::video::ThemeSet(id);
+                break;
+            }
+        }
+    }
+    const auto& theme0 = customos::drivers::video::ThemeCurrent();
 
     // CALCULATOR — native CustomOS app. Window chrome first,
     // then CalculatorInit registers its 16 buttons + content
     // drawer against the returned handle. Width / height are
     // sized to fit the 4x4 keypad (4 * 68 + 3 * 4 = 284 px
     // wide + 2 * 8 inset = 300; 4 * 36 + 3 * 4 + 60 top
-    // inset + 4 bottom = 220).
-    customos::drivers::video::WindowChrome win_a_chrome{};
+    // inset + 4 bottom = 220). Colours come from the active
+    // theme so Ctrl+Alt+Y re-hues without touching layout.
+    using Role = customos::drivers::video::ThemeRole;
+    auto theme_chrome = [&](Role role)
+    {
+        customos::drivers::video::WindowChrome c{};
+        c.colour_border = theme0.window_border;
+        c.colour_title = theme0.role_title[static_cast<customos::u32>(role)];
+        c.colour_client = theme0.role_client[static_cast<customos::u32>(role)];
+        c.colour_close_btn = theme0.window_close;
+        c.title_height = 22;
+        return c;
+    };
+
+    customos::drivers::video::WindowChrome win_a_chrome = theme_chrome(Role::Calculator);
     win_a_chrome.x = 60;
     win_a_chrome.y = 60;
     win_a_chrome.w = 300;
     win_a_chrome.h = 220;
-    win_a_chrome.colour_border = 0x00101828;
-    win_a_chrome.colour_title = 0x00205080;
-    win_a_chrome.colour_client = 0x00101828;
-    win_a_chrome.colour_close_btn = 0x00E04020;
-    win_a_chrome.title_height = 22;
     const customos::drivers::video::WindowHandle calc_handle =
         customos::drivers::video::WindowRegister(win_a_chrome, "CALCULATOR");
+    customos::drivers::video::ThemeRegisterWindow(Role::Calculator, calc_handle);
     customos::apps::calculator::CalculatorInit(calc_handle);
     customos::apps::calculator::CalculatorSelfTest();
 
-    customos::drivers::video::WindowChrome win_b_chrome{};
+    customos::drivers::video::WindowChrome win_b_chrome = theme_chrome(Role::Notes);
     win_b_chrome.x = 500;
     win_b_chrome.y = 100;
     win_b_chrome.w = 380;
     win_b_chrome.h = 200;
-    win_b_chrome.colour_border = 0x00101828;
-    win_b_chrome.colour_title = 0x00306838;
-    win_b_chrome.colour_client = 0x00E0E0D8;
-    win_b_chrome.colour_close_btn = 0x00E04020;
-    win_b_chrome.title_height = 22;
     // NOTEPAD — native CustomOS notes app. The content-draw
     // callback is installed inside NotesInit; the kbd-reader
     // thread below routes keystrokes here when this window
     // is active (focus == keyboard owner).
     const customos::drivers::video::WindowHandle notes_handle =
         customos::drivers::video::WindowRegister(win_b_chrome, "NOTEPAD");
+    customos::drivers::video::ThemeRegisterWindow(Role::Notes, notes_handle);
     customos::apps::notes::NotesInit(notes_handle);
 
     // Task Manager window — a window whose content drawer
     // prints live scheduler + memory stats. The ui-ticker's
     // 1 Hz recompose refreshes it for free.
-    customos::drivers::video::WindowChrome taskman_chrome{};
+    customos::drivers::video::WindowChrome taskman_chrome = theme_chrome(Role::TaskManager);
     taskman_chrome.x = 180;
     taskman_chrome.y = 310;
     taskman_chrome.w = 340;
     taskman_chrome.h = 170;
-    taskman_chrome.colour_border = 0x00101828;
-    taskman_chrome.colour_title = 0x00803020;
-    taskman_chrome.colour_client = 0x00101828;
-    taskman_chrome.colour_close_btn = 0x00E04020;
-    taskman_chrome.title_height = 22;
     const customos::drivers::video::WindowHandle taskman_handle =
         customos::drivers::video::WindowRegister(taskman_chrome, "TASK MANAGER");
+    customos::drivers::video::ThemeRegisterWindow(Role::TaskManager, taskman_handle);
 
     // Live log viewer window — renders a compact view of the
     // klog ring (the same ring `dmesg` prints). Refreshes every
     // ui-ticker beat, so kernel activity appears without the
     // user having to flip consoles.
-    customos::drivers::video::WindowChrome logview_chrome{};
+    customos::drivers::video::WindowChrome logview_chrome = theme_chrome(Role::LogView);
     logview_chrome.x = 560;
     logview_chrome.y = 310;
     logview_chrome.w = 420;
     logview_chrome.h = 180;
-    logview_chrome.colour_border = 0x00101828;
-    logview_chrome.colour_title = 0x00407080;
-    logview_chrome.colour_client = 0x00101020;
-    logview_chrome.colour_close_btn = 0x00E04020;
-    logview_chrome.title_height = 22;
     const customos::drivers::video::WindowHandle logview_handle =
         customos::drivers::video::WindowRegister(logview_chrome, "KERNEL LOG");
+    customos::drivers::video::ThemeRegisterWindow(Role::LogView, logview_handle);
 
     customos::drivers::video::WindowSetContentDraw(
         logview_handle,
@@ -455,10 +470,9 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
             constexpr customos::u32 kFgWarn = 0x00FFD860;  // amber
             constexpr customos::u32 kFgError = 0x00FF6050; // soft red
             constexpr customos::u32 kFgDebug = 0x00808080; // grey
-            constexpr customos::u32 kBg = 0x00101020;
             struct Render
             {
-                customos::u32 cx, cy, col, row, max_col, max_row, fg;
+                customos::u32 cx, cy, col, row, max_col, max_row, fg, bg;
                 bool done;
             };
             static Render r;
@@ -469,6 +483,10 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
             r.max_col = cw / 8;
             r.max_row = ch / 10;
             r.fg = kFgInfo;
+            // Match the window's current client fill so text cells
+            // blend cleanly into the chrome after a theme switch.
+            r.bg = customos::drivers::video::ThemeCurrent()
+                       .role_client[static_cast<customos::u32>(customos::drivers::video::ThemeRole::LogView)];
             r.done = false;
             customos::core::DumpLogRingTo(
                 [](const char* s)
@@ -524,7 +542,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                             }
                         }
                         customos::drivers::video::FramebufferDrawChar(r.cx + r.col * 8, r.cy + r.row * 10, c, r.fg,
-                                                                      kBg);
+                                                                      r.bg);
                         ++r.col;
                     }
                 });
@@ -537,7 +555,11 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
         {
             using customos::drivers::video::FramebufferDrawString;
             constexpr customos::u32 kFg = 0x0080F088;
-            constexpr customos::u32 kBg = 0x00101828;
+            // Match the window's current client fill so the text
+            // rows sit on the same colour as the chrome client.
+            const customos::u32 kBg =
+                customos::drivers::video::ThemeCurrent()
+                    .role_client[static_cast<customos::u32>(customos::drivers::video::ThemeRole::TaskManager)];
             // Manual decimal formatter for u64 — kernel has no
             // printf. Fixed-width (10 digits) so the numeric
             // column doesn't jitter when values roll over.
@@ -603,36 +625,28 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // FILES — native CustomOS file browser. Lists the ramfs
     // trusted root; Up/Down to move, Enter to descend, Backspace
     // or 'B' to go back.
-    customos::drivers::video::WindowChrome files_chrome{};
+    customos::drivers::video::WindowChrome files_chrome = theme_chrome(Role::Files);
     files_chrome.x = 220;
     files_chrome.y = 160;
     files_chrome.w = 400;
     files_chrome.h = 200;
-    files_chrome.colour_border = 0x00101828;
-    files_chrome.colour_title = 0x00606020;
-    files_chrome.colour_client = 0x00101828;
-    files_chrome.colour_close_btn = 0x00E04020;
-    files_chrome.title_height = 22;
     const customos::drivers::video::WindowHandle files_handle =
         customos::drivers::video::WindowRegister(files_chrome, "FILES");
+    customos::drivers::video::ThemeRegisterWindow(Role::Files, files_handle);
     customos::apps::files::FilesInit(files_handle);
     customos::apps::files::FilesSelfTest();
 
     // CLOCK — 7-segment-style wall clock. No input, refreshes
     // via the 1 Hz ui-ticker. Sized tight around the digit row
     // (6 digits + 2 colons + gaps) with room for a date line.
-    customos::drivers::video::WindowChrome clock_chrome{};
+    customos::drivers::video::WindowChrome clock_chrome = theme_chrome(Role::Clock);
     clock_chrome.x = 640;
     clock_chrome.y = 520;
     clock_chrome.w = 240;
     clock_chrome.h = 110;
-    clock_chrome.colour_border = 0x00101828;
-    clock_chrome.colour_title = 0x00203040;
-    clock_chrome.colour_client = 0x00081008;
-    clock_chrome.colour_close_btn = 0x00E04020;
-    clock_chrome.title_height = 22;
     const customos::drivers::video::WindowHandle clock_handle =
         customos::drivers::video::WindowRegister(clock_chrome, "CLOCK");
+    customos::drivers::video::ThemeRegisterWindow(Role::Clock, clock_handle);
     customos::apps::clock::ClockInit(clock_handle);
     customos::apps::clock::ClockSelfTest();
 
@@ -645,7 +659,8 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
         const auto fb_info = customos::drivers::video::FramebufferGet();
         constexpr customos::u32 tb_h = 28;
         const customos::u32 tb_y = (fb_info.height > tb_h) ? fb_info.height - tb_h : 0;
-        customos::drivers::video::TaskbarInit(tb_y, tb_h, 0x00202838, 0x00FFFFFF, 0x00406090);
+        customos::drivers::video::TaskbarInit(tb_y, tb_h, theme0.taskbar_bg, theme0.taskbar_fg, theme0.taskbar_accent,
+                                              theme0.taskbar_tab_inactive, theme0.taskbar_border);
     }
 
     // Menu action ids. Ambient MenuContext() carries a target
@@ -657,7 +672,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // and leaves room for future desktop / window actions without
     // reshuffling ids.
 
-    customos::drivers::video::ConsoleInit(16, 400, 0x0080F088, 0x00181028);
+    customos::drivers::video::ConsoleInit(16, 400, theme0.console_fg, theme0.console_bg);
 
     // Tee kernel log lines to the on-screen console so the desktop
     // shows subsystem activity live — not just the boot seed block.
@@ -774,13 +789,13 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     {
         customos::drivers::video::SetDisplayMode(customos::drivers::video::DisplayMode::Tty);
         customos::drivers::video::ConsoleSetOrigin(16, 16);
-        customos::drivers::video::ConsoleSetColours(0x0080F088, 0x00000000);
+        customos::drivers::video::ConsoleSetColours(theme0.console_fg, 0x00000000);
         customos::drivers::video::DesktopCompose(0x00000000, nullptr);
     }
     else
     {
-        customos::drivers::video::DesktopCompose(kDesktopTeal, "WELCOME TO CUSTOMOS   BOOT OK");
-        customos::drivers::video::CursorInit(kDesktopTeal);
+        customos::drivers::video::DesktopCompose(theme0.desktop_bg, "WELCOME TO CUSTOMOS   BOOT OK");
+        customos::drivers::video::CursorInit(theme0.desktop_bg);
         if (demo_calendar)
         {
             customos::u32 kx = 0, ky = 0, kw = 0, kh = 0;
@@ -790,7 +805,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
             const customos::u32 ax = (kx + kw > pw) ? (kx + kw - pw) : 0;
             const customos::u32 ay = (ky > ph) ? ky - ph : 0;
             customos::drivers::video::CalendarOpen(ax, ay);
-            customos::drivers::video::DesktopCompose(kDesktopTeal, "WELCOME TO CUSTOMOS   BOOT OK");
+            customos::drivers::video::DesktopCompose(theme0.desktop_bg, "WELCOME TO CUSTOMOS   BOOT OK");
         }
     }
 
@@ -800,9 +815,20 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // winlogon-style welcome panel over the framebuffer. The
     // kbd-reader thread routes keys to LoginFeedKey while the
     // gate is up.
+    //
+    // `autologin=1` on the kernel cmdline skips the gate entirely
+    // — useful for headless screenshot captures + CI boot smoke
+    // tests where the runner can't drive a keyboard. The default
+    // remains "login required."
+    const bool autologin = CmdlineMatches(cmdline, "autologin", "1");
+    if (!autologin)
     {
         const auto mode = want_tty ? customos::core::LoginMode::Tty : customos::core::LoginMode::Gui;
         customos::core::LoginStart(mode);
+    }
+    else
+    {
+        SerialWrite("[boot] autologin=1 — skipping login gate\n");
     }
 
     SerialWrite("[boot] Seeding ramfs + VFS self-test.\n");
@@ -1077,7 +1103,9 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     auto kbd_reader = [](void*)
     {
         using namespace customos::drivers::input;
-        constexpr customos::u32 kDesktopTealLocal = 0x00204868;
+        // Sample at each compose call so Ctrl+Alt+Y (theme cycle)
+        // takes effect on the very next repaint — don't cache.
+        auto desktop_bg = []() { return customos::drivers::video::ThemeCurrent().desktop_bg; };
         for (;;)
         {
             const KeyEvent ev = Ps2KeyboardReadEvent();
@@ -1114,7 +1142,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                     else
                     {
                         customos::drivers::video::CursorHide();
-                        customos::drivers::video::DesktopCompose(kDesktopTealLocal, "WELCOME TO CUSTOMOS   BOOT OK");
+                        customos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO CUSTOMOS   BOOT OK");
                         customos::drivers::video::CursorShow();
                     }
                 }
@@ -1160,7 +1188,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                 else
                 {
                     customos::drivers::video::CursorHide();
-                    customos::drivers::video::DesktopCompose(kDesktopTealLocal, "WELCOME TO CUSTOMOS   BOOT OK");
+                    customos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO CUSTOMOS   BOOT OK");
                     customos::drivers::video::CursorShow();
                 }
                 customos::drivers::video::CompositorUnlock();
@@ -1183,19 +1211,50 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                     customos::drivers::video::CursorHide();
                     customos::drivers::video::SetDisplayMode(customos::drivers::video::DisplayMode::Tty);
                     customos::drivers::video::ConsoleSetOrigin(16, 16);
-                    customos::drivers::video::ConsoleSetColours(0x0080F088, 0x00000000);
+                    customos::drivers::video::ConsoleSetColours(customos::drivers::video::ThemeCurrent().console_fg,
+                                                                0x00000000);
                     customos::drivers::video::DesktopCompose(0x00000000, nullptr);
                 }
                 else
                 {
                     customos::drivers::video::SetDisplayMode(customos::drivers::video::DisplayMode::Desktop);
                     customos::drivers::video::ConsoleSetOrigin(16, 400);
-                    customos::drivers::video::ConsoleSetColours(0x0080F088, 0x00181028);
-                    customos::drivers::video::DesktopCompose(kDesktopTealLocal, "WELCOME TO CUSTOMOS   BOOT OK");
+                    customos::drivers::video::ConsoleSetColours(customos::drivers::video::ThemeCurrent().console_fg,
+                                                                customos::drivers::video::ThemeCurrent().console_bg);
+                    customos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO CUSTOMOS   BOOT OK");
                     customos::drivers::video::CursorShow();
                 }
                 customos::drivers::video::CompositorUnlock();
                 SerialWrite(to_tty ? "[ui] enter TTY mode\n" : "[ui] enter DESKTOP mode\n");
+                continue;
+            }
+
+            // Ctrl+Alt+Y cycles the desktop theme. Classic (teal)
+            // -> Slate10 (Win10 x Unreal Slate hybrid) -> wrap.
+            // Re-chromes every themed window + the taskbar +
+            // console + cursor backing, then recomposes so the
+            // new palette appears on screen in one flip.
+            if (ctrl && alt && (ev.code == 'y' || ev.code == 'Y'))
+            {
+                customos::drivers::video::CompositorLock();
+                customos::drivers::video::ThemeCycle();
+                customos::drivers::video::ThemeApplyToAll();
+                const bool is_tty =
+                    (customos::drivers::video::GetDisplayMode() == customos::drivers::video::DisplayMode::Tty);
+                if (is_tty)
+                {
+                    customos::drivers::video::DesktopCompose(0x00000000, nullptr);
+                }
+                else
+                {
+                    customos::drivers::video::CursorHide();
+                    customos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO CUSTOMOS   BOOT OK");
+                    customos::drivers::video::CursorShow();
+                }
+                customos::drivers::video::CompositorUnlock();
+                SerialWrite("[ui] theme -> ");
+                SerialWrite(customos::drivers::video::ThemeIdName(customos::drivers::video::ThemeCurrentId()));
+                SerialWrite("\n");
                 continue;
             }
 
@@ -1207,7 +1266,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                 customos::drivers::video::CompositorLock();
                 customos::drivers::video::WindowCycleActive();
                 customos::drivers::video::CursorHide();
-                customos::drivers::video::DesktopCompose(kDesktopTealLocal, "WELCOME TO CUSTOMOS   BOOT OK");
+                customos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO CUSTOMOS   BOOT OK");
                 customos::drivers::video::CursorShow();
                 customos::drivers::video::CompositorUnlock();
                 SerialWrite("[ui] alt-tab\n");
@@ -1225,7 +1284,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                     SerialWrite("\n");
                 }
                 customos::drivers::video::CursorHide();
-                customos::drivers::video::DesktopCompose(kDesktopTealLocal, "WELCOME TO CUSTOMOS   BOOT OK");
+                customos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO CUSTOMOS   BOOT OK");
                 customos::drivers::video::CursorShow();
                 customos::drivers::video::CompositorUnlock();
                 continue;
@@ -1338,7 +1397,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                 else
                 {
                     customos::drivers::video::CursorHide();
-                    customos::drivers::video::DesktopCompose(kDesktopTealLocal, "WELCOME TO CUSTOMOS   BOOT OK");
+                    customos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO CUSTOMOS   BOOT OK");
                     customos::drivers::video::CursorShow();
                 }
                 customos::drivers::video::CompositorUnlock();
@@ -1356,7 +1415,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // a hidden desktop.
     auto ui_ticker = [](void*)
     {
-        constexpr customos::u32 kDesktopTealLocal = 0x00204868;
+        auto desktop_bg = []() { return customos::drivers::video::ThemeCurrent().desktop_bg; };
         for (;;)
         {
             customos::sched::SchedSleepTicks(100);
@@ -1378,7 +1437,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
             else
             {
                 customos::drivers::video::CursorHide();
-                customos::drivers::video::DesktopCompose(kDesktopTealLocal, "WELCOME TO CUSTOMOS   BOOT OK");
+                customos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO CUSTOMOS   BOOT OK");
                 customos::drivers::video::CursorShow();
             }
             customos::drivers::video::CompositorUnlock();
@@ -1406,7 +1465,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
         static DragState drag{false, customos::drivers::video::kWindowInvalid, 0, 0};
         static bool prev_left = false;
         static bool prev_right = false;
-        constexpr customos::u32 kDesktopTealLocal = 0x00204868;
+        auto desktop_bg = []() { return customos::drivers::video::ThemeCurrent().desktop_bg; };
 
         // Menu item sets — static so their label pointers outlive
         // the menu's open state. action_id scheme is documented in
@@ -1497,7 +1556,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                     }
                 }
                 customos::drivers::video::CursorHide();
-                customos::drivers::video::DesktopCompose(kDesktopTealLocal, "WELCOME TO CUSTOMOS   BOOT OK");
+                customos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO CUSTOMOS   BOOT OK");
                 customos::drivers::video::CursorShow();
                 customos::drivers::video::CompositorUnlock();
                 SerialWrite("[ui] right-click\n");
@@ -1551,7 +1610,8 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                     case 5: // SWITCH TO TTY (from desktop context menu)
                         customos::drivers::video::SetDisplayMode(customos::drivers::video::DisplayMode::Tty);
                         customos::drivers::video::ConsoleSetOrigin(16, 16);
-                        customos::drivers::video::ConsoleSetColours(0x0080F088, 0x00000000);
+                        customos::drivers::video::ConsoleSetColours(customos::drivers::video::ThemeCurrent().console_fg,
+                                                                    0x00000000);
                         break;
                     case 10: // RAISE <ctx>
                         customos::drivers::video::WindowRaise(ctx);
@@ -1652,7 +1712,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                     SerialWriteHex(tab_hit);
                     SerialWrite("\n");
                     customos::drivers::video::CursorHide();
-                    customos::drivers::video::DesktopCompose(kDesktopTealLocal, "WELCOME TO CUSTOMOS   BOOT OK");
+                    customos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO CUSTOMOS   BOOT OK");
                     customos::drivers::video::CursorShow();
                     menu_handled = true; // taskbar ate the click
                 }
@@ -1661,7 +1721,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
             if (press_edge && menu_handled)
             {
                 customos::drivers::video::CursorHide();
-                customos::drivers::video::DesktopCompose(kDesktopTealLocal, "WELCOME TO CUSTOMOS   BOOT OK");
+                customos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO CUSTOMOS   BOOT OK");
                 customos::drivers::video::CursorShow();
             }
             else if (press_edge && !drag.active)
@@ -1700,7 +1760,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                         }
                     }
                     customos::drivers::video::CursorHide();
-                    customos::drivers::video::DesktopCompose(kDesktopTealLocal, "WELCOME TO CUSTOMOS   BOOT OK");
+                    customos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO CUSTOMOS   BOOT OK");
                     customos::drivers::video::CursorShow();
                 }
             }
@@ -1721,7 +1781,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                 const customos::u32 ny = (cy > drag.grab_offset_y) ? cy - drag.grab_offset_y : 0;
                 customos::drivers::video::WindowMoveTo(drag.window, nx, ny);
                 customos::drivers::video::CursorHide();
-                customos::drivers::video::DesktopCompose(kDesktopTealLocal, "WELCOME TO CUSTOMOS   BOOT OK");
+                customos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO CUSTOMOS   BOOT OK");
                 customos::drivers::video::CursorShow();
             }
             else

@@ -217,21 +217,24 @@ extern "C" void TrapDispatch(TrapFrame* frame)
             {
                 LapicEoi();
             }
+
+            // Preemption point. Only after a REAL IRQ handler ran —
+            // a software-triggered stray (e.g. the boot `int 0x42`
+            // probe, debug probes) must never touch the scheduler,
+            // which may not exist yet and wouldn't have anything to
+            // schedule anyway. Before slice-81 this branch ran on
+            // the unhandled path too; that regressed the pre-SchedInit
+            // boot probe into a #GP inside Schedule().
+            if (sched::TakeNeedResched())
+            {
+                sched::Schedule();
+            }
         }
         else
         {
             SerialWrite("[irq] unhandled vector ");
             SerialWriteHex(frame->vector);
             SerialWrite("\n");
-        }
-
-        // Preemption point. EOI happens first so a task we switch to can
-        // immediately take its own timer IRQ; if we swapped CR3/stack
-        // BEFORE EOI, the LAPIC's in-service bit would still be set for
-        // this vector and the next tick would be suppressed.
-        if (sched::TakeNeedResched())
-        {
-            sched::Schedule();
         }
         return;
     }

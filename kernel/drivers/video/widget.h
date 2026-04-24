@@ -38,13 +38,13 @@ constexpr u32 kWidgetInvalid = 0xFFFFFFFFu;
 
 struct ButtonWidget
 {
-    u32 id;              // caller-assigned, returned by the router on events
-    u32 x, y, w, h;      // bounds in framebuffer pixels when owner=kWindowInvalid
+    u32 id;         // caller-assigned, returned by the router on events
+    u32 x, y, w, h; // bounds in framebuffer pixels when owner=kWindowInvalid
     u32 colour_normal;
     u32 colour_pressed;
     u32 colour_border;
-    u32 colour_label;    // ink colour for the label text
-    const char* label;   // caller-owned, nullable (skips text draw)
+    u32 colour_label;  // ink colour for the label text
+    const char* label; // caller-owned, nullable (skips text draw)
 
     // When `owner` is a valid WindowHandle, `x` / `y` are
     // interpreted as OFFSETS from the owning window's origin —
@@ -54,7 +54,7 @@ struct ButtonWidget
     // button stays put regardless of which window is on top.
     u32 owner;
 
-    bool pressed;        // current visual state
+    bool pressed; // current visual state
     u8 _pad[3];
 };
 
@@ -143,6 +143,14 @@ void WindowMoveTo(WindowHandle h, u32 x, u32 y);
 /// `h_out` are populated on success; all four are nullable.
 /// Returns false if the handle is invalid.
 bool WindowGetBounds(WindowHandle h, u32* x_out, u32* y_out, u32* w_out, u32* h_out);
+
+/// Update the chrome colours of an existing window in place.
+/// Used by the theme module when the user cycles themes — the
+/// window's bounds, title pointer, and z-order position all
+/// stay; only the four chrome colours change. Caller owns the
+/// follow-up DesktopCompose that paints the new palette.
+/// No-op if the handle is invalid.
+void WindowSetColours(WindowHandle h, u32 border_rgb, u32 title_rgb, u32 client_rgb, u32 close_rgb);
 
 /// Return the topmost window whose bounds contain (x, y), or
 /// `kWindowInvalid` if none do. Walks the z-order from top to

@@ -32,7 +32,17 @@
 namespace customos::drivers::video
 {
 
-void TaskbarInit(u32 y, u32 height, u32 bg_rgb, u32 fg_rgb, u32 accent_rgb);
+/// Position + chrome. `tab_inactive_rgb` fills idle window tabs;
+/// `border_rgb` draws the 1-px top edge + tab / start outlines.
+/// Passing zero for either uses a pragmatic default that matches
+/// the pre-theme taskbar (dark blue-black border, slate tab fill).
+void TaskbarInit(u32 y, u32 height, u32 bg_rgb, u32 fg_rgb, u32 accent_rgb, u32 tab_inactive_rgb, u32 border_rgb);
+
+/// Update the chrome palette without moving or resizing the strip.
+/// Called by the theme module so a runtime theme switch re-hues
+/// the taskbar without tearing down the layout. Safe no-op if
+/// the taskbar hasn't been Init'd yet.
+void TaskbarSetColours(u32 bg_rgb, u32 fg_rgb, u32 accent_rgb, u32 tab_inactive_rgb, u32 border_rgb);
 
 /// Paint the taskbar strip + its dynamic contents. Safe no-op
 /// before init. Records the current tab layout so subsequent
