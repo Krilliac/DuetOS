@@ -3170,6 +3170,59 @@ constexpr StubEntry kStubsTable[] = {
     // both fill an LPULONGLONG output that kOffCritSecNop wouldn't
     // touch. Leaving them unbound lets the miss-logger record the
     // call (more diagnostic than a silent ret into junk memory).
+
+    // === Batch 56: File I/O + thread/fiber + debug + precise time.
+    // All NO-OP-correct for v0 — no async I/O (CancelIo nothing to
+    // cancel; GetOverlappedResult pretends sync completion), no
+    // multi-CPU affinity knobs (v0 is uni-processor from the user
+    // angle — AffinityMask set always "succeeds"), no fibers (real
+    // stack-swap fibers need SwapContext which isn't hooked up).
+    {"kernel32.dll", "LockFile", kOffReturnOne},
+    {"kernel32.dll", "LockFileEx", kOffReturnOne},
+    {"kernel32.dll", "UnlockFile", kOffReturnOne},
+    {"kernel32.dll", "UnlockFileEx", kOffReturnOne},
+    {"kernel32.dll", "CancelIo", kOffReturnOne},
+    {"kernel32.dll", "CancelIoEx", kOffReturnOne},
+    {"kernel32.dll", "CancelSynchronousIo", kOffReturnOne},
+    {"kernel32.dll", "GetOverlappedResult", kOffReturnOne},
+    {"kernel32.dll", "GetOverlappedResultEx", kOffReturnOne},
+    {"kernel32.dll", "SetThreadAffinityMask", kOffReturnOne},
+    {"kernel32.dll", "SetProcessAffinityMask", kOffReturnOne},
+    {"kernel32.dll", "SetThreadIdealProcessor", kOffReturnZero}, // prev ideal = 0
+    {"kernel32.dll", "GetThreadIdealProcessorEx", kOffReturnOne},
+    {"kernel32.dll", "DisableThreadLibraryCalls", kOffReturnOne},
+    {"kernel32.dll", "CreateFiber", kOffReturnZero},
+    {"kernel32.dll", "CreateFiberEx", kOffReturnZero},
+    {"kernel32.dll", "ConvertThreadToFiber", kOffReturnZero},
+    {"kernel32.dll", "ConvertThreadToFiberEx", kOffReturnZero},
+    {"kernel32.dll", "ConvertFiberToThread", kOffReturnOne},
+    {"kernel32.dll", "SwitchToFiber", kOffCritSecNop}, // void
+    {"kernel32.dll", "DeleteFiber", kOffCritSecNop},   // void
+    {"kernel32.dll", "IsThreadAFiber", kOffReturnZero},
+    {"kernel32.dll", "DebugBreak", kOffCritSecNop}, // void — no int3 (would kill us)
+    {"kernel32.dll", "DebugActiveProcess", kOffReturnZero},
+    {"kernel32.dll", "DebugActiveProcessStop", kOffReturnZero},
+    // GetSystemTimePreciseAsFileTime has the same shape as
+    // GetSystemTimeAsFileTime — reuse the existing real stub.
+    {"kernel32.dll", "GetSystemTimePreciseAsFileTime", kOffGetSysTimeFTReal},
+    // Named pipes: unsupported — all return FALSE / NULL / invalid.
+    {"kernel32.dll", "CreateNamedPipeW", kOffReturnMinus1}, // INVALID_HANDLE_VALUE
+    {"kernel32.dll", "CreateNamedPipeA", kOffReturnMinus1},
+    {"kernel32.dll", "ConnectNamedPipe", kOffReturnZero},
+    {"kernel32.dll", "DisconnectNamedPipe", kOffReturnOne},
+    {"kernel32.dll", "WaitNamedPipeW", kOffReturnZero},
+    {"kernel32.dll", "WaitNamedPipeA", kOffReturnZero},
+    {"kernel32.dll", "PeekConsoleInputW", kOffReturnZero},
+    {"kernel32.dll", "GetLogicalProcessorInformation", kOffReturnZero},
+    {"kernel32.dll", "GetLogicalProcessorInformationEx", kOffReturnZero},
+    {"kernel32.dll", "GetSystemFirmwareTable", kOffReturnZero}, // 0 = size unavailable
+    {"kernel32.dll", "EnumSystemFirmwareTables", kOffReturnZero},
+    {"kernel32.dll", "RegisterApplicationRestart", kOffReturnZero}, // S_OK
+    {"kernel32.dll", "UnregisterApplicationRestart", kOffReturnZero},
+    {"kernel32.dll", "SetSearchPathMode", kOffReturnOne},
+    {"kernel32.dll", "SetDefaultDllDirectories", kOffReturnOne},
+    {"kernel32.dll", "AddDllDirectory", kOffReturnZero}, // NULL cookie
+    {"kernel32.dll", "RemoveDllDirectory", kOffReturnOne},
     // Tls/Fls now route through real per-process storage —
     // moved to batch 46 below.
     {"kernel32.dll", "SetEndOfFile", kOffReturnOne},
