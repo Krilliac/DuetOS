@@ -170,3 +170,150 @@ __declspec(dllexport) HANDLE GetStdHandle(DWORD nStdHandle)
      * chain stays warning-clean under MSVC's LLP64 layout. */
     return (HANDLE) (UINT_PTR) nStdHandle;
 }
+
+/* ------------------------------------------------------------------
+ * Scheduler interaction (Sleep, SwitchToThread, GetTickCount)
+ *
+ * Sleep(0) specifically yields (SYS_SLEEP_MS with rdi=0 behaves
+ * like SYS_YIELD per syscall.h:176-189), so a single trampoline
+ * covers both "drop the timeslice" and "sleep N ms" semantics.
+ * ------------------------------------------------------------------ */
+
+typedef unsigned long long ULONGLONG;
+typedef long               LONG;
+
+__declspec(dllexport) void Sleep(DWORD ms)
+{
+    long discard;
+    __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long) 19), "D"((long) ms) : "memory");
+}
+
+__declspec(dllexport) BOOL SwitchToThread(void)
+{
+    long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long) 3) : "memory");
+    /* SYS_YIELD returns 0 on success — match Win32
+     * SwitchToThread's "TRUE if yielded" semantic. */
+    return 1;
+}
+
+/* SYS_PERF_COUNTER (13) returns raw 100 Hz tick count. Scale
+ * by 10 to convert to ms. Both GetTickCount (DWORD) and
+ * GetTickCount64 (ULONGLONG) share this impl — GetTickCount
+ * is just a truncation of GetTickCount64. */
+__declspec(dllexport) ULONGLONG GetTickCount64(void)
+{
+    long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long) 13) : "memory");
+    return (ULONGLONG) rv * 10ULL;
+}
+
+__declspec(dllexport) DWORD GetTickCount(void)
+{
+    return (DWORD) GetTickCount64();
+}
+
+/* ------------------------------------------------------------------
+ * Interlocked* family — atomic read/modify/write primitives.
+ *
+ * All of these are pure-CPU (no syscall). The Win32 semantics
+ * are well-defined against x86 atomics:
+ *   - Increment/Decrement return the NEW value.
+ *   - Exchange returns the OLD value.
+ *   - CompareExchange returns the OLD value (regardless of
+ *     whether the swap succeeded).
+ *   - ExchangeAdd returns the OLD value.
+ *   - And / Or / Xor return the OLD value.
+ *
+ * Clang's __atomic_* intrinsics on x86-64 emit a single
+ * `lock xadd` / `lock cmpxchg` / `xchg` instruction inline —
+ * no libcall — so -nodefaultlib links cleanly.
+ * ------------------------------------------------------------------ */
+
+__declspec(dllexport) LONG InterlockedIncrement(LONG volatile* addend)
+{
+    return __atomic_add_fetch(addend, 1, __ATOMIC_SEQ_CST);
+}
+
+__declspec(dllexport) LONG InterlockedDecrement(LONG volatile* addend)
+{
+    return __atomic_sub_fetch(addend, 1, __ATOMIC_SEQ_CST);
+}
+
+__declspec(dllexport) LONG InterlockedExchange(LONG volatile* target, LONG value)
+{
+    return __atomic_exchange_n(target, value, __ATOMIC_SEQ_CST);
+}
+
+__declspec(dllexport) LONG InterlockedCompareExchange(LONG volatile* dest, LONG exch, LONG comp)
+{
+    __atomic_compare_exchange_n(dest, &comp, exch,
+                                /*weak=*/0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+    /* comp is updated in place to the actual pre-CAS value —
+     * which is exactly what Win32 InterlockedCompareExchange
+     * returns. */
+    return comp;
+}
+
+__declspec(dllexport) LONG InterlockedExchangeAdd(LONG volatile* addend, LONG value)
+{
+    return __atomic_fetch_add(addend, value, __ATOMIC_SEQ_CST);
+}
+
+__declspec(dllexport) LONG InterlockedAnd(LONG volatile* dest, LONG value)
+{
+    return __atomic_fetch_and(dest, value, __ATOMIC_SEQ_CST);
+}
+
+__declspec(dllexport) LONG InterlockedOr(LONG volatile* dest, LONG value)
+{
+    return __atomic_fetch_or(dest, value, __ATOMIC_SEQ_CST);
+}
+
+__declspec(dllexport) LONG InterlockedXor(LONG volatile* dest, LONG value)
+{
+    return __atomic_fetch_xor(dest, value, __ATOMIC_SEQ_CST);
+}
+
+typedef long long LONG64;
+
+__declspec(dllexport) LONG64 InterlockedIncrement64(LONG64 volatile* addend)
+{
+    return __atomic_add_fetch(addend, 1, __ATOMIC_SEQ_CST);
+}
+
+__declspec(dllexport) LONG64 InterlockedDecrement64(LONG64 volatile* addend)
+{
+    return __atomic_sub_fetch(addend, 1, __ATOMIC_SEQ_CST);
+}
+
+__declspec(dllexport) LONG64 InterlockedExchange64(LONG64 volatile* target, LONG64 value)
+{
+    return __atomic_exchange_n(target, value, __ATOMIC_SEQ_CST);
+}
+
+__declspec(dllexport) LONG64 InterlockedCompareExchange64(LONG64 volatile* dest, LONG64 exch, LONG64 comp)
+{
+    __atomic_compare_exchange_n(dest, &comp, exch, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+    return comp;
+}
+
+__declspec(dllexport) LONG64 InterlockedExchangeAdd64(LONG64 volatile* addend, LONG64 value)
+{
+    return __atomic_fetch_add(addend, value, __ATOMIC_SEQ_CST);
+}
+
+__declspec(dllexport) LONG64 InterlockedAnd64(LONG64 volatile* dest, LONG64 value)
+{
+    return __atomic_fetch_and(dest, value, __ATOMIC_SEQ_CST);
+}
+
+__declspec(dllexport) LONG64 InterlockedOr64(LONG64 volatile* dest, LONG64 value)
+{
+    return __atomic_fetch_or(dest, value, __ATOMIC_SEQ_CST);
+}
+
+__declspec(dllexport) LONG64 InterlockedXor64(LONG64 volatile* dest, LONG64 value)
+{
+    return __atomic_fetch_xor(dest, value, __ATOMIC_SEQ_CST);
+}

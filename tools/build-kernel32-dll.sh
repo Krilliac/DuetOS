@@ -76,6 +76,26 @@ set +e
     /export:IsProcessorFeaturePresent \
     /export:SetConsoleCtrlHandler \
     /export:GetStdHandle \
+    /export:Sleep \
+    /export:SwitchToThread \
+    /export:GetTickCount \
+    /export:GetTickCount64 \
+    /export:InterlockedIncrement \
+    /export:InterlockedDecrement \
+    /export:InterlockedExchange \
+    /export:InterlockedCompareExchange \
+    /export:InterlockedExchangeAdd \
+    /export:InterlockedAnd \
+    /export:InterlockedOr \
+    /export:InterlockedXor \
+    /export:InterlockedIncrement64 \
+    /export:InterlockedDecrement64 \
+    /export:InterlockedExchange64 \
+    /export:InterlockedCompareExchange64 \
+    /export:InterlockedExchangeAdd64 \
+    /export:InterlockedAnd64 \
+    /export:InterlockedOr64 \
+    /export:InterlockedXor64 \
     /out:"${DLL}" \
     "${OBJ}" 2>&1 | grep -v "align specified without /driver"
 LINK_RC=${PIPESTATUS[0]}
