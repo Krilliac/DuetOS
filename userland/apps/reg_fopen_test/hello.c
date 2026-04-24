@@ -27,36 +27,36 @@
  * `[I] sys : exit rc val=0x0` — easy to spot in the live boot log.
  */
 
-typedef int            BOOL;
-typedef unsigned int   UINT;
-typedef unsigned int   DWORD;
-typedef long           LONG;
-typedef void*          HANDLE;
-typedef HANDLE         HKEY;
-typedef HKEY*          PHKEY;
+typedef int BOOL;
+typedef unsigned int UINT;
+typedef unsigned int DWORD;
+typedef long LONG;
+typedef void* HANDLE;
+typedef HANDLE HKEY;
+typedef HKEY* PHKEY;
 typedef unsigned long long size_t;
 
 typedef struct ucrt_FILE
 {
     long long handle;
-    int       eof;
-    int       err;
+    int eof;
+    int err;
 } FILE;
 
-#define HKEY_LOCAL_MACHINE ((HKEY) 0x80000002)
+#define HKEY_LOCAL_MACHINE ((HKEY)0x80000002)
 
 #define ERROR_SUCCESS 0L
 
 __declspec(dllimport) LONG __stdcall RegOpenKeyExA(HKEY hKey, const char* subkey, DWORD opts, DWORD access,
                                                    PHKEY result);
 __declspec(dllimport) LONG __stdcall RegQueryValueExA(HKEY hKey, const char* name, DWORD* reserved, DWORD* type,
-                                                     unsigned char* data, DWORD* cb);
+                                                      unsigned char* data, DWORD* cb);
 __declspec(dllimport) LONG __stdcall RegCloseKey(HKEY hKey);
 
-__declspec(dllimport) FILE*   __cdecl fopen(const char* path, const char* mode);
-__declspec(dllimport) size_t  __cdecl fread(void* ptr, size_t sz, size_t nmemb, FILE* f);
-__declspec(dllimport) int     __cdecl fclose(FILE* f);
-__declspec(dllimport) int     __cdecl printf(const char* fmt, ...);
+__declspec(dllimport) FILE* __cdecl fopen(const char* path, const char* mode);
+__declspec(dllimport) size_t __cdecl fread(void* ptr, size_t sz, size_t nmemb, FILE* f);
+__declspec(dllimport) int __cdecl fclose(FILE* f);
+__declspec(dllimport) int __cdecl printf(const char* fmt, ...);
 
 __declspec(dllimport) void __stdcall ExitProcess(UINT code);
 
@@ -73,18 +73,18 @@ static int ascii_eq(const char* a, const char* b)
 void _start(void)
 {
     /* --- Registry test --- */
-    HKEY hk   = (HKEY) 0;
-    LONG ro   = RegOpenKeyExA(HKEY_LOCAL_MACHINE, "Software\\Microsoft\\Windows NT\\CurrentVersion", 0, 0x20019, &hk);
+    HKEY hk = (HKEY)0;
+    LONG ro = RegOpenKeyExA(HKEY_LOCAL_MACHINE, "Software\\Microsoft\\Windows NT\\CurrentVersion", 0, 0x20019, &hk);
     if (ro != ERROR_SUCCESS)
     {
         printf("[reg-fopen-test] RegOpenKeyEx failed rc=%ld\n", ro);
         ExitProcess(0x00000001);
     }
 
-    char  name_buf[32];
+    char name_buf[32];
     DWORD name_cb = sizeof(name_buf);
-    DWORD type    = 0;
-    LONG  rq      = RegQueryValueExA(hk, "ProductName", 0, &type, (unsigned char*) name_buf, &name_cb);
+    DWORD type = 0;
+    LONG rq = RegQueryValueExA(hk, "ProductName", 0, &type, (unsigned char*)name_buf, &name_cb);
     if (rq != ERROR_SUCCESS)
     {
         printf("[reg-fopen-test] RegQueryValueEx failed rc=%ld\n", rq);
@@ -104,10 +104,10 @@ void _start(void)
         ExitProcess(0x00000011);
     }
     unsigned char mz[2] = {0, 0};
-    size_t        got   = fread(mz, 1, 2, f);
+    size_t got = fread(mz, 1, 2, f);
     if (got != 2)
     {
-        printf("[reg-fopen-test] fread got %u bytes, expected 2\n", (unsigned) got);
+        printf("[reg-fopen-test] fread got %u bytes, expected 2\n", (unsigned)got);
         fclose(f);
         ExitProcess(0x00000012);
     }

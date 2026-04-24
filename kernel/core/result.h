@@ -167,7 +167,7 @@ void ResultSelfTest();
     {                                                                                                                  \
         auto _res_try = (expr);                                                                                        \
         if (!_res_try)                                                                                                 \
-            return ::duetos::core::Err{_res_try.error()};                                                            \
+            return ::duetos::core::Err{_res_try.error()};                                                              \
     } while (0)
 
 // `RESULT_TRY_ASSIGN(decl, expr)` — evaluates `expr`, returns its
@@ -178,5 +178,5 @@ void ResultSelfTest();
 #define RESULT_TRY_ASSIGN(decl, expr)                                                                                  \
     auto _resta_##__LINE__ = (expr);                                                                                   \
     if (!_resta_##__LINE__)                                                                                            \
-        return ::duetos::core::Err{_resta_##__LINE__.error()};                                                       \
+        return ::duetos::core::Err{_resta_##__LINE__.error()};                                                         \
     decl = _resta_##__LINE__.take()

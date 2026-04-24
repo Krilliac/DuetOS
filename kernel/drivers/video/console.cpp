@@ -48,8 +48,14 @@ constinit char* g_capture_buf = nullptr;
 constinit u32 g_capture_cap = 0;
 constinit u32* g_capture_len = nullptr;
 
-ConsoleState& Shell() { return g_consoles[kConsoleShellIdx]; }
-ConsoleState& Klog()  { return g_consoles[kConsoleKlogIdx]; }
+ConsoleState& Shell()
+{
+    return g_consoles[kConsoleShellIdx];
+}
+ConsoleState& Klog()
+{
+    return g_consoles[kConsoleKlogIdx];
+}
 
 void FillSpaces(ConsoleState& cs)
 {

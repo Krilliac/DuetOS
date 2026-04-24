@@ -94,11 +94,11 @@ inline constexpr u32 kVirtioGpuMaxScanouts = 16;
 
 struct VirtioDisplayInfo
 {
-    bool valid;                               // false iff the command did not return RESP_OK_DISPLAY_INFO
-    u32 active_scanouts;                      // number of pmodes with enabled != 0
+    bool valid;          // false iff the command did not return RESP_OK_DISPLAY_INFO
+    u32 active_scanouts; // number of pmodes with enabled != 0
     VirtioDisplayRect rects[kVirtioGpuMaxScanouts];
-    u32 enabled[kVirtioGpuMaxScanouts];       // enabled bit per scanout (0/1)
-    u32 flags[kVirtioGpuMaxScanouts];         // vendor flag bits per scanout
+    u32 enabled[kVirtioGpuMaxScanouts]; // enabled bit per scanout (0/1)
+    u32 flags[kVirtioGpuMaxScanouts];   // vendor flag bits per scanout
 };
 
 /// Complete the ACK → DRIVER → FEATURES_OK → queue setup → DRIVER_OK

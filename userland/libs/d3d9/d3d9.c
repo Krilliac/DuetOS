@@ -6,13 +6,14 @@ typedef unsigned long HRESULT;
 
 __declspec(dllexport) IDirect3D9Ptr Direct3DCreate9(unsigned int sdk_version)
 {
-    (void) sdk_version;
-    return (IDirect3D9Ptr) 0;
+    (void)sdk_version;
+    return (IDirect3D9Ptr)0;
 }
 
 __declspec(dllexport) HRESULT Direct3DCreate9Ex(unsigned int sdk_version, void** out)
 {
-    (void) sdk_version;
-    if (out) *out = (void*) 0;
+    (void)sdk_version;
+    if (out)
+        *out = (void*)0;
     return E_NOTIMPL;
 }

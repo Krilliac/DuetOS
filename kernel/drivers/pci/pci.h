@@ -285,8 +285,8 @@ struct MsixRoute
 /// Failure modes: device lacks MSI-X capability → `Unsupported`;
 /// BAR missing / I/O → `IoError`; vector pool exhausted →
 /// `OutOfMemory`; table map failed → `OutOfMemory`.
-::duetos::core::Result<u8> PciMsixBindSimple(DeviceAddress addr, u16 entry_index,
-                                               ::duetos::arch::IrqHandler handler, MsixRoute* out_route);
+::duetos::core::Result<u8> PciMsixBindSimple(DeviceAddress addr, u16 entry_index, ::duetos::arch::IrqHandler handler,
+                                             MsixRoute* out_route);
 
 // -----------------------------------------------------------------
 // Class-code string for diagnostic logs. Returns a stable pointer to

@@ -31,16 +31,16 @@ namespace duetos::core
 enum class ElfStatus : u8
 {
     Ok = 0,
-    TooSmall,       // Buffer smaller than the 64-byte header.
-    BadMagic,       // Not "\x7FELF".
-    NotElf64,       // ei_class != ELFCLASS64.
-    NotLittleEndian,// ei_data != ELFDATA2LSB.
-    BadVersion,     // ei_version != EV_CURRENT.
-    BadMachine,     // e_machine != EM_X86_64.
-    NoProgramHeaders, // e_phoff==0 or e_phnum==0.
-    HeaderOutOfBounds, // Program header table past end-of-file.
+    TooSmall,           // Buffer smaller than the 64-byte header.
+    BadMagic,           // Not "\x7FELF".
+    NotElf64,           // ei_class != ELFCLASS64.
+    NotLittleEndian,    // ei_data != ELFDATA2LSB.
+    BadVersion,         // ei_version != EV_CURRENT.
+    BadMachine,         // e_machine != EM_X86_64.
+    NoProgramHeaders,   // e_phoff==0 or e_phnum==0.
+    HeaderOutOfBounds,  // Program header table past end-of-file.
     SegmentOutOfBounds, // PT_LOAD p_offset + p_filesz past end-of-file.
-    UnalignedSegment,  // p_offset % p_align != p_vaddr % p_align.
+    UnalignedSegment,   // p_offset % p_align != p_vaddr % p_align.
 };
 
 const char* ElfStatusName(ElfStatus s);
@@ -60,12 +60,12 @@ void ElfProgramHeaderInfo(const u8* file, u64* phoff_out, u16* phnum_out, u16* p
 /// One PT_LOAD segment as the caller needs to process it.
 struct ElfSegment
 {
-    u64 file_offset;  // byte offset of segment data inside `file`
-    u64 vaddr;        // virtual address the segment wants to land at
-    u64 filesz;       // bytes to copy from `file[file_offset]`
-    u64 memsz;        // total bytes in memory (zero-fill memsz - filesz)
-    u64 align;        // p_align
-    u8 flags;         // PF_R (4) | PF_W (2) | PF_X (1), bitwise OR
+    u64 file_offset; // byte offset of segment data inside `file`
+    u64 vaddr;       // virtual address the segment wants to land at
+    u64 filesz;      // bytes to copy from `file[file_offset]`
+    u64 memsz;       // total bytes in memory (zero-fill memsz - filesz)
+    u64 align;       // p_align
+    u8 flags;        // PF_R (4) | PF_W (2) | PF_X (1), bitwise OR
     u8 _pad[7];
 };
 

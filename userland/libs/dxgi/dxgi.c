@@ -4,8 +4,9 @@ typedef unsigned long HRESULT;
 
 __declspec(dllexport) HRESULT CreateDXGIFactory(const void* riid, void** factory)
 {
-    (void) riid;
-    if (factory) *factory = (void*) 0;
+    (void)riid;
+    if (factory)
+        *factory = (void*)0;
     return E_NOTIMPL;
 }
 
@@ -16,6 +17,6 @@ __declspec(dllexport) HRESULT CreateDXGIFactory1(const void* riid, void** factor
 
 __declspec(dllexport) HRESULT CreateDXGIFactory2(unsigned int flags, const void* riid, void** factory)
 {
-    (void) flags;
+    (void)flags;
     return CreateDXGIFactory(riid, factory);
 }

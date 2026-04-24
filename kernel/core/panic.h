@@ -81,7 +81,7 @@ void EndCrashDump();
     {                                                                                                                  \
         if (!(cond))                                                                                                   \
         {                                                                                                              \
-            ::duetos::core::Panic((subsys), "KASSERT failed: " msg);                                                 \
+            ::duetos::core::Panic((subsys), "KASSERT failed: " msg);                                                   \
         }                                                                                                              \
     } while (0)
 
@@ -93,6 +93,6 @@ void EndCrashDump();
     {                                                                                                                  \
         if (!(cond))                                                                                                   \
         {                                                                                                              \
-            ::duetos::core::PanicWithValue((subsys), "KASSERT failed: " msg, (value));                               \
+            ::duetos::core::PanicWithValue((subsys), "KASSERT failed: " msg, (value));                                 \
         }                                                                                                              \
     } while (0)

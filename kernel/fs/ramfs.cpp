@@ -354,10 +354,11 @@ constinit RamfsNode k_trusted_bin_customdll_test = {
 };
 
 constinit const RamfsNode* const k_trusted_bin_children[] = {
-    &k_trusted_bin_hello,          &k_trusted_bin_exit_elf,       &k_trusted_bin_hello_pe,
-    &k_trusted_bin_winkill,        &k_trusted_bin_hello_winapi,   &k_trusted_bin_thread_stress,
-    &k_trusted_bin_syscall_stress, &k_trusted_bin_customdll_test, &k_trusted_bin_windowed_hello,
-    nullptr,
+    &k_trusted_bin_hello,          &k_trusted_bin_exit_elf,
+    &k_trusted_bin_hello_pe,       &k_trusted_bin_winkill,
+    &k_trusted_bin_hello_winapi,   &k_trusted_bin_thread_stress,
+    &k_trusted_bin_syscall_stress, &k_trusted_bin_customdll_test,
+    &k_trusted_bin_windowed_hello, nullptr,
 };
 
 constinit RamfsNode k_trusted_bin_dir = {

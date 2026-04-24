@@ -552,7 +552,7 @@ const VirtioDisplayInfo& VirtioGpuGetDisplayInfo()
 
     // Publish on avail ring.
     const u16 slot = g_cq.next_avail % g_cq.queue_size;
-    g_cq.avail_ring[slot] = 0;   // head descriptor index
+    g_cq.avail_ring[slot] = 0; // head descriptor index
     asm volatile("" ::: "memory");
     g_cq.next_avail = static_cast<u16>(g_cq.next_avail + 1);
     g_cq.avail_hdr->idx = g_cq.next_avail;

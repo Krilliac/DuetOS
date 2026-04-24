@@ -31,7 +31,7 @@ typedef int BOOL;
 
 __declspec(dllexport) NORETURN void msvcp_terminate(void)
 {
-    __asm__ volatile("int $0x80" : : "a"((long long) 0), "D"((long long) 3));
+    __asm__ volatile("int $0x80" : : "a"((long long)0), "D"((long long)3));
     __builtin_unreachable();
 }
 
@@ -59,9 +59,7 @@ __declspec(dllexport) void* msvcp_return_this(void* self)
  * No-op for void-returning std methods (_Osfx / setstate).
  * ------------------------------------------------------------------ */
 
-__declspec(dllexport) void msvcp_void_nop(void)
-{
-}
+__declspec(dllexport) void msvcp_void_nop(void) {}
 
 /* ------------------------------------------------------------------
  * basic_ios::widen(char c) -> char — pass-through. Matches the
@@ -70,7 +68,7 @@ __declspec(dllexport) void msvcp_void_nop(void)
 
 __declspec(dllexport) char msvcp_widen(void* self, char c)
 {
-    (void) self;
+    (void)self;
     return c;
 }
 
@@ -82,14 +80,13 @@ __declspec(dllexport) char msvcp_widen(void* self, char c)
 
 __declspec(dllexport) long long msvcp_sputn(void* self, const void* ptr, long long count)
 {
-    (void) self;
+    (void)self;
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
-                     : "a"((long long) 2),        /* SYS_WRITE */
-                       "D"((long long) 1),        /* fd = stdout */
-                       "S"((long long) ptr),
-                       "d"((long long) count)
+                     : "a"((long long)2), /* SYS_WRITE */
+                       "D"((long long)1), /* fd = stdout */
+                       "S"((long long)ptr), "d"((long long)count)
                      : "memory");
     return rv >= 0 ? rv : 0;
 }

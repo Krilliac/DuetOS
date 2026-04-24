@@ -14,6 +14,4 @@
  * symbol satisfies that. It's not itself exported.
  */
 
-void kernelbase_unused(void)
-{
-}
+void kernelbase_unused(void) {}

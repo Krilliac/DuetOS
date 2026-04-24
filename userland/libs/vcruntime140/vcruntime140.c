@@ -32,8 +32,8 @@ typedef unsigned long long size_t;
 
 __declspec(dllexport) NO_BUILTIN_MEMOPS void* memset(void* dst, int c, size_t n)
 {
-    unsigned char*      d = (unsigned char*) dst;
-    const unsigned char v = (unsigned char) c;
+    unsigned char* d = (unsigned char*)dst;
+    const unsigned char v = (unsigned char)c;
     for (size_t i = 0; i < n; ++i)
         d[i] = v;
     return dst;
@@ -41,8 +41,8 @@ __declspec(dllexport) NO_BUILTIN_MEMOPS void* memset(void* dst, int c, size_t n)
 
 __declspec(dllexport) NO_BUILTIN_MEMOPS void* memcpy(void* dst, const void* src, size_t n)
 {
-    unsigned char*       d = (unsigned char*) dst;
-    const unsigned char* s = (const unsigned char*) src;
+    unsigned char* d = (unsigned char*)dst;
+    const unsigned char* s = (const unsigned char*)src;
     for (size_t i = 0; i < n; ++i)
         d[i] = s[i];
     return dst;
@@ -53,8 +53,8 @@ __declspec(dllexport) NO_BUILTIN_MEMOPS void* memcpy(void* dst, const void* src,
  * the overlap-going-forward case and copy backward. */
 __declspec(dllexport) NO_BUILTIN_MEMOPS void* memmove(void* dst, const void* src, size_t n)
 {
-    unsigned char*       d = (unsigned char*) dst;
-    const unsigned char* s = (const unsigned char*) src;
+    unsigned char* d = (unsigned char*)dst;
+    const unsigned char* s = (const unsigned char*)src;
     if (d == s || n == 0)
         return dst;
     if (d < s)
@@ -72,22 +72,22 @@ __declspec(dllexport) NO_BUILTIN_MEMOPS void* memmove(void* dst, const void* src
 
 __declspec(dllexport) NO_BUILTIN_MEMOPS int memcmp(const void* a, const void* b, size_t n)
 {
-    const unsigned char* x = (const unsigned char*) a;
-    const unsigned char* y = (const unsigned char*) b;
+    const unsigned char* x = (const unsigned char*)a;
+    const unsigned char* y = (const unsigned char*)b;
     for (size_t i = 0; i < n; ++i)
         if (x[i] != y[i])
-            return (int) x[i] - (int) y[i];
+            return (int)x[i] - (int)y[i];
     return 0;
 }
 
 __declspec(dllexport) NO_BUILTIN_MEMOPS void* memchr(const void* ptr, int c, size_t n)
 {
-    const unsigned char* p  = (const unsigned char*) ptr;
-    unsigned char        ch = (unsigned char) c;
+    const unsigned char* p = (const unsigned char*)ptr;
+    unsigned char ch = (unsigned char)c;
     for (size_t i = 0; i < n; ++i)
         if (p[i] == ch)
-            return (void*) (p + i);
-    return (void*) 0;
+            return (void*)(p + i);
+    return (void*)0;
 }
 
 /* ------------------------------------------------------------------
@@ -120,62 +120,62 @@ __declspec(dllexport) NO_BUILTIN_MEMOPS void* memchr(const void* ptr, int c, siz
 __declspec(dllexport) unsigned long __C_specific_handler(void* ExceptionRecord, void* EstablisherFrame,
                                                          void* ContextRecord, void* DispatcherContext)
 {
-    (void) ExceptionRecord;
-    (void) EstablisherFrame;
-    (void) ContextRecord;
-    (void) DispatcherContext;
+    (void)ExceptionRecord;
+    (void)EstablisherFrame;
+    (void)ContextRecord;
+    (void)DispatcherContext;
     return 1; /* ExceptionContinueSearch */
 }
 
 __declspec(dllexport) unsigned long __CxxFrameHandler3(void* ExceptionRecord, void* EstablisherFrame,
-                                                      void* ContextRecord, void* DispatcherContext)
+                                                       void* ContextRecord, void* DispatcherContext)
 {
-    (void) ExceptionRecord;
-    (void) EstablisherFrame;
-    (void) ContextRecord;
-    (void) DispatcherContext;
+    (void)ExceptionRecord;
+    (void)EstablisherFrame;
+    (void)ContextRecord;
+    (void)DispatcherContext;
     return 1;
 }
 
 __declspec(dllexport) unsigned long __CxxFrameHandler4(void* ExceptionRecord, void* EstablisherFrame,
-                                                      void* ContextRecord, void* DispatcherContext)
+                                                       void* ContextRecord, void* DispatcherContext)
 {
-    (void) ExceptionRecord;
-    (void) EstablisherFrame;
-    (void) ContextRecord;
-    (void) DispatcherContext;
+    (void)ExceptionRecord;
+    (void)EstablisherFrame;
+    (void)ContextRecord;
+    (void)DispatcherContext;
     return 1;
 }
 
 __declspec(dllexport) SEH_NORETURN void _CxxThrowException(void* object, const void* throwInfo)
 {
-    (void) object;
-    (void) throwInfo;
-    __asm__ volatile("int $0x80" : : "a"((long long) 0), "D"((long long) 3));
+    (void)object;
+    (void)throwInfo;
+    __asm__ volatile("int $0x80" : : "a"((long long)0), "D"((long long)3));
     __builtin_unreachable();
 }
 
 __declspec(dllexport) SEH_NORETURN void _purecall(void)
 {
-    __asm__ volatile("int $0x80" : : "a"((long long) 0), "D"((long long) 3));
+    __asm__ volatile("int $0x80" : : "a"((long long)0), "D"((long long)3));
     __builtin_unreachable();
 }
 
 __declspec(dllexport) SEH_NORETURN void __std_terminate(void)
 {
-    __asm__ volatile("int $0x80" : : "a"((long long) 0), "D"((long long) 3));
+    __asm__ volatile("int $0x80" : : "a"((long long)0), "D"((long long)3));
     __builtin_unreachable();
 }
 
 __declspec(dllexport) void __std_exception_copy(void* from, void* to)
 {
-    (void) from;
-    (void) to;
+    (void)from;
+    (void)to;
 }
 
 __declspec(dllexport) void __std_exception_destroy(void* what)
 {
-    (void) what;
+    (void)what;
 }
 
 /* __vcrt_InitializeCriticalSectionEx — same contract as
@@ -184,11 +184,11 @@ __declspec(dllexport) void __std_exception_destroy(void* what)
  * DLL doesn't depend on kernel32 being loaded first. */
 __declspec(dllexport) int __vcrt_InitializeCriticalSectionEx(void* cs, unsigned int spin, unsigned int flags)
 {
-    (void) spin;
-    (void) flags;
-    if (cs != (void*) 0)
+    (void)spin;
+    (void)flags;
+    if (cs != (void*)0)
     {
-        unsigned char* b = (unsigned char*) cs;
+        unsigned char* b = (unsigned char*)cs;
         for (int i = 0; i < 40; ++i)
             b[i] = 0;
     }
@@ -198,12 +198,13 @@ __declspec(dllexport) int __vcrt_InitializeCriticalSectionEx(void* cs, unsigned 
 /* RtlUnwind / RtlUnwindEx stubs — normally provided by
  * ntdll, but some PEs import them via vcruntime140 indirectly.
  * v0 can't unwind; noreturn fall-through to abort. */
-__declspec(dllexport) SEH_NORETURN void __CxxUnwind(void* target_frame, void* target_ip, void* exc_record, void* return_value)
+__declspec(dllexport) SEH_NORETURN void __CxxUnwind(void* target_frame, void* target_ip, void* exc_record,
+                                                    void* return_value)
 {
-    (void) target_frame;
-    (void) target_ip;
-    (void) exc_record;
-    (void) return_value;
-    __asm__ volatile("int $0x80" : : "a"((long long) 0), "D"((long long) 3));
+    (void)target_frame;
+    (void)target_ip;
+    (void)exc_record;
+    (void)return_value;
+    __asm__ volatile("int $0x80" : : "a"((long long)0), "D"((long long)3));
     __builtin_unreachable();
 }
