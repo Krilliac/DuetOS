@@ -1,6 +1,6 @@
 # PE EAT parser + DLL loader — stage 2 kickoff
 
-**Type:** Observation · **Status:** Active (stage-2 slices 1-10 landed) · **Last updated:** 2026-04-24
+**Type:** Observation · **Status:** Active (stage-2 slices 1-17 landed; ~70% of flat stubs retired) · **Last updated:** 2026-04-24
 
 ## Context
 
@@ -922,6 +922,78 @@ For rough order-of-magnitude: `kStubsTable` has ~122 entries
 across ~14 DLL names. Retiring everything into shipped DLLs
 is ~30-100 slices of this granularity, most of them simple
 syscall trampolines or return-constant shims.
+
+## Slices 11-17 — retirement wave (consolidated)
+
+After slice 10 proved the first retirement, slices 11-17
+ramped up the pace dramatically. Total flat-stub coverage by
+the end of slice 17: **~85 of ~122 rows retired (~70%)**
+across **6 userland DLLs**.
+
+### DLLs shipped
+
+| DLL | Base VA | Exports | Slice intro | Notes |
+|-----|---------|---------|-------------|-------|
+| `customdll.dll` | `0x10000000` | 4 | slice 2 | Test fixture (Add/Mul/Version + forwarder) |
+| `customdll2.dll` | `0x10010000` | 1 | slice 9 | Test fixture (CustomDouble) |
+| `kernel32.dll` | `0x10020000` | 47 | slice 10 | Process/thread, Interlocked*, Sleep, Console, Wow64, SList, … |
+| `vcruntime140.dll` | `0x10030000` | 3 | slice 13 | memset/memcpy/memmove |
+| `msvcrt.dll` | `0x10040000` | 8 | slice 14 | strlen/strcmp/strcpy/strchr + wide variants |
+| `ucrtbase.dll` | `0x10050000` | 25 | slice 15 + 17 | malloc/free/exit + CRT startup + atoi/strtol + terminate |
+
+Per-spawn frame cost: 6 DLLs × ~3 pages = ~18 frames per
+Win32-imports process. Comfortable headroom in
+`kFrameBudgetTrusted` (256).
+
+### What landed in each slice
+
+- **Slice 11** — kernel32 trampoline batch (11 funcs):
+  GetCurrentThreadId, GetLastError, SetLastError,
+  GetCurrentProcess/Thread (pseudo-handles), ExitProcess,
+  TerminateProcess (noreturn), IsDebuggerPresent,
+  IsProcessorFeaturePresent, SetConsoleCtrlHandler,
+  GetStdHandle.
+- **Slice 12** — Sleep/SwitchToThread/GetTickCount(64) +
+  full Interlocked* family (8 × 32-bit + 8 × 64-bit = 16
+  atomic intrinsics via clang's `__atomic_*`).
+- **Slice 13** — vcruntime140.dll: memset/memcpy/memmove
+  (byte-loop with `__attribute__((no_builtin))` to stop
+  clang from calling itself).
+- **Slice 14** — msvcrt.dll: 4 narrow + 4 wide string
+  intrinsics.
+- **Slice 15** — ucrtbase.dll: heap (malloc/free/calloc/
+  realloc/_aligned_*), exit/_exit, CRT startup shims
+  (_initterm/_set_app_type/_cexit/...), string intrinsics
+  duplicated from msvcrt.
+- **Slice 16** — kernel32 console/wow64/drives/SList batch
+  (15 funcs): GetConsoleMode/CP/OutputCP, GetLogicalDrives,
+  GetDriveTypeA/W, IsWow64Process/2, GetModuleHandleExW/A,
+  FreeLibrary, InterlockedPushEntrySList/Pop/Flush,
+  InitializeSListHead.
+- **Slice 17** — ucrtbase conversions: atoi, atol, strtol,
+  strtoul + C++ runtime terminators (terminate,
+  _invalid_parameter_noinfo_noreturn).
+
+### Key build-system findings during the wave
+
+- **Clang emits `memset` / `memcpy` for large stack zero-
+  inits**. `DllImage[4]{}` (~400 bytes) and `static const
+  PreloadDllEntry preload_set[]` (~150 bytes) both tripped
+  the kernel link with `undefined symbol: memset/memcpy`.
+  Fixes: drop the `{}` (we only read assigned slots) and
+  mark large initialised arrays `static const` (lands in
+  `.rodata` instead of being a runtime template copy).
+- **Win32 LLP64 type sizes**. `unsigned long` is 32 bits
+  under MSVC ABI; using it for HANDLE casts triggers
+  `int-to-void-pointer-cast` warnings. Use a 64-bit
+  `UINT_PTR` typedef.
+- **clang `no_builtin` attribute is selective**. It
+  recognises some str* names but not all wcs* names
+  (`wcscpy`/`wcschr` aren't in its list). `-fno-builtin-X`
+  flags cover the rest at the command-line level.
+- **`/dll /noentry` is the right invocation** for
+  freestanding DLLs without a `_DllMainCRTStartup`. Lets
+  lld-link skip the default entry-point reference.
 
 ## Boot-time visibility
 
