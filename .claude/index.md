@@ -69,6 +69,7 @@ _Read this at every session start (after git sync). Each row links to a detailed
 | Crash dump v0 — embedded symbol table + bracketed dump file | [knowledge/crash-dump-v0.md](knowledge/crash-dump-v0.md) | Observation | Active | 2026-04-20 |
 | Ring 3 first slice — GDT user segments + iretq entry + smoke task | [knowledge/ring3-first-slice-v0.md](knowledge/ring3-first-slice-v0.md) | Observation | Active | 2026-04-20 |
 | Ring-3 adversarial test suite — jail / nx / priv / badint / kread probes | [knowledge/pentest-ring3-adversarial-v0.md](knowledge/pentest-ring3-adversarial-v0.md) | Pattern | Active | 2026-04-21 |
+| GUI pentest runner v0 — live login + shell attack findings | [knowledge/pentest-gui-findings-v0.md](knowledge/pentest-gui-findings-v0.md) | Observation | Active | 2026-04-24 |
 
 ## Quick Reference
 

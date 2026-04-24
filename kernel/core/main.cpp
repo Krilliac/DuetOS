@@ -83,6 +83,7 @@
 #include "../sched/sched.h"
 #include "../security/attack_sim.h"
 #include "../security/guard.h"
+#include "../security/pentest_gui.h"
 
 /*
  * Kernel entry in C++. Called by kernel/arch/x86_64/boot.S once the CPU is
@@ -829,6 +830,17 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     else
     {
         SerialWrite("[boot] autologin=1 — skipping login gate\n");
+    }
+
+    // `pentest=gui` arms the self-driving red-team runner that
+    // scripts keystrokes into the login gate + shell. See
+    // security/pentest_gui.cpp for the probe list. Deliberately
+    // requires an explicit opt-in — the final probe invokes
+    // `halt`, which is one-way.
+    if (CmdlineMatches(cmdline, "pentest", "gui"))
+    {
+        SerialWrite("[boot] pentest=gui — arming GUI pentest runner\n");
+        customos::security::PentestGuiStart();
     }
 
     SerialWrite("[boot] Seeding ramfs + VFS self-test.\n");

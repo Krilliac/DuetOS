@@ -1,5 +1,6 @@
 #include "login.h"
 
+#include "../arch/x86_64/serial.h"
 #include "../drivers/input/ps2kbd.h"
 #include "../drivers/video/console.h"
 #include "../drivers/video/framebuffer.h"
@@ -346,6 +347,15 @@ bool GuiTrySubmit()
     }
     ++g_login.attempts;
     g_login.status = "LOGIN FAILED - CHECK USERNAME / PASSWORD";
+    // Debug: emit the submitted username + password length on serial
+    // so the pentest harness (and humans chasing a brute-force
+    // attempt) can tell whether input actually reached the fields.
+    // Password value is never logged — only its length.
+    customos::arch::SerialWrite("[login-debug] submitted username=\"");
+    customos::arch::SerialWrite(g_login.username);
+    customos::arch::SerialWrite("\" password_len=");
+    customos::arch::SerialWriteHex(g_login.password_len);
+    customos::arch::SerialWrite("\n");
     ClearField(g_login.password, &g_login.password_len);
     g_login.focus = Field::Password;
     GuiRepaint();

@@ -137,6 +137,7 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     sched/sched.cpp
     security/attack_sim.cpp
     security/guard.cpp
+    security/pentest_gui.cpp
     sync/spinlock.cpp
 )
 
