@@ -14,6 +14,7 @@
 #include "../mm/frame_allocator.h"
 #include "../mm/paging.h"
 #include "../sched/sched.h"
+#include "../subsystems/graphics/graphics.h"
 #include "../subsystems/translation/translate.h"
 #include "../subsystems/win32/heap_syscall.h"
 #include "../subsystems/win32/vmap_syscall.h"
@@ -1436,6 +1437,32 @@ void SyscallDispatch(arch::TrapFrame* frame)
     case SYS_WIN_BEEP:
         subsystems::win32::DoWinBeep(frame);
         return;
+
+    case SYS_GFX_D3D_STUB:
+    {
+        // rdi = kind (1 = D3D11, 2 = D3D12, 3 = DXGI). Forward to
+        // the graphics ICD's counter-backed stubs so the `gfx`
+        // shell command sees create-call activity; each returns
+        // HRESULT E_FAIL (0x80004005) which we pass back unchanged.
+        u32 hr = 0;
+        switch (frame->rdi)
+        {
+        case 1:
+            hr = subsystems::graphics::D3D11CreateDeviceStub();
+            break;
+        case 2:
+            hr = subsystems::graphics::D3D12CreateDeviceStub();
+            break;
+        case 3:
+            hr = subsystems::graphics::DxgiCreateFactoryStub();
+            break;
+        default:
+            hr = 0; // bad kind = S_OK surface would confuse callers; leave 0
+            break;
+        }
+        frame->rax = hr;
+        return;
+    }
 
     case SYS_DLL_PROC_ADDRESS:
     {

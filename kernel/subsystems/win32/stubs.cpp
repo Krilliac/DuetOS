@@ -269,6 +269,15 @@ constexpr u32 kOffInitOnceExec = 0xC28; // batch 65 — 87 bytes
 // the Win32 x64 ABI, so save/restore across the syscall.
 constexpr u32 kOffGetProcAddressReal = 0xC7F; // stage-2 slice 4 — 18 bytes
 
+// Render/drivers: D3D11 / D3D12 / DXGI IAT landing pads. Each stub
+// issues SYS_GFX_D3D_STUB (101) with a per-kind `rdi` — the kernel
+// syscall handler routes to `subsystems::graphics::D3D*CreateStub`
+// so the graphics ICD's handle-table counters tick. Returned rax
+// is HRESULT E_FAIL (0x80004005). 13 bytes each.
+constexpr u32 kOffD3d11CreateStub = 0xC91; // render/drivers — 13 bytes
+constexpr u32 kOffD3d12CreateStub = 0xC9E; // render/drivers — 13 bytes
+constexpr u32 kOffDxgiCreateStub = 0xCAB;  // render/drivers — 13 bytes
+
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
     // Windows x64 ABI: first arg (uExitCode) in RCX.
@@ -3186,10 +3195,31 @@ constexpr u8 kStubsBytes[] = {
     0x5E,                         // 0xC8E pop rsi
     0x5F,                         // 0xC8F pop rdi
     0xC3,                         // 0xC90 ret
+
+    // === Render/drivers: D3D11 / D3D12 / DXGI IAT landing pads ===
+
+    // --- D3D11CreateDevice (offset 0xC91, 13 bytes) --------------
+    // rax = HRESULT E_FAIL (returned by the syscall). Kind=1.
+    0xBF, 0x01, 0x00, 0x00, 0x00, // 0xC91 mov edi, 1       ; kind = D3D11
+    0xB8, 0x65, 0x00, 0x00, 0x00, // 0xC96 mov eax, 101     ; SYS_GFX_D3D_STUB
+    0xCD, 0x80,                   // 0xC9B int 0x80
+    0xC3,                         // 0xC9D ret
+
+    // --- D3D12CreateDevice (offset 0xC9E, 13 bytes) --------------
+    0xBF, 0x02, 0x00, 0x00, 0x00, // 0xC9E mov edi, 2       ; kind = D3D12
+    0xB8, 0x65, 0x00, 0x00, 0x00, // 0xCA3 mov eax, 101     ; SYS_GFX_D3D_STUB
+    0xCD, 0x80,                   // 0xCA8 int 0x80
+    0xC3,                         // 0xCAA ret
+
+    // --- CreateDXGIFactory (offset 0xCAB, 13 bytes) --------------
+    0xBF, 0x03, 0x00, 0x00, 0x00, // 0xCAB mov edi, 3       ; kind = DXGI
+    0xB8, 0x65, 0x00, 0x00, 0x00, // 0xCB0 mov eax, 101     ; SYS_GFX_D3D_STUB
+    0xCD, 0x80,                   // 0xCB5 int 0x80
+    0xC3,                         // 0xCB7 ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0xC91, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0xCB8, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -4575,20 +4605,23 @@ constexpr StubEntry kStubsTable[] = {
     // E_FAIL (0x80004005) in eax still lands as a non-NULL
     // pointer from the caller's perspective. For the pre-D3D10
     // path we use kOffReturnZero instead.
-    {"d3d11.dll", "D3D11CreateDevice", kOffHresultEFail},
-    {"d3d11.dll", "D3D11CreateDeviceAndSwapChain", kOffHresultEFail},
-    {"D3D11.dll", "D3D11CreateDevice", kOffHresultEFail},
-    {"D3D11.dll", "D3D11CreateDeviceAndSwapChain", kOffHresultEFail},
-    {"d3d12.dll", "D3D12CreateDevice", kOffHresultEFail},
-    {"d3d12.dll", "D3D12GetDebugInterface", kOffHresultEFail},
-    {"d3d12.dll", "D3D12SerializeRootSignature", kOffHresultEFail},
-    {"D3D12.dll", "D3D12CreateDevice", kOffHresultEFail},
-    {"dxgi.dll", "CreateDXGIFactory", kOffHresultEFail},
-    {"dxgi.dll", "CreateDXGIFactory1", kOffHresultEFail},
-    {"dxgi.dll", "CreateDXGIFactory2", kOffHresultEFail},
-    {"DXGI.dll", "CreateDXGIFactory", kOffHresultEFail},
-    {"DXGI.dll", "CreateDXGIFactory1", kOffHresultEFail},
-    {"DXGI.dll", "CreateDXGIFactory2", kOffHresultEFail},
+    // Route through SYS_GFX_D3D_STUB so the graphics ICD's
+    // handle-table counters tick (visible via the `gfx` shell
+    // command). Return value is still HRESULT E_FAIL.
+    {"d3d11.dll", "D3D11CreateDevice", kOffD3d11CreateStub},
+    {"d3d11.dll", "D3D11CreateDeviceAndSwapChain", kOffD3d11CreateStub},
+    {"D3D11.dll", "D3D11CreateDevice", kOffD3d11CreateStub},
+    {"D3D11.dll", "D3D11CreateDeviceAndSwapChain", kOffD3d11CreateStub},
+    {"d3d12.dll", "D3D12CreateDevice", kOffD3d12CreateStub},
+    {"d3d12.dll", "D3D12GetDebugInterface", kOffD3d12CreateStub},
+    {"d3d12.dll", "D3D12SerializeRootSignature", kOffD3d12CreateStub},
+    {"D3D12.dll", "D3D12CreateDevice", kOffD3d12CreateStub},
+    {"dxgi.dll", "CreateDXGIFactory", kOffDxgiCreateStub},
+    {"dxgi.dll", "CreateDXGIFactory1", kOffDxgiCreateStub},
+    {"dxgi.dll", "CreateDXGIFactory2", kOffDxgiCreateStub},
+    {"DXGI.dll", "CreateDXGIFactory", kOffDxgiCreateStub},
+    {"DXGI.dll", "CreateDXGIFactory1", kOffDxgiCreateStub},
+    {"DXGI.dll", "CreateDXGIFactory2", kOffDxgiCreateStub},
     // d3d9 predates HRESULT-first API — it returns an interface
     // pointer, NULL = failure. Alias to the shared return-zero
     // stub rather than E_FAIL.

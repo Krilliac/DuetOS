@@ -920,6 +920,19 @@ enum SyscallNumber : u64
     //   rax = 1 if played, 0 if the speaker isn't usable.
     // Backs Win32 MessageBeep + Beep.
     SYS_WIN_BEEP = 100,
+
+    // SYS_GFX_D3D_STUB — trace + return E_FAIL from a D3D/DXGI IAT
+    // stub. rdi = kind:
+    //   1 = D3D11CreateDevice / D3D11CreateDeviceAndSwapChain
+    //   2 = D3D12CreateDevice / D3D12GetDebugInterface /
+    //       D3D12SerializeRootSignature
+    //   3 = CreateDXGIFactory / CreateDXGIFactory1 / 2
+    // rax = HRESULT (0x80004005 for any valid kind; 0 on bad kind).
+    // Routes to subsystems::graphics::D3D11CreateDeviceStub /
+    // D3D12CreateDeviceStub / DxgiCreateFactoryStub so the graphics
+    // ICD's handle-table counters tick every time a PE invokes one
+    // of these entry points — visible via the `gfx` shell command.
+    SYS_GFX_D3D_STUB = 101,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit
