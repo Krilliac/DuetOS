@@ -8,6 +8,7 @@
 #include "../mm/paging.h"
 #include "../security/guard.h"
 #include "../subsystems/win32/stubs.h"
+#include "pe_exports.h"
 #include "process.h"
 
 namespace customos::core
@@ -1406,6 +1407,24 @@ void PeReport(const u8* file, u64 file_len)
     ReportImports(file, file_len, h);
     ReportRelocs(file, file_len, h);
     ReportTls(file, file_len, h);
+
+    // Stage 2: also dump the Export Address Table if present.
+    // Executables routinely ship with no exports, in which case
+    // PeParseExports returns NoExportDirectory and we stay
+    // silent. DLLs (and some oddball EXEs that re-export) get
+    // the full dump.
+    PeExports exp{};
+    const PeExportStatus pes = PeParseExports(file, file_len, exp);
+    if (pes == PeExportStatus::Ok)
+    {
+        PeExportsReport(exp);
+    }
+    else if (pes != PeExportStatus::NoExportDirectory)
+    {
+        SerialWrite("  exports: <bad> status=");
+        SerialWrite(PeExportStatusName(pes));
+        SerialWrite("\n");
+    }
 }
 
 } // namespace customos::core
