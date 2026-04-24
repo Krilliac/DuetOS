@@ -7,6 +7,7 @@
 #include "../debug/inspect.h"
 #include "../fs/ramfs.h"
 #include "generated_customdll.h"
+#include "generated_customdll_test.h"
 #include "generated_hello_pe.h"
 #include "generated_hello_winapi.h"
 #include "generated_syscall_stress.h"
@@ -2215,6 +2216,16 @@ void StartRing3SmokeTask()
     SpawnPeFile("ring3-syscall-stress", fs::generated::kBinSyscallStressBytes,
                 fs::generated::kBinSyscallStressBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
                 mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    // Stage-2 slice 6 end-to-end fixture. Imports
+    // CustomAdd / CustomMul / CustomVersion from customdll.dll;
+    // the kernel DLL loader maps the DLL into the process's AS
+    // before PeLoad runs and ResolveImports patches each IAT
+    // slot with the DLL's export VA directly. Expected exit:
+    // 0x1234 on success (= CustomAdd(0x1000, 0x0234)), 0xBAD0
+    // if any of the three DLL call results don't match.
+    SpawnPeFile("ring3-customdll-test", fs::generated::kBinCustomDllTestBytes,
+                fs::generated::kBinCustomDllTestBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     // Real-world Windows PE diagnostic attempt. Expected to
     // reject (most imports unresolved) — the value is the
     // PeReport log line showing the full import / reloc / TLS
@@ -2223,7 +2234,8 @@ void StartRing3SmokeTask()
                 fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     Log(LogLevel::Info, "core/ring3",
         "ring3 smoke tasks queued (incl cpu-hog + hostile + dropcaps + priv + badint + kread + "
-        "ptrfuzz + writefuzz + hellope + winkill-report + thread-stress + syscall-stress)");
+        "ptrfuzz + writefuzz + hellope + winkill-report + thread-stress + syscall-stress + "
+        "customdll-test)");
 }
 
 } // namespace customos::core

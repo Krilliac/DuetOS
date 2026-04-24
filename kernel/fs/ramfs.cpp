@@ -15,9 +15,10 @@
 // Produced from userland/apps/hello_winapi/hello.c. Exercises
 // the full chain: Import Directory -> IAT patch -> stub page
 // -> int 0x80 SYS_EXIT.
+#include "generated_customdll_test.h"
 #include "generated_hello_winapi.h"
-#include "generated_thread_stress.h"
 #include "generated_syscall_stress.h"
+#include "generated_thread_stress.h"
 
 // A real 3rd-party Windows PE embedded verbatim from
 // userland/apps/windows_kill/windows-kill.exe. 79 KiB, 12 DLL
@@ -325,9 +326,23 @@ constinit RamfsNode k_trusted_bin_syscall_stress = {
     .file_size = generated::kBinSyscallStressBytes_len,
 };
 
+// /bin/customdll_test.exe — stage-2 slice 6 end-to-end fixture.
+// Imports CustomAdd / CustomMul / CustomVersion from
+// customdll.dll (loaded by SpawnPeFile before PeLoad, resolved
+// by ResolveImports through the via-DLL path). Exits with
+// 0x1234 on success, 0xBAD0 on a call-result mismatch.
+constinit RamfsNode k_trusted_bin_customdll_test = {
+    .name = "customdll_test.exe",
+    .type = RamfsNodeType::kFile,
+    .children = nullptr,
+    .file_bytes = generated::kBinCustomDllTestBytes,
+    .file_size = generated::kBinCustomDllTestBytes_len,
+};
+
 constinit const RamfsNode* const k_trusted_bin_children[] = {
-    &k_trusted_bin_hello,        &k_trusted_bin_exit_elf,      &k_trusted_bin_hello_pe,       &k_trusted_bin_winkill,
-    &k_trusted_bin_hello_winapi, &k_trusted_bin_thread_stress, &k_trusted_bin_syscall_stress, nullptr,
+    &k_trusted_bin_hello,          &k_trusted_bin_exit_elf,       &k_trusted_bin_hello_pe,
+    &k_trusted_bin_winkill,        &k_trusted_bin_hello_winapi,   &k_trusted_bin_thread_stress,
+    &k_trusted_bin_syscall_stress, &k_trusted_bin_customdll_test, nullptr,
 };
 
 constinit RamfsNode k_trusted_bin_dir = {

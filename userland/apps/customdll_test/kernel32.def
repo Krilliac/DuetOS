@@ -1,0 +1,11 @@
+; userland/apps/customdll_test/kernel32.def
+;
+; Minimal kernel32 .def — only ExitProcess is needed so the test
+; PE can terminate cleanly. The rest of kernel32's surface stays
+; unused; keeping the .def tight keeps the produced PE small and
+; the Import Directory uncluttered.
+
+LIBRARY kernel32.dll
+
+EXPORTS
+    ExitProcess

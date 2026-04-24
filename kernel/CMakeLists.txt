@@ -345,6 +345,34 @@ add_custom_command(
 
 list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_CUSTOMDLL_HEADER}")
 
+# ----------------------------------------------------------------------------
+# Sixth PE fixture: customdll_test.exe — first userland program
+# that imports from a real loaded DLL (customdll.dll) rather
+# than from the flat stubs page. Exercises stage-2 slice 6's
+# via-DLL IAT resolution path end-to-end.
+# ----------------------------------------------------------------------------
+set(CUSTOMOS_CUSTOMDLL_TEST_SRC "${CMAKE_SOURCE_DIR}/userland/apps/customdll_test/hello.c")
+file(GLOB CUSTOMOS_CUSTOMDLL_TEST_DEFS
+    "${CMAKE_SOURCE_DIR}/userland/apps/customdll_test/*.def")
+set(CUSTOMOS_CUSTOMDLL_TEST_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_customdll_test.h")
+set(CUSTOMOS_CUSTOMDLL_TEST_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-customdll-test.sh")
+
+add_custom_command(
+    OUTPUT "${CUSTOMOS_CUSTOMDLL_TEST_HEADER}"
+    COMMAND "${CUSTOMOS_CUSTOMDLL_TEST_SCRIPT}"
+            "${CMAKE_SOURCE_DIR}"
+            "${CUSTOMOS_CUSTOMDLL_TEST_HEADER}"
+    DEPENDS
+        "${CUSTOMOS_CUSTOMDLL_TEST_SRC}"
+        ${CUSTOMOS_CUSTOMDLL_TEST_DEFS}
+        "${CUSTOMOS_CUSTOMDLL_TEST_SCRIPT}"
+        "${CUSTOMOS_EMBED_BLOB_SCRIPT}"
+    COMMENT "Compiling + embedding /bin/customdll_test.exe (stage-2 slice 6 fixture)"
+    VERBATIM
+)
+
+list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_CUSTOMDLL_TEST_HEADER}")
+
 set(CUSTOMOS_KERNEL_LINKER_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/arch/x86_64/linker.ld")
 
 # Shared link flags — applied identically to both stages so the symbol

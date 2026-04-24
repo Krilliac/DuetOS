@@ -1,0 +1,14 @@
+; userland/apps/customdll_test/customdll.def
+;
+; Minimal .def for llvm-dlltool. Produces customdll.lib which
+; lld-link uses to satisfy __imp_CustomAdd / __imp_CustomMul /
+; __imp_CustomVersion at link time. At runtime the kernel's
+; stage-2 DLL loader patches the IAT against the real
+; customdll.dll image mapped at 0x10000000.
+
+LIBRARY customdll.dll
+
+EXPORTS
+    CustomAdd
+    CustomMul
+    CustomVersion

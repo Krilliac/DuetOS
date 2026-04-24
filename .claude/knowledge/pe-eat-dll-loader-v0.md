@@ -1,6 +1,6 @@
 # PE EAT parser + DLL loader — stage 2 kickoff
 
-**Type:** Observation · **Status:** Active (stage-2 slices 1-6 landed) · **Last updated:** 2026-04-24
+**Type:** Observation · **Status:** Active (stage-2 slices 1-7 landed) · **Last updated:** 2026-04-24
 
 ## Context
 
@@ -595,6 +595,71 @@ The path is provably live: add a PE that imports
   `TryResolveViaPreloadedDlls` — when an entry is a forwarder,
   parse `"Dll.Func"`, look up that DLL in the array, recurse.
 
+## Slice 7 — `customdll_test.exe` end-to-end fixture
+
+Slice 6 made the via-DLL path live in the loader but kept it
+dormant: no existing ramfs PE imports from `customdll.dll`, so
+`TryResolveViaPreloadedDlls` missed for every call. Slice 7
+ships the first fixture that actually exercises the path:
+a tiny PE that imports `CustomAdd` / `CustomMul` /
+`CustomVersion` from `customdll.dll` plus `ExitProcess` from
+`kernel32.dll`.
+
+### New fixture
+
+| File | Role |
+|------|------|
+| `userland/apps/customdll_test/hello.c` | `_start` calls each of the three DLL exports, cross-checks their return values, and `ExitProcess`es with `0x1234` on success / `0xBAD0` on mismatch. Freestanding, no CRT, no SSE. |
+| `userland/apps/customdll_test/customdll.def` | Declares the three DLL exports for `llvm-dlltool`. |
+| `userland/apps/customdll_test/kernel32.def` | `ExitProcess` only — tight `.def` to keep the produced PE small. |
+| `tools/build-customdll-test.sh` | Host-side: two `.lib`s via `llvm-dlltool`, one `.obj` via `clang`, one PE via `lld-link /subsystem:console /entry:_start /base:0x140000000`. Embeds bytes as `generated_customdll_test.h`. |
+| `kernel/CMakeLists.txt` | `add_custom_command` fires the build whenever source/scripts change; header folded into both kernel stages. |
+| `kernel/fs/ramfs.cpp` | `/bin/customdll_test.exe` node added to the trusted bin listing. |
+| `kernel/core/ring3_smoke.cpp` | Fifth `SpawnPeFile` call in the autoboot list — runs after `syscall_stress`, before `winkill` diagnostic. |
+
+### Expected boot-log signature
+
+```
+[ring3] pe report name="ring3-customdll-test"
+  image_base=0x140000000 entry_rva=0x1000 image_size=0x3000
+  imports: rva=0x2030 size=0x...
+    needs customdll.dll: CustomAdd, CustomMul, CustomVersion
+    needs kernel32.dll:  ExitProcess
+[ring3] pre-loaded customdll.dll base=0x10000000 (pre-PeLoad — visible to ResolveImports)
+[pe-resolve] via-dll customdll.dll!CustomAdd     -> 0x10001000
+[pe-resolve] via-dll customdll.dll!CustomMul     -> 0x10001010
+[pe-resolve] via-dll customdll.dll!CustomVersion -> 0x10001020
+[pe-resolve] ...import resolved... ExitProcess (flat-stubs path)
+[ring3] pe spawn name="ring3-customdll-test" pid=0xN entry=0x140001000 ...
+[ring3] registered customdll.dll pid=0xN
+...
+[I] sys : exit rc val=0x1234
+```
+
+If `exit rc` reports `0xBAD0`, at least one of the three DLL
+exports returned the wrong value — regression signal.
+
+### Why these particular operands?
+
+- `CustomAdd(0x1000, 0x0234)` → `0x1234` (success signature
+  memorable in the serial log, distinct from `0x2a`/`0xABCDE`/
+  `0xCAFE` used by other fixtures).
+- `CustomMul(3, 4)` → `12` — smallest arguments that produce
+  a non-trivial result.
+- `CustomVersion()` → `0x200` — matches the marker constant
+  baked into `customdll.c` since slice 2.
+
+All three results are checked inline; only a clean
+three-way match produces the `0x1234` exit code.
+
+### Why the fixture has no IAT miss-logger entries
+
+Every import resolves either via-DLL (three of them) or via
+the flat stubs path (`ExitProcess`). No import hits
+`Win32StubsLookupCatchAll`, so the per-process
+`win32_iat_misses[]` table stays empty and no
+`[win32-miss]` log lines appear for this PE.
+
 ## Boot-time visibility
 
 `PeReport` now appends an `exports:` block to the diagnostic it
@@ -627,6 +692,9 @@ first real DLL embedded in ramfs will light up the full dump:
 5. ~~ResolveImports consults DLL table.~~ **Landed in slice 6** —
    PeLoad accepts a DllImage array; SpawnPeFile loads
    customdll pre-PeLoad; direct-to-DLL IAT patching.
+6. ~~End-to-end fixture.~~ **Landed in slice 7** —
+   `customdll_test.exe` imports CustomAdd/Mul/Version,
+   boot log shows `[pe-resolve] via-dll ...`, exits `0x1234`.
 3. **Recursive import resolution.** Walk the DLL's own Import
    Directory, look up each target DLL in the table (load if
    absent, detect circular dependencies), then patch the DLL's
