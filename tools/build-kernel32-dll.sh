@@ -96,6 +96,21 @@ set +e
     /export:InterlockedAnd64 \
     /export:InterlockedOr64 \
     /export:InterlockedXor64 \
+    /export:GetConsoleMode \
+    /export:GetConsoleCP \
+    /export:GetConsoleOutputCP \
+    /export:GetLogicalDrives \
+    /export:GetDriveTypeA \
+    /export:GetDriveTypeW \
+    /export:IsWow64Process \
+    /export:IsWow64Process2 \
+    /export:GetModuleHandleExW \
+    /export:GetModuleHandleExA \
+    /export:FreeLibrary \
+    /export:InterlockedPushEntrySList \
+    /export:InterlockedPopEntrySList \
+    /export:InterlockedFlushSList \
+    /export:InitializeSListHead \
     /out:"${DLL}" \
     "${OBJ}" 2>&1 | grep -v "align specified without /driver"
 LINK_RC=${PIPESTATUS[0]}

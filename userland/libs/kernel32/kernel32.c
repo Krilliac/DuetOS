@@ -317,3 +317,138 @@ __declspec(dllexport) LONG64 InterlockedXor64(LONG64 volatile* dest, LONG64 valu
 {
     return __atomic_fetch_xor(dest, value, __ATOMIC_SEQ_CST);
 }
+
+/* ------------------------------------------------------------------
+ * Console / system introspection (slice 16)
+ *
+ * Most of these are constant-returning shims that report sane
+ * "you're on x86_64 Windows 10, code page 437, no Wow64" values
+ * so CRT startup + typical console programs proceed without
+ * branching onto obscure alt paths.
+ * ------------------------------------------------------------------ */
+
+__declspec(dllexport) BOOL GetConsoleMode(HANDLE hConsole, DWORD* lpMode)
+{
+    (void) hConsole;
+    if (lpMode != (DWORD*) 0)
+        *lpMode = 3; /* ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT */
+    return 1;
+}
+
+__declspec(dllexport) UINT GetConsoleCP(void)
+{
+    return 437; /* OEM code page — what cmd.exe uses by default. */
+}
+
+__declspec(dllexport) UINT GetConsoleOutputCP(void)
+{
+    return 437;
+}
+
+__declspec(dllexport) DWORD GetLogicalDrives(void)
+{
+    /* Bit 23 set = X: — same sentinel the flat stub returns. */
+    return 0x00800000u;
+}
+
+__declspec(dllexport) UINT GetDriveTypeA(const char* root)
+{
+    (void) root;
+    return 3; /* DRIVE_FIXED */
+}
+
+__declspec(dllexport) UINT GetDriveTypeW(const void* root)
+{
+    (void) root;
+    return 3; /* DRIVE_FIXED */
+}
+
+__declspec(dllexport) BOOL IsWow64Process(HANDLE hProc, BOOL* Wow64Process)
+{
+    (void) hProc;
+    if (Wow64Process != (BOOL*) 0)
+        *Wow64Process = 0; /* Native x64, not Wow64. */
+    return 1;
+}
+
+__declspec(dllexport) BOOL IsWow64Process2(HANDLE hProc, unsigned short* proc_machine, unsigned short* native_machine)
+{
+    (void) hProc;
+    if (proc_machine != (unsigned short*) 0)
+        *proc_machine = 0; /* IMAGE_FILE_MACHINE_UNKNOWN — not Wow64. */
+    if (native_machine != (unsigned short*) 0)
+        *native_machine = 0x8664; /* IMAGE_FILE_MACHINE_AMD64 */
+    return 1;
+}
+
+/* HMODULE GetModuleHandleExW/A — v0 always returns "not found"
+ * for non-null names, matching the flat stub. The NULL-arg
+ * path (which should return the EXE base) goes through
+ * GetModuleHandleW in real Windows, so this HMODULE-by-name
+ * variant's flat stub also returned 0. */
+__declspec(dllexport) BOOL GetModuleHandleExW(DWORD flags, const void* name, void** phmodule)
+{
+    (void) flags;
+    (void) name;
+    if (phmodule != (void**) 0)
+        *phmodule = (void*) 0;
+    return 0;
+}
+
+__declspec(dllexport) BOOL GetModuleHandleExA(DWORD flags, const char* name, void** phmodule)
+{
+    (void) flags;
+    (void) name;
+    if (phmodule != (void**) 0)
+        *phmodule = (void*) 0;
+    return 0;
+}
+
+__declspec(dllexport) BOOL FreeLibrary(void* hModule)
+{
+    (void) hModule;
+    return 1; /* Pretend success — we don't refcount mapped DLLs yet. */
+}
+
+/* ------------------------------------------------------------------
+ * SList family — slim-list intrusive stack. v0 returns NULL /
+ * 0, matching the flat kOffReturnZero registration for these.
+ * Any non-null use would panic with a null pointer today; real
+ * callers all have a "what if SList isn't supported" fallback.
+ * ------------------------------------------------------------------ */
+
+typedef struct SLIST_ENTRY
+{
+    struct SLIST_ENTRY* Next;
+} SLIST_ENTRY;
+
+__declspec(dllexport) void InterlockedPushEntrySList(void* head, SLIST_ENTRY* entry)
+{
+    (void) head;
+    (void) entry;
+}
+
+__declspec(dllexport) SLIST_ENTRY* InterlockedPopEntrySList(void* head)
+{
+    (void) head;
+    return (SLIST_ENTRY*) 0;
+}
+
+__declspec(dllexport) SLIST_ENTRY* InterlockedFlushSList(void* head)
+{
+    (void) head;
+    return (SLIST_ENTRY*) 0;
+}
+
+__declspec(dllexport) void InitializeSListHead(void* head)
+{
+    /* Zero the 16-byte SLIST_HEADER (one pointer + one u64
+     * aligned pair on x64). Byte loop keeps this independent
+     * of memset. */
+    if (head != (void*) 0)
+    {
+        unsigned char* b = (unsigned char*) head;
+        for (int i = 0; i < 16; ++i)
+            b[i] = 0;
+    }
+}
