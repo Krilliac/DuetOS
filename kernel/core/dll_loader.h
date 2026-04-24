@@ -116,4 +116,14 @@ u64 DllResolveExport(const DllImage& dll, const char* name);
 /// As above, but by ordinal.
 u64 DllResolveOrdinal(const DllImage& dll, u32 ordinal);
 
+/// Boot-time smoke test for the EAT parser + DLL loader.
+/// Exercises a purpose-built 2 KiB DLL embedded in the kernel
+/// (`generated_customdll.h`): parses its EAT directly, loads it
+/// into a scratch AddressSpace, and verifies name + ordinal
+/// lookups all return VAs inside the mapped image range. Emits
+/// `[dll-test] ...` lines to the serial log. Failure prints
+/// `[dll-test] FAIL <step>` but does not panic — the boot log
+/// is the diagnostic surface.
+void DllLoaderSelfTest();
+
 } // namespace customos::core

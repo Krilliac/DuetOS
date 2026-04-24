@@ -75,6 +75,7 @@
 #include "../subsystems/linux/ring3_smoke.h"
 #include "../subsystems/linux/syscall.h"
 #include "../subsystems/win32/stubs.h"
+#include "dll_loader.h"
 #include "shell.h"
 #include "syscall.h"
 #include "../mm/kheap.h"
@@ -1984,6 +1985,13 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // drops and the change is visible.
     customos::win32::Win32LogNtCoverage();
     customos::subsystems::linux::LinuxLogAbiCoverage();
+
+    // Stage-2 EAT parser + DLL loader smoke test. Loads an
+    // embedded ~2 KiB test DLL into a scratch AS, walks its
+    // export directory, and asserts name + ordinal lookups
+    // resolve to VAs inside the mapped image. Cheap and
+    // self-cleaning (scratch AS is released before return).
+    customos::core::DllLoaderSelfTest();
 
     customos::core::StartHeartbeatThread();
 

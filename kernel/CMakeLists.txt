@@ -35,6 +35,7 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     core/pe_loader.cpp
     core/pe_exports.cpp
     core/dll_loader.cpp
+    core/dll_loader_selftest.cpp
     core/random.cpp
     core/result.cpp
     core/ring3_smoke.cpp
@@ -315,6 +316,34 @@ add_custom_command(
 )
 
 list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_SYSCALL_STRESS_HEADER}")
+
+# ----------------------------------------------------------------------------
+# Test fixture for the stage-2 EAT parser + DLL loader: a tiny
+# freestanding Windows DLL with three exported C functions
+# (CustomAdd, CustomMul, CustomVersion). Built by clang +
+# lld-link /dll /noentry, no CRT, no imports. The kernel self-
+# test in kernel_main (DllLoaderSelfTest) parses the embedded
+# bytes via PeParseExports and DllLoad to confirm name + ordinal
+# lookups return the expected RVAs.
+# ----------------------------------------------------------------------------
+set(CUSTOMOS_CUSTOMDLL_SRC "${CMAKE_SOURCE_DIR}/userland/libs/customdll/customdll.c")
+set(CUSTOMOS_CUSTOMDLL_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_customdll.h")
+set(CUSTOMOS_CUSTOMDLL_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-customdll.sh")
+
+add_custom_command(
+    OUTPUT "${CUSTOMOS_CUSTOMDLL_HEADER}"
+    COMMAND "${CUSTOMOS_CUSTOMDLL_SCRIPT}"
+            "${CMAKE_SOURCE_DIR}"
+            "${CUSTOMOS_CUSTOMDLL_HEADER}"
+    DEPENDS
+        "${CUSTOMOS_CUSTOMDLL_SRC}"
+        "${CUSTOMOS_CUSTOMDLL_SCRIPT}"
+        "${CUSTOMOS_EMBED_BLOB_SCRIPT}"
+    COMMENT "Compiling + embedding customdll.dll (EAT parser fixture)"
+    VERBATIM
+)
+
+list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_CUSTOMDLL_HEADER}")
 
 set(CUSTOMOS_KERNEL_LINKER_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/arch/x86_64/linker.ld")
 

@@ -1,6 +1,6 @@
 # PE EAT parser + DLL loader — stage 2 kickoff
 
-**Type:** Observation · **Status:** Active (stage-2 slice 1 landed) · **Last updated:** 2026-04-24
+**Type:** Observation · **Status:** Active (stage-2 slices 1 + 2 landed) · **Last updated:** 2026-04-24
 
 ## Context
 
@@ -172,6 +172,70 @@ returns 0 on a forwarder; the caller can decide whether to
 chase it (which requires a DLL cache they own) or treat it as
 an unresolved symbol.
 
+## Slice 2 — real test DLL + boot-time smoke test
+
+Slice 1 delivered the parser + loader but had no purpose-built
+fixture: every PE in ramfs is an EXE with no exports, so the
+parser only saw the `NoExportDirectory` path. Slice 2 closes
+that gap.
+
+New test surface:
+
+| File | Role |
+|------|------|
+| `userland/libs/customdll/customdll.c` | Three-function freestanding DLL source: `CustomAdd`, `CustomMul`, `CustomVersion`. `__declspec(dllexport)` on each. No CRT, no imports, no DllMain. |
+| `tools/build-customdll.sh` | Host build script. `clang --target=x86_64-pc-windows-msvc -c` → object, then `lld-link /dll /noentry /nodefaultlib /base:0x10000000 /export:... /out:customdll.dll` → 2 KiB DLL. Runs `embed-blob.py` to produce `generated_customdll.h`. |
+| `kernel/core/dll_loader_selftest.cpp` | `DllLoaderSelfTest()` parses the embedded bytes, loads them into a scratch `AddressSpace`, and asserts name + ordinal lookups resolve to VAs inside the mapped image. |
+| `kernel/CMakeLists.txt` | `add_custom_command` fires the DLL build whenever the C source or the script changes, and the generated header is folded into the kernel's shared source list so both stages pick it up. |
+| `kernel/core/main.cpp` | One-line call into `DllLoaderSelfTest()` right after `Win32LogNtCoverage` — same spot as the other subsystem scoreboards. |
+
+### Expected boot log
+
+```
+[dll-test] begin customdll.dll bytes=0x800
+  exports: dll="customdll.dll" base=0x1 nfunc=0x3 nname=0x3
+    [0x1] CustomAdd      -> rva=0x1000
+    [0x2] CustomMul      -> rva=0x1010
+    [0x3] CustomVersion  -> rva=0x1020
+[dll-test] EAT parse OK — CustomAdd rva=0x1000 CustomMul rva=0x1010 CustomVersion rva=0x1020
+[dll-load] begin base_va=0x10000000 size=0x3000 sections=0x2 chars=0x2022
+[dll-load] relocs blocks=0x1 applied=0x0 delta=0x0
+[dll-load] OK entry_rva=0x0 has_exports=0x1
+[dll-test] DllLoad OK base_va=0x10000000 CustomAdd VA=0x10001000
+```
+
+The `PeExportsReport` block comes from the diagnostic path
+(PeReport now calls it); the `[dll-test]` / `[dll-load]` lines
+come from `DllLoaderSelfTest` itself.
+
+### Why `lld-link /dll /noentry`?
+
+DLLs built through the default path want a `_DllMainCRTStartup`
+reference, which pulls in the MSVC CRT. We don't have one.
+`/noentry` tells lld-link to skip the entry-point reference
+entirely. The kernel's DLL loader currently does not dispatch
+DllMain anyway (see "Deferred" below), so the missing entry is
+inconsequential for now.
+
+### Why three exports, not one?
+
+One export would verify `PeExportLookupName` and
+`PeExportLookupOrdinal` in isolation, but wouldn't catch two
+common bugs:
+
+1. **Off-by-one in the ENT / EOT walk.** A single-export DLL
+   has the name table at offset 0 and the ordinal table at
+   offset 0; any sign-extension or stride error would happen
+   to land on the right slot. Three exports exercise a
+   non-trivial stride.
+2. **Alphabetical ordering assumption in EOT.** lld-link emits
+   names sorted alphabetically (ENT must be sorted per PE
+   spec), with EOT entries pointing back into the EAT. A
+   single export has EOT = [0] regardless. With three sorted
+   exports (CustomAdd, CustomMul, CustomVersion), EOT values
+   diverge from their ENT indices only if the parser honours
+   the EOT indirection correctly.
+
 ## Boot-time visibility
 
 `PeReport` now appends an `exports:` block to the diagnostic it
@@ -189,14 +253,10 @@ first real DLL embedded in ramfs will light up the full dump:
     [0x0003] CustomName -> forwarder="KERNEL32.GetCommandLineA"
 ```
 
-## What's next (stage 2 slice 2+)
+## What's next (stage 2 slice 3+)
 
-1. **Real test DLL.** Add `userland/libs/customdll/` with a
-   couple of exported C functions, a build script mirroring
-   `build-hello-winapi.sh`, and embed the bytes as
-   `generated_customdll.h`. Boot-time self-test calls
-   `DllLoad` against it in a scratch `AddressSpace` and
-   asserts two name-lookups + one ordinal-lookup succeed.
+1. ~~Real test DLL.~~ **Landed in slice 2** —
+   `userland/libs/customdll/`, boot-time `DllLoaderSelfTest`.
 2. **Per-process DLL table.** `Process::dll_images[]` with a
    fixed cap; `DllLoad` registers into it, `DllResolveExport`
    walks it first for dependency resolution.
