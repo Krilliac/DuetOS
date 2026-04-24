@@ -1478,6 +1478,18 @@ void SyscallDispatch(arch::TrapFrame* frame)
     case SYS_GDI_STRETCH_BLT_DC:
         subsystems::win32::DoGdiStretchBltDC(frame);
         return;
+    case SYS_GDI_CREATE_PEN:
+        subsystems::win32::DoGdiCreatePen(frame);
+        return;
+    case SYS_GDI_MOVE_TO_EX:
+        subsystems::win32::DoGdiMoveToEx(frame);
+        return;
+    case SYS_GDI_LINE_TO:
+        subsystems::win32::DoGdiLineTo(frame);
+        return;
+    case SYS_GDI_DRAW_TEXT_USER:
+        subsystems::win32::DoGdiDrawText(frame);
+        return;
     case SYS_GDI_SET_TEXT_COLOR:
         subsystems::win32::DoGdiSetTextColor(frame);
         return;

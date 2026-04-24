@@ -1045,6 +1045,37 @@ enum SyscallNumber : u64
     // destination. SRCCOPY-equivalent; ROP ignored in v0.
     SYS_GDI_STRETCH_BLT_DC = 117,
 
+    // SYS_GDI_CREATE_PEN — Win32 CreatePen.
+    //   rdi = style (ignored in v0), rsi = width, rdx = COLORREF.
+    //   rax = HPEN (tagged). v0 only supports solid pens.
+    SYS_GDI_CREATE_PEN = 118,
+
+    // SYS_GDI_MOVE_TO_EX — Win32 MoveToEx.
+    //   rdi = HDC, rsi = x, rdx = y, r10 = user LPPOINT (may be 0).
+    //   If `r10` != 0, writes the previous cur pos as { LONG, LONG }.
+    //   rax = 1 on success, 0 on invalid HDC / copy-to-user fault.
+    SYS_GDI_MOVE_TO_EX = 119,
+
+    // SYS_GDI_LINE_TO — Win32 LineTo.
+    //   rdi = HDC, rsi = x1 (end), rdx = y1. Reads DC cur pos,
+    //   draws a 1-px line to (x1, y1) in the DC's selected pen
+    //   colour (BLACK_PEN implicit if none), updates cur pos.
+    //   Works on both memDCs (Bresenham into bitmap) and window
+    //   HDCs (display-list line prim + recompose).
+    SYS_GDI_LINE_TO = 120,
+
+    // SYS_GDI_DRAW_TEXT_USER — Win32 DrawTextA.
+    //   rdi = HDC
+    //   rsi = user text pointer
+    //   rdx = text length (-1 for NUL-terminated)
+    //   r10 = user LPRECT (bounding RECT in client coords)
+    //   r8  = format flags (DT_SINGLELINE / DT_CENTER / DT_VCENTER /
+    //                       DT_RIGHT / DT_LEFT / DT_TOP)
+    //   rax = height of the drawn text in pixels on success, or 0
+    //         on bad handle / copy-from-user fault. Single-line
+    //         only in v0.
+    SYS_GDI_DRAW_TEXT_USER = 121,
+
     // SYS_GDI_BITBLT_DC — Win32 BitBlt (9-arg). `rdi` points at a
     // user-stack-resident struct of 9 u64 slots in this order:
     //   +0x00  HDC   hdcDst

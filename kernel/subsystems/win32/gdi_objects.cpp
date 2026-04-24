@@ -19,6 +19,8 @@ namespace
 constinit MemDC g_mem_dcs[kMaxMemDcs] = {};
 constinit Bitmap g_bitmaps[kMaxBitmaps] = {};
 constinit Brush g_brushes[kMaxBrushes] = {};
+constinit Pen g_pens[kMaxPens] = {};
+constinit WindowDcState g_win_dcs[kMaxWindowDcSlots] = {};
 
 // First six brush slots are pre-allocated for stock brushes. Their
 // indices (0..5) match the Win32 GetStockObject codes so the
@@ -75,6 +77,34 @@ Brush* GdiLookupBrush(u64 h)
     return &g_brushes[idx];
 }
 
+Pen* GdiLookupPen(u64 h)
+{
+    if ((h & kGdiTagMask) != kGdiTagPen)
+        return nullptr;
+    const u32 idx = HandleIndex(h);
+    if (idx >= kMaxPens || !g_pens[idx].alive)
+        return nullptr;
+    return &g_pens[idx];
+}
+
+WindowDcState* GdiWindowDcState(u32 window_handle)
+{
+    if (window_handle >= kMaxWindowDcSlots)
+        return nullptr;
+    WindowDcState* s = &g_win_dcs[window_handle];
+    if (!s->init)
+    {
+        s->init = true;
+        s->text_color = 0x00000000;
+        s->bk_color = 0x00FFFFFF;
+        s->bk_mode = kBkModeOpaque;
+        s->selected_pen = 0;
+        s->cur_x = 0;
+        s->cur_y = 0;
+    }
+    return s;
+}
+
 void GdiInit()
 {
     if (g_init_done)
@@ -96,7 +126,21 @@ void GdiInit()
     stock(kStockBlackBrush, 0x00000000, true);
     stock(kStockNullBrush, 0x00000000, true); // NULL brush — no-op fill
 
-    arch::SerialWrite("[gdi] stock objects registered (6 brushes)\n");
+    auto stock_pen = [](u32 slot, u32 rgb, bool present)
+    {
+        // Stock pen slots live in the pen table at indices matching
+        // their GetStockObject codes (6..8). Non-stock CreatePen
+        // calls start from slot 9.
+        g_pens[slot].alive = present;
+        g_pens[slot].rgb = rgb;
+        g_pens[slot].width = 1;
+        g_pens[slot].stock = true;
+    };
+    stock_pen(kStockWhitePen, 0x00FFFFFF, true);
+    stock_pen(kStockBlackPen, 0x00000000, true);
+    stock_pen(kStockNullPen, 0x00000000, true); // NULL pen — skip draw
+
+    arch::SerialWrite("[gdi] stock objects registered (6 brushes, 3 pens)\n");
 }
 
 u64 GdiCreateCompatibleDC()
@@ -115,6 +159,9 @@ u64 GdiCreateCompatibleDC()
             g_mem_dcs[i].text_color = 0x00000000;
             g_mem_dcs[i].bk_color = 0x00FFFFFF;
             g_mem_dcs[i].bk_mode = kBkModeOpaque;
+            g_mem_dcs[i].selected_pen = 0; // implicit BLACK_PEN
+            g_mem_dcs[i].cur_x = 0;
+            g_mem_dcs[i].cur_y = 0;
             return MakeHandle(kGdiTagMemDC, i);
         }
     }
@@ -171,31 +218,83 @@ u64 GdiCreateSolidBrush(u32 rgb)
 
 u64 GdiGetStockObject(u32 index)
 {
-    if (index > kStockNullBrush)
-        return 0;
-    if (!g_brushes[index].alive)
-        return 0;
-    return MakeHandle(kGdiTagBrush, index);
+    // Brush slots 0..5 live in the brush table; pen slots 6..8 in
+    // the pen table. The handle tag lets SelectObject discriminate
+    // without a branch here.
+    if (index <= kStockNullBrush)
+    {
+        if (!g_brushes[index].alive)
+            return 0;
+        return MakeHandle(kGdiTagBrush, index);
+    }
+    if (index <= kStockNullPen)
+    {
+        if (!g_pens[index].alive)
+            return 0;
+        return MakeHandle(kGdiTagPen, index);
+    }
+    return 0;
+}
+
+u64 GdiCreatePen(u32 style, u32 width, u32 rgb)
+{
+    (void)style; // styles (PS_DASH / PS_DOT / etc.) ignored in v0
+    for (u32 i = 9; i < kMaxPens; ++i)
+    {
+        if (!g_pens[i].alive)
+        {
+            g_pens[i].alive = true;
+            g_pens[i].rgb = rgb;
+            g_pens[i].width = (width == 0) ? 1 : width;
+            g_pens[i].stock = false;
+            return MakeHandle(kGdiTagPen, i);
+        }
+    }
+    return 0;
 }
 
 u32 GdiSetTextColor(u64 hdc, u32 rgb)
 {
     MemDC* dc = GdiLookupMemDC(hdc);
-    if (dc == nullptr)
-        return rgb; // window-DC: round-trip the value
-    const u32 prev = dc->text_color;
-    dc->text_color = rgb;
-    return prev;
+    if (dc != nullptr)
+    {
+        const u32 prev = dc->text_color;
+        dc->text_color = rgb;
+        return prev;
+    }
+    if ((hdc & kGdiTagMask) == 0)
+    {
+        WindowDcState* s = GdiWindowDcState(static_cast<u32>(hdc));
+        if (s != nullptr)
+        {
+            const u32 prev = s->text_color;
+            s->text_color = rgb;
+            return prev;
+        }
+    }
+    return rgb;
 }
 
 u32 GdiSetBkColor(u64 hdc, u32 rgb)
 {
     MemDC* dc = GdiLookupMemDC(hdc);
-    if (dc == nullptr)
-        return rgb;
-    const u32 prev = dc->bk_color;
-    dc->bk_color = rgb;
-    return prev;
+    if (dc != nullptr)
+    {
+        const u32 prev = dc->bk_color;
+        dc->bk_color = rgb;
+        return prev;
+    }
+    if ((hdc & kGdiTagMask) == 0)
+    {
+        WindowDcState* s = GdiWindowDcState(static_cast<u32>(hdc));
+        if (s != nullptr)
+        {
+            const u32 prev = s->bk_color;
+            s->bk_color = rgb;
+            return prev;
+        }
+    }
+    return rgb;
 }
 
 u8 GdiSetBkMode(u64 hdc, u8 mode)
@@ -203,29 +302,59 @@ u8 GdiSetBkMode(u64 hdc, u8 mode)
     if (mode != kBkModeTransparent && mode != kBkModeOpaque)
         return 0;
     MemDC* dc = GdiLookupMemDC(hdc);
-    if (dc == nullptr)
-        return mode;
-    const u8 prev = dc->bk_mode;
-    dc->bk_mode = mode;
-    return prev;
+    if (dc != nullptr)
+    {
+        const u8 prev = dc->bk_mode;
+        dc->bk_mode = mode;
+        return prev;
+    }
+    if ((hdc & kGdiTagMask) == 0)
+    {
+        WindowDcState* s = GdiWindowDcState(static_cast<u32>(hdc));
+        if (s != nullptr)
+        {
+            const u8 prev = s->bk_mode;
+            s->bk_mode = mode;
+            return prev;
+        }
+    }
+    return mode;
 }
 
 u64 GdiSelectObject(u64 hdc, u64 hobj)
 {
+    const u64 obj_tag = hobj & kGdiTagMask;
     MemDC* dc = GdiLookupMemDC(hdc);
-    if (dc == nullptr)
-        return 0; // window DCs + invalid HDCs don't track selections
-    const u64 tag = hobj & kGdiTagMask;
-    if (tag == kGdiTagBitmap && GdiLookupBitmap(hobj) != nullptr)
+    if (dc != nullptr)
     {
-        const u64 prev = dc->selected_bitmap;
-        dc->selected_bitmap = hobj;
-        return prev;
+        if (obj_tag == kGdiTagBitmap && GdiLookupBitmap(hobj) != nullptr)
+        {
+            const u64 prev = dc->selected_bitmap;
+            dc->selected_bitmap = hobj;
+            return prev;
+        }
+        if (obj_tag == kGdiTagPen && GdiLookupPen(hobj) != nullptr)
+        {
+            const u64 prev = dc->selected_pen;
+            dc->selected_pen = hobj;
+            return prev;
+        }
+        // Brush selection on memDC isn't tracked yet; round-trip.
+        return hobj;
     }
-    // Other object kinds (brush/pen) aren't tracked on the DC
-    // in v0; return the handle unchanged (Win32 Select* returns the
-    // previous selection) so paired Select+Restore idioms don't
-    // trip over a zero.
+    // Window-HDC path — look up / lazily init the per-window DC
+    // state and track the pen selection there. Brushes still
+    // round-trip (no use case for them on our window path yet).
+    if ((hdc & kGdiTagMask) == 0)
+    {
+        WindowDcState* s = GdiWindowDcState(static_cast<u32>(hdc));
+        if (s != nullptr && obj_tag == kGdiTagPen && GdiLookupPen(hobj) != nullptr)
+        {
+            const u64 prev = s->selected_pen;
+            s->selected_pen = hobj;
+            return prev;
+        }
+    }
     return hobj;
 }
 
@@ -263,6 +392,16 @@ bool GdiDeleteObject(u64 hobj)
         if (b->stock)
             return true; // no-op on stock per Win32 spec
         b->alive = false;
+        return true;
+    }
+    if (tag == kGdiTagPen)
+    {
+        Pen* p = GdiLookupPen(hobj);
+        if (p == nullptr)
+            return false;
+        if (p->stock)
+            return true;
+        p->alive = false;
         return true;
     }
     return false;
@@ -337,6 +476,43 @@ void GdiPaintTextOnBitmap(Bitmap* bmp, i32 x, i32 y, const char* text, u32 fg, u
             }
         }
         cur_x += static_cast<i32>(kGlyphWidth);
+    }
+}
+
+void GdiDrawLineOnBitmap(Bitmap* bmp, i32 x0, i32 y0, i32 x1, i32 y1, u32 rgb)
+{
+    if (bmp == nullptr || bmp->pixels == nullptr)
+        return;
+    // Standard Bresenham with a per-pixel surface clip — no
+    // Cohen-Sutherland pre-clip because single-pixel plots here
+    // are so cheap that the clip-test dwarfs the plot.
+    const i32 dx = (x1 > x0) ? x1 - x0 : x0 - x1;
+    const i32 dy = (y1 > y0) ? -(y1 - y0) : -(y0 - y1);
+    const i32 sx = (x0 < x1) ? 1 : -1;
+    const i32 sy = (y0 < y1) ? 1 : -1;
+    i32 err = dx + dy;
+    i32 x = x0;
+    i32 y = y0;
+    const u32 stride = bmp->pitch / 4;
+    for (;;)
+    {
+        if (x >= 0 && y >= 0 && static_cast<u32>(x) < bmp->width && static_cast<u32>(y) < bmp->height)
+        {
+            bmp->pixels[static_cast<u64>(y) * stride + static_cast<u64>(x)] = rgb;
+        }
+        if (x == x1 && y == y1)
+            break;
+        const i32 e2 = 2 * err;
+        if (e2 >= dy)
+        {
+            err += dy;
+            x += sx;
+        }
+        if (e2 <= dx)
+        {
+            err += dx;
+            y += sy;
+        }
     }
 }
 
@@ -730,6 +906,151 @@ void DoGdiStretchBltDC(arch::TrapFrame* frame)
     }
 
     duetos::mm::KFree(staging);
+    frame->rax = ok ? 1 : 0;
+}
+
+void DoGdiCreatePen(arch::TrapFrame* frame)
+{
+    // rdi = style, rsi = width, rdx = COLORREF (Win32 0x00BBGGRR).
+    const u32 style = static_cast<u32>(frame->rdi);
+    const u32 width = static_cast<u32>(frame->rsi);
+    const u32 cr = static_cast<u32>(frame->rdx);
+    const u32 rgb = ((cr & 0xFF) << 16) | (((cr >> 8) & 0xFF) << 8) | ((cr >> 16) & 0xFF);
+    frame->rax = GdiCreatePen(style, width, rgb);
+}
+
+// Helper: resolve the current "pen colour" for an HDC. memDC uses
+// `selected_pen` on the MemDC; window HDC uses the per-window DC
+// state's `selected_pen`; either 0 = implicit BLACK_PEN.
+u32 ResolvePenColor(u64 hdc)
+{
+    u64 pen = 0;
+    MemDC* dc = GdiLookupMemDC(hdc);
+    if (dc != nullptr)
+    {
+        pen = dc->selected_pen;
+    }
+    else if ((hdc & kGdiTagMask) == 0)
+    {
+        WindowDcState* s = GdiWindowDcState(static_cast<u32>(hdc));
+        if (s != nullptr)
+            pen = s->selected_pen;
+    }
+    if (pen == 0)
+        return 0x00000000; // BLACK_PEN implicit default
+    Pen* p = GdiLookupPen(pen);
+    if (p == nullptr)
+        return 0x00000000;
+    return p->rgb;
+}
+
+void DoGdiMoveToEx(arch::TrapFrame* frame)
+{
+    // rdi = HDC, rsi = x, rdx = y, r10 = optional user LPPOINT out.
+    const i32 x = static_cast<i32>(static_cast<u32>(frame->rsi));
+    const i32 y = static_cast<i32>(static_cast<u32>(frame->rdx));
+    const u64 user_out = frame->r10;
+
+    i32 old_x = 0, old_y = 0;
+    bool ok = false;
+    MemDC* dc = GdiLookupMemDC(frame->rdi);
+    if (dc != nullptr)
+    {
+        old_x = dc->cur_x;
+        old_y = dc->cur_y;
+        dc->cur_x = x;
+        dc->cur_y = y;
+        ok = true;
+    }
+    else if ((frame->rdi & kGdiTagMask) == 0)
+    {
+        WindowDcState* s = GdiWindowDcState(static_cast<u32>(frame->rdi));
+        if (s != nullptr)
+        {
+            old_x = s->cur_x;
+            old_y = s->cur_y;
+            s->cur_x = x;
+            s->cur_y = y;
+            ok = true;
+        }
+    }
+    if (!ok)
+    {
+        frame->rax = 0;
+        return;
+    }
+    if (user_out != 0)
+    {
+        // Win32 POINT is { LONG x; LONG y; } — 8 bytes, two i32s.
+        i32 pt[2] = {old_x, old_y};
+        if (!duetos::mm::CopyToUser(reinterpret_cast<void*>(user_out), pt, sizeof(pt)))
+        {
+            frame->rax = 0;
+            return;
+        }
+    }
+    frame->rax = 1;
+}
+
+void DoGdiLineTo(arch::TrapFrame* frame)
+{
+    using namespace duetos::drivers::video;
+    // rdi = HDC, rsi = x1 (end), rdx = y1.
+    duetos::core::Process* proc = duetos::core::CurrentProcess();
+    if (proc == nullptr)
+    {
+        frame->rax = 0;
+        return;
+    }
+    const i32 x1 = static_cast<i32>(static_cast<u32>(frame->rsi));
+    const i32 y1 = static_cast<i32>(static_cast<u32>(frame->rdx));
+    const u32 rgb = ResolvePenColor(frame->rdi);
+
+    bool ok = false;
+    MemDC* dc = GdiLookupMemDC(frame->rdi);
+    if (dc != nullptr)
+    {
+        if (dc->selected_bitmap != 0)
+        {
+            Bitmap* bmp = GdiLookupBitmap(dc->selected_bitmap);
+            if (bmp != nullptr)
+            {
+                GdiDrawLineOnBitmap(bmp, dc->cur_x, dc->cur_y, x1, y1, rgb);
+                dc->cur_x = x1;
+                dc->cur_y = y1;
+                ok = true;
+            }
+        }
+        else
+        {
+            // No selected bitmap — still advance the current pos so
+            // a follow-up SelectObject + LineTo loop behaves.
+            dc->cur_x = x1;
+            dc->cur_y = y1;
+            ok = true;
+        }
+    }
+    else if ((frame->rdi & kGdiTagMask) == 0)
+    {
+        WindowDcState* s = GdiWindowDcState(static_cast<u32>(frame->rdi));
+        if (s != nullptr)
+        {
+            const i32 x0 = s->cur_x;
+            const i32 y0 = s->cur_y;
+            CompositorLock();
+            const u32 h_comp = HwndToCompositorHandleForCaller(frame->rdi, proc->pid);
+            if (h_comp != kWindowInvalid)
+            {
+                WindowClientLine(h_comp, x0, y0, x1, y1, rgb);
+                const Theme& theme = ThemeCurrent();
+                DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+                ok = true;
+            }
+            CompositorUnlock();
+            s->cur_x = x1;
+            s->cur_y = y1;
+        }
+    }
     frame->rax = ok ? 1 : 0;
 }
 

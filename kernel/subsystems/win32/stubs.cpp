@@ -306,6 +306,24 @@ constexpr u32 kOffGdiSetBkMode = 0xDFF;    // render/drivers — 14 bytes
 
 constexpr u32 kOffGdiStretchBltDC = 0xE0D; // render/drivers — 129 bytes
 
+// Rectangle / Ellipse / SetPixel — previously IAT-less wires into
+// the existing SYS_GDI_* syscalls. Each stub repacks Win32 args
+// into the kernel's (x,y,w,h,color) shape and sends the request
+// on its way. No DC state is consulted today (default white
+// outline).
+constexpr u32 kOffGdiRectangle = 0xE8E; // render/drivers — 40 bytes
+constexpr u32 kOffGdiEllipse = 0xEB6;   // render/drivers — 40 bytes
+constexpr u32 kOffGdiSetPixel = 0xEDE;  // render/drivers — 20 bytes
+
+// Pen + cursor (MoveToEx / LineTo) stubs — the last batch that
+// lights up the outline-drawing primitives (line / rectangle /
+// ellipse) with pen-aware colour state.
+constexpr u32 kOffGdiCreatePen = 0xEF2; // render/drivers — 17 bytes
+constexpr u32 kOffGdiMoveToEx = 0xF03;  // render/drivers — 20 bytes
+constexpr u32 kOffGdiLineTo = 0xF17;    // render/drivers — 17 bytes
+
+constexpr u32 kOffGdiDrawTextA = 0xF28; // render/drivers — 25 bytes
+
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
     // Windows x64 ABI: first arg (uExitCode) in RCX.
@@ -3482,10 +3500,111 @@ constexpr u8 kStubsBytes[] = {
     0xCD, 0x80,                                     // 0xE87 int 0x80
     0x48, 0x83, 0xC4, 0x58,                         // 0xE89 add rsp, 88
     0xC3,                                           // 0xE8D ret
+
+    // === GDI outline primitives — real IAT routes ===============
+
+    // --- Rectangle (offset 0xE8E, 40 bytes) ---------------------
+    // Win32: BOOL Rectangle(HDC=rcx, int left=edx, int top=r8d,
+    //                       int right=r9d, int bottom=[rsp+40]).
+    // DuetOS: SYS_GDI_RECTANGLE (67) — rdi=hwnd, rsi=x, rdx=y,
+    // r10=w, r8=h, r9=colour. Convert LTRB → (L, T, R-L, B-T).
+    // Uses r11 (caller-saved in Win64) as a scratch for B.
+    0x4C, 0x8B, 0x5C, 0x24, 0x28, // 0xE8E mov r11, [rsp+40]   ; bottom
+    0x4D, 0x29, 0xC3,             // 0xE93 sub r11, r8         ; h = bottom - top
+    0x4D, 0x89, 0xCA,             // 0xE96 mov r10, r9         ; R
+    0x49, 0x29, 0xD2,             // 0xE99 sub r10, rdx        ; w = R - L
+    0x48, 0x89, 0xCF,             // 0xE9C mov rdi, rcx        ; hwnd
+    0x48, 0x89, 0xD6,             // 0xE9F mov rsi, rdx        ; x = L
+    0x4C, 0x89, 0xC2,             // 0xEA2 mov rdx, r8         ; y = T
+    0x4D, 0x89, 0xD8,             // 0xEA5 mov r8, r11         ; h
+    0x41, 0xB9, 0xFF, 0xFF, 0xFF, // 0xEA8 mov r9d, 0xFFFFFF   ; colour = white
+    0x00,                         //
+    0xB8, 0x43, 0x00, 0x00, 0x00, // 0xEAE mov eax, 67         ; SYS_GDI_RECTANGLE
+    0xCD, 0x80,                   // 0xEB3 int 0x80
+    0xC3,                         // 0xEB5 ret
+
+    // --- Ellipse (offset 0xEB6, 40 bytes) -----------------------
+    // Same shape as Rectangle; different syscall number.
+    0x4C, 0x8B, 0x5C, 0x24, 0x28, // 0xEB6 mov r11, [rsp+40]
+    0x4D, 0x29, 0xC3,             // 0xEBB sub r11, r8
+    0x4D, 0x89, 0xCA,             // 0xEBE mov r10, r9
+    0x49, 0x29, 0xD2,             // 0xEC1 sub r10, rdx
+    0x48, 0x89, 0xCF,             // 0xEC4 mov rdi, rcx
+    0x48, 0x89, 0xD6,             // 0xEC7 mov rsi, rdx
+    0x4C, 0x89, 0xC2,             // 0xECA mov rdx, r8
+    0x4D, 0x89, 0xD8,             // 0xECD mov r8, r11
+    0x41, 0xB9, 0xFF, 0xFF, 0xFF, // 0xED0 mov r9d, 0xFFFFFF
+    0x00,                         //
+    0xB8, 0x4B, 0x00, 0x00, 0x00, // 0xED6 mov eax, 75         ; SYS_GDI_ELLIPSE
+    0xCD, 0x80,                   // 0xEDB int 0x80
+    0xC3,                         // 0xEDD ret
+
+    // --- SetPixel / SetPixelV (offset 0xEDE, 20 bytes) ----------
+    // Win32: COLORREF SetPixel(HDC=rcx, int x=edx, int y=r8d,
+    //                          COLORREF=r9d).
+    // DuetOS: SYS_GDI_SET_PIXEL (76) — rdi=hwnd, rsi=x, rdx=y,
+    // r10=colour. Also serves SetPixelV (BOOL return — 1 is a
+    // valid non-zero return for SetPixel's caller too).
+    0x48, 0x89, 0xCF,             // 0xEDE mov rdi, rcx
+    0x48, 0x89, 0xD6,             // 0xEE1 mov rsi, rdx        ; x
+    0x4C, 0x89, 0xC2,             // 0xEE4 mov rdx, r8         ; y
+    0x4D, 0x89, 0xCA,             // 0xEE7 mov r10, r9         ; colour
+    0xB8, 0x4C, 0x00, 0x00, 0x00, // 0xEEA mov eax, 76         ; SYS_GDI_SET_PIXEL
+    0xCD, 0x80,                   // 0xEEF int 0x80
+    0xC3,                         // 0xEF1 ret
+
+    // --- CreatePen (offset 0xEF2, 17 bytes) ---------------------
+    // Win32: HPEN CreatePen(int style=rcx, int width=edx,
+    //                       COLORREF=r8d).
+    // DuetOS: SYS_GDI_CREATE_PEN (118) — rdi=style, rsi=width,
+    // rdx=COLORREF.
+    0x48, 0x89, 0xCF,             // 0xEF2 mov rdi, rcx
+    0x48, 0x89, 0xD6,             // 0xEF5 mov rsi, rdx
+    0x4C, 0x89, 0xC2,             // 0xEF8 mov rdx, r8
+    0xB8, 0x76, 0x00, 0x00, 0x00, // 0xEFB mov eax, 118
+    0xCD, 0x80,                   // 0xF00 int 0x80
+    0xC3,                         // 0xF02 ret
+
+    // --- MoveToEx (offset 0xF03, 20 bytes) ----------------------
+    // Win32: BOOL MoveToEx(HDC=rcx, int x=edx, int y=r8d,
+    //                      LPPOINT lpPoint=r9).
+    // DuetOS: SYS_GDI_MOVE_TO_EX (119) — rdi=HDC, rsi=x, rdx=y,
+    // r10=out LPPOINT.
+    0x48, 0x89, 0xCF,             // 0xF03 mov rdi, rcx
+    0x48, 0x89, 0xD6,             // 0xF06 mov rsi, rdx
+    0x4C, 0x89, 0xC2,             // 0xF09 mov rdx, r8
+    0x4D, 0x89, 0xCA,             // 0xF0C mov r10, r9
+    0xB8, 0x77, 0x00, 0x00, 0x00, // 0xF0F mov eax, 119
+    0xCD, 0x80,                   // 0xF14 int 0x80
+    0xC3,                         // 0xF16 ret
+
+    // --- LineTo (offset 0xF17, 17 bytes) ------------------------
+    // Win32: BOOL LineTo(HDC=rcx, int x=edx, int y=r8d).
+    // DuetOS: SYS_GDI_LINE_TO (120) — rdi=HDC, rsi=x, rdx=y.
+    0x48, 0x89, 0xCF,             // 0xF17 mov rdi, rcx
+    0x48, 0x89, 0xD6,             // 0xF1A mov rsi, rdx
+    0x4C, 0x89, 0xC2,             // 0xF1D mov rdx, r8
+    0xB8, 0x78, 0x00, 0x00, 0x00, // 0xF20 mov eax, 120
+    0xCD, 0x80,                   // 0xF25 int 0x80
+    0xC3,                         // 0xF27 ret
+
+    // --- DrawTextA (offset 0xF28, 25 bytes) ---------------------
+    // Win32: int DrawTextA(HDC=rcx, LPCSTR=rdx, int cchText=r8d,
+    //                      LPRECT=r9, UINT format=[rsp+40]).
+    // DuetOS: SYS_GDI_DRAW_TEXT_USER (121) — rdi=HDC, rsi=text,
+    // rdx=len, r10=RECT*, r8=format.
+    0x48, 0x89, 0xCF,             // 0xF28 mov rdi, rcx      ; HDC
+    0x48, 0x89, 0xD6,             // 0xF2B mov rsi, rdx      ; text
+    0x4C, 0x89, 0xC2,             // 0xF2E mov rdx, r8       ; len
+    0x4D, 0x89, 0xCA,             // 0xF31 mov r10, r9       ; RECT*
+    0x44, 0x8B, 0x44, 0x24, 0x28, // 0xF34 mov r8d, [rsp+40] ; format
+    0xB8, 0x79, 0x00, 0x00, 0x00, // 0xF39 mov eax, 121
+    0xCD, 0x80,                   // 0xF3E int 0x80
+    0xC3,                         // 0xF40 ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0xE8E, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0xF41, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -5036,7 +5155,7 @@ constexpr StubEntry kStubsTable[] = {
     {"gdi32.dll", "CreateDIBSection", kOffReturnOne},
     {"gdi32.dll", "CreateSolidBrush", kOffGdiCreateSolidBrush},
     {"gdi32.dll", "CreateBrushIndirect", kOffReturnOne},
-    {"gdi32.dll", "CreatePen", kOffReturnOne},
+    {"gdi32.dll", "CreatePen", kOffGdiCreatePen},
     {"gdi32.dll", "CreateFontA", kOffReturnOne},
     {"gdi32.dll", "CreateFontW", kOffReturnOne},
     {"gdi32.dll", "CreateFontIndirectA", kOffReturnOne},
@@ -5046,10 +5165,12 @@ constexpr StubEntry kStubsTable[] = {
     // caller's "draw succeeded" flag is set.
     {"gdi32.dll", "BitBlt", kOffGdiBitBltDC},
     {"gdi32.dll", "StretchBlt", kOffGdiStretchBltDC},
-    {"gdi32.dll", "MoveToEx", kOffReturnOne},
-    {"gdi32.dll", "LineTo", kOffReturnOne},
-    {"gdi32.dll", "Rectangle", kOffReturnOne},
-    {"gdi32.dll", "Ellipse", kOffReturnOne},
+    {"gdi32.dll", "MoveToEx", kOffGdiMoveToEx},
+    {"gdi32.dll", "LineTo", kOffGdiLineTo},
+    {"gdi32.dll", "Rectangle", kOffGdiRectangle},
+    {"gdi32.dll", "Ellipse", kOffGdiEllipse},
+    {"gdi32.dll", "SetPixel", kOffGdiSetPixel},
+    {"gdi32.dll", "SetPixelV", kOffGdiSetPixel},
     {"gdi32.dll", "Polygon", kOffReturnOne},
     {"gdi32.dll", "Polyline", kOffReturnOne},
     // FillRect is technically a user32 export (not gdi32) in real
@@ -5061,7 +5182,8 @@ constexpr StubEntry kStubsTable[] = {
     {"gdi32.dll", "TextOutW", kOffReturnOne},
     {"gdi32.dll", "ExtTextOutA", kOffReturnOne},
     {"gdi32.dll", "ExtTextOutW", kOffReturnOne},
-    {"gdi32.dll", "DrawTextA", kOffReturnOne},
+    {"gdi32.dll", "DrawTextA", kOffGdiDrawTextA},
+    {"user32.dll", "DrawTextA", kOffGdiDrawTextA},
     {"gdi32.dll", "DrawTextW", kOffReturnOne},
     {"gdi32.dll", "SetBkMode", kOffGdiSetBkMode},
     {"gdi32.dll", "SetBkColor", kOffGdiSetBkColor},

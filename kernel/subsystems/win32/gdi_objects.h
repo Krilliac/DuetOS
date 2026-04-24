@@ -46,10 +46,12 @@ inline constexpr u64 kGdiTagMask = 0x0F000000u;
 inline constexpr u64 kGdiTagMemDC = 0x01000000u;
 inline constexpr u64 kGdiTagBitmap = 0x02000000u;
 inline constexpr u64 kGdiTagBrush = 0x03000000u;
+inline constexpr u64 kGdiTagPen = 0x04000000u;
 
 inline constexpr u32 kMaxMemDcs = 64;
 inline constexpr u32 kMaxBitmaps = 64;
 inline constexpr u32 kMaxBrushes = 64;
+inline constexpr u32 kMaxPens = 64;
 
 // Max pixels per compatible bitmap. Keeps a malicious caller from
 // requesting a 100 MB bitmap. 1024 × 1024 × 4 = 4 MiB per bitmap;
@@ -65,9 +67,12 @@ struct MemDC
 {
     bool alive;
     u64 selected_bitmap; // HBITMAP handle (with tag) or 0 = none
+    u64 selected_pen;    // HPEN handle (with tag) or 0 = use BLACK_PEN implicitly
     u32 text_color;      // 0x00RRGGBB (unpacked from COLORREF on set)
     u32 bk_color;        // 0x00RRGGBB
     u8 bk_mode;          // kBkModeTransparent (default) or kBkModeOpaque
+    i32 cur_x;           // DC current position, set by MoveToEx, read by LineTo
+    i32 cur_y;
 };
 
 struct Bitmap
@@ -86,13 +91,27 @@ struct Brush
     bool stock; // stock brushes are never freed
 };
 
-// Stock brush indices (Win32 GetStockObject codes).
+struct Pen
+{
+    bool alive;
+    u32 rgb;
+    u32 width; // pixels; 0 means "1 pixel cosmetic"
+    bool stock;
+};
+
+// Stock object indices (Win32 GetStockObject codes). Our brush
+// indices 0..5 match Win32 exactly; pen indices start at 6 (we
+// use them as internal brush-table slots so the handle tag can
+// discriminate without extra plumbing).
 inline constexpr u32 kStockWhiteBrush = 0;
 inline constexpr u32 kStockLtGrayBrush = 1;
 inline constexpr u32 kStockGrayBrush = 2;
 inline constexpr u32 kStockDkGrayBrush = 3;
 inline constexpr u32 kStockBlackBrush = 4;
 inline constexpr u32 kStockNullBrush = 5;
+inline constexpr u32 kStockWhitePen = 6;
+inline constexpr u32 kStockBlackPen = 7;
+inline constexpr u32 kStockNullPen = 8;
 
 /// One-time registration of the pre-defined stock objects.
 /// Safe to call multiple times (idempotent).
@@ -109,11 +128,13 @@ u64 GdiHandleType(u64 h);
 MemDC* GdiLookupMemDC(u64 h);
 Bitmap* GdiLookupBitmap(u64 h);
 Brush* GdiLookupBrush(u64 h);
+Pen* GdiLookupPen(u64 h);
 
 // Operations (called from the syscall dispatchers).
 u64 GdiCreateCompatibleDC();
 u64 GdiCreateCompatibleBitmap(u32 width, u32 height);
 u64 GdiCreateSolidBrush(u32 rgb);
+u64 GdiCreatePen(u32 style, u32 width, u32 rgb);
 u64 GdiGetStockObject(u32 index);
 u64 GdiSelectObject(u64 hdc, u64 hobj); // returns previous selection (0 if none / unsupported)
 bool GdiDeleteDC(u64 hdc);
@@ -137,6 +158,37 @@ void GdiPaintTextOnBitmap(Bitmap* bmp, i32 x, i32 y, const char* text, u32 fg, u
 /// (allowing a clipped subrect of a larger source).
 void GdiBlitIntoBitmap(Bitmap* bmp, i32 dst_x, i32 dst_y, const u32* src, u32 src_w, u32 src_h, u32 src_pitch_px);
 
+/// Bresenham line from `(x0, y0)` to `(x1, y1)` inclusive, colour
+/// `rgb`. Surface-clipped. Width is a single pixel regardless of
+/// the caller's pen width (wide lines are a future slice).
+void GdiDrawLineOnBitmap(Bitmap* bmp, i32 x0, i32 y0, i32 x1, i32 y1, u32 rgb);
+
+// Per-window DC state. Window HDCs don't need a separate entry in
+// the handle registry because HDC == HWND (v0 design); instead, a
+// parallel table indexed by compositor window handle carries the
+// DC state so `SetTextColor(hwnd)` / `MoveToEx(hwnd, ...)` /
+// `SelectObject(hwnd, pen)` all take effect as they would in real
+// Windows. `kMaxWindows` slots matches the compositor's window
+// registry size.
+inline constexpr u32 kMaxWindowDcSlots = 16;
+
+struct WindowDcState
+{
+    bool init;
+    u32 text_color;
+    u32 bk_color;
+    u8 bk_mode;
+    u64 selected_pen;
+    i32 cur_x;
+    i32 cur_y;
+};
+
+/// Look up (and lazily initialise) the DC state for a compositor
+/// window handle. Returns nullptr for out-of-range handles. Lazy
+/// init fills Win32 defaults (text=black, bk=white, OPAQUE, no pen
+/// = BLACK_PEN, cur_pos=(0,0)).
+WindowDcState* GdiWindowDcState(u32 window_handle);
+
 // DC colour state (memDC only in v0; window-DC variants are no-op
 // pass-throughs that return the supplied value so
 // SetTextColor/GetTextColor round-trips don't break).
@@ -157,5 +209,8 @@ void DoGdiStretchBltDC(arch::TrapFrame* frame);
 void DoGdiSetTextColor(arch::TrapFrame* frame);
 void DoGdiSetBkColor(arch::TrapFrame* frame);
 void DoGdiSetBkMode(arch::TrapFrame* frame);
+void DoGdiCreatePen(arch::TrapFrame* frame);
+void DoGdiMoveToEx(arch::TrapFrame* frame);
+void DoGdiLineTo(arch::TrapFrame* frame);
 
 } // namespace duetos::subsystems::win32

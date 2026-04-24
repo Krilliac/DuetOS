@@ -67,6 +67,7 @@ void DoGdiEllipse(arch::TrapFrame* frame);
 void DoGdiSetPixel(arch::TrapFrame* frame);
 void DoGdiBitBlt(arch::TrapFrame* frame);
 void DoGdiFillRectUser(arch::TrapFrame* frame);
+void DoGdiDrawText(arch::TrapFrame* frame);
 void DoWinBeginPaint(arch::TrapFrame* frame);
 void DoWinEndPaint(arch::TrapFrame* frame);
 
