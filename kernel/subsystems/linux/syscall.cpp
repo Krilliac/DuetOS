@@ -1228,6 +1228,19 @@ i64 DoGettimeofday(u64 user_tv, u64 user_tz)
     return 0;
 }
 
+// Linux: sysinfo(info). Fills the kernel's current memory + uptime
+// + load info. v0 reports:
+//   * uptime: real seconds since boot (NowNs / 1e9).
+//   * loads:  zero (no load tracking yet).
+//   * totalram / freeram: derived from the physical frame
+//     allocator at 4 KiB granularity. mem_unit=4096 so callers
+//     reading `totalram * mem_unit` see real bytes.
+//   * sharedram / bufferram: zero (no page cache yet).
+//   * totalswap / freeswap / *high: zero (no swap, no high-mem
+//     split on x86_64).
+//   * procs: pulled from sched::AliveTaskCount() — best v0
+//     estimate of "running processes" since each Process has at
+//     least one task.
 i64 DoSysinfo(u64 user_info)
 {
     if (user_info == 0)
@@ -1248,10 +1261,24 @@ i64 DoSysinfo(u64 user_info)
         u64 freehigh;
         u32 mem_unit;
         u8 pad2[4];
-    } info = {};
+    } info;
     info.uptime = static_cast<i64>(NowNs() / 1'000'000'000ull);
+    info.loads[0] = 0;
+    info.loads[1] = 0;
+    info.loads[2] = 0;
+    info.totalram = mm::TotalFrames();
+    info.freeram = mm::FreeFramesCount();
+    info.sharedram = 0;
+    info.bufferram = 0;
+    info.totalswap = 0;
+    info.freeswap = 0;
+    info.totalhigh = 0;
+    info.freehigh = 0;
     info.procs = 1;
-    info.mem_unit = 1;
+    info.pad = 0;
+    info.mem_unit = 4096;
+    for (u64 i = 0; i < sizeof(info.pad2); ++i)
+        info.pad2[i] = 0;
     if (!mm::CopyToUser(reinterpret_cast<void*>(user_info), &info, sizeof(info)))
         return kEFAULT;
     return 0;
@@ -2534,21 +2561,28 @@ i64 DoLchown(u64 user_path, u64 uid, u64 gid)
 }
 
 // times(buf): fill struct tms with user/system/cuser/csys clock
-// counts. v0 has no per-process accounting, so the same monotonic
-// tick count goes in all four slots; the return value is the
-// canonical "ticks since boot" Linux defines.
+// counts in clock ticks (Linux: 100 Hz, 1 tick = 10 ms — matches
+// our scheduler tick exactly). Per-task accounting comes from
+// Process::ticks_used; cuser/cstime tracking would need a wait()
+// path we don't have, so they stay zero. The return value is the
+// canonical "ticks since boot" the kernel TimerTicks counter
+// reports.
 i64 DoTimes(u64 user_buf)
 {
     const u64 t = arch::TimerTicks();
     if (user_buf != 0)
     {
+        u64 utime = 0;
+        const core::Process* p = core::CurrentProcess();
+        if (p != nullptr)
+            utime = p->ticks_used;
         struct
         {
             u64 utime;
             u64 stime;
             u64 cutime;
             u64 cstime;
-        } tms = {t, t, 0, 0};
+        } tms = {utime, 0, 0, 0};
         if (!mm::CopyToUser(reinterpret_cast<void*>(user_buf), &tms, sizeof(tms)))
             return kEFAULT;
     }
@@ -3308,14 +3342,32 @@ i64 DoFaccessat2(i64 dirfd, u64 user_path, u64 mode, u64 flags)
 }
 
 // utimensat(dirfd, path, times, flags): set atime/mtime to
-// nanosecond-precision values. No time-tracking in v0 — 0.
+// nanosecond-precision values. No time-tracking in v0, but mirror
+// utime's path-validation flow so a typo'd path surfaces -ENOENT
+// and a bogus dirfd surfaces -EBADF.
 i64 DoUtimensat(i64 dirfd, u64 user_path, u64 user_times, u64 flags)
 {
     if (dirfd != kAtFdCwd && user_path != 0)
         return kEBADF;
-    (void)user_path;
     (void)user_times;
     (void)flags;
+    if (user_path != 0)
+    {
+        // path-relative form: validate the target exists when it
+        // looks like a FAT32 path. NUL path means "use the dirfd
+        // directly" — accept since we already validated the fd.
+        char kbuf[64];
+        const char* leaf = nullptr;
+        if (!CopyAndStripFatPath(user_path, kbuf, leaf))
+            return kEFAULT;
+        const auto* v = fs::fat32::Fat32Volume(0);
+        if (v != nullptr)
+        {
+            fs::fat32::DirEntry probe;
+            if (!fs::fat32::Fat32LookupPath(v, leaf, &probe))
+                return kENOENT;
+        }
+    }
     return 0;
 }
 
