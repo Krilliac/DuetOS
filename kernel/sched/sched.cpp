@@ -864,6 +864,14 @@ void SchedExit()
 {
     arch::Cli();
     Task* self = Current();
+    // SchedExit must fire exactly once per task. A second call would
+    // double-decrement g_tasks_live, double-push onto the zombie list
+    // (corrupting the intrusive `next` link), and re-arm the reaper
+    // on an already-reaped slot. The public contract is [[noreturn]]
+    // so this should be structurally unreachable; the assert catches
+    // any future path that forgets (e.g., a syscall handler that
+    // calls SchedExit and then falls through).
+    KASSERT(self->state != TaskState::Dead, "sched", "SchedExit called twice on same task");
     self->state = TaskState::Dead;
     ++g_tasks_exited;
     --g_tasks_live;
@@ -1540,6 +1548,12 @@ void WaitQueueBlock(WaitQueue* wq)
     {
         sync::SpinLockGuard guard(g_sched_lock);
         Task* t = Current();
+        // The currently-executing task is necessarily Running. A
+        // caller that reached this path with state already flipped
+        // to Blocked / Sleeping / Dead would be re-enqueued on this
+        // wait queue while still on another list (runqueue, sleep
+        // queue, or zombies), corrupting whichever list holds it.
+        KASSERT(t->state == TaskState::Running, "sched", "WaitQueueBlock on non-Running task");
         t->state = TaskState::Blocked;
         t->next = nullptr;
         t->waiting_on = wq;
@@ -1577,6 +1591,12 @@ bool WaitQueueBlockTimeout(WaitQueue* wq, u64 ticks)
     {
         sync::SpinLockGuard guard(g_sched_lock);
         Task* t = Current();
+        // Same invariant as WaitQueueBlock: the caller is the
+        // currently-executing task, so state must be Running. A
+        // non-Running task would get enqueued here while still on
+        // its home list (runqueue, sleep queue, or zombies) and
+        // corrupt whichever holds it.
+        KASSERT(t->state == TaskState::Running, "sched", "WaitQueueBlockTimeout on non-Running task");
         t->state = TaskState::Blocked;
         t->next = nullptr;
         t->wake_tick = g_tick_now + ticks;

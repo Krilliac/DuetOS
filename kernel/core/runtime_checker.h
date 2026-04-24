@@ -157,6 +157,29 @@ enum class HealthIssue : u32
     // means the shim doesn't survive to the next boot.
     BootSectorModified,
 
+    // A single non-idle task consumed >90% of the scan interval's
+    // scheduler ticks. Catches kernel-thread busy loops and any
+    // user task whose tick budget is large enough to evade the
+    // per-task kill path. Logs the offending id + name so the
+    // operator can correlate against ps output.
+    TaskRunawayCpu,
+
+    // A Machine Check Architecture bank reported a hardware error
+    // event (IA32_MCi_STATUS.VAL set). Correctable ECC, uncorrected
+    // cache line, memory controller timeout — every one of these
+    // lives in MCi_STATUS and never raises #MC on its own. The
+    // checker surfaces them, logs the error code + addr, then
+    // clears the bank so the next scan sees only new events.
+    McaBankFault,
+
+    // An IRQ vector has fired at a rate far above the per-scan
+    // threshold for any known legitimate source (timer = 100/s,
+    // keyboard/mouse intermittent, NIC RX typically <1000/s).
+    // Surfaces runaway handlers, chattering devices, or
+    // misconfigured edge/level trigger — all of which burn CPU
+    // silently until something catches them.
+    IrqStorm,
+
     // Count sentinel
     Count,
 };

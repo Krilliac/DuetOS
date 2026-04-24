@@ -115,6 +115,11 @@ void DoThreadCreate(arch::TrapFrame* frame)
     // would catch any truly wild value on the first #PF).
     if (start_va == 0 || (start_va & (1ULL << 63)) != 0)
     {
+        SerialWrite("[thread] create FAIL invalid rip pid=");
+        SerialWriteHex(proc->pid);
+        SerialWrite(" rip=");
+        SerialWriteHex(start_va);
+        SerialWrite("\n");
         frame->rax = static_cast<u64>(-1);
         return;
     }
@@ -141,6 +146,14 @@ void DoThreadCreate(arch::TrapFrame* frame)
     // Carve a fresh stack range off the process's thread-stack
     // cursor. N pages, writable + NX + user. Stack grows down,
     // so rsp starts at (base + N*4096 - 8).
+    //
+    // On partial-OOM we bump the cursor by the FULL requested range
+    // even though only `p` pages made it in — same pattern as
+    // vmap_syscall's partial-OOM path. Without this the next
+    // DoThreadCreate would try to re-map the successfully-allocated
+    // pages' VAs and AddressSpaceMapUserPage would panic on
+    // "virt already mapped". Leak is bounded; frames get reclaimed
+    // when the process dies (AS destructor walks regions).
     const u64 stack_base_va = proc->thread_stack_cursor;
     const u64 stack_pages = Process::kV0ThreadStackPages;
     mm::PhysAddr top_frame_phys = mm::kNullFrame;
@@ -149,9 +162,14 @@ void DoThreadCreate(arch::TrapFrame* frame)
         const mm::PhysAddr frame_phys = mm::AllocateFrame();
         if (frame_phys == mm::kNullFrame)
         {
-            SerialWrite("[thread] create FAIL stack frame alloc idx=");
+            SerialWrite("[thread] create FAIL stack frame alloc pid=");
+            SerialWriteHex(proc->pid);
+            SerialWrite(" idx=");
             SerialWriteHex(p);
+            SerialWrite("/");
+            SerialWriteHex(stack_pages);
             SerialWrite("\n");
+            proc->thread_stack_cursor += stack_pages * mm::kPageSize;
             frame->rax = static_cast<u64>(-1);
             return;
         }

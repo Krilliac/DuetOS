@@ -88,6 +88,11 @@ void DoMutexWait(arch::TrapFrame* frame)
     if (handle < core::Process::kWin32MutexBase ||
         handle >= core::Process::kWin32MutexBase + core::Process::kWin32MutexCap)
     {
+        arch::SerialWrite("[sys] mutex_wait bad_handle pid=");
+        arch::SerialWriteHex(proc->pid);
+        arch::SerialWrite(" handle=");
+        arch::SerialWriteHex(handle);
+        arch::SerialWrite("\n");
         frame->rax = static_cast<u64>(-1);
         return;
     }
@@ -95,6 +100,11 @@ void DoMutexWait(arch::TrapFrame* frame)
     core::Process::Win32MutexHandle& m = proc->win32_mutexes[slot];
     if (!m.in_use)
     {
+        arch::SerialWrite("[sys] mutex_wait closed_handle pid=");
+        arch::SerialWriteHex(proc->pid);
+        arch::SerialWrite(" handle=");
+        arch::SerialWriteHex(handle);
+        arch::SerialWrite("\n");
         frame->rax = static_cast<u64>(-1);
         return;
     }
@@ -141,6 +151,11 @@ void DoMutexRelease(arch::TrapFrame* frame)
     if (handle < core::Process::kWin32MutexBase ||
         handle >= core::Process::kWin32MutexBase + core::Process::kWin32MutexCap)
     {
+        arch::SerialWrite("[sys] mutex_release bad_handle pid=");
+        arch::SerialWriteHex(proc->pid);
+        arch::SerialWrite(" handle=");
+        arch::SerialWriteHex(handle);
+        arch::SerialWrite("\n");
         frame->rax = static_cast<u64>(-1);
         return;
     }
@@ -148,9 +163,18 @@ void DoMutexRelease(arch::TrapFrame* frame)
     core::Process::Win32MutexHandle& m = proc->win32_mutexes[slot];
     sched::Task* me = sched::CurrentTask();
     arch::Cli();
-    if (!m.in_use || m.owner != me)
+    const bool was_in_use = m.in_use;
+    const bool owns = (m.owner == me);
+    if (!was_in_use || !owns)
     {
         arch::Sti();
+        arch::SerialWrite("[sys] mutex_release ");
+        arch::SerialWrite(!was_in_use ? "closed_handle" : "not_owner");
+        arch::SerialWrite(" pid=");
+        arch::SerialWriteHex(proc->pid);
+        arch::SerialWrite(" handle=");
+        arch::SerialWriteHex(handle);
+        arch::SerialWrite("\n");
         frame->rax = static_cast<u64>(-1);
         return;
     }

@@ -93,6 +93,15 @@ inline constexpr u64 kProcEnvEnvBlockWOff = 0x400;
 // `mov rax, [kProcEnvVa + kProcEnvModuleBaseOff]` read.
 inline constexpr u64 kProcEnvModuleBaseOff = 0x500;
 
+// Unhandled-exception-filter pointer. Per-process top-level
+// filter set by SetUnhandledExceptionFilter and invoked (via
+// tail-call) by UnhandledExceptionFilter. Stored as a u64 so
+// atomic xchg against the slot is a single aligned memory
+// operand. Starts zero (no filter) — the UnhandledExceptionFilter
+// stub then returns EXCEPTION_EXECUTE_HANDLER (1) as Windows's
+// documented default.
+inline constexpr u64 kProcEnvUnhandledFilterOff = 0x600;
+
 /*
  * Data-import catch-all landing pad.
  *

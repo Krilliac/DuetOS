@@ -75,6 +75,7 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     arch/x86_64/idt.cpp
     arch/x86_64/ioapic.cpp
     arch/x86_64/lapic.cpp
+    arch/x86_64/nmi_watchdog.cpp
     arch/x86_64/pic.cpp
     arch/x86_64/retpoline_thunks.S
     arch/x86_64/rtc.cpp

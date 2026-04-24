@@ -105,6 +105,15 @@ void DoFileRead(arch::TrapFrame* frame)
         // refund is impossible without a backing-specific seek.
         // Surface the user-copy failure as -1 so the caller
         // doesn't think it received zeros.
+        arch::SerialWrite("[sys] file_read CopyToUser FAIL pid=");
+        arch::SerialWriteHex(proc->pid);
+        arch::SerialWrite(" handle=");
+        arch::SerialWriteHex(handle);
+        arch::SerialWrite(" dst=");
+        arch::SerialWriteHex(frame->rsi);
+        arch::SerialWrite(" got=");
+        arch::SerialWriteHex(got);
+        arch::SerialWrite("\n");
         frame->rax = static_cast<u64>(-1);
         return;
     }

@@ -144,6 +144,66 @@ constexpr u64 kIrqNestingCeiling = 32;
 // flagging "no context switches" as a real finding.
 constexpr u64 kContextSwitchGraceTicks = 50; // 0.5 s @ 100 Hz
 
+// Runaway-task threshold. If the top CPU consumer (non-idle)
+// ate > 90% of the scheduler ticks that elapsed between two
+// consecutive scans, it's either hot-path kernel work or a
+// busy-loop. Log either way — 90% sustained is unusual enough
+// to deserve a line in the boot log.
+constexpr u64 kRunawayCpuPct = 90;
+
+// IRQ-storm ceiling. Above this many handler invocations on a
+// single vector within one scan interval, the detector raises
+// an alarm. The ceiling is generous (~25 × timer rate) so the
+// 100 Hz scheduler tick itself doesn't trip it even on long
+// scan intervals; a runaway edge-triggered line will fire
+// thousands per interrupt.
+constexpr u64 kIrqStormPerScanCeiling = 25000;
+
+// --- Hung-task / runaway-CPU state. ---------------------------
+// Track the single top CPU consumer across scans. One slot is
+// enough: the detector only flags cases where ONE task dominates
+// two consecutive scans; a multi-task steady state won't trip it.
+struct RunawayState
+{
+    bool populated;
+    u64 id;
+    u64 prev_ticks_run;
+};
+constinit RunawayState g_prev_top = {};
+// Timer tick at previous scan — feeds both the runaway check
+// and the IRQ-storm scan-interval normaliser.
+constinit u64 g_prev_scan_timer_ticks = 0;
+constinit bool g_prev_scan_timer_valid = false;
+
+// --- IRQ-storm state. -----------------------------------------
+// Previous-scan snapshot of each vector's handler-invocation
+// count. The delta across two scans is the per-scan IRQ rate;
+// exceeding kIrqStormPerScanCeiling on any vector logs + reports.
+constinit u64 g_prev_irq_counts[256] = {};
+constinit bool g_prev_irq_counts_valid = false;
+
+// --- MCA bank state. ------------------------------------------
+// Populated by RuntimeCheckerInit based on CPUID.1.EDX[14] (MCA)
+// and IA32_MCG_CAP[7:0]. Zero means "no MCA support detected" and
+// the scan is skipped entirely.
+constinit u32 g_mca_bank_count = 0;
+constexpr u32 kMsrIa32McgCap = 0x179;
+// MCi_STATUS lives at 0x401 + 4*i; clearing it means writing 0.
+// MCi_ADDR is at 0x402 + 4*i and is only valid when STATUS.ADDRV
+// (bit 58) is set.
+constexpr u32 kMsrMcBaseStatus(u32 i)
+{
+    return 0x401 + 4 * i;
+}
+constexpr u32 kMsrMcBaseAddr(u32 i)
+{
+    return 0x402 + 4 * i;
+}
+constexpr u64 kMcStatusVal = 1ULL << 63;   // record valid
+constexpr u64 kMcStatusUc = 1ULL << 61;    // uncorrected
+constexpr u64 kMcStatusEn = 1ULL << 60;    // enabled for #MC
+constexpr u64 kMcStatusAddrv = 1ULL << 58; // MCi_ADDR valid
+
 u64 ReadCr0()
 {
     u64 v;
@@ -821,6 +881,184 @@ bool CheckTaskStacks()
     return ok;
 }
 
+// ------------------------------------------------------------------
+// Hung-task / runaway-CPU detector.
+// ------------------------------------------------------------------
+//
+// A non-idle task that consumes >kRunawayCpuPct of the scheduler
+// ticks between two consecutive scans is almost certainly either:
+//   1) Doing hot-path kernel work (acceptable — log once).
+//   2) A kernel-thread busy-loop (bug).
+//   3) A user task whose tick budget is large enough to evade
+//      the per-task kill path (also a bug).
+//
+// We identify the top CPU consumer per scan via SchedEnumerate
+// and compare against the previous scan's snapshot. Only one
+// slot is tracked because the detector flags cases of sustained
+// single-task dominance across two consecutive scans; a multi-
+// task CPU-bound steady state won't trip it.
+struct RunawayScanCookie
+{
+    u64 id;
+    u64 ticks_run;
+    const char* name;
+};
+
+void RunawayScanCb(const sched::SchedTaskInfo& info, void* cookie)
+{
+    auto* top = static_cast<RunawayScanCookie*>(cookie);
+    // Skip idle tasks — they're SUPPOSED to accumulate ticks
+    // whenever nothing else is Ready.
+    if (info.priority == u8(sched::TaskPriority::Idle))
+        return;
+    if (info.ticks_run > top->ticks_run)
+    {
+        top->id = info.id;
+        top->ticks_run = info.ticks_run;
+        top->name = info.name;
+    }
+}
+
+bool CheckRunawayTask()
+{
+    RunawayScanCookie top = {};
+    sched::SchedEnumerate(RunawayScanCb, &top);
+    if (top.name == nullptr)
+        return true; // no non-idle tasks yet (pre-user boot)
+
+    const u64 now_timer = arch::TimerTicks();
+    if (g_prev_top.populated && g_prev_top.id == top.id && g_prev_scan_timer_valid)
+    {
+        const u64 task_delta = top.ticks_run - g_prev_top.prev_ticks_run;
+        const u64 scan_delta = now_timer - g_prev_scan_timer_ticks;
+        if (scan_delta > 0 && (task_delta * 100) / scan_delta >= kRunawayCpuPct)
+        {
+            arch::SerialWrite("[health] runaway-cpu id=");
+            arch::SerialWriteHex(top.id);
+            arch::SerialWrite(" name=\"");
+            arch::SerialWrite(top.name);
+            arch::SerialWrite("\" ticks=");
+            arch::SerialWriteHex(task_delta);
+            arch::SerialWrite("/");
+            arch::SerialWriteHex(scan_delta);
+            arch::SerialWrite("\n");
+            Report(HealthIssue::TaskRunawayCpu);
+            // Keep tracking the same slot — we want the NEXT
+            // scan to re-evaluate with a fresh baseline.
+            g_prev_top.prev_ticks_run = top.ticks_run;
+            g_prev_scan_timer_ticks = now_timer;
+            return false;
+        }
+    }
+    g_prev_top.populated = true;
+    g_prev_top.id = top.id;
+    g_prev_top.prev_ticks_run = top.ticks_run;
+    g_prev_scan_timer_ticks = now_timer;
+    g_prev_scan_timer_valid = true;
+    return true;
+}
+
+// ------------------------------------------------------------------
+// IRQ-storm detector.
+// ------------------------------------------------------------------
+//
+// Per-vector cumulative counters live in traps.cpp and get
+// incremented on every IRQ dispatch. We snapshot them each scan
+// and raise the alarm if any vector's delta exceeds the ceiling.
+// The ceiling is generous enough that a normal 100 Hz scheduler
+// tick over a many-second scan interval stays well below it;
+// anything over kIrqStormPerScanCeiling is real chatter.
+bool CheckIrqStorm()
+{
+    // Snapshot then compare. First scan just populates the
+    // baseline and emits no findings.
+    u64 now_counts[256];
+    for (u32 v = 0; v < 256; ++v)
+        now_counts[v] = arch::IrqCountForVector(static_cast<u8>(v));
+
+    if (!g_prev_irq_counts_valid)
+    {
+        for (u32 v = 0; v < 256; ++v)
+            g_prev_irq_counts[v] = now_counts[v];
+        g_prev_irq_counts_valid = true;
+        return true;
+    }
+
+    bool any = false;
+    for (u32 v = 0; v < 256; ++v)
+    {
+        const u64 delta = now_counts[v] - g_prev_irq_counts[v];
+        g_prev_irq_counts[v] = now_counts[v];
+        if (delta > kIrqStormPerScanCeiling)
+        {
+            arch::SerialWrite("[health] irq-storm vector=");
+            arch::SerialWriteHex(u64(v));
+            arch::SerialWrite(" rate=");
+            arch::SerialWriteHex(delta);
+            arch::SerialWrite("/scan\n");
+            Report(HealthIssue::IrqStorm);
+            any = true;
+        }
+    }
+    return !any;
+}
+
+// ------------------------------------------------------------------
+// Machine Check Architecture bank scan.
+// ------------------------------------------------------------------
+//
+// The CPU records correctable and uncorrectable hardware errors
+// into per-bank MSRs. A full #MC only fires when the error is
+// BOTH uncorrectable AND enabled for exception; corrected events
+// accumulate silently in MCi_STATUS with VAL set. We walk every
+// bank each scan, log any VAL-set entry with its error code +
+// optional address, then clear the bank so the next scan sees
+// only new events.
+bool CheckMcaBanks()
+{
+    if (g_mca_bank_count == 0)
+        return true;
+
+    bool any = false;
+    for (u32 i = 0; i < g_mca_bank_count; ++i)
+    {
+        const u32 status_msr = kMsrMcBaseStatus(i);
+        const u64 status = ReadMsr(status_msr);
+        if ((status & kMcStatusVal) == 0)
+            continue;
+
+        arch::SerialWrite("[health] mca-bank ");
+        arch::SerialWriteHex(u64(i));
+        arch::SerialWrite(" status=");
+        arch::SerialWriteHex(status);
+        if ((status & kMcStatusUc) != 0)
+            arch::SerialWrite(" UC");
+        if ((status & kMcStatusEn) != 0)
+            arch::SerialWrite(" EN");
+        if ((status & kMcStatusAddrv) != 0)
+        {
+            const u64 addr = ReadMsr(kMsrMcBaseAddr(i));
+            arch::SerialWrite(" addr=");
+            arch::SerialWriteHex(addr);
+        }
+        arch::SerialWrite("\n");
+
+        // Clear the bank so the next scan sees only NEW events.
+        // Per SDM, writing 0 to MCi_STATUS clears VAL + the
+        // associated record; other-bank-0 status on some CPUs
+        // uses a different clearing contract (MCG_STATUS), but
+        // we only touch banks 1..N-1 where the generic rule
+        // applies. Bank 0 is excluded on Intel CPUs to avoid
+        // tripping the shared MCG_STATUS interlock.
+        if (i != 0)
+            WriteMsr(status_msr, 0);
+
+        Report(HealthIssue::McaBankFault);
+        any = true;
+    }
+    return !any;
+}
+
 } // namespace
 
 HealthResponse ResponseFor(HealthIssue issue)
@@ -945,6 +1183,12 @@ const char* HealthIssueName(HealthIssue i)
         return "IA32_FEATURE_CONTROL lock bit cleared since baseline (VMX-based attack setup)";
     case HealthIssue::BootSectorModified:
         return "MBR or GPT header modified since baseline (bootkit / disk-persistence malware)";
+    case HealthIssue::TaskRunawayCpu:
+        return "task consumed >90% of scan interval (kernel busy-loop or escaped tick budget)";
+    case HealthIssue::McaBankFault:
+        return "Machine Check bank reported a hardware error (IA32_MCi_STATUS.VAL set)";
+    case HealthIssue::IrqStorm:
+        return "IRQ vector firing above rate ceiling (chattering line or runaway handler)";
     default:
         return "(unnamed issue)";
     }
@@ -975,6 +1219,22 @@ void RuntimeCheckerInit()
     {
         g_baseline_feature_control = ReadMsr(kMsrIa32FeatureControl);
         g_baseline_feature_control_valid = true;
+    }
+
+    // Machine Check Architecture (MCA) support detection.
+    // CPUID.1:EDX[14] = MCA (architectural MCA), [7] = MCE (legacy).
+    // Both present is the modern norm; we only use MCA (bank
+    // registers). IA32_MCG_CAP[7:0] is the bank count. Clamp to
+    // a sane ceiling so a corrupted MCG_CAP can't trick us into
+    // walking into nonsense MSRs.
+    constexpr u32 kMcaCpuidBit = 1u << 14;
+    constexpr u32 kMceCpuidBit = 1u << 7;
+    constexpr u32 kMcaBankCeiling = 32;
+    if ((edx & kMcaCpuidBit) != 0 && (edx & kMceCpuidBit) != 0)
+    {
+        const u64 mcg_cap = ReadMsr(kMsrIa32McgCap);
+        const u32 banks = u32(mcg_cap & 0xFF);
+        g_mca_bank_count = (banks > kMcaBankCeiling) ? kMcaBankCeiling : banks;
     }
 
     // Capture golden byte-level snapshots of IDT + GDT so the
@@ -1012,6 +1272,8 @@ void RuntimeCheckerInit()
     arch::SerialWriteHex(g_baseline_star);
     arch::SerialWrite(" sysenter_eip=");
     arch::SerialWriteHex(g_baseline_sysenter_eip);
+    arch::SerialWrite("\n[health] mca_banks=");
+    arch::SerialWriteHex(u64(g_mca_bank_count));
     arch::SerialWrite("\n");
 }
 
@@ -1035,6 +1297,9 @@ u64 RuntimeCheckerScan()
     (void)CheckTaskStacks();
     (void)CheckIrqNesting();
     (void)CheckMonotonicCounters();
+    (void)CheckRunawayTask();
+    (void)CheckIrqStorm();
+    (void)CheckMcaBanks();
     if (g_report.baseline_captured != 0)
     {
         (void)CheckSyscallMsrs();

@@ -963,26 +963,20 @@ void SyscallDispatch(arch::TrapFrame* frame)
                 // Auto-reset events we're waking on: clear the
                 // signal. For wait-any, only the winning handle;
                 // for wait-all, every auto-reset event in the set.
+                // Manual-reset events stay signaled (Win32 contract).
                 if (proc != nullptr)
                 {
                     for (u64 i = 0; i < count; ++i)
                     {
                         const u64 h = handles[i];
-                        if (h >= Process::kWin32EventBase && h < Process::kWin32EventBase + Process::kWin32EventCap)
-                        {
-                            const u64 slot = h - Process::kWin32EventBase;
-                            auto& ev = proc->win32_events[slot];
-                            if (!ev.in_use || !ev.manual_reset)
-                                continue;
-                            // Manual-reset: leave signaled. Skip.
-                        }
-                        if (h >= Process::kWin32EventBase && h < Process::kWin32EventBase + Process::kWin32EventCap)
-                        {
-                            const u64 slot = h - Process::kWin32EventBase;
-                            auto& ev = proc->win32_events[slot];
-                            if (!ev.manual_reset && ev.signaled && (wait_all != 0 || i == first_signaled))
-                                ev.signaled = false;
-                        }
+                        if (h < Process::kWin32EventBase || h >= Process::kWin32EventBase + Process::kWin32EventCap)
+                            continue;
+                        const u64 slot = h - Process::kWin32EventBase;
+                        auto& ev = proc->win32_events[slot];
+                        if (!ev.in_use || ev.manual_reset || !ev.signaled)
+                            continue;
+                        if (wait_all != 0 || i == first_signaled)
+                            ev.signaled = false;
                     }
                 }
                 frame->rax = (wait_all != 0) ? 0 : first_signaled; // WAIT_OBJECT_0 + i

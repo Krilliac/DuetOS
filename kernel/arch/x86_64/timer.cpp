@@ -2,6 +2,7 @@
 
 #include "cpu.h"
 #include "lapic.h"
+#include "nmi_watchdog.h"
 #include "serial.h"
 #include "traps.h"
 
@@ -53,6 +54,12 @@ constinit u64 g_lapic_ticks_per_period = 0;
 void TimerHandler()
 {
     ++g_ticks;
+    // Pet the NMI watchdog. If this handler ever stops firing,
+    // the watchdog's PMU overflow will catch it via NMI even
+    // while IF is cleared. Cheap (single store) so it stays in
+    // the hot path unconditionally — the watchdog disables
+    // itself internally when the PMU is unavailable.
+    NmiWatchdogPet();
     sched::OnTimerTick(g_ticks);
 
     // Liveness heartbeat at 1 Hz. Debug-level so a release preset's

@@ -2,6 +2,7 @@
 
 #include "cpu.h"
 #include "lapic.h"
+#include "nmi_watchdog.h"
 #include "serial.h"
 
 #include "../../core/fault_domain.h"
@@ -49,6 +50,101 @@ constexpr customos::u8* g_copy_user_fault_fixup = ::__copy_user_fault_fixup;
 // registered" — the dispatcher logs and EOIs but takes no other
 // action.
 constinit IrqHandler g_irq_handlers[256] = {};
+
+// Per-vector cumulative handler-invocation count. Read by the
+// runtime checker's IRQ-storm detector via IrqCountForVector.
+// Written only from the IRQ dispatch path on the CPU serving the
+// interrupt — interrupts are masked during handler dispatch so
+// no intra-vector race is possible; cross-vector increments
+// through this table are independent slots.
+constinit u64 g_irq_counts[256] = {};
+
+// Global fault counters by category. Bumped on every CPU
+// exception dump (user-mode task-kill or kernel panic). Read
+// only by diagnostic paths (shell health command / log prints);
+// no hot-path dependency on these.
+constinit u64 g_fault_access_violation = 0; // non-present #PF
+constinit u64 g_fault_nx_violation = 0;     // present + instr fetch
+constinit u64 g_fault_write_to_ro = 0;      // present + write
+constinit u64 g_fault_stack_overflow = 0;   // #PF cr2 near rsp
+constinit u64 g_fault_reserved_bit = 0;     // page-table poison
+constinit u64 g_fault_gp = 0;               // #GP
+constinit u64 g_fault_ud = 0;               // #UD
+
+// Classify a page fault into a short mnemonic the dump header
+// can show prominently. `err` is the hardware-pushed error code
+// (Intel SDM Vol 3 Table 4-15); `cr2` is the faulting VA;
+// `rsp` is the current stack pointer (used for the stack-
+// overflow heuristic). Result is a static string literal —
+// the caller does not free.
+const char* ClassifyPageFault(u64 err, u64 cr2, u64 rsp, bool from_user)
+{
+    const bool present = (err & 0x01) != 0;
+    const bool write = (err & 0x02) != 0;
+    const bool rsvd = (err & 0x08) != 0;
+    const bool instr = (err & 0x10) != 0;
+
+    if (rsvd)
+    {
+        ++g_fault_reserved_bit;
+        return "PT_RESERVED_BIT_SET";
+    }
+
+    // Stack-overflow heuristic. A push (or a call) that steps
+    // past the stack's low edge will #PF with cr2 = rsp - k for
+    // small k. The window is wide enough to catch single-frame
+    // spills (up to ~one page below rsp) without aliasing random
+    // dereferences.
+    if (!present && cr2 < rsp && (rsp - cr2) < 0x2000)
+    {
+        ++g_fault_stack_overflow;
+        return from_user ? "STACK_OVERFLOW_USER" : "STACK_OVERFLOW_KERNEL";
+    }
+
+    if (!present)
+    {
+        ++g_fault_access_violation;
+        if (instr)
+            return "ACCESS_VIOLATION_EXECUTE";
+        if (write)
+            return "ACCESS_VIOLATION_WRITE";
+        return "ACCESS_VIOLATION_READ";
+    }
+
+    // Present but faulted — protection violation on the PTE.
+    if (instr)
+    {
+        ++g_fault_nx_violation;
+        return "NX_VIOLATION";
+    }
+    if (write)
+    {
+        ++g_fault_write_to_ro;
+        return "WRITE_TO_RO_PAGE";
+    }
+    return "PROTECTION_FAULT";
+}
+
+// Emit the raw #PF error-code bits as a human-readable flag
+// list. Follows the SDM layout: P (bit 0), W/R (1), U/S (2),
+// RSVD (3), I/D (4), PK (5), SS (6). Newer bits (e.g. SGX bit
+// 15) are noted generically.
+void DumpPageFaultFlags(u64 err)
+{
+    SerialWrite("[");
+    SerialWrite((err & 0x01) ? "present" : "notpresent");
+    SerialWrite((err & 0x02) ? "|write" : "|read");
+    SerialWrite((err & 0x04) ? "|user" : "|kernel");
+    if (err & 0x08)
+        SerialWrite("|rsvd");
+    if (err & 0x10)
+        SerialWrite("|instr");
+    if (err & 0x20)
+        SerialWrite("|pkey");
+    if (err & 0x40)
+        SerialWrite("|ss");
+    SerialWrite("]");
+}
 
 constexpr u8 kIrqVectorBase = 32;
 constexpr u8 kMsixVectorBase = 48;
@@ -203,6 +299,7 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     if (IsDispatchedVector(frame->vector))
     {
         const u8 v = static_cast<u8>(frame->vector);
+        ++g_irq_counts[v];
         const IrqHandler h = g_irq_handlers[v];
         if (h != nullptr)
         {
@@ -271,16 +368,21 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         return;
     }
 
-    // Vector 2 (NMI) is used for cross-CPU panic halt (see
-    // arch::PanicBroadcastNmi). The panicking CPU is about to write
-    // the crash dump to serial; every other CPU that receives the
-    // broadcast NMI comes through here and must halt quietly so it
-    // doesn't fight for the serial line. If NMI ever grows a real
-    // consumer (chipset error, power button, watchdog), route it
-    // before this early-halt — today the default posture is "NMI
-    // means stop and stay stopped."
+    // Vector 2 (NMI). Two legitimate sources feed this entry:
+    //   * The NMI watchdog — PMU counter overflow via LVT Perf.
+    //     Consumed by NmiWatchdogHandleNmi; if the pet counter
+    //     has advanced, the handler re-arms and returns so we
+    //     iretq back to the interrupted code.
+    //   * Cross-CPU panic broadcast (see PanicBroadcastNmi).
+    //     Peers arrive here and must halt quietly so they don't
+    //     fight the panicking CPU for the serial line.
+    // Any non-watchdog NMI (external NMI pin, firmware-injected
+    // chipset error, etc.) also falls through to the halt path —
+    // conservative default: if we don't know why NMI fired, stop.
     if (frame->vector == 2)
     {
+        if (NmiWatchdogHandleNmi())
+            return;
         for (;;)
         {
             asm volatile("cli; hlt");
@@ -422,6 +524,29 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         SerialWrite("\n[task-kill] ring-3 task took ");
         SerialWrite(vec_name);
         SerialWrite(" — terminating\n");
+        // Category / reason label — BSOD-style one-liner that
+        // tells the operator what shape the fault has before
+        // they read hex values. Only meaningful for #PF / #GP /
+        // #UD; other vectors skip the label.
+        if (frame->vector == 14)
+        {
+            const u64 cr2 = ReadCr2();
+            SerialWrite("  reason : ");
+            SerialWrite(ClassifyPageFault(frame->error_code, cr2, frame->rsp, /*from_user=*/true));
+            SerialWrite(" ");
+            DumpPageFaultFlags(frame->error_code);
+            SerialWrite("\n");
+        }
+        else if (frame->vector == 13)
+        {
+            ++g_fault_gp;
+            SerialWrite("  reason : PROTECTION_FAULT_USER\n");
+        }
+        else if (frame->vector == 6)
+        {
+            ++g_fault_ud;
+            SerialWrite("  reason : INVALID_OPCODE\n");
+        }
         SerialWrite("  pid  : ");
         SerialWriteHex(customos::sched::CurrentTaskId());
         SerialWrite("\n  rip  : ");
@@ -466,6 +591,11 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     // enough by name that they don't need a dedicated probe.
     if (frame->vector == 14)
         KBP_PROBE_V(::customos::debug::ProbeId::kKernelPageFault, frame->rip);
+    // Quiet the NMI watchdog before the dump. DumpDiagnostics +
+    // symbol resolution + serial I/O can easily exceed one
+    // watchdog interval; a PMI overflow during the dump would
+    // re-enter the trap dispatcher and scramble the output.
+    NmiWatchdogDisable();
     SerialWrite("\n** CPU EXCEPTION **\n");
 
     // Bracket the record so host-side tooling can extract a .dump file
@@ -490,6 +620,24 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     {
         cr2 = ReadCr2();
         WriteLabelled("cr2       ", cr2);
+        // BSOD-style reason line. Classifies the fault into an
+        // ACCESS_VIOLATION_* / NX_VIOLATION / STACK_OVERFLOW_*
+        // category and breaks the raw err bits into flags.
+        SerialWrite("  reason    : ");
+        SerialWrite(ClassifyPageFault(frame->error_code, cr2, frame->rsp, /*from_user=*/false));
+        SerialWrite(" ");
+        DumpPageFaultFlags(frame->error_code);
+        SerialWrite("\n");
+    }
+    else if (frame->vector == 13)
+    {
+        ++g_fault_gp;
+        SerialWrite("  reason    : PROTECTION_FAULT_KERNEL\n");
+    }
+    else if (frame->vector == 6)
+    {
+        ++g_fault_ud;
+        SerialWrite("  reason    : INVALID_OPCODE\n");
     }
 
     SerialWrite("  --\n");
@@ -548,6 +696,24 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     core::EndCrashDump();
     SerialWrite("[panic] Halting CPU.\n");
     Halt();
+}
+
+u64 IrqCountForVector(u8 v)
+{
+    return g_irq_counts[v];
+}
+
+FaultCounts FaultCountsSnapshot()
+{
+    FaultCounts s;
+    s.access_violation = g_fault_access_violation;
+    s.nx_violation = g_fault_nx_violation;
+    s.write_to_ro = g_fault_write_to_ro;
+    s.stack_overflow = g_fault_stack_overflow;
+    s.reserved_bit = g_fault_reserved_bit;
+    s.gp = g_fault_gp;
+    s.ud = g_fault_ud;
+    return s;
 }
 
 void IrqInstall(u8 vector, IrqHandler handler)
