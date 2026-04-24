@@ -392,4 +392,25 @@ u64 ProcessResolveDllExport(const Process* proc, const char* dll_name, const cha
     return 0;
 }
 
+u64 ProcessResolveDllExportByBase(const Process* proc, u64 base_va, const char* func_name)
+{
+    if (proc == nullptr || func_name == nullptr)
+        return 0;
+    for (u64 i = 0; i < proc->dll_image_count; ++i)
+    {
+        const DllImage& img = proc->dll_images[i];
+        if (!img.has_exports)
+            continue;
+        if (base_va != 0 && img.base_va != base_va)
+            continue;
+        PeExport e{};
+        if (!PeExportLookupName(img.exports, func_name, e))
+            continue;
+        if (e.is_forwarder)
+            return 0;
+        return img.base_va + static_cast<u64>(e.rva);
+    }
+    return 0;
+}
+
 } // namespace customos::core

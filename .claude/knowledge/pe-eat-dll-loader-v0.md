@@ -1,6 +1,6 @@
 # PE EAT parser + DLL loader — stage 2 kickoff
 
-**Type:** Observation · **Status:** Active (stage-2 slices 1-3 landed) · **Last updated:** 2026-04-24
+**Type:** Observation · **Status:** Active (stage-2 slices 1-4 landed) · **Last updated:** 2026-04-24
 
 ## Context
 
@@ -313,6 +313,103 @@ zero-init is the narrowest possible test setup and matches
 the style used by `FrameAllocatorSelfTest` /
 `KernelHeapSelfTest` for their own scratch state.
 
+## Slice 4 — real `GetProcAddress` → `SYS_DLL_PROC_ADDRESS`
+
+Slice 3 made the per-process DLL table callable from kernel
+code. Slice 4 plumbs a user-mode entry point through it: the
+Win32 `GetProcAddress` stub, which has been stuck at
+`kOffReturnZero` since batch 25, now trampolines into a real
+kernel syscall that walks `Process::dll_images[]`.
+
+### New syscall
+
+```text
+SYS_DLL_PROC_ADDRESS = 57
+  rdi = HMODULE (DLL load-base VA; 0 = "any registered DLL")
+  rsi = user ptr to NUL-terminated ASCII function name
+  returns: absolute VA of the export on hit, 0 on miss
+```
+
+Handler in `kernel/core/syscall.cpp`:
+- `CurrentProcess()` — no `proc` → return 0.
+- `CopyFromUser` the function name into a 257-byte kernel-
+  stack bounce buffer (256 chars + hard NUL). Bounded so a
+  hostile caller can't make us walk off the page.
+- Delegates to `ProcessResolveDllExportByBase(proc, hmod, name)`.
+
+### New Process helper
+
+`ProcessResolveDllExportByBase(proc, base_va, func_name)`
+sits alongside the slice-3 `ProcessResolveDllExport(proc,
+dll_name, func_name)`. Difference:
+
+| Caller shape | Helper | Match by |
+|---|---|---|
+| GetProcAddress(HMODULE, LPCSTR) | `ByBase` | DLL's own `base_va` |
+| in-kernel `(dll_name, func_name)` resolution | `ProcessResolveDllExport` | DLL's embedded name (case-insensitive) |
+
+Both helpers hard-reject forwarder exports for now (return
+0). Forwarder chasing needs a cross-DLL resolver that stage-2
+will bring online once multiple DLLs are actually registered.
+
+### New stub bytecode (18 bytes at offset 0xC7F)
+
+```asm
+0xC7F  push rdi
+0xC80  push rsi
+0xC81  mov rdi, rcx              ; hModule
+0xC84  mov rsi, rdx              ; LPCSTR name
+0xC87  mov eax, 57               ; SYS_DLL_PROC_ADDRESS
+0xC8C  int 0x80
+0xC8E  pop rsi
+0xC8F  pop rdi
+0xC90  ret
+```
+
+`kStubsBytes` grows from 0xC7F to 0xC91 bytes. The
+`{"kernel32.dll", "GetProcAddress", kOffReturnZero}` entry
+becomes `kOffGetProcAddressReal`. Every other
+`kOffReturnZero` consumer is unaffected.
+
+Miss contract is identical to the prior stub: 0 back to the
+caller. Existing PEs that `GetProcAddress` an optional API
+and NULL-check gracefully fall back either way, so slice 4
+is a drop-in — no existing ramfs PE regresses.
+
+### Why not wire into ResolveImports yet?
+
+The import resolver currently runs inside `PeLoad`, which is
+invoked from `SpawnPeFile` BEFORE `ProcessCreate`. At that
+point there's no `Process*` to register DLLs on. Teaching
+ResolveImports to consult the DLL table would require either
+(a) two-pass load — create the Process first, then DllLoad
+every needed DLL, then resolve — or (b) a loader-local DLL
+cache that the resolver consults and which is later handed
+to the Process. Both are larger slices than slice 4 warrants,
+so this one stays narrow: it makes **explicit**
+`GetProcAddress` calls real, and leaves the **implicit** IAT
+patching to a future slice.
+
+### Self-test extension
+
+`DllLoaderSelfTest` gets three new assertions for the
+HMODULE path (`ProcessResolveDllExportByBase`):
+
+| Probe | Intent |
+|-------|--------|
+| `ByBase(base_va, CustomAdd)` | Matches exactly on load-base — the Win32-natural path. |
+| `ByBase(0, CustomMul)` | Fallthrough — HMODULE=0 searches every registered DLL. |
+| `ByBase(0xDEADBEEF, CustomAdd)` | Bogus HMODULE → clean 0 back (miss). |
+
+The syscall handler itself isn't callable from kernel_main
+(no ring-3 context), so the in-kernel test stops one layer
+below `int 0x80`. The pathology would be a stub-bytecode
+error; that's caught by a manual ring-3 PE test when the
+first PE that calls `GetProcAddress` against a registered
+DLL lands. For now: `windows-kill.exe` still calls
+GetProcAddress but all DLLs are empty, so the result is 0 —
+same as before slice 4.
+
 ## Boot-time visibility
 
 `PeReport` now appends an `exports:` block to the diagnostic it
@@ -330,13 +427,16 @@ first real DLL embedded in ramfs will light up the full dump:
     [0x0003] CustomName -> forwarder="KERNEL32.GetCommandLineA"
 ```
 
-## What's next (stage 2 slice 4+)
+## What's next (stage 2 slice 5+)
 
 1. ~~Real test DLL.~~ **Landed in slice 2** —
    `userland/libs/customdll/`, boot-time `DllLoaderSelfTest`.
 2. ~~Per-process DLL table.~~ **Landed in slice 3** —
    `Process::dll_images[]`, `ProcessRegisterDllImage`,
    `ProcessResolveDllExport`.
+3. ~~Real GetProcAddress.~~ **Landed in slice 4** —
+   `SYS_DLL_PROC_ADDRESS` (57), `ProcessResolveDllExportByBase`,
+   real stub at `kOffGetProcAddressReal`.
 3. **Recursive import resolution.** Walk the DLL's own Import
    Directory, look up each target DLL in the table (load if
    absent, detect circular dependencies), then patch the DLL's

@@ -672,4 +672,18 @@ bool ProcessRegisterDllImage(Process* proc, const DllImage& image);
 /// must handle forwarder chasing (not yet implemented).
 u64 ProcessResolveDllExport(const Process* proc, const char* dll_name, const char* func_name);
 
+/// Resolve an export by HMODULE (= DLL load-base VA), matching
+/// the Win32 `GetProcAddress(HMODULE, LPCSTR)` shape. Returns
+/// the absolute VA on hit, 0 on miss.
+///
+/// `base_va == 0` searches every registered DLL (useful for a
+/// future "GetModuleHandle(NULL) handed us the EXE" behaviour
+/// that wants to fall through to DLLs). A non-zero `base_va`
+/// restricts the search to the single DLL whose load base
+/// matches — Win32 callers always narrow this way, so the
+/// common path stays O(1) in the DLL count.
+///
+/// Backs `SYS_DLL_PROC_ADDRESS`.
+u64 ProcessResolveDllExportByBase(const Process* proc, u64 base_va, const char* func_name);
+
 } // namespace customos::core

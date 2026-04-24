@@ -253,6 +253,24 @@ void DllLoaderSelfTest()
 
     SerialWrite("[dll-test] ProcessRegisterDllImage + ProcessResolveDllExport OK\n");
 
+    // --- 4. HMODULE-based resolve (slice 4, backs SYS_DLL_PROC_ADDRESS) ---
+    // Mirror the Win32 GetProcAddress(HMODULE, LPCSTR) shape.
+    // The HMODULE a real caller passes is the DLL's load base VA —
+    // exactly what DllLoad wrote into r.image.base_va.
+    const u64 va_by_base_add = ProcessResolveDllExportByBase(proc, r.image.base_va, "CustomAdd");
+    Expect(va_by_base_add == va_add, "ByBase(base_va, CustomAdd)");
+
+    // HMODULE=0 means "any registered DLL" — matches the slice-3
+    // ProcessResolveDllExport(proc, nullptr, ...) fallthrough.
+    const u64 va_by_base_any = ProcessResolveDllExportByBase(proc, 0, "CustomMul");
+    Expect(va_by_base_any == va_mul, "ByBase(0, CustomMul)");
+
+    // A bogus HMODULE → no match, clean 0.
+    const u64 va_by_base_bogus = ProcessResolveDllExportByBase(proc, 0xDEADBEEF, "CustomAdd");
+    Expect(va_by_base_bogus == 0, "ByBase(bogus, CustomAdd)");
+
+    SerialWrite("[dll-test] ProcessResolveDllExportByBase OK (SYS_DLL_PROC_ADDRESS backing)\n");
+
     customos::mm::KFree(proc);
     customos::mm::AddressSpaceRelease(as);
 }
