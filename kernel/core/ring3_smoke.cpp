@@ -11,6 +11,7 @@
 #include "generated_customdll_test.h"
 #include "generated_kernel32_dll.h"
 #include "generated_msvcrt_dll.h"
+#include "generated_ucrtbase_dll.h"
 #include "generated_vcruntime140_dll.h"
 #include "generated_hello_pe.h"
 #include "generated_hello_winapi.h"
@@ -1897,7 +1898,10 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         const u8* bytes;   // kernel direct-map pointer to the blob
         u64 len;           // blob size in bytes
     };
-    const PreloadDllEntry preload_set[] = {
+    // `static` so the array lives in .rodata and the
+    // initializer doesn't compile to a runtime memcpy from a
+    // template — the kernel doesn't link libc.
+    static const PreloadDllEntry preload_set[] = {
         {"customdll.dll", fs::generated::kBinCustomDllBytes, fs::generated::kBinCustomDllBytes_len},
         {"customdll2.dll", fs::generated::kBinCustomDll2Bytes, fs::generated::kBinCustomDll2Bytes_len},
         // Stage-2 slice 10: kernel32.dll retirement DLL —
@@ -1919,6 +1923,12 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         // (strlen / strcmp / strcpy / strchr + wide variants).
         // Retires the batch-7 + 29/31 flat stubs.
         {"msvcrt.dll", fs::generated::kBinMsvcrtDllBytes, fs::generated::kBinMsvcrtDllBytes_len},
+        // Stage-2 slice 15: ucrtbase.dll — UCRT runtime: heap
+        // (malloc/free/calloc/realloc/_aligned_*), terminators
+        // (exit/_exit), CRT startup shims (_initterm,
+        // _set_app_type, ...), string intrinsics. Retires the
+        // batch-6 / 9 flat stubs.
+        {"ucrtbase.dll", fs::generated::kBinUcrtbaseDllBytes, fs::generated::kBinUcrtbaseDllBytes_len},
     };
     constexpr u64 kPreloadEntryCount = sizeof(preload_set) / sizeof(preload_set[0]);
     static_assert(kPreloadEntryCount <= kPreloadSlotCap, "Preload DLL list exceeds stack-local cap");

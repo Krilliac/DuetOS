@@ -449,6 +449,33 @@ add_custom_command(
 list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_MSVCRT_HEADER}")
 
 # ----------------------------------------------------------------------------
+# Userland ucrtbase.dll — stage-2 slice 15. Retires the
+# UCRT runtime stubs: heap alloc (malloc/free/calloc/realloc
+# /_aligned_*), terminators (exit/_exit), CRT startup shims
+# (_initterm/_initterm_e/_cexit/_c_exit/_set_app_type/
+# __setusermatherr/_configthreadlocale), plus string
+# intrinsics aliased from msvcrt.
+# ----------------------------------------------------------------------------
+set(CUSTOMOS_UCRTBASE_SRC "${CMAKE_SOURCE_DIR}/userland/libs/ucrtbase/ucrtbase.c")
+set(CUSTOMOS_UCRTBASE_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_ucrtbase_dll.h")
+set(CUSTOMOS_UCRTBASE_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-ucrtbase-dll.sh")
+
+add_custom_command(
+    OUTPUT "${CUSTOMOS_UCRTBASE_HEADER}"
+    COMMAND "${CUSTOMOS_UCRTBASE_SCRIPT}"
+            "${CMAKE_SOURCE_DIR}"
+            "${CUSTOMOS_UCRTBASE_HEADER}"
+    DEPENDS
+        "${CUSTOMOS_UCRTBASE_SRC}"
+        "${CUSTOMOS_UCRTBASE_SCRIPT}"
+        "${CUSTOMOS_EMBED_BLOB_SCRIPT}"
+    COMMENT "Compiling + embedding ucrtbase.dll (heap + exit + CRT startup retirement)"
+    VERBATIM
+)
+
+list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_UCRTBASE_HEADER}")
+
+# ----------------------------------------------------------------------------
 # Sixth PE fixture: customdll_test.exe — first userland program
 # that imports from a real loaded DLL (customdll.dll) rather
 # than from the flat stubs page. Exercises stage-2 slice 6's
