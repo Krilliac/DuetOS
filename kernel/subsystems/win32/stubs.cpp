@@ -255,6 +255,13 @@ constexpr u32 kOffTryEnterCritSecReal = 0xBCF; // batch 63 — 56 bytes
 constexpr u32 kOffSetUnhandledFilter = 0xC07; // batch 64 — 12 bytes
 constexpr u32 kOffUnhandledFilter = 0xC13;    // batch 64 — 21 bytes
 
+// === Batch 65: real InitOnce (thread-safe lazy init) =========
+// InitOnceInitialize just zero-fills an 8-byte slot; we reuse
+// kOffSrwInit for it. InitOnceExecuteOnce does the actual
+// call-once state machine: CAS 0->1 picks the initialiser,
+// CAS-losers wait for the slot to reach 2 via SYS_YIELD spin.
+constexpr u32 kOffInitOnceExec = 0xC28; // batch 65 — 87 bytes
+
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
     // Windows x64 ABI: first arg (uExitCode) in RCX.
@@ -3084,10 +3091,80 @@ constexpr u8 kStubsBytes[] = {
     // .default (abs 0xC22):
     0xB8, 0x01, 0x00, 0x00, 0x00, // 0xC22 mov eax, 1           ; EXCEPTION_EXECUTE_HANDLER
     0xC3,                         // 0xC27 ret
+
+    // === Batch 65 ==============================================
+
+    // --- InitOnceExecuteOnce (offset 0xC28, 87 bytes) ---------
+    // Win32: BOOL InitOnceExecuteOnce(
+    //          PINIT_ONCE InitOnce = rcx,
+    //          PINIT_ONCE_FN InitFn = rdx,
+    //          PVOID Parameter = r8,
+    //          LPVOID *Context = r9);
+    //
+    // INIT_ONCE is an 8-byte slot we interpret as:
+    //   0 = untouched
+    //   1 = initialiser running
+    //   2 = done
+    //
+    // Single atomic CAS 0->1 picks exactly one thread as the
+    // initialiser. Losers spin-yield on the slot until it reaches
+    // 2. The InitFn signature matches the arg-shifted version of
+    // ours: BOOL InitFn(PINIT_ONCE=rcx, PVOID Parameter=rdx,
+    // PVOID* Context=r8). Our rdx/r8/r9 shift one slot left into
+    // rcx/rdx/r8 before the call. We hold InitOnce in rbx, InitFn
+    // in rdi (both callee-saved) so the shuffle doesn't lose
+    // state.
+    //
+    // Null-InitFn fast path: legitimately used as "mark this
+    // INIT_ONCE complete without running anything." Skipping the
+    // call also avoids CALL-to-0 #PF-killing the task, which is
+    // how syscall-stress's `InitOnceExecuteOnce(&io, 0, 0, 0)`
+    // test uses it.
+    0x53,                         // 0xC28 push rbx
+    0x57,                         // 0xC29 push rdi
+    0x48, 0x89, 0xCB,             // 0xC2A mov rbx, rcx          ; rbx = InitOnce
+    0x48, 0x89, 0xD7,             // 0xC2D mov rdi, rdx          ; rdi = InitFn
+    0x31, 0xC0,                   // 0xC30 xor eax, eax          ; expected = 0
+    0xBA, 0x01, 0x00, 0x00, 0x00, // 0xC32 mov edx, 1            ; new = 1
+    0xF0, 0x48, 0x0F, 0xB1, 0x13, // 0xC37 lock cmpxchg [rbx], rdx
+    0x75, 0x29,                   // 0xC3C jnz .wait (+0x29 -> 0xC67)
+    // We won the CAS.
+    0x48, 0x85, 0xFF,       // 0xC3E test rdi, rdi        ; null InitFn?
+    0x74, 0x15,             // 0xC41 jz .null (+0x15 -> 0xC58)
+    0x48, 0x89, 0xD9,       // 0xC43 mov rcx, rbx         ; arg1 = InitOnce
+    0x4C, 0x89, 0xC2,       // 0xC46 mov rdx, r8          ; arg2 = Parameter
+    0x4D, 0x89, 0xC8,       // 0xC49 mov r8, r9           ; arg3 = Context
+    0x48, 0x83, 0xEC, 0x20, // 0xC4C sub rsp, 32          ; shadow space
+    0xFF, 0xD7,             // 0xC50 call rdi             ; InitFn(...)
+    0x48, 0x83, 0xC4, 0x20, // 0xC52 add rsp, 32
+    0xEB, 0x05,             // 0xC56 jmp .finish (+5 -> 0xC5D)
+    // .null (abs 0xC58): skipped InitFn — return TRUE.
+    0xB8, 0x01, 0x00, 0x00, 0x00, // 0xC58 mov eax, 1
+    // .finish (abs 0xC5D):
+    0x48, 0xC7, 0x03, 0x02, 0x00, 0x00, 0x00, // 0xC5D mov qword [rbx], 2   ; done
+    0x5F,                                     // 0xC64 pop rdi
+    0x5B,                                     // 0xC65 pop rbx
+    0xC3,                                     // 0xC66 ret                  ; eax = call result or 1
+    // .wait (abs 0xC67): CAS lost; slot is 1 or 2. Spin-yield
+    // until it reaches 2 (done).
+    0x48, 0x8B, 0x03,       // 0xC67 mov rax, [rbx]
+    0x48, 0x83, 0xF8, 0x02, // 0xC6A cmp rax, 2
+    0x74, 0x07,             // 0xC6E je .wait_done (+7 -> 0xC77)
+    0x6A, 0x03,             // 0xC70 push 3
+    0x58,                   // 0xC72 pop rax                ; SYS_YIELD
+    0xCD, 0x80,             // 0xC73 int 0x80
+    0xEB, 0xF0,             // 0xC75 jmp .wait (-0x10 -> 0xC67)
+    // .wait_done (abs 0xC77): the initialiser finished. Return 1
+    // (pretend success — we don't track the initialiser's BOOL
+    // across threads).
+    0xB8, 0x01, 0x00, 0x00, 0x00, // 0xC77 mov eax, 1
+    0x5F,                         // 0xC7C pop rdi
+    0x5B,                         // 0xC7D pop rbx
+    0xC3,                         // 0xC7E ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0xC28, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0xC7F, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -3599,10 +3676,12 @@ constexpr StubEntry kStubsTable[] = {
     {"kernel32.dll", "WakeAllConditionVariable", kOffCritSecNop},
     {"kernel32.dll", "SleepConditionVariableCS", kOffReturnOne},
     {"kernel32.dll", "SleepConditionVariableSRW", kOffReturnOne},
-    {"kernel32.dll", "InitOnceInitialize", kOffCritSecNop},
+    // InitOnceInitialize zeroes the 8-byte INIT_ONCE slot. Same
+    // byte sequence as InitializeSRWLock, so share the stub.
+    {"kernel32.dll", "InitOnceInitialize", kOffSrwInit},
     {"kernel32.dll", "InitializeInitOnce", kOffCritSecNop},
     {"kernel32.dll", "InitOnceComplete", kOffReturnOne},
-    {"kernel32.dll", "InitOnceExecuteOnce", kOffReturnOne}, // callback skipped — caller gets TRUE
+    {"kernel32.dll", "InitOnceExecuteOnce", kOffInitOnceExec},
     {"kernel32.dll", "InitOnceBeginInitialize", kOffReturnOne},
     {"kernel32.dll", "CreateWaitableTimerW", kOffReturnZero},
     {"kernel32.dll", "CreateWaitableTimerA", kOffReturnZero},
