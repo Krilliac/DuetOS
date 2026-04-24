@@ -241,6 +241,28 @@ void Prompt();
 // Commands
 // ---------------------------------------------------------------
 
+// Gate sensitive command handlers behind the admin role. Called
+// from the dispatch switch below (we gate at dispatch time rather
+// than inside each handler so the handler stays a pure worker
+// and the policy is visible in one place at the bottom of the
+// file). Prints a denial line and klogs a warning so a guest
+// brute-forcing commands leaves a serial trail.
+bool RequireAdmin(const char* cmd)
+{
+    if (AuthIsAdmin())
+    {
+        return true;
+    }
+    ConsoleWrite("DENIED: ");
+    ConsoleWrite(cmd);
+    ConsoleWriteln(" REQUIRES ADMIN");
+    customos::core::Log(customos::core::LogLevel::Warn, "shell", "admin-only command denied");
+    customos::arch::SerialWrite("[shell] denied (non-admin): ");
+    customos::arch::SerialWrite(cmd);
+    customos::arch::SerialWrite("\n");
+    return false;
+}
+
 void CmdHelp()
 {
     ConsoleWriteln("AVAILABLE COMMANDS:");
@@ -3953,26 +3975,39 @@ void CmdGuard(customos::u32 argc, char** argv)
         ConsoleWriteln("USAGE: GUARD [ON|ADVISORY|ENFORCE|OFF|TEST]");
         return;
     }
+    // Mutating subcommands change the kernel's security posture.
+    // Status read above is harmless for non-admins (just counters),
+    // but anything that flips mode or re-runs the self-test must
+    // be admin-gated so a passwordless guest can't flip the guard
+    // to Off and disable image-load protection.
     if (StrEq(argv[1], "on") || StrEq(argv[1], "advisory"))
     {
+        if (!RequireAdmin("GUARD MODE"))
+            return;
         sec::SetGuardMode(sec::Mode::Advisory);
         ConsoleWriteln("GUARD: ADVISORY (logs, never blocks)");
         return;
     }
     if (StrEq(argv[1], "enforce"))
     {
+        if (!RequireAdmin("GUARD MODE"))
+            return;
         sec::SetGuardMode(sec::Mode::Enforce);
         ConsoleWriteln("GUARD: ENFORCE (prompts on Warn/Deny, default-deny on timeout)");
         return;
     }
     if (StrEq(argv[1], "off"))
     {
+        if (!RequireAdmin("GUARD MODE"))
+            return;
         sec::SetGuardMode(sec::Mode::Off);
         ConsoleWriteln("GUARD: OFF (all images pass through)");
         return;
     }
     if (StrEq(argv[1], "test"))
     {
+        if (!RequireAdmin("GUARD TEST"))
+            return;
         sec::GuardSelfTest();
         ConsoleWriteln("(self-test output on COM1)");
         return;
@@ -7415,6 +7450,8 @@ void Dispatch(char* line)
     }
     if (StrEq(cmd, "msr"))
     {
+        if (!RequireAdmin("MSR"))
+            return;
         CmdMsr(argc, argv);
         return;
     }
@@ -7535,21 +7572,29 @@ void Dispatch(char* line)
     }
     if (StrEq(cmd, "attacksim") || StrEq(cmd, "redteam"))
     {
+        if (!RequireAdmin("ATTACKSIM"))
+            return;
         CmdAttackSim();
         return;
     }
     if (StrEq(cmd, "memdump"))
     {
+        if (!RequireAdmin("MEMDUMP"))
+            return;
         CmdMemDump(argc, argv);
         return;
     }
     if (StrEq(cmd, "bp") || StrEq(cmd, "breakpoint"))
     {
+        if (!RequireAdmin("BP"))
+            return;
         CmdBp(argc, argv);
         return;
     }
     if (StrEq(cmd, "probe"))
     {
+        if (!RequireAdmin("PROBE"))
+            return;
         CmdProbe(argc, argv);
         return;
     }
@@ -7575,6 +7620,11 @@ void Dispatch(char* line)
     }
     if (StrEq(cmd, "loglevel"))
     {
+        // Non-admins would be able to silence forensic logs
+        // (raise threshold to Error) while mounting further
+        // attacks. Admin-only keeps klog evidence intact.
+        if (!RequireAdmin("LOGLEVEL"))
+            return;
         CmdLoglevel(argc, argv);
         return;
     }
@@ -7655,6 +7705,8 @@ void Dispatch(char* line)
     }
     if (StrEq(cmd, "mount"))
     {
+        if (!RequireAdmin("MOUNT"))
+            return;
         CmdMount();
         return;
     }
@@ -7685,6 +7737,12 @@ void Dispatch(char* line)
     }
     if (StrEq(cmd, "read"))
     {
+        // Raw block-device read: returns arbitrary sectors from
+        // NVMe / AHCI / xHCI MSC. Readable bytes may include
+        // filesystem metadata or another user's data, so gate
+        // on admin.
+        if (!RequireAdmin("READ"))
+            return;
         CmdRead(argc, argv);
         return;
     }
@@ -7710,36 +7768,50 @@ void Dispatch(char* line)
     }
     if (StrEq(cmd, "fatwrite"))
     {
+        if (!RequireAdmin("FATWRITE"))
+            return;
         CmdFatwrite(argc, argv);
         return;
     }
     if (StrEq(cmd, "fatappend"))
     {
+        if (!RequireAdmin("FATAPPEND"))
+            return;
         CmdFatappend(argc, argv);
         return;
     }
     if (StrEq(cmd, "fatnew"))
     {
+        if (!RequireAdmin("FATNEW"))
+            return;
         CmdFatnew(argc, argv);
         return;
     }
     if (StrEq(cmd, "fatrm"))
     {
+        if (!RequireAdmin("FATRM"))
+            return;
         CmdFatrm(argc, argv);
         return;
     }
     if (StrEq(cmd, "fattrunc"))
     {
+        if (!RequireAdmin("FATTRUNC"))
+            return;
         CmdFattrunc(argc, argv);
         return;
     }
     if (StrEq(cmd, "fatmkdir"))
     {
+        if (!RequireAdmin("FATMKDIR"))
+            return;
         CmdFatmkdir(argc, argv);
         return;
     }
     if (StrEq(cmd, "fatrmdir"))
     {
+        if (!RequireAdmin("FATRMDIR"))
+            return;
         CmdFatrmdir(argc, argv);
         return;
     }
@@ -7750,6 +7822,11 @@ void Dispatch(char* line)
     }
     if (StrEq(cmd, "linuxexec"))
     {
+        // Spawns an ELF as a ring-3 task with arbitrary code.
+        // Untrusted users must not be able to start new processes
+        // from arbitrary bytes.
+        if (!RequireAdmin("LINUXEXEC"))
+            return;
         CmdLinuxexec(argc, argv);
         return;
     }
@@ -7765,11 +7842,15 @@ void Dispatch(char* line)
     }
     if (StrEq(cmd, "spawn"))
     {
+        if (!RequireAdmin("SPAWN"))
+            return;
         CmdSpawn(argc, argv);
         return;
     }
     if (StrEq(cmd, "kill"))
     {
+        if (!RequireAdmin("KILL"))
+            return;
         CmdKill(argc, argv);
         return;
     }
@@ -7780,6 +7861,8 @@ void Dispatch(char* line)
     }
     if (StrEq(cmd, "exec"))
     {
+        if (!RequireAdmin("EXEC"))
+            return;
         CmdExec(argc, argv);
         return;
     }
@@ -7850,6 +7933,11 @@ void Dispatch(char* line)
     }
     if (StrEq(cmd, "flushtlb") || StrEq(cmd, "flush-tlb"))
     {
+        // Forcing a global TLB flush on every CPU is a real
+        // performance hit + occasional side-channel probe; not
+        // something a logged-in guest should control.
+        if (!RequireAdmin("FLUSHTLB"))
+            return;
         CmdFlushTlb();
         return;
     }
@@ -7865,16 +7953,22 @@ void Dispatch(char* line)
     }
     if (StrEq(cmd, "reboot"))
     {
+        if (!RequireAdmin("REBOOT"))
+            return;
         CmdRebootNow();
         // unreachable
     }
     if (StrEq(cmd, "halt"))
     {
+        if (!RequireAdmin("HALT"))
+            return;
         CmdHaltNow();
         // unreachable
     }
     if (StrEq(cmd, "shutdown") || StrEq(cmd, "poweroff"))
     {
+        if (!RequireAdmin("SHUTDOWN"))
+            return;
         CmdShutdownNow();
         // unreachable
     }

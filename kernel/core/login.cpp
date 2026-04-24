@@ -347,17 +347,28 @@ bool GuiTrySubmit()
     }
     ++g_login.attempts;
     g_login.status = "LOGIN FAILED - CHECK USERNAME / PASSWORD";
-    // Debug: emit the submitted username + password length on serial
-    // so the pentest harness (and humans chasing a brute-force
-    // attempt) can tell whether input actually reached the fields.
-    // Password value is never logged — only its length.
+    // Emit the submitted username + password length on serial for
+    // operator forensics (password VALUE never logged). Matches
+    // the audit trail any sane login daemon writes after a bad
+    // attempt.
     customos::arch::SerialWrite("[login-debug] submitted username=\"");
     customos::arch::SerialWrite(g_login.username);
     customos::arch::SerialWrite("\" password_len=");
     customos::arch::SerialWriteHex(g_login.password_len);
     customos::arch::SerialWrite("\n");
+    // Clear BOTH fields and reset focus to Username on a failed
+    // attempt. Retaining the username caused two real problems:
+    //   1. The next submit inherited the old username with a new
+    //      password typed into the wrong field, producing
+    //      confusing failures for an honest user who mis-typed
+    //      and wanted to start fresh.
+    //   2. An attacker with brief console access could observe
+    //      the last-attempted username of whoever just left —
+    //      a minor but real info leak.
+    // Fresh-blank state is the only policy that avoids both.
+    ClearField(g_login.username, &g_login.username_len);
     ClearField(g_login.password, &g_login.password_len);
-    g_login.focus = Field::Password;
+    g_login.focus = Field::Username;
     GuiRepaint();
     KLOG_WARN("login", "gui auth failed");
     return true;
