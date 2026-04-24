@@ -200,6 +200,9 @@ set +e
     /export:RemoveDirectoryA /export:RemoveDirectoryW \
     /export:FlushFileBuffers \
     /export:GetTempPathA /export:GetTempPathW \
+    /export:GetWindowsDirectoryA /export:GetWindowsDirectoryW \
+    /export:GetSystemDirectoryA /export:GetSystemDirectoryW \
+    /export:GetSystemWindowsDirectoryW \
     /export:GetTempFileNameA /export:GetTempFileNameW \
     /export:GetCurrentDirectoryA \
     /export:SetCurrentDirectoryA /export:SetCurrentDirectoryW \

@@ -1641,18 +1641,23 @@ __declspec(dllexport) DWORD GetFileAttributesW(const wchar_t16* path)
     return 0xFFFFFFFFu;
 }
 
+/* SetFileAttributes — v0 has no writable FS backend; pretend
+ * success (TRUE). Callers that care check GetFileAttributes
+ * afterward and see the attributes unchanged — they proceed
+ * on the assumption we lost the write; same observable as
+ * "read-only FS". batch37 of hello_winapi pins TRUE. */
 __declspec(dllexport) BOOL SetFileAttributesA(const char* path, DWORD attrs)
 {
     (void) path;
     (void) attrs;
-    return 0;
+    return 1;
 }
 
 __declspec(dllexport) BOOL SetFileAttributesW(const wchar_t16* path, DWORD attrs)
 {
     (void) path;
     (void) attrs;
-    return 0;
+    return 1;
 }
 
 __declspec(dllexport) BOOL CreateDirectoryA(const char* path, void* sec)
@@ -1687,28 +1692,73 @@ __declspec(dllexport) BOOL FlushFileBuffers(HANDLE h)
     return 1;
 }
 
-/* GetTempPath / GetTempFileName — return /tmp and a fixed name.
- * Matches behaviour of Linux-hosted builds. */
+/* System-directory queries — all report L"X:\\" (4 chars incl
+ * NUL, 3 chars excl NUL). Matches the flat-stub semantics that
+ * hello_winapi's batch35 pins.
+ *
+ * Signatures:
+ *   DWORD  GetTempPathW(DWORD size, LPWSTR buf);      size-first
+ *   UINT   GetWindowsDirectoryW(LPWSTR buf, UINT sz); buffer-first
+ *   UINT   GetSystemDirectoryW(LPWSTR buf, UINT sz);  buffer-first
+ *
+ * All return 3 on success (chars written excl NUL) or 4 if
+ * the buffer is too small (chars required incl NUL). */
+
+static DWORD write_xcolon_backslash_w(wchar_t16* out, DWORD cap)
+{
+    if (!out || cap < 4)
+        return 4; /* required incl NUL */
+    out[0] = 'X';
+    out[1] = ':';
+    out[2] = '\\';
+    out[3] = 0;
+    return 3; /* chars excl NUL */
+}
+
+static DWORD write_xcolon_backslash_a(char* out, DWORD cap)
+{
+    if (!out || cap < 4)
+        return 4;
+    out[0] = 'X';
+    out[1] = ':';
+    out[2] = '\\';
+    out[3] = 0;
+    return 3;
+}
+
 __declspec(dllexport) DWORD GetTempPathA(DWORD cb, char* out)
 {
-    static const char path[] = "/tmp/";
-    DWORD             want   = sizeof(path);
-    if (!out || cb < want)
-        return want;
-    for (DWORD i = 0; i < want; ++i)
-        out[i] = path[i];
-    return want - 1;
+    return write_xcolon_backslash_a(out, cb);
 }
 
 __declspec(dllexport) DWORD GetTempPathW(DWORD cb, wchar_t16* out)
 {
-    static const char path[] = "/tmp/";
-    DWORD             want   = sizeof(path);
-    if (!out || cb < want)
-        return want;
-    for (DWORD i = 0; i < want; ++i)
-        out[i] = (wchar_t16) (unsigned char) path[i];
-    return want - 1;
+    return write_xcolon_backslash_w(out, cb);
+}
+
+__declspec(dllexport) UINT GetWindowsDirectoryA(char* out, UINT cb)
+{
+    return write_xcolon_backslash_a(out, cb);
+}
+
+__declspec(dllexport) UINT GetWindowsDirectoryW(wchar_t16* out, UINT cb)
+{
+    return write_xcolon_backslash_w(out, cb);
+}
+
+__declspec(dllexport) UINT GetSystemDirectoryA(char* out, UINT cb)
+{
+    return write_xcolon_backslash_a(out, cb);
+}
+
+__declspec(dllexport) UINT GetSystemDirectoryW(wchar_t16* out, UINT cb)
+{
+    return write_xcolon_backslash_w(out, cb);
+}
+
+__declspec(dllexport) UINT GetSystemWindowsDirectoryW(wchar_t16* out, UINT cb)
+{
+    return write_xcolon_backslash_w(out, cb);
 }
 
 __declspec(dllexport) UINT GetTempFileNameA(const char* dir, const char* prefix, UINT unique, char* out)
