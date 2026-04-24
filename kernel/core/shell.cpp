@@ -2376,6 +2376,32 @@ void CmdGpu()
             ConsoleWrite(g.family);
         }
         ConsoleWriteChar('\n');
+        if (g.mmio_size != 0)
+        {
+            ConsoleWrite("       BAR0=");
+            WriteU64Hex(g.mmio_phys, 0);
+            ConsoleWrite("/");
+            WriteU64Hex(g.mmio_size, 0);
+            if (g.mmio_live)
+            {
+                ConsoleWrite("  MMIO=LIVE  probe_reg=");
+                WriteU64Hex(g.probe_reg, 8);
+                if (g.arch != nullptr)
+                {
+                    ConsoleWrite(" arch=");
+                    ConsoleWrite(g.arch);
+                }
+            }
+            else if (g.mmio_virt != nullptr)
+            {
+                ConsoleWrite("  MMIO=DECODE-FAIL");
+            }
+            else
+            {
+                ConsoleWrite("  MMIO=unmapped");
+            }
+            ConsoleWriteChar('\n');
+        }
         if (g.vendor_id == duetos::drivers::gpu::kVendorRedHatVirt && g.device_id == 0x1050)
             saw_virtio = true;
     }
@@ -2399,6 +2425,34 @@ void CmdGpu()
         else
         {
             ConsoleWriteln("virtio-gpu: device present but probe incomplete (no common_cfg)");
+        }
+
+        const auto& d = duetos::drivers::gpu::VirtioGpuLastDisplayInfo();
+        if (d.valid)
+        {
+            ConsoleWrite("virtio-gpu displays: ");
+            WriteU64Dec(d.active_scanouts);
+            ConsoleWriteln(" active scanout(s)");
+            for (u32 i = 0; i < duetos::drivers::gpu::kVirtioGpuMaxScanouts; ++i)
+            {
+                if (d.enabled[i] == 0)
+                    continue;
+                ConsoleWrite("  scanout ");
+                WriteU64Dec(i);
+                ConsoleWrite(": ");
+                WriteU64Dec(d.rects[i].width);
+                ConsoleWrite("x");
+                WriteU64Dec(d.rects[i].height);
+                ConsoleWrite(" @ (");
+                WriteU64Dec(d.rects[i].x);
+                ConsoleWrite(",");
+                WriteU64Dec(d.rects[i].y);
+                ConsoleWriteln(")");
+            }
+        }
+        else
+        {
+            ConsoleWriteln("virtio-gpu displays: GET_DISPLAY_INFO not issued or failed");
         }
     }
 }

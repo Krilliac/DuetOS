@@ -62,6 +62,118 @@ u16 Mmio16(const GpuInfo& g, u64 offset)
     return *p;
 }
 
+u32 Mmio32(const GpuInfo& g, u64 offset)
+{
+    if (g.mmio_virt == nullptr || offset + 4 > g.mmio_size)
+        return 0xFFFFFFFFu;
+    auto* p = reinterpret_cast<volatile u32*>(static_cast<u8*>(g.mmio_virt) + offset);
+    return *p;
+}
+
+// NVIDIA PMC_BOOT_0 is at BAR0 + 0x000000, 4 bytes, on every
+// NVIDIA GPU since NV4 (1998). Format (from open-gpu-kernel-modules
+// and nouveau's nvkm/engine/device/base.c):
+//   bits 27:20 = chipset / architecture id
+//   bits 19:16 = implementation
+//   bits 15:8  = reserved
+//   bits  7:0  = revision (major:minor nibbles)
+//
+// We map the architecture nibble to a short name for boot-log
+// readability; unknown values land on nullptr so the log shows the
+// raw value instead.
+const char* NvidiaArchName(u8 arch)
+{
+    switch (arch)
+    {
+    case 0x40:
+        return "NV40-curie";
+    case 0x50:
+        return "NV50-tesla";
+    case 0xC0:
+        return "GF100-fermi";
+    case 0xE0:
+        return "GK-kepler";
+    case 0x10:
+        return "GM10x-maxwell";
+    case 0x11:
+        return "GM20x-maxwell";
+    case 0x12:
+        return "GP10x-pascal";
+    case 0x13:
+        return "GV10x-volta";
+    case 0x14:
+        return "TU10x-turing";
+    case 0x15:
+        return "GA10x-ampere";
+    case 0x16:
+        return "GH10x-hopper";
+    case 0x17:
+        return "AD10x-ada";
+    case 0x18:
+        return "GB10x-blackwell";
+    default:
+        return nullptr;
+    }
+}
+
+void ProbeNvidiaRegisters(GpuInfo& g)
+{
+    constexpr u64 kPmcBoot0 = 0x000000;
+    const u32 boot0 = Mmio32(g, kPmcBoot0);
+    g.probe_reg = boot0;
+    g.mmio_live = (boot0 != 0xFFFFFFFFu);
+    if (!g.mmio_live)
+    {
+        arch::SerialWrite("[gpu-probe] nvidia: BAR0 read returned 0xFFFFFFFF (MMIO decode failed)\n");
+        return;
+    }
+    const u8 arch_nib = static_cast<u8>((boot0 >> 20) & 0xFF);
+    const u8 impl = static_cast<u8>((boot0 >> 16) & 0xF);
+    const u8 rev = static_cast<u8>(boot0 & 0xFF);
+    g.arch = NvidiaArchName(arch_nib);
+    arch::SerialWrite("[gpu-probe] nvidia: PMC_BOOT_0=");
+    arch::SerialWriteHex(boot0);
+    arch::SerialWrite(" arch=");
+    arch::SerialWriteHex(arch_nib);
+    if (g.arch != nullptr)
+    {
+        arch::SerialWrite(" (");
+        arch::SerialWrite(g.arch);
+        arch::SerialWrite(")");
+    }
+    arch::SerialWrite(" impl=");
+    arch::SerialWriteHex(impl);
+    arch::SerialWrite(" rev=");
+    arch::SerialWriteHex(rev);
+    arch::SerialWrite("\n");
+}
+
+// Intel iGPU: BAR0 is the MMIO register aperture on every Gen we
+// target (Gen9+). There isn't a single "chip id" register that
+// works across every Gen — the canonical GT revision register moves
+// between 0x0 (GEN_INFO) and 0x9130 (GT_CAPABILITY) depending on
+// generation. For v0, we only perform a liveness read and log the
+// first dword. A full-driver slice will decode per-Gen registers.
+void ProbeIntelRegisters(GpuInfo& g)
+{
+    const u32 dword0 = Mmio32(g, 0);
+    g.probe_reg = dword0;
+    g.mmio_live = (dword0 != 0xFFFFFFFFu);
+    arch::SerialWrite("[gpu-probe] intel: BAR0[0]=");
+    arch::SerialWriteHex(dword0);
+    arch::SerialWrite(g.mmio_live ? " (MMIO live)\n" : " (MMIO decode failed)\n");
+}
+
+// AMD Radeon GFX9+: BAR0 is VRAM framebuffer, BAR2 is doorbell, and
+// BAR5 is the MMIO register aperture. We only map BAR0 in GpuInit
+// today, so we cannot reach AMD register ids. A full AMD slice will
+// probe and map BAR5, then read e.g. mmGRBM_STATUS (0x8010).
+void ProbeAmdRegisters(GpuInfo& g)
+{
+    (void)g;
+    arch::SerialWrite("[gpu-probe] amd: no register read — registers at BAR5, not mapped in v0\n");
+}
+
 void DecodeBochsVbe(const GpuInfo& g)
 {
     if (g.mmio_virt == nullptr)
@@ -135,7 +247,32 @@ void RunVendorProbe(GpuInfo& g)
     arch::SerialWriteHex(g.device_id);
     arch::SerialWrite(" family=");
     arch::SerialWrite(family);
-    arch::SerialWrite("  (stub OK — no engine init yet)\n");
+    arch::SerialWrite("\n");
+
+    // Vendor-specific register reads from the mapped BAR0. Each
+    // probe is non-destructive (reads only) and populates
+    // `probe_reg`, `mmio_live`, and optionally `arch` on the
+    // GpuInfo. These are the first reads that actually talk to
+    // the hardware past PCI config-space — a failing read here
+    // means the BAR map is broken or the controller is dead.
+    if (g.mmio_virt != nullptr)
+    {
+        switch (g.vendor_id)
+        {
+        case kVendorNvidia:
+            ProbeNvidiaRegisters(g);
+            break;
+        case kVendorIntel:
+            ProbeIntelRegisters(g);
+            break;
+        case kVendorAmd:
+            ProbeAmdRegisters(g);
+            break;
+        default:
+            break;
+        }
+    }
+
     // Bochs VBE aperture is a QEMU-only detail — probing it on bare
     // metal would be addressing a device that doesn't exist. The
     // vendor-id 0x1234 gate already covers the QEMU-std-VGA path,
@@ -154,6 +291,12 @@ void RunVendorProbe(GpuInfo& g)
     if (g.vendor_id == kVendorRedHatVirt && g.device_id == 0x1050)
     {
         VirtioGpuProbe(g.bus, g.device, g.function);
+        // v1: complete the ACK→DRIVER→FEATURES_OK→DRIVER_OK
+        // handshake, set up controlq, issue GET_DISPLAY_INFO. All
+        // three steps are independently guarded; a failure in
+        // bring-up leaves us with the probe data still visible.
+        if (VirtioGpuBringUp())
+            (void)VirtioGpuGetDisplayInfo();
     }
 }
 
