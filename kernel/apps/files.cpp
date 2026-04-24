@@ -4,7 +4,7 @@
 #include "../drivers/video/framebuffer.h"
 #include "../fs/ramfs.h"
 
-namespace customos::apps::files
+namespace duetos::apps::files
 {
 
 namespace
@@ -21,21 +21,21 @@ constexpr u32 kSelBg = 0x00C0C888;
 
 struct State
 {
-    customos::drivers::video::WindowHandle handle;
+    duetos::drivers::video::WindowHandle handle;
     // Stack of directory nodes from root down to the current
     // view. depth == 1 at init (just the trusted root).
-    const customos::fs::RamfsNode* stack[kMaxDepth];
+    const duetos::fs::RamfsNode* stack[kMaxDepth];
     u32 depth;
     // Selection index within the current directory's children
     // (the node at stack[depth-1]).
     u32 selection;
 };
 
-constinit State g_state = {customos::drivers::video::kWindowInvalid, {}, 0, 0};
+constinit State g_state = {duetos::drivers::video::kWindowInvalid, {}, 0, 0};
 
 // Count children of a directory node. Children list is
 // nullptr-terminated.
-u32 CountChildren(const customos::fs::RamfsNode* dir)
+u32 CountChildren(const duetos::fs::RamfsNode* dir)
 {
     if (dir == nullptr || dir->children == nullptr)
         return 0;
@@ -45,16 +45,16 @@ u32 CountChildren(const customos::fs::RamfsNode* dir)
     return n;
 }
 
-const customos::fs::RamfsNode* Cur()
+const duetos::fs::RamfsNode* Cur()
 {
     if (g_state.depth == 0)
         return nullptr;
     return g_state.stack[g_state.depth - 1];
 }
 
-const customos::fs::RamfsNode* SelectedChild()
+const duetos::fs::RamfsNode* SelectedChild()
 {
-    const customos::fs::RamfsNode* cur = Cur();
+    const duetos::fs::RamfsNode* cur = Cur();
     if (cur == nullptr || cur->children == nullptr)
         return nullptr;
     const u32 n = CountChildren(cur);
@@ -92,17 +92,17 @@ void WriteU64Dec(char* dst, u32 cap, u64 v)
     dst[n] = '\0';
 }
 
-void DrawRow(u32 x, u32 y, u32 w, const customos::fs::RamfsNode* n, bool selected)
+void DrawRow(u32 x, u32 y, u32 w, const duetos::fs::RamfsNode* n, bool selected)
 {
-    using customos::drivers::video::FramebufferDrawString;
-    using customos::drivers::video::FramebufferFillRect;
+    using duetos::drivers::video::FramebufferDrawString;
+    using duetos::drivers::video::FramebufferFillRect;
     if (selected)
         FramebufferFillRect(x, y, w, kRowH, kSelBg);
     else
         FramebufferFillRect(x, y, w, kRowH, kBg);
     const u32 fg = selected ? kInkSel : kInkFg;
     const u32 bg = selected ? kSelBg : kBg;
-    const bool is_dir = (n->type == customos::fs::RamfsNodeType::kDir);
+    const bool is_dir = (n->type == duetos::fs::RamfsNodeType::kDir);
     // "[D] " or "[F] " tag.
     const char* tag = is_dir ? "[D] " : "[F] ";
     FramebufferDrawString(x + 4, y + 1, tag, fg, bg);
@@ -131,10 +131,10 @@ void DrawRow(u32 x, u32 y, u32 w, const customos::fs::RamfsNode* n, bool selecte
 
 void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
 {
-    using customos::drivers::video::FramebufferDrawString;
-    using customos::drivers::video::FramebufferFillRect;
+    using duetos::drivers::video::FramebufferDrawString;
+    using duetos::drivers::video::FramebufferFillRect;
     FramebufferFillRect(cx, cy, cw, ch, kBg);
-    const customos::fs::RamfsNode* cur = Cur();
+    const duetos::fs::RamfsNode* cur = Cur();
     if (cur == nullptr)
     {
         FramebufferDrawString(cx + 4, cy + 4, "(no root)", kInkDim, kBg);
@@ -173,7 +173,7 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
     for (u32 i = 0; i < max_rows && first + i < n; ++i)
     {
         const u32 idx = first + i;
-        const customos::fs::RamfsNode* child = cur->children[idx];
+        const duetos::fs::RamfsNode* child = cur->children[idx];
         if (child == nullptr)
             break;
         DrawRow(cx, list_top + i * kRowH, cw, child, idx == g_state.selection);
@@ -187,28 +187,28 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
 
 } // namespace
 
-void FilesInit(customos::drivers::video::WindowHandle handle)
+void FilesInit(duetos::drivers::video::WindowHandle handle)
 {
     g_state.handle = handle;
     g_state.depth = 0;
     g_state.selection = 0;
-    const customos::fs::RamfsNode* root = customos::fs::RamfsTrustedRoot();
+    const duetos::fs::RamfsNode* root = duetos::fs::RamfsTrustedRoot();
     if (root != nullptr)
     {
         g_state.stack[0] = root;
         g_state.depth = 1;
     }
-    customos::drivers::video::WindowSetContentDraw(handle, DrawFn, nullptr);
+    duetos::drivers::video::WindowSetContentDraw(handle, DrawFn, nullptr);
 }
 
-customos::drivers::video::WindowHandle FilesWindow()
+duetos::drivers::video::WindowHandle FilesWindow()
 {
     return g_state.handle;
 }
 
 bool FilesFeedArrow(bool up)
 {
-    const customos::fs::RamfsNode* cur = Cur();
+    const duetos::fs::RamfsNode* cur = Cur();
     if (cur == nullptr)
         return true;
     const u32 n = CountChildren(cur);
@@ -244,10 +244,10 @@ bool FilesFeedChar(char c)
     }
     if (static_cast<u8>(c) == 0x0A) // Enter
     {
-        const customos::fs::RamfsNode* sel = SelectedChild();
+        const duetos::fs::RamfsNode* sel = SelectedChild();
         if (sel == nullptr)
             return true;
-        if (sel->type == customos::fs::RamfsNodeType::kDir)
+        if (sel->type == duetos::fs::RamfsNodeType::kDir)
         {
             if (g_state.depth < kMaxDepth)
             {
@@ -258,9 +258,9 @@ bool FilesFeedChar(char c)
         else
         {
             // File — log selection. Preview is a future slice.
-            customos::arch::SerialWrite("[files] open file name=");
-            customos::arch::SerialWrite(sel->name ? sel->name : "(unnamed)");
-            customos::arch::SerialWrite("\n");
+            duetos::arch::SerialWrite("[files] open file name=");
+            duetos::arch::SerialWrite(sel->name ? sel->name : "(unnamed)");
+            duetos::arch::SerialWrite("\n");
         }
         return true;
     }
@@ -269,8 +269,8 @@ bool FilesFeedChar(char c)
 
 void FilesSelfTest()
 {
-    using customos::arch::SerialWrite;
-    const customos::fs::RamfsNode* root = customos::fs::RamfsTrustedRoot();
+    using duetos::arch::SerialWrite;
+    const duetos::fs::RamfsNode* root = duetos::fs::RamfsTrustedRoot();
     const u32 root_n = CountChildren(root);
     bool pass = (root != nullptr && root_n > 0);
     // Try to enter the first directory child (if any) and verify
@@ -278,13 +278,13 @@ void FilesSelfTest()
     // directly to exercise the navigation path.
     u32 saved_depth = g_state.depth;
     u32 saved_sel = g_state.selection;
-    const customos::fs::RamfsNode* saved_top = Cur();
+    const duetos::fs::RamfsNode* saved_top = Cur();
     if (pass)
     {
         // Pick the first child that is a directory.
         for (u32 i = 0; i < root_n; ++i)
         {
-            if (root->children[i]->type == customos::fs::RamfsNodeType::kDir)
+            if (root->children[i]->type == duetos::fs::RamfsNodeType::kDir)
             {
                 g_state.selection = i;
                 FilesFeedChar('\n'); // Enter -> descend
@@ -302,4 +302,4 @@ void FilesSelfTest()
     SerialWrite(pass ? "[files] self-test OK (root has children, descend+back works)\n" : "[files] self-test FAILED\n");
 }
 
-} // namespace customos::apps::files
+} // namespace duetos::apps::files

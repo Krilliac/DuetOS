@@ -11,7 +11,7 @@
  * one exception handler call; no heap allocation is ever involved.
  */
 
-namespace customos::arch
+namespace duetos::arch
 {
 
 struct TrapFrame
@@ -171,4 +171,4 @@ struct FaultCounts
 };
 FaultCounts FaultCountsSnapshot();
 
-} // namespace customos::arch
+} // namespace duetos::arch

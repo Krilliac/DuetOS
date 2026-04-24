@@ -3,7 +3,7 @@
 #include "../core/types.h"
 
 /*
- * CustomOS attacker-simulation suite — red-team harness.
+ * DuetOS attacker-simulation suite — red-team harness.
  *
  * Runs a battery of in-kernel attack scenarios that a rootkit /
  * kernel-level malware would attempt, verifies each is detected
@@ -40,7 +40,7 @@
  * otherwise happens synchronously from the calling thread.
  */
 
-namespace customos::security
+namespace duetos::security
 {
 
 enum class AttackOutcome : u8
@@ -85,4 +85,4 @@ void AttackSimRun();
 /// Zero-initialised until AttackSimRun has completed.
 const AttackSummary& AttackSimSummary();
 
-} // namespace customos::security
+} // namespace duetos::security

@@ -3,7 +3,7 @@
 #include "../../core/types.h"
 
 /*
- * CustomOS — USB MSC / SCSI Bulk-only transport helpers, v0.
+ * DuetOS — USB MSC / SCSI Bulk-only transport helpers, v0.
  *
  * A USB mass-storage device speaks the "Bulk-Only Transport"
  * (BBB) wire protocol: the host sends a Command Block Wrapper
@@ -37,7 +37,7 @@
  *   - T10 SPC-4 (INQUIRY / TUR) and SBC-3 (READ/WRITE CAPACITY)
  */
 
-namespace customos::drivers::usb::msc
+namespace duetos::drivers::usb::msc
 {
 
 inline constexpr u32 kCbwSignature = 0x43425355; // "USBC"
@@ -126,4 +126,4 @@ bool MscParseReadCapacity10(const u8* buf, u32 len, ReadCapacity10* out);
 /// KASSERTs the decoded fields. PASS/FAIL line on COM1.
 void MscSelfTest();
 
-} // namespace customos::drivers::usb::msc
+} // namespace duetos::drivers::usb::msc

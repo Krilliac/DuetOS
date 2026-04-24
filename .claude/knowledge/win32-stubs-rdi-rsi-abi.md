@@ -82,7 +82,7 @@ kOff constant from kOffMissLogger onward.
   to the caller, so a trashed rdi doesn't matter in practice.
 - `miss-logger` (0x24A, was 0x246 pre-shift) — called only for
   **unresolved** imports. User code only hits it if it depends on
-  an import CustomOS doesn't stub, which the current workloads
+  an import DuetOS doesn't stub, which the current workloads
   don't. Still worth fixing for hygiene.
 
 ## Rules going forward

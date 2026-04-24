@@ -2,7 +2,7 @@
 
 #include "../../core/klog.h"
 
-namespace customos::arch
+namespace duetos::arch
 {
 
 namespace
@@ -238,4 +238,4 @@ u64 GdtHash()
     return h;
 }
 
-} // namespace customos::arch
+} // namespace duetos::arch

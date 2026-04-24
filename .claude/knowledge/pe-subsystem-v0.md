@@ -18,7 +18,7 @@ captures the v0 slice that brings up a real end-to-end PE path:
    plumbing the existing ELF smoke tasks use.
 
 The PE is freestanding — no imports, no DLLs — and talks the
-CustomOS **native** syscall ABI (`int 0x80`, rax = syscall #).
+DuetOS **native** syscall ABI (`int 0x80`, rax = syscall #).
 The Win32 subsystem (ntdll, kernel32, user32) is still future
 work. This slice is the scaffolding those DLLs will sit on top of.
 
@@ -33,7 +33,7 @@ work. This slice is the scaffolding those DLLs will sit on top of.
 The CMake `add_custom_command` in `kernel/CMakeLists.txt`
 fires on any change to `hello.c`, the shell script, or the
 embed script; its `OUTPUT` header is appended to
-`CUSTOMOS_KERNEL_SHARED_SOURCES` so both kernel stages see the
+`DUETOS_KERNEL_SHARED_SOURCES` so both kernel stages see the
 dependency and the custom command runs on first configure.
 
 The kernel include path is extended with `${CMAKE_CURRENT_BINARY_DIR}`
@@ -215,7 +215,7 @@ Boot-time PeReport output (abridged):
 ### Interpretation of the gap
 
 A Win32 subsystem that runs `windows-kill.exe` natively on
-CustomOS would need, at minimum:
+DuetOS would need, at minimum:
 
 1. **Base relocation application** — apply the 78 entries
    across 3 reloc blocks so the image can land anywhere, not

@@ -1,6 +1,6 @@
 # Agent Session Bootstrap
 
-Scope: entire repository (`CustomOS`).
+Scope: entire repository (`DuetOS`).
 
 For every new session/chat in this repo:
 
@@ -12,4 +12,4 @@ If either file is missing, report that clearly and continue with available conte
 
 ## Project summary for agents
 
-CustomOS is a from-scratch x86_64 operating system that runs **Windows PE executables as a native ABI** and targets commodity Intel/AMD/NVIDIA hardware. The Win32 subsystem (PE loader, NT syscall surface, `ntdll`/`kernel32`/`user32`/`gdi32`/`d3d*`) is a peer to the native ABI, not an emulator bolted on top. See `CLAUDE.md` → "What is this?" for the full scope and non-goals.
+DuetOS is a from-scratch x86_64 operating system that runs **Windows PE executables as a native ABI** and targets commodity Intel/AMD/NVIDIA hardware. The Win32 subsystem (PE loader, NT syscall surface, `ntdll`/`kernel32`/`user32`/`gdi32`/`d3d*`) is a peer to the native ABI, not an emulator bolted on top. See `CLAUDE.md` → "What is this?" for the full scope and non-goals.

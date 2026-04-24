@@ -4,7 +4,7 @@
 #include "../core/klog.h"
 #include "../drivers/storage/block.h"
 
-namespace customos::fs::gpt
+namespace duetos::fs::gpt
 {
 
 namespace
@@ -453,4 +453,4 @@ void GptSelfTest()
     }
 }
 
-} // namespace customos::fs::gpt
+} // namespace duetos::fs::gpt

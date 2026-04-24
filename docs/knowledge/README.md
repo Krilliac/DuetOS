@@ -1,6 +1,6 @@
 # docs/knowledge
 
-Planning and living-decisions documents intended to capture long-range execution strategy for CustomOS.
+Planning and living-decisions documents intended to capture long-range execution strategy for DuetOS.
 
 ## Contents
 

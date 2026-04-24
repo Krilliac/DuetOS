@@ -3,17 +3,17 @@
 #include "types.h"
 
 // Forward-declares to keep this header lightweight.
-namespace customos::fs
+namespace duetos::fs
 {
 struct RamfsNode;
 }
-namespace customos::core
+namespace duetos::core
 {
 struct CapSet;
 }
 
 /*
- * CustomOS ring-3 smoke task — v0.
+ * DuetOS ring-3 smoke task — v0.
  *
  * Boot-time demonstration that the kernel can transition to ring 3 and
  * that a user-mode task coexists with kernel-mode workers. Spawns a
@@ -40,7 +40,7 @@ struct CapSet;
  * mechanism that flips the U/S bit on the user pages).
  */
 
-namespace customos::core
+namespace duetos::core
 {
 
 void StartRing3SmokeTask();
@@ -110,4 +110,4 @@ u64 SpawnElfLinux(const char* name, const u8* elf_bytes, u64 elf_len, CapSet cap
 u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, const fs::RamfsNode* root,
                 u64 frame_budget, u64 tick_budget);
 
-} // namespace customos::core
+} // namespace duetos::core

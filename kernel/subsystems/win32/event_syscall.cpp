@@ -6,7 +6,7 @@
 #include "../../core/process.h"
 #include "../../sched/sched.h"
 
-namespace customos::subsystems::win32
+namespace duetos::subsystems::win32
 {
 
 namespace
@@ -206,4 +206,4 @@ void DoEventWait(arch::TrapFrame* frame)
     frame->rax = got ? kWaitObject0 : kWaitTimeout;
 }
 
-} // namespace customos::subsystems::win32
+} // namespace duetos::subsystems::win32

@@ -1,5 +1,5 @@
 /*
- * CustomOS — kernel thread context switch.
+ * DuetOS — kernel thread context switch.
  *
  *   void ContextSwitch(u64* old_rsp_slot, u64 new_rsp);
  *

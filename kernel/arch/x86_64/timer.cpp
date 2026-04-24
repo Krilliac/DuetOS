@@ -9,7 +9,7 @@
 #include "../../core/klog.h"
 #include "../../sched/sched.h"
 
-namespace customos::arch
+namespace duetos::arch
 {
 
 namespace
@@ -162,4 +162,4 @@ u64 TimerTicks()
     return g_ticks;
 }
 
-} // namespace customos::arch
+} // namespace duetos::arch

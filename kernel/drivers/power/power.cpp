@@ -7,7 +7,7 @@
 #include "../../core/klog.h"
 #include "../../core/panic.h"
 
-namespace customos::drivers::power
+namespace duetos::drivers::power
 {
 
 namespace
@@ -127,4 +127,4 @@ const char* BatteryStateName(BatteryState s)
     }
 }
 
-} // namespace customos::drivers::power
+} // namespace duetos::drivers::power

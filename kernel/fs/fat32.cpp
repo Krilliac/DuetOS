@@ -4,7 +4,7 @@
 #include "../core/klog.h"
 #include "../drivers/storage/block.h"
 
-namespace customos::fs::fat32
+namespace duetos::fs::fat32
 {
 
 namespace
@@ -2999,4 +2999,4 @@ void Fat32SelfTest()
     SerialWrite("[fs/fat32] self-test OK (dir growth handled 70 LFN entries + teardown)\n");
 }
 
-} // namespace customos::fs::fat32
+} // namespace duetos::fs::fat32

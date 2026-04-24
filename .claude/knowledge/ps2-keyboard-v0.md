@@ -91,7 +91,7 @@ stats for observability.
 IRQ handler ends with:
 
 ```cpp
-customos::sched::WaitQueueWakeOne(&g_readers);
+duetos::sched::WaitQueueWakeOne(&g_readers);
 ```
 
 which sets `need_resched` on the woken task's behalf. The IRQ

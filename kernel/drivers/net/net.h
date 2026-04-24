@@ -4,7 +4,7 @@
 #include "../../core/types.h"
 
 /*
- * CustomOS — Network driver shell, v0.
+ * DuetOS — Network driver shell, v0.
  *
  * Discovery + classification for PCI network controllers, mirroring
  * the `drivers/gpu/` pattern. Walks the `pci::Device` cache after
@@ -31,7 +31,7 @@
  * Context: kernel. `NetInit` runs once at boot after `PciEnumerate`.
  */
 
-namespace customos::drivers::net
+namespace duetos::drivers::net
 {
 
 // Common vendor IDs. A few are duplicated with drivers/gpu — PCI
@@ -80,7 +80,7 @@ void NetInit();
 /// established by the previous Init are NOT torn down (would burn
 /// the MMIO arena on every restart cycle); a follow-up slice that
 /// caches `(bus,dev,fn) → mmio_virt` can fix that.
-::customos::core::Result<void> NetShutdown();
+::duetos::core::Result<void> NetShutdown();
 
 /// Number of NICs discovered.
 u64 NicCount();
@@ -97,4 +97,4 @@ const char* RealtekNicTag(u16 device_id);
 const char* BroadcomNicTag(u16 device_id);
 const char* VirtioNetTag(u16 device_id);
 
-} // namespace customos::drivers::net
+} // namespace duetos::drivers::net

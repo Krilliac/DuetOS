@@ -8,7 +8,7 @@
 #include "../core/panic.h"
 #include "../sync/spinlock.h"
 
-namespace customos::mm
+namespace duetos::mm
 {
 
 namespace
@@ -344,4 +344,4 @@ void KernelStackSelfTest()
     SerialWrite("\n");
 }
 
-} // namespace customos::mm
+} // namespace duetos::mm

@@ -12,7 +12,7 @@
 #include "../pci/pci.h"
 #include "usb.h"
 
-namespace customos::drivers::usb::xhci
+namespace duetos::drivers::usb::xhci
 {
 
 namespace
@@ -1044,7 +1044,7 @@ u16 TranslateHidUsage(u8 usage, bool shift)
         const u32 i = (usage - 0x1E);
         return shift ? u16(kDigitsUpper[i]) : u16(kDigitsLower[i]);
     }
-    using namespace customos::drivers::input;
+    using namespace duetos::drivers::input;
     switch (usage)
     {
     case 0x28:
@@ -1112,13 +1112,13 @@ u16 TranslateHidUsage(u8 usage, bool shift)
     case 0x52:
         return u16(kKeyArrowUp);
     default:
-        return u16(customos::drivers::input::kKeyNone);
+        return u16(duetos::drivers::input::kKeyNone);
     }
 }
 
 u8 TranslateHidModifiers(u8 hid_mod)
 {
-    using namespace customos::drivers::input;
+    using namespace duetos::drivers::input;
     u8 m = 0;
     if (hid_mod & 0x11u) // LCtrl | RCtrl
         m |= kKeyModCtrl;
@@ -1156,7 +1156,7 @@ bool UsageInReport(u8 usage, const u8 report[8])
 // still sees the right stream.
 void HidMouseInject(const u8 report[3])
 {
-    using namespace customos::drivers::input;
+    using namespace duetos::drivers::input;
     MousePacket p{};
     p.buttons = 0;
     if (report[0] & 0x01)
@@ -1176,7 +1176,7 @@ void HidMouseInject(const u8 report[3])
 // any "Ctrl held" UI cues without polling.
 void HidDiffAndInject(const u8 prev[8], const u8 curr[8])
 {
-    using namespace customos::drivers::input;
+    using namespace duetos::drivers::input;
     const u8 prev_mod = prev[0];
     const u8 curr_mod = curr[0];
     const bool shift = (curr_mod & 0x22u) != 0;
@@ -1247,7 +1247,7 @@ struct PollTaskArg
 {
     Runtime* rt;
     ControllerInfo* info;
-    customos::sched::WaitQueue wait;
+    duetos::sched::WaitQueue wait;
     u8 irq_vector; // 0 == MSI-X not bound, polling fallback
 };
 
@@ -1275,26 +1275,26 @@ void XhciAckInterrupter(Runtime& rt)
 void XhciIrq0()
 {
     XhciAckInterrupter(g_poll_rt[0]);
-    customos::sched::WaitQueueWakeOne(&g_poll_args[0].wait);
+    duetos::sched::WaitQueueWakeOne(&g_poll_args[0].wait);
 }
 void XhciIrq1()
 {
     XhciAckInterrupter(g_poll_rt[1]);
-    customos::sched::WaitQueueWakeOne(&g_poll_args[1].wait);
+    duetos::sched::WaitQueueWakeOne(&g_poll_args[1].wait);
 }
 void XhciIrq2()
 {
     XhciAckInterrupter(g_poll_rt[2]);
-    customos::sched::WaitQueueWakeOne(&g_poll_args[2].wait);
+    duetos::sched::WaitQueueWakeOne(&g_poll_args[2].wait);
 }
 void XhciIrq3()
 {
     XhciAckInterrupter(g_poll_rt[3]);
-    customos::sched::WaitQueueWakeOne(&g_poll_args[3].wait);
+    duetos::sched::WaitQueueWakeOne(&g_poll_args[3].wait);
 }
 
 static_assert(kMaxControllers == 4, "per-controller IRQ stamps must match kMaxControllers");
-constexpr ::customos::arch::IrqHandler kXhciIrqStamps[kMaxControllers] = {&XhciIrq0, &XhciIrq1, &XhciIrq2, &XhciIrq3};
+constexpr ::duetos::arch::IrqHandler kXhciIrqStamps[kMaxControllers] = {&XhciIrq0, &XhciIrq1, &XhciIrq2, &XhciIrq3};
 
 // Attempt MSI-X bring-up for one controller. On success the
 // controller fires IRQs at `vector` whenever an event is posted
@@ -1302,7 +1302,7 @@ constexpr ::customos::arch::IrqHandler kXhciIrqStamps[kMaxControllers] = {&XhciI
 // tick-cadence polling.
 bool XhciBindMsix(Runtime& rt, const HostControllerInfo& h, u32 ctrlr_idx, u8* out_vector)
 {
-    using namespace customos::drivers::pci;
+    using namespace duetos::drivers::pci;
     DeviceAddress addr{};
     addr.bus = h.bus;
     addr.device = h.device;
@@ -1390,17 +1390,17 @@ void HidPollEntry(void* raw)
             // committing to the block. If something's there we
             // fall through to the next iteration, Sti-free (the
             // scheduler's Schedule path re-enables on switch).
-            customos::arch::Cli();
+            duetos::arch::Cli();
             if ((rt.evt_ring[rt.evt_idx].control & 1u) == (rt.evt_cycle & 1u))
             {
-                customos::arch::Sti();
+                duetos::arch::Sti();
                 continue;
             }
-            customos::sched::WaitQueueBlock(&arg->wait);
+            duetos::sched::WaitQueueBlock(&arg->wait);
         }
         else
         {
-            customos::sched::SchedSleepTicks(1);
+            duetos::sched::SchedSleepTicks(1);
         }
     }
 }
@@ -1837,7 +1837,7 @@ bool InitOne(const HostControllerInfo& h, ControllerInfo& out)
                 arch::SerialWrite(" — falling back to tick-cadence polling\n");
             }
 
-            customos::sched::SchedCreate(HidPollEntry, &g_poll_args[idx], "xhci-hid-poll");
+            duetos::sched::SchedCreate(HidPollEntry, &g_poll_args[idx], "xhci-hid-poll");
         }
     }
 
@@ -1875,11 +1875,11 @@ void XhciInit()
     }
 }
 
-::customos::core::Result<void> XhciShutdown()
+::duetos::core::Result<void> XhciShutdown()
 {
     KLOG_TRACE_SCOPE("drivers/usb/xhci", "XhciShutdown");
-    using ::customos::core::Err;
-    using ::customos::core::ErrorCode;
+    using ::duetos::core::Err;
+    using ::duetos::core::ErrorCode;
     // For each live controller: clear RUN/STOP, wait for HCH=1,
     // write CRCR / DCBAAP / ERSTBA to 0 so the hardware forgets
     // our ring addresses. The kernel frames behind the rings stay
@@ -1966,7 +1966,7 @@ void XhciInit()
     return {};
 }
 
-::customos::core::Result<void> XhciRestart()
+::duetos::core::Result<void> XhciRestart()
 {
     if (auto r = XhciShutdown(); !r)
         return r;
@@ -1986,4 +1986,4 @@ const ControllerInfo* XhciControllerAt(u32 i)
     return &g_controllers[i];
 }
 
-} // namespace customos::drivers::usb::xhci
+} // namespace duetos::drivers::usb::xhci

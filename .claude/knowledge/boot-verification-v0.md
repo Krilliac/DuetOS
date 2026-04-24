@@ -7,7 +7,7 @@
 ## Description
 
 First end-to-end boot of the kernel in QEMU observed. `cmake --preset
-x86_64-debug` + `cmake --build … --target customos-iso` produces a
+x86_64-debug` + `cmake --build … --target duetos-iso` produces a
 bootable ISO; `tools/qemu/run.sh` launches QEMU with `-machine q35
 -cpu max -m 512M`, serial piped to stdio, `-d int,cpu_reset`, headless
 display, and a configurable timeout.
@@ -37,7 +37,7 @@ Depends on: `qemu-system-x86_64`, `grub-mkrescue` (from `grub-pc-bin`),
 On a healthy boot the serial output contains, in order:
 
 ```
-[boot] CustomOS kernel reached long mode.
+[boot] DuetOS kernel reached long mode.
 [boot] Multiboot2 handoff verified.
 [boot] Installing kernel GDT.
 [boot] Installing IDT (vectors 0..31).
@@ -136,7 +136,7 @@ CI should diff the expected boot log shape against the actual.
 
 ### Regression canaries
 
-- **Kernel doesn't reach `kernel_main`** (no `[boot] CustomOS
+- **Kernel doesn't reach `kernel_main`** (no `[boot] DuetOS
   kernel reached long mode.` line): boot.S / Multiboot2 / linker
   script issue. Check that the Multiboot2 header checksum still
   adds to zero, and that the kernel ELF's entrypoint is aligned
@@ -155,7 +155,7 @@ CI should diff the expected boot log shape against the actual.
 
 ## Notes
 
-- **Headless-only for now.** `CUSTOMOS_DISPLAY=gtk` switches to a
+- **Headless-only for now.** `DUETOS_DISPLAY=gtk` switches to a
   graphical window; useful when we start rendering to a framebuffer.
 - **No automated log diff yet.** The shape of the healthy log is
   documented here but not enforced. Cheap CI win: grep for `[panic]`

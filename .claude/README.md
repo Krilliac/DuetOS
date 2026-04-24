@@ -1,6 +1,6 @@
 # Persistence Context Database
 
-This directory is Claude's persistent memory for the CustomOS project. It is **not** OS code — it is a structured knowledge store that Claude reads and writes across sessions to accumulate learning: solutions to problems, effective workflows, codebase observations, and project-specific decisions.
+This directory is Claude's persistent memory for the DuetOS project. It is **not** OS code — it is a structured knowledge store that Claude reads and writes across sessions to accumulate learning: solutions to problems, effective workflows, codebase observations, and project-specific decisions.
 
 ## Why This Exists
 

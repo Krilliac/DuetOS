@@ -6,7 +6,7 @@
 
 ## Description
 
-How the bootable CustomOS ISO is produced and the canonical way to verify a full boot in QEMU. First end-to-end-verified boot landed in this session: the kernel reaches long mode and writes to COM1.
+How the bootable DuetOS ISO is produced and the canonical way to verify a full boot in QEMU. First end-to-end-verified boot landed in this session: the kernel reaches long mode and writes to COM1.
 
 ## Context
 
@@ -21,7 +21,7 @@ cmake --preset x86_64-debug
 cmake --build build/x86_64-debug --parallel $(nproc)
 ```
 
-The `customos-iso` target is declared `ALL` in `kernel/CMakeLists.txt`, so a plain build produces `build/x86_64-debug/customos.iso` alongside the kernel ELF.
+The `duetos-iso` target is declared `ALL` in `kernel/CMakeLists.txt`, so a plain build produces `build/x86_64-debug/duetos.iso` alongside the kernel ELF.
 
 If `grub-mkrescue` and `xorriso` are not installed, the target is silently skipped with a status message pointing at the apt packages required. The kernel ELF still builds.
 
@@ -41,11 +41,11 @@ sudo apt-get install -y grub-common grub-pc-bin xorriso mtools qemu-system-x86
 
 ```bash
 tools/qemu/run.sh                      # interactive, serial on stdio
-CUSTOMOS_TIMEOUT=10 tools/qemu/run.sh  # self-terminate after 10s (useful in CI)
+DUETOS_TIMEOUT=10 tools/qemu/run.sh  # self-terminate after 10s (useful in CI)
 ```
 
 The script:
-1. Uses `-cdrom build/<preset>/customos.iso -boot d` when the ISO exists.
+1. Uses `-cdrom build/<preset>/duetos.iso -boot d` when the ISO exists.
 2. Falls back to `-kernel` **with a warning** if only the ELF exists (that path won't boot today — QEMU's `-kernel` speaks Multiboot 1, not 2).
 3. Passes `-display none -serial stdio -no-reboot -no-shutdown -d int,cpu_reset -D qemu.log`.
 
@@ -54,7 +54,7 @@ The script:
 On a working build the serial output is exactly:
 
 ```
-[boot] CustomOS kernel reached long mode.
+[boot] DuetOS kernel reached long mode.
 [boot] Multiboot2 handoff verified.
 [boot] Halting CPU.
 ```
@@ -65,12 +65,12 @@ On a working build the serial output is exactly:
 
 ```bash
 # Confirm the kernel header is still valid Multiboot2.
-grub-file --is-x86-multiboot2 build/x86_64-debug/kernel/customos-kernel.elf
+grub-file --is-x86-multiboot2 build/x86_64-debug/kernel/duetos-kernel.elf
 
 # Peek at the ISO layout.
-xorriso -indev build/x86_64-debug/customos.iso -find / 2>&1 | grep -v "^xorriso"
+xorriso -indev build/x86_64-debug/duetos.iso -find / 2>&1 | grep -v "^xorriso"
 # Expected top-level:
-#   /boot/customos-kernel.elf
+#   /boot/duetos-kernel.elf
 #   /boot/grub/grub.cfg
 #   /boot/grub/i386-pc/*.mod
 ```
@@ -79,13 +79,13 @@ xorriso -indev build/x86_64-debug/customos.iso -find / 2>&1 | grep -v "^xorriso"
 
 1. Re-run with display on and keep QEMU alive:
    ```bash
-   CUSTOMOS_DISPLAY=gtk tools/qemu/run.sh
+   DUETOS_DISPLAY=gtk tools/qemu/run.sh
    ```
 2. Start QEMU paused with a gdb stub:
    ```bash
    tools/qemu/run.sh -s -S
    # in another terminal:
-   gdb build/x86_64-debug/kernel/customos-kernel.elf \
+   gdb build/x86_64-debug/kernel/duetos-kernel.elf \
        -ex 'target remote :1234' \
        -ex 'break _start' -ex 'continue'
    ```

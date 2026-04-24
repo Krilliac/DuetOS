@@ -4,7 +4,7 @@
 #include "../core/klog.h"
 #include "../drivers/storage/block.h"
 
-namespace customos::fs::ext4
+namespace duetos::fs::ext4
 {
 
 namespace
@@ -402,10 +402,10 @@ void ReadGroup0AndRootInode(Volume& v)
 
 } // namespace
 
-::customos::core::Result<u32> Ext4Probe(u32 block_handle)
+::duetos::core::Result<u32> Ext4Probe(u32 block_handle)
 {
-    using ::customos::core::Err;
-    using ::customos::core::ErrorCode;
+    using ::duetos::core::Err;
+    using ::duetos::core::ErrorCode;
     if (g_volume_count >= kMaxVolumes)
         return Err{ErrorCode::BadState};
     // Read the 1024-byte superblock. ext4 superblock lives at byte
@@ -505,16 +505,16 @@ void Ext4ScanAll()
         // BadState (registry full) bubble up as one-line logs so a
         // failing disk or bumped kMaxVolumes ceiling is visible.
         auto r = Ext4Probe(i);
-        if (!r && r.error() != ::customos::core::ErrorCode::NotFound)
+        if (!r && r.error() != ::duetos::core::ErrorCode::NotFound)
         {
             arch::SerialWrite("[ext4] handle=");
             arch::SerialWriteHex(i);
             arch::SerialWrite(" probe error=");
-            arch::SerialWrite(::customos::core::ErrorCodeName(r.error()));
+            arch::SerialWrite(::duetos::core::ErrorCodeName(r.error()));
             arch::SerialWrite("\n");
         }
     }
     core::LogWithValue(core::LogLevel::Info, "fs/ext4", "ext4 volumes found", g_volume_count);
 }
 
-} // namespace customos::fs::ext4
+} // namespace duetos::fs::ext4

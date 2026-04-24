@@ -102,7 +102,7 @@
  * interrupts enabled. SMP and userland are separate follow-up commits.
  */
 
-#ifdef CUSTOMOS_CANARY_DEMO
+#ifdef DUETOS_CANARY_DEMO
 // Deliberately overrun a stack buffer so the function's epilogue
 // stack-canary check fails on return. Volatile + asm sink prevent
 // the optimiser from eliding the out-of-bounds stores. MUST return
@@ -113,10 +113,10 @@
 // that this function DOES have a canary the compiler can check.
 [[gnu::noinline]] static void CanarySmashDemo()
 {
-    volatile customos::u8 buf[8] = {};
+    volatile duetos::u8 buf[8] = {};
     for (int i = 0; i < 64; ++i)
     {
-        buf[i] = static_cast<customos::u8>(i);
+        buf[i] = static_cast<duetos::u8>(i);
     }
     asm volatile("" : : "r"(&buf[0]) : "memory");
 }
@@ -128,28 +128,28 @@ namespace
 // Walk the Multiboot2 tag list for type-1 (boot cmdline) and
 // return its NUL-terminated string, or nullptr if absent. The
 // pointer is into the live info struct; do not free.
-const char* FindBootCmdline(customos::uptr info_phys)
+const char* FindBootCmdline(duetos::uptr info_phys)
 {
     if (info_phys == 0)
     {
         return nullptr;
     }
-    const auto* info = reinterpret_cast<const customos::mm::MultibootInfoHeader*>(info_phys);
-    customos::uptr cursor = info_phys + sizeof(customos::mm::MultibootInfoHeader);
-    const customos::uptr end = info_phys + info->total_size;
+    const auto* info = reinterpret_cast<const duetos::mm::MultibootInfoHeader*>(info_phys);
+    duetos::uptr cursor = info_phys + sizeof(duetos::mm::MultibootInfoHeader);
+    const duetos::uptr end = info_phys + info->total_size;
     while (cursor < end)
     {
-        const auto* tag = reinterpret_cast<const customos::mm::MultibootTagHeader*>(cursor);
-        if (tag->type == customos::mm::kMultibootTagEnd)
+        const auto* tag = reinterpret_cast<const duetos::mm::MultibootTagHeader*>(cursor);
+        if (tag->type == duetos::mm::kMultibootTagEnd)
         {
             break;
         }
-        if (tag->type == customos::mm::kMultibootTagCmdline)
+        if (tag->type == duetos::mm::kMultibootTagCmdline)
         {
             // String starts right after the 8-byte {type, size} header.
-            return reinterpret_cast<const char*>(cursor + sizeof(customos::mm::MultibootTagHeader));
+            return reinterpret_cast<const char*>(cursor + sizeof(duetos::mm::MultibootTagHeader));
         }
-        cursor += (tag->size + 7u) & ~customos::uptr{7};
+        cursor += (tag->size + 7u) & ~duetos::uptr{7};
     }
     return nullptr;
 }
@@ -213,22 +213,22 @@ bool CmdlineMatches(const char* cmdline, const char* key, const char* want)
 
 } // namespace
 
-extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multiboot_info)
+extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_info)
 {
-    using namespace customos::arch;
-    using namespace customos::mm;
+    using namespace duetos::arch;
+    using namespace duetos::mm;
 
     SerialInit();
-    SerialWrite("[boot] CustomOS kernel reached long mode.\n");
+    SerialWrite("[boot] DuetOS kernel reached long mode.\n");
 
     // klog online as early as Serial. Self-test prints one line at
     // each severity so visual inspection of the early boot log
     // confirms the tag format + u64-value form are working. Trace
     // calls are gated by the runtime threshold (default Info) — use
     // `loglevel t` at the shell to enable function-scope tracing.
-    customos::core::KLogSelfTest();
+    duetos::core::KLogSelfTest();
 
-    constexpr customos::u32 kMultiboot2BootMagic = 0x36D76289;
+    constexpr duetos::u32 kMultiboot2BootMagic = 0x36D76289;
     if (multiboot_magic == kMultiboot2BootMagic)
     {
         SerialWrite("[boot] Multiboot2 handoff verified.\n");
@@ -239,23 +239,23 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     }
 
     SerialWrite("[boot] Probing CPU features.\n");
-    customos::arch::CpuInfoProbe();
+    duetos::arch::CpuInfoProbe();
 
     SerialWrite("[boot] Detecting hypervisor.\n");
-    customos::arch::HypervisorProbe();
+    duetos::arch::HypervisorProbe();
 
     SerialWrite("[boot] Probing SMBIOS.\n");
-    customos::arch::SmbiosInit();
+    duetos::arch::SmbiosInit();
 
     SerialWrite("[boot] Reading MSR thermals.\n");
-    customos::arch::ThermalProbe();
+    duetos::arch::ThermalProbe();
 
     SerialWrite("[boot] Exercising Result<T,E> + TRY primitives.\n");
-    customos::core::ResultSelfTest();
+    duetos::core::ResultSelfTest();
 
     SerialWrite("[boot] Seeding kernel entropy pool.\n");
-    customos::core::RandomInit();
-    customos::core::RandomSelfTest();
+    duetos::core::RandomInit();
+    duetos::core::RandomSelfTest();
     // NOTE: The stack canary has already been randomized from RDTSC
     // in boot.S before kernel_main was called. The C++ helper
     // `RandomizeStackCanary` in stack_canary.cpp is kept as an API
@@ -277,7 +277,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     IdtSetIst(18, kIstMachineCheck); // #MC
 
     SerialWrite("[boot] Installing syscall gate (int 0x80, DPL=3).\n");
-    customos::core::SyscallInit();
+    duetos::core::SyscallInit();
 
     // Slice-80 surface check. Issues an int3 (kernel-mode #BP, must
     // recover via TrapResponse::LogAndContinue) and an int 0x42
@@ -290,13 +290,13 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // subsystem tries to install its own rows; the user-copy
     // helpers are always entry 0 / 1.
     SerialWrite("[boot] Bringing up kernel extable.\n");
-    customos::arch::TrapsRegisterExtable();
-    customos::debug::ExtableSelfTest();
+    duetos::arch::TrapsRegisterExtable();
+    duetos::debug::ExtableSelfTest();
 
     // Fault-domain registry self-test. Registers a toy domain,
     // restarts it twice, checks counters. Real driver domains are
     // registered later in boot once their subsystems are up.
-    customos::core::FaultDomainSelfTest();
+    duetos::core::FaultDomainSelfTest();
 
     SerialWrite("[boot] Parsing Multiboot2 memory map.\n");
     FrameAllocatorInit(multiboot_info);
@@ -323,7 +323,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // Kernel-stack guard-paged arena — runs here because it needs
     // the managed paging API (PagingInit) for MapPage / UnmapPage
     // but must be online before any SchedCreate call uses it.
-    customos::mm::KernelStackSelfTest();
+    duetos::mm::KernelStackSelfTest();
     // Kernel-image W^X / DEP — split the 2 MiB PS direct map covering
     // the kernel image into 4 KiB pages, then apply per-section flags:
     //   .text  → R + X   (writes to .text now #PF)
@@ -342,8 +342,8 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // granular protection and SetPteFlags4K can flip the W bit
     // for a BP install. Runs BEFORE SMP bring-up so the single-
     // CPU invariant the BP installer asserts is still true.
-    customos::debug::BpInit();
-    if (!customos::debug::BpSelfTest())
+    duetos::debug::BpInit();
+    if (!duetos::debug::BpSelfTest())
     {
         SerialWrite("[boot] WARN: breakpoint self-test failed — see serial log\n");
     }
@@ -351,11 +351,11 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // the kernel. Rare+useful events (panic, sandbox denial,
     // Win32 stub miss, kernel #PF) are armed-log by default so
     // the first boot shows activity without any arming.
-    customos::debug::ProbeInit();
+    duetos::debug::ProbeInit();
 
     SerialWrite("[boot] Bringing up framebuffer (if present).\n");
-    customos::drivers::video::FramebufferInit(multiboot_info);
-    customos::drivers::video::FramebufferSelfTest();
+    duetos::drivers::video::FramebufferInit(multiboot_info);
+    duetos::drivers::video::FramebufferSelfTest();
 
     // GUI composition. Order for every paint pass:
     //   1. Desktop fill
@@ -374,90 +374,90 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // cycles at runtime.
     {
         const char* early_cmdline = FindBootCmdline(multiboot_info);
-        for (int i = 0; i < static_cast<int>(customos::drivers::video::ThemeId::kCount); ++i)
+        for (int i = 0; i < static_cast<int>(duetos::drivers::video::ThemeId::kCount); ++i)
         {
-            const auto id = static_cast<customos::drivers::video::ThemeId>(i);
-            if (CmdlineMatches(early_cmdline, "theme", customos::drivers::video::ThemeIdName(id)))
+            const auto id = static_cast<duetos::drivers::video::ThemeId>(i);
+            if (CmdlineMatches(early_cmdline, "theme", duetos::drivers::video::ThemeIdName(id)))
             {
-                customos::drivers::video::ThemeSet(id);
+                duetos::drivers::video::ThemeSet(id);
                 break;
             }
         }
     }
-    const auto& theme0 = customos::drivers::video::ThemeCurrent();
+    const auto& theme0 = duetos::drivers::video::ThemeCurrent();
 
-    // CALCULATOR — native CustomOS app. Window chrome first,
+    // CALCULATOR — native DuetOS app. Window chrome first,
     // then CalculatorInit registers its 16 buttons + content
     // drawer against the returned handle. Width / height are
     // sized to fit the 4x4 keypad (4 * 68 + 3 * 4 = 284 px
     // wide + 2 * 8 inset = 300; 4 * 36 + 3 * 4 + 60 top
     // inset + 4 bottom = 220). Colours come from the active
     // theme so Ctrl+Alt+Y re-hues without touching layout.
-    using Role = customos::drivers::video::ThemeRole;
+    using Role = duetos::drivers::video::ThemeRole;
     auto theme_chrome = [&](Role role)
     {
-        customos::drivers::video::WindowChrome c{};
+        duetos::drivers::video::WindowChrome c{};
         c.colour_border = theme0.window_border;
-        c.colour_title = theme0.role_title[static_cast<customos::u32>(role)];
-        c.colour_client = theme0.role_client[static_cast<customos::u32>(role)];
+        c.colour_title = theme0.role_title[static_cast<duetos::u32>(role)];
+        c.colour_client = theme0.role_client[static_cast<duetos::u32>(role)];
         c.colour_close_btn = theme0.window_close;
         c.title_height = 22;
         return c;
     };
 
-    customos::drivers::video::WindowChrome win_a_chrome = theme_chrome(Role::Calculator);
+    duetos::drivers::video::WindowChrome win_a_chrome = theme_chrome(Role::Calculator);
     win_a_chrome.x = 60;
     win_a_chrome.y = 60;
     win_a_chrome.w = 300;
     win_a_chrome.h = 220;
-    const customos::drivers::video::WindowHandle calc_handle =
-        customos::drivers::video::WindowRegister(win_a_chrome, "CALCULATOR");
-    customos::drivers::video::ThemeRegisterWindow(Role::Calculator, calc_handle);
-    customos::apps::calculator::CalculatorInit(calc_handle);
-    customos::apps::calculator::CalculatorSelfTest();
+    const duetos::drivers::video::WindowHandle calc_handle =
+        duetos::drivers::video::WindowRegister(win_a_chrome, "CALCULATOR");
+    duetos::drivers::video::ThemeRegisterWindow(Role::Calculator, calc_handle);
+    duetos::apps::calculator::CalculatorInit(calc_handle);
+    duetos::apps::calculator::CalculatorSelfTest();
 
-    customos::drivers::video::WindowChrome win_b_chrome = theme_chrome(Role::Notes);
+    duetos::drivers::video::WindowChrome win_b_chrome = theme_chrome(Role::Notes);
     win_b_chrome.x = 500;
     win_b_chrome.y = 100;
     win_b_chrome.w = 380;
     win_b_chrome.h = 200;
-    // NOTEPAD — native CustomOS notes app. The content-draw
+    // NOTEPAD — native DuetOS notes app. The content-draw
     // callback is installed inside NotesInit; the kbd-reader
     // thread below routes keystrokes here when this window
     // is active (focus == keyboard owner).
-    const customos::drivers::video::WindowHandle notes_handle =
-        customos::drivers::video::WindowRegister(win_b_chrome, "NOTEPAD");
-    customos::drivers::video::ThemeRegisterWindow(Role::Notes, notes_handle);
-    customos::apps::notes::NotesInit(notes_handle);
+    const duetos::drivers::video::WindowHandle notes_handle =
+        duetos::drivers::video::WindowRegister(win_b_chrome, "NOTEPAD");
+    duetos::drivers::video::ThemeRegisterWindow(Role::Notes, notes_handle);
+    duetos::apps::notes::NotesInit(notes_handle);
 
     // Task Manager window — a window whose content drawer
     // prints live scheduler + memory stats. The ui-ticker's
     // 1 Hz recompose refreshes it for free.
-    customos::drivers::video::WindowChrome taskman_chrome = theme_chrome(Role::TaskManager);
+    duetos::drivers::video::WindowChrome taskman_chrome = theme_chrome(Role::TaskManager);
     taskman_chrome.x = 180;
     taskman_chrome.y = 310;
     taskman_chrome.w = 340;
     taskman_chrome.h = 170;
-    const customos::drivers::video::WindowHandle taskman_handle =
-        customos::drivers::video::WindowRegister(taskman_chrome, "TASK MANAGER");
-    customos::drivers::video::ThemeRegisterWindow(Role::TaskManager, taskman_handle);
+    const duetos::drivers::video::WindowHandle taskman_handle =
+        duetos::drivers::video::WindowRegister(taskman_chrome, "TASK MANAGER");
+    duetos::drivers::video::ThemeRegisterWindow(Role::TaskManager, taskman_handle);
 
     // Live log viewer window — renders a compact view of the
     // klog ring (the same ring `dmesg` prints). Refreshes every
     // ui-ticker beat, so kernel activity appears without the
     // user having to flip consoles.
-    customos::drivers::video::WindowChrome logview_chrome = theme_chrome(Role::LogView);
+    duetos::drivers::video::WindowChrome logview_chrome = theme_chrome(Role::LogView);
     logview_chrome.x = 560;
     logview_chrome.y = 310;
     logview_chrome.w = 420;
     logview_chrome.h = 180;
-    const customos::drivers::video::WindowHandle logview_handle =
-        customos::drivers::video::WindowRegister(logview_chrome, "KERNEL LOG");
-    customos::drivers::video::ThemeRegisterWindow(Role::LogView, logview_handle);
+    const duetos::drivers::video::WindowHandle logview_handle =
+        duetos::drivers::video::WindowRegister(logview_chrome, "KERNEL LOG");
+    duetos::drivers::video::ThemeRegisterWindow(Role::LogView, logview_handle);
 
-    customos::drivers::video::WindowSetContentDraw(
+    duetos::drivers::video::WindowSetContentDraw(
         logview_handle,
-        [](customos::u32 cx, customos::u32 cy, customos::u32 cw, customos::u32 ch, void*)
+        [](duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32 ch, void*)
         {
             // Shared state so the klog chunk callback knows
             // where to render. Compositor mutex is held
@@ -469,13 +469,13 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
             // / "[D] ") from LevelTag(). We inspect it and set
             // the line's fg; subsequent chunks on the same line
             // inherit that colour until the newline resets.
-            constexpr customos::u32 kFgInfo = 0x00A0C8FF;  // muted blue-white
-            constexpr customos::u32 kFgWarn = 0x00FFD860;  // amber
-            constexpr customos::u32 kFgError = 0x00FF6050; // soft red
-            constexpr customos::u32 kFgDebug = 0x00808080; // grey
+            constexpr duetos::u32 kFgInfo = 0x00A0C8FF;  // muted blue-white
+            constexpr duetos::u32 kFgWarn = 0x00FFD860;  // amber
+            constexpr duetos::u32 kFgError = 0x00FF6050; // soft red
+            constexpr duetos::u32 kFgDebug = 0x00808080; // grey
             struct Render
             {
-                customos::u32 cx, cy, col, row, max_col, max_row, fg, bg;
+                duetos::u32 cx, cy, col, row, max_col, max_row, fg, bg;
                 bool done;
             };
             static Render r;
@@ -488,10 +488,10 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
             r.fg = kFgInfo;
             // Match the window's current client fill so text cells
             // blend cleanly into the chrome after a theme switch.
-            r.bg = customos::drivers::video::ThemeCurrent()
-                       .role_client[static_cast<customos::u32>(customos::drivers::video::ThemeRole::LogView)];
+            r.bg = duetos::drivers::video::ThemeCurrent()
+                       .role_client[static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::LogView)];
             r.done = false;
-            customos::core::DumpLogRingTo(
+            duetos::core::DumpLogRingTo(
                 [](const char* s)
                 {
                     if (r.done || s == nullptr)
@@ -544,7 +544,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                                 return;
                             }
                         }
-                        customos::drivers::video::FramebufferDrawChar(r.cx + r.col * 8, r.cy + r.row * 10, c, r.fg,
+                        duetos::drivers::video::FramebufferDrawChar(r.cx + r.col * 8, r.cy + r.row * 10, c, r.fg,
                                                                       r.bg);
                         ++r.col;
                     }
@@ -552,24 +552,24 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
         },
         nullptr);
 
-    customos::drivers::video::WindowSetContentDraw(
+    duetos::drivers::video::WindowSetContentDraw(
         taskman_handle,
-        [](customos::u32 cx, customos::u32 cy, customos::u32 /*cw*/, customos::u32 /*ch*/, void*)
+        [](duetos::u32 cx, duetos::u32 cy, duetos::u32 /*cw*/, duetos::u32 /*ch*/, void*)
         {
-            using customos::drivers::video::FramebufferDrawString;
-            constexpr customos::u32 kFg = 0x0080F088;
+            using duetos::drivers::video::FramebufferDrawString;
+            constexpr duetos::u32 kFg = 0x0080F088;
             // Match the window's current client fill so the text
             // rows sit on the same colour as the chrome client.
-            const customos::u32 kBg =
-                customos::drivers::video::ThemeCurrent()
-                    .role_client[static_cast<customos::u32>(customos::drivers::video::ThemeRole::TaskManager)];
+            const duetos::u32 kBg =
+                duetos::drivers::video::ThemeCurrent()
+                    .role_client[static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::TaskManager)];
             // Manual decimal formatter for u64 — kernel has no
             // printf. Fixed-width (10 digits) so the numeric
             // column doesn't jitter when values roll over.
-            auto fmt_u64 = [](customos::u64 v, char* out)
+            auto fmt_u64 = [](duetos::u64 v, char* out)
             {
                 char tmp[24];
-                customos::u32 n = 0;
+                duetos::u32 n = 0;
                 if (v == 0)
                 {
                     tmp[n++] = '0';
@@ -582,26 +582,26 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                         v /= 10;
                     }
                 }
-                customos::u32 pad = (n < 10) ? 10 - n : 0;
-                customos::u32 o = 0;
-                for (customos::u32 i = 0; i < pad; ++i)
+                duetos::u32 pad = (n < 10) ? 10 - n : 0;
+                duetos::u32 o = 0;
+                for (duetos::u32 i = 0; i < pad; ++i)
                     out[o++] = ' ';
-                for (customos::u32 i = 0; i < n; ++i)
+                for (duetos::u32 i = 0; i < n; ++i)
                     out[o++] = tmp[n - 1 - i];
                 out[o] = '\0';
             };
 
-            const auto s = customos::sched::SchedStatsRead();
-            const customos::u64 total = customos::mm::TotalFrames();
-            const customos::u64 free_frames = customos::mm::FreeFramesCount();
-            const customos::u64 uptime_s = customos::sched::SchedNowTicks() / 100;
+            const auto s = duetos::sched::SchedStatsRead();
+            const duetos::u64 total = duetos::mm::TotalFrames();
+            const duetos::u64 free_frames = duetos::mm::FreeFramesCount();
+            const duetos::u64 uptime_s = duetos::sched::SchedNowTicks() / 100;
 
             char num[24];
             char line[64];
             struct Row
             {
                 const char* label;
-                customos::u64 value;
+                duetos::u64 value;
             };
             const Row rows[] = {
                 {"UPTIME (S)     ", uptime_s},        {"CTX SWITCHES   ", s.context_switches},
@@ -609,14 +609,14 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                 {"TASKS BLOCKED  ", s.tasks_blocked}, {"MEM FREE (4K)  ", free_frames},
                 {"MEM TOTAL (4K) ", total},
             };
-            customos::u32 y_off = cy + 4;
-            for (customos::u32 i = 0; i < sizeof(rows) / sizeof(rows[0]); ++i)
+            duetos::u32 y_off = cy + 4;
+            for (duetos::u32 i = 0; i < sizeof(rows) / sizeof(rows[0]); ++i)
             {
                 fmt_u64(rows[i].value, num);
-                customos::u32 o = 0;
-                for (customos::u32 j = 0; rows[i].label[j] != '\0' && o + 1 < sizeof(line); ++j)
+                duetos::u32 o = 0;
+                for (duetos::u32 j = 0; rows[i].label[j] != '\0' && o + 1 < sizeof(line); ++j)
                     line[o++] = rows[i].label[j];
-                for (customos::u32 j = 0; num[j] != '\0' && o + 1 < sizeof(line); ++j)
+                for (duetos::u32 j = 0; num[j] != '\0' && o + 1 < sizeof(line); ++j)
                     line[o++] = num[j];
                 line[o] = '\0';
                 FramebufferDrawString(cx + 6, y_off, line, kFg, kBg);
@@ -625,33 +625,33 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
         },
         nullptr);
 
-    // FILES — native CustomOS file browser. Lists the ramfs
+    // FILES — native DuetOS file browser. Lists the ramfs
     // trusted root; Up/Down to move, Enter to descend, Backspace
     // or 'B' to go back.
-    customos::drivers::video::WindowChrome files_chrome = theme_chrome(Role::Files);
+    duetos::drivers::video::WindowChrome files_chrome = theme_chrome(Role::Files);
     files_chrome.x = 220;
     files_chrome.y = 160;
     files_chrome.w = 400;
     files_chrome.h = 200;
-    const customos::drivers::video::WindowHandle files_handle =
-        customos::drivers::video::WindowRegister(files_chrome, "FILES");
-    customos::drivers::video::ThemeRegisterWindow(Role::Files, files_handle);
-    customos::apps::files::FilesInit(files_handle);
-    customos::apps::files::FilesSelfTest();
+    const duetos::drivers::video::WindowHandle files_handle =
+        duetos::drivers::video::WindowRegister(files_chrome, "FILES");
+    duetos::drivers::video::ThemeRegisterWindow(Role::Files, files_handle);
+    duetos::apps::files::FilesInit(files_handle);
+    duetos::apps::files::FilesSelfTest();
 
     // CLOCK — 7-segment-style wall clock. No input, refreshes
     // via the 1 Hz ui-ticker. Sized tight around the digit row
     // (6 digits + 2 colons + gaps) with room for a date line.
-    customos::drivers::video::WindowChrome clock_chrome = theme_chrome(Role::Clock);
+    duetos::drivers::video::WindowChrome clock_chrome = theme_chrome(Role::Clock);
     clock_chrome.x = 640;
     clock_chrome.y = 520;
     clock_chrome.w = 240;
     clock_chrome.h = 110;
-    const customos::drivers::video::WindowHandle clock_handle =
-        customos::drivers::video::WindowRegister(clock_chrome, "CLOCK");
-    customos::drivers::video::ThemeRegisterWindow(Role::Clock, clock_handle);
-    customos::apps::clock::ClockInit(clock_handle);
-    customos::apps::clock::ClockSelfTest();
+    const duetos::drivers::video::WindowHandle clock_handle =
+        duetos::drivers::video::WindowRegister(clock_chrome, "CLOCK");
+    duetos::drivers::video::ThemeRegisterWindow(Role::Clock, clock_handle);
+    duetos::apps::clock::ClockInit(clock_handle);
+    duetos::apps::clock::ClockSelfTest();
 
     // Framebuffer text console. 80x40 chars of boot log at the
     // bottom of the desktop, under the windows in z-order. Dragging
@@ -659,10 +659,10 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // Taskbar across the bottom of the framebuffer. Placed at
     // runtime so a different resolution still anchors correctly.
     {
-        const auto fb_info = customos::drivers::video::FramebufferGet();
-        constexpr customos::u32 tb_h = 28;
-        const customos::u32 tb_y = (fb_info.height > tb_h) ? fb_info.height - tb_h : 0;
-        customos::drivers::video::TaskbarInit(tb_y, tb_h, theme0.taskbar_bg, theme0.taskbar_fg, theme0.taskbar_accent,
+        const auto fb_info = duetos::drivers::video::FramebufferGet();
+        constexpr duetos::u32 tb_h = 28;
+        const duetos::u32 tb_y = (fb_info.height > tb_h) ? fb_info.height - tb_h : 0;
+        duetos::drivers::video::TaskbarInit(tb_y, tb_h, theme0.taskbar_bg, theme0.taskbar_fg, theme0.taskbar_accent,
                                               theme0.taskbar_tab_inactive, theme0.taskbar_border);
     }
 
@@ -675,7 +675,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // and leaves room for future desktop / window actions without
     // reshuffling ids.
 
-    customos::drivers::video::ConsoleInit(16, 400, theme0.console_fg, theme0.console_bg);
+    duetos::drivers::video::ConsoleInit(16, 400, theme0.console_fg, theme0.console_bg);
 
     // Tee kernel log lines to the on-screen console so the desktop
     // shows subsystem activity live — not just the boot seed block.
@@ -689,7 +689,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // the user sees live kernel log output; Ctrl+Alt+F1 goes
     // back to the interactive shell buffer. Both consoles share
     // the same screen origin so the flip is in-place.
-    customos::core::SetLogTee([](const char* s) { customos::drivers::video::ConsoleWriteKlog(s); });
+    duetos::core::SetLogTee([](const char* s) { duetos::drivers::video::ConsoleWriteKlog(s); });
 
     // File sink: tee every Info+ log line into /tmp/boot.log on tmpfs.
     // Accumulates chunks until a newline arrives, then appends the
@@ -697,11 +697,11 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // further appends silently truncate, so the file captures the
     // earliest boot-critical Info+ lines. Once a real FS lands, swap
     // the sink for an on-disk writer and remove the cap.
-    customos::core::SetLogFileSink(
+    duetos::core::SetLogFileSink(
         [](const char* s)
         {
             static char line[256];
-            static customos::u32 len = 0;
+            static duetos::u32 len = 0;
             if (s == nullptr)
                 return;
             while (*s != 0)
@@ -712,42 +712,42 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                 }
                 if (*s == '\n')
                 {
-                    customos::fs::TmpFsAppend("boot.log", line, len);
+                    duetos::fs::TmpFsAppend("boot.log", line, len);
                     len = 0;
                 }
                 ++s;
             }
         });
-    customos::drivers::video::ConsoleWriteln("CUSTOMOS BOOT LOG");
-    customos::drivers::video::ConsoleWriteln("=================");
-    customos::drivers::video::ConsoleWriteln("");
-    customos::drivers::video::ConsoleWriteln("LONG-MODE KERNEL        OK");
-    customos::drivers::video::ConsoleWriteln("GDT IDT TSS IST         OK");
-    customos::drivers::video::ConsoleWriteln("PAGING W^X SMEP SMAP    OK");
-    customos::drivers::video::ConsoleWriteln("FRAME ALLOCATOR / HEAP  OK");
-    customos::drivers::video::ConsoleWriteln("ACPI MADT FADT MCFG     OK");
-    customos::drivers::video::ConsoleWriteln("LAPIC IOAPIC HPET       OK");
-    customos::drivers::video::ConsoleWriteln("SCHEDULER + BLOCKING    OK");
-    customos::drivers::video::ConsoleWriteln("PS/2 KEYBOARD           OK");
-    customos::drivers::video::ConsoleWriteln("PS/2 MOUSE              OK");
-    customos::drivers::video::ConsoleWriteln("PCI ENUMERATION         OK");
-    customos::drivers::video::ConsoleWriteln("FRAMEBUFFER + FONT      OK");
-    customos::drivers::video::ConsoleWriteln("WINDOW MANAGER v0       OK");
-    customos::drivers::video::ConsoleWriteln("");
-    customos::drivers::video::ConsoleWriteln("READY.  TRY DRAGGING A WINDOW BY ITS TITLE BAR.");
+    duetos::drivers::video::ConsoleWriteln("DUETOS BOOT LOG");
+    duetos::drivers::video::ConsoleWriteln("=================");
+    duetos::drivers::video::ConsoleWriteln("");
+    duetos::drivers::video::ConsoleWriteln("LONG-MODE KERNEL        OK");
+    duetos::drivers::video::ConsoleWriteln("GDT IDT TSS IST         OK");
+    duetos::drivers::video::ConsoleWriteln("PAGING W^X SMEP SMAP    OK");
+    duetos::drivers::video::ConsoleWriteln("FRAME ALLOCATOR / HEAP  OK");
+    duetos::drivers::video::ConsoleWriteln("ACPI MADT FADT MCFG     OK");
+    duetos::drivers::video::ConsoleWriteln("LAPIC IOAPIC HPET       OK");
+    duetos::drivers::video::ConsoleWriteln("SCHEDULER + BLOCKING    OK");
+    duetos::drivers::video::ConsoleWriteln("PS/2 KEYBOARD           OK");
+    duetos::drivers::video::ConsoleWriteln("PS/2 MOUSE              OK");
+    duetos::drivers::video::ConsoleWriteln("PCI ENUMERATION         OK");
+    duetos::drivers::video::ConsoleWriteln("FRAMEBUFFER + FONT      OK");
+    duetos::drivers::video::ConsoleWriteln("WINDOW MANAGER v0       OK");
+    duetos::drivers::video::ConsoleWriteln("");
+    duetos::drivers::video::ConsoleWriteln("READY.  TRY DRAGGING A WINDOW BY ITS TITLE BAR.");
 
     // Account subsystem — seed the built-in admin/guest
     // accounts, run the verify/reject self-test, then arm the
     // login gate below. Order matters: the gate consults the
     // account table, so AuthInit must precede LoginStart.
-    customos::core::AuthInit();
-    customos::core::AuthSelfTest();
+    duetos::core::AuthInit();
+    duetos::core::AuthSelfTest();
 
     // Shell welcome + initial prompt. Landing here after every
     // subsystem init line keeps the boot log visible above the
     // prompt — the user sees the tail end of the kernel's own
     // output, then their own typing cursor.
-    customos::core::ShellInit();
+    duetos::core::ShellInit();
 
     // Demo clickable button, owned by window A. x/y are offsets
     // (The CLICK ME demo button previously registered here has
@@ -757,7 +757,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // Initial display mode. Priority:
     //   1. Runtime kernel cmdline "boot=tty" / "boot=desktop"
     //      (Multiboot2 tag 1 — set via GRUB menu entry).
-    //   2. Compile-time CUSTOMOS_BOOT_TTY fallback.
+    //   2. Compile-time DUETOS_BOOT_TTY fallback.
     //   3. Desktop (default).
     // Runtime Ctrl+Alt+T still flips regardless after boot.
     const char* cmdline = FindBootCmdline(multiboot_info);
@@ -778,7 +778,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     }
     else
     {
-#ifdef CUSTOMOS_BOOT_TTY
+#ifdef DUETOS_BOOT_TTY
         want_tty = true;
 #endif
     }
@@ -790,25 +790,25 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
 
     if (want_tty)
     {
-        customos::drivers::video::SetDisplayMode(customos::drivers::video::DisplayMode::Tty);
-        customos::drivers::video::ConsoleSetOrigin(16, 16);
-        customos::drivers::video::ConsoleSetColours(theme0.console_fg, 0x00000000);
-        customos::drivers::video::DesktopCompose(0x00000000, nullptr);
+        duetos::drivers::video::SetDisplayMode(duetos::drivers::video::DisplayMode::Tty);
+        duetos::drivers::video::ConsoleSetOrigin(16, 16);
+        duetos::drivers::video::ConsoleSetColours(theme0.console_fg, 0x00000000);
+        duetos::drivers::video::DesktopCompose(0x00000000, nullptr);
     }
     else
     {
-        customos::drivers::video::DesktopCompose(theme0.desktop_bg, "WELCOME TO CUSTOMOS   BOOT OK");
-        customos::drivers::video::CursorInit(theme0.desktop_bg);
+        duetos::drivers::video::DesktopCompose(theme0.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+        duetos::drivers::video::CursorInit(theme0.desktop_bg);
         if (demo_calendar)
         {
-            customos::u32 kx = 0, ky = 0, kw = 0, kh = 0;
-            customos::drivers::video::TaskbarClockBounds(&kx, &ky, &kw, &kh);
-            const customos::u32 ph = customos::drivers::video::CalendarPanelHeight();
-            const customos::u32 pw = customos::drivers::video::CalendarPanelWidth();
-            const customos::u32 ax = (kx + kw > pw) ? (kx + kw - pw) : 0;
-            const customos::u32 ay = (ky > ph) ? ky - ph : 0;
-            customos::drivers::video::CalendarOpen(ax, ay);
-            customos::drivers::video::DesktopCompose(theme0.desktop_bg, "WELCOME TO CUSTOMOS   BOOT OK");
+            duetos::u32 kx = 0, ky = 0, kw = 0, kh = 0;
+            duetos::drivers::video::TaskbarClockBounds(&kx, &ky, &kw, &kh);
+            const duetos::u32 ph = duetos::drivers::video::CalendarPanelHeight();
+            const duetos::u32 pw = duetos::drivers::video::CalendarPanelWidth();
+            const duetos::u32 ax = (kx + kw > pw) ? (kx + kw - pw) : 0;
+            const duetos::u32 ay = (ky > ph) ? ky - ph : 0;
+            duetos::drivers::video::CalendarOpen(ax, ay);
+            duetos::drivers::video::DesktopCompose(theme0.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
         }
     }
 
@@ -826,8 +826,8 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     const bool autologin = CmdlineMatches(cmdline, "autologin", "1");
     if (!autologin)
     {
-        const auto mode = want_tty ? customos::core::LoginMode::Tty : customos::core::LoginMode::Gui;
-        customos::core::LoginStart(mode);
+        const auto mode = want_tty ? duetos::core::LoginMode::Tty : duetos::core::LoginMode::Gui;
+        duetos::core::LoginStart(mode);
     }
     else
     {
@@ -842,37 +842,37 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     if (CmdlineMatches(cmdline, "pentest", "gui"))
     {
         SerialWrite("[boot] pentest=gui — arming GUI pentest runner\n");
-        customos::security::PentestGuiStart();
+        duetos::security::PentestGuiStart();
     }
 
     SerialWrite("[boot] Seeding ramfs + VFS self-test.\n");
-    customos::fs::RamfsInit();
+    duetos::fs::RamfsInit();
     {
-        using namespace customos::fs;
+        using namespace duetos::fs;
         const RamfsNode* trusted = RamfsTrustedRoot();
         const RamfsNode* sandbox = RamfsSandboxRoot();
 
         // Positive lookups against the trusted tree. Trailing slash,
         // leading slash, empty-component runs — all tolerated.
         if (VfsLookup(trusted, "/etc/version", 64) == nullptr)
-            customos::core::Panic("fs/vfs", "self-test: /etc/version missing from trusted root");
+            duetos::core::Panic("fs/vfs", "self-test: /etc/version missing from trusted root");
         if (VfsLookup(trusted, "/bin/hello", 64) == nullptr)
-            customos::core::Panic("fs/vfs", "self-test: /bin/hello missing from trusted root");
+            duetos::core::Panic("fs/vfs", "self-test: /bin/hello missing from trusted root");
         if (VfsLookup(trusted, "//etc//version", 64) == nullptr)
-            customos::core::Panic("fs/vfs", "self-test: double-slash tolerance broken");
+            duetos::core::Panic("fs/vfs", "self-test: double-slash tolerance broken");
 
         // The sandbox root has exactly one file; its lookup must
         // succeed, and the trusted-only paths must fail.
         if (VfsLookup(sandbox, "/welcome.txt", 64) == nullptr)
-            customos::core::Panic("fs/vfs", "self-test: /welcome.txt missing from sandbox root");
+            duetos::core::Panic("fs/vfs", "self-test: /welcome.txt missing from sandbox root");
         if (VfsLookup(sandbox, "/etc/version", 64) != nullptr)
-            customos::core::Panic("fs/vfs", "self-test: JAIL BROKEN — sandbox saw trusted /etc/version");
+            duetos::core::Panic("fs/vfs", "self-test: JAIL BROKEN — sandbox saw trusted /etc/version");
         if (VfsLookup(sandbox, "/bin/hello", 64) != nullptr)
-            customos::core::Panic("fs/vfs", "self-test: JAIL BROKEN — sandbox saw trusted /bin/hello");
+            duetos::core::Panic("fs/vfs", "self-test: JAIL BROKEN — sandbox saw trusted /bin/hello");
 
         // ".." is rejected outright.
         if (VfsLookup(trusted, "/etc/..", 64) != nullptr)
-            customos::core::Panic("fs/vfs", "self-test: .. accepted (would break jails)");
+            duetos::core::Panic("fs/vfs", "self-test: .. accepted (would break jails)");
 
         SerialWrite("[fs/vfs] self-test OK\n");
     }
@@ -883,20 +883,20 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // covered by ring3_smoke running two tasks at the same VA, but
     // this runs BEFORE scheduler/ring3 bring-up so a regression
     // surfaces at the earliest possible point.
-    customos::mm::AddressSpaceSelfTest();
+    duetos::mm::AddressSpaceSelfTest();
 
     SerialWrite("[boot] Parsing ACPI tables.\n");
-    customos::acpi::AcpiInit(multiboot_info);
+    duetos::acpi::AcpiInit(multiboot_info);
     SerialWrite("[boot] Building AML namespace from DSDT/SSDT.\n");
-    customos::acpi::AmlNamespaceBuild();
+    duetos::acpi::AmlNamespaceBuild();
     {
-        auto aml_init = []() -> customos::core::Result<void>
+        auto aml_init = []() -> duetos::core::Result<void>
         {
-            customos::acpi::AmlNamespaceBuild();
+            duetos::acpi::AmlNamespaceBuild();
             return {};
         };
-        auto aml_teardown = []() -> customos::core::Result<void> { return customos::acpi::AmlNamespaceShutdown(); };
-        customos::core::FaultDomainRegister("acpi/aml", aml_init, aml_teardown);
+        auto aml_teardown = []() -> duetos::core::Result<void> { return duetos::acpi::AmlNamespaceShutdown(); };
+        duetos::core::FaultDomainRegister("acpi/aml", aml_init, aml_teardown);
     }
 
     SerialWrite("[boot] Disabling 8259 PIC.\n");
@@ -916,8 +916,8 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // is visible in the boot log. A future slice wires this
     // into the VFS stat path + Win32 GetSystemTimeAsFileTime.
     {
-        customos::arch::RtcTime t = {};
-        customos::arch::RtcRead(&t);
+        duetos::arch::RtcTime t = {};
+        duetos::arch::RtcRead(&t);
         SerialWrite("[rtc] wall clock ");
         SerialWriteHex(t.year);
         SerialWrite("-");
@@ -938,99 +938,99 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // laptops) battery / thermal hints here. Dump it once at boot
     // for observability — the hex grid is enough for a reader to
     // cross-reference against vendor docs.
-    customos::arch::CmosDump();
+    duetos::arch::CmosDump();
 
     SerialWrite("[boot] Installing BSP per-CPU struct.\n");
-    customos::cpu::PerCpuInitBsp();
+    duetos::cpu::PerCpuInitBsp();
 
     SerialWrite("[boot] Programming Linux-ABI syscall MSRs.\n");
-    customos::subsystems::linux::SyscallInit();
+    duetos::subsystems::linux::SyscallInit();
 
-    customos::sync::SpinLockSelfTest();
+    duetos::sync::SpinLockSelfTest();
 
     SerialWrite("[boot] Bringing up periodic timer.\n");
     TimerInit();
 
     SerialWrite("[boot] Bringing up scheduler.\n");
-    customos::sched::SchedInit();
+    duetos::sched::SchedInit();
     // Idle task FIRST so the runqueue is never empty — even if the
     // reaper or any subsequent worker blocks before the boot task
     // spawns anything else, Schedule() always has a fallback to
     // pick. Supersedes the "ensure SmpStartAps has a runnable peer"
     // workaround that used to depend on worker creation order.
-    customos::sched::SchedStartIdle("idle-bsp");
-    customos::sched::SchedStartReaper();
+    duetos::sched::SchedStartIdle("idle-bsp");
+    duetos::sched::SchedStartReaper();
 
     SerialWrite("[boot] Bringing up PS/2 keyboard.\n");
-    customos::drivers::input::Ps2KeyboardInit();
+    duetos::drivers::input::Ps2KeyboardInit();
 
     SerialWrite("[boot] Bringing up PS/2 mouse.\n");
-    customos::drivers::input::Ps2MouseInit();
+    duetos::drivers::input::Ps2MouseInit();
 
     SerialWrite("[boot] Enumerating PCI bus.\n");
-    customos::drivers::pci::PciEnumerate();
+    duetos::drivers::pci::PciEnumerate();
 
     SerialWrite("[boot] Detecting GPUs.\n");
-    customos::drivers::gpu::GpuInit();
+    duetos::drivers::gpu::GpuInit();
     {
-        auto gpu_init = []() -> customos::core::Result<void>
+        auto gpu_init = []() -> duetos::core::Result<void>
         {
-            customos::drivers::gpu::GpuInit();
+            duetos::drivers::gpu::GpuInit();
             return {};
         };
-        auto gpu_teardown = []() -> customos::core::Result<void> { return customos::drivers::gpu::GpuShutdown(); };
-        customos::core::FaultDomainRegister("drivers/gpu", gpu_init, gpu_teardown);
+        auto gpu_teardown = []() -> duetos::core::Result<void> { return duetos::drivers::gpu::GpuShutdown(); };
+        duetos::core::FaultDomainRegister("drivers/gpu", gpu_init, gpu_teardown);
     }
 
     SerialWrite("[boot] Detecting NICs.\n");
-    customos::drivers::net::NetInit();
+    duetos::drivers::net::NetInit();
     {
-        auto net_init = []() -> customos::core::Result<void>
+        auto net_init = []() -> duetos::core::Result<void>
         {
-            customos::drivers::net::NetInit();
+            duetos::drivers::net::NetInit();
             return {};
         };
-        auto net_teardown = []() -> customos::core::Result<void> { return customos::drivers::net::NetShutdown(); };
-        customos::core::FaultDomainRegister("drivers/net", net_init, net_teardown);
+        auto net_teardown = []() -> duetos::core::Result<void> { return duetos::drivers::net::NetShutdown(); };
+        duetos::core::FaultDomainRegister("drivers/net", net_init, net_teardown);
     }
 
     SerialWrite("[boot] Detecting USB host controllers.\n");
-    customos::drivers::usb::UsbInit();
-    customos::drivers::usb::xhci::XhciInit();
+    duetos::drivers::usb::UsbInit();
+    duetos::drivers::usb::xhci::XhciInit();
     // Register xHCI as a restartable fault domain. Init() is
     // already idempotent (early-return on g_init_done), so the
     // domain's init hook just wraps it in a Result<void>.
     {
-        auto xhci_init = []() -> customos::core::Result<void>
+        auto xhci_init = []() -> duetos::core::Result<void>
         {
-            customos::drivers::usb::xhci::XhciInit();
+            duetos::drivers::usb::xhci::XhciInit();
             return {};
         };
-        auto xhci_teardown = []() -> customos::core::Result<void>
-        { return customos::drivers::usb::xhci::XhciShutdown(); };
-        customos::core::FaultDomainRegister("drivers/usb/xhci", xhci_init, xhci_teardown);
+        auto xhci_teardown = []() -> duetos::core::Result<void>
+        { return duetos::drivers::usb::xhci::XhciShutdown(); };
+        duetos::core::FaultDomainRegister("drivers/usb/xhci", xhci_init, xhci_teardown);
     }
-    customos::drivers::usb::hid::HidSelfTest();
-    customos::drivers::usb::msc::MscSelfTest();
+    duetos::drivers::usb::hid::HidSelfTest();
+    duetos::drivers::usb::msc::MscSelfTest();
 
     SerialWrite("[boot] Detecting audio controllers.\n");
-    customos::drivers::audio::AudioInit();
+    duetos::drivers::audio::AudioInit();
     {
-        auto audio_init = []() -> customos::core::Result<void>
+        auto audio_init = []() -> duetos::core::Result<void>
         {
-            customos::drivers::audio::AudioInit();
+            duetos::drivers::audio::AudioInit();
             return {};
         };
-        auto audio_teardown = []() -> customos::core::Result<void>
-        { return customos::drivers::audio::AudioShutdown(); };
-        customos::core::FaultDomainRegister("drivers/audio", audio_init, audio_teardown);
+        auto audio_teardown = []() -> duetos::core::Result<void>
+        { return duetos::drivers::audio::AudioShutdown(); };
+        duetos::core::FaultDomainRegister("drivers/audio", audio_init, audio_teardown);
     }
 
     SerialWrite("[boot] Bringing up power / thermal shell.\n");
-    customos::drivers::power::PowerInit();
+    duetos::drivers::power::PowerInit();
 
     SerialWrite("[boot] Bringing up network stack skeleton.\n");
-    customos::net::NetStackInit();
+    duetos::net::NetStackInit();
     {
         // Park a canned reply on TCP port 7777. Any connection
         // that lands with a data segment gets this body + FIN.
@@ -1041,45 +1041,45 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                                      "Content-Type: text/plain\r\n"
                                      "Content-Length: 24\r\n"
                                      "\r\n"
-                                     "Hello from CustomOS!\r\n\r\n";
-        customos::net::TcpListen(7777, reinterpret_cast<const customos::u8*>(kHello), sizeof(kHello) - 1);
+                                     "Hello from DuetOS!\r\n\r\n";
+        duetos::net::TcpListen(7777, reinterpret_cast<const duetos::u8*>(kHello), sizeof(kHello) - 1);
     }
 
     SerialWrite("[boot] Bringing up graphics ICD skeleton.\n");
-    customos::subsystems::graphics::GraphicsIcdInit();
+    duetos::subsystems::graphics::GraphicsIcdInit();
 
     SerialWrite("[boot] Bringing up block device layer.\n");
-    customos::drivers::storage::BlockLayerInit();
-    customos::drivers::storage::BlockLayerSelfTest();
+    duetos::drivers::storage::BlockLayerInit();
+    duetos::drivers::storage::BlockLayerSelfTest();
 
     SerialWrite("[boot] Bringing up NVMe controller.\n");
-    customos::drivers::storage::NvmeInit();
-    customos::drivers::storage::NvmeSelfTest();
+    duetos::drivers::storage::NvmeInit();
+    duetos::drivers::storage::NvmeSelfTest();
 
     SerialWrite("[boot] Bringing up AHCI controller(s).\n");
-    customos::drivers::storage::AhciInit();
-    customos::drivers::storage::AhciSelfTest();
+    duetos::drivers::storage::AhciInit();
+    duetos::drivers::storage::AhciSelfTest();
 
     // Security guard must be live BEFORE any loader runs. Advisory
     // mode at boot: scans + logs, never blocks. Flip to Enforce via
     // the shell `guard enforce` once the boot-log is clean.
     SerialWrite("[boot] Starting security guard.\n");
-    customos::security::GuardInit();
-    customos::security::GuardSelfTest();
+    duetos::security::GuardInit();
+    duetos::security::GuardSelfTest();
 
     SerialWrite("[boot] Probing GPT on block devices.\n");
-    customos::fs::gpt::GptSelfTest();
+    duetos::fs::gpt::GptSelfTest();
 
     SerialWrite("[boot] Probing FAT32 on block devices.\n");
-    customos::fs::fat32::Fat32SelfTest();
+    duetos::fs::fat32::Fat32SelfTest();
 
     SerialWrite("[boot] Routing Win32 file syscalls through FAT32.\n");
-    customos::fs::routing::SelfTest();
+    duetos::fs::routing::SelfTest();
 
     SerialWrite("[boot] Probing read-only FS shells (ext4 / NTFS / exFAT).\n");
-    customos::fs::ext4::Ext4ScanAll();
-    customos::fs::ntfs::NtfsScanAll();
-    customos::fs::exfat::ExfatScanAll();
+    duetos::fs::ext4::Ext4ScanAll();
+    duetos::fs::ntfs::NtfsScanAll();
+    duetos::fs::exfat::ExfatScanAll();
 
     // Metrics checkpoint: everything above is bringup overhead; what
     // the system consumes from here on is steady-state.
@@ -1089,15 +1089,15 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // have fired that /tmp/boot.log should be at its 512-byte cap.
     {
         const char* bytes = nullptr;
-        customos::u32 len = 0;
-        if (customos::fs::TmpFsRead("boot.log", &bytes, &len))
+        duetos::u32 len = 0;
+        if (duetos::fs::TmpFsRead("boot.log", &bytes, &len))
         {
-            customos::core::LogWithValue(customos::core::LogLevel::Info, "core/klog", "/tmp/boot.log size (bytes)",
+            duetos::core::LogWithValue(duetos::core::LogLevel::Info, "core/klog", "/tmp/boot.log size (bytes)",
                                          len);
         }
         else
         {
-            customos::core::Log(customos::core::LogLevel::Warn, "core/klog", "/tmp/boot.log not present");
+            duetos::core::Log(duetos::core::LogLevel::Warn, "core/klog", "/tmp/boot.log not present");
         }
     }
 
@@ -1116,10 +1116,10 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // scheduler join — whichever comes first.
     auto kbd_reader = [](void*)
     {
-        using namespace customos::drivers::input;
+        using namespace duetos::drivers::input;
         // Sample at each compose call so Ctrl+Alt+Y (theme cycle)
         // takes effect on the very next repaint — don't cache.
-        auto desktop_bg = []() { return customos::drivers::video::ThemeCurrent().desktop_bg; };
+        auto desktop_bg = []() { return duetos::drivers::video::ThemeCurrent().desktop_bg; };
         for (;;)
         {
             const KeyEvent ev = Ps2KeyboardReadEvent();
@@ -1139,28 +1139,28 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
             // gate draws its own framebuffer output; we bracket
             // with CompositorLock so it races neither the ui-
             // ticker nor the mouse reader.
-            if (customos::core::LoginIsActive())
+            if (duetos::core::LoginIsActive())
             {
-                customos::drivers::video::CompositorLock();
-                const bool still_active = customos::core::LoginFeedKey(ev.code);
+                duetos::drivers::video::CompositorLock();
+                const bool still_active = duetos::core::LoginFeedKey(ev.code);
                 if (!still_active)
                 {
                     // Login succeeded — wipe the login panel and
                     // paint the full desktop (or TTY) underneath.
                     const bool is_tty =
-                        (customos::drivers::video::GetDisplayMode() == customos::drivers::video::DisplayMode::Tty);
+                        (duetos::drivers::video::GetDisplayMode() == duetos::drivers::video::DisplayMode::Tty);
                     if (is_tty)
                     {
-                        customos::drivers::video::DesktopCompose(0x00000000, nullptr);
+                        duetos::drivers::video::DesktopCompose(0x00000000, nullptr);
                     }
                     else
                     {
-                        customos::drivers::video::CursorHide();
-                        customos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO CUSTOMOS   BOOT OK");
-                        customos::drivers::video::CursorShow();
+                        duetos::drivers::video::CursorHide();
+                        duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                        duetos::drivers::video::CursorShow();
                     }
                 }
-                customos::drivers::video::CompositorUnlock();
+                duetos::drivers::video::CompositorUnlock();
                 continue;
             }
 
@@ -1171,7 +1171,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
             // different shortcut like Ctrl+Alt+T).
             if (ctrl && !alt && (ev.code == 'c' || ev.code == 'C'))
             {
-                customos::core::ShellInterrupt();
+                duetos::core::ShellInterrupt();
                 SerialWrite("[ui] ^C\n");
                 continue;
             }
@@ -1182,30 +1182,30 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
             // scrollback. Works in both desktop and TTY modes.
             if (ctrl && alt && (ev.code == kKeyF1 || ev.code == kKeyF2))
             {
-                customos::drivers::video::CompositorLock();
+                duetos::drivers::video::CompositorLock();
                 if (ev.code == kKeyF1)
                 {
-                    customos::drivers::video::ConsoleSelectShell();
+                    duetos::drivers::video::ConsoleSelectShell();
                     SerialWrite("[ui] tty -> shell\n");
                 }
                 else
                 {
-                    customos::drivers::video::ConsoleSelectKlog();
+                    duetos::drivers::video::ConsoleSelectKlog();
                     SerialWrite("[ui] tty -> klog\n");
                 }
                 const bool is_tty =
-                    (customos::drivers::video::GetDisplayMode() == customos::drivers::video::DisplayMode::Tty);
+                    (duetos::drivers::video::GetDisplayMode() == duetos::drivers::video::DisplayMode::Tty);
                 if (is_tty)
                 {
-                    customos::drivers::video::DesktopCompose(0x00000000, nullptr);
+                    duetos::drivers::video::DesktopCompose(0x00000000, nullptr);
                 }
                 else
                 {
-                    customos::drivers::video::CursorHide();
-                    customos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO CUSTOMOS   BOOT OK");
-                    customos::drivers::video::CursorShow();
+                    duetos::drivers::video::CursorHide();
+                    duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                    duetos::drivers::video::CursorShow();
                 }
-                customos::drivers::video::CompositorUnlock();
+                duetos::drivers::video::CompositorUnlock();
                 continue;
             }
 
@@ -1217,28 +1217,28 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
             // shared, so scrollback survives the flip.
             if (ctrl && alt && (ev.code == 't' || ev.code == 'T'))
             {
-                customos::drivers::video::CompositorLock();
+                duetos::drivers::video::CompositorLock();
                 const bool to_tty =
-                    (customos::drivers::video::GetDisplayMode() == customos::drivers::video::DisplayMode::Desktop);
+                    (duetos::drivers::video::GetDisplayMode() == duetos::drivers::video::DisplayMode::Desktop);
                 if (to_tty)
                 {
-                    customos::drivers::video::CursorHide();
-                    customos::drivers::video::SetDisplayMode(customos::drivers::video::DisplayMode::Tty);
-                    customos::drivers::video::ConsoleSetOrigin(16, 16);
-                    customos::drivers::video::ConsoleSetColours(customos::drivers::video::ThemeCurrent().console_fg,
+                    duetos::drivers::video::CursorHide();
+                    duetos::drivers::video::SetDisplayMode(duetos::drivers::video::DisplayMode::Tty);
+                    duetos::drivers::video::ConsoleSetOrigin(16, 16);
+                    duetos::drivers::video::ConsoleSetColours(duetos::drivers::video::ThemeCurrent().console_fg,
                                                                 0x00000000);
-                    customos::drivers::video::DesktopCompose(0x00000000, nullptr);
+                    duetos::drivers::video::DesktopCompose(0x00000000, nullptr);
                 }
                 else
                 {
-                    customos::drivers::video::SetDisplayMode(customos::drivers::video::DisplayMode::Desktop);
-                    customos::drivers::video::ConsoleSetOrigin(16, 400);
-                    customos::drivers::video::ConsoleSetColours(customos::drivers::video::ThemeCurrent().console_fg,
-                                                                customos::drivers::video::ThemeCurrent().console_bg);
-                    customos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO CUSTOMOS   BOOT OK");
-                    customos::drivers::video::CursorShow();
+                    duetos::drivers::video::SetDisplayMode(duetos::drivers::video::DisplayMode::Desktop);
+                    duetos::drivers::video::ConsoleSetOrigin(16, 400);
+                    duetos::drivers::video::ConsoleSetColours(duetos::drivers::video::ThemeCurrent().console_fg,
+                                                                duetos::drivers::video::ThemeCurrent().console_bg);
+                    duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                    duetos::drivers::video::CursorShow();
                 }
-                customos::drivers::video::CompositorUnlock();
+                duetos::drivers::video::CompositorUnlock();
                 SerialWrite(to_tty ? "[ui] enter TTY mode\n" : "[ui] enter DESKTOP mode\n");
                 continue;
             }
@@ -1250,24 +1250,24 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
             // new palette appears on screen in one flip.
             if (ctrl && alt && (ev.code == 'y' || ev.code == 'Y'))
             {
-                customos::drivers::video::CompositorLock();
-                customos::drivers::video::ThemeCycle();
-                customos::drivers::video::ThemeApplyToAll();
+                duetos::drivers::video::CompositorLock();
+                duetos::drivers::video::ThemeCycle();
+                duetos::drivers::video::ThemeApplyToAll();
                 const bool is_tty =
-                    (customos::drivers::video::GetDisplayMode() == customos::drivers::video::DisplayMode::Tty);
+                    (duetos::drivers::video::GetDisplayMode() == duetos::drivers::video::DisplayMode::Tty);
                 if (is_tty)
                 {
-                    customos::drivers::video::DesktopCompose(0x00000000, nullptr);
+                    duetos::drivers::video::DesktopCompose(0x00000000, nullptr);
                 }
                 else
                 {
-                    customos::drivers::video::CursorHide();
-                    customos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO CUSTOMOS   BOOT OK");
-                    customos::drivers::video::CursorShow();
+                    duetos::drivers::video::CursorHide();
+                    duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                    duetos::drivers::video::CursorShow();
                 }
-                customos::drivers::video::CompositorUnlock();
+                duetos::drivers::video::CompositorUnlock();
                 SerialWrite("[ui] theme -> ");
-                SerialWrite(customos::drivers::video::ThemeIdName(customos::drivers::video::ThemeCurrentId()));
+                SerialWrite(duetos::drivers::video::ThemeIdName(duetos::drivers::video::ThemeCurrentId()));
                 SerialWrite("\n");
                 continue;
             }
@@ -1277,30 +1277,30 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
             // Alt+F4 closes it.
             if (alt && ev.code == kKeyTab)
             {
-                customos::drivers::video::CompositorLock();
-                customos::drivers::video::WindowCycleActive();
-                customos::drivers::video::CursorHide();
-                customos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO CUSTOMOS   BOOT OK");
-                customos::drivers::video::CursorShow();
-                customos::drivers::video::CompositorUnlock();
+                duetos::drivers::video::CompositorLock();
+                duetos::drivers::video::WindowCycleActive();
+                duetos::drivers::video::CursorHide();
+                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::CursorShow();
+                duetos::drivers::video::CompositorUnlock();
                 SerialWrite("[ui] alt-tab\n");
                 continue;
             }
             if (alt && ev.code == kKeyF4)
             {
-                customos::drivers::video::CompositorLock();
-                const auto active = customos::drivers::video::WindowActive();
-                if (active != customos::drivers::video::kWindowInvalid)
+                duetos::drivers::video::CompositorLock();
+                const auto active = duetos::drivers::video::WindowActive();
+                if (active != duetos::drivers::video::kWindowInvalid)
                 {
-                    customos::drivers::video::WindowClose(active);
+                    duetos::drivers::video::WindowClose(active);
                     SerialWrite("[ui] alt-f4 close window=");
                     SerialWriteHex(active);
                     SerialWrite("\n");
                 }
-                customos::drivers::video::CursorHide();
-                customos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO CUSTOMOS   BOOT OK");
-                customos::drivers::video::CursorShow();
-                customos::drivers::video::CompositorUnlock();
+                duetos::drivers::video::CursorHide();
+                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::CursorShow();
+                duetos::drivers::video::CompositorUnlock();
                 continue;
             }
 
@@ -1311,17 +1311,17 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
             // serialises with the ui-ticker's draw.
             {
                 bool app_consumed = false;
-                customos::drivers::video::CompositorLock();
-                const auto active = customos::drivers::video::WindowActive();
-                if (active != customos::drivers::video::kWindowInvalid)
+                duetos::drivers::video::CompositorLock();
+                const auto active = duetos::drivers::video::WindowActive();
+                if (active != duetos::drivers::video::kWindowInvalid)
                 {
                     // Arrow-key routing — only Files consumes these
                     // today, but the block is shaped so future apps
                     // can add their own arrow handlers.
-                    if (active == customos::apps::files::FilesWindow() &&
+                    if (active == duetos::apps::files::FilesWindow() &&
                         (ev.code == kKeyArrowUp || ev.code == kKeyArrowDown))
                     {
-                        app_consumed = customos::apps::files::FilesFeedArrow(ev.code == kKeyArrowUp);
+                        app_consumed = duetos::apps::files::FilesFeedArrow(ev.code == kKeyArrowUp);
                     }
                     else
                     {
@@ -1334,23 +1334,23 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                             c = static_cast<char>(ev.code);
                         if (c != 0)
                         {
-                            if (active == customos::apps::notes::NotesWindow())
+                            if (active == duetos::apps::notes::NotesWindow())
                             {
-                                customos::apps::notes::NotesFeedChar(c);
+                                duetos::apps::notes::NotesFeedChar(c);
                                 app_consumed = true;
                             }
-                            else if (active == customos::apps::calculator::CalculatorWindow())
+                            else if (active == duetos::apps::calculator::CalculatorWindow())
                             {
-                                app_consumed = customos::apps::calculator::CalculatorFeedChar(c);
+                                app_consumed = duetos::apps::calculator::CalculatorFeedChar(c);
                             }
-                            else if (active == customos::apps::files::FilesWindow())
+                            else if (active == duetos::apps::files::FilesWindow())
                             {
-                                app_consumed = customos::apps::files::FilesFeedChar(c);
+                                app_consumed = duetos::apps::files::FilesFeedChar(c);
                             }
                         }
                     }
                 }
-                customos::drivers::video::CompositorUnlock();
+                duetos::drivers::video::CompositorUnlock();
                 if (app_consumed)
                 {
                     dirty = true;
@@ -1367,33 +1367,33 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
             // still diagnosable end-to-end.
             if (ev.code == kKeyBackspace)
             {
-                customos::core::ShellBackspace();
+                duetos::core::ShellBackspace();
                 dirty = true;
             }
             else if (ev.code == kKeyEnter)
             {
-                customos::core::ShellSubmit();
+                duetos::core::ShellSubmit();
                 dirty = true;
             }
             else if (ev.code == kKeyArrowUp)
             {
-                customos::core::ShellHistoryPrev();
+                duetos::core::ShellHistoryPrev();
                 dirty = true;
             }
             else if (ev.code == kKeyArrowDown)
             {
-                customos::core::ShellHistoryNext();
+                duetos::core::ShellHistoryNext();
                 dirty = true;
             }
             else if (ev.code == kKeyTab)
             {
-                customos::core::ShellTabComplete();
+                duetos::core::ShellTabComplete();
                 dirty = true;
             }
             else if (ev.code >= 0x20 && ev.code <= 0x7E)
             {
                 const char ch = static_cast<char>(ev.code);
-                customos::core::ShellFeedChar(ch);
+                duetos::core::ShellFeedChar(ch);
                 const char buf[2] = {ch, '\0'};
                 SerialWrite(buf);
                 dirty = true;
@@ -1401,24 +1401,24 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
         app_key_recompose:
             if (dirty)
             {
-                customos::drivers::video::CompositorLock();
+                duetos::drivers::video::CompositorLock();
                 const bool is_tty =
-                    (customos::drivers::video::GetDisplayMode() == customos::drivers::video::DisplayMode::Tty);
+                    (duetos::drivers::video::GetDisplayMode() == duetos::drivers::video::DisplayMode::Tty);
                 if (is_tty)
                 {
-                    customos::drivers::video::DesktopCompose(0x00000000, nullptr);
+                    duetos::drivers::video::DesktopCompose(0x00000000, nullptr);
                 }
                 else
                 {
-                    customos::drivers::video::CursorHide();
-                    customos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO CUSTOMOS   BOOT OK");
-                    customos::drivers::video::CursorShow();
+                    duetos::drivers::video::CursorHide();
+                    duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                    duetos::drivers::video::CursorShow();
                 }
-                customos::drivers::video::CompositorUnlock();
+                duetos::drivers::video::CompositorUnlock();
             }
         }
     };
-    customos::sched::SchedCreate(kbd_reader, nullptr, "kbd-reader");
+    duetos::sched::SchedCreate(kbd_reader, nullptr, "kbd-reader");
 
     // UI ticker: once per second, re-composite so the taskbar's
     // uptime / wall-clock counter advances even when the user
@@ -1429,35 +1429,35 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // a hidden desktop.
     auto ui_ticker = [](void*)
     {
-        auto desktop_bg = []() { return customos::drivers::video::ThemeCurrent().desktop_bg; };
+        auto desktop_bg = []() { return duetos::drivers::video::ThemeCurrent().desktop_bg; };
         for (;;)
         {
-            customos::sched::SchedSleepTicks(100);
-            customos::drivers::video::CompositorLock();
+            duetos::sched::SchedSleepTicks(100);
+            duetos::drivers::video::CompositorLock();
             // While the login gate is up the full-screen login
             // panel owns the framebuffer. Repaint it from its
             // own canonical state so the 1 Hz compose doesn't
             // clobber the field bounds / title bar.
-            if (customos::core::LoginIsActive() && customos::core::LoginCurrentMode() == customos::core::LoginMode::Gui)
+            if (duetos::core::LoginIsActive() && duetos::core::LoginCurrentMode() == duetos::core::LoginMode::Gui)
             {
-                customos::core::LoginRepaint();
-                customos::drivers::video::CompositorUnlock();
+                duetos::core::LoginRepaint();
+                duetos::drivers::video::CompositorUnlock();
                 continue;
             }
-            if (customos::drivers::video::GetDisplayMode() == customos::drivers::video::DisplayMode::Tty)
+            if (duetos::drivers::video::GetDisplayMode() == duetos::drivers::video::DisplayMode::Tty)
             {
-                customos::drivers::video::DesktopCompose(0x00000000, nullptr);
+                duetos::drivers::video::DesktopCompose(0x00000000, nullptr);
             }
             else
             {
-                customos::drivers::video::CursorHide();
-                customos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO CUSTOMOS   BOOT OK");
-                customos::drivers::video::CursorShow();
+                duetos::drivers::video::CursorHide();
+                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::CursorShow();
             }
-            customos::drivers::video::CompositorUnlock();
+            duetos::drivers::video::CompositorUnlock();
         }
     };
-    customos::sched::SchedCreate(ui_ticker, nullptr, "ui-ticker");
+    duetos::sched::SchedCreate(ui_ticker, nullptr, "ui-ticker");
 
     // Mouse reader thread: blocks on Ps2MouseReadPacket, prints one
     // line per decoded packet. Same end-to-end closure the keyboard
@@ -1472,49 +1472,49 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
         struct DragState
         {
             bool active;
-            customos::drivers::video::WindowHandle window;
-            customos::u32 grab_offset_x;
-            customos::u32 grab_offset_y;
+            duetos::drivers::video::WindowHandle window;
+            duetos::u32 grab_offset_x;
+            duetos::u32 grab_offset_y;
         };
-        static DragState drag{false, customos::drivers::video::kWindowInvalid, 0, 0};
+        static DragState drag{false, duetos::drivers::video::kWindowInvalid, 0, 0};
         static bool prev_left = false;
         static bool prev_right = false;
-        auto desktop_bg = []() { return customos::drivers::video::ThemeCurrent().desktop_bg; };
+        auto desktop_bg = []() { return duetos::drivers::video::ThemeCurrent().desktop_bg; };
 
         // Menu item sets — static so their label pointers outlive
         // the menu's open state. action_id scheme is documented in
         // kernel_main's comment above; keep these tables in sync.
-        static const customos::drivers::video::MenuItem kStartItems[] = {
-            {"ABOUT CUSTOMOS", 1},
+        static const duetos::drivers::video::MenuItem kStartItems[] = {
+            {"ABOUT DUETOS", 1},
             {"CYCLE WINDOWS", 2},
             {"LIST WINDOWS", 3},
             {"PING CONSOLE", 4},
         };
-        static const customos::drivers::video::MenuItem kDesktopMenuItems[] = {
-            {"ABOUT CUSTOMOS", 1},
+        static const duetos::drivers::video::MenuItem kDesktopMenuItems[] = {
+            {"ABOUT DUETOS", 1},
             {"CYCLE WINDOWS", 2},
             {"LIST WINDOWS", 3},
             {"SWITCH TO TTY", 5},
         };
-        static const customos::drivers::video::MenuItem kWindowMenuItems[] = {
+        static const duetos::drivers::video::MenuItem kWindowMenuItems[] = {
             {"RAISE", 10},
             {"CLOSE", 11},
         };
 
         for (;;)
         {
-            const auto p = customos::drivers::input::Ps2MouseReadPacket();
+            const auto p = duetos::drivers::input::Ps2MouseReadPacket();
 
             // In TTY mode the cursor is hidden and windows aren't
             // painted — ignore UI-side mouse handling entirely.
             // Serial logging still happens so packet delivery is
             // visible end-to-end.
-            if (customos::drivers::video::GetDisplayMode() == customos::drivers::video::DisplayMode::Tty)
+            if (duetos::drivers::video::GetDisplayMode() == duetos::drivers::video::DisplayMode::Tty)
             {
                 SerialWrite("[mouse-tty] dx=");
-                SerialWriteHex(static_cast<customos::u64>(p.dx));
+                SerialWriteHex(static_cast<duetos::u64>(p.dx));
                 SerialWrite(" dy=");
-                SerialWriteHex(static_cast<customos::u64>(p.dy));
+                SerialWriteHex(static_cast<duetos::u64>(p.dy));
                 SerialWrite(" btn=");
                 SerialWriteHex(p.buttons);
                 SerialWrite("\n");
@@ -1524,18 +1524,18 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
             // Every UI mutation inside this packet lives under
             // the compositor mutex — the kbd reader can be mid-
             // ConsoleWrite / DesktopCompose at the same time.
-            customos::drivers::video::CompositorLock();
-            customos::drivers::video::CursorMove(p.dx, p.dy);
+            duetos::drivers::video::CompositorLock();
+            duetos::drivers::video::CursorMove(p.dx, p.dy);
 
-            customos::u32 cx = 0, cy = 0;
-            customos::drivers::video::CursorPosition(&cx, &cy);
+            duetos::u32 cx = 0, cy = 0;
+            duetos::drivers::video::CursorPosition(&cx, &cy);
 
-            const bool left_down = (p.buttons & customos::drivers::input::kMouseButtonLeft) != 0;
+            const bool left_down = (p.buttons & duetos::drivers::input::kMouseButtonLeft) != 0;
             const bool press_edge = left_down && !prev_left;
             const bool release_edge = !left_down && prev_left;
             prev_left = left_down;
 
-            const bool right_down = (p.buttons & customos::drivers::input::kMouseButtonRight) != 0;
+            const bool right_down = (p.buttons & duetos::drivers::input::kMouseButtonRight) != 0;
             const bool right_press = right_down && !prev_right;
             prev_right = right_down;
 
@@ -1551,28 +1551,28 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
             // on whitespace dismisses the popup).
             if (right_press)
             {
-                if (customos::drivers::video::MenuIsOpen())
+                if (duetos::drivers::video::MenuIsOpen())
                 {
-                    customos::drivers::video::MenuClose();
+                    duetos::drivers::video::MenuClose();
                 }
-                else if (!customos::drivers::video::TaskbarContains(cx, cy))
+                else if (!duetos::drivers::video::TaskbarContains(cx, cy))
                 {
-                    const auto hit = customos::drivers::video::WindowTopmostAt(cx, cy);
-                    if (hit != customos::drivers::video::kWindowInvalid)
+                    const auto hit = duetos::drivers::video::WindowTopmostAt(cx, cy);
+                    if (hit != duetos::drivers::video::kWindowInvalid)
                     {
-                        customos::drivers::video::MenuOpen(
+                        duetos::drivers::video::MenuOpen(
                             kWindowMenuItems, sizeof(kWindowMenuItems) / sizeof(kWindowMenuItems[0]), cx, cy, hit);
                     }
                     else
                     {
-                        customos::drivers::video::MenuOpen(
+                        duetos::drivers::video::MenuOpen(
                             kDesktopMenuItems, sizeof(kDesktopMenuItems) / sizeof(kDesktopMenuItems[0]), cx, cy, 0);
                     }
                 }
-                customos::drivers::video::CursorHide();
-                customos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO CUSTOMOS   BOOT OK");
-                customos::drivers::video::CursorShow();
-                customos::drivers::video::CompositorUnlock();
+                duetos::drivers::video::CursorHide();
+                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::CursorShow();
+                duetos::drivers::video::CompositorUnlock();
                 SerialWrite("[ui] right-click\n");
                 continue;
             }
@@ -1586,55 +1586,55 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
             //   4.  Title bar → raise + begin drag.
             //   5.  Any other part of a window → raise only.
             bool menu_handled = false;
-            if (press_edge && customos::drivers::video::MenuIsOpen())
+            if (press_edge && duetos::drivers::video::MenuIsOpen())
             {
-                const customos::u32 action = customos::drivers::video::MenuItemAt(cx, cy);
+                const duetos::u32 action = duetos::drivers::video::MenuItemAt(cx, cy);
                 if (action != 0)
                 {
-                    const customos::u32 ctx = customos::drivers::video::MenuContext();
+                    const duetos::u32 ctx = duetos::drivers::video::MenuContext();
                     // Dispatch action. Context (ctx) is a caller-
                     // supplied u32 — for window menus it's the
                     // target WindowHandle.
                     switch (action)
                     {
-                    case 1: // ABOUT CUSTOMOS
-                        customos::drivers::video::ConsoleWriteln("");
-                        customos::drivers::video::ConsoleWriteln("-> CUSTOMOS v0 — WINDOWED DESKTOP SHELL");
-                        customos::drivers::video::ConsoleWriteln("   KEYBOARD + MOUSE + FRAMEBUFFER ALL LIVE");
+                    case 1: // ABOUT DUETOS
+                        duetos::drivers::video::ConsoleWriteln("");
+                        duetos::drivers::video::ConsoleWriteln("-> DUETOS v0 — WINDOWED DESKTOP SHELL");
+                        duetos::drivers::video::ConsoleWriteln("   KEYBOARD + MOUSE + FRAMEBUFFER ALL LIVE");
                         break;
                     case 2: // CYCLE WINDOWS
-                        customos::drivers::video::WindowCycleActive();
-                        customos::drivers::video::ConsoleWriteln("-> CYCLED ACTIVE WINDOW");
+                        duetos::drivers::video::WindowCycleActive();
+                        duetos::drivers::video::ConsoleWriteln("-> CYCLED ACTIVE WINDOW");
                         break;
                     case 3: // LIST WINDOWS
-                        customos::drivers::video::ConsoleWriteln("-> REGISTERED WINDOWS:");
-                        for (customos::u32 h = 0; h < customos::drivers::video::WindowRegistryCount(); ++h)
+                        duetos::drivers::video::ConsoleWriteln("-> REGISTERED WINDOWS:");
+                        for (duetos::u32 h = 0; h < duetos::drivers::video::WindowRegistryCount(); ++h)
                         {
-                            if (customos::drivers::video::WindowIsAlive(h))
+                            if (duetos::drivers::video::WindowIsAlive(h))
                             {
-                                const char* title = customos::drivers::video::WindowTitle(h);
-                                customos::drivers::video::ConsoleWrite("   ");
-                                customos::drivers::video::ConsoleWriteln((title != nullptr) ? title : "(UNNAMED)");
+                                const char* title = duetos::drivers::video::WindowTitle(h);
+                                duetos::drivers::video::ConsoleWrite("   ");
+                                duetos::drivers::video::ConsoleWriteln((title != nullptr) ? title : "(UNNAMED)");
                             }
                         }
                         break;
                     case 4: // PING CONSOLE
-                        customos::drivers::video::ConsoleWriteln("-> PONG");
+                        duetos::drivers::video::ConsoleWriteln("-> PONG");
                         break;
                     case 5: // SWITCH TO TTY (from desktop context menu)
-                        customos::drivers::video::SetDisplayMode(customos::drivers::video::DisplayMode::Tty);
-                        customos::drivers::video::ConsoleSetOrigin(16, 16);
-                        customos::drivers::video::ConsoleSetColours(customos::drivers::video::ThemeCurrent().console_fg,
+                        duetos::drivers::video::SetDisplayMode(duetos::drivers::video::DisplayMode::Tty);
+                        duetos::drivers::video::ConsoleSetOrigin(16, 16);
+                        duetos::drivers::video::ConsoleSetColours(duetos::drivers::video::ThemeCurrent().console_fg,
                                                                     0x00000000);
                         break;
                     case 10: // RAISE <ctx>
-                        customos::drivers::video::WindowRaise(ctx);
+                        duetos::drivers::video::WindowRaise(ctx);
                         SerialWrite("[ui] ctx raise window=");
                         SerialWriteHex(ctx);
                         SerialWrite("\n");
                         break;
                     case 11: // CLOSE <ctx>
-                        customos::drivers::video::WindowClose(ctx);
+                        duetos::drivers::video::WindowClose(ctx);
                         SerialWrite("[ui] ctx close window=");
                         SerialWriteHex(ctx);
                         SerialWrite("\n");
@@ -1644,7 +1644,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                     SerialWriteHex(action);
                     SerialWrite("\n");
                 }
-                customos::drivers::video::MenuClose();
+                duetos::drivers::video::MenuClose();
                 menu_handled = true;
             }
 
@@ -1655,23 +1655,23 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
             // rect.
             if (press_edge && !menu_handled && !drag.active)
             {
-                customos::u32 kx = 0, ky = 0, kw = 0, kh = 0;
-                customos::drivers::video::TaskbarClockBounds(&kx, &ky, &kw, &kh);
+                duetos::u32 kx = 0, ky = 0, kw = 0, kh = 0;
+                duetos::drivers::video::TaskbarClockBounds(&kx, &ky, &kw, &kh);
                 if (kw > 0 && cx >= kx && cx < kx + kw && cy >= ky && cy < ky + kh)
                 {
-                    if (customos::drivers::video::CalendarIsOpen())
+                    if (duetos::drivers::video::CalendarIsOpen())
                     {
-                        customos::drivers::video::CalendarClose();
+                        duetos::drivers::video::CalendarClose();
                     }
                     else
                     {
                         // Anchor upper-left so the popup sits
                         // flush above the taskbar's top edge.
-                        const customos::u32 ph = customos::drivers::video::CalendarPanelHeight();
-                        const customos::u32 pw = customos::drivers::video::CalendarPanelWidth();
-                        const customos::u32 ax = (kx + kw > pw) ? (kx + kw - pw) : 0;
-                        const customos::u32 ay = (ky > ph) ? ky - ph : 0;
-                        customos::drivers::video::CalendarOpen(ax, ay);
+                        const duetos::u32 ph = duetos::drivers::video::CalendarPanelHeight();
+                        const duetos::u32 pw = duetos::drivers::video::CalendarPanelWidth();
+                        const duetos::u32 ax = (kx + kw > pw) ? (kx + kw - pw) : 0;
+                        const duetos::u32 ay = (ky > ph) ? ky - ph : 0;
+                        duetos::drivers::video::CalendarOpen(ax, ay);
                         SerialWrite("[ui] calendar open\n");
                     }
                     menu_handled = true;
@@ -1679,22 +1679,22 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
             }
 
             // Clicking outside an open calendar dismisses it.
-            if (press_edge && !menu_handled && customos::drivers::video::CalendarIsOpen() &&
-                !customos::drivers::video::CalendarContains(cx, cy))
+            if (press_edge && !menu_handled && duetos::drivers::video::CalendarIsOpen() &&
+                !duetos::drivers::video::CalendarContains(cx, cy))
             {
-                customos::drivers::video::CalendarClose();
+                duetos::drivers::video::CalendarClose();
             }
 
             // START button press opens (or closes) the menu.
             if (press_edge && !menu_handled && !drag.active)
             {
-                customos::u32 sx = 0, sy = 0, sw = 0, sh = 0;
-                customos::drivers::video::TaskbarStartBounds(&sx, &sy, &sw, &sh);
+                duetos::u32 sx = 0, sy = 0, sw = 0, sh = 0;
+                duetos::drivers::video::TaskbarStartBounds(&sx, &sy, &sw, &sh);
                 if (cx >= sx && cx < sx + sw && cy >= sy && cy < sy + sh)
                 {
-                    if (customos::drivers::video::MenuIsOpen())
+                    if (duetos::drivers::video::MenuIsOpen())
                     {
-                        customos::drivers::video::MenuClose();
+                        duetos::drivers::video::MenuClose();
                     }
                     else
                     {
@@ -1704,11 +1704,11 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                         // flush against the top of the START
                         // button regardless of how many items
                         // are in the set.
-                        customos::drivers::video::MenuOpen(kStartItems, sizeof(kStartItems) / sizeof(kStartItems[0]),
+                        duetos::drivers::video::MenuOpen(kStartItems, sizeof(kStartItems) / sizeof(kStartItems[0]),
                                                            sx, sy, 0);
-                        const customos::u32 mh = customos::drivers::video::MenuPanelHeight();
-                        const customos::u32 my = (sy > mh) ? sy - mh : 0;
-                        customos::drivers::video::MenuOpen(kStartItems, sizeof(kStartItems) / sizeof(kStartItems[0]),
+                        const duetos::u32 mh = duetos::drivers::video::MenuPanelHeight();
+                        const duetos::u32 my = (sy > mh) ? sy - mh : 0;
+                        duetos::drivers::video::MenuOpen(kStartItems, sizeof(kStartItems) / sizeof(kStartItems[0]),
                                                            sx, my, 0);
                         SerialWrite("[ui] menu open\n");
                     }
@@ -1716,46 +1716,46 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                 }
             }
 
-            if (press_edge && !menu_handled && !drag.active && customos::drivers::video::TaskbarContains(cx, cy))
+            if (press_edge && !menu_handled && !drag.active && duetos::drivers::video::TaskbarContains(cx, cy))
             {
-                const customos::u32 tab_hit = customos::drivers::video::TaskbarTabAt(cx, cy);
-                if (tab_hit != customos::drivers::video::kWindowInvalid)
+                const duetos::u32 tab_hit = duetos::drivers::video::TaskbarTabAt(cx, cy);
+                if (tab_hit != duetos::drivers::video::kWindowInvalid)
                 {
-                    customos::drivers::video::WindowRaise(tab_hit);
+                    duetos::drivers::video::WindowRaise(tab_hit);
                     SerialWrite("[ui] taskbar raise window=");
                     SerialWriteHex(tab_hit);
                     SerialWrite("\n");
-                    customos::drivers::video::CursorHide();
-                    customos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO CUSTOMOS   BOOT OK");
-                    customos::drivers::video::CursorShow();
+                    duetos::drivers::video::CursorHide();
+                    duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                    duetos::drivers::video::CursorShow();
                     menu_handled = true; // taskbar ate the click
                 }
             }
 
             if (press_edge && menu_handled)
             {
-                customos::drivers::video::CursorHide();
-                customos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO CUSTOMOS   BOOT OK");
-                customos::drivers::video::CursorShow();
+                duetos::drivers::video::CursorHide();
+                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::CursorShow();
             }
             else if (press_edge && !drag.active)
             {
-                const auto hit = customos::drivers::video::WindowTopmostAt(cx, cy);
-                if (hit != customos::drivers::video::kWindowInvalid)
+                const auto hit = duetos::drivers::video::WindowTopmostAt(cx, cy);
+                if (hit != duetos::drivers::video::kWindowInvalid)
                 {
-                    if (customos::drivers::video::WindowPointInCloseBox(hit, cx, cy))
+                    if (duetos::drivers::video::WindowPointInCloseBox(hit, cx, cy))
                     {
-                        customos::drivers::video::WindowClose(hit);
+                        duetos::drivers::video::WindowClose(hit);
                         SerialWrite("[ui] close window=");
                         SerialWriteHex(hit);
                         SerialWrite("\n");
                     }
                     else
                     {
-                        customos::u32 wx = 0, wy = 0;
-                        customos::drivers::video::WindowGetBounds(hit, &wx, &wy, nullptr, nullptr);
-                        customos::drivers::video::WindowRaise(hit);
-                        const bool in_title = customos::drivers::video::WindowPointInTitle(hit, cx, cy);
+                        duetos::u32 wx = 0, wy = 0;
+                        duetos::drivers::video::WindowGetBounds(hit, &wx, &wy, nullptr, nullptr);
+                        duetos::drivers::video::WindowRaise(hit);
+                        const bool in_title = duetos::drivers::video::WindowPointInTitle(hit, cx, cy);
                         if (in_title)
                         {
                             drag.active = true;
@@ -1773,9 +1773,9 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                             SerialWrite("\n");
                         }
                     }
-                    customos::drivers::video::CursorHide();
-                    customos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO CUSTOMOS   BOOT OK");
-                    customos::drivers::video::CursorShow();
+                    duetos::drivers::video::CursorHide();
+                    duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                    duetos::drivers::video::CursorShow();
                 }
             }
             if (release_edge && drag.active)
@@ -1791,12 +1791,12 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                 // Position the window so the grabbed pixel stays
                 // under the cursor. Any sub-pixel clamp lives
                 // inside WindowMoveTo.
-                const customos::u32 nx = (cx > drag.grab_offset_x) ? cx - drag.grab_offset_x : 0;
-                const customos::u32 ny = (cy > drag.grab_offset_y) ? cy - drag.grab_offset_y : 0;
-                customos::drivers::video::WindowMoveTo(drag.window, nx, ny);
-                customos::drivers::video::CursorHide();
-                customos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO CUSTOMOS   BOOT OK");
-                customos::drivers::video::CursorShow();
+                const duetos::u32 nx = (cx > drag.grab_offset_x) ? cx - drag.grab_offset_x : 0;
+                const duetos::u32 ny = (cy > drag.grab_offset_y) ? cy - drag.grab_offset_y : 0;
+                duetos::drivers::video::WindowMoveTo(drag.window, nx, ny);
+                duetos::drivers::video::CursorHide();
+                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::CursorShow();
             }
             else
             {
@@ -1805,8 +1805,8 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                 // cursor is NOT pinning a window move; this keeps
                 // the button widget inert during drag, matching
                 // Windows' "modal drag" semantics.
-                const customos::u32 hit = customos::drivers::video::WidgetRouteMouse(cx, cy, p.buttons);
-                if (hit != customos::drivers::video::kWidgetInvalid)
+                const duetos::u32 hit = duetos::drivers::video::WidgetRouteMouse(cx, cy, p.buttons);
+                if (hit != duetos::drivers::video::kWidgetInvalid)
                 {
                     SerialWrite("[ui] widget event id=");
                     SerialWriteHex(hit);
@@ -1815,22 +1815,22 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
                     // claims a private ID range (see Calculator's
                     // kIdBase); non-claiming handlers return false
                     // and the event is just logged above.
-                    customos::apps::calculator::CalculatorOnWidgetEvent(hit);
+                    duetos::apps::calculator::CalculatorOnWidgetEvent(hit);
                 }
             }
 
-            customos::drivers::video::CompositorUnlock();
+            duetos::drivers::video::CompositorUnlock();
 
             SerialWrite("[mouse] dx=");
-            SerialWriteHex(static_cast<customos::u64>(p.dx));
+            SerialWriteHex(static_cast<duetos::u64>(p.dx));
             SerialWrite(" dy=");
-            SerialWriteHex(static_cast<customos::u64>(p.dy));
+            SerialWriteHex(static_cast<duetos::u64>(p.dy));
             SerialWrite(" btn=");
             SerialWriteHex(p.buttons);
             SerialWrite("\n");
         }
     };
-    customos::sched::SchedCreate(mouse_reader, nullptr, "mouse-reader");
+    duetos::sched::SchedCreate(mouse_reader, nullptr, "mouse-reader");
 
     // Scheduler self-test: three kernel threads that each bump a shared
     // counter five times under a mutex. If the mutex serialises them
@@ -1840,22 +1840,22 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // exercises WaitQueueBlock / WaitQueueWakeOne whenever two workers
     // collide on MutexLock, so the wait-queue machinery is on the boot
     // path by default.
-    static customos::sched::Mutex s_demo_mutex{};
-    static customos::u64 s_shared_counter = 0;
+    static duetos::sched::Mutex s_demo_mutex{};
+    static duetos::u64 s_shared_counter = 0;
 
     auto worker = [](void* arg)
     {
         const char* name = static_cast<const char*>(arg);
-        for (customos::u64 i = 0; i < 5; ++i)
+        for (duetos::u64 i = 0; i < 5; ++i)
         {
-            customos::sched::MutexLock(&s_demo_mutex);
+            duetos::sched::MutexLock(&s_demo_mutex);
 
-            const customos::u64 before = s_shared_counter;
+            const duetos::u64 before = s_shared_counter;
             // Burn a couple of ms of CPU inside the critical section so
             // that other workers are almost guaranteed to hit the slow
             // path on MutexLock and park on the wait queue. Without this
             // the race is too tight for the self-test to be meaningful.
-            for (customos::u64 j = 0; j < 2'000'000; ++j)
+            for (duetos::u64 j = 0; j < 2'000'000; ++j)
             {
                 asm volatile("" ::: "memory");
             }
@@ -1869,14 +1869,14 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
             SerialWriteHex(s_shared_counter);
             SerialWrite("\n");
 
-            customos::sched::MutexUnlock(&s_demo_mutex);
-            customos::sched::SchedSleepTicks(1); // yield + 10 ms pause
+            duetos::sched::MutexUnlock(&s_demo_mutex);
+            duetos::sched::SchedSleepTicks(1); // yield + 10 ms pause
         }
     };
 
-    customos::sched::SchedCreate(worker, const_cast<char*>("A"), "worker-A");
-    customos::sched::SchedCreate(worker, const_cast<char*>("B"), "worker-B");
-    customos::sched::SchedCreate(worker, const_cast<char*>("C"), "worker-C");
+    duetos::sched::SchedCreate(worker, const_cast<char*>("A"), "worker-A");
+    duetos::sched::SchedCreate(worker, const_cast<char*>("B"), "worker-B");
+    duetos::sched::SchedCreate(worker, const_cast<char*>("C"), "worker-C");
 
     // First ring-3 slice: spawn a dedicated scheduler thread that maps a
     // user code + stack page, drops to ring 3, and runs an interruptible
@@ -1884,43 +1884,43 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // periodically preempt it; the proof-of-life is that this whole
     // boot sequence continues to make forward progress after the
     // iretq into user mode.
-    customos::core::StartRing3SmokeTask();
+    duetos::core::StartRing3SmokeTask();
     // Linux-ABI proof-of-life. Reaches MSR_LSTAR entry stub →
     // LinuxSyscallDispatch → sys_exit_group. A clean exit here
     // proves the whole plumbing — EFER.SCE, MSR setup, swapgs
     // dance, iretq return — works end-to-end.
-    customos::subsystems::linux::SpawnRing3LinuxSmoke();
+    duetos::subsystems::linux::SpawnRing3LinuxSmoke();
     // Same payload wrapped in an ELF64 image loaded via
     // SpawnElfLinux — proves the loader + abi-flavor plumbing
     // works in an in-memory path.
-    customos::subsystems::linux::SpawnRing3LinuxElfSmoke();
+    duetos::subsystems::linux::SpawnRing3LinuxElfSmoke();
     // sys_open/read/close exercise: open HELLO.TXT from FAT32
     // via the Linux ABI and echo its contents back through
     // sys_write. Validates the whole file-I/O chain end-to-end.
-    customos::subsystems::linux::SpawnRing3LinuxFileSmoke();
+    duetos::subsystems::linux::SpawnRing3LinuxFileSmoke();
     // File-backed mmap exerciser: open HELLO.TXT, mmap 17 bytes
     // PROT_READ + MAP_PRIVATE, write the mapped region to
     // stdout. Proves the new file-backed branch in DoMmap works
     // end-to-end — anonymous mmap was the only shape supported
     // before this slice.
-    customos::subsystems::linux::SpawnRing3LinuxMmapSmoke();
+    duetos::subsystems::linux::SpawnRing3LinuxMmapSmoke();
     // Real host-compiled static C ELF (userland/apps/synxtest) —
     // exercises ~12 Linux syscalls and prints a pass/fail tag
     // per call. This is the "compile and run an executable to
     // see what works" probe; boot log shows which parts of the
     // Linux ABI actually hold up when a non-hand-rolled binary
     // does the asking.
-    customos::subsystems::linux::SpawnSynxTestElf();
+    duetos::subsystems::linux::SpawnSynxTestElf();
     // Translation-unit exercise: fire one syscall that the TU
     // converts to a no-op (madvise) and one it declines with a
     // deliberate -ENOSYS (rseq). Boot log shows [translate]
     // lines for each.
-    customos::subsystems::linux::SpawnRing3LinuxTranslateSmoke();
+    duetos::subsystems::linux::SpawnRing3LinuxTranslateSmoke();
     // File-extend exerciser: opens HELLO.TXT, seeks to EOF,
     // writes a few bytes (routes through Fat32AppendAtPath),
     // closes, prints "extended\n" to stdout. Slot 12's
     // untested-at-the-time extend path gets a boot-time check.
-    customos::subsystems::linux::SpawnRing3LinuxExtendSmoke();
+    duetos::subsystems::linux::SpawnRing3LinuxExtendSmoke();
     // Real-binary path: read /fat/LINUX.ELF off the mounted
     // FAT32 volume and spawn it via SpawnElfLinux. Exercises
     // the AHCI -> GPT -> partition-block -> FAT32 -> ElfLoad
@@ -1928,21 +1928,21 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // volume is probed (e.g. when the self-test harness forgets
     // to ship an image).
     {
-        const auto* fat_vol = customos::fs::fat32::Fat32Volume(0);
+        const auto* fat_vol = duetos::fs::fat32::Fat32Volume(0);
         if (fat_vol != nullptr)
         {
-            customos::fs::fat32::DirEntry elf_entry;
-            if (customos::fs::fat32::Fat32LookupPath(fat_vol, "LINUX.ELF", &elf_entry))
+            duetos::fs::fat32::DirEntry elf_entry;
+            if (duetos::fs::fat32::Fat32LookupPath(fat_vol, "LINUX.ELF", &elf_entry))
             {
-                static customos::u8 elf_buf[4096];
-                const customos::i64 n =
-                    customos::fs::fat32::Fat32ReadFile(fat_vol, &elf_entry, elf_buf, sizeof(elf_buf));
+                static duetos::u8 elf_buf[4096];
+                const duetos::i64 n =
+                    duetos::fs::fat32::Fat32ReadFile(fat_vol, &elf_entry, elf_buf, sizeof(elf_buf));
                 if (n > 0)
                 {
                     SerialWrite("[boot] Spawning /fat/LINUX.ELF via SpawnElfLinux.\n");
-                    customos::core::SpawnElfLinux("fat-linux-elf", elf_buf, static_cast<customos::u64>(n),
-                                                  customos::core::CapSetEmpty(), customos::fs::RamfsSandboxRoot(),
-                                                  /*frame_budget=*/16, customos::core::kTickBudgetSandbox);
+                    duetos::core::SpawnElfLinux("fat-linux-elf", elf_buf, static_cast<duetos::u64>(n),
+                                                  duetos::core::CapSetEmpty(), duetos::fs::RamfsSandboxRoot(),
+                                                  /*frame_budget=*/16, duetos::core::kTickBudgetSandbox);
                 }
                 else
                 {
@@ -1965,7 +1965,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // run — so the hashes reflect the final steady-state view
     // of those structures. Earlier capture would flag every
     // subsequent IdtSetUserGate / TssSetRsp0 as "drift".
-    customos::core::RuntimeCheckerInit();
+    duetos::core::RuntimeCheckerInit();
 
     // NMI watchdog. Arms a PMU counter to fire NMI every few
     // seconds of real execution; if the timer IRQ stops
@@ -1975,7 +1975,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // QEMU TCG). Called AFTER TimerInit so the pet-from-IRQ
     // path is already live — otherwise the very first overflow
     // would find a zero pet counter and immediately strike.
-    customos::arch::NmiWatchdogInit();
+    duetos::arch::NmiWatchdogInit();
 
     // ntdll bedrock-coverage scoreboard. Cheap one-shot log line
     // that records how many of the 292 universal NT calls
@@ -1983,21 +1983,21 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // the boot log act as a regression detector — if a future
     // refactor breaks a SYS_* used in the mapping, the count
     // drops and the change is visible.
-    customos::win32::Win32LogNtCoverage();
-    customos::subsystems::linux::LinuxLogAbiCoverage();
+    duetos::win32::Win32LogNtCoverage();
+    duetos::subsystems::linux::LinuxLogAbiCoverage();
 
     // Stage-2 EAT parser + DLL loader smoke test. Loads an
     // embedded ~2 KiB test DLL into a scratch AS, walks its
     // export directory, and asserts name + ordinal lookups
     // resolve to VAs inside the mapped image. Cheap and
     // self-cleaning (scratch AS is released before return).
-    customos::core::DllLoaderSelfTest();
+    duetos::core::DllLoaderSelfTest();
 
-    customos::core::StartHeartbeatThread();
+    duetos::core::StartHeartbeatThread();
 
     SerialWrite("[boot] All subsystems online. Entering idle loop.\n");
 
-#ifdef CUSTOMOS_CANARY_DEMO
+#ifdef DUETOS_CANARY_DEMO
     // Compile-time-gated deliberate stack smash. Calls a helper that
     // overruns a local array past its stack canary; on function
     // return, the compiler-inserted epilogue reads the stashed
@@ -2010,7 +2010,7 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     CanarySmashDemo();
 #endif
 
-#ifdef CUSTOMOS_ATTACK_SIM
+#ifdef DUETOS_ATTACK_SIM
     // Compile-time-gated red-team attack suite. Runs five
     // in-kernel attack scenarios (IDT hijack, GDT swap, LSTAR
     // syscall-hook, canary defang, LBA 0 bootkit write) and
@@ -2019,18 +2019,18 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // guard to Enforce + blockguard to Deny — stateful
     // side-effects that would poison subsequent image loads /
     // sensitive-LBA writes for the rest of the boot.
-    customos::security::AttackSimRun();
+    duetos::security::AttackSimRun();
 #endif
 
-#ifdef CUSTOMOS_PANIC_DEMO
+#ifdef DUETOS_PANIC_DEMO
     // Compile-time-gated deliberate panic used by tools/test-panic.sh
     // to verify the panic path stays healthy end-to-end. Never
     // enabled in a normal build — the default preset does not pass
-    // -DCUSTOMOS_PANIC_DEMO.
-    customos::core::Panic("test/panic-demo", "CUSTOMOS_PANIC_DEMO enabled; halting on purpose");
+    // -DDUETOS_PANIC_DEMO.
+    duetos::core::Panic("test/panic-demo", "DUETOS_PANIC_DEMO enabled; halting on purpose");
 #endif
 
-#ifdef CUSTOMOS_TRAP_DEMO
+#ifdef DUETOS_TRAP_DEMO
     // Compile-time-gated deliberate CPU exception used by
     // tools/test-trap.sh to verify the trap dispatcher's crash-dump
     // path produces an extractable record (BEGIN/END markers,
@@ -2060,5 +2060,5 @@ extern "C" void kernel_main(customos::u32 multiboot_magic, customos::uptr multib
     // scheduler-allocated stack), so the reaper's KFree(stack_base)
     // is a no-op for it. The boot stack's .bss.boot storage isn't
     // heap-managed; the linker placed it and it persists.
-    customos::sched::SchedExit();
+    duetos::sched::SchedExit();
 }

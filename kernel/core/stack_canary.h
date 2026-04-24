@@ -1,7 +1,7 @@
 #pragma once
 
 /*
- * CustomOS stack-canary public surface.
+ * DuetOS stack-canary public surface.
  *
  * The compiler symbols (__stack_chk_guard + __stack_chk_fail) live
  * in stack_canary.cpp and aren't called directly from C++ code.
@@ -9,7 +9,7 @@
  * is the post-boot canary randomization.
  */
 
-namespace customos::core
+namespace duetos::core
 {
 
 /// Replace the boot-constant stack canary with an entropy-pool
@@ -19,4 +19,4 @@ namespace customos::core
 /// `kernel_main` is the intended caller.
 void RandomizeStackCanary();
 
-} // namespace customos::core
+} // namespace duetos::core

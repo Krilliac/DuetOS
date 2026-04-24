@@ -3,7 +3,7 @@
 #include "font8x8.h"
 #include "framebuffer.h"
 
-namespace customos::drivers::video
+namespace duetos::drivers::video
 {
 
 namespace
@@ -305,4 +305,4 @@ void ConsoleEndCapture()
     g_capture_len = nullptr;
 }
 
-} // namespace customos::drivers::video
+} // namespace duetos::drivers::video

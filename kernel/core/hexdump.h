@@ -3,7 +3,7 @@
 #include "types.h"
 
 /*
- * CustomOS — kernel-side hex / memory / instruction dump helpers.
+ * DuetOS — kernel-side hex / memory / instruction dump helpers.
  *
  * A small, self-contained toolkit for getting bytes out on the serial
  * line. Three use cases:
@@ -28,7 +28,7 @@
  * lock. Safe from IRQ / trap / panic context.
  */
 
-namespace customos::core
+namespace duetos::core
 {
 
 /// Upper bound for a single-line instruction dump. x86_64 instructions
@@ -101,4 +101,4 @@ void DumpHexRegionSafe(const char* tag, u64 addr, u32 len, u64 skip_page_va);
 /// diagnostics block.
 void DumpStackWindow(const char* tag, u64 rsp, u32 quad_count);
 
-} // namespace customos::core
+} // namespace duetos::core

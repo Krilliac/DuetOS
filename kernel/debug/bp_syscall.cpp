@@ -5,7 +5,7 @@
 #include "../core/process.h"
 #include "breakpoints.h"
 
-namespace customos::debug
+namespace duetos::debug
 {
 
 void DoBpInstall(arch::TrapFrame* frame)
@@ -105,4 +105,4 @@ void DoBpRemove(arch::TrapFrame* frame)
     frame->rax = (err == BpError::None) ? 0ULL : static_cast<u64>(-1);
 }
 
-} // namespace customos::debug
+} // namespace duetos::debug

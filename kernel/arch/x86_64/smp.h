@@ -33,7 +33,7 @@
  * theirs).
  */
 
-namespace customos::arch
+namespace duetos::arch
 {
 
 /// Copy the trampoline to physical 0x8000, allocate each AP's stack
@@ -74,4 +74,4 @@ void SmpSendIpi(u8 target_apic_id, u32 icr_low);
 /// better than recursing into another panic.
 void PanicBroadcastNmi();
 
-} // namespace customos::arch
+} // namespace duetos::arch

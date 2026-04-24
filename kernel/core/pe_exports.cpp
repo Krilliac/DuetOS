@@ -2,7 +2,7 @@
 
 #include "../arch/x86_64/serial.h"
 
-namespace customos::core
+namespace duetos::core
 {
 
 namespace
@@ -464,4 +464,4 @@ void PeExportsReport(const PeExports& exp)
     }
 }
 
-} // namespace customos::core
+} // namespace duetos::core

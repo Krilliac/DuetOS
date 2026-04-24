@@ -7,7 +7,7 @@
  *
  *   1. The real in-memory registry in advapi32.dll. Looks up
  *      HKLM\Software\Microsoft\Windows NT\CurrentVersion +
- *      queries "ProductName" (REG_SZ). Expects "CustomOS".
+ *      queries "ProductName" (REG_SZ). Expects "DuetOS".
  *
  *   2. The real fopen / fread / fclose in ucrtbase.dll.
  *      Opens /bin/hello.exe (a freestanding ~2 KiB ramfs PE
@@ -18,7 +18,7 @@
  *   0x00000000 — everything passed
  *   0x00000001 — registry open failed
  *   0x00000002 — registry query failed
- *   0x00000003 — registry value was not "CustomOS"
+ *   0x00000003 — registry value was not "DuetOS"
  *   0x00000011 — fopen failed
  *   0x00000012 — fread failed
  *   0x00000013 — bytes weren't "MZ"
@@ -91,7 +91,7 @@ void _start(void)
         ExitProcess(0x00000002);
     }
     printf("[reg-fopen-test] ProductName=\"%s\" (type=%u, size=%u)\n", name_buf, type, name_cb);
-    if (!ascii_eq(name_buf, "CustomOS"))
+    if (!ascii_eq(name_buf, "DuetOS"))
         ExitProcess(0x00000003);
 
     RegCloseKey(hk);

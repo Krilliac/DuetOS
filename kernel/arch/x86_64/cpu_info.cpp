@@ -4,7 +4,7 @@
 #include "../../core/klog.h"
 #include "../../core/panic.h"
 
-namespace customos::arch
+namespace duetos::arch
 {
 
 namespace
@@ -190,4 +190,4 @@ bool CpuHas(CpuFeature feat)
     return (g_info.feature_bits & (1u << feat)) != 0;
 }
 
-} // namespace customos::arch
+} // namespace duetos::arch

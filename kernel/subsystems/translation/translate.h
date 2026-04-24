@@ -3,7 +3,7 @@
 #include "../../core/types.h"
 
 /*
- * CustomOS ABI translation unit — v0.
+ * DuetOS ABI translation unit — v0.
  *
  * A small bridge between the Linux and native syscall dispatchers.
  * When the primary dispatcher doesn't handle a number, it hands
@@ -31,12 +31,12 @@
  *   translation makes sense, that path works the same way.
  */
 
-namespace customos::arch
+namespace duetos::arch
 {
 struct TrapFrame;
 }
 
-namespace customos::subsystems::translation
+namespace duetos::subsystems::translation
 {
 
 // Returned by the gap-fill functions.
@@ -117,4 +117,4 @@ const char* LinuxName(u64 nr);
 /// Windows version.
 const char* NtName(u64 nr);
 
-} // namespace customos::subsystems::translation
+} // namespace duetos::subsystems::translation

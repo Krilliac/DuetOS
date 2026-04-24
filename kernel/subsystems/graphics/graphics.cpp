@@ -4,7 +4,7 @@
 #include "../../core/klog.h"
 #include "../../drivers/gpu/gpu.h"
 
-namespace customos::subsystems::graphics
+namespace duetos::subsystems::graphics
 {
 
 namespace
@@ -249,4 +249,4 @@ GraphicsStats GraphicsStatsRead()
     };
 }
 
-} // namespace customos::subsystems::graphics
+} // namespace duetos::subsystems::graphics

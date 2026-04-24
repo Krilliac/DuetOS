@@ -3,7 +3,7 @@
 #include "types.h"
 
 /*
- * CustomOS — embedded kernel symbol table.
+ * DuetOS — embedded kernel symbol table.
  *
  * The kernel ships with a compact, sorted-by-address table that maps
  * runtime instruction pointers back to:
@@ -35,7 +35,7 @@
  * Context: kernel. Thread-safe by construction (read-only rodata).
  */
 
-namespace customos::core
+namespace duetos::core
 {
 
 /// One row of the embedded symbol table. Addresses are absolute virtual
@@ -91,4 +91,4 @@ void WriteResolvedAddress(const SymbolResolution& resolution);
 /// where possible.
 void WriteAddressWithSymbol(u64 addr);
 
-} // namespace customos::core
+} // namespace duetos::core

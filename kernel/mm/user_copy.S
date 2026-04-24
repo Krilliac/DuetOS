@@ -1,5 +1,5 @@
 /*
- * CustomOS — user-pointer copy primitives with fault fixup.
+ * DuetOS — user-pointer copy primitives with fault fixup.
  *
  * The C++ helpers mm::CopyFromUser / mm::CopyToUser delegate the
  * actual byte-by-byte memory move to one of the assembly routines

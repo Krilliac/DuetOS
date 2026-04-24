@@ -2,7 +2,7 @@
 
 #include "framebuffer.h"
 
-namespace customos::drivers::video
+namespace duetos::drivers::video
 {
 
 namespace
@@ -251,4 +251,4 @@ void CursorSetDesktopBackground(u32 rgb)
     g_desktop_rgb = rgb;
 }
 
-} // namespace customos::drivers::video
+} // namespace duetos::drivers::video

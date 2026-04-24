@@ -6,7 +6,7 @@
 #include "../../mm/paging.h"
 #include "../pci/pci.h"
 
-namespace customos::drivers::audio
+namespace duetos::drivers::audio
 {
 
 namespace
@@ -257,7 +257,7 @@ void AudioInit()
     }
 }
 
-::customos::core::Result<void> AudioShutdown()
+::duetos::core::Result<void> AudioShutdown()
 {
     KLOG_TRACE_SCOPE("drivers/audio", "AudioShutdown");
     const u64 dropped = g_ac_count;
@@ -280,4 +280,4 @@ const AudioControllerInfo& AudioController(u64 index)
     return g_acs[index];
 }
 
-} // namespace customos::drivers::audio
+} // namespace duetos::drivers::audio

@@ -102,5 +102,5 @@ if [[ ${LINK_RC} -ne 0 ]]; then
     exit ${LINK_RC}
 fi
 
-python3 "${EMBED}" "${DLL}" "${OUT_HEADER}" "${SYMBOL_NAME}" --namespace "customos::fs::generated"
+python3 "${EMBED}" "${DLL}" "${OUT_HEADER}" "${SYMBOL_NAME}" --namespace "duetos::fs::generated"
 echo "build-stub-dll.sh: wrote ${OUT_HEADER} (${DLL_NAME} $(stat -c%s "${DLL}") bytes)"

@@ -3,7 +3,7 @@
 #include "../core/types.h"
 
 /*
- * CustomOS — x86_64 debug-register access helpers.
+ * DuetOS — x86_64 debug-register access helpers.
  *
  * DR0..DR3 hold breakpoint linear addresses; DR6 reports which
  * breakpoint condition fired (plus single-step and task-switch
@@ -17,7 +17,7 @@
  * Context: ring 0 only. MOV-to/from-DR is #GP from ring 3.
  */
 
-namespace customos::debug::dr
+namespace duetos::debug::dr
 {
 
 inline u64 ReadDr0()
@@ -152,4 +152,4 @@ inline constexpr u64 Dr7SlotEnableBit(unsigned slot)
     return 1ULL << (slot * 2); // L0, L1, L2, L3
 }
 
-} // namespace customos::debug::dr
+} // namespace duetos::debug::dr

@@ -59,7 +59,7 @@
  * Context: kernel. Init runs once, after Ps2KeyboardInit.
  */
 
-namespace customos::drivers::input
+namespace duetos::drivers::input
 {
 
 constexpr u8 kMouseButtonLeft = 1U << 0;
@@ -106,4 +106,4 @@ Ps2MouseStats Ps2MouseStatsRead();
 /// the same Cli-bracketed discipline the IRQ path uses.
 void MouseInjectPacket(const MousePacket& p);
 
-} // namespace customos::drivers::input
+} // namespace duetos::drivers::input

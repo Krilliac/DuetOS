@@ -7,7 +7,7 @@
 #include "../pci/pci.h"
 #include "hid_descriptor.h"
 
-namespace customos::drivers::usb
+namespace duetos::drivers::usb
 {
 
 namespace
@@ -419,4 +419,4 @@ const UsbClassDriver& ClassDriver(u64 index)
     return kClassDrivers[index];
 }
 
-} // namespace customos::drivers::usb
+} // namespace duetos::drivers::usb

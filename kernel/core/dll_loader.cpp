@@ -6,7 +6,7 @@
 #include "../mm/page.h"
 #include "../mm/paging.h"
 
-namespace customos::core
+namespace duetos::core
 {
 
 namespace
@@ -137,9 +137,9 @@ u64 RvaToFile(const u8* file, const DllHeaders& h, u32 rva)
     return ~u64(0);
 }
 
-bool MapHeadersPage(const u8* file, u64 sizeof_headers, u64 base_va, customos::mm::AddressSpace* as)
+bool MapHeadersPage(const u8* file, u64 sizeof_headers, u64 base_va, duetos::mm::AddressSpace* as)
 {
-    using namespace customos::mm;
+    using namespace duetos::mm;
     const u64 start = base_va & ~kPageMask;
     const u64 end = (base_va + sizeof_headers + kPageMask) & ~kPageMask;
     if (end <= start)
@@ -162,9 +162,9 @@ bool MapHeadersPage(const u8* file, u64 sizeof_headers, u64 base_va, customos::m
     return true;
 }
 
-bool MapSection(const u8* file, const u8* sec, u64 base_va, customos::mm::AddressSpace* as)
+bool MapSection(const u8* file, const u8* sec, u64 base_va, duetos::mm::AddressSpace* as)
 {
-    using namespace customos::mm;
+    using namespace duetos::mm;
     const u32 virt_addr = LeU32(sec + kSectionHeaderVirtualAddress);
     const u32 virt_size = LeU32(sec + kSectionHeaderVirtualSize);
     const u32 raw_size = LeU32(sec + kSectionHeaderSizeOfRawData);
@@ -213,10 +213,10 @@ bool MapSection(const u8* file, const u8* sec, u64 base_va, customos::mm::Addres
 // Apply IMAGE_REL_BASED_DIR64 relocations. Simplified twin of
 // pe_loader.cpp::ApplyRelocations — kept local to keep DLL and
 // EXE loaders independent until a shared helper is justified.
-bool ApplyRelocations(const u8* file, u64 file_len, const DllHeaders& h, customos::mm::AddressSpace* as, u64 base_va,
+bool ApplyRelocations(const u8* file, u64 file_len, const DllHeaders& h, duetos::mm::AddressSpace* as, u64 base_va,
                       u64 delta)
 {
-    using namespace customos::mm;
+    using namespace duetos::mm;
     using arch::SerialWrite;
     using arch::SerialWriteHex;
 
@@ -338,7 +338,7 @@ const char* DllLoadStatusName(DllLoadStatus s)
     return "?";
 }
 
-DllLoadResult DllLoad(const u8* file, u64 file_len, customos::mm::AddressSpace* as, u64 aslr_delta)
+DllLoadResult DllLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, u64 aslr_delta)
 {
     using arch::SerialWrite;
     using arch::SerialWriteHex;
@@ -463,4 +463,4 @@ u64 DllResolveOrdinal(const DllImage& dll, u32 ordinal)
     return dll.base_va + u64(e.rva);
 }
 
-} // namespace customos::core
+} // namespace duetos::core

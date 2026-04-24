@@ -1,7 +1,7 @@
 ; api-ms-win-crt-convert-l1-1-0.def
 ;
 ; UCRT apiset for string-to-number conversions. On real
-; Windows this DLL forwards to ucrtbase.dll. CustomOS resolves
+; Windows this DLL forwards to ucrtbase.dll. DuetOS resolves
 ; the apiset name directly in the stub table. v0 implements
 ; each as "return 0" — callers of strtoul typically check
 ; errno for overflow or use a tentative-parse pattern, and

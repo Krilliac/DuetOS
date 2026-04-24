@@ -4,7 +4,7 @@
 #include "../core/types.h"
 
 /*
- * CustomOS — ext4 driver, v0 probe-only shell.
+ * DuetOS — ext4 driver, v0 probe-only shell.
  *
  * Reads LBA 2 (the 1024-byte superblock offset) of a block handle,
  * validates the ext4 magic (0xEF53 at offset 0x38 of the
@@ -28,7 +28,7 @@
  * polling synchronous).
  */
 
-namespace customos::fs::ext4
+namespace duetos::fs::ext4
 {
 
 inline constexpr u32 kMaxVolumes = 8;
@@ -115,7 +115,7 @@ struct Volume
 ///   IoError    — BlockDeviceRead failed.
 ///   NotFound   — magic mismatch (not an ext2/3/4 volume).
 ///   BadState   — volume registry full.
-::customos::core::Result<u32> Ext4Probe(u32 block_handle);
+::duetos::core::Result<u32> Ext4Probe(u32 block_handle);
 
 u32 Ext4VolumeCount();
 const Volume* Ext4VolumeByIndex(u32 index);
@@ -124,4 +124,4 @@ const Volume* Ext4VolumeByIndex(u32 index);
 /// the outcome for each.
 void Ext4ScanAll();
 
-} // namespace customos::fs::ext4
+} // namespace duetos::fs::ext4

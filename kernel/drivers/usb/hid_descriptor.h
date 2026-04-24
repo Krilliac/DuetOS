@@ -3,7 +3,7 @@
 #include "../../core/types.h"
 
 /*
- * CustomOS — USB HID report-descriptor parser, v0.
+ * DuetOS — USB HID report-descriptor parser, v0.
  *
  * A HID device describes its report format with a "report
  * descriptor" — a byte string of tagged items that a driver must
@@ -39,7 +39,7 @@
  *   - HUT 1.4 "HID Usage Tables"
  */
 
-namespace customos::drivers::usb::hid
+namespace duetos::drivers::usb::hid
 {
 
 // Common HID usage pages (subset of HUT §3). These are the
@@ -105,4 +105,4 @@ bool HidParseDescriptor(const u8* buf, u32 len, HidReportSummary* out);
 /// COM1 and panics on mismatch.
 void HidSelfTest();
 
-} // namespace customos::drivers::usb::hid
+} // namespace duetos::drivers::usb::hid

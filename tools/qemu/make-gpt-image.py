@@ -7,7 +7,7 @@
 #   LBA 1        : Primary GPT header
 #   LBA 2..33    : Partition entry array (128 x 128 = 16 KiB)
 #   LBA 2048..end: Data partition (Linux-filesystem type GUID).
-#                  First 8 bytes = "CUSTOMOS" marker so the kernel's
+#                  First 8 bytes = "DUETOS" marker so the kernel's
 #                  post-GPT probe has a well-known string to assert.
 #   last-33..    : (not written) backup GPT header + entries.
 #
@@ -33,7 +33,7 @@ PART_GUID = uuid.UUID("12345678-1234-5678-9ABC-DEF012345678")
 # Linux filesystem data type GUID (not ESP — we want a plain data part).
 PART_TYPE = uuid.UUID("0FC63DAF-8483-4772-8E79-3D69D8477DE4")
 
-MARKER = b"CUSTOMOS"
+MARKER = b"DUETOS"
 
 # ----- FAT32 layout written into the data partition -----------------------
 # All values are sectors-within-the-partition. Partition starts at
@@ -254,7 +254,7 @@ def build_entries() -> bytearray:
     struct.pack_into("<Q", entry, 32, FIRST_LBA)
     struct.pack_into("<Q", entry, 40, LAST_LBA)
     struct.pack_into("<Q", entry, 48, 0)            # attrs
-    name_utf16 = "CUSTOMOS-TEST".encode("utf-16-le")
+    name_utf16 = "DUETOS-TEST".encode("utf-16-le")
     entry[56:56 + len(name_utf16)] = name_utf16
     entries[0:128] = entry
     return entries
@@ -296,7 +296,7 @@ def build_fat32(part_sector_count: int) -> bytearray:
     # BPB.
     bs = bytearray(SECTOR)
     bs[0:3] = b"\xEB\x58\x90"          # JMP short + NOP
-    bs[3:11] = b"CUSTOMOS"             # OEM name (8 bytes)
+    bs[3:11] = b"DUETOS"             # OEM name (8 bytes)
     struct.pack_into("<H", bs, 11, SECTOR)          # bytes_per_sector
     bs[13] = FAT_SPC                                # sectors_per_cluster
     struct.pack_into("<H", bs, 14, FAT_RESERVED)    # reserved_sectors
@@ -320,7 +320,7 @@ def build_fat32(part_sector_count: int) -> bytearray:
     bs[65] = 0                                      # reserved
     bs[66] = 0x29                                   # boot_sig
     struct.pack_into("<I", bs, 67, 0xCAFEBABE)      # volume_id
-    bs[71:82] = b"CUSTOMOS   "                      # volume_label (11 bytes)
+    bs[71:82] = b"DUETOS   "                      # volume_label (11 bytes)
     bs[82:90] = b"FAT32   "                         # fs_type (8 bytes)
     bs[510] = 0x55
     bs[511] = 0xAA
@@ -484,7 +484,7 @@ def main(out_path: str) -> None:
     img[1 * SECTOR:1 * SECTOR + len(hdr)] = hdr
     img[2 * SECTOR:2 * SECTOR + len(entries)] = entries
 
-    # Format the data partition as FAT32. Blanks the CUSTOMOS marker that
+    # Format the data partition as FAT32. Blanks the DUETOS marker that
     # used to live at byte 0 of the partition — the BPB lives there now;
     # the kernel no longer needs the raw marker since it can parse the FS.
     part_sectors = LAST_LBA - FIRST_LBA + 1

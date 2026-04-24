@@ -1,7 +1,7 @@
 /*
  * userland/apps/hello_winapi/hello.c
  *
- * First CustomOS userland program that talks to "Win32" —
+ * First DuetOS userland program that talks to "Win32" —
  * real imported functions through a real Import Address Table.
  *
  * v0 scope:
@@ -15,12 +15,12 @@
  *      kernel32.lib produced by llvm-dlltool from kernel32.def.
  *   2. The resulting PE carries an Import Directory with three
  *      kernel32.dll entries.
- *   3. On load, the CustomOS PE loader's ResolveImports walks
+ *   3. On load, the DuetOS PE loader's ResolveImports walks
  *      the IAT and patches each slot with the stub VA from
  *      kernel/subsystems/win32/stubs.cpp.
  *   4. Each IAT-routed call lands in the per-process stubs
  *      page at 0x60000000 + stub_offset, which translates the
- *      Windows x64 ABI into a CustomOS int 0x80 syscall.
+ *      Windows x64 ABI into a DuetOS int 0x80 syscall.
  *   5. The WriteFile stub maps to SYS_WRITE(1, buf, n); the
  *      ExitProcess stub maps to SYS_EXIT(code).
  *
@@ -84,7 +84,7 @@ __declspec(dllimport) void* memmove(void* dst, const void* src, size_t n);
 
 // Batch 6 — UCRT CRT-startup shims. These live in the apiset
 // DLLs (api-ms-win-crt-runtime-l1-1-0.dll and friends) that
-// forward to ucrtbase.dll on real Windows. CustomOS handles
+// forward to ucrtbase.dll on real Windows. DuetOS handles
 // the apiset name directly in the stub lookup table.
 __declspec(dllimport) int _initialize_onexit_table(void* table);
 __declspec(dllimport) int _register_onexit_function(void* table, void* fn);
@@ -761,14 +761,14 @@ void _start(void)
     // Batch 24 exercise — file I/O via real handle table.
     //
     // Opens /etc/version (a 27-byte ramfs file containing
-    // "CustomOS v0 (ramfs-seeded)\n"), reads the first 32 bytes,
+    // "DuetOS v0 (ramfs-seeded)\n"), reads the first 32 bytes,
     // seeks back to start, reads again, validates both reads
     // returned the expected first 8 bytes, then closes.
     //
     // Invariants checked:
     //   * CreateFileW returns a non-INVALID_HANDLE_VALUE handle.
     //   * First ReadFile returns >= 27 bytes (entire file fits).
-    //   * Buffer starts with "CustomOS".
+    //   * Buffer starts with "DuetOS".
     //   * SetFilePointerEx(0, FILE_BEGIN) returns 0 (new pos).
     //   * Second ReadFile returns the same first 8 bytes.
     //   * CloseHandle returns TRUE.
@@ -814,7 +814,7 @@ void _start(void)
     //
     // Invariants checked:
     //   * Re-open /etc/version, GetFileSizeEx returns 27 (the
-    //     ramfs payload "CustomOS v0 (ramfs-seeded)\n").
+    //     ramfs payload "DuetOS v0 (ramfs-seeded)\n").
     //   * Reading 1 byte after GetFileSizeEx shows the cursor
     //     wasn't moved by the stat call (still at 0).
     //   * GetModuleHandleW(NULL) returns a non-NULL HMODULE
@@ -837,7 +837,7 @@ void _start(void)
     {
         b25_size_ok = GetFileSizeEx(b25_h, &b25_size);
         // Cursor must still be at 0 after a stat — read 1 byte
-        // and assert it's 'C' (the start of "CustomOS").
+        // and assert it's 'C' (the start of "DuetOS").
         ReadFile(b25_h, &b25_first, 1, &b25_n, 0);
         b25_close_ok = CloseHandle(b25_h);
     }
@@ -1176,7 +1176,7 @@ void _start(void)
     //   * GetUserNameW with a 2-char buffer returns FALSE and
     //     sets *size = 5 (required).
     //   * GetComputerNameW with a 16-char buffer returns TRUE,
-    //     writes L"CustomOS\0", and sets *size = 9.
+    //     writes L"DuetOS\0", and sets *size = 9.
     WCHAR b34_ubuf[16];
     for (int i = 0; i < 16; ++i)
         b34_ubuf[i] = (WCHAR)0xAAAA;

@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────────────────────────────────────
-#                            CustomOS .gitignore
+#                            DuetOS .gitignore
 #        Build artifacts, disk/kernel images, compiler debris,
 #        IDE files, and other generated content stay out of git.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -174,4 +174,4 @@ localdev.ps1
 *.7z
 *.rar
 
-# End of CustomOS .gitignore
+# End of DuetOS .gitignore

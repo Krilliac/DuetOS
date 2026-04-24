@@ -4,7 +4,7 @@
 #include "types.h"
 
 /*
- * CustomOS syscall gate — v0.
+ * DuetOS syscall gate — v0.
  *
  * One vector today: 0x80, reached from ring 3 via `int 0x80`. The gate
  * is a DPL=3 interrupt descriptor, so ring-3 code can issue the int
@@ -28,7 +28,7 @@
  * user task is spawned.
  */
 
-namespace customos::core
+namespace duetos::core
 {
 
 enum SyscallNumber : u64
@@ -285,7 +285,7 @@ enum SyscallNumber : u64
     // bounded by kWin32VmapCapPages (128 = 512 KiB per process).
     // Backs Win32 VirtualAlloc with flAllocationType covering
     // MEM_COMMIT | MEM_RESERVE; flProtect is silently coerced
-    // to RW+NX (the CustomOS W^X policy — no W+X pages).
+    // to RW+NX (the DuetOS W^X policy — no W+X pages).
     SYS_VMAP = 28,
 
     // SYS_VUNMAP: rdi = VA, rsi = size. Returns 0 on success,
@@ -590,4 +590,4 @@ void SyscallInit();
 /// returns.
 void SyscallDispatch(arch::TrapFrame* frame);
 
-} // namespace customos::core
+} // namespace duetos::core

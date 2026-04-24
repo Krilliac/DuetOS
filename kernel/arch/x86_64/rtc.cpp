@@ -4,7 +4,7 @@
 #include "../../core/klog.h"
 #include "cpu.h"
 
-namespace customos::arch
+namespace duetos::arch
 {
 
 namespace
@@ -177,4 +177,4 @@ void CmosDump()
     }
 }
 
-} // namespace customos::arch
+} // namespace duetos::arch

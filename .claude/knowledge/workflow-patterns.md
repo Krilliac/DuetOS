@@ -1,4 +1,4 @@
-# Effective CustomOS Development Workflows
+# Effective DuetOS Development Workflows
 
 **Last updated:** 2026-04-20
 **Type:** Pattern
@@ -10,7 +10,7 @@ Recurring workflows that reduce time spent on overhead and increase the reliabil
 
 ## Context
 
-Applies to all CustomOS development sessions. Most patterns correspond to gaps where the "obvious" approach is slower or less reliable than the pattern described here.
+Applies to all DuetOS development sessions. Most patterns correspond to gaps where the "obvious" approach is slower or less reliable than the pattern described here.
 
 ---
 
@@ -64,7 +64,7 @@ cmake --build build --parallel $(nproc) 2>&1 | tail -30
 cd build && ctest --output-on-failure && cd ..
 
 # 5. QEMU smoke (catches runtime regressions on the boot path)
-tools/qemu/run.sh --headless --timeout 30 build/customos.img
+tools/qemu/run.sh --headless --timeout 30 build/duetos.img
 ```
 
 Stop at the first failure; fix it before proceeding to the next step.

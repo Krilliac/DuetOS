@@ -35,7 +35,7 @@
 // address as an opaque u64.
 extern "C" void isr_128();
 
-namespace customos::core
+namespace duetos::core
 {
 
 namespace
@@ -270,7 +270,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
 
     case SYS_WIN32_MISS_LOG:
     {
-        KBP_PROBE_V(::customos::debug::ProbeId::kWin32StubMiss, frame->rdi);
+        KBP_PROBE_V(::duetos::debug::ProbeId::kWin32StubMiss, frame->rdi);
 
         // rdi = IAT slot VA that the miss-logger trampoline
         // decoded from its caller's `call [rip+disp32]`.
@@ -1361,4 +1361,4 @@ void SyscallDispatch(arch::TrapFrame* frame)
     }
 }
 
-} // namespace customos::core
+} // namespace duetos::core

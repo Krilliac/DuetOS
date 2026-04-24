@@ -6,7 +6,7 @@
 
 ## Description
 
-CustomOS targets **typical commodity PC hardware**. This entry records the specific CPU / GPU / chipset / IO combinations we commit to supporting, in tiers. The matrix is the forcing function for driver work — we do not build a driver for hardware that is not on the matrix.
+DuetOS targets **typical commodity PC hardware**. This entry records the specific CPU / GPU / chipset / IO combinations we commit to supporting, in tiers. The matrix is the forcing function for driver work — we do not build a driver for hardware that is not on the matrix.
 
 ## Context
 
@@ -67,7 +67,7 @@ Tier 3 is critical: bring-up happens in QEMU long before any of Tier 1 gets touc
 
 - **4 GiB minimum** (we'll aim for 2 GiB-usable after reserves, pinned allocations, etc.).
 - **IOMMU**: Intel VT-d or AMD-Vi required for GPU passthrough, DMA-remapping safety. If absent, the kernel refuses to load untrusted drivers by default.
-- **NX + SMEP + SMAP**: required. W^X enforced. If a CPU lacks these, CustomOS refuses to boot.
+- **NX + SMEP + SMAP**: required. W^X enforced. If a CPU lacks these, DuetOS refuses to boot.
 
 ---
 

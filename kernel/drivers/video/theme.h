@@ -43,7 +43,7 @@
  * CompositorLock bracket. No ring-3 exposure yet (no syscall).
  */
 
-namespace customos::drivers::video
+namespace duetos::drivers::video
 {
 
 enum class ThemeId : u8
@@ -142,4 +142,4 @@ void ThemeRegisterWindow(ThemeRole role, WindowHandle h);
 /// registered (no-ops the window loop).
 void ThemeApplyToAll();
 
-} // namespace customos::drivers::video
+} // namespace duetos::drivers::video

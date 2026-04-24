@@ -74,7 +74,7 @@ def parse_nt_table(path: Path):
             owner = "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll"
             fallback = "STATUS_NOT_IMPLEMENTED"
         else:
-            m = re.search(r"::customos::core::(SYS_[A-Z0-9_]+)", mapping)
+            m = re.search(r"::duetos::core::(SYS_[A-Z0-9_]+)", mapping)
             sys_name = m.group(1) if m else "(unknown)"
             status = "translated"
             owner = f"kernel/subsystems/win32/nt_syscall_table_generated.h::{sys_name}"

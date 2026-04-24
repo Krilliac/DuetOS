@@ -9,7 +9,7 @@
 #include "../pci/pci.h"
 #include "block.h"
 
-namespace customos::drivers::storage
+namespace duetos::drivers::storage
 {
 
 namespace
@@ -626,4 +626,4 @@ void AhciSelfTest()
     SerialWrite("[ahci] self-test OK (LBA 0 read + 0x55AA signature present)\n");
 }
 
-} // namespace customos::drivers::storage
+} // namespace duetos::drivers::storage

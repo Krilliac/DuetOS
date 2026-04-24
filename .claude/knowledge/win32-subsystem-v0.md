@@ -9,7 +9,7 @@ Windows PE but only **execute** freestanding images with no
 imports. This entry documents the Win32 subsystem on top of
 it: a kernel-hosted per-process "stubs page" that maps each
 imported `{dll, func}` to a handful of machine-code thunks
-translating the Windows x64 ABI into CustomOS native
+translating the Windows x64 ABI into DuetOS native
 syscalls.
 
 As of 2026-04-21, **9 batches** of stubs have landed:

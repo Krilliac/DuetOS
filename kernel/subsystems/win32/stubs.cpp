@@ -3,7 +3,7 @@
 #include "../../arch/x86_64/serial.h"
 #include "nt_syscall_table_generated.h"
 
-namespace customos::win32
+namespace duetos::win32
 {
 
 namespace
@@ -159,7 +159,7 @@ constexpr u32 kOffNtQuerySystemTimeReal = 0x853;        // batch 49 — 16 bytes
 constexpr u32 kOffNtQueryPerfCounterReal = 0x863;       // batch 49 — 28 bytes
 constexpr u32 kOffCreateThreadReal = 0x87F;             // batch 50 — 39 bytes (saves rdi+rsi)
 // ThreadExitTramp: offset 0x8A6, 6 bytes. Public VA exported as
-// customos::win32::kWin32ThreadExitTrampVa in stubs.h — keep in sync.
+// duetos::win32::kWin32ThreadExitTrampVa in stubs.h — keep in sync.
 
 // === Batch 51: ExitThread + OutputDebugStringA + GetProcessTimes
 // + GetThreadTimes + GetSystemTimes + GlobalMemoryStatusEx +
@@ -264,7 +264,7 @@ constexpr u32 kOffInitOnceExec = 0xC28; // batch 65 — 87 bytes
 
 // === Stage-2 slice 4: real GetProcAddress via SYS_DLL_PROC_ADDRESS =======
 // Win32: FARPROC GetProcAddress(HMODULE hModule=rcx, LPCSTR lpProcName=rdx).
-// CustomOS: SYS_DLL_PROC_ADDRESS (57) with rdi=hmod, rsi=name.
+// DuetOS: SYS_DLL_PROC_ADDRESS (57) with rdi=hmod, rsi=name.
 // Returns exported VA or 0 (= miss). rdi + rsi are callee-saved in
 // the Win32 x64 ABI, so save/restore across the syscall.
 constexpr u32 kOffGetProcAddressReal = 0xC7F; // stage-2 slice 4 — 18 bytes
@@ -272,7 +272,7 @@ constexpr u32 kOffGetProcAddressReal = 0xC7F; // stage-2 slice 4 — 18 bytes
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
     // Windows x64 ABI: first arg (uExitCode) in RCX.
-    // CustomOS native ABI: syscall # in RAX, first arg in RDI,
+    // DuetOS native ABI: syscall # in RAX, first arg in RDI,
     // SYS_EXIT = 0.
     0x48, 0x89, 0xCF, // 0x00 mov rdi, rcx      ; code
     0x31, 0xC0,       // 0x03 xor eax, eax      ; rax = 0 = SYS_EXIT
@@ -1019,7 +1019,7 @@ constexpr u8 kStubsBytes[] = {
     //   char***  __p___argv(void);
     //
     // They return addresses into a process-wide storage block the
-    // CRT initialises during startup. In CustomOS that storage is
+    // CRT initialises during startup. In DuetOS that storage is
     // the "proc-env" page at `kProcEnvVa` (0x65000000), populated
     // by `Win32ProcEnvPopulate` during PE load with argc=1 and
     // argv=[program_name, NULL].
@@ -1881,7 +1881,7 @@ constexpr u8 kStubsBytes[] = {
     // Fixed-string probes for "who am I on this machine?"
     // queries. Real Windows writes the NetBIOS name / SAM user.
     // v0 hands back constants: user = "user" (4 chars), computer
-    // = "CustomOS" (8 chars). Both follow the same in/out-size
+    // = "DuetOS" (8 chars). Both follow the same in/out-size
     // shape: *pcchSize is capacity on entry, chars-written-
     // including-NUL on exit.
 
@@ -1905,7 +1905,7 @@ constexpr u8 kStubsBytes[] = {
 
     // --- GetComputerNameW (offset 0x652, 61 bytes) ------------
     // Win32: BOOL GetComputerNameW(LPWSTR rcx, LPDWORD rdx).
-    //   Writes L"CustomOS\0" (9 wide chars incl NUL) if buffer
+    //   Writes L"DuetOS\0" (9 wide chars incl NUL) if buffer
     //   has room. Same size-convention as GetUserNameW.
     0x8B, 0x02,                               // 0x652 mov eax, [rdx]
     0x83, 0xF8, 0x09,                         // 0x654 cmp eax, 9
@@ -1938,7 +1938,7 @@ constexpr u8 kStubsBytes[] = {
     // UINT GetSystemDirectoryW(LPWSTR rcx, UINT rdx).
     // Buffer-first sig: writes L"X:\\\0" if rdx >= 4, returns 3.
     // Else returns 4 (required size incl NUL). Same content for
-    // both — CustomOS has no filesystem distinction between
+    // both — DuetOS has no filesystem distinction between
     // "Windows" dir and "System32" dir.
     0x83, 0xFA, 0x04,                         // 0x68F cmp edx, 4
     0x72, 0x13,                               // 0x692 jb .small (+0x13 = 19)
@@ -1962,7 +1962,7 @@ constexpr u8 kStubsBytes[] = {
     // --- GetDriveType (offset 0x6B3, 6 bytes) -----------------
     // Win32: UINT GetDriveType{A,W}(LPCxSTR rcx). Returns the
     // drive type. v0 always returns 3 (DRIVE_FIXED) — X: is a
-    // "fixed" logical drive in CustomOS land.
+    // "fixed" logical drive in DuetOS land.
     0xB8, 0x03, 0x00, 0x00, 0x00, // 0x6B3 mov eax, 3 (DRIVE_FIXED)
     0xC3,                         // 0x6B8 ret
 
@@ -2393,7 +2393,7 @@ constexpr u8 kStubsBytes[] = {
     //     DWORD                  dwCreationFlags,      // [rsp+0x28]  (ignored — always-run)
     //     LPDWORD                lpThreadId);          // [rsp+0x30]  (optional out)
     //
-    // CustomOS: SYS_THREAD_CREATE (45) with start_va in rdi,
+    // DuetOS: SYS_THREAD_CREATE (45) with start_va in rdi,
     // param in rsi. Returns handle or 0xFFFFFFFFFFFFFFFF on
     // failure. The Win32 contract is "handle or NULL on fail" —
     // we translate -1 to 0 at the tail.
@@ -2528,7 +2528,7 @@ constexpr u8 kStubsBytes[] = {
     //                                const HANDLE *,     // rdx
     //                                BOOL bWaitAll,      // r8
     //                                DWORD dwMs);        // r9
-    // CustomOS: SYS_WAIT_MULTI with count=rdi, arr=rsi,
+    // DuetOS: SYS_WAIT_MULTI with count=rdi, arr=rsi,
     // waitAll=rdx, timeout_ms=r10. Saves rdi+rsi across the
     // syscall (both callee-saved in Win64 ABI).
     0x57,                         // 0x91C push rdi
@@ -3173,7 +3173,7 @@ constexpr u8 kStubsBytes[] = {
 
     // --- GetProcAddress (offset 0xC7F, 18 bytes) ------------------
     // Win32: FARPROC GetProcAddress(HMODULE hModule=rcx, LPCSTR name=rdx).
-    // CustomOS: SYS_DLL_PROC_ADDRESS (57) with rdi=hmod, rsi=name.
+    // DuetOS: SYS_DLL_PROC_ADDRESS (57) with rdi=hmod, rsi=name.
     // Returns the exported VA or 0 on miss — same miss contract as
     // the old kOffReturnZero stub. rdi + rsi are callee-saved in the
     // Win32 x64 ABI; save/restore across the syscall.
@@ -3795,7 +3795,7 @@ constexpr StubEntry kStubsTable[] = {
     {"kernel32.dll", "AddVectoredContinueHandler", kOffReturnZero},
 
     // Batch 40 — Interlocked atomics. Real LOCK-prefixed instr
-    // sequences; correct even if CustomOS gains ring-3 SMP.
+    // sequences; correct even if DuetOS gains ring-3 SMP.
     // Exported under both legacy `InterlockedX` names and the
     // `_InterlockedX` compiler intrinsic-style names (clang/MSVC
     // alias them).
@@ -3811,7 +3811,7 @@ constexpr StubEntry kStubsTable[] = {
     {"vcruntime140.dll", "_InterlockedExchange", kOffInterlockedExchg},
     {"vcruntime140.dll", "_InterlockedExchangeAdd", kOffInterlockedExchgAdd},
     // __chkstk: MSVC stack-probe helper for functions with
-    // frames > 4 KiB. CustomOS maps the full user stack up-
+    // frames > 4 KiB. DuetOS maps the full user stack up-
     // front at PE load, so no probe is needed — just ret. RAX
     // holds the requested size; we preserve it by doing nothing.
     {"vcruntime140.dll", "__chkstk", kOffCritSecNop},
@@ -3965,7 +3965,7 @@ constexpr StubEntry kStubsTable[] = {
     // startup sees a documented negative return and falls back
     // cleanly rather than hitting the miss-logger.
 
-    // user32 — UI surface. CustomOS has no window system
+    // user32 — UI surface. DuetOS has no window system
     // reachable from ring 3 yet, so every user32 entry either
     // returns failure or a benign constant.
     {"user32.dll", "MessageBoxW", kOffReturnOne}, // IDOK (1) — caller proceeds
@@ -4878,7 +4878,7 @@ bool AsciiEqual(const char* a, const char* b)
     return *a == 0 && *b == 0;
 }
 
-#if defined(CUSTOMOS_WIN32_STUBS_VALIDATE_LINEAR)
+#if defined(DUETOS_WIN32_STUBS_VALIDATE_LINEAR)
 bool Win32StubsLookupLinear(const char* dll, const char* func, u64* out_va, bool* out_is_noop)
 {
     for (const StubEntry& e : kStubsTable)
@@ -5124,7 +5124,7 @@ bool Win32StubsLookupKind(const char* dll, const char* func, u64* out_va, bool* 
     if (dll == nullptr || func == nullptr || out_va == nullptr)
         return false;
     const bool found_hashed = Win32StubsLookupHashed(dll, func, out_va, out_is_noop);
-#if defined(CUSTOMOS_WIN32_STUBS_VALIDATE_LINEAR)
+#if defined(DUETOS_WIN32_STUBS_VALIDATE_LINEAR)
     u64 linear_va = 0;
     bool linear_noop = false;
     const bool found_linear = Win32StubsLookupLinear(dll, func, &linear_va, &linear_noop);
@@ -5155,11 +5155,11 @@ void Win32LogNtCoverage()
     // count, but doing one runtime sweep here also confirms the
     // tables linked correctly into the kernel binary (catches a
     // future "header included but not referenced anywhere" rot).
-    using namespace ::customos::subsystems::win32;
+    using namespace ::duetos::subsystems::win32;
     u32 covered = 0;
     for (u32 i = 0; i < kBedrockNtSyscallCount; ++i)
     {
-        if (kBedrockNtSyscalls[i].customos_sys != kSysNtNotImpl)
+        if (kBedrockNtSyscalls[i].duetos_sys != kSysNtNotImpl)
             ++covered;
     }
     arch::SerialWrite("[win32] ntdll bedrock coverage: ");
@@ -5174,4 +5174,4 @@ void Win32LogNtCoverage()
     arch::SerialWrite(" (every NT syscall known on the target Windows version)\n");
 }
 
-} // namespace customos::win32
+} // namespace duetos::win32

@@ -3,7 +3,7 @@
 #include "../../core/types.h"
 
 /*
- * CustomOS ring-3 transition — v0.
+ * DuetOS ring-3 transition — v0.
  *
  * One-way iretq-based user-mode entry. The caller has already:
  *   1) mapped a user-accessible code page at `user_rip` (kPageUser + exec),
@@ -25,7 +25,7 @@
  * meaningful "enter user mode" semantics.
  */
 
-namespace customos::arch
+namespace duetos::arch
 {
 
 // Implemented in usermode.S; the unmangled name is what the .S file
@@ -51,4 +51,4 @@ extern "C" [[noreturn]] void EnterUserModeWithGs(u64 user_rip, u64 user_rsp, u64
 // setup via MSR, RFLAGS.IF=1) is identical to the 3-arg form.
 extern "C" [[noreturn]] void EnterUserModeThread(u64 user_rip, u64 user_rsp, u64 user_gs_base, u64 user_rcx);
 
-} // namespace customos::arch
+} // namespace duetos::arch

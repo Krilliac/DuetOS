@@ -4,7 +4,7 @@
 #include "klog.h"
 #include "panic.h"
 
-namespace customos::core
+namespace duetos::core
 {
 
 const char* ErrorCodeName(ErrorCode c)
@@ -153,4 +153,4 @@ void ResultSelfTest()
     arch::SerialWrite("[result-selftest] PASS (Result<T> + Result<void> + TRY + ErrorCodeName)\n");
 }
 
-} // namespace customos::core
+} // namespace duetos::core

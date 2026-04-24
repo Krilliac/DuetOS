@@ -3,7 +3,7 @@
 #include "../core/types.h"
 
 /*
- * CustomOS ramfs — v0.
+ * DuetOS ramfs — v0.
  *
  * A read-only, in-memory tree of directories and files seeded at boot.
  * Purpose: provide the FIRST concrete VFS backend so per-process
@@ -36,7 +36,7 @@
  * only, all traversal is stateless).
  */
 
-namespace customos::fs
+namespace duetos::fs
 {
 
 enum class RamfsNodeType : u8
@@ -75,4 +75,4 @@ const RamfsNode* RamfsSandboxRoot();
 /// sentinel check used by the VFS walker.
 bool RamfsIsDir(const RamfsNode* n);
 
-} // namespace customos::fs
+} // namespace duetos::fs

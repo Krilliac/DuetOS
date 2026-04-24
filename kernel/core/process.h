@@ -8,7 +8,7 @@
 #include "types.h"
 
 /*
- * CustomOS process + capability model — v0.
+ * DuetOS process + capability model — v0.
  *
  * A `Process` is the unit that owns user-visible state:
  *   - an `mm::AddressSpace` (its private PML4 and user-half tables)
@@ -50,7 +50,7 @@
  * "requested caps" manifest would break if we reshuffled.
  */
 
-namespace customos::core
+namespace duetos::core
 {
 
 enum Cap : u32
@@ -292,7 +292,7 @@ struct Process
     // ABI flavor — which kernel syscall entry path this process's
     // tasks will route through at ring-3 boundary.
     //   kAbiNative (0): int 0x80 -> core::SyscallDispatch. The
-    //     CustomOS native ABI + Win32 PE subsystem both live
+    //     DuetOS native ABI + Win32 PE subsystem both live
     //     here (Win32 is a user-mode shim that trampolines
     //     through the native ints).
     //   kAbiLinux (1): syscall instruction -> linux::Dispatch.
@@ -686,4 +686,4 @@ u64 ProcessResolveDllExport(const Process* proc, const char* dll_name, const cha
 /// Backs `SYS_DLL_PROC_ADDRESS`.
 u64 ProcessResolveDllExportByBase(const Process* proc, u64 base_va, const char* func_name);
 
-} // namespace customos::core
+} // namespace duetos::core

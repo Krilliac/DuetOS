@@ -3,7 +3,7 @@
 #include "../core/types.h"
 
 /*
- * CustomOS — Win32-handle file routing facade, v0.
+ * DuetOS — Win32-handle file routing facade, v0.
  *
  * One layer between the Win32 file syscalls and the concrete FS
  * backends (ramfs + fat32). Owns:
@@ -33,12 +33,12 @@
  * process AND for self-tests that synthesise their own.
  */
 
-namespace customos::core
+namespace duetos::core
 {
 struct Process;
 }
 
-namespace customos::fs::routing
+namespace duetos::fs::routing
 {
 
 /// Resolve `path` and allocate a Win32FileHandle slot on `proc`.
@@ -46,13 +46,13 @@ namespace customos::fs::routing
 /// success, or u64(-1) on miss / out-of-handles / bad input.
 /// Performs NO capability check — caller (syscall layer or self-
 /// test) is responsible for that gate.
-u64 OpenForProcess(::customos::core::Process* proc, const char* path);
+u64 OpenForProcess(::duetos::core::Process* proc, const char* path);
 
 /// Read up to `len` bytes from the handle into the kernel-space
 /// buffer `dst`. Advances the handle's cursor by the number of
 /// bytes copied. Returns the byte count (0 at EOF) or u64(-1)
 /// on bad handle / I/O failure.
-u64 ReadForProcess(::customos::core::Process* proc, u64 handle, void* dst, u64 len);
+u64 ReadForProcess(::duetos::core::Process* proc, u64 handle, void* dst, u64 len);
 
 /// Write up to `len` bytes from the kernel-space buffer `src` to
 /// the handle's backing store at the current cursor. Advances
@@ -60,7 +60,7 @@ u64 ReadForProcess(::customos::core::Process* proc, u64 handle, void* dst, u64 l
 /// (0..len) or u64(-1) on bad handle / read-only backing /
 /// past-EOF (no growth in this slice) / I/O failure. Performs
 /// NO capability check — caller (syscall layer) is responsible.
-u64 WriteForProcess(::customos::core::Process* proc, u64 handle, const void* src, u64 len);
+u64 WriteForProcess(::duetos::core::Process* proc, u64 handle, const void* src, u64 len);
 
 /// Resolve `path` and create a new file with `init_len` bytes of
 /// initial content (`init_bytes` may be nullptr iff init_len==0).
@@ -69,22 +69,22 @@ u64 WriteForProcess(::customos::core::Process* proc, u64 handle, const void* src
 /// Ramfs paths always fail (read-only). Fat32 paths route through
 /// `Fat32CreateAtPath` then `Fat32LookupPath` to obtain the new
 /// `DirEntry` snapshot. Performs NO capability check.
-u64 CreateForProcess(::customos::core::Process* proc, const char* path, const void* init_bytes, u64 init_len);
+u64 CreateForProcess(::duetos::core::Process* proc, const char* path, const void* init_bytes, u64 init_len);
 
 /// Move the cursor. `whence`: 0 = SET (offset is absolute),
 /// 1 = CUR (offset is signed delta from current), 2 = END
 /// (offset is signed delta from end-of-file). Result is clamped
 /// to [0, file_size]. Returns the new cursor value or u64(-1)
 /// on bad handle / bad whence.
-u64 SeekForProcess(::customos::core::Process* proc, u64 handle, i64 offset, u32 whence);
+u64 SeekForProcess(::duetos::core::Process* proc, u64 handle, i64 offset, u32 whence);
 
 /// Write the current file size of the handle's backing object
 /// to `*out_size`. Returns 0 on success, u64(-1) on bad handle.
-u64 FstatForProcess(::customos::core::Process* proc, u64 handle, u64* out_size);
+u64 FstatForProcess(::duetos::core::Process* proc, u64 handle, u64* out_size);
 
 /// Release the handle's slot. Idempotent — closing an already-
 /// free slot is a no-op. Always returns 0.
-u64 CloseForProcess(::customos::core::Process* proc, u64 handle);
+u64 CloseForProcess(::duetos::core::Process* proc, u64 handle);
 
 /// Boot self-test. Routes /disk/0/HELLO.TXT (the FAT32 image
 /// builder seeds this file with known content) through
@@ -94,4 +94,4 @@ u64 CloseForProcess(::customos::core::Process* proc, u64 handle);
 /// boots without a disk).
 void SelfTest();
 
-} // namespace customos::fs::routing
+} // namespace duetos::fs::routing

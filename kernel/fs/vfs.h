@@ -4,7 +4,7 @@
 #include "ramfs.h"
 
 /*
- * CustomOS VFS — v0.
+ * DuetOS VFS — v0.
  *
  * "VFS" is generous: today the only backend is ramfs (kernel/fs/ramfs.h),
  * and this header's only responsibility is path resolution starting
@@ -53,7 +53,7 @@
  * over constinit data.
  */
 
-namespace customos::fs
+namespace duetos::fs
 {
 
 /// Resolve `path` starting from `root`. `path` may begin with '/'
@@ -70,4 +70,4 @@ namespace customos::fs
 /// so a missing NUL doesn't run off into adjacent data.
 const RamfsNode* VfsLookup(const RamfsNode* root, const char* path, u64 path_max);
 
-} // namespace customos::fs
+} // namespace duetos::fs

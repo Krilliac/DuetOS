@@ -33,7 +33,7 @@ unimplemented.
 `linux-syscalls-x86_64.csv` is a transcription of the upstream
 Linux kernel `arch/x86/entry/syscalls/syscall_64.tbl` file
 (GPL-2.0, Linus Torvalds et al.). Only the `common` / `64` ABI
-rows are captured — x32 (512..547) is not a CustomOS target. Arg
+rows are captured — x32 (512..547) is not a DuetOS target. Arg
 counts come from `include/linux/syscalls.h` on the matching
 kernel version. These are ABI facts: numbers and names are the
 interoperability primitive. The same legal posture covers this

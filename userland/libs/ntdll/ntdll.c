@@ -1,7 +1,7 @@
 /*
  * userland/libs/ntdll/ntdll.c
  *
- * Freestanding CustomOS ntdll.dll — the foundational Windows
+ * Freestanding DuetOS ntdll.dll — the foundational Windows
  * DLL. Retires the batch-42-and-later flat-stub rows for
  * ntdll.dll / __chkstk / Nt* / Zw* / Rtl* / Ldr*.
  *

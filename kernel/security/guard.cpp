@@ -9,7 +9,7 @@
 #include "../drivers/video/framebuffer.h"
 #include "../fs/tmpfs.h"
 
-namespace customos::security
+namespace duetos::security
 {
 
 namespace
@@ -496,7 +496,7 @@ void LoadAllowlist()
 {
     const char* bytes = nullptr;
     u32 len = 0;
-    if (!customos::fs::TmpFsRead(kAllowlistPath, &bytes, &len))
+    if (!duetos::fs::TmpFsRead(kAllowlistPath, &bytes, &len))
     {
         arch::SerialWrite("[guard] no persistent allowlist (first boot or cleared)\n");
         return;
@@ -539,8 +539,8 @@ void SaveAllowlist()
         }
         buf[w++] = '\n';
     }
-    customos::fs::TmpFsTouch(kAllowlistPath);
-    customos::fs::TmpFsWrite(kAllowlistPath, buf, w);
+    duetos::fs::TmpFsTouch(kAllowlistPath);
+    duetos::fs::TmpFsWrite(kAllowlistPath, buf, w);
 }
 
 // ---------------------------------------------------------------
@@ -551,10 +551,10 @@ void SaveAllowlist()
 
 void DrawModal(const ImageDescriptor& desc, const Report& r)
 {
-    if (!customos::drivers::video::FramebufferAvailable())
+    if (!duetos::drivers::video::FramebufferAvailable())
         return;
-    const auto info = customos::drivers::video::FramebufferGet();
-    namespace fb = customos::drivers::video;
+    const auto info = duetos::drivers::video::FramebufferGet();
+    namespace fb = duetos::drivers::video;
 
     // Modal dimensions: 600x240, centred. 8x8 font so a 70-char
     // line fits in ~560 px. Colours: RED border, dark grey body,
@@ -594,10 +594,10 @@ void DrawModal(const ImageDescriptor& desc, const Report& r)
 
 void DrawModalDecision(const char* what, u32 rgb)
 {
-    if (!customos::drivers::video::FramebufferAvailable())
+    if (!duetos::drivers::video::FramebufferAvailable())
         return;
-    const auto info = customos::drivers::video::FramebufferGet();
-    namespace fb = customos::drivers::video;
+    const auto info = duetos::drivers::video::FramebufferGet();
+    namespace fb = duetos::drivers::video;
     const u32 mw = 600, mh = 240;
     const u32 mx = (info.width > mw) ? (info.width - mw) / 2 : 0;
     const u32 my = (info.height > mh) ? (info.height - mh) / 2 : 0;
@@ -648,7 +648,7 @@ bool PromptUser(const ImageDescriptor& desc, const Report& r)
                 return false;
             }
         }
-        const char k = customos::drivers::input::Ps2KeyboardTryReadChar();
+        const char k = duetos::drivers::input::Ps2KeyboardTryReadChar();
         if (k == 'y' || k == 'Y')
         {
             SerialWrite("y (keyboard)\n[guard] user ALLOWED override\n");
@@ -910,4 +910,4 @@ void GuardSelfTest()
     SerialWrite("[guard] self-test OK (clean-elf allowed; injection-pe denied)\n");
 }
 
-} // namespace customos::security
+} // namespace duetos::security

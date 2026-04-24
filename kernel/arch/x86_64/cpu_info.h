@@ -3,7 +3,7 @@
 #include "../../core/types.h"
 
 /*
- * CustomOS — CPU-info probe, v0.
+ * DuetOS — CPU-info probe, v0.
  *
  * Runs CPUID at boot, decodes the vendor string, brand string,
  * family/model/stepping, and a curated set of feature bits. The
@@ -18,7 +18,7 @@
  * RDRAND/RDSEED for entropy).
  */
 
-namespace customos::arch
+namespace duetos::arch
 {
 
 enum CpuFeature : u32
@@ -79,4 +79,4 @@ const CpuInfo& CpuInfoGet();
 /// hasn't run or the bit is out of range.
 bool CpuHas(CpuFeature feat);
 
-} // namespace customos::arch
+} // namespace duetos::arch

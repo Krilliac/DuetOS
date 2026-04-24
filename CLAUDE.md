@@ -1,10 +1,10 @@
-# CustomOS — Claude Code Context
+# DuetOS — Claude Code Context
 
 ## What is this?
 
-CustomOS is a from-scratch, general-purpose operating system written in C++/Rust/ASM. Its two defining goals are:
+DuetOS is a from-scratch, general-purpose operating system written in C++/Rust/ASM. Its two defining goals are:
 
-1. **Run Windows PE executables natively** — a first-class Win32/NT subsystem (not a VM, not an emulator layer on top of another host OS). Think of the PE loader, NT syscall surface, and Win32 user-mode DLLs as part of the base system, co-equal with the native CustomOS ABI.
+1. **Run Windows PE executables natively** — a first-class Win32/NT subsystem (not a VM, not an emulator layer on top of another host OS). Think of the PE loader, NT syscall surface, and Win32 user-mode DLLs as part of the base system, co-equal with the native DuetOS ABI.
 2. **Run on typical commodity PC hardware** — x86_64 from day one (Intel/AMD), with first-class driver support for commodity GPUs (Intel iGPU, AMD Radeon, NVIDIA GeForce). ARM64 is a planned second tier.
 
 This is a greenfield project. Treat every file in the tree as intentionally shaped — there is no "legacy" to work around yet, so the cost of sloppy decisions compounds faster than in a mature codebase. Build it right the first time.
@@ -22,7 +22,7 @@ This is a greenfield project. Treat every file in the tree as intentionally shap
 - **Drivers**: PCIe enumeration, NVMe, AHCI/SATA, xHCI/USB, Intel HDA/AC'97, e1000/iwlwifi/rtl8169 NICs. Audio and networking user-mode stacks.
 - **Security**: W^X enforced, ASLR, stack canaries, control-flow integrity. No setuid; capability-based IPC.
 
-### What CustomOS is **not**
+### What DuetOS is **not**
 
 - Not a Linux distribution. No Linux kernel, no GNU userland as a base.
 - Not a Wine project. Wine's userland reimplementation is useful prior art; we are writing ours.
@@ -88,7 +88,7 @@ These are **guidelines for when to pause and think**, not absolute rules. A clea
 
 ## Coding Standards
 
-- **C++23** for kernel and most subsystems (`constexpr`, `enum class`, `std::expected`-style results, concepts, `if consteval`). No RTTI, no exceptions in kernel code — results go through `customos::core::Result<T, E>` (see `kernel/core/result.h`). Prefer `return Err{ErrorCode::Foo};` + `RESULT_TRY` / `RESULT_TRY_ASSIGN` at call sites over `return -1 / false / nullptr` sentinels.
+- **C++23** for kernel and most subsystems (`constexpr`, `enum class`, `std::expected`-style results, concepts, `if consteval`). No RTTI, no exceptions in kernel code — results go through `duetos::core::Result<T, E>` (see `kernel/core/result.h`). Prefer `return Err{ErrorCode::Foo};` + `RESULT_TRY` / `RESULT_TRY_ASSIGN` at call sites over `return -1 / false / nullptr` sentinels.
 - **Rust** permitted for greenfield subsystems where memory-safety vs. C++ lifetime invariants matter (filesystem drivers, USB stack, network stack). If you reach for Rust, the subsystem must stand alone — no Rust-in-the-middle of a C++ call chain.
 - **ASM**: NASM (Intel syntax) for x86_64 boot, trap frames, context switch. Keep hand-written assembly to the smallest possible surface.
 - **Ownership**: `std::unique_ptr` / `UniquePtr` owning, raw pointers non-owning. In kernel, use the project's own smart pointer primitives — `std::` is user-land only.
@@ -190,7 +190,7 @@ cmake --preset x86_64-kasan            # Debug + KASAN-equivalent
 cmake --build build --parallel $(nproc)
 
 # Run in QEMU
-tools/qemu/run.sh build/customos.img
+tools/qemu/run.sh build/duetos.img
 
 # Run tests (hosted unit tests)
 cd build && ctest --output-on-failure
@@ -233,7 +233,7 @@ Do NOT install for:
 - Docs / CLAUDE.md / `.claude/knowledge/` changes only.
 - Code that compiles but is not yet wired into any live path.
 
-After install, `CUSTOMOS_TIMEOUT=20 tools/qemu/run.sh` is the
+After install, `DUETOS_TIMEOUT=20 tools/qemu/run.sh` is the
 canonical headless smoke invocation (see script header for other
 env-var overrides). Once CI lands, the same install line goes in
 the workflow file.
@@ -289,7 +289,7 @@ cmake --build build --parallel $(nproc) 2>&1 | tail -30
 cd build && ctest --output-on-failure && cd ..
 
 # 6. QEMU smoke (when there's a kernel to boot)
-tools/qemu/run.sh --headless --timeout 30 build/customos.img
+tools/qemu/run.sh --headless --timeout 30 build/duetos.img
 ```
 
 If any step fails, fix before committing. CI (once wired up) will enforce clang-format on every PR.

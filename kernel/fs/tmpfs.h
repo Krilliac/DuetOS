@@ -3,7 +3,7 @@
 #include "../core/types.h"
 
 /*
- * CustomOS tmpfs — v0.
+ * DuetOS tmpfs — v0.
  *
  * A flat, in-memory, writable file tier exposed at /tmp/. Sits
  * alongside the read-only ramfs tree: paths under /tmp/ are
@@ -27,7 +27,7 @@
  * IRQ-safe; the name + content buffers have no synchronisation.
  */
 
-namespace customos::fs
+namespace duetos::fs
 {
 
 constexpr u32 kTmpFsNameMax = 32;
@@ -67,4 +67,4 @@ bool TmpFsUnlink(const char* name);
 using TmpFsEnumCb = void (*)(const char* name, u32 len, void* cookie);
 void TmpFsEnumerate(TmpFsEnumCb cb, void* cookie);
 
-} // namespace customos::fs
+} // namespace duetos::fs

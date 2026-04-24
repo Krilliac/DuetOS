@@ -6,7 +6,7 @@
 #include "../../core/process.h"
 #include "../../sched/sched.h"
 
-namespace customos::subsystems::win32
+namespace duetos::subsystems::win32
 {
 
 namespace
@@ -193,4 +193,4 @@ void DoMutexRelease(arch::TrapFrame* frame)
     frame->rax = 0;
 }
 
-} // namespace customos::subsystems::win32
+} // namespace duetos::subsystems::win32

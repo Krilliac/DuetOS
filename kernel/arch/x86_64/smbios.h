@@ -3,7 +3,7 @@
 #include "../../core/types.h"
 
 /*
- * CustomOS — SMBIOS probe, v0.
+ * DuetOS — SMBIOS probe, v0.
  *
  * Finds the SMBIOS entry-point structure by scanning the
  * legacy BIOS area (0xF0000..0xFFFFF) for the "_SM_" / "_SM3_"
@@ -30,7 +30,7 @@
  * Context: kernel.
  */
 
-namespace customos::arch
+namespace duetos::arch
 {
 
 // Chassis type from SMBIOS Type 3 byte 5 (1-indexed in the
@@ -97,4 +97,4 @@ bool SmbiosIsLaptopChassis();
 /// Human-readable chassis name for logs.
 const char* ChassisTypeName(u8 t);
 
-} // namespace customos::arch
+} // namespace duetos::arch

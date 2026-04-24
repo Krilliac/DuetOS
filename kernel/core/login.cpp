@@ -8,16 +8,16 @@
 #include "auth.h"
 #include "klog.h"
 
-namespace customos::core
+namespace duetos::core
 {
 
-using customos::drivers::video::ConsoleWrite;
-using customos::drivers::video::ConsoleWriteChar;
-using customos::drivers::video::ConsoleWriteln;
-using customos::drivers::video::FramebufferDrawRect;
-using customos::drivers::video::FramebufferDrawString;
-using customos::drivers::video::FramebufferFillRect;
-using customos::drivers::video::FramebufferGet;
+using duetos::drivers::video::ConsoleWrite;
+using duetos::drivers::video::ConsoleWriteChar;
+using duetos::drivers::video::ConsoleWriteln;
+using duetos::drivers::video::FramebufferDrawRect;
+using duetos::drivers::video::FramebufferDrawString;
+using duetos::drivers::video::FramebufferFillRect;
+using duetos::drivers::video::FramebufferGet;
 
 namespace
 {
@@ -98,7 +98,7 @@ void TtyPrintBanner()
 {
     ConsoleWriteln("");
     ConsoleWriteln("================================");
-    ConsoleWriteln("  CUSTOMOS LOGIN");
+    ConsoleWriteln("  DUETOS LOGIN");
     ConsoleWriteln("================================");
     ConsoleWriteln("  DEFAULTS: admin / admin");
     ConsoleWriteln("            guest / (empty)");
@@ -246,7 +246,7 @@ void DrawBackground(const GuiLayout& l)
     FramebufferFillRect(0, 0, l.fb_w, half, kBgTop);
     FramebufferFillRect(0, half, l.fb_w, l.fb_h - half, kBgBottom);
     // Top banner text.
-    FramebufferDrawString(16, 12, "CUSTOMOS", 0x00FFFFFF, kBgTop);
+    FramebufferDrawString(16, 12, "DUETOS", 0x00FFFFFF, kBgTop);
     FramebufferDrawString(l.fb_w - 8 * 9, 12, "LOGIN v0", 0x00C0D0E0, kBgTop);
 }
 
@@ -255,7 +255,7 @@ void DrawPanel(const GuiLayout& l)
     FramebufferFillRect(l.panel_x, l.panel_y, l.panel_w, l.panel_h, kPanel);
     FramebufferDrawRect(l.panel_x, l.panel_y, l.panel_w, l.panel_h, kPanelBorder, 2);
     FramebufferFillRect(l.panel_x, l.panel_y, l.panel_w, l.title_h, kTitleBar);
-    FramebufferDrawString(l.panel_x + 10, l.panel_y + 10, "WELCOME TO CUSTOMOS", kTitleText, kTitleBar);
+    FramebufferDrawString(l.panel_x + 10, l.panel_y + 10, "WELCOME TO DUETOS", kTitleText, kTitleBar);
 }
 
 void DrawField(u32 x, u32 y, u32 w, u32 h, const char* text, u32 len, bool mask, bool focus)
@@ -351,11 +351,11 @@ bool GuiTrySubmit()
     // operator forensics (password VALUE never logged). Matches
     // the audit trail any sane login daemon writes after a bad
     // attempt.
-    customos::arch::SerialWrite("[login-debug] submitted username=\"");
-    customos::arch::SerialWrite(g_login.username);
-    customos::arch::SerialWrite("\" password_len=");
-    customos::arch::SerialWriteHex(g_login.password_len);
-    customos::arch::SerialWrite("\n");
+    duetos::arch::SerialWrite("[login-debug] submitted username=\"");
+    duetos::arch::SerialWrite(g_login.username);
+    duetos::arch::SerialWrite("\" password_len=");
+    duetos::arch::SerialWriteHex(g_login.password_len);
+    duetos::arch::SerialWrite("\n");
     // Clear BOTH fields and reset focus to Username on a failed
     // attempt. Retaining the username caused two real problems:
     //   1. The next submit inherited the old username with a new
@@ -376,9 +376,9 @@ bool GuiTrySubmit()
 
 bool GuiFeedKey(u16 code)
 {
-    using customos::drivers::input::kKeyBackspace;
-    using customos::drivers::input::kKeyEnter;
-    using customos::drivers::input::kKeyTab;
+    using duetos::drivers::input::kKeyBackspace;
+    using duetos::drivers::input::kKeyEnter;
+    using duetos::drivers::input::kKeyTab;
 
     if (code == kKeyTab)
     {
@@ -473,9 +473,9 @@ bool LoginFeedKey(u16 code)
         return GuiFeedKey(code);
     }
 
-    using customos::drivers::input::kKeyBackspace;
-    using customos::drivers::input::kKeyEnter;
-    using customos::drivers::input::kKeyTab;
+    using duetos::drivers::input::kKeyBackspace;
+    using duetos::drivers::input::kKeyEnter;
+    using duetos::drivers::input::kKeyTab;
     if (code == kKeyEnter)
     {
         return TtySubmit();
@@ -523,4 +523,4 @@ void LoginReopen()
     LoginStart(mode);
 }
 
-} // namespace customos::core
+} // namespace duetos::core

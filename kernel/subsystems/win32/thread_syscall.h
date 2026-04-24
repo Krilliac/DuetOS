@@ -8,12 +8,12 @@
  *   SYS_THREAD_CREATE (45) — cap-gated on kCapSpawnThread.
  */
 
-namespace customos::arch
+namespace duetos::arch
 {
 struct TrapFrame;
 }
 
-namespace customos::subsystems::win32
+namespace duetos::subsystems::win32
 {
 
 void DoThreadCreate(arch::TrapFrame* frame);
@@ -27,4 +27,4 @@ void DoThreadCreate(arch::TrapFrame* frame);
 /// `param` in rcx (Win32 x64 calling convention).
 [[noreturn]] void Ring3ThreadEntry(void* arg);
 
-} // namespace customos::subsystems::win32
+} // namespace duetos::subsystems::win32

@@ -30,7 +30,7 @@
  * after that from task context.
  */
 
-namespace customos::drivers::video
+namespace duetos::drivers::video
 {
 
 constexpr u32 kConsoleCols = 80;
@@ -122,4 +122,4 @@ void ConsoleBeginCapture(char* buf, u32 cap, u32* len_out);
 /// the scrollback.
 void ConsoleEndCapture();
 
-} // namespace customos::drivers::video
+} // namespace duetos::drivers::video

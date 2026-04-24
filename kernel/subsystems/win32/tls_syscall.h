@@ -15,12 +15,12 @@
  * grow multiple tasks per process.
  */
 
-namespace customos::arch
+namespace duetos::arch
 {
 struct TrapFrame;
 }
 
-namespace customos::subsystems::win32
+namespace duetos::subsystems::win32
 {
 
 void DoTlsAlloc(arch::TrapFrame* frame);
@@ -28,4 +28,4 @@ void DoTlsFree(arch::TrapFrame* frame);
 void DoTlsGet(arch::TrapFrame* frame);
 void DoTlsSet(arch::TrapFrame* frame);
 
-} // namespace customos::subsystems::win32
+} // namespace duetos::subsystems::win32

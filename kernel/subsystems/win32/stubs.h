@@ -3,14 +3,14 @@
 #include "../../core/types.h"
 
 /*
- * CustomOS Win32 subsystem — user-mode stub page (v0).
+ * DuetOS Win32 subsystem — user-mode stub page (v0).
  *
  * The kernel hosts a read-only executable page per Win32 process
  * that contains the machine code thunks each resolved IAT entry
  * points to. A stub does one of two things:
  *
  *   1. Translate the Win32 x64 ABI (first arg in RCX) into the
- *      CustomOS native ABI (syscall # in RAX, first arg in RDI),
+ *      DuetOS native ABI (syscall # in RAX, first arg in RDI),
  *      issue `int 0x80`, done.
  *   2. For Win32 functions without a native equivalent (registry,
  *      file handles, etc.) — in a later slice — call into a tiny
@@ -26,7 +26,7 @@
  * stack VA the kernel produces today.
  */
 
-namespace customos::win32
+namespace duetos::win32
 {
 
 inline constexpr u64 kWin32StubsVa = 0x60000000ULL;
@@ -73,7 +73,7 @@ inline constexpr u64 kProcEnvCommodeOff = 0x200;
 // pointing at this offset — a UTF-16LE NUL-terminated string
 // containing the program name (and, in v0, nothing else). Real
 // Windows cmdlines contain the full quoted argv joined with
-// spaces; CustomOS hello_winapi-class programs only ever see
+// spaces; DuetOS hello_winapi-class programs only ever see
 // argv[0] so this short-form is faithful enough.
 inline constexpr u64 kProcEnvCmdlineWOff = 0x300;
 // ANSI command line. Win32 GetCommandLineA returns this. Same
@@ -193,9 +193,9 @@ bool IsLikelyDataImport(const char* func);
 /// using the auto-generated table in
 /// `subsystems/win32/nt_syscall_table_generated.h`. Lets the boot
 /// log tell us, at a glance, how much of the universal NT API
-/// surface CustomOS can route to internal SYS_* numbers — the
+/// surface DuetOS can route to internal SYS_* numbers — the
 /// scoreboard for any future ntdll shim. Called once from
 /// `kernel_main` after the Win32 stubs page is built.
 void Win32LogNtCoverage();
 
-} // namespace customos::win32
+} // namespace duetos::win32

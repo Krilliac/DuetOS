@@ -1,14 +1,14 @@
 #pragma once
 
 /*
- * CustomOS — fundamental kernel integer types.
+ * DuetOS — fundamental kernel integer types.
  *
  * Kernel code uses fixed-width aliases exclusively. `int`/`long`/`size_t`
  * et al. are avoided in interfaces because their widths depend on the host
  * ABI — which is meaningless for freestanding kernel code.
  */
 
-namespace customos
+namespace duetos
 {
 
 using u8  = unsigned char;
@@ -32,4 +32,4 @@ static_assert(sizeof(u64)   == 8, "u64 must be 8 bytes");
 static_assert(sizeof(uptr)  == 8, "uptr must be 8 bytes on x86_64");
 static_assert(sizeof(usize) == 8, "usize must be 8 bytes on x86_64");
 
-} // namespace customos
+} // namespace duetos

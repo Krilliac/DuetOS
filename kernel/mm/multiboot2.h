@@ -13,7 +13,7 @@
  * them in memory; do NOT reorder fields.
  */
 
-namespace customos::mm
+namespace duetos::mm
 {
 
 inline constexpr u32 kMultibootTagEnd = 0;
@@ -84,4 +84,4 @@ struct [[gnu::packed]] MultibootFramebufferTag
     // Colour-info trailer follows, shape depends on framebuffer_type.
 };
 
-} // namespace customos::mm
+} // namespace duetos::mm

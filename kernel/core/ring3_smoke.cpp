@@ -89,7 +89,7 @@
  * we used to demonstrate isolation works while writing this slice.
  */
 
-namespace customos::core
+namespace duetos::core
 {
 
 namespace
@@ -138,7 +138,7 @@ constexpr u64 kStatOutOffsetInStack = 0xFF0;
 u64 AslrPickBase()
 {
     const u64 range = (kAslrMaxBase - kAslrMinBase) / kAslrAlign;
-    const u64 r = customos::core::RandomU64() % range;
+    const u64 r = duetos::core::RandomU64() % range;
     return kAslrMinBase + r * kAslrAlign;
 }
 
@@ -420,7 +420,7 @@ void SpawnRing3Task(const char* name, CapSet caps, const fs::RamfsNode* root, u6
 {
     using arch::SerialWrite;
     using arch::SerialWriteHex;
-    using namespace customos::mm;
+    using namespace duetos::mm;
 
     const u64 code_va = AslrPickBase();
     const u64 stack_va = code_va + kStackOffsetFromCode;
@@ -545,7 +545,7 @@ void SpawnDropcapsProbe()
 {
     using arch::SerialWrite;
     using arch::SerialWriteHex;
-    using namespace customos::mm;
+    using namespace duetos::mm;
 
     const u64 code_va = AslrPickBase();
     const u64 stack_va = code_va + kStackOffsetFromCode;
@@ -651,7 +651,7 @@ void SpawnHostileProbe()
 {
     using arch::SerialWrite;
     using arch::SerialWriteHex;
-    using namespace customos::mm;
+    using namespace duetos::mm;
 
     const u64 code_va = AslrPickBase();
     const u64 stack_va = code_va + kStackOffsetFromCode;
@@ -721,7 +721,7 @@ void SpawnCpuHogProbe()
 {
     using arch::SerialWrite;
     using arch::SerialWriteHex;
-    using namespace customos::mm;
+    using namespace duetos::mm;
 
     const u64 code_va = AslrPickBase();
     const u64 stack_va = code_va + kStackOffsetFromCode;
@@ -791,7 +791,7 @@ void SpawnNxProbeTask()
 {
     using arch::SerialWrite;
     using arch::SerialWriteHex;
-    using namespace customos::mm;
+    using namespace duetos::mm;
 
     const u64 code_va = AslrPickBase();
     const u64 stack_va = code_va + kStackOffsetFromCode;
@@ -884,7 +884,7 @@ void SpawnJailProbeTask()
 {
     using arch::SerialWrite;
     using arch::SerialWriteHex;
-    using namespace customos::mm;
+    using namespace duetos::mm;
 
     const u64 code_va = AslrPickBase();
     const u64 stack_va = code_va + kStackOffsetFromCode;
@@ -979,7 +979,7 @@ void SpawnPrivProbeTask()
 {
     using arch::SerialWrite;
     using arch::SerialWriteHex;
-    using namespace customos::mm;
+    using namespace duetos::mm;
 
     const u64 code_va = AslrPickBase();
     const u64 stack_va = code_va + kStackOffsetFromCode;
@@ -1054,7 +1054,7 @@ void SpawnBadIntProbeTask()
 {
     using arch::SerialWrite;
     using arch::SerialWriteHex;
-    using namespace customos::mm;
+    using namespace duetos::mm;
 
     const u64 code_va = AslrPickBase();
     const u64 stack_va = code_va + kStackOffsetFromCode;
@@ -1134,7 +1134,7 @@ void SpawnKernelReadProbeTask()
 {
     using arch::SerialWrite;
     using arch::SerialWriteHex;
-    using namespace customos::mm;
+    using namespace duetos::mm;
 
     const u64 code_va = AslrPickBase();
     const u64 stack_va = code_va + kStackOffsetFromCode;
@@ -1301,7 +1301,7 @@ void SpawnPtrFuzzProbeTask()
 {
     using arch::SerialWrite;
     using arch::SerialWriteHex;
-    using namespace customos::mm;
+    using namespace duetos::mm;
 
     const u64 code_va = AslrPickBase();
     const u64 stack_va = code_va + kStackOffsetFromCode;
@@ -1458,7 +1458,7 @@ void SpawnWriteFuzzProbeTask()
 {
     using arch::SerialWrite;
     using arch::SerialWriteHex;
-    using namespace customos::mm;
+    using namespace duetos::mm;
 
     const u64 code_va = AslrPickBase();
     const u64 stack_va = code_va + kStackOffsetFromCode;
@@ -1603,7 +1603,7 @@ void SpawnBpProbeTask()
 {
     using arch::SerialWrite;
     using arch::SerialWriteHex;
-    using namespace customos::mm;
+    using namespace duetos::mm;
 
     const u64 code_va = AslrPickBase();
     const u64 stack_va = code_va + kStackOffsetFromCode;
@@ -1681,7 +1681,7 @@ u64 SpawnElfFile(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps
 {
     using arch::SerialWrite;
     using arch::SerialWriteHex;
-    using namespace customos::mm;
+    using namespace duetos::mm;
 
     if (elf_bytes == nullptr || elf_len == 0 || root == nullptr)
     {
@@ -1700,7 +1700,7 @@ u64 SpawnElfFile(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps
     }
     // Fire the `inspect arm` latch if the operator armed it
     // before spawning. No-op when unarmed; one-shot when armed.
-    customos::debug::InspectOnSpawn(name, elf_bytes, elf_len);
+    duetos::debug::InspectOnSpawn(name, elf_bytes, elf_len);
     AddressSpace* as = AddressSpaceCreate(frame_budget);
     if (as == nullptr)
     {
@@ -1739,13 +1739,13 @@ u64 SpawnElfLinux(const char* name, const u8* elf_bytes, u64 elf_len, CapSet cap
 {
     using arch::SerialWrite;
     using arch::SerialWriteHex;
-    using namespace customos::mm;
+    using namespace duetos::mm;
 
     if (elf_bytes == nullptr || elf_len == 0 || root == nullptr)
     {
         return 0;
     }
-    customos::debug::InspectOnSpawn(name, elf_bytes, elf_len);
+    duetos::debug::InspectOnSpawn(name, elf_bytes, elf_len);
     AddressSpace* as = AddressSpaceCreate(frame_budget);
     if (as == nullptr)
     {
@@ -1831,7 +1831,7 @@ u64 SpawnElfLinux(const char* name, const u8* elf_bytes, u64 elf_len, CapSet cap
         // obfuscation at startup, so real entropy here gives
         // a ported userland the same hardening it expects on
         // bare Linux.
-        customos::core::RandomFillBytes(stack_direct + off + 72, 16);
+        duetos::core::RandomFillBytes(stack_direct + off + 72, 16);
         proc->user_rsp_init = rsp_init;
     }
 
@@ -1860,13 +1860,13 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
 {
     using arch::SerialWrite;
     using arch::SerialWriteHex;
-    using namespace customos::mm;
+    using namespace duetos::mm;
 
     if (pe_bytes == nullptr || pe_len == 0 || root == nullptr)
     {
         return 0;
     }
-    customos::debug::InspectOnSpawn(name, pe_bytes, pe_len);
+    duetos::debug::InspectOnSpawn(name, pe_bytes, pe_len);
     // Diagnostic pre-pass — always runs, always logs. A PE we
     // reject below still gets a full report: sections, imports,
     // relocs, TLS. That's how we know what a real Win32
@@ -1907,7 +1907,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     // typically 0x140000000 — well above those — so adding up to
     // ~64 MiB keeps us safely in the 0x140000000..0x144000000
     // band.
-    const u64 entropy = customos::core::RandomU64();
+    const u64 entropy = duetos::core::RandomU64();
     const u64 aslr_delta = (entropy & 0x3FF) * (64ULL * 1024);
 
     // Stage-2 slice 6/9 — pre-load the per-spawn DLL set into
@@ -2404,4 +2404,4 @@ void StartRing3SmokeTask()
         "customdll-test)");
 }
 
-} // namespace customos::core
+} // namespace duetos::core

@@ -3,7 +3,7 @@
 #include "../../core/types.h"
 
 /*
- * CustomOS — Bochs VBE (VESA BIOS Extensions) display driver, v0.
+ * DuetOS — Bochs VBE (VESA BIOS Extensions) display driver, v0.
  *
  * First real GPU driver: programs QEMU's std-vga / bochs-display
  * (vendor 0x1234 device 0x1111) via the classic Bochs VBE register
@@ -43,7 +43,7 @@
  * race a mode change — arrange externally).
  */
 
-namespace customos::drivers::gpu
+namespace duetos::drivers::gpu
 {
 
 struct VbeCaps
@@ -78,4 +78,4 @@ bool VbeSetMode(u16 width, u16 height, u16 bpp);
 /// doesn't expose a Bochs VBE device.
 void VbeSelfTest();
 
-} // namespace customos::drivers::gpu
+} // namespace duetos::drivers::gpu

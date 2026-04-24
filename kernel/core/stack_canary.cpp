@@ -3,7 +3,7 @@
 #include "types.h"
 
 /*
- * CustomOS stack-canary runtime support.
+ * DuetOS stack-canary runtime support.
  *
  * The compiler emits, in every protected function's prologue:
  *     mov  <cookie>, __stack_chk_guard
@@ -43,7 +43,7 @@ namespace
 // overflow that trips the canary before that point produces a
 // predictable kernel-panic (the seed is a compile-time
 // constant) but catches the corruption just the same.
-constexpr customos::u64 kCanaryBootSeed = 0x0123456789ABCDEFULL;
+constexpr duetos::u64 kCanaryBootSeed = 0x0123456789ABCDEFULL;
 } // namespace
 
 extern "C"
@@ -51,7 +51,7 @@ extern "C"
 
     // Must match the symbol the compiler emits references to. Size is
     // platform pointer size; u64 on x86-64.
-    __attribute__((used)) customos::u64 __stack_chk_guard = kCanaryBootSeed;
+    __attribute__((used)) duetos::u64 __stack_chk_guard = kCanaryBootSeed;
 
     // Called by compiler-generated epilogue code when the stashed cookie
     // doesn't match __stack_chk_guard at function return. That means
@@ -67,12 +67,12 @@ extern "C"
     // this function specifically.
     [[noreturn]] __attribute__((no_stack_protector)) void __stack_chk_fail()
     {
-        customos::core::Panic("security/stack", "stack canary corrupted — overflow detected");
+        duetos::core::Panic("security/stack", "stack canary corrupted — overflow detected");
     }
 
 } // extern "C"
 
-namespace customos::core
+namespace duetos::core
 {
 
 // Replace the boot-constant canary with a real entropy value.
@@ -95,7 +95,7 @@ namespace customos::core
 // stash pending verification.
 __attribute__((no_stack_protector)) void RandomizeStackCanary()
 {
-    customos::u64 fresh = 0;
+    duetos::u64 fresh = 0;
     unsigned char cf = 0;
 
     // Try RDSEED up to 32 times. Falls through to RDRAND if the
@@ -120,10 +120,10 @@ __attribute__((no_stack_protector)) void RandomizeStackCanary()
         // Last resort: TSC. Not cryptographic but still per-boot
         // unique — an attacker who reads the disk image can't
         // predict when we booted.
-        customos::u32 lo = 0;
-        customos::u32 hi = 0;
+        duetos::u32 lo = 0;
+        duetos::u32 hi = 0;
         asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
-        fresh = (customos::u64(hi) << 32) | lo;
+        fresh = (duetos::u64(hi) << 32) | lo;
     }
     // Keep at least one non-NUL byte — a canary of all zeros
     // would still panic on corruption but looks suspicious in
@@ -131,4 +131,4 @@ __attribute__((no_stack_protector)) void RandomizeStackCanary()
     __stack_chk_guard = fresh | 1ULL;
 }
 
-} // namespace customos::core
+} // namespace duetos::core

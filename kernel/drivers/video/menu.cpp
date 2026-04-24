@@ -2,7 +2,7 @@
 
 #include "framebuffer.h"
 
-namespace customos::drivers::video
+namespace duetos::drivers::video
 {
 
 namespace
@@ -128,4 +128,4 @@ bool MenuContains(u32 x, u32 y)
     return x >= g_anchor_x && x < g_anchor_x + kMenuWidth && y >= g_anchor_y && y < g_anchor_y + PanelHeight();
 }
 
-} // namespace customos::drivers::video
+} // namespace duetos::drivers::video

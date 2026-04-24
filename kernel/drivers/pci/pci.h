@@ -5,7 +5,7 @@
 #include "../../core/types.h"
 
 /*
- * CustomOS — PCI (legacy port-IO) enumeration, v0.
+ * DuetOS — PCI (legacy port-IO) enumeration, v0.
  *
  * Walks the PCI config space via the classic 0xCF8 / 0xCFC port pair:
  *   - 0xCF8 CONFIG_ADDRESS — write (enable|bus|dev|fn|offset) here
@@ -37,7 +37,7 @@
  * read-only after.
  */
 
-namespace customos::drivers::pci
+namespace duetos::drivers::pci
 {
 
 constexpr u64 kMaxDevices = 64;
@@ -271,7 +271,7 @@ struct MsixRoute
     MsixInfo info;             // capability snapshot
 };
 
-::customos::core::Result<MsixRoute> PciMsixRouteSimple(DeviceAddress addr, u16 entry_index, u8 lapic_id, u8 vector);
+::duetos::core::Result<MsixRoute> PciMsixRouteSimple(DeviceAddress addr, u16 entry_index, u8 lapic_id, u8 vector);
 
 /// One-shot MSI-X setup for a single-vector device. Allocates an
 /// IRQ vector from the kernel pool (`IrqAllocVector`), installs
@@ -285,8 +285,8 @@ struct MsixRoute
 /// Failure modes: device lacks MSI-X capability → `Unsupported`;
 /// BAR missing / I/O → `IoError`; vector pool exhausted →
 /// `OutOfMemory`; table map failed → `OutOfMemory`.
-::customos::core::Result<u8> PciMsixBindSimple(DeviceAddress addr, u16 entry_index,
-                                               ::customos::arch::IrqHandler handler, MsixRoute* out_route);
+::duetos::core::Result<u8> PciMsixBindSimple(DeviceAddress addr, u16 entry_index,
+                                               ::duetos::arch::IrqHandler handler, MsixRoute* out_route);
 
 // -----------------------------------------------------------------
 // Class-code string for diagnostic logs. Returns a stable pointer to
@@ -295,4 +295,4 @@ struct MsixRoute
 // -----------------------------------------------------------------
 const char* PciClassName(u8 class_code);
 
-} // namespace customos::drivers::pci
+} // namespace duetos::drivers::pci

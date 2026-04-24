@@ -10,7 +10,7 @@ Concrete time and effort savers for build, CI diagnosis, and git workflows. Thes
 
 ## Context
 
-Applies to any session involving building, testing, CI diagnosis, or git operations in CustomOS. Most apply once the build system is in place; the git ones apply today.
+Applies to any session involving building, testing, CI diagnosis, or git operations in DuetOS. Most apply once the build system is in place; the git ones apply today.
 
 ---
 

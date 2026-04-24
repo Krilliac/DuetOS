@@ -25,7 +25,7 @@ Applies to:
   `dd` to prep a GPT-formatted 16 MiB scratch image.
 - `tools/qemu/make-gpt-image.py` — builds a UEFI-spec GPT with
   one Linux-filesystem-type partition spanning LBA 2048..32734
-  and the `"CUSTOMOS"` marker at the partition's first sector.
+  and the `"DUETOS"` marker at the partition's first sector.
 
 Does not apply to:
 
@@ -107,7 +107,7 @@ the scratch image seeds renders as `0fc63daf-8483-4772-8e79-
 
 ## Notes
 
-- **NvmeSelfTest was updated** from "LBA 0 must equal CUSTOMOS"
+- **NvmeSelfTest was updated** from "LBA 0 must equal DUETOS"
   to "LBA 0 must end in 0x55AA". LBA 0 on a GPT disk is the
   Protective MBR, so the old marker check would permanently
   fail against any GPT-formatted image. The GPT probe provides

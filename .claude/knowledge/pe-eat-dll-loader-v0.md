@@ -1184,7 +1184,7 @@ vcruntime140 and ntdll.
     `toupper`/`tolower`.
   - `qsort` (insertion sort) + `bsearch`.
 
-This single slice moves CustomOS from "PEs link and don't
+This single slice moves DuetOS from "PEs link and don't
 crash" to "PEs can actually print output and do basic CRT
 work."
 

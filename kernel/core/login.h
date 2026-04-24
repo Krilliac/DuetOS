@@ -3,7 +3,7 @@
 #include "types.h"
 
 /*
- * CustomOS — login gate (terminal + GUI), v0.
+ * DuetOS — login gate (terminal + GUI), v0.
  *
  * Sits between boot-time subsystem bring-up and the interactive
  * shell. While the gate is active, the kbd-reader thread routes
@@ -37,7 +37,7 @@
  * the compositor lock (same discipline as every GUI call).
  */
 
-namespace customos::core
+namespace duetos::core
 {
 
 enum class LoginMode : u8
@@ -82,4 +82,4 @@ void LoginRepaint();
 /// called before the first activation), re-paints.
 void LoginReopen();
 
-} // namespace customos::core
+} // namespace duetos::core

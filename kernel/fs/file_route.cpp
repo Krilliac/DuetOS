@@ -8,7 +8,7 @@
 #include "ramfs.h"
 #include "vfs.h"
 
-namespace customos::fs::routing
+namespace duetos::fs::routing
 {
 
 namespace
@@ -80,9 +80,9 @@ bool ParseDiskPath(const char* path, u32* out_idx, const char** out_rest)
 
 // Find a free Win32 handle slot on `proc`. Returns kWin32HandleCap
 // when none are free.
-u64 FindFreeSlot(::customos::core::Process* proc)
+u64 FindFreeSlot(::duetos::core::Process* proc)
 {
-    using ::customos::core::Process;
+    using ::duetos::core::Process;
     for (u64 i = 0; i < Process::kWin32HandleCap; ++i)
     {
         if (proc->win32_handles[i].kind == Process::FsBackingKind::None)
@@ -94,16 +94,16 @@ u64 FindFreeSlot(::customos::core::Process* proc)
 // Validate handle id, return slot index or u64(-1).
 u64 HandleToSlot(u64 handle)
 {
-    using ::customos::core::Process;
+    using ::duetos::core::Process;
     if (handle < Process::kWin32HandleBase || handle >= Process::kWin32HandleBase + Process::kWin32HandleCap)
         return u64(-1);
     return handle - Process::kWin32HandleBase;
 }
 
 // Per-handle byte size accessor — both backings know it.
-u64 HandleSize(const ::customos::core::Process::Win32FileHandle& h)
+u64 HandleSize(const ::duetos::core::Process::Win32FileHandle& h)
 {
-    using ::customos::core::Process;
+    using ::duetos::core::Process;
     if (h.kind == Process::FsBackingKind::Ramfs && h.ramfs_node != nullptr)
         return h.ramfs_node->file_size;
     if (h.kind == Process::FsBackingKind::Fat32)
@@ -113,11 +113,11 @@ u64 HandleSize(const ::customos::core::Process::Win32FileHandle& h)
 
 } // namespace
 
-u64 OpenForProcess(::customos::core::Process* proc, const char* path)
+u64 OpenForProcess(::duetos::core::Process* proc, const char* path)
 {
     using arch::SerialWrite;
     using arch::SerialWriteHex;
-    using ::customos::core::Process;
+    using ::duetos::core::Process;
     if (proc == nullptr || path == nullptr)
         return u64(-1);
 
@@ -213,9 +213,9 @@ u64 OpenForProcess(::customos::core::Process* proc, const char* path)
     return handle;
 }
 
-u64 ReadForProcess(::customos::core::Process* proc, u64 handle, void* dst, u64 len)
+u64 ReadForProcess(::duetos::core::Process* proc, u64 handle, void* dst, u64 len)
 {
-    using ::customos::core::Process;
+    using ::duetos::core::Process;
     if (proc == nullptr || dst == nullptr)
         return u64(-1);
     const u64 slot = HandleToSlot(handle);
@@ -254,9 +254,9 @@ u64 ReadForProcess(::customos::core::Process* proc, u64 handle, void* dst, u64 l
     return u64(got);
 }
 
-u64 WriteForProcess(::customos::core::Process* proc, u64 handle, const void* src, u64 len)
+u64 WriteForProcess(::duetos::core::Process* proc, u64 handle, const void* src, u64 len)
 {
-    using ::customos::core::Process;
+    using ::duetos::core::Process;
     if (proc == nullptr || src == nullptr)
         return u64(-1);
     const u64 slot = HandleToSlot(handle);
@@ -291,11 +291,11 @@ u64 WriteForProcess(::customos::core::Process* proc, u64 handle, const void* src
     return u64(wrote);
 }
 
-u64 CreateForProcess(::customos::core::Process* proc, const char* path, const void* init_bytes, u64 init_len)
+u64 CreateForProcess(::duetos::core::Process* proc, const char* path, const void* init_bytes, u64 init_len)
 {
     using arch::SerialWrite;
     using arch::SerialWriteHex;
-    using ::customos::core::Process;
+    using ::duetos::core::Process;
     if (proc == nullptr || path == nullptr)
         return u64(-1);
     if (init_len > 0 && init_bytes == nullptr)
@@ -376,9 +376,9 @@ u64 CreateForProcess(::customos::core::Process* proc, const char* path, const vo
     return handle;
 }
 
-u64 SeekForProcess(::customos::core::Process* proc, u64 handle, i64 offset, u32 whence)
+u64 SeekForProcess(::duetos::core::Process* proc, u64 handle, i64 offset, u32 whence)
 {
-    using ::customos::core::Process;
+    using ::duetos::core::Process;
     if (proc == nullptr)
         return u64(-1);
     const u64 slot = HandleToSlot(handle);
@@ -412,9 +412,9 @@ u64 SeekForProcess(::customos::core::Process* proc, u64 handle, i64 offset, u32 
     return h.cursor;
 }
 
-u64 FstatForProcess(::customos::core::Process* proc, u64 handle, u64* out_size)
+u64 FstatForProcess(::duetos::core::Process* proc, u64 handle, u64* out_size)
 {
-    using ::customos::core::Process;
+    using ::duetos::core::Process;
     if (proc == nullptr || out_size == nullptr)
         return u64(-1);
     const u64 slot = HandleToSlot(handle);
@@ -427,9 +427,9 @@ u64 FstatForProcess(::customos::core::Process* proc, u64 handle, u64* out_size)
     return 0;
 }
 
-u64 CloseForProcess(::customos::core::Process* proc, u64 handle)
+u64 CloseForProcess(::duetos::core::Process* proc, u64 handle)
 {
-    using ::customos::core::Process;
+    using ::duetos::core::Process;
     if (proc == nullptr)
         return 0;
     const u64 slot = HandleToSlot(handle);
@@ -457,7 +457,7 @@ void SelfTest()
     KLOG_TRACE_SCOPE("fs/route", "SelfTest");
     using arch::SerialWrite;
     using arch::SerialWriteHex;
-    using ::customos::core::Process;
+    using ::duetos::core::Process;
 
     if (fat32::Fat32VolumeCount() == 0)
     {
@@ -486,7 +486,7 @@ void SelfTest()
     if (handle == u64(-1))
     {
         SerialWrite("[fs/route-selftest] FAIL: open /disk/0/HELLO.TXT\n");
-        ::customos::core::Panic("fs/route", "SelfTest open failed");
+        ::duetos::core::Panic("fs/route", "SelfTest open failed");
     }
 
     // Expected content: image builder seeds HELLO.TXT with
@@ -504,14 +504,14 @@ void SelfTest()
     if (FstatForProcess(&s_test_proc, handle, &size) != 0)
     {
         SerialWrite("[fs/route-selftest] FAIL: fstat\n");
-        ::customos::core::Panic("fs/route", "SelfTest fstat failed");
+        ::duetos::core::Panic("fs/route", "SelfTest fstat failed");
     }
     if (size < 17)
     {
         SerialWrite("[fs/route-selftest] FAIL: HELLO.TXT size=");
         SerialWriteHex(size);
         SerialWrite(" expected >= 17\n");
-        ::customos::core::Panic("fs/route", "SelfTest size below seed");
+        ::duetos::core::Panic("fs/route", "SelfTest size below seed");
     }
 
     constexpr const char kExpected[] = "hello from fat32\n"; // image-builder seed (FAT_FILE_BODY)
@@ -527,7 +527,7 @@ void SelfTest()
         SerialWrite(" want=");
         SerialWriteHex(kExpLen);
         SerialWrite("\n");
-        ::customos::core::Panic("fs/route", "SelfTest read length mismatch");
+        ::duetos::core::Panic("fs/route", "SelfTest read length mismatch");
     }
     for (u64 i = 0; i < kExpLen; ++i)
     {
@@ -540,7 +540,7 @@ void SelfTest()
             SerialWrite(" want=");
             SerialWriteHex(static_cast<u64>(static_cast<u8>(kExpected[i])));
             SerialWrite("\n");
-            ::customos::core::Panic("fs/route", "SelfTest byte mismatch");
+            ::duetos::core::Panic("fs/route", "SelfTest byte mismatch");
         }
     }
 
@@ -549,7 +549,7 @@ void SelfTest()
     if (SeekForProcess(&s_test_proc, handle, 0, /*END=*/2) != size)
     {
         SerialWrite("[fs/route-selftest] FAIL: seek to end\n");
-        ::customos::core::Panic("fs/route", "SelfTest seek end mismatch");
+        ::duetos::core::Panic("fs/route", "SelfTest seek end mismatch");
     }
     const u64 eof = ReadForProcess(&s_test_proc, handle, buf, sizeof(buf));
     if (eof != 0)
@@ -557,7 +557,7 @@ void SelfTest()
         SerialWrite("[fs/route-selftest] FAIL: post-EOF read returned ");
         SerialWriteHex(eof);
         SerialWrite("\n");
-        ::customos::core::Panic("fs/route", "SelfTest EOF mismatch");
+        ::duetos::core::Panic("fs/route", "SelfTest EOF mismatch");
     }
 
     // Seek-rewind then re-read the prefix to prove SeekForProcess
@@ -565,7 +565,7 @@ void SelfTest()
     if (SeekForProcess(&s_test_proc, handle, 0, /*SET=*/0) != 0)
     {
         SerialWrite("[fs/route-selftest] FAIL: seek to 0\n");
-        ::customos::core::Panic("fs/route", "SelfTest seek failed");
+        ::duetos::core::Panic("fs/route", "SelfTest seek failed");
     }
     char prefix[6];
     for (u64 i = 0; i < sizeof(prefix); ++i)
@@ -574,14 +574,14 @@ void SelfTest()
     if (got2 != 5 || prefix[0] != 'h' || prefix[4] != 'o')
     {
         SerialWrite("[fs/route-selftest] FAIL: post-seek prefix mismatch\n");
-        ::customos::core::Panic("fs/route", "SelfTest post-seek mismatch");
+        ::duetos::core::Panic("fs/route", "SelfTest post-seek mismatch");
     }
 
     CloseForProcess(&s_test_proc, handle);
     if (s_test_proc.win32_handles[handle - Process::kWin32HandleBase].kind != Process::FsBackingKind::None)
     {
         SerialWrite("[fs/route-selftest] FAIL: close did not free slot\n");
-        ::customos::core::Panic("fs/route", "SelfTest close did not free slot");
+        ::duetos::core::Panic("fs/route", "SelfTest close did not free slot");
     }
 
     // Write + read-back round-trip on HELLO.TXT. Use uppercase
@@ -592,45 +592,45 @@ void SelfTest()
     // against a persistent disk).
     const u64 wh = OpenForProcess(&s_test_proc, "/disk/0/HELLO.TXT");
     if (wh == u64(-1))
-        ::customos::core::Panic("fs/route", "SelfTest reopen for write failed");
+        ::duetos::core::Panic("fs/route", "SelfTest reopen for write failed");
     const char kUpper[5] = {'H', 'E', 'L', 'L', 'O'};
     if (WriteForProcess(&s_test_proc, wh, kUpper, 5) != 5)
     {
         SerialWrite("[fs/route-selftest] FAIL: write returned wrong count\n");
-        ::customos::core::Panic("fs/route", "SelfTest write count mismatch");
+        ::duetos::core::Panic("fs/route", "SelfTest write count mismatch");
     }
     if (SeekForProcess(&s_test_proc, wh, 0, /*SET=*/0) != 0)
-        ::customos::core::Panic("fs/route", "SelfTest post-write seek failed");
+        ::duetos::core::Panic("fs/route", "SelfTest post-write seek failed");
     char vbuf[6];
     for (u64 i = 0; i < sizeof(vbuf); ++i)
         vbuf[i] = 0;
     if (ReadForProcess(&s_test_proc, wh, vbuf, 5) != 5 || vbuf[0] != 'H' || vbuf[4] != 'O')
     {
         SerialWrite("[fs/route-selftest] FAIL: post-write readback mismatch\n");
-        ::customos::core::Panic("fs/route", "SelfTest post-write readback");
+        ::duetos::core::Panic("fs/route", "SelfTest post-write readback");
     }
     // Restore so the on-disk content matches the seed prefix.
     if (SeekForProcess(&s_test_proc, wh, 0, /*SET=*/0) != 0)
-        ::customos::core::Panic("fs/route", "SelfTest restore seek failed");
+        ::duetos::core::Panic("fs/route", "SelfTest restore seek failed");
     const char kLower[5] = {'h', 'e', 'l', 'l', 'o'};
     if (WriteForProcess(&s_test_proc, wh, kLower, 5) != 5)
-        ::customos::core::Panic("fs/route", "SelfTest restore write failed");
+        ::duetos::core::Panic("fs/route", "SelfTest restore write failed");
     CloseForProcess(&s_test_proc, wh);
 
     // Past-EOF write must fail without growing the file. Open
     // HELLO.TXT, seek past end, attempt write — expect u64(-1).
     const u64 eh = OpenForProcess(&s_test_proc, "/disk/0/HELLO.TXT");
     if (eh == u64(-1))
-        ::customos::core::Panic("fs/route", "SelfTest open-for-eof-write failed");
+        ::duetos::core::Panic("fs/route", "SelfTest open-for-eof-write failed");
     u64 esize = 0;
     if (FstatForProcess(&s_test_proc, eh, &esize) != 0)
-        ::customos::core::Panic("fs/route", "SelfTest fstat-for-eof failed");
+        ::duetos::core::Panic("fs/route", "SelfTest fstat-for-eof failed");
     if (SeekForProcess(&s_test_proc, eh, 0, /*END=*/2) != esize)
-        ::customos::core::Panic("fs/route", "SelfTest seek-end before eof-write failed");
+        ::duetos::core::Panic("fs/route", "SelfTest seek-end before eof-write failed");
     if (WriteForProcess(&s_test_proc, eh, "x", 1) != u64(-1))
     {
         SerialWrite("[fs/route-selftest] FAIL: past-EOF write should fail\n");
-        ::customos::core::Panic("fs/route", "SelfTest past-EOF write should fail");
+        ::duetos::core::Panic("fs/route", "SelfTest past-EOF write should fail");
     }
     CloseForProcess(&s_test_proc, eh);
 
@@ -644,13 +644,13 @@ void SelfTest()
     if (ch == u64(-1))
     {
         SerialWrite("[fs/route-selftest] FAIL: create RTNEW.TXT\n");
-        ::customos::core::Panic("fs/route", "SelfTest create failed");
+        ::duetos::core::Panic("fs/route", "SelfTest create failed");
     }
     u64 csz = 0;
     if (FstatForProcess(&s_test_proc, ch, &csz) != 0 || csz != 7)
     {
         SerialWrite("[fs/route-selftest] FAIL: created file size != 7\n");
-        ::customos::core::Panic("fs/route", "SelfTest created size mismatch");
+        ::duetos::core::Panic("fs/route", "SelfTest created size mismatch");
     }
     char rbuf[8];
     for (u64 i = 0; i < sizeof(rbuf); ++i)
@@ -658,7 +658,7 @@ void SelfTest()
     if (ReadForProcess(&s_test_proc, ch, rbuf, 7) != 7 || rbuf[0] != 'r' || rbuf[6] != 'g')
     {
         SerialWrite("[fs/route-selftest] FAIL: created file readback mismatch\n");
-        ::customos::core::Panic("fs/route", "SelfTest created readback mismatch");
+        ::duetos::core::Panic("fs/route", "SelfTest created readback mismatch");
     }
     CloseForProcess(&s_test_proc, ch);
 
@@ -676,4 +676,4 @@ void SelfTest()
                 "on /disk/0/HELLO.TXT and /disk/0/RTNEW.TXT)\n");
 }
 
-} // namespace customos::fs::routing
+} // namespace duetos::fs::routing

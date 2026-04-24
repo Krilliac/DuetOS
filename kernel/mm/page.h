@@ -4,7 +4,7 @@
 #include "frame_allocator.h"
 
 /*
- * CustomOS — kernel direct-map helpers.
+ * DuetOS — kernel direct-map helpers.
  *
  * Until a managed page-table API exists, the kernel relies on the static
  * higher-half mapping installed by boot.S: the first 1 GiB of physical RAM
@@ -20,7 +20,7 @@
  * Context: kernel. Safe at any IRQ level — purely arithmetic.
  */
 
-namespace customos::mm
+namespace duetos::mm
 {
 
 inline constexpr u64 kKernelVirtualBase = 0xFFFFFFFF80000000ULL;
@@ -34,4 +34,4 @@ void* PhysToVirt(PhysAddr phys);
 /// physical address. Panics if the input is outside the direct-map window.
 PhysAddr VirtToPhys(const void* virt);
 
-} // namespace customos::mm
+} // namespace duetos::mm

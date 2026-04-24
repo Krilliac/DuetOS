@@ -6,7 +6,7 @@
 #include "../core/panic.h"
 #include "../drivers/net/net.h"
 
-namespace customos::net
+namespace duetos::net
 {
 
 namespace
@@ -98,9 +98,9 @@ u64 NowTicks()
 } // namespace
 
 // Forward decls for UDP + DHCP + TCP helpers defined further down
-// in the customos::net namespace. Must sit OUTSIDE the anonymous
+// in the duetos::net namespace. Must sit OUTSIDE the anonymous
 // namespace above or they'd name different functions than the
-// ones at customos::net scope.
+// ones at duetos::net scope.
 void NetUdpDispatch(u32 iface_index, Ipv4Address src_ip, u16 src_port, u16 dst_port, const void* payload, u64 len);
 void DhcpOnUdp(u32 iface_index, Ipv4Address src_ip, u16 src_port, u16 dst_port, const void* payload, u64 len);
 void TcpOnSegment(u32 iface_index, const MacAddress& peer_mac, Ipv4Address peer_ip, const u8* tcp, u64 tcp_len);
@@ -2164,4 +2164,4 @@ void NetStackInjectRx(u32 iface_index, const void* frame, u64 len)
     }
 }
 
-} // namespace customos::net
+} // namespace duetos::net

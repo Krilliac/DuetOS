@@ -1,4 +1,4 @@
-# CustomOS — Design Decisions Log
+# DuetOS — Design Decisions Log
 
 _Last updated: 2026-04-20_
 
@@ -1627,7 +1627,7 @@ get an inline "superseded by <commit>" note and stay.
 - **Decision:** Parse the Multiboot2 cmdline tag at kernel
   entry, match `boot=tty` / `boot=desktop` against
   whitespace-delimited tokens. Runtime selection beats the
-  compile-time `CUSTOMOS_BOOT_TTY` flag; no cmdline leaves
+  compile-time `DUETOS_BOOT_TTY` flag; no cmdline leaves
   the flag's default in place. 3-second GRUB timeout, default
   entry is Desktop.
 - **Why:** Direct answer to "I want to boot straight into
@@ -1676,7 +1676,7 @@ get an inline "superseded by <commit>" note and stay.
 
 ---
 
-## 076 — CustomOS shell: interactive command line
+## 076 — DuetOS shell: interactive command line
 
 - **Scope:** `kernel/core/shell.{h,cpp}` — new module. 64-char
   line-edit buffer, prompt, command dispatcher. Commands:
@@ -1717,7 +1717,7 @@ get an inline "superseded by <commit>" note and stay.
   console in place. `kernel/core/main.cpp` — kbd reader
   dispatches Ctrl+Alt+T to toggle; mouse reader skips UI in
   TTY mode; ui-ticker branches on mode. `kernel/CMakeLists.txt`
-  — new `CUSTOMOS_BOOT_TTY` option for text-first initial boot.
+  — new `DUETOS_BOOT_TTY` option for text-first initial boot.
 - **Decision:** Two modes, one console buffer. Desktop =
   full windowed shell; TTY = fullscreen console, black bg,
   no windows / taskbar / cursor. Scrollback survives the

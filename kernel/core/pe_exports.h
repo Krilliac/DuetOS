@@ -3,7 +3,7 @@
 #include "types.h"
 
 /*
- * CustomOS PE/COFF Export Address Table (EAT) parser — stage 2 of
+ * DuetOS PE/COFF Export Address Table (EAT) parser — stage 2 of
  * the Win32 DLL-loader track.
  *
  * Stage 1 (v0 — see `pe-subsystem-v0.md`) ran PEs with imports by
@@ -43,7 +43,7 @@
  * boot before the heap or AS machinery is up.
  */
 
-namespace customos::core
+namespace duetos::core
 {
 
 /// Status of a PeParseExports attempt.
@@ -182,4 +182,4 @@ void PeExportsReport(const PeExports& exp);
 
 inline constexpr u32 kPeExportsReportMax = 32;
 
-} // namespace customos::core
+} // namespace duetos::core

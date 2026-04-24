@@ -7,7 +7,7 @@
 #include "../mm/kheap.h"
 #include "../sched/sched.h"
 
-namespace customos::core
+namespace duetos::core
 {
 
 namespace
@@ -811,7 +811,7 @@ void KLogSelfTest()
     KLOG_WARN("core/klog", "warn-level sanity line");
     KLOG_ERROR("core/klog", "error-level sanity line");
     KLOG_INFO_V("core/klog", "value-form sanity line", 0xCAFEBABE);
-    KLOG_INFO_S("core/klog", "string-form sanity line", "who", "CustomOS");
+    KLOG_INFO_S("core/klog", "string-form sanity line", "who", "DuetOS");
     KLOG_INFO_2V("core/klog", "two-value sanity line", "a", 0x8000, "b", 512);
     // Fire the same once-macro call site from a loop — the static
     // guard is per-site, so only the first iteration should emit.
@@ -827,4 +827,4 @@ void KLogSelfTest()
     }
 }
 
-} // namespace customos::core
+} // namespace duetos::core

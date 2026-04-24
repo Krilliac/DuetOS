@@ -22,7 +22,7 @@
  * fires at `kTickFrequencyHz` until interrupts are masked.
  */
 
-namespace customos::arch
+namespace duetos::arch
 {
 
 inline constexpr u8 kTimerVector = 0x20;     // IRQ 0 in remapped layout
@@ -39,4 +39,4 @@ void TimerInit();
 /// not a synchronised clock.
 u64 TimerTicks();
 
-} // namespace customos::arch
+} // namespace duetos::arch

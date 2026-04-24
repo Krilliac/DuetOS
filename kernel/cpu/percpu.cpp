@@ -4,7 +4,7 @@
 #include "../arch/x86_64/serial.h"
 #include "../core/klog.h"
 
-namespace customos::cpu
+namespace duetos::cpu
 {
 
 namespace
@@ -78,4 +78,4 @@ u32 CurrentCpuIdOrBsp()
     return CurrentCpu()->cpu_id;
 }
 
-} // namespace customos::cpu
+} // namespace duetos::cpu

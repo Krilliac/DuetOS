@@ -5,7 +5,7 @@
 #include "../../core/panic.h"
 #include "../../mm/paging.h"
 
-namespace customos::arch
+namespace duetos::arch
 {
 
 namespace
@@ -128,4 +128,4 @@ u32 HpetPeriodFemtoseconds()
     return g_period_fs;
 }
 
-} // namespace customos::arch
+} // namespace duetos::arch

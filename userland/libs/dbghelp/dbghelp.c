@@ -1,7 +1,7 @@
 /*
  * userland/libs/dbghelp/dbghelp.c
  *
- * Freestanding CustomOS dbghelp.dll. Retires the batch-47 +
+ * Freestanding DuetOS dbghelp.dll. Retires the batch-47 +
  * the bulk-registered dbghelp flat stubs. All entry points
  * are no-ops that return sensible defaults — v0 has no
  * debug-info parsing, no PDB loader, no stack-walk. Real

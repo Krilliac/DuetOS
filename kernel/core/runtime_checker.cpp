@@ -16,9 +16,9 @@
 #include "panic.h"
 
 // __stack_chk_guard symbol is C-linkage.
-extern "C" customos::u64 __stack_chk_guard;
+extern "C" duetos::u64 __stack_chk_guard;
 
-namespace customos::core
+namespace duetos::core
 {
 
 namespace
@@ -413,7 +413,7 @@ void Report(HealthIssue issue)
     }
 }
 
-// ResponseFor + HealthResponseName live at the customos::core
+// ResponseFor + HealthResponseName live at the duetos::core
 // namespace level, not the anonymous-namespace level, so the
 // header declaration resolves + Report()'s call binds.
 // See definitions below, after the `} // namespace` closing.
@@ -1321,4 +1321,4 @@ const HealthReport& RuntimeCheckerStatusRead()
     return g_report;
 }
 
-} // namespace customos::core
+} // namespace duetos::core

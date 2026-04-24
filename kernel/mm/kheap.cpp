@@ -8,7 +8,7 @@
 #include "../core/klog.h"
 #include "../core/panic.h"
 
-namespace customos::mm
+namespace duetos::mm
 {
 
 namespace
@@ -471,4 +471,4 @@ void KernelHeapSelfTest()
     SerialWrite("[mm] kernel heap self-test OK\n");
 }
 
-} // namespace customos::mm
+} // namespace duetos::mm

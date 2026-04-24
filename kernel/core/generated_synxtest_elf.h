@@ -2,7 +2,7 @@
 // Source: synxtest.elf  (13984 bytes)
 #pragma once
 
-namespace customos {
+namespace duetos {
 namespace fs {
 namespace generated {
 
@@ -887,4 +887,4 @@ inline constexpr unsigned long long kBinSynxtestElfBytes_len = sizeof(kBinSynxte
 
 } // namespace generated
 } // namespace fs
-} // namespace customos
+} // namespace duetos

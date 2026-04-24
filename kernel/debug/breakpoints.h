@@ -4,7 +4,7 @@
 #include "../core/types.h"
 
 /*
- * CustomOS — kernel breakpoint subsystem (phase 1).
+ * DuetOS — kernel breakpoint subsystem (phase 1).
  *
  * Two flavours of breakpoint live here:
  *
@@ -39,7 +39,7 @@
  * context. All state is serialised by an internal spinlock.
  */
 
-namespace customos::debug
+namespace duetos::debug
 {
 
 // Opaque, stable identifier for an installed breakpoint. `value`
@@ -187,4 +187,4 @@ BpError BpResume(BreakpointId id);
 /// and stop."
 BpError BpStep(BreakpointId id);
 
-} // namespace customos::debug
+} // namespace duetos::debug

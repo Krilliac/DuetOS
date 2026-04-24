@@ -6,7 +6,7 @@
 faults deeper in its iostream loop. Real-world 80 KB MSVC PE (8
 sections, 52 imports, SEH, TLS, resource dir) executes far enough to
 emit real output via MSVCP140::sputn → SYS_WRITE. First Windows PE
-output on CustomOS. Subsequent cout operations (number formatting,
+output on DuetOS. Subsequent cout operations (number formatting,
 chained strings) still fall through the zero-vtable path and
 eventually fault cleanly; winkill no longer exits to SYS_EXIT(0) on
 its own since the new sputn path now actually reaches more code
@@ -274,7 +274,7 @@ Windows Kill                          ← real MSVC PE output via sputn
 
 The text "Windows Kill " (the version banner's first line) hits
 the serial console verbatim — the first real output from a
-Windows PE on CustomOS. The subsequent fault is `movslq rcx,
+Windows PE on DuetOS. The subsequent fault is `movslq rcx,
 [rax+4]` inside an inlined `operator<<(ostream&, const char*)`
 loop where `rax = [rsi] = "Windows "`. Another string from the
 version banner is being loaded through what it thinks is its
@@ -319,7 +319,7 @@ no-oped via the fake-object data-miss pad — no print, no fault),
 returned from main, ran atexit, and called ExitProcess(0). The
 entire 80 KB MSVC PE (8 sections, 52 imports across 6 DLLs,
 SEH, TLS, resource directory) executed start-to-finish as a
-ring-3 process on CustomOS with zero crashes.
+ring-3 process on DuetOS with zero crashes.
 
 This is a milestone. The walls listed in previous slices
 ("TLS array, PEB, SEH unwind, kernel32/vcruntime stubs") were

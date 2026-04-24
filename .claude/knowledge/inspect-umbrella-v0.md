@@ -96,7 +96,7 @@ needed (shell and spawn path never race on the same line).
   FAT32 / PE / ELF parsers.
 - `kernel/core/ring3_smoke.cpp` — `SpawnElfFile`,
   `SpawnElfLinux`, `SpawnPeFile` each call
-  `customos::debug::InspectOnSpawn(...)` before
+  `duetos::debug::InspectOnSpawn(...)` before
   `ProcessCreate`.
 - `kernel/core/shell.cpp` — `CmdInspect` dispatcher + four
   subcommand handlers + `kCommandSet` entry + help line.

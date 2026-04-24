@@ -4,13 +4,13 @@
 
 // Forward-declare mm::AddressSpace — ElfLoad takes one without
 // pulling address_space.h into every consumer of this header.
-namespace customos::mm
+namespace duetos::mm
 {
 struct AddressSpace;
 }
 
 /*
- * CustomOS ELF64 loader — v0.
+ * DuetOS ELF64 loader — v0.
  *
  * Parses and (eventually) loads x86_64 little-endian ELF64
  * files. v0 scope is "validate + enumerate PT_LOAD segments";
@@ -25,7 +25,7 @@ struct AddressSpace;
  * Context: kernel. Safe from any task-level caller.
  */
 
-namespace customos::core
+namespace duetos::core
 {
 
 enum class ElfStatus : u8
@@ -112,6 +112,6 @@ struct ElfLoadResult
 /// Load a validated ELF image into `as`. Returns {ok=true, ...} on
 /// success. On failure, the AddressSpace may contain partial state
 /// — caller should AddressSpaceRelease it.
-ElfLoadResult ElfLoad(const u8* file, u64 file_len, customos::mm::AddressSpace* as);
+ElfLoadResult ElfLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as);
 
-} // namespace customos::core
+} // namespace duetos::core

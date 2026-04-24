@@ -51,15 +51,15 @@
 #include "ring3_smoke.h"
 #include "runtime_checker.h"
 
-namespace customos::core
+namespace duetos::core
 {
 
 namespace
 {
 
-using customos::drivers::video::ConsoleWrite;
-using customos::drivers::video::ConsoleWriteChar;
-using customos::drivers::video::ConsoleWriteln;
+using duetos::drivers::video::ConsoleWrite;
+using duetos::drivers::video::ConsoleWriteChar;
+using duetos::drivers::video::ConsoleWriteln;
 
 constexpr u32 kInputMax = 64;
 constinit char g_input[kInputMax] = {};
@@ -256,10 +256,10 @@ bool RequireAdmin(const char* cmd)
     ConsoleWrite("DENIED: ");
     ConsoleWrite(cmd);
     ConsoleWriteln(" REQUIRES ADMIN");
-    customos::core::Log(customos::core::LogLevel::Warn, "shell", "admin-only command denied");
-    customos::arch::SerialWrite("[shell] denied (non-admin): ");
-    customos::arch::SerialWrite(cmd);
-    customos::arch::SerialWrite("\n");
+    duetos::core::Log(duetos::core::LogLevel::Warn, "shell", "admin-only command denied");
+    duetos::arch::SerialWrite("[shell] denied (non-admin): ");
+    duetos::arch::SerialWrite(cmd);
+    duetos::arch::SerialWrite("\n");
     return false;
 }
 
@@ -267,8 +267,8 @@ void CmdHelp()
 {
     ConsoleWriteln("AVAILABLE COMMANDS:");
     ConsoleWriteln("  HELP         LIST THIS HELP");
-    ConsoleWriteln("  ABOUT        ABOUT CUSTOMOS");
-    ConsoleWriteln("  VERSION      CUSTOMOS VERSION");
+    ConsoleWriteln("  ABOUT        ABOUT DUETOS");
+    ConsoleWriteln("  VERSION      DUETOS VERSION");
     ConsoleWriteln("  CLEAR        CLEAR THE CONSOLE");
     ConsoleWriteln("  UPTIME       SECONDS SINCE BOOT");
     ConsoleWriteln("  DATE         WALL TIME + DATE");
@@ -418,24 +418,24 @@ void CmdHelp()
 
 void CmdAbout()
 {
-    ConsoleWriteln("CUSTOMOS — A FROM-SCRATCH x86_64 KERNEL WITH A");
+    ConsoleWriteln("DUETOS — A FROM-SCRATCH x86_64 KERNEL WITH A");
     ConsoleWriteln("NATIVE WINDOWED DESKTOP AND A FIRST-CLASS WIN32");
     ConsoleWriteln("SUBSYSTEM PLANNED. BOOT: MULTIBOOT2.  SHELL: YOU.");
 }
 
 void CmdVersion()
 {
-    ConsoleWriteln("CUSTOMOS v0 (WINDOWED DESKTOP SHELL)");
+    ConsoleWriteln("DUETOS v0 (WINDOWED DESKTOP SHELL)");
 }
 
 void CmdClear()
 {
-    customos::drivers::video::ConsoleClear();
+    duetos::drivers::video::ConsoleClear();
 }
 
 void CmdUptime()
 {
-    const u64 secs = customos::sched::SchedNowTicks() / 100;
+    const u64 secs = duetos::sched::SchedNowTicks() / 100;
     ConsoleWrite("UPTIME ");
     WriteU64Dec(secs);
     ConsoleWriteln(" SECONDS");
@@ -443,8 +443,8 @@ void CmdUptime()
 
 void CmdDate()
 {
-    customos::arch::RtcTime t{};
-    customos::arch::RtcRead(&t);
+    duetos::arch::RtcTime t{};
+    duetos::arch::RtcRead(&t);
     WriteU8TwoDigits(t.hour);
     ConsoleWriteChar(':');
     WriteU8TwoDigits(t.minute);
@@ -461,7 +461,7 @@ void CmdDate()
 
 void CmdWindows()
 {
-    using namespace customos::drivers::video;
+    using namespace duetos::drivers::video;
     ConsoleWriteln("REGISTERED WINDOWS:");
     for (u32 h = 0; h < WindowRegistryCount(); ++h)
     {
@@ -474,20 +474,20 @@ void CmdWindows()
     }
 }
 
-void CmdDmesg(customos::u32 argc, char** argv)
+void CmdDmesg(duetos::u32 argc, char** argv)
 {
     // Optional first arg picks the minimum severity. Matches the
     // single-letter `loglevel` command ("t" / "d" / "i" / "w" / "e").
     // Default (no arg) shows every entry. Special: `dmesg c` clears
     // the ring (shorthand for the hidden ClearLogRing API).
-    customos::core::LogLevel min_level = customos::core::LogLevel::Trace;
+    duetos::core::LogLevel min_level = duetos::core::LogLevel::Trace;
     const char* banner_suffix = "";
     if (argc >= 2 && argv[1] != nullptr && argv[1][0] != 0)
     {
         const char c = argv[1][0];
         if (c == 'c' || c == 'C')
         {
-            customos::core::ClearLogRing();
+            duetos::core::ClearLogRing();
             ConsoleWriteln("-- KERNEL LOG RING CLEARED --");
             return;
         }
@@ -495,27 +495,27 @@ void CmdDmesg(customos::u32 argc, char** argv)
         {
         case 't':
         case 'T':
-            min_level = customos::core::LogLevel::Trace;
+            min_level = duetos::core::LogLevel::Trace;
             banner_suffix = " [FILTER: T+]";
             break;
         case 'd':
         case 'D':
-            min_level = customos::core::LogLevel::Debug;
+            min_level = duetos::core::LogLevel::Debug;
             banner_suffix = " [FILTER: D+]";
             break;
         case 'i':
         case 'I':
-            min_level = customos::core::LogLevel::Info;
+            min_level = duetos::core::LogLevel::Info;
             banner_suffix = " [FILTER: I+]";
             break;
         case 'w':
         case 'W':
-            min_level = customos::core::LogLevel::Warn;
+            min_level = duetos::core::LogLevel::Warn;
             banner_suffix = " [FILTER: W+]";
             break;
         case 'e':
         case 'E':
-            min_level = customos::core::LogLevel::Error;
+            min_level = duetos::core::LogLevel::Error;
             banner_suffix = " [FILTER: E ONLY]";
             break;
         default:
@@ -525,12 +525,12 @@ void CmdDmesg(customos::u32 argc, char** argv)
     }
     ConsoleWrite("-- KERNEL LOG RING (OLDEST FIRST)");
     ConsoleWriteln(banner_suffix);
-    customos::core::DumpLogRingToFiltered([](const char* s) { ConsoleWrite(s); }, min_level);
+    duetos::core::DumpLogRingToFiltered([](const char* s) { ConsoleWrite(s); }, min_level);
 }
 
 void CmdStats()
 {
-    const auto s = customos::sched::SchedStatsRead();
+    const auto s = duetos::sched::SchedStatsRead();
     ConsoleWrite("CONTEXT SWITCHES ");
     WriteU64Dec(s.context_switches);
     ConsoleWriteChar('\n');
@@ -746,7 +746,7 @@ u32 ReadFileToBuf(const char* path, char* buf, u32 cap)
     {
         const char* bytes = nullptr;
         u32 len = 0;
-        if (!customos::fs::TmpFsRead(tmp_leaf, &bytes, &len))
+        if (!duetos::fs::TmpFsRead(tmp_leaf, &bytes, &len))
         {
             return static_cast<u32>(-1);
         }
@@ -757,9 +757,9 @@ u32 ReadFileToBuf(const char* path, char* buf, u32 cap)
         }
         return n;
     }
-    const auto* root = customos::fs::RamfsTrustedRoot();
-    const auto* node = customos::fs::VfsLookup(root, path, 128);
-    if (node == nullptr || node->type != customos::fs::RamfsNodeType::kFile)
+    const auto* root = duetos::fs::RamfsTrustedRoot();
+    const auto* node = duetos::fs::VfsLookup(root, path, 128);
+    if (node == nullptr || node->type != duetos::fs::RamfsNodeType::kFile)
     {
         return static_cast<u32>(-1);
     }
@@ -784,7 +784,7 @@ void CmdCp(u32 argc, char** argv)
         ConsoleWriteln("CP: DST MUST BE /tmp/<NAME>");
         return;
     }
-    char scratch[customos::fs::kTmpFsContentMax];
+    char scratch[duetos::fs::kTmpFsContentMax];
     const u32 n = ReadFileToBuf(argv[1], scratch, sizeof(scratch));
     if (n == static_cast<u32>(-1))
     {
@@ -792,7 +792,7 @@ void CmdCp(u32 argc, char** argv)
         ConsoleWriteln(argv[1]);
         return;
     }
-    if (!customos::fs::TmpFsWrite(dst_leaf, scratch, n))
+    if (!duetos::fs::TmpFsWrite(dst_leaf, scratch, n))
     {
         ConsoleWrite("CP: WRITE FAILED: ");
         ConsoleWriteln(argv[2]);
@@ -815,7 +815,7 @@ void CmdMv(u32 argc, char** argv)
     }
     const char* bytes = nullptr;
     u32 len = 0;
-    if (!customos::fs::TmpFsRead(src_leaf, &bytes, &len))
+    if (!duetos::fs::TmpFsRead(src_leaf, &bytes, &len))
     {
         ConsoleWrite("MV: NO SUCH FILE: ");
         ConsoleWriteln(argv[1]);
@@ -824,13 +824,13 @@ void CmdMv(u32 argc, char** argv)
     // Copy through a scratch buffer so we don't alias the
     // tmpfs slot's own storage during write (a same-slot
     // rename collapses to the copy-back-into-self case).
-    char scratch[customos::fs::kTmpFsContentMax];
+    char scratch[duetos::fs::kTmpFsContentMax];
     const u32 n = (len > sizeof(scratch)) ? sizeof(scratch) : len;
     for (u32 i = 0; i < n; ++i)
     {
         scratch[i] = bytes[i];
     }
-    if (!customos::fs::TmpFsWrite(dst_leaf, scratch, n))
+    if (!duetos::fs::TmpFsWrite(dst_leaf, scratch, n))
     {
         ConsoleWrite("MV: WRITE FAILED: ");
         ConsoleWriteln(argv[2]);
@@ -838,7 +838,7 @@ void CmdMv(u32 argc, char** argv)
     }
     // Only unlink the source AFTER the write succeeded —
     // partial failure mustn't lose data.
-    customos::fs::TmpFsUnlink(src_leaf);
+    duetos::fs::TmpFsUnlink(src_leaf);
 }
 
 void CmdWc(u32 argc, char** argv)
@@ -848,7 +848,7 @@ void CmdWc(u32 argc, char** argv)
         ConsoleWriteln("WC: MISSING PATH");
         return;
     }
-    char scratch[customos::fs::kTmpFsContentMax];
+    char scratch[duetos::fs::kTmpFsContentMax];
     const u32 n = ReadFileToBuf(argv[1], scratch, sizeof(scratch));
     if (n == static_cast<u32>(-1))
     {
@@ -926,7 +926,7 @@ void CmdHead(u32 argc, char** argv)
         ConsoleWriteln("HEAD: MISSING PATH");
         return;
     }
-    char scratch[customos::fs::kTmpFsContentMax];
+    char scratch[duetos::fs::kTmpFsContentMax];
     const u32 n = ReadFileToBuf(argv[path_idx], scratch, sizeof(scratch));
     if (n == static_cast<u32>(-1))
     {
@@ -958,7 +958,7 @@ void CmdTail(u32 argc, char** argv)
         ConsoleWriteln("TAIL: MISSING PATH");
         return;
     }
-    char scratch[customos::fs::kTmpFsContentMax];
+    char scratch[duetos::fs::kTmpFsContentMax];
     const u32 n = ReadFileToBuf(argv[path_idx], scratch, sizeof(scratch));
     if (n == static_cast<u32>(-1))
     {
@@ -1076,7 +1076,7 @@ void CmdSort(u32 argc, char** argv)
         ConsoleWriteln("SORT: MISSING PATH");
         return;
     }
-    char scratch[customos::fs::kTmpFsContentMax];
+    char scratch[duetos::fs::kTmpFsContentMax];
     const u32 n = ReadFileToBuf(argv[1], scratch, sizeof(scratch));
     if (n == static_cast<u32>(-1))
     {
@@ -1124,7 +1124,7 @@ void CmdUniq(u32 argc, char** argv)
         ConsoleWriteln("UNIQ: MISSING PATH");
         return;
     }
-    char scratch[customos::fs::kTmpFsContentMax];
+    char scratch[duetos::fs::kTmpFsContentMax];
     const u32 n = ReadFileToBuf(argv[1], scratch, sizeof(scratch));
     if (n == static_cast<u32>(-1))
     {
@@ -1171,7 +1171,7 @@ void CmdGrep(u32 argc, char** argv)
     }
     const char* pattern = argv[1];
     const char* path = argv[2];
-    char scratch[customos::fs::kTmpFsContentMax];
+    char scratch[duetos::fs::kTmpFsContentMax];
     const u32 n = ReadFileToBuf(path, scratch, sizeof(scratch));
     if (n == static_cast<u32>(-1))
     {
@@ -1207,7 +1207,7 @@ void CmdGrep(u32 argc, char** argv)
 // back so sibling subtrees see the correct prefix. Root's name
 // is empty — we skip the name-match test there but still walk
 // its children.
-void FindWalk(const customos::fs::RamfsNode* node, const char* needle, char* path_buf, u32& path_len, u32 path_cap)
+void FindWalk(const duetos::fs::RamfsNode* node, const char* needle, char* path_buf, u32& path_len, u32 path_cap)
 {
     if (node == nullptr)
     {
@@ -1227,7 +1227,7 @@ void FindWalk(const customos::fs::RamfsNode* node, const char* needle, char* pat
             ConsoleWriteChar('\n');
         }
     }
-    if (node->type != customos::fs::RamfsNodeType::kDir || node->children == nullptr)
+    if (node->type != duetos::fs::RamfsNodeType::kDir || node->children == nullptr)
     {
         return;
     }
@@ -1260,14 +1260,14 @@ void CmdFind(u32 argc, char** argv)
     const char* needle = argv[1];
     char path_buf[128] = {};
     u32 path_len = 0;
-    FindWalk(customos::fs::RamfsTrustedRoot(), needle, path_buf, path_len, sizeof(path_buf));
+    FindWalk(duetos::fs::RamfsTrustedRoot(), needle, path_buf, path_len, sizeof(path_buf));
     // tmpfs is flat under /tmp/ — enumerate directly.
     struct Cookie
     {
         const char* needle;
     };
     Cookie cookie{needle};
-    customos::fs::TmpFsEnumerate(
+    duetos::fs::TmpFsEnumerate(
         [](const char* name, u32 /*len*/, void* ck)
         {
             auto* c = static_cast<Cookie*>(ck);
@@ -1392,9 +1392,9 @@ void CmdTime(u32 argc, char** argv)
         }
     }
     buf[o] = '\0';
-    const u64 t0 = customos::sched::SchedNowTicks();
+    const u64 t0 = duetos::sched::SchedNowTicks();
     Dispatch(buf);
-    const u64 t1 = customos::sched::SchedNowTicks();
+    const u64 t1 = duetos::sched::SchedNowTicks();
     // 100 Hz scheduler tick → each tick is 10 ms. Round-trip
     // resolution is therefore one tick; sub-tick durations
     // show as 0 ms, which is honest given the time source.
@@ -1510,7 +1510,7 @@ void CmdSource(u32 argc, char** argv)
         ConsoleWriteln("SOURCE: MISSING PATH");
         return;
     }
-    char scratch[customos::fs::kTmpFsContentMax];
+    char scratch[duetos::fs::kTmpFsContentMax];
     const u32 n = ReadFileToBuf(argv[1], scratch, sizeof(scratch));
     if (n == static_cast<u32>(-1))
     {
@@ -1580,7 +1580,7 @@ void CmdMan(u32 argc, char** argv)
     }
     path[o] = '\0';
 
-    char scratch[customos::fs::kTmpFsContentMax];
+    char scratch[duetos::fs::kTmpFsContentMax];
     const u32 n = ReadFileToBuf(path, scratch, sizeof(scratch));
     if (n == static_cast<u32>(-1))
     {
@@ -1606,13 +1606,13 @@ void CmdSysinfo()
     // from typing version / uptime / date / mem / stats / windows
     // in sequence. Read-only; all data comes from the same
     // accessors the individual commands use.
-    ConsoleWriteln("CUSTOMOS v0  (WINDOWED DESKTOP SHELL)");
+    ConsoleWriteln("DUETOS v0  (WINDOWED DESKTOP SHELL)");
     ConsoleWrite("UPTIME:  ");
-    const u64 secs = customos::sched::SchedNowTicks() / 100;
+    const u64 secs = duetos::sched::SchedNowTicks() / 100;
     WriteU64Dec(secs);
     ConsoleWriteln(" SECONDS");
-    customos::arch::RtcTime t{};
-    customos::arch::RtcRead(&t);
+    duetos::arch::RtcTime t{};
+    duetos::arch::RtcRead(&t);
     ConsoleWrite("WALL:    ");
     WriteU8TwoDigits(t.hour);
     ConsoleWriteChar(':');
@@ -1626,7 +1626,7 @@ void CmdSysinfo()
     ConsoleWriteChar('-');
     WriteU8TwoDigits(t.day);
     ConsoleWriteChar('\n');
-    const auto s = customos::sched::SchedStatsRead();
+    const auto s = duetos::sched::SchedStatsRead();
     ConsoleWrite("TASKS:   ");
     WriteU64Dec(s.tasks_live);
     ConsoleWrite(" LIVE, ");
@@ -1634,17 +1634,17 @@ void CmdSysinfo()
     ConsoleWrite(" SLEEPING, ");
     WriteU64Dec(s.tasks_blocked);
     ConsoleWriteln(" BLOCKED");
-    const u64 total = customos::mm::TotalFrames();
-    const u64 free_frames = customos::mm::FreeFramesCount();
+    const u64 total = duetos::mm::TotalFrames();
+    const u64 free_frames = duetos::mm::FreeFramesCount();
     ConsoleWrite("MEMORY:  ");
     WriteU64Dec((total - free_frames) * 4);
     ConsoleWrite(" KIB USED / ");
     WriteU64Dec(total * 4);
     ConsoleWriteln(" KIB TOTAL");
     u32 alive = 0;
-    for (u32 h = 0; h < customos::drivers::video::WindowRegistryCount(); ++h)
+    for (u32 h = 0; h < duetos::drivers::video::WindowRegistryCount(); ++h)
     {
-        if (customos::drivers::video::WindowIsAlive(h))
+        if (duetos::drivers::video::WindowIsAlive(h))
             ++alive;
     }
     ConsoleWrite("WINDOWS: ");
@@ -1652,7 +1652,7 @@ void CmdSysinfo()
     ConsoleWriteln(" ALIVE");
     ConsoleWrite("MODE:    ");
     ConsoleWriteln(
-        customos::drivers::video::GetDisplayMode() == customos::drivers::video::DisplayMode::Tty ? "TTY" : "DESKTOP");
+        duetos::drivers::video::GetDisplayMode() == duetos::drivers::video::DisplayMode::Tty ? "TTY" : "DESKTOP");
 }
 
 void CmdEnv()
@@ -1827,16 +1827,16 @@ void CmdCpuid(u32 argc, char** argv)
 void CmdCr()
 {
     ConsoleWrite("CR0:  ");
-    WriteU64Hex(customos::arch::ReadCr0());
+    WriteU64Hex(duetos::arch::ReadCr0());
     ConsoleWriteChar('\n');
     ConsoleWrite("CR2:  ");
-    WriteU64Hex(customos::arch::ReadCr2());
+    WriteU64Hex(duetos::arch::ReadCr2());
     ConsoleWriteChar('\n');
     ConsoleWrite("CR3:  ");
-    WriteU64Hex(customos::arch::ReadCr3());
+    WriteU64Hex(duetos::arch::ReadCr3());
     ConsoleWriteChar('\n');
     ConsoleWrite("CR4:  ");
-    WriteU64Hex(customos::arch::ReadCr4());
+    WriteU64Hex(duetos::arch::ReadCr4());
     ConsoleWriteChar('\n');
 }
 
@@ -1882,8 +1882,8 @@ void CmdTsc()
 
 void CmdHpet()
 {
-    const u64 v = customos::arch::HpetReadCounter();
-    const u32 p = customos::arch::HpetPeriodFemtoseconds();
+    const u64 v = duetos::arch::HpetReadCounter();
+    const u32 p = duetos::arch::HpetPeriodFemtoseconds();
     ConsoleWrite("HPET COUNTER: ");
     WriteU64Hex(v);
     ConsoleWriteChar('\n');
@@ -1903,10 +1903,10 @@ void CmdHpet()
 void CmdTicks()
 {
     ConsoleWrite("TIMER TICKS: ");
-    WriteU64Dec(customos::arch::TimerTicks());
+    WriteU64Dec(duetos::arch::TimerTicks());
     ConsoleWriteChar('\n');
     ConsoleWrite("SCHED TICKS: ");
-    WriteU64Dec(customos::sched::SchedNowTicks());
+    WriteU64Dec(duetos::sched::SchedNowTicks());
     ConsoleWriteChar('\n');
 }
 
@@ -1987,7 +1987,7 @@ void CmdMsr(u32 argc, char** argv)
 
 void CmdLapic()
 {
-    using namespace customos::arch;
+    using namespace duetos::arch;
     const u32 id = LapicRead(kLapicRegId);
     const u32 ver = LapicRead(kLapicRegVersion);
     const u32 svr = LapicRead(kLapicRegSvr);
@@ -2017,7 +2017,7 @@ void CmdLapic()
 
 void CmdSmp()
 {
-    const u64 n = customos::arch::SmpCpusOnline();
+    const u64 n = duetos::arch::SmpCpusOnline();
     ConsoleWrite("CPUS ONLINE:   ");
     WriteU64Dec(n);
     ConsoleWriteChar('\n');
@@ -2029,13 +2029,13 @@ void CmdSmp()
 
 void CmdLspci()
 {
-    const u64 n = customos::drivers::pci::PciDeviceCount();
+    const u64 n = duetos::drivers::pci::PciDeviceCount();
     ConsoleWrite("PCI DEVICES:   ");
     WriteU64Dec(n);
     ConsoleWriteChar('\n');
     for (u64 i = 0; i < n; ++i)
     {
-        const auto& d = customos::drivers::pci::PciDevice(i);
+        const auto& d = duetos::drivers::pci::PciDevice(i);
         ConsoleWrite("  ");
         WriteU64Hex(d.addr.bus, 2);
         ConsoleWriteChar(':');
@@ -2051,13 +2051,13 @@ void CmdLspci()
         ConsoleWriteChar('.');
         WriteU64Hex(d.subclass, 2);
         ConsoleWriteChar(' ');
-        ConsoleWriteln(customos::drivers::pci::PciClassName(d.class_code));
+        ConsoleWriteln(duetos::drivers::pci::PciClassName(d.class_code));
     }
 }
 
 void CmdHeap()
 {
-    const auto s = customos::mm::KernelHeapStatsRead();
+    const auto s = duetos::mm::KernelHeapStatsRead();
     ConsoleWrite("POOL BYTES:       ");
     WriteU64Dec(s.pool_bytes);
     ConsoleWriteChar('\n');
@@ -2083,7 +2083,7 @@ void CmdHeap()
 
 void CmdPaging()
 {
-    const auto s = customos::mm::PagingStatsRead();
+    const auto s = duetos::mm::PagingStatsRead();
     ConsoleWrite("PAGE TABLES:       ");
     WriteU64Dec(s.page_tables_allocated);
     ConsoleWriteChar('\n');
@@ -2100,12 +2100,12 @@ void CmdPaging()
 
 void CmdFb()
 {
-    if (!customos::drivers::video::FramebufferAvailable())
+    if (!duetos::drivers::video::FramebufferAvailable())
     {
         ConsoleWriteln("FB: NOT AVAILABLE");
         return;
     }
-    const auto info = customos::drivers::video::FramebufferGet();
+    const auto info = duetos::drivers::video::FramebufferGet();
     ConsoleWrite("FB PHYS:   ");
     WriteU64Hex(info.phys);
     ConsoleWriteChar('\n');
@@ -2125,7 +2125,7 @@ void CmdFb()
 
 void CmdKbdStats()
 {
-    const auto s = customos::drivers::input::Ps2KeyboardStats();
+    const auto s = duetos::drivers::input::Ps2KeyboardStats();
     ConsoleWrite("KBD IRQS:      ");
     WriteU64Dec(s.irqs_seen);
     ConsoleWriteChar('\n');
@@ -2139,7 +2139,7 @@ void CmdKbdStats()
 
 void CmdMouseStats()
 {
-    const auto s = customos::drivers::input::Ps2MouseStatsRead();
+    const auto s = duetos::drivers::input::Ps2MouseStatsRead();
     ConsoleWrite("MOUSE IRQS:     ");
     WriteU64Dec(s.irqs_seen);
     ConsoleWriteChar('\n');
@@ -2155,7 +2155,7 @@ void CmdMouseStats()
 
 void CmdSmbios()
 {
-    const auto& s = customos::arch::SmbiosGet();
+    const auto& s = duetos::arch::SmbiosGet();
     if (!s.present)
     {
         ConsoleWriteln("SMBIOS: (no entry point found)");
@@ -2172,8 +2172,8 @@ void CmdSmbios()
     ConsoleWrite(" v=");
     ConsoleWriteln(s.system_version);
     ConsoleWrite("CHASSIS:      ");
-    ConsoleWrite(customos::arch::ChassisTypeName(s.chassis_type));
-    ConsoleWriteln(customos::arch::SmbiosIsLaptopChassis() ? " (laptop-like)" : "");
+    ConsoleWrite(duetos::arch::ChassisTypeName(s.chassis_type));
+    ConsoleWriteln(duetos::arch::SmbiosIsLaptopChassis() ? " (laptop-like)" : "");
     ConsoleWrite("CPU:          ");
     ConsoleWrite(s.cpu_manufacturer);
     ConsoleWrite(" ");
@@ -2182,13 +2182,13 @@ void CmdSmbios()
 
 void CmdPower()
 {
-    const auto snap = customos::drivers::power::PowerSnapshotRead();
+    const auto snap = duetos::drivers::power::PowerSnapshotRead();
     ConsoleWrite("CHASSIS:      ");
     ConsoleWriteln(snap.chassis_is_laptop ? "laptop-like" : "desktop/server");
     ConsoleWrite("AC:           ");
-    ConsoleWriteln(customos::drivers::power::AcStateName(snap.ac));
+    ConsoleWriteln(duetos::drivers::power::AcStateName(snap.ac));
     ConsoleWrite("BATTERY:      ");
-    ConsoleWriteln(customos::drivers::power::BatteryStateName(snap.battery.state));
+    ConsoleWriteln(duetos::drivers::power::BatteryStateName(snap.battery.state));
     ConsoleWrite("CPU TEMP:     ");
     if (snap.cpu_temp_c != 0)
     {
@@ -2222,7 +2222,7 @@ void CmdPower()
 
 void CmdThermal()
 {
-    const auto r = customos::arch::ThermalRead();
+    const auto r = duetos::arch::ThermalRead();
     if (!r.valid)
     {
         ConsoleWriteln("THERMAL: sensors report invalid (likely emulator)");
@@ -2248,8 +2248,8 @@ void CmdThermal()
 // Linux at a very rough level.
 void CmdHwmon()
 {
-    const auto snap = customos::drivers::power::PowerSnapshotRead();
-    const auto& smbios = customos::arch::SmbiosGet();
+    const auto snap = duetos::drivers::power::PowerSnapshotRead();
+    const auto& smbios = duetos::arch::SmbiosGet();
 
     ConsoleWriteln("=== HWMON ===");
     ConsoleWrite("CHASSIS:      ");
@@ -2292,16 +2292,16 @@ void CmdHwmon()
 
     ConsoleWriteln("-- power --");
     ConsoleWrite("AC STATE:     ");
-    ConsoleWriteln(customos::drivers::power::AcStateName(snap.ac));
+    ConsoleWriteln(duetos::drivers::power::AcStateName(snap.ac));
     const auto& b = snap.battery;
-    if (b.state == customos::drivers::power::kBatNotPresent)
+    if (b.state == duetos::drivers::power::kBatNotPresent)
     {
         ConsoleWriteln("BATTERY:      (not present)");
     }
     else
     {
         ConsoleWrite("BATTERY:      ");
-        ConsoleWrite(customos::drivers::power::BatteryStateName(b.state));
+        ConsoleWrite(duetos::drivers::power::BatteryStateName(b.state));
         ConsoleWrite("  ");
         if (b.percent <= 100)
         {
@@ -2348,7 +2348,7 @@ void CmdHwmon()
 
 void CmdGpu()
 {
-    const u64 n = customos::drivers::gpu::GpuCount();
+    const u64 n = duetos::drivers::gpu::GpuCount();
     if (n == 0)
     {
         ConsoleWriteln("GPU: (none discovered)");
@@ -2356,7 +2356,7 @@ void CmdGpu()
     }
     for (u64 i = 0; i < n; ++i)
     {
-        const auto& g = customos::drivers::gpu::Gpu(i);
+        const auto& g = duetos::drivers::gpu::Gpu(i);
         ConsoleWrite("GPU ");
         WriteU64Dec(i);
         ConsoleWrite(": vid=");
@@ -2398,9 +2398,9 @@ bool ParseU16Decimal(const char* s, u16* out)
 
 void CmdVbe(u32 argc, char** argv)
 {
-    using customos::drivers::gpu::VbeCaps;
-    using customos::drivers::gpu::VbeQuery;
-    using customos::drivers::gpu::VbeSetMode;
+    using duetos::drivers::gpu::VbeCaps;
+    using duetos::drivers::gpu::VbeQuery;
+    using duetos::drivers::gpu::VbeSetMode;
 
     if (argc == 1)
     {
@@ -2465,11 +2465,11 @@ void CmdVbe(u32 argc, char** argv)
         // Bochs GPU in the discovery cache — BAR0 is the
         // linear framebuffer aperture.
         u64 lfb_phys = 0;
-        const u64 gn = customos::drivers::gpu::GpuCount();
+        const u64 gn = duetos::drivers::gpu::GpuCount();
         for (u64 i = 0; i < gn; ++i)
         {
-            const auto& g = customos::drivers::gpu::Gpu(i);
-            if (g.vendor_id == customos::drivers::gpu::kVendorQemuBochs && g.mmio_phys != 0)
+            const auto& g = duetos::drivers::gpu::Gpu(i);
+            if (g.vendor_id == duetos::drivers::gpu::kVendorQemuBochs && g.mmio_phys != 0)
             {
                 lfb_phys = g.mmio_phys;
                 break;
@@ -2481,9 +2481,9 @@ void CmdVbe(u32 argc, char** argv)
             return;
         }
         const u32 pitch = static_cast<u32>(width) * 4;
-        if (customos::drivers::video::FramebufferRebind(lfb_phys, width, height, pitch, static_cast<u8>(bpp)))
+        if (duetos::drivers::video::FramebufferRebind(lfb_phys, width, height, pitch, static_cast<u8>(bpp)))
         {
-            customos::drivers::video::FramebufferClear(0);
+            duetos::drivers::video::FramebufferClear(0);
             ConsoleWriteln("VBE: framebuffer rebound; next recompose paints at the new size");
             ConsoleWriteln("     (overlay widgets retain boot-time positions — known limitation)");
         }
@@ -2499,7 +2499,7 @@ void CmdVbe(u32 argc, char** argv)
 }
 
 // Parse dotted-quad `a.b.c.d`. Returns true on exact 4-octet match.
-bool ParseIpv4(const char* s, customos::net::Ipv4Address* out)
+bool ParseIpv4(const char* s, duetos::net::Ipv4Address* out)
 {
     u32 parts[4] = {};
     u32 idx = 0;
@@ -2542,7 +2542,7 @@ void CmdPing(u32 argc, char** argv)
         ConsoleWriteln("PING: usage: ping <ipv4>");
         return;
     }
-    customos::net::Ipv4Address dst = {};
+    duetos::net::Ipv4Address dst = {};
     if (!ParseIpv4(argv[1], &dst))
     {
         ConsoleWriteln("PING: malformed IPv4 (expected dotted-quad)");
@@ -2553,8 +2553,8 @@ void CmdPing(u32 argc, char** argv)
     static u16 next_id = 0x0100;
     const u16 id = next_id++;
     const u16 seq = 1;
-    customos::net::NetPingArm(id, seq);
-    if (!customos::net::NetIcmpSendEcho(/*iface_index=*/0, dst, id, seq))
+    duetos::net::NetPingArm(id, seq);
+    if (!duetos::net::NetIcmpSendEcho(/*iface_index=*/0, dst, id, seq))
     {
         ConsoleWriteln("PING: send failed (ARP cache miss? try reaching a peer first)");
         return;
@@ -2564,8 +2564,8 @@ void CmdPing(u32 argc, char** argv)
     // we just yield + poll.
     for (u32 i = 0; i < 100; ++i)
     {
-        customos::sched::SchedSleepTicks(1);
-        const auto r = customos::net::NetPingRead();
+        duetos::sched::SchedSleepTicks(1);
+        const auto r = duetos::net::NetPingRead();
         if (r.replied)
         {
             ConsoleWrite("PING: reply from ");
@@ -2591,7 +2591,7 @@ void CmdHttp(u32 argc, char** argv)
         ConsoleWriteln("HTTP: usage: http <ipv4> [port [path]]");
         return;
     }
-    customos::net::Ipv4Address dst = {};
+    duetos::net::Ipv4Address dst = {};
     if (!ParseIpv4(argv[1], &dst))
     {
         ConsoleWriteln("HTTP: malformed IPv4");
@@ -2628,7 +2628,7 @@ void CmdHttp(u32 argc, char** argv)
     put(argv[1]);
     put("\r\nConnection: close\r\n\r\n");
 
-    if (!customos::net::NetTcpConnect(/*iface_index=*/0, dst, port, reinterpret_cast<const u8*>(req), ri))
+    if (!duetos::net::NetTcpConnect(/*iface_index=*/0, dst, port, reinterpret_cast<const u8*>(req), ri))
     {
         ConsoleWriteln("HTTP: connect failed (slot busy / ARP miss / oversized req)");
         return;
@@ -2640,13 +2640,13 @@ void CmdHttp(u32 argc, char** argv)
     // Poll up to 4 s for the response to arrive + FIN.
     for (u32 i = 0; i < 400; ++i)
     {
-        customos::sched::SchedSleepTicks(1);
-        const auto s = customos::net::NetTcpActiveSnapshot();
+        duetos::sched::SchedSleepTicks(1);
+        const auto s = duetos::net::NetTcpActiveSnapshot();
         if (s.response_complete)
         {
             // Print the captured bytes.
             u8 buf[2048];
-            const u32 n = customos::net::NetTcpActiveRead(buf, sizeof(buf));
+            const u32 n = duetos::net::NetTcpActiveRead(buf, sizeof(buf));
             ConsoleWrite("HTTP: ");
             WriteU64Dec(n);
             ConsoleWriteln(" bytes received");
@@ -2676,21 +2676,21 @@ void CmdNtp(u32 argc, char** argv)
     // here need an IP SLIRP will forward to. Public stratum-1/2
     // servers on UDP/123 work when SLIRP's outbound-UDP path is
     // open (the default).
-    customos::net::Ipv4Address server{{216, 239, 35, 0}}; // Google time1.google.com
+    duetos::net::Ipv4Address server{{216, 239, 35, 0}}; // Google time1.google.com
     if (argc >= 2 && !ParseIpv4(argv[1], &server))
     {
         ConsoleWriteln("NTP: malformed server IP");
         return;
     }
-    if (!customos::net::NetNtpQuery(/*iface_index=*/0, server))
+    if (!duetos::net::NetNtpQuery(/*iface_index=*/0, server))
     {
         ConsoleWriteln("NTP: send failed (ARP miss for server + gateway)");
         return;
     }
     for (u32 i = 0; i < 200; ++i) // up to ~2 s
     {
-        customos::sched::SchedSleepTicks(1);
-        const auto r = customos::net::NetNtpResultRead();
+        duetos::sched::SchedSleepTicks(1);
+        const auto r = duetos::net::NetNtpResultRead();
         if (r.synced)
         {
             ConsoleWrite("NTP: unix_secs=");
@@ -2731,21 +2731,21 @@ void CmdNslookup(u32 argc, char** argv)
         ConsoleWriteln("NSLOOKUP: usage: nslookup <name> [resolver_ip]");
         return;
     }
-    customos::net::Ipv4Address resolver{{10, 0, 2, 3}}; // QEMU SLIRP default
+    duetos::net::Ipv4Address resolver{{10, 0, 2, 3}}; // QEMU SLIRP default
     if (argc >= 3 && !ParseIpv4(argv[2], &resolver))
     {
         ConsoleWriteln("NSLOOKUP: malformed resolver IP");
         return;
     }
-    if (!customos::net::NetDnsQueryA(/*iface_index=*/0, resolver, argv[1]))
+    if (!duetos::net::NetDnsQueryA(/*iface_index=*/0, resolver, argv[1]))
     {
         ConsoleWriteln("NSLOOKUP: send failed (ARP miss, name too long, or no iface)");
         return;
     }
     for (u32 i = 0; i < 200; ++i) // wait up to ~2 seconds
     {
-        customos::sched::SchedSleepTicks(1);
-        const auto r = customos::net::NetDnsResultRead();
+        duetos::sched::SchedSleepTicks(1);
+        const auto r = duetos::net::NetDnsResultRead();
         if (r.resolved)
         {
             ConsoleWrite("NSLOOKUP: ");
@@ -2766,7 +2766,7 @@ void CmdNslookup(u32 argc, char** argv)
 
 void CmdNic()
 {
-    const u64 n = customos::drivers::net::NicCount();
+    const u64 n = duetos::drivers::net::NicCount();
     if (n == 0)
     {
         ConsoleWriteln("NIC: (none discovered)");
@@ -2774,7 +2774,7 @@ void CmdNic()
     }
     for (u64 i = 0; i < n; ++i)
     {
-        const auto& nic = customos::drivers::net::Nic(i);
+        const auto& nic = duetos::drivers::net::Nic(i);
         ConsoleWrite("NIC ");
         WriteU64Dec(i);
         ConsoleWrite(": vid=");
@@ -2805,7 +2805,7 @@ void CmdNic()
 
 void CmdArp()
 {
-    const auto s = customos::net::ArpStatsRead();
+    const auto s = duetos::net::ArpStatsRead();
     ConsoleWrite("ARP HITS:       ");
     WriteU64Dec(s.lookups_hit);
     ConsoleWriteChar('\n');
@@ -2832,8 +2832,8 @@ void CmdHealth(u32 argc, char** argv)
     // moment, not the last heartbeat), then print the full
     // report: each issue kind with its cumulative count plus
     // this-scan and total-since-boot summaries.
-    const u64 this_scan = customos::core::RuntimeCheckerScan();
-    const auto& h = customos::core::RuntimeCheckerStatusRead();
+    const u64 this_scan = duetos::core::RuntimeCheckerScan();
+    const auto& h = duetos::core::RuntimeCheckerStatusRead();
     (void)argc;
     (void)argv;
     ConsoleWrite("SCANS RUN:        ");
@@ -2850,7 +2850,7 @@ void CmdHealth(u32 argc, char** argv)
     if (h.issues_found_total > 0)
     {
         ConsoleWriteln("PER-ISSUE BREAKDOWN:");
-        for (u32 i = 1; i < u32(customos::core::HealthIssue::Count); ++i)
+        for (u32 i = 1; i < u32(duetos::core::HealthIssue::Count); ++i)
         {
             const u64 c = h.per_issue_count[i];
             if (c == 0)
@@ -2858,13 +2858,13 @@ void CmdHealth(u32 argc, char** argv)
             ConsoleWrite("  ");
             WriteU64Dec(c);
             ConsoleWrite(" x ");
-            ConsoleWriteln(customos::core::HealthIssueName(customos::core::HealthIssue(i)));
+            ConsoleWriteln(duetos::core::HealthIssueName(duetos::core::HealthIssue(i)));
         }
     }
 }
 
 // Forward decl — definition is later in the file (used by FAT commands).
-bool ParseU64Str(const char* s, customos::u64* out);
+bool ParseU64Str(const char* s, duetos::u64* out);
 
 void CmdMemDump(u32 argc, char** argv)
 {
@@ -2880,13 +2880,13 @@ void CmdMemDump(u32 argc, char** argv)
         ConsoleWriteln("         OUTPUT GOES TO COM1 (SERIAL LOG)");
         return;
     }
-    customos::u64 addr = 0;
+    duetos::u64 addr = 0;
     if (!ParseU64Str(argv[1], &addr))
     {
         ConsoleWriteln("MEMDUMP: BAD ADDRESS");
         return;
     }
-    customos::u64 len = 64;
+    duetos::u64 len = 64;
     if (argc >= 3 && !ParseU64Str(argv[2], &len))
     {
         ConsoleWriteln("MEMDUMP: BAD LENGTH");
@@ -2897,43 +2897,43 @@ void CmdMemDump(u32 argc, char** argv)
         ConsoleWriteln("MEMDUMP: ZERO LENGTH");
         return;
     }
-    customos::core::DumpHexRegionSafe("memdump", addr, static_cast<customos::u32>(len), 0);
+    duetos::core::DumpHexRegionSafe("memdump", addr, static_cast<duetos::u32>(len), 0);
     ConsoleWriteln("MEMDUMP: WROTE TO COM1");
 }
 
-const char* BpKindName(customos::debug::BpKind k)
+const char* BpKindName(duetos::debug::BpKind k)
 {
     switch (k)
     {
-    case customos::debug::BpKind::Software:
+    case duetos::debug::BpKind::Software:
         return "SW";
-    case customos::debug::BpKind::HwExecute:
+    case duetos::debug::BpKind::HwExecute:
         return "HW-X";
-    case customos::debug::BpKind::HwWrite:
+    case duetos::debug::BpKind::HwWrite:
         return "HW-W";
-    case customos::debug::BpKind::HwReadWrite:
+    case duetos::debug::BpKind::HwReadWrite:
         return "HW-RW";
     }
     return "?";
 }
 
-const char* BpErrName(customos::debug::BpError e)
+const char* BpErrName(duetos::debug::BpError e)
 {
     switch (e)
     {
-    case customos::debug::BpError::None:
+    case duetos::debug::BpError::None:
         return "OK";
-    case customos::debug::BpError::InvalidAddress:
+    case duetos::debug::BpError::InvalidAddress:
         return "INVALID-ADDRESS";
-    case customos::debug::BpError::TableFull:
+    case duetos::debug::BpError::TableFull:
         return "TABLE-FULL";
-    case customos::debug::BpError::NoHwSlot:
+    case duetos::debug::BpError::NoHwSlot:
         return "NO-HW-SLOT";
-    case customos::debug::BpError::BadKind:
+    case duetos::debug::BpError::BadKind:
         return "BAD-KIND";
-    case customos::debug::BpError::NotInstalled:
+    case duetos::debug::BpError::NotInstalled:
         return "NOT-INSTALLED";
-    case customos::debug::BpError::SmpUnsupported:
+    case duetos::debug::BpError::SmpUnsupported:
         return "SMP-UNSUPPORTED";
     }
     return "?";
@@ -2956,7 +2956,7 @@ u32 TakeSuspendFlag(u32 argc, char** argv, u32 start, bool* suspend)
     return argc;
 }
 
-void PrintBpRegs(const customos::arch::TrapFrame& f)
+void PrintBpRegs(const duetos::arch::TrapFrame& f)
 {
     // Keep this dense — the framebuffer is 80 cols and the TrapFrame
     // has 15 GPRs + control. Group into rows the operator can scan.
@@ -3046,8 +3046,8 @@ void CmdBp(u32 argc, char** argv)
 
     if (StrEq(sub, "list"))
     {
-        customos::debug::BpInfo infos[32];
-        const usize n = customos::debug::BpList(infos, 32);
+        duetos::debug::BpInfo infos[32];
+        const usize n = duetos::debug::BpList(infos, 32);
         if (n == 0)
         {
             ConsoleWriteln("BP: NONE INSTALLED");
@@ -3093,15 +3093,15 @@ void CmdBp(u32 argc, char** argv)
             ConsoleWriteln("BP SET: NEED <HEX-ADDR>");
             return;
         }
-        customos::u64 addr = 0;
+        duetos::u64 addr = 0;
         if (!ParseU64Str(argv[2], &addr))
         {
             ConsoleWriteln("BP SET: BAD ADDRESS");
             return;
         }
-        customos::debug::BpError err = customos::debug::BpError::None;
-        const customos::debug::BreakpointId id = customos::debug::BpInstallSoftware(addr, suspend, &err);
-        if (err != customos::debug::BpError::None)
+        duetos::debug::BpError err = duetos::debug::BpError::None;
+        const duetos::debug::BreakpointId id = duetos::debug::BpInstallSoftware(addr, suspend, &err);
+        if (err != duetos::debug::BpError::None)
         {
             ConsoleWrite("BP SET: ");
             ConsoleWriteln(BpErrName(err));
@@ -3122,31 +3122,31 @@ void CmdBp(u32 argc, char** argv)
             ConsoleWriteln("BP HW: NEED <HEX-ADDR> [X|W|RW] [LEN]");
             return;
         }
-        customos::u64 addr = 0;
+        duetos::u64 addr = 0;
         if (!ParseU64Str(argv[2], &addr))
         {
             ConsoleWriteln("BP HW: BAD ADDRESS");
             return;
         }
-        customos::debug::BpKind kind = customos::debug::BpKind::HwExecute;
-        customos::debug::BpLen len = customos::debug::BpLen::One;
+        duetos::debug::BpKind kind = duetos::debug::BpKind::HwExecute;
+        duetos::debug::BpLen len = duetos::debug::BpLen::One;
         if (argc >= 4)
         {
             if (StrEq(argv[3], "x"))
-                kind = customos::debug::BpKind::HwExecute;
+                kind = duetos::debug::BpKind::HwExecute;
             else if (StrEq(argv[3], "w"))
-                kind = customos::debug::BpKind::HwWrite;
+                kind = duetos::debug::BpKind::HwWrite;
             else if (StrEq(argv[3], "rw"))
-                kind = customos::debug::BpKind::HwReadWrite;
+                kind = duetos::debug::BpKind::HwReadWrite;
             else
             {
                 ConsoleWriteln("BP HW: BAD KIND (USE X|W|RW)");
                 return;
             }
         }
-        if (argc >= 5 && kind != customos::debug::BpKind::HwExecute)
+        if (argc >= 5 && kind != duetos::debug::BpKind::HwExecute)
         {
-            customos::u64 ln = 0;
+            duetos::u64 ln = 0;
             if (!ParseU64Str(argv[4], &ln))
             {
                 ConsoleWriteln("BP HW: BAD LEN");
@@ -3155,26 +3155,26 @@ void CmdBp(u32 argc, char** argv)
             switch (ln)
             {
             case 1:
-                len = customos::debug::BpLen::One;
+                len = duetos::debug::BpLen::One;
                 break;
             case 2:
-                len = customos::debug::BpLen::Two;
+                len = duetos::debug::BpLen::Two;
                 break;
             case 4:
-                len = customos::debug::BpLen::Four;
+                len = duetos::debug::BpLen::Four;
                 break;
             case 8:
-                len = customos::debug::BpLen::Eight;
+                len = duetos::debug::BpLen::Eight;
                 break;
             default:
                 ConsoleWriteln("BP HW: LEN MUST BE 1/2/4/8");
                 return;
             }
         }
-        customos::debug::BpError err = customos::debug::BpError::None;
-        const customos::debug::BreakpointId id =
-            customos::debug::BpInstallHardware(addr, kind, len, /*owner_pid=*/0, suspend, &err);
-        if (err != customos::debug::BpError::None)
+        duetos::debug::BpError err = duetos::debug::BpError::None;
+        const duetos::debug::BreakpointId id =
+            duetos::debug::BpInstallHardware(addr, kind, len, /*owner_pid=*/0, suspend, &err);
+        if (err != duetos::debug::BpError::None)
         {
             ConsoleWrite("BP HW: ");
             ConsoleWriteln(BpErrName(err));
@@ -3193,14 +3193,14 @@ void CmdBp(u32 argc, char** argv)
             ConsoleWriteln("BP CLEAR: NEED <ID>");
             return;
         }
-        customos::u64 id_val = 0;
+        duetos::u64 id_val = 0;
         if (!ParseU64Str(argv[2], &id_val))
         {
             ConsoleWriteln("BP CLEAR: BAD ID");
             return;
         }
-        const customos::debug::BpError err =
-            customos::debug::BpRemove({static_cast<customos::u32>(id_val)}, /*requester_pid=*/0);
+        const duetos::debug::BpError err =
+            duetos::debug::BpRemove({static_cast<duetos::u32>(id_val)}, /*requester_pid=*/0);
         ConsoleWrite("BP CLEAR: ");
         ConsoleWriteln(BpErrName(err));
         return;
@@ -3208,15 +3208,15 @@ void CmdBp(u32 argc, char** argv)
 
     if (StrEq(sub, "test"))
     {
-        const bool ok = customos::debug::BpSelfTest();
+        const bool ok = duetos::debug::BpSelfTest();
         ConsoleWriteln(ok ? "BP TEST: OK" : "BP TEST: FAILED (SEE SERIAL LOG)");
         return;
     }
 
     if (StrEq(sub, "stopped"))
     {
-        customos::debug::BpInfo infos[32];
-        const usize n = customos::debug::BpList(infos, 32);
+        duetos::debug::BpInfo infos[32];
+        const usize n = duetos::debug::BpList(infos, 32);
         usize any = 0;
         for (usize i = 0; i < n; ++i)
         {
@@ -3245,14 +3245,14 @@ void CmdBp(u32 argc, char** argv)
             ConsoleWriteln("BP REGS: NEED <ID>");
             return;
         }
-        customos::u64 id_val = 0;
+        duetos::u64 id_val = 0;
         if (!ParseU64Str(argv[2], &id_val))
         {
             ConsoleWriteln("BP REGS: BAD ID");
             return;
         }
-        customos::arch::TrapFrame f;
-        if (!customos::debug::BpReadRegs({static_cast<customos::u32>(id_val)}, &f))
+        duetos::arch::TrapFrame f;
+        if (!duetos::debug::BpReadRegs({static_cast<duetos::u32>(id_val)}, &f))
         {
             ConsoleWriteln("BP REGS: NO TASK STOPPED ON THAT ID");
             return;
@@ -3271,14 +3271,14 @@ void CmdBp(u32 argc, char** argv)
             ConsoleWriteln("BP MEM: NEED <ID> <HEX-ADDR> [LEN]");
             return;
         }
-        customos::u64 id_val = 0;
-        customos::u64 addr = 0;
+        duetos::u64 id_val = 0;
+        duetos::u64 addr = 0;
         if (!ParseU64Str(argv[2], &id_val) || !ParseU64Str(argv[3], &addr))
         {
             ConsoleWriteln("BP MEM: BAD ARGS");
             return;
         }
-        customos::u64 len = 64; // default
+        duetos::u64 len = 64; // default
         if (argc >= 5)
         {
             if (!ParseU64Str(argv[4], &len))
@@ -3289,23 +3289,23 @@ void CmdBp(u32 argc, char** argv)
         }
         if (len > 256)
             len = 256; // shell cap — longer dumps belong on serial
-        customos::u8 buf[256];
-        const customos::u64 got = customos::debug::BpReadMem({static_cast<customos::u32>(id_val)}, addr, buf, len);
+        duetos::u8 buf[256];
+        const duetos::u64 got = duetos::debug::BpReadMem({static_cast<duetos::u32>(id_val)}, addr, buf, len);
         if (got == 0)
         {
             ConsoleWriteln("BP MEM: UNREADABLE (UNMAPPED OR NO STOPPED TASK)");
             return;
         }
         // Hex + ASCII, 16 bytes per line.
-        for (customos::u64 off = 0; off < got; off += 16)
+        for (duetos::u64 off = 0; off < got; off += 16)
         {
             WriteU64Hex(addr + off, 16);
             ConsoleWrite(": ");
-            for (customos::u64 i = 0; i < 16; ++i)
+            for (duetos::u64 i = 0; i < 16; ++i)
             {
                 if (off + i < got)
                 {
-                    const customos::u8 b = buf[off + i];
+                    const duetos::u8 b = buf[off + i];
                     const char hi = static_cast<char>("0123456789abcdef"[(b >> 4) & 0xF]);
                     const char lo = static_cast<char>("0123456789abcdef"[b & 0xF]);
                     ConsoleWriteChar(hi);
@@ -3318,9 +3318,9 @@ void CmdBp(u32 argc, char** argv)
                 ConsoleWriteChar(' ');
             }
             ConsoleWriteChar(' ');
-            for (customos::u64 i = 0; i < 16 && off + i < got; ++i)
+            for (duetos::u64 i = 0; i < 16 && off + i < got; ++i)
             {
-                const customos::u8 b = buf[off + i];
+                const duetos::u8 b = buf[off + i];
                 ConsoleWriteChar((b >= 0x20 && b < 0x7F) ? static_cast<char>(b) : '.');
             }
             ConsoleWriteChar('\n');
@@ -3335,13 +3335,13 @@ void CmdBp(u32 argc, char** argv)
             ConsoleWriteln("BP RESUME: NEED <ID>");
             return;
         }
-        customos::u64 id_val = 0;
+        duetos::u64 id_val = 0;
         if (!ParseU64Str(argv[2], &id_val))
         {
             ConsoleWriteln("BP RESUME: BAD ID");
             return;
         }
-        const customos::debug::BpError err = customos::debug::BpResume({static_cast<customos::u32>(id_val)});
+        const duetos::debug::BpError err = duetos::debug::BpResume({static_cast<duetos::u32>(id_val)});
         ConsoleWrite("BP RESUME: ");
         ConsoleWriteln(BpErrName(err));
         return;
@@ -3354,13 +3354,13 @@ void CmdBp(u32 argc, char** argv)
             ConsoleWriteln("BP STEP: NEED <ID>");
             return;
         }
-        customos::u64 id_val = 0;
+        duetos::u64 id_val = 0;
         if (!ParseU64Str(argv[2], &id_val))
         {
             ConsoleWriteln("BP STEP: BAD ID");
             return;
         }
-        const customos::debug::BpError err = customos::debug::BpStep({static_cast<customos::u32>(id_val)});
+        const duetos::debug::BpError err = duetos::debug::BpStep({static_cast<duetos::u32>(id_val)});
         ConsoleWrite("BP STEP: ");
         ConsoleWriteln(BpErrName(err));
         return;
@@ -3369,15 +3369,15 @@ void CmdBp(u32 argc, char** argv)
     ConsoleWriteln("BP: UNKNOWN SUBCOMMAND (HELP: BP WITHOUT ARGS)");
 }
 
-const char* ProbeArmName(customos::debug::ProbeArm a)
+const char* ProbeArmName(duetos::debug::ProbeArm a)
 {
     switch (a)
     {
-    case customos::debug::ProbeArm::Disarmed:
+    case duetos::debug::ProbeArm::Disarmed:
         return "DISARMED";
-    case customos::debug::ProbeArm::ArmedLog:
+    case duetos::debug::ProbeArm::ArmedLog:
         return "ARMED-LOG";
-    case customos::debug::ProbeArm::ArmedSuspend:
+    case duetos::debug::ProbeArm::ArmedSuspend:
         return "ARMED-SUSPEND";
     }
     return "?";
@@ -3403,23 +3403,23 @@ void CmdProbe(u32 argc, char** argv)
     const char* sub = argv[1];
     if (StrEq(sub, "list"))
     {
-        customos::debug::ProbeInfo infos[16];
-        const customos::u64 n = customos::debug::ProbeList(infos, 16);
+        duetos::debug::ProbeInfo infos[16];
+        const duetos::u64 n = duetos::debug::ProbeList(infos, 16);
         if (n == 0)
         {
             ConsoleWriteln("PROBE: NONE REGISTERED");
             return;
         }
         ConsoleWriteln("PROBE: NAME                     ARM            FIRES");
-        for (customos::u64 i = 0; i < n; ++i)
+        for (duetos::u64 i = 0; i < n; ++i)
         {
             ConsoleWrite("  ");
             ConsoleWrite(infos[i].name);
             // pad name to column
-            for (customos::u64 pad = 0; pad + 0 < 24; ++pad)
+            for (duetos::u64 pad = 0; pad + 0 < 24; ++pad)
             {
                 const char* p = infos[i].name;
-                customos::u64 len = 0;
+                duetos::u64 len = 0;
                 while (p[len] != 0)
                     ++len;
                 if (pad + len >= 24)
@@ -3445,20 +3445,20 @@ void CmdProbe(u32 argc, char** argv)
             ConsoleWriteln("PROBE: NEED <NAME>");
             return;
         }
-        const customos::debug::ProbeId id = customos::debug::ProbeByName(argv[2]);
-        if (id == customos::debug::ProbeId::kCount)
+        const duetos::debug::ProbeId id = duetos::debug::ProbeByName(argv[2]);
+        if (id == duetos::debug::ProbeId::kCount)
         {
             ConsoleWriteln("PROBE: UNKNOWN NAME (SEE `PROBE LIST`)");
             return;
         }
-        customos::debug::ProbeArm arm = customos::debug::ProbeArm::Disarmed;
+        duetos::debug::ProbeArm arm = duetos::debug::ProbeArm::Disarmed;
         if (StrEq(sub, "arm"))
         {
-            arm = customos::debug::ProbeArm::ArmedLog;
+            arm = duetos::debug::ProbeArm::ArmedLog;
             if (argc >= 4 && (StrEq(argv[3], "--suspend") || StrEq(argv[3], "-s")))
-                arm = customos::debug::ProbeArm::ArmedSuspend;
+                arm = duetos::debug::ProbeArm::ArmedSuspend;
         }
-        customos::debug::ProbeSetArm(id, arm);
+        duetos::debug::ProbeSetArm(id, arm);
         ConsoleWrite("PROBE ");
         ConsoleWrite(argv[2]);
         ConsoleWrite(": ");
@@ -3467,15 +3467,15 @@ void CmdProbe(u32 argc, char** argv)
     }
     if (StrEq(sub, "arm-all"))
     {
-        for (customos::u32 i = 0; i < static_cast<customos::u32>(customos::debug::ProbeId::kCount); ++i)
-            customos::debug::ProbeSetArm(static_cast<customos::debug::ProbeId>(i), customos::debug::ProbeArm::ArmedLog);
+        for (duetos::u32 i = 0; i < static_cast<duetos::u32>(duetos::debug::ProbeId::kCount); ++i)
+            duetos::debug::ProbeSetArm(static_cast<duetos::debug::ProbeId>(i), duetos::debug::ProbeArm::ArmedLog);
         ConsoleWriteln("PROBE: ALL ARMED-LOG (MAY FLOOD LOG)");
         return;
     }
     if (StrEq(sub, "disarm-all"))
     {
-        for (customos::u32 i = 0; i < static_cast<customos::u32>(customos::debug::ProbeId::kCount); ++i)
-            customos::debug::ProbeSetArm(static_cast<customos::debug::ProbeId>(i), customos::debug::ProbeArm::Disarmed);
+        for (duetos::u32 i = 0; i < static_cast<duetos::u32>(duetos::debug::ProbeId::kCount); ++i)
+            duetos::debug::ProbeSetArm(static_cast<duetos::debug::ProbeId>(i), duetos::debug::ProbeArm::Disarmed);
         ConsoleWriteln("PROBE: ALL DISARMED");
         return;
     }
@@ -3495,19 +3495,19 @@ void CmdInstr(u32 argc, char** argv)
         ConsoleWriteln("       OUTPUT GOES TO COM1 (SERIAL LOG)");
         return;
     }
-    customos::u64 addr = 0;
+    duetos::u64 addr = 0;
     if (!ParseU64Str(argv[1], &addr))
     {
         ConsoleWriteln("INSTR: BAD ADDRESS");
         return;
     }
-    customos::u64 len = 16;
+    duetos::u64 len = 16;
     if (argc >= 3 && !ParseU64Str(argv[2], &len))
     {
         ConsoleWriteln("INSTR: BAD LENGTH");
         return;
     }
-    customos::core::DumpInstructionBytes("instr", addr, static_cast<customos::u32>(len));
+    duetos::core::DumpInstructionBytes("instr", addr, static_cast<duetos::u32>(len));
     ConsoleWriteln("INSTR: WROTE TO COM1");
 }
 
@@ -3531,14 +3531,14 @@ void CmdInspectSyscalls(u32 argc, char** argv)
     if (StrEq(argv[2], "kernel"))
     {
         ConsoleWriteln("INSPECT SYSCALLS: SCANNING KERNEL .TEXT (SEE COM1)");
-        (void)customos::debug::SyscallScanKernelText();
+        (void)duetos::debug::SyscallScanKernelText();
         ConsoleWriteln("INSPECT SYSCALLS: DONE");
         return;
     }
     ConsoleWrite("INSPECT SYSCALLS: SCANNING FILE \"");
     ConsoleWrite(argv[2]);
     ConsoleWriteln("\" (SEE COM1)");
-    (void)customos::debug::SyscallScanFile(argv[2]);
+    (void)duetos::debug::SyscallScanFile(argv[2]);
     ConsoleWriteln("INSPECT SYSCALLS: DONE");
 }
 
@@ -3553,7 +3553,7 @@ void CmdInspectOpcodes(u32 argc, char** argv)
     ConsoleWrite("INSPECT OPCODES: SCANNING FILE \"");
     ConsoleWrite(argv[2]);
     ConsoleWriteln("\" (SEE COM1)");
-    customos::debug::OpcodeScanFile(argv[2]);
+    duetos::debug::OpcodeScanFile(argv[2]);
     ConsoleWriteln("INSPECT OPCODES: DONE");
 }
 
@@ -3567,19 +3567,19 @@ void CmdInspectArm(u32 argc, char** argv)
     }
     if (StrEq(argv[2], "on"))
     {
-        customos::debug::InspectArmSet(true);
+        duetos::debug::InspectArmSet(true);
         ConsoleWriteln("INSPECT ARM: ARMED - OPCODES SCAN WILL FIRE ON NEXT SPAWN");
         return;
     }
     if (StrEq(argv[2], "off"))
     {
-        customos::debug::InspectArmSet(false);
+        duetos::debug::InspectArmSet(false);
         ConsoleWriteln("INSPECT ARM: DISARMED");
         return;
     }
     if (StrEq(argv[2], "status"))
     {
-        ConsoleWriteln(customos::debug::InspectArmActive() ? "INSPECT ARM: STATE=ON (ONE-SHOT)" //
+        ConsoleWriteln(duetos::debug::InspectArmActive() ? "INSPECT ARM: STATE=ON (ONE-SHOT)" //
                                                            : "INSPECT ARM: STATE=OFF");
         return;
     }
@@ -3630,83 +3630,83 @@ void CmdDumpState()
     // counters. Lets an operator capture "what does this kernel
     // think the world looks like right now" in one log entry —
     // useful as a before/after when bisecting a flaky workload.
-    customos::arch::SerialWrite("\n=== CUSTOMOS DUMPSTATE ===\n");
+    duetos::arch::SerialWrite("\n=== DUETOS DUMPSTATE ===\n");
 
     {
-        const auto s = customos::mm::KernelHeapStatsRead();
-        customos::arch::SerialWrite("[heap] pool=");
-        customos::arch::SerialWriteHex(s.pool_bytes);
-        customos::arch::SerialWrite(" used=");
-        customos::arch::SerialWriteHex(s.used_bytes);
-        customos::arch::SerialWrite(" free=");
-        customos::arch::SerialWriteHex(s.free_bytes);
-        customos::arch::SerialWrite("\n[heap] alloc_count=");
-        customos::arch::SerialWriteHex(s.alloc_count);
-        customos::arch::SerialWrite(" free_count=");
-        customos::arch::SerialWriteHex(s.free_count);
-        customos::arch::SerialWrite(" largest_run=");
-        customos::arch::SerialWriteHex(s.largest_free_run);
-        customos::arch::SerialWrite(" free_chunks=");
-        customos::arch::SerialWriteHex(s.free_chunk_count);
-        customos::arch::SerialWrite("\n");
+        const auto s = duetos::mm::KernelHeapStatsRead();
+        duetos::arch::SerialWrite("[heap] pool=");
+        duetos::arch::SerialWriteHex(s.pool_bytes);
+        duetos::arch::SerialWrite(" used=");
+        duetos::arch::SerialWriteHex(s.used_bytes);
+        duetos::arch::SerialWrite(" free=");
+        duetos::arch::SerialWriteHex(s.free_bytes);
+        duetos::arch::SerialWrite("\n[heap] alloc_count=");
+        duetos::arch::SerialWriteHex(s.alloc_count);
+        duetos::arch::SerialWrite(" free_count=");
+        duetos::arch::SerialWriteHex(s.free_count);
+        duetos::arch::SerialWrite(" largest_run=");
+        duetos::arch::SerialWriteHex(s.largest_free_run);
+        duetos::arch::SerialWrite(" free_chunks=");
+        duetos::arch::SerialWriteHex(s.free_chunk_count);
+        duetos::arch::SerialWrite("\n");
     }
 
     {
-        const auto s = customos::mm::PagingStatsRead();
-        customos::arch::SerialWrite("[paging] page_tables=");
-        customos::arch::SerialWriteHex(s.page_tables_allocated);
-        customos::arch::SerialWrite(" mapped=");
-        customos::arch::SerialWriteHex(s.mappings_installed);
-        customos::arch::SerialWrite(" unmapped=");
-        customos::arch::SerialWriteHex(s.mappings_removed);
-        customos::arch::SerialWrite(" mmio_used=");
-        customos::arch::SerialWriteHex(s.mmio_arena_used_bytes);
-        customos::arch::SerialWrite("\n");
+        const auto s = duetos::mm::PagingStatsRead();
+        duetos::arch::SerialWrite("[paging] page_tables=");
+        duetos::arch::SerialWriteHex(s.page_tables_allocated);
+        duetos::arch::SerialWrite(" mapped=");
+        duetos::arch::SerialWriteHex(s.mappings_installed);
+        duetos::arch::SerialWrite(" unmapped=");
+        duetos::arch::SerialWriteHex(s.mappings_removed);
+        duetos::arch::SerialWrite(" mmio_used=");
+        duetos::arch::SerialWriteHex(s.mmio_arena_used_bytes);
+        duetos::arch::SerialWrite("\n");
     }
 
     {
-        const auto s = customos::sched::SchedStatsRead();
-        customos::arch::SerialWrite("[sched] ctx_switches=");
-        customos::arch::SerialWriteHex(s.context_switches);
-        customos::arch::SerialWrite(" live=");
-        customos::arch::SerialWriteHex(s.tasks_live);
-        customos::arch::SerialWrite(" sleeping=");
-        customos::arch::SerialWriteHex(s.tasks_sleeping);
-        customos::arch::SerialWrite(" blocked=");
-        customos::arch::SerialWriteHex(s.tasks_blocked);
-        customos::arch::SerialWrite("\n[sched] created=");
-        customos::arch::SerialWriteHex(s.tasks_created);
-        customos::arch::SerialWrite(" exited=");
-        customos::arch::SerialWriteHex(s.tasks_exited);
-        customos::arch::SerialWrite(" reaped=");
-        customos::arch::SerialWriteHex(s.tasks_reaped);
-        customos::arch::SerialWrite(" total_ticks=");
-        customos::arch::SerialWriteHex(s.total_ticks);
-        customos::arch::SerialWrite(" idle_ticks=");
-        customos::arch::SerialWriteHex(s.idle_ticks);
-        customos::arch::SerialWrite("\n");
+        const auto s = duetos::sched::SchedStatsRead();
+        duetos::arch::SerialWrite("[sched] ctx_switches=");
+        duetos::arch::SerialWriteHex(s.context_switches);
+        duetos::arch::SerialWrite(" live=");
+        duetos::arch::SerialWriteHex(s.tasks_live);
+        duetos::arch::SerialWrite(" sleeping=");
+        duetos::arch::SerialWriteHex(s.tasks_sleeping);
+        duetos::arch::SerialWrite(" blocked=");
+        duetos::arch::SerialWriteHex(s.tasks_blocked);
+        duetos::arch::SerialWrite("\n[sched] created=");
+        duetos::arch::SerialWriteHex(s.tasks_created);
+        duetos::arch::SerialWrite(" exited=");
+        duetos::arch::SerialWriteHex(s.tasks_exited);
+        duetos::arch::SerialWrite(" reaped=");
+        duetos::arch::SerialWriteHex(s.tasks_reaped);
+        duetos::arch::SerialWrite(" total_ticks=");
+        duetos::arch::SerialWriteHex(s.total_ticks);
+        duetos::arch::SerialWrite(" idle_ticks=");
+        duetos::arch::SerialWriteHex(s.idle_ticks);
+        duetos::arch::SerialWrite("\n");
     }
 
     {
-        const auto& h = customos::core::RuntimeCheckerStatusRead();
-        customos::arch::SerialWrite("[health] scans=");
-        customos::arch::SerialWriteHex(h.scans_run);
-        customos::arch::SerialWrite(" issues_total=");
-        customos::arch::SerialWriteHex(h.issues_found_total);
-        customos::arch::SerialWrite(" last_scan=");
-        customos::arch::SerialWriteHex(h.last_scan_issues);
-        customos::arch::SerialWrite(" baseline=");
-        customos::arch::SerialWrite(h.baseline_captured ? "yes" : "no");
-        customos::arch::SerialWrite("\n");
+        const auto& h = duetos::core::RuntimeCheckerStatusRead();
+        duetos::arch::SerialWrite("[health] scans=");
+        duetos::arch::SerialWriteHex(h.scans_run);
+        duetos::arch::SerialWrite(" issues_total=");
+        duetos::arch::SerialWriteHex(h.issues_found_total);
+        duetos::arch::SerialWrite(" last_scan=");
+        duetos::arch::SerialWriteHex(h.last_scan_issues);
+        duetos::arch::SerialWrite(" baseline=");
+        duetos::arch::SerialWrite(h.baseline_captured ? "yes" : "no");
+        duetos::arch::SerialWrite("\n");
     }
 
-    customos::arch::SerialWrite("=== END DUMPSTATE ===\n");
+    duetos::arch::SerialWrite("=== END DUMPSTATE ===\n");
     ConsoleWriteln("DUMPSTATE: WROTE TO COM1");
 }
 
 void CmdIpv4()
 {
-    const auto s = customos::net::Ipv4StatsRead();
+    const auto s = duetos::net::Ipv4StatsRead();
     ConsoleWrite("IPV4 RX:        ");
     WriteU64Dec(s.rx_packets);
     ConsoleWriteChar('\n');
@@ -3740,23 +3740,23 @@ void CmdLoglevel(u32 argc, char** argv)
 {
     if (argc < 2)
     {
-        const auto cur = customos::core::GetLogThreshold();
+        const auto cur = duetos::core::GetLogThreshold();
         ConsoleWrite("LOG THRESHOLD: ");
         switch (cur)
         {
-        case customos::core::LogLevel::Trace:
+        case duetos::core::LogLevel::Trace:
             ConsoleWriteln("TRACE (fn enter/exit + timing)");
             break;
-        case customos::core::LogLevel::Debug:
+        case duetos::core::LogLevel::Debug:
             ConsoleWriteln("DEBUG (show everything)");
             break;
-        case customos::core::LogLevel::Info:
+        case duetos::core::LogLevel::Info:
             ConsoleWriteln("INFO");
             break;
-        case customos::core::LogLevel::Warn:
+        case duetos::core::LogLevel::Warn:
             ConsoleWriteln("WARN");
             break;
-        case customos::core::LogLevel::Error:
+        case duetos::core::LogLevel::Error:
             ConsoleWriteln("ERROR (show only errors)");
             break;
         }
@@ -3764,34 +3764,34 @@ void CmdLoglevel(u32 argc, char** argv)
         return;
     }
     const char c = argv[1][0];
-    customos::core::LogLevel lvl = customos::core::LogLevel::Info;
+    duetos::core::LogLevel lvl = duetos::core::LogLevel::Info;
     switch (c)
     {
     case 't':
     case 'T':
-        lvl = customos::core::LogLevel::Trace;
+        lvl = duetos::core::LogLevel::Trace;
         break;
     case 'd':
     case 'D':
-        lvl = customos::core::LogLevel::Debug;
+        lvl = duetos::core::LogLevel::Debug;
         break;
     case 'i':
     case 'I':
-        lvl = customos::core::LogLevel::Info;
+        lvl = duetos::core::LogLevel::Info;
         break;
     case 'w':
     case 'W':
-        lvl = customos::core::LogLevel::Warn;
+        lvl = duetos::core::LogLevel::Warn;
         break;
     case 'e':
     case 'E':
-        lvl = customos::core::LogLevel::Error;
+        lvl = duetos::core::LogLevel::Error;
         break;
     default:
         ConsoleWriteln("LOGLEVEL: USE T / D / I / W / E");
         return;
     }
-    customos::core::SetLogThreshold(lvl);
+    duetos::core::SetLogThreshold(lvl);
     ConsoleWriteln("LOG THRESHOLD UPDATED");
 }
 
@@ -3799,7 +3799,7 @@ void CmdLogcolor(u32 argc, char** argv)
 {
     if (argc < 2)
     {
-        const bool cur = customos::core::GetLogColor();
+        const bool cur = duetos::core::GetLogColor();
         ConsoleWrite("SERIAL LOG COLOUR: ");
         ConsoleWriteln(cur ? "ON" : "OFF");
         ConsoleWriteln("USAGE: LOGCOLOR ON|OFF");
@@ -3809,7 +3809,7 @@ void CmdLogcolor(u32 argc, char** argv)
     const bool want = (c == 'o' || c == 'O') ? (argv[1][1] == 'n' || argv[1][1] == 'N') : false;
     // "on"  -> c='o', [1]='n'  -> true
     // "off" -> c='o', [1]='f'  -> false
-    customos::core::SetLogColor(want);
+    duetos::core::SetLogColor(want);
     ConsoleWrite("SERIAL LOG COLOUR: ");
     ConsoleWriteln(want ? "ON" : "OFF");
 }
@@ -3834,7 +3834,7 @@ void CmdYield()
 {
     // Voluntary yield from the shell thread — useful for testing
     // cooperative scheduling behaviour by hand. No output.
-    customos::sched::SchedYield();
+    duetos::sched::SchedYield();
 }
 
 void CmdUname(u32 argc, char** argv)
@@ -3843,13 +3843,13 @@ void CmdUname(u32 argc, char** argv)
     const bool all = (argc >= 2 && argv[1][0] == '-' && argv[1][1] == 'a');
     if (all)
     {
-        ConsoleWrite("CustomOS customos v0 x86_64  (tick ");
-        WriteU64Dec(customos::sched::SchedNowTicks());
+        ConsoleWrite("DuetOS duetos v0 x86_64  (tick ");
+        WriteU64Dec(duetos::sched::SchedNowTicks());
         ConsoleWriteln(")");
     }
     else
     {
-        ConsoleWriteln("CustomOS");
+        ConsoleWriteln("DuetOS");
     }
 }
 
@@ -3869,7 +3869,7 @@ void CmdWhoami()
 void CmdHostname()
 {
     const EnvSlot* s = EnvFind("HOSTNAME");
-    ConsoleWriteln((s != nullptr) ? s->value : "customos");
+    ConsoleWriteln((s != nullptr) ? s->value : "duetos");
 }
 
 void CmdPwd()
@@ -3902,12 +3902,12 @@ void CmdMount()
 // Shared helper: parse decimal (default) or hex (0x prefix) into u64.
 // Returns true + writes `*out` on success. Used by `read` + any future
 // command taking a sector number / address.
-bool ParseU64Str(const char* s, customos::u64* out)
+bool ParseU64Str(const char* s, duetos::u64* out)
 {
     if (s == nullptr || out == nullptr || s[0] == 0)
         return false;
-    customos::u64 v = 0;
-    customos::u32 base = 10;
+    duetos::u64 v = 0;
+    duetos::u32 base = 10;
     if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))
     {
         s += 2;
@@ -3917,13 +3917,13 @@ bool ParseU64Str(const char* s, customos::u64* out)
         return false;
     for (; *s != 0; ++s)
     {
-        customos::u64 d;
+        duetos::u64 d;
         if (*s >= '0' && *s <= '9')
-            d = static_cast<customos::u64>(*s - '0');
+            d = static_cast<duetos::u64>(*s - '0');
         else if (base == 16 && *s >= 'a' && *s <= 'f')
-            d = static_cast<customos::u64>(*s - 'a' + 10);
+            d = static_cast<duetos::u64>(*s - 'a' + 10);
         else if (base == 16 && *s >= 'A' && *s <= 'F')
-            d = static_cast<customos::u64>(*s - 'A' + 10);
+            d = static_cast<duetos::u64>(*s - 'A' + 10);
         else
             return false;
         v = v * base + d;
@@ -3936,11 +3936,11 @@ void CmdMetrics()
 {
     // One-shot LogMetrics at Info level, tagged "shell" so the
     // origin is distinguishable from the boot-time checkpoints.
-    customos::core::LogMetrics(customos::core::LogLevel::Info, "shell", "user-requested");
+    duetos::core::LogMetrics(duetos::core::LogLevel::Info, "shell", "user-requested");
     ConsoleWriteln("(also logged to kernel ring at INFO)");
 }
 
-void CmdGuard(customos::u32 argc, char** argv)
+void CmdGuard(duetos::u32 argc, char** argv)
 {
     // Show / control the security guard.
     //   guard                  status line
@@ -3948,7 +3948,7 @@ void CmdGuard(customos::u32 argc, char** argv)
     //   guard enforce          switch to enforce mode (prompts on Warn/Deny)
     //   guard off              disable the guard entirely (use sparingly)
     //   guard test             re-run GuardSelfTest
-    namespace sec = customos::security;
+    namespace sec = duetos::security;
     if (argc < 2)
     {
         ConsoleWrite("GUARD MODE   : ");
@@ -4015,16 +4015,16 @@ void CmdGuard(customos::u32 argc, char** argv)
     ConsoleWriteln("GUARD: UNKNOWN SUBCOMMAND");
 }
 
-void CmdFatls(customos::u32 argc, char** argv)
+void CmdFatls(duetos::u32 argc, char** argv)
 {
     // `fatls [vol_idx]` — list root-directory entries from a
     // probed FAT32 volume. Default volume 0. Columns mirror the
     // boot-time self-test: name, attr, first_cluster, size.
-    namespace fat = customos::fs::fat32;
+    namespace fat = duetos::fs::fat32;
     u32 vol_idx = 0;
     if (argc >= 2)
     {
-        customos::u64 v = 0;
+        duetos::u64 v = 0;
         if (!ParseU64Str(argv[1], &v) || v >= fat::Fat32VolumeCount())
         {
             ConsoleWriteln("FATLS: BAD VOLUME INDEX");
@@ -4039,15 +4039,15 @@ void CmdFatls(customos::u32 argc, char** argv)
         return;
     }
     ConsoleWriteln("NAME          ATTR  FIRST_CLUSTER  SIZE");
-    for (customos::u32 i = 0; i < v->root_entry_count; ++i)
+    for (duetos::u32 i = 0; i < v->root_entry_count; ++i)
     {
         const fat::DirEntry& e = v->root_entries[i];
         ConsoleWrite(e.name);
         // Pad name column to 13 chars.
-        customos::u32 len = 0;
+        duetos::u32 len = 0;
         while (e.name[len] != 0)
             ++len;
-        for (customos::u32 p = len; p < 13; ++p)
+        for (duetos::u32 p = len; p < 13; ++p)
             ConsoleWriteChar(' ');
         ConsoleWriteChar(' ');
         WriteU64Hex(e.attributes, 2);
@@ -4059,13 +4059,13 @@ void CmdFatls(customos::u32 argc, char** argv)
     }
 }
 
-void CmdFatcat(customos::u32 argc, char** argv)
+void CmdFatcat(duetos::u32 argc, char** argv)
 {
     // `fatcat [vol_idx] <name>` — read the named file from a FAT32
     // volume and write it to the console. Caps at 4 KiB (one scratch
     // buffer) for v0; larger reads are a follow-up that streams in
     // chunks. Volume index is optional and defaults to 0.
-    namespace fat = customos::fs::fat32;
+    namespace fat = duetos::fs::fat32;
     if (argc < 2)
     {
         ConsoleWriteln("FATCAT: USAGE: FATCAT [VOL] NAME");
@@ -4075,7 +4075,7 @@ void CmdFatcat(customos::u32 argc, char** argv)
     const char* name = argv[1];
     if (argc >= 3)
     {
-        customos::u64 v = 0;
+        duetos::u64 v = 0;
         if (ParseU64Str(argv[1], &v) && v < fat::Fat32VolumeCount())
         {
             vol_idx = static_cast<u32>(v);
@@ -4105,10 +4105,10 @@ void CmdFatcat(customos::u32 argc, char** argv)
     StreamCtx ctx{0, false};
     const bool ok = fat::Fat32ReadFileStream(
         v, e,
-        [](const customos::u8* data, customos::u64 len, void* cx) -> bool
+        [](const duetos::u8* data, duetos::u64 len, void* cx) -> bool
         {
             auto* s = static_cast<StreamCtx*>(cx);
-            for (customos::u64 i = 0; i < len; ++i)
+            for (duetos::u64 i = 0; i < len; ++i)
             {
                 const char c = static_cast<char>(data[i]);
                 ConsoleWriteChar((c >= 0x20 && c <= 0x7E) || c == '\n' || c == '\r' || c == '\t' ? c : '.');
@@ -4132,7 +4132,7 @@ void CmdFatcat(customos::u32 argc, char** argv)
     }
 }
 
-void CmdFatwrite(customos::u32 argc, char** argv)
+void CmdFatwrite(duetos::u32 argc, char** argv)
 {
     // `fatwrite <path> <offset> <bytes>` — overwrite existing file
     // bytes in-place. `<bytes>` is taken as a literal ASCII string
@@ -4140,22 +4140,22 @@ void CmdFatwrite(customos::u32 argc, char** argv)
     // extension — matches the driver's v0 Fat32WriteInPlace scope.
     // Handy for demonstrating the write path without a user-space
     // editor. Destructive: runs directly against sata0p1 / nvme0n1p1.
-    namespace fat = customos::fs::fat32;
+    namespace fat = duetos::fs::fat32;
     if (argc < 4)
     {
         ConsoleWriteln("FATWRITE: USAGE: FATWRITE PATH OFFSET BYTES...");
         return;
     }
     const char* path = argv[1];
-    customos::u64 off = 0;
+    duetos::u64 off = 0;
     if (!ParseU64Str(argv[2], &off))
     {
         ConsoleWriteln("FATWRITE: BAD OFFSET");
         return;
     }
     // Join argv[3..argc-1] with single spaces to form the payload.
-    static customos::u8 payload[1024];
-    customos::u64 plen = 0;
+    static duetos::u8 payload[1024];
+    duetos::u64 plen = 0;
     for (u32 i = 3; i < argc; ++i)
     {
         if (i > 3 && plen + 1 < sizeof(payload))
@@ -4164,7 +4164,7 @@ void CmdFatwrite(customos::u32 argc, char** argv)
         }
         for (u32 j = 0; argv[i][j] != 0 && plen + 1 < sizeof(payload); ++j)
         {
-            payload[plen++] = static_cast<customos::u8>(argv[i][j]);
+            payload[plen++] = static_cast<duetos::u8>(argv[i][j]);
         }
     }
     // Fat32LookupPath wants a volume-relative path; our shell sniff
@@ -4191,20 +4191,20 @@ void CmdFatwrite(customos::u32 argc, char** argv)
         ConsoleWriteln("FATWRITE: PATH IS A DIRECTORY");
         return;
     }
-    const customos::i64 rc = fat::Fat32WriteInPlace(v, &entry, off, payload, plen);
+    const duetos::i64 rc = fat::Fat32WriteInPlace(v, &entry, off, payload, plen);
     if (rc < 0)
     {
         ConsoleWriteln("FATWRITE: WRITE FAILED (offset+len > size? backend RO?)");
         return;
     }
     ConsoleWrite("FATWRITE: WROTE ");
-    WriteU64Dec(static_cast<customos::u64>(rc));
+    WriteU64Dec(static_cast<duetos::u64>(rc));
     ConsoleWrite(" BYTES AT OFFSET ");
     WriteU64Dec(off);
     ConsoleWriteln("");
 }
 
-void CmdFatappend(customos::u32 argc, char** argv)
+void CmdFatappend(duetos::u32 argc, char** argv)
 {
     // `fatappend <name> <bytes...>` — append the trailing argv
     // tokens (joined with single spaces) to the end of a file in
@@ -4212,7 +4212,7 @@ void CmdFatappend(customos::u32 argc, char** argv)
     // needed. v0 scope is root-dir only — no path walking, no
     // subdirectory targets. The image rebuilds every boot-smoke,
     // so any appends are ephemeral across test cycles.
-    namespace fat = customos::fs::fat32;
+    namespace fat = duetos::fs::fat32;
     if (argc < 3)
     {
         ConsoleWriteln("FATAPPEND: USAGE: FATAPPEND NAME BYTES...");
@@ -4229,8 +4229,8 @@ void CmdFatappend(customos::u32 argc, char** argv)
     {
         ++name;
     }
-    static customos::u8 payload[1024];
-    customos::u64 plen = 0;
+    static duetos::u8 payload[1024];
+    duetos::u64 plen = 0;
     for (u32 i = 2; i < argc; ++i)
     {
         if (i > 2 && plen + 1 < sizeof(payload))
@@ -4239,7 +4239,7 @@ void CmdFatappend(customos::u32 argc, char** argv)
         }
         for (u32 j = 0; argv[i][j] != 0 && plen + 1 < sizeof(payload); ++j)
         {
-            payload[plen++] = static_cast<customos::u8>(argv[i][j]);
+            payload[plen++] = static_cast<duetos::u8>(argv[i][j]);
         }
     }
     const fat::Volume* v = fat::Fat32Volume(0);
@@ -4257,7 +4257,7 @@ void CmdFatappend(customos::u32 argc, char** argv)
             break;
         }
     }
-    const customos::i64 rc =
+    const duetos::i64 rc =
         has_slash ? fat::Fat32AppendAtPath(v, name, payload, plen) : fat::Fat32AppendInRoot(v, name, payload, plen);
     if (rc < 0)
     {
@@ -4265,17 +4265,17 @@ void CmdFatappend(customos::u32 argc, char** argv)
         return;
     }
     ConsoleWrite("FATAPPEND: APPENDED ");
-    WriteU64Dec(static_cast<customos::u64>(rc));
+    WriteU64Dec(static_cast<duetos::u64>(rc));
     ConsoleWrite(" BYTES TO ");
     ConsoleWriteln(name);
 }
 
-void CmdFatnew(customos::u32 argc, char** argv)
+void CmdFatnew(duetos::u32 argc, char** argv)
 {
     // `fatnew <name> [bytes...]` — create a new root-dir file
     // with optional initial content (joined argv). Name must fit
     // in the 8.3 SFN encoding; anything longer is rejected.
-    namespace fat = customos::fs::fat32;
+    namespace fat = duetos::fs::fat32;
     if (argc < 2)
     {
         ConsoleWriteln("FATNEW: USAGE: FATNEW NAME [BYTES...]");
@@ -4290,8 +4290,8 @@ void CmdFatnew(customos::u32 argc, char** argv)
     {
         ++name;
     }
-    static customos::u8 payload[1024];
-    customos::u64 plen = 0;
+    static duetos::u8 payload[1024];
+    duetos::u64 plen = 0;
     for (u32 i = 2; i < argc; ++i)
     {
         if (i > 2 && plen + 1 < sizeof(payload))
@@ -4300,7 +4300,7 @@ void CmdFatnew(customos::u32 argc, char** argv)
         }
         for (u32 j = 0; argv[i][j] != 0 && plen + 1 < sizeof(payload); ++j)
         {
-            payload[plen++] = static_cast<customos::u8>(argv[i][j]);
+            payload[plen++] = static_cast<duetos::u8>(argv[i][j]);
         }
     }
     const fat::Volume* v = fat::Fat32Volume(0);
@@ -4318,7 +4318,7 @@ void CmdFatnew(customos::u32 argc, char** argv)
             break;
         }
     }
-    const customos::i64 rc =
+    const duetos::i64 rc =
         has_slash ? fat::Fat32CreateAtPath(v, name, payload, plen) : fat::Fat32CreateInRoot(v, name, payload, plen);
     if (rc < 0)
     {
@@ -4328,15 +4328,15 @@ void CmdFatnew(customos::u32 argc, char** argv)
     ConsoleWrite("FATNEW: CREATED ");
     ConsoleWrite(name);
     ConsoleWrite(" (");
-    WriteU64Dec(static_cast<customos::u64>(rc));
+    WriteU64Dec(static_cast<duetos::u64>(rc));
     ConsoleWriteln(" BYTES)");
 }
 
-void CmdFatrm(customos::u32 argc, char** argv)
+void CmdFatrm(duetos::u32 argc, char** argv)
 {
     // `fatrm <name>` — delete a root-dir file. Frees its cluster
     // chain, marks the directory entry deleted.
-    namespace fat = customos::fs::fat32;
+    namespace fat = duetos::fs::fat32;
     if (argc < 2)
     {
         ConsoleWriteln("FATRM: USAGE: FATRM NAME");
@@ -4377,11 +4377,11 @@ void CmdFatrm(customos::u32 argc, char** argv)
     ConsoleWriteln(name);
 }
 
-void CmdFattrunc(customos::u32 argc, char** argv)
+void CmdFattrunc(duetos::u32 argc, char** argv)
 {
     // `fattrunc <name> <new_size>` — shrink or grow a file to
     // `new_size` bytes. Growth pads with zeros.
-    namespace fat = customos::fs::fat32;
+    namespace fat = duetos::fs::fat32;
     if (argc < 3)
     {
         ConsoleWriteln("FATTRUNC: USAGE: FATTRUNC NAME NEW_SIZE");
@@ -4396,7 +4396,7 @@ void CmdFattrunc(customos::u32 argc, char** argv)
     {
         ++name;
     }
-    customos::u64 new_size = 0;
+    duetos::u64 new_size = 0;
     if (!ParseU64Str(argv[2], &new_size))
     {
         ConsoleWriteln("FATTRUNC: BAD SIZE");
@@ -4417,7 +4417,7 @@ void CmdFattrunc(customos::u32 argc, char** argv)
             break;
         }
     }
-    const customos::i64 rc =
+    const duetos::i64 rc =
         has_slash ? fat::Fat32TruncateAtPath(v, name, new_size) : fat::Fat32TruncateInRoot(v, name, new_size);
     if (rc < 0)
     {
@@ -4427,14 +4427,14 @@ void CmdFattrunc(customos::u32 argc, char** argv)
     ConsoleWrite("FATTRUNC: ");
     ConsoleWrite(name);
     ConsoleWrite(" -> ");
-    WriteU64Dec(static_cast<customos::u64>(rc));
+    WriteU64Dec(static_cast<duetos::u64>(rc));
     ConsoleWriteln(" BYTES");
 }
 
-void CmdFatmkdir(customos::u32 argc, char** argv)
+void CmdFatmkdir(duetos::u32 argc, char** argv)
 {
     // `fatmkdir <path>` — create a directory in FAT32 volume 0.
-    namespace fat = customos::fs::fat32;
+    namespace fat = duetos::fs::fat32;
     if (argc < 2)
     {
         ConsoleWriteln("FATMKDIR: USAGE: FATMKDIR PATH");
@@ -4465,10 +4465,10 @@ void CmdFatmkdir(customos::u32 argc, char** argv)
     ConsoleWriteln(path);
 }
 
-void CmdFatrmdir(customos::u32 argc, char** argv)
+void CmdFatrmdir(duetos::u32 argc, char** argv)
 {
     // `fatrmdir <path>` — remove an empty directory.
-    namespace fat = customos::fs::fat32;
+    namespace fat = duetos::fs::fat32;
     if (argc < 2)
     {
         ConsoleWriteln("FATRMDIR: USAGE: FATRMDIR PATH");
@@ -4498,7 +4498,7 @@ void CmdFatrmdir(customos::u32 argc, char** argv)
     ConsoleWriteln(path);
 }
 
-void CmdLinuxexec(customos::u32 argc, char** argv)
+void CmdLinuxexec(duetos::u32 argc, char** argv)
 {
     // `linuxexec <path>` — read an ELF file from FAT32 volume 0,
     // hand the bytes to core::SpawnElfLinux, and queue the result
@@ -4506,7 +4506,7 @@ void CmdLinuxexec(customos::u32 argc, char** argv)
     // loader supports" once it's on disk. Accepts either a
     // volume-relative ("LINUX.ELF") or mount-prefixed
     // ("/fat/LINUX.ELF") path.
-    namespace fat = customos::fs::fat32;
+    namespace fat = duetos::fs::fat32;
     if (argc < 2)
     {
         ConsoleWriteln("LINUXEXEC: USAGE: LINUXEXEC PATH");
@@ -4542,16 +4542,16 @@ void CmdLinuxexec(customos::u32 argc, char** argv)
     // 16 KiB cap fits the v0 smoke ELF (~260 B) with plenty of
     // headroom. Larger binaries will hit the cap — expand once a
     // non-trivial musl program needs more.
-    static customos::u8 elf_buf[16384];
-    const customos::i64 n = fat::Fat32ReadFile(v, &entry, elf_buf, sizeof(elf_buf));
+    static duetos::u8 elf_buf[16384];
+    const duetos::i64 n = fat::Fat32ReadFile(v, &entry, elf_buf, sizeof(elf_buf));
     if (n <= 0)
     {
         ConsoleWriteln("LINUXEXEC: READ ERROR OR EMPTY");
         return;
     }
-    const customos::u64 pid = customos::core::SpawnElfLinux(
-        "linuxexec", elf_buf, static_cast<customos::u64>(n), customos::core::CapSetEmpty(),
-        customos::fs::RamfsSandboxRoot(), /*frame_budget=*/16, customos::core::kTickBudgetSandbox);
+    const duetos::u64 pid = duetos::core::SpawnElfLinux(
+        "linuxexec", elf_buf, static_cast<duetos::u64>(n), duetos::core::CapSetEmpty(),
+        duetos::fs::RamfsSandboxRoot(), /*frame_budget=*/16, duetos::core::kTickBudgetSandbox);
     if (pid == 0)
     {
         ConsoleWriteln("LINUXEXEC: SPAWNELFLINUX FAILED");
@@ -4570,12 +4570,12 @@ void CmdTranslate()
     // direction. Buckets are syscall_nr & 0x3FF; overlaps between
     // Linux's wide numbering and native's narrow numbering are
     // rare enough to keep the 1024-slot scheme.
-    namespace tx = customos::subsystems::translation;
+    namespace tx = duetos::subsystems::translation;
     const auto& linux = tx::LinuxHitsRead();
     const auto& native = tx::NativeHitsRead();
     ConsoleWriteln("TRANSLATION UNIT HIT TABLE");
     ConsoleWriteln("  DIR     NR     HITS");
-    for (customos::u32 i = 0; i < 1024; ++i)
+    for (duetos::u32 i = 0; i < 1024; ++i)
     {
         if (linux.buckets[i] == 0)
             continue;
@@ -4585,7 +4585,7 @@ void CmdTranslate()
         WriteU64Dec(linux.buckets[i]);
         ConsoleWriteln("");
     }
-    for (customos::u32 i = 0; i < 1024; ++i)
+    for (duetos::u32 i = 0; i < 1024; ++i)
     {
         if (native.buckets[i] == 0)
             continue;
@@ -4598,7 +4598,7 @@ void CmdTranslate()
     ConsoleWriteln("-- end --");
 }
 
-void CmdRead(customos::u32 argc, char** argv)
+void CmdRead(duetos::u32 argc, char** argv)
 {
     // `read <handle> <lba> [count]` — reads up to one page (4096 B)
     // from the given block device and hexdumps it to the console.
@@ -4610,10 +4610,10 @@ void CmdRead(customos::u32 argc, char** argv)
         ConsoleWriteln("      (count in sectors, default 1, max = 4096/sector_size)");
         return;
     }
-    namespace storage = customos::drivers::storage;
-    customos::u64 handle_u64 = 0;
-    customos::u64 lba = 0;
-    customos::u64 count = 1;
+    namespace storage = duetos::drivers::storage;
+    duetos::u64 handle_u64 = 0;
+    duetos::u64 lba = 0;
+    duetos::u64 count = 1;
     if (!ParseU64Str(argv[1], &handle_u64) || handle_u64 >= 0x100000000ULL)
     {
         ConsoleWriteln("READ: BAD HANDLE");
@@ -4629,14 +4629,14 @@ void CmdRead(customos::u32 argc, char** argv)
         ConsoleWriteln("READ: BAD COUNT");
         return;
     }
-    const customos::u32 handle = static_cast<customos::u32>(handle_u64);
-    const customos::u32 ssize = storage::BlockDeviceSectorSize(handle);
+    const duetos::u32 handle = static_cast<duetos::u32>(handle_u64);
+    const duetos::u32 ssize = storage::BlockDeviceSectorSize(handle);
     if (ssize == 0)
     {
         ConsoleWriteln("READ: INVALID HANDLE (no such block device)");
         return;
     }
-    const customos::u32 max_count = 4096u / ssize;
+    const duetos::u32 max_count = 4096u / ssize;
     if (count == 0 || count > max_count)
     {
         ConsoleWrite("READ: COUNT OUT OF RANGE (max ");
@@ -4644,15 +4644,15 @@ void CmdRead(customos::u32 argc, char** argv)
         ConsoleWriteln(")");
         return;
     }
-    static customos::u8 buf[4096];
-    for (customos::u64 i = 0; i < 4096; ++i)
+    static duetos::u8 buf[4096];
+    for (duetos::u64 i = 0; i < 4096; ++i)
         buf[i] = 0;
-    if (storage::BlockDeviceRead(handle, lba, static_cast<customos::u32>(count), buf) != 0)
+    if (storage::BlockDeviceRead(handle, lba, static_cast<duetos::u32>(count), buf) != 0)
     {
         ConsoleWriteln("READ: DRIVER RETURNED ERROR");
         return;
     }
-    const customos::u32 bytes = static_cast<customos::u32>(count) * ssize;
+    const duetos::u32 bytes = static_cast<duetos::u32>(count) * ssize;
     ConsoleWrite("READ ");
     WriteU64Hex(bytes, 0);
     ConsoleWrite(" BYTES FROM HANDLE ");
@@ -4661,11 +4661,11 @@ void CmdRead(customos::u32 argc, char** argv)
     WriteU64Hex(lba, 0);
     ConsoleWriteln(":");
     // Classic 16-byte hex + ASCII rows, mirroring CmdHexdump.
-    for (customos::u32 row = 0; row < bytes; row += 16)
+    for (duetos::u32 row = 0; row < bytes; row += 16)
     {
         WriteU64Hex(row, 8);
         ConsoleWrite("  ");
-        for (customos::u32 i = 0; i < 16; ++i)
+        for (duetos::u32 i = 0; i < 16; ++i)
         {
             if (row + i < bytes)
                 WriteU64Hex(buf[row + i], 2);
@@ -4676,7 +4676,7 @@ void CmdRead(customos::u32 argc, char** argv)
                 ConsoleWriteChar(' ');
         }
         ConsoleWrite(" |");
-        for (customos::u32 i = 0; i < 16 && row + i < bytes; ++i)
+        for (duetos::u32 i = 0; i < 16 && row + i < bytes; ++i)
         {
             const char c = static_cast<char>(buf[row + i]);
             ConsoleWriteChar((c >= 0x20 && c <= 0x7E) ? c : '.');
@@ -4685,28 +4685,28 @@ void CmdRead(customos::u32 argc, char** argv)
     }
 }
 
-void CmdTrace(customos::u32 argc, char** argv)
+void CmdTrace(duetos::u32 argc, char** argv)
 {
     // `trace`              — show current threshold + in-flight scopes
     // `trace on` / `trace off` — shortcut for loglevel t / i
     if (argc < 2)
     {
-        const auto cur = customos::core::GetLogThreshold();
+        const auto cur = duetos::core::GetLogThreshold();
         ConsoleWrite("TRACE THRESHOLD: ");
-        ConsoleWriteln(cur == customos::core::LogLevel::Trace ? "ON" : "OFF");
+        ConsoleWriteln(cur == duetos::core::LogLevel::Trace ? "ON" : "OFF");
         ConsoleWriteln("(IN-FLIGHT SCOPES LOGGED TO SERIAL BELOW)");
-        customos::core::DumpInflightScopes();
+        duetos::core::DumpInflightScopes();
         ConsoleWriteln("USAGE: TRACE [ON|OFF]");
         return;
     }
     if (argv[1][0] == 'o' && (argv[1][1] == 'n' || argv[1][1] == 'N'))
     {
-        customos::core::SetLogThreshold(customos::core::LogLevel::Trace);
+        duetos::core::SetLogThreshold(duetos::core::LogLevel::Trace);
         ConsoleWriteln("TRACE ON (threshold = TRACE)");
     }
     else if (argv[1][0] == 'o' && (argv[1][1] == 'f' || argv[1][1] == 'F'))
     {
-        customos::core::SetLogThreshold(customos::core::LogLevel::Info);
+        duetos::core::SetLogThreshold(duetos::core::LogLevel::Info);
         ConsoleWriteln("TRACE OFF (threshold = INFO)");
     }
     else
@@ -4717,20 +4717,20 @@ void CmdTrace(customos::u32 argc, char** argv)
 
 void CmdLsblk()
 {
-    namespace storage = customos::drivers::storage;
-    const customos::u32 count = storage::BlockDeviceCount();
+    namespace storage = duetos::drivers::storage;
+    const duetos::u32 count = storage::BlockDeviceCount();
     ConsoleWrite("NAME       HANDLE  SECT_SZ  SECT_COUNT       MODE");
     ConsoleWriteln("");
-    for (customos::u32 i = 0; i < count; ++i)
+    for (duetos::u32 i = 0; i < count; ++i)
     {
         const char* name = storage::BlockDeviceName(i);
         ConsoleWrite(name);
         // Pad the name column to 10 chars (max realistic "nvme0n99").
-        for (customos::u32 p = 0; p < 11; ++p)
+        for (duetos::u32 p = 0; p < 11; ++p)
         {
             if (name[p] == 0)
             {
-                for (customos::u32 q = p; q < 11; ++q)
+                for (duetos::u32 q = p; q < 11; ++q)
                     ConsoleWriteChar(' ');
                 break;
             }
@@ -4751,14 +4751,14 @@ void CmdLsblk()
 
 void CmdLsgpt()
 {
-    namespace gpt = customos::fs::gpt;
-    const customos::u32 disks = gpt::GptDiskCount();
+    namespace gpt = duetos::fs::gpt;
+    const duetos::u32 disks = gpt::GptDiskCount();
     if (disks == 0)
     {
         ConsoleWriteln("  (no GPT disks probed)");
         return;
     }
-    for (customos::u32 di = 0; di < disks; ++di)
+    for (duetos::u32 di = 0; di < disks; ++di)
     {
         const gpt::Disk* d = gpt::GptDisk(di);
         if (d == nullptr)
@@ -4770,7 +4770,7 @@ void CmdLsgpt()
         ConsoleWrite("  PARTS ");
         WriteU64Hex(d->partition_count, 2);
         ConsoleWriteln("");
-        for (customos::u32 pi = 0; pi < d->partition_count; ++pi)
+        for (duetos::u32 pi = 0; pi < d->partition_count; ++pi)
         {
             const gpt::Partition& p = d->partitions[pi];
             ConsoleWrite("  PART ");
@@ -4792,7 +4792,7 @@ void CmdLsgpt()
                 }
                 else
                 {
-                    const customos::u8 b = p.type_guid[idx];
+                    const duetos::u8 b = p.type_guid[idx];
                     const char hi = (b >> 4) < 10 ? char('0' + (b >> 4)) : char('A' + (b >> 4) - 10);
                     const char lo = (b & 0xF) < 10 ? char('0' + (b & 0xF)) : char('A' + (b & 0xF) - 10);
                     ConsoleWriteChar(hi);
@@ -4858,30 +4858,30 @@ void CmdKill(u32 argc, char** argv)
         }
         pid = pid * 10 + static_cast<u64>(argv[1][i] - '0');
     }
-    const auto r = customos::sched::SchedKillByPid(pid);
+    const auto r = duetos::sched::SchedKillByPid(pid);
     switch (r)
     {
-    case customos::sched::KillResult::Signaled:
+    case duetos::sched::KillResult::Signaled:
         ConsoleWrite("KILL: SIGNALED PID ");
         WriteU64Dec(pid);
         ConsoleWriteln(" (WILL DIE ON NEXT SCHEDULE)");
         break;
-    case customos::sched::KillResult::NotFound:
+    case duetos::sched::KillResult::NotFound:
         ConsoleWrite("KILL: NO SUCH PID: ");
         WriteU64Dec(pid);
         ConsoleWriteChar('\n');
         break;
-    case customos::sched::KillResult::Protected:
+    case duetos::sched::KillResult::Protected:
         ConsoleWrite("KILL: PID ");
         WriteU64Dec(pid);
         ConsoleWriteln(" IS PROTECTED (idle/reaper/boot)");
         break;
-    case customos::sched::KillResult::AlreadyDead:
+    case duetos::sched::KillResult::AlreadyDead:
         ConsoleWrite("KILL: PID ");
         WriteU64Dec(pid);
         ConsoleWriteln(" IS ALREADY DEAD");
         break;
-    case customos::sched::KillResult::Blocked:
+    case duetos::sched::KillResult::Blocked:
         ConsoleWrite("KILL: PID ");
         WriteU64Dec(pid);
         ConsoleWriteln(" IS BLOCKED — FLAGGED, WILL DIE WHEN WOKEN");
@@ -4899,7 +4899,7 @@ void CmdSpawn(u32 argc, char** argv)
         ConsoleWriteln("  SEE `MAN SPAWN` FOR DETAILS.");
         return;
     }
-    if (!customos::core::SpawnOnDemand(argv[1]))
+    if (!duetos::core::SpawnOnDemand(argv[1]))
     {
         ConsoleWrite("SPAWN: UNKNOWN KIND: ");
         ConsoleWriteln(argv[1]);
@@ -5059,7 +5059,7 @@ void CmdColor(u32 argc, char** argv)
             return;
         }
     }
-    customos::drivers::video::ConsoleSetColours(fg, bg);
+    duetos::drivers::video::ConsoleSetColours(fg, bg);
     ConsoleWriteln("COLOR: UPDATED. NEXT REDRAW USES THE NEW PALETTE.");
 }
 
@@ -5074,15 +5074,15 @@ void CmdRand(u32 argc, char** argv)
     // call drains fresh bytes (RDSEED/RDRAND/splitmix per tier).
     if (argc >= 2 && argv[1][0] == '-' && argv[1][1] == 's' && argv[1][2] == '\0')
     {
-        const auto s = customos::core::RandomStatsRead();
-        const auto t = customos::core::RandomCurrentTier();
+        const auto s = duetos::core::RandomStatsRead();
+        const auto t = duetos::core::RandomCurrentTier();
         ConsoleWrite("TIER:          ");
         switch (t)
         {
-        case customos::core::EntropyTier::Rdseed:
+        case duetos::core::EntropyTier::Rdseed:
             ConsoleWriteln("RDSEED (NIST TRNG)");
             break;
-        case customos::core::EntropyTier::Rdrand:
+        case duetos::core::EntropyTier::Rdrand:
             ConsoleWriteln("RDRAND (NIST DRBG)");
             break;
         default:
@@ -5125,7 +5125,7 @@ void CmdRand(u32 argc, char** argv)
         if (bytes > 512)
             bytes = 512;
         u8 buf[512];
-        customos::core::RandomFillBytes(buf, bytes);
+        duetos::core::RandomFillBytes(buf, bytes);
         for (u32 i = 0; i < bytes; ++i)
             WriteU64Hex(buf[i], 2);
         ConsoleWriteChar('\n');
@@ -5151,15 +5151,15 @@ void CmdRand(u32 argc, char** argv)
     }
     for (u32 i = 0; i < n; ++i)
     {
-        WriteU64Hex(customos::core::RandomU64());
+        WriteU64Hex(duetos::core::RandomU64());
         ConsoleWriteChar('\n');
     }
 }
 
 void CmdAttackSim()
 {
-    customos::security::AttackSimRun();
-    const auto& s = customos::security::AttackSimSummary();
+    duetos::security::AttackSimRun();
+    const auto& s = duetos::security::AttackSimSummary();
     ConsoleWrite("ATTACK SIM COMPLETE: ");
     WriteU64Dec(s.passed);
     ConsoleWrite(" passed, ");
@@ -5170,7 +5170,7 @@ void CmdAttackSim()
     for (u64 i = 0; i < s.count; ++i)
     {
         ConsoleWrite("  [");
-        ConsoleWrite(customos::security::AttackOutcomeName(s.results[i].outcome));
+        ConsoleWrite(duetos::security::AttackOutcomeName(s.results[i].outcome));
         ConsoleWrite("] ");
         ConsoleWrite(s.results[i].name);
         ConsoleWrite(" -> ");
@@ -5200,8 +5200,8 @@ void CmdUuid(u32 argc, char** argv)
     char buf[37];
     for (u32 i = 0; i < n; ++i)
     {
-        const auto u = customos::core::UuidV4();
-        customos::core::UuidFormat(u, buf);
+        const auto u = duetos::core::UuidV4();
+        duetos::core::UuidFormat(u, buf);
         ConsoleWriteln(buf);
     }
 }
@@ -5212,7 +5212,7 @@ void CmdFlushTlb()
     // "flush every non-global TLB entry" primitive. Global
     // pages survive (they're typically kernel direct-map);
     // anything else is cold on next access.
-    const u64 cr3 = customos::arch::ReadCr3();
+    const u64 cr3 = duetos::arch::ReadCr3();
     asm volatile("mov %0, %%cr3" : : "r"(cr3) : "memory");
     ConsoleWriteln("TLB FLUSHED (CR3 RELOAD).");
 }
@@ -5224,7 +5224,7 @@ void CmdChecksum(u32 argc, char** argv)
         ConsoleWriteln("CHECKSUM: USAGE: CHECKSUM PATH");
         return;
     }
-    char scratch[customos::fs::kTmpFsContentMax];
+    char scratch[duetos::fs::kTmpFsContentMax];
     const u32 n = ReadFileToBuf(argv[1], scratch, sizeof(scratch));
     if (n == static_cast<u32>(-1))
     {
@@ -5330,7 +5330,7 @@ void CmdSleep(u32 argc, char** argv)
             ConsoleWriteln("^C");
             return;
         }
-        customos::sched::SchedSleepTicks(100);
+        duetos::sched::SchedSleepTicks(100);
     }
 }
 
@@ -5339,8 +5339,8 @@ void CmdReset()
     // Wipe the console + reprint the boot banner. Same content
     // ShellInit emits; useful when the scrollback is cluttered
     // or the user just switched terminals.
-    customos::drivers::video::ConsoleClear();
-    char scratch[customos::fs::kTmpFsContentMax];
+    duetos::drivers::video::ConsoleClear();
+    char scratch[duetos::fs::kTmpFsContentMax];
     const u32 n = ReadFileToBuf("/etc/motd", scratch, sizeof(scratch));
     if (n != static_cast<u32>(-1))
     {
@@ -5358,7 +5358,7 @@ void CmdTac(u32 argc, char** argv)
         ConsoleWriteln("TAC: USAGE: TAC PATH");
         return;
     }
-    char scratch[customos::fs::kTmpFsContentMax];
+    char scratch[duetos::fs::kTmpFsContentMax];
     const u32 n = ReadFileToBuf(argv[1], scratch, sizeof(scratch));
     if (n == static_cast<u32>(-1))
     {
@@ -5390,7 +5390,7 @@ void CmdNl(u32 argc, char** argv)
         ConsoleWriteln("NL: USAGE: NL PATH");
         return;
     }
-    char scratch[customos::fs::kTmpFsContentMax];
+    char scratch[duetos::fs::kTmpFsContentMax];
     const u32 n = ReadFileToBuf(argv[1], scratch, sizeof(scratch));
     if (n == static_cast<u32>(-1))
     {
@@ -5450,7 +5450,7 @@ void CmdRev(u32 argc, char** argv)
         ConsoleWriteln("REV: USAGE: REV PATH");
         return;
     }
-    char scratch[customos::fs::kTmpFsContentMax];
+    char scratch[duetos::fs::kTmpFsContentMax];
     const u32 n = ReadFileToBuf(argv[1], scratch, sizeof(scratch));
     if (n == static_cast<u32>(-1))
     {
@@ -5580,7 +5580,7 @@ void CmdHexdump(u32 argc, char** argv)
         ConsoleWriteln("HEXDUMP: USAGE: HEXDUMP PATH");
         return;
     }
-    char scratch[customos::fs::kTmpFsContentMax];
+    char scratch[duetos::fs::kTmpFsContentMax];
     const u32 n = ReadFileToBuf(argv[1], scratch, sizeof(scratch));
     if (n == static_cast<u32>(-1))
     {
@@ -5632,7 +5632,7 @@ void CmdStat(u32 argc, char** argv)
     {
         const char* bytes = nullptr;
         u32 len = 0;
-        if (!customos::fs::TmpFsRead(tmp_leaf, &bytes, &len))
+        if (!duetos::fs::TmpFsRead(tmp_leaf, &bytes, &len))
         {
             ConsoleWrite("STAT: NO SUCH FILE: ");
             ConsoleWriteln(path);
@@ -5646,8 +5646,8 @@ void CmdStat(u32 argc, char** argv)
         ConsoleWriteln(" bytes");
         return;
     }
-    const auto* root = customos::fs::RamfsTrustedRoot();
-    const auto* node = customos::fs::VfsLookup(root, path, 128);
+    const auto* root = duetos::fs::RamfsTrustedRoot();
+    const auto* node = duetos::fs::VfsLookup(root, path, 128);
     if (node == nullptr)
     {
         ConsoleWrite("STAT: NO SUCH PATH: ");
@@ -5658,7 +5658,7 @@ void CmdStat(u32 argc, char** argv)
     ConsoleWriteln(path);
     ConsoleWrite("  NAME:    ");
     ConsoleWriteln(node->name[0] != '\0' ? node->name : "/");
-    if (node->type == customos::fs::RamfsNodeType::kDir)
+    if (node->type == duetos::fs::RamfsNodeType::kDir)
     {
         ConsoleWrite("  TYPE:    DIRECTORY (ramfs, read-only)\n");
         u32 count = 0;
@@ -5756,8 +5756,8 @@ void CmdCal()
     // Print the current month's calendar using RTC for today's
     // date. Simple: build the weekday of the 1st via Zeller,
     // emit a 7-column grid.
-    customos::arch::RtcTime t{};
-    customos::arch::RtcRead(&t);
+    duetos::arch::RtcTime t{};
+    duetos::arch::RtcRead(&t);
     static const u8 kDaysPerMonth[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
     const bool leap = ((t.year % 4 == 0) && (t.year % 100 != 0)) || (t.year % 400 == 0);
     u32 mlen = kDaysPerMonth[(t.month - 1) % 12];
@@ -5832,7 +5832,7 @@ void CmdExec(u32 argc, char** argv)
         ConsoleWriteln("EXEC: USAGE: EXEC PATH   (dry-run ELF loader)");
         return;
     }
-    char scratch[customos::fs::kTmpFsContentMax];
+    char scratch[duetos::fs::kTmpFsContentMax];
     const u32 n = ReadFileToBuf(argv[1], scratch, sizeof(scratch));
     if (n == static_cast<u32>(-1))
     {
@@ -5841,15 +5841,15 @@ void CmdExec(u32 argc, char** argv)
         return;
     }
     const u8* file = reinterpret_cast<const u8*>(scratch);
-    const customos::core::ElfStatus st = customos::core::ElfValidate(file, n);
-    if (st != customos::core::ElfStatus::Ok)
+    const duetos::core::ElfStatus st = duetos::core::ElfValidate(file, n);
+    if (st != duetos::core::ElfStatus::Ok)
     {
         ConsoleWrite("EXEC: INVALID ELF: ");
-        ConsoleWriteln(customos::core::ElfStatusName(st));
+        ConsoleWriteln(duetos::core::ElfStatusName(st));
         return;
     }
     ConsoleWrite("EXEC: OK. ENTRY = ");
-    WriteU64Hex(customos::core::ElfEntry(file));
+    WriteU64Hex(duetos::core::ElfEntry(file));
     ConsoleWriteChar('\n');
     ConsoleWriteln("LOAD PLAN:");
     ConsoleWriteln("  VADDR             FILESZ    MEMSZ     FLAGS   FILE-OFFSET");
@@ -5858,9 +5858,9 @@ void CmdExec(u32 argc, char** argv)
         u32 count;
     };
     Cookie cookie{0};
-    const u32 visited = customos::core::ElfForEachPtLoad(
+    const u32 visited = duetos::core::ElfForEachPtLoad(
         file, n,
-        [](const customos::core::ElfSegment& seg, void* ck)
+        [](const duetos::core::ElfSegment& seg, void* ck)
         {
             auto* c = static_cast<Cookie*>(ck);
             ++c->count;
@@ -5871,9 +5871,9 @@ void CmdExec(u32 argc, char** argv)
             ConsoleWrite("  ");
             WriteU64Hex(seg.memsz, 8);
             ConsoleWrite("  ");
-            ConsoleWriteChar((seg.flags & customos::core::kElfPfR) ? 'R' : '-');
-            ConsoleWriteChar((seg.flags & customos::core::kElfPfW) ? 'W' : '-');
-            ConsoleWriteChar((seg.flags & customos::core::kElfPfX) ? 'X' : '-');
+            ConsoleWriteChar((seg.flags & duetos::core::kElfPfR) ? 'R' : '-');
+            ConsoleWriteChar((seg.flags & duetos::core::kElfPfW) ? 'W' : '-');
+            ConsoleWriteChar((seg.flags & duetos::core::kElfPfX) ? 'X' : '-');
             ConsoleWrite("     ");
             WriteU64Hex(seg.file_offset, 8);
             ConsoleWriteChar('\n');
@@ -5888,9 +5888,9 @@ void CmdExec(u32 argc, char** argv)
     // now — every manually-exec'd binary gets trusted caps +
     // the trusted ramfs root. When SYS_SPAWN arrives, ring-3
     // callers will inherit their own.
-    const u64 new_pid = customos::core::SpawnElfFile(
-        argv[1], file, n, customos::core::CapSetTrusted(), customos::fs::RamfsTrustedRoot(),
-        customos::mm::kFrameBudgetTrusted, customos::core::kTickBudgetTrusted);
+    const u64 new_pid = duetos::core::SpawnElfFile(
+        argv[1], file, n, duetos::core::CapSetTrusted(), duetos::fs::RamfsTrustedRoot(),
+        duetos::mm::kFrameBudgetTrusted, duetos::core::kTickBudgetTrusted);
     if (new_pid == 0)
     {
         ConsoleWriteln("EXEC: SPAWN FAILED (OOM or bad ELF layout).");
@@ -5909,7 +5909,7 @@ void CmdReadelf(u32 argc, char** argv)
         ConsoleWriteln("READELF: USAGE: READELF PATH");
         return;
     }
-    char scratch[customos::fs::kTmpFsContentMax];
+    char scratch[duetos::fs::kTmpFsContentMax];
     const u32 n = ReadFileToBuf(argv[1], scratch, sizeof(scratch));
     if (n == static_cast<u32>(-1))
     {
@@ -6056,8 +6056,8 @@ void CmdPs()
         u32 count;
     };
     Cookie cookie{0};
-    customos::sched::SchedEnumerate(
-        [](const customos::sched::SchedTaskInfo& info, void* ck)
+    duetos::sched::SchedEnumerate(
+        [](const duetos::sched::SchedTaskInfo& info, void* ck)
         {
             auto* c = static_cast<Cookie*>(ck);
             // 4-digit PID aligned, status tag, priority, name.
@@ -6115,7 +6115,7 @@ void CmdTop()
     // Not a live refresh (the shell blocks on keyboard input with
     // no input-loop integration yet) — run it repeatedly for a
     // trend. CPU% is since-boot — `ticks_run / total_ticks * 100`.
-    const auto s = customos::sched::SchedStatsRead();
+    const auto s = duetos::sched::SchedStatsRead();
     const u64 total = s.total_ticks;
     ConsoleWrite("SYSTEM: total_ticks=");
     WriteU64Dec(total);
@@ -6131,8 +6131,8 @@ void CmdTop()
         u64 total;
     };
     Cookie cookie{total};
-    customos::sched::SchedEnumerate(
-        [](const customos::sched::SchedTaskInfo& info, void* ck)
+    duetos::sched::SchedEnumerate(
+        [](const duetos::sched::SchedTaskInfo& info, void* ck)
         {
             auto* c = static_cast<Cookie*>(ck);
             ConsoleWriteChar(info.is_running ? '*' : ' ');
@@ -6165,8 +6165,8 @@ void CmdFree()
 {
     // Compact "free -k"-ish output: one line each for memory
     // totals and the kernel heap.
-    const u64 total = customos::mm::TotalFrames();
-    const u64 free_f = customos::mm::FreeFramesCount();
+    const u64 total = duetos::mm::TotalFrames();
+    const u64 free_f = duetos::mm::FreeFramesCount();
     const u64 used = total - free_f;
     constexpr u64 kKiB = 4;
     ConsoleWriteln("           total         used         free");
@@ -6177,7 +6177,7 @@ void CmdFree()
     ConsoleWrite("K  ");
     WriteU64Dec(free_f * kKiB);
     ConsoleWriteln("K");
-    const auto h = customos::mm::KernelHeapStatsRead();
+    const auto h = duetos::mm::KernelHeapStatsRead();
     ConsoleWrite("HEAP  ");
     WriteU64Dec(h.pool_bytes);
     ConsoleWrite("   ");
@@ -6192,18 +6192,18 @@ void CmdFree()
     ConsoleWriteln("REBOOTING...");
     // Serial also carries the notice so a headless run sees
     // the final line before the reset reg fires.
-    customos::arch::SerialWrite("[shell] user invoked reboot\n");
-    customos::core::KernelReboot();
+    duetos::arch::SerialWrite("[shell] user invoked reboot\n");
+    duetos::core::KernelReboot();
 }
 
 [[noreturn]] void CmdHaltNow()
 {
     ConsoleWriteln("HALTING. SAFE TO POWER OFF.");
-    customos::arch::SerialWrite("[shell] user invoked halt\n");
+    duetos::arch::SerialWrite("[shell] user invoked halt\n");
     // Infinite "cli; hlt" via arch::Halt. The scheduler will
     // never run again on this CPU. For multi-CPU this would
     // need an NMI broadcast; v0 is single-CPU so this is fine.
-    customos::arch::Halt();
+    duetos::arch::Halt();
 }
 
 void CmdBeep(u32 argc, char** argv)
@@ -6230,7 +6230,7 @@ void CmdBeep(u32 argc, char** argv)
         }
         ms = d;
     }
-    if (!customos::drivers::audio::PcSpeakerBeep(freq, ms))
+    if (!duetos::drivers::audio::PcSpeakerBeep(freq, ms))
     {
         ConsoleWriteln("BEEP: frequency out of PIT divider range (20..1193181)");
         return;
@@ -6245,10 +6245,10 @@ void CmdBeep(u32 argc, char** argv)
 [[noreturn]] void CmdShutdownNow()
 {
     ConsoleWriteln("SHUTDOWN: evaluating AML \\_S5 + writing PM1a...");
-    customos::arch::SerialWrite("[shell] user invoked shutdown\n");
+    duetos::arch::SerialWrite("[shell] user invoked shutdown\n");
     // Flush any last bytes by driving a dummy serial write
     // before the PM1 write that may cut power mid-instruction.
-    if (customos::acpi::AcpiShutdown())
+    if (duetos::acpi::AcpiShutdown())
     {
         // AcpiShutdown returns true only on never-reached paths;
         // v0 implementation always returns after the write. Fall
@@ -6258,7 +6258,7 @@ void CmdBeep(u32 argc, char** argv)
     // -machine pc / q35 + the _PTS method runs, which we skip).
     // Fall back to reboot, then halt if that also fails.
     ConsoleWriteln("SHUTDOWN: S5 not honoured; falling back to halt.");
-    customos::arch::Halt();
+    duetos::arch::Halt();
 }
 
 void CmdHistory()
@@ -6284,8 +6284,8 @@ void CmdHistory()
 
 void CmdMem()
 {
-    const u64 total = customos::mm::TotalFrames();
-    const u64 free_frames = customos::mm::FreeFramesCount();
+    const u64 total = duetos::mm::TotalFrames();
+    const u64 free_frames = duetos::mm::FreeFramesCount();
     const u64 used = total - free_frames;
     constexpr u64 kPageKiB = 4;
     ConsoleWrite("TOTAL  ");
@@ -6307,9 +6307,9 @@ void CmdMem()
 
 void CmdMode()
 {
-    const auto mode = customos::drivers::video::GetDisplayMode();
+    const auto mode = duetos::drivers::video::GetDisplayMode();
     ConsoleWrite("CURRENT MODE: ");
-    ConsoleWriteln(mode == customos::drivers::video::DisplayMode::Tty ? "TTY (FULLSCREEN CONSOLE)"
+    ConsoleWriteln(mode == duetos::drivers::video::DisplayMode::Tty ? "TTY (FULLSCREEN CONSOLE)"
                                                                       : "DESKTOP (WINDOWED SHELL)");
     ConsoleWriteln("PRESS CTRL+ALT+T TO TOGGLE.");
 }
@@ -6419,7 +6419,7 @@ void CmdEcho(u32 argc, char** argv)
             ConsoleWriteln("ECHO: ONLY /tmp/<NAME> IS WRITABLE");
             return;
         }
-        char buf[customos::fs::kTmpFsContentMax];
+        char buf[duetos::fs::kTmpFsContentMax];
         u32 out = 0;
         for (u32 i = 1; i < redirect_idx; ++i)
         {
@@ -6436,7 +6436,7 @@ void CmdEcho(u32 argc, char** argv)
         {
             buf[out++] = '\n'; // match /bin/echo's trailing newline
         }
-        const bool ok = append ? customos::fs::TmpFsAppend(leaf, buf, out) : customos::fs::TmpFsWrite(leaf, buf, out);
+        const bool ok = append ? duetos::fs::TmpFsAppend(leaf, buf, out) : duetos::fs::TmpFsWrite(leaf, buf, out);
         if (!ok)
         {
             ConsoleWrite("ECHO: WRITE FAILED: ");
@@ -6477,7 +6477,7 @@ void LsTmpDir()
         ConsoleWriteln(" BYTES");
     };
     Cookie cookie{&any};
-    customos::fs::TmpFsEnumerate(cb, &cookie);
+    duetos::fs::TmpFsEnumerate(cb, &cookie);
     if (!any)
     {
         ConsoleWriteln("(EMPTY DIRECTORY)");
@@ -6498,7 +6498,7 @@ void CmdLs(u32 argc, char** argv)
             return;
         }
         u32 len = 0;
-        if (customos::fs::TmpFsRead(tmp_leaf, nullptr, &len))
+        if (duetos::fs::TmpFsRead(tmp_leaf, nullptr, &len))
         {
             ConsoleWrite(tmp_leaf);
             ConsoleWrite("   ");
@@ -6518,7 +6518,7 @@ void CmdLs(u32 argc, char** argv)
     // directory trees work, not just the root.
     if (const char* fat_leaf = FatLeaf(path); fat_leaf != nullptr)
     {
-        namespace fat = customos::fs::fat32;
+        namespace fat = duetos::fs::fat32;
         const fat::Volume* v = fat::Fat32Volume(0);
         if (v == nullptr)
         {
@@ -6569,15 +6569,15 @@ void CmdLs(u32 argc, char** argv)
         return;
     }
 
-    const auto* root = customos::fs::RamfsTrustedRoot();
-    const auto* node = customos::fs::VfsLookup(root, path, 128);
+    const auto* root = duetos::fs::RamfsTrustedRoot();
+    const auto* node = duetos::fs::VfsLookup(root, path, 128);
     if (node == nullptr)
     {
         ConsoleWrite("LS: NO SUCH PATH: ");
         ConsoleWriteln(path);
         return;
     }
-    if (node->type == customos::fs::RamfsNodeType::kFile)
+    if (node->type == duetos::fs::RamfsNodeType::kFile)
     {
         // POSIX-style: `ls file` prints the filename (no dir walk).
         ConsoleWrite(node->name);
@@ -6596,7 +6596,7 @@ void CmdLs(u32 argc, char** argv)
         const auto* c = node->children[i];
         ConsoleWrite("  ");
         ConsoleWrite(c->name);
-        if (c->type == customos::fs::RamfsNodeType::kDir)
+        if (c->type == duetos::fs::RamfsNodeType::kDir)
         {
             ConsoleWriteln("/");
         }
@@ -6615,7 +6615,7 @@ void CmdLs(u32 argc, char** argv)
     if (StrEq(path, "/") || StrEq(path, ""))
     {
         ConsoleWriteln("  tmp/   (WRITABLE)");
-        if (customos::fs::fat32::Fat32VolumeCount() > 0)
+        if (duetos::fs::fat32::Fat32VolumeCount() > 0)
         {
             ConsoleWriteln("  fat/   (READ-ONLY)");
         }
@@ -6637,7 +6637,7 @@ void CmdCat(u32 argc, char** argv)
     {
         const char* bytes = nullptr;
         u32 len = 0;
-        if (!customos::fs::TmpFsRead(tmp_leaf, &bytes, &len))
+        if (!duetos::fs::TmpFsRead(tmp_leaf, &bytes, &len))
         {
             ConsoleWrite("CAT: NO SUCH FILE: ");
             ConsoleWriteln(path);
@@ -6656,7 +6656,7 @@ void CmdCat(u32 argc, char** argv)
 
     if (const char* fat_leaf = FatLeaf(path); fat_leaf != nullptr && *fat_leaf != '\0')
     {
-        namespace fat = customos::fs::fat32;
+        namespace fat = duetos::fs::fat32;
         const fat::Volume* v = fat::Fat32Volume(0);
         if (v == nullptr)
         {
@@ -6689,10 +6689,10 @@ void CmdCat(u32 argc, char** argv)
         StreamCtx ctx{0, false};
         const bool ok = fat::Fat32ReadFileStream(
             v, &entry,
-            [](const customos::u8* data, customos::u64 len, void* cx) -> bool
+            [](const duetos::u8* data, duetos::u64 len, void* cx) -> bool
             {
                 auto* s = static_cast<StreamCtx*>(cx);
-                for (customos::u64 i = 0; i < len; ++i)
+                for (duetos::u64 i = 0; i < len; ++i)
                 {
                     ConsoleWriteChar(static_cast<char>(data[i]));
                 }
@@ -6716,15 +6716,15 @@ void CmdCat(u32 argc, char** argv)
         return;
     }
 
-    const auto* root = customos::fs::RamfsTrustedRoot();
-    const auto* node = customos::fs::VfsLookup(root, path, 128);
+    const auto* root = duetos::fs::RamfsTrustedRoot();
+    const auto* node = duetos::fs::VfsLookup(root, path, 128);
     if (node == nullptr)
     {
         ConsoleWrite("CAT: NO SUCH FILE: ");
         ConsoleWriteln(path);
         return;
     }
-    if (node->type != customos::fs::RamfsNodeType::kFile)
+    if (node->type != duetos::fs::RamfsNodeType::kFile)
     {
         ConsoleWrite("CAT: NOT A FILE: ");
         ConsoleWriteln(path);
@@ -6756,7 +6756,7 @@ void CmdTouch(u32 argc, char** argv)
         ConsoleWriteln("TOUCH: ONLY /tmp/<NAME> IS WRITABLE");
         return;
     }
-    if (!customos::fs::TmpFsTouch(leaf))
+    if (!duetos::fs::TmpFsTouch(leaf))
     {
         ConsoleWrite("TOUCH: FAILED: ");
         ConsoleWriteln(argv[1]);
@@ -6776,7 +6776,7 @@ void CmdRm(u32 argc, char** argv)
         ConsoleWriteln("RM: ONLY /tmp/<NAME> IS WRITABLE");
         return;
     }
-    if (!customos::fs::TmpFsUnlink(leaf))
+    if (!duetos::fs::TmpFsUnlink(leaf))
     {
         ConsoleWrite("RM: NO SUCH FILE: ");
         ConsoleWriteln(argv[1]);
@@ -7137,18 +7137,18 @@ void Dispatch(char* line)
             right[ri] = '\0';
 
             // Run the LEFT half with output captured.
-            static constexpr u32 kPipeBufMax = customos::fs::kTmpFsContentMax;
+            static constexpr u32 kPipeBufMax = duetos::fs::kTmpFsContentMax;
             static char g_pipe_buf[kPipeBufMax];
             u32 captured = 0;
-            customos::drivers::video::ConsoleBeginCapture(g_pipe_buf, kPipeBufMax, &captured);
+            duetos::drivers::video::ConsoleBeginCapture(g_pipe_buf, kPipeBufMax, &captured);
             Dispatch(left);
-            customos::drivers::video::ConsoleEndCapture();
+            duetos::drivers::video::ConsoleEndCapture();
 
             // Stash captured output in a reserved tmpfs slot.
             // Use a well-known name so nested pipes share the
             // space — each level overwrites as it unwinds.
             constexpr const char* kPipeName = "__pipe__";
-            customos::fs::TmpFsWrite(kPipeName, g_pipe_buf, captured);
+            duetos::fs::TmpFsWrite(kPipeName, g_pipe_buf, captured);
 
             // Append "/tmp/__pipe__" to the right command so it
             // receives the prior stage's output as its final arg.
@@ -7174,7 +7174,7 @@ void Dispatch(char* line)
             Dispatch(combined);
 
             // Drop the temp file so `ls /tmp` stays clean.
-            customos::fs::TmpFsUnlink(kPipeName);
+            duetos::fs::TmpFsUnlink(kPipeName);
             return;
         }
     }
@@ -7989,10 +7989,10 @@ void ShellInit()
     ConsoleWriteln("");
 
     // Print /etc/motd if present — human-facing welcome text,
-    // replaces the tiny "CUSTOMOS SHELL" banner the earlier
+    // replaces the tiny "DUETOS SHELL" banner the earlier
     // version used. If the file is missing (e.g. a stripped
     // sandbox tree), fall back to the minimum one-liner.
-    char scratch[customos::fs::kTmpFsContentMax];
+    char scratch[duetos::fs::kTmpFsContentMax];
     const u32 motd_len = ReadFileToBuf("/etc/motd", scratch, sizeof(scratch));
     if (motd_len != static_cast<u32>(-1))
     {
@@ -8007,7 +8007,7 @@ void ShellInit()
     }
     else
     {
-        ConsoleWriteln("CUSTOMOS SHELL v0   TYPE HELP FOR COMMANDS.");
+        ConsoleWriteln("DUETOS SHELL v0   TYPE HELP FOR COMMANDS.");
     }
 
     // Auto-source /etc/profile. Effect is identical to the user
@@ -8018,8 +8018,8 @@ void ShellInit()
     char* argv[2] = {nullptr, profile_line};
     const char* bytes = nullptr;
     u32 plen = 0;
-    const auto* prof = customos::fs::VfsLookup(customos::fs::RamfsTrustedRoot(), "/etc/profile", 64);
-    if (prof != nullptr && prof->type == customos::fs::RamfsNodeType::kFile)
+    const auto* prof = duetos::fs::VfsLookup(duetos::fs::RamfsTrustedRoot(), "/etc/profile", 64);
+    if (prof != nullptr && prof->type == duetos::fs::RamfsNodeType::kFile)
     {
         (void)bytes;
         (void)plen;
@@ -8267,13 +8267,13 @@ void CompletePath(u32 partial_start)
             c->items[c->count].is_dir = false;
             ++c->count;
         };
-        customos::fs::TmpFsEnumerate(cb, &col);
+        duetos::fs::TmpFsEnumerate(cb, &col);
     }
     else
     {
-        const auto* root = customos::fs::RamfsTrustedRoot();
-        const auto* parent = customos::fs::VfsLookup(root, parent_buf, sizeof(parent_buf));
-        if (parent == nullptr || parent->type != customos::fs::RamfsNodeType::kDir || parent->children == nullptr)
+        const auto* root = duetos::fs::RamfsTrustedRoot();
+        const auto* parent = duetos::fs::VfsLookup(root, parent_buf, sizeof(parent_buf));
+        if (parent == nullptr || parent->type != duetos::fs::RamfsNodeType::kDir || parent->children == nullptr)
         {
             return;
         }
@@ -8283,7 +8283,7 @@ void CompletePath(u32 partial_start)
             if (!NamePrefixMatch(c->name, leaf, leaf_len))
                 continue;
             col.items[col.count].name = c->name;
-            col.items[col.count].is_dir = (c->type == customos::fs::RamfsNodeType::kDir);
+            col.items[col.count].is_dir = (c->type == duetos::fs::RamfsNodeType::kDir);
             ++col.count;
         }
         // Root also offers "tmp/" as a completion target — the
@@ -8400,4 +8400,4 @@ void ShellTabComplete()
     }
 }
 
-} // namespace customos::core
+} // namespace duetos::core

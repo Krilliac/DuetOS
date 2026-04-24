@@ -20,13 +20,13 @@
 // kernel-#PF fault-fixup path. Defined as non-const u8 arrays so
 // the name refers to the address of the label directly (same
 // pattern linker scripts use for _text_start / _kernel_end_phys).
-extern "C" customos::u8 __copy_user_from_start[];
-extern "C" customos::u8 __copy_user_from_end[];
-extern "C" customos::u8 __copy_user_to_start[];
-extern "C" customos::u8 __copy_user_to_end[];
-extern "C" customos::u8 __copy_user_fault_fixup[];
+extern "C" duetos::u8 __copy_user_from_start[];
+extern "C" duetos::u8 __copy_user_from_end[];
+extern "C" duetos::u8 __copy_user_to_start[];
+extern "C" duetos::u8 __copy_user_to_end[];
+extern "C" duetos::u8 __copy_user_fault_fixup[];
 
-namespace customos::arch
+namespace duetos::arch
 {
 
 namespace
@@ -35,11 +35,11 @@ namespace
 // Local aliases so the dispatcher code reads tidy. Taking the
 // addresses through these shims also sidesteps a subtle clang
 // warning about extern arrays without bounds in header form.
-constexpr customos::u8* g_copy_user_from_start = ::__copy_user_from_start;
-constexpr customos::u8* g_copy_user_from_end = ::__copy_user_from_end;
-constexpr customos::u8* g_copy_user_to_start = ::__copy_user_to_start;
-constexpr customos::u8* g_copy_user_to_end = ::__copy_user_to_end;
-constexpr customos::u8* g_copy_user_fault_fixup = ::__copy_user_fault_fixup;
+constexpr duetos::u8* g_copy_user_from_start = ::__copy_user_from_start;
+constexpr duetos::u8* g_copy_user_from_end = ::__copy_user_from_end;
+constexpr duetos::u8* g_copy_user_to_start = ::__copy_user_to_start;
+constexpr duetos::u8* g_copy_user_to_end = ::__copy_user_to_end;
+constexpr duetos::u8* g_copy_user_fault_fixup = ::__copy_user_fault_fixup;
 
 // Per-vector IRQ handler table. Indexed directly by vector number.
 // Vectors 0..31 are CPU exceptions (unused here — those dispatch
@@ -401,7 +401,7 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         if (mm::IsKernelStackGuardFault(cr2))
         {
             SerialWrite("\n** KERNEL STACK OVERFLOW **\n  task id : ");
-            SerialWriteHex(customos::sched::CurrentTaskId());
+            SerialWriteHex(duetos::sched::CurrentTaskId());
             SerialWrite("\n  cr2     : ");
             SerialWriteHex(cr2);
             SerialWrite("\n  rip     : ");
@@ -423,7 +423,7 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     // a kernel RIP can't happen (user can't execute kernel code).
     if ((frame->vector == 14 || frame->vector == 13) && (frame->cs & 3) == 0)
     {
-        const ::customos::debug::ExtableEntry* hit = ::customos::debug::KernelExtableFindEntry(frame->rip);
+        const ::duetos::debug::ExtableEntry* hit = ::duetos::debug::KernelExtableFindEntry(frame->rip);
         if (hit != nullptr)
         {
             SerialWrite("[extable] recovered kernel trap vec=");
@@ -446,9 +446,9 @@ extern "C" void TrapDispatch(TrapFrame* frame)
             // path; the watchdog then teardown+re-init's the
             // subsystem so future calls succeed. MarkRestart is
             // one bool write — safe from trap context.
-            if (hit->domain_id != ::customos::debug::kExtableNoDomain)
+            if (hit->domain_id != ::duetos::debug::kExtableNoDomain)
             {
-                ::customos::core::FaultDomainMarkRestart(hit->domain_id);
+                ::duetos::core::FaultDomainMarkRestart(hit->domain_id);
                 SerialWrite("[extable] marked domain for deferred restart id=");
                 SerialWriteHex(hit->domain_id);
                 SerialWrite("\n");
@@ -548,7 +548,7 @@ extern "C" void TrapDispatch(TrapFrame* frame)
             SerialWrite("  reason : INVALID_OPCODE\n");
         }
         SerialWrite("  pid  : ");
-        SerialWriteHex(customos::sched::CurrentTaskId());
+        SerialWriteHex(duetos::sched::CurrentTaskId());
         SerialWrite("\n  rip  : ");
         SerialWriteHex(frame->rip);
         SerialWrite("\n  rsp  : ");
@@ -576,7 +576,7 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         // timer IRQs to make progress. SchedYield/SchedExit internally
         // cli/sti around Schedule, so we don't need to explicitly sti
         // here. Control never returns from SchedExit.
-        customos::sched::SchedExit();
+        duetos::sched::SchedExit();
     }
 
     // Fall-through outcome: TrapResponse::Panic. Every kernel-mode
@@ -590,7 +590,7 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     // panic dump; other kernel exceptions are already distinct
     // enough by name that they don't need a dedicated probe.
     if (frame->vector == 14)
-        KBP_PROBE_V(::customos::debug::ProbeId::kKernelPageFault, frame->rip);
+        KBP_PROBE_V(::duetos::debug::ProbeId::kKernelPageFault, frame->rip);
     // Quiet the NMI watchdog before the dump. DumpDiagnostics +
     // symbol resolution + serial I/O can easily exceed one
     // watchdog interval; a PMI overflow during the dump would
@@ -760,8 +760,8 @@ void TrapsRegisterExtable()
     const u64 to_s = reinterpret_cast<u64>(g_copy_user_to_start);
     const u64 to_e = reinterpret_cast<u64>(g_copy_user_to_end);
     const u64 fixup = reinterpret_cast<u64>(g_copy_user_fault_fixup);
-    ::customos::debug::KernelExtableRegister(from_s, from_e, fixup, "mm/CopyFromUser");
-    ::customos::debug::KernelExtableRegister(to_s, to_e, fixup, "mm/CopyToUser");
+    ::duetos::debug::KernelExtableRegister(from_s, from_e, fixup, "mm/CopyFromUser");
+    ::duetos::debug::KernelExtableRegister(to_s, to_e, fixup, "mm/CopyToUser");
 }
 
 void TrapsSelfTest()
@@ -786,4 +786,4 @@ void TrapsSelfTest()
     SerialWrite("[traps] self-test OK — #BP and spurious both recovered\n");
 }
 
-} // namespace customos::arch
+} // namespace duetos::arch

@@ -3,7 +3,7 @@
 #include "../core/types.h"
 
 /*
- * CustomOS — per-CPU data (v0).
+ * DuetOS — per-CPU data (v0).
  *
  * Each CPU gets its own `PerCpu` struct. The struct pointer lives in
  * the `IA32_GS_BASE` MSR (0xC0000101), so any CPU can read its own
@@ -18,17 +18,17 @@
  * a straight MSR read on every CPU that supports long mode.
  */
 
-namespace customos::sched
+namespace duetos::sched
 {
 struct Task; // forward decl; defined in kernel/sched/sched.cpp
 }
 
-namespace customos::mm
+namespace duetos::mm
 {
 struct AddressSpace; // forward decl; defined in kernel/mm/address_space.h
 }
 
-namespace customos::cpu
+namespace duetos::cpu
 {
 
 struct PerCpu
@@ -85,4 +85,4 @@ PerCpu* CurrentCpu();
 /// run) so that lock-owner tracking still produces a meaningful value.
 u32 CurrentCpuIdOrBsp();
 
-} // namespace customos::cpu
+} // namespace duetos::cpu

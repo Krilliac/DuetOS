@@ -9,7 +9,7 @@
 
 Both `core::Panic` and `arch::TrapDispatch` (CPU-exception path) emit a
 self-contained, symbolicated crash dump bracketed by
-`=== CUSTOMOS CRASH DUMP BEGIN ===` / `=== CUSTOMOS CRASH DUMP END ===`. Every
+`=== DUETOS CRASH DUMP BEGIN ===` / `=== DUETOS CRASH DUMP END ===`. Every
 in-kernel code address in the dump (RIP, backtrace frames, stack quads) is
 inline-annotated with `function+0xOFFSET (kernel/path/file.cpp:LINE)` using an
 embedded symbol table linked into the kernel at build time.
@@ -45,11 +45,11 @@ panic path. Function + file + line is the lowest-common-denominator debug unit.
 The symbol table has to know every function's VA, but *including* the table
 changes those VAs. Classic chicken-and-egg. Resolved with a two-stage link:
 
-1. `customos-kernel-stage1.elf` links with `core/symbols_stub.cpp` (empty table).
+1. `duetos-kernel-stage1.elf` links with `core/symbols_stub.cpp` (empty table).
 2. `tools/gen-symbols.sh` reads stage-1's `llvm-nm` output, resolves every
    higher-half text symbol via `llvm-addr2line`, and emits
    `symbols_generated.cpp` — a sorted `{addr, size, line, name, file}` array.
-3. `customos-kernel.elf` links the same sources with `symbols_generated.cpp`
+3. `duetos-kernel.elf` links the same sources with `symbols_generated.cpp`
    replacing the stub.
 
 **Key invariant — source ordering.** `symbols_stub.cpp` / `symbols_generated.cpp`
@@ -66,7 +66,7 @@ the crash dump, so BSS drift is irrelevant.
 ## On-the-wire format
 
 ```
-=== CUSTOMOS CRASH DUMP BEGIN ===
+=== DUETOS CRASH DUMP BEGIN ===
   version  : 0x0000000000000001
   subsystem: <subsys>                     (e.g. "arch/traps", "test/panic-demo")
   message  : <message>                    (vector mnemonic for traps; caller string for Panic)
@@ -94,7 +94,7 @@ the crash dump, so BSS drift is irrelevant.
 [panic] --- log ring (last 0xNN entries, oldest first) ---
   [I] ...
   ...
-=== CUSTOMOS CRASH DUMP END ===
+=== DUETOS CRASH DUMP END ===
 [panic] CPU halted — no recovery.
 ```
 
@@ -103,7 +103,7 @@ changes in a way a parser would care about.
 
 ## Resolver semantics
 
-`customos::core::ResolveAddress(addr, &out)`:
+`duetos::core::ResolveAddress(addr, &out)`:
 
 - Binary searches the sorted table for the largest entry with `entry->addr <= addr`.
 - Matches if `addr - entry->addr < entry->size`, **except** when `size == 0`:
@@ -138,8 +138,8 @@ Lookups are O(log N). With ~300 symbols today the longest walk is 9 iterations
   GPR dump in the same BEGIN/END markers with `subsystem: arch/traps`,
   `message: <vector mnemonic>` (e.g. `#PF Page fault`, `#UD Invalid opcode`),
   `value: <error_code>`, and symbolized `rip`.
-- `kernel/CMakeLists.txt` — two-stage build wiring. Gates `CUSTOMOS_PANIC_DEMO`
-  (deliberate `Panic()` at end of `kernel_main`) and `CUSTOMOS_TRAP_DEMO`
+- `kernel/CMakeLists.txt` — two-stage build wiring. Gates `DUETOS_PANIC_DEMO`
+  (deliberate `Panic()` at end of `kernel_main`) and `DUETOS_TRAP_DEMO`
   (deliberate `ud2` at end of `kernel_main` → `#UD`).
 - `tools/test-panic.sh` — exercises the `Panic` path. Captures the dump into
   `build/<preset>/crash-dumps/<timestamp>.dump` and asserts its shape.

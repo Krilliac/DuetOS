@@ -16,7 +16,7 @@
 // TrapDispatch). The same plumbing every hardware IRQ already uses.
 extern "C" void isr_33();
 
-namespace customos::drivers::input
+namespace duetos::drivers::input
 {
 
 namespace
@@ -79,7 +79,7 @@ constinit u8 g_ring[kRingSize] = {};
 constinit u64 g_ring_head = 0; // write cursor (IRQ)
 constinit u64 g_ring_tail = 0; // read cursor (task)
 
-constinit customos::sched::WaitQueue g_readers{};
+constinit duetos::sched::WaitQueue g_readers{};
 
 constinit u64 g_irqs_seen = 0;
 constinit u64 g_bytes_buffered = 0;
@@ -461,7 +461,7 @@ void IrqHandler()
 
     // Wake any reader parked on the queue. WaitQueueWakeOne sets
     // need_resched, so the IRQ dispatcher will Schedule() after EOI.
-    customos::sched::WaitQueueWakeOne(&g_readers);
+    duetos::sched::WaitQueueWakeOne(&g_readers);
 }
 
 } // namespace
@@ -499,10 +499,10 @@ void Ps2KeyboardInit()
     const u8 bsp_id = static_cast<u8>(arch::LapicRead(arch::kLapicRegId) >> 24);
     arch::IoApicRoute(gsi, kKbdVector, bsp_id, kKbdIsaIrq);
 
-    customos::core::LogWithValue(customos::core::LogLevel::Info, "drivers/ps2kbd", "routed isa_irq", kKbdIsaIrq);
-    customos::core::LogWithValue(customos::core::LogLevel::Info, "drivers/ps2kbd", "  gsi", gsi);
-    customos::core::LogWithValue(customos::core::LogLevel::Info, "drivers/ps2kbd", "  vector", kKbdVector);
-    customos::core::LogWithValue(customos::core::LogLevel::Info, "drivers/ps2kbd", "  lapic_id", bsp_id);
+    duetos::core::LogWithValue(duetos::core::LogLevel::Info, "drivers/ps2kbd", "routed isa_irq", kKbdIsaIrq);
+    duetos::core::LogWithValue(duetos::core::LogLevel::Info, "drivers/ps2kbd", "  gsi", gsi);
+    duetos::core::LogWithValue(duetos::core::LogLevel::Info, "drivers/ps2kbd", "  vector", kKbdVector);
+    duetos::core::LogWithValue(duetos::core::LogLevel::Info, "drivers/ps2kbd", "  lapic_id", bsp_id);
 }
 
 u8 Ps2KeyboardRead()
@@ -515,7 +515,7 @@ u8 Ps2KeyboardRead()
     // the sentinel by looping back to the inject-ring drain.
     while (g_ring_head == g_ring_tail && InjectRingEmpty())
     {
-        customos::sched::WaitQueueBlock(&g_readers);
+        duetos::sched::WaitQueueBlock(&g_readers);
         // When we come back, interrupts are still disabled (we never
         // Sti'd), and a byte MAY be available. Could also have been a
         // spurious wake once we add broadcast-wake primitives, so
@@ -912,7 +912,7 @@ void KeyboardInjectEvent(const KeyEvent& ev)
     g_inject_ring[g_inject_head & kInjectRingMask] = ev;
     ++g_inject_head;
     arch::Sti();
-    customos::sched::WaitQueueWakeOne(&g_readers);
+    duetos::sched::WaitQueueWakeOne(&g_readers);
 }
 
-} // namespace customos::drivers::input
+} // namespace duetos::drivers::input

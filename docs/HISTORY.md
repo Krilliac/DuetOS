@@ -1,6 +1,6 @@
-# CustomOS — history
+# DuetOS — history
 
-This document is the narrative of how CustomOS got to where it is today.
+This document is the narrative of how DuetOS got to where it is today.
 It's written for someone who's just landed in the repo and wants to know
 **why** each subsystem looks the way it does before reading the code.
 
@@ -10,7 +10,7 @@ For day-to-day architectural reference, see [`ARCHITECTURE.md`](ARCHITECTURE.md)
 
 ## Phase 0 — a kernel that could tell you what a CPU was doing
 
-CustomOS began as an experiment in live CPU instrumentation. The earliest
+DuetOS began as an experiment in live CPU instrumentation. The earliest
 commits brought up a minimal x86_64 kernel — Multiboot2 handoff, GDT/IDT,
 serial console on COM1, a PIT-calibrated LAPIC timer — with one specific
 purpose: to boot on commodity hardware and **dump everything the CPU was
@@ -192,12 +192,12 @@ to kernel backends:
 
 Verification is live. An end-to-end fixture (`userland/apps/reg_fopen_test/`)
 opens `HKLM\Software\Microsoft\Windows NT\CurrentVersion`, queries
-`ProductName`, gets back `"CustomOS"`, opens `/bin/hello.exe` via
+`ProductName`, gets back `"DuetOS"`, opens `/bin/hello.exe` via
 `fopen`, reads two bytes via `fread`, confirms `"MZ"`, and prints every
 step via `printf` with `%s`/`%u`/`%02x` formatting. Boot log:
 
 ```
-[reg-fopen-test] ProductName="CustomOS" (type=1, size=9)
+[reg-fopen-test] ProductName="DuetOS" (type=1, size=9)
 [reg-fopen-test] /bin/hello.exe first two bytes: 0x4d 0x5a
 [reg-fopen-test] all checks passed
 ```
@@ -208,7 +208,7 @@ step via `printf` with `%s`/`%u`/`%02x` formatting. Boot log:
 
 For context on how far we actually are: Wine has been working for ~30
 years and runs around 70-80% of Windows games. ReactOS has been working
-for ~25 years and runs perhaps 50% of Win32 programs. CustomOS is at
+for ~25 years and runs perhaps 50% of Win32 programs. DuetOS is at
 approximately 1-2% of either. The surface is broadly covered, but
 most of the interesting subsystems (compositor-backed windows, real
 sockets, COM runtime, DirectX-to-Vulkan translation) still return

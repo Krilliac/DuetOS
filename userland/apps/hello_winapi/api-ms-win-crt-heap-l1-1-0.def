@@ -1,7 +1,7 @@
 ; api-ms-win-crt-heap-l1-1-0.def
 ;
 ; UCRT apiset for heap functions. On real Windows this DLL
-; just forwards to ucrtbase.dll. CustomOS's PE loader sees
+; just forwards to ucrtbase.dll. DuetOS's PE loader sees
 ; the apiset name directly in the PE's import table and
 ; resolves each function against kernel/subsystems/win32/
 ; stubs.cpp — the forwarder table lives in the kernel.

@@ -3,7 +3,7 @@
 #include "../../core/types.h"
 
 /*
- * CustomOS — Power / battery / thermal shell, v0.
+ * DuetOS — Power / battery / thermal shell, v0.
  *
  * Umbrella for anything that isn't "CPU instruction" or "PCI
  * device" but still reports energy / thermal / presence state:
@@ -40,7 +40,7 @@
  * + thermal probes.
  */
 
-namespace customos::drivers::power
+namespace duetos::drivers::power
 {
 
 enum AcState : u8
@@ -92,4 +92,4 @@ PowerSnapshot PowerSnapshotRead();
 const char* AcStateName(AcState s);
 const char* BatteryStateName(BatteryState s);
 
-} // namespace customos::drivers::power
+} // namespace duetos::drivers::power

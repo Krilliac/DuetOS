@@ -3,7 +3,7 @@
 #include "types.h"
 
 /*
- * CustomOS — runtime recovery infrastructure.
+ * DuetOS — runtime recovery infrastructure.
  *
  * Implements the API surface defined in
  * `docs/knowledge/runtime-recovery-strategy.md`. See that doc for
@@ -38,7 +38,7 @@
  * policy must not run in IRQ context).
  */
 
-namespace customos::core
+namespace duetos::core
 {
 
 // ---------------------------------------------------------------------------
@@ -136,7 +136,7 @@ template <typename Fn> RetryOutcome RetryWithBackoff(const char* label, Fn fn, c
 /// extension point.
 void OnTaskExited();
 
-} // namespace customos::core
+} // namespace duetos::core
 
 // ---------------------------------------------------------------------------
 // Template implementation — must live in the header.
@@ -144,12 +144,12 @@ void OnTaskExited();
 
 #include "klog.h"
 
-namespace customos::sched
+namespace duetos::sched
 {
 void SchedSleepTicks(u64 ticks); // forward decl to avoid pulling sched.h
 }
 
-namespace customos::core
+namespace duetos::core
 {
 
 template <typename Fn> RetryOutcome RetryWithBackoff(const char* label, Fn fn, const RetryPolicy& policy)
@@ -180,4 +180,4 @@ template <typename Fn> RetryOutcome RetryWithBackoff(const char* label, Fn fn, c
     return RetryOutcome::GaveUp;
 }
 
-} // namespace customos::core
+} // namespace duetos::core

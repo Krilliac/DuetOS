@@ -17,7 +17,7 @@
 #include "../../sched/sched.h"
 #include "stubs.h"
 
-namespace customos::subsystems::win32
+namespace duetos::subsystems::win32
 {
 
 namespace
@@ -44,12 +44,12 @@ struct ThreadDesc
 
     const u64 kstack_top = sched::SchedCurrentKernelStackTop();
     if (kstack_top == 0)
-        ::customos::core::Panic("win32/thread", "SchedCurrentKernelStackTop returned 0");
+        ::duetos::core::Panic("win32/thread", "SchedCurrentKernelStackTop returned 0");
     arch::TssSetRsp0(kstack_top);
     cpu::CurrentCpu()->kernel_rsp = kstack_top;
 
     if (arg == nullptr)
-        ::customos::core::Panic("win32/thread", "Ring3ThreadEntry called with null desc");
+        ::duetos::core::Panic("win32/thread", "Ring3ThreadEntry called with null desc");
 
     // Copy onto the stack then free the heap allocation — the
     // iretq below doesn't return, so deferring the free to the
@@ -86,7 +86,7 @@ void DoThreadCreate(arch::TrapFrame* frame)
 {
     using arch::SerialWrite;
     using arch::SerialWriteHex;
-    using ::customos::core::Process;
+    using ::duetos::core::Process;
 
     core::Process* proc = core::CurrentProcess();
     if (proc == nullptr || !core::CapSetHas(proc->caps, core::kCapSpawnThread))
@@ -196,7 +196,7 @@ void DoThreadCreate(arch::TrapFrame* frame)
     // direct-map gives every frame a kernel-writable alias.
     auto* top_page_kva = static_cast<u8*>(mm::PhysToVirt(top_frame_phys));
     auto* retaddr_slot = reinterpret_cast<u64*>(top_page_kva + mm::kPageSize - 8);
-    *retaddr_slot = ::customos::win32::kWin32ThreadExitTrampVa;
+    *retaddr_slot = ::duetos::win32::kWin32ThreadExitTrampVa;
 
     // Build the kernel-heap ThreadDesc that Ring3ThreadEntry
     // will consume. Heap-allocated so the ring-0 stack frame
@@ -275,4 +275,4 @@ void DoThreadCreate(arch::TrapFrame* frame)
     frame->rax = handle;
 }
 
-} // namespace customos::subsystems::win32
+} // namespace duetos::subsystems::win32

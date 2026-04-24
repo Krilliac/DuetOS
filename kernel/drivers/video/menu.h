@@ -25,7 +25,7 @@
  * dispatch mouse events from the mouse reader thread.
  */
 
-namespace customos::drivers::video
+namespace duetos::drivers::video
 {
 
 struct MenuItem
@@ -74,4 +74,4 @@ bool MenuContains(u32 x, u32 y);
 /// (popup grows upward).
 u32 MenuPanelHeight();
 
-} // namespace customos::drivers::video
+} // namespace duetos::drivers::video

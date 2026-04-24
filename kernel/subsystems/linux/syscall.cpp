@@ -20,7 +20,7 @@
 
 extern "C" void linux_syscall_entry();
 
-namespace customos::subsystems::linux
+namespace duetos::subsystems::linux
 {
 
 namespace
@@ -1317,7 +1317,7 @@ i64 DoTime(u64 user_tloc)
 
 // Linux: nanosleep(req, rem). v0 rounds the request up to whole
 // scheduler ticks (10 ms each at 100 Hz). The `rem` output — how
-// much time is left if interrupted — is always zeroed; CustomOS
+// much time is left if interrupted — is always zeroed; DuetOS
 // doesn't deliver signals yet, so nothing can interrupt a sleep
 // mid-flight.
 i64 DoNanosleep(u64 user_req, u64 user_rem)
@@ -1599,7 +1599,7 @@ i64 DoSetPgid(u64 pid, u64 pgid)
 }
 
 // Identity stubs. v0 presents every process as uid=0/gid=0 —
-// CustomOS doesn't have a user-account model yet. Returning 0
+// DuetOS doesn't have a user-account model yet. Returning 0
 // satisfies musl's libc.a startup without misleading it: programs
 // that check for root will see "yes you're root," which is
 // consistent with "there are no privilege boundaries here."
@@ -2099,10 +2099,10 @@ i64 DoUname(u64 user_buf)
             dst[i] = static_cast<u8>(s[i]);
         }
     };
-    set_field(0, "CustomOS");
-    set_field(1, "customos");
+    set_field(0, "DuetOS");
+    set_field(1, "duetos");
     set_field(2, "0.1");
-    set_field(3, "customos-v0 #1");
+    set_field(3, "duetos-v0 #1");
     set_field(4, "x86_64");
     set_field(5, "localdomain");
     if (!mm::CopyToUser(reinterpret_cast<void*>(user_buf), kbuf, kTotalLen))
@@ -3500,4 +3500,4 @@ void LinuxLogAbiCoverage()
     arch::SerialWrite(")\n");
 }
 
-} // namespace customos::subsystems::linux
+} // namespace duetos::subsystems::linux

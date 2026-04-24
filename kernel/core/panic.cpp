@@ -17,14 +17,14 @@
  *
  * Every halt path emits a self-contained crash dump bracketed by:
  *
- *     === CUSTOMOS CRASH DUMP BEGIN ===
+ *     === DUETOS CRASH DUMP BEGIN ===
  *     ...
- *     === CUSTOMOS CRASH DUMP END ===
+ *     === DUETOS CRASH DUMP END ===
  *
  * on COM1. Host-side tooling (`tools/test-panic.sh` today, a
  * post-mortem harness later) captures the bytes between the markers
  * into a file — that is the "dump file" the crash system produces,
- * given CustomOS has no persistent filesystem yet.
+ * given DuetOS has no persistent filesystem yet.
  *
  * Every address reachable through the embedded symbol table is
  * annotated inline with
@@ -36,14 +36,14 @@
  * mode RIPs) fall back to bare hex — we never fabricate a symbol.
  */
 
-namespace customos::core
+namespace duetos::core
 {
 
 namespace
 {
 
-constexpr const char* kDumpBeginMarker = "=== CUSTOMOS CRASH DUMP BEGIN ===\n";
-constexpr const char* kDumpEndMarker = "=== CUSTOMOS CRASH DUMP END ===\n";
+constexpr const char* kDumpBeginMarker = "=== DUETOS CRASH DUMP BEGIN ===\n";
+constexpr const char* kDumpEndMarker = "=== DUETOS CRASH DUMP END ===\n";
 
 // u16 schema version of the dump record. Bump whenever the layout of
 // lines between BEGIN/END changes in a way a parser would care about.
@@ -259,7 +259,7 @@ void Panic(const char* subsystem, const char* message)
     // Probe before disabling interrupts so the log line hits the
     // ring buffer with a valid timestamp. Armed-log by default —
     // `[probe] panic.enter rip=...` tells you who called Panic.
-    KBP_PROBE(::customos::debug::ProbeId::kPanicEnter);
+    KBP_PROBE(::duetos::debug::ProbeId::kPanicEnter);
 
     // Disable interrupts before writing the banner so a pending IRQ
     // can't preempt us mid-message and scramble the output. Halt
@@ -320,4 +320,4 @@ void PanicWithValue(const char* subsystem, const char* message, u64 value)
     arch::Halt();
 }
 
-} // namespace customos::core
+} // namespace duetos::core

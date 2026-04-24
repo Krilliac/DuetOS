@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Boot CustomOS in GUI mode and capture a single framebuffer PNG.
+# Boot DuetOS in GUI mode and capture a single framebuffer PNG.
 #
 # Runs QEMU headless with the standard kernel ISO, waits for the
 # boot-log marker that says "desktop compositor is painting", then
@@ -14,8 +14,8 @@
 #   tools/qemu/screenshot.sh out.png    -> writes to out.png
 #
 # Env:
-#   CUSTOMOS_PRESET   (default x86_64-debug)
-#   CUSTOMOS_SETTLE   seconds to wait AFTER the boot marker appears
+#   DUETOS_PRESET   (default x86_64-debug)
+#   DUETOS_SETTLE   seconds to wait AFTER the boot marker appears
 #                     so long-running self-tests have time to paint
 #                     the full compose (default 5)
 
@@ -23,14 +23,14 @@ set -euo pipefail
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-PRESET="${CUSTOMOS_PRESET:-x86_64-debug}"
+PRESET="${DUETOS_PRESET:-x86_64-debug}"
 BUILD_DIR="${REPO_ROOT}/build/${PRESET}"
-ISO_IMAGE="${BUILD_DIR}/customos.iso"
+ISO_IMAGE="${BUILD_DIR}/duetos.iso"
 OUT_PNG="${1:-${BUILD_DIR}/screen.png}"
 SERIAL_LOG="${BUILD_DIR}/screen.serial.log"
 PPM_OUT="${BUILD_DIR}/screen.ppm"
 MON_SOCK="${BUILD_DIR}/qemu-mon.sock"
-SETTLE="${CUSTOMOS_SETTLE:-5}"
+SETTLE="${DUETOS_SETTLE:-5}"
 
 if [[ ! -f "${ISO_IMAGE}" ]]; then
     echo "error: ISO not built: ${ISO_IMAGE}" >&2
@@ -70,11 +70,11 @@ QEMU_PID=$!
 # Ensure QEMU is cleaned up on any exit.
 trap 'kill "${QEMU_PID}" 2>/dev/null || true; rm -f "${MON_SOCK}"' EXIT
 
-# If CUSTOMOS_DEMO=1, drive GRUB via the monitor DURING its 3-
+# If DUETOS_DEMO=1, drive GRUB via the monitor DURING its 3-
 # second timeout window: arrow-down past "Desktop" + "TTY" entries
 # to land on "Desktop (demo widgets)", then enter. Must happen
 # before GRUB auto-selects the default.
-if [[ "${CUSTOMOS_DEMO:-0}" == "1" ]]; then
+if [[ "${DUETOS_DEMO:-0}" == "1" ]]; then
     (
         sleep 1  # let QEMU come up + monitor socket appear
         python3 - <<'PY' "${MON_SOCK}"

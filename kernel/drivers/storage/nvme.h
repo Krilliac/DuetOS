@@ -3,7 +3,7 @@
 #include "../../core/types.h"
 
 /*
- * CustomOS NVMe driver — v0.
+ * DuetOS NVMe driver — v0.
  *
  * Minimum viable driver for the "SSD path" — M.2 NVMe is the
  * dominant storage form factor for modern PCs, and QEMU's
@@ -70,7 +70,7 @@
  * controller is present.
  */
 
-namespace customos::drivers::storage
+namespace duetos::drivers::storage
 {
 
 /// Discover and bring up the first NVMe controller on the PCI
@@ -82,9 +82,9 @@ void NvmeInit();
 /// Boot-time self-test: if an NVMe block device exists, reads
 /// LBA 0 and asserts the first 8 bytes match the marker
 /// `tools/qemu/run.sh` seeded into the scratch disk image
-/// ("CUSTOMOS"). Prints one PASS/FAIL line to COM1. If no NVMe
+/// ("DUETOS"). Prints one PASS/FAIL line to COM1. If no NVMe
 /// device is present (no controller or register failed), logs
 /// "skipped" — not a test failure.
 void NvmeSelfTest();
 
-} // namespace customos::drivers::storage
+} // namespace duetos::drivers::storage

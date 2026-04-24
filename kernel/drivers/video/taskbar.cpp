@@ -8,7 +8,7 @@
 #include "framebuffer.h"
 #include "widget.h"
 
-namespace customos::drivers::video
+namespace duetos::drivers::video
 {
 
 namespace
@@ -192,8 +192,8 @@ void TaskbarRedraw()
     // Clock bounds are captured into g_clock_* so the mouse reader
     // can toggle the calendar popup on click.
 
-    customos::arch::RtcTime rtc{};
-    customos::arch::RtcRead(&rtc);
+    duetos::arch::RtcTime rtc{};
+    duetos::arch::RtcRead(&rtc);
 
     // Uptime goes at the far right; the clock gets its own rect
     // so the mouse reader has a tight hit-test target.
@@ -202,7 +202,7 @@ void TaskbarRedraw()
     upbuf[up_off++] = 'U';
     upbuf[up_off++] = 'P';
     upbuf[up_off++] = ' ';
-    const u64 ticks = customos::sched::SchedNowTicks();
+    const u64 ticks = duetos::sched::SchedNowTicks();
     const u64 secs = ticks / 100;
     up_off += FormatU64Dec(secs, upbuf + up_off, sizeof(upbuf) - up_off - 2);
     upbuf[up_off++] = 's';
@@ -306,7 +306,7 @@ void TaskbarRedraw()
     // (4 MiB) — a rough "we're not starving" threshold. Turns red
     // when free frames drop below that as a gross pressure signal.
     {
-        const u64 free_frames = customos::mm::FreeFramesCount();
+        const u64 free_frames = duetos::mm::FreeFramesCount();
         const bool healthy = free_frames > 1024;
         draw_tray_cell("M", healthy ? 0x0040803C : 0x00C04040);
     }
@@ -314,16 +314,16 @@ void TaskbarRedraw()
     draw_tray_cell("C", 0x0040803C);
     // NET: green if at least one NIC was discovered.
     {
-        const bool have_nic = customos::drivers::net::NicCount() > 0;
+        const bool have_nic = duetos::drivers::net::NicCount() > 0;
         draw_tray_cell("N", have_nic ? 0x0040803C : 0x00505058);
     }
     // Battery (only shown if power driver decided a battery is
     // present — laptops; skipped on desktops).
     {
-        const auto snap = customos::drivers::power::PowerSnapshotRead();
-        if (snap.battery.state != customos::drivers::power::kBatNotPresent)
+        const auto snap = duetos::drivers::power::PowerSnapshotRead();
+        if (snap.battery.state != duetos::drivers::power::kBatNotPresent)
         {
-            const u32 colour = (snap.ac == customos::drivers::power::kAcOnline) ? 0x003C9060 : 0x00C09040;
+            const u32 colour = (snap.ac == duetos::drivers::power::kAcOnline) ? 0x003C9060 : 0x00C09040;
             draw_tray_cell("B", colour);
         }
     }
@@ -388,4 +388,4 @@ void TaskbarStartBounds(u32* x_out, u32* y_out, u32* w_out, u32* h_out)
         *h_out = start_h;
 }
 
-} // namespace customos::drivers::video
+} // namespace duetos::drivers::video

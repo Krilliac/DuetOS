@@ -102,6 +102,6 @@ python3 "${EMBED}" \
     "${EXE}" \
     "${OUT_HEADER}" \
     kBinCustomDllTestBytes \
-    --namespace "customos::fs::generated"
+    --namespace "duetos::fs::generated"
 
 echo "build-customdll-test.sh: wrote ${OUT_HEADER} (PE $(stat -c%s "${EXE}") bytes)"

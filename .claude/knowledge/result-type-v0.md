@@ -15,7 +15,7 @@ this file is that type.
 ## Shape
 
 ```cpp
-namespace customos::core {
+namespace duetos::core {
 
 enum class ErrorCode : u32 {
     Ok = 0, OutOfMemory, InvalidArgument, NotFound, AlreadyExists,
@@ -55,9 +55,9 @@ pointers, ints, POD structs like `MsixRoute`, `PhysAddr`.
 ## Canonical usage
 
 ```cpp
-::customos::core::Result<Thing> MakeThing() {
+::duetos::core::Result<Thing> MakeThing() {
     if (bad)
-        return ::customos::core::Err{ErrorCode::InvalidArgument};
+        return ::duetos::core::Err{ErrorCode::InvalidArgument};
     return Thing{...};
 }
 

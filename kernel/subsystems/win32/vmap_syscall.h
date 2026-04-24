@@ -11,15 +11,15 @@
  *                    — a bump-only arena can't free individually.
  */
 
-namespace customos::arch
+namespace duetos::arch
 {
 struct TrapFrame;
 }
 
-namespace customos::subsystems::win32
+namespace duetos::subsystems::win32
 {
 
 void DoVmap(arch::TrapFrame* frame);
 void DoVunmap(arch::TrapFrame* frame);
 
-} // namespace customos::subsystems::win32
+} // namespace duetos::subsystems::win32

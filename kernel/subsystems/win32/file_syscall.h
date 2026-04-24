@@ -19,12 +19,12 @@
  *   SYS_FILE_CREATE (44) — cap-gated on kCapFsWrite.
  */
 
-namespace customos::arch
+namespace duetos::arch
 {
 struct TrapFrame;
 }
 
-namespace customos::subsystems::win32
+namespace duetos::subsystems::win32
 {
 
 void DoFileOpen(arch::TrapFrame* frame);
@@ -35,4 +35,4 @@ void DoFileFstat(arch::TrapFrame* frame);
 void DoFileWrite(arch::TrapFrame* frame);
 void DoFileCreate(arch::TrapFrame* frame);
 
-} // namespace customos::subsystems::win32
+} // namespace duetos::subsystems::win32

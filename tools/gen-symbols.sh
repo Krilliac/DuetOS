@@ -9,12 +9,12 @@
 #
 # Output format — compact but parseable:
 #
-#     namespace customos::core {
-#         extern "C" const SymbolEntry g_customos_symtab_entries[] = {
+#     namespace duetos::core {
+#         extern "C" const SymbolEntry g_duetos_symtab_entries[] = {
 #             { 0xffff..., size, line, "name", "path/file.cpp" },
 #             ...
 #         };
-#         extern "C" const u64 g_customos_symtab_count = N;
+#         extern "C" const u64 g_duetos_symtab_count = N;
 #     }
 #
 # Usage:
@@ -147,9 +147,9 @@ awk '{ print "0x" $1 }' "${SYMS_FILTERED}" > "${ADDR_LIST}"
     printf '\n'
     printf '#include "core/symbols.h"\n'
     printf '\n'
-    printf 'namespace customos::core {\n'
+    printf 'namespace duetos::core {\n'
     printf '\n'
-    printf 'extern "C" const SymbolEntry g_customos_symtab_entries[] = {\n'
+    printf 'extern "C" const SymbolEntry g_duetos_symtab_entries[] = {\n'
 } > "${OUT_CPP}"
 
 # Walk both files in lockstep. `paste -d\|` merges them on a sentinel
@@ -218,9 +218,9 @@ entry_count="$(wc -l < "${SYMS_FILTERED}" | tr -d ' ')"
 {
     printf '};\n'
     printf '\n'
-    printf 'extern "C" const customos::u64 g_customos_symtab_count = %su;\n' "${entry_count}"
+    printf 'extern "C" const duetos::u64 g_duetos_symtab_count = %su;\n' "${entry_count}"
     printf '\n'
-    printf '} // namespace customos::core\n'
+    printf '} // namespace duetos::core\n'
 } >> "${OUT_CPP}"
 
 echo "gen-symbols: ${entry_count} entries -> ${OUT_CPP}"

@@ -4,7 +4,7 @@
 #include "syscall_scan.h"
 
 /*
- * CustomOS — `inspect` umbrella: reverse-engineering + triage
+ * DuetOS — `inspect` umbrella: reverse-engineering + triage
  * tooling that the operator drives from the shell.
  *
  * Subcommands (see `kernel/core/shell.cpp` for dispatch):
@@ -49,7 +49,7 @@
  * operator typed a command (or armed the latch).
  */
 
-namespace customos::debug
+namespace duetos::debug
 {
 
 // ---------- Opcodes scanner ----------
@@ -160,4 +160,4 @@ bool InspectFindPeText(const u8* file, u64 len, InspectSection* out);
 /// false if `file` is not an ELF64 or has no PT_LOAD with PF_X.
 bool InspectFindElfText(const u8* file, u64 len, InspectSection* out);
 
-} // namespace customos::debug
+} // namespace duetos::debug

@@ -3,7 +3,7 @@
 #include "../../core/types.h"
 
 /*
- * CustomOS AHCI storage driver.
+ * DuetOS AHCI storage driver.
  *
  * v0: discovery-only (landed earlier).
  * v1 (this commit): single-port READ DMA EXT + BlockDevice wrapper.
@@ -39,7 +39,7 @@
  * PciEnumerate + BlockLayerInit.
  */
 
-namespace customos::drivers::storage
+namespace duetos::drivers::storage
 {
 
 /// Discover every AHCI controller + online every attached SATA
@@ -57,4 +57,4 @@ void AhciInit();
 /// No-op + log "skipped" if no SATA drive is registered.
 void AhciSelfTest();
 
-} // namespace customos::drivers::storage
+} // namespace duetos::drivers::storage

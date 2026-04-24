@@ -11,7 +11,7 @@
 #include "../../sched/sched.h"
 #include "../pci/pci.h"
 
-namespace customos::drivers::net
+namespace duetos::drivers::net
 {
 
 namespace
@@ -238,7 +238,7 @@ struct E1000Ctx
     // `rx_wait` and the handler wakes it on RX/link events
     // instead of running at tick cadence.
     u8 irq_vector;
-    customos::sched::WaitQueue rx_wait;
+    duetos::sched::WaitQueue rx_wait;
 };
 
 constinit E1000Ctx g_e1000 = {};
@@ -419,7 +419,7 @@ void E1000DrainRx()
         // Hand the frame up the stack — ARP / IPv4 dispatch
         // lives in net/stack.cpp. Interface index 0 matches
         // the NetStackBindInterface call in E1000BringUp.
-        customos::net::NetStackInjectRx(/*iface_index=*/0, buf, len);
+        duetos::net::NetStackInjectRx(/*iface_index=*/0, buf, len);
         // Release the descriptor back to the controller.
         d.status = 0;
         g_e1000.rx_tail = slot;
@@ -438,7 +438,7 @@ void E1000IrqHandler()
     if (g_e1000.mmio == nullptr)
         return;
     (void)E1000Read(kE1000RegIcr);
-    customos::sched::WaitQueueWakeOne(&g_e1000.rx_wait);
+    duetos::sched::WaitQueueWakeOne(&g_e1000.rx_wait);
 }
 
 void E1000RxPollEntry(void*)
@@ -453,18 +453,18 @@ void E1000RxPollEntry(void*)
             // pattern as NVMe/xHCI: under Cli, re-check whether
             // the next RX descriptor is marked DD; if so we
             // skip blocking and loop to drain.
-            customos::arch::Cli();
+            duetos::arch::Cli();
             const u32 slot = (g_e1000.rx_tail + 1) % kE1000RxRingSlots;
             if ((g_e1000.rx_ring[slot].status & kE1000RxStatusDd) != 0)
             {
-                customos::arch::Sti();
+                duetos::arch::Sti();
                 continue;
             }
-            customos::sched::WaitQueueBlock(&g_e1000.rx_wait);
+            duetos::sched::WaitQueueBlock(&g_e1000.rx_wait);
         }
         else
         {
-            customos::sched::SchedSleepTicks(1);
+            duetos::sched::SchedSleepTicks(1);
         }
     }
 }
@@ -490,7 +490,7 @@ void E1000SelfTestTx(const NicInfo& n)
     frame[13] = 0xB5;
     // Payload: a short recognizable marker so a tcpdump on the host
     // netdev sees this frame clearly.
-    const char kMarker[] = "CUSTOMOS-E1000-SELFTEST";
+    const char kMarker[] = "DUETOS-E1000-SELFTEST";
     for (u32 i = 0; i < sizeof(kMarker) - 1 && 14 + i < sizeof(frame); ++i)
         frame[14 + i] = u8(kMarker[i]);
 
@@ -597,7 +597,7 @@ bool E1000BringUp(NicInfo& n)
     // (QEMU's user netdev generates no traffic unless the host
     // initiates; on real hardware the tick cadence is unrelated to
     // line rate since we're draining a batch per tick).
-    customos::sched::SchedCreate(E1000RxPollEntry, nullptr, "e1000-rx-poll");
+    duetos::sched::SchedCreate(E1000RxPollEntry, nullptr, "e1000-rx-poll");
 
     // Bind to the network stack. Static IP 10.0.2.15 matches
     // QEMU's default SLIRP DHCP lease so the host can ping us
@@ -608,15 +608,15 @@ bool E1000BringUp(NicInfo& n)
         (void)iface_index;
         return E1000Send(static_cast<const u8*>(frame), u32(len));
     };
-    customos::net::MacAddress mac{};
+    duetos::net::MacAddress mac{};
     for (u64 i = 0; i < 6; ++i)
         mac.octets[i] = n.mac[i];
     // Start with the all-zero IP so DHCP's DISCOVER uses the
     // correct src=0.0.0.0. The stack rebinds iface 0 to the
     // leased IP on ACK.
-    customos::net::Ipv4Address ip{{0, 0, 0, 0}};
-    customos::net::NetStackBindInterface(/*iface_index=*/0, mac, ip, tx_trampoline);
-    customos::net::DhcpStart(/*iface_index=*/0);
+    duetos::net::Ipv4Address ip{{0, 0, 0, 0}};
+    duetos::net::NetStackBindInterface(/*iface_index=*/0, mac, ip, tx_trampoline);
+    duetos::net::DhcpStart(/*iface_index=*/0);
 
     // Self-test: emit one broadcast frame so a tcpdump on the host
     // side can confirm the TX path works end-to-end.
@@ -771,7 +771,7 @@ void NetInit()
     }
 }
 
-::customos::core::Result<void> NetShutdown()
+::duetos::core::Result<void> NetShutdown()
 {
     KLOG_TRACE_SCOPE("drivers/net", "NetShutdown");
     const u64 dropped = g_nic_count;
@@ -864,4 +864,4 @@ const char* VirtioNetTag(u16 device_id)
     return "virtio-unknown-class";
 }
 
-} // namespace customos::drivers::net
+} // namespace duetos::drivers::net

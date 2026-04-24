@@ -3,7 +3,7 @@
 #include "types.h"
 
 /*
- * CustomOS — Runtime invariant checker, v0.
+ * DuetOS — Runtime invariant checker, v0.
  *
  * Proactive detection of silent corruption / drift in kernel
  * state. The checker runs a fixed battery of invariant tests
@@ -50,7 +50,7 @@
  * spinlock.
  */
 
-namespace customos::core
+namespace duetos::core
 {
 
 enum class HealthIssue : u32
@@ -262,4 +262,4 @@ void RuntimeCheckerTick();
 /// one for arrays this size).
 const HealthReport& RuntimeCheckerStatusRead();
 
-} // namespace customos::core
+} // namespace duetos::core

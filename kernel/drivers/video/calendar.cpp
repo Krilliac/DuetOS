@@ -3,7 +3,7 @@
 #include "../../arch/x86_64/rtc.h"
 #include "framebuffer.h"
 
-namespace customos::drivers::video
+namespace duetos::drivers::video
 {
 
 namespace
@@ -130,8 +130,8 @@ void CalendarRedraw()
     if (!g_open)
         return;
 
-    customos::arch::RtcTime rtc{};
-    customos::arch::RtcRead(&rtc);
+    duetos::arch::RtcTime rtc{};
+    duetos::arch::RtcRead(&rtc);
 
     u32 year = rtc.year;
     u32 month = rtc.month;
@@ -224,4 +224,4 @@ bool CalendarContains(u32 x, u32 y)
     return x >= g_ax && x < g_ax + kPanelW && y >= g_ay && y < g_ay + kPanelH;
 }
 
-} // namespace customos::drivers::video
+} // namespace duetos::drivers::video

@@ -7,7 +7,7 @@
 #include "../../mm/frame_allocator.h"
 #include "../../mm/paging.h"
 
-namespace customos::subsystems::win32
+namespace duetos::subsystems::win32
 {
 
 void DoVmap(arch::TrapFrame* frame)
@@ -95,4 +95,4 @@ void DoVunmap(arch::TrapFrame* frame)
     frame->rax = 0;
 }
 
-} // namespace customos::subsystems::win32
+} // namespace duetos::subsystems::win32

@@ -1,5 +1,5 @@
 ---
-# CustomOS clang-tidy configuration
+# DuetOS clang-tidy configuration
 # Catches common C/C++ pitfalls and enforces modern practices.
 # Kernel code: no RTTI, no exceptions — avoid modernize-* rules that assume them.
 

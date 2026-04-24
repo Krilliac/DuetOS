@@ -3,7 +3,7 @@
 #include "../core/types.h"
 
 /*
- * CustomOS — kernel exception table (extable) — v0.
+ * DuetOS — kernel exception table (extable) — v0.
  *
  * Generalises the mechanism that traps.cpp already hard-codes for
  * `__copy_user_fault_fixup`: a registry of
@@ -41,7 +41,7 @@
  * trying to avoid in the trap path.
  */
 
-namespace customos::debug
+namespace duetos::debug
 {
 
 inline constexpr u32 kMaxExtableEntries = 32;
@@ -108,4 +108,4 @@ const ExtableEntry* KernelExtableEntryAt(u32 i);
 /// paths. PASS/FAIL line on COM1; panics on mismatch.
 void ExtableSelfTest();
 
-} // namespace customos::debug
+} // namespace duetos::debug

@@ -3,7 +3,7 @@
 #include "../../core/types.h"
 
 /*
- * CustomOS — linear framebuffer driver, v0.
+ * DuetOS — linear framebuffer driver, v0.
  *
  * First direct-to-pixel graphics primitive in the tree. Consumes the
  * Multiboot2 framebuffer tag (type 8) GRUB hands over on boot, maps
@@ -48,7 +48,7 @@
  * needs them.
  */
 
-namespace customos::drivers::video
+namespace duetos::drivers::video
 {
 
 struct FramebufferInfo
@@ -128,4 +128,4 @@ void FramebufferSelfTest();
 /// to rebuild it explicitly after this call succeeds.
 bool FramebufferRebind(u64 phys, u32 width, u32 height, u32 pitch, u8 bpp);
 
-} // namespace customos::drivers::video
+} // namespace duetos::drivers::video

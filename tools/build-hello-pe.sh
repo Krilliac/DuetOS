@@ -56,7 +56,7 @@ LLD_LINK="${LLD_LINK:-lld-link}"
 # Link.
 #
 #   /subsystem:console    — console-subsystem PE (we don't care,
-#                           CustomOS ignores Subsystem today, but
+#                           DuetOS ignores Subsystem today, but
 #                           we want a real value).
 #   /entry:_start         — skip the normal CRT entry; use our
 #                           freestanding _start.
@@ -95,6 +95,6 @@ python3 "${EMBED}" \
     "${EXE}" \
     "${OUT_HEADER}" \
     kBinHelloPeBytes \
-    --namespace "customos::fs::generated"
+    --namespace "duetos::fs::generated"
 
 echo "build_hello_pe.sh: wrote ${OUT_HEADER} (PE $(stat -c%s "${EXE}") bytes)"

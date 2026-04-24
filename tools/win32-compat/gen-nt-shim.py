@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Generate a CustomOS NT-syscall mapping table from the j00ru CSV.
+Generate a DuetOS NT-syscall mapping table from the j00ru CSV.
 
 Reads `nt-syscalls-x64.csv` (one row per NT call, one column per Windows
 version), filters to the calls present in EVERY listed version (the
 ~292 "bedrock" calls), and emits a C++ header listing each with:
 
   * its NT syscall number on the chosen Windows version (Win11 by default)
-  * the corresponding CustomOS internal SYS_* number, or kSysNtNotImpl
+  * the corresponding DuetOS internal SYS_* number, or kSysNtNotImpl
     when we don't yet have a mapping
 
 The mapping rules are hand-curated below in `KNOWN_MAPPINGS`. Every time
@@ -27,14 +27,14 @@ from pathlib import Path
 
 # ----------------------------------------------------------------------
 # Mapping rules. Each entry says: "this NT function is the closest
-# equivalent of this CustomOS SYS_* number". Add entries as we
+# equivalent of this DuetOS SYS_* number". Add entries as we
 # implement matching SYS_* numbers in kernel/core/syscall.h.
 #
 # Naming: keep the SYS_* identifier exactly as it appears in syscall.h
 # so the generator can emit the C++ enum reference verbatim.
 # ----------------------------------------------------------------------
 KNOWN_MAPPINGS = {
-    # CustomOS today (slice 80-era) — clean Nt analogues
+    # DuetOS today (slice 80-era) — clean Nt analogues
     "NtTerminateProcess":          "SYS_EXIT",            # ExitProcess maps here too via kernel32
     "NtWriteFile":                 "SYS_WRITE",           # path-based today; close enough for handle-on-stdout
     "NtYieldExecution":            "SYS_YIELD",
@@ -93,7 +93,7 @@ HEADER_TEMPLATE = """// AUTO-GENERATED — do not edit by hand.
 // Target Windows version: {version}
 // Bedrock NT calls (present in every Windows XP→Win11 25H2): {bedrock_count}
 // All known NT calls on the target version: {all_count}
-// CustomOS coverage: {covered_count}/{bedrock_count} = {pct}%
+// DuetOS coverage: {covered_count}/{bedrock_count} = {pct}%
 //
 // See tools/win32-compat/README.md for the legal + design rationale.
 
@@ -102,22 +102,22 @@ HEADER_TEMPLATE = """// AUTO-GENERATED — do not edit by hand.
 #include "../../core/syscall.h"
 #include "../../core/types.h"
 
-namespace customos::subsystems::win32
+namespace duetos::subsystems::win32
 {{
 
-/// Sentinel value for `NtSyscallMapping::customos_sys` indicating that
-/// CustomOS has no internal SYS_* number that maps to this NT call. The
+/// Sentinel value for `NtSyscallMapping::duetos_sys` indicating that
+/// DuetOS has no internal SYS_* number that maps to this NT call. The
 /// ntdll shim's catch-all stub returns STATUS_NOT_IMPLEMENTED for these.
 inline constexpr u32 kSysNtNotImpl = 0xFFFFFFFFu;
 
 /// One row of the NT-syscall mapping table. Used by the (future) ntdll
-/// shim to route an `eax = nt_number` syscall into the matching CustomOS
+/// shim to route an `eax = nt_number` syscall into the matching DuetOS
 /// SYS_*. Sorted by `nt_number` so the shim can binary-search.
 struct NtSyscallMapping
 {{
     const char* nt_name;     // e.g. "NtCreateFile"
     u16 nt_number;           // syscall number on the target Windows version
-    u32 customos_sys;        // matching SYS_* enumerator value, or kSysNtNotImpl
+    u32 duetos_sys;        // matching SYS_* enumerator value, or kSysNtNotImpl
 }};
 
 /// Bedrock NT syscalls — present in every Windows version from XP SP1
@@ -171,7 +171,7 @@ inline const NtSyscallMapping* NtSyscallByNumber(u16 nr)
     return nullptr;
 }}
 
-}} // namespace customos::subsystems::win32
+}} // namespace duetos::subsystems::win32
 """
 
 
@@ -236,7 +236,7 @@ def main():
             if sys_enum is None:
                 mapping_expr = "kSysNtNotImpl"
             else:
-                mapping_expr = f"static_cast<u32>(::customos::core::{sys_enum})"
+                mapping_expr = f"static_cast<u32>(::duetos::core::{sys_enum})"
                 covered += 1
             out.append(f'    {{"{name}", 0x{num:04x}, {mapping_expr}}},')
         return out, covered
@@ -259,7 +259,7 @@ def main():
     print(f"wrote {args.out}")
     print(f"  bedrock NT calls   : {len(bedrock)}")
     print(f"  all NT calls       : {len(all_syscalls)}")
-    print(f"  CustomOS-mapped    : {bedrock_covered} ({pct}%)")
+    print(f"  DuetOS-mapped    : {bedrock_covered} ({pct}%)")
     print(f"  unmapped           : {len(bedrock) - bedrock_covered} (route to kSysNtNotImpl)")
 
 

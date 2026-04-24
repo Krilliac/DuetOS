@@ -4,7 +4,7 @@
 #include "../core/types.h"
 
 /*
- * CustomOS physical frame allocator — v0.
+ * DuetOS physical frame allocator — v0.
  *
  * Hands out 4 KiB frames of physical memory backed by a bitmap. The bitmap
  * itself lives in the first "available" region large enough to hold it that
@@ -22,7 +22,7 @@
  * and before anything else asks for physical memory.
  */
 
-namespace customos::mm
+namespace duetos::mm
 {
 
 using PhysAddr = u64;
@@ -42,11 +42,11 @@ PhysAddr AllocateFrame();
 /// Result-shaped sibling of `AllocateFrame`. Returns
 /// `ErrorCode::OutOfMemory` on allocator exhaustion; success wraps
 /// the same PhysAddr. Prefer this in new code.
-inline ::customos::core::Result<PhysAddr> TryAllocateFrame()
+inline ::duetos::core::Result<PhysAddr> TryAllocateFrame()
 {
     const PhysAddr f = AllocateFrame();
     if (f == kNullFrame)
-        return ::customos::core::Err{::customos::core::ErrorCode::OutOfMemory};
+        return ::duetos::core::Err{::duetos::core::ErrorCode::OutOfMemory};
     return f;
 }
 
@@ -62,13 +62,13 @@ PhysAddr AllocateContiguousFrames(u64 count);
 /// Result-shaped sibling of `AllocateContiguousFrames`. Maps the
 /// null-frame sentinel to `ErrorCode::OutOfMemory` (run not
 /// available) and `count==0` to `ErrorCode::InvalidArgument`.
-inline ::customos::core::Result<PhysAddr> TryAllocateContiguousFrames(u64 count)
+inline ::duetos::core::Result<PhysAddr> TryAllocateContiguousFrames(u64 count)
 {
     if (count == 0)
-        return ::customos::core::Err{::customos::core::ErrorCode::InvalidArgument};
+        return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
     const PhysAddr f = AllocateContiguousFrames(count);
     if (f == kNullFrame)
-        return ::customos::core::Err{::customos::core::ErrorCode::OutOfMemory};
+        return ::duetos::core::Err{::duetos::core::ErrorCode::OutOfMemory};
     return f;
 }
 
@@ -90,4 +90,4 @@ u64 FreeFramesCount();
 /// looks wrong.
 void FrameAllocatorSelfTest();
 
-} // namespace customos::mm
+} // namespace duetos::mm

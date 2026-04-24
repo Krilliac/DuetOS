@@ -1,5 +1,5 @@
 ---
-# CustomOS C++ / C code style
+# DuetOS C++ / C code style
 # Applies to kernel, drivers, subsystems, userland.
 
 BasedOnStyle: Microsoft

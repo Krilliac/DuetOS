@@ -30,7 +30,7 @@
  * wait can busy-spin for up to ~1 ms per read.
  */
 
-namespace customos::arch
+namespace duetos::arch
 {
 
 struct RtcTime
@@ -62,4 +62,4 @@ u8 CmosReadByte(u8 index);
 /// the raw hex. Safe single-init; a second call just re-dumps.
 void CmosDump();
 
-} // namespace customos::arch
+} // namespace duetos::arch

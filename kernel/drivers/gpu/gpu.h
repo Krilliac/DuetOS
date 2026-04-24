@@ -4,7 +4,7 @@
 #include "../../core/types.h"
 
 /*
- * CustomOS — GPU discovery layer, v0.
+ * DuetOS — GPU discovery layer, v0.
  *
  * Walks the PCI device cache after `PciEnumerate()` has run, picks
  * out display-class controllers (class_code == 0x03), classifies
@@ -37,7 +37,7 @@
  * Accessors are read-only after.
  */
 
-namespace customos::drivers::gpu
+namespace duetos::drivers::gpu
 {
 
 // Vendor IDs. Covers the tier-1 real GPUs + tier-3 emulation.
@@ -79,7 +79,7 @@ void GpuInit();
 /// Drop every GPU record + clear the live flag so the next
 /// `GpuInit` re-walks PCI. Always succeeds. MMIO mappings are
 /// retained (same v0 trade-off as drivers/net).
-::customos::core::Result<void> GpuShutdown();
+::duetos::core::Result<void> GpuShutdown();
 
 /// Count of GPUs found by the most recent `GpuInit` call.
 u64 GpuCount();
@@ -112,4 +112,4 @@ const char* AmdGenTag(u16 device_id);
 /// Classify an NVIDIA GPU by device_id. Turing / Ampere / Ada tags.
 const char* NvidiaGenTag(u16 device_id);
 
-} // namespace customos::drivers::gpu
+} // namespace duetos::drivers::gpu

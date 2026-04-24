@@ -54,7 +54,7 @@ HEADER_TEMPLATE = """// AUTO-GENERATED — do not edit by hand.
 
 #include "../../core/types.h"
 
-namespace customos::subsystems::linux
+namespace duetos::subsystems::linux
 {{
 
 enum class HandlerState : u8
@@ -98,7 +98,7 @@ inline const LinuxSyscallEntry* LinuxSyscallLookup(u64 nr)
     return kLinuxSyscallByNumber[static_cast<u32>(nr)];
 }}
 
-}} // namespace customos::subsystems::linux
+}} // namespace duetos::subsystems::linux
 """
 
 

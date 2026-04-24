@@ -3,7 +3,7 @@
 #include "../core/types.h"
 
 /*
- * CustomOS — kernel spinlock primitive (v0).
+ * DuetOS — kernel spinlock primitive (v0).
  *
  * Test-and-set spinlock with interrupt save/restore. Used to guard
  * data structures that are accessed from both IRQ context and task
@@ -35,7 +35,7 @@
  * Context: kernel. Safe to use in IRQ context and task context.
  */
 
-namespace customos::sync
+namespace duetos::sync
 {
 
 struct SpinLock
@@ -97,4 +97,4 @@ class SpinLockGuard
 /// contention testing waits for AP bring-up.
 void SpinLockSelfTest();
 
-} // namespace customos::sync
+} // namespace duetos::sync

@@ -4,7 +4,7 @@
 #include "../../core/panic.h"
 #include "serial.h"
 
-namespace customos::arch
+namespace duetos::arch
 {
 
 namespace
@@ -41,7 +41,7 @@ HypervisorKind Classify(const char* vendor)
 {
     // Vendor strings per each VMM's public documentation. Order
     // picked by frequency of occurrence in a developer's life —
-    // KVM and TCG first because a CustomOS dev on Linux hits
+    // KVM and TCG first because a DuetOS dev on Linux hits
     // these constantly.
     if (VendorEquals(vendor, "KVMKVMKVM\0\0\0"))
         return HypervisorKind::Kvm;
@@ -155,4 +155,4 @@ bool IsEmulator()
     return g_info.valid && g_info.kind != HypervisorKind::None;
 }
 
-} // namespace customos::arch
+} // namespace duetos::arch

@@ -4,7 +4,7 @@
 #include "../../core/klog.h"
 #include "../../core/panic.h"
 
-namespace customos::drivers::usb::hid
+namespace duetos::drivers::usb::hid
 {
 
 namespace
@@ -417,4 +417,4 @@ void HidSelfTest()
     arch::SerialWrite("[hid-selftest] PASS (boot-keyboard + boot-mouse descriptors parsed)\n");
 }
 
-} // namespace customos::drivers::usb::hid
+} // namespace duetos::drivers::usb::hid

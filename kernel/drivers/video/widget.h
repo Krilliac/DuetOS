@@ -31,7 +31,7 @@
  * from the mouse reader thread.
  */
 
-namespace customos::drivers::video
+namespace duetos::drivers::video
 {
 
 constexpr u32 kWidgetInvalid = 0xFFFFFFFFu;
@@ -245,4 +245,4 @@ DisplayMode GetDisplayMode();
 /// appears on screen. This function is pure state — no paint.
 void SetDisplayMode(DisplayMode mode);
 
-} // namespace customos::drivers::video
+} // namespace duetos::drivers::video

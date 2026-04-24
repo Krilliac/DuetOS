@@ -11,7 +11,7 @@
 #include "panic.h"
 #include "runtime_checker.h"
 
-namespace customos::core
+namespace duetos::core
 {
 
 namespace
@@ -57,7 +57,7 @@ constexpr u64 kHeartbeatTicks = 500;
         // Translator overhead snapshot. Raw TSC counts — the reader
         // divides by host TSC Hz to get ns. See translate.h for
         // the rationale (no reliable TSC→ns calibration yet).
-        ::customos::subsystems::translation::TranslatorOverheadDump();
+        ::duetos::subsystems::translation::TranslatorOverheadDump();
         // System CPU-busy fraction, since boot. total_ticks is the
         // raw 100 Hz timer count; idle_ticks is the subset spent in
         // the idle task (priority == Idle). 100 - idle/total = busy%.
@@ -96,4 +96,4 @@ void StartHeartbeatThread()
     sched::SchedCreate(&HeartbeatMain, nullptr, "kheartbeat");
 }
 
-} // namespace customos::core
+} // namespace duetos::core

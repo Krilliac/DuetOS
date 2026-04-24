@@ -8,7 +8,7 @@
 #include "../core/klog.h"
 #include "../core/panic.h"
 
-namespace customos::mm
+namespace duetos::mm
 {
 
 namespace
@@ -859,4 +859,4 @@ void PagingSelfTest()
     SerialWrite("[mm] paging self-test OK\n");
 }
 
-} // namespace customos::mm
+} // namespace duetos::mm

@@ -3,16 +3,16 @@
 #include "pe_exports.h"
 #include "types.h"
 
-namespace customos::mm
+namespace duetos::mm
 {
 struct AddressSpace;
 }
 
-namespace customos::core
+namespace duetos::core
 {
 
 /*
- * CustomOS DLL loader — stage 2 skeleton.
+ * DuetOS DLL loader — stage 2 skeleton.
  *
  * Builds on the EAT parser (`pe_exports.h`) to turn a PE/COFF
  * DLL buffer into a mapped image + parsed export table. The
@@ -105,7 +105,7 @@ struct DllLoadResult
 /// responsible for releasing the AS (mirrors `PeLoad`'s
 /// contract). On success, the IAT for the DLL's OWN imports is
 /// still unresolved; a later slice will recursively resolve them.
-DllLoadResult DllLoad(const u8* file, u64 file_len, customos::mm::AddressSpace* as, u64 aslr_delta);
+DllLoadResult DllLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, u64 aslr_delta);
 
 /// Look up an export by name in a loaded DLL image and return
 /// the absolute VA to jump to. Returns 0 on miss or on a
@@ -126,4 +126,4 @@ u64 DllResolveOrdinal(const DllImage& dll, u32 ordinal);
 /// is the diagnostic surface.
 void DllLoaderSelfTest();
 
-} // namespace customos::core
+} // namespace duetos::core

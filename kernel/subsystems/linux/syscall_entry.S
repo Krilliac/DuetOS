@@ -1,5 +1,5 @@
 /*
- * CustomOS — Linux-ABI syscall entry stub.
+ * DuetOS — Linux-ABI syscall entry stub.
  *
  * Target of MSR_LSTAR. Entered by the `syscall` instruction from
  * ring 3 in a task whose Process::abi_flavor is kAbiLinux. On
@@ -10,7 +10,7 @@
  *   - All other GP registers carry user values.
  *   - RSP is still the user RSP. SS is kernel-data already.
  *
- * We cannot `sysret` to return on CustomOS: its GDT places user
+ * We cannot `sysret` to return on DuetOS: its GDT places user
  * code and user data in an order incompatible with SYSRET's
  * STAR[63:48] + {8,16} selector arithmetic. We use `iretq`
  * instead — which works with any GDT as long as the iret frame

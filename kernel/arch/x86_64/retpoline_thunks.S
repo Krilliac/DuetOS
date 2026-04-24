@@ -1,5 +1,5 @@
 /*
- * CustomOS — retpoline thunks.
+ * DuetOS — retpoline thunks.
  *
  * -mretpoline replaces every `jmp/call *%rXX` the compiler would
  * emit with `call __x86_indirect_thunk_rXX`. These thunks are the

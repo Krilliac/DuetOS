@@ -2,7 +2,7 @@
 
 #include "../drivers/video/framebuffer.h"
 
-namespace customos::apps::notes
+namespace duetos::apps::notes
 {
 
 namespace
@@ -29,7 +29,7 @@ constexpr u32 kPaperColour = 0x00E0E0D8;
 
 constinit char g_buf[kNotesBufCap] = {};
 constinit u32 g_len = 0;
-constinit customos::drivers::video::WindowHandle g_handle = customos::drivers::video::kWindowInvalid;
+constinit duetos::drivers::video::WindowHandle g_handle = duetos::drivers::video::kWindowInvalid;
 
 // Append one byte unconditionally; silently drops at cap.
 void Append(char c)
@@ -42,7 +42,7 @@ void Append(char c)
 
 void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
 {
-    using customos::drivers::video::FramebufferDrawChar;
+    using duetos::drivers::video::FramebufferDrawChar;
     // Reserve a small inset so text doesn't touch the window's
     // border — matches the padding the kernel-log viewer uses.
     constexpr u32 kPad = 4;
@@ -90,22 +90,22 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
 
 } // namespace
 
-void NotesInit(customos::drivers::video::WindowHandle handle)
+void NotesInit(duetos::drivers::video::WindowHandle handle)
 {
     g_handle = handle;
-    customos::drivers::video::WindowSetContentDraw(handle, DrawFn, nullptr);
+    duetos::drivers::video::WindowSetContentDraw(handle, DrawFn, nullptr);
 
     // Seed with a short greeting so the window isn't blank at
     // boot — also gives the smoke harness a deterministic
-    // string to grep for ("CustomOS Notes").
-    const char kInit[] = "CustomOS Notes v0\nType to add text.\n";
+    // string to grep for ("DuetOS Notes").
+    const char kInit[] = "DuetOS Notes v0\nType to add text.\n";
     for (const char* p = kInit; *p != 0; ++p)
     {
         Append(*p);
     }
 }
 
-customos::drivers::video::WindowHandle NotesWindow()
+duetos::drivers::video::WindowHandle NotesWindow()
 {
     return g_handle;
 }
@@ -135,4 +135,4 @@ bool NotesFeedChar(char c)
     return false;
 }
 
-} // namespace customos::apps::notes
+} // namespace duetos::apps::notes

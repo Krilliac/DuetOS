@@ -6,7 +6,7 @@
 
 ## Description
 
-CustomOS has an AHCI discovery stub and an in-memory ramfs/tmpfs
+DuetOS has an AHCI discovery stub and an in-memory ramfs/tmpfs
 pair. There is no block-device interface, no persistent
 filesystem, no NVMe driver, and no partition parser. This entry
 scopes the sequence for getting from "no persistence" to
@@ -193,7 +193,7 @@ is its own slice.
 In order of likely priority:
 
 1. Writable FAT32 (so the shell can create files).
-2. A native CustomOS FS (our own design, journalled, ext-
+2. A native DuetOS FS (our own design, journalled, ext-
    like). Done in Rust from scratch.
 3. NTFS read-only. Required by the Windows-PE pillar once
    we want to load an .exe from a real NTFS partition.

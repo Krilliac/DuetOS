@@ -5,7 +5,7 @@
 #include "../core/runtime_checker.h"
 #include "../drivers/storage/block.h"
 
-namespace customos::security
+namespace duetos::security
 {
 
 namespace
@@ -326,4 +326,4 @@ const AttackSummary& AttackSimSummary()
     return g_summary;
 }
 
-} // namespace customos::security
+} // namespace duetos::security

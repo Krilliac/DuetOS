@@ -3,7 +3,7 @@
 #include "../../core/types.h"
 
 /*
- * CustomOS — Graphics subsystem skeleton, v0.
+ * DuetOS — Graphics subsystem skeleton, v0.
  *
  * Where the pieces live in the final system:
  *
@@ -57,7 +57,7 @@
  * under a user-mode target when one exists.
  */
 
-namespace customos::subsystems::graphics
+namespace duetos::subsystems::graphics
 {
 
 // -------------------------------------------------------------------
@@ -145,4 +145,4 @@ struct GraphicsStats
 };
 GraphicsStats GraphicsStatsRead();
 
-} // namespace customos::subsystems::graphics
+} // namespace duetos::subsystems::graphics

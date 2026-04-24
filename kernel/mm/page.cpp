@@ -2,7 +2,7 @@
 
 #include "../core/panic.h"
 
-namespace customos::mm
+namespace duetos::mm
 {
 
 namespace
@@ -34,4 +34,4 @@ PhysAddr VirtToPhys(const void* virt)
     return static_cast<PhysAddr>(v - kKernelVirtualBase);
 }
 
-} // namespace customos::mm
+} // namespace duetos::mm

@@ -4,7 +4,7 @@
 #include "../../core/types.h"
 
 /*
- * CustomOS block device layer — v0.
+ * DuetOS block device layer — v0.
  *
  * A uniform interface above every backend that exposes sector-
  * addressable storage: the RAM-backed test device today, plus
@@ -41,7 +41,7 @@
  * reported size, never hardcode 512.
  */
 
-namespace customos::drivers::storage
+namespace duetos::drivers::storage
 {
 
 inline constexpr u32 kBlockHandleInvalid = 0xFFFFFFFFu;
@@ -110,10 +110,10 @@ i32 BlockDeviceRead(u32 handle, u64 lba, u32 count, void* buf);
 
 /// Result-shaped sibling of `BlockDeviceRead`. Maps the legacy
 /// -1 return to `ErrorCode::IoError`; success is `Result<void>`.
-inline ::customos::core::Result<void> TryBlockDeviceRead(u32 handle, u64 lba, u32 count, void* buf)
+inline ::duetos::core::Result<void> TryBlockDeviceRead(u32 handle, u64 lba, u32 count, void* buf)
 {
     if (BlockDeviceRead(handle, lba, count, buf) < 0)
-        return ::customos::core::Err{::customos::core::ErrorCode::IoError};
+        return ::duetos::core::Err{::duetos::core::ErrorCode::IoError};
     return {};
 }
 
@@ -128,10 +128,10 @@ i32 BlockDeviceWrite(u32 handle, u64 lba, u32 count, const void* buf);
 /// write-guard denies, BadState for read-only devices) is a
 /// follow-up once `BlockDeviceWrite` itself returns a typed
 /// failure internally.
-inline ::customos::core::Result<void> TryBlockDeviceWrite(u32 handle, u64 lba, u32 count, const void* buf)
+inline ::duetos::core::Result<void> TryBlockDeviceWrite(u32 handle, u64 lba, u32 count, const void* buf)
 {
     if (BlockDeviceWrite(handle, lba, count, buf) < 0)
-        return ::customos::core::Err{::customos::core::ErrorCode::IoError};
+        return ::duetos::core::Err{::duetos::core::ErrorCode::IoError};
     return {};
 }
 
@@ -217,4 +217,4 @@ void BlockLayerInit();
 /// COM1. Called from main.cpp right after BlockLayerInit.
 void BlockLayerSelfTest();
 
-} // namespace customos::drivers::storage
+} // namespace duetos::drivers::storage

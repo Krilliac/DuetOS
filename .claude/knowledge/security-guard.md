@@ -7,7 +7,7 @@
 ## Description
 
 Every loadable image (ELF, PE, kernel thread, user thread) passes
-through `customos::security::Gate()` before the loader maps a page
+through `duetos::security::Gate()` before the loader maps a page
 or the scheduler queues a task. Static-analysis heuristics produce
 a `Verdict` — Allow / Warn / Deny — and, in Enforce mode, the user
 is prompted via **either** a serial-line prompt on COM1 **or** a

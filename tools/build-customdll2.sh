@@ -76,6 +76,6 @@ python3 "${EMBED}" \
     "${DLL}" \
     "${OUT_HEADER}" \
     kBinCustomDll2Bytes \
-    --namespace "customos::fs::generated"
+    --namespace "duetos::fs::generated"
 
 echo "build-customdll2.sh: wrote ${OUT_HEADER} (DLL $(stat -c%s "${DLL}") bytes)"

@@ -1,7 +1,7 @@
 /*
  * userland/libs/shlwapi/shlwapi.c
  *
- * Freestanding CustomOS shlwapi.dll. 16 Path* / Str*
+ * Freestanding DuetOS shlwapi.dll. 16 Path* / Str*
  * string helpers — all pure-C loops. No syscall dependency.
  */
 

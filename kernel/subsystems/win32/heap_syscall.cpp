@@ -5,7 +5,7 @@
 #include "../../core/process.h"
 #include "heap.h"
 
-namespace customos::subsystems::win32
+namespace duetos::subsystems::win32
 {
 
 namespace
@@ -37,7 +37,7 @@ void DoHeapAlloc(arch::TrapFrame* frame)
         frame->rax = 0;
         return;
     }
-    frame->rax = ::customos::win32::Win32HeapAlloc(proc, frame->rdi);
+    frame->rax = ::duetos::win32::Win32HeapAlloc(proc, frame->rdi);
 }
 
 void DoHeapFree(arch::TrapFrame* frame)
@@ -50,7 +50,7 @@ void DoHeapFree(arch::TrapFrame* frame)
         frame->rax = 0;
         return;
     }
-    ::customos::win32::Win32HeapFree(proc, frame->rdi);
+    ::duetos::win32::Win32HeapFree(proc, frame->rdi);
     frame->rax = 0;
 }
 
@@ -64,7 +64,7 @@ void DoHeapSize(arch::TrapFrame* frame)
         frame->rax = 0;
         return;
     }
-    frame->rax = ::customos::win32::Win32HeapSize(proc, frame->rdi);
+    frame->rax = ::duetos::win32::Win32HeapSize(proc, frame->rdi);
 }
 
 void DoHeapRealloc(arch::TrapFrame* frame)
@@ -77,7 +77,7 @@ void DoHeapRealloc(arch::TrapFrame* frame)
         frame->rax = 0;
         return;
     }
-    frame->rax = ::customos::win32::Win32HeapRealloc(proc, frame->rdi, frame->rsi);
+    frame->rax = ::duetos::win32::Win32HeapRealloc(proc, frame->rdi, frame->rsi);
 }
 
-} // namespace customos::subsystems::win32
+} // namespace duetos::subsystems::win32

@@ -6,12 +6,12 @@
 #include "../mm/paging.h"
 #include "syscall.h"
 
-namespace customos::arch
+namespace duetos::arch
 {
 u64 TimerTicks();
-} // namespace customos::arch
+} // namespace duetos::arch
 
-namespace customos::core
+namespace duetos::core
 {
 
 // Convert an RtcTime (Gregorian date + UTC time-of-day) to a
@@ -227,4 +227,4 @@ void DoFtToSt(arch::TrapFrame* frame)
     frame->rax = 0;
 }
 
-} // namespace customos::core
+} // namespace duetos::core

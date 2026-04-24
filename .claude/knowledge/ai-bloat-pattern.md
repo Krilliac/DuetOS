@@ -12,7 +12,7 @@ In an OS codebase the stakes are higher than in application code: a "just-in-cas
 
 ## Context
 
-Observed repeatedly across AI-assisted projects (including the SparkEngine repo that seeded this one). The pattern reproduces regardless of project domain; what changes is only where the bloat accretes. In CustomOS the predictable hot spots are:
+Observed repeatedly across AI-assisted projects (including the SparkEngine repo that seeded this one). The pattern reproduces regardless of project domain; what changes is only where the bloat accretes. In DuetOS the predictable hot spots are:
 
 - Kernel utility headers (list helpers, string helpers, "maybe we'll need this" containers)
 - Driver skeletons with lifecycle methods that are never called

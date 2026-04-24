@@ -3,7 +3,7 @@
 #include "../../core/types.h"
 
 /*
- * CustomOS x86_64 Interrupt Descriptor Table.
+ * DuetOS x86_64 Interrupt Descriptor Table.
  *
  * A single 256-entry IDT shared by all CPUs (for now — SMP bring-up is a
  * later commit). Vectors 0..31 are wired to the CPU-exception stubs in
@@ -15,7 +15,7 @@
  * GdtInit().
  */
 
-namespace customos::arch
+namespace duetos::arch
 {
 
 /// Install the IDT and load it with lidt. Depends on `kKernelCodeSelector`
@@ -59,4 +59,4 @@ u64 IdtHash();
 /// direct access bypasses IdtSetGate's validation.
 u8* IdtRawBase();
 
-} // namespace customos::arch
+} // namespace duetos::arch

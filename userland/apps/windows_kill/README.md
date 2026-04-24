@@ -47,6 +47,6 @@ file size that doesn't balloon the boot image.
 
 ## Not for execution
 
-This file is NEVER executed by CustomOS — the kernel rejects
+This file is NEVER executed by DuetOS — the kernel rejects
 it at `PeValidate` with `PeStatus::ImportsPresent`. The
 diagnostic output IS the contribution.

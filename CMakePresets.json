@@ -13,7 +13,7 @@
             "binaryDir": "${sourceDir}/build/${presetName}",
             "toolchainFile": "${sourceDir}/cmake/toolchains/x86_64-kernel.cmake",
             "cacheVariables": {
-                "CUSTOMOS_ARCH": "x86_64"
+                "DUETOS_ARCH": "x86_64"
             }
         },
         {

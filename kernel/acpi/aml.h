@@ -4,7 +4,7 @@
 #include "../core/types.h"
 
 /*
- * CustomOS — ACPI AML namespace walker, v0.
+ * DuetOS — ACPI AML namespace walker, v0.
  *
  * Walks the AML byte stream of every cached DSDT + SSDT and builds
  * a flat table of named ACPI objects: `\_SB`, `\_SB.PCI0`,
@@ -42,7 +42,7 @@
  * Context: kernel. AmlNamespaceBuild runs ONCE after AcpiInit.
  */
 
-namespace customos::acpi
+namespace duetos::acpi
 {
 
 inline constexpr u32 kMaxAmlNsEntries = 512;
@@ -84,7 +84,7 @@ void AmlNamespaceBuild();
 /// Drop every entry, clear the "built" flag so the next
 /// `AmlNamespaceBuild` re-walks DSDT/SSDT. Always succeeds — this
 /// subsystem has no external resources to surrender.
-::customos::core::Result<void> AmlNamespaceShutdown();
+::duetos::core::Result<void> AmlNamespaceShutdown();
 
 /// Number of named objects discovered. 0 until AmlNamespaceBuild()
 /// has run.
@@ -110,4 +110,4 @@ u32 AmlNamespaceCountByKind(AmlObjectKind k);
 /// "ACPI shutdown unsupported" — we don't guess bits.
 bool AmlReadS5(u8* slp_typa, u8* slp_typb);
 
-} // namespace customos::acpi
+} // namespace duetos::acpi
