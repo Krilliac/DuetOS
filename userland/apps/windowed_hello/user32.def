@@ -5,20 +5,28 @@
 LIBRARY user32.dll
 
 EXPORTS
+    CreateCaret
     CreateWindowExA
     DestroyWindow
     DispatchMessageA
     GetActiveWindow
+    GetFocus
     GetMessageA
+    GetParent
     GetSystemMetrics
     GetWindowLongPtrA
     InvalidateRect
     KillTimer
+    MessageBeep
     MessageBoxA
     PeekMessageA
     RegisterClassA
     ScreenToClient
+    SendMessageA
+    SetCaretPos
+    SetFocus
     SetTimer
     SetWindowLongPtrA
+    ShowCaret
     ShowWindow
     TranslateMessage

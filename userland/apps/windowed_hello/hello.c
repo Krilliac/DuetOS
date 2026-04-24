@@ -83,7 +83,18 @@ __declspec(dllimport) HANDLE __stdcall GetActiveWindow(void);
 __declspec(dllimport) BOOL __stdcall ScreenToClient(HANDLE h, void* pt);
 __declspec(dllimport) long long __stdcall SetWindowLongPtrA(HANDLE h, int index, long long value);
 __declspec(dllimport) long long __stdcall GetWindowLongPtrA(HANDLE h, int index);
-#define GWLP_USERDATA 1
+__declspec(dllimport) LRESULT __stdcall SendMessageA(HANDLE h, UINT msg, WPARAM w, LPARAM l);
+__declspec(dllimport) HANDLE __stdcall GetParent(HANDLE h);
+__declspec(dllimport) HANDLE __stdcall SetFocus(HANDLE h);
+__declspec(dllimport) HANDLE __stdcall GetFocus(void);
+__declspec(dllimport) BOOL __stdcall CreateCaret(HANDLE hwnd, HANDLE bitmap, int w, int h);
+__declspec(dllimport) BOOL __stdcall ShowCaret(HANDLE hwnd);
+__declspec(dllimport) BOOL __stdcall SetCaretPos(int x, int y);
+__declspec(dllimport) BOOL __stdcall MessageBeep(UINT type);
+
+/* Win32 GWL_STYLE / GWLP_USERDATA constants. */
+#define GWLP_USERDATA (-21)
+#define GWL_STYLE (-16)
 __declspec(dllimport) int __stdcall MessageBoxA(HANDLE hWnd, const char* lpText, const char* lpCaption, UINT uType);
 __declspec(dllimport) BOOL __stdcall GetMessageA(MSG* msg, HANDLE h, UINT min, UINT max);
 __declspec(dllimport) BOOL __stdcall PeekMessageA(MSG* msg, HANDLE h, UINT min, UINT max, UINT flags);
@@ -272,6 +283,34 @@ void mainCRTStartup(void)
             DispatchMessageA(&msg);
         }
         dbg_uint("[odbg] windowed_hello: painted ", painted);
+
+        /* SendMessage round-trip: fire a WM_APP message at our
+         * own WndProc. The proc just recognises WM_TIMER today —
+         * we bump USERDATA by 100 so the counter shows the
+         * send landed. */
+        (void)SetWindowLongPtrA(hwnd, GWLP_USERDATA, 0); /* reset for clean count */
+        LRESULT send_rv = SendMessageA(hwnd, 0x0113 /* WM_TIMER */, 42, 0);
+        const long long post_send_userdata = GetWindowLongPtrA(hwnd, GWLP_USERDATA);
+        dbg_uint("[odbg] windowed_hello: send_rv ", (unsigned)send_rv);
+        dbg_uint("[odbg] windowed_hello: send_ud ", (unsigned)post_send_userdata);
+
+        /* Win32 style round-trip: set + read back GWL_STYLE. */
+        (void)SetWindowLongPtrA(hwnd, GWL_STYLE, 0xDEADBEEF);
+        const long long read_style = GetWindowLongPtrA(hwnd, GWL_STYLE);
+        dbg_uint("[odbg] windowed_hello: style   ", (unsigned)read_style);
+
+        /* Focus round-trip: SetFocus → GetFocus. */
+        SetFocus(hwnd);
+        const unsigned focused_bias = (unsigned)(unsigned long long)GetFocus();
+        dbg_uint("[odbg] windowed_hello: focus   ", focused_bias);
+
+        /* Caret + short beep — verifies SYS_WIN_CARET + SYS_WIN_BEEP
+         * reach the compositor + PC speaker. */
+        CreateCaret(hwnd, 0, 2, 16);
+        SetCaretPos(200, 500);
+        ShowCaret(hwnd);
+        MessageBeep(0);
+        OutputDebugStringA("[odbg] windowed_hello: caret+beep done\n");
     }
 
     /* Screenshot settle window. */

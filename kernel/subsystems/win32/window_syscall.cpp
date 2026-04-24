@@ -5,6 +5,7 @@
 #include "../../arch/x86_64/traps.h"
 #include "../../core/process.h"
 #include "../../core/syscall.h"
+#include "../../drivers/audio/pcspk.h"
 #include "../../drivers/video/framebuffer.h"
 #include "../../drivers/video/theme.h"
 #include "../../drivers/video/widget.h"
@@ -1397,6 +1398,122 @@ void DoWinFind(arch::TrapFrame* frame)
     }
     CompositorUnlock();
     frame->rax = result;
+}
+
+// --- Parent / child / focus / caret / beep ------------------------
+
+void DoWinSetParent(arch::TrapFrame* frame)
+{
+    using namespace duetos::drivers::video;
+    duetos::core::Process* proc = duetos::core::CurrentProcess();
+    if (proc == nullptr)
+    {
+        frame->rax = 0;
+        return;
+    }
+    CompositorLock();
+    const u32 child = HwndToCompositorHandleForCaller(frame->rdi, proc->pid);
+    const u32 parent = (frame->rsi == 0) ? kWindowInvalid : HwndToCompositorHandle(frame->rsi);
+    const WindowHandle prev = (child != kWindowInvalid) ? WindowGetParent(child) : kWindowInvalid;
+    if (child != kWindowInvalid)
+    {
+        WindowSetParent(child, parent);
+    }
+    CompositorUnlock();
+    frame->rax = (prev == kWindowInvalid) ? 0 : (static_cast<u64>(prev) + 1);
+}
+
+void DoWinGetParent(arch::TrapFrame* frame)
+{
+    using namespace duetos::drivers::video;
+    CompositorLock();
+    const u32 h = HwndToCompositorHandle(frame->rdi);
+    const WindowHandle p = (h != kWindowInvalid) ? WindowGetParent(h) : kWindowInvalid;
+    CompositorUnlock();
+    frame->rax = (p == kWindowInvalid) ? 0 : (static_cast<u64>(p) + 1);
+}
+
+void DoWinGetRelated(arch::TrapFrame* frame)
+{
+    using namespace duetos::drivers::video;
+    CompositorLock();
+    const u32 h = HwndToCompositorHandle(frame->rdi);
+    WindowHandle r = kWindowInvalid;
+    if (frame->rsi <= 5 && (h != kWindowInvalid || frame->rsi == 2 || frame->rsi == 3))
+    {
+        r = WindowGetRelated(h, static_cast<WindowRel>(frame->rsi));
+    }
+    CompositorUnlock();
+    frame->rax = (r == kWindowInvalid) ? 0 : (static_cast<u64>(r) + 1);
+}
+
+void DoWinSetFocus(arch::TrapFrame* frame)
+{
+    using namespace duetos::drivers::video;
+    duetos::core::Process* proc = duetos::core::CurrentProcess();
+    if (proc == nullptr)
+    {
+        frame->rax = 0;
+        return;
+    }
+    CompositorLock();
+    const WindowHandle prev = WindowGetFocus();
+    const u32 h = (frame->rdi == 0) ? kWindowInvalid : HwndToCompositorHandleForCaller(frame->rdi, proc->pid);
+    WindowSetFocus(h);
+    CompositorUnlock();
+    WindowMsgWakeAll();
+    frame->rax = (prev == kWindowInvalid) ? 0 : (static_cast<u64>(prev) + 1);
+}
+
+void DoWinGetFocus(arch::TrapFrame* frame)
+{
+    using namespace duetos::drivers::video;
+    CompositorLock();
+    const WindowHandle h = WindowGetFocus();
+    CompositorUnlock();
+    frame->rax = (h == kWindowInvalid) ? 0 : (static_cast<u64>(h) + 1);
+}
+
+void DoWinCaret(arch::TrapFrame* frame)
+{
+    using namespace duetos::drivers::video;
+    const u64 op = frame->rdi;
+    bool ok = true;
+    CompositorLock();
+    switch (op)
+    {
+    case 0: // Create(w, h, owner)
+    {
+        const WindowHandle owner = (frame->r10 == 0) ? kWindowInvalid : HwndToCompositorHandle(frame->r10);
+        WindowCaretCreate(owner, static_cast<u32>(frame->rsi), static_cast<u32>(frame->rdx));
+        break;
+    }
+    case 1: // Destroy
+        WindowCaretDestroy();
+        break;
+    case 2: // SetPos(x, y)
+        WindowCaretSetPos(static_cast<u32>(frame->rsi), static_cast<u32>(frame->rdx));
+        break;
+    case 3: // Show
+        WindowCaretShow(true);
+        break;
+    case 4: // Hide
+        WindowCaretShow(false);
+        break;
+    default:
+        ok = false;
+        break;
+    }
+    CompositorUnlock();
+    frame->rax = ok ? 1 : 0;
+}
+
+void DoWinBeep(arch::TrapFrame* frame)
+{
+    const u32 freq = (frame->rdi == 0) ? 800 : static_cast<u32>(frame->rdi);
+    const u32 dur = (frame->rsi == 0) ? 100 : static_cast<u32>(frame->rsi);
+    const bool ok = duetos::drivers::audio::PcSpeakerBeep(freq, dur);
+    frame->rax = ok ? 1 : 0;
 }
 
 void DoWinSetText(arch::TrapFrame* frame)

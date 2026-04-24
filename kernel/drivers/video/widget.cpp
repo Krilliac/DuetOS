@@ -163,10 +163,11 @@ struct RegisteredWindow
     // GetWindowLongPtr for GWLP_WNDPROC, GWLP_USERDATA, and
     // two extras.
     u64 longs[kWinLongSlots];
+    WindowHandle parent; // kWindowInvalid if top-level
     bool alive;
     bool visible;
     bool dirty; // set by InvalidateRect; cleared by BeginPaint / WindowDrainPaints
-    u8 _pad[1];
+    u8 _pad[5];
 };
 
 constinit RegisteredWindow g_windows[kMaxWindows] = {};
@@ -206,6 +207,18 @@ constinit u8 g_vk_state[kWindowVkStateSize / 8] = {};
 // events regardless of cursor position, or kWindowInvalid when
 // no capture is active.
 constinit WindowHandle g_mouse_capture = kWindowInvalid;
+
+// Keyboard focus — distinct from `g_active_window` (z-order
+// topmost). Programs that want to steal input focus without
+// raising to top use SetFocus vs SetActiveWindow.
+constinit WindowHandle g_focus_hwnd = kWindowInvalid;
+
+// Caret — a single global blinking rectangle. The compositor
+// paints it at every DesktopCompose; the ui-ticker's 1 Hz
+// compose flips `g_caret_on` between compositions to produce
+// the blink.
+constinit Caret g_caret = {};
+constinit bool g_caret_on = false; // current blink phase
 
 // Text clipboard — CF_TEXT only for v1. Not split per-process:
 // matches Win32 in that the clipboard is a system singleton.
@@ -330,6 +343,7 @@ WindowHandle WindowRegister(const WindowChrome& chrome, const char* title)
     g_windows[h].visible = true;
     g_windows[h].dirty = false;
     g_windows[h].owner_pid = 0;
+    g_windows[h].parent = kWindowInvalid;
     g_windows[h].msgs.head = 0;
     g_windows[h].msgs.tail = 0;
     g_windows[h].msgs.count = 0;
@@ -891,6 +905,17 @@ void DesktopCompose(u32 desktop_rgb, const char* banner)
     TaskbarRedraw();
     MenuRedraw();
     CalendarRedraw();
+    // Caret — painted last so it overlays everything, including
+    // the taskbar. Blink phase toggles per compose; the ui-
+    // ticker's 1 Hz compose produces the blink cadence.
+    if (g_caret.visible && g_caret.shown && g_caret.w > 0 && g_caret.h > 0)
+    {
+        g_caret_on = !g_caret_on;
+        if (g_caret_on)
+        {
+            FramebufferFillRect(g_caret.x, g_caret.y, g_caret.w, g_caret.h, 0x00000000);
+        }
+    }
 }
 
 DisplayMode GetDisplayMode()
@@ -1538,6 +1563,183 @@ void WindowTimerTick()
     {
         WindowMsgWakeAll();
     }
+}
+
+// --- Parent / child tracking --------------------------------------
+
+void WindowSetParent(WindowHandle h, WindowHandle parent)
+{
+    if (!WindowValid(h))
+    {
+        return;
+    }
+    if (parent != kWindowInvalid && !WindowValid(parent))
+    {
+        parent = kWindowInvalid;
+    }
+    g_windows[h].parent = parent;
+}
+
+WindowHandle WindowGetParent(WindowHandle h)
+{
+    if (!WindowValid(h))
+    {
+        return kWindowInvalid;
+    }
+    const WindowHandle p = g_windows[h].parent;
+    if (p != kWindowInvalid && !WindowValid(p))
+    {
+        return kWindowInvalid;
+    }
+    return p;
+}
+
+WindowHandle WindowGetRelated(WindowHandle h, WindowRel rel)
+{
+    // First / Last traverse the z-order. Next / Prev find h in
+    // z-order and step by 1. Child returns the first alive
+    // window whose parent is h. Owner is treated as parent in
+    // v1 (we don't have a separate owner field).
+    switch (rel)
+    {
+    case WindowRel::First:
+    {
+        for (u32 i = 0; i < g_window_count; ++i)
+        {
+            const WindowHandle w = g_z_order[i];
+            if (WindowValid(w))
+                return w;
+        }
+        return kWindowInvalid;
+    }
+    case WindowRel::Last:
+    {
+        for (u32 i = g_window_count; i > 0; --i)
+        {
+            const WindowHandle w = g_z_order[i - 1];
+            if (WindowValid(w))
+                return w;
+        }
+        return kWindowInvalid;
+    }
+    case WindowRel::Next:
+    case WindowRel::Prev:
+    {
+        if (!WindowValid(h))
+            return kWindowInvalid;
+        u32 idx = g_window_count;
+        for (u32 i = 0; i < g_window_count; ++i)
+        {
+            if (g_z_order[i] == h)
+            {
+                idx = i;
+                break;
+            }
+        }
+        if (idx == g_window_count)
+            return kWindowInvalid;
+        if (rel == WindowRel::Next)
+        {
+            for (u32 i = idx + 1; i < g_window_count; ++i)
+            {
+                if (WindowValid(g_z_order[i]))
+                    return g_z_order[i];
+            }
+        }
+        else
+        {
+            for (u32 i = idx; i > 0; --i)
+            {
+                if (WindowValid(g_z_order[i - 1]))
+                    return g_z_order[i - 1];
+            }
+        }
+        return kWindowInvalid;
+    }
+    case WindowRel::Child:
+    {
+        if (!WindowValid(h))
+            return kWindowInvalid;
+        for (u32 i = 0; i < g_window_count; ++i)
+        {
+            if (WindowValid(i) && g_windows[i].parent == h)
+                return static_cast<WindowHandle>(i);
+        }
+        return kWindowInvalid;
+    }
+    case WindowRel::Owner:
+        return WindowGetParent(h);
+    }
+    return kWindowInvalid;
+}
+
+// --- Keyboard focus -----------------------------------------------
+
+void WindowSetFocus(WindowHandle h)
+{
+    constexpr u32 kWmKillFocus = 0x0008;
+    constexpr u32 kWmSetFocus = 0x0007;
+    const WindowHandle prev = g_focus_hwnd;
+    if (h != kWindowInvalid && !WindowValid(h))
+    {
+        return;
+    }
+    if (prev == h)
+    {
+        return;
+    }
+    if (prev != kWindowInvalid && WindowValid(prev))
+    {
+        WindowPostMessage(prev, kWmKillFocus, static_cast<u64>(h) + 1, 0);
+    }
+    g_focus_hwnd = h;
+    if (h != kWindowInvalid)
+    {
+        WindowPostMessage(h, kWmSetFocus, (prev == kWindowInvalid) ? 0 : (static_cast<u64>(prev) + 1), 0);
+    }
+}
+
+WindowHandle WindowGetFocus()
+{
+    if (g_focus_hwnd != kWindowInvalid && !WindowValid(g_focus_hwnd))
+    {
+        g_focus_hwnd = kWindowInvalid;
+    }
+    return g_focus_hwnd;
+}
+
+// --- Caret --------------------------------------------------------
+
+void WindowCaretCreate(WindowHandle owner, u32 w, u32 h)
+{
+    g_caret.owner = owner;
+    g_caret.w = (w == 0) ? 1 : w;
+    g_caret.h = (h == 0) ? 12 : h;
+    g_caret.visible = true;
+    g_caret.shown = false;
+}
+
+void WindowCaretDestroy()
+{
+    g_caret.visible = false;
+    g_caret.shown = false;
+    g_caret.owner = kWindowInvalid;
+}
+
+void WindowCaretSetPos(u32 x, u32 y)
+{
+    g_caret.x = x;
+    g_caret.y = y;
+}
+
+void WindowCaretShow(bool shown)
+{
+    g_caret.shown = shown;
+}
+
+const Caret& WindowCaretGet()
+{
+    return g_caret;
 }
 
 // --- Per-window user-data longs + dirty region --------------------

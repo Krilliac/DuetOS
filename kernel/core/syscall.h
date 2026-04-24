@@ -875,6 +875,51 @@ enum SyscallNumber : u64
     //   FindWindowA / FindWindowW (W variant flattens client-
     //   side).
     SYS_WIN_FIND = 93,
+
+    // SYS_WIN_SET_PARENT — set a window's parent HWND.
+    //   rdi = HWND (child, biased), rsi = HWND (parent, biased;
+    //         0 = clear/top-level).
+    //   rax = previous parent (biased; 0 if none).
+    // Backs Win32 SetParent.
+    SYS_WIN_SET_PARENT = 94,
+
+    // SYS_WIN_GET_PARENT — read a window's parent HWND.
+    //   rdi = HWND. rax = biased parent or 0. Backs GetParent.
+    SYS_WIN_GET_PARENT = 95,
+
+    // SYS_WIN_GET_RELATED — walk the window relationship graph.
+    //   rdi = HWND, rsi = rel kind (0=Next, 1=Prev, 2=First,
+    //         3=Last, 4=Child, 5=Owner).
+    //   rax = biased HWND, or 0. Backs Win32 GetWindow.
+    SYS_WIN_GET_RELATED = 96,
+
+    // SYS_WIN_SET_FOCUS — move keyboard focus to HWND.
+    //   rdi = HWND (0 = clear focus).
+    //   rax = biased HWND of previous focus, or 0.
+    // Fires WM_KILLFOCUS on the old focus + WM_SETFOCUS on the
+    // new. Backs Win32 SetFocus.
+    SYS_WIN_SET_FOCUS = 97,
+
+    // SYS_WIN_GET_FOCUS — read current focus HWND.
+    //   rax = biased HWND of focus, or 0. Backs Win32 GetFocus.
+    SYS_WIN_GET_FOCUS = 98,
+
+    // SYS_WIN_CARET — combined caret control.
+    //   rdi = op (0=Create, 1=Destroy, 2=SetPos, 3=Show, 4=Hide)
+    //   rsi = arg1 (Create: width; SetPos: x; Show/Hide: 0)
+    //   rdx = arg2 (Create: height; SetPos: y)
+    //   r10 = arg3 (Create: HWND owner; else unused)
+    //   rax = 1 on success, 0 on bad op. Backs Win32
+    //         CreateCaret / DestroyCaret / SetCaretPos /
+    //         ShowCaret / HideCaret.
+    SYS_WIN_CARET = 99,
+
+    // SYS_WIN_BEEP — sound the PC speaker (blocking).
+    //   rdi = frequency in Hz (0 = use Win32 MB_OK default 800)
+    //   rsi = duration in ms (0 = 100 ms default)
+    //   rax = 1 if played, 0 if the speaker isn't usable.
+    // Backs Win32 MessageBeep + Beep.
+    SYS_WIN_BEEP = 100,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit

@@ -78,4 +78,12 @@ void DoWinGetMetric(arch::TrapFrame* frame);
 void DoWinEnum(arch::TrapFrame* frame);
 void DoWinFind(arch::TrapFrame* frame);
 
+void DoWinSetParent(arch::TrapFrame* frame);
+void DoWinGetParent(arch::TrapFrame* frame);
+void DoWinGetRelated(arch::TrapFrame* frame);
+void DoWinSetFocus(arch::TrapFrame* frame);
+void DoWinGetFocus(arch::TrapFrame* frame);
+void DoWinCaret(arch::TrapFrame* frame);
+void DoWinBeep(arch::TrapFrame* frame);
+
 } // namespace duetos::subsystems::win32

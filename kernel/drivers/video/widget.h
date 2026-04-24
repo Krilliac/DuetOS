@@ -526,6 +526,83 @@ bool WindowIsDirty(WindowHandle h);
 /// WM_PAINTs posted.
 u32 WindowDrainPaints();
 
+// ---------------------------------------------------------------
+// Parent / child tracking + focus + caret.
+//
+// Every window has a `parent` field. Top-level windows use
+// `kWindowInvalid` (no parent). The accessor preserves Win32
+// semantics: newly-registered windows have no parent unless
+// explicitly set.
+//
+// Focus: a separate HWND from the "active" window. Active
+// tracks the Z-ordered topmost frame; focus tracks which
+// window receives keyboard input. Edit controls that steal
+// focus without raising to top use the distinction.
+//
+// Caret: a single global blinking rectangle. Drawn by the
+// compositor at the caret's (x, y) when visible; blink is
+// driven by the ui-ticker's 1 Hz compose.
+// ---------------------------------------------------------------
+
+/// Set a window's parent. Pass `kWindowInvalid` to clear.
+void WindowSetParent(WindowHandle h, WindowHandle parent);
+
+/// Read a window's parent. Returns `kWindowInvalid` if none or
+/// for an invalid handle.
+WindowHandle WindowGetParent(WindowHandle h);
+
+enum class WindowRel : u32
+{
+    Next = 0,  // GW_HWNDNEXT (next in z-order)
+    Prev = 1,  // GW_HWNDPREV
+    First = 2, // GW_HWNDFIRST
+    Last = 3,  // GW_HWNDLAST
+    Child = 4, // GW_CHILD (first child of h)
+    Owner = 5, // GW_OWNER — alias for parent in v1
+};
+
+/// Walk the relationship specified by `rel` from `h`. Returns
+/// `kWindowInvalid` if no such window exists.
+WindowHandle WindowGetRelated(WindowHandle h, WindowRel rel);
+
+/// Separate focused-window tracking. Focus is the window that
+/// should receive keyboard input; active is the window that's
+/// Z-ordered topmost. SetFocus posts WM_KILLFOCUS to the old
+/// focus and WM_SETFOCUS to the new one.
+void WindowSetFocus(WindowHandle h);
+
+/// Read the current focus, or `kWindowInvalid` if none.
+WindowHandle WindowGetFocus();
+
+// --- Caret ---
+struct Caret
+{
+    u32 x, y;
+    u32 w, h;
+    bool visible;
+    bool shown; // ShowCaret/HideCaret refcount > 0
+    u8 _pad[2];
+    WindowHandle owner;
+};
+
+/// Set the caret shape. Size defaults to 1x12 if either axis
+/// is zero. Position stays at whatever it was.
+void WindowCaretCreate(WindowHandle owner, u32 w, u32 h);
+
+/// Tear the caret down. The caret stays destroyed until the
+/// next CaretCreate.
+void WindowCaretDestroy();
+
+/// Move the caret to (x, y) in screen coords.
+void WindowCaretSetPos(u32 x, u32 y);
+
+/// Toggle visibility. Show/Hide in Win32 are refcounted but
+/// v1 collapses to a boolean.
+void WindowCaretShow(bool shown);
+
+/// Read the caret state for the compositor's paint path.
+const Caret& WindowCaretGet();
+
 /// Paint every registered window in z-order (bottom first, top
 /// last) + render the stored title string across each title bar
 /// in the default ink colour. Intended as part of a full-desktop

@@ -61,10 +61,20 @@ typedef void* HANDLE;
 #define SYS_WIN_GET_METRIC 91
 #define SYS_WIN_ENUM 92
 #define SYS_WIN_FIND 93
+#define SYS_WIN_SET_PARENT 94
+#define SYS_WIN_GET_PARENT 95
+#define SYS_WIN_GET_RELATED 96
+#define SYS_WIN_SET_FOCUS 97
+#define SYS_WIN_GET_FOCUS 98
+#define SYS_WIN_CARET 99
+#define SYS_WIN_BEEP 100
 
 /* WNDCLASS storage indices for SYS_WIN_SET/GET_LONG. */
 #define GWLP_WNDPROC 0
 #define GWLP_USERDATA 1
+/* Slot 2 = style (GWL_STYLE -16), slot 3 = exstyle (GWL_EXSTYLE -20). */
+#define USER32_LONG_STYLE 2
+#define USER32_LONG_EXSTYLE 3
 
 /* Selected message IDs the pump + DispatchMessage care about. The
  * kernel doesn't interpret these numbers — it passes them through
@@ -408,21 +418,44 @@ __declspec(dllexport) BOOL PostThreadMessageW(DWORD tid, UINT msg, WPARAM w, LPA
     (void)l;
     return 1;
 }
+/* SendMessage is synchronous — it must return the WndProc's
+ * result. v1 implements this by pulling the target's WNDPROC
+ * out of GWLP_WNDPROC and calling it directly. Cross-process
+ * SendMessage returns 0 because SYS_WIN_GET_LONG refuses the
+ * read when the HWND is owned by a different pid. */
+static LRESULT user32_send_core(HANDLE h, UINT msg, WPARAM w, LPARAM l)
+{
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_WIN_GET_LONG), "D"((long long)(unsigned long long)h),
+                       "S"((long long)GWLP_WNDPROC)
+                     : "memory");
+    void* proc_raw = (void*)(unsigned long long)rv;
+    if (!proc_raw)
+        return 0;
+    LRESULT(__stdcall * proc)(HANDLE, UINT, WPARAM, LPARAM) = proc_raw;
+    return proc(h, msg, w, l);
+}
 __declspec(dllexport) LRESULT SendMessageA(HANDLE h, UINT msg, WPARAM w, LPARAM l)
 {
-    (void)h;
-    (void)msg;
-    (void)w;
-    (void)l;
-    return 0;
+    return user32_send_core(h, msg, w, l);
 }
 __declspec(dllexport) LRESULT SendMessageW(HANDLE h, UINT msg, WPARAM w, LPARAM l)
 {
-    (void)h;
-    (void)msg;
-    (void)w;
-    (void)l;
-    return 0;
+    return user32_send_core(h, msg, w, l);
+}
+/* SendNotifyMessage is Win32's "async to other threads but sync
+ * to self" API. v1 collapses to synchronous send. */
+__declspec(dllexport) BOOL SendNotifyMessageA(HANDLE h, UINT msg, WPARAM w, LPARAM l)
+{
+    (void)user32_send_core(h, msg, w, l);
+    return 1;
+}
+__declspec(dllexport) BOOL SendNotifyMessageW(HANDLE h, UINT msg, WPARAM w, LPARAM l)
+{
+    (void)user32_send_core(h, msg, w, l);
+    return 1;
 }
 
 /* --- Window creation / destruction --- */
@@ -470,26 +503,42 @@ static void user32_install_wndproc(HANDLE hwnd, const char* class_name)
     (void)rv;
 }
 
+/* Forward decls so user32_install_create_state can use them
+ * before the full definitions appear below. */
+__declspec(dllexport) long long SetWindowLongPtrA(HANDLE h, int index, long long value);
+__declspec(dllexport) HANDLE SetParent(HANDLE child, HANDLE parent);
+
+/* Capture the style + ex-style + parent into the kernel's
+ * per-window long slots right after create. */
+static void user32_install_create_state(HANDLE hwnd, DWORD style, DWORD ex, HANDLE parent)
+{
+    if (!hwnd)
+        return;
+    /* SetWindowLongPtr with the Win32 -16 / -20 indices remaps
+     * to our slot 2/3. */
+    SetWindowLongPtrA(hwnd, -16 /* GWL_STYLE */, (long long)(unsigned)style);
+    SetWindowLongPtrA(hwnd, -20 /* GWL_EXSTYLE */, (long long)(unsigned)ex);
+    if (parent)
+    {
+        (void)SetParent(hwnd, parent);
+    }
+}
+
 __declspec(dllexport) HANDLE CreateWindowExA(DWORD ex, const char* cls, const char* name, DWORD style, int x, int y,
                                              int w, int h, HANDLE parent, HANDLE menu, HANDLE hInst, void* param)
 {
-    (void)ex;
-    (void)style;
-    (void)parent;
     (void)menu;
     (void)hInst;
     (void)param;
     HANDLE hwnd = win32_create_window_core(x, y, w, h, name);
     user32_install_wndproc(hwnd, cls);
+    user32_install_create_state(hwnd, style, ex, parent);
     return hwnd;
 }
 
 __declspec(dllexport) HANDLE CreateWindowExW(DWORD ex, const wchar_t16* cls, const wchar_t16* name, DWORD style, int x,
                                              int y, int w, int h, HANDLE parent, HANDLE menu, HANDLE hInst, void* param)
 {
-    (void)ex;
-    (void)style;
-    (void)parent;
     (void)menu;
     (void)hInst;
     (void)param;
@@ -499,6 +548,7 @@ __declspec(dllexport) HANDLE CreateWindowExW(DWORD ex, const wchar_t16* cls, con
     win32_w_to_ascii(cls, class_a, WIN_TITLE_MAX);
     HANDLE hwnd = win32_create_window_core(x, y, w, h, title);
     user32_install_wndproc(hwnd, class_a);
+    user32_install_create_state(hwnd, style, ex, parent);
     return hwnd;
 }
 
@@ -854,7 +904,22 @@ __declspec(dllexport) BOOL UnregisterClassW(const wchar_t16* name, HANDLE hInst)
 }
 
 /* --- MessageBox --- */
+/* Win32 MessageBox button IDs. */
 #define IDOK 1
+#define IDCANCEL 2
+#define IDABORT 3
+#define IDRETRY 4
+#define IDIGNORE 5
+#define IDYES 6
+#define IDNO 7
+/* MessageBox uType low 4 bits select the button set. */
+#define MB_OK 0x0
+#define MB_OKCANCEL 0x1
+#define MB_ABORTRETRYIGNORE 0x2
+#define MB_YESNOCANCEL 0x3
+#define MB_YESNO 0x4
+#define MB_RETRYCANCEL 0x5
+
 #define WIN_MSGBOX_TEXT_MAX 256
 
 static int win32_msgbox_core(const char* text, const char* caption)
@@ -868,23 +933,49 @@ static int win32_msgbox_core(const char* text, const char* caption)
     return (int)rv;
 }
 
+/* Map uType to a sensible default return code. No modal UI in
+ * v1 — the MessageBox serial-logs the text and returns a
+ * button ID that matches Win32's "default button" convention:
+ *   MB_OK            → IDOK
+ *   MB_OKCANCEL      → IDOK (user clicked OK)
+ *   MB_YESNO         → IDYES
+ *   MB_YESNOCANCEL   → IDYES
+ *   MB_RETRYCANCEL   → IDRETRY
+ *   MB_ABORTRETRYIGNORE → IDRETRY */
+static int user32_msgbox_result(UINT type)
+{
+    switch (type & 0xF)
+    {
+    case MB_OKCANCEL:
+        return IDOK;
+    case MB_YESNO:
+    case MB_YESNOCANCEL:
+        return IDYES;
+    case MB_RETRYCANCEL:
+        return IDRETRY;
+    case MB_ABORTRETRYIGNORE:
+        return IDRETRY;
+    case MB_OK:
+    default:
+        return IDOK;
+    }
+}
+
 __declspec(dllexport) int MessageBoxA(HANDLE h, const char* text, const char* caption, UINT type)
 {
     (void)h;
-    (void)type;
     (void)win32_msgbox_core(text, caption);
-    return IDOK;
+    return user32_msgbox_result(type);
 }
 __declspec(dllexport) int MessageBoxW(HANDLE h, const wchar_t16* text, const wchar_t16* caption, UINT type)
 {
     (void)h;
-    (void)type;
     char t_ascii[WIN_MSGBOX_TEXT_MAX];
     char c_ascii[WIN_TITLE_MAX];
     win32_w_to_ascii(text, t_ascii, WIN_MSGBOX_TEXT_MAX);
     win32_w_to_ascii(caption, c_ascii, WIN_TITLE_MAX);
     (void)win32_msgbox_core(t_ascii, c_ascii);
-    return IDOK;
+    return user32_msgbox_result(type);
 }
 __declspec(dllexport) int MessageBoxExA(HANDLE h, const char* text, const char* caption, UINT type, unsigned short lang)
 {
@@ -1188,13 +1279,39 @@ __declspec(dllexport) DWORD GetSysColor(int index)
     return 0xFFFFFFu; /* white */
 }
 
-/* --- Window longs --- */
+/* --- Window longs ---
+ * Win32 exposes GWL_STYLE=-16, GWL_EXSTYLE=-20, GWLP_WNDPROC=-4,
+ * GWLP_USERDATA=-21; our kernel uses positive slot indices 0..3.
+ * Both naming conventions work: the raw slot index (0..3) is
+ * passed through, a recognised negative constant is remapped to
+ * the matching slot, anything else falls through to 0.
+ */
+static int user32_slot_from_index(int index)
+{
+    if (index >= 0 && index < 4)
+        return index;
+    switch (index)
+    {
+    case -4:
+        return 0; /* GWLP_WNDPROC */
+    case -21:
+        return 1; /* GWLP_USERDATA */
+    case -16:
+        return USER32_LONG_STYLE;
+    case -20:
+        return USER32_LONG_EXSTYLE;
+    default:
+        return 4; /* out-of-range → syscall returns 0 */
+    }
+}
+
 __declspec(dllexport) long long GetWindowLongPtrA(HANDLE h, int index)
 {
+    const int slot = user32_slot_from_index(index);
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
-                     : "a"((long long)SYS_WIN_GET_LONG), "D"((long long)(unsigned long long)h), "S"((long long)index)
+                     : "a"((long long)SYS_WIN_GET_LONG), "D"((long long)(unsigned long long)h), "S"((long long)slot)
                      : "memory");
     return rv;
 }
@@ -1204,10 +1321,11 @@ __declspec(dllexport) long long GetWindowLongPtrW(HANDLE h, int index)
 }
 __declspec(dllexport) long long SetWindowLongPtrA(HANDLE h, int index, long long value)
 {
+    const int slot = user32_slot_from_index(index);
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
-                     : "a"((long long)SYS_WIN_SET_LONG), "D"((long long)(unsigned long long)h), "S"((long long)index),
+                     : "a"((long long)SYS_WIN_SET_LONG), "D"((long long)(unsigned long long)h), "S"((long long)slot),
                        "d"(value)
                      : "memory");
     return rv;
@@ -1339,3 +1457,152 @@ __declspec(dllexport) BOOL ClientToScreen(HANDLE hwnd, void* pt)
 {
     return user32_convert(hwnd, pt, 0);
 }
+
+/* --- Parent / child --- */
+__declspec(dllexport) HANDLE SetParent(HANDLE child, HANDLE parent)
+{
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_WIN_SET_PARENT), "D"((long long)(unsigned long long)child),
+                       "S"((long long)(unsigned long long)parent)
+                     : "memory");
+    return (HANDLE)(unsigned long long)rv;
+}
+__declspec(dllexport) HANDLE GetParent(HANDLE h)
+{
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_WIN_GET_PARENT), "D"((long long)(unsigned long long)h)
+                     : "memory");
+    return (HANDLE)(unsigned long long)rv;
+}
+__declspec(dllexport) HANDLE GetWindow(HANDLE h, UINT cmd)
+{
+    /* Win32 GW_HWNDNEXT=2, GW_HWNDPREV=3, GW_HWNDFIRST=0,
+     * GW_HWNDLAST=1, GW_CHILD=5, GW_OWNER=4. Kernel enum uses
+     * 0=Next, 1=Prev, 2=First, 3=Last, 4=Child, 5=Owner. Remap: */
+    unsigned rel;
+    switch (cmd)
+    {
+    case 2:
+        rel = 0;
+        break; /* NEXT */
+    case 3:
+        rel = 1;
+        break; /* PREV */
+    case 0:
+        rel = 2;
+        break; /* FIRST */
+    case 1:
+        rel = 3;
+        break; /* LAST */
+    case 5:
+        rel = 4;
+        break; /* CHILD */
+    case 4:
+        rel = 5;
+        break; /* OWNER */
+    default:
+        return (HANDLE)0;
+    }
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_WIN_GET_RELATED), "D"((long long)(unsigned long long)h), "S"((long long)rel)
+                     : "memory");
+    return (HANDLE)(unsigned long long)rv;
+}
+
+/* --- Focus --- */
+__declspec(dllexport) HANDLE SetFocus(HANDLE h)
+{
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_WIN_SET_FOCUS), "D"((long long)(unsigned long long)h)
+                     : "memory");
+    return (HANDLE)(unsigned long long)rv;
+}
+__declspec(dllexport) HANDLE GetFocus(void)
+{
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)SYS_WIN_GET_FOCUS) : "memory");
+    return (HANDLE)(unsigned long long)rv;
+}
+
+/* --- Caret --- */
+static BOOL user32_caret_op(unsigned op, long long arg1, long long arg2, long long arg3)
+{
+    register long long r10_a3 asm("r10") = arg3;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_WIN_CARET), "D"((long long)op), "S"(arg1), "d"(arg2), "r"(r10_a3)
+                     : "memory");
+    return rv ? 1 : 0;
+}
+__declspec(dllexport) BOOL CreateCaret(HANDLE hwnd, HANDLE bitmap, int width, int height)
+{
+    (void)bitmap;
+    return user32_caret_op(0, (long long)(unsigned)width, (long long)(unsigned)height,
+                           (long long)(unsigned long long)hwnd);
+}
+__declspec(dllexport) BOOL DestroyCaret(void)
+{
+    return user32_caret_op(1, 0, 0, 0);
+}
+__declspec(dllexport) BOOL SetCaretPos(int x, int y)
+{
+    return user32_caret_op(2, (long long)(unsigned)x, (long long)(unsigned)y, 0);
+}
+__declspec(dllexport) BOOL ShowCaret(HANDLE hwnd)
+{
+    (void)hwnd;
+    return user32_caret_op(3, 0, 0, 0);
+}
+__declspec(dllexport) BOOL HideCaret(HANDLE hwnd)
+{
+    (void)hwnd;
+    return user32_caret_op(4, 0, 0, 0);
+}
+__declspec(dllexport) UINT GetCaretBlinkTime(void)
+{
+    /* Win32 returns the full period in ms. v1 caret blinks
+     * with the 1 Hz ui-ticker, so period = 1000 ms. */
+    return 1000;
+}
+__declspec(dllexport) BOOL SetCaretBlinkTime(UINT period)
+{
+    (void)period;
+    return 1;
+}
+
+/* --- MessageBeep / Beep --- */
+__declspec(dllexport) BOOL MessageBeep(UINT type)
+{
+    /* Win32 MessageBeep(type) plays the system sound associated
+     * with type; in v1 we always beep at 800Hz for 100ms. */
+    (void)type;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_WIN_BEEP), "D"((long long)0 /* default freq */),
+                       "S"((long long)0 /* default dur */)
+                     : "memory");
+    return rv ? 1 : 0;
+}
+__declspec(dllexport) BOOL Beep(DWORD freq, DWORD dur)
+{
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_WIN_BEEP), "D"((long long)freq), "S"((long long)dur)
+                     : "memory");
+    return rv ? 1 : 0;
+}
+
+/* GWL_STYLE / GWL_EXSTYLE remap is handled inside
+ * user32_slot_from_index (shared with GetWindowLongPtrA); no
+ * separate wrappers needed here. */

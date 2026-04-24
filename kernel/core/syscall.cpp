@@ -1415,6 +1415,27 @@ void SyscallDispatch(arch::TrapFrame* frame)
     case SYS_WIN_FIND:
         subsystems::win32::DoWinFind(frame);
         return;
+    case SYS_WIN_SET_PARENT:
+        subsystems::win32::DoWinSetParent(frame);
+        return;
+    case SYS_WIN_GET_PARENT:
+        subsystems::win32::DoWinGetParent(frame);
+        return;
+    case SYS_WIN_GET_RELATED:
+        subsystems::win32::DoWinGetRelated(frame);
+        return;
+    case SYS_WIN_SET_FOCUS:
+        subsystems::win32::DoWinSetFocus(frame);
+        return;
+    case SYS_WIN_GET_FOCUS:
+        subsystems::win32::DoWinGetFocus(frame);
+        return;
+    case SYS_WIN_CARET:
+        subsystems::win32::DoWinCaret(frame);
+        return;
+    case SYS_WIN_BEEP:
+        subsystems::win32::DoWinBeep(frame);
+        return;
 
     case SYS_DLL_PROC_ADDRESS:
     {
