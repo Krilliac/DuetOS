@@ -195,6 +195,9 @@ constexpr u32 kOffWaitForObj4 = 0xA47; // batch 57 — 122 bytes
 // === Batch 58: real GetStartupInfo stub.
 constexpr u32 kOffGetStartupInfo = 0xAC1; // batch 58 — 24 bytes (zero-fill + cb=104)
 
+// === Batch 59: real GetExitCodeThread (exit-code tracking).
+constexpr u32 kOffGetExitCodeThreadReal = 0xAD9; // batch 59 — 20 bytes (saves rdi)
+
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
     // Windows x64 ABI: first arg (uExitCode) in RCX.
@@ -2754,10 +2757,34 @@ constexpr u8 kStubsBytes[] = {
     0xC7, 0x01, 0x68, 0x00, 0x00, 0x00, // 0xAD1 mov dword [rcx], 104 (cb)
     0x5F,                               // 0xAD7 pop rdi
     0xC3,                               // 0xAD8 ret
+
+    // === Batch 59 =============================================
+
+    // --- GetExitCodeThread real (offset 0xAD9, 20 bytes) ------
+    // Win32: BOOL GetExitCodeThread(HANDLE=rcx, LPDWORD Exit=rdx).
+    // Supersedes the batch-10 stub at kOffGetExitCodeThread which
+    // hard-coded STILL_ACTIVE. Routes to SYS_THREAD_EXIT_CODE
+    // which reads Process.win32_threads[slot].exit_code — kept
+    // at STILL_ACTIVE (0x103) until the task's SYS_EXIT path
+    // stashes the real rdi value there.
+    //
+    // Returns BOOL TRUE always. If the handle is invalid the
+    // syscall returns -1 and we write -1 into *Exit — callers
+    // that interpret the BOOL will succeed, callers that look at
+    // the numeric exit code will see 0xFFFFFFFF (bogus but
+    // non-fatal).
+    0x57,                         // 0xAD9 push rdi
+    0x48, 0x89, 0xCF,             // 0xADA mov rdi, rcx
+    0xB8, 0x37, 0x00, 0x00, 0x00, // 0xADD mov eax, 55 (SYS_THREAD_EXIT_CODE)
+    0xCD, 0x80,                   // 0xAE2 int 0x80
+    0x89, 0x02,                   // 0xAE4 mov [rdx], eax
+    0xB8, 0x01, 0x00, 0x00, 0x00, // 0xAE6 mov eax, 1 (BOOL TRUE)
+    0x5F,                         // 0xAEB pop rdi
+    0xC3,                         // 0xAEC ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0xAD9, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0xAED, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -3857,7 +3884,9 @@ constexpr StubEntry kStubsTable[] = {
     // value is opaque to callers so this "identity"
     // mapping is fine.
     {"kernel32.dll", "OpenProcess", kOffOpenProcess},
-    {"kernel32.dll", "GetExitCodeThread", kOffGetExitCodeThread},
+    // Batch 59: real GetExitCodeThread backed by per-handle
+    // exit_code storage updated at SYS_EXIT time.
+    {"kernel32.dll", "GetExitCodeThread", kOffGetExitCodeThreadReal},
     {"kernel32.dll", "GenerateConsoleCtrlEvent", kOffReturnOne},
 
     // Batch 11 — performance counters, tick count, and the

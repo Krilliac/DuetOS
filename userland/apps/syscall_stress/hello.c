@@ -172,6 +172,7 @@ typedef struct _STARTUPINFOW
     HANDLE hStdInput, hStdOutput, hStdError;
 } STARTUPINFOW;
 __declspec(dllimport) void __stdcall GetStartupInfoW(STARTUPINFOW* p);
+__declspec(dllimport) BOOL __stdcall GetExitCodeThread(HANDLE hThread, DWORD* lpExitCode);
 
 static HANDLE g_events[2];
 
@@ -353,6 +354,24 @@ int __stdcall _start(void)
         WriteString("[syscall-stress] FAIL thread-handle wait didn't return WAIT_OBJECT_0\n");
         WriteHex64(twrc);
         ExitProcess(21);
+    }
+
+    // === Batch 59 coverage: GetExitCodeThread returns recorded 0x42 ===
+    // ChildA called ExitThread(0x42); by the time we get here the
+    // task is Dead and the SYS_EXIT path has written 0x42 into the
+    // thread-handle's exit_code slot.
+    WriteString("[syscall-stress] main: GetExitCodeThread(childA)\n");
+    DWORD childA_rc = 0xDEADBEEF;
+    if (!GetExitCodeThread(hA, &childA_rc))
+    {
+        WriteString("[syscall-stress] FAIL GetExitCodeThread returned FALSE\n");
+        ExitProcess(23);
+    }
+    if (childA_rc != 0x42)
+    {
+        WriteString("[syscall-stress] FAIL GetExitCodeThread got wrong code\n");
+        WriteHex64(childA_rc);
+        ExitProcess(24);
     }
 
     // === Batch 53 coverage: Decode/Encode round-trip ===

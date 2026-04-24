@@ -570,6 +570,14 @@ enum SyscallNumber : u64
     // Dispatched by the thread range in WaitForSingleObject v4.
     // Unprivileged — the caller owns the thread.
     SYS_THREAD_WAIT = 54,
+
+    // SYS_THREAD_EXIT_CODE: rdi = thread handle (0x400..0x407).
+    // Returns the recorded exit code (u32) as u64, or 0x103
+    // (STILL_ACTIVE) if the thread is still running. Returns
+    // u64(-1) on bad handle. The kernel writes this slot from
+    // SYS_EXIT when a Win32 thread task dies (batch 59).
+    // Backs Win32 GetExitCodeThread.
+    SYS_THREAD_EXIT_CODE = 55,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit

@@ -441,7 +441,13 @@ struct Process
     struct Win32ThreadHandle
     {
         bool in_use;
-        u8 _pad[7];
+        u8 _pad[3];
+        // Win32 exit-code tracking (batch 59). Starts at
+        // STILL_ACTIVE (0x103); overwritten by the SYS_EXIT
+        // path when the owning task dies. GetExitCodeThread
+        // reads this field via SYS_THREAD_EXIT_CODE and
+        // returns it as the DWORD exit code.
+        u32 exit_code;
         sched::Task* task; // scheduler Task spawned for this thread
         u64 user_stack_va; // base VA of the thread's user stack
     };

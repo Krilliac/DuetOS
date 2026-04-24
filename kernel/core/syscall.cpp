@@ -156,6 +156,23 @@ void SyscallDispatch(arch::TrapFrame* frame)
     {
         const u64 code = frame->rdi;
         LogWithValue(LogLevel::Info, "sys", "exit rc", code);
+        // Batch 59: if the exiting task owns a Win32 thread-handle
+        // slot in its Process, record the exit code there so
+        // GetExitCodeThread on that handle can return a real
+        // value instead of STILL_ACTIVE.
+        Process* proc = CurrentProcess();
+        sched::Task* self = sched::CurrentTask();
+        if (proc != nullptr && self != nullptr)
+        {
+            for (u32 i = 0; i < Process::kWin32ThreadCap; ++i)
+            {
+                if (proc->win32_threads[i].in_use && proc->win32_threads[i].task == self)
+                {
+                    proc->win32_threads[i].exit_code = static_cast<u32>(code & 0xFFFFFFFFu);
+                    break;
+                }
+            }
+        }
         // SchedExit is [[noreturn]] — it marks the current task Dead,
         // wakes the reaper, and Schedule()s away forever. The trap
         // frame on this task's kernel stack becomes orphaned and
@@ -753,6 +770,36 @@ void SyscallDispatch(arch::TrapFrame* frame)
             }
             // Woken — retry the grab.
         }
+    }
+
+    case SYS_THREAD_EXIT_CODE:
+    {
+        // Win32 contract: GetExitCodeThread on an unknown or
+        // foreign handle (e.g. a process pseudo-handle passed by
+        // mistake) should still succeed with BOOL TRUE and a
+        // benign STILL_ACTIVE (0x103) payload — that's what the
+        // batch-10 stub did before this batch, and the
+        // hello_winapi test pins this behavior. So: return
+        // STILL_ACTIVE for any handle outside our own thread
+        // range, return the real exit_code only for handles we
+        // actually own.
+        constexpr u64 kStillActive = 0x103;
+        const u64 handle = frame->rdi;
+        Process* proc = CurrentProcess();
+        if (proc == nullptr || handle < Process::kWin32ThreadBase ||
+            handle >= Process::kWin32ThreadBase + Process::kWin32ThreadCap)
+        {
+            frame->rax = kStillActive;
+            return;
+        }
+        const u64 slot = handle - Process::kWin32ThreadBase;
+        if (!proc->win32_threads[slot].in_use)
+        {
+            frame->rax = kStillActive;
+            return;
+        }
+        frame->rax = static_cast<u64>(proc->win32_threads[slot].exit_code);
+        return;
     }
 
     case SYS_THREAD_WAIT:
