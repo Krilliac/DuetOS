@@ -81,6 +81,12 @@ set +e
     /export:strcmp \
     /export:strcpy \
     /export:strchr \
+    /export:atoi \
+    /export:atol \
+    /export:strtol \
+    /export:strtoul \
+    /export:terminate \
+    /export:_invalid_parameter_noinfo_noreturn \
     /out:"${DLL}" \
     "${OBJ}" 2>&1 | grep -v "align specified without /driver"
 LINK_RC=${PIPESTATUS[0]}
