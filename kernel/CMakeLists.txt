@@ -449,6 +449,30 @@ add_custom_command(
 list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_MSVCRT_HEADER}")
 
 # ----------------------------------------------------------------------------
+# Userland ntdll.dll — stage-2 slice 24. Retires the batch-42+
+# Nt* / Zw* / Rtl* / Ldr* / __chkstk surface. 108 exports
+# total (Zw* aliases emitted as same-DLL forwarders).
+# ----------------------------------------------------------------------------
+set(CUSTOMOS_NTDLL_SRC "${CMAKE_SOURCE_DIR}/userland/libs/ntdll/ntdll.c")
+set(CUSTOMOS_NTDLL_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_ntdll_dll.h")
+set(CUSTOMOS_NTDLL_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-ntdll-dll.sh")
+
+add_custom_command(
+    OUTPUT "${CUSTOMOS_NTDLL_HEADER}"
+    COMMAND "${CUSTOMOS_NTDLL_SCRIPT}"
+            "${CMAKE_SOURCE_DIR}"
+            "${CUSTOMOS_NTDLL_HEADER}"
+    DEPENDS
+        "${CUSTOMOS_NTDLL_SRC}"
+        "${CUSTOMOS_NTDLL_SCRIPT}"
+        "${CUSTOMOS_EMBED_BLOB_SCRIPT}"
+    COMMENT "Compiling + embedding ntdll.dll (Nt* / Zw* / Rtl* / Ldr* retirement)"
+    VERBATIM
+)
+
+list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_NTDLL_HEADER}")
+
+# ----------------------------------------------------------------------------
 # Userland ucrtbase.dll — stage-2 slice 15. Retires the
 # UCRT runtime stubs: heap alloc (malloc/free/calloc/realloc
 # /_aligned_*), terminators (exit/_exit), CRT startup shims

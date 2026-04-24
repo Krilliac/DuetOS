@@ -11,6 +11,7 @@
 #include "generated_customdll_test.h"
 #include "generated_kernel32_dll.h"
 #include "generated_msvcrt_dll.h"
+#include "generated_ntdll_dll.h"
 #include "generated_ucrtbase_dll.h"
 #include "generated_vcruntime140_dll.h"
 #include "generated_hello_pe.h"
@@ -1891,7 +1892,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     // here is a one-line append once the blob is embedded via
     // CMake. `kPreloadSlotCap` caps the stack-local array size;
     // bump if the list grows past it.
-    constexpr u64 kPreloadSlotCap = 8;
+    constexpr u64 kPreloadSlotCap = 16;
     struct PreloadDllEntry
     {
         const char* label; // diagnostic name for boot-log
@@ -1929,6 +1930,12 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         // _set_app_type, ...), string intrinsics. Retires the
         // batch-6 / 9 flat stubs.
         {"ucrtbase.dll", fs::generated::kBinUcrtbaseDllBytes, fs::generated::kBinUcrtbaseDllBytes_len},
+        // Stage-2 slice 24: ntdll.dll — Nt* / Zw* / Rtl* /
+        // Ldr* / __chkstk. 108 exports. Retires the batch-42+
+        // ntdll flat stubs. Zw* are same-DLL forwarders to
+        // Nt*; STATUS_NOT_IMPLEMENTED aliases centralise on
+        // NtReturnNotImpl.
+        {"ntdll.dll", fs::generated::kBinNtdllDllBytes, fs::generated::kBinNtdllDllBytes_len},
     };
     constexpr u64 kPreloadEntryCount = sizeof(preload_set) / sizeof(preload_set[0]);
     static_assert(kPreloadEntryCount <= kPreloadSlotCap, "Preload DLL list exceeds stack-local cap");
