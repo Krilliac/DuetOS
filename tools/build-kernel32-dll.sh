@@ -125,6 +125,15 @@ set +e
     /export:lstrcmpW \
     /export:lstrcmpiW \
     /export:lstrcpyW \
+    /export:WriteFile \
+    /export:WriteConsoleA \
+    /export:WriteConsoleW \
+    /export:CloseHandle \
+    /export:CreateFileW \
+    /export:ReadFile \
+    /export:SetFilePointerEx \
+    /export:GetFileSizeEx \
+    /export:GetFileSize \
     /out:"${DLL}" \
     "${OBJ}" 2>&1 | grep -v "align specified without /driver"
 LINK_RC=${PIPESTATUS[0]}

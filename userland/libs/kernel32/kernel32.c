@@ -634,3 +634,197 @@ __declspec(dllexport) wchar_t16* lstrcpyW(wchar_t16* dst, const wchar_t16* src)
     while ((*d++ = *src++) != 0) { }
     return dst;
 }
+
+/* ------------------------------------------------------------------
+ * File / console I/O (slice 19)
+ *
+ * Backed by the file syscall family:
+ *   SYS_WRITE      = 2  — fd-based write (fd=1 → stdout)
+ *   SYS_FILE_OPEN  = 20 — open (rdi=ASCII path, rsi=len)
+ *   SYS_FILE_READ  = 21 — read (rdi=handle, rsi=buf, rdx=count)
+ *   SYS_FILE_CLOSE = 22 — close (rdi=handle, no-op for unknown)
+ *   SYS_FILE_SEEK  = 23 — seek (rdi=handle, rsi=offset, rdx=whence)
+ *   SYS_FILE_FSTAT = 24 — fstat-style size (rdi=handle, rsi=outptr)
+ *
+ * The Win32 contract: handle goes in rcx, then rdx, r8, r9 for
+ * args 2-4, with arg 5+ on the stack. Our SYS_* take args in
+ * rdi, rsi, rdx, r10, r8, r9 — so the trampolines mostly just
+ * shuffle the calling convention.
+ *
+ * WriteFile / WriteConsole* ignore the handle and route to
+ * SYS_WRITE(fd=1) — same simplification as the existing flat
+ * stubs. Real handle-aware writes need a richer dispatch
+ * (file vs console vs pipe); deferred.
+ * ------------------------------------------------------------------ */
+
+typedef void* LPDWORD_t; /* DWORD* via opaque pointer to avoid C-warning chains */
+
+__declspec(dllexport) BOOL WriteFile(HANDLE hFile, const void* buf, DWORD n, DWORD* lpWritten, void* lpOverlapped)
+{
+    (void) hFile;
+    (void) lpOverlapped;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long) 2),       /* SYS_WRITE */
+                       "D"((long long) 1),       /* fd=1 (stdout) */
+                       "S"((long long) buf),     /* buf */
+                       "d"((long long) n)        /* count */
+                     : "memory");
+    if (lpWritten != (DWORD*) 0)
+        *lpWritten = rv >= 0 ? (DWORD) rv : 0;
+    return rv >= 0 ? 1 : 0;
+}
+
+__declspec(dllexport) BOOL WriteConsoleA(HANDLE hConsole, const void* buf, DWORD n, DWORD* lpWritten, void* lpReserved)
+{
+    /* Same shape as WriteFile — alias the impl. */
+    return WriteFile(hConsole, buf, n, lpWritten, lpReserved);
+}
+
+/* WriteConsoleW — n is wide-char count. Emit each wchar's low
+ * byte to stdout (UTF-16 → ASCII strip; fine for ASCII and
+ * Latin-1 codepoints, garbles the rest. Same approximation as
+ * the flat stub at kOffWriteConsoleW). */
+__declspec(dllexport) BOOL WriteConsoleW(HANDLE hConsole, const wchar_t16* buf, DWORD n, DWORD* lpWritten,
+                                         void* lpReserved)
+{
+    (void) hConsole;
+    (void) lpReserved;
+    if (buf == (const wchar_t16*) 0 || n == 0)
+    {
+        if (lpWritten != (DWORD*) 0)
+            *lpWritten = 0;
+        return 1;
+    }
+    /* Strip into a stack-local ASCII buffer up to 256 bytes
+     * per call. CRT writes typically come a line at a time so
+     * this is rarely a real cap. */
+    char ascii[256];
+    DWORD cap = n > 256 ? 256 : n;
+    for (DWORD i = 0; i < cap; ++i)
+        ascii[i] = (char) (buf[i] & 0xFF);
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long) 2),       /* SYS_WRITE */
+                       "D"((long long) 1),       /* fd=1 */
+                       "S"((long long) ascii),
+                       "d"((long long) cap)
+                     : "memory");
+    if (lpWritten != (DWORD*) 0)
+        *lpWritten = rv >= 0 ? (DWORD) rv : 0;
+    return rv >= 0 ? 1 : 0;
+}
+
+__declspec(dllexport) BOOL CloseHandle(HANDLE h)
+{
+    long long discard;
+    __asm__ volatile("int $0x80"
+                     : "=a"(discard)
+                     : "a"((long long) 22),     /* SYS_FILE_CLOSE */
+                       "D"((long long) h)
+                     : "memory");
+    return 1; /* Match flat-stub: always TRUE — kernel side
+               * handles unknown handles as a no-op. */
+}
+
+/* CreateFileW — wide path in rcx (lpFileName), other args
+ * ignored. UTF-16 → ASCII strip on a stack-local buffer, then
+ * SYS_FILE_OPEN(rdi=path, rsi=len). Returns the kernel handle
+ * (Win32-shaped 0x100..0x10F) or -1 on failure. */
+__declspec(dllexport) HANDLE CreateFileW(const wchar_t16* lpFileName, DWORD dwDesiredAccess, DWORD dwShareMode,
+                                         void* lpSecurityAttributes, DWORD dwCreationDisposition,
+                                         DWORD dwFlagsAndAttributes, HANDLE hTemplateFile)
+{
+    (void) dwDesiredAccess;
+    (void) dwShareMode;
+    (void) lpSecurityAttributes;
+    (void) dwCreationDisposition;
+    (void) dwFlagsAndAttributes;
+    (void) hTemplateFile;
+    if (lpFileName == (const wchar_t16*) 0)
+        return (HANDLE) (long long) -1; /* INVALID_HANDLE_VALUE */
+    char ascii[256];
+    int  i = 0;
+    while (i < 255 && lpFileName[i] != 0)
+    {
+        ascii[i] = (char) (lpFileName[i] & 0xFF);
+        ++i;
+    }
+    ascii[i] = '\0';
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long) 20),     /* SYS_FILE_OPEN */
+                       "D"((long long) ascii),
+                       "S"((long long) i)
+                     : "memory");
+    return (HANDLE) rv;
+}
+
+__declspec(dllexport) BOOL ReadFile(HANDLE h, void* buf, DWORD count, DWORD* lpRead, void* lpOverlapped)
+{
+    (void) lpOverlapped;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long) 21),     /* SYS_FILE_READ */
+                       "D"((long long) h),
+                       "S"((long long) buf),
+                       "d"((long long) count)
+                     : "memory");
+    if (lpRead != (DWORD*) 0)
+        *lpRead = rv >= 0 ? (DWORD) rv : 0;
+    return rv >= 0 ? 1 : 0;
+}
+
+__declspec(dllexport) BOOL SetFilePointerEx(HANDLE h, long long liDistance, long long* lpNewPosition,
+                                            DWORD dwMoveMethod)
+{
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long) 23),     /* SYS_FILE_SEEK */
+                       "D"((long long) h),
+                       "S"((long long) liDistance),
+                       "d"((long long) dwMoveMethod)
+                     : "memory");
+    if (lpNewPosition != (long long*) 0)
+        *lpNewPosition = rv;
+    return rv >= 0 ? 1 : 0;
+}
+
+__declspec(dllexport) BOOL GetFileSizeEx(HANDLE h, long long* lpFileSize)
+{
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long) 24),     /* SYS_FILE_FSTAT */
+                       "D"((long long) h),
+                       "S"((long long) lpFileSize)
+                     : "memory");
+    /* SYS_FILE_FSTAT returns 0 on success and writes to the
+     * out pointer; non-zero is failure. */
+    return rv == 0 ? 1 : 0;
+}
+
+/* GetFileSize — DWORD version. Same semantics as GetFileSizeEx
+ * but returns the size in rax (low 32 bits) and writes the
+ * high 32 bits via lpFileSizeHigh if non-null. */
+__declspec(dllexport) DWORD GetFileSize(HANDLE h, DWORD* lpFileSizeHigh)
+{
+    long long size = 0;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long) 24),
+                       "D"((long long) h),
+                       "S"((long long) &size)
+                     : "memory");
+    if (rv != 0)
+        return 0xFFFFFFFFu; /* INVALID_FILE_SIZE */
+    if (lpFileSizeHigh != (DWORD*) 0)
+        *lpFileSizeHigh = (DWORD) (size >> 32);
+    return (DWORD) (size & 0xFFFFFFFFu);
+}
