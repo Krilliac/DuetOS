@@ -1,17 +1,32 @@
 ; userland/apps/windowed_hello/user32.def
 ;
-; user32 import surface for the windowed_hello fixture. Each
-; name here must match both:
-;   - an __declspec(dllimport) declaration in hello.c
-;   - an entry in kernel/CMakeLists.txt duetos_stub_dll(user32 ...)
-;     exports list (which resolves against userland/libs/user32/user32.c)
-;
-; The PE loader resolves these at spawn time against the
-; preloaded user32.dll's Export Address Table.
+; user32 import surface for the windowed_hello fixture.
 
 LIBRARY user32.dll
 
 EXPORTS
+    CreateCaret
     CreateWindowExA
-    ShowWindow
+    DestroyWindow
+    DispatchMessageA
+    GetActiveWindow
+    GetFocus
+    GetMessageA
+    GetParent
+    GetSystemMetrics
+    GetWindowLongPtrA
+    InvalidateRect
+    KillTimer
+    MessageBeep
     MessageBoxA
+    PeekMessageA
+    RegisterClassA
+    ScreenToClient
+    SendMessageA
+    SetCaretPos
+    SetFocus
+    SetTimer
+    SetWindowLongPtrA
+    ShowCaret
+    ShowWindow
+    TranslateMessage

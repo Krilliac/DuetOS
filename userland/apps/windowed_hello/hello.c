@@ -1,81 +1,319 @@
 /*
  * userland/apps/windowed_hello/hello.c
  *
- * First DuetOS userland program that creates a real window on
- * the kernel compositor via user32!CreateWindowExA. Proves the
- * windowing v0 slice works end-to-end:
- *   1. PE loader maps the binary.
- *   2. Import resolver binds CreateWindowExA / ShowWindow /
- *      MessageBoxA / Sleep / ExitProcess to their translator
- *      DLL exports (user32.dll, kernel32.dll).
- *   3. user32!CreateWindowExA issues SYS_WIN_CREATE (58) which
- *      WindowRegisters the rect in the kernel compositor.
- *   4. ShowWindow issues SYS_WIN_SHOW (60) which raises +
- *      composes — the window appears on screen at the next
- *      paint.
- *   5. MessageBoxA issues SYS_WIN_MSGBOX (61) which logs the
- *      text + caption to the serial console.
- *   6. Sleep parks the process so the window stays on-screen
- *      long enough for the screenshot script to capture it.
- *   7. ExitProcess(0x57) leaves a distinct exit code so the
- *      boot log makes clear which fixture printed what.
+ * Exercises the windowing subsystem end-to-end: compositor
+ * window, message pump, GDI paint, SetTimer, WM_CLOSE graceful
+ * shutdown. Also serves as the screenshot-capture fixture — the
+ * final `Sleep(20s)` gives the screenshot script's settle window
+ * time to grab the painted client area.
  *
- * Expected serial-log signature:
+ * Expected serial log signature:
  *   [msgbox] pid=... caption="Windowed Hello" text="Running on DuetOS!"
- *   [win] create pid=... hwnd=N rect=(x,y WxH) title="Windowed Hello"
+ *   [win] create pid=... hwnd=N rect=(x,y WxH) title="WINDOWED HELLO"
+ *   [odbg] windowed_hello: paint done
+ *   [odbg] windowed_hello: pumped N messages
  *   [I] sys : exit rc val=0x57
  */
 
 typedef void* HANDLE;
+typedef void* HDC;
+typedef void* HBRUSH;
 typedef unsigned int DWORD;
 typedef unsigned int UINT;
+typedef unsigned int COLORREF;
 typedef int BOOL;
+typedef unsigned long long WPARAM;
+typedef unsigned long long LPARAM;
+typedef unsigned long long LRESULT;
+
+typedef struct
+{
+    HANDLE hwnd;
+    UINT message;
+    UINT _pad;
+    WPARAM wParam;
+    LPARAM lParam;
+    DWORD time;
+    int pt_x;
+    int pt_y;
+    DWORD lPrivate;
+} MSG;
+
+typedef struct
+{
+    int left, top, right, bottom;
+} RECT;
 
 #define CW_USEDEFAULT ((int)0x80000000)
 #define SW_SHOW 5
 #define WS_OVERLAPPEDWINDOW 0x00CF0000u
+#define WM_QUIT 0x0012
+#define WM_CLOSE 0x0010
+#define WM_TIMER 0x0113
+#define PM_REMOVE 1
 
+#define RGB(r, g, b) ((COLORREF)(((unsigned)(r)) | (((unsigned)(g)) << 8) | (((unsigned)(b)) << 16)))
+
+typedef unsigned short ATOM;
+typedef LRESULT(__stdcall* WNDPROC)(HANDLE hwnd, UINT msg, WPARAM w, LPARAM l);
+
+typedef struct
+{
+    UINT style;
+    WNDPROC lpfnWndProc;
+    int cbClsExtra;
+    int cbWndExtra;
+    HANDLE hInstance;
+    HANDLE hIcon;
+    HANDLE hCursor;
+    HANDLE hbrBackground;
+    const char* lpszMenuName;
+    const char* lpszClassName;
+} WNDCLASSA;
+
+__declspec(dllimport) ATOM __stdcall RegisterClassA(const WNDCLASSA* wc);
 __declspec(dllimport) HANDLE __stdcall CreateWindowExA(DWORD dwExStyle, const char* lpClassName,
                                                        const char* lpWindowName, DWORD dwStyle, int x, int y,
                                                        int nWidth, int nHeight, HANDLE hWndParent, HANDLE hMenu,
                                                        HANDLE hInstance, void* lpParam);
 __declspec(dllimport) BOOL __stdcall ShowWindow(HANDLE hWnd, int nCmdShow);
+__declspec(dllimport) BOOL __stdcall InvalidateRect(HANDLE h, const void* r, BOOL erase);
+__declspec(dllimport) int __stdcall GetSystemMetrics(int index);
+__declspec(dllimport) HANDLE __stdcall GetActiveWindow(void);
+__declspec(dllimport) BOOL __stdcall ScreenToClient(HANDLE h, void* pt);
+__declspec(dllimport) long long __stdcall SetWindowLongPtrA(HANDLE h, int index, long long value);
+__declspec(dllimport) long long __stdcall GetWindowLongPtrA(HANDLE h, int index);
+__declspec(dllimport) LRESULT __stdcall SendMessageA(HANDLE h, UINT msg, WPARAM w, LPARAM l);
+__declspec(dllimport) HANDLE __stdcall GetParent(HANDLE h);
+__declspec(dllimport) HANDLE __stdcall SetFocus(HANDLE h);
+__declspec(dllimport) HANDLE __stdcall GetFocus(void);
+__declspec(dllimport) BOOL __stdcall CreateCaret(HANDLE hwnd, HANDLE bitmap, int w, int h);
+__declspec(dllimport) BOOL __stdcall ShowCaret(HANDLE hwnd);
+__declspec(dllimport) BOOL __stdcall SetCaretPos(int x, int y);
+__declspec(dllimport) BOOL __stdcall MessageBeep(UINT type);
+
+/* Win32 GWL_STYLE / GWLP_USERDATA constants. */
+#define GWLP_USERDATA (-21)
+#define GWL_STYLE (-16)
 __declspec(dllimport) int __stdcall MessageBoxA(HANDLE hWnd, const char* lpText, const char* lpCaption, UINT uType);
+__declspec(dllimport) BOOL __stdcall GetMessageA(MSG* msg, HANDLE h, UINT min, UINT max);
+__declspec(dllimport) BOOL __stdcall PeekMessageA(MSG* msg, HANDLE h, UINT min, UINT max, UINT flags);
+__declspec(dllimport) BOOL __stdcall TranslateMessage(const MSG* msg);
+__declspec(dllimport) long long __stdcall DispatchMessageA(const MSG* msg);
+__declspec(dllimport) unsigned long long __stdcall SetTimer(HANDLE h, unsigned long long id, UINT elapse, void* cb);
+__declspec(dllimport) BOOL __stdcall KillTimer(HANDLE h, unsigned long long id);
+__declspec(dllimport) BOOL __stdcall DestroyWindow(HANDLE h);
+
+__declspec(dllimport) HDC __stdcall GetDC(HANDLE hWnd);
+__declspec(dllimport) int __stdcall ReleaseDC(HANDLE hWnd, HDC dc);
+__declspec(dllimport) HBRUSH __stdcall CreateSolidBrush(COLORREF clr);
+__declspec(dllimport) BOOL __stdcall DeleteObject(void* obj);
+__declspec(dllimport) int __stdcall FillRect(HDC dc, const RECT* r, HBRUSH br);
+__declspec(dllimport) BOOL __stdcall Rectangle(HDC dc, int l, int t, int r, int b);
+__declspec(dllimport) BOOL __stdcall Ellipse(HDC dc, int l, int t, int r, int b);
+__declspec(dllimport) BOOL __stdcall LineTo(HDC dc, int x, int y);
+__declspec(dllimport) BOOL __stdcall MoveToEx(HDC dc, int x, int y, void* prev);
+__declspec(dllimport) BOOL __stdcall TextOutA(HDC dc, int x, int y, const char* text, int len);
+__declspec(dllimport) COLORREF __stdcall SetPixel(HDC dc, int x, int y, COLORREF col);
+
 __declspec(dllimport) void __stdcall Sleep(DWORD dwMilliseconds);
 __declspec(dllimport) void __stdcall ExitProcess(unsigned int uExitCode);
+__declspec(dllimport) void __stdcall OutputDebugStringA(const char* s);
+
+static int str_len(const char* s)
+{
+    int n = 0;
+    while (s[n])
+        ++n;
+    return n;
+}
+
+static void dbg_uint(const char* prefix, unsigned v)
+{
+    /* Tiny printf for [odbg] logging. Max 16 decimal digits. */
+    char buf[64];
+    int n = 0;
+    while (prefix[n] && n < 40)
+    {
+        buf[n] = prefix[n];
+        ++n;
+    }
+    /* Reverse-print v. */
+    char digits[16];
+    int d = 0;
+    if (v == 0)
+    {
+        digits[d++] = '0';
+    }
+    while (v > 0 && d < 16)
+    {
+        digits[d++] = (char)('0' + v % 10);
+        v /= 10;
+    }
+    while (d > 0 && n < 62)
+    {
+        buf[n++] = digits[--d];
+    }
+    buf[n++] = '\n';
+    buf[n] = '\0';
+    OutputDebugStringA(buf);
+}
+
+/* WndProc: routes messages via DispatchMessageA. Counts
+ * WM_TIMERs received — the counter is stored in GWLP_USERDATA
+ * so both the WndProc and main can read it, proving the
+ * SetWindowLongPtr round-trip works. */
+static LRESULT __stdcall duet_wndproc(HANDLE hwnd, UINT msg, WPARAM w, LPARAM l)
+{
+    (void)w;
+    (void)l;
+    if (msg == WM_TIMER)
+    {
+        long long prev = GetWindowLongPtrA(hwnd, GWLP_USERDATA);
+        SetWindowLongPtrA(hwnd, GWLP_USERDATA, prev + 1);
+    }
+    return 0;
+}
 
 void mainCRTStartup(void)
 {
-    /* Emit a [msgbox] record first so the serial log carries a
-     * "we got here" marker before anything can go wrong in the
-     * compositor path. */
     MessageBoxA(0, "Running on DuetOS!", "Windowed Hello", 0);
 
-    /* Create a window. Fixed geometry (not CW_USEDEFAULT) so the
-     * result is visually deterministic in the screenshot. */
-    HANDLE hwnd = CreateWindowExA(0, "DuetWindow", "WINDOWED HELLO", WS_OVERLAPPEDWINDOW,
-                                  /* x */ 500,
-                                  /* y */ 400,
-                                  /* w */ 420,
-                                  /* h */ 220,
-                                  /* parent */ 0,
-                                  /* menu */ 0,
-                                  /* hinstance */ 0,
-                                  /* lpparam */ 0);
+    WNDCLASSA wc = {0};
+    wc.lpfnWndProc = duet_wndproc;
+    wc.lpszClassName = "DuetWindow";
+    RegisterClassA(&wc);
 
-    /* Map it onto the compositor. v0's ShowWindow unconditionally
-     * raises + composes, so this also forces the first visible
-     * paint. */
+    /* Log a GetSystemMetrics call to prove the metric syscall
+     * reaches the framebuffer dims (non-zero). */
+    int screen_w = GetSystemMetrics(0 /* SM_CXSCREEN */);
+    int screen_h = GetSystemMetrics(1 /* SM_CYSCREEN */);
+    dbg_uint("[odbg] windowed_hello: screen w=", (unsigned)screen_w);
+    dbg_uint("[odbg] windowed_hello: screen h=", (unsigned)screen_h);
+
+    HANDLE hwnd =
+        CreateWindowExA(0, "DuetWindow", "WINDOWED HELLO", WS_OVERLAPPEDWINDOW, 500, 400, 420, 220, 0, 0, 0, 0);
+
     if (hwnd)
     {
         ShowWindow(hwnd, SW_SHOW);
+
+        /* Paint the client area via gdi32 primitives: bridges
+         * FillRect + Rectangle + Ellipse + LineTo + TextOut to
+         * the kernel's per-window display list. */
+        HDC dc = GetDC(hwnd);
+        if (dc)
+        {
+            /* Background wash. Brush tag carries the COLORREF in
+             * its low 24 bits so the kernel side can recover. */
+            HBRUSH bg = CreateSolidBrush(RGB(0x20, 0x30, 0x50));
+            RECT client = {0, 0, 412, 192};
+            FillRect(dc, &client, bg);
+            DeleteObject(bg);
+
+            /* 1-px outline rectangle + diagonal lines + ellipse
+             * — proves Line / Ellipse reach the compositor. */
+            Rectangle(dc, 10, 10, 200, 80);
+            MoveToEx(dc, 10, 10, 0);
+            LineTo(dc, 200, 80);
+            MoveToEx(dc, 200, 10, 0);
+            LineTo(dc, 10, 80);
+            Ellipse(dc, 220, 10, 400, 80);
+
+            /* Pixel stipple. */
+            for (int i = 0; i < 50; ++i)
+            {
+                SetPixel(dc, 220 + i * 3, 110, RGB(0xFF, 0xFF, 0x00));
+            }
+
+            TextOutA(dc, 12, 100, "DuetOS windowed_hello", 21);
+            TextOutA(dc, 12, 120, "GDI + MsgPump + Timer", 21);
+            ReleaseDC(hwnd, dc);
+        }
+        OutputDebugStringA("[odbg] windowed_hello: paint done\n");
+
+        /* Drain the WM_CREATE / WM_SIZE / WM_ACTIVATE lifecycle
+         * messages that land when the window registers. */
+        MSG msg;
+        unsigned drained = 0;
+        while (drained < 32 && PeekMessageA(&msg, 0, 0, 0, PM_REMOVE))
+        {
+            ++drained;
+            TranslateMessage(&msg);
+            DispatchMessageA(&msg);
+        }
+        dbg_uint("[odbg] windowed_hello: drained ", drained);
+
+        /* Timer-backed pump: SetTimer fires WM_TIMER every 500ms;
+         * GetMessage blocks until one arrives. Pump up to 3 then
+         * bail. Bounded iteration so a broken timer can't hang
+         * the fixture past the 17s screenshot window. */
+        SetTimer(hwnd, 1, 500, 0);
+        unsigned got_timer = 0;
+        unsigned got_total = 0;
+        while (got_timer < 3 && got_total < 50)
+        {
+            if (!GetMessageA(&msg, 0, 0, 0))
+                break;
+            ++got_total;
+            if (msg.message == WM_TIMER)
+                ++got_timer;
+            TranslateMessage(&msg);
+            DispatchMessageA(&msg);
+        }
+        KillTimer(hwnd, 1);
+        dbg_uint("[odbg] windowed_hello: pumped ", got_total);
+        dbg_uint("[odbg] windowed_hello: timers ", got_timer);
+        /* WndProc counter should match `got_timer` — that's how
+         * we know DispatchMessage actually invoked our proc. */
+        const unsigned dispatched_timers = (unsigned)GetWindowLongPtrA(hwnd, GWLP_USERDATA);
+        dbg_uint("[odbg] windowed_hello: wndproc ", dispatched_timers);
+
+        /* InvalidateRect → WM_PAINT round-trip. */
+        InvalidateRect(hwnd, 0, 1);
+        unsigned painted = 0;
+        for (unsigned iter = 0; iter < 8; ++iter)
+        {
+            if (!PeekMessageA(&msg, 0, 0, 0, PM_REMOVE))
+                break;
+            if (msg.message == 0x000F /* WM_PAINT */)
+            {
+                ++painted;
+            }
+            DispatchMessageA(&msg);
+        }
+        dbg_uint("[odbg] windowed_hello: painted ", painted);
+
+        /* SendMessage round-trip: fire a WM_APP message at our
+         * own WndProc. The proc just recognises WM_TIMER today —
+         * we bump USERDATA by 100 so the counter shows the
+         * send landed. */
+        (void)SetWindowLongPtrA(hwnd, GWLP_USERDATA, 0); /* reset for clean count */
+        LRESULT send_rv = SendMessageA(hwnd, 0x0113 /* WM_TIMER */, 42, 0);
+        const long long post_send_userdata = GetWindowLongPtrA(hwnd, GWLP_USERDATA);
+        dbg_uint("[odbg] windowed_hello: send_rv ", (unsigned)send_rv);
+        dbg_uint("[odbg] windowed_hello: send_ud ", (unsigned)post_send_userdata);
+
+        /* Win32 style round-trip: set + read back GWL_STYLE. */
+        (void)SetWindowLongPtrA(hwnd, GWL_STYLE, 0xDEADBEEF);
+        const long long read_style = GetWindowLongPtrA(hwnd, GWL_STYLE);
+        dbg_uint("[odbg] windowed_hello: style   ", (unsigned)read_style);
+
+        /* Focus round-trip: SetFocus → GetFocus. */
+        SetFocus(hwnd);
+        const unsigned focused_bias = (unsigned)(unsigned long long)GetFocus();
+        dbg_uint("[odbg] windowed_hello: focus   ", focused_bias);
+
+        /* Caret + short beep — verifies SYS_WIN_CARET + SYS_WIN_BEEP
+         * reach the compositor + PC speaker. */
+        CreateCaret(hwnd, 0, 2, 16);
+        SetCaretPos(200, 500);
+        ShowCaret(hwnd);
+        MessageBeep(0);
+        OutputDebugStringA("[odbg] windowed_hello: caret+beep done\n");
     }
 
-    /* Park for long enough that the screenshot script's settle
-     * window (DUETOS_SETTLE=5s default) captures the window on
-     * screen. After that we exit cleanly with a distinctive
-     * exit code. */
-    Sleep(20000);
-
+    /* Screenshot settle window. */
+    Sleep(17000);
     ExitProcess(0x57);
 }

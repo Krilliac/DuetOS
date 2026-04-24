@@ -1319,6 +1319,123 @@ void SyscallDispatch(arch::TrapFrame* frame)
     case SYS_WIN_MSGBOX:
         subsystems::win32::DoWinMsgBox(frame);
         return;
+    case SYS_WIN_PEEK_MSG:
+        subsystems::win32::DoWinPeekMsg(frame);
+        return;
+    case SYS_WIN_GET_MSG:
+        subsystems::win32::DoWinGetMsg(frame);
+        return;
+    case SYS_WIN_POST_MSG:
+        subsystems::win32::DoWinPostMsg(frame);
+        return;
+    case SYS_GDI_FILL_RECT:
+        subsystems::win32::DoGdiFillRect(frame);
+        return;
+    case SYS_GDI_TEXT_OUT:
+        subsystems::win32::DoGdiTextOut(frame);
+        return;
+    case SYS_GDI_RECTANGLE:
+        subsystems::win32::DoGdiRectangle(frame);
+        return;
+    case SYS_GDI_CLEAR:
+        subsystems::win32::DoGdiClear(frame);
+        return;
+    case SYS_WIN_MOVE:
+        subsystems::win32::DoWinMove(frame);
+        return;
+    case SYS_WIN_GET_RECT:
+        subsystems::win32::DoWinGetRect(frame);
+        return;
+    case SYS_WIN_SET_TEXT:
+        subsystems::win32::DoWinSetText(frame);
+        return;
+    case SYS_WIN_TIMER_SET:
+        subsystems::win32::DoWinTimerSet(frame);
+        return;
+    case SYS_WIN_TIMER_KILL:
+        subsystems::win32::DoWinTimerKill(frame);
+        return;
+    case SYS_GDI_LINE:
+        subsystems::win32::DoGdiLine(frame);
+        return;
+    case SYS_GDI_ELLIPSE:
+        subsystems::win32::DoGdiEllipse(frame);
+        return;
+    case SYS_GDI_SET_PIXEL:
+        subsystems::win32::DoGdiSetPixel(frame);
+        return;
+    case SYS_WIN_GET_KEYSTATE:
+        subsystems::win32::DoWinGetKeyState(frame);
+        return;
+    case SYS_WIN_GET_CURSOR:
+        subsystems::win32::DoWinGetCursor(frame);
+        return;
+    case SYS_WIN_SET_CURSOR:
+        subsystems::win32::DoWinSetCursor(frame);
+        return;
+    case SYS_WIN_SET_CAPTURE:
+        subsystems::win32::DoWinSetCapture(frame);
+        return;
+    case SYS_WIN_RELEASE_CAPTURE:
+        subsystems::win32::DoWinReleaseCapture(frame);
+        return;
+    case SYS_WIN_GET_CAPTURE:
+        subsystems::win32::DoWinGetCapture(frame);
+        return;
+    case SYS_WIN_CLIP_SET_TEXT:
+        subsystems::win32::DoWinClipSetText(frame);
+        return;
+    case SYS_WIN_CLIP_GET_TEXT:
+        subsystems::win32::DoWinClipGetText(frame);
+        return;
+    case SYS_WIN_GET_LONG:
+        subsystems::win32::DoWinGetLong(frame);
+        return;
+    case SYS_WIN_SET_LONG:
+        subsystems::win32::DoWinSetLong(frame);
+        return;
+    case SYS_WIN_INVALIDATE:
+        subsystems::win32::DoWinInvalidate(frame);
+        return;
+    case SYS_WIN_VALIDATE:
+        subsystems::win32::DoWinValidate(frame);
+        return;
+    case SYS_WIN_GET_ACTIVE:
+        subsystems::win32::DoWinGetActive(frame);
+        return;
+    case SYS_WIN_SET_ACTIVE:
+        subsystems::win32::DoWinSetActive(frame);
+        return;
+    case SYS_WIN_GET_METRIC:
+        subsystems::win32::DoWinGetMetric(frame);
+        return;
+    case SYS_WIN_ENUM:
+        subsystems::win32::DoWinEnum(frame);
+        return;
+    case SYS_WIN_FIND:
+        subsystems::win32::DoWinFind(frame);
+        return;
+    case SYS_WIN_SET_PARENT:
+        subsystems::win32::DoWinSetParent(frame);
+        return;
+    case SYS_WIN_GET_PARENT:
+        subsystems::win32::DoWinGetParent(frame);
+        return;
+    case SYS_WIN_GET_RELATED:
+        subsystems::win32::DoWinGetRelated(frame);
+        return;
+    case SYS_WIN_SET_FOCUS:
+        subsystems::win32::DoWinSetFocus(frame);
+        return;
+    case SYS_WIN_GET_FOCUS:
+        subsystems::win32::DoWinGetFocus(frame);
+        return;
+    case SYS_WIN_CARET:
+        subsystems::win32::DoWinCaret(frame);
+        return;
+    case SYS_WIN_BEEP:
+        subsystems::win32::DoWinBeep(frame);
+        return;
 
     case SYS_DLL_PROC_ADDRESS:
     {

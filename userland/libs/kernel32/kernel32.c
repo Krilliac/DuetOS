@@ -32,11 +32,11 @@
  * registers the syscall reads.
  */
 
-typedef unsigned int       DWORD;
-typedef unsigned int       UINT;
-typedef int                BOOL;
-typedef void*              HANDLE;
-typedef unsigned long      ULONG;
+typedef unsigned int DWORD;
+typedef unsigned int UINT;
+typedef int BOOL;
+typedef void* HANDLE;
+typedef unsigned long ULONG;
 typedef unsigned long long UINT_PTR; /* 64-bit on x64 windows-msvc; DWORD is 32 */
 
 #define WIN32_NORETURN __attribute__((noreturn))
@@ -49,8 +49,8 @@ typedef unsigned long long UINT_PTR; /* 64-bit on x64 windows-msvc; DWORD is 32 
 __declspec(dllexport) DWORD GetCurrentProcessId(void)
 {
     long rv;
-    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long) 8) : "memory");
-    return (DWORD) rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long)8) : "memory");
+    return (DWORD)rv;
 }
 
 /* SYS_GETPID = 1 — kernel returns the scheduler task id.
@@ -60,8 +60,8 @@ __declspec(dllexport) DWORD GetCurrentProcessId(void)
 __declspec(dllexport) DWORD GetCurrentThreadId(void)
 {
     long rv;
-    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long) 1) : "memory");
-    return (DWORD) rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long)1) : "memory");
+    return (DWORD)rv;
 }
 
 /* ------------------------------------------------------------------
@@ -73,12 +73,12 @@ __declspec(dllexport) DWORD GetCurrentThreadId(void)
 
 __declspec(dllexport) HANDLE GetCurrentProcess(void)
 {
-    return (HANDLE) (long) -1;
+    return (HANDLE)(long)-1;
 }
 
 __declspec(dllexport) HANDLE GetCurrentThread(void)
 {
-    return (HANDLE) (long) -2;
+    return (HANDLE)(long)-2;
 }
 
 /* ------------------------------------------------------------------
@@ -90,15 +90,15 @@ __declspec(dllexport) HANDLE GetCurrentThread(void)
 __declspec(dllexport) DWORD GetLastError(void)
 {
     long rv;
-    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long) 9) : "memory");
-    return (DWORD) rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long)9) : "memory");
+    return (DWORD)rv;
 }
 
 /* SYS_SETLASTERROR = 10 — rdi = new error code. */
 __declspec(dllexport) void SetLastError(DWORD err)
 {
     long discard;
-    __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long) 10), "D"((long) err) : "memory");
+    __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long)10), "D"((long)err) : "memory");
 }
 
 /* ------------------------------------------------------------------
@@ -107,7 +107,7 @@ __declspec(dllexport) void SetLastError(DWORD err)
 
 __declspec(dllexport) WIN32_NORETURN void ExitProcess(UINT uExitCode)
 {
-    __asm__ volatile("int $0x80" : : "a"((long) 0), "D"((long) uExitCode));
+    __asm__ volatile("int $0x80" : : "a"((long)0), "D"((long)uExitCode));
     __builtin_unreachable();
 }
 
@@ -116,8 +116,8 @@ __declspec(dllexport) WIN32_NORETURN void ExitProcess(UINT uExitCode)
  * goes to SYS_EXIT same as ExitProcess. */
 __declspec(dllexport) WIN32_NORETURN BOOL TerminateProcess(HANDLE hProcess, UINT uExitCode)
 {
-    (void) hProcess;
-    __asm__ volatile("int $0x80" : : "a"((long) 0), "D"((long) uExitCode));
+    (void)hProcess;
+    __asm__ volatile("int $0x80" : : "a"((long)0), "D"((long)uExitCode));
     __builtin_unreachable();
 }
 
@@ -134,7 +134,7 @@ __declspec(dllexport) BOOL IsDebuggerPresent(void)
 
 __declspec(dllexport) BOOL IsProcessorFeaturePresent(DWORD feature)
 {
-    (void) feature;
+    (void)feature;
     /* Optimistically claim every queried feature is present —
      * x86_64 universally has SSE / SSE2 / CMPXCHG16B / NX, and
      * AES / AVX / RDRAND are all visible in our CPU probe log.
@@ -145,8 +145,8 @@ __declspec(dllexport) BOOL IsProcessorFeaturePresent(DWORD feature)
 
 __declspec(dllexport) BOOL SetConsoleCtrlHandler(void* handler, BOOL add)
 {
-    (void) handler;
-    (void) add;
+    (void)handler;
+    (void)add;
     /* We have no console Ctrl-C dispatcher yet — pretend we
      * registered. Matches the flat stub's kOffReturnOne
      * behaviour. */
@@ -168,7 +168,7 @@ __declspec(dllexport) HANDLE GetStdHandle(DWORD nStdHandle)
      * 0x00000000FFFFFFF5 as a HANDLE — same as the flat stub's
      * `mov eax, ecx; ret`. UINT_PTR is 64-bit so the cast-
      * chain stays warning-clean under MSVC's LLP64 layout. */
-    return (HANDLE) (UINT_PTR) nStdHandle;
+    return (HANDLE)(UINT_PTR)nStdHandle;
 }
 
 /* ------------------------------------------------------------------
@@ -180,18 +180,18 @@ __declspec(dllexport) HANDLE GetStdHandle(DWORD nStdHandle)
  * ------------------------------------------------------------------ */
 
 typedef unsigned long long ULONGLONG;
-typedef long               LONG;
+typedef long LONG;
 
 __declspec(dllexport) void Sleep(DWORD ms)
 {
     long discard;
-    __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long) 19), "D"((long) ms) : "memory");
+    __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long)19), "D"((long)ms) : "memory");
 }
 
 __declspec(dllexport) BOOL SwitchToThread(void)
 {
     long rv;
-    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long) 3) : "memory");
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long)3) : "memory");
     /* SYS_YIELD returns 0 on success — match Win32
      * SwitchToThread's "TRUE if yielded" semantic. */
     return 1;
@@ -204,13 +204,13 @@ __declspec(dllexport) BOOL SwitchToThread(void)
 __declspec(dllexport) ULONGLONG GetTickCount64(void)
 {
     long rv;
-    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long) 13) : "memory");
-    return (ULONGLONG) rv * 10ULL;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long)13) : "memory");
+    return (ULONGLONG)rv * 10ULL;
 }
 
 __declspec(dllexport) DWORD GetTickCount(void)
 {
-    return (DWORD) GetTickCount64();
+    return (DWORD)GetTickCount64();
 }
 
 /* ------------------------------------------------------------------
@@ -329,8 +329,8 @@ __declspec(dllexport) LONG64 InterlockedXor64(LONG64 volatile* dest, LONG64 valu
 
 __declspec(dllexport) BOOL GetConsoleMode(HANDLE hConsole, DWORD* lpMode)
 {
-    (void) hConsole;
-    if (lpMode != (DWORD*) 0)
+    (void)hConsole;
+    if (lpMode != (DWORD*)0)
         *lpMode = 3; /* ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT */
     return 1;
 }
@@ -352,14 +352,14 @@ __declspec(dllexport) UINT GetConsoleOutputCP(void)
 
 __declspec(dllexport) BOOL SetConsoleMode(HANDLE hConsole, DWORD mode)
 {
-    (void) hConsole;
-    (void) mode;
+    (void)hConsole;
+    (void)mode;
     return 1;
 }
 
 __declspec(dllexport) BOOL SetConsoleOutputCP(UINT cp)
 {
-    (void) cp;
+    (void)cp;
     return 1;
 }
 
@@ -370,7 +370,7 @@ __declspec(dllexport) void OutputDebugStringA(const char* str)
     if (!str)
         return;
     long long discard;
-    __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long) 46), "D"((long long) str) : "memory");
+    __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long)46), "D"((long long)str) : "memory");
 }
 
 typedef unsigned short WCHAR_t;
@@ -379,16 +379,16 @@ __declspec(dllexport) void OutputDebugStringW(const WCHAR_t* wstr)
     if (!wstr)
         return;
     /* Strip to ASCII into a 256-byte stack buffer. */
-    char   buf[256];
+    char buf[256];
     size_t i = 0;
     while (i < 255 && wstr[i])
     {
-        buf[i] = (char) (wstr[i] & 0xFF);
+        buf[i] = (char)(wstr[i] & 0xFF);
         ++i;
     }
     buf[i] = 0;
     long long discard;
-    __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long) 46), "D"((long long) buf) : "memory");
+    __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long)46), "D"((long long)buf) : "memory");
 }
 
 __declspec(dllexport) DWORD GetLogicalDrives(void)
@@ -399,30 +399,30 @@ __declspec(dllexport) DWORD GetLogicalDrives(void)
 
 __declspec(dllexport) UINT GetDriveTypeA(const char* root)
 {
-    (void) root;
+    (void)root;
     return 3; /* DRIVE_FIXED */
 }
 
 __declspec(dllexport) UINT GetDriveTypeW(const void* root)
 {
-    (void) root;
+    (void)root;
     return 3; /* DRIVE_FIXED */
 }
 
 __declspec(dllexport) BOOL IsWow64Process(HANDLE hProc, BOOL* Wow64Process)
 {
-    (void) hProc;
-    if (Wow64Process != (BOOL*) 0)
+    (void)hProc;
+    if (Wow64Process != (BOOL*)0)
         *Wow64Process = 0; /* Native x64, not Wow64. */
     return 1;
 }
 
 __declspec(dllexport) BOOL IsWow64Process2(HANDLE hProc, unsigned short* proc_machine, unsigned short* native_machine)
 {
-    (void) hProc;
-    if (proc_machine != (unsigned short*) 0)
+    (void)hProc;
+    if (proc_machine != (unsigned short*)0)
         *proc_machine = 0; /* IMAGE_FILE_MACHINE_UNKNOWN — not Wow64. */
-    if (native_machine != (unsigned short*) 0)
+    if (native_machine != (unsigned short*)0)
         *native_machine = 0x8664; /* IMAGE_FILE_MACHINE_AMD64 */
     return 1;
 }
@@ -434,25 +434,25 @@ __declspec(dllexport) BOOL IsWow64Process2(HANDLE hProc, unsigned short* proc_ma
  * variant's flat stub also returned 0. */
 __declspec(dllexport) BOOL GetModuleHandleExW(DWORD flags, const void* name, void** phmodule)
 {
-    (void) flags;
-    (void) name;
-    if (phmodule != (void**) 0)
-        *phmodule = (void*) 0;
+    (void)flags;
+    (void)name;
+    if (phmodule != (void**)0)
+        *phmodule = (void*)0;
     return 0;
 }
 
 __declspec(dllexport) BOOL GetModuleHandleExA(DWORD flags, const char* name, void** phmodule)
 {
-    (void) flags;
-    (void) name;
-    if (phmodule != (void**) 0)
-        *phmodule = (void*) 0;
+    (void)flags;
+    (void)name;
+    if (phmodule != (void**)0)
+        *phmodule = (void*)0;
     return 0;
 }
 
 __declspec(dllexport) BOOL FreeLibrary(void* hModule)
 {
-    (void) hModule;
+    (void)hModule;
     return 1; /* Pretend success — we don't refcount mapped DLLs yet. */
 }
 
@@ -470,20 +470,20 @@ typedef struct SLIST_ENTRY
 
 __declspec(dllexport) void InterlockedPushEntrySList(void* head, SLIST_ENTRY* entry)
 {
-    (void) head;
-    (void) entry;
+    (void)head;
+    (void)entry;
 }
 
 __declspec(dllexport) SLIST_ENTRY* InterlockedPopEntrySList(void* head)
 {
-    (void) head;
-    return (SLIST_ENTRY*) 0;
+    (void)head;
+    return (SLIST_ENTRY*)0;
 }
 
 __declspec(dllexport) SLIST_ENTRY* InterlockedFlushSList(void* head)
 {
-    (void) head;
-    return (SLIST_ENTRY*) 0;
+    (void)head;
+    return (SLIST_ENTRY*)0;
 }
 
 __declspec(dllexport) void InitializeSListHead(void* head)
@@ -491,9 +491,9 @@ __declspec(dllexport) void InitializeSListHead(void* head)
     /* Zero the 16-byte SLIST_HEADER (one pointer + one u64
      * aligned pair on x64). Byte loop keeps this independent
      * of memset. */
-    if (head != (void*) 0)
+    if (head != (void*)0)
     {
-        unsigned char* b = (unsigned char*) head;
+        unsigned char* b = (unsigned char*)head;
         for (int i = 0; i < 16; ++i)
             b[i] = 0;
     }
@@ -514,16 +514,16 @@ __declspec(dllexport) void InitializeSListHead(void* head)
  * ------------------------------------------------------------------ */
 
 typedef unsigned long long SIZE_T;
-typedef unsigned int       PROT;
+typedef unsigned int PROT;
 
 __declspec(dllexport) void* VirtualAlloc(void* lpAddress, SIZE_T dwSize, DWORD flAllocationType, DWORD flProtect)
 {
-    (void) lpAddress;
-    (void) flAllocationType;
-    (void) flProtect;
+    (void)lpAddress;
+    (void)flAllocationType;
+    (void)flProtect;
     long long rv;
-    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long) 28), "D"((long long) dwSize) : "memory");
-    return (void*) rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)28), "D"((long long)dwSize) : "memory");
+    return (void*)rv;
 }
 
 /* VirtualAllocEx ignores the extra HANDLE arg in v0 (the flat
@@ -531,17 +531,17 @@ __declspec(dllexport) void* VirtualAlloc(void* lpAddress, SIZE_T dwSize, DWORD f
 __declspec(dllexport) void* VirtualAllocEx(HANDLE hProcess, void* lpAddress, SIZE_T dwSize, DWORD flAllocationType,
                                            DWORD flProtect)
 {
-    (void) hProcess;
+    (void)hProcess;
     return VirtualAlloc(lpAddress, dwSize, flAllocationType, flProtect);
 }
 
 __declspec(dllexport) BOOL VirtualFree(void* lpAddress, SIZE_T dwSize, DWORD dwFreeType)
 {
-    (void) dwFreeType;
+    (void)dwFreeType;
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
-                     : "a"((long long) 29), "D"((long long) lpAddress), "S"((long long) dwSize)
+                     : "a"((long long)29), "D"((long long)lpAddress), "S"((long long)dwSize)
                      : "memory");
     /* SYS_VUNMAP returns 0 on hit, -1 on miss; Win32 wants
      * BOOL TRUE on hit. */
@@ -550,19 +550,19 @@ __declspec(dllexport) BOOL VirtualFree(void* lpAddress, SIZE_T dwSize, DWORD dwF
 
 __declspec(dllexport) BOOL VirtualFreeEx(HANDLE hProcess, void* lpAddress, SIZE_T dwSize, DWORD dwFreeType)
 {
-    (void) hProcess;
+    (void)hProcess;
     return VirtualFree(lpAddress, dwSize, dwFreeType);
 }
 
 __declspec(dllexport) BOOL VirtualProtect(void* lpAddress, SIZE_T dwSize, DWORD flNewProtect, DWORD* lpflOldProtect)
 {
-    (void) lpAddress;
-    (void) dwSize;
-    (void) flNewProtect;
+    (void)lpAddress;
+    (void)dwSize;
+    (void)flNewProtect;
     /* Every vmap page is RW+NX by construction (W^X). Round-
      * trip PAGE_READWRITE (= 0x04) as the "previous" protection
      * so MSVC CRT's probe path sees a plausible value. */
-    if (lpflOldProtect != (DWORD*) 0)
+    if (lpflOldProtect != (DWORD*)0)
         *lpflOldProtect = 0x04;
     return 1;
 }
@@ -570,7 +570,7 @@ __declspec(dllexport) BOOL VirtualProtect(void* lpAddress, SIZE_T dwSize, DWORD 
 __declspec(dllexport) BOOL VirtualProtectEx(HANDLE hProcess, void* lpAddress, SIZE_T dwSize, DWORD flNewProtect,
                                             DWORD* lpflOldProtect)
 {
-    (void) hProcess;
+    (void)hProcess;
     return VirtualProtect(lpAddress, dwSize, flNewProtect, lpflOldProtect);
 }
 
@@ -585,7 +585,7 @@ __declspec(dllexport) BOOL VirtualProtectEx(HANDLE hProcess, void* lpAddress, SI
 
 __declspec(dllexport) NO_BUILTIN_LSTR int lstrlenA(const char* s)
 {
-    if (s == (const char*) 0)
+    if (s == (const char*)0)
         return 0; /* lstrlenA NUL-input returns 0, not crash */
     int n = 0;
     while (s[n])
@@ -595,39 +595,41 @@ __declspec(dllexport) NO_BUILTIN_LSTR int lstrlenA(const char* s)
 
 __declspec(dllexport) NO_BUILTIN_LSTR int lstrcmpA(const char* a, const char* b)
 {
-    if (a == (const char*) 0 || b == (const char*) 0)
-        return (a == b) ? 0 : (a == (const char*) 0 ? -1 : 1);
+    if (a == (const char*)0 || b == (const char*)0)
+        return (a == b) ? 0 : (a == (const char*)0 ? -1 : 1);
     while (*a && *a == *b)
     {
         ++a;
         ++b;
     }
-    return (int) (unsigned char) *a - (int) (unsigned char) *b;
+    return (int)(unsigned char)*a - (int)(unsigned char)*b;
 }
 
 __declspec(dllexport) NO_BUILTIN_LSTR int lstrcmpiA(const char* a, const char* b)
 {
-    if (a == (const char*) 0 || b == (const char*) 0)
-        return (a == b) ? 0 : (a == (const char*) 0 ? -1 : 1);
+    if (a == (const char*)0 || b == (const char*)0)
+        return (a == b) ? 0 : (a == (const char*)0 ? -1 : 1);
     for (;; ++a, ++b)
     {
         char ca = *a;
         char cb = *b;
         if (ca >= 'A' && ca <= 'Z')
-            ca = (char) (ca + ('a' - 'A'));
+            ca = (char)(ca + ('a' - 'A'));
         if (cb >= 'A' && cb <= 'Z')
-            cb = (char) (cb + ('a' - 'A'));
+            cb = (char)(cb + ('a' - 'A'));
         if (!ca || ca != cb)
-            return (int) (unsigned char) ca - (int) (unsigned char) cb;
+            return (int)(unsigned char)ca - (int)(unsigned char)cb;
     }
 }
 
 __declspec(dllexport) NO_BUILTIN_LSTR char* lstrcpyA(char* dst, const char* src)
 {
-    if (dst == (char*) 0 || src == (const char*) 0)
+    if (dst == (char*)0 || src == (const char*)0)
         return dst;
     char* d = dst;
-    while ((*d++ = *src++) != 0) { }
+    while ((*d++ = *src++) != 0)
+    {
+    }
     return dst;
 }
 
@@ -635,7 +637,7 @@ typedef unsigned short wchar_t16; /* Win32 wchar_t is UTF-16 */
 
 __declspec(dllexport) int lstrlenW(const wchar_t16* s)
 {
-    if (s == (const wchar_t16*) 0)
+    if (s == (const wchar_t16*)0)
         return 0;
     int n = 0;
     while (s[n])
@@ -645,39 +647,41 @@ __declspec(dllexport) int lstrlenW(const wchar_t16* s)
 
 __declspec(dllexport) int lstrcmpW(const wchar_t16* a, const wchar_t16* b)
 {
-    if (a == (const wchar_t16*) 0 || b == (const wchar_t16*) 0)
-        return (a == b) ? 0 : (a == (const wchar_t16*) 0 ? -1 : 1);
+    if (a == (const wchar_t16*)0 || b == (const wchar_t16*)0)
+        return (a == b) ? 0 : (a == (const wchar_t16*)0 ? -1 : 1);
     while (*a && *a == *b)
     {
         ++a;
         ++b;
     }
-    return (int) *a - (int) *b;
+    return (int)*a - (int)*b;
 }
 
 __declspec(dllexport) int lstrcmpiW(const wchar_t16* a, const wchar_t16* b)
 {
-    if (a == (const wchar_t16*) 0 || b == (const wchar_t16*) 0)
-        return (a == b) ? 0 : (a == (const wchar_t16*) 0 ? -1 : 1);
+    if (a == (const wchar_t16*)0 || b == (const wchar_t16*)0)
+        return (a == b) ? 0 : (a == (const wchar_t16*)0 ? -1 : 1);
     for (;; ++a, ++b)
     {
         wchar_t16 ca = *a;
         wchar_t16 cb = *b;
         if (ca >= 'A' && ca <= 'Z')
-            ca = (wchar_t16) (ca + ('a' - 'A'));
+            ca = (wchar_t16)(ca + ('a' - 'A'));
         if (cb >= 'A' && cb <= 'Z')
-            cb = (wchar_t16) (cb + ('a' - 'A'));
+            cb = (wchar_t16)(cb + ('a' - 'A'));
         if (!ca || ca != cb)
-            return (int) ca - (int) cb;
+            return (int)ca - (int)cb;
     }
 }
 
 __declspec(dllexport) wchar_t16* lstrcpyW(wchar_t16* dst, const wchar_t16* src)
 {
-    if (dst == (wchar_t16*) 0 || src == (const wchar_t16*) 0)
+    if (dst == (wchar_t16*)0 || src == (const wchar_t16*)0)
         return dst;
     wchar_t16* d = dst;
-    while ((*d++ = *src++) != 0) { }
+    while ((*d++ = *src++) != 0)
+    {
+    }
     return dst;
 }
 
@@ -707,18 +711,18 @@ typedef void* LPDWORD_t; /* DWORD* via opaque pointer to avoid C-warning chains 
 
 __declspec(dllexport) BOOL WriteFile(HANDLE hFile, const void* buf, DWORD n, DWORD* lpWritten, void* lpOverlapped)
 {
-    (void) hFile;
-    (void) lpOverlapped;
+    (void)hFile;
+    (void)lpOverlapped;
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
-                     : "a"((long long) 2),       /* SYS_WRITE */
-                       "D"((long long) 1),       /* fd=1 (stdout) */
-                       "S"((long long) buf),     /* buf */
-                       "d"((long long) n)        /* count */
+                     : "a"((long long)2),   /* SYS_WRITE */
+                       "D"((long long)1),   /* fd=1 (stdout) */
+                       "S"((long long)buf), /* buf */
+                       "d"((long long)n)    /* count */
                      : "memory");
-    if (lpWritten != (DWORD*) 0)
-        *lpWritten = rv >= 0 ? (DWORD) rv : 0;
+    if (lpWritten != (DWORD*)0)
+        *lpWritten = rv >= 0 ? (DWORD)rv : 0;
     return rv >= 0 ? 1 : 0;
 }
 
@@ -735,11 +739,11 @@ __declspec(dllexport) BOOL WriteConsoleA(HANDLE hConsole, const void* buf, DWORD
 __declspec(dllexport) BOOL WriteConsoleW(HANDLE hConsole, const wchar_t16* buf, DWORD n, DWORD* lpWritten,
                                          void* lpReserved)
 {
-    (void) hConsole;
-    (void) lpReserved;
-    if (buf == (const wchar_t16*) 0 || n == 0)
+    (void)hConsole;
+    (void)lpReserved;
+    if (buf == (const wchar_t16*)0 || n == 0)
     {
-        if (lpWritten != (DWORD*) 0)
+        if (lpWritten != (DWORD*)0)
             *lpWritten = 0;
         return 1;
     }
@@ -749,17 +753,16 @@ __declspec(dllexport) BOOL WriteConsoleW(HANDLE hConsole, const wchar_t16* buf, 
     char ascii[256];
     DWORD cap = n > 256 ? 256 : n;
     for (DWORD i = 0; i < cap; ++i)
-        ascii[i] = (char) (buf[i] & 0xFF);
+        ascii[i] = (char)(buf[i] & 0xFF);
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
-                     : "a"((long long) 2),       /* SYS_WRITE */
-                       "D"((long long) 1),       /* fd=1 */
-                       "S"((long long) ascii),
-                       "d"((long long) cap)
+                     : "a"((long long)2), /* SYS_WRITE */
+                       "D"((long long)1), /* fd=1 */
+                       "S"((long long)ascii), "d"((long long)cap)
                      : "memory");
-    if (lpWritten != (DWORD*) 0)
-        *lpWritten = rv >= 0 ? (DWORD) rv : 0;
+    if (lpWritten != (DWORD*)0)
+        *lpWritten = rv >= 0 ? (DWORD)rv : 0;
     return rv >= 0 ? 1 : 0;
 }
 
@@ -768,8 +771,8 @@ __declspec(dllexport) BOOL CloseHandle(HANDLE h)
     long long discard;
     __asm__ volatile("int $0x80"
                      : "=a"(discard)
-                     : "a"((long long) 22),     /* SYS_FILE_CLOSE */
-                       "D"((long long) h)
+                     : "a"((long long)22), /* SYS_FILE_CLOSE */
+                       "D"((long long)h)
                      : "memory");
     return 1; /* Match flat-stub: always TRUE — kernel side
                * handles unknown handles as a no-op. */
@@ -783,45 +786,42 @@ __declspec(dllexport) HANDLE CreateFileW(const wchar_t16* lpFileName, DWORD dwDe
                                          void* lpSecurityAttributes, DWORD dwCreationDisposition,
                                          DWORD dwFlagsAndAttributes, HANDLE hTemplateFile)
 {
-    (void) dwDesiredAccess;
-    (void) dwShareMode;
-    (void) lpSecurityAttributes;
-    (void) dwCreationDisposition;
-    (void) dwFlagsAndAttributes;
-    (void) hTemplateFile;
-    if (lpFileName == (const wchar_t16*) 0)
-        return (HANDLE) (long long) -1; /* INVALID_HANDLE_VALUE */
+    (void)dwDesiredAccess;
+    (void)dwShareMode;
+    (void)lpSecurityAttributes;
+    (void)dwCreationDisposition;
+    (void)dwFlagsAndAttributes;
+    (void)hTemplateFile;
+    if (lpFileName == (const wchar_t16*)0)
+        return (HANDLE)(long long)-1; /* INVALID_HANDLE_VALUE */
     char ascii[256];
-    int  i = 0;
+    int i = 0;
     while (i < 255 && lpFileName[i] != 0)
     {
-        ascii[i] = (char) (lpFileName[i] & 0xFF);
+        ascii[i] = (char)(lpFileName[i] & 0xFF);
         ++i;
     }
     ascii[i] = '\0';
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
-                     : "a"((long long) 20),     /* SYS_FILE_OPEN */
-                       "D"((long long) ascii),
-                       "S"((long long) i)
+                     : "a"((long long)20), /* SYS_FILE_OPEN */
+                       "D"((long long)ascii), "S"((long long)i)
                      : "memory");
-    return (HANDLE) rv;
+    return (HANDLE)rv;
 }
 
 __declspec(dllexport) BOOL ReadFile(HANDLE h, void* buf, DWORD count, DWORD* lpRead, void* lpOverlapped)
 {
-    (void) lpOverlapped;
+    (void)lpOverlapped;
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
-                     : "a"((long long) 21),     /* SYS_FILE_READ */
-                       "D"((long long) h),
-                       "S"((long long) buf),
-                       "d"((long long) count)
+                     : "a"((long long)21), /* SYS_FILE_READ */
+                       "D"((long long)h), "S"((long long)buf), "d"((long long)count)
                      : "memory");
-    if (lpRead != (DWORD*) 0)
-        *lpRead = rv >= 0 ? (DWORD) rv : 0;
+    if (lpRead != (DWORD*)0)
+        *lpRead = rv >= 0 ? (DWORD)rv : 0;
     return rv >= 0 ? 1 : 0;
 }
 
@@ -831,12 +831,10 @@ __declspec(dllexport) BOOL SetFilePointerEx(HANDLE h, long long liDistance, long
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
-                     : "a"((long long) 23),     /* SYS_FILE_SEEK */
-                       "D"((long long) h),
-                       "S"((long long) liDistance),
-                       "d"((long long) dwMoveMethod)
+                     : "a"((long long)23), /* SYS_FILE_SEEK */
+                       "D"((long long)h), "S"((long long)liDistance), "d"((long long)dwMoveMethod)
                      : "memory");
-    if (lpNewPosition != (long long*) 0)
+    if (lpNewPosition != (long long*)0)
         *lpNewPosition = rv;
     return rv >= 0 ? 1 : 0;
 }
@@ -846,9 +844,8 @@ __declspec(dllexport) BOOL GetFileSizeEx(HANDLE h, long long* lpFileSize)
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
-                     : "a"((long long) 24),     /* SYS_FILE_FSTAT */
-                       "D"((long long) h),
-                       "S"((long long) lpFileSize)
+                     : "a"((long long)24), /* SYS_FILE_FSTAT */
+                       "D"((long long)h), "S"((long long)lpFileSize)
                      : "memory");
     /* SYS_FILE_FSTAT returns 0 on success and writes to the
      * out pointer; non-zero is failure. */
@@ -862,17 +859,12 @@ __declspec(dllexport) DWORD GetFileSize(HANDLE h, DWORD* lpFileSizeHigh)
 {
     long long size = 0;
     long long rv;
-    __asm__ volatile("int $0x80"
-                     : "=a"(rv)
-                     : "a"((long long) 24),
-                       "D"((long long) h),
-                       "S"((long long) &size)
-                     : "memory");
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)24), "D"((long long)h), "S"((long long)&size) : "memory");
     if (rv != 0)
         return 0xFFFFFFFFu; /* INVALID_FILE_SIZE */
-    if (lpFileSizeHigh != (DWORD*) 0)
-        *lpFileSizeHigh = (DWORD) (size >> 32);
-    return (DWORD) (size & 0xFFFFFFFFu);
+    if (lpFileSizeHigh != (DWORD*)0)
+        *lpFileSizeHigh = (DWORD)(size >> 32);
+    return (DWORD)(size & 0xFFFFFFFFu);
 }
 
 /* ------------------------------------------------------------------
@@ -888,16 +880,16 @@ __declspec(dllexport) DWORD GetFileSize(HANDLE h, DWORD* lpFileSizeHigh)
 __declspec(dllexport) void GetSystemTimeAsFileTime(long long* lpFileTime)
 {
     long long rv;
-    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long) 17) : "memory");
-    if (lpFileTime != (long long*) 0)
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)17) : "memory");
+    if (lpFileTime != (long long*)0)
         *lpFileTime = rv;
 }
 
 __declspec(dllexport) BOOL QueryPerformanceCounter(long long* lpPerformanceCount)
 {
     long long rv;
-    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long) 18) : "memory");
-    if (lpPerformanceCount != (long long*) 0)
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)18) : "memory");
+    if (lpPerformanceCount != (long long*)0)
         *lpPerformanceCount = rv;
     return 1;
 }
@@ -906,7 +898,7 @@ __declspec(dllexport) BOOL QueryPerformanceFrequency(long long* lpFrequency)
 {
     /* 1 GHz — pairs with QPC's nanosecond return so subtraction
      * + division yields seconds. */
-    if (lpFrequency != (long long*) 0)
+    if (lpFrequency != (long long*)0)
         *lpFrequency = 1000000000LL;
     return 1;
 }
@@ -924,72 +916,63 @@ __declspec(dllexport) HANDLE GetProcessHeap(void)
 {
     /* Sentinel — same value as the flat stub returned, matching
      * the per-process heap base. */
-    return (HANDLE) 0x50000000ULL;
+    return (HANDLE)0x50000000ULL;
 }
 
 __declspec(dllexport) void* HeapAlloc(HANDLE hHeap, DWORD dwFlags, SIZE_T dwBytes)
 {
-    (void) hHeap;
-    (void) dwFlags;
+    (void)hHeap;
+    (void)dwFlags;
     long long rv;
-    __asm__ volatile("int $0x80"
-                     : "=a"(rv)
-                     : "a"((long long) 11), "D"((long long) dwBytes)
-                     : "memory");
-    return (void*) rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)11), "D"((long long)dwBytes) : "memory");
+    return (void*)rv;
 }
 
 __declspec(dllexport) BOOL HeapFree(HANDLE hHeap, DWORD dwFlags, void* lpMem)
 {
-    (void) hHeap;
-    (void) dwFlags;
-    if (lpMem == (void*) 0)
+    (void)hHeap;
+    (void)dwFlags;
+    if (lpMem == (void*)0)
         return 1;
     long long discard;
-    __asm__ volatile("int $0x80"
-                     : "=a"(discard)
-                     : "a"((long long) 12), "D"((long long) lpMem)
-                     : "memory");
+    __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long)12), "D"((long long)lpMem) : "memory");
     return 1;
 }
 
 __declspec(dllexport) SIZE_T HeapSize(HANDLE hHeap, DWORD dwFlags, const void* lpMem)
 {
-    (void) hHeap;
-    (void) dwFlags;
+    (void)hHeap;
+    (void)dwFlags;
     long long rv;
-    __asm__ volatile("int $0x80"
-                     : "=a"(rv)
-                     : "a"((long long) 14), "D"((long long) lpMem)
-                     : "memory");
-    return (SIZE_T) rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)14), "D"((long long)lpMem) : "memory");
+    return (SIZE_T)rv;
 }
 
 __declspec(dllexport) void* HeapReAlloc(HANDLE hHeap, DWORD dwFlags, void* lpMem, SIZE_T dwBytes)
 {
-    (void) hHeap;
-    (void) dwFlags;
+    (void)hHeap;
+    (void)dwFlags;
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
-                     : "a"((long long) 15), "D"((long long) lpMem), "S"((long long) dwBytes)
+                     : "a"((long long)15), "D"((long long)lpMem), "S"((long long)dwBytes)
                      : "memory");
-    return (void*) rv;
+    return (void*)rv;
 }
 
 __declspec(dllexport) HANDLE HeapCreate(DWORD flOptions, SIZE_T dwInitialSize, SIZE_T dwMaximumSize)
 {
-    (void) flOptions;
-    (void) dwInitialSize;
-    (void) dwMaximumSize;
+    (void)flOptions;
+    (void)dwInitialSize;
+    (void)dwMaximumSize;
     /* All heaps collapse to the per-process default. Return the
      * sentinel from GetProcessHeap. */
-    return (HANDLE) 0x50000000ULL;
+    return (HANDLE)0x50000000ULL;
 }
 
 __declspec(dllexport) BOOL HeapDestroy(HANDLE hHeap)
 {
-    (void) hHeap;
+    (void)hHeap;
     return 1; /* Pretend success — we don't refcount heaps. */
 }
 
@@ -1028,9 +1011,9 @@ __declspec(dllexport) BOOL IsValidCodePage(UINT codepage)
 __declspec(dllexport) int MultiByteToWideChar(UINT codepage, DWORD dwFlags, const char* lpMultiByteStr, int cbMultiByte,
                                               wchar_t16* lpWideCharStr, int cchWideChar)
 {
-    (void) codepage;
-    (void) dwFlags;
-    if (lpMultiByteStr == (const char*) 0)
+    (void)codepage;
+    (void)dwFlags;
+    if (lpMultiByteStr == (const char*)0)
         return 0;
     /* cbMultiByte == -1 means "input is NUL-terminated; include
      * the terminator in the output". Compute length first. */
@@ -1044,11 +1027,11 @@ __declspec(dllexport) int MultiByteToWideChar(UINT codepage, DWORD dwFlags, cons
     }
     else
         in_len = cbMultiByte;
-    if (cchWideChar == 0 || lpWideCharStr == (wchar_t16*) 0)
+    if (cchWideChar == 0 || lpWideCharStr == (wchar_t16*)0)
         return in_len; /* Caller is asking for required size. */
     int copy = in_len < cchWideChar ? in_len : cchWideChar;
     for (int i = 0; i < copy; ++i)
-        lpWideCharStr[i] = (wchar_t16) (unsigned char) lpMultiByteStr[i];
+        lpWideCharStr[i] = (wchar_t16)(unsigned char)lpMultiByteStr[i];
     return copy;
 }
 
@@ -1056,12 +1039,12 @@ __declspec(dllexport) int WideCharToMultiByte(UINT codepage, DWORD dwFlags, cons
                                               int cchWideChar, char* lpMultiByteStr, int cbMultiByte,
                                               const char* lpDefaultChar, BOOL* lpUsedDefaultChar)
 {
-    (void) codepage;
-    (void) dwFlags;
-    (void) lpDefaultChar;
-    if (lpUsedDefaultChar != (BOOL*) 0)
+    (void)codepage;
+    (void)dwFlags;
+    (void)lpDefaultChar;
+    if (lpUsedDefaultChar != (BOOL*)0)
         *lpUsedDefaultChar = 0;
-    if (lpWideCharStr == (const wchar_t16*) 0)
+    if (lpWideCharStr == (const wchar_t16*)0)
         return 0;
     int in_len;
     if (cchWideChar < 0)
@@ -1073,11 +1056,11 @@ __declspec(dllexport) int WideCharToMultiByte(UINT codepage, DWORD dwFlags, cons
     }
     else
         in_len = cchWideChar;
-    if (cbMultiByte == 0 || lpMultiByteStr == (char*) 0)
+    if (cbMultiByte == 0 || lpMultiByteStr == (char*)0)
         return in_len;
     int copy = in_len < cbMultiByte ? in_len : cbMultiByte;
     for (int i = 0; i < copy; ++i)
-        lpMultiByteStr[i] = (char) (lpWideCharStr[i] & 0xFF);
+        lpMultiByteStr[i] = (char)(lpWideCharStr[i] & 0xFF);
     return copy;
 }
 
@@ -1092,23 +1075,23 @@ __declspec(dllexport) int WideCharToMultiByte(UINT codepage, DWORD dwFlags, cons
 __declspec(dllexport) DWORD TlsAlloc(void)
 {
     long long rv;
-    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long) 34) : "memory");
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)34) : "memory");
     /* Kernel returns u32(-1) on failure; pass through. */
-    return (DWORD) rv;
+    return (DWORD)rv;
 }
 
 __declspec(dllexport) BOOL TlsFree(DWORD slot)
 {
     long long rv;
-    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long) 35), "D"((long long) slot) : "memory");
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)35), "D"((long long)slot) : "memory");
     return rv == 0 ? 1 : 0;
 }
 
 __declspec(dllexport) void* TlsGetValue(DWORD slot)
 {
     long long rv;
-    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long) 36), "D"((long long) slot) : "memory");
-    return (void*) rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)36), "D"((long long)slot) : "memory");
+    return (void*)rv;
 }
 
 __declspec(dllexport) BOOL TlsSetValue(DWORD slot, void* value)
@@ -1116,7 +1099,7 @@ __declspec(dllexport) BOOL TlsSetValue(DWORD slot, void* value)
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
-                     : "a"((long long) 37), "D"((long long) slot), "S"((long long) value)
+                     : "a"((long long)37), "D"((long long)slot), "S"((long long)value)
                      : "memory");
     return rv == 0 ? 1 : 0;
 }
@@ -1132,74 +1115,74 @@ __declspec(dllexport) BOOL TlsSetValue(DWORD slot, void* value)
 
 __declspec(dllexport) HANDLE CreateMutexW(void* sec, BOOL bInitialOwner, const wchar_t16* name)
 {
-    (void) sec;
-    (void) name;
+    (void)sec;
+    (void)name;
     long long rv;
-    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long) 25), "D"((long long) bInitialOwner) : "memory");
-    return (HANDLE) rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)25), "D"((long long)bInitialOwner) : "memory");
+    return (HANDLE)rv;
 }
 
 __declspec(dllexport) HANDLE CreateMutexA(void* sec, BOOL bInitialOwner, const char* name)
 {
-    (void) name;
-    return CreateMutexW(sec, bInitialOwner, (const wchar_t16*) 0);
+    (void)name;
+    return CreateMutexW(sec, bInitialOwner, (const wchar_t16*)0);
 }
 
 __declspec(dllexport) BOOL ReleaseMutex(HANDLE h)
 {
     long long rv;
-    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long) 27), "D"((long long) h) : "memory");
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)27), "D"((long long)h) : "memory");
     return rv == 0 ? 1 : 0;
 }
 
 __declspec(dllexport) HANDLE CreateEventW(void* sec, BOOL bManualReset, BOOL bInitialState, const wchar_t16* name)
 {
-    (void) sec;
-    (void) name;
+    (void)sec;
+    (void)name;
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
-                     : "a"((long long) 30), "D"((long long) bManualReset), "S"((long long) bInitialState)
+                     : "a"((long long)30), "D"((long long)bManualReset), "S"((long long)bInitialState)
                      : "memory");
-    return (HANDLE) rv;
+    return (HANDLE)rv;
 }
 
 __declspec(dllexport) HANDLE CreateEventA(void* sec, BOOL bManualReset, BOOL bInitialState, const char* name)
 {
-    (void) name;
-    return CreateEventW(sec, bManualReset, bInitialState, (const wchar_t16*) 0);
+    (void)name;
+    return CreateEventW(sec, bManualReset, bInitialState, (const wchar_t16*)0);
 }
 
 __declspec(dllexport) BOOL SetEvent(HANDLE h)
 {
     long long rv;
-    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long) 31), "D"((long long) h) : "memory");
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)31), "D"((long long)h) : "memory");
     return rv == 0 ? 1 : 0;
 }
 
 __declspec(dllexport) BOOL ResetEvent(HANDLE h)
 {
     long long rv;
-    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long) 32), "D"((long long) h) : "memory");
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)32), "D"((long long)h) : "memory");
     return rv == 0 ? 1 : 0;
 }
 
 __declspec(dllexport) HANDLE CreateSemaphoreW(void* sec, long initial, long maximum, const wchar_t16* name)
 {
-    (void) sec;
-    (void) name;
+    (void)sec;
+    (void)name;
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
-                     : "a"((long long) 51), "D"((long long) initial), "S"((long long) maximum)
+                     : "a"((long long)51), "D"((long long)initial), "S"((long long)maximum)
                      : "memory");
-    return (HANDLE) rv;
+    return (HANDLE)rv;
 }
 
 __declspec(dllexport) HANDLE CreateSemaphoreA(void* sec, long initial, long maximum, const char* name)
 {
-    (void) name;
-    return CreateSemaphoreW(sec, initial, maximum, (const wchar_t16*) 0);
+    (void)name;
+    return CreateSemaphoreW(sec, initial, maximum, (const wchar_t16*)0);
 }
 
 __declspec(dllexport) BOOL ReleaseSemaphore(HANDLE h, long releaseCount, long* lpPreviousCount)
@@ -1207,9 +1190,9 @@ __declspec(dllexport) BOOL ReleaseSemaphore(HANDLE h, long releaseCount, long* l
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
-                     : "a"((long long) 52), "D"((long long) h), "S"((long long) releaseCount)
+                     : "a"((long long)52), "D"((long long)h), "S"((long long)releaseCount)
                      : "memory");
-    if (lpPreviousCount != (long*) 0)
+    if (lpPreviousCount != (long*)0)
         *lpPreviousCount = 0; /* v0 doesn't track previous count. */
     return rv == 0 ? 1 : 0;
 }
@@ -1226,11 +1209,11 @@ __declspec(dllexport) BOOL ReleaseSemaphore(HANDLE h, long releaseCount, long* l
  * ------------------------------------------------------------------ */
 
 #define WAIT_OBJECT_0 0u
-#define WAIT_TIMEOUT  0x102u
+#define WAIT_TIMEOUT 0x102u
 
 __declspec(dllexport) DWORD WaitForSingleObject(HANDLE h, DWORD timeout_ms)
 {
-    unsigned long long handle = (unsigned long long) h;
+    unsigned long long handle = (unsigned long long)h;
     long long rv;
     long long syscall_num;
     if (handle >= 0x200 && handle < 0x208)
@@ -1245,14 +1228,14 @@ __declspec(dllexport) DWORD WaitForSingleObject(HANDLE h, DWORD timeout_ms)
         return WAIT_OBJECT_0; /* Unknown handle — pseudo-signal. */
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
-                     : "a"(syscall_num), "D"((long long) h), "S"((long long) timeout_ms)
+                     : "a"(syscall_num), "D"((long long)h), "S"((long long)timeout_ms)
                      : "memory");
-    return (DWORD) rv;
+    return (DWORD)rv;
 }
 
 __declspec(dllexport) DWORD WaitForSingleObjectEx(HANDLE h, DWORD timeout_ms, BOOL bAlertable)
 {
-    (void) bAlertable; /* APCs not supported in v0. */
+    (void)bAlertable; /* APCs not supported in v0. */
     return WaitForSingleObject(h, timeout_ms);
 }
 
@@ -1274,23 +1257,23 @@ typedef long long volatile* CritSecPtr;
 static long long syscall_get_tid(void)
 {
     long long rv;
-    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long) 1) : "memory");
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)1) : "memory");
     return rv;
 }
 
 static void syscall_yield(void)
 {
     long long discard;
-    __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long) 3) : "memory");
+    __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long)3) : "memory");
 }
 
 __declspec(dllexport) BOOL InitializeCriticalSection(void* cs)
 {
     /* Zero the 40-byte CRITICAL_SECTION. Byte loop keeps this
      * independent of memset. */
-    if (cs != (void*) 0)
+    if (cs != (void*)0)
     {
-        unsigned char* b = (unsigned char*) cs;
+        unsigned char* b = (unsigned char*)cs;
         for (int i = 0; i < 40; ++i)
             b[i] = 0;
     }
@@ -1299,28 +1282,28 @@ __declspec(dllexport) BOOL InitializeCriticalSection(void* cs)
 
 __declspec(dllexport) BOOL InitializeCriticalSectionEx(void* cs, DWORD spin, DWORD flags)
 {
-    (void) spin;
-    (void) flags;
+    (void)spin;
+    (void)flags;
     return InitializeCriticalSection(cs);
 }
 
 __declspec(dllexport) BOOL InitializeCriticalSectionAndSpinCount(void* cs, DWORD spin)
 {
-    (void) spin;
+    (void)spin;
     return InitializeCriticalSection(cs);
 }
 
 __declspec(dllexport) void DeleteCriticalSection(void* cs)
 {
-    (void) cs;
+    (void)cs;
     /* No allocations to free; flat stub is also a no-op. */
 }
 
 __declspec(dllexport) void EnterCriticalSection(void* cs)
 {
-    long long  tid     = syscall_get_tid();
-    CritSecPtr owner   = (CritSecPtr) cs;
-    long long volatile* recur = (long long volatile*) cs + 1;
+    long long tid = syscall_get_tid();
+    CritSecPtr owner = (CritSecPtr)cs;
+    long long volatile* recur = (long long volatile*)cs + 1;
     for (;;)
     {
         long long expected = 0;
@@ -1343,20 +1326,20 @@ __declspec(dllexport) void EnterCriticalSection(void* cs)
 
 __declspec(dllexport) void LeaveCriticalSection(void* cs)
 {
-    CritSecPtr owner   = (CritSecPtr) cs;
-    long long volatile* recur = (long long volatile*) cs + 1;
-    long long           next  = *recur - 1;
-    *recur                    = next;
+    CritSecPtr owner = (CritSecPtr)cs;
+    long long volatile* recur = (long long volatile*)cs + 1;
+    long long next = *recur - 1;
+    *recur = next;
     if (next == 0)
         *owner = 0; /* Release: next acquirer's CAS wins. */
 }
 
 __declspec(dllexport) BOOL TryEnterCriticalSection(void* cs)
 {
-    long long  tid     = syscall_get_tid();
-    CritSecPtr owner   = (CritSecPtr) cs;
-    long long volatile* recur = (long long volatile*) cs + 1;
-    long long           expected = 0;
+    long long tid = syscall_get_tid();
+    CritSecPtr owner = (CritSecPtr)cs;
+    long long volatile* recur = (long long volatile*)cs + 1;
+    long long expected = 0;
     if (__atomic_compare_exchange_n(owner, &expected, tid, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
     {
         *recur = 1;
@@ -1380,14 +1363,14 @@ __declspec(dllexport) BOOL TryEnterCriticalSection(void* cs)
 
 __declspec(dllexport) void InitializeSRWLock(void* lock)
 {
-    if (lock != (void*) 0)
-        *(long long volatile*) lock = 0;
+    if (lock != (void*)0)
+        *(long long volatile*)lock = 0;
 }
 
 __declspec(dllexport) void AcquireSRWLockExclusive(void* lock)
 {
-    long long           tid = syscall_get_tid();
-    long long volatile* p   = (long long volatile*) lock;
+    long long tid = syscall_get_tid();
+    long long volatile* p = (long long volatile*)lock;
     for (;;)
     {
         long long expected = 0;
@@ -1399,15 +1382,15 @@ __declspec(dllexport) void AcquireSRWLockExclusive(void* lock)
 
 __declspec(dllexport) void ReleaseSRWLockExclusive(void* lock)
 {
-    if (lock != (void*) 0)
-        *(long long volatile*) lock = 0;
+    if (lock != (void*)0)
+        *(long long volatile*)lock = 0;
 }
 
 __declspec(dllexport) BOOL TryAcquireSRWLockExclusive(void* lock)
 {
-    long long           tid      = syscall_get_tid();
-    long long volatile* p        = (long long volatile*) lock;
-    long long           expected = 0;
+    long long tid = syscall_get_tid();
+    long long volatile* p = (long long volatile*)lock;
+    long long expected = 0;
     if (__atomic_compare_exchange_n(p, &expected, tid, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
         return 1;
     return 0;
@@ -1446,12 +1429,12 @@ typedef BOOL (*InitOnceFn)(void* InitOnce, void* Parameter, void** Context);
 
 __declspec(dllexport) BOOL InitOnceExecuteOnce(void* InitOnce, InitOnceFn InitFn, void* Parameter, void** Context)
 {
-    long long volatile* slot     = (long long volatile*) InitOnce;
-    long long           expected = 0;
+    long long volatile* slot = (long long volatile*)InitOnce;
+    long long expected = 0;
     if (__atomic_compare_exchange_n(slot, &expected, 1LL, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
     {
         /* We won the CAS — run the initialiser (if any). */
-        if (InitFn != (InitOnceFn) 0)
+        if (InitFn != (InitOnceFn)0)
             InitFn(InitOnce, Parameter, Context);
         *slot = 2; /* Mark done. */
         return 1;
@@ -1479,32 +1462,30 @@ typedef DWORD (*ThreadStartFn)(void*);
 __declspec(dllexport) HANDLE CreateThread(void* lpThreadAttributes, SIZE_T dwStackSize, ThreadStartFn lpStartAddress,
                                           void* lpParameter, DWORD dwCreationFlags, DWORD* lpThreadId)
 {
-    (void) lpThreadAttributes;
-    (void) dwStackSize;
-    (void) dwCreationFlags;
+    (void)lpThreadAttributes;
+    (void)dwStackSize;
+    (void)dwCreationFlags;
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
-                     : "a"((long long) 45),
-                       "D"((long long) lpStartAddress),
-                       "S"((long long) lpParameter)
+                     : "a"((long long)45), "D"((long long)lpStartAddress), "S"((long long)lpParameter)
                      : "memory");
     /* Win32 contract: NULL on failure. The kernel returns -1
      * (cast as u64 = 0xFF..F) on failure; translate. */
     if (rv == -1)
     {
-        if (lpThreadId != (DWORD*) 0)
+        if (lpThreadId != (DWORD*)0)
             *lpThreadId = 0;
-        return (HANDLE) 0;
+        return (HANDLE)0;
     }
-    if (lpThreadId != (DWORD*) 0)
-        *lpThreadId = (DWORD) rv;
-    return (HANDLE) rv;
+    if (lpThreadId != (DWORD*)0)
+        *lpThreadId = (DWORD)rv;
+    return (HANDLE)rv;
 }
 
 __declspec(dllexport) DWORD ResumeThread(HANDLE hThread)
 {
-    (void) hThread;
+    (void)hThread;
     /* No suspended-thread state in v0 — every CreateThread runs
      * immediately. Return 0 (= "thread was not previously
      * suspended"), matching the flat stub's behaviour. */
@@ -1514,17 +1495,14 @@ __declspec(dllexport) DWORD ResumeThread(HANDLE hThread)
 __declspec(dllexport) BOOL GetExitCodeThread(HANDLE hThread, DWORD* lpExitCode)
 {
     long long rv;
-    __asm__ volatile("int $0x80"
-                     : "=a"(rv)
-                     : "a"((long long) 55), "D"((long long) hThread)
-                     : "memory");
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)55), "D"((long long)hThread) : "memory");
     /* SYS_THREAD_EXIT_CODE returns u64(-1) on bad handle and
      * the actual exit code (or STILL_ACTIVE = 0x103) otherwise.
      * Win32 contract: BOOL TRUE on success regardless of
      * STILL_ACTIVE; we always claim success (matches flat
      * stub's optimism). */
-    if (lpExitCode != (DWORD*) 0)
-        *lpExitCode = (rv == -1) ? 0x103 : (DWORD) rv;
+    if (lpExitCode != (DWORD*)0)
+        *lpExitCode = (rv == -1) ? 0x103 : (DWORD)rv;
     return 1;
 }
 
@@ -1532,7 +1510,7 @@ __declspec(dllexport) WIN32_NORETURN void ExitThread(DWORD dwExitCode)
 {
     /* For our single-thread-per-process model ExitThread ==
      * ExitProcess. Match the flat stub's behaviour. */
-    __asm__ volatile("int $0x80" : : "a"((long long) 0), "D"((long long) dwExitCode));
+    __asm__ volatile("int $0x80" : : "a"((long long)0), "D"((long long)dwExitCode));
     __builtin_unreachable();
 }
 
@@ -1541,8 +1519,8 @@ __declspec(dllexport) BOOL GetExitCodeProcess(HANDLE hProcess, DWORD* lpExitCode
     /* No cross-process query in v0 — pretend the queried
      * process is still running. Matches the flat stub's
      * STILL_ACTIVE behaviour. */
-    (void) hProcess;
-    if (lpExitCode != (DWORD*) 0)
+    (void)hProcess;
+    if (lpExitCode != (DWORD*)0)
         *lpExitCode = 0x103; /* STILL_ACTIVE */
     return 1;
 }
@@ -1555,89 +1533,89 @@ __declspec(dllexport) BOOL GetExitCodeProcess(HANDLE hProcess, DWORD* lpExitCode
 
 __declspec(dllexport) HANDLE FindFirstFileA(const char* path, void* find_data)
 {
-    (void) path;
-    (void) find_data;
-    return (HANDLE) (long long) -1; /* INVALID_HANDLE_VALUE — "no files" */
+    (void)path;
+    (void)find_data;
+    return (HANDLE)(long long)-1; /* INVALID_HANDLE_VALUE — "no files" */
 }
 
 __declspec(dllexport) HANDLE FindFirstFileW(const wchar_t16* path, void* find_data)
 {
-    (void) path;
-    (void) find_data;
-    return (HANDLE) (long long) -1;
+    (void)path;
+    (void)find_data;
+    return (HANDLE)(long long)-1;
 }
 
 __declspec(dllexport) BOOL FindNextFileA(HANDLE h, void* find_data)
 {
-    (void) h;
-    (void) find_data;
+    (void)h;
+    (void)find_data;
     return 0; /* No more files */
 }
 
 __declspec(dllexport) BOOL FindNextFileW(HANDLE h, void* find_data)
 {
-    (void) h;
-    (void) find_data;
+    (void)h;
+    (void)find_data;
     return 0;
 }
 
 __declspec(dllexport) BOOL FindClose(HANDLE h)
 {
-    (void) h;
+    (void)h;
     return 1;
 }
 
 __declspec(dllexport) BOOL CopyFileA(const char* src, const char* dst, BOOL fail_if_exists)
 {
-    (void) src;
-    (void) dst;
-    (void) fail_if_exists;
+    (void)src;
+    (void)dst;
+    (void)fail_if_exists;
     return 0;
 }
 
 __declspec(dllexport) BOOL CopyFileW(const wchar_t16* src, const wchar_t16* dst, BOOL fail_if_exists)
 {
-    (void) src;
-    (void) dst;
-    (void) fail_if_exists;
+    (void)src;
+    (void)dst;
+    (void)fail_if_exists;
     return 0;
 }
 
 __declspec(dllexport) BOOL MoveFileA(const char* src, const char* dst)
 {
-    (void) src;
-    (void) dst;
+    (void)src;
+    (void)dst;
     return 0;
 }
 
 __declspec(dllexport) BOOL MoveFileW(const wchar_t16* src, const wchar_t16* dst)
 {
-    (void) src;
-    (void) dst;
+    (void)src;
+    (void)dst;
     return 0;
 }
 
 __declspec(dllexport) BOOL DeleteFileA(const char* path)
 {
-    (void) path;
+    (void)path;
     return 0;
 }
 
 __declspec(dllexport) BOOL DeleteFileW(const wchar_t16* path)
 {
-    (void) path;
+    (void)path;
     return 0;
 }
 
 __declspec(dllexport) DWORD GetFileAttributesA(const char* path)
 {
-    (void) path;
+    (void)path;
     return 0xFFFFFFFFu; /* INVALID_FILE_ATTRIBUTES — "not found" */
 }
 
 __declspec(dllexport) DWORD GetFileAttributesW(const wchar_t16* path)
 {
-    (void) path;
+    (void)path;
     return 0xFFFFFFFFu;
 }
 
@@ -1648,47 +1626,47 @@ __declspec(dllexport) DWORD GetFileAttributesW(const wchar_t16* path)
  * "read-only FS". batch37 of hello_winapi pins TRUE. */
 __declspec(dllexport) BOOL SetFileAttributesA(const char* path, DWORD attrs)
 {
-    (void) path;
-    (void) attrs;
+    (void)path;
+    (void)attrs;
     return 1;
 }
 
 __declspec(dllexport) BOOL SetFileAttributesW(const wchar_t16* path, DWORD attrs)
 {
-    (void) path;
-    (void) attrs;
+    (void)path;
+    (void)attrs;
     return 1;
 }
 
 __declspec(dllexport) BOOL CreateDirectoryA(const char* path, void* sec)
 {
-    (void) path;
-    (void) sec;
+    (void)path;
+    (void)sec;
     return 0;
 }
 
 __declspec(dllexport) BOOL CreateDirectoryW(const wchar_t16* path, void* sec)
 {
-    (void) path;
-    (void) sec;
+    (void)path;
+    (void)sec;
     return 0;
 }
 
 __declspec(dllexport) BOOL RemoveDirectoryA(const char* path)
 {
-    (void) path;
+    (void)path;
     return 0;
 }
 
 __declspec(dllexport) BOOL RemoveDirectoryW(const wchar_t16* path)
 {
-    (void) path;
+    (void)path;
     return 0;
 }
 
 __declspec(dllexport) BOOL FlushFileBuffers(HANDLE h)
 {
-    (void) h;
+    (void)h;
     return 1;
 }
 
@@ -1763,9 +1741,9 @@ __declspec(dllexport) UINT GetSystemWindowsDirectoryW(wchar_t16* out, UINT cb)
 
 __declspec(dllexport) UINT GetTempFileNameA(const char* dir, const char* prefix, UINT unique, char* out)
 {
-    (void) dir;
-    (void) prefix;
-    (void) unique;
+    (void)dir;
+    (void)prefix;
+    (void)unique;
     if (out)
         out[0] = 0;
     return 0;
@@ -1773,9 +1751,9 @@ __declspec(dllexport) UINT GetTempFileNameA(const char* dir, const char* prefix,
 
 __declspec(dllexport) UINT GetTempFileNameW(const wchar_t16* dir, const wchar_t16* prefix, UINT unique, wchar_t16* out)
 {
-    (void) dir;
-    (void) prefix;
-    (void) unique;
+    (void)dir;
+    (void)prefix;
+    (void)unique;
     if (out)
         out[0] = 0;
     return 0;
@@ -1784,7 +1762,7 @@ __declspec(dllexport) UINT GetTempFileNameW(const wchar_t16* dir, const wchar_t1
 __declspec(dllexport) DWORD GetCurrentDirectoryA(DWORD cb, char* out)
 {
     static const char dir[] = "C:\\";
-    DWORD             want  = sizeof(dir);
+    DWORD want = sizeof(dir);
     if (!out || cb < want)
         return want;
     for (DWORD i = 0; i < want; ++i)
@@ -1794,13 +1772,13 @@ __declspec(dllexport) DWORD GetCurrentDirectoryA(DWORD cb, char* out)
 
 __declspec(dllexport) BOOL SetCurrentDirectoryA(const char* path)
 {
-    (void) path;
+    (void)path;
     return 1;
 }
 
 __declspec(dllexport) BOOL SetCurrentDirectoryW(const wchar_t16* path)
 {
-    (void) path;
+    (void)path;
     return 1;
 }
 
@@ -1810,24 +1788,24 @@ __declspec(dllexport) BOOL SetCurrentDirectoryW(const wchar_t16* path)
  * snapshots don't error. */
 __declspec(dllexport) HANDLE CreateToolhelp32Snapshot(DWORD flags, DWORD pid)
 {
-    (void) flags;
-    (void) pid;
+    (void)flags;
+    (void)pid;
     /* Return a non-INVALID sentinel so callers Close it later
      * (CloseHandle on an unknown handle is already a no-op). */
-    return (HANDLE) 0x1001;
+    return (HANDLE)0x1001;
 }
 
 __declspec(dllexport) BOOL Process32FirstW(HANDLE h, void* entry)
 {
-    (void) h;
-    (void) entry;
+    (void)h;
+    (void)entry;
     return 0; /* Empty snapshot */
 }
 
 __declspec(dllexport) BOOL Process32NextW(HANDLE h, void* entry)
 {
-    (void) h;
-    (void) entry;
+    (void)h;
+    (void)entry;
     return 0;
 }
 
@@ -1843,15 +1821,15 @@ __declspec(dllexport) BOOL Process32Next(HANDLE h, void* entry)
 
 __declspec(dllexport) HANDLE OpenProcess(DWORD access, BOOL inherit, DWORD pid)
 {
-    (void) access;
-    (void) inherit;
-    (void) pid;
-    return (HANDLE) 0; /* Access denied — keep callers on fallback */
+    (void)access;
+    (void)inherit;
+    (void)pid;
+    return (HANDLE)0; /* Access denied — keep callers on fallback */
 }
 
 __declspec(dllexport) BOOL GenerateConsoleCtrlEvent(DWORD event, DWORD group)
 {
-    (void) event;
-    (void) group;
+    (void)event;
+    (void)group;
     return 0;
 }

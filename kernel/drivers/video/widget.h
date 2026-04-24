@@ -102,6 +102,12 @@ constexpr u32 kMaxWindows = 16;
 
 using WindowHandle = u32;
 
+/// Maximum ASCII bytes stored in a window's mutable title buffer
+/// (NUL included). Matches the syscall-side `kWinTitleMax` but
+/// kept independent so this header has no dependency on
+/// `core/syscall.h`.
+constexpr u32 kWindowTitleStorage = 64;
+
 struct WindowChrome
 {
     u32 x, y, w, h;
@@ -204,6 +210,398 @@ const char* WindowTitle(WindowHandle h);
 /// cookie is passed back unchanged.
 using WindowContentFn = void (*)(u32 x, u32 y, u32 w, u32 h, void* cookie);
 void WindowSetContentDraw(WindowHandle handle, WindowContentFn fn, void* cookie);
+
+// ---------------------------------------------------------------
+// Per-window ownership + message queue + GDI display list.
+//
+// Ring-3 windows registered via SYS_WIN_CREATE carry the owning
+// process's pid so the process-exit reaper can close every window
+// belonging to a dying process in one walk. Kernel-owned boot
+// windows (Calculator, Notepad, ...) use owner_pid == 0 so the
+// reaper never touches them.
+//
+// Each window owns a small fixed-size message ring that
+// SYS_WIN_POST_MSG enqueues into and SYS_WIN_GET/PEEK_MSG
+// dequeues from. Overflow drops the oldest message (standard
+// finite-queue policy for input events).
+//
+// Each window also owns a small display list of GDI primitives —
+// FillRect / TextOut / Rectangle recordings — that the compositor
+// replays after chrome paint on every DesktopCompose. Display-list
+// overflow drops oldest; callers that want a clean slate call
+// WindowClearDisplayList first (backing WM_PAINT / InvalidateRect
+// with bErase = TRUE).
+// ---------------------------------------------------------------
+
+/// Maximum messages queued per window. Oldest-dropped on overflow.
+constexpr u32 kWinMsgQueueDepth = 32;
+
+/// Maximum recorded GDI primitives per window. Oldest-dropped.
+constexpr u32 kWinDisplayListDepth = 32;
+
+/// Maximum ASCII text length stored per TextOut primitive.
+constexpr u32 kWinTextOutMax = 47; // + NUL = 48
+
+struct WindowMsg
+{
+    u32 hwnd_biased; // HWND as seen by user32 (biased +1)
+    u32 message;     // WM_KEYDOWN / WM_CHAR / WM_CLOSE / WM_QUIT / ...
+    u64 wparam;
+    u64 lparam;
+};
+
+enum class WinGdiPrimKind : u8
+{
+    None = 0,
+    FillRect,  // x,y,w,h,colour → solid fill relative to client origin
+    TextOut,   // x,y,colour,text → 8x8 ASCII glyphs
+    Rectangle, // x,y,w,h,colour → 1-px outline
+    Line,      // x,y,w,h,colour — (x,y) → (x+w, y+h) Bresenham line
+    Ellipse,   // x,y,w,h,colour — 1-px outline, midpoint algorithm
+    Pixel,     // x,y,colour — single client-local pixel
+};
+
+struct WinGdiPrim
+{
+    WinGdiPrimKind kind;
+    u8 _pad[3];
+    i32 x, y;
+    i32 w, h; // Rectangle interprets these as width / height
+    u32 colour_rgb;
+    char text[kWinTextOutMax + 1]; // NUL-terminated ASCII (TextOut only)
+};
+
+/// Set the owning pid on `h`. Ring-3-created windows call this
+/// from the SYS_WIN_CREATE handler; boot-time windows leave it at
+/// the default 0 (kernel-owned, never reaped).
+void WindowSetOwnerPid(WindowHandle h, u64 pid);
+
+/// Enqueue a message on `h`. Returns false if the handle is
+/// invalid; on queue full the oldest message is evicted and the
+/// call still returns true.
+bool WindowPostMessage(WindowHandle h, u32 message, u64 wparam, u64 lparam);
+
+/// Dequeue a message from `h` (FIFO). Returns false if the queue
+/// is empty or the handle is invalid. Sets `*out` on success.
+bool WindowPopMessage(WindowHandle h, WindowMsg* out);
+
+/// Peek the head message without removing it. Returns false on
+/// empty / invalid handle.
+bool WindowPeekMessage(WindowHandle h, WindowMsg* out);
+
+/// Pop the first pending message across ANY alive window owned
+/// by `pid`. Matches Win32 GetMessage(hWnd=NULL) semantics scoped
+/// to the calling process. Returns false if no queued message
+/// exists across every window owned by `pid`.
+bool WindowPopMessageAny(u64 pid, WindowMsg* out);
+
+/// True iff at least one alive window owned by `pid` has a
+/// non-empty message queue. Non-blocking — the caller's message
+/// pump polls this, yields on false, and re-enters GetMessage.
+bool WindowAnyMessagePending(u64 pid);
+
+/// Close every alive window whose owner_pid matches `pid`. Called
+/// from `ProcessRelease` when the last task holding a Process
+/// drops its reference — guarantees that a ring-3 PE that exited
+/// without DestroyWindow never leaks a compositor slot. No-op for
+/// pid == 0 (would close every kernel-owned boot window).
+u32 WindowReapByOwner(u64 pid);
+
+/// Block the current task on the global message wait queue for
+/// up to `timeout_ticks` (10 ms per tick). Returns when woken
+/// by `WindowMsgWakeAll` OR when the timeout expires. Caller
+/// must hold interrupts disabled across the "queue empty check"
+/// and this call — same contract as `sched::WaitQueueBlockTimeout`.
+/// Wakes are broadcast: every blocker re-checks its own queue
+/// after return, so spurious wakes are expected and the caller
+/// must loop. The timeout is also a safety net against a lost
+/// wake landing in the narrow window between "check queue
+/// empty" and "enter wait queue".
+void WindowMsgWaitBlockTimeout(u64 timeout_ticks);
+
+/// Wake every task blocked in `WindowMsgWaitBlockTimeout`.
+/// Called from the PostMessage syscall and the keyboard / mouse
+/// routers after appending a message. Safe from IRQ context.
+void WindowMsgWakeAll();
+
+/// Append a solid fill primitive to `h`'s display list. Coords
+/// are in window-client-local pixels (origin = top-left of the
+/// client area, just below the title bar). Overflow evicts the
+/// oldest primitive so long-running redrawers don't leak.
+void WindowClientFillRect(WindowHandle h, i32 x, i32 y, i32 w, i32 hgt, u32 rgb);
+
+/// Append a 1-pixel rectangle outline primitive.
+void WindowClientRectangle(WindowHandle h, i32 x, i32 y, i32 w, i32 hgt, u32 rgb);
+
+/// Append a TextOut primitive. `text` is copied by value (truncated
+/// to `kWinTextOutMax` ASCII bytes, non-ASCII bytes stored as '?').
+void WindowClientTextOut(WindowHandle h, i32 x, i32 y, const char* text, u32 rgb);
+
+/// Append a Bresenham line primitive from (x, y) to (x2, y2).
+void WindowClientLine(WindowHandle h, i32 x, i32 y, i32 x2, i32 y2, u32 rgb);
+
+/// Append a 1-pixel ellipse outline primitive inside the
+/// bounding box (x, y, w, hgt).
+void WindowClientEllipse(WindowHandle h, i32 x, i32 y, i32 w, i32 hgt, u32 rgb);
+
+/// Append a single-pixel primitive.
+void WindowClientPixel(WindowHandle h, i32 x, i32 y, u32 rgb);
+
+/// Drop every recorded GDI primitive for `h` (WM_PAINT with
+/// bErase = TRUE support).
+void WindowClearDisplayList(WindowHandle h);
+
+/// Read the owning pid — used by the keyboard router to decide
+/// whether to post to the window's queue (PE-owned, pid > 0) or
+/// fall through to the native shell (pid == 0).
+u64 WindowOwnerPid(WindowHandle h);
+
+// ---------------------------------------------------------------
+// Visibility (SW_HIDE re-showable) + mutable title (SetWindowText)
+// + sizing (MoveWindow).
+//
+// Newly-registered windows start visible. SW_HIDE clears the bit
+// (the compositor stops drawing + hit-testing the window, but
+// the slot stays alive and the HWND keeps its identity). SW_SHOW
+// sets it again. Distinct from WindowClose which actually reaps
+// the slot.
+// ---------------------------------------------------------------
+
+/// True iff `h` is alive AND currently visible.
+bool WindowIsVisible(WindowHandle h);
+
+/// Set the visible bit. No redraw — callers trigger the next
+/// DesktopCompose themselves.
+void WindowSetVisible(WindowHandle h, bool visible);
+
+/// Bounded-copy a new ASCII title into the window's arena slot.
+/// Non-ASCII bytes become '?'. Returns false for invalid handle
+/// or a window the kernel didn't arena-allocate for (boot
+/// windows whose title lives in .rodata — refuse to mutate).
+/// A successful call updates the stored title pointer's CONTENT
+/// in place; the pointer itself doesn't change.
+bool WindowSetTitle(WindowHandle h, const char* ascii_src);
+
+/// Resize in-place. Width/height are clamped against the
+/// framebuffer. (0 = "don't change" for each dimension.)
+void WindowResizeTo(WindowHandle h, u32 w, u32 hgt);
+
+// ---------------------------------------------------------------
+// Async input-state cache + mouse capture + text clipboard.
+//
+// Async keyboard state: maintained by the kbd reader via
+// `WindowInputTrackKey` on every press/release edge. Backs Win32
+// `GetKeyState` / `GetAsyncKeyState` — returns true iff the
+// key code is currently held.
+//
+// Mouse capture: one HWND per system ("ownership"). When non-
+// invalid, subsequent mouse-message routing targets THIS window
+// regardless of the cursor position. Backs Win32 SetCapture /
+// ReleaseCapture / GetCapture.
+//
+// Clipboard: a single bounded ASCII text buffer. Backs Win32
+// SetClipboardData(CF_TEXT) / GetClipboardData(CF_TEXT) via
+// the user32 wrappers.
+// ---------------------------------------------------------------
+
+constexpr u32 kWindowVkStateSize = 256;
+
+/// Record a key press/release edge. `code` can be a raw VK /
+/// char code (<256) or an extended key (arrows, F-keys). Only
+/// the low 8 bits are retained; extended codes wrap but collide
+/// only with keys we don't otherwise expose.
+void WindowInputTrackKey(u16 code, bool down);
+
+/// True iff `code` is currently down. Always false for codes
+/// outside the tracked range.
+bool WindowKeyIsDown(u16 code);
+
+/// Current cursor position in framebuffer coordinates. Pointers
+/// may be null to skip writing that axis.
+void WindowGetCursor(u32* x_out, u32* y_out);
+
+/// Move the cursor. Backing call is `CursorHide` / move /
+/// `CursorShow`, all under the compositor lock owned by the
+/// caller.
+void WindowSetCursor(u32 x, u32 y);
+
+/// Set the captured window. Returns the previously captured
+/// handle (kWindowInvalid if none). Passing kWindowInvalid
+/// releases capture (same as `WindowReleaseCapture`).
+WindowHandle WindowSetCapture(WindowHandle h);
+
+/// Release capture. No-op if no window is captured.
+void WindowReleaseCapture();
+
+/// Current captured window or kWindowInvalid.
+WindowHandle WindowGetCapture();
+
+constexpr u32 kWindowClipboardMax = 1024;
+
+/// Replace the clipboard text. `text` is copied in bounded to
+/// `kWindowClipboardMax` ASCII bytes (non-ASCII stored as '?').
+/// A null pointer clears the clipboard.
+void WindowClipboardSetText(const char* text);
+
+/// Copy current clipboard text into `dst` (cap = buffer size
+/// including NUL). Returns the stored length (bytes without
+/// NUL), always ≤ cap - 1 once the call returns.
+u32 WindowClipboardGetText(char* dst, u32 cap);
+
+// ---------------------------------------------------------------
+// Per-window timer table. `SetTimer` registers (hwnd, timer_id,
+// interval_ms); the kernel's timer-ticker thread posts WM_TIMER
+// to the target HWND every `interval_ms`. Per-process budget is
+// bounded by `kWindowTimersMax`.
+// ---------------------------------------------------------------
+
+constexpr u32 kWindowTimersMax = 32;
+
+/// Install or update a timer. Returns true on success. `hwnd`
+/// must be alive + owned by `pid` (the syscall's caller). If a
+/// timer with the same (hwnd, timer_id) already exists its
+/// interval is updated; otherwise a free slot is consumed.
+/// Returns false if the timer table is full.
+bool WindowTimerSet(u64 pid, WindowHandle hwnd, u32 timer_id, u32 interval_ms);
+
+/// Remove a timer. Returns true on success, false if unknown.
+bool WindowTimerKill(u64 pid, WindowHandle hwnd, u32 timer_id);
+
+/// Drop all timers for a given (pid, hwnd) — called by the
+/// process reaper so dead windows don't keep posting.
+void WindowTimerReap(u64 pid, WindowHandle hwnd);
+
+/// Advance every registered timer by one scheduler tick. Posts
+/// WM_TIMER into the target window's queue when a timer's
+/// remaining counter reaches 0 and resets it to `interval`.
+/// Intended to be called from a dedicated timer-ticker thread
+/// under the compositor lock.
+void WindowTimerTick();
+
+// ---------------------------------------------------------------
+// Per-window user-data slot + dirty region for WM_PAINT.
+//
+// Win32 exposes SetWindowLongPtrA(GWLP_USERDATA, ...) /
+// SetWindowLongPtrA(GWLP_WNDPROC, ...). v1 gives each window
+// four 64-bit slots selectable by index — enough for
+// GWLP_USERDATA (index kWinLongUserData), GWLP_WNDPROC
+// (index kWinLongWndProc), and two extras.
+//
+// Dirty region: a single bool per window (whole-client dirty).
+// InvalidateRect sets it; UpdateWindow + the mouse/kbd readers
+// sample it on every pump to post WM_PAINT; EndPaint clears it.
+// A real Win32 invalid-rect tracker is a future upgrade.
+// ---------------------------------------------------------------
+
+constexpr u32 kWinLongSlots = 4;
+constexpr u32 kWinLongWndProc = 0;  // GWLP_WNDPROC
+constexpr u32 kWinLongUserData = 1; // GWLP_USERDATA
+constexpr u32 kWinLongExtra0 = 2;
+constexpr u32 kWinLongExtra1 = 3;
+
+/// Read a 64-bit per-window long. Returns 0 on bad handle or
+/// out-of-range index.
+u64 WindowGetLong(WindowHandle h, u32 index);
+
+/// Write a 64-bit per-window long. Returns the previous value.
+/// No-op for bad handle / index.
+u64 WindowSetLong(WindowHandle h, u32 index, u64 value);
+
+/// Mark a window's client area dirty. Next pump cycle posts
+/// WM_PAINT.
+void WindowInvalidate(WindowHandle h);
+
+/// Clear the dirty bit (BeginPaint's half) without painting.
+void WindowValidate(WindowHandle h);
+
+/// True iff the window's dirty flag is set.
+bool WindowIsDirty(WindowHandle h);
+
+/// Walk every alive window; for each dirty one, post WM_PAINT
+/// (wParam/lParam = 0, lParam's coords are unused in v1 since
+/// we only track whole-client dirty). Then clear the dirty bit
+/// per window (the PE's BeginPaint/EndPaint round-trip is the
+/// canonical ack but a simple queue-side clear also keeps the
+/// message from re-firing every tick). Returns the number of
+/// WM_PAINTs posted.
+u32 WindowDrainPaints();
+
+// ---------------------------------------------------------------
+// Parent / child tracking + focus + caret.
+//
+// Every window has a `parent` field. Top-level windows use
+// `kWindowInvalid` (no parent). The accessor preserves Win32
+// semantics: newly-registered windows have no parent unless
+// explicitly set.
+//
+// Focus: a separate HWND from the "active" window. Active
+// tracks the Z-ordered topmost frame; focus tracks which
+// window receives keyboard input. Edit controls that steal
+// focus without raising to top use the distinction.
+//
+// Caret: a single global blinking rectangle. Drawn by the
+// compositor at the caret's (x, y) when visible; blink is
+// driven by the ui-ticker's 1 Hz compose.
+// ---------------------------------------------------------------
+
+/// Set a window's parent. Pass `kWindowInvalid` to clear.
+void WindowSetParent(WindowHandle h, WindowHandle parent);
+
+/// Read a window's parent. Returns `kWindowInvalid` if none or
+/// for an invalid handle.
+WindowHandle WindowGetParent(WindowHandle h);
+
+enum class WindowRel : u32
+{
+    Next = 0,  // GW_HWNDNEXT (next in z-order)
+    Prev = 1,  // GW_HWNDPREV
+    First = 2, // GW_HWNDFIRST
+    Last = 3,  // GW_HWNDLAST
+    Child = 4, // GW_CHILD (first child of h)
+    Owner = 5, // GW_OWNER — alias for parent in v1
+};
+
+/// Walk the relationship specified by `rel` from `h`. Returns
+/// `kWindowInvalid` if no such window exists.
+WindowHandle WindowGetRelated(WindowHandle h, WindowRel rel);
+
+/// Separate focused-window tracking. Focus is the window that
+/// should receive keyboard input; active is the window that's
+/// Z-ordered topmost. SetFocus posts WM_KILLFOCUS to the old
+/// focus and WM_SETFOCUS to the new one.
+void WindowSetFocus(WindowHandle h);
+
+/// Read the current focus, or `kWindowInvalid` if none.
+WindowHandle WindowGetFocus();
+
+// --- Caret ---
+struct Caret
+{
+    u32 x, y;
+    u32 w, h;
+    bool visible;
+    bool shown; // ShowCaret/HideCaret refcount > 0
+    u8 _pad[2];
+    WindowHandle owner;
+};
+
+/// Set the caret shape. Size defaults to 1x12 if either axis
+/// is zero. Position stays at whatever it was.
+void WindowCaretCreate(WindowHandle owner, u32 w, u32 h);
+
+/// Tear the caret down. The caret stays destroyed until the
+/// next CaretCreate.
+void WindowCaretDestroy();
+
+/// Move the caret to (x, y) in screen coords.
+void WindowCaretSetPos(u32 x, u32 y);
+
+/// Toggle visibility. Show/Hide in Win32 are refcounted but
+/// v1 collapses to a boolean.
+void WindowCaretShow(bool shown);
+
+/// Read the caret state for the compositor's paint path.
+const Caret& WindowCaretGet();
 
 /// Paint every registered window in z-order (bottom first, top
 /// last) + render the stored title string across each title bar

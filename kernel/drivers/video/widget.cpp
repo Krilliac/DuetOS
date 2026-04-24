@@ -1,11 +1,12 @@
 #include "widget.h"
 
+#include "../../arch/x86_64/cpu.h"
 #include "../../drivers/input/ps2mouse.h"
 #include "../../sched/sched.h"
+#include "calendar.h"
 #include "console.h"
 #include "cursor.h"
 #include "framebuffer.h"
-#include "calendar.h"
 #include "menu.h"
 #include "taskbar.h"
 
@@ -135,14 +136,38 @@ void WidgetDrawAll()
 namespace
 {
 
+struct WindowMsgRing
+{
+    WindowMsg buf[kWinMsgQueueDepth];
+    u32 head; // next read
+    u32 tail; // next write
+    u32 count;
+};
+
 struct RegisteredWindow
 {
     WindowChrome chrome;
-    const char* title;          // caller-owned string, stored by reference
+    // Title pointer always points at `mut_title` on this same
+    // struct (register-time copy from the caller's string);
+    // SetWindowText overwrites the buffer in place so the
+    // pointer stays stable.
+    const char* title;
+    char mut_title[kWindowTitleStorage];
     WindowContentFn content_fn; // nullable per-window content drawer
     void* content_cookie;
+    u64 owner_pid; // 0 = kernel-owned boot window, >0 = ring-3 pid
+    WindowMsgRing msgs;
+    WinGdiPrim prims[kWinDisplayListDepth];
+    u32 prim_count;
+    // Per-window Win32 longs — backs SetWindowLongPtr /
+    // GetWindowLongPtr for GWLP_WNDPROC, GWLP_USERDATA, and
+    // two extras.
+    u64 longs[kWinLongSlots];
+    WindowHandle parent; // kWindowInvalid if top-level
     bool alive;
-    u8 _pad[7];
+    bool visible;
+    bool dirty; // set by InvalidateRect; cleared by BeginPaint / WindowDrainPaints
+    u8 _pad[5];
 };
 
 constinit RegisteredWindow g_windows[kMaxWindows] = {};
@@ -160,6 +185,62 @@ constinit u32 g_z_order[kMaxWindows] = {};
 // before any Cursor* / Window* / Widget* / DesktopCompose call,
 // so concurrent typing-while-dragging is race-free.
 constinit duetos::sched::Mutex g_compositor_mutex{};
+
+// Global message wait queue. Any task blocked in
+// SYS_WIN_GET_MSG parks here until PostMessage (or an input
+// router) calls WindowMsgWakeAll. Single queue is sufficient
+// for v1 — one wake broadcast per post, each blocker re-checks
+// its own per-window ring. Upgrades to per-process queues when
+// a workload has many concurrent message pumps.
+constinit duetos::sched::WaitQueue g_msg_wq{};
+
+// Async keyboard state — 1 bit per VK code. The kbd-reader
+// toggles bits on every press/release edge before dispatching
+// the event; `WindowKeyIsDown` reads the bit. Covers both raw
+// ASCII chars (0x20..0x7E) and extended codes (arrows, F-keys)
+// up to 255. Kernel apps don't need this — they consume events
+// from the ring directly — so this table is effectively a Win32
+// compat shim.
+constinit u8 g_vk_state[kWindowVkStateSize / 8] = {};
+
+// Mouse capture — one system-wide HWND that gets all mouse
+// events regardless of cursor position, or kWindowInvalid when
+// no capture is active.
+constinit WindowHandle g_mouse_capture = kWindowInvalid;
+
+// Keyboard focus — distinct from `g_active_window` (z-order
+// topmost). Programs that want to steal input focus without
+// raising to top use SetFocus vs SetActiveWindow.
+constinit WindowHandle g_focus_hwnd = kWindowInvalid;
+
+// Caret — a single global blinking rectangle. The compositor
+// paints it at every DesktopCompose; the ui-ticker's 1 Hz
+// compose flips `g_caret_on` between compositions to produce
+// the blink.
+constinit Caret g_caret = {};
+constinit bool g_caret_on = false; // current blink phase
+
+// Text clipboard — CF_TEXT only for v1. Not split per-process:
+// matches Win32 in that the clipboard is a system singleton.
+constinit char g_clipboard[kWindowClipboardMax] = {};
+constinit u32 g_clipboard_len = 0;
+
+// Per-process timer table. `remaining_ticks` counts down each
+// scheduler tick; on zero, a WM_TIMER is posted to `hwnd` with
+// wParam = timer_id, and `remaining_ticks` is reset to
+// `interval_ticks`. 32 slots is enough for many simultaneous
+// SetTimer callers — upgrade to a dynamic table when needed.
+struct WindowTimerSlot
+{
+    bool in_use;
+    u8 _pad[3];
+    u32 timer_id;
+    u64 owner_pid;
+    WindowHandle hwnd;
+    u32 interval_ticks;
+    u32 remaining_ticks;
+};
+constinit WindowTimerSlot g_timers[kWindowTimersMax] = {};
 
 // Currently-active (focused) window — the one with the brightly
 // painted title bar. Follows the topmost z-order slot: WindowRaise
@@ -228,6 +309,27 @@ void WindowDraw(const WindowChrome& w)
     }
 }
 
+namespace
+{
+// Sanitise + bounded-copy an ASCII title into a window's stable
+// storage slot. Non-ASCII bytes become '?'. Result is always
+// NUL-terminated.
+void StoreTitle(RegisteredWindow& w, const char* src)
+{
+    u32 i = 0;
+    if (src != nullptr)
+    {
+        for (; i + 1 < kWindowTitleStorage && src[i] != '\0'; ++i)
+        {
+            const char c = src[i];
+            w.mut_title[i] = (c >= 0x20 && c < 0x7F) ? c : '?';
+        }
+    }
+    w.mut_title[i] = '\0';
+    w.title = w.mut_title;
+}
+} // namespace
+
 WindowHandle WindowRegister(const WindowChrome& chrome, const char* title)
 {
     if (g_window_count >= kMaxWindows)
@@ -236,8 +338,22 @@ WindowHandle WindowRegister(const WindowChrome& chrome, const char* title)
     }
     const WindowHandle h = g_window_count;
     g_windows[h].chrome = chrome;
-    g_windows[h].title = title;
+    StoreTitle(g_windows[h], title);
     g_windows[h].alive = true;
+    g_windows[h].visible = true;
+    g_windows[h].dirty = false;
+    g_windows[h].owner_pid = 0;
+    g_windows[h].parent = kWindowInvalid;
+    g_windows[h].msgs.head = 0;
+    g_windows[h].msgs.tail = 0;
+    g_windows[h].msgs.count = 0;
+    g_windows[h].prim_count = 0;
+    g_windows[h].content_fn = nullptr;
+    g_windows[h].content_cookie = nullptr;
+    for (u32 i = 0; i < kWinLongSlots; ++i)
+    {
+        g_windows[h].longs[i] = 0;
+    }
     g_z_order[g_window_count] = h;
     ++g_window_count;
     // The latest-registered window lands on top of z-order and
@@ -382,7 +498,7 @@ WindowHandle WindowTopmostAt(u32 x, u32 y)
     for (u32 i = g_window_count; i > 0; --i)
     {
         const WindowHandle h = g_z_order[i - 1];
-        if (!g_windows[h].alive)
+        if (!g_windows[h].alive || !g_windows[h].visible)
             continue;
         const auto& c = g_windows[h].chrome;
         if (x >= c.x && x < c.x + c.w && y >= c.y && y < c.y + c.h)
@@ -487,7 +603,7 @@ void WindowDrawAllOrdered()
     for (u32 i = 0; i < g_window_count; ++i)
     {
         const WindowHandle h = g_z_order[i];
-        if (!g_windows[h].alive)
+        if (!g_windows[h].alive || !g_windows[h].visible)
             continue;
         const bool is_active = (h == g_active_window);
         // Use the window's registered title colour when active,
@@ -517,20 +633,221 @@ void WindowDrawAllOrdered()
                 PaintButton(g_widgets[j]);
             }
         }
+        // Client-area rectangle — primitives + content_fn consume
+        // it (origin is just inside the 2-px border, under the
+        // title bar).
+        const auto& cc = drawn;
+        const u32 tbh_c = (cc.title_height == 0) ? 22 : cc.title_height;
+        const u32 tbh_eff_c = (tbh_c > cc.h) ? cc.h : tbh_c;
+        const u32 client_x = cc.x + 2;
+        const u32 client_y = cc.y + tbh_eff_c + 2;
+        const u32 client_w = (cc.w > 4) ? cc.w - 4 : 0;
+        const u32 client_h = (cc.h > tbh_eff_c + 4) ? cc.h - tbh_eff_c - 4 : 0;
+
+        // Replay GDI display list. Ring-3 PEs record primitives
+        // via SYS_GDI_* syscalls; the compositor paints them here
+        // on every compose. Coords are client-local; out-of-rect
+        // primitives clamp to zero size.
+        for (u32 p = 0; p < g_windows[h].prim_count; ++p)
+        {
+            const WinGdiPrim& pr = g_windows[h].prims[p];
+            if (pr.kind == WinGdiPrimKind::None)
+                continue;
+            const i32 ax = static_cast<i32>(client_x) + pr.x;
+            const i32 ay = static_cast<i32>(client_y) + pr.y;
+            if (ax < 0 || ay < 0 || client_w == 0 || client_h == 0)
+                continue;
+            // Clamp to client rect.
+            const u32 max_x = client_x + client_w;
+            const u32 max_y = client_y + client_h;
+            if (static_cast<u32>(ax) >= max_x || static_cast<u32>(ay) >= max_y)
+                continue;
+            u32 pw = static_cast<u32>(pr.w < 0 ? 0 : pr.w);
+            u32 ph = static_cast<u32>(pr.h < 0 ? 0 : pr.h);
+            if (static_cast<u32>(ax) + pw > max_x)
+                pw = max_x - static_cast<u32>(ax);
+            if (static_cast<u32>(ay) + ph > max_y)
+                ph = max_y - static_cast<u32>(ay);
+            switch (pr.kind)
+            {
+            case WinGdiPrimKind::FillRect:
+                if (pw > 0 && ph > 0)
+                {
+                    FramebufferFillRect(static_cast<u32>(ax), static_cast<u32>(ay), pw, ph, pr.colour_rgb);
+                }
+                break;
+            case WinGdiPrimKind::Rectangle:
+                if (pw > 0 && ph > 0)
+                {
+                    FramebufferDrawRect(static_cast<u32>(ax), static_cast<u32>(ay), pw, ph, pr.colour_rgb, 1);
+                }
+                break;
+            case WinGdiPrimKind::TextOut:
+            {
+                // TextOut has no w/h in the record; glyph width
+                // is computed from the stored string. Clip by
+                // trailing NUL or by remaining client-rect room.
+                const u32 px = static_cast<u32>(ax);
+                const u32 py = static_cast<u32>(ay);
+                if (py + 8 > max_y)
+                    break; // no vertical room for one 8x8 glyph row
+                const u32 avail_cols = (max_x > px) ? (max_x - px) / 8 : 0;
+                char clipped[kWinTextOutMax + 1];
+                u32 n = 0;
+                while (n < avail_cols && n < kWinTextOutMax && pr.text[n] != '\0')
+                {
+                    clipped[n] = pr.text[n];
+                    ++n;
+                }
+                clipped[n] = '\0';
+                if (n > 0)
+                {
+                    FramebufferDrawString(px, py, clipped, pr.colour_rgb, cc.colour_client);
+                }
+                break;
+            }
+            case WinGdiPrimKind::Line:
+            {
+                // Bresenham: (ax, ay) = start; endpoint =
+                // (client_x + pr.x + pr.w, client_y + pr.y + pr.h).
+                // Clamp both endpoints to the client rect rather
+                // than clipping the line analytically.
+                const i32 cx_max = static_cast<i32>(max_x);
+                const i32 cy_max = static_cast<i32>(max_y);
+                const i32 cx_min = static_cast<i32>(client_x);
+                const i32 cy_min = static_cast<i32>(client_y);
+                i32 x0 = ax;
+                i32 y0 = ay;
+                i32 x1 = ax + pr.w;
+                i32 y1 = ay + pr.h;
+                // Bresenham, symmetric in all 8 octants.
+                const i32 dx_l = (x1 >= x0) ? (x1 - x0) : (x0 - x1);
+                const i32 sx = (x1 >= x0) ? 1 : -1;
+                const i32 dy_l = -((y1 >= y0) ? (y1 - y0) : (y0 - y1));
+                const i32 sy = (y1 >= y0) ? 1 : -1;
+                i32 err = dx_l + dy_l;
+                // Safety cap on iterations so a malicious line
+                // with huge coords can't spin the compositor.
+                const u32 kMaxLinePixels = 4096;
+                for (u32 step = 0; step < kMaxLinePixels; ++step)
+                {
+                    if (x0 >= cx_min && x0 < cx_max && y0 >= cy_min && y0 < cy_max)
+                    {
+                        FramebufferPutPixel(static_cast<u32>(x0), static_cast<u32>(y0), pr.colour_rgb);
+                    }
+                    if (x0 == x1 && y0 == y1)
+                        break;
+                    const i32 e2 = 2 * err;
+                    if (e2 >= dy_l)
+                    {
+                        err += dy_l;
+                        x0 += sx;
+                    }
+                    if (e2 <= dx_l)
+                    {
+                        err += dx_l;
+                        y0 += sy;
+                    }
+                }
+                break;
+            }
+            case WinGdiPrimKind::Ellipse:
+            {
+                // Midpoint ellipse over axis-aligned bounding
+                // box (ax, ay, pw, ph). Degenerate when either
+                // dimension is under 2 — fall back to a pixel /
+                // line.
+                if (pw < 2 || ph < 2)
+                {
+                    if (pw > 0 && ph > 0)
+                    {
+                        FramebufferPutPixel(static_cast<u32>(ax), static_cast<u32>(ay), pr.colour_rgb);
+                    }
+                    break;
+                }
+                const i32 a = static_cast<i32>(pw / 2);
+                const i32 b = static_cast<i32>(ph / 2);
+                const i32 xc = ax + a;
+                const i32 yc = ay + b;
+                const i64 a2 = static_cast<i64>(a) * a;
+                const i64 b2 = static_cast<i64>(b) * b;
+                auto plot4 = [&](i32 x_off, i32 y_off)
+                {
+                    const i32 px_pts[4] = {xc + x_off, xc - x_off, xc + x_off, xc - x_off};
+                    const i32 py_pts[4] = {yc + y_off, yc + y_off, yc - y_off, yc - y_off};
+                    for (u32 k = 0; k < 4; ++k)
+                    {
+                        if (px_pts[k] >= static_cast<i32>(client_x) && px_pts[k] < static_cast<i32>(max_x) &&
+                            py_pts[k] >= static_cast<i32>(client_y) && py_pts[k] < static_cast<i32>(max_y))
+                        {
+                            FramebufferPutPixel(static_cast<u32>(px_pts[k]), static_cast<u32>(py_pts[k]),
+                                                pr.colour_rgb);
+                        }
+                    }
+                };
+                // Region 1.
+                i64 x = 0;
+                i64 y = b;
+                i64 d1 = b2 - a2 * b + a2 / 4;
+                i64 dx = 2 * b2 * x;
+                i64 dy = 2 * a2 * y;
+                while (dx < dy)
+                {
+                    plot4(static_cast<i32>(x), static_cast<i32>(y));
+                    if (d1 < 0)
+                    {
+                        x++;
+                        dx += 2 * b2;
+                        d1 += dx + b2;
+                    }
+                    else
+                    {
+                        x++;
+                        y--;
+                        dx += 2 * b2;
+                        dy -= 2 * a2;
+                        d1 += dx - dy + b2;
+                    }
+                }
+                // Region 2.
+                i64 d2 = b2 * (2 * x + 1) * (2 * x + 1) / 4 + a2 * (y - 1) * (y - 1) - a2 * b2;
+                while (y >= 0)
+                {
+                    plot4(static_cast<i32>(x), static_cast<i32>(y));
+                    if (d2 > 0)
+                    {
+                        y--;
+                        dy -= 2 * a2;
+                        d2 += a2 - dy;
+                    }
+                    else
+                    {
+                        y--;
+                        x++;
+                        dx += 2 * b2;
+                        dy -= 2 * a2;
+                        d2 += dx - dy + a2;
+                    }
+                }
+                break;
+            }
+            case WinGdiPrimKind::Pixel:
+                // Single pixel at (ax, ay). Already clipped by
+                // the outer max-x/max-y guard above.
+                FramebufferPutPixel(static_cast<u32>(ax), static_cast<u32>(ay), pr.colour_rgb);
+                break;
+            case WinGdiPrimKind::None:
+                break;
+            }
+        }
+
         // Dynamic content drawer — runs after chrome + widgets
         // so live text (e.g. task-manager stats) overlays the
         // static client-area fill. Given the client rect so
         // the drawer doesn't need to know about the title bar.
         if (g_windows[h].content_fn != nullptr)
         {
-            const auto& c = drawn;
-            const u32 tbh = (c.title_height == 0) ? 22 : c.title_height;
-            const u32 tbh_eff = (tbh > c.h) ? c.h : tbh;
-            const u32 cx = c.x + 2;
-            const u32 cy = c.y + tbh_eff + 2;
-            const u32 cw = (c.w > 4) ? c.w - 4 : 0;
-            const u32 ch = (c.h > tbh_eff + 4) ? c.h - tbh_eff - 4 : 0;
-            g_windows[h].content_fn(cx, cy, cw, ch, g_windows[h].content_cookie);
+            g_windows[h].content_fn(client_x, client_y, client_w, client_h, g_windows[h].content_cookie);
         }
     }
 }
@@ -588,6 +905,17 @@ void DesktopCompose(u32 desktop_rgb, const char* banner)
     TaskbarRedraw();
     MenuRedraw();
     CalendarRedraw();
+    // Caret — painted last so it overlays everything, including
+    // the taskbar. Blink phase toggles per compose; the ui-
+    // ticker's 1 Hz compose produces the blink cadence.
+    if (g_caret.visible && g_caret.shown && g_caret.w > 0 && g_caret.h > 0)
+    {
+        g_caret_on = !g_caret_on;
+        if (g_caret_on)
+        {
+            FramebufferFillRect(g_caret.x, g_caret.y, g_caret.w, g_caret.h, 0x00000000);
+        }
+    }
 }
 
 DisplayMode GetDisplayMode()
@@ -641,6 +969,885 @@ u32 WidgetRouteMouse(u32 cursor_x, u32 cursor_y, u8 button_mask)
         }
     }
     return kWidgetInvalid;
+}
+
+// --- Owner pid / message queue / display list --------------------
+
+void WindowSetOwnerPid(WindowHandle h, u64 pid)
+{
+    if (!WindowValid(h))
+    {
+        return;
+    }
+    g_windows[h].owner_pid = pid;
+}
+
+u64 WindowOwnerPid(WindowHandle h)
+{
+    if (!WindowValid(h))
+    {
+        return 0;
+    }
+    return g_windows[h].owner_pid;
+}
+
+namespace
+{
+
+constexpr u32 kWindowHwndBias = 1; // mirrors window_syscall.cpp kHwndBias
+
+bool MsgRingPop(WindowMsgRing& r, WindowMsg* out)
+{
+    if (r.count == 0)
+    {
+        return false;
+    }
+    *out = r.buf[r.head];
+    r.head = (r.head + 1) % kWinMsgQueueDepth;
+    --r.count;
+    return true;
+}
+
+void MsgRingPush(WindowMsgRing& r, const WindowMsg& m)
+{
+    if (r.count == kWinMsgQueueDepth)
+    {
+        // Evict oldest — standard "drop-oldest" policy for a
+        // bounded input queue. Caller's syscall still reports
+        // success because the message landed (the victim was
+        // already stale).
+        r.head = (r.head + 1) % kWinMsgQueueDepth;
+        --r.count;
+    }
+    r.buf[r.tail] = m;
+    r.tail = (r.tail + 1) % kWinMsgQueueDepth;
+    ++r.count;
+}
+
+} // namespace
+
+bool WindowPostMessage(WindowHandle h, u32 message, u64 wparam, u64 lparam)
+{
+    if (!WindowValid(h))
+    {
+        return false;
+    }
+    WindowMsg m{};
+    m.hwnd_biased = h + kWindowHwndBias;
+    m.message = message;
+    m.wparam = wparam;
+    m.lparam = lparam;
+    MsgRingPush(g_windows[h].msgs, m);
+    return true;
+}
+
+bool WindowPopMessage(WindowHandle h, WindowMsg* out)
+{
+    if (!WindowValid(h) || out == nullptr)
+    {
+        return false;
+    }
+    return MsgRingPop(g_windows[h].msgs, out);
+}
+
+bool WindowPeekMessage(WindowHandle h, WindowMsg* out)
+{
+    if (!WindowValid(h) || out == nullptr)
+    {
+        return false;
+    }
+    WindowMsgRing& r = g_windows[h].msgs;
+    if (r.count == 0)
+    {
+        return false;
+    }
+    *out = r.buf[r.head];
+    return true;
+}
+
+bool WindowPopMessageAny(u64 pid, WindowMsg* out)
+{
+    if (pid == 0 || out == nullptr)
+    {
+        return false;
+    }
+    for (u32 i = 0; i < g_window_count; ++i)
+    {
+        if (!g_windows[i].alive || g_windows[i].owner_pid != pid)
+            continue;
+        if (MsgRingPop(g_windows[i].msgs, out))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool WindowAnyMessagePending(u64 pid)
+{
+    if (pid == 0)
+    {
+        return false;
+    }
+    for (u32 i = 0; i < g_window_count; ++i)
+    {
+        if (g_windows[i].alive && g_windows[i].owner_pid == pid && g_windows[i].msgs.count > 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+u32 WindowReapByOwner(u64 pid)
+{
+    if (pid == 0)
+    {
+        return 0; // refuse to reap kernel-owned windows
+    }
+    u32 reaped = 0;
+    for (u32 i = 0; i < g_window_count; ++i)
+    {
+        if (g_windows[i].alive && g_windows[i].owner_pid == pid)
+        {
+            WindowTimerReap(pid, static_cast<WindowHandle>(i));
+            WindowClose(static_cast<WindowHandle>(i));
+            ++reaped;
+        }
+    }
+    // If the dying process held mouse capture, release it.
+    if (WindowGetCapture() != kWindowInvalid && WindowOwnerPid(WindowGetCapture()) == pid)
+    {
+        WindowReleaseCapture();
+    }
+    // A process going away could have been holding a pump open
+    // in a sibling thread. Wake any GetMessage blockers so they
+    // re-check and either dequeue a pending WM_QUIT or exit
+    // naturally when their own pid no longer owns any windows.
+    if (reaped > 0)
+    {
+        WindowMsgWakeAll();
+    }
+    return reaped;
+}
+
+void WindowMsgWaitBlockTimeout(u64 timeout_ticks)
+{
+    (void)duetos::sched::WaitQueueBlockTimeout(&g_msg_wq, timeout_ticks);
+}
+
+void WindowMsgWakeAll()
+{
+    duetos::arch::Cli();
+    (void)duetos::sched::WaitQueueWakeAll(&g_msg_wq);
+    duetos::arch::Sti();
+}
+
+namespace
+{
+
+void CopyAsciiClamped(char* dst, u32 cap, const char* src)
+{
+    u32 i = 0;
+    if (src != nullptr)
+    {
+        for (; i + 1 < cap && src[i] != '\0'; ++i)
+        {
+            const char c = src[i];
+            dst[i] = (c >= 0x20 && c < 0x7F) ? c : '?';
+        }
+    }
+    dst[i] = '\0';
+}
+
+// Append a primitive, evicting oldest on overflow — mirrors
+// message-ring overflow policy so long-running redrawers don't
+// panic on fullness.
+void PrimListAppend(RegisteredWindow& w, const WinGdiPrim& p)
+{
+    if (w.prim_count == kWinDisplayListDepth)
+    {
+        for (u32 i = 1; i < kWinDisplayListDepth; ++i)
+        {
+            w.prims[i - 1] = w.prims[i];
+        }
+        w.prim_count = kWinDisplayListDepth - 1;
+    }
+    w.prims[w.prim_count] = p;
+    ++w.prim_count;
+}
+
+} // namespace
+
+void WindowClientFillRect(WindowHandle h, i32 x, i32 y, i32 w, i32 hgt, u32 rgb)
+{
+    if (!WindowValid(h))
+    {
+        return;
+    }
+    WinGdiPrim p{};
+    p.kind = WinGdiPrimKind::FillRect;
+    p.x = x;
+    p.y = y;
+    p.w = w;
+    p.h = hgt;
+    p.colour_rgb = rgb;
+    PrimListAppend(g_windows[h], p);
+}
+
+void WindowClientRectangle(WindowHandle h, i32 x, i32 y, i32 w, i32 hgt, u32 rgb)
+{
+    if (!WindowValid(h))
+    {
+        return;
+    }
+    WinGdiPrim p{};
+    p.kind = WinGdiPrimKind::Rectangle;
+    p.x = x;
+    p.y = y;
+    p.w = w;
+    p.h = hgt;
+    p.colour_rgb = rgb;
+    PrimListAppend(g_windows[h], p);
+}
+
+void WindowClientTextOut(WindowHandle h, i32 x, i32 y, const char* text, u32 rgb)
+{
+    if (!WindowValid(h))
+    {
+        return;
+    }
+    WinGdiPrim p{};
+    p.kind = WinGdiPrimKind::TextOut;
+    p.x = x;
+    p.y = y;
+    p.colour_rgb = rgb;
+    CopyAsciiClamped(p.text, sizeof(p.text), text);
+    PrimListAppend(g_windows[h], p);
+}
+
+void WindowClientLine(WindowHandle h, i32 x, i32 y, i32 x2, i32 y2, u32 rgb)
+{
+    if (!WindowValid(h))
+    {
+        return;
+    }
+    WinGdiPrim p{};
+    p.kind = WinGdiPrimKind::Line;
+    p.x = x;
+    p.y = y;
+    // Encode endpoint as (w, h) deltas so the struct stays the
+    // same shape as FillRect/Rectangle.
+    p.w = x2 - x;
+    p.h = y2 - y;
+    p.colour_rgb = rgb;
+    PrimListAppend(g_windows[h], p);
+}
+
+void WindowClientEllipse(WindowHandle h, i32 x, i32 y, i32 w, i32 hgt, u32 rgb)
+{
+    if (!WindowValid(h))
+    {
+        return;
+    }
+    WinGdiPrim p{};
+    p.kind = WinGdiPrimKind::Ellipse;
+    p.x = x;
+    p.y = y;
+    p.w = w;
+    p.h = hgt;
+    p.colour_rgb = rgb;
+    PrimListAppend(g_windows[h], p);
+}
+
+void WindowClientPixel(WindowHandle h, i32 x, i32 y, u32 rgb)
+{
+    if (!WindowValid(h))
+    {
+        return;
+    }
+    WinGdiPrim p{};
+    p.kind = WinGdiPrimKind::Pixel;
+    p.x = x;
+    p.y = y;
+    p.w = 1;
+    p.h = 1;
+    p.colour_rgb = rgb;
+    PrimListAppend(g_windows[h], p);
+}
+
+void WindowClearDisplayList(WindowHandle h)
+{
+    if (!WindowValid(h))
+    {
+        return;
+    }
+    g_windows[h].prim_count = 0;
+}
+
+bool WindowIsVisible(WindowHandle h)
+{
+    return WindowValid(h) && g_windows[h].visible;
+}
+
+void WindowSetVisible(WindowHandle h, bool visible)
+{
+    if (!WindowValid(h))
+    {
+        return;
+    }
+    g_windows[h].visible = visible;
+    // If we just hid the active window, promote the next
+    // visible + alive window so focus doesn't dangle on a
+    // hidden slot.
+    if (!visible && g_active_window == h)
+    {
+        g_active_window = kWindowInvalid;
+        for (u32 i = g_window_count; i > 0; --i)
+        {
+            const WindowHandle candidate = g_z_order[i - 1];
+            if (candidate != h && WindowValid(candidate) && g_windows[candidate].visible)
+            {
+                g_active_window = candidate;
+                break;
+            }
+        }
+    }
+}
+
+bool WindowSetTitle(WindowHandle h, const char* ascii_src)
+{
+    if (!WindowValid(h))
+    {
+        return false;
+    }
+    StoreTitle(g_windows[h], ascii_src);
+    return true;
+}
+
+// --- Async keyboard state -----------------------------------------
+
+void WindowInputTrackKey(u16 code, bool down)
+{
+    const u32 idx = code & 0xFF;
+    const u32 byte = idx / 8;
+    const u32 bit = idx % 8;
+    if (down)
+    {
+        g_vk_state[byte] |= static_cast<u8>(1u << bit);
+    }
+    else
+    {
+        g_vk_state[byte] &= static_cast<u8>(~(1u << bit));
+    }
+}
+
+bool WindowKeyIsDown(u16 code)
+{
+    const u32 idx = code & 0xFF;
+    const u32 byte = idx / 8;
+    const u32 bit = idx % 8;
+    return (g_vk_state[byte] & (1u << bit)) != 0;
+}
+
+// --- Cursor accessors ---------------------------------------------
+
+void WindowGetCursor(u32* x_out, u32* y_out)
+{
+    u32 cx = 0, cy = 0;
+    CursorPosition(&cx, &cy);
+    if (x_out)
+        *x_out = cx;
+    if (y_out)
+        *y_out = cy;
+}
+
+void WindowSetCursor(u32 x, u32 y)
+{
+    u32 cx = 0, cy = 0;
+    CursorPosition(&cx, &cy);
+    const i32 dx = static_cast<i32>(x) - static_cast<i32>(cx);
+    const i32 dy = static_cast<i32>(y) - static_cast<i32>(cy);
+    CursorHide();
+    CursorMove(static_cast<i8>((dx > 127)    ? 127
+                               : (dx < -128) ? -128
+                                             : dx),
+               static_cast<i8>((dy > 127)    ? 127
+                               : (dy < -128) ? -128
+                                             : dy));
+    CursorShow();
+}
+
+// --- Mouse capture ------------------------------------------------
+
+WindowHandle WindowSetCapture(WindowHandle h)
+{
+    const WindowHandle prev = g_mouse_capture;
+    if (h == kWindowInvalid || !WindowValid(h))
+    {
+        g_mouse_capture = kWindowInvalid;
+    }
+    else
+    {
+        g_mouse_capture = h;
+    }
+    return prev;
+}
+
+void WindowReleaseCapture()
+{
+    g_mouse_capture = kWindowInvalid;
+}
+
+WindowHandle WindowGetCapture()
+{
+    if (g_mouse_capture != kWindowInvalid && !WindowValid(g_mouse_capture))
+    {
+        // Capture owner died without releasing. Reset so we
+        // don't keep routing to a dead slot.
+        g_mouse_capture = kWindowInvalid;
+    }
+    return g_mouse_capture;
+}
+
+// --- Clipboard ----------------------------------------------------
+
+void WindowClipboardSetText(const char* text)
+{
+    u32 i = 0;
+    if (text != nullptr)
+    {
+        for (; i + 1 < kWindowClipboardMax && text[i] != '\0'; ++i)
+        {
+            const char c = text[i];
+            g_clipboard[i] = (c >= 0x20 && c < 0x7F) ? c : '?';
+        }
+    }
+    g_clipboard[i] = '\0';
+    g_clipboard_len = i;
+}
+
+u32 WindowClipboardGetText(char* dst, u32 cap)
+{
+    if (dst == nullptr || cap == 0)
+    {
+        return 0;
+    }
+    u32 n = g_clipboard_len;
+    if (n > cap - 1)
+        n = cap - 1;
+    for (u32 i = 0; i < n; ++i)
+    {
+        dst[i] = g_clipboard[i];
+    }
+    dst[n] = '\0';
+    return n;
+}
+
+// --- Timer table --------------------------------------------------
+
+namespace
+{
+
+// Resolve an existing (pid, hwnd, timer_id) slot index or
+// `kWindowTimersMax` if none. Linear scan — N is 32.
+u32 FindTimerSlot(u64 pid, WindowHandle hwnd, u32 timer_id)
+{
+    for (u32 i = 0; i < kWindowTimersMax; ++i)
+    {
+        const auto& s = g_timers[i];
+        if (s.in_use && s.owner_pid == pid && s.hwnd == hwnd && s.timer_id == timer_id)
+        {
+            return i;
+        }
+    }
+    return kWindowTimersMax;
+}
+
+u32 AllocTimerSlot()
+{
+    for (u32 i = 0; i < kWindowTimersMax; ++i)
+    {
+        if (!g_timers[i].in_use)
+        {
+            return i;
+        }
+    }
+    return kWindowTimersMax;
+}
+
+} // namespace
+
+bool WindowTimerSet(u64 pid, WindowHandle hwnd, u32 timer_id, u32 interval_ms)
+{
+    if (pid == 0 || !WindowValid(hwnd) || g_windows[hwnd].owner_pid != pid)
+    {
+        return false;
+    }
+    // Tick period is 100 Hz — 10 ms per tick. Round UP so a
+    // `SetTimer(.., 15)` ticks every 2 ticks = 20 ms (Win32's
+    // minimum is USER_TIMER_MINIMUM = 10 ms; we bottom out at
+    // one tick).
+    const u32 ticks = (interval_ms == 0) ? 1 : ((interval_ms + 9) / 10);
+    u32 slot = FindTimerSlot(pid, hwnd, timer_id);
+    if (slot == kWindowTimersMax)
+    {
+        slot = AllocTimerSlot();
+        if (slot == kWindowTimersMax)
+        {
+            return false;
+        }
+        g_timers[slot].in_use = true;
+        g_timers[slot].owner_pid = pid;
+        g_timers[slot].hwnd = hwnd;
+        g_timers[slot].timer_id = timer_id;
+    }
+    g_timers[slot].interval_ticks = ticks;
+    g_timers[slot].remaining_ticks = ticks;
+    return true;
+}
+
+bool WindowTimerKill(u64 pid, WindowHandle hwnd, u32 timer_id)
+{
+    const u32 slot = FindTimerSlot(pid, hwnd, timer_id);
+    if (slot == kWindowTimersMax)
+    {
+        return false;
+    }
+    g_timers[slot].in_use = false;
+    return true;
+}
+
+void WindowTimerReap(u64 pid, WindowHandle hwnd)
+{
+    for (u32 i = 0; i < kWindowTimersMax; ++i)
+    {
+        if (g_timers[i].in_use && g_timers[i].owner_pid == pid && g_timers[i].hwnd == hwnd)
+        {
+            g_timers[i].in_use = false;
+        }
+    }
+}
+
+void WindowTimerTick()
+{
+    constexpr u32 kWmTimer = 0x0113;
+    bool any_posted = false;
+    for (u32 i = 0; i < kWindowTimersMax; ++i)
+    {
+        auto& s = g_timers[i];
+        if (!s.in_use)
+            continue;
+        if (!WindowValid(s.hwnd) || g_windows[s.hwnd].owner_pid != s.owner_pid)
+        {
+            // Target died out from under us — drop the timer.
+            s.in_use = false;
+            continue;
+        }
+        if (s.remaining_ticks == 0)
+        {
+            s.remaining_ticks = s.interval_ticks;
+        }
+        else
+        {
+            --s.remaining_ticks;
+            if (s.remaining_ticks == 0)
+            {
+                WindowPostMessage(s.hwnd, kWmTimer, s.timer_id, 0);
+                s.remaining_ticks = s.interval_ticks;
+                any_posted = true;
+            }
+        }
+    }
+    if (any_posted)
+    {
+        WindowMsgWakeAll();
+    }
+}
+
+// --- Parent / child tracking --------------------------------------
+
+void WindowSetParent(WindowHandle h, WindowHandle parent)
+{
+    if (!WindowValid(h))
+    {
+        return;
+    }
+    if (parent != kWindowInvalid && !WindowValid(parent))
+    {
+        parent = kWindowInvalid;
+    }
+    g_windows[h].parent = parent;
+}
+
+WindowHandle WindowGetParent(WindowHandle h)
+{
+    if (!WindowValid(h))
+    {
+        return kWindowInvalid;
+    }
+    const WindowHandle p = g_windows[h].parent;
+    if (p != kWindowInvalid && !WindowValid(p))
+    {
+        return kWindowInvalid;
+    }
+    return p;
+}
+
+WindowHandle WindowGetRelated(WindowHandle h, WindowRel rel)
+{
+    // First / Last traverse the z-order. Next / Prev find h in
+    // z-order and step by 1. Child returns the first alive
+    // window whose parent is h. Owner is treated as parent in
+    // v1 (we don't have a separate owner field).
+    switch (rel)
+    {
+    case WindowRel::First:
+    {
+        for (u32 i = 0; i < g_window_count; ++i)
+        {
+            const WindowHandle w = g_z_order[i];
+            if (WindowValid(w))
+                return w;
+        }
+        return kWindowInvalid;
+    }
+    case WindowRel::Last:
+    {
+        for (u32 i = g_window_count; i > 0; --i)
+        {
+            const WindowHandle w = g_z_order[i - 1];
+            if (WindowValid(w))
+                return w;
+        }
+        return kWindowInvalid;
+    }
+    case WindowRel::Next:
+    case WindowRel::Prev:
+    {
+        if (!WindowValid(h))
+            return kWindowInvalid;
+        u32 idx = g_window_count;
+        for (u32 i = 0; i < g_window_count; ++i)
+        {
+            if (g_z_order[i] == h)
+            {
+                idx = i;
+                break;
+            }
+        }
+        if (idx == g_window_count)
+            return kWindowInvalid;
+        if (rel == WindowRel::Next)
+        {
+            for (u32 i = idx + 1; i < g_window_count; ++i)
+            {
+                if (WindowValid(g_z_order[i]))
+                    return g_z_order[i];
+            }
+        }
+        else
+        {
+            for (u32 i = idx; i > 0; --i)
+            {
+                if (WindowValid(g_z_order[i - 1]))
+                    return g_z_order[i - 1];
+            }
+        }
+        return kWindowInvalid;
+    }
+    case WindowRel::Child:
+    {
+        if (!WindowValid(h))
+            return kWindowInvalid;
+        for (u32 i = 0; i < g_window_count; ++i)
+        {
+            if (WindowValid(i) && g_windows[i].parent == h)
+                return static_cast<WindowHandle>(i);
+        }
+        return kWindowInvalid;
+    }
+    case WindowRel::Owner:
+        return WindowGetParent(h);
+    }
+    return kWindowInvalid;
+}
+
+// --- Keyboard focus -----------------------------------------------
+
+void WindowSetFocus(WindowHandle h)
+{
+    constexpr u32 kWmKillFocus = 0x0008;
+    constexpr u32 kWmSetFocus = 0x0007;
+    const WindowHandle prev = g_focus_hwnd;
+    if (h != kWindowInvalid && !WindowValid(h))
+    {
+        return;
+    }
+    if (prev == h)
+    {
+        return;
+    }
+    if (prev != kWindowInvalid && WindowValid(prev))
+    {
+        WindowPostMessage(prev, kWmKillFocus, static_cast<u64>(h) + 1, 0);
+    }
+    g_focus_hwnd = h;
+    if (h != kWindowInvalid)
+    {
+        WindowPostMessage(h, kWmSetFocus, (prev == kWindowInvalid) ? 0 : (static_cast<u64>(prev) + 1), 0);
+    }
+}
+
+WindowHandle WindowGetFocus()
+{
+    if (g_focus_hwnd != kWindowInvalid && !WindowValid(g_focus_hwnd))
+    {
+        g_focus_hwnd = kWindowInvalid;
+    }
+    return g_focus_hwnd;
+}
+
+// --- Caret --------------------------------------------------------
+
+void WindowCaretCreate(WindowHandle owner, u32 w, u32 h)
+{
+    g_caret.owner = owner;
+    g_caret.w = (w == 0) ? 1 : w;
+    g_caret.h = (h == 0) ? 12 : h;
+    g_caret.visible = true;
+    g_caret.shown = false;
+}
+
+void WindowCaretDestroy()
+{
+    g_caret.visible = false;
+    g_caret.shown = false;
+    g_caret.owner = kWindowInvalid;
+}
+
+void WindowCaretSetPos(u32 x, u32 y)
+{
+    g_caret.x = x;
+    g_caret.y = y;
+}
+
+void WindowCaretShow(bool shown)
+{
+    g_caret.shown = shown;
+}
+
+const Caret& WindowCaretGet()
+{
+    return g_caret;
+}
+
+// --- Per-window user-data longs + dirty region --------------------
+
+u64 WindowGetLong(WindowHandle h, u32 index)
+{
+    if (!WindowValid(h) || index >= kWinLongSlots)
+    {
+        return 0;
+    }
+    return g_windows[h].longs[index];
+}
+
+u64 WindowSetLong(WindowHandle h, u32 index, u64 value)
+{
+    if (!WindowValid(h) || index >= kWinLongSlots)
+    {
+        return 0;
+    }
+    const u64 prev = g_windows[h].longs[index];
+    g_windows[h].longs[index] = value;
+    return prev;
+}
+
+void WindowInvalidate(WindowHandle h)
+{
+    if (!WindowValid(h))
+    {
+        return;
+    }
+    g_windows[h].dirty = true;
+}
+
+void WindowValidate(WindowHandle h)
+{
+    if (!WindowValid(h))
+    {
+        return;
+    }
+    g_windows[h].dirty = false;
+}
+
+bool WindowIsDirty(WindowHandle h)
+{
+    return WindowValid(h) && g_windows[h].dirty;
+}
+
+u32 WindowDrainPaints()
+{
+    constexpr u32 kWmPaint = 0x000F;
+    u32 posted = 0;
+    for (u32 i = 0; i < g_window_count; ++i)
+    {
+        if (!g_windows[i].alive || !g_windows[i].dirty)
+            continue;
+        if (g_windows[i].owner_pid == 0)
+        {
+            // Kernel-owned windows don't have PE pumps — clear
+            // without posting so the flag doesn't accumulate
+            // forever (the boot apps paint via content_fn on
+            // every compose).
+            g_windows[i].dirty = false;
+            continue;
+        }
+        // wParam = HDC (0 in v1), lParam = dirty-rect pointer
+        // (0 since whole-client dirty is the only mode). The
+        // BeginPaint path on the user side will produce the HDC.
+        WindowPostMessage(static_cast<WindowHandle>(i), kWmPaint, 0, 0);
+        g_windows[i].dirty = false;
+        ++posted;
+    }
+    if (posted > 0)
+    {
+        WindowMsgWakeAll();
+    }
+    return posted;
+}
+
+void WindowResizeTo(WindowHandle h, u32 w, u32 hgt)
+{
+    if (!WindowValid(h))
+    {
+        return;
+    }
+    const auto info = FramebufferGet();
+    const u32 fb_w = info.width ? info.width : 1024;
+    const u32 fb_h = info.height ? info.height : 768;
+    auto& c = g_windows[h].chrome;
+    if (w > 0)
+    {
+        if (w > fb_w)
+            w = fb_w;
+        if (c.x + w > fb_w)
+        {
+            c.x = (fb_w > w) ? fb_w - w : 0;
+        }
+        c.w = w;
+    }
+    if (hgt > 0)
+    {
+        if (hgt > fb_h)
+            hgt = fb_h;
+        if (c.y + hgt > fb_h)
+        {
+            c.y = (fb_h > hgt) ? fb_h - hgt : 0;
+        }
+        c.h = hgt;
+    }
 }
 
 } // namespace duetos::drivers::video

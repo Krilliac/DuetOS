@@ -632,6 +632,294 @@ enum SyscallNumber : u64
     //         (bounded to kWinTitleMax; nullable → "MessageBox")
     //   rax = 1 (IDOK)
     SYS_WIN_MSGBOX = 61,
+
+    // SYS_WIN_PEEK_MSG — non-blocking dequeue of one pending
+    // message for the current process.
+    //   rdi = user pointer to a 4×u64 output slot:
+    //         [hwnd_biased, message, wparam, lparam]
+    //   rsi = HWND filter (biased) — 0 = any window owned by
+    //         the caller's pid. Non-zero restricts to that one
+    //         window's queue.
+    //   rdx = bRemove (0 = peek only, non-zero = dequeue).
+    //   rax = 1 if a message was available (and, if bRemove,
+    //         removed from the queue), 0 if nothing pending.
+    // Backs Win32 PeekMessageA / PeekMessageW.
+    SYS_WIN_PEEK_MSG = 62,
+
+    // SYS_WIN_GET_MSG — blocking dequeue of one pending message.
+    //   rdi = user pointer to a 4×u64 output slot (same layout
+    //         as PEEK_MSG).
+    //   rsi = HWND filter (biased) — 0 = any.
+    //   rax = 1 for a regular message, 0 if the message was
+    //         WM_QUIT (caller breaks its message loop), u64(-1)
+    //         on bad user pointer.
+    // v0 implementation polls + SchedSleepTicks(1) when the
+    // queue is empty — 10 ms latency to an incoming message.
+    // Backs Win32 GetMessageA / GetMessageW.
+    SYS_WIN_GET_MSG = 63,
+
+    // SYS_WIN_POST_MSG — enqueue a message to a window.
+    //   rdi = HWND (biased)
+    //   rsi = message code (UINT — WM_* id)
+    //   rdx = wParam
+    //   r10 = lParam
+    //   rax = 1 on success, 0 on invalid handle.
+    // The message is appended to the target window's ring;
+    // overflow drops the oldest and the call still reports
+    // success (classic input-queue policy).
+    // Backs Win32 PostMessageA / PostMessageW.
+    SYS_WIN_POST_MSG = 64,
+
+    // SYS_GDI_FILL_RECT — record a solid-fill primitive in a
+    // window's client-area display list. The compositor replays
+    // the list after chrome on every DesktopCompose.
+    //   rdi = HWND (biased)
+    //   rsi = x (i32 client-local)
+    //   rdx = y (i32 client-local)
+    //   r10 = w (i32)
+    //   r8  = h (i32)
+    //   r9  = COLORREF in Win32 0x00BBGGRR form; the kernel
+    //         re-packs to the framebuffer's 0x00RRGGBB layout
+    //         before storage.
+    //   rax = 1 on success, 0 on invalid handle.
+    // Backs Win32 gdi32 FillRect + Rectangle's fill path.
+    SYS_GDI_FILL_RECT = 65,
+
+    // SYS_GDI_TEXT_OUT — record an ASCII TextOut primitive.
+    //   rdi = HWND (biased)
+    //   rsi = x (i32 client-local)
+    //   rdx = y (i32 client-local)
+    //   r10 = user pointer to text (bounded to kWinTextOutMax
+    //         bytes, non-ASCII stored as '?')
+    //   r8  = text length (bytes; truncated to cap)
+    //   r9  = COLORREF (0x00BBGGRR; repacked like FILL_RECT)
+    //   rax = 1 on success, 0 on bad handle / bad user pointer.
+    // Backs Win32 gdi32 TextOutA / TextOutW.
+    SYS_GDI_TEXT_OUT = 66,
+
+    // SYS_GDI_RECTANGLE — record a 1-px outline primitive.
+    //   rdi..r9 same as SYS_GDI_FILL_RECT.
+    // Backs Win32 gdi32 Rectangle (outline half only in v0 —
+    // fill is the caller's job via FillRect first).
+    SYS_GDI_RECTANGLE = 67,
+
+    // SYS_GDI_CLEAR — drop every recorded primitive for a
+    // window (backs WM_PAINT with bErase = TRUE +
+    // InvalidateRect / BeginPaint reset).
+    //   rdi = HWND (biased)
+    //   rax = 1 on success, 0 on invalid handle.
+    SYS_GDI_CLEAR = 68,
+
+    // SYS_WIN_MOVE — reposition + optionally resize a window.
+    //   rdi = HWND (biased)
+    //   rsi = x (u32, framebuffer coord) — ignored if r9 bit 0
+    //   rdx = y (u32)                     — ignored if r9 bit 0
+    //   r10 = w (u32; 0 = "don't change")
+    //   r8  = h (u32; 0 = "don't change")
+    //   r9  = flags: bit 0 = nomove (SWP_NOMOVE), bit 1 = nosize
+    //         (SWP_NOSIZE). Neither set = move + resize.
+    //   rax = 1 on success, 0 on invalid handle.
+    // Backs Win32 MoveWindow / SetWindowPos.
+    SYS_WIN_MOVE = 69,
+
+    // SYS_WIN_GET_RECT — read back a window's geometry.
+    //   rdi = HWND (biased)
+    //   rsi = rect selector: 0 = window rect (outer bounds,
+    //         framebuffer coords), 1 = client rect (local,
+    //         origin always 0,0; right/bottom = client w/h).
+    //   rdx = user pointer to a 16-byte RECT (left, top, right,
+    //         bottom; int32 each).
+    //   rax = 1 on success, 0 on bad handle / bad user pointer.
+    // Backs Win32 GetWindowRect + GetClientRect.
+    SYS_WIN_GET_RECT = 70,
+
+    // SYS_WIN_SET_TEXT — overwrite a window's title in place.
+    //   rdi = HWND (biased)
+    //   rsi = user pointer to ASCII text (NUL-terminated)
+    //   rax = 1 on success, 0 on invalid handle / bad pointer.
+    // Backs Win32 SetWindowTextA; SetWindowTextW does its own
+    // UTF-16 → ASCII strip on the user side first.
+    SYS_WIN_SET_TEXT = 71,
+
+    // SYS_WIN_TIMER_SET — install or update a per-window timer.
+    //   rdi = HWND (biased)
+    //   rsi = timer_id (u32; caller-assigned)
+    //   rdx = interval in ms (rounds up to scheduler ticks)
+    //   rax = timer_id on success, 0 on failure (bad handle,
+    //         timer table full, or interval == 0).
+    // Backs Win32 SetTimer. Timer ticker posts WM_TIMER
+    // (wParam = timer_id) to the window every interval.
+    SYS_WIN_TIMER_SET = 72,
+
+    // SYS_WIN_TIMER_KILL — remove a timer.
+    //   rdi = HWND (biased)
+    //   rsi = timer_id
+    //   rax = 1 on success, 0 if unknown. Backs Win32 KillTimer.
+    SYS_WIN_TIMER_KILL = 73,
+
+    // SYS_GDI_LINE — record a Bresenham line primitive.
+    //   rdi = HWND (biased)
+    //   rsi = x0, rdx = y0, r10 = x1, r8 = y1 (i32 client-local)
+    //   r9  = COLORREF. Backs Win32 LineTo + MoveToEx+LineTo.
+    SYS_GDI_LINE = 74,
+
+    // SYS_GDI_ELLIPSE — 1-px outline inside a bounding box.
+    //   Same arg shape as SYS_GDI_FILL_RECT. Backs Win32 Ellipse.
+    SYS_GDI_ELLIPSE = 75,
+
+    // SYS_GDI_SET_PIXEL — single-pixel primitive.
+    //   rdi = HWND, rsi = x, rdx = y, r10 = COLORREF.
+    //   Backs Win32 SetPixel / SetPixelV.
+    SYS_GDI_SET_PIXEL = 76,
+
+    // SYS_WIN_GET_KEYSTATE — async keyboard state query.
+    //   rdi = virtual-key / character code (low 8 bits used).
+    //   rax = Win32-style short: high bit set iff currently
+    //         held; low bit set iff toggled (v1: toggled bit
+    //         not tracked — always 0). Backs Win32 GetKeyState
+    //         + GetAsyncKeyState.
+    SYS_WIN_GET_KEYSTATE = 77,
+
+    // SYS_WIN_GET_CURSOR — read cursor position.
+    //   rdi = user pointer to a 2×i32 POINT (x, y).
+    //   rax = 1 on success, 0 on bad pointer. Backs
+    //         GetCursorPos.
+    SYS_WIN_GET_CURSOR = 78,
+
+    // SYS_WIN_SET_CURSOR — move cursor.
+    //   rdi = x, rsi = y (framebuffer coords; clamped).
+    //   rax = 1 on success. Backs SetCursorPos.
+    SYS_WIN_SET_CURSOR = 79,
+
+    // SYS_WIN_SET_CAPTURE — grab mouse for `HWND`.
+    //   rdi = HWND.
+    //   rax = previously-captured HWND (biased; 0 if none).
+    //         Backs Win32 SetCapture.
+    SYS_WIN_SET_CAPTURE = 80,
+
+    // SYS_WIN_RELEASE_CAPTURE — release capture. No args.
+    //   rax = 1 always. Backs Win32 ReleaseCapture.
+    SYS_WIN_RELEASE_CAPTURE = 81,
+
+    // SYS_WIN_GET_CAPTURE — query captured HWND. No args.
+    //   rax = biased HWND, or 0 if none. Backs Win32 GetCapture.
+    SYS_WIN_GET_CAPTURE = 82,
+
+    // SYS_WIN_CLIP_SET_TEXT — replace clipboard text.
+    //   rdi = user pointer to NUL-terminated ASCII (nullable).
+    //   rax = 1 always. Backs Win32 SetClipboardData(CF_TEXT)
+    //         via the user32 wrapper.
+    SYS_WIN_CLIP_SET_TEXT = 83,
+
+    // SYS_WIN_CLIP_GET_TEXT — read clipboard text.
+    //   rdi = user buffer pointer, rsi = buffer capacity.
+    //   rax = stored length in bytes (0 if empty / bad
+    //         pointer / zero cap). Backs Win32
+    //         GetClipboardData(CF_TEXT).
+    SYS_WIN_CLIP_GET_TEXT = 84,
+
+    // SYS_WIN_GET_LONG — read a per-window long slot.
+    //   rdi = HWND (biased)
+    //   rsi = slot index (0=WNDPROC, 1=USERDATA, 2/3=extra)
+    //   rax = 64-bit value, 0 on bad handle / index.
+    // Backs Win32 GetWindowLongPtrA / SetWindowLongA / etc.
+    SYS_WIN_GET_LONG = 85,
+
+    // SYS_WIN_SET_LONG — write a per-window long slot.
+    //   rdi = HWND, rsi = index, rdx = value.
+    //   rax = previous value. Backs SetWindowLongPtrA.
+    SYS_WIN_SET_LONG = 86,
+
+    // SYS_WIN_INVALIDATE — mark a window client-dirty.
+    //   rdi = HWND, rsi = bErase (ignored in v1; display-list
+    //         replay always repaints the whole client).
+    //   rax = 1 on success, 0 on bad handle.
+    // Next pump-drain posts WM_PAINT. Backs Win32 InvalidateRect
+    // (with nullptr rect and erase = FALSE).
+    SYS_WIN_INVALIDATE = 87,
+
+    // SYS_WIN_VALIDATE — clear dirty bit without painting.
+    //   rdi = HWND. rax = 1 on success. Backs ValidateRect
+    //   + the implicit validate inside EndPaint.
+    SYS_WIN_VALIDATE = 88,
+
+    // SYS_WIN_GET_ACTIVE — read the currently-active HWND.
+    //   rax = biased HWND of the active window, or 0 if none.
+    // Backs GetActiveWindow / GetForegroundWindow.
+    SYS_WIN_GET_ACTIVE = 89,
+
+    // SYS_WIN_SET_ACTIVE — make `HWND` the active + topmost.
+    //   rdi = HWND. rax = previous active (biased; 0 if none).
+    // Backs SetActiveWindow / SetForegroundWindow.
+    SYS_WIN_SET_ACTIVE = 90,
+
+    // SYS_WIN_GET_METRIC — read a GetSystemMetrics selector.
+    //   rdi = SM_* index (see user32 stub).
+    //   rax = integer metric; 0 for unknown indices. Matches
+    //   Win32 (programs tolerate 0 for unsupported selectors).
+    SYS_WIN_GET_METRIC = 91,
+
+    // SYS_WIN_ENUM — fill an array with biased HWNDs of every
+    // alive window in registration order.
+    //   rdi = user pointer to u64[cap]
+    //   rsi = cap (#entries)
+    //   rax = actual count written (≤ cap).
+    // Backs EnumWindows via a client-side loop that calls the
+    // user callback per-HWND.
+    SYS_WIN_ENUM = 92,
+
+    // SYS_WIN_FIND — find a window by title.
+    //   rdi = user pointer to ASCII title (NUL-terminated)
+    //   rax = biased HWND of first match, or 0. Title compare
+    //   is case-insensitive (Win32 convention). Backs
+    //   FindWindowA / FindWindowW (W variant flattens client-
+    //   side).
+    SYS_WIN_FIND = 93,
+
+    // SYS_WIN_SET_PARENT — set a window's parent HWND.
+    //   rdi = HWND (child, biased), rsi = HWND (parent, biased;
+    //         0 = clear/top-level).
+    //   rax = previous parent (biased; 0 if none).
+    // Backs Win32 SetParent.
+    SYS_WIN_SET_PARENT = 94,
+
+    // SYS_WIN_GET_PARENT — read a window's parent HWND.
+    //   rdi = HWND. rax = biased parent or 0. Backs GetParent.
+    SYS_WIN_GET_PARENT = 95,
+
+    // SYS_WIN_GET_RELATED — walk the window relationship graph.
+    //   rdi = HWND, rsi = rel kind (0=Next, 1=Prev, 2=First,
+    //         3=Last, 4=Child, 5=Owner).
+    //   rax = biased HWND, or 0. Backs Win32 GetWindow.
+    SYS_WIN_GET_RELATED = 96,
+
+    // SYS_WIN_SET_FOCUS — move keyboard focus to HWND.
+    //   rdi = HWND (0 = clear focus).
+    //   rax = biased HWND of previous focus, or 0.
+    // Fires WM_KILLFOCUS on the old focus + WM_SETFOCUS on the
+    // new. Backs Win32 SetFocus.
+    SYS_WIN_SET_FOCUS = 97,
+
+    // SYS_WIN_GET_FOCUS — read current focus HWND.
+    //   rax = biased HWND of focus, or 0. Backs Win32 GetFocus.
+    SYS_WIN_GET_FOCUS = 98,
+
+    // SYS_WIN_CARET — combined caret control.
+    //   rdi = op (0=Create, 1=Destroy, 2=SetPos, 3=Show, 4=Hide)
+    //   rsi = arg1 (Create: width; SetPos: x; Show/Hide: 0)
+    //   rdx = arg2 (Create: height; SetPos: y)
+    //   r10 = arg3 (Create: HWND owner; else unused)
+    //   rax = 1 on success, 0 on bad op. Backs Win32
+    //         CreateCaret / DestroyCaret / SetCaretPos /
+    //         ShowCaret / HideCaret.
+    SYS_WIN_CARET = 99,
+
+    // SYS_WIN_BEEP — sound the PC speaker (blocking).
+    //   rdi = frequency in Hz (0 = use Win32 MB_OK default 800)
+    //   rsi = duration in ms (0 = 100 ms default)
+    //   rax = 1 if played, 0 if the speaker isn't usable.
+    // Backs Win32 MessageBeep + Beep.
+    SYS_WIN_BEEP = 100,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit

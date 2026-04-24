@@ -2,7 +2,10 @@
 
 **Last updated:** 2026-04-24
 **Type:** Observation + Decision
-**Status:** Landed — first PE-created window painting end-to-end
+**Status:** Superseded by `win32-windowing-v1.md` — the five
+follow-ups listed at the tail of this doc (message queue, input
+routing, GDI paint, process-exit reaper, SW_HIDE hide/re-show)
+have all landed except SW_HIDE. Retained for historical context.
 
 ## What shipped
 
