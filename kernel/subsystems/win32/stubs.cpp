@@ -208,6 +208,17 @@ constexpr u32 kOffInterlockedAnd64 = 0xB1D; // batch 60 — 17 bytes
 constexpr u32 kOffInterlockedOr64 = 0xB2E;  // batch 60 — 17 bytes
 constexpr u32 kOffInterlockedXor64 = 0xB3F; // batch 60 — 17 bytes
 
+// === Batch 61: real critical sections ======================
+// Until now EnterCriticalSection / LeaveCriticalSection were
+// single-byte `ret`s — safe while each process ran single-threaded,
+// but with SYS_THREAD_CREATE live every call is a latent race.
+// These stubs lay an owner-TID + recursion-count lock over the
+// existing 40-byte CRITICAL_SECTION struct (InitializeCriticalSection
+// already zero-fills it). The acquire uses `lock cmpxchg`; on
+// contention we SYS_YIELD and retry.
+constexpr u32 kOffEnterCritSecReal = 0xB50; // batch 61 — 49 bytes
+constexpr u32 kOffLeaveCritSecReal = 0xB81; // batch 61 — 14 bytes
+
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
     // Windows x64 ABI: first arg (uExitCode) in RCX.
@@ -2850,10 +2861,69 @@ constexpr u8 kStubsBytes[] = {
     0xF0, 0x4C, 0x0F, 0xB1, 0x01, // 0xB48 lock cmpxchg [rcx], r8
     0x75, 0xF0,                   // 0xB4D jne -16 -> 0xB3F
     0xC3,                         // 0xB4F ret
+
+    // === Batch 61 ==============================================
+
+    // --- EnterCriticalSection (offset 0xB50, 50 bytes) --------
+    // Win32: void EnterCriticalSection(LPCRITICAL_SECTION = rcx).
+    //
+    // CRITICAL_SECTION layout we impose on the caller's 40-byte
+    // struct (InitializeCriticalSection already zero-fills it):
+    //   [rcx+0x00] u64 owner_tid    (0 = unheld)
+    //   [rcx+0x08] u64 recursion
+    //   [rcx+0x10..0x28]            unused
+    //
+    // Algorithm:
+    //   1. rbx <- rcx   (rbx is callee-saved in Win64; we need a
+    //                   register that survives int 0x80).
+    //   2. r8  <- our task id via SYS_GETPID.
+    //   3. lock cmpxchg: if owner == 0, owner := r8. ZF=1 -> took.
+    //   4. If not, check owner == r8 (recursive acquire).
+    //   5. Otherwise SYS_YIELD and retry.
+    //
+    // Win64 ABI: rbx and rsi/rdi are callee-saved; the int 0x80
+    // syscall path preserves all but rax. We push/pop rbx around
+    // the body.
+    0x53,             // 0xB50 push rbx
+    0x48, 0x89, 0xCB, // 0xB51 mov rbx, rcx            ; save lpcs
+    0x6A, 0x01,       // 0xB54 push 1
+    0x58,             // 0xB56 pop rax                 ; rax = SYS_GETPID
+    0xCD, 0x80,       // 0xB57 int 0x80                ; rax = TID
+    0x49, 0x89, 0xC0, // 0xB59 mov r8, rax             ; r8 = our TID
+    // .retry (abs 0xB5C):
+    0x31, 0xC0,                   // 0xB5C xor eax, eax            ; expected = 0
+    0xF0, 0x4C, 0x0F, 0xB1, 0x03, // 0xB5E lock cmpxchg [rbx], r8
+    0x74, 0x0C,                   // 0xB63 je .took (+0x0C -> 0xB71)
+    0x4C, 0x39, 0x03,             // 0xB65 cmp [rbx], r8           ; owner == us?
+    0x74, 0x11,                   // 0xB68 je .recursive (+0x11 -> 0xB7B)
+    0x6A, 0x03,                   // 0xB6A push 3
+    0x58,                         // 0xB6C pop rax                 ; rax = SYS_YIELD
+    0xCD, 0x80,                   // 0xB6D int 0x80
+    0xEB, 0xEB,                   // 0xB6F jmp .retry (-0x15 -> 0xB5C)
+    // .took (abs 0xB71): first acquire — recursion := 1.
+    0x48, 0xC7, 0x43, 0x08, 0x01, 0x00, 0x00, 0x00, // 0xB71 mov qword [rbx+8], 1
+    0x5B,                                           // 0xB79 pop rbx
+    0xC3,                                           // 0xB7A ret
+    // .recursive (abs 0xB7B): already held by us — bump.
+    0x48, 0xFF, 0x43, 0x08, // 0xB7B inc qword [rbx+8]
+    0x5B,                   // 0xB7F pop rbx
+    0xC3,                   // 0xB80 ret
+
+    // --- LeaveCriticalSection (offset 0xB81, 14 bytes) --------
+    // Win32: void LeaveCriticalSection(LPCRITICAL_SECTION = rcx).
+    // Decrement recursion; on zero, clear owner so the next
+    // acquire wins the cmpxchg. Caller is assumed to hold — a
+    // bogus caller underflows recursion and never re-zeroes
+    // owner (matches Windows: "bad things happen").
+    0x48, 0xFF, 0x49, 0x08,                   // 0xB81 dec qword [rcx+8]
+    0x75, 0x07,                               // 0xB85 jnz .done (+7 -> 0xB8E)
+    0x48, 0xC7, 0x01, 0x00, 0x00, 0x00, 0x00, // 0xB87 mov qword [rcx], 0
+    // .done (abs 0xB8E):
+    0xC3, // 0xB8E ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0xB50, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0xB8F, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -2895,8 +2965,12 @@ constexpr StubEntry kStubsTable[] = {
     {"kernel32.dll", "InitializeCriticalSection", kOffInitCritSec},
     {"kernel32.dll", "InitializeCriticalSectionEx", kOffInitCritSec},
     {"kernel32.dll", "InitializeCriticalSectionAndSpinCount", kOffInitCritSec},
-    {"kernel32.dll", "EnterCriticalSection", kOffCritSecNop},
-    {"kernel32.dll", "LeaveCriticalSection", kOffCritSecNop},
+    {"kernel32.dll", "EnterCriticalSection", kOffEnterCritSecReal},
+    {"kernel32.dll", "LeaveCriticalSection", kOffLeaveCritSecReal},
+    // DeleteCriticalSection stays a bare `ret` — our CS doesn't own
+    // any kernel handle or heap state, so there's literally nothing
+    // to tear down. Real Windows's Rtl code only zeroes the DebugInfo
+    // pointer and frees a reserved slot; neither applies here.
     {"kernel32.dll", "DeleteCriticalSection", kOffCritSecNop},
     // Batch 5 — vcruntime140 memory intrinsics
     {"vcruntime140.dll", "memmove", kOffMemmove},
@@ -3848,8 +3922,8 @@ constexpr StubEntry kStubsTable[] = {
     {"ntdll.dll", "RtlFillMemory", kOffCritSecNop},
     {"ntdll.dll", "RtlCopyMemory", kOffMemmove}, // real memcpy
     {"ntdll.dll", "RtlMoveMemory", kOffMemmove},
-    {"ntdll.dll", "RtlEnterCriticalSection", kOffCritSecNop},
-    {"ntdll.dll", "RtlLeaveCriticalSection", kOffCritSecNop},
+    {"ntdll.dll", "RtlEnterCriticalSection", kOffEnterCritSecReal},
+    {"ntdll.dll", "RtlLeaveCriticalSection", kOffLeaveCritSecReal},
     {"ntdll.dll", "RtlInitializeCriticalSection", kOffInitCritSec},
     {"ntdll.dll", "RtlDeleteCriticalSection", kOffCritSecNop},
     {"ntdll.dll", "RtlTryEnterCriticalSection", kOffReturnOne}, // TRUE
