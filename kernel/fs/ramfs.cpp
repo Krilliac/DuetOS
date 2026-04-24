@@ -19,6 +19,7 @@
 #include "generated_hello_winapi.h"
 #include "generated_syscall_stress.h"
 #include "generated_thread_stress.h"
+#include "generated_windowed_hello.h"
 
 // A real 3rd-party Windows PE embedded verbatim from
 // userland/apps/windows_kill/windows-kill.exe. 79 KiB, 12 DLL
@@ -326,6 +327,19 @@ constinit RamfsNode k_trusted_bin_syscall_stress = {
     .file_size = generated::kBinSyscallStressBytes_len,
 };
 
+// /bin/windowed_hello.exe — first PE that calls
+// user32!CreateWindowExA to register a window on the kernel
+// compositor. Proves the windowing v0 bridge (SYS_WIN_CREATE /
+// SYS_WIN_SHOW / SYS_WIN_MSGBOX, syscalls 58..61) works
+// end-to-end from a real PE's Import Directory.
+constinit RamfsNode k_trusted_bin_windowed_hello = {
+    .name = "windowed_hello.exe",
+    .type = RamfsNodeType::kFile,
+    .children = nullptr,
+    .file_bytes = generated::kBinWindowedHelloBytes,
+    .file_size = generated::kBinWindowedHelloBytes_len,
+};
+
 // /bin/customdll_test.exe — stage-2 slice 6 end-to-end fixture.
 // Imports CustomAdd / CustomMul / CustomVersion from
 // customdll.dll (loaded by SpawnPeFile before PeLoad, resolved
@@ -342,7 +356,8 @@ constinit RamfsNode k_trusted_bin_customdll_test = {
 constinit const RamfsNode* const k_trusted_bin_children[] = {
     &k_trusted_bin_hello,          &k_trusted_bin_exit_elf,       &k_trusted_bin_hello_pe,
     &k_trusted_bin_winkill,        &k_trusted_bin_hello_winapi,   &k_trusted_bin_thread_stress,
-    &k_trusted_bin_syscall_stress, &k_trusted_bin_customdll_test, nullptr,
+    &k_trusted_bin_syscall_stress, &k_trusted_bin_customdll_test, &k_trusted_bin_windowed_hello,
+    nullptr,
 };
 
 constinit RamfsNode k_trusted_bin_dir = {

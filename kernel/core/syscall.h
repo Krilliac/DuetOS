@@ -563,6 +563,75 @@ enum SyscallNumber : u64
     // return-zero GetProcAddress stub. See
     // .claude/knowledge/pe-eat-dll-loader-v0.md.
     SYS_DLL_PROC_ADDRESS = 57,
+
+    // Windowing family — bridge user32.dll's CreateWindowExA/W /
+    // DestroyWindow / ShowWindow / MessageBox stubs into the
+    // kernel-mode compositor + window registry that live in
+    // kernel/drivers/video/widget.{h,cpp}. v0: ring-3 PEs can
+    // register a rectangle with a title, have the compositor
+    // paint it in z-order with the rest of the desktop, and tear
+    // it down on exit. No message pump yet — GetMessage still
+    // returns 0 (WM_QUIT). No keyboard/mouse dispatch to the
+    // target window yet — input routes to the native console
+    // as before.
+    //
+    // SYS_WIN_CREATE — register a window in the compositor.
+    //   rdi = x (u32, framebuffer coord)
+    //   rsi = y (u32)
+    //   rdx = width (u32; clamped to framebuffer width)
+    //   r10 = height (u32; clamped to framebuffer height)
+    //   r8  = user pointer to NUL-terminated ASCII title
+    //         (bounded copy, truncated to kWinTitleMax bytes).
+    //         May be null → falls back to a generic "WINDOW"
+    //         label so the chrome still has a visible title bar.
+    //   rax = non-zero HWND on success (biased +1 so handle 0
+    //         can continue to mean "failure" per Win32 convention).
+    //         0 on failure (no free slots, OOM for the title copy,
+    //         or fault on the title pointer).
+    //
+    // Cap-gated on kCapWindow — a future bit in CapSet; for v0
+    // every process has the cap implicitly so the bridge works
+    // out of the box.
+    SYS_WIN_CREATE = 58,
+
+    // SYS_WIN_DESTROY — tear down a window registered via
+    // SYS_WIN_CREATE.
+    //   rdi = HWND returned by SYS_WIN_CREATE (biased; kernel
+    //         unbiases before touching the registry).
+    //   rax = 1 on success, 0 on invalid handle.
+    //
+    // Triggers a DesktopCompose under the compositor lock so
+    // the window visually disappears in the same call.
+    SYS_WIN_DESTROY = 59,
+
+    // SYS_WIN_SHOW — map Win32 ShowWindow(cmd) onto our
+    // compositor. Only two behaviours matter for v0:
+    //   cmd == 0 (SW_HIDE) → close the window (same as
+    //     DESTROY, but the HWND stays allocated so a
+    //     subsequent ShowWindow(SW_SHOW*) could in principle
+    //     re-map — not implemented yet; hidden windows stay
+    //     hidden for the process's lifetime).
+    //   cmd != 0 (anything "show"-ish)            → raise +
+    //     compose.
+    //   rdi = HWND (biased)
+    //   rsi = cmd
+    //   rax = 0 (Win32 ShowWindow's "BOOL — was the window
+    //         previously visible" is always reported as FALSE
+    //         here; we don't track visibility history).
+    SYS_WIN_SHOW = 60,
+
+    // SYS_WIN_MSGBOX — synchronous message-box surrogate. No
+    // modal dialog is drawn in v0; the text + caption are
+    // emitted to the serial console as a single [msgbox]
+    // record so the call is visible + debuggable, and IDOK is
+    // returned so callers that branch on the result continue
+    // along the "user clicked OK" path.
+    //   rdi = user pointer to NUL-terminated ASCII text
+    //         (bounded to kWinMsgBoxTextMax)
+    //   rsi = user pointer to NUL-terminated ASCII caption
+    //         (bounded to kWinTitleMax; nullable → "MessageBox")
+    //   rax = 1 (IDOK)
+    SYS_WIN_MSGBOX = 61,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit
@@ -581,6 +650,17 @@ inline constexpr u64 kSyscallDebugPrintMax = 256;
 /// pass. Matches the Win32 MAXIMUM_WAIT_OBJECTS (64). Bounds the
 /// kernel-stack bounce array the syscall uses.
 inline constexpr u64 kSyscallWaitMultiMax = 64;
+
+/// Bounded copy-in length for window titles (SYS_WIN_CREATE) and
+/// MessageBox captions (SYS_WIN_MSGBOX). Keeps the on-kernel-stack
+/// bounce buffer tiny. Titles longer than this are silently
+/// truncated — Win32 already allows arbitrary UI truncation.
+inline constexpr u64 kWinTitleMax = 64;
+
+/// Bounded copy-in length for MessageBox body text. 256 bytes is a
+/// comfortable single-line budget and keeps the serial record
+/// human-readable.
+inline constexpr u64 kWinMsgBoxTextMax = 256;
 
 void SyscallInit();
 
