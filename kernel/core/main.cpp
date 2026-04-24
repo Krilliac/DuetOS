@@ -74,6 +74,7 @@
 #include "runtime_checker.h"
 #include "../subsystems/linux/ring3_smoke.h"
 #include "../subsystems/linux/syscall.h"
+#include "../subsystems/win32/gdi_objects.h"
 #include "../subsystems/win32/stubs.h"
 #include "dll_loader.h"
 #include "shell.h"
@@ -1044,6 +1045,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     SerialWrite("[boot] Bringing up graphics ICD skeleton.\n");
     duetos::subsystems::graphics::GraphicsIcdInit();
+    duetos::subsystems::win32::GdiInit();
 
     SerialWrite("[boot] Bringing up block device layer.\n");
     duetos::drivers::storage::BlockLayerInit();

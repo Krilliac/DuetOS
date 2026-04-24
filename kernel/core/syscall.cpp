@@ -16,6 +16,7 @@
 #include "../sched/sched.h"
 #include "../subsystems/graphics/graphics.h"
 #include "../subsystems/translation/translate.h"
+#include "../subsystems/win32/gdi_objects.h"
 #include "../subsystems/win32/heap_syscall.h"
 #include "../subsystems/win32/vmap_syscall.h"
 #include "../subsystems/win32/tls_syscall.h"
@@ -1449,6 +1450,30 @@ void SyscallDispatch(arch::TrapFrame* frame)
         return;
     case SYS_GDI_FILL_RECT_USER:
         subsystems::win32::DoGdiFillRectUser(frame);
+        return;
+    case SYS_GDI_CREATE_COMPAT_DC:
+        subsystems::win32::DoGdiCreateCompatibleDC(frame);
+        return;
+    case SYS_GDI_CREATE_COMPAT_BITMAP:
+        subsystems::win32::DoGdiCreateCompatibleBitmap(frame);
+        return;
+    case SYS_GDI_CREATE_SOLID_BRUSH:
+        subsystems::win32::DoGdiCreateSolidBrush(frame);
+        return;
+    case SYS_GDI_GET_STOCK_OBJECT:
+        subsystems::win32::DoGdiGetStockObject(frame);
+        return;
+    case SYS_GDI_SELECT_OBJECT:
+        subsystems::win32::DoGdiSelectObject(frame);
+        return;
+    case SYS_GDI_DELETE_DC:
+        subsystems::win32::DoGdiDeleteDC(frame);
+        return;
+    case SYS_GDI_DELETE_OBJECT:
+        subsystems::win32::DoGdiDeleteObject(frame);
+        return;
+    case SYS_GDI_BITBLT_DC:
+        subsystems::win32::DoGdiBitBltDC(frame);
         return;
 
     case SYS_GFX_D3D_STUB:

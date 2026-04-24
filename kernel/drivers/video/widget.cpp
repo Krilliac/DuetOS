@@ -944,6 +944,12 @@ void DesktopCompose(u32 desktop_rgb, const char* banner)
             FramebufferFillRect(g_caret.x, g_caret.y, g_caret.w, g_caret.h, 0x00000000);
         }
     }
+    // Present the freshly-composed frame. For in-place framebuffers
+    // (firmware handoff, Bochs VBE) this is a no-op. For
+    // virtio-gpu-backed framebuffers the hook runs
+    // TRANSFER_TO_HOST_2D + RESOURCE_FLUSH so the host composites
+    // our guest pixels onto the actual display surface.
+    FramebufferPresent();
 }
 
 DisplayMode GetDisplayMode()

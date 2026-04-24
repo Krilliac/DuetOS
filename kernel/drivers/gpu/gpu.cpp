@@ -4,6 +4,7 @@
 #include "../../arch/x86_64/serial.h"
 #include "../../core/klog.h"
 #include "../../core/panic.h"
+#include "../../drivers/video/framebuffer.h"
 #include "../../mm/paging.h"
 #include "../pci/pci.h"
 #include "bochs_vbe.h"
@@ -328,13 +329,26 @@ void RunVendorProbe(GpuInfo& g)
                 if (VirtioGpuSetupScanout(w, h))
                 {
                     const auto& sc = VirtioGpuScanoutInfo();
-                    // Diagonal gradient + three corner swatches.
-                    // BGRA8888: pixel = 0xAARRGGBB? No — virtio-gpu
-                    // B8G8R8A8_UNORM means first byte is B, then G,
-                    // R, A. We just write a u32 = (A<<24)|(R<<16)|
-                    // (G<<8)|B which on little-endian x86 lays out
-                    // B,G,R,A in memory — exactly the format the
-                    // host expects.
+                    // Rebind the kernel framebuffer to the virtio-gpu
+                    // backing. BGRA8888 is compatible with the video
+                    // driver's 32-bpp pixel format (little-endian
+                    // layout puts B,G,R,A in memory, which the host
+                    // interprets correctly). Register a present hook
+                    // so the compositor's end-of-compose step pushes
+                    // the new pixels to the host via TRANSFER_TO_HOST_2D
+                    // + RESOURCE_FLUSH. On QEMU `-vga virtio` this
+                    // turns the virtio-gpu into our primary display.
+                    ::duetos::drivers::video::FramebufferRebindExternal(sc.backing_va, sc.backing_phys, sc.width,
+                                                                        sc.height, sc.pitch, 32);
+                    ::duetos::drivers::video::FramebufferSetPresentHook(
+                        []() {
+                            (void)VirtioGpuFlushScanout(0, 0, VirtioGpuScanoutInfo().width,
+                                                        VirtioGpuScanoutInfo().height);
+                        });
+                    // Paint a boot-proof test pattern straight into
+                    // the backing (now also the kernel framebuffer)
+                    // and flush once so the host sees something
+                    // before the first DesktopCompose runs.
                     auto* px = static_cast<u32*>(sc.backing_va);
                     for (u32 yy = 0; yy < sc.height; ++yy)
                     {
@@ -346,8 +360,6 @@ void RunVendorProbe(GpuInfo& g)
                             px[yy * sc.width + xx] = (u32(0xFF) << 24) | (u32(r) << 16) | (u32(g_) << 8) | u32(b);
                         }
                     }
-                    // Corner swatches (16×16) to confirm coordinate
-                    // orientation at a glance.
                     constexpr u32 kSw = 16;
                     auto fill_box = [&](u32 x0, u32 y0, u32 rgb)
                     {
@@ -359,7 +371,6 @@ void RunVendorProbe(GpuInfo& g)
                     fill_box(sc.width - kSw, 0, 0xFF00FF00);               // top-right green
                     fill_box(0, sc.height - kSw, 0xFF0000FF);              // bottom-left blue
                     fill_box(sc.width - kSw, sc.height - kSw, 0xFFFFFFFF); // bottom-right white
-
                     (void)VirtioGpuFlushScanout(0, 0, sc.width, sc.height);
                 }
             }

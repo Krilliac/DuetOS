@@ -138,4 +138,25 @@ void FramebufferSelfTest();
 /// to rebuild it explicitly after this call succeeds.
 bool FramebufferRebind(u64 phys, u32 width, u32 height, u32 pitch, u8 bpp);
 
+/// Rebind to an already-mapped kernel VA — the external-memory
+/// variant. Unlike `FramebufferRebind` this doesn't call `MapMmio`
+/// (the caller already has the VA), so it's the right primitive for
+/// a framebuffer that lives in ordinary RAM (virtio-gpu backing,
+/// future guest-owned double-buffer, etc.). `virt` must remain
+/// valid for the lifetime of the framebuffer. Returns false on
+/// invalid geometry.
+bool FramebufferRebindExternal(void* virt, u64 phys, u32 width, u32 height, u32 pitch, u8 bpp);
+
+// Present hook. A backend driver (today: virtio-gpu) can register a
+// function that runs at the end of `FramebufferPresent()`; the
+// compositor calls that function as the last step of every
+// `DesktopCompose` pass. For in-place framebuffers (firmware
+// handoff, Bochs VBE) there's nothing to do — the hook stays null
+// and `FramebufferPresent()` is a no-op. For virtio-gpu the hook
+// runs TRANSFER_TO_HOST_2D + RESOURCE_FLUSH so the host sees the
+// new guest pixels.
+using FramebufferPresentFn = void (*)();
+void FramebufferSetPresentHook(FramebufferPresentFn fn);
+void FramebufferPresent();
+
 } // namespace duetos::drivers::video

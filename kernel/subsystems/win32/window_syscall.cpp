@@ -424,11 +424,29 @@ u32 ColorRefToRgb(u64 colorref)
     return (r << 16) | (g << 8) | b;
 }
 
+bool CopyMsgToUser(const duetos::drivers::video::WindowMsg& m, u64 user_ptr)
+{
+    if (user_ptr == 0)
+    {
+        return false;
+    }
+    UserMsg out{};
+    out.hwnd = static_cast<u64>(m.hwnd_biased);
+    out.message = m.message;
+    out.wparam = m.wparam;
+    out.lparam = m.lparam;
+    return duetos::mm::CopyToUser(reinterpret_cast<void*>(user_ptr), &out, sizeof(out));
+}
+
+} // namespace
+
 // Resolve a user-supplied biased HWND to a compositor handle AND
 // verify it belongs to the calling process. Prevents a ring-3
 // PE from reading/writing another process's message queue. For
 // v0 this also refuses pid == 0 (kernel-owned boot windows) so
-// a PE can't PostMessage to the Calculator.
+// a PE can't PostMessage to the Calculator. Declared in
+// window_syscall.h so other subsystem modules (GDI object
+// handlers in gdi_objects.cpp) can share it.
 u32 HwndToCompositorHandleForCaller(u64 hwnd_biased, u64 pid)
 {
     using namespace duetos::drivers::video;
@@ -447,22 +465,6 @@ u32 HwndToCompositorHandleForCaller(u64 hwnd_biased, u64 pid)
     }
     return h_comp;
 }
-
-bool CopyMsgToUser(const duetos::drivers::video::WindowMsg& m, u64 user_ptr)
-{
-    if (user_ptr == 0)
-    {
-        return false;
-    }
-    UserMsg out{};
-    out.hwnd = static_cast<u64>(m.hwnd_biased);
-    out.message = m.message;
-    out.wparam = m.wparam;
-    out.lparam = m.lparam;
-    return duetos::mm::CopyToUser(reinterpret_cast<void*>(user_ptr), &out, sizeof(out));
-}
-
-} // namespace
 
 void DoWinPeekMsg(arch::TrapFrame* frame)
 {

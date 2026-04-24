@@ -185,6 +185,50 @@ bool FramebufferRebind(u64 phys, u32 width, u32 height, u32 pitch, u8 bpp)
     return true;
 }
 
+bool FramebufferRebindExternal(void* virt, u64 phys, u32 width, u32 height, u32 pitch, u8 bpp)
+{
+    if (bpp != 32 || virt == nullptr || pitch < width * 4 || (pitch & 3) != 0 || width == 0 || height == 0)
+    {
+        SerialWrite("[video/fb] rebind-ext rejected (bad geometry or null virt)\n");
+        return false;
+    }
+    g_info.virt = virt;
+    g_info.phys = phys;
+    g_info.width = width;
+    g_info.height = height;
+    g_info.pitch = pitch;
+    g_info.bpp = bpp;
+    g_available = true;
+    SerialWrite("[video/fb] rebound-ext virt=");
+    SerialWriteHex(reinterpret_cast<u64>(virt));
+    SerialWrite(" phys=");
+    SerialWriteHex(phys);
+    SerialWrite(" ");
+    SerialWriteHex(width);
+    SerialWrite("x");
+    SerialWriteHex(height);
+    SerialWrite(" pitch=");
+    SerialWriteHex(pitch);
+    SerialWrite("\n");
+    return true;
+}
+
+namespace
+{
+constinit FramebufferPresentFn g_present_hook = nullptr;
+} // namespace
+
+void FramebufferSetPresentHook(FramebufferPresentFn fn)
+{
+    g_present_hook = fn;
+}
+
+void FramebufferPresent()
+{
+    if (g_present_hook != nullptr)
+        g_present_hook();
+}
+
 FramebufferInfo FramebufferGet()
 {
     return g_info;

@@ -980,6 +980,60 @@ enum SyscallNumber : u64
     //   rax = 1 on success, 0 on bad handle / copy-from-user fault.
     // Recomposes the desktop after recording.
     SYS_GDI_FILL_RECT_USER = 105,
+
+    // SYS_GDI_CREATE_COMPAT_DC — CreateCompatibleDC. rdi = hdc_src
+    // (ignored in v0). rax = new memory HDC (tagged handle) or 0.
+    SYS_GDI_CREATE_COMPAT_DC = 106,
+
+    // SYS_GDI_CREATE_COMPAT_BITMAP — CreateCompatibleBitmap.
+    // rdi = hdc (ignored), rsi = width, rdx = height.
+    // rax = HBITMAP (tagged) or 0. Pixels are KMalloc'd BGRA8888,
+    // row-major, pitch = width*4.
+    SYS_GDI_CREATE_COMPAT_BITMAP = 107,
+
+    // SYS_GDI_CREATE_SOLID_BRUSH — CreateSolidBrush.
+    // rdi = COLORREF (0x00BBGGRR Win32 layout). rax = HBRUSH.
+    SYS_GDI_CREATE_SOLID_BRUSH = 108,
+
+    // SYS_GDI_GET_STOCK_OBJECT — GetStockObject.
+    // rdi = stock index (0..5 for brushes; others return 0 in v0).
+    // rax = stable HBRUSH handle, or 0 for unsupported index.
+    SYS_GDI_GET_STOCK_OBJECT = 109,
+
+    // SYS_GDI_SELECT_OBJECT — SelectObject.
+    // rdi = HDC, rsi = HGDIOBJ. Returns previously-selected object
+    // in rax. For memory DCs we currently only track the selected
+    // HBITMAP; brush/pen selections are a no-op pass-through (the
+    // handle comes back unchanged).
+    SYS_GDI_SELECT_OBJECT = 110,
+
+    // SYS_GDI_DELETE_DC — DeleteDC.
+    // rdi = HDC. Frees a memory DC; no-op (returns 1) on window DCs
+    // or invalid handles. rax = 1/0.
+    SYS_GDI_DELETE_DC = 111,
+
+    // SYS_GDI_DELETE_OBJECT — DeleteObject.
+    // rdi = HGDIOBJ. Frees a bitmap's pixel buffer or drops a
+    // non-stock brush. Stock brushes are a safe no-op. rax = 1/0.
+    SYS_GDI_DELETE_OBJECT = 112,
+
+    // SYS_GDI_BITBLT_DC — Win32 BitBlt (9-arg). `rdi` points at a
+    // user-stack-resident struct of 9 u64 slots in this order:
+    //   +0x00  HDC   hdcDst
+    //   +0x08  int   x      (low 32 meaningful; upper ignored)
+    //   +0x10  int   y
+    //   +0x18  int   cx
+    //   +0x20  int   cy
+    //   +0x28  HDC   hdcSrc
+    //   +0x30  int   x1
+    //   +0x38  int   y1
+    //   +0x40  DWORD rop    (treated as SRCCOPY for any value in v0)
+    // Effect: the pixels from `hdcSrc`'s selected HBITMAP, subrect
+    // `(x1, y1, cx, cy)`, are blitted into `hdcDst` (a window HWND)
+    // at `(x, y)` as a Blit display-list primitive. Recomposes.
+    // rax = 1 on success, 0 on any validation failure.
+    // Capped at `kWinBlitMaxPx` total pixels per call.
+    SYS_GDI_BITBLT_DC = 113,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit

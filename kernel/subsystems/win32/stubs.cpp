@@ -287,6 +287,17 @@ constexpr u32 kOffWinUpdateWindow = 0xCDF;   // render/drivers — 13 bytes
 constexpr u32 kOffWinGetDC = 0xCEC;          // render/drivers —  4 bytes
 constexpr u32 kOffWinReleaseDC = 0xCF0;      // render/drivers —  6 bytes
 constexpr u32 kOffGdiFillRectUser = 0xCF6;   // render/drivers — 17 bytes
+constexpr u32 kOffGdiTextOutA = 0xD07;       // render/drivers — 31 bytes
+
+// GDI object handle table — real handle-returning stubs.
+constexpr u32 kOffGdiCreateCompatDC = 0xD26;   // render/drivers — 11 bytes
+constexpr u32 kOffGdiCreateCompatBmp = 0xD31;  // render/drivers — 17 bytes
+constexpr u32 kOffGdiCreateSolidBrush = 0xD42; // render/drivers — 11 bytes
+constexpr u32 kOffGdiGetStockObject = 0xD4D;   // render/drivers — 11 bytes
+constexpr u32 kOffGdiSelectObject = 0xD58;     // render/drivers — 14 bytes
+constexpr u32 kOffGdiDeleteDC = 0xD66;         // render/drivers — 11 bytes
+constexpr u32 kOffGdiDeleteObject = 0xD71;     // render/drivers — 11 bytes
+constexpr u32 kOffGdiBitBltDC = 0xD7C;         // render/drivers — 103 bytes
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -3290,10 +3301,123 @@ constexpr u8 kStubsBytes[] = {
     0xB8, 0x69, 0x00, 0x00, 0x00, // 0xCFF mov eax, 105     ; SYS_GDI_FILL_RECT_USER
     0xCD, 0x80,                   // 0xD04 int 0x80
     0xC3,                         // 0xD06 ret
+
+    // --- TextOutA (offset 0xD07, 31 bytes) -----------------------
+    // Win32: BOOL TextOutA(HDC hdc=rcx, int x=edx, int y=r8d,
+    //                      LPCSTR=r9, int cchString=[rsp+0x28]).
+    // 5th arg is on the stack (above the 32 B shadow space + 8 B
+    // return address = [rsp+0x28]).
+    // DuetOS: SYS_GDI_TEXT_OUT (66) — rdi=hwnd, rsi=x, rdx=y,
+    // r10=text ptr, r8=len, r9=colour. We default the colour to
+    // white (0xFFFFFF) because TextOutA doesn't carry one in its
+    // signature (real Windows uses SetTextColor on the DC, which
+    // we don't track yet).
+    0x48, 0x89, 0xCF,             // 0xD07 mov rdi, rcx     ; hwnd
+    0x48, 0x89, 0xD6,             // 0xD0A mov rsi, rdx     ; x
+    0x4C, 0x89, 0xC2,             // 0xD0D mov rdx, r8      ; y
+    0x4D, 0x89, 0xCA,             // 0xD10 mov r10, r9      ; text ptr
+    0x44, 0x8B, 0x44, 0x24, 0x28, // 0xD13 mov r8d, [rsp+40]; cchString
+    0x41, 0xB9, 0xFF, 0xFF, 0xFF, // 0xD18 mov r9d, 0xFFFFFF; default colour
+    0x00,                         //       (imm32 continuation)
+    0xB8, 0x42, 0x00, 0x00, 0x00, // 0xD1E mov eax, 66      ; SYS_GDI_TEXT_OUT
+    0xCD, 0x80,                   // 0xD23 int 0x80
+    0xC3,                         // 0xD25 ret
+
+    // === GDI object handle-table stubs ===========================
+
+    // --- CreateCompatibleDC (offset 0xD26, 11 bytes) -------------
+    0x48, 0x89, 0xCF,             // 0xD26 mov rdi, rcx     ; hdc_src
+    0xB8, 0x6A, 0x00, 0x00, 0x00, // 0xD29 mov eax, 106
+    0xCD, 0x80,                   // 0xD2E int 0x80
+    0xC3,                         // 0xD30 ret
+
+    // --- CreateCompatibleBitmap (offset 0xD31, 17 bytes) ---------
+    0x48, 0x89, 0xCF,             // 0xD31 mov rdi, rcx     ; hdc
+    0x48, 0x89, 0xD6,             // 0xD34 mov rsi, rdx     ; width
+    0x4C, 0x89, 0xC2,             // 0xD37 mov rdx, r8      ; height
+    0xB8, 0x6B, 0x00, 0x00, 0x00, // 0xD3A mov eax, 107
+    0xCD, 0x80,                   // 0xD3F int 0x80
+    0xC3,                         // 0xD41 ret
+
+    // --- CreateSolidBrush (offset 0xD42, 11 bytes) ---------------
+    0x48, 0x89, 0xCF,             // 0xD42 mov rdi, rcx     ; COLORREF
+    0xB8, 0x6C, 0x00, 0x00, 0x00, // 0xD45 mov eax, 108
+    0xCD, 0x80,                   // 0xD4A int 0x80
+    0xC3,                         // 0xD4C ret
+
+    // --- GetStockObject (offset 0xD4D, 11 bytes) -----------------
+    0x48, 0x89, 0xCF,             // 0xD4D mov rdi, rcx     ; index
+    0xB8, 0x6D, 0x00, 0x00, 0x00, // 0xD50 mov eax, 109
+    0xCD, 0x80,                   // 0xD55 int 0x80
+    0xC3,                         // 0xD57 ret
+
+    // --- SelectObject (offset 0xD58, 14 bytes) -------------------
+    0x48, 0x89, 0xCF,             // 0xD58 mov rdi, rcx     ; hdc
+    0x48, 0x89, 0xD6,             // 0xD5B mov rsi, rdx     ; hobj
+    0xB8, 0x6E, 0x00, 0x00, 0x00, // 0xD5E mov eax, 110
+    0xCD, 0x80,                   // 0xD63 int 0x80
+    0xC3,                         // 0xD65 ret
+
+    // --- DeleteDC (offset 0xD66, 11 bytes) -----------------------
+    0x48, 0x89, 0xCF,             // 0xD66 mov rdi, rcx     ; hdc
+    0xB8, 0x6F, 0x00, 0x00, 0x00, // 0xD69 mov eax, 111
+    0xCD, 0x80,                   // 0xD6E int 0x80
+    0xC3,                         // 0xD70 ret
+
+    // --- DeleteObject (offset 0xD71, 11 bytes) -------------------
+    0x48, 0x89, 0xCF,             // 0xD71 mov rdi, rcx     ; hobj
+    0xB8, 0x70, 0x00, 0x00, 0x00, // 0xD74 mov eax, 112
+    0xCD, 0x80,                   // 0xD79 int 0x80
+    0xC3,                         // 0xD7B ret
+
+    // --- BitBlt (offset 0xD7C, 103 bytes) ------------------------
+    // Win32: BOOL BitBlt(HDC hdcDest=rcx, int x=edx, int y=r8d,
+    //                    int cx=r9d, int cy=[rsp+40],
+    //                    HDC hdcSrc=[rsp+48], int x1=[rsp+56],
+    //                    int y1=[rsp+64], DWORD rop=[rsp+72]).
+    // Build a 9 * u64 args struct on our own stack (pre-sub 72
+    // bytes), pass the pointer via rdi into SYS_GDI_BITBLT_DC (113).
+    // Only the low 32 bits of each int slot are meaningful; the
+    // kernel ignores the upper 32.
+    //
+    // After `sub rsp, 72`:
+    //   [rsp+0..71]  = our 9-slot struct
+    //   [rsp+72]     = return address
+    //   [rsp+80..111]= caller's 32 B shadow space
+    //   [rsp+112]    = cy
+    //   [rsp+120]    = hdcSrc
+    //   [rsp+128]    = x1
+    //   [rsp+136]    = y1
+    //   [rsp+144]    = rop
+    0x48, 0x83, 0xEC, 0x48,             // 0xD7C sub rsp, 72
+    0x48, 0x89, 0x0C, 0x24,             // 0xD80 mov [rsp+0], rcx       ; hdcDst
+    0x48, 0x89, 0x54, 0x24, 0x08,       // 0xD84 mov [rsp+8], rdx       ; x
+    0x4C, 0x89, 0x44, 0x24, 0x10,       // 0xD89 mov [rsp+16], r8       ; y
+    0x4C, 0x89, 0x4C, 0x24, 0x18,       // 0xD8E mov [rsp+24], r9       ; cx
+    0x48, 0x8B, 0x84, 0x24, 0x70, 0x00, // 0xD93 mov rax, [rsp+112]     ; cy
+    0x00, 0x00,                         //
+    0x48, 0x89, 0x44, 0x24, 0x20,       // 0xD9B mov [rsp+32], rax
+    0x48, 0x8B, 0x84, 0x24, 0x78, 0x00, // 0xDA0 mov rax, [rsp+120]     ; hdcSrc
+    0x00, 0x00,                         //
+    0x48, 0x89, 0x44, 0x24, 0x28,       // 0xDA8 mov [rsp+40], rax
+    0x48, 0x8B, 0x84, 0x24, 0x80, 0x00, // 0xDAD mov rax, [rsp+128]     ; x1
+    0x00, 0x00,                         //
+    0x48, 0x89, 0x44, 0x24, 0x30,       // 0xDB5 mov [rsp+48], rax
+    0x48, 0x8B, 0x84, 0x24, 0x88, 0x00, // 0xDBA mov rax, [rsp+136]     ; y1
+    0x00, 0x00,                         //
+    0x48, 0x89, 0x44, 0x24, 0x38,       // 0xDC2 mov [rsp+56], rax
+    0x48, 0x8B, 0x84, 0x24, 0x90, 0x00, // 0xDC7 mov rax, [rsp+144]     ; rop
+    0x00, 0x00,                         //
+    0x48, 0x89, 0x44, 0x24, 0x40,       // 0xDCF mov [rsp+64], rax
+    0x48, 0x89, 0xE7,                   // 0xDD4 mov rdi, rsp
+    0xB8, 0x71, 0x00, 0x00, 0x00,       // 0xDD7 mov eax, 113           ; SYS_GDI_BITBLT_DC
+    0xCD, 0x80,                         // 0xDDC int 0x80
+    0x48, 0x83, 0xC4, 0x48,             // 0xDDE add rsp, 72
+    0xC3,                               // 0xDE2 ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0xD07, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0xDE3, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -4815,30 +4939,34 @@ constexpr StubEntry kStubsTable[] = {
     {"user32.dll", "MessageBoxExA", kOffReturnOne},
     {"user32.dll", "MessageBoxExW", kOffReturnOne},
 
-    // gdi32: device contexts — fake non-zero HDCs.
+    // gdi32: device contexts — DC-less entry points still return a
+    // non-zero fake handle; CreateCompatibleDC / DeleteDC go through
+    // the real GDI object table so memory DCs are real.
     {"gdi32.dll", "GetDC", kOffReturnOne},
     {"gdi32.dll", "GetWindowDC", kOffReturnOne},
     {"gdi32.dll", "ReleaseDC", kOffReturnOne},
-    {"gdi32.dll", "CreateCompatibleDC", kOffReturnOne},
-    {"gdi32.dll", "DeleteDC", kOffReturnOne},
+    {"gdi32.dll", "CreateCompatibleDC", kOffGdiCreateCompatDC},
+    {"gdi32.dll", "DeleteDC", kOffGdiDeleteDC},
     {"gdi32.dll", "SaveDC", kOffReturnOne},
     {"gdi32.dll", "RestoreDC", kOffReturnOne},
 
-    // gdi32: object table — SelectObject / DeleteObject round-trip
-    // must work so a PE that creates + destroys a brush/bitmap
-    // doesn't think it leaked.
-    {"gdi32.dll", "SelectObject", kOffReturnOne},
-    {"gdi32.dll", "DeleteObject", kOffReturnOne},
-    {"gdi32.dll", "GetStockObject", kOffReturnOne},
+    // gdi32: object table — real handle registry. SelectObject
+    // tracks the currently-selected HBITMAP per memory DC; stock
+    // + solid brushes live in the brush registry.
+    {"gdi32.dll", "SelectObject", kOffGdiSelectObject},
+    {"gdi32.dll", "DeleteObject", kOffGdiDeleteObject},
+    {"gdi32.dll", "GetStockObject", kOffGdiGetStockObject},
     {"gdi32.dll", "GetObjectA", kOffReturnOne},
     {"gdi32.dll", "GetObjectW", kOffReturnOne},
 
-    // gdi32: bitmap + brush creation.
+    // gdi32: bitmap + brush creation. CompatibleBitmap + SolidBrush
+    // allocate real kernel state; the rest remain dummies until we
+    // need them.
     {"gdi32.dll", "CreateBitmap", kOffReturnOne},
-    {"gdi32.dll", "CreateCompatibleBitmap", kOffReturnOne},
+    {"gdi32.dll", "CreateCompatibleBitmap", kOffGdiCreateCompatBmp},
     {"gdi32.dll", "CreateDIBitmap", kOffReturnOne},
     {"gdi32.dll", "CreateDIBSection", kOffReturnOne},
-    {"gdi32.dll", "CreateSolidBrush", kOffReturnOne},
+    {"gdi32.dll", "CreateSolidBrush", kOffGdiCreateSolidBrush},
     {"gdi32.dll", "CreateBrushIndirect", kOffReturnOne},
     {"gdi32.dll", "CreatePen", kOffReturnOne},
     {"gdi32.dll", "CreateFontA", kOffReturnOne},
@@ -4848,7 +4976,7 @@ constexpr StubEntry kStubsTable[] = {
 
     // gdi32: drawing primitives — all boolean, return TRUE so the
     // caller's "draw succeeded" flag is set.
-    {"gdi32.dll", "BitBlt", kOffReturnOne},
+    {"gdi32.dll", "BitBlt", kOffGdiBitBltDC},
     {"gdi32.dll", "StretchBlt", kOffReturnOne},
     {"gdi32.dll", "MoveToEx", kOffReturnOne},
     {"gdi32.dll", "LineTo", kOffReturnOne},
@@ -4861,7 +4989,7 @@ constexpr StubEntry kStubsTable[] = {
     {"gdi32.dll", "FillRect", kOffGdiFillRectUser},
     {"user32.dll", "FillRect", kOffGdiFillRectUser},
     {"gdi32.dll", "FrameRect", kOffReturnOne},
-    {"gdi32.dll", "TextOutA", kOffReturnOne},
+    {"gdi32.dll", "TextOutA", kOffGdiTextOutA},
     {"gdi32.dll", "TextOutW", kOffReturnOne},
     {"gdi32.dll", "ExtTextOutA", kOffReturnOne},
     {"gdi32.dll", "ExtTextOutW", kOffReturnOne},
