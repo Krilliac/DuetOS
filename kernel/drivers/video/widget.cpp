@@ -362,6 +362,19 @@ bool WindowGetBounds(WindowHandle h, u32* x_out, u32* y_out, u32* w_out, u32* h_
     return true;
 }
 
+void WindowSetColours(WindowHandle h, u32 border_rgb, u32 title_rgb, u32 client_rgb, u32 close_rgb)
+{
+    if (!WindowValid(h))
+    {
+        return;
+    }
+    auto& c = g_windows[h].chrome;
+    c.colour_border = border_rgb;
+    c.colour_title = title_rgb;
+    c.colour_client = client_rgb;
+    c.colour_close_btn = close_rgb;
+}
+
 WindowHandle WindowTopmostAt(u32 x, u32 y)
 {
     // Walk top-down so the first match is the visually-topmost

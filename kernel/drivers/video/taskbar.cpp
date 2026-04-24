@@ -19,6 +19,8 @@ constinit u32 g_h = 0;
 constinit u32 g_bg = 0x00202020;
 constinit u32 g_fg = 0x00FFFFFF;
 constinit u32 g_accent = 0x00406080;
+constinit u32 g_tab_inactive = 0x00303848;
+constinit u32 g_border = 0x00101828;
 constinit bool g_ready = false;
 
 // Cached clock-widget bounds (recomputed every redraw). Exposed
@@ -86,14 +88,25 @@ u32 TextRowY()
 
 } // namespace
 
-void TaskbarInit(u32 y, u32 height, u32 bg_rgb, u32 fg_rgb, u32 accent_rgb)
+void TaskbarInit(u32 y, u32 height, u32 bg_rgb, u32 fg_rgb, u32 accent_rgb, u32 tab_inactive_rgb, u32 border_rgb)
 {
     g_y = y;
     g_h = height;
     g_bg = bg_rgb;
     g_fg = fg_rgb;
     g_accent = accent_rgb;
+    g_tab_inactive = tab_inactive_rgb;
+    g_border = border_rgb;
     g_ready = true;
+}
+
+void TaskbarSetColours(u32 bg_rgb, u32 fg_rgb, u32 accent_rgb, u32 tab_inactive_rgb, u32 border_rgb)
+{
+    g_bg = bg_rgb;
+    g_fg = fg_rgb;
+    g_accent = accent_rgb;
+    g_tab_inactive = tab_inactive_rgb;
+    g_border = border_rgb;
 }
 
 void TaskbarRedraw()
@@ -116,7 +129,7 @@ void TaskbarRedraw()
     // menu via the mouse reader's TaskbarStartBounds hit-test.
     constexpr u32 start_w = 88;
     FramebufferFillRect(4, g_y + 4, start_w, g_h - 8, g_accent);
-    FramebufferDrawRect(4, g_y + 4, start_w, g_h - 8, 0x00101828, 1);
+    FramebufferDrawRect(4, g_y + 4, start_w, g_h - 8, g_border, 1);
     FramebufferDrawString(4 + (start_w - 5 * 8) / 2, text_y, "START", g_fg, g_accent);
 
     // Per-window tabs. Iterate every registered window, filter
@@ -146,9 +159,9 @@ void TaskbarRedraw()
         // Active tab uses the taskbar's accent colour so the
         // focused window reads at a glance — matches the window-
         // chrome active/inactive distinction.
-        const u32 tab_bg = is_active ? g_accent : 0x00303848;
+        const u32 tab_bg = is_active ? g_accent : g_tab_inactive;
         FramebufferFillRect(tab_x, g_y + 4, tab_w, g_h - 8, tab_bg);
-        FramebufferDrawRect(tab_x, g_y + 4, tab_w, g_h - 8, 0x00101828, 1);
+        FramebufferDrawRect(tab_x, g_y + 4, tab_w, g_h - 8, g_border, 1);
         const char* title = WindowTitle(h);
         if (title != nullptr)
         {
@@ -277,7 +290,7 @@ void TaskbarRedraw()
             return;
         const u32 cx = tray_right - tray_cell;
         FramebufferFillRect(cx, tray_y, tray_cell, tray_cell, body_rgb);
-        FramebufferDrawRect(cx, tray_y, tray_cell, tray_cell, 0x00101828, 1);
+        FramebufferDrawRect(cx, tray_y, tray_cell, tray_cell, g_border, 1);
         // 3-char label centred ~ (20 - 8)/2, but we only have
         // 8x8 glyphs so we place one glyph for 1-char labels and
         // stack two glyphs for 2-char ones.

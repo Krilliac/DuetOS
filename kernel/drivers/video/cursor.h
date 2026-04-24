@@ -67,4 +67,10 @@ void CursorHide();
 /// sprite on top. Pairs with CursorHide().
 void CursorShow();
 
+/// Update the fallback desktop-background colour the cursor uses
+/// when its backing store misses (framebuffer read out of bounds).
+/// Called by the theme module after a theme switch so the cursor
+/// repaints over the new desktop fill rather than the old one.
+void CursorSetDesktopBackground(u32 rgb);
+
 } // namespace customos::drivers::video
