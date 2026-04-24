@@ -91,6 +91,7 @@ set +e
     /export:CustomAdd \
     /export:CustomMul \
     /export:CustomVersion \
+    /export:CustomAddFwd=customdll.CustomAdd \
     /out:"${DLL}" \
     "${OBJ}" 2>&1 | grep -v "align specified without /driver"
 LINK_RC=${PIPESTATUS[0]}

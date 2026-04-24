@@ -684,18 +684,90 @@ bool DllNameEqCI(const char* a, const char* b)
     return *a == *b;
 }
 
-// Stage-2 slice 6: try the caller's preloaded DLL array before
+// Parse a PE-style forwarder string ("DllBase.TargetFunc") into
+// its two halves. Returns false on malformed strings (no '.',
+// empty target, ordinal-style `#N` which we don't yet support).
+//
+// On success, writes the pre-'.' substring into `out_dll`
+// (appending ".dll" if not already present — PE forwarders
+// conventionally omit the extension) and sets `*out_func` to
+// point at the character just past the '.'. `out_dll` must have
+// room for at least kMaxForwarderDllLen bytes.
+constexpr u64 kMaxForwarderDllLen = 64;
+bool ParseForwarder(const char* fwd, char* out_dll, const char** out_func)
+{
+    if (fwd == nullptr || out_dll == nullptr || out_func == nullptr)
+        return false;
+    // Locate the '.' separator — first occurrence is the split.
+    const char* dot = nullptr;
+    for (const char* p = fwd; *p; ++p)
+    {
+        if (*p == '.')
+        {
+            dot = p;
+            break;
+        }
+    }
+    if (dot == nullptr || dot == fwd)
+        return false;
+    // Reject ordinal-form forwarders ("Dll.#N") — resolver
+    // would need a by-ordinal pass; deferred until something
+    // real needs it.
+    if (*(dot + 1) == '#' || *(dot + 1) == '\0')
+        return false;
+
+    // Copy the DLL name segment, append ".dll" if caller didn't.
+    const u64 dll_chars = static_cast<u64>(dot - fwd);
+    // Leave room for ".dll\0" (5 bytes) on top of the segment.
+    if (dll_chars + 5 > kMaxForwarderDllLen)
+        return false;
+    for (u64 i = 0; i < dll_chars; ++i)
+        out_dll[i] = fwd[i];
+    out_dll[dll_chars] = '\0';
+
+    // Detect a pre-existing ".dll" / ".DLL" suffix.
+    bool has_dll_suffix = false;
+    if (dll_chars >= 4)
+    {
+        const char* tail = out_dll + (dll_chars - 4);
+        if (AsciiToLower(tail[0]) == '.' && AsciiToLower(tail[1]) == 'd' && AsciiToLower(tail[2]) == 'l' &&
+            AsciiToLower(tail[3]) == 'l')
+            has_dll_suffix = true;
+    }
+    if (!has_dll_suffix)
+    {
+        out_dll[dll_chars + 0] = '.';
+        out_dll[dll_chars + 1] = 'd';
+        out_dll[dll_chars + 2] = 'l';
+        out_dll[dll_chars + 3] = 'l';
+        out_dll[dll_chars + 4] = '\0';
+    }
+
+    *out_func = dot + 1;
+    return true;
+}
+
+// Stage-2 slice 6+8: try the caller's preloaded DLL array before
 // falling through to the flat stubs table. Returns true and
 // writes *out_va on hit; returns false on miss so ResolveImports
 // falls through to Win32StubsLookupKind unchanged.
 //
-// Forwarder exports are deferred: we skip them and fall through,
-// which means a genuine "customdll forwards CustomAdd to
-// otherdll.OtherAdd" scenario currently lands on the catch-all.
-// Once a real stage-2 workload needs forwarder chasing, this
-// helper grows a recursive path.
-bool TryResolveViaPreloadedDlls(const char* dll_name, const char* fn_name, const DllImage* dlls, u64 count, u64* out_va)
+// Forwarder exports (where the EAT RVA points inside the export
+// directory to a "Dll.Target" string rather than to a real code
+// RVA) are chased recursively: we parse the forwarder, look up
+// the target in the same preloaded-DLL array. `depth` bounds the
+// recursion against pathological forwarder cycles (depth ~4 is
+// enough for real-world multi-hop redirects like
+// kernel32→kernelbase→ntdll).
+//
+// Ordinal-form forwarders ("Dll.#N") remain deferred — the
+// current callers don't produce any.
+constexpr u32 kMaxForwarderDepth = 4;
+bool TryResolveViaPreloadedDllsImpl(const char* dll_name, const char* fn_name, const DllImage* dlls, u64 count,
+                                    u32 depth, u64* out_va)
 {
+    if (depth > kMaxForwarderDepth)
+        return false;
     if (dll_name == nullptr || fn_name == nullptr || dlls == nullptr || count == 0 || out_va == nullptr)
         return false;
     for (u64 i = 0; i < count; ++i)
@@ -710,11 +782,42 @@ bool TryResolveViaPreloadedDlls(const char* dll_name, const char* fn_name, const
         if (!PeExportLookupName(img.exports, fn_name, e))
             continue;
         if (e.is_forwarder)
-            continue; // forwarder chasing deferred; fall through to stubs
+        {
+            // Parse the "Dll.Func" string and recurse against
+            // the same preloaded-DLL array.
+            char fwd_dll[kMaxForwarderDllLen];
+            const char* fwd_func = nullptr;
+            if (!ParseForwarder(e.forwarder, fwd_dll, &fwd_func))
+            {
+                arch::SerialWrite("[pe-resolve] forwarder unparseable: \"");
+                arch::SerialWrite(e.forwarder ? e.forwarder : "<null>");
+                arch::SerialWrite("\"\n");
+                continue; // fall through to next DLL match / flat stubs
+            }
+            u64 target_va = 0;
+            if (!TryResolveViaPreloadedDllsImpl(fwd_dll, fwd_func, dlls, count, depth + 1, &target_va))
+                continue; // target unknown; fall through
+            arch::SerialWrite("[pe-resolve] via-dll-fwd ");
+            arch::SerialWrite(dll_name);
+            arch::SerialWrite("!");
+            arch::SerialWrite(fn_name);
+            arch::SerialWrite(" -> ");
+            arch::SerialWrite(e.forwarder);
+            arch::SerialWrite(" -> ");
+            arch::SerialWriteHex(target_va);
+            arch::SerialWrite("\n");
+            *out_va = target_va;
+            return true;
+        }
         *out_va = img.base_va + static_cast<u64>(e.rva);
         return true;
     }
     return false;
+}
+
+bool TryResolveViaPreloadedDlls(const char* dll_name, const char* fn_name, const DllImage* dlls, u64 count, u64* out_va)
+{
+    return TryResolveViaPreloadedDllsImpl(dll_name, fn_name, dlls, count, /*depth=*/0, out_va);
 }
 
 bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, customos::mm::AddressSpace* as,

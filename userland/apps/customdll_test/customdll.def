@@ -12,3 +12,4 @@ EXPORTS
     CustomAdd
     CustomMul
     CustomVersion
+    CustomAddFwd

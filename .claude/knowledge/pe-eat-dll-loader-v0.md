@@ -1,6 +1,6 @@
 # PE EAT parser + DLL loader — stage 2 kickoff
 
-**Type:** Observation · **Status:** Active (stage-2 slices 1-7 landed) · **Last updated:** 2026-04-24
+**Type:** Observation · **Status:** Active (stage-2 slices 1-8 landed) · **Last updated:** 2026-04-24
 
 ## Context
 
@@ -660,6 +660,91 @@ the flat stubs path (`ExitProcess`). No import hits
 `win32_iat_misses[]` table stays empty and no
 `[win32-miss]` log lines appear for this PE.
 
+## Slice 8 — forwarder chasing
+
+Slice 6 detected forwarder exports but skipped them (fell
+through to the flat stubs). Real Windows PEs forward heavily
+(`msvcp140` → `ucrtbase`, `kernel32` → `kernelbase`, `ucrt` →
+`api-ms-win-crt-*`), so resolving forwarders is non-optional
+for a production DLL surface. Slice 8 adds the chase.
+
+### What changed in `TryResolveViaPreloadedDlls`
+
+A new `ParseForwarder(fwd, out_dll, out_func)` helper in the
+pe_loader anon namespace splits a PE forwarder string
+(`"DllBase.TargetFunc"`) into its two halves:
+
+- Locates the first `'.'` — the split point per PE spec.
+- Copies the pre-`.` segment into `out_dll`; appends `".dll"`
+  if the source didn't already carry that suffix (real PEs
+  sometimes do, sometimes don't).
+- Rejects ordinal-form forwarders (`"Dll.#N"`) — deferred
+  until something real needs them. The current customdll-only
+  test pool has no such forwarders.
+
+The resolver becomes `TryResolveViaPreloadedDllsImpl(... depth)`
+and recurses on a forwarder hit with `depth+1`. A compile-time
+ceiling `kMaxForwarderDepth = 4` bounds the chase against
+pathological cycles — 4 is enough for real multi-hop chains
+(kernel32→kernelbase→ntdll is typically 2 hops).
+
+On a successful chase, the boot log now emits:
+
+```
+[pe-resolve] via-dll-fwd customdll.dll!CustomAddFwd \
+    -> customdll.CustomAdd -> 0x10001000
+```
+
+Distinguishing the forwarder path from the direct via-DLL
+path (`via-dll` vs `via-dll-fwd`) makes the chain visible
+for regression diagnosis.
+
+### DLL-side change (`tools/build-customdll.sh`)
+
+One extra `lld-link` flag:
+
+```
+/export:CustomAddFwd=customdll.CustomAdd
+```
+
+`lld-link` emits a fourth export whose EAT slot points back
+inside the Export Directory to the string
+`customdll.CustomAdd`. `llvm-readobj --coff-exports` confirms
+the shape:
+
+```
+Export {
+  Ordinal: 2
+  Name: CustomAddFwd
+  ForwardedTo: customdll.CustomAdd
+}
+```
+
+### Test-PE extension (`customdll_test.exe`)
+
+Imports `CustomAddFwd` via `customdll.def`, calls it with
+`(0x1100, 0x0133)` = `0x1233`. The success check now
+requires all four results (direct + forwarded + mul + ver)
+to match — any regression in either the direct or the
+forwarder path produces `0xBAD0` as the exit code.
+
+### Boot-log signature on success (slice 8)
+
+```
+[pe-resolve] via-dll     customdll.dll!CustomAdd     -> 0x10001000
+[pe-resolve] via-dll-fwd customdll.dll!CustomAddFwd \
+             -> customdll.CustomAdd -> 0x10001000
+[pe-resolve] via-dll     customdll.dll!CustomMul     -> 0x10001010
+[pe-resolve] via-dll     customdll.dll!CustomVersion -> 0x10001020
+...
+[I] sys : exit rc val=0x1234
+```
+
+Both `via-dll` and `via-dll-fwd` paths land on the same
+`0x10001000` — `CustomAddFwd`'s IAT slot ends up with the
+same VA as `CustomAdd`'s. The chase runs exactly once at
+load time; runtime calls are indistinguishable.
+
 ## Boot-time visibility
 
 `PeReport` now appends an `exports:` block to the diagnostic it
@@ -695,6 +780,10 @@ first real DLL embedded in ramfs will light up the full dump:
 6. ~~End-to-end fixture.~~ **Landed in slice 7** —
    `customdll_test.exe` imports CustomAdd/Mul/Version,
    boot log shows `[pe-resolve] via-dll ...`, exits `0x1234`.
+7. ~~Forwarder chasing.~~ **Landed in slice 8** —
+   `ParseForwarder` + bounded recursion in
+   `TryResolveViaPreloadedDlls`. `CustomAddFwd` forwarder
+   exercises the chase end-to-end.
 3. **Recursive import resolution.** Walk the DLL's own Import
    Directory, look up each target DLL in the table (load if
    absent, detect circular dependencies), then patch the DLL's
