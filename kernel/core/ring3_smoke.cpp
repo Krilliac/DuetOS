@@ -29,6 +29,7 @@
 #include "generated_ole32_dll.h"
 #include "generated_oleaut32_dll.h"
 #include "generated_psapi_dll.h"
+#include "generated_reg_fopen_test.h"
 #include "generated_shell32_dll.h"
 #include "generated_shlwapi_dll.h"
 #include "generated_iphlpapi_dll.h"
@@ -2387,6 +2388,10 @@ void StartRing3SmokeTask()
     SpawnPeFile("ring3-customdll-test", fs::generated::kBinCustomDllTestBytes,
                 fs::generated::kBinCustomDllTestBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
                 mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    // Stage-2 slice 34 end-to-end fixture. Exercises the real
+    // registry in advapi32.dll + real fopen/fread in ucrtbase.dll.
+    SpawnPeFile("ring3-reg-fopen-test", fs::generated::kBinRegFopenTestBytes, fs::generated::kBinRegFopenTestBytes_len,
+                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     // Real-world Windows PE diagnostic attempt. Expected to
     // reject (most imports unresolved) — the value is the
     // PeReport log line showing the full import / reloc / TLS

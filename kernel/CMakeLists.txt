@@ -671,6 +671,22 @@ add_custom_command(
 
 list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_CUSTOMDLL_TEST_HEADER}")
 
+# --- Stage-2 slice 34 — real-registry + real-fopen test fixture ---
+set(CUSTOMOS_REG_FOPEN_TEST_SRC "${CMAKE_SOURCE_DIR}/userland/apps/reg_fopen_test/hello.c")
+file(GLOB CUSTOMOS_REG_FOPEN_TEST_DEFS
+    "${CMAKE_SOURCE_DIR}/userland/apps/reg_fopen_test/*.def")
+set(CUSTOMOS_REG_FOPEN_TEST_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_reg_fopen_test.h")
+set(CUSTOMOS_REG_FOPEN_TEST_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-reg-fopen-test.sh")
+add_custom_command(
+    OUTPUT "${CUSTOMOS_REG_FOPEN_TEST_HEADER}"
+    COMMAND "${CUSTOMOS_REG_FOPEN_TEST_SCRIPT}" "${CMAKE_SOURCE_DIR}" "${CUSTOMOS_REG_FOPEN_TEST_HEADER}"
+    DEPENDS "${CUSTOMOS_REG_FOPEN_TEST_SRC}" ${CUSTOMOS_REG_FOPEN_TEST_DEFS}
+            "${CUSTOMOS_REG_FOPEN_TEST_SCRIPT}" "${CUSTOMOS_EMBED_BLOB_SCRIPT}"
+    COMMENT "Compiling + embedding reg_fopen_test.exe (registry + fopen fixture)"
+    VERBATIM
+)
+list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_REG_FOPEN_TEST_HEADER}")
+
 set(CUSTOMOS_KERNEL_LINKER_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/arch/x86_64/linker.ld")
 
 # Shared link flags — applied identically to both stages so the symbol

@@ -697,24 +697,84 @@ __declspec(dllexport) FILE* __acrt_iob_func(unsigned int index)
     }
 }
 
+/* Real fopen: route to SYS_FILE_OPEN (20) which takes rdi =
+ * ASCII path ptr, rsi = path length. Returns a kernel handle
+ * in 0x100..0x10F (Win32 file-handle range) on success, or -1
+ * on miss. Wrap that in a FILE* allocated on the process heap.
+ *
+ * Mode string is parsed for 'r'/'w'/'a' for diagnostic /
+ * read-vs-write disambiguation; v0 only really supports reads
+ * but we still fail a write-mode open on an unknown path the
+ * same way — returns NULL. */
+
+static FILE* alloc_FILE_wrapping(long long handle)
+{
+    /* Heap-allocate the 24-byte FILE struct so fclose can free
+     * it. SYS_HEAP_ALLOC = 11. */
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long) 11), "D"((long long) sizeof(FILE)) : "memory");
+    if (rv == 0)
+        return (FILE*) 0;
+    FILE* f   = (FILE*) rv;
+    f->handle = handle;
+    f->eof    = 0;
+    f->err    = 0;
+    return f;
+}
+
 __declspec(dllexport) FILE* fopen(const char* path, const char* mode)
 {
-    (void) path;
+    if (!path)
+        return (FILE*) 0;
     (void) mode;
-    return (FILE*) 0; /* v0: no on-disk open — NULL */
+    /* Compute length. */
+    long long n = 0;
+    while (path[n])
+        ++n;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long) 20),   /* SYS_FILE_OPEN */
+                       "D"((long long) path), /* rdi = path */
+                       "S"(n)                 /* rsi = length */
+                     : "memory");
+    if (rv < 0x100 || rv >= 0x110)
+        return (FILE*) 0; /* out-of-range = failure */
+    return alloc_FILE_wrapping(rv);
 }
 
 typedef unsigned short _ucrt_wchar_t;
 __declspec(dllexport) FILE* _wfopen(const _ucrt_wchar_t* path, const _ucrt_wchar_t* mode)
 {
-    (void) path;
+    if (!path)
+        return (FILE*) 0;
     (void) mode;
-    return (FILE*) 0;
+    /* UTF-16 -> ASCII strip on stack. */
+    char      ascii[256];
+    long long n = 0;
+    while (n < 255 && path[n])
+    {
+        ascii[n] = (char) (path[n] & 0xFF);
+        ++n;
+    }
+    ascii[n] = 0;
+    return fopen(ascii, (const char*) 0);
 }
 
 __declspec(dllexport) int fclose(FILE* f)
 {
-    (void) f;
+    if (!f)
+        return -1;
+    /* Close kernel handle if this is a real file (not a stdio
+     * sentinel -10/-11/-12). SYS_FILE_CLOSE = 22. */
+    if (f->handle >= 0x100 && f->handle < 0x110)
+    {
+        long long discard;
+        __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long) 22), "D"(f->handle) : "memory");
+    }
+    /* Free the FILE struct back to the heap. SYS_HEAP_FREE = 12. */
+    long long discard2;
+    __asm__ volatile("int $0x80" : "=a"(discard2) : "a"((long long) 12), "D"((long long) f) : "memory");
     return 0;
 }
 
@@ -734,12 +794,32 @@ __declspec(dllexport) size_t fwrite(const void* ptr, size_t sz, size_t nmemb, FI
 
 __declspec(dllexport) size_t fread(void* ptr, size_t sz, size_t nmemb, FILE* f)
 {
-    (void) ptr;
-    (void) sz;
-    (void) nmemb;
-    if (f)
-        f->eof = 1; /* Immediate EOF */
-    return 0;
+    if (!f || !ptr || sz == 0 || nmemb == 0)
+        return 0;
+    /* stdio sentinels can't be read in v0. */
+    if (f->handle < 0x100 || f->handle >= 0x110)
+    {
+        f->eof = 1;
+        return 0;
+    }
+    size_t    total = sz * nmemb;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long) 21),    /* SYS_FILE_READ */
+                       "D"(f->handle),         /* rdi = handle */
+                       "S"((long long) ptr),   /* rsi = buf */
+                       "d"((long long) total)  /* rdx = count */
+                     : "memory");
+    if (rv <= 0)
+    {
+        f->eof = 1;
+        return 0;
+    }
+    /* Partial read = EOF on next call. */
+    if ((size_t) rv < total)
+        f->eof = 1;
+    return (size_t) rv / sz;
 }
 
 __declspec(dllexport) int fflush(FILE* f)
@@ -776,34 +856,78 @@ __declspec(dllexport) int fputc(int c, FILE* f)
     return -1;
 }
 
+/* fgets: read one byte at a time via fread, stop at \n or EOF.
+ * Returns buf on success, NULL on immediate EOF. Consistent
+ * with the C standard: if we hit EOF with no bytes read, NULL;
+ * otherwise buf is returned even if the line has no '\n'. */
 __declspec(dllexport) char* fgets(char* buf, int n, FILE* f)
 {
-    (void) buf;
-    (void) n;
-    if (f)
-        f->eof = 1;
-    return (char*) 0;
+    if (!buf || n <= 1 || !f)
+        return (char*) 0;
+    int i = 0;
+    while (i < n - 1)
+    {
+        char   c;
+        size_t got = fread(&c, 1, 1, f);
+        if (got == 0)
+            break;
+        buf[i++] = c;
+        if (c == '\n')
+            break;
+    }
+    if (i == 0)
+        return (char*) 0;
+    buf[i] = 0;
+    return buf;
 }
 
 __declspec(dllexport) int fgetc(FILE* f)
 {
-    if (f)
-        f->eof = 1;
-    return -1; /* EOF */
+    unsigned char c;
+    size_t        got = fread(&c, 1, 1, f);
+    if (got == 0)
+        return -1; /* EOF */
+    return (int) c;
 }
 
+/* fseek: SYS_FILE_SEEK = 23, rdi=handle, rsi=offset, rdx=whence.
+ * Whence 0/1/2 match SEEK_SET/CUR/END in both worlds.
+ * Returns 0 on success (matches C stdlib contract). */
 __declspec(dllexport) int fseek(FILE* f, long off, int whence)
 {
-    (void) f;
-    (void) off;
-    (void) whence;
-    return -1;
+    if (!f || f->handle < 0x100 || f->handle >= 0x110)
+        return -1;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long) 23),   /* SYS_FILE_SEEK */
+                       "D"(f->handle),
+                       "S"((long long) off),
+                       "d"((long long) whence)
+                     : "memory");
+    if (rv < 0)
+        return -1;
+    /* Seek succeeded -> clear EOF flag. */
+    f->eof = 0;
+    return 0;
 }
 
+/* ftell: use SEEK_CUR with offset=0 to query the current cursor
+ * without moving. Kernel SYS_FILE_SEEK returns the new position
+ * in rax. */
 __declspec(dllexport) long ftell(FILE* f)
 {
-    (void) f;
-    return -1L;
+    if (!f || f->handle < 0x100 || f->handle >= 0x110)
+        return -1L;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long) 23),   /* SYS_FILE_SEEK */
+                       "D"(f->handle),
+                       "S"((long long) 0),    /* offset 0 */
+                       "d"((long long) 1)     /* SEEK_CUR */
+                     : "memory");
+    return rv < 0 ? -1L : (long) rv;
 }
 
 __declspec(dllexport) int feof(FILE* f)
