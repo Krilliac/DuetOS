@@ -817,6 +817,64 @@ enum SyscallNumber : u64
     //         pointer / zero cap). Backs Win32
     //         GetClipboardData(CF_TEXT).
     SYS_WIN_CLIP_GET_TEXT = 84,
+
+    // SYS_WIN_GET_LONG — read a per-window long slot.
+    //   rdi = HWND (biased)
+    //   rsi = slot index (0=WNDPROC, 1=USERDATA, 2/3=extra)
+    //   rax = 64-bit value, 0 on bad handle / index.
+    // Backs Win32 GetWindowLongPtrA / SetWindowLongA / etc.
+    SYS_WIN_GET_LONG = 85,
+
+    // SYS_WIN_SET_LONG — write a per-window long slot.
+    //   rdi = HWND, rsi = index, rdx = value.
+    //   rax = previous value. Backs SetWindowLongPtrA.
+    SYS_WIN_SET_LONG = 86,
+
+    // SYS_WIN_INVALIDATE — mark a window client-dirty.
+    //   rdi = HWND, rsi = bErase (ignored in v1; display-list
+    //         replay always repaints the whole client).
+    //   rax = 1 on success, 0 on bad handle.
+    // Next pump-drain posts WM_PAINT. Backs Win32 InvalidateRect
+    // (with nullptr rect and erase = FALSE).
+    SYS_WIN_INVALIDATE = 87,
+
+    // SYS_WIN_VALIDATE — clear dirty bit without painting.
+    //   rdi = HWND. rax = 1 on success. Backs ValidateRect
+    //   + the implicit validate inside EndPaint.
+    SYS_WIN_VALIDATE = 88,
+
+    // SYS_WIN_GET_ACTIVE — read the currently-active HWND.
+    //   rax = biased HWND of the active window, or 0 if none.
+    // Backs GetActiveWindow / GetForegroundWindow.
+    SYS_WIN_GET_ACTIVE = 89,
+
+    // SYS_WIN_SET_ACTIVE — make `HWND` the active + topmost.
+    //   rdi = HWND. rax = previous active (biased; 0 if none).
+    // Backs SetActiveWindow / SetForegroundWindow.
+    SYS_WIN_SET_ACTIVE = 90,
+
+    // SYS_WIN_GET_METRIC — read a GetSystemMetrics selector.
+    //   rdi = SM_* index (see user32 stub).
+    //   rax = integer metric; 0 for unknown indices. Matches
+    //   Win32 (programs tolerate 0 for unsupported selectors).
+    SYS_WIN_GET_METRIC = 91,
+
+    // SYS_WIN_ENUM — fill an array with biased HWNDs of every
+    // alive window in registration order.
+    //   rdi = user pointer to u64[cap]
+    //   rsi = cap (#entries)
+    //   rax = actual count written (≤ cap).
+    // Backs EnumWindows via a client-side loop that calls the
+    // user callback per-HWND.
+    SYS_WIN_ENUM = 92,
+
+    // SYS_WIN_FIND — find a window by title.
+    //   rdi = user pointer to ASCII title (NUL-terminated)
+    //   rax = biased HWND of first match, or 0. Title compare
+    //   is case-insensitive (Win32 convention). Backs
+    //   FindWindowA / FindWindowW (W variant flattens client-
+    //   side).
+    SYS_WIN_FIND = 93,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit

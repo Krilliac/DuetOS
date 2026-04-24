@@ -159,9 +159,14 @@ struct RegisteredWindow
     WindowMsgRing msgs;
     WinGdiPrim prims[kWinDisplayListDepth];
     u32 prim_count;
+    // Per-window Win32 longs — backs SetWindowLongPtr /
+    // GetWindowLongPtr for GWLP_WNDPROC, GWLP_USERDATA, and
+    // two extras.
+    u64 longs[kWinLongSlots];
     bool alive;
     bool visible;
-    u8 _pad[2];
+    bool dirty; // set by InvalidateRect; cleared by BeginPaint / WindowDrainPaints
+    u8 _pad[1];
 };
 
 constinit RegisteredWindow g_windows[kMaxWindows] = {};
@@ -323,6 +328,7 @@ WindowHandle WindowRegister(const WindowChrome& chrome, const char* title)
     StoreTitle(g_windows[h], title);
     g_windows[h].alive = true;
     g_windows[h].visible = true;
+    g_windows[h].dirty = false;
     g_windows[h].owner_pid = 0;
     g_windows[h].msgs.head = 0;
     g_windows[h].msgs.tail = 0;
@@ -330,6 +336,10 @@ WindowHandle WindowRegister(const WindowChrome& chrome, const char* title)
     g_windows[h].prim_count = 0;
     g_windows[h].content_fn = nullptr;
     g_windows[h].content_cookie = nullptr;
+    for (u32 i = 0; i < kWinLongSlots; ++i)
+    {
+        g_windows[h].longs[i] = 0;
+    }
     g_z_order[g_window_count] = h;
     ++g_window_count;
     // The latest-registered window lands on top of z-order and
@@ -1528,6 +1538,82 @@ void WindowTimerTick()
     {
         WindowMsgWakeAll();
     }
+}
+
+// --- Per-window user-data longs + dirty region --------------------
+
+u64 WindowGetLong(WindowHandle h, u32 index)
+{
+    if (!WindowValid(h) || index >= kWinLongSlots)
+    {
+        return 0;
+    }
+    return g_windows[h].longs[index];
+}
+
+u64 WindowSetLong(WindowHandle h, u32 index, u64 value)
+{
+    if (!WindowValid(h) || index >= kWinLongSlots)
+    {
+        return 0;
+    }
+    const u64 prev = g_windows[h].longs[index];
+    g_windows[h].longs[index] = value;
+    return prev;
+}
+
+void WindowInvalidate(WindowHandle h)
+{
+    if (!WindowValid(h))
+    {
+        return;
+    }
+    g_windows[h].dirty = true;
+}
+
+void WindowValidate(WindowHandle h)
+{
+    if (!WindowValid(h))
+    {
+        return;
+    }
+    g_windows[h].dirty = false;
+}
+
+bool WindowIsDirty(WindowHandle h)
+{
+    return WindowValid(h) && g_windows[h].dirty;
+}
+
+u32 WindowDrainPaints()
+{
+    constexpr u32 kWmPaint = 0x000F;
+    u32 posted = 0;
+    for (u32 i = 0; i < g_window_count; ++i)
+    {
+        if (!g_windows[i].alive || !g_windows[i].dirty)
+            continue;
+        if (g_windows[i].owner_pid == 0)
+        {
+            // Kernel-owned windows don't have PE pumps — clear
+            // without posting so the flag doesn't accumulate
+            // forever (the boot apps paint via content_fn on
+            // every compose).
+            g_windows[i].dirty = false;
+            continue;
+        }
+        // wParam = HDC (0 in v1), lParam = dirty-rect pointer
+        // (0 since whole-client dirty is the only mode). The
+        // BeginPaint path on the user side will produce the HDC.
+        WindowPostMessage(static_cast<WindowHandle>(i), kWmPaint, 0, 0);
+        g_windows[i].dirty = false;
+        ++posted;
+    }
+    if (posted > 0)
+    {
+        WindowMsgWakeAll();
+    }
+    return posted;
 }
 
 void WindowResizeTo(WindowHandle h, u32 w, u32 hgt)

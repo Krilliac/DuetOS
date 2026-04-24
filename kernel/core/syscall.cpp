@@ -1388,6 +1388,33 @@ void SyscallDispatch(arch::TrapFrame* frame)
     case SYS_WIN_CLIP_GET_TEXT:
         subsystems::win32::DoWinClipGetText(frame);
         return;
+    case SYS_WIN_GET_LONG:
+        subsystems::win32::DoWinGetLong(frame);
+        return;
+    case SYS_WIN_SET_LONG:
+        subsystems::win32::DoWinSetLong(frame);
+        return;
+    case SYS_WIN_INVALIDATE:
+        subsystems::win32::DoWinInvalidate(frame);
+        return;
+    case SYS_WIN_VALIDATE:
+        subsystems::win32::DoWinValidate(frame);
+        return;
+    case SYS_WIN_GET_ACTIVE:
+        subsystems::win32::DoWinGetActive(frame);
+        return;
+    case SYS_WIN_SET_ACTIVE:
+        subsystems::win32::DoWinSetActive(frame);
+        return;
+    case SYS_WIN_GET_METRIC:
+        subsystems::win32::DoWinGetMetric(frame);
+        return;
+    case SYS_WIN_ENUM:
+        subsystems::win32::DoWinEnum(frame);
+        return;
+    case SYS_WIN_FIND:
+        subsystems::win32::DoWinFind(frame);
+        return;
 
     case SYS_DLL_PROC_ADDRESS:
     {

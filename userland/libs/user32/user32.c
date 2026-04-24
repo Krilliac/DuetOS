@@ -52,6 +52,19 @@ typedef void* HANDLE;
 #define SYS_WIN_GET_CAPTURE 82
 #define SYS_WIN_CLIP_SET_TEXT 83
 #define SYS_WIN_CLIP_GET_TEXT 84
+#define SYS_WIN_GET_LONG 85
+#define SYS_WIN_SET_LONG 86
+#define SYS_WIN_INVALIDATE 87
+#define SYS_WIN_VALIDATE 88
+#define SYS_WIN_GET_ACTIVE 89
+#define SYS_WIN_SET_ACTIVE 90
+#define SYS_WIN_GET_METRIC 91
+#define SYS_WIN_ENUM 92
+#define SYS_WIN_FIND 93
+
+/* WNDCLASS storage indices for SYS_WIN_SET/GET_LONG. */
+#define GWLP_WNDPROC 0
+#define GWLP_USERDATA 1
 
 /* Selected message IDs the pump + DispatchMessage care about. The
  * kernel doesn't interpret these numbers — it passes them through
@@ -199,20 +212,119 @@ __declspec(dllexport) BOOL PeekMessageW(void* msg, HANDLE h, UINT min, UINT max,
     return PeekMessageA(msg, h, min, max, flags);
 }
 
-/* DispatchMessage delivers the message to the target window's
- * WndProc. v0 has no per-window WndProc table — every Win32
- * program supplies its WndProc via RegisterClass(ExA/W), which we
- * stub. Returning 0 matches the default-processed-message
- * convention callers accept. */
+/* WndProc dispatch — the class table that RegisterClass* fills
+ * in lives here in user32; the kernel stores the per-window
+ * WNDPROC pointer in GWLP_WNDPROC (SYS_WIN_GET_LONG index 0)
+ * so every CreateWindow call copies its class's WNDPROC into
+ * the window's long slot. DispatchMessage pulls the WNDPROC
+ * back out and invokes it with the x64 __stdcall ABI. */
+
+typedef LRESULT(__stdcall* WNDPROC)(HANDLE hwnd, UINT msg, WPARAM w, LPARAM l);
+
+#define USER32_CLASS_CAP 32
+
+struct user32_wndclass
+{
+    char name[64];
+    WNDPROC wndproc;
+    int in_use;
+};
+static struct user32_wndclass s_classes[USER32_CLASS_CAP];
+
+static void user32_strcpy_ascii(char* dst, unsigned cap, const char* src)
+{
+    unsigned i = 0;
+    if (src)
+    {
+        for (; i + 1 < cap && src[i]; ++i)
+            dst[i] = src[i];
+    }
+    dst[i] = '\0';
+}
+static int user32_strieq(const char* a, const char* b, unsigned cap)
+{
+    for (unsigned i = 0; i < cap; ++i)
+    {
+        char ca = a[i], cb = b[i];
+        if (ca >= 'A' && ca <= 'Z')
+            ca = (char)(ca + ('a' - 'A'));
+        if (cb >= 'A' && cb <= 'Z')
+            cb = (char)(cb + ('a' - 'A'));
+        if (ca != cb)
+            return 0;
+        if (ca == 0)
+            return 1;
+    }
+    return 1;
+}
+
+/* Register (or update) a class record. Returns 1 on success. */
+static int user32_class_register(const char* name, WNDPROC proc)
+{
+    if (!name)
+        return 0;
+    for (unsigned i = 0; i < USER32_CLASS_CAP; ++i)
+    {
+        if (s_classes[i].in_use && user32_strieq(s_classes[i].name, name, 64))
+        {
+            s_classes[i].wndproc = proc;
+            return 1;
+        }
+    }
+    for (unsigned i = 0; i < USER32_CLASS_CAP; ++i)
+    {
+        if (!s_classes[i].in_use)
+        {
+            user32_strcpy_ascii(s_classes[i].name, 64, name);
+            s_classes[i].wndproc = proc;
+            s_classes[i].in_use = 1;
+            return 1;
+        }
+    }
+    return 0; /* table full */
+}
+
+static WNDPROC user32_class_lookup(const char* name)
+{
+    if (!name)
+        return 0;
+    for (unsigned i = 0; i < USER32_CLASS_CAP; ++i)
+    {
+        if (s_classes[i].in_use && user32_strieq(s_classes[i].name, name, 64))
+        {
+            return s_classes[i].wndproc;
+        }
+    }
+    return 0;
+}
+
+/* DispatchMessage pulls the WNDPROC from the window's
+ * GWLP_WNDPROC long slot and invokes it. If no WNDPROC is
+ * registered, fall through to DefWindowProcA (returns 0). */
+static LRESULT user32_dispatch_core(const void* msg_any)
+{
+    if (!msg_any)
+        return 0;
+    const struct user32_msg_wire* m = (const struct user32_msg_wire*)msg_any;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_WIN_GET_LONG), "D"((long long)(unsigned long long)m->hwnd),
+                       "S"((long long)GWLP_WNDPROC)
+                     : "memory");
+    WNDPROC proc = (WNDPROC)(unsigned long long)rv;
+    if (!proc)
+        return 0;
+    return proc(m->hwnd, m->message, m->wParam, m->lParam);
+}
+
 __declspec(dllexport) LRESULT DispatchMessageA(const void* msg)
 {
-    (void)msg;
-    return 0;
+    return user32_dispatch_core(msg);
 }
 __declspec(dllexport) LRESULT DispatchMessageW(const void* msg)
 {
-    (void)msg;
-    return 0;
+    return user32_dispatch_core(msg);
 }
 __declspec(dllexport) BOOL TranslateMessage(const void* msg)
 {
@@ -339,32 +451,55 @@ static HANDLE win32_create_window_core(int x, int y, int w, int h, const char* t
     return (HANDLE)(unsigned long long)rv;
 }
 
+/* Install the registered class's WNDPROC into the freshly-
+ * created window's GWLP_WNDPROC slot so DispatchMessage can
+ * recover it. No-op if the class has no registered proc. */
+static void user32_install_wndproc(HANDLE hwnd, const char* class_name)
+{
+    if (!hwnd || !class_name)
+        return;
+    WNDPROC proc = user32_class_lookup(class_name);
+    if (!proc)
+        return;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_WIN_SET_LONG), "D"((long long)(unsigned long long)hwnd),
+                       "S"((long long)GWLP_WNDPROC), "d"((long long)(unsigned long long)proc)
+                     : "memory");
+    (void)rv;
+}
+
 __declspec(dllexport) HANDLE CreateWindowExA(DWORD ex, const char* cls, const char* name, DWORD style, int x, int y,
                                              int w, int h, HANDLE parent, HANDLE menu, HANDLE hInst, void* param)
 {
     (void)ex;
-    (void)cls;
     (void)style;
     (void)parent;
     (void)menu;
     (void)hInst;
     (void)param;
-    return win32_create_window_core(x, y, w, h, name);
+    HANDLE hwnd = win32_create_window_core(x, y, w, h, name);
+    user32_install_wndproc(hwnd, cls);
+    return hwnd;
 }
 
 __declspec(dllexport) HANDLE CreateWindowExW(DWORD ex, const wchar_t16* cls, const wchar_t16* name, DWORD style, int x,
                                              int y, int w, int h, HANDLE parent, HANDLE menu, HANDLE hInst, void* param)
 {
     (void)ex;
-    (void)cls;
     (void)style;
     (void)parent;
     (void)menu;
     (void)hInst;
     (void)param;
     char title[WIN_TITLE_MAX];
+    char class_a[WIN_TITLE_MAX];
     win32_w_to_ascii(name, title, WIN_TITLE_MAX);
-    return win32_create_window_core(x, y, w, h, title);
+    win32_w_to_ascii(cls, class_a, WIN_TITLE_MAX);
+    HANDLE hwnd = win32_create_window_core(x, y, w, h, title);
+    user32_install_wndproc(hwnd, class_a);
+    return hwnd;
 }
 
 __declspec(dllexport) BOOL DestroyWindow(HANDLE h)
@@ -393,14 +528,87 @@ __declspec(dllexport) BOOL ShowWindow(HANDLE h, int cmd)
 }
 __declspec(dllexport) BOOL UpdateWindow(HANDLE h)
 {
+    /* No-op beyond InvalidateRect: the kernel's paint drain
+     * runs right after Invalidate, so by the time the pump
+     * returns, WM_PAINT is already queued. */
     (void)h;
     return 1;
 }
 __declspec(dllexport) BOOL InvalidateRect(HANDLE h, const void* r, BOOL erase)
 {
-    (void)h;
+    (void)r; /* whole-client dirty only in v1 */
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_WIN_INVALIDATE), "D"((long long)(unsigned long long)h), "S"((long long)erase)
+                     : "memory");
+    return rv ? 1 : 0;
+}
+__declspec(dllexport) BOOL ValidateRect(HANDLE h, const void* r)
+{
     (void)r;
-    (void)erase;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_WIN_VALIDATE), "D"((long long)(unsigned long long)h)
+                     : "memory");
+    return rv ? 1 : 0;
+}
+
+/* BeginPaint / EndPaint — PAINTSTRUCT = { HDC hdc; BOOL fErase;
+ * RECT rcPaint; BOOL fRestore; BOOL fIncUpdate; BYTE rgbReserved[32]; }
+ * sizeof ~= 72 on x64. We only write the first three fields; the
+ * rest is left untouched (typical callers don't inspect them). */
+typedef struct
+{
+    HANDLE hdc;
+    BOOL fErase;
+    int left, top, right, bottom;
+    BOOL fRestore;
+    BOOL fIncUpdate;
+    unsigned char rgbReserved[32];
+} PAINTSTRUCT;
+
+__declspec(dllexport) HANDLE BeginPaint(HANDLE hwnd, void* ps)
+{
+    /* GetDC gives an HDC tagged with the HWND, so a subsequent
+     * FillRect/TextOut dispatches correctly. BeginPaint is
+     * expected to return the HDC; cache in the PAINTSTRUCT so
+     * EndPaint can release. */
+    /* Encode HDC_TAG same way gdi32 does; user32 doesn't have
+     * gdi32 symbols, but the encoding is stable ABI. */
+    const unsigned long long GDI_TAG = 0xDC00000000ULL;
+    HANDLE hdc = (HANDLE)((unsigned long long)hwnd | GDI_TAG);
+    if (ps)
+    {
+        PAINTSTRUCT* p = (PAINTSTRUCT*)ps;
+        p->hdc = hdc;
+        p->fErase = 1;
+        /* Invalid rect = whole client in v1. Fill with a best-
+         * effort client rect from SYS_WIN_GET_RECT. */
+        int rect[4] = {0, 0, 0, 0};
+        long long rv;
+        __asm__ volatile("int $0x80"
+                         : "=a"(rv)
+                         : "a"((long long)SYS_WIN_GET_RECT), "D"((long long)(unsigned long long)hwnd),
+                           "S"((long long)1 /* client */), "d"((long long)(unsigned long long)rect)
+                         : "memory");
+        (void)rv;
+        p->left = rect[0];
+        p->top = rect[1];
+        p->right = rect[2];
+        p->bottom = rect[3];
+        p->fRestore = 0;
+        p->fIncUpdate = 0;
+    }
+    /* Clear the dirty bit now — the caller promises to paint. */
+    ValidateRect(hwnd, 0);
+    return hdc;
+}
+__declspec(dllexport) BOOL EndPaint(HANDLE hwnd, const void* ps)
+{
+    (void)hwnd;
+    (void)ps;
     return 1;
 }
 /* SYS_WIN_MOVE flags. Match the kernel-side enum used by
@@ -454,14 +662,32 @@ __declspec(dllexport) BOOL IsWindow(HANDLE h)
 }
 __declspec(dllexport) HANDLE GetActiveWindow(void)
 {
-    return (HANDLE)0;
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)SYS_WIN_GET_ACTIVE) : "memory");
+    return (HANDLE)(unsigned long long)rv;
 }
 __declspec(dllexport) HANDLE GetForegroundWindow(void)
 {
-    return (HANDLE)0;
+    return GetActiveWindow();
+}
+__declspec(dllexport) HANDLE SetActiveWindow(HANDLE h)
+{
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_WIN_SET_ACTIVE), "D"((long long)(unsigned long long)h)
+                     : "memory");
+    return (HANDLE)(unsigned long long)rv;
+}
+__declspec(dllexport) BOOL SetForegroundWindow(HANDLE h)
+{
+    return SetActiveWindow(h) ? 1 : 0;
 }
 __declspec(dllexport) HANDLE GetDesktopWindow(void)
 {
+    /* v1: no true desktop HWND — return biased handle 0 (== 1
+     * in HWND space) as a sentinel the caller can pass into
+     * GetClientRect to fetch the screen dimensions. */
     return (HANDLE)0;
 }
 static BOOL user32_getrect_core(HANDLE h, unsigned selector, void* r)
@@ -524,31 +750,101 @@ __declspec(dllexport) HANDLE GetProcessWindowStation(void)
 
 /* --- Class registration --- */
 typedef unsigned short ATOM;
+
+/* WNDCLASSA layout: {
+ *   UINT style; WNDPROC lpfnWndProc; int cbClsExtra; int cbWndExtra;
+ *   HINSTANCE hInstance; HICON hIcon; HCURSOR hCursor;
+ *   HBRUSH hbrBackground; LPCSTR lpszMenuName; LPCSTR lpszClassName; }
+ * Total sizeof = 40 on MSVC x64 (4 + 8 + 4 + 4 + 8 + 8 + 8 + 8 + 8 + 8 = 68, rounded).
+ * WNDCLASSEXA has cbSize prepended + hIconSm appended. */
+struct user32_wndclass_a
+{
+    UINT style;
+    WNDPROC lpfnWndProc;
+    int cbClsExtra;
+    int cbWndExtra;
+    HANDLE hInstance;
+    HANDLE hIcon;
+    HANDLE hCursor;
+    HANDLE hbrBackground;
+    const char* lpszMenuName;
+    const char* lpszClassName;
+};
+struct user32_wndclassex_a
+{
+    UINT cbSize;
+    UINT style;
+    WNDPROC lpfnWndProc;
+    int cbClsExtra;
+    int cbWndExtra;
+    HANDLE hInstance;
+    HANDLE hIcon;
+    HANDLE hCursor;
+    HANDLE hbrBackground;
+    const char* lpszMenuName;
+    const char* lpszClassName;
+    HANDLE hIconSm;
+};
+
 __declspec(dllexport) ATOM RegisterClassA(const void* wc)
 {
-    (void)wc;
-    return 1;
+    if (!wc)
+        return 0;
+    const struct user32_wndclass_a* c = (const struct user32_wndclass_a*)wc;
+    if (!c->lpszClassName)
+        return 0;
+    return user32_class_register(c->lpszClassName, c->lpfnWndProc) ? 1 : 0;
 }
 __declspec(dllexport) ATOM RegisterClassW(const void* wc)
 {
-    (void)wc;
-    return 1;
+    /* Can't inspect wide names safely without flattening; v1
+     * accepts and stores with a synthetic name so CreateWindowExW
+     * still succeeds (callers typically pair RegisterClassW with
+     * CreateWindowExW using the same pointer). */
+    if (!wc)
+        return 0;
+    const struct user32_wndclass_a* c = (const struct user32_wndclass_a*)wc;
+    char dummy[16];
+    dummy[0] = 'W';
+    dummy[1] = '-';
+    /* Embed low 14 bits of the WNDPROC pointer so different
+     * classes with distinct procs stay distinct. */
+    unsigned long long v = (unsigned long long)c->lpfnWndProc;
+    for (int i = 0; i < 13; ++i)
+    {
+        dummy[2 + i] = (char)('a' + ((v >> (i * 4)) & 0xF));
+    }
+    dummy[15] = '\0';
+    return user32_class_register(dummy, c->lpfnWndProc) ? 1 : 0;
 }
 __declspec(dllexport) ATOM RegisterClassExA(const void* wcex)
 {
-    (void)wcex;
-    return 1;
+    if (!wcex)
+        return 0;
+    const struct user32_wndclassex_a* c = (const struct user32_wndclassex_a*)wcex;
+    if (!c->lpszClassName)
+        return 0;
+    return user32_class_register(c->lpszClassName, c->lpfnWndProc) ? 1 : 0;
 }
 __declspec(dllexport) ATOM RegisterClassExW(const void* wcex)
 {
-    (void)wcex;
-    return 1;
+    return RegisterClassW(wcex); /* shape identical in the v1 bridge */
 }
 __declspec(dllexport) BOOL UnregisterClassA(const char* name, HANDLE hInst)
 {
-    (void)name;
     (void)hInst;
-    return 1;
+    if (!name)
+        return 0;
+    for (unsigned i = 0; i < USER32_CLASS_CAP; ++i)
+    {
+        if (s_classes[i].in_use && user32_strieq(s_classes[i].name, name, 64))
+        {
+            s_classes[i].in_use = 0;
+            s_classes[i].wndproc = 0;
+            return 1;
+        }
+    }
+    return 0;
 }
 __declspec(dllexport) BOOL UnregisterClassW(const wchar_t16* name, HANDLE hInst)
 {
@@ -882,13 +1178,164 @@ __declspec(dllexport) wchar_t16* CharUpperW(wchar_t16* s)
 /* --- System metrics --- */
 __declspec(dllexport) int GetSystemMetrics(int index)
 {
-    /* Return 0 for everything — caller either uses the value
-     * directly (fine, 0 is "sensible default") or checks != 0. */
-    (void)index;
-    return 0;
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)SYS_WIN_GET_METRIC), "D"((long long)index) : "memory");
+    return (int)rv;
 }
 __declspec(dllexport) DWORD GetSysColor(int index)
 {
     (void)index;
     return 0xFFFFFFu; /* white */
+}
+
+/* --- Window longs --- */
+__declspec(dllexport) long long GetWindowLongPtrA(HANDLE h, int index)
+{
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_WIN_GET_LONG), "D"((long long)(unsigned long long)h), "S"((long long)index)
+                     : "memory");
+    return rv;
+}
+__declspec(dllexport) long long GetWindowLongPtrW(HANDLE h, int index)
+{
+    return GetWindowLongPtrA(h, index);
+}
+__declspec(dllexport) long long SetWindowLongPtrA(HANDLE h, int index, long long value)
+{
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_WIN_SET_LONG), "D"((long long)(unsigned long long)h), "S"((long long)index),
+                       "d"(value)
+                     : "memory");
+    return rv;
+}
+__declspec(dllexport) long long SetWindowLongPtrW(HANDLE h, int index, long long value)
+{
+    return SetWindowLongPtrA(h, index, value);
+}
+/* GetWindowLongA / SetWindowLongA: same syscall, truncated to 32
+ * bits on the way in and out. */
+__declspec(dllexport) long GetWindowLongA(HANDLE h, int index)
+{
+    return (long)GetWindowLongPtrA(h, index);
+}
+__declspec(dllexport) long GetWindowLongW(HANDLE h, int index)
+{
+    return (long)GetWindowLongPtrA(h, index);
+}
+__declspec(dllexport) long SetWindowLongA(HANDLE h, int index, long value)
+{
+    return (long)SetWindowLongPtrA(h, index, (long long)value);
+}
+__declspec(dllexport) long SetWindowLongW(HANDLE h, int index, long value)
+{
+    return (long)SetWindowLongPtrA(h, index, (long long)value);
+}
+
+/* --- Enumeration + find --- */
+typedef BOOL(__stdcall* WNDENUMPROC)(HANDLE hwnd, LPARAM lparam);
+
+__declspec(dllexport) BOOL EnumWindows(WNDENUMPROC proc, LPARAM lparam)
+{
+    if (!proc)
+        return 0;
+    unsigned long long buf[32];
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_WIN_ENUM), "D"((long long)(unsigned long long)buf),
+                       "S"((long long)(sizeof(buf) / sizeof(buf[0])))
+                     : "memory");
+    const unsigned n = (unsigned)rv;
+    for (unsigned i = 0; i < n; ++i)
+    {
+        if (!proc((HANDLE)buf[i], lparam))
+            break; /* Win32 EnumWindows stops on FALSE */
+    }
+    return 1;
+}
+
+__declspec(dllexport) HANDLE FindWindowA(const char* cls, const char* name)
+{
+    (void)cls; /* v1: match by title only */
+    if (!name)
+        return (HANDLE)0;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_WIN_FIND), "D"((long long)(unsigned long long)name)
+                     : "memory");
+    return (HANDLE)(unsigned long long)rv;
+}
+__declspec(dllexport) HANDLE FindWindowW(const wchar_t16* cls, const wchar_t16* name)
+{
+    (void)cls;
+    if (!name)
+        return (HANDLE)0;
+    char ascii[WIN_TITLE_MAX];
+    win32_w_to_ascii(name, ascii, WIN_TITLE_MAX);
+    return FindWindowA(0, ascii);
+}
+__declspec(dllexport) HANDLE FindWindowExA(HANDLE parent, HANDLE after, const char* cls, const char* name)
+{
+    (void)parent;
+    (void)after;
+    return FindWindowA(cls, name);
+}
+__declspec(dllexport) HANDLE FindWindowExW(HANDLE parent, HANDLE after, const wchar_t16* cls, const wchar_t16* name)
+{
+    (void)parent;
+    (void)after;
+    return FindWindowW(cls, name);
+}
+
+/* --- Screen <-> client coord conversion --- */
+/* Both compute the window's top-left in screen coords from
+ * SYS_WIN_GET_RECT with selector 0, then add the 2-px border +
+ * 22-px title offset. Client-side translation; no new syscall. */
+typedef struct
+{
+    int x;
+    int y;
+} user32_POINT;
+
+static BOOL user32_convert(HANDLE hwnd, void* pt, int to_client)
+{
+    if (!pt)
+        return 0;
+    int rect[4] = {0, 0, 0, 0};
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_WIN_GET_RECT), "D"((long long)(unsigned long long)hwnd),
+                       "S"((long long)0 /* window rect */), "d"((long long)(unsigned long long)rect)
+                     : "memory");
+    if (!rv)
+        return 0;
+    user32_POINT* p = (user32_POINT*)pt;
+    const int origin_x = rect[0] + 2;
+    const int origin_y = rect[1] + 2 + 22;
+    if (to_client)
+    {
+        p->x -= origin_x;
+        p->y -= origin_y;
+    }
+    else
+    {
+        p->x += origin_x;
+        p->y += origin_y;
+    }
+    return 1;
+}
+
+__declspec(dllexport) BOOL ScreenToClient(HANDLE hwnd, void* pt)
+{
+    return user32_convert(hwnd, pt, 1);
+}
+__declspec(dllexport) BOOL ClientToScreen(HANDLE hwnd, void* pt)
+{
+    return user32_convert(hwnd, pt, 0);
 }

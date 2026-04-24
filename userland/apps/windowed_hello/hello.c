@@ -24,6 +24,7 @@ typedef unsigned int COLORREF;
 typedef int BOOL;
 typedef unsigned long long WPARAM;
 typedef unsigned long long LPARAM;
+typedef unsigned long long LRESULT;
 
 typedef struct
 {
@@ -53,11 +54,36 @@ typedef struct
 
 #define RGB(r, g, b) ((COLORREF)(((unsigned)(r)) | (((unsigned)(g)) << 8) | (((unsigned)(b)) << 16)))
 
+typedef unsigned short ATOM;
+typedef LRESULT(__stdcall* WNDPROC)(HANDLE hwnd, UINT msg, WPARAM w, LPARAM l);
+
+typedef struct
+{
+    UINT style;
+    WNDPROC lpfnWndProc;
+    int cbClsExtra;
+    int cbWndExtra;
+    HANDLE hInstance;
+    HANDLE hIcon;
+    HANDLE hCursor;
+    HANDLE hbrBackground;
+    const char* lpszMenuName;
+    const char* lpszClassName;
+} WNDCLASSA;
+
+__declspec(dllimport) ATOM __stdcall RegisterClassA(const WNDCLASSA* wc);
 __declspec(dllimport) HANDLE __stdcall CreateWindowExA(DWORD dwExStyle, const char* lpClassName,
                                                        const char* lpWindowName, DWORD dwStyle, int x, int y,
                                                        int nWidth, int nHeight, HANDLE hWndParent, HANDLE hMenu,
                                                        HANDLE hInstance, void* lpParam);
 __declspec(dllimport) BOOL __stdcall ShowWindow(HANDLE hWnd, int nCmdShow);
+__declspec(dllimport) BOOL __stdcall InvalidateRect(HANDLE h, const void* r, BOOL erase);
+__declspec(dllimport) int __stdcall GetSystemMetrics(int index);
+__declspec(dllimport) HANDLE __stdcall GetActiveWindow(void);
+__declspec(dllimport) BOOL __stdcall ScreenToClient(HANDLE h, void* pt);
+__declspec(dllimport) long long __stdcall SetWindowLongPtrA(HANDLE h, int index, long long value);
+__declspec(dllimport) long long __stdcall GetWindowLongPtrA(HANDLE h, int index);
+#define GWLP_USERDATA 1
 __declspec(dllimport) int __stdcall MessageBoxA(HANDLE hWnd, const char* lpText, const char* lpCaption, UINT uType);
 __declspec(dllimport) BOOL __stdcall GetMessageA(MSG* msg, HANDLE h, UINT min, UINT max);
 __declspec(dllimport) BOOL __stdcall PeekMessageA(MSG* msg, HANDLE h, UINT min, UINT max, UINT flags);
@@ -122,9 +148,37 @@ static void dbg_uint(const char* prefix, unsigned v)
     OutputDebugStringA(buf);
 }
 
+/* WndProc: routes messages via DispatchMessageA. Counts
+ * WM_TIMERs received — the counter is stored in GWLP_USERDATA
+ * so both the WndProc and main can read it, proving the
+ * SetWindowLongPtr round-trip works. */
+static LRESULT __stdcall duet_wndproc(HANDLE hwnd, UINT msg, WPARAM w, LPARAM l)
+{
+    (void)w;
+    (void)l;
+    if (msg == WM_TIMER)
+    {
+        long long prev = GetWindowLongPtrA(hwnd, GWLP_USERDATA);
+        SetWindowLongPtrA(hwnd, GWLP_USERDATA, prev + 1);
+    }
+    return 0;
+}
+
 void mainCRTStartup(void)
 {
     MessageBoxA(0, "Running on DuetOS!", "Windowed Hello", 0);
+
+    WNDCLASSA wc = {0};
+    wc.lpfnWndProc = duet_wndproc;
+    wc.lpszClassName = "DuetWindow";
+    RegisterClassA(&wc);
+
+    /* Log a GetSystemMetrics call to prove the metric syscall
+     * reaches the framebuffer dims (non-zero). */
+    int screen_w = GetSystemMetrics(0 /* SM_CXSCREEN */);
+    int screen_h = GetSystemMetrics(1 /* SM_CYSCREEN */);
+    dbg_uint("[odbg] windowed_hello: screen w=", (unsigned)screen_w);
+    dbg_uint("[odbg] windowed_hello: screen h=", (unsigned)screen_h);
 
     HANDLE hwnd =
         CreateWindowExA(0, "DuetWindow", "WINDOWED HELLO", WS_OVERLAPPEDWINDOW, 500, 400, 420, 220, 0, 0, 0, 0);
@@ -199,6 +253,25 @@ void mainCRTStartup(void)
         KillTimer(hwnd, 1);
         dbg_uint("[odbg] windowed_hello: pumped ", got_total);
         dbg_uint("[odbg] windowed_hello: timers ", got_timer);
+        /* WndProc counter should match `got_timer` — that's how
+         * we know DispatchMessage actually invoked our proc. */
+        const unsigned dispatched_timers = (unsigned)GetWindowLongPtrA(hwnd, GWLP_USERDATA);
+        dbg_uint("[odbg] windowed_hello: wndproc ", dispatched_timers);
+
+        /* InvalidateRect → WM_PAINT round-trip. */
+        InvalidateRect(hwnd, 0, 1);
+        unsigned painted = 0;
+        for (unsigned iter = 0; iter < 8; ++iter)
+        {
+            if (!PeekMessageA(&msg, 0, 0, 0, PM_REMOVE))
+                break;
+            if (msg.message == 0x000F /* WM_PAINT */)
+            {
+                ++painted;
+            }
+            DispatchMessageA(&msg);
+        }
+        dbg_uint("[odbg] windowed_hello: painted ", painted);
     }
 
     /* Screenshot settle window. */

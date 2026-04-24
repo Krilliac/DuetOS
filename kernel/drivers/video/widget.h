@@ -478,6 +478,54 @@ void WindowTimerReap(u64 pid, WindowHandle hwnd);
 /// under the compositor lock.
 void WindowTimerTick();
 
+// ---------------------------------------------------------------
+// Per-window user-data slot + dirty region for WM_PAINT.
+//
+// Win32 exposes SetWindowLongPtrA(GWLP_USERDATA, ...) /
+// SetWindowLongPtrA(GWLP_WNDPROC, ...). v1 gives each window
+// four 64-bit slots selectable by index — enough for
+// GWLP_USERDATA (index kWinLongUserData), GWLP_WNDPROC
+// (index kWinLongWndProc), and two extras.
+//
+// Dirty region: a single bool per window (whole-client dirty).
+// InvalidateRect sets it; UpdateWindow + the mouse/kbd readers
+// sample it on every pump to post WM_PAINT; EndPaint clears it.
+// A real Win32 invalid-rect tracker is a future upgrade.
+// ---------------------------------------------------------------
+
+constexpr u32 kWinLongSlots = 4;
+constexpr u32 kWinLongWndProc = 0;  // GWLP_WNDPROC
+constexpr u32 kWinLongUserData = 1; // GWLP_USERDATA
+constexpr u32 kWinLongExtra0 = 2;
+constexpr u32 kWinLongExtra1 = 3;
+
+/// Read a 64-bit per-window long. Returns 0 on bad handle or
+/// out-of-range index.
+u64 WindowGetLong(WindowHandle h, u32 index);
+
+/// Write a 64-bit per-window long. Returns the previous value.
+/// No-op for bad handle / index.
+u64 WindowSetLong(WindowHandle h, u32 index, u64 value);
+
+/// Mark a window's client area dirty. Next pump cycle posts
+/// WM_PAINT.
+void WindowInvalidate(WindowHandle h);
+
+/// Clear the dirty bit (BeginPaint's half) without painting.
+void WindowValidate(WindowHandle h);
+
+/// True iff the window's dirty flag is set.
+bool WindowIsDirty(WindowHandle h);
+
+/// Walk every alive window; for each dirty one, post WM_PAINT
+/// (wParam/lParam = 0, lParam's coords are unused in v1 since
+/// we only track whole-client dirty). Then clear the dirty bit
+/// per window (the PE's BeginPaint/EndPaint round-trip is the
+/// canonical ack but a simple queue-side clear also keeps the
+/// message from re-firing every tick). Returns the number of
+/// WM_PAINTs posted.
+u32 WindowDrainPaints();
+
 /// Paint every registered window in z-order (bottom first, top
 /// last) + render the stored title string across each title bar
 /// in the default ink colour. Intended as part of a full-desktop

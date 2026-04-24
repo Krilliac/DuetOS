@@ -68,4 +68,14 @@ void DoWinGetCapture(arch::TrapFrame* frame);
 void DoWinClipSetText(arch::TrapFrame* frame);
 void DoWinClipGetText(arch::TrapFrame* frame);
 
+void DoWinGetLong(arch::TrapFrame* frame);
+void DoWinSetLong(arch::TrapFrame* frame);
+void DoWinInvalidate(arch::TrapFrame* frame);
+void DoWinValidate(arch::TrapFrame* frame);
+void DoWinGetActive(arch::TrapFrame* frame);
+void DoWinSetActive(arch::TrapFrame* frame);
+void DoWinGetMetric(arch::TrapFrame* frame);
+void DoWinEnum(arch::TrapFrame* frame);
+void DoWinFind(arch::TrapFrame* frame);
+
 } // namespace duetos::subsystems::win32

@@ -544,8 +544,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                                 return;
                             }
                         }
-                        duetos::drivers::video::FramebufferDrawChar(r.cx + r.col * 8, r.cy + r.row * 10, c, r.fg,
-                                                                      r.bg);
+                        duetos::drivers::video::FramebufferDrawChar(r.cx + r.col * 8, r.cy + r.row * 10, c, r.fg, r.bg);
                         ++r.col;
                     }
                 });
@@ -663,7 +662,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         constexpr duetos::u32 tb_h = 28;
         const duetos::u32 tb_y = (fb_info.height > tb_h) ? fb_info.height - tb_h : 0;
         duetos::drivers::video::TaskbarInit(tb_y, tb_h, theme0.taskbar_bg, theme0.taskbar_fg, theme0.taskbar_accent,
-                                              theme0.taskbar_tab_inactive, theme0.taskbar_border);
+                                            theme0.taskbar_tab_inactive, theme0.taskbar_border);
     }
 
     // Menu action ids. Ambient MenuContext() carries a target
@@ -1006,8 +1005,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             duetos::drivers::usb::xhci::XhciInit();
             return {};
         };
-        auto xhci_teardown = []() -> duetos::core::Result<void>
-        { return duetos::drivers::usb::xhci::XhciShutdown(); };
+        auto xhci_teardown = []() -> duetos::core::Result<void> { return duetos::drivers::usb::xhci::XhciShutdown(); };
         duetos::core::FaultDomainRegister("drivers/usb/xhci", xhci_init, xhci_teardown);
     }
     duetos::drivers::usb::hid::HidSelfTest();
@@ -1021,8 +1019,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             duetos::drivers::audio::AudioInit();
             return {};
         };
-        auto audio_teardown = []() -> duetos::core::Result<void>
-        { return duetos::drivers::audio::AudioShutdown(); };
+        auto audio_teardown = []() -> duetos::core::Result<void> { return duetos::drivers::audio::AudioShutdown(); };
         duetos::core::FaultDomainRegister("drivers/audio", audio_init, audio_teardown);
     }
 
@@ -1092,8 +1089,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         duetos::u32 len = 0;
         if (duetos::fs::TmpFsRead("boot.log", &bytes, &len))
         {
-            duetos::core::LogWithValue(duetos::core::LogLevel::Info, "core/klog", "/tmp/boot.log size (bytes)",
-                                         len);
+            duetos::core::LogWithValue(duetos::core::LogLevel::Info, "core/klog", "/tmp/boot.log size (bytes)", len);
         }
         else
         {
@@ -1232,7 +1228,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                     duetos::drivers::video::SetDisplayMode(duetos::drivers::video::DisplayMode::Tty);
                     duetos::drivers::video::ConsoleSetOrigin(16, 16);
                     duetos::drivers::video::ConsoleSetColours(duetos::drivers::video::ThemeCurrent().console_fg,
-                                                                0x00000000);
+                                                              0x00000000);
                     duetos::drivers::video::DesktopCompose(0x00000000, nullptr);
                 }
                 else
@@ -1240,7 +1236,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                     duetos::drivers::video::SetDisplayMode(duetos::drivers::video::DisplayMode::Desktop);
                     duetos::drivers::video::ConsoleSetOrigin(16, 400);
                     duetos::drivers::video::ConsoleSetColours(duetos::drivers::video::ThemeCurrent().console_fg,
-                                                                duetos::drivers::video::ThemeCurrent().console_bg);
+                                                              duetos::drivers::video::ThemeCurrent().console_bg);
                     duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
                     duetos::drivers::video::CursorShow();
                 }
@@ -1690,7 +1686,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                         duetos::drivers::video::SetDisplayMode(duetos::drivers::video::DisplayMode::Tty);
                         duetos::drivers::video::ConsoleSetOrigin(16, 16);
                         duetos::drivers::video::ConsoleSetColours(duetos::drivers::video::ThemeCurrent().console_fg,
-                                                                    0x00000000);
+                                                                  0x00000000);
                         break;
                     case 10: // RAISE <ctx>
                         duetos::drivers::video::WindowRaise(ctx);
@@ -1769,12 +1765,12 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                         // flush against the top of the START
                         // button regardless of how many items
                         // are in the set.
-                        duetos::drivers::video::MenuOpen(kStartItems, sizeof(kStartItems) / sizeof(kStartItems[0]),
-                                                           sx, sy, 0);
+                        duetos::drivers::video::MenuOpen(kStartItems, sizeof(kStartItems) / sizeof(kStartItems[0]), sx,
+                                                         sy, 0);
                         const duetos::u32 mh = duetos::drivers::video::MenuPanelHeight();
                         const duetos::u32 my = (sy > mh) ? sy - mh : 0;
-                        duetos::drivers::video::MenuOpen(kStartItems, sizeof(kStartItems) / sizeof(kStartItems[0]),
-                                                           sx, my, 0);
+                        duetos::drivers::video::MenuOpen(kStartItems, sizeof(kStartItems) / sizeof(kStartItems[0]), sx,
+                                                         my, 0);
                         SerialWrite("[ui] menu open\n");
                     }
                     menu_handled = true;
@@ -1919,7 +1915,35 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                     }
                     if (press_edge)
                     {
-                        duetos::drivers::video::WindowPostMessage(pe_hit, kWmLButtonDown, wparam, lparam);
+                        // Double-click detection: two press edges
+                        // within ~500ms (50 ticks @ 100Hz) at the
+                        // same pixel on the same HWND fire
+                        // WM_LBUTTONDBLCLK (0x0203) instead of a
+                        // second WM_LBUTTONDOWN.
+                        constexpr duetos::u32 kWmLButtonDblClk = 0x0203;
+                        constexpr duetos::u64 kDblClickTicks = 50; // 500ms
+                        static duetos::u64 s_last_click_tick = 0;
+                        static duetos::drivers::video::WindowHandle s_last_click_hwnd =
+                            duetos::drivers::video::kWindowInvalid;
+                        static duetos::u32 s_last_click_x = 0;
+                        static duetos::u32 s_last_click_y = 0;
+                        const duetos::u64 now_tick = duetos::arch::TimerTicks();
+                        const bool is_dbl = (s_last_click_hwnd == pe_hit) &&
+                                            (now_tick - s_last_click_tick <= kDblClickTicks) &&
+                                            (s_last_click_x == cx) && (s_last_click_y == cy);
+                        if (is_dbl)
+                        {
+                            duetos::drivers::video::WindowPostMessage(pe_hit, kWmLButtonDblClk, wparam, lparam);
+                            s_last_click_hwnd = duetos::drivers::video::kWindowInvalid;
+                        }
+                        else
+                        {
+                            duetos::drivers::video::WindowPostMessage(pe_hit, kWmLButtonDown, wparam, lparam);
+                            s_last_click_tick = now_tick;
+                            s_last_click_hwnd = pe_hit;
+                            s_last_click_x = cx;
+                            s_last_click_y = cy;
+                        }
                     }
                     if (release_edge)
                     {
@@ -2103,14 +2127,13 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             if (duetos::fs::fat32::Fat32LookupPath(fat_vol, "LINUX.ELF", &elf_entry))
             {
                 static duetos::u8 elf_buf[4096];
-                const duetos::i64 n =
-                    duetos::fs::fat32::Fat32ReadFile(fat_vol, &elf_entry, elf_buf, sizeof(elf_buf));
+                const duetos::i64 n = duetos::fs::fat32::Fat32ReadFile(fat_vol, &elf_entry, elf_buf, sizeof(elf_buf));
                 if (n > 0)
                 {
                     SerialWrite("[boot] Spawning /fat/LINUX.ELF via SpawnElfLinux.\n");
                     duetos::core::SpawnElfLinux("fat-linux-elf", elf_buf, static_cast<duetos::u64>(n),
-                                                  duetos::core::CapSetEmpty(), duetos::fs::RamfsSandboxRoot(),
-                                                  /*frame_budget=*/16, duetos::core::kTickBudgetSandbox);
+                                                duetos::core::CapSetEmpty(), duetos::fs::RamfsSandboxRoot(),
+                                                /*frame_budget=*/16, duetos::core::kTickBudgetSandbox);
                 }
                 else
                 {
