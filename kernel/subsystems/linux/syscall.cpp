@@ -267,6 +267,50 @@ enum : u64
     kSysFaccessat = 269,
     kSysFaccessat2 = 439,
     kSysUtimensat = 280,
+
+    // Batch 67 — common syscalls that previously fell through to
+    // the "unhandled" path. Each gets a Linux-shaped no-op so
+    // a caller probing for "is this kernel a Linux v4+?" doesn't
+    // immediately bail. Real semantics wait for the underlying
+    // subsystem to land:
+    //   pipe / pipe2          : -ENFILE (no pipe machinery)
+    //   wait4 / waitid        : -ECHILD (no fork, no children)
+    //   rt_sigpending         : 0 mask (no signal delivery)
+    //   rt_sigsuspend / sigtimedwait / pselect6 / ppoll : -EINTR
+    //   eventfd / eventfd2    : -ENOSYS
+    //   timerfd_*             : -ENOSYS
+    //   signalfd / signalfd4  : -ENOSYS
+    //   fadvise64             : 0 (no readahead — accept)
+    //   readahead             : 0
+    //   epoll_create*         : -ENOSYS
+    //   inotify_init*         : -ENOSYS
+    //   prctl                 : minimal — PR_GET/SET_NAME accepted
+    kSysPipe = 22,
+    kSysPipe2 = 293,
+    kSysWait4 = 61,
+    kSysWaitid = 247,
+    kSysRtSigpending = 127,
+    kSysRtSigsuspend = 130,
+    kSysRtSigtimedwait = 128,
+    kSysPpoll = 271,
+    kSysPselect6 = 270,
+    kSysEventfd = 284,
+    kSysEventfd2 = 290,
+    kSysTimerfdCreate = 283,
+    kSysTimerfdSettime = 286,
+    kSysTimerfdGettime = 287,
+    kSysSignalfd = 282,
+    kSysSignalfd4 = 289,
+    kSysFadvise64 = 221,
+    kSysReadahead = 187,
+    kSysEpollCreate = 213,
+    kSysEpollCreate1 = 291,
+    kSysEpollCtl = 233,
+    kSysEpollWait = 232,
+    kSysEpollPwait = 281,
+    kSysInotifyInit = 253,
+    kSysInotifyInit1 = 294,
+    kSysPrctl = 157,
 };
 
 // POSIX AT_FDCWD — used by the *at family to mean "resolve
@@ -3371,6 +3415,286 @@ i64 DoUtimensat(i64 dirfd, u64 user_path, u64 user_times, u64 flags)
     return 0;
 }
 
+// ---------------------------------------------------------------
+// Batch 67 — minimal stubs for previously-unwired common syscalls.
+// Each one returns a Linux-shaped error/zero so a caller that
+// probes the syscall sees a clean answer instead of the
+// "unhandled syscall" panic line.
+// ---------------------------------------------------------------
+
+constexpr i64 kENFILE = -23;
+constexpr i64 kECHILD = -10;
+constexpr i64 kEINTR = -4;
+
+// pipe / pipe2: no pipe machinery yet — return -ENFILE so musl's
+// "create my CLOEXEC pipe pair" probe at startup falls back
+// gracefully. -ENOSYS would also work but Linux returns -ENFILE
+// when the system pipe-fd table is exhausted, which is a closer
+// fit for "we don't have any pipes to give you."
+i64 DoPipe(u64 user_fds)
+{
+    (void)user_fds;
+    return kENFILE;
+}
+i64 DoPipe2(u64 user_fds, u64 flags)
+{
+    (void)user_fds;
+    (void)flags;
+    return kENFILE;
+}
+
+// wait4(pid, status, options, rusage) / waitid(idtype, id, info,
+// options, rusage). v0 has no fork → no children → -ECHILD is the
+// canonical "you have no children to wait for" return.
+i64 DoWait4(u64 pid, u64 user_status, u64 options, u64 user_rusage)
+{
+    (void)pid;
+    (void)user_status;
+    (void)options;
+    (void)user_rusage;
+    return kECHILD;
+}
+i64 DoWaitid(u64 idtype, u64 id, u64 user_info, u64 options, u64 user_rusage)
+{
+    (void)idtype;
+    (void)id;
+    (void)user_info;
+    (void)options;
+    (void)user_rusage;
+    return kECHILD;
+}
+
+// rt_sigpending(set, sigsetsize). No signal delivery yet → no
+// pending signals → write a zeroed mask.
+i64 DoRtSigpending(u64 user_set, u64 sigsetsize)
+{
+    (void)sigsetsize;
+    if (user_set == 0)
+        return kEFAULT;
+    const u64 zero = 0;
+    if (!mm::CopyToUser(reinterpret_cast<void*>(user_set), &zero, sizeof(zero)))
+        return kEFAULT;
+    return 0;
+}
+
+// rt_sigsuspend / sigtimedwait. Without signal delivery these
+// would block forever; -EINTR mirrors what a signal-aware caller
+// would see, prompting most libc paths to retry.
+i64 DoRtSigsuspend(u64 user_mask, u64 sigsetsize)
+{
+    (void)user_mask;
+    (void)sigsetsize;
+    return kEINTR;
+}
+i64 DoRtSigtimedwait(u64 user_mask, u64 user_info, u64 user_ts, u64 sigsetsize)
+{
+    (void)user_mask;
+    (void)user_info;
+    (void)user_ts;
+    (void)sigsetsize;
+    return kEINTR;
+}
+
+// ppoll / pselect6: poll/select with a sigmask + timeout. Reuse
+// the existing poll/select handlers; the sigmask is silently
+// ignored (matches what we do for plain rt_sigprocmask anyway).
+i64 DoPpoll(u64 user_fds, u64 nfds, u64 user_ts, u64 user_sigmask, u64 sigsetsize)
+{
+    (void)user_sigmask;
+    (void)sigsetsize;
+    // Convert nanosecond timeout to ms if user_ts is non-null.
+    i64 timeout_ms = -1;
+    if (user_ts != 0)
+    {
+        struct
+        {
+            i64 sec;
+            i64 nsec;
+        } ts;
+        if (!mm::CopyFromUser(&ts, reinterpret_cast<const void*>(user_ts), sizeof(ts)))
+            return kEFAULT;
+        timeout_ms = ts.sec * 1000 + ts.nsec / 1'000'000;
+    }
+    return DoPoll(user_fds, nfds, timeout_ms);
+}
+i64 DoPselect6(u64 nfds, u64 r, u64 w, u64 e, u64 user_ts, u64 user_sigmask)
+{
+    (void)user_sigmask;
+    (void)user_ts;
+    return DoSelect(nfds, r, w, e, 0);
+}
+
+// eventfd / eventfd2 / timerfd_* / signalfd / signalfd4:
+// no eventfd / timerfd / signalfd machinery yet. -ENOSYS so
+// libraries fall back to their pipe-based polyfill.
+i64 DoEventfd(u64 initval, u64 flags)
+{
+    (void)initval;
+    (void)flags;
+    return kENOSYS;
+}
+i64 DoTimerfdCreate(u64 clockid, u64 flags)
+{
+    (void)clockid;
+    (void)flags;
+    return kENOSYS;
+}
+i64 DoTimerfdSettime(u64 fd, u64 flags, u64 user_new, u64 user_old)
+{
+    (void)fd;
+    (void)flags;
+    (void)user_new;
+    (void)user_old;
+    return kENOSYS;
+}
+i64 DoTimerfdGettime(u64 fd, u64 user_curr)
+{
+    (void)fd;
+    (void)user_curr;
+    return kENOSYS;
+}
+i64 DoSignalfd(u64 fd, u64 user_mask, u64 sigsetsize, u64 flags)
+{
+    (void)fd;
+    (void)user_mask;
+    (void)sigsetsize;
+    (void)flags;
+    return kENOSYS;
+}
+
+// fadvise64(fd, offset, len, advice): readahead / dontneed hint.
+// No readahead engine — accept the call as a no-op so callers
+// that fadvise their input files at startup don't bail. Validate
+// the fd so a bogus call sees -EBADF.
+i64 DoFadvise64(u64 fd, u64 offset, u64 len, u64 advice)
+{
+    (void)offset;
+    (void)len;
+    (void)advice;
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr || fd >= 16 || p->linux_fds[fd].state == 0)
+        return kEBADF;
+    return 0;
+}
+
+// readahead(fd, offset, count): explicitly populate the page
+// cache for a file extent. No page cache → no work to do →
+// validate the fd and return 0.
+i64 DoReadahead(u64 fd, u64 offset, u64 count)
+{
+    (void)offset;
+    (void)count;
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr || fd >= 16 || p->linux_fds[fd].state == 0)
+        return kEBADF;
+    return 0;
+}
+
+// epoll / inotify: no event-poll or filesystem-watch machinery.
+// -ENOSYS lets autoconf-y libraries detect the gap and fall back.
+i64 DoEpollCreate(u64 size)
+{
+    (void)size;
+    return kENOSYS;
+}
+i64 DoEpollCreate1(u64 flags)
+{
+    (void)flags;
+    return kENOSYS;
+}
+i64 DoEpollCtl(u64 epfd, u64 op, u64 fd, u64 event)
+{
+    (void)epfd;
+    (void)op;
+    (void)fd;
+    (void)event;
+    return kENOSYS;
+}
+i64 DoEpollWait(u64 epfd, u64 events, u64 maxevents, u64 timeout_ms)
+{
+    (void)epfd;
+    (void)events;
+    (void)maxevents;
+    (void)timeout_ms;
+    return kENOSYS;
+}
+i64 DoEpollPwait(u64 epfd, u64 events, u64 maxevents, u64 timeout_ms, u64 sigmask, u64 sigsetsize)
+{
+    (void)sigmask;
+    (void)sigsetsize;
+    return DoEpollWait(epfd, events, maxevents, timeout_ms);
+}
+i64 DoInotifyInit()
+{
+    return kENOSYS;
+}
+i64 DoInotifyInit1(u64 flags)
+{
+    (void)flags;
+    return kENOSYS;
+}
+
+// prctl(option, arg2, arg3, arg4, arg5): wide multiplexed call.
+// We accept the most common options that musl + bionic exercise
+// at startup and ignore the rest with -EINVAL.
+//   PR_SET_NAME (15) — copy up to 16 bytes into Process::name.
+//                       Accepting silently lets logging tools rename
+//                       their threads (e.g. "musl-thread-pool-1").
+//   PR_GET_NAME (16) — return the stored name.
+//   PR_SET_DUMPABLE (4) / PR_GET_DUMPABLE (3) — accept; we have no
+//                       core-dumps anyway.
+//   PR_SET_PDEATHSIG (1) — accept; no parent-death tracking.
+//   PR_GET_PDEATHSIG (2) — return 0.
+//   PR_SET_SECCOMP (22) — refuse with -EINVAL (no filter engine).
+i64 DoPrctl(u64 option, u64 arg2, u64 arg3, u64 arg4, u64 arg5)
+{
+    (void)arg3;
+    (void)arg4;
+    (void)arg5;
+    constexpr u64 kPrSetPdeathsig = 1;
+    constexpr u64 kPrGetPdeathsig = 2;
+    constexpr u64 kPrGetDumpable = 3;
+    constexpr u64 kPrSetDumpable = 4;
+    constexpr u64 kPrSetName = 15;
+    constexpr u64 kPrGetName = 16;
+    constexpr u64 kPrSetSeccomp = 22;
+    switch (option)
+    {
+    case kPrSetPdeathsig:
+    case kPrSetDumpable:
+        return 0;
+    case kPrGetPdeathsig:
+        return 0;
+    case kPrGetDumpable:
+        return 1; // dumpable by default in Linux too
+    case kPrGetName:
+    {
+        if (arg2 == 0)
+            return kEFAULT;
+        const core::Process* p = core::CurrentProcess();
+        char buf[16];
+        for (u32 i = 0; i < sizeof(buf); ++i)
+            buf[i] = 0;
+        if (p != nullptr && p->name != nullptr)
+        {
+            for (u32 i = 0; i + 1 < sizeof(buf) && p->name[i] != 0; ++i)
+                buf[i] = p->name[i];
+        }
+        if (!mm::CopyToUser(reinterpret_cast<void*>(arg2), buf, sizeof(buf)))
+            return kEFAULT;
+        return 0;
+    }
+    case kPrSetName:
+        // No way to mutate Process::name (it's a const char*) so
+        // we accept silently. Future: add a writable name buffer.
+        return 0;
+    case kPrSetSeccomp:
+        return kEINVAL;
+    default:
+        return kEINVAL;
+    }
+}
+
 } // namespace
 
 // ---------------------------------------------------------------
@@ -3922,6 +4246,82 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
         break;
     case kSysUtimensat:
         rv = DoUtimensat(static_cast<i64>(frame->rdi), frame->rsi, frame->rdx, frame->r10);
+        break;
+
+    // Batch 67 — common stubs.
+    case kSysPipe:
+        rv = DoPipe(frame->rdi);
+        break;
+    case kSysPipe2:
+        rv = DoPipe2(frame->rdi, frame->rsi);
+        break;
+    case kSysWait4:
+        rv = DoWait4(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysWaitid:
+        rv = DoWaitid(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+        break;
+    case kSysRtSigpending:
+        rv = DoRtSigpending(frame->rdi, frame->rsi);
+        break;
+    case kSysRtSigsuspend:
+        rv = DoRtSigsuspend(frame->rdi, frame->rsi);
+        break;
+    case kSysRtSigtimedwait:
+        rv = DoRtSigtimedwait(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysPpoll:
+        rv = DoPpoll(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+        break;
+    case kSysPselect6:
+        rv = DoPselect6(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8, frame->r9);
+        break;
+    case kSysEventfd:
+    case kSysEventfd2:
+        rv = DoEventfd(frame->rdi, frame->rsi);
+        break;
+    case kSysTimerfdCreate:
+        rv = DoTimerfdCreate(frame->rdi, frame->rsi);
+        break;
+    case kSysTimerfdSettime:
+        rv = DoTimerfdSettime(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysTimerfdGettime:
+        rv = DoTimerfdGettime(frame->rdi, frame->rsi);
+        break;
+    case kSysSignalfd:
+    case kSysSignalfd4:
+        rv = DoSignalfd(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysFadvise64:
+        rv = DoFadvise64(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysReadahead:
+        rv = DoReadahead(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysEpollCreate:
+        rv = DoEpollCreate(frame->rdi);
+        break;
+    case kSysEpollCreate1:
+        rv = DoEpollCreate1(frame->rdi);
+        break;
+    case kSysEpollCtl:
+        rv = DoEpollCtl(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysEpollWait:
+        rv = DoEpollWait(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysEpollPwait:
+        rv = DoEpollPwait(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8, frame->r9);
+        break;
+    case kSysInotifyInit:
+        rv = DoInotifyInit();
+        break;
+    case kSysInotifyInit1:
+        rv = DoInotifyInit1(frame->rdi);
+        break;
+    case kSysPrctl:
+        rv = DoPrctl(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
         break;
 
     default:
