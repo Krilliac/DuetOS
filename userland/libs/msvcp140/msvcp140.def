@@ -1,0 +1,51 @@
+; msvcp140.def — export table for CustomOS's msvcp140.dll.
+;
+; Maps 17 mangled C++ std:: names to the six plain-C internal
+; helpers in msvcp140.c. lld-link processes this via /def: and
+; emits each export under the mangled name but targeting the
+; internal symbol.
+;
+; Name = InternalName syntax creates an alias export — the
+; exported name is on the left, the resolution target is on
+; the right. The target must be a symbol that actually exists
+; in the linked object.
+
+LIBRARY msvcp140.dll
+
+EXPORTS
+    ; Throw helpers -> terminate()
+    ?_Xbad_alloc@std@@YAXXZ           = msvcp_terminate
+    ?_Xlength_error@std@@YAXPEBD@Z    = msvcp_terminate
+    ?_Xout_of_range@std@@YAXPEBD@Z    = msvcp_terminate
+
+    ; Err-map helpers -> return 0 / NULL
+    ?_Syserror_map@std@@YAPEBDH@Z     = msvcp_return_zero
+    ?_Winerror_map@std@@YAHH@Z        = msvcp_return_zero
+    ?_Winerror_message@std@@YAKKPEADK@Z = msvcp_return_zero
+    ?uncaught_exception@std@@YA_NXZ   = msvcp_return_zero
+
+    ; basic_streambuf::sputn / sputc
+    ?sputn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QEAA_JPEBD_J@Z = msvcp_sputn
+    ?sputc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QEAAHD@Z       = msvcp_return_zero
+
+    ; basic_ostream helpers -> return *this
+    ?put@?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV12@D@Z    = msvcp_return_this
+    ?flush@?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV12@XZ   = msvcp_return_this
+    ??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@H@Z      = msvcp_return_this
+    ??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@K@Z      = msvcp_return_this
+    ??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@P6AAEAV01@AEAV01@@Z@Z = msvcp_return_this
+
+    ; void-returning stream methods
+    ?_Osfx@?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAXXZ         = msvcp_void_nop
+    ?setstate@?$basic_ios@DU?$char_traits@D@std@@@std@@QEAAXH_N@Z       = msvcp_void_nop
+
+    ; basic_ios::widen
+    ?widen@?$basic_ios@DU?$char_traits@D@std@@@std@@QEBADD@Z            = msvcp_widen
+
+    ; Internal helpers (also exported so they resolve in the alias map)
+    msvcp_terminate
+    msvcp_return_zero
+    msvcp_return_this
+    msvcp_void_nop
+    msvcp_widen
+    msvcp_sputn

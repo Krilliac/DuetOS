@@ -1,0 +1,12 @@
+; userland/apps/customdll_test/customdll2.def
+;
+; Minimal .def for llvm-dlltool so lld-link can resolve the
+; __imp_CustomDouble symbol against a stamped customdll2.lib.
+; At runtime the kernel's stage-2 slice-9 multi-DLL preload
+; places customdll2.dll at 0x10010000 and ResolveImports
+; patches the IAT slot with CustomDouble's real VA.
+
+LIBRARY customdll2.dll
+
+EXPORTS
+    CustomDouble

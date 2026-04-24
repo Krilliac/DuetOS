@@ -8,6 +8,7 @@
 #include "../mm/paging.h"
 #include "../security/guard.h"
 #include "../subsystems/win32/stubs.h"
+#include "pe_exports.h"
 #include "process.h"
 
 namespace customos::core
@@ -659,7 +660,168 @@ bool ApplyRelocations(const u8* file, u64 file_len, const PeHeaders& h, customos
     return true;
 }
 
-bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, customos::mm::AddressSpace* as)
+// ASCII to-lower. Duplicated locally from process.cpp to keep
+// pe_loader.cpp standalone — no cross-translation-unit coupling
+// for a 5-line helper.
+inline char AsciiToLower(char c)
+{
+    return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + ('a' - 'A')) : c;
+}
+
+// Case-insensitive strcmp for DLL names (Win32 convention —
+// lld-link capitalises inconsistently across toolchains).
+bool DllNameEqCI(const char* a, const char* b)
+{
+    if (a == nullptr || b == nullptr)
+        return a == b;
+    while (*a && *b)
+    {
+        if (AsciiToLower(*a) != AsciiToLower(*b))
+            return false;
+        ++a;
+        ++b;
+    }
+    return *a == *b;
+}
+
+// Parse a PE-style forwarder string ("DllBase.TargetFunc") into
+// its two halves. Returns false on malformed strings (no '.',
+// empty target, ordinal-style `#N` which we don't yet support).
+//
+// On success, writes the pre-'.' substring into `out_dll`
+// (appending ".dll" if not already present — PE forwarders
+// conventionally omit the extension) and sets `*out_func` to
+// point at the character just past the '.'. `out_dll` must have
+// room for at least kMaxForwarderDllLen bytes.
+constexpr u64 kMaxForwarderDllLen = 64;
+bool ParseForwarder(const char* fwd, char* out_dll, const char** out_func)
+{
+    if (fwd == nullptr || out_dll == nullptr || out_func == nullptr)
+        return false;
+    // Locate the '.' separator — first occurrence is the split.
+    const char* dot = nullptr;
+    for (const char* p = fwd; *p; ++p)
+    {
+        if (*p == '.')
+        {
+            dot = p;
+            break;
+        }
+    }
+    if (dot == nullptr || dot == fwd)
+        return false;
+    // Reject ordinal-form forwarders ("Dll.#N") — resolver
+    // would need a by-ordinal pass; deferred until something
+    // real needs it.
+    if (*(dot + 1) == '#' || *(dot + 1) == '\0')
+        return false;
+
+    // Copy the DLL name segment, append ".dll" if caller didn't.
+    const u64 dll_chars = static_cast<u64>(dot - fwd);
+    // Leave room for ".dll\0" (5 bytes) on top of the segment.
+    if (dll_chars + 5 > kMaxForwarderDllLen)
+        return false;
+    for (u64 i = 0; i < dll_chars; ++i)
+        out_dll[i] = fwd[i];
+    out_dll[dll_chars] = '\0';
+
+    // Detect a pre-existing ".dll" / ".DLL" suffix.
+    bool has_dll_suffix = false;
+    if (dll_chars >= 4)
+    {
+        const char* tail = out_dll + (dll_chars - 4);
+        if (AsciiToLower(tail[0]) == '.' && AsciiToLower(tail[1]) == 'd' && AsciiToLower(tail[2]) == 'l' &&
+            AsciiToLower(tail[3]) == 'l')
+            has_dll_suffix = true;
+    }
+    if (!has_dll_suffix)
+    {
+        out_dll[dll_chars + 0] = '.';
+        out_dll[dll_chars + 1] = 'd';
+        out_dll[dll_chars + 2] = 'l';
+        out_dll[dll_chars + 3] = 'l';
+        out_dll[dll_chars + 4] = '\0';
+    }
+
+    *out_func = dot + 1;
+    return true;
+}
+
+// Stage-2 slice 6+8: try the caller's preloaded DLL array before
+// falling through to the flat stubs table. Returns true and
+// writes *out_va on hit; returns false on miss so ResolveImports
+// falls through to Win32StubsLookupKind unchanged.
+//
+// Forwarder exports (where the EAT RVA points inside the export
+// directory to a "Dll.Target" string rather than to a real code
+// RVA) are chased recursively: we parse the forwarder, look up
+// the target in the same preloaded-DLL array. `depth` bounds the
+// recursion against pathological forwarder cycles (depth ~4 is
+// enough for real-world multi-hop redirects like
+// kernel32→kernelbase→ntdll).
+//
+// Ordinal-form forwarders ("Dll.#N") remain deferred — the
+// current callers don't produce any.
+constexpr u32 kMaxForwarderDepth = 4;
+bool TryResolveViaPreloadedDllsImpl(const char* dll_name, const char* fn_name, const DllImage* dlls, u64 count,
+                                    u32 depth, u64* out_va)
+{
+    if (depth > kMaxForwarderDepth)
+        return false;
+    if (dll_name == nullptr || fn_name == nullptr || dlls == nullptr || count == 0 || out_va == nullptr)
+        return false;
+    for (u64 i = 0; i < count; ++i)
+    {
+        const DllImage& img = dlls[i];
+        if (!img.has_exports)
+            continue;
+        const char* img_dll_name = PeExportsDllName(img.exports);
+        if (!DllNameEqCI(img_dll_name, dll_name))
+            continue;
+        PeExport e{};
+        if (!PeExportLookupName(img.exports, fn_name, e))
+            continue;
+        if (e.is_forwarder)
+        {
+            // Parse the "Dll.Func" string and recurse against
+            // the same preloaded-DLL array.
+            char fwd_dll[kMaxForwarderDllLen];
+            const char* fwd_func = nullptr;
+            if (!ParseForwarder(e.forwarder, fwd_dll, &fwd_func))
+            {
+                arch::SerialWrite("[pe-resolve] forwarder unparseable: \"");
+                arch::SerialWrite(e.forwarder ? e.forwarder : "<null>");
+                arch::SerialWrite("\"\n");
+                continue; // fall through to next DLL match / flat stubs
+            }
+            u64 target_va = 0;
+            if (!TryResolveViaPreloadedDllsImpl(fwd_dll, fwd_func, dlls, count, depth + 1, &target_va))
+                continue; // target unknown; fall through
+            arch::SerialWrite("[pe-resolve] via-dll-fwd ");
+            arch::SerialWrite(dll_name);
+            arch::SerialWrite("!");
+            arch::SerialWrite(fn_name);
+            arch::SerialWrite(" -> ");
+            arch::SerialWrite(e.forwarder);
+            arch::SerialWrite(" -> ");
+            arch::SerialWriteHex(target_va);
+            arch::SerialWrite("\n");
+            *out_va = target_va;
+            return true;
+        }
+        *out_va = img.base_va + static_cast<u64>(e.rva);
+        return true;
+    }
+    return false;
+}
+
+bool TryResolveViaPreloadedDlls(const char* dll_name, const char* fn_name, const DllImage* dlls, u64 count, u64* out_va)
+{
+    return TryResolveViaPreloadedDllsImpl(dll_name, fn_name, dlls, count, /*depth=*/0, out_va);
+}
+
+bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, customos::mm::AddressSpace* as,
+                    const DllImage* preloaded_dlls, u64 preloaded_dll_count)
 {
     KLOG_TRACE_SCOPE("pe-resolve", "ResolveImports");
     using arch::SerialWrite;
@@ -763,7 +925,26 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, customos::
 
             u64 stub_va = 0;
             bool is_noop_stub = false;
-            if (!win32::Win32StubsLookupKind(dll_name, fn_name, &stub_va, &is_noop_stub))
+            // Stage-2 slice 6: consult the caller's preloaded DLL
+            // table first. On hit, the IAT slot is patched with
+            // the DLL's export VA directly — no trampoline page,
+            // no syscall round-trip — the PE's indirect call
+            // lands straight in the DLL's code. Misses fall
+            // through to Win32StubsLookupKind, preserving all
+            // existing stub-table behaviour.
+            const bool resolved_via_dll =
+                TryResolveViaPreloadedDlls(dll_name, fn_name, preloaded_dlls, preloaded_dll_count, &stub_va);
+            if (resolved_via_dll)
+            {
+                SerialWrite("[pe-resolve] via-dll ");
+                SerialWrite(dll_name);
+                SerialWrite("!");
+                SerialWrite(fn_name);
+                SerialWrite(" -> ");
+                SerialWriteHex(stub_va);
+                SerialWrite("\n");
+            }
+            else if (!win32::Win32StubsLookupKind(dll_name, fn_name, &stub_va, &is_noop_stub))
             {
                 // Unresolved import. Two flavours land here:
                 //   - Functions -> miss-logger thunk (R-X). Called,
@@ -838,7 +1019,7 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, customos::
 } // namespace
 
 PeLoadResult PeLoad(const u8* file, u64 file_len, customos::mm::AddressSpace* as, const char* program_name,
-                    u64 aslr_delta)
+                    u64 aslr_delta, const DllImage* preloaded_dlls, u64 preloaded_dll_count)
 {
     KLOG_TRACE_SCOPE("pe-loader", "PeLoad");
     PeLoadResult r{};
@@ -1079,7 +1260,7 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, customos::mm::AddressSpace* as
         // AS layer enforces W^X and will panic if both are set.
         AddressSpaceMapUserPage(as, win32::kWin32StubsVa, stubs_frame, kPagePresent | kPageUser);
 
-        if (!ResolveImports(file, file_len, h, as))
+        if (!ResolveImports(file, file_len, h, as, preloaded_dlls, preloaded_dll_count))
         {
             SerialWrite("[pe-load] FAIL ResolveImports\n");
             return r;
@@ -1406,6 +1587,24 @@ void PeReport(const u8* file, u64 file_len)
     ReportImports(file, file_len, h);
     ReportRelocs(file, file_len, h);
     ReportTls(file, file_len, h);
+
+    // Stage 2: also dump the Export Address Table if present.
+    // Executables routinely ship with no exports, in which case
+    // PeParseExports returns NoExportDirectory and we stay
+    // silent. DLLs (and some oddball EXEs that re-export) get
+    // the full dump.
+    PeExports exp{};
+    const PeExportStatus pes = PeParseExports(file, file_len, exp);
+    if (pes == PeExportStatus::Ok)
+    {
+        PeExportsReport(exp);
+    }
+    else if (pes != PeExportStatus::NoExportDirectory)
+    {
+        SerialWrite("  exports: <bad> status=");
+        SerialWrite(PeExportStatusName(pes));
+        SerialWrite("\n");
+    }
 }
 
 } // namespace customos::core

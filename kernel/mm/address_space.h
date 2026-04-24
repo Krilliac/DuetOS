@@ -74,13 +74,12 @@ namespace customos::mm
 {
 
 // Max user-page mappings per address space. Bumped from 32 → 128
-// so a real-world PE (e.g. windows-kill.exe: 8 sections, 100
-// imports, 16 heap pages) fits without hitting the region-table
-// cap. 128 × 16 bytes/region = 2 KiB per AS — still cheap, and
-// well under a page so the fixed-size table stays on the AS
-// struct. Workloads beyond this still panic the loader, which is
-// the behaviour we want while the region table is flat.
-inline constexpr u64 kMaxUserVmRegionsPerAs = 128;
+// → 1024 as the stage-2 preload set grew to 29 userland DLLs
+// (each contributing ~3 page regions + PE sections + heap +
+// stack + TEB + stubs). 1024 × 16 bytes/region = 16 KiB per AS
+// (four pages) — still cheap. A region-arena-backed impl can
+// replace this flat table when a workload exceeds 1024.
+inline constexpr u64 kMaxUserVmRegionsPerAs = 1024;
 
 // Default frame budgets for the two canonical profiles. A new AS is
 // created with one of these (or a caller-supplied value) and

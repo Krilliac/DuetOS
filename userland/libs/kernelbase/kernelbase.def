@@ -1,0 +1,51 @@
+; kernelbase.def — pure forwarder DLL. Every entry forwards
+; to kernel32.dll; the slice-8 chaser in pe_loader.cpp
+; recurses through these at IAT-patch time.
+
+LIBRARY kernelbase.dll
+
+EXPORTS
+    CloseHandle                = kernel32.CloseHandle
+    CreateEventW               = kernel32.CreateEventW
+    CreateFileW                = kernel32.CreateFileW
+    CreateMutexW               = kernel32.CreateMutexW
+    ExitProcess                = kernel32.ExitProcess
+    GetCommandLineA            = kernel32.GetCommandLineA
+    GetCommandLineW            = kernel32.GetCommandLineW
+    GetCurrentProcess          = kernel32.GetCurrentProcess
+    GetCurrentProcessId        = kernel32.GetCurrentProcessId
+    GetCurrentThreadId         = kernel32.GetCurrentThreadId
+    GetLastError               = kernel32.GetLastError
+    GetModuleFileNameW         = kernel32.GetModuleFileNameW
+    GetModuleHandleW           = kernel32.GetModuleHandleW
+    GetProcessHeap             = kernel32.GetProcessHeap
+    GetStdHandle               = kernel32.GetStdHandle
+    GetVersionExW              = kernel32.GetVersionExW
+    HeapAlloc                  = kernel32.HeapAlloc
+    HeapFree                   = kernel32.HeapFree
+    InterlockedCompareExchange = kernel32.InterlockedCompareExchange
+    InterlockedDecrement       = kernel32.InterlockedDecrement
+    InterlockedExchange        = kernel32.InterlockedExchange
+    InterlockedIncrement       = kernel32.InterlockedIncrement
+    IsWow64Process             = kernel32.IsWow64Process
+    MultiByteToWideChar        = kernel32.MultiByteToWideChar
+    ReadFile                   = kernel32.ReadFile
+    ReleaseMutex               = kernel32.ReleaseMutex
+    ResetEvent                 = kernel32.ResetEvent
+    SetEvent                   = kernel32.SetEvent
+    SetLastError               = kernel32.SetLastError
+    Sleep                      = kernel32.Sleep
+    SwitchToThread             = kernel32.SwitchToThread
+    TlsAlloc                   = kernel32.TlsAlloc
+    TlsFree                    = kernel32.TlsFree
+    TlsGetValue                = kernel32.TlsGetValue
+    TlsSetValue                = kernel32.TlsSetValue
+    VirtualAlloc               = kernel32.VirtualAlloc
+    VirtualFree                = kernel32.VirtualFree
+    VirtualProtect             = kernel32.VirtualProtect
+    WaitForSingleObject        = kernel32.WaitForSingleObject
+    WaitForSingleObjectEx      = kernel32.WaitForSingleObjectEx
+    WideCharToMultiByte        = kernel32.WideCharToMultiByte
+    WriteFile                  = kernel32.WriteFile
+    lstrcmpW                   = kernel32.lstrcmpW
+    lstrlenW                   = kernel32.lstrlenW

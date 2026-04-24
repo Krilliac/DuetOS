@@ -1,0 +1,7 @@
+LIBRARY ucrtbase.dll
+
+EXPORTS
+    fopen
+    fread
+    fclose
+    printf

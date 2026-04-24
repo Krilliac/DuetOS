@@ -33,6 +33,9 @@ set(CUSTOMOS_KERNEL_SHARED_SOURCES
     core/recovery.cpp
     core/elf_loader.cpp
     core/pe_loader.cpp
+    core/pe_exports.cpp
+    core/dll_loader.cpp
+    core/dll_loader_selftest.cpp
     core/random.cpp
     core/result.cpp
     core/ring3_smoke.cpp
@@ -313,6 +316,376 @@ add_custom_command(
 )
 
 list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_SYSCALL_STRESS_HEADER}")
+
+# ----------------------------------------------------------------------------
+# Test fixture for the stage-2 EAT parser + DLL loader: a tiny
+# freestanding Windows DLL with three exported C functions
+# (CustomAdd, CustomMul, CustomVersion). Built by clang +
+# lld-link /dll /noentry, no CRT, no imports. The kernel self-
+# test in kernel_main (DllLoaderSelfTest) parses the embedded
+# bytes via PeParseExports and DllLoad to confirm name + ordinal
+# lookups return the expected RVAs.
+# ----------------------------------------------------------------------------
+set(CUSTOMOS_CUSTOMDLL_SRC "${CMAKE_SOURCE_DIR}/userland/libs/customdll/customdll.c")
+set(CUSTOMOS_CUSTOMDLL_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_customdll.h")
+set(CUSTOMOS_CUSTOMDLL_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-customdll.sh")
+
+add_custom_command(
+    OUTPUT "${CUSTOMOS_CUSTOMDLL_HEADER}"
+    COMMAND "${CUSTOMOS_CUSTOMDLL_SCRIPT}"
+            "${CMAKE_SOURCE_DIR}"
+            "${CUSTOMOS_CUSTOMDLL_HEADER}"
+    DEPENDS
+        "${CUSTOMOS_CUSTOMDLL_SRC}"
+        "${CUSTOMOS_CUSTOMDLL_SCRIPT}"
+        "${CUSTOMOS_EMBED_BLOB_SCRIPT}"
+    COMMENT "Compiling + embedding customdll.dll (EAT parser fixture)"
+    VERBATIM
+)
+
+list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_CUSTOMDLL_HEADER}")
+
+# ----------------------------------------------------------------------------
+# Second test DLL for the stage-2 slice 9 multi-DLL preload path.
+# Exports CustomDouble(int) -> int at load base 0x10010000.
+# Deliberately disjoint exports from customdll.dll so a call to
+# CustomDouble HAS to reach the second entry in the preload
+# array — proves the resolver walks past the first DLL on miss.
+# ----------------------------------------------------------------------------
+set(CUSTOMOS_CUSTOMDLL2_SRC "${CMAKE_SOURCE_DIR}/userland/libs/customdll2/customdll2.c")
+set(CUSTOMOS_CUSTOMDLL2_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_customdll2.h")
+set(CUSTOMOS_CUSTOMDLL2_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-customdll2.sh")
+
+add_custom_command(
+    OUTPUT "${CUSTOMOS_CUSTOMDLL2_HEADER}"
+    COMMAND "${CUSTOMOS_CUSTOMDLL2_SCRIPT}"
+            "${CMAKE_SOURCE_DIR}"
+            "${CUSTOMOS_CUSTOMDLL2_HEADER}"
+    DEPENDS
+        "${CUSTOMOS_CUSTOMDLL2_SRC}"
+        "${CUSTOMOS_CUSTOMDLL2_SCRIPT}"
+        "${CUSTOMOS_EMBED_BLOB_SCRIPT}"
+    COMMENT "Compiling + embedding customdll2.dll (multi-DLL preload fixture)"
+    VERBATIM
+)
+
+list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_CUSTOMDLL2_HEADER}")
+
+# ----------------------------------------------------------------------------
+# Userland kernel32.dll — stage-2 slice 10 kicks off the
+# retirement of flat-stubs-page entries into real userland
+# code. First export: GetCurrentProcessId. Future slices
+# extend kernel32.c with more entry points; every addition
+# retires the matching stub (which stays compiled as a
+# fallback but becomes unreachable via slice-6's via-DLL
+# priority).
+# ----------------------------------------------------------------------------
+set(CUSTOMOS_KERNEL32_SRC "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/kernel32.c")
+set(CUSTOMOS_KERNEL32_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_kernel32_dll.h")
+set(CUSTOMOS_KERNEL32_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-kernel32-dll.sh")
+
+add_custom_command(
+    OUTPUT "${CUSTOMOS_KERNEL32_HEADER}"
+    COMMAND "${CUSTOMOS_KERNEL32_SCRIPT}"
+            "${CMAKE_SOURCE_DIR}"
+            "${CUSTOMOS_KERNEL32_HEADER}"
+    DEPENDS
+        "${CUSTOMOS_KERNEL32_SRC}"
+        "${CUSTOMOS_KERNEL32_SCRIPT}"
+        "${CUSTOMOS_EMBED_BLOB_SCRIPT}"
+    COMMENT "Compiling + embedding kernel32.dll (first stub retirement)"
+    VERBATIM
+)
+
+list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_KERNEL32_HEADER}")
+
+# ----------------------------------------------------------------------------
+# Userland vcruntime140.dll — stage-2 slice 13. Retires the
+# batch-5 memset/memcpy/memmove flat stubs. Every MSVC-built
+# PE calls these routinely (struct copy / zero-init / CRT
+# startup), so the via-DLL path fires heavily.
+# ----------------------------------------------------------------------------
+set(CUSTOMOS_VCRUNTIME140_SRC "${CMAKE_SOURCE_DIR}/userland/libs/vcruntime140/vcruntime140.c")
+set(CUSTOMOS_VCRUNTIME140_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_vcruntime140_dll.h")
+set(CUSTOMOS_VCRUNTIME140_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-vcruntime140-dll.sh")
+
+add_custom_command(
+    OUTPUT "${CUSTOMOS_VCRUNTIME140_HEADER}"
+    COMMAND "${CUSTOMOS_VCRUNTIME140_SCRIPT}"
+            "${CMAKE_SOURCE_DIR}"
+            "${CUSTOMOS_VCRUNTIME140_HEADER}"
+    DEPENDS
+        "${CUSTOMOS_VCRUNTIME140_SRC}"
+        "${CUSTOMOS_VCRUNTIME140_SCRIPT}"
+        "${CUSTOMOS_EMBED_BLOB_SCRIPT}"
+    COMMENT "Compiling + embedding vcruntime140.dll (memset/memcpy/memmove retirement)"
+    VERBATIM
+)
+
+list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_VCRUNTIME140_HEADER}")
+
+# ----------------------------------------------------------------------------
+# Userland msvcrt.dll — stage-2 slice 14. Retires the string
+# intrinsics (strlen / strcmp / strcpy / strchr + wide
+# variants) from the flat stubs.
+# ----------------------------------------------------------------------------
+set(CUSTOMOS_MSVCRT_SRC "${CMAKE_SOURCE_DIR}/userland/libs/msvcrt/msvcrt.c")
+set(CUSTOMOS_MSVCRT_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_msvcrt_dll.h")
+set(CUSTOMOS_MSVCRT_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-msvcrt-dll.sh")
+
+add_custom_command(
+    OUTPUT "${CUSTOMOS_MSVCRT_HEADER}"
+    COMMAND "${CUSTOMOS_MSVCRT_SCRIPT}"
+            "${CMAKE_SOURCE_DIR}"
+            "${CUSTOMOS_MSVCRT_HEADER}"
+    DEPENDS
+        "${CUSTOMOS_MSVCRT_SRC}"
+        "${CUSTOMOS_MSVCRT_SCRIPT}"
+        "${CUSTOMOS_EMBED_BLOB_SCRIPT}"
+    COMMENT "Compiling + embedding msvcrt.dll (string intrinsics retirement)"
+    VERBATIM
+)
+
+list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_MSVCRT_HEADER}")
+
+# ----------------------------------------------------------------------------
+# Userland ntdll.dll — stage-2 slice 24. Retires the batch-42+
+# Nt* / Zw* / Rtl* / Ldr* / __chkstk surface. 108 exports
+# total (Zw* aliases emitted as same-DLL forwarders).
+# ----------------------------------------------------------------------------
+set(CUSTOMOS_NTDLL_SRC "${CMAKE_SOURCE_DIR}/userland/libs/ntdll/ntdll.c")
+set(CUSTOMOS_NTDLL_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_ntdll_dll.h")
+set(CUSTOMOS_NTDLL_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-ntdll-dll.sh")
+
+add_custom_command(
+    OUTPUT "${CUSTOMOS_NTDLL_HEADER}"
+    COMMAND "${CUSTOMOS_NTDLL_SCRIPT}"
+            "${CMAKE_SOURCE_DIR}"
+            "${CUSTOMOS_NTDLL_HEADER}"
+    DEPENDS
+        "${CUSTOMOS_NTDLL_SRC}"
+        "${CUSTOMOS_NTDLL_SCRIPT}"
+        "${CUSTOMOS_EMBED_BLOB_SCRIPT}"
+    COMMENT "Compiling + embedding ntdll.dll (Nt* / Zw* / Rtl* / Ldr* retirement)"
+    VERBATIM
+)
+
+list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_NTDLL_HEADER}")
+
+# ----------------------------------------------------------------------------
+# Userland dbghelp.dll — stage-2 slice 25. 11 Sym* / StackWalk
+# / MiniDumpWriteDump no-ops; callers always check return.
+# ----------------------------------------------------------------------------
+set(CUSTOMOS_DBGHELP_SRC "${CMAKE_SOURCE_DIR}/userland/libs/dbghelp/dbghelp.c")
+set(CUSTOMOS_DBGHELP_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_dbghelp_dll.h")
+set(CUSTOMOS_DBGHELP_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-dbghelp-dll.sh")
+
+add_custom_command(
+    OUTPUT "${CUSTOMOS_DBGHELP_HEADER}"
+    COMMAND "${CUSTOMOS_DBGHELP_SCRIPT}"
+            "${CMAKE_SOURCE_DIR}"
+            "${CUSTOMOS_DBGHELP_HEADER}"
+    DEPENDS
+        "${CUSTOMOS_DBGHELP_SRC}"
+        "${CUSTOMOS_DBGHELP_SCRIPT}"
+        "${CUSTOMOS_EMBED_BLOB_SCRIPT}"
+    COMMENT "Compiling + embedding dbghelp.dll (Sym* no-ops)"
+    VERBATIM
+)
+
+list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_DBGHELP_HEADER}")
+
+# ----------------------------------------------------------------------------
+# Userland msvcp140.dll — stage-2 slice 26. 17 mangled C++
+# std:: names (throw helpers + ostream + iostate) via .def.
+# ----------------------------------------------------------------------------
+set(CUSTOMOS_MSVCP140_SRC "${CMAKE_SOURCE_DIR}/userland/libs/msvcp140/msvcp140.c")
+set(CUSTOMOS_MSVCP140_DEF "${CMAKE_SOURCE_DIR}/userland/libs/msvcp140/msvcp140.def")
+set(CUSTOMOS_MSVCP140_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_msvcp140_dll.h")
+set(CUSTOMOS_MSVCP140_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-msvcp140-dll.sh")
+
+add_custom_command(
+    OUTPUT "${CUSTOMOS_MSVCP140_HEADER}"
+    COMMAND "${CUSTOMOS_MSVCP140_SCRIPT}"
+            "${CMAKE_SOURCE_DIR}"
+            "${CUSTOMOS_MSVCP140_HEADER}"
+    DEPENDS
+        "${CUSTOMOS_MSVCP140_SRC}"
+        "${CUSTOMOS_MSVCP140_DEF}"
+        "${CUSTOMOS_MSVCP140_SCRIPT}"
+        "${CUSTOMOS_EMBED_BLOB_SCRIPT}"
+    COMMENT "Compiling + embedding msvcp140.dll (C++ std throw + ostream helpers)"
+    VERBATIM
+)
+
+list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_MSVCP140_HEADER}")
+
+# ----------------------------------------------------------------------------
+# Userland kernelbase.dll — stage-2 slice 27. Forwarder-only
+# DLL: every export cross-forwards to kernel32.dll via the
+# slice-8 chaser in the kernel loader.
+# ----------------------------------------------------------------------------
+set(CUSTOMOS_KERNELBASE_SRC "${CMAKE_SOURCE_DIR}/userland/libs/kernelbase/kernelbase.c")
+set(CUSTOMOS_KERNELBASE_DEF "${CMAKE_SOURCE_DIR}/userland/libs/kernelbase/kernelbase.def")
+set(CUSTOMOS_KERNELBASE_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_kernelbase_dll.h")
+set(CUSTOMOS_KERNELBASE_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-kernelbase-dll.sh")
+
+add_custom_command(
+    OUTPUT "${CUSTOMOS_KERNELBASE_HEADER}"
+    COMMAND "${CUSTOMOS_KERNELBASE_SCRIPT}" "${CMAKE_SOURCE_DIR}" "${CUSTOMOS_KERNELBASE_HEADER}"
+    DEPENDS "${CUSTOMOS_KERNELBASE_SRC}" "${CUSTOMOS_KERNELBASE_DEF}" "${CUSTOMOS_KERNELBASE_SCRIPT}" "${CUSTOMOS_EMBED_BLOB_SCRIPT}"
+    COMMENT "Compiling + embedding kernelbase.dll (forwarders -> kernel32)"
+    VERBATIM
+)
+
+list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_KERNELBASE_HEADER}")
+
+# ----------------------------------------------------------------------------
+# Userland advapi32.dll — stage-2 slice 27. 25 exports: Reg*
+# (all return "not found"), token/privilege (pretend success),
+# GetUserName* (constant), SystemFunction036 (deterministic).
+# ----------------------------------------------------------------------------
+set(CUSTOMOS_ADVAPI32_SRC "${CMAKE_SOURCE_DIR}/userland/libs/advapi32/advapi32.c")
+set(CUSTOMOS_ADVAPI32_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_advapi32_dll.h")
+set(CUSTOMOS_ADVAPI32_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-advapi32-dll.sh")
+
+add_custom_command(
+    OUTPUT "${CUSTOMOS_ADVAPI32_HEADER}"
+    COMMAND "${CUSTOMOS_ADVAPI32_SCRIPT}" "${CMAKE_SOURCE_DIR}" "${CUSTOMOS_ADVAPI32_HEADER}"
+    DEPENDS "${CUSTOMOS_ADVAPI32_SRC}" "${CUSTOMOS_ADVAPI32_SCRIPT}" "${CUSTOMOS_EMBED_BLOB_SCRIPT}"
+    COMMENT "Compiling + embedding advapi32.dll (Reg* / token / GetUserName / RtlGenRandom)"
+    VERBATIM
+)
+
+list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_ADVAPI32_HEADER}")
+
+# ----------------------------------------------------------------------------
+# Stage-2 slice 28 — seven small stub DLLs built via a generic
+# helper (tools/build-stub-dll.sh). Each DLL has a small hand-
+# written .c source + an export list passed on the CMake cmd-
+# line.
+# ----------------------------------------------------------------------------
+set(CUSTOMOS_STUB_DLL_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-stub-dll.sh")
+
+macro(customos_stub_dll name base_va exports)
+    set(_src "${CMAKE_SOURCE_DIR}/userland/libs/${name}/${name}.c")
+    set(_header "${CMAKE_CURRENT_BINARY_DIR}/generated_${name}_dll.h")
+    add_custom_command(
+        OUTPUT "${_header}"
+        COMMAND "${CUSTOMOS_STUB_DLL_SCRIPT}"
+                "${CMAKE_SOURCE_DIR}" "${_header}" "${name}" "${base_va}" "${exports}"
+        DEPENDS "${_src}" "${CUSTOMOS_STUB_DLL_SCRIPT}" "${CUSTOMOS_EMBED_BLOB_SCRIPT}"
+        COMMENT "Compiling + embedding ${name}.dll"
+        VERBATIM
+    )
+    list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${_header}")
+    set(CUSTOMOS_${name}_HEADER "${_header}" PARENT_SCOPE_UNUSED)
+endmacro()
+
+customos_stub_dll(shlwapi 0x100B0000 "PathAddBackslashW,PathAppendW,PathCombineW,PathFileExistsA,PathFileExistsW,PathFindExtensionA,PathFindExtensionW,PathFindFileNameA,PathFindFileNameW,PathIsDirectoryW,PathRemoveFileSpecW,PathStripPathW,StrCmpNW,StrCmpW,StrStrIW,StrStrW")
+customos_stub_dll(shell32 0x100C0000 "CommandLineToArgvW,ExtractIconW,ExtractIconExW,SHCreateDirectoryW,SHCreateDirectoryExW,SHFileOperationW,SHGetFolderPathA,SHGetFolderPathW,SHGetKnownFolderPath,SHGetPathFromIDListW,SHGetSpecialFolderPathW,ShellExecuteW,ShellExecuteExW")
+customos_stub_dll(ole32 0x100D0000 "CoInitialize,CoInitializeEx,CoUninitialize,OleInitialize,OleUninitialize,CoCreateInstance,CoCreateInstanceEx,CoGetClassObject,CLSIDFromString,CLSIDFromProgID,IIDFromString,StringFromCLSID,CoTaskMemAlloc,CoTaskMemFree,CoTaskMemRealloc")
+customos_stub_dll(oleaut32 0x100E0000 "VariantInit,VariantClear,SysAllocString,SysFreeString,SysStringLen")
+customos_stub_dll(winmm 0x100F0000 "timeGetTime,timeBeginPeriod,timeEndPeriod,timeGetDevCaps,timeSetEvent,timeKillEvent,PlaySoundW,mciSendStringW")
+customos_stub_dll(bcrypt 0x10100000 "BCryptOpenAlgorithmProvider,BCryptCloseAlgorithmProvider,BCryptCreateHash,BCryptHashData,BCryptFinishHash,BCryptDestroyHash,BCryptGetProperty,BCryptGenRandom")
+customos_stub_dll(psapi 0x10110000 "EnumProcesses,EnumProcessModules,GetMappedFileNameW,GetModuleBaseNameW,GetModuleFileNameExW,GetProcessMemoryInfo,QueryWorkingSet")
+
+# --- Stage-2 slice 29 — DirectX + user32/gdi32 stub tier ---
+customos_stub_dll(d3d9 0x10120000 "Direct3DCreate9,Direct3DCreate9Ex")
+customos_stub_dll(d3d11 0x10130000 "D3D11CreateDevice,D3D11CreateDeviceAndSwapChain")
+customos_stub_dll(d3d12 0x10140000 "D3D12CreateDevice,D3D12GetDebugInterface,D3D12SerializeRootSignature")
+customos_stub_dll(dxgi 0x10150000 "CreateDXGIFactory,CreateDXGIFactory1,CreateDXGIFactory2")
+customos_stub_dll(user32 0x10160000 "CallWindowProcA,CallWindowProcW,CharLowerW,CharUpperW,ClipCursor,CloseClipboard,CreateWindowExA,CreateWindowExW,DefWindowProcA,DefWindowProcW,DestroyWindow,DispatchMessageA,DispatchMessageW,EmptyClipboard,GetActiveWindow,GetClientRect,GetClipboardData,GetCursorPos,GetDesktopWindow,GetForegroundWindow,GetMessageA,GetMessageW,GetProcessWindowStation,GetSysColor,GetSystemMetrics,GetWindowRect,InvalidateRect,IsWindow,LoadAcceleratorsA,LoadAcceleratorsW,LoadBitmapA,LoadBitmapW,LoadCursorA,LoadCursorW,LoadIconA,LoadIconW,LoadImageA,LoadImageW,LoadMenuA,LoadMenuW,LoadStringA,LoadStringW,MessageBoxA,MessageBoxExA,MessageBoxExW,MessageBoxW,MoveWindow,OpenClipboard,PeekMessageA,PeekMessageW,PostMessageA,PostMessageW,PostQuitMessage,PostThreadMessageA,PostThreadMessageW,RegisterClassA,RegisterClassExA,RegisterClassExW,RegisterClassW,SendMessageA,SendMessageW,SetClipboardData,SetCursor,SetCursorPos,SetWindowPos,ShowCursor,ShowWindow,TranslateAcceleratorA,TranslateAcceleratorW,TranslateMessage,UnregisterClassA,UnregisterClassW,UpdateWindow")
+customos_stub_dll(gdi32 0x10180000 "BitBlt,CreateBitmap,CreateBrushIndirect,CreateCompatibleBitmap,CreateCompatibleDC,CreateDIBSection,CreateDIBitmap,CreateFontA,CreateFontIndirectA,CreateFontIndirectW,CreateFontW,CreatePen,CreateSolidBrush,DeleteDC,DeleteObject,DrawTextA,DrawTextW,Ellipse,ExtTextOutA,ExtTextOutW,FillRect,FrameRect,GetDC,GetObjectA,GetObjectW,GetStockObject,GetWindowDC,LineTo,MoveToEx,Polygon,Polyline,Rectangle,ReleaseDC,RestoreDC,SaveDC,SelectObject,SetBkColor,SetBkMode,SetMapMode,SetTextAlign,SetTextColor,StretchBlt,TextOutA,TextOutW")
+
+# --- Stage-2 slice 31 — networking / crypto / common UI / version / setup ---
+customos_stub_dll(ws2_32 0x10190000 "WSAStartup,WSACleanup,WSAGetLastError,WSASetLastError,socket,closesocket,bind,listen,connect,accept,send,recv,sendto,recvfrom,shutdown,setsockopt,getsockopt,select,htons,ntohs,htonl,ntohl,inet_addr,gethostbyname,gethostname,getaddrinfo,freeaddrinfo")
+customos_stub_dll(wininet 0x101A0000 "InternetOpenA,InternetOpenW,InternetConnectA,HttpOpenRequestA,HttpSendRequestA,InternetReadFile,InternetCloseHandle,InternetOpenUrlA")
+customos_stub_dll(winhttp 0x101B0000 "WinHttpOpen,WinHttpConnect,WinHttpOpenRequest,WinHttpSendRequest,WinHttpReceiveResponse,WinHttpReadData,WinHttpCloseHandle")
+customos_stub_dll(crypt32 0x101C0000 "CertOpenStore,CertCloseStore,CertFindCertificateInStore,CertFreeCertificateContext,CryptAcquireContextA,CryptReleaseContext,CryptGenRandom,CryptProtectData,CryptUnprotectData")
+customos_stub_dll(comctl32 0x101D0000 "InitCommonControls,InitCommonControlsEx,CreateStatusWindowA,CreateStatusWindowW,PropertySheetA,PropertySheetW,ImageList_Create,ImageList_Destroy")
+customos_stub_dll(comdlg32 0x101E0000 "GetOpenFileNameA,GetOpenFileNameW,GetSaveFileNameA,GetSaveFileNameW,ChooseColorA,ChooseColorW,ChooseFontA,ChooseFontW,PrintDlgA,PrintDlgW,CommDlgExtendedError")
+customos_stub_dll(version 0x101F0000 "GetFileVersionInfoSizeA,GetFileVersionInfoSizeW,GetFileVersionInfoA,GetFileVersionInfoW,VerQueryValueA,VerQueryValueW")
+customos_stub_dll(setupapi 0x10200000 "SetupDiGetClassDevsA,SetupDiGetClassDevsW,SetupDiDestroyDeviceInfoList,SetupDiEnumDeviceInfo,SetupOpenInfFileA,SetupOpenInfFileW,SetupCloseInfFile")
+
+# --- Stage-2 slice 33 — six more support DLLs ---
+customos_stub_dll(iphlpapi 0x10210000 "GetAdaptersInfo,GetAdaptersAddresses,GetIfTable,GetNumberOfInterfaces,IcmpSendEcho,IcmpCreateFile,IcmpCloseHandle")
+customos_stub_dll(userenv 0x10220000 "GetUserProfileDirectoryA,GetUserProfileDirectoryW,GetAllUsersProfileDirectoryW,CreateEnvironmentBlock,DestroyEnvironmentBlock,LoadUserProfileW,UnloadUserProfile")
+customos_stub_dll(wtsapi32 0x10230000 "WTSQuerySessionInformationA,WTSQuerySessionInformationW,WTSFreeMemory,WTSEnumerateSessionsW,WTSRegisterSessionNotification,WTSUnRegisterSessionNotification")
+customos_stub_dll(dwmapi 0x10240000 "DwmIsCompositionEnabled,DwmEnableComposition,DwmExtendFrameIntoClientArea,DwmGetWindowAttribute,DwmSetWindowAttribute,DwmFlush")
+customos_stub_dll(uxtheme 0x10250000 "OpenThemeData,CloseThemeData,IsThemeActive,IsAppThemed,SetWindowTheme,GetThemeSysFont,DrawThemeBackground,DrawThemeText")
+customos_stub_dll(secur32 0x10260000 "AcquireCredentialsHandleA,FreeCredentialsHandle,InitializeSecurityContextA,DeleteSecurityContext,GetUserNameExA,GetUserNameExW")
+
+# ----------------------------------------------------------------------------
+# Userland ucrtbase.dll — stage-2 slice 15. Retires the
+# UCRT runtime stubs: heap alloc (malloc/free/calloc/realloc
+# /_aligned_*), terminators (exit/_exit), CRT startup shims
+# (_initterm/_initterm_e/_cexit/_c_exit/_set_app_type/
+# __setusermatherr/_configthreadlocale), plus string
+# intrinsics aliased from msvcrt.
+# ----------------------------------------------------------------------------
+set(CUSTOMOS_UCRTBASE_SRC "${CMAKE_SOURCE_DIR}/userland/libs/ucrtbase/ucrtbase.c")
+set(CUSTOMOS_UCRTBASE_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_ucrtbase_dll.h")
+set(CUSTOMOS_UCRTBASE_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-ucrtbase-dll.sh")
+
+add_custom_command(
+    OUTPUT "${CUSTOMOS_UCRTBASE_HEADER}"
+    COMMAND "${CUSTOMOS_UCRTBASE_SCRIPT}"
+            "${CMAKE_SOURCE_DIR}"
+            "${CUSTOMOS_UCRTBASE_HEADER}"
+    DEPENDS
+        "${CUSTOMOS_UCRTBASE_SRC}"
+        "${CUSTOMOS_UCRTBASE_SCRIPT}"
+        "${CUSTOMOS_EMBED_BLOB_SCRIPT}"
+    COMMENT "Compiling + embedding ucrtbase.dll (heap + exit + CRT startup retirement)"
+    VERBATIM
+)
+
+list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_UCRTBASE_HEADER}")
+
+# ----------------------------------------------------------------------------
+# Sixth PE fixture: customdll_test.exe — first userland program
+# that imports from a real loaded DLL (customdll.dll) rather
+# than from the flat stubs page. Exercises stage-2 slice 6's
+# via-DLL IAT resolution path end-to-end.
+# ----------------------------------------------------------------------------
+set(CUSTOMOS_CUSTOMDLL_TEST_SRC "${CMAKE_SOURCE_DIR}/userland/apps/customdll_test/hello.c")
+file(GLOB CUSTOMOS_CUSTOMDLL_TEST_DEFS
+    "${CMAKE_SOURCE_DIR}/userland/apps/customdll_test/*.def")
+set(CUSTOMOS_CUSTOMDLL_TEST_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_customdll_test.h")
+set(CUSTOMOS_CUSTOMDLL_TEST_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-customdll-test.sh")
+
+add_custom_command(
+    OUTPUT "${CUSTOMOS_CUSTOMDLL_TEST_HEADER}"
+    COMMAND "${CUSTOMOS_CUSTOMDLL_TEST_SCRIPT}"
+            "${CMAKE_SOURCE_DIR}"
+            "${CUSTOMOS_CUSTOMDLL_TEST_HEADER}"
+    DEPENDS
+        "${CUSTOMOS_CUSTOMDLL_TEST_SRC}"
+        ${CUSTOMOS_CUSTOMDLL_TEST_DEFS}
+        "${CUSTOMOS_CUSTOMDLL_TEST_SCRIPT}"
+        "${CUSTOMOS_EMBED_BLOB_SCRIPT}"
+    COMMENT "Compiling + embedding /bin/customdll_test.exe (stage-2 slice 6 fixture)"
+    VERBATIM
+)
+
+list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_CUSTOMDLL_TEST_HEADER}")
+
+# --- Stage-2 slice 34 — real-registry + real-fopen test fixture ---
+set(CUSTOMOS_REG_FOPEN_TEST_SRC "${CMAKE_SOURCE_DIR}/userland/apps/reg_fopen_test/hello.c")
+file(GLOB CUSTOMOS_REG_FOPEN_TEST_DEFS
+    "${CMAKE_SOURCE_DIR}/userland/apps/reg_fopen_test/*.def")
+set(CUSTOMOS_REG_FOPEN_TEST_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_reg_fopen_test.h")
+set(CUSTOMOS_REG_FOPEN_TEST_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-reg-fopen-test.sh")
+add_custom_command(
+    OUTPUT "${CUSTOMOS_REG_FOPEN_TEST_HEADER}"
+    COMMAND "${CUSTOMOS_REG_FOPEN_TEST_SCRIPT}" "${CMAKE_SOURCE_DIR}" "${CUSTOMOS_REG_FOPEN_TEST_HEADER}"
+    DEPENDS "${CUSTOMOS_REG_FOPEN_TEST_SRC}" ${CUSTOMOS_REG_FOPEN_TEST_DEFS}
+            "${CUSTOMOS_REG_FOPEN_TEST_SCRIPT}" "${CUSTOMOS_EMBED_BLOB_SCRIPT}"
+    COMMENT "Compiling + embedding reg_fopen_test.exe (registry + fopen fixture)"
+    VERBATIM
+)
+list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_REG_FOPEN_TEST_HEADER}")
 
 set(CUSTOMOS_KERNEL_LINKER_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/arch/x86_64/linker.ld")
 

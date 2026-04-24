@@ -16,6 +16,7 @@ _Read this at every session start (after git sync). Each row links to a detailed
 | PE subsystem v0 — freestanding hello.exe + real-world PE diagnostic | [knowledge/pe-subsystem-v0.md](knowledge/pe-subsystem-v0.md) | Observation | Active | 2026-04-21 |
 | PE base-relocation support v0 — walk + apply, zero-delta in v0 | [knowledge/pe-base-reloc-v0.md](knowledge/pe-base-reloc-v0.md) | Observation | Active | 2026-04-21 |
 | Win32 subsystem v0 — import resolution + kernel32.ExitProcess stub | [knowledge/win32-subsystem-v0.md](knowledge/win32-subsystem-v0.md) | Observation | Active | 2026-04-21 |
+| PE EAT parser + DLL loader skeleton (stage 2 slice 1) | [knowledge/pe-eat-dll-loader-v0.md](knowledge/pe-eat-dll-loader-v0.md) | Observation | Active | 2026-04-24 |
 | Win32 heap — real HeapSize + HeapReAlloc / realloc (batch 14) | [knowledge/win32-subsystem-v0.md#batch-14--real-heapsize--heaprealloc](knowledge/win32-subsystem-v0.md) | Observation | Active | 2026-04-21 |
 | Real-world PE execution — winkill CRT entry + argc/argv + five loader gaps | [knowledge/pe-real-world-run.md](knowledge/pe-real-world-run.md) | Observation | Active | 2026-04-22 |
 | Win32 stubs — callee-saved rdi/rsi ABI bug + fix pattern | [knowledge/win32-stubs-rdi-rsi-abi.md](knowledge/win32-stubs-rdi-rsi-abi.md) | Issue + Pattern | Active | 2026-04-22 |

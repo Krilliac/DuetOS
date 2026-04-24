@@ -545,6 +545,24 @@ enum SyscallNumber : u64
     // claude/refactor-inspect-command into the win32 batch-51-60
     // branch — the win32 batches had already published 46..55.
     SYS_NT_INVOKE = 56,
+
+    // SYS_DLL_PROC_ADDRESS: Win32 GetProcAddress, table-backed.
+    // rdi = HMODULE (the DLL's load base VA; 0 = "any
+    //       registered DLL", matches the common case where the
+    //       caller already narrows to a specific DLL by name
+    //       via our future GetModuleHandle path).
+    // rsi = user pointer to a NUL-terminated ASCII function
+    //       name. Bounded-copied via CopyFromUser.
+    //
+    // Returns the absolute VA of the exported function on hit,
+    // or 0 on miss (module not in the process's DLL table,
+    // name not exported, forwarder — forwarder chasing not yet
+    // implemented).
+    //
+    // Stage-2 slice 4 of the DLL-loader track. Replaces the
+    // return-zero GetProcAddress stub. See
+    // .claude/knowledge/pe-eat-dll-loader-v0.md.
+    SYS_DLL_PROC_ADDRESS = 57,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit

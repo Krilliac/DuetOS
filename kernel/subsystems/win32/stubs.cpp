@@ -262,6 +262,13 @@ constexpr u32 kOffUnhandledFilter = 0xC13;    // batch 64 — 21 bytes
 // CAS-losers wait for the slot to reach 2 via SYS_YIELD spin.
 constexpr u32 kOffInitOnceExec = 0xC28; // batch 65 — 87 bytes
 
+// === Stage-2 slice 4: real GetProcAddress via SYS_DLL_PROC_ADDRESS =======
+// Win32: FARPROC GetProcAddress(HMODULE hModule=rcx, LPCSTR lpProcName=rdx).
+// CustomOS: SYS_DLL_PROC_ADDRESS (57) with rdi=hmod, rsi=name.
+// Returns exported VA or 0 (= miss). rdi + rsi are callee-saved in
+// the Win32 x64 ABI, so save/restore across the syscall.
+constexpr u32 kOffGetProcAddressReal = 0xC7F; // stage-2 slice 4 — 18 bytes
+
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
     // Windows x64 ABI: first arg (uExitCode) in RCX.
@@ -3161,10 +3168,28 @@ constexpr u8 kStubsBytes[] = {
     0x5F,                         // 0xC7C pop rdi
     0x5B,                         // 0xC7D pop rbx
     0xC3,                         // 0xC7E ret
+
+    // === Stage-2 slice 4: real GetProcAddress =====================
+
+    // --- GetProcAddress (offset 0xC7F, 18 bytes) ------------------
+    // Win32: FARPROC GetProcAddress(HMODULE hModule=rcx, LPCSTR name=rdx).
+    // CustomOS: SYS_DLL_PROC_ADDRESS (57) with rdi=hmod, rsi=name.
+    // Returns the exported VA or 0 on miss — same miss contract as
+    // the old kOffReturnZero stub. rdi + rsi are callee-saved in the
+    // Win32 x64 ABI; save/restore across the syscall.
+    0x57,                         // 0xC7F push rdi
+    0x56,                         // 0xC80 push rsi
+    0x48, 0x89, 0xCF,             // 0xC81 mov rdi, rcx     ; hModule
+    0x48, 0x89, 0xD6,             // 0xC84 mov rsi, rdx     ; name ptr
+    0xB8, 0x39, 0x00, 0x00, 0x00, // 0xC87 mov eax, 57      ; SYS_DLL_PROC_ADDRESS
+    0xCD, 0x80,                   // 0xC8C int 0x80
+    0x5E,                         // 0xC8E pop rsi
+    0x5F,                         // 0xC8F pop rdi
+    0xC3,                         // 0xC90 ret
 };
 
 static_assert(sizeof(kStubsBytes) <= 4096, "Win32 stubs page fits in one 4 KiB page");
-static_assert(sizeof(kStubsBytes) == 0xC7F, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kStubsBytes) == 0xC91, "stub layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The stub
 // bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
@@ -3356,7 +3381,13 @@ constexpr StubEntry kStubsTable[] = {
     {"kernel32.dll", "LoadLibraryExW", kOffReturnZero},
     {"kernel32.dll", "LoadLibraryExA", kOffReturnZero},
     {"kernel32.dll", "FreeLibrary", kOffReturnOne}, // pretend success
-    {"kernel32.dll", "GetProcAddress", kOffReturnZero},
+    // GetProcAddress — real trampoline into SYS_DLL_PROC_ADDRESS
+    // as of stage-2 slice 4. Returns the exported VA out of the
+    // process's DLL image table, or 0 on miss (= same contract
+    // the old return-zero stub honoured, so existing callers that
+    // GetProcAddress an optional API and NULL-check gracefully fall
+    // back either way).
+    {"kernel32.dll", "GetProcAddress", kOffGetProcAddressReal},
 
     // Batch 26 — Win32 mutex (real waitqueue-backed semantics).
     // CreateMutexW allocates a per-process slot returning a 0x200+

@@ -1305,6 +1305,39 @@ void SyscallDispatch(arch::TrapFrame* frame)
         return;
     }
 
+    case SYS_DLL_PROC_ADDRESS:
+    {
+        // rdi = HMODULE (DLL base VA; 0 = any registered DLL).
+        // rsi = user VA of NUL-terminated ASCII function name.
+        //
+        // Returns the exported function's VA on hit, 0 on miss
+        // (module not registered, name not exported, forwarder).
+        // Returning 0 matches Win32 GetProcAddress's miss
+        // semantics exactly.
+        Process* proc = CurrentProcess();
+        if (proc == nullptr)
+        {
+            frame->rax = 0;
+            return;
+        }
+        // Bounded copy-in for the function name. 256 chars is
+        // comfortably above the longest C++-mangled export name
+        // we've seen in MSVCP140 (~180 chars).
+        constexpr u64 kDllFuncNameMax = 256;
+        char name_buf[kDllFuncNameMax + 1];
+        for (u64 i = 0; i < sizeof(name_buf); ++i)
+            name_buf[i] = 0;
+        if (frame->rsi == 0 || !mm::CopyFromUser(name_buf, reinterpret_cast<const void*>(frame->rsi), kDllFuncNameMax))
+        {
+            frame->rax = 0;
+            return;
+        }
+        name_buf[kDllFuncNameMax] = '\0';
+        const u64 va = ProcessResolveDllExportByBase(proc, frame->rdi, name_buf);
+        frame->rax = va;
+        return;
+    }
+
     default:
     {
         // Offer to the translation unit before surfacing the
