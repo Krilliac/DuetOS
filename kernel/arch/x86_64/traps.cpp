@@ -50,6 +50,14 @@ constexpr customos::u8* g_copy_user_fault_fixup = ::__copy_user_fault_fixup;
 // action.
 constinit IrqHandler g_irq_handlers[256] = {};
 
+// Per-vector cumulative handler-invocation count. Read by the
+// runtime checker's IRQ-storm detector via IrqCountForVector.
+// Written only from the IRQ dispatch path on the CPU serving the
+// interrupt — interrupts are masked during handler dispatch so
+// no intra-vector race is possible; cross-vector increments
+// through this table are independent slots.
+constinit u64 g_irq_counts[256] = {};
+
 constexpr u8 kIrqVectorBase = 32;
 constexpr u8 kMsixVectorBase = 48;
 constexpr u8 kMsixVectorMax = 239; // leave 240..254 reserved for future (IPIs, debug)
@@ -203,6 +211,7 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     if (IsDispatchedVector(frame->vector))
     {
         const u8 v = static_cast<u8>(frame->vector);
+        ++g_irq_counts[v];
         const IrqHandler h = g_irq_handlers[v];
         if (h != nullptr)
         {
@@ -548,6 +557,11 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     core::EndCrashDump();
     SerialWrite("[panic] Halting CPU.\n");
     Halt();
+}
+
+u64 IrqCountForVector(u8 v)
+{
+    return g_irq_counts[v];
 }
 
 void IrqInstall(u8 vector, IrqHandler handler)

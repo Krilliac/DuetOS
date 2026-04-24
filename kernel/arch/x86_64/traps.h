@@ -146,4 +146,12 @@ void TrapsSelfTest();
 /// the IDT is loaded and after KernelExtable is usable.
 void TrapsRegisterExtable();
 
+/// Per-vector IRQ counter snapshot. Returns the cumulative count
+/// of handler invocations for vector `v` since boot. Used by the
+/// runtime checker's IRQ-storm detector to compute per-scan
+/// deltas and raise an alarm when a single vector fires at a
+/// rate above its expected ceiling. Indexing outside 0..255 is
+/// a no-op returning 0.
+u64 IrqCountForVector(u8 v);
+
 } // namespace customos::arch
