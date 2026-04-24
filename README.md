@@ -98,13 +98,53 @@ A healthy boot ends with something like:
 
 ```
 [ring3] registered 0x26 DLL(s) pid=0x13
-[reg-fopen-test] ProductName="DuetOS" (type=1, size=9)
+[reg-fopen-test] ProductName="DuetOS" (type=1, size=7)
 [reg-fopen-test] /bin/hello.exe first two bytes: 0x4d 0x5a
 [reg-fopen-test] all checks passed
 Windows Kill 1.1.4 | Windows Kill Library 3.1.3
 Not enough argument. Use -h for help.
 [I] sys : exit rc val=0x1234
 ```
+
+---
+
+## Screenshots
+
+Captured live from the QEMU runs that produce the boot log above. See
+[`docs/screenshots/`](docs/screenshots/) for the PNGs. Reproduce any of
+them with:
+
+```bash
+cmake --preset x86_64-debug
+cmake --build build/x86_64-debug --parallel $(nproc)
+
+# Full framebuffer PNG of the default boot (login gate)
+tools/qemu/screenshot.sh docs/screenshots/01-login-screen.png
+
+# Other boot entries by index-from-default (see boot/grub/grub.cfg)
+tools/qemu/screenshot-theme.sh 5 docs/screenshots/02-desktop-classic.png
+tools/qemu/screenshot-theme.sh 6 docs/screenshots/03-desktop-slate10.png
+tools/qemu/screenshot-theme.sh 2 docs/screenshots/04-terminal-tty.png
+```
+
+| Login gate | Terminal (TTY) |
+|------------|----------------|
+| ![login gate](docs/screenshots/01-login-screen.png) | ![fullscreen TTY](docs/screenshots/04-terminal-tty.png) |
+| Default boot. USERNAME/PASSWORD form, default accounts hinted at the bottom. | `boot=tty` entry. Fullscreen green-on-black framebuffer console with the boot log, shell help, and login prompt. |
+
+| Windowed desktop, Classic theme | Windowed desktop, Slate10 theme |
+|---------------------------------|---------------------------------|
+| ![classic theme](docs/screenshots/02-desktop-classic.png) | ![slate10 theme](docs/screenshots/03-desktop-slate10.png) |
+| Calculator, Notepad, Files, Task Manager, Kernel Log, Clock widget, taskbar with Start button + pinned apps + tray + clock. | Same compose, Slate10 theme — dark charcoal chrome, flat Win10-blue accent. `Ctrl+Alt+Y` cycles themes at runtime. |
+
+### Windows PE on the serial console
+
+[`docs/screenshots/06-windows-pe-serial-excerpt.txt`](docs/screenshots/06-windows-pe-serial-excerpt.txt)
+is the live excerpt for the PE-on-DuetOS evidence block: an MSVC-built
+fixture queries the registry (`ProductName="DuetOS"`, 7 bytes), `fopen`s
+`/bin/hello.exe` and reads `MZ`, then `windows-kill.exe` — a real
+third-party 80 KB PE with 52 imports across 6 DLLs — prints its
+signature line and exits cleanly through our Win32 DLL surface.
 
 ---
 
@@ -136,7 +176,14 @@ full architectural statement.
 
 ## Non-goals
 
-- Not a Linux distribution. No Linux kernel, no GNU userland base.
+- **Not a Linux distribution, and not a Linux host.** There is no Linux
+  kernel under this tree. The kernel in `kernel/` is written from
+  scratch and booted directly by GRUB/UEFI into long mode; nothing
+  else runs below it. `subsystems/linux/` is a **guest ABI translator**
+  — the same shape as `subsystems/win32/`, a second entry ABI into our
+  kernel, so a Linux ELF binary can call `syscall` and hit a DuetOS
+  syscall via the translation unit. Win32 and Linux are peers; the
+  host is DuetOS.
 - Not a Wine fork. Wine is useful prior art; this repo does not vendor
   it or link against it.
 - Not a ReactOS rewrite.

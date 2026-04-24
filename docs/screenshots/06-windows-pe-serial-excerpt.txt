@@ -1,0 +1,37 @@
+DuetOS — Windows PE on serial, excerpt
+Captured live: build/x86_64-debug/duetos.iso booted under QEMU (OVMF),
+serial on stdio. Reproduce: `DUETOS_TIMEOUT=45 tools/qemu/run.sh`.
+
+The reg_fopen_test fixture is an MSVC-built PE. The kernel loads it
+through our PE loader, resolves imports against our advapi32 + ucrtbase
+userland DLLs, runs it in ring 3. It opens HKLM\Software\Microsoft\
+Windows NT\CurrentVersion, queries ProductName, fopen()s /bin/hello.exe,
+reads two bytes, prints each result via our printf.
+
+  [ring3] pe report name="ring3-reg-fopen-test"
+  [proc] create pid=0x0000000000000014 name="ring3-reg-fopen-test" caps=0x000000000000003e code_va=0x0000000140de1000 stack_va=0x000000007fff0000
+  [ring3] pe spawn name="ring3-reg-fopen-test" pid=0x0000000000000014 entry=0x0000000140de1000 image_base=0x0000000140de0000 stack_top=0x0000000080000000
+  [guard] ALLOW kind=uthread name="ring3-reg-fopen-test" findings=0x0000000000000000
+  [sched] created task id=0x000000000000001e name="ring3-reg-fopen-test" rsp=0xffffffffe0095fc0 as=0xffffffff8038fa70
+  [reg-fopen-test] ProductName="DuetOS" (type=1, size=7)
+  [fs/route] open ok pid=0x0000000000000014 path="/bin/hello.exe" backing=ramfs handle=0x0000000000000100 size=0x0000000000003000
+  [reg-fopen-test] /bin/hello.exe first two bytes: 0x4d 0x5a
+  [reg-fopen-test] all checks passed
+  Windows Kill 1.1.4 | Windows Kill Library 3.1.3Not enough argument. Use -h for help.
+  [I] sys : exit rc   val=0x1234 (4660)
+
+Three cross-checks in that block:
+
+  1. size=7 — advapi32 returns the NUL-terminated REG_SZ "DuetOS" at its
+     correct 7-byte width. Pre-fix (size=9) it overran into post-literal
+     memory by two bytes; the one-character byte-count check proves the
+     rename regression is closed.
+
+  2. MZ — fopen + fread of /bin/hello.exe returned the Windows PE magic
+     bytes 0x4d 0x5a. The file is served by our ramfs, routed through
+     our ucrtbase fopen, read through our fread.
+
+  3. Windows Kill 1.1.4 — a real third-party 80 KB MSVC PE (external
+     origin, unmodified, 52 imports across 6 DLLs, SEH, TLS, resources)
+     printing its signature line and exiting cleanly through our Win32
+     DLL surface.
