@@ -90,7 +90,15 @@ u32 WidgetRouteMouse(u32 cursor_x, u32 cursor_y, u8 button_mask);
 // ---------------------------------------------------------------
 
 constexpr u32 kWindowInvalid = 0xFFFFFFFFu;
-constexpr u32 kMaxWindows = 6;
+// Headroom split: 6 slots for boot-time built-in apps (Calculator,
+// Notepad, Task Manager, Kernel Log, Files, Clock), 10 slots for
+// ring-3 windows registered via SYS_WIN_CREATE from user32.dll's
+// CreateWindowExA/W bridge. 16 is a round number well under any
+// real-world Win32 program's window budget and small enough that
+// the kMaxWindows-sized static arrays still fit comfortably in
+// .bss. A future slice replaces this with a dynamic table when
+// some program legitimately needs more than 16.
+constexpr u32 kMaxWindows = 16;
 
 using WindowHandle = u32;
 

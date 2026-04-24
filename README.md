@@ -146,6 +146,35 @@ fixture queries the registry (`ProductName="DuetOS"`, 7 bytes), `fopen`s
 third-party 80 KB PE with 52 imports across 6 DLLs — prints its
 signature line and exits cleanly through our Win32 DLL surface.
 
+### Windowed PE through user32!CreateWindowExA
+
+![windowed hello](docs/screenshots/07-windowed-hello.png)
+
+`/bin/windowed_hello.exe` (see [`userland/apps/windowed_hello/`](userland/apps/windowed_hello/))
+is a real Windows PE that imports `CreateWindowExA`, `ShowWindow`, and
+`MessageBoxA` from `user32.dll` plus `Sleep` and `ExitProcess` from
+`kernel32.dll`. On boot, the PE loader maps it, the import resolver
+binds each call against the preloaded `user32.dll`'s EAT, and the stub
+issues `int 0x80` with `SYS_WIN_CREATE` (58) / `SYS_WIN_SHOW` (60) /
+`SYS_WIN_MSGBOX` (61). The kernel-side handlers route into the
+compositor in `kernel/drivers/video/widget.cpp` — the blue-titled
+**WINDOWED HELLO** window bottom-right in the screenshot is the result,
+painted in the same pass as the native Calculator / Notepad / Files /
+Task Manager / Kernel Log windows. Serial log excerpt for the same
+run:
+
+```
+[msgbox] pid=0x16 caption="Windowed Hello" text="Running on DuetOS!"
+[win] create pid=0x16 hwnd=7 rect=(500,400 420x220) title="WINDOWED HELLO"
+[I] sys : exit rc val=0x57
+```
+
+Reproduce with:
+
+```bash
+DUETOS_SETTLE=10 tools/qemu/screenshot-theme.sh 5 docs/screenshots/07-windowed-hello.png
+```
+
 ---
 
 ## What works today
@@ -158,13 +187,22 @@ through the DLL surface.
 
 ## What doesn't work (yet)
 
-Windowed programs — `user32!CreateWindowExW` returns NULL; there is
-no window manager and no GDI renderer. Networking — `ws2_32!socket`
-returns `INVALID_SOCKET`; the kernel net stack is a skeleton.
-DirectX — returns `E_NOTIMPL`; no Vulkan ICD yet. COM — returns
-`CLASS_E_CLASSNOTAVAILABLE`. Each of those is its own multi-slice
-implementation track; the DLL surface is the scaffolding that makes
-them possible.
+Windowing v0 landed (see screenshot above): `user32!CreateWindowExA/W`,
+`ShowWindow`, `DestroyWindow`, and `MessageBoxA/W` are now bridged to
+the in-kernel compositor (`kMaxWindows` = 16, four new syscalls in
+the 58..61 range). Still missing on the windowing track: GDI paint
+APIs (`BitBlt` / `TextOut` / `Rectangle` are still silent no-ops —
+the window chrome paints but the client area stays blank), per-window
+message queues (`GetMessage` / `PeekMessage` still return WM_QUIT so
+event-driven programs exit their pump immediately), and
+keyboard/mouse routing to the target window (input still goes to the
+native console).
+
+Networking — `ws2_32!socket` returns `INVALID_SOCKET`; the kernel
+net stack is a skeleton. DirectX — returns `E_NOTIMPL`; no Vulkan
+ICD yet. COM — returns `CLASS_E_CLASSNOTAVAILABLE`. Each of those
+is its own multi-slice implementation track; the DLL surface is the
+scaffolding that makes them possible.
 
 See [`docs/HISTORY.md`](docs/HISTORY.md) for how the project got to
 this point and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the

@@ -22,6 +22,7 @@
 #include "../subsystems/win32/thread_syscall.h"
 #include "../subsystems/win32/mutex_syscall.h"
 #include "../subsystems/win32/event_syscall.h"
+#include "../subsystems/win32/window_syscall.h"
 #include "../subsystems/win32/heap.h"
 #include "klog.h"
 #include "process.h"
@@ -1304,6 +1305,20 @@ void SyscallDispatch(arch::TrapFrame* frame)
         frame->rax = 0;
         return;
     }
+
+    // Windowing family — ring-3 bridge to the kernel compositor.
+    case SYS_WIN_CREATE:
+        subsystems::win32::DoWinCreate(frame);
+        return;
+    case SYS_WIN_DESTROY:
+        subsystems::win32::DoWinDestroy(frame);
+        return;
+    case SYS_WIN_SHOW:
+        subsystems::win32::DoWinShow(frame);
+        return;
+    case SYS_WIN_MSGBOX:
+        subsystems::win32::DoWinMsgBox(frame);
+        return;
 
     case SYS_DLL_PROC_ADDRESS:
     {

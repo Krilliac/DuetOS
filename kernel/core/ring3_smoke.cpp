@@ -48,6 +48,7 @@
 #include "generated_wtsapi32_dll.h"
 #include "generated_hello_pe.h"
 #include "generated_hello_winapi.h"
+#include "generated_windowed_hello.h"
 #include "generated_syscall_stress.h"
 #include "generated_thread_stress.h"
 #include "generated_winkill_pe.h"
@@ -2398,6 +2399,17 @@ void StartRing3SmokeTask()
     // gap. See .claude/knowledge/pe-subsystem-v0.md.
     SpawnPeFile("ring3-winkill", fs::generated::kBinWinKillBytes, fs::generated::kBinWinKillBytes_len, CapSetTrusted(),
                 fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    // Windowing v0 proof: a freestanding PE that imports
+    // user32!CreateWindowExA + ShowWindow + MessageBoxA and
+    // calls them. The Win32 → SYS_WIN_CREATE bridge turns
+    // those into real compositor-managed windows. Expected
+    // serial log lines: [msgbox] ... then [win] create pid=...
+    // hwnd=N rect=(500,400 420x220) title="WINDOWED HELLO".
+    // Sleep(20s) keeps the window visible long enough for the
+    // screenshot script's settle window to capture it.
+    SpawnPeFile("ring3-windowed-hello", fs::generated::kBinWindowedHelloBytes,
+                fs::generated::kBinWindowedHelloBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     Log(LogLevel::Info, "core/ring3",
         "ring3 smoke tasks queued (incl cpu-hog + hostile + dropcaps + priv + badint + kread + "
         "ptrfuzz + writefuzz + hellope + winkill-report + thread-stress + syscall-stress + "

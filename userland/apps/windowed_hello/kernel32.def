@@ -1,0 +1,12 @@
+; userland/apps/windowed_hello/kernel32.def
+;
+; kernel32 import surface for the windowed_hello fixture.
+; Sleep + ExitProcess are the bare minimum to park the
+; process after ShowWindow so the screenshot script's settle
+; window sees the window on screen.
+
+LIBRARY kernel32.dll
+
+EXPORTS
+    Sleep
+    ExitProcess

@@ -54,6 +54,7 @@ set(DUETOS_KERNEL_SHARED_SOURCES
     subsystems/win32/thread_syscall.cpp
     subsystems/win32/tls_syscall.cpp
     subsystems/win32/vmap_syscall.cpp
+    subsystems/win32/window_syscall.cpp
     core/shell.cpp
     core/stack_canary.cpp
     core/symbols.cpp
@@ -316,6 +317,34 @@ add_custom_command(
 )
 
 list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_SYSCALL_STRESS_HEADER}")
+
+# ----------------------------------------------------------------------------
+# Sixth PE fixture: windowed_hello.exe — first PE that creates a
+# real window via the user32 → SYS_WIN_CREATE bridge. Proves the
+# windowing v0 slice end-to-end: import-resolved user32!
+# CreateWindowExA lands in the kernel compositor + paints.
+# ----------------------------------------------------------------------------
+set(DUETOS_WINDOWED_HELLO_SRC "${CMAKE_SOURCE_DIR}/userland/apps/windowed_hello/hello.c")
+file(GLOB DUETOS_WINDOWED_HELLO_DEFS
+    "${CMAKE_SOURCE_DIR}/userland/apps/windowed_hello/*.def")
+set(DUETOS_WINDOWED_HELLO_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_windowed_hello.h")
+set(DUETOS_WINDOWED_HELLO_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-windowed-hello.sh")
+
+add_custom_command(
+    OUTPUT "${DUETOS_WINDOWED_HELLO_HEADER}"
+    COMMAND "${DUETOS_WINDOWED_HELLO_SCRIPT}"
+            "${CMAKE_SOURCE_DIR}"
+            "${DUETOS_WINDOWED_HELLO_HEADER}"
+    DEPENDS
+        "${DUETOS_WINDOWED_HELLO_SRC}"
+        ${DUETOS_WINDOWED_HELLO_DEFS}
+        "${DUETOS_WINDOWED_HELLO_SCRIPT}"
+        "${DUETOS_EMBED_BLOB_SCRIPT}"
+    COMMENT "Compiling + embedding /bin/windowed_hello.exe (user32 window bridge)"
+    VERBATIM
+)
+
+list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_WINDOWED_HELLO_HEADER}")
 
 # ----------------------------------------------------------------------------
 # Test fixture for the stage-2 EAT parser + DLL loader: a tiny
