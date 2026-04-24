@@ -496,6 +496,31 @@ add_custom_command(
 list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_DBGHELP_HEADER}")
 
 # ----------------------------------------------------------------------------
+# Userland msvcp140.dll — stage-2 slice 26. 17 mangled C++
+# std:: names (throw helpers + ostream + iostate) via .def.
+# ----------------------------------------------------------------------------
+set(CUSTOMOS_MSVCP140_SRC "${CMAKE_SOURCE_DIR}/userland/libs/msvcp140/msvcp140.c")
+set(CUSTOMOS_MSVCP140_DEF "${CMAKE_SOURCE_DIR}/userland/libs/msvcp140/msvcp140.def")
+set(CUSTOMOS_MSVCP140_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_msvcp140_dll.h")
+set(CUSTOMOS_MSVCP140_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-msvcp140-dll.sh")
+
+add_custom_command(
+    OUTPUT "${CUSTOMOS_MSVCP140_HEADER}"
+    COMMAND "${CUSTOMOS_MSVCP140_SCRIPT}"
+            "${CMAKE_SOURCE_DIR}"
+            "${CUSTOMOS_MSVCP140_HEADER}"
+    DEPENDS
+        "${CUSTOMOS_MSVCP140_SRC}"
+        "${CUSTOMOS_MSVCP140_DEF}"
+        "${CUSTOMOS_MSVCP140_SCRIPT}"
+        "${CUSTOMOS_EMBED_BLOB_SCRIPT}"
+    COMMENT "Compiling + embedding msvcp140.dll (C++ std throw + ostream helpers)"
+    VERBATIM
+)
+
+list(APPEND CUSTOMOS_KERNEL_SHARED_SOURCES "${CUSTOMOS_MSVCP140_HEADER}")
+
+# ----------------------------------------------------------------------------
 # Userland ucrtbase.dll — stage-2 slice 15. Retires the
 # UCRT runtime stubs: heap alloc (malloc/free/calloc/realloc
 # /_aligned_*), terminators (exit/_exit), CRT startup shims

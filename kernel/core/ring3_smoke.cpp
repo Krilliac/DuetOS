@@ -11,6 +11,7 @@
 #include "generated_customdll_test.h"
 #include "generated_dbghelp_dll.h"
 #include "generated_kernel32_dll.h"
+#include "generated_msvcp140_dll.h"
 #include "generated_msvcrt_dll.h"
 #include "generated_ntdll_dll.h"
 #include "generated_ucrtbase_dll.h"
@@ -1941,6 +1942,10 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         // MiniDumpWriteDump no-ops. Callers check returns; v0
         // has no PDB parser or stack walker.
         {"dbghelp.dll", fs::generated::kBinDbghelpDllBytes, fs::generated::kBinDbghelpDllBytes_len},
+        // Stage-2 slice 26: msvcp140.dll — 17 C++ std::
+        // throw helpers + ostream stubs via mangled-name .def
+        // aliases. Throw paths terminate with SYS_EXIT(3).
+        {"msvcp140.dll", fs::generated::kBinMsvcp140DllBytes, fs::generated::kBinMsvcp140DllBytes_len},
     };
     constexpr u64 kPreloadEntryCount = sizeof(preload_set) / sizeof(preload_set[0]);
     static_assert(kPreloadEntryCount <= kPreloadSlotCap, "Preload DLL list exceeds stack-local cap");
