@@ -6,6 +6,7 @@
 #include "../mm/page.h"
 #include "../mm/paging.h"
 #include "../security/guard.h"
+#include "../subsystems/win32/proc_env.h"
 #include "../subsystems/win32/stubs.h"
 #include "cleanroom_trace.h"
 #include "klog.h"

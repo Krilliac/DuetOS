@@ -56,6 +56,8 @@ set(DUETOS_KERNEL_SHARED_SOURCES
     subsystems/win32/heap.cpp
     subsystems/win32/heap_syscall.cpp
     subsystems/win32/mutex_syscall.cpp
+    subsystems/win32/nt_coverage.cpp
+    subsystems/win32/proc_env.cpp
     subsystems/win32/stubs.cpp
     subsystems/win32/thread_syscall.cpp
     subsystems/win32/tls_syscall.cpp

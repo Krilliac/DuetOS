@@ -83,7 +83,7 @@
 #include "../subsystems/linux/ring3_smoke.h"
 #include "../subsystems/linux/syscall.h"
 #include "../subsystems/win32/gdi_objects.h"
-#include "../subsystems/win32/stubs.h"
+#include "../subsystems/win32/nt_coverage.h"
 #include "dll_loader.h"
 #include "shell.h"
 #include "syscall.h"
