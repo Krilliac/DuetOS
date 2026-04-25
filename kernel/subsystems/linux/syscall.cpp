@@ -334,6 +334,54 @@ enum : u64
     kSysAccept4 = 288,
     kSysSendmmsg = 307,
     kSysRecvmmsg = 299,
+
+    // Batch 69 — process-control + IPC. Each returns a Linux-
+    // shaped error so probing libc paths bail cleanly.
+    kSysClone = 56,
+    kSysFork = 57,
+    kSysVfork = 58,
+    kSysExecve = 59,
+    kSysExecveat = 322,
+    kSysChroot = 161,
+    kSysPivotRoot = 155,
+    kSysUmask = 95,
+    // SysV IPC.
+    kSysShmget = 29,
+    kSysShmat = 30,
+    kSysShmctl = 31,
+    kSysShmdt = 67,
+    kSysSemget = 64,
+    kSysSemop = 65,
+    kSysSemctl = 66,
+    kSysSemtimedop = 220,
+    kSysMsgget = 68,
+    kSysMsgsnd = 69,
+    kSysMsgrcv = 70,
+    kSysMsgctl = 71,
+    // POSIX message queues.
+    kSysMqOpen = 240,
+    kSysMqUnlink = 241,
+    kSysMqTimedsend = 242,
+    kSysMqTimedreceive = 243,
+    kSysMqNotify = 244,
+    kSysMqGetsetattr = 245,
+    // inotify mutators.
+    kSysInotifyAddWatch = 254,
+    kSysInotifyRmWatch = 255,
+    // misc.
+    kSysIoSetup = 206,
+    kSysIoDestroy = 207,
+    kSysIoGetevents = 208,
+    kSysIoSubmit = 209,
+    kSysIoCancel = 210,
+    kSysSwapon = 167,
+    kSysSwapoff = 168,
+    kSysReboot = 169,
+    kSysSethostname = 170,
+    kSysSetdomainname = 171,
+    kSysIopl = 172,
+    kSysIoperm = 173,
+    kSysQuotactl = 179,
 };
 
 // POSIX AT_FDCWD — used by the *at family to mean "resolve
@@ -4370,6 +4418,75 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
     case kSysSendmmsg:
     case kSysRecvmmsg:
         rv = kEBADF;
+        break;
+
+    // Batch 69 — process control. Linux fork/vfork/clone +
+    // execve don't have a v0 implementation; return -ENOSYS.
+    case kSysClone:
+    case kSysFork:
+    case kSysVfork:
+        rv = kENOSYS;
+        break;
+    case kSysExecve:
+    case kSysExecveat:
+        rv = kENOSYS;
+        break;
+    case kSysChroot:
+    case kSysPivotRoot:
+        rv = kEPERM;
+        break;
+    case kSysUmask:
+        // Most v0 callers want the "old umask" return — Linux
+        // contract is "always returns the previous value, never
+        // -1". Default umask is 022, which matches what musl's
+        // CRT expects on a fresh system.
+        rv = 022;
+        break;
+    // SysV IPC + POSIX MQ — no IPC engine.
+    case kSysShmget:
+    case kSysShmat:
+    case kSysShmctl:
+    case kSysShmdt:
+    case kSysSemget:
+    case kSysSemop:
+    case kSysSemctl:
+    case kSysSemtimedop:
+    case kSysMsgget:
+    case kSysMsgsnd:
+    case kSysMsgrcv:
+    case kSysMsgctl:
+    case kSysMqOpen:
+    case kSysMqUnlink:
+    case kSysMqTimedsend:
+    case kSysMqTimedreceive:
+    case kSysMqNotify:
+    case kSysMqGetsetattr:
+        rv = kENOSYS;
+        break;
+    case kSysInotifyAddWatch:
+    case kSysInotifyRmWatch:
+        rv = kENOSYS;
+        break;
+    // libaio — no async-I/O engine.
+    case kSysIoSetup:
+    case kSysIoDestroy:
+    case kSysIoGetevents:
+    case kSysIoSubmit:
+    case kSysIoCancel:
+        rv = kENOSYS;
+        break;
+    // System-mutation calls — refuse so a misbehaving program
+    // can't reboot the box or twiddle privileged knobs from
+    // ring-3 Linux ABI. Reboot has its own native path.
+    case kSysSwapon:
+    case kSysSwapoff:
+    case kSysReboot:
+    case kSysSethostname:
+    case kSysSetdomainname:
+    case kSysIopl:
+    case kSysIoperm:
+    case kSysQuotactl:
+        rv = kEPERM;
         break;
 
     default:
