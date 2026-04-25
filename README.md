@@ -1,5 +1,9 @@
 # DuetOS
 
+[![duetos.iso downloads](https://img.shields.io/github/downloads/DuetOS/DuetOS/duetos.iso/total?label=duetos.iso%20downloads)](https://github.com/DuetOS/DuetOS/releases/latest/download/duetos.iso)
+
+Download the latest bootable ISO: **[duetos.iso](https://github.com/DuetOS/DuetOS/releases/latest/download/duetos.iso)**.
+
 A general-purpose operating system, written from scratch, that runs
 Windows PE executables natively — not via a VM, not via Wine, not as an
 emulator bolted onto another host OS. The PE loader, the NT syscall
