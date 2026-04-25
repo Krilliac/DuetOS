@@ -1076,6 +1076,15 @@ u64 TaskId(const Task* t)
     return (t != nullptr) ? t->id : 0;
 }
 
+const char* TaskName(const Task* t)
+{
+    if (t == nullptr)
+    {
+        return "<null>";
+    }
+    return (t->name != nullptr) ? t->name : "<noname>";
+}
+
 u64 SchedCurrentKernelStackTop()
 {
     Task* self = Current();

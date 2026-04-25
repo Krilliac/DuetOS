@@ -580,4 +580,542 @@ void SerialWriteCapBits(u64 bits)
     }
 }
 
+const char* LinuxSignalName(u64 sig)
+{
+    switch (sig)
+    {
+    case 1:
+        return "SIGHUP";
+    case 2:
+        return "SIGINT";
+    case 3:
+        return "SIGQUIT";
+    case 4:
+        return "SIGILL";
+    case 5:
+        return "SIGTRAP";
+    case 6:
+        return "SIGABRT";
+    case 7:
+        return "SIGBUS";
+    case 8:
+        return "SIGFPE";
+    case 9:
+        return "SIGKILL";
+    case 10:
+        return "SIGUSR1";
+    case 11:
+        return "SIGSEGV";
+    case 12:
+        return "SIGUSR2";
+    case 13:
+        return "SIGPIPE";
+    case 14:
+        return "SIGALRM";
+    case 15:
+        return "SIGTERM";
+    case 16:
+        return "SIGSTKFLT";
+    case 17:
+        return "SIGCHLD";
+    case 18:
+        return "SIGCONT";
+    case 19:
+        return "SIGSTOP";
+    case 20:
+        return "SIGTSTP";
+    case 21:
+        return "SIGTTIN";
+    case 22:
+        return "SIGTTOU";
+    case 23:
+        return "SIGURG";
+    case 24:
+        return "SIGXCPU";
+    case 25:
+        return "SIGXFSZ";
+    case 26:
+        return "SIGVTALRM";
+    case 27:
+        return "SIGPROF";
+    case 28:
+        return "SIGWINCH";
+    case 29:
+        return "SIGIO";
+    case 30:
+        return "SIGPWR";
+    case 31:
+        return "SIGSYS";
+    case 32:
+        return "SIGRTMIN";
+    case 64:
+        return "SIGRTMAX";
+    }
+    if (sig >= 33 && sig <= 63)
+    {
+        return "SIGRT";
+    }
+    return "?";
+}
+
+const char* LinuxErrnoName(u64 e)
+{
+    switch (e)
+    {
+    case 1:
+        return "EPERM";
+    case 2:
+        return "ENOENT";
+    case 3:
+        return "ESRCH";
+    case 4:
+        return "EINTR";
+    case 5:
+        return "EIO";
+    case 6:
+        return "ENXIO";
+    case 7:
+        return "E2BIG";
+    case 8:
+        return "ENOEXEC";
+    case 9:
+        return "EBADF";
+    case 10:
+        return "ECHILD";
+    case 11:
+        return "EAGAIN";
+    case 12:
+        return "ENOMEM";
+    case 13:
+        return "EACCES";
+    case 14:
+        return "EFAULT";
+    case 15:
+        return "ENOTBLK";
+    case 16:
+        return "EBUSY";
+    case 17:
+        return "EEXIST";
+    case 18:
+        return "EXDEV";
+    case 19:
+        return "ENODEV";
+    case 20:
+        return "ENOTDIR";
+    case 21:
+        return "EISDIR";
+    case 22:
+        return "EINVAL";
+    case 23:
+        return "ENFILE";
+    case 24:
+        return "EMFILE";
+    case 25:
+        return "ENOTTY";
+    case 26:
+        return "ETXTBSY";
+    case 27:
+        return "EFBIG";
+    case 28:
+        return "ENOSPC";
+    case 29:
+        return "ESPIPE";
+    case 30:
+        return "EROFS";
+    case 31:
+        return "EMLINK";
+    case 32:
+        return "EPIPE";
+    case 33:
+        return "EDOM";
+    case 34:
+        return "ERANGE";
+    case 35:
+        return "EDEADLK";
+    case 36:
+        return "ENAMETOOLONG";
+    case 37:
+        return "ENOLCK";
+    case 38:
+        return "ENOSYS";
+    case 39:
+        return "ENOTEMPTY";
+    case 40:
+        return "ELOOP";
+    case 42:
+        return "ENOMSG";
+    case 75:
+        return "EOVERFLOW";
+    case 84:
+        return "EILSEQ";
+    case 88:
+        return "ENOTSOCK";
+    case 90:
+        return "EMSGSIZE";
+    case 95:
+        return "EOPNOTSUPP";
+    case 97:
+        return "EAFNOSUPPORT";
+    case 98:
+        return "EADDRINUSE";
+    case 99:
+        return "EADDRNOTAVAIL";
+    case 101:
+        return "ENETUNREACH";
+    case 103:
+        return "ECONNABORTED";
+    case 104:
+        return "ECONNRESET";
+    case 105:
+        return "ENOBUFS";
+    case 106:
+        return "EISCONN";
+    case 107:
+        return "ENOTCONN";
+    case 110:
+        return "ETIMEDOUT";
+    case 111:
+        return "ECONNREFUSED";
+    case 112:
+        return "EHOSTDOWN";
+    case 113:
+        return "EHOSTUNREACH";
+    case 114:
+        return "EALREADY";
+    case 115:
+        return "EINPROGRESS";
+    }
+    return "?";
+}
+
+const char* NtStatusName(u64 status)
+{
+    // Curated subset — the codes the Win32 subsystem actually
+    // returns, plus a handful of adjacent ones a debugger might
+    // see while bisecting.
+    switch (status)
+    {
+    case 0x00000000ULL:
+        return "STATUS_SUCCESS";
+    case 0x00000103ULL:
+        return "STATUS_PENDING";
+    case 0x40000000ULL:
+        return "STATUS_OBJECT_NAME_EXISTS";
+    case 0x80000005ULL:
+        return "STATUS_BUFFER_OVERFLOW";
+    case 0x80000006ULL:
+        return "STATUS_NO_MORE_FILES";
+    case 0xC0000001ULL:
+        return "STATUS_UNSUCCESSFUL";
+    case 0xC0000002ULL:
+        return "STATUS_NOT_IMPLEMENTED";
+    case 0xC0000005ULL:
+        return "STATUS_ACCESS_VIOLATION";
+    case 0xC0000008ULL:
+        return "STATUS_INVALID_HANDLE";
+    case 0xC000000DULL:
+        return "STATUS_INVALID_PARAMETER";
+    case 0xC000000EULL:
+        return "STATUS_NO_SUCH_DEVICE";
+    case 0xC000000FULL:
+        return "STATUS_NO_SUCH_FILE";
+    case 0xC0000010ULL:
+        return "STATUS_INVALID_DEVICE_REQUEST";
+    case 0xC0000011ULL:
+        return "STATUS_END_OF_FILE";
+    case 0xC0000017ULL:
+        return "STATUS_NO_MEMORY";
+    case 0xC0000022ULL:
+        return "STATUS_ACCESS_DENIED";
+    case 0xC0000023ULL:
+        return "STATUS_BUFFER_TOO_SMALL";
+    case 0xC0000024ULL:
+        return "STATUS_OBJECT_TYPE_MISMATCH";
+    case 0xC0000034ULL:
+        return "STATUS_OBJECT_NAME_NOT_FOUND";
+    case 0xC0000035ULL:
+        return "STATUS_OBJECT_NAME_COLLISION";
+    case 0xC000003AULL:
+        return "STATUS_OBJECT_PATH_NOT_FOUND";
+    case 0xC0000043ULL:
+        return "STATUS_SHARING_VIOLATION";
+    case 0xC0000056ULL:
+        return "STATUS_DELETE_PENDING";
+    case 0xC000007FULL:
+        return "STATUS_DISK_FULL";
+    case 0xC00000B5ULL:
+        return "STATUS_IO_TIMEOUT";
+    case 0xC0000120ULL:
+        return "STATUS_CANCELLED";
+    case 0xC0000135ULL:
+        return "STATUS_DLL_NOT_FOUND";
+    case 0xC0000139ULL:
+        return "STATUS_ENTRYPOINT_NOT_FOUND";
+    }
+    return "?";
+}
+
+void SerialWriteWin32AccessMask(u64 mask)
+{
+    arch::SerialWrite("[");
+    bool first = true;
+    auto emit = [&](const char* name)
+    {
+        if (!first)
+            arch::SerialWrite("|");
+        arch::SerialWrite(name);
+        first = false;
+    };
+    if (mask & 0x80000000ULL)
+        emit("GENERIC_READ");
+    if (mask & 0x40000000ULL)
+        emit("GENERIC_WRITE");
+    if (mask & 0x20000000ULL)
+        emit("GENERIC_EXECUTE");
+    if (mask & 0x10000000ULL)
+        emit("GENERIC_ALL");
+    if (mask & 0x00100000ULL)
+        emit("SYNCHRONIZE");
+    if (mask & 0x00010000ULL)
+        emit("DELETE");
+    if (mask & 0x00020000ULL)
+        emit("READ_CONTROL");
+    if (mask & 0x00040000ULL)
+        emit("WRITE_DAC");
+    if (mask & 0x00080000ULL)
+        emit("WRITE_OWNER");
+    if (mask & 0x00000001ULL)
+        emit("FILE_READ_DATA");
+    if (mask & 0x00000002ULL)
+        emit("FILE_WRITE_DATA");
+    if (mask & 0x00000004ULL)
+        emit("FILE_APPEND_DATA");
+    if (mask & 0x00000008ULL)
+        emit("FILE_READ_EA");
+    if (mask & 0x00000010ULL)
+        emit("FILE_WRITE_EA");
+    if (mask & 0x00000020ULL)
+        emit("FILE_EXECUTE");
+    if (mask & 0x00000080ULL)
+        emit("FILE_READ_ATTRIBUTES");
+    if (mask & 0x00000100ULL)
+        emit("FILE_WRITE_ATTRIBUTES");
+    if (first)
+        arch::SerialWrite("none");
+    arch::SerialWrite("]");
+}
+
+void SerialWriteOpenFlags(u64 flags)
+{
+    arch::SerialWrite("[");
+    bool first = true;
+    // Access mode is the LOW two bits as a 2-bit field, not a
+    // bitmask; emit it as a single token.
+    switch (flags & 0x3)
+    {
+    case 0:
+        arch::SerialWrite("O_RDONLY");
+        first = false;
+        break;
+    case 1:
+        arch::SerialWrite("O_WRONLY");
+        first = false;
+        break;
+    case 2:
+        arch::SerialWrite("O_RDWR");
+        first = false;
+        break;
+    case 3:
+        arch::SerialWrite("O_RDWR?");
+        first = false;
+        break;
+    }
+    auto emit = [&](u64 bit, const char* name)
+    {
+        if ((flags & bit) == 0)
+            return;
+        if (!first)
+            arch::SerialWrite("|");
+        arch::SerialWrite(name);
+        first = false;
+    };
+    emit(0x40, "O_CREAT");
+    emit(0x80, "O_EXCL");
+    emit(0x100, "O_NOCTTY");
+    emit(0x200, "O_TRUNC");
+    emit(0x400, "O_APPEND");
+    emit(0x800, "O_NONBLOCK");
+    emit(0x1000, "O_DSYNC");
+    emit(0x2000, "FASYNC");
+    emit(0x4000, "O_DIRECT");
+    emit(0x10000, "O_DIRECTORY");
+    emit(0x20000, "O_NOFOLLOW");
+    emit(0x40000, "O_NOATIME");
+    emit(0x80000, "O_CLOEXEC");
+    emit(0x100000, "O_SYNC");
+    emit(0x200000, "O_PATH");
+    emit(0x400000, "O_TMPFILE");
+    arch::SerialWrite("]");
+}
+
+void SerialWriteMmapProt(u64 prot)
+{
+    arch::SerialWrite("[");
+    if (prot == 0)
+    {
+        arch::SerialWrite("PROT_NONE]");
+        return;
+    }
+    bool first = true;
+    auto emit = [&](u64 bit, const char* name)
+    {
+        if ((prot & bit) == 0)
+            return;
+        if (!first)
+            arch::SerialWrite("|");
+        arch::SerialWrite(name);
+        first = false;
+    };
+    emit(0x1, "R");
+    emit(0x2, "W");
+    emit(0x4, "X");
+    arch::SerialWrite("]");
+}
+
+void SerialWriteMmapFlags(u64 flags)
+{
+    arch::SerialWrite("[");
+    bool first = true;
+    // Sharing mode is a 2-bit field at bits [1:0] (1 = SHARED,
+    // 2 = PRIVATE, 3 = SHARED_VALIDATE).
+    switch (flags & 0xF)
+    {
+    case 1:
+        arch::SerialWrite("MAP_SHARED");
+        first = false;
+        break;
+    case 2:
+        arch::SerialWrite("MAP_PRIVATE");
+        first = false;
+        break;
+    case 3:
+        arch::SerialWrite("MAP_SHARED_VALIDATE");
+        first = false;
+        break;
+    }
+    auto emit = [&](u64 bit, const char* name)
+    {
+        if ((flags & bit) == 0)
+            return;
+        if (!first)
+            arch::SerialWrite("|");
+        arch::SerialWrite(name);
+        first = false;
+    };
+    emit(0x10, "FIXED");
+    emit(0x20, "ANONYMOUS");
+    emit(0x100, "GROWSDOWN");
+    emit(0x800, "DENYWRITE");
+    emit(0x1000, "EXECUTABLE");
+    emit(0x2000, "LOCKED");
+    emit(0x4000, "NORESERVE");
+    emit(0x8000, "POPULATE");
+    emit(0x10000, "NONBLOCK");
+    emit(0x20000, "STACK");
+    emit(0x40000, "HUGETLB");
+    if (first)
+        arch::SerialWrite("none");
+    arch::SerialWrite("]");
+}
+
+void SerialWriteInodeMode(u64 mode)
+{
+    arch::SerialWrite("[");
+    // File-type bits live at S_IFMT (0xF000); emit a 3-letter
+    // tag mirroring `ls -l`'s first column.
+    const u64 type = mode & 0xF000;
+    switch (type)
+    {
+    case 0x1000:
+        arch::SerialWrite("FIFO ");
+        break;
+    case 0x2000:
+        arch::SerialWrite("CHR  ");
+        break;
+    case 0x4000:
+        arch::SerialWrite("DIR  ");
+        break;
+    case 0x6000:
+        arch::SerialWrite("BLK  ");
+        break;
+    case 0x8000:
+        arch::SerialWrite("REG  ");
+        break;
+    case 0xA000:
+        arch::SerialWrite("LNK  ");
+        break;
+    case 0xC000:
+        arch::SerialWrite("SOCK ");
+        break;
+    default:
+        arch::SerialWrite("?    ");
+        break;
+    }
+    // Permission bits in `rwxrwxrwx` form.
+    auto bit = [&](u64 m, char c)
+    {
+        const char buf[2] = {c, 0};
+        arch::SerialWrite((mode & m) ? buf : "-");
+    };
+    bit(0400, 'r');
+    bit(0200, 'w');
+    bit(0100, 'x');
+    bit(0040, 'r');
+    bit(0020, 'w');
+    bit(0010, 'x');
+    bit(0004, 'r');
+    bit(0002, 'w');
+    bit(0001, 'x');
+    if (mode & 04000)
+        arch::SerialWrite(" suid");
+    if (mode & 02000)
+        arch::SerialWrite(" sgid");
+    if (mode & 01000)
+        arch::SerialWrite(" sticky");
+    arch::SerialWrite("]");
+}
+
+void SerialWriteFatAttr(u64 attr)
+{
+    // Long-File-Name escape value — 0x0F (RO|H|S|V) — surfaces
+    // as a single token rather than being unpacked into its
+    // four-flag form.
+    if ((attr & 0x3F) == 0x0F)
+    {
+        arch::SerialWrite("[LFN]");
+        return;
+    }
+    arch::SerialWrite("[");
+    bool first = true;
+    auto emit = [&](u64 bit, char c)
+    {
+        if ((attr & bit) == 0)
+            return;
+        if (!first)
+            arch::SerialWrite("|");
+        const char buf[2] = {c, 0};
+        arch::SerialWrite(buf);
+        first = false;
+    };
+    emit(0x01, 'R'); // read-only
+    emit(0x02, 'H'); // hidden
+    emit(0x04, 'S'); // system
+    emit(0x08, 'V'); // volume id
+    emit(0x10, 'D'); // directory
+    emit(0x20, 'A'); // archive
+    if (first)
+        arch::SerialWrite("none");
+    arch::SerialWrite("]");
+}
+
 } // namespace duetos::core

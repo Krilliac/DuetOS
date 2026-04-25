@@ -295,4 +295,12 @@ struct MsixRoute
 // -----------------------------------------------------------------
 const char* PciClassName(u8 class_code);
 
+// More specific name for the (class, subclass, prog_if) triple. For
+// the common cases this names the actual controller flavour — e.g.
+// `0x01/0x06/0x01` -> "SATA AHCI", `0x0C/0x03/0x30` -> "USB xHCI",
+// `0x01/0x08/0x02` -> "NVMe". Returns "" for triples we haven't
+// catalogued yet, so callers can `if (*detail) { print " - ", detail }`
+// without polluting the log when there's nothing useful to say.
+const char* PciSubclassDetail(u8 class_code, u8 subclass, u8 prog_if);
+
 } // namespace duetos::drivers::pci

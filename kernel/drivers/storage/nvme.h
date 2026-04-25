@@ -87,4 +87,20 @@ void NvmeInit();
 /// "skipped" — not a test failure.
 void NvmeSelfTest();
 
+/// Translate an NVMe status-code-type / status-code pair into a
+/// short human-readable name. SCT 0 = Generic Command Status,
+/// SCT 1 = Command Specific Status, SCT 2 = Media and Data
+/// Integrity Errors, SCT 7 = Vendor specific. The most common
+/// codes (success, invalid opcode, internal error, LBA out of
+/// range, etc.) get explicit names; anything we haven't catalogued
+/// returns "unknown" so callers can still print the raw (sct, sc)
+/// pair.
+const char* NvmeStatusName(u8 sct, u8 sc);
+
+/// Translate an NVMe admin-set opcode (set 0) or NVM-set opcode
+/// (set 1) to its name. `set` matches the I/O queue convention:
+/// 0 = admin queue, 1 = an NVM I/O queue. Returns "unknown" for
+/// codes outside the small subset this driver issues.
+const char* NvmeOpcodeName(u8 set, u8 opcode);
+
 } // namespace duetos::drivers::storage

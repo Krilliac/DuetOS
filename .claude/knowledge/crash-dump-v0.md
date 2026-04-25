@@ -2,7 +2,7 @@
 
 **Type**: Observation
 **Status**: Active
-**Last updated**: 2026-04-20
+**Last updated**: 2026-04-25
 **Commit**: (see current branch HEAD)
 
 ## Summary
@@ -72,18 +72,23 @@ the crash dump, so BSS drift is irrelevant.
   message  : <message>                    (vector mnemonic for traps; caller string for Panic)
   value    : 0xNN                         (present for PanicWithValue + every trap; error_code on traps)
   symtab_entries : 0xNN
-  <trap-only: vector + rip + cs + rflags + rsp + ss + cr2(PF) + all GPRs>
+  <trap-only: vector + vector_name + rip + cs[ring=N ...] + rflags[...] + rsp + ss[...] + cr2(PF) + all GPRs>
 [panic] --- diagnostics ---
   uptime   : 0xNN
+  uptime   : <12.345 ms / 1.234 s / 1m 02.345s> since boot
   cpu_id   : 0xNN
   lapic_id : 0xNN
   task_ptr : 0xNN                         (present after SchedInit)
+  task     : <name>#<id>                  (resolved via sched::TaskName / sched::TaskId)
   rip      : 0xNN  [fn+0xOFF (file:line)]
   rsp      : 0xNN
   rbp      : 0xNN
-  cr0..cr4 : 0xNN
-  rflags   : 0xNN
-  efer     : 0xNN
+  cr0      : 0xNN [PE|MP|...|WP|PG]
+  cr2      : 0xNN
+  cr3      : 0xNN [pml4=0x... pcid=N]
+  cr4      : 0xNN [PAE|PGE|...|SMEP|SMAP]
+  rflags   : 0xNN [IF|RF|IOPL=N|...]
+  efer     : 0xNN [SCE|LME|LMA|NXE]
   backtrace (up to 16 frames, innermost first):
     #0x00000000  rip=0xNN  [fn+0xOFF (file:line)]
                  rbp=0xNN
@@ -98,8 +103,69 @@ the crash dump, so BSS drift is irrelevant.
 [panic] CPU halted — no recovery.
 ```
 
+Trap-path GPR lines (`rax..r15`) carry an inline `[fn+0xOFF (file:line)]`
+annotation when the value falls in plausible kernel code range — surfaces
+stale callback pointers / vtable spills / saved-RIP residue without forcing
+the operator to re-symbolize by hand.
+
 The schema is v1. Bump `kDumpSchemaVersion` in `core/panic.cpp` when the layout
-changes in a way a parser would care about.
+changes in a way a parser would care about. The bit-decoded suffixes (e.g.
+`[PE|WP|PG]`) live on the SAME line as the existing `<label> : <hex>` token
+sequence, so a parser that anchors on `<label> : 0x[0-9a-f]+` keeps working;
+human readers get the meaning for free.
+
+Human-readable decoders live in `kernel/core/diag_decode.{h,cpp}`:
+`WriteCr0Bits` / `WriteCr4Bits` / `WriteRflagsBits` / `WriteEferBits` /
+`WriteCr3Decoded` / `WriteSegmentSelectorBits` / `WritePageFaultErrBits` /
+`WritePteFlags` plus `WriteUptimeReadable` and `WriteCurrentTaskLabel`.
+All call only into `arch::Serial*` and the embedded symbol resolver, so
+they're safe from panic / IRQ / trap context.
+
+The same readability pass extends throughout the kernel — every log
+that previously emitted opaque hex now also surfaces a decoded
+interpretation. Coverage by subsystem (each file owns the decoder
+nearest its data):
+
+- `kernel/core/log_names.{h,cpp}` — POSIX/Linux: `LinuxSignalName`
+  (1..31 + RT range), `LinuxErrnoName` (1..115); Win32:
+  `NtStatusName` (curated subset of STATUS_*); flag printers
+  `SerialWriteWin32AccessMask` / `SerialWriteOpenFlags` /
+  `SerialWriteMmapProt` / `SerialWriteMmapFlags` /
+  `SerialWriteInodeMode` / `SerialWriteFatAttr`.
+- `kernel/drivers/pci/pci.{h,cpp}` — `PciSubclassDetail` for the
+  (class, subclass, prog_if) triple → "SATA AHCI", "USB xHCI",
+  "NVMe", etc.
+- `kernel/drivers/storage/nvme.{h,cpp}` — `NvmeStatusName` (SCT/SC
+  pair → "Internal Error" / "LBA Out of Range" / ...) and
+  `NvmeOpcodeName` (admin / NVM op → name). `CSTS.CFS` failure
+  log surfaces `[RDY|CFS|SHST|...]`.
+- `kernel/drivers/storage/ahci.cpp` — controller summary now
+  emits `cap [SNCQ|S64A|...|NP=N]`, `vs <major>.<minor>.<patch>`,
+  `ghc [AE|IE|HR]` alongside the raw hex.
+- `kernel/drivers/usb/xhci.cpp` — `CompletionCodeName` (TRB
+  completion code → "USB Transaction Error" / "Stall Error" /
+  "Short Packet" / ...). Every "failed code=" log line wraps it.
+- `kernel/drivers/usb/usb.cpp` — `hciver` hex now followed by a
+  dotted "(major.minor)" rendering of the BCD field.
+- `kernel/mm/paging.cpp` — flag-protect log wraps `flags=0xN` with
+  `WritePteFlags` `[P|RW|US|...|NX]`.
+- `kernel/core/pe_loader.cpp` — unsupported reloc-type log resolves
+  the IMAGE_REL_BASED_* name (DIR64 / HIGHLOW / ABSOLUTE / ...).
+- `kernel/fs/gpt.cpp` — partition-type GUID emits a known-name
+  suffix ("EFI System", "Microsoft Basic Data", "Linux Filesystem",
+  ...) when the GUID matches the curated table.
+- `kernel/fs/ext4.cpp` — root-inode log includes
+  `SerialWriteInodeMode` `[REG rwxr-xr-x]` next to `mode=0xN`.
+- `kernel/fs/fat32.cpp` — directory entry log surfaces the
+  attribute byte as `[A|R|H|S|D|V]` or `[LFN]`.
+- `kernel/subsystems/linux/syscall.cpp` — `kill` / `tgkill` log
+  wraps the signal number with its `SIGTERM` / `SIGKILL` / ...
+  name.
+
+Token shape preserved: every existing `<label>=0x<hex>` (or
+`SerialWriteHex(...)`) emission stays exactly where and how it
+was; the decoded suffix is appended to the same line. Parsers
+that anchor on the hex format are unaffected.
 
 ## Resolver semantics
 

@@ -174,6 +174,91 @@ constexpr u32 kPortScRw1cMask = (1u << 1) | (0x7Fu << 17);
 // allocate one (Enable Slot in particular).
 constexpr u32 kCompletionCodeSuccess = 1;
 
+// xHCI 1.2 §6.4.5 — Completion Codes. Translate the 8-bit code
+// embedded in event TRBs into a short human-readable name. Used
+// only by failure-path log lines so a reader doesn't have to map
+// `code=4` to "USB Transaction Error" by hand. Caller may still
+// print the raw decimal/hex value alongside.
+const char* CompletionCodeName(u32 code)
+{
+    switch (code)
+    {
+    case 0:
+        return "Invalid";
+    case 1:
+        return "Success";
+    case 2:
+        return "Data Buffer Error";
+    case 3:
+        return "Babble Detected Error";
+    case 4:
+        return "USB Transaction Error";
+    case 5:
+        return "TRB Error";
+    case 6:
+        return "Stall Error";
+    case 7:
+        return "Resource Error";
+    case 8:
+        return "Bandwidth Error";
+    case 9:
+        return "No Slots Available";
+    case 10:
+        return "Invalid Stream Type";
+    case 11:
+        return "Slot Not Enabled";
+    case 12:
+        return "Endpoint Not Enabled";
+    case 13:
+        return "Short Packet";
+    case 14:
+        return "Ring Underrun";
+    case 15:
+        return "Ring Overrun";
+    case 16:
+        return "VF Event Ring Full";
+    case 17:
+        return "Parameter Error";
+    case 18:
+        return "Bandwidth Overrun";
+    case 19:
+        return "Context State Error";
+    case 20:
+        return "No Ping Response";
+    case 21:
+        return "Event Ring Full";
+    case 22:
+        return "Incompatible Device";
+    case 23:
+        return "Missed Service";
+    case 24:
+        return "Command Ring Stopped";
+    case 25:
+        return "Command Aborted";
+    case 26:
+        return "Stopped";
+    case 27:
+        return "Stopped - Length Invalid";
+    case 28:
+        return "Stopped - Short Packet";
+    case 29:
+        return "Max Exit Latency Too Large";
+    case 31:
+        return "Isoch Buffer Overrun";
+    case 32:
+        return "Event Lost";
+    case 33:
+        return "Undefined Error";
+    case 34:
+        return "Invalid Stream ID";
+    case 35:
+        return "Secondary Bandwidth Error";
+    case 36:
+        return "Split Transaction Error";
+    }
+    return "Reserved/Vendor";
+}
+
 // One TRB = 16 bytes: { u32 param_lo, u32 param_hi, u32 status, u32 control }.
 struct alignas(16) Trb
 {
@@ -650,7 +735,9 @@ bool AddressDevice(Runtime& rt, PortRecord& port)
     {
         arch::SerialWrite("[xhci]   Address Device failed code=");
         arch::SerialWriteHex(code);
-        arch::SerialWrite(" slot=");
+        arch::SerialWrite(" (");
+        arch::SerialWrite(CompletionCodeName(code));
+        arch::SerialWrite(") slot=");
         arch::SerialWriteHex(dev->slot_id);
         arch::SerialWrite("\n");
         return false;
@@ -718,7 +805,9 @@ bool DoControlIn(Runtime& rt, DeviceState* dev, u8 bmRequestType, u8 bRequest, u
         arch::SerialWrite(diag);
         arch::SerialWrite(" failed code=");
         arch::SerialWriteHex(code);
-        arch::SerialWrite(" slot=");
+        arch::SerialWrite(" (");
+        arch::SerialWrite(CompletionCodeName(code));
+        arch::SerialWrite(") slot=");
         arch::SerialWriteHex(dev->slot_id);
         arch::SerialWrite("\n");
         return false;
@@ -769,7 +858,9 @@ bool DoControlNoData(Runtime& rt, DeviceState* dev, u8 bmRequestType, u8 bReques
         arch::SerialWrite(diag);
         arch::SerialWrite(" failed code=");
         arch::SerialWriteHex(code);
-        arch::SerialWrite(" slot=");
+        arch::SerialWrite(" (");
+        arch::SerialWrite(CompletionCodeName(code));
+        arch::SerialWrite(") slot=");
         arch::SerialWriteHex(dev->slot_id);
         arch::SerialWrite("\n");
         return false;
@@ -1095,7 +1186,9 @@ bool BringUpHidKeyboard(Runtime& rt, PortRecord& port)
     {
         arch::SerialWrite("[xhci]   Configure Endpoint failed code=");
         arch::SerialWriteHex(code);
-        arch::SerialWrite(" slot=");
+        arch::SerialWrite(" (");
+        arch::SerialWrite(CompletionCodeName(code));
+        arch::SerialWrite(") slot=");
         arch::SerialWriteHex(dev->slot_id);
         arch::SerialWrite("\n");
         return false;
@@ -2069,7 +2162,9 @@ bool ControlOutWithData(Runtime& rt, DeviceState* dev, u8 bmRequestType, u8 bReq
         arch::SerialWrite(diag);
         arch::SerialWrite(" failed code=");
         arch::SerialWriteHex(code);
-        arch::SerialWrite("\n");
+        arch::SerialWrite(" (");
+        arch::SerialWrite(CompletionCodeName(code));
+        arch::SerialWrite(")\n");
         return false;
     }
     return true;
@@ -2201,7 +2296,9 @@ bool XhciConfigureBulkEndpoint(u8 slot_id, u8 ep_addr, u16 max_packet)
     {
         arch::SerialWrite("[xhci] bulk-EP configure failed code=");
         arch::SerialWriteHex(code);
-        arch::SerialWrite(" slot=");
+        arch::SerialWrite(" (");
+        arch::SerialWrite(CompletionCodeName(code));
+        arch::SerialWrite(") slot=");
         arch::SerialWriteHex(slot_id);
         arch::SerialWrite(" ep=");
         arch::SerialWriteHex(ep_addr);

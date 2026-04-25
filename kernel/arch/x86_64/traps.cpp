@@ -35,6 +35,7 @@
 #include "nmi_watchdog.h"
 #include "serial.h"
 
+#include "../../core/diag_decode.h"
 #include "../../core/fault_domain.h"
 #include "../../core/hexdump.h"
 #include "../../core/log_names.h"
@@ -242,6 +243,50 @@ void WriteLabelled(const char* label, u64 value)
     SerialWrite(label);
     SerialWrite(" : ");
     SerialWriteHex(value);
+    SerialWrite("\n");
+}
+
+// Render a GPR value with an optional symbolic annotation. Most GPRs
+// hold non-pointer data (counts, indices, flags) for which a symbol
+// lookup would either return nothing or — worse — match a symbol that
+// happens to share its low bits with the value. We therefore only
+// resolve when the value falls in the higher-half kernel range, which
+// is what `core::WriteSymbolIfCode` enforces. A clean register full of
+// zeros / counts / small values shows as plain hex; one that holds a
+// kernel function pointer (callback, vtable, return-address spill)
+// gets `[fn+0xOFF (path:LINE)]` appended.
+void WriteLabelledGpr(const char* label, duetos::u64 value)
+{
+    SerialWrite("  ");
+    SerialWrite(label);
+    SerialWrite(" : ");
+    SerialWriteHex(value);
+    duetos::core::WriteSymbolIfCode(value);
+    SerialWrite("\n");
+}
+
+// Render a segment-selector line as hex + ring/role decoded. Used
+// for cs and ss in the trap dump so the operator immediately sees
+// "ring 3 user-code" instead of having to map `0x33` to a GDT slot
+// in their head.
+void WriteLabelledSelector(const char* label, duetos::u64 value)
+{
+    SerialWrite("  ");
+    SerialWrite(label);
+    SerialWrite(" : ");
+    SerialWriteHex(value);
+    duetos::core::WriteSegmentSelectorBits(value);
+    SerialWrite("\n");
+}
+
+// Render rflags as hex + decoded bits.
+void WriteLabelledRflags(const char* label, duetos::u64 value)
+{
+    SerialWrite("  ");
+    SerialWrite(label);
+    SerialWrite(" : ");
+    SerialWriteHex(value);
+    duetos::core::WriteRflagsBits(value);
     SerialWrite("\n");
 }
 
@@ -580,7 +625,9 @@ extern "C" void TrapDispatch(TrapFrame* frame)
             ++g_fault_ud;
             SerialWrite("  reason : INVALID_OPCODE\n");
         }
-        SerialWrite("  pid  : ");
+        SerialWrite("  task : ");
+        ::duetos::core::WriteCurrentTaskLabel();
+        SerialWrite("\n  pid  : ");
         SerialWriteHex(duetos::sched::CurrentTaskId());
         SerialWrite("\n  rip  : ");
         SerialWriteHex(frame->rip);
@@ -588,12 +635,14 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         SerialWriteHex(frame->rsp);
         SerialWrite("\n  cs   : ");
         SerialWriteHex(frame->cs);
+        ::duetos::core::WriteSegmentSelectorBits(frame->cs);
         if (frame->vector == 14)
         {
             SerialWrite("\n  cr2  : ");
             SerialWriteHex(ReadCr2());
             SerialWrite("\n  err  : ");
             SerialWriteHex(frame->error_code);
+            ::duetos::core::WritePageFaultErrBits(frame->error_code);
         }
         SerialWrite("\n");
         // Instruction-at-RIP dump. Most user-mode faults are a wild
@@ -640,13 +689,16 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     core::BeginCrashDump("arch/traps", vector_name, &frame->error_code);
 
     WriteLabelled("vector    ", frame->vector);
+    SerialWrite("  vector_name : ");
+    SerialWrite(vector_name);
+    SerialWrite("\n");
     SerialWrite("  rip       : ");
     core::WriteAddressWithSymbol(frame->rip);
     SerialWrite("\n");
-    WriteLabelled("cs        ", frame->cs);
-    WriteLabelled("rflags    ", frame->rflags);
+    WriteLabelledSelector("cs        ", frame->cs);
+    WriteLabelledRflags("rflags    ", frame->rflags);
     WriteLabelled("rsp       ", frame->rsp);
-    WriteLabelled("ss        ", frame->ss);
+    WriteLabelledSelector("ss        ", frame->ss);
 
     u64 cr2 = 0;
     if (frame->vector == 14) // #PF
@@ -674,21 +726,27 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     }
 
     SerialWrite("  --\n");
-    WriteLabelled("rax       ", frame->rax);
-    WriteLabelled("rbx       ", frame->rbx);
-    WriteLabelled("rcx       ", frame->rcx);
-    WriteLabelled("rdx       ", frame->rdx);
-    WriteLabelled("rsi       ", frame->rsi);
-    WriteLabelled("rdi       ", frame->rdi);
-    WriteLabelled("rbp       ", frame->rbp);
-    WriteLabelled("r8        ", frame->r8);
-    WriteLabelled("r9        ", frame->r9);
-    WriteLabelled("r10       ", frame->r10);
-    WriteLabelled("r11       ", frame->r11);
-    WriteLabelled("r12       ", frame->r12);
-    WriteLabelled("r13       ", frame->r13);
-    WriteLabelled("r14       ", frame->r14);
-    WriteLabelled("r15       ", frame->r15);
+    // GPRs. Each register is printed with its raw hex (existing
+    // schema) and, when the value falls in plausible kernel code
+    // range, the resolved `[fn+0xOFF (file:line)]` annotation. This
+    // surfaces stale callback pointers, return-address spills,
+    // vtable entries, etc., without forcing the operator to run a
+    // separate symbolizer over every value by hand.
+    WriteLabelledGpr("rax       ", frame->rax);
+    WriteLabelledGpr("rbx       ", frame->rbx);
+    WriteLabelledGpr("rcx       ", frame->rcx);
+    WriteLabelledGpr("rdx       ", frame->rdx);
+    WriteLabelledGpr("rsi       ", frame->rsi);
+    WriteLabelledGpr("rdi       ", frame->rdi);
+    WriteLabelledGpr("rbp       ", frame->rbp);
+    WriteLabelledGpr("r8        ", frame->r8);
+    WriteLabelledGpr("r9        ", frame->r9);
+    WriteLabelledGpr("r10       ", frame->r10);
+    WriteLabelledGpr("r11       ", frame->r11);
+    WriteLabelledGpr("r12       ", frame->r12);
+    WriteLabelledGpr("r13       ", frame->r13);
+    WriteLabelledGpr("r14       ", frame->r14);
+    WriteLabelledGpr("r15       ", frame->r15);
 
     // Instruction bytes at RIP. Lets the operator eyeball the actual
     // opcode that faulted without running objdump. x86_64 max

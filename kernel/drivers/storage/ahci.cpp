@@ -565,6 +565,91 @@ void BringUpController(const pci::Device& dev, u32 ctrl_idx)
                          static_cast<u64>(bar5.address), "abar_mmio", reinterpret_cast<u64>(hba));
     core::LogWith2Values(core::LogLevel::Info, "drivers/ahci", "  caps", "cap", cap, "vs", vs);
     core::LogWith2Values(core::LogLevel::Info, "drivers/ahci", "  state", "ghc", ghc, "pi", pi);
+    // Decoded register breakdown — surface the bits a reader needs
+    // to triage. CAP is the controller's capability snapshot
+    // (NCQ / 64-bit DMA / hot-plug / max ports), VS is major.minor
+    // (e.g. 0x00010300 = 1.3.0), GHC is the live mode (AE/IE/HR)
+    // and PI is the bitmask of populated ports.
+    arch::SerialWrite("[I] drivers/ahci :   cap [");
+    bool first = true;
+    auto cap_bit = [&](u32 b, const char* n)
+    {
+        if ((cap & (1U << b)) == 0)
+            return;
+        if (!first)
+            arch::SerialWrite("|");
+        arch::SerialWrite(n);
+        first = false;
+    };
+    cap_bit(13, "PMD");
+    cap_bit(17, "PSC");
+    cap_bit(18, "SSC");
+    cap_bit(19, "PMP");
+    cap_bit(20, "FBSS");
+    cap_bit(24, "SCLO");
+    cap_bit(25, "SAL");
+    cap_bit(26, "SALP");
+    cap_bit(27, "SSS");
+    cap_bit(28, "SMPS");
+    cap_bit(29, "SSNTF");
+    cap_bit(30, "SNCQ");
+    cap_bit(31, "S64A");
+    if (!first)
+        arch::SerialWrite("|");
+    arch::SerialWrite("NP=");
+    {
+        char d[3] = {0, 0, 0};
+        u32 n = (cap & 0x1F) + 1;
+        if (n >= 10)
+        {
+            d[0] = static_cast<char>('0' + (n / 10));
+            d[1] = static_cast<char>('0' + (n % 10));
+        }
+        else
+        {
+            d[0] = static_cast<char>('0' + n);
+        }
+        arch::SerialWrite(d);
+    }
+    arch::SerialWrite("]\n");
+
+    arch::SerialWrite("[I] drivers/ahci :   vs ");
+    {
+        const u32 maj = (vs >> 16) & 0xFFFF;
+        const u32 min = (vs >> 8) & 0xFF;
+        const u32 sub = vs & 0xFF;
+        char buf[6] = {0, 0, 0, 0, 0, 0};
+        buf[0] = static_cast<char>('0' + (maj % 10));
+        buf[1] = '.';
+        buf[2] = static_cast<char>('0' + ((min >> 4) & 0xF));
+        buf[3] = static_cast<char>('0' + (min & 0xF));
+        buf[4] = '.';
+        buf[5] = 0;
+        arch::SerialWrite(buf);
+        char tail[3] = {static_cast<char>('0' + ((sub >> 4) & 0xF)), static_cast<char>('0' + (sub & 0xF)), 0};
+        arch::SerialWrite(tail);
+    }
+    arch::SerialWrite("\n");
+
+    arch::SerialWrite("[I] drivers/ahci :   ghc [");
+    bool gfirst = true;
+    auto gbit = [&](u32 b, const char* n)
+    {
+        if ((ghc & (1U << b)) == 0)
+            return;
+        if (!gfirst)
+            arch::SerialWrite("|");
+        arch::SerialWrite(n);
+        gfirst = false;
+    };
+    gbit(31, "AE");
+    gbit(2, "MRSM");
+    gbit(1, "IE");
+    gbit(0, "HR");
+    if (gfirst)
+        arch::SerialWrite("none");
+    arch::SerialWrite("]\n");
+
     core::LogWithValue(core::LogLevel::Info, "drivers/ahci", "  num_ports", num_ports);
 
     for (u32 i = 0; i < num_ports && i < 32; ++i)

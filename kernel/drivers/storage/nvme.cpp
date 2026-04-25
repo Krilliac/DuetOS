@@ -257,7 +257,46 @@ bool WaitReady(u32 expected)
         const u32 csts = Reg32(kRegCsts);
         if (csts & kCstsCfs)
         {
+            // CSTS bit decode (NVMe Base Spec §3.1.6): RDY=0, CFS=1,
+            // SHST=3:2, NSSRO=4, PP=5. Surface them as a flag list
+            // alongside the raw hex so the operator sees "CFS|...".
             core::LogWithValue(core::LogLevel::Error, "drivers/nvme", "CSTS.CFS set during wait", csts);
+            arch::SerialWrite("[E] drivers/nvme : CSTS bits [");
+            bool first = true;
+            if (csts & 0x01)
+            {
+                arch::SerialWrite("RDY");
+                first = false;
+            }
+            if (csts & 0x02)
+            {
+                if (!first)
+                    arch::SerialWrite("|");
+                arch::SerialWrite("CFS");
+                first = false;
+            }
+            const u32 shst = (csts >> 2) & 0x3;
+            if (shst != 0)
+            {
+                if (!first)
+                    arch::SerialWrite("|");
+                arch::SerialWrite(shst == 1 ? "SHST=processing" : (shst == 2 ? "SHST=complete" : "SHST=rsvd"));
+                first = false;
+            }
+            if (csts & 0x10)
+            {
+                if (!first)
+                    arch::SerialWrite("|");
+                arch::SerialWrite("NSSRO");
+                first = false;
+            }
+            if (csts & 0x20)
+            {
+                if (!first)
+                    arch::SerialWrite("|");
+                arch::SerialWrite("PP");
+            }
+            arch::SerialWrite("]\n");
             return false;
         }
         if ((csts & kCstsReady) == expected)
@@ -399,7 +438,19 @@ bool SubmitAndWait(Queue& q, SqEntry entry)
             *CqHeadDoorbell(q.id) = new_head;
             if (status_full != 0)
             {
-                core::LogWith2Values(core::LogLevel::Error, "drivers/nvme", "command failed", "sct", sct, "sc", sc);
+                // Surface both the (sct, sc) pair AND the human-readable
+                // status name + the opcode name. A reader who's never
+                // memorised the NVMe spec figures sees "Internal Error"
+                // / "LBA Out of Range" / "Invalid Opcode" instead of
+                // chasing down `sct=0 sc=6` in a PDF.
+                const u8 op = static_cast<u8>(entry.cdw0 & 0xFFu);
+                const bool is_admin = (q.id == 0);
+                core::LogWith2Values(core::LogLevel::Error, "drivers/nvme", "command failed", "sct",
+                                     static_cast<u64>(sct), "sc", static_cast<u64>(sc));
+                core::LogWithString(core::LogLevel::Error, "drivers/nvme", "  status", "name",
+                                    NvmeStatusName(static_cast<u8>(sct), static_cast<u8>(sc)));
+                core::LogWithString(core::LogLevel::Error, "drivers/nvme", "  opcode", "name",
+                                    NvmeOpcodeName(is_admin ? 0 : 1, op));
                 return false;
             }
             return true;
@@ -1021,6 +1072,156 @@ void NvmeSelfTest()
         return;
     }
     SerialWrite("[nvme] self-test OK (LBA 0 read + 0x55AA signature present)\n");
+}
+
+const char* NvmeStatusName(u8 sct, u8 sc)
+{
+    // Generic Command Status (NVMe Base Spec 1.4 Figure 122).
+    if (sct == 0)
+    {
+        switch (sc)
+        {
+        case 0x00:
+            return "Successful Completion";
+        case 0x01:
+            return "Invalid Command Opcode";
+        case 0x02:
+            return "Invalid Field in Command";
+        case 0x03:
+            return "Command ID Conflict";
+        case 0x04:
+            return "Data Transfer Error";
+        case 0x05:
+            return "Aborted - Power Loss";
+        case 0x06:
+            return "Internal Error";
+        case 0x07:
+            return "Command Abort Requested";
+        case 0x08:
+            return "Aborted - SQ Deletion";
+        case 0x0B:
+            return "Aborted - Failed Fused";
+        case 0x0E:
+            return "Invalid SGL Segment Descriptor";
+        case 0x0F:
+            return "Invalid Number of SGL Descriptors";
+        case 0x80:
+            return "LBA Out of Range";
+        case 0x81:
+            return "Capacity Exceeded";
+        case 0x82:
+            return "Namespace Not Ready";
+        }
+        return "Generic Status (unknown)";
+    }
+    // Command Specific Status.
+    if (sct == 1)
+    {
+        switch (sc)
+        {
+        case 0x00:
+            return "Completion Queue Invalid";
+        case 0x01:
+            return "Invalid Queue Identifier";
+        case 0x02:
+            return "Invalid Queue Size";
+        case 0x05:
+            return "Asynchronous Event Request Limit Exceeded";
+        case 0x0C:
+            return "Invalid Interrupt Vector";
+        }
+        return "Command-Specific Status (unknown)";
+    }
+    // Media and Data Integrity Errors.
+    if (sct == 2)
+    {
+        switch (sc)
+        {
+        case 0x80:
+            return "Write Fault";
+        case 0x81:
+            return "Unrecovered Read Error";
+        case 0x82:
+            return "End-to-end Guard Check Error";
+        case 0x83:
+            return "End-to-end Application Tag Check Error";
+        case 0x84:
+            return "End-to-end Reference Tag Check Error";
+        case 0x85:
+            return "Compare Failure";
+        case 0x86:
+            return "Access Denied";
+        }
+        return "Media/Integrity (unknown)";
+    }
+    if (sct == 7)
+    {
+        return "Vendor Specific";
+    }
+    return "Reserved Status Code Type";
+}
+
+const char* NvmeOpcodeName(u8 set, u8 opcode)
+{
+    if (set == 0)
+    {
+        // Admin command set.
+        switch (opcode)
+        {
+        case 0x00:
+            return "Delete I/O Submission Queue";
+        case 0x01:
+            return "Create I/O Submission Queue";
+        case 0x02:
+            return "Get Log Page";
+        case 0x04:
+            return "Delete I/O Completion Queue";
+        case 0x05:
+            return "Create I/O Completion Queue";
+        case 0x06:
+            return "Identify";
+        case 0x08:
+            return "Abort";
+        case 0x09:
+            return "Set Features";
+        case 0x0A:
+            return "Get Features";
+        case 0x0C:
+            return "Asynchronous Event Request";
+        case 0x10:
+            return "Firmware Commit";
+        case 0x11:
+            return "Firmware Image Download";
+        case 0x80:
+            return "Format NVM";
+        case 0x81:
+            return "Security Send";
+        case 0x82:
+            return "Security Receive";
+        }
+        return "admin (unknown)";
+    }
+    // NVM I/O command set.
+    switch (opcode)
+    {
+    case 0x00:
+        return "Flush";
+    case 0x01:
+        return "Write";
+    case 0x02:
+        return "Read";
+    case 0x04:
+        return "Write Uncorrectable";
+    case 0x05:
+        return "Compare";
+    case 0x08:
+        return "Write Zeroes";
+    case 0x09:
+        return "Dataset Management";
+    case 0x0D:
+        return "Reservation Register";
+    }
+    return "I/O (unknown)";
 }
 
 } // namespace duetos::drivers::storage

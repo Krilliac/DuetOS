@@ -653,9 +653,44 @@ bool ApplyRelocations(const u8* file, u64 file_len, const PeHeaders& h, duetos::
                 continue;
             if (type != 10) // IMAGE_REL_BASED_DIR64 is the only other type we expect.
             {
+                // Surface the IMAGE_REL_BASED_* name so a reader doesn't
+                // have to look up `type=3` against the PE spec table.
+                const char* name = "unknown";
+                switch (type)
+                {
+                case 0:
+                    name = "ABSOLUTE";
+                    break;
+                case 1:
+                    name = "HIGH";
+                    break;
+                case 2:
+                    name = "LOW";
+                    break;
+                case 3:
+                    name = "HIGHLOW";
+                    break;
+                case 4:
+                    name = "HIGHADJ";
+                    break;
+                case 5:
+                    name = "MIPS_JMPADDR/ARM_MOV32";
+                    break;
+                case 7:
+                    name = "ARM_MOV32T";
+                    break;
+                case 9:
+                    name = "MIPS_JMPADDR16";
+                    break;
+                case 10:
+                    name = "DIR64";
+                    break;
+                }
                 SerialWrite("[pe-reloc] unsupported reloc type=");
                 SerialWriteHex(type);
-                SerialWrite("\n");
+                SerialWrite(" (IMAGE_REL_BASED_");
+                SerialWrite(name);
+                SerialWrite(")\n");
                 return false;
             }
 

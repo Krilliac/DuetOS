@@ -24,6 +24,7 @@ set(DUETOS_KERNEL_SHARED_SOURCES
     core/auth.cpp
     core/cleanroom_trace.cpp
     core/crprobe.cpp
+    core/diag_decode.cpp
     core/heartbeat.cpp
     core/hexdump.cpp
     core/klog.cpp
