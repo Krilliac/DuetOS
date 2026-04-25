@@ -32,6 +32,7 @@ set(DUETOS_KERNEL_SHARED_SOURCES
     core/reboot.cpp
     core/recovery.cpp
     core/elf_loader.cpp
+    core/firmware_loader.cpp
     core/pe_loader.cpp
     core/pe_exports.cpp
     core/dll_loader.cpp
@@ -104,14 +105,19 @@ set(DUETOS_KERNEL_SHARED_SOURCES
     drivers/gpu/bochs_vbe.cpp
     drivers/gpu/gpu.cpp
     drivers/gpu/virtio_gpu.cpp
+    drivers/net/bcm43xx.cpp
+    drivers/net/iwlwifi.cpp
     drivers/net/net.cpp
+    drivers/net/rtl88xx.cpp
     drivers/pci/pci.cpp
     drivers/power/power.cpp
     drivers/storage/ahci.cpp
     drivers/storage/block.cpp
     drivers/storage/nvme.cpp
     drivers/usb/hid_descriptor.cpp
+    drivers/usb/cdc_ecm.cpp
     drivers/usb/msc_scsi.cpp
+    drivers/usb/rndis.cpp
     drivers/usb/usb.cpp
     drivers/usb/xhci.cpp
     drivers/video/calendar.cpp
@@ -140,6 +146,7 @@ set(DUETOS_KERNEL_SHARED_SOURCES
     mm/page.cpp
     mm/paging.cpp
     mm/user_copy.S
+    net/net_smoke.cpp
     net/stack.cpp
     sched/context_switch.S
     sched/sched.cpp

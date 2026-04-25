@@ -228,6 +228,35 @@ struct DeviceState
     u8* hid_buf_virt;         // report buffer (8 bytes keyboard, 3 bytes mouse)
     u8 hid_prev[8];           // keyboard: previous report (mouse is stateless on keys)
     u64 hid_outstanding_phys; // TRB phys addr we're waiting on, or 0
+
+    // Bulk endpoint state. One pair (IN + OUT) per device is enough
+    // for every v0 USB-net class we care about (CDC-ECM, RTL8150,
+    // AX88xxx). Configured by XhciConfigureBulkEndpoint; used by
+    // XhciBulkSubmit + XhciBulkPoll.
+    bool bulk_in_ready;
+    u8 bulk_in_ep_addr;
+    u8 bulk_in_dci;
+    u16 bulk_in_mps;
+    mm::PhysAddr bulk_in_ring_phys;
+    Trb* bulk_in_ring;
+    u32 bulk_in_ring_slots;
+    u32 bulk_in_ring_idx;
+    u32 bulk_in_ring_cycle;
+
+    bool bulk_out_ready;
+    u8 bulk_out_ep_addr;
+    u8 bulk_out_dci;
+    u16 bulk_out_mps;
+    mm::PhysAddr bulk_out_ring_phys;
+    Trb* bulk_out_ring;
+    u32 bulk_out_ring_slots;
+    u32 bulk_out_ring_idx;
+    u32 bulk_out_ring_cycle;
+
+    // Class/subclass for device-by-class lookup (populated during
+    // descriptor parse).
+    u8 dev_class;
+    u8 dev_subclass;
 };
 constinit DeviceState g_devices[kMaxDevicesTotal] = {};
 constinit u32 g_device_count = 0;
@@ -381,6 +410,12 @@ void AdvanceEventRing(Runtime& rt)
     WriteMmio64(rt.intr0, /*kIntrErdpLo=*/0x18, erdp | (1ull << 3));
 }
 
+// Forward declaration for the side cache helpers defined further
+// down the TU. WaitEvent stashes Transfer Events that aren't for
+// the current expect_phys so a concurrent poller can claim them.
+void TrbEventCacheStash(u64 trb_phys, u32 completion_code, u32 residual, u32 trb_len);
+bool TrbEventCacheTake(u64 trb_phys, u32* completion_code, u32* residual, u32* trb_len);
+
 // Drain events until one whose TRB pointer equals `expect_phys` and
 // whose type matches `expect_type` lands in the consumer slot.
 // Irrelevant events are consumed + dropped (port-status changes, etc.).
@@ -405,9 +440,19 @@ bool WaitEvent(Runtime& rt, u64 expect_phys, u32 expect_type, Trb* out, u64 iter
             AdvanceEventRing(rt);
             return true;
         }
-        // Non-matching event — drop it. A Port Status Change event
-        // can land between an Enable Slot completion and the next
-        // command; we don't care.
+        // Non-matching event. If it's another Transfer Event, stash
+        // it into the side cache so a concurrent XhciBulkPoll waiter
+        // can claim it. Other event types (port status, command
+        // completions destined for the synchronous command path)
+        // are dropped — those callers either run during init when
+        // no other consumer exists, or have their own dedicated
+        // pollers.
+        if (type == kTrbTypeTransferEvent)
+        {
+            const u32 code = (e.status >> 24) & 0xFF;
+            const u32 residual = e.status & 0x00FFFFFF;
+            TrbEventCacheStash(ptr, code, residual, /*trb_len=*/0);
+        }
         AdvanceEventRing(rt);
     }
     return false;
@@ -719,6 +764,8 @@ bool FetchDeviceDescriptor(Runtime& rt, PortRecord& port)
     port.device_subclass = d[5];
     port.device_protocol = d[6];
     port.descriptor_ok = true;
+    dev->dev_class = port.device_class;
+    dev->dev_subclass = port.device_subclass;
     return true;
 }
 
@@ -834,6 +881,10 @@ constexpr u8 kUsbReqSetConfiguration = 0x09;
 constexpr u32 kTrbTypeConfigureEndpoint = 12;
 // xHCI EP Type = Interrupt IN (§6.2.3, table 6-9).
 constexpr u32 kEpTypeInterruptIn = 7;
+// Bulk endpoint types (§6.2.3 table 6-9). Symmetric IN / OUT
+// distinguished by direction nibble in the input context.
+constexpr u32 kEpTypeBulkOut = 2;
+constexpr u32 kEpTypeBulkIn = 6;
 
 // Translate a USB bEndpointAddress into the xHCI Device Context
 // Index (DCI) used for both the input-context layout and the
@@ -1254,6 +1305,117 @@ struct PollTaskArg
 constinit PollTaskArg g_poll_args[kMaxControllers] = {};
 constinit Runtime g_poll_rt[kMaxControllers] = {};
 
+// Event-ring drain pause. Set to true by class drivers (CDC-ECM)
+// while they run control or bulk transfers synchronously — keeps
+// HidPollEntry from stealing the Transfer Events those transfers
+// are waiting on. Volatile because it's read across threads; single
+// writer at a time (documented contract).
+constinit volatile bool g_event_consumer_paused = false;
+
+// Side cache for Transfer Events that arrive on the ring but aren't
+// for the TRB the current waiter is polling for. Two-thread case:
+// rndis-rx submits a bulk-IN and polls for it; the smoke task
+// concurrently submits a bulk-OUT and polls for IT. Whichever
+// thread's WaitEvent runs first consumes BOTH events — the second
+// thread's TRB is "stolen". To fix, every WaitEvent that sees an
+// event for a different TRB stashes it here. Subsequent
+// XhciBulkPoll calls check the cache before polling the live ring.
+//
+// Single-slot cache works because only two concurrent waiters are
+// expected in v0 (one TX, one RX per USB-net device). Multi-device
+// USB-net coexistence will need a multi-slot version, which is a
+// trivial extension once the use case lands.
+struct TrbEventCacheEntry
+{
+    volatile u64 trb_phys;
+    volatile u32 completion_code;
+    volatile u32 residual; // status bits 0..23 = remaining bytes (for short packets)
+    volatile u32 trb_len;  // length we put in the original TRB
+    volatile u8 valid;
+};
+constinit TrbEventCacheEntry g_trb_event_cache[4] = {};
+
+// Bulk-poll serialization. The event ring's consumer indices
+// (rt.evt_idx + rt.evt_cycle) are non-atomic; two threads in
+// WaitEvent simultaneously corrupt them. The simplest correct v0
+// fix is to serialize XhciBulkPoll calls so only one waiter
+// touches the ring at a time. Concurrency goes back to 1×, which
+// is plenty for DHCP-rate USB-net traffic; a future event-router
+// slice removes the need.
+constinit volatile u32 g_bulk_poll_lock = 0;
+
+void BulkPollLockAcquire()
+{
+    u32 spins = 0;
+    while (true)
+    {
+        u32 expected = 0;
+        if (__atomic_compare_exchange_n(&g_bulk_poll_lock, &expected, 1u, /*weak=*/false, __ATOMIC_ACQUIRE,
+                                        __ATOMIC_ACQUIRE))
+            return;
+        if (++spins >= 4096)
+        {
+            // Yield instead of pure spin — the lock holder might
+            // be waiting for an event that requires scheduler
+            // progress (timer tick, IRQ-driven wake).
+            duetos::sched::SchedSleepTicks(1);
+            spins = 0;
+        }
+        else
+        {
+            asm volatile("pause" : : : "memory");
+        }
+    }
+}
+
+void BulkPollLockRelease()
+{
+    __atomic_store_n(&g_bulk_poll_lock, 0u, __ATOMIC_RELEASE);
+}
+
+// Cache an unrelated event for someone else's poll to claim.
+void TrbEventCacheStash(u64 trb_phys, u32 completion_code, u32 residual, u32 trb_len)
+{
+    for (auto& e : g_trb_event_cache)
+    {
+        if (e.valid)
+            continue;
+        e.trb_phys = trb_phys;
+        e.completion_code = completion_code;
+        e.residual = residual;
+        e.trb_len = trb_len;
+        e.valid = 1;
+        return;
+    }
+    // Cache full — drop oldest (slot 0) so we always have room.
+    g_trb_event_cache[0].trb_phys = trb_phys;
+    g_trb_event_cache[0].completion_code = completion_code;
+    g_trb_event_cache[0].residual = residual;
+    g_trb_event_cache[0].trb_len = trb_len;
+    g_trb_event_cache[0].valid = 1;
+}
+
+// Try to claim a cached event for this TRB. Returns true on hit.
+bool TrbEventCacheTake(u64 trb_phys, u32* completion_code, u32* residual, u32* trb_len)
+{
+    for (auto& e : g_trb_event_cache)
+    {
+        if (e.valid && e.trb_phys == trb_phys)
+        {
+            if (completion_code)
+                *completion_code = e.completion_code;
+            if (residual)
+                *residual = e.residual;
+            if (trb_len)
+                *trb_len = e.trb_len;
+            e.valid = 0;
+            e.trb_phys = 0;
+            return true;
+        }
+    }
+    return false;
+}
+
 // Acknowledge interrupter 0's IMAN.IP (the device-side pending
 // bit). LAPIC EOI is handled by the generic IRQ dispatcher; this
 // clears the xHCI-internal pending bit so a subsequent event
@@ -1332,6 +1494,14 @@ void HidPollEntry(void* raw)
     for (;;)
     {
         // Drain every event currently available, then sleep.
+        // Yield entirely while a class driver has the ring paused
+        // (CDC-ECM bring-up, future USB-net probes). Short window;
+        // the probe only takes ~10ms on QEMU.
+        if (g_event_consumer_paused)
+        {
+            duetos::sched::SchedSleepTicks(1);
+            continue;
+        }
         Trb e{};
         while (TryReadEvent(rt, &e))
         {
@@ -1801,6 +1971,18 @@ bool InitOne(const HostControllerInfo& h, ControllerInfo& out)
     arch::SerialWriteHex(out.hid_mice_bound);
     arch::SerialWrite("\n");
 
+    // Always publish this controller's Runtime into g_poll_rt so
+    // that public APIs (XhciControlIn / XhciBulkSubmit) can reach
+    // the event + command rings even when no HID device drove a
+    // task spawn. Without this, a USB-net-only board leaves
+    // g_poll_rt[idx] zeroed and every user-issued transfer's
+    // WaitEvent polls a nullptr ring + times out.
+    {
+        const u32 idx_any = u32(&out - g_controllers);
+        if (idx_any < kMaxControllers)
+            g_poll_rt[idx_any] = rt;
+    }
+
     // Spawn the per-controller HID polling task if any device
     // came up. The Runtime struct lives in our stack frame here;
     // copy it into file-scope storage so the task's entry point
@@ -1814,7 +1996,8 @@ bool InitOne(const HostControllerInfo& h, ControllerInfo& out)
         const u32 idx = u32(&out - g_controllers);
         if (idx < kMaxControllers)
         {
-            g_poll_rt[idx] = rt;
+            // g_poll_rt[idx] is already populated by the
+            // unconditional publish above — just wire the arg.
             g_poll_args[idx].rt = &g_poll_rt[idx];
             g_poll_args[idx].info = &out;
             g_poll_args[idx].wait = {};
@@ -1844,7 +2027,306 @@ bool InitOne(const HostControllerInfo& h, ControllerInfo& out)
     return true;
 }
 
+// -------------------------------------------------------------------
+// USB-net class-driver primitives. Exposed via xhci.h. These are the
+// minimal slice of xHCI needed by a Bulk-In / Bulk-Out USB class
+// driver (CDC-ECM, RTL8150, AX88xxx, ...). They thunk into the
+// internal helpers above and return bool / out-params instead of
+// Result<> to keep the cross-driver surface narrow.
+// -------------------------------------------------------------------
+
+bool ControlOutWithData(Runtime& rt, DeviceState* dev, u8 bmRequestType, u8 bRequest, u16 wValue, u16 wIndex,
+                        const void* buf, u16 len, const char* diag)
+{
+    // bmRequestType bit 7 must be 0 (host-to-device).
+    const u32 setup_lo = u32(bmRequestType) | (u32(bRequest) << 8) | (u32(wValue) << 16);
+    const u32 setup_hi = u32(wIndex) | (u32(len) << 16);
+    const u32 setup_status = 8u;
+    const bool has_data = buf != nullptr && len > 0;
+    const u32 transfer_type = has_data ? kTransferTypeOutData : kTransferTypeNoData;
+    const u32 setup_ctl = (transfer_type << 16) | kTrbCtlIdt;
+
+    const u64 setup_phys =
+        EnqueueRingTrb(dev->ep0_ring, dev->ep0_ring_phys, dev->ep0_slots, dev->ep0_idx, dev->ep0_cycle,
+                       kTrbTypeSetupStage, setup_lo, setup_hi, setup_status, setup_ctl);
+    (void)setup_phys;
+
+    if (has_data)
+    {
+        // Copy payload into the device's scratch page for DMA.
+        const auto* src = static_cast<const u8*>(buf);
+        for (u16 i = 0; i < len; ++i)
+            dev->scratch_virt[i] = src[i];
+        const u64 data_phys =
+            EnqueueRingTrb(dev->ep0_ring, dev->ep0_ring_phys, dev->ep0_slots, dev->ep0_idx, dev->ep0_cycle,
+                           kTrbTypeDataStage, u32(dev->scratch_phys), u32(dev->scratch_phys >> 32), len, /*ctl=*/0);
+        (void)data_phys;
+    }
+
+    // Status stage IN (opposite of OUT data), IOC=1.
+    const u64 status_phys = EnqueueRingTrb(dev->ep0_ring, dev->ep0_ring_phys, dev->ep0_slots, dev->ep0_idx,
+                                           dev->ep0_cycle, kTrbTypeStatusStage, 0, 0, 0, kTrbCtlIoc | kTrbCtlDirIn);
+    if (status_phys == 0)
+        return false;
+    RingDoorbell(rt, dev->slot_id, 1);
+    Trb e{};
+    if (!WaitEvent(rt, status_phys, kTrbTypeTransferEvent, &e, 4'000'000))
+    {
+        arch::SerialWrite("[xhci]   control-OUT ");
+        arch::SerialWrite(diag);
+        arch::SerialWrite(" timed out\n");
+        return false;
+    }
+    const u32 code = (e.status >> 24) & 0xFF;
+    if (code != kCompletionCodeSuccess)
+    {
+        arch::SerialWrite("[xhci]   control-OUT ");
+        arch::SerialWrite(diag);
+        arch::SerialWrite(" failed code=");
+        arch::SerialWriteHex(code);
+        arch::SerialWrite("\n");
+        return false;
+    }
+    return true;
+}
+
 } // namespace
+
+u8 XhciFindDeviceByClass(u8 class_code, u8 subclass)
+{
+    for (u32 i = 0; i < kMaxDevicesTotal; ++i)
+    {
+        const DeviceState& d = g_devices[i];
+        if (!d.in_use || d.slot_id == 0)
+            continue;
+        if (class_code != 0xFF && d.dev_class != class_code)
+            continue;
+        if (subclass != 0xFF && d.dev_subclass != subclass)
+            continue;
+        return d.slot_id;
+    }
+    return 0;
+}
+
+void XhciPauseEventConsumer(bool pause)
+{
+    g_event_consumer_paused = pause;
+}
+
+u32 XhciEnumerateDevices(u8* out, u32 max)
+{
+    u32 n = 0;
+    for (u32 i = 0; i < kMaxDevicesTotal && n < max; ++i)
+    {
+        const DeviceState& d = g_devices[i];
+        if (!d.in_use || d.slot_id == 0)
+            continue;
+        if (out != nullptr)
+            out[n] = d.slot_id;
+        ++n;
+    }
+    return n;
+}
+
+bool XhciControlIn(u8 slot_id, u8 bmRequestType, u8 bRequest, u16 wValue, u16 wIndex, void* buf, u16 len)
+{
+    if ((bmRequestType & 0x80) == 0 || len > mm::kPageSize)
+        return false;
+    DeviceState* dev = DeviceForSlot(slot_id);
+    if (dev == nullptr)
+        return false;
+    Runtime& rt = g_poll_rt[dev->ctrlr_idx];
+    if (!DoControlIn(rt, dev, bmRequestType, bRequest, wValue, wIndex, len, "user-control-IN"))
+        return false;
+    if (buf != nullptr && len > 0)
+    {
+        auto* dst = static_cast<u8*>(buf);
+        for (u16 i = 0; i < len; ++i)
+            dst[i] = dev->scratch_virt[i];
+    }
+    return true;
+}
+
+bool XhciControlOut(u8 slot_id, u8 bmRequestType, u8 bRequest, u16 wValue, u16 wIndex, const void* buf, u16 len)
+{
+    if ((bmRequestType & 0x80) != 0 || len > mm::kPageSize)
+        return false;
+    DeviceState* dev = DeviceForSlot(slot_id);
+    if (dev == nullptr)
+        return false;
+    Runtime& rt = g_poll_rt[dev->ctrlr_idx];
+    return ControlOutWithData(rt, dev, bmRequestType, bRequest, wValue, wIndex, buf, len, "user-control-OUT");
+}
+
+bool XhciConfigureBulkEndpoint(u8 slot_id, u8 ep_addr, u16 max_packet)
+{
+    DeviceState* dev = DeviceForSlot(slot_id);
+    if (dev == nullptr)
+        return false;
+    const bool is_in = (ep_addr & 0x80) != 0;
+    if (is_in && dev->bulk_in_ready)
+        return true;
+    if (!is_in && dev->bulk_out_ready)
+        return true;
+
+    mm::PhysAddr ring_phys = 0;
+    void* ring_virt = nullptr;
+    if (!AllocZeroPage(&ring_phys, &ring_virt))
+        return false;
+
+    auto* ring = static_cast<Trb*>(ring_virt);
+    const u32 slots = mm::kPageSize / sizeof(Trb);
+    Trb& link = ring[slots - 1];
+    link.param_lo = u32(ring_phys);
+    link.param_hi = u32(ring_phys >> 32);
+    link.status = 0;
+    link.control = (kTrbTypeLink << 10) | (1u << 1) | 1u;
+
+    const u8 dci = EndpointDci(ep_addr);
+    const u32 ep_type = is_in ? kEpTypeBulkIn : kEpTypeBulkOut;
+    const u32 interval = 0; // bulk endpoints don't use the interval field
+
+    Runtime& rt = g_poll_rt[dev->ctrlr_idx];
+    BuildConfigureEndpointInputContext(dev->input_ctx_virt, rt.ctx_bytes, dev->port_num, dev->speed, dci, ep_type,
+                                       max_packet, interval, ring_phys);
+    const u64 cmd_phys = SubmitCmd(rt, kTrbTypeConfigureEndpoint, u32(dev->input_ctx_phys),
+                                   u32(dev->input_ctx_phys >> 32), 0, u32(slot_id) << 24);
+    if (cmd_phys == 0)
+        return false;
+    u32 cc = 0;
+    u8 sl = 0;
+    if (!WaitCmdCompletion(rt, cmd_phys, &cc, &sl))
+        return false;
+    const u32 code = (cc >> 24) & 0xFF;
+    if (code != kCompletionCodeSuccess)
+    {
+        arch::SerialWrite("[xhci] bulk-EP configure failed code=");
+        arch::SerialWriteHex(code);
+        arch::SerialWrite(" slot=");
+        arch::SerialWriteHex(slot_id);
+        arch::SerialWrite(" ep=");
+        arch::SerialWriteHex(ep_addr);
+        arch::SerialWrite("\n");
+        return false;
+    }
+
+    if (is_in)
+    {
+        dev->bulk_in_ep_addr = ep_addr;
+        dev->bulk_in_dci = dci;
+        dev->bulk_in_mps = max_packet;
+        dev->bulk_in_ring_phys = ring_phys;
+        dev->bulk_in_ring = ring;
+        dev->bulk_in_ring_slots = slots;
+        dev->bulk_in_ring_idx = 0;
+        dev->bulk_in_ring_cycle = 1;
+        dev->bulk_in_ready = true;
+    }
+    else
+    {
+        dev->bulk_out_ep_addr = ep_addr;
+        dev->bulk_out_dci = dci;
+        dev->bulk_out_mps = max_packet;
+        dev->bulk_out_ring_phys = ring_phys;
+        dev->bulk_out_ring = ring;
+        dev->bulk_out_ring_slots = slots;
+        dev->bulk_out_ring_idx = 0;
+        dev->bulk_out_ring_cycle = 1;
+        dev->bulk_out_ready = true;
+    }
+    return true;
+}
+
+u64 XhciBulkSubmit(u8 slot_id, u8 ep_addr, u64 buf_phys, u32 len)
+{
+    DeviceState* dev = DeviceForSlot(slot_id);
+    if (dev == nullptr)
+        return 0;
+    const bool is_in = (ep_addr & 0x80) != 0;
+    Runtime& rt = g_poll_rt[dev->ctrlr_idx];
+    u64 trb_phys = 0;
+    if (is_in)
+    {
+        if (!dev->bulk_in_ready || ep_addr != dev->bulk_in_ep_addr)
+            return 0;
+        trb_phys = EnqueueRingTrb(dev->bulk_in_ring, dev->bulk_in_ring_phys, dev->bulk_in_ring_slots,
+                                  dev->bulk_in_ring_idx, dev->bulk_in_ring_cycle, kTrbTypeNormal, u32(buf_phys),
+                                  u32(buf_phys >> 32), len, kTrbCtlIoc);
+        RingDoorbell(rt, slot_id, dev->bulk_in_dci);
+    }
+    else
+    {
+        if (!dev->bulk_out_ready || ep_addr != dev->bulk_out_ep_addr)
+            return 0;
+        trb_phys = EnqueueRingTrb(dev->bulk_out_ring, dev->bulk_out_ring_phys, dev->bulk_out_ring_slots,
+                                  dev->bulk_out_ring_idx, dev->bulk_out_ring_cycle, kTrbTypeNormal, u32(buf_phys),
+                                  u32(buf_phys >> 32), len, kTrbCtlIoc);
+        RingDoorbell(rt, slot_id, dev->bulk_out_dci);
+    }
+    return trb_phys;
+}
+
+bool XhciBulkPoll(u8 slot_id, u8 ep_addr, u64 trb_phys, u32* out_bytes, u64 timeout_us)
+{
+    DeviceState* dev = DeviceForSlot(slot_id);
+    if (dev == nullptr || trb_phys == 0)
+        return false;
+
+    // Serialize all bulk pollers — the event ring's consumer
+    // indices aren't safe under concurrent access in v0.
+    BulkPollLockAcquire();
+    struct Unlocker
+    {
+        ~Unlocker() { BulkPollLockRelease(); }
+    } unlocker;
+    (void)unlocker;
+
+    // Helper to compute bytes-actually-transferred from the
+    // residual byte count + the TRB length we enqueued.
+    auto compute_bytes = [&](u32 residual) -> u32
+    {
+        const Trb* ring = (ep_addr & 0x80) ? dev->bulk_in_ring : dev->bulk_out_ring;
+        const u32 slots = (ep_addr & 0x80) ? dev->bulk_in_ring_slots : dev->bulk_out_ring_slots;
+        const u64 ring_phys_base = (ep_addr & 0x80) ? dev->bulk_in_ring_phys : dev->bulk_out_ring_phys;
+        u32 trb_idx = 0;
+        if (trb_phys >= ring_phys_base && trb_phys < ring_phys_base + slots * sizeof(Trb))
+            trb_idx = u32((trb_phys - ring_phys_base) / sizeof(Trb));
+        const u32 trb_len = ring[trb_idx].status & 0x0001FFFF;
+        return trb_len > residual ? trb_len - residual : 0;
+    };
+
+    // Bulk-poll lock is held; we own the event ring. Use the
+    // original WaitEvent with a coarse iter budget. The cache
+    // exists for events we drained but didn't match — a future
+    // caller acquiring the lock will check it.
+    Runtime& rt = g_poll_rt[dev->ctrlr_idx];
+    Trb e{};
+    // 4M iters ≈ ~4ms on TCG. Scale linearly to the timeout the
+    // caller asked for, but cap at a value that won't busy-spin
+    // for hundreds of ms (would starve other tasks). The lock
+    // holder doesn't yield during WaitEvent, so we keep the
+    // window small + come back through SchedSleepTicks at the
+    // outer level if the caller wants longer.
+    constexpr u64 kItersPerMs = 1000;
+    const u64 iters = timeout_us * kItersPerMs + 1;
+    if (WaitEvent(rt, trb_phys, kTrbTypeTransferEvent, &e, iters))
+    {
+        const u32 code = (e.status >> 24) & 0xFF;
+        if (out_bytes != nullptr)
+            *out_bytes = compute_bytes(e.status & 0x00FFFFFF);
+        return code == kCompletionCodeSuccess || code == 13 /* Short Packet */;
+    }
+    // Even after timeout, the cache may hold our event (drained
+    // by a previous waiter). Claim it if so.
+    u32 code = 0, residual = 0, len_unused = 0;
+    if (TrbEventCacheTake(trb_phys, &code, &residual, &len_unused))
+    {
+        if (out_bytes != nullptr)
+            *out_bytes = compute_bytes(residual);
+        return code == kCompletionCodeSuccess || code == 13 /* Short Packet */;
+    }
+    return false;
+}
 
 void XhciInit()
 {

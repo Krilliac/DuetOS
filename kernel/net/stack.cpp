@@ -1694,7 +1694,14 @@ bool NetTcpConnect(u32 iface_index, Ipv4Address dst_ip, u16 dst_port, const u8* 
     }
     else
     {
-        Ipv4Address gw{{dst_ip.octets[0], dst_ip.octets[1], dst_ip.octets[2], 2}};
+        // ARP miss for the destination — fall back to the
+        // DHCP-supplied router. The old code guessed `dst[0..2].2`
+        // which only worked for QEMU SLIRP's 10.0.2.0/24; on a
+        // real /24 connecting to an arbitrary public IP the guess
+        // misses and TCP connect would silently fail.
+        const DhcpLease lease = DhcpLeaseRead();
+        Ipv4Address gw =
+            lease.valid ? lease.router : Ipv4Address{{dst_ip.octets[0], dst_ip.octets[1], dst_ip.octets[2], 2}};
         const ArpEntry* gw_entry = ArpLookup(iface_index, gw);
         if (gw_entry == nullptr)
             return false;
@@ -2009,7 +2016,15 @@ bool NetDnsQueryA(u32 iface_index, Ipv4Address resolver_ip, const char* name)
     }
     else
     {
-        Ipv4Address gw{{resolver_ip.octets[0], resolver_ip.octets[1], resolver_ip.octets[2], 2}};
+        // ARP miss for the resolver — fall back to the DHCP-supplied
+        // router. The old guess (`resolver[0..2].2`) only worked for
+        // QEMU SLIRP's 10.0.2.0/24 layout; on a real LAN where the
+        // resolver lives off-link or has a non-`.2` gateway, the
+        // guess misses and DNS would silently fail.
+        const DhcpLease lease = DhcpLeaseRead();
+        Ipv4Address gw = lease.valid
+                             ? lease.router
+                             : Ipv4Address{{resolver_ip.octets[0], resolver_ip.octets[1], resolver_ip.octets[2], 2}};
         const ArpEntry* gw_entry = ArpLookup(iface_index, gw);
         if (gw_entry == nullptr)
             return false;
@@ -2129,7 +2144,10 @@ bool NetNtpQuery(u32 iface_index, Ipv4Address server_ip)
     }
     else
     {
-        Ipv4Address gw{{server_ip.octets[0], server_ip.octets[1], server_ip.octets[2], 2}};
+        // Same DHCP-router fallback as DNS / TCP connect.
+        const DhcpLease lease = DhcpLeaseRead();
+        Ipv4Address gw = lease.valid ? lease.router
+                                     : Ipv4Address{{server_ip.octets[0], server_ip.octets[1], server_ip.octets[2], 2}};
         const ArpEntry* gw_entry = ArpLookup(iface_index, gw);
         if (gw_entry == nullptr)
             return false;

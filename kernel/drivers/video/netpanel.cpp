@@ -129,8 +129,9 @@ u32 ComputeFullHeight()
 {
     // Header (24) + connection summary (28) + section gap.
     u32 h = kMargin + 24 + 4 + 28 + kSectionGap;
-    // Wireless section header + 2 lines.
-    h += 12 + kRowH * 2 + kSectionGap;
+    // Wireless section header + up to 3 lines (count + shell-status +
+    // firmware-pending hint when a driver shell bound).
+    h += 12 + kRowH * 3 + kSectionGap;
     // Wired section header + per-NIC: 1 chrome line + 3 detail lines.
     h += 12; // section header
     const u64 nics = duetos::drivers::net::NicCount();
@@ -246,8 +247,18 @@ void DrawWirelessSection(u32 ax, u32& y, u32 w)
     line[off] = '\0';
     WriteAt(ax + kMargin, y, line, kTextRgb, kBodyRgb);
     y += kRowH;
-    WriteAt(ax + kMargin, y, "  no wireless driver online", kWarnRgb, kBodyRgb);
-    y += kRowH;
+    if (wifi.drivers_online > 0)
+    {
+        WriteAt(ax + kMargin, y, "  driver shell online", kAccentRgb, kBodyRgb);
+        y += kRowH;
+        WriteAt(ax + kMargin, y, "  (firmware loader pending)", kDimRgb, kBodyRgb);
+        y += kRowH;
+    }
+    else
+    {
+        WriteAt(ax + kMargin, y, "  no wireless driver online", kWarnRgb, kBodyRgb);
+        y += kRowH;
+    }
 }
 
 void DrawWiredSection(u32 ax, u32& y)

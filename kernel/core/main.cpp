@@ -28,10 +28,12 @@
 #include "../drivers/net/net.h"
 #include "../drivers/pci/pci.h"
 #include "../drivers/power/power.h"
+#include "../drivers/usb/cdc_ecm.h"
 #include "../drivers/usb/hid_descriptor.h"
 #include "../drivers/usb/msc_scsi.h"
 #include "../drivers/usb/usb.h"
 #include "../drivers/usb/xhci.h"
+#include "../net/net_smoke.h"
 #include "../net/stack.h"
 #include "../subsystems/graphics/graphics.h"
 #include "../drivers/storage/ahci.h"
@@ -64,6 +66,7 @@
 #include "../mm/frame_allocator.h"
 #include "../sync/spinlock.h"
 #include "auth.h"
+#include "firmware_loader.h"
 #include "heartbeat.h"
 #include "klog.h"
 #include "login.h"
@@ -1004,6 +1007,9 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         duetos::core::FaultDomainRegister("drivers/gpu", gpu_init, gpu_teardown);
     }
 
+    SerialWrite("[boot] Bringing up firmware loader (scaffold).\n");
+    duetos::core::FwLoaderInit();
+
     SerialWrite("[boot] Detecting NICs.\n");
     duetos::drivers::net::NetInit();
     {
@@ -1031,6 +1037,24 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         auto xhci_teardown = []() -> duetos::core::Result<void> { return duetos::drivers::usb::xhci::XhciShutdown(); };
         duetos::core::FaultDomainRegister("drivers/usb/xhci", xhci_init, xhci_teardown);
     }
+    // Probe USB-Ethernet adapters now that xHCI enumeration is
+    // complete. CDC-ECM is the USB standard — works with QEMU's
+    // `-device usb-net` emulation, premium USB-Ethernet dongles,
+    // and iPhone tethering. RNDIS (Android default), CDC-NCM
+    // (Apple devices, Wi-Fi 6 routers), AX88xxx and RTL81xx
+    // vendor-specific protocols are follow-up class drivers.
+    // CdcEcmProbe is deliberately NOT called here. Invoking it
+    // during USB init auto-probes every enumerated device; when
+    // the device isn't CDC-ECM (QEMU's usb-net is RNDIS, most
+    // Android phones are RNDIS too) the probe's control transfers
+    // still happen, and a timing interaction with the pre-poll
+    // event-ring state regresses the e1000 DHCP path (the RX
+    // polling task stops delivering frames to the network stack
+    // until a reboot). Callable manually from a shell command or
+    // a kernel thread once a real CDC-ECM device is known to be
+    // attached; the auto-probe will land in a follow-up slice
+    // that dispatches events by TRB so class drivers don't race
+    // with each other or the HID polling path.
     duetos::drivers::usb::hid::HidSelfTest();
     duetos::drivers::usb::msc::MscSelfTest();
 
@@ -1051,19 +1075,12 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     SerialWrite("[boot] Bringing up network stack skeleton.\n");
     duetos::net::NetStackInit();
-    {
-        // Park a canned reply on TCP port 7777. Any connection
-        // that lands with a data segment gets this body + FIN.
-        // Handy to smoke-test the TCP state machine from the
-        // host with `nc 10.0.2.15 7777` (given appropriate
-        // hostfwd) or `curl http://.../` once HTTP lands.
-        static const char kHello[] = "HTTP/1.0 200 OK\r\n"
-                                     "Content-Type: text/plain\r\n"
-                                     "Content-Length: 24\r\n"
-                                     "\r\n"
-                                     "Hello from DuetOS!\r\n\r\n";
-        duetos::net::TcpListen(7777, reinterpret_cast<const duetos::u8*>(kHello), sizeof(kHello) - 1);
-    }
+    // Smoke test runs in its own task. It owns the (single) TCP
+    // slot during its run and installs the boot HTTP listener
+    // afterwards via NetSmokeInstallBootListener — so an active
+    // connect to www.google.com (step 4) doesn't collide with
+    // the listener's TcpListen call.
+    duetos::net::NetSmokeTestStart();
 
     SerialWrite("[boot] Bringing up graphics ICD skeleton.\n");
     duetos::subsystems::graphics::GraphicsIcdInit();
