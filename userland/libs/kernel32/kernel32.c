@@ -1833,3 +1833,224 @@ __declspec(dllexport) BOOL GenerateConsoleCtrlEvent(DWORD event, DWORD group)
     (void)group;
     return 0;
 }
+
+/* GlobalAlloc / LocalAlloc family. Deprecated Win32 heap APIs
+ * still used by old clipboard / OLE code. v0 routes both through
+ * SYS_HEAP_ALLOC (=11) and SYS_HEAP_FREE (=12). Flags ignored;
+ * every block behaves like GMEM_FIXED so Lock/Unlock are
+ * pass-through. GMEM_ZEROINIT (0x0040) is honoured — zeros the
+ * buffer before returning. */
+#define GMEM_ZEROINIT 0x0040u
+
+__declspec(dllexport) HANDLE GlobalAlloc(UINT flags, SIZE_T cb)
+{
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)11), "D"((long long)cb) : "memory");
+    if (rv != 0 && (flags & GMEM_ZEROINIT))
+    {
+        unsigned char* p = (unsigned char*)rv;
+        for (SIZE_T i = 0; i < cb; ++i)
+            p[i] = 0;
+    }
+    return (HANDLE)rv;
+}
+
+__declspec(dllexport) HANDLE GlobalReAlloc(HANDLE h, SIZE_T cb, UINT flags)
+{
+    (void)flags;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)15), /* SYS_HEAP_REALLOC */
+                       "D"((long long)(unsigned long long)h), "S"((long long)cb)
+                     : "memory");
+    return (HANDLE)rv;
+}
+
+__declspec(dllexport) HANDLE GlobalFree(HANDLE h)
+{
+    if (h == (HANDLE)0)
+        return (HANDLE)0;
+    long long discard;
+    __asm__ volatile("int $0x80"
+                     : "=a"(discard)
+                     : "a"((long long)12), "D"((long long)(unsigned long long)h)
+                     : "memory");
+    return (HANDLE)0; /* GlobalFree returns NULL on success. */
+}
+
+__declspec(dllexport) void* GlobalLock(HANDLE h)
+{
+    /* GMEM_FIXED → handle == pointer. */
+    return (void*)h;
+}
+
+__declspec(dllexport) BOOL GlobalUnlock(HANDLE h)
+{
+    (void)h;
+    return 1;
+}
+
+__declspec(dllexport) SIZE_T GlobalSize(HANDLE h)
+{
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)14), /* SYS_HEAP_SIZE */
+                       "D"((long long)(unsigned long long)h)
+                     : "memory");
+    return (SIZE_T)rv;
+}
+
+__declspec(dllexport) UINT GlobalFlags(HANDLE h)
+{
+    (void)h;
+    return 0;
+}
+
+/* Local* — same shape as Global*. */
+__declspec(dllexport) HANDLE LocalAlloc(UINT flags, SIZE_T cb)
+{
+    return GlobalAlloc(flags, cb);
+}
+
+__declspec(dllexport) HANDLE LocalReAlloc(HANDLE h, SIZE_T cb, UINT flags)
+{
+    return GlobalReAlloc(h, cb, flags);
+}
+
+__declspec(dllexport) HANDLE LocalFree(HANDLE h)
+{
+    return GlobalFree(h);
+}
+
+__declspec(dllexport) void* LocalLock(HANDLE h)
+{
+    return GlobalLock(h);
+}
+
+__declspec(dllexport) BOOL LocalUnlock(HANDLE h)
+{
+    return GlobalUnlock(h);
+}
+
+__declspec(dllexport) SIZE_T LocalSize(HANDLE h)
+{
+    return GlobalSize(h);
+}
+
+__declspec(dllexport) UINT LocalFlags(HANDLE h)
+{
+    return GlobalFlags(h);
+}
+
+/* Affinity / CPU info — single-CPU; both masks are 1. */
+__declspec(dllexport) BOOL GetProcessAffinityMask(HANDLE proc, unsigned long long* proc_mask,
+                                                  unsigned long long* sys_mask)
+{
+    (void)proc;
+    if (proc_mask)
+        *proc_mask = 1;
+    if (sys_mask)
+        *sys_mask = 1;
+    return 1;
+}
+
+__declspec(dllexport) BOOL SetProcessAffinityMask(HANDLE proc, unsigned long long mask)
+{
+    (void)proc;
+    (void)mask;
+    return 1;
+}
+
+__declspec(dllexport) unsigned long long SetThreadAffinityMask(HANDLE thread, unsigned long long mask)
+{
+    (void)thread;
+    (void)mask;
+    return 1;
+}
+
+__declspec(dllexport) DWORD GetActiveProcessorCount(unsigned short group)
+{
+    (void)group;
+    return 1;
+}
+
+__declspec(dllexport) unsigned short GetActiveProcessorGroupCount(void)
+{
+    return 1;
+}
+
+/* GetSystemInfo / GetNativeSystemInfo — populate SYSTEM_INFO
+ * (48 bytes). Apps query this for page size + processor count. */
+__declspec(dllexport) void GetSystemInfo(void* info)
+{
+    if (!info)
+        return;
+    unsigned char* p = (unsigned char*)info;
+    for (int i = 0; i < 48; ++i)
+        p[i] = 0;
+    *((unsigned short*)&p[0]) = 9; /* PROCESSOR_ARCHITECTURE_AMD64 */
+    *((DWORD*)&p[4]) = 4096;
+    *((unsigned long long*)&p[8]) = 0x10000ULL;
+    *((unsigned long long*)&p[16]) = 0x7FFFFFFEFFFFULL;
+    *((unsigned long long*)&p[24]) = 1;
+    *((DWORD*)&p[32]) = 1;
+    *((DWORD*)&p[36]) = 8664; /* PROCESSOR_AMD_X8664 */
+    *((DWORD*)&p[40]) = 65536;
+}
+
+__declspec(dllexport) void GetNativeSystemInfo(void* info)
+{
+    GetSystemInfo(info);
+}
+
+/* Windows version reporting — claim Windows 10 build 19041
+ * (matches the registry stub in advapi32). */
+__declspec(dllexport) DWORD GetVersion(void)
+{
+    /* Layout: low 8 bits major (10), bits 8..15 minor (0),
+     * high 16 bits build (19041) — but the high bit is set on
+     * NT-based versions, so flip bit 31. */
+    return 0x4A6100AAu;
+}
+
+__declspec(dllexport) BOOL GetVersionExA(void* info)
+{
+    if (!info)
+        return 0;
+    DWORD* p = (DWORD*)info;
+    if (p[0] < 148)
+        return 0;
+    p[1] = 10;
+    p[2] = 0;
+    p[3] = 19041;
+    p[4] = 2; /* VER_PLATFORM_WIN32_NT */
+    char* csd = (char*)((unsigned char*)info + 20);
+    csd[0] = 0;
+    return 1;
+}
+
+__declspec(dllexport) BOOL GetVersionExW(void* info)
+{
+    if (!info)
+        return 0;
+    DWORD* p = (DWORD*)info;
+    if (p[0] < 276)
+        return 0;
+    p[1] = 10;
+    p[2] = 0;
+    p[3] = 19041;
+    p[4] = 2;
+    unsigned short* csd = (unsigned short*)((unsigned char*)info + 20);
+    csd[0] = 0;
+    return 1;
+}
+
+__declspec(dllexport) BOOL VerifyVersionInfoW(void* info, DWORD type_mask, unsigned long long cond_mask)
+{
+    (void)info;
+    (void)type_mask;
+    (void)cond_mask;
+    return 1;
+}
