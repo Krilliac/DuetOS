@@ -4,6 +4,7 @@
 #include "../../drivers/net/net.h"
 #include "../../drivers/power/power.h"
 #include "../../mm/frame_allocator.h"
+#include "../../net/stack.h"
 #include "../../sched/sched.h"
 #include "framebuffer.h"
 #include "widget.h"
@@ -29,6 +30,16 @@ constinit u32 g_clock_x = 0;
 constinit u32 g_clock_y = 0;
 constinit u32 g_clock_w = 0;
 constinit u32 g_clock_h = 0;
+
+// Cached NET tray cell bounds — exposed via TaskbarNetCellBounds for
+// the mouse reader to hover-preview / click-toggle the network
+// flyout. Recomputed every redraw because the tray lays out right-
+// to-left and the date width can shift the entire tray when the
+// month name changes glyph count.
+constinit u32 g_net_cell_x = 0;
+constinit u32 g_net_cell_y = 0;
+constinit u32 g_net_cell_w = 0;
+constinit u32 g_net_cell_h = 0;
 
 // Last-painted tab layout. Updated by TaskbarRedraw; consumed by
 // TaskbarTabAt. Capacity matches kMaxWindows so tabs and window
@@ -284,7 +295,12 @@ void TaskbarRedraw()
     const u32 tray_y = g_y + (g_h > tray_cell ? (g_h - tray_cell) / 2 : 0);
     u32 tray_right = (date_x > tray_gap + 4) ? date_x - tray_gap : 0;
 
-    auto draw_tray_cell = [&](const char* label, u32 body_rgb)
+    // Reset cached cell bounds; we re-publish only the cells that
+    // actually got placed on this redraw (e.g. NET cell skipped
+    // entirely if the strip ran out of horizontal room).
+    g_net_cell_x = g_net_cell_y = g_net_cell_w = g_net_cell_h = 0;
+
+    auto draw_tray_cell = [&](const char* label, u32 body_rgb, u32* out_x, u32* out_y, u32* out_w, u32* out_h)
     {
         if (tray_right < tray_cell + 4)
             return;
@@ -299,6 +315,14 @@ void TaskbarRedraw()
         const u32 tx = cx + (tray_cell - tw) / 2;
         const u32 ty = tray_y + (tray_cell - 8) / 2;
         FramebufferDrawString(tx, ty, label, 0x00FFFFFF, body_rgb);
+        if (out_x != nullptr)
+            *out_x = cx;
+        if (out_y != nullptr)
+            *out_y = tray_y;
+        if (out_w != nullptr)
+            *out_w = tray_cell;
+        if (out_h != nullptr)
+            *out_h = tray_cell;
         tray_right = (cx >= tray_gap) ? cx - tray_gap : 0;
     };
 
@@ -308,14 +332,26 @@ void TaskbarRedraw()
     {
         const u64 free_frames = duetos::mm::FreeFramesCount();
         const bool healthy = free_frames > 1024;
-        draw_tray_cell("M", healthy ? 0x0040803C : 0x00C04040);
+        draw_tray_cell("M", healthy ? 0x0040803C : 0x00C04040, nullptr, nullptr, nullptr, nullptr);
     }
     // CPU: always green while scheduler is running.
-    draw_tray_cell("C", 0x0040803C);
-    // NET: green if at least one NIC was discovered.
+    draw_tray_cell("C", 0x0040803C, nullptr, nullptr, nullptr, nullptr);
+    // NET: green if at least one NIC is bound to the stack AND has
+    // a DHCP lease; amber while a NIC is up but DHCP hasn't bound;
+    // grey if no NIC was discovered. The flyout panel hangs off
+    // this cell — we publish its bounds so the mouse reader can
+    // hover-preview and click-toggle it.
     {
         const bool have_nic = duetos::drivers::net::NicCount() > 0;
-        draw_tray_cell("N", have_nic ? 0x0040803C : 0x00505058);
+        const auto lease = duetos::net::DhcpLeaseRead();
+        u32 colour;
+        if (!have_nic)
+            colour = 0x00505058;
+        else if (lease.valid)
+            colour = 0x0040803C; // green — online
+        else
+            colour = 0x00C0A040; // amber — link up, DHCP pending
+        draw_tray_cell("N", colour, &g_net_cell_x, &g_net_cell_y, &g_net_cell_w, &g_net_cell_h);
     }
     // Battery (only shown if power driver decided a battery is
     // present — laptops; skipped on desktops).
@@ -324,7 +360,7 @@ void TaskbarRedraw()
         if (snap.battery.state != duetos::drivers::power::kBatNotPresent)
         {
             const u32 colour = (snap.ac == duetos::drivers::power::kAcOnline) ? 0x003C9060 : 0x00C09040;
-            draw_tray_cell("B", colour);
+            draw_tray_cell("B", colour, nullptr, nullptr, nullptr, nullptr);
         }
     }
 }
@@ -366,6 +402,18 @@ void TaskbarClockBounds(u32* x_out, u32* y_out, u32* w_out, u32* h_out)
         *w_out = g_clock_w;
     if (h_out)
         *h_out = g_clock_h;
+}
+
+void TaskbarNetCellBounds(u32* x_out, u32* y_out, u32* w_out, u32* h_out)
+{
+    if (x_out)
+        *x_out = g_net_cell_x;
+    if (y_out)
+        *y_out = g_net_cell_y;
+    if (w_out)
+        *w_out = g_net_cell_w;
+    if (h_out)
+        *h_out = g_net_cell_h;
 }
 
 void TaskbarStartBounds(u32* x_out, u32* y_out, u32* w_out, u32* h_out)

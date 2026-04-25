@@ -120,6 +120,7 @@ set(DUETOS_KERNEL_SHARED_SOURCES
     drivers/video/font8x8.cpp
     drivers/video/framebuffer.cpp
     drivers/video/menu.cpp
+    drivers/video/netpanel.cpp
     drivers/video/taskbar.cpp
     drivers/video/theme.cpp
     drivers/video/widget.cpp

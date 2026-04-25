@@ -794,6 +794,62 @@ const NicInfo& Nic(u64 index)
     return g_nics[index];
 }
 
+namespace
+{
+
+bool StrPrefixMatches(const char* s, const char* prefix)
+{
+    if (s == nullptr || prefix == nullptr)
+        return false;
+    for (u32 i = 0; prefix[i] != '\0'; ++i)
+    {
+        if (s[i] == '\0' || s[i] != prefix[i])
+            return false;
+    }
+    return true;
+}
+
+bool FamilyLooksWireless(const char* family)
+{
+    if (family == nullptr)
+        return false;
+    // Match the families our vendor-tag tables emit for wireless
+    // adapters: iwlwifi (Intel), rtl8821ae-wifi (Realtek),
+    // bcm4331-wifi (Broadcom). Substring-checked at the prefix
+    // since the suffixes drift across silicon revisions.
+    return StrPrefixMatches(family, "iwlwifi") || StrPrefixMatches(family, "rtl8821") ||
+           StrPrefixMatches(family, "bcm43") || StrPrefixMatches(family, "bcm4331") ||
+           StrPrefixMatches(family, "rtl88");
+}
+
+} // namespace
+
+bool NicIsWireless(u64 index)
+{
+    if (index >= g_nic_count)
+        return false;
+    const NicInfo& n = g_nics[index];
+    // PCI subclass 0x80 is "network controller / other" — vendors
+    // ship their wireless cards there since there's no dedicated
+    // PCI subclass for Wi-Fi. The family tag is the secondary
+    // signal for vendors that put wireless on subclass 0x00 by
+    // mistake (or pre-PCIe legacy).
+    return n.subclass == kPciSubclassOther || FamilyLooksWireless(n.family);
+}
+
+WirelessStatus WirelessStatusRead()
+{
+    WirelessStatus s = {};
+    for (u64 i = 0; i < g_nic_count; ++i)
+    {
+        if (NicIsWireless(i))
+            ++s.adapters_detected;
+    }
+    // s.drivers_online stays 0 — no wireless driver in v0. When an
+    // iwlwifi / rtl88xx slice lands, count the bring-up'd ones here.
+    return s;
+}
+
 // -------------------------------------------------------------------
 // Vendor classifiers. Coarse ranges; unknown IDs land on "unknown".
 // Source: Linux kernel driver pci_device_id tables.

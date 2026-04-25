@@ -88,6 +88,26 @@ u64 NicCount();
 /// Accessor for a discovered NIC record.
 const NicInfo& Nic(u64 index);
 
+/// True iff the NIC at `index` is a wireless adapter — discriminated
+/// by either the PCI subclass (0x80 = "other / wireless" historically
+/// used for Wi-Fi) or by family-string heuristics matching Intel
+/// iwlwifi / Realtek rtl88xx / Broadcom bcm43xx ranges. Used by the
+/// shell `netscan` and the GUI network flyout to separate wired
+/// from wireless adapters honestly — DuetOS has no wireless driver
+/// online, so detected wireless adapters are advertised as "no
+/// driver" rather than silently treated as Ethernet.
+bool NicIsWireless(u64 index);
+
+/// Display-friendly summary of the wireless story for the GUI net
+/// flyout: how many wireless adapters were detected and whether any
+/// have a driver online (today: always 0 — no wireless driver).
+struct WirelessStatus
+{
+    u32 adapters_detected;
+    u32 drivers_online;
+};
+WirelessStatus WirelessStatusRead();
+
 // Vendor probe stubs — classify by device_id and log the family.
 // No packet I/O. Replaced by real chip-specific init in a future
 // driver slice (e1000 ring setup, rtl8169 MAC config, etc.).

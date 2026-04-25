@@ -151,6 +151,25 @@ void NetStackInit();
 /// interfaces (loopback, tun/tap) come online.
 u64 InterfaceCount();
 
+/// True iff `NetStackBindInterface` has run for `iface_index`. The
+/// driver-layer NIC table can have entries that aren't bound here
+/// (probe-only NICs whose vendor driver isn't done yet).
+bool InterfaceIsBound(u32 iface_index);
+
+/// Bound IPv4 address for `iface_index`. Returns 0.0.0.0 if not
+/// bound or if DHCP hasn't completed yet (the iface is bound with
+/// 0.0.0.0 at NIC bring-up so DHCP DISCOVER goes out with the
+/// correct src=0.0.0.0).
+Ipv4Address InterfaceIp(u32 iface_index);
+
+/// Bound MAC for `iface_index`. Returns all-zero MAC if unbound.
+MacAddress InterfaceMac(u32 iface_index);
+
+/// Number of currently-cached, non-expired ARP entries. Useful for
+/// shell `ifconfig` / `route` to indicate L2 reachability without
+/// dumping the whole table.
+u32 ArpEntryCount();
+
 // -------------------------------------------------------------------
 // ARP cache — skeleton API.
 //

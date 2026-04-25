@@ -8,6 +8,7 @@
 #include "cursor.h"
 #include "framebuffer.h"
 #include "menu.h"
+#include "netpanel.h"
 #include "taskbar.h"
 
 namespace duetos::drivers::video
@@ -933,6 +934,7 @@ void DesktopCompose(u32 desktop_rgb, const char* banner)
     TaskbarRedraw();
     MenuRedraw();
     CalendarRedraw();
+    NetPanelRedraw();
     // Caret — painted last so it overlays everything, including
     // the taskbar. Blink phase toggles per compose; the ui-
     // ticker's 1 Hz compose produces the blink cadence.
