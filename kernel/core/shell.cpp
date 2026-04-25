@@ -23,6 +23,7 @@
 #include "../drivers/usb/rndis.h"
 #include "../drivers/power/power.h"
 #include "../net/stack.h"
+#include "../net/wifi.h"
 #include "../drivers/storage/block.h"
 #include "../drivers/video/console.h"
 #include "../drivers/video/cursor.h"
@@ -48,6 +49,8 @@
 #include "../security/guard.h"
 #include "elf_loader.h"
 #include "hexdump.h"
+#include "cleanroom_trace.h"
+#include "firmware_loader.h"
 #include "auth.h"
 #include "klog.h"
 #include "login.h"
@@ -1383,24 +1386,24 @@ void CmdFind(u32 argc, char** argv)
 // dispatched in Dispatch — keeping the two in sync is the
 // price of not having reflection.
 static const char* const kCommandSet[] = {
-    "help",      "about",   "version",    "clear",    "uptime",   "date",      "windows",    "mode",     "ls",
-    "cat",       "touch",   "rm",         "echo",     "cp",       "mv",        "wc",         "head",     "tail",
-    "dmesg",     "stats",   "mem",        "history",  "set",      "unset",     "env",        "alias",    "unalias",
-    "sysinfo",   "source",  "man",        "grep",     "find",     "time",      "which",      "seq",      "sort",
-    "uniq",      "cpuid",   "cr",         "rflags",   "tsc",      "hpet",      "ticks",      "msr",      "lapic",
-    "smp",       "lspci",   "heap",       "paging",   "fb",       "kbdstats",  "mousestats", "loglevel", "logcolor",
-    "getenv",    "yield",   "reboot",     "halt",     "uname",    "whoami",    "hostname",   "pwd",      "true",
-    "false",     "mount",   "lsmod",      "lsblk",    "lsgpt",    "free",      "ps",         "spawn",    "readelf",
-    "hexdump",   "stat",    "basename",   "dirname",  "cal",      "sleep",     "reset",      "tac",      "nl",
-    "rev",       "expr",    "color",      "rand",     "flushtlb", "checksum",  "repeat",     "kill",     "exec",
-    "metrics",   "trace",   "read",       "guard",    "top",      "fatcat",    "fatls",      "fatwrite", "fatappend",
-    "fatnew",    "fatrm",   "fattrunc",   "fatmkdir", "fatrmdir", "linuxexec", "translate",  "smbios",   "power",
-    "battery",   "thermal", "temp",       "gpu",      "lsgpu",    "gfx",       "nic",        "lsnic",    "ip",
-    "arp",       "ipv4",    "uuid",       "uuidgen",  "health",   "checkup",   "attacksim",  "redteam",  "memdump",
-    "ifconfig",  "netinfo", "dhcp",       "route",    "netscan",  "wifi",      "net",        "usbnet",   "instr",
-    "dumpstate", "bp",      "breakpoint", "login",    "logout",   "passwd",    "useradd",    "userdel",  "users",
-    "who",       "su",      "hwmon",      "vbe",      "ping",     "nslookup",  "ntp",        "http",     "shutdown",
-    "poweroff",  "beep",    "inspect",    "theme",
+    "help",     "about",   "version",  "clear",     "uptime",   "date",       "windows",    "mode",     "ls",
+    "cat",      "touch",   "rm",       "echo",      "cp",       "mv",         "wc",         "head",     "tail",
+    "dmesg",    "stats",   "mem",      "history",   "set",      "unset",      "env",        "alias",    "unalias",
+    "sysinfo",  "source",  "man",      "grep",      "find",     "time",       "which",      "seq",      "sort",
+    "uniq",     "cpuid",   "cr",       "rflags",    "tsc",      "hpet",       "ticks",      "msr",      "lapic",
+    "smp",      "lspci",   "heap",     "paging",    "fb",       "kbdstats",   "mousestats", "loglevel", "logcolor",
+    "getenv",   "yield",   "reboot",   "halt",      "uname",    "whoami",     "hostname",   "pwd",      "true",
+    "false",    "mount",   "lsmod",    "lsblk",     "lsgpt",    "free",       "ps",         "spawn",    "readelf",
+    "hexdump",  "stat",    "basename", "dirname",   "cal",      "sleep",      "reset",      "tac",      "nl",
+    "rev",      "expr",    "color",    "rand",      "flushtlb", "checksum",   "repeat",     "kill",     "exec",
+    "metrics",  "trace",   "read",     "guard",     "top",      "fatcat",     "fatls",      "fatwrite", "fatappend",
+    "fatnew",   "fatrm",   "fattrunc", "fatmkdir",  "fatrmdir", "linuxexec",  "translate",  "smbios",   "power",
+    "battery",  "thermal", "temp",     "gpu",       "lsgpu",    "gfx",        "nic",        "lsnic",    "ip",
+    "arp",      "ipv4",    "uuid",     "uuidgen",   "health",   "checkup",    "attacksim",  "redteam",  "memdump",
+    "ifconfig", "netinfo", "dhcp",     "route",     "netscan",  "wifi",       "fwpolicy",   "fwtrace",  "crtrace",
+    "net",      "usbnet",  "instr",    "dumpstate", "bp",       "breakpoint", "login",      "logout",   "passwd",
+    "useradd",  "userdel", "users",    "who",       "su",       "hwmon",      "vbe",        "ping",     "nslookup",
+    "ntp",      "http",    "shutdown", "poweroff",  "beep",     "inspect",    "theme",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -3258,7 +3261,24 @@ void CmdNetscan()
             ConsoleWrite(" of ");
             WriteU64Dec(wifi.adapters_detected);
             ConsoleWriteln(" adapter(s)");
-            ConsoleWriteln("  (chip identified + MMIO live; firmware loader pending — cannot scan)");
+            ConsoleWrite("  firmware: ready=");
+            WriteU64Dec(wifi.firmware_ready);
+            ConsoleWrite(" missing=");
+            WriteU64Dec(wifi.firmware_missing);
+            ConsoleWrite(" incompatible=");
+            WriteU64Dec(wifi.firmware_incompatible);
+            ConsoleWrite(" load-error=");
+            WriteU64Dec(wifi.firmware_load_error);
+            ConsoleWriteln("");
+            if (wifi.firmware_ready == 0)
+            {
+                ConsoleWriteln("  cannot scan SSIDs yet: no wireless adapter has a usable firmware blob loaded");
+            }
+            else
+            {
+                ConsoleWriteln(
+                    "  firmware ready on at least one adapter; 802.11 scan/assoc datapath is still not implemented");
+            }
         }
         else
         {
@@ -3301,6 +3321,278 @@ void CmdNetscan()
                 WriteIpv4(ip);
             }
         }
+        ConsoleWriteln("");
+    }
+}
+
+void CmdWifi(duetos::u32 argc, char** argv)
+{
+    if (argc < 2 || StrEq(argv[1], "status"))
+    {
+        const auto st = duetos::net::WifiStatusRead(0);
+        ConsoleWrite("WIFI: iface0 backend=");
+        ConsoleWrite(st.backend_present ? "yes" : "no");
+        ConsoleWrite(" connected=");
+        ConsoleWrite(st.connected ? "yes" : "no");
+        if (st.connected)
+        {
+            ConsoleWrite(" ssid=\"");
+            ConsoleWrite(st.ssid);
+            ConsoleWrite("\" security=");
+            ConsoleWrite(st.security == duetos::net::WifiSecurity::Wpa2Psk ? "wpa2-psk" : "open");
+        }
+        ConsoleWriteln("");
+        if (!st.backend_present)
+            ConsoleWriteln("WIFI: no registered Wi-Fi backend yet");
+        return;
+    }
+    if (StrEq(argv[1], "scan"))
+    {
+        duetos::net::WifiScanResult results[duetos::net::kWifiMaxScanResults] = {};
+        duetos::u32 count = 0;
+        if (!duetos::net::WifiScan(0, results, duetos::net::kWifiMaxScanResults, &count))
+        {
+            ConsoleWriteln("WIFI: scan failed (backend unavailable or driver refused)");
+            return;
+        }
+        ConsoleWrite("WIFI: ");
+        WriteU64Dec(count);
+        ConsoleWriteln(" network(s)");
+        for (duetos::u32 i = 0; i < count; ++i)
+        {
+            ConsoleWrite("  ");
+            ConsoleWrite(results[i].ssid);
+            ConsoleWrite("  ");
+            ConsoleWrite(results[i].security == duetos::net::WifiSecurity::Wpa2Psk ? "WPA2" : "OPEN");
+            ConsoleWrite("  rssi=");
+            WriteI64Dec(results[i].rssi_dbm);
+            ConsoleWriteln(" dBm");
+        }
+        return;
+    }
+    if (StrEq(argv[1], "connect"))
+    {
+        if (argc < 3)
+        {
+            ConsoleWriteln("WIFI: usage: wifi connect <ssid> [psk]");
+            return;
+        }
+        const char* ssid = argv[2];
+        const bool has_psk = argc >= 4;
+        const auto sec = has_psk ? duetos::net::WifiSecurity::Wpa2Psk : duetos::net::WifiSecurity::Open;
+        const char* psk = has_psk ? argv[3] : nullptr;
+        if (!duetos::net::WifiConnect(0, ssid, sec, psk))
+        {
+            ConsoleWriteln("WIFI: connect failed (backend missing, invalid auth, or driver rejected)");
+            return;
+        }
+        ConsoleWriteln("WIFI: associated; requesting DHCP lease ...");
+        if (!duetos::net::DhcpStart(0))
+        {
+            ConsoleWriteln("WIFI: DHCP start failed");
+            return;
+        }
+        duetos::net::DhcpLease lease = {};
+        for (duetos::u32 i = 0; i < 300; ++i)
+        {
+            duetos::sched::SchedSleepTicks(1);
+            lease = duetos::net::DhcpLeaseRead();
+            if (lease.valid)
+                break;
+        }
+        if (!lease.valid)
+        {
+            ConsoleWriteln("WIFI: no DHCP ACK");
+            return;
+        }
+        ConsoleWrite("WIFI: connected ip=");
+        WriteIpv4(lease.ip);
+        ConsoleWrite(" gw=");
+        WriteIpv4(lease.router);
+        ConsoleWriteln("");
+        return;
+    }
+    if (StrEq(argv[1], "disconnect"))
+    {
+        if (!duetos::net::WifiDisconnect(0))
+        {
+            ConsoleWriteln("WIFI: disconnect failed (backend unavailable or driver refused)");
+            return;
+        }
+        ConsoleWriteln("WIFI: disconnected");
+        return;
+    }
+    ConsoleWriteln("WIFI: usage: wifi <status|scan|connect|disconnect>");
+}
+
+void CmdFwPolicy(duetos::u32 argc, char** argv)
+{
+    auto policy_name = [](duetos::core::FwSourcePolicy p) -> const char*
+    {
+        switch (p)
+        {
+        case duetos::core::FwSourcePolicy::OpenThenVendor:
+            return "open-then-vendor";
+        case duetos::core::FwSourcePolicy::OpenOnly:
+            return "open-only";
+        case duetos::core::FwSourcePolicy::VendorOnly:
+            return "vendor-only";
+        default:
+            return "unknown";
+        }
+    };
+
+    if (argc < 2 || StrEq(argv[1], "status"))
+    {
+        const auto s = duetos::core::FwBackendStatsRead();
+        ConsoleWrite("FWPOLICY: ");
+        ConsoleWrite(policy_name(s.policy));
+        ConsoleWrite("  backend=");
+        ConsoleWrite(s.kind == duetos::core::FwBackendKind::Vfs ? "vfs" : "none");
+        ConsoleWrite("  lookups=");
+        WriteU64Dec(s.lookups);
+        ConsoleWrite("  hits=");
+        WriteU64Dec(s.hits);
+        ConsoleWrite("  misses=");
+        WriteU64Dec(s.misses);
+        ConsoleWriteln("");
+        return;
+    }
+
+    if (StrEq(argv[1], "open-only"))
+    {
+        duetos::core::FwSetSourcePolicy(duetos::core::FwSourcePolicy::OpenOnly);
+        ConsoleWriteln("FWPOLICY: set to open-only");
+        return;
+    }
+    if (StrEq(argv[1], "vendor-only"))
+    {
+        duetos::core::FwSetSourcePolicy(duetos::core::FwSourcePolicy::VendorOnly);
+        ConsoleWriteln("FWPOLICY: set to vendor-only");
+        return;
+    }
+    if (StrEq(argv[1], "open-then-vendor"))
+    {
+        duetos::core::FwSetSourcePolicy(duetos::core::FwSourcePolicy::OpenThenVendor);
+        ConsoleWriteln("FWPOLICY: set to open-then-vendor");
+        return;
+    }
+    ConsoleWriteln("FWPOLICY: usage: fwpolicy <status|open-only|open-then-vendor|vendor-only>");
+}
+
+void CmdFwTrace(duetos::u32 argc, char** argv)
+{
+    if (argc >= 2 && StrEq(argv[1], "clear"))
+    {
+        duetos::core::FwTraceClear();
+        ConsoleWriteln("FWTRACE: cleared");
+        return;
+    }
+
+    duetos::u32 limit = duetos::core::FwTraceCount();
+    if (argc >= 3 && StrEq(argv[1], "show"))
+    {
+        const duetos::i64 parsed = ParseInt(argv[2]);
+        if (parsed > 0)
+            limit = static_cast<duetos::u32>(parsed);
+    }
+
+    const duetos::u32 count = duetos::core::FwTraceCount();
+    if (count == 0)
+    {
+        ConsoleWriteln("FWTRACE: empty");
+        return;
+    }
+
+    if (limit > count)
+        limit = count;
+    const duetos::u32 start = count - limit;
+    ConsoleWrite("FWTRACE: showing ");
+    WriteU64Dec(limit);
+    ConsoleWrite(" of ");
+    WriteU64Dec(count);
+    ConsoleWriteln(" entries");
+    for (duetos::u32 i = start; i < count; ++i)
+    {
+        duetos::core::FwTraceEntry e{};
+        if (!duetos::core::FwTraceRead(i, &e))
+            continue;
+        ConsoleWrite("  [");
+        WriteU64Dec(i);
+        ConsoleWrite("] policy=");
+        switch (e.policy)
+        {
+        case duetos::core::FwSourcePolicy::OpenOnly:
+            ConsoleWrite("open-only");
+            break;
+        case duetos::core::FwSourcePolicy::VendorOnly:
+            ConsoleWrite("vendor-only");
+            break;
+        default:
+            ConsoleWrite("open-then-vendor");
+            break;
+        }
+        ConsoleWrite(" result=");
+        ConsoleWrite(duetos::core::ErrorCodeName(e.result));
+        ConsoleWrite(" vendor=\"");
+        ConsoleWrite(e.vendor);
+        ConsoleWrite("\" base=\"");
+        ConsoleWrite(e.basename);
+        ConsoleWrite("\" path=\"");
+        ConsoleWrite(e.attempted_path);
+        ConsoleWriteln("\"");
+    }
+}
+
+void CmdCrTrace(duetos::u32 argc, char** argv)
+{
+    if (argc >= 2 && StrEq(argv[1], "clear"))
+    {
+        duetos::core::CleanroomTraceClear();
+        ConsoleWriteln("CRTRACE: cleared");
+        return;
+    }
+
+    duetos::u32 limit = duetos::core::CleanroomTraceCount();
+    if (argc >= 3 && StrEq(argv[1], "show"))
+    {
+        const duetos::i64 parsed = ParseInt(argv[2]);
+        if (parsed > 0)
+            limit = static_cast<duetos::u32>(parsed);
+    }
+
+    const duetos::u32 count = duetos::core::CleanroomTraceCount();
+    if (count == 0)
+    {
+        ConsoleWriteln("CRTRACE: empty");
+        return;
+    }
+    if (limit > count)
+        limit = count;
+
+    const duetos::u32 start = count - limit;
+    ConsoleWrite("CRTRACE: showing ");
+    WriteU64Dec(limit);
+    ConsoleWrite(" of ");
+    WriteU64Dec(count);
+    ConsoleWriteln(" entries");
+    for (duetos::u32 i = start; i < count; ++i)
+    {
+        duetos::core::CleanroomTraceEntry e{};
+        if (!duetos::core::CleanroomTraceRead(i, &e))
+            continue;
+        ConsoleWrite("  [");
+        WriteU64Dec(i);
+        ConsoleWrite("] ");
+        ConsoleWrite(e.subsystem);
+        ConsoleWrite("::");
+        ConsoleWrite(e.event);
+        ConsoleWrite(" a=");
+        WriteU64Hex(e.a);
+        ConsoleWrite(" b=");
+        WriteU64Hex(e.b);
+        ConsoleWrite(" c=");
+        WriteU64Hex(e.c);
         ConsoleWriteln("");
     }
 }
@@ -8325,9 +8617,29 @@ void Dispatch(char* line)
         CmdRoute(argc, argv);
         return;
     }
-    if (StrEq(cmd, "netscan") || StrEq(cmd, "wifi"))
+    if (StrEq(cmd, "netscan"))
     {
         CmdNetscan();
+        return;
+    }
+    if (StrEq(cmd, "wifi"))
+    {
+        CmdWifi(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "fwpolicy"))
+    {
+        CmdFwPolicy(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "fwtrace"))
+    {
+        CmdFwTrace(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "crtrace"))
+    {
+        CmdCrTrace(argc, argv);
         return;
     }
     if (StrEq(cmd, "net"))

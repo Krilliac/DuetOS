@@ -188,6 +188,7 @@ bool IwlwifiBringUp(NicInfo& n)
     n.driver_online = true;
     // Wireless link is UP only after association — which needs FW.
     n.link_up = false;
+    n.wireless_fw_state = NicInfo::WirelessFwState::Missing;
 
     // Probe the firmware loader for vendor microcode. v0 backend
     // always misses; the driver records `firmware_pending=true`
@@ -224,10 +225,23 @@ bool IwlwifiBringUp(NicInfo& n)
         // slice. Drop the blob (we don't yet know how to use it).
         duetos::core::FwRelease(fw.value());
         n.firmware_pending = false;
+        n.wireless_fw_state = NicInfo::WirelessFwState::Ready;
     }
     else
     {
         n.firmware_pending = true;
+        switch (fw.error())
+        {
+        case duetos::core::ErrorCode::NotFound:
+            n.wireless_fw_state = NicInfo::WirelessFwState::Missing;
+            break;
+        case duetos::core::ErrorCode::Corrupt:
+            n.wireless_fw_state = NicInfo::WirelessFwState::Incompatible;
+            break;
+        default:
+            n.wireless_fw_state = NicInfo::WirelessFwState::LoadError;
+            break;
+        }
     }
 
     g_stats.hw_rev = hw_rev;

@@ -1,4 +1,5 @@
 #include "stack.h"
+#include "wifi.h"
 
 #include "../arch/x86_64/serial.h"
 #include "../arch/x86_64/timer.h"
@@ -197,6 +198,7 @@ void NetStackInit()
     static constinit bool s_done = false;
     KASSERT(!s_done, "net/stack", "NetStackInit called twice");
     s_done = true;
+    WifiInit();
 
     // Walk the driver-layer NIC table. Today we just log a
     // one-line-per-interface "would bind" record — there's no
