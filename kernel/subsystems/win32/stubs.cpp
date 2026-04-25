@@ -346,12 +346,12 @@ constexpr u32 kOffGdiPatBlt = 0xFE1;          // render/drivers — 25 bytes
 // UTF-16 text entry points. Stub page spans two 4 KiB pages now
 // because these plus the filled-primitive stubs pushed us past
 // 4 KiB; pe_loader.cpp allocates 2 contiguous frames and maps both.
-constexpr u32 kOffGdiTextOutW = 0xFFA;        // render/drivers — 31 bytes
-constexpr u32 kOffGdiDrawTextW = 0x1019;      // render/drivers — 25 bytes
+constexpr u32 kOffGdiTextOutW = 0xFFA;   // render/drivers — 31 bytes
+constexpr u32 kOffGdiDrawTextW = 0x1019; // render/drivers — 25 bytes
 
 // System palette entry points.
-constexpr u32 kOffGetSysColor = 0x1032;       // render/drivers — 11 bytes
-constexpr u32 kOffGetSysColorBrush = 0x103D;  // render/drivers — 11 bytes
+constexpr u32 kOffGetSysColor = 0x1032;      // render/drivers — 11 bytes
+constexpr u32 kOffGetSysColorBrush = 0x103D; // render/drivers — 11 bytes
 
 constexpr u8 kStubsBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
@@ -3698,10 +3698,10 @@ constexpr u8 kStubsBytes[] = {
     0x5B,                         // 0xF95 pop rbx
     0xC3,                         // 0xF96 ret
     // .default (offset 0xF97):
-    0x31, 0xC0,                   // 0xF97 xor eax, eax
-    0x41, 0x5C,                   // 0xF99 pop r12
-    0x5B,                         // 0xF9B pop rbx
-    0xC3,                         // 0xF9C ret
+    0x31, 0xC0, // 0xF97 xor eax, eax
+    0x41, 0x5C, // 0xF99 pop r12
+    0x5B,       // 0xF9B pop rbx
+    0xC3,       // 0xF9C ret
 
     // === Filled primitives — brush/pen from DC =================
 
