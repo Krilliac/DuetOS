@@ -84,3 +84,153 @@ __declspec(dllexport) HANDLE InternetOpenUrlA(HANDLE h, const char* url, const c
     (void)ctx;
     return (HANDLE)0;
 }
+
+__declspec(dllexport) HANDLE InternetOpenUrlW(HANDLE h, const wchar_t16* url, const wchar_t16* hdrs, DWORD hlen,
+                                              DWORD flags, unsigned long long ctx)
+{
+    (void)h;
+    (void)url;
+    (void)hdrs;
+    (void)hlen;
+    (void)flags;
+    (void)ctx;
+    return (HANDLE)0;
+}
+
+__declspec(dllexport) HANDLE InternetConnectW(HANDLE h, const wchar_t16* server, unsigned short port,
+                                              const wchar_t16* user, const wchar_t16* pw, DWORD svc, DWORD flags,
+                                              unsigned long long ctx)
+{
+    (void)h;
+    (void)server;
+    (void)port;
+    (void)user;
+    (void)pw;
+    (void)svc;
+    (void)flags;
+    (void)ctx;
+    return (HANDLE)0;
+}
+
+__declspec(dllexport) HANDLE HttpOpenRequestW(HANDLE h, const wchar_t16* verb, const wchar_t16* obj,
+                                              const wchar_t16* ver, const wchar_t16* ref, const wchar_t16** types,
+                                              DWORD flags, unsigned long long ctx)
+{
+    (void)h;
+    (void)verb;
+    (void)obj;
+    (void)ver;
+    (void)ref;
+    (void)types;
+    (void)flags;
+    (void)ctx;
+    return (HANDLE)0;
+}
+
+__declspec(dllexport) BOOL HttpSendRequestW(HANDLE h, const wchar_t16* hdrs, DWORD hlen, void* opt, DWORD ol)
+{
+    (void)h;
+    (void)hdrs;
+    (void)hlen;
+    (void)opt;
+    (void)ol;
+    return 0;
+}
+
+__declspec(dllexport) BOOL InternetWriteFile(HANDLE h, const void* buf, DWORD cb, DWORD* written)
+{
+    (void)h;
+    (void)buf;
+    (void)cb;
+    if (written)
+        *written = 0;
+    return 0;
+}
+
+__declspec(dllexport) BOOL InternetQueryDataAvailable(HANDLE h, DWORD* avail, DWORD flags, unsigned long long ctx)
+{
+    (void)h;
+    (void)flags;
+    (void)ctx;
+    if (avail)
+        *avail = 0;
+    return 0;
+}
+
+__declspec(dllexport) BOOL InternetSetOptionA(HANDLE h, DWORD opt, void* val, DWORD len)
+{
+    (void)h;
+    (void)opt;
+    (void)val;
+    (void)len;
+    return 1;
+}
+
+__declspec(dllexport) BOOL InternetSetOptionW(HANDLE h, DWORD opt, void* val, DWORD len)
+{
+    (void)h;
+    (void)opt;
+    (void)val;
+    (void)len;
+    return 1;
+}
+
+__declspec(dllexport) BOOL InternetQueryOptionA(HANDLE h, DWORD opt, void* val, DWORD* len)
+{
+    (void)h;
+    (void)opt;
+    (void)val;
+    if (len)
+        *len = 0;
+    return 0;
+}
+
+__declspec(dllexport) BOOL InternetQueryOptionW(HANDLE h, DWORD opt, void* val, DWORD* len)
+{
+    (void)h;
+    (void)opt;
+    (void)val;
+    if (len)
+        *len = 0;
+    return 0;
+}
+
+__declspec(dllexport) BOOL HttpQueryInfoA(HANDLE h, DWORD info_level, void* buf, DWORD* len, DWORD* idx)
+{
+    (void)h;
+    (void)info_level;
+    (void)buf;
+    if (len)
+        *len = 0;
+    if (idx)
+        *idx = 0;
+    return 0;
+}
+
+__declspec(dllexport) BOOL HttpQueryInfoW(HANDLE h, DWORD info_level, void* buf, DWORD* len, DWORD* idx)
+{
+    (void)h;
+    (void)info_level;
+    (void)buf;
+    if (len)
+        *len = 0;
+    if (idx)
+        *idx = 0;
+    return 0;
+}
+
+__declspec(dllexport) BOOL InternetGetConnectedState(DWORD* flags, DWORD rsv)
+{
+    (void)rsv;
+    if (flags)
+        *flags = 0;
+    return 0; /* Not connected. */
+}
+
+__declspec(dllexport) BOOL InternetCheckConnectionA(const char* url, DWORD flags, DWORD rsv)
+{
+    (void)url;
+    (void)flags;
+    (void)rsv;
+    return 0;
+}

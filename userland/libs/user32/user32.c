@@ -1273,10 +1273,22 @@ __declspec(dllexport) int GetSystemMetrics(int index)
     __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)SYS_WIN_GET_METRIC), "D"((long long)index) : "memory");
     return (int)rv;
 }
+/* GetSysColor — return a stable per-index colour. The kernel
+ * publishes the canonical palette via SYS_GDI_GET_SYS_COLOR
+ * (=127); use that so apps that paint with COLOR_WINDOWTEXT /
+ * COLOR_BTNFACE / COLOR_HIGHLIGHT see distinct colours instead
+ * of always-white. Falls back to white on out-of-range. */
 __declspec(dllexport) DWORD GetSysColor(int index)
 {
-    (void)index;
-    return 0xFFFFFFu; /* white */
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)127), "D"((long long)index) : "memory");
+    if (rv == 0 && index != 0 && index != 8)
+    {
+        /* SYS_GDI_GET_SYS_COLOR returned 0 for an unknown index;
+         * Win32 returns 0 too — match it. */
+        return (DWORD)rv;
+    }
+    return (DWORD)rv;
 }
 
 /* --- Window longs ---
@@ -1606,3 +1618,208 @@ __declspec(dllexport) BOOL Beep(DWORD freq, DWORD dur)
 /* GWL_STYLE / GWL_EXSTYLE remap is handled inside
  * user32_slot_from_index (shared with GetWindowLongPtrA); no
  * separate wrappers needed here. */
+
+/* --- Menu API stubs ---
+ * v0 has no menu engine; every entry returns a sentinel non-null
+ * handle so caller-side null checks pass, and the mutators all
+ * report success. Real menus need a separate kernel-side menu
+ * table — out of scope for v0. */
+__declspec(dllexport) HANDLE CreateMenu(void)
+{
+    /* Distinct sentinel so identity checks don't collide with
+     * other handle ranges. */
+    return (HANDLE)(long long)0xCEEEFFFF;
+}
+__declspec(dllexport) HANDLE CreatePopupMenu(void)
+{
+    return (HANDLE)(long long)0xCEEFFFFE;
+}
+__declspec(dllexport) BOOL DestroyMenu(HANDLE menu)
+{
+    (void)menu;
+    return 1;
+}
+__declspec(dllexport) HANDLE GetMenu(HANDLE hwnd)
+{
+    (void)hwnd;
+    return (HANDLE)0;
+}
+__declspec(dllexport) BOOL SetMenu(HANDLE hwnd, HANDLE menu)
+{
+    (void)hwnd;
+    (void)menu;
+    return 1;
+}
+__declspec(dllexport) HANDLE GetSubMenu(HANDLE menu, int pos)
+{
+    (void)menu;
+    (void)pos;
+    return (HANDLE)0;
+}
+__declspec(dllexport) int GetMenuItemCount(HANDLE menu)
+{
+    (void)menu;
+    return 0;
+}
+__declspec(dllexport) UINT GetMenuItemID(HANDLE menu, int pos)
+{
+    (void)menu;
+    (void)pos;
+    return 0xFFFFFFFFu; /* -1 */
+}
+__declspec(dllexport) UINT GetMenuState(HANDLE menu, UINT id, UINT flags)
+{
+    (void)menu;
+    (void)id;
+    (void)flags;
+    return 0xFFFFFFFFu;
+}
+__declspec(dllexport) BOOL AppendMenuA(HANDLE menu, UINT flags, unsigned long long item_id, const char* text)
+{
+    (void)menu;
+    (void)flags;
+    (void)item_id;
+    (void)text;
+    return 1;
+}
+__declspec(dllexport) BOOL AppendMenuW(HANDLE menu, UINT flags, unsigned long long item_id, const wchar_t16* text)
+{
+    (void)menu;
+    (void)flags;
+    (void)item_id;
+    (void)text;
+    return 1;
+}
+__declspec(dllexport) BOOL InsertMenuA(HANDLE menu, UINT pos, UINT flags, unsigned long long item_id, const char* text)
+{
+    (void)menu;
+    (void)pos;
+    (void)flags;
+    (void)item_id;
+    (void)text;
+    return 1;
+}
+__declspec(dllexport) BOOL InsertMenuW(HANDLE menu, UINT pos, UINT flags, unsigned long long item_id,
+                                       const wchar_t16* text)
+{
+    (void)menu;
+    (void)pos;
+    (void)flags;
+    (void)item_id;
+    (void)text;
+    return 1;
+}
+__declspec(dllexport) BOOL RemoveMenu(HANDLE menu, UINT pos, UINT flags)
+{
+    (void)menu;
+    (void)pos;
+    (void)flags;
+    return 1;
+}
+__declspec(dllexport) BOOL DeleteMenu(HANDLE menu, UINT pos, UINT flags)
+{
+    (void)menu;
+    (void)pos;
+    (void)flags;
+    return 1;
+}
+__declspec(dllexport) BOOL EnableMenuItem(HANDLE menu, UINT id, UINT flags)
+{
+    (void)menu;
+    (void)id;
+    (void)flags;
+    return 1;
+}
+__declspec(dllexport) DWORD CheckMenuItem(HANDLE menu, UINT id, UINT flags)
+{
+    (void)menu;
+    (void)id;
+    (void)flags;
+    return 0;
+}
+__declspec(dllexport) BOOL ModifyMenuA(HANDLE menu, UINT pos, UINT flags, unsigned long long item_id, const char* text)
+{
+    return InsertMenuA(menu, pos, flags, item_id, text);
+}
+__declspec(dllexport) BOOL ModifyMenuW(HANDLE menu, UINT pos, UINT flags, unsigned long long item_id,
+                                       const wchar_t16* text)
+{
+    return InsertMenuW(menu, pos, flags, item_id, text);
+}
+__declspec(dllexport) BOOL TrackPopupMenu(HANDLE menu, UINT flags, int x, int y, int reserved, HANDLE hwnd, void* rect)
+{
+    (void)menu;
+    (void)flags;
+    (void)x;
+    (void)y;
+    (void)reserved;
+    (void)hwnd;
+    (void)rect;
+    /* No popup menu shown — return 0 (= "no item selected"). */
+    return 0;
+}
+__declspec(dllexport) BOOL TrackPopupMenuEx(HANDLE menu, UINT flags, int x, int y, HANDLE hwnd, void* params)
+{
+    (void)menu;
+    (void)flags;
+    (void)x;
+    (void)y;
+    (void)hwnd;
+    (void)params;
+    return 0;
+}
+__declspec(dllexport) BOOL DrawMenuBar(HANDLE hwnd)
+{
+    (void)hwnd;
+    return 1;
+}
+
+/* --- Charset / virtual-key conversion --- */
+__declspec(dllexport) UINT MapVirtualKeyA(UINT code, UINT type)
+{
+    (void)type;
+    return code; /* Pass-through as a v0 placeholder. */
+}
+__declspec(dllexport) UINT MapVirtualKeyW(UINT code, UINT type)
+{
+    return MapVirtualKeyA(code, type);
+}
+__declspec(dllexport) UINT MapVirtualKeyExA(UINT code, UINT type, HANDLE layout)
+{
+    (void)layout;
+    return MapVirtualKeyA(code, type);
+}
+__declspec(dllexport) UINT MapVirtualKeyExW(UINT code, UINT type, HANDLE layout)
+{
+    return MapVirtualKeyExA(code, type, layout);
+}
+__declspec(dllexport) UINT GetKeyboardLayout(DWORD thread)
+{
+    (void)thread;
+    return 0x04090409u; /* en-US, en-US */
+}
+
+/* --- Window state queries (only ones not already in user32) --- */
+__declspec(dllexport) BOOL IsZoomed(HANDLE hwnd)
+{
+    (void)hwnd;
+    return 0;
+}
+__declspec(dllexport) BOOL IsIconic(HANDLE hwnd)
+{
+    (void)hwnd;
+    return 0;
+}
+__declspec(dllexport) BOOL IsChild(HANDLE parent, HANDLE child)
+{
+    (void)parent;
+    (void)child;
+    return 0;
+}
+__declspec(dllexport) DWORD GetWindowThreadProcessId(HANDLE hwnd, DWORD* pid)
+{
+    (void)hwnd;
+    if (pid)
+        *pid = 1;
+    return 1;
+}

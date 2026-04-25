@@ -167,6 +167,11 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
         p->linux_sigactions[i].mask = 0;
     }
     p->linux_signal_mask = 0;
+    // Default cwd is "/" — matches the value DoGetcwd hard-coded
+    // before this field existed.
+    for (u32 i = 0; i < Process::kLinuxCwdCap; ++i)
+        p->linux_cwd[i] = 0;
+    p->linux_cwd[0] = '/';
     p->refcount = 1;
 
     ++g_live_processes;

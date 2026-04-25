@@ -652,3 +652,84 @@ __declspec(dllexport) void RtlUnwindEx(void* TargetFrame, void* TargetIp, void* 
     (void)HistoryTable;
     __asm__ volatile("int $0x80" : : "a"((long long)0), "D"((long long)3));
 }
+
+/* RtlGetVersion / RtlVerifyVersionInfo — same v0 build as
+ * kernel32 GetVersionEx, but with NTSTATUS returns. Used by
+ * Vista+ apps that bypass the deprecated GetVersionEx and ask
+ * RtlGetVersion directly. Win10 build 19041 matches the
+ * registry stub in advapi32. */
+__declspec(dllexport) NTSTATUS RtlGetVersion(void* info)
+{
+    if (!info)
+        return 0xC000000DUL;
+    DWORD* p = (DWORD*)info;
+    DWORD struct_size = p[0];
+    if (struct_size < 276)
+        return 0xC0000023UL;
+    p[1] = 10;
+    p[2] = 0;
+    p[3] = 19041;
+    p[4] = 2;
+    unsigned short* csd = (unsigned short*)((unsigned char*)info + 20);
+    csd[0] = 0;
+    if (struct_size >= 284)
+    {
+        unsigned short* tail = (unsigned short*)((unsigned char*)info + 276);
+        tail[0] = 0;
+        tail[1] = 0;
+        tail[2] = 0;
+        tail[3] = 1;
+    }
+    return 0;
+}
+
+__declspec(dllexport) NTSTATUS RtlVerifyVersionInfo(void* info, DWORD type_mask, unsigned long long cond_mask)
+{
+    (void)info;
+    (void)type_mask;
+    (void)cond_mask;
+    return 0;
+}
+
+/* RtlComputeCrc32. Reflected polynomial 0xEDB88320. */
+__declspec(dllexport) DWORD RtlComputeCrc32(DWORD seed, const unsigned char* buf, ULONG len)
+{
+    DWORD crc = seed ^ 0xFFFFFFFFu;
+    for (ULONG i = 0; i < len; ++i)
+    {
+        crc ^= buf[i];
+        for (int j = 0; j < 8; ++j)
+            crc = (crc >> 1) ^ (0xEDB88320u & -(int)(crc & 1));
+    }
+    return crc ^ 0xFFFFFFFFu;
+}
+
+/* RtlGenRandom. Mixes SYS_PERF_COUNTER ticks per call.
+ * NOT formally cryptographic. */
+static unsigned long long g_rtl_rand = 0xCAFEBABEDEADBEEFULL;
+__declspec(dllexport) BOOL RtlGenRandom(void* buf, ULONG len)
+{
+    if (!buf || len == 0)
+        return 1;
+    long long ticks;
+    __asm__ volatile("int $0x80" : "=a"(ticks) : "a"((long long)13) : "memory");
+    g_rtl_rand ^= (unsigned long long)ticks;
+    unsigned char* p = (unsigned char*)buf;
+    for (ULONG i = 0; i < len; ++i)
+    {
+        g_rtl_rand = g_rtl_rand * 6364136223846793005ULL + 1442695040888963407ULL;
+        p[i] = (unsigned char)(g_rtl_rand >> 56);
+    }
+    return 1;
+}
+
+/* RtlSecureZeroMemory: same as RtlZeroMemory but the compiler
+ * isn't allowed to optimise it away. The no-builtin attribute
+ * already prevents that for our RtlZeroMemory; alias it. */
+__declspec(dllexport) void* RtlSecureZeroMemory(void* dst, SIZE_T n)
+{
+    unsigned char volatile* d = (unsigned char volatile*)dst;
+    for (SIZE_T i = 0; i < n; ++i)
+        d[i] = 0;
+    return dst;
+}

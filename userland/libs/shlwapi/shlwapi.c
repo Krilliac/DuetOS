@@ -248,3 +248,265 @@ __declspec(dllexport) NO_BUILTIN_LOOPS wchar_t16* StrStrIW(const wchar_t16* hays
     }
     return (wchar_t16*)0;
 }
+
+/* ---- ANSI string helpers ---- */
+
+__declspec(dllexport) NO_BUILTIN_LOOPS int StrCmpA(const char* a, const char* b)
+{
+    if (!a || !b)
+        return (a == b) ? 0 : (a ? 1 : -1);
+    while (*a && *a == *b)
+    {
+        ++a;
+        ++b;
+    }
+    return (int)(unsigned char)*a - (int)(unsigned char)*b;
+}
+
+__declspec(dllexport) NO_BUILTIN_LOOPS int StrCmpNA(const char* a, const char* b, int n)
+{
+    if (!a || !b)
+        return (a == b) ? 0 : (a ? 1 : -1);
+    for (int i = 0; i < n; ++i)
+    {
+        if (!a[i] || a[i] != b[i])
+            return (int)(unsigned char)a[i] - (int)(unsigned char)b[i];
+    }
+    return 0;
+}
+
+__declspec(dllexport) NO_BUILTIN_LOOPS int StrCmpIA(const char* a, const char* b)
+{
+    if (!a || !b)
+        return (a == b) ? 0 : (a ? 1 : -1);
+    while (*a && *b)
+    {
+        char ca = *a, cb = *b;
+        if (ca >= 'A' && ca <= 'Z')
+            ca = (char)(ca + ('a' - 'A'));
+        if (cb >= 'A' && cb <= 'Z')
+            cb = (char)(cb + ('a' - 'A'));
+        if (ca != cb)
+            return (int)(unsigned char)ca - (int)(unsigned char)cb;
+        ++a;
+        ++b;
+    }
+    return (int)(unsigned char)*a - (int)(unsigned char)*b;
+}
+
+__declspec(dllexport) NO_BUILTIN_LOOPS int StrCmpNIA(const char* a, const char* b, int n)
+{
+    if (!a || !b)
+        return (a == b) ? 0 : (a ? 1 : -1);
+    for (int i = 0; i < n; ++i)
+    {
+        char ca = a[i], cb = b[i];
+        if (ca >= 'A' && ca <= 'Z')
+            ca = (char)(ca + ('a' - 'A'));
+        if (cb >= 'A' && cb <= 'Z')
+            cb = (char)(cb + ('a' - 'A'));
+        if (!ca || ca != cb)
+            return (int)(unsigned char)ca - (int)(unsigned char)cb;
+    }
+    return 0;
+}
+
+__declspec(dllexport) NO_BUILTIN_LOOPS char* StrChrA(const char* s, int c)
+{
+    if (!s)
+        return (char*)0;
+    while (*s)
+    {
+        if (*s == (char)c)
+            return (char*)s;
+        ++s;
+    }
+    return (c == 0) ? (char*)s : (char*)0;
+}
+
+__declspec(dllexport) NO_BUILTIN_LOOPS wchar_t16* StrChrW(const wchar_t16* s, wchar_t16 c)
+{
+    if (!s)
+        return (wchar_t16*)0;
+    while (*s)
+    {
+        if (*s == c)
+            return (wchar_t16*)s;
+        ++s;
+    }
+    return (c == 0) ? (wchar_t16*)s : (wchar_t16*)0;
+}
+
+__declspec(dllexport) NO_BUILTIN_LOOPS char* StrRChrA(const char* s, const char* end, int c)
+{
+    if (!s)
+        return (char*)0;
+    if (!end)
+        end = s + alen(s);
+    const char* p = end;
+    while (p > s)
+    {
+        --p;
+        if (*p == (char)c)
+            return (char*)p;
+    }
+    return (char*)0;
+}
+
+__declspec(dllexport) NO_BUILTIN_LOOPS wchar_t16* StrRChrW(const wchar_t16* s, const wchar_t16* end, wchar_t16 c)
+{
+    if (!s)
+        return (wchar_t16*)0;
+    if (!end)
+        end = s + wlen(s);
+    const wchar_t16* p = end;
+    while (p > s)
+    {
+        --p;
+        if (*p == c)
+            return (wchar_t16*)p;
+    }
+    return (wchar_t16*)0;
+}
+
+/* ---- Path predicates / mutators (pure logic) ---- */
+
+/* Relative iff first character isn't '\\' or '/' AND not "X:" drive. */
+__declspec(dllexport) BOOL PathIsRelativeA(const char* p)
+{
+    if (!p || !p[0])
+        return 1;
+    if (p[0] == '\\' || p[0] == '/')
+        return 0;
+    if (p[1] == ':')
+        return 0;
+    return 1;
+}
+
+__declspec(dllexport) BOOL PathIsRelativeW(const wchar_t16* p)
+{
+    if (!p || !p[0])
+        return 1;
+    if (p[0] == '\\' || p[0] == '/')
+        return 0;
+    if (p[1] == ':')
+        return 0;
+    return 1;
+}
+
+__declspec(dllexport) void PathRemoveExtensionA(char* p)
+{
+    if (!p)
+        return;
+    size_t n = alen(p);
+    for (size_t i = n; i > 0; --i)
+    {
+        char c = p[i - 1];
+        if (c == '\\' || c == '/')
+            return;
+        if (c == '.')
+        {
+            p[i - 1] = 0;
+            return;
+        }
+    }
+}
+
+__declspec(dllexport) void PathRemoveExtensionW(wchar_t16* p)
+{
+    if (!p)
+        return;
+    size_t n = wlen(p);
+    for (size_t i = n; i > 0; --i)
+    {
+        wchar_t16 c = p[i - 1];
+        if (c == '\\' || c == '/')
+            return;
+        if (c == '.')
+        {
+            p[i - 1] = 0;
+            return;
+        }
+    }
+}
+
+__declspec(dllexport) BOOL PathRemoveBackslashA(char* p)
+{
+    if (!p)
+        return 0;
+    size_t n = alen(p);
+    if (n > 0 && (p[n - 1] == '\\' || p[n - 1] == '/'))
+    {
+        p[n - 1] = 0;
+        return 1;
+    }
+    return 0;
+}
+
+__declspec(dllexport) BOOL PathRemoveBackslashW(wchar_t16* p)
+{
+    if (!p)
+        return 0;
+    size_t n = wlen(p);
+    if (n > 0 && (p[n - 1] == '\\' || p[n - 1] == '/'))
+    {
+        p[n - 1] = 0;
+        return 1;
+    }
+    return 0;
+}
+
+__declspec(dllexport) BOOL PathAddBackslashA(char* p)
+{
+    if (!p)
+        return 0;
+    size_t n = alen(p);
+    if (n > 0 && (p[n - 1] == '\\' || p[n - 1] == '/'))
+        return 1;
+    p[n] = '\\';
+    p[n + 1] = 0;
+    return 1;
+}
+
+/* PathMatchSpec: case-insensitive glob matching of '*' and '?'. */
+static int match_spec_w(const wchar_t16* s, const wchar_t16* pat)
+{
+    while (*pat)
+    {
+        if (*pat == '*')
+        {
+            ++pat;
+            if (!*pat)
+                return 1;
+            while (*s)
+            {
+                if (match_spec_w(s, pat))
+                    return 1;
+                ++s;
+            }
+            return 0;
+        }
+        if (!*s)
+            return 0;
+        if (*pat != '?')
+        {
+            wchar_t16 a = *s, b = *pat;
+            if (a >= 'A' && a <= 'Z')
+                a = (wchar_t16)(a + ('a' - 'A'));
+            if (b >= 'A' && b <= 'Z')
+                b = (wchar_t16)(b + ('a' - 'A'));
+            if (a != b)
+                return 0;
+        }
+        ++s;
+        ++pat;
+    }
+    return *s == 0;
+}
+
+__declspec(dllexport) BOOL PathMatchSpecW(const wchar_t16* s, const wchar_t16* pat)
+{
+    if (!s || !pat)
+        return 0;
+    return match_spec_w(s, pat);
+}

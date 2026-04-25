@@ -67,3 +67,86 @@ __declspec(dllexport) BOOL WinHttpCloseHandle(HANDLE h)
     (void)h;
     return 1;
 }
+
+__declspec(dllexport) BOOL WinHttpQueryDataAvailable(HANDLE h, DWORD* avail)
+{
+    (void)h;
+    if (avail)
+        *avail = 0;
+    return 0;
+}
+
+__declspec(dllexport) BOOL WinHttpQueryHeaders(HANDLE h, DWORD info_level, const wchar_t16* name, void* buf, DWORD* len,
+                                               DWORD* idx)
+{
+    (void)h;
+    (void)info_level;
+    (void)name;
+    (void)buf;
+    if (len)
+        *len = 0;
+    if (idx)
+        *idx = 0;
+    return 0;
+}
+
+__declspec(dllexport) BOOL WinHttpAddRequestHeaders(HANDLE h, const wchar_t16* hdrs, DWORD len, DWORD modifiers)
+{
+    (void)h;
+    (void)hdrs;
+    (void)len;
+    (void)modifiers;
+    return 1;
+}
+
+__declspec(dllexport) BOOL WinHttpSetOption(HANDLE h, DWORD opt, const void* val, DWORD len)
+{
+    (void)h;
+    (void)opt;
+    (void)val;
+    (void)len;
+    return 1;
+}
+
+__declspec(dllexport) BOOL WinHttpQueryOption(HANDLE h, DWORD opt, void* val, DWORD* len)
+{
+    (void)h;
+    (void)opt;
+    (void)val;
+    if (len)
+        *len = 0;
+    return 0;
+}
+
+__declspec(dllexport) BOOL WinHttpSetTimeouts(HANDLE h, int resolve, int connect, int send, int receive)
+{
+    (void)h;
+    (void)resolve;
+    (void)connect;
+    (void)send;
+    (void)receive;
+    return 1;
+}
+
+__declspec(dllexport) BOOL WinHttpSetStatusCallback(HANDLE h, void* cb, DWORD flags, unsigned long long rsv)
+{
+    (void)h;
+    (void)cb;
+    (void)flags;
+    (void)rsv;
+    return 1;
+}
+
+__declspec(dllexport) BOOL WinHttpCheckPlatform(void)
+{
+    return 1;
+}
+
+__declspec(dllexport) BOOL WinHttpCrackUrl(const wchar_t16* url, DWORD len, DWORD flags, void* components)
+{
+    (void)url;
+    (void)len;
+    (void)flags;
+    (void)components;
+    return 0;
+}
