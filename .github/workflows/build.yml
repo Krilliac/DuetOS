@@ -61,7 +61,8 @@ jobs:
       - name: Install toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-18 lld-18 llvm-18 cmake ninja-build python3
+          sudo apt-get install -y clang-18 lld-18 llvm-18 cmake ninja-build python3 \
+                                  grub-common grub-pc-bin grub-efi-amd64-bin xorriso mtools
           sudo ln -sf /usr/bin/clang-18 /usr/local/bin/clang
           sudo ln -sf /usr/bin/clang++-18 /usr/local/bin/clang++
           sudo ln -sf /usr/bin/lld-link-18 /usr/local/bin/lld-link
@@ -75,6 +76,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: duetos-kernel-debug
+          if-no-files-found: error
           path: |
             build/x86_64-debug/duetos.iso
             build/x86_64-debug/kernel/duetos-kernel.elf
