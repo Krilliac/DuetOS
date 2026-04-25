@@ -595,6 +595,14 @@ void CaptureDiskBaselines()
     const u32 cap = (n < kMaxBlockDevicesForHealth) ? n : u32(kMaxBlockDevicesForHealth);
     for (u32 i = 0; i < cap; ++i)
     {
+        // Partition-view devices expose partition-relative LBAs:
+        // LBA 0 is typically a filesystem boot sector, not the
+        // disk's protective MBR. FAT/ext self-tests legitimately
+        // mutate those sectors, so guarding/checking "LBA 0/1"
+        // on partition handles would false-positive every healthy
+        // boot. Baseline only whole-disk handles here.
+        if (drivers::storage::BlockDeviceIsPartition(i))
+            continue;
         for (u32 lba = 0; lba < 2; ++lba)
         {
             const i32 rc = drivers::storage::BlockDeviceRead(i, lba, 1, g_health_scratch);
@@ -622,6 +630,8 @@ bool CheckBootSectors()
     const u32 cap = (n < kMaxBlockDevicesForHealth) ? n : u32(kMaxBlockDevicesForHealth);
     for (u32 i = 0; i < cap; ++i)
     {
+        if (drivers::storage::BlockDeviceIsPartition(i))
+            continue;
         for (u32 lba = 0; lba < 2; ++lba)
         {
             if (!g_baseline_disk_valid[i][lba])

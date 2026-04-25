@@ -196,6 +196,14 @@ bool BlockDeviceIsWritable(u32 handle)
     return ops != nullptr && ops->write != nullptr;
 }
 
+bool BlockDeviceIsPartition(u32 handle)
+{
+    if (!ValidHandle(handle))
+        return false;
+    const BlockOps* ops = g_devices[handle].desc.ops;
+    return ops == &kPartitionBlockOps || ops == &kPartitionBlockOpsRO;
+}
+
 i32 BlockDeviceRead(u32 handle, u64 lba, u32 count, void* buf)
 {
     if (!ValidHandle(handle) || buf == nullptr || count == 0)

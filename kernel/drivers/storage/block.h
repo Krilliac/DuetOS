@@ -103,6 +103,13 @@ u32 BlockDeviceSectorSize(u32 handle);
 u64 BlockDeviceSectorCount(u32 handle);
 bool BlockDeviceIsWritable(u32 handle);
 
+/// True when `handle` is a partition-view block device created by
+/// `PartitionBlockDeviceCreate` (LBA-translation wrapper over a
+/// parent disk). Useful for callers (e.g. runtime health checks)
+/// that need to reason about raw-disk LBAs and should ignore
+/// partition-relative LBA 0/1.
+bool BlockDeviceIsPartition(u32 handle);
+
 /// Read `count` sectors starting at `lba` into `buf`. Returns
 /// 0 on success, -1 on failure. The layer bounds-checks lba +
 /// count against sector_count before dispatch.
