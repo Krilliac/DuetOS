@@ -38,6 +38,9 @@ typedef struct
 #define SYS_GDI_TEXT_OUT 66
 #define SYS_GDI_RECTANGLE 67
 #define SYS_GDI_CLEAR 68
+#define SYS_GDI_SET_TEXT_COLOR 114
+#define SYS_GDI_SET_BK_COLOR 115
+#define SYS_GDI_SET_BK_MODE 116
 #define SYS_GDI_LINE 74
 #define SYS_GDI_ELLIPSE 75
 #define SYS_GDI_SET_PIXEL 76
@@ -582,18 +585,24 @@ __declspec(dllexport) COLORREF GetPixel(HDC dc, INT x, INT y)
     return (COLORREF)-1;
 }
 
-/* --- DC state setters (return "previous value", all 0) --- */
+/* --- DC state setters (route to kernel where the syscall exists) --- */
 __declspec(dllexport) COLORREF SetBkColor(HDC dc, COLORREF clr)
 {
-    (void)dc;
-    (void)clr;
-    return 0;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_GDI_SET_BK_COLOR), "D"((long long)(unsigned long long)dc), "S"((long long)clr)
+                     : "memory");
+    return (COLORREF)rv;
 }
 __declspec(dllexport) INT SetBkMode(HDC dc, INT mode)
 {
-    (void)dc;
-    (void)mode;
-    return 0;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_GDI_SET_BK_MODE), "D"((long long)(unsigned long long)dc), "S"((long long)mode)
+                     : "memory");
+    return (INT)rv;
 }
 __declspec(dllexport) INT SetMapMode(HDC dc, INT mode)
 {
@@ -609,7 +618,11 @@ __declspec(dllexport) UINT SetTextAlign(HDC dc, UINT align)
 }
 __declspec(dllexport) COLORREF SetTextColor(HDC dc, COLORREF clr)
 {
-    (void)dc;
-    (void)clr;
-    return 0;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_GDI_SET_TEXT_COLOR), "D"((long long)(unsigned long long)dc),
+                       "S"((long long)clr)
+                     : "memory");
+    return (COLORREF)rv;
 }
