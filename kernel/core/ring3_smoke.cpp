@@ -64,6 +64,7 @@
 #include "random.h"
 #include "panic.h"
 #include "pe_loader.h"
+#include "log_names.h"
 #include "process.h"
 
 /*
@@ -465,7 +466,9 @@ void SpawnRing3Task(const char* name, CapSet caps, const fs::RamfsNode* root, u6
     SerialWriteHex(proc->pid);
     SerialWrite(" caps=");
     SerialWriteHex(proc->caps.bits);
-    SerialWrite(" code_va=");
+    SerialWrite("(");
+    duetos::core::SerialWriteCapBits(proc->caps.bits);
+    SerialWrite(") code_va=");
     SerialWriteHex(code_va);
     SerialWrite(" stack_va=");
     SerialWriteHex(stack_va);

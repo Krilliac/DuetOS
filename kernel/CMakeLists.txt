@@ -23,9 +23,11 @@
 set(DUETOS_KERNEL_SHARED_SOURCES
     core/auth.cpp
     core/cleanroom_trace.cpp
+    core/crprobe.cpp
     core/heartbeat.cpp
     core/hexdump.cpp
     core/klog.cpp
+    core/log_names.cpp
     core/login.cpp
     core/main.cpp
     core/panic.cpp
@@ -42,6 +44,7 @@ set(DUETOS_KERNEL_SHARED_SOURCES
     core/result.cpp
     core/ring3_smoke.cpp
     core/runtime_checker.cpp
+    core/string.cpp
     subsystems/graphics/graphics.cpp
     subsystems/linux/ring3_smoke.cpp
     subsystems/linux/syscall.cpp

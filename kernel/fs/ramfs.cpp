@@ -108,12 +108,21 @@ constexpr u8 kEtcMotdBytes[] = "------------------------------------------------
 // Default shell profile — auto-sourced by the shell on init.
 // Each line dispatches as if typed at the prompt. Lines starting
 // with '#' are comments and skipped by the source command.
+//
+// Under DUETOS_CRTRACE_SURVEY the profile also runs `crtrace show
+// 256` so a headless boot dumps the cleanroom-trace ring without
+// needing keyboard input. See tools/cleanroom/run-trace-survey.sh.
 constexpr u8 kEtcProfileBytes[] = "# DuetOS default profile\n"
                                   "# Runs every time the shell starts.\n"
                                   "set PS1 duetos> \n"
                                   "alias ll ls\n"
                                   "alias l ls\n"
-                                  "alias cls clear\n";
+                                  "alias cls clear\n"
+#ifdef DUETOS_CRTRACE_SURVEY
+                                  "crprobe\n"
+                                  "crtrace show 256\n"
+#endif
+    ;
 
 // Man pages — plain-text per-command help. Each file here lands
 // at /etc/man/<name> and is read by the shell's `man` command

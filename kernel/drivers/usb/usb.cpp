@@ -2,6 +2,7 @@
 
 #include "../../arch/x86_64/serial.h"
 #include "../../core/klog.h"
+#include "../../core/log_names.h"
 #include "../../core/panic.h"
 #include "../../mm/paging.h"
 #include "../pci/pci.h"
@@ -278,7 +279,9 @@ void LogHostController(const HostControllerInfo& h)
     arch::SerialWriteHex(h.function);
     arch::SerialWrite("  vid=");
     arch::SerialWriteHex(h.vendor_id);
-    arch::SerialWrite(" did=");
+    arch::SerialWrite("(");
+    arch::SerialWrite(::duetos::core::PciVendorName(h.vendor_id));
+    arch::SerialWrite(") did=");
     arch::SerialWriteHex(h.device_id);
     arch::SerialWrite(" kind=");
     arch::SerialWrite(HciKindName(h.kind));

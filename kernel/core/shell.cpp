@@ -50,6 +50,7 @@
 #include "elf_loader.h"
 #include "hexdump.h"
 #include "cleanroom_trace.h"
+#include "crprobe.h"
 #include "firmware_loader.h"
 #include "auth.h"
 #include "klog.h"
@@ -209,6 +210,12 @@ void WriteU8TwoDigits(u8 v)
     ConsoleWriteChar(static_cast<char>('0' + (v / 10)));
     ConsoleWriteChar(static_cast<char>('0' + (v % 10)));
 }
+
+// Forward declarations so commands defined earlier in the file
+// can use shared helpers whose bodies live further down.
+void WriteI64Dec(i64 v);
+bool ParseU64Str(const char* s, duetos::u64* out);
+duetos::i64 ParseInt(const char* s);
 
 // Fixed-width hex writer: prints `digits` nibbles of `v`, high
 // nibble first, with a leading "0x". digits == 0 trims leading
@@ -1401,9 +1408,9 @@ static const char* const kCommandSet[] = {
     "battery",  "thermal", "temp",     "gpu",       "lsgpu",    "gfx",        "nic",        "lsnic",    "ip",
     "arp",      "ipv4",    "uuid",     "uuidgen",   "health",   "checkup",    "attacksim",  "redteam",  "memdump",
     "ifconfig", "netinfo", "dhcp",     "route",     "netscan",  "wifi",       "fwpolicy",   "fwtrace",  "crtrace",
-    "net",      "usbnet",  "instr",    "dumpstate", "bp",       "breakpoint", "login",      "logout",   "passwd",
-    "useradd",  "userdel", "users",    "who",       "su",       "hwmon",      "vbe",        "ping",     "nslookup",
-    "ntp",      "http",    "shutdown", "poweroff",  "beep",     "inspect",    "theme",
+    "crprobe",  "net",     "usbnet",   "instr",     "dumpstate","bp",         "breakpoint", "login",    "logout",
+    "passwd",   "useradd", "userdel",  "users",     "who",      "su",         "hwmon",      "vbe",      "ping",
+    "nslookup", "ntp",     "http",     "shutdown",  "poweroff", "beep",       "inspect",    "theme",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -3576,6 +3583,7 @@ void CmdCrTrace(duetos::u32 argc, char** argv)
     ConsoleWrite(" of ");
     WriteU64Dec(count);
     ConsoleWriteln(" entries");
+    duetos::arch::SerialWrite("\n=== CRTRACE DUMP BEGIN ===\n");
     for (duetos::u32 i = start; i < count; ++i)
     {
         duetos::core::CleanroomTraceEntry e{};
@@ -3594,7 +3602,16 @@ void CmdCrTrace(duetos::u32 argc, char** argv)
         ConsoleWrite(" c=");
         WriteU64Hex(e.c);
         ConsoleWriteln("");
+        duetos::arch::SerialWrite("CRTRACE [");
+        duetos::arch::SerialWriteHex(i);
+        duetos::arch::SerialWrite("] ");
+        duetos::arch::SerialWrite(e.subsystem);
+        duetos::arch::SerialWrite("::");
+        duetos::arch::SerialWrite(e.event);
+        duetos::core::CleanroomTraceWriteDecoded(e);
+        duetos::arch::SerialWrite("\n");
     }
+    duetos::arch::SerialWrite("=== CRTRACE DUMP END ===\n");
 }
 
 // `net` umbrella: sub-commands `up`, `status`, `test`. Each one is a
@@ -4962,6 +4979,22 @@ bool ParseU64Str(const char* s, duetos::u64* out)
     }
     *out = v;
     return true;
+}
+
+// Convenience integer parser used by commands that take a small
+// positive count (e.g. `crtrace show 64`). Returns the parsed
+// value on success; any parse failure or value above i64-max
+// returns 0 so the caller's `if (parsed > 0)` guard falls
+// through to the default. Reuses ParseU64Str so decimal +
+// 0x-hex syntax stay aligned across the shell.
+duetos::i64 ParseInt(const char* s)
+{
+    duetos::u64 v = 0;
+    if (!ParseU64Str(s, &v))
+        return 0;
+    if (v > 0x7FFFFFFFFFFFFFFFull)
+        return 0;
+    return static_cast<duetos::i64>(v);
 }
 
 void CmdMetrics()
@@ -8642,6 +8675,13 @@ void Dispatch(char* line)
     if (StrEq(cmd, "crtrace"))
     {
         CmdCrTrace(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "crprobe"))
+    {
+        ConsoleWriteln("CRPROBE: firing wifi + fw-loader trace dispatch points");
+        duetos::core::CrProbeRun();
+        ConsoleWriteln("CRPROBE: done — try `crtrace show 32`");
         return;
     }
     if (StrEq(cmd, "net"))
