@@ -19,7 +19,7 @@
  *   `LeU16/32/64` helpers — never via casts to packed structs —
  *   so the loader survives unaligned headers without UB.
  *
- *   IAT resolution priority (slice-6 onward):
+ *   IAT resolution priority (onward):
  *     loaded DLL EATs (chase forwarders)
  *       -> Win32ThunksLookupKind          (in-kernel thunks page)
  *         -> IsLikelyDataImport ? data-miss landing pad
@@ -831,7 +831,7 @@ bool ParseForwarder(const char* fwd, char* out_dll, ParsedForwarder& out)
     return true;
 }
 
-// Stage-2 slice 6+8: try the caller's preloaded DLL array before
+// Try the caller's preloaded DLL array (with forwarder chase) before
 // falling through to the flat stubs table. Returns true and
 // writes *out_va on hit; returns false on miss so ResolveImports
 // falls through to Win32ThunksLookupKind unchanged.
@@ -1110,8 +1110,8 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
 
             u64 stub_va = 0;
             bool is_noop_stub = false;
-            // Stage-2 slice 6: consult the caller's preloaded DLL
-            // table first. On hit, the IAT slot is patched with
+            // Consult the caller's preloaded DLL table first.
+            // On hit, the IAT slot is patched with
             // the DLL's export VA directly — no trampoline page,
             // no syscall round-trip — the PE's indirect call
             // lands straight in the DLL's code. Misses fall
@@ -1358,7 +1358,7 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
     {
         SerialWrite("[pe-load] FAIL TlsCallbacksUnsupported count=");
         SerialWriteHex(tls_cb_count);
-        SerialWrite(" — v0 cannot invoke TLS callbacks; a future slice "
+        SerialWrite(" — v0 cannot invoke TLS callbacks; a follow-up "
                     "injects a per-process thunk to call them before entry\n");
         return r;
     }

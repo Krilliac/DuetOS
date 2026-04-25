@@ -124,7 +124,7 @@ u8 IrqAllocVector();
 /// there's real work to do after IdtInit().
 [[noreturn]] void RaiseSelfTestBreakpoint();
 
-/// Boot-time confidence check for the slice-80 trap surface:
+/// Boot-time confidence check for the trap surface:
 ///   1. Issue `int3` from kernel mode. Verifies the dispatcher routes
 ///      #BP through TrapResponse::LogAndContinue + iretq instead of
 ///      halting. If the policy regresses, the kernel hangs here and

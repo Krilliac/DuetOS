@@ -350,7 +350,7 @@ extern "C" void TrapDispatch(TrapFrame* frame)
             // a software-triggered stray (e.g. the boot `int 0x42`
             // probe, debug probes) must never touch the scheduler,
             // which may not exist yet and wouldn't have anything to
-            // schedule anyway. Before slice-81 this branch ran on
+            // schedule anyway. Before this branch ran on
             // the unhandled path too; that regressed the pre-SchedInit
             // boot probe into a #GP inside Schedule().
             if (sched::TakeNeedResched())
@@ -492,7 +492,7 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     }
 
     // CPU exception path. Route through the per-vector tiered
-    // response policy (slice 80) — explicit per-class outcome
+    // response policy — explicit per-class outcome
     // instead of "everything panics", so a recoverable trap (an
     // in-kernel int3, a debug-register single-step) doesn't bring
     // the kernel down. The policy table itself lives in
@@ -809,7 +809,7 @@ void TrapsSelfTest()
     asm volatile("int3");
 
     // 2. Spurious-vector probe. Vector 0x42 has no registered handler,
-    // no driver routes IRQs to it. With slice-80's full-IDT install
+    // no driver routes IRQs to it. With the prior full-IDT install
     // it fires `mkstub 66` -> isr_common -> TrapDispatch's spurious
     // branch, which logs "[idt] spurious vector 0x42 ..." and
     // iretq's. Without the new install it would cascade to #NP and

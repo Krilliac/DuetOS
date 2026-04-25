@@ -2299,7 +2299,7 @@ void CmdMouseStats()
     ConsoleWriteChar('\n');
 }
 
-// ------ slice 52: observability commands for the v0 subsystems ------
+// ------ Observability commands for the v0 subsystems ------
 
 void CmdSmbios()
 {

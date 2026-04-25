@@ -110,8 +110,8 @@ bool TaskIsDead(const Task* t);
 /// integer value is a stable handle for logs / future ABI.
 enum class KillReason : u8
 {
-    TickBudget = 1,             // CPU-tick budget exhausted (slice 14)
-    SandboxDenialThreshold = 2, // too many cap-denials (slice 16)
+    TickBudget = 1,             // CPU-tick budget exhausted
+    SandboxDenialThreshold = 2, // too many cap-denials
     UserKill = 3,               // shell `kill <pid>` / operator-initiated
     // Add new reasons at the end.
 };

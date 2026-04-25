@@ -1,8 +1,7 @@
 /*
  * userland/apps/thread_stress/hello.c
  *
- * Exercises the CreateThread -> SYS_THREAD_CREATE path added in
- * batch 50. Flow:
+ * Exercises the CreateThread -> SYS_THREAD_CREATE path. Flow:
  *
  *   main:
  *     - CreateEventW(manual-reset, non-signaled)

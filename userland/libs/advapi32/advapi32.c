@@ -1,9 +1,8 @@
 /*
  * userland/libs/advapi32/advapi32.c
  *
- * Freestanding DuetOS advapi32.dll. Stage-2 slice 34
- * upgrades this from the all-stubs slice-27 version to a real
- * in-memory registry:
+ * Freestanding DuetOS advapi32.dll. Upgrades the earlier
+ * all-stubs version to a real in-memory registry:
  *
  *   - HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER, HKEY_CLASSES_ROOT,
  *     HKEY_USERS, HKEY_CURRENT_CONFIG — the five standard
@@ -35,7 +34,8 @@
  *     isn't stored.
  *
  * Remaining non-registry entries (tokens, GetUserName,
- * SystemFunction036) kept from slice 27 unchanged.
+ * SystemFunction036) are unchanged from the earlier
+ * stubs-only build.
  *
  * Build: tools/build-advapi32-dll.sh.
  */
@@ -458,8 +458,8 @@ __declspec(dllexport) LSTATUS RegSetValueExW(HANDLE hKey, const wchar_t16* name,
 }
 
 /* ------------------------------------------------------------------
- * Tokens / privileges — unchanged from slice 27 (pretend
- * success). GetUserName + SystemFunction036 likewise.
+ * Tokens / privileges — pretend success. GetUserName +
+ * SystemFunction036 likewise.
  * ------------------------------------------------------------------ */
 
 __declspec(dllexport) BOOL OpenProcessToken(HANDLE hProcess, DWORD access, HANDLE* token)

@@ -20,7 +20,7 @@ namespace
 // Each entry below is a handful of raw x86-64 instructions,
 // packed back-to-back. The layout is:
 //
-//   offset 0x00:  ExitProcess thunk  (9 bytes)
+// offset 0x00: ExitProcess thunk (9 bytes)
 //
 // Future entries append at the current end. IAT slots point
 // at (kWin32ThunksVa + entry.offset), so stable offsets matter
@@ -48,182 +48,181 @@ namespace
 // the genuine no-op stubs (constant returners, miss loggers,
 // single-byte `ret`s). Everything else is a real ABI-translation
 // thunk.
-constexpr u32 kOffExitProcess = 0x00;                    // batch 1 — 9 bytes
-constexpr u32 kOffGetStdHandle = 0x09;                   // batch 1 — 3 bytes
-constexpr u32 kOffWriteFile = 0x0C;                      // batch 1 — 44 bytes
-constexpr u32 kOffGetCurrentProcess = 0x38;              // batch 2 — 8 bytes
-constexpr u32 kOffGetCurrentThread = 0x40;               // batch 2 — 8 bytes
-constexpr u32 kOffGetCurrentProcessId = 0x48;            // batch 2 — 8 bytes
-constexpr u32 kOffGetCurrentThreadId = 0x50;             // batch 2 — 8 bytes
-constexpr u32 kOffTerminateProcess = 0x58;               // batch 2 — 9 bytes
-constexpr u32 kOffGetLastError = 0x61;                   // batch 3 — 8 bytes
-constexpr u32 kOffSetLastError = 0x69;                   // batch 3 — 10 bytes
-constexpr u32 kOffInitCritSec = 0x74;                    // batch 4 — 18 bytes
-constexpr u32 kOffCritSecNop = 0x86;                     // batch 4 — 1 byte (ret)
-constexpr u32 kOffMemmove = 0x87;                        // batch 5 — 45 bytes (memcpy aliases)
-constexpr u32 kOffMemset = 0xB4;                         // batch 5 — 19 bytes
-constexpr u32 kOffReturnZero = 0xC7;                     // batch 6 — 3 bytes  (shared "xor eax,eax; ret")
-constexpr u32 kOffTerminate = 0xCA;                      // batch 6 — 11 bytes (SYS_EXIT(3))
-constexpr u32 kOffInvalidParam = 0xD5;                   // batch 6 — 11 bytes (SYS_EXIT(0xC0000417))
-constexpr u32 kOffStrcmp = 0xE0;                         // batch 7 — 29 bytes
-constexpr u32 kOffStrlen = 0xFD;                         // batch 7 — 17 bytes
-constexpr u32 kOffWcslen = 0x10E;                        // batch 7 — 22 bytes
-constexpr u32 kOffStrchr = 0x124;                        // batch 7 — 23 bytes
-constexpr u32 kOffStrcpy = 0x13B;                        // batch 7 — 23 bytes
-constexpr u32 kOffReturnOne = 0x152;                     // batch 8 — 6 bytes (shared "mov eax, 1; ret")
-constexpr u32 kOffHeapAlloc = 0x158;                     // batch 9 — 11 bytes
-constexpr u32 kOffHeapFree = 0x163;                      // batch 9 — 16 bytes
-constexpr u32 kOffGetProcessHeap = 0x173;                // batch 9 — 8 bytes
-constexpr u32 kOffMalloc = 0x17B;                        // batch 9 — 11 bytes
-constexpr u32 kOffFree = 0x186;                          // batch 9 — 11 bytes
-constexpr u32 kOffCalloc = 0x191;                        // batch 9 — 35 bytes
-constexpr u32 kOffOpenProcessToken = 0x1B4;              // batch 10 — 13 bytes
-constexpr u32 kOffLookupPrivVal = 0x1C1;                 // batch 10 — 13 bytes
-constexpr u32 kOffInitSListHead = 0x1CE;                 // batch 10 — 16 bytes
-[[maybe_unused]] constexpr u32 kOffGetSysTimeFT = 0x1DE; // batch 10 — 8 bytes (superseded by kOffGetSysTimeFTReal)
-constexpr u32 kOffOpenProcess = 0x1E6;                   // batch 10 — 4 bytes
-constexpr u32 kOffGetExitCodeThread = 0x1EA;             // batch 10 — 12 bytes
-[[maybe_unused]] constexpr u32 kOffQueryPerfCounter = 0x1F6; // batch 11 — 16 bytes (superseded by kOffQpcNs)
-[[maybe_unused]] constexpr u32 kOffQueryPerfFreq = 0x206;    // batch 11 — 13 bytes (superseded by kOffQpfNs)
-constexpr u32 kOffGetTickCount = 0x213;                      // batch 11 — 12 bytes (shared w/ GetTickCount64)
-constexpr u32 kOffHeapSize = 0x21F;                          // batch 14 — 11 bytes
-constexpr u32 kOffHeapRealloc = 0x22A;                       // batch 14 — 16 bytes
-constexpr u32 kOffRealloc = 0x23A;                           // batch 14 — 16 bytes
-constexpr u32 kOffMissLogger = 0x24A;                        // batch 15 — 41 bytes
-constexpr u32 kOffPArgc = 0x273;                             // batch 16 —  6 bytes
-constexpr u32 kOffPArgv = 0x279;                             // batch 16 —  6 bytes
-constexpr u32 kOffPCommode = 0x27F;                          // batch 17 —  6 bytes
-constexpr u32 kOffSputn = 0x285;                             // batch 18 — 19 bytes
-constexpr u32 kOffReturnThis = 0x298;                        // batch 18 —  4 bytes
-constexpr u32 kOffWiden = 0x29C;                             // batch 18 —  4 bytes
-constexpr u32 kOffHresultEFail = 0x2A0;                      // batch 19 —  6 bytes
-constexpr u32 kOffGetSysTimeFTReal = 0x2A6;                  // batch 20 — 13 bytes
-constexpr u32 kOffQpcNs = 0x2B3;                             // batch 21 — 13 bytes
-constexpr u32 kOffQpfNs = 0x2C0;                             // batch 21 — 10 bytes
-constexpr u32 kOffSleep = 0x2CF;                             // batch 22 — 12 bytes (push/pop rdi)
-constexpr u32 kOffSwitchToThread = 0x2DB;                    // batch 22 — 10 bytes
-constexpr u32 kOffGetCmdLineW = 0x2E5;                       // batch 23 — 6 bytes
-constexpr u32 kOffGetCmdLineA = 0x2EB;                       // batch 23 — 6 bytes
-constexpr u32 kOffGetEnvBlockW = 0x2F1;                      // batch 23 — 6 bytes
-constexpr u32 kOffCreateFileW = 0x2F7;                       // batch 24 — 59 bytes (UTF-16 strip + open)
-constexpr u32 kOffReadFile = 0x332;                          // batch 24 — 46 bytes
-constexpr u32 kOffCloseHandle = 0x360;                       // batch 24 — 15 bytes
-constexpr u32 kOffSetFilePtrEx = 0x36F;                      // batch 24 — 38 bytes
-constexpr u32 kOffGetFileSizeEx = 0x395;                     // batch 25 — 29 bytes
-constexpr u32 kOffGetModuleHandleW = 0x3B2;                  // batch 25 — 17 bytes
-constexpr u32 kOffCreateMutexW = 0x3C3;                      // batch 26 — 13 bytes
-[[maybe_unused]] constexpr u32 kOffWaitForObj =
-    0x3D0;                                       // batch 26 — 38 bytes (mutex-aware, reserved for direct WFMO inline)
-constexpr u32 kOffReleaseMutex = 0x3F6;          // batch 26 — 24 bytes
-constexpr u32 kOffWriteConsoleW = 0x40E;         // batch 27 — 96 bytes (UTF-16 strip + SYS_WRITE)
-constexpr u32 kOffGetConsoleMode = 0x46E;        // batch 27 — 12 bytes
-constexpr u32 kOffGetConsoleCP = 0x47A;          // batch 27 — 6 bytes
-constexpr u32 kOffVirtualAlloc = 0x480;          // batch 28 — 13 bytes
-constexpr u32 kOffVirtualFree = 0x48D;           // batch 28 — 29 bytes
-constexpr u32 kOffVirtualProtect = 0x4AA;        // batch 28 — 18 bytes
-constexpr u32 kOffLstrlenW = 0x4BC;              // batch 29 — 15 bytes
-constexpr u32 kOffLstrcmpW = 0x4CB;              // batch 29 — 37 bytes
-constexpr u32 kOffLstrcpyW = 0x4F0;              // batch 29 — 27 bytes
-constexpr u32 kOffIsWow64 = 0x50B;               // batch 30 — 17 bytes
-constexpr u32 kOffGetVersionExW = 0x51C;         // batch 30 — 34 bytes
-constexpr u32 kOffLstrlenA = 0x53E;              // batch 31 — 14 bytes
-constexpr u32 kOffLstrcmpA = 0x54C;              // batch 31 — 37 bytes
-constexpr u32 kOffLstrcpyA = 0x571;              // batch 31 — 26 bytes
-constexpr u32 kOffGetModFileNameW = 0x58B;       // batch 32 — 24 bytes
-constexpr u32 kOffGetCurrentDirW = 0x5A3;        // batch 32 — 31 bytes
-constexpr u32 kOffMBtoWC = 0x5C2;                // batch 33 — 49 bytes
-constexpr u32 kOffWCtoMB = 0x5F3;                // batch 33 — 48 bytes
-constexpr u32 kOffGetUserNameW = 0x623;          // batch 34 — 47 bytes
-constexpr u32 kOffGetComputerNameW = 0x652;      // batch 34 — 61 bytes
-constexpr u32 kOffGetWinDirW = 0x68F;            // batch 35 — 30 bytes (buf-first sig)
-constexpr u32 kOffGetLogicalDrives = 0x6AD;      // batch 36 — 6 bytes (returns 0x00800000, X: drive)
-constexpr u32 kOffGetDriveType = 0x6B3;          // batch 36 — 6 bytes (returns 3 = DRIVE_FIXED)
-constexpr u32 kOffReturnTwo = 0x6B9;             // batch 37 — 6 bytes (ERROR_FILE_NOT_FOUND / stream pos)
-constexpr u32 kOffReturnMinus1 = 0x6BF;          // batch 37 — 6 bytes (INVALID_FILE_ATTRIBUTES)
-constexpr u32 kOffReturnPrioNormal = 0x6C5;      // batch 39 — 6 bytes (0x20 = NORMAL_PRIORITY_CLASS)
-constexpr u32 kOffInterlockedInc = 0x6CB;        // batch 40 — 12 bytes
-constexpr u32 kOffInterlockedDec = 0x6D7;        // batch 40 — 12 bytes
-constexpr u32 kOffInterlockedCmpXchg = 0x6E3;    // batch 40 —  8 bytes
-constexpr u32 kOffInterlockedExchg = 0x6EB;      // batch 40 —  5 bytes
-constexpr u32 kOffInterlockedExchgAdd = 0x6F0;   // batch 40 —  7 bytes
-constexpr u32 kOffInterlockedInc64 = 0x6F7;      // batch 41 — 14 bytes
-constexpr u32 kOffInterlockedDec64 = 0x705;      // batch 41 — 16 bytes
-constexpr u32 kOffInterlockedCmpXchg64 = 0x715;  // batch 41 —  9 bytes
-constexpr u32 kOffInterlockedExchg64 = 0x71E;    // batch 41 —  7 bytes
-constexpr u32 kOffInterlockedExchgAdd64 = 0x725; // batch 41 —  9 bytes
-constexpr u32 kOffReturnStatusNotImpl = 0x72E;   // batch 42 —  6 bytes (STATUS_NOT_IMPLEMENTED)
-constexpr u32 kOffCreateEventReal = 0x734;       // batch 45 — 18 bytes (real event-backed)
-constexpr u32 kOffSetEventReal = 0x746;          // batch 45 — 15 bytes
-constexpr u32 kOffResetEventReal = 0x755;        // batch 45 — 15 bytes
-// NOTE: kOffWaitForObj2 is retired as of batch 54. All imports
+constexpr u32 kOffExitProcess = 0x00;                        // 9 bytes
+constexpr u32 kOffGetStdHandle = 0x09;                       // 3 bytes
+constexpr u32 kOffWriteFile = 0x0C;                          // 44 bytes
+constexpr u32 kOffGetCurrentProcess = 0x38;                  // 8 bytes
+constexpr u32 kOffGetCurrentThread = 0x40;                   // 8 bytes
+constexpr u32 kOffGetCurrentProcessId = 0x48;                // 8 bytes
+constexpr u32 kOffGetCurrentThreadId = 0x50;                 // 8 bytes
+constexpr u32 kOffTerminateProcess = 0x58;                   // 9 bytes
+constexpr u32 kOffGetLastError = 0x61;                       // 8 bytes
+constexpr u32 kOffSetLastError = 0x69;                       // 10 bytes
+constexpr u32 kOffInitCritSec = 0x74;                        // 18 bytes
+constexpr u32 kOffCritSecNop = 0x86;                         // 1 byte (ret)
+constexpr u32 kOffMemmove = 0x87;                            // 45 bytes (memcpy aliases)
+constexpr u32 kOffMemset = 0xB4;                             // 19 bytes
+constexpr u32 kOffReturnZero = 0xC7;                         // 3 bytes (shared "xor eax,eax; ret")
+constexpr u32 kOffTerminate = 0xCA;                          // 11 bytes (SYS_EXIT(3))
+constexpr u32 kOffInvalidParam = 0xD5;                       // 11 bytes (SYS_EXIT(0xC0000417))
+constexpr u32 kOffStrcmp = 0xE0;                             // 29 bytes
+constexpr u32 kOffStrlen = 0xFD;                             // 17 bytes
+constexpr u32 kOffWcslen = 0x10E;                            // 22 bytes
+constexpr u32 kOffStrchr = 0x124;                            // 23 bytes
+constexpr u32 kOffStrcpy = 0x13B;                            // 23 bytes
+constexpr u32 kOffReturnOne = 0x152;                         // 6 bytes (shared "mov eax, 1; ret")
+constexpr u32 kOffHeapAlloc = 0x158;                         // 11 bytes
+constexpr u32 kOffHeapFree = 0x163;                          // 16 bytes
+constexpr u32 kOffGetProcessHeap = 0x173;                    // 8 bytes
+constexpr u32 kOffMalloc = 0x17B;                            // 11 bytes
+constexpr u32 kOffFree = 0x186;                              // 11 bytes
+constexpr u32 kOffCalloc = 0x191;                            // 35 bytes
+constexpr u32 kOffOpenProcessToken = 0x1B4;                  // 13 bytes
+constexpr u32 kOffLookupPrivVal = 0x1C1;                     // 13 bytes
+constexpr u32 kOffInitSListHead = 0x1CE;                     // 16 bytes
+[[maybe_unused]] constexpr u32 kOffGetSysTimeFT = 0x1DE;     // 8 bytes (superseded by kOffGetSysTimeFTReal)
+constexpr u32 kOffOpenProcess = 0x1E6;                       // 4 bytes
+constexpr u32 kOffGetExitCodeThread = 0x1EA;                 // 12 bytes
+[[maybe_unused]] constexpr u32 kOffQueryPerfCounter = 0x1F6; // 16 bytes (superseded by kOffQpcNs)
+[[maybe_unused]] constexpr u32 kOffQueryPerfFreq = 0x206;    // 13 bytes (superseded by kOffQpfNs)
+constexpr u32 kOffGetTickCount = 0x213;                      // 12 bytes (shared w/ GetTickCount64)
+constexpr u32 kOffHeapSize = 0x21F;                          // 11 bytes
+constexpr u32 kOffHeapRealloc = 0x22A;                       // 16 bytes
+constexpr u32 kOffRealloc = 0x23A;                           // 16 bytes
+constexpr u32 kOffMissLogger = 0x24A;                        // 41 bytes
+constexpr u32 kOffPArgc = 0x273;                             // 6 bytes
+constexpr u32 kOffPArgv = 0x279;                             // 6 bytes
+constexpr u32 kOffPCommode = 0x27F;                          // 6 bytes
+constexpr u32 kOffSputn = 0x285;                             // 19 bytes
+constexpr u32 kOffReturnThis = 0x298;                        // 4 bytes
+constexpr u32 kOffWiden = 0x29C;                             // 4 bytes
+constexpr u32 kOffHresultEFail = 0x2A0;                      // 6 bytes
+constexpr u32 kOffGetSysTimeFTReal = 0x2A6;                  // 13 bytes
+constexpr u32 kOffQpcNs = 0x2B3;                             // 13 bytes
+constexpr u32 kOffQpfNs = 0x2C0;                             // 10 bytes
+constexpr u32 kOffSleep = 0x2CF;                             // 12 bytes (push/pop rdi)
+constexpr u32 kOffSwitchToThread = 0x2DB;                    // 10 bytes
+constexpr u32 kOffGetCmdLineW = 0x2E5;                       // 6 bytes
+constexpr u32 kOffGetCmdLineA = 0x2EB;                       // 6 bytes
+constexpr u32 kOffGetEnvBlockW = 0x2F1;                      // 6 bytes
+constexpr u32 kOffCreateFileW = 0x2F7;                       // 59 bytes (UTF-16 strip + open)
+constexpr u32 kOffReadFile = 0x332;                          // 46 bytes
+constexpr u32 kOffCloseHandle = 0x360;                       // 15 bytes
+constexpr u32 kOffSetFilePtrEx = 0x36F;                      // 38 bytes
+constexpr u32 kOffGetFileSizeEx = 0x395;                     // 29 bytes
+constexpr u32 kOffGetModuleHandleW = 0x3B2;                  // 17 bytes
+constexpr u32 kOffCreateMutexW = 0x3C3;                      // 13 bytes
+[[maybe_unused]] constexpr u32 kOffWaitForObj = 0x3D0;       // 38 bytes (mutex-aware, reserved for direct WFMO inline)
+constexpr u32 kOffReleaseMutex = 0x3F6;                      // 24 bytes
+constexpr u32 kOffWriteConsoleW = 0x40E;                     // 96 bytes (UTF-16 strip + SYS_WRITE)
+constexpr u32 kOffGetConsoleMode = 0x46E;                    // 12 bytes
+constexpr u32 kOffGetConsoleCP = 0x47A;                      // 6 bytes
+constexpr u32 kOffVirtualAlloc = 0x480;                      // 13 bytes
+constexpr u32 kOffVirtualFree = 0x48D;                       // 29 bytes
+constexpr u32 kOffVirtualProtect = 0x4AA;                    // 18 bytes
+constexpr u32 kOffLstrlenW = 0x4BC;                          // 15 bytes
+constexpr u32 kOffLstrcmpW = 0x4CB;                          // 37 bytes
+constexpr u32 kOffLstrcpyW = 0x4F0;                          // 27 bytes
+constexpr u32 kOffIsWow64 = 0x50B;                           // 17 bytes
+constexpr u32 kOffGetVersionExW = 0x51C;                     // 34 bytes
+constexpr u32 kOffLstrlenA = 0x53E;                          // 14 bytes
+constexpr u32 kOffLstrcmpA = 0x54C;                          // 37 bytes
+constexpr u32 kOffLstrcpyA = 0x571;                          // 26 bytes
+constexpr u32 kOffGetModFileNameW = 0x58B;                   // 24 bytes
+constexpr u32 kOffGetCurrentDirW = 0x5A3;                    // 31 bytes
+constexpr u32 kOffMBtoWC = 0x5C2;                            // 49 bytes
+constexpr u32 kOffWCtoMB = 0x5F3;                            // 48 bytes
+constexpr u32 kOffGetUserNameW = 0x623;                      // 47 bytes
+constexpr u32 kOffGetComputerNameW = 0x652;                  // 61 bytes
+constexpr u32 kOffGetWinDirW = 0x68F;                        // 30 bytes (buf-first sig)
+constexpr u32 kOffGetLogicalDrives = 0x6AD;                  // 6 bytes (returns 0x00800000, X: drive)
+constexpr u32 kOffGetDriveType = 0x6B3;                      // 6 bytes (returns 3 = DRIVE_FIXED)
+constexpr u32 kOffReturnTwo = 0x6B9;                         // 6 bytes (ERROR_FILE_NOT_FOUND / stream pos)
+constexpr u32 kOffReturnMinus1 = 0x6BF;                      // 6 bytes (INVALID_FILE_ATTRIBUTES)
+constexpr u32 kOffReturnPrioNormal = 0x6C5;                  // 6 bytes (0x20 = NORMAL_PRIORITY_CLASS)
+constexpr u32 kOffInterlockedInc = 0x6CB;                    // 12 bytes
+constexpr u32 kOffInterlockedDec = 0x6D7;                    // 12 bytes
+constexpr u32 kOffInterlockedCmpXchg = 0x6E3;                // 8 bytes
+constexpr u32 kOffInterlockedExchg = 0x6EB;                  // 5 bytes
+constexpr u32 kOffInterlockedExchgAdd = 0x6F0;               // 7 bytes
+constexpr u32 kOffInterlockedInc64 = 0x6F7;                  // 14 bytes
+constexpr u32 kOffInterlockedDec64 = 0x705;                  // 16 bytes
+constexpr u32 kOffInterlockedCmpXchg64 = 0x715;              // 9 bytes
+constexpr u32 kOffInterlockedExchg64 = 0x71E;                // 7 bytes
+constexpr u32 kOffInterlockedExchgAdd64 = 0x725;             // 9 bytes
+constexpr u32 kOffReturnStatusNotImpl = 0x72E;               // 6 bytes (STATUS_NOT_IMPLEMENTED)
+constexpr u32 kOffCreateEventReal = 0x734;                   // 18 bytes (real event-backed)
+constexpr u32 kOffSetEventReal = 0x746;                      // 15 bytes
+constexpr u32 kOffResetEventReal = 0x755;                    // 15 bytes
+// NOTE: kOffWaitForObj2 is retired as of . All imports
 // now route through kOffWaitForObj3 which adds the semaphore
 // range. The v2 bytes remain inside kThunksBytes (dead code) for
-// a future slice that wants to diff the two; unused constant is
+// a follow-up that wants to diff the two; unused constant is
 // marked [[maybe_unused]] to suppress the warning.
-[[maybe_unused]] constexpr u32 kOffWaitForObj2 = 0x764; // batch 45 — 66 bytes (mutex+event-aware)
-constexpr u32 kOffTlsAllocReal = 0x7A6;                 // batch 46 —  8 bytes
-constexpr u32 kOffTlsFreeReal = 0x7AE;                  // batch 46 — 24 bytes
-constexpr u32 kOffTlsGetValueReal = 0x7C6;              // batch 46 — 13 bytes
-constexpr u32 kOffTlsSetValueReal = 0x7D3;              // batch 46 — 20 bytes
-constexpr u32 kOffNtAllocateVirtualMemory = 0x7E7;      // batch 47 — 36 bytes
-constexpr u32 kOffNtFreeVirtualMemory = 0x80B;          // batch 47 — 33 bytes
-constexpr u32 kOffGetSystemTimeSt = 0x82C;              // batch 48 — 11 bytes
-constexpr u32 kOffSystemTimeToFileTime = 0x837;         // batch 48 — 14 bytes
-constexpr u32 kOffFileTimeToSystemTime = 0x845;         // batch 48 — 14 bytes
-constexpr u32 kOffNtQuerySystemTimeReal = 0x853;        // batch 49 — 16 bytes
-constexpr u32 kOffNtQueryPerfCounterReal = 0x863;       // batch 49 — 28 bytes
-constexpr u32 kOffCreateThreadReal = 0x87F;             // batch 50 — 39 bytes (saves rdi+rsi)
+[[maybe_unused]] constexpr u32 kOffWaitForObj2 = 0x764; // 66 bytes (mutex+event-aware)
+constexpr u32 kOffTlsAllocReal = 0x7A6;                 // 8 bytes
+constexpr u32 kOffTlsFreeReal = 0x7AE;                  // 24 bytes
+constexpr u32 kOffTlsGetValueReal = 0x7C6;              // 13 bytes
+constexpr u32 kOffTlsSetValueReal = 0x7D3;              // 20 bytes
+constexpr u32 kOffNtAllocateVirtualMemory = 0x7E7;      // 36 bytes
+constexpr u32 kOffNtFreeVirtualMemory = 0x80B;          // 33 bytes
+constexpr u32 kOffGetSystemTimeSt = 0x82C;              // 11 bytes
+constexpr u32 kOffSystemTimeToFileTime = 0x837;         // 14 bytes
+constexpr u32 kOffFileTimeToSystemTime = 0x845;         // 14 bytes
+constexpr u32 kOffNtQuerySystemTimeReal = 0x853;        // 16 bytes
+constexpr u32 kOffNtQueryPerfCounterReal = 0x863;       // 28 bytes
+constexpr u32 kOffCreateThreadReal = 0x87F;             // 39 bytes (saves rdi+rsi)
 // ThreadExitTramp: offset 0x8A6, 6 bytes. Public VA exported as
 // duetos::win32::kWin32ThreadExitTrampVa in thunks.h — keep in sync.
 
-// === Batch 51: ExitThread + OutputDebugStringA + GetProcessTimes
+// === ExitThread + OutputDebugStringA + GetProcessTimes
 // + GetThreadTimes + GetSystemTimes + GlobalMemoryStatusEx +
 // WaitForMultipleObjects.
-constexpr u32 kOffExitThread = 0x8AC;             // batch 51 — 9 bytes (noreturn, no save)
-constexpr u32 kOffOutputDebugStringA = 0x8B5;     // batch 51 — 13 bytes (saves rdi)
-constexpr u32 kOffGetProcessTimes = 0x8C2;        // batch 51 — 44 bytes (also GetThreadTimes)
-constexpr u32 kOffGetSystemTimes = 0x8EE;         // batch 51 — 30 bytes
-constexpr u32 kOffGlobalMemoryStatusEx = 0x90C;   // batch 51 — 16 bytes (saves rdi)
-constexpr u32 kOffWaitForMultipleObjects = 0x91C; // batch 51 — 24 bytes (saves rdi+rsi)
+constexpr u32 kOffExitThread = 0x8AC;             // 9 bytes (noreturn, no save)
+constexpr u32 kOffOutputDebugStringA = 0x8B5;     // 13 bytes (saves rdi)
+constexpr u32 kOffGetProcessTimes = 0x8C2;        // 44 bytes (also GetThreadTimes)
+constexpr u32 kOffGetSystemTimes = 0x8EE;         // 30 bytes
+constexpr u32 kOffGlobalMemoryStatusEx = 0x90C;   // 16 bytes (saves rdi)
+constexpr u32 kOffWaitForMultipleObjects = 0x91C; // 24 bytes (saves rdi+rsi)
 
-// === Batch 52: GetSystemInfo / OutputDebugStringW / FormatMessageA /
+// === GetSystemInfo / OutputDebugStringW / FormatMessageA /
 // GetConsoleScreenBufferInfo.
-constexpr u32 kOffGetSystemInfo = 0x934;              // batch 52 — 13 bytes (saves rdi)
-constexpr u32 kOffOutputDebugStringW = 0x941;         // batch 52 — 13 bytes (saves rdi)
-constexpr u32 kOffFormatMessageA = 0x94E;             // batch 52 — 32 bytes
-constexpr u32 kOffGetConsoleScreenBufferInfo = 0x96E; // batch 52 — 54 bytes
+constexpr u32 kOffGetSystemInfo = 0x934;              // 13 bytes (saves rdi)
+constexpr u32 kOffOutputDebugStringW = 0x941;         // 13 bytes (saves rdi)
+constexpr u32 kOffFormatMessageA = 0x94E;             // 32 bytes
+constexpr u32 kOffGetConsoleScreenBufferInfo = 0x96E; // 54 bytes
 
-// === Batch 53: RaiseException / DecodePointer / EncodePointer.
-constexpr u32 kOffRaiseException = 0x9A4; // batch 53 — 9 bytes (noreturn)
-constexpr u32 kOffDecodePointer = 0x9AD;  // batch 53 — 4 bytes (identity)
+// === RaiseException / DecodePointer / EncodePointer.
+constexpr u32 kOffRaiseException = 0x9A4; // 9 bytes (noreturn)
+constexpr u32 kOffDecodePointer = 0x9AD;  // 4 bytes (identity)
 
-// === Batch 54: Semaphore family + upgraded WaitForSingleObject v3.
-constexpr u32 kOffCreateSemaphoreW = 0x9B1;             // batch 54 — 27 bytes (saves rdi+rsi)
-constexpr u32 kOffReleaseSemaphore = 0x9CC;             // batch 54 — 29 bytes (saves rdi+rsi)
-[[maybe_unused]] constexpr u32 kOffWaitForObj3 = 0x9E9; // batch 54 — 94 bytes
-                                                        // Retired in batch 57 — see kOffWaitForObj4.
+// === Semaphore family + upgraded WaitForSingleObject v3.
+constexpr u32 kOffCreateSemaphoreW = 0x9B1;             // 27 bytes (saves rdi+rsi)
+constexpr u32 kOffReleaseSemaphore = 0x9CC;             // 29 bytes (saves rdi+rsi)
+[[maybe_unused]] constexpr u32 kOffWaitForObj3 = 0x9E9; // 94 bytes
+                                                        // Retired — see kOffWaitForObj4.
 
-// === Batch 57: real thread-handle wait + 4-range WaitForSingleObject v4.
-constexpr u32 kOffWaitForObj4 = 0xA47; // batch 57 — 122 bytes
+// === real thread-handle wait + 4-range WaitForSingleObject v4.
+constexpr u32 kOffWaitForObj4 = 0xA47; // 122 bytes
                                        // (v3 + thread range 0x400..0x407 → SYS_THREAD_WAIT)
 
-// === Batch 58: real GetStartupInfo stub.
-constexpr u32 kOffGetStartupInfo = 0xAC1; // batch 58 — 24 bytes (zero-fill + cb=104)
+// === real GetStartupInfo stub.
+constexpr u32 kOffGetStartupInfo = 0xAC1; // 24 bytes (zero-fill + cb=104)
 
-// === Batch 59: real GetExitCodeThread (exit-code tracking).
-constexpr u32 kOffGetExitCodeThreadReal = 0xAD9; // batch 59 — 20 bytes (saves rdi)
+// === real GetExitCodeThread (exit-code tracking).
+constexpr u32 kOffGetExitCodeThreadReal = 0xAD9; // 20 bytes (saves rdi)
 
-// === Batch 60: Interlocked{And,Or,Xor} (+64-bit). LOCK CMPXCHG
+// === Interlocked{And,Or,Xor} (+64-bit). LOCK CMPXCHG
 // loops so SMP future-proofing + timer-tick preemption safety
 // hold today.
-constexpr u32 kOffInterlockedAnd = 0xAED;   // batch 60 — 16 bytes
-constexpr u32 kOffInterlockedOr = 0xAFD;    // batch 60 — 16 bytes
-constexpr u32 kOffInterlockedXor = 0xB0D;   // batch 60 — 16 bytes
-constexpr u32 kOffInterlockedAnd64 = 0xB1D; // batch 60 — 17 bytes
-constexpr u32 kOffInterlockedOr64 = 0xB2E;  // batch 60 — 17 bytes
-constexpr u32 kOffInterlockedXor64 = 0xB3F; // batch 60 — 17 bytes
+constexpr u32 kOffInterlockedAnd = 0xAED;   // 16 bytes
+constexpr u32 kOffInterlockedOr = 0xAFD;    // 16 bytes
+constexpr u32 kOffInterlockedXor = 0xB0D;   // 16 bytes
+constexpr u32 kOffInterlockedAnd64 = 0xB1D; // 17 bytes
+constexpr u32 kOffInterlockedOr64 = 0xB2E;  // 17 bytes
+constexpr u32 kOffInterlockedXor64 = 0xB3F; // 17 bytes
 
-// === Batch 61: real critical sections ======================
+// === real critical sections ======================
 // Until now EnterCriticalSection / LeaveCriticalSection were
 // single-byte `ret`s — safe while each process ran single-threaded,
 // but with SYS_THREAD_CREATE live every call is a latent race.
@@ -231,10 +230,10 @@ constexpr u32 kOffInterlockedXor64 = 0xB3F; // batch 60 — 17 bytes
 // existing 40-byte CRITICAL_SECTION struct (InitializeCriticalSection
 // already zero-fills it). The acquire uses `lock cmpxchg`; on
 // contention we SYS_YIELD and retry.
-constexpr u32 kOffEnterCritSecReal = 0xB50; // batch 61 — 49 bytes
-constexpr u32 kOffLeaveCritSecReal = 0xB81; // batch 61 — 14 bytes
+constexpr u32 kOffEnterCritSecReal = 0xB50; // 49 bytes
+constexpr u32 kOffLeaveCritSecReal = 0xB81; // 14 bytes
 
-// === Batch 62: real SRWLOCKs (exclusive-only; shared aliases to exclusive) ===
+// === real SRWLOCKs (exclusive-only; shared aliases to exclusive) ===
 // Win32 SRWLOCK is a single pointer-sized (8 byte) word. Layout
 // we impose: [rcx+0] u64 owner_tid (0 = unheld). Acquire/release
 // is a straight `lock cmpxchg` on the slot; shared operations
@@ -242,12 +241,12 @@ constexpr u32 kOffLeaveCritSecReal = 0xB81; // batch 61 — 14 bytes
 // That's suboptimal for reader-heavy workloads but preserves
 // correctness — the prior binding (NO-OP for shared) allowed
 // readers to observe mid-write state.
-constexpr u32 kOffSrwInit = 0xB8F;           // batch 62 — 6 bytes
-constexpr u32 kOffSrwAcquireExcl = 0xB95;    // batch 62 — 30 bytes
-constexpr u32 kOffSrwReleaseExcl = 0xBB3;    // batch 62 — 6 bytes
-constexpr u32 kOffSrwTryAcquireExcl = 0xBB9; // batch 62 — 22 bytes
+constexpr u32 kOffSrwInit = 0xB8F;           // 6 bytes
+constexpr u32 kOffSrwAcquireExcl = 0xB95;    // 30 bytes
+constexpr u32 kOffSrwReleaseExcl = 0xBB3;    // 6 bytes
+constexpr u32 kOffSrwTryAcquireExcl = 0xBB9; // 22 bytes
 
-// === Batch 63: correctness fixes for two always-returning stubs ===
+// === correctness fixes for two always-returning stubs ===
 // RtlTryEnterCriticalSection was bound to kOffReturnOne (always
 // "got it"), which actively lied to callers — a genuinely held
 // lock was reported as free and the caller proceeded into a
@@ -256,9 +255,9 @@ constexpr u32 kOffSrwTryAcquireExcl = 0xBB9; // batch 62 — 22 bytes
 // scalar fallback paths when the real CPU has SSE2/AVX/etc.
 // Only TryEnter needs new bytecode; the other fix is a rebind
 // to the existing kOffReturnOne.
-constexpr u32 kOffTryEnterCritSecReal = 0xBCF; // batch 63 — 56 bytes
+constexpr u32 kOffTryEnterCritSecReal = 0xBCF; // 56 bytes
 
-// === Batch 64: real SetUnhandledExceptionFilter round-trip ===
+// === real SetUnhandledExceptionFilter round-trip ===
 // The old bindings were kOffReturnZero for both — SetUnhandled
 // always claimed "no previous filter" and UnhandledException
 // always returned 0 (EXCEPTION_CONTINUE_SEARCH), which is the
@@ -267,22 +266,22 @@ constexpr u32 kOffTryEnterCritSecReal = 0xBCF; // batch 63 — 56 bytes
 // tail-call it on invocation; if the slot is zero we return
 // EXCEPTION_EXECUTE_HANDLER (1) — the Windows-default when no
 // top-level filter was ever installed.
-constexpr u32 kOffSetUnhandledFilter = 0xC07; // batch 64 — 12 bytes
-constexpr u32 kOffUnhandledFilter = 0xC13;    // batch 64 — 21 bytes
+constexpr u32 kOffSetUnhandledFilter = 0xC07; // 12 bytes
+constexpr u32 kOffUnhandledFilter = 0xC13;    // 21 bytes
 
-// === Batch 65: real InitOnce (thread-safe lazy init) =========
+// === real InitOnce (thread-safe lazy init) =========
 // InitOnceInitialize just zero-fills an 8-byte slot; we reuse
 // kOffSrwInit for it. InitOnceExecuteOnce does the actual
 // call-once state machine: CAS 0->1 picks the initialiser,
 // CAS-losers wait for the slot to reach 2 via SYS_YIELD spin.
-constexpr u32 kOffInitOnceExec = 0xC28; // batch 65 — 87 bytes
+constexpr u32 kOffInitOnceExec = 0xC28; // 87 bytes
 
-// === Stage-2 slice 4: real GetProcAddress via SYS_DLL_PROC_ADDRESS =======
+// === real GetProcAddress via SYS_DLL_PROC_ADDRESS =======
 // Win32: FARPROC GetProcAddress(HMODULE hModule=rcx, LPCSTR lpProcName=rdx).
 // DuetOS: SYS_DLL_PROC_ADDRESS (57) with rdi=hmod, rsi=name.
 // Returns exported VA or 0 (= miss). rdi + rsi are callee-saved in
 // the Win32 x64 ABI, so save/restore across the syscall.
-constexpr u32 kOffGetProcAddressReal = 0xC7F; // stage-2 slice 4 — 18 bytes
+constexpr u32 kOffGetProcAddressReal = 0xC7F; // 18 bytes
 
 // Render/drivers: D3D11 / D3D12 / DXGI IAT landing pads. Each stub
 // issues SYS_GFX_D3D_STUB (101) with a per-kind `rdi` — the kernel
@@ -299,8 +298,8 @@ constexpr u32 kOffWinBeginPaint = 0xCB8;     // render/drivers — 14 bytes
 constexpr u32 kOffWinEndPaint = 0xCC6;       // render/drivers — 11 bytes
 constexpr u32 kOffWinInvalidateRect = 0xCD1; // render/drivers — 14 bytes
 constexpr u32 kOffWinUpdateWindow = 0xCDF;   // render/drivers — 13 bytes
-constexpr u32 kOffWinGetDC = 0xCEC;          // render/drivers —  4 bytes
-constexpr u32 kOffWinReleaseDC = 0xCF0;      // render/drivers —  6 bytes
+constexpr u32 kOffWinGetDC = 0xCEC;          // render/drivers — 4 bytes
+constexpr u32 kOffWinReleaseDC = 0xCF0;      // render/drivers — 6 bytes
 constexpr u32 kOffGdiFillRectUser = 0xCF6;   // render/drivers — 17 bytes
 constexpr u32 kOffGdiTextOutA = 0xD07;       // render/drivers — 31 bytes
 
@@ -332,9 +331,9 @@ constexpr u32 kOffGdiStretchBltDC = 0xE0D; // render/drivers — 129 bytes
 [[maybe_unused]] constexpr u32 kOffGdiEllipse = 0xEB6;   // render/drivers — 40 bytes
 constexpr u32 kOffGdiSetPixel = 0xEDE;                   // render/drivers — 20 bytes
 
-// Pen + cursor (MoveToEx / LineTo) stubs — the last batch that
-// lights up the outline-drawing primitives (line / rectangle /
-// ellipse) with pen-aware colour state.
+// Pen + cursor (MoveToEx / LineTo) stubs — light up the
+// outline-drawing primitives (line / rectangle / ellipse) with
+// pen-aware colour state.
 constexpr u32 kOffGdiCreatePen = 0xEF2; // render/drivers — 17 bytes
 constexpr u32 kOffGdiMoveToEx = 0xF03;  // render/drivers — 20 bytes
 constexpr u32 kOffGdiLineTo = 0xF17;    // render/drivers — 17 bytes
@@ -373,10 +372,10 @@ constexpr u8 kThunksBytes[] = {
     // Windows x64 ABI: first arg (uExitCode) in RCX.
     // DuetOS native ABI: syscall # in RAX, first arg in RDI,
     // SYS_EXIT = 0.
-    0x48, 0x89, 0xCF, // 0x00 mov rdi, rcx      ; code
-    0x31, 0xC0,       // 0x03 xor eax, eax      ; rax = 0 = SYS_EXIT
+    0x48, 0x89, 0xCF, // 0x00 mov rdi, rcx ; code
+    0x31, 0xC0,       // 0x03 xor eax, eax ; rax = 0 = SYS_EXIT
     0xCD, 0x80,       // 0x05 int 0x80
-    0x0F, 0x0B,       // 0x07 ud2               ; [[noreturn]]
+    0x0F, 0x0B,       // 0x07 ud2 ; [[noreturn]]
 
     // --- GetStdHandle (offset 0x09, 3 bytes) -------------------
     // Win32: HANDLE GetStdHandle(DWORD nStdHandle).
@@ -399,16 +398,16 @@ constexpr u8 kThunksBytes[] = {
 
     // --- WriteFile / WriteConsoleA (offset 0x0C, 44 bytes) -----
     // Win32 signatures (identical shape, that's why we alias):
-    //   BOOL WriteFile(HANDLE hFile,        rcx
-    //                  LPCVOID lpBuffer,    rdx
-    //                  DWORD nBytes,        r8
-    //                  LPDWORD lpWritten,   r9
-    //                  LPOVERLAPPED ovl);   [rsp+0x28]
-    //   BOOL WriteConsoleA(HANDLE hConsoleOutput, rcx
-    //                      LPCVOID lpBuffer,      rdx
-    //                      DWORD nChars,          r8
-    //                      LPDWORD lpCharsOut,    r9
-    //                      LPVOID lpReserved);    [rsp+0x28]
+    // BOOL WriteFile(HANDLE hFile, rcx
+    // LPCVOID lpBuffer, rdx
+    // DWORD nBytes, r8
+    // LPDWORD lpWritten, r9
+    // LPOVERLAPPED ovl); [rsp+0x28]
+    // BOOL WriteConsoleA(HANDLE hConsoleOutput, rcx
+    // LPCVOID lpBuffer, rdx
+    // DWORD nChars, r8
+    // LPDWORD lpCharsOut, r9
+    // LPVOID lpReserved); [rsp+0x28]
     //
     // v0 semantic: ignore the handle + the trailing reserved/
     // overlapped arg, issue SYS_WRITE(1, buf, n), and store
@@ -427,20 +426,20 @@ constexpr u8 kThunksBytes[] = {
     // it to store the output count without saving.
     0x56,             // 0x0C push rsi
     0x57,             // 0x0D push rdi
-    0x48, 0x89, 0xD6, // 0x0E mov rsi, rdx         ; buf
-    0x4C, 0x89, 0xC2, // 0x11 mov rdx, r8          ; n
+    0x48, 0x89, 0xD6, // 0x0E mov rsi, rdx ; buf
+    0x4C, 0x89, 0xC2, // 0x11 mov rdx, r8 ; n
     0x6A, 0x01,       // 0x14 push 1
-    0x5F,             // 0x16 pop rdi              ; fd = 1 (stdout)
+    0x5F,             // 0x16 pop rdi ; fd = 1 (stdout)
     0x6A, 0x02,       // 0x17 push 2
-    0x58,             // 0x19 pop rax              ; SYS_WRITE
-    0xCD, 0x80,       // 0x1A int 0x80             ; rax = n or -1
+    0x58,             // 0x19 pop rax ; SYS_WRITE
+    0xCD, 0x80,       // 0x1A int 0x80 ; rax = n or -1
 
     // If lpWritten (r9) != NULL, store max(rax, 0) as DWORD.
     0x4D, 0x85, 0xC9, // 0x1C test r9, r9
     0x74, 0x0B,       // 0x1F je +0x0B -> 0x2C
     0x31, 0xC9,       // 0x21 xor ecx, ecx
     0x48, 0x85, 0xC0, // 0x23 test rax, rax
-    0x0F, 0x49, 0xC8, // 0x26 cmovns ecx, eax  ; ecx = rax if rax>=0, else 0
+    0x0F, 0x49, 0xC8, // 0x26 cmovns ecx, eax ; ecx = rax if rax>=0, else 0
     0x41, 0x89, 0x09, // 0x29 mov [r9], ecx
 
     // BOOL return: 1 if rax >= 0, else 0. Restore rdi + rsi
@@ -452,7 +451,7 @@ constexpr u8 kThunksBytes[] = {
     0x5E,             // 0x36 pop rsi
     0xC3,             // 0x37 ret
 
-    // === Batch 2: process/thread lifecycle ====================
+    // === process/thread lifecycle ====================
 
     // --- GetCurrentProcess (offset 0x38, 8 bytes) --------------
     // Win32: HANDLE GetCurrentProcess(void). Returns the
@@ -497,12 +496,12 @@ constexpr u8 kThunksBytes[] = {
     //
     // Bytes identical in shape to ExitProcess but with rdx
     // as the source register for the exit code.
-    0x48, 0x89, 0xD7, // 0x58 mov rdi, rdx          ; code
-    0x31, 0xC0,       // 0x5B xor eax, eax          ; SYS_EXIT
+    0x48, 0x89, 0xD7, // 0x58 mov rdi, rdx ; code
+    0x31, 0xC0,       // 0x5B xor eax, eax ; SYS_EXIT
     0xCD, 0x80,       // 0x5D int 0x80
-    0x0F, 0x0B,       // 0x5F ud2                   ; [[noreturn]]
+    0x0F, 0x0B,       // 0x5F ud2 ; [[noreturn]]
 
-    // === Batch 3: last-error slot =============================
+    // === last-error slot =============================
 
     // --- GetLastError (offset 0x61, 8 bytes) -------------------
     // Win32: DWORD GetLastError(void). Returns
@@ -528,7 +527,7 @@ constexpr u8 kThunksBytes[] = {
     0x5F,             // 0x72 pop rdi
     0xC3,             // 0x73 ret
 
-    // === Batch 4: critical sections (v0 no-ops) ===============
+    // === critical sections (v0 no-ops) ===============
 
     // --- InitializeCriticalSection (offset 0x74, 18 bytes) -----
     // Aliased by InitializeCriticalSectionEx and
@@ -538,7 +537,7 @@ constexpr u8 kThunksBytes[] = {
     // v0 is single-task per process, so a critical section
     // with no recursion tracking, no owning-thread check, and
     // no semaphore is semantically correct — there's nothing
-    // to serialize against. A future slice will replace this
+    // to serialize against. a follow-up will replace this
     // when a multi-threading model lands.
     //
     // Assumes DF=0 on entry (Win64 ABI contract). Uses rdi
@@ -564,7 +563,7 @@ constexpr u8 kThunksBytes[] = {
     // return.
     0xC3, // 0x86 ret
 
-    // === Batch 5: vcruntime140 memory intrinsics ==============
+    // === vcruntime140 memory intrinsics ==============
     //
     // CRITICAL ABI NOTE: the Microsoft x64 ABI marks RDI, RSI,
     // RBX, RBP, R12-R15 as NONVOLATILE (callee-saved) — the
@@ -590,10 +589,10 @@ constexpr u8 kThunksBytes[] = {
     // Saves nonvolatile rsi, rdi around the work.
     0x56,             // 0x87 push rsi
     0x57,             // 0x88 push rdi
-    0x49, 0x89, 0xC9, // 0x89 mov r9, rcx     ; save dst for return
-    0x48, 0x89, 0xCF, // 0x8C mov rdi, rcx    ; dst
-    0x48, 0x89, 0xD6, // 0x8F mov rsi, rdx    ; src
-    0x4C, 0x89, 0xC1, // 0x92 mov rcx, r8     ; n
+    0x49, 0x89, 0xC9, // 0x89 mov r9, rcx ; save dst for return
+    0x48, 0x89, 0xCF, // 0x8C mov rdi, rcx ; dst
+    0x48, 0x89, 0xD6, // 0x8F mov rsi, rdx ; src
+    0x4C, 0x89, 0xC1, // 0x92 mov rcx, r8 ; n
     0x48, 0x39, 0xF7, // 0x95 cmp rdi, rsi
     0x76, 0x12,       // 0x98 jbe +18 -> 0xAC (forward path)
     // backward-copy path (dst > src, overlap-safe)
@@ -608,7 +607,7 @@ constexpr u8 kThunksBytes[] = {
     // forward-copy path
     0xF3, 0xA4, // 0xAC rep movsb
     // common epilogue
-    0x4C, 0x89, 0xC8, // 0xAE mov rax, r9     ; return dst
+    0x4C, 0x89, 0xC8, // 0xAE mov rax, r9 ; return dst
     0x5F,             // 0xB1 pop rdi
     0x5E,             // 0xB2 pop rsi
     0xC3,             // 0xB3 ret
@@ -618,16 +617,16 @@ constexpr u8 kThunksBytes[] = {
     // Byte value is the low 8 bits of c (edx). Returns dst.
     // Saves nonvolatile rdi.
     0x57,             // 0xB4 push rdi
-    0x49, 0x89, 0xC9, // 0xB5 mov r9, rcx     ; save dst for return
-    0x48, 0x89, 0xCF, // 0xB8 mov rdi, rcx    ; dst
-    0x89, 0xD0,       // 0xBB mov eax, edx    ; al = c
-    0x4C, 0x89, 0xC1, // 0xBD mov rcx, r8     ; n
+    0x49, 0x89, 0xC9, // 0xB5 mov r9, rcx ; save dst for return
+    0x48, 0x89, 0xCF, // 0xB8 mov rdi, rcx ; dst
+    0x89, 0xD0,       // 0xBB mov eax, edx ; al = c
+    0x4C, 0x89, 0xC1, // 0xBD mov rcx, r8 ; n
     0xF3, 0xAA,       // 0xC0 rep stosb
-    0x4C, 0x89, 0xC8, // 0xC2 mov rax, r9     ; return dst
+    0x4C, 0x89, 0xC8, // 0xC2 mov rax, r9 ; return dst
     0x5F,             // 0xC5 pop rdi
     0xC3,             // 0xC6 ret
 
-    // === Batch 6: UCRT CRT-startup shims ======================
+    // === UCRT CRT-startup shims ======================
 
     // --- Return-zero (offset 0xC7, 3 bytes) --------------------
     // Shared stub for every apiset/ucrt function whose v0
@@ -651,7 +650,7 @@ constexpr u8 kThunksBytes[] = {
     // with code 3 (same as POSIX SIGABRT-ish — 3 is the
     // conventional abort exit in the CRT).
     0xBF, 0x03, 0x00, 0x00, 0x00, // 0xCA mov edi, 3
-    0x31, 0xC0,                   // 0xCF xor eax, eax   ; SYS_EXIT
+    0x31, 0xC0,                   // 0xCF xor eax, eax ; SYS_EXIT
     0xCD, 0x80,                   // 0xD1 int 0x80
     0x0F, 0x0B,                   // 0xD3 ud2
 
@@ -661,11 +660,11 @@ constexpr u8 kThunksBytes[] = {
     // exit with that so the code is observable in the serial
     // log.
     0xBF, 0x17, 0x04, 0x00, 0xC0, // 0xD5 mov edi, 0xC0000417
-    0x31, 0xC0,                   // 0xDA xor eax, eax   ; SYS_EXIT
+    0x31, 0xC0,                   // 0xDA xor eax, eax ; SYS_EXIT
     0xCD, 0x80,                   // 0xDC int 0x80
     0x0F, 0x0B,                   // 0xDE ud2
 
-    // === Batch 7: CRT string intrinsics =======================
+    // === CRT string intrinsics =======================
 
     // --- strcmp (offset 0xE0, 29 bytes) ------------------------
     // int strcmp(const char* a=rcx, const char* b=rdx).
@@ -691,13 +690,13 @@ constexpr u8 kThunksBytes[] = {
     // --- strlen (offset 0xFD, 17 bytes) ------------------------
     // size_t strlen(const char* s=rcx). Walks until NUL,
     // returns byte count.
-    0x48, 0x89, 0xC8, // 0xFD mov rax, rcx    ; save start
+    0x48, 0x89, 0xC8, // 0xFD mov rax, rcx ; save start
     0x80, 0x38, 0x00, // 0x100 cmp byte [rax], 0
     0x74, 0x05,       // 0x103 je +5 -> 0x10A .done
     0x48, 0xFF, 0xC0, // 0x105 inc rax
     0xEB, 0xF6,       // 0x108 jmp -10 -> 0x100 .loop
     // .done:
-    0x48, 0x29, 0xC8, // 0x10A sub rax, rcx   ; length = end - start
+    0x48, 0x29, 0xC8, // 0x10A sub rax, rcx ; length = end - start
     0xC3,             // 0x10D ret
 
     // --- wcslen (offset 0x10E, 22 bytes) -----------------------
@@ -711,7 +710,7 @@ constexpr u8 kThunksBytes[] = {
     0xEB, 0xF4,             // 0x11B jmp -12 -> 0x111 .loop
     // .done:
     0x48, 0x29, 0xC8, // 0x11D sub rax, rcx
-    0x48, 0xD1, 0xE8, // 0x120 shr rax, 1     ; byte count / 2 = chars
+    0x48, 0xD1, 0xE8, // 0x120 shr rax, 1 ; byte count / 2 = chars
     0xC3,             // 0x123 ret
 
     // --- strchr (offset 0x124, 23 bytes) -----------------------
@@ -719,7 +718,7 @@ constexpr u8 kThunksBytes[] = {
     // Returns pointer to first byte matching (char)c,
     // including the terminating NUL, or nullptr if not
     // found. Matches Win32/ISO C semantics.
-    0x88, 0xD0,       // 0x124 mov al, dl      ; byte to find
+    0x88, 0xD0,       // 0x124 mov al, dl ; byte to find
     0x38, 0x01,       // 0x126 cmp [rcx], al
     0x74, 0x0A,       // 0x128 je +10 -> 0x134 .found
     0x80, 0x39, 0x00, // 0x12A cmp byte [rcx], 0
@@ -739,7 +738,7 @@ constexpr u8 kThunksBytes[] = {
     // Uses r8b (scratch byte, caller-saved) as the transfer
     // register — can't use dl since rdx is the source
     // pointer.
-    0x48, 0x89, 0xC8, // 0x13B mov rax, rcx    ; save dst
+    0x48, 0x89, 0xC8, // 0x13B mov rax, rcx ; save dst
     0x44, 0x8A, 0x02, // 0x13E mov r8b, [rdx]
     0x44, 0x88, 0x01, // 0x141 mov [rcx], r8b
     0x45, 0x84, 0xC0, // 0x144 test r8b, r8b
@@ -750,7 +749,7 @@ constexpr u8 kThunksBytes[] = {
     // .done:
     0xC3, // 0x151 ret
 
-    // === Batch 8: kernel32 safe-ignore shims ==================
+    // === kernel32 safe-ignore shims ==================
 
     // --- Return-one (offset 0x152, 6 bytes) --------------------
     // Shared stub for Win32 functions whose v0 semantic is
@@ -761,7 +760,7 @@ constexpr u8 kThunksBytes[] = {
     0xB8, 0x01, 0x00, 0x00, 0x00, // 0x152 mov eax, 1
     0xC3,                         // 0x157 ret
 
-    // === Batch 9: Win32 process heap ==========================
+    // === Win32 process heap ==========================
     //
     // Per-process heap backed by SYS_HEAP_ALLOC / SYS_HEAP_FREE,
     // serviced by kernel/subsystems/win32/heap.cpp against the
@@ -808,7 +807,7 @@ constexpr u8 kThunksBytes[] = {
     0x58,                         // 0x169 pop rax
     0xCD, 0x80,                   // 0x16A int 0x80
     0x5F,                         // 0x16C pop rdi
-    0xB8, 0x01, 0x00, 0x00, 0x00, // 0x16D mov eax, 1       ; BOOL TRUE
+    0xB8, 0x01, 0x00, 0x00, 0x00, // 0x16D mov eax, 1 ; BOOL TRUE
     0xC3,                         // 0x172 ret
 
     // --- GetProcessHeap (offset 0x173, 8 bytes) ----------------
@@ -837,7 +836,7 @@ constexpr u8 kThunksBytes[] = {
     // is fine — C "void" discards it. Win64 ABI fix: preserve
     // rdi across the `mov rdi, rcx`.
     //
-    // CRITICAL: this stub was the root cause of the batch 48
+    // CRITICAL: this stub was the root cause of the
     // stress-test crash. A caller allocates rdi to hold the
     // malloc IAT pointer, calls malloc, then calls free (which
     // clobbered rdi), then tries to call malloc again via rdi —
@@ -855,36 +854,36 @@ constexpr u8 kThunksBytes[] = {
     // Allocate count*size bytes and zero-fill. Zero on OOM.
     //
     // Implementation:
-    //   rcx = count * size (imul is nonzero-trashing, rdx is
-    //         only read; after imul, rdx is untouched)
-    //   r9  = saved count*size (for the stosb loop)
-    //   SYS_HEAP_ALLOC preserves r9 (int 0x80 only writes rax).
-    //   On success: rep stosb zeros [rdi, rdi+rcx); push/pop
-    //   rax around the loop because stosb destroys rdi, rcx.
+    // rcx = count * size (imul is nonzero-trashing, rdx is
+    // only read; after imul, rdx is untouched)
+    // r9 = saved count*size (for the stosb loop)
+    // SYS_HEAP_ALLOC preserves r9 (int 0x80 only writes rax).
+    // On success: rep stosb zeros [rdi, rdi+rcx); push/pop
+    // rax around the loop because stosb destroys rdi, rcx.
     //
     // Win64 ABI fix: save/restore rdi (callee-saved). Compressed
     // `mov eax, 11` frees 2 bytes for push/pop rdi; stub stays
     // at 35 bytes. The fail-path jz still skips 12 bytes (the
     // zero-fill sequence) to land on the shared `pop rdi; ret`.
     0x57,                   // 0x191 push rdi
-    0x48, 0x0F, 0xAF, 0xCA, // 0x192 imul rcx, rdx       ; rcx = count*size
-    0x48, 0x89, 0xCF,       // 0x196 mov rdi, rcx        ; arg: size
-    0x49, 0x89, 0xC9,       // 0x199 mov r9, rcx         ; save size for stosb
+    0x48, 0x0F, 0xAF, 0xCA, // 0x192 imul rcx, rdx ; rcx = count*size
+    0x48, 0x89, 0xCF,       // 0x196 mov rdi, rcx ; arg: size
+    0x49, 0x89, 0xC9,       // 0x199 mov r9, rcx ; save size for stosb
     0x6A, 0x0B,             // 0x19C push 11 (SYS_HEAP_ALLOC)
     0x58,                   // 0x19E pop rax
-    0xCD, 0x80,             // 0x19F int 0x80            ; rax = ptr or 0
+    0xCD, 0x80,             // 0x19F int 0x80 ; rax = ptr or 0
     0x48, 0x85, 0xC0,       // 0x1A1 test rax, rax
     0x74, 0x0C,             // 0x1A4 jz +12 -> 0x1B2 (pop rdi; ret)
-    0x48, 0x89, 0xC7,       // 0x1A6 mov rdi, rax        ; dst
-    0x4C, 0x89, 0xC9,       // 0x1A9 mov rcx, r9         ; count
-    0x50,                   // 0x1AC push rax            ; preserve return
-    0x30, 0xC0,             // 0x1AD xor al, al          ; zero byte
+    0x48, 0x89, 0xC7,       // 0x1A6 mov rdi, rax ; dst
+    0x4C, 0x89, 0xC9,       // 0x1A9 mov rcx, r9 ; count
+    0x50,                   // 0x1AC push rax ; preserve return
+    0x30, 0xC0,             // 0x1AD xor al, al ; zero byte
     0xF3, 0xAA,             // 0x1AF rep stosb
     0x58,                   // 0x1B1 pop rax
     0x5F,                   // 0x1B2 pop rdi
     0xC3,                   // 0x1B3 ret
 
-    // === Batch 10: advapi32 + kernel32 safe-ignore expansion ==
+    // === advapi32 + kernel32 safe-ignore expansion ==
     //
     // advapi32 token/privilege dance: every caller of these
     // expects BOOL return + out-params filled in with
@@ -894,8 +893,8 @@ constexpr u8 kThunksBytes[] = {
 
     // --- OpenProcessToken (offset 0x1B4, 13 bytes) -------------
     // Win32: BOOL OpenProcessToken(HANDLE Process=rcx,
-    //                              DWORD DesiredAccess=rdx,
-    //                              PHANDLE TokenHandle=r8).
+    // DWORD DesiredAccess=rdx,
+    // PHANDLE TokenHandle=r8).
     // Out-param: *TokenHandle = 1 (non-null fake handle).
     // Return TRUE.
     0x49, 0xC7, 0x00, 0x01, 0x00, 0x00, 0x00, // 0x1B4 mov qword [r8], 1
@@ -904,8 +903,8 @@ constexpr u8 kThunksBytes[] = {
 
     // --- LookupPrivilegeValueW (offset 0x1C1, 13 bytes) --------
     // Win32: BOOL LookupPrivilegeValueW(LPCWSTR System=rcx,
-    //                                   LPCWSTR Name=rdx,
-    //                                   PLUID Luid=r8).
+    // LPCWSTR Name=rdx,
+    // PLUID Luid=r8).
     // Out-param: *Luid = {LowPart=1, HighPart=0} (LUID is a
     // pair of 32-bit fields in one u64). Non-zero so
     // AdjustTokenPrivileges doesn't treat it as invalid.
@@ -925,18 +924,18 @@ constexpr u8 kThunksBytes[] = {
     // --- GetSystemTimeAsFileTime (offset 0x1DE, 8 bytes) -------
     // Win32: void GetSystemTimeAsFileTime(LPFILETIME=rcx).
     // Superseded — the IAT binding table now routes
-    // GetSystemTimeAsFileTime to kOffGetSysTimeFTReal (batch 20,
-    // offset 0x2A6) which issues SYS_GETTIME_FT to sample the
+    // GetSystemTimeAsFileTime to kOffGetSysTimeFTReal
+    // (offset 0x2A6) which issues SYS_GETTIME_FT to sample the
     // CMOS RTC and return a real FILETIME. The zero-writing
-    // bytes below remain so the layout of earlier batches stays
+    // bytes below remain so the existing thunk layout stays
     // frozen; no import lands here.
     0x48, 0xC7, 0x01, 0x00, 0x00, 0x00, 0x00, // 0x1DE mov qword [rcx], 0
     0xC3,                                     // 0x1E5 ret
 
     // --- OpenProcess (offset 0x1E6, 4 bytes) -------------------
     // Win32: HANDLE OpenProcess(DWORD Access=rcx,
-    //                           BOOL Inherit=rdx,
-    //                           DWORD ProcessId=r8).
+    // BOOL Inherit=rdx,
+    // DWORD ProcessId=r8).
     // Return the PID itself as the handle. Any later call
     // that receives this handle (e.g. GetExitCodeProcess)
     // can still identify the process if we ever wire up
@@ -957,7 +956,7 @@ constexpr u8 kThunksBytes[] = {
     0xB8, 0x01, 0x00, 0x00, 0x00,       // 0x1F0 mov eax, 1
     0xC3,                               // 0x1F5 ret
 
-    // === Batch 11: performance counters + tick count =========
+    // === performance counters + tick count =========
     //
     // Backed by SYS_PERF_COUNTER (13), which returns the
     // kernel's tick counter from arch::TimerTicks(). 100 Hz =
@@ -970,7 +969,7 @@ constexpr u8 kThunksBytes[] = {
     // Out-param: *ctr = current tick count (u64).
     // Return TRUE.
     0xB8, 0x0D, 0x00, 0x00, 0x00, // 0x1F6 mov eax, 13 (SYS_PERF_COUNTER)
-    0xCD, 0x80,                   // 0x1FB int 0x80           ; rax = ticks
+    0xCD, 0x80,                   // 0x1FB int 0x80 ; rax = ticks
     0x48, 0x89, 0x01,             // 0x1FD mov [rcx], rax
     0xB8, 0x01, 0x00, 0x00, 0x00, // 0x200 mov eax, 1
     0xC3,                         // 0x205 ret
@@ -989,18 +988,18 @@ constexpr u8 kThunksBytes[] = {
     // Win32: DWORD GetTickCount(void), ULONGLONG GetTickCount64(void).
     // Both return milliseconds since boot. We scale the 100 Hz
     // tick counter by 10 to convert to ms.
-    //   * GetTickCount truncates to 32 bits — caller reads
-    //     only EAX; upper half of RAX is ignored.
-    //   * GetTickCount64 returns the full RAX.
+    // * GetTickCount truncates to 32 bits — caller reads
+    // only EAX; upper half of RAX is ignored.
+    // * GetTickCount64 returns the full RAX.
     // Same implementation either way.
     0xB8, 0x0D, 0x00, 0x00, 0x00, // 0x213 mov eax, 13 (SYS_PERF_COUNTER)
     0xCD, 0x80,                   // 0x218 int 0x80
     0x48, 0x6B, 0xC0, 0x0A,       // 0x21A imul rax, rax, 10 ; ticks -> ms
     0xC3,                         // 0x21E ret
 
-    // === Batch 14: real HeapSize + HeapReAlloc ================
+    // === real HeapSize + HeapReAlloc ================
     //
-    // Upgrades the v0 "return 0" stubs from batch 9 to real
+    // Upgrades the v0 "return 0" stubs to real
     // syscalls backed by kernel/subsystems/win32/heap.cpp.
     // Payload-capacity tracking falls out for free from the
     // 16-byte block header the allocator already writes — the
@@ -1023,7 +1022,7 @@ constexpr u8 kThunksBytes[] = {
 
     // --- HeapReAlloc (offset 0x22A, 16 bytes) ------------------
     // Win32: LPVOID HeapReAlloc(HANDLE hHeap=rcx, DWORD dwFlags=rdx,
-    //                           LPVOID lpMem=r8, SIZE_T dwBytes=r9).
+    // LPVOID lpMem=r8, SIZE_T dwBytes=r9).
     // Translate to the two-arg SYS_HEAP_REALLOC = 15: rdi =
     // lpMem (r8), rsi = dwBytes (r9). hHeap + dwFlags ignored.
     // Return value in rax (new VA, or 0 on failure).
@@ -1065,17 +1064,17 @@ constexpr u8 kThunksBytes[] = {
     // decode of the caller's control flow so we recover the IAT
     // slot VA that matches what the PE loader staged:
     //
-    //   step A  (caller's `call qword [rip+rel32]` is actually
-    //            `call rel32` because MSVC emits 5-byte direct
-    //            CALLs to tiny 6-byte import "thunks", not the
-    //            `call [IAT]` pattern). So [rsp] - 4 gives the
-    //            rel32 of the CALL; adding it to [rsp] yields
-    //            the thunk's VA (e.g. 0x140004F4E).
+    // step A (caller's `call qword [rip+rel32]` is actually
+    // `call rel32` because MSVC emits 5-byte direct
+    // CALLs to tiny 6-byte import "thunks", not the
+    // `call [IAT]` pattern). So [rsp] - 4 gives the
+    // rel32 of the CALL; adding it to [rsp] yields
+    // the thunk's VA (e.g. 0x140004F4E).
     //
-    //   step B  At the thunk, bytes are `FF 25 rel32_2` — an
-    //            indirect `jmp qword [rip+rel32_2]`. rel32_2 is
-    //            relative to the byte after the jmp, so
-    //            IAT_slot_VA = thunk + 6 + rel32_2.
+    // step B At the thunk, bytes are `FF 25 rel32_2` — an
+    // indirect `jmp qword [rip+rel32_2]`. rel32_2 is
+    // relative to the byte after the jmp, so
+    // IAT_slot_VA = thunk + 6 + rel32_2.
     //
     // The kernel side looks up IAT_slot_VA in the per-process
     // miss table populated at load time and logs the function
@@ -1094,28 +1093,28 @@ constexpr u8 kThunksBytes[] = {
     // Regs: we clobber rax, rcx, rdi — all caller-saved under
     // any Win64 callable we'd be substituted for, and the syscall
     // path preserves the rest. No save/restore needed.
-    0x48, 0x8B, 0x04, 0x24,       // 0x24A mov rax, [rsp]               ; return addr
-    0x80, 0x78, 0xFB, 0xE8,       // 0x24E cmp byte [rax-5], 0xE8        ; CALL rel32?
-    0x75, 0x1C,                   // 0x252 jne +28 -> 0x270              ; skip decode+syscall
-    0x48, 0x63, 0x48, 0xFC,       // 0x254 movsxd rcx, dword [rax-4]    ; CALL rel32
-    0x48, 0x01, 0xC1,             // 0x258 add rcx, rax                 ; rcx = thunk VA
-    0x48, 0x63, 0x41, 0x02,       // 0x25B movsxd rax, dword [rcx+2]    ; thunk's JMP rel32
-    0x48, 0x01, 0xC8,             // 0x25F add rax, rcx                 ; rax = thunk + rel32
-    0x48, 0x83, 0xC0, 0x06,       // 0x262 add rax, 6                   ; rax = IAT slot VA
-    0x48, 0x89, 0xC7,             // 0x266 mov rdi, rax                 ; arg0 = IAT slot VA
+    0x48, 0x8B, 0x04, 0x24,       // 0x24A mov rax, [rsp] ; return addr
+    0x80, 0x78, 0xFB, 0xE8,       // 0x24E cmp byte [rax-5], 0xE8 ; CALL rel32?
+    0x75, 0x1C,                   // 0x252 jne +28 -> 0x270 ; skip decode+syscall
+    0x48, 0x63, 0x48, 0xFC,       // 0x254 movsxd rcx, dword [rax-4] ; CALL rel32
+    0x48, 0x01, 0xC1,             // 0x258 add rcx, rax ; rcx = thunk VA
+    0x48, 0x63, 0x41, 0x02,       // 0x25B movsxd rax, dword [rcx+2] ; thunk's JMP rel32
+    0x48, 0x01, 0xC8,             // 0x25F add rax, rcx ; rax = thunk + rel32
+    0x48, 0x83, 0xC0, 0x06,       // 0x262 add rax, 6 ; rax = IAT slot VA
+    0x48, 0x89, 0xC7,             // 0x266 mov rdi, rax ; arg0 = IAT slot VA
     0xB8, 0x10, 0x00, 0x00, 0x00, // 0x269 mov eax, 16 (SYS_WIN32_MISS_LOG)
     0xCD, 0x80,                   // 0x26E int 0x80
     // .skip target — common epilogue returns 0 for both paths.
     0x31, 0xC0, // 0x270 xor eax, eax
     0xC3,       // 0x272 ret
 
-    // === Batch 16: CRT argc / argv accessors ==================
+    // === CRT argc / argv accessors ==================
     //
     // The MSVC CRT's `__scrt_common_main_seh` reads argc/argv via
     // two accessor functions rather than touching globals directly:
     //
-    //   int*     __p___argc(void);
-    //   char***  __p___argv(void);
+    // int* __p___argc(void);
+    // char*** __p___argv(void);
     //
     // They return addresses into a process-wide storage block the
     // CRT initialises during startup. In DuetOS that storage is
@@ -1139,7 +1138,7 @@ constexpr u8 kThunksBytes[] = {
     0xB8, 0x08, 0x00, 0x00, 0x65, // 0x279 mov eax, 0x65000008
     0xC3,                         // 0x27E ret
 
-    // === Batch 17: UCRT stdio accessors =======================
+    // === UCRT stdio accessors =======================
 
     // --- __p__commode (offset 0x27F, 6 bytes) ------------------
     // int* __p__commode(void) — returns a pointer to the
@@ -1153,7 +1152,7 @@ constexpr u8 kThunksBytes[] = {
     0xB8, 0x00, 0x02, 0x00, 0x65, // 0x27F mov eax, 0x65000200
     0xC3,                         // 0x284 ret
 
-    // === Batch 18: C++ iostream output ========================
+    // === C++ iostream output ========================
     //
     // MSVCP140 virtual methods that would normally sit behind
     // `std::cout.rdbuf()->sputn(...)` / `std::cout << x` virtual
@@ -1165,7 +1164,7 @@ constexpr u8 kThunksBytes[] = {
     // via virtual dispatch through a zero vtable (from the
     // fake-object data-miss pad), so these stubs aren't called
     // by winkill's current execution path. They unblock any
-    // future slice that constructs a real `std::cout` whose
+    // a follow-up that constructs a real `std::cout` whose
     // streambuf vtable points at kOffSputn etc., and they work
     // immediately for programs that take the method's address
     // directly (e.g. `auto f = &basic_streambuf::sputn`).
@@ -1183,16 +1182,16 @@ constexpr u8 kThunksBytes[] = {
     // stub stays at 19 bytes.
     0x56,             // 0x285 push rsi
     0x57,             // 0x286 push rdi
-    0x48, 0x89, 0xD6, // 0x287 mov rsi, rdx        ; buf
-    0x4C, 0x89, 0xC2, // 0x28A mov rdx, r8         ; n
+    0x48, 0x89, 0xD6, // 0x287 mov rsi, rdx ; buf
+    0x4C, 0x89, 0xC2, // 0x28A mov rdx, r8 ; n
     0x6A, 0x01,       // 0x28D push 1
-    0x5F,             // 0x28F pop rdi             ; fd = stdout
+    0x5F,             // 0x28F pop rdi ; fd = stdout
     0x6A, 0x02,       // 0x290 push 2
-    0x58,             // 0x292 pop rax             ; SYS_WRITE
+    0x58,             // 0x292 pop rax ; SYS_WRITE
     0xCD, 0x80,       // 0x293 int 0x80
     0x5F,             // 0x295 pop rdi
     0x5E,             // 0x296 pop rsi
-    0xC3,             // 0x297 ret                 ; rax = count
+    0xC3,             // 0x297 ret ; rax = count
 
     // --- return-this (offset 0x298, 4 bytes) -------------------
     // `basic_ostream& basic_ostream::flush()` and any Win32
@@ -1207,7 +1206,7 @@ constexpr u8 kThunksBytes[] = {
     0x0F, 0xB6, 0xC2, // 0x29C movzx eax, dl
     0xC3,             // 0x29F ret
 
-    // === Batch 19: D3D / DXGI — HRESULT E_FAIL ================
+    // === D3D / DXGI — HRESULT E_FAIL ================
     //
     // Any PE that imports d3d11 / d3d12 / dxgi entry points
     // lands on this stub. Returns HRESULT E_FAIL
@@ -1217,7 +1216,7 @@ constexpr u8 kThunksBytes[] = {
     // (HRESULT S_OK == 0), which would lead to a null-deref
     // on the returned IDirect3D*/ID3D11*/IDXGI* interface.
     //
-    // Wire-up target: a future slice redirects this IAT
+    // Wire-up target: a follow-up redirects this IAT
     // landing through a syscall to
     // subsystems::graphics::D3D11CreateDeviceStub etc., so the
     // kernel log records exactly which D3D entry point got
@@ -1230,7 +1229,7 @@ constexpr u8 kThunksBytes[] = {
     0xB8, 0x05, 0x40, 0x00, 0x80, // 0x2A0 mov eax, 0x80004005
     0xC3,                         // 0x2A5 ret
 
-    // === Batch 20: real GetSystemTimeAsFileTime ===============
+    // === real GetSystemTimeAsFileTime ===============
     //
     // Replaces the old `0x1DE` stub (which wrote 0 into *rcx).
     // Issues SYS_GETTIME_FT (17) which samples the CMOS RTC and
@@ -1238,22 +1237,22 @@ constexpr u8 kThunksBytes[] = {
     // Then stores the result into *rcx (the caller's LPFILETIME).
     //
     // Register discipline:
-    //   - rcx must survive the int 0x80 so we can write *rcx at
-    //     the end. int 0x80 preserves all GPRs except rax, so we
-    //     don't need to save/restore rcx, but we push it anyway
-    //     as paranoia for any future syscall that might clobber
-    //     arguments.
-    //   - Nothing else matters (caller-saved under Win64 ABI).
+    // - rcx must survive the int 0x80 so we can write *rcx at
+    // the end. int 0x80 preserves all GPRs except rax, so we
+    // don't need to save/restore rcx, but we push it anyway
+    // as paranoia for any future syscall that might clobber
+    // arguments.
+    // - Nothing else matters (caller-saved under Win64 ABI).
     //
     // 13 bytes total.
     0x51,                         // 0x2A6 push rcx
     0xB8, 0x11, 0x00, 0x00, 0x00, // 0x2A7 mov eax, 17 (SYS_GETTIME_FT)
-    0xCD, 0x80,                   // 0x2AC int 0x80                ; rax = FILETIME
+    0xCD, 0x80,                   // 0x2AC int 0x80 ; rax = FILETIME
     0x59,                         // 0x2AE pop rcx
     0x48, 0x89, 0x01,             // 0x2AF mov [rcx], rax
     0xC3,                         // 0x2B2 ret
 
-    // === Batch 21: HPET-backed QueryPerformance{Counter,Frequency} ===
+    // === HPET-backed QueryPerformance{Counter,Frequency} ===
     //
     // The old QPC at 0x1F6 returned LAPIC tick counter (100 Hz)
     // and the old QPF at 0x206 returned 100. Replacing both so
@@ -1268,10 +1267,10 @@ constexpr u8 kThunksBytes[] = {
     // Win32: BOOL QueryPerformanceCounter(LARGE_INTEGER* ctr=rcx).
     0x51,                         // 0x2B3 push rcx
     0xB8, 0x12, 0x00, 0x00, 0x00, // 0x2B4 mov eax, 18 (SYS_NOW_NS)
-    0xCD, 0x80,                   // 0x2B9 int 0x80         ; rax = ns since boot
+    0xCD, 0x80,                   // 0x2B9 int 0x80 ; rax = ns since boot
     0x59,                         // 0x2BB pop rcx
     0x48, 0x89, 0x01,             // 0x2BC mov [rcx], rax
-    0xB0, 0x01,                   // 0x2BF mov al, 1        ; BOOL TRUE (low byte)
+    0xB0, 0x01,                   // 0x2BF mov al, 1 ; BOOL TRUE (low byte)
     0xC3,                         // 0x2C1 ret
 
     // --- QPF via constant 1'000'000'000 (offset 0x2C2, 13 bytes) --
@@ -1295,17 +1294,17 @@ constexpr u8 kThunksBytes[] = {
     // by MSVC/clang's register allocator) survives Sleep with
     // value `dwMilliseconds`, and the next deref/call through
     // that "pointer" #PFs at cr2 = ms. (Hit live during the
-    // Batch 22 bring-up: Sleep(50) → cr2=0x32.)
+    // bring-up: Sleep(50) → cr2=0x32.)
     //
     // `mov edi, ecx` is a 32-bit move — x86_64 zero-extends the
     // upper half of rdi automatically, so a DWORD `ms` becomes a
     // u64 with the high bits cleared, matching what SYS_SLEEP_MS
     // expects in rdi.
-    0x57,                         // 0x2CF push rdi            ; save callee-saved
-    0x89, 0xCF,                   // 0x2D0 mov edi, ecx        ; ms -> rdi
-    0xB8, 0x13, 0x00, 0x00, 0x00, // 0x2D2 mov eax, 19         ; SYS_SLEEP_MS
+    0x57,                         // 0x2CF push rdi ; save callee-saved
+    0x89, 0xCF,                   // 0x2D0 mov edi, ecx ; ms -> rdi
+    0xB8, 0x13, 0x00, 0x00, 0x00, // 0x2D2 mov eax, 19 ; SYS_SLEEP_MS
     0xCD, 0x80,                   // 0x2D7 int 0x80
-    0x5F,                         // 0x2D9 pop rdi             ; restore
+    0x5F,                         // 0x2D9 pop rdi ; restore
     0xC3,                         // 0x2DA ret
 
     // --- SwitchToThread (offset 0x2DB, 10 bytes) ---------------
@@ -1318,12 +1317,12 @@ constexpr u8 kThunksBytes[] = {
     // and after, which isn't worth the kernel-side complexity.
     //
     // No callee-saved regs touched — only RAX (caller-saved).
-    0xB8, 0x03, 0x00, 0x00, 0x00, // 0x2DB mov eax, 3          ; SYS_YIELD
+    0xB8, 0x03, 0x00, 0x00, 0x00, // 0x2DB mov eax, 3 ; SYS_YIELD
     0xCD, 0x80,                   // 0x2E0 int 0x80
-    0xB0, 0x01,                   // 0x2E2 mov al, 1           ; BOOL TRUE
+    0xB0, 0x01,                   // 0x2E2 mov al, 1 ; BOOL TRUE
     0xC3,                         // 0x2E4 ret
 
-    // === Batch 23: command line + environment ================
+    // === command line + environment ================
     //
     // Each of these stubs returns a pointer into the proc-env
     // page. The destination addresses live in the low 4 GiB
@@ -1335,30 +1334,30 @@ constexpr u8 kThunksBytes[] = {
     // pointer to a wide cmdline string for the lifetime of the
     // process. The CRT calls this exactly once during startup
     // to populate __wargv; downstream callers see argv via
-    // __p___argv (already wired in batch 16).
+    // __p___argv (already wired).
 
     // --- GetCommandLineW (offset 0x2E5, 6 bytes) ---------------
     // Returns LPCWSTR = kProcEnvVa + kProcEnvCmdlineWOff
-    //                 = 0x65000300 (low 4 GiB).
+    // = 0x65000300 (low 4 GiB).
     0xB8, 0x00, 0x03, 0x00, 0x65, // 0x2E5 mov eax, 0x65000300
     0xC3,                         // 0x2EA ret
 
     // --- GetCommandLineA (offset 0x2EB, 6 bytes) ---------------
     // Returns LPCSTR = kProcEnvVa + kProcEnvCmdlineAOff
-    //                = 0x65000380.
+    // = 0x65000380.
     0xB8, 0x80, 0x03, 0x00, 0x65, // 0x2EB mov eax, 0x65000380
     0xC3,                         // 0x2F0 ret
 
     // --- GetEnvironmentStringsW (offset 0x2F1, 6 bytes) --------
     // Returns LPWCH = kProcEnvVa + kProcEnvEnvBlockWOff
-    //               = 0x65000400. The block is two NUL bytes
+    // = 0x65000400. The block is two NUL bytes
     // (an empty env), so any caller that walks it stops
     // immediately. FreeEnvironmentStringsW is a Win32 cleanup
     // hook — registered as a no-op (returns TRUE) below.
     0xB8, 0x00, 0x04, 0x00, 0x65, // 0x2F1 mov eax, 0x65000400
     0xC3,                         // 0x2F6 ret
 
-    // === Batch 24: file I/O ===================================
+    // === file I/O ===================================
     //
     // Win32 handle table lives on Process; SYS_FILE_OPEN /
     // SYS_FILE_READ / SYS_FILE_CLOSE / SYS_FILE_SEEK route in.
@@ -1367,9 +1366,9 @@ constexpr u8 kThunksBytes[] = {
 
     // --- CreateFileW (offset 0x2F7, 59 bytes) -----------------
     // Win32: HANDLE CreateFileW(LPCWSTR lpFileName=rcx, DWORD
-    //          dwDesiredAccess, DWORD dwShareMode,
-    //          LPSECURITY_ATTRIBUTES lpSec, DWORD dwCreate,
-    //          DWORD dwFlags, HANDLE hTemplate);
+    // dwDesiredAccess, DWORD dwShareMode,
+    // LPSECURITY_ATTRIBUTES lpSec, DWORD dwCreate,
+    // DWORD dwFlags, HANDLE hTemplate);
     //
     // v0 ignores every flag — opens read-only no matter what.
     // The wide path in rcx gets stripped to ASCII on a stack-
@@ -1377,43 +1376,43 @@ constexpr u8 kThunksBytes[] = {
     // the kernel.
     //
     // RDI / RSI are CALLEE-SAVED in the Win32 x64 ABI — same
-    // bug class that bit Sleep in batch 22; both are saved+
+    // bug class that bit Sleep; both are saved+
     // restored across the syscall.
     0x57,                                     // 0x2F7 push rdi
     0x56,                                     // 0x2F8 push rsi
-    0x48, 0x81, 0xEC, 0x08, 0x01, 0x00, 0x00, // 0x2F9 sub rsp, 0x108  ; 264-byte ASCII buf
-    0x48, 0x89, 0xE7,                         // 0x300 mov rdi, rsp    ; rdi = ASCII dst
-    0x31, 0xD2,                               // 0x303 xor edx, edx    ; idx = 0
+    0x48, 0x81, 0xEC, 0x08, 0x01, 0x00, 0x00, // 0x2F9 sub rsp, 0x108 ; 264-byte ASCII buf
+    0x48, 0x89, 0xE7,                         // 0x300 mov rdi, rsp ; rdi = ASCII dst
+    0x31, 0xD2,                               // 0x303 xor edx, edx ; idx = 0
     // .loop:
-    0x83, 0xFA, 0xFF,       // 0x305 cmp edx, 0xFF    ; cap at 255
+    0x83, 0xFA, 0xFF,       // 0x305 cmp edx, 0xFF ; cap at 255
     0x73, 0x10,             // 0x308 jae +0x10 (.done)
-    0x0F, 0xB7, 0x04, 0x51, // 0x30A movzx eax, word [rcx+rdx*2]  ; load wide char
-    0x66, 0x85, 0xC0,       // 0x30E test ax, ax      ; NUL?
+    0x0F, 0xB7, 0x04, 0x51, // 0x30A movzx eax, word [rcx+rdx*2] ; load wide char
+    0x66, 0x85, 0xC0,       // 0x30E test ax, ax ; NUL?
     0x74, 0x07,             // 0x311 jz +0x07 (.done)
     0x88, 0x04, 0x17,       // 0x313 mov [rdi+rdx], al ; ASCII low byte
     0xFF, 0xC2,             // 0x316 inc edx
     0xEB, 0xEB,             // 0x318 jmp .loop (-0x15)
     // .done:
-    0xC6, 0x04, 0x17, 0x00,                   // 0x31A mov byte [rdi+rdx], 0  ; NUL terminate
-    0x48, 0x89, 0xD6,                         // 0x31E mov rsi, rdx    ; len -> rsi (arg 1)
-    0xB8, 0x14, 0x00, 0x00, 0x00,             // 0x321 mov eax, 20     ; SYS_FILE_OPEN
+    0xC6, 0x04, 0x17, 0x00,                   // 0x31A mov byte [rdi+rdx], 0 ; NUL terminate
+    0x48, 0x89, 0xD6,                         // 0x31E mov rsi, rdx ; len -> rsi (arg 1)
+    0xB8, 0x14, 0x00, 0x00, 0x00,             // 0x321 mov eax, 20 ; SYS_FILE_OPEN
     0xCD, 0x80,                               // 0x326 int 0x80
-    0x48, 0x81, 0xC4, 0x08, 0x01, 0x00, 0x00, // 0x328 add rsp, 0x108  ; restore stack
+    0x48, 0x81, 0xC4, 0x08, 0x01, 0x00, 0x00, // 0x328 add rsp, 0x108 ; restore stack
     0x5E,                                     // 0x32F pop rsi
     0x5F,                                     // 0x330 pop rdi
     0xC3,                                     // 0x331 ret
 
     // --- ReadFile (offset 0x332, 46 bytes) --------------------
     // Win32: BOOL ReadFile(HANDLE rcx, LPVOID buf=rdx,
-    //          DWORD count=r8, LPDWORD lpRead=r9, LPOVERLAPPED).
+    // DWORD count=r8, LPDWORD lpRead=r9, LPOVERLAPPED).
     // Maps to SYS_FILE_READ; stores byte count in *lpRead if
     // non-NULL; returns TRUE on success (rax >= 0).
     0x57,                         // 0x332 push rdi
     0x56,                         // 0x333 push rsi
-    0x48, 0x89, 0xCF,             // 0x334 mov rdi, rcx     ; handle
-    0x48, 0x89, 0xD6,             // 0x337 mov rsi, rdx     ; buf
-    0x4C, 0x89, 0xC2,             // 0x33A mov rdx, r8      ; count
-    0xB8, 0x15, 0x00, 0x00, 0x00, // 0x33D mov eax, 21      ; SYS_FILE_READ
+    0x48, 0x89, 0xCF,             // 0x334 mov rdi, rcx ; handle
+    0x48, 0x89, 0xD6,             // 0x337 mov rsi, rdx ; buf
+    0x4C, 0x89, 0xC2,             // 0x33A mov rdx, r8 ; count
+    0xB8, 0x15, 0x00, 0x00, 0x00, // 0x33D mov eax, 21 ; SYS_FILE_READ
     0xCD, 0x80,                   // 0x342 int 0x80
     // *lpRead = max(rax, 0) if r9 != NULL
     0x4D, 0x85, 0xC9, // 0x344 test r9, r9
@@ -1437,24 +1436,24 @@ constexpr u8 kThunksBytes[] = {
     // call sites (e.g. CreateEventW pseudo-handles).
     0x57,                         // 0x360 push rdi
     0x48, 0x89, 0xCF,             // 0x361 mov rdi, rcx
-    0xB8, 0x16, 0x00, 0x00, 0x00, // 0x364 mov eax, 22      ; SYS_FILE_CLOSE
+    0xB8, 0x16, 0x00, 0x00, 0x00, // 0x364 mov eax, 22 ; SYS_FILE_CLOSE
     0xCD, 0x80,                   // 0x369 int 0x80
-    0xB0, 0x01,                   // 0x36B mov al, 1        ; BOOL TRUE
+    0xB0, 0x01,                   // 0x36B mov al, 1 ; BOOL TRUE
     0x5F,                         // 0x36D pop rdi
     0xC3,                         // 0x36E ret
 
     // --- SetFilePointerEx (offset 0x36F, 38 bytes) ------------
     // Win32: BOOL SetFilePointerEx(HANDLE rcx,
-    //          LARGE_INTEGER off=rdx, LARGE_INTEGER* newPos=r8,
-    //          DWORD dwMoveMethod=r9).
+    // LARGE_INTEGER off=rdx, LARGE_INTEGER* newPos=r8,
+    // DWORD dwMoveMethod=r9).
     // Maps to SYS_FILE_SEEK; writes new position to *r8 if
     // non-NULL; returns TRUE iff rax >= 0.
     0x57,                         // 0x36F push rdi
     0x56,                         // 0x370 push rsi
-    0x48, 0x89, 0xCF,             // 0x371 mov rdi, rcx     ; handle
-    0x48, 0x89, 0xD6,             // 0x374 mov rsi, rdx     ; offset
-    0x4C, 0x89, 0xCA,             // 0x377 mov rdx, r9      ; whence
-    0xB8, 0x17, 0x00, 0x00, 0x00, // 0x37A mov eax, 23      ; SYS_FILE_SEEK
+    0x48, 0x89, 0xCF,             // 0x371 mov rdi, rcx ; handle
+    0x48, 0x89, 0xD6,             // 0x374 mov rsi, rdx ; offset
+    0x4C, 0x89, 0xCA,             // 0x377 mov rdx, r9 ; whence
+    0xB8, 0x17, 0x00, 0x00, 0x00, // 0x37A mov eax, 23 ; SYS_FILE_SEEK
     0xCD, 0x80,                   // 0x37F int 0x80
     0x4D, 0x85, 0xC0,             // 0x381 test r8, r8
     0x74, 0x03,                   // 0x384 jz +0x03
@@ -1466,7 +1465,7 @@ constexpr u8 kThunksBytes[] = {
     0x5F,                         // 0x393 pop rdi
     0xC3,                         // 0x394 ret
 
-    // === Batch 25: file stat + module lookup ==================
+    // === file stat + module lookup ==================
 
     // --- GetFileSizeEx (offset 0x395, 29 bytes) ---------------
     // Win32: BOOL GetFileSizeEx(HANDLE rcx, LARGE_INTEGER* rdx).
@@ -1475,12 +1474,12 @@ constexpr u8 kThunksBytes[] = {
     // would).
     0x57,                         // 0x395 push rdi
     0x56,                         // 0x396 push rsi
-    0x48, 0x89, 0xCF,             // 0x397 mov rdi, rcx     ; handle
-    0x48, 0x89, 0xD6,             // 0x39A mov rsi, rdx     ; out ptr
-    0xB8, 0x18, 0x00, 0x00, 0x00, // 0x39D mov eax, 24      ; SYS_FILE_FSTAT
+    0x48, 0x89, 0xCF,             // 0x397 mov rdi, rcx ; handle
+    0x48, 0x89, 0xD6,             // 0x39A mov rsi, rdx ; out ptr
+    0xB8, 0x18, 0x00, 0x00, 0x00, // 0x39D mov eax, 24 ; SYS_FILE_FSTAT
     0xCD, 0x80,                   // 0x3A2 int 0x80
     0x31, 0xC9,                   // 0x3A4 xor ecx, ecx
-    0x48, 0x85, 0xC0,             // 0x3A6 test rax, rax    ; ZF=1 iff success (rax==0)
+    0x48, 0x85, 0xC0,             // 0x3A6 test rax, rax ; ZF=1 iff success (rax==0)
     0x0F, 0x94, 0xC1,             // 0x3A9 sete cl
     0x0F, 0xB6, 0xC1,             // 0x3AC movzx eax, cl
     0x5E,                         // 0x3AF pop rsi
@@ -1505,17 +1504,17 @@ constexpr u8 kThunksBytes[] = {
     0x31, 0xC0, // 0x3C0 xor eax, eax
     0xC3,       // 0x3C2 ret
 
-    // === Batch 26: Win32 mutex (real waitqueue-backed) =========
+    // === Win32 mutex (real waitqueue-backed) =========
 
     // --- CreateMutexW (offset 0x3C3, 13 bytes) ----------------
     // Win32: HANDLE CreateMutexW(LPSECURITY_ATTRIBUTES rcx,
-    //          BOOL bInitialOwner=rdx, LPCWSTR lpName=r8).
+    // BOOL bInitialOwner=rdx, LPCWSTR lpName=r8).
     // Ignores attrs + name; forwards bInitialOwner to
     // SYS_MUTEX_CREATE which returns the kWin32MutexBase + slot
     // pseudo-handle directly.
     0x57,                         // 0x3C3 push rdi
-    0x48, 0x89, 0xD7,             // 0x3C4 mov rdi, rdx       ; bInitialOwner
-    0xB8, 0x19, 0x00, 0x00, 0x00, // 0x3C7 mov eax, 25        ; SYS_MUTEX_CREATE
+    0x48, 0x89, 0xD7,             // 0x3C4 mov rdi, rdx ; bInitialOwner
+    0xB8, 0x19, 0x00, 0x00, 0x00, // 0x3C7 mov eax, 25 ; SYS_MUTEX_CREATE
     0xCD, 0x80,                   // 0x3CC int 0x80
     0x5F,                         // 0x3CE pop rdi
     0xC3,                         // 0x3CF ret
@@ -1524,27 +1523,27 @@ constexpr u8 kThunksBytes[] = {
     // Win32: DWORD WaitForSingleObject(HANDLE rcx, DWORD timeout=rdx).
     //
     // Dispatches by handle range:
-    //   * Mutex range (0x200..0x207): SYS_MUTEX_WAIT.
-    //   * Anything else: pseudo-signal (return 0 = WAIT_OBJECT_0)
-    //     to preserve the slice-10 batch-10 behaviour for events,
-    //     thread handles, etc., that the v0 stubs don't track.
+    // * Mutex range (0x200..0x207): SYS_MUTEX_WAIT.
+    // * Anything else: pseudo-signal (return 0 = WAIT_OBJECT_0)
+    // to preserve the behaviour for events,
+    // thread handles, etc., that the v0 stubs don't track.
     //
     // RDI / RSI saved+restored — Win32 ABI callee-saved.
     0x57,                               // 0x3D0 push rdi
     0x56,                               // 0x3D1 push rsi
-    0x48, 0x89, 0xC8,                   // 0x3D2 mov rax, rcx       ; handle
-    0x48, 0x2D, 0x00, 0x02, 0x00, 0x00, // 0x3D5 sub rax, 0x200     ; rax -= base
-    0x48, 0x83, 0xF8, 0x08,             // 0x3DB cmp rax, 8         ; in mutex range?
+    0x48, 0x89, 0xC8,                   // 0x3D2 mov rax, rcx ; handle
+    0x48, 0x2D, 0x00, 0x02, 0x00, 0x00, // 0x3D5 sub rax, 0x200 ; rax -= base
+    0x48, 0x83, 0xF8, 0x08,             // 0x3DB cmp rax, 8 ; in mutex range?
     0x73, 0x10,                         // 0x3DF jae .pseudo (+0x10)
-    0x48, 0x89, 0xCF,                   // 0x3E1 mov rdi, rcx       ; handle
-    0x48, 0x89, 0xD6,                   // 0x3E4 mov rsi, rdx       ; timeout_ms
-    0xB8, 0x1A, 0x00, 0x00, 0x00,       // 0x3E7 mov eax, 26        ; SYS_MUTEX_WAIT
+    0x48, 0x89, 0xCF,                   // 0x3E1 mov rdi, rcx ; handle
+    0x48, 0x89, 0xD6,                   // 0x3E4 mov rsi, rdx ; timeout_ms
+    0xB8, 0x1A, 0x00, 0x00, 0x00,       // 0x3E7 mov eax, 26 ; SYS_MUTEX_WAIT
     0xCD, 0x80,                         // 0x3EC int 0x80
     0x5E,                               // 0x3EE pop rsi
     0x5F,                               // 0x3EF pop rdi
     0xC3,                               // 0x3F0 ret
     // .pseudo:
-    0x31, 0xC0, // 0x3F1 xor eax, eax       ; WAIT_OBJECT_0 = 0
+    0x31, 0xC0, // 0x3F1 xor eax, eax ; WAIT_OBJECT_0 = 0
     0x5E,       // 0x3F3 pop rsi
     0x5F,       // 0x3F4 pop rdi
     0xC3,       // 0x3F5 ret
@@ -1555,7 +1554,7 @@ constexpr u8 kThunksBytes[] = {
     // BOOL = (rax == 0).
     0x57,                         // 0x3F6 push rdi
     0x48, 0x89, 0xCF,             // 0x3F7 mov rdi, rcx
-    0xB8, 0x1B, 0x00, 0x00, 0x00, // 0x3FA mov eax, 27         ; SYS_MUTEX_RELEASE
+    0xB8, 0x1B, 0x00, 0x00, 0x00, // 0x3FA mov eax, 27 ; SYS_MUTEX_RELEASE
     0xCD, 0x80,                   // 0x3FF int 0x80
     0x31, 0xC9,                   // 0x401 xor ecx, ecx
     0x48, 0x85, 0xC0,             // 0x403 test rax, rax
@@ -1564,12 +1563,12 @@ constexpr u8 kThunksBytes[] = {
     0x5F,                         // 0x40C pop rdi
     0xC3,                         // 0x40D ret
 
-    // === Batch 27: console APIs ================================
+    // === console APIs ================================
 
     // --- WriteConsoleW (offset 0x40E, 96 bytes) ---------------
     // Win32: BOOL WriteConsoleW(HANDLE rcx, const void* rdx,
-    //          DWORD nChars=r8, LPDWORD lpCharsOut=r9,
-    //          LPVOID lpReserved=[rsp+0x28]).
+    // DWORD nChars=r8, LPDWORD lpCharsOut=r9,
+    // LPVOID lpReserved=[rsp+0x28]).
     //
     // Strips UTF-16LE to low-byte ASCII on a 512-byte stack
     // buffer (capped — longer writes truncate), then routes
@@ -1585,44 +1584,44 @@ constexpr u8 kThunksBytes[] = {
     0x56,                                     // 0x40F push rsi
     0x41, 0x54,                               // 0x410 push r12
     0x41, 0x55,                               // 0x412 push r13
-    0x48, 0x81, 0xEC, 0x08, 0x02, 0x00, 0x00, // 0x414 sub rsp, 0x208  ; 512-byte ASCII buf + 8 pad
-    0x48, 0x89, 0xE7,                         // 0x41B mov rdi, rsp    ; dst
-    0x48, 0x89, 0xD6,                         // 0x41E mov rsi, rdx    ; src (wide)
-    0x4D, 0x89, 0xC4,                         // 0x421 mov r12, r8     ; nChars (save)
-    0x4D, 0x89, 0xCD,                         // 0x424 mov r13, r9     ; lpCharsOut (save)
-    0x31, 0xC9,                               // 0x427 xor ecx, ecx    ; i = 0
+    0x48, 0x81, 0xEC, 0x08, 0x02, 0x00, 0x00, // 0x414 sub rsp, 0x208 ; 512-byte ASCII buf + 8 pad
+    0x48, 0x89, 0xE7,                         // 0x41B mov rdi, rsp ; dst
+    0x48, 0x89, 0xD6,                         // 0x41E mov rsi, rdx ; src (wide)
+    0x4D, 0x89, 0xC4,                         // 0x421 mov r12, r8 ; nChars (save)
+    0x4D, 0x89, 0xCD,                         // 0x424 mov r13, r9 ; lpCharsOut (save)
+    0x31, 0xC9,                               // 0x427 xor ecx, ecx ; i = 0
     // .loop:
-    0x4C, 0x39, 0xE1,                         // 0x429 cmp rcx, r12    ; i < count?
+    0x4C, 0x39, 0xE1,                         // 0x429 cmp rcx, r12 ; i < count?
     0x73, 0x15,                               // 0x42C jae .done (+0x15)
-    0x48, 0x81, 0xF9, 0x00, 0x02, 0x00, 0x00, // 0x42E cmp rcx, 0x200  ; i < 512?
+    0x48, 0x81, 0xF9, 0x00, 0x02, 0x00, 0x00, // 0x42E cmp rcx, 0x200 ; i < 512?
     0x73, 0x0C,                               // 0x435 jae .done (+0x0C)
     0x0F, 0xB7, 0x04, 0x4E,                   // 0x437 movzx eax, word [rsi+rcx*2]
     0x88, 0x04, 0x0F,                         // 0x43B mov [rdi+rcx], al
     0x48, 0xFF, 0xC1,                         // 0x43E inc rcx
     0xEB, 0xE6,                               // 0x441 jmp .loop (-0x1A)
     // .done: rcx = actual ASCII byte count
-    0x48, 0x89, 0xCA,             // 0x443 mov rdx, rcx    ; len for SYS_WRITE
-    0x48, 0x89, 0xFE,             // 0x446 mov rsi, rdi    ; buf = ASCII dst
-    0xBF, 0x01, 0x00, 0x00, 0x00, // 0x449 mov edi, 1      ; fd = stdout
-    0xB8, 0x02, 0x00, 0x00, 0x00, // 0x44E mov eax, 2      ; SYS_WRITE
+    0x48, 0x89, 0xCA,             // 0x443 mov rdx, rcx ; len for SYS_WRITE
+    0x48, 0x89, 0xFE,             // 0x446 mov rsi, rdi ; buf = ASCII dst
+    0xBF, 0x01, 0x00, 0x00, 0x00, // 0x449 mov edi, 1 ; fd = stdout
+    0xB8, 0x02, 0x00, 0x00, 0x00, // 0x44E mov eax, 2 ; SYS_WRITE
     0xCD, 0x80,                   // 0x453 int 0x80
-    0x4D, 0x85, 0xED,             // 0x455 test r13, r13   ; lpCharsOut != NULL?
+    0x4D, 0x85, 0xED,             // 0x455 test r13, r13 ; lpCharsOut != NULL?
     0x74, 0x04,                   // 0x458 jz .skip (+4)
-    0x45, 0x89, 0x65, 0x00,       // 0x45A mov [r13+0], r12d   ; store wide-char count
+    0x45, 0x89, 0x65, 0x00,       // 0x45A mov [r13+0], r12d ; store wide-char count
     // .skip:
     0x48, 0x81, 0xC4, 0x08, 0x02, 0x00, 0x00, // 0x45E add rsp, 0x208
     0x41, 0x5D,                               // 0x465 pop r13
     0x41, 0x5C,                               // 0x467 pop r12
     0x5E,                                     // 0x469 pop rsi
     0x5F,                                     // 0x46A pop rdi
-    0xB0, 0x01,                               // 0x46B mov al, 1       ; BOOL TRUE
+    0xB0, 0x01,                               // 0x46B mov al, 1 ; BOOL TRUE
     0xC3,                                     // 0x46D ret
 
     // --- GetConsoleMode (offset 0x46E, 12 bytes) --------------
     // Win32: BOOL GetConsoleMode(HANDLE rcx, DWORD* rdx).
     // Returns a plausible flag combination —
-    //   ENABLE_PROCESSED_OUTPUT (0x1) | ENABLE_WRAP_AT_EOL (0x2) |
-    //   ENABLE_VIRTUAL_TERMINAL_PROCESSING (0x4) = 0x7.
+    // ENABLE_PROCESSED_OUTPUT (0x1) | ENABLE_WRAP_AT_EOL (0x2) |
+    // ENABLE_VIRTUAL_TERMINAL_PROCESSING (0x4) = 0x7.
     // Callers that query-then-modify + SetConsoleMode round-trip
     // see the mode they set (SetConsoleMode is kOffReturnOne, so
     // the write is a no-op; the next Get returns the same
@@ -1642,33 +1641,33 @@ constexpr u8 kThunksBytes[] = {
     0xB8, 0xE9, 0xFD, 0x00, 0x00, // 0x47A mov eax, 65001 (CP_UTF8)
     0xC3,                         // 0x47F ret
 
-    // === Batch 28: virtual memory (VirtualAlloc/Free/Protect) ==
+    // === virtual memory (VirtualAlloc/Free/Protect) ==
 
     // --- VirtualAlloc (offset 0x480, 13 bytes) ----------------
     // Win32: LPVOID VirtualAlloc(LPVOID rcx, SIZE_T rdx,
-    //          DWORD flAllocationType=r8, DWORD flProtect=r9).
+    // DWORD flAllocationType=r8, DWORD flProtect=r9).
     // v0 ignores rcx (caller's preferred address), r8, r9 —
     // just forwards the size to SYS_VMAP which bump-allocates
     // RW+NX+User pages. Kernel returns the VA; stub returns it
     // verbatim (or 0 on arena exhaustion).
     0x57,                         // 0x480 push rdi
-    0x48, 0x89, 0xD7,             // 0x481 mov rdi, rdx       ; size
-    0xB8, 0x1C, 0x00, 0x00, 0x00, // 0x484 mov eax, 28        ; SYS_VMAP
+    0x48, 0x89, 0xD7,             // 0x481 mov rdi, rdx ; size
+    0xB8, 0x1C, 0x00, 0x00, 0x00, // 0x484 mov eax, 28 ; SYS_VMAP
     0xCD, 0x80,                   // 0x489 int 0x80
     0x5F,                         // 0x48B pop rdi
     0xC3,                         // 0x48C ret
 
     // --- VirtualFree (offset 0x48D, 29 bytes) -----------------
     // Win32: BOOL VirtualFree(LPVOID rcx, SIZE_T rdx,
-    //          DWORD dwFreeType=r8).
+    // DWORD dwFreeType=r8).
     // v0: no-op with range validation. Ignores rdx + r8;
     // SYS_VUNMAP returns 0 if the VA is in the vmap arena, -1
     // otherwise. BOOL = (rax == 0).
     0x57,                         // 0x48D push rdi
     0x56,                         // 0x48E push rsi
-    0x48, 0x89, 0xCF,             // 0x48F mov rdi, rcx       ; va
-    0x48, 0x89, 0xD6,             // 0x492 mov rsi, rdx       ; size
-    0xB8, 0x1D, 0x00, 0x00, 0x00, // 0x495 mov eax, 29        ; SYS_VUNMAP
+    0x48, 0x89, 0xCF,             // 0x48F mov rdi, rcx ; va
+    0x48, 0x89, 0xD6,             // 0x492 mov rsi, rdx ; size
+    0xB8, 0x1D, 0x00, 0x00, 0x00, // 0x495 mov eax, 29 ; SYS_VUNMAP
     0xCD, 0x80,                   // 0x49A int 0x80
     0x31, 0xC9,                   // 0x49C xor ecx, ecx
     0x48, 0x85, 0xC0,             // 0x49E test rax, rax
@@ -1680,7 +1679,7 @@ constexpr u8 kThunksBytes[] = {
 
     // --- VirtualProtect (offset 0x4AA, 18 bytes) --------------
     // Win32: BOOL VirtualProtect(LPVOID rcx, SIZE_T rdx,
-    //          DWORD flNewProtect=r8, PDWORD lpflOldProtect=r9).
+    // DWORD flNewProtect=r8, PDWORD lpflOldProtect=r9).
     // v0 is a no-op: every vmap page is RW+NX by construction
     // (W^X policy — no W+X). If r9 is non-NULL we write
     // PAGE_READWRITE (0x04) back as the "old" protection so
@@ -1693,7 +1692,7 @@ constexpr u8 kThunksBytes[] = {
     0xB8, 0x01, 0x00, 0x00, 0x00, // 0x4B6 mov eax, 1 (BOOL TRUE)
     0xC3,                         // 0x4BB ret
 
-    // === Batch 29: wide-string helpers =========================
+    // === wide-string helpers =========================
 
     // --- lstrlenW (offset 0x4BC, 15 bytes) --------------------
     // Win32: int lstrlenW(LPCWSTR rcx). Scans for a u16 zero and
@@ -1713,13 +1712,13 @@ constexpr u8 kThunksBytes[] = {
     // Returns 0 if equal, negative if s1 < s2, positive if s1 > s2.
     // Pure compute — no locale folding (lstrcmpW is ordinal
     // compare; lstrcmpiW would case-fold, which we don't stub).
-    0x31, 0xC0, // 0x4CB xor eax, eax      ; i = 0
+    0x31, 0xC0, // 0x4CB xor eax, eax ; i = 0
     // .loop:
     0x44, 0x0F, 0xB7, 0x04, 0x41, // 0x4CD movzx r8d, word [rcx+rax*2]
     0x44, 0x0F, 0xB7, 0x0C, 0x42, // 0x4D2 movzx r9d, word [rdx+rax*2]
     0x45, 0x39, 0xC8,             // 0x4D7 cmp r8d, r9d
     0x75, 0x0D,                   // 0x4DA jne .diff (+0x0D)
-    0x45, 0x85, 0xC0,             // 0x4DC test r8d, r8d       ; both NUL?
+    0x45, 0x85, 0xC0,             // 0x4DC test r8d, r8d ; both NUL?
     0x74, 0x05,                   // 0x4DF je .equal (+5)
     0x48, 0xFF, 0xC0,             // 0x4E1 inc rax
     0xEB, 0xE7,                   // 0x4E4 jmp .loop (-0x19)
@@ -1727,7 +1726,7 @@ constexpr u8 kThunksBytes[] = {
     0x31, 0xC0, // 0x4E6 xor eax, eax
     0xC3,       // 0x4E8 ret
     // .diff:
-    0x44, 0x89, 0xC0, // 0x4E9 mov eax, r8d     ; signed diff
+    0x44, 0x89, 0xC0, // 0x4E9 mov eax, r8d ; signed diff
     0x44, 0x29, 0xC8, // 0x4EC sub eax, r9d
     0xC3,             // 0x4EF ret
 
@@ -1737,19 +1736,19 @@ constexpr u8 kThunksBytes[] = {
     // including the terminating NUL. Classic strcpy shape on
     // 16-bit elements — no length check, caller's responsibility
     // to size the destination.
-    0x48, 0x89, 0xC8, // 0x4F0 mov rax, rcx    ; save dst for return
-    0x45, 0x31, 0xC0, // 0x4F3 xor r8d, r8d    ; i = 0
+    0x48, 0x89, 0xC8, // 0x4F0 mov rax, rcx ; save dst for return
+    0x45, 0x31, 0xC0, // 0x4F3 xor r8d, r8d ; i = 0
     // .loop:
     0x46, 0x0F, 0xB7, 0x0C, 0x42, // 0x4F6 movzx r9d, word [rdx+r8*2]
     0x66, 0x46, 0x89, 0x0C, 0x41, // 0x4FB mov word [rcx+r8*2], r9w
-    0x45, 0x85, 0xC9,             // 0x500 test r9d, r9d   ; copied NUL?
+    0x45, 0x85, 0xC9,             // 0x500 test r9d, r9d ; copied NUL?
     0x74, 0x05,                   // 0x503 je .done (+5)
     0x49, 0xFF, 0xC0,             // 0x505 inc r8
     0xEB, 0xEC,                   // 0x508 jmp .loop (-0x14)
     // .done:
     0xC3, // 0x50A ret
 
-    // === Batch 30: system-info probes ==========================
+    // === system-info probes ==========================
 
     // --- IsWow64Process (offset 0x50B, 17 bytes) --------------
     // Win32: BOOL IsWow64Process(HANDLE rcx, PBOOL rdx).
@@ -1768,12 +1767,12 @@ constexpr u8 kThunksBytes[] = {
     // Win32: BOOL GetVersionExW(POSVERSIONINFOW rcx).
     //
     // Layout of OSVERSIONINFOW:
-    //   0x00  dwOSVersionInfoSize  <- caller-set; we leave alone
-    //   0x04  dwMajorVersion       <- we write 10 (Win10)
-    //   0x08  dwMinorVersion       <- we write 0
-    //   0x0C  dwBuildNumber        <- we write 19041 (Win10 2004)
-    //   0x10  dwPlatformId         <- we write 2 (VER_PLATFORM_WIN32_NT)
-    //   0x14  szCSDVersion[128]    <- leave caller's zero-init
+    // 0x00 dwOSVersionInfoSize <- caller-set; we leave alone
+    // 0x04 dwMajorVersion <- we write 10 (Win10)
+    // 0x08 dwMinorVersion <- we write 0
+    // 0x0C dwBuildNumber <- we write 19041 (Win10 2004)
+    // 0x10 dwPlatformId <- we write 2 (VER_PLATFORM_WIN32_NT)
+    // 0x14 szCSDVersion[128] <- leave caller's zero-init
     //
     // 19041 = 0x4A61; fits in imm32 signed. Picked to look like a
     // recent-ish Windows 10 build so feature-gate probes see a
@@ -1782,15 +1781,15 @@ constexpr u8 kThunksBytes[] = {
     // GetVersionEx (ANSI) aliases to this — the first five DWORDs
     // are layout-identical; only szCSDVersion differs (ANSI vs
     // wide), which we don't touch.
-    0xC7, 0x41, 0x04, 0x0A, 0x00, 0x00, 0x00, // 0x51C mov dword [rcx+0x04], 10    (major)
-    0xC7, 0x41, 0x08, 0x00, 0x00, 0x00, 0x00, // 0x523 mov dword [rcx+0x08], 0     (minor)
+    0xC7, 0x41, 0x04, 0x0A, 0x00, 0x00, 0x00, // 0x51C mov dword [rcx+0x04], 10 (major)
+    0xC7, 0x41, 0x08, 0x00, 0x00, 0x00, 0x00, // 0x523 mov dword [rcx+0x08], 0 (minor)
     0xC7, 0x41, 0x0C, 0x61, 0x4A, 0x00, 0x00, // 0x52A mov dword [rcx+0x0C], 19041 (build)
-    0xC7, 0x41, 0x10, 0x02, 0x00, 0x00, 0x00, // 0x531 mov dword [rcx+0x10], 2     (NT platform)
+    0xC7, 0x41, 0x10, 0x02, 0x00, 0x00, 0x00, // 0x531 mov dword [rcx+0x10], 2 (NT platform)
     0xB8, 0x01, 0x00, 0x00, 0x00,             // 0x538 mov eax, 1 (BOOL TRUE)
     0xC3,                                     // 0x53D ret
 
-    // === Batch 31: ANSI-byte string helpers ====================
-    // Symmetric to batch 29 but for single-byte LPCSTR inputs.
+    // === ANSI-byte string helpers ====================
+    // Symmetric to but for single-byte LPCSTR inputs.
 
     // --- lstrlenA (offset 0x53E, 14 bytes) --------------------
     // Win32: int lstrlenA(LPCSTR rcx). Byte-strlen.
@@ -1828,8 +1827,8 @@ constexpr u8 kThunksBytes[] = {
     // --- lstrcpyA (offset 0x571, 26 bytes) --------------------
     // Win32: LPSTR lstrcpyA(LPSTR rcx, LPCSTR rdx). Byte-strcpy,
     // returns dst (rcx).
-    0x48, 0x89, 0xC8, // 0x571 mov rax, rcx   ; save dst for return
-    0x45, 0x31, 0xC0, // 0x574 xor r8d, r8d   ; i = 0
+    0x48, 0x89, 0xC8, // 0x571 mov rax, rcx ; save dst for return
+    0x45, 0x31, 0xC0, // 0x574 xor r8d, r8d ; i = 0
     // .loop:
     0x46, 0x0F, 0xB6, 0x0C, 0x02, // 0x577 movzx r9d, byte [rdx+r8]
     0x46, 0x88, 0x0C, 0x01,       // 0x57C mov byte [rcx+r8], r9b
@@ -1840,7 +1839,7 @@ constexpr u8 kThunksBytes[] = {
     // .done:
     0xC3, // 0x58A ret
 
-    // === Batch 32: path-query stubs ============================
+    // === path-query stubs ============================
     //
     // All v0 paths report a single fixed "X:\" — the minimum
     // legal Windows drive-qualified absolute path. Consumers
@@ -1848,12 +1847,12 @@ constexpr u8 kThunksBytes[] = {
     // System32?") see a non-NULL, well-formed path and don't
     // crash; consumers that actually try to open the returned
     // path get a normal not-found result from our VFS. Future
-    // slices can plumb the real PE path through when spawn
+    // a follow-up can plumb the real PE path through when spawn
     // actually knows it.
     //
     // Encoding: "X:\" is 3 wide chars + NUL = 8 bytes = 2 dwords:
-    //   dword 0 : 0x003A 0x0058 (': X' little-endian) = 0x003A0058
-    //   dword 1 : 0x0000 0x005C ('\0 \\' LE)          = 0x0000005C
+    // dword 0 : 0x003A 0x0058 (': X' little-endian) = 0x003A0058
+    // dword 1 : 0x0000 0x005C ('\0 \\' LE) = 0x0000005C
 
     // --- GetModuleFileNameW (offset 0x58B, 24 bytes) ----------
     // Win32: DWORD GetModuleFileNameW(HMODULE rcx, LPWSTR rdx, DWORD r8).
@@ -1881,7 +1880,7 @@ constexpr u8 kThunksBytes[] = {
     0xB8, 0x03, 0x00, 0x00, 0x00,             // 0x5BC mov eax, 3
     0xC3,                                     // 0x5C1 ret
 
-    // === Batch 33: encoding converters =========================
+    // === encoding converters =========================
     //
     // v0 treats both directions as simple byte-extend / byte-
     // truncate. That's correct for 7-bit ASCII under any of the
@@ -1891,32 +1890,32 @@ constexpr u8 kThunksBytes[] = {
     // documented as v0 limitation.
     //
     // Stack-arg layout at entry, after `push rdi; push rsi`:
-    //   [rsp+0]   saved rsi
-    //   [rsp+8]   saved rdi
-    //   [rsp+16]  return address
-    //   [rsp+24]  shadow arg 1 (rcx spill slot)
-    //   [rsp+32]  shadow arg 2 (rdx spill slot)
-    //   [rsp+40]  shadow arg 3 (r8 spill slot)
-    //   [rsp+48]  shadow arg 4 (r9 spill slot)
-    //   [rsp+56]  arg 5 = output pointer
-    //   [rsp+64]  arg 6 = output capacity
+    // [rsp+0] saved rsi
+    // [rsp+8] saved rdi
+    // [rsp+16] return address
+    // [rsp+24] shadow arg 1 (rcx spill slot)
+    // [rsp+32] shadow arg 2 (rdx spill slot)
+    // [rsp+40] shadow arg 3 (r8 spill slot)
+    // [rsp+48] shadow arg 4 (r9 spill slot)
+    // [rsp+56] arg 5 = output pointer
+    // [rsp+64] arg 6 = output capacity
 
     // --- MultiByteToWideChar (offset 0x5C2, 49 bytes) ---------
     // Win32: int MultiByteToWideChar(UINT CP=rcx, DWORD flags=rdx,
-    //          LPCCH lpMultiByteStr=r8, int cbMultiByte=r9,
-    //          LPWSTR dst=[rsp+0x28], int cchWideChar=[rsp+0x30]).
+    // LPCCH lpMultiByteStr=r8, int cbMultiByte=r9,
+    // LPWSTR dst=[rsp+0x28], int cchWideChar=[rsp+0x30]).
     //
     // v0 routes each source byte through `movzx r16, byte` and
     // stores as wide char. Copies min(cbMultiByte, cchWideChar)
     // chars, returns count written. If cchWideChar == 0, returns
     // cbMultiByte (size-query mode). Caller is expected to pass
-    // an actual byte count (not -1); future slice handles the
+    // an actual byte count (not -1); a follow-up handles the
     // NUL-terminated variant.
     0x57,                         // 0x5C2 push rdi
     0x56,                         // 0x5C3 push rsi
-    0x48, 0x8B, 0x7C, 0x24, 0x38, // 0x5C4 mov rdi, [rsp+0x38]   ; dst (LPWSTR)
-    0x8B, 0x4C, 0x24, 0x40,       // 0x5C9 mov ecx, [rsp+0x40]   ; cchWideChar (dst_cap)
-    0x44, 0x89, 0xCE,             // 0x5CD mov esi, r9d          ; cbMultiByte (src_len)
+    0x48, 0x8B, 0x7C, 0x24, 0x38, // 0x5C4 mov rdi, [rsp+0x38] ; dst (LPWSTR)
+    0x8B, 0x4C, 0x24, 0x40,       // 0x5C9 mov ecx, [rsp+0x40] ; cchWideChar (dst_cap)
+    0x44, 0x89, 0xCE,             // 0x5CD mov esi, r9d ; cbMultiByte (src_len)
     0x85, 0xC9,                   // 0x5D0 test ecx, ecx
     0x74, 0x1A,                   // 0x5D2 jz .size_query (+0x1A)
     0x31, 0xC0,                   // 0x5D4 xor eax, eax
@@ -1941,18 +1940,18 @@ constexpr u8 kThunksBytes[] = {
 
     // --- WideCharToMultiByte (offset 0x5F3, 48 bytes) ---------
     // Win32: int WideCharToMultiByte(UINT CP=rcx, DWORD flags=rdx,
-    //          LPCWCH lpWideCharStr=r8, int cchWideChar=r9,
-    //          LPSTR dst=[rsp+0x28], int cbMultiByte=[rsp+0x30],
-    //          LPCCH lpDefaultChar=[rsp+0x38]  (ignored),
-    //          LPBOOL lpUsedDefaultChar=[rsp+0x40]  (ignored)).
+    // LPCWCH lpWideCharStr=r8, int cchWideChar=r9,
+    // LPSTR dst=[rsp+0x28], int cbMultiByte=[rsp+0x30],
+    // LPCCH lpDefaultChar=[rsp+0x38] (ignored),
+    // LPBOOL lpUsedDefaultChar=[rsp+0x40] (ignored)).
     //
     // v0 truncates each wide char to its low byte — correct for
     // ASCII-range content, loses high-plane data otherwise.
     0x57,                         // 0x5F3 push rdi
     0x56,                         // 0x5F4 push rsi
-    0x48, 0x8B, 0x7C, 0x24, 0x38, // 0x5F5 mov rdi, [rsp+0x38]   ; dst (LPSTR)
-    0x8B, 0x4C, 0x24, 0x40,       // 0x5FA mov ecx, [rsp+0x40]   ; cbMultiByte (dst_cap)
-    0x44, 0x89, 0xCE,             // 0x5FE mov esi, r9d          ; cchWideChar (src_len)
+    0x48, 0x8B, 0x7C, 0x24, 0x38, // 0x5F5 mov rdi, [rsp+0x38] ; dst (LPSTR)
+    0x8B, 0x4C, 0x24, 0x40,       // 0x5FA mov ecx, [rsp+0x40] ; cbMultiByte (dst_cap)
+    0x44, 0x89, 0xCE,             // 0x5FE mov esi, r9d ; cchWideChar (src_len)
     0x85, 0xC9,                   // 0x601 test ecx, ecx
     0x74, 0x19,                   // 0x603 jz .size_query (+0x19)
     0x31, 0xC0,                   // 0x605 xor eax, eax
@@ -1975,7 +1974,7 @@ constexpr u8 kThunksBytes[] = {
     0x5F,       // 0x621 pop rdi
     0xC3,       // 0x622 ret
 
-    // === Batch 34: identity queries ============================
+    // === identity queries ============================
     //
     // Fixed-string probes for "who am I on this machine?"
     // queries. Real Windows writes the NetBIOS name / SAM user.
@@ -1986,9 +1985,9 @@ constexpr u8 kThunksBytes[] = {
 
     // --- GetUserNameW (offset 0x623, 47 bytes) ----------------
     // Win32: BOOL GetUserNameW(LPWSTR rcx, LPDWORD rdx).
-    //   If *rdx >= 5, write L"user\0", *rdx = 5, return TRUE.
-    //   Else, *rdx = 5 (required), return FALSE.
-    0x8B, 0x02,                               // 0x623 mov eax, [rdx]  (capacity in wide chars)
+    // If *rdx >= 5, write L"user\0", *rdx = 5, return TRUE.
+    // Else, *rdx = 5 (required), return FALSE.
+    0x8B, 0x02,                               // 0x623 mov eax, [rdx] (capacity in wide chars)
     0x83, 0xF8, 0x05,                         // 0x625 cmp eax, 5
     0x72, 0x1F,                               // 0x628 jb .small (+0x1F = 31)
     0xC7, 0x01, 0x75, 0x00, 0x73, 0x00,       // 0x62A mov dword [rcx], 0x00730075 (L"us")
@@ -2004,8 +2003,8 @@ constexpr u8 kThunksBytes[] = {
 
     // --- GetComputerNameW (offset 0x652, 61 bytes) ------------
     // Win32: BOOL GetComputerNameW(LPWSTR rcx, LPDWORD rdx).
-    //   Writes L"DuetOS\0" (9 wide chars incl NUL) if buffer
-    //   has room. Same size-convention as GetUserNameW.
+    // Writes L"DuetOS\0" (9 wide chars incl NUL) if buffer
+    // has room. Same size-convention as GetUserNameW.
     0x8B, 0x02,                               // 0x652 mov eax, [rdx]
     0x83, 0xF8, 0x09,                         // 0x654 cmp eax, 9
     0x72, 0x2D,                               // 0x657 jb .small (+0x2D = 45)
@@ -2022,7 +2021,7 @@ constexpr u8 kThunksBytes[] = {
     0x31, 0xC0,                         // 0x68C xor eax, eax
     0xC3,                               // 0x68E ret
 
-    // === Batch 35: system-directory queries ====================
+    // === system-directory queries ====================
     //
     // GetWindowsDirectoryW / GetSystemDirectoryW have buffer-
     // first signatures (rcx = buffer, rdx = size). We report
@@ -2049,7 +2048,7 @@ constexpr u8 kThunksBytes[] = {
     0xB8, 0x04, 0x00, 0x00, 0x00, // 0x6A7 mov eax, 4 (required incl NUL)
     0xC3,                         // 0x6AC ret
 
-    // === Batch 36: misc — drives + error mode + format msg ====
+    // === misc — drives + error mode + format msg ====
 
     // --- GetLogicalDrives (offset 0x6AD, 6 bytes) -------------
     // Win32: DWORD GetLogicalDrives(void). Returns a bitmap of
@@ -2065,7 +2064,7 @@ constexpr u8 kThunksBytes[] = {
     0xB8, 0x03, 0x00, 0x00, 0x00, // 0x6B3 mov eax, 3 (DRIVE_FIXED)
     0xC3,                         // 0x6B8 ret
 
-    // === Batch 37: registry + file-attributes constant stubs ==
+    // === registry + file-attributes constant stubs ==
 
     // --- return-two (offset 0x6B9, 6 bytes) -------------------
     // Win32: typed as LSTATUS / LONG. Reg* APIs return
@@ -2090,7 +2089,7 @@ constexpr u8 kThunksBytes[] = {
     0xB8, 0x20, 0x00, 0x00, 0x00, // 0x6C5 mov eax, 0x20 (NORMAL_PRIORITY_CLASS)
     0xC3,                         // 0x6CA ret
 
-    // === Batch 40: Interlocked* atomic operations ==============
+    // === Interlocked* atomic operations ==============
     //
     // Real hardware LOCK-prefix instructions — these are correct
     // atomic semantics, not no-ops. v0 is effectively single-CPU
@@ -2102,25 +2101,25 @@ constexpr u8 kThunksBytes[] = {
     // Win32: LONG InterlockedIncrement(LONG volatile *rcx).
     // Returns NEW value. Implementation: xadd eax=1, then inc.
     0xB8, 0x01, 0x00, 0x00, 0x00, // 0x6CB mov eax, 1
-    0xF0, 0x0F, 0xC1, 0x01,       // 0x6D0 lock xadd [rcx], eax    ; eax=old, [rcx]+=1
-    0xFF, 0xC0,                   // 0x6D4 inc eax                  ; eax = new
+    0xF0, 0x0F, 0xC1, 0x01,       // 0x6D0 lock xadd [rcx], eax ; eax=old, [rcx]+=1
+    0xFF, 0xC0,                   // 0x6D4 inc eax ; eax = new
     0xC3,                         // 0x6D6 ret
 
     // --- InterlockedDecrement (offset 0x6D7, 12 bytes) --------
     // Win32: LONG InterlockedDecrement(LONG volatile *rcx).
     0xB8, 0xFF, 0xFF, 0xFF, 0xFF, // 0x6D7 mov eax, -1
-    0xF0, 0x0F, 0xC1, 0x01,       // 0x6DC lock xadd [rcx], eax    ; eax=old, [rcx]+=-1
-    0xFF, 0xC8,                   // 0x6E0 dec eax                  ; eax = new
+    0xF0, 0x0F, 0xC1, 0x01,       // 0x6DC lock xadd [rcx], eax ; eax=old, [rcx]+=-1
+    0xFF, 0xC8,                   // 0x6E0 dec eax ; eax = new
     0xC3,                         // 0x6E2 ret
 
     // --- InterlockedCompareExchange (offset 0x6E3, 8 bytes) ---
     // Win32: LONG InterlockedCompareExchange(LONG* rcx,
-    //          LONG exchange=rdx, LONG compare=r8).
+    // LONG exchange=rdx, LONG compare=r8).
     // If *rcx == compare: *rcx = exchange; return compare.
     // Else: return *rcx (unchanged). LOCK CMPXCHG does this
     // atomically; compare arg is loaded into EAX so CMPXCHG
     // compares against it, and on success stores EDX.
-    0x44, 0x89, 0xC0,       // 0x6E3 mov eax, r8d          ; compare -> EAX
+    0x44, 0x89, 0xC0,       // 0x6E3 mov eax, r8d ; compare -> EAX
     0xF0, 0x0F, 0xB1, 0x11, // 0x6E6 lock cmpxchg [rcx], edx
     0xC3,                   // 0x6EA ret
 
@@ -2128,20 +2127,20 @@ constexpr u8 kThunksBytes[] = {
     // Win32: LONG InterlockedExchange(LONG* rcx, LONG val=rdx).
     // Atomic XCHG reg/mem is implicitly locked — no LOCK prefix
     // needed. Returns the OLD value.
-    0x89, 0xD0, // 0x6EB mov eax, edx        ; val -> EAX
-    0x87, 0x01, // 0x6ED xchg [rcx], eax     ; EAX = old, [rcx] = val
+    0x89, 0xD0, // 0x6EB mov eax, edx ; val -> EAX
+    0x87, 0x01, // 0x6ED xchg [rcx], eax ; EAX = old, [rcx] = val
     0xC3,       // 0x6EF ret
 
     // --- InterlockedExchangeAdd (offset 0x6F0, 7 bytes) -------
     // Win32: LONG InterlockedExchangeAdd(LONG* rcx, LONG add=rdx).
     // Returns the OLD value; *rcx += add.
-    0x89, 0xD0,             // 0x6F0 mov eax, edx        ; add -> EAX
+    0x89, 0xD0,             // 0x6F0 mov eax, edx ; add -> EAX
     0xF0, 0x0F, 0xC1, 0x01, // 0x6F2 lock xadd [rcx], eax ; EAX = old, [rcx] += add
     0xC3,                   // 0x6F6 ret
 
-    // === Batch 41: 64-bit Interlocked atomics ==================
+    // === 64-bit Interlocked atomics ==================
     //
-    // 64-bit counterparts to batch 40. REX.W prefix (0x48) makes
+    // 64-bit counterparts to . REX.W prefix (0x48) makes
     // the ops 64-bit wide. `mov rax, -1` uses the full 7-byte
     // sign-extended form — `mov eax, -1` would zero-extend to
     // 0x00000000FFFFFFFF which is NOT -1 in 64-bit.
@@ -2164,21 +2163,21 @@ constexpr u8 kThunksBytes[] = {
 
     // --- InterlockedCompareExchange64 (offset 0x715, 9 bytes) -
     // Win32: LONGLONG InterlockedCompareExchange64(LONGLONG* rcx,
-    //          LONGLONG exchange=rdx, LONGLONG compare=r8).
-    0x4C, 0x89, 0xC0,             // 0x715 mov rax, r8        ; compare -> RAX
+    // LONGLONG exchange=rdx, LONGLONG compare=r8).
+    0x4C, 0x89, 0xC0,             // 0x715 mov rax, r8 ; compare -> RAX
     0xF0, 0x48, 0x0F, 0xB1, 0x11, // 0x718 lock cmpxchg [rcx], rdx
     0xC3,                         // 0x71D ret
 
     // --- InterlockedExchange64 (offset 0x71E, 7 bytes) --------
     // Win32: LONGLONG InterlockedExchange64(LONGLONG* rcx,
-    //          LONGLONG val=rdx). XCHG with memory implicitly LOCKs.
+    // LONGLONG val=rdx). XCHG with memory implicitly LOCKs.
     0x48, 0x89, 0xD0, // 0x71E mov rax, rdx
     0x48, 0x87, 0x01, // 0x721 xchg [rcx], rax
     0xC3,             // 0x724 ret
 
     // --- InterlockedExchangeAdd64 (offset 0x725, 9 bytes) -----
     // Win32: LONGLONG InterlockedExchangeAdd64(LONGLONG* rcx,
-    //          LONGLONG add=rdx). Returns OLD value.
+    // LONGLONG add=rdx). Returns OLD value.
     0x48, 0x89, 0xD0,             // 0x725 mov rax, rdx
     0xF0, 0x48, 0x0F, 0xC1, 0x01, // 0x728 lock xadd [rcx], rax
     0xC3,                         // 0x72D ret
@@ -2192,26 +2191,26 @@ constexpr u8 kThunksBytes[] = {
     0xB8, 0xBB, 0x00, 0x00, 0xC0, // 0x72E mov eax, 0xC00000BB
     0xC3,                         // 0x733 ret
 
-    // === Batch 45: real event handles ==========================
+    // === real event handles ==========================
     //
-    // Replaces the slice-10 kOffReturnOne CreateEventW no-op
+    // Replaces the kOffReturnOne CreateEventW no-op
     // with genuine per-process event state. Infrastructure
-    // parallels batch 26's mutex layer. Events have no owner,
+    // parallels 's mutex layer. Events have no owner,
     // no recursion — just a signaled flag + waitqueue. Manual-
     // vs. auto-reset differ only in whether SetEvent wakes all
     // or one, and whether a successful wait clears the signal.
 
     // --- CreateEventW (offset 0x734, 18 bytes) ----------------
     // Win32: HANDLE CreateEventW(LPSECURITY_ATTRIBUTES rcx,
-    //          BOOL bManualReset=rdx, BOOL bInitialState=r8,
-    //          LPCWSTR lpName=r9).
+    // BOOL bManualReset=rdx, BOOL bInitialState=r8,
+    // LPCWSTR lpName=r9).
     // Attrs + name ignored in v0. Forwards bManualReset/
     // bInitialState to SYS_EVENT_CREATE.
     0x57,                         // 0x734 push rdi
     0x56,                         // 0x735 push rsi
-    0x48, 0x89, 0xD7,             // 0x736 mov rdi, rdx       ; bManualReset
-    0x4C, 0x89, 0xC6,             // 0x739 mov rsi, r8        ; bInitialState
-    0xB8, 0x1E, 0x00, 0x00, 0x00, // 0x73C mov eax, 30        ; SYS_EVENT_CREATE
+    0x48, 0x89, 0xD7,             // 0x736 mov rdi, rdx ; bManualReset
+    0x4C, 0x89, 0xC6,             // 0x739 mov rsi, r8 ; bInitialState
+    0xB8, 0x1E, 0x00, 0x00, 0x00, // 0x73C mov eax, 30 ; SYS_EVENT_CREATE
     0xCD, 0x80,                   // 0x741 int 0x80
     0x5E,                         // 0x743 pop rsi
     0x5F,                         // 0x744 pop rdi
@@ -2222,9 +2221,9 @@ constexpr u8 kThunksBytes[] = {
     // Returns TRUE (SYS_EVENT_SET succeeds for any valid handle).
     0x57,                         // 0x746 push rdi
     0x48, 0x89, 0xCF,             // 0x747 mov rdi, rcx
-    0xB8, 0x1F, 0x00, 0x00, 0x00, // 0x74A mov eax, 31        ; SYS_EVENT_SET
+    0xB8, 0x1F, 0x00, 0x00, 0x00, // 0x74A mov eax, 31 ; SYS_EVENT_SET
     0xCD, 0x80,                   // 0x74F int 0x80
-    0xB0, 0x01,                   // 0x751 mov al, 1          ; BOOL TRUE
+    0xB0, 0x01,                   // 0x751 mov al, 1 ; BOOL TRUE
     0x5F,                         // 0x753 pop rdi
     0xC3,                         // 0x754 ret
 
@@ -2232,21 +2231,21 @@ constexpr u8 kThunksBytes[] = {
     // Win32: BOOL ResetEvent(HANDLE rcx).
     0x57,                         // 0x755 push rdi
     0x48, 0x89, 0xCF,             // 0x756 mov rdi, rcx
-    0xB8, 0x20, 0x00, 0x00, 0x00, // 0x759 mov eax, 32        ; SYS_EVENT_RESET
+    0xB8, 0x20, 0x00, 0x00, 0x00, // 0x759 mov eax, 32 ; SYS_EVENT_RESET
     0xCD, 0x80,                   // 0x75E int 0x80
     0xB0, 0x01,                   // 0x760 mov al, 1
     0x5F,                         // 0x762 pop rdi
     0xC3,                         // 0x763 ret
 
     // --- WaitForSingleObject v2 (offset 0x764, 66 bytes) ------
-    // Upgraded version of batch 26's WaitForSingleObject that
+    // Upgraded version of 's WaitForSingleObject that
     // dispatches THREE ranges:
-    //   * Mutex range (0x200..0x207): SYS_MUTEX_WAIT.
-    //   * Event range (0x300..0x307): SYS_EVENT_WAIT.
-    //   * Anything else: pseudo-signal (return WAIT_OBJECT_0),
-    //     preserving slice-10's "unknown handle is already
-    //     signaled" contract for batch 10's CreateEventW no-op
-    //     return value (= 1, outside both ranges).
+    // * Mutex range (0x200..0x207): SYS_MUTEX_WAIT.
+    // * Event range (0x300..0x307): SYS_EVENT_WAIT.
+    // * Anything else: pseudo-signal (return WAIT_OBJECT_0),
+    // preserving 's "unknown handle is already
+    // signaled" contract for 's CreateEventW no-op
+    // return value (= 1, outside both ranges).
     //
     // RDI / RSI saved + restored — Win32 ABI callee-saved.
     0x57,                               // 0x764 push rdi
@@ -2280,10 +2279,10 @@ constexpr u8 kThunksBytes[] = {
     0x5F,                         // 0x7A4 pop rdi
     0xC3,                         // 0x7A5 ret
 
-    // === Batch 46: real TLS (persistent slot storage) ==========
+    // === real TLS (persistent slot storage) ==========
     //
     // Per-process 64-slot table with u64 storage per slot + a
-    // 64-bit bitmap for in-use tracking. Supersedes batch 39's
+    // 64-bit bitmap for in-use tracking. Supersedes 's
     // alias-to-kOffReturnMinus1 TlsAlloc which always claimed
     // TLS_OUT_OF_INDEXES. Single-threaded process in v0 means
     // "thread-local" == "process-local" — but the CRT uses TLS
@@ -2332,9 +2331,9 @@ constexpr u8 kThunksBytes[] = {
     0x5F,                         // 0x7E5 pop rdi
     0xC3,                         // 0x7E6 ret
 
-    // === Batch 47: ntdll virtual-memory primitives =============
+    // === ntdll virtual-memory primitives =============
     //
-    // Until this batch, the import resolver mapped both
+    // Previously the import resolver mapped both
     // `ntdll!NtAllocateVirtualMemory` and `NtFreeVirtualMemory`
     // to `kOffReturnStatusNotImpl` — a 6-byte stub returning
     // `STATUS_NOT_IMPLEMENTED`. PE binaries that bypass kernel32
@@ -2350,12 +2349,12 @@ constexpr u8 kThunksBytes[] = {
 
     // --- NtAllocateVirtualMemory (offset 0x7E7, 36 bytes) ----
     // Win64: NTSTATUS NtAllocateVirtualMemory(
-    //          HANDLE       rcx,        // ProcessHandle (ignored — must be self)
-    //          PVOID*       rdx,        // BaseAddress (in/out)
-    //          ULONG_PTR    r8,         // ZeroBits (ignored)
-    //          PSIZE_T      r9,         // RegionSize (in/out)
-    //          ULONG        [rsp+0x28], // AllocationType (ignored — always commit)
-    //          ULONG        [rsp+0x30]) // Protect (ignored — RW+NX)
+    // HANDLE rcx, // ProcessHandle (ignored — must be self)
+    // PVOID* rdx, // BaseAddress (in/out)
+    // ULONG_PTR r8, // ZeroBits (ignored)
+    // PSIZE_T r9, // RegionSize (in/out)
+    // ULONG [rsp+0x28], // AllocationType (ignored — always commit)
+    // ULONG [rsp+0x30]) // Protect (ignored — RW+NX)
     //
     // Stub semantics: read *RegionSize, hand it to SYS_VMAP,
     // write the returned VA to *BaseAddress, leave *RegionSize
@@ -2363,14 +2362,14 @@ constexpr u8 kThunksBytes[] = {
     // requested size). Returns STATUS_SUCCESS or STATUS_NO_MEMORY.
     0x57,                         // 0x7E7 push rdi
     0x56,                         // 0x7E8 push rsi
-    0x49, 0x8B, 0x39,             // 0x7E9 mov rdi, [r9]      ; size from *RegionSize
-    0xB8, 0x1C, 0x00, 0x00, 0x00, // 0x7EC mov eax, 28        ; SYS_VMAP
+    0x49, 0x8B, 0x39,             // 0x7E9 mov rdi, [r9] ; size from *RegionSize
+    0xB8, 0x1C, 0x00, 0x00, 0x00, // 0x7EC mov eax, 28 ; SYS_VMAP
     0xCD, 0x80,                   // 0x7F1 int 0x80
-    0x48, 0x85, 0xC0,             // 0x7F3 test rax, rax      ; 0 = OOM
+    0x48, 0x85, 0xC0,             // 0x7F3 test rax, rax ; 0 = OOM
     0x74, 0x0B,                   // 0x7F6 jz .fail (+11)
-    0x48, 0x89, 0x02,             // 0x7F8 mov [rdx], rax     ; *BaseAddress = VA
-    0x49, 0x89, 0x39,             // 0x7FB mov [r9], rdi      ; echo size back
-    0x31, 0xC0,                   // 0x7FE xor eax, eax       ; STATUS_SUCCESS
+    0x48, 0x89, 0x02,             // 0x7F8 mov [rdx], rax ; *BaseAddress = VA
+    0x49, 0x89, 0x39,             // 0x7FB mov [r9], rdi ; echo size back
+    0x31, 0xC0,                   // 0x7FE xor eax, eax ; STATUS_SUCCESS
     0x5E,                         // 0x800 pop rsi
     0x5F,                         // 0x801 pop rdi
     0xC3,                         // 0x802 ret
@@ -2382,23 +2381,23 @@ constexpr u8 kThunksBytes[] = {
 
     // --- NtFreeVirtualMemory (offset 0x80B, 33 bytes) --------
     // Win64: NTSTATUS NtFreeVirtualMemory(
-    //          HANDLE       rcx,    // ProcessHandle (ignored)
-    //          PVOID*       rdx,    // BaseAddress (in/out)
-    //          PSIZE_T      r8,     // RegionSize (in/out)
-    //          ULONG        r9)     // FreeType (ignored — always release)
+    // HANDLE rcx, // ProcessHandle (ignored)
+    // PVOID* rdx, // BaseAddress (in/out)
+    // PSIZE_T r8, // RegionSize (in/out)
+    // ULONG r9) // FreeType (ignored — always release)
     //
     // Stub semantics: read *BaseAddress and *RegionSize, hand
     // them to SYS_VUNMAP. Kernel returns 0 on success or non-
     // zero if the VA isn't in the per-process vmap arena.
     0x57,                         // 0x80B push rdi
     0x56,                         // 0x80C push rsi
-    0x48, 0x8B, 0x3A,             // 0x80D mov rdi, [rdx]     ; VA from *BaseAddress
-    0x49, 0x8B, 0x30,             // 0x810 mov rsi, [r8]      ; size from *RegionSize
-    0xB8, 0x1D, 0x00, 0x00, 0x00, // 0x813 mov eax, 29        ; SYS_VUNMAP
+    0x48, 0x8B, 0x3A,             // 0x80D mov rdi, [rdx] ; VA from *BaseAddress
+    0x49, 0x8B, 0x30,             // 0x810 mov rsi, [r8] ; size from *RegionSize
+    0xB8, 0x1D, 0x00, 0x00, 0x00, // 0x813 mov eax, 29 ; SYS_VUNMAP
     0xCD, 0x80,                   // 0x818 int 0x80
     0x48, 0x85, 0xC0,             // 0x81A test rax, rax
     0x75, 0x05,                   // 0x81D jnz .fail (+5)
-    0x31, 0xC0,                   // 0x81F xor eax, eax       ; STATUS_SUCCESS
+    0x31, 0xC0,                   // 0x81F xor eax, eax ; STATUS_SUCCESS
     0x5E,                         // 0x821 pop rsi
     0x5F,                         // 0x822 pop rdi
     0xC3,                         // 0x823 ret
@@ -2408,7 +2407,7 @@ constexpr u8 kThunksBytes[] = {
     0x5F,                         // 0x82A pop rdi
     0xC3,                         // 0x82B ret
 
-    // === Batch 48: SYSTEMTIME / FILETIME pointer-output APIs =====
+    // === SYSTEMTIME / FILETIME pointer-output APIs =====
     //
     // The previous commit (8a8ce9b) deliberately skipped these:
     // a `mov eax,1; ret` stub leaves a caller-allocated SYSTEMTIME
@@ -2420,16 +2419,16 @@ constexpr u8 kThunksBytes[] = {
 
     // --- GetSystemTime / GetLocalTime (offset 0x82C, 11 bytes) -----
     // Win32 ABI: void GetSystemTime(LPSYSTEMTIME=rcx).
-    //   GetLocalTime aliases to the same stub — we have no timezone
-    //   database yet, so local == UTC.
-    0x48, 0x89, 0xCF,             // 0x82C mov rdi, rcx   ; SYSTEMTIME* out
-    0xB8, 0x28, 0x00, 0x00, 0x00, // 0x82F mov eax, 40    ; SYS_GETTIME_ST
+    // GetLocalTime aliases to the same stub — we have no timezone
+    // database yet, so local == UTC.
+    0x48, 0x89, 0xCF,             // 0x82C mov rdi, rcx ; SYSTEMTIME* out
+    0xB8, 0x28, 0x00, 0x00, 0x00, // 0x82F mov eax, 40 ; SYS_GETTIME_ST
     0xCD, 0x80,                   // 0x834 int 0x80
     0xC3,                         // 0x836 ret
 
     // --- SystemTimeToFileTime (offset 0x837, 14 bytes) -----------
     // Win32 ABI: BOOL SystemTimeToFileTime(const SYSTEMTIME* = rcx,
-    //                                       LPFILETIME        = rdx).
+    // LPFILETIME = rdx).
     // Kernel returns 0 on success in rax — matches Win32 TRUE
     // (non-zero). On EFAULT or invalid input, kernel writes
     // u64(-1) which is also non-zero; the caller can't tell the
@@ -2437,20 +2436,20 @@ constexpr u8 kThunksBytes[] = {
     // always succeeds.
     0x48, 0x89, 0xCF,             // 0x837 mov rdi, rcx
     0x48, 0x89, 0xD6,             // 0x83A mov rsi, rdx
-    0xB8, 0x29, 0x00, 0x00, 0x00, // 0x83D mov eax, 41    ; SYS_ST_TO_FT
+    0xB8, 0x29, 0x00, 0x00, 0x00, // 0x83D mov eax, 41 ; SYS_ST_TO_FT
     0xCD, 0x80,                   // 0x842 int 0x80
     0xC3,                         // 0x844 ret
 
     // --- FileTimeToSystemTime (offset 0x845, 14 bytes) -----------
     // Win32 ABI: BOOL FileTimeToSystemTime(const FILETIME* = rcx,
-    //                                       LPSYSTEMTIME   = rdx).
+    // LPSYSTEMTIME = rdx).
     0x48, 0x89, 0xCF,             // 0x845 mov rdi, rcx
     0x48, 0x89, 0xD6,             // 0x848 mov rsi, rdx
-    0xB8, 0x2A, 0x00, 0x00, 0x00, // 0x84B mov eax, 42    ; SYS_FT_TO_ST
+    0xB8, 0x2A, 0x00, 0x00, 0x00, // 0x84B mov eax, 42 ; SYS_FT_TO_ST
     0xCD, 0x80,                   // 0x850 int 0x80
     0xC3,                         // 0x852 ret
 
-    // === Batch 49: real NTSTATUS-returning ntdll time/perf =========
+    // === real NTSTATUS-returning ntdll time/perf =========
     //
     // Unlike kernel32's BOOL-returning APIs, NtQuerySystemTime /
     // NtQueryPerformanceCounter return NTSTATUS (0 on success).
@@ -2460,37 +2459,37 @@ constexpr u8 kThunksBytes[] = {
     // NT ABI: NTSTATUS NtQuerySystemTime(PLARGE_INTEGER out=rcx).
     // Fill *out via SYS_GETTIME_FT and return STATUS_SUCCESS (0).
     0x48, 0x89, 0xCF,             // 0x853 mov rdi, rcx
-    0xB8, 0x11, 0x00, 0x00, 0x00, // 0x856 mov eax, 17    ; SYS_GETTIME_FT
-    0xCD, 0x80,                   // 0x85B int 0x80        ; rax = FILETIME ticks
+    0xB8, 0x11, 0x00, 0x00, 0x00, // 0x856 mov eax, 17 ; SYS_GETTIME_FT
+    0xCD, 0x80,                   // 0x85B int 0x80 ; rax = FILETIME ticks
     0x48, 0x89, 0x01,             // 0x85D mov [rcx], rax
-    0x31, 0xC0,                   // 0x860 xor eax, eax    ; STATUS_SUCCESS
+    0x31, 0xC0,                   // 0x860 xor eax, eax ; STATUS_SUCCESS
     0xC3,                         // 0x862 ret
 
     // --- NtQueryPerformanceCounter (offset 0x863, 28 bytes) ------
     // NT ABI:
-    //   NTSTATUS NtQueryPerformanceCounter(
-    //       PLARGE_INTEGER Counter=rcx, PLARGE_INTEGER Freq=rdx)
+    // NTSTATUS NtQueryPerformanceCounter(
+    // PLARGE_INTEGER Counter=rcx, PLARGE_INTEGER Freq=rdx)
     // Counter is mandatory; Frequency is optional.
     0x48, 0x89, 0xCF,                         // 0x863 mov rdi, rcx
-    0xB8, 0x12, 0x00, 0x00, 0x00,             // 0x866 mov eax, 18    ; SYS_NOW_NS
-    0xCD, 0x80,                               // 0x86B int 0x80        ; rax = ns
+    0xB8, 0x12, 0x00, 0x00, 0x00,             // 0x866 mov eax, 18 ; SYS_NOW_NS
+    0xCD, 0x80,                               // 0x86B int 0x80 ; rax = ns
     0x48, 0x89, 0x01,                         // 0x86D mov [rcx], rax
     0x48, 0x85, 0xD2,                         // 0x870 test rdx, rdx
     0x74, 0x07,                               // 0x873 jz .done
     0x48, 0xC7, 0x02, 0x00, 0xCA, 0x9A, 0x3B, // 0x875 mov qword [rdx], 1_000_000_000
     // .done:
-    0x31, 0xC0, // 0x87C xor eax, eax   ; STATUS_SUCCESS
+    0x31, 0xC0, // 0x87C xor eax, eax ; STATUS_SUCCESS
     0xC3,       // 0x87E ret
 
-    // === Batch 50: real CreateThread via SYS_THREAD_CREATE =====
+    // === real CreateThread via SYS_THREAD_CREATE =====
     //
     // Win32: HANDLE CreateThread(
-    //     LPSECURITY_ATTRIBUTES  lpThreadAttributes,  // rcx  (ignored)
-    //     SIZE_T                 dwStackSize,          // rdx  (ignored — kernel picks)
-    //     LPTHREAD_START_ROUTINE lpStartAddress,       // r8
-    //     LPVOID                 lpParameter,          // r9
-    //     DWORD                  dwCreationFlags,      // [rsp+0x28]  (ignored — always-run)
-    //     LPDWORD                lpThreadId);          // [rsp+0x30]  (optional out)
+    // LPSECURITY_ATTRIBUTES lpThreadAttributes, // rcx (ignored)
+    // SIZE_T dwStackSize, // rdx (ignored — kernel picks)
+    // LPTHREAD_START_ROUTINE lpStartAddress, // r8
+    // LPVOID lpParameter, // r9
+    // DWORD dwCreationFlags, // [rsp+0x28] (ignored — always-run)
+    // LPDWORD lpThreadId); // [rsp+0x30] (optional out)
     //
     // DuetOS: SYS_THREAD_CREATE (45) with start_va in rdi,
     // param in rsi. Returns handle or 0xFFFFFFFFFFFFFFFF on
@@ -2501,20 +2500,20 @@ constexpr u8 kThunksBytes[] = {
     // Win64 ABI: rdi + rsi are callee-saved — save/restore around
     // the syscall so callers that hold IAT slots in rdi (which
     // MSVC's code generator routinely does) survive the call.
-    // Added after syscall_stress.exe hit a latent bug from batch 50
+    // Added after syscall_stress.exe hit a latent bug
     // where rdi was clobbered and main jumped through the wrecked
     // rdi into the thread proc directly.
     0x57,                         // 0x87F push rdi
     0x56,                         // 0x880 push rsi
-    0x4C, 0x89, 0xC7,             // 0x881 mov rdi, r8          ; start
-    0x4C, 0x89, 0xCE,             // 0x884 mov rsi, r9          ; param
-    0xB8, 0x2D, 0x00, 0x00, 0x00, // 0x887 mov eax, 45          ; SYS_THREAD_CREATE
-    0xCD, 0x80,                   // 0x88C int 0x80             ; rax = handle or -1
+    0x4C, 0x89, 0xC7,             // 0x881 mov rdi, r8 ; start
+    0x4C, 0x89, 0xCE,             // 0x884 mov rsi, r9 ; param
+    0xB8, 0x2D, 0x00, 0x00, 0x00, // 0x887 mov eax, 45 ; SYS_THREAD_CREATE
+    0xCD, 0x80,                   // 0x88C int 0x80 ; rax = handle or -1
     // We pushed 16 bytes, so lpThreadId (originally at [rsp+0x30])
     // is now at [rsp+0x40].
     0x48, 0x8B, 0x4C, 0x24, 0x40, // 0x88E mov rcx, [rsp+0x40]
     0x48, 0x85, 0xC9,             // 0x893 test rcx, rcx
-    0x74, 0x02,                   // 0x896 je  +2 -> 0x89A
+    0x74, 0x02,                   // 0x896 je +2 -> 0x89A
     0x89, 0x01,                   // 0x898 mov [rcx], eax
     // Translate -1 (any high bits set) to 0 for Win32 "NULL" handle
     // semantics.
@@ -2534,21 +2533,21 @@ constexpr u8 kThunksBytes[] = {
     // copy it to EDI (SYS_EXIT's first arg) then issue SYS_EXIT(0).
     // SYS_EXIT kills just this task — the process's other threads
     // (e.g. main waiting on the event) are unaffected. Noreturn.
-    0x89, 0xC7, // 0x8A6 mov edi, eax     ; thread retcode
-    0x31, 0xC0, // 0x8A8 xor eax, eax    ; SYS_EXIT = 0
-    0xCD, 0x80, // 0x8AA int 0x80        ; noreturn
+    0x89, 0xC7, // 0x8A6 mov edi, eax ; thread retcode
+    0x31, 0xC0, // 0x8A8 xor eax, eax ; SYS_EXIT = 0
+    0xCD, 0x80, // 0x8AA int 0x80 ; noreturn
 
-    // === Batch 51 =============================================
+    // === =============================================
 
     // --- ExitThread (offset 0x8AC, 9 bytes) -------------------
-    // Win32: void ExitThread(DWORD dwExitCode).  rcx = exit code.
+    // Win32: void ExitThread(DWORD dwExitCode). rcx = exit code.
     // Maps to SYS_EXIT — kills only the calling task (just like
     // the ThreadExitTramp fallback) without disturbing the rest
     // of the process.
-    0x48, 0x89, 0xCF, // 0x8AC mov rdi, rcx       ; exit code
-    0x31, 0xC0,       // 0x8AF xor eax, eax       ; SYS_EXIT
+    0x48, 0x89, 0xCF, // 0x8AC mov rdi, rcx ; exit code
+    0x31, 0xC0,       // 0x8AF xor eax, eax ; SYS_EXIT
     0xCD, 0x80,       // 0x8B1 int 0x80
-    0x0F, 0x0B,       // 0x8B3 ud2                ; [[noreturn]]
+    0x0F, 0x0B,       // 0x8B3 ud2 ; [[noreturn]]
 
     // --- OutputDebugStringA (offset 0x8B5, 13 bytes) ----------
     // Win32: void OutputDebugStringA(LPCSTR lpOutputString).
@@ -2557,19 +2556,19 @@ constexpr u8 kThunksBytes[] = {
     // Win64 ABI: rdi is callee-saved — push/pop around the
     // syscall to preserve the caller's rdi.
     0x57,                         // 0x8B5 push rdi
-    0x48, 0x89, 0xCF,             // 0x8B6 mov rdi, rcx      ; str
-    0xB8, 0x2E, 0x00, 0x00, 0x00, // 0x8B9 mov eax, 46       ; SYS_DEBUG_PRINT
+    0x48, 0x89, 0xCF,             // 0x8B6 mov rdi, rcx ; str
+    0xB8, 0x2E, 0x00, 0x00, 0x00, // 0x8B9 mov eax, 46 ; SYS_DEBUG_PRINT
     0xCD, 0x80,                   // 0x8BE int 0x80
     0x5F,                         // 0x8C0 pop rdi
     0xC3,                         // 0x8C1 ret
 
     // --- GetProcessTimes (offset 0x8C2, 44 bytes) -------------
     // Win32:
-    //   BOOL GetProcessTimes(HANDLE hProcess,             // rcx ignored
-    //                        LPFILETIME CreationTime,     // rdx
-    //                        LPFILETIME ExitTime,         // r8
-    //                        LPFILETIME KernelTime,       // r9
-    //                        LPFILETIME UserTime);        // [rsp+0x28]
+    // BOOL GetProcessTimes(HANDLE hProcess, // rcx ignored
+    // LPFILETIME CreationTime, // rdx
+    // LPFILETIME ExitTime, // r8
+    // LPFILETIME KernelTime, // r9
+    // LPFILETIME UserTime); // [rsp+0x28]
     // Aliased by GetThreadTimes (same shape). v0 just zeros all
     // four FILETIMEs and returns BOOL TRUE — callers that only
     // want to detect "API exists" proceed cleanly, callers that
@@ -2583,16 +2582,16 @@ constexpr u8 kThunksBytes[] = {
     0x49, 0xC7, 0x01, 0x00, 0x00, 0x00, 0x00, // 0x8D0 mov qword [r9], 0
     0x48, 0x8B, 0x4C, 0x24, 0x28,             // 0x8D7 mov rcx, [rsp+0x28]
     0x48, 0x85, 0xC9,                         // 0x8DC test rcx, rcx
-    0x74, 0x07,                               // 0x8DF je +7  -> 0x8E8
+    0x74, 0x07,                               // 0x8DF je +7 -> 0x8E8
     0x48, 0xC7, 0x01, 0x00, 0x00, 0x00, 0x00, // 0x8E1 mov qword [rcx], 0
     0xB8, 0x01, 0x00, 0x00, 0x00,             // 0x8E8 mov eax, 1 (BOOL TRUE)
     0xC3,                                     // 0x8ED ret
 
     // --- GetSystemTimes (offset 0x8EE, 30 bytes) --------------
     // Win32:
-    //   BOOL GetSystemTimes(PFILETIME IdleTime,       // rcx
-    //                       PFILETIME KernelTime,     // rdx
-    //                       PFILETIME UserTime);      // r8
+    // BOOL GetSystemTimes(PFILETIME IdleTime, // rcx
+    // PFILETIME KernelTime, // rdx
+    // PFILETIME UserTime); // r8
     // v0 zeros rcx and rdx pointers when non-null, returns BOOL
     // TRUE. r8 (UserTime) is left untouched — stub-size budget,
     // and UserTime is less commonly consulted than Idle/Kernel.
@@ -2617,32 +2616,32 @@ constexpr u8 kThunksBytes[] = {
     0x48, 0x89, 0xCF,             // 0x90D mov rdi, rcx
     0xB8, 0x2F, 0x00, 0x00, 0x00, // 0x910 mov eax, 47 ; SYS_MEM_STATUS
     0xCD, 0x80,                   // 0x915 int 0x80
-    0x48, 0xFF, 0xC0,             // 0x917 inc rax     ; 0→1, -1→0
+    0x48, 0xFF, 0xC0,             // 0x917 inc rax ; 0→1, -1→0
     0x5F,                         // 0x91A pop rdi
     0xC3,                         // 0x91B ret
 
     // --- WaitForMultipleObjects (offset 0x91C, 24 bytes) ------
     // Win32:
-    //   DWORD WaitForMultipleObjects(DWORD nCount,       // rcx
-    //                                const HANDLE *,     // rdx
-    //                                BOOL bWaitAll,      // r8
-    //                                DWORD dwMs);        // r9
+    // DWORD WaitForMultipleObjects(DWORD nCount, // rcx
+    // const HANDLE *, // rdx
+    // BOOL bWaitAll, // r8
+    // DWORD dwMs); // r9
     // DuetOS: SYS_WAIT_MULTI with count=rdi, arr=rsi,
     // waitAll=rdx, timeout_ms=r10. Saves rdi+rsi across the
     // syscall (both callee-saved in Win64 ABI).
     0x57,                         // 0x91C push rdi
     0x56,                         // 0x91D push rsi
-    0x48, 0x89, 0xCF,             // 0x91E mov rdi, rcx  ; count
-    0x48, 0x89, 0xD6,             // 0x921 mov rsi, rdx  ; handle array
-    0x4C, 0x89, 0xC2,             // 0x924 mov rdx, r8   ; waitAll
-    0x4D, 0x89, 0xCA,             // 0x927 mov r10, r9   ; timeout
-    0xB8, 0x30, 0x00, 0x00, 0x00, // 0x92A mov eax, 48   ; SYS_WAIT_MULTI
+    0x48, 0x89, 0xCF,             // 0x91E mov rdi, rcx ; count
+    0x48, 0x89, 0xD6,             // 0x921 mov rsi, rdx ; handle array
+    0x4C, 0x89, 0xC2,             // 0x924 mov rdx, r8 ; waitAll
+    0x4D, 0x89, 0xCA,             // 0x927 mov r10, r9 ; timeout
+    0xB8, 0x30, 0x00, 0x00, 0x00, // 0x92A mov eax, 48 ; SYS_WAIT_MULTI
     0xCD, 0x80,                   // 0x92F int 0x80
     0x5E,                         // 0x931 pop rsi
     0x5F,                         // 0x932 pop rdi
     0xC3,                         // 0x933 ret
 
-    // === Batch 52 =============================================
+    // === =============================================
 
     // --- GetSystemInfo (offset 0x934, 13 bytes) ---------------
     // Win32: void GetSystemInfo(LPSYSTEM_INFO lpSystemInfo).
@@ -2669,9 +2668,9 @@ constexpr u8 kThunksBytes[] = {
 
     // --- FormatMessageA (offset 0x94E, 32 bytes) --------------
     // Win32:
-    //   DWORD FormatMessageA(DWORD flags, LPCVOID src, DWORD msgId,
-    //                        DWORD lang, LPSTR buf, DWORD nSize,
-    //                        va_list *args);
+    // DWORD FormatMessageA(DWORD flags, LPCVOID src, DWORD msgId,
+    // DWORD lang, LPSTR buf, DWORD nSize,
+    // va_list *args);
     // v0: writes "Error.\n\0" (7 chars + NUL) into lpBuffer if
     // non-NULL, returns 7. If lpBuffer is NULL, returns 0.
     // This lets callers that print the buffer see a stable
@@ -2679,7 +2678,7 @@ constexpr u8 kThunksBytes[] = {
     // gate on "non-zero return means message decoded" take the
     // happy path. No flag handling — a follow-up can add
     // FORMAT_MESSAGE_ALLOCATE_BUFFER + hex-formatting of msgId.
-    0x48, 0x8B, 0x44, 0x24, 0x28, // 0x94E mov rax, [rsp+0x28]   ; lpBuffer
+    0x48, 0x8B, 0x44, 0x24, 0x28, // 0x94E mov rax, [rsp+0x28] ; lpBuffer
     0x48, 0x85, 0xC0,             // 0x953 test rax, rax
     0x74, 0x13,                   // 0x956 je +19 -> 0x96B (null_buf)
     // Write "Erro" (0x6F727245) then "r.\n\0" (0x000A2E72) at [rax+4]
@@ -2693,14 +2692,14 @@ constexpr u8 kThunksBytes[] = {
 
     // --- GetConsoleScreenBufferInfo (offset 0x96E, 54 bytes) --
     // Win32:
-    //   BOOL GetConsoleScreenBufferInfo(HANDLE hOut,
-    //                                    PCONSOLE_SCREEN_BUFFER_INFO p);
+    // BOOL GetConsoleScreenBufferInfo(HANDLE hOut,
+    // PCONSOLE_SCREEN_BUFFER_INFO p);
     // rdx = buffer. 22-byte layout:
-    //   0x00 COORD dwSize (80, 25)
-    //   0x04 COORD dwCursorPosition (0, 0)
-    //   0x08 WORD  wAttributes (0x07 white-on-black)
-    //   0x0A SMALL_RECT srWindow (L=0, T=0, R=79, B=24)
-    //   0x12 COORD dwMaximumWindowSize (80, 25)
+    // 0x00 COORD dwSize (80, 25)
+    // 0x04 COORD dwCursorPosition (0, 0)
+    // 0x08 WORD wAttributes (0x07 white-on-black)
+    // 0x0A SMALL_RECT srWindow (L=0, T=0, R=79, B=24)
+    // 0x12 COORD dwMaximumWindowSize (80, 25)
     // Returns TRUE unless rdx is NULL.
     0x48, 0x85, 0xD2, // 0x96E test rdx, rdx
     0x74, 0x2E,       // 0x971 je +46 -> 0x9A1 (fail)
@@ -2721,12 +2720,12 @@ constexpr u8 kThunksBytes[] = {
     0x31, 0xC0,                               // 0x9A1 xor eax, eax
     0xC3,                                     // 0x9A3 ret
 
-    // === Batch 53 =============================================
+    // === =============================================
 
     // --- RaiseException (offset 0x9A4, 9 bytes) ---------------
     // Win32:
-    //   void RaiseException(DWORD dwExceptionCode, DWORD flags,
-    //                       DWORD nArgs, const ULONG_PTR *args);
+    // void RaiseException(DWORD dwExceptionCode, DWORD flags,
+    // DWORD nArgs, const ULONG_PTR *args);
     // v0 has no SEH, so any RaiseException is fatal — route to
     // SYS_EXIT with rcx (exception code) as the exit code.
     0x48, 0x89, 0xCF, // 0x9A4 mov rdi, rcx
@@ -2743,22 +2742,22 @@ constexpr u8 kThunksBytes[] = {
     0x48, 0x89, 0xC8, // 0x9AD mov rax, rcx
     0xC3,             // 0x9B0 ret
 
-    // === Batch 54 =============================================
+    // === =============================================
 
     // --- CreateSemaphoreW (offset 0x9B1, 27 bytes) ------------
     // Win32:
-    //   HANDLE CreateSemaphoreW(LPSECURITY_ATTRIBUTES, // rcx (ignored)
-    //                            LONG lInitial,        // rdx
-    //                            LONG lMaximum,        // r8
-    //                            LPCWSTR lpName);      // r9 (ignored)
+    // HANDLE CreateSemaphoreW(LPSECURITY_ATTRIBUTES, // rcx (ignored)
+    // LONG lInitial, // rdx
+    // LONG lMaximum, // r8
+    // LPCWSTR lpName); // r9 (ignored)
     // Maps to SYS_SEM_CREATE(initial, max). Translates kernel
     // -1 to Win32 NULL handle. CreateSemaphoreA + CreateSemaphoreExW
     // are wired to the same stub.
     0x57,                         // 0x9B1 push rdi
     0x56,                         // 0x9B2 push rsi
-    0x48, 0x89, 0xD7,             // 0x9B3 mov rdi, rdx     ; initial
-    0x4C, 0x89, 0xC6,             // 0x9B6 mov rsi, r8      ; max
-    0xB8, 0x33, 0x00, 0x00, 0x00, // 0x9B9 mov eax, 51      ; SYS_SEM_CREATE
+    0x48, 0x89, 0xD7,             // 0x9B3 mov rdi, rdx ; initial
+    0x4C, 0x89, 0xC6,             // 0x9B6 mov rsi, r8 ; max
+    0xB8, 0x33, 0x00, 0x00, 0x00, // 0x9B9 mov eax, 51 ; SYS_SEM_CREATE
     0xCD, 0x80,                   // 0x9BE int 0x80
     0x48, 0x83, 0xF8, 0xFF,       // 0x9C0 cmp rax, -1
     0x75, 0x03,                   // 0x9C4 jne +3 -> 0x9C9 (pop rsi)
@@ -2770,22 +2769,22 @@ constexpr u8 kThunksBytes[] = {
 
     // --- ReleaseSemaphore (offset 0x9CC, 29 bytes) ------------
     // Win32:
-    //   BOOL ReleaseSemaphore(HANDLE hSem,           // rcx
-    //                          LONG lReleaseCount,    // rdx
-    //                          LPLONG lpPreviousCount // r8 (optional)
-    //                          );
+    // BOOL ReleaseSemaphore(HANDLE hSem, // rcx
+    // LONG lReleaseCount, // rdx
+    // LPLONG lpPreviousCount // r8 (optional)
+    // );
     // int 0x80 preserves r8 (isr_common pushes/pops all GPRs)
     // so we can still read it after the syscall without a save.
     0x57,                         // 0x9CC push rdi
     0x56,                         // 0x9CD push rsi
     0x48, 0x89, 0xCF,             // 0x9CE mov rdi, rcx
     0x48, 0x89, 0xD6,             // 0x9D1 mov rsi, rdx
-    0xB8, 0x34, 0x00, 0x00, 0x00, // 0x9D4 mov eax, 52      ; SYS_SEM_RELEASE
+    0xB8, 0x34, 0x00, 0x00, 0x00, // 0x9D4 mov eax, 52 ; SYS_SEM_RELEASE
     0xCD, 0x80,                   // 0x9D9 int 0x80
-    0x4D, 0x85, 0xC0,             // 0x9DB test r8, r8      ; lpPreviousCount != NULL?
+    0x4D, 0x85, 0xC0,             // 0x9DB test r8, r8 ; lpPreviousCount != NULL?
     0x74, 0x03,                   // 0x9DE je +3 -> 0x9E3 (inc rax)
     0x41, 0x89, 0x00,             // 0x9E0 mov [r8], eax
-    0x48, 0xFF, 0xC0,             // 0x9E3 inc rax          ; -1 -> 0 FALSE; prev -> prev+1 TRUE
+    0x48, 0xFF, 0xC0,             // 0x9E3 inc rax ; -1 -> 0 FALSE; prev -> prev+1 TRUE
     0x5E,                         // 0x9E6 pop rsi
     0x5F,                         // 0x9E7 pop rdi
     0xC3,                         // 0x9E8 ret
@@ -2807,7 +2806,7 @@ constexpr u8 kThunksBytes[] = {
     0x48, 0x83, 0xF8, 0x08,             // 0xA0C cmp rax, 8
     0x72, 0x25,                         // 0xA10 jb .sem (+37 -> 0xA37)
     // .pseudo path (handle not in any known range)
-    0x31, 0xC0, // 0xA12 xor eax, eax   ; WAIT_OBJECT_0 for unknown
+    0x31, 0xC0, // 0xA12 xor eax, eax ; WAIT_OBJECT_0 for unknown
     0x5E,       // 0xA14 pop rsi
     0x5F,       // 0xA15 pop rdi
     0xC3,       // 0xA16 ret
@@ -2836,7 +2835,7 @@ constexpr u8 kThunksBytes[] = {
     0x5F,                         // 0xA45 pop rdi
     0xC3,                         // 0xA46 ret
 
-    // === Batch 57 =============================================
+    // === =============================================
 
     // --- WaitForSingleObject v4 (offset 0xA47, 122 bytes) -----
     // v3 + a fourth range (0x400..0x407, thread handles) that
@@ -2900,7 +2899,7 @@ constexpr u8 kThunksBytes[] = {
     0x5F,                         // 0xABF pop rdi
     0xC3,                         // 0xAC0 ret
 
-    // === Batch 58 =============================================
+    // === =============================================
 
     // --- GetStartupInfo{W,A} (offset 0xAC1, 24 bytes) ---------
     // Win32: void GetStartupInfo{A,W}(LPSTARTUPINFO{A,W} p).
@@ -2922,18 +2921,18 @@ constexpr u8 kThunksBytes[] = {
     0x48, 0x89, 0xCF,                   // 0xAC2 mov rdi, rcx
     0x51,                               // 0xAC5 push rcx
     0x31, 0xC0,                         // 0xAC6 xor eax, eax
-    0xB9, 0x0D, 0x00, 0x00, 0x00,       // 0xAC8 mov ecx, 13  ; 104/8 qwords
+    0xB9, 0x0D, 0x00, 0x00, 0x00,       // 0xAC8 mov ecx, 13 ; 104/8 qwords
     0xF3, 0x48, 0xAB,                   // 0xACD rep stosq
     0x59,                               // 0xAD0 pop rcx
     0xC7, 0x01, 0x68, 0x00, 0x00, 0x00, // 0xAD1 mov dword [rcx], 104 (cb)
     0x5F,                               // 0xAD7 pop rdi
     0xC3,                               // 0xAD8 ret
 
-    // === Batch 59 =============================================
+    // === =============================================
 
     // --- GetExitCodeThread real (offset 0xAD9, 20 bytes) ------
     // Win32: BOOL GetExitCodeThread(HANDLE=rcx, LPDWORD Exit=rdx).
-    // Supersedes the batch-10 stub at kOffGetExitCodeThread which
+    // Supersedes the stub at kOffGetExitCodeThread which
     // hard-coded STILL_ACTIVE. Routes to SYS_THREAD_EXIT_CODE
     // which reads Process.win32_threads[slot].exit_code — kept
     // at STILL_ACTIVE (0x103) until the task's SYS_EXIT path
@@ -2953,19 +2952,19 @@ constexpr u8 kThunksBytes[] = {
     0x5F,                         // 0xAEB pop rdi
     0xC3,                         // 0xAEC ret
 
-    // === Batch 60 =============================================
+    // === =============================================
 
     // --- InterlockedAnd (offset 0xAED, 16 bytes) --------------
     // Win32: LONG InterlockedAnd(LONG volatile *Target=rcx,
-    //                             LONG Value=edx).
+    // LONG Value=edx).
     // Returns the ORIGINAL value of *Target. Standard CAS loop:
-    //   do { old = *t; new = old & v; } while (!cas(t, old, new));
+    // do { old = *t; new = old & v; } while (!cas(t, old, new));
     // LOCK CMPXCHG is serialised across CPUs and acts as a full
     // barrier — correct under both SMP and single-CPU with a
     // preemptive timer interrupt.
-    0x8B, 0x01,                   // 0xAED mov eax, [rcx]       ; old
-    0x41, 0x89, 0xC0,             // 0xAEF mov r8d, eax         ; new = old
-    0x41, 0x21, 0xD0,             // 0xAF2 and r8d, edx         ; new &= value
+    0x8B, 0x01,                   // 0xAED mov eax, [rcx] ; old
+    0x41, 0x89, 0xC0,             // 0xAEF mov r8d, eax ; new = old
+    0x41, 0x21, 0xD0,             // 0xAF2 and r8d, edx ; new &= value
     0xF0, 0x44, 0x0F, 0xB1, 0x01, // 0xAF5 lock cmpxchg [rcx], r8d
     0x75, 0xF1,                   // 0xAFA jne -15 -> 0xAED (retry)
     0xC3,                         // 0xAFC ret
@@ -3011,42 +3010,42 @@ constexpr u8 kThunksBytes[] = {
     0x75, 0xF0,                   // 0xB4D jne -16 -> 0xB3F
     0xC3,                         // 0xB4F ret
 
-    // === Batch 61 ==============================================
+    // === ==============================================
 
     // --- EnterCriticalSection (offset 0xB50, 50 bytes) --------
     // Win32: void EnterCriticalSection(LPCRITICAL_SECTION = rcx).
     //
     // CRITICAL_SECTION layout we impose on the caller's 40-byte
     // struct (InitializeCriticalSection already zero-fills it):
-    //   [rcx+0x00] u64 owner_tid    (0 = unheld)
-    //   [rcx+0x08] u64 recursion
-    //   [rcx+0x10..0x28]            unused
+    // [rcx+0x00] u64 owner_tid (0 = unheld)
+    // [rcx+0x08] u64 recursion
+    // [rcx+0x10..0x28] unused
     //
     // Algorithm:
-    //   1. rbx <- rcx   (rbx is callee-saved in Win64; we need a
-    //                   register that survives int 0x80).
-    //   2. r8  <- our task id via SYS_GETPID.
-    //   3. lock cmpxchg: if owner == 0, owner := r8. ZF=1 -> took.
-    //   4. If not, check owner == r8 (recursive acquire).
-    //   5. Otherwise SYS_YIELD and retry.
+    // 1. rbx <- rcx (rbx is callee-saved in Win64; we need a
+    // register that survives int 0x80).
+    // 2. r8 <- our task id via SYS_GETPID.
+    // 3. lock cmpxchg: if owner == 0, owner := r8. ZF=1 -> took.
+    // 4. If not, check owner == r8 (recursive acquire).
+    // 5. Otherwise SYS_YIELD and retry.
     //
     // Win64 ABI: rbx and rsi/rdi are callee-saved; the int 0x80
     // syscall path preserves all but rax. We push/pop rbx around
     // the body.
     0x53,             // 0xB50 push rbx
-    0x48, 0x89, 0xCB, // 0xB51 mov rbx, rcx            ; save lpcs
+    0x48, 0x89, 0xCB, // 0xB51 mov rbx, rcx ; save lpcs
     0x6A, 0x01,       // 0xB54 push 1
-    0x58,             // 0xB56 pop rax                 ; rax = SYS_GETPID
-    0xCD, 0x80,       // 0xB57 int 0x80                ; rax = TID
-    0x49, 0x89, 0xC0, // 0xB59 mov r8, rax             ; r8 = our TID
+    0x58,             // 0xB56 pop rax ; rax = SYS_GETPID
+    0xCD, 0x80,       // 0xB57 int 0x80 ; rax = TID
+    0x49, 0x89, 0xC0, // 0xB59 mov r8, rax ; r8 = our TID
     // .retry (abs 0xB5C):
-    0x31, 0xC0,                   // 0xB5C xor eax, eax            ; expected = 0
+    0x31, 0xC0,                   // 0xB5C xor eax, eax ; expected = 0
     0xF0, 0x4C, 0x0F, 0xB1, 0x03, // 0xB5E lock cmpxchg [rbx], r8
     0x74, 0x0C,                   // 0xB63 je .took (+0x0C -> 0xB71)
-    0x4C, 0x39, 0x03,             // 0xB65 cmp [rbx], r8           ; owner == us?
+    0x4C, 0x39, 0x03,             // 0xB65 cmp [rbx], r8 ; owner == us?
     0x74, 0x11,                   // 0xB68 je .recursive (+0x11 -> 0xB7B)
     0x6A, 0x03,                   // 0xB6A push 3
-    0x58,                         // 0xB6C pop rax                 ; rax = SYS_YIELD
+    0x58,                         // 0xB6C pop rax ; rax = SYS_YIELD
     0xCD, 0x80,                   // 0xB6D int 0x80
     0xEB, 0xEB,                   // 0xB6F jmp .retry (-0x15 -> 0xB5C)
     // .took (abs 0xB71): first acquire — recursion := 1.
@@ -3070,7 +3069,7 @@ constexpr u8 kThunksBytes[] = {
     // .done (abs 0xB8E):
     0xC3, // 0xB8E ret
 
-    // === Batch 62 ==============================================
+    // === ==============================================
 
     // --- InitializeSRWLock (offset 0xB8F, 6 bytes) ------------
     // Win32: void InitializeSRWLock(PSRWLOCK = rcx). Zero the
@@ -3090,15 +3089,15 @@ constexpr u8 kThunksBytes[] = {
     0x53,             // 0xB95 push rbx
     0x48, 0x89, 0xCB, // 0xB96 mov rbx, rcx
     0x6A, 0x01,       // 0xB99 push 1
-    0x58,             // 0xB9B pop rax                 ; SYS_GETPID
-    0xCD, 0x80,       // 0xB9C int 0x80                ; rax = TID
-    0x49, 0x89, 0xC0, // 0xB9E mov r8, rax             ; r8 = our TID
+    0x58,             // 0xB9B pop rax ; SYS_GETPID
+    0xCD, 0x80,       // 0xB9C int 0x80 ; rax = TID
+    0x49, 0x89, 0xC0, // 0xB9E mov r8, rax ; r8 = our TID
     // .retry (abs 0xBA1):
-    0x31, 0xC0,                   // 0xBA1 xor eax, eax            ; expected = 0
+    0x31, 0xC0,                   // 0xBA1 xor eax, eax ; expected = 0
     0xF0, 0x4C, 0x0F, 0xB1, 0x03, // 0xBA3 lock cmpxchg [rbx], r8
     0x74, 0x07,                   // 0xBA8 je .done (+7 -> 0xBB1)
     0x6A, 0x03,                   // 0xBAA push 3
-    0x58,                         // 0xBAC pop rax                 ; SYS_YIELD
+    0x58,                         // 0xBAC pop rax ; SYS_YIELD
     0xCD, 0x80,                   // 0xBAD int 0x80
     0xEB, 0xF0,                   // 0xBAF jmp .retry (-16 -> 0xBA1)
     // .done (abs 0xBB1):
@@ -3121,16 +3120,16 @@ constexpr u8 kThunksBytes[] = {
     // rax; the existing binding to kOffReturnOne (always 1) was
     // dishonest and masked real contention.
     0x6A, 0x01,                   // 0xBB9 push 1
-    0x58,                         // 0xBBB pop rax                 ; SYS_GETPID
-    0xCD, 0x80,                   // 0xBBC int 0x80                ; rax = TID
-    0x49, 0x89, 0xC0,             // 0xBBE mov r8, rax             ; r8 = our TID
-    0x31, 0xC0,                   // 0xBC1 xor eax, eax            ; expected = 0
+    0x58,                         // 0xBBB pop rax ; SYS_GETPID
+    0xCD, 0x80,                   // 0xBBC int 0x80 ; rax = TID
+    0x49, 0x89, 0xC0,             // 0xBBE mov r8, rax ; r8 = our TID
+    0x31, 0xC0,                   // 0xBC1 xor eax, eax ; expected = 0
     0xF0, 0x4C, 0x0F, 0xB1, 0x01, // 0xBC3 lock cmpxchg [rcx], r8
-    0x0F, 0x94, 0xC0,             // 0xBC8 setz al                 ; al = ZF
-    0x0F, 0xB6, 0xC0,             // 0xBCB movzx eax, al           ; eax = BOOL
+    0x0F, 0x94, 0xC0,             // 0xBC8 setz al ; al = ZF
+    0x0F, 0xB6, 0xC0,             // 0xBCB movzx eax, al ; eax = BOOL
     0xC3,                         // 0xBCE ret
 
-    // === Batch 63 ==============================================
+    // === ==============================================
 
     // --- RtlTryEnterCriticalSection (offset 0xBCF, 56 bytes) --
     // Win32: BOOL TryEnterCriticalSection(LPCRITICAL_SECTION = rcx).
@@ -3141,15 +3140,15 @@ constexpr u8 kThunksBytes[] = {
     0x53,                         // 0xBCF push rbx
     0x48, 0x89, 0xCB,             // 0xBD0 mov rbx, rcx
     0x6A, 0x01,                   // 0xBD3 push 1
-    0x58,                         // 0xBD5 pop rax                 ; SYS_GETPID
-    0xCD, 0x80,                   // 0xBD6 int 0x80                ; rax = TID
-    0x49, 0x89, 0xC0,             // 0xBD8 mov r8, rax             ; r8 = TID
-    0x31, 0xC0,                   // 0xBDB xor eax, eax            ; expected = 0
+    0x58,                         // 0xBD5 pop rax ; SYS_GETPID
+    0xCD, 0x80,                   // 0xBD6 int 0x80 ; rax = TID
+    0x49, 0x89, 0xC0,             // 0xBD8 mov r8, rax ; r8 = TID
+    0x31, 0xC0,                   // 0xBDB xor eax, eax ; expected = 0
     0xF0, 0x4C, 0x0F, 0xB1, 0x03, // 0xBDD lock cmpxchg [rbx], r8
     0x74, 0x09,                   // 0xBE2 je .took (+9 -> 0xBED)
     0x4C, 0x39, 0x03,             // 0xBE4 cmp [rbx], r8
     0x74, 0x13,                   // 0xBE7 je .recursive (+0x13 -> 0xBFC)
-    0x31, 0xC0,                   // 0xBE9 xor eax, eax            ; not-taken: return 0
+    0x31, 0xC0,                   // 0xBE9 xor eax, eax ; not-taken: return 0
     0x5B,                         // 0xBEB pop rbx
     0xC3,                         // 0xBEC ret
     // .took (abs 0xBED):
@@ -3163,11 +3162,11 @@ constexpr u8 kThunksBytes[] = {
     0x5B,                         // 0xC05 pop rbx
     0xC3,                         // 0xC06 ret
 
-    // === Batch 64 ==============================================
+    // === ==============================================
 
     // --- SetUnhandledExceptionFilter (offset 0xC07, 12 bytes) -
     // Win32: LPTOP_LEVEL_EXCEPTION_FILTER SetUnhandledExceptionFilter(
-    //          LPTOP_LEVEL_EXCEPTION_FILTER newFilter = rcx);
+    // LPTOP_LEVEL_EXCEPTION_FILTER newFilter = rcx);
     // Returns the previous filter. xchg on a memory operand is
     // implicitly `lock`ed on x86, so this is a single atomic swap:
     // caller's rcx lands in the proc-env slot; the previous value
@@ -3177,7 +3176,7 @@ constexpr u8 kThunksBytes[] = {
     // zero-extends to rax — saves 5 bytes vs `mov rax, imm64`.
     0xB8, 0x00, 0x06, 0x00, 0x65, // 0xC07 mov eax, 0x65000600 ; &proc_env.unhandled
     0x48, 0x87, 0x08,             // 0xC0C xchg qword [rax], rcx
-    0x48, 0x89, 0xC8,             // 0xC0F mov rax, rcx          ; return old
+    0x48, 0x89, 0xC8,             // 0xC0F mov rax, rcx ; return old
     0xC3,                         // 0xC12 ret
 
     // --- UnhandledExceptionFilter (offset 0xC13, 21 bytes) ----
@@ -3190,27 +3189,27 @@ constexpr u8 kThunksBytes[] = {
     // caller (CRT's _seh_filter_exe or similar) then proceeds
     // to terminate the process via the standard SEH path.
     0xB8, 0x00, 0x06, 0x00, 0x65, // 0xC13 mov eax, 0x65000600
-    0x48, 0x8B, 0x00,             // 0xC18 mov rax, [rax]        ; load filter
+    0x48, 0x8B, 0x00,             // 0xC18 mov rax, [rax] ; load filter
     0x48, 0x85, 0xC0,             // 0xC1B test rax, rax
     0x74, 0x02,                   // 0xC1E jz .default (+2 -> 0xC22)
-    0xFF, 0xE0,                   // 0xC20 jmp rax              ; tail-call filter
+    0xFF, 0xE0,                   // 0xC20 jmp rax ; tail-call filter
     // .default (abs 0xC22):
-    0xB8, 0x01, 0x00, 0x00, 0x00, // 0xC22 mov eax, 1           ; EXCEPTION_EXECUTE_HANDLER
+    0xB8, 0x01, 0x00, 0x00, 0x00, // 0xC22 mov eax, 1 ; EXCEPTION_EXECUTE_HANDLER
     0xC3,                         // 0xC27 ret
 
-    // === Batch 65 ==============================================
+    // === ==============================================
 
     // --- InitOnceExecuteOnce (offset 0xC28, 87 bytes) ---------
     // Win32: BOOL InitOnceExecuteOnce(
-    //          PINIT_ONCE InitOnce = rcx,
-    //          PINIT_ONCE_FN InitFn = rdx,
-    //          PVOID Parameter = r8,
-    //          LPVOID *Context = r9);
+    // PINIT_ONCE InitOnce = rcx,
+    // PINIT_ONCE_FN InitFn = rdx,
+    // PVOID Parameter = r8,
+    // LPVOID *Context = r9);
     //
     // INIT_ONCE is an 8-byte slot we interpret as:
-    //   0 = untouched
-    //   1 = initialiser running
-    //   2 = done
+    // 0 = untouched
+    // 1 = initialiser running
+    // 2 = done
     //
     // Single atomic CAS 0->1 picks exactly one thread as the
     // initialiser. Losers spin-yield on the slot until it reaches
@@ -3228,36 +3227,36 @@ constexpr u8 kThunksBytes[] = {
     // test uses it.
     0x53,                         // 0xC28 push rbx
     0x57,                         // 0xC29 push rdi
-    0x48, 0x89, 0xCB,             // 0xC2A mov rbx, rcx          ; rbx = InitOnce
-    0x48, 0x89, 0xD7,             // 0xC2D mov rdi, rdx          ; rdi = InitFn
-    0x31, 0xC0,                   // 0xC30 xor eax, eax          ; expected = 0
-    0xBA, 0x01, 0x00, 0x00, 0x00, // 0xC32 mov edx, 1            ; new = 1
+    0x48, 0x89, 0xCB,             // 0xC2A mov rbx, rcx ; rbx = InitOnce
+    0x48, 0x89, 0xD7,             // 0xC2D mov rdi, rdx ; rdi = InitFn
+    0x31, 0xC0,                   // 0xC30 xor eax, eax ; expected = 0
+    0xBA, 0x01, 0x00, 0x00, 0x00, // 0xC32 mov edx, 1 ; new = 1
     0xF0, 0x48, 0x0F, 0xB1, 0x13, // 0xC37 lock cmpxchg [rbx], rdx
     0x75, 0x29,                   // 0xC3C jnz .wait (+0x29 -> 0xC67)
     // We won the CAS.
-    0x48, 0x85, 0xFF,       // 0xC3E test rdi, rdi        ; null InitFn?
+    0x48, 0x85, 0xFF,       // 0xC3E test rdi, rdi ; null InitFn?
     0x74, 0x15,             // 0xC41 jz .null (+0x15 -> 0xC58)
-    0x48, 0x89, 0xD9,       // 0xC43 mov rcx, rbx         ; arg1 = InitOnce
-    0x4C, 0x89, 0xC2,       // 0xC46 mov rdx, r8          ; arg2 = Parameter
-    0x4D, 0x89, 0xC8,       // 0xC49 mov r8, r9           ; arg3 = Context
-    0x48, 0x83, 0xEC, 0x20, // 0xC4C sub rsp, 32          ; shadow space
-    0xFF, 0xD7,             // 0xC50 call rdi             ; InitFn(...)
+    0x48, 0x89, 0xD9,       // 0xC43 mov rcx, rbx ; arg1 = InitOnce
+    0x4C, 0x89, 0xC2,       // 0xC46 mov rdx, r8 ; arg2 = Parameter
+    0x4D, 0x89, 0xC8,       // 0xC49 mov r8, r9 ; arg3 = Context
+    0x48, 0x83, 0xEC, 0x20, // 0xC4C sub rsp, 32 ; shadow space
+    0xFF, 0xD7,             // 0xC50 call rdi ; InitFn(...)
     0x48, 0x83, 0xC4, 0x20, // 0xC52 add rsp, 32
     0xEB, 0x05,             // 0xC56 jmp .finish (+5 -> 0xC5D)
     // .null (abs 0xC58): skipped InitFn — return TRUE.
     0xB8, 0x01, 0x00, 0x00, 0x00, // 0xC58 mov eax, 1
     // .finish (abs 0xC5D):
-    0x48, 0xC7, 0x03, 0x02, 0x00, 0x00, 0x00, // 0xC5D mov qword [rbx], 2   ; done
+    0x48, 0xC7, 0x03, 0x02, 0x00, 0x00, 0x00, // 0xC5D mov qword [rbx], 2 ; done
     0x5F,                                     // 0xC64 pop rdi
     0x5B,                                     // 0xC65 pop rbx
-    0xC3,                                     // 0xC66 ret                  ; eax = call result or 1
+    0xC3,                                     // 0xC66 ret ; eax = call result or 1
     // .wait (abs 0xC67): CAS lost; slot is 1 or 2. Spin-yield
     // until it reaches 2 (done).
     0x48, 0x8B, 0x03,       // 0xC67 mov rax, [rbx]
     0x48, 0x83, 0xF8, 0x02, // 0xC6A cmp rax, 2
     0x74, 0x07,             // 0xC6E je .wait_done (+7 -> 0xC77)
     0x6A, 0x03,             // 0xC70 push 3
-    0x58,                   // 0xC72 pop rax                ; SYS_YIELD
+    0x58,                   // 0xC72 pop rax ; SYS_YIELD
     0xCD, 0x80,             // 0xC73 int 0x80
     0xEB, 0xF0,             // 0xC75 jmp .wait (-0x10 -> 0xC67)
     // .wait_done (abs 0xC77): the initialiser finished. Return 1
@@ -3268,7 +3267,7 @@ constexpr u8 kThunksBytes[] = {
     0x5B,                         // 0xC7D pop rbx
     0xC3,                         // 0xC7E ret
 
-    // === Stage-2 slice 4: real GetProcAddress =====================
+    // === real GetProcAddress =====================
 
     // --- GetProcAddress (offset 0xC7F, 18 bytes) ------------------
     // Win32: FARPROC GetProcAddress(HMODULE hModule=rcx, LPCSTR name=rdx).
@@ -3278,9 +3277,9 @@ constexpr u8 kThunksBytes[] = {
     // Win32 x64 ABI; save/restore across the syscall.
     0x57,                         // 0xC7F push rdi
     0x56,                         // 0xC80 push rsi
-    0x48, 0x89, 0xCF,             // 0xC81 mov rdi, rcx     ; hModule
-    0x48, 0x89, 0xD6,             // 0xC84 mov rsi, rdx     ; name ptr
-    0xB8, 0x39, 0x00, 0x00, 0x00, // 0xC87 mov eax, 57      ; SYS_DLL_PROC_ADDRESS
+    0x48, 0x89, 0xCF,             // 0xC81 mov rdi, rcx ; hModule
+    0x48, 0x89, 0xD6,             // 0xC84 mov rsi, rdx ; name ptr
+    0xB8, 0x39, 0x00, 0x00, 0x00, // 0xC87 mov eax, 57 ; SYS_DLL_PROC_ADDRESS
     0xCD, 0x80,                   // 0xC8C int 0x80
     0x5E,                         // 0xC8E pop rsi
     0x5F,                         // 0xC8F pop rdi
@@ -3290,20 +3289,20 @@ constexpr u8 kThunksBytes[] = {
 
     // --- D3D11CreateDevice (offset 0xC91, 13 bytes) --------------
     // rax = HRESULT E_FAIL (returned by the syscall). Kind=1.
-    0xBF, 0x01, 0x00, 0x00, 0x00, // 0xC91 mov edi, 1       ; kind = D3D11
-    0xB8, 0x65, 0x00, 0x00, 0x00, // 0xC96 mov eax, 101     ; SYS_GFX_D3D_STUB
+    0xBF, 0x01, 0x00, 0x00, 0x00, // 0xC91 mov edi, 1 ; kind = D3D11
+    0xB8, 0x65, 0x00, 0x00, 0x00, // 0xC96 mov eax, 101 ; SYS_GFX_D3D_STUB
     0xCD, 0x80,                   // 0xC9B int 0x80
     0xC3,                         // 0xC9D ret
 
     // --- D3D12CreateDevice (offset 0xC9E, 13 bytes) --------------
-    0xBF, 0x02, 0x00, 0x00, 0x00, // 0xC9E mov edi, 2       ; kind = D3D12
-    0xB8, 0x65, 0x00, 0x00, 0x00, // 0xCA3 mov eax, 101     ; SYS_GFX_D3D_STUB
+    0xBF, 0x02, 0x00, 0x00, 0x00, // 0xC9E mov edi, 2 ; kind = D3D12
+    0xB8, 0x65, 0x00, 0x00, 0x00, // 0xCA3 mov eax, 101 ; SYS_GFX_D3D_STUB
     0xCD, 0x80,                   // 0xCA8 int 0x80
     0xC3,                         // 0xCAA ret
 
     // --- CreateDXGIFactory (offset 0xCAB, 13 bytes) --------------
-    0xBF, 0x03, 0x00, 0x00, 0x00, // 0xCAB mov edi, 3       ; kind = DXGI
-    0xB8, 0x65, 0x00, 0x00, 0x00, // 0xCB0 mov eax, 101     ; SYS_GFX_D3D_STUB
+    0xBF, 0x03, 0x00, 0x00, 0x00, // 0xCAB mov edi, 3 ; kind = DXGI
+    0xB8, 0x65, 0x00, 0x00, 0x00, // 0xCB0 mov eax, 101 ; SYS_GFX_D3D_STUB
     0xCD, 0x80,                   // 0xCB5 int 0x80
     0xC3,                         // 0xCB7 ret
 
@@ -3313,17 +3312,17 @@ constexpr u8 kThunksBytes[] = {
     // Win32: HDC BeginPaint(HWND hwnd=rcx, LPPAINTSTRUCT lpPaint=rdx).
     // DuetOS: SYS_WIN_BEGIN_PAINT (103) with rdi=hwnd, rsi=ps ptr.
     // Kernel fills the 72-B PAINTSTRUCT + validates dirty.
-    0x48, 0x89, 0xCF,             // 0xCB8 mov rdi, rcx     ; hwnd
-    0x48, 0x89, 0xD6,             // 0xCBB mov rsi, rdx     ; PAINTSTRUCT*
-    0xB8, 0x67, 0x00, 0x00, 0x00, // 0xCBE mov eax, 103     ; SYS_WIN_BEGIN_PAINT
+    0x48, 0x89, 0xCF,             // 0xCB8 mov rdi, rcx ; hwnd
+    0x48, 0x89, 0xD6,             // 0xCBB mov rsi, rdx ; PAINTSTRUCT*
+    0xB8, 0x67, 0x00, 0x00, 0x00, // 0xCBE mov eax, 103 ; SYS_WIN_BEGIN_PAINT
     0xCD, 0x80,                   // 0xCC3 int 0x80
     0xC3,                         // 0xCC5 ret
 
     // --- EndPaint (offset 0xCC6, 11 bytes) -----------------------
     // Win32: BOOL EndPaint(HWND=rcx, const PAINTSTRUCT*=rdx).
     // DuetOS: SYS_WIN_END_PAINT (104). No-op + returns 1.
-    0x48, 0x89, 0xCF,             // 0xCC6 mov rdi, rcx     ; hwnd
-    0xB8, 0x68, 0x00, 0x00, 0x00, // 0xCC9 mov eax, 104     ; SYS_WIN_END_PAINT
+    0x48, 0x89, 0xCF,             // 0xCC6 mov rdi, rcx ; hwnd
+    0xB8, 0x68, 0x00, 0x00, 0x00, // 0xCC9 mov eax, 104 ; SYS_WIN_END_PAINT
     0xCD, 0x80,                   // 0xCCE int 0x80
     0xC3,                         // 0xCD0 ret
 
@@ -3331,9 +3330,9 @@ constexpr u8 kThunksBytes[] = {
     // Win32: BOOL InvalidateRect(HWND=rcx, RECT*=rdx, BOOL bErase=r8).
     // DuetOS: SYS_WIN_INVALIDATE (87). lpRect is ignored in v1 —
     // the whole client repaints on every compose.
-    0x48, 0x89, 0xCF,             // 0xCD1 mov rdi, rcx     ; hwnd
-    0x4C, 0x89, 0xC6,             // 0xCD4 mov rsi, r8      ; bErase
-    0xB8, 0x57, 0x00, 0x00, 0x00, // 0xCD7 mov eax, 87      ; SYS_WIN_INVALIDATE
+    0x48, 0x89, 0xCF,             // 0xCD1 mov rdi, rcx ; hwnd
+    0x4C, 0x89, 0xC6,             // 0xCD4 mov rsi, r8 ; bErase
+    0xB8, 0x57, 0x00, 0x00, 0x00, // 0xCD7 mov eax, 87 ; SYS_WIN_INVALIDATE
     0xCD, 0x80,                   // 0xCDC int 0x80
     0xC3,                         // 0xCDE ret
 
@@ -3341,9 +3340,9 @@ constexpr u8 kThunksBytes[] = {
     // Win32: BOOL UpdateWindow(HWND=rcx). Posts WM_PAINT if dirty.
     // DuetOS: SYS_WIN_INVALIDATE (87) with bErase=0 — same drain
     // path as InvalidateRect.
-    0x48, 0x89, 0xCF,             // 0xCDF mov rdi, rcx     ; hwnd
-    0x31, 0xF6,                   // 0xCE2 xor esi, esi     ; bErase = 0
-    0xB8, 0x57, 0x00, 0x00, 0x00, // 0xCE4 mov eax, 87      ; SYS_WIN_INVALIDATE
+    0x48, 0x89, 0xCF,             // 0xCDF mov rdi, rcx ; hwnd
+    0x31, 0xF6,                   // 0xCE2 xor esi, esi ; bErase = 0
+    0xB8, 0x57, 0x00, 0x00, 0x00, // 0xCE4 mov eax, 87 ; SYS_WIN_INVALIDATE
     0xCD, 0x80,                   // 0xCE9 int 0x80
     0xC3,                         // 0xCEB ret
 
@@ -3351,7 +3350,7 @@ constexpr u8 kThunksBytes[] = {
     // Win32: HDC GetDC(HWND=rcx). We alias HDC to HWND — the only
     // GDI entry points we route through syscalls take the hwnd
     // back, so a pass-through return is semantically correct.
-    0x48, 0x89, 0xC8, // 0xCEC mov rax, rcx     ; HDC = HWND
+    0x48, 0x89, 0xC8, // 0xCEC mov rax, rcx ; HDC = HWND
     0xC3,             // 0xCEF ret
 
     // --- ReleaseDC (offset 0xCF0, 6 bytes) -----------------------
@@ -3364,16 +3363,16 @@ constexpr u8 kThunksBytes[] = {
     // Win32: int FillRect(HDC hdc=rcx, const RECT*=rdx, HBRUSH=r8).
     // DuetOS: SYS_GDI_FILL_RECT_USER (105) — rdi=hwnd/hdc,
     // rsi=user RECT*, rdx=brush (treated as COLORREF).
-    0x48, 0x89, 0xCF,             // 0xCF6 mov rdi, rcx     ; hdc/hwnd
-    0x48, 0x89, 0xD6,             // 0xCF9 mov rsi, rdx     ; RECT*
-    0x4C, 0x89, 0xC2,             // 0xCFC mov rdx, r8      ; brush → colour
-    0xB8, 0x69, 0x00, 0x00, 0x00, // 0xCFF mov eax, 105     ; SYS_GDI_FILL_RECT_USER
+    0x48, 0x89, 0xCF,             // 0xCF6 mov rdi, rcx ; hdc/hwnd
+    0x48, 0x89, 0xD6,             // 0xCF9 mov rsi, rdx ; RECT*
+    0x4C, 0x89, 0xC2,             // 0xCFC mov rdx, r8 ; brush → colour
+    0xB8, 0x69, 0x00, 0x00, 0x00, // 0xCFF mov eax, 105 ; SYS_GDI_FILL_RECT_USER
     0xCD, 0x80,                   // 0xD04 int 0x80
     0xC3,                         // 0xD06 ret
 
     // --- TextOutA (offset 0xD07, 31 bytes) -----------------------
     // Win32: BOOL TextOutA(HDC hdc=rcx, int x=edx, int y=r8d,
-    //                      LPCSTR=r9, int cchString=[rsp+0x28]).
+    // LPCSTR=r9, int cchString=[rsp+0x28]).
     // 5th arg is on the stack (above the 32 B shadow space + 8 B
     // return address = [rsp+0x28]).
     // DuetOS: SYS_GDI_TEXT_OUT (66) — rdi=hwnd, rsi=x, rdx=y,
@@ -3381,105 +3380,105 @@ constexpr u8 kThunksBytes[] = {
     // white (0xFFFFFF) because TextOutA doesn't carry one in its
     // signature (real Windows uses SetTextColor on the DC, which
     // we don't track yet).
-    0x48, 0x89, 0xCF,             // 0xD07 mov rdi, rcx     ; hwnd
-    0x48, 0x89, 0xD6,             // 0xD0A mov rsi, rdx     ; x
-    0x4C, 0x89, 0xC2,             // 0xD0D mov rdx, r8      ; y
-    0x4D, 0x89, 0xCA,             // 0xD10 mov r10, r9      ; text ptr
+    0x48, 0x89, 0xCF,             // 0xD07 mov rdi, rcx ; hwnd
+    0x48, 0x89, 0xD6,             // 0xD0A mov rsi, rdx ; x
+    0x4C, 0x89, 0xC2,             // 0xD0D mov rdx, r8 ; y
+    0x4D, 0x89, 0xCA,             // 0xD10 mov r10, r9 ; text ptr
     0x44, 0x8B, 0x44, 0x24, 0x28, // 0xD13 mov r8d, [rsp+40]; cchString
     0x41, 0xB9, 0xFF, 0xFF, 0xFF, // 0xD18 mov r9d, 0xFFFFFF; default colour
-    0x00,                         //       (imm32 continuation)
-    0xB8, 0x42, 0x00, 0x00, 0x00, // 0xD1E mov eax, 66      ; SYS_GDI_TEXT_OUT
+    0x00,                         // (imm32 continuation)
+    0xB8, 0x42, 0x00, 0x00, 0x00, // 0xD1E mov eax, 66 ; SYS_GDI_TEXT_OUT
     0xCD, 0x80,                   // 0xD23 int 0x80
     0xC3,                         // 0xD25 ret
 
     // === GDI object handle-table stubs ===========================
 
     // --- CreateCompatibleDC (offset 0xD26, 11 bytes) -------------
-    0x48, 0x89, 0xCF,             // 0xD26 mov rdi, rcx     ; hdc_src
+    0x48, 0x89, 0xCF,             // 0xD26 mov rdi, rcx ; hdc_src
     0xB8, 0x6A, 0x00, 0x00, 0x00, // 0xD29 mov eax, 106
     0xCD, 0x80,                   // 0xD2E int 0x80
     0xC3,                         // 0xD30 ret
 
     // --- CreateCompatibleBitmap (offset 0xD31, 17 bytes) ---------
-    0x48, 0x89, 0xCF,             // 0xD31 mov rdi, rcx     ; hdc
-    0x48, 0x89, 0xD6,             // 0xD34 mov rsi, rdx     ; width
-    0x4C, 0x89, 0xC2,             // 0xD37 mov rdx, r8      ; height
+    0x48, 0x89, 0xCF,             // 0xD31 mov rdi, rcx ; hdc
+    0x48, 0x89, 0xD6,             // 0xD34 mov rsi, rdx ; width
+    0x4C, 0x89, 0xC2,             // 0xD37 mov rdx, r8 ; height
     0xB8, 0x6B, 0x00, 0x00, 0x00, // 0xD3A mov eax, 107
     0xCD, 0x80,                   // 0xD3F int 0x80
     0xC3,                         // 0xD41 ret
 
     // --- CreateSolidBrush (offset 0xD42, 11 bytes) ---------------
-    0x48, 0x89, 0xCF,             // 0xD42 mov rdi, rcx     ; COLORREF
+    0x48, 0x89, 0xCF,             // 0xD42 mov rdi, rcx ; COLORREF
     0xB8, 0x6C, 0x00, 0x00, 0x00, // 0xD45 mov eax, 108
     0xCD, 0x80,                   // 0xD4A int 0x80
     0xC3,                         // 0xD4C ret
 
     // --- GetStockObject (offset 0xD4D, 11 bytes) -----------------
-    0x48, 0x89, 0xCF,             // 0xD4D mov rdi, rcx     ; index
+    0x48, 0x89, 0xCF,             // 0xD4D mov rdi, rcx ; index
     0xB8, 0x6D, 0x00, 0x00, 0x00, // 0xD50 mov eax, 109
     0xCD, 0x80,                   // 0xD55 int 0x80
     0xC3,                         // 0xD57 ret
 
     // --- SelectObject (offset 0xD58, 14 bytes) -------------------
-    0x48, 0x89, 0xCF,             // 0xD58 mov rdi, rcx     ; hdc
-    0x48, 0x89, 0xD6,             // 0xD5B mov rsi, rdx     ; hobj
+    0x48, 0x89, 0xCF,             // 0xD58 mov rdi, rcx ; hdc
+    0x48, 0x89, 0xD6,             // 0xD5B mov rsi, rdx ; hobj
     0xB8, 0x6E, 0x00, 0x00, 0x00, // 0xD5E mov eax, 110
     0xCD, 0x80,                   // 0xD63 int 0x80
     0xC3,                         // 0xD65 ret
 
     // --- DeleteDC (offset 0xD66, 11 bytes) -----------------------
-    0x48, 0x89, 0xCF,             // 0xD66 mov rdi, rcx     ; hdc
+    0x48, 0x89, 0xCF,             // 0xD66 mov rdi, rcx ; hdc
     0xB8, 0x6F, 0x00, 0x00, 0x00, // 0xD69 mov eax, 111
     0xCD, 0x80,                   // 0xD6E int 0x80
     0xC3,                         // 0xD70 ret
 
     // --- DeleteObject (offset 0xD71, 11 bytes) -------------------
-    0x48, 0x89, 0xCF,             // 0xD71 mov rdi, rcx     ; hobj
+    0x48, 0x89, 0xCF,             // 0xD71 mov rdi, rcx ; hobj
     0xB8, 0x70, 0x00, 0x00, 0x00, // 0xD74 mov eax, 112
     0xCD, 0x80,                   // 0xD79 int 0x80
     0xC3,                         // 0xD7B ret
 
     // --- BitBlt (offset 0xD7C, 103 bytes) ------------------------
     // Win32: BOOL BitBlt(HDC hdcDest=rcx, int x=edx, int y=r8d,
-    //                    int cx=r9d, int cy=[rsp+40],
-    //                    HDC hdcSrc=[rsp+48], int x1=[rsp+56],
-    //                    int y1=[rsp+64], DWORD rop=[rsp+72]).
+    // int cx=r9d, int cy=[rsp+40],
+    // HDC hdcSrc=[rsp+48], int x1=[rsp+56],
+    // int y1=[rsp+64], DWORD rop=[rsp+72]).
     // Build a 9 * u64 args struct on our own stack (pre-sub 72
     // bytes), pass the pointer via rdi into SYS_GDI_BITBLT_DC (113).
     // Only the low 32 bits of each int slot are meaningful; the
     // kernel ignores the upper 32.
     //
     // After `sub rsp, 72`:
-    //   [rsp+0..71]  = our 9-slot struct
-    //   [rsp+72]     = return address
-    //   [rsp+80..111]= caller's 32 B shadow space
-    //   [rsp+112]    = cy
-    //   [rsp+120]    = hdcSrc
-    //   [rsp+128]    = x1
-    //   [rsp+136]    = y1
-    //   [rsp+144]    = rop
+    // [rsp+0..71] = our 9-slot struct
+    // [rsp+72] = return address
+    // [rsp+80..111]= caller's 32 B shadow space
+    // [rsp+112] = cy
+    // [rsp+120] = hdcSrc
+    // [rsp+128] = x1
+    // [rsp+136] = y1
+    // [rsp+144] = rop
     0x48, 0x83, 0xEC, 0x48,             // 0xD7C sub rsp, 72
-    0x48, 0x89, 0x0C, 0x24,             // 0xD80 mov [rsp+0], rcx       ; hdcDst
-    0x48, 0x89, 0x54, 0x24, 0x08,       // 0xD84 mov [rsp+8], rdx       ; x
-    0x4C, 0x89, 0x44, 0x24, 0x10,       // 0xD89 mov [rsp+16], r8       ; y
-    0x4C, 0x89, 0x4C, 0x24, 0x18,       // 0xD8E mov [rsp+24], r9       ; cx
-    0x48, 0x8B, 0x84, 0x24, 0x70, 0x00, // 0xD93 mov rax, [rsp+112]     ; cy
+    0x48, 0x89, 0x0C, 0x24,             // 0xD80 mov [rsp+0], rcx ; hdcDst
+    0x48, 0x89, 0x54, 0x24, 0x08,       // 0xD84 mov [rsp+8], rdx ; x
+    0x4C, 0x89, 0x44, 0x24, 0x10,       // 0xD89 mov [rsp+16], r8 ; y
+    0x4C, 0x89, 0x4C, 0x24, 0x18,       // 0xD8E mov [rsp+24], r9 ; cx
+    0x48, 0x8B, 0x84, 0x24, 0x70, 0x00, // 0xD93 mov rax, [rsp+112] ; cy
     0x00, 0x00,                         //
     0x48, 0x89, 0x44, 0x24, 0x20,       // 0xD9B mov [rsp+32], rax
-    0x48, 0x8B, 0x84, 0x24, 0x78, 0x00, // 0xDA0 mov rax, [rsp+120]     ; hdcSrc
+    0x48, 0x8B, 0x84, 0x24, 0x78, 0x00, // 0xDA0 mov rax, [rsp+120] ; hdcSrc
     0x00, 0x00,                         //
     0x48, 0x89, 0x44, 0x24, 0x28,       // 0xDA8 mov [rsp+40], rax
-    0x48, 0x8B, 0x84, 0x24, 0x80, 0x00, // 0xDAD mov rax, [rsp+128]     ; x1
+    0x48, 0x8B, 0x84, 0x24, 0x80, 0x00, // 0xDAD mov rax, [rsp+128] ; x1
     0x00, 0x00,                         //
     0x48, 0x89, 0x44, 0x24, 0x30,       // 0xDB5 mov [rsp+48], rax
-    0x48, 0x8B, 0x84, 0x24, 0x88, 0x00, // 0xDBA mov rax, [rsp+136]     ; y1
+    0x48, 0x8B, 0x84, 0x24, 0x88, 0x00, // 0xDBA mov rax, [rsp+136] ; y1
     0x00, 0x00,                         //
     0x48, 0x89, 0x44, 0x24, 0x38,       // 0xDC2 mov [rsp+56], rax
-    0x48, 0x8B, 0x84, 0x24, 0x90, 0x00, // 0xDC7 mov rax, [rsp+144]     ; rop
+    0x48, 0x8B, 0x84, 0x24, 0x90, 0x00, // 0xDC7 mov rax, [rsp+144] ; rop
     0x00, 0x00,                         //
     0x48, 0x89, 0x44, 0x24, 0x40,       // 0xDCF mov [rsp+64], rax
     0x48, 0x89, 0xE7,                   // 0xDD4 mov rdi, rsp
-    0xB8, 0x71, 0x00, 0x00, 0x00,       // 0xDD7 mov eax, 113           ; SYS_GDI_BITBLT_DC
+    0xB8, 0x71, 0x00, 0x00, 0x00,       // 0xDD7 mov eax, 113 ; SYS_GDI_BITBLT_DC
     0xCD, 0x80,                         // 0xDDC int 0x80
     0x48, 0x83, 0xC4, 0x48,             // 0xDDE add rsp, 72
     0xC3,                               // 0xDE2 ret
@@ -3489,42 +3488,42 @@ constexpr u8 kThunksBytes[] = {
     // --- SetTextColor (offset 0xDE3, 14 bytes) ------------------
     // Win32: COLORREF SetTextColor(HDC=rcx, COLORREF=rdx).
     // DuetOS: SYS_GDI_SET_TEXT_COLOR (114). rax = previous colour.
-    0x48, 0x89, 0xCF,             // 0xDE3 mov rdi, rcx     ; HDC
-    0x48, 0x89, 0xD6,             // 0xDE6 mov rsi, rdx     ; COLORREF
-    0xB8, 0x72, 0x00, 0x00, 0x00, // 0xDE9 mov eax, 114     ; SYS_GDI_SET_TEXT_COLOR
+    0x48, 0x89, 0xCF,             // 0xDE3 mov rdi, rcx ; HDC
+    0x48, 0x89, 0xD6,             // 0xDE6 mov rsi, rdx ; COLORREF
+    0xB8, 0x72, 0x00, 0x00, 0x00, // 0xDE9 mov eax, 114 ; SYS_GDI_SET_TEXT_COLOR
     0xCD, 0x80,                   // 0xDEE int 0x80
     0xC3,                         // 0xDF0 ret
 
     // --- SetBkColor (offset 0xDF1, 14 bytes) --------------------
-    0x48, 0x89, 0xCF,             // 0xDF1 mov rdi, rcx     ; HDC
-    0x48, 0x89, 0xD6,             // 0xDF4 mov rsi, rdx     ; COLORREF
-    0xB8, 0x73, 0x00, 0x00, 0x00, // 0xDF7 mov eax, 115     ; SYS_GDI_SET_BK_COLOR
+    0x48, 0x89, 0xCF,             // 0xDF1 mov rdi, rcx ; HDC
+    0x48, 0x89, 0xD6,             // 0xDF4 mov rsi, rdx ; COLORREF
+    0xB8, 0x73, 0x00, 0x00, 0x00, // 0xDF7 mov eax, 115 ; SYS_GDI_SET_BK_COLOR
     0xCD, 0x80,                   // 0xDFC int 0x80
     0xC3,                         // 0xDFE ret
 
     // --- SetBkMode (offset 0xDFF, 14 bytes) ---------------------
     // Win32: int SetBkMode(HDC=rcx, int mode=edx). OPAQUE=2, TRANSPARENT=1.
-    0x48, 0x89, 0xCF,             // 0xDFF mov rdi, rcx     ; HDC
-    0x48, 0x89, 0xD6,             // 0xE02 mov rsi, rdx     ; mode
-    0xB8, 0x74, 0x00, 0x00, 0x00, // 0xE05 mov eax, 116     ; SYS_GDI_SET_BK_MODE
+    0x48, 0x89, 0xCF,             // 0xDFF mov rdi, rcx ; HDC
+    0x48, 0x89, 0xD6,             // 0xE02 mov rsi, rdx ; mode
+    0xB8, 0x74, 0x00, 0x00, 0x00, // 0xE05 mov eax, 116 ; SYS_GDI_SET_BK_MODE
     0xCD, 0x80,                   // 0xE0A int 0x80
     0xC3,                         // 0xE0C ret
 
     // --- StretchBlt (offset 0xE0D, 129 bytes) -------------------
     // Win32: BOOL StretchBlt(HDC hdcDst=rcx, int xDst=edx,
-    //                        int yDst=r8d, int wDst=r9d,
-    //                        int hDst=[rsp+40], HDC hdcSrc=[rsp+48],
-    //                        int xSrc=[rsp+56], int ySrc=[rsp+64],
-    //                        int wSrc=[rsp+72], int hSrc=[rsp+80],
-    //                        DWORD rop=[rsp+88]).
+    // int yDst=r8d, int wDst=r9d,
+    // int hDst=[rsp+40], HDC hdcSrc=[rsp+48],
+    // int xSrc=[rsp+56], int ySrc=[rsp+64],
+    // int wSrc=[rsp+72], int hSrc=[rsp+80],
+    // DWORD rop=[rsp+88]).
     // Pack 11 u64s into a stack-resident struct (88 B), pass
     // pointer via rdi to SYS_GDI_STRETCH_BLT_DC (117). Stack args
     // are read from [rsp+88+40 .. rsp+88+88] after the sub.
     0x48, 0x83, 0xEC, 0x58,                         // 0xE0D sub rsp, 88
-    0x48, 0x89, 0x0C, 0x24,                         // 0xE11 mov [rsp+0], rcx   ; hdcDst
-    0x48, 0x89, 0x54, 0x24, 0x08,                   // 0xE15 mov [rsp+8], rdx   ; xDst
-    0x4C, 0x89, 0x44, 0x24, 0x10,                   // 0xE1A mov [rsp+16], r8   ; yDst
-    0x4C, 0x89, 0x4C, 0x24, 0x18,                   // 0xE1F mov [rsp+24], r9   ; wDst
+    0x48, 0x89, 0x0C, 0x24,                         // 0xE11 mov [rsp+0], rcx ; hdcDst
+    0x48, 0x89, 0x54, 0x24, 0x08,                   // 0xE15 mov [rsp+8], rdx ; xDst
+    0x4C, 0x89, 0x44, 0x24, 0x10,                   // 0xE1A mov [rsp+16], r8 ; yDst
+    0x4C, 0x89, 0x4C, 0x24, 0x18,                   // 0xE1F mov [rsp+24], r9 ; wDst
     0x48, 0x8B, 0x84, 0x24, 0x80, 0x00, 0x00, 0x00, // 0xE24 mov rax, [rsp+128] ; hDst
     0x48, 0x89, 0x44, 0x24, 0x20,                   // 0xE2C mov [rsp+32], rax
     0x48, 0x8B, 0x84, 0x24, 0x88, 0x00, 0x00, 0x00, // 0xE31 mov rax, [rsp+136] ; hdcSrc
@@ -3540,7 +3539,7 @@ constexpr u8 kThunksBytes[] = {
     0x48, 0x8B, 0x84, 0x24, 0xB0, 0x00, 0x00, 0x00, // 0xE72 mov rax, [rsp+176] ; rop
     0x48, 0x89, 0x44, 0x24, 0x50,                   // 0xE7A mov [rsp+80], rax
     0x48, 0x89, 0xE7,                               // 0xE7F mov rdi, rsp
-    0xB8, 0x75, 0x00, 0x00, 0x00,                   // 0xE82 mov eax, 117       ; SYS_GDI_STRETCH_BLT_DC
+    0xB8, 0x75, 0x00, 0x00, 0x00,                   // 0xE82 mov eax, 117 ; SYS_GDI_STRETCH_BLT_DC
     0xCD, 0x80,                                     // 0xE87 int 0x80
     0x48, 0x83, 0xC4, 0x58,                         // 0xE89 add rsp, 88
     0xC3,                                           // 0xE8D ret
@@ -3549,21 +3548,21 @@ constexpr u8 kThunksBytes[] = {
 
     // --- Rectangle (offset 0xE8E, 40 bytes) ---------------------
     // Win32: BOOL Rectangle(HDC=rcx, int left=edx, int top=r8d,
-    //                       int right=r9d, int bottom=[rsp+40]).
+    // int right=r9d, int bottom=[rsp+40]).
     // DuetOS: SYS_GDI_RECTANGLE (67) — rdi=hwnd, rsi=x, rdx=y,
     // r10=w, r8=h, r9=colour. Convert LTRB → (L, T, R-L, B-T).
     // Uses r11 (caller-saved in Win64) as a scratch for B.
-    0x4C, 0x8B, 0x5C, 0x24, 0x28, // 0xE8E mov r11, [rsp+40]   ; bottom
-    0x4D, 0x29, 0xC3,             // 0xE93 sub r11, r8         ; h = bottom - top
-    0x4D, 0x89, 0xCA,             // 0xE96 mov r10, r9         ; R
-    0x49, 0x29, 0xD2,             // 0xE99 sub r10, rdx        ; w = R - L
-    0x48, 0x89, 0xCF,             // 0xE9C mov rdi, rcx        ; hwnd
-    0x48, 0x89, 0xD6,             // 0xE9F mov rsi, rdx        ; x = L
-    0x4C, 0x89, 0xC2,             // 0xEA2 mov rdx, r8         ; y = T
-    0x4D, 0x89, 0xD8,             // 0xEA5 mov r8, r11         ; h
-    0x41, 0xB9, 0xFF, 0xFF, 0xFF, // 0xEA8 mov r9d, 0xFFFFFF   ; colour = white
+    0x4C, 0x8B, 0x5C, 0x24, 0x28, // 0xE8E mov r11, [rsp+40] ; bottom
+    0x4D, 0x29, 0xC3,             // 0xE93 sub r11, r8 ; h = bottom - top
+    0x4D, 0x89, 0xCA,             // 0xE96 mov r10, r9 ; R
+    0x49, 0x29, 0xD2,             // 0xE99 sub r10, rdx ; w = R - L
+    0x48, 0x89, 0xCF,             // 0xE9C mov rdi, rcx ; hwnd
+    0x48, 0x89, 0xD6,             // 0xE9F mov rsi, rdx ; x = L
+    0x4C, 0x89, 0xC2,             // 0xEA2 mov rdx, r8 ; y = T
+    0x4D, 0x89, 0xD8,             // 0xEA5 mov r8, r11 ; h
+    0x41, 0xB9, 0xFF, 0xFF, 0xFF, // 0xEA8 mov r9d, 0xFFFFFF ; colour = white
     0x00,                         //
-    0xB8, 0x43, 0x00, 0x00, 0x00, // 0xEAE mov eax, 67         ; SYS_GDI_RECTANGLE
+    0xB8, 0x43, 0x00, 0x00, 0x00, // 0xEAE mov eax, 67 ; SYS_GDI_RECTANGLE
     0xCD, 0x80,                   // 0xEB3 int 0x80
     0xC3,                         // 0xEB5 ret
 
@@ -3579,27 +3578,27 @@ constexpr u8 kThunksBytes[] = {
     0x4D, 0x89, 0xD8,             // 0xECD mov r8, r11
     0x41, 0xB9, 0xFF, 0xFF, 0xFF, // 0xED0 mov r9d, 0xFFFFFF
     0x00,                         //
-    0xB8, 0x4B, 0x00, 0x00, 0x00, // 0xED6 mov eax, 75         ; SYS_GDI_ELLIPSE
+    0xB8, 0x4B, 0x00, 0x00, 0x00, // 0xED6 mov eax, 75 ; SYS_GDI_ELLIPSE
     0xCD, 0x80,                   // 0xEDB int 0x80
     0xC3,                         // 0xEDD ret
 
     // --- SetPixel / SetPixelV (offset 0xEDE, 20 bytes) ----------
     // Win32: COLORREF SetPixel(HDC=rcx, int x=edx, int y=r8d,
-    //                          COLORREF=r9d).
+    // COLORREF=r9d).
     // DuetOS: SYS_GDI_SET_PIXEL (76) — rdi=hwnd, rsi=x, rdx=y,
     // r10=colour. Also serves SetPixelV (BOOL return — 1 is a
     // valid non-zero return for SetPixel's caller too).
     0x48, 0x89, 0xCF,             // 0xEDE mov rdi, rcx
-    0x48, 0x89, 0xD6,             // 0xEE1 mov rsi, rdx        ; x
-    0x4C, 0x89, 0xC2,             // 0xEE4 mov rdx, r8         ; y
-    0x4D, 0x89, 0xCA,             // 0xEE7 mov r10, r9         ; colour
-    0xB8, 0x4C, 0x00, 0x00, 0x00, // 0xEEA mov eax, 76         ; SYS_GDI_SET_PIXEL
+    0x48, 0x89, 0xD6,             // 0xEE1 mov rsi, rdx ; x
+    0x4C, 0x89, 0xC2,             // 0xEE4 mov rdx, r8 ; y
+    0x4D, 0x89, 0xCA,             // 0xEE7 mov r10, r9 ; colour
+    0xB8, 0x4C, 0x00, 0x00, 0x00, // 0xEEA mov eax, 76 ; SYS_GDI_SET_PIXEL
     0xCD, 0x80,                   // 0xEEF int 0x80
     0xC3,                         // 0xEF1 ret
 
     // --- CreatePen (offset 0xEF2, 17 bytes) ---------------------
     // Win32: HPEN CreatePen(int style=rcx, int width=edx,
-    //                       COLORREF=r8d).
+    // COLORREF=r8d).
     // DuetOS: SYS_GDI_CREATE_PEN (118) — rdi=style, rsi=width,
     // rdx=COLORREF.
     0x48, 0x89, 0xCF,             // 0xEF2 mov rdi, rcx
@@ -3611,7 +3610,7 @@ constexpr u8 kThunksBytes[] = {
 
     // --- MoveToEx (offset 0xF03, 20 bytes) ----------------------
     // Win32: BOOL MoveToEx(HDC=rcx, int x=edx, int y=r8d,
-    //                      LPPOINT lpPoint=r9).
+    // LPPOINT lpPoint=r9).
     // DuetOS: SYS_GDI_MOVE_TO_EX (119) — rdi=HDC, rsi=x, rdx=y,
     // r10=out LPPOINT.
     0x48, 0x89, 0xCF,             // 0xF03 mov rdi, rcx
@@ -3634,13 +3633,13 @@ constexpr u8 kThunksBytes[] = {
 
     // --- DrawTextA (offset 0xF28, 25 bytes) ---------------------
     // Win32: int DrawTextA(HDC=rcx, LPCSTR=rdx, int cchText=r8d,
-    //                      LPRECT=r9, UINT format=[rsp+40]).
+    // LPRECT=r9, UINT format=[rsp+40]).
     // DuetOS: SYS_GDI_DRAW_TEXT_USER (121) — rdi=HDC, rsi=text,
     // rdx=len, r10=RECT*, r8=format.
-    0x48, 0x89, 0xCF,             // 0xF28 mov rdi, rcx      ; HDC
-    0x48, 0x89, 0xD6,             // 0xF2B mov rsi, rdx      ; text
-    0x4C, 0x89, 0xC2,             // 0xF2E mov rdx, r8       ; len
-    0x4D, 0x89, 0xCA,             // 0xF31 mov r10, r9       ; RECT*
+    0x48, 0x89, 0xCF,             // 0xF28 mov rdi, rcx ; HDC
+    0x48, 0x89, 0xD6,             // 0xF2B mov rsi, rdx ; text
+    0x4C, 0x89, 0xC2,             // 0xF2E mov rdx, r8 ; len
+    0x4D, 0x89, 0xCA,             // 0xF31 mov r10, r9 ; RECT*
     0x44, 0x8B, 0x44, 0x24, 0x28, // 0xF34 mov r8d, [rsp+40] ; format
     0xB8, 0x79, 0x00, 0x00, 0x00, // 0xF39 mov eax, 121
     0xCD, 0x80,                   // 0xF3E int 0x80
@@ -3650,7 +3649,7 @@ constexpr u8 kThunksBytes[] = {
 
     // --- GetMessageA/W (offset 0xF41, 14 bytes) -----------------
     // Win32: BOOL GetMessage(LPMSG=rcx, HWND filter=rdx,
-    //                        UINT fMin=r8d, UINT fMax=r9d).
+    // UINT fMin=r8d, UINT fMax=r9d).
     // Filter-min/max ignored in v0 (our queues don't carry enough
     // message granularity for range filtering yet).
     // DuetOS: SYS_WIN_GET_MSG (63) — rdi=out ptr, rsi=hwnd filter.
@@ -3659,20 +3658,20 @@ constexpr u8 kThunksBytes[] = {
     // lparam — are exactly what our kernel writes out; the trailing
     // time/pt/lPrivate are left uninitialised (Win32 apps that
     // read them get indeterminate but non-crashing data).
-    0x48, 0x89, 0xCF,             // 0xF41 mov rdi, rcx      ; LPMSG
-    0x48, 0x89, 0xD6,             // 0xF44 mov rsi, rdx      ; HWND filter
-    0xB8, 0x3F, 0x00, 0x00, 0x00, // 0xF47 mov eax, 63       ; SYS_WIN_GET_MSG
+    0x48, 0x89, 0xCF,             // 0xF41 mov rdi, rcx ; LPMSG
+    0x48, 0x89, 0xD6,             // 0xF44 mov rsi, rdx ; HWND filter
+    0xB8, 0x3F, 0x00, 0x00, 0x00, // 0xF47 mov eax, 63 ; SYS_WIN_GET_MSG
     0xCD, 0x80,                   // 0xF4C int 0x80
     0xC3,                         // 0xF4E ret
 
     // --- PeekMessageA/W (offset 0xF4F, 18 bytes) ----------------
     // Win32: BOOL PeekMessageA(LPMSG=rcx, HWND=rdx, UINT fMin=r8d,
-    //                          UINT fMax=r9d, UINT wRemove=[rsp+40]).
+    // UINT fMax=r9d, UINT wRemove=[rsp+40]).
     // DuetOS: SYS_WIN_PEEK_MSG (62) — rdi=out, rsi=hwnd, rdx=bRemove.
     0x48, 0x89, 0xCF,             // 0xF4F mov rdi, rcx
     0x48, 0x89, 0xD6,             // 0xF52 mov rsi, rdx
     0x8B, 0x54, 0x24, 0x28,       // 0xF55 mov edx, [rsp+40] ; wRemove
-    0xB8, 0x3E, 0x00, 0x00, 0x00, // 0xF59 mov eax, 62       ; SYS_WIN_PEEK_MSG
+    0xB8, 0x3E, 0x00, 0x00, 0x00, // 0xF59 mov eax, 62 ; SYS_WIN_PEEK_MSG
     0xCD, 0x80,                   // 0xF5E int 0x80
     0xC3,                         // 0xF60 ret
 
@@ -3682,7 +3681,7 @@ constexpr u8 kThunksBytes[] = {
     // (set by SetWindowLongPtrA + RegisterClass at CreateWindow
     // time). Look it up via SYS_WIN_GET_LONG, then synthesise the
     // Win32 WndProc call:
-    //     wndproc(hwnd, msg, wparam, lparam)
+    // wndproc(hwnd, msg, wparam, lparam)
     // If the WndProc slot is 0 we just return 0 — the app's
     // default handler never wired.
     //
@@ -3694,20 +3693,20 @@ constexpr u8 kThunksBytes[] = {
     // +8 before the call, canonical Win64 pre-call alignment.
     0x53,                         // 0xF61 push rbx
     0x41, 0x54,                   // 0xF62 push r12
-    0x48, 0x89, 0xCB,             // 0xF64 mov rbx, rcx      ; lpMsg
-    0x4C, 0x8B, 0x23,             // 0xF67 mov r12, [rbx]    ; hwnd_biased
+    0x48, 0x89, 0xCB,             // 0xF64 mov rbx, rcx ; lpMsg
+    0x4C, 0x8B, 0x23,             // 0xF67 mov r12, [rbx] ; hwnd_biased
     0x4C, 0x89, 0xE7,             // 0xF6A mov rdi, r12
-    0x31, 0xF6,                   // 0xF6D xor esi, esi      ; index = 0 (GWLP_WNDPROC)
-    0xB8, 0x55, 0x00, 0x00, 0x00, // 0xF6F mov eax, 85       ; SYS_WIN_GET_LONG
+    0x31, 0xF6,                   // 0xF6D xor esi, esi ; index = 0 (GWLP_WNDPROC)
+    0xB8, 0x55, 0x00, 0x00, 0x00, // 0xF6F mov eax, 85 ; SYS_WIN_GET_LONG
     0xCD, 0x80,                   // 0xF74 int 0x80
     0x48, 0x85, 0xC0,             // 0xF76 test rax, rax
     0x74, 0x1C,                   // 0xF79 jz .default (+28 to 0xF97)
     0x48, 0x83, 0xEC, 0x28,       // 0xF7B sub rsp, 40
-    0x4C, 0x89, 0xE1,             // 0xF7F mov rcx, r12      ; hwnd
-    0x8B, 0x53, 0x08,             // 0xF82 mov edx, [rbx+8]  ; message
-    0x4C, 0x8B, 0x43, 0x10,       // 0xF85 mov r8, [rbx+16]  ; wparam
-    0x4C, 0x8B, 0x4B, 0x18,       // 0xF89 mov r9, [rbx+24]  ; lparam
-    0xFF, 0xD0,                   // 0xF8D call rax          ; WndProc
+    0x4C, 0x89, 0xE1,             // 0xF7F mov rcx, r12 ; hwnd
+    0x8B, 0x53, 0x08,             // 0xF82 mov edx, [rbx+8] ; message
+    0x4C, 0x8B, 0x43, 0x10,       // 0xF85 mov r8, [rbx+16] ; wparam
+    0x4C, 0x8B, 0x4B, 0x18,       // 0xF89 mov r9, [rbx+24] ; lparam
+    0xFF, 0xD0,                   // 0xF8D call rax ; WndProc
     0x48, 0x83, 0xC4, 0x28,       // 0xF8F add rsp, 40
     0x41, 0x5C,                   // 0xF93 pop r12
     0x5B,                         // 0xF95 pop rbx
@@ -3722,18 +3721,18 @@ constexpr u8 kThunksBytes[] = {
 
     // --- Rectangle filled (offset 0xF9D, 34 bytes) --------------
     // Win32: BOOL Rectangle(HDC=rcx, int L=edx, int T=r8d,
-    //                       int R=r9d, int B=[rsp+40]).
+    // int R=r9d, int B=[rsp+40]).
     // DuetOS: SYS_GDI_RECTANGLE_FILLED (122) — rdi=HDC, rsi=x,
     // rdx=y, r10=w, r8=h. Convert LTRB→xywh. Colour is fetched
     // from DC state (selected_brush + selected_pen), not from args.
     0x4C, 0x8B, 0x5C, 0x24, 0x28, // 0xF9D mov r11, [rsp+40] ; B
-    0x4D, 0x29, 0xC3,             // 0xFA2 sub r11, r8       ; h
-    0x4D, 0x89, 0xCA,             // 0xFA5 mov r10, r9       ; R
-    0x49, 0x29, 0xD2,             // 0xFA8 sub r10, rdx      ; w
-    0x48, 0x89, 0xCF,             // 0xFAB mov rdi, rcx      ; HDC
-    0x48, 0x89, 0xD6,             // 0xFAE mov rsi, rdx      ; x = L
-    0x4C, 0x89, 0xC2,             // 0xFB1 mov rdx, r8       ; y = T
-    0x4D, 0x89, 0xD8,             // 0xFB4 mov r8, r11       ; h
+    0x4D, 0x29, 0xC3,             // 0xFA2 sub r11, r8 ; h
+    0x4D, 0x89, 0xCA,             // 0xFA5 mov r10, r9 ; R
+    0x49, 0x29, 0xD2,             // 0xFA8 sub r10, rdx ; w
+    0x48, 0x89, 0xCF,             // 0xFAB mov rdi, rcx ; HDC
+    0x48, 0x89, 0xD6,             // 0xFAE mov rsi, rdx ; x = L
+    0x4C, 0x89, 0xC2,             // 0xFB1 mov rdx, r8 ; y = T
+    0x4D, 0x89, 0xD8,             // 0xFB4 mov r8, r11 ; h
     0xB8, 0x7A, 0x00, 0x00, 0x00, // 0xFB7 mov eax, 122
     0xCD, 0x80,                   // 0xFBC int 0x80
     0xC3,                         // 0xFBE ret
@@ -3754,15 +3753,15 @@ constexpr u8 kThunksBytes[] = {
 
     // --- PatBlt (offset 0xFE1, 25 bytes) -----------------------
     // Win32: BOOL PatBlt(HDC=rcx, int x=edx, int y=r8d,
-    //                    int w=r9d, int h=[rsp+40],
-    //                    DWORD rop=[rsp+48]).
+    // int w=r9d, int h=[rsp+40],
+    // DWORD rop=[rsp+48]).
     // DuetOS: SYS_GDI_PAT_BLT (124) — rdi=HDC, rsi=x, rdx=y,
     // r10=w, r8=h. ROP ignored (always PATCOPY).
     0x48, 0x89, 0xCF,             // 0xFE1 mov rdi, rcx
-    0x48, 0x89, 0xD6,             // 0xFE4 mov rsi, rdx       ; x
-    0x4C, 0x89, 0xC2,             // 0xFE7 mov rdx, r8        ; y
-    0x4D, 0x89, 0xCA,             // 0xFEA mov r10, r9        ; w
-    0x44, 0x8B, 0x44, 0x24, 0x28, // 0xFED mov r8d, [rsp+40]  ; h
+    0x48, 0x89, 0xD6,             // 0xFE4 mov rsi, rdx ; x
+    0x4C, 0x89, 0xC2,             // 0xFE7 mov rdx, r8 ; y
+    0x4D, 0x89, 0xCA,             // 0xFEA mov r10, r9 ; w
+    0x44, 0x8B, 0x44, 0x24, 0x28, // 0xFED mov r8d, [rsp+40] ; h
     0xB8, 0x7C, 0x00, 0x00, 0x00, // 0xFF2 mov eax, 124
     0xCD, 0x80,                   // 0xFF7 int 0x80
     0xC3,                         // 0xFF9 ret
@@ -3771,7 +3770,7 @@ constexpr u8 kThunksBytes[] = {
 
     // --- TextOutW (offset 0xFFA, 31 bytes) ----------------------
     // Win32: BOOL TextOutW(HDC=rcx, int x=edx, int y=r8d,
-    //                      LPCWSTR=r9, int cchString=[rsp+40]).
+    // LPCWSTR=r9, int cchString=[rsp+40]).
     // Same shape as TextOutA; different syscall. Kernel strips
     // each u16 to ASCII ('?' for non-ASCII) then shares the
     // memDC / window-DC dispatch with DoGdiTextOut.
@@ -3782,20 +3781,20 @@ constexpr u8 kThunksBytes[] = {
     0x44, 0x8B, 0x44, 0x24, 0x28, // 0x1006 mov r8d, [rsp+40] ; cchString
     0x41, 0xB9, 0xFF, 0xFF, 0xFF, // 0x100B mov r9d, 0xFFFFFF ; fallback colour
     0x00,                         //
-    0xB8, 0x7D, 0x00, 0x00, 0x00, // 0x1011 mov eax, 125      ; SYS_GDI_TEXT_OUT_W
+    0xB8, 0x7D, 0x00, 0x00, 0x00, // 0x1011 mov eax, 125 ; SYS_GDI_TEXT_OUT_W
     0xCD, 0x80,                   // 0x1016 int 0x80
     0xC3,                         // 0x1018 ret
 
     // --- DrawTextW (offset 0x1019, 25 bytes) --------------------
     // Win32: int DrawTextW(HDC=rcx, LPCWSTR=rdx, int cchText=r8d,
-    //                      LPRECT=r9, UINT format=[rsp+40]).
+    // LPRECT=r9, UINT format=[rsp+40]).
     // Same shape as DrawTextA.
     0x48, 0x89, 0xCF,             // 0x1019 mov rdi, rcx
     0x48, 0x89, 0xD6,             // 0x101C mov rsi, rdx
     0x4C, 0x89, 0xC2,             // 0x101F mov rdx, r8
     0x4D, 0x89, 0xCA,             // 0x1022 mov r10, r9
     0x44, 0x8B, 0x44, 0x24, 0x28, // 0x1025 mov r8d, [rsp+40] ; format
-    0xB8, 0x7E, 0x00, 0x00, 0x00, // 0x102A mov eax, 126      ; SYS_GDI_DRAW_TEXT_W
+    0xB8, 0x7E, 0x00, 0x00, 0x00, // 0x102A mov eax, 126 ; SYS_GDI_DRAW_TEXT_W
     0xCD, 0x80,                   // 0x102F int 0x80
     0xC3,                         // 0x1031 ret
 
@@ -3804,14 +3803,14 @@ constexpr u8 kThunksBytes[] = {
     // --- GetSysColor (offset 0x1032, 11 bytes) ------------------
     // Win32: DWORD GetSysColor(int nIndex=ecx).
     0x48, 0x89, 0xCF,             // 0x1032 mov rdi, rcx
-    0xB8, 0x7F, 0x00, 0x00, 0x00, // 0x1035 mov eax, 127   ; SYS_GDI_GET_SYS_COLOR
+    0xB8, 0x7F, 0x00, 0x00, 0x00, // 0x1035 mov eax, 127 ; SYS_GDI_GET_SYS_COLOR
     0xCD, 0x80,                   // 0x103A int 0x80
     0xC3,                         // 0x103C ret
 
     // --- GetSysColorBrush (offset 0x103D, 11 bytes) -------------
     // Win32: HBRUSH GetSysColorBrush(int nIndex=ecx).
     0x48, 0x89, 0xCF,             // 0x103D mov rdi, rcx
-    0xB8, 0x80, 0x00, 0x00, 0x00, // 0x1040 mov eax, 128   ; SYS_GDI_GET_SYS_COLOR_BRUSH
+    0xB8, 0x80, 0x00, 0x00, 0x00, // 0x1040 mov eax, 128 ; SYS_GDI_GET_SYS_COLOR_BRUSH
     0xCD, 0x80,                   // 0x1045 int 0x80
     0xC3,                         // 0x1047 ret
 };
@@ -3838,7 +3837,7 @@ struct ThunkEntry
 };
 
 constexpr ThunkEntry kThunksTable[] = {
-    // Batch 1 — console I/O
+    // console I/O
     {"kernel32.dll", "ExitProcess", kOffExitProcess},
     {"kernel32.dll", "GetStdHandle", kOffGetStdHandle},
     // WriteFile and WriteConsoleA share the same stub — both
@@ -3848,16 +3847,16 @@ constexpr ThunkEntry kThunksTable[] = {
     // codes, real handle dispatch) lands in both at once.
     {"kernel32.dll", "WriteFile", kOffWriteFile},
     {"kernel32.dll", "WriteConsoleA", kOffWriteFile},
-    // Batch 2 — process/thread lifecycle
+    // process/thread lifecycle
     {"kernel32.dll", "GetCurrentProcess", kOffGetCurrentProcess},
     {"kernel32.dll", "GetCurrentThread", kOffGetCurrentThread},
     {"kernel32.dll", "GetCurrentProcessId", kOffGetCurrentProcessId},
     {"kernel32.dll", "GetCurrentThreadId", kOffGetCurrentThreadId},
     {"kernel32.dll", "TerminateProcess", kOffTerminateProcess},
-    // Batch 3 — last-error slot
+    // last-error slot
     {"kernel32.dll", "GetLastError", kOffGetLastError},
     {"kernel32.dll", "SetLastError", kOffSetLastError},
-    // Batch 4 — critical sections (v0 no-ops)
+    // critical sections (v0 no-ops)
     {"kernel32.dll", "InitializeCriticalSection", kOffInitCritSec},
     {"kernel32.dll", "InitializeCriticalSectionEx", kOffInitCritSec},
     {"kernel32.dll", "InitializeCriticalSectionAndSpinCount", kOffInitCritSec},
@@ -3868,14 +3867,14 @@ constexpr ThunkEntry kThunksTable[] = {
     // to tear down. Real Windows's Rtl code only zeroes the DebugInfo
     // pointer and frees a reserved slot; neither applies here.
     {"kernel32.dll", "DeleteCriticalSection", kOffCritSecNop},
-    // Batch 5 — vcruntime140 memory intrinsics
+    // vcruntime140 memory intrinsics
     {"vcruntime140.dll", "memmove", kOffMemmove},
     // memcpy is safe to alias to memmove — memmove is a strict
     // superset (handles overlap), same return value contract.
     {"vcruntime140.dll", "memcpy", kOffMemmove},
     {"vcruntime140.dll", "memset", kOffMemset},
 
-    // Batch 6 — UCRT CRT-startup shims.
+    // UCRT CRT-startup shims.
     //
     // Most of these are "return success, do nothing" stubs that
     // let a CRT-driven startup sequence advance far enough for
@@ -3922,7 +3921,7 @@ constexpr ThunkEntry kThunksTable[] = {
     {"ucrtbase.dll", "_exit", kOffExitProcess},
     {"ucrtbase.dll", "terminate", kOffTerminate},
 
-    // Batch 7 — CRT string intrinsics. Pure functions; no
+    // CRT string intrinsics. Pure functions; no
     // kernel state, no ABI surprises. Register under the
     // apiset + ucrtbase + msvcrt names to cover all three
     // common link paths.
@@ -3942,24 +3941,24 @@ constexpr ThunkEntry kThunksTable[] = {
     {"msvcrt.dll", "strchr", kOffStrchr},
     {"msvcrt.dll", "strcpy", kOffStrcpy},
 
-    // Batch 8 — kernel32 "safe ignore" shims. These functions
+    // kernel32 "safe ignore" shims. These functions
     // do real work on Windows but can safely return a sentinel
     // value in v0 without causing the caller to immediately
     // crash. Most of them surface in the windows-kill.exe
-    // import list; this batch narrows that gap.
+    // import list; these stubs narrow that gap.
     //
     // Return-zero family (returns NULL / FALSE / 0):
-    //   GetModuleHandle* — NULL means "module not found"
-    //     (or, for NULL arg, a default that's fine to be 0).
-    //   GetProcAddress   — NULL means "symbol not exported";
-    //     caller falls back.
-    //   IsDebuggerPresent          — FALSE = not debugged.
-    //   IsProcessorFeaturePresent  — FALSE = feature absent;
-    //     caller uses non-SIMD fallback path.
-    //   SetUnhandledExceptionFilter — NULL = no previous filter.
-    //   UnhandledExceptionFilter    — 0 = EXCEPTION_CONTINUE_SEARCH.
+    // GetModuleHandle* — NULL means "module not found"
+    // (or, for NULL arg, a default that's fine to be 0).
+    // GetProcAddress — NULL means "symbol not exported";
+    // caller falls back.
+    // IsDebuggerPresent — FALSE = not debugged.
+    // IsProcessorFeaturePresent — FALSE = feature absent;
+    // caller uses non-SIMD fallback path.
+    // SetUnhandledExceptionFilter — NULL = no previous filter.
+    // UnhandledExceptionFilter — 0 = EXCEPTION_CONTINUE_SEARCH.
     // GetModuleHandleA / GetModuleHandleW / GetProcAddress moved to
-    // batch 25 below — GetModuleHandleW(NULL) now returns the EXE
+    // below — GetModuleHandleW(NULL) now returns the EXE
     // image base instead of always-zero. The Win32ThunksLookup walk
     // returns the first match, so the real entries take precedence
     // by appearing earlier in the table.
@@ -3977,10 +3976,10 @@ constexpr ThunkEntry kThunksTable[] = {
     {"kernel32.dll", "UnhandledExceptionFilter", kOffUnhandledFilter},
 
     // Return-one family (returns TRUE / 1 = success):
-    //   SetConsoleCtrlHandler — pretend we registered.
+    // SetConsoleCtrlHandler — pretend we registered.
     {"kernel32.dll", "SetConsoleCtrlHandler", kOffReturnOne},
 
-    // Batch 24 — file I/O. Real handle table on Process,
+    // file I/O. Real handle table on Process,
     // backed by SYS_FILE_OPEN / SYS_FILE_READ / SYS_FILE_CLOSE
     // / SYS_FILE_SEEK. CloseHandle is the file-close path —
     // also harmlessly handles non-file handles (the kernel
@@ -3990,7 +3989,7 @@ constexpr ThunkEntry kThunksTable[] = {
     {"kernel32.dll", "CloseHandle", kOffCloseHandle},
     {"kernel32.dll", "SetFilePointerEx", kOffSetFilePtrEx},
 
-    // Batch 25 — file stat + module lookup. GetFileSizeEx is
+    // file stat + module lookup. GetFileSizeEx is
     // backed by SYS_FILE_FSTAT (non-destructive size).
     // GetModuleHandleW(NULL) returns the EXE image base from
     // the proc-env page; any non-NULL name returns 0. Library
@@ -4010,30 +4009,31 @@ constexpr ThunkEntry kThunksTable[] = {
     {"kernel32.dll", "LoadLibraryExA", kOffReturnZero},
     {"kernel32.dll", "FreeLibrary", kOffReturnOne}, // pretend success
     // GetProcAddress — real trampoline into SYS_DLL_PROC_ADDRESS
-    // as of stage-2 slice 4. Returns the exported VA out of the
+    //. Returns the exported VA out of the
     // process's DLL image table, or 0 on miss (= same contract
     // the old return-zero stub honoured, so existing callers that
     // GetProcAddress an optional API and NULL-check gracefully fall
     // back either way).
     {"kernel32.dll", "GetProcAddress", kOffGetProcAddressReal},
 
-    // Batch 26 — Win32 mutex (real waitqueue-backed semantics).
+    // Win32 mutex (real waitqueue-backed semantics).
     // CreateMutexW allocates a per-process slot returning a 0x200+
     // pseudo-handle. WaitForSingleObject dispatches by handle range
     // — mutex handles route to SYS_MUTEX_WAIT, anything else
     // pseudo-signals as before. ReleaseMutex routes to
     // SYS_MUTEX_RELEASE. All three are recursive (Win32 contract).
-    // CloseHandle (batch 24) handles mutex slots too via range
+    // CloseHandle handles mutex slots too via range
     // dispatch in SYS_FILE_CLOSE.
     {"kernel32.dll", "CreateMutexW", kOffCreateMutexW},
     {"kernel32.dll", "CreateMutexA", kOffCreateMutexW},
     {"kernel32.dll", "CreateMutexExW", kOffCreateMutexW},     // ignores extra Ex args
-    {"kernel32.dll", "WaitForSingleObject", kOffWaitForObj4}, // batch 54 upgrade
+    {"kernel32.dll", "WaitForSingleObject", kOffWaitForObj4}, // upgrade
     {"kernel32.dll", "WaitForSingleObjectEx", kOffWaitForObj4},
     {"kernel32.dll", "ReleaseMutex", kOffReleaseMutex},
 
-    // Batch 45 — real event handles. Replaces the kOffReturnOne
-    // no-op CreateEventW / SetEvent / ResetEvent from slice 10.
+    // Real event handles. Replaces the kOffReturnOne
+    // no-op CreateEventW / SetEvent / ResetEvent from the
+    // earlier kernel32 binding.
     // Per-process event table at 0x300..0x307.
     {"kernel32.dll", "CreateEventW", kOffCreateEventReal},
     {"kernel32.dll", "CreateEventA", kOffCreateEventReal},
@@ -4042,7 +4042,7 @@ constexpr ThunkEntry kThunksTable[] = {
     {"kernel32.dll", "SetEvent", kOffSetEventReal},
     {"kernel32.dll", "ResetEvent", kOffResetEventReal},
 
-    // Batch 46 — real TLS. Replaces batch 39's alias-to-
+    // real TLS. Replaces 's alias-to-
     // TLS_OUT_OF_INDEXES TlsAlloc. Per-process 64-slot table.
     // Fls* aliases to the same storage (v0 has no fibers).
     {"kernel32.dll", "TlsAlloc", kOffTlsAllocReal},
@@ -4054,7 +4054,7 @@ constexpr ThunkEntry kThunksTable[] = {
     {"kernel32.dll", "FlsGetValue", kOffTlsGetValueReal},
     {"kernel32.dll", "FlsSetValue", kOffTlsSetValueReal},
 
-    // Batch 27 — console APIs. WriteConsoleW is the major
+    // console APIs. WriteConsoleW is the major
     // Unicode-output entry point; the stub UTF-16-strips to
     // ASCII on a stack buffer and routes through SYS_WRITE
     // (same path as WriteFile-to-stdout). GetConsoleMode /
@@ -4072,19 +4072,19 @@ constexpr ThunkEntry kThunksTable[] = {
     // Windows silently drops when no debugger is attached. We
     // do the same — kOffReturnZero returns 0 as a `void` sink
     // (both signatures: LPCWSTR / LPCSTR, no return).
-    // Batch 51: OutputDebugStringA → real kernel debug-print syscall.
+    // OutputDebugStringA → real kernel debug-print syscall.
     // OutputDebugStringW unchanged for now (UTF-16 → ASCII strip in
     // a follow-up; most real callers use the A form).
     {"kernel32.dll", "OutputDebugStringW", kOffOutputDebugStringW},
     {"kernel32.dll", "OutputDebugStringA", kOffOutputDebugStringA},
 
-    // Batch 28 — virtual memory. VirtualAlloc is the single
+    // virtual memory. VirtualAlloc is the single
     // most-requested Win32 memory primitive for non-trivial
     // PEs (JIT, CoreCLR, TLS setup, custom allocators). Bump-
     // only arena at 0x40000000..+512KiB per process.
     // VirtualFree is a no-op (range-check only). VirtualProtect
     // no-ops and echoes PAGE_READWRITE back — W^X forbids the
-    // RWX pages a JIT would actually want, so a second slice
+    // RWX pages a JIT would actually want, so a a follow-up
     // adds a separate "JIT image" mechanism when a real JIT
     // workload needs it.
     {"kernel32.dll", "VirtualAlloc", kOffVirtualAlloc},
@@ -4096,7 +4096,7 @@ constexpr ThunkEntry kThunksTable[] = {
     {"kernel32.dll", "VirtualQuery", kOffReturnZero}, // v0 query returns 0 = failed
     {"kernel32.dll", "VirtualQueryEx", kOffReturnZero},
 
-    // Batch 29 — wide-string helpers. Pure-compute primitives
+    // wide-string helpers. Pure-compute primitives
     // heavily used by multilingual PEs and MSVC CRT. lstrcmpW
     // is ordinal compare (no locale fold — lstrcmpiW would
     // case-fold, not stubbed). lstrlen has a hard cap of
@@ -4106,7 +4106,7 @@ constexpr ThunkEntry kThunksTable[] = {
     {"kernel32.dll", "lstrcmpW", kOffLstrcmpW},
     {"kernel32.dll", "lstrcpyW", kOffLstrcpyW},
 
-    // Batch 30 — system-info probes. IsWow64Process returns FALSE
+    // system-info probes. IsWow64Process returns FALSE
     // (native x64 process, no 32-bit emulation). GetVersionEx*
     // reports Windows 10 build 19041 (2004 / 20H1) — a modern-
     // enough version to pass most feature-gate checks without
@@ -4117,13 +4117,13 @@ constexpr ThunkEntry kThunksTable[] = {
     {"kernel32.dll", "GetVersionExW", kOffGetVersionExW},
     {"kernel32.dll", "GetVersionExA", kOffGetVersionExW}, // ASCII CSD left untouched
 
-    // Batch 31 — ANSI-byte string helpers. Symmetric to batch 29
+    // ANSI-byte string helpers. Symmetric to
     // but for LPCSTR. Pure compute, no syscalls.
     {"kernel32.dll", "lstrlenA", kOffLstrlenA},
     {"kernel32.dll", "lstrcmpA", kOffLstrcmpA},
     {"kernel32.dll", "lstrcpyA", kOffLstrcpyA},
 
-    // Batch 32 — path-query stubs. All v0 paths report a single
+    // path-query stubs. All v0 paths report a single
     // fixed "X:\\" — well-formed, absolute, drive-qualified —
     // which is enough for literal path comparisons without
     // crashing. Real spawn-path plumbing is a follow-up.
@@ -4135,13 +4135,13 @@ constexpr ThunkEntry kThunksTable[] = {
     {"kernel32.dll", "SetCurrentDirectoryW", kOffReturnOne}, // pretend success
     {"kernel32.dll", "SetCurrentDirectoryA", kOffReturnOne},
 
-    // Batch 33 — encoding converters. v0 handles ASCII-range
+    // encoding converters. v0 handles ASCII-range
     // content perfectly (byte-extend / byte-truncate); non-ASCII
     // UTF-8 sequences lose high-plane data.
     {"kernel32.dll", "MultiByteToWideChar", kOffMBtoWC},
     {"kernel32.dll", "WideCharToMultiByte", kOffWCtoMB},
 
-    // Batch 34 — identity queries. Fixed-string stubs.
+    // identity queries. Fixed-string stubs.
     // kernel32 hosts GetComputerNameW; advapi32 hosts
     // GetUserNameW (on real Windows it's an advapi32 export
     // that delegates to LsaQueryInformationPolicy). Both land
@@ -4151,7 +4151,7 @@ constexpr ThunkEntry kThunksTable[] = {
     {"kernel32.dll", "GetComputerNameW", kOffGetComputerNameW},
     {"kernel32.dll", "GetComputerNameA", kOffGetComputerNameW},
 
-    // Batch 35 — system-directory queries. GetTempPathW shares
+    // system-directory queries. GetTempPathW shares
     // GetCurrentDirectoryW's (size, buffer) signature so it
     // aliases to that stub. GetWindowsDirectoryW /
     // GetSystemDirectoryW have (buffer, size) — separate stub.
@@ -4165,12 +4165,12 @@ constexpr ThunkEntry kThunksTable[] = {
     {"kernel32.dll", "GetSystemWindowsDirectoryW", kOffGetWinDirW},
     {"kernel32.dll", "GetSystemWindowsDirectoryA", kOffGetWinDirW},
 
-    // Batch 36 — drives, error modes, format messages.
-    //   GetLogicalDrives returns bit 23 set (only X: mounted).
-    //   GetDriveType*   returns 3 (DRIVE_FIXED) for any input.
-    //   SetErrorMode / GetErrorMode return 0 (no special mode).
-    //   FormatMessage{W,A} returns 0 — callers usually fall
-    //     back to their own format-by-code path.
+    // drives, error modes, format messages.
+    // GetLogicalDrives returns bit 23 set (only X: mounted).
+    // GetDriveType* returns 3 (DRIVE_FIXED) for any input.
+    // SetErrorMode / GetErrorMode return 0 (no special mode).
+    // FormatMessage{W,A} returns 0 — callers usually fall
+    // back to their own format-by-code path.
     {"kernel32.dll", "GetLogicalDrives", kOffGetLogicalDrives},
     {"kernel32.dll", "GetDriveTypeW", kOffGetDriveType},
     {"kernel32.dll", "GetDriveTypeA", kOffGetDriveType},
@@ -4183,13 +4183,13 @@ constexpr ThunkEntry kThunksTable[] = {
     {"kernel32.dll", "FormatMessageW", kOffReturnZero},
     {"kernel32.dll", "FormatMessageA", kOffFormatMessageA},
 
-    // Batch 37 — registry + file-attribute no-op stubs.
-    //   Reg open / read family returns ERROR_FILE_NOT_FOUND (2),
-    //     the standard "key doesn't exist" status.
-    //   Reg write / close family returns ERROR_SUCCESS (0).
-    //   GetFileAttributesW returns INVALID_FILE_ATTRIBUTES (-1)
-    //     — caller treats as "file not present".
-    //   SetFileAttributesW returns TRUE (pretend success).
+    // registry + file-attribute no-op stubs.
+    // Reg open / read family returns ERROR_FILE_NOT_FOUND (2),
+    // the standard "key doesn't exist" status.
+    // Reg write / close family returns ERROR_SUCCESS (0).
+    // GetFileAttributesW returns INVALID_FILE_ATTRIBUTES (-1)
+    // — caller treats as "file not present".
+    // SetFileAttributesW returns TRUE (pretend success).
     {"advapi32.dll", "RegOpenKeyW", kOffReturnTwo},
     {"advapi32.dll", "RegOpenKeyA", kOffReturnTwo},
     {"advapi32.dll", "RegOpenKeyExW", kOffReturnTwo},
@@ -4220,17 +4220,17 @@ constexpr ThunkEntry kThunksTable[] = {
     {"kernel32.dll", "CreateDirectoryW", kOffReturnOne},
     {"kernel32.dll", "RemoveDirectoryW", kOffReturnOne},
 
-    // Batch 38 — locale / processor / time-zone probes. All
+    // locale / processor / time-zone probes. All
     // aliases to existing constant-returning stubs; zero new
     // stub bytes needed.
-    //   GetACP / GetOEMCP -> 65001 (CP_UTF8) via kOffGetConsoleCP.
-    //   IsValidCodePage -> TRUE.
-    //   GetThreadLocale / *DefaultLCID -> 0 (LOCALE_INVARIANT).
-    //   GetTimeZoneInformation -> 1 (TIME_ZONE_ID_STANDARD).
-    //   GetProcessTimes / GetThreadTimes -> FALSE ("couldn't
-    //     query — use fallback"), safer than TRUE + uninit out.
-    //   GetStartupInfoW -> kOffCritSecNop (void return, 1-byte ret).
-    //   VerifyVersionInfoW -> TRUE (version probe passes).
+    // GetACP / GetOEMCP -> 65001 (CP_UTF8) via kOffGetConsoleCP.
+    // IsValidCodePage -> TRUE.
+    // GetThreadLocale / *DefaultLCID -> 0 (LOCALE_INVARIANT).
+    // GetTimeZoneInformation -> 1 (TIME_ZONE_ID_STANDARD).
+    // GetProcessTimes / GetThreadTimes -> FALSE ("couldn't
+    // query — use fallback"), safer than TRUE + uninit out.
+    // GetStartupInfoW -> kOffCritSecNop (void return, 1-byte ret).
+    // VerifyVersionInfoW -> TRUE (version probe passes).
     {"kernel32.dll", "GetACP", kOffGetConsoleCP},
     {"kernel32.dll", "GetOEMCP", kOffGetConsoleCP},
     {"kernel32.dll", "IsValidCodePage", kOffReturnOne},
@@ -4243,10 +4243,10 @@ constexpr ThunkEntry kThunksTable[] = {
     {"kernel32.dll", "GetTimeZoneInformation", kOffReturnOne},
     {"kernel32.dll", "GetDynamicTimeZoneInformation", kOffReturnOne},
     {"kernel32.dll", "GetCurrentProcessorNumber", kOffReturnZero},
-    // Batch 51: GetProcessTimes / GetThreadTimes → zero-fill stubs.
+    // GetProcessTimes / GetThreadTimes → zero-fill stubs.
     {"kernel32.dll", "GetProcessTimes", kOffGetProcessTimes},
     {"kernel32.dll", "GetThreadTimes", kOffGetProcessTimes}, // same shape
-    // Batch 58: GetStartupInfo{W,A} now zero-fill the caller's
+    // GetStartupInfo{W,A} now zero-fill the caller's
     // 104-byte STARTUPINFO and set cb = 104 (the nop previously
     // here left the buffer uninitialised — callers read a wild
     // pointer from lpDesktop / hStdInput and faulted).
@@ -4255,24 +4255,24 @@ constexpr ThunkEntry kThunksTable[] = {
     {"kernel32.dll", "VerSetConditionMask", kOffReturnZero},
     {"kernel32.dll", "VerifyVersionInfoW", kOffReturnOne},
     {"kernel32.dll", "VerifyVersionInfoA", kOffReturnOne},
-    // Paired with batch 10's InitializeSListHead — more InterlockedX
+    // Paired with 's InitializeSListHead — more InterlockedX
     // SList ops all no-op (return NULL = empty list).
     {"kernel32.dll", "InterlockedPushEntrySList", kOffReturnZero},
     {"kernel32.dll", "InterlockedPopEntrySList", kOffReturnZero},
     {"kernel32.dll", "InterlockedFlushSList", kOffReturnZero},
     {"kernel32.dll", "QueryDepthSList", kOffReturnZero},
     // Misc memory / CPU / numa probes.
-    // Batch 51: GlobalMemoryStatusEx → real SYS_MEM_STATUS;
+    // GlobalMemoryStatusEx → real SYS_MEM_STATUS;
     // GetSystemTimes → zero-fill stub.
     {"kernel32.dll", "GlobalMemoryStatusEx", kOffGlobalMemoryStatusEx},
     {"kernel32.dll", "GetSystemTimes", kOffGetSystemTimes},
-    // Batch 52: GetSystemInfo / GetNativeSystemInfo populate a
+    // GetSystemInfo / GetNativeSystemInfo populate a
     // Win32 SYSTEM_INFO struct with x86_64 constants.
     {"kernel32.dll", "GetSystemInfo", kOffGetSystemInfo},
     {"kernel32.dll", "GetNativeSystemInfo", kOffGetSystemInfo},
     {"kernel32.dll", "GetNumaHighestNodeNumber", kOffReturnZero},
 
-    // Batch 39 — process priority / TLS / file-type aliases.
+    // process priority / TLS / file-type aliases.
     // TlsAlloc returning TLS_OUT_OF_INDEXES (0xFFFFFFFF) is a
     // supported "no slots available" signal — forces the MSVC
     // CRT into its single-threaded fallback path instead of
@@ -4283,24 +4283,24 @@ constexpr ThunkEntry kThunksTable[] = {
     {"kernel32.dll", "SetPriorityClass", kOffReturnOne},
     {"kernel32.dll", "GetThreadPriority", kOffReturnZero}, // 0 = NORMAL
     {"kernel32.dll", "SetThreadPriority", kOffReturnOne},
-    {"kernel32.dll", "CreateThread", kOffCreateThreadReal}, // batch 50 — real spawn via SYS_THREAD_CREATE
-    {"kernel32.dll", "CreateRemoteThread", kOffReturnZero}, // batch-24 fallback stays (no cross-proc v0)
-    // Batch 51: ExitThread routes to SYS_EXIT (kills just this
+    {"kernel32.dll", "CreateThread", kOffCreateThreadReal}, // real spawn via SYS_THREAD_CREATE
+    {"kernel32.dll", "CreateRemoteThread", kOffReturnZero}, // fallback stays (no cross-proc v0)
+    // ExitThread routes to SYS_EXIT (kills just this
     // task). FreeLibraryAndExitThread aliases to ExitThread — the
     // FreeLibrary half is a no-op in v0 (no DLL unload path).
     {"kernel32.dll", "ExitThread", kOffExitThread},
     {"kernel32.dll", "FreeLibraryAndExitThread", kOffExitThread},
-    // Batch 51: WaitForMultipleObjects via SYS_WAIT_MULTI.
+    // WaitForMultipleObjects via SYS_WAIT_MULTI.
     {"kernel32.dll", "WaitForMultipleObjects", kOffWaitForMultipleObjects},
     {"kernel32.dll", "WaitForMultipleObjectsEx", kOffWaitForMultipleObjects},
-    // Batch 53: RaiseException → SYS_EXIT. DecodePointer /
+    // RaiseException → SYS_EXIT. DecodePointer /
     // EncodePointer → identity (round-trip preserved).
     {"kernel32.dll", "RaiseException", kOffRaiseException},
     {"kernel32.dll", "DecodePointer", kOffDecodePointer},
     {"kernel32.dll", "EncodePointer", kOffDecodePointer},
     {"kernel32.dll", "RtlDecodePointer", kOffDecodePointer},
     {"kernel32.dll", "RtlEncodePointer", kOffDecodePointer},
-    // Batch 54: Semaphore family — CreateSemaphore(W/A/ExW) route
+    // Semaphore family — CreateSemaphore(W/A/ExW) route
     // through SYS_SEM_CREATE; ReleaseSemaphore through SYS_SEM_RELEASE;
     // WaitForSingleObject on a semaphore handle is dispatched by
     // the new v3 stub to SYS_SEM_WAIT.
@@ -4309,7 +4309,7 @@ constexpr ThunkEntry kThunksTable[] = {
     {"kernel32.dll", "CreateSemaphoreExW", kOffCreateSemaphoreW},
     {"kernel32.dll", "CreateSemaphoreExA", kOffCreateSemaphoreW},
     {"kernel32.dll", "ReleaseSemaphore", kOffReleaseSemaphore},
-    // === Batch 55: SRW locks, condition variables, one-time
+    // === SRW locks, condition variables, one-time
     // init, waitable timers, file mapping. All NO-OP-correct for
     // a single-threaded-by-default v0 — SRW acquire/release is a
     // ret on a process whose threads never contend for the lock;
@@ -4360,7 +4360,7 @@ constexpr ThunkEntry kThunksTable[] = {
     // touch. Leaving them unbound lets the miss-logger record the
     // call (more diagnostic than a silent ret into junk memory).
 
-    // === Batch 56: File I/O + thread/fiber + debug + precise time.
+    // === File I/O + thread/fiber + debug + precise time.
     // All NO-OP-correct for v0 — no async I/O (CancelIo nothing to
     // cancel; GetOverlappedResult pretends sync completion), no
     // multi-CPU affinity knobs (v0 is uni-processor from the user
@@ -4413,7 +4413,7 @@ constexpr ThunkEntry kThunksTable[] = {
     {"kernel32.dll", "AddDllDirectory", kOffReturnZero}, // NULL cookie
     {"kernel32.dll", "RemoveDllDirectory", kOffReturnOne},
     // Tls/Fls now route through real per-process storage —
-    // moved to batch 46 below.
+    // moved to below.
     {"kernel32.dll", "SetEndOfFile", kOffReturnOne},
     {"kernel32.dll", "FlushFileBuffers", kOffReturnOne}, // pretend fsync
     {"kernel32.dll", "GetFileType", kOffReturnTwo},      // 2 = FILE_TYPE_CHAR (console-ish)
@@ -4422,7 +4422,7 @@ constexpr ThunkEntry kThunksTable[] = {
     {"kernel32.dll", "RemoveVectoredExceptionHandler", kOffReturnZero},
     {"kernel32.dll", "AddVectoredContinueHandler", kOffReturnZero},
 
-    // Batch 40 — Interlocked atomics. Real LOCK-prefixed instr
+    // Interlocked atomics. Real LOCK-prefixed instr
     // sequences; correct even if DuetOS gains ring-3 SMP.
     // Exported under both legacy `InterlockedX` names and the
     // `_InterlockedX` compiler intrinsic-style names (clang/MSVC
@@ -4444,13 +4444,13 @@ constexpr ThunkEntry kThunksTable[] = {
     // holds the requested size; we preserve it by doing nothing.
     {"vcruntime140.dll", "__chkstk", kOffCritSecNop},
     {"ntdll.dll", "__chkstk", kOffCritSecNop},
-    // 64-bit variants (batch 41)
+    // 64-bit variants
     {"kernel32.dll", "InterlockedIncrement64", kOffInterlockedInc64},
     {"kernel32.dll", "InterlockedDecrement64", kOffInterlockedDec64},
     {"kernel32.dll", "InterlockedCompareExchange64", kOffInterlockedCmpXchg64},
     {"kernel32.dll", "InterlockedExchange64", kOffInterlockedExchg64},
     {"kernel32.dll", "InterlockedExchangeAdd64", kOffInterlockedExchgAdd64},
-    // Batch 60: Interlocked{And,Or,Xor} 32 + 64. CAS-loop stubs
+    // Interlocked{And,Or,Xor} 32 + 64. CAS-loop stubs
     // backed by LOCK CMPXCHG — correct under SMP + timer-tick
     // preemption. Return the ORIGINAL pre-modify value per Win32
     // contract.
@@ -4466,7 +4466,7 @@ constexpr ThunkEntry kThunksTable[] = {
     {"vcruntime140.dll", "_InterlockedExchange64", kOffInterlockedExchg64},
     {"vcruntime140.dll", "_InterlockedExchangeAdd64", kOffInterlockedExchgAdd64},
 
-    // === Batch 42 — ntdll.dll coverage =========================
+    // === ntdll.dll coverage =========================
     //
     // A PE that bypasses kernel32 and imports directly from ntdll
     // (installers, anti-debug tooling, some Microsoft-shipped
@@ -4478,11 +4478,11 @@ constexpr ThunkEntry kThunksTable[] = {
     // back or propagate the status up cleanly.
     //
     // Two exceptions where the signature matches perfectly:
-    //   * NtClose(HANDLE rcx) matches CloseHandle(HANDLE rcx),
-    //     so we alias to kOffCloseHandle — NtClose actually works.
-    //   * NtYieldExecution() takes no args; reuse kOffCritSecNop
-    //     (1-byte ret) since the return value (NTSTATUS 0 =
-    //     STATUS_SUCCESS) is what we'd emit anyway.
+    // * NtClose(HANDLE rcx) matches CloseHandle(HANDLE rcx),
+    // so we alias to kOffCloseHandle — NtClose actually works.
+    // * NtYieldExecution() takes no args; reuse kOffCritSecNop
+    // (1-byte ret) since the return value (NTSTATUS 0 =
+    // STATUS_SUCCESS) is what we'd emit anyway.
     //
     // Rtl* functions are mostly pure-compute user-mode helpers
     // that don't cross the kernel boundary on real Windows.
@@ -4512,7 +4512,7 @@ constexpr ThunkEntry kThunksTable[] = {
     {"ntdll.dll", "ZwSetInformationFile", kOffReturnStatusNotImpl},
     {"ntdll.dll", "NtQueryVolumeInformationFile", kOffReturnStatusNotImpl},
     {"ntdll.dll", "ZwQueryVolumeInformationFile", kOffReturnStatusNotImpl},
-    // batch 47: real NtAllocateVirtualMemory / NtFreeVirtualMemory
+    // : real NtAllocateVirtualMemory / NtFreeVirtualMemory
     // trampolines that route to SYS_VMAP / SYS_VUNMAP (the same
     // page-grain allocator backing kernel32.VirtualAlloc/Free).
     // Was kOffReturnStatusNotImpl before — every PE that bypassed
@@ -4544,7 +4544,7 @@ constexpr ThunkEntry kThunksTable[] = {
     {"ntdll.dll", "ZwWaitForMultipleObjects", kOffReturnStatusNotImpl},
     {"ntdll.dll", "NtDelayExecution", kOffReturnStatusNotImpl},
     {"ntdll.dll", "ZwDelayExecution", kOffReturnStatusNotImpl},
-    // Dedicated NTSTATUS-returning stubs (batch 49), so ntdll
+    // Dedicated NTSTATUS-returning stubs, so ntdll
     // callers see STATUS_SUCCESS (0) instead of kernel32 BOOL.
     {"ntdll.dll", "NtQueryPerformanceCounter", kOffNtQueryPerfCounterReal},
     {"ntdll.dll", "ZwQueryPerformanceCounter", kOffNtQueryPerfCounterReal},
@@ -4586,7 +4586,7 @@ constexpr ThunkEntry kThunksTable[] = {
     {"ntdll.dll", "ZwAllocateVirtualMemory", kOffNtAllocateVirtualMemory},
     {"ntdll.dll", "ZwFreeVirtualMemory", kOffNtFreeVirtualMemory},
 
-    // === Batch 43 — UI / locale / clipboard / mapping ==========
+    // === UI / locale / clipboard / mapping ==========
     //
     // Broad coverage sweep. Most bindings are "best-effort
     // failure" aliases so a PE that probes any of these at
@@ -4659,7 +4659,7 @@ constexpr ThunkEntry kThunksTable[] = {
     {"kernel32.dll", "GetStringTypeExW", kOffReturnOne},
     {"kernel32.dll", "IsDBCSLeadByte", kOffReturnZero}, // FALSE — no DBCS
 
-    // === Batch 44 — shell32 / ole32 / winmm / shlwapi / psapi ==
+    // === shell32 / ole32 / winmm / shlwapi / psapi ==
     //
     // Another broad coverage sweep. All aliases to existing
     // constant-return stubs. Most return "failure" or "empty
@@ -4737,7 +4737,7 @@ constexpr ThunkEntry kThunksTable[] = {
     {"psapi.dll", "GetMappedFileNameW", kOffReturnZero},
     {"psapi.dll", "QueryWorkingSet", kOffReturnZero},
 
-    // === Batch 47 — kernelbase / bcrypt / dbghelp / extended ntdll ===
+    // === kernelbase / bcrypt / dbghelp / extended ntdll ===
     //
     // Coverage for the newer DLL split (kernelbase.dll = common
     // kernel32+advapi32 core since Win8) + crypto + debugging
@@ -4852,7 +4852,7 @@ constexpr ThunkEntry kThunksTable[] = {
     {"ntdll.dll", "LdrGetProcedureAddress", kOffReturnStatusNotImpl},
     {"ntdll.dll", "RtlRunOnceExecuteOnce", kOffReturnZero}, // S_OK
 
-    // Batch 9 — Win32 process heap, backed by the per-process
+    // Win32 process heap, backed by the per-process
     // 16-page region at 0x50000000 and SYS_HEAP_ALLOC /
     // SYS_HEAP_FREE. See kernel/subsystems/win32/heap.cpp.
     //
@@ -4869,7 +4869,7 @@ constexpr ThunkEntry kThunksTable[] = {
     {"kernel32.dll", "HeapCreate", kOffGetProcessHeap},
     {"kernel32.dll", "HeapDestroy", kOffReturnOne},
     // HeapReAlloc / HeapSize: backed by SYS_HEAP_REALLOC +
-    // SYS_HEAP_SIZE as of batch 14 — block header carries the
+    // SYS_HEAP_SIZE as of — block header carries the
     // rounded-up size so we can translate both operations
     // without extra per-block bookkeeping.
     {"kernel32.dll", "HeapReAlloc", kOffHeapRealloc},
@@ -4902,7 +4902,7 @@ constexpr ThunkEntry kThunksTable[] = {
     {"msvcrt.dll", "calloc", kOffCalloc},
     {"msvcrt.dll", "realloc", kOffRealloc},
 
-    // Batch 10 — advapi32 privilege/token + kernel32 event /
+    // advapi32 privilege/token + kernel32 event /
     // wait / system-time / process shims. Mostly "return
     // success and do nothing" since the kernel has no real
     // security model, no multi-threading in user land, and
@@ -4933,12 +4933,12 @@ constexpr ThunkEntry kThunksTable[] = {
     // event is "always signaled"; CreateEventW returns a fake
     // non-null handle; SetEvent/ResetEvent return TRUE).
     // CreateEventW / SetEvent / ResetEvent now route to real
-    // event infrastructure — moved to batch 45 below.
+    // event infrastructure — moved to below.
 
     // kernel32 — wait (v0: immediate return with
-    // WaitForSingleObject moved to batch 26 below — now mutex-aware.
+    // WaitForSingleObject moved to below — now mutex-aware.
     // The stub still pseudo-signals (returns 0 = WAIT_OBJECT_0) for
-    // non-mutex handles, preserving the original batch-10 contract
+    // non-mutex handles, preserving the original contract
     // for events / thread handles that v0 doesn't track.
 
     // kernel32 — interlocked SList (zero-init an SList head).
@@ -4957,28 +4957,28 @@ constexpr ThunkEntry kThunksTable[] = {
     // value is opaque to callers so this "identity"
     // mapping is fine.
     {"kernel32.dll", "OpenProcess", kOffOpenProcess},
-    // Batch 59: real GetExitCodeThread backed by per-handle
+    // real GetExitCodeThread backed by per-handle
     // exit_code storage updated at SYS_EXIT time.
     {"kernel32.dll", "GetExitCodeThread", kOffGetExitCodeThreadReal},
     {"kernel32.dll", "GenerateConsoleCtrlEvent", kOffReturnOne},
 
-    // Batch 11 — performance counters, tick count, and the
+    // performance counters, tick count, and the
     // Rtl*/Toolhelp32/thread-management clusters. The perf
     // counter family is REAL — backed by SYS_PERF_COUNTER
     // and the kernel 100 Hz tick. The rest are safe no-ops
     // that let callers proceed without crashing:
-    //   * Rtl* unwind family returns 0 — "no function entry
-    //     found" / "no frames captured". Code that uses
-    //     these for crash-report formatting gets an empty
-    //     report but doesn't fault.
-    //   * Toolhelp32 snapshot returns 1 (non-null handle)
-    //     but Process32First returns FALSE — program sees
-    //     an empty process list.
-    //   * CreateRemoteThread returns 0 (NULL) — the target
-    //     program handles failure gracefully per the Win32
-    //     contract (GetLastError returns the last set
-    //     error; our stub stack doesn't populate that yet).
-    // QueryPerformance{Counter,Frequency} upgraded (batch 21) to
+    // * Rtl* unwind family returns 0 — "no function entry
+    // found" / "no frames captured". Code that uses
+    // these for crash-report formatting gets an empty
+    // report but doesn't fault.
+    // * Toolhelp32 snapshot returns 1 (non-null handle)
+    // but Process32First returns FALSE — program sees
+    // an empty process list.
+    // * CreateRemoteThread returns 0 (NULL) — the target
+    // program handles failure gracefully per the Win32
+    // contract (GetLastError returns the last set
+    // error; our stub stack doesn't populate that yet).
+    // QueryPerformance{Counter,Frequency} upgraded to
     // HPET-backed nanosecond resolution. The old stubs at 0x1F6
     // / 0x206 stay in the page as dead bytes.
     {"kernel32.dll", "QueryPerformanceCounter", kOffQpcNs},
@@ -4986,7 +4986,7 @@ constexpr ThunkEntry kThunksTable[] = {
     {"kernel32.dll", "GetTickCount", kOffGetTickCount},
     {"kernel32.dll", "GetTickCount64", kOffGetTickCount},
 
-    // Batch 22 — Sleep + SwitchToThread (timer + voluntary yield).
+    // Sleep + SwitchToThread (timer + voluntary yield).
     // Sleep routes to SYS_SLEEP_MS; SwitchToThread routes to
     // SYS_YIELD. SleepEx ignores its bAlertable arg and aliases
     // to Sleep — no APC delivery in v0, so the alertable form
@@ -4995,7 +4995,7 @@ constexpr ThunkEntry kThunksTable[] = {
     {"kernel32.dll", "SleepEx", kOffSleep},
     {"kernel32.dll", "SwitchToThread", kOffSwitchToThread},
 
-    // Batch 23 — command line + environment (proc-env page reads).
+    // command line + environment (proc-env page reads).
     // GetCommandLineW / GetCommandLineA hand back pointers into
     // the proc-env page populated by Win32ProcEnvPopulate at PE
     // load. GetEnvironmentVariableW returns 0 (var-not-found)
@@ -5033,7 +5033,7 @@ constexpr ThunkEntry kThunksTable[] = {
     {"kernel32.dll", "ResumeThread", kOffReturnZero},
     {"kernel32.dll", "GetExitCodeProcess", kOffGetExitCodeThread},
 
-    // Batch 12 — dbghelp + vcruntime SEH + UCRT convert.
+    // dbghelp + vcruntime SEH + UCRT convert.
     // All aliases to existing stubs; no new bytecode.
     //
     // dbghelp: symbol-table code paths. Succeed-but-find-nothing
@@ -5075,8 +5075,8 @@ constexpr ThunkEntry kThunksTable[] = {
     {"msvcrt.dll", "atoi", kOffReturnZero},
     {"msvcrt.dll", "atol", kOffReturnZero},
 
-    // Batch 13a — MSVCP140 throw helpers + small-return
-    // helpers. All aliases. The `?_X*_error` + `?_Xbad_alloc`
+    // MSVCP140 throw helpers + small-return helpers.
+    // All aliases. The `?_X*_error` + `?_Xbad_alloc`
     // family are unconditionally-throwing functions; under
     // Windows a caller wraps them in try/catch. We don't have
     // SEH, so reaching any of these is a crash by definition —
@@ -5094,8 +5094,8 @@ constexpr ThunkEntry kThunksTable[] = {
     // currently in flight), i.e. kOffReturnZero.
     //
     // Not yet covered: the cout / basic_ostream cluster.
-    // windows-kill.exe's next UNRESOLVED after this batch
-    // lands will be in that group.
+    // windows-kill.exe's next UNRESOLVED after these
+    // helpers land will be in that group.
     {"MSVCP140.dll", "?_Xbad_alloc@std@@YAXXZ", kOffTerminate},
     {"MSVCP140.dll", "?_Xlength_error@std@@YAXPEBD@Z", kOffTerminate},
     {"MSVCP140.dll", "?_Xout_of_range@std@@YAXPEBD@Z", kOffTerminate},
@@ -5104,10 +5104,10 @@ constexpr ThunkEntry kThunksTable[] = {
     {"MSVCP140.dll", "?_Winerror_message@std@@YAKKPEADK@Z", kOffReturnZero},
     {"MSVCP140.dll", "?uncaught_exception@std@@YA_NXZ", kOffReturnZero},
 
-    // Batch 16 — MSVC CRT argc / argv accessors. These are the
+    // MSVC CRT argc / argv accessors. These are the
     // first real-valued reads the CRT's __scrt_common_main_seh
     // makes during startup: `argc = *__p___argc()` and
-    // `argv = *__p___argv()`. Prior to this batch they landed on
+    // `argv = *__p___argv()`. Previously they landed on
     // the catch-all NO-OP stub, returned 0, and the CRT faulted
     // when it dereferenced the zero. Now they return pointers
     // into the per-process proc-env page (kProcEnvVa), which the
@@ -5124,7 +5124,7 @@ constexpr ThunkEntry kThunksTable[] = {
     {"msvcrt.dll", "__p___argc", kOffPArgc},
     {"msvcrt.dll", "__p___argv", kOffPArgv},
 
-    // Batch 17 — UCRT stdio accessors. `__p__commode` returns
+    // UCRT stdio accessors. `__p__commode` returns
     // &_commode for callers that want the default-file-mode
     // flags (every UCRT-linked program reads it during startup
     // to pick text vs binary I/O). `_callnewh` is the C++
@@ -5138,7 +5138,7 @@ constexpr ThunkEntry kThunksTable[] = {
     {"ucrtbase.dll", "_callnewh", kOffReturnZero},
     {"msvcrt.dll", "_callnewh", kOffReturnZero},
 
-    // Batch 18 — MSVCP140 iostream methods. Direct-call paths
+    // MSVCP140 iostream methods. Direct-call paths
     // (via IAT) now do the right thing; virtual-dispatch paths
     // still walk the fake-object data-miss pad. The mangled
     // names are the MSVC x64 form (`?method@class@@Q..Z`).
@@ -5186,19 +5186,19 @@ constexpr ThunkEntry kThunksTable[] = {
     {"MSVCP140.dll", "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@P6AAEAV01@AEAV01@@Z@Z",
      kOffReturnThis},
 
-    // Batch 19 — D3D / DXGI create-device family. Returning
+    // D3D / DXGI create-device family. Returning
     // HRESULT E_FAIL lets a caller's "no graphics" fallback
     // kick in. Covers the entry points DXVK / vkd3d-proton
     // intercept at the top of their translation chain:
     //
-    //   D3D11CreateDevice / D3D11CreateDeviceAndSwapChain
-    //     — MSVC d3d11.dll direct
-    //   D3D12CreateDevice
-    //     — MSVC d3d12.dll direct
-    //   CreateDXGIFactory / CreateDXGIFactory1 / CreateDXGIFactory2
-    //     — dxgi.dll, prerequisite for D3D device creation
-    //   Direct3DCreate9 / Direct3DCreate9Ex
-    //     — legacy d3d9.dll entry
+    // D3D11CreateDevice / D3D11CreateDeviceAndSwapChain
+    // — MSVC d3d11.dll direct
+    // D3D12CreateDevice
+    // — MSVC d3d12.dll direct
+    // CreateDXGIFactory / CreateDXGIFactory1 / CreateDXGIFactory2
+    // — dxgi.dll, prerequisite for D3D device creation
+    // Direct3DCreate9 / Direct3DCreate9Ex
+    // — legacy d3d9.dll entry
     //
     // Direct3DCreate9 returns an IDirect3D9* — NULL on failure.
     // E_FAIL (0x80004005) in eax still lands as a non-NULL
@@ -5240,13 +5240,13 @@ constexpr ThunkEntry kThunksTable[] = {
     //
     // Semantics chosen per MSDN so a well-behaved PE sees "call
     // succeeded but nothing happened":
-    //   - CreateWindowExW -> non-zero (caller treats 0 as failure).
-    //   - GetMessageW     -> 0 (signals WM_QUIT; main loop exits
-    //                         cleanly instead of spinning forever).
-    //   - DefWindowProc*  -> 0 (most messages ignore the return).
-    //   - GDI object/DC handles -> non-zero so SelectObject /
-    //                         DeleteObject later don't hit ERROR_
-    //                         INVALID_HANDLE paths.
+    // - CreateWindowExW -> non-zero (caller treats 0 as failure).
+    // - GetMessageW -> 0 (signals WM_QUIT; main loop exits
+    // cleanly instead of spinning forever).
+    // - DefWindowProc* -> 0 (most messages ignore the return).
+    // - GDI object/DC handles -> non-zero so SelectObject /
+    // DeleteObject later don't hit ERROR_
+    // INVALID_HANDLE paths.
     //
     // Pointer-output APIs that *populate a struct* (GetSystemTime,
     // GetLocalTime, SystemTimeToFileTime, etc.) need real stub
@@ -5412,8 +5412,8 @@ constexpr ThunkEntry kThunksTable[] = {
     {"gdi32.dll", "SetTextAlign", kOffReturnZero},
 
     // -----------------------------------------------------------------
-    // Batch 48: real stubs for pointer-output time APIs — the ones
-    // deliberately skipped by the previous GUI batch because a 0/1
+    // Real stubs for pointer-output time APIs — the ones
+    // deliberately skipped by the prior GUI bindings because a 0/1
     // return leaves their caller-allocated output struct
     // uninitialised. These bridge Win64 ABI -> int 0x80 with the
     // new SYS_GETTIME_ST / SYS_ST_TO_FT / SYS_FT_TO_ST syscalls
@@ -5629,7 +5629,7 @@ bool IsLikelyDataImport(const char* func)
     if (func == nullptr || func[0] != '?')
         return false;
     // MSVC mangling for a static/global data symbol is
-    //   ?<name>@[<scope>@...]@@3<type-spec>[<type-modifiers>]
+    // ?<name>@[<scope>@...]@@3<type-spec>[<type-modifiers>]
     // The `3` after `@@` is the storage-class letter for
     // "static data / global". Functions use storage classes
     // like Q (public non-static), A/B (access), or encode the

@@ -10,9 +10,8 @@
  * Every function exported here retires the corresponding
  * `{"kernel32.dll", "<name>", kOff<name>}` row in
  * kStubsTable. The flat stub stays compiled as a fallback
- * (slice-6's via-DLL path runs first; the stub is only
- * reached if preload fails). A later sweep-slice deletes
- * the dead rows.
+ * (the via-DLL path runs first; the stub is only reached
+ * if preload fails). A later sweep deletes the dead rows.
  *
  * Build: tools/build-kernel32-dll.sh
  *   clang --target=x86_64-pc-windows-msvc + lld-link /dll
@@ -319,7 +318,7 @@ __declspec(dllexport) LONG64 InterlockedXor64(LONG64 volatile* dest, LONG64 valu
 }
 
 /* ------------------------------------------------------------------
- * Console / system introspection (slice 16)
+ * Console / system introspection
  *
  * Most of these are constant-returning shims that report sane
  * "you're on x86_64 Windows 10, code page 437, no Wow64" values
@@ -338,8 +337,8 @@ __declspec(dllexport) BOOL GetConsoleMode(HANDLE hConsole, DWORD* lpMode)
 /* Code pages: report CP_UTF8 (65001). Callers that serialise
  * via WriteConsoleW don't actually care; callers that ASK
  * expect a sane answer, and UTF-8 is closer to our actual
- * "pass through" stdout than OEM 437. batch27 of
- * hello_winapi.exe pins this at 65001. */
+ * "pass through" stdout than OEM 437. The console-API
+ * smoke test in hello_winapi.exe pins this at 65001. */
 __declspec(dllexport) UINT GetConsoleCP(void)
 {
     return 65001;
@@ -500,7 +499,7 @@ __declspec(dllexport) void InitializeSListHead(void* head)
 }
 
 /* ------------------------------------------------------------------
- * Virtual memory (slice 18)
+ * Virtual memory
  *
  * SYS_VMAP   = 28 — bump-allocate `size` bytes (page-rounded)
  *              from the per-process vmap arena, return VA.
@@ -575,7 +574,7 @@ __declspec(dllexport) BOOL VirtualProtectEx(HANDLE hProcess, void* lpAddress, SI
 }
 
 /* ------------------------------------------------------------------
- * lstr* family (slice 18) — Windows' historic string helpers,
+ * lstr* family — Windows' historic string helpers,
  * still imported by older / port-compat code paths in real
  * MSVC PEs. Same semantics as str / wcs intrinsics without
  * the SEH wrappers real Windows applies on top.
@@ -686,7 +685,7 @@ __declspec(dllexport) wchar_t16* lstrcpyW(wchar_t16* dst, const wchar_t16* src)
 }
 
 /* ------------------------------------------------------------------
- * File / console I/O (slice 19)
+ * File / console I/O
  *
  * Backed by the file syscall family:
  *   SYS_WRITE      = 2  — fd-based write (fd=1 → stdout)
@@ -868,7 +867,7 @@ __declspec(dllexport) DWORD GetFileSize(HANDLE h, DWORD* lpFileSizeHigh)
 }
 
 /* ------------------------------------------------------------------
- * Time queries (slice 20)
+ * Time queries
  *
  * SYS_GETTIME_FT = 17 — Windows FILETIME (100 ns ticks since 1601).
  * SYS_NOW_NS     = 18 — nanoseconds since boot (HPET-backed).
@@ -904,7 +903,7 @@ __declspec(dllexport) BOOL QueryPerformanceFrequency(long long* lpFrequency)
 }
 
 /* ------------------------------------------------------------------
- * Heap aliases (slice 20)
+ * Heap aliases
  *
  * These all alias to the per-process heap via SYS_HEAP_*.
  * GetProcessHeap returns a sentinel; HeapAlloc/Free/Size/ReAlloc
@@ -977,7 +976,7 @@ __declspec(dllexport) BOOL HeapDestroy(HANDLE hHeap)
 }
 
 /* ------------------------------------------------------------------
- * Locale / code page (slice 20)
+ * Locale / code page
  *
  * v0 reports a US-English / Latin-1 locale across the board.
  * Programs that branch on these mostly just want a sane default.
@@ -1000,7 +999,7 @@ __declspec(dllexport) BOOL IsValidCodePage(UINT codepage)
 }
 
 /* ------------------------------------------------------------------
- * MultiByteToWideChar / WideCharToMultiByte (slice 20)
+ * MultiByteToWideChar / WideCharToMultiByte
  *
  * v0 only supports a 1:1 byte-to-wchar conversion (low byte of
  * the wchar = the source byte). Sufficient for ASCII and
@@ -1065,7 +1064,7 @@ __declspec(dllexport) int WideCharToMultiByte(UINT codepage, DWORD dwFlags, cons
 }
 
 /* ------------------------------------------------------------------
- * TLS slots (slice 21)
+ * TLS slots
  *
  * SYS_TLS_ALLOC = 34 / FREE = 35 / GET = 36 / SET = 37.
  * Per-process TLS table backs all four. TLS_OUT_OF_INDEXES =
@@ -1105,7 +1104,7 @@ __declspec(dllexport) BOOL TlsSetValue(DWORD slot, void* value)
 }
 
 /* ------------------------------------------------------------------
- * Win32 sync primitives — handle-based (slice 21)
+ * Win32 sync primitives — handle-based
  *
  * Kernel state lives in Process tables (mutex, event,
  * semaphore, thread). Handles are kWin32{Mutex,Event,Sem,Thread}
@@ -1240,7 +1239,7 @@ __declspec(dllexport) DWORD WaitForSingleObjectEx(HANDLE h, DWORD timeout_ms, BO
 }
 
 /* ------------------------------------------------------------------
- * CriticalSection (slice 22)
+ * CriticalSection
  *
  * CRITICAL_SECTION is a 40-byte caller-owned struct. v0 uses the
  * first 16 bytes as:
@@ -1354,7 +1353,7 @@ __declspec(dllexport) BOOL TryEnterCriticalSection(void* cs)
 }
 
 /* ------------------------------------------------------------------
- * SRWLock — single 8-byte slot, exclusive only (slice 22)
+ * SRWLock — single 8-byte slot, exclusive only
  *
  * v0 collapses shared/exclusive to exclusive. Real Win32 SRW
  * locks are NOT reentrant — second acquire from the same thread
@@ -1413,7 +1412,7 @@ __declspec(dllexport) BOOL TryAcquireSRWLockShared(void* lock)
 }
 
 /* ------------------------------------------------------------------
- * InitOnceExecuteOnce (slice 22)
+ * InitOnceExecuteOnce
  *
  * INIT_ONCE is an 8-byte slot we interpret as:
  *     0 = untouched
@@ -1446,7 +1445,7 @@ __declspec(dllexport) BOOL InitOnceExecuteOnce(void* InitOnce, InitOnceFn InitFn
 }
 
 /* ------------------------------------------------------------------
- * Thread management (slice 23)
+ * Thread management
  *
  * SYS_THREAD_CREATE = 45 (rdi=start_va, rsi=param) -> handle
  * SYS_THREAD_EXIT_CODE = 55 (rdi=handle) -> exit code
@@ -1526,7 +1525,7 @@ __declspec(dllexport) BOOL GetExitCodeProcess(HANDLE hProcess, DWORD* lpExitCode
 }
 
 /* ------------------------------------------------------------------
- * File system (slice 30) — Find*, Copy/Move/Delete, dir ops.
+ * File system — Find*, Copy/Move/Delete, dir ops.
  * All report "not found" / ACCESS_DENIED to keep real programs
  * on their graceful-failure paths.
  * ------------------------------------------------------------------ */
@@ -1623,7 +1622,8 @@ __declspec(dllexport) DWORD GetFileAttributesW(const wchar_t16* path)
  * success (TRUE). Callers that care check GetFileAttributes
  * afterward and see the attributes unchanged — they proceed
  * on the assumption we lost the write; same observable as
- * "read-only FS". batch37 of hello_winapi pins TRUE. */
+ * "read-only FS". The reg-fattr smoke test in hello_winapi
+ * pins this at TRUE. */
 __declspec(dllexport) BOOL SetFileAttributesA(const char* path, DWORD attrs)
 {
     (void)path;
@@ -1671,8 +1671,8 @@ __declspec(dllexport) BOOL FlushFileBuffers(HANDLE h)
 }
 
 /* System-directory queries — all report L"X:\\" (4 chars incl
- * NUL, 3 chars excl NUL). Matches the flat-stub semantics that
- * hello_winapi's batch35 pins.
+ * NUL, 3 chars excl NUL). Matches the flat-stub semantics
+ * that hello_winapi's sysdir smoke test pins.
  *
  * Signatures:
  *   DWORD  GetTempPathW(DWORD size, LPWSTR buf);      size-first

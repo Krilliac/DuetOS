@@ -348,7 +348,7 @@ struct Process
     u64 dll_image_count;
 
     // Win32 file-handle table — backs CreateFileW / ReadFile /
-    // CloseHandle / SetFilePointerEx (batch 24). Each slot is
+    // CloseHandle / SetFilePointerEx. Each slot is
     // tagged by `kind`: a Ramfs-backed slot stores a pointer to
     // the resolved `.rodata` RamfsNode; a Fat32-backed slot
     // stores a (volume_index, dir_entry) snapshot so reads can
@@ -363,7 +363,7 @@ struct Process
     // The "/disk/" prefix is the smallest credible mount-table
     // stand-in: it lets a Win32 PE name a real on-disk file
     // without yet building a real mount table or drive-letter
-    // resolver. A future slice replaces this with named mounts
+    // resolver. A follow-up replaces this with named mounts
     // (`/mnt/<name>/...`) once those exist.
     //
     // Returned handles to user mode are `kWin32HandleBase + idx`
@@ -394,7 +394,7 @@ struct Process
     Win32FileHandle win32_handles[kWin32HandleCap];
 
     // Win32 mutex table — backs CreateMutexW / WaitForSingleObject /
-    // ReleaseMutex (batch 26). Per-mutex owner pointer + recursion
+    // ReleaseMutex. Per-mutex owner pointer + recursion
     // counter + waitqueue. Real blocking semantics; uses the
     // existing sched::WaitQueue + WaitQueueBlockTimeout path.
     //
@@ -420,7 +420,7 @@ struct Process
     Win32MutexHandle win32_mutexes[kWin32MutexCap];
 
     // Win32 event table — backs CreateEventW / SetEvent /
-    // ResetEvent / WaitForSingleObject (batch 45). Simpler than
+    // ResetEvent / WaitForSingleObject. Simpler than
     // mutexes: no owner, no recursion, just a signaled flag
     // with a waitqueue. Manual-reset events stay signaled until
     // ResetEvent; auto-reset events wake one waiter then clear
@@ -441,7 +441,7 @@ struct Process
     static constexpr u64 kWin32EventBase = 0x300;
     Win32EventHandle win32_events[kWin32EventCap];
 
-    // Win32 thread table — backs CreateThread (batch ~47). Each
+    // Win32 thread table — backs CreateThread. Each
     // slot carries a pointer to the scheduler Task that was
     // spawned for the thread + a small bit of lifecycle state.
     // Handles run kWin32ThreadBase + idx (= 0x400..0x407),
@@ -469,7 +469,7 @@ struct Process
     {
         bool in_use;
         u8 _pad[3];
-        // Win32 exit-code tracking (batch 59). Starts at
+        // Win32 exit-code tracking. Starts at
         // STILL_ACTIVE (0x103); overwritten by the SYS_EXIT
         // path when the owning task dies. GetExitCodeThread
         // reads this field via SYS_THREAD_EXIT_CODE and
@@ -483,8 +483,8 @@ struct Process
     Win32ThreadHandle win32_threads[kWin32ThreadCap];
 
     // Win32 counting-semaphore table — backs CreateSemaphoreW /
-    // ReleaseSemaphore / WaitForSingleObject on a semaphore handle
-    // (batch 54). Handles run kWin32SemaphoreBase + idx
+    // ReleaseSemaphore / WaitForSingleObject on a semaphore handle.
+    // Handles run kWin32SemaphoreBase + idx
     // (= 0x500..0x507), disjoint from every other Win32 range.
     //
     // Semantics:
@@ -521,7 +521,7 @@ struct Process
     u64 thread_stack_cursor;
 
     // Win32 TLS (Thread-Local Storage) slots — backs TlsAlloc /
-    // TlsGetValue / TlsSetValue / TlsFree (batch 46). v0 is
+    // TlsGetValue / TlsSetValue / TlsFree. v0 is
     // single-threaded per process, so "thread-local" is just
     // "process-local" — but the slot allocator + per-slot
     // storage give MSVC CRT's TLS-using startup paths (errno,
@@ -536,13 +536,13 @@ struct Process
     u64 tls_slot_value[kWin32TlsCap];
 
     // Win32 VirtualAlloc bump arena — backs VirtualAlloc /
-    // VirtualFree / VirtualProtect (batch 28). Each SYS_VMAP
+    // VirtualFree / VirtualProtect. Each SYS_VMAP
     // request rounds the size up to page multiples, allocates
     // fresh frames via AllocateFrame, maps them RW + NX + User
     // at the current cursor VA, then bumps the cursor.
     //
     // v0 is bump-only — VirtualFree is documented as a leak.
-    // A second slice adds a free list once a real workload
+    // A follow-up adds a free list once a real workload
     // proves the leak matters. The cap is generous enough for
     // most CRT startups (heap fallback, TLS slot tables,
     // __chkstk probe area) to fit without needing reclaim.

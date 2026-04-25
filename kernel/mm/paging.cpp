@@ -159,7 +159,7 @@ void EnableKernelProtectionBits()
 
     // CR0.WP (bit 16) — Write Protect. With WP=0 (default), ring-0
     // stores bypass the page-table W bit: the kernel can overwrite
-    // any page regardless of its RO flag. That defeats slice-10b's
+    // any page regardless of its RO flag. That defeats the prior
     // kernel-image W^X — a buggy kernel pointer could silently
     // scribble .text. Setting WP=1 enforces W against ring 0 too,
     // so any write to a RO page #PFs whether the writer is user or

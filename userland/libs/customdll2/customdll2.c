@@ -1,8 +1,8 @@
 /*
  * userland/libs/customdll2/customdll2.c
  *
- * Second freestanding test DLL, introduced by stage-2 slice 9
- * to exercise the multi-DLL preload path in SpawnPeFile. The
+ * Second freestanding test DLL — exercises the multi-DLL
+ * preload path in SpawnPeFile. The
  * loader now pre-maps BOTH customdll.dll and customdll2.dll
  * into every Win32-imports PE's address space, and
  * ResolveImports walks the full array on each import lookup.

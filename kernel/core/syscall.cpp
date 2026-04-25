@@ -844,7 +844,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
         // foreign handle (e.g. a process pseudo-handle passed by
         // mistake) should still succeed with BOOL TRUE and a
         // benign STILL_ACTIVE (0x103) payload — that's what the
-        // batch-10 stub did before this batch, and the
+        // stub did before this set, and the
         // hello_winapi test pins this behavior. So: return
         // STILL_ACTIVE for any handle outside our own thread
         // range, return the real exit_code only for handles we

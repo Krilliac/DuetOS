@@ -1,7 +1,7 @@
 /*
  * userland/libs/ucrtbase/ucrtbase.c
  *
- * Freestanding DuetOS ucrtbase.dll. Retires the batch-6 / 9
+ * Freestanding DuetOS ucrtbase.dll. Retires the prior
  * UCRT runtime stubs in kernel/subsystems/win32/stubs.cpp.
  *
  * Covers:
@@ -73,7 +73,7 @@ __declspec(dllexport) void* realloc(void* ptr, size_t size)
  * argument and treats them as plain malloc/free. Our heap
  * returns 8-byte-aligned blocks anyway, which covers every
  * caller today (CRT callers that ask for 16 or 32 get 8, but
- * no existing PE has tripped on that yet). A future slice can
+ * no existing PE has tripped on that yet). A follow-up can
  * add real alignment by over-allocating + storing a back-
  * pointer. */
 __declspec(dllexport) void* _aligned_malloc(size_t size, size_t alignment)
@@ -110,8 +110,8 @@ __declspec(dllexport) UCRT_NORETURN void _exit(int code)
  * process init. Real implementations iterate function-pointer
  * tables (_initterm) or install error handlers. Our PEs have
  * been running with flat-stub return-zero versions of these
- * since batch 6 — preserving that behaviour keeps every
- * existing PE stable.
+ * — preserving that behaviour keeps every existing PE
+ * stable.
  * ------------------------------------------------------------------ */
 
 /* void _initterm(PVPFV first, PVPFV last); — iterate the
@@ -198,7 +198,7 @@ __declspec(dllexport) NO_BUILTIN_STR char* strchr(const char* s, int c)
 }
 
 /* ------------------------------------------------------------------
- * Number conversion (slice 17)
+ * Number conversion
  *
  * Retires the api-ms-win-crt-convert atoi / atol / strtol /
  * strtoul aliases. Small loops, well-defined semantics, no
@@ -351,7 +351,7 @@ __declspec(dllexport) atoi_ulong strtoul(const char* s, char** endptr, int base)
 }
 
 /* ------------------------------------------------------------------
- * C++ runtime helpers (slice 17)
+ * C++ runtime helpers
  *
  * terminate() / _invalid_parameter_noinfo_noreturn() — the
  * C++ runtime's abort paths. Both map to SYS_EXIT with a
@@ -372,7 +372,7 @@ __declspec(dllexport) UCRT_NORETURN void _invalid_parameter_noinfo_noreturn(void
 }
 
 /* ------------------------------------------------------------------
- * Minimal printf family (slice 30)
+ * Minimal printf family
  *
  * Supports: %d, %i, %u, %x, %X, %p, %s, %c, %%, with optional
  * width (unpadded or 0-padded) and long/long-long modifiers
@@ -647,7 +647,7 @@ __declspec(dllexport) int putchar(int c)
 }
 
 /* ------------------------------------------------------------------
- * File streams (slice 30)
+ * File streams
  *
  * v0 represents FILE* as a Win32 HANDLE wrapped in a 24-byte
  * struct allocated on the process heap (to match fopen() ->
@@ -965,7 +965,7 @@ __declspec(dllexport) int vprintf(const char* fmt, va_list ap)
 }
 
 /* ------------------------------------------------------------------
- * Extended string / memory intrinsics (slice 30)
+ * Extended string / memory intrinsics
  * ------------------------------------------------------------------ */
 
 __declspec(dllexport) NO_BUILTIN_STR int strncmp(const char* a, const char* b, size_t n)
@@ -1048,7 +1048,7 @@ __declspec(dllexport) int _strnicmp(const char* a, const char* b, size_t n)
 }
 
 /* ------------------------------------------------------------------
- * abs, isdigit / isalpha family (slice 30)
+ * abs, isdigit / isalpha family
  *
  * Trivial — ASCII-only, fine for v0.
  * ------------------------------------------------------------------ */
@@ -1153,7 +1153,7 @@ __declspec(dllexport) void* bsearch(const void* key, const void* base, size_t n,
 }
 
 /* ------------------------------------------------------------------
- * Minimal sscanf (slice 33)
+ * Minimal sscanf
  *
  * Handles %d / %u / %x / %s / %c / %% with optional width.
  * No floating point, no %n, no character classes. Suitable
@@ -1342,7 +1342,7 @@ __declspec(dllexport) int sscanf(const char* buf, const char* fmt, ...)
 }
 
 /* ------------------------------------------------------------------
- * rand / srand (slice 33) — SPLITMIX64 (deterministic).
+ * rand / srand — SPLITMIX64 (deterministic).
  * ------------------------------------------------------------------ */
 
 static unsigned long long g_rand_state = 0xDEADBEEFCAFEBABEULL;
@@ -1360,7 +1360,7 @@ __declspec(dllexport) int rand(void)
 }
 
 /* ------------------------------------------------------------------
- * getenv / _putenv (slice 33) — v0 has no env block. All lookups
+ * getenv / _putenv — v0 has no env block. All lookups
  * report "not found"; _putenv silently succeeds.
  * ------------------------------------------------------------------ */
 

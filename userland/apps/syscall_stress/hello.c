@@ -1,7 +1,7 @@
 /*
  * userland/apps/syscall_stress/hello.c
  *
- * Drives the batch-51 Win32 additions:
+ * Drives the Win32 additions:
  *   - OutputDebugStringA         → SYS_DEBUG_PRINT
  *   - GetProcessTimes            → zero-fill stub
  *   - GetThreadTimes             → alias of GetProcessTimes
@@ -24,7 +24,7 @@
  *
  * Each child thread calls ExitThread(0x42) to exit explicitly
  * (exercises the ExitThread stub — the thread-exit trampoline
- *  fallback from batch 50 is the non-explicit path).
+ *  fallback is the non-explicit path).
  */
 
 typedef void* HANDLE;

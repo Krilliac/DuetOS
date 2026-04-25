@@ -256,7 +256,7 @@ enum SyscallNumber : u64
     // ours on return. Backs Win32 WaitForSingleObject / WaitForSingleObjectEx
     // for mutex handles only — handles outside the mutex range
     // hit the user-mode stub's pseudo-signal path (return 0 for
-    // events / threads / etc., preserving the slice-10 semantics).
+    // events / threads / etc., preserving the semantics).
     SYS_MUTEX_WAIT = 26,
 
     // SYS_MUTEX_RELEASE: rdi = mutex handle. Returns 0 on
@@ -514,7 +514,7 @@ enum SyscallNumber : u64
     // Returns the recorded exit code (u32) as u64, or 0x103
     // (STILL_ACTIVE) if the thread is still running. Returns
     // u64(-1) on bad handle. The kernel writes this slot from
-    // SYS_EXIT when a Win32 thread task dies (batch 59).
+    // SYS_EXIT when a Win32 thread task dies.
     // Backs Win32 GetExitCodeThread.
     SYS_THREAD_EXIT_CODE = 55,
 
@@ -542,8 +542,8 @@ enum SyscallNumber : u64
     // the native side.
     //
     // Moved to 56 from the original 46 during the merge of
-    // claude/refactor-inspect-command into the win32 batch-51-60
-    // branch — the win32 batches had already published 46..55.
+    // claude/refactor-inspect-command into the win32 development
+    // branch — the win32 work had already published 46..55.
     SYS_NT_INVOKE = 56,
 
     // SYS_DLL_PROC_ADDRESS: Win32 GetProcAddress, table-backed.
@@ -559,7 +559,7 @@ enum SyscallNumber : u64
     // name not exported, forwarder — forwarder chasing not yet
     // implemented).
     //
-    // Stage-2 slice 4 of the DLL-loader track. Replaces the
+    // Part of the DLL-loader work. Replaces the
     // return-zero GetProcAddress stub. See
     // .claude/knowledge/pe-eat-dll-loader-v0.md.
     SYS_DLL_PROC_ADDRESS = 57,

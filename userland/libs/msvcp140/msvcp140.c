@@ -2,7 +2,8 @@
  * userland/libs/msvcp140/msvcp140.c
  *
  * Freestanding DuetOS msvcp140.dll — the C++ std:: runtime
- * DLL. Retires 17 batch-13a flat-stub rows.
+ * DLL. Retires 17 flat-stub rows that previously covered the
+ * std:: throw helpers and ostream surface.
  *
  * Real MSVCP140 is huge (thousands of exports). This v0 covers
  * only the subset real-world PEs (like windows-kill.exe) import

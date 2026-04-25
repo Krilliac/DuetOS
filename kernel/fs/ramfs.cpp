@@ -349,7 +349,7 @@ constinit RamfsNode k_trusted_bin_windowed_hello = {
     .file_size = generated::kBinWindowedHelloBytes_len,
 };
 
-// /bin/customdll_test.exe — stage-2 slice 6 end-to-end fixture.
+// /bin/customdll_test.exe — DLL-loader end-to-end fixture.
 // Imports CustomAdd / CustomMul / CustomVersion from
 // customdll.dll (loaded by SpawnPeFile before PeLoad, resolved
 // by ResolveImports through the via-DLL path). Exits with
