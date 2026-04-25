@@ -1,4 +1,4 @@
-#include "stubs.h"
+#include "thunks.h"
 
 #include "../../arch/x86_64/serial.h"
 #include "proc_env.h"
@@ -10,15 +10,20 @@ namespace
 {
 
 // ---------------------------------------------------------------
-// Stub bytecode.
+// Thunk bytecode.
 //
-// Each entry is a handful of raw x86-64 instructions, packed
-// back-to-back. The layout is:
+// See `thunks.h` for the architectural overview — what a thunk
+// is, why the bytes are hand-assembled into a single contiguous
+// `constexpr u8[]`, and how IAT slots are wired to offsets in
+// this array.
 //
-//   offset 0x00:  ExitProcess stub  (9 bytes)
+// Each entry below is a handful of raw x86-64 instructions,
+// packed back-to-back. The layout is:
+//
+//   offset 0x00:  ExitProcess thunk  (9 bytes)
 //
 // Future entries append at the current end. IAT slots point
-// at (kWin32StubsVa + entry.offset), so stable offsets matter
+// at (kWin32ThunksVa + entry.offset), so stable offsets matter
 // only within a single boot — we regenerate + re-map the page
 // per process anyway, no persistence between runs.
 //
@@ -28,11 +33,21 @@ namespace
 // runtime-allocated frame, (c) a .S file would mean a second
 // user-mode target in the build which is a premature
 // abstraction for v0.
+//
+// Reading the file: each `kOff<Name>` is the offset of a thunk
+// inside `kThunksBytes`; the byte rows that follow with `// 0x<addr>`
+// comments are the disassembly of that thunk, with the Win32 ABI
+// → DuetOS ABI translation written out in inline comments.
 // ---------------------------------------------------------------
 
-// Stub offsets. Kept as named constants so the table below
+// Thunk offsets. Kept as named constants so the table below
 // stays readable and so two exports (WriteFile + WriteConsoleA)
 // can alias to the same offset without duplicating the code.
+//
+// Names containing `Return*` / `MissLogger` / `CritSecNop` flag
+// the genuine no-op stubs (constant returners, miss loggers,
+// single-byte `ret`s). Everything else is a real ABI-translation
+// thunk.
 constexpr u32 kOffExitProcess = 0x00;                    // batch 1 — 9 bytes
 constexpr u32 kOffGetStdHandle = 0x09;                   // batch 1 — 3 bytes
 constexpr u32 kOffWriteFile = 0x0C;                      // batch 1 — 44 bytes
@@ -142,7 +157,7 @@ constexpr u32 kOffSetEventReal = 0x746;          // batch 45 — 15 bytes
 constexpr u32 kOffResetEventReal = 0x755;        // batch 45 — 15 bytes
 // NOTE: kOffWaitForObj2 is retired as of batch 54. All imports
 // now route through kOffWaitForObj3 which adds the semaphore
-// range. The v2 bytes remain inside kStubsBytes (dead code) for
+// range. The v2 bytes remain inside kThunksBytes (dead code) for
 // a future slice that wants to diff the two; unused constant is
 // marked [[maybe_unused]] to suppress the warning.
 [[maybe_unused]] constexpr u32 kOffWaitForObj2 = 0x764; // batch 45 — 66 bytes (mutex+event-aware)
@@ -159,7 +174,7 @@ constexpr u32 kOffNtQuerySystemTimeReal = 0x853;        // batch 49 — 16 bytes
 constexpr u32 kOffNtQueryPerfCounterReal = 0x863;       // batch 49 — 28 bytes
 constexpr u32 kOffCreateThreadReal = 0x87F;             // batch 50 — 39 bytes (saves rdi+rsi)
 // ThreadExitTramp: offset 0x8A6, 6 bytes. Public VA exported as
-// duetos::win32::kWin32ThreadExitTrampVa in stubs.h — keep in sync.
+// duetos::win32::kWin32ThreadExitTrampVa in thunks.h — keep in sync.
 
 // === Batch 51: ExitThread + OutputDebugStringA + GetProcessTimes
 // + GetThreadTimes + GetSystemTimes + GlobalMemoryStatusEx +
@@ -353,7 +368,7 @@ constexpr u32 kOffGdiDrawTextW = 0x1019; // render/drivers — 25 bytes
 constexpr u32 kOffGetSysColor = 0x1032;      // render/drivers — 11 bytes
 constexpr u32 kOffGetSysColorBrush = 0x103D; // render/drivers — 11 bytes
 
-constexpr u8 kStubsBytes[] = {
+constexpr u8 kThunksBytes[] = {
     // --- ExitProcess (offset 0x00, 9 bytes) --------------------
     // Windows x64 ABI: first arg (uExitCode) in RCX.
     // DuetOS native ABI: syscall # in RAX, first arg in RDI,
@@ -2513,7 +2528,7 @@ constexpr u8 kStubsBytes[] = {
 
     // --- ThreadExitTramp (offset 0x8A6, 6 bytes) ---------------
     // Landing site when a Win32 thread proc returns. DoThreadCreate
-    // writes (kWin32StubsVa + 0x8A2) to [stack_top - 8] so the
+    // writes (kWin32ThunksVa + 0x8A2) to [stack_top - 8] so the
     // thread proc's final `ret` pops this VA into RIP. The thread
     // proc's return value is still in EAX (Win32 __stdcall). We
     // copy it to EDI (SYS_EXIT's first arg) then issue SYS_EXIT(0).
@@ -3801,28 +3816,28 @@ constexpr u8 kStubsBytes[] = {
     0xC3,                         // 0x1047 ret
 };
 
-static_assert(sizeof(kStubsBytes) <= 8192, "Win32 stubs page fits in two 4 KiB pages");
-static_assert(sizeof(kStubsBytes) == 0x1048, "stub layout drifted; update kOff* constants");
+static_assert(sizeof(kThunksBytes) <= 8192, "Win32 thunks page fits in two 4 KiB pages");
+static_assert(sizeof(kThunksBytes) == 0x1048, "thunk layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
-// sync with the public proc-env layout constants. The stub
-// bytes encode 0x65000000 and 0x65000008 directly; if stubs.h
+// sync with the public proc-env layout constants. The thunk
+// bytes encode 0x65000000 and 0x65000008 directly; if proc_env.h
 // moves the page VA or the argc / argv-ptr offsets, these
 // bytes must follow.
-static_assert(kProcEnvVa == 0x65000000ULL, "proc-env page VA no longer matches __p___argc stub bytes");
-static_assert(kProcEnvArgcOff == 0x00, "argc offset no longer matches __p___argc stub bytes");
-static_assert(kProcEnvArgvPtrOff == 0x08, "argv-ptr offset no longer matches __p___argv stub bytes");
-static_assert(kProcEnvCommodeOff == 0x200, "commode offset no longer matches __p__commode stub bytes");
+static_assert(kProcEnvVa == 0x65000000ULL, "proc-env page VA no longer matches __p___argc thunk bytes");
+static_assert(kProcEnvArgcOff == 0x00, "argc offset no longer matches __p___argc thunk bytes");
+static_assert(kProcEnvArgvPtrOff == 0x08, "argv-ptr offset no longer matches __p___argv thunk bytes");
+static_assert(kProcEnvCommodeOff == 0x200, "commode offset no longer matches __p__commode thunk bytes");
 static_assert(kProcEnvUnhandledFilterOff == 0x600,
               "unhandled-filter offset no longer matches SetUnhandledExceptionFilter stub bytes");
 
-struct StubEntry
+struct ThunkEntry
 {
     const char* dll;
     const char* func;
     u32 offset;
 };
 
-constexpr StubEntry kStubsTable[] = {
+constexpr ThunkEntry kThunksTable[] = {
     // Batch 1 — console I/O
     {"kernel32.dll", "ExitProcess", kOffExitProcess},
     {"kernel32.dll", "GetStdHandle", kOffGetStdHandle},
@@ -3945,7 +3960,7 @@ constexpr StubEntry kStubsTable[] = {
     //   UnhandledExceptionFilter    — 0 = EXCEPTION_CONTINUE_SEARCH.
     // GetModuleHandleA / GetModuleHandleW / GetProcAddress moved to
     // batch 25 below — GetModuleHandleW(NULL) now returns the EXE
-    // image base instead of always-zero. The Win32StubsLookup walk
+    // image base instead of always-zero. The Win32ThunksLookup walk
     // returns the first match, so the real entries take precedence
     // by appearing earlier in the table.
     {"kernel32.dll", "IsDebuggerPresent", kOffReturnZero},
@@ -5220,7 +5235,7 @@ constexpr StubEntry kStubsTable[] = {
     // to cover to run a non-console Windows PE. Every entry below
     // aliases to one of the shared canned stubs — kOffReturnZero
     // (xor eax,eax; ret) or kOffReturnOne (mov eax, 1; ret) — so no
-    // new stub bytes land; the file's static_assert on kStubsBytes
+    // new stub bytes land; the file's static_assert on kThunksBytes
     // size stays valid.
     //
     // Semantics chosen per MSDN so a well-behaved PE sees "call
@@ -5410,7 +5425,7 @@ constexpr StubEntry kStubsTable[] = {
     {"kernel32.dll", "FileTimeToSystemTime", kOffFileTimeToSystemTime},
 };
 
-struct StubHashEntry
+struct ThunkHashEntry
 {
     u64 key_hash;
     u32 stub_index;
@@ -5429,7 +5444,7 @@ constexpr u64 Fnv1a64Append(u64 hash, char c)
     return (hash ^ static_cast<u8>(c)) * kFnvPrime;
 }
 
-constexpr u64 StubLookupHash(const char* dll, const char* func)
+constexpr u64 ThunkLookupHash(const char* dll, const char* func)
 {
     constexpr u64 kFnvOffsetBasis = 14695981039346656037ULL;
     u64 hash = kFnvOffsetBasis;
@@ -5447,17 +5462,17 @@ constexpr u64 StubLookupHash(const char* dll, const char* func)
     return hash;
 }
 
-template <u64 N> struct StubHashTable
+template <u64 N> struct ThunkHashTable
 {
-    StubHashEntry entries[N];
+    ThunkHashEntry entries[N];
 };
 
-template <u64 N> consteval StubHashTable<N> BuildStubHashTable(const StubEntry (&table)[N])
+template <u64 N> consteval ThunkHashTable<N> BuildThunkHashTable(const ThunkEntry (&table)[N])
 {
-    StubHashTable<N> sorted{};
+    ThunkHashTable<N> sorted{};
     for (u64 i = 0; i < N; ++i)
     {
-        sorted.entries[i].key_hash = StubLookupHash(table[i].dll, table[i].func);
+        sorted.entries[i].key_hash = ThunkLookupHash(table[i].dll, table[i].func);
         sorted.entries[i].stub_index = static_cast<u32>(i);
     }
 
@@ -5465,7 +5480,7 @@ template <u64 N> consteval StubHashTable<N> BuildStubHashTable(const StubEntry (
     // branch-light and cache-friendly.
     for (u64 i = 1; i < N; ++i)
     {
-        StubHashEntry value = sorted.entries[i];
+        ThunkHashEntry value = sorted.entries[i];
         u64 j = i;
         while (j > 0 && sorted.entries[j - 1].key_hash > value.key_hash)
         {
@@ -5477,9 +5492,9 @@ template <u64 N> consteval StubHashTable<N> BuildStubHashTable(const StubEntry (
     return sorted;
 }
 
-constexpr auto kSortedStubHashes = BuildStubHashTable(kStubsTable);
-constexpr u64 kSortedStubHashCount = sizeof(kSortedStubHashes.entries) / sizeof(kSortedStubHashes.entries[0]);
-static_assert(kSortedStubHashCount == (sizeof(kStubsTable) / sizeof(kStubsTable[0])), "hash table size mismatch");
+constexpr auto kSortedThunkHashes = BuildThunkHashTable(kThunksTable);
+constexpr u64 kSortedThunkHashCount = sizeof(kSortedThunkHashes.entries) / sizeof(kSortedThunkHashes.entries[0]);
+static_assert(kSortedThunkHashCount == (sizeof(kThunksTable) / sizeof(kThunksTable[0])), "hash table size mismatch");
 
 // Case-insensitive strcmp for ASCII. Win32 DLL name
 // capitalisation is inconsistent (lld-link writes
@@ -5515,16 +5530,16 @@ bool AsciiEqual(const char* a, const char* b)
     return *a == 0 && *b == 0;
 }
 
-#if defined(DUETOS_WIN32_STUBS_VALIDATE_LINEAR)
-bool Win32StubsLookupLinear(const char* dll, const char* func, u64* out_va, bool* out_is_noop)
+#if defined(DUETOS_WIN32_THUNKS_VALIDATE_LINEAR)
+bool Win32ThunksLookupLinear(const char* dll, const char* func, u64* out_va, bool* out_is_noop)
 {
-    for (const StubEntry& e : kStubsTable)
+    for (const ThunkEntry& e : kThunksTable)
     {
         if (!AsciiCaseEqual(e.dll, dll))
             continue;
         if (!AsciiEqual(e.func, func))
             continue;
-        *out_va = kWin32StubsVa + e.offset;
+        *out_va = kWin32ThunksVa + e.offset;
         if (out_is_noop != nullptr)
         {
             *out_is_noop = (e.offset == kOffReturnZero) || (e.offset == kOffReturnOne) ||
@@ -5536,29 +5551,29 @@ bool Win32StubsLookupLinear(const char* dll, const char* func, u64* out_va, bool
 }
 #endif
 
-bool Win32StubsLookupHashed(const char* dll, const char* func, u64* out_va, bool* out_is_noop)
+bool Win32ThunksLookupHashed(const char* dll, const char* func, u64* out_va, bool* out_is_noop)
 {
-    const u64 key_hash = StubLookupHash(dll, func);
+    const u64 key_hash = ThunkLookupHash(dll, func);
     u64 lo = 0;
-    u64 hi = kSortedStubHashCount;
+    u64 hi = kSortedThunkHashCount;
     while (lo < hi)
     {
         const u64 mid = lo + ((hi - lo) / 2);
-        if (kSortedStubHashes.entries[mid].key_hash < key_hash)
+        if (kSortedThunkHashes.entries[mid].key_hash < key_hash)
             lo = mid + 1;
         else
             hi = mid;
     }
 
-    for (u64 i = lo; i < kSortedStubHashCount; ++i)
+    for (u64 i = lo; i < kSortedThunkHashCount; ++i)
     {
-        const StubHashEntry& probe = kSortedStubHashes.entries[i];
+        const ThunkHashEntry& probe = kSortedThunkHashes.entries[i];
         if (probe.key_hash != key_hash)
             break;
-        const StubEntry& e = kStubsTable[probe.stub_index];
+        const ThunkEntry& e = kThunksTable[probe.stub_index];
         if (!AsciiCaseEqual(e.dll, dll) || !AsciiEqual(e.func, func))
             continue;
-        *out_va = kWin32StubsVa + e.offset;
+        *out_va = kWin32ThunksVa + e.offset;
         if (out_is_noop != nullptr)
         {
             *out_is_noop = (e.offset == kOffReturnZero) || (e.offset == kOffReturnOne) ||
@@ -5571,20 +5586,20 @@ bool Win32StubsLookupHashed(const char* dll, const char* func, u64* out_va, bool
 
 } // namespace
 
-void Win32StubsPopulate(u8* dst)
+void Win32ThunksPopulate(u8* dst)
 {
     if (dst == nullptr)
         return;
-    for (u64 i = 0; i < sizeof(kStubsBytes); ++i)
-        dst[i] = kStubsBytes[i];
+    for (u64 i = 0; i < sizeof(kThunksBytes); ++i)
+        dst[i] = kThunksBytes[i];
 }
 
-bool Win32StubsLookup(const char* dll, const char* func, u64* out_va)
+bool Win32ThunksLookup(const char* dll, const char* func, u64* out_va)
 {
-    return Win32StubsLookupKind(dll, func, out_va, nullptr);
+    return Win32ThunksLookupKind(dll, func, out_va, nullptr);
 }
 
-bool Win32StubsLookupCatchAll(u64* out_va)
+bool Win32ThunksLookupCatchAll(u64* out_va)
 {
     if (out_va == nullptr)
         return false;
@@ -5593,11 +5608,11 @@ bool Win32StubsLookupCatchAll(u64* out_va)
     // call site (returns 0), but each call emits a
     // [win32-miss] line so the boot log identifies, in real
     // time, exactly which unstubbed import the PE just reached.
-    *out_va = kWin32StubsVa + kOffMissLogger;
+    *out_va = kWin32ThunksVa + kOffMissLogger;
     return true;
 }
 
-bool Win32StubsLookupDataCatchAll(u64* out_va)
+bool Win32ThunksLookupDataCatchAll(u64* out_va)
 {
     if (out_va == nullptr)
         return false;
@@ -5637,15 +5652,15 @@ bool IsLikelyDataImport(const char* func)
     return false;
 }
 
-bool Win32StubsLookupKind(const char* dll, const char* func, u64* out_va, bool* out_is_noop)
+bool Win32ThunksLookupKind(const char* dll, const char* func, u64* out_va, bool* out_is_noop)
 {
     if (dll == nullptr || func == nullptr || out_va == nullptr)
         return false;
-    const bool found_hashed = Win32StubsLookupHashed(dll, func, out_va, out_is_noop);
-#if defined(DUETOS_WIN32_STUBS_VALIDATE_LINEAR)
+    const bool found_hashed = Win32ThunksLookupHashed(dll, func, out_va, out_is_noop);
+#if defined(DUETOS_WIN32_THUNKS_VALIDATE_LINEAR)
     u64 linear_va = 0;
     bool linear_noop = false;
-    const bool found_linear = Win32StubsLookupLinear(dll, func, &linear_va, &linear_noop);
+    const bool found_linear = Win32ThunksLookupLinear(dll, func, &linear_va, &linear_noop);
     if (found_hashed != found_linear ||
         (found_hashed && ((*out_va != linear_va) || ((out_is_noop != nullptr) && (*out_is_noop != linear_noop)))))
     {

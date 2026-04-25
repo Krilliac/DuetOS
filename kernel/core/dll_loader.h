@@ -20,8 +20,8 @@ namespace duetos::core
  *
  *   - A real `LoadLibraryW` that maps ntdll / kernel32 / user32
  *     per-process from on-disk DLLs and lets the IAT resolver
- *     patch via the DLL's EAT, retiring the flat `kStubsTable`
- *     lookup currently done by `Win32StubsLookup`.
+ *     patch via the DLL's EAT, retiring the flat `kThunksTable`
+ *     lookup currently done by `Win32ThunksLookup`.
  *
  * This header delivers only the first slice of that: **parse +
  * map + parse EAT**. Import resolution of the DLL itself (which

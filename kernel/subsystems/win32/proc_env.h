@@ -29,7 +29,7 @@
  *
  * Lives at a fixed user VA (kProcEnvVa = 0x65000000) in every
  * Win32-imports process. Companion to the R-X stubs page
- * (kWin32StubsVa, see stubs.h).
+ * (kWin32ThunksVa, see thunks.h).
  *
  * The CRT reads `argc = *__p___argc()` and `argv = *__p___argv()`.
  * `__p___argc` returns `kProcEnvVa + kProcEnvArgcOff` (type
