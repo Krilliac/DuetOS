@@ -34,6 +34,17 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # driver can produce the disk image.
 set(DUETOS_ARTIFACTS "" CACHE INTERNAL "Accumulated build artifacts")
 
+# Cleanroom-trace survey mode. OFF by default. When ON, the kernel
+# auto-dumps the cleanroom-trace ring buffer to COM1 once all
+# subsystems are online, and `/etc/profile` runs `crtrace show 256`
+# at shell startup. Useful for headless RE / CI surveys where you
+# want the trace contents without typing at the console. See
+# tools/cleanroom/run-trace-survey.sh for the canonical harness.
+option(DUETOS_CRTRACE_SURVEY "Enable cleanroom-trace boot-time + profile auto-dump" OFF)
+if(DUETOS_CRTRACE_SURVEY)
+    add_compile_definitions(DUETOS_CRTRACE_SURVEY=1)
+endif()
+
 add_subdirectory(kernel)
 
 # ----------------------------------------------------------------------------

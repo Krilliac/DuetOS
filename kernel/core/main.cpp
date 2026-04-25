@@ -66,6 +66,9 @@
 #include "../mm/frame_allocator.h"
 #include "../sync/spinlock.h"
 #include "auth.h"
+#ifdef DUETOS_CRTRACE_SURVEY
+#include "cleanroom_trace.h"
+#endif
 #include "firmware_loader.h"
 #include "heartbeat.h"
 #include "klog.h"
@@ -2318,6 +2321,41 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     duetos::core::StartHeartbeatThread();
 
     SerialWrite("[boot] All subsystems online. Entering idle loop.\n");
+
+#ifdef DUETOS_CRTRACE_SURVEY
+    // Survey-mode dump. The shell-side `crtrace show` command also
+    // mirrors to serial; this boot-time variant fires once all
+    // subsystems are online so headless CI runs capture the full
+    // ring without needing to drive the shell. Gated because the
+    // dump is hundreds of lines and noisy on normal interactive
+    // boots. Enable with `cmake -DDUETOS_CRTRACE_SURVEY=ON`.
+    {
+        const duetos::u32 cr_count = duetos::core::CleanroomTraceCount();
+        SerialWrite("=== CRTRACE BOOT DUMP BEGIN count=");
+        SerialWriteHex(cr_count);
+        SerialWrite(" ===\n");
+        for (duetos::u32 i = 0; i < cr_count; ++i)
+        {
+            duetos::core::CleanroomTraceEntry e{};
+            if (!duetos::core::CleanroomTraceRead(i, &e))
+                continue;
+            SerialWrite("CRTRACE ");
+            SerialWriteHex(i);
+            SerialWrite(" ");
+            SerialWrite(e.subsystem);
+            SerialWrite("::");
+            SerialWrite(e.event);
+            SerialWrite(" a=");
+            SerialWriteHex(e.a);
+            SerialWrite(" b=");
+            SerialWriteHex(e.b);
+            SerialWrite(" c=");
+            SerialWriteHex(e.c);
+            SerialWrite("\n");
+        }
+        SerialWrite("=== CRTRACE BOOT DUMP END ===\n");
+    }
+#endif
 
 #ifdef DUETOS_CANARY_DEMO
     // Compile-time-gated deliberate stack smash. Calls a helper that

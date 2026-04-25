@@ -42,6 +42,7 @@ set(DUETOS_KERNEL_SHARED_SOURCES
     core/result.cpp
     core/ring3_smoke.cpp
     core/runtime_checker.cpp
+    core/string.cpp
     subsystems/graphics/graphics.cpp
     subsystems/linux/ring3_smoke.cpp
     subsystems/linux/syscall.cpp
