@@ -1,8 +1,13 @@
 # DuetOS
 
-[![Latest release](https://img.shields.io/github/v/release/DuetOS/DuetOS?display_name=release)](https://github.com/DuetOS/DuetOS/releases)
+[![Release channel](https://img.shields.io/github/v/release/DuetOS/DuetOS/latest-release?label=release%20channel)](https://github.com/DuetOS/DuetOS/releases/tag/latest-release)
+[![Release downloads](https://img.shields.io/github/downloads/DuetOS/DuetOS/latest-release/total?label=release%20downloads)](https://github.com/DuetOS/DuetOS/releases/tag/latest-release)
+[![Debug channel](https://img.shields.io/github/v/release/DuetOS/DuetOS/latest-debug?include_prereleases&label=debug%20channel)](https://github.com/DuetOS/DuetOS/releases/tag/latest-debug)
+[![Debug downloads](https://img.shields.io/github/downloads/DuetOS/DuetOS/latest-debug/total?label=debug%20downloads)](https://github.com/DuetOS/DuetOS/releases/tag/latest-debug)
 
-Download the latest bootable ISO from the releases page: **[DuetOS Releases](https://github.com/DuetOS/DuetOS/releases)**.
+Download channel artifacts from: **[Release channel](https://github.com/DuetOS/DuetOS/releases/tag/latest-release)** / **[Debug channel](https://github.com/DuetOS/DuetOS/releases/tag/latest-debug)**.
+
+Channel releases are published from **tag builds** (`v*` tags). Regular CI artifact uploads in Actions are temporary and do not populate the Releases page.
 
 A general-purpose operating system, written from scratch, that runs
 Windows PE executables natively — not via a VM, not via Wine, not as an

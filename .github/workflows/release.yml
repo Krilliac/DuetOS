@@ -1,0 +1,156 @@
+name: release-channels
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      source_tag:
+        description: 'Version tag to build from (example: v0.1.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-channels-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-release-assets:
+    name: build release assets
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve source tag
+        id: source
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "tag=${{ inputs.source_tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout source tag
+        run: git checkout "${{ steps.source.outputs.tag }}"
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 lld-18 llvm-18 cmake ninja-build python3 \
+                                  grub-common grub-pc-bin grub-efi-amd64-bin xorriso mtools
+          sudo ln -sf /usr/bin/clang-18 /usr/local/bin/clang
+          sudo ln -sf /usr/bin/clang++-18 /usr/local/bin/clang++
+          sudo ln -sf /usr/bin/lld-link-18 /usr/local/bin/lld-link
+          sudo ln -sf /usr/bin/llvm-dlltool-18 /usr/local/bin/llvm-dlltool
+          sudo ln -sf /usr/bin/ld.lld-18 /usr/local/bin/ld.lld
+
+      - name: Build debug image
+        run: |
+          cmake --preset x86_64-debug
+          cmake --build build/x86_64-debug --parallel $(nproc)
+
+      - name: Build release image
+        run: |
+          cmake --preset x86_64-release
+          cmake --build build/x86_64-release --parallel $(nproc)
+
+      - name: Package assets
+        run: |
+          set -euo pipefail
+          mkdir -p dist/debug dist/release
+
+          cp build/x86_64-debug/duetos.iso dist/debug/duetos-debug.iso
+          cp build/x86_64-debug/kernel/duetos-kernel.elf dist/debug/duetos-kernel-debug.elf
+          sha256sum dist/debug/* > dist/debug/SHA256SUMS.txt
+
+          cp build/x86_64-release/duetos.iso dist/release/duetos-release.iso
+          cp build/x86_64-release/kernel/duetos-kernel.elf dist/release/duetos-kernel-release.elf
+          sha256sum dist/release/* > dist/release/SHA256SUMS.txt
+
+      - name: Upload packaged assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: duetos-release-channels-${{ steps.source.outputs.tag }}
+          if-no-files-found: error
+          path: dist/**
+          retention-days: 14
+
+  publish-debug-release:
+    name: publish debug channel
+    needs: build-release-assets
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Resolve source tag
+        id: source
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "tag=${{ inputs.source_tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download packaged assets
+        uses: actions/download-artifact@v4
+        with:
+          name: duetos-release-channels-${{ steps.source.outputs.tag }}
+          path: dist
+
+      - name: Publish debug release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest-debug
+          target_commitish: ${{ steps.source.outputs.tag }}
+          name: DuetOS Debug (from ${{ steps.source.outputs.tag }})
+          body: |
+            Rolling debug channel build from `${{ steps.source.outputs.tag }}`.
+          prerelease: true
+          make_latest: false
+          fail_on_unmatched_files: true
+          overwrite_files: true
+          files: |
+            dist/debug/duetos-debug.iso
+            dist/debug/duetos-kernel-debug.elf
+            dist/debug/SHA256SUMS.txt
+
+  publish-release-release:
+    name: publish release channel
+    needs: build-release-assets
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Resolve source tag
+        id: source
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "tag=${{ inputs.source_tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download packaged assets
+        uses: actions/download-artifact@v4
+        with:
+          name: duetos-release-channels-${{ steps.source.outputs.tag }}
+          path: dist
+
+      - name: Publish release release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest-release
+          target_commitish: ${{ steps.source.outputs.tag }}
+          name: DuetOS Release (from ${{ steps.source.outputs.tag }})
+          body: |
+            Rolling stable release channel build from `${{ steps.source.outputs.tag }}`.
+          prerelease: false
+          make_latest: true
+          fail_on_unmatched_files: true
+          overwrite_files: true
+          files: |
+            dist/release/duetos-release.iso
+            dist/release/duetos-kernel-release.elf
+            dist/release/SHA256SUMS.txt
