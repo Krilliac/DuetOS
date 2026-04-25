@@ -1,8 +1,8 @@
 # DuetOS
 
-[![duetos.iso downloads](https://img.shields.io/github/downloads/DuetOS/DuetOS/duetos.iso/total?label=duetos.iso%20downloads)](https://github.com/DuetOS/DuetOS/releases/latest/download/duetos.iso)
+[![Latest release](https://img.shields.io/github/v/release/DuetOS/DuetOS?display_name=release)](https://github.com/DuetOS/DuetOS/releases)
 
-Download the latest bootable ISO: **[duetos.iso](https://github.com/DuetOS/DuetOS/releases/latest/download/duetos.iso)**.
+Download the latest bootable ISO from the releases page: **[DuetOS Releases](https://github.com/DuetOS/DuetOS/releases)**.
 
 A general-purpose operating system, written from scratch, that runs
 Windows PE executables natively — not via a VM, not via Wine, not as an
