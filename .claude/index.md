@@ -90,6 +90,7 @@ _Read this at every session start (after git sync). Each row links to a detailed
 | Ring-3 adversarial test suite — jail / nx / priv / badint / kread probes | [knowledge/pentest-ring3-adversarial-v0.md](knowledge/pentest-ring3-adversarial-v0.md) | Pattern | Active | 2026-04-21 |
 | GUI pentest runner v0 — live login + shell attack findings | [knowledge/pentest-gui-findings-v0.md](knowledge/pentest-gui-findings-v0.md) | Observation | Active | 2026-04-24 |
 | Cleanroom-trace boot survey v0 — first live read of the trace ring buffer | [knowledge/cleanroom-trace-boot-survey-v0.md](knowledge/cleanroom-trace-boot-survey-v0.md) | Observation | Active | 2026-04-25 |
+| Deferred-task batch (2026-04-25) — PE ordinal forwarders, ext4 multi-block dirs, GDI ellipse fill/outline parity | [knowledge/deferred-task-batch-2026-04-25.md](knowledge/deferred-task-batch-2026-04-25.md) | Observation | Active | 2026-04-25 |
 
 ## Quick Reference
 

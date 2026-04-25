@@ -835,6 +835,47 @@ void WindowDrawAllOrdered()
                 }
                 break;
             }
+            case WinGdiPrimKind::FilledEllipse:
+            {
+                // Bounding-box scan with integer ellipse test:
+                // (x-cx)^2 * b^2 + (y-cy)^2 * a^2 <= a^2 * b^2.
+                // Surface-clipped against the window client rect.
+                if (pw < 1 || ph < 1)
+                    break;
+                const i64 a = static_cast<i64>(pw) / 2;
+                const i64 b = static_cast<i64>(ph) / 2;
+                if (a == 0 || b == 0)
+                    break;
+                const i64 cx = static_cast<i64>(ax) + a;
+                const i64 cy = static_cast<i64>(ay) + b;
+                const i64 a2 = a * a;
+                const i64 b2 = b * b;
+                const i64 a2b2 = a2 * b2;
+                i64 x0 = ax;
+                i64 y0 = ay;
+                i64 x1 = static_cast<i64>(ax) + pw;
+                i64 y1 = static_cast<i64>(ay) + ph;
+                if (x0 < static_cast<i64>(client_x))
+                    x0 = static_cast<i64>(client_x);
+                if (y0 < static_cast<i64>(client_y))
+                    y0 = static_cast<i64>(client_y);
+                if (x1 > static_cast<i64>(max_x))
+                    x1 = static_cast<i64>(max_x);
+                if (y1 > static_cast<i64>(max_y))
+                    y1 = static_cast<i64>(max_y);
+                for (i64 yy = y0; yy < y1; ++yy)
+                {
+                    const i64 dy = yy - cy;
+                    const i64 dy2 = dy * dy;
+                    for (i64 xx = x0; xx < x1; ++xx)
+                    {
+                        const i64 dx = xx - cx;
+                        if (dx * dx * b2 + dy2 * a2 <= a2b2)
+                            FramebufferPutPixel(static_cast<u32>(xx), static_cast<u32>(yy), pr.colour_rgb);
+                    }
+                }
+                break;
+            }
             case WinGdiPrimKind::Pixel:
                 // Single pixel at (ax, ay). Already clipped by
                 // the outer max-x/max-y guard above.
@@ -1293,6 +1334,22 @@ void WindowClientEllipse(WindowHandle h, i32 x, i32 y, i32 w, i32 hgt, u32 rgb)
     p.w = w;
     p.h = hgt;
     p.colour_rgb = rgb;
+    PrimListAppend(g_windows[h], p);
+}
+
+void WindowClientFilledEllipse(WindowHandle h, i32 x, i32 y, i32 w, i32 hgt, u32 fill_rgb)
+{
+    if (!WindowValid(h))
+    {
+        return;
+    }
+    WinGdiPrim p{};
+    p.kind = WinGdiPrimKind::FilledEllipse;
+    p.x = x;
+    p.y = y;
+    p.w = w;
+    p.h = hgt;
+    p.colour_rgb = fill_rgb;
     PrimListAppend(g_windows[h], p);
 }
 

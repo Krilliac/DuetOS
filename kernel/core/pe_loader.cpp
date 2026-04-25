@@ -685,20 +685,32 @@ bool DllNameEqCI(const char* a, const char* b)
     return *a == *b;
 }
 
-// Parse a PE-style forwarder string ("DllBase.TargetFunc") into
-// its two halves. Returns false on malformed strings (no '.',
-// empty target, ordinal-style `#N` which we don't yet support).
+// Parse a PE-style forwarder string ("DllBase.TargetFunc" or
+// "DllBase.#Ordinal") into its components.
 //
 // On success, writes the pre-'.' substring into `out_dll`
 // (appending ".dll" if not already present — PE forwarders
-// conventionally omit the extension) and sets `*out_func` to
-// point at the character just past the '.'. `out_dll` must have
-// room for at least kMaxForwarderDllLen bytes.
+// conventionally omit the extension) and fills `out`:
+//   - is_ordinal=false + func points just past '.' for name form
+//   - is_ordinal=true  + ordinal holds the parsed decimal ordinal
+//                        for "#N" form
+// `out_dll` must have room for at least kMaxForwarderDllLen
+// bytes. Returns false on malformed strings (no '.', empty
+// target, missing/overflowed ordinal digits).
 constexpr u64 kMaxForwarderDllLen = 64;
-bool ParseForwarder(const char* fwd, char* out_dll, const char** out_func)
+
+struct ParsedForwarder
 {
-    if (fwd == nullptr || out_dll == nullptr || out_func == nullptr)
+    bool is_ordinal;
+    u32 ordinal;      // valid when is_ordinal
+    const char* func; // valid when !is_ordinal (borrowed into fwd)
+};
+
+bool ParseForwarder(const char* fwd, char* out_dll, ParsedForwarder& out)
+{
+    if (fwd == nullptr || out_dll == nullptr)
         return false;
+    out = {};
     // Locate the '.' separator — first occurrence is the split.
     const char* dot = nullptr;
     for (const char* p = fwd; *p; ++p)
@@ -711,11 +723,8 @@ bool ParseForwarder(const char* fwd, char* out_dll, const char** out_func)
     }
     if (dot == nullptr || dot == fwd)
         return false;
-    // Reject ordinal-form forwarders ("Dll.#N") — resolver
-    // would need a by-ordinal pass; deferred until something
-    // real needs it.
-    if (*(dot + 1) == '#' || *(dot + 1) == '\0')
-        return false;
+    if (*(dot + 1) == '\0')
+        return false; // empty target after '.'
 
     // Copy the DLL name segment, append ".dll" if caller didn't.
     const u64 dll_chars = static_cast<u64>(dot - fwd);
@@ -744,7 +753,32 @@ bool ParseForwarder(const char* fwd, char* out_dll, const char** out_func)
         out_dll[dll_chars + 4] = '\0';
     }
 
-    *out_func = dot + 1;
+    // Ordinal form: "Dll.#N" — N is decimal, fits in u32. Reject
+    // empty digit run (just '#'), non-digit chars, and any value
+    // that overflows u32.
+    if (*(dot + 1) == '#')
+    {
+        const char* digits = dot + 2;
+        if (*digits < '0' || *digits > '9')
+            return false;
+        u64 acc = 0;
+        for (const char* p = digits; *p; ++p)
+        {
+            if (*p < '0' || *p > '9')
+                return false;
+            acc = acc * 10 + u64(*p - '0');
+            if (acc > 0xFFFFFFFFULL)
+                return false;
+        }
+        out.is_ordinal = true;
+        out.ordinal = static_cast<u32>(acc);
+        out.func = nullptr;
+        return true;
+    }
+
+    out.is_ordinal = false;
+    out.ordinal = 0;
+    out.func = dot + 1;
     return true;
 }
 
@@ -759,11 +793,13 @@ bool ParseForwarder(const char* fwd, char* out_dll, const char** out_func)
 // the target in the same preloaded-DLL array. `depth` bounds the
 // recursion against pathological forwarder cycles (depth ~4 is
 // enough for real-world multi-hop redirects like
-// kernel32→kernelbase→ntdll).
-//
-// Ordinal-form forwarders ("Dll.#N") remain deferred — the
-// current callers don't produce any.
+// kernel32→kernelbase→ntdll). Both name-form ("Dll.Func") and
+// ordinal-form ("Dll.#N") forwarders are handled.
 constexpr u32 kMaxForwarderDepth = 4;
+
+bool TryResolveViaPreloadedDllsByOrdinalImpl(const char* dll_name, u32 ordinal, const DllImage* dlls, u64 count,
+                                             u32 depth, u64* out_va);
+
 bool TryResolveViaPreloadedDllsImpl(const char* dll_name, const char* fn_name, const DllImage* dlls, u64 count,
                                     u32 depth, u64* out_va)
 {
@@ -784,11 +820,9 @@ bool TryResolveViaPreloadedDllsImpl(const char* dll_name, const char* fn_name, c
             continue;
         if (e.is_forwarder)
         {
-            // Parse the "Dll.Func" string and recurse against
-            // the same preloaded-DLL array.
             char fwd_dll[kMaxForwarderDllLen];
-            const char* fwd_func = nullptr;
-            if (!ParseForwarder(e.forwarder, fwd_dll, &fwd_func))
+            ParsedForwarder parsed{};
+            if (!ParseForwarder(e.forwarder, fwd_dll, parsed))
             {
                 arch::SerialWrite("[pe-resolve] forwarder unparseable: \"");
                 arch::SerialWrite(e.forwarder ? e.forwarder : "<null>");
@@ -796,12 +830,76 @@ bool TryResolveViaPreloadedDllsImpl(const char* dll_name, const char* fn_name, c
                 continue; // fall through to next DLL match / flat stubs
             }
             u64 target_va = 0;
-            if (!TryResolveViaPreloadedDllsImpl(fwd_dll, fwd_func, dlls, count, depth + 1, &target_va))
+            const bool ok = parsed.is_ordinal ? TryResolveViaPreloadedDllsByOrdinalImpl(fwd_dll, parsed.ordinal, dlls,
+                                                                                        count, depth + 1, &target_va)
+                                              : TryResolveViaPreloadedDllsImpl(fwd_dll, parsed.func, dlls, count,
+                                                                               depth + 1, &target_va);
+            if (!ok)
                 continue; // target unknown; fall through
             arch::SerialWrite("[pe-resolve] via-dll-fwd ");
             arch::SerialWrite(dll_name);
             arch::SerialWrite("!");
             arch::SerialWrite(fn_name);
+            arch::SerialWrite(" -> ");
+            arch::SerialWrite(e.forwarder);
+            arch::SerialWrite(" -> ");
+            arch::SerialWriteHex(target_va);
+            arch::SerialWrite("\n");
+            *out_va = target_va;
+            return true;
+        }
+        *out_va = img.base_va + static_cast<u64>(e.rva);
+        return true;
+    }
+    return false;
+}
+
+// Ordinal-keyed twin of the recursive resolver above. Used when a
+// forwarder string is "Dll.#N" — the chained target is identified
+// by its absolute ordinal, not by name. Forwarder exports reached
+// via ordinal are themselves chased through the same recursion
+// (with depth incremented), so a "kernel32.#100 -> ntdll.RtlFoo"
+// chain resolves cleanly.
+bool TryResolveViaPreloadedDllsByOrdinalImpl(const char* dll_name, u32 ordinal, const DllImage* dlls, u64 count,
+                                             u32 depth, u64* out_va)
+{
+    if (depth > kMaxForwarderDepth)
+        return false;
+    if (dll_name == nullptr || dlls == nullptr || count == 0 || out_va == nullptr)
+        return false;
+    for (u64 i = 0; i < count; ++i)
+    {
+        const DllImage& img = dlls[i];
+        if (!img.has_exports)
+            continue;
+        const char* img_dll_name = PeExportsDllName(img.exports);
+        if (!DllNameEqCI(img_dll_name, dll_name))
+            continue;
+        PeExport e{};
+        if (!PeExportLookupOrdinal(img.exports, ordinal, e))
+            continue;
+        if (e.is_forwarder)
+        {
+            char fwd_dll[kMaxForwarderDllLen];
+            ParsedForwarder parsed{};
+            if (!ParseForwarder(e.forwarder, fwd_dll, parsed))
+            {
+                arch::SerialWrite("[pe-resolve] forwarder unparseable: \"");
+                arch::SerialWrite(e.forwarder ? e.forwarder : "<null>");
+                arch::SerialWrite("\"\n");
+                continue;
+            }
+            u64 target_va = 0;
+            const bool ok = parsed.is_ordinal ? TryResolveViaPreloadedDllsByOrdinalImpl(fwd_dll, parsed.ordinal, dlls,
+                                                                                        count, depth + 1, &target_va)
+                                              : TryResolveViaPreloadedDllsImpl(fwd_dll, parsed.func, dlls, count,
+                                                                               depth + 1, &target_va);
+            if (!ok)
+                continue;
+            arch::SerialWrite("[pe-resolve] via-dll-fwd ");
+            arch::SerialWrite(dll_name);
+            arch::SerialWrite("!#");
+            arch::SerialWriteHex(ordinal);
             arch::SerialWrite(" -> ");
             arch::SerialWrite(e.forwarder);
             arch::SerialWrite(" -> ");
@@ -1619,6 +1717,11 @@ void PeReport(const u8* file, u64 file_len)
         SerialWrite(PeExportStatusName(pes));
         SerialWrite("\n");
     }
+}
+
+bool PeResolveViaDlls(const char* dll_name, const char* fn_name, const DllImage* dlls, u64 count, u64* out_va)
+{
+    return TryResolveViaPreloadedDlls(dll_name, fn_name, dlls, count, out_va);
 }
 
 } // namespace duetos::core
