@@ -34,6 +34,8 @@
 
 #include "window_syscall.h"
 
+#include "custom.h"
+
 #include "../../arch/x86_64/cpu.h"
 #include "../../arch/x86_64/serial.h"
 #include "../../arch/x86_64/traps.h"
@@ -308,7 +310,9 @@ void DoWinCreate(arch::TrapFrame* frame)
     duetos::arch::SerialWrite(title);
     duetos::arch::SerialWrite("\"\n");
 
-    frame->rax = static_cast<u64>(h_comp) + kHwndBias;
+    const u64 hwnd_biased = static_cast<u64>(h_comp) + kHwndBias;
+    custom::OnHandleAlloc(proc, hwnd_biased, static_cast<u32>(duetos::core::SYS_WIN_CREATE), frame->rip);
+    frame->rax = hwnd_biased;
 }
 
 void DoWinDestroy(arch::TrapFrame* frame)
@@ -351,6 +355,7 @@ void DoWinDestroy(arch::TrapFrame* frame)
     SerialWriteDec(frame->rdi);
     duetos::arch::SerialWrite("\n");
 
+    custom::OnHandleClose(proc, frame->rdi);
     frame->rax = 1;
 }
 
