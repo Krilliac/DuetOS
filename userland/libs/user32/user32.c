@@ -1273,10 +1273,22 @@ __declspec(dllexport) int GetSystemMetrics(int index)
     __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)SYS_WIN_GET_METRIC), "D"((long long)index) : "memory");
     return (int)rv;
 }
+/* GetSysColor — return a stable per-index colour. The kernel
+ * publishes the canonical palette via SYS_GDI_GET_SYS_COLOR
+ * (=127); use that so apps that paint with COLOR_WINDOWTEXT /
+ * COLOR_BTNFACE / COLOR_HIGHLIGHT see distinct colours instead
+ * of always-white. Falls back to white on out-of-range. */
 __declspec(dllexport) DWORD GetSysColor(int index)
 {
-    (void)index;
-    return 0xFFFFFFu; /* white */
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)127), "D"((long long)index) : "memory");
+    if (rv == 0 && index != 0 && index != 8)
+    {
+        /* SYS_GDI_GET_SYS_COLOR returned 0 for an unknown index;
+         * Win32 returns 0 too — match it. */
+        return (DWORD)rv;
+    }
+    return (DWORD)rv;
 }
 
 /* --- Window longs ---
