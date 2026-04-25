@@ -174,10 +174,9 @@ u32 ArpEntryCount();
 // ARP cache — skeleton API.
 //
 // A full implementation maps IPv4 addresses to Ethernet MAC
-// addresses via ARP request/reply exchange. Today the state machine
-// is absent; we expose the cache surface so that a future L3 slice
-// can plumb lookups and, when a cache miss happens, punt to the L2
-// driver's transmit path (not yet wired either).
+// addresses via ARP request/reply exchange. v0 includes cache
+// lookups/inserts plus a minimal "send request + wait briefly"
+// miss path used by DNS/TCP/NTP destination resolution.
 //
 // Design constraints:
 //   - Fixed-capacity cache (no per-entry heap alloc in v0).
@@ -223,6 +222,8 @@ struct ArpStats
     u64 evictions;
     u64 rx_packets;
     u64 rx_rejects;
+    u64 tx_requests;
+    u64 tx_failures;
 };
 ArpStats ArpStatsRead();
 
@@ -357,8 +358,8 @@ struct DnsResult
 /// kDnsMaxName chars) via `iface_index`. `resolver_ip` is the
 /// DNS server (typically the DHCP-supplied value or 10.0.2.3 for
 /// QEMU SLIRP). Returns false on oversized name, malformed
-/// labels, interface missing, or ARP cache miss for the
-/// resolver's gateway.
+/// labels, interface missing, or unresolved L2 destination
+/// after direct ARP + gateway fallback attempts.
 bool NetDnsQueryA(u32 iface_index, Ipv4Address resolver_ip, const char* name);
 
 /// Snapshot of the latest DNS query state. `resolved` is true
@@ -387,8 +388,8 @@ struct NtpResult
 
 /// Send one NTP v3 client query to `server_ip:123`. Binds an
 /// ephemeral UDP port for the reply. Returns false on iface
-/// binding miss or ARP resolution failure for the server's
-/// gateway.
+/// binding miss or unresolved L2 destination after ARP
+/// attempts.
 bool NetNtpQuery(u32 iface_index, Ipv4Address server_ip);
 
 /// Snapshot of the latest NTP transaction. `synced` is true iff
@@ -520,7 +521,7 @@ struct TcpActiveSnapshot
 /// Kick off an active connect. `request` is sent after the
 /// three-way handshake completes; `request_len` must be
 /// <= kTcpMaxCannedReply. Returns false on slot-busy /
-/// oversize / ARP miss for gateway.
+/// oversize / unresolved L2 destination after ARP attempts.
 bool NetTcpConnect(u32 iface_index, Ipv4Address dst_ip, u16 dst_port, const u8* request, u32 request_len);
 
 /// Copy up to `cap` bytes of the RX buffer into `out`, returns

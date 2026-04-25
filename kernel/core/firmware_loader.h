@@ -7,11 +7,10 @@
  * DuetOS — kernel firmware loader (scaffold).
  *
  * Centralizes the "load this vendor blob" surface that wireless and
- * GPU drivers need before they can do real work. v0 is honest:
- * there is no firmware-bearing filesystem mounted at boot, no
- * signature verifier, no microcode-format parser — every lookup
- * returns `Err{ErrorCode::NotFound}`. The shape of the API is
- * stable so a follow-up slice can drop in:
+ * GPU drivers need before they can do real work. The loader now uses
+ * a VFS-backed lookup path (`/lib/firmware/<vendor>/<basename>` then
+ * `/lib/firmware/<basename>`) and enforces optional size bounds.
+ * Signature verification remains a follow-up slice:
  *
  *   1. A scan of `/lib/firmware/<vendor>/<filename>` (or a
  *      wireless-specific path) on the boot filesystem once
@@ -72,25 +71,43 @@ enum class FwBackendKind : u8
     EmbeddedTable, // hand-curated kBlob table linked into the kernel
 };
 
+enum class FwSourcePolicy : u8
+{
+    OpenThenVendor = 0, // prefer DuetOS/open firmware paths, then vendor path
+    OpenOnly,           // reject vendor paths entirely
+    VendorOnly,         // skip open firmware paths
+};
+
 struct FwBackendStats
 {
     FwBackendKind kind;
+    FwSourcePolicy policy;
     u32 lookups;
     u32 hits;
     u32 misses;
     u32 verification_failures;
 };
 
-/// Look up a firmware blob. v0 implementation always returns
-/// `Err{ErrorCode::NotFound}` — no backend is installed. The
-/// driver-side caller is expected to handle this gracefully (mark
-/// `firmware_pending` and continue), which is how the wireless
-/// driver shells already behave.
+inline constexpr u32 kFwTracePathMax = 159;
+inline constexpr u32 kFwTraceNameMax = 63;
+inline constexpr u32 kFwTraceCapacity = 64;
+
+struct FwTraceEntry
+{
+    char vendor[kFwTraceNameMax + 1];
+    char basename[kFwTraceNameMax + 1];
+    char attempted_path[kFwTracePathMax + 1];
+    ErrorCode result;
+    FwSourcePolicy policy;
+};
+
+/// Look up a firmware blob from the VFS-backed firmware tree. Returns
+/// `Err{ErrorCode::NotFound}` when no candidate path exists and
+/// `Err{ErrorCode::Corrupt}` when size bounds are violated.
 ::duetos::core::Result<FwBlob> FwLoad(const FwLoadRequest& req);
 
-/// Release a blob obtained from `FwLoad`. v0: no-op (no
-/// allocations, nothing to free). Stays in the API so the caller
-/// pattern is correct from day one.
+/// Release a blob obtained from `FwLoad`. Current backends return
+/// stable in-memory bytes, so this is a no-op.
 void FwRelease(const FwBlob& blob);
 
 /// Snapshot of the current backend's stats. Useful for the
@@ -98,10 +115,23 @@ void FwRelease(const FwBlob& blob);
 /// availability.
 FwBackendStats FwBackendStatsRead();
 
-/// Initialize the firmware loader. Idempotent. v0: just records
-/// `FwBackendKind::None` and logs that no backend is wired up yet.
-/// A future slice that mounts /lib/firmware will replace this with
-/// a VFS-backed scanner.
+/// Select firmware source policy globally.
+void FwSetSourcePolicy(FwSourcePolicy policy);
+
+/// Read current firmware source policy.
+FwSourcePolicy FwSourcePolicyRead();
+
+/// Number of trace entries currently retained (bounded ring buffer).
+u32 FwTraceCount();
+
+/// Read a trace entry by index where 0 is oldest and
+/// `FwTraceCount()-1` is newest. Returns false if out-of-range.
+bool FwTraceRead(u32 index, FwTraceEntry* out);
+
+/// Clear all trace entries.
+void FwTraceClear();
+
+/// Initialize the firmware loader. Idempotent.
 void FwLoaderInit();
 
 } // namespace duetos::core

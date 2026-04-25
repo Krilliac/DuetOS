@@ -4,10 +4,11 @@
 #include "../mm/address_space.h"
 #include "../mm/frame_allocator.h"
 #include "../mm/page.h"
-#include "klog.h"
 #include "../mm/paging.h"
 #include "../security/guard.h"
 #include "../subsystems/win32/stubs.h"
+#include "cleanroom_trace.h"
+#include "klog.h"
 #include "pe_exports.h"
 #include "process.h"
 
@@ -959,6 +960,8 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
                     is_data ? win32::Win32StubsLookupDataCatchAll(&stub_va) : win32::Win32StubsLookupCatchAll(&stub_va);
                 if (!ok)
                 {
+                    core::CleanroomTraceRecord("pe-loader", "import-unresolved-fatal", h.image_base, first_thunk,
+                                               fn_idx);
                     core::LogWithString(core::LogLevel::Error, "pe-resolve", "UNRESOLVED import (no catch-all)", "fn",
                                         fn_name);
                     core::LogWithString(core::LogLevel::Error, "pe-resolve", "  from", "dll", dll_name);
@@ -978,6 +981,8 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
                     const u64 iat_slot_va_for_miss = h.image_base + u64(first_thunk) + u64(fn_idx) * 8;
                     StagedMissAppend(iat_slot_va_for_miss, fn_name);
                 }
+                core::CleanroomTraceRecord("pe-loader", is_data ? "import-data-catchall" : "import-fn-catchall",
+                                           h.image_base, first_thunk, fn_idx);
             }
 
             // Patch the IAT slot. Slot VA = image_base +
@@ -1013,6 +1018,7 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
     }
 
     core::LogWithValue(core::LogLevel::Info, "pe-resolve", "total imports resolved", resolved);
+    core::CleanroomTraceRecord("pe-loader", "imports-resolved", h.image_base, resolved, 0);
     return true;
 }
 

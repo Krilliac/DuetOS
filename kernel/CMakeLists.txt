@@ -22,6 +22,7 @@
 
 set(DUETOS_KERNEL_SHARED_SOURCES
     core/auth.cpp
+    core/cleanroom_trace.cpp
     core/heartbeat.cpp
     core/hexdump.cpp
     core/klog.cpp
@@ -148,6 +149,7 @@ set(DUETOS_KERNEL_SHARED_SOURCES
     mm/user_copy.S
     net/net_smoke.cpp
     net/stack.cpp
+    net/wifi.cpp
     sched/context_switch.S
     sched/sched.cpp
     security/attack_sim.cpp

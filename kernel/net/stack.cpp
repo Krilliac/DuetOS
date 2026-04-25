@@ -1,10 +1,12 @@
 #include "stack.h"
+#include "wifi.h"
 
 #include "../arch/x86_64/serial.h"
 #include "../arch/x86_64/timer.h"
 #include "../core/klog.h"
 #include "../core/panic.h"
 #include "../drivers/net/net.h"
+#include "../sched/sched.h"
 
 namespace duetos::net
 {
@@ -95,6 +97,91 @@ u64 NowTicks()
     return arch::TimerTicks();
 }
 
+bool IsZeroIp(Ipv4Address ip)
+{
+    return ip.octets[0] == 0 && ip.octets[1] == 0 && ip.octets[2] == 0 && ip.octets[3] == 0;
+}
+
+bool SendArpRequest(u32 iface_index, Ipv4Address target_ip)
+{
+    if (iface_index >= kMaxInterfaces || !g_interfaces[iface_index].bound)
+        return false;
+    const Interface& ifc = g_interfaces[iface_index];
+    if (ifc.tx == nullptr || IsZeroIp(ifc.ip))
+    {
+        ++g_arp_stats.tx_failures;
+        return false;
+    }
+
+    u8 req[42] = {};
+    for (u64 i = 0; i < 6; ++i)
+        req[i] = 0xFF; // Ethernet broadcast
+    for (u64 i = 0; i < 6; ++i)
+        req[6 + i] = ifc.mac.octets[i];
+    req[12] = 0x08;
+    req[13] = 0x06; // ARP
+    req[14] = 0x00;
+    req[15] = 0x01; // Ethernet
+    req[16] = 0x08;
+    req[17] = 0x00; // IPv4
+    req[18] = 0x06;
+    req[19] = 0x04;
+    req[20] = 0x00;
+    req[21] = 0x01; // request
+    for (u64 i = 0; i < 6; ++i)
+        req[22 + i] = ifc.mac.octets[i];
+    for (u64 i = 0; i < 4; ++i)
+        req[28 + i] = ifc.ip.octets[i];
+    for (u64 i = 0; i < 4; ++i)
+        req[38 + i] = target_ip.octets[i];
+
+    ++g_arp_stats.tx_requests;
+    const bool ok = ifc.tx(iface_index, req, sizeof(req));
+    if (!ok)
+        ++g_arp_stats.tx_failures;
+    return ok;
+}
+
+const ArpEntry* ArpResolveWithWait(u32 iface_index, Ipv4Address ip, u64 per_try_timeout_ticks, u32 max_tries)
+{
+    const ArpEntry* hit = ArpLookup(iface_index, ip);
+    if (hit != nullptr)
+        return hit;
+
+    if (max_tries == 0)
+        return nullptr;
+
+    for (u32 attempt = 0; attempt < max_tries; ++attempt)
+    {
+        if (!SendArpRequest(iface_index, ip))
+            return nullptr;
+
+        const u64 start = NowTicks();
+        while ((NowTicks() - start) < per_try_timeout_ticks)
+        {
+            duetos::sched::SchedSleepTicks(1);
+            hit = ArpLookup(iface_index, ip);
+            if (hit != nullptr)
+                return hit;
+        }
+    }
+    return nullptr;
+}
+
+const ArpEntry* ResolveL2Destination(u32 iface_index, Ipv4Address target_ip)
+{
+    const DhcpLease lease = DhcpLeaseRead();
+    const Ipv4Address fallback_gw =
+        lease.valid ? lease.router : Ipv4Address{{target_ip.octets[0], target_ip.octets[1], target_ip.octets[2], 2}};
+
+    // First try direct destination resolution.
+    const ArpEntry* dst = ArpResolveWithWait(iface_index, target_ip, /*per_try_timeout_ticks=*/10, /*max_tries=*/3);
+    if (dst != nullptr)
+        return dst;
+    // Then try resolving the DHCP/default gateway.
+    return ArpResolveWithWait(iface_index, fallback_gw, /*per_try_timeout_ticks=*/10, /*max_tries=*/3);
+}
+
 } // namespace
 
 // Forward decls for UDP + DHCP + TCP helpers defined further down
@@ -111,6 +198,7 @@ void NetStackInit()
     static constinit bool s_done = false;
     KASSERT(!s_done, "net/stack", "NetStackInit called twice");
     s_done = true;
+    WifiInit();
 
     // Walk the driver-layer NIC table. Today we just log a
     // one-line-per-interface "would bind" record — there's no
@@ -1686,27 +1774,11 @@ bool NetTcpConnect(u32 iface_index, Ipv4Address dst_ip, u16 dst_port, const u8* 
         return false;
 
     const Interface& ifc = g_interfaces[iface_index];
-    const ArpEntry* arp = ArpLookup(iface_index, dst_ip);
+    const ArpEntry* arp = ResolveL2Destination(iface_index, dst_ip);
     MacAddress dst_mac = {};
-    if (arp != nullptr)
-    {
-        dst_mac = arp->mac;
-    }
-    else
-    {
-        // ARP miss for the destination — fall back to the
-        // DHCP-supplied router. The old code guessed `dst[0..2].2`
-        // which only worked for QEMU SLIRP's 10.0.2.0/24; on a
-        // real /24 connecting to an arbitrary public IP the guess
-        // misses and TCP connect would silently fail.
-        const DhcpLease lease = DhcpLeaseRead();
-        Ipv4Address gw =
-            lease.valid ? lease.router : Ipv4Address{{dst_ip.octets[0], dst_ip.octets[1], dst_ip.octets[2], 2}};
-        const ArpEntry* gw_entry = ArpLookup(iface_index, gw);
-        if (gw_entry == nullptr)
-            return false;
-        dst_mac = gw_entry->mac;
-    }
+    if (arp == nullptr)
+        return false;
+    dst_mac = arp->mac;
 
     TcpConnClear();
     g_tcp_conn.in_use = true;
@@ -2003,33 +2075,13 @@ bool NetDnsQueryA(u32 iface_index, Ipv4Address resolver_ip, const char* name)
         return false;
     const Interface& ifc = g_interfaces[iface_index];
 
-    // Resolve the L2 destination. SLIRP assigns the same vendor
-    // MAC to every virtual host in the 10.0.2.0/24 subnet, so
-    // the gateway's MAC works for any same-subnet peer we
-    // haven't talked to yet. On real hardware this becomes
-    // "ARP request + wait" — a future slice.
-    const ArpEntry* arp = ArpLookup(iface_index, resolver_ip);
+    // Resolve the L2 destination. First try direct resolver IP;
+    // on miss, resolve and use the gateway.
+    const ArpEntry* arp = ResolveL2Destination(iface_index, resolver_ip);
     MacAddress dst_mac = {};
-    if (arp != nullptr)
-    {
-        dst_mac = arp->mac;
-    }
-    else
-    {
-        // ARP miss for the resolver — fall back to the DHCP-supplied
-        // router. The old guess (`resolver[0..2].2`) only worked for
-        // QEMU SLIRP's 10.0.2.0/24 layout; on a real LAN where the
-        // resolver lives off-link or has a non-`.2` gateway, the
-        // guess misses and DNS would silently fail.
-        const DhcpLease lease = DhcpLeaseRead();
-        Ipv4Address gw = lease.valid
-                             ? lease.router
-                             : Ipv4Address{{resolver_ip.octets[0], resolver_ip.octets[1], resolver_ip.octets[2], 2}};
-        const ArpEntry* gw_entry = ArpLookup(iface_index, gw);
-        if (gw_entry == nullptr)
-            return false;
-        dst_mac = gw_entry->mac;
-    }
+    if (arp == nullptr)
+        return false;
+    dst_mac = arp->mac;
 
     // Build query.
     u8 qbuf[12 + kDnsMaxName + 2 + 4];
@@ -2136,23 +2188,11 @@ bool NetNtpQuery(u32 iface_index, Ipv4Address server_ip)
         return false;
     const Interface& ifc = g_interfaces[iface_index];
 
-    const ArpEntry* arp = ArpLookup(iface_index, server_ip);
+    const ArpEntry* arp = ResolveL2Destination(iface_index, server_ip);
     MacAddress dst_mac = {};
-    if (arp != nullptr)
-    {
-        dst_mac = arp->mac;
-    }
-    else
-    {
-        // Same DHCP-router fallback as DNS / TCP connect.
-        const DhcpLease lease = DhcpLeaseRead();
-        Ipv4Address gw = lease.valid ? lease.router
-                                     : Ipv4Address{{server_ip.octets[0], server_ip.octets[1], server_ip.octets[2], 2}};
-        const ArpEntry* gw_entry = ArpLookup(iface_index, gw);
-        if (gw_entry == nullptr)
-            return false;
-        dst_mac = gw_entry->mac;
-    }
+    if (arp == nullptr)
+        return false;
+    dst_mac = arp->mac;
 
     // 48-byte NTP v3 client packet. Only byte 0 matters for a
     // query: LI=0, VN=3, Mode=3 (client) → 0x1B. Everything else

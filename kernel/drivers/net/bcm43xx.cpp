@@ -148,6 +148,7 @@ bool Bcm43xxBringUp(NicInfo& n)
     n.chip_id = info;
     n.driver_online = true;
     n.link_up = false;
+    n.wireless_fw_state = NicInfo::WirelessFwState::Missing;
 
     // Probe firmware loader. bcm43xx blobs live under
     // `b43/<chip>.fw` (b43 driver) or `brcm/<chip>.bin`
@@ -177,10 +178,23 @@ bool Bcm43xxBringUp(NicInfo& n)
     {
         duetos::core::FwRelease(fw.value());
         n.firmware_pending = false;
+        n.wireless_fw_state = NicInfo::WirelessFwState::Ready;
     }
     else
     {
         n.firmware_pending = true;
+        switch (fw.error())
+        {
+        case duetos::core::ErrorCode::NotFound:
+            n.wireless_fw_state = NicInfo::WirelessFwState::Missing;
+            break;
+        case duetos::core::ErrorCode::Corrupt:
+            n.wireless_fw_state = NicInfo::WirelessFwState::Incompatible;
+            break;
+        default:
+            n.wireless_fw_state = NicInfo::WirelessFwState::LoadError;
+            break;
+        }
     }
 
     g_stats.chip_info = info;

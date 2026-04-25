@@ -2,6 +2,7 @@
 
 #include "../../arch/x86_64/cpu.h"
 #include "../../arch/x86_64/serial.h"
+#include "../../core/cleanroom_trace.h"
 #include "../../core/klog.h"
 #include "../../core/panic.h"
 #include "../../mm/frame_allocator.h"
@@ -136,6 +137,8 @@ constexpr u64 kE1000RegCtrl = 0x00000;
 constexpr u64 kE1000RegIcr = 0x000C0;    // Interrupt Cause Read (RC)
 constexpr u64 kE1000RegImc = 0x000D8;    // Interrupt Mask Clear
 constexpr u64 kE1000RegImsSet = 0x000D0; // Interrupt Mask Set
+constexpr u64 kE1000RegIvar = 0x000E4;   // Interrupt Vector Allocation Register (82574/e1000e)
+constexpr u64 kE1000RegIvargp = 0x000E8; // IVAR misc/other causes group
 constexpr u64 kE1000RegRctl = 0x00100;   // Receive Control
 constexpr u64 kE1000RegTctl = 0x00400;   // Transmit Control
 constexpr u64 kE1000RegTipg = 0x00410;   // TX Inter-Packet Gap
@@ -216,6 +219,7 @@ constexpr u32 kE1000IntLsc = 1u << 2;    // Link Status Change
 constexpr u32 kE1000IntRxdmt0 = 1u << 4; // RX Desc Min Threshold
 constexpr u32 kE1000IntRxo = 1u << 6;    // RX Overrun
 constexpr u32 kE1000IntRxt0 = 1u << 7;   // RX Timer (desc done)
+constexpr u32 kE1000IvarValid = 1u << 7; // per-byte IVAR "entry valid"
 
 struct E1000Ctx
 {
@@ -405,16 +409,19 @@ bool E1000Send(const u8* data, u32 len)
 // EOP descriptor log the first 32 bytes (ethernet dst+src+type +
 // a few payload bytes). A real TCP/IP stack would hand the frame
 // up to the protocol layer here; v0 just counts + logs.
-void E1000DrainRx()
+u32 E1000DrainRx(u32 budget_packets)
 {
     if (!g_e1000.online)
-        return;
+        return 0;
+    u32 drained = 0;
     for (u32 checked = 0; checked < kE1000RxRingSlots; ++checked)
     {
+        if (budget_packets != 0 && drained >= budget_packets)
+            break;
         const u32 slot = (g_e1000.rx_tail + 1) % kE1000RxRingSlots;
         volatile E1000RxDesc& d = g_e1000.rx_ring[slot];
         if ((d.status & kE1000RxStatusDd) == 0)
-            return;
+            break;
         const u16 len = d.length;
         u8* buf = g_e1000.rx_buf_base_virt + u64(slot) * kE1000RxBufBytes;
         ++g_e1000.rx_packets;
@@ -427,7 +434,21 @@ void E1000DrainRx()
         d.status = 0;
         g_e1000.rx_tail = slot;
         E1000Write(kE1000RegRdt, slot);
+        ++drained;
     }
+    return drained;
+}
+
+void E1000ConfigureMsixIvar(u8 vector)
+{
+    // 82574/e1000e layout: one byte per queue source in IVAR.
+    // Program queue 0 RX + queue 0 TX + misc causes to the same
+    // vector and set the VALID bit on each programmed byte.
+    const u32 entry = (u32(vector & 0x1F) | kE1000IvarValid);
+    const u32 ivar = entry | (entry << 8) | (entry << 16) | (entry << 24);
+    E1000Write(kE1000RegIvar, ivar);
+    E1000Write(kE1000RegIvargp, entry);
+    core::CleanroomTraceRecord("e1000", "ivar-programmed", vector, ivar, entry);
 }
 
 // MSI-X / MSI handler. ICR (Interrupt Cause Read) clear-on-read:
@@ -447,9 +468,12 @@ void E1000IrqHandler()
 void E1000RxPollEntry(void*)
 {
     const bool have_msix = (g_e1000.irq_vector != 0);
+    constexpr u32 kRxPollBudget = 64;
     for (;;)
     {
-        E1000DrainRx();
+        const u32 drained = E1000DrainRx(kRxPollBudget);
+        if (drained == kRxPollBudget)
+            continue;
         if (have_msix)
         {
             // Block until IRQ wakes us. Same lost-wakeup guard
@@ -539,55 +563,35 @@ bool E1000BringUp(NicInfo& n)
     g_e1000.online = true;
     n.driver_online = true;
     n.firmware_pending = false;
+    n.wireless_fw_state = NicInfo::WirelessFwState::NotApplicable;
 
-    // MSI-X bring-up. Classic 82540EM (QEMU's `-device e1000`) only
-    // exposes legacy MSI (cap 0x05), not MSI-X (0x11) — bind is a
-    // no-op on that silicon and the RX task tick-polls.
-    //
-    // e1000e variants (82574+, i210/i217/i219) DO advertise MSI-X
-    // and `PciMsixBindSimple` happily returns a vector — but the
-    // 82574 needs `IVAR` (0x000E4) programmed to route RX/TX/Other
-    // interrupt causes to the MSI-X vector before the handler ever
-    // fires. Without that, IRQs are bound but never delivered, the
-    // RX wait queue never wakes, and packets sit in the descriptor
-    // ring until the next lost-wakeup recovery tick (which only
-    // checks ONE descriptor, missing bursts). Verified on QEMU
-    // -device e1000e: DHCP+ICMP+DNS replies appear on the wire
-    // (filter-dump pcap) but the driver never sees them.
-    //
-    // Until the IVAR / EIAC / EIAM programming slice lands, gate
-    // MSI-X to legacy e1000 device IDs only. Polling at 100 Hz is
-    // plenty for v0 — the e1000 v0 milestone never claimed MSI-X.
-    const bool is_classic_e1000 = (n.device_id >= 0x1000 && n.device_id <= 0x107F);
-    if (is_classic_e1000)
+    // MSI-X bring-up. If bind succeeds, program IVAR so RX/TX/other
+    // causes route to the bound vector before IMS unmask.
+    pci::DeviceAddress addr{};
+    addr.bus = n.bus;
+    addr.device = n.device;
+    addr.function = n.function;
+    auto r = pci::PciMsixBindSimple(addr, /*entry_index=*/0, E1000IrqHandler, /*out_route=*/nullptr);
+    if (r.has_value())
     {
-        pci::DeviceAddress addr{};
-        addr.bus = n.bus;
-        addr.device = n.device;
-        addr.function = n.function;
-        auto r = pci::PciMsixBindSimple(addr, /*entry_index=*/0, E1000IrqHandler, /*out_route=*/nullptr);
-        if (r.has_value())
-        {
-            g_e1000.irq_vector = r.value();
-            // Enable RX + link + TX-writeback IRQ sources. Writing
-            // to IMS (Interrupt Mask SET) turns bits on; IMC
-            // (clear) takes them off. Read ICR once to clear any
-            // pending state before we unmask.
-            (void)E1000Read(kE1000RegIcr);
-            const u32 mask = kE1000IntRxt0 | kE1000IntRxdmt0 | kE1000IntRxo | kE1000IntLsc | kE1000IntTxdw;
-            E1000Write(kE1000RegImsSet, mask);
-            arch::SerialWrite("[e1000] MSI-X bound vector=");
-            arch::SerialWriteHex(g_e1000.irq_vector);
-            arch::SerialWrite("\n");
-        }
-        else
-        {
-            arch::SerialWrite("[e1000] MSI-X unavailable — RX task will tick-poll\n");
-        }
+        g_e1000.irq_vector = r.value();
+        E1000ConfigureMsixIvar(g_e1000.irq_vector);
+        // Enable RX + link + TX-writeback IRQ sources. Writing
+        // to IMS (Interrupt Mask SET) turns bits on; IMC
+        // (clear) takes them off. Read ICR once to clear any
+        // pending state before we unmask.
+        (void)E1000Read(kE1000RegIcr);
+        const u32 mask = kE1000IntRxt0 | kE1000IntRxdmt0 | kE1000IntRxo | kE1000IntLsc | kE1000IntTxdw;
+        E1000Write(kE1000RegImsSet, mask);
+        arch::SerialWrite("[e1000] MSI-X bound vector=");
+        arch::SerialWriteHex(g_e1000.irq_vector);
+        arch::SerialWrite(" (IVAR programmed)\n");
+        core::CleanroomTraceRecord("e1000", "msix-bound", g_e1000.irq_vector, 1, 0);
     }
     else
     {
-        arch::SerialWrite("[e1000] e1000e detected — MSI-X gated off (IVAR programming pending), tick-poll only\n");
+        arch::SerialWrite("[e1000] MSI-X unavailable — RX task will tick-poll\n");
+        core::CleanroomTraceRecord("e1000", "msix-fallback-poll", n.device_id, 0, 0);
     }
 
     // Re-read link state now that we've asserted SLU — can take a
@@ -894,6 +898,23 @@ WirelessStatus WirelessStatusRead()
         ++s.adapters_detected;
         if (g_nics[i].driver_online)
             ++s.drivers_online;
+        switch (g_nics[i].wireless_fw_state)
+        {
+        case NicInfo::WirelessFwState::Ready:
+            ++s.firmware_ready;
+            break;
+        case NicInfo::WirelessFwState::Missing:
+            ++s.firmware_missing;
+            break;
+        case NicInfo::WirelessFwState::Incompatible:
+            ++s.firmware_incompatible;
+            break;
+        case NicInfo::WirelessFwState::LoadError:
+            ++s.firmware_load_error;
+            break;
+        case NicInfo::WirelessFwState::NotApplicable:
+            break;
+        }
     }
     return s;
 }

@@ -51,7 +51,7 @@ namespace duetos::drivers::usb
 /// one that responds to RNDIS INITIALIZE. Returns true iff a device
 /// came online. Caller is responsible for ensuring the xHCI HID
 /// poll task isn't actively draining the event ring (use
-/// XhciPauseEventConsumer).
+/// XhciPauseEventConsumer, now a compatibility no-op).
 bool RndisProbe();
 
 struct RndisStats
