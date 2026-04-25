@@ -246,6 +246,22 @@ void WriteLabelled(const char* label, u64 value)
     SerialWrite("\n");
 }
 
+// Variant for raw VAs (cr2 / rsp on the trap dump): same hex
+// formatting, but appends a `[region=...]` tag so the operator
+// instantly sees whether a faulting address landed in the kernel
+// stack arena, an MMIO mapping, the non-canonical hole, or out at
+// some user-space VA. Avoids forcing the reader to keep paging.h's
+// memory map in their head.
+void WriteLabelledVa(const char* label, duetos::u64 value)
+{
+    SerialWrite("  ");
+    SerialWrite(label);
+    SerialWrite(" : ");
+    SerialWriteHex(value);
+    duetos::core::WriteVaRegion(value);
+    SerialWrite("\n");
+}
+
 // Render a GPR value with an optional symbolic annotation. Most GPRs
 // hold non-pointer data (counts, indices, flags) for which a symbol
 // lookup would either return nothing or — worse — match a symbol that
@@ -694,17 +710,22 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     SerialWrite("\n");
     SerialWrite("  rip       : ");
     core::WriteAddressWithSymbol(frame->rip);
+    core::WriteVaRegion(frame->rip);
     SerialWrite("\n");
     WriteLabelledSelector("cs        ", frame->cs);
     WriteLabelledRflags("rflags    ", frame->rflags);
-    WriteLabelled("rsp       ", frame->rsp);
+    WriteLabelledVa("rsp       ", frame->rsp);
     WriteLabelledSelector("ss        ", frame->ss);
 
     u64 cr2 = 0;
     if (frame->vector == 14) // #PF
     {
         cr2 = ReadCr2();
-        WriteLabelled("cr2       ", cr2);
+        // CR2 region tag instantly distinguishes "wild user pointer
+        // poked into kernel land" (user-canonical) from "kernel
+        // stack overflow" (k.stack-arena guard hit) from "MMIO
+        // dereferenced after device removal" (k.mmio).
+        WriteLabelledVa("cr2       ", cr2);
         // BSOD-style reason line. Classifies the fault into an
         // ACCESS_VIOLATION_* / NX_VIOLATION / STACK_OVERFLOW_*
         // category and breaks the raw err bits into flags.

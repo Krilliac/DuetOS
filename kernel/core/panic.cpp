@@ -71,6 +71,22 @@ void WriteLabelledCode(const char* label, u64 value)
     arch::SerialWrite(label);
     arch::SerialWrite(" : ");
     WriteAddressWithSymbol(value);
+    WriteVaRegion(value);
+    arch::SerialWrite("\n");
+}
+
+// Like WriteLabelled but appends the VA-region tag, e.g.
+//     rsp      : 0xFFFFFFFFE0001FF8 [region=k.stack-arena]
+// Used for raw VAs that aren't expected to be code (rsp / rbp) and
+// for cr2 on a #PF — both cases benefit from "what region IS this?"
+// annotation that the bare hex doesn't convey.
+void WriteLabelledVa(const char* label, u64 value)
+{
+    arch::SerialWrite("  ");
+    arch::SerialWrite(label);
+    arch::SerialWrite(" : ");
+    arch::SerialWriteHex(value);
+    WriteVaRegion(value);
     arch::SerialWrite("\n");
 }
 
@@ -239,8 +255,8 @@ void DumpDiagnostics(u64 rip, u64 rsp, u64 rbp)
     arch::SerialWrite(" since boot\n");
     DumpTask();
     WriteLabelledCode("rip      ", rip);
-    WriteLabelled("rsp      ", rsp);
-    WriteLabelled("rbp      ", rbp);
+    WriteLabelledVa("rsp      ", rsp);
+    WriteLabelledVa("rbp      ", rbp);
 
     // Control + flags registers. Each line carries the raw hex
     // (existing schema) plus a bracket-list naming the bits that
@@ -256,7 +272,11 @@ void DumpDiagnostics(u64 rip, u64 rsp, u64 rbp)
     arch::SerialWriteHex(cr0);
     WriteCr0Bits(cr0);
     arch::SerialWrite("\n");
-    WriteLabelled("cr2      ", cr2);
+    // CR2 outside a #PF is stale (it holds the last faulting VA the
+    // CPU latched), but the region tag is still informative — a
+    // panic in a code path that stalls on a guard-page touch will
+    // show `k.stack-arena` here, for instance.
+    WriteLabelledVa("cr2      ", cr2);
     arch::SerialWrite("  cr3      : ");
     arch::SerialWriteHex(cr3);
     WriteCr3Decoded(cr3);

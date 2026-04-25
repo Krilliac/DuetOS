@@ -118,6 +118,7 @@
 #include "process.h"
 #include "random.h"
 #include "fault_domain.h"
+#include "diag_decode.h"
 #include "hexdump.h"
 #include "result.h"
 #include "string.h"
@@ -311,6 +312,9 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     SerialWrite("[boot] Exercising kernel-VA range + hexdump formatters.\n");
     duetos::core::HexdumpSelfTest();
+
+    SerialWrite("[boot] Exercising VA-region classifier (panic / trap dump annotation).\n");
+    duetos::core::VaRegionSelfTest();
 
     SerialWrite("[boot] Exercising process / capability helpers.\n");
     duetos::core::ProcessSelfTest();

@@ -80,4 +80,50 @@ void WriteSymbolIfCode(u64 value);
 /// and any logger that prints PTE flags.
 void WritePteFlags(u64 flags);
 
+/// Coarse VA classification used by the crash-dump path to annotate
+/// raw addresses (cr2 / rsp / rbp / rip) with the region they fall
+/// into. Hex alone tells you the value; this tells you what the value
+/// MEANS without forcing the operator to keep paging.h's memory map
+/// in their head while reading a panic.
+///
+/// Order matters — `Classify` walks the most specific buckets first
+/// (kernel image sections, kernel arenas) before falling back to the
+/// coarse user/canonical/non-canonical buckets. Tags are stable
+/// strings so a host-side parser can grep on them.
+enum class VaRegion : u8
+{
+    Null,             // exactly 0
+    LowNullPage,      // [0 .. 4 KiB)
+    LowIdentityMap,   // (4 KiB .. 1 GiB) — boot-stack region pre-userland
+    UserCanonicalLow, // [1 GiB .. 0x0000_8000_0000_0000)
+    NonCanonical,     // canonical hole
+    KernelCanonical,  // [0xFFFF_8000_0000_0000 .. 0xFFFF_FFFF_8000_0000)
+    KernelText,       // [_text_start .. _text_end)
+    KernelRodata,     // [_rodata_start .. _rodata_end)
+    KernelData,       // [_data_start .. _data_end)
+    KernelBss,        // [_bss_start .. _bss_end)
+    KernelDirectMap,  // remainder of [kKernelVirtualBase .. kMmioArenaBase)
+    KernelMmio,       // [kMmioArenaBase .. kKernelStackArenaBase)
+    KernelStackArena, // [kKernelStackArenaBase .. end)
+};
+
+/// Return the region a VA falls in. Pure arithmetic + a couple of
+/// linker-symbol comparisons; safe from any context.
+VaRegion ClassifyVa(u64 va);
+
+/// Stable short-name for a region (e.g. "k.text", "user-canonical").
+/// Used in `[region=...]` annotations.
+const char* VaRegionName(VaRegion region);
+
+/// Convenience: emit ` [region=NAME]` to serial. Caller does NOT
+/// pre-emit a separator — this writes its own leading space. No
+/// trailing newline.
+void WriteVaRegion(u64 va);
+
+/// Boot-time validation that `ClassifyVa` returns the expected region
+/// for known fixed addresses across every bucket. Panics on mismatch.
+/// Called from `kernel_main`'s self-test block alongside the other
+/// diag self-tests.
+void VaRegionSelfTest();
+
 } // namespace duetos::core

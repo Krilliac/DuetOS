@@ -167,6 +167,44 @@ Token shape preserved: every existing `<label>=0x<hex>` (or
 was; the decoded suffix is appended to the same line. Parsers
 that anchor on the hex format are unaffected.
 
+### VA-region tag on raw addresses
+
+Beyond the bit-decoders, every raw VA emitted in a crash dump
+(`rip` / `rsp` / `rbp` / `cr2`) now carries a `[region=NAME]`
+suffix produced by `core::WriteVaRegion`. The classifier
+(`core::ClassifyVa` in `kernel/core/diag_decode.{h,cpp}`) walks
+the most specific buckets first — kernel image sections
+(`k.text` / `k.rodata` / `k.data` / `k.bss` resolved against the
+linker's `_text_start..._bss_end` symbols) before the kernel
+arenas (`k.directmap` / `k.mmio` / `k.stack-arena` keyed off
+`mm::kKernelVirtualBase` / `kMmioArenaBase` /
+`kKernelStackArenaBase`) — then falls back to coarse buckets
+for canonical user space, the non-canonical hole, the boot
+identity map, and the null page.
+
+Why: hex alone tells you the value; the region tag tells you
+what the value MEANS. A `cr2 : 0xFFFFFFFFE0000FF8 [region=k.stack-arena]`
+on a #PF instantly reads as "kernel stack overflow"; a
+`rsp : 0x00007FFF... [region=user-canonical]` on a kernel-mode
+panic is a klaxon for "we panicked while still on the user
+stack". Without the tag the operator has to keep paging.h's
+memory map in their head while reading the dump.
+
+`core::VaRegionSelfTest()` is invoked from `kernel_main`
+alongside the other diag self-tests; it asserts the classifier
+on both sides of every bucket transition and on the linker
+symbols themselves. If the layout in `paging.h` / `kstack.h` /
+the linker script ever drifts, the self-test panics at boot
+with a labelled mismatch instead of mis-tagging crash-dump
+addresses silently.
+
+Token shape preserved: the region tag is appended to the same
+line, after a single space, in `[region=...]` form. Parsers
+that anchor on the existing hex (or on the
+`[fn+0xOFF (path:LINE)]` symbol annotation that may also
+precede it on `rip`) are unaffected; the trailing tag is just
+extra trivia they can ignore.
+
 ## Resolver semantics
 
 `duetos::core::ResolveAddress(addr, &out)`:
