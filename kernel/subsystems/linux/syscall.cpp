@@ -311,6 +311,29 @@ enum : u64
     kSysInotifyInit = 253,
     kSysInotifyInit1 = 294,
     kSysPrctl = 157,
+
+    // Batch 68 — Linux BSD-socket syscalls. v0 has no userland
+    // socket layer; each handler returns -ENETDOWN or -ENOSYS so
+    // a libc fallback to "no network" runs cleanly instead of
+    // panicking on the unhandled-syscall path.
+    kSysSocket = 41,
+    kSysConnect = 42,
+    kSysAccept = 43,
+    kSysSendto = 44,
+    kSysRecvfrom = 45,
+    kSysSendmsg = 46,
+    kSysRecvmsg = 47,
+    kSysShutdown = 48,
+    kSysBind = 49,
+    kSysListen = 50,
+    kSysGetsockname = 51,
+    kSysGetpeername = 52,
+    kSysSocketpair = 53,
+    kSysSetsockopt = 54,
+    kSysGetsockopt = 55,
+    kSysAccept4 = 288,
+    kSysSendmmsg = 307,
+    kSysRecvmmsg = 299,
 };
 
 // POSIX AT_FDCWD — used by the *at family to mean "resolve
@@ -4322,6 +4345,31 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
         break;
     case kSysPrctl:
         rv = DoPrctl(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+        break;
+
+    // Batch 68 — BSD-socket family. No userland socket layer;
+    // socket() returns -ENETDOWN, others -EBADF (no fd to act on).
+    case kSysSocket:
+    case kSysSocketpair:
+        rv = -100; // -ENETDOWN
+        break;
+    case kSysAccept:
+    case kSysAccept4:
+    case kSysConnect:
+    case kSysBind:
+    case kSysListen:
+    case kSysShutdown:
+    case kSysGetsockname:
+    case kSysGetpeername:
+    case kSysSetsockopt:
+    case kSysGetsockopt:
+    case kSysSendto:
+    case kSysRecvfrom:
+    case kSysSendmsg:
+    case kSysRecvmsg:
+    case kSysSendmmsg:
+    case kSysRecvmmsg:
+        rv = kEBADF;
         break;
 
     default:
