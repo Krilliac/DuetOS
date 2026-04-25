@@ -919,6 +919,12 @@ bool TryResolveViaPreloadedDlls(const char* dll_name, const char* fn_name, const
     return TryResolveViaPreloadedDllsImpl(dll_name, fn_name, dlls, count, /*depth=*/0, out_va);
 }
 
+bool TryResolveViaPreloadedDllsByOrdinal(const char* dll_name, u32 ordinal, const DllImage* dlls, u64 count,
+                                         u64* out_va)
+{
+    return TryResolveViaPreloadedDllsByOrdinalImpl(dll_name, ordinal, dlls, count, /*depth=*/0, out_va);
+}
+
 bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm::AddressSpace* as,
                     const DllImage* preloaded_dlls, u64 preloaded_dll_count)
 {
@@ -995,31 +1001,57 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
             const u64 ent = LeU64(file + int_ent_off);
             if (ent == 0)
                 break;
-            if (ent & (u64(1) << 63))
+
+            // Ordinal vs by-name: bit 63 set marks an ordinal
+            // import. The low 16 bits hold the ordinal value.
+            const bool is_ordinal_import = (ent & (u64(1) << 63)) != 0;
+            const u32 import_ordinal = static_cast<u32>(ent & 0xFFFF);
+
+            const char* fn_name = nullptr;
+            char ordinal_name_buf[32];
+            if (is_ordinal_import)
             {
-                SerialWrite("[pe-resolve] ");
-                SerialWrite(dll_name);
-                SerialWrite(": ordinal import #");
-                SerialWriteHex(ent & 0xFFFF);
-                SerialWrite(" — v0 only resolves by-name imports\n");
-                return false;
+                // Synthesize a printable "#N" name for log lines and
+                // catch-all path. The buffer is on the stack — the
+                // by-name fall-through never persists this pointer.
+                ordinal_name_buf[0] = '#';
+                u32 v = import_ordinal;
+                u32 digits = 0;
+                char tmp[10];
+                if (v == 0)
+                {
+                    tmp[digits++] = '0';
+                }
+                while (v > 0 && digits < sizeof(tmp))
+                {
+                    tmp[digits++] = static_cast<char>('0' + (v % 10));
+                    v /= 10;
+                }
+                u32 out_idx = 1;
+                for (u32 i = digits; i > 0 && out_idx + 1 < sizeof(ordinal_name_buf); --i)
+                    ordinal_name_buf[out_idx++] = tmp[i - 1];
+                ordinal_name_buf[out_idx] = '\0';
+                fn_name = ordinal_name_buf;
             }
-            const u32 ibn_rva = static_cast<u32>(ent & 0x7FFFFFFF);
-            const u64 ibn_off = RvaToFile(file, h, ibn_rva);
-            if (ibn_off == ~u64(0) || ibn_off + 2 >= file_len)
+            else
             {
-                SerialWrite("[pe-resolve] ");
-                SerialWrite(dll_name);
-                SerialWrite(": IBN rva out of bounds\n");
-                return false;
-            }
-            const char* fn_name = BoundedCString(file, file_len, ibn_off + 2);
-            if (fn_name == nullptr)
-            {
-                SerialWrite("[pe-resolve] ");
-                SerialWrite(dll_name);
-                SerialWrite(": IBN name unterminated\n");
-                return false;
+                const u32 ibn_rva = static_cast<u32>(ent & 0x7FFFFFFF);
+                const u64 ibn_off = RvaToFile(file, h, ibn_rva);
+                if (ibn_off == ~u64(0) || ibn_off + 2 >= file_len)
+                {
+                    SerialWrite("[pe-resolve] ");
+                    SerialWrite(dll_name);
+                    SerialWrite(": IBN rva out of bounds\n");
+                    return false;
+                }
+                fn_name = BoundedCString(file, file_len, ibn_off + 2);
+                if (fn_name == nullptr)
+                {
+                    SerialWrite("[pe-resolve] ");
+                    SerialWrite(dll_name);
+                    SerialWrite(": IBN name unterminated\n");
+                    return false;
+                }
             }
 
             u64 stub_va = 0;
@@ -1031,8 +1063,14 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
             // lands straight in the DLL's code. Misses fall
             // through to Win32StubsLookupKind, preserving all
             // existing stub-table behaviour.
+            //
+            // For ordinal imports we ask the EAT directly; the
+            // flat stub table is name-keyed and won't match.
             const bool resolved_via_dll =
-                TryResolveViaPreloadedDlls(dll_name, fn_name, preloaded_dlls, preloaded_dll_count, &stub_va);
+                is_ordinal_import
+                    ? TryResolveViaPreloadedDllsByOrdinal(dll_name, import_ordinal, preloaded_dlls, preloaded_dll_count,
+                                                          &stub_va)
+                    : TryResolveViaPreloadedDlls(dll_name, fn_name, preloaded_dlls, preloaded_dll_count, &stub_va);
             if (resolved_via_dll)
             {
                 SerialWrite("[pe-resolve] via-dll ");

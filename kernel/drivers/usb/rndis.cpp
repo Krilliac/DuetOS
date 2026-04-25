@@ -374,34 +374,44 @@ void RxPollEntry(void*)
         // same lock and would starve under a long RX hold.
         if (xhci::XhciBulkPoll(g_state.slot_id, g_state.bulk_in_ep, trb_phys, &got, /*timeout_us=*/5000))
         {
-            // Each transfer carries one or more RNDIS_PACKET_MSG
-            // records. v0 only delivers the first.
-            if (got >= sizeof(RndisPacketHeader))
+            // Each transfer can carry one or more RNDIS_PACKET_MSG
+            // records back to back. Walk them by `msg_len`,
+            // delivering each one's data span to the net stack and
+            // stopping at the first malformed record so a runt
+            // tail byte can't desync the loop.
+            u32 cursor = 0;
+            while (cursor + sizeof(RndisPacketHeader) <= got)
             {
-                const u8* hdr = g_state.rx_buf_virt;
-                if (LeU32(hdr + 0) == kRndisMsgPacket)
+                const u8* hdr = g_state.rx_buf_virt + cursor;
+                const u32 msg_type = LeU32(hdr + 0);
+                if (msg_type != kRndisMsgPacket)
                 {
-                    const u32 msg_len = LeU32(hdr + 4);
-                    const u32 data_off = LeU32(hdr + 8);
-                    const u32 data_len = LeU32(hdr + 12);
-                    const u32 abs = 8 + data_off; // data_off is from offset 8
-                    if (msg_len <= got && abs + data_len <= got && data_len >= 14)
-                    {
-                        ++g_state.stats.rx_packets;
-                        g_state.stats.rx_bytes += data_len;
-                        duetos::net::NetStackInjectRx(g_state.iface_index, g_state.rx_buf_virt + abs, data_len);
-                    }
-                    else
-                    {
-                        ++g_state.stats.rx_dropped;
-                    }
+                    // Probably a control-plane indication
+                    // (RNDIS_INDICATE_STATUS_MSG) — ignore in v0
+                    // and stop walking the buffer.
+                    ++g_state.stats.rx_dropped;
+                    break;
+                }
+                const u32 msg_len = LeU32(hdr + 4);
+                const u32 data_off = LeU32(hdr + 8);
+                const u32 data_len = LeU32(hdr + 12);
+                if (msg_len < sizeof(RndisPacketHeader) || cursor + msg_len > got)
+                {
+                    ++g_state.stats.rx_dropped;
+                    break;
+                }
+                const u32 abs = 8 + data_off; // data_off is from offset 8
+                if (abs + data_len <= msg_len && data_len >= 14)
+                {
+                    ++g_state.stats.rx_packets;
+                    g_state.stats.rx_bytes += data_len;
+                    duetos::net::NetStackInjectRx(g_state.iface_index, hdr + abs, data_len);
                 }
                 else
                 {
-                    // Probably a control-plane indication
-                    // (RNDIS_INDICATE_STATUS_MSG) — ignore in v0.
                     ++g_state.stats.rx_dropped;
                 }
+                cursor += msg_len;
             }
         }
         else

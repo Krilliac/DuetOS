@@ -86,3 +86,41 @@ guarded by existing call paths and validated by recompile.
 - **Compositor prims pair with bitmap helpers.** When a GDI op exists on memDC
   bitmaps, the same op should exist as a recorded compositor prim — keep the
   two surfaces feature-parallel.
+
+## Batch 2 — same session, additional gaps
+
+### 6. RNDIS RX delivers all records per transfer
+
+`kernel/drivers/usb/rndis.cpp::RxPollEntry` previously delivered only the
+first `RNDIS_PACKET_MSG` per bulk-IN transfer. Now it walks the buffer by
+each header's `msg_len`, delivers every record's data span to
+`NetStackInjectRx`, and stops at the first malformed record so a runt
+trailer can't desync the cursor. Ignored control-plane indications
+(`RNDIS_INDICATE_STATUS_MSG`) still abort the walk for that transfer.
+
+### 7. FAT32 LFN sequence validation
+
+`kernel/fs/fat32.cpp::WalkDirChain` previously trusted any LFN ordinal
+sequence without checking the per-fragment checksum. Now it captures the
+checksum from the first fragment, requires every fragment in the sequence
+to share it, and verifies the assembled checksum matches the `ComputeLfnChecksum`
+of the trailing 11-byte SFN. On mismatch the walker falls back to the SFN
+8.3 form — orphaned LFN runs (typical after a partial rename) no longer
+clobber the displayed name with stale UTF-16 fragments.
+
+### 8. PE by-ordinal import resolution
+
+`kernel/core/pe_loader.cpp::ResolveImports` used to reject any IBN entry
+with bit 63 set ("v0 only resolves by-name imports"). Now an ordinal
+import is parsed off the IBN, a printable `#N` synthetic name is built
+on the stack for log lines, and resolution dispatches to a new public
+`TryResolveViaPreloadedDllsByOrdinal` wrapper. EAT-miss ordinal imports
+fall through to the existing function-catch-all NO-OP stub path so PEs
+with ordinal imports stop being hard-rejects.
+
+## Files touched (batch 2)
+
+- `kernel/drivers/usb/rndis.cpp` — multi-record RX walk
+- `kernel/fs/fat32.cpp` — `ComputeLfnChecksum` + sequence check
+- `kernel/core/pe_loader.cpp` — public `TryResolveViaPreloadedDllsByOrdinal`
+  wrapper + ordinal-import branch in `ResolveImports`
