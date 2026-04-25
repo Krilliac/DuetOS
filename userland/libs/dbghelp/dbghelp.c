@@ -130,3 +130,88 @@ __declspec(dllexport) BOOL MiniDumpWriteDump(HANDLE hProcess, DWORD ProcessId, H
     (void)Callback;
     return 0; /* No dump written. */
 }
+
+__declspec(dllexport) BOOL SymGetModuleInfo64(HANDLE hProcess, unsigned long long qwAddr, void* ModuleInfo)
+{
+    (void)hProcess;
+    (void)qwAddr;
+    (void)ModuleInfo;
+    return 0;
+}
+
+__declspec(dllexport) DWORD SymGetOptions(void)
+{
+    return 0;
+}
+
+__declspec(dllexport) DWORD SymSetOptions(DWORD opts)
+{
+    (void)opts;
+    return 0;
+}
+
+__declspec(dllexport) BOOL SymRefreshModuleList(HANDLE hProcess)
+{
+    (void)hProcess;
+    return 1;
+}
+
+__declspec(dllexport) BOOL SymUnloadModule64(HANDLE hProcess, unsigned long long base)
+{
+    (void)hProcess;
+    (void)base;
+    return 1;
+}
+
+__declspec(dllexport) BOOL SymEnumSymbols(HANDLE hProcess, unsigned long long base, const char* mask, void* cb,
+                                          void* user)
+{
+    (void)hProcess;
+    (void)base;
+    (void)mask;
+    (void)cb;
+    (void)user;
+    return 1; /* Empty enum — no callbacks fire. */
+}
+
+__declspec(dllexport) BOOL SymEnumSymbolsW(HANDLE hProcess, unsigned long long base, const void* mask, void* cb,
+                                           void* user)
+{
+    (void)hProcess;
+    (void)base;
+    (void)mask;
+    (void)cb;
+    (void)user;
+    return 1;
+}
+
+__declspec(dllexport) DWORD UnDecorateSymbolName(const char* DecoratedName, char* UnDecoratedName, DWORD UndecoratedLen,
+                                                 DWORD Flags)
+{
+    (void)Flags;
+    if (!UnDecoratedName || UndecoratedLen == 0)
+        return 0;
+    DWORD i = 0;
+    if (DecoratedName)
+    {
+        for (; i + 1 < UndecoratedLen && DecoratedName[i]; ++i)
+            UnDecoratedName[i] = DecoratedName[i];
+    }
+    UnDecoratedName[i] = 0;
+    return i;
+}
+
+__declspec(dllexport) BOOL SymGetSearchPath(HANDLE hProcess, char* path, DWORD path_len)
+{
+    (void)hProcess;
+    if (path && path_len > 0)
+        path[0] = 0;
+    return 1;
+}
+
+__declspec(dllexport) BOOL SymSetSearchPath(HANDLE hProcess, const char* path)
+{
+    (void)hProcess;
+    (void)path;
+    return 1;
+}
