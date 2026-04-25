@@ -50,6 +50,7 @@
 #include "elf_loader.h"
 #include "hexdump.h"
 #include "cleanroom_trace.h"
+#include "crprobe.h"
 #include "firmware_loader.h"
 #include "auth.h"
 #include "klog.h"
@@ -1407,9 +1408,9 @@ static const char* const kCommandSet[] = {
     "battery",  "thermal", "temp",     "gpu",       "lsgpu",    "gfx",        "nic",        "lsnic",    "ip",
     "arp",      "ipv4",    "uuid",     "uuidgen",   "health",   "checkup",    "attacksim",  "redteam",  "memdump",
     "ifconfig", "netinfo", "dhcp",     "route",     "netscan",  "wifi",       "fwpolicy",   "fwtrace",  "crtrace",
-    "net",      "usbnet",  "instr",    "dumpstate", "bp",       "breakpoint", "login",      "logout",   "passwd",
-    "useradd",  "userdel", "users",    "who",       "su",       "hwmon",      "vbe",        "ping",     "nslookup",
-    "ntp",      "http",    "shutdown", "poweroff",  "beep",     "inspect",    "theme",
+    "crprobe",  "net",     "usbnet",   "instr",     "dumpstate","bp",         "breakpoint", "login",    "logout",
+    "passwd",   "useradd", "userdel",  "users",     "who",      "su",         "hwmon",      "vbe",      "ping",
+    "nslookup", "ntp",     "http",     "shutdown",  "poweroff", "beep",       "inspect",    "theme",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -3601,15 +3602,13 @@ void CmdCrTrace(duetos::u32 argc, char** argv)
         ConsoleWrite(" c=");
         WriteU64Hex(e.c);
         ConsoleWriteln("");
-        duetos::arch::SerialWrite("CRTRACE ");
+        duetos::arch::SerialWrite("CRTRACE [");
+        duetos::arch::SerialWriteHex(i);
+        duetos::arch::SerialWrite("] ");
         duetos::arch::SerialWrite(e.subsystem);
         duetos::arch::SerialWrite("::");
         duetos::arch::SerialWrite(e.event);
-        duetos::arch::SerialWriteHex(e.a);
-        duetos::arch::SerialWrite(" ");
-        duetos::arch::SerialWriteHex(e.b);
-        duetos::arch::SerialWrite(" ");
-        duetos::arch::SerialWriteHex(e.c);
+        duetos::core::CleanroomTraceWriteDecoded(e);
         duetos::arch::SerialWrite("\n");
     }
     duetos::arch::SerialWrite("=== CRTRACE DUMP END ===\n");
@@ -8676,6 +8675,13 @@ void Dispatch(char* line)
     if (StrEq(cmd, "crtrace"))
     {
         CmdCrTrace(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "crprobe"))
+    {
+        ConsoleWriteln("CRPROBE: firing wifi + fw-loader trace dispatch points");
+        duetos::core::CrProbeRun();
+        ConsoleWriteln("CRPROBE: done — try `crtrace show 32`");
         return;
     }
     if (StrEq(cmd, "net"))

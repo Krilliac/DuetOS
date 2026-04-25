@@ -2339,18 +2339,13 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             duetos::core::CleanroomTraceEntry e{};
             if (!duetos::core::CleanroomTraceRead(i, &e))
                 continue;
-            SerialWrite("CRTRACE ");
+            SerialWrite("CRTRACE [");
             SerialWriteHex(i);
-            SerialWrite(" ");
+            SerialWrite("] ");
             SerialWrite(e.subsystem);
             SerialWrite("::");
             SerialWrite(e.event);
-            SerialWrite(" a=");
-            SerialWriteHex(e.a);
-            SerialWrite(" b=");
-            SerialWriteHex(e.b);
-            SerialWrite(" c=");
-            SerialWriteHex(e.c);
+            duetos::core::CleanroomTraceWriteDecoded(e);
             SerialWrite("\n");
         }
         SerialWrite("=== CRTRACE BOOT DUMP END ===\n");

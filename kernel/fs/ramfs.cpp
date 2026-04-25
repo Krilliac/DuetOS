@@ -119,6 +119,7 @@ constexpr u8 kEtcProfileBytes[] = "# DuetOS default profile\n"
                                   "alias l ls\n"
                                   "alias cls clear\n"
 #ifdef DUETOS_CRTRACE_SURVEY
+                                  "crprobe\n"
                                   "crtrace show 256\n"
 #endif
     ;

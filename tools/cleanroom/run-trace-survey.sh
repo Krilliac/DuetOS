@@ -70,5 +70,5 @@ fi
 
 echo "captured: ${OUT_LOG}"
 echo "  CRTRACE entries:" \
-    "$(grep -c '^CRTRACE [0-9a-fx]\+ ' "${OUT_LOG}" || true)"
+    "$(grep -c '^CRTRACE \[' "${OUT_LOG}" || true)"
 echo "  Decode shell::command hashes with tools/cleanroom/decode_hash.py"
