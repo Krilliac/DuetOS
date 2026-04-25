@@ -117,6 +117,7 @@ set(DUETOS_KERNEL_SHARED_SOURCES
     drivers/usb/hid_descriptor.cpp
     drivers/usb/cdc_ecm.cpp
     drivers/usb/msc_scsi.cpp
+    drivers/usb/rndis.cpp
     drivers/usb/usb.cpp
     drivers/usb/xhci.cpp
     drivers/video/calendar.cpp

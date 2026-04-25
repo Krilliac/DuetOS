@@ -2,6 +2,8 @@
 
 #include "../arch/x86_64/serial.h"
 #include "../core/klog.h"
+#include "../drivers/usb/cdc_ecm.h"
+#include "../drivers/usb/rndis.h"
 #include "../sched/sched.h"
 #include "stack.h"
 
@@ -273,6 +275,14 @@ void NetSmokeEntry(void*)
                                  "Hello from DuetOS!\r\n\r\n";
     TcpListen(7777, reinterpret_cast<const u8*>(kHello), sizeof(kHello) - 1);
     arch::SerialWrite("[net-smoke] boot listener installed on tcp/7777\n");
+
+    // USB-net auto-probe is intentionally NOT called here. With a
+    // real RNDIS device attached, the bring-up succeeds but the
+    // bulk RX poll task and the synchronous DHCP TX collide on
+    // the v0 event-ring consumer (non-atomic evt_idx / evt_cycle).
+    // Manual invocation via the `usbnet probe` shell command
+    // works for one-shot testing in a controlled context. Real
+    // concurrent USB-net needs the event-router slice.
 }
 
 } // namespace

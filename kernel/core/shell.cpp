@@ -19,6 +19,8 @@
 #include "../drivers/input/ps2mouse.h"
 #include "../drivers/net/net.h"
 #include "../drivers/pci/pci.h"
+#include "../drivers/usb/cdc_ecm.h"
+#include "../drivers/usb/rndis.h"
 #include "../drivers/power/power.h"
 #include "../net/stack.h"
 #include "../drivers/storage/block.h"
@@ -1381,24 +1383,24 @@ void CmdFind(u32 argc, char** argv)
 // dispatched in Dispatch — keeping the two in sync is the
 // price of not having reflection.
 static const char* const kCommandSet[] = {
-    "help",     "about",     "version",  "clear",      "uptime",   "date",      "windows",    "mode",     "ls",
-    "cat",      "touch",     "rm",       "echo",       "cp",       "mv",        "wc",         "head",     "tail",
-    "dmesg",    "stats",     "mem",      "history",    "set",      "unset",     "env",        "alias",    "unalias",
-    "sysinfo",  "source",    "man",      "grep",       "find",     "time",      "which",      "seq",      "sort",
-    "uniq",     "cpuid",     "cr",       "rflags",     "tsc",      "hpet",      "ticks",      "msr",      "lapic",
-    "smp",      "lspci",     "heap",     "paging",     "fb",       "kbdstats",  "mousestats", "loglevel", "logcolor",
-    "getenv",   "yield",     "reboot",   "halt",       "uname",    "whoami",    "hostname",   "pwd",      "true",
-    "false",    "mount",     "lsmod",    "lsblk",      "lsgpt",    "free",      "ps",         "spawn",    "readelf",
-    "hexdump",  "stat",      "basename", "dirname",    "cal",      "sleep",     "reset",      "tac",      "nl",
-    "rev",      "expr",      "color",    "rand",       "flushtlb", "checksum",  "repeat",     "kill",     "exec",
-    "metrics",  "trace",     "read",     "guard",      "top",      "fatcat",    "fatls",      "fatwrite", "fatappend",
-    "fatnew",   "fatrm",     "fattrunc", "fatmkdir",   "fatrmdir", "linuxexec", "translate",  "smbios",   "power",
-    "battery",  "thermal",   "temp",     "gpu",        "lsgpu",    "gfx",       "nic",        "lsnic",    "ip",
-    "arp",      "ipv4",      "uuid",     "uuidgen",    "health",   "checkup",   "attacksim",  "redteam",  "memdump",
-    "ifconfig", "netinfo",   "dhcp",     "route",      "netscan",  "wifi",      "net",
-    "instr",    "dumpstate", "bp",       "breakpoint", "login",    "logout",    "passwd",     "useradd",  "userdel",
-    "users",    "who",       "su",       "hwmon",      "vbe",      "ping",      "nslookup",   "ntp",      "http",
-    "shutdown", "poweroff",  "beep",     "inspect",    "theme",
+    "help",      "about",   "version",    "clear",    "uptime",   "date",      "windows",    "mode",     "ls",
+    "cat",       "touch",   "rm",         "echo",     "cp",       "mv",        "wc",         "head",     "tail",
+    "dmesg",     "stats",   "mem",        "history",  "set",      "unset",     "env",        "alias",    "unalias",
+    "sysinfo",   "source",  "man",        "grep",     "find",     "time",      "which",      "seq",      "sort",
+    "uniq",      "cpuid",   "cr",         "rflags",   "tsc",      "hpet",      "ticks",      "msr",      "lapic",
+    "smp",       "lspci",   "heap",       "paging",   "fb",       "kbdstats",  "mousestats", "loglevel", "logcolor",
+    "getenv",    "yield",   "reboot",     "halt",     "uname",    "whoami",    "hostname",   "pwd",      "true",
+    "false",     "mount",   "lsmod",      "lsblk",    "lsgpt",    "free",      "ps",         "spawn",    "readelf",
+    "hexdump",   "stat",    "basename",   "dirname",  "cal",      "sleep",     "reset",      "tac",      "nl",
+    "rev",       "expr",    "color",      "rand",     "flushtlb", "checksum",  "repeat",     "kill",     "exec",
+    "metrics",   "trace",   "read",       "guard",    "top",      "fatcat",    "fatls",      "fatwrite", "fatappend",
+    "fatnew",    "fatrm",   "fattrunc",   "fatmkdir", "fatrmdir", "linuxexec", "translate",  "smbios",   "power",
+    "battery",   "thermal", "temp",       "gpu",      "lsgpu",    "gfx",       "nic",        "lsnic",    "ip",
+    "arp",       "ipv4",    "uuid",       "uuidgen",  "health",   "checkup",   "attacksim",  "redteam",  "memdump",
+    "ifconfig",  "netinfo", "dhcp",       "route",    "netscan",  "wifi",      "net",        "usbnet",   "instr",
+    "dumpstate", "bp",      "breakpoint", "login",    "logout",   "passwd",    "useradd",    "userdel",  "users",
+    "who",       "su",      "hwmon",      "vbe",      "ping",     "nslookup",  "ntp",        "http",     "shutdown",
+    "poweroff",  "beep",    "inspect",    "theme",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -3485,6 +3487,60 @@ void CmdNet(duetos::u32 argc, char** argv)
         return;
     }
     ConsoleWriteln("NET: usage: net <up|status|test>");
+}
+
+// Manual USB-Ethernet probe. The auto-probe path is gated off in
+// kernel_main because it interacts badly with the pre-poll xHCI
+// event-ring state and regresses the e1000 wired DHCP. Calling
+// this from the shell after boot completes runs the probe in a
+// stable scheduler context.
+//
+//   usbnet probe — try CDC-ECM then RNDIS; bind iface 1 on first hit
+//   usbnet status — show whichever USB-net driver is online
+void CmdUsbNet(duetos::u32 argc, char** argv)
+{
+    if (argc < 2 || StrEq(argv[1], "status"))
+    {
+        const auto cdc = duetos::drivers::usb::CdcEcmStatsRead();
+        const auto rn = duetos::drivers::usb::RndisStatsRead();
+        ConsoleWrite("USBNET: cdc-ecm=");
+        ConsoleWrite(cdc.online ? "UP" : "down");
+        ConsoleWrite("  rndis=");
+        ConsoleWrite(rn.online ? "UP" : "down");
+        if (cdc.online)
+        {
+            ConsoleWrite("  cdc-ecm-mac=");
+            WriteMac(cdc.mac);
+        }
+        if (rn.online)
+        {
+            ConsoleWrite("  rndis-mac=");
+            WriteMac(rn.mac);
+        }
+        ConsoleWriteln("");
+        return;
+    }
+    if (StrEq(argv[1], "probe"))
+    {
+        ConsoleWriteln("USBNET: probing CDC-ECM ...");
+        const bool cdc_ok = duetos::drivers::usb::CdcEcmProbe();
+        if (cdc_ok)
+        {
+            ConsoleWriteln("USBNET: CDC-ECM bound on iface 1 — DHCP started");
+            return;
+        }
+        ConsoleWriteln("USBNET: no CDC-ECM device. probing RNDIS ...");
+        const bool rn_ok = duetos::drivers::usb::RndisProbe();
+        if (rn_ok)
+        {
+            ConsoleWriteln("USBNET: RNDIS bound on iface 1 — DHCP started");
+            return;
+        }
+        ConsoleWriteln("USBNET: no compatible USB-Ethernet device found "
+                       "(supported: CDC-ECM, RNDIS — Android tether default)");
+        return;
+    }
+    ConsoleWriteln("USBNET: usage: usbnet <probe|status>");
 }
 
 void CmdArp()
@@ -8277,6 +8333,11 @@ void Dispatch(char* line)
     if (StrEq(cmd, "net"))
     {
         CmdNet(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "usbnet"))
+    {
+        CmdUsbNet(argc, argv);
         return;
     }
     if (StrEq(cmd, "health") || StrEq(cmd, "checkup"))

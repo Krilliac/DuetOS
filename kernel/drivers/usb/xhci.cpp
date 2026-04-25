@@ -410,6 +410,12 @@ void AdvanceEventRing(Runtime& rt)
     WriteMmio64(rt.intr0, /*kIntrErdpLo=*/0x18, erdp | (1ull << 3));
 }
 
+// Forward declaration for the side cache helpers defined further
+// down the TU. WaitEvent stashes Transfer Events that aren't for
+// the current expect_phys so a concurrent poller can claim them.
+void TrbEventCacheStash(u64 trb_phys, u32 completion_code, u32 residual, u32 trb_len);
+bool TrbEventCacheTake(u64 trb_phys, u32* completion_code, u32* residual, u32* trb_len);
+
 // Drain events until one whose TRB pointer equals `expect_phys` and
 // whose type matches `expect_type` lands in the consumer slot.
 // Irrelevant events are consumed + dropped (port-status changes, etc.).
@@ -434,9 +440,19 @@ bool WaitEvent(Runtime& rt, u64 expect_phys, u32 expect_type, Trb* out, u64 iter
             AdvanceEventRing(rt);
             return true;
         }
-        // Non-matching event — drop it. A Port Status Change event
-        // can land between an Enable Slot completion and the next
-        // command; we don't care.
+        // Non-matching event. If it's another Transfer Event, stash
+        // it into the side cache so a concurrent XhciBulkPoll waiter
+        // can claim it. Other event types (port status, command
+        // completions destined for the synchronous command path)
+        // are dropped — those callers either run during init when
+        // no other consumer exists, or have their own dedicated
+        // pollers.
+        if (type == kTrbTypeTransferEvent)
+        {
+            const u32 code = (e.status >> 24) & 0xFF;
+            const u32 residual = e.status & 0x00FFFFFF;
+            TrbEventCacheStash(ptr, code, residual, /*trb_len=*/0);
+        }
         AdvanceEventRing(rt);
     }
     return false;
@@ -1296,6 +1312,110 @@ constinit Runtime g_poll_rt[kMaxControllers] = {};
 // writer at a time (documented contract).
 constinit volatile bool g_event_consumer_paused = false;
 
+// Side cache for Transfer Events that arrive on the ring but aren't
+// for the TRB the current waiter is polling for. Two-thread case:
+// rndis-rx submits a bulk-IN and polls for it; the smoke task
+// concurrently submits a bulk-OUT and polls for IT. Whichever
+// thread's WaitEvent runs first consumes BOTH events — the second
+// thread's TRB is "stolen". To fix, every WaitEvent that sees an
+// event for a different TRB stashes it here. Subsequent
+// XhciBulkPoll calls check the cache before polling the live ring.
+//
+// Single-slot cache works because only two concurrent waiters are
+// expected in v0 (one TX, one RX per USB-net device). Multi-device
+// USB-net coexistence will need a multi-slot version, which is a
+// trivial extension once the use case lands.
+struct TrbEventCacheEntry
+{
+    volatile u64 trb_phys;
+    volatile u32 completion_code;
+    volatile u32 residual; // status bits 0..23 = remaining bytes (for short packets)
+    volatile u32 trb_len;  // length we put in the original TRB
+    volatile u8 valid;
+};
+constinit TrbEventCacheEntry g_trb_event_cache[4] = {};
+
+// Bulk-poll serialization. The event ring's consumer indices
+// (rt.evt_idx + rt.evt_cycle) are non-atomic; two threads in
+// WaitEvent simultaneously corrupt them. The simplest correct v0
+// fix is to serialize XhciBulkPoll calls so only one waiter
+// touches the ring at a time. Concurrency goes back to 1×, which
+// is plenty for DHCP-rate USB-net traffic; a future event-router
+// slice removes the need.
+constinit volatile u32 g_bulk_poll_lock = 0;
+
+void BulkPollLockAcquire()
+{
+    u32 spins = 0;
+    while (true)
+    {
+        u32 expected = 0;
+        if (__atomic_compare_exchange_n(&g_bulk_poll_lock, &expected, 1u, /*weak=*/false, __ATOMIC_ACQUIRE,
+                                        __ATOMIC_ACQUIRE))
+            return;
+        if (++spins >= 4096)
+        {
+            // Yield instead of pure spin — the lock holder might
+            // be waiting for an event that requires scheduler
+            // progress (timer tick, IRQ-driven wake).
+            duetos::sched::SchedSleepTicks(1);
+            spins = 0;
+        }
+        else
+        {
+            asm volatile("pause" : : : "memory");
+        }
+    }
+}
+
+void BulkPollLockRelease()
+{
+    __atomic_store_n(&g_bulk_poll_lock, 0u, __ATOMIC_RELEASE);
+}
+
+// Cache an unrelated event for someone else's poll to claim.
+void TrbEventCacheStash(u64 trb_phys, u32 completion_code, u32 residual, u32 trb_len)
+{
+    for (auto& e : g_trb_event_cache)
+    {
+        if (e.valid)
+            continue;
+        e.trb_phys = trb_phys;
+        e.completion_code = completion_code;
+        e.residual = residual;
+        e.trb_len = trb_len;
+        e.valid = 1;
+        return;
+    }
+    // Cache full — drop oldest (slot 0) so we always have room.
+    g_trb_event_cache[0].trb_phys = trb_phys;
+    g_trb_event_cache[0].completion_code = completion_code;
+    g_trb_event_cache[0].residual = residual;
+    g_trb_event_cache[0].trb_len = trb_len;
+    g_trb_event_cache[0].valid = 1;
+}
+
+// Try to claim a cached event for this TRB. Returns true on hit.
+bool TrbEventCacheTake(u64 trb_phys, u32* completion_code, u32* residual, u32* trb_len)
+{
+    for (auto& e : g_trb_event_cache)
+    {
+        if (e.valid && e.trb_phys == trb_phys)
+        {
+            if (completion_code)
+                *completion_code = e.completion_code;
+            if (residual)
+                *residual = e.residual;
+            if (trb_len)
+                *trb_len = e.trb_len;
+            e.valid = 0;
+            e.trb_phys = 0;
+            return true;
+        }
+    }
+    return false;
+}
+
 // Acknowledge interrupter 0's IMAN.IP (the device-side pending
 // bit). LAPIC EOI is handled by the generic IRQ dispatcher; this
 // clears the xHCI-internal pending bit so a subsequent event
@@ -2148,27 +2268,23 @@ u64 XhciBulkSubmit(u8 slot_id, u8 ep_addr, u64 buf_phys, u32 len)
 
 bool XhciBulkPoll(u8 slot_id, u8 ep_addr, u64 trb_phys, u32* out_bytes, u64 timeout_us)
 {
-    (void)ep_addr;
     DeviceState* dev = DeviceForSlot(slot_id);
     if (dev == nullptr || trb_phys == 0)
         return false;
-    Runtime& rt = g_poll_rt[dev->ctrlr_idx];
-    Trb e{};
-    // Convert microseconds to the WaitEvent iteration budget. The
-    // existing helper uses `iters` as a coarse spin count; 4M iters
-    // correlates with ~4 ms in the original calls. Scale linearly.
-    const u64 iters = (timeout_us * 1000) + 1;
-    if (!WaitEvent(rt, trb_phys, kTrbTypeTransferEvent, &e, iters))
-        return false;
-    const u32 code = (e.status >> 24) & 0xFF;
-    if (out_bytes != nullptr)
+
+    // Serialize all bulk pollers — the event ring's consumer
+    // indices aren't safe under concurrent access in v0.
+    BulkPollLockAcquire();
+    struct Unlocker
     {
-        const u32 residual = e.status & 0x00FFFFFF;
-        // The Transfer Event status bits 0..23 are the residual byte
-        // count (transfer length minus actually-moved bytes). The
-        // caller wants bytes-actually-transferred — derive from
-        // residual + the `len` we put in the TRB. Walk the ring
-        // backwards to find the matching TRB len.
+        ~Unlocker() { BulkPollLockRelease(); }
+    } unlocker;
+    (void)unlocker;
+
+    // Helper to compute bytes-actually-transferred from the
+    // residual byte count + the TRB length we enqueued.
+    auto compute_bytes = [&](u32 residual) -> u32
+    {
         const Trb* ring = (ep_addr & 0x80) ? dev->bulk_in_ring : dev->bulk_out_ring;
         const u32 slots = (ep_addr & 0x80) ? dev->bulk_in_ring_slots : dev->bulk_out_ring_slots;
         const u64 ring_phys_base = (ep_addr & 0x80) ? dev->bulk_in_ring_phys : dev->bulk_out_ring_phys;
@@ -2176,9 +2292,40 @@ bool XhciBulkPoll(u8 slot_id, u8 ep_addr, u64 trb_phys, u32* out_bytes, u64 time
         if (trb_phys >= ring_phys_base && trb_phys < ring_phys_base + slots * sizeof(Trb))
             trb_idx = u32((trb_phys - ring_phys_base) / sizeof(Trb));
         const u32 trb_len = ring[trb_idx].status & 0x0001FFFF;
-        *out_bytes = trb_len > residual ? trb_len - residual : 0;
+        return trb_len > residual ? trb_len - residual : 0;
+    };
+
+    // Bulk-poll lock is held; we own the event ring. Use the
+    // original WaitEvent with a coarse iter budget. The cache
+    // exists for events we drained but didn't match — a future
+    // caller acquiring the lock will check it.
+    Runtime& rt = g_poll_rt[dev->ctrlr_idx];
+    Trb e{};
+    // 4M iters ≈ ~4ms on TCG. Scale linearly to the timeout the
+    // caller asked for, but cap at a value that won't busy-spin
+    // for hundreds of ms (would starve other tasks). The lock
+    // holder doesn't yield during WaitEvent, so we keep the
+    // window small + come back through SchedSleepTicks at the
+    // outer level if the caller wants longer.
+    constexpr u64 kItersPerMs = 1000;
+    const u64 iters = timeout_us * kItersPerMs + 1;
+    if (WaitEvent(rt, trb_phys, kTrbTypeTransferEvent, &e, iters))
+    {
+        const u32 code = (e.status >> 24) & 0xFF;
+        if (out_bytes != nullptr)
+            *out_bytes = compute_bytes(e.status & 0x00FFFFFF);
+        return code == kCompletionCodeSuccess || code == 13 /* Short Packet */;
     }
-    return code == kCompletionCodeSuccess || code == 13 /* Short Packet */;
+    // Even after timeout, the cache may hold our event (drained
+    // by a previous waiter). Claim it if so.
+    u32 code = 0, residual = 0, len_unused = 0;
+    if (TrbEventCacheTake(trb_phys, &code, &residual, &len_unused))
+    {
+        if (out_bytes != nullptr)
+            *out_bytes = compute_bytes(residual);
+        return code == kCompletionCodeSuccess || code == 13 /* Short Packet */;
+    }
+    return false;
 }
 
 void XhciInit()
