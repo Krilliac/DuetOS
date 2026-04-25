@@ -204,32 +204,62 @@ step via `printf` with `%s`/`%u`/`%02x` formatting. Boot log:
 
 ---
 
-## The current gap to "runs arbitrary Windows apps"
+## Phase 6 — windowed Win32 + live network
+
+The "What doesn't work" list from the end of Phase 5 has shrunk. As of
+2026-04-25:
+
+- **Win32 windowing is live.** `windowed_hello` boots, paints with
+  `Rectangle` / `Ellipse` / `DrawTextW` / `FillRect`, dispatches
+  `WM_PAINT` / `WM_TIMER` / `WM_LBUTTONDOWN` through a user-registered
+  WndProc, round-trips `SendMessage`, queries focus / styles / sys
+  palette, and exits cleanly. The compositor renders into a virtio-gpu
+  scanout (kernel framebuffer) and the present hook flushes per
+  compose. See `.claude/knowledge/win32-windowing-v1.4.md` and
+  `render-drivers-v6.md`.
+- **Networking is live.** Intel e1000 wired NIC + USB CDC-ECM + USB
+  RNDIS drivers, full TCP/UDP/IP/ARP stack, DHCP client, DNS
+  resolver. DuetOS reaches Google over a real connection (see
+  `.claude/knowledge/live-internet-connectivity-v0.md`). RNDIS now
+  delivers every `RNDIS_PACKET_MSG` per bulk transfer (was: only the
+  first).
+- **PE loader stage 2 closed several gaps.** Forwarders chase
+  through the per-process DLL table for both name-form and ordinal-
+  form (`Dll.#N`) entries; by-ordinal IAT entries resolve against
+  preloaded EATs; `PeExportLookupName` is binary-search.
 
 For context on how far we actually are: Wine has been working for ~30
-years and runs around 70-80% of Windows games. ReactOS has been working
-for ~25 years and runs perhaps 50% of Win32 programs. DuetOS is at
-approximately 1-2% of either. The surface is broadly covered, but
-most of the interesting subsystems (compositor-backed windows, real
-sockets, COM runtime, DirectX-to-Vulkan translation) still return
-documented-error sentinels rather than running.
+years and runs ~70–80% of Windows games. ReactOS has been working for
+~25 years and runs perhaps 50% of Win32 programs. DuetOS is still
+~1–2% of either by application coverage, but the surface that an
+arbitrary windowed Win32 app touches at boot now actually runs
+end-to-end on every commit.
 
-What does work today:
+What works today:
 - Freestanding Win32 PEs (no CRT, direct int 0x80) — since Phase 1.
-- MSVC-built console PEs with CRT, threads, mutexes, events, atomics,
+- MSVC console PEs with CRT, threads, mutexes, events, atomics,
   printf, file I/O, registry queries — since Phase 4 / 5.
 - `windows-kill.exe` (a real shipped third-party Windows binary) —
   since the end of Phase 3.
+- Windowed Win32 PEs (`windowed_hello` end-to-end on every boot) —
+  Phase 6.
+- Live Internet (DNS + TCP to a real Internet host) — Phase 6.
 
-What doesn't work:
-- Windowed programs (user32 / gdi32 return NULL at CreateWindow).
-- Networking (ws2_32 returns WSAENETDOWN).
-- Any program whose happy path requires a COM instance, a loaded DLL
-  by path, actual file writes, or DirectX.
+What still doesn't work:
+- COM apartments, real `CoInitialize` / `CoCreateInstance` runtime.
+- DirectX rendering (D3D9/11/12 DLLs are real COM-vtable shapes but
+  the underlying device returns E_FAIL on real submits).
+- Modal dialogs, menus, common controls, scroll bars, outline fonts,
+  multi-threaded message queues.
+- Most of `winsock2`'s asynchronous surface (the synchronous BSD-
+  socket subset works).
+- Arbitrary file writes through the FS write paths (read paths are
+  live; write is the next FS slice).
 
-Each of those is its own multi-slice implementation track. The DLL
-surface is a scaffolding for making them possible, not a substitute
-for doing the work.
+Each of those is its own multi-slice track. The DLL surface is the
+scaffolding for making them possible; this phase is replacing the
+documented-error sentinels with real implementations one
+subsystem at a time.
 
 ---
 

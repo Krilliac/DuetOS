@@ -1,90 +1,112 @@
-# Win32 windowing v1.4 — SendMessage + styles + parent/focus + caret + beep + MessageBox types
+# Win32 windowing — current state (through v1.4)
 
-**Last updated:** 2026-04-24
+**Last updated:** 2026-04-25
 **Type:** Observation + Decision
-**Status:** Landed — `windowed_hello` now round-trips
-SendMessage → WndProc, GWL_STYLE set/get, SetFocus/GetFocus,
-CreateCaret + SetCaretPos + ShowCaret, MessageBeep, all
-end-to-end.
+**Status:** Active — `windowed_hello` exercises the full surface
+end-to-end on every headless QEMU boot.
 
-## What shipped (syscalls 94..100)
+## Scope
 
-### Parent / child (94 / 95 / 96)
+Cumulative snapshot of every Win32 windowing slice that has
+landed: lifecycle, message queue, GDI, input, focus, parent/child,
+styles, caret, MessageBox returns, SendMessage. Replaces the
+per-slice notes (`win32-windowing-v0/v1/v1.2/v1.3`) — git history
+preserves them; this doc captures the system as it stands today.
 
-`RegisteredWindow.parent` holds a WindowHandle or
-kWindowInvalid. `SetParent` / `GetParent` / `GetWindow(GW_*)`
-back the Win32 names; `WindowGetRelated` walks z-order for
-Next/Prev/First/Last and scans for Child. Owner is aliased to
-parent in v1 (no separate owner field).
+## Architecture
 
-### Focus separate from active (97 / 98)
+```
+PE (user32 IAT) ──► user32 stub bytecode ──► int 0x80
+                                              │
+                                              ▼
+                                         SYS_WIN_*
+                                              │
+                                              ▼
+   kernel/subsystems/win32/window_syscall.cpp ──►
+   kernel/drivers/video/widget.cpp (compositor + per-window state)
+                                              │
+                                              ▼
+                                  framebuffer present hook
+```
 
-`g_focus_hwnd` is a distinct handle from `g_active_window`
-(the topmost z-order). `SetFocus` fires
-WM_KILLFOCUS(old, wParam=new_hwnd) and WM_SETFOCUS(new,
-wParam=prev_hwnd). Callers that want "focus but don't raise"
-finally have the API.
+`HwndToCompositorHandleForCaller(hwnd, pid)` is the per-process
+HWND → compositor handle gate at every entry. Cross-process HWND
+reads return `kWindowInvalid`, which prevents accidental cross-pid
+GWLP reads (and forces SendMessage cross-process to return 0).
 
-### Caret (99)
+## What is wired
 
-Single global blinking rectangle. One syscall (op + args) does
-Create / Destroy / SetPos / Show / Hide. The compositor's
-DesktopCompose toggles `g_caret_on` on every compose and
-paints a solid rectangle when `on && shown && visible`. The
-1-Hz ui-ticker drives the blink cadence.
+### Lifecycle / message pump
+- `CreateWindowExA/W` (captures dwStyle / dwExStyle / parent into
+  the per-window 4-slot `longs[]` array).
+- `DestroyWindow`, `ShowWindow`, `MoveWindow`, `UpdateWindow`,
+  `InvalidateRect` → WM_PAINT.
+- `GetMessageA/W` (blocking, 10 ms granularity) and
+  `PeekMessageA/W` (non-blocking) on the per-window message ring.
+- `TranslateMessage`, `DispatchMessageA/W` (60-byte stub that
+  looks up the WndProc and invokes via `__stdcall`).
+- `DefWindowProcA/W` returns 0 / WM_PAINT-end semantics.
+- Process-exit reaper destroys windows + frees `longs[]` slots.
 
-### MessageBeep / Beep (100)
+### GDI
+- Window HDC + memDC paths share one object table (HBRUSH, HPEN,
+  HBITMAP). Stock objects (`GetStockObject`) return real handles.
+- `CreateCompatibleDC` + `CreateCompatibleBitmap` + `SelectObject`
+  + `BitBlt` / `StretchBlt` work as the canonical double-buffered
+  paint idiom. memDC paint helpers in `gdi_objects.cpp` write
+  raw BGRA into the selected bitmap.
+- Outline + fill primitives: `Rectangle`, `FillRect`,
+  `Ellipse` (fill+outline), `MoveToEx` + `LineTo`, `SetPixel`.
+  Pen / brush / bk_color / bk_mode / text_color are stored per-DC
+  (memDC and window DC); `text_color_set` flag distinguishes
+  "explicit black" from "never set" so SetTextColor(BLACK) takes
+  effect on a window DC.
+- `TextOutA`, `TextOutW`, `DrawTextA` (8×8 font, ASCII +
+  punctuation; `Font8x8Lookup` falls back to a filled-box glyph
+  for unmapped codes).
+- `GetSysColor` + `GetSysColorBrush` return Classic-theme values.
 
-Forwards to `duetos::drivers::audio::PcSpeakerBeep(freq_hz,
-duration_ms)` — 800 Hz / 100 ms defaults for `MessageBeep(0)`.
-Blocking (PC speaker busy-loops in the driver), but the
-duration is brief enough to accept.
+### Input
+- WM_LBUTTONDOWN / WM_LBUTTONUP / WM_MOUSEMOVE / WM_KEYDOWN /
+  WM_KEYUP / WM_CHAR routed by the compositor to the per-window
+  ring of the focused window.
+- `SetCapture` / `ReleaseCapture` redirect mouse messages to a
+  capturing window regardless of cursor position.
+- Async input state: `GetKeyState`, `GetAsyncKeyState`,
+  `GetCursorPos`, `SetCursorPos`.
 
-## SendMessage — user32 only
+### Focus / parent / styles
+- `g_focus_hwnd` is distinct from `g_active_window` (topmost
+  z-order). `SetFocus` fires WM_KILLFOCUS / WM_SETFOCUS pairs.
+- `SetParent`, `GetParent`, `GetWindow(GW_*)` walk z-order for
+  Next / Prev / First / Last; Child scans descendants.
+- `GetWindowLongPtr[A/W]` / `SetWindowLongPtr[A/W]` recognise
+  Win32 negative constants: GWLP_WNDPROC=−4, GWLP_USERDATA=−21,
+  GWL_STYLE=−16, GWL_EXSTYLE=−20 — remapped to slots 0/1/2/3 of
+  the per-window `longs[]` array.
 
-`SendMessageA/W` + `SendNotifyMessageA/W` fetch the target's
-GWLP_WNDPROC via SYS_WIN_GET_LONG and invoke it directly
-(`__stdcall` ABI). Cross-process SendMessage naturally fails
-— the kernel's HwndToCompositorHandleForCaller refuses reads
-against another pid's HWND so GWLP_WNDPROC comes back 0.
+### Caret / beep
+- `CreateCaret` / `DestroyCaret` / `SetCaretPos` / `ShowCaret` /
+  `HideCaret` route through one syscall (op + args). Compositor's
+  1 Hz ui-ticker toggles `g_caret_on`; DesktopCompose paints a
+  solid rectangle when `on && shown && visible`.
+- `MessageBeep` / `Beep` forward to `PcSpeakerBeep(freq, ms)`;
+  defaults 800 Hz / 100 ms for `MessageBeep(0)`. Blocking but
+  brief.
 
-## Window styles — client-side remap via GWL_STYLE / GWL_EXSTYLE
+### SendMessage
+- `SendMessageA/W` + `SendNotifyMessageA/W` fetch the target's
+  GWLP_WNDPROC via SYS_WIN_GET_LONG and invoke it directly
+  (__stdcall). Cross-process SendMessage returns 0 because the
+  HWND→compositor lookup denies cross-pid reads.
 
-No new kernel state. User32's `user32_slot_from_index()`
-recognises Win32's negative constants (GWLP_WNDPROC=-4,
-GWLP_USERDATA=-21, GWL_STYLE=-16, GWL_EXSTYLE=-20) and
-remaps to the 4-slot `RegisteredWindow.longs[]` array:
-slot 0 = WNDPROC, slot 1 = USERDATA, slot 2 = STYLE, slot 3 =
-EXSTYLE. CreateWindowEx captures `dwStyle` + `dwExStyle` into
-slots 2/3 right after the window is created.
+### MessageBox
+- Real return codes per `uType & 0xF`: IDOK (1), IDRETRY (4),
+  IDYES (6) for the common shapes. Simulates "user clicked the
+  default button". The text still goes only to the serial log —
+  no modal UI.
 
-## MessageBox — real return codes
-
-User32's `user32_msgbox_result(uType)` maps:
-
-| uType & 0xF | Return code |
-|-------------|-------------|
-| MB_OK (0) | IDOK (1) |
-| MB_OKCANCEL (1) | IDOK (1) |
-| MB_ABORTRETRYIGNORE (2) | IDRETRY (4) |
-| MB_YESNOCANCEL (3) | IDYES (6) |
-| MB_YESNO (4) | IDYES (6) |
-| MB_RETRYCANCEL (5) | IDRETRY (4) |
-
-Simulates "user clicked the default button". No modal UI
-still — the MessageBox text is serial-logged as before.
-
-## New exports (user32.dll)
-
-Beep, CreateCaret, DestroyCaret, GetCaretBlinkTime, GetFocus,
-GetParent, GetWindow, HideCaret, MessageBeep, SendNotifyMessageA,
-SendNotifyMessageW, SetCaretBlinkTime, SetCaretPos, SetFocus,
-SetParent, ShowCaret. Plus upgrades to MessageBox[A/W/ExA/ExW]
-(real return codes), SendMessage[A/W] (real WndProc invoke),
-GetWindowLongPtr[A/W] (Win32 negative constant remap),
-CreateWindowEx[A/W] (captures style/exstyle/parent).
-
-## Verification
+## Verification (`windowed_hello` end-to-end)
 
 ```
 [odbg] windowed_hello: screen w=1280
@@ -95,24 +117,31 @@ CreateWindowEx[A/W] (captures style/exstyle/parent).
 [odbg] windowed_hello: timers 3
 [odbg] windowed_hello: wndproc 3
 [odbg] windowed_hello: painted 1
-[odbg] windowed_hello: send_rv 0      ← SendMessage returned DefWndProc's 0
-[odbg] windowed_hello: send_ud 1      ← WndProc incremented USERDATA
-[odbg] windowed_hello: style   3735928559  ← 0xDEADBEEF round-trip
-[odbg] windowed_hello: focus   7            ← GetFocus = biased HWND
+[odbg] windowed_hello: send_rv 0          (SendMessage → DefWindowProc=0)
+[odbg] windowed_hello: send_ud 1          (WndProc incremented USERDATA)
+[odbg] windowed_hello: style 3735928559   (0xDEADBEEF round-trip)
+[odbg] windowed_hello: focus 7            (GetFocus = biased HWND)
 [odbg] windowed_hello: caret+beep done
 [I] sys : exit rc val=0x57
 ```
 
-## Still NOT done yet
+## Not yet wired
 
-- **Modal dialog loops** — DialogBox / EndDialog. Would need a
-  nested message-pump + DialogProc dispatch.
-- **Menus** — CreateMenu / AppendMenu / TrackPopupMenu not
-  implemented. Menu bars and popup menus are a big slice.
+- **Modal dialogs** — DialogBox / EndDialog. Needs a nested
+  pump + DialogProc dispatch.
+- **Menus** — CreateMenu / AppendMenu / TrackPopupMenu return 0.
 - **Common controls** — no edit / button / list / treeview.
 - **Scroll bars** — no SB_* API, no WM_HSCROLL / WM_VSCROLL.
-- **Icon / bitmap rendering** — LoadBitmap etc. still return 0.
-- **Font rendering** — only the 8×8 built-in font via TextOut.
-- **Multi-threaded GetMessage** — the per-pid filter works for
-  single-threaded PEs; a multi-threaded PE would see its
+- **Icon / bitmap loading** — `LoadBitmap` etc. return 0.
+- **Outline fonts** — only the 8×8 built-in font.
+- **Multi-threaded message queues** — the per-pid filter handles
+  one thread per process; a multi-threaded PE would see its
   threads' queues merged.
+
+## Notes
+
+- See also: [render-drivers-v6.md](render-drivers-v6.md) for the
+  paint stack underneath the GDI surface.
+- See also: [win32-stubs-rdi-rsi-abi.md](win32-stubs-rdi-rsi-abi.md)
+  for the rdi/rsi callee-saved bug pattern that hit several of
+  these stubs during bring-up.

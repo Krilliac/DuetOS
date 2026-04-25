@@ -1,120 +1,130 @@
-# render/drivers v6 — message loop + filled primitives + UTF-16 text + sys palette
+# Render / drivers — current state (through v6)
 
-**Last updated:** 2026-04-24
+**Last updated:** 2026-04-25
 **Type:** Observation + Decision
-**Status:** Active — a functional Win32 GUI app runs on the
-desktop. Mouse + keyboard events reach the PE's WndProc;
-Rectangle / Ellipse / DrawText / TextOutW produce expected
-pixels; GetSysColor returns Classic-theme values.
+**Status:** Active — a Win32 GUI app paints, takes mouse +
+keyboard input, dispatches WM_PAINT through a user-registered
+WndProc, and queries the system palette. End-to-end on every
+boot via `windowed_hello`.
 
-## The headline: PE message loops now work
+## Scope
 
-Every Win32 GUI tutorial ever written centers on this boilerplate:
+Cumulative snapshot of every render / GDI / GPU bring-up slice
+that has landed. Replaces the per-slice notes
+(`render-drivers-v1/v2/v3/v4/v5`) — git history preserves them;
+this doc captures the system as it stands today. The matching
+windowing-side slice notes live in `win32-windowing-v1.4.md`.
 
-```c
-MSG msg;
-while (GetMessage(&msg, NULL, 0, 0)) {
-    TranslateMessage(&msg);
-    DispatchMessage(&msg);
-}
+## Stack
+
+```
+PE (gdi32 IAT) ──► gdi32 stub bytecode (8 KiB R-X over 2 frames) ──► int 0x80
+                                                                      │
+                                                                      ▼
+                                                                 SYS_GDI_*
+                                                                      │
+                                                       ┌──────────────┴────────────────┐
+                                                       ▼                               ▼
+                                          window-DC compositor prims           memDC bitmap pixel writes
+                                          (display-list in widget.cpp)        (gdi_objects.cpp paint helpers)
+                                                       │                               │
+                                                       └──────────► framebuffer ◄──────┘
+                                                                          │
+                                                                          ▼
+                                                              FramebufferPresent hook
+                                                                          │
+                                                                          ▼
+                                                       virtio-gpu TRANSFER_TO_HOST_2D + RESOURCE_FLUSH
+                                                          (or noop on plain `-vga std`)
 ```
 
-Before v6: `GetMessageA` returned 0 on the first call (dummy
-`kOffReturnZero` stub), so every PE exited its message loop
-immediately — no input, no paint, no interaction.
+## What is wired
 
-After v6:
-- `GetMessageA/W` → `SYS_WIN_GET_MSG` (63). Blocks (10 ms granularity)
-  until the window's message ring has something.
-- `PeekMessageA/W` → `SYS_WIN_PEEK_MSG` (62). Non-blocking.
-- `DispatchMessageA/W` → custom 60-byte stub that looks up the
-  window's registered WndProc via `SYS_WIN_GET_LONG(hwnd, 0)` and
-  calls it directly: `wndproc(hwnd, msg, wparam, lparam)`. The
-  call happens entirely in user mode — no kernel bounce.
-- `TranslateMessage` stays at `kOffReturnZero` because our PS/2
-  keyboard reader already posts `WM_CHAR` directly after
-  `WM_KEYDOWN`.
+### GPU discovery + virtio-gpu kernel framebuffer
+- `drivers/gpu/gpu.cpp` walks PCI display-class devices, maps
+  BAR0, runs vendor-specific MMIO liveness probes (NVIDIA reads
+  `PMC_BOOT_0`; Intel reads BAR0+0; AMD GFX9+ documents the BAR5
+  gap without mapping).
+- `drivers/gpu/virtio_gpu.cpp` runs the full virtio 1.0 §3.1.1
+  handshake, then the five-command 2D scanout cycle:
+  RESOURCE_CREATE_2D / ATTACH_BACKING / SET_SCANOUT /
+  TRANSFER_TO_HOST_2D / RESOURCE_FLUSH. Backing pages are
+  RAM-allocated via `AllocateContiguousFrames` and bound to the
+  framebuffer via `FramebufferRebindExternal` (the cacheable
+  sibling of `FramebufferRebind` — virtio-gpu backing must NOT
+  go through `MapMmio`).
+- `FramebufferSetPresentHook(fn)` registers the per-compose
+  flush callback. On QEMU `-vga virtio` every desktop compose
+  flushes through to the host.
 
-Input routing was already fully wired in v1.2–v1.4 (mouse clicks
-→ WM_LBUTTONDOWN with client coords, key events → WM_KEYDOWN +
-WM_CHAR, focus tracking, capture). The syscall bridge being absent
-made it all invisible to PEs.
+### GDI object table
+- `gdi_objects.{h,cpp}` owns four parallel arrays: `g_pens`,
+  `g_brushes`, `g_bitmaps`, `g_mem_dcs`. Handles encode a tag
+  in the high bits (`kGdiTagPen`, `kGdiTagBrush`, `kGdiTagBitmap`,
+  `kGdiTagMemDC`); raw 0..N values are window HDCs.
+- `WindowDcState` (one per compositor window slot) holds
+  `text_color` + `text_color_set` flag (so SetTextColor(BLACK) is
+  honored), `bk_color`, `bk_mode`, `selected_pen`, `selected_brush`,
+  `cur_x` / `cur_y` for MoveToEx + LineTo.
+- `MemDC` mirrors that state with an additional `selected_bitmap`.
+  memDC paint helpers always read `text_color` directly (no flag
+  needed because the field is the only source).
+- Stock objects (`GetStockObject`) return real handles; deleting
+  them is a safe no-op.
 
-## Filled primitives + DC brush state
+### Outline + fill primitives
+- `Rectangle` (LTRB, fill+outline), `FillRect`, `Ellipse`
+  (fill+outline including a window-path `FilledEllipse` compositor
+  prim and a memDC outline-on-fill helper),
+  `MoveToEx` + `LineTo` (Bresenham), `SetPixel`, `PatBlt`
+  (PATCOPY only — ROP ignored).
+- Filled-shape syscalls: `SYS_GDI_RECTANGLE_FILLED` (122),
+  `SYS_GDI_ELLIPSE_FILLED` (123), `SYS_GDI_PAT_BLT` (124).
+- The integer-ellipse test
+  `(x-cx)²·b² + (y-cy)²·a² ≤ a²·b²` is used everywhere — no sqrt,
+  no sin/cos.
 
-Win32 `Rectangle` / `Ellipse` / `PatBlt` fill with the DC's
-currently-selected brush and outline with the selected pen. The v5
-outline-only stubs were visually wrong for most apps.
+### Text
+- `TextOutA` (66) / `TextOutW` (125) / `DrawTextA` (alignment) /
+  `DrawTextW` (126). UTF-16 text is downcoded to ASCII on the
+  syscall boundary (`(char)wc` if `wc < 0x80`, else `'?'`).
+- 8×8 built-in font (`drivers/video/font8x8.cpp`): ASCII +
+  digits + punctuation. Lowercase aliased to uppercase. Unmapped
+  codes render as a filled-box placeholder.
+- `DrawTextAsciiOnDc` is the alignment + dispatch core shared by
+  the A and W variants after their respective copy-ins.
 
-- `MemDC` + `WindowDcState` grew a `selected_brush` field;
-  `SelectObject(hdc, hbrush)` now stores it for both kinds of DC.
-- `ResolveBrushColor(hdc)` is the sibling of `ResolvePenColor` —
-  returns `WHITE_BRUSH` (0xFFFFFF) when no selection.
-- `SYS_GDI_RECTANGLE_FILLED` (122): fills rect body with brush,
-  draws outline with pen. Window path records FillRect + Rectangle
-  display-list prims; memDC path paints the bitmap + 4 Bresenham
-  edges.
-- `SYS_GDI_ELLIPSE_FILLED` (123): bounding-box scan with the
-  integer-ellipse test `(x-cx)² * b² + (y-cy)² * a² ≤ a²·b²`. No
-  sqrt. memDC fill is real; window path still outline-only
-  because the compositor lacks a FilledEllipse prim (documented
-  gap, not a blocker for most apps since most fills happen on
-  memDCs anyway via the double-buffered paint pattern).
-- `SYS_GDI_PAT_BLT` (124): rect fill with DC brush. ROP ignored —
-  always `PATCOPY` semantics.
+### memDC pixel writes
+- `GdiPaintRectOnBitmap(bmp, x, y, w, h, rgb)` — clipped solid
+  fill.
+- `GdiPaintTextOnBitmap(bmp, x, y, text, fg, bg, opaque)` — 8×8
+  glyphs with per-pixel clipping. TRANSPARENT mode leaves
+  non-glyph pixels untouched.
+- `GdiBlitIntoBitmap(bmp, dx, dy, src, sw, sh, src_pitch_px)` —
+  BGRA rect copy with pitch + source-offset slide for negative
+  dst coordinates.
 
-## UTF-16 text — TextOutW + DrawTextW
+### BitBlt / StretchBlt
+- `SYS_GDI_BITBLT` (window↔window, window↔memDC, memDC↔memDC,
+  via the object-table dispatch).
+- `SYS_GDI_STRETCH_BLT_DC` (117): 11-arg StretchBlt packed into
+  a single user-stack struct, nearest-neighbor sampling, capped
+  at `kWinBlitMaxPx`.
 
-Many modern PEs (especially anything MSVC-compiled with
-`UNICODE`) import `gdi32.TextOutW` / `DrawTextW` instead of the A
-variants. Before v6 these returned dummy 1 and drew nothing.
+### System palette
+- 31-entry Classic-theme table covers `COLOR_SCROLLBAR` (0)
+  through `COLOR_MENUBAR` (30). `GetSysColor` returns the raw
+  COLORREF; `GdiSysColorBrush(idx)` lazily allocates a real
+  HBRUSH on first access and caches it with `.stock = true`.
 
-Implementation:
-- `SYS_GDI_TEXT_OUT_W` (125) + `SYS_GDI_DRAW_TEXT_W` (126).
-- Kernel reads the UTF-16 source into an on-stack buffer, walks
-  it u16-by-u16, and produces an ASCII string where each wchar_t
-  is either `(char)wc` if `wc < 0x80` or `'?'` for non-ASCII.
-  We don't implement real Unicode rendering yet; the `?`
-  placeholder means a Unicode-heavy PE gets question marks
-  instead of the correct glyphs, but ASCII-heavy PEs (including
-  all English UI strings from Windows apps) render correctly.
-- `DrawTextAsciiOnDc` helper — the alignment + dispatch core
-  from `DoGdiDrawText` was extracted so both A and W variants
-  share it after their respective copy-ins.
+### Stub page
+- `kernel/subsystems/win32/stubs.cpp` lives across two contiguous
+  4 KiB R-X frames at `kWin32StubsVa` (allocated by
+  `pe_loader.cpp:PeLoad` via `AllocateContiguousFrames(2)`).
+  Static-asserted at `<= 8192`; current end ~0x1048 leaves
+  ~50 % of the second page free.
 
-## Stub page outgrew one page — now 2 × 4 KiB
-
-TextOutW at 31 bytes would have pushed us past 4096. Two choices:
-compact existing stubs (painful, offset churn) or expand. We
-expanded:
-
-- `pe_loader.cpp:PeLoad` now calls `AllocateContiguousFrames(2)`
-  and maps both pages R-X at `kWin32StubsVa + 0` and
-  `kWin32StubsVa + 0x1000`.
-- The `static_assert` bumped from `<= 4096` to `<= 8192`. Current
-  end: `0x1048` = 4168 bytes; ~50 % of the second page free.
-- `Win32StubsPopulate(dst)` already uses `sizeof(kStubsBytes)` so
-  the copy loop doesn't need changes.
-
-## System palette — GetSysColor + GetSysColorBrush
-
-Win32 apps query the system palette to avoid hard-coding colours
-(`GetSysColor(COLOR_WINDOW)` vs. `RGB(255,255,255)` directly).
-Returning 0 made every UI element look broken.
-
-- 31-entry Classic-theme palette table covers
-  `COLOR_SCROLLBAR` (0) through `COLOR_MENUBAR` (30).
-- `GdiSysColorBrush(idx)` lazily allocates a real HBRUSH the
-  first time each palette slot is queried, caches the handle,
-  and sets `.stock = true` so `DeleteObject` is a safe no-op.
-
-A PE calling `GetSysColor(COLOR_BTNFACE)` now gets `0x00F0F0F0`
-(Classic grey); `GetSysColorBrush(COLOR_HIGHLIGHT)` returns a
-reusable HBRUSH with the Classic selection blue.
-
-## End-to-end: what a real PE now does
-
-Consider a typical "Notepad-style" skeleton:
+## Worked example — what a real PE now does
 
 ```c
 LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
@@ -141,59 +151,38 @@ LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     }
     return DefWindowProc(h, m, w, l);
 }
-
-int WINAPI WinMain(...) {
-    WNDCLASSEX wc = {0};
-    wc.cbSize        = sizeof(wc);
-    wc.lpfnWndProc   = WndProc;
-    wc.hbrBackground = GetSysColorBrush(COLOR_WINDOW);
-    wc.lpszClassName = "MyApp";
-    RegisterClassExA(&wc);
-    HWND h = CreateWindowExA(0, "MyApp", "Title", WS_OVERLAPPEDWINDOW,
-                             CW_USEDEFAULT, CW_USEDEFAULT, 400, 300,
-                             NULL, NULL, hInst, NULL);
-    ShowWindow(h, SW_SHOWNORMAL);
-    MSG msg;
-    while (GetMessage(&msg, NULL, 0, 0)) {
-        TranslateMessage(&msg);
-        DispatchMessage(&msg);
-    }
-    return 0;
-}
 ```
 
-Every call above now has a real backing:
+Every call has a real backing.
 
-- `RegisterClassExA` / `CreateWindowExA` / `ShowWindow` — v1.x
-- `GetMessage` → real (v6)
-- `DispatchMessage` → WndProc is called (v6)
-- `BeginPaint` / `EndPaint` → v3
-- `FillRect` (with HBRUSH from GetSysColorBrush) → v3+v6
-- `SetBkMode` / `SetTextColor` → v4
-- `DrawTextW` with alignment → v5+v6
-- `Rectangle` filled → v6
-- `MessageBoxA` / `PostQuitMessage` → v1.x
-- The click fires `WM_LBUTTONDOWN` that the WndProc sees → v1.2+v6
+## Not yet wired
 
-## Still ahead
-
-- Window-DC filled-ellipse prim (needs FilledEllipse display-list entry)
-- Real Unicode rendering (non-ASCII `?` placeholder for now)
-- Pen width > 1 (thick lines)
-- DT_WORDBREAK + multi-line DrawText
-- SetDIBits / StretchDIBits for raw pixel upload
-- GetSystemMetrics returning sensible per-index values
-  (currently all 0)
+- **Real Unicode rendering** — non-ASCII renders `?`.
+- **Pen width > 1** — thick lines.
+- **DT_WORDBREAK + multi-line DrawText**.
+- **SetDIBits / StretchDIBits** — raw pixel upload from PE memory.
+- **GetSystemMetrics** — returns 0 for all indices.
+- **Hardware-accelerated paint paths** — every prim is CPU
+  software-renderered into the framebuffer; the GPU drivers
+  do scanout + flush only.
 
 ## References
 
-- `kernel/subsystems/win32/stubs.cpp` — offsets 0xF41..0x1047
-  covering message loop, filled primitives, UTF-16 text, palette.
-- `kernel/subsystems/win32/gdi_objects.{h,cpp}` — brush tracking,
-  filled primitive handlers, sys-palette table + brush pool.
-- `kernel/subsystems/win32/window_syscall.cpp` — DoGdiTextOutW,
-  DoGdiDrawTextW, DrawTextAsciiOnDc helper.
-- `kernel/core/syscall.h` — SYS_GDI_RECTANGLE_FILLED (122) through
-  SYS_GDI_GET_SYS_COLOR_BRUSH (128).
-- `kernel/core/pe_loader.cpp:1247` — stubs page expanded to two
-  contiguous 4 KiB frames.
+- `kernel/subsystems/win32/stubs.cpp` — gdi32 IAT bytecode.
+- `kernel/subsystems/win32/gdi_objects.{h,cpp}` — handle table,
+  paint helpers, sys-palette table + brush pool.
+- `kernel/subsystems/win32/window_syscall.cpp` — DoGdi* dispatch
+  + DrawTextAsciiOnDc helper.
+- `kernel/core/syscall.h` — SYS_GDI_* (60–128) constants and ABI.
+- `kernel/drivers/gpu/virtio_gpu.cpp` — virtio-gpu 2D cycle.
+- `kernel/drivers/video/widget.cpp` — compositor + display-list
+  prims (FilledEllipse, FillRect, Rectangle, TextOut, ...).
+- `kernel/drivers/video/font8x8.{h,cpp}` — 8×8 font lookup.
+
+## Notes
+
+- **See also:** [win32-windowing-v1.4.md](win32-windowing-v1.4.md)
+  for the message-pump + lifecycle layer that drives this paint
+  surface.
+- **See also:** [directx-v0.md](directx-v0.md) for the COM-vtable
+  d3d/dxgi DLLs that sit alongside gdi32.
