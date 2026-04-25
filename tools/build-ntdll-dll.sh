@@ -2,8 +2,8 @@
 # tools/build-ntdll-dll.sh
 #
 # Compiles userland/libs/ntdll/ntdll.c into a freestanding
-# x86_64 Windows PE DLL. Stage-2 slice 24: retires the batch-42+
-# ntdll.dll flat stubs (Nt* / Zw* / Rtl* / Ldr* / __chkstk).
+# x86_64 Windows PE DLL. Retires the prior ntdll.dll flat
+# stubs (Nt* / Zw* / Rtl* / Ldr* / __chkstk).
 #
 # Zw* aliases are emitted as same-DLL forwarders via
 # /export:Zw=Nt lld-link flags — one copy of each function

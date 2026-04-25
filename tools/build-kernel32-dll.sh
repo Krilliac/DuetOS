@@ -11,7 +11,7 @@
 # in ring-3 code instead of the kernel-hosted stubs page.
 # Future slices extend this DLL with additional exports; the
 # corresponding kStubsTable entries become dead code (still
-# compiled but never reached because slice-6's via-DLL path
+# compiled but never reached because the via-DLL path
 # matches first).
 #
 # Usage:

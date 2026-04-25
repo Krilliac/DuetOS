@@ -3,8 +3,8 @@
 #
 # Compiles userland/libs/kernelbase into a forwarder-only
 # x86_64 Windows PE DLL. Every export in kernelbase.def is a
-# cross-DLL forwarder to kernel32.dll; the slice-8 forwarder
-# chaser in the kernel loader resolves them at IAT-patch time.
+# cross-DLL forwarder to kernel32.dll; the kernel loader's
+# forwarder chaser resolves them at IAT-patch time.
 
 set -euo pipefail
 

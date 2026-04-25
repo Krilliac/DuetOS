@@ -62,9 +62,9 @@ expected=(
     "[heap] HeapAlloc + GetProcessHeap OK"
     "[heap] malloc+free+malloc round-trip OK"
     "[heap] calloc zero-fill OK"
-    "[batch10] advapi32 + event/wait/time/proc OK"
-    "[batch11] perf counter + tick count OK"
-    "[batch14] HeapSize + HeapReAlloc + realloc OK"
+    "[advapi] advapi32 + event/wait/time/proc OK"
+    "[perf-counter] perf counter + tick count OK"
+    "[heap-resize] HeapSize + HeapReAlloc + realloc OK"
     "[calc] self-test OK"
     "[files] self-test OK"
     "[clock] self-test OK"
@@ -92,7 +92,7 @@ expected=(
     # RTC readable at boot. Wall-clock is non-zero on any live
     # machine; regression would mean CMOS access broke.
     "[rtc] wall clock"
-    # GPU discovery: the drivers/gpu slice walks the PCI cache,
+    # GPU discovery: the drivers/gpu layer walks the PCI cache,
     # classifies display controllers by vendor, and maps BAR 0.
     # QEMU's Bochs VGA always appears here — a missing line means
     # GpuInit didn't run or the PCI device table regressed.
@@ -131,7 +131,7 @@ forbidden=(
     "PANIC"
     "DUETOS CRASH"
     "triple fault"
-    # Regression guard: as of slice 28 (2026-04-22), winkill
+    # Regression guard: winkill
     # (real-world MSVC windows-kill.exe) runs start-to-finish
     # as a ring-3 process and exits via ExitProcess(0). Any
     # scheduler-initiated kill of it (tick-budget exhaustion,
@@ -152,11 +152,11 @@ allowed_unresolved=(
     # All of these are gaps documented in the knowledge
     # entry. Keep this list narrow — any NEW unresolved is
     # a conscious gap we're choosing not to close yet.
-    "MSVCP140.dll!"      # C++ std runtime, batch 13+ material
-    "dbghelp.dll!"       # Sym* family (most landed in batch 12, keep for any latent)
-    "ADVAPI32.dll!"      # batch-10 covered the trio but PEs vary in case
-    "VCRUNTIME140.dll!"  # SEH intrinsics stubbed in batch 12, case-variant fallback
-    "api-ms-win-crt-convert"  # batch 12 stubbed; fallback for pre-batch case
+    "MSVCP140.dll!"           # C++ std runtime — partial coverage
+    "dbghelp.dll!"            # Sym* family — most stubbed, keep for any latent
+    "ADVAPI32.dll!"           # the trio is covered but PEs vary in case
+    "VCRUNTIME140.dll!"       # SEH intrinsics stubbed; case-variant fallback
+    "api-ms-win-crt-convert"  # stubbed; fallback for case variants
 )
 
 fail=0

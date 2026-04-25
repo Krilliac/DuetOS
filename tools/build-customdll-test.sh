@@ -8,8 +8,8 @@
 # C++ constexpr u8 array for inclusion in the kernel.
 #
 # Unlike hello_winapi which imports only from kernel32, this PE
-# is the first fixture that exercises the stage-2 slice-6
-# via-DLL path: at load time, ResolveImports consults the
+# is the first fixture that exercises the via-DLL path: at
+# load time, ResolveImports consults the
 # pre-loaded customdll.dll image and patches each
 # customdll.dll!* IAT slot directly with the DLL's export VA.
 #

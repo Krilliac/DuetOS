@@ -3,8 +3,8 @@
 #
 # Compiles userland/libs/msvcp140/msvcp140.c + the matching
 # .def file into a freestanding x86_64 Windows PE DLL.
-# Stage-2 slice 26: retires the 17 batch-13a MSVCP140 flat
-# stubs (C++ std:: throw helpers + ostream helpers).
+# Retires the 17 MSVCP140 flat stubs (C++ std:: throw helpers
+# + ostream helpers).
 #
 # Exports all use mangled C++ names that bash can't pass on
 # the command line; they come from msvcp140.def via /def:

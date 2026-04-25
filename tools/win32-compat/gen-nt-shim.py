@@ -34,7 +34,7 @@ from pathlib import Path
 # so the generator can emit the C++ enum reference verbatim.
 # ----------------------------------------------------------------------
 KNOWN_MAPPINGS = {
-    # DuetOS today (slice 80-era) — clean Nt analogues
+    # DuetOS today — clean Nt analogues
     "NtTerminateProcess":          "SYS_EXIT",            # ExitProcess maps here too via kernel32
     "NtWriteFile":                 "SYS_WRITE",           # path-based today; close enough for handle-on-stdout
     "NtYieldExecution":            "SYS_YIELD",
@@ -42,18 +42,18 @@ KNOWN_MAPPINGS = {
     "NtFreeVirtualMemory":         "SYS_VUNMAP",
     "NtQueryPerformanceCounter":   "SYS_PERF_COUNTER",
     "NtQuerySystemTime":           "SYS_GETTIME_FT",
-    "NtDelayExecution":            "SYS_SLEEP_MS",         # batch 22
-    "NtCreateFile":                "SYS_FILE_OPEN",        # batch 24
-    "NtOpenFile":                  "SYS_FILE_OPEN",        # batch 24 (read-only variant)
-    "NtReadFile":                  "SYS_FILE_READ",        # batch 24
-    "NtClose":                     "SYS_FILE_CLOSE",       # batch 24
-    "NtQueryInformationFile":      "SYS_FILE_FSTAT",       # batch 25 (size info class)
-    "NtCreateMutant":              "SYS_MUTEX_CREATE",     # batch 26
-    "NtReleaseMutant":             "SYS_MUTEX_RELEASE",    # batch 26
-    "NtWaitForSingleObject":       "SYS_MUTEX_WAIT",       # batch 26 (mutex handles)
-    "NtCreateEvent":               "SYS_EVENT_CREATE",     # batch 45
-    "NtSetEvent":                  "SYS_EVENT_SET",        # batch 45
-    "NtResetEvent":                "SYS_EVENT_RESET",      # batch 45
+    "NtDelayExecution":            "SYS_SLEEP_MS",
+    "NtCreateFile":                "SYS_FILE_OPEN",
+    "NtOpenFile":                  "SYS_FILE_OPEN",
+    "NtReadFile":                  "SYS_FILE_READ",
+    "NtClose":                     "SYS_FILE_CLOSE",
+    "NtQueryInformationFile":      "SYS_FILE_FSTAT",
+    "NtCreateMutant":              "SYS_MUTEX_CREATE",
+    "NtReleaseMutant":             "SYS_MUTEX_RELEASE",
+    "NtWaitForSingleObject":       "SYS_MUTEX_WAIT",
+    "NtCreateEvent":               "SYS_EVENT_CREATE",
+    "NtSetEvent":                  "SYS_EVENT_SET",
+    "NtResetEvent":                "SYS_EVENT_RESET",
     "NtWaitForMultipleObjects":    "SYS_EVENT_WAIT",       # best-effort: first wait target in v0
     "NtSetInformationFile":        "SYS_FILE_SEEK",        # FilePositionInformation-class shape
     "NtWriteVirtualMemory":        "SYS_WRITE",            # debug/log path best-effort sink
@@ -72,14 +72,14 @@ KNOWN_MAPPINGS = {
     "NtTerminateThread":           "SYS_NT_INVOKE",        # linux:exit
     # NtAllocateVirtualMemory / NtFreeVirtualMemory now route to
     # SYS_VMAP / SYS_VUNMAP — page-grain semantics matching the
-    # kernel32!VirtualAlloc trampoline (batch 28). The earlier
+    # kernel32!VirtualAlloc trampoline. The earlier
     # SYS_HEAP_ALLOC mapping was a smaller-scope shortcut that
     # would have lied about page granularity to any caller that
     # actually invoked the Nt primitive (rather than going through
     # kernel32.HeapAlloc). The runtime trampolines for these two
     # NT calls live in stubs.cpp at kOff{NtAllocate,NtFree}-
-    # VirtualMemory (batch 47).
-    # Slice 84+ candidates (filled in as the SYS_* lands)
+    # VirtualMemory.
+    # Future candidates (filled in as the SYS_* lands)
     # "NtSetInformationFile":      "SYS_FILE_SEEK",   (Position info class)
 }
 

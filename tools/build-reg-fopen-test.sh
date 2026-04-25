@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tools/build-reg-fopen-test.sh
 #
-# Build the stage-2 slice 34 end-to-end test PE. Imports from
+# Build the registry + fopen end-to-end test PE. Imports from
 # advapi32 (real registry) + ucrtbase (real fopen) + kernel32
 # (ExitProcess). Verifies HKLM\Software\Microsoft\Windows NT\
 # CurrentVersion\ProductName == "DuetOS" and /bin/hello.exe

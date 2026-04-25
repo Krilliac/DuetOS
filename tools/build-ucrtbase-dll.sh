@@ -2,9 +2,9 @@
 # tools/build-ucrtbase-dll.sh
 #
 # Compiles userland/libs/ucrtbase/ucrtbase.c into a
-# freestanding x86_64 Windows PE DLL. Stage-2 slice 15:
-# retires the batch-6 / 9 UCRT runtime stubs — heap, exit,
-# CRT startup shims, string intrinsics.
+# freestanding x86_64 Windows PE DLL. Retires the prior
+# UCRT runtime stubs — heap, exit, CRT startup shims,
+# string intrinsics.
 #
 # Usage:
 #     build-ucrtbase-dll.sh <repo_root> <out_header>

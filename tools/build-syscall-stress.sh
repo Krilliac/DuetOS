@@ -2,10 +2,9 @@
 # tools/build-syscall-stress.sh
 #
 # Compiles userland/apps/syscall_stress/hello.c into a real
-# x86_64 Windows PE/COFF .exe that exercises the Win32 APIs
-# added in batch 51 — OutputDebugStringA, ExitThread,
-# GetProcessTimes, GetSystemTimes, GlobalMemoryStatusEx,
-# WaitForMultipleObjects.
+# x86_64 Windows PE/COFF .exe that exercises the late Win32
+# additions: OutputDebugStringA, ExitThread, GetProcessTimes,
+# GetSystemTimes, GlobalMemoryStatusEx, WaitForMultipleObjects.
 #
 # Mirrors tools/build-thread-stress.sh — same compile/link
 # flags, same embed pipeline, just a different source dir.

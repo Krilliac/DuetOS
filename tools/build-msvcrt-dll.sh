@@ -2,9 +2,8 @@
 # tools/build-msvcrt-dll.sh
 #
 # Compiles userland/libs/msvcrt/msvcrt.c into a freestanding
-# x86_64 Windows PE DLL. Stage-2 slice 14: retires the batch-7
-# + 29 / 31 string intrinsics from kernel/subsystems/win32/
-# stubs.cpp.
+# x86_64 Windows PE DLL. Retires the prior string-intrinsic
+# stubs from kernel/subsystems/win32/stubs.cpp.
 #
 # Usage:
 #     build-msvcrt-dll.sh <repo_root> <out_header>
