@@ -1,3 +1,23 @@
+/*
+ * DuetOS — AHCI / SATA storage driver: implementation.
+ *
+ * Companion to ahci.h — see there for the controller / port
+ * record shapes and the block-layer integration.
+ *
+ * WHAT
+ *   Drives AHCI host bus adapters: maps the ABAR MMIO window,
+ *   resets each port, allocates command-list + FIS-receive
+ *   buffers, IDENTIFYs the attached drive, and exposes
+ *   /dev/sda* through the block layer.
+ *
+ * HOW
+ *   Polling at v0 — same rationale as nvme.cpp. Each command is
+ *   built into the port's CL slot 0, the issue register is
+ *   written, and the caller polls PxCI until the slot bit
+ *   clears. PxIS is checked for taskfile errors after every
+ *   completion.
+ */
+
 #include "ahci.h"
 
 #include "../../arch/x86_64/serial.h"

@@ -1,3 +1,38 @@
+/*
+ * DuetOS — FAT32 filesystem driver: implementation.
+ *
+ * Companion to fat32.h — see there for the public mount/read/
+ * write/lookup API and the in-memory mount struct.
+ *
+ * WHAT
+ *   Mounts a FAT32 partition discovered by the GPT parser
+ *   (kernel/fs/gpt.cpp), parses the BPB, and exposes
+ *   directory walks + file read/write through the VFS
+ *   adapter. Supports long file names (LFN, UTF-16) including
+ *   the LFN-checksum sidechannel; short-name fallback when LFN
+ *   is missing.
+ *
+ * HOW
+ *   FAT itself is a chained-cluster index; lookups walk the
+ *   chain by `next = fat[curr]`. We cache the FAT in
+ *   per-mount RAM at v0 — small enough on typical FAT32
+ *   volumes (<128 MiB FAT for a 32 GiB volume), big enough
+ *   that on-demand FAT-block reads will be needed when we
+ *   support larger partitions.
+ *
+ *   Directory entries are 32-byte structs; LFN entries
+ *   precede the 8.3 entry and are stitched together by the
+ *   walker. Write paths gate through the security guard
+ *   (security/guard.cpp) so a sandboxed Win32 PE can't
+ *   silently scribble over the boot partition.
+ *
+ * WHY THIS FILE IS LARGE
+ *   FAT32 has a lot of wire-format ceremony (BPB, FAT, LFN
+ *   stitching, 8.3 generation, free-cluster scan, cluster-
+ *   chain walk). Each is short but they accumulate. Plus the
+ *   shell `fat32` command's pretty-printer.
+ */
+
 #include "fat32.h"
 
 #include "../arch/x86_64/serial.h"

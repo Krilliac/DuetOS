@@ -1,3 +1,22 @@
+/*
+ * DuetOS — GPU discovery + driver dispatch: implementation.
+ *
+ * Companion to gpu.h — see there for the device record, BAR
+ * layout, and the unified compositor surface API.
+ *
+ * WHAT
+ *   Walks the PCI device list for class 0x03 (display) and
+ *   matches each device against the per-vendor probe chain
+ *   (Intel iGPU, AMD Radeon, NVIDIA GeForce, virtio-gpu, Bochs
+ *   VBE). The first matching vendor probe takes ownership;
+ *   non-matching devices stay unattached.
+ *
+ * HOW
+ *   Common BAR-map / framebuffer-discovery helpers live here;
+ *   per-vendor command-stream + DMA fences live in their own
+ *   TUs (virtio_gpu.cpp, bochs_vbe.cpp, etc.).
+ */
+
 #include "gpu.h"
 
 #include "../../arch/x86_64/hypervisor.h"

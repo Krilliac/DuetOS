@@ -1,3 +1,31 @@
+/*
+ * DuetOS — physical frame allocator: implementation.
+ *
+ * Companion to frame_allocator.h — see there for the public API
+ * (`AllocateFrame`, `FreeFrame`, `kNullFrame`) and the bitmap-
+ * over-Multiboot2-map design.
+ *
+ * WHAT
+ *   Owns the physical-memory bitmap. One bit per 4 KiB frame
+ *   (1=free, 0=in-use). The bitmap itself lives in low physical
+ *   memory at a frame chosen by the boot path; entries up to
+ *   the kernel image's end and through reserved Multiboot2
+ *   ranges are marked in-use at init time.
+ *
+ * HOW
+ *   `Init` walks the Multiboot2 memory map, sizes the bitmap,
+ *   and marks every (E820 RESERVED | LOADER_CODE | bitmap
+ *   itself | kernel image) range as in-use. Allocation is a
+ *   first-fit linear scan; free is a single bit clear. The
+ *   scan is O(N) on the bitmap which is negligible until we
+ *   start carving out user pages in the megabytes — at which
+ *   point a buddy-allocator overlay will replace the linear
+ *   path for the user-half range.
+ *
+ *   Diagnostic: `FrameAllocatorDump` walks the bitmap and emits
+ *   a free/used summary used by the `mem` shell command.
+ */
+
 #include "frame_allocator.h"
 
 #include "multiboot2.h"

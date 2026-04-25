@@ -1,3 +1,27 @@
+/*
+ * DuetOS — file-syscall routing layer: implementation.
+ *
+ * Companion to file_route.h — see there for the public router
+ * API used by the syscall dispatcher.
+ *
+ * WHAT
+ *   Decides which FS backend a path resolves into:
+ *     - `/bin/*`       -> embedded ramfs (binaries baked into
+ *                         the kernel image at build time)
+ *     - everything     -> the active mount at the longest
+ *                         matching prefix (FAT32 / ext4 /
+ *                         tmpfs / ramfs)
+ *
+ *   Insulates the syscall layer from per-FS specifics so
+ *   SYS_READ / SYS_STAT can stay generic.
+ *
+ * HOW
+ *   Mount table is a flat array of {prefix, fs-vtable}; lookup
+ *   is a longest-prefix scan. Path normalisation (no `..`
+ *   escapes, leading `/` enforcement) happens here before any
+ *   FS-specific code sees the path.
+ */
+
 #include "file_route.h"
 
 #include "../arch/x86_64/serial.h"

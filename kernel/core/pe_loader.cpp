@@ -1,3 +1,45 @@
+/*
+ * DuetOS — PE/COFF loader: implementation.
+ *
+ * Companion to pe_loader.h — see there for the v0 scope statement
+ * (which PE features are supported, which are intentionally cut)
+ * and the caller-facing API (PeLoad, PeReport).
+ *
+ * WHAT
+ *   Maps a PE32+ image into a fresh address space, applies base
+ *   relocations, resolves IAT entries (chasing forwarders through
+ *   the per-process DLL table; falling back to the Win32 thunks
+ *   page for unresolved imports), and returns the entry point VA
+ *   for the spawn path to start a Task on.
+ *
+ * HOW
+ *   Top-down inside `PeLoad`. Numbered phases match the section
+ *   banners (`// 1. Validate headers`, `// 2. Reserve image`,
+ *   etc.). Each phase reads from the byte buffer via the
+ *   `LeU16/32/64` helpers — never via casts to packed structs —
+ *   so the loader survives unaligned headers without UB.
+ *
+ *   IAT resolution priority (slice-6 onward):
+ *     loaded DLL EATs (chase forwarders)
+ *       -> Win32ThunksLookupKind          (in-kernel thunks page)
+ *         -> IsLikelyDataImport ? data-miss landing pad
+ *                               : miss-logger thunk
+ *
+ *   Companion files:
+ *     pe_exports.cpp   — EAT parsing + name-table binary search
+ *     dll_loader.cpp   — preload table for kernel32 / ntdll / etc.
+ *     win32/thunks.cpp — kernel-resident IAT thunk page
+ *     win32/proc_env.cpp — proc-env page (argv, cmdline, etc.)
+ *
+ * WHY THIS FILE IS LARGE
+ *   PE has many directories (imports, exports, base relocs, TLS,
+ *   resources, exception, debug). Each gets its own walker. A
+ *   real-world MSVC PE exercises most of them; the v0 PE we ship
+ *   only the bare minimum, but the diagnostic path (`PeReport`)
+ *   walks every directory and emits a coverage table on boot —
+ *   that diagnostic surface is what pushes line count up.
+ */
+
 #include "pe_loader.h"
 
 #include "../arch/x86_64/serial.h"

@@ -1,3 +1,38 @@
+/*
+ * DuetOS — desktop UI widget toolkit: implementation.
+ *
+ * Companion to widget.h — see there for the widget tree shape,
+ * the per-widget vtable (paint / hit-test / handle-event), and
+ * the catalog of built-in widgets.
+ *
+ * WHAT
+ *   Owns every native (non-Win32-PE) UI element the desktop
+ *   draws: taskbar, start menu, network flyout, file manager,
+ *   notes app, calendar, clock app, calculator, theme picker,
+ *   pentest GUI, login screen widgets, etc. Each widget is
+ *   a struct + a vtable pointer; the compositor walks the
+ *   widget tree once per frame and asks each visible widget
+ *   to paint itself.
+ *
+ * HOW
+ *   Widget tree is rooted in the desktop singleton. Layout is
+ *   manual (no flex / constraint solver) — each widget knows
+ *   its own absolute rect and updates it on parent-resize.
+ *   Input dispatch: mouse events hit-test top-down, keyboard
+ *   events go to the focused widget.
+ *
+ *   Theme state (colours, font metrics) is read from the
+ *   theme singleton (drivers/video/theme.h) so a single
+ *   `theme dark` shell command repaints every widget without
+ *   per-widget knowledge.
+ *
+ * WHY THIS FILE IS LARGE
+ *   ~30 distinct widget types, each with paint + event +
+ *   layout code. Splitting per-widget would scatter the
+ *   tree-walk and the theme-bind plumbing; for now they share
+ *   a TU and section banners group related widgets together.
+ */
+
 #include "widget.h"
 
 #include "../../arch/x86_64/cpu.h"

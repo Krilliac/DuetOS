@@ -1,3 +1,27 @@
+/*
+ * DuetOS — login gate: implementation.
+ *
+ * Companion to login.h — see there for the two UI flavours
+ * (Tty / Gui), v0 scope limits, and integration with the auth
+ * subsystem.
+ *
+ * WHAT
+ *   Two parallel UIs sharing one auth back-end. The keyboard
+ *   thread routes every key into `LoginFeedKey` while the gate
+ *   is active; the gate dispatches to the active mode's
+ *   per-key handler.
+ *
+ * HOW
+ *   Per-mode helpers cluster in their own banners
+ *   (`// === TTY mode`, `// === GUI mode`). Field state is held
+ *   in a small struct of (buf, len, cursor); ClearField /
+ *   FieldAppend / FieldBackspace are the building blocks for
+ *   both modes.
+ *
+ *   Auth call goes through the auth.h interface — login itself
+ *   doesn't touch credential storage.
+ */
+
 #include "login.h"
 
 #include "../arch/x86_64/serial.h"

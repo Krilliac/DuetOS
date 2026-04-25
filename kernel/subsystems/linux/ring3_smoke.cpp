@@ -1,3 +1,24 @@
+/*
+ * DuetOS — Linux-subsystem ring-3 smoke probes: implementation.
+ *
+ * Companion to ring3_smoke.h (Linux subsystem) — see there for
+ * the per-probe contract.
+ *
+ * WHAT
+ *   The Linux-flavour analogue of kernel/core/ring3_smoke.cpp:
+ *   spawns ring-3 tasks built from hand-laid bytecode that
+ *   exercise the Linux ABI surface specifically (the `syscall`
+ *   instruction path, MSR_LSTAR routing, Linux-specific syscall
+ *   numbers, errno return-value convention).
+ *
+ * HOW
+ *   Same WriteUserCodeFrame pattern as core/ring3_smoke.cpp:
+ *   bytecode laid into a fresh frame, mapped user-RX, task
+ *   spawned with abi_flavor = kAbiLinux so the syscall MSR is
+ *   activated for that task. Each Spawn*Probe targets one
+ *   Linux syscall and asserts the expected return.
+ */
+
 #include "ring3_smoke.h"
 
 #include "../../arch/x86_64/gdt.h"

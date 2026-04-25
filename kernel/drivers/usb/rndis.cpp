@@ -1,3 +1,28 @@
+/*
+ * DuetOS — USB RNDIS Ethernet class driver: implementation.
+ *
+ * Companion to rndis.h — see there for the device-record shape
+ * and integration with the network driver layer (drivers/net).
+ *
+ * WHAT
+ *   Talks RNDIS (Microsoft's USB-Ethernet variant) over a USB
+ *   bulk pair. Issues control plane (`INITIALIZE_MSG`,
+ *   `QUERY_MSG` for OID values, `SET_MSG` for filter), then
+ *   moves Ethernet frames through bulk-IN/OUT.
+ *
+ * HOW
+ *   Control messages go through the device's control endpoint;
+ *   data through bulk endpoints discovered from the
+ *   class-specific descriptor. RNDIS frames a single Ethernet
+ *   packet inside a `RNDIS_PACKET_MSG` header; the framer/
+ *   deframer lives here.
+ *
+ *   A bulk-poll serialisation gap is documented in
+ *   .claude/knowledge/usb-rndis-driver-v0.md — multiple in-flight
+ *   bulk transfers race on the xHCI TRB queue. Until that's
+ *   fixed, RX is one-at-a-time.
+ */
+
 #include "rndis.h"
 
 #include "../../arch/x86_64/serial.h"

@@ -1,3 +1,31 @@
+/*
+ * DuetOS — AML interpreter (v0): implementation.
+ *
+ * Companion to aml.h — see there for the supported opcode
+ * subset and the integration points (the shell `acpi` command,
+ * device-power transitions).
+ *
+ * WHAT
+ *   A minimal walker over AML byte streams from the DSDT/SSDT.
+ *   v0 covers the opcodes we actually need to read battery /
+ *   thermal / device-power state and to evaluate simple `_STA`
+ *   methods. Anything outside that subset returns "not
+ *   supported" so the caller falls back to a default.
+ *
+ * HOW
+ *   The interpreter is a pure-software walker — no JIT, no
+ *   intermediate IR. State lives in a small struct that
+ *   tracks the current cursor, scope chain, and named-object
+ *   table. Each opcode handler decodes operands, executes,
+ *   and either advances or pushes a new scope.
+ *
+ * WHY THIS FILE IS LARGE
+ *   AML has ~80 opcodes in the v0 subset. Each handler is
+ *   short but they accumulate. A switch over the leading
+ *   byte (with two-byte ExtOp prefix handled in a nested
+ *   switch) compiles to a tight jump table.
+ */
+
 #include "aml.h"
 
 #include "../arch/x86_64/serial.h"

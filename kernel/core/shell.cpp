@@ -1,3 +1,44 @@
+/*
+ * DuetOS — kernel shell: implementation.
+ *
+ * Companion to shell.h — see there for the v0 scope (line-edit
+ * model, command list, intentional limits like single global
+ * line buffer, no piping).
+ *
+ * WHAT
+ *   Reads keystrokes from the keyboard input thread, edits a
+ *   line buffer, and on Enter dispatches to a fixed command
+ *   table. Output goes to the framebuffer console (and to
+ *   serial when the framebuffer is unavailable, e.g. early
+ *   boot or headless).
+ *
+ * HOW
+ *   Two-tier dispatch:
+ *     1. Built-in commands matched by `CommandIs(line, "name")`
+ *        in a long if/else chain near `ShellExecute`. Each
+ *        command body inlines its own argument parsing — no
+ *        argv tokeniser.
+ *     2. External commands aren't supported in v0. An unknown
+ *        first token prints "command not found" and returns.
+ *
+ *   Output helpers (WriteU64Dec, WriteU64Hex, etc.) live near
+ *   the top — they're used by every command body. Section
+ *   banners (`// === network commands`, `// === inspect`,
+ *   `// === graphics`) group commands by domain so reading
+ *   the file top-to-bottom finds related commands together.
+ *
+ * WHY THIS FILE IS HUGE (~9.5K LINES)
+ *   The shell is the user's primary debug surface. Every
+ *   subsystem grows a few `command` entries to expose state
+ *   (`pci`, `acpi`, `mem`, `windows`, `ifconfig`, `ext4`,
+ *   `nvme`, `inspect`, ...). At ~75-100 commands, each 30-150
+ *   lines of body, the file naturally grows past the 500-line
+ *   anti-bloat threshold. Splitting commands into per-domain
+ *   TUs is on the table once a real text editor / pipe layer
+ *   exists; until then, `Ctrl+F help` plus the section banners
+ *   keep navigation tractable.
+ */
+
 #include "shell.h"
 
 #include "../arch/x86_64/cpu.h"

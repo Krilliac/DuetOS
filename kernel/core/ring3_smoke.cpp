@@ -1,3 +1,42 @@
+/*
+ * DuetOS — ring-3 smoke + adversarial probe suite: implementation.
+ *
+ * Companion to ring3_smoke.h — see there for the menu of probes
+ * (jail / nx / priv / badint / kread / dropcaps / cpu-hog / ...)
+ * and how the Pentest GUI driver consumes their results.
+ *
+ * WHAT
+ *   Spawns minimal ring-3 tasks built from hand-laid x86_64
+ *   bytecode (no userland toolchain in the loop). Each task
+ *   exercises one specific kernel boundary: a #PF on a kernel
+ *   address from ring 3, a #UD from a privileged insn, a syscall
+ *   denied by the cap bitmask, a deliberate frame-budget
+ *   exhaustion, etc.
+ *
+ *   The kernel response (clean fault, killed task, syscall
+ *   returns -1, or panic) is the test signal. AttackSim and the
+ *   Pentest GUI consume those signals as red-team / blue-team
+ *   evidence.
+ *
+ * HOW
+ *   `WriteUserCodeFrame` lays a few hand-assembled instructions
+ *   at the start of a frame, maps it as user-RX, points the
+ *   task's user RIP at it, sets up a user RW stack, and lets
+ *   the scheduler take over. Each `Spawn*Probe` is the same
+ *   pattern with a different bytecode payload.
+ *
+ *   Bytecode helpers (`WriteImm32LE`, `WriteImm64LE`) sit at
+ *   the top; the per-probe spawners follow. Fixture probes for
+ *   cap/budget/CPU-hog testing live in their own banners.
+ *
+ * WHY THIS FILE IS LARGE
+ *   Each probe is ~50-150 lines (frame setup + bytecode +
+ *   capability config + expected-outcome assertion). v0 has
+ *   ~15 probes. The adversarial suite is the kernel's primary
+ *   "did your refactor break ring-3 isolation?" check, so each
+ *   probe pays its weight.
+ */
+
 #include "ring3_smoke.h"
 
 #include "../arch/x86_64/gdt.h"

@@ -1,3 +1,32 @@
+/*
+ * DuetOS — network driver glue layer: implementation.
+ *
+ * Companion to net.h — see there for the per-interface record,
+ * driver-vtable shape, and the TX/RX queue contract the upper
+ * stack consumes.
+ *
+ * WHAT
+ *   The thin layer between concrete NIC drivers (e1000, RTL,
+ *   USB-CDC-ECM, RNDIS) and the in-kernel TCP/IP stack
+ *   (kernel/net/stack.cpp). Owns the active-interface table,
+ *   driver registration, packet enqueue, and the shell-facing
+ *   diagnostic dumpers behind `ifconfig` / `netscan`.
+ *
+ * HOW
+ *   Drivers call `NetRegisterInterface(vtable, hw_addr)` at
+ *   probe time; the layer stashes the vtable and exposes a
+ *   uniform `NetTxPacket` / `NetRxPoll` to the stack. RX
+ *   pollers run from a dedicated kernel thread per NIC; TX
+ *   submissions come synchronously from the stack and either
+ *   immediately enqueue or block on the NIC's driver lock.
+ *
+ * WHY THIS FILE IS LARGE
+ *   Diagnostic surface — every NIC type wants its own pretty-
+ *   print of state, every command (ifconfig / dhcp / route /
+ *   netscan) lives here, and the wireless-credentials helper
+ *   for the wifi flyout panel adds another section.
+ */
+
 #include "net.h"
 
 #include "../../arch/x86_64/cpu.h"

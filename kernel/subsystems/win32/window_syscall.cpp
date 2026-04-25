@@ -1,3 +1,37 @@
+/*
+ * DuetOS — Win32 windowing syscalls: implementation.
+ *
+ * Companion to window_syscall.h — see there for the public
+ * SYS_WIN_* contract (CreateWindow, DestroyWindow, ShowWindow,
+ * the message-pump bridge, GDI primitive surface).
+ *
+ * WHAT
+ *   Backs every user32!*Window* import the Win32 thunks page
+ *   routes into the kernel. Owns the in-kernel window table,
+ *   the per-window message queue, the WndProc dispatch state,
+ *   timer table, and the paint-lifecycle (BeginPaint /
+ *   EndPaint / InvalidateRect / UpdateWindow) state.
+ *
+ * HOW
+ *   Window handles are kernel-internal indices into a fixed
+ *   pool. The compositor (subsystems/graphics/graphics.cpp)
+ *   walks the pool every frame and renders visible windows
+ *   into the framebuffer.
+ *
+ *   Message dispatch: WM_TIMER / WM_PAINT / input events get
+ *   posted into the per-window queue; the user-space Win32
+ *   message loop drains the queue via SYS_WIN_GETMSG, the
+ *   kernel runs the user-supplied WndProc by transferring
+ *   control back to ring 3 with a synthetic frame on the
+ *   user stack.
+ *
+ * WHY THIS FILE IS LARGE
+ *   ~30 user32 entry points + the paint lifecycle + the GDI
+ *   primitive routing live here. Each is short but they
+ *   accumulate, and the message-loop trampoline plumbing
+ *   spans several hundred lines on its own.
+ */
+
 #include "window_syscall.h"
 
 #include "../../arch/x86_64/cpu.h"
