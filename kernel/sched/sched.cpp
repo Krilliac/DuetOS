@@ -41,6 +41,7 @@
 #include "../arch/x86_64/gdt.h"
 #include "../arch/x86_64/serial.h"
 #include "../arch/x86_64/traps.h"
+#include "../core/kdbg.h"
 #include "../core/klog.h"
 #include "../core/panic.h"
 #include "../core/process.h"

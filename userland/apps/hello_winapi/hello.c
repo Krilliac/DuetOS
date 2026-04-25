@@ -4,6 +4,15 @@
  * First DuetOS userland program that talks to "Win32" —
  * real imported functions through a real Import Address Table.
  *
+ * Batch-30 verbose diagnostic:
+ *   Compile with -DHELLO_DBG_BATCH30=1 to emit a per-flag "[b30-dbg]"
+ *   line on the FAILURE path (each invariant rendered as 0/1 +
+ *   sentinel byte hex). Off by default — the smoke test only needs
+ *   the OK / FAILED line — but invaluable for diagnosing which of
+ *   the eleven checks broke when batch30 regresses. The kernel-side
+ *   KDBG channel system can't reach into PE userland (separate ABI),
+ *   so this is a TU-local toggle.
+ *
  * v0 scope:
  *   - GetStdHandle(STD_OUTPUT_HANDLE) -> HANDLE
  *   - WriteFile(handle, buf, n, &written, NULL) -> BOOL
@@ -1051,9 +1060,54 @@ void _start(void)
                     ovi.dwPlatformId == 2 && ovi.szCSDVersion[0] == 'X';
     DWORD b30w = 0;
     if (b30_pass)
+    {
         WriteFile(out, b30_ok, sizeof(b30_ok) - 1, &b30w, 0);
+    }
     else
+    {
+#if defined(HELLO_DBG_BATCH30) && HELLO_DBG_BATCH30
+        /* Per-flag bitmask + szCSDVersion[0] hex. Reads as
+         *   [b30-dbg] 1111111110 csd=0000
+         * meaning every check passed except the last (sentinel was
+         * clobbered by the called stub). Letters in name match the
+         * b30_pass conjunct order. */
+        char b30dbg[32];
+        b30dbg[0] = '[';
+        b30dbg[1] = 'b';
+        b30dbg[2] = '3';
+        b30dbg[3] = '0';
+        b30dbg[4] = '-';
+        b30dbg[5] = 'd';
+        b30dbg[6] = 'b';
+        b30dbg[7] = 'g';
+        b30dbg[8] = ']';
+        b30dbg[9] = ' ';
+        b30dbg[10] = (char)('0' + (b30_iw_ok ? 1 : 0));
+        b30dbg[11] = (char)('0' + (b30_wow64 == 0 ? 1 : 0));
+        b30dbg[12] = (char)('0' + (b30_iw_null ? 1 : 0));
+        b30dbg[13] = (char)('0' + (b30_gv_ok ? 1 : 0));
+        b30dbg[14] = (char)('0' + (ovi.dwOSVersionInfoSize == sizeof(ovi) ? 1 : 0));
+        b30dbg[15] = (char)('0' + (ovi.dwMajorVersion == 10 ? 1 : 0));
+        b30dbg[16] = (char)('0' + (ovi.dwMinorVersion == 0 ? 1 : 0));
+        b30dbg[17] = (char)('0' + (ovi.dwBuildNumber == 19041 ? 1 : 0));
+        b30dbg[18] = (char)('0' + (ovi.dwPlatformId == 2 ? 1 : 0));
+        b30dbg[19] = (char)('0' + (ovi.szCSDVersion[0] == 'X' ? 1 : 0));
+        b30dbg[20] = ' ';
+        b30dbg[21] = 'c';
+        b30dbg[22] = 's';
+        b30dbg[23] = 'd';
+        b30dbg[24] = '=';
+        unsigned short b30_csd0 = ovi.szCSDVersion[0];
+        const char b30_hex[] = "0123456789abcdef";
+        b30dbg[25] = b30_hex[(b30_csd0 >> 12) & 0xF];
+        b30dbg[26] = b30_hex[(b30_csd0 >> 8) & 0xF];
+        b30dbg[27] = b30_hex[(b30_csd0 >> 4) & 0xF];
+        b30dbg[28] = b30_hex[b30_csd0 & 0xF];
+        b30dbg[29] = '\n';
+        WriteFile(out, b30dbg, 30, &b30w, 0);
+#endif
         WriteFile(out, b30_bad, sizeof(b30_bad) - 1, &b30w, 0);
+    }
 
     // Batch 31 exercise — ANSI string helpers.
     // Mirrors batch 29 but with byte strings.

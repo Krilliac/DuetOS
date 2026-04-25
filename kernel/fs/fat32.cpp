@@ -36,6 +36,7 @@
 #include "fat32.h"
 
 #include "../arch/x86_64/serial.h"
+#include "../core/kdbg.h"
 #include "../core/klog.h"
 #include "../drivers/storage/block.h"
 #include "../sched/sched.h"
@@ -637,6 +638,7 @@ bool Fat32LookupPath(const Volume* v, const char* path, DirEntry* out)
     Fat32Guard guard;
     if (v == nullptr || path == nullptr || out == nullptr)
         return false;
+    KDBG_S(Fat32Lookup, "fs/fat32", "lookup", "path", path);
 
     // Synthetic "root" entry: directory at v->root_cluster.
     DirEntry cur;
@@ -990,13 +992,18 @@ bool ZeroCluster(const Volume& v, u32 cluster)
 // (first_cluster, attrs, times) are preserved.
 bool UpdateEntrySizeInDir(const Volume& v, u32 first_cluster, const char* want, u32 new_size)
 {
+    KDBG_3V(Fat32Walker, "fs/fat32", "UpdateEntrySizeInDir enter", "first_cluster", first_cluster, "want_first_byte",
+            want != nullptr ? static_cast<u64>(static_cast<u8>(want[0])) : 0u, "new_size", new_size);
     u32 cluster = first_cluster;
     // Bounded like the other walkers — 64 clusters covers any
     // realistic directory.
     for (u32 step = 0; step < 64; ++step)
     {
         if (cluster < 2 || cluster >= 0x0FFFFFF8u)
+        {
+            KDBG_2V(Fat32Walker, "fs/fat32", "walk halt", "step", step, "cluster", cluster);
             return false;
+        }
         const u32 bytes = v.sectors_per_cluster * v.bytes_per_sector;
         // Read the cluster one sector at a time so we can find the
         // entry, patch it in the scratch copy, and write JUST that
@@ -1006,12 +1013,17 @@ bool UpdateEntrySizeInDir(const Volume& v, u32 first_cluster, const char* want, 
         for (u32 sec = 0; sec < v.sectors_per_cluster; ++sec)
         {
             const u64 lba = u64(v.data_start_sector) + u64(cluster - 2) * u64(v.sectors_per_cluster) + sec;
-            if (drivers::storage::BlockDeviceRead(v.block_handle, lba, 1, g_scratch) != 0)
+            const i32 rd_rc = drivers::storage::BlockDeviceRead(v.block_handle, lba, 1, g_scratch);
+            KDBG_4V(Fat32Walker, "fs/fat32", "post-read", "lba", lba, "rd_rc", static_cast<u64>(rd_rc), "g0",
+                    static_cast<u64>(g_scratch[0]), "g32", static_cast<u64>(g_scratch[32]));
+            if (rd_rc != 0)
                 return false;
             const u32 bytes_in_sec = v.bytes_per_sector;
             for (u32 off = 0; off + 32 <= bytes_in_sec; off += 32)
             {
                 const u8* e = g_scratch + off;
+                KDBG_3V(Fat32Walker, "fs/fat32", "visit", "off", off, "e0", static_cast<u64>(e[0]), "e11",
+                        static_cast<u64>(e[11]));
                 if (e[0] == 0x00)
                     return false; // end of dir — not found
                 if (e[0] == 0xE5)
@@ -1025,6 +1037,7 @@ bool UpdateEntrySizeInDir(const Volume& v, u32 first_cluster, const char* want, 
                 DecodeEntry(e, decoded);
                 if (IsDotEntry(decoded.name))
                     continue;
+                KDBG_S(Fat32Walker, "fs/fat32", "entry", "name", decoded.name);
                 // Match on the SFN only — LFN matching would need
                 // us to accumulate fragments here too, which v0
                 // append doesn't need (HELLO.TXT in the self-test
@@ -1432,9 +1445,13 @@ i64 AppendInDir(const Volume* v, u32 dir_cluster, const char* name, const void* 
     if (len == 0)
         return 0;
 
+    KDBG_2V(Fat32Append, "fs/fat32", "AppendInDir enter", "dir_cluster", dir_cluster, "len", len);
     DirEntry e_val;
     if (!FindInDirByName(*v, dir_cluster, name, &e_val))
+    {
+        KDBG_S(Fat32Append, "fs/fat32", "AppendInDir target missing", "name", name);
         return -1;
+    }
     const DirEntry* e = &e_val;
     if (e->attributes & kAttrDirectory)
         return -1; // append-to-directory is nonsensical
@@ -1534,6 +1551,22 @@ i64 AppendInDir(const Volume* v, u32 dir_cluster, const char* name, const void* 
     if (!UpdateEntrySizeInDir(*v, dir_cluster, name, new_size))
     {
         core::Log(core::LogLevel::Error, "fs/fat32", "append: cluster chain extended but dir entry size update failed");
+        // Forensic dump of the dir cluster's first sector — only
+        // emitted when Fat32Append channel is on, so the normal
+        // boot log isn't polluted on every flake.
+        if (KDBG_ON(Fat32Append))
+        {
+            const u64 lba0 = u64(v->data_start_sector) + u64(dir_cluster - 2) * u64(v->sectors_per_cluster);
+            if (drivers::storage::BlockDeviceRead(v->block_handle, lba0, 1, g_scratch) == 0)
+            {
+                for (u32 slot = 0; slot < 16; ++slot)
+                {
+                    core::DbgEmit3V(core::DbgChannel::Fat32Append, "fs/fat32", "dump-slot", "off", slot * 32u, "first",
+                                    static_cast<u64>(g_scratch[slot * 32]), "attr",
+                                    static_cast<u64>(g_scratch[slot * 32 + 11]));
+                }
+            }
+        }
         return -1;
     }
 

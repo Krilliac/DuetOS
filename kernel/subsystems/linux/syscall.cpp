@@ -44,6 +44,7 @@
 #include "../../arch/x86_64/serial.h"
 #include "../../arch/x86_64/timer.h"
 #include "../../arch/x86_64/traps.h"
+#include "../../core/kdbg.h"
 #include "../../core/klog.h"
 #include "../../core/cleanroom_trace.h"
 #include "../../core/process.h"

@@ -27,6 +27,7 @@ set(DUETOS_KERNEL_SHARED_SOURCES
     core/heartbeat.cpp
     core/hexdump.cpp
     core/klog.cpp
+    core/kdbg.cpp
     core/log_names.cpp
     core/login.cpp
     core/main.cpp
