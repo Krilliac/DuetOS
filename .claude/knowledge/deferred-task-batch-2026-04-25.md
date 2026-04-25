@@ -124,3 +124,22 @@ with ordinal imports stop being hard-rejects.
 - `kernel/fs/fat32.cpp` — `ComputeLfnChecksum` + sequence check
 - `kernel/core/pe_loader.cpp` — public `TryResolveViaPreloadedDllsByOrdinal`
   wrapper + ordinal-import branch in `ResolveImports`
+
+## Batch 3 — same session
+
+### 9. PE export name lookup: linear → binary search
+
+`kernel/core/pe_exports.cpp::PeExportLookupName` was a linear scan with a
+header note that "binary search is a one-file change when a hot loader path
+demands it". With the IAT-resolver and per-process GetProcAddress now both
+hitting the EAT for every import / GetProcAddress call, the loader path
+counts. Upgraded to a binary search using a new `StrCmp3` 3-way compare;
+the PE spec guarantees ENT is name-sorted in ASCII order. A bad name RVA
+at the midpoint falls back to the original linear scan so a single
+malformed slot can't mis-discard half a real DLL's exports.
+
+## Files touched (batch 3)
+
+- `kernel/core/pe_exports.cpp` — `StrCmp3` + binary-search rewrite of
+  `PeExportLookupName`
+- `kernel/core/pe_exports.h` — updated header note

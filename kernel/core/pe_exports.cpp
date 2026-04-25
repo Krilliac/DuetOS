@@ -378,6 +378,25 @@ bool PeExportLookupOrdinal(const PeExports& exp, u32 ordinal, PeExport& out)
     return PeExportAt(exp, idx, out);
 }
 
+// 3-way compare two NUL-terminated strings. Returns <0/0/>0 in
+// the lexicographic ordering convention. Treats both nullptr as
+// equal so a malformed ENT slot doesn't crash the search.
+int StrCmp3(const char* a, const char* b)
+{
+    if (a == nullptr || b == nullptr)
+        return (a == b) ? 0 : (a == nullptr ? -1 : 1);
+    while (*a && *b)
+    {
+        const int da = static_cast<unsigned char>(*a);
+        const int db = static_cast<unsigned char>(*b);
+        if (da != db)
+            return da - db;
+        ++a;
+        ++b;
+    }
+    return static_cast<unsigned char>(*a) - static_cast<unsigned char>(*b);
+}
+
 bool PeExportLookupName(const PeExports& exp, const char* name, PeExport& out)
 {
     if (name == nullptr || exp.num_names == 0)
@@ -385,23 +404,57 @@ bool PeExportLookupName(const PeExports& exp, const char* name, PeExport& out)
     PeHeaderShape h{};
     if (!ParsePeShape(exp.file, exp.file_len, h))
         return false;
-    // Linear scan. ENT is name-sorted by spec; binary search is
-    // a one-file change when a hot loader path demands it.
-    for (u32 n = 0; n < exp.num_names; ++n)
+    // Binary search. The PE spec requires the Export Name Table
+    // (ENT) to be name-sorted in ASCII order, paired index-for-
+    // index with the Export Ordinal Table (EOT). On a malformed
+    // image with a bad name RVA at the midpoint, fall back to a
+    // linear scan rather than mis-discarding half the table.
+    auto load_name = [&](u32 idx) -> const char*
     {
-        const u32 name_rva = LeU32(exp.file + exp.names_file_off + u64(n) * 4);
+        const u32 name_rva = LeU32(exp.file + exp.names_file_off + u64(idx) * 4);
         const u64 off = RvaToFile(exp.file, h, name_rva);
         if (off == ~u64(0))
-            continue;
-        const char* cand = CStringAt(exp.file, exp.file_len, off);
+            return nullptr;
+        return CStringAt(exp.file, exp.file_len, off);
+    };
+
+    u32 lo = 0;
+    u32 hi = exp.num_names;
+    while (lo < hi)
+    {
+        const u32 mid = lo + (hi - lo) / 2;
+        const char* cand = load_name(mid);
         if (cand == nullptr)
-            continue;
-        if (!StrEq(cand, name))
-            continue;
-        u32 eat_idx = 0;
-        if (!NameIdxToOrdinalIndex(exp, n, eat_idx))
+        {
+            // Bad name RVA at mid — bail to linear scan to keep
+            // the lookup correct on a malformed-but-otherwise-
+            // valid image.
+            for (u32 n = 0; n < exp.num_names; ++n)
+            {
+                const char* c = load_name(n);
+                if (c == nullptr)
+                    continue;
+                if (!StrEq(c, name))
+                    continue;
+                u32 eat_idx = 0;
+                if (!NameIdxToOrdinalIndex(exp, n, eat_idx))
+                    return false;
+                return PopulateFromIndex(exp, eat_idx, c, out);
+            }
             return false;
-        return PopulateFromIndex(exp, eat_idx, cand, out);
+        }
+        const int cmp = StrCmp3(cand, name);
+        if (cmp == 0)
+        {
+            u32 eat_idx = 0;
+            if (!NameIdxToOrdinalIndex(exp, mid, eat_idx))
+                return false;
+            return PopulateFromIndex(exp, eat_idx, cand, out);
+        }
+        if (cmp < 0)
+            lo = mid + 1;
+        else
+            hi = mid;
     }
     return false;
 }
