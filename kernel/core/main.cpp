@@ -32,6 +32,7 @@
 #include "../drivers/usb/msc_scsi.h"
 #include "../drivers/usb/usb.h"
 #include "../drivers/usb/xhci.h"
+#include "../net/net_smoke.h"
 #include "../net/stack.h"
 #include "../subsystems/graphics/graphics.h"
 #include "../drivers/storage/ahci.h"
@@ -64,6 +65,7 @@
 #include "../mm/frame_allocator.h"
 #include "../sync/spinlock.h"
 #include "auth.h"
+#include "firmware_loader.h"
 #include "heartbeat.h"
 #include "klog.h"
 #include "login.h"
@@ -1004,6 +1006,9 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         duetos::core::FaultDomainRegister("drivers/gpu", gpu_init, gpu_teardown);
     }
 
+    SerialWrite("[boot] Bringing up firmware loader (scaffold).\n");
+    duetos::core::FwLoaderInit();
+
     SerialWrite("[boot] Detecting NICs.\n");
     duetos::drivers::net::NetInit();
     {
@@ -1051,19 +1056,12 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     SerialWrite("[boot] Bringing up network stack skeleton.\n");
     duetos::net::NetStackInit();
-    {
-        // Park a canned reply on TCP port 7777. Any connection
-        // that lands with a data segment gets this body + FIN.
-        // Handy to smoke-test the TCP state machine from the
-        // host with `nc 10.0.2.15 7777` (given appropriate
-        // hostfwd) or `curl http://.../` once HTTP lands.
-        static const char kHello[] = "HTTP/1.0 200 OK\r\n"
-                                     "Content-Type: text/plain\r\n"
-                                     "Content-Length: 24\r\n"
-                                     "\r\n"
-                                     "Hello from DuetOS!\r\n\r\n";
-        duetos::net::TcpListen(7777, reinterpret_cast<const duetos::u8*>(kHello), sizeof(kHello) - 1);
-    }
+    // Smoke test runs in its own task. It owns the (single) TCP
+    // slot during its run and installs the boot HTTP listener
+    // afterwards via NetSmokeInstallBootListener — so an active
+    // connect to www.google.com (step 4) doesn't collide with
+    // the listener's TcpListen call.
+    duetos::net::NetSmokeTestStart();
 
     SerialWrite("[boot] Bringing up graphics ICD skeleton.\n");
     duetos::subsystems::graphics::GraphicsIcdInit();

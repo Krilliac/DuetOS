@@ -32,6 +32,7 @@ set(DUETOS_KERNEL_SHARED_SOURCES
     core/reboot.cpp
     core/recovery.cpp
     core/elf_loader.cpp
+    core/firmware_loader.cpp
     core/pe_loader.cpp
     core/pe_exports.cpp
     core/dll_loader.cpp
@@ -143,6 +144,7 @@ set(DUETOS_KERNEL_SHARED_SOURCES
     mm/page.cpp
     mm/paging.cpp
     mm/user_copy.S
+    net/net_smoke.cpp
     net/stack.cpp
     sched/context_switch.S
     sched/sched.cpp

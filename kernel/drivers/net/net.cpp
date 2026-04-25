@@ -540,11 +540,26 @@ bool E1000BringUp(NicInfo& n)
     n.driver_online = true;
     n.firmware_pending = false;
 
-    // MSI-X bring-up. Classic 82540EM (QEMU's `-device e1000`)
-    // only exposes legacy MSI (cap 0x05), not MSI-X (0x11), so
-    // PciMsixBindSimple will return Unsupported and we fall
-    // back to polling. Real hardware + e1000e variants do
-    // advertise MSI-X; the wiring lights up automatically there.
+    // MSI-X bring-up. Classic 82540EM (QEMU's `-device e1000`) only
+    // exposes legacy MSI (cap 0x05), not MSI-X (0x11) — bind is a
+    // no-op on that silicon and the RX task tick-polls.
+    //
+    // e1000e variants (82574+, i210/i217/i219) DO advertise MSI-X
+    // and `PciMsixBindSimple` happily returns a vector — but the
+    // 82574 needs `IVAR` (0x000E4) programmed to route RX/TX/Other
+    // interrupt causes to the MSI-X vector before the handler ever
+    // fires. Without that, IRQs are bound but never delivered, the
+    // RX wait queue never wakes, and packets sit in the descriptor
+    // ring until the next lost-wakeup recovery tick (which only
+    // checks ONE descriptor, missing bursts). Verified on QEMU
+    // -device e1000e: DHCP+ICMP+DNS replies appear on the wire
+    // (filter-dump pcap) but the driver never sees them.
+    //
+    // Until the IVAR / EIAC / EIAM programming slice lands, gate
+    // MSI-X to legacy e1000 device IDs only. Polling at 100 Hz is
+    // plenty for v0 — the e1000 v0 milestone never claimed MSI-X.
+    const bool is_classic_e1000 = (n.device_id >= 0x1000 && n.device_id <= 0x107F);
+    if (is_classic_e1000)
     {
         pci::DeviceAddress addr{};
         addr.bus = n.bus;
@@ -569,6 +584,10 @@ bool E1000BringUp(NicInfo& n)
         {
             arch::SerialWrite("[e1000] MSI-X unavailable — RX task will tick-poll\n");
         }
+    }
+    else
+    {
+        arch::SerialWrite("[e1000] e1000e detected — MSI-X gated off (IVAR programming pending), tick-poll only\n");
     }
 
     // Re-read link state now that we've asserted SLU — can take a

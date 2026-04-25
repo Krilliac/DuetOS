@@ -1,6 +1,7 @@
 #include "rtl88xx.h"
 
 #include "../../arch/x86_64/serial.h"
+#include "../../core/firmware_loader.h"
 #include "../../core/klog.h"
 #include "../../sched/sched.h"
 
@@ -161,8 +162,44 @@ bool Rtl88xxBringUp(NicInfo& n)
 
     n.chip_id = cfg1;
     n.driver_online = true;
-    n.firmware_pending = true;
     n.link_up = false;
+
+    // Probe firmware loader. rtl88xx vendor blob naming follows
+    // `rtlwifi/rtl<chip>fw.bin`; pick by IC nibble.
+    duetos::core::FwLoadRequest req{};
+    req.vendor = "realtek-rtl88xx";
+    const u32 ic = (cfg1 >> 4) & 0x0F;
+    switch (ic)
+    {
+    case 0x0:
+        req.basename = "rtlwifi/rtl8723befw.bin";
+        break;
+    case 0x1:
+        req.basename = "rtlwifi/rtl8812aefw.bin";
+        break;
+    case 0x2:
+        req.basename = "rtlwifi/rtl8814aefw.bin";
+        break;
+    case 0x3:
+        req.basename = "rtlwifi/rtl8822befw.bin";
+        break;
+    case 0x4:
+        req.basename = "rtw89/rtw8852a_fw.bin";
+        break;
+    default:
+        req.basename = "rtlwifi/rtl8821aefw.bin";
+        break;
+    }
+    auto fw = duetos::core::FwLoad(req);
+    if (fw.has_value())
+    {
+        duetos::core::FwRelease(fw.value());
+        n.firmware_pending = false;
+    }
+    else
+    {
+        n.firmware_pending = true;
+    }
 
     g_stats.sys_cfg1 = cfg1;
     g_stats.sys_cfg2 = cfg2;

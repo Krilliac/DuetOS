@@ -1,6 +1,7 @@
 #include "iwlwifi.h"
 
 #include "../../arch/x86_64/serial.h"
+#include "../../core/firmware_loader.h"
 #include "../../core/klog.h"
 #include "../../sched/sched.h"
 
@@ -185,9 +186,49 @@ bool IwlwifiBringUp(NicInfo& n)
 
     n.chip_id = hw_rev;
     n.driver_online = true;
-    n.firmware_pending = true;
     // Wireless link is UP only after association — which needs FW.
     n.link_up = false;
+
+    // Probe the firmware loader for vendor microcode. v0 backend
+    // always misses; the driver records `firmware_pending=true`
+    // and the watch task continues. When a real backend lands
+    // (VFS-mounted /lib/firmware), this branch starts seeing
+    // hits and the next slice's loader can chain into PHY/RF
+    // init.
+    duetos::core::FwLoadRequest req{};
+    req.vendor = "intel-iwlwifi";
+    // Firmware basename is silicon-family-dependent. Pick a
+    // canonical name per HW_REV Type nibble; the real iwlwifi
+    // table is much larger but this is enough to exercise the
+    // loader path.
+    const u8 type = u8((hw_rev >> 4) & 0x0F);
+    switch (type)
+    {
+    case 0x6:
+        req.basename = "iwlwifi-cc-a0-46.ucode"; // AX200/AX201
+        break;
+    case 0x7:
+        req.basename = "iwlwifi-ty-a0-gf-a0-46.ucode"; // AX210
+        break;
+    case 0x4:
+        req.basename = "iwlwifi-8000C-46.ucode"; // 8260
+        break;
+    default:
+        req.basename = "iwlwifi-9000-pu-b0-jf-b0-46.ucode";
+        break;
+    }
+    auto fw = duetos::core::FwLoad(req);
+    if (fw.has_value())
+    {
+        // Real fw — cannot happen in v0; reserved for the loader
+        // slice. Drop the blob (we don't yet know how to use it).
+        duetos::core::FwRelease(fw.value());
+        n.firmware_pending = false;
+    }
+    else
+    {
+        n.firmware_pending = true;
+    }
 
     g_stats.hw_rev = hw_rev;
     ++g_stats.adapters_bound;

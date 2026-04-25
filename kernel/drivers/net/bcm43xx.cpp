@@ -1,6 +1,7 @@
 #include "bcm43xx.h"
 
 #include "../../arch/x86_64/serial.h"
+#include "../../core/firmware_loader.h"
 #include "../../core/klog.h"
 #include "../../sched/sched.h"
 
@@ -146,8 +147,41 @@ bool Bcm43xxBringUp(NicInfo& n)
 
     n.chip_id = info;
     n.driver_online = true;
-    n.firmware_pending = true;
     n.link_up = false;
+
+    // Probe firmware loader. bcm43xx blobs live under
+    // `b43/<chip>.fw` (b43 driver) or `brcm/<chip>.bin`
+    // (brcmfmac); pick a representative name per ChipID.
+    duetos::core::FwLoadRequest req{};
+    req.vendor = "broadcom-bcm43xx";
+    char namebuf[32];
+    {
+        const char* prefix = "brcm/brcmfmac";
+        u32 off = 0;
+        for (u32 i = 0; prefix[i] != '\0' && off + 1 < sizeof(namebuf); ++i)
+            namebuf[off++] = prefix[i];
+        // Hex chip id (16 bits) without 0x prefix.
+        const char* hex = "0123456789abcdef";
+        namebuf[off++] = hex[(chip_id_field >> 12) & 0xF];
+        namebuf[off++] = hex[(chip_id_field >> 8) & 0xF];
+        namebuf[off++] = hex[(chip_id_field >> 4) & 0xF];
+        namebuf[off++] = hex[(chip_id_field >> 0) & 0xF];
+        const char* suffix = "-pcie.bin";
+        for (u32 i = 0; suffix[i] != '\0' && off + 1 < sizeof(namebuf); ++i)
+            namebuf[off++] = suffix[i];
+        namebuf[off] = '\0';
+    }
+    req.basename = namebuf;
+    auto fw = duetos::core::FwLoad(req);
+    if (fw.has_value())
+    {
+        duetos::core::FwRelease(fw.value());
+        n.firmware_pending = false;
+    }
+    else
+    {
+        n.firmware_pending = true;
+    }
 
     g_stats.chip_info = info;
     g_stats.chip_id_field = chip_id_field;
