@@ -34,6 +34,7 @@
 #include "../../core/klog.h"
 #include "../../core/process.h"
 #include "../../core/random.h"
+#include "../../core/syscall_names.h"
 #include "../../mm/paging.h"
 #include "../../sched/sched.h"
 #include "../linux/linux_syscall_table_generated.h"
@@ -206,29 +207,18 @@ void LogTranslation(const char* origin, u64 nr, const char* target)
 // have a live Do* handler in syscall.cpp so the miss-path log line
 // can distinguish "known, unimplemented" from "unknown number".
 
-struct NativeSysName
+// Names for the experimental "extension" native syscalls synthesised
+// in this TU (kNativeClockNs etc., 0x200..0x211). These numbers are
+// not part of the SyscallNumber enum — they live as anonymous-enum
+// constants further down — so they can't ride the shared
+// kSyscallNames table; we keep them here next to the values they
+// describe.
+struct NativeExtName
 {
     u64 nr;
     const char* name;
 };
-constexpr NativeSysName kNativeNames[] = {
-    {0, "SYS_EXIT"},
-    {1, "SYS_GETPID"},
-    {2, "SYS_WRITE"},
-    {3, "SYS_YIELD"},
-    {4, "SYS_STAT"},
-    {5, "SYS_READ"},
-    {6, "SYS_DROPCAPS"},
-    {7, "SYS_SPAWN"},
-    {8, "SYS_GETPROCID"},
-    {9, "SYS_GETLASTERROR"},
-    {10, "SYS_SETLASTERROR"},
-    {11, "SYS_HEAP_ALLOC"},
-    {12, "SYS_HEAP_FREE"},
-    {13, "SYS_PERF_COUNTER"},
-    {14, "SYS_HEAP_SIZE"},
-    {15, "SYS_HEAP_REALLOC"},
-    {16, "SYS_WIN32_MISS_LOG"},
+constexpr NativeExtName kNativeExtNames[] = {
     {0x200, "NativeClockNs"},
     {0x201, "NativeGetRandom"},
     {0x210, "NativeWin32Alloc"},
@@ -246,7 +236,9 @@ constexpr NativeSysName kNativeNames[] = {
 
 const char* NativeName(u64 nr)
 {
-    for (const auto& e : kNativeNames)
+    if (const char* name = ::duetos::core::SyscallNumberName(nr); name != nullptr)
+        return name;
+    for (const auto& e : kNativeExtNames)
     {
         if (e.nr == nr)
             return e.name;

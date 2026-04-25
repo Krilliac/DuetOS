@@ -79,17 +79,10 @@ void ProbeFire(ProbeId id, u64 caller_rip, u64 value)
     const ProbeArm arm = g_probe_arm[idx];
     if (arm == ProbeArm::Disarmed)
         return;
-    // Armed — count + log. Find the name row for the line tag.
+    // Armed — count + log. The table is in ProbeId order (enforced
+    // by the static_assert above) so the name is a direct index.
     ++g_probe_fires[idx];
-    const char* name = "<unknown>";
-    for (const ProbeRow& row : kProbeTable)
-    {
-        if (row.id == id)
-        {
-            name = row.name;
-            break;
-        }
-    }
+    const char* name = kProbeTable[idx].name;
     if (value != 0)
     {
         KLOG_INFO_2V("debug/probes", name, "rip", caller_rip, "val", value);
@@ -144,8 +137,8 @@ u64 ProbeList(ProbeInfo* out, u64 cap)
     {
         out[i].id = kProbeTable[i].id;
         out[i].name = kProbeTable[i].name;
-        out[i].arm = g_probe_arm[static_cast<u64>(kProbeTable[i].id)];
-        out[i].fire_count = g_probe_fires[static_cast<u64>(kProbeTable[i].id)];
+        out[i].arm = g_probe_arm[i];
+        out[i].fire_count = g_probe_fires[i];
     }
     return lim;
 }

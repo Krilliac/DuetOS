@@ -1,6 +1,7 @@
 #include "syscall_scan.h"
 
 #include "../arch/x86_64/serial.h"
+#include "../core/syscall_names.h"
 #include "../subsystems/linux/linux_syscall_table_generated.h"
 #include "../subsystems/translation/translate.h"
 #include "inspect.h"
@@ -10,76 +11,6 @@ namespace duetos::debug
 
 namespace
 {
-
-// Native DuetOS SYS_* table lookup — the translation unit owns
-// the authoritative name table (for logging) but exposes only the
-// Linux + NT lookups. Keep a small local mirror of the native
-// names, indexed by number, so the scanner can classify `int 0x80`
-// sites without pulling in translate.cpp's internals.
-struct NativeName
-{
-    u32 nr;
-    const char* name;
-};
-constexpr NativeName kNativeNames[] = {
-    {0, "SYS_EXIT"},
-    {1, "SYS_GETPID"},
-    {2, "SYS_WRITE"},
-    {3, "SYS_YIELD"},
-    {4, "SYS_STAT"},
-    {5, "SYS_READ"},
-    {6, "SYS_DROPCAPS"},
-    {7, "SYS_SPAWN"},
-    {8, "SYS_GETPROCID"},
-    {9, "SYS_GETLASTERROR"},
-    {10, "SYS_SETLASTERROR"},
-    {11, "SYS_HEAP_ALLOC"},
-    {12, "SYS_HEAP_FREE"},
-    {13, "SYS_PERF_COUNTER"},
-    {14, "SYS_HEAP_SIZE"},
-    {15, "SYS_HEAP_REALLOC"},
-    {16, "SYS_WIN32_MISS_LOG"},
-    {17, "SYS_GETTIME_FT"},
-    {18, "SYS_NOW_NS"},
-    {19, "SYS_SLEEP_MS"},
-    {20, "SYS_FILE_OPEN"},
-    {21, "SYS_FILE_READ"},
-    {22, "SYS_FILE_CLOSE"},
-    {23, "SYS_FILE_SEEK"},
-    {24, "SYS_FILE_FSTAT"},
-    {25, "SYS_MUTEX_CREATE"},
-    {26, "SYS_MUTEX_WAIT"},
-    {27, "SYS_MUTEX_RELEASE"},
-    {28, "SYS_VMAP"},
-    {29, "SYS_VUNMAP"},
-    {30, "SYS_EVENT_CREATE"},
-    {31, "SYS_EVENT_SET"},
-    {32, "SYS_EVENT_RESET"},
-    {33, "SYS_EVENT_WAIT"},
-    {34, "SYS_TLS_ALLOC"},
-    {35, "SYS_TLS_FREE"},
-    {36, "SYS_TLS_GET"},
-    {37, "SYS_TLS_SET"},
-    {38, "SYS_BP_INSTALL"},
-    {39, "SYS_BP_REMOVE"},
-    {40, "SYS_GETTIME_ST"},
-    {41, "SYS_ST_TO_FT"},
-    {42, "SYS_FT_TO_ST"},
-    {43, "SYS_FILE_WRITE"},
-    {44, "SYS_FILE_CREATE"},
-    {45, "SYS_THREAD_CREATE"},
-    {46, "SYS_NT_INVOKE"},
-};
-
-const char* NativeNameLookup(u32 nr)
-{
-    for (const auto& e : kNativeNames)
-    {
-        if (e.nr == nr)
-            return e.name;
-    }
-    return nullptr;
-}
 
 // How far back from a syscall-issuing opcode we'll walk looking
 // for a `mov eax, imm32`. MSVC / gcc / clang all emit the
@@ -149,7 +80,7 @@ void ClassifySite(SyscallSite& site)
     // Native: only meaningful for `int 0x80`.
     if (site.kind == SyscallSiteKind::Int80)
     {
-        c.native_name = NativeNameLookup(site.nr);
+        c.native_name = core::SyscallNumberName(site.nr);
         if (c.native_name != nullptr)
         {
             c.known_native = true;
