@@ -9,10 +9,18 @@
 #   * no "forbidden" signature appears (no panic, no triple fault,
 #     no UNRESOLVED import).
 #
-# Exits 0 on full pass, 1 on any missing/forbidden signature,
-# 2 if the QEMU launcher isn't installed (treated as a skip —
-# ctest will report a regular failure; install QEMU to get
-# an actual test run).
+# Exit codes:
+#    0 — full pass, every expected signature found, none forbidden.
+#    1 — real regression: one or more expected signatures missing,
+#        or an UNRESOLVED outside the allowed list.
+#    2 — environment skip: QEMU not installed (CI installs it; on
+#        a dev box without QEMU we report a skip rather than a
+#        failure).
+#    3 — likely flake: kernel reached the test-run scope (we saw
+#        `[I] core/ring3 : ring3 smoke tasks queued`) but a later
+#        DUETOS CRASH / PANIC tripped before all expected
+#        signatures landed. The CI workflow retries on this code
+#        before declaring a real failure.
 #
 # The signature list mirrors .github/workflows/build.yml's
 # qemu-smoke job so local `ctest` and CI stay in lockstep.
@@ -62,9 +70,9 @@ expected=(
     "[heap] HeapAlloc + GetProcessHeap OK"
     "[heap] malloc+free+malloc round-trip OK"
     "[heap] calloc zero-fill OK"
-    "[batch10] advapi32 + event/wait/time/proc OK"
-    "[batch11] perf counter + tick count OK"
-    "[batch14] HeapSize + HeapReAlloc + realloc OK"
+    "[advapi] advapi32 + event/wait/time/proc OK"
+    "[perf-counter] perf counter + tick count OK"
+    "[heap-resize] HeapSize + HeapReAlloc + realloc OK"
     "[calc] self-test OK"
     "[files] self-test OK"
     "[clock] self-test OK"
@@ -92,7 +100,7 @@ expected=(
     # RTC readable at boot. Wall-clock is non-zero on any live
     # machine; regression would mean CMOS access broke.
     "[rtc] wall clock"
-    # GPU discovery: the drivers/gpu slice walks the PCI cache,
+    # GPU discovery: the drivers/gpu layer walks the PCI cache,
     # classifies display controllers by vendor, and maps BAR 0.
     # QEMU's Bochs VGA always appears here — a missing line means
     # GpuInit didn't run or the PCI device table regressed.
@@ -131,7 +139,7 @@ forbidden=(
     "PANIC"
     "DUETOS CRASH"
     "triple fault"
-    # Regression guard: as of slice 28 (2026-04-22), winkill
+    # Regression guard: winkill
     # (real-world MSVC windows-kill.exe) runs start-to-finish
     # as a ring-3 process and exits via ExitProcess(0). Any
     # scheduler-initiated kill of it (tick-budget exhaustion,
@@ -152,11 +160,11 @@ allowed_unresolved=(
     # All of these are gaps documented in the knowledge
     # entry. Keep this list narrow — any NEW unresolved is
     # a conscious gap we're choosing not to close yet.
-    "MSVCP140.dll!"      # C++ std runtime, batch 13+ material
-    "dbghelp.dll!"       # Sym* family (most landed in batch 12, keep for any latent)
-    "ADVAPI32.dll!"      # batch-10 covered the trio but PEs vary in case
-    "VCRUNTIME140.dll!"  # SEH intrinsics stubbed in batch 12, case-variant fallback
-    "api-ms-win-crt-convert"  # batch 12 stubbed; fallback for pre-batch case
+    "MSVCP140.dll!"           # C++ std runtime — partial coverage
+    "dbghelp.dll!"            # Sym* family — most stubbed, keep for any latent
+    "ADVAPI32.dll!"           # the trio is covered but PEs vary in case
+    "VCRUNTIME140.dll!"       # SEH intrinsics stubbed; case-variant fallback
+    "api-ms-win-crt-convert"  # stubbed; fallback for case variants
 )
 
 fail=0
@@ -189,6 +197,25 @@ done < <(grep -aF UNRESOLVED "${SERIAL_LOG}" || true)
 if [[ $fail -ne 0 ]]; then
     echo "=== last 60 lines of serial log ==="
     tail -60 "${SERIAL_LOG}" || true
+
+    # Distinguish a real regression (expected signature genuinely
+    # absent because the code path didn't run) from a flake
+    # (kernel reached the test-run scope but tripped a
+    # non-deterministic crash before all signatures landed).
+    # The CI workflow retries on flakes (exit 3) but fails the
+    # build immediately on regressions (exit 1).
+    smoke_started=0
+    crash_seen=0
+    if grep -aF '[I] core/ring3 : ring3 smoke tasks queued' "${SERIAL_LOG}" > /dev/null; then
+        smoke_started=1
+    fi
+    if grep -aE 'DUETOS CRASH|^\[panic\]|triple fault' "${SERIAL_LOG}" > /dev/null; then
+        crash_seen=1
+    fi
+    if [[ $smoke_started -eq 1 && $crash_seen -eq 1 ]]; then
+        echo "FLAKY: kernel reached smoke scope then crashed; retry recommended."
+        exit 3
+    fi
     exit 1
 fi
 

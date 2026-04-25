@@ -4,8 +4,8 @@
 # Compiles userland/libs/customdll2/customdll2.c into a
 # freestanding x86_64 Windows PE DLL and embeds the bytes as
 # a C++ constexpr u8 array for inclusion in the kernel.
-# Stage-2 slice 9 uses this alongside customdll.dll to exercise
-# the multi-DLL preload path in SpawnPeFile.
+# This DLL pairs with customdll.dll to exercise the
+# multi-DLL preload path in SpawnPeFile.
 #
 # Usage:
 #     build-customdll2.sh <repo_root> <out_header>

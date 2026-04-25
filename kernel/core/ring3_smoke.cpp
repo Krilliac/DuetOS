@@ -605,7 +605,7 @@ void SpawnDropcapsProbe()
         Panic("core/ring3", "code frame alloc failed for dropcaps probe");
     }
     auto* code_direct = static_cast<u8*>(PhysToVirt(code_frame));
-    // Zero-on-alloc (slice 18) means the page is already zeroed.
+    // Zero-on-alloc means the page is already zeroed.
     for (u64 i = 0; i < sizeof(kDropcapsProbeBytes); ++i)
     {
         code_direct[i] = kDropcapsProbeBytes[i];
@@ -1953,7 +1953,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     const u64 entropy = duetos::core::RandomU64();
     const u64 aslr_delta = (entropy & 0x3FF) * (64ULL * 1024);
 
-    // Stage-2 slice 6/9 — pre-load the per-spawn DLL set into
+    // Pre-load the per-spawn DLL set into
     // `as` BEFORE PeLoad runs so ResolveImports can consult
     // their EATs. Each DllImage lives on this stack frame for
     // the duration of PeLoad; after ProcessCreate we copy them
@@ -1980,55 +1980,53 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     static const PreloadDllEntry preload_set[] = {
         {"customdll.dll", fs::generated::kBinCustomDllBytes, fs::generated::kBinCustomDllBytes_len},
         {"customdll2.dll", fs::generated::kBinCustomDll2Bytes, fs::generated::kBinCustomDll2Bytes_len},
-        // Stage-2 slice 10: kernel32.dll retirement DLL —
-        // now 32 exports across slices 10-12 (process/thread
+        // kernel32.dll — 32 exports covering process/thread
         // identity, pseudo-handles, last-error, terminators,
-        // safe-ignore shims, GetStdHandle, Sleep/
-        // SwitchToThread / GetTickCount(64), full Interlocked*
-        // family 32+64-bit). The via-DLL path in
+        // safe-ignore shims, GetStdHandle, Sleep /
+        // SwitchToThread / GetTickCount(64), and the full
+        // Interlocked* family (32 + 64-bit). The via-DLL path in
         // ResolveImports matches kernel32.dll BEFORE falling
         // through to the hand-assembled stubs page. Stubs stay
-        // as dead-code fallback; sweep-slice later.
+        // as dead-code fallback; sweep later.
         {"kernel32.dll", fs::generated::kBinKernel32DllBytes, fs::generated::kBinKernel32DllBytes_len},
-        // Stage-2 slice 13: vcruntime140.dll — memset / memcpy
-        // / memmove. Every MSVC-built PE calls these for
-        // struct copy / zero-init / CRT startup. The via-DLL
-        // path now fires for each.
+        // vcruntime140.dll — memset / memcpy / memmove. Every
+        // MSVC-built PE calls these for struct copy / zero-init
+        // / CRT startup. The via-DLL path now fires for each.
         {"vcruntime140.dll", fs::generated::kBinVcruntime140DllBytes, fs::generated::kBinVcruntime140DllBytes_len},
-        // Stage-2 slice 14: msvcrt.dll — string intrinsics
+        // msvcrt.dll — string intrinsics
         // (strlen / strcmp / strcpy / strchr + wide variants).
-        // Retires the batch-7 + 29/31 flat stubs.
+        // Retires the corresponding flat stubs.
         {"msvcrt.dll", fs::generated::kBinMsvcrtDllBytes, fs::generated::kBinMsvcrtDllBytes_len},
-        // Stage-2 slice 15: ucrtbase.dll — UCRT runtime: heap
+        // ucrtbase.dll — UCRT runtime: heap
         // (malloc/free/calloc/realloc/_aligned_*), terminators
         // (exit/_exit), CRT startup shims (_initterm,
         // _set_app_type, ...), string intrinsics. Retires the
-        // batch-6 / 9 flat stubs.
+        // corresponding flat stubs.
         {"ucrtbase.dll", fs::generated::kBinUcrtbaseDllBytes, fs::generated::kBinUcrtbaseDllBytes_len},
-        // Stage-2 slice 24: ntdll.dll — Nt* / Zw* / Rtl* /
-        // Ldr* / __chkstk. 108 exports. Retires the batch-42+
-        // ntdll flat stubs. Zw* are same-DLL forwarders to
-        // Nt*; STATUS_NOT_IMPLEMENTED aliases centralise on
+        // ntdll.dll — Nt* / Zw* / Rtl* / Ldr* / __chkstk.
+        // 108 exports. Retires the prior ntdll flat stubs.
+        // Zw* are same-DLL forwarders to Nt*;
+        // STATUS_NOT_IMPLEMENTED aliases centralise on
         // NtReturnNotImpl.
         {"ntdll.dll", fs::generated::kBinNtdllDllBytes, fs::generated::kBinNtdllDllBytes_len},
-        // Stage-2 slice 25: dbghelp.dll — 11 Sym* / StackWalk /
-        // MiniDumpWriteDump no-ops. Callers check returns; v0
-        // has no PDB parser or stack walker.
+        // dbghelp.dll — 11 Sym* / StackWalk / MiniDumpWriteDump
+        // no-ops. Callers check returns; v0 has no PDB parser
+        // or stack walker.
         {"dbghelp.dll", fs::generated::kBinDbghelpDllBytes, fs::generated::kBinDbghelpDllBytes_len},
-        // Stage-2 slice 26: msvcp140.dll — 17 C++ std::
-        // throw helpers + ostream stubs via mangled-name .def
-        // aliases. Throw paths terminate with SYS_EXIT(3).
+        // msvcp140.dll — 17 C++ std:: throw helpers + ostream
+        // stubs via mangled-name .def aliases. Throw paths
+        // terminate with SYS_EXIT(3).
         {"msvcp140.dll", fs::generated::kBinMsvcp140DllBytes, fs::generated::kBinMsvcp140DllBytes_len},
-        // Stage-2 slice 27: kernelbase.dll — pure forwarders
-        // to kernel32.dll (44 entries). Resolved at IAT-patch
-        // time via the slice-8 forwarder chaser.
+        // kernelbase.dll — pure forwarders to kernel32.dll
+        // (44 entries). Resolved at IAT-patch time via the
+        // forwarder chaser.
         {"kernelbase.dll", fs::generated::kBinKernelbaseDllBytes, fs::generated::kBinKernelbaseDllBytes_len},
-        // Stage-2 slice 27: advapi32.dll — Reg* (not-found),
+        // advapi32.dll — Reg* (not-found),
         // token/privilege (success), GetUserName* (constant),
         // SystemFunction036 (deterministic RNG). 25 exports.
         {"advapi32.dll", fs::generated::kBinAdvapi32DllBytes, fs::generated::kBinAdvapi32DllBytes_len},
-        // Stage-2 slice 28: small stub DLLs for misc support
-        // surface. Most return "not found" / success sentinels;
+        // Small stub DLLs for misc support surface. Most
+        // return "not found" / success sentinels;
         // CoTaskMem* + SysAllocString alias the process heap.
         {"shlwapi.dll", fs::generated::kBinShlwapiDllBytes, fs::generated::kBinShlwapiDllBytes_len},
         {"shell32.dll", fs::generated::kBinShell32DllBytes, fs::generated::kBinShell32DllBytes_len},
@@ -2037,21 +2035,20 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         {"winmm.dll", fs::generated::kBinWinmmDllBytes, fs::generated::kBinWinmmDllBytes_len},
         {"bcrypt.dll", fs::generated::kBinBcryptDllBytes, fs::generated::kBinBcryptDllBytes_len},
         {"psapi.dll", fs::generated::kBinPsapiDllBytes, fs::generated::kBinPsapiDllBytes_len},
-        // Stage-2 slice 29: DirectX + user32/gdi32 return-
-        // constant tier. Every DirectX entry returns E_NOTIMPL;
-        // GetDC returns a sentinel so windowed programs don't
-        // null-check-fail at HDC acquisition. Full GUI/drawing
-        // stack remains deferred.
+        // DirectX + user32 / gdi32 return-constant tier. Every
+        // DirectX entry returns E_NOTIMPL; GetDC returns a
+        // sentinel so windowed programs don't null-check-fail
+        // at HDC acquisition. Full GUI/drawing stack remains
+        // deferred.
         {"d3d9.dll", fs::generated::kBinD3d9DllBytes, fs::generated::kBinD3d9DllBytes_len},
         {"d3d11.dll", fs::generated::kBinD3d11DllBytes, fs::generated::kBinD3d11DllBytes_len},
         {"d3d12.dll", fs::generated::kBinD3d12DllBytes, fs::generated::kBinD3d12DllBytes_len},
         {"dxgi.dll", fs::generated::kBinDxgiDllBytes, fs::generated::kBinDxgiDllBytes_len},
         {"user32.dll", fs::generated::kBinUser32DllBytes, fs::generated::kBinUser32DllBytes_len},
         {"gdi32.dll", fs::generated::kBinGdi32DllBytes, fs::generated::kBinGdi32DllBytes_len},
-        // Stage-2 slice 31: networking / crypto / common UI /
-        // version / setup. All stubs — real Windows programs
-        // that import these typically check returns and
-        // gracefully fall back.
+        // Networking / crypto / common UI / version / setup.
+        // All stubs — real Windows programs that import these
+        // typically check returns and gracefully fall back.
         {"ws2_32.dll", fs::generated::kBinWs2_32DllBytes, fs::generated::kBinWs2_32DllBytes_len},
         {"wininet.dll", fs::generated::kBinWininetDllBytes, fs::generated::kBinWininetDllBytes_len},
         {"winhttp.dll", fs::generated::kBinWinhttpDllBytes, fs::generated::kBinWinhttpDllBytes_len},
@@ -2060,8 +2057,8 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         {"comdlg32.dll", fs::generated::kBinComdlg32DllBytes, fs::generated::kBinComdlg32DllBytes_len},
         {"version.dll", fs::generated::kBinVersionDllBytes, fs::generated::kBinVersionDllBytes_len},
         {"setupapi.dll", fs::generated::kBinSetupapiDllBytes, fs::generated::kBinSetupapiDllBytes_len},
-        // Stage-2 slice 33: six more support DLLs — IP helper,
-        // user env, terminal services, DWM, theming, SSPI.
+        // Six more support DLLs — IP helper, user env,
+        // terminal services, DWM, theming, SSPI.
         {"iphlpapi.dll", fs::generated::kBinIphlpapiDllBytes, fs::generated::kBinIphlpapiDllBytes_len},
         {"userenv.dll", fs::generated::kBinUserenvDllBytes, fs::generated::kBinUserenvDllBytes_len},
         {"wtsapi32.dll", fs::generated::kBinWtsapi32DllBytes, fs::generated::kBinWtsapi32DllBytes_len},
@@ -2155,8 +2152,8 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
             AddressSpaceRelease(as);
             return 0;
         }
-        // Stage-2 slice 6/9 — the DLLs were pre-loaded BEFORE
-        // PeLoad so ResolveImports could consult their EATs. Now
+        // The DLLs were pre-loaded BEFORE PeLoad so
+        // ResolveImports could consult their EATs. Now
         // that the Process exists, copy each DllImage into its
         // permanent `dll_images[]` table so
         // SYS_DLL_PROC_ADDRESS / ProcessResolveDllExportByBase
@@ -2414,14 +2411,14 @@ void StartRing3SmokeTask()
     // SYS_THREAD_CREATE path. Expected exit: 0xABCDE on success.
     SpawnPeFile("ring3-thread-stress", fs::generated::kBinThreadStressBytes, fs::generated::kBinThreadStressBytes_len,
                 CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-    // Syscall-stress PE: batch-51 coverage — OutputDebugStringA,
+    // Syscall-stress PE: coverage — OutputDebugStringA,
     // ExitThread, GetProcessTimes/GetThreadTimes/GetSystemTimes,
     // GlobalMemoryStatusEx, WaitForMultipleObjects. Expected exit:
     // 0xCAFE on success.
     SpawnPeFile("ring3-syscall-stress", fs::generated::kBinSyscallStressBytes,
                 fs::generated::kBinSyscallStressBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
                 mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-    // Stage-2 slice 6 end-to-end fixture. Imports
+    // DLL-loader end-to-end fixture. Imports
     // CustomAdd / CustomMul / CustomVersion from customdll.dll;
     // the kernel DLL loader maps the DLL into the process's AS
     // before PeLoad runs and ResolveImports patches each IAT
@@ -2431,7 +2428,7 @@ void StartRing3SmokeTask()
     SpawnPeFile("ring3-customdll-test", fs::generated::kBinCustomDllTestBytes,
                 fs::generated::kBinCustomDllTestBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
                 mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-    // Stage-2 slice 34 end-to-end fixture. Exercises the real
+    // Registry + fopen end-to-end fixture. Exercises the real
     // registry in advapi32.dll + real fopen/fread in ucrtbase.dll.
     SpawnPeFile("ring3-reg-fopen-test", fs::generated::kBinRegFopenTestBytes, fs::generated::kBinRegFopenTestBytes_len,
                 CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);

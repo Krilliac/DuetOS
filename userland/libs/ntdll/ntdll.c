@@ -2,7 +2,7 @@
  * userland/libs/ntdll/ntdll.c
  *
  * Freestanding DuetOS ntdll.dll — the foundational Windows
- * DLL. Retires the batch-42-and-later flat-stub rows for
+ * DLL. Retires the prior flat-stub rows for
  * ntdll.dll / __chkstk / Nt* / Zw* / Rtl* / Ldr*.
  *
  * Layout:
@@ -85,7 +85,7 @@ __declspec(dllexport) NTSTATUS NtReturnNotImpl(void)
  *   SYS_MUTEX_RELEASE= 27 — NtReleaseMutant
  *   SYS_GETTIME_FT   = 17 — NtQuerySystemTime
  *   SYS_NOW_NS       = 18 — NtQueryPerformanceCounter
- *   SYS_SLEEP_MS     = 19 — NtDelayExecution (ms slice)
+ *   SYS_SLEEP_MS     = 19 — NtDelayExecution (millisecond delay)
  *   SYS_GETLASTERROR = 9, SYS_SETLASTERROR = 10 — Rtl* aliases
  * ------------------------------------------------------------------ */
 
@@ -571,7 +571,7 @@ __declspec(dllexport) NTSTATUS RtlRunOnceExecuteOnce(void* RunOnce, RtlRunOnceFn
 }
 
 /* ------------------------------------------------------------------
- * SEH unwind helpers (slice 32)
+ * SEH unwind helpers
  *
  * Real ntdll walks .pdata RUNTIME_FUNCTION tables to support
  * unwinding and stack traces. v0 has no unwind machinery; all

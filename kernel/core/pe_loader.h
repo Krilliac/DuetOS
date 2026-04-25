@@ -149,7 +149,7 @@ struct PeLoadResult
 /// reserved VA regions (stack at 0x7FFF0000, win32 heap at
 /// 0x50000000, etc.).
 ///
-/// Stage-2 slice 6 — `preloaded_dlls` / `preloaded_dll_count`:
+/// `preloaded_dlls` / `preloaded_dll_count`:
 /// optional array of DLL images the caller has ALREADY loaded
 /// into `as` via `DllLoad`. ResolveImports consults this array
 /// BEFORE the flat `Win32ThunksLookup` table: for every
@@ -158,7 +158,7 @@ struct PeLoadResult
 /// the IAT slot is patched with the DLL's export VA directly —
 /// bypassing the trampoline page. Misses fall through to
 /// Win32ThunksLookup so existing PEs are unaffected. Pass
-/// nullptr / 0 to disable (the pre-slice-6 behaviour).
+/// nullptr / 0 to disable (the pre-DLL-loader behaviour).
 PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, const char* program_name,
                     u64 aslr_delta, const DllImage* preloaded_dlls = nullptr, u64 preloaded_dll_count = 0);
 

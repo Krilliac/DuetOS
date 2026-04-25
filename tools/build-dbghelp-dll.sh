@@ -2,8 +2,7 @@
 # tools/build-dbghelp-dll.sh
 #
 # Compiles userland/libs/dbghelp/dbghelp.c into a freestanding
-# x86_64 Windows PE DLL. Stage-2 slice 25: retires the 11
-# dbghelp flat-stub rows.
+# x86_64 Windows PE DLL. Retires the 11 dbghelp flat-stub rows.
 #
 # All entry points are no-ops (Init/Cleanup return TRUE; every
 # Sym* / StackWalk / MiniDumpWriteDump returns 0 = "no info").

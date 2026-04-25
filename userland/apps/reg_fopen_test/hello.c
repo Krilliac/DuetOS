@@ -1,8 +1,8 @@
 /*
  * userland/apps/reg_fopen_test/hello.c
  *
- * Stage-2 slice 34 end-to-end test. This PE exercises two
- * subsystems that slice 34 upgraded from "return stub" to
+ * End-to-end test. This PE exercises two
+ * subsystems that upgraded from "return stub" to
  * "real implementation":
  *
  *   1. The real in-memory registry in advapi32.dll. Looks up
@@ -11,8 +11,9 @@
  *
  *   2. The real fopen / fread / fclose in ucrtbase.dll.
  *      Opens /bin/hello.exe (a freestanding ~2 KiB ramfs PE
- *      that's been in the tree since slice 2), reads the first
- *      2 bytes, and checks they're "MZ" — the DOS PE magic.
+ *      that has been in the tree since the ramfs landed),
+ *      reads the first 2 bytes, and checks they're "MZ" — the
+ *      DOS PE magic.
  *
  * Exit code encodes which checks passed:
  *   0x00000000 — everything passed

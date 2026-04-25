@@ -141,7 +141,7 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
         p->win32_threads[i].task = nullptr;
         p->win32_threads[i].user_stack_va = 0;
     }
-    // Win32 semaphore table — every slot starts free (batch 54).
+    // Win32 semaphore table — every slot starts free.
     for (u32 i = 0; i < Process::kWin32SemaphoreCap; ++i)
     {
         p->win32_semaphores[i].in_use = false;

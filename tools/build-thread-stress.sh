@@ -85,7 +85,7 @@ done
 # Link. No /align:4096 — we want the real-world default
 # FileAlignment=512 that the PE loader now accepts. Also
 # default /dynamicbase, which emits a real .reloc directory —
-# the base-reloc slice of the loader walks it (delta is 0 in
+# the loader's base-reloc walker walks it (delta is 0 in
 # v0 so no addresses actually change, but the walk catches a
 # malformed .reloc table up front and keeps the test fixture
 # shape aligned with real-world MSVC-linked PEs).
@@ -93,7 +93,7 @@ done
 # Delete the prior EXE first so a silent link failure (e.g.
 # undefined import) doesn't leave the PREVIOUS exe in place
 # and trick the embed step into baking stale bytes into the
-# kernel. Caught a real bug during batch 24 bring-up where a
+# kernel. Caught a real bug during bring-up where a
 # missing .def export silently re-shipped the old PE.
 rm -f "${EXE}"
 

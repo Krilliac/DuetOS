@@ -191,7 +191,7 @@ void DllLoaderSelfTest()
     SerialWriteHex(va_add);
     SerialWrite("\n");
 
-    // --- 3. Per-process DLL table (slice 3) ---
+    // --- 3. Per-process DLL table ---
     // Zero-initialise a scratch Process — we don't go through
     // ProcessCreate because we only care about the DLL-table
     // fields, and a full ProcessCreate would drag in the AS
@@ -253,14 +253,14 @@ void DllLoaderSelfTest()
 
     SerialWrite("[dll-test] ProcessRegisterDllImage + ProcessResolveDllExport OK\n");
 
-    // --- 4. HMODULE-based resolve (slice 4, backs SYS_DLL_PROC_ADDRESS) ---
+    // --- 4. HMODULE-based resolve (backs SYS_DLL_PROC_ADDRESS) ---
     // Mirror the Win32 GetProcAddress(HMODULE, LPCSTR) shape.
     // The HMODULE a real caller passes is the DLL's load base VA —
     // exactly what DllLoad wrote into r.image.base_va.
     const u64 va_by_base_add = ProcessResolveDllExportByBase(proc, r.image.base_va, "CustomAdd");
     Expect(va_by_base_add == va_add, "ByBase(base_va, CustomAdd)");
 
-    // HMODULE=0 means "any registered DLL" — matches the slice-3
+    // HMODULE=0 means "any registered DLL" — matches the
     // ProcessResolveDllExport(proc, nullptr, ...) fallthrough.
     const u64 va_by_base_any = ProcessResolveDllExportByBase(proc, 0, "CustomMul");
     Expect(va_by_base_any == va_mul, "ByBase(0, CustomMul)");

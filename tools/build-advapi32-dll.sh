@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tools/build-advapi32-dll.sh — stage-2 slice 27.
+# tools/build-advapi32-dll.sh — freestanding advapi32.dll build.
 
 set -euo pipefail
 

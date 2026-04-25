@@ -2,7 +2,7 @@
  * userland/libs/vcruntime140/vcruntime140.c
  *
  * Freestanding DuetOS vcruntime140.dll — memory intrinsics
- * (memset / memcpy / memmove). Retires the batch-5 flat stubs
+ * (memset / memcpy / memmove). Retires the corresponding flat stubs
  * in kernel/subsystems/win32/stubs.cpp.
  *
  * These three functions are the workhorse of any MSVC-built
@@ -91,7 +91,7 @@ __declspec(dllexport) NO_BUILTIN_MEMOPS void* memchr(const void* ptr, int c, siz
 }
 
 /* ------------------------------------------------------------------
- * SEH / C++ exception stubs (slice 32)
+ * SEH / C++ exception stubs
  *
  * Real Windows unwinds through .pdata/.xdata at exception
  * time. v0 has no unwind machinery. We provide:

@@ -5,8 +5,8 @@
 # freestanding x86_64 Windows PE DLL and embeds the bytes as
 # a C++ constexpr u8 array for inclusion in the kernel.
 #
-# Stage-2 slice 13: retires the memset / memcpy / memmove flat
-# stubs in kernel/subsystems/win32/stubs.cpp. Every MSVC-built
+# Retires the prior memset / memcpy / memmove flat stubs in
+# kernel/subsystems/win32/stubs.cpp. Every MSVC-built
 # PE calls these routinely (struct copy / zero-init / CRT
 # startup), so the via-DLL path fires heavily.
 #
