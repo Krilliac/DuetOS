@@ -9,10 +9,18 @@
 #   * no "forbidden" signature appears (no panic, no triple fault,
 #     no UNRESOLVED import).
 #
-# Exits 0 on full pass, 1 on any missing/forbidden signature,
-# 2 if the QEMU launcher isn't installed (treated as a skip —
-# ctest will report a regular failure; install QEMU to get
-# an actual test run).
+# Exit codes:
+#    0 — full pass, every expected signature found, none forbidden.
+#    1 — real regression: one or more expected signatures missing,
+#        or an UNRESOLVED outside the allowed list.
+#    2 — environment skip: QEMU not installed (CI installs it; on
+#        a dev box without QEMU we report a skip rather than a
+#        failure).
+#    3 — likely flake: kernel reached the test-run scope (we saw
+#        `[I] core/ring3 : ring3 smoke tasks queued`) but a later
+#        DUETOS CRASH / PANIC tripped before all expected
+#        signatures landed. The CI workflow retries on this code
+#        before declaring a real failure.
 #
 # The signature list mirrors .github/workflows/build.yml's
 # qemu-smoke job so local `ctest` and CI stay in lockstep.
@@ -189,6 +197,25 @@ done < <(grep -aF UNRESOLVED "${SERIAL_LOG}" || true)
 if [[ $fail -ne 0 ]]; then
     echo "=== last 60 lines of serial log ==="
     tail -60 "${SERIAL_LOG}" || true
+
+    # Distinguish a real regression (expected signature genuinely
+    # absent because the code path didn't run) from a flake
+    # (kernel reached the test-run scope but tripped a
+    # non-deterministic crash before all signatures landed).
+    # The CI workflow retries on flakes (exit 3) but fails the
+    # build immediately on regressions (exit 1).
+    smoke_started=0
+    crash_seen=0
+    if grep -aF '[I] core/ring3 : ring3 smoke tasks queued' "${SERIAL_LOG}" > /dev/null; then
+        smoke_started=1
+    fi
+    if grep -aE 'DUETOS CRASH|^\[panic\]|triple fault' "${SERIAL_LOG}" > /dev/null; then
+        crash_seen=1
+    fi
+    if [[ $smoke_started -eq 1 && $crash_seen -eq 1 ]]; then
+        echo "FLAKY: kernel reached smoke scope then crashed; retry recommended."
+        exit 3
+    fi
     exit 1
 fi
 

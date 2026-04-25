@@ -341,18 +341,40 @@ u32 SkipDataRefObject(const u8* p, u32 remaining)
     }
 }
 
+// Recursion-depth bound for WalkTermList. Each recursive frame
+// adds ~200 bytes of locals (path[64] + saved regs + spilled
+// args). Kernel stacks are 16 KiB (kKernelStackPages * kPageSize)
+// and must also leave room for trap frames + interrupted
+// callers. Cap at 32: well under the stack budget, and still
+// deep enough for any legitimate ACPI table — real-world DSDTs
+// rarely nest past 8-10 levels of Scope/Device.
+constexpr u8 kMaxAmlRecursion = 32;
+
 // The walker. Produces entries into the global table.
 struct Walker
 {
     const u8* base; // start of the AML body for this table
     u64 length;     // bytes available
     u8 source_idx;  // 0=DSDT, N+1 = SSDT[N]
+    u8 depth = 0;   // current recursion depth (Walk -> Container -> Walk -> ...)
 
     // Walk a TermList that ends at byte offset `end`. `scope` is
     // the current canonical path (NUL-terminated, ≤ kPathCap).
     // Returns when pos >= end or an unknown opcode is hit.
     void WalkTermList(u32 pos, u32 end, const char* scope)
     {
+        // Hard cap on recursion. A malformed or pathologically
+        // deep AML body would otherwise blow the kernel stack
+        // (16 KiB) and trigger a #PF on the guard page.
+        if (depth >= kMaxAmlRecursion)
+            return;
+        ++depth;
+        struct DepthGuard
+        {
+            u8* d;
+            ~DepthGuard() { --*d; }
+        } guard{&depth};
+
         while (pos < end && pos < length && g_entry_count < kMaxAmlNsEntries)
         {
             const u32 start = pos;

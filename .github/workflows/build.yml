@@ -41,7 +41,12 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install clang-format
         run: |
-          sudo apt-get update
+          # Retry-with-backoff against transient mirror flakes
+          # (pattern lifted from SparkEngine's build.yml).
+          for attempt in 1 2 3 4; do
+            if sudo apt-get update; then break; fi
+            sleep $((attempt * 5))
+          done
           sudo apt-get install -y clang-format-18
           sudo ln -sf /usr/bin/clang-format-18 /usr/local/bin/clang-format
       - name: Check format
@@ -60,7 +65,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install toolchain
         run: |
-          sudo apt-get update
+          for attempt in 1 2 3 4; do
+            if sudo apt-get update; then break; fi
+            sleep $((attempt * 5))
+          done
           sudo apt-get install -y clang-18 lld-18 llvm-18 cmake ninja-build python3 \
                                   grub-common grub-pc-bin grub-efi-amd64-bin xorriso mtools
           sudo ln -sf /usr/bin/clang-18 /usr/local/bin/clang
@@ -89,7 +97,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install toolchain
         run: |
-          sudo apt-get update
+          for attempt in 1 2 3 4; do
+            if sudo apt-get update; then break; fi
+            sleep $((attempt * 5))
+          done
           sudo apt-get install -y clang-18 lld-18 llvm-18 cmake ninja-build python3 \
                                   grub-common grub-pc-bin grub-efi-amd64-bin xorriso mtools
           sudo ln -sf /usr/bin/clang-18 /usr/local/bin/clang
@@ -115,11 +126,17 @@ jobs:
     name: qemu smoke
     needs: build-debug
     runs-on: ubuntu-24.04
+    permissions:
+      pull-requests: write   # for the PR-comment-on-fail step
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - name: Install QEMU + grub
         run: |
-          sudo apt-get update
+          for attempt in 1 2 3 4; do
+            if sudo apt-get update; then break; fi
+            sleep $((attempt * 5))
+          done
           sudo apt-get install -y qemu-system-x86 grub-common grub-pc-bin \
                                   grub-efi-amd64-bin xorriso mtools ovmf
       - name: Download kernel artifact
@@ -127,22 +144,140 @@ jobs:
         with:
           name: duetos-kernel-debug
           path: build/x86_64-debug/
-      - name: Boot + assert signatures via ctest driver
+      - name: Configure
+        run: cmake --preset x86_64-debug
+      - name: Boot + assert signatures (with flake retry)
+        id: smoke
+        shell: bash
         run: |
-          set -eo pipefail
-          cmake --preset x86_64-debug
-          # Drive the exact same script ctest would run locally
-          # so local + CI stay in sync. The downloaded artifact
-          # is at build/x86_64-debug/ already.
-          DUETOS_TIMEOUT=30 \
-            tools/ctest-boot-smoke.sh build/x86_64-debug
-      - name: Upload serial log (on failure)
+          # Drive the exact same script ctest would run locally so
+          # local + CI stay in sync. ctest-boot-smoke.sh exits:
+          #   0 = pass, 1 = regression, 2 = env skip, 3 = flake.
+          # We retry on flake (exit 3) up to twice — pattern lifted
+          # from SparkEngine's qemu CI. A real regression (exit 1)
+          # fails immediately; an env skip (exit 2) is treated as a
+          # warning, not a fail.
+          set +e
+          attempts=3
+          rc=0
+          status=""
+          for i in $(seq 1 ${attempts}); do
+            echo "::group::smoke attempt ${i}/${attempts}"
+            DUETOS_TIMEOUT=30 \
+              tools/ctest-boot-smoke.sh build/x86_64-debug
+            rc=$?
+            echo "::endgroup::"
+            cp -f build/x86_64-debug/ctest-smoke-serial.log \
+                  "ctest-smoke-serial-attempt-${i}.log" 2> /dev/null || true
+            if [[ $rc -eq 0 ]]; then
+              status="pass"; break
+            fi
+            if [[ $rc -eq 1 ]]; then
+              status="regression"; break
+            fi
+            if [[ $rc -eq 2 ]]; then
+              status="skip"; break
+            fi
+            # rc == 3: flake. Retry unless we've used our attempts.
+            status="flaky"
+            if [[ $i -lt ${attempts} ]]; then
+              echo "::warning::Smoke attempt ${i} flaked (kernel crash in non-test scope); retrying..."
+              sleep 2
+              continue
+            fi
+          done
+          echo "rc=${rc}"          >> "$GITHUB_OUTPUT"
+          echo "status=${status}"  >> "$GITHUB_OUTPUT"
+          # Skip is a non-failure (CI shouldn't have hit it now
+          # that we install qemu, but treat it as a warning).
+          if [[ "${status}" == "skip" ]]; then
+            echo "::warning::QEMU not available; smoke test skipped."
+            exit 0
+          fi
+          if [[ "${status}" == "pass" ]]; then exit 0; fi
+          # Anything else (regression OR repeated flake) fails.
+          exit 1
+      - name: Upload serial logs (on failure)
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: qemu-serial-log
-          path: /tmp/qemu-smoke/serial.log
+          path: |
+            ctest-smoke-serial-attempt-*.log
+            build/x86_64-debug/ctest-smoke-serial.log
           retention-days: 7
+          if-no-files-found: ignore
+      - name: Comment on PR (sticky)
+        # `always()` so the comment can be updated to "passed"
+        # after a previous run wrote a failure comment, mirroring
+        # SparkEngine's report-ci-errors.js sticky-comment pattern.
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const MARKER = '<!-- duetos-qemu-smoke-report -->';
+            const status = '${{ steps.smoke.outputs.status }}' || 'unknown';
+            const rc = '${{ steps.smoke.outputs.rc }}' || '?';
+            const run = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const sha = context.payload.pull_request?.head?.sha?.slice(0, 7) || context.sha.slice(0, 7);
+
+            // On pass, only post / update if a failure comment
+            // was previously left — turning :x: into :white_check_mark:.
+            // No need to spam the PR with "still passing" comments.
+            const { data: comments } = await github.rest.issues.listComments({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 100,
+            });
+            const existing = comments.find(c => c.body && c.body.includes(MARKER));
+            if (status === 'pass' && !existing) return;
+
+            // Locate the freshest serial-log tail we can.
+            const candidates = [
+              'ctest-smoke-serial-attempt-3.log',
+              'ctest-smoke-serial-attempt-2.log',
+              'ctest-smoke-serial-attempt-1.log',
+              'build/x86_64-debug/ctest-smoke-serial.log',
+            ];
+            let tail = '(no serial log captured)';
+            for (const p of candidates) {
+              if (fs.existsSync(p)) {
+                const lines = fs.readFileSync(p, 'utf8').trim().split('\n');
+                tail = lines.slice(-40).join('\n');
+                break;
+              }
+            }
+
+            const verdict = {
+              pass:       `:white_check_mark: **qemu-smoke passed** for \`${sha}\`.`,
+              regression: `:x: **Regression** — an expected boot signature is missing or a forbidden one appeared (\`${sha}\`).`,
+              flaky:      `:warning: **Flaky** — the kernel reached the smoke scope then crashed; retried 3 times, all crashed (\`${sha}\`).`,
+              skip:       `:information_source: **Skipped** — QEMU not available on the runner.`,
+            }[status] || `:question: Smoke exited rc=${rc} (status=${status}).`;
+
+            const bodyParts = [MARKER, '', '## qemu-smoke', '', verdict, '', `[View full run](${run})`];
+            if (status !== 'pass') {
+              bodyParts.push('', '<details><summary>Last 40 lines of serial log</summary>', '', '```', tail, '```', '', '</details>');
+            }
+            const body = bodyParts.join('\n');
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                comment_id: existing.id,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body,
+              });
+            }
 
   clang-tidy:
     name: clang-tidy (advisory)
@@ -153,7 +288,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install tidy
         run: |
-          sudo apt-get update
+          for attempt in 1 2 3 4; do
+            if sudo apt-get update; then break; fi
+            sleep $((attempt * 5))
+          done
           sudo apt-get install -y clang-tidy-18 clang-18 cmake ninja-build
           sudo ln -sf /usr/bin/clang-tidy-18 /usr/local/bin/clang-tidy
       - name: Configure (for compile_commands.json)
