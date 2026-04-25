@@ -7,6 +7,7 @@
 #include "../../arch/x86_64/timer.h"
 #include "../../arch/x86_64/traps.h"
 #include "../../core/klog.h"
+#include "../../core/cleanroom_trace.h"
 #include "../../core/process.h"
 #include "../../core/random.h"
 #include "../../cpu/percpu.h"
@@ -3859,6 +3860,9 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
     }
 
     const u64 nr = frame->rax;
+    const core::Process* proc = core::CurrentProcess();
+    const u64 pid = (proc != nullptr) ? proc->pid : 0;
+    core::CleanroomTraceRecord("syscall", "linux-dispatch", nr, pid, frame->rip);
     i64 rv = kENOSYS;
     switch (nr)
     {

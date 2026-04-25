@@ -74,4 +74,22 @@ void CleanroomTraceClear()
         g_trace[i] = {};
 }
 
+u64 CleanroomTraceHashToken(const char* text)
+{
+    // Stable 64-bit FNV-1a for low-cardinality identifiers
+    // (shell command names, event labels) so call sites can
+    // record meaningful breadcrumbs without storing long text.
+    constexpr u64 kOffset = 1469598103934665603ull;
+    constexpr u64 kPrime = 1099511628211ull;
+    u64 h = kOffset;
+    if (text == nullptr)
+        return h;
+    for (u32 i = 0; text[i] != '\0'; ++i)
+    {
+        h ^= static_cast<u8>(text[i]);
+        h *= kPrime;
+    }
+    return h;
+}
+
 } // namespace duetos::core
