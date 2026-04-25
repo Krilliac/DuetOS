@@ -1,10 +1,20 @@
 #include "mutex_syscall.h"
 
+#include "custom.h"
+
 #include "../../arch/x86_64/cpu.h"
+#include "../../core/syscall.h"
 #include "../../arch/x86_64/serial.h"
+#include "../../arch/x86_64/timer.h"
 #include "../../arch/x86_64/traps.h"
 #include "../../core/process.h"
 #include "../../sched/sched.h"
+#include "custom.h"
+
+namespace duetos::arch
+{
+u64 TimerTicks();
+} // namespace duetos::arch
 
 namespace duetos::subsystems::win32
 {
@@ -69,6 +79,7 @@ void DoMutexCreate(arch::TrapFrame* frame)
     arch::SerialWrite(" initial_owner=");
     arch::SerialWriteHex(frame->rdi);
     arch::SerialWrite("\n");
+    custom::OnHandleAlloc(proc, handle, static_cast<u32>(core::SYS_MUTEX_CREATE), frame->rip);
     frame->rax = handle;
 }
 
@@ -116,6 +127,7 @@ void DoMutexWait(arch::TrapFrame* frame)
         m.owner = me;
         m.recursion = 1;
         arch::Sti();
+        custom::OnMutexAcquire(proc, static_cast<u32>(slot));
         frame->rax = kWaitObject0;
         return;
     }
@@ -123,19 +135,30 @@ void DoMutexWait(arch::TrapFrame* frame)
     {
         m.recursion += 1;
         arch::Sti();
+        custom::OnMutexAcquire(proc, static_cast<u32>(slot));
         frame->rax = kWaitObject0;
         return;
     }
+    // Custom-Win32 deadlock detect + contention wait_count bump.
+    // The owner task's id (if we have it) becomes the holder edge —
+    // helps cycle-detection follow the wait-for graph.
+    const u64 holder_tid = (m.owner != nullptr) ? sched::TaskId(m.owner) : 0;
+    custom::OnMutexWaitStart(proc, static_cast<u32>(slot), handle, holder_tid, proc->pid);
+    const u64 wait_start = arch::TimerTicks();
     if (timeout_ms == kInfiniteMs)
     {
         sched::WaitQueueBlock(&m.waiters);
         arch::Sti();
+        const u64 wait_end = arch::TimerTicks();
+        custom::OnMutexWaitEnd(proc, static_cast<u32>(slot), wait_end - wait_start);
         frame->rax = kWaitObject0;
         return;
     }
     const u64 ticks = (timeout_ms + (kMsPerTick - 1)) / kMsPerTick;
     const bool got = sched::WaitQueueBlockTimeout(&m.waiters, ticks);
     arch::Sti();
+    const u64 wait_end = arch::TimerTicks();
+    custom::OnMutexWaitEnd(proc, static_cast<u32>(slot), wait_end - wait_start);
     frame->rax = got ? kWaitObject0 : kWaitTimeout;
 }
 

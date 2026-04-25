@@ -6,6 +6,7 @@
 #include "../drivers/video/theme.h"
 #include "../drivers/video/widget.h"
 #include "../mm/kheap.h"
+#include "../subsystems/win32/custom.h"
 #include "../sched/sched.h"
 #include "klog.h"
 #include "panic.h"
@@ -169,6 +170,8 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
         p->linux_sigactions[i].mask = 0;
     }
     p->linux_signal_mask = 0;
+    // Win32 custom-diagnostics state lazy-allocates on first opt-in.
+    p->win32_custom_state = nullptr;
     // Default cwd is "/" — matches the value DoGetcwd hard-coded
     // before this field existed.
     for (u32 i = 0; i < Process::kLinuxCwdCap; ++i)
@@ -260,6 +263,19 @@ void ProcessRelease(Process* p)
     // returned.
     mm::AddressSpaceRelease(p->as);
     p->as = nullptr;
+
+    // Emit the recorded diagnostic data to serial before the
+    // state is freed. No-op when the process has no custom state
+    // (non-Win32 native + Linux processes). For Win32 PEs the
+    // observability tier is auto-on, so this fires for every Win32
+    // PE exit and gives a post-mortem record without anyone having
+    // to know the dump syscall exists.
+    subsystems::win32::custom::DumpOnAbnormalExit(p);
+
+    // Free the Win32 custom-diagnostics state if any was allocated.
+    // No-op when the process never opted into any custom-Win32
+    // feature (the common path).
+    subsystems::win32::custom::CleanupProcess(p);
 
     mm::KFree(p);
     --g_live_processes;

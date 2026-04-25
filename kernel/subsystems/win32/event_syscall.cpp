@@ -4,7 +4,9 @@
 #include "../../arch/x86_64/serial.h"
 #include "../../arch/x86_64/traps.h"
 #include "../../core/process.h"
+#include "../../core/syscall.h"
 #include "../../sched/sched.h"
+#include "custom.h"
 
 namespace duetos::subsystems::win32
 {
@@ -59,6 +61,7 @@ void DoEventCreate(arch::TrapFrame* frame)
     arch::SerialWrite(" signaled=");
     arch::SerialWriteHex(e.signaled ? 1 : 0);
     arch::SerialWrite("\n");
+    custom::OnHandleAlloc(proc, handle, static_cast<u32>(core::SYS_EVENT_CREATE), frame->rip);
     frame->rax = handle;
 }
 

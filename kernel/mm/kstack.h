@@ -81,11 +81,15 @@ inline constexpr uptr kKernelStackArenaBase = 0xFFFFFFFFE0000000ULL;
 /// happen.
 inline constexpr u64 kKernelStackGuardPages = 1;
 
-/// Usable stack pages per slot. 4 * 4 KiB = 16 KiB — identical
-/// to the previous heap-backed size (kKernelStackBytes in
-/// sched.cpp). Keeping the usable size unchanged means no task
-/// that fit before overflows now.
-inline constexpr u64 kKernelStackPages = 4;
+/// Usable stack pages per slot. 16 * 4 KiB = 64 KiB. Bumped from
+/// 4 (16 KiB) on 2026-04-25 because the PE-loader path stacks
+/// up: SpawnRing3Pe carries a ~5 KiB local DllImage[48] preload
+/// array, and DllLoad → AddressSpaceMapUserPage walks the page
+/// tables through a deep recursion. 32 KiB still occasionally
+/// overflowed once handle-alloc + close hooks were added across
+/// the file/event/mutex/thread create handlers; 64 KiB gives a
+/// comfortable margin.
+inline constexpr u64 kKernelStackPages = 16;
 
 /// Total bytes consumed by one slot, guard + stack.
 inline constexpr u64 kKernelStackSlotBytes = (kKernelStackGuardPages + kKernelStackPages) * kPageSize;

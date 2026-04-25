@@ -178,6 +178,12 @@ Task* CurrentTask();
 /// itself. Returns ~0 if called before SchedInit.
 u64 CurrentTaskId();
 
+/// Read the task ID of an arbitrary `Task*`. Returns 0 for nullptr.
+/// Used by Win32 custom-diagnostics deadlock-detection to record a
+/// mutex's owner edge in the wait graph without exposing Task's
+/// layout.
+u64 TaskId(const Task* t);
+
 /// Top (high address) of the current task's kernel stack. Returns 0 for
 /// the boot task (it never had a scheduler-managed kernel stack — it
 /// runs on the boot.S stack, which is irrelevant for ring-3 RSP0

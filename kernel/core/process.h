@@ -578,6 +578,15 @@ struct Process
     LinuxSigAction linux_sigactions[kLinuxSignalCount];
     u64 linux_signal_mask; // per-process blocked-signal bitmask (rt_sigprocmask)
 
+    // Win32 custom-diagnostics state — opaque pointer to a
+    // duetos::subsystems::win32::custom::ProcessCustomState. nullptr
+    // until the process opts into any custom-Win32 feature via
+    // SYS_WIN32_CUSTOM op=SetPolicy. Owned by the custom module;
+    // ProcessRelease forwards to custom::CleanupProcess. Kept as
+    // an opaque void* so process.h doesn't pull in the win32
+    // subsystem headers.
+    void* win32_custom_state;
+
     // Linux current-working-directory. `chdir(path)` copies the
     // (resolved-or-not) path into this buffer; `getcwd` reads it
     // back. v0 stores the path verbatim — no canonicalisation, no

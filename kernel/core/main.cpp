@@ -125,6 +125,7 @@
 #include "runtime_checker.h"
 #include "../subsystems/linux/ring3_smoke.h"
 #include "../subsystems/linux/syscall.h"
+#include "../subsystems/win32/custom_selftest.h"
 #include "../subsystems/win32/gdi_objects.h"
 #include "../subsystems/win32/nt_coverage.h"
 #include "dll_loader.h"
@@ -2341,6 +2342,11 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // resolve to VAs inside the mapped image. Cheap and
     // self-cleaning (scratch AS is released before return).
     duetos::core::DllLoaderSelfTest();
+
+    // Win32 custom-diagnostics self-test. Synthesises a fake
+    // process and drives every recorded hook so the boot serial
+    // log shows concrete data flowing through each surface.
+    duetos::subsystems::win32::custom::Win32CustomSelfTest();
 
     duetos::core::StartHeartbeatThread();
 

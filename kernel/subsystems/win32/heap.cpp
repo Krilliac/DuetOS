@@ -7,6 +7,7 @@
 #include "../../mm/frame_allocator.h"
 #include "../../mm/page.h"
 #include "../../mm/paging.h"
+#include "custom.h"
 
 namespace duetos::win32
 {
@@ -122,6 +123,15 @@ bool Win32HeapInit(duetos::core::Process* proc)
     SerialWrite(" size=");
     SerialWriteHex(heap_bytes);
     SerialWrite("\n");
+
+    // Auto-enable the observability tier of the Win32 custom
+    // diagnostics suite for every Win32 PE. Apps that don't want
+    // them can still clear bits explicitly via SYS_WIN32_CUSTOM
+    // op=SetPolicy. Kept here (rather than ProcessCreate) because
+    // Win32HeapInit is the canonical "this process is a Win32 PE
+    // with imports" gate — non-Win32 native tasks don't pay the
+    // ~7 KB state allocation.
+    duetos::subsystems::win32::custom::ApplySystemDefaultPolicy(proc);
     return true;
 }
 
@@ -136,14 +146,17 @@ u64 Win32HeapAlloc(duetos::core::Process* proc, u64 size)
 
     // First-fit: walk the free list, find the first block
     // whose size >= needed. `prev` tracks the predecessor so
-    // we can splice the chosen block out.
+    // we can splice the chosen block out. Quarantined blocks
+    // (kPolicyQuarantineFree opt-in) are skipped until their
+    // hold expires — keeps freshly-freed payloads from being
+    // handed straight back out, which is the common UAF window.
     u64 prev = 0;
     u64 cur = proc->heap_free_head;
     while (cur != 0)
     {
         const u64 block_size = PeekU64(proc, cur + 0);
         const u64 block_next = PeekU64(proc, cur + 8);
-        if (block_size >= needed)
+        if (block_size >= needed && !duetos::subsystems::win32::custom::IsQuarantined(proc, cur + kHeaderSize))
         {
             const u64 leftover = block_size - needed;
             if (leftover >= kHeaderSize + kMinSplitPayload)
@@ -196,11 +209,17 @@ void Win32HeapFree(duetos::core::Process* proc, u64 user_ptr)
         return;
     if (block_hdr >= proc->heap_base + proc->heap_pages * duetos::mm::kPageSize)
         return;
+    const u64 block_size = PeekU64(proc, block_hdr + 0);
     // Prepend to the free list. O(1) insertion, no coalescing.
     // The header's `size` field is preserved from allocation;
     // we just update `next`.
     PokeU64(proc, block_hdr + 8, proc->heap_free_head);
     proc->heap_free_head = block_hdr;
+    // Win32 custom quarantine hook: blocks the just-freed payload
+    // from reuse for kQuarantineTicks ticks under
+    // kPolicyQuarantineFree. No-op when the policy bit is off.
+    if (block_size > kHeaderSize)
+        duetos::subsystems::win32::custom::OnHeapFree(proc, user_ptr, block_size - kHeaderSize);
 }
 
 u64 Win32HeapSize(duetos::core::Process* proc, u64 user_ptr)

@@ -1135,6 +1135,15 @@ enum SyscallNumber : u64
     // rax = 1 on success, 0 on any validation failure.
     // Capped at `kWinBlitMaxPx` total pixels per call.
     SYS_GDI_BITBLT_DC = 113,
+
+    // SYS_WIN32_CUSTOM — multiplexed entry point for the Win32
+    // subsystem's custom diagnostics + safety extensions. Sub-op
+    // is in rdi (see win32::custom::kOp* constants); rsi/rdx/r10
+    // are op-specific. Per-process state is lazy-allocated on the
+    // first SetPolicy call and lives on Process::win32_custom_state.
+    // Default policy = 0 — every feature is opt-in so apps that
+    // probe Windows-buggy behaviour are unaffected.
+    SYS_WIN32_CUSTOM = 129,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit

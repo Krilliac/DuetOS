@@ -71,6 +71,7 @@
 #include "../subsystems/win32/event_syscall.h"
 #include "../subsystems/win32/window_syscall.h"
 #include "../subsystems/win32/heap.h"
+#include "../subsystems/win32/custom.h"
 #include "klog.h"
 #include "cleanroom_trace.h"
 #include "log_names.h"
@@ -202,9 +203,19 @@ void SyscallInit()
 void SyscallDispatch(arch::TrapFrame* frame)
 {
     const u64 num = frame->rax;
+    // Outer-scope `proc` was previously `const Process*`; keep that
+    // shape so the many `case` blocks below that re-declare a local
+    // `Process* proc` for write access don't trip -Wshadow.
     const Process* proc = CurrentProcess();
     const u64 pid = (proc != nullptr) ? proc->pid : 0;
     CleanroomTraceRecord("syscall", "native-dispatch", num, pid, frame->rip);
+    // Win32 custom flight recorder. No-op unless the caller has
+    // opted into kPolicyFlightRecorder via SYS_WIN32_CUSTOM. Cheap
+    // (one inline policy-bit check) when off. We hand the hook a
+    // mutable Process* because the recorder needs to write into the
+    // process's lazy-allocated state — but the dispatcher itself
+    // never mutates the process struct from this scope.
+    subsystems::win32::custom::OnSyscallEntry(const_cast<Process*>(proc), num, frame);
     switch (num)
     {
     case SYS_EXIT:
@@ -277,7 +288,13 @@ void SyscallDispatch(arch::TrapFrame* frame)
         if (proc != nullptr)
         {
             frame->rax = u64(proc->win32_last_error);
-            proc->win32_last_error = u32(frame->rdi & 0xFFFFFFFFULL);
+            const u32 new_err = u32(frame->rdi & 0xFFFFFFFFULL);
+            proc->win32_last_error = new_err;
+            // Win32 custom error-provenance hook — records the RIP
+            // that just stamped the error so a debugger can answer
+            // "where did this code come from?" in one shot. No-op
+            // unless kPolicyErrorProvenance is set.
+            subsystems::win32::custom::OnLastErrorSet(proc, new_err, frame->rip, static_cast<u32>(SYS_SETLASTERROR));
         }
         else
         {
@@ -285,6 +302,10 @@ void SyscallDispatch(arch::TrapFrame* frame)
         }
         return;
     }
+
+    case SYS_WIN32_CUSTOM:
+        subsystems::win32::custom::DoCustom(frame);
+        return;
 
     // Heap family: handlers live in subsystems/win32/heap_syscall.cpp.
     case SYS_HEAP_ALLOC:

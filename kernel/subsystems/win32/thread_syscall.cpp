@@ -1,5 +1,7 @@
 #include "thread_syscall.h"
 
+#include "custom.h"
+
 #include "../../arch/x86_64/gdt.h"
 #include "../../arch/x86_64/serial.h"
 #include "../../arch/x86_64/traps.h"
@@ -272,6 +274,7 @@ void DoThreadCreate(arch::TrapFrame* frame)
     SerialWrite(" stack_base=");
     SerialWriteHex(stack_base_va);
     SerialWrite("\n");
+    custom::OnHandleAlloc(proc, handle, static_cast<u32>(core::SYS_THREAD_CREATE), frame->rip);
     frame->rax = handle;
 }
 
