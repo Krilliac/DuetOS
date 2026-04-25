@@ -9,19 +9,19 @@ and prints a hash -> name table you can grep CRTRACE output
 against.
 
 The kernel's hash function is in
-kernel/core/cleanroom_trace.cpp:CleanroomTraceHashToken. It uses
-FNV-1a-style mixing with a NON-STANDARD offset basis
-(1469598103934665603 — one digit short of the real FNV-1a-64
-offset 14695981039346656037). This script intentionally uses the
-SAME constant the kernel uses so the hashes match what's in
-the trace, and DOES NOT pretend to be a portable FNV-1a
-implementation. If the kernel constant is ever fixed to the
-real FNV-1a offset, update KERNEL_FNV_OFFSET here in lockstep.
+kernel/core/cleanroom_trace.cpp:CleanroomTraceHashToken — RFC-
+style FNV-1a-64 (offset 14695981039346656037, prime
+1099511628211). Any standard FNV-1a-64 implementation will
+produce matching hashes. An earlier revision used a truncated
+offset basis (1469598103934665603, missing the trailing digit);
+that constant is preserved below as KERNEL_FNV_OFFSET_LEGACY so
+old captured logs can still be decoded with --legacy-hash.
 
 Usage:
     tools/cleanroom/decode_hash.py [name ...]
     tools/cleanroom/decode_hash.py --all          # hash every shell command name
     tools/cleanroom/decode_hash.py --grep TRACE   # find hashes in TRACE that match a known name
+    tools/cleanroom/decode_hash.py --legacy-hash --grep OLD_TRACE   # for pre-fix captures
 """
 
 from __future__ import annotations
@@ -31,14 +31,15 @@ import re
 import sys
 from pathlib import Path
 
-# Mirror of the kernel's offset/prime — see kernel/core/cleanroom_trace.cpp:82.
-KERNEL_FNV_OFFSET = 1469598103934665603
-KERNEL_FNV_PRIME  = 1099511628211
-U64_MASK          = (1 << 64) - 1
+# Mirror of the kernel's current offset/prime — see kernel/core/cleanroom_trace.cpp.
+KERNEL_FNV_OFFSET = 14695981039346656037
+KERNEL_FNV_OFFSET_LEGACY = 1469598103934665603  # Pre-2026-04-25; missing trailing digit.
+KERNEL_FNV_PRIME = 1099511628211
+U64_MASK = (1 << 64) - 1
 
 
-def kernel_hash(s: str) -> int:
-    h = KERNEL_FNV_OFFSET
+def kernel_hash(s: str, *, legacy: bool = False) -> int:
+    h = KERNEL_FNV_OFFSET_LEGACY if legacy else KERNEL_FNV_OFFSET
     for b in s.encode():
         h ^= b
         h = (h * KERNEL_FNV_PRIME) & U64_MASK
@@ -62,12 +63,12 @@ KNOWN_SHELL_COMMANDS: tuple[str, ...] = (
 )
 
 
-def cmd_hash_table(names: list[str]) -> dict[int, str]:
-    return {kernel_hash(n): n for n in names}
+def cmd_hash_table(names: list[str], *, legacy: bool = False) -> dict[int, str]:
+    return {kernel_hash(n, legacy=legacy): n for n in names}
 
 
-def parse_grep(log_path: Path) -> int:
-    table = cmd_hash_table(list(KNOWN_SHELL_COMMANDS))
+def parse_grep(log_path: Path, *, legacy: bool = False) -> int:
+    table = cmd_hash_table(list(KNOWN_SHELL_COMMANDS), legacy=legacy)
     pat = re.compile(r"CRTRACE\s+[\w:.-]+::command\s*0x([0-9a-fA-F]{16})")
     found = 0
     raw_bytes = log_path.read_bytes()
@@ -93,18 +94,20 @@ def main() -> int:
                    help="print hash for every name in the curated list")
     g.add_argument("--grep", metavar="LOG",
                    help="annotate CRTRACE shell::command hashes from LOG with names")
+    p.add_argument("--legacy-hash", action="store_true",
+                   help="use the pre-2026-04-25 truncated FNV-1a offset basis (for old logs)")
     p.add_argument("names", nargs="*", help="command names to hash")
     args = p.parse_args()
 
     if args.grep:
-        return parse_grep(Path(args.grep))
+        return parse_grep(Path(args.grep), legacy=args.legacy_hash)
 
     names = list(KNOWN_SHELL_COMMANDS) if args.all else args.names
     if not names:
         p.print_help(sys.stderr)
         return 2
     for n in names:
-        print(f"0x{kernel_hash(n):016x}  {n}")
+        print(f"0x{kernel_hash(n, legacy=args.legacy_hash):016x}  {n}")
     return 0
 
 
