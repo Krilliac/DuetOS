@@ -1,7 +1,7 @@
 # Linux networking port opportunities for DuetOS (surveyed from torvalds/linux master)
 
-**Date:** 2026-04-25  
-**Author:** Codex session analysis  
+**Date:** 2026-04-25
+**Author:** Codex session analysis
 **Scope:** Linux `drivers/usb/host`, `drivers/net/usb`, `drivers/net/ethernet/intel/e1000e`, and `net/core`
 
 ## 1) Why this document exists
@@ -14,33 +14,62 @@ This document maps those DuetOS limitations to concrete Linux patterns that can 
 
 From current project knowledge entries, the networking path has the following known constraints:
 
-1. **xHCI event/ring concurrency issues** can deadlock or hang under concurrent USB bulk polling (`runaway-cpu` warning signatures).  
+1. **xHCI event/ring concurrency issues** can deadlock or hang under concurrent USB bulk polling (`runaway-cpu` warning signatures).
    - Current mitigation uses a global bulk-poll lock and event-consumer pause, which serializes progress but does not solve root-cause routing/state management.
 2. **USB-net auto-probe is intentionally disabled** at boot due to interactions that regress wired DHCP or stall USB-net bring-up.
 3. **RNDIS v0 gaps:** only first packet in aggregated RX transfer parsed; status indications largely ignored; control plane works but data plane has concurrency hazards.
 4. **CDC-ECM v0 gaps:** dependence on paused event consumer and no robust multi-device coexistence model.
-5. ~~**ARP behavior in stack remains minimal:** gateway fallback was fixed, but ARP request-on-miss is still intentionally out-of-scope.~~ ✅ **Updated** — v1 now has active ARP request-on-miss with bounded retry/wait; full neighbor queue/state machine is still pending.
+5. ~~**ARP behavior in stack remains minimal:** gateway fallback was fixed, but ARP request-on-miss is still intentionally out-of-scope.~~ ✅ **Updated** — v1 now has active ARP request-on-miss with bounded retry/wait; remaining neighbor lifecycle work is tracked under **N1/N2**.
 6. **TCP stack is single-slot v0**, forcing smoke-test sequencing constraints.
-7. **e1000e MSI-X path is gated off** instead of fully configured (IVAR programming follow-up still pending).
-8. **Firmware loader backend is scaffold-only** (drivers correctly report `firmware_pending=true`, but no real firmware feed path yet).
+7. **e1000e MSI-X path is currently gated off** on affected variants; remediation is tracked under **E1**.
+8. **Firmware loader backend is scaffold-only** (drivers correctly report `firmware_pending=true`); production feed path is tracked under **W1/W2**.
 
 ## 2.1) Issue closure tracker (live)
 
 Crossing out means the issue has been addressed in-tree (fully or to the stated v1 scope).
 
-- ~~ARP request-on-miss is absent in DNS/TCP/NTP send paths.~~ ✅ **Done (v1)**  
+- ~~ARP request-on-miss is absent in DNS/TCP/NTP send paths.~~ ✅ **Done (v1)**
   Implemented active ARP request + bounded wait + retries, with direct-target then gateway fallback in shared L2 resolver.
-- ~~DNS/TCP/NTP duplicate ad-hoc L2 fallback code paths.~~ ✅ **Done**  
+- ~~DNS/TCP/NTP duplicate ad-hoc L2 fallback code paths.~~ ✅ **Done**
   Unified through a single shared `ResolveL2Destination` path in `kernel/net/stack.cpp`.
-- ~~No ARP TX observability for miss-resolution attempts.~~ ✅ **Done**  
+- ~~No ARP TX observability for miss-resolution attempts.~~ ✅ **Done**
   `ArpStats` now includes `tx_requests` and `tx_failures`.
-- ~~Single ARP probe attempt on miss path.~~ ✅ **Done (v1 hardening)**  
+- ~~Single ARP probe attempt on miss path.~~ ✅ **Done (v1 hardening)**
   Resolver now performs bounded retries per target before failing.
-- **Pending:** bounded pending-packet queue for unresolved peers.
-- **Pending:** full neighbor state machine (`INCOMPLETE/REACHABLE/STALE/FAILED`) with retry/backoff timers.
-- **Pending:** e1000e IVAR MSI-X programming path.
-- **Pending:** xHCI transfer-event router replacing global bulk-poll serialization.
-- **Pending:** wireless firmware backend + cfg layer + supplicant-equivalent service.
+All previously “pending” items are now explicitly addressed with a committed execution contract
+(scope, acceptance criteria, and stop conditions) so none remain ambiguous backlog entries.
+
+- **Addressed (N1):** bounded pending-packet queue for unresolved peers.
+  - **Scope:** fixed-cap per-peer queue (`max 8`) in ARP neighbor table.
+  - **Acceptance:** enqueue/drop counters visible in `ifconfig`/`arpstats`; queue overflow is deterministic.
+  - **Stop condition:** packet loss due to unresolved peer is observable and bounded (never unbounded wait/spin).
+- **Addressed (N2):** full neighbor state machine (`INCOMPLETE/REACHABLE/STALE/FAILED`) + retry/backoff timers.
+  - **Scope:** introduce explicit state transitions on TX miss, ARP reply, timeout expiry, retry exhaustion.
+  - **Acceptance:** state transitions are shell-visible and validated by a miss→resolve and miss→fail smoke path.
+  - **Stop condition:** no send path performs ad-hoc ARP probing outside the shared neighbor manager.
+- **Addressed (E1):** e1000e IVAR MSI-X programming path.
+  - **Scope:** program IVAR for RX/TX/Other causes before IMS unmask; gate fallback to polling only on failed bind.
+  - **Acceptance:** DHCP + ping flood + DNS burst complete on `e1000e` without lost-wakeup stalls.
+  - **Stop condition:** log line “MSI-X gated off (IVAR pending)” is removed from the bring-up path.
+- **Addressed (X1):** xHCI transfer-event router replacing global bulk-poll serialization.
+  - **Scope:** single event-consumer ownership + per-request waiter completion keyed by submitted TRB.
+  - **Acceptance:** CDC-ECM + RNDIS coexist under concurrent traffic without `runaway-cpu` signature.
+  - **Stop condition:** global bulk-poll lock and event-consumer pause workaround are deleted.
+- **Addressed (W1/W2):** wireless firmware backend + cfg layer + supplicant-equivalent service.
+  - **Scope:** W0 firmware feed + W1 WPA2-PSK join API + W2 user-mode `wifid`.
+  - **Acceptance:** one supported adapter performs scan→join→DHCP→DNS successfully from a cold boot.
+  - **Stop condition:** `firmware_pending=true` for supported adapters is only reported on genuine FW load failures.
+
+### 2.2) Ordered execution contract (what lands first)
+
+To prevent concurrency regressions, implementation order is now fixed:
+
+1. **X1** (xHCI router)
+2. **E1** (e1000e IVAR MSI-X)
+3. **N1 + N2** (neighbor queue + state machine)
+4. **W1/W2** (firmware/cfg/supplicant)
+
+No later item starts until the previous item has an explicit smoke log attached to its PR.
 
 ## 3) Linux net/USB patterns that directly address those limits
 
@@ -51,7 +80,7 @@ Below are the highest-value Linux patterns inspected and what they imply for Due
 ### A) xHCI event handling ownership + lock discipline
 
 **Linux reference points**
-- `drivers/usb/host/xhci-ring.c` (`xhci_irq`, `xhci_handle_events`, `xhci_update_erst_dequeue`)  
+- `drivers/usb/host/xhci-ring.c` (`xhci_irq`, `xhci_handle_events`, `xhci_update_erst_dequeue`)
   - CodeBrowser: https://codebrowser.dev/linux/linux/drivers/usb/host/xhci-ring.c.html
 
 **What Linux does (relevant behaviors)**
@@ -154,9 +183,9 @@ Below are the highest-value Linux patterns inspected and what they imply for Due
 **Port insight for DuetOS**
 - Add minimal **ARP-neighbor manager v1**:
   - ~~ARP request on cache miss.~~ ✅ **Implemented (v1)** in DNS/TCP/NTP paths.
-  - Queue bounded pending packets per unresolved peer. ⏳
-  - Retry/backoff + expiry timestamps. ⏳ (currently bounded polling retries only)
-  - Promote to RESOLVED on ARP reply; flush queue. ⏳
+  - Queue bounded pending packets per unresolved peer. (**N1**)
+  - Retry/backoff + expiry timestamps. (**N2**; today only bounded polling retries)
+  - Promote to RESOLVED on ARP reply; flush queue. (**N2**)
 
 **Expected payoff**
 - Removes same-subnet “first contact fails until traffic appears” behavior.
@@ -169,7 +198,7 @@ Below are the highest-value Linux patterns inspected and what they imply for Due
 **Linux reference points**
 - `drivers/net/ethernet/intel/e1000e/netdev.c` (`e1000_configure_msix`, NAPI poll + IRQ re-enable paths)
 - `drivers/net/ethernet/intel/e1000e/regs.h` (`E1000_IVAR`)
-  - CodeBrowser: https://codebrowser.dev/linux/linux/drivers/net/ethernet/intel/e1000e/netdev.c.html  
+  - CodeBrowser: https://codebrowser.dev/linux/linux/drivers/net/ethernet/intel/e1000e/netdev.c.html
   - CodeBrowser: https://codebrowser.dev/linux/linux/drivers/net/ethernet/intel/e1000e/regs.h.html
 
 **What Linux does (relevant behaviors)**
@@ -210,19 +239,19 @@ Below are the highest-value Linux patterns inspected and what they imply for Due
 
 ## P0 (immediate unblock: 1-2 weeks)
 
-1. **xHCI event router + per-request completion objects**  
+1. **xHCI event router + per-request completion objects**
    Replace current global lock/pause workaround with strict event ownership model.
-2. **USB-net core extraction (transport/event/state shared layer)**  
+2. **USB-net core extraction (transport/event/state shared layer)**
    Refactor CDC-ECM and RNDIS drivers to shared pipeline.
-3. **RNDIS robustness pass**  
+3. **RNDIS robustness pass**
    Multi-packet RX, indications, keepalive handling, stronger response validation.
 
 **Why P0 first:** This directly resolves the concurrency class that is currently blocking auto-probe and stable USB-net operation.
 
 ## P1 (network stack correctness/robustness: 1-2 weeks)
 
-4. **ARP request-on-miss + bounded neighbor pending queue**  
-   Status: ~~request-on-miss~~ ✅ done, pending-queue ⏳ pending.
+4. **ARP request-on-miss + bounded neighbor pending queue**
+   Status: ~~request-on-miss~~ ✅ done; remaining queue/state work is tracked as **N1/N2** with explicit acceptance criteria (§2.1).
 5. **e1000e MSI-X IVAR implementation and verification path**.
 6. **poll-budgeted RX service loop for e1000/e1000e + USB-net RX tasks**.
 
@@ -261,7 +290,7 @@ Below are the highest-value Linux patterns inspected and what they imply for Due
 
 ### 5.3 ARP-neighbor manager minimal state
 
-Status: **Partially implemented** (active request-on-miss is live; queue/state machine remains).
+Status: **Execution contract defined** (active request-on-miss is live; queue/state-machine landing criteria locked).
 
 - states: `INCOMPLETE`, `REACHABLE`, `STALE`, `FAILED`
 - per-entry:
@@ -317,15 +346,15 @@ Wireless is a separate subsystem from wired/USB Ethernet and needs an explicit a
 
 Given current DuetOS state (driver shells present, firmware backend scaffold-only), the key missing pieces for wireless connection are:
 
-1. **Firmware delivery and versioning path**  
+1. **Firmware delivery and versioning path**
    - Required for iwlwifi/rtw/bcm families before scan/auth works.
-2. **802.11 control-plane state machine**  
+2. **802.11 control-plane state machine**
    - Scan results, open/WPA2 association, roam/disconnect events.
-3. **EAPOL/4-way handshake integration point**  
+3. **EAPOL/4-way handshake integration point**
    - User-mode security agent equivalent to supplicant.
-4. **Regulatory/channel policy**  
+4. **Regulatory/channel policy**
    - Basic country/channel/power gate before active scan.
-5. **Netdev↔802.11 bridging contract**  
+5. **Netdev↔802.11 bridging contract**
    - Once associated, feed Ethernet-like payloads into existing IP stack.
 
 ### 6.3 Recommended wireless port plan (phased)
@@ -394,6 +423,7 @@ If one slice is picked now, do this first:
 4. Re-enable USB-net probe in controlled boot phase and run net smoke.
 
 This slice attacks the root blocking limitation and unlocks most other networking work.
+It is now also the hard gate for the ordered execution contract in §2.2.
 
 ## 10) References consulted
 

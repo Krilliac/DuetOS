@@ -177,13 +177,9 @@ u8 XhciFindDeviceByClass(u8 class_code, u8 subclass);
 /// level and XhciFindDeviceByClass misses).
 u32 XhciEnumerateDevices(u8* out, u32 max);
 
-/// Pause / resume the per-controller HID polling task's event-ring
-/// drain. Class drivers that issue control or bulk transfers from a
-/// non-xHCI thread must pause the drainer across the call — the
-/// v0 event-ring consumer pops events with no TRB-based dispatch,
-/// so an un-paused drain can steal the Transfer Event that the
-/// class driver is waiting on. Pass true before a transfer batch,
-/// false after. Nesting is NOT supported — one owner at a time.
+/// Compatibility shim for older class-driver call-sites. Runtime
+/// xHCI now uses router-driven event ownership, so this API is a
+/// no-op.
 void XhciPauseEventConsumer(bool pause);
 
 /// Control-IN transfer on EP0. bmRequestType MUST have bit 7 set

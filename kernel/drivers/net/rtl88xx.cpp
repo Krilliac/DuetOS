@@ -163,6 +163,7 @@ bool Rtl88xxBringUp(NicInfo& n)
     n.chip_id = cfg1;
     n.driver_online = true;
     n.link_up = false;
+    n.wireless_fw_state = NicInfo::WirelessFwState::Missing;
 
     // Probe firmware loader. rtl88xx vendor blob naming follows
     // `rtlwifi/rtl<chip>fw.bin`; pick by IC nibble.
@@ -195,10 +196,23 @@ bool Rtl88xxBringUp(NicInfo& n)
     {
         duetos::core::FwRelease(fw.value());
         n.firmware_pending = false;
+        n.wireless_fw_state = NicInfo::WirelessFwState::Ready;
     }
     else
     {
         n.firmware_pending = true;
+        switch (fw.error())
+        {
+        case duetos::core::ErrorCode::NotFound:
+            n.wireless_fw_state = NicInfo::WirelessFwState::Missing;
+            break;
+        case duetos::core::ErrorCode::Corrupt:
+            n.wireless_fw_state = NicInfo::WirelessFwState::Incompatible;
+            break;
+        default:
+            n.wireless_fw_state = NicInfo::WirelessFwState::LoadError;
+            break;
+        }
     }
 
     g_stats.sys_cfg1 = cfg1;

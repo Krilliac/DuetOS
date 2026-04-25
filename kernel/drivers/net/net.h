@@ -53,6 +53,15 @@ inline constexpr u64 kMaxNics = 4;
 
 struct NicInfo
 {
+    enum class WirelessFwState : u8
+    {
+        NotApplicable = 0, // wired NIC or non-wireless probe path
+        Ready,             // blob located and accepted by loader
+        Missing,           // lookup miss in /lib/firmware
+        Incompatible,      // blob found but rejected by size/format gates
+        LoadError,         // generic backend / argument / I/O failure
+    };
+
     u16 vendor_id;
     u16 device_id;
     u8 bus;
@@ -77,6 +86,7 @@ struct NicInfo
     // in v0, so every wireless NIC reports `firmware_pending=true`
     // until the loader lands. Wired NICs leave this false.
     bool firmware_pending;
+    WirelessFwState wireless_fw_state;
     // Vendor-readable chip identification dword. iwlwifi: CSR_HW_REV;
     // rtl88xx: SYS_CFG1 / chip-version register; bcm43xx: ChipCommon
     // ChipID dword. Zero if the bring-up didn't reach an MMIO read.
@@ -118,6 +128,10 @@ struct WirelessStatus
 {
     u32 adapters_detected;
     u32 drivers_online;
+    u32 firmware_ready;
+    u32 firmware_missing;
+    u32 firmware_incompatible;
+    u32 firmware_load_error;
 };
 WirelessStatus WirelessStatusRead();
 

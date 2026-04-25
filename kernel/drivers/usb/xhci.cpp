@@ -2,6 +2,7 @@
 
 #include "../../arch/x86_64/cpu.h"
 #include "../../arch/x86_64/serial.h"
+#include "../../core/cleanroom_trace.h"
 #include "../../core/klog.h"
 #include "../../core/result.h"
 #include "../../mm/frame_allocator.h"
@@ -1305,26 +1306,10 @@ struct PollTaskArg
 constinit PollTaskArg g_poll_args[kMaxControllers] = {};
 constinit Runtime g_poll_rt[kMaxControllers] = {};
 
-// Event-ring drain pause. Set to true by class drivers (CDC-ECM)
-// while they run control or bulk transfers synchronously — keeps
-// HidPollEntry from stealing the Transfer Events those transfers
-// are waiting on. Volatile because it's read across threads; single
-// writer at a time (documented contract).
-constinit volatile bool g_event_consumer_paused = false;
-
 // Side cache for Transfer Events that arrive on the ring but aren't
-// for the TRB the current waiter is polling for. Two-thread case:
-// rndis-rx submits a bulk-IN and polls for it; the smoke task
-// concurrently submits a bulk-OUT and polls for IT. Whichever
-// thread's WaitEvent runs first consumes BOTH events — the second
-// thread's TRB is "stolen". To fix, every WaitEvent that sees an
-// event for a different TRB stashes it here. Subsequent
-// XhciBulkPoll calls check the cache before polling the live ring.
-//
-// Single-slot cache works because only two concurrent waiters are
-// expected in v0 (one TX, one RX per USB-net device). Multi-device
-// USB-net coexistence will need a multi-slot version, which is a
-// trivial extension once the use case lands.
+// for HID endpoints. HidPollEntry is the designated runtime
+// event-ring owner; it routes non-HID transfer completions here so
+// bulk/control waiters can claim them by TRB pointer.
 struct TrbEventCacheEntry
 {
     volatile u64 trb_phys;
@@ -1333,45 +1318,7 @@ struct TrbEventCacheEntry
     volatile u32 trb_len;  // length we put in the original TRB
     volatile u8 valid;
 };
-constinit TrbEventCacheEntry g_trb_event_cache[4] = {};
-
-// Bulk-poll serialization. The event ring's consumer indices
-// (rt.evt_idx + rt.evt_cycle) are non-atomic; two threads in
-// WaitEvent simultaneously corrupt them. The simplest correct v0
-// fix is to serialize XhciBulkPoll calls so only one waiter
-// touches the ring at a time. Concurrency goes back to 1×, which
-// is plenty for DHCP-rate USB-net traffic; a future event-router
-// slice removes the need.
-constinit volatile u32 g_bulk_poll_lock = 0;
-
-void BulkPollLockAcquire()
-{
-    u32 spins = 0;
-    while (true)
-    {
-        u32 expected = 0;
-        if (__atomic_compare_exchange_n(&g_bulk_poll_lock, &expected, 1u, /*weak=*/false, __ATOMIC_ACQUIRE,
-                                        __ATOMIC_ACQUIRE))
-            return;
-        if (++spins >= 4096)
-        {
-            // Yield instead of pure spin — the lock holder might
-            // be waiting for an event that requires scheduler
-            // progress (timer tick, IRQ-driven wake).
-            duetos::sched::SchedSleepTicks(1);
-            spins = 0;
-        }
-        else
-        {
-            asm volatile("pause" : : : "memory");
-        }
-    }
-}
-
-void BulkPollLockRelease()
-{
-    __atomic_store_n(&g_bulk_poll_lock, 0u, __ATOMIC_RELEASE);
-}
+constinit TrbEventCacheEntry g_trb_event_cache[32] = {};
 
 // Cache an unrelated event for someone else's poll to claim.
 void TrbEventCacheStash(u64 trb_phys, u32 completion_code, u32 residual, u32 trb_len)
@@ -1494,14 +1441,6 @@ void HidPollEntry(void* raw)
     for (;;)
     {
         // Drain every event currently available, then sleep.
-        // Yield entirely while a class driver has the ring paused
-        // (CDC-ECM bring-up, future USB-net probes). Short window;
-        // the probe only takes ~10ms on QEMU.
-        if (g_event_consumer_paused)
-        {
-            duetos::sched::SchedSleepTicks(1);
-            continue;
-        }
         Trb e{};
         while (TryReadEvent(rt, &e))
         {
@@ -1509,7 +1448,10 @@ void HidPollEntry(void* raw)
             if (type != kTrbTypeTransferEvent)
                 continue;
             const u64 ptr = (u64(e.param_hi) << 32) | u64(e.param_lo);
+            const u32 completion_code = (e.status >> 24) & 0xFF;
+            const u32 residual = e.status & 0x00FFFFFF;
             // Find which HID device this TRB belongs to.
+            bool consumed_by_hid = false;
             for (u32 i = 0; i < kMaxDevicesTotal; ++i)
             {
                 DeviceState& dev = g_devices[i];
@@ -1517,6 +1459,7 @@ void HidPollEntry(void* raw)
                     continue;
                 if (dev.hid_outstanding_phys == 0 || dev.hid_outstanding_phys != ptr)
                     continue;
+                consumed_by_hid = true;
                 // Parse + inject. Mice skip the diff state — each
                 // report is a standalone delta + button snapshot,
                 // so we push the packet as-is.
@@ -1545,6 +1488,8 @@ void HidPollEntry(void* raw)
                     RingDoorbell(rt, dev.slot_id, dev.hid_ep_xhci_idx);
                 break;
             }
+            if (!consumed_by_hid)
+                TrbEventCacheStash(ptr, completion_code, residual, /*trb_len=*/0);
         }
         if (have_msix)
         {
@@ -2110,7 +2055,11 @@ u8 XhciFindDeviceByClass(u8 class_code, u8 subclass)
 
 void XhciPauseEventConsumer(bool pause)
 {
-    g_event_consumer_paused = pause;
+    // Router-backed runtime path: HidPollEntry is the event-ring
+    // owner and forwards non-HID completions into the side cache
+    // for bulk waiters. Keep this API as a compatibility no-op so
+    // existing class-driver call-sites stay source-compatible.
+    (void)pause;
 }
 
 u32 XhciEnumerateDevices(u8* out, u32 max)
@@ -2272,15 +2221,6 @@ bool XhciBulkPoll(u8 slot_id, u8 ep_addr, u64 trb_phys, u32* out_bytes, u64 time
     if (dev == nullptr || trb_phys == 0)
         return false;
 
-    // Serialize all bulk pollers — the event ring's consumer
-    // indices aren't safe under concurrent access in v0.
-    BulkPollLockAcquire();
-    struct Unlocker
-    {
-        ~Unlocker() { BulkPollLockRelease(); }
-    } unlocker;
-    (void)unlocker;
-
     // Helper to compute bytes-actually-transferred from the
     // residual byte count + the TRB length we enqueued.
     auto compute_bytes = [&](u32 residual) -> u32
@@ -2295,36 +2235,26 @@ bool XhciBulkPoll(u8 slot_id, u8 ep_addr, u64 trb_phys, u32* out_bytes, u64 time
         return trb_len > residual ? trb_len - residual : 0;
     };
 
-    // Bulk-poll lock is held; we own the event ring. Use the
-    // original WaitEvent with a coarse iter budget. The cache
-    // exists for events we drained but didn't match — a future
-    // caller acquiring the lock will check it.
-    Runtime& rt = g_poll_rt[dev->ctrlr_idx];
-    Trb e{};
-    // 4M iters ≈ ~4ms on TCG. Scale linearly to the timeout the
-    // caller asked for, but cap at a value that won't busy-spin
-    // for hundreds of ms (would starve other tasks). The lock
-    // holder doesn't yield during WaitEvent, so we keep the
-    // window small + come back through SchedSleepTicks at the
-    // outer level if the caller wants longer.
-    constexpr u64 kItersPerMs = 1000;
-    const u64 iters = timeout_us * kItersPerMs + 1;
-    if (WaitEvent(rt, trb_phys, kTrbTypeTransferEvent, &e, iters))
+    // Runtime event-ring ownership belongs to HidPollEntry; bulk
+    // waiters poll for their completion in the transfer-event cache.
+    const u64 timeout_ticks = (timeout_us + 9'999) / 10'000; // 100 Hz kernel tick
+    const u64 polls = timeout_ticks == 0 ? 1 : timeout_ticks;
+    for (u64 i = 0; i < polls; ++i)
     {
-        const u32 code = (e.status >> 24) & 0xFF;
-        if (out_bytes != nullptr)
-            *out_bytes = compute_bytes(e.status & 0x00FFFFFF);
-        return code == kCompletionCodeSuccess || code == 13 /* Short Packet */;
+        u32 code = 0;
+        u32 residual = 0;
+        u32 len_unused = 0;
+        if (TrbEventCacheTake(trb_phys, &code, &residual, &len_unused))
+        {
+            if (out_bytes != nullptr)
+                *out_bytes = compute_bytes(residual);
+            core::CleanroomTraceRecord("xhci", "bulk-cache-hit", trb_phys, code, residual);
+            return code == kCompletionCodeSuccess || code == 13 /* Short Packet */;
+        }
+        if (timeout_ticks != 0)
+            duetos::sched::SchedSleepTicks(1);
     }
-    // Even after timeout, the cache may hold our event (drained
-    // by a previous waiter). Claim it if so.
-    u32 code = 0, residual = 0, len_unused = 0;
-    if (TrbEventCacheTake(trb_phys, &code, &residual, &len_unused))
-    {
-        if (out_bytes != nullptr)
-            *out_bytes = compute_bytes(residual);
-        return code == kCompletionCodeSuccess || code == 13 /* Short Packet */;
-    }
+    core::CleanroomTraceRecord("xhci", "bulk-timeout", trb_phys, timeout_us, 0);
     return false;
 }
 
