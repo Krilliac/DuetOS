@@ -3248,8 +3248,21 @@ void CmdNetscan()
     ConsoleWriteln("WIRELESS NETWORKS:");
     if (any_wifi)
     {
-        ConsoleWriteln("  wireless adapter detected, but DuetOS has no wireless driver online");
-        ConsoleWriteln("  (iwlwifi / rtl88xx / bcm4 driver implementation pending)");
+        const auto wifi = duetos::drivers::net::WirelessStatusRead();
+        if (wifi.drivers_online > 0)
+        {
+            ConsoleWrite("  wireless driver shell online for ");
+            WriteU64Dec(wifi.drivers_online);
+            ConsoleWrite(" of ");
+            WriteU64Dec(wifi.adapters_detected);
+            ConsoleWriteln(" adapter(s)");
+            ConsoleWriteln("  (chip identified + MMIO live; firmware loader pending — cannot scan)");
+        }
+        else
+        {
+            ConsoleWriteln("  wireless adapter detected, but driver shell did not bind");
+            ConsoleWriteln("  (device ID outside iwlwifi / rtl88xx / bcm43xx match tables)");
+        }
     }
     else
     {

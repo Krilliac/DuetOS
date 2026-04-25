@@ -68,6 +68,19 @@ struct NicInfo
     bool mac_valid;
     bool link_up; // filled by the vendor probe; false on NICs
                   // whose status register we don't read yet
+    // True when a chip-specific driver shell has bound to this NIC
+    // (e1000 brings full I/O up; iwlwifi / rtl88xx / bcm43xx bring
+    // up to chip-identified + MMIO-live + awaiting firmware).
+    bool driver_online;
+    // Wireless-only: true iff the chip needs vendor firmware before
+    // it can associate. The kernel has no firmware-loader subsystem
+    // in v0, so every wireless NIC reports `firmware_pending=true`
+    // until the loader lands. Wired NICs leave this false.
+    bool firmware_pending;
+    // Vendor-readable chip identification dword. iwlwifi: CSR_HW_REV;
+    // rtl88xx: SYS_CFG1 / chip-version register; bcm43xx: ChipCommon
+    // ChipID dword. Zero if the bring-up didn't reach an MMIO read.
+    u32 chip_id;
 };
 
 /// Walk the PCI cache, register every network controller, run the

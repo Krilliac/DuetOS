@@ -10,6 +10,9 @@
 #include "../../net/stack.h"
 #include "../../sched/sched.h"
 #include "../pci/pci.h"
+#include "bcm43xx.h"
+#include "iwlwifi.h"
+#include "rtl88xx.h"
 
 namespace duetos::drivers::net
 {
@@ -534,6 +537,8 @@ bool E1000BringUp(NicInfo& n)
         return false;
 
     g_e1000.online = true;
+    n.driver_online = true;
+    n.firmware_pending = false;
 
     // MSI-X bring-up. Classic 82540EM (QEMU's `-device e1000`)
     // only exposes legacy MSI (cap 0x05), not MSI-X (0x11), so
@@ -646,6 +651,7 @@ void RunVendorProbe(NicInfo& n)
     }
     n.family = family;
     bool brought_up = false;
+    bool wireless_shell = false;
     if (n.vendor_id == kVendorIntel && IsE1000CompatFamily(family))
     {
         ProbeE1000State(n);
@@ -667,13 +673,35 @@ void RunVendorProbe(NicInfo& n)
             brought_up = E1000BringUp(n);
         }
     }
+    // Wireless dispatch — order matters only insofar as each `Matches`
+    // is keyed off vendor_id, so at most one will fire per NIC.
+    else if (IwlwifiMatches(n.vendor_id, n.device_id))
+    {
+        wireless_shell = IwlwifiBringUp(n);
+        brought_up = wireless_shell;
+    }
+    else if (Rtl88xxMatches(n.vendor_id, n.device_id))
+    {
+        wireless_shell = Rtl88xxBringUp(n);
+        brought_up = wireless_shell;
+    }
+    else if (Bcm43xxMatches(n.vendor_id, n.device_id))
+    {
+        wireless_shell = Bcm43xxBringUp(n);
+        brought_up = wireless_shell;
+    }
     arch::SerialWrite("[net-probe] vid=");
     arch::SerialWriteHex(n.vendor_id);
     arch::SerialWrite(" did=");
     arch::SerialWriteHex(n.device_id);
     arch::SerialWrite(" family=");
     arch::SerialWrite(family);
-    arch::SerialWrite(brought_up ? "  (driver online)\n" : "  (probe only — no packet I/O)\n");
+    if (wireless_shell)
+        arch::SerialWrite("  (driver shell online — firmware pending)\n");
+    else if (brought_up)
+        arch::SerialWrite("  (driver online)\n");
+    else
+        arch::SerialWrite("  (probe only — no packet I/O)\n");
     if (n.mac_valid)
     {
         arch::SerialWrite("[net-probe]   mac=");
@@ -842,11 +870,12 @@ WirelessStatus WirelessStatusRead()
     WirelessStatus s = {};
     for (u64 i = 0; i < g_nic_count; ++i)
     {
-        if (NicIsWireless(i))
-            ++s.adapters_detected;
+        if (!NicIsWireless(i))
+            continue;
+        ++s.adapters_detected;
+        if (g_nics[i].driver_online)
+            ++s.drivers_online;
     }
-    // s.drivers_online stays 0 — no wireless driver in v0. When an
-    // iwlwifi / rtl88xx slice lands, count the bring-up'd ones here.
     return s;
 }
 
@@ -874,9 +903,43 @@ const char* IntelNicTag(u16 device_id)
     // i40e (X710/XL710) — 40 Gbps.
     if (device_id >= 0x1572 && device_id <= 0x158B)
         return "i40e-x710";
-    // Wi-Fi: iwlwifi 7xxx/8xxx/9xxx/AX2xx ranges.
-    if (device_id >= 0x24F3 && device_id <= 0x7AF0)
-        return "iwlwifi";
+    // Wi-Fi: iwlwifi covers 1000/4965/5000/6000/7000/8000/9000/AX/Be.
+    // The PCI IDs are scattered — match the Linux iwlwifi pci_table
+    // family-by-family rather than as one coarse range.
+    //
+    //   1000/100        : 0x0083, 0x0084, 0x0085, 0x0087, 0x0089, 0x008A, 0x008B
+    //   6000            : 0x0082..0x0091, 0x008D..0x008E
+    //   4965            : 0x4229, 0x4230
+    //   5000/5150       : 0x4232..0x423D
+    //   7260/3160       : 0x08B1..0x08B4
+    //   7265/3165/3168  : 0x095A, 0x095B
+    //   8260/3168       : 0x24F3, 0x24F4, 0x24F5, 0x24FD
+    //   9000/AX         : 0x2526, 0x271B, 0x271C, 0x30DC, 0x31DC, 0x9DF0, 0xA370
+    //   AX200/AX201/AX210: 0x2723, 0x2725, 0x7AF0, 0x7E40, 0xA0F0, 0x43F0
+    //   Be200/Be201     : 0x272B, 0x51F0, 0x51F1, 0xD2F0, 0xE2F0
+    if (device_id == 0x4229 || device_id == 0x4230)
+        return "iwlwifi-4965";
+    if (device_id >= 0x4232 && device_id <= 0x423D)
+        return "iwlwifi-5000";
+    if ((device_id >= 0x0082 && device_id <= 0x0091) || device_id == 0x008D || device_id == 0x008E)
+        return "iwlwifi-6000";
+    if (device_id == 0x0083 || device_id == 0x0084 || device_id == 0x0085 || device_id == 0x0087 ||
+        device_id == 0x0089 || device_id == 0x008A || device_id == 0x008B)
+        return "iwlwifi-1000";
+    if (device_id >= 0x08B1 && device_id <= 0x08B4)
+        return "iwlwifi-7260";
+    if (device_id == 0x095A || device_id == 0x095B)
+        return "iwlwifi-7265";
+    if (device_id == 0x24F3 || device_id == 0x24F4 || device_id == 0x24F5 || device_id == 0x24FD)
+        return "iwlwifi-8260";
+    if (device_id == 0x2526 || device_id == 0x271B || device_id == 0x271C || device_id == 0x30DC ||
+        device_id == 0x31DC || device_id == 0x9DF0 || device_id == 0xA370)
+        return "iwlwifi-9000";
+    if (device_id == 0x2723 || device_id == 0x2725 || device_id == 0x7AF0 || device_id == 0x7E40 ||
+        device_id == 0xA0F0 || device_id == 0x43F0)
+        return "iwlwifi-AX2xx";
+    if (device_id == 0x272B || device_id == 0x51F0 || device_id == 0x51F1 || device_id == 0xD2F0 || device_id == 0xE2F0)
+        return "iwlwifi-Be2xx";
     return "intel-nic-unknown";
 }
 
@@ -884,6 +947,7 @@ const char* RealtekNicTag(u16 device_id)
 {
     switch (device_id)
     {
+    // Wired
     case 0x8139:
         return "rtl8139";
     case 0x8168:
@@ -893,9 +957,31 @@ const char* RealtekNicTag(u16 device_id)
         return "rtl8101e";
     case 0x8125:
         return "rtl8125-2.5g";
+    // Wireless: rtl88xx family — covers Wi-Fi 4/5/6 PCIe parts. The
+    // family tag drives the bring-up dispatch in RunVendorProbe.
+    case 0x8723:
+    case 0xB723:
+        return "rtl8723be-wifi";
+    case 0x8812:
+    case 0xB812:
+        return "rtl8812ae-wifi";
+    case 0x8813:
+    case 0xB813:
+        return "rtl8813ae-wifi";
+    case 0x8814:
+    case 0xB814:
+        return "rtl8814ae-wifi";
+    case 0x8821:
     case 0xC821:
     case 0xC822:
+    case 0xC820:
         return "rtl8821ae-wifi";
+    case 0x8822:
+    case 0xB822:
+        return "rtl8822be-wifi";
+    case 0x8852:
+    case 0xB852:
+        return "rtl8852ae-wifi";
     default:
         return "realtek-unknown";
     }
@@ -903,11 +989,23 @@ const char* RealtekNicTag(u16 device_id)
 
 const char* BroadcomNicTag(u16 device_id)
 {
-    // bcm57xx family range (rough).
+    // bcm57xx wired (tg3 family — gigabit ethernet).
     if (device_id >= 0x1600 && device_id <= 0x16FF)
         return "bcm57xx-tg3";
-    if (device_id >= 0x43A0 && device_id <= 0x43FF)
+    // bcm43xx wireless: Linux maps the entire 0x4300..0x43FF range
+    // to b43/brcmsmac/brcmfmac silicon. Subdivide so the bring-up
+    // logging tags the rough generation.
+    if (device_id >= 0x4300 && device_id <= 0x4329)
+        return "bcm4318-wifi";
+    if (device_id == 0x4331 || device_id == 0x4350 || device_id == 0x4351 || device_id == 0x4357 ||
+        device_id == 0x4358 || device_id == 0x4359)
         return "bcm4331-wifi";
+    if (device_id >= 0x4350 && device_id <= 0x4360)
+        return "bcm43602-wifi";
+    if (device_id >= 0x43A0 && device_id <= 0x43FF)
+        return "bcm43xx-wifi";
+    if (device_id == 0x4727)
+        return "bcm4313-wifi";
     return "broadcom-unknown";
 }
 

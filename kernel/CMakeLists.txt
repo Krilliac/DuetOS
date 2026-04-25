@@ -104,7 +104,10 @@ set(DUETOS_KERNEL_SHARED_SOURCES
     drivers/gpu/bochs_vbe.cpp
     drivers/gpu/gpu.cpp
     drivers/gpu/virtio_gpu.cpp
+    drivers/net/bcm43xx.cpp
+    drivers/net/iwlwifi.cpp
     drivers/net/net.cpp
+    drivers/net/rtl88xx.cpp
     drivers/pci/pci.cpp
     drivers/power/power.cpp
     drivers/storage/ahci.cpp
