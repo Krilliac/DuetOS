@@ -69,6 +69,7 @@ set(DUETOS_KERNEL_SHARED_SOURCES
     core/symbols.cpp
     core/fault_domain.cpp
     core/syscall.cpp
+    core/syscall_names.cpp
     core/time_syscall.cpp
     debug/bp_syscall.cpp
     debug/extable.cpp
