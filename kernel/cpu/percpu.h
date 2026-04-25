@@ -31,6 +31,14 @@ struct AddressSpace; // forward decl; defined in kernel/mm/address_space.h
 namespace duetos::cpu
 {
 
+// Maximum spinlocks we track per CPU at once. Real kernel paths
+// rarely nest more than ~3 (heap → freelist → page-table); 8 gives
+// generous headroom. Exceeding the cap drops tracking for the
+// excess locks (logged once) rather than panicking — a deep nest
+// is itself a signal worth surfacing, but not at the cost of
+// taking the box down on lock-debug overflow.
+inline constexpr u32 kPerCpuMaxHeldLocks = 8;
+
 struct PerCpu
 {
     u32 cpu_id;                   // 0 = BSP; APs number 1..N in bring-up order
@@ -51,6 +59,33 @@ struct PerCpu
     // kernel/subsystems/linux/syscall_entry.S.
     u64 kernel_rsp;
     u64 user_rsp_scratch;
+
+    // Cross-CPU panic snapshot. The panicking CPU broadcasts an NMI
+    // (`arch::PanicBroadcastNmi`); each peer's vector-2 handler
+    // captures its own state into these fields BEFORE halting, so
+    // the panicking CPU can include peer RIP/RSP/task in the dump.
+    // `panic_snapshot_valid` flips from 0 → 1 once captured, so the
+    // dumper can distinguish "peer hung before NMI hit" (valid=0)
+    // from a clean snapshot. Layout intentionally placed AFTER the
+    // syscall-entry fields so kPerCpuKernelRsp / kPerCpuUserRspScratch
+    // stay at +32 / +40 — adding fields here doesn't disturb the
+    // hand-written assembly stub.
+    u8 panic_snapshot_valid;
+    u8 _pad2[7];
+    u64 panic_snapshot_rip;
+    u64 panic_snapshot_rsp;
+    sched::Task* panic_snapshot_task;
+
+    // Spinlock holder tracking for the panic dump's `held locks`
+    // section. Push on SpinLockAcquire (with the acquirer's RIP),
+    // pop on SpinLockRelease. Same scoping rule as the snapshot
+    // fields: lives behind PerCpuInit, so SpinLock acquires before
+    // BSP install simply skip the bookkeeping. `void*` for the lock
+    // pointer keeps cpu/percpu.h free of a sync/spinlock.h include.
+    u32 held_locks_count;
+    u32 _pad3;
+    void* held_locks[kPerCpuMaxHeldLocks];
+    u64 held_lock_rips[kPerCpuMaxHeldLocks];
 
     // Everything below this line will grow as SMP matures:
     //   - per-CPU runqueue head/tail + spinlock
@@ -84,5 +119,20 @@ PerCpu* CurrentCpu();
 /// spinlock primitive during BSP bring-up, before PerCpuInitBsp has
 /// run) so that lock-owner tracking still produces a meaningful value.
 u32 CurrentCpuIdOrBsp();
+
+/// True iff `PerCpuInitBsp` has run. Subsystems that touch per-CPU
+/// state from a path that may run before BSP install (early spinlock
+/// acquires from frame-allocator init, NMI from the watchdog
+/// pre-percpu) gate on this.
+bool BspInstalled();
+
+/// Pointer to the BSP's static PerCpu. Always non-null. Used by
+/// the SMP enumerator so the panic dump path can iterate every
+/// CPU's snapshot buffer (BSP at index 0, APs from arch/smp.cpp's
+/// table). Reading PerCpu fields off this pointer from a CPU OTHER
+/// than the BSP is fine — they're plain memory; the only caller
+/// today (panic dump) is the panicking CPU and it accesses its own
+/// fields via CurrentCpu(), peer fields via this enumerator.
+PerCpu* BspPercpu();
 
 } // namespace duetos::cpu

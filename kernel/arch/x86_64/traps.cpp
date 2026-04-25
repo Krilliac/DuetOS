@@ -42,11 +42,13 @@
 #include "../../core/panic.h"
 #include "../../core/symbols.h"
 #include "../../core/syscall.h"
+#include "../../cpu/percpu.h"
 #include "../../debug/breakpoints.h"
 #include "../../debug/extable.h"
 #include "../../debug/probes.h"
 #include "../../mm/kstack.h"
 #include "../../sched/sched.h"
+#include "smp.h"
 
 // user_copy.S labels, exposed to the trap dispatcher for the
 // kernel-#PF fault-fixup path. Defined as non-const u8 arrays so
@@ -477,6 +479,29 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     {
         if (NmiWatchdogHandleNmi())
             return;
+
+        // Cross-CPU panic broadcast (or any unclaimed NMI). Capture
+        // our state into the per-CPU snapshot buffer BEFORE halting
+        // so the panicking CPU can include peer context in its dump.
+        // The store-to-flag is last so a partial capture (e.g. NMI
+        // on top of NMI-during-store) still leaves valid=0 and the
+        // dumper prints the right "<no snapshot>" branch.
+        //
+        // Gated on BspInstalled — an NMI before PerCpu install
+        // (very early boot) has no per-CPU buffer to write into,
+        // and CurrentCpu()'s GSBASE read would return 0.
+        if (cpu::BspInstalled())
+        {
+            cpu::PerCpu* p = cpu::CurrentCpu();
+            if (p != nullptr)
+            {
+                p->panic_snapshot_rip = frame->rip;
+                p->panic_snapshot_rsp = frame->rsp;
+                p->panic_snapshot_task = p->current_task;
+                asm volatile("" ::: "memory");
+                p->panic_snapshot_valid = 1;
+            }
+        }
         for (;;)
         {
             asm volatile("cli; hlt");
@@ -694,6 +719,11 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     // watchdog interval; a PMI overflow during the dump would
     // re-enter the trap dispatcher and scramble the output.
     NmiWatchdogDisable();
+    // Halt peer CPUs the same way `core::Panic` does — they're
+    // running against potentially-corrupt shared state once we've
+    // taken a fault in kernel mode, and their NMI handlers commit
+    // a snapshot we can dump after our own diagnostics.
+    PanicBroadcastNmi();
     SerialWrite("\n** CPU EXCEPTION **\n");
 
     // Bracket the record so host-side tooling can extract a .dump file
@@ -804,6 +834,7 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     // dispatcher's own frame), so the returned frame chain shows
     // the actual call path that led to the exception.
     core::DumpDiagnostics(frame->rip, frame->rsp, frame->rbp);
+    core::DumpPeerCpuSnapshots();
 
     core::EndCrashDump();
     SerialWrite("[panic] Halting CPU.\n");

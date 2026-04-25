@@ -43,7 +43,8 @@ constexpr u32 kMaxAps = acpi::kMaxCpus - 1;
 // heap-allocated PerCpu whose pointer is cached here so the AP's C++
 // entry can find its own struct by cpu_id.
 constinit cpu::PerCpu* g_ap_percpus[acpi::kMaxCpus] = {};
-constinit u64 g_cpus_online = 1; // BSP always counted
+constinit u64 g_cpus_online = 1;  // BSP always counted
+constinit u32 g_cpu_id_limit = 1; // 1 + max cpu_id ever bound (so iteration covers BSP + every AP slot used)
 
 // LAPIC ICR low-half fields.
 constexpr u64 kLapicRegIcrLow = 0x300;
@@ -165,6 +166,24 @@ u64 SmpCpusOnline()
     return g_cpus_online;
 }
 
+cpu::PerCpu* SmpGetPercpu(u32 cpu_id)
+{
+    if (cpu_id == 0)
+    {
+        return cpu::BspPercpu();
+    }
+    if (cpu_id >= acpi::kMaxCpus)
+    {
+        return nullptr;
+    }
+    return g_ap_percpus[cpu_id];
+}
+
+u32 SmpCpuIdLimit()
+{
+    return g_cpu_id_limit;
+}
+
 // ---------------------------------------------------------------------------
 // AP kernel entry — called from ap_trampoline.S once long mode is live.
 // Signature: void ApEntryFromTrampoline(u32 cpu_id)
@@ -278,7 +297,26 @@ u64 SmpStartAps()
         ap_pcpu->current_task = nullptr;
         ap_pcpu->current_as = nullptr; // boot PML4 — APs come up on the kernel AS
         ap_pcpu->need_resched = false;
+        ap_pcpu->kernel_rsp = 0;
+        ap_pcpu->user_rsp_scratch = 0;
+        // Zero the snapshot + held-lock bookkeeping. KMalloc doesn't
+        // zero, and a stale `panic_snapshot_valid` would make a peer
+        // CPU look snapshotted when it actually hasn't been NMI'd.
+        ap_pcpu->panic_snapshot_valid = 0;
+        ap_pcpu->panic_snapshot_rip = 0;
+        ap_pcpu->panic_snapshot_rsp = 0;
+        ap_pcpu->panic_snapshot_task = nullptr;
+        ap_pcpu->held_locks_count = 0;
+        for (u32 hl = 0; hl < cpu::kPerCpuMaxHeldLocks; ++hl)
+        {
+            ap_pcpu->held_locks[hl] = nullptr;
+            ap_pcpu->held_lock_rips[hl] = 0;
+        }
         g_ap_percpus[cpu_id] = ap_pcpu;
+        if (cpu_id + 1 > g_cpu_id_limit)
+        {
+            g_cpu_id_limit = cpu_id + 1;
+        }
 
         // Per-AP 16 KiB stack. The trampoline loads RSP with stack_top
         // (= stack_base + size) so we pass that.

@@ -220,6 +220,123 @@ void DumpTask()
 
 } // namespace
 
+void DumpPeerCpuSnapshots()
+{
+    const u32 self = cpu::BspInstalled() ? cpu::CurrentCpuIdOrBsp() : 0;
+    const u32 limit = arch::SmpCpuIdLimit();
+    if (limit <= 1)
+    {
+        // BSP-only configuration — nothing to dump. Emit a marker
+        // anyway so the absence is explicit, not "did the dumper
+        // even run?".
+        arch::SerialWrite("[panic] --- peer CPU snapshots: (none — single CPU online) ---\n");
+        return;
+    }
+
+    arch::SerialWrite("[panic] --- peer CPU snapshots ---\n");
+    for (u32 id = 0; id < limit; ++id)
+    {
+        if (id == self)
+        {
+            continue;
+        }
+        cpu::PerCpu* peer = arch::SmpGetPercpu(id);
+        if (peer == nullptr)
+        {
+            continue;
+        }
+        arch::SerialWrite("  cpu#");
+        arch::SerialWriteHex(static_cast<u64>(id));
+        arch::SerialWrite(" lapic=");
+        arch::SerialWriteHex(static_cast<u64>(peer->lapic_id));
+        if (peer->panic_snapshot_valid == 0)
+        {
+            arch::SerialWrite("  <no NMI snapshot — peer may be hung pre-NMI>\n");
+            continue;
+        }
+        arch::SerialWrite("\n    rip=");
+        WriteAddressWithSymbol(peer->panic_snapshot_rip);
+        WriteVaRegion(peer->panic_snapshot_rip);
+        arch::SerialWrite("\n    rsp=");
+        arch::SerialWriteHex(peer->panic_snapshot_rsp);
+        WriteVaRegion(peer->panic_snapshot_rsp);
+        arch::SerialWrite("\n    task=");
+        if (peer->panic_snapshot_task == nullptr)
+        {
+            arch::SerialWrite("<none>");
+        }
+        else
+        {
+            arch::SerialWriteHex(reinterpret_cast<u64>(peer->panic_snapshot_task));
+        }
+        arch::SerialWrite("\n");
+        // Held locks captured at NMI time — if the peer was holding
+        // anything when the panicking CPU broadcast NMI, that's the
+        // first thing to look at for a deadlock-shaped panic.
+        const u32 hl = peer->held_locks_count;
+        if (hl != 0)
+        {
+            arch::SerialWrite("    held locks (");
+            arch::SerialWriteHex(static_cast<u64>(hl));
+            arch::SerialWrite("):\n");
+            const u32 cap = (hl < cpu::kPerCpuMaxHeldLocks) ? hl : cpu::kPerCpuMaxHeldLocks;
+            for (u32 i = 0; i < cap; ++i)
+            {
+                arch::SerialWrite("      [");
+                arch::SerialWriteHex(static_cast<u64>(i));
+                arch::SerialWrite("] lock=");
+                arch::SerialWriteHex(reinterpret_cast<u64>(peer->held_locks[i]));
+                arch::SerialWrite("  acquired-rip=");
+                WriteAddressWithSymbol(peer->held_lock_rips[i]);
+                arch::SerialWrite("\n");
+            }
+        }
+    }
+}
+
+namespace
+{
+
+// Same as DumpPeerCpuSnapshots but for the panicking CPU's OWN held
+// locks. Emitted from DumpDiagnostics so the local view comes out
+// next to the rest of the panicker's state, not after the peer
+// section. If we panicked while holding any lock, the entries here
+// usually point straight at the bug.
+void DumpHeldLocksLocal()
+{
+    if (!cpu::BspInstalled())
+    {
+        return;
+    }
+    cpu::PerCpu* p = cpu::CurrentCpu();
+    if (p == nullptr || p->held_locks_count == 0)
+    {
+        return;
+    }
+    const u32 hl = p->held_locks_count;
+    arch::SerialWrite("  held locks (");
+    arch::SerialWriteHex(static_cast<u64>(hl));
+    arch::SerialWrite(", innermost first):\n");
+    const u32 cap = (hl < cpu::kPerCpuMaxHeldLocks) ? hl : cpu::kPerCpuMaxHeldLocks;
+    // Stack discipline: index 0 is the bottom (acquired first).
+    // Print top-down so the most recently acquired lock — usually
+    // the one whose critical section we panicked inside — is the
+    // first line a reader sees.
+    for (u32 i = 0; i < cap; ++i)
+    {
+        const u32 idx = cap - 1 - i;
+        arch::SerialWrite("    [");
+        arch::SerialWriteHex(static_cast<u64>(idx));
+        arch::SerialWrite("] lock=");
+        arch::SerialWriteHex(reinterpret_cast<u64>(p->held_locks[idx]));
+        arch::SerialWrite("  acquired-rip=");
+        WriteAddressWithSymbol(p->held_lock_rips[idx]);
+        arch::SerialWrite("\n");
+    }
+}
+
+} // namespace
+
 void BeginCrashDump(const char* subsystem, const char* message, const u64* optional_value)
 {
     arch::SerialWrite("\n");
@@ -306,6 +423,7 @@ void DumpDiagnostics(u64 rip, u64 rsp, u64 rbp)
     DumpInstructionBytes("panic-rip", rip, 16);
     DumpBacktrace(rbp);
     DumpStack(rsp, 16);
+    DumpHeldLocksLocal();
     DumpLogRing();
     DumpInflightScopes();
 }
@@ -332,7 +450,9 @@ void Panic(const char* subsystem, const char* message)
     // Broadcast NMI to peer CPUs so they stop fighting for the
     // serial line / executing against potentially-corrupt shared
     // state. Peers halt quietly in the trap dispatcher's NMI
-    // short-circuit. No-op pre-LapicInit.
+    // short-circuit AFTER capturing their own snapshot into
+    // `panic_snapshot_*` — see DumpPeerCpuSnapshots later in this
+    // routine. No-op pre-LapicInit.
     arch::PanicBroadcastNmi();
 
     arch::SerialWrite("\n[panic] ");
@@ -347,6 +467,7 @@ void Panic(const char* subsystem, const char* message)
     // RBP/RSP here captures the state of Panic() itself; the backtrace
     // walker then climbs up through the caller.
     DumpDiagnostics(reinterpret_cast<u64>(__builtin_return_address(0)), arch::ReadRsp(), arch::ReadRbp());
+    DumpPeerCpuSnapshots();
 
     EndCrashDump();
     arch::SerialWrite("[panic] CPU halted — no recovery.\n");
@@ -370,6 +491,7 @@ void PanicWithValue(const char* subsystem, const char* message, u64 value)
     BeginCrashDump(subsystem, message, &value);
 
     DumpDiagnostics(reinterpret_cast<u64>(__builtin_return_address(0)), arch::ReadRsp(), arch::ReadRbp());
+    DumpPeerCpuSnapshots();
 
     EndCrashDump();
     arch::SerialWrite("[panic] CPU halted — no recovery.\n");

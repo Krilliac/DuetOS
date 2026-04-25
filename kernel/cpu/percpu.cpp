@@ -20,8 +20,17 @@ constinit PerCpu g_bsp_percpu = {
     .current_as = nullptr, // kernel AS = boot PML4, until a process is activated
     .need_resched = false,
     ._pad = {},
-    .kernel_rsp = 0,       // filled on first ring3 task switch-in (sched + ring3 smoke)
-    .user_rsp_scratch = 0, // touched only by the syscall entry stub
+    .kernel_rsp = 0,           // filled on first ring3 task switch-in (sched + ring3 smoke)
+    .user_rsp_scratch = 0,     // touched only by the syscall entry stub
+    .panic_snapshot_valid = 0, // capture is filled lazily by the NMI peer-snapshot path
+    ._pad2 = {},
+    .panic_snapshot_rip = 0,
+    .panic_snapshot_rsp = 0,
+    .panic_snapshot_task = nullptr,
+    .held_locks_count = 0,
+    ._pad3 = 0,
+    .held_locks = {},
+    .held_lock_rips = {},
 };
 
 // One-shot flag so CurrentCpuIdOrBsp can return a sane value before
@@ -76,6 +85,16 @@ u32 CurrentCpuIdOrBsp()
         return 0;
     }
     return CurrentCpu()->cpu_id;
+}
+
+bool BspInstalled()
+{
+    return g_bsp_installed;
+}
+
+PerCpu* BspPercpu()
+{
+    return &g_bsp_percpu;
 }
 
 } // namespace duetos::cpu

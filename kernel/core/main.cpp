@@ -316,6 +316,12 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     SerialWrite("[boot] Exercising VA-region classifier (panic / trap dump annotation).\n");
     duetos::core::VaRegionSelfTest();
 
+    // One-shot mm-map anchor for every later panic dump. The region
+    // tags on cr2/rsp/rbp/rip in a crash record map back to the
+    // ranges printed here without forcing the operator to consult
+    // paging.h / kstack.h / linker.ld separately.
+    duetos::core::WriteMmMapSummary();
+
     SerialWrite("[boot] Exercising process / capability helpers.\n");
     duetos::core::ProcessSelfTest();
 

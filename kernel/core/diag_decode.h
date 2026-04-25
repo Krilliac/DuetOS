@@ -126,4 +126,16 @@ void WriteVaRegion(u64 va);
 /// diag self-tests.
 void VaRegionSelfTest();
 
+/// Emit a one-shot bracketed mm-map summary to serial:
+///   === DUETOS KERNEL MM MAP ===
+///     k.text        : 0x... .. 0x...   (N KiB)
+///     ...
+///   === END KERNEL MM MAP ===
+/// Sourced directly from the linker section symbols + `mm/paging.h`
+/// + `mm/kstack.h` constants the VA classifier already reads, so a
+/// future layout change updates both at once. Intended to run once
+/// at boot — every later panic dump's `[region=...]` tags are then
+/// trivially decodable against this single anchor.
+void WriteMmMapSummary();
+
 } // namespace duetos::core

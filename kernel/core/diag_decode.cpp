@@ -618,4 +618,73 @@ void VaRegionSelfTest()
     arch::SerialWrite(")\n");
 }
 
+namespace
+{
+
+// Emit a size in the largest power-of-1024 unit that keeps the
+// integer >= 1. Used by WriteMmMapSummary so the summary line for
+// each region carries human units instead of forcing the reader to
+// shift bytes mentally. KiB / MiB / GiB only — bigger than that and
+// we've outgrown the kernel-half layout the table is documenting.
+void WriteHumanSize(u64 bytes)
+{
+    constexpr u64 kKi = 1024ULL;
+    constexpr u64 kMi = 1024ULL * 1024ULL;
+    constexpr u64 kGi = 1024ULL * 1024ULL * 1024ULL;
+    if (bytes >= kGi && (bytes % kGi) == 0)
+    {
+        WriteDecimal(bytes / kGi);
+        arch::SerialWrite(" GiB");
+        return;
+    }
+    if (bytes >= kMi)
+    {
+        WriteDecimal(bytes / kMi);
+        arch::SerialWrite(" MiB");
+        return;
+    }
+    if (bytes >= kKi)
+    {
+        WriteDecimal(bytes / kKi);
+        arch::SerialWrite(" KiB");
+        return;
+    }
+    WriteDecimal(bytes);
+    arch::SerialWrite(" B");
+}
+
+void WriteMmMapRow(const char* label, u64 lo, u64 hi)
+{
+    arch::SerialWrite("  ");
+    arch::SerialWrite(label);
+    arch::SerialWrite(" : ");
+    arch::SerialWriteHex(lo);
+    arch::SerialWrite(" .. ");
+    arch::SerialWriteHex(hi);
+    arch::SerialWrite("   (");
+    WriteHumanSize(hi - lo);
+    arch::SerialWrite(")\n");
+}
+
+} // namespace
+
+void WriteMmMapSummary()
+{
+    arch::SerialWrite("\n=== DUETOS KERNEL MM MAP ===\n");
+    WriteMmMapRow("k.text       ", reinterpret_cast<u64>(_text_start), reinterpret_cast<u64>(_text_end));
+    WriteMmMapRow("k.rodata     ", reinterpret_cast<u64>(_rodata_start), reinterpret_cast<u64>(_rodata_end));
+    WriteMmMapRow("k.data       ", reinterpret_cast<u64>(_data_start), reinterpret_cast<u64>(_data_end));
+    WriteMmMapRow("k.bss        ", reinterpret_cast<u64>(_bss_start), reinterpret_cast<u64>(_bss_end));
+    // Direct-map and MMIO arenas are fixed by paging.h. The reported
+    // direct-map starts at kKernelVirtualBase (covers the kernel
+    // image too — text/rodata/data/bss are subsets), so a value tagged
+    // `k.directmap` in a panic is something OUTSIDE the image but
+    // still inside the boot 1 GiB window.
+    WriteMmMapRow("k.directmap  ", duetos::mm::kKernelVirtualBase, duetos::mm::kMmioArenaBase);
+    WriteMmMapRow("k.mmio       ", duetos::mm::kMmioArenaBase, duetos::mm::kKernelStackArenaBase);
+    WriteMmMapRow("k.stack-arena", duetos::mm::kKernelStackArenaBase,
+                  duetos::mm::kKernelStackArenaBase + duetos::mm::kKernelStackArenaBytes);
+    arch::SerialWrite("=== END KERNEL MM MAP ===\n\n");
+}
+
 } // namespace duetos::core

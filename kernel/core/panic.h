@@ -68,6 +68,16 @@ void BeginCrashDump(const char* subsystem, const char* message, const u64* optio
 /// `=== DUETOS CRASH DUMP END ===` marker.
 void EndCrashDump();
 
+/// Walk every peer CPU's per-CPU snapshot buffer and emit it.
+/// Snapshots are populated by the NMI handler in
+/// `arch/x86_64/traps.cpp` after a `PanicBroadcastNmi`. Caller is
+/// the panicking CPU; it skips its own slot. Safe to call even when
+/// only the BSP is online (emits a "(none — single CPU online)"
+/// marker so the absence is explicit). Used by `core::Panic` /
+/// `core::PanicWithValue` AND by the trap dispatcher's panic path
+/// so every halt point produces the same peer-CPU section.
+void DumpPeerCpuSnapshots();
+
 } // namespace duetos::core
 
 // ---------------------------------------------------------------------------
