@@ -164,3 +164,25 @@ unconditionally) so it is unchanged.
   `GdiSetTextColor`
 - `kernel/subsystems/win32/window_syscall.cpp` — three `text_color != 0` →
   `text_color_set` updates
+
+## Batch 5 — same session
+
+### 11. gdi32!DrawTextW wired to SYS_GDI_DRAW_TEXT_W
+
+`userland/libs/gdi32/gdi32.c::DrawTextW` was a return-zero stub. Real
+PEs compiled with `UNICODE` import the W variant and saw nothing. The
+kernel side has had `SYS_GDI_DRAW_TEXT_W` (126) since the v6 render
+slice — copies in the user wchar_t buffer, downcodes non-ASCII to
+`?`, and applies the full DT_CENTER / DT_VCENTER / DT_RIGHT / DT_LEFT
+/ DT_TOP / DT_SINGLELINE alignment. The fix is just the user-side
+trampoline: pack rdi / rsi / rdx / r10 / r8 with the Win32 args,
+issue `int 0x80` with `eax = 126`, return the rax pixel height.
+
+DrawTextA stays as the simpler "rect's top-left as anchor" wrapper —
+it routes through `gdi32_text_core` → SYS_GDI_TEXT_OUT and matches
+the existing observed behavior.
+
+## Files touched (batch 5)
+
+- `userland/libs/gdi32/gdi32.c` — added `SYS_GDI_DRAW_TEXT_W` define,
+  reimplemented `DrawTextW` as a real syscall trampoline.
