@@ -158,7 +158,7 @@ struct PeHeaders
 // the serial log forever.
 const char* BoundedCString(const u8* file, u64 file_len, u64 off)
 {
-    if (off >= file_len)
+    if (file == nullptr || off >= file_len)
         return nullptr;
     constexpr u64 kMaxLen = 256;
     const u64 cap = (file_len - off) < kMaxLen ? (file_len - off) : kMaxLen;
@@ -1223,7 +1223,12 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
             preloaded_dll_count);
     PeLoadResult r{};
     r.ok = false;
-    if (as == nullptr)
+    if (as == nullptr || file == nullptr || file_len == 0)
+        return r;
+    // Reject preloaded_dlls inconsistencies: a non-zero count with a
+    // null table would deref garbage when the import resolver
+    // chases forwarders. Either both populated or both empty.
+    if (preloaded_dll_count != 0 && preloaded_dlls == nullptr)
         return r;
 
     // Security guard. Catches the classic process-injection combo

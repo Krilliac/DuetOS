@@ -158,11 +158,17 @@ ElfStatus ElfValidate(const u8* file, u64 file_len)
 
 u64 ElfEntry(const u8* file)
 {
+    // ElfValidate guarantees a 64-byte ehdr exists; defensively
+    // refuse a null caller rather than dereferencing into low memory.
+    if (file == nullptr)
+        return 0;
     return LeU64(file + 24);
 }
 
 void ElfProgramHeaderInfo(const u8* file, u64* phoff_out, u16* phnum_out, u16* phentsize_out)
 {
+    if (file == nullptr)
+        return;
     if (phoff_out != nullptr)
         *phoff_out = LeU64(file + 32);
     if (phentsize_out != nullptr)
@@ -173,7 +179,7 @@ void ElfProgramHeaderInfo(const u8* file, u64* phoff_out, u16* phnum_out, u16* p
 
 u32 ElfForEachPtLoad(const u8* file, u64 /*file_len*/, ElfSegmentCb cb, void* cookie)
 {
-    if (cb == nullptr)
+    if (file == nullptr || cb == nullptr)
         return 0;
     const u64 e_phoff = LeU64(file + 32);
     const u16 e_phentsize = LeU16(file + 54);

@@ -123,6 +123,12 @@ bool TmpFsWrite(const char* name, const char* bytes, u32 len)
     {
         return false;
     }
+    // Null bytes with a non-zero length is a caller bug; treat
+    // zero-length writes as legitimate truncation.
+    if (bytes == nullptr && len > 0)
+    {
+        return false;
+    }
     TmpFsSlot* s = Find(name);
     if (s == nullptr)
     {
@@ -147,6 +153,10 @@ bool TmpFsWrite(const char* name, const char* bytes, u32 len)
 bool TmpFsAppend(const char* name, const char* bytes, u32 len)
 {
     if (!NameIsValid(name))
+    {
+        return false;
+    }
+    if (bytes == nullptr && len > 0)
     {
         return false;
     }

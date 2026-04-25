@@ -799,6 +799,8 @@ u32 AmlNamespaceCountByKind(AmlObjectKind k)
 // caller stays in "shutdown unsupported" — we don't guess bits.
 bool AmlReadS5(u8* slp_typa, u8* slp_typb)
 {
+    if (slp_typa == nullptr || slp_typb == nullptr)
+        return false;
     const AmlNamespaceEntry* entry = AmlNamespaceFind("\\_S5_");
     if (entry == nullptr)
         entry = AmlNamespaceFind("\\_S5");
@@ -812,9 +814,14 @@ bool AmlReadS5(u8* slp_typa, u8* slp_typb)
         const u64 dsdt_phys = DsdtAddress();
         if (dsdt_phys == 0)
             return false;
+        const u32 dsdt_len = DsdtLength();
+        // SdtHeader is 36 bytes; refuse a header-only / truncated
+        // table rather than underflowing the subtraction below.
+        if (dsdt_len < 36)
+            return false;
         const auto* hdr = static_cast<const u8*>(mm::PhysToVirt(dsdt_phys));
         aml = hdr + 36; // skip SdtHeader
-        aml_len = DsdtLength() - 36;
+        aml_len = dsdt_len - 36;
     }
     else
     {
@@ -824,12 +831,17 @@ bool AmlReadS5(u8* slp_typa, u8* slp_typb)
         const u64 ssdt_phys = SsdtAddress(idx);
         if (ssdt_phys == 0)
             return false;
+        const u32 ssdt_len = SsdtLength(idx);
+        if (ssdt_len < 36)
+            return false;
         const auto* hdr = static_cast<const u8*>(mm::PhysToVirt(ssdt_phys));
         aml = hdr + 36;
-        aml_len = SsdtLength(idx) - 36;
+        aml_len = ssdt_len - 36;
     }
 
-    if (entry->aml_offset + 4 > aml_len)
+    // Overflow-safe bounds check — `aml_offset + 4` could wrap if
+    // a corrupt entry stashed UINT32_MAX-3 in aml_offset.
+    if (entry->aml_offset > aml_len || aml_len - entry->aml_offset < 4)
         return false;
     u32 p = entry->aml_offset + 4; // past the 4-char "_S5_" name
     if (p + 2 > aml_len || aml[p] != 0x12 /* PackageOp */)

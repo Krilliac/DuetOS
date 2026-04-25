@@ -223,6 +223,8 @@ void WalkSystemRecords(Volume& v)
     using ::duetos::core::ErrorCode;
     if (g_volume_count >= kMaxVolumes)
         return Err{ErrorCode::BadState};
+    if (block_handle >= drivers::storage::BlockDeviceCount())
+        return Err{ErrorCode::InvalidArgument};
     const i32 rc = drivers::storage::BlockDeviceRead(block_handle, kBootSectorLba, 1, g_scratch);
     if (rc < 0)
         return Err{ErrorCode::IoError};
@@ -237,6 +239,12 @@ void WalkSystemRecords(Volume& v)
     v.block_handle = block_handle;
     v.bytes_per_sector = LeU16(sect + kOffBytesPerSector);
     v.sectors_per_cluster = sect[kOffSectorsPerCluster];
+    // bytes_per_sector must be 512..4096 (NTFS spec) and sector
+    // count must be non-zero — otherwise downstream divides
+    // (sectors_per_record = mft_record_size / bps) produce zero
+    // and walks loop forever or read LBA 0 repeatedly.
+    if (v.bytes_per_sector == 0 || v.bytes_per_sector > 4096 || v.sectors_per_cluster == 0)
+        return Err{ErrorCode::Corrupt};
     v.total_sectors = LeU64(sect + kOffTotalSectors);
     v.mft_lcn = LeU64(sect + kOffMftLcn);
     v.clusters_per_mft_record = i8(sect[kOffClustersPerMftRecord]);

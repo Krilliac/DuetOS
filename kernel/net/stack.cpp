@@ -1040,6 +1040,24 @@ u16 UdpChecksum(Ipv4Address src, Ipv4Address dst, const u8* udp, u64 udp_len)
 void NetUdpDispatch(u32 iface_index, Ipv4Address src_ip, u16 src_port, u16 dst_port, const void* payload, u64 len)
 {
     ++g_udp_stats.rx_packets;
+    // Drop frames whose iface_index is outside our interface table —
+    // every UDP handler indexes g_interfaces[iface_index] without
+    // its own bounds check, and the IP RX path does not gate UDP
+    // on iface_index the way it does for ICMP. A driver bug or a
+    // crafted IP frame with an unmapped iface index would otherwise
+    // alias into adjacent kernel state.
+    if (iface_index >= kMaxInterfaces)
+    {
+        ++g_udp_stats.rx_no_port;
+        return;
+    }
+    // A null payload with a non-zero len would be a driver bug —
+    // refuse rather than walk a null pointer in the handler.
+    if (payload == nullptr && len != 0)
+    {
+        ++g_udp_stats.rx_no_port;
+        return;
+    }
     for (const UdpBinding& b : g_udp_bindings)
     {
         if (b.in_use && b.port == dst_port && b.handler != nullptr)
@@ -1223,6 +1241,8 @@ constexpr u64 kDhcpFrameBytes = 236 + 4 + 64; // BOOTP + magic + options region
 // Handles the DHCP `pad` (0) + `end` (255) short options.
 bool DhcpFindOption(const u8* opts, u64 opts_len, u8 opt_code, const u8** out_data, u8* out_len)
 {
+    if (opts == nullptr || out_data == nullptr || out_len == nullptr)
+        return false;
     u64 i = 0;
     while (i < opts_len)
     {
@@ -1338,9 +1358,9 @@ void DhcpOnUdp(u32 iface_index, Ipv4Address src_ip, u16 src_port, u16 dst_port, 
 {
     (void)src_port;
     (void)dst_port;
-    if (iface_index != g_dhcp.iface_index)
+    if (iface_index >= kMaxInterfaces || iface_index != g_dhcp.iface_index)
         return;
-    if (len < kDhcpFrameBytes)
+    if (payload == nullptr || len < kDhcpFrameBytes)
         return;
     const auto* buf = static_cast<const u8*>(payload);
     if (buf[0] != kDhcpOpReply)
@@ -1634,7 +1654,12 @@ void TcpSendRst(u32 iface_index, const MacAddress& peer_mac, Ipv4Address peer_ip
 
 void TcpOnSegment(u32 iface_index, const MacAddress& peer_mac, Ipv4Address peer_ip, const u8* tcp, u64 tcp_len)
 {
-    if (tcp_len < 20)
+    if (tcp == nullptr || tcp_len < 20)
+        return;
+    // Bus-side bound — caller (Ipv4HandleIncoming) is the same gate
+    // that NetUdpDispatch sees; defend in depth so a future caller
+    // that forgets the bound doesn't read past g_interfaces[].
+    if (iface_index >= kMaxInterfaces)
         return;
     ++g_tcp_stats.rx_packets;
     const u16 src_port = (u16(tcp[0]) << 8) | u16(tcp[1]);
@@ -2008,7 +2033,7 @@ void DnsOnUdp(u32 iface_index, Ipv4Address src_ip, u16 src_port, u16 dst_port, c
     (void)dst_port;
     if (!g_dns_pending)
         return;
-    if (len < 12)
+    if (payload == nullptr || len < 12)
         return;
     const auto* b = static_cast<const u8*>(payload);
     const u16 xid = (u16(b[0]) << 8) | u16(b[1]);
@@ -2065,6 +2090,8 @@ void DnsOnUdp(u32 iface_index, Ipv4Address src_ip, u16 src_port, u16 dst_port, c
 // written (including the terminator), or 0 on invalid input.
 u32 EncodeDnsName(const char* name, u8* out, u32 cap)
 {
+    if (name == nullptr || out == nullptr || cap < 2)
+        return 0;
     u32 w = 0;
     u32 label_start = w;
     out[w++] = 0; // placeholder for first length byte
@@ -2272,6 +2299,13 @@ bool NetStackBindInterface(u32 iface_index, MacAddress mac, Ipv4Address ip, NetT
 void NetStackInjectRx(u32 iface_index, const void* frame, u64 len)
 {
     if (frame == nullptr || len < 14)
+        return;
+    // Drop frames from interfaces outside our table — every L3
+    // handler indexes g_interfaces[iface_index] and the per-handler
+    // checks vary (ICMP guards, UDP newly guards, ARP relies on
+    // ArpInsert's internal cap). One gate at the bus boundary
+    // makes the invariant uniform.
+    if (iface_index >= kMaxInterfaces)
         return;
     const auto* eth = static_cast<const u8*>(frame);
     const u16 ether_type = (u16(eth[12]) << 8) | u16(eth[13]);
