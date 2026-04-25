@@ -90,7 +90,8 @@ jobs:
       - name: Install toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-18 lld-18 llvm-18 cmake ninja-build python3
+          sudo apt-get install -y clang-18 lld-18 llvm-18 cmake ninja-build python3 \
+                                  grub-common grub-pc-bin grub-efi-amd64-bin xorriso mtools
           sudo ln -sf /usr/bin/clang-18 /usr/local/bin/clang
           sudo ln -sf /usr/bin/clang++-18 /usr/local/bin/clang++
           sudo ln -sf /usr/bin/lld-link-18 /usr/local/bin/lld-link
@@ -100,6 +101,15 @@ jobs:
         run: cmake --preset x86_64-release
       - name: Build
         run: cmake --build build/x86_64-release --parallel $(nproc)
+      - name: Upload kernel
+        uses: actions/upload-artifact@v4
+        with:
+          name: duetos-kernel-release
+          if-no-files-found: error
+          path: |
+            build/x86_64-release/duetos.iso
+            build/x86_64-release/kernel/duetos-kernel.elf
+          retention-days: 7
 
   qemu-smoke:
     name: qemu smoke
@@ -157,3 +167,68 @@ jobs:
           find kernel -name '*.cpp' | head -30 | while read f; do
             clang-tidy -p build/x86_64-debug "$f" --quiet 2>&1 || true
           done | head -200
+
+  publish-rolling:
+    # Refresh the latest-debug / latest-release rolling channels on every
+    # push to main. The README's download badges read off these tags;
+    # without this job they'd stay empty until someone pushes a v* tag
+    # (which release.yml handles separately and overwrites these).
+    name: publish rolling channels
+    runs-on: ubuntu-24.04
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [build-debug, build-release, qemu-smoke]
+    permissions:
+      contents: write
+    steps:
+      - name: Download debug artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: duetos-kernel-debug
+          path: dist/debug-raw
+      - name: Download release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: duetos-kernel-release
+          path: dist/release-raw
+      - name: Stage assets
+        run: |
+          set -euo pipefail
+          mkdir -p dist/debug dist/release
+          cp dist/debug-raw/duetos.iso dist/debug/duetos-debug.iso
+          cp dist/debug-raw/kernel/duetos-kernel.elf dist/debug/duetos-kernel-debug.elf
+          ( cd dist/debug && sha256sum duetos-debug.iso duetos-kernel-debug.elf > SHA256SUMS.txt )
+          cp dist/release-raw/duetos.iso dist/release/duetos-release.iso
+          cp dist/release-raw/kernel/duetos-kernel.elf dist/release/duetos-kernel-release.elf
+          ( cd dist/release && sha256sum duetos-release.iso duetos-kernel-release.elf > SHA256SUMS.txt )
+      - name: Publish debug channel
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest-debug
+          target_commitish: ${{ github.sha }}
+          name: DuetOS Debug (rolling, ${{ github.sha }})
+          body: |
+            Rolling debug channel build from `main` @ ${{ github.sha }}.
+          prerelease: true
+          make_latest: false
+          fail_on_unmatched_files: true
+          overwrite_files: true
+          files: |
+            dist/debug/duetos-debug.iso
+            dist/debug/duetos-kernel-debug.elf
+            dist/debug/SHA256SUMS.txt
+      - name: Publish release channel
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest-release
+          target_commitish: ${{ github.sha }}
+          name: DuetOS Release (rolling, ${{ github.sha }})
+          body: |
+            Rolling release channel build from `main` @ ${{ github.sha }}.
+          prerelease: false
+          make_latest: true
+          fail_on_unmatched_files: true
+          overwrite_files: true
+          files: |
+            dist/release/duetos-release.iso
+            dist/release/duetos-kernel-release.elf
+            dist/release/SHA256SUMS.txt

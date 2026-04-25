@@ -1,13 +1,13 @@
 # DuetOS
 
-[![Release channel](https://img.shields.io/github/v/release/DuetOS/DuetOS/latest-release?label=release%20channel)](https://github.com/DuetOS/DuetOS/releases/tag/latest-release)
-[![Release downloads](https://img.shields.io/github/downloads/DuetOS/DuetOS/latest-release/total?label=release%20downloads)](https://github.com/DuetOS/DuetOS/releases/tag/latest-release)
-[![Debug channel](https://img.shields.io/github/v/release/DuetOS/DuetOS/latest-debug?include_prereleases&label=debug%20channel)](https://github.com/DuetOS/DuetOS/releases/tag/latest-debug)
-[![Debug downloads](https://img.shields.io/github/downloads/DuetOS/DuetOS/latest-debug/total?label=debug%20downloads)](https://github.com/DuetOS/DuetOS/releases/tag/latest-debug)
+[![Release channel](https://img.shields.io/github/v/release/krilliac/duetos/latest-release?label=release%20channel)](https://github.com/krilliac/duetos/releases/tag/latest-release)
+[![Release downloads](https://img.shields.io/github/downloads/krilliac/duetos/latest-release/total?label=release%20downloads)](https://github.com/krilliac/duetos/releases/tag/latest-release)
+[![Debug channel](https://img.shields.io/github/v/release/krilliac/duetos/latest-debug?include_prereleases&label=debug%20channel)](https://github.com/krilliac/duetos/releases/tag/latest-debug)
+[![Debug downloads](https://img.shields.io/github/downloads/krilliac/duetos/latest-debug/total?label=debug%20downloads)](https://github.com/krilliac/duetos/releases/tag/latest-debug)
 
-Download channel artifacts from: **[Release channel](https://github.com/DuetOS/DuetOS/releases/tag/latest-release)** / **[Debug channel](https://github.com/DuetOS/DuetOS/releases/tag/latest-debug)**.
+Download channel artifacts from: **[Release channel](https://github.com/krilliac/duetos/releases/tag/latest-release)** / **[Debug channel](https://github.com/krilliac/duetos/releases/tag/latest-debug)**.
 
-Channel releases are published from **tag builds** (`v*` tags). Regular CI artifact uploads in Actions are temporary and do not populate the Releases page.
+Channel releases are refreshed continuously by CI on every push to `main`, and re-published from **tag builds** (`v*` tags) when a version is cut. The ephemeral per-run uploads in the Actions tab are kept for 7 days for debugging and do not populate the Releases page.
 
 A general-purpose operating system, written from scratch, that runs
 Windows PE executables natively — not via a VM, not via Wine, not as an
