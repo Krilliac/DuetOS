@@ -71,4 +71,12 @@ void TaskbarStartBounds(u32* x, u32* y, u32* w, u32* h);
 /// calendar popup. Populated after TaskbarRedraw.
 void TaskbarClockBounds(u32* x, u32* y, u32* w, u32* h);
 
+/// Bounds of the NETWORK tray cell ("N" badge). Used by the
+/// mouse reader to hover-preview / click-toggle the network
+/// flyout, similar to Windows' bottom-right Wi-Fi icon. Returns
+/// w == 0 if the cell hasn't been laid out yet (TaskbarRedraw
+/// must have run at least once). Anchored coordinates are
+/// framebuffer-absolute.
+void TaskbarNetCellBounds(u32* x, u32* y, u32* w, u32* h);
+
 } // namespace duetos::drivers::video

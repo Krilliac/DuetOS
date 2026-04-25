@@ -53,6 +53,7 @@
 #include "../drivers/video/framebuffer.h"
 #include "../drivers/video/calendar.h"
 #include "../drivers/video/menu.h"
+#include "../drivers/video/netpanel.h"
 #include "../drivers/video/taskbar.h"
 #include "../drivers/video/theme.h"
 #include "../drivers/video/widget.h"
@@ -1777,6 +1778,86 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 !duetos::drivers::video::CalendarContains(cx, cy))
             {
                 duetos::drivers::video::CalendarClose();
+            }
+
+            // --- Network flyout handlers ---------------------------
+            //
+            // Hover-preview + click-toggle on the NET tray cell,
+            // mirroring the Windows / GNOME bottom-right Wi-Fi flyout.
+            // State machine:
+            //   - Cursor over cell + no mode → open Preview.
+            //   - Click on cell + Preview open → upgrade to Full.
+            //   - Click on cell + Full open → close.
+            //   - Cursor leaves cell + panel + mode is Preview →
+            //     close (Full sticks through hover-out by design).
+            //   - Click outside Full panel → close.
+            //   - Click on RENEW button inside Full → kick DHCP.
+            {
+                duetos::u32 nx = 0, ny = 0, nw = 0, nh = 0;
+                duetos::drivers::video::TaskbarNetCellBounds(&nx, &ny, &nw, &nh);
+                const bool over_cell = (nw > 0) && cx >= nx && cx < nx + nw && cy >= ny && cy < ny + nh;
+                const auto net_mode = duetos::drivers::video::NetPanelCurrentMode();
+
+                // RENEW button — handled BEFORE the click-outside
+                // dismissal so the press doesn't simultaneously
+                // close the panel.
+                if (press_edge && !menu_handled && net_mode == duetos::drivers::video::NetPanelMode::Full &&
+                    duetos::drivers::video::NetPanelRenewButtonContains(cx, cy))
+                {
+                    (void)duetos::drivers::video::NetPanelDoRenew();
+                    SerialWrite("[ui] netpanel renew\n");
+                    menu_handled = true;
+                }
+
+                // Click on the NET tray cell — toggle modes.
+                if (press_edge && !menu_handled && over_cell)
+                {
+                    if (net_mode == duetos::drivers::video::NetPanelMode::Full)
+                    {
+                        duetos::drivers::video::NetPanelClose();
+                    }
+                    else
+                    {
+                        // Always (re-)open in Full mode on click,
+                        // even if Preview was already up — clicking
+                        // is the explicit "show me everything" gesture.
+                        const duetos::u32 fw = 320; // matches netpanel kFullW
+                        duetos::drivers::video::NetPanelOpen(0, 0, duetos::drivers::video::NetPanelMode::Full);
+                        const duetos::u32 fh = duetos::drivers::video::NetPanelHeight();
+                        const duetos::u32 ax = (nx + nw > fw) ? (nx + nw - fw) : 0;
+                        const duetos::u32 ay = (ny > fh) ? ny - fh : 0;
+                        duetos::drivers::video::NetPanelOpen(ax, ay, duetos::drivers::video::NetPanelMode::Full);
+                        SerialWrite("[ui] netpanel open (full)\n");
+                    }
+                    menu_handled = true;
+                }
+                // Click outside an open Full panel → close.
+                else if (press_edge && !menu_handled && net_mode == duetos::drivers::video::NetPanelMode::Full &&
+                         !duetos::drivers::video::NetPanelContains(cx, cy))
+                {
+                    duetos::drivers::video::NetPanelClose();
+                    SerialWrite("[ui] netpanel close (click outside)\n");
+                    // Don't set menu_handled — the click might still
+                    // legitimately fall through to a window or other
+                    // taskbar widget.
+                }
+                // Hover open / close — runs every packet, no
+                // press_edge gate. Only mutates state if the panel
+                // isn't already in Full mode (Full ignores hover-out).
+                else if (over_cell && net_mode == duetos::drivers::video::NetPanelMode::Closed)
+                {
+                    const duetos::u32 pw = 220; // matches netpanel kPreviewW
+                    const duetos::u32 ph = 56;  // matches kPreviewH
+                    const duetos::u32 ax = (nx + nw > pw) ? (nx + nw - pw) : 0;
+                    const duetos::u32 ay = (ny > ph) ? ny - ph : 0;
+                    duetos::drivers::video::NetPanelOpen(ax, ay, duetos::drivers::video::NetPanelMode::Preview);
+                    SerialWrite("[ui] netpanel hover preview\n");
+                }
+                else if (!over_cell && net_mode == duetos::drivers::video::NetPanelMode::Preview &&
+                         !duetos::drivers::video::NetPanelContains(cx, cy))
+                {
+                    duetos::drivers::video::NetPanelClose();
+                }
             }
 
             // START button press opens (or closes) the menu.

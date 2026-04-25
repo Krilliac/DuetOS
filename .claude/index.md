@@ -78,6 +78,7 @@ _Read this at every session start (after git sync). Each row links to a detailed
 | xHCI HID boot keyboard — end-to-end USB keyboard input | [knowledge/xhci-hid-keyboard-v0.md](knowledge/xhci-hid-keyboard-v0.md) | Observation | Active | 2026-04-23 |
 | Intel e1000 NIC driver — real packet I/O on commodity wired gigabit | [knowledge/e1000-driver-v0.md](knowledge/e1000-driver-v0.md) | Observation | Active | 2026-04-23 |
 | Network shell commands — ifconfig / dhcp / route / netscan / net | [knowledge/network-shell-commands-v0.md](knowledge/network-shell-commands-v0.md) | Observation | Active | 2026-04-25 |
+| Network flyout panel — bottom-right Wi-Fi-style popup with hover preview | [knowledge/network-flyout-panel-v0.md](knowledge/network-flyout-panel-v0.md) | Observation + Decision | Active | 2026-04-25 |
 | Kernel entropy pool — RDSEED/RDRAND/splitmix tier | [knowledge/kernel-entropy-v0.md](knowledge/kernel-entropy-v0.md) | Observation | Active | 2026-04-22 |
 | Runtime invariant checker — heap/frames/sched/CRx/canary/stack-overflow | [knowledge/runtime-invariant-checker-v0.md](knowledge/runtime-invariant-checker-v0.md) | Observation | Active | 2026-04-22 |
 | Crash dump v0 — embedded symbol table + bracketed dump file | [knowledge/crash-dump-v0.md](knowledge/crash-dump-v0.md) | Observation | Active | 2026-04-20 |
