@@ -2,7 +2,7 @@
 
 **Type**: Observation
 **Status**: Active
-**Last updated**: 2026-04-20
+**Last updated**: 2026-04-25
 **Commit**: (see current branch HEAD)
 
 ## Summary
@@ -72,18 +72,23 @@ the crash dump, so BSS drift is irrelevant.
   message  : <message>                    (vector mnemonic for traps; caller string for Panic)
   value    : 0xNN                         (present for PanicWithValue + every trap; error_code on traps)
   symtab_entries : 0xNN
-  <trap-only: vector + rip + cs + rflags + rsp + ss + cr2(PF) + all GPRs>
+  <trap-only: vector + vector_name + rip + cs[ring=N ...] + rflags[...] + rsp + ss[...] + cr2(PF) + all GPRs>
 [panic] --- diagnostics ---
   uptime   : 0xNN
+  uptime   : <12.345 ms / 1.234 s / 1m 02.345s> since boot
   cpu_id   : 0xNN
   lapic_id : 0xNN
   task_ptr : 0xNN                         (present after SchedInit)
+  task     : <name>#<id>                  (resolved via sched::TaskName / sched::TaskId)
   rip      : 0xNN  [fn+0xOFF (file:line)]
   rsp      : 0xNN
   rbp      : 0xNN
-  cr0..cr4 : 0xNN
-  rflags   : 0xNN
-  efer     : 0xNN
+  cr0      : 0xNN [PE|MP|...|WP|PG]
+  cr2      : 0xNN
+  cr3      : 0xNN [pml4=0x... pcid=N]
+  cr4      : 0xNN [PAE|PGE|...|SMEP|SMAP]
+  rflags   : 0xNN [IF|RF|IOPL=N|...]
+  efer     : 0xNN [SCE|LME|LMA|NXE]
   backtrace (up to 16 frames, innermost first):
     #0x00000000  rip=0xNN  [fn+0xOFF (file:line)]
                  rbp=0xNN
@@ -98,8 +103,23 @@ the crash dump, so BSS drift is irrelevant.
 [panic] CPU halted — no recovery.
 ```
 
+Trap-path GPR lines (`rax..r15`) carry an inline `[fn+0xOFF (file:line)]`
+annotation when the value falls in plausible kernel code range — surfaces
+stale callback pointers / vtable spills / saved-RIP residue without forcing
+the operator to re-symbolize by hand.
+
 The schema is v1. Bump `kDumpSchemaVersion` in `core/panic.cpp` when the layout
-changes in a way a parser would care about.
+changes in a way a parser would care about. The bit-decoded suffixes (e.g.
+`[PE|WP|PG]`) live on the SAME line as the existing `<label> : <hex>` token
+sequence, so a parser that anchors on `<label> : 0x[0-9a-f]+` keeps working;
+human readers get the meaning for free.
+
+Human-readable decoders live in `kernel/core/diag_decode.{h,cpp}`:
+`WriteCr0Bits` / `WriteCr4Bits` / `WriteRflagsBits` / `WriteEferBits` /
+`WriteCr3Decoded` / `WriteSegmentSelectorBits` / `WritePageFaultErrBits`
+plus `WriteUptimeReadable` and `WriteCurrentTaskLabel`. All call only into
+`arch::Serial*` and the embedded symbol resolver, so they're safe from
+panic / IRQ / trap context.
 
 ## Resolver semantics
 

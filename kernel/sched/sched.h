@@ -184,6 +184,14 @@ u64 CurrentTaskId();
 /// layout.
 u64 TaskId(const Task* t);
 
+/// Read the human-readable name of an arbitrary `Task*`. Returns
+/// `"<null>"` for nullptr and `"<noname>"` for a task whose name
+/// pointer was never set. The returned C-string is owned by the
+/// task and remains valid for the task's lifetime — it points
+/// into the same `name` field the scheduler logs print. Used by
+/// the crash-dump path to label the current task on a panic.
+const char* TaskName(const Task* t);
+
 /// Top (high address) of the current task's kernel stack. Returns 0 for
 /// the boot task (it never had a scheduler-managed kernel stack — it
 /// runs on the boot.S stack, which is irrelevant for ring-3 RSP0

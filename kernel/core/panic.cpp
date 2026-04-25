@@ -8,6 +8,7 @@
 #include "../arch/x86_64/timer.h"
 #include "../cpu/percpu.h"
 #include "../debug/probes.h"
+#include "diag_decode.h"
 #include "hexdump.h"
 #include "klog.h"
 #include "symbols.h"
@@ -191,11 +192,13 @@ void DumpTask()
     sched::Task* task = pcpu->current_task;
     if (task != nullptr)
     {
-        // Task layout is file-local to sched.cpp; we only touch it via
-        // forward-declared opaque pointer here. No field access until
-        // sched exposes an accessor. Print the pointer; let the operator
-        // cross-reference against the [sched] created-task log lines.
         WriteLabelled("task_ptr ", reinterpret_cast<u64>(task));
+        // Resolve the task to its human-readable name and id so the
+        // operator doesn't have to cross-reference the pointer
+        // against earlier `[sched] created-task` lines.
+        arch::SerialWrite("  task     : ");
+        WriteCurrentTaskLabel();
+        arch::SerialWrite("\n");
     }
 }
 
@@ -226,17 +229,50 @@ void EndCrashDump()
 void DumpDiagnostics(u64 rip, u64 rsp, u64 rbp)
 {
     arch::SerialWrite("[panic] --- diagnostics ---\n");
+    // Wall-clock time since boot, rendered as ms / s / m+s. The raw
+    // tick count still goes out as the dump's `uptime` line so a
+    // host-side parser sees a stable hex value, but the readable
+    // form is what an operator scans first.
     WriteLabelled("uptime   ", arch::TimerTicks());
+    arch::SerialWrite("  uptime   : ");
+    WriteUptimeReadable();
+    arch::SerialWrite(" since boot\n");
     DumpTask();
     WriteLabelledCode("rip      ", rip);
     WriteLabelled("rsp      ", rsp);
     WriteLabelled("rbp      ", rbp);
-    WriteLabelled("cr0      ", arch::ReadCr0());
-    WriteLabelled("cr2      ", arch::ReadCr2());
-    WriteLabelled("cr3      ", arch::ReadCr3());
-    WriteLabelled("cr4      ", arch::ReadCr4());
-    WriteLabelled("rflags   ", arch::ReadRflags());
-    WriteLabelled("efer     ", arch::ReadEfer());
+
+    // Control + flags registers. Each line carries the raw hex
+    // (existing schema) plus a bracket-list naming the bits that
+    // are set, so a reader doesn't have to decode `0x80050033` in
+    // their head to see PE / WP / PG enabled.
+    const u64 cr0 = arch::ReadCr0();
+    const u64 cr2 = arch::ReadCr2();
+    const u64 cr3 = arch::ReadCr3();
+    const u64 cr4 = arch::ReadCr4();
+    const u64 rflags = arch::ReadRflags();
+    const u64 efer = arch::ReadEfer();
+    arch::SerialWrite("  cr0      : ");
+    arch::SerialWriteHex(cr0);
+    WriteCr0Bits(cr0);
+    arch::SerialWrite("\n");
+    WriteLabelled("cr2      ", cr2);
+    arch::SerialWrite("  cr3      : ");
+    arch::SerialWriteHex(cr3);
+    WriteCr3Decoded(cr3);
+    arch::SerialWrite("\n");
+    arch::SerialWrite("  cr4      : ");
+    arch::SerialWriteHex(cr4);
+    WriteCr4Bits(cr4);
+    arch::SerialWrite("\n");
+    arch::SerialWrite("  rflags   : ");
+    arch::SerialWriteHex(rflags);
+    WriteRflagsBits(rflags);
+    arch::SerialWrite("\n");
+    arch::SerialWrite("  efer     : ");
+    arch::SerialWriteHex(efer);
+    WriteEferBits(efer);
+    arch::SerialWrite("\n");
     // A blown IST stack is one of the quietest ways a kernel can
     // die — silently corrupts neighbouring BSS and shows up as
     // mystery data corruption later. Surface it explicitly here
