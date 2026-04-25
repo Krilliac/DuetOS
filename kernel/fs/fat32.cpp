@@ -38,6 +38,7 @@
 #include "../arch/x86_64/serial.h"
 #include "../core/kdbg.h"
 #include "../core/klog.h"
+#include "../core/log_names.h"
 #include "../drivers/storage/block.h"
 #include "../sched/sched.h"
 
@@ -479,6 +480,7 @@ void LogEntry(const DirEntry& e)
     SerialWrite(e.name);
     SerialWrite("  attr=");
     SerialWriteHex(static_cast<u64>(e.attributes));
+    ::duetos::core::SerialWriteFatAttr(static_cast<u64>(e.attributes));
     SerialWrite("  first_cluster=");
     SerialWriteHex(static_cast<u64>(e.first_cluster));
     SerialWrite("  size=");

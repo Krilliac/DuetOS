@@ -116,10 +116,56 @@ human readers get the meaning for free.
 
 Human-readable decoders live in `kernel/core/diag_decode.{h,cpp}`:
 `WriteCr0Bits` / `WriteCr4Bits` / `WriteRflagsBits` / `WriteEferBits` /
-`WriteCr3Decoded` / `WriteSegmentSelectorBits` / `WritePageFaultErrBits`
-plus `WriteUptimeReadable` and `WriteCurrentTaskLabel`. All call only into
-`arch::Serial*` and the embedded symbol resolver, so they're safe from
-panic / IRQ / trap context.
+`WriteCr3Decoded` / `WriteSegmentSelectorBits` / `WritePageFaultErrBits` /
+`WritePteFlags` plus `WriteUptimeReadable` and `WriteCurrentTaskLabel`.
+All call only into `arch::Serial*` and the embedded symbol resolver, so
+they're safe from panic / IRQ / trap context.
+
+The same readability pass extends throughout the kernel — every log
+that previously emitted opaque hex now also surfaces a decoded
+interpretation. Coverage by subsystem (each file owns the decoder
+nearest its data):
+
+- `kernel/core/log_names.{h,cpp}` — POSIX/Linux: `LinuxSignalName`
+  (1..31 + RT range), `LinuxErrnoName` (1..115); Win32:
+  `NtStatusName` (curated subset of STATUS_*); flag printers
+  `SerialWriteWin32AccessMask` / `SerialWriteOpenFlags` /
+  `SerialWriteMmapProt` / `SerialWriteMmapFlags` /
+  `SerialWriteInodeMode` / `SerialWriteFatAttr`.
+- `kernel/drivers/pci/pci.{h,cpp}` — `PciSubclassDetail` for the
+  (class, subclass, prog_if) triple → "SATA AHCI", "USB xHCI",
+  "NVMe", etc.
+- `kernel/drivers/storage/nvme.{h,cpp}` — `NvmeStatusName` (SCT/SC
+  pair → "Internal Error" / "LBA Out of Range" / ...) and
+  `NvmeOpcodeName` (admin / NVM op → name). `CSTS.CFS` failure
+  log surfaces `[RDY|CFS|SHST|...]`.
+- `kernel/drivers/storage/ahci.cpp` — controller summary now
+  emits `cap [SNCQ|S64A|...|NP=N]`, `vs <major>.<minor>.<patch>`,
+  `ghc [AE|IE|HR]` alongside the raw hex.
+- `kernel/drivers/usb/xhci.cpp` — `CompletionCodeName` (TRB
+  completion code → "USB Transaction Error" / "Stall Error" /
+  "Short Packet" / ...). Every "failed code=" log line wraps it.
+- `kernel/drivers/usb/usb.cpp` — `hciver` hex now followed by a
+  dotted "(major.minor)" rendering of the BCD field.
+- `kernel/mm/paging.cpp` — flag-protect log wraps `flags=0xN` with
+  `WritePteFlags` `[P|RW|US|...|NX]`.
+- `kernel/core/pe_loader.cpp` — unsupported reloc-type log resolves
+  the IMAGE_REL_BASED_* name (DIR64 / HIGHLOW / ABSOLUTE / ...).
+- `kernel/fs/gpt.cpp` — partition-type GUID emits a known-name
+  suffix ("EFI System", "Microsoft Basic Data", "Linux Filesystem",
+  ...) when the GUID matches the curated table.
+- `kernel/fs/ext4.cpp` — root-inode log includes
+  `SerialWriteInodeMode` `[REG rwxr-xr-x]` next to `mode=0xN`.
+- `kernel/fs/fat32.cpp` — directory entry log surfaces the
+  attribute byte as `[A|R|H|S|D|V]` or `[LFN]`.
+- `kernel/subsystems/linux/syscall.cpp` — `kill` / `tgkill` log
+  wraps the signal number with its `SIGTERM` / `SIGKILL` / ...
+  name.
+
+Token shape preserved: every existing `<label>=0x<hex>` (or
+`SerialWriteHex(...)`) emission stays exactly where and how it
+was; the decoded suffix is appended to the same line. Parsers
+that anchor on the hex format are unaffected.
 
 ## Resolver semantics
 

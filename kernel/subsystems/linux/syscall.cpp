@@ -47,6 +47,7 @@
 #include "../../core/kdbg.h"
 #include "../../core/klog.h"
 #include "../../core/cleanroom_trace.h"
+#include "../../core/log_names.h"
 #include "../../core/process.h"
 #include "../../core/random.h"
 #include "../../cpu/percpu.h"
@@ -1971,7 +1972,9 @@ i64 DoTgkill(u64 tgid, u64 tid, u64 sig)
         return kESRCH;
     arch::SerialWrite("[linux] tgkill -> self; interpreting as abort. sig=");
     arch::SerialWriteHex(sig);
-    arch::SerialWrite("\n");
+    arch::SerialWrite(" (");
+    arch::SerialWrite(::duetos::core::LinuxSignalName(sig));
+    arch::SerialWrite(")\n");
     sched::SchedExit();
     return 0;
 }
@@ -1986,7 +1989,9 @@ i64 DoKill(u64 pid, u64 sig)
         return kESRCH;
     arch::SerialWrite("[linux] kill(self) sig=");
     arch::SerialWriteHex(sig);
-    arch::SerialWrite("\n");
+    arch::SerialWrite(" (");
+    arch::SerialWrite(::duetos::core::LinuxSignalName(sig));
+    arch::SerialWrite(")\n");
     sched::SchedExit();
     return 0;
 }

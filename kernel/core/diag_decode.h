@@ -75,4 +75,9 @@ void WriteCr3Decoded(u64 value);
 /// (or may not) be holding function pointers.
 void WriteSymbolIfCode(u64 value);
 
+/// Decode an x86_64 page-table-entry flags word (Intel SDM Vol 3A
+/// §4.5) as `[P|RW|US|PWT|PCD|A|D|PS/PAT|G|NX]`. Used by `mm/paging`
+/// and any logger that prints PTE flags.
+void WritePteFlags(u64 flags);
+
 } // namespace duetos::core

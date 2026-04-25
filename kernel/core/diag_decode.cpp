@@ -382,4 +382,29 @@ void WriteSymbolIfCode(u64 value)
     }
 }
 
+void WritePteFlags(u64 flags)
+{
+    arch::SerialWrite(" [");
+    bool first = true;
+    EmitFlag(flags & (1ULL << 0), "P", first);
+    EmitFlag(flags & (1ULL << 1), "RW", first);
+    EmitFlag(flags & (1ULL << 2), "US", first);
+    EmitFlag(flags & (1ULL << 3), "PWT", first);
+    EmitFlag(flags & (1ULL << 4), "PCD", first);
+    EmitFlag(flags & (1ULL << 5), "A", first);
+    EmitFlag(flags & (1ULL << 6), "D", first);
+    // Bit 7 is "PS" in PDE/PDPTE (page size = huge page) but "PAT" in
+    // a leaf PTE. The two contexts share a printer here so the label
+    // is the disjunction; the surrounding log line tells the reader
+    // which level the flags belong to.
+    EmitFlag(flags & (1ULL << 7), "PS/PAT", first);
+    EmitFlag(flags & (1ULL << 8), "G", first);
+    EmitFlag(flags & (1ULL << 63), "NX", first);
+    if (first)
+    {
+        arch::SerialWrite("none");
+    }
+    arch::SerialWrite("]");
+}
+
 } // namespace duetos::core

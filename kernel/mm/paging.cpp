@@ -39,6 +39,7 @@
 
 #include "../arch/x86_64/cpu.h"
 #include "../arch/x86_64/serial.h"
+#include "../core/diag_decode.h"
 #include "../core/klog.h"
 #include "../core/panic.h"
 
@@ -771,6 +772,7 @@ void ProtectRange(u64 va_start, u64 va_end, u64 flags, const char* name)
     SerialWriteHex(va_end);
     SerialWrite(") flags=");
     SerialWriteHex(flags);
+    ::duetos::core::WritePteFlags(flags);
     SerialWrite("\n");
 
     for (u64 v = va_start; v < va_end; v += kPageSize)

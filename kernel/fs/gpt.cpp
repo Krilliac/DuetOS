@@ -242,6 +242,59 @@ void WriteGuid(const u8* g)
     }
 }
 
+// Map a GPT type-GUID to a short name. Returns "" when the GUID
+// isn't one we've catalogued — caller falls back to the canonical
+// hex rendering. Names follow the conventional `gdisk` short form.
+const char* GuidLabel(const u8* g)
+{
+    struct Known
+    {
+        u8 bytes[16];
+        const char* name;
+    };
+    static constexpr Known kTable[] = {
+        // EFI System Partition: C12A7328-F81F-11D2-BA4B-00A0C93EC93B
+        {{0x28, 0x73, 0x2A, 0xC1, 0x1F, 0xF8, 0xD2, 0x11, 0xBA, 0x4B, 0x00, 0xA0, 0xC9, 0x3E, 0xC9, 0x3B},
+         "EFI System"},
+        // BIOS Boot: 21686148-6449-6E6F-744E-656564454649
+        {{0x48, 0x61, 0x68, 0x21, 0x49, 0x64, 0x6F, 0x6E, 0x74, 0x4E, 0x65, 0x65, 0x64, 0x45, 0x46, 0x49}, "BIOS Boot"},
+        // Microsoft Reserved: E3C9E316-0B5C-4DB8-817D-F92DF00215AE
+        {{0x16, 0xE3, 0xC9, 0xE3, 0x5C, 0x0B, 0xB8, 0x4D, 0x81, 0x7D, 0xF9, 0x2D, 0xF0, 0x02, 0x15, 0xAE},
+         "Microsoft Reserved"},
+        // Microsoft Basic Data: EBD0A0A2-B9E5-4433-87C0-68B6B72699C7
+        {{0xA2, 0xA0, 0xD0, 0xEB, 0xE5, 0xB9, 0x33, 0x44, 0x87, 0xC0, 0x68, 0xB6, 0xB7, 0x26, 0x99, 0xC7},
+         "Microsoft Basic Data"},
+        // Linux Filesystem: 0FC63DAF-8483-4772-8E79-3D69D8477DE4
+        {{0xAF, 0x3D, 0xC6, 0x0F, 0x83, 0x84, 0x72, 0x47, 0x8E, 0x79, 0x3D, 0x69, 0xD8, 0x47, 0x7D, 0xE4},
+         "Linux Filesystem"},
+        // Linux Swap: 0657FD6D-A4AB-43C4-84E5-0933C84B4F4F
+        {{0x6D, 0xFD, 0x57, 0x06, 0xAB, 0xA4, 0xC4, 0x43, 0x84, 0xE5, 0x09, 0x33, 0xC8, 0x4B, 0x4F, 0x4F},
+         "Linux Swap"},
+        // Linux LVM: E6D6D379-F507-44C2-A23C-238F2A3DF928
+        {{0x79, 0xD3, 0xD6, 0xE6, 0x07, 0xF5, 0xC2, 0x44, 0xA2, 0x3C, 0x23, 0x8F, 0x2A, 0x3D, 0xF9, 0x28}, "Linux LVM"},
+        // Windows Recovery: DE94BBA4-06D1-4D40-A16A-BFD50179D6AC
+        {{0xA4, 0xBB, 0x94, 0xDE, 0xD1, 0x06, 0x40, 0x4D, 0xA1, 0x6A, 0xBF, 0xD5, 0x01, 0x79, 0xD6, 0xAC},
+         "Windows Recovery"},
+    };
+    for (const auto& e : kTable)
+    {
+        bool match = true;
+        for (int i = 0; i < 16; ++i)
+        {
+            if (e.bytes[i] != g[i])
+            {
+                match = false;
+                break;
+            }
+        }
+        if (match)
+        {
+            return e.name;
+        }
+    }
+    return "";
+}
+
 void LogPartitionLine(const Partition& p, u32 index)
 {
     using arch::SerialWrite;
@@ -254,6 +307,13 @@ void LogPartitionLine(const Partition& p, u32 index)
     SerialWriteHex(p.last_lba);
     SerialWrite(" type=");
     WriteGuid(p.type_guid);
+    const char* label = GuidLabel(p.type_guid);
+    if (label[0] != 0)
+    {
+        SerialWrite(" (");
+        SerialWrite(label);
+        SerialWrite(")");
+    }
     SerialWrite("\n");
 }
 

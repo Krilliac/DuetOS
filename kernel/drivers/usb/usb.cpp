@@ -196,6 +196,18 @@ void DecodeXhciCaps(const HostControllerInfo& h)
     arch::SerialWriteHex(caplen);
     arch::SerialWrite(" hciver=");
     arch::SerialWriteHex(hciver);
+    // hciver layout: bits 31:16 = BCD-encoded major.minor (0x0100 = 1.0,
+    // 0x0110 = 1.10 = 1.1, 0x0120 = 1.20 = 1.2). Render as a dotted
+    // version so a reader doesn't have to decode the BCD by hand.
+    {
+        const u32 maj = (hciver >> 24) & 0xFF;
+        const u32 min = (hciver >> 16) & 0xFF;
+        char buf[6] = {static_cast<char>('0' + (maj % 10)),  '.', static_cast<char>('0' + ((min >> 4) & 0xF)),
+                       static_cast<char>('0' + (min & 0xF)), 0,   0};
+        arch::SerialWrite(" (");
+        arch::SerialWrite(buf);
+        arch::SerialWrite(")");
+    }
     arch::SerialWrite(" max_slots=");
     arch::SerialWriteHex(hcsp1 & 0xFF);
     arch::SerialWrite(" max_intrs=");

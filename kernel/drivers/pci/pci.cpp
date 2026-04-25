@@ -538,6 +538,98 @@ const char* PciClassName(u8 class_code)
     }
 }
 
+const char* PciSubclassDetail(u8 class_code, u8 subclass, u8 prog_if)
+{
+    // Pinpoint names for the subclass/prog_if triples we actually
+    // care about — anything more specific than the bare class name
+    // helps a reader spot "ah, that's the NVMe drive" or "the xHCI
+    // controller" without cross-referencing the PCI SIG database.
+    switch (class_code)
+    {
+    case 0x01: // mass storage
+        switch (subclass)
+        {
+        case 0x01:
+            return "IDE";
+        case 0x06:
+            return (prog_if == 0x01) ? "SATA AHCI" : "SATA";
+        case 0x07:
+            return "SAS";
+        case 0x08:
+            return (prog_if == 0x02) ? "NVMe" : "NVM";
+        }
+        break;
+    case 0x02: // network
+        switch (subclass)
+        {
+        case 0x00:
+            return "Ethernet";
+        case 0x80:
+            return "wireless/other";
+        }
+        break;
+    case 0x03: // display
+        switch (subclass)
+        {
+        case 0x00:
+            return "VGA";
+        case 0x01:
+            return "XGA";
+        case 0x02:
+            return "3D";
+        }
+        break;
+    case 0x06: // bridge
+        switch (subclass)
+        {
+        case 0x00:
+            return "host bridge";
+        case 0x01:
+            return "ISA bridge";
+        case 0x04:
+            return "PCI-PCI bridge";
+        }
+        break;
+    case 0x0C: // serial bus
+        switch (subclass)
+        {
+        case 0x03: // USB
+            switch (prog_if)
+            {
+            case 0x00:
+                return "USB UHCI";
+            case 0x10:
+                return "USB OHCI";
+            case 0x20:
+                return "USB EHCI";
+            case 0x30:
+                return "USB xHCI";
+            case 0x40:
+                return "USB4";
+            default:
+                return "USB";
+            }
+        case 0x05:
+            return "SMBus";
+        case 0x07:
+            return "IPMI";
+        }
+        break;
+    case 0x0D: // wireless
+        switch (subclass)
+        {
+        case 0x10:
+            return "802.11a";
+        case 0x11:
+            return "802.11b";
+        case 0x20:
+            return "802.11";
+        }
+        break;
+    }
+    return "";
+}
+
 namespace
 {
 
@@ -744,6 +836,12 @@ void PciEnumerate()
         arch::SerialWriteHex(d.prog_if);
         arch::SerialWrite(" (");
         arch::SerialWrite(PciClassName(d.class_code));
+        const char* detail = PciSubclassDetail(d.class_code, d.subclass, d.prog_if);
+        if (detail[0] != 0)
+        {
+            arch::SerialWrite(" / ");
+            arch::SerialWrite(detail);
+        }
         arch::SerialWrite(")");
 
         // BAR0 — the "main" MMIO window for most endpoints. Header-type-1

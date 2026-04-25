@@ -26,6 +26,7 @@
 
 #include "../arch/x86_64/serial.h"
 #include "../core/klog.h"
+#include "../core/log_names.h"
 #include "../drivers/storage/block.h"
 
 namespace duetos::fs::ext4
@@ -425,6 +426,7 @@ void ReadGroup0AndRootInode(Volume& v)
     v.root_inode_valid = true;
     arch::SerialWrite("[ext4]   root_inode mode=");
     arch::SerialWriteHex(v.root_inode.mode);
+    ::duetos::core::SerialWriteInodeMode(v.root_inode.mode);
     arch::SerialWrite(" type=");
     arch::SerialWrite(InodeModeType(v.root_inode.mode));
     arch::SerialWrite(" size=");
