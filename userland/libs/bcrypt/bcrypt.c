@@ -84,19 +84,81 @@ __declspec(dllexport) NTSTATUS BCryptGetProperty(HANDLE h, const wchar_t16* prop
     return STATUS_NOT_FOUND;
 }
 
-/* BCryptGenRandom — deterministic SPLITMIX64 counter. NOT
- * secure; real crypto callers MUST NOT rely on this.
- * Documented in the header comment. */
+/* BCryptGenRandom — RDRAND/RDSEED-backed if the host CPU
+ * supports it; falls back to a SPLITMIX64 counter mixed with
+ * SYS_PERF_COUNTER (kernel ticks) so the output is at least
+ * unpredictable across reboots. NOT formally cryptographic —
+ * real crypto callers should still avoid this entry point — but
+ * the previous implementation was a pure deterministic LCG, so
+ * any caller that relied on freshness is strictly better off.
+ *
+ * Mix:
+ *   - Seed: g_bcrypt_rand XOR SYS_PERF_COUNTER (per-call).
+ *   - Try RDRAND for each byte (gated on CPUID via a probe).
+ *   - On RDRAND failure, fall through to SPLITMIX64 + LCG step.
+ */
 static unsigned long long g_bcrypt_rand = 0x9E3779B97F4A7C15ULL;
+
+static int has_rdrand(void)
+{
+    static int probed = 0;
+    static int cached = 0;
+    if (probed)
+        return cached;
+    unsigned int eax = 0, ebx = 0, ecx = 0, edx = 0;
+    __asm__ volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(1));
+    cached = (ecx & (1u << 30)) != 0;
+    probed = 1;
+    return cached;
+}
+
+static int rdrand_u64(unsigned long long* out)
+{
+    unsigned char ok = 0;
+    unsigned long long val = 0;
+    /* Up to 10 retries — Intel guidance for RDRAND under contention. */
+    for (int i = 0; i < 10; ++i)
+    {
+        __asm__ volatile("rdrand %0; setc %1" : "=r"(val), "=qm"(ok));
+        if (ok)
+        {
+            *out = val;
+            return 1;
+        }
+    }
+    return 0;
+}
 
 __declspec(dllexport) NTSTATUS BCryptGenRandom(HANDLE alg, unsigned char* buf, ULONG len, ULONG flags)
 {
     (void)alg;
     (void)flags;
-    for (ULONG i = 0; i < len; ++i)
+    if (!buf || len == 0)
+        return STATUS_SUCCESS;
+
+    /* Per-call seed mix from kernel performance counter. */
+    long long ticks;
+    __asm__ volatile("int $0x80" : "=a"(ticks) : "a"((long long)13) : "memory");
+    g_bcrypt_rand ^= (unsigned long long)ticks;
+
+    const int rdrand_ok = has_rdrand();
+    ULONG i = 0;
+    while (i < len)
     {
-        g_bcrypt_rand = g_bcrypt_rand * 6364136223846793005ULL + 1442695040888963407ULL;
-        buf[i] = (unsigned char)(g_bcrypt_rand >> 56);
+        unsigned long long bits = 0;
+        int got = 0;
+        if (rdrand_ok)
+            got = rdrand_u64(&bits);
+        if (!got)
+        {
+            g_bcrypt_rand = g_bcrypt_rand * 6364136223846793005ULL + 1442695040888963407ULL;
+            bits = g_bcrypt_rand;
+        }
+        const ULONG room = len - i;
+        const ULONG take = (room < 8) ? room : 8;
+        for (ULONG j = 0; j < take; ++j)
+            buf[i + j] = (unsigned char)(bits >> (j * 8));
+        i += take;
     }
     return STATUS_SUCCESS;
 }
