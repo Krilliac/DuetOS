@@ -1,3 +1,29 @@
+/*
+ * DuetOS — ACPI table discovery: implementation.
+ *
+ * Companion to acpi.h — see there for the public discovery API
+ * (FindRsdp, MapXsdtEntries, the MADT/HPET/MCFG getters).
+ *
+ * WHAT
+ *   Locates the ACPI Root System Description Pointer in either
+ *   the EBDA region or the legacy 0xE0000-0xFFFFF window, walks
+ *   the XSDT (or RSDT on pre-2.0 firmware) it points at, and
+ *   exposes lookups for the tables we currently consume: MADT
+ *   (LAPIC/IOAPIC/IRQ overrides), HPET (timer base), MCFG (PCIe
+ *   ECAM base), FADT (IAPC boot flags).
+ *
+ * HOW
+ *   Tables get checksummed before any contents are trusted —
+ *   `AcpiTableChecksum` is the gatekeeper. Each per-table
+ *   parser knows the wire layout from the ACPI 6.x spec; we
+ *   never include vendor headers for them.
+ *
+ *   AML execution lives in aml.cpp; this file owns only the
+ *   static-data tables. The split is deliberate: AML touches
+ *   I/O ports and SMM-adjacent state, table parsing is
+ *   read-only.
+ */
+
 #include "acpi.h"
 
 #include "../arch/x86_64/cpu.h"

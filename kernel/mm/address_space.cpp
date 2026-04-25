@@ -1,3 +1,30 @@
+/*
+ * DuetOS — per-process address space: implementation.
+ *
+ * Companion to address_space.h — see there for the AddressSpace
+ * struct and the kernel-half vs user-half split rules.
+ *
+ * WHAT
+ *   An `AddressSpace` is one PML4 root + the bookkeeping needed
+ *   to map/unmap pages into it. The kernel half (top 256 PML4
+ *   entries) is shared across every AddressSpace via shared
+ *   high-half tables installed at boot; the user half is
+ *   per-process and zeroed at create time.
+ *
+ * HOW
+ *   `Create` allocates a fresh PML4 frame, copies the kernel-
+ *   half pointers from the boot PML4, and zeroes the user
+ *   half. `Switch` writes CR3. `MapUserPage` /
+ *   `UnmapUserPage` are thin wrappers that gate on "this VA
+ *   is in the user half" before delegating to paging.cpp's
+ *   walk-or-create.
+ *
+ *   Teardown (`Destroy`) walks the user half and frees every
+ *   leaf frame, then every intermediate page-table frame, then
+ *   the PML4 itself. The kernel half is left alone — it's
+ *   shared.
+ */
+
 #include "address_space.h"
 
 #include "../arch/x86_64/cpu.h"

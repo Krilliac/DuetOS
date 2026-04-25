@@ -1,3 +1,27 @@
+/*
+ * DuetOS — ext4 read-only filesystem driver: implementation.
+ *
+ * Companion to ext4.h — see there for the mount struct and the
+ * read-only API exposed via VFS.
+ *
+ * WHAT
+ *   Mounts an ext4 partition (read-only at v0), parses the
+ *   superblock + block-group descriptors, and exposes inode
+ *   lookups + file reads. Supports the multi-block-directory
+ *   variant (extent-mapped dir blocks instead of linear).
+ *
+ * HOW
+ *   Inode walk: superblock -> bgdesc -> inode table -> inode.
+ *   File reads follow the extent tree at depth >= 1 (linear
+ *   block-list at depth 0). Each block read goes through the
+ *   block-layer cache.
+ *
+ *   No write support at v0. Mount mode is the kernel's
+ *   primary interop with Linux data partitions; write would
+ *   require journal handling which is a large slice on its
+ *   own.
+ */
+
 #include "ext4.h"
 
 #include "../arch/x86_64/serial.h"

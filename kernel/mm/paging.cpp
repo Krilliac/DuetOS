@@ -1,3 +1,37 @@
+/*
+ * DuetOS — 4-level x86_64 paging: implementation.
+ *
+ * Companion to paging.h — see there for the managed page-table
+ * API (`MapKernelPage`, `MapUserPage`, `Unmap`, `WalkResolve`)
+ * and the page-flag bitmask (kPagePresent, kPageWritable, ...).
+ *
+ * WHAT
+ *   Provides the read/write API for the kernel's PML4 trees:
+ *   walking, mapping, and unmapping virtual->physical
+ *   translations at 4 KiB granularity. Operates over the
+ *   in-kernel direct map of physical memory installed by
+ *   boot.S, so a PT entry's frame address is also dereferenced
+ *   directly (no recursive-mapping trickery).
+ *
+ * HOW
+ *   `WalkOrCreate` is the central helper: given a (PML4, va,
+ *   create_missing), it descends 4 levels, allocating a fresh
+ *   frame for each missing intermediate table when
+ *   `create_missing=true`. Map/unmap call it then write the
+ *   leaf PTE. TLB shootdown is local-only at v0; SMP shootdown
+ *   is a planned slice.
+ *
+ *   Bit semantics centralised in `EncodePte` so kPage* flags
+ *   compose into the right PTE layout (NX bit moves between
+ *   levels' high bit, user/writable inherited per level, etc.).
+ *
+ * WHY THIS FILE IS LARGE
+ *   Four levels × (map / unmap / walk / dump) entry points,
+ *   plus the kernel-half / user-half split, plus the W^X
+ *   gating + KASLR-aware mapping helpers. Every path is short;
+ *   they accumulate.
+ */
+
 #include "paging.h"
 
 #include "frame_allocator.h"

@@ -1,3 +1,36 @@
+/*
+ * DuetOS — PCI / PCIe enumeration: implementation.
+ *
+ * Companion to pci.h — see there for the device record shape,
+ * config-space accessors, and the public API
+ * (`PciInit`, `PciFind`, `PciForEach`).
+ *
+ * WHAT
+ *   Walks every (bus, device, function) tuple, reads vendor +
+ *   device + class + BAR config-space, and stashes a `PciDev`
+ *   record per non-empty function. Drivers query the table at
+ *   probe time via class / vendor / device matching.
+ *
+ * HOW
+ *   ECAM (Enhanced Configuration Access Mechanism) is preferred
+ *   when ACPI provides an MCFG entry — it's a flat MMIO
+ *   window; legacy 0xCF8/0xCFC port pair is the fallback for
+ *   pre-PCIe systems. Both paths funnel through `PciCfgRead*`
+ *   so callers never branch.
+ *
+ *   Class-code dispatch lives here too: GPUs (class 0x03) get
+ *   forwarded to the GPU-driver probe chain, NVMe (0x01/0x08)
+ *   to nvme.cpp, AHCI (0x01/0x06) to ahci.cpp, etc. The probe
+ *   chain is per-class, not per-vendor — first matching
+ *   driver wins, then enumeration moves on.
+ *
+ * WHY THIS FILE IS LARGE
+ *   Every probe path lives here (one per class we drive). Each
+ *   is short but the count adds up. The shell `pci` command's
+ *   pretty-printer also lives here so it can read the same
+ *   class-code lookup tables without exporting them.
+ */
+
 #include "pci.h"
 
 #include "../../acpi/acpi.h"

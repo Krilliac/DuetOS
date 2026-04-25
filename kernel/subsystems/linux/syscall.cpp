@@ -1,3 +1,41 @@
+/*
+ * DuetOS — Linux ABI syscall surface: implementation.
+ *
+ * Companion to syscall.h (the Linux-subsystem header next to
+ * this file) — see there for the SYS_* enum mirroring Linux
+ * x86_64 syscall numbers and the dispatch contract.
+ *
+ * WHAT
+ *   Implements (or stubs) every Linux syscall a Linux-flavour
+ *   userland might call via the `syscall` instruction. Numbers
+ *   match upstream Linux x86_64 — they're ABI in the same way
+ *   DuetOS native SYS_* numbers are ABI: never reused, never
+ *   renumbered.
+ *
+ * HOW
+ *   `syscall_entry.S` (in this directory) is the asm stub
+ *   MSR_LSTAR points at. It builds a TrapFrame and calls
+ *   `LinuxSyscallDispatch` here, which is one big switch on
+ *   the syscall number. Each handler either:
+ *     - reuses an existing DuetOS native syscall (most cases:
+ *       Linux read/write/openat translate to SYS_READ etc.),
+ *     - implements Linux semantics directly (mmap flag fan-out,
+ *       futex, signal-set bookkeeping),
+ *     - returns -ENOSYS for genuinely-unsupported entries.
+ *
+ *   The auto-generated header `linux_syscall_table_generated.h`
+ *   provides the full {number, name, supported?} table for the
+ *   coverage scoreboard the boot log emits — same model as
+ *   the Win32 NT-coverage logger.
+ *
+ * WHY THIS FILE IS LARGE
+ *   Linux has ~350 syscalls. Many are short stubs but each
+ *   carries argument-shape conversion (Linux ABI uses rdi/rsi/
+ *   rdx/r10/r8/r9; DuetOS native uses rdi/rsi/rdx). At ~80
+ *   handlers + the dispatch + the coverage logger, ~4.5K lines
+ *   is in line with the file's job.
+ */
+
 #include "syscall.h"
 
 #include "linux_syscall_table_generated.h"

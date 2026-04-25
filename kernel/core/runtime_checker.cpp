@@ -1,3 +1,32 @@
+/*
+ * DuetOS — runtime invariant checker: implementation.
+ *
+ * Companion to runtime_checker.h — see there for the detector
+ * matrix (heap, frames, sched, CRx, canary, stack overflow) and
+ * the policy / report API.
+ *
+ * WHAT
+ *   Periodically (and on demand from the AttackSim path) walks
+ *   kernel-internal data structures looking for invariant
+ *   breaks: corrupted heap headers, bitmap-vs-paging frame
+ *   disagreements, stack canary tampering, control-register
+ *   bits flipped from boot baselines, etc. Each detector emits
+ *   a HealthIssue through `Report` which the policy layer then
+ *   logs / panics / quarantines depending on configured mode.
+ *
+ * HOW
+ *   One detector per banner section. Each detector is read-only
+ *   on the structures it inspects, so it is safe to run from
+ *   the timer-tick context. Detectors that need MSR reads gate
+ *   on CPU support.
+ *
+ * WHY THIS FILE IS LARGE
+ *   ~12 detectors at v0, each with its own walker + reporter.
+ *   The disk-baseline path also caches LBA snapshots used by
+ *   the security/guard write-protector, which adds another
+ *   ~150 lines.
+ */
+
 #include "runtime_checker.h"
 
 #include "../arch/x86_64/cpu.h"

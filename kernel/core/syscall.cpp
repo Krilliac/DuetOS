@@ -1,3 +1,48 @@
+/*
+ * DuetOS — native int-0x80 syscall dispatcher: implementation.
+ *
+ * Companion to syscall.h — see there for the calling convention
+ * (rax=number, rdi/rsi/rdx args, rax return), the SYS_* enum, the
+ * capability gating contract, and the ABI-stability rules.
+ *
+ * WHAT
+ *   `SyscallDispatch` is the C++ entry point the int-0x80 IDT
+ *   vector (0x80, DPL=3) routes into via the shared trap path in
+ *   exceptions.S. It pulls the syscall number out of the trap
+ *   frame's rax, looks up the handler, runs it inside the calling
+ *   task's address space, and writes the return value back into
+ *   the frame's rax slot.
+ *
+ * HOW
+ *   Dispatch is a single big `switch (num)` rather than a
+ *   function-pointer table. Reasons:
+ *     - A dense switch over an enum compiles to a jump table
+ *       anyway.
+ *     - Every handler shares scratch state and early-exit paths
+ *       (klog, capability checks, fault-domain entry/exit)
+ *       without per-handler boilerplate.
+ *     - SYS_* numbers are ABI; a switch makes "added at the tail,
+ *       never reused" visually obvious.
+ *
+ *   Each case typically: (1) checks the caller's capability
+ *   bitmask, (2) translates user pointers through CopyFromUser /
+ *   CopyToUser (which trap-fix #PFs), (3) delegates to a
+ *   subsystem (vfs, sched, win32::*, mm::*) and maps its
+ *   Result<T,E> onto a positive-or-negative-errno return.
+ *
+ *   Trace tags (`klog::Trace("syscall", ...)`) bracket every
+ *   handler. The `loglevel t` shell command turns them on for
+ *   live observability without rebuild.
+ *
+ * WHY THIS FILE IS LARGE
+ *   v0 has ~80 syscalls live; each handler is short (10-40 lines)
+ *   but they accumulate. Splitting per-subsystem would mean the
+ *   dispatch table chases function pointers across TUs at every
+ *   syscall — measurable in tight loops, and the indirection
+ *   breaks the compiler's jump-table optimisation. Keep handlers
+ *   together until profile data argues otherwise.
+ */
+
 #include "syscall.h"
 
 #include "../arch/x86_64/cpu.h"

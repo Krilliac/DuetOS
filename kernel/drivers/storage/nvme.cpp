@@ -1,3 +1,28 @@
+/*
+ * DuetOS — NVMe storage driver: implementation.
+ *
+ * Companion to nvme.h — see there for the device-record shape,
+ * block-layer integration, and v0 polling-IO contract.
+ *
+ * WHAT
+ *   Drives NVMe-over-PCIe controllers: discovers the doorbell
+ *   stride, posts the admin SQ/CQ, identifies the controller
+ *   and namespace 1, then stands up an I/O SQ/CQ for read/write.
+ *   Hooks the block layer so /dev/nvme0n1 appears with a working
+ *   ReadBlock / WriteBlock path.
+ *
+ * HOW
+ *   Polling at v0 — no MSI-X, no interrupt thread. Each
+ *   submission rings the doorbell; the caller spins on the CQ
+ *   head. Acceptable because v0 has only one outstanding I/O
+ *   at a time. MSI-X lands when the block layer grows
+ *   queue-depth > 1.
+ *
+ *   Self-test (`NvmeMarkerSelfTest`) writes + reads a sentinel
+ *   block at boot; failure quarantines the device instead of
+ *   letting later writes corrupt user data.
+ */
+
 #include "nvme.h"
 
 #include "../../arch/x86_64/cpu.h"

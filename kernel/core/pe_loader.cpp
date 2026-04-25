@@ -1,3 +1,45 @@
+/*
+ * DuetOS — PE/COFF loader: implementation.
+ *
+ * Companion to pe_loader.h — see there for the v0 scope statement
+ * (which PE features are supported, which are intentionally cut)
+ * and the caller-facing API (PeLoad, PeReport).
+ *
+ * WHAT
+ *   Maps a PE32+ image into a fresh address space, applies base
+ *   relocations, resolves IAT entries (chasing forwarders through
+ *   the per-process DLL table; falling back to the Win32 thunks
+ *   page for unresolved imports), and returns the entry point VA
+ *   for the spawn path to start a Task on.
+ *
+ * HOW
+ *   Top-down inside `PeLoad`. Numbered phases match the section
+ *   banners (`// 1. Validate headers`, `// 2. Reserve image`,
+ *   etc.). Each phase reads from the byte buffer via the
+ *   `LeU16/32/64` helpers — never via casts to packed structs —
+ *   so the loader survives unaligned headers without UB.
+ *
+ *   IAT resolution priority (slice-6 onward):
+ *     loaded DLL EATs (chase forwarders)
+ *       -> Win32ThunksLookupKind          (in-kernel thunks page)
+ *         -> IsLikelyDataImport ? data-miss landing pad
+ *                               : miss-logger thunk
+ *
+ *   Companion files:
+ *     pe_exports.cpp   — EAT parsing + name-table binary search
+ *     dll_loader.cpp   — preload table for kernel32 / ntdll / etc.
+ *     win32/thunks.cpp — kernel-resident IAT thunk page
+ *     win32/proc_env.cpp — proc-env page (argv, cmdline, etc.)
+ *
+ * WHY THIS FILE IS LARGE
+ *   PE has many directories (imports, exports, base relocs, TLS,
+ *   resources, exception, debug). Each gets its own walker. A
+ *   real-world MSVC PE exercises most of them; the v0 PE we ship
+ *   only the bare minimum, but the diagnostic path (`PeReport`)
+ *   walks every directory and emits a coverage table on boot —
+ *   that diagnostic surface is what pushes line count up.
+ */
+
 #include "pe_loader.h"
 
 #include "../arch/x86_64/serial.h"
@@ -6,7 +48,8 @@
 #include "../mm/page.h"
 #include "../mm/paging.h"
 #include "../security/guard.h"
-#include "../subsystems/win32/stubs.h"
+#include "../subsystems/win32/proc_env.h"
+#include "../subsystems/win32/thunks.h"
 #include "cleanroom_trace.h"
 #include "klog.h"
 #include "pe_exports.h"
@@ -438,7 +481,7 @@ PeStatus PeValidate(const u8* file, u64 file_len)
 //   1. Read the DLL name from its Name RVA.
 //   2. For each function entry (by-name; ordinal imports get
 //      rejected in v0), read the hint/name from the IBN, look
-//      up the stub VA in win32::Win32StubsLookup.
+//      up the stub VA in win32::Win32ThunksLookup.
 //   3. Write the stub VA to the corresponding IAT slot by
 //      finding the user page's physical frame and poking
 //      through the kernel's direct map (the user-level
@@ -785,7 +828,7 @@ bool ParseForwarder(const char* fwd, char* out_dll, ParsedForwarder& out)
 // Stage-2 slice 6+8: try the caller's preloaded DLL array before
 // falling through to the flat stubs table. Returns true and
 // writes *out_va on hit; returns false on miss so ResolveImports
-// falls through to Win32StubsLookupKind unchanged.
+// falls through to Win32ThunksLookupKind unchanged.
 //
 // Forwarder exports (where the EAT RVA points inside the export
 // directory to a "Dll.Target" string rather than to a real code
@@ -1061,7 +1104,7 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
             // the DLL's export VA directly — no trampoline page,
             // no syscall round-trip — the PE's indirect call
             // lands straight in the DLL's code. Misses fall
-            // through to Win32StubsLookupKind, preserving all
+            // through to Win32ThunksLookupKind, preserving all
             // existing stub-table behaviour.
             //
             // For ordinal imports we ask the EAT directly; the
@@ -1081,7 +1124,7 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
                 SerialWriteHex(stub_va);
                 SerialWrite("\n");
             }
-            else if (!win32::Win32StubsLookupKind(dll_name, fn_name, &stub_va, &is_noop_stub))
+            else if (!win32::Win32ThunksLookupKind(dll_name, fn_name, &stub_va, &is_noop_stub))
             {
                 // Unresolved import. Two flavours land here:
                 //   - Functions -> miss-logger thunk (R-X). Called,
@@ -1092,8 +1135,8 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
                 // Picking the right bucket is a name-mangling
                 // heuristic (`?...@@3...` == MSVC global data).
                 const bool is_data = win32::IsLikelyDataImport(fn_name);
-                const bool ok =
-                    is_data ? win32::Win32StubsLookupDataCatchAll(&stub_va) : win32::Win32StubsLookupCatchAll(&stub_va);
+                const bool ok = is_data ? win32::Win32ThunksLookupDataCatchAll(&stub_va)
+                                        : win32::Win32ThunksLookupCatchAll(&stub_va);
                 if (!ok)
                 {
                     core::CleanroomTraceRecord("pe-loader", "import-unresolved-fatal", h.image_base, first_thunk,
@@ -1390,7 +1433,7 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
     // The stub byte table has outgrown a single 4 KiB page (render
     // work: filled Rectangle/Ellipse + UTF-16 paint + message loop
     // etc.), so we now allocate two contiguous frames and map both
-    // R-X. `Win32StubsPopulate` writes the full `sizeof(kStubsBytes)`
+    // R-X. `Win32ThunksPopulate` writes the full `sizeof(kThunksBytes)`
     // into the direct-map window; any trailing bytes in the second
     // page beyond the stub table stay zeroed from the pre-clear.
     if (ps == PeStatus::ImportsPresent)
@@ -1404,10 +1447,10 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
         auto* stubs_direct = static_cast<u8*>(PhysToVirt(stubs_frame));
         for (u64 i = 0; i < 2 * kPageSize; ++i)
             stubs_direct[i] = 0;
-        win32::Win32StubsPopulate(stubs_direct);
+        win32::Win32ThunksPopulate(stubs_direct);
         // R-X on both pages: no kPageWritable (W^X), no kPageNoExecute.
-        AddressSpaceMapUserPage(as, win32::kWin32StubsVa, stubs_frame, kPagePresent | kPageUser);
-        AddressSpaceMapUserPage(as, win32::kWin32StubsVa + kPageSize, stubs_frame + kPageSize,
+        AddressSpaceMapUserPage(as, win32::kWin32ThunksVa, stubs_frame, kPagePresent | kPageUser);
+        AddressSpaceMapUserPage(as, win32::kWin32ThunksVa + kPageSize, stubs_frame + kPageSize,
                                 kPagePresent | kPageUser);
 
         if (!ResolveImports(file, file_len, h, as, preloaded_dlls, preloaded_dll_count))

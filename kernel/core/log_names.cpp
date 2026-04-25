@@ -1,3 +1,26 @@
+/*
+ * DuetOS — log-name lookup tables: implementation.
+ *
+ * Companion to log_names.h — see there for the API.
+ *
+ * WHAT
+ *   Translates kernel-internal numeric IDs (syscall numbers,
+ *   capability bits, exception vectors, fault-domain tags) into
+ *   human-readable strings for the boot log, panic dump, and
+ *   shell `inspect` commands.
+ *
+ * HOW
+ *   One `static constexpr` lookup table per ID space, paired
+ *   with a `*ToName(id)` accessor. Tables are kept in numeric
+ *   order so a binary search compiles into a tight jump (most
+ *   are small enough that linear scan is faster).
+ *
+ * WHY THIS FILE IS LARGE
+ *   The tables are the file. Adding a SYS_* / cap / vector
+ *   means appending a row here. The size is a direct readout
+ *   of "how much of the kernel has names."
+ */
+
 #include "log_names.h"
 
 #include "../arch/x86_64/serial.h"

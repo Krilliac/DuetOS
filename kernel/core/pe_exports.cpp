@@ -1,3 +1,22 @@
+/*
+ * DuetOS — PE Export Address Table parser: implementation.
+ *
+ * Companion to pe_exports.h — see there for the public API
+ * (`PeParseExports`, `PeExportLookupName`).
+ *
+ * WHAT
+ *   Walks a PE's IMAGE_EXPORT_DIRECTORY and produces three
+ *   parallel arrays the resolver uses: name-table, ordinal-
+ *   table, EAT (RVAs). Distinguishes own-module entries from
+ *   forwarders (`Dll.Func` / `Dll.#N` strings inside .edata).
+ *
+ * HOW
+ *   `LeU16/32/64` byte-level readers (no packed-struct casts);
+ *   header offsets hand-coded rather than pulled from <winnt.h>
+ *   to keep the kernel self-contained. `PeExportLookupName` is
+ *   a binary search over the (sorted) name table.
+ */
+
 #include "pe_exports.h"
 
 #include "../arch/x86_64/serial.h"

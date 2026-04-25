@@ -1,3 +1,30 @@
+/*
+ * DuetOS — kernel breakpoint subsystem: implementation.
+ *
+ * Companion to breakpoints.h — see there for the phased v0
+ * roadmap (per-task DR state, suspend/inspect/resume/step,
+ * static KBP_PROBE macros, kCapDebug gating).
+ *
+ * WHAT
+ *   Hardware-DR-backed breakpoints exposed both as a kernel-
+ *   internal probe API (`KBP_PROBE` macros — code-armed traps
+ *   that take a struct dump on hit) and as a syscall surface
+ *   (SYS_BP_*). Per-task DR state stays with each Task and is
+ *   reloaded on context switch.
+ *
+ * HOW
+ *   `BpArm` writes DR0..DR3 + DR7 enable bits for the calling
+ *   task. On #DB, the trap dispatcher (traps.cpp) calls into
+ *   here to look up which probe fired and run its callback
+ *   (suspend / log / step) without leaving ring 0.
+ *
+ *   Static probes use the KBP_PROBE_* macros: at compile time
+ *   they emit a row in a `.kbp_probes` section the linker
+ *   gathers; at boot, `BpScanStaticProbes` walks the section
+ *   and arms each enabled probe. Disabled probes cost only
+ *   that section row (a few bytes).
+ */
+
 #include "breakpoints.h"
 
 #include "../arch/x86_64/smp.h"

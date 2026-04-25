@@ -1,3 +1,33 @@
+/*
+ * DuetOS — x86_64 trap dispatcher: implementation.
+ *
+ * Companion to traps.h — see there for TrapFrame layout (which
+ * matches the push order in exceptions.S) and the per-vector
+ * dispatch contract.
+ *
+ * WHAT
+ *   Single C++ entry point `TrapDispatch`, called from the
+ *   shared `isr_common` stub in exceptions.S after the per-
+ *   vector preamble has normalised the frame. Routes to the
+ *   right handler based on `frame->vector`:
+ *     - 0..31  CPU exceptions (#PF, #UD, #GP, ...)
+ *     - 32..47 IRQs from PIC/IOAPIC (kept for legacy fallback)
+ *     - 0x80   syscall gate -> core::SyscallDispatch
+ *     - other  spurious / IPI / debug
+ *
+ * HOW
+ *   Per-vector handlers are inline switch arms. The big ones
+ *   (#PF / #GP / #DB) get their own helpers because they have
+ *   non-trivial logic: extable lookup, fault-domain entry/exit,
+ *   user-pointer fault recovery (cooperating with mm/user_copy.S),
+ *   per-task DR* state for hardware breakpoints.
+ *
+ *   Crash-dump path: on an unrecoverable fault, the dispatcher
+ *   captures the frame, walks the kernel stack via the embedded
+ *   symbol table, and emits a BEGIN/END bracketed dump to
+ *   serial. See core/panic.cpp for the dump formatter.
+ */
+
 #include "traps.h"
 
 #include "cpu.h"

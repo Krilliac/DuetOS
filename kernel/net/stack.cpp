@@ -1,3 +1,37 @@
+/*
+ * DuetOS — TCP/IP stack: implementation.
+ *
+ * Companion to stack.h — see there for the public socket-style
+ * API (open / connect / send / recv / close) and the per-
+ * connection state record.
+ *
+ * WHAT
+ *   In-kernel implementation of Ethernet -> ARP -> IPv4 -> ICMP,
+ *   UDP, and TCP. Receives packets from the driver layer
+ *   (drivers/net/net.cpp), parses headers, demultiplexes by
+ *   protocol + (saddr, sport, daddr, dport) tuple, and feeds
+ *   the per-connection state machine.
+ *
+ * HOW
+ *   Single big RX path: `NetStackInputPacket` walks Ethernet,
+ *   IPv4, then per-protocol. TCP gets its own state machine
+ *   (closed / syn-sent / established / fin-wait / ...) with
+ *   one block per state in the dispatch switch. ARP cache,
+ *   route table, and the connection table are flat arrays at
+ *   v0 — the count is small enough that linear scan is faster
+ *   than building hashes.
+ *
+ *   DHCP client + DNS resolver live here too; both are short
+ *   state machines driven by the same RX path.
+ *
+ * WHY THIS FILE IS LARGE
+ *   Each protocol's full RX + TX path lives here. TCP alone is
+ *   ~600 lines (the state machine + retransmission timer +
+ *   sequence-space bookkeeping). Splitting per-protocol is on
+ *   the table once a per-protocol unit-test scaffold exists;
+ *   for now they share helper functions and stay together.
+ */
+
 #include "stack.h"
 #include "wifi.h"
 

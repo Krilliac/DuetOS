@@ -1,3 +1,40 @@
+/*
+ * DuetOS — kernel scheduler: implementation.
+ *
+ * Companion to sched.h — see there for Task struct, scheduling
+ * classes, and the public API (`Create`, `Yield`, `Sleep`,
+ * `Exit`, wait queues, mutexes).
+ *
+ * WHAT
+ *   Round-robin scheduler with per-CPU runqueues. Drives
+ *   preemption from the LAPIC timer tick. Owns the Task table
+ *   (fixed-size pool, no dynamic growth at v0), the per-CPU
+ *   `current` pointer, the global wait-queue list, and the
+ *   blocking-primitive plumbing (mutex / event / sleep / join).
+ *
+ * HOW
+ *   `Schedule()` is called from the timer-tick handler and from
+ *   any explicit yield path. It picks the next runnable Task
+ *   from the current CPU's runqueue and calls `ContextSwitch`
+ *   (in sched/context_switch.S) to swap stacks. The chosen
+ *   task's RSP is loaded; whatever was pushed there last (the
+ *   callee-saved set + return address) is popped and returned
+ *   to.
+ *
+ *   Task lifecycle banners (`// === create / fork / wait / exit`)
+ *   group the lifecycle entry points. Wait-queue helpers
+ *   (`WaitQueueWait`, `WaitQueueWake`) sit in their own banner
+ *   — they're shared by mutex / event / sleep.
+ *
+ * WHY THIS FILE IS LARGE
+ *   Scheduler v0 + blocking primitives v0 + per-CPU bring-up
+ *   + Win32 thread-create plumbing all live here. Each is a
+ *   handful of functions; the count adds up. Splitting per
+ *   concern would scatter related state (the Task table and
+ *   the wait-queue list both need to walk the same set), so
+ *   they stay co-located.
+ */
+
 #include "sched.h"
 
 #include "../arch/x86_64/cpu.h"

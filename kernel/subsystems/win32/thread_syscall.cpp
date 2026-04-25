@@ -15,7 +15,7 @@
 #include "../../mm/page.h"
 #include "../../mm/paging.h"
 #include "../../sched/sched.h"
-#include "stubs.h"
+#include "thunks.h"
 
 namespace duetos::subsystems::win32
 {

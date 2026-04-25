@@ -1,3 +1,30 @@
+/*
+ * DuetOS — security guard: implementation.
+ *
+ * Companion to guard.h — see there for the guard mode enum
+ * (Off / Audit / Enforce), the policy update API, and the
+ * subsystem hooks (image-load gate, sensitive-LBA write
+ * gate).
+ *
+ * WHAT
+ *   Centralised security policy point. Every PE / ELF load
+ *   passes through `GuardCheckImageLoad`; every block-layer
+ *   write to a "sensitive" LBA range (boot sector, GPT, NVMe
+ *   IDENTIFY mirror) passes through `GuardCheckBlockWrite`.
+ *   Each gate either allows, audit-logs, or denies based on
+ *   the current mode + the AttackSim escalation state.
+ *
+ * HOW
+ *   Mode is a single atomic enum, mutable from the shell
+ *   `guard` command. AttackSim runs flip the mode to Enforce
+ *   (image guard) and Deny (block-write guard) so subsequent
+ *   adversarial probes hit the same denial path real attacks
+ *   would.
+ *
+ *   Sensitive-LBA table is built at boot from the GPT parser
+ *   + a hand-coded list of NVMe/AHCI metadata regions.
+ */
+
 #include "guard.h"
 
 #include "../arch/x86_64/cpu.h"

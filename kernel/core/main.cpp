@@ -1,3 +1,44 @@
+/*
+ * DuetOS — kernel entry + boot orchestrator.
+ *
+ * WHAT
+ *   The single file that wires every kernel subsystem together.
+ *   `kernel_main` is what `boot.S` jumps to once long mode +
+ *   higher-half mapping are live. From here every other subsystem
+ *   (mm, sched, drivers, FS, Win32) is brought up in dependency
+ *   order, then the scheduler is started and control transfers
+ *   to the idle loop / first user task.
+ *
+ * HOW
+ *   The body of `kernel_main` is intentionally one long top-down
+ *   sequence rather than a tree of init routines. Boot order is
+ *   load-bearing — if frame_allocator runs before the Multiboot2
+ *   memory map is parsed, you get a triple fault — and the linear
+ *   form makes the order legible at a glance. Read the file from
+ *   `kernel_main` downward; each block has a `// === Phase: <name>`
+ *   header.
+ *
+ *   Subsystems split into their own TUs; this file only owns the
+ *   *call sequence*. The order is approximately:
+ *     early console -> physmem map -> paging -> heap -> IDT/GDT ->
+ *     APIC + timer -> SMP AP bringup -> scheduler online -> drivers
+ *     (PCIe, NVMe, GPU, input) -> VFS -> Win32 / Linux subsystems
+ *     -> first user task.
+ *
+ *   Build-flag knobs: DUETOS_PANIC_DEMO / DUETOS_TRAP_DEMO /
+ *   DUETOS_CANARY_DEMO / DUETOS_ATTACK_SIM toggle deliberate
+ *   late-boot stress paths for testing the recovery / dump
+ *   plumbing. None of them ship in a release preset.
+ *
+ * WHY THIS FILE IS LARGE
+ *   The kernel has a lot of subsystems and they all need to be
+ *   wired in *somewhere*. We could decompose `kernel_main` into
+ *   per-phase helpers, but the trade is "shorter file" against
+ *   "boot order is now spread over a dozen TUs" — and getting boot
+ *   order wrong is a triple-fault, not a unit-test failure. One
+ *   long readable function wins.
+ */
+
 #include "types.h"
 #include "../acpi/acpi.h"
 #include "../acpi/aml.h"
@@ -83,7 +124,7 @@
 #include "../subsystems/linux/ring3_smoke.h"
 #include "../subsystems/linux/syscall.h"
 #include "../subsystems/win32/gdi_objects.h"
-#include "../subsystems/win32/stubs.h"
+#include "../subsystems/win32/nt_coverage.h"
 #include "dll_loader.h"
 #include "shell.h"
 #include "syscall.h"

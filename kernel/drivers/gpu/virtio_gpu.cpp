@@ -1,3 +1,29 @@
+/*
+ * DuetOS — virtio-gpu driver (host-emulated GPU): implementation.
+ *
+ * Companion to virtio_gpu.h — see there for the controller
+ * record and the framebuffer surface contract.
+ *
+ * WHAT
+ *   Drives the virtio-gpu PCI device QEMU exposes when run with
+ *   `-vga virtio`. Provides a real 2D framebuffer the
+ *   compositor renders into and a working flush path
+ *   (`TRANSFER_TO_HOST_2D` + `RESOURCE_FLUSH`).
+ *
+ * HOW
+ *   Two virtqueues: control (commands) and cursor. Each command
+ *   is built into a guest buffer, descriptored into the queue,
+ *   and the device is kicked via the doorbell. We poll the
+ *   used-ring for completions — interrupt routing is a future
+ *   slice.
+ *
+ *   Resource lifecycle: at init we create one 2D resource
+ *   sized to the boot-elected framebuffer dimensions, attach
+ *   guest backing, and use it as the scanout target. Every
+ *   compositor flush is a transfer + flush pair on that
+ *   resource.
+ */
+
 #include "virtio_gpu.h"
 
 #include "../../arch/x86_64/serial.h"

@@ -1,3 +1,24 @@
+/*
+ * DuetOS — `inspect` umbrella command: implementation.
+ *
+ * Companion to inspect.h — see there for the subcommand list
+ * (syscalls / opcodes / arm / ...) used by the shell.
+ *
+ * WHAT
+ *   Kernel-internal "look at yourself" command set. Each
+ *   subcommand walks one of the kernel's metadata tables (the
+ *   syscall name list, the opcode mnemonic table, the per-CPU
+ *   arm state) and prints it for human consumption — no
+ *   syscall round-trip, all reads happen in ring 0 and dump
+ *   to the active console.
+ *
+ * HOW
+ *   Argument tokens dispatch into per-table walkers via a
+ *   small if-chain in `Inspect`. Each walker iterates its
+ *   table, formats one row per entry, and uses the klog /
+ *   console writers for output.
+ */
+
 #include "inspect.h"
 
 #include "../arch/x86_64/serial.h"

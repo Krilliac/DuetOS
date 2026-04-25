@@ -1,3 +1,33 @@
+/*
+ * DuetOS — Win32 GDI objects (DC / brush / pen / bitmap):
+ * implementation.
+ *
+ * Companion to gdi_objects.h — see there for the GDI handle
+ * shapes and how the syscall layer (SYS_GDI_*) consumes them.
+ *
+ * WHAT
+ *   Backs every gdi32!* import that builds or consumes a GDI
+ *   object handle: CreateCompatibleDC / CreateCompatibleBitmap
+ *   / CreateSolidBrush / CreatePen / SelectObject / DeleteDC /
+ *   DeleteObject. Plus the DC's colour state (text colour, bg
+ *   colour, bg mode) and the stock-object table.
+ *
+ * HOW
+ *   Each GDI handle is a kernel-internal index into a per-kind
+ *   object pool (DC pool, brush pool, pen pool, bitmap pool).
+ *   SelectObject swaps the DC's slot for the new handle and
+ *   returns the previous one — matching Windows' contract.
+ *
+ *   Drawing primitives consult the DC's currently-selected pen
+ *   + brush rather than caller-supplied colours, which is why
+ *   Rectangle / Ellipse / FillRect produce the right output
+ *   without an explicit colour arg.
+ *
+ * WHY THIS FILE IS LARGE
+ *   ~25 GDI APIs at v0, each with handle validation + pool
+ *   bookkeeping + syscall-side error mapping.
+ */
+
 #include "gdi_objects.h"
 
 #include "../../arch/x86_64/serial.h"

@@ -1,3 +1,25 @@
+/*
+ * DuetOS — PS/2 keyboard driver: implementation.
+ *
+ * Companion to ps2kbd.h — see there for the input-event shape
+ * and the consumer chain (login gate -> shell -> active task).
+ *
+ * WHAT
+ *   First end-to-end IRQ-driven driver. Hooks IRQ1, reads
+ *   scancodes from port 0x60, translates Set 1 scancodes
+ *   (with E0/E1 escape handling) into kKey enums + ASCII, and
+ *   drops events into the input ring the kbd-reader thread
+ *   pulls from.
+ *
+ * HOW
+ *   IRQ handler is a thin "read scancode, push to ring, EOI";
+ *   all decoding (modifier tracking, dead-key handling,
+ *   layout) happens in the consumer thread to keep the IRQ
+ *   path short. Layout table lives at the top of the file —
+ *   v0 is US ANSI; non-US layouts are an additional table
+ *   away.
+ */
+
 #include "ps2kbd.h"
 
 #include "../../acpi/acpi.h"

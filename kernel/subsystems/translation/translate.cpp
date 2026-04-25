@@ -1,3 +1,32 @@
+/*
+ * DuetOS — ABI translation unit: implementation.
+ *
+ * Companion to translate.h — see there for the public
+ * translation entry points (Linux <-> DuetOS native, NT ->
+ * DuetOS native).
+ *
+ * WHAT
+ *   Bidirectional conversion between foreign-ABI syscall
+ *   numbers / argument shapes / errno values and the DuetOS
+ *   native equivalents. Used by:
+ *     - the Linux subsystem (`syscall` instruction path) when
+ *       a SYS_NT_INVOKE arrives from a Win32 PE that wants to
+ *       reuse the Linux ABI (rare but supported);
+ *     - the NT->Linux translator that lets ntdll Nt* calls
+ *       fall through to a Linux SYS_* on the native side.
+ *
+ * HOW
+ *   Translation tables are static arrays sorted by foreign
+ *   syscall number. Argument-shape conversion (fd ordering,
+ *   open() flags, mmap protection bits) is per-syscall hand
+ *   code — too irregular to drive from a generic table.
+ *
+ *   Errno mapping: Linux errno is positive, NTSTATUS is a
+ *   sign-bit-encoded 32-bit space, DuetOS native uses a
+ *   `Result<T, ErrorCode>` enum class. This file owns the
+ *   tables + helpers that map between them.
+ */
+
 #include "translate.h"
 
 #include "../../arch/x86_64/serial.h"

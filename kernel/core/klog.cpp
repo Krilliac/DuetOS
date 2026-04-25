@@ -1,3 +1,30 @@
+/*
+ * DuetOS — kernel structured logging: implementation.
+ *
+ * Companion to klog.h — see there for the line format, severity
+ * levels, and design rationale.
+ *
+ * WHAT
+ *   Backs the `klog::Log* / Trace / Debug / Warn / Error` calls.
+ *   Lines are emitted to the serial port immediately and copied
+ *   into a fixed-size in-kernel ring (`g_log_ring`) so the panic
+ *   path can dump the last N entries to serial after a halt.
+ *
+ * HOW
+ *   Single-shot serial writer + fixed-shape formatters (no
+ *   variadic printf — too much surface for kernel code). Severity
+ *   threshold is mutable at runtime (`SetLogThreshold`). An
+ *   optional secondary sink (`g_tee`) forwards level >= a min to
+ *   a registered consumer (e.g. the framebuffer console once
+ *   it's up).
+ *
+ * WHY THIS FILE IS LARGE
+ *   One formatter per argument shape (no value, +u64, +string,
+ *   +pair). Each is short but they accumulate. Plus the
+ *   timestamp helpers, the colour-SGR wrapping, the ring + sink
+ *   plumbing.
+ */
+
 #include "klog.h"
 
 #include "../arch/x86_64/hpet.h"
