@@ -2,6 +2,11 @@
 
 #include "../../core/types.h"
 
+namespace duetos::cpu
+{
+struct PerCpu;
+}
+
 /*
  * SMP AP bring-up.
  *
@@ -73,5 +78,17 @@ void SmpSendIpi(u8 target_apic_id, u32 icr_low);
 /// is already committed to halting; tolerating a stuck IPI is
 /// better than recursing into another panic.
 void PanicBroadcastNmi();
+
+/// Look up a CPU's PerCpu struct by `cpu_id`. Returns the BSP for
+/// `cpu_id == 0` (always non-null after PerCpuInitBsp), the matching
+/// AP for higher ids, or nullptr if that slot was never allocated.
+/// Used by the panic dump path to walk every peer CPU's snapshot
+/// buffer; safe at any context (pure pointer-table read).
+cpu::PerCpu* SmpGetPercpu(u32 cpu_id);
+
+/// Highest cpu_id ever allocated + 1 (i.e. the upper bound of a
+/// `for (id = 0; id < SmpCpuIdLimit(); ++id)` loop). 1 if only the
+/// BSP has come up.
+u32 SmpCpuIdLimit();
 
 } // namespace duetos::arch

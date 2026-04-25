@@ -5,9 +5,22 @@
 #include "../arch/x86_64/serial.h"
 #include "../arch/x86_64/timer.h"
 #include "../cpu/percpu.h"
+#include "../mm/kstack.h"
+#include "../mm/page.h"
+#include "../mm/paging.h"
 #include "../sched/sched.h"
 #include "hexdump.h"
+#include "panic.h"
 #include "symbols.h"
+
+extern "C" duetos::u8 _text_start[];
+extern "C" duetos::u8 _text_end[];
+extern "C" duetos::u8 _rodata_start[];
+extern "C" duetos::u8 _rodata_end[];
+extern "C" duetos::u8 _data_start[];
+extern "C" duetos::u8 _data_end[];
+extern "C" duetos::u8 _bss_start[];
+extern "C" duetos::u8 _bss_end[];
 
 /*
  * DuetOS — diagnostic decoders.
@@ -405,6 +418,273 @@ void WritePteFlags(u64 flags)
         arch::SerialWrite("none");
     }
     arch::SerialWrite("]");
+}
+
+namespace
+{
+
+// Lower bound of the canonical higher-half on x86_64 (sign-extended
+// bit 47). Anything between [0x0000_8000_0000_0000 .. this) is in the
+// non-canonical hole and a kernel access through it would have #GP'd
+// before reaching the dump path; flagging it explicitly tells the
+// operator the value can't possibly be a real pointer.
+constexpr u64 kCanonicalHigherHalfStart = 0xFFFF800000000000ULL;
+constexpr u64 kCanonicalUserMax = 0x0000800000000000ULL;
+constexpr u64 kLowIdentityMapEnd = 0x0000000040000000ULL; // 1 GiB
+constexpr u64 kLowNullPageEnd = 0x0000000000001000ULL;    // 4 KiB
+
+inline bool InRange(u64 va, const u8* lo, const u8* hi)
+{
+    const u64 a = reinterpret_cast<u64>(lo);
+    const u64 b = reinterpret_cast<u64>(hi);
+    return va >= a && va < b;
+}
+
+} // namespace
+
+VaRegion ClassifyVa(u64 va)
+{
+    if (va == 0)
+    {
+        return VaRegion::Null;
+    }
+    // Higher-half kernel buckets first — most specific to least.
+    if (va >= duetos::mm::kKernelVirtualBase)
+    {
+        if (InRange(va, _text_start, _text_end))
+        {
+            return VaRegion::KernelText;
+        }
+        if (InRange(va, _rodata_start, _rodata_end))
+        {
+            return VaRegion::KernelRodata;
+        }
+        if (InRange(va, _data_start, _data_end))
+        {
+            return VaRegion::KernelData;
+        }
+        if (InRange(va, _bss_start, _bss_end))
+        {
+            return VaRegion::KernelBss;
+        }
+        if (va >= duetos::mm::kKernelStackArenaBase)
+        {
+            return VaRegion::KernelStackArena;
+        }
+        if (va >= duetos::mm::kMmioArenaBase)
+        {
+            return VaRegion::KernelMmio;
+        }
+        return VaRegion::KernelDirectMap;
+    }
+    if (va >= kCanonicalHigherHalfStart)
+    {
+        return VaRegion::KernelCanonical;
+    }
+    if (va >= kCanonicalUserMax)
+    {
+        return VaRegion::NonCanonical;
+    }
+    if (va < kLowNullPageEnd)
+    {
+        return VaRegion::LowNullPage;
+    }
+    if (va < kLowIdentityMapEnd)
+    {
+        return VaRegion::LowIdentityMap;
+    }
+    return VaRegion::UserCanonicalLow;
+}
+
+const char* VaRegionName(VaRegion region)
+{
+    switch (region)
+    {
+    case VaRegion::Null:
+        return "null";
+    case VaRegion::LowNullPage:
+        return "null-page";
+    case VaRegion::LowIdentityMap:
+        return "low-id-map";
+    case VaRegion::UserCanonicalLow:
+        return "user-canonical";
+    case VaRegion::NonCanonical:
+        return "non-canonical";
+    case VaRegion::KernelCanonical:
+        return "k.canonical-high";
+    case VaRegion::KernelText:
+        return "k.text";
+    case VaRegion::KernelRodata:
+        return "k.rodata";
+    case VaRegion::KernelData:
+        return "k.data";
+    case VaRegion::KernelBss:
+        return "k.bss";
+    case VaRegion::KernelDirectMap:
+        return "k.directmap";
+    case VaRegion::KernelMmio:
+        return "k.mmio";
+    case VaRegion::KernelStackArena:
+        return "k.stack-arena";
+    }
+    return "unknown";
+}
+
+void WriteVaRegion(u64 va)
+{
+    arch::SerialWrite(" [region=");
+    arch::SerialWrite(VaRegionName(ClassifyVa(va)));
+    arch::SerialWrite("]");
+}
+
+namespace
+{
+
+void ExpectRegion(u64 va, VaRegion expected, const char* what)
+{
+    const VaRegion got = ClassifyVa(va);
+    if (got == expected)
+    {
+        return;
+    }
+    arch::SerialWrite("[va-region-selftest] FAIL ");
+    arch::SerialWrite(what);
+    arch::SerialWrite(" : got=");
+    arch::SerialWrite(VaRegionName(got));
+    arch::SerialWrite(" want=");
+    arch::SerialWrite(VaRegionName(expected));
+    arch::SerialWrite("\n");
+    Panic("core/diag_decode", "VaRegionSelfTest classifier mismatch");
+}
+
+} // namespace
+
+void VaRegionSelfTest()
+{
+    // Coarse buckets — boundaries first, then a representative
+    // interior address per region. Both sides of every transition
+    // are hit so a one-off classifier change can't slip through.
+    ExpectRegion(0, VaRegion::Null, "null");
+    ExpectRegion(0x100, VaRegion::LowNullPage, "low null-page interior");
+    ExpectRegion(0xFFF, VaRegion::LowNullPage, "low null-page edge");
+    ExpectRegion(0x1000, VaRegion::LowIdentityMap, "id-map start");
+    ExpectRegion(0x10000000, VaRegion::LowIdentityMap, "id-map middle");
+    ExpectRegion(0x3FFFFFFF, VaRegion::LowIdentityMap, "id-map end");
+    ExpectRegion(0x40000000, VaRegion::UserCanonicalLow, "user-canonical start");
+    ExpectRegion(0x00007FFFFFFFFFFFULL, VaRegion::UserCanonicalLow, "user-canonical end");
+    ExpectRegion(0x0000800000000000ULL, VaRegion::NonCanonical, "non-canonical start");
+    ExpectRegion(0xFFFF7FFFFFFFFFFFULL, VaRegion::NonCanonical, "non-canonical end");
+    ExpectRegion(0xFFFF800000000000ULL, VaRegion::KernelCanonical, "kernel-canonical start");
+    ExpectRegion(0xFFFFFFFF7FFFFFFFULL, VaRegion::KernelCanonical, "kernel-canonical end");
+
+    // Kernel image sections — derived from the same linker
+    // symbols the classifier reads, so one of the section symbols
+    // must always classify as its own section.
+    ExpectRegion(reinterpret_cast<u64>(_text_start), VaRegion::KernelText, "text start");
+    ExpectRegion(reinterpret_cast<u64>(_text_end) - 1, VaRegion::KernelText, "text end-1");
+    ExpectRegion(reinterpret_cast<u64>(_rodata_start), VaRegion::KernelRodata, "rodata start");
+    ExpectRegion(reinterpret_cast<u64>(_data_start), VaRegion::KernelData, "data start");
+    ExpectRegion(reinterpret_cast<u64>(_bss_start), VaRegion::KernelBss, "bss start");
+
+    // Past kernel image but still in the direct-map window — the
+    // map covers a full 1 GiB and the kernel image only consumes
+    // the front of it; an MMIO mapping or a heap chunk that lands
+    // here should classify as `k.directmap`.
+    constexpr u64 mid_directmap = duetos::mm::kKernelVirtualBase + (16ULL * 1024 * 1024);
+    if (reinterpret_cast<u64>(_bss_end) <= mid_directmap)
+    {
+        ExpectRegion(mid_directmap, VaRegion::KernelDirectMap, "direct-map past image");
+    }
+
+    // MMIO + stack arenas — fixed bases, classifier only needs
+    // the address arithmetic to be right.
+    ExpectRegion(duetos::mm::kMmioArenaBase, VaRegion::KernelMmio, "mmio arena start");
+    ExpectRegion(duetos::mm::kMmioArenaBase + 0x1000, VaRegion::KernelMmio, "mmio arena interior");
+    ExpectRegion(duetos::mm::kKernelStackArenaBase, VaRegion::KernelStackArena, "kstack arena start");
+    ExpectRegion(0xFFFFFFFFFFFFF000ULL, VaRegion::KernelStackArena, "kstack arena top page");
+
+    arch::SerialWrite("[va-region-selftest] PASS (");
+    // Surface the section-bound values the classifier is using —
+    // makes a future failure trivial to triage by comparing the
+    // logged bounds against the linker map.
+    arch::SerialWrite("text=");
+    arch::SerialWriteHex(reinterpret_cast<u64>(_text_start));
+    arch::SerialWrite("..");
+    arch::SerialWriteHex(reinterpret_cast<u64>(_text_end));
+    arch::SerialWrite(" bss=");
+    arch::SerialWriteHex(reinterpret_cast<u64>(_bss_start));
+    arch::SerialWrite("..");
+    arch::SerialWriteHex(reinterpret_cast<u64>(_bss_end));
+    arch::SerialWrite(")\n");
+}
+
+namespace
+{
+
+// Emit a size in the largest power-of-1024 unit that keeps the
+// integer >= 1. Used by WriteMmMapSummary so the summary line for
+// each region carries human units instead of forcing the reader to
+// shift bytes mentally. KiB / MiB / GiB only — bigger than that and
+// we've outgrown the kernel-half layout the table is documenting.
+void WriteHumanSize(u64 bytes)
+{
+    constexpr u64 kKi = 1024ULL;
+    constexpr u64 kMi = 1024ULL * 1024ULL;
+    constexpr u64 kGi = 1024ULL * 1024ULL * 1024ULL;
+    if (bytes >= kGi && (bytes % kGi) == 0)
+    {
+        WriteDecimal(bytes / kGi);
+        arch::SerialWrite(" GiB");
+        return;
+    }
+    if (bytes >= kMi)
+    {
+        WriteDecimal(bytes / kMi);
+        arch::SerialWrite(" MiB");
+        return;
+    }
+    if (bytes >= kKi)
+    {
+        WriteDecimal(bytes / kKi);
+        arch::SerialWrite(" KiB");
+        return;
+    }
+    WriteDecimal(bytes);
+    arch::SerialWrite(" B");
+}
+
+void WriteMmMapRow(const char* label, u64 lo, u64 hi)
+{
+    arch::SerialWrite("  ");
+    arch::SerialWrite(label);
+    arch::SerialWrite(" : ");
+    arch::SerialWriteHex(lo);
+    arch::SerialWrite(" .. ");
+    arch::SerialWriteHex(hi);
+    arch::SerialWrite("   (");
+    WriteHumanSize(hi - lo);
+    arch::SerialWrite(")\n");
+}
+
+} // namespace
+
+void WriteMmMapSummary()
+{
+    arch::SerialWrite("\n=== DUETOS KERNEL MM MAP ===\n");
+    WriteMmMapRow("k.text       ", reinterpret_cast<u64>(_text_start), reinterpret_cast<u64>(_text_end));
+    WriteMmMapRow("k.rodata     ", reinterpret_cast<u64>(_rodata_start), reinterpret_cast<u64>(_rodata_end));
+    WriteMmMapRow("k.data       ", reinterpret_cast<u64>(_data_start), reinterpret_cast<u64>(_data_end));
+    WriteMmMapRow("k.bss        ", reinterpret_cast<u64>(_bss_start), reinterpret_cast<u64>(_bss_end));
+    // Direct-map and MMIO arenas are fixed by paging.h. The reported
+    // direct-map starts at kKernelVirtualBase (covers the kernel
+    // image too — text/rodata/data/bss are subsets), so a value tagged
+    // `k.directmap` in a panic is something OUTSIDE the image but
+    // still inside the boot 1 GiB window.
+    WriteMmMapRow("k.directmap  ", duetos::mm::kKernelVirtualBase, duetos::mm::kMmioArenaBase);
+    WriteMmMapRow("k.mmio       ", duetos::mm::kMmioArenaBase, duetos::mm::kKernelStackArenaBase);
+    WriteMmMapRow("k.stack-arena", duetos::mm::kKernelStackArenaBase,
+                  duetos::mm::kKernelStackArenaBase + duetos::mm::kKernelStackArenaBytes);
+    arch::SerialWrite("=== END KERNEL MM MAP ===\n\n");
 }
 
 } // namespace duetos::core

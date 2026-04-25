@@ -167,6 +167,126 @@ Token shape preserved: every existing `<label>=0x<hex>` (or
 was; the decoded suffix is appended to the same line. Parsers
 that anchor on the hex format are unaffected.
 
+### VA-region tag on raw addresses
+
+Beyond the bit-decoders, every raw VA emitted in a crash dump
+(`rip` / `rsp` / `rbp` / `cr2`) now carries a `[region=NAME]`
+suffix produced by `core::WriteVaRegion`. The classifier
+(`core::ClassifyVa` in `kernel/core/diag_decode.{h,cpp}`) walks
+the most specific buckets first — kernel image sections
+(`k.text` / `k.rodata` / `k.data` / `k.bss` resolved against the
+linker's `_text_start..._bss_end` symbols) before the kernel
+arenas (`k.directmap` / `k.mmio` / `k.stack-arena` keyed off
+`mm::kKernelVirtualBase` / `kMmioArenaBase` /
+`kKernelStackArenaBase`) — then falls back to coarse buckets
+for canonical user space, the non-canonical hole, the boot
+identity map, and the null page.
+
+Why: hex alone tells you the value; the region tag tells you
+what the value MEANS. A `cr2 : 0xFFFFFFFFE0000FF8 [region=k.stack-arena]`
+on a #PF instantly reads as "kernel stack overflow"; a
+`rsp : 0x00007FFF... [region=user-canonical]` on a kernel-mode
+panic is a klaxon for "we panicked while still on the user
+stack". Without the tag the operator has to keep paging.h's
+memory map in their head while reading the dump.
+
+`core::VaRegionSelfTest()` is invoked from `kernel_main`
+alongside the other diag self-tests; it asserts the classifier
+on both sides of every bucket transition and on the linker
+symbols themselves. If the layout in `paging.h` / `kstack.h` /
+the linker script ever drifts, the self-test panics at boot
+with a labelled mismatch instead of mis-tagging crash-dump
+addresses silently.
+
+Token shape preserved: the region tag is appended to the same
+line, after a single space, in `[region=...]` form. Parsers
+that anchor on the existing hex (or on the
+`[fn+0xOFF (path:LINE)]` symbol annotation that may also
+precede it on `rip`) are unaffected; the trailing tag is just
+extra trivia they can ignore.
+
+### Boot-time kernel mm-map anchor
+
+`core::WriteMmMapSummary` (in `kernel/core/diag_decode.{h,cpp}`)
+emits one bracketed block at boot — `=== DUETOS KERNEL MM MAP ===`
+… `=== END KERNEL MM MAP ===` — listing every range a `[region=...]`
+tag can resolve to (`k.text` / `k.rodata` / `k.data` / `k.bss` /
+`k.directmap` / `k.mmio` / `k.stack-arena`) with `lo .. hi (size)`
+for each. Sourced directly from the same linker symbols + paging.h
+constants the classifier reads, so a layout change updates both
+at once. Every later panic dump's region tags map back to this
+single anchor without forcing the operator to consult the linker
+script or paging.h.
+
+Invoked from `kernel_main` immediately after `VaRegionSelfTest`
+so the summary is in the boot log before any subsystem can
+panic.
+
+### Peer-CPU snapshot in crash dumps
+
+Both `core::Panic` and the trap dispatcher's panic path now
+broadcast NMI to peer CPUs (the trap path didn't before — peers
+kept running while the dispatcher dumped). Each peer's vector-2
+handler in `arch/x86_64/traps.cpp` captures its own
+`rip` / `rsp` / `current_task` into the per-CPU snapshot fields
+(`panic_snapshot_*` in `cpu::PerCpu`) BEFORE halting. The
+panicking CPU then iterates every cpu_id via
+`arch::SmpGetPercpu` + `arch::SmpCpuIdLimit` and emits each
+peer's snapshot in a `[panic] --- peer CPU snapshots ---` block:
+
+```
+[panic] --- peer CPU snapshots ---
+  cpu#0x00000001 lapic=0x00000001
+    rip=0xFFFFFFFF80123ABC  [SchedYield+0x4f (sched/sched.cpp:412)] [region=k.text]
+    rsp=0xFFFFFFFFE0102FE0 [region=k.stack-arena]
+    task=0xFFFF888001234000
+    held locks (1):
+      [0x00000000] lock=0xFFFFFFFF80250040  acquired-rip=0xFFFFFFFF8011A2D7  [SchedRunQueueEnqueue+0x27 (...)]
+  cpu#0x00000002 lapic=0x00000002  <no NMI snapshot — peer may be hung pre-NMI>
+```
+
+`panic_snapshot_valid` flips 0→1 atomically (memory barrier
+before the flag write) so a partial capture leaves the flag at 0
+and the dumper prints the "<no snapshot>" branch. Peer slots
+that were never allocated (`SmpGetPercpu` returns nullptr for
+unbound cpu_ids) are skipped silently. BSP-only configurations
+get one explicit `(none — single CPU online)` line so the
+absence of peers is visible.
+
+### Per-CPU held-locks tracking
+
+`SpinLockAcquire` / `SpinLockRelease` in `kernel/sync/spinlock.cpp`
+push / pop a `(lock_ptr, caller_rip)` pair on a per-CPU stack
+(`held_locks[8]` + `held_lock_rips[8]` in `cpu::PerCpu`).
+Caller RIP is captured via `__builtin_return_address(0)` at
+acquire time and resolved through the embedded symbol table
+when the dump prints — so each entry reads as
+`acquired-rip=0xHEX [fn+0xOFF (file:line)]`.
+
+`DumpDiagnostics` emits the panicking CPU's stack as a `held
+locks (N, innermost first):` section right after the raw stack
+quads; `DumpPeerCpuSnapshots` includes each peer's stack inline
+with that peer's snapshot. A panic with a non-empty held-locks
+section usually points straight at the deadlock or invariant
+break.
+
+Out-of-order release (`SpinLockRelease` whose lock isn't at the
+top of the held stack) is itself a bug shape — `HeldLocksPop`
+panics with `release out-of-order` + the offending lock pointer
+so the misuse surfaces immediately rather than silently
+corrupting the dump's later snapshots.
+
+Tracking is gated on `cpu::BspInstalled()`; acquires before
+`PerCpuInitBsp` (frame allocator init) silently skip the
+bookkeeping. Overflow past `kPerCpuMaxHeldLocks = 8` keeps the
+counter climbing so the dump can show the depth without
+clobbering the array — a deep nest is its own diagnostic
+signal.
+
+`SpinLockSelfTest` exercises the climb / fall on a 2-deep
+nested acquire and asserts the counter returns to baseline on
+release.
+
 ## Resolver semantics
 
 `duetos::core::ResolveAddress(addr, &out)`:
