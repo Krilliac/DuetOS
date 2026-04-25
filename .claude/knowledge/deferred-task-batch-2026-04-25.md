@@ -143,3 +143,24 @@ malformed slot can't mis-discard half a real DLL's exports.
 - `kernel/core/pe_exports.cpp` — `StrCmp3` + binary-search rewrite of
   `PeExportLookupName`
 - `kernel/core/pe_exports.h` — updated header note
+
+## Batch 4 — same session
+
+### 10. Window-DC SetTextColor honored even for explicit black
+
+`DoGdiTextOut`, `DoGdiTextOutW`, and the SYS_GDI_DRAW_TEXT_W path all
+guarded the per-window text color with `s->text_color != 0`, which silently
+discarded an explicit `SetTextColor(hdc, RGB(0,0,0))`. With the IAT TextOutA
+stub passing white in r9 as a default, that meant explicit-black ended up
+rendering white. Added `text_color_set` to `WindowDcState` (init false,
+set true by `GdiSetTextColor`) and switched all three sites to gate on
+the flag instead. memDC was already correct (always uses dc->text_color
+unconditionally) so it is unchanged.
+
+## Files touched (batch 4)
+
+- `kernel/subsystems/win32/gdi_objects.h` — `text_color_set` field
+- `kernel/subsystems/win32/gdi_objects.cpp` — flag init + set in
+  `GdiSetTextColor`
+- `kernel/subsystems/win32/window_syscall.cpp` — three `text_color != 0` →
+  `text_color_set` updates

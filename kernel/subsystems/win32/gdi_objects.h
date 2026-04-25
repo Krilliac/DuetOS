@@ -176,6 +176,7 @@ inline constexpr u32 kMaxWindowDcSlots = 16;
 struct WindowDcState
 {
     bool init;
+    bool text_color_set;
     u32 text_color;
     u32 bk_color;
     u8 bk_mode;

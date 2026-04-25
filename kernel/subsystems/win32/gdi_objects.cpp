@@ -95,6 +95,7 @@ WindowDcState* GdiWindowDcState(u32 window_handle)
     if (!s->init)
     {
         s->init = true;
+        s->text_color_set = false;
         s->text_color = 0x00000000;
         s->bk_color = 0x00FFFFFF;
         s->bk_mode = kBkModeOpaque;
@@ -348,6 +349,7 @@ u32 GdiSetTextColor(u64 hdc, u32 rgb)
         {
             const u32 prev = s->text_color;
             s->text_color = rgb;
+            s->text_color_set = true;
             return prev;
         }
     }

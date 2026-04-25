@@ -753,7 +753,7 @@ void DoGdiTextOut(arch::TrapFrame* frame)
         // COLORREF for the native SYS_GDI_TEXT_OUT path).
         u32 paint_rgb = rgb;
         WindowDcState* s = GdiWindowDcState(static_cast<u32>(hdc));
-        if (s != nullptr && s->text_color != 0)
+        if (s != nullptr && s->text_color_set)
             paint_rgb = s->text_color;
         CompositorLock();
         const u32 h_comp = HwndToCompositorHandleForCaller(hdc, proc->pid);
@@ -831,7 +831,7 @@ void DoGdiTextOutW(arch::TrapFrame* frame)
     {
         u32 paint_rgb = rgb;
         WindowDcState* s = GdiWindowDcState(static_cast<u32>(hdc));
-        if (s != nullptr && s->text_color != 0)
+        if (s != nullptr && s->text_color_set)
             paint_rgb = s->text_color;
         CompositorLock();
         const u32 h_comp = HwndToCompositorHandleForCaller(hdc, proc->pid);
@@ -1624,7 +1624,7 @@ static u64 DrawTextAsciiOnDc(u64 hdc, const char* text, u64 copy_len, u64 user_r
     {
         u32 fg = 0x00FFFFFF;
         WindowDcState* s = GdiWindowDcState(static_cast<u32>(hdc));
-        if (s != nullptr && s->text_color != 0)
+        if (s != nullptr && s->text_color_set)
             fg = s->text_color;
         CompositorLock();
         const u32 h_comp = HwndToCompositorHandleForCaller(hdc, proc->pid);
