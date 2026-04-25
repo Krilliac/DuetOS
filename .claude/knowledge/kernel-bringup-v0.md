@@ -10,7 +10,7 @@ The very first boot path landed in the tree. Documented here so future sessions 
 
 ## Context
 
-Applies to `kernel/arch/x86_64/boot.S`, `kernel/arch/x86_64/linker.ld`, `kernel/core/main.cpp`, and the freestanding toolchain in `cmake/toolchains/x86_64-kernel.cmake`. This is the first buildable kernel image in the project — commit that introduced it lives on `claude/port-sparkengine-components-f38iH`.
+Applies to `kernel/arch/x86_64/boot.S`, `kernel/arch/x86_64/linker.ld`, `kernel/core/main.cpp`, and the freestanding toolchain in `cmake/toolchains/x86_64-kernel.cmake`. This is the first buildable kernel image in the project; the bring-up commit is on `main` (search log for "kernel bring-up v0").
 
 ## Details
 

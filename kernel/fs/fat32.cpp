@@ -213,6 +213,19 @@ void DecodeLfnChars(const u8* e, char* out_chars, bool* did_terminate)
     }
 }
 
+// FAT32 short-name checksum, per the spec: rotate-right one bit and
+// add each of the 11 SFN bytes. All LFN fragments in a sequence
+// carry this checksum at offset 13 — when it mismatches the SFN
+// that follows, the LFN is orphaned (typical after a partial
+// rename) and we must fall back to the 8.3 name.
+u8 ComputeLfnChecksum(const u8* sfn11)
+{
+    u8 sum = 0;
+    for (u32 i = 0; i < 11; ++i)
+        sum = static_cast<u8>(((sum & 1) ? 0x80 : 0) + static_cast<u8>(sum >> 1) + sfn11[i]);
+    return sum;
+}
+
 // Walk a directory's cluster chain, decode each in-use entry, and
 // feed it to `visit`. LFN sequences are assembled into the DirEntry's
 // `name` field before the visitor is called on the SFN. Deleted /
@@ -229,6 +242,9 @@ bool WalkDirChain(const Volume& v, u32 first_cluster, DirVisitor visit, void* ct
     // 128-byte budget at copy-out time.
     char pending_long[260];
     bool pending_any = false;
+    u8 pending_checksum = 0;
+    bool pending_checksum_set = false;
+    bool pending_checksum_consistent = true;
     VZero(pending_long, sizeof(pending_long));
 
     u32 cluster = first_cluster;
@@ -248,6 +264,8 @@ bool WalkDirChain(const Volume& v, u32 first_cluster, DirVisitor visit, void* ct
             if (e[0] == 0xE5)
             {
                 pending_any = false;
+                pending_checksum_set = false;
+                pending_checksum_consistent = true;
                 continue;
             }
             const u8 attr = e[11];
@@ -259,7 +277,20 @@ bool WalkDirChain(const Volume& v, u32 first_cluster, DirVisitor visit, void* ct
                 if (ord == 0 || ord > 20)
                 {
                     pending_any = false;
+                    pending_checksum_set = false;
+                    pending_checksum_consistent = true;
                     continue;
+                }
+                const u8 frag_chk = e[13];
+                if (!pending_checksum_set)
+                {
+                    pending_checksum = frag_chk;
+                    pending_checksum_set = true;
+                    pending_checksum_consistent = true;
+                }
+                else if (frag_chk != pending_checksum)
+                {
+                    pending_checksum_consistent = false;
                 }
                 char chars[13];
                 for (u32 i = 0; i < 13; ++i)
@@ -275,6 +306,8 @@ bool WalkDirChain(const Volume& v, u32 first_cluster, DirVisitor visit, void* ct
             if (attr & kAttrVolumeId)
             {
                 pending_any = false;
+                pending_checksum_set = false;
+                pending_checksum_consistent = true;
                 continue;
             }
 
@@ -283,22 +316,34 @@ bool WalkDirChain(const Volume& v, u32 first_cluster, DirVisitor visit, void* ct
             if (IsDotEntry(decoded.name))
             {
                 pending_any = false;
+                pending_checksum_set = false;
+                pending_checksum_consistent = true;
                 continue;
             }
             if (pending_any)
             {
-                // Replace the 8.3 name with the assembled LFN.
-                // Trust the sequence; v0 doesn't validate the
-                // 11-byte SFN checksum at LFN byte 13.
-                u32 n = 0;
-                while (n + 1 < sizeof(decoded.name) && pending_long[n] != 0)
+                // Replace the 8.3 name with the assembled LFN, but
+                // only if every fragment carried the same checksum
+                // AND that checksum matches the trailing SFN's
+                // 11-byte computation. Otherwise the LFN is
+                // orphaned — fall back to the SFN.
+                bool lfn_ok = pending_checksum_set && pending_checksum_consistent;
+                if (lfn_ok && ComputeLfnChecksum(e) != pending_checksum)
+                    lfn_ok = false;
+                if (lfn_ok)
                 {
-                    decoded.name[n] = pending_long[n];
-                    ++n;
+                    u32 n = 0;
+                    while (n + 1 < sizeof(decoded.name) && pending_long[n] != 0)
+                    {
+                        decoded.name[n] = pending_long[n];
+                        ++n;
+                    }
+                    decoded.name[n] = 0;
                 }
-                decoded.name[n] = 0;
             }
             pending_any = false;
+            pending_checksum_set = false;
+            pending_checksum_consistent = true;
             VZero(pending_long, sizeof(pending_long));
 
             if (!visit(decoded, ctx))

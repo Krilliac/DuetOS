@@ -156,9 +156,10 @@ bool PeExportLookupOrdinal(const PeExports& exp, u32 ordinal, PeExport& out);
 /// Look up an export by ASCII name. Case-sensitive, matching
 /// MSVC `/EXPORT:` convention — `GetProcAddress` expects exact
 /// case. Returns true on hit, false on miss (no such name in
-/// the Export Name Table). The lookup is currently linear; the
-/// PE spec guarantees sorted order so an upgrade to binary
-/// search is free when a hot path demands it.
+/// the Export Name Table). Implemented as a binary search over
+/// the name-sorted ENT (per PE spec); falls back to a linear
+/// scan on a malformed name RVA at the midpoint so a single bad
+/// slot can't mis-discard half the table.
 bool PeExportLookupName(const PeExports& exp, const char* name, PeExport& out);
 
 /// Resolve the DLL's own name as embedded in the Export

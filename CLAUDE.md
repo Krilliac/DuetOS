@@ -256,7 +256,7 @@ git rebase origin/main                         # if behind, rebase
 **Rules:**
 - **Never** commit or push while behind the base branch. Always rebase first.
 - Prefer upstream changes for auto-generated content (`<!-- AUTO:* -->` sections) once docs automation is introduced.
-- All development for the Claude-driven port/bootstrapping work happens on `claude/port-sparkengine-components-f38iH`. Do not push to other branches without explicit permission.
+- All Claude-driven development happens on the feature branch the harness checked out for the session (`claude/<slug>`). Merge target is `main`. Do not push to other branches without explicit permission.
 
 ## Pre-commit checks
 

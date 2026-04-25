@@ -247,12 +247,14 @@ u32 ParseDirBlock(const u8* block, u32 block_size, Ext4DirEntry* out_entries, u3
     return produced;
 }
 
-// Walk the root-directory data block. Requires `v.root_inode_valid`
+// Walk the root-directory data blocks. Requires `v.root_inode_valid`
 // and that the root inode uses the extent tree (the common ext4
-// layout). Handles a single-extent, depth-0 extent tree; for the
-// typical freshly-formatted volume the root directory fits in one
-// block, so this covers the common case. Multi-extent / multi-
-// block directories log a note and bail.
+// layout). Handles depth-0 extent trees with multiple extents,
+// each spanning one or more contiguous physical blocks — covers
+// freshly-formatted volumes whose root has grown past one block.
+// Depth>0 (extent tree with intermediate index nodes) still bails;
+// the index-node walk would need extra block reads and a small
+// recursion budget — landed when a workload demands it.
 void WalkRootDir(Volume& v)
 {
     if (!v.root_inode_valid || !v.root_inode.uses_extents)
@@ -274,33 +276,54 @@ void WalkRootDir(Volume& v)
         return;
     }
 
-    const u8* first_extent = ib + 12; // header is 12 bytes
-    const u16 len_blocks = LeU16(first_extent + kEeLength);
-    const u64 phys = (u64(LeU16(first_extent + kEePhysHi)) << 32) | LeU32(first_extent + kEePhysLo);
-    if (len_blocks == 0 || phys == 0)
-        return;
-
     const u32 sector_size = drivers::storage::BlockDeviceSectorSize(v.block_handle);
     if (sector_size == 0)
         return;
-    const u64 lba = phys * v.block_size / sector_size;
 
-    // Read the FIRST data block of the directory. A directory that
-    // spans multiple blocks will have more entries in subsequent
-    // blocks — we cap at one block of parsing in v0.
-    if (!ReadIntoBlockScratch(v.block_handle, lba, sector_size, v.block_size))
+    // i_block holds the 12-byte header followed by up to 4 extent
+    // records (also 12 bytes each) when depth==0. The on-disk
+    // header is at most 4 leaf extents wide for the inline tree.
+    constexpr u16 kInlineMaxLeafExtents = 4;
+    const u16 leaf_count = entries < kInlineMaxLeafExtents ? entries : kInlineMaxLeafExtents;
+
+    v.root_dir_entry_count = 0;
+    u32 produced = 0;
+    bool any_block_failed = false;
+
+    for (u16 ei = 0; ei < leaf_count && produced < kMaxRootDirEntries; ++ei)
     {
-        arch::SerialWrite("[ext4]   root-dir data block read failed\n");
-        return;
+        const u8* ext = ib + 12 + u64(ei) * 12;
+        const u16 len_blocks = LeU16(ext + kEeLength);
+        const u64 phys = (u64(LeU16(ext + kEePhysHi)) << 32) | LeU32(ext + kEePhysLo);
+        if (len_blocks == 0 || phys == 0)
+            continue;
+
+        for (u16 bi = 0; bi < len_blocks && produced < kMaxRootDirEntries; ++bi)
+        {
+            const u64 block_phys = phys + bi;
+            const u64 lba = block_phys * v.block_size / sector_size;
+            if (!ReadIntoBlockScratch(v.block_handle, lba, sector_size, v.block_size))
+            {
+                arch::SerialWrite("[ext4]   root-dir data block read failed (extent=");
+                arch::SerialWriteHex(ei);
+                arch::SerialWrite(" block=");
+                arch::SerialWriteHex(bi);
+                arch::SerialWrite(")\n");
+                any_block_failed = true;
+                break;
+            }
+            produced = ParseDirBlock(g_block_scratch, v.block_size, v.root_dir_entries, kMaxRootDirEntries, produced);
+        }
     }
 
-    v.root_dir_entry_count = ParseDirBlock(g_block_scratch, v.block_size, v.root_dir_entries, kMaxRootDirEntries, 0);
+    v.root_dir_entry_count = produced;
+
     arch::SerialWrite("[ext4]   root-dir entries: ");
     arch::SerialWriteHex(v.root_dir_entry_count);
-    arch::SerialWrite(" (extent phys=");
-    arch::SerialWriteHex(phys);
-    arch::SerialWrite(" len_blocks=");
-    arch::SerialWriteHex(len_blocks);
+    arch::SerialWrite(" (extents=");
+    arch::SerialWriteHex(leaf_count);
+    if (any_block_failed)
+        arch::SerialWrite(" partial");
     arch::SerialWrite(")\n");
     for (u32 i = 0; i < v.root_dir_entry_count; ++i)
     {

@@ -253,13 +253,14 @@ struct WindowMsg
 enum class WinGdiPrimKind : u8
 {
     None = 0,
-    FillRect,  // x,y,w,h,colour → solid fill relative to client origin
-    TextOut,   // x,y,colour,text → 8x8 ASCII glyphs
-    Rectangle, // x,y,w,h,colour → 1-px outline
-    Line,      // x,y,w,h,colour — (x,y) → (x+w, y+h) Bresenham line
-    Ellipse,   // x,y,w,h,colour — 1-px outline, midpoint algorithm
-    Pixel,     // x,y,colour — single client-local pixel
-    Blit,      // x,y,w,h,pool_off → BGRA8888 rect from the window's blit pool
+    FillRect,      // x,y,w,h,colour → solid fill relative to client origin
+    TextOut,       // x,y,colour,text → 8x8 ASCII glyphs
+    Rectangle,     // x,y,w,h,colour → 1-px outline
+    Line,          // x,y,w,h,colour — (x,y) → (x+w, y+h) Bresenham line
+    Ellipse,       // x,y,w,h,colour — 1-px outline, midpoint algorithm
+    FilledEllipse, // x,y,w,h,colour — solid fill, integer test, no sqrt
+    Pixel,         // x,y,colour — single client-local pixel
+    Blit,          // x,y,w,h,pool_off → BGRA8888 rect from the window's blit pool
 };
 
 struct WinGdiPrim
@@ -352,6 +353,12 @@ void WindowClientLine(WindowHandle h, i32 x, i32 y, i32 x2, i32 y2, u32 rgb);
 /// Append a 1-pixel ellipse outline primitive inside the
 /// bounding box (x, y, w, hgt).
 void WindowClientEllipse(WindowHandle h, i32 x, i32 y, i32 w, i32 hgt, u32 rgb);
+
+/// Append a solid-filled ellipse primitive bounded by (x, y, w, h).
+/// `fill_rgb` paints the interior; outline is left to a follow-up
+/// `WindowClientEllipse` call by the caller (matches the GDI
+/// `Ellipse(hdc)` convention of "fill then outline").
+void WindowClientFilledEllipse(WindowHandle h, i32 x, i32 y, i32 w, i32 hgt, u32 fill_rgb);
 
 /// Append a single-pixel primitive.
 void WindowClientPixel(WindowHandle h, i32 x, i32 y, u32 rgb);

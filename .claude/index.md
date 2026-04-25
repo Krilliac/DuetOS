@@ -17,11 +17,7 @@ _Read this at every session start (after git sync). Each row links to a detailed
 | PE base-relocation support v0 — walk + apply, zero-delta in v0 | [knowledge/pe-base-reloc-v0.md](knowledge/pe-base-reloc-v0.md) | Observation | Active | 2026-04-21 |
 | Win32 subsystem v0 — import resolution + kernel32.ExitProcess stub | [knowledge/win32-subsystem-v0.md](knowledge/win32-subsystem-v0.md) | Observation | Active | 2026-04-21 |
 | PE EAT parser + DLL loader skeleton (stage 2 slice 1) | [knowledge/pe-eat-dll-loader-v0.md](knowledge/pe-eat-dll-loader-v0.md) | Observation | Active | 2026-04-24 |
-| Win32 windowing v0 — user32 → SYS_WIN_* → compositor | [knowledge/win32-windowing-v0.md](knowledge/win32-windowing-v0.md) | Observation + Decision | Active | 2026-04-24 |
-| Win32 windowing v1 — per-window msg queues + GDI + input + reaper | [knowledge/win32-windowing-v1.md](knowledge/win32-windowing-v1.md) | Observation + Decision | Active | 2026-04-24 |
-| Win32 windowing v1.2 — lifecycle msgs + timers + GDI prims + async input + capture + clipboard | [knowledge/win32-windowing-v1.2.md](knowledge/win32-windowing-v1.2.md) | Observation + Decision | Active | 2026-04-24 |
-| Win32 windowing v1.3 — WndProc dispatch + WM_PAINT + longs + metrics + cross-proc + enum/find | [knowledge/win32-windowing-v1.3.md](knowledge/win32-windowing-v1.3.md) | Observation + Decision | Active | 2026-04-24 |
-| Win32 windowing v1.4 — SendMessage + styles + parent/focus + caret + beep + MessageBox types | [knowledge/win32-windowing-v1.4.md](knowledge/win32-windowing-v1.4.md) | Observation + Decision | Active | 2026-04-24 |
+| Win32 windowing — current state (through v1.4) | [knowledge/win32-windowing-v1.4.md](knowledge/win32-windowing-v1.4.md) | Observation + Decision | Active | 2026-04-25 |
 | Win32 heap — real HeapSize + HeapReAlloc / realloc (batch 14) | [knowledge/win32-subsystem-v0.md#batch-14--real-heapsize--heaprealloc](knowledge/win32-subsystem-v0.md) | Observation | Active | 2026-04-21 |
 | Real-world PE execution — winkill CRT entry + argc/argv + five loader gaps | [knowledge/pe-real-world-run.md](knowledge/pe-real-world-run.md) | Observation | Active | 2026-04-22 |
 | Win32 stubs — callee-saved rdi/rsi ABI bug + fix pattern | [knowledge/win32-stubs-rdi-rsi-abi.md](knowledge/win32-stubs-rdi-rsi-abi.md) | Issue + Pattern | Active | 2026-04-22 |
@@ -67,12 +63,7 @@ _Read this at every session start (after git sync). Each row links to a detailed
 | PCI enumeration v0 — legacy port-IO walk | [knowledge/pci-enum-v0.md](knowledge/pci-enum-v0.md) | Observation | Active | 2026-04-20 |
 | GPU discovery v0 — PCI classification + BAR map | [knowledge/gpu-discovery-v0.md](knowledge/gpu-discovery-v0.md) | Observation | Active | 2026-04-22 |
 | Driver shells v0 — net / usb / audio / gpu-probes | [knowledge/driver-shells-v0.md](knowledge/driver-shells-v0.md) | Observation | Active | 2026-04-22 |
-| render/drivers v1 — virtio-gpu bring-up + D3D IAT routing + vendor MMIO reads | [knowledge/render-drivers-v1.md](knowledge/render-drivers-v1.md) | Observation + Pattern | Active | 2026-04-24 |
-| render/drivers v2 — virtio-gpu 2D cycle + SYS_GDI_BITBLT + real paint IAT | [knowledge/render-drivers-v2.md](knowledge/render-drivers-v2.md) | Observation + Pattern | Active | 2026-04-24 |
-| render/drivers v3 — virtio-gpu kernel FB + TextOutA + GDI object table + real BitBlt | [knowledge/render-drivers-v3.md](knowledge/render-drivers-v3.md) | Observation + Decision | Active | 2026-04-24 |
-| render/drivers v4 — memDC painting + DC colour state + StretchBlt | [knowledge/render-drivers-v4.md](knowledge/render-drivers-v4.md) | Observation | Active | 2026-04-24 |
-| render/drivers v5 — Rectangle/Ellipse/SetPixel IAT + pen state + MoveToEx/LineTo + DrawTextA | [knowledge/render-drivers-v5.md](knowledge/render-drivers-v5.md) | Observation | Active | 2026-04-24 |
-| render/drivers v6 — message loop + filled primitives + UTF-16 text + sys palette | [knowledge/render-drivers-v6.md](knowledge/render-drivers-v6.md) | Observation + Decision | Active | 2026-04-24 |
+| Render / drivers — current state (through v6) | [knowledge/render-drivers-v6.md](knowledge/render-drivers-v6.md) | Observation + Decision | Active | 2026-04-25 |
 | DirectX v0 — real COM-vtable d3d9/d3d11/d3d12/dxgi DLLs | [knowledge/directx-v0.md](knowledge/directx-v0.md) | Observation + Decision | Active | 2026-04-24 |
 | xHCI enumeration v0 — Address Device + GET_DESCRIPTOR(Device) | [knowledge/xhci-enumeration-v0.md](knowledge/xhci-enumeration-v0.md) | Observation | Active | 2026-04-23 |
 | xHCI HID boot keyboard — end-to-end USB keyboard input | [knowledge/xhci-hid-keyboard-v0.md](knowledge/xhci-hid-keyboard-v0.md) | Observation | Active | 2026-04-23 |
@@ -90,32 +81,58 @@ _Read this at every session start (after git sync). Each row links to a detailed
 | Ring-3 adversarial test suite — jail / nx / priv / badint / kread probes | [knowledge/pentest-ring3-adversarial-v0.md](knowledge/pentest-ring3-adversarial-v0.md) | Pattern | Active | 2026-04-21 |
 | GUI pentest runner v0 — live login + shell attack findings | [knowledge/pentest-gui-findings-v0.md](knowledge/pentest-gui-findings-v0.md) | Observation | Active | 2026-04-24 |
 | Cleanroom-trace boot survey v0 — first live read of the trace ring buffer | [knowledge/cleanroom-trace-boot-survey-v0.md](knowledge/cleanroom-trace-boot-survey-v0.md) | Observation | Active | 2026-04-25 |
+| Deferred-task batches (2026-04-25) — PE ordinal forwarders + by-ord IAT + binary-search EAT, ext4 multi-block dirs, GDI ellipse fill/outline parity, RNDIS multi-record RX, FAT32 LFN-checksum, window-DC SetTextColor explicit-black | [knowledge/deferred-task-batch-2026-04-25.md](knowledge/deferred-task-batch-2026-04-25.md) | Observation | Active | 2026-04-25 |
 
 ## Quick Reference
 
-### Current Project State (2026-04-22)
+### Current Project State (2026-04-25)
 
-**Milestone (2026-04-22)**: `windows-kill.exe` — a real-world 80 KB MSVC
-PE with 8 sections, 52 imports across 6 DLLs, SEH, TLS, and a resource
-directory — runs end-to-end as a ring-3 process on DuetOS and exits
-via `SYS_EXIT(0)`. No #PF, no #GP, no panic, no task-kill. The CRT's
-`__p___argc` / `__p___argv` now return pointers into a per-process
-proc-env page; unresolved data imports (e.g. `std::cout`) route to a
-fake-object pad so MSVC's virtual-dispatch idiom walks mapped zeros
-instead of code bytes; the miss-logger decoder skips indirect-call
-patterns rather than fabricating `<unmapped>` entries. Programs don't
-yet PRINT (std::cout no-ops), but the full PE execution path is clean.
+The system boots end-to-end on QEMU `-vga virtio` and exercises every
+landed subsystem on its way to the desktop. Headline capabilities:
 
-### Prior Project State (2026-04-20)
+- **PE / Win32**: Real-world MSVC PEs (e.g. `windows-kill.exe`, ~80 KB,
+  52 imports across 6 DLLs, SEH + TLS + resources) load and exit
+  cleanly. Stage-2 PE loader chases forwarders (name + ordinal) through
+  the per-process DLL table; ordinal-form `Dll.#N` forwarders are
+  parsed; by-ordinal IAT entries resolve against preloaded EATs;
+  `PeExportLookupName` is binary-search.
+- **Win32 windowing**: `windowed_hello` paints with GDI primitives,
+  pumps `WM_TIMER`s, dispatches `WM_PAINT` through a user-registered
+  WndProc, round-trips `SendMessage`, queries focus / styles / palette,
+  exits cleanly. `text_color_set` flag honors explicit-black
+  `SetTextColor`. Filled-ellipse compositor prim parity between
+  window-HDC and memDC paths.
+- **Storage / FS**: NVMe + GPT + FAT32 + ext4 read paths. FAT32 LFN
+  walker validates the per-fragment checksum against the trailing SFN
+  (orphaned LFN runs fall back to the 8.3 name). ext4 root-dir walk
+  iterates every leaf-extent block; depth>0 still deferred.
+- **Net**: e1000 wired NIC + USB CDC-ECM + USB RNDIS for live
+  Internet. RNDIS RX delivers every `RNDIS_PACKET_MSG` per bulk
+  transfer (was: only the first).
+- **Render**: virtio-gpu 2D scanout cycle as the kernel framebuffer;
+  Classic-theme system palette; 8×8 font.
+- **Security**: SMEP / SMAP / NX / W^X / KASLR / CFI all on; image-load
+  guard; per-process address spaces; sandbox 5-wall story.
 
-- **Repository**: kernel runs at `0xFFFFFFFF80000000` (higher-half), brings up GDT + IDT (vectors 0..47 + LAPIC spurious 0xFF), parses the Multiboot2 memory map, runs a bitmap-backed physical frame allocator with single + contiguous-run allocation, brings up a 2 MiB first-fit + coalescing kernel heap (`KMalloc`/`KFree`) over the higher-half direct map, adopts the boot PML4 with a 4-level managed paging API (`MapPage`/`UnmapPage`/`MapMmio` into a 512 MiB MMIO arena at `0xFFFFFFFFC0000000`, EFER.NXE on), masks the legacy 8259 PIC, brings up the BSP LAPIC, arms a PIT-calibrated periodic LAPIC timer at 100 Hz on vector 0x20, and runs a round-robin preemptive scheduler with kernel threads (`SchedCreate` / `SchedYield` / `SchedExit`) whose time slices are driven by the timer IRQ. Blocking primitives are online: `SchedSleepTicks` (tick-driven sleep queue), `WaitQueue` (event-driven FIFO), and `Mutex` with FIFO hand-off (built on `WaitQueue`). ACPI MADT is parsed at boot (RSDP → XSDT/RSDT → APIC) and the IOAPIC driver consumes it to map every controller's MMIO window, read the version register, and mask every pin; `IoApicRoute(gsi, vector, lapic_id, isa_irq)` / `IoApicMask` / `IoApicUnmask` are ready for drivers to program. MPS polarity + trigger flags from MADT overrides are honoured on ISA routes. PS/2 keyboard is online as the first real end-to-end IRQ-driven driver: ACPI → IOAPIC → IDT → dispatcher → driver → SPSC ring buffer → `WaitQueue` → scheduler — raw scan codes come out as `[kbd] scan=0xNN` on COM1. Both the panic path and the CPU-exception trap dispatcher now emit a bracketed, self-describing crash dump record (`=== DUETOS CRASH DUMP BEGIN/END ===`) with every code address annotated inline by an embedded, build-time-generated function symbol table (`function+offset (file:line)`); trap dumps also carry all GPRs from the hardware TrapFrame. `tools/test-panic.sh` and `tools/test-trap.sh` extract each record into `build/<preset>/crash-dumps/<timestamp>.dump` and `<timestamp>-trap.dump` respectively, asserting the shape of each path. Design decisions are now tracked in a living log (`docs/knowledge/design-decisions-log.md`) with rationale + "revisit when" markers per slice. The GDT has been extended with DPL=3 user-code/user-data descriptors (slots 5–6); the BSP TSS gained a runtime-settable RSP0 slot that the scheduler now auto-publishes on every switch-in to a task with a kernel stack. `arch::EnterUserMode(rip, rsp)` builds an iretq frame into ring 3. The syscall ABI v0 is online via `int 0x80` (DPL=3 gate): `SYS_EXIT = 0`, `SYS_GETPID = 1`, `SYS_WRITE = 2`, `SYS_YIELD = 3`. SMEP + SMAP are enabled in `PagingInit` (CPUID-gated CR4 flips); `mm::CopyFromUser` / `mm::CopyToUser` validate pointers against the canonical low half, walk the PT to confirm every touched page is `Present | User`, and bracket the copy with stac/clac. Per-task user-VM regions are registered via `sched::RegisterUserVmRegion` and reaped (UnmapPage + FreeFrame) on task death, so nothing leaks across task boundaries. A `ring3-smoke` scheduler thread maps one code + one stack page with the U/S bit set, drops a 38-byte payload (pause; pause; SYS_WRITE("Hello from ring 3!\n"); SYS_YIELD; SYS_EXIT) into ring 3, registers both pages for reaper-driven cleanup, and is reaped cleanly by the kernel-side reaper after SYS_EXIT — the user pages are unmapped and the backing frames returned to the physical allocator. Boot ends with three worker threads contending on a demo mutex, a `kbd-reader` thread blocked on keyboard input, the BSP driving its idle task via `sti; hlt`, and APs halted in their trampoline. All self-tests pass. Next bites: SMP scheduler join (APs actually running), USB HID / xHCI (real-hardware input path), `__copy_user_fault_fixup` for copy-from-user #PF recovery, or per-process address spaces (unblocks a second ring-3 task without a VA collision).
+Branch convention: each Claude-driven slice runs on its own
+`claude/<slug>` feature branch. Merge target is `main`. The active
+branch for any given session is whatever the harness checked out;
+session-start git sync rebases on `origin/main` first.
+
 - **Default branch**: `main`.
-- **Active dev branch**: `claude/port-sparkengine-components-f38iH` (Claude-driven bootstrapping).
-- **Platforms**: x86_64 first (Multiboot2 → long mode). ARM64 planned, not started. UEFI path planned, not started.
-- **Toolchain in use**: clang 18.1.3, lld 18, cmake 3.28, GNU assembler via clang (`.S` files with Intel syntax). NASM not required yet.
-- **Build system**: `cmake --preset x86_64-debug` / `x86_64-release`. Produces `build/<preset>/kernel/duetos-kernel.elf`.
-- **Runtime tooling not yet installed on dev host**: `qemu-system-x86_64`, `ovmf`, `grub-mkrescue`, `xorriso`. `tools/qemu/run.sh` documents the install step and will work as soon as those are present, once the Multiboot2 ISO build helper lands.
-- **CI**: not yet wired. When it lands, mirror locally with the commands in `CLAUDE.md` → "Pre-commit checks".
+- **Platforms**: x86_64 first (Multiboot2 → long mode + UEFI hybrid
+  ISO). ARM64 planned, not started.
+- **Toolchain**: clang 18.1.3, lld 18, cmake 3.28, GNU assembler via
+  clang (`.S` files with Intel syntax). NASM not required yet.
+- **Build**: `cmake --preset x86_64-debug` / `x86_64-release`. Output:
+  `build/<preset>/kernel/duetos-kernel.elf`.
+- **Live-test tooling on demand**: `qemu-system-x86_64`, `ovmf`,
+  `grub-mkrescue`, `xorriso`, `mtools` are NOT pre-installed on the
+  dev host. CLAUDE.md → "Live-test runtime tooling — install on
+  demand" lists when to install (runtime-behaviour deltas, not pure
+  refactors) and the apt line.
+- **CI**: not yet wired. When it lands, mirror locally with the
+  commands in CLAUDE.md → "Pre-commit checks".
 
 ### Project Pillars (one-liners)
 

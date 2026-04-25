@@ -103,20 +103,23 @@ The same pattern applies to:
 
 | Subsystem | Kernel backend | Win32 translator state |
 |-----------|----------------|-----------------------|
-| File I/O | ramfs + FAT32 (read) + `SYS_FILE_*` | **working** — `fopen`/`fread` live-verified |
+| File I/O (read) | ramfs + FAT32/ext4 read paths + NVMe + `SYS_FILE_*` | **working** — `fopen`/`fread` live-verified |
+| File I/O (write) | none yet | **stub** — `fwrite` to a real file no-ops |
 | Registry | static tree in `advapi32` | **working** — `RegQueryValueEx` live-verified |
 | stdout / stderr | COM1 serial | **working** — `printf` live-verified |
 | Time | HPET + LAPIC timer | **working** — `GetTickCount` / `QueryPerf*` |
 | Heap | kernel slab + per-process region | **working** — `malloc` / `HeapAlloc` |
-| Threads | SMP round-robin scheduler | **working** — `CreateThread` + `Wait*` |
+| Threads | round-robin scheduler (UP; SMP AP bring-up pending) | **working** — `CreateThread` + `Wait*` |
 | Atomics | native `lock xadd` / `cmpxchg` | **working** — full `Interlocked*` |
 | Critical sections + SRW | CAS + `SYS_YIELD` spin | **working** |
 | Environment vars | static list in `ucrtbase` | **working** — `getenv` |
-| stdin | PS/2 keyboard driver exists, not wired to `fread` yet | **stub** — `fgets` returns NULL |
-| Network | kernel stack is skeleton | **stub** — `ws2_32` returns WSAENETDOWN |
-| Graphics | framebuffer + compositor; no Vulkan ICD yet | **stub** — `d3d*` returns E_NOTIMPL |
-| Windows / input | no WM, no HWND | **stub** — `user32!CreateWindow` returns NULL |
-| Audio | no audio path | **stub** — `winmm!PlaySound` returns 0 |
+| Windows / input (basic) | compositor + per-window msg ring + WndProc dispatch | **working** — `windowed_hello` paints + pumps + dispatches |
+| GDI primitives | object table + memDC + window-DC paint | **working** — Rectangle / Ellipse / DrawText / FillRect |
+| stdin | PS/2 + USB HID keyboards live; not wired to `fread` | **stub** — `fgets` returns NULL |
+| Network | TCP/UDP/IP/ARP stack + e1000 + USB CDC-ECM + RNDIS, DHCP, DNS | **working** for sync BSD sockets; **stub** for ws2_32 async surface |
+| Graphics (3D) | virtio-gpu 2D scanout; no Vulkan ICD | **stub** — `d3d*` Create* returns E_FAIL |
+| Modal dialogs / menus / common controls / scroll bars | none | **stub** |
+| Audio | PC speaker only (`PcSpeakerBeep`) | **partial** — `MessageBeep` works; `PlaySound` returns 0 |
 | COM runtime | none | **stub** — `CoCreateInstance` returns CLASS_E_... |
 
 Every row with **working** in the translator column has a real kernel
@@ -175,11 +178,14 @@ The kernel preserves all registers except `rax`. `rcx` and `r11` are
 NOT used as arg registers (they collide with `syscall`/`sysret`);
 we use `int 0x80` so this is an internal constraint only.
 
-Full syscall table lives in `kernel/core/syscall.h`. As of this
-writing, ~57 numbered syscalls cover exit, yield, pid queries, last-
-error, heap, file I/O, file-handle ops, timer, event / mutex /
-semaphore / thread primitives, TLS slots, vmap, debug print, and NT
-forwarding (`SYS_NT_INVOKE`).
+Full syscall table lives in `kernel/core/syscall.h`. As of 2026-04-25
+the table covers ~130 numbered syscalls across: process / thread
+lifecycle, last-error, heap, file I/O, file-handle ops, timers, event
+/ mutex / semaphore / thread primitives, TLS slots, vmap, debug
+print, NT forwarding (`SYS_NT_INVOKE`), Linux ABI translation, the
+window manager (`SYS_WIN_*`), the GDI surface (`SYS_GDI_*`), the
+networking BSD-socket layer, and the GPU stub forwarders. Numbers are
+ABI-stable once published.
 
 ---
 

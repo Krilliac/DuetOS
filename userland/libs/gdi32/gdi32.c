@@ -44,6 +44,7 @@ typedef struct
 #define SYS_GDI_LINE 74
 #define SYS_GDI_ELLIPSE 75
 #define SYS_GDI_SET_PIXEL 76
+#define SYS_GDI_DRAW_TEXT_W 126
 
 /* Encode the HWND inside the HDC pointer so later GDI calls can
  * recover it. Bit layout: HDC == (HWND | GDI_TAG). GDI_TAG keeps
@@ -350,12 +351,22 @@ __declspec(dllexport) INT DrawTextA(HDC dc, const char* text, INT len, void* r, 
 }
 __declspec(dllexport) INT DrawTextW(HDC dc, const wchar_t16* text, INT len, void* r, UINT fmt)
 {
-    (void)dc;
-    (void)text;
-    (void)len;
-    (void)r;
-    (void)fmt;
-    return 0;
+    if (!r || !text)
+        return 0;
+    /* The kernel handler accepts the HDC directly (memDC tag or
+     * window-DC raw handle), copies in `rdx` wchar_ts, downcodes
+     * non-ASCII to '?', and applies DT_CENTER / DT_VCENTER /
+     * DT_RIGHT / DT_LEFT / DT_TOP / DT_SINGLELINE. Returns the
+     * drawn-text pixel height in eax. */
+    register long long r10_r asm("r10") = (long long)(unsigned long long)r;
+    register long long r8_f asm("r8") = (long long)fmt;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_GDI_DRAW_TEXT_W), "D"((long long)(unsigned long long)dc),
+                       "S"((long long)(unsigned long long)text), "d"((long long)len), "r"(r10_r), "r"(r8_f)
+                     : "memory");
+    return (INT)(rv > 0 ? rv : 0);
 }
 
 static unsigned gdi32_ascii_len(const wchar_t16* s, INT len)

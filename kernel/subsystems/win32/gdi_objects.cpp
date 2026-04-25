@@ -95,6 +95,7 @@ WindowDcState* GdiWindowDcState(u32 window_handle)
     if (!s->init)
     {
         s->init = true;
+        s->text_color_set = false;
         s->text_color = 0x00000000;
         s->bk_color = 0x00FFFFFF;
         s->bk_mode = kBkModeOpaque;
@@ -348,6 +349,7 @@ u32 GdiSetTextColor(u64 hdc, u32 rgb)
         {
             const u32 prev = s->text_color;
             s->text_color = rgb;
+            s->text_color_set = true;
             return prev;
         }
     }
@@ -1157,6 +1159,59 @@ void PaintFilledEllipseOnBitmap(Bitmap* bmp, i32 x, i32 y, i32 w, i32 h, u32 rgb
     }
 }
 
+// Paint a 1-pixel-thick ellipse outline into a bitmap, matching
+// the boundary that PaintFilledEllipseOnBitmap would produce. A
+// pixel is "on the outline" iff it is inside the ellipse and at
+// least one of its 4-connected neighbours is outside. Same
+// integer test as the filled version, no sqrt.
+void PaintEllipseOutlineOnBitmap(Bitmap* bmp, i32 x, i32 y, i32 w, i32 h, u32 rgb)
+{
+    if (bmp == nullptr || bmp->pixels == nullptr || w <= 0 || h <= 0)
+        return;
+    const i64 a = w / 2;
+    const i64 b = h / 2;
+    if (a == 0 || b == 0)
+        return;
+    const i64 cx = x + a;
+    const i64 cy = y + b;
+    const i64 a2 = a * a;
+    const i64 b2 = b * b;
+    const i64 a2b2 = a2 * b2;
+
+    auto inside = [&](i64 xx, i64 yy) -> bool
+    {
+        const i64 dx = xx - cx;
+        const i64 dy = yy - cy;
+        return dx * dx * b2 + dy * dy * a2 <= a2b2;
+    };
+
+    i64 x0 = x;
+    i64 y0 = y;
+    i64 x1 = static_cast<i64>(x) + w;
+    i64 y1 = static_cast<i64>(y) + h;
+    if (x0 < 0)
+        x0 = 0;
+    if (y0 < 0)
+        y0 = 0;
+    if (x1 > static_cast<i64>(bmp->width))
+        x1 = bmp->width;
+    if (y1 > static_cast<i64>(bmp->height))
+        y1 = bmp->height;
+
+    const u32 stride = bmp->pitch / 4;
+    for (i64 yy = y0; yy < y1; ++yy)
+    {
+        u32* row = bmp->pixels + static_cast<u64>(yy) * stride;
+        for (i64 xx = x0; xx < x1; ++xx)
+        {
+            if (!inside(xx, yy))
+                continue;
+            if (!inside(xx - 1, yy) || !inside(xx + 1, yy) || !inside(xx, yy - 1) || !inside(xx, yy + 1))
+                row[xx] = rgb;
+        }
+    }
+}
+
 void DoGdiLineTo(arch::TrapFrame* frame)
 {
     using namespace duetos::drivers::video;
@@ -1380,12 +1435,7 @@ void DoGdiEllipseFilled(arch::TrapFrame* frame)
             if (bmp != nullptr)
             {
                 PaintFilledEllipseOnBitmap(bmp, x, y, w, h, brush_rgb);
-                // Outline via the window-path midpoint algorithm
-                // isn't available as a bitmap helper; for v0 we
-                // paint a slightly-smaller ellipse in pen colour
-                // over the fill's border ring, which approximates
-                // the outline for small + medium ellipses.
-                (void)pen_rgb; // outline-on-bitmap deferred
+                PaintEllipseOutlineOnBitmap(bmp, x, y, w, h, pen_rgb);
                 ok = true;
             }
         }
@@ -1396,12 +1446,12 @@ void DoGdiEllipseFilled(arch::TrapFrame* frame)
         const u32 h_comp = HwndToCompositorHandleForCaller(hdc, proc->pid);
         if (h_comp != kWindowInvalid)
         {
-            // Window path: the compositor doesn't yet have a
-            // filled-ellipse prim. Record the outline via the
-            // existing Ellipse prim; the area is technically
-            // unfilled but the shape is on screen. Filled-ellipse
-            // on window HDC is a documented v0 gap.
-            (void)brush_rgb;
+            // Win32 Ellipse(hdc, ...) fills with the current brush
+            // and outlines with the current pen. Record both prims:
+            // the FilledEllipse paints the interior; the Ellipse
+            // outline is drawn on top by the compositor in the
+            // order they were enqueued.
+            WindowClientFilledEllipse(h_comp, x, y, w, h, brush_rgb);
             WindowClientEllipse(h_comp, x, y, w, h, pen_rgb);
             const Theme& theme = ThemeCurrent();
             DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");

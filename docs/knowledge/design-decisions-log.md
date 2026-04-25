@@ -1,6 +1,12 @@
 # DuetOS — Design Decisions Log
 
-_Last updated: 2026-04-20_
+_Last updated: 2026-04-25_
+
+_Note (2026-04-25): the latest formal entries are 042 (HPET self-test).
+Decisions made during the windowing / GDI / USB / network / deferred-
+task work between 2026-04-21 and 2026-04-25 are captured per-slice in
+`.claude/knowledge/` rather than reformatted into this log; rebuild
+the cumulative view from `.claude/index.md` if needed._
 
 ## Purpose
 
@@ -12,18 +18,13 @@ peripheral).
 
 This is a companion to:
 
-- `roadmap-to-gui-desktop.md` — the 13-track vision and phasing.
 - `security-malware-hard-stop-plan.md` — the security posture we're
   building toward.
-- `track-2-platform-foundation-implementation-plan.md` — the platform-
-  bring-up contract these decisions are executing against.
-- `implementation-backlog-gates.md` — the gate framework every slice
-  has to clear.
+- `smp-ap-bringup-scope.md` — the staged plan for finishing SMP.
+- `runtime-recovery-strategy.md` — halt/restart/retry/reject taxonomy
+  every fault path defers to.
 
-The entries here are the **ground truth of what actually shipped**,
-which sometimes differs from what the planning docs prescribed; when
-it does, the log flags the divergence so the planning doc can be
-updated later.
+The entries here are the **ground truth of what actually shipped**.
 
 **Format per entry:**
 

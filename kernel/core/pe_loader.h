@@ -168,6 +168,19 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
 /// ProcessCreate. Idempotent: drains the staging buffer to empty.
 void PeLoadDrainIatMisses(duetos::core::Process* proc);
 
+/// Resolve `dll_name!fn_name` against an array of preloaded DLL
+/// images. Walks each image's EAT and chases forwarder exports
+/// recursively (both name-form "Dll.Func" and ordinal-form
+/// "Dll.#N"), bounded against forwarder cycles. Returns true and
+/// writes the absolute target VA on success; returns false if
+/// the DLL isn't in the array, the function isn't exported, or
+/// a forwarder chain leaves the array.
+///
+/// Used both by PeLoad's IAT resolver and by the per-process
+/// GetProcAddress path so user-mode lookups see the same
+/// forwarder behaviour as kernel-mode imports.
+bool PeResolveViaDlls(const char* dll_name, const char* fn_name, const DllImage* dlls, u64 count, u64* out_va);
+
 // IMAGE_SCN_* bits exposed for any caller that wants to decode
 // section flags on its own (readelf-style tools later).
 inline constexpr u32 kScnCntCode = 0x00000020;

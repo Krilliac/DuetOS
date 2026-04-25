@@ -9,6 +9,7 @@
 #include "../sched/sched.h"
 #include "klog.h"
 #include "panic.h"
+#include "pe_loader.h"
 
 namespace duetos::core
 {
@@ -420,7 +421,16 @@ u64 ProcessResolveDllExport(const Process* proc, const char* dll_name, const cha
         if (!PeExportLookupName(img.exports, func_name, e))
             continue;
         if (e.is_forwarder)
-            return 0; // forwarder chasing: not yet implemented
+        {
+            // Chase the forwarder through the rest of the process's
+            // DLL table. The shared resolver handles both name- and
+            // ordinal-form forwarders and bounds against cycles.
+            const char* fwd_dll = PeExportsDllName(img.exports);
+            u64 va = 0;
+            if (PeResolveViaDlls(fwd_dll, func_name, proc->dll_images, proc->dll_image_count, &va))
+                return va;
+            return 0;
+        }
         return img.base_va + static_cast<u64>(e.rva);
     }
     return 0;
@@ -441,7 +451,13 @@ u64 ProcessResolveDllExportByBase(const Process* proc, u64 base_va, const char* 
         if (!PeExportLookupName(img.exports, func_name, e))
             continue;
         if (e.is_forwarder)
+        {
+            const char* fwd_dll = PeExportsDllName(img.exports);
+            u64 va = 0;
+            if (PeResolveViaDlls(fwd_dll, func_name, proc->dll_images, proc->dll_image_count, &va))
+                return va;
             return 0;
+        }
         return img.base_va + static_cast<u64>(e.rva);
     }
     return 0;
