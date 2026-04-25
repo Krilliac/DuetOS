@@ -151,4 +151,75 @@ void XhciInit();
 u32 XhciCount();
 const ControllerInfo* XhciControllerAt(u32 i);
 
+// -------------------------------------------------------------------
+// USB-net class-driver surface (CDC-ECM, RTL8150, ASIX, ...). The
+// primitives here are the small slice of xHCI machinery that a
+// Bulk-In / Bulk-Out USB class driver needs: find a device by
+// class, send control transfers for register reads/writes, add a
+// bulk endpoint to the device context, submit a Normal TRB, and
+// wait for its completion.
+//
+// Returning bool + out-params (rather than Result<>) keeps the
+// surface narrow; the class driver is expected to handle failures
+// by marking the device offline and logging, not by RESULT_TRY'ing
+// up the stack.
+// -------------------------------------------------------------------
+
+/// Walk every addressed device. Returns the first slot_id whose
+/// device descriptor's class/subclass match (0xFF wildcards each).
+/// Returns 0 if no match. Safe to call after xHCI init.
+u8 XhciFindDeviceByClass(u8 class_code, u8 subclass);
+
+/// Enumerate every addressed device's slot_id. `out[0..max)` is
+/// filled with the currently-live slot ids and the count returned.
+/// Useful for class probes that want to try-parse each device
+/// themselves (e.g. CDC-ECM where class is declared at the interface
+/// level and XhciFindDeviceByClass misses).
+u32 XhciEnumerateDevices(u8* out, u32 max);
+
+/// Pause / resume the per-controller HID polling task's event-ring
+/// drain. Class drivers that issue control or bulk transfers from a
+/// non-xHCI thread must pause the drainer across the call — the
+/// v0 event-ring consumer pops events with no TRB-based dispatch,
+/// so an un-paused drain can steal the Transfer Event that the
+/// class driver is waiting on. Pass true before a transfer batch,
+/// false after. Nesting is NOT supported — one owner at a time.
+void XhciPauseEventConsumer(bool pause);
+
+/// Control-IN transfer on EP0. bmRequestType MUST have bit 7 set
+/// (device-to-host). On success the low `len` bytes of the device's
+/// scratch buffer are copied into `buf`. Returns false on timeout
+/// or non-Success completion code. `len` must be <= mm::kPageSize.
+bool XhciControlIn(u8 slot_id, u8 bmRequestType, u8 bRequest, u16 wValue, u16 wIndex, void* buf, u16 len);
+
+/// Control-OUT transfer on EP0 (host-to-device). bmRequestType MUST
+/// have bit 7 clear. If `buf != nullptr && len > 0`, the payload is
+/// copied into scratch and sent as the Data stage; otherwise this
+/// is a no-data control transfer. Returns false on timeout or
+/// failure completion. `len` must be <= mm::kPageSize.
+bool XhciControlOut(u8 slot_id, u8 bmRequestType, u8 bRequest, u16 wValue, u16 wIndex, const void* buf, u16 len);
+
+/// Allocate a transfer ring and submit Configure Endpoint so the
+/// given bulk endpoint becomes active. `ep_addr` is the USB
+/// endpoint address with bit 7 set for IN, clear for OUT.
+/// `max_packet` must match the endpoint descriptor. Idempotent
+/// per `(slot_id, ep_addr)`. Returns false on allocation / command
+/// failure.
+bool XhciConfigureBulkEndpoint(u8 slot_id, u8 ep_addr, u16 max_packet);
+
+/// Submit one Normal TRB on the previously-configured bulk ring
+/// for `(slot_id, ep_addr)` and ring the device's doorbell.
+/// `buf_phys` is the DMA target (for IN) or source (for OUT) and
+/// `len` is the byte count. Returns the TRB physical address the
+/// caller passes to XhciBulkPoll, or 0 on error (endpoint not
+/// configured / ring full).
+u64 XhciBulkSubmit(u8 slot_id, u8 ep_addr, u64 buf_phys, u32 len);
+
+/// Poll the event ring for a Transfer Event completing `trb_phys`.
+/// Returns true on Success (and writes the byte count the
+/// controller actually transferred into `*out_bytes` if non-null).
+/// Returns false on timeout or any error completion code.
+/// `timeout_us` is a coarse microsecond budget.
+bool XhciBulkPoll(u8 slot_id, u8 ep_addr, u64 trb_phys, u32* out_bytes, u64 timeout_us);
+
 } // namespace duetos::drivers::usb::xhci

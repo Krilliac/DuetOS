@@ -28,6 +28,7 @@
 #include "../drivers/net/net.h"
 #include "../drivers/pci/pci.h"
 #include "../drivers/power/power.h"
+#include "../drivers/usb/cdc_ecm.h"
 #include "../drivers/usb/hid_descriptor.h"
 #include "../drivers/usb/msc_scsi.h"
 #include "../drivers/usb/usb.h"
@@ -1036,6 +1037,24 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         auto xhci_teardown = []() -> duetos::core::Result<void> { return duetos::drivers::usb::xhci::XhciShutdown(); };
         duetos::core::FaultDomainRegister("drivers/usb/xhci", xhci_init, xhci_teardown);
     }
+    // Probe USB-Ethernet adapters now that xHCI enumeration is
+    // complete. CDC-ECM is the USB standard — works with QEMU's
+    // `-device usb-net` emulation, premium USB-Ethernet dongles,
+    // and iPhone tethering. RNDIS (Android default), CDC-NCM
+    // (Apple devices, Wi-Fi 6 routers), AX88xxx and RTL81xx
+    // vendor-specific protocols are follow-up class drivers.
+    // CdcEcmProbe is deliberately NOT called here. Invoking it
+    // during USB init auto-probes every enumerated device; when
+    // the device isn't CDC-ECM (QEMU's usb-net is RNDIS, most
+    // Android phones are RNDIS too) the probe's control transfers
+    // still happen, and a timing interaction with the pre-poll
+    // event-ring state regresses the e1000 DHCP path (the RX
+    // polling task stops delivering frames to the network stack
+    // until a reboot). Callable manually from a shell command or
+    // a kernel thread once a real CDC-ECM device is known to be
+    // attached; the auto-probe will land in a follow-up slice
+    // that dispatches events by TRB so class drivers don't race
+    // with each other or the HID polling path.
     duetos::drivers::usb::hid::HidSelfTest();
     duetos::drivers::usb::msc::MscSelfTest();
 

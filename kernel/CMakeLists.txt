@@ -115,6 +115,7 @@ set(DUETOS_KERNEL_SHARED_SOURCES
     drivers/storage/block.cpp
     drivers/storage/nvme.cpp
     drivers/usb/hid_descriptor.cpp
+    drivers/usb/cdc_ecm.cpp
     drivers/usb/msc_scsi.cpp
     drivers/usb/usb.cpp
     drivers/usb/xhci.cpp
