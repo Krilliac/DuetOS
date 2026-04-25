@@ -332,6 +332,11 @@ void CmdHelp()
     ConsoleWriteln("  GPU          LIST DISCOVERED GPUS");
     ConsoleWriteln("  VBE [W H [B]]  QUERY / SET BOCHS-VBE DISPLAY MODE");
     ConsoleWriteln("  NIC          LIST NICS + MAC + LINK");
+    ConsoleWriteln("  IFCONFIG     PER-IFACE: LINK / MAC / IP / GATEWAY / DNS / LEASE");
+    ConsoleWriteln("  NETSCAN      LIST WIRELESS + WIRED NETWORKS WE COULD CONNECT TO");
+    ConsoleWriteln("  DHCP [RENEW] SHOW LEASE; `DHCP RENEW` SENDS A FRESH DISCOVER");
+    ConsoleWriteln("  ROUTE [-V]   DEFAULT GATEWAY + DNS  (-V = ALSO DUMP GATEWAY ARP)");
+    ConsoleWriteln("  NET UP|STATUS|TEST  BRING UP / STATUS / END-TO-END SMOKE");
     ConsoleWriteln("  ARP          ARP CACHE + STATS");
     ConsoleWriteln("  PING IP      ICMP ECHO REQUEST + WAIT 1S FOR REPLY");
     ConsoleWriteln("  NSLOOKUP NAME DNS A-RECORD LOOKUP (RESOLVER 10.0.2.3)");
@@ -1390,6 +1395,7 @@ static const char* const kCommandSet[] = {
     "fatnew",   "fatrm",     "fattrunc", "fatmkdir",   "fatrmdir", "linuxexec", "translate",  "smbios",   "power",
     "battery",  "thermal",   "temp",     "gpu",        "lsgpu",    "gfx",       "nic",        "lsnic",    "ip",
     "arp",      "ipv4",      "uuid",     "uuidgen",    "health",   "checkup",   "attacksim",  "redteam",  "memdump",
+    "ifconfig", "netinfo",   "dhcp",     "route",      "netscan",  "wifi",      "net",
     "instr",    "dumpstate", "bp",       "breakpoint", "login",    "logout",    "passwd",     "useradd",  "userdel",
     "users",    "who",       "su",       "hwmon",      "vbe",      "ping",      "nslookup",   "ntp",      "http",
     "shutdown", "poweroff",  "beep",     "inspect",    "theme",
@@ -3021,6 +3027,451 @@ void CmdNic()
         }
         ConsoleWriteChar('\n');
     }
+}
+
+// Print "a.b.c.d" — used by every networking command that wants to
+// surface IPs without each one re-implementing the dotted-quad
+// formatter. Zero-tolerance for tabs (kernel console is fixed-width).
+void WriteIpv4(duetos::net::Ipv4Address ip)
+{
+    for (u64 i = 0; i < 4; ++i)
+    {
+        if (i != 0)
+            ConsoleWriteChar('.');
+        WriteU64Dec(ip.octets[i]);
+    }
+}
+
+void WriteMac(const duetos::u8 mac[6])
+{
+    for (u64 i = 0; i < 6; ++i)
+    {
+        if (i != 0)
+            ConsoleWriteChar(':');
+        WriteU64Hex(mac[i], 2);
+    }
+}
+
+bool Ipv4IsZero(duetos::net::Ipv4Address ip)
+{
+    for (u64 i = 0; i < 4; ++i)
+        if (ip.octets[i] != 0)
+            return false;
+    return true;
+}
+
+// Comprehensive per-interface dump — combines driver-layer NIC info
+// (vendor / family / link state / MAC), stack-layer binding (IPv4
+// address actually in use) and DHCP lease state (router / DNS /
+// lease seconds) on one report. The shell `nic` command is the
+// minimal driver-only view; this is the one the user runs when
+// they want "what's my IP, am I online, who's my gateway".
+void CmdIfconfig()
+{
+    const duetos::u64 nics = duetos::drivers::net::NicCount();
+    if (nics == 0)
+    {
+        ConsoleWriteln("IFCONFIG: no network interfaces (no PCI NICs discovered)");
+        ConsoleWriteln("         (Wi-Fi adapters need a vendor driver — none online yet)");
+        return;
+    }
+    for (duetos::u64 i = 0; i < nics; ++i)
+    {
+        const auto& nic = duetos::drivers::net::Nic(i);
+        const bool bound = duetos::net::InterfaceIsBound(static_cast<duetos::u32>(i));
+        ConsoleWrite("net");
+        WriteU64Dec(i);
+        ConsoleWrite("  ");
+        ConsoleWrite(nic.vendor);
+        if (nic.family != nullptr)
+        {
+            ConsoleWriteChar(' ');
+            ConsoleWrite(nic.family);
+        }
+        ConsoleWriteln("");
+        ConsoleWrite("       link    ");
+        ConsoleWriteln(nic.mac_valid && nic.link_up ? "UP" : "DOWN");
+        if (nic.mac_valid)
+        {
+            ConsoleWrite("       ether   ");
+            WriteMac(nic.mac);
+            ConsoleWriteln("");
+        }
+        if (bound)
+        {
+            const auto ip = duetos::net::InterfaceIp(static_cast<duetos::u32>(i));
+            ConsoleWrite("       inet    ");
+            WriteIpv4(ip);
+            if (Ipv4IsZero(ip))
+                ConsoleWriteln(" (waiting for DHCP)");
+            else
+                ConsoleWriteln("");
+        }
+        else
+        {
+            ConsoleWriteln("       inet    (not bound to stack — driver hasn't called bind yet)");
+        }
+        // Lease detail (DHCP is single-iface in v0; only print on the
+        // interface that owns the lease).
+        const auto lease = duetos::net::DhcpLeaseRead();
+        if (bound && lease.valid)
+        {
+            ConsoleWrite("       gateway ");
+            WriteIpv4(lease.router);
+            ConsoleWriteln("");
+            ConsoleWrite("       dns     ");
+            WriteIpv4(lease.dns);
+            ConsoleWriteln("");
+            ConsoleWrite("       dhcp    server=");
+            WriteIpv4(lease.server);
+            ConsoleWrite("  lease=");
+            WriteU64Dec(lease.lease_secs);
+            ConsoleWriteln("s");
+        }
+    }
+    ConsoleWrite("ARP cache: ");
+    WriteU64Dec(duetos::net::ArpEntryCount());
+    ConsoleWriteln(" live entries");
+}
+
+// Pure-status dump for the DHCP lease. `dhcp` shows; `dhcp renew`
+// kicks a fresh DISCOVER on iface 0. Renewal is a one-shot — the
+// stack's DhcpStart resets the state machine + sends DISCOVER, so
+// calling it again from the shell is idempotent.
+void CmdDhcp(duetos::u32 argc, char** argv)
+{
+    if (argc >= 2 && (StrEq(argv[1], "renew") || StrEq(argv[1], "request") || StrEq(argv[1], "start")))
+    {
+        if (!duetos::net::InterfaceIsBound(0))
+        {
+            ConsoleWriteln("DHCP: iface 0 not bound (no NIC driver online?)");
+            return;
+        }
+        if (!duetos::net::DhcpStart(0))
+        {
+            ConsoleWriteln("DHCP: start failed (transaction already in flight?)");
+            return;
+        }
+        ConsoleWriteln("DHCP: DISCOVER sent — wait ~1s then re-run `dhcp` for the bound IP");
+        // Best-effort wait so the user sees the result without a
+        // second command. SLIRP replies in a few ms; real hardware
+        // takes longer. We poll up to ~2s.
+        for (duetos::u32 i = 0; i < 200; ++i)
+        {
+            duetos::sched::SchedSleepTicks(1);
+            const auto poll = duetos::net::DhcpLeaseRead();
+            if (poll.valid)
+                break;
+        }
+    }
+    const auto lease = duetos::net::DhcpLeaseRead();
+    if (!lease.valid)
+    {
+        ConsoleWriteln("DHCP: no lease (server didn't respond, or transaction in flight)");
+        ConsoleWriteln("      try: `dhcp renew`");
+        return;
+    }
+    ConsoleWrite("DHCP: bound  ip=");
+    WriteIpv4(lease.ip);
+    ConsoleWriteln("");
+    ConsoleWrite("      gateway=");
+    WriteIpv4(lease.router);
+    ConsoleWriteln("");
+    ConsoleWrite("      dns    =");
+    WriteIpv4(lease.dns);
+    ConsoleWriteln("");
+    ConsoleWrite("      server =");
+    WriteIpv4(lease.server);
+    ConsoleWriteln("");
+    ConsoleWrite("      lease  =");
+    WriteU64Dec(lease.lease_secs);
+    ConsoleWriteln(" sec");
+}
+
+// Default-route view derived from the DHCP lease + ARP cache state.
+// `route -v` (any extra arg) does an ARP lookup against the gateway
+// to confirm L2 reachability without sending a packet.
+void CmdRoute(duetos::u32 argc, char** argv)
+{
+    (void)argv;
+    const auto lease = duetos::net::DhcpLeaseRead();
+    if (!lease.valid)
+    {
+        ConsoleWriteln("ROUTE: no default route (DHCP not bound — try `dhcp renew`)");
+        return;
+    }
+    ConsoleWrite("default via ");
+    WriteIpv4(lease.router);
+    ConsoleWrite(" dev net0  src ");
+    WriteIpv4(lease.ip);
+    ConsoleWriteln("");
+    ConsoleWrite("DNS via ");
+    WriteIpv4(lease.dns);
+    ConsoleWriteln("");
+    if (argc < 2)
+        return;
+    const auto* arp = duetos::net::ArpLookup(0, lease.router);
+    ConsoleWrite("gateway L2: ");
+    if (arp == nullptr)
+    {
+        ConsoleWriteln("not in ARP cache (peer hasn't replied to ARP yet)");
+        return;
+    }
+    WriteMac(arp->mac.octets);
+    ConsoleWriteln("  (ARP cached)");
+}
+
+// "List networks I can connect to". Today: walks every PCI NIC, lists
+// wired link state. Wi-Fi is honest — we don't have a wireless driver
+// online, so SSID scanning isn't possible; we say so explicitly
+// instead of pretending the empty list means "no networks".
+void CmdNetscan()
+{
+    const duetos::u64 nics = duetos::drivers::net::NicCount();
+    bool any_wifi = false;
+    bool any_eth = false;
+    for (duetos::u64 i = 0; i < nics; ++i)
+    {
+        const auto& nic = duetos::drivers::net::Nic(i);
+        // PCI subclass 0x80 ("other") is what the ath9k / iwlwifi /
+        // rtl88xx wireless families historically advertise. Real
+        // wireless NICs would also expose family strings starting
+        // with "iwlwifi" / "rtl8821" — match either.
+        const bool wifiish = nic.subclass == 0x80 || (nic.family != nullptr && (StrStartsWith(nic.family, "iwlwifi") ||
+                                                                                StrStartsWith(nic.family, "rtl8821") ||
+                                                                                StrStartsWith(nic.family, "bcm4")));
+        if (wifiish)
+            any_wifi = true;
+        else
+            any_eth = true;
+    }
+    ConsoleWriteln("WIRELESS NETWORKS:");
+    if (any_wifi)
+    {
+        ConsoleWriteln("  wireless adapter detected, but DuetOS has no wireless driver online");
+        ConsoleWriteln("  (iwlwifi / rtl88xx / bcm4 driver implementation pending)");
+    }
+    else
+    {
+        ConsoleWriteln("  (no wireless adapter detected)");
+    }
+    ConsoleWriteln("WIRED NETWORKS:");
+    if (!any_eth)
+    {
+        ConsoleWriteln("  (no wired adapter detected)");
+        return;
+    }
+    for (duetos::u64 i = 0; i < nics; ++i)
+    {
+        const auto& nic = duetos::drivers::net::Nic(i);
+        if (nic.subclass == 0x80)
+            continue;
+        ConsoleWrite("  net");
+        WriteU64Dec(i);
+        ConsoleWrite("  ");
+        ConsoleWrite(nic.vendor);
+        if (nic.family != nullptr)
+        {
+            ConsoleWriteChar(' ');
+            ConsoleWrite(nic.family);
+        }
+        ConsoleWrite("  link=");
+        ConsoleWrite(nic.mac_valid && nic.link_up ? "UP " : "DOWN ");
+        if (duetos::net::InterfaceIsBound(static_cast<duetos::u32>(i)))
+        {
+            const auto ip = duetos::net::InterfaceIp(static_cast<duetos::u32>(i));
+            if (!Ipv4IsZero(ip))
+            {
+                ConsoleWrite(" ip=");
+                WriteIpv4(ip);
+            }
+        }
+        ConsoleWriteln("");
+    }
+}
+
+// `net` umbrella: sub-commands `up`, `status`, `test`. Each one is a
+// thin wrapper around the existing primitives so the user has a
+// single place to "bring the network up + verify it works" without
+// memorising every command name.
+//
+//   net up     — ensure DHCP is bound (kicks DISCOVER if not)
+//   net status — print brief one-line status
+//   net test   — full end-to-end smoke: lease + ARP gateway + DNS
+//                lookup of a known name + ICMP echo to gateway
+void CmdNet(duetos::u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("NET: usage: net <up|status|test>");
+        return;
+    }
+    if (StrEq(argv[1], "up"))
+    {
+        if (!duetos::net::InterfaceIsBound(0))
+        {
+            ConsoleWriteln("NET UP: iface 0 not bound (no NIC driver?)");
+            return;
+        }
+        auto lease = duetos::net::DhcpLeaseRead();
+        if (lease.valid)
+        {
+            ConsoleWrite("NET UP: already bound  ip=");
+            WriteIpv4(lease.ip);
+            ConsoleWriteln("");
+            return;
+        }
+        if (!duetos::net::DhcpStart(0))
+        {
+            ConsoleWriteln("NET UP: DHCP start failed");
+            return;
+        }
+        ConsoleWriteln("NET UP: DHCP DISCOVER sent ...");
+        for (duetos::u32 i = 0; i < 300; ++i)
+        {
+            duetos::sched::SchedSleepTicks(1);
+            lease = duetos::net::DhcpLeaseRead();
+            if (lease.valid)
+                break;
+        }
+        if (!lease.valid)
+        {
+            ConsoleWriteln("NET UP: timeout — no DHCP ACK in 3s");
+            return;
+        }
+        ConsoleWrite("NET UP: bound  ip=");
+        WriteIpv4(lease.ip);
+        ConsoleWrite("  gw=");
+        WriteIpv4(lease.router);
+        ConsoleWrite("  dns=");
+        WriteIpv4(lease.dns);
+        ConsoleWriteln("");
+        return;
+    }
+    if (StrEq(argv[1], "status"))
+    {
+        const auto lease = duetos::net::DhcpLeaseRead();
+        const bool bound = duetos::net::InterfaceIsBound(0);
+        ConsoleWrite("NET: iface0=");
+        ConsoleWrite(bound ? "UP" : "DOWN");
+        ConsoleWrite("  dhcp=");
+        ConsoleWrite(lease.valid ? "BOUND" : "PENDING");
+        if (lease.valid)
+        {
+            ConsoleWrite("  ip=");
+            WriteIpv4(lease.ip);
+            ConsoleWrite("  gw=");
+            WriteIpv4(lease.router);
+        }
+        ConsoleWrite("  arp=");
+        WriteU64Dec(duetos::net::ArpEntryCount());
+        ConsoleWriteln("");
+        return;
+    }
+    if (StrEq(argv[1], "test"))
+    {
+        // 1. DHCP lease present?
+        ConsoleWrite("NET TEST: dhcp ... ");
+        auto lease = duetos::net::DhcpLeaseRead();
+        if (!lease.valid)
+        {
+            duetos::net::DhcpStart(0);
+            for (duetos::u32 i = 0; i < 300; ++i)
+            {
+                duetos::sched::SchedSleepTicks(1);
+                lease = duetos::net::DhcpLeaseRead();
+                if (lease.valid)
+                    break;
+            }
+        }
+        if (!lease.valid)
+        {
+            ConsoleWriteln("FAIL (no lease)");
+            return;
+        }
+        ConsoleWrite("OK ip=");
+        WriteIpv4(lease.ip);
+        ConsoleWriteln("");
+
+        // 2. ARP-resolve the gateway by sending a probe ping. The
+        //    ICMP TX path triggers ARP-resolve internally; on QEMU
+        //    SLIRP the gateway replies to ARP from boot, so the
+        //    cache is already warm. On real hardware this primes it.
+        ConsoleWrite("NET TEST: gateway ARP ... ");
+        const auto* arp = duetos::net::ArpLookup(0, lease.router);
+        if (arp == nullptr)
+        {
+            // Send a single ICMP echo to force ARP request out.
+            duetos::net::NetIcmpSendEcho(0, lease.router, 0xBEEF, 1);
+            for (duetos::u32 i = 0; i < 100; ++i)
+            {
+                duetos::sched::SchedSleepTicks(1);
+                arp = duetos::net::ArpLookup(0, lease.router);
+                if (arp != nullptr)
+                    break;
+            }
+        }
+        if (arp == nullptr)
+        {
+            ConsoleWriteln("FAIL (gateway didn't reply to ARP)");
+            return;
+        }
+        ConsoleWrite("OK mac=");
+        WriteMac(arp->mac.octets);
+        ConsoleWriteln("");
+
+        // 3. DNS A-record query against the lease's resolver.
+        ConsoleWrite("NET TEST: dns ... ");
+        if (!duetos::net::NetDnsQueryA(0, lease.dns, "example.com"))
+        {
+            ConsoleWriteln("FAIL (send rejected)");
+            return;
+        }
+        duetos::net::DnsResult dr{};
+        for (duetos::u32 i = 0; i < 300; ++i)
+        {
+            duetos::sched::SchedSleepTicks(1);
+            dr = duetos::net::NetDnsResultRead();
+            if (dr.resolved)
+                break;
+        }
+        if (!dr.resolved)
+        {
+            ConsoleWriteln("FAIL (no reply)");
+            return;
+        }
+        ConsoleWrite("OK example.com -> ");
+        WriteIpv4(dr.ip);
+        ConsoleWriteln("");
+
+        // 4. ICMP echo to the gateway as a final reachability probe.
+        ConsoleWrite("NET TEST: ping gateway ... ");
+        duetos::net::NetPingArm(0xCAFE, 1);
+        if (!duetos::net::NetIcmpSendEcho(0, lease.router, 0xCAFE, 1))
+        {
+            ConsoleWriteln("FAIL (send rejected)");
+            return;
+        }
+        duetos::net::PingResult pr{};
+        for (duetos::u32 i = 0; i < 200; ++i)
+        {
+            duetos::sched::SchedSleepTicks(1);
+            pr = duetos::net::NetPingRead();
+            if (pr.replied)
+                break;
+        }
+        if (!pr.replied)
+        {
+            ConsoleWriteln("FAIL (no echo reply)");
+            return;
+        }
+        ConsoleWrite("OK rtt~=");
+        WriteU64Dec(pr.rtt_ticks * 10);
+        ConsoleWriteln("ms");
+        ConsoleWriteln("NET TEST: PASS — DuetOS is online");
+        return;
+    }
+    ConsoleWriteln("NET: usage: net <up|status|test>");
 }
 
 void CmdArp()
@@ -7788,6 +8239,31 @@ void Dispatch(char* line)
     if (StrEq(cmd, "ipv4"))
     {
         CmdIpv4();
+        return;
+    }
+    if (StrEq(cmd, "ifconfig") || StrEq(cmd, "netinfo"))
+    {
+        CmdIfconfig();
+        return;
+    }
+    if (StrEq(cmd, "dhcp"))
+    {
+        CmdDhcp(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "route"))
+    {
+        CmdRoute(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "netscan") || StrEq(cmd, "wifi"))
+    {
+        CmdNetscan();
+        return;
+    }
+    if (StrEq(cmd, "net"))
+    {
+        CmdNet(argc, argv);
         return;
     }
     if (StrEq(cmd, "health") || StrEq(cmd, "checkup"))

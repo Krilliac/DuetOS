@@ -410,6 +410,42 @@ u64 InterfaceCount()
     return g_interface_count;
 }
 
+bool InterfaceIsBound(u32 iface_index)
+{
+    if (iface_index >= kMaxInterfaces)
+        return false;
+    return g_interfaces[iface_index].bound;
+}
+
+Ipv4Address InterfaceIp(u32 iface_index)
+{
+    if (iface_index >= kMaxInterfaces || !g_interfaces[iface_index].bound)
+        return Ipv4Address{};
+    return g_interfaces[iface_index].ip;
+}
+
+MacAddress InterfaceMac(u32 iface_index)
+{
+    if (iface_index >= kMaxInterfaces || !g_interfaces[iface_index].bound)
+        return MacAddress{};
+    return g_interfaces[iface_index].mac;
+}
+
+u32 ArpEntryCount()
+{
+    const u64 now = NowTicks();
+    u32 live = 0;
+    for (const ArpEntry& e : g_arp_cache)
+    {
+        if (e.expiry_ticks == 0)
+            continue;
+        if (now >= e.expiry_ticks)
+            continue;
+        ++live;
+    }
+    return live;
+}
+
 const ArpEntry* ArpLookup(u32 iface_index, Ipv4Address ip)
 {
     const u64 now = NowTicks();
