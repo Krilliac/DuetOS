@@ -101,4 +101,14 @@ void DumpHexRegionSafe(const char* tag, u64 addr, u32 len, u64 skip_page_va);
 /// diagnostics block.
 void DumpStackWindow(const char* tag, u64 rsp, u32 quad_count);
 
+/// Self-test for `PlausibleKernelAddress`. Pins the higher-half
+/// boundary, the MMIO arena cap, the sentinel NULL rejection, and a
+/// sweep of low-half addresses (which must always reject regardless
+/// of how the userland map ends up wired). Plus a short call into
+/// `DumpInstructionBytes` / `DumpHexRegion` against a known-mapped
+/// region (a kernel symbol) so the formatter path runs.
+///
+/// Panics on any failure. Boot-time only.
+void HexdumpSelfTest();
+
 } // namespace duetos::core

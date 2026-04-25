@@ -70,4 +70,16 @@ namespace duetos::fs
 /// so a missing NUL doesn't run off into adjacent data.
 const RamfsNode* VfsLookup(const RamfsNode* root, const char* path, u64 path_max);
 
+/// Comprehensive self-test of the path resolver against the seeded
+/// ramfs trees. Asserts every documented behaviour: positive lookups,
+/// jail containment (sandbox root cannot see trusted paths), ".."
+/// rejection, "." pass-through, empty-component tolerance, trailing
+/// slash tolerance, walk-through-file rejection, null/zero-length
+/// guards, and path_max truncation. Panics on any failure.
+///
+/// Runs at boot from kernel_main, before address-space isolation
+/// brings up ring 3 — a VFS regression here is fatal because every
+/// later subsystem (sandboxing, file syscalls) layers on these rules.
+void VfsSelfTest();
+
 } // namespace duetos::fs

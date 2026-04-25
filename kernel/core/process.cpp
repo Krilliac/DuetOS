@@ -463,4 +463,123 @@ u64 ProcessResolveDllExportByBase(const Process* proc, u64 base_va, const char* 
     return 0;
 }
 
+namespace
+{
+
+void Expect(bool cond, const char* what)
+{
+    if (cond)
+    {
+        return;
+    }
+    arch::SerialWrite("[process-selftest] FAIL ");
+    arch::SerialWrite(what);
+    arch::SerialWrite("\n");
+    Panic("core/process", "ProcessSelfTest assertion failed");
+}
+
+bool StrEq(const char* a, const char* b)
+{
+    if (a == nullptr || b == nullptr)
+    {
+        return a == b;
+    }
+    while (*a && *b)
+    {
+        if (*a != *b)
+        {
+            return false;
+        }
+        ++a;
+        ++b;
+    }
+    return *a == *b;
+}
+
+} // namespace
+
+void ProcessSelfTest()
+{
+    KLOG_TRACE_SCOPE("core/process", "ProcessSelfTest");
+
+    // ----- CapSet bitmap basics -----
+    {
+        constexpr CapSet empty = CapSetEmpty();
+        Expect(empty.bits == 0, "CapSetEmpty.bits == 0");
+        Expect(!CapSetHas(empty, kCapSerialConsole), "empty has no SerialConsole");
+        Expect(!CapSetHas(empty, kCapFsRead), "empty has no FsRead");
+        Expect(!CapSetHas(empty, kCapFsWrite), "empty has no FsWrite");
+        Expect(!CapSetHas(empty, kCapDebug), "empty has no Debug");
+        Expect(!CapSetHas(empty, kCapSpawnThread), "empty has no SpawnThread");
+    }
+    {
+        constexpr CapSet trusted = CapSetTrusted();
+        Expect(trusted.bits != 0, "CapSetTrusted not empty");
+        Expect(CapSetHas(trusted, kCapSerialConsole), "trusted has SerialConsole");
+        Expect(CapSetHas(trusted, kCapFsRead), "trusted has FsRead");
+        Expect(CapSetHas(trusted, kCapFsWrite), "trusted has FsWrite");
+        Expect(CapSetHas(trusted, kCapDebug), "trusted has Debug");
+        Expect(CapSetHas(trusted, kCapSpawnThread), "trusted has SpawnThread");
+    }
+
+    // ----- Boundary cases on the cap enum -----
+    {
+        CapSet s = CapSetEmpty();
+        // kCapNone never enters the bitmap — it's the "no cap" sentinel.
+        CapSetAdd(s, kCapNone);
+        Expect(s.bits == 0, "CapSetAdd(kCapNone) is a no-op");
+        Expect(!CapSetHas(s, kCapNone), "CapSetHas(kCapNone) is false");
+
+        // kCapCount is the boundary marker, never live.
+        CapSetAdd(s, kCapCount);
+        Expect(s.bits == 0, "CapSetAdd(kCapCount) is a no-op");
+        Expect(!CapSetHas(s, kCapCount), "CapSetHas(kCapCount) is false");
+    }
+
+    // ----- CapSetAdd accumulates without disturbing other bits -----
+    {
+        CapSet s = CapSetEmpty();
+        CapSetAdd(s, kCapSerialConsole);
+        Expect(CapSetHas(s, kCapSerialConsole), "after Add SerialConsole, set");
+        Expect(!CapSetHas(s, kCapFsRead), "after Add SerialConsole, FsRead unset");
+        CapSetAdd(s, kCapFsRead);
+        Expect(CapSetHas(s, kCapSerialConsole), "after second Add, SerialConsole still set");
+        Expect(CapSetHas(s, kCapFsRead), "after Add FsRead, set");
+        // Adding the same cap twice is a no-op.
+        const u64 before = s.bits;
+        CapSetAdd(s, kCapSerialConsole);
+        Expect(s.bits == before, "double-Add is idempotent");
+    }
+
+    // ----- CapName: every defined cap returns a real string -----
+    Expect(StrEq(CapName(kCapNone), "<none>"), "CapName(kCapNone) == <none>");
+    Expect(StrEq(CapName(kCapSerialConsole), "SerialConsole"), "CapName(SerialConsole)");
+    Expect(StrEq(CapName(kCapFsRead), "FsRead"), "CapName(FsRead)");
+    Expect(StrEq(CapName(kCapDebug), "Debug"), "CapName(Debug)");
+    Expect(StrEq(CapName(kCapFsWrite), "FsWrite"), "CapName(FsWrite)");
+    Expect(StrEq(CapName(kCapSpawnThread), "SpawnThread"), "CapName(SpawnThread)");
+    Expect(StrEq(CapName(kCapCount), "<sentinel>"), "CapName(kCapCount) == <sentinel>");
+
+    // Catches "added an enum value, forgot the switch arm" — every
+    // entry from 1 to kCapCount must produce a non-fallback name.
+    for (u32 c = 1; c < static_cast<u32>(kCapCount); ++c)
+    {
+        const char* name = CapName(static_cast<Cap>(c));
+        Expect(name != nullptr, "CapName non-null");
+        Expect(!StrEq(name, "<unknown>"), "CapName covers every enumerator");
+    }
+
+    // ----- ShouldLogDenial rate-limit (1st, then every 32nd) -----
+    Expect(ShouldLogDenial(1), "denial #1 logs");
+    Expect(!ShouldLogDenial(2), "denial #2 silent");
+    Expect(!ShouldLogDenial(31), "denial #31 silent");
+    Expect(ShouldLogDenial(32), "denial #32 logs");
+    Expect(!ShouldLogDenial(33), "denial #33 silent");
+    Expect(ShouldLogDenial(64), "denial #64 logs");
+    Expect(ShouldLogDenial(96), "denial #96 logs");
+    Expect(ShouldLogDenial(kSandboxDenialKillThreshold - 4), "denial near threshold logs (96)");
+
+    arch::SerialWrite("[process-selftest] PASS (CapSet + CapName + ShouldLogDenial)\n");
+}
+
 } // namespace duetos::core

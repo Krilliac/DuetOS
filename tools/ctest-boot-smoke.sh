@@ -127,6 +127,13 @@ expected=(
     # ESCALATE as forbidden below.
     '[health] baseline cr0='
     '[I] kheartbeat : health_last_scan_issues'
+    # Boot-time pure-helper self-tests. Each panics on first failure,
+    # so seeing the trailing PASS / OK line proves every assertion in
+    # that block fired clean.
+    '[string-selftest] PASS'
+    '[hexdump-selftest] PASS'
+    '[process-selftest] PASS'
+    '[fs/vfs] self-test OK (32 cases'
 )
 
 # Forbidden signatures — anything indicating an unhandled
