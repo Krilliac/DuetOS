@@ -7,10 +7,25 @@
  *
  * The Win32 reimplementation lets us layer features over the
  * Microsoft ABI that real Windows can't add without breaking
- * compatibility. This module hosts those features as a single
- * **opt-in** facility — apps that probe for buggy Windows
- * behaviour are unaffected unless they explicitly enable a
- * policy bit.
+ * compatibility. Features split into two tiers:
+ *
+ *   - **Auto-on** for every Win32 PE: pure-observability features
+ *     that don't change anything an app can see. Apps with no
+ *     diagnostics intent of their own still get them — no code
+ *     change required. (FlightRecorder, HandleProvenance,
+ *     ErrorProvenance, ContentionProfile, DeadlockDetect,
+ *     InputReplay.)
+ *
+ *   - **Opt-in** by SYS_WIN32_CUSTOM op=SetPolicy: features whose
+ *     presence is observable to apps that probe Windows-buggy
+ *     behaviour. Quarantine-free, strict RWX, strict handle
+ *     inheritance, async paint, pixel isolation.
+ *
+ * Operators flip the kernel-wide auto-on default at runtime via
+ * op=SetSystemDefault — useful for promoting QuarantineFree to
+ * default-on for a debug build of the OS without touching any
+ * app's source. Already-running processes keep whatever default
+ * they got at spawn; the change only affects newly-spawned PEs.
  *
  * Features (all gated by per-process policy bits):
  *
@@ -107,6 +122,31 @@ inline constexpr u64 kPolicyStrictHandleInherit = 1ULL << 10;
 
 inline constexpr u64 kPolicyAllMask = (1ULL << 11) - 1ULL;
 
+// ---------- Auto-on default ----------
+//
+// Tier-1 features change no observable behaviour — they only
+// *record* signal — so every Win32 PE gets them at load time
+// without the app's source having to opt in. Apps that genuinely
+// don't want them can clear bits via SYS_WIN32_CUSTOM op=SetPolicy.
+//
+// Tier-2 (behaviour-changing) features stay opt-in: their
+// presence in `kPolicyAutoOnDefault` would turn a Windows-buggy
+// probe into a different Windows-buggy probe, which is exactly
+// the tradeoff we're trying not to lose.
+//
+//   Auto-on (tier 1):
+//     FlightRecorder, HandleProvenance, ErrorProvenance,
+//     ContentionProfile, DeadlockDetect (cycle is logged but the
+//     wait still proceeds — pure diagnostic), InputReplay (data
+//     plane is pull-only).
+//
+//   Opt-in (tier 2):
+//     QuarantineFree (delays heap reuse — observable to a UAF
+//     test), AsyncPaint, PixelIsolation, StrictRwx (refuses some
+//     loads outright), StrictHandleInherit.
+inline constexpr u64 kPolicyAutoOnDefault = kPolicyFlightRecorder | kPolicyHandleProvenance | kPolicyErrorProvenance |
+                                            kPolicyContentionProfile | kPolicyDeadlockDetect | kPolicyInputReplay;
+
 // ---------- Sub-op codes for SYS_WIN32_CUSTOM ----------
 //
 // The single Win32-custom syscall multiplexes into these by rdi.
@@ -120,6 +160,8 @@ inline constexpr u64 kOpDetectDeadlock = 5;
 inline constexpr u64 kOpDumpQuarantine = 6;
 inline constexpr u64 kOpDumpContention = 7;
 inline constexpr u64 kOpDumpInputReplay = 8;
+inline constexpr u64 kOpGetSystemDefault = 9;
+inline constexpr u64 kOpSetSystemDefault = 10;
 
 // ---------- Per-process record types ----------
 struct FlightRecord
@@ -241,6 +283,20 @@ ProcessCustomState* GetState(core::Process* proc);
 
 // Free the per-process state. Called by ProcessRelease.
 void CleanupProcess(core::Process* proc);
+
+// Apply the system-default policy mask to `proc`. Called once per
+// Win32 PE at load time (from Win32HeapInit). Allocates the state
+// block if needed; ORs system_default into the existing policy
+// (idempotent). Best-effort — silent on KMalloc OOM.
+void ApplySystemDefaultPolicy(core::Process* proc);
+
+// Read / write the kernel-wide default policy mask. Defaults to
+// kPolicyAutoOnDefault at boot; an operator (root shell, init
+// script) can flip it via SYS_WIN32_CUSTOM op=SetSystemDefault to
+// turn the diagnostic suite up (e.g. add quarantine for a debug
+// session) or down (e.g. clear the lot for a production build).
+u64 GetSystemDefaultPolicy();
+void SetSystemDefaultPolicy(u64 mask);
 
 // ---------- Hook entry points (called from existing handlers) ----------
 //

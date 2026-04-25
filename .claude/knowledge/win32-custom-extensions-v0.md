@@ -19,26 +19,57 @@ Files: `kernel/subsystems/win32/custom.{h,cpp}`. New syscall:
 ## Tradeoff (the design constraint)
 
 Every "extra" is also extra surface that could disagree with apps
-that probe Windows-buggy behaviour. The mitigation is **everything
-is opt-in**. The default policy on every freshly-spawned process is
-`0` — no feature is active. Apps must explicitly set bits via
-`SYS_WIN32_CUSTOM op=SetPolicy`.
+that probe Windows-buggy behaviour. The mitigation is to split the
+features into two tiers:
+
+**Tier 1 — auto-on for every Win32 PE.** No observable behaviour
+delta — these features only *record*, never change anything an app
+can see:
+
+  - FlightRecorder, HandleProvenance, ErrorProvenance,
+    ContentionProfile, DeadlockDetect (cycle is logged but the
+    wait still proceeds), InputReplay (data plane is pull-only).
+
+These bits live in `kPolicyAutoOnDefault` (in `custom.h`) and are
+applied to every Win32 PE at load time by `ApplySystemDefaultPolicy`,
+hooked at the canonical "this process is a Win32 PE with imports"
+gate — `Win32HeapInit`. Non-Win32 native tasks (kernel-spawned
+workers, the boot task, Linux-ABI processes) don't pay the ~7 KB
+state-allocation cost.
+
+**Tier 2 — opt-in only.** Behaviour-changing features stay off
+until the app or operator explicitly turns them on. Their presence
+in the auto-on default would turn a Windows-buggy probe into a
+different Windows-buggy probe, which is exactly what the design
+is trying to avoid:
+
+  - QuarantineFree (delays reuse — observable to a free-then-touch
+    test), AsyncPaint, PixelIsolation, StrictRwx (refuses some
+    loads outright), StrictHandleInherit.
+
+Apps opt in by calling `SYS_WIN32_CUSTOM op=SetPolicy(new_mask)`
+inside their startup. Operators flip the system-wide default via
+`op=SetSystemDefault` at runtime — useful for promoting
+QuarantineFree to default-on for a debug build of the OS without
+touching any app's source. **Already-running processes keep
+whatever default they got at spawn time** — only newly-spawned
+PEs see a changed system-default.
 
 ## Features
 
-| Bit | Name                       | What it does |
-|-----|----------------------------|--------------|
-| 0   | FlightRecorder             | Per-process ring buffer (64 entries) of recent syscalls (num + arg snapshot + RIP + ns timestamp). Dumped on abnormal exit. |
-| 1   | HandleProvenance           | Side table of every Win32 handle: creator RIP, syscall, timestamp, generation. Use-after-CloseHandle flagged. |
-| 2   | ErrorProvenance            | SetLastError records the RIP that set it. Debugger can answer "where did ERROR_x come from?". |
-| 3   | QuarantineFree             | Heap blocks freed by Win32HeapFree are held ~250 ms before reuse. Catches the basic UAF pattern. |
-| 4   | DeadlockDetect             | Every WaitForSingleObject(mutex) registers a wait edge in a global graph; cycles are logged with the full edge list. |
-| 5   | ContentionProfile          | Per-mutex acquire / wait / wait-ms accumulators. Free hot-lock signal. |
-| 6   | AsyncPaint                 | WM keeps the last good frame and never blocks on a paint message. (Policy queryable; compositor wiring is a follow-up.) |
-| 7   | PixelIsolation             | Cross-process BitBlt reads denied when both src and dst opt in. (Policy queryable; gdi32 wiring is a follow-up.) |
-| 8   | InputReplay                | Global ring (256 entries) capturing every WM_* dispatched to a window whose owner has the bit set. |
-| 9   | StrictRwx                  | A PE section with both MEM_WRITE and MEM_EXECUTE is refused at load. |
-| 10  | StrictHandleInherit        | Child processes don't auto-inherit "inheritable" handles. (Policy queryable; child-spawn wiring is a follow-up.) |
+| Bit | Name                  | Tier         | What it does |
+|-----|-----------------------|--------------|--------------|
+| 0   | FlightRecorder        | auto-on      | Per-process ring buffer (64 entries) of recent syscalls (num + arg snapshot + RIP + ns timestamp). Dumped on abnormal exit. |
+| 1   | HandleProvenance      | auto-on      | Side table of every Win32 handle: creator RIP, syscall, timestamp, generation. Use-after-CloseHandle flagged. |
+| 2   | ErrorProvenance       | auto-on      | SetLastError records the RIP that set it. Debugger can answer "where did ERROR_x come from?". |
+| 3   | QuarantineFree        | opt-in       | Heap blocks freed by Win32HeapFree are held ~250 ms before reuse. Catches the basic UAF pattern. |
+| 4   | DeadlockDetect        | auto-on      | Every WaitForSingleObject(mutex) registers a wait edge in a global graph; cycles are logged with the full edge list. Wait still proceeds. |
+| 5   | ContentionProfile     | auto-on      | Per-mutex acquire / wait / wait-ms accumulators. Free hot-lock signal. |
+| 6   | AsyncPaint            | opt-in       | WM keeps the last good frame and never blocks on a paint message. (Policy queryable; compositor wiring is a follow-up.) |
+| 7   | PixelIsolation        | opt-in       | Cross-process BitBlt reads denied when both src and dst opt in. (Policy queryable; gdi32 wiring is a follow-up.) |
+| 8   | InputReplay           | auto-on      | Global ring (256 entries) capturing every WM_* dispatched to a window whose owner has the bit set. |
+| 9   | StrictRwx             | opt-in       | A PE section with both MEM_WRITE and MEM_EXECUTE is refused at load. |
+| 10  | StrictHandleInherit   | opt-in       | Child processes don't auto-inherit "inheritable" handles. (Policy queryable; child-spawn wiring is a follow-up.) |
 
 Five of the eleven (FlightRecorder, HandleProvenance,
 ErrorProvenance, QuarantineFree, DeadlockDetect, ContentionProfile,
@@ -87,6 +118,8 @@ Multiplexed. `rdi` = sub-op:
 | 6  | DumpQuarantine        | (none)                      | 0 |
 | 7  | DumpContention        | (none)                      | 0 |
 | 8  | DumpInputReplay       | (none)                      | 0 |
+| 9  | GetSystemDefault      | (none)                      | current system-default mask |
+| 10 | SetSystemDefault      | rsi = new mask              | previous system-default mask |
 
 Bits in the policy mask above `kPolicyAllMask` are silently
 dropped — keeps the syscall forward-compatible without forcing

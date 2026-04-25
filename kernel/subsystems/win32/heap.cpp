@@ -123,6 +123,15 @@ bool Win32HeapInit(duetos::core::Process* proc)
     SerialWrite(" size=");
     SerialWriteHex(heap_bytes);
     SerialWrite("\n");
+
+    // Auto-enable the observability tier of the Win32 custom
+    // diagnostics suite for every Win32 PE. Apps that don't want
+    // them can still clear bits explicitly via SYS_WIN32_CUSTOM
+    // op=SetPolicy. Kept here (rather than ProcessCreate) because
+    // Win32HeapInit is the canonical "this process is a Win32 PE
+    // with imports" gate — non-Win32 native tasks don't pay the
+    // ~7 KB state allocation.
+    duetos::subsystems::win32::custom::ApplySystemDefaultPolicy(proc);
     return true;
 }
 

@@ -34,6 +34,12 @@ u32 g_input_replay_count;
 
 WaitEdge g_wait_graph[kWaitGraphCap];
 
+// Kernel-wide default policy mask applied to every Win32 PE at
+// load. Initialised to the auto-on tier (observability features
+// only — see custom.h `kPolicyAutoOnDefault`). Mutable at runtime
+// via SYS_WIN32_CUSTOM op=SetSystemDefault.
+u64 g_system_default_policy = kPolicyAutoOnDefault;
+
 u64 NowNs()
 {
     const u64 counter = arch::HpetReadCounter();
@@ -185,6 +191,36 @@ ProcessCustomState* GetState(core::Process* proc)
     if (proc == nullptr)
         return nullptr;
     return static_cast<ProcessCustomState*>(proc->win32_custom_state);
+}
+
+void ApplySystemDefaultPolicy(core::Process* proc)
+{
+    if (proc == nullptr)
+        return;
+    const u64 mask = g_system_default_policy & kPolicyAllMask;
+    if (mask == 0)
+        return; // operator turned everything off — skip the alloc
+    auto* s = EnsureState(proc);
+    if (s == nullptr)
+        return; // OOM — diagnostics are best-effort
+    arch::Cli();
+    s->policy |= mask;
+    arch::Sti();
+    arch::SerialWrite("[w32-custom] auto-on pid=");
+    arch::SerialWriteHex(proc->pid);
+    arch::SerialWrite(" policy=");
+    arch::SerialWriteHex(s->policy);
+    arch::SerialWrite("\n");
+}
+
+u64 GetSystemDefaultPolicy()
+{
+    return g_system_default_policy;
+}
+
+void SetSystemDefaultPolicy(u64 mask)
+{
+    g_system_default_policy = mask & kPolicyAllMask;
 }
 
 void CleanupProcess(core::Process* proc)
@@ -743,6 +779,29 @@ void DoCustom(arch::TrapFrame* frame)
         const bool cycle = DetectCycle(me_tid);
         arch::Sti();
         frame->rax = cycle ? 1 : 0;
+        return;
+    }
+    case kOpGetSystemDefault:
+    {
+        frame->rax = GetSystemDefaultPolicy();
+        return;
+    }
+    case kOpSetSystemDefault:
+    {
+        // rsi = new system-default mask. Affects every PROCESS
+        // SPAWNED AFTER this call — already-running processes
+        // keep whatever they were started with (unless they
+        // call SetPolicy themselves). Privileged in spirit;
+        // currently any process can flip it. A future revision
+        // gates on a capability bit.
+        const u64 old = GetSystemDefaultPolicy();
+        SetSystemDefaultPolicy(frame->rsi);
+        arch::SerialWrite("[w32-custom] system-default 0x");
+        arch::SerialWriteHex(old);
+        arch::SerialWrite(" -> 0x");
+        arch::SerialWriteHex(GetSystemDefaultPolicy());
+        arch::SerialWrite("\n");
+        frame->rax = old;
         return;
     }
     default:
