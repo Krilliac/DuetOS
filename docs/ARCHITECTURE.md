@@ -1,260 +1,349 @@
-# DuetOS — architecture
+# DuetOS — Architecture Deep Dive
 
-For the evolution story, see [`HISTORY.md`](HISTORY.md). This document is
-the layering model — what calls what, who owns which subsystem, and how
-Windows binaries actually run.
+For the evolution timeline, see [`HISTORY.md`](HISTORY.md). This document is the system map: what exists today, how the major components interact, and where each ABI enters the same core runtime.
 
 ---
 
-## One stack, two ABIs
+## 0) Executive model (one kernel, two user ABI faces)
 
-DuetOS is **not** two parallel operating systems. It is one kernel
-with one set of drivers and one real implementation of each subsystem,
-reachable from ring 3 through two ABIs:
+DuetOS is one operating system with one kernel and one set of core backends. It exposes two user entry surfaces:
 
-1. **Native ABI** — `int 0x80`, `SYS_*` numbers. The primary path.
-2. **Win32 ABI** — `call qword [iat]` through a patched Import
-   Address Table, resolved to user-mode DLL code that forwards to the
-   native ABI.
+- **Native DuetOS ABI** (`int 0x80`, `SYS_*` numbers)
+- **Win32 ABI** (PE imports resolved to DuetOS user-mode translator DLLs)
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│  Windows PE applications                                       │
-│  third-party .exe files, unmodified                            │
-└──────────────────────────────────────────────────────────────┘
-                │ imports:  kernel32!CreateFileW
-                │           ws2_32!socket
-                │           user32!CreateWindowExW
-                ↓
-┌──────────────────────────────────────────────────────────────┐
-│  Win32 translator DLLs  (userland/libs/*/, 29 DLLs)            │
-│  These are NOT reimplementations of Windows subsystems.        │
-│  They are thin marshallers: Win32 ABI → native SYS_*.          │
-└──────────────────────────────────────────────────────────────┘
-                │ int 0x80
-                │ rax = SYS_* number
-                │ rdi / rsi / rdx / r10 / r8 / r9 = args
-                ↓
-┌──────────────────────────────────────────────────────────────┐
-│  Native DuetOS kernel                                         │
-│  One TCP stack. One compositor. One FS VFS. One registry.      │
-│  One GPU ICD. One scheduler. No "Windows parallels."           │
-└──────────────────────────────────────────────────────────────┘
-                │
-                ↓
-┌──────────────────────────────────────────────────────────────┐
-│  Kernel-mode drivers                                           │
-│  PCIe, NVMe, AHCI, xHCI, e1000, iwlwifi, HDA,                 │
-│  Intel iGPU, AMDGPU, NVIDIA                                    │
-└──────────────────────────────────────────────────────────────┘
+Both paths converge into the same kernel subsystems.
+
+```text
+                 ┌─────────────────────────────────────────────────────┐
+                 │                  User Programs                      │
+                 │                                                     │
+                 │  A) Native DuetOS apps      B) Windows PE apps     │
+                 └───────────────┬───────────────────┬─────────────────┘
+                                 │                   │
+                                 │                   │ IAT calls
+                                 │                   │ (kernel32/user32/ws2_32/...)
+                                 │                   ▼
+                                 │        ┌────────────────────────────┐
+                                 │        │ Win32 Translator DLL Layer │
+                                 │        │ (userland/libs/*)          │
+                                 │        │ Win32 ABI -> SYS_* marshal │
+                                 │        └──────────────┬─────────────┘
+                                 │                       │
+                                 └───────────┬───────────┘
+                                             │  int 0x80
+                                             ▼
+                    ┌───────────────────────────────────────────────────┐
+                    │                DuetOS Kernel Core                │
+                    │  sched | mm | vfs | net | graphics | ipc | ...  │
+                    └───────────────────────────┬───────────────────────┘
+                                                │
+                                                ▼
+                    ┌───────────────────────────────────────────────────┐
+                    │               Kernel Device Drivers              │
+                    │ PCIe, NVMe, AHCI, xHCI, e1000, virtio-gpu, ...  │
+                    └───────────────────────────────────────────────────┘
 ```
 
+**Design invariant:** no duplicate subsystem stacks (no separate “Windows TCP stack”, no separate “Windows VFS”). There is only one implementation per domain, shared by both ABI fronts.
+
 ---
 
-## Win32 DLLs are translators, not subsystems
+## 1) Boot and bring-up choreography (what starts first, and why)
 
-The commitment: every Win32 DLL in `userland/libs/` is a translator.
-It takes a Win32 ABI call, marshals arguments, and hands off to the
-native kernel for the actual work. There is no separate "Windows TCP
-stack" or "Windows compositor" — just our one stack reached from two
-entry points.
-
-A call like this:
-
-```c
-// In a Windows PE built with MSVC:
-send(sock, buf, len, 0);
+```text
+[UEFI firmware]
+      |
+      v
+[bootloader / kernel image handoff]
+      |
+      v
+[kernel entry (x86_64)]
+      |
+      +--> early serial console
+      +--> memory map ingest
+      +--> paging + higher-half mappings
+      +--> frame allocator + kernel heap
+      +--> GDT/IDT + exception/trap plumbing
+      +--> LAPIC/IOAPIC/timer setup
+      +--> scheduler online
+      +--> core driver init (PCI -> storage/net/input/gpu)
+      +--> VFS mount roots + process/runtime services
+      +--> user-mode workloads (native + PE fixtures)
 ```
 
-Travels as follows:
+### Bring-up dependency chain
 
-1. The PE's `.text` does `call qword ptr [__imp_send]`.
-2. The IAT slot was patched at load time to point at our
-   `userland/libs/ws2_32/ws2_32.c:send` — which was itself resolved
-   via slice-6's via-DLL path through the preloaded DLL table.
-3. `ws2_32!send` translates the Winsock ABI (rcx=sock, rdx=buf, r8=len,
-   r9=flags) into native ABI (rdi=sock, rsi=buf, rdx=len, r10=flags)
-   and issues `int 0x80` with `rax = SYS_SOCK_SEND`.
-4. The kernel's `SYS_SOCK_SEND` dispatcher in `kernel/core/syscall.cpp`
-   looks up the `core::Socket` by fd and hands the buffer to
-   `net::stack::Send`.
-5. The net stack queues the TCP segment, hands it to the e1000 kernel
-   driver, which writes the TX ring and lets the NIC DMA out.
+```text
+MMU before scheduler context switches
+-> scheduler before user threads
+-> PCI enumeration before device-class probes
+-> block/network/input before higher services
+-> core services before Win32 translator workloads
+```
 
-There is one and only one TCP stack at step 4. A native program calling
-`socket()` via the DuetOS syscall directly hits the same stack at the
-same entry point.
-
-The same pattern applies to:
-
-- **Graphics** — `d3d11!CreateDevice` translates D3D → our Vulkan ICD
-  (same shape as [DXVK](https://github.com/doitsujin/dxvk) on Linux,
-  re-implemented from spec).
-- **File I/O** — `kernel32!CreateFileW` → `SYS_FILE_OPEN` →
-  our VFS.
-- **Registry** — implemented fully in `userland/libs/advapi32/`
-  because the data is small and static; no kernel backing needed.
-- **Threads / mutexes / events** — `kernel32!CreateThread` →
-  `SYS_THREAD_CREATE` → our scheduler.
+The ordering is intentionally strict to prevent partially-live subsystems from exposing unstable ABI behavior.
 
 ---
 
-## Where real implementations currently live
+## 2) Architectural layers and ownership
 
-| Subsystem | Kernel backend | Win32 translator state |
-|-----------|----------------|-----------------------|
-| File I/O (read) | ramfs + FAT32/ext4 read paths + NVMe + `SYS_FILE_*` | **working** — `fopen`/`fread` live-verified |
-| File I/O (write) | none yet | **stub** — `fwrite` to a real file no-ops |
-| Registry | static tree in `advapi32` | **working** — `RegQueryValueEx` live-verified |
-| stdout / stderr | COM1 serial | **working** — `printf` live-verified |
-| Time | HPET + LAPIC timer | **working** — `GetTickCount` / `QueryPerf*` |
-| Heap | kernel slab + per-process region | **working** — `malloc` / `HeapAlloc` |
-| Threads | round-robin scheduler (UP; SMP AP bring-up pending) | **working** — `CreateThread` + `Wait*` |
-| Atomics | native `lock xadd` / `cmpxchg` | **working** — full `Interlocked*` |
-| Critical sections + SRW | CAS + `SYS_YIELD` spin | **working** |
-| Environment vars | static list in `ucrtbase` | **working** — `getenv` |
-| Windows / input (basic) | compositor + per-window msg ring + WndProc dispatch | **working** — `windowed_hello` paints + pumps + dispatches |
-| GDI primitives | object table + memDC + window-DC paint | **working** — Rectangle / Ellipse / DrawText / FillRect |
-| stdin | PS/2 + USB HID keyboards live; not wired to `fread` | **stub** — `fgets` returns NULL |
-| Network | TCP/UDP/IP/ARP stack + e1000 + USB CDC-ECM + RNDIS, DHCP, DNS | **working** for sync BSD sockets; **stub** for ws2_32 async surface |
-| Graphics (3D) | virtio-gpu 2D scanout; no Vulkan ICD | **stub** — `d3d*` Create* returns E_FAIL |
-| Modal dialogs / menus / common controls / scroll bars | none | **stub** |
-| Audio | PC speaker only (`PcSpeakerBeep`) | **partial** — `MessageBeep` works; `PlaySound` returns 0 |
-| COM runtime | none | **stub** — `CoCreateInstance` returns CLASS_E_... |
+### Layered view
 
-Every row with **working** in the translator column has a real kernel
-backend. Every row with **stub** is where the native kernel implementation
-hasn't been built yet; the translator DLL returns the documented Windows
-error code so calling programs see clean failure paths instead of
-page faults.
+```text
+┌────────────────────────────────────────────────────────────────────────────┐
+│ L6: Applications                                                          │
+│     - Native apps                                                         │
+│     - Windows PE executables                                              │
+├────────────────────────────────────────────────────────────────────────────┤
+│ L5: User ABI/adaptation libraries                                         │
+│     - Native libc surface                                                 │
+│     - Win32 translators: ntdll/kernel32/user32/gdi32/ws2_32/...          │
+├────────────────────────────────────────────────────────────────────────────┤
+│ L4: Syscall contract                                                      │
+│     - int 0x80 entry                                                      │
+│     - SYS_* numbering (ABI-stable once published)                         │
+├────────────────────────────────────────────────────────────────────────────┤
+│ L3: Kernel subsystems                                                     │
+│     - Scheduler/process/thread model                                      │
+│     - Memory/address spaces/allocators                                    │
+│     - VFS + filesystem backends                                           │
+│     - Networking stack                                                     │
+│     - Window/compositor/GDI backing                                       │
+│     - Security/capability policy                                          │
+├────────────────────────────────────────────────────────────────────────────┤
+│ L2: Driver framework + bus/domain drivers                                 │
+│     - PCI, storage, USB, NIC, GPU, power                                 │
+├────────────────────────────────────────────────────────────────────────────┤
+│ L1: Arch/HW control plane                                                 │
+│     - x86_64 traps/interrupts/timers/CPU bring-up                         │
+└────────────────────────────────────────────────────────────────────────────┘
+```
 
----
+### Threading model (high level)
 
-## The DLL load path
+```text
+[Per-CPU runqueue(s)] <-> [scheduler]
+         |                    |
+         |                    +--> task state transitions
+         |                         (ready <-> running <-> blocked)
+         |
+         +--> timer ticks / yields drive preemption points
+```
 
-How a Win32 PE gets its imports resolved:
-
-1. `SpawnPeFile` is called with a PE byte buffer and capability set.
-2. `PeValidate` → `PeReport` (diagnostic dump) → decide to load.
-3. `AddressSpaceCreate` allocates a fresh PML4.
-4. Before `PeLoad` runs, the spawn code pre-loads the 29-DLL set into
-   the new AS via `DllLoad`. Each DLL gets its own load base (starting
-   at `0x10000000`, spaced 1 MiB apart) and its EAT is parsed into a
-   `DllImage`.
-5. `PeLoad` is called with the `DllImage*` array. It:
-   - Maps the PE's sections at their `ImageBase + VirtualAddress`.
-   - Applies base relocations.
-   - Walks the Import Directory. For each `{dll, func}` pair,
-     `TryResolveViaPreloadedDlls` searches the DLL array and, on hit,
-     patches the IAT slot with the export's absolute VA. Forwarder
-     exports recurse up to depth 4.
-   - Falls through to the legacy flat stubs table for anything not
-     covered by the preloaded DLLs.
-6. `ProcessCreate` + `Win32HeapInit` + `ProcessRegisterDllImage` for
-   each preloaded DLL (so `SYS_DLL_PROC_ADDRESS` can reach them).
-7. `SchedCreateUser` puts the task on a runqueue. On its first tick,
-   it enters ring 3 at `ImageBase + AddressOfEntryPoint` with a
-   Win32-shaped rsp.
+The scheduler is the shared execution substrate for native processes and PE-hosted Win32 workloads.
 
 ---
 
-## Native syscall ABI
+## 3) Syscall ABI contract (native kernel gateway)
 
-All syscalls go through `int 0x80`. The dispatcher is
-`kernel/core/syscall.cpp :: SyscallDispatch`. Arguments follow the
-System V AMD64 convention adapted for 6 args:
+All user-mode calls converge through `int 0x80` dispatch.
 
-| Register | Role |
-|----------|------|
-| `rax` | Syscall number (on entry); return value (on exit) |
+| Register | Meaning |
+|---|---|
+| `rax` | syscall number on entry; return value on exit |
 | `rdi` | arg1 |
 | `rsi` | arg2 |
 | `rdx` | arg3 |
 | `r10` | arg4 |
-| `r8` | arg5 |
-| `r9` | arg6 |
+| `r8`  | arg5 |
+| `r9`  | arg6 |
 
-The kernel preserves all registers except `rax`. `rcx` and `r11` are
-NOT used as arg registers (they collide with `syscall`/`sysret`);
-we use `int 0x80` so this is an internal constraint only.
+```text
+user call site
+  -> marshal args to (rdi,rsi,rdx,r10,r8,r9)
+  -> rax = SYS_*
+  -> int 0x80
+  -> kernel dispatch table
+  -> subsystem handler
+  -> retval in rax
+```
 
-Full syscall table lives in `kernel/core/syscall.h`. As of 2026-04-25
-the table covers ~130 numbered syscalls across: process / thread
-lifecycle, last-error, heap, file I/O, file-handle ops, timers, event
-/ mutex / semaphore / thread primitives, TLS slots, vmap, debug
-print, NT forwarding (`SYS_NT_INVOKE`), Linux ABI translation, the
-window manager (`SYS_WIN_*`), the GDI surface (`SYS_GDI_*`), the
-networking BSD-socket layer, and the GPU stub forwarders. Numbers are
-ABI-stable once published.
-
----
-
-## Capabilities, not uid
-
-Every `Process` has a `CapSet` — a bitmask of capabilities granted at
-spawn time. Examples: `kCapSerialConsole`, `kCapFsRead`, `kCapFsWrite`,
-`kCapDebug`, `kCapSpawnThread`. Syscalls that touch sensitive state
-check the caller's CapSet and return `-1` on miss.
-
-There is no setuid. A process can drop caps (`SYS_DROPCAPS`), never
-grant them. The Win32 handle model (explicitly-granted, revocable,
-duplicatable) maps onto this cleanly.
-
-Trusted kernel-shipped PEs run with the full CapSet. Adversarial
-probes run with empty CapSets — each denied syscall is logged and
-counted; threshold-crossing processes are reaped.
+This stable gateway is what makes the Win32 translator layer thin and deterministic.
 
 ---
 
-## Security posture
+## 4) PE + Win32 execution path (how a Windows .exe actually runs)
 
-- **W^X** enforced at page-map time: no user mapping may be both
-  writable and executable. Enforcement lives in
-  `mm::AddressSpaceMapUserPage`.
-- **SMEP + SMAP** enabled at boot (CPUID-gated CR4 flips).
-- **ASLR**: per-spawn 64 KiB-aligned delta in `[0, 64 MiB)` added to
-  PE `ImageBase`.
-- **Stack canaries** on every kernel function with a stack frame.
-- **Retpoline** on kernel indirect calls.
-- **Frame budgets**: every `AddressSpace` has a capped region count;
-  a runaway process can't drain the frame allocator.
-- **Kernel-stack guard pages**: unmapped low-edge page per task.
+### Import/launch flow
+
+```text
+PE bytes
+  -> validation/reporting
+  -> new process address space
+  -> preload translator DLL set into process AS
+  -> parse each DLL EAT
+  -> map PE sections
+  -> apply relocations
+  -> walk imports
+       -> resolve via preloaded DLL export tables
+       -> patch IAT slots with resolved absolute VA
+       -> recurse forwarders (bounded depth)
+  -> create process/thread state + heap bootstrap
+  -> schedule first user entry at PE EntryPoint
+```
+
+### Runtime call flow example (`send`)
+
+```text
+PE .text: call [__imp_send]
+   -> ws2_32!send (translator DLL)
+   -> Win32 calling convention -> SYS_SOCK_SEND marshal
+   -> int 0x80
+   -> kernel syscall dispatch
+   -> net stack send path
+   -> NIC driver TX ring programming
+   -> packet on wire
+```
+
+The same kernel send backend is used by native sockets and Win32 sockets.
 
 ---
 
-## Build + run
+## 5) Subsystem matrix (current integration status)
+
+| Domain | Backend owner | Status summary |
+|---|---|---|
+| File I/O (read path) | Kernel VFS + FAT32/ext4 + storage drivers | Working end-to-end |
+| File I/O (write path) | Kernel backend incomplete | Translator returns controlled failures/stubs |
+| Registry-like queries | User-side advapi32 tree | Working for current fixture coverage |
+| Heap/thread primitives | Kernel process/thread + Win32 syscall surface | Working in live fixtures |
+| Windowing/GDI basic path | Kernel window/compositor + GDI object plumbing | Working for basic paint/pump/tests |
+| Network sync sockets | Kernel TCP/UDP/IP + NIC/USB transports | Working for sync path; async Winsock surface partial |
+| 3D graphics API | Vulkan ICD not landed yet | D3D create paths are stubs/fail-fast |
+| COM runtime surface | Not implemented | Returns documented failure paths |
+| Audio | Minimal backend + select APIs | Partial |
+
+---
+
+## 6) Security and containment model (cross-cutting)
+
+```text
+Process launch
+  -> CapSet attached (least privilege policy)
+  -> Address space limits + region budgets
+  -> W^X/NX map-time checks
+  -> runtime syscall cap checks
+  -> denial / logging / optional reap on abuse threshold
+```
+
+### Major active controls
+
+- W^X enforcement on user mappings
+- NX enabled
+- SMEP/SMAP where available
+- ASLR offsetting for image load
+- Stack canary and retpoline hardening
+- Capability-gated privileged syscalls
+- Kernel-stack guard page strategy
+
+Security policy is process-centric and capability-driven (not setuid-centric).
+
+---
+
+## 7) Filesystem + storage composition
+
+```text
+[VFS namespace]
+    |
+    +--> [ramfs/tmpfs]
+    +--> [FAT32 reader]
+    +--> [ext4 reader]
+    +--> [NTFS/exFAT work-in-progress paths]
+
+Block path:
+VFS op -> fs backend -> block layer assumptions -> NVMe/AHCI driver -> hardware
+```
+
+This keeps user ABI stable while individual filesystem backends evolve.
+
+---
+
+## 8) Networking composition
+
+```text
+socket API (native or ws2_32 translator)
+    -> syscall dispatch
+    -> kernel net stack (ARP/IP/UDP/TCP + DNS/DHCP helpers)
+    -> device adapter (e1000 / USB ECM / USB RNDIS)
+    -> link
+```
+
+Current architecture already supports multiple link transports behind a shared socket-facing API.
+
+---
+
+## 9) Graphics/windowing composition
+
+```text
+user32/gdi32 translator calls
+   -> SYS_WIN_* / SYS_GDI_*
+   -> kernel window manager + compositor
+   -> framebuffer/virtio-gpu scanout path
+```
+
+Near-term shape is 2D-first with explicit stubs for not-yet-landed 3D API paths.
+
+---
+
+## 10) Why this shape scales
+
+```text
+Single backend per domain
+ + dual ABI front doors
+ + stable syscall contract
+ + capability-based security envelope
+ = faster iteration without architecture fork risk
+```
+
+### Tradeoff summary
+
+- **Pros**
+  - No split-brain subsystem maintenance
+  - Predictable behavior parity across native + Win32 callers
+  - Easier observability and debugging at shared kernel choke points
+- **Costs**
+  - Translator correctness is critical (ABI marshalling must be exact)
+  - Stub surfaces need disciplined, explicit failure behavior until backend lands
+  - ABI stability constrains reckless syscall churn
+
+---
+
+## 11) Practical map: where to look in the tree
+
+- `kernel/arch/x86_64/` → traps/interrupts/timers/CPU setup
+- `kernel/mm/` → paging, frames, address-space, heap/stack primitives
+- `kernel/sched/` → runqueues and scheduling core
+- `kernel/fs/` → VFS + filesystem backends
+- `kernel/net/` + `kernel/drivers/net/` → stack + adapters
+- `kernel/subsystems/win32/` → Win32-facing syscall surfaces and state glue
+- `kernel/subsystems/linux/` + `kernel/subsystems/translation/` → Linux ABI/translation surfaces
+- `kernel/drivers/` → hardware domain drivers
+- `userland/apps/` → native/PE fixture workloads used for live validation
+- `docs/HISTORY.md` → historical landing order and milestone context
+
+---
+
+## 12) Build + smoke-test commands
 
 ```bash
 # Configure
 cmake --preset x86_64-debug
 
-# Build kernel + all userland DLLs + ISO
+# Build
 cmake --build build/x86_64-debug --parallel $(nproc)
 
-# Boot in QEMU (requires qemu-system-x86 + OVMF + xorriso +
-# grub-common + grub-pc-bin + grub-efi-amd64-bin + mtools).
+# Runtime smoke (if runtime tooling is installed)
 DUETOS_TIMEOUT=30 tools/qemu/run.sh build/x86_64-debug/duetos.iso
 ```
 
-The boot log comes out on stdout. On a healthy boot you see the DLL
-preload dump, per-PE spawn records, import-resolution traces, and the
-exit codes of each test fixture. The end-to-end sentinel to look for
-is `[reg-fopen-test] all checks passed` — that means the real
-registry, the real `fopen`, and the real `printf` formatting all
-work together under live execution.
-
 ---
 
-## Project pillars (non-negotiable)
+## 13) Non-negotiable architecture rules
 
-From `CLAUDE.md`:
+1. One real backend per subsystem domain.
+2. Win32 DLL layer is a translator, not an alternate kernel.
+3. Syscall numbers are ABI commitments once published.
+4. Security invariants (W^X/caps/etc.) are part of functional correctness.
+5. If a subsystem exists, it must be wired into a real call path (or removed).
 
-- Run Windows PE executables natively. Not a VM. Not Wine.
-- Run on commodity PC hardware. x86_64 first class from day one.
-- Capability-based IPC. No setuid.
-- W^X enforced. ASLR enforced. CFI enforced.
-- Vulkan is the primary user-mode graphics API; D3D translates onto it.
-- One subsystem per function; two translators (native + Win32) on top.
-
-Every architectural decision in the tree ultimately traces to one of
-those.
+These constraints keep DuetOS coherent as it scales from bring-up to real workload execution.
