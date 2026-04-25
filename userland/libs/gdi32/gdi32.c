@@ -626,3 +626,201 @@ __declspec(dllexport) COLORREF SetTextColor(HDC dc, COLORREF clr)
                      : "memory");
     return (COLORREF)rv;
 }
+
+/* GetDeviceCaps — report device capability ints. The kernel's
+ * default framebuffer is 32-bpp; hardcode the constants apps
+ * routinely query. Index list:
+ *   8  = HORZRES        (pixels)
+ *   10 = VERTRES        (pixels)
+ *   12 = BITSPIXEL      (32)
+ *   14 = PLANES         (1)
+ *   88 = LOGPIXELSX     (96 — standard DPI)
+ *   90 = LOGPIXELSY     (96)
+ *   24 = NUMCOLORS      (-1 = "more than 256")
+ *   26 = ASPECTX        (36 — square pixels)
+ *   40 = ASPECTY        (36)
+ *   38 = TECHNOLOGY     (0 = DT_PLOTTER, but 1 = DT_RASDISPLAY is canonical)
+ * Anything else returns 0.
+ */
+__declspec(dllexport) INT GetDeviceCaps(HDC dc, INT index)
+{
+    (void)dc;
+    switch (index)
+    {
+    case 8:
+        return 1024; /* HORZRES — matches the default framebuffer */
+    case 10:
+        return 768; /* VERTRES */
+    case 12:
+        return 32; /* BITSPIXEL */
+    case 14:
+        return 1; /* PLANES */
+    case 88:
+    case 90:
+        return 96; /* LOGPIXELSX/Y */
+    case 24:
+        return -1; /* NUMCOLORS — "true colour" sentinel */
+    case 26:
+    case 40:
+        return 36; /* ASPECTX/Y — square pixels */
+    case 38:
+        return 1; /* TECHNOLOGY = DT_RASDISPLAY */
+    case 22:
+        return 8; /* HORZSIZE — millimetres (ballpark) */
+    case 6:
+        return 8; /* VERTSIZE */
+    default:
+        return 0;
+    }
+}
+
+/* GetTextExtentPoint32A/W — measure text. With 8x8 bitmap font,
+ * width = chars * 8, height = 8. Caller's SIZE struct is two
+ * INT fields (cx, cy). */
+typedef struct
+{
+    INT cx;
+    INT cy;
+} SIZE_GDI;
+__declspec(dllexport) BOOL GetTextExtentPoint32A(HDC dc, const char* str, INT cnt, SIZE_GDI* sz)
+{
+    (void)dc;
+    (void)str;
+    if (sz)
+    {
+        sz->cx = (cnt < 0 ? 0 : cnt) * 8;
+        sz->cy = 8;
+    }
+    return 1;
+}
+__declspec(dllexport) BOOL GetTextExtentPoint32W(HDC dc, const wchar_t16* str, INT cnt, SIZE_GDI* sz)
+{
+    (void)dc;
+    (void)str;
+    if (sz)
+    {
+        sz->cx = (cnt < 0 ? 0 : cnt) * 8;
+        sz->cy = 8;
+    }
+    return 1;
+}
+__declspec(dllexport) BOOL GetTextExtentExPointW(HDC dc, const wchar_t16* str, INT cnt, INT max_extent, INT* fit,
+                                                 INT* dx, SIZE_GDI* sz)
+{
+    (void)dc;
+    (void)str;
+    (void)max_extent;
+    (void)dx;
+    if (fit)
+        *fit = cnt;
+    if (sz)
+    {
+        sz->cx = (cnt < 0 ? 0 : cnt) * 8;
+        sz->cy = 8;
+    }
+    return 1;
+}
+
+/* GetTextMetricsA/W — fill a TEXTMETRIC. Real struct is 56 bytes
+ * for ANSI. We zero-fill and write the few fields apps actually
+ * read: tmHeight=8, tmAveCharWidth=8, tmMaxCharWidth=8. */
+__declspec(dllexport) BOOL GetTextMetricsA(HDC dc, void* tm)
+{
+    (void)dc;
+    if (!tm)
+        return 0;
+    unsigned char* p = (unsigned char*)tm;
+    for (int i = 0; i < 56; ++i)
+        p[i] = 0;
+    INT* fields = (INT*)tm;
+    fields[0] = 8; /* tmHeight */
+    fields[1] = 8; /* tmAscent */
+    fields[2] = 0; /* tmDescent */
+    fields[5] = 8; /* tmAveCharWidth */
+    fields[6] = 8; /* tmMaxCharWidth */
+    fields[7] = 1; /* tmWeight (FW_NORMAL = 400 actually but doesn't matter for v0) */
+    return 1;
+}
+__declspec(dllexport) BOOL GetTextMetricsW(HDC dc, void* tm)
+{
+    return GetTextMetricsA(dc, tm);
+}
+
+/* GetCharWidth32A/W — width of each character in the range. With
+ * a fixed-width font, every cell is 8 pixels. */
+__declspec(dllexport) BOOL GetCharWidth32A(HDC dc, UINT first, UINT last, INT* widths)
+{
+    (void)dc;
+    if (!widths || last < first)
+        return 0;
+    UINT n = last - first + 1;
+    for (UINT i = 0; i < n; ++i)
+        widths[i] = 8;
+    return 1;
+}
+__declspec(dllexport) BOOL GetCharWidth32W(HDC dc, UINT first, UINT last, INT* widths)
+{
+    return GetCharWidth32A(dc, first, last, widths);
+}
+
+/* SetROP2 / GetROP2 — drawing-mode setter. R2_COPYPEN (13) is
+ * the universal default; accept any set, return previous. */
+__declspec(dllexport) INT SetROP2(HDC dc, INT mode)
+{
+    (void)dc;
+    (void)mode;
+    return 13;
+}
+__declspec(dllexport) INT GetROP2(HDC dc)
+{
+    (void)dc;
+    return 13;
+}
+
+/* GetClipBox — fill the RECT with a "cover everything" extent.
+ * Returns SIMPLEREGION (2). */
+__declspec(dllexport) INT GetClipBox(HDC dc, RECT* r)
+{
+    (void)dc;
+    if (r)
+    {
+        r->left = 0;
+        r->top = 0;
+        r->right = 1024;
+        r->bottom = 768;
+    }
+    return 2;
+}
+
+__declspec(dllexport) INT IntersectClipRect(HDC dc, INT l, INT t, INT r, INT b)
+{
+    (void)dc;
+    (void)l;
+    (void)t;
+    (void)r;
+    (void)b;
+    return 2; /* SIMPLEREGION */
+}
+
+__declspec(dllexport) INT ExcludeClipRect(HDC dc, INT l, INT t, INT r, INT b)
+{
+    (void)dc;
+    (void)l;
+    (void)t;
+    (void)r;
+    (void)b;
+    return 2;
+}
+
+__declspec(dllexport) INT SetStretchBltMode(HDC dc, INT mode)
+{
+    (void)dc;
+    (void)mode;
+    return 1;
+}
+
+__declspec(dllexport) INT GetStretchBltMode(HDC dc)
+{
+    (void)dc;
+    return 1;
+}
