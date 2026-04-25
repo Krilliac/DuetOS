@@ -1,6 +1,8 @@
 #include "hexdump.h"
 
 #include "../arch/x86_64/serial.h"
+#include "klog.h"
+#include "panic.h"
 #include "symbols.h"
 
 namespace duetos::core
@@ -152,6 +154,69 @@ void DumpHexRegionSafe(const char* tag, u64 addr, u32 len, u64 skip_page_va)
         }
         offset += line_len;
     }
+}
+
+namespace
+{
+
+void Expect(bool cond, const char* what)
+{
+    if (cond)
+    {
+        return;
+    }
+    arch::SerialWrite("[hexdump-selftest] FAIL ");
+    arch::SerialWrite(what);
+    arch::SerialWrite("\n");
+    Panic("core/hexdump", "HexdumpSelfTest assertion failed");
+}
+
+} // namespace
+
+void HexdumpSelfTest()
+{
+    KLOG_TRACE_SCOPE("core/hexdump", "HexdumpSelfTest");
+
+    // ----- PlausibleKernelAddress -----
+    // NULL is rejected outright — every consumer would fault if we
+    // accepted it.
+    Expect(!PlausibleKernelAddress(0), "addr=0 rejected");
+
+    // Low-half addresses (user / boot identity map) always reject so
+    // the trap dispatcher never deref's a user RIP under SMAP.
+    Expect(!PlausibleKernelAddress(0x1000), "low VA 0x1000 rejected");
+    Expect(!PlausibleKernelAddress(0x40000000), "user VA rejected");
+    Expect(!PlausibleKernelAddress(0x7FFFE000), "ring-3 stack VA rejected");
+    Expect(!PlausibleKernelAddress(0xFFFFFFFE), "32-bit max rejected");
+
+    // Higher-half boundary: kHigherHalfStart inclusive, kHigherHalfEnd
+    // exclusive. The constants are file-private; assert against the
+    // canonical values from the header comment.
+    constexpr u64 kHigherHalfStart = 0xFFFFFFFF80000000ULL;
+    constexpr u64 kHigherHalfEnd = 0xFFFFFFFFE0000000ULL;
+    Expect(!PlausibleKernelAddress(kHigherHalfStart - 1), "below higher half rejected");
+    Expect(PlausibleKernelAddress(kHigherHalfStart), "higher-half start accepted");
+    Expect(PlausibleKernelAddress(kHigherHalfStart + 0x10000), "kernel direct map accepted");
+    Expect(PlausibleKernelAddress(kHigherHalfEnd - 1), "MMIO arena cap accepted");
+    Expect(!PlausibleKernelAddress(kHigherHalfEnd), "above MMIO arena rejected");
+    Expect(!PlausibleKernelAddress(0xFFFFFFFFFFFFFFFFULL), "u64 max rejected");
+
+    // ----- DumpInstructionBytes against a known-mapped kernel symbol -----
+    // `&HexdumpSelfTest` itself sits in .text, which is mapped R+X
+    // and lives in the higher half. Dumping the first 8 bytes of our
+    // own function exercises the formatter end-to-end. The byte
+    // values aren't asserted (they vary with optimisation level) —
+    // we just need the call to return without faulting.
+    const u64 self_va = reinterpret_cast<u64>(&HexdumpSelfTest);
+    Expect(PlausibleKernelAddress(self_va), "self_va in kernel range");
+    DumpInstructionBytes("hexdump-selftest", self_va, 8);
+
+    // ----- DumpHexRegionSafe against an unmapped low VA -----
+    // Should print "<unreadable>" rather than fault; the call below
+    // not panicking IS the assertion.
+    DumpHexRegionSafe("hexdump-selftest", 0x1000, 16, /*skip_page_va=*/0);
+
+    arch::SerialWrite("[hexdump-selftest] PASS (PlausibleKernelAddress + dump formatters)\n");
 }
 
 void DumpStackWindow(const char* tag, u64 rsp, u32 quad_count)

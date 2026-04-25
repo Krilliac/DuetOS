@@ -699,4 +699,11 @@ u64 ProcessResolveDllExport(const Process* proc, const char* dll_name, const cha
 /// Backs `SYS_DLL_PROC_ADDRESS`.
 u64 ProcessResolveDllExportByBase(const Process* proc, u64 base_va, const char* func_name);
 
+/// Self-test of the process model's pure helpers: CapSet bitmap
+/// operations, CapName lookup, the denial rate-limit predicate, and
+/// the boundary checks around kCapNone / kCapCount. Does NOT create
+/// a Process — that path needs an AddressSpace + scheduler that
+/// aren't online at the call site. Panics on any failure.
+void ProcessSelfTest();
+
 } // namespace duetos::core

@@ -118,7 +118,9 @@
 #include "process.h"
 #include "random.h"
 #include "fault_domain.h"
+#include "hexdump.h"
 #include "result.h"
+#include "string.h"
 #include "ring3_smoke.h"
 #include "runtime_checker.h"
 #include "../subsystems/linux/ring3_smoke.h"
@@ -302,6 +304,15 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     SerialWrite("[boot] Exercising Result<T,E> + TRY primitives.\n");
     duetos::core::ResultSelfTest();
+
+    SerialWrite("[boot] Exercising freestanding memset/memcpy/memmove.\n");
+    duetos::core::StringSelfTest();
+
+    SerialWrite("[boot] Exercising kernel-VA range + hexdump formatters.\n");
+    duetos::core::HexdumpSelfTest();
+
+    SerialWrite("[boot] Exercising process / capability helpers.\n");
+    duetos::core::ProcessSelfTest();
 
     SerialWrite("[boot] Seeding kernel entropy pool.\n");
     duetos::core::RandomInit();
@@ -916,35 +927,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     SerialWrite("[boot] Seeding ramfs + VFS self-test.\n");
     duetos::fs::RamfsInit();
-    {
-        using namespace duetos::fs;
-        const RamfsNode* trusted = RamfsTrustedRoot();
-        const RamfsNode* sandbox = RamfsSandboxRoot();
-
-        // Positive lookups against the trusted tree. Trailing slash,
-        // leading slash, empty-component runs — all tolerated.
-        if (VfsLookup(trusted, "/etc/version", 64) == nullptr)
-            duetos::core::Panic("fs/vfs", "self-test: /etc/version missing from trusted root");
-        if (VfsLookup(trusted, "/bin/hello", 64) == nullptr)
-            duetos::core::Panic("fs/vfs", "self-test: /bin/hello missing from trusted root");
-        if (VfsLookup(trusted, "//etc//version", 64) == nullptr)
-            duetos::core::Panic("fs/vfs", "self-test: double-slash tolerance broken");
-
-        // The sandbox root has exactly one file; its lookup must
-        // succeed, and the trusted-only paths must fail.
-        if (VfsLookup(sandbox, "/welcome.txt", 64) == nullptr)
-            duetos::core::Panic("fs/vfs", "self-test: /welcome.txt missing from sandbox root");
-        if (VfsLookup(sandbox, "/etc/version", 64) != nullptr)
-            duetos::core::Panic("fs/vfs", "self-test: JAIL BROKEN — sandbox saw trusted /etc/version");
-        if (VfsLookup(sandbox, "/bin/hello", 64) != nullptr)
-            duetos::core::Panic("fs/vfs", "self-test: JAIL BROKEN — sandbox saw trusted /bin/hello");
-
-        // ".." is rejected outright.
-        if (VfsLookup(trusted, "/etc/..", 64) != nullptr)
-            duetos::core::Panic("fs/vfs", "self-test: .. accepted (would break jails)");
-
-        SerialWrite("[fs/vfs] self-test OK\n");
-    }
+    duetos::fs::VfsSelfTest();
 
     // Address-space isolation self-test — direct assertion that a
     // user page mapped in one AS is invisible in a sibling AS, and
