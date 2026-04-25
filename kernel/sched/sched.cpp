@@ -200,7 +200,13 @@ using arch::Halt;
 using arch::SerialWrite;
 using arch::SerialWriteHex;
 
-constexpr u64 kKernelStackBytes = 16 * 1024; // 16 KiB per task — plenty for v0
+constexpr u64 kKernelStackBytes = 64 * 1024; // 64 KiB per task — bumped from 16 KiB on
+                                             // 2026-04-25 because the PE-loader path
+                                             // (~5 KiB DllImage[48] preload local +
+                                             // recursive page-table walks during
+                                             // AddressSpaceMapUserPage) overflowed the
+                                             // 16 KiB cap on the second PE spawn.
+                                             // See mm/kstack.h.
 
 // Canary planted at the lowest 8 bytes of every task's kernel stack.
 // Stack grows DOWN, so the canary sits at the EDGE of overflow: if

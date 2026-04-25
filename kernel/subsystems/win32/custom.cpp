@@ -203,14 +203,14 @@ void ApplySystemDefaultPolicy(core::Process* proc)
     auto* s = EnsureState(proc);
     if (s == nullptr)
         return; // OOM — diagnostics are best-effort
-    arch::Cli();
+    // Set policy without holding IRQs off; the field is u64 and
+    // the only racing readers are syscall handlers in the same
+    // task's context. No serial output here — the call path is
+    // already deep inside PeLoad → Win32HeapInit and adding
+    // string formatting here has been observed to push the
+    // kernel-stack chain over its 16 KiB limit on the second PE
+    // spawn (the preload-DLL stack-local array eats ~5 KiB).
     s->policy |= mask;
-    arch::Sti();
-    arch::SerialWrite("[w32-custom] auto-on pid=");
-    arch::SerialWriteHex(proc->pid);
-    arch::SerialWrite(" policy=");
-    arch::SerialWriteHex(s->policy);
-    arch::SerialWrite("\n");
 }
 
 u64 GetSystemDefaultPolicy()

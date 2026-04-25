@@ -1,6 +1,9 @@
 #include "mutex_syscall.h"
 
+#include "custom.h"
+
 #include "../../arch/x86_64/cpu.h"
+#include "../../core/syscall.h"
 #include "../../arch/x86_64/serial.h"
 #include "../../arch/x86_64/timer.h"
 #include "../../arch/x86_64/traps.h"
@@ -76,6 +79,7 @@ void DoMutexCreate(arch::TrapFrame* frame)
     arch::SerialWrite(" initial_owner=");
     arch::SerialWriteHex(frame->rdi);
     arch::SerialWrite("\n");
+    custom::OnHandleAlloc(proc, handle, static_cast<u32>(core::SYS_MUTEX_CREATE), frame->rip);
     frame->rax = handle;
 }
 

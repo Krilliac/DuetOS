@@ -52,6 +52,7 @@ set(DUETOS_KERNEL_SHARED_SOURCES
     subsystems/linux/syscall_entry.S
     subsystems/translation/translate.cpp
     subsystems/win32/custom.cpp
+    subsystems/win32/custom_selftest.cpp
     subsystems/win32/event_syscall.cpp
     subsystems/win32/file_syscall.cpp
     subsystems/win32/gdi_objects.cpp

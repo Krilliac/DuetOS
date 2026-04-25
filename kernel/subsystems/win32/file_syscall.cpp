@@ -1,5 +1,7 @@
 #include "file_syscall.h"
 
+#include "custom.h"
+
 #include "../../arch/x86_64/cpu.h"
 #include "../../arch/x86_64/serial.h"
 #include "../../arch/x86_64/traps.h"
@@ -59,7 +61,10 @@ void DoFileOpen(arch::TrapFrame* frame)
     kpath[path_cap] = '\0';
     kpath[core::kSyscallPathMax - 1] = '\0';
 
-    frame->rax = fs::routing::OpenForProcess(proc, kpath);
+    const u64 handle = fs::routing::OpenForProcess(proc, kpath);
+    if (handle != static_cast<u64>(-1) && handle != 0)
+        custom::OnHandleAlloc(proc, handle, static_cast<u32>(core::SYS_FILE_OPEN), frame->rip);
+    frame->rax = handle;
 }
 
 void DoFileRead(arch::TrapFrame* frame)
@@ -136,6 +141,11 @@ void DoFileClose(arch::TrapFrame* frame)
         return;
     }
     const u64 handle = frame->rdi;
+    // Win32 custom: mark this handle as closed in the per-process
+    // handle ledger. Anyone reading it later (via the ledger, not
+    // via the actual handle table) sees `active=false` and the
+    // generation count carries the use-after-close evidence.
+    custom::OnHandleClose(proc, handle);
     if (handle >= core::Process::kWin32HandleBase &&
         handle < core::Process::kWin32HandleBase + core::Process::kWin32HandleCap)
     {

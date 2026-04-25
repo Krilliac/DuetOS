@@ -264,6 +264,14 @@ void ProcessRelease(Process* p)
     mm::AddressSpaceRelease(p->as);
     p->as = nullptr;
 
+    // Emit the recorded diagnostic data to serial before the
+    // state is freed. No-op when the process has no custom state
+    // (non-Win32 native + Linux processes). For Win32 PEs the
+    // observability tier is auto-on, so this fires for every Win32
+    // PE exit and gives a post-mortem record without anyone having
+    // to know the dump syscall exists.
+    subsystems::win32::custom::DumpOnAbnormalExit(p);
+
     // Free the Win32 custom-diagnostics state if any was allocated.
     // No-op when the process never opted into any custom-Win32
     // feature (the common path).
