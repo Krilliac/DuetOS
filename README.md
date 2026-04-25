@@ -1,8 +1,8 @@
 # DuetOS
 
-[![Release channel](https://img.shields.io/github/v/release/krilliac/duetos/latest-release?label=release%20channel)](https://github.com/krilliac/duetos/releases/tag/latest-release)
+[![Release channel](https://img.shields.io/github/v/release/krilliac/duetos?display_name=tag&filter=latest-release&label=release%20channel)](https://github.com/krilliac/duetos/releases/tag/latest-release)
 [![Release downloads](https://img.shields.io/github/downloads/krilliac/duetos/latest-release/total?label=release%20downloads)](https://github.com/krilliac/duetos/releases/tag/latest-release)
-[![Debug channel](https://img.shields.io/github/v/release/krilliac/duetos/latest-debug?include_prereleases&label=debug%20channel)](https://github.com/krilliac/duetos/releases/tag/latest-debug)
+[![Debug channel](https://img.shields.io/github/v/release/krilliac/duetos?include_prereleases&display_name=tag&filter=latest-debug&label=debug%20channel)](https://github.com/krilliac/duetos/releases/tag/latest-debug)
 [![Debug downloads](https://img.shields.io/github/downloads/krilliac/duetos/latest-debug/total?label=debug%20downloads)](https://github.com/krilliac/duetos/releases/tag/latest-debug)
 
 Download channel artifacts from: **[Release channel](https://github.com/krilliac/duetos/releases/tag/latest-release)** / **[Debug channel](https://github.com/krilliac/duetos/releases/tag/latest-debug)**.
