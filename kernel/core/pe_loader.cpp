@@ -51,6 +51,7 @@
 #include "../subsystems/win32/proc_env.h"
 #include "../subsystems/win32/thunks.h"
 #include "cleanroom_trace.h"
+#include "kdbg.h"
 #include "klog.h"
 #include "pe_exports.h"
 #include "process.h"
@@ -606,9 +607,13 @@ bool ApplyRelocations(const u8* file, u64 file_len, const PeHeaders& h, duetos::
 {
     using arch::SerialWrite;
     using arch::SerialWriteHex;
+    KDBG_2V(PeReloc, "pe-reloc", "ApplyRelocations enter", "delta", delta, "file_len", file_len);
     const PeDataDir br = ReadDataDir(file, h, kDirEntryBaseReloc);
     if (br.rva == 0 || br.size == 0)
+    {
+        KDBG(PeReloc, "pe-reloc", "no reloc table — nothing to do");
         return true;
+    }
 
     const u64 tbl_off = RvaToFile(file, h, br.rva);
     if (tbl_off == ~u64(0) || tbl_off + br.size > file_len)
@@ -616,6 +621,7 @@ bool ApplyRelocations(const u8* file, u64 file_len, const PeHeaders& h, duetos::
         SerialWrite("[pe-reloc] reloc table rva out of bounds\n");
         return false;
     }
+    KDBG_2V(PeReloc, "pe-reloc", "reloc table mapped", "tbl_off", tbl_off, "size", br.size);
 
     const u64 end = tbl_off + br.size;
     u64 cursor = tbl_off;
@@ -974,9 +980,13 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
     KLOG_TRACE_SCOPE("pe-resolve", "ResolveImports");
     using arch::SerialWrite;
     using arch::SerialWriteHex;
+    KDBG_V(PeImport, "pe-resolve", "ResolveImports enter; preloaded_dll_count", preloaded_dll_count);
     const PeDataDir imp = ReadDataDir(file, h, kDirEntryImport);
     if (imp.rva == 0 || imp.size == 0)
+    {
+        KDBG(PeImport, "pe-resolve", "no import directory — skipping");
         return true; // no imports, nothing to do
+    }
 
     const u64 tbl_off = RvaToFile(file, h, imp.rva);
     if (tbl_off == ~u64(0) || tbl_off + imp.size > file_len)
@@ -984,6 +994,7 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
         SerialWrite("[pe-resolve] import table rva out of bounds\n");
         return false;
     }
+    KDBG_2V(PeImport, "pe-resolve", "import table mapped", "tbl_off", tbl_off, "size", imp.size);
 
     constexpr u32 kMaxDll = 64;
     constexpr u32 kMaxFnPerDll = 256;
@@ -1207,6 +1218,9 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
                     u64 aslr_delta, const DllImage* preloaded_dlls, u64 preloaded_dll_count)
 {
     KLOG_TRACE_SCOPE("pe-loader", "PeLoad");
+    KDBG_S(PeLoad, "pe-loader", "PeLoad enter", "name", program_name != nullptr ? program_name : "(anon)");
+    KDBG_3V(PeLoad, "pe-loader", "PeLoad sizes", "file_len", file_len, "aslr_delta", aslr_delta, "preloaded_dlls",
+            preloaded_dll_count);
     PeLoadResult r{};
     r.ok = false;
     if (as == nullptr)

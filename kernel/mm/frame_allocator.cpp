@@ -33,6 +33,7 @@
 
 #include "../arch/x86_64/cpu.h"
 #include "../arch/x86_64/serial.h"
+#include "../core/kdbg.h"
 #include "../core/klog.h"
 #include "../core/panic.h"
 
@@ -429,6 +430,7 @@ PhysAddr AllocateFrame()
     // during a sustained OOM storm helps nobody. Callers get the
     // kNullFrame return value to react to.
     KLOG_ONCE_WARN("mm/frame", "out of physical frames (AllocateFrame)");
+    KDBG(Mm, "mm/frame", "AllocateFrame OOM");
     return kNullFrame;
 }
 

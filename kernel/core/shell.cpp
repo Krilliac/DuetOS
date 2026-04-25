@@ -94,6 +94,7 @@
 #include "crprobe.h"
 #include "firmware_loader.h"
 #include "auth.h"
+#include "kdbg.h"
 #include "klog.h"
 #include "login.h"
 #include "process.h"
@@ -1434,24 +1435,24 @@ void CmdFind(u32 argc, char** argv)
 // dispatched in Dispatch — keeping the two in sync is the
 // price of not having reflection.
 static const char* const kCommandSet[] = {
-    "help",     "about",   "version",  "clear",    "uptime",    "date",      "windows",    "mode",     "ls",
-    "cat",      "touch",   "rm",       "echo",     "cp",        "mv",        "wc",         "head",     "tail",
-    "dmesg",    "stats",   "mem",      "history",  "set",       "unset",     "env",        "alias",    "unalias",
-    "sysinfo",  "source",  "man",      "grep",     "find",      "time",      "which",      "seq",      "sort",
-    "uniq",     "cpuid",   "cr",       "rflags",   "tsc",       "hpet",      "ticks",      "msr",      "lapic",
-    "smp",      "lspci",   "heap",     "paging",   "fb",        "kbdstats",  "mousestats", "loglevel", "logcolor",
-    "getenv",   "yield",   "reboot",   "halt",     "uname",     "whoami",    "hostname",   "pwd",      "true",
-    "false",    "mount",   "lsmod",    "lsblk",    "lsgpt",     "free",      "ps",         "spawn",    "readelf",
-    "hexdump",  "stat",    "basename", "dirname",  "cal",       "sleep",     "reset",      "tac",      "nl",
-    "rev",      "expr",    "color",    "rand",     "flushtlb",  "checksum",  "repeat",     "kill",     "exec",
-    "metrics",  "trace",   "read",     "guard",    "top",       "fatcat",    "fatls",      "fatwrite", "fatappend",
-    "fatnew",   "fatrm",   "fattrunc", "fatmkdir", "fatrmdir",  "linuxexec", "translate",  "smbios",   "power",
-    "battery",  "thermal", "temp",     "gpu",      "lsgpu",     "gfx",       "nic",        "lsnic",    "ip",
-    "arp",      "ipv4",    "uuid",     "uuidgen",  "health",    "checkup",   "attacksim",  "redteam",  "memdump",
-    "ifconfig", "netinfo", "dhcp",     "route",    "netscan",   "wifi",      "fwpolicy",   "fwtrace",  "crtrace",
-    "crprobe",  "net",     "usbnet",   "instr",    "dumpstate", "bp",        "breakpoint", "login",    "logout",
-    "passwd",   "useradd", "userdel",  "users",    "who",       "su",        "hwmon",      "vbe",      "ping",
-    "nslookup", "ntp",     "http",     "shutdown", "poweroff",  "beep",      "inspect",    "theme",
+    "help",      "about",    "version", "clear",    "uptime",   "date",      "windows",    "mode",       "ls",
+    "cat",       "touch",    "rm",      "echo",     "cp",       "mv",        "wc",         "head",       "tail",
+    "dmesg",     "stats",    "mem",     "history",  "set",      "unset",     "env",        "alias",      "unalias",
+    "sysinfo",   "source",   "man",     "grep",     "find",     "time",      "which",      "seq",        "sort",
+    "uniq",      "cpuid",    "cr",      "rflags",   "tsc",      "hpet",      "ticks",      "msr",        "lapic",
+    "smp",       "lspci",    "heap",    "paging",   "fb",       "kbdstats",  "mousestats", "loglevel",   "logcolor",
+    "kdbg",      "getenv",   "yield",   "reboot",   "halt",     "uname",     "whoami",     "hostname",   "pwd",
+    "true",      "false",    "mount",   "lsmod",    "lsblk",    "lsgpt",     "free",       "ps",         "spawn",
+    "readelf",   "hexdump",  "stat",    "basename", "dirname",  "cal",       "sleep",      "reset",      "tac",
+    "nl",        "rev",      "expr",    "color",    "rand",     "flushtlb",  "checksum",   "repeat",     "kill",
+    "exec",      "metrics",  "trace",   "read",     "guard",    "top",       "fatcat",     "fatls",      "fatwrite",
+    "fatappend", "fatnew",   "fatrm",   "fattrunc", "fatmkdir", "fatrmdir",  "linuxexec",  "translate",  "smbios",
+    "power",     "battery",  "thermal", "temp",     "gpu",      "lsgpu",     "gfx",        "nic",        "lsnic",
+    "ip",        "arp",      "ipv4",    "uuid",     "uuidgen",  "health",    "checkup",    "attacksim",  "redteam",
+    "memdump",   "ifconfig", "netinfo", "dhcp",     "route",    "netscan",   "wifi",       "fwpolicy",   "fwtrace",
+    "crtrace",   "crprobe",  "net",     "usbnet",   "instr",    "dumpstate", "bp",         "breakpoint", "login",
+    "logout",    "passwd",   "useradd", "userdel",  "users",    "who",       "su",         "hwmon",      "vbe",
+    "ping",      "nslookup", "ntp",     "http",     "shutdown", "poweroff",  "beep",       "inspect",    "theme",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -4902,6 +4903,113 @@ void CmdLogcolor(u32 argc, char** argv)
     duetos::core::SetLogColor(want);
     ConsoleWrite("SERIAL LOG COLOUR: ");
     ConsoleWriteln(want ? "ON" : "OFF");
+}
+
+// Parse a hex u64 from "0x..." or bare "...". Returns false on
+// any non-hex char or empty input. Local to the kdbg command
+// because the shell doesn't ship a generic hex parser yet.
+bool KdbgParseHex(const char* s, u64* out)
+{
+    if (s == nullptr || s[0] == 0)
+        return false;
+    if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))
+        s += 2;
+    if (s[0] == 0)
+        return false;
+    u64 v = 0;
+    for (u32 i = 0; s[i] != 0; ++i)
+    {
+        const char c = s[i];
+        u8 nib = 0;
+        if (c >= '0' && c <= '9')
+            nib = static_cast<u8>(c - '0');
+        else if (c >= 'a' && c <= 'f')
+            nib = static_cast<u8>(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F')
+            nib = static_cast<u8>(c - 'A' + 10);
+        else
+            return false;
+        v = (v << 4) | nib;
+    }
+    *out = v;
+    return true;
+}
+
+// `kdbg list` — show every channel + on/off + current mask.
+// `kdbg on  <name>` / `kdbg off <name>` — toggle a single channel
+// (use "all" to flip every bit).
+// `kdbg mask <hex>` — set the mask outright (e.g. `kdbg mask 0x3` to
+//                     enable Fat32Walker + Fat32Append).
+void CmdKdbg(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("KDBG: USAGE");
+        ConsoleWriteln("  KDBG LIST");
+        ConsoleWriteln("  KDBG ON <CHANNEL>");
+        ConsoleWriteln("  KDBG OFF <CHANNEL>");
+        ConsoleWriteln("  KDBG MASK 0x<HEX>");
+        ConsoleWriteln("  KDBG ON ALL  /  KDBG OFF ALL");
+        return;
+    }
+    const char* sub = argv[1];
+    if (StrEq(sub, "list"))
+    {
+        duetos::core::DbgListChannels();
+        return;
+    }
+    if (StrEq(sub, "on"))
+    {
+        if (argc < 3)
+        {
+            ConsoleWriteln("KDBG ON: USE A CHANNEL NAME (OR \"ALL\")");
+            return;
+        }
+        const auto ch = duetos::core::DbgChannelByName(argv[2]);
+        if (ch == duetos::core::DbgChannel::None)
+        {
+            ConsoleWriteln("KDBG: UNKNOWN CHANNEL");
+            return;
+        }
+        duetos::core::DbgEnable(static_cast<duetos::u32>(ch));
+        ConsoleWriteln("KDBG: ENABLED");
+        return;
+    }
+    if (StrEq(sub, "off"))
+    {
+        if (argc < 3)
+        {
+            ConsoleWriteln("KDBG OFF: USE A CHANNEL NAME (OR \"ALL\")");
+            return;
+        }
+        const auto ch = duetos::core::DbgChannelByName(argv[2]);
+        if (ch == duetos::core::DbgChannel::None)
+        {
+            ConsoleWriteln("KDBG: UNKNOWN CHANNEL");
+            return;
+        }
+        duetos::core::DbgDisable(static_cast<duetos::u32>(ch));
+        ConsoleWriteln("KDBG: DISABLED");
+        return;
+    }
+    if (StrEq(sub, "mask"))
+    {
+        if (argc < 3)
+        {
+            ConsoleWriteln("KDBG MASK: USE 0x<HEX>");
+            return;
+        }
+        u64 v = 0;
+        if (!KdbgParseHex(argv[2], &v))
+        {
+            ConsoleWriteln("KDBG MASK: BAD HEX");
+            return;
+        }
+        duetos::core::DbgSet(static_cast<duetos::u32>(v));
+        ConsoleWriteln("KDBG: MASK SET");
+        return;
+    }
+    ConsoleWriteln("KDBG: UNKNOWN SUBCOMMAND");
 }
 
 void CmdGetenv(u32 argc, char** argv)
@@ -8801,6 +8909,17 @@ void Dispatch(char* line)
         if (!RequireAdmin("LOGLEVEL"))
             return;
         CmdLoglevel(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "kdbg"))
+    {
+        // Same threat model as `loglevel` — KDBG channels can
+        // surface per-syscall arg dumps and dir-walker traces,
+        // useful for forensics. Gating to admin keeps malicious
+        // ring-3 from quietly disabling diagnostic streams.
+        if (!RequireAdmin("KDBG"))
+            return;
+        CmdKdbg(argc, argv);
         return;
     }
     if (StrEq(cmd, "getenv"))

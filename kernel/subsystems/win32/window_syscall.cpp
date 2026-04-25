@@ -37,6 +37,7 @@
 #include "../../arch/x86_64/cpu.h"
 #include "../../arch/x86_64/serial.h"
 #include "../../arch/x86_64/traps.h"
+#include "../../core/kdbg.h"
 #include "../../core/process.h"
 #include "../../core/syscall.h"
 #include "../../drivers/audio/pcspk.h"
@@ -146,6 +147,7 @@ bool CopyUserString(char* kdst, u64 cap, u64 user_ptr)
 
 void DoWinCreate(arch::TrapFrame* frame)
 {
+    KDBG_4V(Win32Wm, "win32/wm", "DoWinCreate", "x", frame->rdi, "y", frame->rsi, "w", frame->rdx, "h", frame->r10);
     using namespace duetos::drivers::video;
 
     duetos::core::Process* proc = duetos::core::CurrentProcess();
@@ -311,6 +313,7 @@ void DoWinCreate(arch::TrapFrame* frame)
 
 void DoWinDestroy(arch::TrapFrame* frame)
 {
+    KDBG_V(Win32Wm, "win32/wm", "DoWinDestroy hwnd", frame->rdi);
     using namespace duetos::drivers::video;
 
     duetos::core::Process* proc = duetos::core::CurrentProcess();
@@ -568,6 +571,7 @@ void DoWinPeekMsg(arch::TrapFrame* frame)
 
 void DoWinGetMsg(arch::TrapFrame* frame)
 {
+    KDBG_V(Win32Wm, "win32/wm", "DoWinGetMsg msg_user", frame->rdi);
     using namespace duetos::drivers::video;
     // WM_QUIT per Win32. Breaks the user's message loop.
     constexpr u32 kWmQuit = 0x0012;
@@ -670,6 +674,7 @@ void DoWinPostMsg(arch::TrapFrame* frame)
 
 void DoGdiFillRect(arch::TrapFrame* frame)
 {
+    KDBG(Gdi, "win32/gdi", "DoGdiFillRect");
     using namespace duetos::drivers::video;
 
     duetos::core::Process* proc = duetos::core::CurrentProcess();

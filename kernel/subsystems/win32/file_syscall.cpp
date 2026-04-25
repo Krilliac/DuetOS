@@ -3,6 +3,7 @@
 #include "../../arch/x86_64/cpu.h"
 #include "../../arch/x86_64/serial.h"
 #include "../../arch/x86_64/traps.h"
+#include "../../core/kdbg.h"
 #include "../../core/process.h"
 #include "../../core/syscall.h"
 #include "../../fs/file_route.h"
@@ -16,6 +17,7 @@ namespace duetos::subsystems::win32
 
 void DoFileOpen(arch::TrapFrame* frame)
 {
+    KDBG_2V(Win32Thunk, "win32/file", "DoFileOpen", "user_path", frame->rdi, "path_cap", frame->rsi);
     // Path-based open. Routing (ramfs vs fat32 by /disk/<idx>/
     // prefix) lives in fs::routing — this layer only does the
     // syscall-context work (cap check, CopyFromUser, rax wiring).
@@ -62,6 +64,7 @@ void DoFileOpen(arch::TrapFrame* frame)
 
 void DoFileRead(arch::TrapFrame* frame)
 {
+    KDBG_3V(Win32Thunk, "win32/file", "DoFileRead", "handle", frame->rdi, "buf", frame->rsi, "count", frame->rdx);
     // Read up to rdx bytes from the handle into rsi. Returns
     // bytes copied (0 at EOF) or u64(-1) on bad handle / bad user
     // ptr. Backing dispatch (ramfs direct copy vs fat32 cluster
@@ -122,6 +125,7 @@ void DoFileRead(arch::TrapFrame* frame)
 
 void DoFileClose(arch::TrapFrame* frame)
 {
+    KDBG_V(Win32Thunk, "win32/file", "DoFileClose handle", frame->rdi);
     // Generic Win32 CloseHandle. Dispatches by handle range:
     // file table (0x100..), mutex table (0x200..), event table
     // (0x300..). Out-of-range handles are a documented no-op.
@@ -166,6 +170,7 @@ void DoFileClose(arch::TrapFrame* frame)
 
 void DoFileSeek(arch::TrapFrame* frame)
 {
+    KDBG_3V(Win32Thunk, "win32/file", "DoFileSeek", "handle", frame->rdi, "offset", frame->rsi, "whence", frame->rdx);
     // SET / CUR / END seeking with clamp to [0, file_size].
     // Dispatch by handle kind lives in fs::routing.
     core::Process* proc = core::CurrentProcess();
@@ -182,6 +187,7 @@ void DoFileSeek(arch::TrapFrame* frame)
 
 void DoFileFstat(arch::TrapFrame* frame)
 {
+    KDBG_2V(Win32Thunk, "win32/file", "DoFileFstat", "handle", frame->rdi, "out_buf", frame->rsi);
     // Non-destructive size query for an open Win32 handle.
     // GetFileSizeEx maps here directly.
     core::Process* proc = core::CurrentProcess();
@@ -207,6 +213,7 @@ void DoFileFstat(arch::TrapFrame* frame)
 
 void DoFileWrite(arch::TrapFrame* frame)
 {
+    KDBG_3V(Win32Thunk, "win32/file", "DoFileWrite", "handle", frame->rdi, "buf", frame->rsi, "count", frame->rdx);
     // Write up to rdx bytes from rsi into the handle at its
     // current cursor. Cap-gated on kCapFsWrite. Backing dispatch
     // (ramfs refused; fat32 in-place) lives in fs::routing.

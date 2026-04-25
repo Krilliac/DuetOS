@@ -4,6 +4,15 @@
  * First DuetOS userland program that talks to "Win32" —
  * real imported functions through a real Import Address Table.
  *
+ * Batch-30 verbose diagnostic:
+ *   Compile with -DHELLO_DBG_BATCH30=1 to emit a per-flag "[b30-dbg]"
+ *   line on the FAILURE path (each invariant rendered as 0/1 +
+ *   sentinel byte hex). Off by default — the smoke test only needs
+ *   the OK / FAILED line — but invaluable for diagnosing which of
+ *   the eleven checks broke when batch30 regresses. The kernel-side
+ *   KDBG channel system can't reach into PE userland (separate ABI),
+ *   so this is a TU-local toggle.
+ *
  * v0 scope:
  *   - GetStdHandle(STD_OUTPUT_HANDLE) -> HANDLE
  *   - WriteFile(handle, buf, n, &written, NULL) -> BOOL
@@ -760,15 +769,15 @@ void _start(void)
 
     // Batch 24 exercise — file I/O via real handle table.
     //
-    // Opens /etc/version (a 27-byte ramfs file containing
+    // Opens /etc/version (a 25-byte ramfs file containing
     // "DuetOS v0 (ramfs-seeded)\n"), reads the first 32 bytes,
     // seeks back to start, reads again, validates both reads
     // returned the expected first 8 bytes, then closes.
     //
     // Invariants checked:
     //   * CreateFileW returns a non-INVALID_HANDLE_VALUE handle.
-    //   * First ReadFile returns >= 27 bytes (entire file fits).
-    //   * Buffer starts with "DuetOS".
+    //   * First ReadFile returns >= 25 bytes (entire file fits).
+    //   * Buffer starts with "DuetOS v".
     //   * SetFilePointerEx(0, FILE_BEGIN) returns 0 (new pos).
     //   * Second ReadFile returns the same first 8 bytes.
     //   * CloseHandle returns TRUE.
@@ -798,10 +807,10 @@ void _start(void)
         b24_close_ok = CloseHandle(b24_h);
         (void)newpos;
     }
-    BOOL b24_pass = b24_h != INVALID_HANDLE_VALUE && b24_read_ok && b24_n >= 27 && b24_buf[0] == 'C' &&
-                    b24_buf[1] == 'u' && b24_buf[2] == 's' && b24_buf[3] == 't' && b24_buf[4] == 'o' &&
-                    b24_buf[5] == 'm' && b24_buf[6] == 'O' && b24_buf[7] == 'S' && b24_seek_ok && b24_read2_ok &&
-                    b24_n2 == 8 && b24_buf2[0] == 'C' && b24_buf2[7] == 'S' && b24_close_ok;
+    BOOL b24_pass = b24_h != INVALID_HANDLE_VALUE && b24_read_ok && b24_n >= 25 && b24_buf[0] == 'D' &&
+                    b24_buf[1] == 'u' && b24_buf[2] == 'e' && b24_buf[3] == 't' && b24_buf[4] == 'O' &&
+                    b24_buf[5] == 'S' && b24_buf[6] == ' ' && b24_buf[7] == 'v' && b24_seek_ok && b24_read2_ok &&
+                    b24_n2 == 8 && b24_buf2[0] == 'D' && b24_buf2[7] == 'v' && b24_close_ok;
     const char b24_ok[] = "[batch24] CreateFileW + ReadFile + Seek + Close OK\n";
     const char b24_bad[] = "[batch24] file I/O FAILED invariants\n";
     DWORD b24w = 0;
@@ -813,7 +822,7 @@ void _start(void)
     // Batch 25 exercise — file stat + module lookup.
     //
     // Invariants checked:
-    //   * Re-open /etc/version, GetFileSizeEx returns 27 (the
+    //   * Re-open /etc/version, GetFileSizeEx returns 25 (the
     //     ramfs payload "DuetOS v0 (ramfs-seeded)\n").
     //   * Reading 1 byte after GetFileSizeEx shows the cursor
     //     wasn't moved by the stat call (still at 0).
@@ -837,7 +846,7 @@ void _start(void)
     {
         b25_size_ok = GetFileSizeEx(b25_h, &b25_size);
         // Cursor must still be at 0 after a stat — read 1 byte
-        // and assert it's 'C' (the start of "DuetOS").
+        // and assert it's 'D' (the start of "DuetOS").
         ReadFile(b25_h, &b25_first, 1, &b25_n, 0);
         b25_close_ok = CloseHandle(b25_h);
     }
@@ -851,8 +860,8 @@ void _start(void)
 
     const char b25_ok[] = "[batch25] GetFileSizeEx + GetModuleHandleW + LoadLibraryW OK\n";
     const char b25_bad[] = "[batch25] file stat / module lookup FAILED invariants\n";
-    BOOL b25_pass = b25_h != INVALID_HANDLE_VALUE && b25_size_ok && b25_size.QuadPart == 27 && b25_n == 1 &&
-                    b25_first == 'C' && b25_close_ok && b25_self != 0 && b25_named == 0 && b25_loaded == 0 &&
+    BOOL b25_pass = b25_h != INVALID_HANDLE_VALUE && b25_size_ok && b25_size.QuadPart == 25 && b25_n == 1 &&
+                    b25_first == 'D' && b25_close_ok && b25_self != 0 && b25_named == 0 && b25_loaded == 0 &&
                     b25_proc == 0 && b25_free_ok != 0;
     DWORD b25w = 0;
     if (b25_pass)
@@ -1051,9 +1060,54 @@ void _start(void)
                     ovi.dwPlatformId == 2 && ovi.szCSDVersion[0] == 'X';
     DWORD b30w = 0;
     if (b30_pass)
+    {
         WriteFile(out, b30_ok, sizeof(b30_ok) - 1, &b30w, 0);
+    }
     else
+    {
+#if defined(HELLO_DBG_BATCH30) && HELLO_DBG_BATCH30
+        /* Per-flag bitmask + szCSDVersion[0] hex. Reads as
+         *   [b30-dbg] 1111111110 csd=0000
+         * meaning every check passed except the last (sentinel was
+         * clobbered by the called stub). Letters in name match the
+         * b30_pass conjunct order. */
+        char b30dbg[32];
+        b30dbg[0] = '[';
+        b30dbg[1] = 'b';
+        b30dbg[2] = '3';
+        b30dbg[3] = '0';
+        b30dbg[4] = '-';
+        b30dbg[5] = 'd';
+        b30dbg[6] = 'b';
+        b30dbg[7] = 'g';
+        b30dbg[8] = ']';
+        b30dbg[9] = ' ';
+        b30dbg[10] = (char)('0' + (b30_iw_ok ? 1 : 0));
+        b30dbg[11] = (char)('0' + (b30_wow64 == 0 ? 1 : 0));
+        b30dbg[12] = (char)('0' + (b30_iw_null ? 1 : 0));
+        b30dbg[13] = (char)('0' + (b30_gv_ok ? 1 : 0));
+        b30dbg[14] = (char)('0' + (ovi.dwOSVersionInfoSize == sizeof(ovi) ? 1 : 0));
+        b30dbg[15] = (char)('0' + (ovi.dwMajorVersion == 10 ? 1 : 0));
+        b30dbg[16] = (char)('0' + (ovi.dwMinorVersion == 0 ? 1 : 0));
+        b30dbg[17] = (char)('0' + (ovi.dwBuildNumber == 19041 ? 1 : 0));
+        b30dbg[18] = (char)('0' + (ovi.dwPlatformId == 2 ? 1 : 0));
+        b30dbg[19] = (char)('0' + (ovi.szCSDVersion[0] == 'X' ? 1 : 0));
+        b30dbg[20] = ' ';
+        b30dbg[21] = 'c';
+        b30dbg[22] = 's';
+        b30dbg[23] = 'd';
+        b30dbg[24] = '=';
+        unsigned short b30_csd0 = ovi.szCSDVersion[0];
+        const char b30_hex[] = "0123456789abcdef";
+        b30dbg[25] = b30_hex[(b30_csd0 >> 12) & 0xF];
+        b30dbg[26] = b30_hex[(b30_csd0 >> 8) & 0xF];
+        b30dbg[27] = b30_hex[(b30_csd0 >> 4) & 0xF];
+        b30dbg[28] = b30_hex[b30_csd0 & 0xF];
+        b30dbg[29] = '\n';
+        WriteFile(out, b30dbg, 30, &b30w, 0);
+#endif
         WriteFile(out, b30_bad, sizeof(b30_bad) - 1, &b30w, 0);
+    }
 
     // Batch 31 exercise — ANSI string helpers.
     // Mirrors batch 29 but with byte strings.

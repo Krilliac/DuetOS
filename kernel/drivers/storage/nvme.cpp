@@ -28,6 +28,7 @@
 #include "../../arch/x86_64/cpu.h"
 #include "../../arch/x86_64/hpet.h"
 #include "../../arch/x86_64/serial.h"
+#include "../../core/kdbg.h"
 #include "../../core/klog.h"
 #include "../../core/panic.h"
 #include "../../mm/frame_allocator.h"
@@ -775,11 +776,13 @@ i32 NvmeDoIo(bool write, u64 lba, u32 count, void* user_buf)
 
 i32 NvmeBlockRead(void* /*cookie*/, u64 lba, u32 count, void* buf)
 {
+    KDBG_2V(Storage, "drivers/nvme", "NvmeBlockRead", "lba", lba, "count", count);
     return NvmeDoIo(/*write=*/false, lba, count, buf);
 }
 
 i32 NvmeBlockWrite(void* /*cookie*/, u64 lba, u32 count, const void* buf)
 {
+    KDBG_2V(Storage, "drivers/nvme", "NvmeBlockWrite", "lba", lba, "count", count);
     return NvmeDoIo(/*write=*/true, lba, count, const_cast<void*>(buf));
 }
 

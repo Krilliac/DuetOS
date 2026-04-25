@@ -2026,8 +2026,8 @@ __declspec(dllexport) BOOL GetVersionExA(void* info)
     p[2] = 0;
     p[3] = 19041;
     p[4] = 2; /* VER_PLATFORM_WIN32_NT */
-    char* csd = (char*)((unsigned char*)info + 20);
-    csd[0] = 0;
+    /* szCSDVersion left untouched — matches the kernel32 thunk
+       fast-path. Caller is expected to zero-init the struct. */
     return 1;
 }
 
@@ -2042,8 +2042,8 @@ __declspec(dllexport) BOOL GetVersionExW(void* info)
     p[2] = 0;
     p[3] = 19041;
     p[4] = 2;
-    unsigned short* csd = (unsigned short*)((unsigned char*)info + 20);
-    csd[0] = 0;
+    /* szCSDVersion left untouched — matches the kernel32 thunk
+       fast-path. Caller is expected to zero-init the struct. */
     return 1;
 }
 

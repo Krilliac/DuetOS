@@ -21,6 +21,7 @@
 #include "ahci.h"
 
 #include "../../arch/x86_64/serial.h"
+#include "../../core/kdbg.h"
 #include "../../core/klog.h"
 #include "../../core/panic.h"
 #include "../../mm/frame_allocator.h"
@@ -348,6 +349,7 @@ const char* SignatureName(u32 sig)
 
 i32 AhciBlockRead(void* cookie, u64 lba, u32 count, void* buf)
 {
+    KDBG_2V(Storage, "drivers/ahci", "AhciBlockRead", "lba", lba, "count", count);
     auto* p = static_cast<Port*>(cookie);
     if (!p->online)
         return -1;
@@ -376,6 +378,7 @@ i32 AhciBlockRead(void* cookie, u64 lba, u32 count, void* buf)
 
 i32 AhciBlockWrite(void* cookie, u64 lba, u32 count, const void* buf)
 {
+    KDBG_2V(Storage, "drivers/ahci", "AhciBlockWrite", "lba", lba, "count", count);
     auto* p = static_cast<Port*>(cookie);
     if (!p->online)
         return -1;

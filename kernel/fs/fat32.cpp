@@ -36,8 +36,10 @@
 #include "fat32.h"
 
 #include "../arch/x86_64/serial.h"
+#include "../core/kdbg.h"
 #include "../core/klog.h"
 #include "../drivers/storage/block.h"
+#include "../sched/sched.h"
 
 namespace duetos::fs::fat32
 {
@@ -50,6 +52,63 @@ namespace
 // layer's cap.
 constinit Volume g_volumes[kMaxVolumes] = {};
 constinit u32 g_volume_count = 0;
+
+// Serialize every public-API entry — concurrent ring-3 tasks that
+// both reach for FAT32 (e.g. the windows-side openat smoke + the
+// linux-side write-past-EOF smoke racing during boot) otherwise
+// stomp on the shared g_scratch buffer. Symptom is a walker
+// reading the dir cluster, getting preempted while iterating
+// g_scratch slots, and finding stale LFN-encoder padding from the
+// preempting task's create path. Cheapest fix: a single mutex
+// around the whole module — FAT32 ops are short and the
+// contention is rare on a single-volume v0 system.
+//
+// Recursive variant: many public Fat32 entry points call into
+// other public ones (Fat32CreateAtPath -> Fat32LookupPath, etc.).
+// Track the owning task and skip the lock if we already hold it,
+// so inner public-call edges don't deadlock.
+constinit sched::Mutex g_fat32_mutex = {};
+constinit u64 g_fat32_recursion = 0;
+
+class Fat32Guard
+{
+  public:
+    Fat32Guard()
+    {
+        sched::Task* me = sched::CurrentTask();
+        if (me != nullptr && g_fat32_mutex.owner == me)
+        {
+            ++g_fat32_recursion;
+            owns_ = false;
+            return;
+        }
+        // CurrentTask() can be nullptr during early boot before
+        // the scheduler is online — Fat32Probe runs then. Skip the
+        // lock in that case; preemption isn't possible yet, so the
+        // race we're guarding against can't fire.
+        if (me == nullptr)
+        {
+            owns_ = false;
+            return;
+        }
+        sched::MutexLock(&g_fat32_mutex);
+        owns_ = true;
+    }
+    ~Fat32Guard()
+    {
+        if (!owns_)
+        {
+            --g_fat32_recursion;
+            return;
+        }
+        sched::MutexUnlock(&g_fat32_mutex);
+    }
+    Fat32Guard(const Fat32Guard&) = delete;
+    Fat32Guard& operator=(const Fat32Guard&) = delete;
+
+  private:
+    bool owns_ = false;
+};
 
 // FAT attribute byte bits (spec §6.1). Only the ones this v0 code
 // consults are defined here; ReadOnly / Hidden / System get added
@@ -576,8 +635,10 @@ bool FindVisitor(const DirEntry& e, void* cx)
 
 bool Fat32LookupPath(const Volume* v, const char* path, DirEntry* out)
 {
+    Fat32Guard guard;
     if (v == nullptr || path == nullptr || out == nullptr)
         return false;
+    KDBG_S(Fat32Lookup, "fs/fat32", "lookup", "path", path);
 
     // Synthetic "root" entry: directory at v->root_cluster.
     DirEntry cur;
@@ -669,6 +730,7 @@ const DirEntry* Fat32FindInRoot(const Volume* v, const char* name)
 
 i64 Fat32ReadFile(const Volume* v, const DirEntry* e, void* out, u64 max)
 {
+    Fat32Guard guard;
     if (v == nullptr || e == nullptr || out == nullptr)
         return -1;
     if (max == 0 || e->size_bytes == 0 || e->first_cluster < 2)
@@ -724,6 +786,7 @@ i64 Fat32ReadFile(const Volume* v, const DirEntry* e, void* out, u64 max)
 
 i64 Fat32ReadAt(const Volume* v, const DirEntry* e, u64 offset, void* out, u64 len)
 {
+    Fat32Guard guard;
     if (v == nullptr || e == nullptr || out == nullptr)
         return -1;
     if (len == 0)
@@ -774,6 +837,7 @@ i64 Fat32ReadAt(const Volume* v, const DirEntry* e, u64 offset, void* out, u64 l
 
 i64 Fat32WriteInPlace(const Volume* v, const DirEntry* e, u64 offset, const void* buf, u64 len)
 {
+    Fat32Guard guard;
     if (v == nullptr || e == nullptr || buf == nullptr)
         return -1;
     if (len == 0)
@@ -928,13 +992,18 @@ bool ZeroCluster(const Volume& v, u32 cluster)
 // (first_cluster, attrs, times) are preserved.
 bool UpdateEntrySizeInDir(const Volume& v, u32 first_cluster, const char* want, u32 new_size)
 {
+    KDBG_3V(Fat32Walker, "fs/fat32", "UpdateEntrySizeInDir enter", "first_cluster", first_cluster, "want_first_byte",
+            want != nullptr ? static_cast<u64>(static_cast<u8>(want[0])) : 0u, "new_size", new_size);
     u32 cluster = first_cluster;
     // Bounded like the other walkers — 64 clusters covers any
     // realistic directory.
     for (u32 step = 0; step < 64; ++step)
     {
         if (cluster < 2 || cluster >= 0x0FFFFFF8u)
+        {
+            KDBG_2V(Fat32Walker, "fs/fat32", "walk halt", "step", step, "cluster", cluster);
             return false;
+        }
         const u32 bytes = v.sectors_per_cluster * v.bytes_per_sector;
         // Read the cluster one sector at a time so we can find the
         // entry, patch it in the scratch copy, and write JUST that
@@ -944,12 +1013,17 @@ bool UpdateEntrySizeInDir(const Volume& v, u32 first_cluster, const char* want, 
         for (u32 sec = 0; sec < v.sectors_per_cluster; ++sec)
         {
             const u64 lba = u64(v.data_start_sector) + u64(cluster - 2) * u64(v.sectors_per_cluster) + sec;
-            if (drivers::storage::BlockDeviceRead(v.block_handle, lba, 1, g_scratch) != 0)
+            const i32 rd_rc = drivers::storage::BlockDeviceRead(v.block_handle, lba, 1, g_scratch);
+            KDBG_4V(Fat32Walker, "fs/fat32", "post-read", "lba", lba, "rd_rc", static_cast<u64>(rd_rc), "g0",
+                    static_cast<u64>(g_scratch[0]), "g32", static_cast<u64>(g_scratch[32]));
+            if (rd_rc != 0)
                 return false;
             const u32 bytes_in_sec = v.bytes_per_sector;
             for (u32 off = 0; off + 32 <= bytes_in_sec; off += 32)
             {
                 const u8* e = g_scratch + off;
+                KDBG_3V(Fat32Walker, "fs/fat32", "visit", "off", off, "e0", static_cast<u64>(e[0]), "e11",
+                        static_cast<u64>(e[11]));
                 if (e[0] == 0x00)
                     return false; // end of dir — not found
                 if (e[0] == 0xE5)
@@ -963,6 +1037,7 @@ bool UpdateEntrySizeInDir(const Volume& v, u32 first_cluster, const char* want, 
                 DecodeEntry(e, decoded);
                 if (IsDotEntry(decoded.name))
                     continue;
+                KDBG_S(Fat32Walker, "fs/fat32", "entry", "name", decoded.name);
                 // Match on the SFN only — LFN matching would need
                 // us to accumulate fragments here too, which v0
                 // append doesn't need (HELLO.TXT in the self-test
@@ -1370,9 +1445,13 @@ i64 AppendInDir(const Volume* v, u32 dir_cluster, const char* name, const void* 
     if (len == 0)
         return 0;
 
+    KDBG_2V(Fat32Append, "fs/fat32", "AppendInDir enter", "dir_cluster", dir_cluster, "len", len);
     DirEntry e_val;
     if (!FindInDirByName(*v, dir_cluster, name, &e_val))
+    {
+        KDBG_S(Fat32Append, "fs/fat32", "AppendInDir target missing", "name", name);
         return -1;
+    }
     const DirEntry* e = &e_val;
     if (e->attributes & kAttrDirectory)
         return -1; // append-to-directory is nonsensical
@@ -1472,6 +1551,22 @@ i64 AppendInDir(const Volume* v, u32 dir_cluster, const char* name, const void* 
     if (!UpdateEntrySizeInDir(*v, dir_cluster, name, new_size))
     {
         core::Log(core::LogLevel::Error, "fs/fat32", "append: cluster chain extended but dir entry size update failed");
+        // Forensic dump of the dir cluster's first sector — only
+        // emitted when Fat32Append channel is on, so the normal
+        // boot log isn't polluted on every flake.
+        if (KDBG_ON(Fat32Append))
+        {
+            const u64 lba0 = u64(v->data_start_sector) + u64(dir_cluster - 2) * u64(v->sectors_per_cluster);
+            if (drivers::storage::BlockDeviceRead(v->block_handle, lba0, 1, g_scratch) == 0)
+            {
+                for (u32 slot = 0; slot < 16; ++slot)
+                {
+                    core::DbgEmit3V(core::DbgChannel::Fat32Append, "fs/fat32", "dump-slot", "off", slot * 32u, "first",
+                                    static_cast<u64>(g_scratch[slot * 32]), "attr",
+                                    static_cast<u64>(g_scratch[slot * 32 + 11]));
+                }
+            }
+        }
         return -1;
     }
 
@@ -1768,6 +1863,7 @@ void EncodeLfnFragment(const char* chunk, u32 chunk_len, u8 ordinal, bool is_las
 
 i64 Fat32AppendInRoot(const Volume* v, const char* name, const void* buf, u64 len)
 {
+    Fat32Guard guard;
     if (v == nullptr)
         return -1;
     return AppendInDir(v, v->root_cluster, name, buf, len);
@@ -1775,6 +1871,7 @@ i64 Fat32AppendInRoot(const Volume* v, const char* name, const void* buf, u64 le
 
 i64 Fat32AppendAtPath(const Volume* v, const char* path, const void* buf, u64 len)
 {
+    Fat32Guard guard;
     if (v == nullptr || path == nullptr)
         return -1;
     u32 parent_cluster = 0;
@@ -1967,6 +2064,7 @@ i64 CreateInDir(const Volume* v, u32 dir_cluster, const char* name, const void* 
 
 i64 Fat32CreateInRoot(const Volume* v, const char* name, const void* buf, u64 len)
 {
+    Fat32Guard guard;
     if (v == nullptr)
         return -1;
     return CreateInDir(v, v->root_cluster, name, buf, len);
@@ -1974,6 +2072,7 @@ i64 Fat32CreateInRoot(const Volume* v, const char* name, const void* buf, u64 le
 
 i64 Fat32CreateAtPath(const Volume* v, const char* path, const void* buf, u64 len)
 {
+    Fat32Guard guard;
     if (v == nullptr || path == nullptr)
         return -1;
     u32 parent_cluster = 0;
@@ -2071,6 +2170,7 @@ bool DeleteInDir(const Volume* v, u32 dir_cluster, const char* name)
 
 bool Fat32DeleteInRoot(const Volume* v, const char* name)
 {
+    Fat32Guard guard;
     if (v == nullptr)
         return false;
     return DeleteInDir(v, v->root_cluster, name);
@@ -2078,6 +2178,7 @@ bool Fat32DeleteInRoot(const Volume* v, const char* name)
 
 bool Fat32DeleteAtPath(const Volume* v, const char* path)
 {
+    Fat32Guard guard;
     if (v == nullptr || path == nullptr)
         return false;
     u32 parent_cluster = 0;
@@ -2250,6 +2351,7 @@ bool DirHasOnlyDots(const Volume& v, u32 dir_cluster)
 
 bool Fat32MkdirAtPath(const Volume* v, const char* path)
 {
+    Fat32Guard guard;
     if (v == nullptr || path == nullptr)
         return false;
     u32 parent_cluster = 0;
@@ -2285,6 +2387,7 @@ bool Fat32MkdirAtPath(const Volume* v, const char* path)
 
 bool Fat32RmdirAtPath(const Volume* v, const char* path)
 {
+    Fat32Guard guard;
     if (v == nullptr || path == nullptr)
         return false;
     u32 parent_cluster = 0;
@@ -2414,6 +2517,7 @@ i64 TruncateInDir(const Volume* v, u32 dir_cluster, const char* name, u64 new_si
 
 i64 Fat32TruncateInRoot(const Volume* v, const char* name, u64 new_size)
 {
+    Fat32Guard guard;
     if (v == nullptr)
         return -1;
     return TruncateInDir(v, v->root_cluster, name, new_size);
@@ -2421,6 +2525,7 @@ i64 Fat32TruncateInRoot(const Volume* v, const char* name, u64 new_size)
 
 i64 Fat32TruncateAtPath(const Volume* v, const char* path, u64 new_size)
 {
+    Fat32Guard guard;
     if (v == nullptr || path == nullptr)
         return -1;
     u32 parent_cluster = 0;
@@ -2432,6 +2537,7 @@ i64 Fat32TruncateAtPath(const Volume* v, const char* path, u64 new_size)
 
 bool Fat32ReadFileStream(const Volume* v, const DirEntry* e, ReadChunkCb cb, void* ctx)
 {
+    Fat32Guard guard;
     if (v == nullptr || e == nullptr || cb == nullptr)
         return false;
     if (e->size_bytes == 0 || e->first_cluster < 2)
