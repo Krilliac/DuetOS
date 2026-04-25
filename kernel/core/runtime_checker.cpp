@@ -250,7 +250,6 @@ bool IsSecurityCritical(HealthIssue issue)
     case HealthIssue::TaskRspOutOfRange:
     case HealthIssue::SyscallMsrHijacked:
     case HealthIssue::FeatureControlUnlocked:
-    case HealthIssue::BootSectorModified:
         return true;
     default:
         return false;
@@ -377,11 +376,10 @@ void Report(HealthIssue issue)
         security::SetGuardMode(security::Mode::Enforce);
     }
 
-    // Bootkit-specific escalation: any boot-sector drift or
-    // syscall-MSR-hook flips the block-layer write guard from
-    // Advisory to Deny so a subsequent write attempt by the
-    // attacker is refused rather than just logged.
-    if ((issue == HealthIssue::BootSectorModified || issue == HealthIssue::SyscallMsrHijacked) &&
+    // Syscall-hook escalation: a syscall-MSR hijack flips the
+    // block-layer write guard from Advisory to Deny so a later
+    // persistence write attempt is refused instead of logged.
+    if (issue == HealthIssue::SyscallMsrHijacked &&
         drivers::storage::BlockWriteGuardMode() != drivers::storage::WriteGuardMode::Deny)
     {
         arch::SerialWrite("[health] ESCALATE: blockguard -> Deny (rootkit indicator)\n");
