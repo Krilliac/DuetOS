@@ -267,6 +267,11 @@ bool GptProbe(u32 block_handle, u32* out_index)
         core::Log(core::LogLevel::Warn, "fs/gpt", "disk registry full");
         return false;
     }
+    if (block_handle >= drivers::storage::BlockDeviceCount())
+    {
+        core::LogWithValue(core::LogLevel::Warn, "fs/gpt", "invalid block handle", block_handle);
+        return false;
+    }
     const u32 sector_size = drivers::storage::BlockDeviceSectorSize(block_handle);
     const u64 sector_count = drivers::storage::BlockDeviceSectorCount(block_handle);
     if (sector_size < 512 || sector_count < 34)

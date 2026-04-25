@@ -811,13 +811,20 @@ bool FetchDeviceDescriptor(Runtime& rt, PortRecord& port)
 // Returns true on keyboard found.
 bool ParseConfigForHidBoot(const u8* buf, u32 len, PortRecord& port)
 {
-    if (len < kConfigDescriptorHeaderBytes)
+    if (buf == nullptr || len < kConfigDescriptorHeaderBytes)
         return false;
     // Top-level Configuration descriptor: byte 5 = bConfigurationValue
     // (the argument we'll pass to SET_CONFIGURATION below).
     port.hid_config_value = buf[5];
 
+    // bLength of the Config descriptor itself. Must be at least 2
+    // for the inner walker's "dlen < 2 → break" guard to advance
+    // past this header — if bLength is 0 or 1 we'd loop on the
+    // SAME byte indefinitely, except the body's break catches that
+    // too. Defensive cap.
     u32 off = buf[0]; // skip the Configuration descriptor itself
+    if (off < kConfigDescriptorHeaderBytes)
+        return false;
     bool in_hid_iface = false;
     while (off + 2 <= len)
     {
@@ -2114,6 +2121,11 @@ bool XhciControlIn(u8 slot_id, u8 bmRequestType, u8 bRequest, u16 wValue, u16 wI
 {
     if ((bmRequestType & 0x80) == 0 || len > mm::kPageSize)
         return false;
+    // A non-zero length with a null caller buffer is a caller bug —
+    // we'd silently drop the device's IN data. Refuse so the bug
+    // surfaces at the call site instead of as a missing read.
+    if (buf == nullptr && len > 0)
+        return false;
     DeviceState* dev = DeviceForSlot(slot_id);
     if (dev == nullptr)
         return false;
@@ -2132,6 +2144,11 @@ bool XhciControlIn(u8 slot_id, u8 bmRequestType, u8 bRequest, u16 wValue, u16 wI
 bool XhciControlOut(u8 slot_id, u8 bmRequestType, u8 bRequest, u16 wValue, u16 wIndex, const void* buf, u16 len)
 {
     if ((bmRequestType & 0x80) != 0 || len > mm::kPageSize)
+        return false;
+    // Symmetric to XhciControlIn: claim len bytes but supply no
+    // buffer is a caller bug. Refuse rather than silently degrade
+    // to the no-data SETUP path inside ControlOutWithData.
+    if (buf == nullptr && len > 0)
         return false;
     DeviceState* dev = DeviceForSlot(slot_id);
     if (dev == nullptr)

@@ -95,6 +95,13 @@ char Utf16ToSafeAscii(u16 cp)
 // the total entry count in the buffer for bounds checks.
 u32 ParseFileEntrySet(const u8* buf, u32 start_idx, u32 buf_entries, DirEntry* out)
 {
+    // Bound the primary-entry read against the buffer — the directory
+    // walker normally advances one slot at a time so this should
+    // always pass, but a corrupt directory whose previous entry-set
+    // claimed an oversized SecondaryCount could push start_idx past
+    // the buffer end.
+    if (start_idx >= buf_entries)
+        return 0;
     const u8* file_ent = buf + u64(start_idx) * 32;
     if ((file_ent[0] & 0x7F) != (kDirEntryFile & 0x7F))
         return 0;
@@ -224,6 +231,8 @@ void WalkRootDir(Volume& v)
     using ::duetos::core::ErrorCode;
     if (g_volume_count >= kMaxVolumes)
         return Err{ErrorCode::BadState};
+    if (block_handle >= drivers::storage::BlockDeviceCount())
+        return Err{ErrorCode::InvalidArgument};
     const i32 rc = drivers::storage::BlockDeviceRead(block_handle, kBootSectorLba, 1, g_scratch);
     if (rc < 0)
         return Err{ErrorCode::IoError};
@@ -232,6 +241,21 @@ void WalkRootDir(Volume& v)
         return Err{ErrorCode::NotFound};
     if (!MatchesFsName(sect))
         return Err{ErrorCode::NotFound};
+
+    // exFAT spec §3.1.13/14: BytesPerSectorShift in [9, 12]
+    // (512 .. 4096 bytes), SectorsPerClusterShift in
+    // [0, 25 - BytesPerSectorShift] (max cluster 32 MiB).
+    // Reject anything outside the spec — `1u << shift` on a
+    // shift count >= 32 is undefined behaviour, and a hostile
+    // boot sector with shift=63 would otherwise cascade into
+    // wild geometry numbers. WalkRootDir already guards against
+    // bps==0 but only reactively after the shift has happened.
+    const u8 bps_shift = sect[kOffBytesPerSectorShift];
+    const u8 spc_shift = sect[kOffSectorsPerClusterShift];
+    if (bps_shift < 9 || bps_shift > 12)
+        return Err{ErrorCode::Corrupt};
+    if (spc_shift > (25 - bps_shift))
+        return Err{ErrorCode::Corrupt};
 
     // Build the volume record directly in its registry slot — avoids
     // a whole-struct copy (kMaxDirEntries × sizeof(DirEntry) would
@@ -246,8 +270,8 @@ void WalkRootDir(Volume& v)
     v.cluster_heap_offset_sectors = LeU32(sect + kOffClusterHeapOffset);
     v.cluster_count = LeU32(sect + kOffClusterCount);
     v.first_cluster_of_root = LeU32(sect + kOffFirstClusterOfRoot);
-    v.bytes_per_sector_shift = sect[kOffBytesPerSectorShift];
-    v.sectors_per_cluster_shift = sect[kOffSectorsPerClusterShift];
+    v.bytes_per_sector_shift = bps_shift;
+    v.sectors_per_cluster_shift = spc_shift;
 
     arch::SerialWrite("[exfat] probe OK handle=");
     arch::SerialWriteHex(block_handle);

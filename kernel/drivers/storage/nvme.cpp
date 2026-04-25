@@ -722,7 +722,30 @@ i32 NvmeDoIo(bool write, u64 lba, u32 count, void* user_buf)
     {
         return -1;
     }
+    // Caller-supplied buffer is required for non-zero counts. A null
+    // here would silently dereference inside the copy loops below.
+    if (user_buf == nullptr)
+    {
+        return -1;
+    }
     const u32 ss = g_ctrl.ns_sector_size;
+    // ns_sector_size is set during NvmeInit's Identify Namespace and
+    // should never be zero on an `online` controller. Assert rather
+    // than divide-by-zero.
+    if (ss == 0)
+    {
+        return -1;
+    }
+    // LBA range check: the namespace exposes a finite set of LBAs;
+    // a request that runs off the end is a caller bug. Without this
+    // guard we'd happily issue an out-of-range NVMe Read/Write and
+    // the controller would either reject (best case) or return
+    // garbage from outside the namespace.
+    const u64 last_lba = lba + (count - 1);
+    if (last_lba < lba || last_lba >= g_ctrl.ns_sector_count)
+    {
+        return -1;
+    }
     // Per-command cap is the lesser of our staging-buffer size and
     // the controller's MDTS (when set). Callers doing larger I/O
     // must loop over this limit — the block layer already does.
@@ -732,7 +755,7 @@ i32 NvmeDoIo(bool write, u64 lba, u32 count, void* user_buf)
         per_cmd_bytes = g_ctrl.mdts_max_bytes;
     }
     const u32 per_cmd_max_sectors = per_cmd_bytes / ss;
-    if (count > per_cmd_max_sectors)
+    if (per_cmd_max_sectors == 0 || count > per_cmd_max_sectors)
     {
         return -1;
     }

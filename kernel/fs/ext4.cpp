@@ -126,7 +126,7 @@ void ByteZero(void* dst, u64 n)
 // Returns false on error or if `bytes` exceeds the scratch size.
 bool ReadIntoBlockScratch(u32 block_handle, u64 lba, u32 sector_size, u64 bytes)
 {
-    if (sector_size == 0 || bytes > sizeof(g_block_scratch))
+    if (sector_size == 0 || bytes == 0 || bytes > sizeof(g_block_scratch))
         return false;
     const u32 count = u32(bytes / sector_size);
     if (count == 0 || (bytes % sector_size) != 0)
@@ -455,6 +455,11 @@ void ReadGroup0AndRootInode(Volume& v)
     using ::duetos::core::ErrorCode;
     if (g_volume_count >= kMaxVolumes)
         return Err{ErrorCode::BadState};
+    // Reject obviously invalid block handles before issuing the read —
+    // BlockDeviceRead would log+fail anyway, but rejecting up front
+    // keeps the per-disk error path single-edged.
+    if (block_handle >= drivers::storage::BlockDeviceCount())
+        return Err{ErrorCode::InvalidArgument};
     // Read the 1024-byte superblock. ext4 superblock lives at byte
     // 1024 regardless of block size — LBA 2 on a 512-byte-sector
     // device. We read 2 sectors (1024 bytes) into the static
@@ -468,10 +473,21 @@ void ReadGroup0AndRootInode(Volume& v)
     if (magic != kSuperblockMagic)
         return Err{ErrorCode::NotFound};
 
+    // Reject pathological s_log_block_size values BEFORE we shift —
+    // a u32 shift count >= 32 is undefined behaviour, and ext4's
+    // block_size = 1024 << s_log_block_size legitimately tops out
+    // at 65536 (s_log_block_size = 6). A corrupt-or-hostile
+    // superblock with s_log_block_size = 0xFFFFFFFF would otherwise
+    // wrap our shift and produce a wild block_size that cascades
+    // into divide-by-zero / overflow downstream.
+    const u32 log_block_size = LeU32(sb + kSbOffLogBlockSize);
+    if (log_block_size > 6)
+        return Err{ErrorCode::Corrupt};
+
     Volume& v = g_volumes[g_volume_count];
     ByteZero(&v, sizeof(v));
     v.block_handle = block_handle;
-    v.block_size = u32(1024) << LeU32(sb + kSbOffLogBlockSize);
+    v.block_size = u32(1024) << log_block_size;
     v.block_count = LeU32(sb + kSbOffBlockCountLo);
     v.inode_count = LeU32(sb + kSbOffInodeCount);
     v.first_data_block = LeU32(sb + kSbOffFirstDataBlock);
@@ -486,6 +502,16 @@ void ReadGroup0AndRootInode(Volume& v)
     v.inode_size = (v.rev_level >= 1) ? LeU16(sb + kSbOffInodeSize) : 128;
     if (v.inode_size == 0)
         v.inode_size = 128;
+    // Reject zero blocks_per_group / inodes_per_group: both are
+    // divisors in the group-descriptor and inode-table walks.
+    // A zero value here is either a corrupt superblock or a
+    // pre-format zeroed sector — either way, refuse the mount.
+    if (v.blocks_per_group == 0 || v.inodes_per_group == 0)
+        return Err{ErrorCode::Corrupt};
+    // inode_size must fit inside one block — the inode-table walk
+    // assumes inode N's bytes lie within the same block read.
+    if (v.inode_size > v.block_size)
+        return Err{ErrorCode::Corrupt};
     for (u32 i = 0; i < 16; ++i)
         v.label[i] = char(sb[kSbOffVolumeName + i]);
     v.label[16] = '\0';
