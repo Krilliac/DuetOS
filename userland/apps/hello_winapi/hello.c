@@ -760,15 +760,15 @@ void _start(void)
 
     // Batch 24 exercise — file I/O via real handle table.
     //
-    // Opens /etc/version (a 27-byte ramfs file containing
+    // Opens /etc/version (a 25-byte ramfs file containing
     // "DuetOS v0 (ramfs-seeded)\n"), reads the first 32 bytes,
     // seeks back to start, reads again, validates both reads
     // returned the expected first 8 bytes, then closes.
     //
     // Invariants checked:
     //   * CreateFileW returns a non-INVALID_HANDLE_VALUE handle.
-    //   * First ReadFile returns >= 27 bytes (entire file fits).
-    //   * Buffer starts with "DuetOS".
+    //   * First ReadFile returns >= 25 bytes (entire file fits).
+    //   * Buffer starts with "DuetOS v".
     //   * SetFilePointerEx(0, FILE_BEGIN) returns 0 (new pos).
     //   * Second ReadFile returns the same first 8 bytes.
     //   * CloseHandle returns TRUE.
@@ -798,10 +798,10 @@ void _start(void)
         b24_close_ok = CloseHandle(b24_h);
         (void)newpos;
     }
-    BOOL b24_pass = b24_h != INVALID_HANDLE_VALUE && b24_read_ok && b24_n >= 27 && b24_buf[0] == 'C' &&
-                    b24_buf[1] == 'u' && b24_buf[2] == 's' && b24_buf[3] == 't' && b24_buf[4] == 'o' &&
-                    b24_buf[5] == 'm' && b24_buf[6] == 'O' && b24_buf[7] == 'S' && b24_seek_ok && b24_read2_ok &&
-                    b24_n2 == 8 && b24_buf2[0] == 'C' && b24_buf2[7] == 'S' && b24_close_ok;
+    BOOL b24_pass = b24_h != INVALID_HANDLE_VALUE && b24_read_ok && b24_n >= 25 && b24_buf[0] == 'D' &&
+                    b24_buf[1] == 'u' && b24_buf[2] == 'e' && b24_buf[3] == 't' && b24_buf[4] == 'O' &&
+                    b24_buf[5] == 'S' && b24_buf[6] == ' ' && b24_buf[7] == 'v' && b24_seek_ok && b24_read2_ok &&
+                    b24_n2 == 8 && b24_buf2[0] == 'D' && b24_buf2[7] == 'v' && b24_close_ok;
     const char b24_ok[] = "[batch24] CreateFileW + ReadFile + Seek + Close OK\n";
     const char b24_bad[] = "[batch24] file I/O FAILED invariants\n";
     DWORD b24w = 0;
@@ -813,7 +813,7 @@ void _start(void)
     // Batch 25 exercise — file stat + module lookup.
     //
     // Invariants checked:
-    //   * Re-open /etc/version, GetFileSizeEx returns 27 (the
+    //   * Re-open /etc/version, GetFileSizeEx returns 25 (the
     //     ramfs payload "DuetOS v0 (ramfs-seeded)\n").
     //   * Reading 1 byte after GetFileSizeEx shows the cursor
     //     wasn't moved by the stat call (still at 0).
@@ -837,7 +837,7 @@ void _start(void)
     {
         b25_size_ok = GetFileSizeEx(b25_h, &b25_size);
         // Cursor must still be at 0 after a stat — read 1 byte
-        // and assert it's 'C' (the start of "DuetOS").
+        // and assert it's 'D' (the start of "DuetOS").
         ReadFile(b25_h, &b25_first, 1, &b25_n, 0);
         b25_close_ok = CloseHandle(b25_h);
     }
@@ -851,8 +851,8 @@ void _start(void)
 
     const char b25_ok[] = "[batch25] GetFileSizeEx + GetModuleHandleW + LoadLibraryW OK\n";
     const char b25_bad[] = "[batch25] file stat / module lookup FAILED invariants\n";
-    BOOL b25_pass = b25_h != INVALID_HANDLE_VALUE && b25_size_ok && b25_size.QuadPart == 27 && b25_n == 1 &&
-                    b25_first == 'C' && b25_close_ok && b25_self != 0 && b25_named == 0 && b25_loaded == 0 &&
+    BOOL b25_pass = b25_h != INVALID_HANDLE_VALUE && b25_size_ok && b25_size.QuadPart == 25 && b25_n == 1 &&
+                    b25_first == 'D' && b25_close_ok && b25_self != 0 && b25_named == 0 && b25_loaded == 0 &&
                     b25_proc == 0 && b25_free_ok != 0;
     DWORD b25w = 0;
     if (b25_pass)
