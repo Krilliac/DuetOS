@@ -21,5 +21,6 @@ void CleanroomTraceRecord(const char* subsystem, const char* event, u64 a, u64 b
 u32 CleanroomTraceCount();
 bool CleanroomTraceRead(u32 index, CleanroomTraceEntry* out);
 void CleanroomTraceClear();
+u64 CleanroomTraceHashToken(const char* text);
 
 } // namespace duetos::core

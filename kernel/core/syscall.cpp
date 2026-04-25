@@ -27,6 +27,7 @@
 #include "../subsystems/win32/window_syscall.h"
 #include "../subsystems/win32/heap.h"
 #include "klog.h"
+#include "cleanroom_trace.h"
 #include "process.h"
 #include "ring3_smoke.h"
 #include "time_syscall.h"
@@ -153,6 +154,9 @@ void SyscallInit()
 void SyscallDispatch(arch::TrapFrame* frame)
 {
     const u64 num = frame->rax;
+    const Process* proc = CurrentProcess();
+    const u64 pid = (proc != nullptr) ? proc->pid : 0;
+    CleanroomTraceRecord("syscall", "native-dispatch", num, pid, frame->rip);
     switch (num)
     {
     case SYS_EXIT:

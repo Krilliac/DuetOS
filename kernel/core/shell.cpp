@@ -8265,6 +8265,8 @@ void Dispatch(char* line)
     }
 
     const char* cmd = argv[0];
+    duetos::core::CleanroomTraceRecord("shell", "command", duetos::core::CleanroomTraceHashToken(cmd), argc,
+                                       duetos::core::CleanroomTraceHashToken((argc > 1) ? argv[1] : nullptr));
     if (StrEq(cmd, "help"))
     {
         CmdHelp();
