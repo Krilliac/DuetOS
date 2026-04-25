@@ -1,6 +1,7 @@
 #include "process.h"
 
 #include "../arch/x86_64/serial.h"
+#include "log_names.h"
 #include "../debug/probes.h"
 #include "../drivers/video/theme.h"
 #include "../drivers/video/widget.h"
@@ -182,7 +183,9 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     arch::SerialWrite(name);
     arch::SerialWrite("\" caps=");
     arch::SerialWriteHex(caps.bits);
-    arch::SerialWrite(" code_va=");
+    arch::SerialWrite("(");
+    SerialWriteCapBits(caps.bits);
+    arch::SerialWrite(") code_va=");
     arch::SerialWriteHex(user_code_va);
     arch::SerialWrite(" stack_va=");
     arch::SerialWriteHex(user_stack_va);

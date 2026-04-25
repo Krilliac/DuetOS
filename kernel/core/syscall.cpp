@@ -28,6 +28,7 @@
 #include "../subsystems/win32/heap.h"
 #include "klog.h"
 #include "cleanroom_trace.h"
+#include "log_names.h"
 #include "process.h"
 #include "ring3_smoke.h"
 #include "time_syscall.h"
@@ -64,7 +65,9 @@ void ReportUnknownSyscall(u64 num, u64 rip)
 {
     arch::SerialWrite("[sys] WARN unknown syscall num=");
     arch::SerialWriteHex(num);
-    arch::SerialWrite(" rip=");
+    arch::SerialWrite("(");
+    arch::SerialWrite(SyscallName(num));
+    arch::SerialWrite(") rip=");
     arch::SerialWriteHex(rip);
     arch::SerialWrite("\n");
 }
@@ -1303,11 +1306,17 @@ void SyscallDispatch(arch::TrapFrame* frame)
         arch::SerialWriteHex(proc->pid);
         arch::SerialWrite(" mask=");
         arch::SerialWriteHex(drop_mask);
-        arch::SerialWrite(" caps=");
+        arch::SerialWrite("(");
+        SerialWriteCapBits(drop_mask);
+        arch::SerialWrite(") caps=");
         arch::SerialWriteHex(before);
-        arch::SerialWrite("->");
+        arch::SerialWrite("(");
+        SerialWriteCapBits(before);
+        arch::SerialWrite(")->");
         arch::SerialWriteHex(proc->caps.bits);
-        arch::SerialWrite("\n");
+        arch::SerialWrite("(");
+        SerialWriteCapBits(proc->caps.bits);
+        arch::SerialWrite(")\n");
         frame->rax = 0;
         return;
     }

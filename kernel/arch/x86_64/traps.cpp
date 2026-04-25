@@ -7,6 +7,7 @@
 
 #include "../../core/fault_domain.h"
 #include "../../core/hexdump.h"
+#include "../../core/log_names.h"
 #include "../../core/panic.h"
 #include "../../core/symbols.h"
 #include "../../core/syscall.h"
@@ -331,7 +332,9 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         {
             SerialWrite("[irq] unhandled vector ");
             SerialWriteHex(frame->vector);
-            SerialWrite("\n");
+            SerialWrite("(");
+            SerialWrite(::duetos::core::IdtVectorName(frame->vector));
+            SerialWrite(")\n");
         }
         return;
     }

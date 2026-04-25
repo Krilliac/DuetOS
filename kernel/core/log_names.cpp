@@ -1,5 +1,8 @@
 #include "log_names.h"
 
+#include "../arch/x86_64/serial.h"
+#include "process.h"
+
 namespace duetos::core
 {
 
@@ -387,6 +390,170 @@ const char* FwSourcePolicyName(u64 policy)
         return "vendor-only";
     default:
         return "?";
+    }
+}
+
+const char* PciVendorName(u64 vid)
+{
+    // Common PCIe vendor IDs we expect to see on commodity PC
+    // hardware + the QEMU emulated devices we boot under in CI.
+    // Fed by https://pcisig.com/membership/member-companies and
+    // QEMU's own device files.
+    switch (vid)
+    {
+    case 0x1022:
+        return "AMD";
+    case 0x10de:
+        return "NVIDIA";
+    case 0x10ec:
+        return "Realtek";
+    case 0x1234:
+        return "QEMU-Bochs";
+    case 0x14e4:
+        return "Broadcom";
+    case 0x1814:
+        return "Ralink";
+    case 0x1969:
+        return "Atheros/Qualcomm";
+    case 0x1af4:
+        return "Red Hat (virtio)";
+    case 0x1b36:
+        return "Red Hat (qemu)";
+    case 0x8086:
+        return "Intel";
+    case 0x9710:
+        return "MosChip";
+    default:
+        return "?";
+    }
+}
+
+const char* PeMachineName(u64 machine)
+{
+    // Subset of IMAGE_FILE_MACHINE_* the PE loader can plausibly
+    // see. Values from MS-PECOFF spec Section 3.3.1.
+    switch (machine)
+    {
+    case 0x0000:
+        return "Unknown";
+    case 0x014c:
+        return "x86";
+    case 0x0200:
+        return "ItaniumIA64";
+    case 0x8664:
+        return "x86-64";
+    case 0x01c0:
+        return "ARM";
+    case 0xaa64:
+        return "ARM64";
+    case 0x01c4:
+        return "ARMNT";
+    case 0x0ebc:
+        return "EBC";
+    case 0x5032:
+        return "RISCV32";
+    case 0x5064:
+        return "RISCV64";
+    default:
+        return "?";
+    }
+}
+
+const char* IdtVectorName(u64 vec)
+{
+    // Architectural exceptions (Intel SDM Vol. 3, Table 6-1)
+    // and the small set of vectors DuetOS programs explicitly.
+    switch (vec)
+    {
+    case 0x00:
+        return "#DE divide-by-zero";
+    case 0x01:
+        return "#DB debug";
+    case 0x02:
+        return "NMI";
+    case 0x03:
+        return "#BP breakpoint";
+    case 0x04:
+        return "#OF overflow";
+    case 0x05:
+        return "#BR bound-range";
+    case 0x06:
+        return "#UD invalid-opcode";
+    case 0x07:
+        return "#NM device-not-available";
+    case 0x08:
+        return "#DF double-fault";
+    case 0x0a:
+        return "#TS invalid-tss";
+    case 0x0b:
+        return "#NP segment-not-present";
+    case 0x0c:
+        return "#SS stack-segment";
+    case 0x0d:
+        return "#GP general-protection";
+    case 0x0e:
+        return "#PF page-fault";
+    case 0x10:
+        return "#MF x87-fpu";
+    case 0x11:
+        return "#AC alignment-check";
+    case 0x12:
+        return "#MC machine-check";
+    case 0x13:
+        return "#XM simd-fpu";
+    case 0x14:
+        return "#VE virtualization";
+    case 0x15:
+        return "#CP control-protection";
+    case 0x20:
+        return "lapic-timer";
+    case 0x21:
+        return "ps2-keyboard";
+    case 0x2c:
+        return "ps2-mouse";
+    case 0x80:
+        return "syscall (int 0x80)";
+    case 0xfd:
+        return "lapic-error";
+    case 0xfe:
+        return "lapic-ipi";
+    case 0xff:
+        return "lapic-spurious";
+    default:
+        if (vec >= 0x21 && vec < 0x80)
+            return "external-irq";
+        return "?";
+    }
+}
+
+void SerialWriteCapBits(u64 bits)
+{
+    if (bits == 0)
+    {
+        arch::SerialWrite("<none>");
+        return;
+    }
+    bool first = true;
+    for (u32 c = 1; c < static_cast<u32>(kCapCount); ++c)
+    {
+        if ((bits & (1ULL << c)) == 0)
+            continue;
+        if (!first)
+            arch::SerialWrite("|");
+        arch::SerialWrite(CapName(static_cast<Cap>(c)));
+        first = false;
+    }
+    // Anything outside the known bit range — log it raw so a
+    // future cap that hasn't reached the lookup table yet is
+    // still visible instead of silently dropped.
+    const u64 known_mask = (1ULL << static_cast<u32>(kCapCount)) - 2; // bits [1..kCapCount)
+    const u64 unknown = bits & ~known_mask;
+    if (unknown != 0)
+    {
+        if (!first)
+            arch::SerialWrite("|");
+        arch::SerialWrite("?bits=");
+        arch::SerialWriteHex(unknown);
     }
 }
 

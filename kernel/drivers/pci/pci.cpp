@@ -5,6 +5,7 @@
 #include "../../arch/x86_64/lapic.h"
 #include "../../arch/x86_64/serial.h"
 #include "../../core/klog.h"
+#include "../../core/log_names.h"
 #include "../../core/panic.h"
 #include "../../mm/paging.h"
 #include "../../sync/spinlock.h"
@@ -698,7 +699,9 @@ void PciEnumerate()
         arch::SerialWriteHex(d.addr.function);
         arch::SerialWrite("  vid=");
         arch::SerialWriteHex(d.vendor_id);
-        arch::SerialWrite(" did=");
+        arch::SerialWrite("(");
+        arch::SerialWrite(::duetos::core::PciVendorName(d.vendor_id));
+        arch::SerialWrite(") did=");
         arch::SerialWriteHex(d.device_id);
         arch::SerialWrite(" class=");
         arch::SerialWriteHex(d.class_code);
