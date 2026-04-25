@@ -538,13 +538,247 @@ __declspec(dllexport) BOOL GetUserNameW(wchar_t16* buffer, DWORD* cb)
 
 static unsigned long long g_rand_ctr = 0x9E3779B97F4A7C15ULL;
 
+/* SystemFunction036 (RtlGenRandom) — used by ucrtbase /
+ * vcruntime as their fallback entropy source. Mix in the kernel
+ * performance counter on every call so the byte stream isn't
+ * static across process lifetime. NOT formally cryptographic. */
 __declspec(dllexport) BOOL SystemFunction036(void* buf, DWORD len)
 {
+    if (!buf || len == 0)
+        return 1;
+    long long ticks;
+    __asm__ volatile("int $0x80" : "=a"(ticks) : "a"((long long)13) : "memory");
+    g_rand_ctr ^= (unsigned long long)ticks;
     unsigned char* p = (unsigned char*)buf;
     for (DWORD i = 0; i < len; ++i)
     {
         g_rand_ctr = g_rand_ctr * 6364136223846793005ULL + 1442695040888963407ULL;
         p[i] = (unsigned char)(g_rand_ctr >> 56);
     }
+    return 1;
+}
+
+/* SID + token helpers. v0 has no security model, so each entry
+ * point either accepts as success (mutators) or returns "no
+ * info" (queries). The constants returned (8-byte LUIDs etc.)
+ * are deterministic, not hostile-resistant. */
+__declspec(dllexport) BOOL IsValidSid(void* sid)
+{
+    return sid != (void*)0;
+}
+
+__declspec(dllexport) BOOL EqualSid(void* a, void* b)
+{
+    return a == b;
+}
+
+__declspec(dllexport) DWORD GetLengthSid(void* sid)
+{
+    (void)sid;
+    return 8; /* MAX_SID is 68; 8 is a SID with 0 sub-auths. */
+}
+
+__declspec(dllexport) BOOL CopySid(DWORD dst_len, void* dst, void* src)
+{
+    (void)dst_len;
+    if (!dst || !src)
+        return 0;
+    unsigned char* d = (unsigned char*)dst;
+    unsigned char* s = (unsigned char*)src;
+    for (DWORD i = 0; i < 8 && i < dst_len; ++i)
+        d[i] = s[i];
+    return 1;
+}
+
+__declspec(dllexport) void* FreeSid(void* sid)
+{
+    (void)sid;
+    return (void*)0; /* Win32 contract: returns NULL on success. */
+}
+
+__declspec(dllexport) BOOL AllocateAndInitializeSid(void* auth, unsigned char sub_count, DWORD sa0, DWORD sa1,
+                                                    DWORD sa2, DWORD sa3, DWORD sa4, DWORD sa5, DWORD sa6, DWORD sa7,
+                                                    void** sid)
+{
+    (void)auth;
+    (void)sub_count;
+    (void)sa0;
+    (void)sa1;
+    (void)sa2;
+    (void)sa3;
+    (void)sa4;
+    (void)sa5;
+    (void)sa6;
+    (void)sa7;
+    if (sid)
+        *sid = (void*)0;
+    return 0;
+}
+
+__declspec(dllexport) BOOL ConvertStringSidToSidA(const char* str, void** sid)
+{
+    (void)str;
+    if (sid)
+        *sid = (void*)0;
+    return 0;
+}
+__declspec(dllexport) BOOL ConvertStringSidToSidW(const wchar_t16* str, void** sid)
+{
+    (void)str;
+    if (sid)
+        *sid = (void*)0;
+    return 0;
+}
+
+__declspec(dllexport) BOOL ConvertSidToStringSidA(void* sid, char** str)
+{
+    (void)sid;
+    if (str)
+        *str = (char*)0;
+    return 0;
+}
+__declspec(dllexport) BOOL ConvertSidToStringSidW(void* sid, wchar_t16** str)
+{
+    (void)sid;
+    if (str)
+        *str = (wchar_t16*)0;
+    return 0;
+}
+
+__declspec(dllexport) BOOL GetTokenInformation(HANDLE token, DWORD info_class, void* info, DWORD info_len, DWORD* used)
+{
+    (void)token;
+    (void)info_class;
+    (void)info;
+    (void)info_len;
+    if (used)
+        *used = 0;
+    return 0;
+}
+
+__declspec(dllexport) BOOL SetTokenInformation(HANDLE token, DWORD info_class, void* info, DWORD info_len)
+{
+    (void)token;
+    (void)info_class;
+    (void)info;
+    (void)info_len;
+    return 1;
+}
+
+__declspec(dllexport) BOOL DuplicateToken(HANDLE token, DWORD level, HANDLE* dup)
+{
+    (void)token;
+    (void)level;
+    if (dup)
+        *dup = (HANDLE)0;
+    return 0;
+}
+
+__declspec(dllexport) BOOL DuplicateTokenEx(HANDLE token, DWORD access, void* sa, DWORD level, DWORD type, HANDLE* dup)
+{
+    (void)token;
+    (void)access;
+    (void)sa;
+    (void)level;
+    (void)type;
+    if (dup)
+        *dup = (HANDLE)0;
+    return 0;
+}
+
+__declspec(dllexport) BOOL ImpersonateLoggedOnUser(HANDLE token)
+{
+    (void)token;
+    return 1;
+}
+
+__declspec(dllexport) BOOL RevertToSelf(void)
+{
+    return 1;
+}
+
+/* Event log: register / report / deregister. v0 doesn't write
+ * an event log; ReportEvent is silently dropped, register returns
+ * a sentinel handle. */
+__declspec(dllexport) HANDLE RegisterEventSourceA(const char* server, const char* name)
+{
+    (void)server;
+    (void)name;
+    return (HANDLE)(long long)0xE7E7E7E7;
+}
+__declspec(dllexport) HANDLE RegisterEventSourceW(const wchar_t16* server, const wchar_t16* name)
+{
+    (void)server;
+    (void)name;
+    return (HANDLE)(long long)0xE7E7E7E7;
+}
+__declspec(dllexport) BOOL DeregisterEventSource(HANDLE h)
+{
+    (void)h;
+    return 1;
+}
+__declspec(dllexport) BOOL ReportEventA(HANDLE h, unsigned short type, unsigned short cat, DWORD eid, void* sid,
+                                        unsigned short num_strings, DWORD data_size, const char** strings, void* data)
+{
+    (void)h;
+    (void)type;
+    (void)cat;
+    (void)eid;
+    (void)sid;
+    (void)num_strings;
+    (void)data_size;
+    (void)strings;
+    (void)data;
+    return 1;
+}
+__declspec(dllexport) BOOL ReportEventW(HANDLE h, unsigned short type, unsigned short cat, DWORD eid, void* sid,
+                                        unsigned short num_strings, DWORD data_size, const wchar_t16** strings,
+                                        void* data)
+{
+    (void)h;
+    (void)type;
+    (void)cat;
+    (void)eid;
+    (void)sid;
+    (void)num_strings;
+    (void)data_size;
+    (void)strings;
+    (void)data;
+    return 1;
+}
+
+/* Service-control dispatcher: a service binary's main calls
+ * StartServiceCtrlDispatcher and blocks until the SCM tells it
+ * to stop. v0 has no SCM, so we can't block on a real thing —
+ * return FALSE so the binary's startup falls through to the
+ * "console mode" path that most services keep around for debug. */
+__declspec(dllexport) BOOL StartServiceCtrlDispatcherA(const void* table)
+{
+    (void)table;
+    return 0;
+}
+__declspec(dllexport) BOOL StartServiceCtrlDispatcherW(const void* table)
+{
+    (void)table;
+    return 0;
+}
+
+__declspec(dllexport) HANDLE OpenSCManagerA(const char* mach, const char* db, DWORD access)
+{
+    (void)mach;
+    (void)db;
+    (void)access;
+    return (HANDLE)0;
+}
+__declspec(dllexport) HANDLE OpenSCManagerW(const wchar_t16* mach, const wchar_t16* db, DWORD access)
+{
+    (void)mach;
+    (void)db;
+    (void)access;
+    return (HANDLE)0;
+}
+__declspec(dllexport) BOOL CloseServiceHandle(HANDLE h)
+{
+    (void)h;
     return 1;
 }
