@@ -1,11 +1,12 @@
 # DuetOS
 
 [![Release channel](https://img.shields.io/github/v/release/krilliac/duetos?display_name=tag&filter=latest-release&label=release%20channel)](https://github.com/krilliac/duetos/releases/tag/latest-release)
-[![Release downloads](https://img.shields.io/github/downloads/krilliac/duetos/latest-release/total?label=release%20downloads)](https://github.com/krilliac/duetos/releases/tag/latest-release)
+[![Download release ISO](https://img.shields.io/github/downloads/krilliac/duetos/latest-release/duetos-release.iso?label=release%20iso%20%E2%86%93%20this%20release&color=blue)](https://github.com/krilliac/duetos/releases/download/latest-release/duetos-release.iso)
 [![Debug channel](https://img.shields.io/github/v/release/krilliac/duetos?include_prereleases&display_name=tag&filter=latest-debug&label=debug%20channel)](https://github.com/krilliac/duetos/releases/tag/latest-debug)
-[![Debug downloads](https://img.shields.io/github/downloads/krilliac/duetos/latest-debug/total?label=debug%20downloads)](https://github.com/krilliac/duetos/releases/tag/latest-debug)
+[![Download debug ISO](https://img.shields.io/github/downloads/krilliac/duetos/latest-debug/duetos-debug.iso?label=debug%20iso%20%E2%86%93%20this%20release&color=orange)](https://github.com/krilliac/duetos/releases/download/latest-debug/duetos-debug.iso)
+[![Lifetime downloads](https://img.shields.io/github/downloads/krilliac/duetos/total?label=lifetime%20downloads%20(all%20channels)&color=success)](https://github.com/krilliac/duetos/releases)
 
-Download channel artifacts from: **[Release channel](https://github.com/krilliac/duetos/releases/tag/latest-release)** / **[Debug channel](https://github.com/krilliac/duetos/releases/tag/latest-debug)**.
+Click a **channel** badge to open the release page, or an **iso ↓** badge to download the ISO directly. The "this release" counter resets when CI re-publishes the rolling channel; "lifetime downloads" sums every asset download across both channels and never resets.
 
 Channel releases are refreshed continuously by CI on every push to `main`, and re-published from **tag builds** (`v*` tags) when a version is cut. The ephemeral per-run uploads in the Actions tab are kept for 7 days for debugging and do not populate the Releases page.
 
