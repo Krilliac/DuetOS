@@ -1065,6 +1065,11 @@ u64 CurrentTaskId()
     return self->id;
 }
 
+u64 TaskId(const Task* t)
+{
+    return (t != nullptr) ? t->id : 0;
+}
+
 u64 SchedCurrentKernelStackTop()
 {
     Task* self = Current();

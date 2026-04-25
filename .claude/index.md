@@ -83,6 +83,7 @@ _Read this at every session start (after git sync). Each row links to a detailed
 | GUI pentest runner v0 — live login + shell attack findings | [knowledge/pentest-gui-findings-v0.md](knowledge/pentest-gui-findings-v0.md) | Observation | Active | 2026-04-24 |
 | Cleanroom-trace boot survey v0 — first live read of the trace ring buffer | [knowledge/cleanroom-trace-boot-survey-v0.md](knowledge/cleanroom-trace-boot-survey-v0.md) | Observation | Active | 2026-04-25 |
 | Deferred-task batches (2026-04-25) — PE ordinal forwarders + by-ord IAT + binary-search EAT, ext4 multi-block dirs, GDI ellipse fill/outline parity, RNDIS multi-record RX, FAT32 LFN-checksum, window-DC SetTextColor explicit-black | [knowledge/deferred-task-batch-2026-04-25.md](knowledge/deferred-task-batch-2026-04-25.md) | Observation | Active | 2026-04-25 |
+| Win32 custom diagnostics + safety extensions v0 — flight recorder, handle provenance, error provenance, heap quarantine, deadlock detect, contention profile, async-paint policy, pixel isolation, input replay, strict-RWX, strict-handle-inherit (all opt-in) | [knowledge/win32-custom-extensions-v0.md](knowledge/win32-custom-extensions-v0.md) | Observation + Decision | Active | 2026-04-25 |
 
 ## Quick Reference
 
