@@ -27,7 +27,7 @@ move it to the "Landed" table at the bottom.
 | Kernel-side stub handlers | — | — | 18 |
 | Win32 user-mode thunks (no-op / constant returners) | — | — | ~15 |
 | Userland-DLL stub functions | — | — | ~30+ |
-| Capabilities defined vs. needed | 5 | 5 | 8+ missing |
+| Capabilities defined vs. needed | 7 | 7 | 5 missing (Framebuffer / Audio / Signal / Fork / Exec) |
 | Filesystems with full write support | 6 | 2 (FAT32 partial, tmpfs) | 4 |
 | Driver subsystems with packet I/O | 4 | 0 | 4 (net / audio / GPU / USB-bulk) |
 
@@ -206,23 +206,23 @@ Notable native-ABI gaps:
 | `kCapDebug` | 3 | `SYS_BP_INSTALL` / `SYS_BP_REMOVE` |
 | `kCapFsWrite` | 4 | `SYS_FILE_WRITE`, `SYS_FILE_CREATE` |
 | `kCapSpawnThread` | 5 | `SYS_THREAD_CREATE` |
+| `kCapNet` | 6 | Linux BSD-socket family (`socket` / `socketpair` / `accept` / `connect` / `bind` / `listen` / `shutdown` / `getsockname` / `getpeername` / `getsockopt` / `setsockopt` / `send*` / `recv*`). Withheld → -EACCES |
+| `kCapInput` | 7 | `SYS_WIN_GET_KEYSTATE` (key polling) + `SYS_WIN_GET_CURSOR` (cursor polling). Withheld → "no key pressed" / "cursor at (0,0)" deception (the call still returns success so the caller's polling loop doesn't trip an error path) |
 
 ### Missing caps (would gate currently-ungated operations)
 
 | Missing cap | Would gate | Blocks (testing-side) |
 |---|---|---|
-| `kCapNetSend` | Socket creation; outbound traffic | Network-deny tests; RAT-prevention test |
-| `kCapNetRecv` | Inbound socket binds / accepts | Reverse-shell prevention |
-| `kCapInput` | Keyboard / mouse input stream reads | Keylogger-prevention test |
-| `kCapFramebuffer` | Framebuffer / DRM reads / writes | Screen-scraper prevention |
+| `kCapFramebuffer` | Framebuffer / DRM reads / writes | Screen-scraper prevention. Deferred until a user-mode FB-readback or direct-FB-write syscall actually exists — adding the cap before the gate site would be dead code |
 | `kCapAudio` | Audio capture / playback | Microphone-snoop prevention |
 | `kCapSignal` | Sending signals to other processes | Cross-process signal-based attack prevention |
 | `kCapFork` | Process duplication | Currently no fork — moot until impl'd |
 | `kCapExec` | Exec a different image | Currently no exec — moot until impl'd |
 
-These eight caps are the missing infrastructure that blocks slices
-2-5 of the redteam coverage matrix (keylogger / screen / RAT tests
-and ransomware FS-rate gating).
+These five caps are the remaining infrastructure that blocks the
+screen-grab / audio-snoop / cross-proc-signal / fork-exec slices of
+the redteam coverage matrix. Each one only earns its existence once
+its target syscall does — see the §12 Landed entry for the policy.
 
 ## 7. Drivers
 
@@ -337,10 +337,10 @@ re-doing the structural scan.
 
 Cheapest → most-expensive, by impact-per-LOC:
 
-1. **Fix the 5 mismapped NT syscalls** (NtWriteVirtualMemory, NtReadVirtualMemory, NtSetInformationFile, NtReleaseSemaphore, NtCreateSemaphore). Each is a 1-line table edit to remap to `kSysNtNotImpl`, plus optionally a real impl. **~50 LOC for the remap; ~500 LOC if implementing properly.** Closes the silent-wrong-semantics class entirely.
-2. **Add a `// STUB:` / `// GAP:` convention.** Pure docs; lets future audits grep instead of structure-scan.
-3. **Wire ucrtbase `fwrite` to `SYS_FILE_WRITE` for real file handles.** Closes the silent-data-loss landmine. ~30 LOC.
-4. **Add the 3 missing test-relevant capabilities** (`kCapNet`, `kCapInput`, `kCapFramebuffer`). Cross-cutting; ~200 LOC. Unlocks slices 2-5 of the redteam coverage matrix.
+1. ~~**Fix the 5 mismapped NT syscalls**~~ — DONE (commit `ad32498`, see §12). 4 of 5 remapped to `kSysNtNotImpl`; `NtSetInformationFile`'s position-info case left at SYS_FILE_SEEK because that subset is genuinely correct.
+2. ~~**Add a `// STUB:` / `// GAP:` convention.**~~ — DONE (CLAUDE.md → "Coding Standards" + first marker on `TranslateRseq`). Future audits grep `// (STUB|GAP):` once enough sites are tagged.
+3. ~~**Wire ucrtbase `fwrite` to `SYS_FILE_WRITE` for real file handles.**~~ — DONE (commit `ad32498`).
+4. **Add the 3 missing test-relevant capabilities** (`kCapNet`, `kCapInput`, `kCapFramebuffer`) — **PARTIAL**: `kCapNet` + `kCapInput` landed and wired (§12). `kCapFramebuffer` deferred until a user-mode FB-readback or direct-FB-write syscall exists to gate; landing the cap before the gate site would be dead code. Take this slice when adding the first such surface.
 5. **Implement registry read syscalls** (NtOpenKey, NtQueryValueKey, NtCloseKey, NtEnumerateKey, NtEnumerateValueKey). The kernel registry already exists in advapi32; route NT calls through it. ~400 LOC. Unlocks ~half of real Windows apps.
 6. **Implement cross-process VM access** (NtOpenProcess, NtReadVirtualMemory, NtWriteVirtualMemory, NtQueryVirtualMemory). ~500 LOC. Unlocks the entire "real Windows malware" test surface.
 7. **Implement thread manipulation** (NtSuspendThread, NtResumeThread, NtSetContextThread, NtGetContextThread). ~300 LOC. Unlocks thread-hijack tests.
@@ -357,6 +357,8 @@ Cheapest → most-expensive, by impact-per-LOC:
 |---|---|---|---|
 | 2026-04-26 | `ad32498` | NT shim §1.2 mismaps: `NtWriteVirtualMemory`, `NtReadVirtualMemory`, `NtCreateSemaphore`, `NtReleaseSemaphore` now route to `kSysNtNotImpl` | Closes silent-wrong-semantics class for cross-AS memory ops + counted-semaphore concurrency. Mapped count drops 28→24; honest NotImpl beats silent corruption. `NtSetInformationFile` kept at SYS_FILE_SEEK because the position-info class is genuinely correct |
 | 2026-04-26 | `ad32498` | ucrtbase §4.1: `fwrite(fd > 2)` now routes to `SYS_FILE_WRITE` instead of returning 0 | Closes silent-data-loss landmine. Stdio file writes from PEs actually land in the FS now. Unlocks ransomware-shape PE payloads via plain CRT |
+| 2026-04-26 | _pending_ | Item 4 (partial): `kCapNet` added + wired on the linux BSD-socket family (socket/socketpair/accept/connect/bind/listen/shutdown/get/setsockopt/send*/recv*); `kCapInput` added + wired on `SYS_WIN_GET_KEYSTATE` + `SYS_WIN_GET_CURSOR` | Closes the §6 "missing infrastructure" gap for the Net + Input redteam slices. Sandboxed PEs now get -EACCES from socket-family calls (distinguishable from "stack offline" -ENETDOWN) and a "no key pressed / cursor at origin" deception from the async input pollers. `kCapFramebuffer` deferred — there is no user-mode framebuffer-readback or direct-fb-write syscall today, so the cap would be dead code. Add it together with the first such surface (e.g. screen-grab BitBlt or DRM read) so the cap and its gate land in the same commit. `kCapAudio`/`kCapSignal`/`kCapFork`/`kCapExec` likewise deferred until their backing syscalls exist |
+| 2026-04-26 | _pending_ | Item 2: `// STUB:` / `// GAP:` convention codified in CLAUDE.md → "Coding Standards"; first demonstration marker on `TranslateRseq` (`kernel/subsystems/translation/translate.cpp:367`) | Future audits can re-derive this inventory from `git grep -nE "// (STUB\|GAP):"` once enough sites have markers. Convention is intentionally not back-applied to TUs whose entire purpose is to house stubs (`kernel/subsystems/linux/syscall_stub.cpp`, the `kSysNtNotImpl` table) — those are documented at the file/table level and per-handler markers would be redundant noise |
 
 ## Wiring summary
 

@@ -107,6 +107,44 @@ enum Cap : u32
     // profiles inherit it via the kProfileTrusted loop.
     kCapSpawnThread = 5,
 
+    // Talk to the network. Gates every BSD-socket-family Linux
+    // syscall the linux ABI dispatcher recognises (socket /
+    // socketpair / accept / connect / bind / listen / send* /
+    // recv* / sendmsg / recvmsg). Without this cap, the gate
+    // returns -EACCES instead of the "no socket layer yet"
+    // -ENETDOWN/-EBADF that callers WITH the cap see — a
+    // sandboxed RAT prober gets a clean denial signal that
+    // stays distinguishable from "the network stack is offline".
+    // Held by the trusted profile (so internal kernel-shipped
+    // userland keeps the same surface it had before this cap
+    // existed); withheld from kProfileSandbox so untrusted PEs
+    // cannot reach the socket family at all.
+    //
+    // Granularity is intentionally coarse — one cap covers
+    // both inbound (bind/listen/accept) and outbound
+    // (connect/send) for v0. Splitting into kCapNetSend +
+    // kCapNetRecv is reserved for when a real workload proves
+    // the asymmetric profile is needed.
+    kCapNet = 6,
+
+    // Read keyboard / mouse / cursor state. Gates the
+    // SYS_WIN_GET_KEYSTATE + SYS_WIN_GET_CURSOR async-input
+    // family — the syscalls a Win32 keylogger or click-
+    // recorder polls. Without this cap, GetKeyState reports
+    // "key up" for every code and GetCursorPos reports (0,0)
+    // — the same shape a process gets when no input has ever
+    // been delivered, so callers don't trip on a novel error
+    // path. Trusted profile holds the cap; kProfileSandbox
+    // does not.
+    //
+    // Note: synchronous input via WM_KEYDOWN / WM_MOUSEMOVE
+    // through the message pump is NOT gated — those messages
+    // are addressed to a specific HWND the kernel already
+    // routed deliberately. The cap targets the unsolicited
+    // GLOBAL polling surface that turns any process into a
+    // keylogger.
+    kCapInput = 7,
+
     // Sentinel: keep this as the last entry so kProfileTrusted can
     // be built by a loop that iterates [1 .. kCapCount). Do NOT
     // use kCapCount as a live cap — it's a boundary marker.

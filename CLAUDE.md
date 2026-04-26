@@ -99,6 +99,10 @@ These are **guidelines for when to pause and think**, not absolute rules. A clea
 - **Zero warnings**: `-Wall -Wextra -Wpedantic -Werror` on GCC/Clang; `/W4 /WX` on MSVC.
 - **No naked `new`/`delete`** in portable code. Kernel allocations go through the slab/page allocators explicitly, never through a global `operator new`.
 - **No global mutable state** outside the kernel's explicit per-CPU areas. If something looks like a singleton, it is probably a per-CPU or per-process structure.
+- **Stub markers**: any handler / thunk / DLL function whose v0 implementation deliberately omits the real semantics carries a `// STUB:` comment on or immediately above the line that bakes in the omission. A handler that correctly implements its contract but with a known limitation carries `// GAP: <what's missing> — <when to revisit>`. Both forms are greppable: the audit cadence in `.claude/knowledge/stub-gap-inventory-v0.md` re-derives the inventory from `git grep -nE "// (STUB|GAP):"` once enough markers have landed to make the structural scan obsolete.
+  - `// STUB:` — handler returns a constant / does nothing / returns `-ENOSYS` / returns the wrong target. Real callers WILL behave incorrectly. The marker stays until a real implementation lands.
+  - `// GAP: <missing> — <revisit>` — handler is correct for the v0 happy path but a documented edge case is unimplemented (e.g. "no IPv6", "no LFN", "no oversize"). Real callers along the happy path work; the marker pins the known limit so a future audit can find it cheaply.
+  - **Do not** pepper STUB/GAP markers on code that does its job — the convention exists to bound the gap inventory, not to annotate every line. If removing the marker wouldn't change a maintainer's belief about what works, don't write it.
 
 ## Architecture (planned directory layout)
 

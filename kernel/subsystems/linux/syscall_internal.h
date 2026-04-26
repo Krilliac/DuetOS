@@ -29,6 +29,7 @@ inline constexpr i64 kEIO = -5;
 inline constexpr i64 kEBADF = -9;
 inline constexpr i64 kECHILD = -10;
 inline constexpr i64 kENOMEM = -12;
+inline constexpr i64 kEACCES = -13;
 inline constexpr i64 kEFAULT = -14;
 inline constexpr i64 kEISDIR = -21;
 inline constexpr i64 kEINVAL = -22;

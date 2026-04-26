@@ -363,6 +363,10 @@ const char* CapName(Cap c)
         return "FsWrite";
     case kCapSpawnThread:
         return "SpawnThread";
+    case kCapNet:
+        return "Net";
+    case kCapInput:
+        return "Input";
     case kCapCount:
         return "<sentinel>";
     }
@@ -527,6 +531,8 @@ void ProcessSelfTest()
         Expect(!CapSetHas(empty, kCapFsWrite), "empty has no FsWrite");
         Expect(!CapSetHas(empty, kCapDebug), "empty has no Debug");
         Expect(!CapSetHas(empty, kCapSpawnThread), "empty has no SpawnThread");
+        Expect(!CapSetHas(empty, kCapNet), "empty has no Net");
+        Expect(!CapSetHas(empty, kCapInput), "empty has no Input");
     }
     {
         constexpr CapSet trusted = CapSetTrusted();
@@ -536,6 +542,8 @@ void ProcessSelfTest()
         Expect(CapSetHas(trusted, kCapFsWrite), "trusted has FsWrite");
         Expect(CapSetHas(trusted, kCapDebug), "trusted has Debug");
         Expect(CapSetHas(trusted, kCapSpawnThread), "trusted has SpawnThread");
+        Expect(CapSetHas(trusted, kCapNet), "trusted has Net");
+        Expect(CapSetHas(trusted, kCapInput), "trusted has Input");
     }
 
     // ----- Boundary cases on the cap enum -----
@@ -574,6 +582,8 @@ void ProcessSelfTest()
     Expect(StrEq(CapName(kCapDebug), "Debug"), "CapName(Debug)");
     Expect(StrEq(CapName(kCapFsWrite), "FsWrite"), "CapName(FsWrite)");
     Expect(StrEq(CapName(kCapSpawnThread), "SpawnThread"), "CapName(SpawnThread)");
+    Expect(StrEq(CapName(kCapNet), "Net"), "CapName(Net)");
+    Expect(StrEq(CapName(kCapInput), "Input"), "CapName(Input)");
     Expect(StrEq(CapName(kCapCount), "<sentinel>"), "CapName(kCapCount) == <sentinel>");
 
     // Catches "added an enum value, forgot the switch arm" — every

@@ -1075,12 +1075,20 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
         rv = DoPrctl(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
         break;
 
-    // Batch 68 — BSD-socket family. No userland socket layer;
-    // socket() returns -ENETDOWN, others -EBADF (no fd to act on).
+    // Batch 68 — BSD-socket family. Two-stage gate:
+    //
+    //   1. kCapNet check first. A sandboxed process WITHOUT the
+    //      cap gets -EACCES — the same shape Linux returns when
+    //      a SECCOMP filter or LSM denies the call. Distinguishable
+    //      from the "no socket layer" code below, which the call
+    //      WITH the cap would see, so test code can tell "denied
+    //      by sandbox" from "stack offline".
+    //   2. With the cap, fall through to the "no userland socket
+    //      layer yet" path: socket()/socketpair() report -ENETDOWN
+    //      so callers fall back gracefully; the rest of the family
+    //      reports -EBADF (the fd they were handed never existed).
     case kSysSocket:
     case kSysSocketpair:
-        rv = -100; // -ENETDOWN
-        break;
     case kSysAccept:
     case kSysAccept4:
     case kSysConnect:
@@ -1097,8 +1105,34 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
     case kSysRecvmsg:
     case kSysSendmmsg:
     case kSysRecvmmsg:
-        rv = kEBADF;
+    {
+        duetos::core::Process* proc = duetos::core::CurrentProcess();
+        if (proc == nullptr || !duetos::core::CapSetHas(proc->caps, duetos::core::kCapNet))
+        {
+            duetos::core::RecordSandboxDenial(duetos::core::kCapNet);
+            if (proc != nullptr && duetos::core::ShouldLogDenial(proc->sandbox_denials))
+            {
+                arch::SerialWrite("[linux] denied socket-family pid=");
+                arch::SerialWriteHex(proc->pid);
+                arch::SerialWrite(" syscall=");
+                arch::SerialWriteHex(nr);
+                arch::SerialWrite(" cap=Net denial_idx=");
+                arch::SerialWriteHex(proc->sandbox_denials);
+                arch::SerialWrite("\n");
+            }
+            rv = kEACCES;
+            break;
+        }
+        if (nr == kSysSocket || nr == kSysSocketpair)
+        {
+            rv = -100; // -ENETDOWN — stack not online
+        }
+        else
+        {
+            rv = kEBADF; // no socket fd ever issued
+        }
         break;
+    }
 
     // Batch 69 — process control. Linux fork/vfork/clone +
     // execve don't have a v0 implementation; return -ENOSYS.
