@@ -58,6 +58,7 @@ set(DUETOS_KERNEL_SHARED_SOURCES
     subsystems/linux/syscall_rlimit.cpp
     subsystems/linux/syscall_sched.cpp
     subsystems/linux/syscall_sig.cpp
+    subsystems/linux/syscall_stub.cpp
     subsystems/linux/syscall_time.cpp
     subsystems/linux/syscall_entry.S
     subsystems/translation/translate.cpp

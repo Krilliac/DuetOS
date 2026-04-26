@@ -47,6 +47,32 @@ i64 DoGetrlimit(u64 resource, u64 user_old);
 i64 DoSetrlimit(u64 resource, u64 user_new);
 i64 DoPrlimit64(u64 pid, u64 resource, u64 user_new, u64 user_old);
 
+// Stub handlers (syscall_stub.cpp). Calls for subsystems v0 has
+// no machinery for: pipes, fork/wait, eventfd / timerfd /
+// signalfd, epoll, inotify, plus the page-cache hint pair
+// (fadvise64 / readahead). Each returns the canonical Linux
+// errno (-ENFILE / -ECHILD / -ENOSYS) for "we don't have that
+// subsystem" so callers fall through to a polyfill instead of
+// the unhandled-syscall panic line.
+i64 DoPipe(u64 user_fds);
+i64 DoPipe2(u64 user_fds, u64 flags);
+i64 DoWait4(u64 pid, u64 user_status, u64 options, u64 user_rusage);
+i64 DoWaitid(u64 idtype, u64 id, u64 user_info, u64 options, u64 user_rusage);
+i64 DoEventfd(u64 initval, u64 flags);
+i64 DoTimerfdCreate(u64 clockid, u64 flags);
+i64 DoTimerfdSettime(u64 fd, u64 flags, u64 user_new, u64 user_old);
+i64 DoTimerfdGettime(u64 fd, u64 user_curr);
+i64 DoSignalfd(u64 fd, u64 user_mask, u64 sigsetsize, u64 flags);
+i64 DoFadvise64(u64 fd, u64 offset, u64 len, u64 advice);
+i64 DoReadahead(u64 fd, u64 offset, u64 count);
+i64 DoEpollCreate(u64 size);
+i64 DoEpollCreate1(u64 flags);
+i64 DoEpollCtl(u64 epfd, u64 op, u64 fd, u64 event);
+i64 DoEpollWait(u64 epfd, u64 events, u64 maxevents, u64 timeout_ms);
+i64 DoEpollPwait(u64 epfd, u64 events, u64 maxevents, u64 timeout_ms, u64 sigmask, u64 sigsetsize);
+i64 DoInotifyInit();
+i64 DoInotifyInit1(u64 flags);
+
 // Memory-management handlers (syscall_mm.cpp). brk grows the
 // per-process Linux heap; mmap supports MAP_PRIVATE +
 // MAP_ANONYMOUS or MAP_PRIVATE + file-backed (no page-cache, so
