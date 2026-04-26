@@ -89,7 +89,7 @@ constexpr u32 kMsrStar = 0xC0000081;  // CS selectors for syscall/sysret
 constexpr u32 kMsrLstar = 0xC0000082; // entry RIP for 64-bit syscall
 // MSR_CSTAR (0xC0000083) is the compat-mode entry; we don't
 // plan to run 32-bit code, so leave it unprogrammed.
-constexpr u32 kMsrFsBase = 0xC0000100;       // user FS.base — musl TLS anchor
+// kMsrFsBase moved with DoArchPrctl into syscall_misc.cpp.
 constexpr u32 kMsrSfmask = 0xC0000084;       // RFLAGS mask applied at entry
 constexpr u32 kMsrKernelGsBase = 0xC0000102; // swapgs source for kernel GS
 
@@ -426,11 +426,8 @@ enum : u64
 // kESRCH / kESPIPE / kENOTTY moved to syscall_internal.h alongside
 // the rest of the errno constants.
 
-// ARCH_* codes for arch_prctl (linux/arch/x86/include/uapi/asm/prctl.h).
-constexpr u64 kArchSetGs = 0x1001;
-constexpr u64 kArchSetFs = 0x1002;
-constexpr u64 kArchGetFs = 0x1003;
-constexpr u64 kArchGetGs = 0x1004;
+// ARCH_* codes for arch_prctl moved with DoArchPrctl into
+// syscall_misc.cpp.
 
 // DoExitGroup / DoExit / DoGetPid moved to syscall_proc.cpp
 // alongside the rest of the process-control handlers.
@@ -454,203 +451,8 @@ constexpr u64 kArchGetGs = 0x1004;
 // DoRtSigaction / DoRtSigprocmask moved to syscall_sig.cpp
 // alongside the rest of the signal handlers.
 
-i64 DoSetTidAddress(u64 user_tid_ptr)
-{
-    (void)user_tid_ptr;
-    return static_cast<i64>(sched::CurrentTaskId());
-}
-
-// Linux: access(path, mode). v0 implements as a presence probe —
-// if FAT32LookupPath finds the entry, return 0 (success); else
-// -ENOENT. The `mode` bits (R_OK, W_OK, X_OK, F_OK) are ignored:
-// everything in FAT32 is effectively rwx from the Linux task's
-// perspective.
-// DoAccess moved to syscall_file.cpp.
-
-// Linux: readlink(path, buf, bufsiz). We don't have real symlinks
-// yet, but musl / glibc query /proc/self/exe (and /proc/PID/exe)
-// during CRT init to recover the program path. Special-case that
-// to return the current process's name with a leading "/", which
-// is enough for argv[0] / dlopen's relative-path resolution to
-// work. Everything else: -EINVAL ("not a symlink").
-i64 DoReadlink(u64 user_path, u64 user_buf, u64 bufsiz)
-{
-    char path[64];
-    for (u32 i = 0; i < sizeof(path); ++i)
-        path[i] = 0;
-    if (!mm::CopyFromUser(path, reinterpret_cast<const void*>(user_path), sizeof(path) - 1))
-        return kEFAULT;
-    path[sizeof(path) - 1] = 0;
-
-    // Match exactly "/proc/self/exe". /proc/<PID>/exe is not
-    // recognised yet — glibc's fallback uses /proc/self/exe too.
-    const char kSelf[] = "/proc/self/exe";
-    bool matches = true;
-    for (u32 i = 0; i < sizeof(kSelf); ++i)
-    {
-        if (path[i] != kSelf[i])
-        {
-            matches = false;
-            break;
-        }
-    }
-    if (!matches)
-        return kEINVAL;
-
-    core::Process* p = core::CurrentProcess();
-    if (p == nullptr || p->name == nullptr)
-        return kEINVAL;
-
-    char out[64];
-    u64 out_len = 0;
-    out[out_len++] = '/';
-    const char* n = p->name;
-    while (*n != '\0' && out_len + 1 < sizeof(out))
-    {
-        out[out_len++] = *n++;
-    }
-    if (bufsiz == 0)
-        return 0;
-    const u64 to_copy = (out_len < bufsiz) ? out_len : bufsiz;
-    if (!mm::CopyToUser(reinterpret_cast<void*>(user_buf), out, to_copy))
-        return kEFAULT;
-    // readlink does not write a trailing NUL; the return value is
-    // the byte count the caller uses to terminate.
-    return i64(to_copy);
-}
-
-// Linux: getcwd(buf, size). Returns the per-process cwd stored
-// on Process::linux_cwd — written by chdir / fchdir, defaults to
-// "/". POSIX getcwd returns the byte length INCLUDING the NUL
-// terminator (so "/" → 2). -ERANGE if the buffer is too small.
-// DoGetcwd moved to syscall_path.cpp.
-
-// Linux: futex(uaddr, op, val, ...).
-//
-// Single-threaded processes have no contention, so we never
-// actually block. The real Linux semantics we respect:
-//   FUTEX_WAIT (0): if *uaddr != val, return -EAGAIN — tells the
-//                   caller "the value already changed, try again".
-//                   Otherwise return 0 (spurious wakeup — musl
-//                   retries the condition).
-//   FUTEX_WAKE (1): return 0 (no waiters, nothing to wake).
-//
-// FUTEX_PRIVATE_FLAG (0x80) masks off — it's a hint to the kernel
-// about shared-memory scope, and for our single-address-space
-// case it's a no-op.
-i64 DoFutex(u64 uaddr, u64 op, u64 val, u64 timeout, u64 uaddr2, u64 val3)
-{
-    (void)timeout;
-    (void)uaddr2;
-    (void)val3;
-    constexpr u64 kFutexWait = 0;
-    constexpr u64 kFutexWake = 1;
-    constexpr u64 kFutexOpMask = 0x7F;
-    const u64 base_op = op & kFutexOpMask;
-    if (base_op == kFutexWait)
-    {
-        // Validate the caller's pointer and compare against `val`.
-        // Copy fails with -EFAULT so a buggy program (e.g. null
-        // uaddr) gets a specific error instead of a silent zero.
-        u32 cur = 0;
-        if (!mm::CopyFromUser(&cur, reinterpret_cast<const void*>(uaddr), sizeof(cur)))
-            return kEFAULT;
-        if (cur != u32(val))
-            return -11; // -EAGAIN
-        return 0;       // "spurious" wake — caller retries
-    }
-    if (base_op == kFutexWake)
-    {
-        return 0; // no waiters in single-thread v0
-    }
-    // Unknown op — reject so a test-suite like LTP gets -EINVAL
-    // rather than silent success.
-    (void)uaddr;
-    (void)val;
-    return kEINVAL;
-}
-
-// ReadTsc moved to syscall_time.cpp alongside the rest of the
-// time / clock plumbing.
-
-// Linux: getrandom(buf, count, flags). Routes through the shared
-// kernel entropy pool (RDSEED → RDRAND → splitmix) so a Linux
-// userland's stack-cookie / pointer-mangling / crypto init get
-// the same hardware backing the rest of the kernel uses. Real
-// glibc / musl treat this syscall as cryptographic; we match
-// that contract when the CPU supports RDSEED/RDRAND.
-i64 DoGetRandom(u64 user_buf, u64 count, u64 flags)
-{
-    (void)flags;
-    if (count == 0)
-        return 0;
-    if (count > 4096)
-        count = 4096; // cap per call, same as Linux default for unseeded
-    static u8 tmp[4096];
-    core::RandomFillBytes(tmp, count);
-    if (!mm::CopyToUser(reinterpret_cast<void*>(user_buf), tmp, count))
-        return kEFAULT;
-    return static_cast<i64>(count);
-}
-
-// NowNs / DoClockGetTime / DoGettimeofday moved to syscall_time.cpp.
-
-// Linux: sysinfo(info). Fills the kernel's current memory + uptime
-// + load info. v0 reports:
-//   * uptime: real seconds since boot (NowNs / 1e9).
-//   * loads:  zero (no load tracking yet).
-//   * totalram / freeram: derived from the physical frame
-//     allocator at 4 KiB granularity. mem_unit=4096 so callers
-//     reading `totalram * mem_unit` see real bytes.
-//   * sharedram / bufferram: zero (no page cache yet).
-//   * totalswap / freeswap / *high: zero (no swap, no high-mem
-//     split on x86_64).
-//   * procs: pulled from sched::AliveTaskCount() — best v0
-//     estimate of "running processes" since each Process has at
-//     least one task.
-i64 DoSysinfo(u64 user_info)
-{
-    if (user_info == 0)
-        return kEFAULT;
-    struct Info
-    {
-        i64 uptime;
-        u64 loads[3];
-        u64 totalram;
-        u64 freeram;
-        u64 sharedram;
-        u64 bufferram;
-        u64 totalswap;
-        u64 freeswap;
-        u16 procs;
-        u16 pad;
-        u64 totalhigh;
-        u64 freehigh;
-        u32 mem_unit;
-        u8 pad2[4];
-    } info;
-    info.uptime = static_cast<i64>(NowNs() / 1'000'000'000ull);
-    info.loads[0] = 0;
-    info.loads[1] = 0;
-    info.loads[2] = 0;
-    info.totalram = mm::TotalFrames();
-    info.freeram = mm::FreeFramesCount();
-    info.sharedram = 0;
-    info.bufferram = 0;
-    info.totalswap = 0;
-    info.freeswap = 0;
-    info.totalhigh = 0;
-    info.freehigh = 0;
-    info.procs = 1;
-    info.pad = 0;
-    info.mem_unit = 4096;
-    for (u64 i = 0; i < sizeof(info.pad2); ++i)
-        info.pad2[i] = 0;
-    if (!mm::CopyToUser(reinterpret_cast<void*>(user_info), &info, sizeof(info)))
-        return kEFAULT;
-    return 0;
-}
-
+// DoSetTidAddress / DoReadlink / DoFutex / DoGetRandom / DoSysinfo
+// moved to syscall_misc.cpp.
 
 // Linux: madvise(addr, len, advice). Hint to the kernel about
 // expected access patterns. v0 has no swap, no readahead engine,
@@ -728,247 +530,7 @@ i64 DoSysinfo(u64 user_info)
 
 // DoDup3 moved to syscall_fd.cpp.
 
-// Linux: getrusage(who, usage). Returns resource-usage stats
-// for self/children/thread. We don't have a kernel/user split
-// in our tick accounting, so the (utime + stime) sum reflects
-// total CPU time and we put it all in utime — matches what a
-// SCHED_OTHER task's accounting would look like in practice.
-// All other fields stay zero (no I/O accounting, no page-fault
-// counters, no signal counters tracked at this layer yet).
-//
-// Struct layout (144 bytes): {ru_utime:16, ru_stime:16, 14×u64}.
-constexpr i64 kRusageSelf = 0;
-constexpr i64 kRusageChildren = -1;
-constexpr i64 kRusageThread = 1;
-i64 DoGetrusage(u64 who, u64 user_buf)
-{
-    if (user_buf == 0)
-        return kEFAULT;
-    const i64 who_signed = static_cast<i64>(who);
-    if (who_signed != kRusageSelf && who_signed != kRusageChildren && who_signed != kRusageThread)
-        return kEINVAL;
 
-    struct Rusage
-    {
-        i64 ru_utime_sec, ru_utime_usec;
-        i64 ru_stime_sec, ru_stime_usec;
-        i64 ru_pad[14];
-    } ru;
-    ru.ru_utime_sec = 0;
-    ru.ru_utime_usec = 0;
-    ru.ru_stime_sec = 0;
-    ru.ru_stime_usec = 0;
-    for (u64 i = 0; i < 14; ++i)
-        ru.ru_pad[i] = 0;
-    if (who_signed == kRusageSelf || who_signed == kRusageThread)
-    {
-        const core::Process* p = core::CurrentProcess();
-        if (p != nullptr)
-        {
-            // 100 Hz scheduler tick → each tick = 10 ms.
-            const u64 ticks = p->ticks_used;
-            ru.ru_utime_sec = static_cast<i64>(ticks / 100ull);
-            ru.ru_utime_usec = static_cast<i64>((ticks % 100ull) * 10'000ull);
-        }
-    }
-    // RUSAGE_CHILDREN: no children tracking → all zero, which
-    // matches what wait()-less programs see in practice.
-    if (!mm::CopyToUser(reinterpret_cast<void*>(user_buf), &ru, sizeof(ru)))
-        return kEFAULT;
-    return 0;
-}
-
-// Linux: poll(fds, nfds, timeout_ms). Returns count of fds that
-// are ready. v0 has no event-driven fd machinery (all fds are
-// either ttys that "block" on read and return immediately on
-// write, or regular files that are always "ready" for read
-// with available bytes). Matching caller expectations:
-//   - If any pollfd has POLLIN/POLLOUT requested for a live
-//     fd, mark it ready in revents and count it. That's what a
-//     caller like "wait until stdin has input" would see on a
-//     tty — immediately ready, non-blocking.
-//   - A zero-nfds poll with a non-negative timeout is a
-//     Linux-idiomatic nanosleep; we accept + return 0.
-// All edge cases (POLLHUP, POLLERR, negative timeout = "wait
-// forever") are returned as 0 revents (=no event), which is
-// honest — we'd need a proper wait-queue per fd to do more.
-constexpr i64 kPollIn = 0x0001;
-constexpr i64 kPollOut = 0x0004;
-i64 DoPoll(u64 user_fds, u64 nfds, i64 timeout_ms)
-{
-    (void)timeout_ms;
-    if (nfds == 0)
-        return 0;
-    if (user_fds == 0)
-        return kEFAULT;
-    // Cap at 16 — matches our per-process fd table; larger polls
-    // are surely bogus until we support more. Each pollfd is
-    // 8 bytes: {int fd, short events, short revents}.
-    if (nfds > 16)
-        return kEINVAL;
-
-    struct PollFd
-    {
-        i32 fd;
-        i16 events;
-        i16 revents;
-    } fds[16];
-    if (!mm::CopyFromUser(&fds[0], reinterpret_cast<const void*>(user_fds), nfds * sizeof(PollFd)))
-        return kEFAULT;
-
-    core::Process* p = core::CurrentProcess();
-    i64 ready = 0;
-    for (u64 i = 0; i < nfds; ++i)
-    {
-        fds[i].revents = 0;
-        if (fds[i].fd < 0 || fds[i].fd >= 16)
-            continue;
-        if (p == nullptr)
-            continue;
-        const u8 state = p->linux_fds[static_cast<u64>(fds[i].fd)].state;
-        if (state == 0)
-        {
-            // Closed slot — POSIX says revents=POLLNVAL (0x20).
-            fds[i].revents = 0x20;
-            ++ready;
-            continue;
-        }
-        if ((fds[i].events & kPollIn) != 0 || (fds[i].events & kPollOut) != 0)
-        {
-            fds[i].revents = fds[i].events & (kPollIn | kPollOut);
-            ++ready;
-        }
-    }
-    if (!mm::CopyToUser(reinterpret_cast<void*>(user_fds), &fds[0], nfds * sizeof(PollFd)))
-        return kEFAULT;
-    return ready;
-}
-
-// Linux: select(nfds, readfds, writefds, exceptfds, timeout).
-// Boundary-probe stub — we don't implement real fd bitmap
-// dispatch. Return "0 ready" which tells the caller "your
-// timeout expired without any event" — harmless, lets the
-// caller loop or move on. Real implementations rarely reach
-// select() anymore (poll/epoll dominate); synxtest probes it
-// to show the stub is present.
-i64 DoSelect(u64 nfds, u64 rfds, u64 wfds, u64 efds, u64 timeout)
-{
-    (void)nfds;
-    (void)rfds;
-    (void)wfds;
-    (void)efds;
-    (void)timeout;
-    return 0;
-}
-
-// Linux: getdents64(fd, dirp, count). Read directory entries
-// into the user buffer. v0 has no readable per-fd directory
-// state — when we get a dirfd we don't know where we are in
-// the enumeration. Returning 0 means "end of directory", which
-// makes `ls` print nothing rather than looping. Honest partial
-// implementation; a real one requires a per-fd cursor into the
-// FAT32 root, which the existing fd state doesn't carry.
-i64 DoGetdents64(u64 fd, u64 user_buf, u64 count)
-{
-    (void)fd;
-    (void)user_buf;
-    (void)count;
-    return 0;
-}
-
-// Linux: set_robust_list(head, len). musl's thread init calls
-// this. We have no robust-futex wake-on-exit machinery, so
-// accepting + no-op is the honest glibc-compat move.
-i64 DoSetRobustList(u64 head, u64 len)
-{
-    (void)head;
-    (void)len;
-    return 0;
-}
-i64 DoGetRobustList(u64 pid, u64 user_head_ptr, u64 user_len_ptr)
-{
-    (void)pid;
-    (void)user_head_ptr;
-    (void)user_len_ptr;
-    return 0;
-}
-
-// Linux: arch_prctl(code, addr). Used almost exclusively by musl's
-// CRT at _start to plant the thread-local-storage anchor in
-// FS.base: `arch_prctl(ARCH_SET_FS, &thread_block)`. Without this,
-// every %fs:[...] access in musl hits an unmapped VA and #PF.
-//
-// v0 scope:
-//   ARCH_SET_FS — write `addr` to MSR_FS_BASE.
-//   ARCH_GET_FS — read MSR_FS_BASE, write to *(u64*)addr.
-//   ARCH_SET_GS / GET_GS — return -EINVAL (we use MSR_GS_BASE
-//     for our own swapgs dance; exposing it to user mode would
-//     let a malicious task alias our per-CPU area).
-//
-// Note: we don't save/restore MSR_FS_BASE across context switches
-// yet. Works because v0 has at most one Linux-ABI task running at
-// a time (and kernel workers don't touch FS.base). Multi-Linux-
-// task support will need per-Task fs_base storage.
-i64 DoArchPrctl(u64 code, u64 addr)
-{
-    switch (code)
-    {
-    case kArchSetFs:
-        WriteMsr(kMsrFsBase, addr);
-        return 0;
-    case kArchGetFs:
-    {
-        u32 lo, hi;
-        asm volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(kMsrFsBase));
-        const u64 v = (static_cast<u64>(hi) << 32) | lo;
-        if (!mm::CopyToUser(reinterpret_cast<void*>(addr), &v, sizeof(v)))
-        {
-            return kEFAULT;
-        }
-        return 0;
-    }
-    case kArchSetGs:
-    case kArchGetGs:
-        return kEINVAL;
-    default:
-        return kEINVAL;
-    }
-}
-
-// Linux: uname(buf). Fills a struct utsname with six NUL-padded
-// 65-char fields: sysname, nodename, release, version, machine,
-// domainname. Total 6 * 65 = 390 bytes. musl reads this at
-// startup for diagnostics (`uname -a` etc.) and for platform
-// dispatch in a few places. Static response: a real kernel
-// would plumb nodename to a runtime-configurable hostname.
-i64 DoUname(u64 user_buf)
-{
-    constexpr u64 kFieldLen = 65;
-    constexpr u64 kFields = 6;
-    constexpr u64 kTotalLen = kFieldLen * kFields;
-    u8 kbuf[kTotalLen];
-    for (u64 i = 0; i < kTotalLen; ++i)
-        kbuf[i] = 0;
-    auto set_field = [&](u64 field_idx, const char* s)
-    {
-        u8* dst = kbuf + field_idx * kFieldLen;
-        for (u64 i = 0; s[i] != 0 && i < kFieldLen - 1; ++i)
-        {
-            dst[i] = static_cast<u8>(s[i]);
-        }
-    };
-    set_field(0, "DuetOS");
-    set_field(1, "duetos");
-    set_field(2, "0.1");
-    set_field(3, "duetos-v0 #1");
-    set_field(4, "x86_64");
-    set_field(5, "localdomain");
-    if (!mm::CopyToUser(reinterpret_cast<void*>(user_buf), kbuf, kTotalLen))
-    {
-        return kEFAULT;
-    }
-    return 0;
-}
 
 // ---------------------------------------------------------------
 // Batch 55 — compat-stub + FAT32-backed handlers for the most-
@@ -981,31 +543,6 @@ i64 DoUname(u64 user_buf)
 
 // DoLstat moved to syscall_file.cpp.
 
-// pause(): suspend until a signal arrives. v0 has no signal
-// delivery, so this would block forever. Sleep in big chunks
-// instead of a tight yield loop so the scheduler isn't burning
-// cycles on us. Returns -EINTR conventionally on wake; since we
-// never wake, the return is unreachable.
-i64 DoPause()
-{
-    constexpr u64 kHugeTicks = 1ull << 30; // ~3.4 yrs at 100 Hz
-    for (;;)
-    {
-        sched::SchedSleepTicks(kHugeTicks);
-    }
-    return 0;
-}
-
-// DoMremap / DoMsync / DoMincore moved to syscall_mm.cpp.
-
-// flock(fd, op): advisory file lock. v0 is single-process for
-// the FAT32 mount; advisory locks are no-ops by definition.
-i64 DoFlock(u64 fd, u64 op)
-{
-    (void)fd;
-    (void)op;
-    return 0;
-}
 
 
 // times(buf): fill struct tms with user/system/cuser/csys clock
@@ -1025,32 +562,6 @@ i64 DoFlock(u64 fd, u64 op)
 // TU keeps the dispatcher's references unqualified.
 
 
-// personality(persona): query/set the process's execution
-// personality (32-bit emulation, address-space layout quirks,
-// etc.). v0 only ever runs as the default Linux personality;
-// return 0 as both "current persona" and "set succeeded".
-i64 DoPersonality(u64 persona)
-{
-    (void)persona;
-    return 0;
-}
-
-// getpriority / setpriority: nice-value query/set. v0 scheduler
-// is a flat round-robin with no priority levels. Return 0 (the
-// neutral nice value) on get; accept any set as a no-op.
-i64 DoGetpriority(u64 which, u64 who)
-{
-    (void)which;
-    (void)who;
-    return 0;
-}
-i64 DoSetpriority(u64 which, u64 who, u64 prio)
-{
-    (void)which;
-    (void)who;
-    (void)prio;
-    return 0;
-}
 
 // DoMlock / DoMunlock / DoMlockall / DoMunlockall moved to syscall_mm.cpp.
 
@@ -1079,18 +590,6 @@ i64 DoSetpriority(u64 which, u64 who, u64 prio)
 
 // DoClockGetres / DoClockNanosleep moved to syscall_time.cpp.
 
-// getcpu(cpu, node, tcache): which CPU are we on. BSP-only — 0.
-i64 DoGetcpu(u64 user_cpu, u64 user_node, u64 user_tcache)
-{
-    (void)user_tcache;
-    const u32 zero = 0;
-    if (user_cpu != 0 && !mm::CopyToUser(reinterpret_cast<void*>(user_cpu), &zero, sizeof(zero)))
-        return kEFAULT;
-    if (user_node != 0 && !mm::CopyToUser(reinterpret_cast<void*>(user_node), &zero, sizeof(zero)))
-        return kEFAULT;
-    return 0;
-}
-
 // DoChmod / DoFchmod / DoChown / DoFchown / DoLchown / DoUtime /
 // DoMknod / DoTruncate / DoFtruncate / DoUnlink / DoMkdir /
 // DoRmdir / DoMkdirat / DoUnlinkat / DoLinkat / DoSymlinkat /
@@ -1115,96 +614,12 @@ i64 DoGetcpu(u64 user_cpu, u64 user_node, u64 user_tcache)
 // DoRtSigpending / DoRtSigsuspend / DoRtSigtimedwait moved to
 // syscall_sig.cpp.
 
-// ppoll / pselect6: poll/select with a sigmask + timeout. Reuse
-// the existing poll/select handlers; the sigmask is silently
-// ignored (matches what we do for plain rt_sigprocmask anyway).
-i64 DoPpoll(u64 user_fds, u64 nfds, u64 user_ts, u64 user_sigmask, u64 sigsetsize)
-{
-    (void)user_sigmask;
-    (void)sigsetsize;
-    // Convert nanosecond timeout to ms if user_ts is non-null.
-    i64 timeout_ms = -1;
-    if (user_ts != 0)
-    {
-        struct
-        {
-            i64 sec;
-            i64 nsec;
-        } ts;
-        if (!mm::CopyFromUser(&ts, reinterpret_cast<const void*>(user_ts), sizeof(ts)))
-            return kEFAULT;
-        timeout_ms = ts.sec * 1000 + ts.nsec / 1'000'000;
-    }
-    return DoPoll(user_fds, nfds, timeout_ms);
-}
-i64 DoPselect6(u64 nfds, u64 r, u64 w, u64 e, u64 user_ts, u64 user_sigmask)
-{
-    (void)user_sigmask;
-    (void)user_ts;
-    return DoSelect(nfds, r, w, e, 0);
-}
-
-
-// prctl(option, arg2, arg3, arg4, arg5): wide multiplexed call.
-// We accept the most common options that musl + bionic exercise
-// at startup and ignore the rest with -EINVAL.
-//   PR_SET_NAME (15) — copy up to 16 bytes into Process::name.
-//                       Accepting silently lets logging tools rename
-//                       their threads (e.g. "musl-thread-pool-1").
-//   PR_GET_NAME (16) — return the stored name.
-//   PR_SET_DUMPABLE (4) / PR_GET_DUMPABLE (3) — accept; we have no
-//                       core-dumps anyway.
-//   PR_SET_PDEATHSIG (1) — accept; no parent-death tracking.
-//   PR_GET_PDEATHSIG (2) — return 0.
-//   PR_SET_SECCOMP (22) — refuse with -EINVAL (no filter engine).
-i64 DoPrctl(u64 option, u64 arg2, u64 arg3, u64 arg4, u64 arg5)
-{
-    (void)arg3;
-    (void)arg4;
-    (void)arg5;
-    constexpr u64 kPrSetPdeathsig = 1;
-    constexpr u64 kPrGetPdeathsig = 2;
-    constexpr u64 kPrGetDumpable = 3;
-    constexpr u64 kPrSetDumpable = 4;
-    constexpr u64 kPrSetName = 15;
-    constexpr u64 kPrGetName = 16;
-    constexpr u64 kPrSetSeccomp = 22;
-    switch (option)
-    {
-    case kPrSetPdeathsig:
-    case kPrSetDumpable:
-        return 0;
-    case kPrGetPdeathsig:
-        return 0;
-    case kPrGetDumpable:
-        return 1; // dumpable by default in Linux too
-    case kPrGetName:
-    {
-        if (arg2 == 0)
-            return kEFAULT;
-        const core::Process* p = core::CurrentProcess();
-        char buf[16];
-        for (u32 i = 0; i < sizeof(buf); ++i)
-            buf[i] = 0;
-        if (p != nullptr && p->name != nullptr)
-        {
-            for (u32 i = 0; i + 1 < sizeof(buf) && p->name[i] != 0; ++i)
-                buf[i] = p->name[i];
-        }
-        if (!mm::CopyToUser(reinterpret_cast<void*>(arg2), buf, sizeof(buf)))
-            return kEFAULT;
-        return 0;
-    }
-    case kPrSetName:
-        // No way to mutate Process::name (it's a const char*) so
-        // we accept silently. Future: add a writable name buffer.
-        return 0;
-    case kPrSetSeccomp:
-        return kEINVAL;
-    default:
-        return kEINVAL;
-    }
-}
+// DoArchPrctl / DoUname / DoPause / DoFlock / DoPersonality /
+// DoGetpriority / DoSetpriority / DoGetcpu / DoGetrusage /
+// DoPoll / DoSelect / DoGetdents64 / DoSetRobustList /
+// DoGetRobustList / DoPpoll / DoPselect6 / DoPrctl /
+// DoSetTidAddress / DoReadlink / DoFutex / DoGetRandom /
+// DoSysinfo moved to syscall_misc.cpp.
 
 } // namespace
 

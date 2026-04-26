@@ -55,6 +55,7 @@ set(DUETOS_KERNEL_SHARED_SOURCES
     subsystems/linux/syscall_file.cpp
     subsystems/linux/syscall_fs_mut.cpp
     subsystems/linux/syscall_io.cpp
+    subsystems/linux/syscall_misc.cpp
     subsystems/linux/syscall_mm.cpp
     subsystems/linux/syscall_path.cpp
     subsystems/linux/syscall_pathutil.cpp

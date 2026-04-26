@@ -188,6 +188,35 @@ i64 DoFaccessat(i64 dirfd, u64 user_path, u64 mode, u64 flags);
 i64 DoFaccessat2(i64 dirfd, u64 user_path, u64 mode, u64 flags);
 i64 DoUtimensat(i64 dirfd, u64 user_path, u64 user_times, u64 flags);
 
+// Miscellaneous handlers (syscall_misc.cpp). The handlers that
+// don't fit any of the other domain slices: arch_prctl, uname,
+// set_tid_address, sysinfo, getrandom, futex, personality,
+// pause, flock, get/setpriority, getcpu, prctl, getrusage,
+// poll/ppoll/select/pselect6, getdents64, set/get_robust_list,
+// readlink (with the /proc/self/exe special case).
+i64 DoSetTidAddress(u64 user_tid_ptr);
+i64 DoReadlink(u64 user_path, u64 user_buf, u64 bufsiz);
+i64 DoFutex(u64 uaddr, u64 op, u64 val, u64 timeout, u64 uaddr2, u64 val3);
+i64 DoGetRandom(u64 user_buf, u64 count, u64 flags);
+i64 DoSysinfo(u64 user_info);
+i64 DoGetrusage(u64 who, u64 user_buf);
+i64 DoPoll(u64 user_fds, u64 nfds, i64 timeout_ms);
+i64 DoSelect(u64 nfds, u64 rfds, u64 wfds, u64 efds, u64 timeout);
+i64 DoGetdents64(u64 fd, u64 user_buf, u64 count);
+i64 DoSetRobustList(u64 head, u64 len);
+i64 DoGetRobustList(u64 pid, u64 user_head_ptr, u64 user_len_ptr);
+i64 DoArchPrctl(u64 code, u64 addr);
+i64 DoUname(u64 user_buf);
+i64 DoPause();
+i64 DoFlock(u64 fd, u64 op);
+i64 DoPersonality(u64 persona);
+i64 DoGetpriority(u64 which, u64 who);
+i64 DoSetpriority(u64 which, u64 who, u64 prio);
+i64 DoGetcpu(u64 user_cpu, u64 user_node, u64 user_tcache);
+i64 DoPpoll(u64 user_fds, u64 nfds, u64 user_ts, u64 user_sigmask, u64 sigsetsize);
+i64 DoPselect6(u64 nfds, u64 r, u64 w, u64 e, u64 user_ts, u64 user_sigmask);
+i64 DoPrctl(u64 option, u64 arg2, u64 arg3, u64 arg4, u64 arg5);
+
 // I/O handlers (syscall_io.cpp). read / write route through the
 // FAT32 driver (or COM1 for stdin/stdout/stderr fds). lseek
 // adjusts the per-fd cursor; ioctl handles the three TTY ioctls
