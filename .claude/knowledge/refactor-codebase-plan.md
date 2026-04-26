@@ -11,7 +11,7 @@ Branch: `claude/refactor-codebase-VvLO6`. Pushed to origin.
 | 1 | `kernel/core/shell.cpp`               | 9,769 | 9,769 | ☐ not started |
 | 2 | `kernel/subsystems/win32/thunks.cpp`  | 5,684 |   655 | ☑ done (`cae3704`) |
 | 3 | `kernel/subsystems/linux/syscall.cpp` | 4,642 | 4,642 | ☐ not started |
-| 4 | `kernel/fs/fat32.cpp`                 | 3,190 |   640 | ◐ partial (selftest + read/write + read-API + lookup splits landed; dir + write/create sub-splits deferred) |
+| 4 | `kernel/fs/fat32.cpp`                 | 3,190 |   300 | ◐ partial (selftest + read/write + read-API + lookup + dir splits landed; write-side create/delete/mkdir/rmdir sub-split deferred) |
 | 5 | `kernel/drivers/usb/xhci.cpp`         | 2,548 | 2,548 | ☐ not started |
 
 **Landed** (build-verified through both kernel stages):
@@ -34,14 +34,14 @@ the timeout-prevention rules):
 - `kernel/subsystems/linux/syscall.cpp` (4,642 lines) — split by syscall
   subsystem (io, file, mm, proc, sig, time, fd, cred, sched, rlimit,
   misc, stub).
-- `kernel/fs/fat32.cpp` (now 640 lines) — finish the per-layer split.
-  Read side still needs `fat32_dir.cpp` (`WalkDirChain`,
-  `WalkRootIntoSnapshot`, decoders, `LogEntry`, `Fat32ListDirByCluster`,
-  `Fat32FindInRoot`) extracted out, leaving probe + accessors +
-  block primitives in `fat32.cpp` (~250 lines). Write side
-  (`fat32_write.cpp`, 1,732 lines) wants a sub-split into
-  `fat32_create.cpp` (`Fat32CreateAtPath`, `Fat32DeleteAtPath`,
-  `Fat32MkdirAtPath`, `Fat32RmdirAtPath` + their helpers).
+- `kernel/fs/fat32.cpp` (now 300 lines) — read side complete.
+  Remaining: write-side sub-split of `fat32_write.cpp` (1,732 lines)
+  into `fat32_create.cpp` (`Fat32CreateAtPath`, `Fat32DeleteAtPath`,
+  `Fat32MkdirAtPath`, `Fat32RmdirAtPath` + their helpers
+  `CreateInDir`, `DeleteInDir`, `SeedDotEntries`, `PlantDirEntry`,
+  `DirHasOnlyDots`, `MakeSfn`, `NeedsLfn`, `SfnChecksum`,
+  `GenerateUniqueSfn`, `EncodeLfnFragment`, `FindFreeRunInDir`,
+  `ReserveRunInDir`).
 - `kernel/drivers/usb/xhci.cpp` (2,548 lines) — recommend a 4-file
   split (core / init / xfer / enum) rather than the explorer's
   optimistic 10-file plan; `InitOne` orchestrates AddressDevice +
