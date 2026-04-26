@@ -68,6 +68,32 @@ bool EnvSet(const char* name, const char* value);
 bool EnvUnset(const char* name);
 
 // ---------------------------------------------------------------
+// Aliases. Same shape as the env table — 8 slots, 32-byte names,
+// 96-byte expansions. Dispatched BEFORE the env-var pass so an
+// alias that includes $VAR references still gets expanded.
+//
+// Definitions live in shell_state.cpp; declared here so sibling
+// TUs can reach the table without going through a public API.
+// AliasFind / AliasSet / AliasUnset reuse EnvNameEq / EnvCopy
+// inline above.
+// ---------------------------------------------------------------
+inline constexpr u32 kAliasSlotCount = 8;
+inline constexpr u32 kAliasExpansionMax = 96;
+
+struct AliasSlot
+{
+    bool in_use;
+    char name[kEnvNameMax];
+    char expansion[kAliasExpansionMax];
+};
+
+extern AliasSlot g_aliases[kAliasSlotCount];
+
+AliasSlot* AliasFind(const char* name);
+bool AliasSet(const char* name, const char* expansion);
+bool AliasUnset(const char* name);
+
+// ---------------------------------------------------------------
 // Pure path / parse helpers (shell_pathutil.cpp). Used across the
 // shell for string handling that has no other dependencies.
 //

@@ -613,77 +613,12 @@ void CmdStats()
 // (TmpLeaf / FatLeaf are now declared in shell_internal.h.)
 void Dispatch(char* line); // CmdTime + CmdSource recurse via this
 
-// EnvSlot / g_env / EnvFind / EnvSet / EnvUnset moved to
+// EnvSlot / g_env / EnvFind / EnvSet / EnvUnset and AliasSlot /
+// g_aliases / AliasFind / AliasSet / AliasUnset moved to
 // shell_state.cpp; declared in shell_internal.h. EnvNameEq +
-// EnvCopy are inline in the same header so the alias-table code
-// below can keep calling them without a back-edge dependency.
-
-// ---------------------------------------------------------------
-// Aliases. Same shape as the env table — 8 slots, 32-byte names,
-// 96-byte expansions. Dispatched BEFORE the env-var pass so an
-// alias that includes $VAR references still gets expanded.
-// ---------------------------------------------------------------
-
-constexpr u32 kAliasSlotCount = 8;
-constexpr u32 kAliasExpansionMax = 96;
-
-struct AliasSlot
-{
-    bool in_use;
-    char name[kEnvNameMax];
-    char expansion[kAliasExpansionMax];
-};
-
-constinit AliasSlot g_aliases[kAliasSlotCount] = {};
-
-AliasSlot* AliasFind(const char* name)
-{
-    for (u32 i = 0; i < kAliasSlotCount; ++i)
-    {
-        if (g_aliases[i].in_use && EnvNameEq(g_aliases[i].name, name))
-        {
-            return &g_aliases[i];
-        }
-    }
-    return nullptr;
-}
-
-bool AliasSet(const char* name, const char* expansion)
-{
-    AliasSlot* s = AliasFind(name);
-    if (s == nullptr)
-    {
-        for (u32 i = 0; i < kAliasSlotCount; ++i)
-        {
-            if (!g_aliases[i].in_use)
-            {
-                s = &g_aliases[i];
-                s->in_use = true;
-                break;
-            }
-        }
-    }
-    if (s == nullptr)
-    {
-        return false;
-    }
-    EnvCopy(s->name, name, kEnvNameMax);
-    EnvCopy(s->expansion, expansion, kAliasExpansionMax);
-    return true;
-}
-
-bool AliasUnset(const char* name)
-{
-    AliasSlot* s = AliasFind(name);
-    if (s == nullptr)
-    {
-        return false;
-    }
-    s->in_use = false;
-    s->name[0] = '\0';
-    s->expansion[0] = '\0';
-    return true;
-}
+// EnvCopy stay inline in the same header so any caller in
+// either table reaches them through the using-directive at the
+// top of this TU.
 
 void Prompt()
 {
