@@ -50,6 +50,7 @@ set(DUETOS_KERNEL_SHARED_SOURCES
     subsystems/graphics/graphics.cpp
     subsystems/linux/ring3_smoke.cpp
     subsystems/linux/syscall.cpp
+    subsystems/linux/syscall_cred.cpp
     subsystems/linux/syscall_entry.S
     subsystems/translation/translate.cpp
     subsystems/win32/custom.cpp

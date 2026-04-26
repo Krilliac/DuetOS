@@ -39,6 +39,7 @@
 #include "syscall.h"
 
 #include "linux_syscall_table_generated.h"
+#include "syscall_internal.h"
 
 #include "../../arch/x86_64/hpet.h"
 #include "../../arch/x86_64/serial.h"
@@ -64,6 +65,14 @@ extern "C" void linux_syscall_entry();
 namespace duetos::subsystems::linux
 {
 
+// Hoist cross-TU primitives (errno constants, sibling-TU handler
+// declarations) into the subsystem's outer namespace so the
+// dispatcher and the anonymous-namespace helpers below can call
+// them unqualified, matching the in-TU layout this file used to
+// have. Internal-only consumers outside this TU pick the names
+// up by including syscall_internal.h.
+using namespace internal;
+
 namespace
 {
 // Hot-path tracing gate for LinuxSyscallDispatch. Debug keeps
@@ -84,20 +93,10 @@ constexpr u32 kMsrFsBase = 0xC0000100;       // user FS.base — musl TLS anchor
 constexpr u32 kMsrSfmask = 0xC0000084;       // RFLAGS mask applied at entry
 constexpr u32 kMsrKernelGsBase = 0xC0000102; // swapgs source for kernel GS
 
-// Canonical Linux errno values used by the handlers we implement.
-// Only the subset we actually return today; extend as needed.
-constexpr i64 kENOSYS = -38;
-constexpr i64 kEBADF = -9;
-constexpr i64 kEFAULT = -14;
-constexpr i64 kENOMEM = -12;
-constexpr i64 kEINVAL = -22;
-constexpr i64 kENOENT = -2;
-constexpr i64 kEIO = -5;
-constexpr i64 kEMFILE = -24;
-constexpr i64 kEISDIR = -21;
-constexpr i64 kENAMETOOLONG = -36;
-constexpr i64 kERANGE = -34;
-constexpr i64 kEPERM = -1;
+// Linux errno constants live in syscall_internal.h so sibling
+// translation units (syscall_cred.cpp, etc.) can return them
+// without redeclaring. The `using namespace internal;` directive
+// above makes them visible here without qualification.
 
 // Linux mmap flag bits we care about (asm-generic definitions,
 // matches x86_64 too).
@@ -431,10 +430,8 @@ enum : u64
 // other dirfd is -EBADF until per-fd CWDs land.
 constexpr i64 kAtFdCwd = -100;
 
-constexpr i64 kESRCH = -3;
-
-constexpr i64 kESPIPE = -29;
-constexpr i64 kENOTTY = -25;
+// kESRCH / kESPIPE / kENOTTY moved to syscall_internal.h alongside
+// the rest of the errno constants.
 
 // ARCH_* codes for arch_prctl (linux/arch/x86/include/uapi/asm/prctl.h).
 constexpr u64 kArchSetGs = 0x1001;
@@ -2021,27 +2018,10 @@ i64 DoSetPgid(u64 pid, u64 pgid)
     return 0;
 }
 
-// Identity stubs. v0 presents every process as uid=0/gid=0 —
-// DuetOS doesn't have a user-account model yet. Returning 0
-// satisfies musl's libc.a startup without misleading it: programs
-// that check for root will see "yes you're root," which is
-// consistent with "there are no privilege boundaries here."
-i64 DoGetUid()
-{
-    return 0;
-}
-i64 DoGetGid()
-{
-    return 0;
-}
-i64 DoGetEuid()
-{
-    return 0;
-}
-i64 DoGetEgid()
-{
-    return 0;
-}
+// Identity stubs (DoGetUid / DoGetGid / DoGetEuid / DoGetEgid)
+// moved to syscall_cred.cpp alongside the rest of the credential
+// handlers. The `using namespace internal;` directive at the top
+// of this TU keeps the dispatcher's references unqualified.
 
 // Page-align `x` up. Our cluster size is 4 KiB, matching FAT32's
 // native page; the mmap / brk paths map 4 KiB frames directly,
@@ -2749,113 +2729,12 @@ i64 DoTimes(u64 user_buf)
     return static_cast<i64>(t);
 }
 
-// setuid / setgid / setreuid / setregid / setresuid / setresgid:
-// v0 is uid 0 / gid 0 across the board. Accept the call as a
-// no-op so setuid-root daemons started under us don't fail.
-i64 DoSetuid(u64 uid)
-{
-    (void)uid;
-    return 0;
-}
-i64 DoSetgid(u64 gid)
-{
-    (void)gid;
-    return 0;
-}
-i64 DoSetreuid(u64 ruid, u64 euid)
-{
-    (void)ruid;
-    (void)euid;
-    return 0;
-}
-i64 DoSetregid(u64 rgid, u64 egid)
-{
-    (void)rgid;
-    (void)egid;
-    return 0;
-}
-i64 DoSetresuid(u64 ruid, u64 euid, u64 suid)
-{
-    (void)ruid;
-    (void)euid;
-    (void)suid;
-    return 0;
-}
-i64 DoSetresgid(u64 rgid, u64 egid, u64 sgid)
-{
-    (void)rgid;
-    (void)egid;
-    (void)sgid;
-    return 0;
-}
-
-// getresuid / getresgid (id_t* ruid, id_t* euid, id_t* suid):
-// write three u32 zeros so the caller sees a consistent uid/gid
-// triple. Bad pointers surface as EFAULT.
-i64 DoGetresuid(u64 user_r, u64 user_e, u64 user_s)
-{
-    const u32 zero = 0;
-    if (user_r != 0 && !mm::CopyToUser(reinterpret_cast<void*>(user_r), &zero, sizeof(zero)))
-        return kEFAULT;
-    if (user_e != 0 && !mm::CopyToUser(reinterpret_cast<void*>(user_e), &zero, sizeof(zero)))
-        return kEFAULT;
-    if (user_s != 0 && !mm::CopyToUser(reinterpret_cast<void*>(user_s), &zero, sizeof(zero)))
-        return kEFAULT;
-    return 0;
-}
-i64 DoGetresgid(u64 user_r, u64 user_e, u64 user_s)
-{
-    return DoGetresuid(user_r, user_e, user_s);
-}
-
-// setfsuid / setfsgid: returns the PREVIOUS fsuid/fsgid, which
-// is always 0 in v0.
-i64 DoSetfsuid(u64 uid)
-{
-    (void)uid;
-    return 0;
-}
-i64 DoSetfsgid(u64 gid)
-{
-    (void)gid;
-    return 0;
-}
-
-// getgroups(size, list): return the supplementary group list.
-// v0 has none; return 0 (count of groups in the list). Linux
-// allows size=0 as a "how many groups would there be" probe;
-// our answer is still 0.
-i64 DoGetgroups(u64 size, u64 user_list)
-{
-    (void)size;
-    (void)user_list;
-    return 0;
-}
-// setgroups(size, list): accept as no-op. Refusing would break
-// setuid-style binaries that drop their groups before privsep.
-i64 DoSetgroups(u64 size, u64 user_list)
-{
-    (void)size;
-    (void)user_list;
-    return 0;
-}
-
-// capget / capset: POSIX capabilities. v0 has no Linux-style
-// capability model (we have our own CapSet, but it's not the
-// same shape). Accept the call as a no-op so libcap-using
-// programs initialise without complaining.
-i64 DoCapget(u64 user_hdr, u64 user_data)
-{
-    (void)user_hdr;
-    (void)user_data;
-    return 0;
-}
-i64 DoCapset(u64 user_hdr, u64 user_data)
-{
-    (void)user_hdr;
-    (void)user_data;
-    return 0;
-}
+// Credential handlers (DoSetuid / DoSetgid / DoSetreuid /
+// DoSetregid / DoSetresuid / DoSetresgid / DoGetresuid /
+// DoGetresgid / DoSetfsuid / DoSetfsgid / DoGetgroups /
+// DoSetgroups / DoCapget / DoCapset) live in syscall_cred.cpp.
+// The `using namespace internal;` directive at the top of this
+// TU keeps the dispatcher's references unqualified.
 
 // utime(path, buf): set atime/mtime on a file. v0 doesn't track
 // either, so accept as no-op — but verify the path is real before
