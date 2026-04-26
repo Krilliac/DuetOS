@@ -97,6 +97,7 @@
 #include "kdbg.h"
 #include "klog.h"
 #include "login.h"
+#include "symbols.h"
 #include "process.h"
 #include "random.h"
 #include "reboot.h"
@@ -1453,6 +1454,7 @@ static const char* const kCommandSet[] = {
     "crtrace",   "crprobe",  "net",     "usbnet",   "instr",    "dumpstate", "bp",         "breakpoint", "login",
     "logout",    "passwd",   "useradd", "userdel",  "users",    "who",       "su",         "hwmon",      "vbe",
     "ping",      "nslookup", "ntp",     "http",     "shutdown", "poweroff",  "beep",       "inspect",    "theme",
+    "addr2sym",
 };
 constexpr u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -4600,6 +4602,71 @@ void CmdInstr(u32 argc, char** argv)
     }
     duetos::core::DumpInstructionBytes("instr", addr, static_cast<duetos::u32>(len));
     ConsoleWriteln("INSTR: WROTE TO COM1");
+}
+
+// addr2sym <hex-addr> — resolve a kernel VA to function+offset (file:line)
+// using the embedded symbol table. The same lookup the panic dump uses,
+// exposed at the shell so an operator can decode a RIP off a serial log
+// without leaving the running system. Output goes to BOTH the on-screen
+// console (one truncated line) and COM1 (full annotated line). Mirrors
+// the host-side `tools/symbolize.sh` for offline use, but doesn't need
+// addr2line / llvm-symbolizer.
+void CmdAddr2Sym(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("ADDR2SYM: USAGE: ADDR2SYM <HEX-ADDR>");
+        ConsoleWriteln("         RESOLVE A KERNEL VA TO FN+OFFSET (FILE:LINE)");
+        return;
+    }
+    duetos::u64 addr = 0;
+    if (!ParseU64Str(argv[1], &addr))
+    {
+        ConsoleWriteln("ADDR2SYM: BAD ADDRESS");
+        return;
+    }
+    // COM1: full canonical form (matches every other panic-dump line so
+    // post-mortem grep sees the same shape).
+    duetos::arch::SerialWrite("[addr2sym] ");
+    duetos::core::WriteAddressWithSymbol(addr);
+    duetos::arch::SerialWrite("\n");
+
+    // Console: short summary, since the full file path often won't fit
+    // in 80 cols. Fall back to "<unresolved>" when the lookup misses.
+    duetos::core::SymbolResolution res{};
+    if (!duetos::core::ResolveAddress(addr, &res) || res.entry == nullptr)
+    {
+        ConsoleWriteln("ADDR2SYM: <UNRESOLVED>");
+        return;
+    }
+    char line[96];
+    duetos::u32 i = 0;
+    auto put = [&](const char* s)
+    {
+        for (duetos::u32 k = 0; s[k] != '\0' && i + 1 < sizeof(line); ++k)
+            line[i++] = s[k];
+    };
+    auto put_hex = [&](duetos::u64 v)
+    {
+        char buf[18];
+        buf[0] = '0';
+        buf[1] = 'x';
+        for (duetos::u32 d = 0; d < 16; ++d)
+        {
+            const duetos::u32 nib = static_cast<duetos::u32>((v >> ((15 - d) * 4)) & 0xF);
+            buf[2 + d] = static_cast<char>(nib < 10 ? '0' + nib : 'a' + (nib - 10));
+        }
+        for (duetos::u32 k = 0; k < 18 && i + 1 < sizeof(line); ++k)
+            line[i++] = buf[k];
+    };
+    put("ADDR2SYM ");
+    put_hex(addr);
+    put(" -> ");
+    put(res.entry->name);
+    put("+");
+    put_hex(res.offset);
+    line[i] = '\0';
+    ConsoleWriteln(line);
 }
 
 void CmdInspectHelp()
@@ -8884,6 +8951,11 @@ void Dispatch(char* line)
     if (StrEq(cmd, "instr"))
     {
         CmdInstr(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "addr2sym"))
+    {
+        CmdAddr2Sym(argc, argv);
         return;
     }
     if (StrEq(cmd, "inspect"))

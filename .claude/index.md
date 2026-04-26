@@ -39,11 +39,14 @@ _Read this at every session start (after git sync). Each row links to a detailed
 | `inspect` umbrella v0 — `syscalls` / `opcodes` / `arm` subcommands | [knowledge/inspect-umbrella-v0.md](knowledge/inspect-umbrella-v0.md) | Observation | Active | 2026-04-23 |
 | ABI translation unit (Linux gap-fill) | [knowledge/abi-translation-unit.md](knowledge/abi-translation-unit.md) | Observation | Active | 2026-04-22 |
 | Native DuetOS apps v0 — pattern for in-kernel applications | [knowledge/native-apps-v0.md](knowledge/native-apps-v0.md) | Pattern | Active | 2026-04-21 |
+| gfxdemo multi-mode v0 — six animated effects (plasma/mandelbrot/cube/particles/starfield/fire) + key dispatch + self-tests | [knowledge/gfxdemo-multimode-v0.md](knowledge/gfxdemo-multimode-v0.md) | Observation + Pattern | Active | 2026-04-26 |
 | Kernel bring-up v0 (Multiboot2 → long mode → `kernel_main`) | [knowledge/kernel-bringup-v0.md](knowledge/kernel-bringup-v0.md) | Observation | Active | 2026-04-20 |
 | ISO build & end-to-end boot verification | [knowledge/iso-build-and-boot.md](knowledge/iso-build-and-boot.md) | Pattern | Active | 2026-04-20 |
 | GDT + IDT v0 — canonical descriptors and trap path | [knowledge/gdt-idt-v0.md](knowledge/gdt-idt-v0.md) | Observation | Active | 2026-04-20 |
 | Physical frame allocator v0 — bitmap over Multiboot2 map | [knowledge/frame-allocator-v0.md](knowledge/frame-allocator-v0.md) | Observation | Active | 2026-04-20 |
 | Higher-half kernel move v0 — `0xFFFFFFFF80000000` | [knowledge/higher-half-kernel-v0.md](knowledge/higher-half-kernel-v0.md) | Observation | Active | 2026-04-20 |
+| Boot stack high-VMA alias — fixes #DF on first boot→user CR3 switch under load | [knowledge/boot-stack-high-vma-fix.md](knowledge/boot-stack-high-vma-fix.md) | Issue + Pattern | Active | 2026-04-26 |
+| Debug tooling — `addr2sym` shell command + `tools/disasm-at.sh` + `tools/decode-panic.sh` | [knowledge/debug-tooling-symbol-disasm.md](knowledge/debug-tooling-symbol-disasm.md) | Pattern | Active | 2026-04-26 |
 | Kernel heap v0 — first-fit + coalescing over direct map | [knowledge/kernel-heap-v0.md](knowledge/kernel-heap-v0.md) | Observation | Active | 2026-04-20 |
 | Managed page-table API v0 — 4-level walker over boot PML4 | [knowledge/paging-v0.md](knowledge/paging-v0.md) | Observation | Active | 2026-04-20 |
 | LAPIC + periodic timer v0 — PIT-calibrated 100 Hz tick | [knowledge/lapic-timer-v0.md](knowledge/lapic-timer-v0.md) | Observation | Active | 2026-04-20 |

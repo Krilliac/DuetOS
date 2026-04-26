@@ -1496,6 +1496,10 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                             {
                                 app_consumed = duetos::apps::files::FilesFeedChar(c);
                             }
+                            else if (active == duetos::apps::gfxdemo::GfxDemoWindow())
+                            {
+                                app_consumed = duetos::apps::gfxdemo::GfxDemoFeedChar(c);
+                            }
                         }
                     }
                 }
