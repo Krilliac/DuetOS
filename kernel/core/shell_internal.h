@@ -228,6 +228,25 @@ void CmdAlias(u32 argc, char** argv);
 void CmdUnalias(u32 argc, char** argv);
 
 // ---------------------------------------------------------------
+// Filesystem-facing commands (shell_filesystem.cpp). Coreutils-
+// style commands that walk tmpfs / ramfs / FAT32 mounts.
+// ---------------------------------------------------------------
+void CmdCp(u32 argc, char** argv);
+void CmdMv(u32 argc, char** argv);
+void CmdWc(u32 argc, char** argv);
+void CmdHead(u32 argc, char** argv);
+void CmdTail(u32 argc, char** argv);
+void CmdSort(u32 argc, char** argv);
+void CmdUniq(u32 argc, char** argv);
+void CmdGrep(u32 argc, char** argv);
+void CmdFind(u32 argc, char** argv);
+void CmdLs(u32 argc, char** argv);
+void CmdCat(u32 argc, char** argv);
+void CmdTouch(u32 argc, char** argv);
+void CmdRm(u32 argc, char** argv);
+void CmdEcho(u32 argc, char** argv);
+
+// ---------------------------------------------------------------
 // Misc trivial utility commands (shell_utilities.cpp). Commands
 // that touch only one or two kernel subsystems and don't need
 // any of the larger TU-private helpers in shell.cpp.
