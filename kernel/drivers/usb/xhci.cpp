@@ -1598,45 +1598,6 @@ bool ControlOutWithData(Runtime& rt, DeviceState* dev, u8 bmRequestType, u8 bReq
 
 } // namespace
 
-u8 XhciFindDeviceByClass(u8 class_code, u8 subclass)
-{
-    for (u32 i = 0; i < kMaxDevicesTotal; ++i)
-    {
-        const DeviceState& d = g_devices[i];
-        if (!d.in_use || d.slot_id == 0)
-            continue;
-        if (class_code != 0xFF && d.dev_class != class_code)
-            continue;
-        if (subclass != 0xFF && d.dev_subclass != subclass)
-            continue;
-        return d.slot_id;
-    }
-    return 0;
-}
-
-void XhciPauseEventConsumer(bool pause)
-{
-    // Router-backed runtime path: HidPollEntry is the event-ring
-    // owner and forwards non-HID completions into the side cache
-    // for bulk waiters. Keep this API as a compatibility no-op so
-    // existing class-driver call-sites stay source-compatible.
-    (void)pause;
-}
-
-u32 XhciEnumerateDevices(u8* out, u32 max)
-{
-    u32 n = 0;
-    for (u32 i = 0; i < kMaxDevicesTotal && n < max; ++i)
-    {
-        const DeviceState& d = g_devices[i];
-        if (!d.in_use || d.slot_id == 0)
-            continue;
-        if (out != nullptr)
-            out[n] = d.slot_id;
-        ++n;
-    }
-    return n;
-}
 
 bool XhciControlIn(u8 slot_id, u8 bmRequestType, u8 bRequest, u16 wValue, u16 wIndex, void* buf, u16 len)
 {
@@ -1959,16 +1920,5 @@ void XhciInit()
     return {};
 }
 
-u32 XhciCount()
-{
-    return g_controller_count;
-}
-
-const ControllerInfo* XhciControllerAt(u32 i)
-{
-    if (i >= g_controller_count)
-        return nullptr;
-    return &g_controllers[i];
-}
 
 } // namespace duetos::drivers::usb::xhci

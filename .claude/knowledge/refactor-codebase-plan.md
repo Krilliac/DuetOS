@@ -12,7 +12,7 @@ Branch: `claude/refactor-codebase-VvLO6`. Pushed to origin.
 | 2 | `kernel/subsystems/win32/thunks.cpp`  | 5,684 |   655 | ☑ done (`cae3704`) |
 | 3 | `kernel/subsystems/linux/syscall.cpp` | 4,642 | 4,642 | ☐ not started |
 | 4 | `kernel/fs/fat32.cpp`                 | 3,190 |   300 | ☑ done (decomposed into fat32 + fat32_dir + fat32_lookup + fat32_read + fat32_write + fat32_create + selftest, plus fat32_internal.h and fat32_write_internal.h) |
-| 5 | `kernel/drivers/usb/xhci.cpp`         | 2,548 | 1,974 | ◐ partial (CompletionCodeName + HID input + MMIO accessors + speed helpers + spec-constants + Trb/ErstEntry/Runtime/DeviceState structs + global-table extern decls all in xhci_internal.h; per-aspect xhci_xfer/init/enum sub-splits now unblocked) |
+| 5 | `kernel/drivers/usb/xhci.cpp`         | 2,548 | 1,924 | ◐ partial (5 sibling TUs landed: complete/input/speed/admin/header-hoisted MMIO; structs+globals exposed via xhci_internal.h; per-aspect xhci_xfer/init/enum sub-splits next) |
 
 **Landed** (build-verified through both kernel stages):
 
