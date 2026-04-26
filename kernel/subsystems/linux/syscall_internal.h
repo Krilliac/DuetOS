@@ -157,6 +157,37 @@ const char* StripFatPrefix(const char* p);
 bool CopyAndStripFatPath(u64 user_path, char (&kbuf)[64], const char*& out_leaf);
 i64 AtFdCwdOnly(i64 dirfd);
 
+// FS-mutating handlers (syscall_fs_mut.cpp). truncate / ftruncate
+// / unlink / mkdir / rmdir route through the FAT32 *AtPath
+// primitives. chmod / fchmod / chown / fchown / lchown / utime
+// are no-ops in v0 (no permission / time model) but verify the
+// target exists. mknod returns -EPERM. The *at-family delegates
+// to the non-*at handler when dirfd == AT_FDCWD.
+i64 DoChmod(u64 user_path, u64 mode);
+i64 DoFchmod(u64 fd, u64 mode);
+i64 DoChown(u64 user_path, u64 uid, u64 gid);
+i64 DoFchown(u64 fd, u64 uid, u64 gid);
+i64 DoLchown(u64 user_path, u64 uid, u64 gid);
+i64 DoUtime(u64 user_path, u64 user_buf);
+i64 DoMknod(u64 user_path, u64 mode, u64 dev);
+i64 DoTruncate(u64 user_path, u64 length);
+i64 DoFtruncate(u64 fd, u64 length);
+i64 DoUnlink(u64 user_path);
+i64 DoMkdir(u64 user_path, u64 mode);
+i64 DoRmdir(u64 user_path);
+i64 DoMkdirat(i64 dirfd, u64 user_path, u64 mode);
+i64 DoUnlinkat(i64 dirfd, u64 user_path, u64 flags);
+i64 DoLinkat(i64 olddirfd, u64 oldpath, i64 newdirfd, u64 newpath, u64 flags);
+i64 DoSymlinkat(u64 target, i64 newdirfd, u64 linkpath);
+i64 DoRenameat(i64 olddirfd, u64 oldpath, i64 newdirfd, u64 newpath);
+i64 DoRenameat2(i64 olddirfd, u64 oldpath, i64 newdirfd, u64 newpath, u64 flags);
+i64 DoFchownat(i64 dirfd, u64 user_path, u64 uid, u64 gid, u64 flags);
+i64 DoFutimesat(i64 dirfd, u64 user_path, u64 user_times);
+i64 DoFchmodat(i64 dirfd, u64 user_path, u64 mode, u64 flags);
+i64 DoFaccessat(i64 dirfd, u64 user_path, u64 mode, u64 flags);
+i64 DoFaccessat2(i64 dirfd, u64 user_path, u64 mode, u64 flags);
+i64 DoUtimensat(i64 dirfd, u64 user_path, u64 user_times, u64 flags);
+
 // File handlers (syscall_file.cpp). open / close / stat / fstat
 // / lstat / access / openat / newfstatat. open snapshots the
 // FAT32 entry into the per-process linux_fds[16] table; stat
