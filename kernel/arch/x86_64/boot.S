@@ -247,10 +247,27 @@ long_mode_trampoline:
     mov     gs, ax
     mov     ss, ax
 
-    /* Switch onto the boot stack. stack_top lives in .bss.boot (low VMA);
-     * that's fine because the identity map covers it. Later bring-up will
-     * move to a per-CPU stack in kernel memory. */
+    /* Switch onto the boot stack via its HIGH-VMA alias.
+     *
+     * `stack_top` is linked at LOW VMA (.bss.boot, identity-mapped). Per-
+     * process address spaces zero PML4[0..255] (the low half) at create
+     * time, so any low-VA pointer becomes unmapped the moment Schedule()
+     * activates a user AS. The boot task — which keeps using this stack
+     * forever — would then double-fault on its very next push the next
+     * time it ran on the CPU.
+     *
+     * The same physical pages are mapped TWICE in boot_pml4: at low VA
+     * via PML4[0]→PDPT[0]→PD (identity) AND at high VA via
+     * PML4[511]→PDPT[510]→same PD. The high alias lives in PML4[511],
+     * which every per-process AS copies verbatim, so it stays mapped
+     * across every CR3 switch. Bias the boot stack pointer up to that
+     * alias here, immediately after long mode + paging come up.
+     *
+     * KERNEL_VIRTUAL_BASE = 0xFFFFFFFF80000000. movabs is required —
+     * the constant is a 64-bit immediate. */
     mov     rsp, offset stack_top
+    movabs  rax, 0xFFFFFFFF80000000
+    add     rsp, rax
     xor     rbp, rbp                    /* end the call-chain for debuggers */
 
     /* Zero-extend the 32-bit Multiboot2 handoff state stashed in edi/esi
