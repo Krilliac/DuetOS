@@ -55,138 +55,25 @@ namespace duetos::drivers::usb::xhci
 // using them unqualified after each per-aspect extraction.
 using namespace internal;
 
-namespace
+namespace internal
 {
 
+// File-scope global tables. Declarations live in xhci_internal.h
+// (extern constinit) so the per-aspect TUs can reach them; the
+// definitions stay here so storage is single-TU.
 constinit ControllerInfo g_controllers[kMaxControllers] = {};
 constinit u32 g_controller_count = 0;
-// File-scope "is Init live" flag so XhciShutdown can clear it and
-// a subsequent XhciInit re-runs. Previously this was a function-
-// static constinit bool that made Init idempotent; restartable
-// drivers need the flag to be rewindable.
+// "Is Init live" flag so XhciShutdown can clear it and a subsequent
+// XhciInit re-runs — restartable drivers need this rewindable.
 constinit bool g_init_done = false;
 
-
-// One TRB = 16 bytes: { u32 param_lo, u32 param_hi, u32 status, u32 control }.
-struct alignas(16) Trb
-{
-    u32 param_lo;
-    u32 param_hi;
-    u32 status;
-    u32 control;
-};
-
-// One ERST entry = 16 bytes: { u64 ring_phys, u32 ring_size, u32 rsvd }.
-struct alignas(16) ErstEntry
-{
-    u64 ring_phys;
-    u32 ring_size;
-    u32 _rsvd;
-};
-
-// Per-controller submit/complete state. Lives in the stack frame of
-// InitOne but gets passed by reference to the command / transfer
-// helpers so they don't have to close over lambdas.
-struct Runtime
-{
-    volatile u8* mmio;
-    volatile u8* op;
-    volatile u8* intr0;
-    volatile u32* db_base; // &DB[0]; DB[n] is db_base + n
-
-    Trb* cmd_ring;
-    u64 cmd_phys;
-    u32 cmd_slots;
-    u32 cmd_idx;
-    u32 cmd_cycle;
-
-    Trb* evt_ring;
-    u64 evt_phys;
-    u32 evt_slots;
-    u32 evt_idx;
-    u32 evt_cycle;
-
-    u64* dcbaa;    // kernel-virtual pointer to the DCBAA page
-    u32 ctx_bytes; // 32 or 64, from HCCPARAMS1.CSZ
-    u8 max_slots;  // for bounds
-    ControllerInfo* info;
-};
-
-// Per-device state allocated at Address Device time. We only keep
-// as many as fit in the fixed-size table below; extra ports beyond
-// the cap silently skip enumeration. Tuned high enough to cover the
-// kMaxXhciPortsPerController * kMaxControllers product so a real
-// box with every port populated still fits.
-constexpr u32 kMaxDevicesTotal = 32;
-
-struct DeviceState
-{
-    bool in_use;
-    u8 slot_id;
-    u8 port_num;
-    u8 speed;
-    u8 ctrlr_idx; // index into g_controllers
-    mm::PhysAddr device_ctx_phys;
-    mm::PhysAddr input_ctx_phys;
-    void* input_ctx_virt;
-    mm::PhysAddr ep0_ring_phys;
-    Trb* ep0_ring;
-    u32 ep0_slots;
-    u32 ep0_idx;
-    u32 ep0_cycle;
-    mm::PhysAddr scratch_phys;
-    u8* scratch_virt;
-    // HID boot state — set once the HID bring-up finishes
-    // (SET_CONFIGURATION + Configure Endpoint succeeded). The
-    // polling task iterates the device table looking for
-    // `hid_ready`; `hid_is_mouse` decides which report parser
-    // to invoke (3-byte mouse vs 8-byte keyboard).
-    bool hid_ready;
-    bool hid_is_mouse;
-    u8 hid_ep_addr;        // e.g. 0x81 = EP1 IN
-    u8 hid_ep_xhci_idx;    // DCI for Input Context + doorbell target
-    u16 hid_ep_max_packet; // from the endpoint descriptor
-    mm::PhysAddr hid_ring_phys;
-    Trb* hid_ring;
-    u32 hid_ring_slots;
-    u32 hid_ring_idx;
-    u32 hid_ring_cycle;
-    mm::PhysAddr hid_buf_phys;
-    u8* hid_buf_virt;         // report buffer (8 bytes keyboard, 3 bytes mouse)
-    u8 hid_prev[8];           // keyboard: previous report (mouse is stateless on keys)
-    u64 hid_outstanding_phys; // TRB phys addr we're waiting on, or 0
-
-    // Bulk endpoint state. One pair (IN + OUT) per device is enough
-    // for every v0 USB-net class we care about (CDC-ECM, RTL8150,
-    // AX88xxx). Configured by XhciConfigureBulkEndpoint; used by
-    // XhciBulkSubmit + XhciBulkPoll.
-    bool bulk_in_ready;
-    u8 bulk_in_ep_addr;
-    u8 bulk_in_dci;
-    u16 bulk_in_mps;
-    mm::PhysAddr bulk_in_ring_phys;
-    Trb* bulk_in_ring;
-    u32 bulk_in_ring_slots;
-    u32 bulk_in_ring_idx;
-    u32 bulk_in_ring_cycle;
-
-    bool bulk_out_ready;
-    u8 bulk_out_ep_addr;
-    u8 bulk_out_dci;
-    u16 bulk_out_mps;
-    mm::PhysAddr bulk_out_ring_phys;
-    Trb* bulk_out_ring;
-    u32 bulk_out_ring_slots;
-    u32 bulk_out_ring_idx;
-    u32 bulk_out_ring_cycle;
-
-    // Class/subclass for device-by-class lookup (populated during
-    // descriptor parse).
-    u8 dev_class;
-    u8 dev_subclass;
-};
 constinit DeviceState g_devices[kMaxDevicesTotal] = {};
 constinit u32 g_device_count = 0;
+
+} // namespace internal
+
+namespace
+{
 
 // Byte-wise zero for arbitrary POD — the freestanding toolchain has
 // no libc memset and implicit struct zeroing (`x = {}`) on a large
