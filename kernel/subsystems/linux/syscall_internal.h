@@ -157,6 +157,21 @@ const char* StripFatPrefix(const char* p);
 bool CopyAndStripFatPath(u64 user_path, char (&kbuf)[64], const char*& out_leaf);
 i64 AtFdCwdOnly(i64 dirfd);
 
+// File handlers (syscall_file.cpp). open / close / stat / fstat
+// / lstat / access / openat / newfstatat. open snapshots the
+// FAT32 entry into the per-process linux_fds[16] table; stat
+// fills a 144-byte Linux struct stat from the entry; lstat is
+// identical (no symlinks); openat / newfstatat enforce the
+// AT_FDCWD-only constraint via AtFdCwdOnly.
+i64 DoOpen(u64 user_path, u64 flags, u64 mode);
+i64 DoClose(u64 fd);
+i64 DoStat(u64 user_path, u64 user_buf);
+i64 DoFstat(u64 fd, u64 user_buf);
+i64 DoLstat(u64 user_path, u64 user_buf);
+i64 DoAccess(u64 user_path, u64 mode);
+i64 DoOpenat(i64 dirfd, u64 user_path, u64 flags, u64 mode);
+i64 DoNewFstatat(i64 dirfd, u64 user_path, u64 user_buf, u64 flags);
+
 // CWD / path handlers (syscall_path.cpp). v0 records per-process
 // CWD in core::Process::linux_cwd; chdir / fchdir update it,
 // getcwd reads it back. The string is volume-relative — every
