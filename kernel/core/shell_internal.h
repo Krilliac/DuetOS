@@ -320,6 +320,15 @@ void CmdNic();
 void CmdIfconfig();
 void CmdArp();
 void CmdIpv4();
+void CmdDhcp(u32 argc, char** argv);
+void CmdRoute(u32 argc, char** argv);
+void CmdNetscan();
+void CmdWifi(u32 argc, char** argv);
+void CmdFwPolicy(u32 argc, char** argv);
+void CmdFwTrace(u32 argc, char** argv);
+void CmdCrTrace(u32 argc, char** argv);
+void CmdNet(u32 argc, char** argv);
+void CmdUsbNet(u32 argc, char** argv);
 
 // ---------------------------------------------------------------
 // Misc trivial utility commands (shell_utilities.cpp). Commands

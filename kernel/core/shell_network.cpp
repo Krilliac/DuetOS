@@ -28,10 +28,16 @@
 
 #include "shell_internal.h"
 
+#include "../arch/x86_64/serial.h"
 #include "../drivers/net/net.h"
+#include "../drivers/usb/cdc_ecm.h"
+#include "../drivers/usb/rndis.h"
 #include "../drivers/video/console.h"
 #include "../net/stack.h"
+#include "../net/wifi.h"
 #include "../sched/sched.h"
+#include "cleanroom_trace.h"
+#include "firmware_loader.h"
 
 namespace duetos::core::shell::internal
 {
@@ -502,6 +508,669 @@ void CmdIpv4()
     ConsoleWrite("IPV4 RX OTHER:  ");
     WriteU64Dec(s.rx_other_proto);
     ConsoleWriteChar('\n');
+}
+
+void CmdDhcp(u32 argc, char** argv)
+{
+    if (argc >= 2 && (StrEq(argv[1], "renew") || StrEq(argv[1], "request") || StrEq(argv[1], "start")))
+    {
+        if (!duetos::net::InterfaceIsBound(0))
+        {
+            ConsoleWriteln("DHCP: iface 0 not bound (no NIC driver online?)");
+            return;
+        }
+        if (!duetos::net::DhcpStart(0))
+        {
+            ConsoleWriteln("DHCP: start failed (transaction already in flight?)");
+            return;
+        }
+        ConsoleWriteln("DHCP: DISCOVER sent — wait ~1s then re-run `dhcp` for the bound IP");
+        for (u32 i = 0; i < 200; ++i)
+        {
+            duetos::sched::SchedSleepTicks(1);
+            const auto poll = duetos::net::DhcpLeaseRead();
+            if (poll.valid)
+                break;
+        }
+    }
+    const auto lease = duetos::net::DhcpLeaseRead();
+    if (!lease.valid)
+    {
+        ConsoleWriteln("DHCP: no lease (server didn't respond, or transaction in flight)");
+        ConsoleWriteln("      try: `dhcp renew`");
+        return;
+    }
+    ConsoleWrite("DHCP: bound  ip=");
+    WriteIpv4(lease.ip);
+    ConsoleWriteln("");
+    ConsoleWrite("      gateway=");
+    WriteIpv4(lease.router);
+    ConsoleWriteln("");
+    ConsoleWrite("      dns    =");
+    WriteIpv4(lease.dns);
+    ConsoleWriteln("");
+    ConsoleWrite("      server =");
+    WriteIpv4(lease.server);
+    ConsoleWriteln("");
+    ConsoleWrite("      lease  =");
+    WriteU64Dec(lease.lease_secs);
+    ConsoleWriteln(" sec");
+}
+
+void CmdRoute(u32 argc, char** argv)
+{
+    (void)argv;
+    const auto lease = duetos::net::DhcpLeaseRead();
+    if (!lease.valid)
+    {
+        ConsoleWriteln("ROUTE: no default route (DHCP not bound — try `dhcp renew`)");
+        return;
+    }
+    ConsoleWrite("default via ");
+    WriteIpv4(lease.router);
+    ConsoleWrite(" dev net0  src ");
+    WriteIpv4(lease.ip);
+    ConsoleWriteln("");
+    ConsoleWrite("DNS via ");
+    WriteIpv4(lease.dns);
+    ConsoleWriteln("");
+    if (argc < 2)
+        return;
+    const auto* arp = duetos::net::ArpLookup(0, lease.router);
+    ConsoleWrite("gateway L2: ");
+    if (arp == nullptr)
+    {
+        ConsoleWriteln("not in ARP cache (peer hasn't replied to ARP yet)");
+        return;
+    }
+    WriteMac(arp->mac.octets);
+    ConsoleWriteln("  (ARP cached)");
+}
+
+void CmdNetscan()
+{
+    const u64 nics = duetos::drivers::net::NicCount();
+    bool any_wifi = false;
+    bool any_eth = false;
+    for (u64 i = 0; i < nics; ++i)
+    {
+        const auto& nic = duetos::drivers::net::Nic(i);
+        const bool wifiish = nic.subclass == 0x80 || (nic.family != nullptr && (StrStartsWith(nic.family, "iwlwifi") ||
+                                                                                StrStartsWith(nic.family, "rtl8821") ||
+                                                                                StrStartsWith(nic.family, "bcm4")));
+        if (wifiish)
+            any_wifi = true;
+        else
+            any_eth = true;
+    }
+    ConsoleWriteln("WIRELESS NETWORKS:");
+    if (any_wifi)
+    {
+        const auto wifi = duetos::drivers::net::WirelessStatusRead();
+        if (wifi.drivers_online > 0)
+        {
+            ConsoleWrite("  wireless driver shell online for ");
+            WriteU64Dec(wifi.drivers_online);
+            ConsoleWrite(" of ");
+            WriteU64Dec(wifi.adapters_detected);
+            ConsoleWriteln(" adapter(s)");
+            ConsoleWrite("  firmware: ready=");
+            WriteU64Dec(wifi.firmware_ready);
+            ConsoleWrite(" missing=");
+            WriteU64Dec(wifi.firmware_missing);
+            ConsoleWrite(" incompatible=");
+            WriteU64Dec(wifi.firmware_incompatible);
+            ConsoleWrite(" load-error=");
+            WriteU64Dec(wifi.firmware_load_error);
+            ConsoleWriteln("");
+            if (wifi.firmware_ready == 0)
+            {
+                ConsoleWriteln("  cannot scan SSIDs yet: no wireless adapter has a usable firmware blob loaded");
+            }
+            else
+            {
+                ConsoleWriteln(
+                    "  firmware ready on at least one adapter; 802.11 scan/assoc datapath is still not implemented");
+            }
+        }
+        else
+        {
+            ConsoleWriteln("  wireless adapter detected, but driver shell did not bind");
+            ConsoleWriteln("  (device ID outside iwlwifi / rtl88xx / bcm43xx match tables)");
+        }
+    }
+    else
+    {
+        ConsoleWriteln("  (no wireless adapter detected)");
+    }
+    ConsoleWriteln("WIRED NETWORKS:");
+    if (!any_eth)
+    {
+        ConsoleWriteln("  (no wired adapter detected)");
+        return;
+    }
+    for (u64 i = 0; i < nics; ++i)
+    {
+        const auto& nic = duetos::drivers::net::Nic(i);
+        if (nic.subclass == 0x80)
+            continue;
+        ConsoleWrite("  net");
+        WriteU64Dec(i);
+        ConsoleWrite("  ");
+        ConsoleWrite(nic.vendor);
+        if (nic.family != nullptr)
+        {
+            ConsoleWriteChar(' ');
+            ConsoleWrite(nic.family);
+        }
+        ConsoleWrite("  link=");
+        ConsoleWrite(nic.mac_valid && nic.link_up ? "UP " : "DOWN ");
+        if (duetos::net::InterfaceIsBound(static_cast<u32>(i)))
+        {
+            const auto ip = duetos::net::InterfaceIp(static_cast<u32>(i));
+            if (!Ipv4IsZero(ip))
+            {
+                ConsoleWrite(" ip=");
+                WriteIpv4(ip);
+            }
+        }
+        ConsoleWriteln("");
+    }
+}
+
+void CmdWifi(u32 argc, char** argv)
+{
+    if (argc < 2 || StrEq(argv[1], "status"))
+    {
+        const auto st = duetos::net::WifiStatusRead(0);
+        ConsoleWrite("WIFI: iface0 backend=");
+        ConsoleWrite(st.backend_present ? "yes" : "no");
+        ConsoleWrite(" connected=");
+        ConsoleWrite(st.connected ? "yes" : "no");
+        if (st.connected)
+        {
+            ConsoleWrite(" ssid=\"");
+            ConsoleWrite(st.ssid);
+            ConsoleWrite("\" security=");
+            ConsoleWrite(st.security == duetos::net::WifiSecurity::Wpa2Psk ? "wpa2-psk" : "open");
+        }
+        ConsoleWriteln("");
+        if (!st.backend_present)
+            ConsoleWriteln("WIFI: no registered Wi-Fi backend yet");
+        return;
+    }
+    if (StrEq(argv[1], "scan"))
+    {
+        duetos::net::WifiScanResult results[duetos::net::kWifiMaxScanResults] = {};
+        u32 count = 0;
+        if (!duetos::net::WifiScan(0, results, duetos::net::kWifiMaxScanResults, &count))
+        {
+            ConsoleWriteln("WIFI: scan failed (backend unavailable or driver refused)");
+            return;
+        }
+        ConsoleWrite("WIFI: ");
+        WriteU64Dec(count);
+        ConsoleWriteln(" network(s)");
+        for (u32 i = 0; i < count; ++i)
+        {
+            ConsoleWrite("  ");
+            ConsoleWrite(results[i].ssid);
+            ConsoleWrite("  ");
+            ConsoleWrite(results[i].security == duetos::net::WifiSecurity::Wpa2Psk ? "WPA2" : "OPEN");
+            ConsoleWrite("  rssi=");
+            WriteI64Dec(results[i].rssi_dbm);
+            ConsoleWriteln(" dBm");
+        }
+        return;
+    }
+    if (StrEq(argv[1], "connect"))
+    {
+        if (argc < 3)
+        {
+            ConsoleWriteln("WIFI: usage: wifi connect <ssid> [psk]");
+            return;
+        }
+        const char* ssid = argv[2];
+        const bool has_psk = argc >= 4;
+        const auto sec = has_psk ? duetos::net::WifiSecurity::Wpa2Psk : duetos::net::WifiSecurity::Open;
+        const char* psk = has_psk ? argv[3] : nullptr;
+        if (!duetos::net::WifiConnect(0, ssid, sec, psk))
+        {
+            ConsoleWriteln("WIFI: connect failed (backend missing, invalid auth, or driver rejected)");
+            return;
+        }
+        ConsoleWriteln("WIFI: associated; requesting DHCP lease ...");
+        if (!duetos::net::DhcpStart(0))
+        {
+            ConsoleWriteln("WIFI: DHCP start failed");
+            return;
+        }
+        duetos::net::DhcpLease lease = {};
+        for (u32 i = 0; i < 300; ++i)
+        {
+            duetos::sched::SchedSleepTicks(1);
+            lease = duetos::net::DhcpLeaseRead();
+            if (lease.valid)
+                break;
+        }
+        if (!lease.valid)
+        {
+            ConsoleWriteln("WIFI: no DHCP ACK");
+            return;
+        }
+        ConsoleWrite("WIFI: connected ip=");
+        WriteIpv4(lease.ip);
+        ConsoleWrite(" gw=");
+        WriteIpv4(lease.router);
+        ConsoleWriteln("");
+        return;
+    }
+    if (StrEq(argv[1], "disconnect"))
+    {
+        if (!duetos::net::WifiDisconnect(0))
+        {
+            ConsoleWriteln("WIFI: disconnect failed (backend unavailable or driver refused)");
+            return;
+        }
+        ConsoleWriteln("WIFI: disconnected");
+        return;
+    }
+    ConsoleWriteln("WIFI: usage: wifi <status|scan|connect|disconnect>");
+}
+
+void CmdFwPolicy(u32 argc, char** argv)
+{
+    auto policy_name = [](duetos::core::FwSourcePolicy p) -> const char*
+    {
+        switch (p)
+        {
+        case duetos::core::FwSourcePolicy::OpenThenVendor:
+            return "open-then-vendor";
+        case duetos::core::FwSourcePolicy::OpenOnly:
+            return "open-only";
+        case duetos::core::FwSourcePolicy::VendorOnly:
+            return "vendor-only";
+        default:
+            return "unknown";
+        }
+    };
+
+    if (argc < 2 || StrEq(argv[1], "status"))
+    {
+        const auto s = duetos::core::FwBackendStatsRead();
+        ConsoleWrite("FWPOLICY: ");
+        ConsoleWrite(policy_name(s.policy));
+        ConsoleWrite("  backend=");
+        ConsoleWrite(s.kind == duetos::core::FwBackendKind::Vfs ? "vfs" : "none");
+        ConsoleWrite("  lookups=");
+        WriteU64Dec(s.lookups);
+        ConsoleWrite("  hits=");
+        WriteU64Dec(s.hits);
+        ConsoleWrite("  misses=");
+        WriteU64Dec(s.misses);
+        ConsoleWriteln("");
+        return;
+    }
+
+    if (StrEq(argv[1], "open-only"))
+    {
+        duetos::core::FwSetSourcePolicy(duetos::core::FwSourcePolicy::OpenOnly);
+        ConsoleWriteln("FWPOLICY: set to open-only");
+        return;
+    }
+    if (StrEq(argv[1], "vendor-only"))
+    {
+        duetos::core::FwSetSourcePolicy(duetos::core::FwSourcePolicy::VendorOnly);
+        ConsoleWriteln("FWPOLICY: set to vendor-only");
+        return;
+    }
+    if (StrEq(argv[1], "open-then-vendor"))
+    {
+        duetos::core::FwSetSourcePolicy(duetos::core::FwSourcePolicy::OpenThenVendor);
+        ConsoleWriteln("FWPOLICY: set to open-then-vendor");
+        return;
+    }
+    ConsoleWriteln("FWPOLICY: usage: fwpolicy <status|open-only|open-then-vendor|vendor-only>");
+}
+
+void CmdFwTrace(u32 argc, char** argv)
+{
+    if (argc >= 2 && StrEq(argv[1], "clear"))
+    {
+        duetos::core::FwTraceClear();
+        ConsoleWriteln("FWTRACE: cleared");
+        return;
+    }
+
+    u32 limit = duetos::core::FwTraceCount();
+    if (argc >= 3 && StrEq(argv[1], "show"))
+    {
+        const i64 parsed = ParseInt(argv[2]);
+        if (parsed > 0)
+            limit = static_cast<u32>(parsed);
+    }
+
+    const u32 count = duetos::core::FwTraceCount();
+    if (count == 0)
+    {
+        ConsoleWriteln("FWTRACE: empty");
+        return;
+    }
+
+    if (limit > count)
+        limit = count;
+    const u32 start = count - limit;
+    ConsoleWrite("FWTRACE: showing ");
+    WriteU64Dec(limit);
+    ConsoleWrite(" of ");
+    WriteU64Dec(count);
+    ConsoleWriteln(" entries");
+    for (u32 i = start; i < count; ++i)
+    {
+        duetos::core::FwTraceEntry e{};
+        if (!duetos::core::FwTraceRead(i, &e))
+            continue;
+        ConsoleWrite("  [");
+        WriteU64Dec(i);
+        ConsoleWrite("] policy=");
+        switch (e.policy)
+        {
+        case duetos::core::FwSourcePolicy::OpenOnly:
+            ConsoleWrite("open-only");
+            break;
+        case duetos::core::FwSourcePolicy::VendorOnly:
+            ConsoleWrite("vendor-only");
+            break;
+        default:
+            ConsoleWrite("open-then-vendor");
+            break;
+        }
+        ConsoleWrite(" result=");
+        ConsoleWrite(duetos::core::ErrorCodeName(e.result));
+        ConsoleWrite(" vendor=\"");
+        ConsoleWrite(e.vendor);
+        ConsoleWrite("\" base=\"");
+        ConsoleWrite(e.basename);
+        ConsoleWrite("\" path=\"");
+        ConsoleWrite(e.attempted_path);
+        ConsoleWriteln("\"");
+    }
+}
+
+void CmdCrTrace(u32 argc, char** argv)
+{
+    if (argc >= 2 && StrEq(argv[1], "clear"))
+    {
+        duetos::core::CleanroomTraceClear();
+        ConsoleWriteln("CRTRACE: cleared");
+        return;
+    }
+
+    u32 limit = duetos::core::CleanroomTraceCount();
+    if (argc >= 3 && StrEq(argv[1], "show"))
+    {
+        const i64 parsed = ParseInt(argv[2]);
+        if (parsed > 0)
+            limit = static_cast<u32>(parsed);
+    }
+
+    const u32 count = duetos::core::CleanroomTraceCount();
+    if (count == 0)
+    {
+        ConsoleWriteln("CRTRACE: empty");
+        return;
+    }
+    if (limit > count)
+        limit = count;
+
+    const u32 start = count - limit;
+    ConsoleWrite("CRTRACE: showing ");
+    WriteU64Dec(limit);
+    ConsoleWrite(" of ");
+    WriteU64Dec(count);
+    ConsoleWriteln(" entries");
+    duetos::arch::SerialWrite("\n=== CRTRACE DUMP BEGIN ===\n");
+    for (u32 i = start; i < count; ++i)
+    {
+        duetos::core::CleanroomTraceEntry e{};
+        if (!duetos::core::CleanroomTraceRead(i, &e))
+            continue;
+        ConsoleWrite("  [");
+        WriteU64Dec(i);
+        ConsoleWrite("] ");
+        ConsoleWrite(e.subsystem);
+        ConsoleWrite("::");
+        ConsoleWrite(e.event);
+        ConsoleWrite(" a=");
+        WriteU64Hex(e.a);
+        ConsoleWrite(" b=");
+        WriteU64Hex(e.b);
+        ConsoleWrite(" c=");
+        WriteU64Hex(e.c);
+        ConsoleWriteln("");
+        duetos::arch::SerialWrite("CRTRACE [");
+        duetos::arch::SerialWriteHex(i);
+        duetos::arch::SerialWrite("] ");
+        duetos::arch::SerialWrite(e.subsystem);
+        duetos::arch::SerialWrite("::");
+        duetos::arch::SerialWrite(e.event);
+        duetos::core::CleanroomTraceWriteDecoded(e);
+        duetos::arch::SerialWrite("\n");
+    }
+    duetos::arch::SerialWrite("=== CRTRACE DUMP END ===\n");
+}
+
+void CmdNet(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("NET: usage: net <up|status|test>");
+        return;
+    }
+    if (StrEq(argv[1], "up"))
+    {
+        if (!duetos::net::InterfaceIsBound(0))
+        {
+            ConsoleWriteln("NET UP: iface 0 not bound (no NIC driver?)");
+            return;
+        }
+        auto lease = duetos::net::DhcpLeaseRead();
+        if (lease.valid)
+        {
+            ConsoleWrite("NET UP: already bound  ip=");
+            WriteIpv4(lease.ip);
+            ConsoleWriteln("");
+            return;
+        }
+        if (!duetos::net::DhcpStart(0))
+        {
+            ConsoleWriteln("NET UP: DHCP start failed");
+            return;
+        }
+        ConsoleWriteln("NET UP: DHCP DISCOVER sent ...");
+        for (u32 i = 0; i < 300; ++i)
+        {
+            duetos::sched::SchedSleepTicks(1);
+            lease = duetos::net::DhcpLeaseRead();
+            if (lease.valid)
+                break;
+        }
+        if (!lease.valid)
+        {
+            ConsoleWriteln("NET UP: timeout — no DHCP ACK in 3s");
+            return;
+        }
+        ConsoleWrite("NET UP: bound  ip=");
+        WriteIpv4(lease.ip);
+        ConsoleWrite("  gw=");
+        WriteIpv4(lease.router);
+        ConsoleWrite("  dns=");
+        WriteIpv4(lease.dns);
+        ConsoleWriteln("");
+        return;
+    }
+    if (StrEq(argv[1], "status"))
+    {
+        const auto lease = duetos::net::DhcpLeaseRead();
+        const bool bound = duetos::net::InterfaceIsBound(0);
+        ConsoleWrite("NET: iface0=");
+        ConsoleWrite(bound ? "UP" : "DOWN");
+        ConsoleWrite("  dhcp=");
+        ConsoleWrite(lease.valid ? "BOUND" : "PENDING");
+        if (lease.valid)
+        {
+            ConsoleWrite("  ip=");
+            WriteIpv4(lease.ip);
+            ConsoleWrite("  gw=");
+            WriteIpv4(lease.router);
+        }
+        ConsoleWrite("  arp=");
+        WriteU64Dec(duetos::net::ArpEntryCount());
+        ConsoleWriteln("");
+        return;
+    }
+    if (StrEq(argv[1], "test"))
+    {
+        ConsoleWrite("NET TEST: dhcp ... ");
+        auto lease = duetos::net::DhcpLeaseRead();
+        if (!lease.valid)
+        {
+            duetos::net::DhcpStart(0);
+            for (u32 i = 0; i < 300; ++i)
+            {
+                duetos::sched::SchedSleepTicks(1);
+                lease = duetos::net::DhcpLeaseRead();
+                if (lease.valid)
+                    break;
+            }
+        }
+        if (!lease.valid)
+        {
+            ConsoleWriteln("FAIL (no lease)");
+            return;
+        }
+        ConsoleWrite("OK ip=");
+        WriteIpv4(lease.ip);
+        ConsoleWriteln("");
+
+        ConsoleWrite("NET TEST: gateway ARP ... ");
+        const auto* arp = duetos::net::ArpLookup(0, lease.router);
+        if (arp == nullptr)
+        {
+            duetos::net::NetIcmpSendEcho(0, lease.router, 0xBEEF, 1);
+            for (u32 i = 0; i < 100; ++i)
+            {
+                duetos::sched::SchedSleepTicks(1);
+                arp = duetos::net::ArpLookup(0, lease.router);
+                if (arp != nullptr)
+                    break;
+            }
+        }
+        if (arp == nullptr)
+        {
+            ConsoleWriteln("FAIL (gateway didn't reply to ARP)");
+            return;
+        }
+        ConsoleWrite("OK mac=");
+        WriteMac(arp->mac.octets);
+        ConsoleWriteln("");
+
+        ConsoleWrite("NET TEST: dns ... ");
+        if (!duetos::net::NetDnsQueryA(0, lease.dns, "example.com"))
+        {
+            ConsoleWriteln("FAIL (send rejected)");
+            return;
+        }
+        duetos::net::DnsResult dr{};
+        for (u32 i = 0; i < 300; ++i)
+        {
+            duetos::sched::SchedSleepTicks(1);
+            dr = duetos::net::NetDnsResultRead();
+            if (dr.resolved)
+                break;
+        }
+        if (!dr.resolved)
+        {
+            ConsoleWriteln("FAIL (no reply)");
+            return;
+        }
+        ConsoleWrite("OK example.com -> ");
+        WriteIpv4(dr.ip);
+        ConsoleWriteln("");
+
+        ConsoleWrite("NET TEST: ping gateway ... ");
+        duetos::net::NetPingArm(0xCAFE, 1);
+        if (!duetos::net::NetIcmpSendEcho(0, lease.router, 0xCAFE, 1))
+        {
+            ConsoleWriteln("FAIL (send rejected)");
+            return;
+        }
+        duetos::net::PingResult pr{};
+        for (u32 i = 0; i < 200; ++i)
+        {
+            duetos::sched::SchedSleepTicks(1);
+            pr = duetos::net::NetPingRead();
+            if (pr.replied)
+                break;
+        }
+        if (!pr.replied)
+        {
+            ConsoleWriteln("FAIL (no echo reply)");
+            return;
+        }
+        ConsoleWrite("OK rtt~=");
+        WriteU64Dec(pr.rtt_ticks * 10);
+        ConsoleWriteln("ms");
+        ConsoleWriteln("NET TEST: PASS — DuetOS is online");
+        return;
+    }
+    ConsoleWriteln("NET: usage: net <up|status|test>");
+}
+
+void CmdUsbNet(u32 argc, char** argv)
+{
+    if (argc < 2 || StrEq(argv[1], "status"))
+    {
+        const auto cdc = duetos::drivers::usb::CdcEcmStatsRead();
+        const auto rn = duetos::drivers::usb::RndisStatsRead();
+        ConsoleWrite("USBNET: cdc-ecm=");
+        ConsoleWrite(cdc.online ? "UP" : "down");
+        ConsoleWrite("  rndis=");
+        ConsoleWrite(rn.online ? "UP" : "down");
+        if (cdc.online)
+        {
+            ConsoleWrite("  cdc-ecm-mac=");
+            WriteMac(cdc.mac);
+        }
+        if (rn.online)
+        {
+            ConsoleWrite("  rndis-mac=");
+            WriteMac(rn.mac);
+        }
+        ConsoleWriteln("");
+        return;
+    }
+    if (StrEq(argv[1], "probe"))
+    {
+        ConsoleWriteln("USBNET: probing CDC-ECM ...");
+        const bool cdc_ok = duetos::drivers::usb::CdcEcmProbe();
+        if (cdc_ok)
+        {
+            ConsoleWriteln("USBNET: CDC-ECM bound on iface 1 — DHCP started");
+            return;
+        }
+        ConsoleWriteln("USBNET: no CDC-ECM device. probing RNDIS ...");
+        const bool rn_ok = duetos::drivers::usb::RndisProbe();
+        if (rn_ok)
+        {
+            ConsoleWriteln("USBNET: RNDIS bound on iface 1 — DHCP started");
+            return;
+        }
+        ConsoleWriteln("USBNET: no compatible USB-Ethernet device found "
+                       "(supported: CDC-ECM, RNDIS — Android tether default)");
+        return;
+    }
+    ConsoleWriteln("USBNET: usage: usbnet <probe|status>");
 }
 
 } // namespace duetos::core::shell::internal
