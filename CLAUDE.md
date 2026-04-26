@@ -332,8 +332,25 @@ The `.claude/` directory is persistent AI memory — a knowledge base that Claud
 | A faster/better way to do something was discovered | **Optimization** |
 | A non-obvious codebase/tooling fact was discovered | **Observation** |
 | An architectural or style decision was made | **Decision** |
+| A multi-step / multi-session work plan was drafted | **Plan** |
 
 After writing, update `.claude/index.md` and commit both alongside code changes.
+
+### Plan files
+
+Any plan that spans more than the current session — refactor sequences, multi-PR feature builds, deferred-task batches — must be persisted into `.claude/knowledge/<slug>-plan.md` and added to `.claude/index.md`. Harness-local plan files (under `/root/.claude/plans/`) do not survive a session boundary; the next session won't know the plan exists.
+
+A plan file owns three things:
+
+1. **Status preamble** — a `## Status (YYYY-MM-DD)` block at the top with a "Landed" table (commit hash + effect) and a "Deferred" list. Update it in the same commit as the work that changes which items are landed vs. deferred. Never let the status drift behind the code.
+2. **Resume prompt** — a one-paragraph quote a fresh session can paste back to pick up where the last left off.
+3. **The plan itself** — the durable design content (file-by-file targets, conventions, verification steps, risk mitigations).
+
+Lifecycle rules:
+
+- **Mark off as you go.** Move a deferred item into the Landed table the moment its commit lands; do not batch updates across multiple commits.
+- **Delete only when fully done.** A plan file may be deleted only once every item in it is marked landed AND the plan generated no follow-up work that warrants its own entry. If any "deferred" entry, "follow-up", "out of scope but next time" item, or open question remains, the file stays.
+- **On deletion**, also remove its row from `.claude/index.md` in the same commit.
 
 ### At session end
 

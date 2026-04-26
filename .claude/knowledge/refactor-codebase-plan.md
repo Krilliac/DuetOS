@@ -4,6 +4,16 @@
 
 Branch: `claude/refactor-codebase-VvLO6`. Pushed to origin.
 
+**Per-split rollup:**
+
+| Split | File | Original | Current | State |
+|---|---|---:|---:|---|
+| 1 | `kernel/core/shell.cpp`               | 9,769 | 9,769 | ☐ not started |
+| 2 | `kernel/subsystems/win32/thunks.cpp`  | 5,684 |   655 | ☑ done (`cae3704`) |
+| 3 | `kernel/subsystems/linux/syscall.cpp` | 4,642 | 4,642 | ☐ not started |
+| 4 | `kernel/fs/fat32.cpp`                 | 3,190 |   871 | ◐ partial (selftest + read/write split landed; finer per-layer split deferred) |
+| 5 | `kernel/drivers/usb/xhci.cpp`         | 2,548 | 2,548 | ☐ not started |
+
 **Landed** (build-verified through both kernel stages):
 
 | Commit | Effect |
