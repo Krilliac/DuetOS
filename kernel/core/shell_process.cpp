@@ -2,13 +2,10 @@
  * DuetOS — kernel shell: process / scheduler / memory commands.
  *
  * Sibling TU of shell.cpp. Houses the read-only observability
- * triple: ps (per-task scheduler enumeration), top (one-shot
- * CPU% snapshot), free (frame + kernel-heap totals).
- *
- * Spawn / Kill / Exec / Linuxexec / Translate / Readelf are
- * queued for a follow-up slice — those handlers share path-strip
- * and FAT32-load helpers with several other shell commands, so
- * extracting them coordinates with that follow-up work.
+ * triple — ps / top / free — plus the spawn + kill mutators that
+ * round out the process bucket. Linuxexec / Exec / Translate /
+ * Readelf live in shell_exec.cpp; AttackSim / Guard live in
+ * shell_security.cpp.
  */
 
 #include "shell_internal.h"
@@ -17,6 +14,7 @@
 #include "../mm/frame_allocator.h"
 #include "../mm/kheap.h"
 #include "../sched/sched.h"
+#include "ring3_smoke.h"
 
 namespace duetos::core::shell::internal
 {
@@ -184,6 +182,77 @@ void CmdFree()
     ConsoleWrite("   ");
     WriteU64Dec(h.free_bytes);
     ConsoleWriteChar('\n');
+}
+
+void CmdKill(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("KILL: USAGE: KILL PID");
+        return;
+    }
+    u64 pid = 0;
+    for (u32 i = 0; argv[1][i] != '\0'; ++i)
+    {
+        if (argv[1][i] < '0' || argv[1][i] > '9')
+        {
+            ConsoleWriteln("KILL: BAD PID");
+            return;
+        }
+        pid = pid * 10 + static_cast<u64>(argv[1][i] - '0');
+    }
+    const auto r = duetos::sched::SchedKillByPid(pid);
+    switch (r)
+    {
+    case duetos::sched::KillResult::Signaled:
+        ConsoleWrite("KILL: SIGNALED PID ");
+        WriteU64Dec(pid);
+        ConsoleWriteln(" (WILL DIE ON NEXT SCHEDULE)");
+        break;
+    case duetos::sched::KillResult::NotFound:
+        ConsoleWrite("KILL: NO SUCH PID: ");
+        WriteU64Dec(pid);
+        ConsoleWriteChar('\n');
+        break;
+    case duetos::sched::KillResult::Protected:
+        ConsoleWrite("KILL: PID ");
+        WriteU64Dec(pid);
+        ConsoleWriteln(" IS PROTECTED (idle/reaper/boot)");
+        break;
+    case duetos::sched::KillResult::AlreadyDead:
+        ConsoleWrite("KILL: PID ");
+        WriteU64Dec(pid);
+        ConsoleWriteln(" IS ALREADY DEAD");
+        break;
+    case duetos::sched::KillResult::Blocked:
+        ConsoleWrite("KILL: PID ");
+        WriteU64Dec(pid);
+        ConsoleWriteln(" IS BLOCKED — FLAGGED, WILL DIE WHEN WOKEN");
+        break;
+    }
+}
+
+void CmdSpawn(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("SPAWN: USAGE: SPAWN <KIND>");
+        ConsoleWriteln("  KINDS:  hello  sandbox  jail  nx  hog  hostile  dropcaps  priv  badint");
+        ConsoleWriteln("          kread  ptrfuzz  writefuzz  hellope  winkill  winhello");
+        ConsoleWriteln("  SEE `MAN SPAWN` FOR DETAILS.");
+        return;
+    }
+    if (!duetos::core::SpawnOnDemand(argv[1]))
+    {
+        ConsoleWrite("SPAWN: UNKNOWN KIND: ");
+        ConsoleWriteln(argv[1]);
+        ConsoleWriteln("  KINDS:  hello  sandbox  jail  nx  hog  hostile  dropcaps  priv  badint");
+        ConsoleWriteln("          kread  ptrfuzz  writefuzz  hellope  winkill  winhello");
+        return;
+    }
+    ConsoleWrite("SPAWN: QUEUED ");
+    ConsoleWriteln(argv[1]);
+    ConsoleWriteln("  (RUN `PS` TO SEE IT, OR WATCH THE KERNEL LOG)");
 }
 
 } // namespace duetos::core::shell::internal

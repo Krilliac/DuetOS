@@ -175,21 +175,7 @@ void Prompt();
 // and the policy is visible in one place at the bottom of the
 // file). Prints a denial line and klogs a warning so a guest
 // brute-forcing commands leaves a serial trail.
-bool RequireAdmin(const char* cmd)
-{
-    if (AuthIsAdmin())
-    {
-        return true;
-    }
-    ConsoleWrite("DENIED: ");
-    ConsoleWrite(cmd);
-    ConsoleWriteln(" REQUIRES ADMIN");
-    duetos::core::Log(duetos::core::LogLevel::Warn, "shell", "admin-only command denied");
-    duetos::arch::SerialWrite("[shell] denied (non-admin): ");
-    duetos::arch::SerialWrite(cmd);
-    duetos::arch::SerialWrite("\n");
-    return false;
-}
+// RequireAdmin moved to shell_security.cpp.
 
 void CmdHelp()
 {
@@ -905,80 +891,8 @@ void CmdSysinfo()
 // ParseU64Str and removed.
 
 
-void CmdGuard(duetos::u32 argc, char** argv)
-{
-    // Show / control the security guard.
-    //   guard                  status line
-    //   guard on | advisory    switch to advisory mode
-    //   guard enforce          switch to enforce mode (prompts on Warn/Deny)
-    //   guard off              disable the guard entirely (use sparingly)
-    //   guard test             re-run GuardSelfTest
-    namespace sec = duetos::security;
-    if (argc < 2)
-    {
-        ConsoleWrite("GUARD MODE   : ");
-        ConsoleWriteln(sec::GuardModeName(sec::GuardMode()));
-        ConsoleWrite("SCANS  : ");
-        WriteU64Hex(sec::GuardScanCount(), 0);
-        ConsoleWriteln("");
-        ConsoleWrite("ALLOW  : ");
-        WriteU64Hex(sec::GuardAllowCount(), 0);
-        ConsoleWriteln("");
-        ConsoleWrite("WARN   : ");
-        WriteU64Hex(sec::GuardWarnCount(), 0);
-        ConsoleWriteln("");
-        ConsoleWrite("DENY   : ");
-        WriteU64Hex(sec::GuardDenyCount(), 0);
-        ConsoleWriteln("");
-        const sec::Report* last = sec::GuardLastReport();
-        if (last != nullptr && last->finding_count > 0)
-        {
-            ConsoleWrite("LAST REPORT FINDINGS: ");
-            WriteU64Hex(last->finding_count, 0);
-            ConsoleWriteln("");
-        }
-        ConsoleWriteln("USAGE: GUARD [ON|ADVISORY|ENFORCE|OFF|TEST]");
-        return;
-    }
-    // Mutating subcommands change the kernel's security posture.
-    // Status read above is harmless for non-admins (just counters),
-    // but anything that flips mode or re-runs the self-test must
-    // be admin-gated so a passwordless guest can't flip the guard
-    // to Off and disable image-load protection.
-    if (StrEq(argv[1], "on") || StrEq(argv[1], "advisory"))
-    {
-        if (!RequireAdmin("GUARD MODE"))
-            return;
-        sec::SetGuardMode(sec::Mode::Advisory);
-        ConsoleWriteln("GUARD: ADVISORY (logs, never blocks)");
-        return;
-    }
-    if (StrEq(argv[1], "enforce"))
-    {
-        if (!RequireAdmin("GUARD MODE"))
-            return;
-        sec::SetGuardMode(sec::Mode::Enforce);
-        ConsoleWriteln("GUARD: ENFORCE (prompts on Warn/Deny, default-deny on timeout)");
-        return;
-    }
-    if (StrEq(argv[1], "off"))
-    {
-        if (!RequireAdmin("GUARD MODE"))
-            return;
-        sec::SetGuardMode(sec::Mode::Off);
-        ConsoleWriteln("GUARD: OFF (all images pass through)");
-        return;
-    }
-    if (StrEq(argv[1], "test"))
-    {
-        if (!RequireAdmin("GUARD TEST"))
-            return;
-        sec::GuardSelfTest();
-        ConsoleWriteln("(self-test output on COM1)");
-        return;
-    }
-    ConsoleWriteln("GUARD: UNKNOWN SUBCOMMAND");
-}
+// CmdGuard moved to shell_security.cpp.
+
 
 // CmdFatls / CmdFatcat / CmdFatwrite / CmdFatappend / CmdFatnew / CmdFatrm /
 // CmdFattrunc / CmdFatmkdir / CmdFatrmdir moved to shell_filesystem.cpp.
@@ -995,76 +909,8 @@ void CmdGuard(duetos::u32 argc, char** argv)
 // SchedStateName moved to shell_process.cpp alongside its only
 // callers (CmdPs, CmdTop).
 
-void CmdKill(u32 argc, char** argv)
-{
-    if (argc < 2)
-    {
-        ConsoleWriteln("KILL: USAGE: KILL PID");
-        return;
-    }
-    u64 pid = 0;
-    for (u32 i = 0; argv[1][i] != '\0'; ++i)
-    {
-        if (argv[1][i] < '0' || argv[1][i] > '9')
-        {
-            ConsoleWriteln("KILL: BAD PID");
-            return;
-        }
-        pid = pid * 10 + static_cast<u64>(argv[1][i] - '0');
-    }
-    const auto r = duetos::sched::SchedKillByPid(pid);
-    switch (r)
-    {
-    case duetos::sched::KillResult::Signaled:
-        ConsoleWrite("KILL: SIGNALED PID ");
-        WriteU64Dec(pid);
-        ConsoleWriteln(" (WILL DIE ON NEXT SCHEDULE)");
-        break;
-    case duetos::sched::KillResult::NotFound:
-        ConsoleWrite("KILL: NO SUCH PID: ");
-        WriteU64Dec(pid);
-        ConsoleWriteChar('\n');
-        break;
-    case duetos::sched::KillResult::Protected:
-        ConsoleWrite("KILL: PID ");
-        WriteU64Dec(pid);
-        ConsoleWriteln(" IS PROTECTED (idle/reaper/boot)");
-        break;
-    case duetos::sched::KillResult::AlreadyDead:
-        ConsoleWrite("KILL: PID ");
-        WriteU64Dec(pid);
-        ConsoleWriteln(" IS ALREADY DEAD");
-        break;
-    case duetos::sched::KillResult::Blocked:
-        ConsoleWrite("KILL: PID ");
-        WriteU64Dec(pid);
-        ConsoleWriteln(" IS BLOCKED — FLAGGED, WILL DIE WHEN WOKEN");
-        break;
-    }
-}
+// CmdKill / CmdSpawn moved to shell_process.cpp.
 
-void CmdSpawn(u32 argc, char** argv)
-{
-    if (argc < 2)
-    {
-        ConsoleWriteln("SPAWN: USAGE: SPAWN <KIND>");
-        ConsoleWriteln("  KINDS:  hello  sandbox  jail  nx  hog  hostile  dropcaps  priv  badint");
-        ConsoleWriteln("          kread  ptrfuzz  writefuzz  hellope  winkill  winhello");
-        ConsoleWriteln("  SEE `MAN SPAWN` FOR DETAILS.");
-        return;
-    }
-    if (!duetos::core::SpawnOnDemand(argv[1]))
-    {
-        ConsoleWrite("SPAWN: UNKNOWN KIND: ");
-        ConsoleWriteln(argv[1]);
-        ConsoleWriteln("  KINDS:  hello  sandbox  jail  nx  hog  hostile  dropcaps  priv  badint");
-        ConsoleWriteln("          kread  ptrfuzz  writefuzz  hellope  winkill  winhello");
-        return;
-    }
-    ConsoleWrite("SPAWN: QUEUED ");
-    ConsoleWriteln(argv[1]);
-    ConsoleWriteln("  (RUN `PS` TO SEE IT, OR WATCH THE KERNEL LOG)");
-}
 // LeU16 / LeU32 / LeU64 / ElfTypeName / ElfMachineName / ElfPtypeName moved to shell_exec.cpp.
 
 
@@ -1072,27 +918,8 @@ void CmdSpawn(u32 argc, char** argv)
 
 // CmdColor / CmdRand moved to shell_utilities.cpp.
 
-void CmdAttackSim()
-{
-    duetos::security::AttackSimRun();
-    const auto& s = duetos::security::AttackSimSummary();
-    ConsoleWrite("ATTACK SIM COMPLETE: ");
-    WriteU64Dec(s.passed);
-    ConsoleWrite(" passed, ");
-    WriteU64Dec(s.failed);
-    ConsoleWrite(" failed, ");
-    WriteU64Dec(s.skipped);
-    ConsoleWriteln(" skipped");
-    for (u64 i = 0; i < s.count; ++i)
-    {
-        ConsoleWrite("  [");
-        ConsoleWrite(duetos::security::AttackOutcomeName(s.results[i].outcome));
-        ConsoleWrite("] ");
-        ConsoleWrite(s.results[i].name);
-        ConsoleWrite(" -> ");
-        ConsoleWriteln(s.results[i].detector);
-    }
-}
+// CmdAttackSim moved to shell_security.cpp.
+
 
 // CmdUuid moved to shell_utilities.cpp.
 

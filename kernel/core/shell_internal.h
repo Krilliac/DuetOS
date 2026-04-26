@@ -351,6 +351,15 @@ void CmdKdbg(u32 argc, char** argv);
 void CmdMetrics();
 
 // ---------------------------------------------------------------
+// Admin gate. Returns true if the current user has the admin role,
+// otherwise prints a denial line, klogs a warning, and returns false.
+// Used by the dispatcher's gate switch + the small handful of
+// commands that do per-subcommand admin checks (e.g. `guard`).
+// Definition lives in shell.cpp.
+// ---------------------------------------------------------------
+bool RequireAdmin(const char* cmd);
+
+// ---------------------------------------------------------------
 // Executable + low-level read commands (shell_exec.cpp). Loaders
 // for native ELF + Linux ELF + raw block-device peek + ABI
 // translation table dump.
@@ -360,6 +369,15 @@ void CmdTranslate();
 void CmdRead(u32 argc, char** argv);
 void CmdExec(u32 argc, char** argv);
 void CmdReadelf(u32 argc, char** argv);
+
+// ---------------------------------------------------------------
+// Process + security commands. Kill / Spawn live in
+// shell_process.cpp; Guard / AttackSim live in shell_security.cpp.
+// ---------------------------------------------------------------
+void CmdKill(u32 argc, char** argv);
+void CmdSpawn(u32 argc, char** argv);
+void CmdGuard(u32 argc, char** argv);
+void CmdAttackSim();
 
 // ---------------------------------------------------------------
 // Misc trivial utility commands (shell_utilities.cpp). Commands
