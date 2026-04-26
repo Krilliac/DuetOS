@@ -9,7 +9,7 @@ Branches: `claude/refactor-codebase-VvLO6` (merged via PR #74) and
 
 | Split | File | Original | Current | State |
 |---|---|---:|---:|---|
-| 1 | `kernel/core/shell.cpp`               | 9,769 | 9,222 | ◐ in progress (5 slices: security / storage / process / core / core-extension; ~5.6% trim, the trivially-isolated commands. Remaining slices need helper hoists — EnvFind / FatLeaf / WriteU64Hex etc. — to shell_internal.h before they can move) |
+| 1 | `kernel/core/shell.cpp`               | 9,769 | 9,127 | ◐ in progress (5 command slices + env-table hoist; ~6.6% trim. First helper hoist landed: EnvSlot / g_env / EnvFind / EnvSet / EnvUnset live in shell_state.cpp + shell_internal.h, CmdHostname moved to shell_core.cpp. Remaining hoists: FatLeaf / ParseU64Str / ParseInt path-strip, alias table, history ring, shared output helpers — each unlocks a larger bucket) |
 | 2 | `kernel/subsystems/win32/thunks.cpp`  | 5,684 |   655 | ☑ done (`cae3704`) |
 | 3 | `kernel/subsystems/linux/syscall.cpp` | 4,642 | 1,274 | ☑ done (73% reduction; decomposed into 16 per-domain sibling TUs: cred / fd / file / fs_mut / io / misc / mm / path / pathutil / proc / rlimit / sched / sig / stub / time + syscall_internal.h. syscall.cpp itself is now just header + kSys* enum + LinuxSyscallDispatch + SyscallInit + LinuxLogAbiCoverage + thin Linux* public wrappers) |
 | 4 | `kernel/fs/fat32.cpp`                 | 3,190 |   300 | ☑ done (decomposed into fat32 + fat32_dir + fat32_lookup + fat32_read + fat32_write + fat32_create + selftest, plus fat32_internal.h and fat32_write_internal.h) |
@@ -47,18 +47,20 @@ Branches: `claude/refactor-codebase-VvLO6` (merged via PR #74) and
 | `ef5cc27 shell: extract ps / top / free into sibling TU` | `shell.cpp` 9,468 → 9,308 lines. ps / top / free + TU-private SchedStateName → new `shell_process.cpp` (218 lines). Spawn / Kill / Exec / Linuxexec / Translate / Readelf deferred (share path-strip + FAT32-load helpers). |
 | `83cb4dc shell: extract trivial banner / status commands into sibling TU` | `shell.cpp` 9,308 → 9,266 lines. about / version / clear / uptime / date → new `shell_core.cpp` (104 lines). |
 | `fb792b3 shell: extend shell_core.cpp with yield / uname / whoami / pwd / true / false` | `shell.cpp` 9,266 → 9,222 lines. Six more trivially-small commands appended to `shell_core.cpp`. CmdHostname stays in shell.cpp pending the env-table hoist. |
+| `<pending> shell: hoist env-table to shell_internal.h + shell_state.cpp` | `shell.cpp` 9,222 → 9,127 lines (-95). EnvSlot + kEnvSlotCount/kEnvNameMax/kEnvValueMax + g_env[] + EnvFind / EnvSet / EnvUnset → new `shell_state.cpp` (71 lines), declared in `shell_internal.h`. EnvNameEq / EnvCopy stay inline in the header so the alias table still in shell.cpp can keep calling them. CmdHostname follows the env table into `shell_core.cpp`. First helper hoist of the five queued in the plan; unblocks future CmdEnv / CmdSet / CmdUnset / CmdGetenv / `$VAR` substitution extractions. |
 
 **Deferred** to a follow-up session (each warrants its own fresh chat per
 the timeout-prevention rules):
 
-- `kernel/core/shell.cpp` (now 9,222 lines) — five small slices have
-  landed (security / storage / process / core × 2). Each new slice
-  must promote one or more of the still-TU-private helpers into
-  `shell_internal.h` to unlock larger groups:
-  - **env-table hoist** (EnvFind / EnvSet / EnvUnset + `EnvSlot`
-    + `g_env[]`) — unlocks CmdHostname, CmdEnv, CmdSet, CmdUnset,
-    CmdGetenv, the $VAR substitution path, and any future
-    config-aware commands.
+- `kernel/core/shell.cpp` (now 9,127 lines) — five command slices
+  + the first helper hoist (env-table) have landed. CmdHostname
+  followed the env table into `shell_core.cpp`. Each remaining
+  slice must promote one or more of the still-TU-private helpers
+  into `shell_internal.h` to unlock larger groups:
+  - **env-table hoist** ✅ landed — EnvSlot / g_env / EnvFind /
+    EnvSet / EnvUnset live in `shell_state.cpp`. CmdEnv / CmdSet /
+    CmdUnset / CmdGetenv and the $VAR substitution path are now
+    extractable in subsequent slices.
   - **alias-table hoist** (AliasFind / AliasSet / AliasUnset +
     `AliasSlot` + `g_aliases[]`) — unlocks CmdAlias / CmdUnalias.
   - **history-ring hoist** (HistoryAppend / HistoryExpand /
@@ -88,29 +90,26 @@ _(Linux syscall split completed on
 syscall.cpp 4,642 → 1,274 lines.)_
 
 **Resume prompt for a fresh session:**
-> The `linux/syscall.cpp` split is complete (commits `794c108` →
-> `84ed53d`, 4,642 → 1,274 lines, 73% reduction across 17 commits).
-> The shell split is now in progress on the same branch
-> (`claude/continue-refactoring-split-QlCKz`): 5 small slices
-> landed via commits `2977dba` → `fb792b3`, taking shell.cpp from
-> 9,769 → 9,222 lines. The shell_internal.h scaffolding (under
-> `duetos::core::shell::internal`) and the
-> `using namespace shell::internal;` directive at the top of
-> shell.cpp are already in place.
+> The shell split is in progress on
+> `claude/continue-refactoring-1s8hF` (and earlier on
+> `claude/continue-refactoring-split-QlCKz`). 5 command slices
+> (commits `2977dba` → `fb792b3`) plus the first helper hoist
+> (env-table → `shell_state.cpp`, with CmdHostname following it
+> into `shell_core.cpp`) have landed. Cumulative effect: shell.cpp
+> 9,769 → 9,127 lines.
 >
-> The next session should land one of the five "helper hoists"
-> listed in the deferred section above (env-table / alias-table /
-> history-ring / path-strip / shared-output-helpers). Each hoist
-> is a small surgical commit, but each one unlocks a much larger
-> bucket of commands for subsequent extractions. The recommended
-> order is: env-table first (touches the most commands), then
-> path-strip (unlocks the entire Fat* family in one slice), then
-> shared-output-helpers (lets every sibling TU drop its local
-> WriteU64Dec / WriteU64Hex copies).
+> The next session should land another helper hoist in the same
+> shape as the env-table one. Recommended order: path-strip
+> (FatLeaf / ParseU64Str / ParseInt — unlocks the entire Fat*
+> family + CmdRead + CmdLinuxexec + CmdExec + CmdReadelf +
+> CmdTranslate in subsequent slices), then shared-output-helpers
+> (WriteU64Dec / WriteU64Hex / WriteI64Dec / WriteU8TwoDigits —
+> lets every sibling TU drop its local copies), then alias-table
+> and history-ring.
 >
-> Start a fresh `claude/<slug>` branch off main rather than
-> continuing on `claude/continue-refactoring-split-QlCKz` —
-> that one's already very long.
+> Each hoist is a small surgical commit but unlocks a much larger
+> bucket of commands. Start a fresh `claude/<slug>` branch off
+> main if the current branch grows long.
 
 ---
 
