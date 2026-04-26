@@ -39,6 +39,28 @@ CLANG="${CLANG:-clang}"
 LLD_LINK="${LLD_LINK:-lld-link}"
 DLLTOOL="${DLLTOOL:-llvm-dlltool}"
 
+resolve_dlltool() {
+    if command -v "${DLLTOOL}" >/dev/null 2>&1; then
+        echo "${DLLTOOL}"
+        return 0
+    fi
+
+    local candidate
+    for candidate in llvm-dlltool llvm-dlltool-18 llvm-dlltool-17 llvm-dlltool-16 x86_64-w64-mingw32-dlltool; do
+        if command -v "${candidate}" >/dev/null 2>&1; then
+            echo "${candidate}"
+            return 0
+        fi
+    done
+
+    echo "build-customdll-test.sh: no dlltool found." >&2
+    echo "  Tried DLLTOOL=${DLLTOOL} plus llvm-dlltool{-18,-17,-16} and x86_64-w64-mingw32-dlltool." >&2
+    echo "  Install llvm binutils (provides llvm-dlltool) or mingw-w64 binutils." >&2
+    exit 1
+}
+
+DLLTOOL_BIN="$(resolve_dlltool)"
+
 # One .lib per .def. llvm-dlltool stamps the LIBRARY name from
 # the .def into the generated .lib's import descriptors, so
 # lld-link emits the correct DLL references at link time.
@@ -46,7 +68,7 @@ GEN_LIBS=()
 for def in "${SRC_DIR}"/*.def; do
     base=$(basename "${def}" .def)
     lib="${WORK_DIR}/${base}.lib"
-    "${DLLTOOL}" -d "${def}" -l "${lib}" -m i386:x86-64
+    "${DLLTOOL_BIN}" -d "${def}" -l "${lib}" -m i386:x86-64
     GEN_LIBS+=("${lib}")
 done
 

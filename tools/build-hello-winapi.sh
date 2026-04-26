@@ -46,6 +46,28 @@ CLANG="${CLANG:-clang}"
 LLD_LINK="${LLD_LINK:-lld-link}"
 DLLTOOL="${DLLTOOL:-llvm-dlltool}"
 
+resolve_dlltool() {
+    if command -v "${DLLTOOL}" >/dev/null 2>&1; then
+        echo "${DLLTOOL}"
+        return 0
+    fi
+
+    local candidate
+    for candidate in llvm-dlltool llvm-dlltool-18 llvm-dlltool-17 llvm-dlltool-16 x86_64-w64-mingw32-dlltool; do
+        if command -v "${candidate}" >/dev/null 2>&1; then
+            echo "${candidate}"
+            return 0
+        fi
+    done
+
+    echo "build-hello-winapi.sh: no dlltool found." >&2
+    echo "  Tried DLLTOOL=${DLLTOOL} plus llvm-dlltool{-18,-17,-16} and x86_64-w64-mingw32-dlltool." >&2
+    echo "  Install llvm binutils (provides llvm-dlltool) or mingw-w64 binutils." >&2
+    exit 1
+}
+
+DLLTOOL_BIN="$(resolve_dlltool)"
+
 # Generate one import library per .def file in the source
 # directory. Each .def names a specific DLL in its LIBRARY
 # line (kernel32.dll, vcruntime140.dll, api-ms-win-crt-*, …)
@@ -59,7 +81,7 @@ GEN_LIBS=()
 for def in "${SRC_DIR}"/*.def; do
     base=$(basename "${def}" .def)
     lib="${WORK_DIR}/${base}.lib"
-    "${DLLTOOL}" -d "${def}" -l "${lib}" -m i386:x86-64
+    "${DLLTOOL_BIN}" -d "${def}" -l "${lib}" -m i386:x86-64
     GEN_LIBS+=("${lib}")
 done
 
