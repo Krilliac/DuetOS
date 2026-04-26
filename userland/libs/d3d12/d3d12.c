@@ -15,7 +15,7 @@
  *     also accepts a swap-chain pointer through Present-style
  *     paths but is otherwise self-contained.
  *
- * Build: tools/build-stub-dll.sh (base 0x10140000).
+ * Build: tools/build/build-stub-dll.sh (base 0x10140000).
  */
 
 #include "../dx_shared.h"

@@ -1,9 +1,9 @@
-#include "hpet.h"
+#include "arch/x86_64/hpet.h"
 
-#include "../../acpi/acpi.h"
-#include "../../core/klog.h"
-#include "../../core/panic.h"
-#include "../../mm/paging.h"
+#include "acpi/acpi.h"
+#include "log/klog.h"
+#include "core/panic.h"
+#include "mm/paging.h"
 
 namespace duetos::arch
 {

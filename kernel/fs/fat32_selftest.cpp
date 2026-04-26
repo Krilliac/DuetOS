@@ -5,11 +5,11 @@
 // sibling translation unit. fat32.cpp shrinks by ~610 lines and the
 // self-test that runs once at boot is now editable in isolation.
 
-#include "fat32.h"
+#include "fs/fat32.h"
 
-#include "../arch/x86_64/serial.h"
-#include "../core/klog.h"
-#include "../drivers/storage/block.h"
+#include "arch/x86_64/serial.h"
+#include "log/klog.h"
+#include "drivers/storage/block.h"
 
 namespace duetos::fs::fat32
 {

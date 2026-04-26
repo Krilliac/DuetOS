@@ -30,7 +30,7 @@ accessors.
 - `u32 ArpEntryCount()` — count of currently-cached, non-expired
   entries.
 
-### Shell commands (`kernel/core/shell.cpp`)
+### Shell commands (`kernel/shell/shell.cpp`)
 
 | Command       | Aliases       | Function                                             |
 |---------------|---------------|------------------------------------------------------|
@@ -90,7 +90,7 @@ scan via the driver's per-radio interface.
 
 - `kernel/net/stack.h` — 4 new accessor declarations
 - `kernel/net/stack.cpp` — 4 new accessor definitions
-- `kernel/core/shell.cpp` — 5 new commands, dispatcher + help
+- `kernel/shell/shell.cpp` — 5 new commands, dispatcher + help
 - `.claude/knowledge/network-shell-commands-v0.md` — this file
 - `.claude/index.md` — index entry
 

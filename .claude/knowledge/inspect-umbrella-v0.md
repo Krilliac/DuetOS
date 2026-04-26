@@ -94,11 +94,11 @@ needed (shell and spawn path never race on the same line).
   scanner (backs `inspect syscalls`). Now uses the shared
   loader helpers from `inspect.h` — no more duplicated
   FAT32 / PE / ELF parsers.
-- `kernel/core/ring3_smoke.cpp` — `SpawnElfFile`,
+- `kernel/proc/ring3_smoke.cpp` — `SpawnElfFile`,
   `SpawnElfLinux`, `SpawnPeFile` each call
   `duetos::debug::InspectOnSpawn(...)` before
   `ProcessCreate`.
-- `kernel/core/shell.cpp` — `CmdInspect` dispatcher + four
+- `kernel/shell/shell.cpp` — `CmdInspect` dispatcher + four
   subcommand handlers + `kCommandSet` entry + help line.
 - `kernel/CMakeLists.txt` — `debug/inspect.cpp` added to
   kernel-stage1 sources.

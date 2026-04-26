@@ -27,8 +27,8 @@ work. This slice is the scaffolding those DLLs will sit on top of.
 | File | Role |
 |------|------|
 | `userland/apps/hello_pe/hello.c` | Freestanding C — inline-asm `int 0x80` for `SYS_WRITE`, `SYS_EXIT`. Entry point `_start`. No CRT, no libc. |
-| `tools/build-hello-pe.sh` | Host compile script: `clang --target=x86_64-pc-windows-msvc -ffreestanding -nostdlib …` → `lld-link /subsystem:console /entry:_start /nodefaultlib /base:0x400000 /align:4096 /filealign:4096 /dynamicbase:no`. Then calls `embed-blob.py`. |
-| `tools/embed-blob.py` | Byte-blob → C++ header. Emits `constexpr unsigned char kBinHelloPeBytes[] = { ... }` + `_len`, wrapped in a namespace. |
+| `tools/build/build-hello-pe.sh` | Host compile script: `clang --target=x86_64-pc-windows-msvc -ffreestanding -nostdlib …` → `lld-link /subsystem:console /entry:_start /nodefaultlib /base:0x400000 /align:4096 /filealign:4096 /dynamicbase:no`. Then calls `embed-blob.py`. |
+| `tools/build/embed-blob.py` | Byte-blob → C++ header. Emits `constexpr unsigned char kBinHelloPeBytes[] = { ... }` + `_len`, wrapped in a namespace. |
 
 The CMake `add_custom_command` in `kernel/CMakeLists.txt`
 fires on any change to `hello.c`, the shell script, or the
@@ -98,7 +98,7 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, AddressSpace* as);
 
 ## Process + scheduler plumbing
 
-`SpawnPeFile` in `kernel/core/ring3_smoke.cpp` is the PE twin of
+`SpawnPeFile` in `kernel/proc/ring3_smoke.cpp` is the PE twin of
 `SpawnElfFile`:
 
 1. `PeValidate` — early reject with a serial-log reason.

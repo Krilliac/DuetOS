@@ -32,7 +32,7 @@ isolation.
 - `kernel/sched/sched.{h,cpp}` — `Task::as`, `SchedCreateUser(...,
   as)`, `Schedule()` calls `AddressSpaceActivate(next->as)` before
   `ContextSwitch`. Reaper calls `AddressSpaceRelease(dead->as)`.
-- `kernel/core/ring3_smoke.cpp` — spawns TWO ring-3 tasks at the
+- `kernel/proc/ring3_smoke.cpp` — spawns TWO ring-3 tasks at the
   SAME user VA (0x40000000 code, 0x40010000 stack), each in its own
   AS, demonstrating that VA collisions across processes aren't.
 

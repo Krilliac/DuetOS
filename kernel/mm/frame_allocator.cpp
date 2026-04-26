@@ -26,16 +26,16 @@
  *   a free/used summary used by the `mem` shell command.
  */
 
-#include "frame_allocator.h"
+#include "mm/frame_allocator.h"
 
-#include "multiboot2.h"
-#include "page.h"
+#include "mm/multiboot2.h"
+#include "mm/page.h"
 
-#include "../arch/x86_64/cpu.h"
-#include "../arch/x86_64/serial.h"
-#include "../core/kdbg.h"
-#include "../core/klog.h"
-#include "../core/panic.h"
+#include "arch/x86_64/cpu.h"
+#include "arch/x86_64/serial.h"
+#include "diag/kdbg.h"
+#include "log/klog.h"
+#include "core/panic.h"
 
 // Linker-script symbols. Both are PHYSICAL addresses: the kernel image is
 // loaded contiguously starting at 1 MiB and the bitmap reservation needs

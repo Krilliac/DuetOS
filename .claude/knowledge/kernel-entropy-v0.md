@@ -108,4 +108,4 @@ the invocation point and uncomments one line in `main.cpp`.
 
 - `kernel/core/random.{h,cpp}` — the pool.
 - `kernel/core/stack_canary.{h,cpp}` — dormant randomization.
-- `kernel/core/shell.cpp::CmdRand` — user-facing observability.
+- `kernel/shell/shell.cpp::CmdRand` — user-facing observability.

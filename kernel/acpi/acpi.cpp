@@ -24,15 +24,15 @@
  *   read-only.
  */
 
-#include "acpi.h"
+#include "acpi/acpi.h"
 
-#include "../arch/x86_64/cpu.h"
-#include "../arch/x86_64/serial.h"
-#include "../core/klog.h"
-#include "../core/panic.h"
-#include "../mm/multiboot2.h"
-#include "../mm/page.h"
-#include "aml.h"
+#include "arch/x86_64/cpu.h"
+#include "arch/x86_64/serial.h"
+#include "log/klog.h"
+#include "core/panic.h"
+#include "mm/multiboot2.h"
+#include "mm/page.h"
+#include "acpi/aml.h"
 
 namespace duetos::acpi
 {

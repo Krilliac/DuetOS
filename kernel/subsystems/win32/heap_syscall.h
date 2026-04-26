@@ -1,7 +1,7 @@
 #pragma once
 
 /*
- * Win32 heap-syscall handlers — extracted from core/syscall.cpp
+ * Win32 heap-syscall handlers — extracted from syscall/syscall.cpp
  * so the dispatcher is a thin router.
  *
  *   SYS_HEAP_ALLOC    (11) — rdi=size

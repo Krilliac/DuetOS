@@ -11,8 +11,8 @@
  * public xfer surface in xhci.cpp can reach them by name.
  */
 
-#include "../../sched/sched.h"
-#include "xhci_internal.h"
+#include "sched/sched.h"
+#include "drivers/usb/xhci_internal.h"
 
 namespace duetos::drivers::usb::xhci::internal
 {

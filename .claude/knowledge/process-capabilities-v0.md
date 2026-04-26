@@ -36,9 +36,9 @@ Two profiles are wired as constexpr helpers:
   `SchedCreateUser(..., core::Process*)`, `TaskProcess(Task*)`.
   Reaper calls `ProcessRelease` on death; Process destructor
   transitively releases its AS.
-- `kernel/core/syscall.cpp` — `DoWrite` gates on `kCapSerialConsole`
+- `kernel/syscall/syscall.cpp` — `DoWrite` gates on `kCapSerialConsole`
   before the SMAP copy path.
-- `kernel/core/ring3_smoke.cpp` — spawns two trusted tasks + one
+- `kernel/proc/ring3_smoke.cpp` — spawns two trusted tasks + one
   sandbox task. All three use the same user-code payload; only
   the sandbox's `SYS_WRITE` is denied (logged + -1 returned). The
   user payload ignores the return value so `SYS_YIELD` and

@@ -1,13 +1,13 @@
-#include "heap.h"
+#include "subsystems/win32/heap.h"
 
-#include "../../arch/x86_64/serial.h"
-#include "../../core/klog.h"
-#include "../../core/process.h"
-#include "../../mm/address_space.h"
-#include "../../mm/frame_allocator.h"
-#include "../../mm/page.h"
-#include "../../mm/paging.h"
-#include "custom.h"
+#include "arch/x86_64/serial.h"
+#include "log/klog.h"
+#include "proc/process.h"
+#include "mm/address_space.h"
+#include "mm/frame_allocator.h"
+#include "mm/page.h"
+#include "mm/paging.h"
+#include "subsystems/win32/custom.h"
 
 namespace duetos::win32
 {

@@ -23,7 +23,7 @@
  *      don't depend on kernel32 being loaded first.
  *   6. Ldr* — return STATUS_NOT_IMPLEMENTED.
  *
- * Build: tools/build-ntdll-dll.sh at /base:0x10060000.
+ * Build: tools/build/build-ntdll-dll.sh at /base:0x10060000.
  */
 
 typedef unsigned int DWORD;

@@ -60,7 +60,7 @@ turn on together:
    gains a final `crtrace show 256` line so the shell-side
    dump fires automatically once the prompt arrives (gives a
    second look at the buffer state right after profile loads).
-3. `kernel/core/shell.cpp` `CmdCrTrace` — always-on (not gated),
+3. `kernel/shell/shell.cpp` `CmdCrTrace` — always-on (not gated),
    adds a SerialWrite mirror so any future invocation of
    `crtrace show` makes it to serial. Costs nothing on
    interactive boots.
@@ -312,14 +312,14 @@ v1 ring + hash fixes (always on):
 Build-stop fixes (real bugs that broke the merged HEAD; always
 on):
 
-- `kernel/core/string.cpp` (new) — freestanding `memset` /
+- `kernel/util/string.cpp` (new) — freestanding `memset` /
   `memcpy` / `memmove` extern "C" stubs. The compiler emits
   implicit calls for `T x = {}` on POD arrays / structs and
   for struct-by-value copies even with `-fno-builtin`; without
   these the link fails the moment any subsystem zero-inits a
   ring-buffer entry. Two recently-merged subsystems
   (firmware_loader, shell crtrace path) tripped this.
-- `kernel/core/shell.cpp` — added `WriteI64Dec` /
+- `kernel/shell/shell.cpp` — added `WriteI64Dec` /
   `ParseU64Str` / `ParseInt` forward declarations and a
   ParseInt definition. The `crtrace show <N>` and the Wi-Fi
   scan dump (RSSI in dBm) had call sites that were never
@@ -329,7 +329,7 @@ on):
 
 Always-on diagnostic improvement:
 
-- `kernel/core/shell.cpp` `CmdCrTrace` — SerialWrite mirror so
+- `kernel/shell/shell.cpp` `CmdCrTrace` — SerialWrite mirror so
   the shell-side `crtrace show` works in headless mode.
 
 Survey-mode patches (gated behind `DUETOS_CRTRACE_SURVEY`):

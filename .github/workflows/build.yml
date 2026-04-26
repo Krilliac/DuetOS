@@ -164,7 +164,7 @@ jobs:
           for i in $(seq 1 ${attempts}); do
             echo "::group::smoke attempt ${i}/${attempts}"
             DUETOS_TIMEOUT=30 \
-              tools/ctest-boot-smoke.sh build/x86_64-debug
+              tools/test/ctest-boot-smoke.sh build/x86_64-debug
             rc=$?
             echo "::endgroup::"
             cp -f build/x86_64-debug/ctest-smoke-serial.log \

@@ -118,7 +118,7 @@ jobs:
           mkdir -p build/x86_64-debug
           cp dist/debug/duetos-debug.iso build/x86_64-debug/duetos.iso
       - name: Run smoke test
-        run: DUETOS_TIMEOUT=30 tools/ctest-boot-smoke.sh build/x86_64-debug
+        run: DUETOS_TIMEOUT=30 tools/test/ctest-boot-smoke.sh build/x86_64-debug
 
   publish-debug-release:
     name: publish debug channel

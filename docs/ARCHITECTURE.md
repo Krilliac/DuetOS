@@ -355,7 +355,7 @@ The repository keeps CI/release automation in-tree as the source of truth:
 - [`.github/workflows/build.yml`](../.github/workflows/build.yml)
   - Format enforcement (`clang-format`)
   - Debug + release configure/build presets
-  - Boot smoke (`tools/ctest-boot-smoke.sh`) in CI
+  - Boot smoke (`tools/test/ctest-boot-smoke.sh`) in CI
 - [`.github/workflows/release.yml`](../.github/workflows/release.yml)
   - Builds debug + release assets
   - Publishes rolling release tags to:

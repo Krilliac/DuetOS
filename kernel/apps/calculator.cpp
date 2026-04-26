@@ -1,7 +1,7 @@
-#include "calculator.h"
+#include "apps/calculator.h"
 
-#include "../arch/x86_64/serial.h"
-#include "../drivers/video/framebuffer.h"
+#include "arch/x86_64/serial.h"
+#include "drivers/video/framebuffer.h"
 
 namespace duetos::apps::calculator
 {

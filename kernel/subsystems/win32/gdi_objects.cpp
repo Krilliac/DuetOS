@@ -28,17 +28,17 @@
  *   bookkeeping + syscall-side error mapping.
  */
 
-#include "gdi_objects.h"
+#include "subsystems/win32/gdi_objects.h"
 
-#include "../../arch/x86_64/serial.h"
-#include "../../core/process.h"
-#include "../../drivers/video/font8x8.h"
-#include "../../drivers/video/framebuffer.h"
-#include "../../drivers/video/theme.h"
-#include "../../drivers/video/widget.h"
-#include "../../mm/kheap.h"
-#include "../../mm/paging.h"
-#include "window_syscall.h"
+#include "arch/x86_64/serial.h"
+#include "proc/process.h"
+#include "drivers/video/font8x8.h"
+#include "drivers/video/framebuffer.h"
+#include "drivers/video/theme.h"
+#include "drivers/video/widget.h"
+#include "mm/kheap.h"
+#include "mm/paging.h"
+#include "subsystems/win32/window_syscall.h"
 
 namespace duetos::subsystems::win32
 {

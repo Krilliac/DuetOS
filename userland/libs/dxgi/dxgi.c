@@ -8,7 +8,7 @@
  * the canonical "create factory → pick adapter → make swap chain
  * for HWND → clear → present" flow without a nullptr or E_FAIL.
  *
- * Build: tools/build-stub-dll.sh (base 0x10150000).
+ * Build: tools/build/build-stub-dll.sh (base 0x10150000).
  */
 
 #include "../dx_shared.h"

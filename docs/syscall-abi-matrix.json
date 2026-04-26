@@ -2996,7 +2996,7 @@
     "number": 0,
     "name": "SYS_EXIT",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3004,7 +3004,7 @@
     "number": 1,
     "name": "SYS_GETPID",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3012,7 +3012,7 @@
     "number": 2,
     "name": "SYS_WRITE",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3020,7 +3020,7 @@
     "number": 3,
     "name": "SYS_YIELD",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3028,7 +3028,7 @@
     "number": 4,
     "name": "SYS_STAT",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3036,7 +3036,7 @@
     "number": 5,
     "name": "SYS_READ",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3044,7 +3044,7 @@
     "number": 6,
     "name": "SYS_DROPCAPS",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3052,7 +3052,7 @@
     "number": 7,
     "name": "SYS_SPAWN",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3060,7 +3060,7 @@
     "number": 8,
     "name": "SYS_GETPROCID",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3068,7 +3068,7 @@
     "number": 9,
     "name": "SYS_GETLASTERROR",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3076,7 +3076,7 @@
     "number": 10,
     "name": "SYS_SETLASTERROR",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3084,7 +3084,7 @@
     "number": 11,
     "name": "SYS_HEAP_ALLOC",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3092,7 +3092,7 @@
     "number": 12,
     "name": "SYS_HEAP_FREE",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3100,7 +3100,7 @@
     "number": 13,
     "name": "SYS_PERF_COUNTER",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3108,7 +3108,7 @@
     "number": 14,
     "name": "SYS_HEAP_SIZE",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3116,7 +3116,7 @@
     "number": 15,
     "name": "SYS_HEAP_REALLOC",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3124,7 +3124,7 @@
     "number": 16,
     "name": "SYS_WIN32_MISS_LOG",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3132,7 +3132,7 @@
     "number": 17,
     "name": "SYS_GETTIME_FT",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3140,7 +3140,7 @@
     "number": 18,
     "name": "SYS_NOW_NS",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3148,7 +3148,7 @@
     "number": 19,
     "name": "SYS_SLEEP_MS",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3156,7 +3156,7 @@
     "number": 20,
     "name": "SYS_FILE_OPEN",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3164,7 +3164,7 @@
     "number": 21,
     "name": "SYS_FILE_READ",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3172,7 +3172,7 @@
     "number": 22,
     "name": "SYS_FILE_CLOSE",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3180,7 +3180,7 @@
     "number": 23,
     "name": "SYS_FILE_SEEK",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3188,7 +3188,7 @@
     "number": 24,
     "name": "SYS_FILE_FSTAT",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3196,7 +3196,7 @@
     "number": 25,
     "name": "SYS_MUTEX_CREATE",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3204,7 +3204,7 @@
     "number": 26,
     "name": "SYS_MUTEX_WAIT",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3212,7 +3212,7 @@
     "number": 27,
     "name": "SYS_MUTEX_RELEASE",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3220,7 +3220,7 @@
     "number": 28,
     "name": "SYS_VMAP",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3228,7 +3228,7 @@
     "number": 29,
     "name": "SYS_VUNMAP",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3236,7 +3236,7 @@
     "number": 30,
     "name": "SYS_EVENT_CREATE",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3244,7 +3244,7 @@
     "number": 31,
     "name": "SYS_EVENT_SET",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3252,7 +3252,7 @@
     "number": 32,
     "name": "SYS_EVENT_RESET",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3260,7 +3260,7 @@
     "number": 33,
     "name": "SYS_EVENT_WAIT",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3268,7 +3268,7 @@
     "number": 34,
     "name": "SYS_TLS_ALLOC",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3276,7 +3276,7 @@
     "number": 35,
     "name": "SYS_TLS_FREE",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3284,7 +3284,7 @@
     "number": 36,
     "name": "SYS_TLS_GET",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3292,7 +3292,7 @@
     "number": 37,
     "name": "SYS_TLS_SET",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3300,7 +3300,7 @@
     "number": 38,
     "name": "SYS_BP_INSTALL",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3308,7 +3308,7 @@
     "number": 39,
     "name": "SYS_BP_REMOVE",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3316,7 +3316,7 @@
     "number": 40,
     "name": "SYS_GETTIME_ST",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3324,7 +3324,7 @@
     "number": 41,
     "name": "SYS_ST_TO_FT",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3332,7 +3332,7 @@
     "number": 42,
     "name": "SYS_FT_TO_ST",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3340,7 +3340,7 @@
     "number": 43,
     "name": "SYS_FILE_WRITE",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3348,7 +3348,7 @@
     "number": 44,
     "name": "SYS_FILE_CREATE",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3356,7 +3356,7 @@
     "number": 45,
     "name": "SYS_THREAD_CREATE",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3364,7 +3364,7 @@
     "number": 46,
     "name": "SYS_DEBUG_PRINT",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3372,7 +3372,7 @@
     "number": 47,
     "name": "SYS_MEM_STATUS",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3380,7 +3380,7 @@
     "number": 48,
     "name": "SYS_WAIT_MULTI",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3388,7 +3388,7 @@
     "number": 49,
     "name": "SYS_SYSTEM_INFO",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3396,7 +3396,7 @@
     "number": 50,
     "name": "SYS_DEBUG_PRINTW",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3404,7 +3404,7 @@
     "number": 51,
     "name": "SYS_SEM_CREATE",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3412,7 +3412,7 @@
     "number": 52,
     "name": "SYS_SEM_RELEASE",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3420,7 +3420,7 @@
     "number": 53,
     "name": "SYS_SEM_WAIT",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3428,7 +3428,7 @@
     "number": 54,
     "name": "SYS_THREAD_WAIT",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3436,7 +3436,7 @@
     "number": 55,
     "name": "SYS_THREAD_EXIT_CODE",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3444,7 +3444,7 @@
     "number": 56,
     "name": "SYS_NT_INVOKE",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3452,7 +3452,7 @@
     "number": 57,
     "name": "SYS_DLL_PROC_ADDRESS",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3460,7 +3460,7 @@
     "number": 58,
     "name": "SYS_WIN_CREATE",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3468,7 +3468,7 @@
     "number": 59,
     "name": "SYS_WIN_DESTROY",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3476,7 +3476,7 @@
     "number": 60,
     "name": "SYS_WIN_SHOW",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3484,7 +3484,7 @@
     "number": 61,
     "name": "SYS_WIN_MSGBOX",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3492,7 +3492,7 @@
     "number": 62,
     "name": "SYS_WIN_PEEK_MSG",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3500,7 +3500,7 @@
     "number": 63,
     "name": "SYS_WIN_GET_MSG",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3508,7 +3508,7 @@
     "number": 64,
     "name": "SYS_WIN_POST_MSG",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3516,7 +3516,7 @@
     "number": 65,
     "name": "SYS_GDI_FILL_RECT",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3524,7 +3524,7 @@
     "number": 66,
     "name": "SYS_GDI_TEXT_OUT",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3532,7 +3532,7 @@
     "number": 67,
     "name": "SYS_GDI_RECTANGLE",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3540,7 +3540,7 @@
     "number": 68,
     "name": "SYS_GDI_CLEAR",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3548,7 +3548,7 @@
     "number": 69,
     "name": "SYS_WIN_MOVE",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3556,7 +3556,7 @@
     "number": 70,
     "name": "SYS_WIN_GET_RECT",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3564,7 +3564,7 @@
     "number": 71,
     "name": "SYS_WIN_SET_TEXT",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3572,7 +3572,7 @@
     "number": 72,
     "name": "SYS_WIN_TIMER_SET",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3580,7 +3580,7 @@
     "number": 73,
     "name": "SYS_WIN_TIMER_KILL",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3588,7 +3588,7 @@
     "number": 74,
     "name": "SYS_GDI_LINE",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3596,7 +3596,7 @@
     "number": 75,
     "name": "SYS_GDI_ELLIPSE",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3604,7 +3604,7 @@
     "number": 76,
     "name": "SYS_GDI_SET_PIXEL",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3612,7 +3612,7 @@
     "number": 77,
     "name": "SYS_WIN_GET_KEYSTATE",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3620,7 +3620,7 @@
     "number": 78,
     "name": "SYS_WIN_GET_CURSOR",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3628,7 +3628,7 @@
     "number": 79,
     "name": "SYS_WIN_SET_CURSOR",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3636,7 +3636,7 @@
     "number": 80,
     "name": "SYS_WIN_SET_CAPTURE",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3644,7 +3644,7 @@
     "number": 81,
     "name": "SYS_WIN_RELEASE_CAPTURE",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3652,7 +3652,7 @@
     "number": 82,
     "name": "SYS_WIN_GET_CAPTURE",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3660,7 +3660,7 @@
     "number": 83,
     "name": "SYS_WIN_CLIP_SET_TEXT",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3668,7 +3668,7 @@
     "number": 84,
     "name": "SYS_WIN_CLIP_GET_TEXT",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3676,7 +3676,7 @@
     "number": 85,
     "name": "SYS_WIN_GET_LONG",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3684,7 +3684,7 @@
     "number": 86,
     "name": "SYS_WIN_SET_LONG",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3692,7 +3692,7 @@
     "number": 87,
     "name": "SYS_WIN_INVALIDATE",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3700,7 +3700,7 @@
     "number": 88,
     "name": "SYS_WIN_VALIDATE",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3708,7 +3708,7 @@
     "number": 89,
     "name": "SYS_WIN_GET_ACTIVE",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3716,7 +3716,7 @@
     "number": 90,
     "name": "SYS_WIN_SET_ACTIVE",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3724,7 +3724,7 @@
     "number": 91,
     "name": "SYS_WIN_GET_METRIC",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3732,7 +3732,7 @@
     "number": 92,
     "name": "SYS_WIN_ENUM",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3740,7 +3740,7 @@
     "number": 93,
     "name": "SYS_WIN_FIND",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3748,7 +3748,7 @@
     "number": 94,
     "name": "SYS_WIN_SET_PARENT",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3756,7 +3756,7 @@
     "number": 95,
     "name": "SYS_WIN_GET_PARENT",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3764,7 +3764,7 @@
     "number": 96,
     "name": "SYS_WIN_GET_RELATED",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3772,7 +3772,7 @@
     "number": 97,
     "name": "SYS_WIN_SET_FOCUS",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3780,7 +3780,7 @@
     "number": 98,
     "name": "SYS_WIN_GET_FOCUS",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3788,7 +3788,7 @@
     "number": 99,
     "name": "SYS_WIN_CARET",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3796,7 +3796,7 @@
     "number": 100,
     "name": "SYS_WIN_BEEP",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3804,7 +3804,7 @@
     "number": 101,
     "name": "SYS_GFX_D3D_STUB",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3812,7 +3812,7 @@
     "number": 102,
     "name": "SYS_GDI_BITBLT",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3820,7 +3820,7 @@
     "number": 103,
     "name": "SYS_WIN_BEGIN_PAINT",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3828,7 +3828,7 @@
     "number": 104,
     "name": "SYS_WIN_END_PAINT",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3836,7 +3836,7 @@
     "number": 105,
     "name": "SYS_GDI_FILL_RECT_USER",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3844,7 +3844,7 @@
     "number": 106,
     "name": "SYS_GDI_CREATE_COMPAT_DC",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3852,7 +3852,7 @@
     "number": 107,
     "name": "SYS_GDI_CREATE_COMPAT_BITMAP",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3860,7 +3860,7 @@
     "number": 108,
     "name": "SYS_GDI_CREATE_SOLID_BRUSH",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3868,7 +3868,7 @@
     "number": 109,
     "name": "SYS_GDI_GET_STOCK_OBJECT",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3876,7 +3876,7 @@
     "number": 110,
     "name": "SYS_GDI_SELECT_OBJECT",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3884,7 +3884,7 @@
     "number": 111,
     "name": "SYS_GDI_DELETE_DC",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3892,7 +3892,7 @@
     "number": 112,
     "name": "SYS_GDI_DELETE_OBJECT",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3900,7 +3900,7 @@
     "number": 113,
     "name": "SYS_GDI_BITBLT_DC",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3908,7 +3908,7 @@
     "number": 114,
     "name": "SYS_GDI_SET_TEXT_COLOR",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3916,7 +3916,7 @@
     "number": 115,
     "name": "SYS_GDI_SET_BK_COLOR",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3924,7 +3924,7 @@
     "number": 116,
     "name": "SYS_GDI_SET_BK_MODE",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3932,7 +3932,7 @@
     "number": 117,
     "name": "SYS_GDI_STRETCH_BLT_DC",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3940,7 +3940,7 @@
     "number": 118,
     "name": "SYS_GDI_CREATE_PEN",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3948,7 +3948,7 @@
     "number": 119,
     "name": "SYS_GDI_MOVE_TO_EX",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3956,7 +3956,7 @@
     "number": 120,
     "name": "SYS_GDI_LINE_TO",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3964,7 +3964,7 @@
     "number": 121,
     "name": "SYS_GDI_DRAW_TEXT_USER",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3972,7 +3972,7 @@
     "number": 122,
     "name": "SYS_GDI_RECTANGLE_FILLED",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3980,7 +3980,7 @@
     "number": 123,
     "name": "SYS_GDI_ELLIPSE_FILLED",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3988,7 +3988,7 @@
     "number": 124,
     "name": "SYS_GDI_PAT_BLT",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -3996,7 +3996,7 @@
     "number": 125,
     "name": "SYS_GDI_TEXT_OUT_W",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -4004,7 +4004,7 @@
     "number": 126,
     "name": "SYS_GDI_DRAW_TEXT_W",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -4012,7 +4012,7 @@
     "number": 127,
     "name": "SYS_GDI_GET_SYS_COLOR",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -4020,7 +4020,7 @@
     "number": 128,
     "name": "SYS_GDI_GET_SYS_COLOR_BRUSH",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {
@@ -4028,7 +4028,7 @@
     "number": 129,
     "name": "SYS_WIN32_CUSTOM",
     "status": "implemented",
-    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
   },
   {

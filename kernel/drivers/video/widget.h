@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../../core/types.h"
+#include "util/types.h"
 
 /*
  * Minimal widget layer — v0.
@@ -105,7 +105,7 @@ using WindowHandle = u32;
 /// Maximum ASCII bytes stored in a window's mutable title buffer
 /// (NUL included). Matches the syscall-side `kWinTitleMax` but
 /// kept independent so this header has no dependency on
-/// `core/syscall.h`.
+/// `syscall/syscall.h`.
 constexpr u32 kWindowTitleStorage = 64;
 
 struct WindowChrome

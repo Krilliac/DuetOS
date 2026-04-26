@@ -78,7 +78,7 @@ firmware-loader slice lands.
   (iwlwifi: signed `.ucode` with TLV sections;
   rtl88xx: `rtl8xxx*.bin` with section/protection codes;
   bcm43xx: BCM-internal `.fw` blobs + b43 cfg). A separate
-  `kernel/core/firmware_loader.cpp` slice is the next
+  `kernel/loader/firmware_loader.cpp` slice is the next
   unblocker.
 - 802.11 MLME / scan / association / key install. The kernel
   has no `cfg80211`-equivalent surface; that's an even later

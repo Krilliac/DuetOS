@@ -25,16 +25,16 @@
  *   + a hand-coded list of NVMe/AHCI metadata regions.
  */
 
-#include "guard.h"
+#include "security/guard.h"
 
-#include "../arch/x86_64/cpu.h"
-#include "../arch/x86_64/hpet.h"
-#include "../arch/x86_64/serial.h"
-#include "../core/klog.h"
-#include "../core/types.h"
-#include "../drivers/input/ps2kbd.h"
-#include "../drivers/video/framebuffer.h"
-#include "../fs/tmpfs.h"
+#include "arch/x86_64/cpu.h"
+#include "arch/x86_64/hpet.h"
+#include "arch/x86_64/serial.h"
+#include "log/klog.h"
+#include "util/types.h"
+#include "drivers/input/ps2kbd.h"
+#include "drivers/video/framebuffer.h"
+#include "fs/tmpfs.h"
 
 namespace duetos::security
 {

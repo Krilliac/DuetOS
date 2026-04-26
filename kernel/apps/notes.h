@@ -1,7 +1,7 @@
 #pragma once
 
-#include "../core/types.h"
-#include "../drivers/video/widget.h"
+#include "util/types.h"
+#include "drivers/video/widget.h"
 
 /*
  * DuetOS Notes — v1.

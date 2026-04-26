@@ -25,9 +25,9 @@
  * is unchanged.
  */
 
-#include "fat32.h"
+#include "fs/fat32.h"
 
-#include "fat32_internal.h"
+#include "fs/fat32_internal.h"
 
 namespace duetos::fs::fat32
 {

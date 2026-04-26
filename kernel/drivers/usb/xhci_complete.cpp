@@ -8,7 +8,7 @@
  * lives in xhci_internal.h.
  */
 
-#include "xhci_internal.h"
+#include "drivers/usb/xhci_internal.h"
 
 namespace duetos::drivers::usb::xhci::internal
 {

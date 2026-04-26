@@ -32,24 +32,24 @@
  *   spans several hundred lines on its own.
  */
 
-#include "window_syscall.h"
+#include "subsystems/win32/window_syscall.h"
 
-#include "custom.h"
+#include "subsystems/win32/custom.h"
 
-#include "../../arch/x86_64/cpu.h"
-#include "../../arch/x86_64/serial.h"
-#include "../../arch/x86_64/traps.h"
-#include "../../core/kdbg.h"
-#include "../../core/process.h"
-#include "../../core/syscall.h"
-#include "../../drivers/audio/pcspk.h"
-#include "../../drivers/video/framebuffer.h"
-#include "../../drivers/video/theme.h"
-#include "../../drivers/video/widget.h"
-#include "../../mm/kheap.h"
-#include "../../mm/paging.h"
-#include "../../sched/sched.h"
-#include "gdi_objects.h"
+#include "arch/x86_64/cpu.h"
+#include "arch/x86_64/serial.h"
+#include "arch/x86_64/traps.h"
+#include "diag/kdbg.h"
+#include "proc/process.h"
+#include "syscall/syscall.h"
+#include "drivers/audio/pcspk.h"
+#include "drivers/video/framebuffer.h"
+#include "drivers/video/theme.h"
+#include "drivers/video/widget.h"
+#include "mm/kheap.h"
+#include "mm/paging.h"
+#include "sched/sched.h"
+#include "subsystems/win32/gdi_objects.h"
 
 namespace duetos::subsystems::win32
 {

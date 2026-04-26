@@ -24,13 +24,13 @@
  *   resource.
  */
 
-#include "virtio_gpu.h"
+#include "drivers/gpu/virtio_gpu.h"
 
-#include "../../arch/x86_64/serial.h"
-#include "../../mm/frame_allocator.h"
-#include "../../mm/page.h"
-#include "../../mm/paging.h"
-#include "../pci/pci.h"
+#include "arch/x86_64/serial.h"
+#include "mm/frame_allocator.h"
+#include "mm/page.h"
+#include "mm/paging.h"
+#include "drivers/pci/pci.h"
 
 namespace duetos::drivers::gpu
 {

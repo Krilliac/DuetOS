@@ -1,9 +1,9 @@
-#include "attack_sim.h"
+#include "security/attack_sim.h"
 
-#include "../arch/x86_64/serial.h"
-#include "../core/klog.h"
-#include "../core/runtime_checker.h"
-#include "../drivers/storage/block.h"
+#include "arch/x86_64/serial.h"
+#include "log/klog.h"
+#include "diag/runtime_checker.h"
+#include "drivers/storage/block.h"
 
 namespace duetos::security
 {

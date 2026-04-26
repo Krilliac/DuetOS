@@ -1,7 +1,7 @@
-#include "nt_coverage.h"
+#include "subsystems/win32/nt_coverage.h"
 
-#include "../../arch/x86_64/serial.h"
-#include "nt_syscall_table_generated.h"
+#include "arch/x86_64/serial.h"
+#include "subsystems/win32/nt_syscall_table_generated.h"
 
 namespace duetos::win32
 {

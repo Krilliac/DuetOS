@@ -3,7 +3,7 @@
 /*
  * DuetOS — Linux-ABI ring-3 smoke test.
  *
- * Companion to core/ring3_smoke.cpp. Constructs a minimal ring-3
+ * Companion to proc/ring3_smoke.cpp. Constructs a minimal ring-3
  * task whose payload is a raw `syscall` instruction sequence:
  *
  *   mov  eax, 231          ; SYS_EXIT_GROUP
@@ -52,7 +52,7 @@ void SpawnRing3LinuxMmapSmoke();
 /// syscalls and prints a pass/fail tag for each. Source lives in
 /// userland/apps/synxtest/synxtest.c; the compiled ELF is embedded
 /// into the kernel image via kernel/core/generated_synxtest_elf.h
-/// (rebuild via tools/embed-blob.py if the source changes).
+/// (rebuild via tools/build/embed-blob.py if the source changes).
 void SpawnSynxTestElf();
 
 /// Exercises the ABI translation unit. Issues one syscall that

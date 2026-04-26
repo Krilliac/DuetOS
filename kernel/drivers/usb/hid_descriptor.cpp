@@ -1,8 +1,8 @@
-#include "hid_descriptor.h"
+#include "drivers/usb/hid_descriptor.h"
 
-#include "../../arch/x86_64/serial.h"
-#include "../../core/klog.h"
-#include "../../core/panic.h"
+#include "arch/x86_64/serial.h"
+#include "log/klog.h"
+#include "core/panic.h"
 
 namespace duetos::drivers::usb::hid
 {

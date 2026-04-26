@@ -18,7 +18,7 @@ shell commands.
 Applies to:
 
 - `kernel/core/klog.{h,cpp}` — the logger itself.
-- `kernel/core/shell.cpp` — `loglevel`, `dmesg`, `logcolor`
+- `kernel/shell/shell.cpp` — `loglevel`, `dmesg`, `logcolor`
   commands.
 - `kernel/core/main.cpp` — file-sink install, metrics
   checkpoints.

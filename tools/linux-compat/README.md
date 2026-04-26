@@ -42,7 +42,7 @@ that covers j00ru's NT table (see `../win32-compat/README.md`).
 ## Regenerating
 
 ```sh
-tools/regenerate-syscall-artifacts.sh
+tools/build/regenerate-syscall-artifacts.sh
 ```
 
 This runs the Linux table generator, the NT table generator, and

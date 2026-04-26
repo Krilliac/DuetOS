@@ -1,12 +1,12 @@
-#include "kheap.h"
+#include "mm/kheap.h"
 
-#include "frame_allocator.h"
-#include "page.h"
+#include "mm/frame_allocator.h"
+#include "mm/page.h"
 
-#include "../arch/x86_64/cpu.h"
-#include "../arch/x86_64/serial.h"
-#include "../core/klog.h"
-#include "../core/panic.h"
+#include "arch/x86_64/cpu.h"
+#include "arch/x86_64/serial.h"
+#include "log/klog.h"
+#include "core/panic.h"
 
 namespace duetos::mm
 {

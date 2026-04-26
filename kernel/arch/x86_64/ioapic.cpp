@@ -1,13 +1,13 @@
-#include "ioapic.h"
+#include "arch/x86_64/ioapic.h"
 
-#include "cpu.h"
-#include "lapic.h"
-#include "serial.h"
+#include "arch/x86_64/cpu.h"
+#include "arch/x86_64/lapic.h"
+#include "arch/x86_64/serial.h"
 
-#include "../../acpi/acpi.h"
-#include "../../core/klog.h"
-#include "../../core/panic.h"
-#include "../../mm/paging.h"
+#include "acpi/acpi.h"
+#include "log/klog.h"
+#include "core/panic.h"
+#include "mm/paging.h"
 
 namespace duetos::arch
 {

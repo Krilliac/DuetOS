@@ -28,7 +28,7 @@ from pathlib import Path
 # ----------------------------------------------------------------------
 # Mapping rules. Each entry says: "this NT function is the closest
 # equivalent of this DuetOS SYS_* number". Add entries as we
-# implement matching SYS_* numbers in kernel/core/syscall.h.
+# implement matching SYS_* numbers in kernel/syscall/syscall.h.
 #
 # Naming: keep the SYS_* identifier exactly as it appears in syscall.h
 # so the generator can emit the C++ enum reference verbatim.

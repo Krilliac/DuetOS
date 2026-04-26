@@ -17,17 +17,17 @@
  *   TUs (virtio_gpu.cpp, bochs_vbe.cpp, etc.).
  */
 
-#include "gpu.h"
+#include "drivers/gpu/gpu.h"
 
-#include "../../arch/x86_64/hypervisor.h"
-#include "../../arch/x86_64/serial.h"
-#include "../../core/klog.h"
-#include "../../core/panic.h"
-#include "../../drivers/video/framebuffer.h"
-#include "../../mm/paging.h"
-#include "../pci/pci.h"
-#include "bochs_vbe.h"
-#include "virtio_gpu.h"
+#include "arch/x86_64/hypervisor.h"
+#include "arch/x86_64/serial.h"
+#include "log/klog.h"
+#include "core/panic.h"
+#include "drivers/video/framebuffer.h"
+#include "mm/paging.h"
+#include "drivers/pci/pci.h"
+#include "drivers/gpu/bochs_vbe.h"
+#include "drivers/gpu/virtio_gpu.h"
 
 namespace duetos::drivers::gpu
 {

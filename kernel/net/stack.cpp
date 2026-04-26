@@ -32,15 +32,15 @@
  *   for now they share helper functions and stay together.
  */
 
-#include "stack.h"
-#include "wifi.h"
+#include "net/stack.h"
+#include "net/wifi.h"
 
-#include "../arch/x86_64/serial.h"
-#include "../arch/x86_64/timer.h"
-#include "../core/klog.h"
-#include "../core/panic.h"
-#include "../drivers/net/net.h"
-#include "../sched/sched.h"
+#include "arch/x86_64/serial.h"
+#include "arch/x86_64/timer.h"
+#include "log/klog.h"
+#include "core/panic.h"
+#include "drivers/net/net.h"
+#include "sched/sched.h"
 
 namespace duetos::net
 {

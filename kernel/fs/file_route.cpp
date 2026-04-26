@@ -22,15 +22,15 @@
  *   FS-specific code sees the path.
  */
 
-#include "file_route.h"
+#include "fs/file_route.h"
 
-#include "../arch/x86_64/serial.h"
-#include "../core/klog.h"
-#include "../core/panic.h"
-#include "../core/process.h"
-#include "fat32.h"
-#include "ramfs.h"
-#include "vfs.h"
+#include "arch/x86_64/serial.h"
+#include "log/klog.h"
+#include "core/panic.h"
+#include "proc/process.h"
+#include "fs/fat32.h"
+#include "fs/ramfs.h"
+#include "fs/vfs.h"
 
 namespace duetos::fs::routing
 {

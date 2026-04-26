@@ -9,7 +9,7 @@ and prints a hash -> name table you can grep CRTRACE output
 against.
 
 The kernel's hash function is in
-kernel/core/cleanroom_trace.cpp:CleanroomTraceHashToken — RFC-
+kernel/diag/cleanroom_trace.cpp:CleanroomTraceHashToken — RFC-
 style FNV-1a-64 (offset 14695981039346656037, prime
 1099511628211). Any standard FNV-1a-64 implementation will
 produce matching hashes. An earlier revision used a truncated
@@ -31,7 +31,7 @@ import re
 import sys
 from pathlib import Path
 
-# Mirror of the kernel's current offset/prime — see kernel/core/cleanroom_trace.cpp.
+# Mirror of the kernel's current offset/prime — see kernel/diag/cleanroom_trace.cpp.
 KERNEL_FNV_OFFSET = 14695981039346656037
 KERNEL_FNV_OFFSET_LEGACY = 1469598103934665603  # Pre-2026-04-25; missing trailing digit.
 KERNEL_FNV_PRIME = 1099511628211
@@ -47,7 +47,7 @@ def kernel_hash(s: str, *, legacy: bool = False) -> int:
 
 
 # Curated baseline of shell command names. Extracted from
-# kernel/core/shell.cpp's command-name table on 2026-04-25.
+# kernel/shell/shell.cpp's command-name table on 2026-04-25.
 # Keep alphabetically sorted; new commands can be appended.
 KNOWN_SHELL_COMMANDS: tuple[str, ...] = (
     "about", "alias", "attacksim", "bp", "breakpoint", "cat", "cd",

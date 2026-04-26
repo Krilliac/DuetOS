@@ -52,7 +52,7 @@ Expected output:
   3. ICMP echo to `8.8.8.8` (skipped when SLIRP runs without
      raw-ICMP capability — typical for unprivileged QEMU).
   4. TCP connect + HTTP/1.0 GET to the resolved Google IP.
-- **`kernel/core/firmware_loader.cpp/.h`** — vendor-firmware
+- **`kernel/loader/firmware_loader.cpp/.h`** — vendor-firmware
   loader scaffold. v0 backend always misses; the API lets
   iwlwifi / rtl88xx / bcm43xx call `FwLoad(req)` honestly so
   `firmware_pending` is set from a real lookup result instead

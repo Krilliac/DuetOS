@@ -1,8 +1,8 @@
-#include "notes.h"
+#include "apps/notes.h"
 
-#include "../arch/x86_64/serial.h"
-#include "../drivers/input/ps2kbd.h"
-#include "../drivers/video/framebuffer.h"
+#include "arch/x86_64/serial.h"
+#include "drivers/input/ps2kbd.h"
+#include "drivers/video/framebuffer.h"
 
 namespace duetos::apps::notes
 {

@@ -13,7 +13,7 @@
  * (the via-DLL path runs first; the stub is only reached
  * if preload fails). A later sweep deletes the dead rows.
  *
- * Build: tools/build-kernel32-dll.sh
+ * Build: tools/build/build-kernel32-dll.sh
  *   clang --target=x86_64-pc-windows-msvc + lld-link /dll
  *   /noentry /nodefaultlib /base:0x10020000 + one /export:
  *   line per function. No CRT, no imports.

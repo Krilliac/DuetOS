@@ -14,15 +14,15 @@
  * swap and no page reclaim.
  */
 
-#include "syscall_internal.h"
+#include "subsystems/linux/syscall_internal.h"
 
-#include "../../arch/x86_64/serial.h"
-#include "../../core/process.h"
-#include "../../fs/fat32.h"
-#include "../../mm/address_space.h"
-#include "../../mm/frame_allocator.h"
-#include "../../mm/page.h"
-#include "../../mm/paging.h"
+#include "arch/x86_64/serial.h"
+#include "proc/process.h"
+#include "fs/fat32.h"
+#include "mm/address_space.h"
+#include "mm/frame_allocator.h"
+#include "mm/page.h"
+#include "mm/paging.h"
 
 namespace duetos::subsystems::linux::internal
 {

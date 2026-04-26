@@ -1,10 +1,10 @@
-#include "spinlock.h"
+#include "sync/spinlock.h"
 
-#include "../arch/x86_64/cpu.h"
-#include "../arch/x86_64/serial.h"
-#include "../core/klog.h"
-#include "../core/panic.h"
-#include "../cpu/percpu.h"
+#include "arch/x86_64/cpu.h"
+#include "arch/x86_64/serial.h"
+#include "log/klog.h"
+#include "core/panic.h"
+#include "cpu/percpu.h"
 
 // Holder-tracking knob — gated on the kernel having installed
 // PerCpu, since the per-CPU stack lives there. Acquires before

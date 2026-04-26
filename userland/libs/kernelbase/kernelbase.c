@@ -4,7 +4,7 @@
  * DuetOS kernelbase.dll — a pure forwarder DLL. Every export
  * is a cross-DLL forwarder (via msvcp140.dll-style .def) to
  * the matching kernel32.dll entry. The forwarder chaser
- * in kernel/core/pe_loader.cpp recurses
+ * in kernel/loader/pe_loader.cpp recurses
  * through these at load time, so an import of
  * `kernelbase.dll!GetCurrentProcessId` ends up pointing at
  * `kernel32.dll!GetCurrentProcessId` via a one-hop chase.

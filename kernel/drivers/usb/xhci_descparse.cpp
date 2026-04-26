@@ -8,7 +8,7 @@
  * already in RAM from FetchAndParseConfig over in xhci.cpp.
  */
 
-#include "xhci_internal.h"
+#include "drivers/usb/xhci_internal.h"
 
 namespace duetos::drivers::usb::xhci::internal
 {

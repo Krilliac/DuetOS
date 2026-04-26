@@ -252,8 +252,8 @@ dispatcher.
 ## References
 
 - `kernel/subsystems/linux/syscall.{h,cpp,_entry.S}` — core
-- `kernel/core/ring3_smoke.cpp::SpawnElfLinux` — loader entry
-- `kernel/core/process.h` — Process fields
+- `kernel/proc/ring3_smoke.cpp::SpawnElfLinux` — loader entry
+- `kernel/proc/process.h` — Process fields
 - `kernel/cpu/percpu.h` — per-CPU layout
 - `tools/qemu/make-gpt-image.py` — `/fat/LINUX.ELF` seed
 - `.claude/knowledge/security-guard.md` — image-load gate that

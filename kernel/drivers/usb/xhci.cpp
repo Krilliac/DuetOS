@@ -31,21 +31,21 @@
  *   sequencing. Plus the per-class probe chains live here too.
  */
 
-#include "xhci.h"
+#include "drivers/usb/xhci.h"
 
-#include "../../arch/x86_64/cpu.h"
-#include "../../arch/x86_64/serial.h"
-#include "../../core/cleanroom_trace.h"
-#include "../../core/klog.h"
-#include "../../core/result.h"
-#include "../../mm/frame_allocator.h"
-#include "../../mm/page.h"
-#include "../../sched/sched.h"
-#include "../input/ps2kbd.h"
-#include "../input/ps2mouse.h"
-#include "../pci/pci.h"
-#include "usb.h"
-#include "xhci_internal.h"
+#include "arch/x86_64/cpu.h"
+#include "arch/x86_64/serial.h"
+#include "diag/cleanroom_trace.h"
+#include "log/klog.h"
+#include "util/result.h"
+#include "mm/frame_allocator.h"
+#include "mm/page.h"
+#include "sched/sched.h"
+#include "drivers/input/ps2kbd.h"
+#include "drivers/input/ps2mouse.h"
+#include "drivers/pci/pci.h"
+#include "drivers/usb/usb.h"
+#include "drivers/usb/xhci_internal.h"
 
 namespace duetos::drivers::usb::xhci
 {

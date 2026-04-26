@@ -14,7 +14,7 @@
 // declared in gfxdemo_modes.cpp; the dispatcher resets them when
 // the user hits 'r'.
 
-#include "../core/types.h"
+#include "util/types.h"
 
 namespace duetos::apps::gfxdemo
 {

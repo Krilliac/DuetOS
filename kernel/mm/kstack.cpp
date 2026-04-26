@@ -1,12 +1,12 @@
-#include "kstack.h"
+#include "mm/kstack.h"
 
-#include "frame_allocator.h"
-#include "paging.h"
+#include "mm/frame_allocator.h"
+#include "mm/paging.h"
 
-#include "../arch/x86_64/serial.h"
-#include "../core/klog.h"
-#include "../core/panic.h"
-#include "../sync/spinlock.h"
+#include "arch/x86_64/serial.h"
+#include "log/klog.h"
+#include "core/panic.h"
+#include "sync/spinlock.h"
 
 namespace duetos::mm
 {

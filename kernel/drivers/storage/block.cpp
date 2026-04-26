@@ -1,8 +1,8 @@
-#include "block.h"
+#include "drivers/storage/block.h"
 
-#include "../../arch/x86_64/serial.h"
-#include "../../core/klog.h"
-#include "../../mm/kheap.h"
+#include "arch/x86_64/serial.h"
+#include "log/klog.h"
+#include "mm/kheap.h"
 
 namespace duetos::drivers::storage
 {

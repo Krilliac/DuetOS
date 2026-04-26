@@ -1,7 +1,7 @@
-#include "calendar.h"
+#include "drivers/video/calendar.h"
 
-#include "../../arch/x86_64/rtc.h"
-#include "framebuffer.h"
+#include "arch/x86_64/rtc.h"
+#include "drivers/video/framebuffer.h"
 
 namespace duetos::drivers::video
 {

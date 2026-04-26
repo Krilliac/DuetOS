@@ -24,11 +24,11 @@ on the next boot.
 - `kernel/security/guard.cpp` — heuristics + state + prompt +
   persistence + self-test
 - Hook sites:
-  - `kernel/core/elf_loader.cpp:ElfLoad` (gates every ELF)
-  - `kernel/core/pe_loader.cpp:PeLoad` (gates every PE incl. DLLs)
+  - `kernel/loader/elf_loader.cpp:ElfLoad` (gates every ELF)
+  - `kernel/loader/pe_loader.cpp:PeLoad` (gates every PE incl. DLLs)
   - `kernel/sched/sched.cpp:SchedCreate + SchedCreateUser` (gates
     every thread, name-based only)
-- `kernel/core/shell.cpp` — `guard` command: status / mode toggles /
+- `kernel/shell/shell.cpp` — `guard` command: status / mode toggles /
   self-test trigger
 - `kernel/drivers/input/ps2kbd.cpp` — new `Ps2KeyboardTryReadChar`
   non-blocking variant for the unified prompt loop

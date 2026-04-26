@@ -8,9 +8,9 @@
  * flag set), but our workloads don't hit the difference yet.
  */
 
-#include "syscall_internal.h"
+#include "subsystems/linux/syscall_internal.h"
 
-#include "../../core/process.h"
+#include "proc/process.h"
 
 namespace duetos::subsystems::linux::internal
 {

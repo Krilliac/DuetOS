@@ -5,7 +5,7 @@
  * Present pipeline. Higher-level state (texture stages, vertex
  * shaders, etc.) returns D3DERR-style codes via DX_HSTUB.
  *
- * Build: tools/build-stub-dll.sh (base 0x10120000).
+ * Build: tools/build/build-stub-dll.sh (base 0x10120000).
  */
 
 #include "../dx_shared.h"

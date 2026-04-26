@@ -1,6 +1,6 @@
 #pragma once
 
-#include "types.h"
+#include "util/types.h"
 
 /*
  * DuetOS — unified kernel panic / assert infrastructure.

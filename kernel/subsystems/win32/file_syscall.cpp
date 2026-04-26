@@ -1,18 +1,18 @@
-#include "file_syscall.h"
+#include "subsystems/win32/file_syscall.h"
 
-#include "custom.h"
+#include "subsystems/win32/custom.h"
 
-#include "../../arch/x86_64/cpu.h"
-#include "../../arch/x86_64/serial.h"
-#include "../../arch/x86_64/traps.h"
-#include "../../core/kdbg.h"
-#include "../../core/process.h"
-#include "../../core/syscall.h"
-#include "../../fs/file_route.h"
-#include "../../fs/ramfs.h"
-#include "../../fs/vfs.h"
-#include "../../mm/paging.h"
-#include "../../sched/sched.h"
+#include "arch/x86_64/cpu.h"
+#include "arch/x86_64/serial.h"
+#include "arch/x86_64/traps.h"
+#include "diag/kdbg.h"
+#include "proc/process.h"
+#include "syscall/syscall.h"
+#include "fs/file_route.h"
+#include "fs/ramfs.h"
+#include "fs/vfs.h"
+#include "mm/paging.h"
+#include "sched/sched.h"
 
 namespace duetos::subsystems::win32
 {

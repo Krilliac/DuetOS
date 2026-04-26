@@ -11,7 +11,7 @@
  * recognising the loops as str or wcs intrinsics and turning
  * them into tail calls to themselves.
  *
- * Build: tools/build-msvcrt-dll.sh
+ * Build: tools/build/build-msvcrt-dll.sh
  *   clang --target=x86_64-pc-windows-msvc + lld-link /dll
  *   /noentry /nodefaultlib /base:0x10040000.
  */

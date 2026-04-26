@@ -1,7 +1,7 @@
-#include "wifi.h"
+#include "net/wifi.h"
 
-#include "../core/cleanroom_trace.h"
-#include "../sync/spinlock.h"
+#include "diag/cleanroom_trace.h"
+#include "sync/spinlock.h"
 
 namespace duetos::net
 {

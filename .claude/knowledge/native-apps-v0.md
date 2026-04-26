@@ -156,7 +156,7 @@ self-test at boot that prints `[<app>] self-test OK (...)` or
 the OK line as an expected signature, catching regressions
 without needing any user interaction.
 
-See `tools/ctest-boot-smoke.sh` — each app adds one line to
+See `tools/test/ctest-boot-smoke.sh` — each app adds one line to
 the `expected` array once its self-test runs.
 
 ## Notes

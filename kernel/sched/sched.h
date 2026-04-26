@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../core/types.h"
+#include "util/types.h"
 
 namespace duetos::mm
 {
@@ -9,7 +9,7 @@ struct AddressSpace; // forward decl; defined in kernel/mm/address_space.h
 
 namespace duetos::core
 {
-struct Process; // forward decl; defined in kernel/core/process.h
+struct Process; // forward decl; defined in kernel/proc/process.h
 }
 
 /*

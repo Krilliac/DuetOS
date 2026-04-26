@@ -1,8 +1,8 @@
-#include "gpt.h"
+#include "fs/gpt.h"
 
-#include "../arch/x86_64/serial.h"
-#include "../core/klog.h"
-#include "../drivers/storage/block.h"
+#include "arch/x86_64/serial.h"
+#include "log/klog.h"
+#include "drivers/storage/block.h"
 
 namespace duetos::fs::gpt
 {

@@ -14,7 +14,7 @@ hypothetical future need. All landed without new files, headers, or subsystems.
 
 ### 1. PE forwarder strings: ordinal form (`Dll.#N`)
 
-`kernel/core/pe_loader.cpp::ParseForwarder` previously rejected `Dll.#N` and
+`kernel/loader/pe_loader.cpp::ParseForwarder` previously rejected `Dll.#N` and
 returned false. Now `ParseForwarder` writes a `ParsedForwarder` struct
 containing `is_ordinal`/`ordinal`/`func` and the resolver dispatches to a new
 `TryResolveViaPreloadedDllsByOrdinalImpl` for the ordinal branch. Same depth
@@ -60,10 +60,10 @@ matching the Win32 `Ellipse(hdc)` contract.
 
 ## Files touched
 
-- `kernel/core/pe_loader.cpp` — `ParseForwarder` + ordinal-form resolver +
+- `kernel/loader/pe_loader.cpp` — `ParseForwarder` + ordinal-form resolver +
   public `PeResolveViaDlls` wrapper
-- `kernel/core/pe_loader.h` — declares `PeResolveViaDlls`
-- `kernel/core/process.cpp` — forwarder chasing in `ProcessResolveDllExport*`
+- `kernel/loader/pe_loader.h` — declares `PeResolveViaDlls`
+- `kernel/proc/process.cpp` — forwarder chasing in `ProcessResolveDllExport*`
 - `kernel/fs/ext4.cpp` — multi-block / multi-extent root-dir walk
 - `kernel/subsystems/win32/gdi_objects.cpp` — outline-on-bitmap + window-path
   filled-ellipse + outline
@@ -110,7 +110,7 @@ clobber the displayed name with stale UTF-16 fragments.
 
 ### 8. PE by-ordinal import resolution
 
-`kernel/core/pe_loader.cpp::ResolveImports` used to reject any IBN entry
+`kernel/loader/pe_loader.cpp::ResolveImports` used to reject any IBN entry
 with bit 63 set ("v0 only resolves by-name imports"). Now an ordinal
 import is parsed off the IBN, a printable `#N` synthetic name is built
 on the stack for log lines, and resolution dispatches to a new public
@@ -122,14 +122,14 @@ with ordinal imports stop being hard-rejects.
 
 - `kernel/drivers/usb/rndis.cpp` — multi-record RX walk
 - `kernel/fs/fat32.cpp` — `ComputeLfnChecksum` + sequence check
-- `kernel/core/pe_loader.cpp` — public `TryResolveViaPreloadedDllsByOrdinal`
+- `kernel/loader/pe_loader.cpp` — public `TryResolveViaPreloadedDllsByOrdinal`
   wrapper + ordinal-import branch in `ResolveImports`
 
 ## Batch 3 — same session
 
 ### 9. PE export name lookup: linear → binary search
 
-`kernel/core/pe_exports.cpp::PeExportLookupName` was a linear scan with a
+`kernel/loader/pe_exports.cpp::PeExportLookupName` was a linear scan with a
 header note that "binary search is a one-file change when a hot loader path
 demands it". With the IAT-resolver and per-process GetProcAddress now both
 hitting the EAT for every import / GetProcAddress call, the loader path
@@ -140,9 +140,9 @@ malformed slot can't mis-discard half a real DLL's exports.
 
 ## Files touched (batch 3)
 
-- `kernel/core/pe_exports.cpp` — `StrCmp3` + binary-search rewrite of
+- `kernel/loader/pe_exports.cpp` — `StrCmp3` + binary-search rewrite of
   `PeExportLookupName`
-- `kernel/core/pe_exports.h` — updated header note
+- `kernel/loader/pe_exports.h` — updated header note
 
 ## Batch 4 — same session
 

@@ -1,6 +1,6 @@
-#include "menu.h"
+#include "drivers/video/menu.h"
 
-#include "framebuffer.h"
+#include "drivers/video/framebuffer.h"
 
 namespace duetos::drivers::video
 {

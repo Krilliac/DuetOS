@@ -1,15 +1,15 @@
-#include "ps2mouse.h"
+#include "drivers/input/ps2mouse.h"
 
-#include "../../acpi/acpi.h"
-#include "../../arch/x86_64/cpu.h"
-#include "../../arch/x86_64/idt.h"
-#include "../../arch/x86_64/ioapic.h"
-#include "../../arch/x86_64/lapic.h"
-#include "../../arch/x86_64/serial.h"
-#include "../../arch/x86_64/traps.h"
-#include "../../core/klog.h"
-#include "../../core/panic.h"
-#include "../../sched/sched.h"
+#include "acpi/acpi.h"
+#include "arch/x86_64/cpu.h"
+#include "arch/x86_64/idt.h"
+#include "arch/x86_64/ioapic.h"
+#include "arch/x86_64/lapic.h"
+#include "arch/x86_64/serial.h"
+#include "arch/x86_64/traps.h"
+#include "log/klog.h"
+#include "core/panic.h"
+#include "sched/sched.h"
 
 // Vector 0x2C = IRQ 12. Stub lives in exceptions.S alongside
 // isr_33 (kbd, IRQ 1); both follow the same isr_common path.

@@ -1,6 +1,6 @@
-#include "gdt.h"
+#include "arch/x86_64/gdt.h"
 
-#include "../../core/klog.h"
+#include "log/klog.h"
 
 namespace duetos::arch
 {

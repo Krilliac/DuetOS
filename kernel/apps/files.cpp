@@ -1,8 +1,8 @@
-#include "files.h"
+#include "apps/files.h"
 
-#include "../arch/x86_64/serial.h"
-#include "../drivers/video/framebuffer.h"
-#include "../fs/ramfs.h"
+#include "arch/x86_64/serial.h"
+#include "drivers/video/framebuffer.h"
+#include "fs/ramfs.h"
 
 namespace duetos::apps::files
 {

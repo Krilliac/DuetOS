@@ -18,7 +18,7 @@ wired, self-test runs at boot. Phases 2 (per-task syscall API) and
   `#BP` (vec 3) and `#DB` (vec 1) route through the manager
   before the generic `LogAndContinue` log line; the manager's
   return value decides whether the fallback fires.
-- `kernel/core/shell.cpp:~2360 / ~6246` — `CmdBp` + dispatch
+- `kernel/shell/shell.cpp:~2360 / ~6246` — `CmdBp` + dispatch
   entry for `bp` / `breakpoint`.
 - `kernel/core/main.cpp:~298` — `BpInit()` + `BpSelfTest()`
   called after `ProtectKernelImage()` and before SMP bring-up.
@@ -127,7 +127,7 @@ Adds:
   whatever CPU the owning task ran on — no IPI shootdown
   needed. SW BPs still assert single-CPU.
 
-Smoke test: `SpawnBpProbeTask()` in `kernel/core/ring3_smoke.cpp`.
+Smoke test: `SpawnBpProbeTask()` in `kernel/proc/ring3_smoke.cpp`.
 A trusted task issues `SYS_BP_INSTALL` on a `nop` in its own
 code page, executes the nop (fires #DB), removes the BP, and
 prints `[bp-probe] passed via HW BP`. Expected log sequence:
@@ -183,7 +183,7 @@ whole OS:
   BP fired while a spinlock is held would deadlock on
   attempted resume. Phase 4 can relax this once that
   telemetry is live.
-- **Shell commands (kernel/core/shell.cpp:CmdBp):**
+- **Shell commands (kernel/shell/shell.cpp:CmdBp):**
   - `bp stopped` — list tasks currently suspended
   - `bp regs <id>` — dump the stopped task's saved trap frame
   - `bp mem <id> <hex-addr> [len]` — hex+ASCII dump of the

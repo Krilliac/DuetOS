@@ -1,8 +1,8 @@
 #pragma once
 
-#include "../../arch/x86_64/traps.h"
-#include "../../core/result.h"
-#include "../../core/types.h"
+#include "arch/x86_64/traps.h"
+#include "util/result.h"
+#include "util/types.h"
 
 /*
  * DuetOS — PCI (legacy port-IO) enumeration, v0.

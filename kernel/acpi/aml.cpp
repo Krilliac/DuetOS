@@ -26,13 +26,13 @@
  *   switch) compiles to a tight jump table.
  */
 
-#include "aml.h"
+#include "acpi/aml.h"
 
-#include "../arch/x86_64/serial.h"
-#include "../core/klog.h"
-#include "../core/panic.h"
-#include "../mm/page.h"
-#include "acpi.h"
+#include "arch/x86_64/serial.h"
+#include "log/klog.h"
+#include "core/panic.h"
+#include "mm/page.h"
+#include "acpi/acpi.h"
 
 namespace duetos::acpi
 {

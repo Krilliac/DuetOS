@@ -130,7 +130,7 @@ init.
 
 ## Boot-smoke guards
 
-`tools/ctest-boot-smoke.sh` asserts every shell's
+`tools/test/ctest-boot-smoke.sh` asserts every shell's
 `discovered Xxx` klog line, every vendor probe's tag, and the
 `class drivers registered` line for USB. The e1000e + Bochs
 family tags are also explicit — they won't drift unless QEMU's

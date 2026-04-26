@@ -65,7 +65,7 @@ future refactors that accidentally widen the namespace.
 - `kernel/core/process.{h,cpp}` — `Process::root`, `ProcessCreate`
   now takes `root`, `kCapFsRead` added.
 - `kernel/core/syscall.{h,cpp}` — `SYS_STAT = 4`.
-- `kernel/core/ring3_smoke.cpp` — trusted tasks use trusted root,
+- `kernel/proc/ring3_smoke.cpp` — trusted tasks use trusted root,
   sandbox task uses sandbox root.
 - `kernel/core/main.cpp` — `RamfsInit` + the self-test block.
 

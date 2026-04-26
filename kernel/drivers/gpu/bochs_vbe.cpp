@@ -1,8 +1,8 @@
-#include "bochs_vbe.h"
+#include "drivers/gpu/bochs_vbe.h"
 
-#include "../../arch/x86_64/cpu.h"
-#include "../../arch/x86_64/serial.h"
-#include "../../core/klog.h"
+#include "arch/x86_64/cpu.h"
+#include "arch/x86_64/serial.h"
+#include "log/klog.h"
 
 namespace duetos::drivers::gpu
 {

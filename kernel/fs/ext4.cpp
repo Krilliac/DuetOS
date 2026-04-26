@@ -22,12 +22,12 @@
  *   own.
  */
 
-#include "ext4.h"
+#include "fs/ext4.h"
 
-#include "../arch/x86_64/serial.h"
-#include "../core/klog.h"
-#include "../core/log_names.h"
-#include "../drivers/storage/block.h"
+#include "arch/x86_64/serial.h"
+#include "log/klog.h"
+#include "diag/log_names.h"
+#include "drivers/storage/block.h"
 
 namespace duetos::fs::ext4
 {

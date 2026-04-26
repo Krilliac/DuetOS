@@ -20,18 +20,18 @@
  *   away.
  */
 
-#include "ps2kbd.h"
+#include "drivers/input/ps2kbd.h"
 
-#include "../../acpi/acpi.h"
-#include "../../arch/x86_64/cpu.h"
-#include "../../arch/x86_64/idt.h"
-#include "../../arch/x86_64/ioapic.h"
-#include "../../arch/x86_64/lapic.h"
-#include "../../arch/x86_64/serial.h"
-#include "../../arch/x86_64/traps.h"
-#include "../../core/klog.h"
-#include "../../core/panic.h"
-#include "../../sched/sched.h"
+#include "acpi/acpi.h"
+#include "arch/x86_64/cpu.h"
+#include "arch/x86_64/idt.h"
+#include "arch/x86_64/ioapic.h"
+#include "arch/x86_64/lapic.h"
+#include "arch/x86_64/serial.h"
+#include "arch/x86_64/traps.h"
+#include "log/klog.h"
+#include "core/panic.h"
+#include "sched/sched.h"
 
 // Defined in exceptions.S — the stub for vector 0x21 that pushes a zero
 // error code, pushes the vector, and jumps to isr_common (which calls

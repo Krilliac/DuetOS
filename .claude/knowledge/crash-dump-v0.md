@@ -22,13 +22,13 @@ every GPR (`rax..r15`) captured in the TrapFrame, which is worth a lot when the
 fault is register-dependent (bad `cr2`, garbage `rdi`, etc.).
 
 Because there is no kernel filesystem yet, "dump file" means "the bytes between
-the two markers on COM1". `tools/test-panic.sh` extracts that range into
+the two markers on COM1". `tools/debug/test-panic.sh` extracts that range into
 `build/<preset>/crash-dumps/<UTC-timestamp>.dump` and asserts the dump's shape
 against a schema.
 
 ## Why embed the symbol table
 
-A post-mortem symbolizer like `llvm-symbolizer` exists (see `tools/symbolize.sh`),
+A post-mortem symbolizer like `llvm-symbolizer` exists (see `tools/debug/symbolize.sh`),
 but it runs **off-box**. That's fine for developer ergonomics — but:
 
 1. On real hardware we often can't pair-ship the ELF + log to the same place.
@@ -46,7 +46,7 @@ The symbol table has to know every function's VA, but *including* the table
 changes those VAs. Classic chicken-and-egg. Resolved with a two-stage link:
 
 1. `duetos-kernel-stage1.elf` links with `core/symbols_stub.cpp` (empty table).
-2. `tools/gen-symbols.sh` reads stage-1's `llvm-nm` output, resolves every
+2. `tools/build/gen-symbols.sh` reads stage-1's `llvm-nm` output, resolves every
    higher-half text symbol via `llvm-addr2line`, and emits
    `symbols_generated.cpp` — a sorted `{addr, size, line, name, file}` array.
 3. `duetos-kernel.elf` links the same sources with `symbols_generated.cpp`
@@ -149,7 +149,7 @@ nearest its data):
   dotted "(major.minor)" rendering of the BCD field.
 - `kernel/mm/paging.cpp` — flag-protect log wraps `flags=0xN` with
   `WritePteFlags` `[P|RW|US|...|NX]`.
-- `kernel/core/pe_loader.cpp` — unsupported reloc-type log resolves
+- `kernel/loader/pe_loader.cpp` — unsupported reloc-type log resolves
   the IMAGE_REL_BASED_* name (DIR64 / HIGHLOW / ABSOLUTE / ...).
 - `kernel/fs/gpt.cpp` — partition-type GUID emits a known-name
   suffix ("EFI System", "Microsoft Basic Data", "Linux Filesystem",
@@ -313,8 +313,8 @@ Lookups are O(log N). With ~300 symbols today the longest walk is 9 iterations
 ## Files
 
 - `kernel/core/symbols.{h,cpp}` — resolver + output helpers.
-- `kernel/core/symbols_stub.cpp` — stage-1 placeholder (count = 0).
-- `tools/gen-symbols.sh` — ELF → `symbols_generated.cpp` generator. Depends on
+- `kernel/util/symbols_stub.cpp` — stage-1 placeholder (count = 0).
+- `tools/build/gen-symbols.sh` — ELF → `symbols_generated.cpp` generator. Depends on
   `llvm-nm` (or `nm`) + `llvm-addr2line` (or `addr2line`). Filter uses
   mawk-compatible awk — no gawk-only builtins like `strtonum`.
 - `kernel/core/panic.{h,cpp}` — emits the bracketed dump, symbolizes RIP +
@@ -327,9 +327,9 @@ Lookups are O(log N). With ~300 symbols today the longest walk is 9 iterations
 - `kernel/CMakeLists.txt` — two-stage build wiring. Gates `DUETOS_PANIC_DEMO`
   (deliberate `Panic()` at end of `kernel_main`) and `DUETOS_TRAP_DEMO`
   (deliberate `ud2` at end of `kernel_main` → `#UD`).
-- `tools/test-panic.sh` — exercises the `Panic` path. Captures the dump into
+- `tools/debug/test-panic.sh` — exercises the `Panic` path. Captures the dump into
   `build/<preset>/crash-dumps/<timestamp>.dump` and asserts its shape.
-- `tools/test-trap.sh` — exercises the trap-dispatcher path via `ud2`.
+- `tools/debug/test-trap.sh` — exercises the trap-dispatcher path via `ud2`.
   Captures into `<timestamp>-trap.dump` and asserts the trap-specific fields
   (`subsystem: arch/traps`, `#UD` message, symbolized RIP). Kept separate so
   a regression in one path can't masquerade as a regression in the other.

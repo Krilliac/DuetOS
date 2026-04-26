@@ -133,7 +133,7 @@ userland/apps/hello_winapi/kernel32.def   llvm-dlltool -> kernel32.lib
         ▼         ▼
 lld-link  ───────────►  hello_winapi.exe  (real x64 PE, 2 KiB, 1 import)
         │
-        ▼  tools/embed-blob.py
+        ▼  tools/build/embed-blob.py
 generated_hello_winapi.h   (constexpr u8 kBinHelloWinapiBytes[])
         │
         ▼  #include in kernel/fs/ramfs.cpp
@@ -158,9 +158,9 @@ stub at 0x60000000:  mov rdi, rcx;  xor eax, eax;  int 0x80;  ud2
 |-------|------|------|
 | Userland source | `userland/apps/hello_winapi/hello.c` | `__declspec(dllimport) void __stdcall ExitProcess(unsigned int)` + `_start` that calls it. No CRT, no libc. |
 | Import stub `.def` | `userland/apps/hello_winapi/kernel32.def` | `LIBRARY kernel32.dll / EXPORTS ExitProcess`. Input to llvm-dlltool. |
-| Host build | `tools/build-hello-winapi.sh` | Generates kernel32.lib, compiles hello.c, links, embeds via `embed-blob.py`. |
+| Host build | `tools/build/build-hello-winapi.sh` | Generates kernel32.lib, compiles hello.c, links, embeds via `embed-blob.py`. |
 | Kernel stub page | `kernel/subsystems/win32/stubs.{h,cpp}` | 9 bytes of x86-64 machine code per stub + a `{dll, func, offset}` lookup table. |
-| Import resolver | `kernel/core/pe_loader.cpp` `ResolveImports` | Walks Import Directory, looks up each `{dll, func}` in the stubs table, patches the IAT slot. |
+| Import resolver | `kernel/loader/pe_loader.cpp` `ResolveImports` | Walks Import Directory, looks up each `{dll, func}` in the stubs table, patches the IAT slot. |
 | Address-space helper | `kernel/mm/address_space.cpp` `AddressSpaceLookupUserFrame` | Given a user VA, returns the backing physical frame — so the resolver can write an IAT slot via `PhysToVirt(frame) + page_offset` without remapping the user page RW. |
 
 ## The ExitProcess stub (9 bytes)

@@ -6,7 +6,7 @@
 
 ## What
 
-`kernel/core/result.h` — a `std::expected`-shaped `Result<T, E = ErrorCode>`
+`kernel/util/result.h` — a `std::expected`-shaped `Result<T, E = ErrorCode>`
 type that's the canonical way every fallible operation returns its
 error to its caller. C++ exceptions are off globally
 (`-fno-exceptions`); CLAUDE.md mandates a `Result<T, E>` type and
@@ -139,7 +139,7 @@ toward a uniform error-propagation surface one slice at a time.
 
 ## References
 
-- `kernel/core/result.h` — the primitive.
-- `kernel/core/result.cpp` — `ErrorCodeName` + self-test.
+- `kernel/util/result.h` — the primitive.
+- `kernel/util/result.cpp` — `ErrorCodeName` + self-test.
 - `kernel/drivers/pci/pci.{h,cpp}::PciMsixRouteSimple` — first
   converted call site.

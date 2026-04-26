@@ -5,7 +5,7 @@ The kernel records `syscall::native-dispatch` and
 `syscall::linux-dispatch` entries with a=syscall_num, b=pid,
 c=rip. This helper prints the equivalent of `crtrace show` with
 each numeric syscall replaced by its symbol so the trace is
-readable without cross-referencing kernel/core/syscall.h and
+readable without cross-referencing kernel/syscall/syscall.h and
 kernel/subsystems/linux/syscall.cpp by hand.
 
 Usage:
@@ -19,7 +19,7 @@ import re
 import sys
 from pathlib import Path
 
-# Native syscall map — extracted from kernel/core/syscall.h
+# Native syscall map — extracted from kernel/syscall/syscall.h
 # (numbers under SYS_*). Keep this in sync when new SYS_* lands.
 NATIVE_SYSCALLS: dict[int, str] = {
     0: "EXIT", 1: "GETPID", 2: "WRITE", 3: "YIELD", 4: "STAT",

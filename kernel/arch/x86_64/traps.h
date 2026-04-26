@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../../core/types.h"
+#include "util/types.h"
 
 /*
  * Uniform trap frame presented to the C++ dispatcher by every CPU-exception

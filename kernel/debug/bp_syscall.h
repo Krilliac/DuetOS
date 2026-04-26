@@ -2,7 +2,7 @@
 
 /*
  * Debug breakpoint syscall handlers — extracted from
- * core/syscall.cpp so the dispatcher stays a thin router.
+ * syscall/syscall.cpp so the dispatcher stays a thin router.
  *
  *   SYS_BP_INSTALL (38) — rdi=va, rsi=kind|flags, rdx=len
  *   SYS_BP_REMOVE  (39) — rdi=bp_id

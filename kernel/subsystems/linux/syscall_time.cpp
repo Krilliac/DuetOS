@@ -12,13 +12,13 @@
  * a sleep mid-flight (no signal delivery yet).
  */
 
-#include "syscall_internal.h"
+#include "subsystems/linux/syscall_internal.h"
 
-#include "../../arch/x86_64/hpet.h"
-#include "../../arch/x86_64/timer.h"
-#include "../../core/process.h"
-#include "../../mm/address_space.h"
-#include "../../sched/sched.h"
+#include "arch/x86_64/hpet.h"
+#include "arch/x86_64/timer.h"
+#include "proc/process.h"
+#include "mm/address_space.h"
+#include "sched/sched.h"
 
 namespace duetos::subsystems::linux::internal
 {

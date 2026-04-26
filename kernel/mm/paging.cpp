@@ -32,16 +32,16 @@
  *   they accumulate.
  */
 
-#include "paging.h"
+#include "mm/paging.h"
 
-#include "frame_allocator.h"
-#include "page.h"
+#include "mm/frame_allocator.h"
+#include "mm/page.h"
 
-#include "../arch/x86_64/cpu.h"
-#include "../arch/x86_64/serial.h"
-#include "../core/diag_decode.h"
-#include "../core/klog.h"
-#include "../core/panic.h"
+#include "arch/x86_64/cpu.h"
+#include "arch/x86_64/serial.h"
+#include "diag/diag_decode.h"
+#include "log/klog.h"
+#include "core/panic.h"
 
 namespace duetos::mm
 {

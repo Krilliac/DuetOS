@@ -40,7 +40,7 @@ scheduler, and our syscalls. Bits as shipped, running on DuetOS.
   AHCI, xHCI/USB, PS/2, HDA, e1000. HPET-calibrated LAPIC timer.
   Kernel-mode breakpoint subsystem with hardware DR gates. Live crash
   dump with inline symbol resolution.
-- **PE loader** (`kernel/core/pe_loader.cpp`, `pe_exports.cpp`,
+- **PE loader** (`kernel/loader/pe_loader.cpp`, `pe_exports.cpp`,
   `dll_loader.cpp`) — validates DOS + NT + PE32+ headers, maps
   sections with characteristic-driven flags, applies DIR64 base
   relocations, walks the Export Address Table, resolves imports
@@ -121,7 +121,7 @@ cmake --preset x86_64-release
 cmake --build build/x86_64-release --parallel $(nproc)
 
 # Optional smoke gate equivalent
-DUETOS_TIMEOUT=30 tools/ctest-boot-smoke.sh build/x86_64-debug
+DUETOS_TIMEOUT=30 tools/test/ctest-boot-smoke.sh build/x86_64-debug
 ```
 
 A healthy boot ends with something like:

@@ -659,7 +659,7 @@ get an inline "superseded by <commit>" note and stay.
   of `mov eax,0; xor edi,edi; int 0x80`). `kernel/core/
   ring3_smoke.{h,cpp}` — `Ring3UserEntry` promoted out of the
   anon namespace; new `SpawnElfFile` wraps the full AS → ELF →
-  Process → SchedCreateUser pipeline. `kernel/core/shell.cpp`
+  Process → SchedCreateUser pipeline. `kernel/shell/shell.cpp`
   — `CmdExec`'s dry-run print is now followed by a real
   `SpawnElfFile` call.
 - **Decision:**
@@ -711,7 +711,7 @@ get an inline "superseded by <commit>" note and stay.
 ## 107 — Proper ELF64 loader module + `exec` dry-run command
 
 - **Scope:** `kernel/core/elf_loader.{h,cpp}` — new module.
-  `kernel/core/shell.cpp` — `exec PATH` command.
+  `kernel/shell/shell.cpp` — `exec PATH` command.
 - **Decision:** Two-stage landing for SYS_SPAWN:
     Stage 1 (this slice): validation + iteration API.
       ElfValidate, ElfEntry, ElfProgramHeaderInfo,
@@ -750,7 +750,7 @@ get an inline "superseded by <commit>" note and stay.
   Cli() to find the target, applies a state-specific
   detach, and sets `kill_requested` + `kill_reason`.
   Reserved tasks (pid 0, reaper, idle-*) are rejected as
-  Protected. `kernel/core/shell.cpp` — `kill PID` command
+  Protected. `kernel/shell/shell.cpp` — `kill PID` command
   translates KillResult to user messages.
 - **Decision:** State-specific behaviour:
     Running / Ready  — flag only; Schedule() handles.
@@ -792,7 +792,7 @@ get an inline "superseded by <commit>" note and stay.
 
 ## 105 — Shell utility batch (sleep / reset / tac / nl / rev / expr / color / rand / flushtlb / checksum / repeat)
 
-- **Scope:** `kernel/core/shell.cpp` — eleven commands in
+- **Scope:** `kernel/shell/shell.cpp` — eleven commands in
   two sub-batches. All wrappers around existing APIs.
 - **Decision:**
   - `sleep N` polls the interrupt flag every second so a
@@ -831,7 +831,7 @@ get an inline "superseded by <commit>" note and stay.
 
 ## 104 — Shell file-inspection commands (hexdump / stat / basename / dirname / cal)
 
-- **Scope:** `kernel/core/shell.cpp` — five commands, each a
+- **Scope:** `kernel/shell/shell.cpp` — five commands, each a
   thin wrapper around existing ramfs/tmpfs paths + a bit of
   local parsing. `hexdump` renders 16-byte rows with the
   canonical HH/ASCII layout. `stat` prints ramfs vs tmpfs +
@@ -860,7 +860,7 @@ get an inline "superseded by <commit>" note and stay.
 
 - **Scope:** `kernel/fs/ramfs.cpp` — 120-byte minimal valid
   ELF64 binary at `/bin/sample.elf` (64-byte header + one
-  PT_LOAD). `kernel/core/shell.cpp` — `readelf PATH` parser
+  PT_LOAD). `kernel/shell/shell.cpp` — `readelf PATH` parser
   + LeU16/LeU32/LeU64 unaligned readers + type-name lookup
   tables.
 - **Decision:** Ship a synthetic header rather than wire up
@@ -889,7 +889,7 @@ get an inline "superseded by <commit>" note and stay.
 
 - **Scope:** `kernel/core/ring3_smoke.{h,cpp}` — new
   `SpawnOnDemand(kind)` dispatcher exposing the existing
-  boot-time ring-3 spawners. `kernel/core/shell.cpp` —
+  boot-time ring-3 spawners. `kernel/shell/shell.cpp` —
   new `spawn <kind>` command where kind ∈ {hello, sandbox,
   jail, nx, hog, hostile, dropcaps}.
 - **Decision:** Keep SYS_SPAWN deferred until a user-mode
@@ -977,7 +977,7 @@ get an inline "superseded by <commit>" note and stay.
 
 ## 099 — Shell system-manipulation command suite (29 new commands)
 
-- **Scope:** `kernel/core/shell.cpp` — one batch of 20 kernel-
+- **Scope:** `kernel/shell/shell.cpp` — one batch of 20 kernel-
   introspection / control commands (cpuid, cr, rflags, tsc, msr,
   hpet, ticks, lapic, smp, lspci, heap, paging, fb, kbdstats,
   mousestats, loglevel, getenv, yield, reboot, halt) plus a
@@ -1019,7 +1019,7 @@ get an inline "superseded by <commit>" note and stay.
 - **Scope:** `kernel/drivers/video/console.{h,cpp}` — new
   `ConsoleBeginCapture` / `ConsoleEndCapture` divert
   shell-slot writes to a caller buffer (klog slot
-  unaffected). `kernel/core/shell.cpp` — Dispatch parses
+  unaffected). `kernel/shell/shell.cpp` — Dispatch parses
   `|` before tokenisation, runs the left half with
   capture active, stashes the output in `/tmp/__pipe__`,
   then re-dispatches the right half with the tmpfs path
@@ -1058,7 +1058,7 @@ get an inline "superseded by <commit>" note and stay.
 
 ## 097 — Shell `sort` + `uniq`
 
-- **Scope:** `kernel/core/shell.cpp` — `CmdSort` + `CmdUniq`
+- **Scope:** `kernel/shell/shell.cpp` — `CmdSort` + `CmdUniq`
   and shared helpers `SliceLines` + `LineCompare`.
 - **Decision:** `sort` uses insertion sort on a (offset, length)
   index pair array (stack-local, cap 128 lines) — line bodies
@@ -1086,7 +1086,7 @@ get an inline "superseded by <commit>" note and stay.
   files (ls, cat, echo, cp, mv, grep, find, history, alias,
   env, time, source) declared via a one-line `MAN_NODE()`
   macro. New `k_trusted_etc_man_dir` slots into `/etc`.
-  `kernel/core/shell.cpp` — `CmdMan` rewritten to build
+  `kernel/shell/shell.cpp` — `CmdMan` rewritten to build
   `/etc/man/<name>` and dispatch through `ReadFileToBuf`.
 - **Decision:** Keep the man-page text in ramfs, not inline
   in shell.cpp. MAN_NODE() macro collapses each per-page
@@ -1112,7 +1112,7 @@ get an inline "superseded by <commit>" note and stay.
 
 ## 095 — Shell `time` / `which` / `seq` + factored kCommandSet
 
-- **Scope:** `kernel/core/shell.cpp` — three new commands, plus
+- **Scope:** `kernel/shell/shell.cpp` — three new commands, plus
   the canonical `kCommandSet[]` lifted from a function-local
   static into a file-scope `static const` so it has one source
   of truth for tab-complete and the new `which` lookup.
@@ -1139,7 +1139,7 @@ get an inline "superseded by <commit>" note and stay.
 
 ## 094 — Shell `grep` + `find`
 
-- **Scope:** `kernel/core/shell.cpp` — `grep PATTERN PATH`
+- **Scope:** `kernel/shell/shell.cpp` — `grep PATTERN PATH`
   walks line-by-line and prints matches; `find NAME`
   recursively walks the ramfs tree printing absolute paths
   whose leaf contains NAME, then enumerates tmpfs slots.
@@ -1169,7 +1169,7 @@ get an inline "superseded by <commit>" note and stay.
 
 - **Scope:** `kernel/fs/ramfs.cpp` — seeds `/etc/motd`
   (welcome banner + key bindings) and `/etc/profile`
-  (default aliases + prompt). `kernel/core/shell.cpp` —
+  (default aliases + prompt). `kernel/shell/shell.cpp` —
   new `source` command (dispatches each line of a file as
   a shell command; `#` comments + blank lines skipped;
   `.` alias). New `man NAME` prints detailed per-command
@@ -1232,7 +1232,7 @@ get an inline "superseded by <commit>" note and stay.
 
 ## 091 — Shell alias / unalias / sysinfo + $PS1 prompt
 
-- **Scope:** `kernel/core/shell.cpp` — 8-slot alias table
+- **Scope:** `kernel/shell/shell.cpp` — 8-slot alias table
   (names 32B, expansions 96B); `alias` / `unalias` / `sysinfo`
   commands; Prompt() now consults $PS1 before defaulting to
   "$ ".
@@ -1263,7 +1263,7 @@ get an inline "superseded by <commit>" note and stay.
 
 ## 090 — Shell env variables + $VAR whole-token substitution
 
-- **Scope:** `kernel/core/shell.cpp` — 8-slot env table
+- **Scope:** `kernel/shell/shell.cpp` — 8-slot env table
   (32-byte names, 128-byte values). New `set` / `unset` /
   `env` commands + pre-tokenize pass in Dispatch that
   replaces whole-token `$VAR` references with their value
@@ -1293,7 +1293,7 @@ get an inline "superseded by <commit>" note and stay.
 
 ## 089 — cp / mv / wc / head / tail coreutils-ish commands
 
-- **Scope:** `kernel/core/shell.cpp` — five new commands
+- **Scope:** `kernel/shell/shell.cpp` — five new commands
   built on a shared `ReadFileToBuf` helper that dispatches
   on the /tmp prefix to pick tmpfs vs ramfs.
 - **Decision:** Keep the commands thin — each is a 20-50
@@ -1378,7 +1378,7 @@ get an inline "superseded by <commit>" note and stay.
 
 - **Scope:** `kernel/fs/tmpfs.{h,cpp}` — new `TmpFsAppend`
   that grows the target slot's content up to the hard cap.
-  `kernel/core/shell.cpp` — echo tokenizer recognises `>>`
+  `kernel/shell/shell.cpp` — echo tokenizer recognises `>>`
   separately from `>` and routes accordingly.
 - **Decision:** Append truncates the portion past
   kTmpFsContentMax rather than failing — matches ENOSPC on a
@@ -1466,7 +1466,7 @@ get an inline "superseded by <commit>" note and stay.
 
 - **Scope:** `kernel/fs/tmpfs.{h,cpp}` — new 16-slot flat
   writable tier with 32-byte names and 512-byte content
-  buffers in .bss. `kernel/core/shell.cpp` — `ls` / `cat` /
+  buffers in .bss. `kernel/shell/shell.cpp` — `ls` / `cat` /
   Tab completion route /tmp paths through tmpfs; new
   `touch` / `rm` commands; `echo ... > /tmp/name` redirect.
 - **Decision:** The first writable tier is deliberately
@@ -1496,7 +1496,7 @@ get an inline "superseded by <commit>" note and stay.
 
 ## 082 — Tab path completion for ls / cat
 
-- **Scope:** `kernel/core/shell.cpp` — `ShellTabComplete`
+- **Scope:** `kernel/shell/shell.cpp` — `ShellTabComplete`
   split into `CompleteCommandName` + `CompletePath`, with
   shared helpers `ExtendLine` / `NamePrefixMatch`. Tab on a
   buffer containing whitespace dispatches to path completion
@@ -2511,7 +2511,7 @@ get an inline "superseded by <commit>" note and stay.
 ## 051 — SYS_YIELD = 3 (cooperative yield from ring 3)
 
 - **Scope:** `kernel/core/syscall.{h,cpp}` — new enum value,
-  new switch case; `kernel/core/ring3_smoke.cpp` — payload
+  new switch case; `kernel/proc/ring3_smoke.cpp` — payload
   grew from 31 → 31+7 = 38 bytes to insert `mov eax, 3; int
   0x80` between the SYS_WRITE and SYS_EXIT calls.
 - **Decision:** Expose `sched::SchedYield` to ring 3 via a
@@ -2680,7 +2680,7 @@ get an inline "superseded by <commit>" note and stay.
   `arch::TssSetRsp0(next->stack_base + next->stack_size)` right
   before `ContextSwitch`, for every task with a non-null
   `stack_base`. Include reorg in `kernel/sched/sched.cpp` +
-  comment in `kernel/core/ring3_smoke.cpp` downgrading the manual
+  comment in `kernel/proc/ring3_smoke.cpp` downgrading the manual
   TssSetRsp0 call there to belt-and-braces.
 - **Decision:** Make "TSS.RSP0 always reflects the current task's
   kernel-stack top" an invariant the scheduler owns, not an
@@ -2720,7 +2720,7 @@ get an inline "superseded by <commit>" note and stay.
 
 - **Scope:** `kernel/core/syscall.{h,cpp}` — `SYS_WRITE = 2`,
   `DoWrite` helper, `kSyscallWriteMax = 256` bounce buffer cap.
-  Ring-3 payload update in `kernel/core/ring3_smoke.cpp` (now
+  Ring-3 payload update in `kernel/proc/ring3_smoke.cpp` (now
   calls SYS_WRITE with "Hello from ring 3!\n" before SYS_EXIT).
 - **Decision:** First syscall that consumes a pointer argument.
   Calling convention: rdi = fd, rsi = buf, rdx = len. Only fd=1
@@ -2845,7 +2845,7 @@ get an inline "superseded by <commit>" note and stay.
   exception fallback), `kernel/core/syscall.{h,cpp}` (new module:
   `SyscallNumber::SYS_EXIT`, `SyscallInit`, `SyscallDispatch`),
   wiring in `kernel/core/main.cpp`, payload update in
-  `kernel/core/ring3_smoke.cpp`.
+  `kernel/proc/ring3_smoke.cpp`.
 - **Decision:** Land the minimum usable user→kernel ABI. A single
   vector (0x80) via legacy `int N` (not SYSCALL/SYSRET), installed
   with a DPL=3 interrupt gate so ring-3 code can issue the int
@@ -3063,7 +3063,7 @@ get an inline "superseded by <commit>" note and stay.
 
 ## 041 — Heartbeat to SchedSleepUntil (drift-free cadence)
 
-- **Scope:** `kernel/core/heartbeat.cpp` — replace
+- **Scope:** `kernel/diag/heartbeat.cpp` — replace
   `SchedSleepTicks(kHeartbeatTicks)` with
   `SchedSleepUntil(deadline); deadline += kHeartbeatTicks;`
 - **Decision:** First consumer of the absolute-deadline
@@ -3254,7 +3254,7 @@ get an inline "superseded by <commit>" note and stay.
 
 ## 035 — HPET-timestamped klog lines
 
-- **Scope:** `kernel/core/klog.cpp` — prefixes every log line
+- **Scope:** `kernel/log/klog.cpp` — prefixes every log line
   with `[ts=0xNNNNNNNNNNNNNNNN] `
 - **Decision:** Timestamp source is HPET main counter if
   available (sub-microsecond precision), scheduler tick counter

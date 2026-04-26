@@ -26,7 +26,7 @@
  * as `int main() { puts(...); return 0; }` linked against a
  * real msvcrt-equivalent.
  *
- * Build (host): see tools/build-hello-pe.sh.
+ * Build (host): see tools/build/build-hello-pe.sh.
  */
 
 typedef long long i64;

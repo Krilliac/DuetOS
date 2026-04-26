@@ -34,8 +34,8 @@
 // second) when the desktop is idle, and on every key/mouse event
 // triggering a recompose.
 
-#include "../core/types.h"
-#include "../drivers/video/widget.h"
+#include "util/types.h"
+#include "drivers/video/widget.h"
 
 namespace duetos::apps::gfxdemo
 {

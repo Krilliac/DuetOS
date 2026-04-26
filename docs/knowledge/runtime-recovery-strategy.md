@@ -115,7 +115,7 @@ drivers must document what locks they hold in each code path (see
 `CLAUDE.md` "Thread safety rules").
 
 **Nothing actionable today** — we have PS/2, which has no fault path.
-The `kernel/core/recovery.h` module defines the API shape for when
+The `kernel/diag/recovery.h` module defines the API shape for when
 the first real driver arrives.
 
 ### Class C — Process / task fault (KILL — future, post-ring-3)
@@ -165,7 +165,7 @@ first real recovery path in the codebase.
 sensitive paths; 10 retries / 1 s total for background work.
 Specific subsystems override per known device characteristics.
 
-**Actionable today:** small helper in `kernel/core/recovery.h` —
+**Actionable today:** small helper in `kernel/diag/recovery.h` —
 `RetryWithBackoff(Fn, Policy)`. Usable when we have an I/O path
 that needs it; costs one API surface now, zero call sites.
 
@@ -259,7 +259,7 @@ written down first.
 | Class | Status | Notes |
 |-------|--------|-------|
 | A HALT | **Active** | `core::Panic` + `KASSERT` landed. |
-| B Driver RESTART | **API only** | `kernel/core/recovery.h` shell; no driver uses it yet. |
+| B Driver RESTART | **API only** | `kernel/diag/recovery.h` shell; no driver uses it yet. |
 | C Process KILL | **Partial — task reaper** | Dead-task reaper closes the known leak. Full process-kill semantics arrive with ring 3. |
 | D RETRY | **API only** | `RetryWithBackoff` helper; no I/O path uses it yet. |
 | E REJECT | **Deferred** | Requires a trust boundary. Arrives with syscalls. |

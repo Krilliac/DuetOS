@@ -25,18 +25,18 @@
  *   that section row (a few bytes).
  */
 
-#include "breakpoints.h"
+#include "debug/breakpoints.h"
 
-#include "../arch/x86_64/smp.h"
-#include "../core/klog.h"
-#include "../core/process.h"
-#include "../mm/address_space.h"
-#include "../mm/frame_allocator.h"
-#include "../mm/page.h"
-#include "../mm/paging.h"
-#include "../sched/sched.h"
-#include "../sync/spinlock.h"
-#include "dr.h"
+#include "arch/x86_64/smp.h"
+#include "log/klog.h"
+#include "proc/process.h"
+#include "mm/address_space.h"
+#include "mm/frame_allocator.h"
+#include "mm/page.h"
+#include "mm/paging.h"
+#include "sched/sched.h"
+#include "sync/spinlock.h"
+#include "debug/dr.h"
 
 namespace duetos::debug
 {

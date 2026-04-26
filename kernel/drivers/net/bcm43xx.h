@@ -1,7 +1,7 @@
 #pragma once
 
-#include "../../core/types.h"
-#include "net.h"
+#include "util/types.h"
+#include "drivers/net/net.h"
 
 /*
  * DuetOS — Broadcom bcm43xx Wi-Fi driver shell, v0.
