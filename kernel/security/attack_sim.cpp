@@ -26,6 +26,8 @@ void Wrmsr(u32 msr, u64 value)
 }
 
 constexpr u32 kMsrIa32Lstar = 0xC0000082;
+constexpr u32 kMsrIa32SysenterCs = 0x174;
+constexpr u32 kMsrIa32SysenterEip = 0x176;
 constexpr u32 kMsrEfer = 0xC0000080;
 constexpr u64 kEferNxe = 1ULL << 11;
 constexpr u64 kCr0Wp = 1ULL << 16;
@@ -203,6 +205,41 @@ void AttackLstar()
 void RestoreLstar()
 {
     Wrmsr(kMsrIa32Lstar, g_saved_lstar);
+}
+
+// SYSENTER_CS / SYSENTER_EIP — the legacy 32-bit fast-syscall pair.
+// DuetOS ring-3 code uses SYSCALL (LSTAR), not SYSENTER, so writing
+// these MSRs has no functional effect on the live syscall path. The
+// runtime checker watches all five baseline syscall MSRs in one
+// detector (CheckSyscallMsrs at runtime_checker.cpp:573); each of
+// these attacks bumps the same `SyscallMsrHijacked` counter. Real-
+// world meaning: a rootkit hooking SYSENTER (still used by 32-bit
+// PEs that haven't been recompiled for SYSCALL) would scribble
+// these. We omit STAR + CSTAR attacks because STAR holds the CS:SS
+// pair that SYSCALL/SYSRET reads on every entry/exit — scrambling
+// it would crash the next user-mode return before the detector
+// could scan.
+constinit u64 g_saved_sysenter_cs = 0;
+constinit u64 g_saved_sysenter_eip = 0;
+
+void AttackSysenterCs()
+{
+    g_saved_sysenter_cs = Rdmsr(kMsrIa32SysenterCs);
+    Wrmsr(kMsrIa32SysenterCs, 0xCAFEBABEDEAD0001ULL);
+}
+void RestoreSysenterCs()
+{
+    Wrmsr(kMsrIa32SysenterCs, g_saved_sysenter_cs);
+}
+
+void AttackSysenterEip()
+{
+    g_saved_sysenter_eip = Rdmsr(kMsrIa32SysenterEip);
+    Wrmsr(kMsrIa32SysenterEip, 0xBADC0DECAFE00002ULL);
+}
+void RestoreSysenterEip()
+{
+    Wrmsr(kMsrIa32SysenterEip, g_saved_sysenter_eip);
 }
 
 // AttackCanary intentionally omitted — see kSpecs comment.
@@ -426,13 +463,17 @@ void AttackSimRun()
     // re-assert the cleared bit on the next scan; our explicit
     // Restore is a safety net. Kernel-text patch holds IRQs off
     // across its WP-clear window — see AttackKernelTextPatch.
-    static constinit const Spec kSpecs[9] = {
+    static constinit const Spec kSpecs[11] = {
         {"Bootkit LBA 0 write", "BootSectorModified", core::HealthIssue::BootSectorModified, nullptr, AttackBootSector,
          RestoreBootSector},
         {"IDT hijack", "IdtModified", core::HealthIssue::IdtModified, nullptr, AttackIdt, RestoreIdt},
         {"GDT descriptor swap", "GdtModified", core::HealthIssue::GdtModified, nullptr, AttackGdt, RestoreGdt},
         {"LSTAR syscall hook", "SyscallMsrHijacked", core::HealthIssue::SyscallMsrHijacked, nullptr, AttackLstar,
          RestoreLstar},
+        {"SYSENTER_CS hook (legacy 32-bit syscall)", "SyscallMsrHijacked", core::HealthIssue::SyscallMsrHijacked,
+         nullptr, AttackSysenterCs, RestoreSysenterCs},
+        {"SYSENTER_EIP hook (legacy 32-bit syscall)", "SyscallMsrHijacked", core::HealthIssue::SyscallMsrHijacked,
+         nullptr, AttackSysenterEip, RestoreSysenterEip},
         {"CR0.WP defang (W^X bypass)", "Cr0WpCleared", core::HealthIssue::Cr0WpCleared, PrecheckCr0Wp, AttackCr0Wp,
          RestoreCr0Wp},
         {"CR4.SMEP defang (ret2usr enable)", "Cr4SmepCleared", core::HealthIssue::Cr4SmepCleared, PrecheckCr4Smep,
