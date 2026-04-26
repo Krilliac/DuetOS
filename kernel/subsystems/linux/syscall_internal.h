@@ -47,6 +47,27 @@ i64 DoGetrlimit(u64 resource, u64 user_old);
 i64 DoSetrlimit(u64 resource, u64 user_new);
 i64 DoPrlimit64(u64 pid, u64 resource, u64 user_new, u64 user_old);
 
+// Process-control handlers (syscall_proc.cpp). exit / exit_group
+// teardown the calling task via sched::SchedExit; getpid / gettid
+// both return the current task id (one task per process in v0);
+// kill / tgkill targeting self exits, anything else returns
+// -ESRCH because we don't deliver signals yet. setpgid / getpgrp
+// / getpgid / getsid / setsid are accepted as no-ops returning
+// 0 / 1 (init-like ppid).
+i64 DoExit(u64 status);
+i64 DoExitGroup(u64 status);
+i64 DoGetPid();
+i64 DoGetTid();
+i64 DoGetpgrp();
+i64 DoGetPpid();
+i64 DoGetPgid(u64 pid);
+i64 DoGetSid(u64 pid);
+i64 DoSetPgid(u64 pid, u64 pgid);
+i64 DoSetsid();
+i64 DoSchedYield();
+i64 DoTgkill(u64 tgid, u64 tid, u64 sig);
+i64 DoKill(u64 pid, u64 sig);
+
 // File-descriptor handlers (syscall_fd.cpp). v0 stores per-fd
 // state in core::Process::linux_fds[16]; dup / dup2 / dup3 / fcntl
 // manipulate the slot table without sharing file descriptions
