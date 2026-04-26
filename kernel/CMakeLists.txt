@@ -81,6 +81,7 @@ set(DUETOS_KERNEL_SHARED_SOURCES
     apps/clock.cpp
     apps/files.cpp
     apps/gfxdemo.cpp
+    apps/gfxdemo_modes.cpp
     apps/notes.cpp
     arch/x86_64/ap_trampoline.S
     arch/x86_64/boot.S
