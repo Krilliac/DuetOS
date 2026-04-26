@@ -188,6 +188,24 @@ i64 DoFaccessat(i64 dirfd, u64 user_path, u64 mode, u64 flags);
 i64 DoFaccessat2(i64 dirfd, u64 user_path, u64 mode, u64 flags);
 i64 DoUtimensat(i64 dirfd, u64 user_path, u64 user_times, u64 flags);
 
+// I/O handlers (syscall_io.cpp). read / write route through the
+// FAT32 driver (or COM1 for stdin/stdout/stderr fds). lseek
+// adjusts the per-fd cursor; ioctl handles the three TTY ioctls
+// musl's stdio actually probes (TCGETS / TCSETS / TIOCGWINSZ).
+// pread64 / pwrite64 save+restore the cursor around DoRead /
+// DoWrite. fsync / fdatasync are no-ops (writes are synchronous).
+// readv / writev iterate the iovec calling DoRead / DoWrite.
+i64 DoRead(u64 fd, u64 user_buf, u64 len);
+i64 DoWrite(u64 fd, u64 user_buf, u64 len);
+i64 DoReadv(u64 fd, u64 user_iov, u64 iovcnt);
+i64 DoWritev(u64 fd, u64 user_iov, u64 iovcnt);
+i64 DoLseek(u64 fd, i64 offset, u64 whence);
+i64 DoIoctl(u64 fd, u64 cmd, u64 arg);
+i64 DoFsync(u64 fd);
+i64 DoFdatasync(u64 fd);
+i64 DoPread64(u64 fd, u64 user_buf, u64 len, i64 offset);
+i64 DoPwrite64(u64 fd, u64 user_buf, u64 len, i64 offset);
+
 // File handlers (syscall_file.cpp). open / close / stat / fstat
 // / lstat / access / openat / newfstatat. open snapshots the
 // FAT32 entry into the per-process linux_fds[16] table; stat
