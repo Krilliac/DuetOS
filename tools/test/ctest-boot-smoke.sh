@@ -36,7 +36,7 @@ if [[ $# -ne 1 ]]; then
 fi
 
 BIN_DIR="$1"
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUN_SCRIPT="${REPO_ROOT}/tools/qemu/run.sh"
 
 if [[ ! -x "${RUN_SCRIPT}" ]]; then

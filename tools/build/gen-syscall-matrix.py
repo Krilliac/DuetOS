@@ -2,7 +2,7 @@
 """Generate a unified syscall ownership/status matrix.
 
 Inputs:
-  - kernel/core/syscall.h
+  - kernel/syscall/syscall.h
   - kernel/subsystems/linux/linux_syscall_table_generated.h
   - kernel/subsystems/win32/nt_syscall_table_generated.h
   - kernel/subsystems/translation/translate.cpp
@@ -33,7 +33,7 @@ def parse_native_syscalls(path: Path):
                 "number": nr,
                 "name": name,
                 "status": "implemented",
-                "owner": "kernel/core/syscall.h::SyscallNumber",
+                "owner": "kernel/syscall/syscall.h::SyscallNumber",
                 "fallback": "none (native syscall entry)",
             }
         )
@@ -164,7 +164,7 @@ def render_markdown(rows):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--syscall-h", type=Path, default=Path("kernel/core/syscall.h"))
+    ap.add_argument("--syscall-h", type=Path, default=Path("kernel/syscall/syscall.h"))
     ap.add_argument(
         "--linux-table",
         type=Path,

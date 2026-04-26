@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${ROOT_DIR}"
 
 python3 tools/linux-compat/gen-linux-syscall-table.py \
@@ -15,7 +15,7 @@ python3 tools/win32-compat/gen-nt-shim.py \
     --out kernel/subsystems/win32/nt_syscall_table_generated.h
 
 python3 tools/build/gen-syscall-matrix.py \
-    --syscall-h kernel/core/syscall.h \
+    --syscall-h kernel/syscall/syscall.h \
     --linux-table kernel/subsystems/linux/linux_syscall_table_generated.h \
     --nt-table kernel/subsystems/win32/nt_syscall_table_generated.h \
     --translate-cpp kernel/subsystems/translation/translate.cpp \

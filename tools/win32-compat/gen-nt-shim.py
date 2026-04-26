@@ -99,8 +99,8 @@ HEADER_TEMPLATE = """// AUTO-GENERATED — do not edit by hand.
 
 #pragma once
 
-#include "../../core/syscall.h"
-#include "../../core/types.h"
+#include "syscall/syscall.h"
+#include "util/types.h"
 
 namespace duetos::subsystems::win32
 {{
