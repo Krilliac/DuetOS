@@ -31,32 +31,6 @@ using duetos::drivers::video::ConsoleWrite;
 using duetos::drivers::video::ConsoleWriteChar;
 using duetos::drivers::video::ConsoleWriteln;
 
-void WriteU64Dec(u64 v)
-{
-    if (v == 0)
-    {
-        ConsoleWriteChar('0');
-        return;
-    }
-    char tmp[24];
-    u32 n = 0;
-    while (v > 0 && n < sizeof(tmp))
-    {
-        tmp[n++] = static_cast<char>('0' + (v % 10));
-        v /= 10;
-    }
-    for (u32 i = 0; i < n; ++i)
-    {
-        ConsoleWriteChar(tmp[n - 1 - i]);
-    }
-}
-
-void WriteU8TwoDigits(u8 v)
-{
-    ConsoleWriteChar(static_cast<char>('0' + (v / 10)));
-    ConsoleWriteChar(static_cast<char>('0' + (v % 10)));
-}
-
 } // namespace
 
 void CmdAbout()

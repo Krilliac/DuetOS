@@ -83,6 +83,22 @@ bool ParseU64Str(const char* s, u64* out);
 i64 ParseInt(const char* s);
 
 // ---------------------------------------------------------------
+// Shared console-output formatters (shell_format.cpp). Numeric
+// printers used by every command that emits a value. Hoisted so
+// each sibling TU can reach them through this header instead of
+// carrying its own local copy.
+//
+// WriteU64Dec / WriteU8TwoDigits / WriteU64Hex / WriteI64Dec all
+// emit directly to the kernel console via ConsoleWriteChar /
+// ConsoleWrite. WriteU64Hex defaults to 16-nibble width; pass 0
+// to strip leading zeros.
+// ---------------------------------------------------------------
+void WriteU64Dec(u64 v);
+void WriteU8TwoDigits(u8 v);
+void WriteU64Hex(u64 v, u32 digits = 16);
+void WriteI64Dec(i64 v);
+
+// ---------------------------------------------------------------
 // Trivial info / housekeeping commands (shell_core.cpp). Banner /
 // status commands that need nothing beyond the console driver,
 // RTC, scheduler tick clock, or the env table above.

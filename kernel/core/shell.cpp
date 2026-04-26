@@ -235,69 +235,8 @@ void ReplaceLine(const char* text)
     g_input[g_len] = '\0';
 }
 
-void WriteU64Dec(u64 v)
-{
-    if (v == 0)
-    {
-        ConsoleWriteChar('0');
-        return;
-    }
-    char tmp[24];
-    u32 n = 0;
-    while (v > 0 && n < sizeof(tmp))
-    {
-        tmp[n++] = static_cast<char>('0' + (v % 10));
-        v /= 10;
-    }
-    for (u32 i = 0; i < n; ++i)
-    {
-        ConsoleWriteChar(tmp[n - 1 - i]);
-    }
-}
-
-void WriteU8TwoDigits(u8 v)
-{
-    ConsoleWriteChar(static_cast<char>('0' + (v / 10)));
-    ConsoleWriteChar(static_cast<char>('0' + (v % 10)));
-}
-
-// Forward declarations so commands defined earlier in the file
-// can use shared helpers whose bodies live further down. (TmpLeaf
-// / FatLeaf / ParseU64Str / ParseInt are declared in
-// shell_internal.h instead — they live in shell_pathutil.cpp.)
-void WriteI64Dec(i64 v);
-
-// Fixed-width hex writer: prints `digits` nibbles of `v`, high
-// nibble first, with a leading "0x". digits == 0 trims leading
-// zeros (min 1). Used by every register-dump / MSR / CPUID
-// command.
-void WriteU64Hex(u64 v, u32 digits = 16)
-{
-    ConsoleWrite("0x");
-    if (digits == 0)
-    {
-        // Strip leading zeros — find highest non-zero nibble.
-        digits = 1;
-        for (u32 i = 16; i > 0; --i)
-        {
-            if (((v >> ((i - 1) * 4)) & 0xF) != 0)
-            {
-                digits = i;
-                break;
-            }
-        }
-    }
-    if (digits > 16)
-    {
-        digits = 16;
-    }
-    for (u32 i = digits; i > 0; --i)
-    {
-        const u8 nib = static_cast<u8>((v >> ((i - 1) * 4)) & 0xF);
-        const char c = (nib < 10) ? static_cast<char>('0' + nib) : static_cast<char>('A' + nib - 10);
-        ConsoleWriteChar(c);
-    }
-}
+// WriteU64Dec / WriteU8TwoDigits / WriteU64Hex / WriteI64Dec
+// moved to shell_format.cpp; declared in shell_internal.h.
 
 // Prompt() reads $PS1 from the env table if set; implementation
 // lives after the env infrastructure is declared, further down.
@@ -6430,18 +6369,7 @@ bool ParseI64(const char* s, i64* out)
     return true;
 }
 
-void WriteI64Dec(i64 v)
-{
-    if (v < 0)
-    {
-        ConsoleWriteChar('-');
-        WriteU64Dec(static_cast<u64>(-v));
-    }
-    else
-    {
-        WriteU64Dec(static_cast<u64>(v));
-    }
-}
+// WriteI64Dec moved to shell_format.cpp.
 
 void CmdExpr(u32 argc, char** argv)
 {

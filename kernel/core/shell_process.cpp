@@ -28,33 +28,7 @@ using duetos::drivers::video::ConsoleWrite;
 using duetos::drivers::video::ConsoleWriteChar;
 using duetos::drivers::video::ConsoleWriteln;
 
-// TU-local decimal printer. Duplicated rather than promoted to a
-// shared header — the canonical copy lives in shell.cpp's anon
-// namespace and gets used by hundreds of other commands; this is
-// the lower-blast-radius mirror.
-void WriteU64Dec(u64 v)
-{
-    if (v == 0)
-    {
-        ConsoleWriteChar('0');
-        return;
-    }
-    char tmp[24];
-    u32 n = 0;
-    while (v > 0 && n < sizeof(tmp))
-    {
-        tmp[n++] = static_cast<char>('0' + (v % 10));
-        v /= 10;
-    }
-    for (u32 i = 0; i < n; ++i)
-    {
-        ConsoleWriteChar(tmp[n - 1 - i]);
-    }
-}
-
-// Used by CmdPs / CmdTop. The shell.cpp copy was the canonical
-// definition; both callers are in this TU now, so the helper
-// moves too.
+// SchedStateName: TU-private, used by CmdPs / CmdTop only.
 const char* SchedStateName(u8 s)
 {
     switch (s)
