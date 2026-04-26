@@ -2,15 +2,16 @@
  * DuetOS — kernel shell: cross-TU shell state.
  *
  * Definitions of the long-lived shell tables that need to be
- * visible from more than one shell sibling TU. Currently this
- * houses the environment table (g_env + EnvFind / EnvSet /
- * EnvUnset) and the alias table (g_aliases + AliasFind /
- * AliasSet / AliasUnset). The history ring will follow on a
- * subsequent hoist slice.
+ * visible from more than one shell sibling TU: the environment
+ * table (g_env + EnvFind / EnvSet / EnvUnset), the alias table
+ * (g_aliases + AliasFind / AliasSet / AliasUnset), and the
+ * command history ring (g_history + HistoryPush / HistoryAt /
+ * HistoryExpand).
  *
- * Sized helpers (EnvNameEq / EnvCopy) live inline in
- * shell_internal.h so callers in either table or any sibling TU
- * reach them through the same header without a back-edge here.
+ * Sized helpers (EnvNameEq / EnvCopy / StrEq / StrStartsWith)
+ * live inline in shell_internal.h so callers in either table or
+ * any sibling TU reach them through the same header without a
+ * back-edge here.
  */
 
 #include "shell_internal.h"
@@ -118,6 +119,92 @@ bool AliasUnset(const char* name)
     s->name[0] = '\0';
     s->expansion[0] = '\0';
     return true;
+}
+
+constinit char g_history[kHistoryCap][kInputMax] = {};
+constinit u32 g_history_head = 0;
+constinit u32 g_history_count = 0;
+constinit u32 g_history_cursor = 0;
+
+void HistoryPush(const char* line)
+{
+    // Skip empty submissions and duplicates of the newest entry —
+    // matches every shell users are used to.
+    if (line[0] == '\0')
+    {
+        return;
+    }
+    if (g_history_count > 0)
+    {
+        const u32 newest = (g_history_head + kHistoryCap - 1) % kHistoryCap;
+        if (StrEq(g_history[newest], line))
+        {
+            return;
+        }
+    }
+    u32 i = 0;
+    for (; i < kInputMax - 1 && line[i] != '\0'; ++i)
+    {
+        g_history[g_history_head][i] = line[i];
+    }
+    g_history[g_history_head][i] = '\0';
+    g_history_head = (g_history_head + 1) % kHistoryCap;
+    if (g_history_count < kHistoryCap)
+    {
+        ++g_history_count;
+    }
+}
+
+// Look up the `n`th most-recent entry (n=1 newest, n=history_count
+// oldest). Returns nullptr if n is out of range.
+const char* HistoryAt(u32 n)
+{
+    if (n == 0 || n > g_history_count)
+    {
+        return nullptr;
+    }
+    const u32 idx = (g_history_head + kHistoryCap - n) % kHistoryCap;
+    return g_history[idx];
+}
+
+// Resolve a `!` history-expansion token. Returns the string to
+// dispatch, or nullptr if no valid recall applies (caller should
+// print "NO SUCH HISTORY ENTRY" and continue with the original
+// line). `!!` = most recent; `!N` = the Nth entry displayed by
+// `history` (oldest is 1).
+const char* HistoryExpand(const char* line)
+{
+    if (line[0] != '!')
+    {
+        return nullptr;
+    }
+    if (line[1] == '!' && line[2] == '\0')
+    {
+        return HistoryAt(1);
+    }
+    // !N — parse decimal.
+    u32 n = 0;
+    u32 i = 1;
+    if (line[i] == '\0')
+    {
+        return nullptr;
+    }
+    for (; line[i] != '\0'; ++i)
+    {
+        if (line[i] < '0' || line[i] > '9')
+        {
+            return nullptr;
+        }
+        n = n * 10 + static_cast<u32>(line[i] - '0');
+    }
+    if (n == 0 || n > g_history_count)
+    {
+        return nullptr;
+    }
+    // Display index is oldest-first; convert to newest-first
+    // for HistoryAt.
+    const u32 inv = g_history_count - n + 1;
+    return HistoryAt(inv);
 }
 
 } // namespace duetos::core::shell::internal

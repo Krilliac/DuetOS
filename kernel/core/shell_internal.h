@@ -68,6 +68,36 @@ bool EnvSet(const char* name, const char* value);
 bool EnvUnset(const char* name);
 
 // ---------------------------------------------------------------
+// String utility helpers. Inline so every sibling TU reaches them
+// without a back-edge dependency on shell.cpp.
+//
+// StrEq returns true iff a and b are equal C-strings. StrStartsWith
+// returns true iff `s` begins with `prefix`. Both stop at the first
+// '\0' on the shorter side.
+// ---------------------------------------------------------------
+inline bool StrEq(const char* a, const char* b)
+{
+    for (u32 i = 0;; ++i)
+    {
+        if (a[i] != b[i])
+            return false;
+        if (a[i] == '\0')
+            return true;
+    }
+}
+
+inline bool StrStartsWith(const char* s, const char* prefix)
+{
+    for (u32 i = 0;; ++i)
+    {
+        if (prefix[i] == '\0')
+            return true;
+        if (s[i] != prefix[i])
+            return false;
+    }
+}
+
+// ---------------------------------------------------------------
 // Aliases. Same shape as the env table — 8 slots, 32-byte names,
 // 96-byte expansions. Dispatched BEFORE the env-var pass so an
 // alias that includes $VAR references still gets expanded.
@@ -92,6 +122,34 @@ extern AliasSlot g_aliases[kAliasSlotCount];
 AliasSlot* AliasFind(const char* name);
 bool AliasSet(const char* name, const char* expansion);
 bool AliasUnset(const char* name);
+
+// ---------------------------------------------------------------
+// Command history. Ring buffer of the last `kHistoryCap` submitted
+// lines. g_history_count saturates at the cap; the newest entry
+// lives at ((head - 1) mod cap). g_history_cursor is the recall
+// index — 0 == "at the live prompt", 1 == most recent, etc.
+//
+// kInputMax sizes both the per-line history slots and the live
+// input buffer (g_input in shell.cpp); hoisted alongside so any
+// sibling TU that needs to size a temporary line buffer matches
+// the shell's input width.
+//
+// Definitions live in shell_state.cpp; declared here so the
+// `history`, `!N` recall, Up/Down arrow recall, and any future
+// CmdHistory extraction can share the same ring without going
+// through a public API.
+// ---------------------------------------------------------------
+inline constexpr u32 kInputMax = 64;
+inline constexpr u32 kHistoryCap = 8;
+
+extern char g_history[kHistoryCap][kInputMax];
+extern u32 g_history_head;
+extern u32 g_history_count;
+extern u32 g_history_cursor;
+
+void HistoryPush(const char* line);
+const char* HistoryAt(u32 n);
+const char* HistoryExpand(const char* line);
 
 // ---------------------------------------------------------------
 // Pure path / parse helpers (shell_pathutil.cpp). Used across the

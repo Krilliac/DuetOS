@@ -25,17 +25,6 @@ using duetos::drivers::video::ConsoleWrite;
 using duetos::drivers::video::ConsoleWriteChar;
 using duetos::drivers::video::ConsoleWriteln;
 
-bool StrEq(const char* a, const char* b)
-{
-    for (u32 i = 0;; ++i)
-    {
-        if (a[i] != b[i])
-            return false;
-        if (a[i] == '\0')
-            return true;
-    }
-}
-
 const char* RoleName(AuthRole r)
 {
     switch (r)

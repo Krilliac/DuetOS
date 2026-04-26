@@ -121,7 +121,9 @@ using duetos::drivers::video::ConsoleWrite;
 using duetos::drivers::video::ConsoleWriteChar;
 using duetos::drivers::video::ConsoleWriteln;
 
-constexpr u32 kInputMax = 64;
+// kInputMax / kHistoryCap + StrEq / StrStartsWith moved to
+// shell_internal.h. The history ring (g_history* + HistoryPush /
+// HistoryAt / HistoryExpand) lives in shell_state.cpp.
 constinit char g_input[kInputMax] = {};
 constinit u32 g_len = 0;
 
@@ -131,85 +133,6 @@ constinit u32 g_len = 0;
 // on x86_64, which is good enough for the kbd-reader + shell-
 // task single-producer / single-consumer pattern.
 constinit bool g_interrupt = false;
-
-// Command history. Ring buffer of the last `kHistoryCap`
-// submitted lines. g_history_count saturates at the cap; newest
-// entry lives at ((head - 1) mod cap). g_history_cursor is the
-// recall index — 0 == "at the live prompt" (no recall), 1 == the
-// most recent entry, etc. Walking Up goes back in history;
-// Down walks forward until we reach the live prompt.
-constexpr u32 kHistoryCap = 8;
-constinit char g_history[kHistoryCap][kInputMax] = {};
-constinit u32 g_history_head = 0;
-constinit u32 g_history_count = 0;
-constinit u32 g_history_cursor = 0;
-
-bool StrEq(const char* a, const char* b)
-{
-    for (u32 i = 0;; ++i)
-    {
-        if (a[i] != b[i])
-            return false;
-        if (a[i] == '\0')
-            return true;
-    }
-}
-
-// Compare the first `n` characters of a and b. Used for the
-// "echo <rest>" dispatch where we only know the command prefix.
-bool StrStartsWith(const char* s, const char* prefix)
-{
-    for (u32 i = 0;; ++i)
-    {
-        if (prefix[i] == '\0')
-            return true;
-        if (s[i] != prefix[i])
-            return false;
-    }
-}
-
-void HistoryPush(const char* line)
-{
-    // Skip empty submissions and duplicates of the newest entry —
-    // matches every shell users are used to.
-    if (line[0] == '\0')
-    {
-        return;
-    }
-    if (g_history_count > 0)
-    {
-        const u32 newest = (g_history_head + kHistoryCap - 1) % kHistoryCap;
-        if (StrEq(g_history[newest], line))
-        {
-            return;
-        }
-    }
-    u32 i = 0;
-    for (; i < kInputMax - 1 && line[i] != '\0'; ++i)
-    {
-        g_history[g_history_head][i] = line[i];
-    }
-    g_history[g_history_head][i] = '\0';
-    g_history_head = (g_history_head + 1) % kHistoryCap;
-    if (g_history_count < kHistoryCap)
-    {
-        ++g_history_count;
-    }
-}
-
-// Look up the `n`th most-recent entry (n=1 newest, n=history_count
-// oldest). Returns nullptr if n is out of range. Exposed externally
-// via Shell{HistoryCount,HistoryGet} so the `history` command + the
-// `!N` recall can share the same walker.
-const char* HistoryAt(u32 n)
-{
-    if (n == 0 || n > g_history_count)
-    {
-        return nullptr;
-    }
-    const u32 idx = (g_history_head + kHistoryCap - n) % kHistoryCap;
-    return g_history[idx];
-}
 
 // Wipe the current visible line (print '\b' len times) and load
 // `text` into the edit buffer + echo it. `nullptr` just clears
@@ -7400,45 +7323,7 @@ u32 Tokenize(char* buf, char** argv)
     return count;
 }
 
-// Resolve a `!` history-expansion token. Returns the string to
-// dispatch, or nullptr if no valid recall applies (caller should
-// print "NO SUCH HISTORY ENTRY" and continue with the original
-// line). `!!` = most recent; `!N` = the Nth entry displayed by
-// `history` (oldest is 1).
-const char* HistoryExpand(const char* line)
-{
-    if (line[0] != '!')
-    {
-        return nullptr;
-    }
-    if (line[1] == '!' && line[2] == '\0')
-    {
-        return HistoryAt(1);
-    }
-    // !N — parse decimal.
-    u32 n = 0;
-    u32 i = 1;
-    if (line[i] == '\0')
-    {
-        return nullptr;
-    }
-    for (; line[i] != '\0'; ++i)
-    {
-        if (line[i] < '0' || line[i] > '9')
-        {
-            return nullptr;
-        }
-        n = n * 10 + static_cast<u32>(line[i] - '0');
-    }
-    if (n == 0 || n > g_history_count)
-    {
-        return nullptr;
-    }
-    // Display index is oldest-first; convert to newest-first
-    // for HistoryAt.
-    const u32 inv = g_history_count - n + 1;
-    return HistoryAt(inv);
-}
+// HistoryExpand moved to shell_state.cpp.
 
 // ---------------------------------------------------------------
 // Account management commands — useradd / userdel / passwd /
