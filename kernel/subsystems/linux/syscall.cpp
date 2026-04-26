@@ -98,10 +98,8 @@ constexpr u32 kMsrKernelGsBase = 0xC0000102; // swapgs source for kernel GS
 // without redeclaring. The `using namespace internal;` directive
 // above makes them visible here without qualification.
 
-// Linux mmap flag bits we care about (asm-generic definitions,
-// matches x86_64 too).
-constexpr u64 kMapPrivate = 0x02;
-constexpr u64 kMapAnonymous = 0x20;
+// Linux mmap flag bits (kMapPrivate / kMapAnonymous) moved with
+// DoMmap into syscall_mm.cpp.
 
 // Per-process Linux fd cap on a single write/read. A real kernel
 // wouldn't impose this but musl's newline-buffered stdout rarely
@@ -1289,16 +1287,7 @@ i64 DoFdatasync(u64 fd)
 //
 // The most common bad-input case is a non-page-aligned addr; mirror
 // Linux's -EINVAL on that.
-i64 DoMadvise(u64 addr, u64 len, u64 advice)
-{
-    constexpr u64 kPageSize = 4096;
-    if ((addr & (kPageSize - 1)) != 0)
-        return kEINVAL;
-    if (addr + len < addr)
-        return kEINVAL;
-    (void)advice;
-    return 0;
-}
+// DoMadvise moved to syscall_mm.cpp.
 
 // DoGetpgrp moved to syscall_proc.cpp.
 
@@ -1374,28 +1363,7 @@ i64 DoPwrite64(u64 fd, u64 user_buf, u64 len, i64 offset)
 //     PROT_EXEC=4, PROT_NONE=0; PROT_GROWSDOWN/UP at 0x01000000
 //     and 0x02000000 are accepted by Linux so musl's stack-
 //     guard tweak doesn't get rejected).
-i64 DoMprotect(u64 addr, u64 len, u64 prot)
-{
-    constexpr u64 kPageSize = 4096;
-    constexpr u64 kProtValid = 0x7 | 0x01000000ull | 0x02000000ull;
-    if (len == 0)
-        return 0;
-    if ((addr & (kPageSize - 1)) != 0)
-        return kEINVAL;
-    if ((prot & ~kProtValid) != 0)
-        return kEINVAL;
-    if (addr + len < addr)
-        return kEINVAL;
-    // Reject kernel-VA pointers — same canonical-low-half gate
-    // mm::CopyFromUser applies. The kernel's user mappings live
-    // in [0, 0x0000_8000_0000_0000), the higher-half kernel in
-    // [0xFFFF_8000_..., ...). Anything else is a user bug or a
-    // hostile call.
-    constexpr u64 kUserMaxExclusive = 0x0000800000000000ull;
-    if (addr >= kUserMaxExclusive || (addr + len) > kUserMaxExclusive)
-        return kEINVAL;
-    return 0;
-}
+// DoMprotect moved to syscall_mm.cpp.
 
 // DoSigaltstack / DoRtSigreturn moved to syscall_sig.cpp.
 
@@ -1407,242 +1375,7 @@ i64 DoMprotect(u64 addr, u64 len, u64 prot)
 // handlers. The `using namespace internal;` directive at the top
 // of this TU keeps the dispatcher's references unqualified.
 
-// Page-align `x` up. Our cluster size is 4 KiB, matching FAT32's
-// native page; the mmap / brk paths map 4 KiB frames directly,
-// so all lengths round up to a 4 KiB boundary before allocation.
-u64 PageUp(u64 x)
-{
-    return (x + 0xFFFu) & ~0xFFFull;
-}
-
-// Linux: brk(addr). Three cases:
-//   addr == 0 -> return current brk (the `sbrk(0)` query path).
-//   addr < linux_brk_base -> ignore, return current. Linux
-//     doesn't shrink past the initial segment end.
-//   addr > linux_brk_current -> map fresh RW+U+NX pages to extend
-//     the heap; return the new brk on success. Allocation failure
-//     partway through is "treat as unchanged", which is what Linux
-//     does — the caller checks the return == the requested addr.
-i64 DoBrk(u64 new_brk)
-{
-    core::Process* p = core::CurrentProcess();
-    if (p == nullptr || p->abi_flavor != core::kAbiLinux)
-    {
-        return 0;
-    }
-    if (new_brk == 0)
-    {
-        return static_cast<i64>(p->linux_brk_current);
-    }
-    if (new_brk < p->linux_brk_base)
-    {
-        return static_cast<i64>(p->linux_brk_current);
-    }
-    const u64 cur_aligned = PageUp(p->linux_brk_current);
-    const u64 new_aligned = PageUp(new_brk);
-    if (new_aligned > cur_aligned)
-    {
-        for (u64 va = cur_aligned; va < new_aligned; va += mm::kPageSize)
-        {
-            const mm::PhysAddr frame = mm::AllocateFrame();
-            if (frame == mm::kNullFrame)
-            {
-                // Roll back to the last successfully-mapped page.
-                // Simplest: just don't update linux_brk_current
-                // past whatever we managed to materialise.
-                p->linux_brk_current = va;
-                return static_cast<i64>(p->linux_brk_current);
-            }
-            mm::AddressSpaceMapUserPage(p->as, va, frame,
-                                        mm::kPagePresent | mm::kPageWritable | mm::kPageUser | mm::kPageNoExecute);
-        }
-    }
-    p->linux_brk_current = new_brk;
-    arch::SerialWrite("[linux] brk -> ");
-    arch::SerialWriteHex(p->linux_brk_current);
-    arch::SerialWrite("\n");
-    return static_cast<i64>(p->linux_brk_current);
-}
-
-// Linux: mmap(addr, len, prot, flags, fd, offset). v0 supports
-// two cases:
-//   1. Anonymous + private (musl malloc, static CRT bss growth).
-//      Bumps a per-process VA cursor, allocates frames lazily,
-//      maps RW+NX. PROT is ignored.
-//   2. File-backed + private (MAP_PRIVATE without MAP_ANONYMOUS,
-//      a regular fd). Loads the requested file extent into a
-//      private writable copy — semantics matching Linux's
-//      MAP_PRIVATE: writes go to the copy, never back to the
-//      file. The reader's PROT_READ vs PROT_EXEC is honoured to
-//      the extent the kernel can: PROT_EXEC clears the NX bit.
-//      MAP_SHARED for files isn't supported — would need page-
-//      cache + writeback we don't have.
-//
-// Returns the chosen VA as a u64 on success, -errno on failure.
-// `addr` (MAP_FIXED) is ignored in v0; we always pick from the
-// per-process bump cursor.
-i64 DoMmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off)
-{
-    (void)addr;
-    if ((flags & kMapPrivate) == 0)
-    {
-        // MAP_SHARED without MAP_ANONYMOUS would need a page cache.
-        // MAP_SHARED with MAP_ANONYMOUS would need shared frames.
-        // Neither shape appears in our v0 workloads.
-        return kEINVAL;
-    }
-    if (len == 0)
-    {
-        return kEINVAL;
-    }
-    core::Process* p = core::CurrentProcess();
-    if (p == nullptr || p->abi_flavor != core::kAbiLinux)
-    {
-        return kENOSYS;
-    }
-
-    const u64 aligned = PageUp(len);
-    const u64 base = p->linux_mmap_cursor;
-
-    // PTE flags: always present + user. Writable for anonymous
-    // (callers expect to write to anonymous pages — that's what
-    // they're for). For file-backed MAP_PRIVATE we still want
-    // writable so MAP_PRIVATE write-fault semantics work as
-    // "writes go to the private copy" without a CoW machinery —
-    // we just hand out a writable private copy from the start.
-    // NX is cleared only when PROT_EXEC is requested.
-    u64 pte_flags = mm::kPagePresent | mm::kPageUser | mm::kPageWritable;
-    constexpr u64 kProtExec = 0x4;
-    if ((prot & kProtExec) == 0)
-        pte_flags |= mm::kPageNoExecute;
-
-    if ((flags & kMapAnonymous) != 0)
-    {
-        // Anonymous path — frames come up zero-filled (the frame
-        // allocator scrubs them).
-        for (u64 va = base; va < base + aligned; va += mm::kPageSize)
-        {
-            const mm::PhysAddr frame = mm::AllocateFrame();
-            if (frame == mm::kNullFrame)
-            {
-                // Partial-map rollback would require tearing down the
-                // mappings we already installed. v0 leaks on OOM —
-                // the process is about to die, AS teardown reclaims.
-                return kENOMEM;
-            }
-            mm::AddressSpaceMapUserPage(p->as, va, frame, pte_flags);
-        }
-        p->linux_mmap_cursor += aligned;
-        arch::SerialWrite("[linux] mmap anon -> ");
-        arch::SerialWriteHex(base);
-        arch::SerialWrite(" len=");
-        arch::SerialWriteHex(aligned);
-        arch::SerialWrite("\n");
-        return static_cast<i64>(base);
-    }
-
-    // File-backed: validate the fd is open against a regular
-    // FAT32 file (state == 2). Special tty fds (state == 1) and
-    // closed slots (state == 0) reject with -EBADF / -EACCES.
-    if (fd >= 16)
-        return kEBADF;
-    // state==1 is a tty fd, state==0 is a closed slot. Both
-    // invalid for mmap; collapse to -EBADF (real Linux returns
-    // -EACCES for ttys, -EBADF for closed — we don't carry an
-    // errno distinct enough to be worth a dedicated constant).
-    if (p->linux_fds[fd].state != 2)
-        return kEBADF;
-
-    const auto* v = fs::fat32::Fat32Volume(0);
-    if (v == nullptr)
-        return kEIO;
-
-    // Read the file. The existing DoRead path streams through a
-    // 4 KiB scratch; for mmap we pull the whole file (up to a v0
-    // cap matching the read scratch) so we can copy slices into
-    // each freshly-allocated frame at the requested offset.
-    static u8 file_scratch[4096];
-    fs::fat32::DirEntry entry;
-    for (u64 i = 0; i < sizeof(entry.name); ++i)
-        entry.name[i] = 0;
-    entry.attributes = 0;
-    entry.first_cluster = p->linux_fds[fd].first_cluster;
-    entry.size_bytes = p->linux_fds[fd].size;
-    const i64 read_total = fs::fat32::Fat32ReadFile(v, &entry, file_scratch, sizeof(file_scratch));
-    if (read_total < 0)
-        return kEIO;
-    const u64 file_size = static_cast<u64>(read_total);
-
-    // Walk the requested range page by page. Each page is freshly
-    // allocated (so this is a private copy), then either:
-    //   - filled from file_scratch[off + page_off ..]   (in-range), or
-    //   - left zero (if the page is past EOF — Linux MAP_PRIVATE
-    //     pads past-EOF pages with zeros; the fault sees zero,
-    //     a SIGBUS would only happen mid-page-of-EOF on real
-    //     Linux, which we don't replicate at v0).
-    for (u64 page_idx = 0; page_idx * mm::kPageSize < aligned; ++page_idx)
-    {
-        const u64 va = base + page_idx * mm::kPageSize;
-        const mm::PhysAddr frame = mm::AllocateFrame();
-        if (frame == mm::kNullFrame)
-            return kENOMEM;
-        // Frame allocator zeros the frame; we only need to copy
-        // the bytes that fall inside the file.
-        u8* dst = static_cast<u8*>(mm::PhysToVirt(frame));
-        const u64 page_off_in_file = off + page_idx * mm::kPageSize;
-        if (page_off_in_file < file_size)
-        {
-            u64 to_copy = file_size - page_off_in_file;
-            if (to_copy > mm::kPageSize)
-                to_copy = mm::kPageSize;
-            for (u64 i = 0; i < to_copy; ++i)
-                dst[i] = file_scratch[page_off_in_file + i];
-        }
-        mm::AddressSpaceMapUserPage(p->as, va, frame, pte_flags);
-    }
-    p->linux_mmap_cursor += aligned;
-    arch::SerialWrite("[linux] mmap file fd=");
-    arch::SerialWriteHex(fd);
-    arch::SerialWrite(" -> ");
-    arch::SerialWriteHex(base);
-    arch::SerialWrite(" len=");
-    arch::SerialWriteHex(aligned);
-    arch::SerialWrite(" off=");
-    arch::SerialWriteHex(off);
-    arch::SerialWrite("\n");
-    return static_cast<i64>(base);
-}
-
-// Linux: munmap(addr, len). Walks every 4 KiB page in
-// [addr, addr+len) and asks the AS to release it. Pages that
-// weren't mapped by mmap() (or were already unmapped) are silently
-// ignored — matches Linux's relaxed behaviour where munmap of an
-// un-mapped range is a no-op rather than -EINVAL.
-i64 DoMunmap(u64 addr, u64 len)
-{
-    if (len == 0)
-        return 0;
-    if ((addr & 0xFFF) != 0)
-        return kEINVAL;
-    core::Process* p = core::CurrentProcess();
-    if (p == nullptr || p->as == nullptr)
-        return kEINVAL;
-    const u64 aligned_len = (len + 0xFFF) & ~u64(0xFFF);
-    u64 freed = 0;
-    for (u64 off = 0; off < aligned_len; off += mm::kPageSize)
-    {
-        if (mm::AddressSpaceUnmapUserPage(p->as, addr + off))
-            ++freed;
-    }
-    arch::SerialWrite("[linux] munmap addr=");
-    arch::SerialWriteHex(addr);
-    arch::SerialWrite(" len=");
-    arch::SerialWriteHex(aligned_len);
-    arch::SerialWrite(" pages_released=");
-    arch::SerialWriteHex(freed);
-    arch::SerialWrite("\n");
-    return 0;
-}
+// PageUp helper + DoBrk + DoMmap + DoMunmap moved to syscall_mm.cpp.
 
 // Linux: openat(dirfd, pathname, flags, mode). Modern glibc's
 // `open()` is usually `openat(AT_FDCWD, ...)` under the hood —
@@ -1925,7 +1658,8 @@ i64 DoUname(u64 user_buf)
 // block at the top for the list and rationale.
 // ---------------------------------------------------------------
 
-constexpr i64 kENOMEM_ = -12; // shadow-named to avoid collision with kENOMEM above
+// kENOMEM_ shadow constant removed — DoMremap moved to syscall_mm.cpp,
+// which uses the kENOMEM in syscall_internal.h directly.
 
 // lstat is identical to stat in v0 — there are no symlinks.
 i64 DoLstat(u64 user_path, u64 user_buf)
@@ -1948,76 +1682,7 @@ i64 DoPause()
     return 0;
 }
 
-// mremap(): we have no remap-in-place machinery. -ENOMEM is the
-// canonical "couldn't grow your mapping" return; callers fall
-// back to alloc-new + memcpy + unmap, which already works via
-// mmap/munmap.
-// Linux: mremap(old_addr, old_size, new_size, flags, new_addr).
-// v0 has no mremap engine. If the request shrinks, accept and
-// keep the original VA — every page above new_size stays mapped
-// but the caller agreed to ignore them. Otherwise -ENOMEM.
-i64 DoMremap(u64 old_addr, u64 old_len, u64 new_len, u64 flags, u64 new_addr)
-{
-    constexpr u64 kPageSize = 4096;
-    if ((old_addr & (kPageSize - 1)) != 0)
-        return kEINVAL;
-    if (old_len == 0 || new_len == 0)
-        return kEINVAL;
-    if (new_len <= old_len)
-    {
-        // Shrink-in-place: leak the upper pages, return old_addr.
-        return static_cast<i64>(old_addr);
-    }
-    (void)flags;
-    (void)new_addr;
-    return kENOMEM_;
-}
-
-// msync(): write-back of a memory mapping. v0 mmap is anonymous-
-// only; there's nothing to flush. Validate flags so a bug that
-// passes garbage gets a clean -EINVAL.
-//   MS_ASYNC      = 1
-//   MS_INVALIDATE = 2
-//   MS_SYNC       = 4
-i64 DoMsync(u64 addr, u64 len, u64 flags)
-{
-    constexpr u64 kPageSize = 4096;
-    constexpr u64 kMsValid = 0x7;
-    if ((addr & (kPageSize - 1)) != 0)
-        return kEINVAL;
-    if ((flags & ~kMsValid) != 0)
-        return kEINVAL;
-    // MS_ASYNC and MS_SYNC are mutually exclusive.
-    if ((flags & 0x1) && (flags & 0x4))
-        return kEINVAL;
-    (void)len;
-    return 0;
-}
-
-// mincore(addr, len, vec): mark every page in [addr, addr+len)
-// as resident by writing 1 to each byte of the user vec. v0
-// has no swap and no page reclaim, so every mapped page IS
-// resident. Bad address surfaces as EFAULT.
-i64 DoMincore(u64 addr, u64 len, u64 user_vec)
-{
-    (void)addr;
-    if (user_vec == 0)
-        return kEFAULT;
-    const u64 pages = (len + 0xFFFu) / 0x1000u;
-    if (pages == 0)
-        return 0;
-    // Cap at a reasonable batch so a hostile huge `len` doesn't
-    // make us copy a multi-MiB byte vector. 4096 pages = 16 MiB
-    // of mapping covered per call; larger ranges chunk caller-side.
-    constexpr u64 kMaxPages = 4096;
-    const u64 to_mark = (pages > kMaxPages) ? kMaxPages : pages;
-    static u8 ones[kMaxPages];
-    for (u64 i = 0; i < to_mark; ++i)
-        ones[i] = 1;
-    if (!mm::CopyToUser(reinterpret_cast<void*>(user_vec), ones, to_mark))
-        return kEFAULT;
-    return 0;
-}
+// DoMremap / DoMsync / DoMincore moved to syscall_mm.cpp.
 
 // flock(fd, op): advisory file lock. v0 is single-process for
 // the FAT32 mount; advisory locks are no-ops by definition.
@@ -2146,43 +1811,7 @@ i64 DoSetpriority(u64 which, u64 who, u64 prio)
     return 0;
 }
 
-// mlock / munlock / mlockall / munlockall: pin pages in RAM.
-// v0 has no swap and no page reclaim — every mapped page is
-// already pinned, so the call is semantically a no-op. We still
-// validate inputs so a malformed call sees -EINVAL / -ENOMEM
-// instead of silent success — matches Linux's behaviour and lets
-// libc abort early when the caller hands in garbage.
-i64 DoMlock(u64 addr, u64 len)
-{
-    constexpr u64 kPageSize = 4096;
-    constexpr u64 kUserMaxExclusive = 0x0000800000000000ull;
-    if (len == 0)
-        return 0;
-    if ((addr & (kPageSize - 1)) != 0)
-        return kEINVAL;
-    if (addr + len < addr)
-        return kEINVAL;
-    if (addr >= kUserMaxExclusive || (addr + len) > kUserMaxExclusive)
-        return kENOMEM;
-    return 0;
-}
-i64 DoMunlock(u64 addr, u64 len)
-{
-    return DoMlock(addr, len);
-}
-// MCL_CURRENT (1), MCL_FUTURE (2), MCL_ONFAULT (4) are the only
-// flags Linux accepts; any other bit is -EINVAL.
-i64 DoMlockall(u64 flags)
-{
-    constexpr u64 kMclValid = 0x7;
-    if ((flags & ~kMclValid) != 0 || flags == 0)
-        return kEINVAL;
-    return 0;
-}
-i64 DoMunlockall()
-{
-    return 0;
-}
+// DoMlock / DoMunlock / DoMlockall / DoMunlockall moved to syscall_mm.cpp.
 
 // FAT32-backed filesystem ops. All four route through the
 // existing Fat32*AtPath primitives. Path strip mirrors DoOpen:

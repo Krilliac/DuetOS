@@ -47,6 +47,25 @@ i64 DoGetrlimit(u64 resource, u64 user_old);
 i64 DoSetrlimit(u64 resource, u64 user_new);
 i64 DoPrlimit64(u64 pid, u64 resource, u64 user_new, u64 user_old);
 
+// Memory-management handlers (syscall_mm.cpp). brk grows the
+// per-process Linux heap; mmap supports MAP_PRIVATE +
+// MAP_ANONYMOUS or MAP_PRIVATE + file-backed (no page-cache, so
+// MAP_SHARED is rejected). mprotect / madvise / mremap / msync /
+// mincore validate inputs the way Linux does but mostly accept
+// as no-op since v0 has no swap and no page reclaim.
+i64 DoBrk(u64 new_brk);
+i64 DoMmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off);
+i64 DoMunmap(u64 addr, u64 len);
+i64 DoMprotect(u64 addr, u64 len, u64 prot);
+i64 DoMadvise(u64 addr, u64 len, u64 advice);
+i64 DoMremap(u64 old_addr, u64 old_len, u64 new_len, u64 flags, u64 new_addr);
+i64 DoMsync(u64 addr, u64 len, u64 flags);
+i64 DoMincore(u64 addr, u64 len, u64 user_vec);
+i64 DoMlock(u64 addr, u64 len);
+i64 DoMunlock(u64 addr, u64 len);
+i64 DoMlockall(u64 flags);
+i64 DoMunlockall();
+
 // Process-control handlers (syscall_proc.cpp). exit / exit_group
 // teardown the calling task via sched::SchedExit; getpid / gettid
 // both return the current task id (one task per process in v0);
