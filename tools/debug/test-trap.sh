@@ -45,7 +45,7 @@
 set -euo pipefail
 
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 readonly PRESET="${DUETOS_PRESET:-x86_64-debug}"
 readonly BUILD_DIR="${REPO_ROOT}/build/${PRESET}"
 readonly DUMP_DIR="${BUILD_DIR}/crash-dumps"

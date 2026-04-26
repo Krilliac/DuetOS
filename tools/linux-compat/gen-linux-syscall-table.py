@@ -52,7 +52,7 @@ HEADER_TEMPLATE = """// AUTO-GENERATED — do not edit by hand.
 
 #pragma once
 
-#include "../../core/types.h"
+#include "util/types.h"
 
 namespace duetos::subsystems::linux
 {{

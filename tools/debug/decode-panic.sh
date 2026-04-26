@@ -40,7 +40,7 @@
 set -euo pipefail
 
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 SERIAL="${1:-${REPO_ROOT}/build/x86_64-debug/ctest-smoke-serial.log}"
 KERNEL_ELF="${2:-${REPO_ROOT}/build/x86_64-debug/kernel/duetos-kernel.elf}"
