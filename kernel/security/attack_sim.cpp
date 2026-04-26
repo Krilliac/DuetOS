@@ -26,6 +26,37 @@ void Wrmsr(u32 msr, u64 value)
 }
 
 constexpr u32 kMsrIa32Lstar = 0xC0000082;
+constexpr u32 kMsrEfer = 0xC0000080;
+constexpr u64 kEferNxe = 1ULL << 11;
+constexpr u64 kCr0Wp = 1ULL << 16;
+constexpr u64 kCr4Smep = 1ULL << 20;
+constexpr u64 kCr4Smap = 1ULL << 21;
+constexpr u64 kRflagsIf = 1ULL << 9;
+
+// ---- raw CR helpers ----
+//
+// Same `mov %%crN, %r` pattern as runtime_checker.cpp's healer.
+// All ring-0; #GP'd from anywhere else.
+u64 ReadCr0()
+{
+    u64 v;
+    asm volatile("mov %%cr0, %0" : "=r"(v));
+    return v;
+}
+void WriteCr0(u64 v)
+{
+    asm volatile("mov %0, %%cr0" : : "r"(v));
+}
+u64 ReadCr4()
+{
+    u64 v;
+    asm volatile("mov %%cr4, %0" : "=r"(v));
+    return v;
+}
+void WriteCr4(u64 v)
+{
+    asm volatile("mov %0, %%cr4" : : "r"(v));
+}
 
 // ---- descriptor table helpers ----
 //
@@ -66,11 +97,17 @@ u64 IssueCount(core::HealthIssue issue)
     return r.per_issue_count[u32(issue)];
 }
 
-AttackOutcome RunAttack(const char* name, core::HealthIssue expected, void (*attack)(), void (*restore)())
+AttackOutcome RunAttack(const char* name, core::HealthIssue expected, bool (*precheck)(), void (*attack)(),
+                        void (*restore)())
 {
     arch::SerialWrite("[attacksim] --- ");
     arch::SerialWrite(name);
     arch::SerialWrite(" ---\n");
+    if (precheck != nullptr && !precheck())
+    {
+        arch::SerialWrite("[attacksim]   SKIPPED — precheck refused (feature not on this CPU)\n");
+        return AttackOutcome::Skipped;
+    }
     const u64 before = IssueCount(expected);
     attack();
     (void)core::RuntimeCheckerScan();
@@ -170,6 +207,122 @@ void RestoreLstar()
 
 // AttackCanary intentionally omitted — see kSpecs comment.
 
+// ---- control-register defang attacks ----
+//
+// CR0.WP / CR4.SMEP / CR4.SMAP / EFER.NXE are the four "I am
+// kernel; trust me" bits a rootkit clears so it can:
+//   - WP off  → write to RX kernel pages (inline hook .text)
+//   - SMEP off → execute ring-3 pages from ring 0 (ret2usr)
+//   - SMAP off → read/write ring-3 pages from ring 0 without
+//                stac/clac bracketing (steal user secrets)
+//   - NXE off  → execute data pages everywhere
+//
+// The runtime checker's `HealControlRegisters` re-asserts every
+// baseline-set bit on its next scan, so the attack window is
+// observably one-shot; our explicit Restore is a safety net for
+// the case where the checker decides not to heal (policy quirk
+// or future regression). Each attack precheck refuses if the bit
+// wasn't set at boot — testing absence-of-feature on a CPU that
+// never had the feature would always FailNoDetect.
+
+bool PrecheckCr0Wp()
+{
+    return (ReadCr0() & kCr0Wp) != 0;
+}
+void AttackCr0Wp()
+{
+    WriteCr0(ReadCr0() & ~kCr0Wp);
+}
+void RestoreCr0Wp()
+{
+    WriteCr0(ReadCr0() | kCr0Wp);
+}
+
+bool PrecheckCr4Smep()
+{
+    return (ReadCr4() & kCr4Smep) != 0;
+}
+void AttackCr4Smep()
+{
+    WriteCr4(ReadCr4() & ~kCr4Smep);
+}
+void RestoreCr4Smep()
+{
+    WriteCr4(ReadCr4() | kCr4Smep);
+}
+
+bool PrecheckCr4Smap()
+{
+    return (ReadCr4() & kCr4Smap) != 0;
+}
+void AttackCr4Smap()
+{
+    WriteCr4(ReadCr4() & ~kCr4Smap);
+}
+void RestoreCr4Smap()
+{
+    WriteCr4(ReadCr4() | kCr4Smap);
+}
+
+bool PrecheckEferNxe()
+{
+    return (Rdmsr(kMsrEfer) & kEferNxe) != 0;
+}
+void AttackEferNxe()
+{
+    Wrmsr(kMsrEfer, Rdmsr(kMsrEfer) & ~kEferNxe);
+}
+void RestoreEferNxe()
+{
+    Wrmsr(kMsrEfer, Rdmsr(kMsrEfer) | kEferNxe);
+}
+
+// ---- kernel .text byte patch ----
+//
+// Simulates the inline-hook half of a rootkit: scribble one byte
+// inside the kernel's `.text` spot-hash window so KernelTextSpot
+// sees the drift. We pick `_text_start + kTextPatchOffset`, which
+// lives in the early boot stub (multiboot2 entry / 32→64 bit
+// transition). That code runs once at boot and is dormant for
+// the rest of the session, so a one-byte XOR can't crash a live
+// path. We hold IRQs off across the WP-clear window so an
+// interrupt handler can't accidentally take advantage of the
+// briefly-writable kernel text.
+//
+// The byte is restored before the next attack runs, so the spot
+// hash is back to baseline for subsequent suite entries.
+extern "C" const u8 _text_start[];
+constexpr u64 kTextPatchOffset = 0x40;
+constinit u8 g_saved_text_byte = 0;
+
+void AttackKernelTextPatch()
+{
+    u64 rflags;
+    asm volatile("pushfq; pop %0" : "=r"(rflags));
+    asm volatile("cli");
+    const u64 cr0 = ReadCr0();
+    WriteCr0(cr0 & ~kCr0Wp);
+    auto* p = const_cast<u8*>(_text_start) + kTextPatchOffset;
+    g_saved_text_byte = *p;
+    *p = u8(~g_saved_text_byte);
+    WriteCr0(cr0);
+    if ((rflags & kRflagsIf) != 0)
+        asm volatile("sti");
+}
+void RestoreKernelTextPatch()
+{
+    u64 rflags;
+    asm volatile("pushfq; pop %0" : "=r"(rflags));
+    asm volatile("cli");
+    const u64 cr0 = ReadCr0();
+    WriteCr0(cr0 & ~kCr0Wp);
+    auto* p = const_cast<u8*>(_text_start) + kTextPatchOffset;
+    *p = g_saved_text_byte;
+    WriteCr0(cr0);
+    if ((rflags & kRflagsIf) != 0)
+        asm volatile("sti");
+}
+
 // Remembered state for the bootkit attack's two-phase
 // modify / restore. `g_boot_dev` is the handle whose LBA 0 got
 // the bad byte; `g_boot_saved_byte` is what was there before.
@@ -256,38 +409,76 @@ void AttackSimRun()
         const char* name;
         const char* detector_name;
         core::HealthIssue issue;
+        bool (*precheck)(); // nullable — null means always runnable
         void (*attack)();
         void (*restore)();
     };
     // Order-sensitive: the bootkit attack MUST run first. Any
-    // other security-critical finding (IDT/GDT/LSTAR) also
-    // escalates the blockguard to Deny, which would then refuse
-    // the bootkit's write before it reaches the disk — the hash
-    // check sees no change and reports FAIL even though the
-    // layered defense actually just worked. Running bootkit
-    // first lets the write land (in Advisory mode), the hash
-    // picks up the change, and the detector fires cleanly.
-    static constinit const Spec kSpecs[4] = {
-        {"Bootkit LBA 0 write", "BootSectorModified", core::HealthIssue::BootSectorModified, AttackBootSector,
+    // other security-critical finding (IDT/GDT/LSTAR/CR/EFER/
+    // .text patch) also escalates the blockguard to Deny, which
+    // would then refuse the bootkit's write before it reaches the
+    // disk — the hash check sees no change and reports FAIL even
+    // though the layered defense actually just worked. Running
+    // bootkit first lets the write land (in Advisory mode), the
+    // hash picks up the change, and the detector fires cleanly.
+    //
+    // The CR/EFER attacks rely on `HealControlRegisters` to
+    // re-assert the cleared bit on the next scan; our explicit
+    // Restore is a safety net. Kernel-text patch holds IRQs off
+    // across its WP-clear window — see AttackKernelTextPatch.
+    static constinit const Spec kSpecs[9] = {
+        {"Bootkit LBA 0 write", "BootSectorModified", core::HealthIssue::BootSectorModified, nullptr, AttackBootSector,
          RestoreBootSector},
-        {"IDT hijack", "IdtModified", core::HealthIssue::IdtModified, AttackIdt, RestoreIdt},
-        {"GDT descriptor swap", "GdtModified", core::HealthIssue::GdtModified, AttackGdt, RestoreGdt},
-        {"LSTAR syscall hook", "SyscallMsrHijacked", core::HealthIssue::SyscallMsrHijacked, AttackLstar, RestoreLstar},
-        // "Stack canary defang" — deliberately NOT in the suite. Zeroing
-        // __stack_chk_guard while the kernel is live self-bricks: the
-        // very next protected function that returns compares its
-        // stashed cookie to 0 and calls __stack_chk_fail → panic. The
-        // StackCanaryZero detector is trivially sound (a literal `== 0`
-        // check); proving it requires a more careful harness (CLI,
-        // no_stack_protector on every callee) than the rest of the
-        // suite. Separate slice.
+        {"IDT hijack", "IdtModified", core::HealthIssue::IdtModified, nullptr, AttackIdt, RestoreIdt},
+        {"GDT descriptor swap", "GdtModified", core::HealthIssue::GdtModified, nullptr, AttackGdt, RestoreGdt},
+        {"LSTAR syscall hook", "SyscallMsrHijacked", core::HealthIssue::SyscallMsrHijacked, nullptr, AttackLstar,
+         RestoreLstar},
+        {"CR0.WP defang (W^X bypass)", "Cr0WpCleared", core::HealthIssue::Cr0WpCleared, PrecheckCr0Wp, AttackCr0Wp,
+         RestoreCr0Wp},
+        {"CR4.SMEP defang (ret2usr enable)", "Cr4SmepCleared", core::HealthIssue::Cr4SmepCleared, PrecheckCr4Smep,
+         AttackCr4Smep, RestoreCr4Smep},
+        {"CR4.SMAP defang (user-mem read)", "Cr4SmapCleared", core::HealthIssue::Cr4SmapCleared, PrecheckCr4Smap,
+         AttackCr4Smap, RestoreCr4Smap},
+        {"EFER.NXE defang (data exec)", "EferNxeCleared", core::HealthIssue::EferNxeCleared, PrecheckEferNxe,
+         AttackEferNxe, RestoreEferNxe},
+        {"Kernel .text inline-hook (1-byte patch)", "KernelTextModified", core::HealthIssue::KernelTextModified,
+         nullptr, AttackKernelTextPatch, RestoreKernelTextPatch},
+        // Deferred — each needs its own slice with bespoke handling:
+        //
+        //   "Stack canary defang"  — zeroing __stack_chk_guard while
+        //     the kernel is live self-bricks; next protected return
+        //     calls __stack_chk_fail → panic. Needs a no-stack-
+        //     protector island around the whole snapshot/scan path.
+        //
+        //   "IA32_FEATURE_CONTROL unlock" — once firmware sets the
+        //     lock bit, WRMSR refuses to clear it (#GP). Untriggerable
+        //     on locked firmware; on unlocked firmware the very fact
+        //     that boot didn't lock means the detector also doesn't
+        //     check, so the suite slot is meaningless either way.
+        //
+        //   "IRQ storm" — needs >25 000 software interrupts into a
+        //     real registered handler within one scan window. Doable
+        //     with `int $vec` × N but pollutes IRQ statistics for the
+        //     rest of the boot; defer until the suite gains a "reset
+        //     baselines" hook.
+        //
+        //   "Heap pool mismatch / underflow" — corrupts the kernel
+        //     allocator's bookkeeping; recovering is invasive (must
+        //     repair both used/free counters and any chunk header
+        //     scribbled to bait the detector). Separate slice with a
+        //     dedicated scratch heap.
+        //
+        //   "Task stack overflow / RSP out of range" — needs to pick
+        //     a non-running task and scribble its stack-bottom canary
+        //     or saved-rsp without racing the scheduler. Wants a
+        //     scheduler-quiesce primitive that doesn't yet exist.
     };
 
     for (const Spec& sp : kSpecs)
     {
         if (s.count >= kMaxAttackResults)
             break;
-        const AttackOutcome o = RunAttack(sp.name, sp.issue, sp.attack, sp.restore);
+        const AttackOutcome o = RunAttack(sp.name, sp.issue, sp.precheck, sp.attack, sp.restore);
         s.results[s.count].name = sp.name;
         s.results[s.count].detector = sp.detector_name;
         s.results[s.count].outcome = o;
