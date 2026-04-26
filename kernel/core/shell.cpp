@@ -5062,41 +5062,7 @@ void CmdGetenv(u32 argc, char** argv)
     ConsoleWriteln(s->value);
 }
 
-void CmdYield()
-{
-    // Voluntary yield from the shell thread — useful for testing
-    // cooperative scheduling behaviour by hand. No output.
-    duetos::sched::SchedYield();
-}
-
-void CmdUname(u32 argc, char** argv)
-{
-    // uname default: kernel name. -a prints everything.
-    const bool all = (argc >= 2 && argv[1][0] == '-' && argv[1][1] == 'a');
-    if (all)
-    {
-        ConsoleWrite("DuetOS duetos v0 x86_64  (tick ");
-        WriteU64Dec(duetos::sched::SchedNowTicks());
-        ConsoleWriteln(")");
-    }
-    else
-    {
-        ConsoleWriteln("DuetOS");
-    }
-}
-
-void CmdWhoami()
-{
-    const char* name = AuthCurrentUserName();
-    if (name[0] == '\0')
-    {
-        ConsoleWriteln("(no session)");
-    }
-    else
-    {
-        ConsoleWriteln(name);
-    }
-}
+// CmdYield / CmdUname / CmdWhoami moved to shell_core.cpp.
 
 void CmdHostname()
 {
@@ -5104,24 +5070,7 @@ void CmdHostname()
     ConsoleWriteln((s != nullptr) ? s->value : "duetos");
 }
 
-void CmdPwd()
-{
-    // No per-process CWD yet; every path in the shell is
-    // absolute against the trusted ramfs root. `pwd` prints
-    // "/" so scripts that consult it don't break.
-    ConsoleWriteln("/");
-}
-
-void CmdTrue()
-{
-    // No-op success — useful in scripts: `cmd && true`.
-}
-
-void CmdFalse()
-{
-    // No-op failure placeholder. No exit codes yet; the
-    // visual-only marker prints nothing (matches /bin/false).
-}
+// CmdPwd / CmdTrue / CmdFalse moved to shell_core.cpp.
 
 // CmdMount moved to shell_storage.cpp.
 

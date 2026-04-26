@@ -27,6 +27,12 @@ void CmdVersion();
 void CmdClear();
 void CmdUptime();
 void CmdDate();
+void CmdYield();
+void CmdUname(u32 argc, char** argv);
+void CmdWhoami();
+void CmdPwd();
+void CmdTrue();
+void CmdFalse();
 
 // ---------------------------------------------------------------
 // Account management commands (shell_security.cpp). Thin wrappers
