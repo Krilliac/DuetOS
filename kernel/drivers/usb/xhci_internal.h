@@ -32,4 +32,28 @@ const char* CompletionCodeName(u32 code);
 void HidMouseInject(const u8 report[3]);
 void HidDiffAndInject(const u8 prev[8], const u8 curr[8]);
 
+// MMIO accessors. xHCI registers are word- or qword-sized and
+// require strict-aliased volatile access so the compiler doesn't
+// reorder, fuse, or elide them. Inline + header-resident so every
+// xhci_*.cpp TU shares one definition.
+inline u32 ReadMmio32(volatile u8* base, u64 offset)
+{
+    return *reinterpret_cast<volatile u32*>(base + offset);
+}
+
+inline void WriteMmio32(volatile u8* base, u64 offset, u32 value)
+{
+    *reinterpret_cast<volatile u32*>(base + offset) = value;
+}
+
+[[maybe_unused]] inline u64 ReadMmio64(volatile u8* base, u64 offset)
+{
+    return *reinterpret_cast<volatile u64*>(base + offset);
+}
+
+inline void WriteMmio64(volatile u8* base, u64 offset, u64 value)
+{
+    *reinterpret_cast<volatile u64*>(base + offset) = value;
+}
+
 } // namespace duetos::drivers::usb::xhci::internal

@@ -334,23 +334,6 @@ inline volatile u8* OpBase(const HostControllerInfo& h, u8 caplen)
     return static_cast<volatile u8*>(h.mmio_virt) + caplen;
 }
 
-inline u32 ReadMmio32(volatile u8* base, u64 offset)
-{
-    return *reinterpret_cast<volatile u32*>(base + offset);
-}
-inline void WriteMmio32(volatile u8* base, u64 offset, u32 value)
-{
-    *reinterpret_cast<volatile u32*>(base + offset) = value;
-}
-[[maybe_unused]] inline u64 ReadMmio64(volatile u8* base, u64 offset)
-{
-    return *reinterpret_cast<volatile u64*>(base + offset);
-}
-inline void WriteMmio64(volatile u8* base, u64 offset, u64 value)
-{
-    *reinterpret_cast<volatile u64*>(base + offset) = value;
-}
-
 // Allocate one zeroed 4 KiB frame; return both phys + kernel-virtual
 // pointer. Returns false on out-of-memory.
 bool AllocZeroPage(mm::PhysAddr* out_phys, void** out_virt)
