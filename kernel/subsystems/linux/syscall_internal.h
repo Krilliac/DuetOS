@@ -24,12 +24,15 @@ namespace duetos::subsystems::linux::internal
 inline constexpr i64 kEPERM = -1;
 inline constexpr i64 kENOENT = -2;
 inline constexpr i64 kESRCH = -3;
+inline constexpr i64 kEINTR = -4;
 inline constexpr i64 kEIO = -5;
 inline constexpr i64 kEBADF = -9;
+inline constexpr i64 kECHILD = -10;
 inline constexpr i64 kENOMEM = -12;
 inline constexpr i64 kEFAULT = -14;
 inline constexpr i64 kEISDIR = -21;
 inline constexpr i64 kEINVAL = -22;
+inline constexpr i64 kENFILE = -23;
 inline constexpr i64 kEMFILE = -24;
 inline constexpr i64 kENOTTY = -25;
 inline constexpr i64 kESPIPE = -29;
@@ -43,6 +46,18 @@ inline constexpr i64 kENOSYS = -38;
 i64 DoGetrlimit(u64 resource, u64 user_old);
 i64 DoSetrlimit(u64 resource, u64 user_new);
 i64 DoPrlimit64(u64 pid, u64 resource, u64 user_new, u64 user_old);
+
+// Signal handlers (syscall_sig.cpp). v0 has no actual signal
+// delivery — every entry persists state where the caller probes
+// it (sigaction slots, signal mask) or returns 0 / -EINTR so
+// libc paths make forward progress instead of -ENOSYS-crashing.
+i64 DoRtSigaction(u64 signum, u64 new_act, u64 old_act, u64 sigsetsize);
+i64 DoRtSigprocmask(u64 how, u64 user_set, u64 user_oldset, u64 sigsetsize);
+i64 DoSigaltstack(u64 ss, u64 old_ss);
+i64 DoRtSigreturn();
+i64 DoRtSigpending(u64 user_set, u64 sigsetsize);
+i64 DoRtSigsuspend(u64 user_mask, u64 sigsetsize);
+i64 DoRtSigtimedwait(u64 user_mask, u64 user_info, u64 user_ts, u64 sigsetsize);
 
 // Time / clock handlers (syscall_time.cpp). NowNs is the
 // HPET-derived "nanoseconds since boot" reading every Linux
