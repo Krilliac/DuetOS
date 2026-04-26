@@ -179,4 +179,128 @@ i64 DoInotifyInit1(u64 flags)
     return kENOSYS;
 }
 
+// ---------------------------------------------------------------
+// Compat / tracing / mount / link / rename stub group.
+// ---------------------------------------------------------------
+
+// ptrace(request, pid, addr, data): process tracing. v0 has no
+// ptrace machinery. -EPERM is the "tracing not permitted" return
+// Linux gives to unprivileged callers.
+i64 DoPtrace(u64 request, u64 pid, u64 addr, u64 data)
+{
+    (void)request;
+    (void)pid;
+    (void)addr;
+    (void)data;
+    return kEPERM;
+}
+
+// syslog(type, bufp, len): kernel log read/control. Every type
+// is a no-op success in v0 — kernel log lives on COM1, not in a
+// user-readable ring buffer. Returns 0 for "nothing written".
+i64 DoSyslog(u64 type, u64 bufp, u64 len)
+{
+    (void)type;
+    (void)bufp;
+    (void)len;
+    return 0;
+}
+
+// vhangup: revoke the controlling terminal. No tty model — 0.
+i64 DoVhangup()
+{
+    return 0;
+}
+
+// acct(filename): BSD process accounting. We do no accounting.
+i64 DoAcct(u64 filename)
+{
+    (void)filename;
+    return 0;
+}
+
+// mount(source, target, fstype, flags, data): mount a filesystem.
+// v0 mounts FAT32 volume 0 implicitly at boot and does not expose
+// a user-mode mount API. -EPERM is the appropriate return.
+i64 DoMount(u64 source, u64 target, u64 fstype, u64 flags, u64 data)
+{
+    (void)source;
+    (void)target;
+    (void)fstype;
+    (void)flags;
+    (void)data;
+    return kEPERM;
+}
+i64 DoUmount2(u64 target, u64 flags)
+{
+    (void)target;
+    (void)flags;
+    return kEPERM;
+}
+
+// sync / syncfs: flush cached writes to backing store. v0 FAT32
+// writes are synchronous (no page cache), so there's nothing to
+// flush.
+i64 DoSync()
+{
+    return 0;
+}
+i64 DoSyncfs(u64 fd)
+{
+    (void)fd;
+    return 0;
+}
+
+// rename(old, new) / link(old, new) / symlink(target, linkpath):
+// no rename / link primitive in fat32 v0. -ENOSYS tells musl
+// "this operation is not available on this kernel" — clearer
+// than an -EPERM "you're not allowed" lie.
+i64 DoRename(u64 old_path, u64 new_path)
+{
+    (void)old_path;
+    (void)new_path;
+    return kENOSYS;
+}
+i64 DoLink(u64 old_path, u64 new_path)
+{
+    (void)old_path;
+    (void)new_path;
+    return kENOSYS;
+}
+i64 DoSymlink(u64 target, u64 linkpath)
+{
+    (void)target;
+    (void)linkpath;
+    return kENOSYS;
+}
+
+// set_thread_area / get_thread_area: x86_32 LDT entry for TLS.
+// 64-bit code uses arch_prctl(ARCH_SET_FS) instead. Reject cleanly.
+i64 DoSetThreadArea(u64 u_info)
+{
+    (void)u_info;
+    return kEINVAL;
+}
+i64 DoGetThreadArea(u64 u_info)
+{
+    (void)u_info;
+    return kEINVAL;
+}
+
+// ioprio_get / ioprio_set: per-process I/O priority. Flat
+// scheduler; accept + return 0 (the default "BE / nice=4" level).
+i64 DoIoprioGet(u64 which, u64 who)
+{
+    (void)which;
+    (void)who;
+    return 0;
+}
+i64 DoIoprioSet(u64 which, u64 who, u64 ioprio)
+{
+    (void)which;
+    (void)who;
+    (void)ioprio;
+    return 0;
+}
+
 } // namespace duetos::subsystems::linux::internal

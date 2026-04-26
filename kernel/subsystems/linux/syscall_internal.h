@@ -50,10 +50,29 @@ i64 DoPrlimit64(u64 pid, u64 resource, u64 user_new, u64 user_old);
 // Stub handlers (syscall_stub.cpp). Calls for subsystems v0 has
 // no machinery for: pipes, fork/wait, eventfd / timerfd /
 // signalfd, epoll, inotify, plus the page-cache hint pair
-// (fadvise64 / readahead). Each returns the canonical Linux
-// errno (-ENFILE / -ECHILD / -ENOSYS) for "we don't have that
-// subsystem" so callers fall through to a polyfill instead of
-// the unhandled-syscall panic line.
+// (fadvise64 / readahead). Plus the "tracing / mount / link /
+// rename" compat group: ptrace / syslog / vhangup / acct /
+// mount / umount2 / sync / syncfs / rename / link / symlink /
+// set_thread_area / get_thread_area / ioprio_get / ioprio_set.
+// Each returns the canonical Linux errno (-ENFILE / -ECHILD /
+// -ENOSYS / -EPERM) for "we don't have that subsystem" so
+// callers fall through to a polyfill instead of the
+// unhandled-syscall panic line.
+i64 DoPtrace(u64 request, u64 pid, u64 addr, u64 data);
+i64 DoSyslog(u64 type, u64 bufp, u64 len);
+i64 DoVhangup();
+i64 DoAcct(u64 filename);
+i64 DoMount(u64 source, u64 target, u64 fstype, u64 flags, u64 data);
+i64 DoUmount2(u64 target, u64 flags);
+i64 DoSync();
+i64 DoSyncfs(u64 fd);
+i64 DoRename(u64 old_path, u64 new_path);
+i64 DoLink(u64 old_path, u64 new_path);
+i64 DoSymlink(u64 target, u64 linkpath);
+i64 DoSetThreadArea(u64 u_info);
+i64 DoGetThreadArea(u64 u_info);
+i64 DoIoprioGet(u64 which, u64 who);
+i64 DoIoprioSet(u64 which, u64 who, u64 ioprio);
 i64 DoPipe(u64 user_fds);
 i64 DoPipe2(u64 user_fds, u64 flags);
 i64 DoWait4(u64 pid, u64 user_status, u64 options, u64 user_rusage);
