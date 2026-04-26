@@ -24,4 +24,12 @@ namespace duetos::drivers::usb::xhci::internal
 // at static storage; callers must not free it.
 const char* CompletionCodeName(u32 code);
 
+// HID-class input bridge. Boot-protocol mouse and keyboard reports
+// arriving on the interrupt-IN ring funnel through these into the
+// kernel's PS/2-shaped input queues so the rest of the system
+// doesn't care that the device is USB. HidPollEntry in xhci.cpp
+// is the only caller.
+void HidMouseInject(const u8 report[3]);
+void HidDiffAndInject(const u8 prev[8], const u8 curr[8]);
+
 } // namespace duetos::drivers::usb::xhci::internal
