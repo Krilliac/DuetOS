@@ -168,6 +168,31 @@ extern bool g_interrupt;
 void ReplaceLine(const char* text);
 
 // ---------------------------------------------------------------
+// Top-level dispatcher (shell_dispatch.cpp). Splits a submitted
+// line into pipe stages, expands `!` history references and the
+// $VAR token-substitution, then walks the if/else chain that
+// matches the canonical command list against argv[0].
+//
+// Definition lives in shell_dispatch.cpp; declared here so the
+// public ShellSubmit wrapper in shell.cpp can call it.
+// ---------------------------------------------------------------
+void Dispatch(char* line);
+
+// Render the current prompt. Reads $PS1 from the env table if
+// set; defaults to "$ ". Definition lives in shell_dispatch.cpp;
+// declared here so ShellInit / ShellSubmit (shell.cpp) and the
+// tab-completer (shell_complete.cpp) can call it after dispatch
+// or after a multi-candidate completion list.
+void Prompt();
+
+// Canonical built-in command list. Single source of truth used
+// by the dispatcher (`which` matches against it) and the
+// tab-completer (CompleteCommandName uses it for prefix walk).
+// Definition lives in shell_dispatch.cpp.
+extern const char* const kCommandSet[];
+extern const u32 kCommandCount;
+
+// ---------------------------------------------------------------
 // Pure path / parse helpers (shell_pathutil.cpp). Used across the
 // shell for string handling that has no other dependencies.
 //
