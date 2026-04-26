@@ -56,4 +56,10 @@ inline void WriteMmio64(volatile u8* base, u64 offset, u64 value)
     *reinterpret_cast<volatile u64*>(base + offset) = value;
 }
 
+// Speed-derived constants used by the enum + HID-class setup paths.
+// EP0 max-packet-size default by PORTSC speed; HID interrupt-EP poll
+// interval converted into the xHCI Interval encoding (2^n × 125 µs).
+u32 DefaultMaxPacketSize0(u8 speed);
+u32 HidXhciInterval(u8 speed, u8 bInterval);
+
 } // namespace duetos::drivers::usb::xhci::internal
