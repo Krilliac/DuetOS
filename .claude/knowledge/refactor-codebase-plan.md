@@ -9,7 +9,7 @@ Branches: `claude/refactor-codebase-VvLO6` (merged via PR #74) and
 
 | Split | File | Original | Current | State |
 |---|---|---:|---:|---|
-| 1 | `kernel/core/shell.cpp`               | 9,769 | 9,769 | ☐ not started |
+| 1 | `kernel/core/shell.cpp`               | 9,769 | 9,222 | ◐ in progress (5 slices: security / storage / process / core / core-extension; ~5.6% trim, the trivially-isolated commands. Remaining slices need helper hoists — EnvFind / FatLeaf / WriteU64Hex etc. — to shell_internal.h before they can move) |
 | 2 | `kernel/subsystems/win32/thunks.cpp`  | 5,684 |   655 | ☑ done (`cae3704`) |
 | 3 | `kernel/subsystems/linux/syscall.cpp` | 4,642 | 1,274 | ☑ done (73% reduction; decomposed into 16 per-domain sibling TUs: cred / fd / file / fs_mut / io / misc / mm / path / pathutil / proc / rlimit / sched / sig / stub / time + syscall_internal.h. syscall.cpp itself is now just header + kSys* enum + LinuxSyscallDispatch + SyscallInit + LinuxLogAbiCoverage + thin Linux* public wrappers) |
 | 4 | `kernel/fs/fat32.cpp`                 | 3,190 |   300 | ☑ done (decomposed into fat32 + fat32_dir + fat32_lookup + fat32_read + fat32_write + fat32_create + selftest, plus fat32_internal.h and fat32_write_internal.h) |
@@ -42,46 +42,75 @@ Branches: `claude/refactor-codebase-VvLO6` (merged via PR #74) and
 | `4fe7804 linux-syscall: extract I/O handlers into sibling TU` | `syscall.cpp` 2,470 → 2,037 lines. read / write / lseek / ioctl / fsync / fdatasync / pread64 / pwrite64 / readv / writev + kLinuxIoMax → new `syscall_io.cpp` (450 lines). |
 | `6fccf1f linux-syscall: extract miscellaneous handlers into sibling TU` | `syscall.cpp` 2,037 → 1,452 lines. Catch-all "misc" group: arch_prctl / uname / set_tid_address / sysinfo / getrandom / futex / personality / pause / flock / get/setpriority / getcpu / prctl / getrusage / poll / select / getdents64 / set_robust_list / get_robust_list / ppoll / pselect6 / readlink → new `syscall_misc.cpp` (534 lines). WriteMsr duplicated TU-locally so the file is self-contained. |
 | `84ed53d linux-syscall: collapse scattered breadcrumb comments` | `syscall.cpp` 1,452 → 1,274 lines. Replace ~200 lines of in-line "moved to" stubs with one consolidated note. Update file header comment to describe the actual current layout. |
+| `2977dba shell: extract account-management commands into sibling TU` | `shell.cpp` 9,769 → 9,580 lines. users / useradd / userdel / passwd / logout / su / login + RoleName / RoleFromArg → new `shell_security.cpp` (256 lines). Establishes the shell_internal.h scaffolding under `duetos::core::shell::internal` with a `using namespace shell::internal;` directive at the top of shell.cpp. |
+| `2ae2b09 shell: extract storage / device-list commands into sibling TU` | `shell.cpp` 9,580 → 9,468 lines. mount / lsblk / lsgpt / lsmod → new `shell_storage.cpp` (164 lines). Fat* family deferred (shares FatLeaf + ParseU64Str with the rest of the shell). |
+| `ef5cc27 shell: extract ps / top / free into sibling TU` | `shell.cpp` 9,468 → 9,308 lines. ps / top / free + TU-private SchedStateName → new `shell_process.cpp` (218 lines). Spawn / Kill / Exec / Linuxexec / Translate / Readelf deferred (share path-strip + FAT32-load helpers). |
+| `83cb4dc shell: extract trivial banner / status commands into sibling TU` | `shell.cpp` 9,308 → 9,266 lines. about / version / clear / uptime / date → new `shell_core.cpp` (104 lines). |
+| `fb792b3 shell: extend shell_core.cpp with yield / uname / whoami / pwd / true / false` | `shell.cpp` 9,266 → 9,222 lines. Six more trivially-small commands appended to `shell_core.cpp`. CmdHostname stays in shell.cpp pending the env-table hoist. |
 
 **Deferred** to a follow-up session (each warrants its own fresh chat per
 the timeout-prevention rules):
 
-- `kernel/core/shell.cpp` (9,769 lines) — per-domain command extraction
-  + shared-state plumbing into `shell_internal.h`. No big data block to
-  `.inc`-extract; this is a real function-by-function split.
+- `kernel/core/shell.cpp` (now 9,222 lines) — five small slices have
+  landed (security / storage / process / core × 2). Each new slice
+  must promote one or more of the still-TU-private helpers into
+  `shell_internal.h` to unlock larger groups:
+  - **env-table hoist** (EnvFind / EnvSet / EnvUnset + `EnvSlot`
+    + `g_env[]`) — unlocks CmdHostname, CmdEnv, CmdSet, CmdUnset,
+    CmdGetenv, the $VAR substitution path, and any future
+    config-aware commands.
+  - **alias-table hoist** (AliasFind / AliasSet / AliasUnset +
+    `AliasSlot` + `g_aliases[]`) — unlocks CmdAlias / CmdUnalias.
+  - **history-ring hoist** (HistoryAppend / HistoryExpand /
+    HistoryRecallEntry / `g_history[]`) — unlocks CmdHistory and
+    the input-edit Up/Down arrow path.
+  - **path-strip hoist** (FatLeaf, ParseU64Str, ParseInt) —
+    unlocks the entire Fat* family + CmdRead + CmdLinuxexec +
+    CmdExec + CmdReadelf + CmdTranslate.
+  - **shared output helpers hoist** (WriteU64Dec / WriteU64Hex /
+    WriteI64Dec / WriteU8TwoDigits) — currently each new slice
+    duplicates them locally; promoting them once shrinks every
+    sibling TU.
+
+  After those five hoists the remaining buckets follow the original
+  plan layout: filesystem (Ls/Cat/Rm/Touch/Cp/Mv/Find/Grep/Head/
+  Tail/Wc/Sort/Uniq/Stat/Basename/Dirname/Hexdump), network (Ping/
+  Http/Ntp/Nslookup/Nic/Ifconfig/Dhcp/Route/Netscan/Wifi/Arp/Ipv4/
+  UsbNet/Net/FwPolicy/FwTrace/CrTrace), debug (Bp/Probe/Inspect/
+  DumpState/MemDump/Trace/Addr2Sym/Instr), hardware (Cpuid/Cr/
+  Rflags/Tsc/Hpet/Ticks/Msr/Lapic/Smp/Lspci/Heap/Paging/Fb/Smbios/
+  Power/Thermal/Hwmon/Gpu/Gfx/Vbe/KbdStats/MouseStats), utilities
+  (Cal/Sleep/Reset/Rand/Uuid/Color/Beep/Checksum/Repeat/Expr/Rev/
+  Tac/Nl/FlushTlb), and finally the dispatcher (`kCommandSet[]`
+  registry + Dispatch).
 _(Linux syscall split completed on
 `claude/continue-refactoring-split-QlCKz` across 17 commits;
 syscall.cpp 4,642 → 1,274 lines.)_
 
 **Resume prompt for a fresh session:**
 > The `linux/syscall.cpp` split is complete (commits `794c108` →
-> `84ed53d` on `claude/continue-refactoring-split-QlCKz`,
-> 4,642 → 1,274 lines, 73% reduction across 17 commits). The only
-> remaining target from the original top-5 is
-> `kernel/core/shell.cpp` (still 9,769 lines, ~20× the project's
-> ~500-line guideline).
+> `84ed53d`, 4,642 → 1,274 lines, 73% reduction across 17 commits).
+> The shell split is now in progress on the same branch
+> (`claude/continue-refactoring-split-QlCKz`): 5 small slices
+> landed via commits `2977dba` → `fb792b3`, taking shell.cpp from
+> 9,769 → 9,222 lines. The shell_internal.h scaffolding (under
+> `duetos::core::shell::internal`) and the
+> `using namespace shell::internal;` directive at the top of
+> shell.cpp are already in place.
 >
-> The shell split is the most ambitious of the five — there's no
-> big data block to `.inc`-extract; it's a real per-domain
-> function-by-function decomposition. Use the same pattern that
-> worked for `xhci.cpp` and `linux/syscall.cpp`:
->
->   1. Create `kernel/core/shell_internal.h` carrying shared
->      state declarations (input / history / interrupt; env;
->      alias; numeric / parse helpers) under
->      `duetos::core::shell::internal`.
->   2. Move shared state into a new `shell_state.cpp` with the
->      same `internal::` namespace.
->   3. Extract one bucket per commit (core, dispatch, filesystem,
->      network, storage, debug, hardware, process, security,
->      utilities — see "Split 1" of this plan for the bucket
->      table). Build verify between each.
->   4. Cap each session at ~3 buckets. Push after each commit
->      so a stream-timeout doesn't lose progress.
+> The next session should land one of the five "helper hoists"
+> listed in the deferred section above (env-table / alias-table /
+> history-ring / path-strip / shared-output-helpers). Each hoist
+> is a small surgical commit, but each one unlocks a much larger
+> bucket of commands for subsequent extractions. The recommended
+> order is: env-table first (touches the most commands), then
+> path-strip (unlocks the entire Fat* family in one slice), then
+> shared-output-helpers (lets every sibling TU drop its local
+> WriteU64Dec / WriteU64Hex copies).
 >
 > Start a fresh `claude/<slug>` branch off main rather than
 > continuing on `claude/continue-refactoring-split-QlCKz` —
-> that one's already long.
+> that one's already very long.
 
 ---
 
