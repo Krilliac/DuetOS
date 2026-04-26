@@ -347,3 +347,27 @@ DUETOS_TIMEOUT=30 tools/qemu/run.sh build/x86_64-debug/duetos.iso
 5. If a subsystem exists, it must be wired into a real call path (or removed).
 
 These constraints keep DuetOS coherent as it scales from bring-up to real workload execution.
+
+## 14) CI topology and artifact channels
+
+The repository keeps CI/release automation in-tree as the source of truth:
+
+- [`.github/workflows/build.yml`](../.github/workflows/build.yml)
+  - Format enforcement (`clang-format`)
+  - Debug + release configure/build presets
+  - Boot smoke (`tools/ctest-boot-smoke.sh`) in CI
+- [`.github/workflows/release.yml`](../.github/workflows/release.yml)
+  - Builds debug + release assets
+  - Publishes rolling release tags to:
+    - `latest-debug` (debug channel)
+    - `latest-release` (release channel)
+  - Triggers from `main`, `v*` tags, and manual dispatch
+
+Artifact channels are intentionally split:
+
+- **`latest-release`**: stable rolling channel from release preset artifacts.
+- **`latest-debug`**: prerelease rolling channel from debug preset artifacts.
+
+The Actions-tab run artifacts are short-retention diagnostics; GitHub Releases
+under the two rolling tags are the long-lived distribution channels.
+

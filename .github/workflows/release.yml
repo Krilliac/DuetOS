@@ -2,14 +2,22 @@ name: release-channels
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
   workflow_dispatch:
     inputs:
-      source_tag:
-        description: 'Version tag to build from (example: v0.1.0)'
+      source_ref:
+        description: 'Branch or tag to build from (example: main or v0.1.0)'
         required: true
+        default: 'main'
         type: string
+      smoke_gate:
+        description: 'Run QEMU smoke gate before publish'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -22,22 +30,27 @@ jobs:
   build-release-assets:
     name: build release assets
     runs-on: ubuntu-24.04
+    outputs:
+      source_ref: ${{ steps.source.outputs.ref }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Resolve source tag
+      - name: Resolve source ref
         id: source
+        shell: bash
         run: |
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "tag=${{ inputs.source_tag }}" >> "$GITHUB_OUTPUT"
+            echo "ref=${{ inputs.source_ref }}" >> "$GITHUB_OUTPUT"
+          elif [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            echo "ref=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
           else
-            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "ref=main" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Checkout source tag
-        run: git checkout "${{ steps.source.outputs.tag }}"
+      - name: Checkout source ref
+        run: git checkout "${{ steps.source.outputs.ref }}"
 
       - name: Install toolchain
         run: |
@@ -76,39 +89,59 @@ jobs:
       - name: Upload packaged assets
         uses: actions/upload-artifact@v4
         with:
-          name: duetos-release-channels-${{ steps.source.outputs.tag }}
+          name: duetos-release-channels-${{ steps.source.outputs.ref }}
           if-no-files-found: error
           path: dist/**
           retention-days: 14
 
-  publish-debug-release:
-    name: publish debug channel
+  release-smoke-gate:
+    name: qemu smoke gate (optional)
     needs: build-release-assets
     runs-on: ubuntu-24.04
+    if: |
+      (github.event_name == 'workflow_dispatch' && inputs.smoke_gate) ||
+      (github.event_name != 'workflow_dispatch' && vars.RELEASE_SMOKE_GATE == 'true')
     steps:
-      - name: Resolve source tag
-        id: source
+      - uses: actions/checkout@v4
+      - name: Install QEMU + grub
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "tag=${{ inputs.source_tag }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-          fi
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 grub-common grub-pc-bin \
+                                  grub-efi-amd64-bin xorriso mtools ovmf
+      - name: Download debug artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: duetos-release-channels-${{ needs.build-release-assets.outputs.source_ref }}
+          path: dist
+      - name: Prepare debug ISO for smoke script
+        run: |
+          mkdir -p build/x86_64-debug
+          cp dist/debug/duetos-debug.iso build/x86_64-debug/duetos.iso
+      - name: Run smoke test
+        run: DUETOS_TIMEOUT=30 tools/ctest-boot-smoke.sh build/x86_64-debug
 
+  publish-debug-release:
+    name: publish debug channel
+    needs: [build-release-assets, release-smoke-gate]
+    if: |
+      always() && needs.build-release-assets.result == 'success' &&
+      (needs.release-smoke-gate.result == 'success' || needs.release-smoke-gate.result == 'skipped')
+    runs-on: ubuntu-24.04
+    steps:
       - name: Download packaged assets
         uses: actions/download-artifact@v4
         with:
-          name: duetos-release-channels-${{ steps.source.outputs.tag }}
+          name: duetos-release-channels-${{ needs.build-release-assets.outputs.source_ref }}
           path: dist
 
       - name: Publish debug release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest-debug
-          target_commitish: ${{ steps.source.outputs.tag }}
-          name: DuetOS Debug (from ${{ steps.source.outputs.tag }})
+          target_commitish: ${{ needs.build-release-assets.outputs.source_ref }}
+          name: DuetOS Debug (from ${{ needs.build-release-assets.outputs.source_ref }})
           body: |
-            Rolling debug channel build from `${{ steps.source.outputs.tag }}`.
+            Rolling debug channel build from `${{ needs.build-release-assets.outputs.source_ref }}`.
           prerelease: true
           make_latest: false
           fail_on_unmatched_files: true
@@ -120,32 +153,26 @@ jobs:
 
   publish-release-release:
     name: publish release channel
-    needs: build-release-assets
+    needs: [build-release-assets, release-smoke-gate]
+    if: |
+      always() && needs.build-release-assets.result == 'success' &&
+      (needs.release-smoke-gate.result == 'success' || needs.release-smoke-gate.result == 'skipped')
     runs-on: ubuntu-24.04
     steps:
-      - name: Resolve source tag
-        id: source
-        run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "tag=${{ inputs.source_tag }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Download packaged assets
         uses: actions/download-artifact@v4
         with:
-          name: duetos-release-channels-${{ steps.source.outputs.tag }}
+          name: duetos-release-channels-${{ needs.build-release-assets.outputs.source_ref }}
           path: dist
 
       - name: Publish release release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest-release
-          target_commitish: ${{ steps.source.outputs.tag }}
-          name: DuetOS Release (from ${{ steps.source.outputs.tag }})
+          target_commitish: ${{ needs.build-release-assets.outputs.source_ref }}
+          name: DuetOS Release (from ${{ needs.build-release-assets.outputs.source_ref }})
           body: |
-            Rolling stable release channel build from `${{ steps.source.outputs.tag }}`.
+            Rolling stable release channel build from `${{ needs.build-release-assets.outputs.source_ref }}`.
           prerelease: false
           make_latest: true
           fail_on_unmatched_files: true
