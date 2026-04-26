@@ -68,6 +68,21 @@ bool EnvSet(const char* name, const char* value);
 bool EnvUnset(const char* name);
 
 // ---------------------------------------------------------------
+// Pure path / parse helpers (shell_pathutil.cpp). Used across the
+// shell for string handling that has no other dependencies.
+//
+// TmpLeaf / FatLeaf strip the /tmp + /fat prefix off a path and
+// hand back a pointer into the original string at the leaf name
+// (or nullptr if the path doesn't match). ParseU64Str accepts
+// decimal or 0x-hex; ParseInt is the i64 wrapper used by
+// commands that take a small positive count.
+// ---------------------------------------------------------------
+const char* TmpLeaf(const char* path);
+const char* FatLeaf(const char* path);
+bool ParseU64Str(const char* s, u64* out);
+i64 ParseInt(const char* s);
+
+// ---------------------------------------------------------------
 // Trivial info / housekeeping commands (shell_core.cpp). Banner /
 // status commands that need nothing beyond the console driver,
 // RTC, scheduler tick clock, or the env table above.

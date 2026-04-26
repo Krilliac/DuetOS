@@ -262,10 +262,10 @@ void WriteU8TwoDigits(u8 v)
 }
 
 // Forward declarations so commands defined earlier in the file
-// can use shared helpers whose bodies live further down.
+// can use shared helpers whose bodies live further down. (TmpLeaf
+// / FatLeaf / ParseU64Str / ParseInt are declared in
+// shell_internal.h instead — they live in shell_pathutil.cpp.)
 void WriteI64Dec(i64 v);
-bool ParseU64Str(const char* s, duetos::u64* out);
-duetos::i64 ParseInt(const char* s);
 
 // Fixed-width hex writer: prints `digits` nibbles of `v`, high
 // nibble first, with a leading "0x". digits == 0 trims leading
@@ -671,8 +671,7 @@ void CmdStats()
 
 // Forwards — these helpers live further down but are used by
 // the earlier command implementations / the Prompt helper.
-const char* TmpLeaf(const char* path);
-const char* FatLeaf(const char* path);
+// (TmpLeaf / FatLeaf are now declared in shell_internal.h.)
 void Dispatch(char* line); // CmdTime + CmdSource recurse via this
 
 // EnvSlot / g_env / EnvFind / EnvSet / EnvUnset moved to
@@ -3836,9 +3835,6 @@ void CmdHealth(u32 argc, char** argv)
     }
 }
 
-// Forward decl — definition is later in the file (used by FAT commands).
-bool ParseU64Str(const char* s, duetos::u64* out);
-
 void CmdMemDump(u32 argc, char** argv)
 {
     // memdump <hex-addr> [len]   — dump arbitrary kernel memory.
@@ -4980,54 +4976,7 @@ void CmdGetenv(u32 argc, char** argv)
 
 // CmdMount moved to shell_storage.cpp.
 
-// Shared helper: parse decimal (default) or hex (0x prefix) into u64.
-// Returns true + writes `*out` on success. Used by `read` + any future
-// command taking a sector number / address.
-bool ParseU64Str(const char* s, duetos::u64* out)
-{
-    if (s == nullptr || out == nullptr || s[0] == 0)
-        return false;
-    duetos::u64 v = 0;
-    duetos::u32 base = 10;
-    if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))
-    {
-        s += 2;
-        base = 16;
-    }
-    if (*s == 0)
-        return false;
-    for (; *s != 0; ++s)
-    {
-        duetos::u64 d;
-        if (*s >= '0' && *s <= '9')
-            d = static_cast<duetos::u64>(*s - '0');
-        else if (base == 16 && *s >= 'a' && *s <= 'f')
-            d = static_cast<duetos::u64>(*s - 'a' + 10);
-        else if (base == 16 && *s >= 'A' && *s <= 'F')
-            d = static_cast<duetos::u64>(*s - 'A' + 10);
-        else
-            return false;
-        v = v * base + d;
-    }
-    *out = v;
-    return true;
-}
-
-// Convenience integer parser used by commands that take a small
-// positive count (e.g. `crtrace show 64`). Returns the parsed
-// value on success; any parse failure or value above i64-max
-// returns 0 so the caller's `if (parsed > 0)` guard falls
-// through to the default. Reuses ParseU64Str so decimal +
-// 0x-hex syntax stay aligned across the shell.
-duetos::i64 ParseInt(const char* s)
-{
-    duetos::u64 v = 0;
-    if (!ParseU64Str(s, &v))
-        return 0;
-    if (v > 0x7FFFFFFFFFFFFFFFull)
-        return 0;
-    return static_cast<duetos::i64>(v);
-}
+// ParseU64Str / ParseInt moved to shell_pathutil.cpp.
 
 void CmdMetrics()
 {
@@ -7149,72 +7098,7 @@ void CmdMode()
     ConsoleWriteln("PRESS CTRL+ALT+T TO TOGGLE.");
 }
 
-// `/tmp` is served by the writable tmpfs, not the static
-// ramfs. Returns nullptr if `path` doesn't name /tmp or a
-// /tmp/<leaf>, otherwise a pointer to the leaf name inside
-// the original string (empty when the path is exactly "/tmp").
-// Hoisted above the commands so CmdEcho's redirect branch can
-// reuse it without a forward declaration.
-const char* TmpLeaf(const char* path)
-{
-    if (path == nullptr)
-    {
-        return nullptr;
-    }
-    const char prefix[] = "/tmp";
-    u32 i = 0;
-    for (; prefix[i] != '\0'; ++i)
-    {
-        if (path[i] != prefix[i])
-        {
-            return nullptr;
-        }
-    }
-    if (path[i] == '\0')
-    {
-        return path + i; // ""
-    }
-    if (path[i] == '/')
-    {
-        return path + i + 1;
-    }
-    return nullptr;
-}
-
-// Same shape as TmpLeaf, but for the FAT32 mount surfaced at /fat.
-// /fat          -> "" (list volume 0's root)
-// /fat/FILE     -> "FILE"   (look up FILE in volume 0's root)
-// anything else -> nullptr  (falls through to ramfs / tmpfs)
-//
-// Hard-coded to volume 0 for now: the shell has no syntax for
-// picking a different mount, and the first (and only) FAT32 volume
-// we probe in tests is at index 0. The `fatcat` raw command still
-// lets an operator poke any volume by index if they need to.
-const char* FatLeaf(const char* path)
-{
-    if (path == nullptr)
-    {
-        return nullptr;
-    }
-    const char prefix[] = "/fat";
-    u32 i = 0;
-    for (; prefix[i] != '\0'; ++i)
-    {
-        if (path[i] != prefix[i])
-        {
-            return nullptr;
-        }
-    }
-    if (path[i] == '\0')
-    {
-        return path + i; // ""
-    }
-    if (path[i] == '/')
-    {
-        return path + i + 1;
-    }
-    return nullptr;
-}
+// TmpLeaf / FatLeaf moved to shell_pathutil.cpp.
 
 void CmdEcho(u32 argc, char** argv)
 {
