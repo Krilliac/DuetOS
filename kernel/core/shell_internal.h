@@ -201,6 +201,20 @@ void CmdFalse();
 void CmdHostname();
 
 // ---------------------------------------------------------------
+// Misc trivial utility commands (shell_utilities.cpp). Commands
+// that touch only one or two kernel subsystems and don't need
+// any of the larger TU-private helpers in shell.cpp.
+// ---------------------------------------------------------------
+void CmdBasename(u32 argc, char** argv);
+void CmdDirname(u32 argc, char** argv);
+void CmdFlushTlb();
+void CmdMem();
+void CmdMode();
+void CmdHistory();
+void CmdSleep(u32 argc, char** argv);
+[[noreturn]] void CmdShutdownNow();
+
+// ---------------------------------------------------------------
 // Account management commands (shell_security.cpp). Thin wrappers
 // around auth.h. Admin-only paths are enforced inside each
 // handler so the kernel-side API stays pure data-access.

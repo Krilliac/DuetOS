@@ -90,6 +90,7 @@ set(DUETOS_KERNEL_SHARED_SOURCES
     core/shell_security.cpp
     core/shell_state.cpp
     core/shell_storage.cpp
+    core/shell_utilities.cpp
     core/stack_canary.cpp
     core/symbols.cpp
     core/fault_domain.cpp
