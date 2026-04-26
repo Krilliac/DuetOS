@@ -1,6 +1,6 @@
 # Deferred-task batch — 2026-04-25
 
-**Last updated:** 2026-04-25
+**Last updated:** 2026-04-26
 **Type:** Observation
 **Status:** Active
 
@@ -186,3 +186,57 @@ the existing observed behavior.
 
 - `userland/libs/gdi32/gdi32.c` — added `SYS_GDI_DRAW_TEXT_W` define,
   reimplemented `DrawTextW` as a real syscall trampoline.
+
+## Follow-up — 2026-04-26
+
+### 12. ext4 root-dir extent tree at depth>0
+
+`kernel/fs/ext4.cpp::WalkRootDir` previously bailed with
+`"root-dir extent tree has depth>0 — walk deferred"` when the inline
+extent header at the root inode advertised `eh_depth != 0`. That kicks
+in for any directory whose physical-block list outgrows the four
+inline leaf extents — common on real-world ext4 root filesystems.
+
+The walker now dispatches on depth:
+
+- **depth==0** still walks the up-to-4 inline leaf extents directly,
+  via the new `ProcessLeafExtents(v, sector_size, hdr, entries, ...)`
+  helper carved out of the original loop.
+- **depth>0** descends through interior index nodes via
+  `WalkExtentIndexTree`, an iterative DFS bounded by
+  `kMaxExtentNodeVisits = 64`. Inline index entries seed the stack;
+  each pop reads the interior node into `g_extent_node_scratch` (a
+  new 4 KiB buffer kept distinct from `g_block_scratch` so the leaf
+  walk does not clobber the node mid-iteration), validates the
+  `0xF30A` magic, and either pushes the node's index children or
+  hands the node to `ProcessLeafExtents` if its own header reports
+  `depth==0`.
+
+Bounds:
+- Max 64 interior-node visits → a corrupt tree where every index
+  entry forwards to another index node terminates with a logged
+  `"extent walk hit visit cap — truncated"`.
+- `cap_entries = min(eh_entries, (block_size - 12) / 12)` → a
+  malformed `eh_entries` cannot read past the buffer.
+- Stack overflow gets a logged `"extent stack overflow — walk
+  truncated"`.
+
+Log line now also reports the depth + leaves visited:
+`root-dir entries: N (depth=D leaves=L)` for depth>0 trees,
+`(extents=N)` unchanged for depth==0.
+
+## Files touched (follow-up)
+
+- `kernel/fs/ext4.cpp` — `g_extent_node_scratch` buffer,
+  `kEiLeafLo`/`kEiLeafHi` index-entry offsets, `ProcessLeafExtents`
+  + `WalkExtentIndexTree` helpers, dispatch in `WalkRootDir`.
+
+## Build / verification (follow-up)
+
+`cmake --preset x86_64-debug && cmake --build build/x86_64-debug
+--target duetos-kernel -j$(nproc)` clean. No QEMU smoke on this
+host (qemu/grub-mkrescue not installed); the new path is exercised
+on any ext4 volume whose root directory has overflowed past the
+inline-extent count, which the existing fixture builder does not
+yet produce — verification on a synthetic large-root image is a
+separate slice.

@@ -44,8 +44,12 @@ u32 g_volume_count = 0;
 // NVMe / AHCI DMA alignment expectations.
 alignas(16) constinit u8 g_scratch[1024] = {};
 // Block scratch — 4 KiB covers the common block size (4 KiB) in one
-// read. Used for group descriptor table + inode table reads.
+// read. Used for group descriptor table + inode table reads, and for
+// directory data blocks during the extent-tree walk.
 alignas(16) constinit u8 g_block_scratch[4096] = {};
+// Extent-node scratch — held distinct from g_block_scratch so an
+// interior node stays valid across the leaf-data reads it dispatches.
+alignas(16) constinit u8 g_extent_node_scratch[4096] = {};
 
 // Pull a little-endian u16/u32/u64 out of a raw byte buffer.
 inline u16 LeU16(const u8* p)
@@ -234,11 +238,16 @@ constexpr u64 kEhMagic = 0x00;
 constexpr u64 kEhEntries = 0x02;
 constexpr u64 kEhMax = 0x04;
 constexpr u64 kEhDepth = 0x06;
-// Extent-entry fields. (kEeLogical at offset 0 — tracked in the
+// Leaf-extent fields. (ee_block at offset 0 — tracked in the
 // comment but we only need length + phys for a single-extent walk.)
 constexpr u64 kEeLength = 0x04;
 constexpr u64 kEePhysHi = 0x06;
 constexpr u64 kEePhysLo = 0x08;
+// Index-entry fields (depth>0 nodes). ei_block at offset 0 (logical
+// span — unused here), ei_leaf_lo + ei_leaf_hi point at the next
+// node's physical block.
+constexpr u64 kEiLeafLo = 0x04;
+constexpr u64 kEiLeafHi = 0x08;
 
 // Parse one directory block's worth of linux_dirent records into
 // `out_entries[]`. `block` points to the start of the block;
@@ -272,52 +281,16 @@ u32 ParseDirBlock(const u8* block, u32 block_size, Ext4DirEntry* out_entries, u3
     return produced;
 }
 
-// Walk the root-directory data blocks. Requires `v.root_inode_valid`
-// and that the root inode uses the extent tree (the common ext4
-// layout). Handles depth-0 extent trees with multiple extents,
-// each spanning one or more contiguous physical blocks — covers
-// freshly-formatted volumes whose root has grown past one block.
-// Depth>0 (extent tree with intermediate index nodes) still bails;
-// the index-node walk would need extra block reads and a small
-// recursion budget — landed when a workload demands it.
-void WalkRootDir(Volume& v)
+// Process leaf extents from a buffer that begins with the 12-byte
+// extent header. `entries` is the already-capped leaf count. Each
+// leaf-data block is read into g_block_scratch and parsed for
+// linux_dirent records. `produced` is updated; `any_failed` is
+// raised on a block-read error so the caller can flag the log line.
+void ProcessLeafExtents(Volume& v, u32 sector_size, const u8* hdr, u16 entries, u32& produced, bool& any_failed)
 {
-    if (!v.root_inode_valid || !v.root_inode.uses_extents)
-        return;
-    const u8* ib = v.root_inode.i_block;
-    if (LeU16(ib + kEhMagic) != kExtentHeaderMagic)
+    for (u16 ei = 0; ei < entries && produced < kMaxRootDirEntries; ++ei)
     {
-        arch::SerialWrite("[ext4]   root-dir extent header magic mismatch\n");
-        return;
-    }
-    const u16 entries = LeU16(ib + kEhEntries);
-    const u16 max_entries = LeU16(ib + kEhMax);
-    const u16 depth = LeU16(ib + kEhDepth);
-    if (entries == 0 || max_entries == 0)
-        return;
-    if (depth != 0)
-    {
-        arch::SerialWrite("[ext4]   root-dir extent tree has depth>0 — walk deferred\n");
-        return;
-    }
-
-    const u32 sector_size = drivers::storage::BlockDeviceSectorSize(v.block_handle);
-    if (sector_size == 0)
-        return;
-
-    // i_block holds the 12-byte header followed by up to 4 extent
-    // records (also 12 bytes each) when depth==0. The on-disk
-    // header is at most 4 leaf extents wide for the inline tree.
-    constexpr u16 kInlineMaxLeafExtents = 4;
-    const u16 leaf_count = entries < kInlineMaxLeafExtents ? entries : kInlineMaxLeafExtents;
-
-    v.root_dir_entry_count = 0;
-    u32 produced = 0;
-    bool any_block_failed = false;
-
-    for (u16 ei = 0; ei < leaf_count && produced < kMaxRootDirEntries; ++ei)
-    {
-        const u8* ext = ib + 12 + u64(ei) * 12;
+        const u8* ext = hdr + 12 + u64(ei) * 12;
         const u16 len_blocks = LeU16(ext + kEeLength);
         const u64 phys = (u64(LeU16(ext + kEePhysHi)) << 32) | LeU32(ext + kEePhysLo);
         if (len_blocks == 0 || phys == 0)
@@ -334,19 +307,172 @@ void WalkRootDir(Volume& v)
                 arch::SerialWrite(" block=");
                 arch::SerialWriteHex(bi);
                 arch::SerialWrite(")\n");
-                any_block_failed = true;
+                any_failed = true;
                 break;
             }
             produced = ParseDirBlock(g_block_scratch, v.block_size, v.root_dir_entries, kMaxRootDirEntries, produced);
         }
+    }
+}
+
+// Iterative DFS over an extent tree whose root header is in `root_hdr`
+// (the inode's inline i_block) at depth>=1. `root_count` is the
+// already-capped count of inline index records.
+//
+// Each interior node is read into g_extent_node_scratch (kept distinct
+// from g_block_scratch so a leaf walk dispatched mid-traversal does not
+// clobber the node we are still iterating). The DFS is bounded by
+// `kMaxExtentNodeVisits` to keep a corrupt or hostile tree from
+// looping forever — there is no parent pointer in the on-disk format
+// to detect cycles directly.
+void WalkExtentIndexTree(Volume& v, u32 sector_size, const u8* root_hdr, u16 root_count, u32& produced,
+                         u32& leaves_visited, bool& any_failed)
+{
+    constexpr u32 kMaxExtentNodeVisits = 64;
+    u64 stack[kMaxExtentNodeVisits];
+    u32 sp = 0;
+
+    auto push = [&](u64 phys) -> bool
+    {
+        if (phys == 0)
+            return true;
+        if (sp >= kMaxExtentNodeVisits)
+        {
+            arch::SerialWrite("[ext4]   extent stack overflow — walk truncated\n");
+            any_failed = true;
+            return false;
+        }
+        stack[sp++] = phys;
+        return true;
+    };
+
+    for (u16 ei = 0; ei < root_count; ++ei)
+    {
+        const u8* idx = root_hdr + 12 + u64(ei) * 12;
+        const u64 phys = (u64(LeU16(idx + kEiLeafHi)) << 32) | LeU32(idx + kEiLeafLo);
+        if (!push(phys))
+            break;
+    }
+
+    const u32 count_per_block = u32(v.block_size / sector_size);
+    if (count_per_block == 0)
+    {
+        any_failed = true;
+        return;
+    }
+    // Cap interior-node entries against the on-disk block size so a
+    // malformed entries-count can't walk past the buffer.
+    const u16 max_records_per_node = u16((v.block_size - 12) / 12);
+
+    u32 visits = 0;
+    while (sp > 0 && produced < kMaxRootDirEntries)
+    {
+        if (visits >= kMaxExtentNodeVisits)
+        {
+            arch::SerialWrite("[ext4]   extent walk hit visit cap — truncated\n");
+            any_failed = true;
+            break;
+        }
+        const u64 phys = stack[--sp];
+        ++visits;
+        const u64 lba = phys * v.block_size / sector_size;
+        if (drivers::storage::BlockDeviceRead(v.block_handle, lba, count_per_block, g_extent_node_scratch) < 0)
+        {
+            arch::SerialWrite("[ext4]   extent node read failed (block=");
+            arch::SerialWriteHex(phys);
+            arch::SerialWrite(")\n");
+            any_failed = true;
+            continue;
+        }
+        if (LeU16(g_extent_node_scratch + kEhMagic) != kExtentHeaderMagic)
+        {
+            arch::SerialWrite("[ext4]   extent node magic mismatch (block=");
+            arch::SerialWriteHex(phys);
+            arch::SerialWrite(")\n");
+            any_failed = true;
+            continue;
+        }
+        const u16 child_entries = LeU16(g_extent_node_scratch + kEhEntries);
+        const u16 child_depth = LeU16(g_extent_node_scratch + kEhDepth);
+        const u16 cap_entries = child_entries < max_records_per_node ? child_entries : max_records_per_node;
+
+        if (child_depth == 0)
+        {
+            ProcessLeafExtents(v, sector_size, g_extent_node_scratch, cap_entries, produced, any_failed);
+            ++leaves_visited;
+        }
+        else
+        {
+            for (u16 ei = 0; ei < cap_entries; ++ei)
+            {
+                const u8* idx = g_extent_node_scratch + 12 + u64(ei) * 12;
+                const u64 child_phys = (u64(LeU16(idx + kEiLeafHi)) << 32) | LeU32(idx + kEiLeafLo);
+                if (!push(child_phys))
+                    break;
+            }
+        }
+    }
+}
+
+// Walk the root-directory data blocks. Requires `v.root_inode_valid`
+// and that the root inode uses the extent tree (the common ext4
+// layout). Depth==0 walks the up-to-4 inline leaf extents; depth>0
+// descends through interior index nodes via WalkExtentIndexTree,
+// which tops out at 64 node visits to bound a corrupt tree.
+void WalkRootDir(Volume& v)
+{
+    if (!v.root_inode_valid || !v.root_inode.uses_extents)
+        return;
+    const u8* ib = v.root_inode.i_block;
+    if (LeU16(ib + kEhMagic) != kExtentHeaderMagic)
+    {
+        arch::SerialWrite("[ext4]   root-dir extent header magic mismatch\n");
+        return;
+    }
+    const u16 entries = LeU16(ib + kEhEntries);
+    const u16 max_entries = LeU16(ib + kEhMax);
+    const u16 depth = LeU16(ib + kEhDepth);
+    if (entries == 0 || max_entries == 0)
+        return;
+
+    const u32 sector_size = drivers::storage::BlockDeviceSectorSize(v.block_handle);
+    if (sector_size == 0 || v.block_size == 0 || (v.block_size % sector_size) != 0)
+        return;
+
+    // i_block holds the 12-byte header followed by up to 4 records
+    // (12 bytes each) — leaf extents at depth==0, index entries at
+    // depth>0.
+    constexpr u16 kInlineMaxRecords = 4;
+    const u16 root_count = entries < kInlineMaxRecords ? entries : kInlineMaxRecords;
+
+    v.root_dir_entry_count = 0;
+    u32 produced = 0;
+    u32 leaves_visited = 0;
+    bool any_block_failed = false;
+
+    if (depth == 0)
+    {
+        ProcessLeafExtents(v, sector_size, ib, root_count, produced, any_block_failed);
+        leaves_visited = root_count;
+    }
+    else
+    {
+        WalkExtentIndexTree(v, sector_size, ib, root_count, produced, leaves_visited, any_block_failed);
     }
 
     v.root_dir_entry_count = produced;
 
     arch::SerialWrite("[ext4]   root-dir entries: ");
     arch::SerialWriteHex(v.root_dir_entry_count);
-    arch::SerialWrite(" (extents=");
-    arch::SerialWriteHex(leaf_count);
+    arch::SerialWrite(depth == 0 ? " (extents=" : " (depth=");
+    if (depth == 0)
+        arch::SerialWriteHex(leaves_visited);
+    else
+    {
+        arch::SerialWriteHex(depth);
+        arch::SerialWrite(" leaves=");
+        arch::SerialWriteHex(leaves_visited);
+    }
     if (any_block_failed)
         arch::SerialWrite(" partial");
     arch::SerialWrite(")\n");
