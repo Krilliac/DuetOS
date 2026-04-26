@@ -56,10 +56,20 @@ KNOWN_MAPPINGS = {
     "NtResetEvent":                "SYS_EVENT_RESET",
     "NtWaitForMultipleObjects":    "SYS_EVENT_WAIT",       # best-effort: first wait target in v0
     "NtSetInformationFile":        "SYS_FILE_SEEK",        # FilePositionInformation-class shape
-    "NtWriteVirtualMemory":        "SYS_WRITE",            # debug/log path best-effort sink
-    "NtReadVirtualMemory":         "SYS_READ",             # debug/probe path best-effort source
-    "NtCreateSemaphore":           "SYS_EVENT_CREATE",     # v0 event object is closest sync primitive
-    "NtReleaseSemaphore":          "SYS_EVENT_SET",        # release ≈ signal
+    # NtWriteVirtualMemory / NtReadVirtualMemory: NotImpl on purpose.
+    # Previous mappings (SYS_WRITE / SYS_READ) silently corrupted callers
+    # by treating the target PID handle as a file descriptor — cross-AS
+    # writes never landed where the caller intended, and an arbitrary
+    # fd matching the handle value would receive the bytes instead.
+    # Until a real cross-AS read/write primitive exists, NotImpl is
+    # honest. See .claude/knowledge/stub-gap-inventory-v0.md §1.2.
+    #
+    # NtCreateSemaphore / NtReleaseSemaphore: NotImpl on purpose.
+    # Previous mappings (SYS_EVENT_CREATE / SYS_EVENT_SET) collapsed
+    # counted semaphores onto binary events — a Release that should
+    # increment count from 5→6 instead set the event, waking ALL
+    # waiters at once instead of one. Concurrency-correctness bug
+    # waiting to happen. NotImpl until a real counted semaphore lands.
     # Batch 56 — NT→Linux fallback via SYS_NT_INVOKE. These NT
     # calls don't have dedicated SYS_* numbers; the shim forwards
     # them through the generic SYS_NT_INVOKE gateway, which routes
