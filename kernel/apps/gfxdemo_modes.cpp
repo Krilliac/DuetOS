@@ -247,11 +247,15 @@ void RenderMandelbrot(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u3
         return;
     // Animated zoom: span shrinks slowly, oscillating around a
     // visually interesting region. Centre is fixed at (-0.7, 0).
-    // Span in Q18: starts at 3.0 << 18, breathes ±33%.
+    // Span in Q18: base 3.0 with a continuous ±25 % breath driven
+    // by SinQ15(frame * 4). Multiply-first to keep precision —
+    // dividing the Q15 sin first would round to ~0 for almost
+    // every frame and freeze the zoom.
     const duetos::i32 base_span = 3 << 18;
-    const duetos::i32 osc = (SinQ15(frame * 4) >> 4);                            // ±2048
-    const duetos::i32 span_q18 = base_span - (base_span / 4) * (osc / 2048) / 1; // breath
-    const duetos::i32 cx0_q18 = -((7 << 18) / 10);                               // -0.7
+    const duetos::i64 osc_q15 = SinQ15(frame * 4); // -32767..+32767
+    const duetos::i64 breath_q18 = (static_cast<duetos::i64>(base_span / 4) * osc_q15) / 32767;
+    const duetos::i32 span_q18 = base_span - static_cast<duetos::i32>(breath_q18);
+    const duetos::i32 cx0_q18 = -((7 << 18) / 10); // -0.7
     const duetos::i32 cy0_q18 = 0;
     // Coarse 4-pixel tiles to keep per-frame iteration count
     // manageable on the 1 Hz draw budget.
