@@ -152,6 +152,22 @@ const char* HistoryAt(u32 n);
 const char* HistoryExpand(const char* line);
 
 // ---------------------------------------------------------------
+// Live input edit buffer (g_input + g_len) and the latched
+// Ctrl+C interrupt flag (g_interrupt). Definitions live in
+// shell_state.cpp; declared here so the dispatch + tab-completion
+// sibling TUs can read them without going through a public API.
+//
+// ReplaceLine wipes the visible line + reloads the buffer with
+// `text` (or clears it if `text == nullptr`). Used by the
+// history Prev / Next handlers and by the interactive completer.
+// ---------------------------------------------------------------
+extern char g_input[kInputMax];
+extern u32 g_len;
+extern bool g_interrupt;
+
+void ReplaceLine(const char* text);
+
+// ---------------------------------------------------------------
 // Pure path / parse helpers (shell_pathutil.cpp). Used across the
 // shell for string handling that has no other dependencies.
 //

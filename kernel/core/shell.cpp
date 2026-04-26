@@ -123,40 +123,8 @@ using duetos::drivers::video::ConsoleWriteln;
 
 // kInputMax / kHistoryCap + StrEq / StrStartsWith moved to
 // shell_internal.h. The history ring (g_history* + HistoryPush /
-// HistoryAt / HistoryExpand) lives in shell_state.cpp.
-constinit char g_input[kInputMax] = {};
-constinit u32 g_len = 0;
-
-// Latched Ctrl+C flag. Long-running commands poll via
-// ShellInterruptRequested; the kbd reader flips it on from
-// the Ctrl+C hotkey. Read/clear is atomic at word granularity
-// on x86_64, which is good enough for the kbd-reader + shell-
-// task single-producer / single-consumer pattern.
-constinit bool g_interrupt = false;
-
-// Wipe the current visible line (print '\b' len times) and load
-// `text` into the edit buffer + echo it. `nullptr` just clears
-// the line.
-void ReplaceLine(const char* text)
-{
-    while (g_len > 0)
-    {
-        ConsoleWriteChar('\b');
-        --g_len;
-    }
-    g_input[0] = '\0';
-    if (text == nullptr)
-    {
-        return;
-    }
-    for (u32 i = 0; text[i] != '\0' && g_len + 1 < kInputMax; ++i)
-    {
-        g_input[g_len] = text[i];
-        ConsoleWriteChar(text[i]);
-        ++g_len;
-    }
-    g_input[g_len] = '\0';
-}
+// HistoryAt / HistoryExpand) and the live input buffer (g_input /
+// g_len / g_interrupt + ReplaceLine) live in shell_state.cpp.
 
 // WriteU64Dec / WriteU8TwoDigits / WriteU64Hex / WriteI64Dec
 // moved to shell_format.cpp; declared in shell_internal.h.

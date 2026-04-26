@@ -4,9 +4,10 @@
  * Definitions of the long-lived shell tables that need to be
  * visible from more than one shell sibling TU: the environment
  * table (g_env + EnvFind / EnvSet / EnvUnset), the alias table
- * (g_aliases + AliasFind / AliasSet / AliasUnset), and the
- * command history ring (g_history + HistoryPush / HistoryAt /
- * HistoryExpand).
+ * (g_aliases + AliasFind / AliasSet / AliasUnset), the command
+ * history ring (g_history + HistoryPush / HistoryAt /
+ * HistoryExpand), and the live input edit buffer (g_input +
+ * g_len + g_interrupt + ReplaceLine).
  *
  * Sized helpers (EnvNameEq / EnvCopy / StrEq / StrStartsWith)
  * live inline in shell_internal.h so callers in either table or
@@ -15,6 +16,8 @@
  */
 
 #include "shell_internal.h"
+
+#include "../drivers/video/console.h"
 
 namespace duetos::core::shell::internal
 {
@@ -165,6 +168,39 @@ const char* HistoryAt(u32 n)
     }
     const u32 idx = (g_history_head + kHistoryCap - n) % kHistoryCap;
     return g_history[idx];
+}
+
+// Live input edit buffer. g_input holds the bytes the user has
+// typed since the last submission; g_len is the number of bytes.
+// g_interrupt is the latched Ctrl+C flag — long-running command
+// handlers poll it via the public ShellInterruptRequested wrapper
+// in shell.cpp.
+constinit char g_input[kInputMax] = {};
+constinit u32 g_len = 0;
+constinit bool g_interrupt = false;
+
+// Wipe the visible line (echo '\b' g_len times) and load `text`
+// into the edit buffer. `nullptr` just clears the line.
+void ReplaceLine(const char* text)
+{
+    using duetos::drivers::video::ConsoleWriteChar;
+    while (g_len > 0)
+    {
+        ConsoleWriteChar('\b');
+        --g_len;
+    }
+    g_input[0] = '\0';
+    if (text == nullptr)
+    {
+        return;
+    }
+    for (u32 i = 0; text[i] != '\0' && g_len + 1 < kInputMax; ++i)
+    {
+        g_input[g_len] = text[i];
+        ConsoleWriteChar(text[i]);
+        ++g_len;
+    }
+    g_input[g_len] = '\0';
 }
 
 // Resolve a `!` history-expansion token. Returns the string to
