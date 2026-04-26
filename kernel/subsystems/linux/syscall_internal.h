@@ -47,6 +47,15 @@ i64 DoGetrlimit(u64 resource, u64 user_old);
 i64 DoSetrlimit(u64 resource, u64 user_new);
 i64 DoPrlimit64(u64 pid, u64 resource, u64 user_new, u64 user_old);
 
+// File-descriptor handlers (syscall_fd.cpp). v0 stores per-fd
+// state in core::Process::linux_fds[16]; dup / dup2 / dup3 / fcntl
+// manipulate the slot table without sharing file descriptions
+// (real Linux dup() shares; we don't yet).
+i64 DoDup(u64 fd);
+i64 DoDup2(u64 oldfd, u64 newfd);
+i64 DoDup3(u64 oldfd, u64 newfd, u64 flags);
+i64 DoFcntl(u64 fd, u64 cmd, u64 arg);
+
 // Signal handlers (syscall_sig.cpp). v0 has no actual signal
 // delivery — every entry persists state where the caller probes
 // it (sigaction slots, signal mask) or returns 0 / -EINTR so

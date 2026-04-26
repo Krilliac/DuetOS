@@ -51,6 +51,7 @@ set(DUETOS_KERNEL_SHARED_SOURCES
     subsystems/linux/ring3_smoke.cpp
     subsystems/linux/syscall.cpp
     subsystems/linux/syscall_cred.cpp
+    subsystems/linux/syscall_fd.cpp
     subsystems/linux/syscall_rlimit.cpp
     subsystems/linux/syscall_sched.cpp
     subsystems/linux/syscall_sig.cpp
