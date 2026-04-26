@@ -44,6 +44,7 @@
 #include "../fs/vfs.h"
 #include "../mm/frame_allocator.h"
 #include "../sched/sched.h"
+#include "klog.h"
 #include "random.h"
 
 #include "shell.h"
@@ -837,6 +838,162 @@ void CmdBeep(u32 argc, char** argv)
     ConsoleWrite(" Hz for ");
     WriteU64Dec(ms);
     ConsoleWriteln(" ms");
+}
+
+void CmdSeq(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("SEQ: USAGE: SEQ N");
+        return;
+    }
+    u32 n = 0;
+    for (u32 i = 0; argv[1][i] != '\0'; ++i)
+    {
+        if (argv[1][i] < '0' || argv[1][i] > '9')
+        {
+            ConsoleWriteln("SEQ: BAD NUMBER");
+            return;
+        }
+        n = n * 10 + static_cast<u32>(argv[1][i] - '0');
+    }
+    // Uncapped; check the Ctrl+C flag every iteration. The interrupt
+    // latch is cleared on consume, so a second command after ^C
+    // runs normally.
+    for (u32 i = 1; i <= n; ++i)
+    {
+        if (ShellInterruptRequested())
+        {
+            ConsoleWriteln("^C");
+            return;
+        }
+        WriteU64Dec(i);
+        ConsoleWriteChar('\n');
+    }
+}
+
+void CmdDmesg(u32 argc, char** argv)
+{
+    // Optional first arg picks the minimum severity. Matches the
+    // single-letter `loglevel` command ("t" / "d" / "i" / "w" / "e").
+    // Default (no arg) shows every entry. Special: `dmesg c` clears
+    // the ring.
+    duetos::core::LogLevel min_level = duetos::core::LogLevel::Trace;
+    const char* banner_suffix = "";
+    if (argc >= 2 && argv[1] != nullptr && argv[1][0] != 0)
+    {
+        const char c = argv[1][0];
+        if (c == 'c' || c == 'C')
+        {
+            duetos::core::ClearLogRing();
+            ConsoleWriteln("-- KERNEL LOG RING CLEARED --");
+            return;
+        }
+        switch (c)
+        {
+        case 't':
+        case 'T':
+            min_level = duetos::core::LogLevel::Trace;
+            banner_suffix = " [FILTER: T+]";
+            break;
+        case 'd':
+        case 'D':
+            min_level = duetos::core::LogLevel::Debug;
+            banner_suffix = " [FILTER: D+]";
+            break;
+        case 'i':
+        case 'I':
+            min_level = duetos::core::LogLevel::Info;
+            banner_suffix = " [FILTER: I+]";
+            break;
+        case 'w':
+        case 'W':
+            min_level = duetos::core::LogLevel::Warn;
+            banner_suffix = " [FILTER: W+]";
+            break;
+        case 'e':
+        case 'E':
+            min_level = duetos::core::LogLevel::Error;
+            banner_suffix = " [FILTER: E ONLY]";
+            break;
+        default:
+            ConsoleWriteln("DMESG: USE [T|D|I|W|E] (severity) OR [C] (clear ring)");
+            return;
+        }
+    }
+    ConsoleWrite("-- KERNEL LOG RING (OLDEST FIRST)");
+    ConsoleWriteln(banner_suffix);
+    duetos::core::DumpLogRingToFiltered([](const char* s) { ConsoleWrite(s); }, min_level);
+}
+
+void CmdStats()
+{
+    const auto s = duetos::sched::SchedStatsRead();
+    ConsoleWrite("CONTEXT SWITCHES ");
+    WriteU64Dec(s.context_switches);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("TASKS LIVE       ");
+    WriteU64Dec(s.tasks_live);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("TASKS SLEEPING   ");
+    WriteU64Dec(s.tasks_sleeping);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("TASKS BLOCKED    ");
+    WriteU64Dec(s.tasks_blocked);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("TASKS CREATED    ");
+    WriteU64Dec(s.tasks_created);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("TASKS EXITED     ");
+    WriteU64Dec(s.tasks_exited);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("TASKS REAPED     ");
+    WriteU64Dec(s.tasks_reaped);
+    ConsoleWriteChar('\n');
+}
+
+void CmdMan(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("MAN: MISSING COMMAND NAME");
+        ConsoleWriteln("MAN: TRY `help` FOR A COMMAND LIST");
+        return;
+    }
+    const char* name = argv[1];
+
+    // Build "/etc/man/<name>" in a scratch buffer and cat it.
+    char path[64];
+    const char prefix[] = "/etc/man/";
+    u32 o = 0;
+    for (; prefix[o] != '\0'; ++o)
+    {
+        path[o] = prefix[o];
+    }
+    for (u32 i = 0; name[i] != '\0' && o + 1 < sizeof(path); ++i)
+    {
+        path[o++] = name[i];
+    }
+    path[o] = '\0';
+
+    char scratch[duetos::fs::kTmpFsContentMax];
+    const u32 n = ReadFileToBuf(path, scratch, sizeof(scratch));
+    if (n == static_cast<u32>(-1))
+    {
+        ConsoleWrite("MAN: NO PAGE FOR: ");
+        ConsoleWriteln(name);
+        ConsoleWriteln("MAN: TRY `help` FOR A COMMAND LIST");
+        ConsoleWriteln("MAN: OR `ls /etc/man` TO SEE WHAT'S AVAILABLE");
+        return;
+    }
+    for (u32 i = 0; i < n; ++i)
+    {
+        ConsoleWriteChar(scratch[i]);
+    }
+    if (n == 0 || scratch[n - 1] != '\n')
+    {
+        ConsoleWriteChar('\n');
+    }
 }
 
 } // namespace duetos::core::shell::internal

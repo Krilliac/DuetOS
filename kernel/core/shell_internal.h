@@ -405,6 +405,10 @@ void CmdHexdump(u32 argc, char** argv);
 void CmdStat(u32 argc, char** argv);
 void CmdCal();
 void CmdBeep(u32 argc, char** argv);
+void CmdSeq(u32 argc, char** argv);
+void CmdDmesg(u32 argc, char** argv);
+void CmdStats();
+void CmdMan(u32 argc, char** argv);
 
 // ---------------------------------------------------------------
 // Account management commands (shell_security.cpp). Thin wrappers
