@@ -83,10 +83,22 @@ set(DUETOS_KERNEL_SHARED_SOURCES
     subsystems/win32/vmap_syscall.cpp
     subsystems/win32/window_syscall.cpp
     core/shell.cpp
+    core/shell_complete.cpp
     core/shell_core.cpp
+    core/shell_debug.cpp
+    core/shell_dispatch.cpp
+    core/shell_exec.cpp
+    core/shell_filesystem.cpp
+    core/shell_format.cpp
+    core/shell_fsio.cpp
+    core/shell_hardware.cpp
+    core/shell_network.cpp
+    core/shell_pathutil.cpp
     core/shell_process.cpp
     core/shell_security.cpp
+    core/shell_state.cpp
     core/shell_storage.cpp
+    core/shell_utilities.cpp
     core/stack_canary.cpp
     core/symbols.cpp
     core/fault_domain.cpp

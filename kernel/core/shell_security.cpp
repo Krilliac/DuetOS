@@ -13,7 +13,11 @@
 #include "auth.h"
 #include "login.h"
 
+#include "../arch/x86_64/serial.h"
 #include "../drivers/video/console.h"
+#include "../security/attack_sim.h"
+#include "../security/guard.h"
+#include "klog.h"
 
 namespace duetos::core::shell::internal
 {
@@ -24,37 +28,6 @@ namespace
 using duetos::drivers::video::ConsoleWrite;
 using duetos::drivers::video::ConsoleWriteChar;
 using duetos::drivers::video::ConsoleWriteln;
-
-bool StrEq(const char* a, const char* b)
-{
-    for (u32 i = 0;; ++i)
-    {
-        if (a[i] != b[i])
-            return false;
-        if (a[i] == '\0')
-            return true;
-    }
-}
-
-void WriteU64Dec(u64 v)
-{
-    if (v == 0)
-    {
-        ConsoleWriteChar('0');
-        return;
-    }
-    char tmp[24];
-    u32 n = 0;
-    while (v > 0 && n < sizeof(tmp))
-    {
-        tmp[n++] = static_cast<char>('0' + (v % 10));
-        v /= 10;
-    }
-    for (u32 i = 0; i < n; ++i)
-    {
-        ConsoleWriteChar(tmp[n - 1 - i]);
-    }
-}
 
 const char* RoleName(AuthRole r)
 {
@@ -80,6 +53,22 @@ AuthRole RoleFromArg(const char* s)
 }
 
 } // namespace
+
+bool RequireAdmin(const char* cmd)
+{
+    if (AuthIsAdmin())
+    {
+        return true;
+    }
+    ConsoleWrite("DENIED: ");
+    ConsoleWrite(cmd);
+    ConsoleWriteln(" REQUIRES ADMIN");
+    duetos::core::Log(duetos::core::LogLevel::Warn, "shell", "admin-only command denied");
+    duetos::arch::SerialWrite("[shell] denied (non-admin): ");
+    duetos::arch::SerialWrite(cmd);
+    duetos::arch::SerialWrite("\n");
+    return false;
+}
 
 void CmdUsers()
 {
@@ -247,6 +236,102 @@ void CmdLoginCmd(u32 argc, char** argv)
     }
     ConsoleWrite("LOGIN: WELCOME, ");
     ConsoleWriteln(argv[1]);
+}
+
+void CmdGuard(u32 argc, char** argv)
+{
+    // Show / control the security guard.
+    //   guard                  status line
+    //   guard on | advisory    switch to advisory mode
+    //   guard enforce          switch to enforce mode (prompts on Warn/Deny)
+    //   guard off              disable the guard entirely (use sparingly)
+    //   guard test             re-run GuardSelfTest
+    namespace sec = duetos::security;
+    if (argc < 2)
+    {
+        ConsoleWrite("GUARD MODE   : ");
+        ConsoleWriteln(sec::GuardModeName(sec::GuardMode()));
+        ConsoleWrite("SCANS  : ");
+        WriteU64Hex(sec::GuardScanCount(), 0);
+        ConsoleWriteln("");
+        ConsoleWrite("ALLOW  : ");
+        WriteU64Hex(sec::GuardAllowCount(), 0);
+        ConsoleWriteln("");
+        ConsoleWrite("WARN   : ");
+        WriteU64Hex(sec::GuardWarnCount(), 0);
+        ConsoleWriteln("");
+        ConsoleWrite("DENY   : ");
+        WriteU64Hex(sec::GuardDenyCount(), 0);
+        ConsoleWriteln("");
+        const sec::Report* last = sec::GuardLastReport();
+        if (last != nullptr && last->finding_count > 0)
+        {
+            ConsoleWrite("LAST REPORT FINDINGS: ");
+            WriteU64Hex(last->finding_count, 0);
+            ConsoleWriteln("");
+        }
+        ConsoleWriteln("USAGE: GUARD [ON|ADVISORY|ENFORCE|OFF|TEST]");
+        return;
+    }
+    // Mutating subcommands change the kernel's security posture
+    // and must be admin-gated so a passwordless guest can't flip
+    // the guard to Off and disable image-load protection. Status
+    // read above is harmless (just counters).
+    if (StrEq(argv[1], "on") || StrEq(argv[1], "advisory"))
+    {
+        if (!RequireAdmin("GUARD MODE"))
+            return;
+        sec::SetGuardMode(sec::Mode::Advisory);
+        ConsoleWriteln("GUARD: ADVISORY (logs, never blocks)");
+        return;
+    }
+    if (StrEq(argv[1], "enforce"))
+    {
+        if (!RequireAdmin("GUARD MODE"))
+            return;
+        sec::SetGuardMode(sec::Mode::Enforce);
+        ConsoleWriteln("GUARD: ENFORCE (prompts on Warn/Deny, default-deny on timeout)");
+        return;
+    }
+    if (StrEq(argv[1], "off"))
+    {
+        if (!RequireAdmin("GUARD MODE"))
+            return;
+        sec::SetGuardMode(sec::Mode::Off);
+        ConsoleWriteln("GUARD: OFF (all images pass through)");
+        return;
+    }
+    if (StrEq(argv[1], "test"))
+    {
+        if (!RequireAdmin("GUARD TEST"))
+            return;
+        sec::GuardSelfTest();
+        ConsoleWriteln("(self-test output on COM1)");
+        return;
+    }
+    ConsoleWriteln("GUARD: UNKNOWN SUBCOMMAND");
+}
+
+void CmdAttackSim()
+{
+    duetos::security::AttackSimRun();
+    const auto& s = duetos::security::AttackSimSummary();
+    ConsoleWrite("ATTACK SIM COMPLETE: ");
+    WriteU64Dec(s.passed);
+    ConsoleWrite(" passed, ");
+    WriteU64Dec(s.failed);
+    ConsoleWrite(" failed, ");
+    WriteU64Dec(s.skipped);
+    ConsoleWriteln(" skipped");
+    for (u64 i = 0; i < s.count; ++i)
+    {
+        ConsoleWrite("  [");
+        ConsoleWrite(duetos::security::AttackOutcomeName(s.results[i].outcome));
+        ConsoleWrite("] ");
+        ConsoleWrite(s.results[i].name);
+        ConsoleWrite(" -> ");
+        ConsoleWriteln(s.results[i].detector);
+    }
 }
 
 } // namespace duetos::core::shell::internal

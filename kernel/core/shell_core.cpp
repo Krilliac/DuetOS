@@ -31,32 +31,6 @@ using duetos::drivers::video::ConsoleWrite;
 using duetos::drivers::video::ConsoleWriteChar;
 using duetos::drivers::video::ConsoleWriteln;
 
-void WriteU64Dec(u64 v)
-{
-    if (v == 0)
-    {
-        ConsoleWriteChar('0');
-        return;
-    }
-    char tmp[24];
-    u32 n = 0;
-    while (v > 0 && n < sizeof(tmp))
-    {
-        tmp[n++] = static_cast<char>('0' + (v % 10));
-        v /= 10;
-    }
-    for (u32 i = 0; i < n; ++i)
-    {
-        ConsoleWriteChar(tmp[n - 1 - i]);
-    }
-}
-
-void WriteU8TwoDigits(u8 v)
-{
-    ConsoleWriteChar(static_cast<char>('0' + (v / 10)));
-    ConsoleWriteChar(static_cast<char>('0' + (v % 10)));
-}
-
 } // namespace
 
 void CmdAbout()
@@ -155,6 +129,147 @@ void CmdFalse()
 {
     // No-op failure placeholder. No exit codes yet; the
     // visual-only marker prints nothing (matches /bin/false).
+}
+
+void CmdHostname()
+{
+    const EnvSlot* s = EnvFind("HOSTNAME");
+    ConsoleWriteln((s != nullptr) ? s->value : "duetos");
+}
+
+// ---------------------------------------------------------------
+// Env / alias commands. Thin wrappers over the hoisted env-table
+// and alias-table machinery in shell_state.cpp.
+// ---------------------------------------------------------------
+
+void CmdSet(u32 argc, char** argv)
+{
+    if (argc < 3)
+    {
+        ConsoleWriteln("SET: USAGE: SET NAME VALUE");
+        return;
+    }
+    if (!EnvSet(argv[1], argv[2]))
+    {
+        ConsoleWriteln("SET: ENV TABLE FULL");
+    }
+}
+
+void CmdUnset(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("UNSET: MISSING NAME");
+        return;
+    }
+    if (!EnvUnset(argv[1]))
+    {
+        ConsoleWrite("UNSET: NO SUCH VAR: ");
+        ConsoleWriteln(argv[1]);
+    }
+}
+
+void CmdGetenv(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("GETENV: USAGE: GETENV NAME");
+        return;
+    }
+    const EnvSlot* s = EnvFind(argv[1]);
+    if (s == nullptr)
+    {
+        ConsoleWriteln("(UNSET)");
+        return;
+    }
+    ConsoleWriteln(s->value);
+}
+
+void CmdEnv()
+{
+    bool any = false;
+    for (u32 i = 0; i < kEnvSlotCount; ++i)
+    {
+        if (!g_env[i].in_use)
+            continue;
+        any = true;
+        ConsoleWrite("  ");
+        ConsoleWrite(g_env[i].name);
+        ConsoleWriteChar('=');
+        ConsoleWriteln(g_env[i].value);
+    }
+    if (!any)
+    {
+        ConsoleWriteln("(NO VARIABLES SET)");
+    }
+}
+
+void CmdAlias(u32 argc, char** argv)
+{
+    if (argc == 1)
+    {
+        // List all.
+        bool any = false;
+        for (u32 i = 0; i < kAliasSlotCount; ++i)
+        {
+            if (!g_aliases[i].in_use)
+                continue;
+            any = true;
+            ConsoleWrite("  ");
+            ConsoleWrite(g_aliases[i].name);
+            ConsoleWrite("  = ");
+            ConsoleWriteln(g_aliases[i].expansion);
+        }
+        if (!any)
+        {
+            ConsoleWriteln("(NO ALIASES)");
+        }
+        return;
+    }
+    if (argc == 2)
+    {
+        const AliasSlot* s = AliasFind(argv[1]);
+        if (s == nullptr)
+        {
+            ConsoleWrite("ALIAS: NO SUCH ALIAS: ");
+            ConsoleWriteln(argv[1]);
+            return;
+        }
+        ConsoleWrite(argv[1]);
+        ConsoleWrite(" = ");
+        ConsoleWriteln(s->expansion);
+        return;
+    }
+    // 3+ args — join args[2..argc] with single spaces into the
+    // expansion, matching how the user typed it.
+    char buf[kAliasExpansionMax];
+    u32 out = 0;
+    for (u32 i = 2; i < argc; ++i)
+    {
+        if (i > 2 && out + 1 < sizeof(buf))
+            buf[out++] = ' ';
+        for (u32 j = 0; argv[i][j] != '\0' && out + 1 < sizeof(buf); ++j)
+            buf[out++] = argv[i][j];
+    }
+    buf[out] = '\0';
+    if (!AliasSet(argv[1], buf))
+    {
+        ConsoleWriteln("ALIAS: TABLE FULL");
+    }
+}
+
+void CmdUnalias(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("UNALIAS: MISSING NAME");
+        return;
+    }
+    if (!AliasUnset(argv[1]))
+    {
+        ConsoleWrite("UNALIAS: NO SUCH ALIAS: ");
+        ConsoleWriteln(argv[1]);
+    }
 }
 
 } // namespace duetos::core::shell::internal

@@ -27,10 +27,12 @@ using duetos::drivers::video::ConsoleWrite;
 using duetos::drivers::video::ConsoleWriteChar;
 using duetos::drivers::video::ConsoleWriteln;
 
-// TU-local hex printer. The shell.cpp copy is the canonical
-// definition; duplicated here so this file is self-contained
-// without dragging the parent's anon namespace into the build.
-void WriteU64Hex(u64 v, u32 digits = 16)
+// TU-local hex printer used for tabular column output. Distinct
+// from the canonical WriteU64Hex in shell_format.cpp: this one
+// emits no "0x" prefix and pads to a fixed width without leading
+// zeros stripped. Renamed to WriteHexCol so the canonical one
+// (declared in shell_internal.h) doesn't shadow it.
+void WriteHexCol(u64 v, u32 digits = 16)
 {
     char tmp[16];
     if (digits == 0 || digits > 16)
@@ -74,11 +76,11 @@ void CmdLsblk()
                 break;
             }
         }
-        WriteU64Hex(i, 4);
+        WriteHexCol(i, 4);
         ConsoleWrite("    ");
-        WriteU64Hex(storage::BlockDeviceSectorSize(i), 6);
+        WriteHexCol(storage::BlockDeviceSectorSize(i), 6);
         ConsoleWrite("  ");
-        WriteU64Hex(storage::BlockDeviceSectorCount(i), 16);
+        WriteHexCol(storage::BlockDeviceSectorCount(i), 16);
         ConsoleWrite("  ");
         ConsoleWriteln(storage::BlockDeviceIsWritable(i) ? "rw" : "ro");
     }
@@ -103,21 +105,21 @@ void CmdLsgpt()
         if (d == nullptr)
             continue;
         ConsoleWrite("DISK HANDLE ");
-        WriteU64Hex(d->block_handle, 4);
+        WriteHexCol(d->block_handle, 4);
         ConsoleWrite("  SECTOR_SIZE ");
-        WriteU64Hex(d->sector_size, 4);
+        WriteHexCol(d->sector_size, 4);
         ConsoleWrite("  PARTS ");
-        WriteU64Hex(d->partition_count, 2);
+        WriteHexCol(d->partition_count, 2);
         ConsoleWriteln("");
         for (duetos::u32 pi = 0; pi < d->partition_count; ++pi)
         {
             const gpt::Partition& p = d->partitions[pi];
             ConsoleWrite("  PART ");
-            WriteU64Hex(pi, 2);
+            WriteHexCol(pi, 2);
             ConsoleWrite(" FIRST_LBA ");
-            WriteU64Hex(p.first_lba, 0);
+            WriteHexCol(p.first_lba, 0);
             ConsoleWrite(" LAST_LBA ");
-            WriteU64Hex(p.last_lba, 0);
+            WriteHexCol(p.last_lba, 0);
             ConsoleWriteln("");
             ConsoleWrite("       TYPE ");
             // Canonical mixed-endian GUID rendering.
