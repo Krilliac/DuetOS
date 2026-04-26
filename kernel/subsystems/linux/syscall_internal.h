@@ -37,6 +37,13 @@ inline constexpr i64 kERANGE = -34;
 inline constexpr i64 kENAMETOOLONG = -36;
 inline constexpr i64 kENOSYS = -38;
 
+// Resource limit handlers (syscall_rlimit.cpp). v0 reports the
+// real ceilings where it has them (NOFILE 16, NPROC 64, STACK
+// 64 KiB, NICE 20) and RLIM_INFINITY for everything else.
+i64 DoGetrlimit(u64 resource, u64 user_old);
+i64 DoSetrlimit(u64 resource, u64 user_new);
+i64 DoPrlimit64(u64 pid, u64 resource, u64 user_new, u64 user_old);
+
 // Credential handlers (syscall_cred.cpp). All are uid-0/gid-0
 // no-ops in v0 — DuetOS has no Linux-style user account model.
 i64 DoGetUid();
