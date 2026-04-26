@@ -44,6 +44,19 @@ i64 DoGetrlimit(u64 resource, u64 user_old);
 i64 DoSetrlimit(u64 resource, u64 user_new);
 i64 DoPrlimit64(u64 pid, u64 resource, u64 user_new, u64 user_old);
 
+// Time / clock handlers (syscall_time.cpp). NowNs is the
+// HPET-derived "nanoseconds since boot" reading every Linux
+// clock currently bottoms out in (CLOCK_REALTIME ≈ boot in v0).
+// LinuxNowNs in the public wrapper layer forwards to it.
+u64 NowNs();
+i64 DoClockGetTime(u64 clk_id, u64 user_ts);
+i64 DoGettimeofday(u64 user_tv, u64 user_tz);
+i64 DoTime(u64 user_tloc);
+i64 DoNanosleep(u64 user_req, u64 user_rem);
+i64 DoTimes(u64 user_buf);
+i64 DoClockGetres(u64 clk_id, u64 user_res);
+i64 DoClockNanosleep(u64 clk_id, u64 flags, u64 user_req, u64 user_rem);
+
 // Scheduler-policy handlers (syscall_sched.cpp). v0 has one real
 // scheduler (round-robin kernel threads) and BSP-only SMP, so
 // every handler reports SCHED_OTHER on CPU 0 and rejects
