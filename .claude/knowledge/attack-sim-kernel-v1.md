@@ -36,7 +36,7 @@ Each attack follows the same five-step recipe (`RunAttack`):
    pre-attack baseline, restore the world. A second post-restore scan
    prevents the next attack inheriting a still-pending detection.
 
-## Suite inventory (9 active + 5 deferred)
+## Suite inventory (11 active + 5 deferred)
 
 | # | Attack | Detector that fires | Notes |
 |---|---|---|---|
@@ -44,14 +44,21 @@ Each attack follows the same five-step recipe (`RunAttack`):
 | 2 | IDT vector 0 hijack | `IdtModified` | Single-byte XOR on the live IDT |
 | 3 | GDT slot 0 (null desc) scribble | `GdtModified` | Null descriptor is never loaded — safe to corrupt |
 | 4 | LSTAR syscall hook | `SyscallMsrHijacked` | Classic rootkit MSR overwrite |
-| 5 | CR0.WP defang (W^X bypass) | `Cr0WpCleared` | Auto-healed by `HealControlRegisters` |
-| 6 | CR4.SMEP defang (ret2usr enable) | `Cr4SmepCleared` | Skipped if CPU lacks SMEP |
-| 7 | CR4.SMAP defang (user-mem read) | `Cr4SmapCleared` | Skipped if CPU lacks SMAP |
-| 8 | EFER.NXE defang (data exec) | `EferNxeCleared` | Auto-healed |
-| 9 | Kernel `.text` 1-byte patch | `KernelTextModified` | IRQ-off + CR0.WP toggle bracket the write window. Patches `_text_start + 0x40` (dormant boot stub) |
+| 5 | SYSENTER_CS hook | `SyscallMsrHijacked` | Legacy 32-bit syscall path; DuetOS uses SYSCALL so safe to scramble |
+| 6 | SYSENTER_EIP hook | `SyscallMsrHijacked` | Same — legacy path, no functional impact |
+| 7 | CR0.WP defang (W^X bypass) | `Cr0WpCleared` | Auto-healed by `HealControlRegisters` |
+| 8 | CR4.SMEP defang (ret2usr enable) | `Cr4SmepCleared` | Skipped if CPU lacks SMEP |
+| 9 | CR4.SMAP defang (user-mem read) | `Cr4SmapCleared` | Skipped if CPU lacks SMAP |
+| 10 | EFER.NXE defang (data exec) | `EferNxeCleared` | Auto-healed |
+| 11 | Kernel `.text` 1-byte patch | `KernelTextModified` | IRQ-off + CR0.WP toggle bracket the write window. Patches `_text_start + 0x40` (dormant boot stub) |
 
 **Deferred (each needs its own slice):**
 
+- *STAR / CSTAR scrambling* — STAR holds the CS:SS pair SYSCALL/SYSRET
+  reads on every entry/exit. Scrambling it crashes the next user-mode
+  return before the runtime-checker scan can fire. Needs a synthetic
+  bracketed harness that masks IRQs, performs no syscalls, restores,
+  then unmasks.
 - *Stack canary defang* — zeroing `__stack_chk_guard` self-bricks the
   live kernel; needs a `no_stack_protector` island around the whole
   snapshot/scan path.
