@@ -28,12 +28,27 @@
  *   coverage scoreboard the boot log emits — same model as
  *   the Win32 NT-coverage logger.
  *
- * WHY THIS FILE IS LARGE
- *   Linux has ~350 syscalls. Many are short stubs but each
- *   carries argument-shape conversion (Linux ABI uses rdi/rsi/
- *   rdx/r10/r8/r9; DuetOS native uses rdi/rsi/rdx). At ~80
- *   handlers + the dispatch + the coverage logger, ~4.5K lines
- *   is in line with the file's job.
+ * FILE LAYOUT
+ *   The handler implementations themselves live in per-domain
+ *   sibling translation units (syscall_<area>.cpp), each defining
+ *   its handlers in the duetos::subsystems::linux::internal
+ *   namespace. The list (cred, fd, file, fs_mut, io, misc, mm,
+ *   path, pathutil, proc, rlimit, sched, sig, stub, time) +
+ *   their decls live in syscall_internal.h.
+ *
+ *   This TU keeps:
+ *     - the syscall-number enum (kSys*) — the ABI-stable inputs
+ *       to the dispatch switch;
+ *     - the LinuxSyscallDispatch switch itself;
+ *     - SyscallInit + the MSR / SFMASK / KERNEL_GS_BASE wiring;
+ *     - LinuxLogAbiCoverage (boot-time coverage scoreboard);
+ *     - thin Linux* public wrappers exposed to the NT→Linux
+ *       translator and to other kernel callers.
+ *
+ *   `using namespace internal;` at the top hoists every Do*
+ *   handler back into this TU's outer namespace so the dispatch
+ *   switch keeps reading like the in-TU layout the file used
+ *   to have.
  */
 
 #include "syscall.h"
@@ -423,203 +438,10 @@ enum : u64
 // alongside the StripFatPrefix / CopyAndStripFatPath / AtFdCwdOnly
 // declarations they pair with.
 
-// kESRCH / kESPIPE / kENOTTY moved to syscall_internal.h alongside
-// the rest of the errno constants.
-
-// ARCH_* codes for arch_prctl moved with DoArchPrctl into
-// syscall_misc.cpp.
-
-// DoExitGroup / DoExit / DoGetPid moved to syscall_proc.cpp
-// alongside the rest of the process-control handlers.
-
-// DoWrite / DoRead / DoWritev / DoReadv / DoLseek / DoIoctl moved
-// to syscall_io.cpp.
-
-// Linux: rt_sigaction. Store the requested handler + mask + flags
-// in the per-process signal table so a subsequent rt_sigaction
-// with a nullptr new_act returns the value we just persisted.
-// Signal DELIVERY is still not wired (no user-mode trampoline, no
-// pending queue) but musl's CRT init relies on readback to decide
-// whether SIGPIPE is SIG_IGN'd — returning the previous value
-// matters even though we never actually raise a signal.
-//
-// Linux sigaction layout (offsets into the user struct):
-//   0x00  sa_handler (u64) or sa_sigaction
-//   0x08  sa_flags (u64)
-//   0x10  sa_restorer (u64)
-//   0x18  sa_mask (u64, first u64 of the sigset)
-// DoRtSigaction / DoRtSigprocmask moved to syscall_sig.cpp
-// alongside the rest of the signal handlers.
-
-// DoSetTidAddress / DoReadlink / DoFutex / DoGetRandom / DoSysinfo
-// moved to syscall_misc.cpp.
-
-// Linux: madvise(addr, len, advice). Hint to the kernel about
-// expected access patterns. v0 has no swap, no readahead engine,
-// and no compact/cold-page reclaim — so any sane hint is a clean
-// no-op. The actively-destructive hints (MADV_DONTNEED, MADV_FREE)
-// would zero pages on real Linux; we don't honour them — programs
-// that rely on the zero are still safe because they re-touch the
-// pages and re-read whatever bytes are there. This matches what a
-// MADV_NORMAL response would look like.
-//
-// The most common bad-input case is a non-page-aligned addr; mirror
-// Linux's -EINVAL on that.
-// DoMadvise moved to syscall_mm.cpp.
-
-// DoGetpgrp moved to syscall_proc.cpp.
-
-// Resource-limit handlers (DoGetrlimit / DoSetrlimit /
-// DoPrlimit64) plus the kRlimit* / kRlimInfinity constants and
-// RlimitDefaultsFor helper live in syscall_rlimit.cpp. The
-// `using namespace internal;` directive at the top of this TU
-// keeps the dispatcher's references unqualified.
-
-// DoTime / DoNanosleep moved to syscall_time.cpp.
-
-// DoFsync / DoFdatasync / DoPread64 / DoPwrite64 moved to
-// syscall_io.cpp alongside the rest of the I/O surface.
-
-// CopyFdSlot + DoDup / DoDup2 / DoFcntl moved to syscall_fd.cpp
-// alongside DoDup3.
-
-// Linux: chdir(path). Copies the user path into the process's
-// linux_cwd buffer, byte-for-byte (no canonicalisation — every
-// FAT32 / ramfs lookup already strips the prefix at use site).
-// -ENAMETOOLONG if the path doesn't fit; -ENOENT if the target
-// directory doesn't actually exist on the FAT32 volume (when the
-// path looks like a FAT32 path); otherwise success.
-// DoChdir / DoFchdir moved to syscall_path.cpp.
-
-// Linux: mprotect(addr, len, prot). v0 maps all user pages RW
-// and has no MapProtect helper, so the protections themselves
-// stay advisory — but the call validates inputs the way Linux
-// does so a buggy program sees -EINVAL instead of a phantom
-// success.
-//
-// Validation:
-//   * addr must be page-aligned (4 KiB).
-//   * (addr + len) must not overflow.
-//   * The whole range must lie in the canonical low half — same
-//     gate CopyFromUser uses to refuse kernel-VA pointers.
-//   * len == 0 is success in Linux; mirror that.
-//   * prot has 4 valid bits (PROT_READ=1, PROT_WRITE=2,
-//     PROT_EXEC=4, PROT_NONE=0; PROT_GROWSDOWN/UP at 0x01000000
-//     and 0x02000000 are accepted by Linux so musl's stack-
-//     guard tweak doesn't get rejected).
-// DoMprotect moved to syscall_mm.cpp.
-
-// DoSigaltstack / DoRtSigreturn moved to syscall_sig.cpp.
-
-// DoSchedYield / DoGetTid / DoTgkill / DoKill / DoGetPpid /
-// DoGetPgid / DoGetSid / DoSetPgid moved to syscall_proc.cpp.
-
-// Identity stubs (DoGetUid / DoGetGid / DoGetEuid / DoGetEgid)
-// moved to syscall_cred.cpp alongside the rest of the credential
-// handlers. The `using namespace internal;` directive at the top
-// of this TU keeps the dispatcher's references unqualified.
-
-// PageUp helper + DoBrk + DoMmap + DoMunmap moved to syscall_mm.cpp.
-
-// Linux: openat(dirfd, pathname, flags, mode). Modern glibc's
-// `open()` is usually `openat(AT_FDCWD, ...)` under the hood —
-// this handler is what real compiled-C binaries actually hit.
-// v0 only honours AT_FDCWD; any other dirfd is -EBADF until
-// per-fd directory state lands (same limitation fchdir has).
-// DoOpenat / DoNewFstatat moved to syscall_file.cpp.
-
-// DoDup3 moved to syscall_fd.cpp.
-
-
-
-// ---------------------------------------------------------------
-// Batch 55 — compat-stub + FAT32-backed handlers for the most-
-// commonly-probed unimplemented syscalls. See the kSys* enum
-// block at the top for the list and rationale.
-// ---------------------------------------------------------------
-
-// kENOMEM_ shadow constant removed — DoMremap moved to syscall_mm.cpp,
-// which uses the kENOMEM in syscall_internal.h directly.
-
-// DoLstat moved to syscall_file.cpp.
-
-
-
-// times(buf): fill struct tms with user/system/cuser/csys clock
-// counts in clock ticks (Linux: 100 Hz, 1 tick = 10 ms — matches
-// our scheduler tick exactly). Per-task accounting comes from
-// Process::ticks_used; cuser/cstime tracking would need a wait()
-// path we don't have, so they stay zero. The return value is the
-// canonical "ticks since boot" the kernel TimerTicks counter
-// reports.
-// DoTimes moved to syscall_time.cpp.
-
-// Credential handlers (DoSetuid / DoSetgid / DoSetreuid /
-// DoSetregid / DoSetresuid / DoSetresgid / DoGetresuid /
-// DoGetresgid / DoSetfsuid / DoSetfsgid / DoGetgroups /
-// DoSetgroups / DoCapget / DoCapset) live in syscall_cred.cpp.
-// The `using namespace internal;` directive at the top of this
-// TU keeps the dispatcher's references unqualified.
-
-
-
-// DoMlock / DoMunlock / DoMlockall / DoMunlockall moved to syscall_mm.cpp.
-
-// FAT32-backed filesystem ops. All four route through the
-// existing Fat32*AtPath primitives. Path strip mirrors DoOpen:
-// musl uses absolute paths, FAT32 wants volume-relative.
-
-// ---------------------------------------------------------------
-// Batch 56 — additional compat stubs + *at-family delegations.
-// ---------------------------------------------------------------
-
-// kAtRemoveDir + AtFdCwdOnly moved to syscall_internal.h /
-// syscall_pathutil.cpp.
-
-// DoPtrace / DoSyslog / DoVhangup / DoAcct / DoMount / DoUmount2 /
-// DoSync / DoSyncfs / DoRename / DoLink / DoSymlink / DoSetThreadArea
-// / DoGetThreadArea / DoIoprioGet / DoIoprioSet moved to
-// syscall_stub.cpp.
-
-// Scheduler-policy handlers (DoSchedSetaffinity / DoSchedGetaffinity
-// / DoSchedGetscheduler / DoSchedSetscheduler / DoSchedGetparam /
-// DoSchedSetparam / DoSchedGetPriorityMax/Min / DoSchedRrGetInterval)
-// plus the SCHED_* constants live in syscall_sched.cpp. The
-// `using namespace internal;` directive at the top of this TU
-// keeps the dispatcher's references unqualified.
-
-// DoClockGetres / DoClockNanosleep moved to syscall_time.cpp.
-
-// DoChmod / DoFchmod / DoChown / DoFchown / DoLchown / DoUtime /
-// DoMknod / DoTruncate / DoFtruncate / DoUnlink / DoMkdir /
-// DoRmdir / DoMkdirat / DoUnlinkat / DoLinkat / DoSymlinkat /
-// DoRenameat / DoRenameat2 / DoFchownat / DoFutimesat /
-// DoFchmodat / DoFaccessat / DoFaccessat2 / DoUtimensat moved
-// to syscall_fs_mut.cpp.
-
-// ---------------------------------------------------------------
-// Batch 67 — minimal stubs for previously-unwired common syscalls.
-// Each one returns a Linux-shaped error/zero so a caller that
-// probes the syscall sees a clean answer instead of the
-// "unhandled syscall" panic line.
-// ---------------------------------------------------------------
-
-// kENFILE / kECHILD / kEINTR moved to syscall_internal.h with the
-// rest of the errno constants.
-
-// DoPipe / DoPipe2 / DoWait4 / DoWaitid / DoEventfd / DoTimerfd* /
-// DoSignalfd / DoFadvise64 / DoReadahead / DoEpoll* / DoInotifyInit*
-// moved to syscall_stub.cpp.
-
-// DoRtSigpending / DoRtSigsuspend / DoRtSigtimedwait moved to
-// syscall_sig.cpp.
-
-// DoArchPrctl / DoUname / DoPause / DoFlock / DoPersonality /
-// DoGetpriority / DoSetpriority / DoGetcpu / DoGetrusage /
-// DoPoll / DoSelect / DoGetdents64 / DoSetRobustList /
-// DoGetRobustList / DoPpoll / DoPselect6 / DoPrctl /
-// DoSetTidAddress / DoReadlink / DoFutex / DoGetRandom /
-// DoSysinfo moved to syscall_misc.cpp.
+// All Do* handler bodies live in per-domain sibling TUs; see
+// syscall_internal.h for the full duetos::subsystems::linux::internal
+// roster. The dispatch switch below calls them unqualified via the
+// `using namespace internal;` directive at the top of this TU.
 
 } // namespace
 
