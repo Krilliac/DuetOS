@@ -9,7 +9,7 @@ Branches: `claude/refactor-codebase-VvLO6` (merged via PR #74) and
 
 | Split | File | Original | Current | State |
 |---|---|---:|---:|---|
-| 1 | `kernel/core/shell.cpp`               | 9,769 | 9,127 | ◐ in progress (5 command slices + env-table hoist; ~6.6% trim. First helper hoist landed: EnvSlot / g_env / EnvFind / EnvSet / EnvUnset live in shell_state.cpp + shell_internal.h, CmdHostname moved to shell_core.cpp. Remaining hoists: FatLeaf / ParseU64Str / ParseInt path-strip, alias table, history ring, shared output helpers — each unlocks a larger bucket) |
+| 1 | `kernel/core/shell.cpp`               | 9,769 | 9,011 | ◐ in progress (5 command slices + 2 helper hoists; ~7.8% trim. Env-table → shell_state.cpp; path/parse helpers TmpLeaf / FatLeaf / ParseU64Str / ParseInt → shell_pathutil.cpp. Remaining hoists: alias table, history ring, shared output helpers — each unlocks a larger bucket) |
 | 2 | `kernel/subsystems/win32/thunks.cpp`  | 5,684 |   655 | ☑ done (`cae3704`) |
 | 3 | `kernel/subsystems/linux/syscall.cpp` | 4,642 | 1,274 | ☑ done (73% reduction; decomposed into 16 per-domain sibling TUs: cred / fd / file / fs_mut / io / misc / mm / path / pathutil / proc / rlimit / sched / sig / stub / time + syscall_internal.h. syscall.cpp itself is now just header + kSys* enum + LinuxSyscallDispatch + SyscallInit + LinuxLogAbiCoverage + thin Linux* public wrappers) |
 | 4 | `kernel/fs/fat32.cpp`                 | 3,190 |   300 | ☑ done (decomposed into fat32 + fat32_dir + fat32_lookup + fat32_read + fat32_write + fat32_create + selftest, plus fat32_internal.h and fat32_write_internal.h) |
@@ -48,6 +48,7 @@ Branches: `claude/refactor-codebase-VvLO6` (merged via PR #74) and
 | `83cb4dc shell: extract trivial banner / status commands into sibling TU` | `shell.cpp` 9,308 → 9,266 lines. about / version / clear / uptime / date → new `shell_core.cpp` (104 lines). |
 | `fb792b3 shell: extend shell_core.cpp with yield / uname / whoami / pwd / true / false` | `shell.cpp` 9,266 → 9,222 lines. Six more trivially-small commands appended to `shell_core.cpp`. CmdHostname stays in shell.cpp pending the env-table hoist. |
 | `<pending> shell: hoist env-table to shell_internal.h + shell_state.cpp` | `shell.cpp` 9,222 → 9,127 lines (-95). EnvSlot + kEnvSlotCount/kEnvNameMax/kEnvValueMax + g_env[] + EnvFind / EnvSet / EnvUnset → new `shell_state.cpp` (71 lines), declared in `shell_internal.h`. EnvNameEq / EnvCopy stay inline in the header so the alias table still in shell.cpp can keep calling them. CmdHostname follows the env table into `shell_core.cpp`. First helper hoist of the five queued in the plan; unblocks future CmdEnv / CmdSet / CmdUnset / CmdGetenv / `$VAR` substitution extractions. |
+| `<pending> shell: hoist path / parse helpers into shell_pathutil.cpp` | `shell.cpp` 9,127 → 9,011 lines (-116). TmpLeaf / FatLeaf / ParseU64Str / ParseInt → new `shell_pathutil.cpp` (135 lines). Pure functions, no state — declared in `shell_internal.h`. Removes both forward-decl blocks (lines ~264-268 + the leftover `bool ParseU64Str(...);` at the top of the memdump region) so siblings can call all four through the existing `using namespace shell::internal;` directive. Unblocks the entire Fat* family + CmdRead + CmdLinuxexec + CmdExec + CmdReadelf + CmdTranslate. |
 
 **Deferred** to a follow-up session (each warrants its own fresh chat per
 the timeout-prevention rules):
@@ -66,9 +67,10 @@ the timeout-prevention rules):
   - **history-ring hoist** (HistoryAppend / HistoryExpand /
     HistoryRecallEntry / `g_history[]`) — unlocks CmdHistory and
     the input-edit Up/Down arrow path.
-  - **path-strip hoist** (FatLeaf, ParseU64Str, ParseInt) —
-    unlocks the entire Fat* family + CmdRead + CmdLinuxexec +
-    CmdExec + CmdReadelf + CmdTranslate.
+  - **path-strip hoist** ✅ landed — TmpLeaf / FatLeaf /
+    ParseU64Str / ParseInt live in `shell_pathutil.cpp`. The
+    Fat* family + CmdRead + CmdLinuxexec + CmdExec + CmdReadelf
+    + CmdTranslate are now extractable in subsequent slices.
   - **shared output helpers hoist** (WriteU64Dec / WriteU64Hex /
     WriteI64Dec / WriteU8TwoDigits) — currently each new slice
     duplicates them locally; promoting them once shrinks every
@@ -93,19 +95,18 @@ syscall.cpp 4,642 → 1,274 lines.)_
 > The shell split is in progress on
 > `claude/continue-refactoring-1s8hF` (and earlier on
 > `claude/continue-refactoring-split-QlCKz`). 5 command slices
-> (commits `2977dba` → `fb792b3`) plus the first helper hoist
-> (env-table → `shell_state.cpp`, with CmdHostname following it
-> into `shell_core.cpp`) have landed. Cumulative effect: shell.cpp
-> 9,769 → 9,127 lines.
+> (commits `2977dba` → `fb792b3`) + 2 helper hoists (env-table →
+> `shell_state.cpp`; path / parse helpers → `shell_pathutil.cpp`)
+> have landed. Cumulative effect: shell.cpp 9,769 → 9,011 lines.
 >
-> The next session should land another helper hoist in the same
-> shape as the env-table one. Recommended order: path-strip
-> (FatLeaf / ParseU64Str / ParseInt — unlocks the entire Fat*
-> family + CmdRead + CmdLinuxexec + CmdExec + CmdReadelf +
-> CmdTranslate in subsequent slices), then shared-output-helpers
-> (WriteU64Dec / WriteU64Hex / WriteI64Dec / WriteU8TwoDigits —
-> lets every sibling TU drop its local copies), then alias-table
-> and history-ring.
+> The next session should land another helper hoist. Recommended
+> order: shared-output-helpers (WriteU64Dec / WriteU64Hex /
+> WriteI64Dec / WriteU8TwoDigits — lets every sibling TU drop
+> its local copies, immediately shrinks shell_security.cpp,
+> shell_core.cpp, shell_process.cpp), then alias-table, then
+> history-ring. After all five hoists land, follow with the
+> filesystem / network / debug / hardware / utilities buckets
+> per the plan layout above.
 >
 > Each hoist is a small surgical commit but unlocks a much larger
 > bucket of commands. Start a fresh `claude/<slug>` branch off
