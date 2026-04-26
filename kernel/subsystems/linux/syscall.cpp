@@ -422,11 +422,9 @@ enum : u64
     kSysQuotactl = 179,
 };
 
-// POSIX AT_FDCWD — used by the *at family to mean "resolve
-// relative to the caller's CWD". v0 has no per-process CWD
-// yet, so AT_FDCWD always resolves to the sandbox root; any
-// other dirfd is -EBADF until per-fd CWDs land.
-constexpr i64 kAtFdCwd = -100;
+// kAtFdCwd / kAtRemoveDir constants moved to syscall_internal.h
+// alongside the StripFatPrefix / CopyAndStripFatPath / AtFdCwdOnly
+// declarations they pair with.
 
 // kESRCH / kESPIPE / kENOTTY moved to syscall_internal.h alongside
 // the rest of the errno constants.
@@ -532,22 +530,7 @@ i64 DoWrite(u64 fd, u64 user_buf, u64 len)
     return static_cast<i64>(written);
 }
 
-// Skip the `/fat/` mount prefix (or a bare leading slash) so what
-// we hand to Fat32LookupPath is volume-relative. musl and shell
-// callers both use absolute-looking paths; the FAT32 driver
-// doesn't understand mount-point naming.
-const char* StripFatPrefix(const char* p)
-{
-    while (*p == '/')
-        ++p;
-    if (p[0] == 'f' && p[1] == 'a' && p[2] == 't' && p[3] == '/')
-        return p + 4;
-    return p;
-}
-
-// Forward declaration so chmod/chown/utime up top can call the
-// volume-relative copy helper that's defined further down.
-bool CopyAndStripFatPath(u64 user_path, char (&kbuf)[64], const char*& out_leaf);
+// StripFatPrefix + CopyAndStripFatPath moved to syscall_pathutil.cpp.
 
 // Linux: open(path, flags, mode). v0 scope:
 //   - Read-only. Any write/create/truncate flag bits in `flags`
@@ -1817,31 +1800,7 @@ i64 DoSetpriority(u64 which, u64 who, u64 prio)
 // existing Fat32*AtPath primitives. Path strip mirrors DoOpen:
 // musl uses absolute paths, FAT32 wants volume-relative.
 
-// Helper: copy a user path into a 64-byte kernel buffer +
-// strip the FAT32 mount prefix. Returns true on success, false
-// if the copy failed or the path is unterminated. Out points
-// inside `kbuf`; lifetime tracks `kbuf`.
-bool CopyAndStripFatPath(u64 user_path, char (&kbuf)[64], const char*& out_leaf)
-{
-    for (u32 i = 0; i < sizeof(kbuf); ++i)
-        kbuf[i] = 0;
-    if (!mm::CopyFromUser(kbuf, reinterpret_cast<const void*>(user_path), sizeof(kbuf) - 1))
-        return false;
-    kbuf[sizeof(kbuf) - 1] = 0;
-    bool has_nul = false;
-    for (u32 i = 0; i < sizeof(kbuf); ++i)
-    {
-        if (kbuf[i] == 0)
-        {
-            has_nul = true;
-            break;
-        }
-    }
-    if (!has_nul)
-        return false;
-    out_leaf = StripFatPrefix(kbuf);
-    return true;
-}
+// CopyAndStripFatPath body moved to syscall_pathutil.cpp.
 
 // truncate(path, length): shrink/grow a file to `length` bytes.
 i64 DoTruncate(u64 user_path, u64 length)
@@ -1929,22 +1888,8 @@ i64 DoRmdir(u64 user_path)
 // Batch 56 — additional compat stubs + *at-family delegations.
 // ---------------------------------------------------------------
 
-// AT_REMOVEDIR flag for unlinkat.
-constexpr u64 kAtRemoveDir = 0x200;
-
-// Helper: for *at syscalls, v0 only supports AT_FDCWD. Returns
-// kEBADF for any other dirfd value, 0 otherwise. Logged so a
-// caller that happens to pass a real dirfd sees why the call
-// fails instead of chasing a phantom bug.
-i64 AtFdCwdOnly(i64 dirfd)
-{
-    if (dirfd == kAtFdCwd)
-        return 0;
-    arch::SerialWrite("[linux] *at-family: unsupported dirfd=");
-    arch::SerialWriteHex(static_cast<u64>(dirfd));
-    arch::SerialWrite(" (AT_FDCWD-only in v0)\n");
-    return kEBADF;
-}
+// kAtRemoveDir + AtFdCwdOnly moved to syscall_internal.h /
+// syscall_pathutil.cpp.
 
 // DoPtrace / DoSyslog / DoVhangup / DoAcct / DoMount / DoUmount2 /
 // DoSync / DoSyncfs / DoRename / DoLink / DoSymlink / DoSetThreadArea

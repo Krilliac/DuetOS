@@ -132,6 +132,31 @@ i64 DoSchedYield();
 i64 DoTgkill(u64 tgid, u64 tid, u64 sig);
 i64 DoKill(u64 pid, u64 sig);
 
+// POSIX *at-family: AT_FDCWD = -100 means "resolve the path
+// relative to the caller's CWD". v0 has no per-process CWD
+// pointer threaded into the FAT32 lookup path yet, so AT_FDCWD
+// always resolves against the sandbox root; any other dirfd is
+// -EBADF until per-fd CWDs land. AT_REMOVEDIR is the unlinkat
+// flag bit that turns the call into rmdir.
+inline constexpr i64 kAtFdCwd = -100;
+inline constexpr u64 kAtRemoveDir = 0x200;
+
+// Path-strip helpers shared across the file / fs_mut / utime /
+// utimensat handlers. Definitions live in syscall.cpp for now;
+// a future slice may move them to a dedicated syscall_pathutil.cpp.
+//
+// StripFatPrefix: skip a leading "/fat/" mount prefix (or any run
+//   of '/'). The FAT32 driver wants volume-relative paths.
+// CopyAndStripFatPath: copy a u64 user pointer into a 64-byte
+//   kernel buffer, NUL-terminate, then point `out_leaf` at the
+//   stripped suffix. Returns false on copy failure or unterminated
+//   string.
+// AtFdCwdOnly: the *at-family guard — returns 0 for AT_FDCWD,
+//   -EBADF (with a serial log line) otherwise.
+const char* StripFatPrefix(const char* p);
+bool CopyAndStripFatPath(u64 user_path, char (&kbuf)[64], const char*& out_leaf);
+i64 AtFdCwdOnly(i64 dirfd);
+
 // CWD / path handlers (syscall_path.cpp). v0 records per-process
 // CWD in core::Process::linux_cwd; chdir / fchdir update it,
 // getcwd reads it back. The string is volume-relative — every
