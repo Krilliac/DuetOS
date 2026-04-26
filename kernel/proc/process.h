@@ -548,6 +548,38 @@ struct Process
     static constexpr u64 kWin32SemaphoreBase = 0x500;
     Win32SemaphoreHandle win32_semaphores[kWin32SemaphoreCap];
 
+    // Win32 registry handle table — backs the in-kernel read-only
+    // registry exposed via SYS_REGISTRY (NtOpenKey /
+    // NtQueryValueKey / NtClose paths in ntdll.dll). Each slot
+    // carries the resolved kernel-side `RegKey*` (a borrowed
+    // pointer into the static well-known-keys table — no
+    // ownership; never freed).
+    //
+    // Handles run kWin32RegistryBase + idx (= 0x600..0x607),
+    // disjoint from every other Win32 handle range so the shared
+    // CloseHandle / NtClose dispatch picks the right table by
+    // value alone. Real Windows registry handles live in the same
+    // HKEY-handle space as predefined sentinels (HKLM = 0x80000002
+    // etc.); the kernel-side ABI always normalises predefined
+    // HKEYs back to "open against HKEY-root" inside the SYS_REGISTRY
+    // Open op, so callers see consistent kernel handles regardless
+    // of whether they passed a predefined sentinel or a previously-
+    // opened subkey.
+    //
+    // 8 slots is plenty for v0 — a typical MSVC PE startup probes
+    // at most 2-3 keys (CurrentVersion + CurrentUser\Internet
+    // Settings + Volatile Environment). Grow when a real workload
+    // needs more.
+    struct Win32RegistryHandle
+    {
+        bool in_use;
+        u8 _pad[7];
+        const void* reg_key; // borrowed RegKey* — opaque to process.h
+    };
+    static constexpr u64 kWin32RegistryCap = 8;
+    static constexpr u64 kWin32RegistryBase = 0x600;
+    Win32RegistryHandle win32_reg_handles[kWin32RegistryCap];
+
     // Per-process cursor for thread-stack allocation. Each new
     // thread carves kV0ThreadStackPages pages off this bump
     // cursor. The base sits above the main task's stack and

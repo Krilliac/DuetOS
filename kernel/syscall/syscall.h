@@ -1144,6 +1144,26 @@ enum SyscallNumber : u64
     // Default policy = 0 — every feature is opt-in so apps that
     // probe Windows-buggy behaviour are unaffected.
     SYS_WIN32_CUSTOM = 129,
+
+    // SYS_REGISTRY — multiplexed entry point for the kernel-side
+    // Win32 registry. Sub-op in rdi (see
+    // duetos::subsystems::win32::registry::kOp*); the rest of the
+    // arg layout is per-op (registry.h documents each op).
+    //
+    // Backs ntdll.dll's NtOpenKey / NtQueryValueKey direct
+    // syscalls — the Reg* family in advapi32.dll is unaffected
+    // (advapi32 still serves its own well-known tree without
+    // crossing the syscall boundary). The two trees are kept in
+    // sync by hand, see kernel/subsystems/win32/registry.cpp's
+    // header comment.
+    //
+    // Returns NTSTATUS in rax (kNtStatusSuccess = 0,
+    // STATUS_OBJECT_NAME_NOT_FOUND = 0xC0000034, etc.) — the
+    // registry surface is the only kernel syscall today that
+    // reports NTSTATUS rather than -errno or 0/1, because every
+    // caller (NtOpenKey, NtQueryValueKey) is bound to that
+    // contract on the Win32 side.
+    SYS_REGISTRY = 130,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit

@@ -1106,14 +1106,16 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
     case kSysSendmmsg:
     case kSysRecvmmsg:
     {
-        duetos::core::Process* proc = duetos::core::CurrentProcess();
+        // Reuse the outer-dispatch `proc`; the cap check needs no
+        // mutation, just CapSetHas. Avoids shadowing the const
+        // proc declared at the top of LinuxSyscallDispatch.
         if (proc == nullptr || !duetos::core::CapSetHas(proc->caps, duetos::core::kCapNet))
         {
             duetos::core::RecordSandboxDenial(duetos::core::kCapNet);
             if (proc != nullptr && duetos::core::ShouldLogDenial(proc->sandbox_denials))
             {
                 arch::SerialWrite("[linux] denied socket-family pid=");
-                arch::SerialWriteHex(proc->pid);
+                arch::SerialWriteHex(pid);
                 arch::SerialWrite(" syscall=");
                 arch::SerialWriteHex(nr);
                 arch::SerialWrite(" cap=Net denial_idx=");

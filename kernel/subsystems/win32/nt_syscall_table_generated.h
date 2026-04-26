@@ -8,7 +8,7 @@
 // Target Windows version: Windows 11 and Server (11 25H2)
 // Bedrock NT calls (present in every Windows XP→Win11 25H2): 292
 // All known NT calls on the target version: 489
-// DuetOS coverage: 24/292 = 8%
+// DuetOS coverage: 26/292 = 8%
 //
 // See tools/win32-compat/README.md for the legal + design rationale.
 
@@ -56,12 +56,12 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
     {"NtClose", 0x000f, static_cast<u32>(::duetos::core::SYS_FILE_CLOSE)},
     {"NtQueryObject", 0x0010, kSysNtNotImpl},
     {"NtQueryInformationFile", 0x0011, static_cast<u32>(::duetos::core::SYS_FILE_FSTAT)},
-    {"NtOpenKey", 0x0012, kSysNtNotImpl},
+    {"NtOpenKey", 0x0012, static_cast<u32>(::duetos::core::SYS_REGISTRY)},
     {"NtEnumerateValueKey", 0x0013, kSysNtNotImpl},
     {"NtFindAtom", 0x0014, kSysNtNotImpl},
     {"NtQueryDefaultLocale", 0x0015, kSysNtNotImpl},
     {"NtQueryKey", 0x0016, kSysNtNotImpl},
-    {"NtQueryValueKey", 0x0017, kSysNtNotImpl},
+    {"NtQueryValueKey", 0x0017, static_cast<u32>(::duetos::core::SYS_REGISTRY)},
     {"NtAllocateVirtualMemory", 0x0018, static_cast<u32>(::duetos::core::SYS_VMAP)},
     {"NtQueryInformationProcess", 0x0019, kSysNtNotImpl},
     {"NtWaitForMultipleObjects32", 0x001a, kSysNtNotImpl},
@@ -336,7 +336,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
 inline constexpr u32 kBedrockNtSyscallCount =
     sizeof(kBedrockNtSyscalls) / sizeof(kBedrockNtSyscalls[0]);
 
-inline constexpr u32 kBedrockNtSyscallsCovered = 24;
+inline constexpr u32 kBedrockNtSyscallsCovered = 26;
 
 /// Every NT syscall known on the target Windows version — superset
 /// of `kBedrockNtSyscalls`. Includes version-specific additions
@@ -363,12 +363,12 @@ inline constexpr NtSyscallMapping kAllNtSyscalls[] = {
     {"NtClose", 0x000f, static_cast<u32>(::duetos::core::SYS_FILE_CLOSE)},
     {"NtQueryObject", 0x0010, kSysNtNotImpl},
     {"NtQueryInformationFile", 0x0011, static_cast<u32>(::duetos::core::SYS_FILE_FSTAT)},
-    {"NtOpenKey", 0x0012, kSysNtNotImpl},
+    {"NtOpenKey", 0x0012, static_cast<u32>(::duetos::core::SYS_REGISTRY)},
     {"NtEnumerateValueKey", 0x0013, kSysNtNotImpl},
     {"NtFindAtom", 0x0014, kSysNtNotImpl},
     {"NtQueryDefaultLocale", 0x0015, kSysNtNotImpl},
     {"NtQueryKey", 0x0016, kSysNtNotImpl},
-    {"NtQueryValueKey", 0x0017, kSysNtNotImpl},
+    {"NtQueryValueKey", 0x0017, static_cast<u32>(::duetos::core::SYS_REGISTRY)},
     {"NtAllocateVirtualMemory", 0x0018, static_cast<u32>(::duetos::core::SYS_VMAP)},
     {"NtQueryInformationProcess", 0x0019, kSysNtNotImpl},
     {"NtWaitForMultipleObjects32", 0x001a, kSysNtNotImpl},
@@ -644,7 +644,7 @@ inline constexpr NtSyscallMapping kAllNtSyscalls[] = {
     {"NtOpenEventPair", 0x0128, kSysNtNotImpl},
     {"NtOpenIoCompletion", 0x0129, kSysNtNotImpl},
     {"NtOpenJobObject", 0x012a, kSysNtNotImpl},
-    {"NtOpenKeyEx", 0x012b, kSysNtNotImpl},
+    {"NtOpenKeyEx", 0x012b, static_cast<u32>(::duetos::core::SYS_REGISTRY)},
     {"NtOpenKeyTransacted", 0x012c, kSysNtNotImpl},
     {"NtOpenKeyTransactedEx", 0x012d, kSysNtNotImpl},
     {"NtOpenKeyedEvent", 0x012e, kSysNtNotImpl},

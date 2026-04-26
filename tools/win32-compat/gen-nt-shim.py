@@ -56,6 +56,31 @@ KNOWN_MAPPINGS = {
     "NtResetEvent":                "SYS_EVENT_RESET",
     "NtWaitForMultipleObjects":    "SYS_EVENT_WAIT",       # best-effort: first wait target in v0
     "NtSetInformationFile":        "SYS_FILE_SEEK",        # FilePositionInformation-class shape
+
+    # Registry read family — kernel-side static tree lives in
+    # kernel/subsystems/win32/registry.cpp (mirrors advapi32.c's
+    # well-known keys). NtOpenKey + NtQueryValueKey route through
+    # SYS_REGISTRY's op-multiplexed dispatch (op=1 / op=3); a
+    # future ntdll shim that consumes this table will need
+    # additional metadata to know which op to set in rdi —
+    # the table only carries the SYS_* target.
+    #
+    # NtClose stays on SYS_FILE_CLOSE: the kernel-side handler
+    # already dispatches by handle range (file / mutex / event /
+    # registry) and tears down the right slot.
+    "NtOpenKey":                   "SYS_REGISTRY",         # op=kOpOpenKey (1)
+    "NtOpenKeyEx":                 "SYS_REGISTRY",         # same shape; access mask ignored in v0
+    "NtQueryValueKey":             "SYS_REGISTRY",         # op=kOpQueryValue (3)
+    # NtCreateKey / NtSetValueKey / NtDeleteKey / NtDeleteValueKey:
+    # NotImpl on purpose — registry is read-only in v0. Mapping
+    # them to SYS_REGISTRY's read-only Open op would silently lie
+    # to a writer; better to keep the honest STATUS_NOT_IMPLEMENTED.
+    # NtEnumerateKey / NtEnumerateValueKey: NotImpl on purpose —
+    # the static tree has no children-list walker yet. Adding
+    # one means broadening the v0 RegKey schema to know about
+    # subkey arrays; deferred.
+    # NtFlushKey / NtNotifyChangeKey: NotImpl on purpose — there
+    # is no journal to flush and no change-notification machinery.
     # NtWriteVirtualMemory / NtReadVirtualMemory: NotImpl on purpose.
     # Previous mappings (SYS_WRITE / SYS_READ) silently corrupted callers
     # by treating the target PID handle as a file descriptor — cross-AS

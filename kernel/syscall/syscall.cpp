@@ -72,6 +72,7 @@
 #include "subsystems/win32/window_syscall.h"
 #include "subsystems/win32/heap.h"
 #include "subsystems/win32/custom.h"
+#include "subsystems/win32/registry.h"
 #include "log/klog.h"
 #include "diag/cleanroom_trace.h"
 #include "diag/log_names.h"
@@ -305,6 +306,10 @@ void SyscallDispatch(arch::TrapFrame* frame)
 
     case SYS_WIN32_CUSTOM:
         subsystems::win32::custom::DoCustom(frame);
+        return;
+
+    case SYS_REGISTRY:
+        subsystems::win32::registry::DoRegistry(frame);
         return;
 
     // Heap family: handlers live in subsystems/win32/heap_syscall.cpp.

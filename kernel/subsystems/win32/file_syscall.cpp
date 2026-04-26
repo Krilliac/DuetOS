@@ -1,6 +1,7 @@
 #include "subsystems/win32/file_syscall.h"
 
 #include "subsystems/win32/custom.h"
+#include "subsystems/win32/registry.h"
 
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
@@ -174,6 +175,15 @@ void DoFileClose(arch::TrapFrame* frame)
         e.in_use = false;
         e.signaled = false;
         arch::Sti();
+    }
+    else if (handle >= core::Process::kWin32RegistryBase &&
+             handle < core::Process::kWin32RegistryBase + core::Process::kWin32RegistryCap)
+    {
+        // Registry handles share the CloseHandle / NtClose entry
+        // point with file / mutex / event handles. The registry
+        // module owns the per-slot bookkeeping, so route through
+        // it rather than poking the table directly here.
+        (void)registry::ReleaseHandleForCurrentProcess(handle);
     }
     frame->rax = 0;
 }
