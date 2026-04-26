@@ -68,6 +68,15 @@ i64 DoSchedYield();
 i64 DoTgkill(u64 tgid, u64 tid, u64 sig);
 i64 DoKill(u64 pid, u64 sig);
 
+// CWD / path handlers (syscall_path.cpp). v0 records per-process
+// CWD in core::Process::linux_cwd; chdir / fchdir update it,
+// getcwd reads it back. The string is volume-relative — every
+// FAT32 / ramfs lookup site already strips the mount prefix at
+// the use point.
+i64 DoChdir(u64 user_path);
+i64 DoFchdir(u64 fd);
+i64 DoGetcwd(u64 user_buf, u64 size);
+
 // File-descriptor handlers (syscall_fd.cpp). v0 stores per-fd
 // state in core::Process::linux_fds[16]; dup / dup2 / dup3 / fcntl
 // manipulate the slot table without sharing file descriptions
