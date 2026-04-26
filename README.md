@@ -104,6 +104,26 @@ Tools required for the ISO path:
 Clang 18+ (used as both the freestanding kernel compiler and the
 host cross-compiler for the userland Windows PE toolchain).
 
+## CI + release automation
+
+All release automation is in-repo under [`.github/workflows/`](.github/workflows/):
+
+- [`build.yml`](.github/workflows/build.yml) runs format + debug/release builds and CI smoke checks.
+- [`release.yml`](.github/workflows/release.yml) publishes rolling channels (`latest-debug`, `latest-release`) from `main` and from `v*` tags.
+
+Local validation of release logic (same core commands used by CI):
+
+```bash
+cmake --preset x86_64-debug
+cmake --build build/x86_64-debug --parallel $(nproc)
+
+cmake --preset x86_64-release
+cmake --build build/x86_64-release --parallel $(nproc)
+
+# Optional smoke gate equivalent
+DUETOS_TIMEOUT=30 tools/ctest-boot-smoke.sh build/x86_64-debug
+```
+
 A healthy boot ends with something like:
 
 ```
