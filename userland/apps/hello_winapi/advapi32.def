@@ -10,7 +10,7 @@
 ; process memory) will continue their setup dance and never
 ; actually exercise the privileged code path.
 ;
-; Keep in sync with kernel/subsystems/win32/stubs.cpp entries
+; Keep in sync with kernel/subsystems/win32/thunks.cpp entries
 ; under LIBRARY advapi32.dll.
 
 LIBRARY advapi32.dll

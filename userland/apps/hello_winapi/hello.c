@@ -26,7 +26,7 @@
  *      kernel32.dll entries.
  *   3. On load, the DuetOS PE loader's ResolveImports walks
  *      the IAT and patches each slot with the stub VA from
- *      kernel/subsystems/win32/stubs.cpp.
+ *      kernel/subsystems/win32/thunks.cpp.
  *   4. Each IAT-routed call lands in the per-process stubs
  *      page at 0x60000000 + stub_offset, which translates the
  *      Windows x64 ABI into a DuetOS int 0x80 syscall.

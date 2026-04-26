@@ -3,7 +3,7 @@
  *
  * Freestanding DuetOS vcruntime140.dll — memory intrinsics
  * (memset / memcpy / memmove). Retires the corresponding flat stubs
- * in kernel/subsystems/win32/stubs.cpp.
+ * in kernel/subsystems/win32/thunks.cpp.
  *
  * These three functions are the workhorse of any MSVC-built
  * PE: the CRT uses them for virtually every non-trivial data

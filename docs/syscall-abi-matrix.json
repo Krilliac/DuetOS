@@ -3362,7 +3362,671 @@
   {
     "abi": "native",
     "number": 46,
+    "name": "SYS_DEBUG_PRINT",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 47,
+    "name": "SYS_MEM_STATUS",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 48,
+    "name": "SYS_WAIT_MULTI",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 49,
+    "name": "SYS_SYSTEM_INFO",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 50,
+    "name": "SYS_DEBUG_PRINTW",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 51,
+    "name": "SYS_SEM_CREATE",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 52,
+    "name": "SYS_SEM_RELEASE",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 53,
+    "name": "SYS_SEM_WAIT",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 54,
+    "name": "SYS_THREAD_WAIT",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 55,
+    "name": "SYS_THREAD_EXIT_CODE",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 56,
     "name": "SYS_NT_INVOKE",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 57,
+    "name": "SYS_DLL_PROC_ADDRESS",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 58,
+    "name": "SYS_WIN_CREATE",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 59,
+    "name": "SYS_WIN_DESTROY",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 60,
+    "name": "SYS_WIN_SHOW",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 61,
+    "name": "SYS_WIN_MSGBOX",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 62,
+    "name": "SYS_WIN_PEEK_MSG",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 63,
+    "name": "SYS_WIN_GET_MSG",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 64,
+    "name": "SYS_WIN_POST_MSG",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 65,
+    "name": "SYS_GDI_FILL_RECT",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 66,
+    "name": "SYS_GDI_TEXT_OUT",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 67,
+    "name": "SYS_GDI_RECTANGLE",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 68,
+    "name": "SYS_GDI_CLEAR",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 69,
+    "name": "SYS_WIN_MOVE",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 70,
+    "name": "SYS_WIN_GET_RECT",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 71,
+    "name": "SYS_WIN_SET_TEXT",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 72,
+    "name": "SYS_WIN_TIMER_SET",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 73,
+    "name": "SYS_WIN_TIMER_KILL",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 74,
+    "name": "SYS_GDI_LINE",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 75,
+    "name": "SYS_GDI_ELLIPSE",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 76,
+    "name": "SYS_GDI_SET_PIXEL",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 77,
+    "name": "SYS_WIN_GET_KEYSTATE",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 78,
+    "name": "SYS_WIN_GET_CURSOR",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 79,
+    "name": "SYS_WIN_SET_CURSOR",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 80,
+    "name": "SYS_WIN_SET_CAPTURE",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 81,
+    "name": "SYS_WIN_RELEASE_CAPTURE",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 82,
+    "name": "SYS_WIN_GET_CAPTURE",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 83,
+    "name": "SYS_WIN_CLIP_SET_TEXT",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 84,
+    "name": "SYS_WIN_CLIP_GET_TEXT",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 85,
+    "name": "SYS_WIN_GET_LONG",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 86,
+    "name": "SYS_WIN_SET_LONG",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 87,
+    "name": "SYS_WIN_INVALIDATE",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 88,
+    "name": "SYS_WIN_VALIDATE",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 89,
+    "name": "SYS_WIN_GET_ACTIVE",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 90,
+    "name": "SYS_WIN_SET_ACTIVE",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 91,
+    "name": "SYS_WIN_GET_METRIC",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 92,
+    "name": "SYS_WIN_ENUM",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 93,
+    "name": "SYS_WIN_FIND",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 94,
+    "name": "SYS_WIN_SET_PARENT",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 95,
+    "name": "SYS_WIN_GET_PARENT",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 96,
+    "name": "SYS_WIN_GET_RELATED",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 97,
+    "name": "SYS_WIN_SET_FOCUS",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 98,
+    "name": "SYS_WIN_GET_FOCUS",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 99,
+    "name": "SYS_WIN_CARET",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 100,
+    "name": "SYS_WIN_BEEP",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 101,
+    "name": "SYS_GFX_D3D_STUB",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 102,
+    "name": "SYS_GDI_BITBLT",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 103,
+    "name": "SYS_WIN_BEGIN_PAINT",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 104,
+    "name": "SYS_WIN_END_PAINT",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 105,
+    "name": "SYS_GDI_FILL_RECT_USER",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 106,
+    "name": "SYS_GDI_CREATE_COMPAT_DC",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 107,
+    "name": "SYS_GDI_CREATE_COMPAT_BITMAP",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 108,
+    "name": "SYS_GDI_CREATE_SOLID_BRUSH",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 109,
+    "name": "SYS_GDI_GET_STOCK_OBJECT",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 110,
+    "name": "SYS_GDI_SELECT_OBJECT",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 111,
+    "name": "SYS_GDI_DELETE_DC",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 112,
+    "name": "SYS_GDI_DELETE_OBJECT",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 113,
+    "name": "SYS_GDI_BITBLT_DC",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 114,
+    "name": "SYS_GDI_SET_TEXT_COLOR",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 115,
+    "name": "SYS_GDI_SET_BK_COLOR",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 116,
+    "name": "SYS_GDI_SET_BK_MODE",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 117,
+    "name": "SYS_GDI_STRETCH_BLT_DC",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 118,
+    "name": "SYS_GDI_CREATE_PEN",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 119,
+    "name": "SYS_GDI_MOVE_TO_EX",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 120,
+    "name": "SYS_GDI_LINE_TO",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 121,
+    "name": "SYS_GDI_DRAW_TEXT_USER",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 122,
+    "name": "SYS_GDI_RECTANGLE_FILLED",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 123,
+    "name": "SYS_GDI_ELLIPSE_FILLED",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 124,
+    "name": "SYS_GDI_PAT_BLT",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 125,
+    "name": "SYS_GDI_TEXT_OUT_W",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 126,
+    "name": "SYS_GDI_DRAW_TEXT_W",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 127,
+    "name": "SYS_GDI_GET_SYS_COLOR",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 128,
+    "name": "SYS_GDI_GET_SYS_COLOR_BRUSH",
+    "status": "implemented",
+    "owner": "kernel/core/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 129,
+    "name": "SYS_WIN32_CUSTOM",
     "status": "implemented",
     "owner": "kernel/core/syscall.h::SyscallNumber",
     "fallback": "none (native syscall entry)"
@@ -3404,7 +4068,7 @@
     "number": 0,
     "name": "NtAccessCheck",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3412,7 +4076,7 @@
     "number": 1,
     "name": "NtWorkerFactoryWorkerReady",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3420,7 +4084,7 @@
     "number": 2,
     "name": "NtAcceptConnectPort",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3428,7 +4092,7 @@
     "number": 3,
     "name": "NtMapUserPhysicalPagesScatter",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3444,7 +4108,7 @@
     "number": 5,
     "name": "NtCallbackReturn",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3460,7 +4124,7 @@
     "number": 7,
     "name": "NtDeviceIoControlFile",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3476,7 +4140,7 @@
     "number": 9,
     "name": "NtRemoveIoCompletion",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3492,7 +4156,7 @@
     "number": 11,
     "name": "NtReplyWaitReceivePort",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3500,7 +4164,7 @@
     "number": 12,
     "name": "NtReplyPort",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3508,7 +4172,7 @@
     "number": 13,
     "name": "NtSetInformationThread",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3532,7 +4196,7 @@
     "number": 16,
     "name": "NtQueryObject",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3548,7 +4212,7 @@
     "number": 18,
     "name": "NtOpenKey",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3556,7 +4220,7 @@
     "number": 19,
     "name": "NtEnumerateValueKey",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3564,7 +4228,7 @@
     "number": 20,
     "name": "NtFindAtom",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3572,7 +4236,7 @@
     "number": 21,
     "name": "NtQueryDefaultLocale",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3580,7 +4244,7 @@
     "number": 22,
     "name": "NtQueryKey",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3588,7 +4252,7 @@
     "number": 23,
     "name": "NtQueryValueKey",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3604,7 +4268,7 @@
     "number": 25,
     "name": "NtQueryInformationProcess",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3612,7 +4276,7 @@
     "number": 26,
     "name": "NtWaitForMultipleObjects32",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3620,7 +4284,7 @@
     "number": 27,
     "name": "NtWriteFileGather",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3628,7 +4292,7 @@
     "number": 28,
     "name": "NtSetInformationProcess",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3636,7 +4300,7 @@
     "number": 29,
     "name": "NtCreateKey",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3652,7 +4316,7 @@
     "number": 31,
     "name": "NtImpersonateClientOfPort",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3668,7 +4332,7 @@
     "number": 33,
     "name": "NtQueryInformationToken",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3676,7 +4340,7 @@
     "number": 34,
     "name": "NtRequestWaitReplyPort",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3684,7 +4348,7 @@
     "number": 35,
     "name": "NtQueryVirtualMemory",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3692,7 +4356,7 @@
     "number": 36,
     "name": "NtOpenThreadToken",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3700,7 +4364,7 @@
     "number": 37,
     "name": "NtQueryInformationThread",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3708,7 +4372,7 @@
     "number": 38,
     "name": "NtOpenProcess",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3724,7 +4388,7 @@
     "number": 40,
     "name": "NtMapViewOfSection",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3732,7 +4396,7 @@
     "number": 41,
     "name": "NtAccessCheckAndAuditAlarm",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3740,7 +4404,7 @@
     "number": 42,
     "name": "NtUnmapViewOfSection",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3748,7 +4412,7 @@
     "number": 43,
     "name": "NtReplyWaitReceivePortEx",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3764,7 +4428,7 @@
     "number": 45,
     "name": "NtSetEventBoostPriority",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3772,7 +4436,7 @@
     "number": 46,
     "name": "NtReadFileScatter",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3780,7 +4444,7 @@
     "number": 47,
     "name": "NtOpenThreadTokenEx",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3788,7 +4452,7 @@
     "number": 48,
     "name": "NtOpenProcessTokenEx",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3804,7 +4468,7 @@
     "number": 50,
     "name": "NtEnumerateKey",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3828,7 +4492,7 @@
     "number": 53,
     "name": "NtQueryDirectoryFile",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3836,7 +4500,7 @@
     "number": 54,
     "name": "NtQuerySystemInformation",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3844,7 +4508,7 @@
     "number": 55,
     "name": "NtOpenSection",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3852,7 +4516,7 @@
     "number": 56,
     "name": "NtQueryTimer",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3860,7 +4524,7 @@
     "number": 57,
     "name": "NtFsControlFile",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3876,7 +4540,7 @@
     "number": 59,
     "name": "NtCloseObjectAuditAlarm",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3884,7 +4548,7 @@
     "number": 60,
     "name": "NtDuplicateObject",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3892,7 +4556,7 @@
     "number": 61,
     "name": "NtQueryAttributesFile",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3900,7 +4564,7 @@
     "number": 62,
     "name": "NtClearEvent",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3916,7 +4580,7 @@
     "number": 64,
     "name": "NtOpenEvent",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3924,7 +4588,7 @@
     "number": 65,
     "name": "NtAdjustPrivilegesToken",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3932,7 +4596,7 @@
     "number": 66,
     "name": "NtDuplicateToken",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3940,7 +4604,7 @@
     "number": 67,
     "name": "NtContinue",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3948,7 +4612,7 @@
     "number": 68,
     "name": "NtQueryDefaultUILanguage",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3956,7 +4620,7 @@
     "number": 69,
     "name": "NtQueueApcThread",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3972,7 +4636,7 @@
     "number": 71,
     "name": "NtAddAtom",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3988,7 +4652,7 @@
     "number": 73,
     "name": "NtQueryVolumeInformationFile",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -3996,7 +4660,7 @@
     "number": 74,
     "name": "NtCreateSection",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4012,7 +4676,7 @@
     "number": 76,
     "name": "NtApphelpCacheControl",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4020,7 +4684,7 @@
     "number": 77,
     "name": "NtCreateProcessEx",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4028,7 +4692,7 @@
     "number": 78,
     "name": "NtCreateThread",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4036,7 +4700,7 @@
     "number": 79,
     "name": "NtIsProcessInJob",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4044,7 +4708,7 @@
     "number": 80,
     "name": "NtProtectVirtualMemory",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4052,7 +4716,7 @@
     "number": 81,
     "name": "NtQuerySection",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4060,7 +4724,7 @@
     "number": 82,
     "name": "NtResumeThread",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4076,7 +4740,7 @@
     "number": 84,
     "name": "NtReadRequestData",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4092,7 +4756,7 @@
     "number": 86,
     "name": "NtQueryEvent",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4100,7 +4764,7 @@
     "number": 87,
     "name": "NtWriteRequestData",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4108,7 +4772,7 @@
     "number": 88,
     "name": "NtOpenDirectoryObject",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4116,7 +4780,7 @@
     "number": 89,
     "name": "NtAccessCheckByTypeAndAuditAlarm",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4140,7 +4804,7 @@
     "number": 92,
     "name": "NtSetInformationObject",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4148,7 +4812,7 @@
     "number": 93,
     "name": "NtCancelIoFile",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4156,7 +4820,7 @@
     "number": 94,
     "name": "NtTraceEvent",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4164,7 +4828,7 @@
     "number": 95,
     "name": "NtPowerInformation",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4172,7 +4836,7 @@
     "number": 96,
     "name": "NtSetValueKey",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4180,7 +4844,7 @@
     "number": 97,
     "name": "NtCancelTimer",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4188,7 +4852,7 @@
     "number": 98,
     "name": "NtSetTimer",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4196,7 +4860,7 @@
     "number": 99,
     "name": "NtAccessCheckByType",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4204,7 +4868,7 @@
     "number": 100,
     "name": "NtAccessCheckByTypeResultList",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4212,7 +4876,7 @@
     "number": 101,
     "name": "NtAccessCheckByTypeResultListAndAuditAlarm",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4220,7 +4884,7 @@
     "number": 102,
     "name": "NtAccessCheckByTypeResultListAndAuditAlarmByHandle",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4228,7 +4892,7 @@
     "number": 103,
     "name": "NtAcquireCrossVmMutant",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4236,7 +4900,7 @@
     "number": 104,
     "name": "NtAcquireProcessActivityReference",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4244,7 +4908,7 @@
     "number": 105,
     "name": "NtAddAtomEx",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4252,7 +4916,7 @@
     "number": 106,
     "name": "NtAddBootEntry",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4260,7 +4924,7 @@
     "number": 107,
     "name": "NtAddDriverEntry",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4268,7 +4932,7 @@
     "number": 108,
     "name": "NtAdjustGroupsToken",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4276,7 +4940,7 @@
     "number": 109,
     "name": "NtAdjustTokenClaimsAndDeviceGroups",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4284,7 +4948,7 @@
     "number": 110,
     "name": "NtAlertMultipleThreadByThreadId",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4292,7 +4956,7 @@
     "number": 111,
     "name": "NtAlertResumeThread",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4300,7 +4964,7 @@
     "number": 112,
     "name": "NtAlertThread",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4308,7 +4972,7 @@
     "number": 113,
     "name": "NtAlertThreadByThreadId",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4316,7 +4980,7 @@
     "number": 114,
     "name": "NtAlertThreadByThreadIdEx",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4324,7 +4988,7 @@
     "number": 115,
     "name": "NtAllocateLocallyUniqueId",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4332,7 +4996,7 @@
     "number": 116,
     "name": "NtAllocateReserveObject",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4340,7 +5004,7 @@
     "number": 117,
     "name": "NtAllocateUserPhysicalPages",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4348,7 +5012,7 @@
     "number": 118,
     "name": "NtAllocateUserPhysicalPagesEx",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4356,7 +5020,7 @@
     "number": 119,
     "name": "NtAllocateUuids",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4364,7 +5028,7 @@
     "number": 120,
     "name": "NtAllocateVirtualMemoryEx",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4372,7 +5036,7 @@
     "number": 121,
     "name": "NtAlpcAcceptConnectPort",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4380,7 +5044,7 @@
     "number": 122,
     "name": "NtAlpcCancelMessage",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4388,7 +5052,7 @@
     "number": 123,
     "name": "NtAlpcConnectPort",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4396,7 +5060,7 @@
     "number": 124,
     "name": "NtAlpcConnectPortEx",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4404,7 +5068,7 @@
     "number": 125,
     "name": "NtAlpcCreatePort",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4412,7 +5076,7 @@
     "number": 126,
     "name": "NtAlpcCreatePortSection",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4420,7 +5084,7 @@
     "number": 127,
     "name": "NtAlpcCreateResourceReserve",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4428,7 +5092,7 @@
     "number": 128,
     "name": "NtAlpcCreateSectionView",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4436,7 +5100,7 @@
     "number": 129,
     "name": "NtAlpcCreateSecurityContext",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4444,7 +5108,7 @@
     "number": 130,
     "name": "NtAlpcDeletePortSection",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4452,7 +5116,7 @@
     "number": 131,
     "name": "NtAlpcDeleteResourceReserve",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4460,7 +5124,7 @@
     "number": 132,
     "name": "NtAlpcDeleteSectionView",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4468,7 +5132,7 @@
     "number": 133,
     "name": "NtAlpcDeleteSecurityContext",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4476,7 +5140,7 @@
     "number": 134,
     "name": "NtAlpcDisconnectPort",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4484,7 +5148,7 @@
     "number": 135,
     "name": "NtAlpcImpersonateClientContainerOfPort",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4492,7 +5156,7 @@
     "number": 136,
     "name": "NtAlpcImpersonateClientOfPort",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4500,7 +5164,7 @@
     "number": 137,
     "name": "NtAlpcOpenSenderProcess",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4508,7 +5172,7 @@
     "number": 138,
     "name": "NtAlpcOpenSenderThread",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4516,7 +5180,7 @@
     "number": 139,
     "name": "NtAlpcQueryInformation",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4524,7 +5188,7 @@
     "number": 140,
     "name": "NtAlpcQueryInformationMessage",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4532,7 +5196,7 @@
     "number": 141,
     "name": "NtAlpcRevokeSecurityContext",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4540,7 +5204,7 @@
     "number": 142,
     "name": "NtAlpcSendWaitReceivePort",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4548,7 +5212,7 @@
     "number": 143,
     "name": "NtAlpcSetInformation",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4556,7 +5220,7 @@
     "number": 144,
     "name": "NtAreMappedFilesTheSame",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4564,7 +5228,7 @@
     "number": 145,
     "name": "NtAssignProcessToJobObject",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4572,7 +5236,7 @@
     "number": 146,
     "name": "NtAssociateWaitCompletionPacket",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4580,7 +5244,7 @@
     "number": 147,
     "name": "NtCallEnclave",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4588,7 +5252,7 @@
     "number": 148,
     "name": "NtCancelIoFileEx",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4596,7 +5260,7 @@
     "number": 149,
     "name": "NtCancelSynchronousIoFile",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4604,7 +5268,7 @@
     "number": 150,
     "name": "NtCancelTimer2",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4612,7 +5276,7 @@
     "number": 151,
     "name": "NtCancelWaitCompletionPacket",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4620,7 +5284,7 @@
     "number": 152,
     "name": "NtChangeProcessState",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4628,7 +5292,7 @@
     "number": 153,
     "name": "NtChangeThreadState",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4636,7 +5300,7 @@
     "number": 154,
     "name": "NtCommitComplete",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4644,7 +5308,7 @@
     "number": 155,
     "name": "NtCommitEnlistment",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4652,7 +5316,7 @@
     "number": 156,
     "name": "NtCommitRegistryTransaction",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4660,7 +5324,7 @@
     "number": 157,
     "name": "NtCommitTransaction",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4668,7 +5332,7 @@
     "number": 158,
     "name": "NtCompactKeys",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4676,7 +5340,7 @@
     "number": 159,
     "name": "NtCompareObjects",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4684,7 +5348,7 @@
     "number": 160,
     "name": "NtCompareSigningLevels",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4692,7 +5356,7 @@
     "number": 161,
     "name": "NtCompareTokens",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4700,7 +5364,7 @@
     "number": 162,
     "name": "NtCompleteConnectPort",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4708,7 +5372,7 @@
     "number": 163,
     "name": "NtCompressKey",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4716,7 +5380,7 @@
     "number": 164,
     "name": "NtConnectPort",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4724,7 +5388,7 @@
     "number": 165,
     "name": "NtContinueEx",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4732,7 +5396,7 @@
     "number": 166,
     "name": "NtConvertBetweenAuxiliaryCounterAndPerformanceCounter",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4740,7 +5404,7 @@
     "number": 167,
     "name": "NtCopyFileChunk",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4748,7 +5412,7 @@
     "number": 168,
     "name": "NtCreateCpuPartition",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4756,7 +5420,7 @@
     "number": 169,
     "name": "NtCreateCrossVmEvent",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4764,7 +5428,7 @@
     "number": 170,
     "name": "NtCreateCrossVmMutant",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4772,7 +5436,7 @@
     "number": 171,
     "name": "NtCreateDebugObject",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4780,7 +5444,7 @@
     "number": 172,
     "name": "NtCreateDirectoryObject",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4788,7 +5452,7 @@
     "number": 173,
     "name": "NtCreateDirectoryObjectEx",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4796,7 +5460,7 @@
     "number": 174,
     "name": "NtCreateEnclave",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4804,7 +5468,7 @@
     "number": 175,
     "name": "NtCreateEnlistment",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4812,7 +5476,7 @@
     "number": 176,
     "name": "NtCreateEventPair",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4820,7 +5484,7 @@
     "number": 177,
     "name": "NtCreateIRTimer",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4828,7 +5492,7 @@
     "number": 178,
     "name": "NtCreateIoCompletion",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4836,7 +5500,7 @@
     "number": 179,
     "name": "NtCreateIoRing",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4844,7 +5508,7 @@
     "number": 180,
     "name": "NtCreateJobObject",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4852,7 +5516,7 @@
     "number": 181,
     "name": "NtCreateJobSet",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4860,7 +5524,7 @@
     "number": 182,
     "name": "NtCreateKeyTransacted",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4868,7 +5532,7 @@
     "number": 183,
     "name": "NtCreateKeyedEvent",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4876,7 +5540,7 @@
     "number": 184,
     "name": "NtCreateLowBoxToken",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4884,7 +5548,7 @@
     "number": 185,
     "name": "NtCreateMailslotFile",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4900,7 +5564,7 @@
     "number": 187,
     "name": "NtCreateNamedPipeFile",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4908,7 +5572,7 @@
     "number": 188,
     "name": "NtCreatePagingFile",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4916,7 +5580,7 @@
     "number": 189,
     "name": "NtCreatePartition",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4924,7 +5588,7 @@
     "number": 190,
     "name": "NtCreatePort",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4932,7 +5596,7 @@
     "number": 191,
     "name": "NtCreatePrivateNamespace",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4940,7 +5604,7 @@
     "number": 192,
     "name": "NtCreateProcess",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4948,7 +5612,7 @@
     "number": 193,
     "name": "NtCreateProcessStateChange",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4956,7 +5620,7 @@
     "number": 194,
     "name": "NtCreateProfile",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4964,7 +5628,7 @@
     "number": 195,
     "name": "NtCreateProfileEx",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4972,7 +5636,7 @@
     "number": 196,
     "name": "NtCreateRegistryTransaction",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4980,7 +5644,7 @@
     "number": 197,
     "name": "NtCreateResourceManager",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -4988,7 +5652,7 @@
     "number": 198,
     "name": "NtCreateSectionEx",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5004,7 +5668,7 @@
     "number": 200,
     "name": "NtCreateSymbolicLinkObject",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5012,7 +5676,7 @@
     "number": 201,
     "name": "NtCreateThreadEx",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5020,7 +5684,7 @@
     "number": 202,
     "name": "NtCreateThreadStateChange",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5028,7 +5692,7 @@
     "number": 203,
     "name": "NtCreateTimer",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5036,7 +5700,7 @@
     "number": 204,
     "name": "NtCreateTimer2",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5044,7 +5708,7 @@
     "number": 205,
     "name": "NtCreateToken",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5052,7 +5716,7 @@
     "number": 206,
     "name": "NtCreateTokenEx",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5060,7 +5724,7 @@
     "number": 207,
     "name": "NtCreateTransaction",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5068,7 +5732,7 @@
     "number": 208,
     "name": "NtCreateTransactionManager",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5076,7 +5740,7 @@
     "number": 209,
     "name": "NtCreateUserProcess",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5084,7 +5748,7 @@
     "number": 210,
     "name": "NtCreateWaitCompletionPacket",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5092,7 +5756,7 @@
     "number": 211,
     "name": "NtCreateWaitablePort",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5100,7 +5764,7 @@
     "number": 212,
     "name": "NtCreateWnfStateName",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5108,7 +5772,7 @@
     "number": 213,
     "name": "NtCreateWorkerFactory",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5116,7 +5780,7 @@
     "number": 214,
     "name": "NtDebugActiveProcess",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5124,7 +5788,7 @@
     "number": 215,
     "name": "NtDebugContinue",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5132,7 +5796,7 @@
     "number": 216,
     "name": "NtDeleteAtom",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5140,7 +5804,7 @@
     "number": 217,
     "name": "NtDeleteBootEntry",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5148,7 +5812,7 @@
     "number": 218,
     "name": "NtDeleteDriverEntry",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5156,7 +5820,7 @@
     "number": 219,
     "name": "NtDeleteFile",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5164,7 +5828,7 @@
     "number": 220,
     "name": "NtDeleteKey",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5172,7 +5836,7 @@
     "number": 221,
     "name": "NtDeleteObjectAuditAlarm",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5180,7 +5844,7 @@
     "number": 222,
     "name": "NtDeletePrivateNamespace",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5188,7 +5852,7 @@
     "number": 223,
     "name": "NtDeleteValueKey",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5196,7 +5860,7 @@
     "number": 224,
     "name": "NtDeleteWnfStateData",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5204,7 +5868,7 @@
     "number": 225,
     "name": "NtDeleteWnfStateName",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5212,7 +5876,7 @@
     "number": 226,
     "name": "NtDirectGraphicsCall",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5220,7 +5884,7 @@
     "number": 227,
     "name": "NtDisableLastKnownGood",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5228,7 +5892,7 @@
     "number": 228,
     "name": "NtDisplayString",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5236,7 +5900,7 @@
     "number": 229,
     "name": "NtDrawText",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5244,7 +5908,7 @@
     "number": 230,
     "name": "NtEnableLastKnownGood",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5252,7 +5916,7 @@
     "number": 231,
     "name": "NtEnumerateBootEntries",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5260,7 +5924,7 @@
     "number": 232,
     "name": "NtEnumerateDriverEntries",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5268,7 +5932,7 @@
     "number": 233,
     "name": "NtEnumerateSystemEnvironmentValuesEx",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5276,7 +5940,7 @@
     "number": 234,
     "name": "NtEnumerateTransactionObject",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5284,7 +5948,7 @@
     "number": 235,
     "name": "NtExtendSection",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5292,7 +5956,7 @@
     "number": 236,
     "name": "NtFilterBootOption",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5300,7 +5964,7 @@
     "number": 237,
     "name": "NtFilterToken",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5308,7 +5972,7 @@
     "number": 238,
     "name": "NtFilterTokenEx",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5316,7 +5980,7 @@
     "number": 239,
     "name": "NtFlushBuffersFileEx",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5324,7 +5988,7 @@
     "number": 240,
     "name": "NtFlushInstallUILanguage",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5332,7 +5996,7 @@
     "number": 241,
     "name": "NtFlushInstructionCache",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5340,7 +6004,7 @@
     "number": 242,
     "name": "NtFlushKey",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5348,7 +6012,7 @@
     "number": 243,
     "name": "NtFlushProcessWriteBuffers",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5356,7 +6020,7 @@
     "number": 244,
     "name": "NtFlushVirtualMemory",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5364,7 +6028,7 @@
     "number": 245,
     "name": "NtFlushWriteBuffer",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5372,7 +6036,7 @@
     "number": 246,
     "name": "NtFreeUserPhysicalPages",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5380,7 +6044,7 @@
     "number": 247,
     "name": "NtFreezeRegistry",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5388,7 +6052,7 @@
     "number": 248,
     "name": "NtFreezeTransactions",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5396,7 +6060,7 @@
     "number": 249,
     "name": "NtGetCachedSigningLevel",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5404,7 +6068,7 @@
     "number": 250,
     "name": "NtGetCompleteWnfStateSubscription",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5412,7 +6076,7 @@
     "number": 251,
     "name": "NtGetContextThread",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5428,7 +6092,7 @@
     "number": 253,
     "name": "NtGetCurrentProcessorNumberEx",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5436,7 +6100,7 @@
     "number": 254,
     "name": "NtGetDevicePowerState",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5444,7 +6108,7 @@
     "number": 255,
     "name": "NtGetMUIRegistryInfo",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5452,7 +6116,7 @@
     "number": 256,
     "name": "NtGetNextProcess",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5460,7 +6124,7 @@
     "number": 257,
     "name": "NtGetNextThread",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5468,7 +6132,7 @@
     "number": 258,
     "name": "NtGetNlsSectionPtr",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5476,7 +6140,7 @@
     "number": 259,
     "name": "NtGetNotificationResourceManager",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5484,7 +6148,7 @@
     "number": 260,
     "name": "NtGetWriteWatch",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5492,7 +6156,7 @@
     "number": 261,
     "name": "NtImpersonateAnonymousToken",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5500,7 +6164,7 @@
     "number": 262,
     "name": "NtImpersonateThread",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5508,7 +6172,7 @@
     "number": 263,
     "name": "NtInitializeEnclave",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5516,7 +6180,7 @@
     "number": 264,
     "name": "NtInitializeNlsFiles",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5524,7 +6188,7 @@
     "number": 265,
     "name": "NtInitializeRegistry",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5532,7 +6196,7 @@
     "number": 266,
     "name": "NtInitiatePowerAction",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5540,7 +6204,7 @@
     "number": 267,
     "name": "NtIsSystemResumeAutomatic",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5548,7 +6212,7 @@
     "number": 268,
     "name": "NtIsUILanguageComitted",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5556,7 +6220,7 @@
     "number": 269,
     "name": "NtListenPort",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5564,7 +6228,7 @@
     "number": 270,
     "name": "NtLoadDriver",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5572,7 +6236,7 @@
     "number": 271,
     "name": "NtLoadEnclaveData",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5580,7 +6244,7 @@
     "number": 272,
     "name": "NtLoadKey",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5588,7 +6252,7 @@
     "number": 273,
     "name": "NtLoadKey2",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5596,7 +6260,7 @@
     "number": 274,
     "name": "NtLoadKey3",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5604,7 +6268,7 @@
     "number": 275,
     "name": "NtLoadKeyEx",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5612,7 +6276,7 @@
     "number": 276,
     "name": "NtLockFile",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5620,7 +6284,7 @@
     "number": 277,
     "name": "NtLockProductActivationKeys",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5628,7 +6292,7 @@
     "number": 278,
     "name": "NtLockRegistryKey",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5636,7 +6300,7 @@
     "number": 279,
     "name": "NtLockVirtualMemory",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5644,7 +6308,7 @@
     "number": 280,
     "name": "NtMakePermanentObject",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5652,7 +6316,7 @@
     "number": 281,
     "name": "NtMakeTemporaryObject",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5660,7 +6324,7 @@
     "number": 282,
     "name": "NtManageHotPatch",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5668,7 +6332,7 @@
     "number": 283,
     "name": "NtManagePartition",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5676,7 +6340,7 @@
     "number": 284,
     "name": "NtMapCMFModule",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5684,7 +6348,7 @@
     "number": 285,
     "name": "NtMapUserPhysicalPages",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5692,7 +6356,7 @@
     "number": 286,
     "name": "NtMapViewOfSectionEx",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5700,7 +6364,7 @@
     "number": 287,
     "name": "NtModifyBootEntry",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5708,7 +6372,7 @@
     "number": 288,
     "name": "NtModifyDriverEntry",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5716,7 +6380,7 @@
     "number": 289,
     "name": "NtNotifyChangeDirectoryFile",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5724,7 +6388,7 @@
     "number": 290,
     "name": "NtNotifyChangeDirectoryFileEx",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5732,7 +6396,7 @@
     "number": 291,
     "name": "NtNotifyChangeKey",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5740,7 +6404,7 @@
     "number": 292,
     "name": "NtNotifyChangeMultipleKeys",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5748,7 +6412,7 @@
     "number": 293,
     "name": "NtNotifyChangeSession",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5756,7 +6420,7 @@
     "number": 294,
     "name": "NtOpenCpuPartition",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5764,7 +6428,7 @@
     "number": 295,
     "name": "NtOpenEnlistment",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5772,7 +6436,7 @@
     "number": 296,
     "name": "NtOpenEventPair",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5780,7 +6444,7 @@
     "number": 297,
     "name": "NtOpenIoCompletion",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5788,7 +6452,7 @@
     "number": 298,
     "name": "NtOpenJobObject",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5796,7 +6460,7 @@
     "number": 299,
     "name": "NtOpenKeyEx",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5804,7 +6468,7 @@
     "number": 300,
     "name": "NtOpenKeyTransacted",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5812,7 +6476,7 @@
     "number": 301,
     "name": "NtOpenKeyTransactedEx",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5820,7 +6484,7 @@
     "number": 302,
     "name": "NtOpenKeyedEvent",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5828,7 +6492,7 @@
     "number": 303,
     "name": "NtOpenMutant",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5836,7 +6500,7 @@
     "number": 304,
     "name": "NtOpenObjectAuditAlarm",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5844,7 +6508,7 @@
     "number": 305,
     "name": "NtOpenPartition",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5852,7 +6516,7 @@
     "number": 306,
     "name": "NtOpenPrivateNamespace",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5860,7 +6524,7 @@
     "number": 307,
     "name": "NtOpenProcessToken",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5868,7 +6532,7 @@
     "number": 308,
     "name": "NtOpenRegistryTransaction",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5876,7 +6540,7 @@
     "number": 309,
     "name": "NtOpenResourceManager",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5884,7 +6548,7 @@
     "number": 310,
     "name": "NtOpenSemaphore",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5892,7 +6556,7 @@
     "number": 311,
     "name": "NtOpenSession",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5900,7 +6564,7 @@
     "number": 312,
     "name": "NtOpenSymbolicLinkObject",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5908,7 +6572,7 @@
     "number": 313,
     "name": "NtOpenThread",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5916,7 +6580,7 @@
     "number": 314,
     "name": "NtOpenTimer",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5924,7 +6588,7 @@
     "number": 315,
     "name": "NtOpenTransaction",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5932,7 +6596,7 @@
     "number": 316,
     "name": "NtOpenTransactionManager",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5940,7 +6604,7 @@
     "number": 317,
     "name": "NtPlugPlayControl",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5948,7 +6612,7 @@
     "number": 318,
     "name": "NtPrePrepareComplete",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5956,7 +6620,7 @@
     "number": 319,
     "name": "NtPrePrepareEnlistment",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5964,7 +6628,7 @@
     "number": 320,
     "name": "NtPrepareComplete",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5972,7 +6636,7 @@
     "number": 321,
     "name": "NtPrepareEnlistment",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5980,7 +6644,7 @@
     "number": 322,
     "name": "NtPrivilegeCheck",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5988,7 +6652,7 @@
     "number": 323,
     "name": "NtPrivilegeObjectAuditAlarm",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -5996,7 +6660,7 @@
     "number": 324,
     "name": "NtPrivilegedServiceAuditAlarm",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6004,7 +6668,7 @@
     "number": 325,
     "name": "NtPropagationComplete",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6012,7 +6676,7 @@
     "number": 326,
     "name": "NtPropagationFailed",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6020,7 +6684,7 @@
     "number": 327,
     "name": "NtPssCaptureVaSpaceBulk",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6028,7 +6692,7 @@
     "number": 328,
     "name": "NtPulseEvent",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6036,7 +6700,7 @@
     "number": 329,
     "name": "NtQueryAuxiliaryCounterFrequency",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6044,7 +6708,7 @@
     "number": 330,
     "name": "NtQueryBootEntryOrder",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6052,7 +6716,7 @@
     "number": 331,
     "name": "NtQueryBootOptions",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6060,7 +6724,7 @@
     "number": 332,
     "name": "NtQueryDebugFilterState",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6068,7 +6732,7 @@
     "number": 333,
     "name": "NtQueryDirectoryFileEx",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6076,7 +6740,7 @@
     "number": 334,
     "name": "NtQueryDirectoryObject",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6084,7 +6748,7 @@
     "number": 335,
     "name": "NtQueryDriverEntryOrder",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6092,7 +6756,7 @@
     "number": 336,
     "name": "NtQueryEaFile",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6100,7 +6764,7 @@
     "number": 337,
     "name": "NtQueryFullAttributesFile",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6108,7 +6772,7 @@
     "number": 338,
     "name": "NtQueryInformationAtom",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6116,7 +6780,7 @@
     "number": 339,
     "name": "NtQueryInformationByName",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6124,7 +6788,7 @@
     "number": 340,
     "name": "NtQueryInformationCpuPartition",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6132,7 +6796,7 @@
     "number": 341,
     "name": "NtQueryInformationEnlistment",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6140,7 +6804,7 @@
     "number": 342,
     "name": "NtQueryInformationJobObject",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6148,7 +6812,7 @@
     "number": 343,
     "name": "NtQueryInformationPort",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6156,7 +6820,7 @@
     "number": 344,
     "name": "NtQueryInformationResourceManager",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6164,7 +6828,7 @@
     "number": 345,
     "name": "NtQueryInformationTransaction",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6172,7 +6836,7 @@
     "number": 346,
     "name": "NtQueryInformationTransactionManager",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6180,7 +6844,7 @@
     "number": 347,
     "name": "NtQueryInformationWorkerFactory",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6188,7 +6852,7 @@
     "number": 348,
     "name": "NtQueryInstallUILanguage",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6196,7 +6860,7 @@
     "number": 349,
     "name": "NtQueryIntervalProfile",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6204,7 +6868,7 @@
     "number": 350,
     "name": "NtQueryIoCompletion",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6212,7 +6876,7 @@
     "number": 351,
     "name": "NtQueryIoRingCapabilities",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6220,7 +6884,7 @@
     "number": 352,
     "name": "NtQueryLicenseValue",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6228,7 +6892,7 @@
     "number": 353,
     "name": "NtQueryMultipleValueKey",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6236,7 +6900,7 @@
     "number": 354,
     "name": "NtQueryMutant",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6244,7 +6908,7 @@
     "number": 355,
     "name": "NtQueryOpenSubKeys",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6252,7 +6916,7 @@
     "number": 356,
     "name": "NtQueryOpenSubKeysEx",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6260,7 +6924,7 @@
     "number": 357,
     "name": "NtQueryPortInformationProcess",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6268,7 +6932,7 @@
     "number": 358,
     "name": "NtQueryQuotaInformationFile",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6276,7 +6940,7 @@
     "number": 359,
     "name": "NtQuerySecurityAttributesToken",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6284,7 +6948,7 @@
     "number": 360,
     "name": "NtQuerySecurityObject",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6292,7 +6956,7 @@
     "number": 361,
     "name": "NtQuerySecurityPolicy",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6300,7 +6964,7 @@
     "number": 362,
     "name": "NtQuerySemaphore",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6308,7 +6972,7 @@
     "number": 363,
     "name": "NtQuerySymbolicLinkObject",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6316,7 +6980,7 @@
     "number": 364,
     "name": "NtQuerySystemEnvironmentValue",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6324,7 +6988,7 @@
     "number": 365,
     "name": "NtQuerySystemEnvironmentValueEx",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6332,7 +6996,7 @@
     "number": 366,
     "name": "NtQuerySystemInformationEx",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6340,7 +7004,7 @@
     "number": 367,
     "name": "NtQueryTimerResolution",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6348,7 +7012,7 @@
     "number": 368,
     "name": "NtQueryWnfStateData",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6356,7 +7020,7 @@
     "number": 369,
     "name": "NtQueryWnfStateNameInformation",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6364,7 +7028,7 @@
     "number": 370,
     "name": "NtQueueApcThreadEx",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6372,7 +7036,7 @@
     "number": 371,
     "name": "NtQueueApcThreadEx2",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6380,7 +7044,7 @@
     "number": 372,
     "name": "NtRaiseException",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6388,7 +7052,7 @@
     "number": 373,
     "name": "NtRaiseHardError",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6396,7 +7060,7 @@
     "number": 374,
     "name": "NtReadOnlyEnlistment",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6404,7 +7068,7 @@
     "number": 375,
     "name": "NtReadVirtualMemoryEx",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6412,7 +7076,7 @@
     "number": 376,
     "name": "NtRecoverEnlistment",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6420,7 +7084,7 @@
     "number": 377,
     "name": "NtRecoverResourceManager",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6428,7 +7092,7 @@
     "number": 378,
     "name": "NtRecoverTransactionManager",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6436,7 +7100,7 @@
     "number": 379,
     "name": "NtRegisterProtocolAddressInformation",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6444,7 +7108,7 @@
     "number": 380,
     "name": "NtRegisterThreadTerminatePort",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6452,7 +7116,7 @@
     "number": 381,
     "name": "NtReleaseKeyedEvent",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6460,7 +7124,7 @@
     "number": 382,
     "name": "NtReleaseWorkerFactoryWorker",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6468,7 +7132,7 @@
     "number": 383,
     "name": "NtRemoveIoCompletionEx",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6476,7 +7140,7 @@
     "number": 384,
     "name": "NtRemoveProcessDebug",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6484,7 +7148,7 @@
     "number": 385,
     "name": "NtRenameKey",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6492,7 +7156,7 @@
     "number": 386,
     "name": "NtRenameTransactionManager",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6500,7 +7164,7 @@
     "number": 387,
     "name": "NtReplaceKey",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6508,7 +7172,7 @@
     "number": 388,
     "name": "NtReplacePartitionUnit",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6516,7 +7180,7 @@
     "number": 389,
     "name": "NtReplyWaitReplyPort",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6524,7 +7188,7 @@
     "number": 390,
     "name": "NtRequestPort",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6540,7 +7204,7 @@
     "number": 392,
     "name": "NtResetWriteWatch",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6548,7 +7212,7 @@
     "number": 393,
     "name": "NtRestoreKey",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6556,7 +7220,7 @@
     "number": 394,
     "name": "NtResumeProcess",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6564,7 +7228,7 @@
     "number": 395,
     "name": "NtRevertContainerImpersonation",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6572,7 +7236,7 @@
     "number": 396,
     "name": "NtRollbackComplete",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6580,7 +7244,7 @@
     "number": 397,
     "name": "NtRollbackEnlistment",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6588,7 +7252,7 @@
     "number": 398,
     "name": "NtRollbackRegistryTransaction",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6596,7 +7260,7 @@
     "number": 399,
     "name": "NtRollbackTransaction",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6604,7 +7268,7 @@
     "number": 400,
     "name": "NtRollforwardTransactionManager",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6612,7 +7276,7 @@
     "number": 401,
     "name": "NtSaveKey",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6620,7 +7284,7 @@
     "number": 402,
     "name": "NtSaveKeyEx",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6628,7 +7292,7 @@
     "number": 403,
     "name": "NtSaveMergedKeys",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6636,7 +7300,7 @@
     "number": 404,
     "name": "NtSecureConnectPort",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6644,7 +7308,7 @@
     "number": 405,
     "name": "NtSerializeBoot",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6652,7 +7316,7 @@
     "number": 406,
     "name": "NtSetBootEntryOrder",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6660,7 +7324,7 @@
     "number": 407,
     "name": "NtSetBootOptions",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6668,7 +7332,7 @@
     "number": 408,
     "name": "NtSetCachedSigningLevel",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6676,7 +7340,7 @@
     "number": 409,
     "name": "NtSetCachedSigningLevel2",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6684,7 +7348,7 @@
     "number": 410,
     "name": "NtSetContextThread",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6692,7 +7356,7 @@
     "number": 411,
     "name": "NtSetDebugFilterState",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6700,7 +7364,7 @@
     "number": 412,
     "name": "NtSetDefaultHardErrorPort",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6708,7 +7372,7 @@
     "number": 413,
     "name": "NtSetDefaultLocale",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6716,7 +7380,7 @@
     "number": 414,
     "name": "NtSetDefaultUILanguage",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6724,7 +7388,7 @@
     "number": 415,
     "name": "NtSetDriverEntryOrder",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6732,7 +7396,7 @@
     "number": 416,
     "name": "NtSetEaFile",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6740,7 +7404,7 @@
     "number": 417,
     "name": "NtSetEventEx",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6748,7 +7412,7 @@
     "number": 418,
     "name": "NtSetHighEventPair",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6756,7 +7420,7 @@
     "number": 419,
     "name": "NtSetHighWaitLowEventPair",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6764,7 +7428,7 @@
     "number": 420,
     "name": "NtSetIRTimer",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6772,7 +7436,7 @@
     "number": 421,
     "name": "NtSetInformationCpuPartition",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6780,7 +7444,7 @@
     "number": 422,
     "name": "NtSetInformationDebugObject",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6788,7 +7452,7 @@
     "number": 423,
     "name": "NtSetInformationEnlistment",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6796,7 +7460,7 @@
     "number": 424,
     "name": "NtSetInformationIoRing",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6804,7 +7468,7 @@
     "number": 425,
     "name": "NtSetInformationJobObject",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6812,7 +7476,7 @@
     "number": 426,
     "name": "NtSetInformationKey",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6820,7 +7484,7 @@
     "number": 427,
     "name": "NtSetInformationResourceManager",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6828,7 +7492,7 @@
     "number": 428,
     "name": "NtSetInformationSymbolicLink",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6836,7 +7500,7 @@
     "number": 429,
     "name": "NtSetInformationToken",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6844,7 +7508,7 @@
     "number": 430,
     "name": "NtSetInformationTransaction",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6852,7 +7516,7 @@
     "number": 431,
     "name": "NtSetInformationTransactionManager",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6860,7 +7524,7 @@
     "number": 432,
     "name": "NtSetInformationVirtualMemory",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6868,7 +7532,7 @@
     "number": 433,
     "name": "NtSetInformationWorkerFactory",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6876,7 +7540,7 @@
     "number": 434,
     "name": "NtSetIntervalProfile",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6884,7 +7548,7 @@
     "number": 435,
     "name": "NtSetIoCompletion",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6892,7 +7556,7 @@
     "number": 436,
     "name": "NtSetIoCompletionEx",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6900,7 +7564,7 @@
     "number": 437,
     "name": "NtSetLdtEntries",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6908,7 +7572,7 @@
     "number": 438,
     "name": "NtSetLowEventPair",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6916,7 +7580,7 @@
     "number": 439,
     "name": "NtSetLowWaitHighEventPair",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6924,7 +7588,7 @@
     "number": 440,
     "name": "NtSetQuotaInformationFile",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6932,7 +7596,7 @@
     "number": 441,
     "name": "NtSetSecurityObject",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6940,7 +7604,7 @@
     "number": 442,
     "name": "NtSetSystemEnvironmentValue",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6948,7 +7612,7 @@
     "number": 443,
     "name": "NtSetSystemEnvironmentValueEx",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6956,7 +7620,7 @@
     "number": 444,
     "name": "NtSetSystemInformation",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6964,7 +7628,7 @@
     "number": 445,
     "name": "NtSetSystemPowerState",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6972,7 +7636,7 @@
     "number": 446,
     "name": "NtSetSystemTime",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6980,7 +7644,7 @@
     "number": 447,
     "name": "NtSetThreadExecutionState",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6988,7 +7652,7 @@
     "number": 448,
     "name": "NtSetTimer2",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -6996,7 +7660,7 @@
     "number": 449,
     "name": "NtSetTimerEx",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -7004,7 +7668,7 @@
     "number": 450,
     "name": "NtSetTimerResolution",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -7012,7 +7676,7 @@
     "number": 451,
     "name": "NtSetUuidSeed",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -7020,7 +7684,7 @@
     "number": 452,
     "name": "NtSetVolumeInformationFile",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -7028,7 +7692,7 @@
     "number": 453,
     "name": "NtSetWnfProcessNotificationEvent",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -7036,7 +7700,7 @@
     "number": 454,
     "name": "NtShutdownSystem",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -7044,7 +7708,7 @@
     "number": 455,
     "name": "NtShutdownWorkerFactory",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -7052,7 +7716,7 @@
     "number": 456,
     "name": "NtSignalAndWaitForSingleObject",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -7060,7 +7724,7 @@
     "number": 457,
     "name": "NtSinglePhaseReject",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -7068,7 +7732,7 @@
     "number": 458,
     "name": "NtStartProfile",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -7076,7 +7740,7 @@
     "number": 459,
     "name": "NtStopProfile",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -7084,7 +7748,7 @@
     "number": 460,
     "name": "NtSubmitIoRing",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -7092,7 +7756,7 @@
     "number": 461,
     "name": "NtSubscribeWnfStateChange",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -7100,7 +7764,7 @@
     "number": 462,
     "name": "NtSuspendProcess",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -7108,7 +7772,7 @@
     "number": 463,
     "name": "NtSuspendThread",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -7116,7 +7780,7 @@
     "number": 464,
     "name": "NtSystemDebugControl",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -7124,7 +7788,7 @@
     "number": 465,
     "name": "NtTerminateEnclave",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -7132,7 +7796,7 @@
     "number": 466,
     "name": "NtTerminateJobObject",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -7140,7 +7804,7 @@
     "number": 467,
     "name": "NtTestAlert",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -7148,7 +7812,7 @@
     "number": 468,
     "name": "NtThawRegistry",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -7156,7 +7820,7 @@
     "number": 469,
     "name": "NtThawTransactions",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -7164,7 +7828,7 @@
     "number": 470,
     "name": "NtTraceControl",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -7172,7 +7836,7 @@
     "number": 471,
     "name": "NtTranslateFilePath",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -7180,7 +7844,7 @@
     "number": 472,
     "name": "NtUmsThreadYield",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -7188,7 +7852,7 @@
     "number": 473,
     "name": "NtUnloadDriver",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -7196,7 +7860,7 @@
     "number": 474,
     "name": "NtUnloadKey",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -7204,7 +7868,7 @@
     "number": 475,
     "name": "NtUnloadKey2",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -7212,7 +7876,7 @@
     "number": 476,
     "name": "NtUnloadKeyEx",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -7220,7 +7884,7 @@
     "number": 477,
     "name": "NtUnlockFile",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -7228,7 +7892,7 @@
     "number": 478,
     "name": "NtUnlockVirtualMemory",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -7236,7 +7900,7 @@
     "number": 479,
     "name": "NtUnmapViewOfSectionEx",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -7244,7 +7908,7 @@
     "number": 480,
     "name": "NtUnsubscribeWnfStateChange",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -7252,7 +7916,7 @@
     "number": 481,
     "name": "NtUpdateWnfStateData",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -7260,7 +7924,7 @@
     "number": 482,
     "name": "NtVdmControl",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -7268,7 +7932,7 @@
     "number": 483,
     "name": "NtWaitForAlertByThreadId",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -7276,7 +7940,7 @@
     "number": 484,
     "name": "NtWaitForDebugEvent",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -7284,7 +7948,7 @@
     "number": 485,
     "name": "NtWaitForKeyedEvent",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -7292,7 +7956,7 @@
     "number": 486,
     "name": "NtWaitForWorkViaWorkerFactory",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -7300,7 +7964,7 @@
     "number": 487,
     "name": "NtWaitHighEventPair",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   },
   {
@@ -7308,7 +7972,7 @@
     "number": 488,
     "name": "NtWaitLowEventPair",
     "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll",
+    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
     "fallback": "STATUS_NOT_IMPLEMENTED"
   }
 ]

@@ -2,7 +2,7 @@
  * userland/libs/ucrtbase/ucrtbase.c
  *
  * Freestanding DuetOS ucrtbase.dll. Retires the prior
- * UCRT runtime stubs in kernel/subsystems/win32/stubs.cpp.
+ * UCRT runtime stubs in kernel/subsystems/win32/thunks.cpp.
  *
  * Covers:
  *   - Heap allocation: malloc, free, calloc, realloc,

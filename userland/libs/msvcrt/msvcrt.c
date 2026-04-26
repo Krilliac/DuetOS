@@ -4,7 +4,7 @@
  * Freestanding DuetOS msvcrt.dll — string intrinsics
  * (strlen, strcmp, strcpy, strchr, wcslen, wcscmp, wcscpy,
  * wcschr). Retires the + 29/31 flat stubs in
- * kernel/subsystems/win32/stubs.cpp.
+ * kernel/subsystems/win32/thunks.cpp.
  *
  * All implementations are plain C loops. `-fno-builtin` +
  * `__attribute__((no_builtin(...)))` prevent clang from

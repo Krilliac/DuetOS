@@ -4,10 +4,10 @@
 ; just forwards to ucrtbase.dll. DuetOS's PE loader sees
 ; the apiset name directly in the PE's import table and
 ; resolves each function against kernel/subsystems/win32/
-; stubs.cpp — the forwarder table lives in the kernel.
+; thunks.cpp — the forwarder table lives in the kernel.
 ;
 ; Keep this list in sync with kStubsTable entries under the
-; same DLL name in stubs.cpp. A mismatch surfaces at load
+; same DLL name in thunks.cpp. A mismatch surfaces at load
 ; time as UNRESOLVED <dll>!<func>.
 
 LIBRARY api-ms-win-crt-heap-l1-1-0.dll

@@ -24,6 +24,9 @@ longer-lived material that survives across many slices.
   `drivers/net/ethernet/intel/e1000e`, and `net/core` for things we
   could lift into DuetOS. Dated 2026-04-25; treat as a one-shot
   research log rather than a perpetual living doc.
+- `win32-thunks-compat-note.md` — compatibility mapping for historical
+  `kernel/subsystems/win32/stubs.*` references; canonical paths are
+  now `kernel/subsystems/win32/thunks.*`.
 
 ### Implementation ground-truth (append-only)
 

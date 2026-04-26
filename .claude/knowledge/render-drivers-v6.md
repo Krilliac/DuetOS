@@ -118,7 +118,7 @@ PE (gdi32 IAT) ──► gdi32 stub bytecode (8 KiB R-X over 2 frames) ──►
   HBRUSH on first access and caches it with `.stock = true`.
 
 ### Stub page
-- `kernel/subsystems/win32/stubs.cpp` lives across two contiguous
+- `kernel/subsystems/win32/thunks.cpp` lives across two contiguous
   4 KiB R-X frames at `kWin32StubsVa` (allocated by
   `pe_loader.cpp:PeLoad` via `AllocateContiguousFrames(2)`).
   Static-asserted at `<= 8192`; current end ~0x1048 leaves
@@ -168,7 +168,7 @@ Every call has a real backing.
 
 ## References
 
-- `kernel/subsystems/win32/stubs.cpp` — gdi32 IAT bytecode.
+- `kernel/subsystems/win32/thunks.cpp` — gdi32 IAT bytecode.
 - `kernel/subsystems/win32/gdi_objects.{h,cpp}` — handle table,
   paint helpers, sys-palette table + brush pool.
 - `kernel/subsystems/win32/window_syscall.cpp` — DoGdi* dispatch
