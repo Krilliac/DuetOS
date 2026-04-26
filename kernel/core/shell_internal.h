@@ -247,6 +247,36 @@ void CmdRm(u32 argc, char** argv);
 void CmdEcho(u32 argc, char** argv);
 
 // ---------------------------------------------------------------
+// Hardware introspection commands (shell_hardware.cpp). Direct
+// readouts of x86 CPU state (CPUID / RFLAGS / TSC / MSR), local
+// APIC, SMP topology, PCI inventory, kernel heap / paging stats,
+// framebuffer + input + SMBIOS / power / thermal / GPU readouts,
+// and the Bochs / BGA mode-set command.
+// ---------------------------------------------------------------
+void CmdCpuid(u32 argc, char** argv);
+void CmdCr();
+void CmdRflags();
+void CmdTsc();
+void CmdHpet();
+void CmdTicks();
+void CmdMsr(u32 argc, char** argv);
+void CmdLapic();
+void CmdSmp();
+void CmdLspci();
+void CmdHeap();
+void CmdPaging();
+void CmdFb();
+void CmdKbdStats();
+void CmdMouseStats();
+void CmdSmbios();
+void CmdPower();
+void CmdThermal();
+void CmdHwmon();
+void CmdGpu();
+void CmdGfx();
+void CmdVbe(u32 argc, char** argv);
+
+// ---------------------------------------------------------------
 // Misc trivial utility commands (shell_utilities.cpp). Commands
 // that touch only one or two kernel subsystems and don't need
 // any of the larger TU-private helpers in shell.cpp.
