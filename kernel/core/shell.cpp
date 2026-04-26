@@ -103,9 +103,16 @@
 #include "reboot.h"
 #include "ring3_smoke.h"
 #include "runtime_checker.h"
+#include "shell_internal.h"
 
 namespace duetos::core
 {
+
+// Hoist the per-domain Cmd* handlers from the shell sibling TUs
+// (shell_security.cpp, ...) back into this TU's outer namespace
+// so the dispatch chain in Dispatch() keeps reading like the
+// in-TU layout the file used to have.
+using namespace shell::internal;
 
 namespace
 {
@@ -8141,205 +8148,9 @@ const char* HistoryExpand(const char* line)
 
 // ---------------------------------------------------------------
 // Account management commands — useradd / userdel / passwd /
-// users / login / logout / su. All thin wrappers around auth.h.
-// Admin-only paths are enforced here so the kernel-side API
-// stays pure data-access and callable from the login gate
-// without capability juggling.
+// users / login / logout / su — moved to shell_security.cpp.
 // ---------------------------------------------------------------
 
-const char* RoleName(AuthRole r)
-{
-    switch (r)
-    {
-    case AuthRole::Admin:
-        return "admin";
-    case AuthRole::User:
-        return "user";
-    case AuthRole::Guest:
-        return "guest";
-    }
-    return "?";
-}
-
-AuthRole RoleFromArg(const char* s)
-{
-    if (StrEq(s, "admin"))
-        return AuthRole::Admin;
-    if (StrEq(s, "guest"))
-        return AuthRole::Guest;
-    return AuthRole::User;
-}
-
-void CmdUsers()
-{
-    const u32 n = AuthAccountCount();
-    ConsoleWrite("USERS (");
-    WriteU64Dec(n);
-    ConsoleWriteln(" accounts)");
-    const char* active = AuthCurrentUserName();
-    for (u32 i = 0; i < n; ++i)
-    {
-        AccountView v = {};
-        if (!AuthAccountAt(i, &v))
-            continue;
-        ConsoleWrite("  ");
-        ConsoleWrite(v.username);
-        ConsoleWrite("  [");
-        ConsoleWrite(RoleName(v.role));
-        ConsoleWrite("]");
-        if (!v.has_password)
-        {
-            ConsoleWrite("  (no password)");
-        }
-        if (active[0] != '\0' && StrEq(active, v.username))
-        {
-            ConsoleWrite("  *");
-        }
-        ConsoleWriteChar('\n');
-    }
-}
-
-void CmdUseradd(u32 argc, char** argv)
-{
-    if (!AuthIsAdmin())
-    {
-        ConsoleWriteln("USERADD: PERMISSION DENIED (ADMIN ONLY)");
-        return;
-    }
-    if (argc < 3)
-    {
-        ConsoleWriteln("USERADD: USAGE: USERADD <NAME> <PASSWORD> [ROLE]");
-        ConsoleWriteln("  ROLE: admin | user (default) | guest");
-        return;
-    }
-    const AuthRole role = (argc >= 4) ? RoleFromArg(argv[3]) : AuthRole::User;
-    if (!AuthAddUser(argv[1], argv[2], role))
-    {
-        ConsoleWriteln("USERADD: FAILED (DUPLICATE, FULL TABLE, OR INVALID NAME/PASSWORD)");
-        return;
-    }
-    ConsoleWrite("USERADD: CREATED ");
-    ConsoleWrite(argv[1]);
-    ConsoleWrite(" [");
-    ConsoleWrite(RoleName(role));
-    ConsoleWriteln("]");
-}
-
-void CmdUserdel(u32 argc, char** argv)
-{
-    if (!AuthIsAdmin())
-    {
-        ConsoleWriteln("USERDEL: PERMISSION DENIED (ADMIN ONLY)");
-        return;
-    }
-    if (argc < 2)
-    {
-        ConsoleWriteln("USERDEL: USAGE: USERDEL <NAME>");
-        return;
-    }
-    if (!AuthDeleteUser(argv[1]))
-    {
-        ConsoleWriteln("USERDEL: FAILED (UNKNOWN USER OR LAST ADMIN)");
-        return;
-    }
-    ConsoleWrite("USERDEL: REMOVED ");
-    ConsoleWriteln(argv[1]);
-}
-
-void CmdPasswd(u32 argc, char** argv)
-{
-    // Self-service flow: `passwd <old> <new>` — change the
-    // current user's password. Admin flow: `passwd <name>
-    // <new>` — force-set another user's password. Without
-    // enough args, print usage.
-    const char* me = AuthCurrentUserName();
-    if (me[0] == '\0')
-    {
-        ConsoleWriteln("PASSWD: NO ACTIVE SESSION");
-        return;
-    }
-    if (argc == 3)
-    {
-        // Self-service: argv[1] = old, argv[2] = new
-        if (!AuthChangePassword(me, argv[1], argv[2]))
-        {
-            ConsoleWriteln("PASSWD: FAILED (WRONG OLD PASSWORD OR INVALID NEW PASSWORD)");
-            return;
-        }
-        ConsoleWriteln("PASSWD: PASSWORD UPDATED");
-        return;
-    }
-    if (argc == 4)
-    {
-        // Admin flow: argv[1] = user, argv[2] = new, argv[3] = "--force"
-        if (!AuthIsAdmin())
-        {
-            ConsoleWriteln("PASSWD: PERMISSION DENIED (ADMIN ONLY FOR FORCE RESET)");
-            return;
-        }
-        if (!StrEq(argv[3], "--force"))
-        {
-            ConsoleWriteln("PASSWD: USAGE: PASSWD <USER> <NEW_PW> --force");
-            return;
-        }
-        if (!AuthChangePassword(argv[1], nullptr, argv[2]))
-        {
-            ConsoleWriteln("PASSWD: FAILED (UNKNOWN USER OR INVALID PASSWORD)");
-            return;
-        }
-        ConsoleWrite("PASSWD: PASSWORD FOR ");
-        ConsoleWrite(argv[1]);
-        ConsoleWriteln(" UPDATED");
-        return;
-    }
-    ConsoleWriteln("PASSWD: USAGE:");
-    ConsoleWriteln("  PASSWD <OLD_PW> <NEW_PW>                (SELF-SERVICE)");
-    ConsoleWriteln("  PASSWD <USER> <NEW_PW> --force          (ADMIN RESET)");
-}
-
-void CmdLogout()
-{
-    if (!AuthIsAuthenticated())
-    {
-        ConsoleWriteln("LOGOUT: NO ACTIVE SESSION");
-        return;
-    }
-    ConsoleWrite("LOGOUT: GOODBYE, ");
-    ConsoleWriteln(AuthCurrentUserName());
-    LoginReopen();
-}
-
-void CmdSu(u32 argc, char** argv)
-{
-    if (argc < 3)
-    {
-        ConsoleWriteln("SU: USAGE: SU <USER> <PASSWORD>");
-        return;
-    }
-    if (!AuthLogin(argv[1], argv[2]))
-    {
-        ConsoleWriteln("SU: AUTHENTICATION FAILED");
-        return;
-    }
-    ConsoleWrite("SU: SWITCHED TO ");
-    ConsoleWriteln(argv[1]);
-}
-
-void CmdLoginCmd(u32 argc, char** argv)
-{
-    if (argc < 3)
-    {
-        ConsoleWriteln("LOGIN: USAGE: LOGIN <USER> <PASSWORD>");
-        return;
-    }
-    if (!AuthLogin(argv[1], argv[2]))
-    {
-        ConsoleWriteln("LOGIN: AUTHENTICATION FAILED");
-        return;
-    }
-    ConsoleWrite("LOGIN: WELCOME, ");
-    ConsoleWriteln(argv[1]);
-}
 
 void Dispatch(char* line)
 {
