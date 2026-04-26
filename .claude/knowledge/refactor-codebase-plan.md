@@ -11,7 +11,7 @@ Branches: `claude/refactor-codebase-VvLO6` (merged via PR #74) and
 |---|---|---:|---:|---|
 | 1 | `kernel/core/shell.cpp`               | 9,769 | 9,769 | ☐ not started |
 | 2 | `kernel/subsystems/win32/thunks.cpp`  | 5,684 |   655 | ☑ done (`cae3704`) |
-| 3 | `kernel/subsystems/linux/syscall.cpp` | 4,642 | 3,028 | ◐ in progress (35% reduction: cred + rlimit + sched + time + sig + fd + proc + path + mm + stub + compat-stub extracted; remaining: io/file/fs_mut/misc + path-strip helper hoist) |
+| 3 | `kernel/subsystems/linux/syscall.cpp` | 4,642 | 1,274 | ☑ done (73% reduction; decomposed into 16 per-domain sibling TUs: cred / fd / file / fs_mut / io / misc / mm / path / pathutil / proc / rlimit / sched / sig / stub / time + syscall_internal.h. syscall.cpp itself is now just header + kSys* enum + LinuxSyscallDispatch + SyscallInit + LinuxLogAbiCoverage + thin Linux* public wrappers) |
 | 4 | `kernel/fs/fat32.cpp`                 | 3,190 |   300 | ☑ done (decomposed into fat32 + fat32_dir + fat32_lookup + fat32_read + fat32_write + fat32_create + selftest, plus fat32_internal.h and fat32_write_internal.h) |
 | 5 | `kernel/drivers/usb/xhci.cpp`         | 2,548 |    76 | ☑ done (decomposed into 14 sibling TUs: admin/complete/context/control/descparse/enum/event/init/input/irq/ring/speed/xfer + xhci_internal.h; xhci.cpp itself is now just file header + namespace scaffolding + global definitions backing the extern decls in the header) |
 
@@ -36,6 +36,12 @@ Branches: `claude/refactor-codebase-VvLO6` (merged via PR #74) and
 | `97e7c11 linux-syscall: extract memory-management handlers into sibling TU` | `syscall.cpp` 3,657 → 3,290 lines. brk / mmap / munmap / mprotect / madvise / mremap / msync / mincore / mlock / munlock / mlockall / munlockall + kMapPrivate / kMapAnonymous + PageUp helper → `syscall_mm.cpp` (371 lines). Drops the kENOMEM_ shadow constant — DoMremap now uses kENOMEM directly. |
 | `1c2ef92 linux-syscall: extract stub handlers into sibling TU` | `syscall.cpp` 3,290 → 3,147 lines. Contiguous Pipe / Wait / Eventfd / Timerfd / Signalfd / Epoll / Inotify / Fadvise / Readahead block → new `syscall_stub.cpp`. Each returns the canonical Linux errno (-ENFILE / -ECHILD / -ENOSYS) for "we don't have that subsystem". |
 | `b46b42f linux-syscall: extract compat / tracing / mount stub group` | `syscall.cpp` 3,147 → 3,028 lines. Extends `syscall_stub.cpp` with the compat / tracing / mount / link / rename group: ptrace / syslog / vhangup / acct / mount / umount2 / sync / syncfs / rename / link / symlink / set_thread_area / get_thread_area / ioprio_get / ioprio_set. |
+| `1658b90 linux-syscall: hoist path-strip helpers into shared sibling TU` | `syscall.cpp` 3,028 → 2,964 lines. StripFatPrefix / CopyAndStripFatPath / AtFdCwdOnly + kAtFdCwd / kAtRemoveDir → new `syscall_pathutil.cpp` (65 lines). Unblocks the file / fs_mut / utime slices. |
+| `d04e749 linux-syscall: extract file-table handlers into sibling TU` | `syscall.cpp` 2,964 → 2,635 lines. open / close / stat / fstat / lstat / access / openat / newfstatat + TU-private FillStatFromEntry → new `syscall_file.cpp` (291 lines). |
+| `656c0b8 linux-syscall: extract FS-mutating handlers into sibling TU` | `syscall.cpp` 2,635 → 2,470 lines. chmod / fchmod / chown / fchown / lchown / utime / mknod / truncate / ftruncate / unlink / mkdir / rmdir + the *at-family (mkdirat / unlinkat / linkat / symlinkat / renameat / renameat2 / fchownat / futimesat / fchmodat / faccessat / faccessat2 / utimensat) → new `syscall_fs_mut.cpp` (306 lines). |
+| `4fe7804 linux-syscall: extract I/O handlers into sibling TU` | `syscall.cpp` 2,470 → 2,037 lines. read / write / lseek / ioctl / fsync / fdatasync / pread64 / pwrite64 / readv / writev + kLinuxIoMax → new `syscall_io.cpp` (450 lines). |
+| `6fccf1f linux-syscall: extract miscellaneous handlers into sibling TU` | `syscall.cpp` 2,037 → 1,452 lines. Catch-all "misc" group: arch_prctl / uname / set_tid_address / sysinfo / getrandom / futex / personality / pause / flock / get/setpriority / getcpu / prctl / getrusage / poll / select / getdents64 / set_robust_list / get_robust_list / ppoll / pselect6 / readlink → new `syscall_misc.cpp` (534 lines). WriteMsr duplicated TU-locally so the file is self-contained. |
+| `84ed53d linux-syscall: collapse scattered breadcrumb comments` | `syscall.cpp` 1,452 → 1,274 lines. Replace ~200 lines of in-line "moved to" stubs with one consolidated note. Update file header comment to describe the actual current layout. |
 
 **Deferred** to a follow-up session (each warrants its own fresh chat per
 the timeout-prevention rules):
@@ -43,60 +49,39 @@ the timeout-prevention rules):
 - `kernel/core/shell.cpp` (9,769 lines) — per-domain command extraction
   + shared-state plumbing into `shell_internal.h`. No big data block to
   `.inc`-extract; this is a real function-by-function split.
-- `kernel/subsystems/linux/syscall.cpp` (now 3,028 lines) — continue
-  the per-domain split started on
-  `claude/continue-refactoring-split-QlCKz`. Eleven slices have
-  landed (cred / rlimit / sched / time / sig / fd / proc / path /
-  mm / stub / compat-stub). Remaining slices, in ascending
-  complexity:
-  - **path-strip helper hoist** (StripFatPrefix +
-    CopyAndStripFatPath + AtFdCwdOnly) — currently TU-private to
-    syscall.cpp, used by the file / fs_mut / utime / utimensat
-    handlers. Promoting their decls into `syscall_internal.h`
-    unblocks the next four slices.
-  - **misc** (DoArchPrctl, DoUname, DoSetTidAddress, DoSysinfo,
-    DoGetRandom, DoFutex, DoPersonality, DoPause, DoFlock,
-    DoGetpriority, DoSetpriority, DoMknod, DoGetcpu, DoPrctl,
-    DoGetrusage, DoPoll, DoSelect, DoGetdents64, DoSetRobustList,
-    DoGetRobustList, DoReadlink, BSD-socket / IPC stubs,
-    fork/exec stubs).
-  - **io** (DoRead, DoWrite, DoLseek, DoIoctl, DoFsync, DoFdatasync,
-    DoPread64, DoPwrite64, DoReadv, DoWritev) — relies on the
-    LinuxIoMax constant + FAT32 read/write APIs; some handlers
-    use StripFatPrefix.
-  - **file** (DoOpen, DoClose, DoStat, DoFstat, DoLstat, DoAccess,
-    DoOpenat, DoNewFstatat) — uses StripFatPrefix +
-    CopyAndStripFatPath.
-  - **fs_mut** (DoMkdir, DoRmdir, DoUnlink, DoTruncate, DoFtruncate,
-    DoChmod, DoFchmod, DoChown, DoFchown, DoLchown, DoUtime,
-    DoUtimensat, DoMkdirat, DoUnlinkat, DoLinkat, DoSymlinkat,
-    DoRenameat, DoRenameat2, DoFchownat, DoFutimesat, DoFchmodat,
-    DoFaccessat, DoFaccessat2) — uses CopyAndStripFatPath +
-    AtFdCwdOnly.
-  The `internal::` namespace + `using namespace internal;` pattern
-  in syscall.cpp is already in place; each new slice just adds Do*
-  decls to `syscall_internal.h`, defines them in a new
-  `syscall_<domain>.cpp`, removes the old bodies from
-  `syscall.cpp`, and lists the new file in `kernel/CMakeLists.txt`.
+_(Linux syscall split completed on
+`claude/continue-refactoring-split-QlCKz` across 17 commits;
+syscall.cpp 4,642 → 1,274 lines.)_
 
 **Resume prompt for a fresh session:**
-> Continue the refactor on branch `claude/continue-refactoring-split-QlCKz`
-> (or a fresh `claude/<slug>` cut from `main` if a new session started
-> a different branch). Read `.claude/knowledge/refactor-codebase-plan.md`
-> for context. Eleven slices of `linux/syscall.cpp` have landed
-> (cred, rlimit, sched, time, sig, fd, proc, path, mm, stub,
-> compat-stub) — `syscall.cpp` is down from 4,642 → 3,028 lines
-> (35% reduction). The `internal::` namespace machinery +
-> `syscall_internal.h` are already in place, so additional slices
-> just follow the same recipe (extract, register in CMakeLists,
-> build, commit). Recommended next steps in the deferred list above:
-> hoist the StripFatPrefix / CopyAndStripFatPath / AtFdCwdOnly
-> helpers into `syscall_internal.h` first — that unblocks the
-> remaining file / fs_mut / utime slices. After that the misc / io
-> slices are tractable. Each individual slice adds ~150-300 lines
-> to a new TU and removes ~50-200 from syscall.cpp. Cap each
-> session at ~3 slices to stay safely under the stream-timeout
-> threshold.
+> The `linux/syscall.cpp` split is complete (commits `794c108` →
+> `84ed53d` on `claude/continue-refactoring-split-QlCKz`,
+> 4,642 → 1,274 lines, 73% reduction across 17 commits). The only
+> remaining target from the original top-5 is
+> `kernel/core/shell.cpp` (still 9,769 lines, ~20× the project's
+> ~500-line guideline).
+>
+> The shell split is the most ambitious of the five — there's no
+> big data block to `.inc`-extract; it's a real per-domain
+> function-by-function decomposition. Use the same pattern that
+> worked for `xhci.cpp` and `linux/syscall.cpp`:
+>
+>   1. Create `kernel/core/shell_internal.h` carrying shared
+>      state declarations (input / history / interrupt; env;
+>      alias; numeric / parse helpers) under
+>      `duetos::core::shell::internal`.
+>   2. Move shared state into a new `shell_state.cpp` with the
+>      same `internal::` namespace.
+>   3. Extract one bucket per commit (core, dispatch, filesystem,
+>      network, storage, debug, hardware, process, security,
+>      utilities — see "Split 1" of this plan for the bucket
+>      table). Build verify between each.
+>   4. Cap each session at ~3 buckets. Push after each commit
+>      so a stream-timeout doesn't lose progress.
+>
+> Start a fresh `claude/<slug>` branch off main rather than
+> continuing on `claude/continue-refactoring-split-QlCKz` —
+> that one's already long.
 
 ---
 
