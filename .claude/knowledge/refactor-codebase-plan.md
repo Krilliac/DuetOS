@@ -11,6 +11,7 @@ Branch: `claude/refactor-codebase-VvLO6`. Pushed to origin.
 | `cae3704 win32/thunks: extract bytecode + entry table to .inc files` | `thunks.cpp` 5,684 → 655 lines (88% reduction). Bytecode + entry-table bodies live in `thunks_bytecode.inc` + `thunks_table.inc`, `#include`d back into `thunks.cpp`. TU stays whole. |
 | `1f5efd1 docs: add Stream Timeout Prevention section to CLAUDE.md` | 5-rule mitigation block (one task at a time, ~150-line write cap, fresh session after 20+ tool calls, short greps, retry shorter on timeout). |
 | `736381b fs/fat32: split Fat32SelfTest into a sibling file` | `fat32.cpp` 3,190 → 2,579 lines. SelfTest lives in `fat32_selftest.cpp` (628 lines), uses public Fat32* API only. |
+| `0ed4370 fs/fat32: split mutating path into sibling translation unit` | `fat32.cpp` 2,579 → 871 lines. All on-disk mutators (`Fat32WriteInPlace`, `Fat32Append*`, `Fat32Create*`, `Fat32Delete*`, `Fat32Mkdir/RmdirAtPath`, `Fat32Truncate*`) plus their helpers live in `fat32_write.cpp` (1,732 lines). Cross-TU primitives (`g_scratch`, `Fat32Guard`, `ReadCluster`, `WalkDirChain`, `WalkRootIntoSnapshot`, etc.) hoisted into `namespace duetos::fs::fat32::internal` via new `fat32_internal.h` (99 lines). Public `fat32.h` API unchanged. |
 
 **Deferred** to a follow-up session (each warrants its own fresh chat per
 the timeout-prevention rules):
@@ -21,8 +22,16 @@ the timeout-prevention rules):
 - `kernel/subsystems/linux/syscall.cpp` (4,642 lines) — split by syscall
   subsystem (io, file, mm, proc, sig, time, fd, cred, sched, rlimit,
   misc, stub).
-- `kernel/fs/fat32.cpp` (now 2,579 lines) — finish the per-layer split
-  (probe / dir / lookup / read / write / create).
+- `kernel/fs/fat32.cpp` (now 871 lines) — finish the per-layer split.
+  Read side still needs `fat32_dir.cpp` (`WalkDirChain`,
+  `WalkRootIntoSnapshot`, decoders, `LogEntry`, `Fat32ListDirByCluster`,
+  `Fat32FindInRoot`), `fat32_lookup.cpp` (`Fat32LookupPath`, `FindCtx`,
+  `FindVisitor`), and `fat32_read.cpp` (`Fat32ReadFile`, `Fat32ReadAt`,
+  `Fat32ReadFileStream`) extracted out, leaving probe + accessors +
+  block primitives in `fat32.cpp` (~250 lines). Write side
+  (`fat32_write.cpp`, 1,732 lines) wants a sub-split into
+  `fat32_create.cpp` (`Fat32CreateAtPath`, `Fat32DeleteAtPath`,
+  `Fat32MkdirAtPath`, `Fat32RmdirAtPath` + their helpers).
 - `kernel/drivers/usb/xhci.cpp` (2,548 lines) — recommend a 4-file
   split (core / init / xfer / enum) rather than the explorer's
   optimistic 10-file plan; `InitOne` orchestrates AddressDevice +
