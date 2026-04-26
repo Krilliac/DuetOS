@@ -134,14 +134,20 @@ set +e
     /export:ZwSetInformationThread=NtReturnNotImpl \
     /export:NtQuerySystemInformation=NtReturnNotImpl \
     /export:ZwQuerySystemInformation=NtReturnNotImpl \
-    /export:NtOpenKey=NtReturnNotImpl \
-    /export:ZwOpenKey=NtReturnNotImpl \
+    `# Real registry-read primitives — back SYS_REGISTRY (op-multiplexed).` \
+    `# NtOpenKey + NtOpenKeyEx + NtQueryValueKey live here as real C` \
+    `# functions; NtCreateKey / NtEnumerateKey / NtQueryKey stay NotImpl` \
+    `# (registry is read-only in v0; subkey-children walker not implemented).` \
+    /export:NtOpenKey \
+    /export:ZwOpenKey=NtOpenKey \
+    /export:NtOpenKeyEx \
+    /export:ZwOpenKeyEx=NtOpenKeyEx \
+    /export:NtQueryValueKey \
+    /export:ZwQueryValueKey=NtQueryValueKey \
     /export:NtEnumerateKey=NtReturnNotImpl \
     /export:ZwEnumerateKey=NtReturnNotImpl \
     /export:NtQueryKey=NtReturnNotImpl \
     /export:ZwQueryKey=NtReturnNotImpl \
-    /export:NtQueryValueKey=NtReturnNotImpl \
-    /export:ZwQueryValueKey=NtReturnNotImpl \
     /export:NtEnumerateValueKey=NtReturnNotImpl \
     /export:ZwEnumerateValueKey=NtReturnNotImpl \
     /export:LdrGetDllHandle=NtReturnNotImpl \

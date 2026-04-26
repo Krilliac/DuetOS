@@ -733,3 +733,275 @@ __declspec(dllexport) void* RtlSecureZeroMemory(void* dst, SIZE_T n)
         d[i] = 0;
     return dst;
 }
+
+/* ------------------------------------------------------------------
+ * Registry — NtOpenKey + NtQueryValueKey
+ *
+ * These wrap SYS_REGISTRY (= 130) which is op-multiplexed by rdi:
+ *   op=1 (kOpOpenKey)    rsi=parent, rdx=ASCII-path, r10=&out_handle
+ *   op=2 (kOpClose)      rsi=handle  — already reachable via NtClose
+ *                                       (SYS_FILE_CLOSE dispatches by
+ *                                        handle range)
+ *   op=3 (kOpQueryValue) rsi=handle, rdx=ASCII-name, r10=buf,
+ *                        r8=buf_cap, r9=&packed (size:32 | type:32)
+ *
+ * Win32 callers pass UNICODE_STRING + OBJECT_ATTRIBUTES; the kernel
+ * registry only takes ASCII paths. The thunks below do the conversion
+ * inline (low-byte strip; non-ASCII becomes '?'). The path also gets
+ * the leading "\\Registry\\Machine\\" / "\\Registry\\User\\" prefix
+ * stripped so the kernel sees the same path advapi32 already serves
+ * (HKLM\\Software\\... etc. — the leading-prefix-and-HKEY pair is
+ * how Windows turns a UNICODE path into an HKEY-rooted lookup).
+ * ------------------------------------------------------------------ */
+
+/* UNICODE_STRING reuses the typedef declared earlier in this TU
+ * (line ~408). The OBJECT_ATTRIBUTES struct is registry-specific
+ * so it lives next to the registry thunks instead. */
+typedef struct _OBJECT_ATTRIBUTES
+{
+    ULONG Length;               /* sizeof(OBJECT_ATTRIBUTES) — 48 on x64 */
+    HANDLE RootDirectory;       /* parent HKEY (predefined or previously-opened) */
+    UNICODE_STRING* ObjectName; /* full registry path; sometimes NULL */
+    ULONG Attributes;
+    void* SecurityDescriptor;
+    void* SecurityQualityOfService;
+} OBJECT_ATTRIBUTES;
+
+/* KEY_VALUE_INFORMATION_CLASS values used by NtQueryValueKey. v0
+ * supports only KeyValuePartialInformation (the one MSVC PE startup
+ * + advapi32 + every common Windows-side caller asks for). */
+#define KeyValueBasicInformation 0
+#define KeyValueFullInformation 1
+#define KeyValuePartialInformation 2
+
+#define NTSTATUS_OBJECT_NAME_NOT_FOUND 0xC0000034UL
+#define NTSTATUS_INVALID_HANDLE 0xC0000008UL
+#define NTSTATUS_BUFFER_TOO_SMALL 0xC0000023UL
+
+#define HKEY_CLASSES_ROOT_NT ((HANDLE)(unsigned long long)0x80000000ULL)
+#define HKEY_CURRENT_USER_NT ((HANDLE)(unsigned long long)0x80000001ULL)
+#define HKEY_LOCAL_MACHINE_NT ((HANDLE)(unsigned long long)0x80000002ULL)
+#define HKEY_USERS_NT ((HANDLE)(unsigned long long)0x80000003ULL)
+
+static unsigned ntdll_strlen_a(const char* s)
+{
+    unsigned n = 0;
+    while (s && s[n])
+        ++n;
+    return n;
+}
+
+/* ASCII case-insensitive prefix match. Returns the length of the
+ * prefix on success (so the caller can advance past it) or 0 on
+ * miss. `prefix` is NUL-terminated; `s` is a wide buffer of length
+ * `s_chars` and is treated as ASCII (low-byte strip). */
+static unsigned ntdll_w_starts_with_ci(const wchar_t16* s, unsigned s_chars, const char* prefix)
+{
+    const unsigned plen = ntdll_strlen_a(prefix);
+    if (s_chars < plen)
+        return 0;
+    for (unsigned i = 0; i < plen; ++i)
+    {
+        char a = (char)(s[i] & 0xFF);
+        char b = prefix[i];
+        if (a >= 'A' && a <= 'Z')
+            a = (char)(a + ('a' - 'A'));
+        if (b >= 'A' && b <= 'Z')
+            b = (char)(b + ('a' - 'A'));
+        if (a != b)
+            return 0;
+    }
+    return plen;
+}
+
+/* Translate a Windows-shape registry path into a (parent_hkey,
+ * ASCII subkey) pair the kernel-side SYS_REGISTRY recognises.
+ *
+ * Input contract (from OBJECT_ATTRIBUTES):
+ *   - If RootDirectory is one of the predefined HKEY sentinels,
+ *     the ObjectName is the subkey path with no \Registry\
+ *     prefix.
+ *   - If RootDirectory is NULL, the ObjectName must start with
+ *     \Registry\Machine\ (→ HKLM) or \Registry\User\ (→ HKCU).
+ *     We strip the prefix and pick the matching sentinel.
+ *
+ * Output: writes ASCII path into `dst` (cap bytes), returns the
+ * resolved parent HKEY sentinel (or NULL on parse failure).
+ */
+static HANDLE ntdll_reg_resolve(HANDLE root_dir, const UNICODE_STRING* name, char* dst, unsigned cap)
+{
+    if (cap == 0 || dst == (char*)0 || name == (const UNICODE_STRING*)0 || name->Buffer == (wchar_t16*)0)
+        return (HANDLE)0;
+
+    const unsigned chars = (unsigned)(name->Length / 2);
+    const wchar_t16* s = name->Buffer;
+    unsigned skip = 0;
+    HANDLE parent = root_dir;
+
+    if (root_dir == (HANDLE)0)
+    {
+        unsigned p = ntdll_w_starts_with_ci(s, chars, "\\Registry\\Machine\\");
+        if (p != 0)
+        {
+            parent = HKEY_LOCAL_MACHINE_NT;
+            skip = p;
+        }
+        else if ((p = ntdll_w_starts_with_ci(s, chars, "\\Registry\\User\\")) != 0)
+        {
+            parent = HKEY_CURRENT_USER_NT;
+            skip = p;
+        }
+        else
+        {
+            return (HANDLE)0; /* unrecognised root — only Machine/User in v0 */
+        }
+    }
+
+    unsigned o = 0;
+    for (unsigned i = skip; i < chars; ++i)
+    {
+        if (o + 1 >= cap)
+            return (HANDLE)0; /* path too long for the kernel buffer */
+        unsigned short w = s[i];
+        char c = (w <= 0x7F) ? (char)w : '?';
+        dst[o++] = c;
+    }
+    dst[o] = 0;
+    return parent;
+}
+
+__declspec(dllexport) NTSTATUS NtOpenKey(HANDLE* KeyHandle, ULONG DesiredAccess, OBJECT_ATTRIBUTES* ObjectAttributes)
+{
+    (void)DesiredAccess;
+    if (KeyHandle == (HANDLE*)0 || ObjectAttributes == (OBJECT_ATTRIBUTES*)0)
+        return NTSTATUS_INVALID_PARAMETER;
+
+    char path[256];
+    HANDLE parent =
+        ntdll_reg_resolve(ObjectAttributes->RootDirectory, ObjectAttributes->ObjectName, path, sizeof(path));
+    if (parent == (HANDLE)0)
+        return NTSTATUS_OBJECT_NAME_NOT_FOUND;
+
+    long long out_handle = 0;
+    long long status;
+    /* SYS_REGISTRY = 130, op = 1 (kOpOpenKey).
+     * Operand indexing: %0=status(rax), %1=130(rax-in), %2=1(rdi),
+     * %3=parent(rsi), %4=&out_handle(r), %5=path(rdx). */
+    __asm__ volatile("mov %4, %%r10\n\t"
+                     "int $0x80"
+                     : "=a"(status)
+                     : "a"((long long)130), "D"((long long)1), "S"((long long)parent), "r"((long long)&out_handle),
+                       "d"((long long)path)
+                     : "r10", "memory");
+    if (status != 0)
+        return (NTSTATUS)status;
+    *KeyHandle = (HANDLE)out_handle;
+    return NTSTATUS_SUCCESS;
+}
+
+/* Same surface, narrowed: OpenKeyEx adds an Attributes ULONG before
+ * RootDirectory in some headers but the runtime ABI (3 args) is
+ * identical for our purposes — just forward. */
+__declspec(dllexport) NTSTATUS NtOpenKeyEx(HANDLE* KeyHandle, ULONG DesiredAccess, OBJECT_ATTRIBUTES* ObjectAttributes,
+                                           ULONG OpenOptions)
+{
+    (void)OpenOptions;
+    return NtOpenKey(KeyHandle, DesiredAccess, ObjectAttributes);
+}
+
+__declspec(dllexport) NTSTATUS NtQueryValueKey(HANDLE KeyHandle, UNICODE_STRING* ValueName, ULONG InfoClass,
+                                               void* KeyValueInformation, ULONG Length, ULONG* ResultLength)
+{
+    if (ValueName == (UNICODE_STRING*)0 || ValueName->Buffer == (wchar_t16*)0)
+        return NTSTATUS_INVALID_PARAMETER;
+
+    /* Strip the value name to ASCII. */
+    char name[64];
+    {
+        const unsigned chars = (unsigned)(ValueName->Length / 2);
+        if (chars + 1 > sizeof(name))
+            return NTSTATUS_INVALID_PARAMETER;
+        for (unsigned i = 0; i < chars; ++i)
+        {
+            unsigned short w = ValueName->Buffer[i];
+            name[i] = (w <= 0x7F) ? (char)w : '?';
+        }
+        name[chars] = 0;
+    }
+
+    /* First trip: size-only query. The kernel-side QueryValue
+     * writes a packed [size:32 | type:32] u64 to r9 even on
+     * STATUS_BUFFER_TOO_SMALL, so we know how much to allocate /
+     * advertise even if the caller's buffer is short. */
+    long long packed = 0;
+    long long status;
+    /* SYS_REGISTRY = 130, op = 3 (kOpQueryValue) */
+    /* Args: rdi=op, rsi=handle, rdx=name, r10=buf (0 = size-only),
+     *       r8=cap (0), r9=&packed. */
+    __asm__ volatile("mov %4, %%r10\n\t"
+                     "mov %5, %%r8\n\t"
+                     "mov %6, %%r9\n\t"
+                     "int $0x80"
+                     : "=a"(status)
+                     : "a"((long long)130), "D"((long long)3), "S"((long long)KeyHandle), "r"((long long)0),
+                       "r"((long long)0), "r"((long long)&packed), "d"((long long)name)
+                     : "r10", "r8", "r9", "memory");
+    if (status != 0)
+        return (NTSTATUS)status;
+
+    const unsigned data_size = (unsigned)(packed >> 32);
+    const unsigned data_type = (unsigned)(packed & 0xFFFFFFFFu);
+
+    /* Compute output size in the requested info-class layout.
+     * Only KeyValuePartialInformation is implemented in v0;
+     * other classes return STATUS_NOT_IMPLEMENTED so callers
+     * fall back rather than misinterpret. */
+    if (InfoClass != KeyValuePartialInformation)
+        return (NTSTATUS)NTSTATUS_NOT_IMPLEMENTED;
+
+    /* KEY_VALUE_PARTIAL_INFORMATION:
+     *   ULONG TitleIndex;   // 0
+     *   ULONG Type;         // value type
+     *   ULONG DataLength;   // bytes of Data
+     *   UCHAR Data[1];      // VLA */
+    const ULONG header_size = 12;
+    const ULONG total_size = header_size + (ULONG)data_size;
+    if (ResultLength != (ULONG*)0)
+        *ResultLength = total_size;
+    if (Length < total_size)
+        return (NTSTATUS)NTSTATUS_BUFFER_TOO_SMALL;
+    if (KeyValueInformation == (void*)0)
+        return NTSTATUS_INVALID_PARAMETER;
+
+    unsigned char* out = (unsigned char*)KeyValueInformation;
+    /* TitleIndex = 0 */
+    out[0] = 0;
+    out[1] = 0;
+    out[2] = 0;
+    out[3] = 0;
+    /* Type */
+    out[4] = (unsigned char)(data_type & 0xFF);
+    out[5] = (unsigned char)((data_type >> 8) & 0xFF);
+    out[6] = (unsigned char)((data_type >> 16) & 0xFF);
+    out[7] = (unsigned char)((data_type >> 24) & 0xFF);
+    /* DataLength */
+    out[8] = (unsigned char)(data_size & 0xFF);
+    out[9] = (unsigned char)((data_size >> 8) & 0xFF);
+    out[10] = (unsigned char)((data_size >> 16) & 0xFF);
+    out[11] = (unsigned char)((data_size >> 24) & 0xFF);
+
+    /* Second trip: copy bytes into the Data[] tail. */
+    long long status2;
+    __asm__ volatile("mov %4, %%r10\n\t"
+                     "mov %5, %%r8\n\t"
+                     "mov %6, %%r9\n\t"
+                     "int $0x80"
+                     : "=a"(status2)
+                     : "a"((long long)130), "D"((long long)3), "S"((long long)KeyHandle),
+                       "r"((long long)(out + header_size)), "r"((long long)data_size), "r"((long long)&packed),
+                       "d"((long long)name)
+                     : "r10", "r8", "r9", "memory");
+    if (status2 != 0)
+        return (NTSTATUS)status2;
+    return NTSTATUS_SUCCESS;
+}
