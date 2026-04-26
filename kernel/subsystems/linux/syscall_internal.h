@@ -44,6 +44,20 @@ i64 DoGetrlimit(u64 resource, u64 user_old);
 i64 DoSetrlimit(u64 resource, u64 user_new);
 i64 DoPrlimit64(u64 pid, u64 resource, u64 user_new, u64 user_old);
 
+// Scheduler-policy handlers (syscall_sched.cpp). v0 has one real
+// scheduler (round-robin kernel threads) and BSP-only SMP, so
+// every handler reports SCHED_OTHER on CPU 0 and rejects
+// real-time class transitions with -EPERM.
+i64 DoSchedSetaffinity(u64 pid, u64 cpusetsize, u64 user_mask);
+i64 DoSchedGetaffinity(u64 pid, u64 cpusetsize, u64 user_mask);
+i64 DoSchedGetscheduler(u64 pid);
+i64 DoSchedSetscheduler(u64 pid, u64 policy, u64 user_param);
+i64 DoSchedGetparam(u64 pid, u64 user_param);
+i64 DoSchedSetparam(u64 pid, u64 user_param);
+i64 DoSchedGetPriorityMax(u64 policy);
+i64 DoSchedGetPriorityMin(u64 policy);
+i64 DoSchedRrGetInterval(u64 pid, u64 user_ts);
+
 // Credential handlers (syscall_cred.cpp). All are uid-0/gid-0
 // no-ops in v0 — DuetOS has no Linux-style user account model.
 i64 DoGetUid();
