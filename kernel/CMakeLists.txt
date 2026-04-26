@@ -145,6 +145,7 @@ set(DUETOS_KERNEL_SHARED_SOURCES
     fs/exfat.cpp
     fs/ext4.cpp
     fs/fat32.cpp
+    fs/fat32_lookup.cpp
     fs/fat32_read.cpp
     fs/fat32_selftest.cpp
     fs/fat32_write.cpp
