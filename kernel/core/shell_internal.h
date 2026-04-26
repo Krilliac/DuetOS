@@ -40,4 +40,16 @@ void CmdLsblk();
 void CmdLsgpt();
 void CmdLsmod();
 
+// ---------------------------------------------------------------
+// Process / scheduler / memory observability (shell_process.cpp).
+// ps / top render the per-task scheduler enumeration; free reports
+// memory-frame and kernel-heap totals. (Spawn / Kill / Exec /
+// Linuxexec / Translate / Readelf are queued for a follow-up
+// slice — they share path-strip / FAT32-load helpers with the
+// rest of the shell.)
+// ---------------------------------------------------------------
+void CmdPs();
+void CmdTop();
+void CmdFree();
+
 } // namespace duetos::core::shell::internal
