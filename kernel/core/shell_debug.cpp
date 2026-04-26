@@ -27,6 +27,7 @@
 #include "../mm/paging.h"
 #include "../sched/sched.h"
 #include "hexdump.h"
+#include "kdbg.h"
 #include "klog.h"
 #include "runtime_checker.h"
 #include "symbols.h"
@@ -927,6 +928,197 @@ void CmdProbe(u32 argc, char** argv)
         return;
     }
     ConsoleWriteln("PROBE: UNKNOWN SUBCOMMAND");
+}
+
+void CmdHealth(u32 argc, char** argv)
+{
+    // Run a fresh scan (so the report reflects the current
+    // moment, not the last heartbeat), then print the full
+    // report: each issue kind with its cumulative count plus
+    // this-scan and total-since-boot summaries.
+    const u64 this_scan = duetos::core::RuntimeCheckerScan();
+    const auto& h = duetos::core::RuntimeCheckerStatusRead();
+    (void)argc;
+    (void)argv;
+    ConsoleWrite("SCANS RUN:        ");
+    WriteU64Dec(h.scans_run);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("THIS SCAN:        ");
+    WriteU64Dec(this_scan);
+    ConsoleWriteln(this_scan == 0 ? " issues (CLEAN)" : " issues");
+    ConsoleWrite("TOTAL ISSUES:     ");
+    WriteU64Dec(h.issues_found_total);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("BASELINE CAPTURED:");
+    ConsoleWriteln(h.baseline_captured ? " YES" : " NO");
+    if (h.issues_found_total > 0)
+    {
+        ConsoleWriteln("PER-ISSUE BREAKDOWN:");
+        for (u32 i = 1; i < u32(duetos::core::HealthIssue::Count); ++i)
+        {
+            const u64 c = h.per_issue_count[i];
+            if (c == 0)
+                continue;
+            ConsoleWrite("  ");
+            WriteU64Dec(c);
+            ConsoleWrite(" x ");
+            ConsoleWriteln(duetos::core::HealthIssueName(duetos::core::HealthIssue(i)));
+        }
+    }
+}
+
+void CmdLoglevel(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        const auto cur = duetos::core::GetLogThreshold();
+        ConsoleWrite("LOG THRESHOLD: ");
+        switch (cur)
+        {
+        case duetos::core::LogLevel::Trace:
+            ConsoleWriteln("TRACE (fn enter/exit + timing)");
+            break;
+        case duetos::core::LogLevel::Debug:
+            ConsoleWriteln("DEBUG (show everything)");
+            break;
+        case duetos::core::LogLevel::Info:
+            ConsoleWriteln("INFO");
+            break;
+        case duetos::core::LogLevel::Warn:
+            ConsoleWriteln("WARN");
+            break;
+        case duetos::core::LogLevel::Error:
+            ConsoleWriteln("ERROR (show only errors)");
+            break;
+        }
+        ConsoleWriteln("USAGE: LOGLEVEL [T|D|I|W|E]");
+        return;
+    }
+    const char c = argv[1][0];
+    duetos::core::LogLevel lvl = duetos::core::LogLevel::Info;
+    switch (c)
+    {
+    case 't':
+    case 'T':
+        lvl = duetos::core::LogLevel::Trace;
+        break;
+    case 'd':
+    case 'D':
+        lvl = duetos::core::LogLevel::Debug;
+        break;
+    case 'i':
+    case 'I':
+        lvl = duetos::core::LogLevel::Info;
+        break;
+    case 'w':
+    case 'W':
+        lvl = duetos::core::LogLevel::Warn;
+        break;
+    case 'e':
+    case 'E':
+        lvl = duetos::core::LogLevel::Error;
+        break;
+    default:
+        ConsoleWriteln("LOGLEVEL: USE T / D / I / W / E");
+        return;
+    }
+    duetos::core::SetLogThreshold(lvl);
+    ConsoleWriteln("LOG THRESHOLD UPDATED");
+}
+
+void CmdLogcolor(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        const bool cur = duetos::core::GetLogColor();
+        ConsoleWrite("SERIAL LOG COLOUR: ");
+        ConsoleWriteln(cur ? "ON" : "OFF");
+        ConsoleWriteln("USAGE: LOGCOLOR ON|OFF");
+        return;
+    }
+    const char c = argv[1][0];
+    const bool want = (c == 'o' || c == 'O') ? (argv[1][1] == 'n' || argv[1][1] == 'N') : false;
+    duetos::core::SetLogColor(want);
+    ConsoleWrite("SERIAL LOG COLOUR: ");
+    ConsoleWriteln(want ? "ON" : "OFF");
+}
+
+void CmdKdbg(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("KDBG: USAGE");
+        ConsoleWriteln("  KDBG LIST");
+        ConsoleWriteln("  KDBG ON <CHANNEL>");
+        ConsoleWriteln("  KDBG OFF <CHANNEL>");
+        ConsoleWriteln("  KDBG MASK 0x<HEX>");
+        ConsoleWriteln("  KDBG ON ALL  /  KDBG OFF ALL");
+        return;
+    }
+    const char* sub = argv[1];
+    if (StrEq(sub, "list"))
+    {
+        duetos::core::DbgListChannels();
+        return;
+    }
+    if (StrEq(sub, "on"))
+    {
+        if (argc < 3)
+        {
+            ConsoleWriteln("KDBG ON: USE A CHANNEL NAME (OR \"ALL\")");
+            return;
+        }
+        const auto ch = duetos::core::DbgChannelByName(argv[2]);
+        if (ch == duetos::core::DbgChannel::None)
+        {
+            ConsoleWriteln("KDBG: UNKNOWN CHANNEL");
+            return;
+        }
+        duetos::core::DbgEnable(static_cast<u32>(ch));
+        ConsoleWriteln("KDBG: ENABLED");
+        return;
+    }
+    if (StrEq(sub, "off"))
+    {
+        if (argc < 3)
+        {
+            ConsoleWriteln("KDBG OFF: USE A CHANNEL NAME (OR \"ALL\")");
+            return;
+        }
+        const auto ch = duetos::core::DbgChannelByName(argv[2]);
+        if (ch == duetos::core::DbgChannel::None)
+        {
+            ConsoleWriteln("KDBG: UNKNOWN CHANNEL");
+            return;
+        }
+        duetos::core::DbgDisable(static_cast<u32>(ch));
+        ConsoleWriteln("KDBG: DISABLED");
+        return;
+    }
+    if (StrEq(sub, "mask"))
+    {
+        if (argc < 3)
+        {
+            ConsoleWriteln("KDBG MASK: USE 0x<HEX>");
+            return;
+        }
+        u64 v = 0;
+        if (!ParseU64Str(argv[2], &v))
+        {
+            ConsoleWriteln("KDBG MASK: BAD HEX");
+            return;
+        }
+        duetos::core::DbgSet(static_cast<u32>(v));
+        ConsoleWriteln("KDBG: MASK SET");
+        return;
+    }
+    ConsoleWriteln("KDBG: UNKNOWN SUBCOMMAND");
+}
+
+void CmdMetrics()
+{
+    duetos::core::LogMetrics(duetos::core::LogLevel::Info, "shell", "user-requested");
+    ConsoleWriteln("(also logged to kernel ring at INFO)");
 }
 
 } // namespace duetos::core::shell::internal
