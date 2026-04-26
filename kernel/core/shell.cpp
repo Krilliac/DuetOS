@@ -488,48 +488,8 @@ void CmdHelp()
     ConsoleWriteln("       ALT+TAB = CYCLE WINDOW  ALT+F4 = CLOSE WINDOW");
 }
 
-void CmdAbout()
-{
-    ConsoleWriteln("DUETOS — A FROM-SCRATCH x86_64 KERNEL WITH A");
-    ConsoleWriteln("NATIVE WINDOWED DESKTOP AND A FIRST-CLASS WIN32");
-    ConsoleWriteln("SUBSYSTEM PLANNED. BOOT: MULTIBOOT2.  SHELL: YOU.");
-}
-
-void CmdVersion()
-{
-    ConsoleWriteln("DUETOS v0 (WINDOWED DESKTOP SHELL)");
-}
-
-void CmdClear()
-{
-    duetos::drivers::video::ConsoleClear();
-}
-
-void CmdUptime()
-{
-    const u64 secs = duetos::sched::SchedNowTicks() / 100;
-    ConsoleWrite("UPTIME ");
-    WriteU64Dec(secs);
-    ConsoleWriteln(" SECONDS");
-}
-
-void CmdDate()
-{
-    duetos::arch::RtcTime t{};
-    duetos::arch::RtcRead(&t);
-    WriteU8TwoDigits(t.hour);
-    ConsoleWriteChar(':');
-    WriteU8TwoDigits(t.minute);
-    ConsoleWriteChar(':');
-    WriteU8TwoDigits(t.second);
-    ConsoleWriteChar(' ');
-    WriteU64Dec(t.year);
-    ConsoleWriteChar('-');
-    WriteU8TwoDigits(t.month);
-    ConsoleWriteChar('-');
-    WriteU8TwoDigits(t.day);
-    ConsoleWriteChar('\n');
-}
+// CmdAbout / CmdVersion / CmdClear / CmdUptime / CmdDate moved
+// to shell_core.cpp.
 
 void CmdWindows()
 {

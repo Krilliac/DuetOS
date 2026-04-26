@@ -18,6 +18,17 @@ namespace duetos::core::shell::internal
 {
 
 // ---------------------------------------------------------------
+// Trivial info / housekeeping commands (shell_core.cpp). Five
+// banner / status commands that need nothing beyond the console
+// driver, RTC, and the scheduler tick clock.
+// ---------------------------------------------------------------
+void CmdAbout();
+void CmdVersion();
+void CmdClear();
+void CmdUptime();
+void CmdDate();
+
+// ---------------------------------------------------------------
 // Account management commands (shell_security.cpp). Thin wrappers
 // around auth.h. Admin-only paths are enforced inside each
 // handler so the kernel-side API stays pure data-access.

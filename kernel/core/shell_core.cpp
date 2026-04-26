@@ -1,0 +1,103 @@
+/*
+ * DuetOS — kernel shell: trivial banner / status commands.
+ *
+ * Sibling TU of shell.cpp. Houses the five smallest commands —
+ * about / version / clear / uptime / date. Each fits in <30 lines
+ * and depends only on the console driver, the RTC, and the
+ * scheduler's tick counter.
+ *
+ * Larger "core"-flavoured commands (help, theme, dmesg, stats,
+ * env, alias, source, man, history, sysinfo, time, set, unset,
+ * getenv, seq, which) stay in shell.cpp until a follow-up slice
+ * promotes their shared helpers (env table, alias table, history
+ * ring) into shell_internal.h.
+ */
+
+#include "shell_internal.h"
+
+#include "../arch/x86_64/rtc.h"
+#include "../drivers/video/console.h"
+#include "../sched/sched.h"
+
+namespace duetos::core::shell::internal
+{
+
+namespace
+{
+
+using duetos::drivers::video::ConsoleWrite;
+using duetos::drivers::video::ConsoleWriteChar;
+using duetos::drivers::video::ConsoleWriteln;
+
+void WriteU64Dec(u64 v)
+{
+    if (v == 0)
+    {
+        ConsoleWriteChar('0');
+        return;
+    }
+    char tmp[24];
+    u32 n = 0;
+    while (v > 0 && n < sizeof(tmp))
+    {
+        tmp[n++] = static_cast<char>('0' + (v % 10));
+        v /= 10;
+    }
+    for (u32 i = 0; i < n; ++i)
+    {
+        ConsoleWriteChar(tmp[n - 1 - i]);
+    }
+}
+
+void WriteU8TwoDigits(u8 v)
+{
+    ConsoleWriteChar(static_cast<char>('0' + (v / 10)));
+    ConsoleWriteChar(static_cast<char>('0' + (v % 10)));
+}
+
+} // namespace
+
+void CmdAbout()
+{
+    ConsoleWriteln("DUETOS — A FROM-SCRATCH x86_64 KERNEL WITH A");
+    ConsoleWriteln("NATIVE WINDOWED DESKTOP AND A FIRST-CLASS WIN32");
+    ConsoleWriteln("SUBSYSTEM PLANNED. BOOT: MULTIBOOT2.  SHELL: YOU.");
+}
+
+void CmdVersion()
+{
+    ConsoleWriteln("DUETOS v0 (WINDOWED DESKTOP SHELL)");
+}
+
+void CmdClear()
+{
+    duetos::drivers::video::ConsoleClear();
+}
+
+void CmdUptime()
+{
+    const u64 secs = duetos::sched::SchedNowTicks() / 100;
+    ConsoleWrite("UPTIME ");
+    WriteU64Dec(secs);
+    ConsoleWriteln(" SECONDS");
+}
+
+void CmdDate()
+{
+    duetos::arch::RtcTime t{};
+    duetos::arch::RtcRead(&t);
+    WriteU8TwoDigits(t.hour);
+    ConsoleWriteChar(':');
+    WriteU8TwoDigits(t.minute);
+    ConsoleWriteChar(':');
+    WriteU8TwoDigits(t.second);
+    ConsoleWriteChar(' ');
+    WriteU64Dec(t.year);
+    ConsoleWriteChar('-');
+    WriteU8TwoDigits(t.month);
+    ConsoleWriteChar('-');
+    WriteU8TwoDigits(t.day);
+    ConsoleWriteChar('\n');
+}
+
+} // namespace duetos::core::shell::internal
