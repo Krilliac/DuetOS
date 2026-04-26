@@ -560,40 +560,7 @@ void Prompt()
 // either tmpfs (/tmp/<leaf>) or the read-only ramfs. Returns
 // the number of bytes copied (up to `cap`) or u32 max on miss.
 // Never dereferences a nullptr out buffer.
-u32 ReadFileToBuf(const char* path, char* buf, u32 cap)
-{
-    if (path == nullptr || buf == nullptr || cap == 0)
-    {
-        return static_cast<u32>(-1);
-    }
-    if (const char* tmp_leaf = TmpLeaf(path); tmp_leaf != nullptr && *tmp_leaf != '\0')
-    {
-        const char* bytes = nullptr;
-        u32 len = 0;
-        if (!duetos::fs::TmpFsRead(tmp_leaf, &bytes, &len))
-        {
-            return static_cast<u32>(-1);
-        }
-        const u32 n = (len > cap) ? cap : len;
-        for (u32 i = 0; i < n; ++i)
-        {
-            buf[i] = bytes[i];
-        }
-        return n;
-    }
-    const auto* root = duetos::fs::RamfsTrustedRoot();
-    const auto* node = duetos::fs::VfsLookup(root, path, 128);
-    if (node == nullptr || node->type != duetos::fs::RamfsNodeType::kFile)
-    {
-        return static_cast<u32>(-1);
-    }
-    const u32 n = (node->file_size > cap) ? cap : static_cast<u32>(node->file_size);
-    for (u32 i = 0; i < n; ++i)
-    {
-        buf[i] = static_cast<char>(node->file_bytes[i]);
-    }
-    return n;
-}
+// ReadFileToBuf moved to shell_fsio.cpp.
 
 void CmdCp(u32 argc, char** argv)
 {
@@ -872,26 +839,7 @@ int LineCompare(const char* a, u32 alen, const char* b, u32 blen)
     return (alen < blen) ? -1 : 1;
 }
 
-// Walk `scratch[0..n)` and populate `offs`/`lens` with one
-// entry per line (excluding the terminating '\n'). Unterminated
-// final line is counted. Returns number of lines written (capped).
-u32 SliceLines(const char* scratch, u32 n, u32* offs, u32* lens, u32 cap)
-{
-    u32 count = 0;
-    u32 start = 0;
-    for (u32 i = 0; i <= n && count < cap; ++i)
-    {
-        const bool at_end = (i == n);
-        if (at_end || scratch[i] == '\n')
-        {
-            offs[count] = start;
-            lens[count] = i - start;
-            ++count;
-            start = i + 1;
-        }
-    }
-    return count;
-}
+// SliceLines moved to shell_fsio.cpp.
 
 void CmdSort(u32 argc, char** argv)
 {
@@ -2225,25 +2173,7 @@ void CmdGfx()
     ConsoleWriteChar('\n');
 }
 
-// Parse a decimal u32 from `s` into `*out`. Returns true on full
-// success. Accepts 1..5 digits (0..65535), which covers every
-// reasonable display dimension.
-bool ParseU16Decimal(const char* s, u16* out)
-{
-    if (s == nullptr || *s == '\0')
-        return false;
-    u32 v = 0;
-    for (u32 i = 0; s[i] != '\0'; ++i)
-    {
-        if (s[i] < '0' || s[i] > '9')
-            return false;
-        v = v * 10 + u32(s[i] - '0');
-        if (v > 0xFFFFu)
-            return false;
-    }
-    *out = u16(v);
-    return true;
-}
+// ParseU16Decimal moved to shell_pathutil.cpp.
 
 void CmdVbe(u32 argc, char** argv)
 {
@@ -5599,35 +5529,7 @@ const char* ElfPtypeName(u32 t)
     }
 }
 
-// Parse a hex literal like "0xA0C8FF" or "A0C8FF" into a u32.
-// Returns true + writes to *out on success.
-bool ParseHex32(const char* s, u32* out)
-{
-    if (s == nullptr || s[0] == '\0')
-        return false;
-    if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X'))
-        s += 2;
-    u32 v = 0;
-    u32 n = 0;
-    for (u32 i = 0; s[i] != '\0'; ++i)
-    {
-        const char c = s[i];
-        u32 nib;
-        if (c >= '0' && c <= '9')
-            nib = c - '0';
-        else if (c >= 'a' && c <= 'f')
-            nib = c - 'a' + 10;
-        else if (c >= 'A' && c <= 'F')
-            nib = c - 'A' + 10;
-        else
-            return false;
-        if (++n > 8)
-            return false;
-        v = (v << 4) | nib;
-    }
-    *out = v;
-    return true;
-}
+// ParseHex32 moved to shell_pathutil.cpp.
 
 void CmdColor(u32 argc, char** argv)
 {
@@ -6034,37 +5936,8 @@ void CmdRev(u32 argc, char** argv)
     }
 }
 
-// Parse an optionally-signed decimal integer. On success writes
-// into `*out` and returns true. Used by expr for A / B.
-bool ParseI64(const char* s, i64* out)
-{
-    if (s == nullptr || s[0] == '\0')
-        return false;
-    bool neg = false;
-    u32 i = 0;
-    if (s[0] == '-')
-    {
-        neg = true;
-        i = 1;
-    }
-    else if (s[0] == '+')
-    {
-        i = 1;
-    }
-    if (s[i] == '\0')
-        return false;
-    u64 acc = 0;
-    for (; s[i] != '\0'; ++i)
-    {
-        if (s[i] < '0' || s[i] > '9')
-            return false;
-        acc = acc * 10 + static_cast<u32>(s[i] - '0');
-    }
-    *out = neg ? -static_cast<i64>(acc) : static_cast<i64>(acc);
-    return true;
-}
-
-// WriteI64Dec moved to shell_format.cpp.
+// ParseI64 / WriteI64Dec moved to shell_pathutil.cpp +
+// shell_format.cpp.
 
 void CmdExpr(u32 argc, char** argv)
 {

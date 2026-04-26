@@ -165,6 +165,27 @@ const char* TmpLeaf(const char* path);
 const char* FatLeaf(const char* path);
 bool ParseU64Str(const char* s, u64* out);
 i64 ParseInt(const char* s);
+bool ParseI64(const char* s, i64* out);
+bool ParseU16Decimal(const char* s, u16* out);
+bool ParseHex32(const char* s, u32* out);
+
+// ---------------------------------------------------------------
+// Filesystem I/O helpers (shell_fsio.cpp). Read-only helpers
+// that handle the standard "fetch file body into a stack buffer
+// + walk lines" pattern shared by every shell command that
+// processes file content.
+//
+// ReadFileToBuf returns the number of bytes copied (capped at
+// `cap`) or u32(-1) if the path doesn't resolve in tmpfs or
+// ramfs. Never dereferences a nullptr buf.
+//
+// SliceLines walks `scratch[0..n)` and populates parallel
+// `offs[]`/`lens[]` arrays — one entry per line, excluding the
+// terminating '\n'. The unterminated final line is counted.
+// Returns the number of lines written (capped at `cap`).
+// ---------------------------------------------------------------
+u32 ReadFileToBuf(const char* path, char* buf, u32 cap);
+u32 SliceLines(const char* scratch, u32 n, u32* offs, u32* lens, u32 cap);
 
 // ---------------------------------------------------------------
 // Shared console-output formatters (shell_format.cpp). Numeric
