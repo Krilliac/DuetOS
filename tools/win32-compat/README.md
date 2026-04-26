@@ -2,7 +2,7 @@
 
 Reference data + generators that map between **NT syscall numbers** (the
 `ntdll!Nt*` ABI that real Windows binaries see when they bypass
-`kernel32`) and the DuetOS internal `SYS_*` enum (`kernel/core/syscall.h`).
+`kernel32`) and the DuetOS internal `SYS_*` enum (`kernel/syscall/syscall.h`).
 
 ## Why this exists
 
@@ -55,7 +55,7 @@ extract our own from a Windows install.
 ## Regenerating
 
 ```sh
-tools/regenerate-syscall-artifacts.sh
+tools/build/regenerate-syscall-artifacts.sh
 ```
 
 This runs Linux + NT table generation and also emits the unified

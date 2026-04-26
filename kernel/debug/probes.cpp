@@ -1,6 +1,6 @@
-#include "probes.h"
+#include "debug/probes.h"
 
-#include "../core/klog.h"
+#include "log/klog.h"
 
 namespace duetos::debug
 {

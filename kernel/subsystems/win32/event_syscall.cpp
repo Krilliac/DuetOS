@@ -1,12 +1,12 @@
-#include "event_syscall.h"
+#include "subsystems/win32/event_syscall.h"
 
-#include "../../arch/x86_64/cpu.h"
-#include "../../arch/x86_64/serial.h"
-#include "../../arch/x86_64/traps.h"
-#include "../../core/process.h"
-#include "../../core/syscall.h"
-#include "../../sched/sched.h"
-#include "custom.h"
+#include "arch/x86_64/cpu.h"
+#include "arch/x86_64/serial.h"
+#include "arch/x86_64/traps.h"
+#include "proc/process.h"
+#include "syscall/syscall.h"
+#include "sched/sched.h"
+#include "subsystems/win32/custom.h"
 
 namespace duetos::subsystems::win32
 {

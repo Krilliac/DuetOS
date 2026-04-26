@@ -1,8 +1,8 @@
-#include "tls_syscall.h"
+#include "subsystems/win32/tls_syscall.h"
 
-#include "../../arch/x86_64/cpu.h"
-#include "../../arch/x86_64/traps.h"
-#include "../../core/process.h"
+#include "arch/x86_64/cpu.h"
+#include "arch/x86_64/traps.h"
+#include "proc/process.h"
 
 namespace duetos::subsystems::win32
 {

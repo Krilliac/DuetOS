@@ -1,11 +1,11 @@
-#include "net_smoke.h"
+#include "net/net_smoke.h"
 
-#include "../arch/x86_64/serial.h"
-#include "../core/klog.h"
-#include "../drivers/usb/cdc_ecm.h"
-#include "../drivers/usb/rndis.h"
-#include "../sched/sched.h"
-#include "stack.h"
+#include "arch/x86_64/serial.h"
+#include "log/klog.h"
+#include "drivers/usb/cdc_ecm.h"
+#include "drivers/usb/rndis.h"
+#include "sched/sched.h"
+#include "net/stack.h"
 
 namespace duetos::net
 {

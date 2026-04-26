@@ -1,8 +1,8 @@
 #pragma once
 
-#include "../core/types.h"
-#include "frame_allocator.h"
-#include "paging.h"
+#include "util/types.h"
+#include "mm/frame_allocator.h"
+#include "mm/paging.h"
 
 /*
  * DuetOS per-process address space — v0.

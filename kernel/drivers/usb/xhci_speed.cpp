@@ -7,7 +7,7 @@
  * state, no MMIO — just the small numeric tables the spec defines.
  */
 
-#include "xhci_internal.h"
+#include "drivers/usb/xhci_internal.h"
 
 namespace duetos::drivers::usb::xhci::internal
 {

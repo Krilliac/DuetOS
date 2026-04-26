@@ -1,7 +1,7 @@
-#include "pcspk.h"
+#include "drivers/audio/pcspk.h"
 
-#include "../../arch/x86_64/cpu.h"
-#include "../../arch/x86_64/hpet.h"
+#include "arch/x86_64/cpu.h"
+#include "arch/x86_64/hpet.h"
 
 namespace duetos::drivers::audio
 {

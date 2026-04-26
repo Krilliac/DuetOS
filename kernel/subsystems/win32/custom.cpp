@@ -1,14 +1,14 @@
-#include "custom.h"
+#include "subsystems/win32/custom.h"
 
-#include "../../arch/x86_64/cpu.h"
-#include "../../arch/x86_64/hpet.h"
-#include "../../arch/x86_64/serial.h"
-#include "../../arch/x86_64/timer.h"
-#include "../../arch/x86_64/traps.h"
-#include "../../core/process.h"
-#include "../../mm/kheap.h"
-#include "../../mm/paging.h"
-#include "../../sched/sched.h"
+#include "arch/x86_64/cpu.h"
+#include "arch/x86_64/hpet.h"
+#include "arch/x86_64/serial.h"
+#include "arch/x86_64/timer.h"
+#include "arch/x86_64/traps.h"
+#include "proc/process.h"
+#include "mm/kheap.h"
+#include "mm/paging.h"
+#include "sched/sched.h"
 
 namespace duetos::arch
 {

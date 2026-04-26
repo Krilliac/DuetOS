@@ -1,10 +1,10 @@
-#include "theme.h"
+#include "drivers/video/theme.h"
 
-#include "../../arch/x86_64/serial.h"
-#include "console.h"
-#include "cursor.h"
-#include "taskbar.h"
-#include "widget.h"
+#include "arch/x86_64/serial.h"
+#include "drivers/video/console.h"
+#include "drivers/video/cursor.h"
+#include "drivers/video/taskbar.h"
+#include "drivers/video/widget.h"
 
 namespace duetos::drivers::video
 {

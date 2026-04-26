@@ -405,7 +405,7 @@ single-point fix rather than a "loader silently refused" dead end.
 - `kernel/core/pe_loader.{h,cpp}` — step trace, 16-page stack, TEB
   alloc, `teb_va` in `PeLoadResult`, catch-all fallback, TlsPresent
   accepted.
-- `kernel/core/ring3_smoke.cpp` — `SpawnPeFile` sets
+- `kernel/proc/ring3_smoke.cpp` — `SpawnPeFile` sets
   `user_rsp_init = stack_top - 0x48` + `user_gs_base = r.teb_va`,
   accepts `TlsPresent` validate, calls `EnterUserModeWithGs`.
 - `kernel/core/process.{h,cpp}` — new `user_gs_base` field.

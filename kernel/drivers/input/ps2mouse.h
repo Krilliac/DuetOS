@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../../core/types.h"
+#include "util/types.h"
 
 /*
  * PS/2 mouse driver — v0.

@@ -14,8 +14,8 @@
 
 #pragma once
 
-#include "../../core/syscall.h"
-#include "../../core/types.h"
+#include "syscall/syscall.h"
+#include "util/types.h"
 
 namespace duetos::subsystems::win32
 {

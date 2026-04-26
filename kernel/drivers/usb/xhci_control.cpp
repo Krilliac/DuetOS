@@ -14,8 +14,8 @@
  * EP0 ring and waits for the Status Stage Transfer Event.
  */
 
-#include "../../arch/x86_64/serial.h"
-#include "xhci_internal.h"
+#include "arch/x86_64/serial.h"
+#include "drivers/usb/xhci_internal.h"
 
 namespace duetos::drivers::usb::xhci::internal
 {

@@ -1,9 +1,9 @@
-#include "iwlwifi.h"
+#include "drivers/net/iwlwifi.h"
 
-#include "../../arch/x86_64/serial.h"
-#include "../../core/firmware_loader.h"
-#include "../../core/klog.h"
-#include "../../sched/sched.h"
+#include "arch/x86_64/serial.h"
+#include "loader/firmware_loader.h"
+#include "log/klog.h"
+#include "sched/sched.h"
 
 namespace duetos::drivers::net
 {

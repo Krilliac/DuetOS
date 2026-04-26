@@ -27,22 +27,22 @@
  *   for the wifi flyout panel adds another section.
  */
 
-#include "net.h"
+#include "drivers/net/net.h"
 
-#include "../../arch/x86_64/cpu.h"
-#include "../../arch/x86_64/serial.h"
-#include "../../core/cleanroom_trace.h"
-#include "../../core/klog.h"
-#include "../../core/panic.h"
-#include "../../mm/frame_allocator.h"
-#include "../../mm/page.h"
-#include "../../mm/paging.h"
-#include "../../net/stack.h"
-#include "../../sched/sched.h"
-#include "../pci/pci.h"
-#include "bcm43xx.h"
-#include "iwlwifi.h"
-#include "rtl88xx.h"
+#include "arch/x86_64/cpu.h"
+#include "arch/x86_64/serial.h"
+#include "diag/cleanroom_trace.h"
+#include "log/klog.h"
+#include "core/panic.h"
+#include "mm/frame_allocator.h"
+#include "mm/page.h"
+#include "mm/paging.h"
+#include "net/stack.h"
+#include "sched/sched.h"
+#include "drivers/pci/pci.h"
+#include "drivers/net/bcm43xx.h"
+#include "drivers/net/iwlwifi.h"
+#include "drivers/net/rtl88xx.h"
 
 namespace duetos::drivers::net
 {

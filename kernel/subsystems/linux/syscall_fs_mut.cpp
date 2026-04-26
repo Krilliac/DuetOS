@@ -21,10 +21,10 @@
  * syscall_pathutil.cpp. The *at delegations call AtFdCwdOnly first.
  */
 
-#include "syscall_internal.h"
+#include "subsystems/linux/syscall_internal.h"
 
-#include "../../core/process.h"
-#include "../../fs/fat32.h"
+#include "proc/process.h"
+#include "fs/fat32.h"
 
 namespace duetos::subsystems::linux::internal
 {

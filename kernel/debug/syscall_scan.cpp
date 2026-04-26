@@ -1,10 +1,10 @@
-#include "syscall_scan.h"
+#include "debug/syscall_scan.h"
 
-#include "../arch/x86_64/serial.h"
-#include "../core/syscall_names.h"
-#include "../subsystems/linux/linux_syscall_table_generated.h"
-#include "../subsystems/translation/translate.h"
-#include "inspect.h"
+#include "arch/x86_64/serial.h"
+#include "syscall/syscall_names.h"
+#include "subsystems/linux/linux_syscall_table_generated.h"
+#include "subsystems/translation/translate.h"
+#include "debug/inspect.h"
 
 namespace duetos::debug
 {

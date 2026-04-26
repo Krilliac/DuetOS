@@ -25,16 +25,16 @@
  *   shared.
  */
 
-#include "address_space.h"
+#include "mm/address_space.h"
 
-#include "../arch/x86_64/cpu.h"
-#include "../arch/x86_64/serial.h"
-#include "../core/klog.h"
-#include "../core/panic.h"
-#include "../cpu/percpu.h"
-#include "frame_allocator.h"
-#include "kheap.h"
-#include "page.h"
+#include "arch/x86_64/cpu.h"
+#include "arch/x86_64/serial.h"
+#include "log/klog.h"
+#include "core/panic.h"
+#include "cpu/percpu.h"
+#include "mm/frame_allocator.h"
+#include "mm/kheap.h"
+#include "mm/page.h"
 
 namespace duetos::mm
 {

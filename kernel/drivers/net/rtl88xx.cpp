@@ -1,9 +1,9 @@
-#include "rtl88xx.h"
+#include "drivers/net/rtl88xx.h"
 
-#include "../../arch/x86_64/serial.h"
-#include "../../core/firmware_loader.h"
-#include "../../core/klog.h"
-#include "../../sched/sched.h"
+#include "arch/x86_64/serial.h"
+#include "loader/firmware_loader.h"
+#include "log/klog.h"
+#include "sched/sched.h"
 
 namespace duetos::drivers::net
 {

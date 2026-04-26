@@ -1,7 +1,7 @@
-#include "console.h"
+#include "drivers/video/console.h"
 
-#include "font8x8.h"
-#include "framebuffer.h"
+#include "drivers/video/font8x8.h"
+#include "drivers/video/framebuffer.h"
 
 namespace duetos::drivers::video
 {

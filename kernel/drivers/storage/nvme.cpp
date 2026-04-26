@@ -23,20 +23,20 @@
  *   letting later writes corrupt user data.
  */
 
-#include "nvme.h"
+#include "drivers/storage/nvme.h"
 
-#include "../../arch/x86_64/cpu.h"
-#include "../../arch/x86_64/hpet.h"
-#include "../../arch/x86_64/serial.h"
-#include "../../core/kdbg.h"
-#include "../../core/klog.h"
-#include "../../core/panic.h"
-#include "../../mm/frame_allocator.h"
-#include "../../mm/page.h"
-#include "../../mm/paging.h"
-#include "../../sched/sched.h"
-#include "../pci/pci.h"
-#include "block.h"
+#include "arch/x86_64/cpu.h"
+#include "arch/x86_64/hpet.h"
+#include "arch/x86_64/serial.h"
+#include "diag/kdbg.h"
+#include "log/klog.h"
+#include "core/panic.h"
+#include "mm/frame_allocator.h"
+#include "mm/page.h"
+#include "mm/paging.h"
+#include "sched/sched.h"
+#include "drivers/pci/pci.h"
+#include "drivers/storage/block.h"
 
 namespace duetos::drivers::storage
 {

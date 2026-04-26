@@ -37,7 +37,7 @@
  * SystemFunction036) are unchanged from the earlier
  * stubs-only build.
  *
- * Build: tools/build-advapi32-dll.sh.
+ * Build: tools/build/build-advapi32-dll.sh.
  */
 
 typedef int BOOL;

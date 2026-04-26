@@ -25,7 +25,7 @@ ever happen.
 ## Symptoms
 
 Reproduced under host CPU pressure (`yes >/dev/null` × 8 on a 4-core
-host while `tools/ctest-boot-smoke.sh` runs):
+host while `tools/test/ctest-boot-smoke.sh` runs):
 
 ```
 ** CPU EXCEPTION **
@@ -68,7 +68,7 @@ up). Local repro:
 ```bash
 # Stress the host while running the smoke
 ( for i in 1 2 3 4 5 6 7 8; do yes >/dev/null & done; sleep 240; pkill -9 yes ) &
-DUETOS_TIMEOUT=45 tools/ctest-boot-smoke.sh build/x86_64-debug
+DUETOS_TIMEOUT=45 tools/test/ctest-boot-smoke.sh build/x86_64-debug
 ```
 
 Without the fix: 5/5 FLAKY, all hitting `#DF` in `WriteCr3` or `#PF`
@@ -121,7 +121,7 @@ is now informed by the actual failure mode rather than a generic
 ## Verification
 
 - `cmake --build build/x86_64-debug` clean (`-Werror` honoured)
-- `tools/ctest-boot-smoke.sh` 8/8 PASS under heavy host stress
+- `tools/test/ctest-boot-smoke.sh` 8/8 PASS under heavy host stress
 - Same fixture without stress: same 8/8 PASS (regression coverage)
 - The headless screenshot helpers still produce the desktop frame
   (PLASMA + FIRE) — boot path through `kernel_main` unaffected

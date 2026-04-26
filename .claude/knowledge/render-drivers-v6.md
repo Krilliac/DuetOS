@@ -173,7 +173,7 @@ Every call has a real backing.
   paint helpers, sys-palette table + brush pool.
 - `kernel/subsystems/win32/window_syscall.cpp` — DoGdi* dispatch
   + DrawTextAsciiOnDc helper.
-- `kernel/core/syscall.h` — SYS_GDI_* (60–128) constants and ABI.
+- `kernel/syscall/syscall.h` — SYS_GDI_* (60–128) constants and ABI.
 - `kernel/drivers/gpu/virtio_gpu.cpp` — virtio-gpu 2D cycle.
 - `kernel/drivers/video/widget.cpp` — compositor + display-list
   prims (FilledEllipse, FillRect, Rectangle, TextOut, ...).

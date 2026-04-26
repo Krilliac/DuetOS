@@ -1,12 +1,12 @@
-#include "usb.h"
+#include "drivers/usb/usb.h"
 
-#include "../../arch/x86_64/serial.h"
-#include "../../core/klog.h"
-#include "../../core/log_names.h"
-#include "../../core/panic.h"
-#include "../../mm/paging.h"
-#include "../pci/pci.h"
-#include "hid_descriptor.h"
+#include "arch/x86_64/serial.h"
+#include "log/klog.h"
+#include "diag/log_names.h"
+#include "core/panic.h"
+#include "mm/paging.h"
+#include "drivers/pci/pci.h"
+#include "drivers/usb/hid_descriptor.h"
 
 namespace duetos::drivers::usb
 {

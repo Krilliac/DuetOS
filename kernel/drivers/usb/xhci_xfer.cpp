@@ -15,13 +15,13 @@
  * already exposed in xhci_internal.h.
  */
 
-#include "xhci.h"
+#include "drivers/usb/xhci.h"
 
-#include "../../arch/x86_64/serial.h"
-#include "../../core/cleanroom_trace.h"
-#include "../../mm/page.h"
-#include "../../sched/sched.h"
-#include "xhci_internal.h"
+#include "arch/x86_64/serial.h"
+#include "diag/cleanroom_trace.h"
+#include "mm/page.h"
+#include "sched/sched.h"
+#include "drivers/usb/xhci_internal.h"
 
 namespace duetos::drivers::usb::xhci
 {

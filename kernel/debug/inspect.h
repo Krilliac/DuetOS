@@ -1,13 +1,13 @@
 #pragma once
 
-#include "../core/types.h"
-#include "syscall_scan.h"
+#include "util/types.h"
+#include "debug/syscall_scan.h"
 
 /*
  * DuetOS — `inspect` umbrella: reverse-engineering + triage
  * tooling that the operator drives from the shell.
  *
- * Subcommands (see `kernel/core/shell.cpp` for dispatch):
+ * Subcommands (see `kernel/shell/shell.cpp` for dispatch):
  *
  *   inspect syscalls kernel | <path>
  *       Locate syscall-issuing idioms (syscall / int 0x80 /

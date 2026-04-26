@@ -4,7 +4,7 @@
  * Freestanding shared header for the four DirectX DLLs that
  * make up DuetOS's DirectX v0 (d3d9, d3d11, d3d12, dxgi).
  *
- * Each DLL is built independently by tools/build-stub-dll.sh
+ * Each DLL is built independently by tools/build/build-stub-dll.sh
  * with no include path; this header lives one directory up so
  * a `#include "../dx_shared.h"` in each .c file picks it up.
  *

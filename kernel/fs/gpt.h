@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../core/types.h"
+#include "util/types.h"
 
 /*
  * DuetOS GPT partition parser — v0.

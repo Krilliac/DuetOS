@@ -18,13 +18,13 @@
  * each port and calls these in sequence.
  */
 
-#include "xhci.h"
+#include "drivers/usb/xhci.h"
 
-#include "../../arch/x86_64/serial.h"
-#include "../../core/klog.h"
-#include "../../mm/frame_allocator.h"
-#include "../../mm/page.h"
-#include "xhci_internal.h"
+#include "arch/x86_64/serial.h"
+#include "log/klog.h"
+#include "mm/frame_allocator.h"
+#include "mm/page.h"
+#include "drivers/usb/xhci_internal.h"
 
 namespace duetos::drivers::usb::xhci::internal
 {

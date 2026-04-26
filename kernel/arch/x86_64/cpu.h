@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../../core/types.h"
+#include "util/types.h"
 
 /*
  * Low-level x86_64 CPU helpers.

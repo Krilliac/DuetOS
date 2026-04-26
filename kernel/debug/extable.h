@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../core/types.h"
+#include "util/types.h"
 
 /*
  * DuetOS — kernel exception table (extable) — v0.
@@ -49,7 +49,7 @@ inline constexpr u32 kMaxExtableEntries = 32;
 // Sentinel for `ExtableEntry::domain_id` meaning "no fault domain
 // attached to this row." Mirrors `core::kFaultDomainInvalid` but
 // declared here as a plain u32 so this header doesn't have to
-// pull in `core/fault_domain.h` (which would create an awkward
+// pull in `security/fault_domain.h` (which would create an awkward
 // debug → core dependency loop for the trap-handler include).
 inline constexpr u32 kExtableNoDomain = 0xFFFFFFFFu;
 

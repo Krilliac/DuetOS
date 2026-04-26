@@ -1,6 +1,6 @@
-#include "serial.h"
+#include "arch/x86_64/serial.h"
 
-#include "cpu.h"
+#include "arch/x86_64/cpu.h"
 
 namespace duetos::arch
 {

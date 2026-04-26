@@ -1,9 +1,9 @@
-#include "gfxdemo.h"
-#include "gfxdemo_modes.h"
+#include "apps/gfxdemo.h"
+#include "apps/gfxdemo_modes.h"
 
-#include "../arch/x86_64/serial.h"
-#include "../arch/x86_64/timer.h"
-#include "../drivers/video/framebuffer.h"
+#include "arch/x86_64/serial.h"
+#include "arch/x86_64/timer.h"
+#include "drivers/video/framebuffer.h"
 
 namespace duetos::apps::gfxdemo
 {

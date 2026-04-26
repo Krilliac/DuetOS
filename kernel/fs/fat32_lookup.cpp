@@ -15,10 +15,10 @@
  * stash entry, stop" use case. Public fat32.h API unchanged.
  */
 
-#include "fat32.h"
+#include "fs/fat32.h"
 
-#include "../core/kdbg.h"
-#include "fat32_internal.h"
+#include "diag/kdbg.h"
+#include "fs/fat32_internal.h"
 
 namespace duetos::fs::fat32
 {

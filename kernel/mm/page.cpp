@@ -1,6 +1,6 @@
-#include "page.h"
+#include "mm/page.h"
 
-#include "../core/panic.h"
+#include "core/panic.h"
 
 namespace duetos::mm
 {

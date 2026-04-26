@@ -139,8 +139,8 @@ undefined helper. Both fixed as part of batch 55:
   constants, per-NT translator helpers.
 - `kernel/subsystems/translation/translate.h` — declare
   `NtTranslateToLinux`.
-- `kernel/core/syscall.h` — `SYS_NT_INVOKE = 46`.
-- `kernel/core/syscall.cpp` — dispatch case for `SYS_NT_INVOKE`.
+- `kernel/syscall/syscall.h` — `SYS_NT_INVOKE = 46`.
+- `kernel/syscall/syscall.cpp` — dispatch case for `SYS_NT_INVOKE`.
 - `tools/linux-compat/gen-linux-syscall-table.py` — emit
   `Primary`/`Effective` constants.
 - `tools/win32-compat/gen-nt-shim.py` — four new NT→SYS_NT_INVOKE

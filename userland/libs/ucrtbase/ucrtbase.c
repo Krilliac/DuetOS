@@ -18,7 +18,7 @@
  *   SYS_EXIT = 0, SYS_HEAP_ALLOC = 11, SYS_HEAP_FREE = 12,
  *   SYS_HEAP_REALLOC = 15.
  *
- * Build: tools/build-ucrtbase-dll.sh at /base:0x10050000.
+ * Build: tools/build/build-ucrtbase-dll.sh at /base:0x10050000.
  */
 
 typedef unsigned int UINT;

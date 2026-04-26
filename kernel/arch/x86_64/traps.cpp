@@ -28,27 +28,27 @@
  *   serial. See core/panic.cpp for the dump formatter.
  */
 
-#include "traps.h"
+#include "arch/x86_64/traps.h"
 
-#include "cpu.h"
-#include "lapic.h"
-#include "nmi_watchdog.h"
-#include "serial.h"
+#include "arch/x86_64/cpu.h"
+#include "arch/x86_64/lapic.h"
+#include "arch/x86_64/nmi_watchdog.h"
+#include "arch/x86_64/serial.h"
 
-#include "../../core/diag_decode.h"
-#include "../../core/fault_domain.h"
-#include "../../core/hexdump.h"
-#include "../../core/log_names.h"
-#include "../../core/panic.h"
-#include "../../core/symbols.h"
-#include "../../core/syscall.h"
-#include "../../cpu/percpu.h"
-#include "../../debug/breakpoints.h"
-#include "../../debug/extable.h"
-#include "../../debug/probes.h"
-#include "../../mm/kstack.h"
-#include "../../sched/sched.h"
-#include "smp.h"
+#include "diag/diag_decode.h"
+#include "security/fault_domain.h"
+#include "diag/hexdump.h"
+#include "diag/log_names.h"
+#include "core/panic.h"
+#include "util/symbols.h"
+#include "syscall/syscall.h"
+#include "cpu/percpu.h"
+#include "debug/breakpoints.h"
+#include "debug/extable.h"
+#include "debug/probes.h"
+#include "mm/kstack.h"
+#include "sched/sched.h"
+#include "arch/x86_64/smp.h"
 
 // user_copy.S labels, exposed to the trap dispatcher for the
 // kernel-#PF fault-fixup path. Defined as non-const u8 arrays so

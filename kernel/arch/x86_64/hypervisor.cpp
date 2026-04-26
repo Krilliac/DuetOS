@@ -1,8 +1,8 @@
-#include "hypervisor.h"
+#include "arch/x86_64/hypervisor.h"
 
-#include "../../core/klog.h"
-#include "../../core/panic.h"
-#include "serial.h"
+#include "log/klog.h"
+#include "core/panic.h"
+#include "arch/x86_64/serial.h"
 
 namespace duetos::arch
 {

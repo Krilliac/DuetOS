@@ -1,8 +1,8 @@
-#include "idt.h"
+#include "arch/x86_64/idt.h"
 
-#include "gdt.h"
+#include "arch/x86_64/gdt.h"
 
-#include "../../core/panic.h"
+#include "core/panic.h"
 
 /*
  * The exception + IRQ stubs in exceptions.S publish their addresses

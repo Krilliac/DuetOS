@@ -31,17 +31,17 @@
  *   class-code lookup tables without exporting them.
  */
 
-#include "pci.h"
+#include "drivers/pci/pci.h"
 
-#include "../../acpi/acpi.h"
-#include "../../arch/x86_64/cpu.h"
-#include "../../arch/x86_64/lapic.h"
-#include "../../arch/x86_64/serial.h"
-#include "../../core/klog.h"
-#include "../../core/log_names.h"
-#include "../../core/panic.h"
-#include "../../mm/paging.h"
-#include "../../sync/spinlock.h"
+#include "acpi/acpi.h"
+#include "arch/x86_64/cpu.h"
+#include "arch/x86_64/lapic.h"
+#include "arch/x86_64/serial.h"
+#include "log/klog.h"
+#include "diag/log_names.h"
+#include "core/panic.h"
+#include "mm/paging.h"
+#include "sync/spinlock.h"
 
 namespace duetos::drivers::pci
 {

@@ -1,12 +1,12 @@
-#include "cdc_ecm.h"
+#include "drivers/usb/cdc_ecm.h"
 
-#include "../../arch/x86_64/serial.h"
-#include "../../core/klog.h"
-#include "../../mm/frame_allocator.h"
-#include "../../mm/page.h"
-#include "../../net/stack.h"
-#include "../../sched/sched.h"
-#include "xhci.h"
+#include "arch/x86_64/serial.h"
+#include "log/klog.h"
+#include "mm/frame_allocator.h"
+#include "mm/page.h"
+#include "net/stack.h"
+#include "sched/sched.h"
+#include "drivers/usb/xhci.h"
 
 namespace duetos::drivers::usb
 {

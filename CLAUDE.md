@@ -88,7 +88,7 @@ These are **guidelines for when to pause and think**, not absolute rules. A clea
 
 ## Coding Standards
 
-- **C++23** for kernel and most subsystems (`constexpr`, `enum class`, `std::expected`-style results, concepts, `if consteval`). No RTTI, no exceptions in kernel code — results go through `duetos::core::Result<T, E>` (see `kernel/core/result.h`). Prefer `return Err{ErrorCode::Foo};` + `RESULT_TRY` / `RESULT_TRY_ASSIGN` at call sites over `return -1 / false / nullptr` sentinels.
+- **C++23** for kernel and most subsystems (`constexpr`, `enum class`, `std::expected`-style results, concepts, `if consteval`). No RTTI, no exceptions in kernel code — results go through `duetos::core::Result<T, E>` (see `kernel/util/result.h`). Prefer `return Err{ErrorCode::Foo};` + `RESULT_TRY` / `RESULT_TRY_ASSIGN` at call sites over `return -1 / false / nullptr` sentinels.
 - **Rust** permitted for greenfield subsystems where memory-safety vs. C++ lifetime invariants matter (filesystem drivers, USB stack, network stack). If you reach for Rust, the subsystem must stand alone — no Rust-in-the-middle of a C++ call chain.
 - **ASM**: NASM (Intel syntax) for x86_64 boot, trap frames, context switch. Keep hand-written assembly to the smallest possible surface.
 - **Ownership**: `std::unique_ptr` / `UniquePtr` owning, raw pointers non-owning. In kernel, use the project's own smart pointer primitives — `std::` is user-land only.
@@ -107,18 +107,31 @@ This tree is **aspirational** — the directories will appear as the work does. 
 ```
 boot/                     — UEFI loader (x86_64), legacy BIOS stub (later), boot protocol
 kernel/
+  acpi/                   — ACPI tables (RSDP, MADT, FADT) + AML parser
+  apps/                   — In-kernel native apps (calculator, clock, gfxdemo, …)
   arch/x86_64/            — Bootstrap, paging, GDT/IDT, trap frames, APIC, context switch
   arch/aarch64/           — (later) ARM64 equivalents
-  core/                   — Entry, panic, early init, per-CPU setup
-  mm/                     — Physical frame allocator, paging, slab, VMAs, kmalloc
-  sched/                  — Scheduler, runqueues, threads, processes, IPC
-  fs/                     — VFS, path resolution, mount table, dcache
-  net/                    — Protocol stacks (TCP/IP, UDP, ICMP, ARP)
-  sync/                   — Spinlocks, mutexes, RW locks, RCU-lite
-  time/                   — HPET/TSC/APIC timer, clocksource, scheduler tick
-  ipc/                    — Capability-based IPC, ports, shared memory
-  syscall/                — Native syscall dispatch
+  core/                   — Entry (main.cpp), panic, early init
+  cpu/                    — Per-CPU data structures
+  debug/                  — Breakpoints, probes, syscall scan, exception tables
+  diag/                   — Diagnostic surface: kdbg, crprobe, runtime checker, hexdump, recovery
   drivers/                — In-kernel device drivers (see below)
+  fs/                     — VFS, path resolution, FAT32/exFAT/ext4/NTFS, ramfs, GPT
+  loader/                 — ELF + PE loaders, DLL loader, firmware loader
+  log/                    — klog (kernel log ring + sinks)
+  mm/                     — Physical frame allocator, paging, slab, kheap, kstack, address spaces
+  net/                    — Protocol stacks (TCP/IP, UDP, ICMP, ARP, Wi-Fi)
+  power/                  — Reboot / shutdown
+  proc/                   — Process model (process.cpp, ring3 smoke)
+  sched/                  — Scheduler, runqueues, threads, context switch
+  security/               — Auth/login, stack canary, fault domains, attack sim, pentest, image guard
+  shell/                  — Kernel shell (split across shell_*.cpp TUs)
+  subsystems/             — Linux ABI, Win32 ABI, graphics, ABI translation
+  sync/                   — Spinlocks, mutexes, RW locks, RCU-lite
+  syscall/                — Native syscall dispatch + time syscalls
+  util/                   — Result<T,E>, string helpers, types, symbols, random
+  time/                   — (planned) HPET/TSC/APIC timer, clocksource, scheduler tick
+  ipc/                    — (planned) Capability-based IPC, ports, shared memory
 drivers/
   pci/                    — PCIe enumeration
   storage/nvme/           — NVMe

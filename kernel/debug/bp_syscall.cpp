@@ -1,9 +1,9 @@
-#include "bp_syscall.h"
+#include "debug/bp_syscall.h"
 
-#include "../arch/x86_64/serial.h"
-#include "../arch/x86_64/traps.h"
-#include "../core/process.h"
-#include "breakpoints.h"
+#include "arch/x86_64/serial.h"
+#include "arch/x86_64/traps.h"
+#include "proc/process.h"
+#include "debug/breakpoints.h"
 
 namespace duetos::debug
 {

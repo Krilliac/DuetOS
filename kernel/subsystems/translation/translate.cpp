@@ -27,20 +27,20 @@
  *   tables + helpers that map between them.
  */
 
-#include "translate.h"
+#include "subsystems/translation/translate.h"
 
-#include "../../arch/x86_64/serial.h"
-#include "../../arch/x86_64/traps.h"
-#include "../../core/klog.h"
-#include "../../core/process.h"
-#include "../../core/random.h"
-#include "../../core/syscall_names.h"
-#include "../../mm/paging.h"
-#include "../../sched/sched.h"
-#include "../linux/linux_syscall_table_generated.h"
-#include "../linux/syscall.h"
-#include "../win32/heap.h"
-#include "../win32/nt_syscall_table_generated.h"
+#include "arch/x86_64/serial.h"
+#include "arch/x86_64/traps.h"
+#include "log/klog.h"
+#include "proc/process.h"
+#include "util/random.h"
+#include "syscall/syscall_names.h"
+#include "mm/paging.h"
+#include "sched/sched.h"
+#include "subsystems/linux/linux_syscall_table_generated.h"
+#include "subsystems/linux/syscall.h"
+#include "subsystems/win32/heap.h"
+#include "subsystems/win32/nt_syscall_table_generated.h"
 
 namespace duetos::subsystems::translation
 {

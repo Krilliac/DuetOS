@@ -17,11 +17,11 @@
  * the slot-table + metadata surface.
  */
 
-#include "syscall_internal.h"
+#include "subsystems/linux/syscall_internal.h"
 
-#include "../../core/process.h"
-#include "../../fs/fat32.h"
-#include "../../mm/address_space.h"
+#include "proc/process.h"
+#include "fs/fat32.h"
+#include "mm/address_space.h"
 
 namespace duetos::subsystems::linux::internal
 {

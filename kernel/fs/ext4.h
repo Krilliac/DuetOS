@@ -1,7 +1,7 @@
 #pragma once
 
-#include "../core/result.h"
-#include "../core/types.h"
+#include "util/result.h"
+#include "util/types.h"
 
 /*
  * DuetOS — ext4 driver, v0 probe-only shell.

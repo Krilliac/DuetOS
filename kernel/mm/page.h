@@ -1,7 +1,7 @@
 #pragma once
 
-#include "../core/types.h"
-#include "frame_allocator.h"
+#include "util/types.h"
+#include "mm/frame_allocator.h"
 
 /*
  * DuetOS — kernel direct-map helpers.

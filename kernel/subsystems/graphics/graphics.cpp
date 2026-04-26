@@ -1,8 +1,8 @@
-#include "graphics.h"
+#include "subsystems/graphics/graphics.h"
 
-#include "../../arch/x86_64/serial.h"
-#include "../../core/klog.h"
-#include "../../drivers/gpu/gpu.h"
+#include "arch/x86_64/serial.h"
+#include "log/klog.h"
+#include "drivers/gpu/gpu.h"
 
 namespace duetos::subsystems::graphics
 {

@@ -1,17 +1,17 @@
-#include "panic.h"
+#include "core/panic.h"
 
-#include "../arch/x86_64/cpu.h"
-#include "../arch/x86_64/gdt.h"
-#include "../arch/x86_64/nmi_watchdog.h"
-#include "../arch/x86_64/serial.h"
-#include "../arch/x86_64/smp.h"
-#include "../arch/x86_64/timer.h"
-#include "../cpu/percpu.h"
-#include "../debug/probes.h"
-#include "diag_decode.h"
-#include "hexdump.h"
-#include "klog.h"
-#include "symbols.h"
+#include "arch/x86_64/cpu.h"
+#include "arch/x86_64/gdt.h"
+#include "arch/x86_64/nmi_watchdog.h"
+#include "arch/x86_64/serial.h"
+#include "arch/x86_64/smp.h"
+#include "arch/x86_64/timer.h"
+#include "cpu/percpu.h"
+#include "debug/probes.h"
+#include "diag/diag_decode.h"
+#include "diag/hexdump.h"
+#include "log/klog.h"
+#include "util/symbols.h"
 
 /*
  * Panic / crash-dump output.
@@ -22,7 +22,7 @@
  *     ...
  *     === DUETOS CRASH DUMP END ===
  *
- * on COM1. Host-side tooling (`tools/test-panic.sh` today, a
+ * on COM1. Host-side tooling (`tools/debug/test-panic.sh` today, a
  * post-mortem harness later) captures the bytes between the markers
  * into a file — that is the "dump file" the crash system produces,
  * given DuetOS has no persistent filesystem yet.

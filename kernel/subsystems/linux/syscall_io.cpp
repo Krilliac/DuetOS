@@ -21,12 +21,12 @@
  * + ignore), TIOCGWINSZ (fake 80×24).
  */
 
-#include "syscall_internal.h"
+#include "subsystems/linux/syscall_internal.h"
 
-#include "../../arch/x86_64/serial.h"
-#include "../../core/process.h"
-#include "../../fs/fat32.h"
-#include "../../mm/address_space.h"
+#include "arch/x86_64/serial.h"
+#include "proc/process.h"
+#include "fs/fat32.h"
+#include "mm/address_space.h"
 
 namespace duetos::subsystems::linux::internal
 {

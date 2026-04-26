@@ -15,14 +15,14 @@
  * from fat32_internal.h.
  */
 
-#include "fat32.h"
+#include "fs/fat32.h"
 
-#include "../core/kdbg.h"
-#include "../core/klog.h"
-#include "../core/log_names.h"
-#include "../drivers/storage/block.h"
-#include "fat32_internal.h"
-#include "fat32_write_internal.h"
+#include "diag/kdbg.h"
+#include "log/klog.h"
+#include "diag/log_names.h"
+#include "drivers/storage/block.h"
+#include "fs/fat32_internal.h"
+#include "fs/fat32_write_internal.h"
 
 namespace duetos::fs::fat32
 {

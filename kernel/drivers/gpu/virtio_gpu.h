@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../../core/types.h"
+#include "util/types.h"
 
 /*
  * DuetOS — virtio-gpu discovery, v0.

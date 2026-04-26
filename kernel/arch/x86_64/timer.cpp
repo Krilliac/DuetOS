@@ -1,13 +1,13 @@
-#include "timer.h"
+#include "arch/x86_64/timer.h"
 
-#include "cpu.h"
-#include "lapic.h"
-#include "nmi_watchdog.h"
-#include "serial.h"
-#include "traps.h"
+#include "arch/x86_64/cpu.h"
+#include "arch/x86_64/lapic.h"
+#include "arch/x86_64/nmi_watchdog.h"
+#include "arch/x86_64/serial.h"
+#include "arch/x86_64/traps.h"
 
-#include "../../core/klog.h"
-#include "../../sched/sched.h"
+#include "log/klog.h"
+#include "sched/sched.h"
 
 namespace duetos::arch
 {

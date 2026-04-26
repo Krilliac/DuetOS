@@ -15,7 +15,7 @@
  *     CustomMul(int, int)     -> int
  *     CustomVersion()         -> unsigned  (= 0x0200, stage-2 marker)
  *
- * Build (host): see tools/build-customdll.sh. The produced DLL
+ * Build (host): see tools/build/build-customdll.sh. The produced DLL
  * is linked with /dll /noentry so no DllMain stub is required;
  * the kernel's DLL loader does not dispatch DllMain yet
  * anyway.

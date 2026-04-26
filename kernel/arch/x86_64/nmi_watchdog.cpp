@@ -1,9 +1,9 @@
-#include "nmi_watchdog.h"
+#include "arch/x86_64/nmi_watchdog.h"
 
-#include "lapic.h"
-#include "serial.h"
+#include "arch/x86_64/lapic.h"
+#include "arch/x86_64/serial.h"
 
-#include "../../core/panic.h"
+#include "core/panic.h"
 
 namespace duetos::arch
 {

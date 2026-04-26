@@ -24,9 +24,9 @@
  * left in place to keep this slice surgical.
  */
 
-#include "syscall_internal.h"
+#include "subsystems/linux/syscall_internal.h"
 
-#include "../../core/process.h"
+#include "proc/process.h"
 
 namespace duetos::subsystems::linux::internal
 {

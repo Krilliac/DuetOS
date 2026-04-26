@@ -13,213 +13,42 @@
 #      list — rodata growth in stage 2 happens strictly AFTER every other
 #      symbol.
 #
-#   2. Run `tools/gen-symbols.sh` against stage 1 to produce
+#   2. Run `tools/build/gen-symbols.sh` against stage 1 to produce
 #      `symbols_generated.cpp`, a sorted `{addr, size, line, name, file}`
 #      table, and relink the final `duetos-kernel.elf` with it in place
 #      of the stub.
 #
 # The final image is what the ISO target packages. Stage 1 is a throwaway.
 
-set(DUETOS_KERNEL_SHARED_SOURCES
-    core/auth.cpp
-    core/cleanroom_trace.cpp
-    core/crprobe.cpp
-    core/diag_decode.cpp
-    core/heartbeat.cpp
-    core/hexdump.cpp
-    core/klog.cpp
-    core/kdbg.cpp
-    core/log_names.cpp
-    core/login.cpp
-    core/main.cpp
-    core/panic.cpp
-    core/process.cpp
-    core/reboot.cpp
-    core/recovery.cpp
-    core/elf_loader.cpp
-    core/firmware_loader.cpp
-    core/pe_loader.cpp
-    core/pe_exports.cpp
-    core/dll_loader.cpp
-    core/dll_loader_selftest.cpp
-    core/random.cpp
-    core/result.cpp
-    core/ring3_smoke.cpp
-    core/runtime_checker.cpp
-    core/string.cpp
-    subsystems/graphics/graphics.cpp
-    subsystems/linux/ring3_smoke.cpp
-    subsystems/linux/syscall.cpp
-    subsystems/linux/syscall_cred.cpp
-    subsystems/linux/syscall_fd.cpp
-    subsystems/linux/syscall_file.cpp
-    subsystems/linux/syscall_fs_mut.cpp
-    subsystems/linux/syscall_io.cpp
-    subsystems/linux/syscall_misc.cpp
-    subsystems/linux/syscall_mm.cpp
-    subsystems/linux/syscall_path.cpp
-    subsystems/linux/syscall_pathutil.cpp
-    subsystems/linux/syscall_proc.cpp
-    subsystems/linux/syscall_rlimit.cpp
-    subsystems/linux/syscall_sched.cpp
-    subsystems/linux/syscall_sig.cpp
-    subsystems/linux/syscall_stub.cpp
-    subsystems/linux/syscall_time.cpp
-    subsystems/linux/syscall_entry.S
-    subsystems/translation/translate.cpp
-    subsystems/win32/custom.cpp
-    subsystems/win32/custom_selftest.cpp
-    subsystems/win32/event_syscall.cpp
-    subsystems/win32/file_syscall.cpp
-    subsystems/win32/gdi_objects.cpp
-    subsystems/win32/heap.cpp
-    subsystems/win32/heap_syscall.cpp
-    subsystems/win32/mutex_syscall.cpp
-    subsystems/win32/nt_coverage.cpp
-    subsystems/win32/proc_env.cpp
-    subsystems/win32/thunks.cpp
-    subsystems/win32/thread_syscall.cpp
-    subsystems/win32/tls_syscall.cpp
-    subsystems/win32/vmap_syscall.cpp
-    subsystems/win32/window_syscall.cpp
-    core/shell.cpp
-    core/shell_complete.cpp
-    core/shell_core.cpp
-    core/shell_debug.cpp
-    core/shell_dispatch.cpp
-    core/shell_exec.cpp
-    core/shell_filesystem.cpp
-    core/shell_format.cpp
-    core/shell_fsio.cpp
-    core/shell_hardware.cpp
-    core/shell_network.cpp
-    core/shell_pathutil.cpp
-    core/shell_process.cpp
-    core/shell_security.cpp
-    core/shell_state.cpp
-    core/shell_storage.cpp
-    core/shell_utilities.cpp
-    core/stack_canary.cpp
-    core/symbols.cpp
-    core/fault_domain.cpp
-    core/syscall.cpp
-    core/syscall_names.cpp
-    core/time_syscall.cpp
-    debug/bp_syscall.cpp
-    debug/extable.cpp
-    acpi/acpi.cpp
-    apps/calculator.cpp
-    apps/clock.cpp
-    apps/files.cpp
-    apps/gfxdemo.cpp
-    apps/gfxdemo_modes.cpp
-    apps/notes.cpp
-    arch/x86_64/ap_trampoline.S
-    arch/x86_64/boot.S
-    acpi/aml.cpp
-    arch/x86_64/cpu_info.cpp
-    arch/x86_64/hypervisor.cpp
-    arch/x86_64/exceptions.S
-    arch/x86_64/gdt.cpp
-    arch/x86_64/hpet.cpp
-    arch/x86_64/idt.cpp
-    arch/x86_64/ioapic.cpp
-    arch/x86_64/lapic.cpp
-    arch/x86_64/nmi_watchdog.cpp
-    arch/x86_64/pic.cpp
-    arch/x86_64/retpoline_thunks.S
-    arch/x86_64/rtc.cpp
-    arch/x86_64/serial.cpp
-    arch/x86_64/smbios.cpp
-    arch/x86_64/smp.cpp
-    arch/x86_64/thermal.cpp
-    arch/x86_64/timer.cpp
-    arch/x86_64/traps.cpp
-    arch/x86_64/usermode.S
-    cpu/percpu.cpp
-    debug/breakpoints.cpp
-    debug/inspect.cpp
-    debug/probes.cpp
-    debug/syscall_scan.cpp
-    drivers/input/ps2kbd.cpp
-    drivers/input/ps2mouse.cpp
-    drivers/audio/audio.cpp
-    drivers/audio/pcspk.cpp
-    drivers/gpu/bochs_vbe.cpp
-    drivers/gpu/gpu.cpp
-    drivers/gpu/virtio_gpu.cpp
-    drivers/net/bcm43xx.cpp
-    drivers/net/iwlwifi.cpp
-    drivers/net/net.cpp
-    drivers/net/rtl88xx.cpp
-    drivers/pci/pci.cpp
-    drivers/power/power.cpp
-    drivers/storage/ahci.cpp
-    drivers/storage/block.cpp
-    drivers/storage/nvme.cpp
-    drivers/usb/hid_descriptor.cpp
-    drivers/usb/cdc_ecm.cpp
-    drivers/usb/msc_scsi.cpp
-    drivers/usb/rndis.cpp
-    drivers/usb/usb.cpp
-    drivers/usb/xhci.cpp
-    drivers/usb/xhci_admin.cpp
-    drivers/usb/xhci_complete.cpp
-    drivers/usb/xhci_context.cpp
-    drivers/usb/xhci_control.cpp
-    drivers/usb/xhci_descparse.cpp
-    drivers/usb/xhci_enum.cpp
-    drivers/usb/xhci_event.cpp
-    drivers/usb/xhci_init.cpp
-    drivers/usb/xhci_input.cpp
-    drivers/usb/xhci_irq.cpp
-    drivers/usb/xhci_ring.cpp
-    drivers/usb/xhci_speed.cpp
-    drivers/usb/xhci_xfer.cpp
-    drivers/video/calendar.cpp
-    drivers/video/console.cpp
-    drivers/video/cursor.cpp
-    drivers/video/font8x8.cpp
-    drivers/video/framebuffer.cpp
-    drivers/video/menu.cpp
-    drivers/video/netpanel.cpp
-    drivers/video/taskbar.cpp
-    drivers/video/theme.cpp
-    drivers/video/widget.cpp
-    fs/exfat.cpp
-    fs/ext4.cpp
-    fs/fat32.cpp
-    fs/fat32_create.cpp
-    fs/fat32_dir.cpp
-    fs/fat32_lookup.cpp
-    fs/fat32_read.cpp
-    fs/fat32_selftest.cpp
-    fs/fat32_write.cpp
-    fs/file_route.cpp
-    fs/gpt.cpp
-    fs/ntfs.cpp
-    fs/ramfs.cpp
-    fs/tmpfs.cpp
-    fs/vfs.cpp
-    mm/address_space.cpp
-    mm/frame_allocator.cpp
-    mm/kheap.cpp
-    mm/kstack.cpp
-    mm/page.cpp
-    mm/paging.cpp
-    mm/user_copy.S
-    net/net_smoke.cpp
-    net/stack.cpp
-    net/wifi.cpp
-    sched/context_switch.S
-    sched/sched.cpp
-    security/attack_sim.cpp
-    security/guard.cpp
-    security/pentest_gui.cpp
-    sync/spinlock.cpp
+# ----------------------------------------------------------------------------
+# Kernel source discovery — globbed dynamically.
+#
+# Every .cpp / .c / .S under kernel/ is part of the kernel image with two
+# exceptions, both removed below:
+#
+#   - util/symbols_stub.cpp — stage-1 only. Stage 2 swaps in the generated
+#     symbols table TU in this slot.
+#   - tests/  — once present, hosted unit tests live here and are NOT linked
+#     into the bare-metal kernel.
+#
+# CONFIGURE_DEPENDS reruns the glob when a file appears or disappears, so
+# adding a new source file just needs the file itself; no CMakeLists edit.
+# ----------------------------------------------------------------------------
+file(GLOB_RECURSE DUETOS_KERNEL_SHARED_SOURCES
+    CONFIGURE_DEPENDS
+    RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
+    "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/*.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/*.S"
 )
 
-# core/stack_canary.cpp provides __stack_chk_fail and the
+# Stage 1 owns this file exclusively; stage 2 substitutes the generated TU.
+list(REMOVE_ITEM DUETOS_KERNEL_SHARED_SOURCES util/symbols_stub.cpp)
+
+# Future-proofing: keep tests/ out of the kernel image if/when it appears.
+list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^tests/")
+
+# security/stack_canary.cpp provides __stack_chk_fail and the
 # RandomizeStackCanary helper. The latter updates the cookie at
 # runtime; if ANY function in this file gets compiled with stack
 # protection, the prologue/epilogue would sample __stack_chk_guard
@@ -227,447 +56,193 @@ set(DUETOS_KERNEL_SHARED_SOURCES
 # __attribute__((no_stack_protector)) on the two functions that
 # care; -fno-stack-protector on the whole TU is belt + braces.
 set_source_files_properties(
-    core/stack_canary.cpp
+    security/stack_canary.cpp
     PROPERTIES COMPILE_OPTIONS "-fno-stack-protector"
 )
 
 # ----------------------------------------------------------------------------
-# Host-side userland build: userland/apps/hello_pe/hello.c is compiled
-# with clang targeting x86_64-pc-windows-msvc and linked by lld-link
-# into a real freestanding PE/COFF .exe. The bytes are embedded into a
-# C++ constexpr u8 header that ramfs.cpp includes, so /bin/hello.exe
-# appears on the boot filesystem without a disk backend.
+# Embedded-blob plumbing.
 #
-# This relies on host clang + lld-link + python3 being present, which
-# the dev container ships with. A future slice will guard this with a
-# CMake probe and fall back to a hand-laid byte array if the
-# toolchain is missing.
-# ----------------------------------------------------------------------------
-set(DUETOS_HELLO_PE_SRC "${CMAKE_SOURCE_DIR}/userland/apps/hello_pe/hello.c")
-set(DUETOS_HELLO_PE_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_hello_pe.h")
-set(DUETOS_HELLO_PE_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-hello-pe.sh")
-set(DUETOS_EMBED_BLOB_SCRIPT "${CMAKE_SOURCE_DIR}/tools/embed-blob.py")
-
-add_custom_command(
-    OUTPUT "${DUETOS_HELLO_PE_HEADER}"
-    COMMAND "${DUETOS_HELLO_PE_SCRIPT}"
-            "${CMAKE_SOURCE_DIR}"
-            "${DUETOS_HELLO_PE_HEADER}"
-    DEPENDS
-        "${DUETOS_HELLO_PE_SRC}"
-        "${DUETOS_HELLO_PE_SCRIPT}"
-        "${DUETOS_EMBED_BLOB_SCRIPT}"
-    COMMENT "Compiling + embedding /bin/hello.exe (freestanding PE)"
-    VERBATIM
-)
-
-# ramfs.cpp includes the generated header. Add it to the shared
-# source list so BOTH stages see the dependency and the custom
-# command fires on first configure.
-list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_HELLO_PE_HEADER}")
-
-# ----------------------------------------------------------------------------
-# Embed a real Windows PE (windows-kill.exe, a small standalone
-# Win32 console utility — 79 KiB, 12 DLL deps, 100 imported
-# functions, TLS callbacks). This is NOT a file we can run: v0
-# has no Win32 subsystem, no ntdll, nothing to resolve the
-# imports against. But the kernel PE loader's diagnostic path
-# (PeReport) exercises every directory on this image, giving a
-# concrete gap report on boot.
+# The kernel image bakes in a handful of generated headers built from
+# userland sources (PE fixtures + DLL stubs). Every entry shares the
+# same shape: run a build script, write a generated header into the
+# build dir, register the header as a kernel source so both stages
+# pick it up.
 #
-# This is the tractable substitute for "download Chrome and try
-# to run it": real Windows PE, real imports, but small enough
-# that embedding it into a constexpr u8 array doesn't balloon
-# the kernel.
+# tools/build/embed-blob.py is the underlying byte-array emitter the
+# build scripts call into. The duetos_embed_blob() helper wraps the
+# add_custom_command + list-append pattern.
 # ----------------------------------------------------------------------------
-set(DUETOS_WINKILL_SRC "${CMAKE_SOURCE_DIR}/userland/apps/windows_kill/windows-kill.exe")
+set(DUETOS_EMBED_BLOB_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build/embed-blob.py")
+
+# Helper: register a generated header that the kernel image embeds.
+#
+#   duetos_embed_blob(header
+#       SCRIPT  <path>            # build script invoked as: <script> SRCROOT <header>
+#       SRC     <path>            # primary source the script reads
+#       COMMENT <text>            # CMake progress message
+#       [DEFS_DIR <path>]         # if set, glob *.def in this dir as deps
+#       [EXTRA_DEPS dep1 ...])    # additional deps appended verbatim
+#
+# The output header lives at ${CMAKE_CURRENT_BINARY_DIR}/<header>.
+function(duetos_embed_blob header_name)
+    cmake_parse_arguments(EB
+        ""                              # no boolean opts
+        "SCRIPT;SRC;COMMENT;DEFS_DIR"   # single-value
+        "EXTRA_DEPS"                    # multi-value
+        ${ARGN})
+
+    set(_header "${CMAKE_CURRENT_BINARY_DIR}/${header_name}")
+    set(_defs "")
+    if(EB_DEFS_DIR)
+        file(GLOB _defs CONFIGURE_DEPENDS "${EB_DEFS_DIR}/*.def")
+    endif()
+
+    add_custom_command(
+        OUTPUT  "${_header}"
+        COMMAND "${EB_SCRIPT}" "${CMAKE_SOURCE_DIR}" "${_header}"
+        DEPENDS "${EB_SRC}" "${EB_SCRIPT}" "${DUETOS_EMBED_BLOB_SCRIPT}"
+                ${_defs} ${EB_EXTRA_DEPS}
+        COMMENT "${EB_COMMENT}"
+        VERBATIM
+    )
+
+    set(DUETOS_KERNEL_SHARED_SOURCES
+        ${DUETOS_KERNEL_SHARED_SOURCES} "${_header}"
+        PARENT_SCOPE)
+endfunction()
+
+# ----------------------------------------------------------------------------
+# PE fixtures embedded into ramfs as /bin/*.exe.
+# ----------------------------------------------------------------------------
+duetos_embed_blob(generated_hello_pe.h
+    SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-hello-pe.sh"
+    SRC     "${CMAKE_SOURCE_DIR}/userland/apps/hello_pe/hello.c"
+    COMMENT "Compiling + embedding /bin/hello.exe (freestanding PE)")
+
+duetos_embed_blob(generated_hello_winapi.h
+    SCRIPT   "${CMAKE_SOURCE_DIR}/tools/build/build-hello-winapi.sh"
+    SRC      "${CMAKE_SOURCE_DIR}/userland/apps/hello_winapi/hello.c"
+    DEFS_DIR "${CMAKE_SOURCE_DIR}/userland/apps/hello_winapi"
+    COMMENT  "Compiling + embedding /bin/hello_winapi.exe (Win32 import path)")
+
+duetos_embed_blob(generated_thread_stress.h
+    SCRIPT   "${CMAKE_SOURCE_DIR}/tools/build/build-thread-stress.sh"
+    SRC      "${CMAKE_SOURCE_DIR}/userland/apps/thread_stress/hello.c"
+    DEFS_DIR "${CMAKE_SOURCE_DIR}/userland/apps/thread_stress"
+    COMMENT  "Compiling + embedding /bin/thread_stress.exe (CreateThread path)")
+
+duetos_embed_blob(generated_syscall_stress.h
+    SCRIPT   "${CMAKE_SOURCE_DIR}/tools/build/build-syscall-stress.sh"
+    SRC      "${CMAKE_SOURCE_DIR}/userland/apps/syscall_stress/hello.c"
+    DEFS_DIR "${CMAKE_SOURCE_DIR}/userland/apps/syscall_stress"
+    COMMENT  "Compiling + embedding /bin/syscall_stress.exe (batch 51 API coverage)")
+
+duetos_embed_blob(generated_windowed_hello.h
+    SCRIPT   "${CMAKE_SOURCE_DIR}/tools/build/build-windowed-hello.sh"
+    SRC      "${CMAKE_SOURCE_DIR}/userland/apps/windowed_hello/hello.c"
+    DEFS_DIR "${CMAKE_SOURCE_DIR}/userland/apps/windowed_hello"
+    COMMENT  "Compiling + embedding /bin/windowed_hello.exe (user32 window bridge)")
+
+duetos_embed_blob(generated_customdll_test.h
+    SCRIPT   "${CMAKE_SOURCE_DIR}/tools/build/build-customdll-test.sh"
+    SRC      "${CMAKE_SOURCE_DIR}/userland/apps/customdll_test/hello.c"
+    DEFS_DIR "${CMAKE_SOURCE_DIR}/userland/apps/customdll_test"
+    COMMENT  "Compiling + embedding /bin/customdll_test.exe (stage-2 slice 6 fixture)")
+
+duetos_embed_blob(generated_reg_fopen_test.h
+    SCRIPT   "${CMAKE_SOURCE_DIR}/tools/build/build-reg-fopen-test.sh"
+    SRC      "${CMAKE_SOURCE_DIR}/userland/apps/reg_fopen_test/hello.c"
+    DEFS_DIR "${CMAKE_SOURCE_DIR}/userland/apps/reg_fopen_test"
+    COMMENT  "Compiling + embedding reg_fopen_test.exe (registry + fopen fixture)")
+
+# ----------------------------------------------------------------------------
+# Real Windows PE — windows-kill.exe (~80 KiB binary, 12 DLL deps).
+# This one isn't compiled from source; it's a prebuilt MSVC PE we
+# embed verbatim for the loader's diagnostic path. Custom command
+# (not duetos_embed_blob) because it calls embed-blob.py directly
+# with a custom symbol name + namespace.
+# ----------------------------------------------------------------------------
+set(DUETOS_WINKILL_SRC    "${CMAKE_SOURCE_DIR}/userland/apps/windows_kill/windows-kill.exe")
 set(DUETOS_WINKILL_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_winkill_pe.h")
-
 add_custom_command(
     OUTPUT "${DUETOS_WINKILL_HEADER}"
-    COMMAND python3
-            "${DUETOS_EMBED_BLOB_SCRIPT}"
-            "${DUETOS_WINKILL_SRC}"
-            "${DUETOS_WINKILL_HEADER}"
-            kBinWinKillBytes
-            --namespace "duetos::fs::generated"
-    DEPENDS
-        "${DUETOS_WINKILL_SRC}"
-        "${DUETOS_EMBED_BLOB_SCRIPT}"
+    COMMAND python3 "${DUETOS_EMBED_BLOB_SCRIPT}"
+            "${DUETOS_WINKILL_SRC}" "${DUETOS_WINKILL_HEADER}"
+            kBinWinKillBytes --namespace "duetos::fs::generated"
+    DEPENDS "${DUETOS_WINKILL_SRC}" "${DUETOS_EMBED_BLOB_SCRIPT}"
     COMMENT "Embedding real Windows PE /bin/windows-kill.exe"
-    VERBATIM
-)
-
+    VERBATIM)
 list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_WINKILL_HEADER}")
 
 # ----------------------------------------------------------------------------
-# Third PE fixture: hello_winapi.exe — first userland program
-# that talks to the DuetOS Win32 subsystem through a real
-# Import Directory. Built via llvm-dlltool (kernel32.lib) +
-# clang + lld-link. See tools/build-hello-winapi.sh and
-# .claude/knowledge/pe-subsystem-v0.md for the layered
-# mechanism.
+# Userland DLLs embedded into the kernel image. Each entry retires
+# a slice of the legacy flat-stub-page entries by providing real
+# code in a real loaded DLL.
 # ----------------------------------------------------------------------------
-set(DUETOS_HELLO_WINAPI_SRC "${CMAKE_SOURCE_DIR}/userland/apps/hello_winapi/hello.c")
-# Every .def file in the hello_winapi dir becomes a separate
-# import library feeding lld-link. Glob-dependency means adding
-# a new .def (e.g. for a future DLL stub set) automatically
-# triggers a rebuild without touching this CMakeLists.
-file(GLOB DUETOS_HELLO_WINAPI_DEFS
-    "${CMAKE_SOURCE_DIR}/userland/apps/hello_winapi/*.def")
-set(DUETOS_HELLO_WINAPI_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_hello_winapi.h")
-set(DUETOS_HELLO_WINAPI_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-hello-winapi.sh")
+duetos_embed_blob(generated_customdll.h
+    SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-customdll.sh"
+    SRC     "${CMAKE_SOURCE_DIR}/userland/libs/customdll/customdll.c"
+    COMMENT "Compiling + embedding customdll.dll (EAT parser fixture)")
 
-add_custom_command(
-    OUTPUT "${DUETOS_HELLO_WINAPI_HEADER}"
-    COMMAND "${DUETOS_HELLO_WINAPI_SCRIPT}"
-            "${CMAKE_SOURCE_DIR}"
-            "${DUETOS_HELLO_WINAPI_HEADER}"
-    DEPENDS
-        "${DUETOS_HELLO_WINAPI_SRC}"
-        ${DUETOS_HELLO_WINAPI_DEFS}
-        "${DUETOS_HELLO_WINAPI_SCRIPT}"
-        "${DUETOS_EMBED_BLOB_SCRIPT}"
-    COMMENT "Compiling + embedding /bin/hello_winapi.exe (Win32 import path)"
-    VERBATIM
-)
+duetos_embed_blob(generated_customdll2.h
+    SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-customdll2.sh"
+    SRC     "${CMAKE_SOURCE_DIR}/userland/libs/customdll2/customdll2.c"
+    COMMENT "Compiling + embedding customdll2.dll (multi-DLL preload fixture)")
 
-list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_HELLO_WINAPI_HEADER}")
+duetos_embed_blob(generated_kernel32_dll.h
+    SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-kernel32-dll.sh"
+    SRC     "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/kernel32.c"
+    COMMENT "Compiling + embedding kernel32.dll (first stub retirement)")
 
-# ----------------------------------------------------------------------------
-# Fourth PE fixture: thread_stress.exe — exercises CreateThread,
-# CreateEventW, SetEvent, WaitForSingleObject round-trip. Verifies
-# the batch-50 SYS_THREAD_CREATE wiring works end-to-end: main
-# creates a child thread, child writes a sentinel + signals an
-# event, main wakes + checks the sentinel.
-# ----------------------------------------------------------------------------
-set(DUETOS_THREAD_STRESS_SRC "${CMAKE_SOURCE_DIR}/userland/apps/thread_stress/hello.c")
-file(GLOB DUETOS_THREAD_STRESS_DEFS
-    "${CMAKE_SOURCE_DIR}/userland/apps/thread_stress/*.def")
-set(DUETOS_THREAD_STRESS_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_thread_stress.h")
-set(DUETOS_THREAD_STRESS_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-thread-stress.sh")
+duetos_embed_blob(generated_vcruntime140_dll.h
+    SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-vcruntime140-dll.sh"
+    SRC     "${CMAKE_SOURCE_DIR}/userland/libs/vcruntime140/vcruntime140.c"
+    COMMENT "Compiling + embedding vcruntime140.dll (memset/memcpy/memmove retirement)")
 
-add_custom_command(
-    OUTPUT "${DUETOS_THREAD_STRESS_HEADER}"
-    COMMAND "${DUETOS_THREAD_STRESS_SCRIPT}"
-            "${CMAKE_SOURCE_DIR}"
-            "${DUETOS_THREAD_STRESS_HEADER}"
-    DEPENDS
-        "${DUETOS_THREAD_STRESS_SRC}"
-        ${DUETOS_THREAD_STRESS_DEFS}
-        "${DUETOS_THREAD_STRESS_SCRIPT}"
-        "${DUETOS_EMBED_BLOB_SCRIPT}"
-    COMMENT "Compiling + embedding /bin/thread_stress.exe (CreateThread path)"
-    VERBATIM
-)
+duetos_embed_blob(generated_msvcrt_dll.h
+    SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-msvcrt-dll.sh"
+    SRC     "${CMAKE_SOURCE_DIR}/userland/libs/msvcrt/msvcrt.c"
+    COMMENT "Compiling + embedding msvcrt.dll (string intrinsics retirement)")
 
-list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_THREAD_STRESS_HEADER}")
+duetos_embed_blob(generated_ntdll_dll.h
+    SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-ntdll-dll.sh"
+    SRC     "${CMAKE_SOURCE_DIR}/userland/libs/ntdll/ntdll.c"
+    COMMENT "Compiling + embedding ntdll.dll (Nt* / Zw* / Rtl* / Ldr* retirement)")
 
-# ----------------------------------------------------------------------------
-# Fifth PE fixture: syscall_stress.exe — exercises the batch-51
-# Win32 API additions: OutputDebugStringA, ExitThread,
-# GetProcessTimes / GetThreadTimes / GetSystemTimes,
-# GlobalMemoryStatusEx, WaitForMultipleObjects.
-# ----------------------------------------------------------------------------
-set(DUETOS_SYSCALL_STRESS_SRC "${CMAKE_SOURCE_DIR}/userland/apps/syscall_stress/hello.c")
-file(GLOB DUETOS_SYSCALL_STRESS_DEFS
-    "${CMAKE_SOURCE_DIR}/userland/apps/syscall_stress/*.def")
-set(DUETOS_SYSCALL_STRESS_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_syscall_stress.h")
-set(DUETOS_SYSCALL_STRESS_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-syscall-stress.sh")
+duetos_embed_blob(generated_dbghelp_dll.h
+    SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-dbghelp-dll.sh"
+    SRC     "${CMAKE_SOURCE_DIR}/userland/libs/dbghelp/dbghelp.c"
+    COMMENT "Compiling + embedding dbghelp.dll (Sym* no-ops)")
 
-add_custom_command(
-    OUTPUT "${DUETOS_SYSCALL_STRESS_HEADER}"
-    COMMAND "${DUETOS_SYSCALL_STRESS_SCRIPT}"
-            "${CMAKE_SOURCE_DIR}"
-            "${DUETOS_SYSCALL_STRESS_HEADER}"
-    DEPENDS
-        "${DUETOS_SYSCALL_STRESS_SRC}"
-        ${DUETOS_SYSCALL_STRESS_DEFS}
-        "${DUETOS_SYSCALL_STRESS_SCRIPT}"
-        "${DUETOS_EMBED_BLOB_SCRIPT}"
-    COMMENT "Compiling + embedding /bin/syscall_stress.exe (batch 51 API coverage)"
-    VERBATIM
-)
+duetos_embed_blob(generated_msvcp140_dll.h
+    SCRIPT     "${CMAKE_SOURCE_DIR}/tools/build/build-msvcp140-dll.sh"
+    SRC        "${CMAKE_SOURCE_DIR}/userland/libs/msvcp140/msvcp140.c"
+    EXTRA_DEPS "${CMAKE_SOURCE_DIR}/userland/libs/msvcp140/msvcp140.def"
+    COMMENT    "Compiling + embedding msvcp140.dll (C++ std throw + ostream helpers)")
 
-list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_SYSCALL_STRESS_HEADER}")
+duetos_embed_blob(generated_kernelbase_dll.h
+    SCRIPT     "${CMAKE_SOURCE_DIR}/tools/build/build-kernelbase-dll.sh"
+    SRC        "${CMAKE_SOURCE_DIR}/userland/libs/kernelbase/kernelbase.c"
+    EXTRA_DEPS "${CMAKE_SOURCE_DIR}/userland/libs/kernelbase/kernelbase.def"
+    COMMENT    "Compiling + embedding kernelbase.dll (forwarders -> kernel32)")
+
+duetos_embed_blob(generated_advapi32_dll.h
+    SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-advapi32-dll.sh"
+    SRC     "${CMAKE_SOURCE_DIR}/userland/libs/advapi32/advapi32.c"
+    COMMENT "Compiling + embedding advapi32.dll (Reg* / token / GetUserName / RtlGenRandom)")
+
+duetos_embed_blob(generated_ucrtbase_dll.h
+    SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-ucrtbase-dll.sh"
+    SRC     "${CMAKE_SOURCE_DIR}/userland/libs/ucrtbase/ucrtbase.c"
+    COMMENT "Compiling + embedding ucrtbase.dll (heap + exit + CRT startup retirement)")
 
 # ----------------------------------------------------------------------------
-# Sixth PE fixture: windowed_hello.exe — first PE that creates a
-# real window via the user32 → SYS_WIN_CREATE bridge. Proves the
-# windowing v0 slice end-to-end: import-resolved user32!
-# CreateWindowExA lands in the kernel compositor + paints.
+# Generic stub DLLs — small, hand-written .c source + an export list
+# passed on the build-script command line. tools/build/build-stub-dll.sh
+# is the shared compiler invocation for all of these.
 # ----------------------------------------------------------------------------
-set(DUETOS_WINDOWED_HELLO_SRC "${CMAKE_SOURCE_DIR}/userland/apps/windowed_hello/hello.c")
-file(GLOB DUETOS_WINDOWED_HELLO_DEFS
-    "${CMAKE_SOURCE_DIR}/userland/apps/windowed_hello/*.def")
-set(DUETOS_WINDOWED_HELLO_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_windowed_hello.h")
-set(DUETOS_WINDOWED_HELLO_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-windowed-hello.sh")
-
-add_custom_command(
-    OUTPUT "${DUETOS_WINDOWED_HELLO_HEADER}"
-    COMMAND "${DUETOS_WINDOWED_HELLO_SCRIPT}"
-            "${CMAKE_SOURCE_DIR}"
-            "${DUETOS_WINDOWED_HELLO_HEADER}"
-    DEPENDS
-        "${DUETOS_WINDOWED_HELLO_SRC}"
-        ${DUETOS_WINDOWED_HELLO_DEFS}
-        "${DUETOS_WINDOWED_HELLO_SCRIPT}"
-        "${DUETOS_EMBED_BLOB_SCRIPT}"
-    COMMENT "Compiling + embedding /bin/windowed_hello.exe (user32 window bridge)"
-    VERBATIM
-)
-
-list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_WINDOWED_HELLO_HEADER}")
-
-# ----------------------------------------------------------------------------
-# Test fixture for the stage-2 EAT parser + DLL loader: a tiny
-# freestanding Windows DLL with three exported C functions
-# (CustomAdd, CustomMul, CustomVersion). Built by clang +
-# lld-link /dll /noentry, no CRT, no imports. The kernel self-
-# test in kernel_main (DllLoaderSelfTest) parses the embedded
-# bytes via PeParseExports and DllLoad to confirm name + ordinal
-# lookups return the expected RVAs.
-# ----------------------------------------------------------------------------
-set(DUETOS_CUSTOMDLL_SRC "${CMAKE_SOURCE_DIR}/userland/libs/customdll/customdll.c")
-set(DUETOS_CUSTOMDLL_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_customdll.h")
-set(DUETOS_CUSTOMDLL_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-customdll.sh")
-
-add_custom_command(
-    OUTPUT "${DUETOS_CUSTOMDLL_HEADER}"
-    COMMAND "${DUETOS_CUSTOMDLL_SCRIPT}"
-            "${CMAKE_SOURCE_DIR}"
-            "${DUETOS_CUSTOMDLL_HEADER}"
-    DEPENDS
-        "${DUETOS_CUSTOMDLL_SRC}"
-        "${DUETOS_CUSTOMDLL_SCRIPT}"
-        "${DUETOS_EMBED_BLOB_SCRIPT}"
-    COMMENT "Compiling + embedding customdll.dll (EAT parser fixture)"
-    VERBATIM
-)
-
-list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_CUSTOMDLL_HEADER}")
-
-# ----------------------------------------------------------------------------
-# Second test DLL for the stage-2 slice 9 multi-DLL preload path.
-# Exports CustomDouble(int) -> int at load base 0x10010000.
-# Deliberately disjoint exports from customdll.dll so a call to
-# CustomDouble HAS to reach the second entry in the preload
-# array — proves the resolver walks past the first DLL on miss.
-# ----------------------------------------------------------------------------
-set(DUETOS_CUSTOMDLL2_SRC "${CMAKE_SOURCE_DIR}/userland/libs/customdll2/customdll2.c")
-set(DUETOS_CUSTOMDLL2_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_customdll2.h")
-set(DUETOS_CUSTOMDLL2_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-customdll2.sh")
-
-add_custom_command(
-    OUTPUT "${DUETOS_CUSTOMDLL2_HEADER}"
-    COMMAND "${DUETOS_CUSTOMDLL2_SCRIPT}"
-            "${CMAKE_SOURCE_DIR}"
-            "${DUETOS_CUSTOMDLL2_HEADER}"
-    DEPENDS
-        "${DUETOS_CUSTOMDLL2_SRC}"
-        "${DUETOS_CUSTOMDLL2_SCRIPT}"
-        "${DUETOS_EMBED_BLOB_SCRIPT}"
-    COMMENT "Compiling + embedding customdll2.dll (multi-DLL preload fixture)"
-    VERBATIM
-)
-
-list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_CUSTOMDLL2_HEADER}")
-
-# ----------------------------------------------------------------------------
-# Userland kernel32.dll — stage-2 slice 10 kicks off the
-# retirement of flat-stubs-page entries into real userland
-# code. First export: GetCurrentProcessId. Future slices
-# extend kernel32.c with more entry points; every addition
-# retires the matching stub (which stays compiled as a
-# fallback but becomes unreachable via slice-6's via-DLL
-# priority).
-# ----------------------------------------------------------------------------
-set(DUETOS_KERNEL32_SRC "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/kernel32.c")
-set(DUETOS_KERNEL32_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_kernel32_dll.h")
-set(DUETOS_KERNEL32_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-kernel32-dll.sh")
-
-add_custom_command(
-    OUTPUT "${DUETOS_KERNEL32_HEADER}"
-    COMMAND "${DUETOS_KERNEL32_SCRIPT}"
-            "${CMAKE_SOURCE_DIR}"
-            "${DUETOS_KERNEL32_HEADER}"
-    DEPENDS
-        "${DUETOS_KERNEL32_SRC}"
-        "${DUETOS_KERNEL32_SCRIPT}"
-        "${DUETOS_EMBED_BLOB_SCRIPT}"
-    COMMENT "Compiling + embedding kernel32.dll (first stub retirement)"
-    VERBATIM
-)
-
-list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_KERNEL32_HEADER}")
-
-# ----------------------------------------------------------------------------
-# Userland vcruntime140.dll — stage-2 slice 13. Retires the
-# batch-5 memset/memcpy/memmove flat stubs. Every MSVC-built
-# PE calls these routinely (struct copy / zero-init / CRT
-# startup), so the via-DLL path fires heavily.
-# ----------------------------------------------------------------------------
-set(DUETOS_VCRUNTIME140_SRC "${CMAKE_SOURCE_DIR}/userland/libs/vcruntime140/vcruntime140.c")
-set(DUETOS_VCRUNTIME140_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_vcruntime140_dll.h")
-set(DUETOS_VCRUNTIME140_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-vcruntime140-dll.sh")
-
-add_custom_command(
-    OUTPUT "${DUETOS_VCRUNTIME140_HEADER}"
-    COMMAND "${DUETOS_VCRUNTIME140_SCRIPT}"
-            "${CMAKE_SOURCE_DIR}"
-            "${DUETOS_VCRUNTIME140_HEADER}"
-    DEPENDS
-        "${DUETOS_VCRUNTIME140_SRC}"
-        "${DUETOS_VCRUNTIME140_SCRIPT}"
-        "${DUETOS_EMBED_BLOB_SCRIPT}"
-    COMMENT "Compiling + embedding vcruntime140.dll (memset/memcpy/memmove retirement)"
-    VERBATIM
-)
-
-list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_VCRUNTIME140_HEADER}")
-
-# ----------------------------------------------------------------------------
-# Userland msvcrt.dll — stage-2 slice 14. Retires the string
-# intrinsics (strlen / strcmp / strcpy / strchr + wide
-# variants) from the flat stubs.
-# ----------------------------------------------------------------------------
-set(DUETOS_MSVCRT_SRC "${CMAKE_SOURCE_DIR}/userland/libs/msvcrt/msvcrt.c")
-set(DUETOS_MSVCRT_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_msvcrt_dll.h")
-set(DUETOS_MSVCRT_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-msvcrt-dll.sh")
-
-add_custom_command(
-    OUTPUT "${DUETOS_MSVCRT_HEADER}"
-    COMMAND "${DUETOS_MSVCRT_SCRIPT}"
-            "${CMAKE_SOURCE_DIR}"
-            "${DUETOS_MSVCRT_HEADER}"
-    DEPENDS
-        "${DUETOS_MSVCRT_SRC}"
-        "${DUETOS_MSVCRT_SCRIPT}"
-        "${DUETOS_EMBED_BLOB_SCRIPT}"
-    COMMENT "Compiling + embedding msvcrt.dll (string intrinsics retirement)"
-    VERBATIM
-)
-
-list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_MSVCRT_HEADER}")
-
-# ----------------------------------------------------------------------------
-# Userland ntdll.dll — stage-2 slice 24. Retires the batch-42+
-# Nt* / Zw* / Rtl* / Ldr* / __chkstk surface. 108 exports
-# total (Zw* aliases emitted as same-DLL forwarders).
-# ----------------------------------------------------------------------------
-set(DUETOS_NTDLL_SRC "${CMAKE_SOURCE_DIR}/userland/libs/ntdll/ntdll.c")
-set(DUETOS_NTDLL_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_ntdll_dll.h")
-set(DUETOS_NTDLL_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-ntdll-dll.sh")
-
-add_custom_command(
-    OUTPUT "${DUETOS_NTDLL_HEADER}"
-    COMMAND "${DUETOS_NTDLL_SCRIPT}"
-            "${CMAKE_SOURCE_DIR}"
-            "${DUETOS_NTDLL_HEADER}"
-    DEPENDS
-        "${DUETOS_NTDLL_SRC}"
-        "${DUETOS_NTDLL_SCRIPT}"
-        "${DUETOS_EMBED_BLOB_SCRIPT}"
-    COMMENT "Compiling + embedding ntdll.dll (Nt* / Zw* / Rtl* / Ldr* retirement)"
-    VERBATIM
-)
-
-list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_NTDLL_HEADER}")
-
-# ----------------------------------------------------------------------------
-# Userland dbghelp.dll — stage-2 slice 25. 11 Sym* / StackWalk
-# / MiniDumpWriteDump no-ops; callers always check return.
-# ----------------------------------------------------------------------------
-set(DUETOS_DBGHELP_SRC "${CMAKE_SOURCE_DIR}/userland/libs/dbghelp/dbghelp.c")
-set(DUETOS_DBGHELP_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_dbghelp_dll.h")
-set(DUETOS_DBGHELP_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-dbghelp-dll.sh")
-
-add_custom_command(
-    OUTPUT "${DUETOS_DBGHELP_HEADER}"
-    COMMAND "${DUETOS_DBGHELP_SCRIPT}"
-            "${CMAKE_SOURCE_DIR}"
-            "${DUETOS_DBGHELP_HEADER}"
-    DEPENDS
-        "${DUETOS_DBGHELP_SRC}"
-        "${DUETOS_DBGHELP_SCRIPT}"
-        "${DUETOS_EMBED_BLOB_SCRIPT}"
-    COMMENT "Compiling + embedding dbghelp.dll (Sym* no-ops)"
-    VERBATIM
-)
-
-list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_DBGHELP_HEADER}")
-
-# ----------------------------------------------------------------------------
-# Userland msvcp140.dll — stage-2 slice 26. 17 mangled C++
-# std:: names (throw helpers + ostream + iostate) via .def.
-# ----------------------------------------------------------------------------
-set(DUETOS_MSVCP140_SRC "${CMAKE_SOURCE_DIR}/userland/libs/msvcp140/msvcp140.c")
-set(DUETOS_MSVCP140_DEF "${CMAKE_SOURCE_DIR}/userland/libs/msvcp140/msvcp140.def")
-set(DUETOS_MSVCP140_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_msvcp140_dll.h")
-set(DUETOS_MSVCP140_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-msvcp140-dll.sh")
-
-add_custom_command(
-    OUTPUT "${DUETOS_MSVCP140_HEADER}"
-    COMMAND "${DUETOS_MSVCP140_SCRIPT}"
-            "${CMAKE_SOURCE_DIR}"
-            "${DUETOS_MSVCP140_HEADER}"
-    DEPENDS
-        "${DUETOS_MSVCP140_SRC}"
-        "${DUETOS_MSVCP140_DEF}"
-        "${DUETOS_MSVCP140_SCRIPT}"
-        "${DUETOS_EMBED_BLOB_SCRIPT}"
-    COMMENT "Compiling + embedding msvcp140.dll (C++ std throw + ostream helpers)"
-    VERBATIM
-)
-
-list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_MSVCP140_HEADER}")
-
-# ----------------------------------------------------------------------------
-# Userland kernelbase.dll — stage-2 slice 27. Forwarder-only
-# DLL: every export cross-forwards to kernel32.dll via the
-# slice-8 chaser in the kernel loader.
-# ----------------------------------------------------------------------------
-set(DUETOS_KERNELBASE_SRC "${CMAKE_SOURCE_DIR}/userland/libs/kernelbase/kernelbase.c")
-set(DUETOS_KERNELBASE_DEF "${CMAKE_SOURCE_DIR}/userland/libs/kernelbase/kernelbase.def")
-set(DUETOS_KERNELBASE_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_kernelbase_dll.h")
-set(DUETOS_KERNELBASE_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-kernelbase-dll.sh")
-
-add_custom_command(
-    OUTPUT "${DUETOS_KERNELBASE_HEADER}"
-    COMMAND "${DUETOS_KERNELBASE_SCRIPT}" "${CMAKE_SOURCE_DIR}" "${DUETOS_KERNELBASE_HEADER}"
-    DEPENDS "${DUETOS_KERNELBASE_SRC}" "${DUETOS_KERNELBASE_DEF}" "${DUETOS_KERNELBASE_SCRIPT}" "${DUETOS_EMBED_BLOB_SCRIPT}"
-    COMMENT "Compiling + embedding kernelbase.dll (forwarders -> kernel32)"
-    VERBATIM
-)
-
-list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_KERNELBASE_HEADER}")
-
-# ----------------------------------------------------------------------------
-# Userland advapi32.dll — stage-2 slice 27. 25 exports: Reg*
-# (all return "not found"), token/privilege (pretend success),
-# GetUserName* (constant), SystemFunction036 (deterministic).
-# ----------------------------------------------------------------------------
-set(DUETOS_ADVAPI32_SRC "${CMAKE_SOURCE_DIR}/userland/libs/advapi32/advapi32.c")
-set(DUETOS_ADVAPI32_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_advapi32_dll.h")
-set(DUETOS_ADVAPI32_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-advapi32-dll.sh")
-
-add_custom_command(
-    OUTPUT "${DUETOS_ADVAPI32_HEADER}"
-    COMMAND "${DUETOS_ADVAPI32_SCRIPT}" "${CMAKE_SOURCE_DIR}" "${DUETOS_ADVAPI32_HEADER}"
-    DEPENDS "${DUETOS_ADVAPI32_SRC}" "${DUETOS_ADVAPI32_SCRIPT}" "${DUETOS_EMBED_BLOB_SCRIPT}"
-    COMMENT "Compiling + embedding advapi32.dll (Reg* / token / GetUserName / RtlGenRandom)"
-    VERBATIM
-)
-
-list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_ADVAPI32_HEADER}")
-
-# ----------------------------------------------------------------------------
-# Stage-2 slice 28 — seven small stub DLLs built via a generic
-# helper (tools/build-stub-dll.sh). Each DLL has a small hand-
-# written .c source + an export list passed on the CMake cmd-
-# line.
-# ----------------------------------------------------------------------------
-set(DUETOS_STUB_DLL_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-stub-dll.sh")
+set(DUETOS_STUB_DLL_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build/build-stub-dll.sh")
 
 macro(duetos_stub_dll name base_va exports)
     set(_src "${CMAKE_SOURCE_DIR}/userland/libs/${name}/${name}.c")
@@ -681,7 +256,6 @@ macro(duetos_stub_dll name base_va exports)
         VERBATIM
     )
     list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${_header}")
-    set(DUETOS_${name}_HEADER "${_header}" PARENT_SCOPE_UNUSED)
 endmacro()
 
 duetos_stub_dll(shlwapi 0x100B0000 "PathAddBackslashW,PathAppendW,PathCombineW,PathFileExistsA,PathFileExistsW,PathFindExtensionA,PathFindExtensionW,PathFindFileNameA,PathFindFileNameW,PathIsDirectoryW,PathRemoveFileSpecW,PathStripPathW,StrCmpNW,StrCmpW,StrStrIW,StrStrW")
@@ -692,9 +266,8 @@ duetos_stub_dll(winmm 0x100F0000 "timeGetTime,timeBeginPeriod,timeEndPeriod,time
 duetos_stub_dll(bcrypt 0x10100000 "BCryptOpenAlgorithmProvider,BCryptCloseAlgorithmProvider,BCryptCreateHash,BCryptHashData,BCryptFinishHash,BCryptDestroyHash,BCryptGetProperty,BCryptGenRandom")
 duetos_stub_dll(psapi 0x10110000 "EnumProcesses,EnumProcessModules,GetMappedFileNameW,GetModuleBaseNameW,GetModuleFileNameExW,GetProcessMemoryInfo,QueryWorkingSet")
 
-# --- DirectX v0 — real COM-vtable d3d9/d3d11/d3d12/dxgi DLLs that
-#     produce working Clear-and-Present pipelines via SYS_GDI_BITBLT.
-#     See userland/libs/dx_shared.h + .claude/knowledge/directx-v0.md.
+# DirectX v0 — real COM-vtable d3d9/d3d11/d3d12/dxgi DLLs that produce working
+# Clear-and-Present pipelines via SYS_GDI_BITBLT.
 duetos_stub_dll(d3d9 0x10120000 "Direct3DCreate9,Direct3DCreate9Ex")
 duetos_stub_dll(d3d11 0x10130000 "D3D11CreateDevice,D3D11CreateDeviceAndSwapChain")
 duetos_stub_dll(d3d12 0x10140000 "D3D12CreateDevice,D3D12GetDebugInterface,D3D12SerializeRootSignature")
@@ -702,7 +275,7 @@ duetos_stub_dll(dxgi 0x10150000 "CreateDXGIFactory,CreateDXGIFactory1,CreateDXGI
 duetos_stub_dll(user32 0x10160000 "BeginPaint,Beep,CallWindowProcA,CallWindowProcW,CharLowerW,CharUpperW,ClientToScreen,ClipCursor,CloseClipboard,CreateCaret,CreateWindowExA,CreateWindowExW,DefWindowProcA,DefWindowProcW,DestroyCaret,DestroyWindow,DispatchMessageA,DispatchMessageW,EmptyClipboard,EndPaint,EnumWindows,FindWindowA,FindWindowExA,FindWindowExW,FindWindowW,GetActiveWindow,GetAsyncKeyState,GetCapture,GetCaretBlinkTime,GetClientRect,GetClipboardData,GetCursorPos,GetDesktopWindow,GetFocus,GetForegroundWindow,GetKeyState,GetMessageA,GetMessageW,GetParent,GetProcessWindowStation,GetSysColor,GetSystemMetrics,GetWindow,GetWindowLongA,GetWindowLongPtrA,GetWindowLongPtrW,GetWindowLongW,GetWindowRect,GetWindowTextA,GetWindowTextW,HideCaret,InvalidateRect,IsWindow,KillTimer,LoadAcceleratorsA,LoadAcceleratorsW,LoadBitmapA,LoadBitmapW,LoadCursorA,LoadCursorW,LoadIconA,LoadIconW,LoadImageA,LoadImageW,LoadMenuA,LoadMenuW,LoadStringA,LoadStringW,MessageBeep,MessageBoxA,MessageBoxExA,MessageBoxExW,MessageBoxW,MoveWindow,OpenClipboard,PeekMessageA,PeekMessageW,PostMessageA,PostMessageW,PostQuitMessage,PostThreadMessageA,PostThreadMessageW,RegisterClassA,RegisterClassExA,RegisterClassExW,RegisterClassW,ReleaseCapture,ScreenToClient,SendMessageA,SendMessageW,SendNotifyMessageA,SendNotifyMessageW,SetActiveWindow,SetCapture,SetCaretBlinkTime,SetCaretPos,SetClipboardData,SetCursor,SetCursorPos,SetFocus,SetForegroundWindow,SetParent,SetTimer,SetWindowLongA,SetWindowLongPtrA,SetWindowLongPtrW,SetWindowLongW,SetWindowPos,SetWindowTextA,SetWindowTextW,ShowCaret,ShowCursor,ShowWindow,TranslateAcceleratorA,TranslateAcceleratorW,TranslateMessage,UnregisterClassA,UnregisterClassW,UpdateWindow,ValidateRect")
 duetos_stub_dll(gdi32 0x10180000 "BitBlt,CreateBitmap,CreateBrushIndirect,CreateCompatibleBitmap,CreateCompatibleDC,CreateDIBSection,CreateDIBitmap,CreateFontA,CreateFontIndirectA,CreateFontIndirectW,CreateFontW,CreatePen,CreateSolidBrush,DeleteDC,DeleteObject,DrawTextA,DrawTextW,Ellipse,ExtTextOutA,ExtTextOutW,FillRect,FrameRect,GetDC,GetObjectA,GetObjectW,GetPixel,GetStockObject,GetWindowDC,LineTo,MoveToEx,Polygon,Polyline,Rectangle,ReleaseDC,RestoreDC,SaveDC,SelectObject,SetBkColor,SetBkMode,SetMapMode,SetPixel,SetPixelV,SetTextAlign,SetTextColor,StretchBlt,TextOutA,TextOutW")
 
-# --- Stage-2 slice 31 — networking / crypto / common UI / version / setup ---
+# Stage-2 slice 31 — networking / crypto / common UI / version / setup.
 duetos_stub_dll(ws2_32 0x10190000 "WSAStartup,WSACleanup,WSAGetLastError,WSASetLastError,socket,closesocket,bind,listen,connect,accept,send,recv,sendto,recvfrom,shutdown,setsockopt,getsockopt,select,htons,ntohs,htonl,ntohl,inet_addr,gethostbyname,gethostname,getaddrinfo,freeaddrinfo")
 duetos_stub_dll(wininet 0x101A0000 "InternetOpenA,InternetOpenW,InternetConnectA,HttpOpenRequestA,HttpSendRequestA,InternetReadFile,InternetCloseHandle,InternetOpenUrlA")
 duetos_stub_dll(winhttp 0x101B0000 "WinHttpOpen,WinHttpConnect,WinHttpOpenRequest,WinHttpSendRequest,WinHttpReceiveResponse,WinHttpReadData,WinHttpCloseHandle")
@@ -712,7 +285,7 @@ duetos_stub_dll(comdlg32 0x101E0000 "GetOpenFileNameA,GetOpenFileNameW,GetSaveFi
 duetos_stub_dll(version 0x101F0000 "GetFileVersionInfoSizeA,GetFileVersionInfoSizeW,GetFileVersionInfoA,GetFileVersionInfoW,VerQueryValueA,VerQueryValueW")
 duetos_stub_dll(setupapi 0x10200000 "SetupDiGetClassDevsA,SetupDiGetClassDevsW,SetupDiDestroyDeviceInfoList,SetupDiEnumDeviceInfo,SetupOpenInfFileA,SetupOpenInfFileW,SetupCloseInfFile")
 
-# --- Stage-2 slice 33 — six more support DLLs ---
+# Stage-2 slice 33 — six more support DLLs.
 duetos_stub_dll(iphlpapi 0x10210000 "GetAdaptersInfo,GetAdaptersAddresses,GetIfTable,GetNumberOfInterfaces,IcmpSendEcho,IcmpCreateFile,IcmpCloseHandle")
 duetos_stub_dll(userenv 0x10220000 "GetUserProfileDirectoryA,GetUserProfileDirectoryW,GetAllUsersProfileDirectoryW,CreateEnvironmentBlock,DestroyEnvironmentBlock,LoadUserProfileW,UnloadUserProfile")
 duetos_stub_dll(wtsapi32 0x10230000 "WTSQuerySessionInformationA,WTSQuerySessionInformationW,WTSFreeMemory,WTSEnumerateSessionsW,WTSRegisterSessionNotification,WTSUnRegisterSessionNotification")
@@ -720,76 +293,6 @@ duetos_stub_dll(dwmapi 0x10240000 "DwmIsCompositionEnabled,DwmEnableComposition,
 duetos_stub_dll(uxtheme 0x10250000 "OpenThemeData,CloseThemeData,IsThemeActive,IsAppThemed,SetWindowTheme,GetThemeSysFont,DrawThemeBackground,DrawThemeText")
 duetos_stub_dll(secur32 0x10260000 "AcquireCredentialsHandleA,FreeCredentialsHandle,InitializeSecurityContextA,DeleteSecurityContext,GetUserNameExA,GetUserNameExW")
 
-# ----------------------------------------------------------------------------
-# Userland ucrtbase.dll — stage-2 slice 15. Retires the
-# UCRT runtime stubs: heap alloc (malloc/free/calloc/realloc
-# /_aligned_*), terminators (exit/_exit), CRT startup shims
-# (_initterm/_initterm_e/_cexit/_c_exit/_set_app_type/
-# __setusermatherr/_configthreadlocale), plus string
-# intrinsics aliased from msvcrt.
-# ----------------------------------------------------------------------------
-set(DUETOS_UCRTBASE_SRC "${CMAKE_SOURCE_DIR}/userland/libs/ucrtbase/ucrtbase.c")
-set(DUETOS_UCRTBASE_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_ucrtbase_dll.h")
-set(DUETOS_UCRTBASE_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-ucrtbase-dll.sh")
-
-add_custom_command(
-    OUTPUT "${DUETOS_UCRTBASE_HEADER}"
-    COMMAND "${DUETOS_UCRTBASE_SCRIPT}"
-            "${CMAKE_SOURCE_DIR}"
-            "${DUETOS_UCRTBASE_HEADER}"
-    DEPENDS
-        "${DUETOS_UCRTBASE_SRC}"
-        "${DUETOS_UCRTBASE_SCRIPT}"
-        "${DUETOS_EMBED_BLOB_SCRIPT}"
-    COMMENT "Compiling + embedding ucrtbase.dll (heap + exit + CRT startup retirement)"
-    VERBATIM
-)
-
-list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_UCRTBASE_HEADER}")
-
-# ----------------------------------------------------------------------------
-# Sixth PE fixture: customdll_test.exe — first userland program
-# that imports from a real loaded DLL (customdll.dll) rather
-# than from the flat stubs page. Exercises stage-2 slice 6's
-# via-DLL IAT resolution path end-to-end.
-# ----------------------------------------------------------------------------
-set(DUETOS_CUSTOMDLL_TEST_SRC "${CMAKE_SOURCE_DIR}/userland/apps/customdll_test/hello.c")
-file(GLOB DUETOS_CUSTOMDLL_TEST_DEFS
-    "${CMAKE_SOURCE_DIR}/userland/apps/customdll_test/*.def")
-set(DUETOS_CUSTOMDLL_TEST_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_customdll_test.h")
-set(DUETOS_CUSTOMDLL_TEST_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-customdll-test.sh")
-
-add_custom_command(
-    OUTPUT "${DUETOS_CUSTOMDLL_TEST_HEADER}"
-    COMMAND "${DUETOS_CUSTOMDLL_TEST_SCRIPT}"
-            "${CMAKE_SOURCE_DIR}"
-            "${DUETOS_CUSTOMDLL_TEST_HEADER}"
-    DEPENDS
-        "${DUETOS_CUSTOMDLL_TEST_SRC}"
-        ${DUETOS_CUSTOMDLL_TEST_DEFS}
-        "${DUETOS_CUSTOMDLL_TEST_SCRIPT}"
-        "${DUETOS_EMBED_BLOB_SCRIPT}"
-    COMMENT "Compiling + embedding /bin/customdll_test.exe (stage-2 slice 6 fixture)"
-    VERBATIM
-)
-
-list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_CUSTOMDLL_TEST_HEADER}")
-
-# --- Stage-2 slice 34 — real-registry + real-fopen test fixture ---
-set(DUETOS_REG_FOPEN_TEST_SRC "${CMAKE_SOURCE_DIR}/userland/apps/reg_fopen_test/hello.c")
-file(GLOB DUETOS_REG_FOPEN_TEST_DEFS
-    "${CMAKE_SOURCE_DIR}/userland/apps/reg_fopen_test/*.def")
-set(DUETOS_REG_FOPEN_TEST_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_reg_fopen_test.h")
-set(DUETOS_REG_FOPEN_TEST_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build-reg-fopen-test.sh")
-add_custom_command(
-    OUTPUT "${DUETOS_REG_FOPEN_TEST_HEADER}"
-    COMMAND "${DUETOS_REG_FOPEN_TEST_SCRIPT}" "${CMAKE_SOURCE_DIR}" "${DUETOS_REG_FOPEN_TEST_HEADER}"
-    DEPENDS "${DUETOS_REG_FOPEN_TEST_SRC}" ${DUETOS_REG_FOPEN_TEST_DEFS}
-            "${DUETOS_REG_FOPEN_TEST_SCRIPT}" "${DUETOS_EMBED_BLOB_SCRIPT}"
-    COMMENT "Compiling + embedding reg_fopen_test.exe (registry + fopen fixture)"
-    VERBATIM
-)
-list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_REG_FOPEN_TEST_HEADER}")
 
 set(DUETOS_KERNEL_LINKER_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/arch/x86_64/linker.ld")
 
@@ -819,7 +322,7 @@ endfunction()
 # ----------------------------------------------------------------------------
 add_executable(duetos-kernel-stage1
     ${DUETOS_KERNEL_SHARED_SOURCES}
-    core/symbols_stub.cpp
+    util/symbols_stub.cpp
 )
 set_target_properties(duetos-kernel-stage1 PROPERTIES
     OUTPUT_NAME "duetos-kernel-stage1.elf"
@@ -848,11 +351,11 @@ set(DUETOS_SYMBOLS_GENERATED "${CMAKE_CURRENT_BINARY_DIR}/symbols_generated.cpp"
 
 add_custom_command(
     OUTPUT "${DUETOS_SYMBOLS_GENERATED}"
-    COMMAND "${CMAKE_SOURCE_DIR}/tools/gen-symbols.sh"
+    COMMAND "${CMAKE_SOURCE_DIR}/tools/build/gen-symbols.sh"
             "$<TARGET_FILE:duetos-kernel-stage1>"
             "${DUETOS_SYMBOLS_GENERATED}"
             "${CMAKE_SOURCE_DIR}"
-    DEPENDS duetos-kernel-stage1 "${CMAKE_SOURCE_DIR}/tools/gen-symbols.sh"
+    DEPENDS duetos-kernel-stage1 "${CMAKE_SOURCE_DIR}/tools/build/gen-symbols.sh"
     COMMENT "Extracting kernel symbol table from stage-1 ELF"
     VERBATIM
 )
@@ -869,7 +372,7 @@ add_executable(duetos-kernel
 )
 
 # Deliberate-panic build flag, consumed by kernel_main and triggered
-# by tools/test-panic.sh. OFF for normal builds — the demo panic
+# by tools/debug/test-panic.sh. OFF for normal builds — the demo panic
 # halts the kernel on purpose and must not ship in a release preset.
 option(DUETOS_PANIC_DEMO "Insert a deliberate Panic() at end of kernel_main (test-panic.sh)" OFF)
 if(DUETOS_PANIC_DEMO)
@@ -902,7 +405,7 @@ endif()
 
 
 # Deliberate-CPU-exception build flag, consumed by kernel_main and
-# triggered by tools/test-trap.sh. Executes `ud2` to take a #UD fault
+# triggered by tools/debug/test-trap.sh. Executes `ud2` to take a #UD fault
 # so the trap dispatcher's crash-dump path can be verified end-to-end
 # (extractable BEGIN/END record, symbolized RIP, backtrace). OFF for
 # normal builds.

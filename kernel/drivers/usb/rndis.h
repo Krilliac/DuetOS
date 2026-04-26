@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../../core/types.h"
+#include "util/types.h"
 
 /*
  * DuetOS — USB RNDIS Ethernet driver, v0.

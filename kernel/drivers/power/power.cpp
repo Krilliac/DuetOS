@@ -1,11 +1,11 @@
-#include "power.h"
+#include "drivers/power/power.h"
 
-#include "../../acpi/acpi.h"
-#include "../../arch/x86_64/serial.h"
-#include "../../arch/x86_64/smbios.h"
-#include "../../arch/x86_64/thermal.h"
-#include "../../core/klog.h"
-#include "../../core/panic.h"
+#include "acpi/acpi.h"
+#include "arch/x86_64/serial.h"
+#include "arch/x86_64/smbios.h"
+#include "arch/x86_64/thermal.h"
+#include "log/klog.h"
+#include "core/panic.h"
 
 namespace duetos::drivers::power
 {

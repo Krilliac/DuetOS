@@ -13,7 +13,7 @@
  * MiniDumpWriteDump return 0 = FALSE (no info, no walk, no
  * dump).
  *
- * Build: tools/build-dbghelp-dll.sh at /base:0x10070000.
+ * Build: tools/build/build-dbghelp-dll.sh at /base:0x10070000.
  */
 
 typedef int BOOL;

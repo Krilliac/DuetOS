@@ -13,9 +13,9 @@
  * over in xhci.cpp. Cross-TU surface lives in xhci_internal.h.
  */
 
-#include "../input/ps2kbd.h"
-#include "../input/ps2mouse.h"
-#include "xhci_internal.h"
+#include "drivers/input/ps2kbd.h"
+#include "drivers/input/ps2mouse.h"
+#include "drivers/usb/xhci_internal.h"
 
 namespace duetos::drivers::usb::xhci::internal
 {

@@ -5,37 +5,37 @@
  * the per-probe contract.
  *
  * WHAT
- *   The Linux-flavour analogue of kernel/core/ring3_smoke.cpp:
+ *   The Linux-flavour analogue of kernel/proc/ring3_smoke.cpp:
  *   spawns ring-3 tasks built from hand-laid bytecode that
  *   exercise the Linux ABI surface specifically (the `syscall`
  *   instruction path, MSR_LSTAR routing, Linux-specific syscall
  *   numbers, errno return-value convention).
  *
  * HOW
- *   Same WriteUserCodeFrame pattern as core/ring3_smoke.cpp:
+ *   Same WriteUserCodeFrame pattern as proc/ring3_smoke.cpp:
  *   bytecode laid into a fresh frame, mapped user-RX, task
  *   spawned with abi_flavor = kAbiLinux so the syscall MSR is
  *   activated for that task. Each Spawn*Probe targets one
  *   Linux syscall and asserts the expected return.
  */
 
-#include "ring3_smoke.h"
+#include "subsystems/linux/ring3_smoke.h"
 
-#include "../../arch/x86_64/gdt.h"
-#include "../../arch/x86_64/serial.h"
-#include "../../arch/x86_64/usermode.h"
-#include "../../core/klog.h"
-#include "../../core/panic.h"
-#include "../../core/process.h"
-#include "../../core/ring3_smoke.h"
-#include "../../core/generated_synxtest_elf.h"
-#include "../../cpu/percpu.h"
-#include "../../fs/ramfs.h"
-#include "../../mm/address_space.h"
-#include "../../mm/frame_allocator.h"
-#include "../../mm/page.h"
-#include "../../mm/paging.h"
-#include "../../sched/sched.h"
+#include "arch/x86_64/gdt.h"
+#include "arch/x86_64/serial.h"
+#include "arch/x86_64/usermode.h"
+#include "log/klog.h"
+#include "core/panic.h"
+#include "proc/process.h"
+#include "proc/ring3_smoke.h"
+#include "core/generated_synxtest_elf.h"
+#include "cpu/percpu.h"
+#include "fs/ramfs.h"
+#include "mm/address_space.h"
+#include "mm/frame_allocator.h"
+#include "mm/page.h"
+#include "mm/paging.h"
+#include "sched/sched.h"
 
 namespace duetos::subsystems::linux
 {

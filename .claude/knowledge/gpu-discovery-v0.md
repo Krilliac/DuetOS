@@ -68,7 +68,7 @@ at the same physical memory; future slices can consolidate.
 
 ## Boot-smoke guard
 
-`tools/ctest-boot-smoke.sh` now asserts the
+`tools/test/ctest-boot-smoke.sh` now asserts the
 `drivers/gpu : discovered GPUs` klog line appears. A regression in
 PCI enumeration or GpuInit wiring fails the smoke.
 

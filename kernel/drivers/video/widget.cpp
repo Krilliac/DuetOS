@@ -33,18 +33,18 @@
  *   a TU and section banners group related widgets together.
  */
 
-#include "widget.h"
+#include "drivers/video/widget.h"
 
-#include "../../arch/x86_64/cpu.h"
-#include "../../drivers/input/ps2mouse.h"
-#include "../../sched/sched.h"
-#include "calendar.h"
-#include "console.h"
-#include "cursor.h"
-#include "framebuffer.h"
-#include "menu.h"
-#include "netpanel.h"
-#include "taskbar.h"
+#include "arch/x86_64/cpu.h"
+#include "drivers/input/ps2mouse.h"
+#include "sched/sched.h"
+#include "drivers/video/calendar.h"
+#include "drivers/video/console.h"
+#include "drivers/video/cursor.h"
+#include "drivers/video/framebuffer.h"
+#include "drivers/video/menu.h"
+#include "drivers/video/netpanel.h"
+#include "drivers/video/taskbar.h"
 
 namespace duetos::drivers::video
 {

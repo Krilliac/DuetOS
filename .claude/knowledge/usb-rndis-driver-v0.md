@@ -98,7 +98,7 @@ driver is functional end-to-end.**
 - `kernel/drivers/usb/xhci.cpp` — adds the side cache, the bulk
   poll lock + ack/release helpers, the forward declarations.
 - `kernel/CMakeLists.txt` — `drivers/usb/rndis.cpp` added.
-- `kernel/core/shell.cpp` — `CmdUsbNet` + `usbnet` keyword.
+- `kernel/shell/shell.cpp` — `CmdUsbNet` + `usbnet` keyword.
 - `kernel/core/main.cpp` — auto-probe deliberately NOT called.
 - `kernel/net/net_smoke.cpp` — auto-probe deliberately NOT
   called from the smoke-test tail (regression note in code).

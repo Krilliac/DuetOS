@@ -18,10 +18,10 @@ is a no-op — the walk still runs to validate the table shape.
 
 Applies to:
 
-- `kernel/core/pe_loader.cpp` — `ApplyRelocations` (new),
+- `kernel/loader/pe_loader.cpp` — `ApplyRelocations` (new),
   `ParseHeaders` (relaxed), `PeLoad` (calls apply between
   section mapping and import resolution).
-- `tools/build-hello-winapi.sh` — flipped from
+- `tools/build/build-hello-winapi.sh` — flipped from
   `/dynamicbase:no` to default `/dynamicbase` so the smoke
   harness exercises the walk on every boot.
 

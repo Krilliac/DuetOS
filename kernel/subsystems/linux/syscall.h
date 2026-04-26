@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../../core/types.h"
+#include "util/types.h"
 
 /*
  * DuetOS — Linux-ABI syscall subsystem (v0).
@@ -18,7 +18,7 @@
  *
  * The in-kernel dispatch table is separate from core::SyscallDispatch
  * (which is the native DuetOS table reached via int 0x80). A
- * process's `abi_flavor` field (core/process.h) is set by the
+ * process's `abi_flavor` field (proc/process.h) is set by the
  * loader at spawn time and determines which entry path its ring-3
  * task will use — the Win32 PE subsystem stays on int 0x80
  * unchanged, Linux ELF binaries go through `syscall`.

@@ -17,9 +17,9 @@
  * Runtime / ring it should poke as an argument.
  */
 
-#include "../../mm/frame_allocator.h"
-#include "../../mm/page.h"
-#include "xhci_internal.h"
+#include "mm/frame_allocator.h"
+#include "mm/page.h"
+#include "drivers/usb/xhci_internal.h"
 
 namespace duetos::drivers::usb::xhci::internal
 {

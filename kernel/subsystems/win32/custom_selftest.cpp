@@ -1,11 +1,11 @@
-#include "custom_selftest.h"
-#include "custom.h"
+#include "subsystems/win32/custom_selftest.h"
+#include "subsystems/win32/custom.h"
 
-#include "../../arch/x86_64/serial.h"
-#include "../../arch/x86_64/traps.h"
-#include "../../core/process.h"
-#include "../../core/syscall.h"
-#include "../../mm/kheap.h"
+#include "arch/x86_64/serial.h"
+#include "arch/x86_64/traps.h"
+#include "proc/process.h"
+#include "syscall/syscall.h"
+#include "mm/kheap.h"
 
 /*
  * End-to-end smoke test for the Win32 custom-diagnostics suite.

@@ -17,7 +17,7 @@
  * and `-fno-builtin` on the command line cooperate to keep
  * the bodies loop-shaped.
  *
- * Build: tools/build-vcruntime140-dll.sh
+ * Build: tools/build/build-vcruntime140-dll.sh
  *   clang --target=x86_64-pc-windows-msvc + lld-link /dll
  *   /noentry /nodefaultlib /base:0x10030000.
  */

@@ -13,7 +13,7 @@
  * bytes the controller expects.
  */
 
-#include "xhci_internal.h"
+#include "drivers/usb/xhci_internal.h"
 
 namespace duetos::drivers::usb::xhci::internal
 {

@@ -32,9 +32,9 @@ Three new translation units:
 
 | File | Role |
 |------|------|
-| `kernel/core/pe_exports.h` / `.cpp` | Standalone EAT parser. Given a PE file buffer, validates `IMAGE_EXPORT_DIRECTORY` and exposes name / ordinal lookup + forwarder detection. No allocations, no AS dependency. |
-| `kernel/core/dll_loader.h` / `.cpp` | DLL-loader skeleton. `DllLoad(file, len, as, aslr_delta)` validates the DLL-kind bit, maps every section into `as`, applies base relocations, and parses the EAT. Returns a `DllImage` + parsed `PeExports`. |
-| `kernel/core/pe_loader.cpp` | One-line extension: `PeReport` now calls `PeExportsReport` on every PE it scans so the boot log dumps the EAT whenever one is present. |
+| `kernel/loader/pe_exports.h` / `.cpp` | Standalone EAT parser. Given a PE file buffer, validates `IMAGE_EXPORT_DIRECTORY` and exposes name / ordinal lookup + forwarder detection. No allocations, no AS dependency. |
+| `kernel/loader/dll_loader.h` / `.cpp` | DLL-loader skeleton. `DllLoad(file, len, as, aslr_delta)` validates the DLL-kind bit, maps every section into `as`, applies base relocations, and parses the EAT. Returns a `DllImage` + parsed `PeExports`. |
+| `kernel/loader/pe_loader.cpp` | One-line extension: `PeReport` now calls `PeExportsReport` on every PE it scans so the boot log dumps the EAT whenever one is present. |
 
 ## EAT parser API (pe_exports.h)
 
@@ -121,7 +121,7 @@ Deferred to stage 2 slice 2+:
   parser has been exercised on every existing ramfs PE (they
   all hit `NoExportDirectory` cleanly). A later slice will
   add a purpose-built test DLL (mirror of
-  `tools/build-hello-winapi.sh`) so the name / ordinal lookup
+  `tools/build/build-hello-winapi.sh`) so the name / ordinal lookup
   and forwarder paths get real coverage on boot.
 
 ## Design decisions
@@ -184,8 +184,8 @@ New test surface:
 | File | Role |
 |------|------|
 | `userland/libs/customdll/customdll.c` | Three-function freestanding DLL source: `CustomAdd`, `CustomMul`, `CustomVersion`. `__declspec(dllexport)` on each. No CRT, no imports, no DllMain. |
-| `tools/build-customdll.sh` | Host build script. `clang --target=x86_64-pc-windows-msvc -c` → object, then `lld-link /dll /noentry /nodefaultlib /base:0x10000000 /export:... /out:customdll.dll` → 2 KiB DLL. Runs `embed-blob.py` to produce `generated_customdll.h`. |
-| `kernel/core/dll_loader_selftest.cpp` | `DllLoaderSelfTest()` parses the embedded bytes, loads them into a scratch `AddressSpace`, and asserts name + ordinal lookups resolve to VAs inside the mapped image. |
+| `tools/build/build-customdll.sh` | Host build script. `clang --target=x86_64-pc-windows-msvc -c` → object, then `lld-link /dll /noentry /nodefaultlib /base:0x10000000 /export:... /out:customdll.dll` → 2 KiB DLL. Runs `embed-blob.py` to produce `generated_customdll.h`. |
+| `kernel/loader/dll_loader_selftest.cpp` | `DllLoaderSelfTest()` parses the embedded bytes, loads them into a scratch `AddressSpace`, and asserts name + ordinal lookups resolve to VAs inside the mapped image. |
 | `kernel/CMakeLists.txt` | `add_custom_command` fires the DLL build whenever the C source or the script changes, and the generated header is folded into the kernel's shared source list so both stages pick it up. |
 | `kernel/core/main.cpp` | One-line call into `DllLoaderSelfTest()` right after `Win32LogNtCoverage` — same spot as the other subsystem scoreboards. |
 
@@ -330,7 +330,7 @@ SYS_DLL_PROC_ADDRESS = 57
   returns: absolute VA of the export on hit, 0 on miss
 ```
 
-Handler in `kernel/core/syscall.cpp`:
+Handler in `kernel/syscall/syscall.cpp`:
 - `CurrentProcess()` — no `proc` → return 0.
 - `CopyFromUser` the function name into a 257-byte kernel-
   stack bounce buffer (256 chars + hard NUL). Bounded so a
@@ -422,7 +422,7 @@ immediately after `Win32HeapInit`, inside the existing
 
 ### Where it hooks
 
-`kernel/core/ring3_smoke.cpp::SpawnPeFile` — right after the
+`kernel/proc/ring3_smoke.cpp::SpawnPeFile` — right after the
 Win32 heap stands up for a PE that had imports. Reuses the
 same gate: freestanding PEs (e.g. `hello.exe`) neither get a
 heap nor a DLL, keeping their frame footprint unchanged.
@@ -612,10 +612,10 @@ a tiny PE that imports `CustomAdd` / `CustomMul` /
 | `userland/apps/customdll_test/hello.c` | `_start` calls each of the three DLL exports, cross-checks their return values, and `ExitProcess`es with `0x1234` on success / `0xBAD0` on mismatch. Freestanding, no CRT, no SSE. |
 | `userland/apps/customdll_test/customdll.def` | Declares the three DLL exports for `llvm-dlltool`. |
 | `userland/apps/customdll_test/kernel32.def` | `ExitProcess` only — tight `.def` to keep the produced PE small. |
-| `tools/build-customdll-test.sh` | Host-side: two `.lib`s via `llvm-dlltool`, one `.obj` via `clang`, one PE via `lld-link /subsystem:console /entry:_start /base:0x140000000`. Embeds bytes as `generated_customdll_test.h`. |
+| `tools/build/build-customdll-test.sh` | Host-side: two `.lib`s via `llvm-dlltool`, one `.obj` via `clang`, one PE via `lld-link /subsystem:console /entry:_start /base:0x140000000`. Embeds bytes as `generated_customdll_test.h`. |
 | `kernel/CMakeLists.txt` | `add_custom_command` fires the build whenever source/scripts change; header folded into both kernel stages. |
 | `kernel/fs/ramfs.cpp` | `/bin/customdll_test.exe` node added to the trusted bin listing. |
-| `kernel/core/ring3_smoke.cpp` | Fifth `SpawnPeFile` call in the autoboot list — runs after `syscall_stress`, before `winkill` diagnostic. |
+| `kernel/proc/ring3_smoke.cpp` | Fifth `SpawnPeFile` call in the autoboot list — runs after `syscall_stress`, before `winkill` diagnostic. |
 
 ### Expected boot-log signature
 
@@ -699,7 +699,7 @@ Distinguishing the forwarder path from the direct via-DLL
 path (`via-dll` vs `via-dll-fwd`) makes the chain visible
 for regression diagnosis.
 
-### DLL-side change (`tools/build-customdll.sh`)
+### DLL-side change (`tools/build/build-customdll.sh`)
 
 One extra `lld-link` flag:
 
@@ -790,7 +790,7 @@ before the increment — no uninitialised-read hazard.
 | File | Role |
 |------|------|
 | `userland/libs/customdll2/customdll2.c` | `__declspec(dllexport) int CustomDouble(int n) { return n*2; }`. One function, disjoint from customdll.dll. |
-| `tools/build-customdll2.sh` | `clang --target=...msvc -c` → `.obj`, `lld-link /dll /noentry /base:0x10010000 /export:CustomDouble` → DLL. Embed as `generated_customdll2.h`. |
+| `tools/build/build-customdll2.sh` | `clang --target=...msvc -c` → `.obj`, `lld-link /dll /noentry /base:0x10010000 /export:CustomDouble` → DLL. Embed as `generated_customdll2.h`. |
 | `kernel/CMakeLists.txt` | `add_custom_command` for the new blob; header folded into both stages. |
 
 Load base `0x10010000` = 1 MiB above `customdll.dll`'s
@@ -1128,7 +1128,7 @@ within `kFrameBudgetTrusted`'s 256.
   function with ~42 exports aliasing to it. Cheap way to
   retire big STATUS_NOT_IMPLEMENTED batches without writing
   42 copies.
-- **Generic stub-DLL builder** (`tools/build-stub-dll.sh`) —
+- **Generic stub-DLL builder** (`tools/build/build-stub-dll.sh`) —
   takes (name, base VA, comma-separated exports) + a
   per-DLL C source. Slices 28-29 shipped 13 DLLs through
   this one helper.

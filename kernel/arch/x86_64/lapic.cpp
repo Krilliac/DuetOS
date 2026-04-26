@@ -1,12 +1,12 @@
-#include "lapic.h"
+#include "arch/x86_64/lapic.h"
 
-#include "cpu.h"
-#include "idt.h"
-#include "serial.h"
+#include "arch/x86_64/cpu.h"
+#include "arch/x86_64/idt.h"
+#include "arch/x86_64/serial.h"
 
-#include "../../core/klog.h"
-#include "../../core/panic.h"
-#include "../../mm/paging.h"
+#include "log/klog.h"
+#include "core/panic.h"
+#include "mm/paging.h"
 
 // Defined in exceptions.S — the dedicated stub for the LAPIC spurious
 // vector (0xFF). Lives outside isr_stub_table because a 256-entry table

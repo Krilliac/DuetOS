@@ -1,13 +1,13 @@
-#include "taskbar.h"
+#include "drivers/video/taskbar.h"
 
-#include "../../arch/x86_64/rtc.h"
-#include "../../drivers/net/net.h"
-#include "../../drivers/power/power.h"
-#include "../../mm/frame_allocator.h"
-#include "../../net/stack.h"
-#include "../../sched/sched.h"
-#include "framebuffer.h"
-#include "widget.h"
+#include "arch/x86_64/rtc.h"
+#include "drivers/net/net.h"
+#include "drivers/power/power.h"
+#include "mm/frame_allocator.h"
+#include "net/stack.h"
+#include "sched/sched.h"
+#include "drivers/video/framebuffer.h"
+#include "drivers/video/widget.h"
 
 namespace duetos::drivers::video
 {

@@ -1,7 +1,7 @@
 #pragma once
 
-#include "../core/types.h"
-#include "ramfs.h"
+#include "util/types.h"
+#include "fs/ramfs.h"
 
 /*
  * DuetOS VFS — v0.

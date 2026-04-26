@@ -18,17 +18,17 @@
  *   completion.
  */
 
-#include "ahci.h"
+#include "drivers/storage/ahci.h"
 
-#include "../../arch/x86_64/serial.h"
-#include "../../core/kdbg.h"
-#include "../../core/klog.h"
-#include "../../core/panic.h"
-#include "../../mm/frame_allocator.h"
-#include "../../mm/page.h"
-#include "../../mm/paging.h"
-#include "../pci/pci.h"
-#include "block.h"
+#include "arch/x86_64/serial.h"
+#include "diag/kdbg.h"
+#include "log/klog.h"
+#include "core/panic.h"
+#include "mm/frame_allocator.h"
+#include "mm/page.h"
+#include "mm/paging.h"
+#include "drivers/pci/pci.h"
+#include "drivers/storage/block.h"
 
 namespace duetos::drivers::storage
 {

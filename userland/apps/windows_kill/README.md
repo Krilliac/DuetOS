@@ -2,7 +2,7 @@
 
 `windows-kill.exe` is a third-party Windows console utility
 vendored into this repo as a **test vector for the kernel PE
-loader's diagnostic path** (`kernel/core/pe_loader.cpp` —
+loader's diagnostic path** (`kernel/loader/pe_loader.cpp` —
 `PeReport`).
 
 ## What it exercises

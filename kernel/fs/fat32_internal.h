@@ -14,8 +14,8 @@
 // for the driver's own TUs only — never include this header from
 // outside kernel/fs/. The public API lives in fat32.h.
 
-#include "../core/types.h"
-#include "fat32.h"
+#include "util/types.h"
+#include "fs/fat32.h"
 
 namespace duetos::fs::fat32::internal
 {

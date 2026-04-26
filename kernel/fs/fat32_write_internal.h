@@ -14,8 +14,8 @@
 // kernel/fs/. The read-side primitives live in fat32_internal.h
 // under `namespace internal`.
 
-#include "../core/types.h"
-#include "fat32.h"
+#include "util/types.h"
+#include "fs/fat32.h"
 
 namespace duetos::fs::fat32::internal_write
 {

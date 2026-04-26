@@ -1,9 +1,9 @@
-#include "pic.h"
+#include "arch/x86_64/pic.h"
 
-#include "cpu.h"
-#include "serial.h"
+#include "arch/x86_64/cpu.h"
+#include "arch/x86_64/serial.h"
 
-#include "../../core/klog.h"
+#include "log/klog.h"
 
 namespace duetos::arch
 {

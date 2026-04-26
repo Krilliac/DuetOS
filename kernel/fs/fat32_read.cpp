@@ -14,10 +14,10 @@
  * is unchanged — split is source-only.
  */
 
-#include "fat32.h"
+#include "fs/fat32.h"
 
-#include "../drivers/storage/block.h"
-#include "fat32_internal.h"
+#include "drivers/storage/block.h"
+#include "fs/fat32_internal.h"
 
 namespace duetos::fs::fat32
 {

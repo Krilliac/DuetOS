@@ -1,17 +1,17 @@
-#include "smp.h"
+#include "arch/x86_64/smp.h"
 
-#include "cpu.h"
-#include "lapic.h"
-#include "serial.h"
-#include "timer.h"
+#include "arch/x86_64/cpu.h"
+#include "arch/x86_64/lapic.h"
+#include "arch/x86_64/serial.h"
+#include "arch/x86_64/timer.h"
 
-#include "../../acpi/acpi.h"
-#include "../../core/klog.h"
-#include "../../core/panic.h"
-#include "../../cpu/percpu.h"
-#include "../../mm/kheap.h"
-#include "../../mm/page.h"
-#include "../../sched/sched.h"
+#include "acpi/acpi.h"
+#include "log/klog.h"
+#include "core/panic.h"
+#include "cpu/percpu.h"
+#include "mm/kheap.h"
+#include "mm/page.h"
+#include "sched/sched.h"
 
 // Linker-emitted symbols for the trampoline image (see ap_trampoline.S).
 // Declared at file scope (outside any namespace) so the linker matches

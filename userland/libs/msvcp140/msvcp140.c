@@ -15,7 +15,7 @@
  * aliases in a .def file (mangled C++ names contain ? @ / <
  * which can't appear on a bash command line without escaping).
  *
- * Build: tools/build-msvcp140-dll.sh at /base:0x10080000.
+ * Build: tools/build/build-msvcp140-dll.sh at /base:0x10080000.
  */
 
 typedef int BOOL;

@@ -14,13 +14,13 @@
  * file doesn't depend on syscall.cpp's anon-namespace WriteMsr.
  */
 
-#include "syscall_internal.h"
+#include "subsystems/linux/syscall_internal.h"
 
-#include "../../core/process.h"
-#include "../../core/random.h"
-#include "../../mm/address_space.h"
-#include "../../mm/frame_allocator.h"
-#include "../../sched/sched.h"
+#include "proc/process.h"
+#include "util/random.h"
+#include "mm/address_space.h"
+#include "mm/frame_allocator.h"
+#include "sched/sched.h"
 
 namespace duetos::subsystems::linux::internal
 {

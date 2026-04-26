@@ -269,10 +269,10 @@ subsystem at a time.
   and anti-bloat guidelines.
 - `docs/ARCHITECTURE.md` — the layering model, how a Win32 call
   travels from the PE's `call qword [iat]` to a kernel syscall.
-- `kernel/core/pe_loader.cpp` — PE spawn path with diagnostic
+- `kernel/loader/pe_loader.cpp` — PE spawn path with diagnostic
   PeReport.
-- `kernel/core/pe_exports.cpp` — EAT parser.
-- `kernel/core/dll_loader.cpp` — DLL loader and via-DLL resolver.
+- `kernel/loader/pe_exports.cpp` — EAT parser.
+- `kernel/loader/dll_loader.cpp` — DLL loader and via-DLL resolver.
 - `userland/libs/*/` — the 29 userland DLL sources.
 - `.claude/knowledge/` — working notes accumulated during development.
   Many of these reference internal slice/batch numbering that does not

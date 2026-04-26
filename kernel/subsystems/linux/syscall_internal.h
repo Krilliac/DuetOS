@@ -13,7 +13,7 @@
 // header from outside kernel/subsystems/linux/. The public API
 // lives in syscall.h.
 
-#include "../../core/types.h"
+#include "util/types.h"
 
 namespace duetos::subsystems::linux::internal
 {

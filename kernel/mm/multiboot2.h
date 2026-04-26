@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../core/types.h"
+#include "util/types.h"
 
 /*
  * Multiboot2 information structure — the subset we actually consume.

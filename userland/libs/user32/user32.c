@@ -28,7 +28,7 @@ typedef unsigned long long LPARAM;
 typedef unsigned short wchar_t16;
 typedef void* HANDLE;
 
-/* Syscall numbers duplicated from kernel/core/syscall.h — keeping
+/* Syscall numbers duplicated from kernel/syscall/syscall.h — keeping
  * the two in sync is a manual discipline shared with every other
  * DLL here. Compile-time drift is caught by the stubs' runtime
  * behaviour diverging from spec. */

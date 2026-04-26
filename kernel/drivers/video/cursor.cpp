@@ -1,6 +1,6 @@
-#include "cursor.h"
+#include "drivers/video/cursor.h"
 
-#include "framebuffer.h"
+#include "drivers/video/framebuffer.h"
 
 namespace duetos::drivers::video
 {

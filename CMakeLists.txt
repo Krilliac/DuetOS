@@ -63,7 +63,7 @@ add_subdirectory(kernel)
 enable_testing()
 
 set(DUETOS_QEMU_RUN "${CMAKE_SOURCE_DIR}/tools/qemu/run.sh")
-set(DUETOS_SMOKE_DRIVER "${CMAKE_SOURCE_DIR}/tools/ctest-boot-smoke.sh")
+set(DUETOS_SMOKE_DRIVER "${CMAKE_SOURCE_DIR}/tools/test/ctest-boot-smoke.sh")
 
 add_test(NAME duetos-boot-smoke
     COMMAND "${DUETOS_SMOKE_DRIVER}" "${CMAKE_BINARY_DIR}"

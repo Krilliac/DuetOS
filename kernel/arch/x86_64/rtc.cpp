@@ -1,8 +1,8 @@
-#include "rtc.h"
+#include "arch/x86_64/rtc.h"
 
-#include "../../arch/x86_64/serial.h"
-#include "../../core/klog.h"
-#include "cpu.h"
+#include "arch/x86_64/serial.h"
+#include "log/klog.h"
+#include "arch/x86_64/cpu.h"
 
 namespace duetos::arch
 {

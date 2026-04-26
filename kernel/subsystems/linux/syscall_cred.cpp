@@ -12,9 +12,9 @@
  * `internal::Do*` declarations in syscall_internal.h.
  */
 
-#include "syscall_internal.h"
+#include "subsystems/linux/syscall_internal.h"
 
-#include "../../mm/address_space.h"
+#include "mm/address_space.h"
 
 namespace duetos::subsystems::linux::internal
 {

@@ -12,11 +12,11 @@
 // Runtime, ControllerInfo, PortRecord, DeviceState) and the MMIO
 // helpers here as well.
 
-#include "../../arch/x86_64/traps.h"
-#include "../../core/types.h"
-#include "../../mm/page.h"
-#include "../../sched/sched.h"
-#include "xhci.h"
+#include "arch/x86_64/traps.h"
+#include "util/types.h"
+#include "mm/page.h"
+#include "sched/sched.h"
+#include "drivers/usb/xhci.h"
 
 namespace duetos::drivers::usb::xhci::internal
 {

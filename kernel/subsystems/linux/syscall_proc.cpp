@@ -13,11 +13,11 @@
  * no-op returning 0 (or 1 for getppid, init-like).
  */
 
-#include "syscall_internal.h"
+#include "subsystems/linux/syscall_internal.h"
 
-#include "../../arch/x86_64/serial.h"
-#include "../../core/log_names.h"
-#include "../../sched/sched.h"
+#include "arch/x86_64/serial.h"
+#include "diag/log_names.h"
+#include "sched/sched.h"
 
 namespace duetos::subsystems::linux::internal
 {

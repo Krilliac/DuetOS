@@ -17,7 +17,7 @@ workflow.
 
 | Need | Live OS command / panic line |
 |------|-------------------------------|
-| Resolve a kernel VA → fn+offset (file:line) | `addr2sym <hex-addr>` (shell), or every panic line is auto-annotated `[fn+0xOFF (file:line)]` via the embedded symbol table (`kernel/core/symbols.h`) |
+| Resolve a kernel VA → fn+offset (file:line) | `addr2sym <hex-addr>` (shell), or every panic line is auto-annotated `[fn+0xOFF (file:line)]` via the embedded symbol table (`kernel/util/symbols.h`) |
 | 16-byte instruction dump at an address | `instr <hex-addr> [len]` (shell), or `[fault-rip] instr@<addr> : <16 bytes>` in every crash dump |
 | Function inventory (~`nm`) | The embedded symbol table is the same source — every name shows up in panic backtraces and the `addr2sym` reverse lookup |
 | Walk a backtrace from RIP/RBP | `dumpstate` / panic-time backtrace (already prints `#N rip=<sym> rbp=<addr>`) |
@@ -25,7 +25,7 @@ workflow.
 | Find syscall idioms inside a binary | `inspect syscalls <path>` |
 
 The symbol table is generated at build time by
-`tools/gen-symbols.sh` (sorted by address, ~3K entries) and linked
+`tools/build/gen-symbols.sh` (sorted by address, ~3K entries) and linked
 into the kernel as `.rodata`. The resolver is allocation-free, lock-
 free, and panic-safe — it's used from inside the trap dispatcher
 itself.
@@ -39,26 +39,26 @@ What the kernel does NOT do, and offline tools still beat it at:
   `objdump` / `llvm-objdump` for that.
 - **Cross-binary RIP lookup**. Tasks loaded from /bin/* PE images
   have RIPs in user space; the kernel symbol table only covers
-  kernel VAs. Host-side `tools/symbolize.sh` falls back to the PE
+  kernel VAs. Host-side `tools/debug/symbolize.sh` falls back to the PE
   loader's own debug info if available.
 
 ## Host scripts (offline reuse)
 
-### `tools/symbolize.sh` (pre-existing)
+### `tools/debug/symbolize.sh` (pre-existing)
 
 ```
-tools/symbolize.sh [KERNEL_ELF] < panic_log.txt
-tools/qemu/run.sh 2>&1 | tools/symbolize.sh
+tools/debug/symbolize.sh [KERNEL_ELF] < panic_log.txt
+tools/qemu/run.sh 2>&1 | tools/debug/symbolize.sh
 ```
 
 Annotate every kernel-VA hex in a serial log with
 `[name+0xOFF (file:line)]`. Uses `llvm-symbolizer` if available, falls
 back to `addr2line` (binutils).
 
-### `tools/disasm-at.sh` (new, this slice)
+### `tools/debug/disasm-at.sh` (new, this slice)
 
 ```
-tools/disasm-at.sh <hex-addr> [bytes-before] [bytes-after] [kernel-elf]
+tools/debug/disasm-at.sh <hex-addr> [bytes-before] [bytes-after] [kernel-elf]
 ```
 
 A focused `objdump -d` window. Prints disassembly between
@@ -67,11 +67,11 @@ A focused `objdump -d` window. Prints disassembly between
 view is available live via the in-OS `instr` command, but `disasm-at`
 also decodes the bytes into mnemonics.
 
-### `tools/decode-panic.sh` (new, this slice)
+### `tools/debug/decode-panic.sh` (new, this slice)
 
 ```
-tools/decode-panic.sh [serial-log] [kernel-elf]
-tools/qemu/run.sh 2>&1 | tools/decode-panic.sh - [kernel-elf]
+tools/debug/decode-panic.sh [serial-log] [kernel-elf]
+tools/qemu/run.sh 2>&1 | tools/debug/decode-panic.sh - [kernel-elf]
 ```
 
 Composes `symbolize.sh` + `disasm-at.sh` end-to-end:
@@ -111,7 +111,7 @@ ADDR2SYM 0xffffffff801c1ce8 -> duetos::arch::WriteCr3+0x18
 Offline (saved log + ELF):
 
 ```
-$ tools/decode-panic.sh build/x86_64-debug/ctest-smoke-serial.log
+$ tools/debug/decode-panic.sh build/x86_64-debug/ctest-smoke-serial.log
 ... [extracted record with annotations] ...
 --- rip 0xffffffff801c1ce8 ---
 ffffffff801c1ce4: 48 83 c4 08            add    $0x8,%rsp

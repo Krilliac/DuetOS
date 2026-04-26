@@ -14,12 +14,12 @@
  * the task rather than silently returning.
  */
 
-#include "syscall_internal.h"
+#include "subsystems/linux/syscall_internal.h"
 
-#include "../../arch/x86_64/serial.h"
-#include "../../core/process.h"
-#include "../../mm/address_space.h"
-#include "../../sched/sched.h"
+#include "arch/x86_64/serial.h"
+#include "proc/process.h"
+#include "mm/address_space.h"
+#include "sched/sched.h"
 
 namespace duetos::subsystems::linux::internal
 {

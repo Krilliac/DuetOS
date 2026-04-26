@@ -1,8 +1,8 @@
-#include "netpanel.h"
+#include "drivers/video/netpanel.h"
 
-#include "../../drivers/net/net.h"
-#include "../../net/stack.h"
-#include "framebuffer.h"
+#include "drivers/net/net.h"
+#include "net/stack.h"
+#include "drivers/video/framebuffer.h"
 
 namespace duetos::drivers::video
 {

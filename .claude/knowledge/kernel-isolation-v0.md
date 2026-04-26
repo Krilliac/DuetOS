@@ -124,4 +124,4 @@ in a driver probe path. That's 80% of the real pain in practice.
 - `kernel/arch/x86_64/traps.cpp` — trap handler consults extable
 - `kernel/drivers/usb/xhci.{h,cpp}` — first subsystem with full
   Init + Shutdown + Restart lifecycle
-- `kernel/core/result.h` — error type used by fault-domain return
+- `kernel/util/result.h` — error type used by fault-domain return

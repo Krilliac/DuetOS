@@ -1,7 +1,7 @@
 #pragma once
 
-#include "../../arch/x86_64/traps.h"
-#include "../../core/types.h"
+#include "arch/x86_64/traps.h"
+#include "util/types.h"
 
 /*
  * DuetOS — Win32 GDI object + DC registry.

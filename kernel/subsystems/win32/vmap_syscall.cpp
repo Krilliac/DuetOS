@@ -1,11 +1,11 @@
-#include "vmap_syscall.h"
+#include "subsystems/win32/vmap_syscall.h"
 
-#include "../../arch/x86_64/serial.h"
-#include "../../arch/x86_64/traps.h"
-#include "../../core/process.h"
-#include "../../mm/address_space.h"
-#include "../../mm/frame_allocator.h"
-#include "../../mm/paging.h"
+#include "arch/x86_64/serial.h"
+#include "arch/x86_64/traps.h"
+#include "proc/process.h"
+#include "mm/address_space.h"
+#include "mm/frame_allocator.h"
+#include "mm/paging.h"
 
 namespace duetos::subsystems::win32
 {

@@ -1,10 +1,10 @@
-#include "audio.h"
+#include "drivers/audio/audio.h"
 
-#include "../../arch/x86_64/serial.h"
-#include "../../core/klog.h"
-#include "../../core/panic.h"
-#include "../../mm/paging.h"
-#include "../pci/pci.h"
+#include "arch/x86_64/serial.h"
+#include "log/klog.h"
+#include "core/panic.h"
+#include "mm/paging.h"
+#include "drivers/pci/pci.h"
 
 namespace duetos::drivers::audio
 {

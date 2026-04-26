@@ -48,7 +48,7 @@ Two profiles: `CapSetTrusted` (every defined cap) and
 `CapSetEmpty` (zero caps). Real sandbox processes use `CapSetEmpty`
 plus selectively granted caps. Caps are ABI: numbers never change.
 
-Files: `kernel/core/process.{h,cpp}`, `kernel/core/syscall.cpp`.
+Files: `kernel/core/process.{h,cpp}`, `kernel/syscall/syscall.cpp`.
 See `.claude/knowledge/process-capabilities-v0.md`.
 
 ### 3. VFS namespace jail — `core::Process::root`
@@ -67,7 +67,7 @@ The boot-time VFS self-test asserts that a sandbox root cannot
 resolve `/etc/version` (named "JAIL BROKEN" in the panic). Boot
 halts on regression.
 
-Files: `kernel/fs/{ramfs,vfs}.{h,cpp}`, `kernel/core/process.h`.
+Files: `kernel/fs/{ramfs,vfs}.{h,cpp}`, `kernel/proc/process.h`.
 See `.claude/knowledge/vfs-namespace-v0.md`.
 
 ### 4. W^X enforcement at the map-page choke points
@@ -116,7 +116,7 @@ Resource-quota coverage: frames (wall 5) + CPU time (wall 5b)
 together bound what a malicious EXE can exhaust.
 
 Files: `kernel/core/process.{h,cpp}`, `kernel/sched/sched.{h,cpp}`,
-`kernel/core/ring3_smoke.cpp` (`SpawnCpuHogProbe`).
+`kernel/proc/ring3_smoke.cpp` (`SpawnCpuHogProbe`).
 
 ### 6. W^X / DEP (Windows name: DEP = NX bit)
 
@@ -134,7 +134,7 @@ Files: `kernel/core/process.{h,cpp}`, `kernel/sched/sched.{h,cpp}`,
   continues running.
 
 Files: `kernel/mm/paging.{h,cpp}`,
-`kernel/core/ring3_smoke.cpp`,
+`kernel/proc/ring3_smoke.cpp`,
 `.claude/knowledge/dep-nx-v0.md`.
 
 ### 7. ASLR — per-process code/stack base randomisation
@@ -153,7 +153,7 @@ ASLR outcome — `mov rax, <imm64>` forms avoid the sign-
 extension gotcha of `mov [disp32], imm32`.
 
 Files: `kernel/core/process.{h,cpp}`,
-`kernel/core/ring3_smoke.cpp`.
+`kernel/proc/ring3_smoke.cpp`.
 
 ### 8. Stack canaries
 
@@ -168,7 +168,7 @@ on the stack and an epilogue that verifies. Mismatch tail-calls
 can't check its own canary, since the stack is already
 corrupt.
 
-Files: `kernel/core/stack_canary.cpp`,
+Files: `kernel/security/stack_canary.cpp`,
 `cmake/toolchains/x86_64-kernel.cmake`.
 
 ### 9. Control-Flow Integrity via Intel CET / IBT
@@ -236,7 +236,7 @@ Resource-quota coverage along three axes: frames (5), CPU time
 (5b), policy retries (11).
 
 Files: `kernel/core/process.{h,cpp}`, `kernel/sched/sched.{h,cpp}`,
-`kernel/core/syscall.cpp`, `kernel/core/ring3_smoke.cpp`.
+`kernel/syscall/syscall.cpp`, `kernel/proc/ring3_smoke.cpp`.
 
 ### 12. Voluntary cap-dropping (SYS_DROPCAPS)
 
@@ -261,7 +261,7 @@ Boot log shows the first message printed, then
 second message DOES NOT print — confirming irreversibility at
 the user-mode level.
 
-Files: `kernel/core/syscall.{h,cpp}`, `kernel/core/ring3_smoke.cpp`.
+Files: `kernel/core/syscall.{h,cpp}`, `kernel/proc/ring3_smoke.cpp`.
 
 ## Separate from the walls: graceful task death
 

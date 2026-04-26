@@ -19,10 +19,10 @@
  *   console writers for output.
  */
 
-#include "inspect.h"
+#include "debug/inspect.h"
 
-#include "../arch/x86_64/serial.h"
-#include "../fs/fat32.h"
+#include "arch/x86_64/serial.h"
+#include "fs/fat32.h"
 
 namespace duetos::debug
 {

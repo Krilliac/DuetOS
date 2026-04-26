@@ -1,7 +1,7 @@
-#include "thunks.h"
+#include "subsystems/win32/thunks.h"
 
-#include "../../arch/x86_64/serial.h"
-#include "proc_env.h"
+#include "arch/x86_64/serial.h"
+#include "subsystems/win32/proc_env.h"
 
 namespace duetos::win32
 {
@@ -293,7 +293,7 @@ constexpr u32 kOffD3d12CreateStub = 0xC9E; // render/drivers — 13 bytes
 constexpr u32 kOffDxgiCreateStub = 0xCAB;  // render/drivers — 13 bytes
 
 // Paint lifecycle + FillRect — real implementations routing through
-// dedicated syscalls. See core/syscall.h for the per-syscall ABI.
+// dedicated syscalls. See syscall/syscall.h for the per-syscall ABI.
 constexpr u32 kOffWinBeginPaint = 0xCB8;     // render/drivers — 14 bytes
 constexpr u32 kOffWinEndPaint = 0xCC6;       // render/drivers — 11 bytes
 constexpr u32 kOffWinInvalidateRect = 0xCD1; // render/drivers — 14 bytes
@@ -368,7 +368,7 @@ constexpr u32 kOffGetSysColor = 0x1032;      // render/drivers — 11 bytes
 constexpr u32 kOffGetSysColorBrush = 0x103D; // render/drivers — 11 bytes
 
 constexpr u8 kThunksBytes[] = {
-#include "thunks_bytecode.inc"
+#include "subsystems/win32/thunks_bytecode.inc"
 };
 
 static_assert(sizeof(kThunksBytes) <= 8192, "Win32 thunks page fits in two 4 KiB pages");
@@ -393,7 +393,7 @@ struct ThunkEntry
 };
 
 constexpr ThunkEntry kThunksTable[] = {
-#include "thunks_table.inc"
+#include "subsystems/win32/thunks_table.inc"
 };
 
 struct ThunkHashEntry

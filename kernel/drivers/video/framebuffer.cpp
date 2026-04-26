@@ -1,9 +1,9 @@
-#include "framebuffer.h"
+#include "drivers/video/framebuffer.h"
 
-#include "../../arch/x86_64/serial.h"
-#include "../../mm/multiboot2.h"
-#include "../../mm/paging.h"
-#include "font8x8.h"
+#include "arch/x86_64/serial.h"
+#include "mm/multiboot2.h"
+#include "mm/paging.h"
+#include "drivers/video/font8x8.h"
 
 namespace duetos::drivers::video
 {

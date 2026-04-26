@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../core/types.h"
+#include "util/types.h"
 
 /*
  * DuetOS FAT32 driver — v0 (read-only BPB parse + root-dir walk).

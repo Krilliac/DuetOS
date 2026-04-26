@@ -1,8 +1,8 @@
-#include "clock.h"
+#include "apps/clock.h"
 
-#include "../arch/x86_64/rtc.h"
-#include "../arch/x86_64/serial.h"
-#include "../drivers/video/framebuffer.h"
+#include "arch/x86_64/rtc.h"
+#include "arch/x86_64/serial.h"
+#include "drivers/video/framebuffer.h"
 
 namespace duetos::apps::clock
 {

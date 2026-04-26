@@ -1,6 +1,6 @@
-#include "gfxdemo_modes.h"
+#include "apps/gfxdemo_modes.h"
 
-#include "../drivers/video/framebuffer.h"
+#include "drivers/video/framebuffer.h"
 
 namespace duetos::apps::gfxdemo
 {

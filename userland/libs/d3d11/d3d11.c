@@ -19,7 +19,7 @@
  * shared dx_stub_hresult so apps that only test the clear path
  * don't crash, and apps that try real rendering fail predictably.
  *
- * Build: tools/build-stub-dll.sh (base 0x10130000).
+ * Build: tools/build/build-stub-dll.sh (base 0x10130000).
  */
 
 #include "../dx_shared.h"
