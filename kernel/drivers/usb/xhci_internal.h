@@ -400,4 +400,27 @@ void BuildAddressDeviceInputContext(void* input_ctx_virt, u32 ctx_bytes, u8 port
 void BuildConfigureEndpointInputContext(void* input_ctx_virt, u32 ctx_bytes, u8 port_num, u8 speed, u8 new_dci,
                                         u32 new_ep_type, u32 new_mps, u32 new_interval, u64 new_ring_phys);
 
+// =====================================================================
+// Control transfers on EP0 (xhci_control.cpp)
+// =====================================================================
+
+// USB control-IN transfer on EP0. Builds Setup/Data/Status TRBs,
+// rings DB[slot_id]/target=1, waits for the Status Stage transfer
+// event. On success the device has written `wLength` bytes into
+// `dev->scratch_virt`. `diag` is a short tag for failure-path log
+// lines.
+bool DoControlIn(Runtime& rt, DeviceState* dev, u8 bmRequestType, u8 bRequest, u16 wValue, u16 wIndex, u16 wLength,
+                 const char* diag);
+
+// USB control transfer with NO data stage. SET_CONFIGURATION,
+// HID SET_PROTOCOL / SET_IDLE, etc.
+bool DoControlNoData(Runtime& rt, DeviceState* dev, u8 bmRequestType, u8 bRequest, u16 wValue, u16 wIndex,
+                     const char* diag);
+
+// USB control-OUT with optional data payload. Used by class
+// drivers to push small bulk-class control requests (e.g. CDC-ECM
+// SET_ETHERNET_MULTICAST_FILTERS).
+bool ControlOutWithData(Runtime& rt, DeviceState* dev, u8 bmRequestType, u8 bRequest, u16 wValue, u16 wIndex,
+                        const void* buf, u16 len, const char* diag);
+
 } // namespace duetos::drivers::usb::xhci::internal

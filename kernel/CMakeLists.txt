@@ -135,6 +135,7 @@ set(DUETOS_KERNEL_SHARED_SOURCES
     drivers/usb/xhci_admin.cpp
     drivers/usb/xhci_complete.cpp
     drivers/usb/xhci_context.cpp
+    drivers/usb/xhci_control.cpp
     drivers/usb/xhci_descparse.cpp
     drivers/usb/xhci_event.cpp
     drivers/usb/xhci_input.cpp
