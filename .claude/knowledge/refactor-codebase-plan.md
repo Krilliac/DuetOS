@@ -12,7 +12,7 @@ Branch: `claude/refactor-codebase-VvLO6`. Pushed to origin.
 | 2 | `kernel/subsystems/win32/thunks.cpp`  | 5,684 |   655 | ☑ done (`cae3704`) |
 | 3 | `kernel/subsystems/linux/syscall.cpp` | 4,642 | 4,642 | ☐ not started |
 | 4 | `kernel/fs/fat32.cpp`                 | 3,190 |   300 | ☑ done (decomposed into fat32 + fat32_dir + fat32_lookup + fat32_read + fat32_write + fat32_create + selftest, plus fat32_internal.h and fat32_write_internal.h) |
-| 5 | `kernel/drivers/usb/xhci.cpp`         | 2,548 | 2,200 | ◐ partial (CompletionCodeName + HID input + MMIO accessors + speed helpers extracted into xhci_complete.cpp/xhci_input.cpp/xhci_speed.cpp/xhci_internal.h; per-aspect core/init/xfer/enum sub-splits deferred) |
+| 5 | `kernel/drivers/usb/xhci.cpp`         | 2,548 | 2,087 | ◐ partial (CompletionCodeName + HID input + MMIO accessors + speed helpers + spec-constants block extracted; structs/globals + per-aspect core/init/xfer/enum sub-splits deferred) |
 
 **Landed** (build-verified through both kernel stages):
 

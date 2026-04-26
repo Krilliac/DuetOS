@@ -58,7 +58,6 @@ using namespace internal;
 namespace
 {
 
-constexpr u32 kMaxControllers = 4;
 constinit ControllerInfo g_controllers[kMaxControllers] = {};
 constinit u32 g_controller_count = 0;
 // File-scope "is Init live" flag so XhciShutdown can clear it and
@@ -67,118 +66,6 @@ constinit u32 g_controller_count = 0;
 // drivers need the flag to be rewindable.
 constinit bool g_init_done = false;
 
-// xHCI capability-reg offsets (xHCI 1.2 §5.3).
-constexpr u64 kCapHciVersion = 0x00; // u32 = caplen | (rsvd) | hciver
-constexpr u64 kCapHcsParams1 = 0x04;
-constexpr u64 kCapHcsParams2 = 0x08;
-constexpr u64 kCapHccParams1 = 0x10;
-constexpr u64 kCapDbOff = 0x14;
-constexpr u64 kCapRtsOff = 0x18;
-
-// Operational-reg offsets (relative to opbase = mmio + caplen).
-constexpr u64 kOpUsbCmd = 0x00;
-constexpr u64 kOpUsbSts = 0x04;
-constexpr u64 kOpDnCtrl = 0x14;
-constexpr u64 kOpCrcr = 0x18;   // u64
-constexpr u64 kOpDcbaap = 0x30; // u64
-constexpr u64 kOpConfig = 0x38;
-
-// USBCMD bits.
-constexpr u32 kCmdRunStop = 1u << 0;
-constexpr u32 kCmdHcReset = 1u << 1;
-constexpr u32 kCmdIntrEnable = 1u << 2; // Interrupter Enable — gates all MSI/MSI-X delivery
-
-// Interrupter register block (offset 0x00 of each interrupter at
-// rt_base + 0x20 * N). IMAN: bit 0 = IP (interrupt pending, RW1C),
-// bit 1 = IE (interrupt enable).
-constexpr u64 kIntrIman = 0x00;
-constexpr u32 kImanIp = 1u << 0;
-constexpr u32 kImanIe = 1u << 1;
-
-// USBSTS bits.
-constexpr u32 kStsHcHalted = 1u << 0;
-constexpr u32 kStsCnr = 1u << 11;
-
-// HCCPARAMS1 bits.
-constexpr u32 kHccParams1Csz = 1u << 2; // context size: 0=32 B, 1=64 B
-
-// TRB types (control field bits 15:10). xHCI 1.2 §6.4.
-// kTrbTypeNormal / kTrbTypePortStatusChange aren't emitted or
-// matched against by this slice but are real spec-defined types
-// the next slice (HID transfers) will consume — keep them named.
-[[maybe_unused]] constexpr u32 kTrbTypeNormal = 1;
-constexpr u32 kTrbTypeSetupStage = 2;
-constexpr u32 kTrbTypeDataStage = 3;
-constexpr u32 kTrbTypeStatusStage = 4;
-constexpr u32 kTrbTypeLink = 6;
-constexpr u32 kTrbTypeEnableSlot = 9;
-constexpr u32 kTrbTypeAddressDevice = 11;
-constexpr u32 kTrbTypeNoOp = 23; // command-ring NoOp
-constexpr u32 kTrbTypeTransferEvent = 32;
-constexpr u32 kTrbTypeCmdCompletion = 33;
-[[maybe_unused]] constexpr u32 kTrbTypePortStatusChange = 34;
-
-// Setup Stage TRB control bits.
-constexpr u32 kTrbCtlIdt = 1u << 6; // Immediate Data (setup packet is inline)
-constexpr u32 kTrbCtlIoc = 1u << 5; // Interrupt On Completion
-// "Transfer Type" field in Setup/Status Stage control bits 17:16.
-// Only In-Data is emitted this slice; the other three are kept
-// named for the Config-descriptor / SET_CONFIGURATION slice.
-[[maybe_unused]] constexpr u32 kTransferTypeNoData = 0;
-[[maybe_unused]] constexpr u32 kTransferTypeReservedBulk = 1; // invalid for control
-[[maybe_unused]] constexpr u32 kTransferTypeOutData = 2;
-constexpr u32 kTransferTypeInData = 3;
-// Data/Status Stage "DIR" bit is bit 16 (1 = IN, 0 = OUT).
-constexpr u32 kTrbCtlDirIn = 1u << 16;
-
-// USB standard setup packet fields.
-constexpr u8 kUsbReqGetDescriptor = 0x06;
-constexpr u16 kUsbDescriptorDevice = 0x0100; // type=1, index=0
-constexpr u16 kUsbDescriptorConfig = 0x0200; // type=2, index=0
-constexpr u32 kDeviceDescriptorBytes = 18;
-constexpr u32 kConfigDescriptorHeaderBytes = 9; // bLength..wTotalLength fits in 9 bytes
-
-// Config-descriptor tree tags — byte 1 (bDescriptorType) of each
-// sub-descriptor. Config + HID sub-descriptors aren't matched
-// against in this slice but are part of the spec set the parser
-// walks past; the next slice (Configure Endpoint) reads the HID
-// descriptor's country code, so keep the name.
-[[maybe_unused]] constexpr u8 kDescTypeConfig = 0x02;
-constexpr u8 kDescTypeInterface = 0x04;
-constexpr u8 kDescTypeEndpoint = 0x05;
-[[maybe_unused]] constexpr u8 kDescTypeHid = 0x21;
-
-// Interface class 3 = HID; subclass 1 = Boot Interface; protocol
-// 1 = Keyboard, 2 = Mouse. Finding the boot triple lets us skip
-// HID report-descriptor parsing: both devices use fixed report
-// formats (8 bytes keyboard, 3 bytes mouse).
-constexpr u8 kIfaceClassHid = 0x03;
-constexpr u8 kIfaceSubclassBoot = 0x01;
-constexpr u8 kIfaceProtocolKeyboard = 0x01;
-constexpr u8 kIfaceProtocolMouse = 0x02;
-
-// Endpoint descriptor bmAttributes bits 0..1 = transfer type
-// (0=control, 1=iso, 2=bulk, 3=interrupt). bEndpointAddress bit 7
-// is direction (1=IN, 0=OUT).
-constexpr u8 kEpAttrTypeMask = 0x03;
-constexpr u8 kEpAttrTypeInterrupt = 0x03;
-constexpr u8 kEpAddrDirIn = 0x80;
-
-// PORTSC bit layout we care about.
-constexpr u32 kPortScCcs = 1u << 0; // current-connect status (RO)
-constexpr u32 kPortScPed = 1u << 1; // port enabled/disabled (RW1C)
-constexpr u32 kPortScPr = 1u << 4;  // port reset (RW1S)
-
-// PORTSC RW1C bits (PED + the 7 change bits at 17..23). When we
-// modify PORTSC we mask these out of our writeback so a status-
-// change bit that the controller has set doesn't get cleared as
-// a side effect of "I just wanted to write PR=1".
-constexpr u32 kPortScRw1cMask = (1u << 1) | (0x7Fu << 17);
-
-// Command Completion event: status bits 31:24 carry a completion
-// code; 1 = success. Bits 23:16 carry the slot ID for commands that
-// allocate one (Enable Slot in particular).
-constexpr u32 kCompletionCodeSuccess = 1;
 
 // One TRB = 16 bytes: { u32 param_lo, u32 param_hi, u32 status, u32 control }.
 struct alignas(16) Trb
