@@ -126,6 +126,17 @@ inline constexpr u32 kPortScRw1cMask = (1u << 1) | (0x7Fu << 17);
 // code; 1 = success.
 inline constexpr u32 kCompletionCodeSuccess = 1;
 
+// USB-standard request for SET_CONFIGURATION (§9.4.7).
+inline constexpr u8 kUsbReqSetConfiguration = 0x09;
+// xHCI Configure Endpoint command TRB type (§6.4.3.5).
+inline constexpr u32 kTrbTypeConfigureEndpoint = 12;
+// xHCI EP Type = Interrupt IN (§6.2.3, table 6-9).
+inline constexpr u32 kEpTypeInterruptIn = 7;
+// Bulk endpoint types (§6.2.3 table 6-9). Symmetric IN / OUT
+// distinguished by direction nibble in the input context.
+inline constexpr u32 kEpTypeBulkOut = 2;
+inline constexpr u32 kEpTypeBulkIn = 6;
+
 
 // Map an xHCI completion-code byte from a Transfer Event / Command
 // Completion TRB into a short human-readable string. Used only by
@@ -422,5 +433,23 @@ bool DoControlNoData(Runtime& rt, DeviceState* dev, u8 bmRequestType, u8 bReques
 // SET_ETHERNET_MULTICAST_FILTERS).
 bool ControlOutWithData(Runtime& rt, DeviceState* dev, u8 bmRequestType, u8 bRequest, u16 wValue, u16 wIndex,
                         const void* buf, u16 len, const char* diag);
+
+// =====================================================================
+// Slot/endpoint accessors (xhci_xfer.cpp + xhci.cpp callers)
+// =====================================================================
+
+// Linear scan of g_devices for the entry whose slot_id matches.
+// Returns nullptr on miss.
+DeviceState* DeviceForSlot(u8 slot_id);
+
+// Translate a USB bEndpointAddress into the xHCI Device Context
+// Index (DCI). DCI = (ep_num * 2) + (direction == IN ? 1 : 0);
+// EP0 occupies DCI 1 regardless of direction.
+u8 EndpointDci(u8 ep_addr);
+
+// Enqueue one Normal TRB on the device's HID interrupt-IN ring.
+// IOC bit set so the completion lands as a Transfer Event the
+// HID poll task can match against the previous report.
+u64 HidEnqueueNormalTrb(DeviceState* dev, u64 buf_phys, u32 len);
 
 } // namespace duetos::drivers::usb::xhci::internal

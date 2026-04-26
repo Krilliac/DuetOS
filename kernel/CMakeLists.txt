@@ -142,6 +142,7 @@ set(DUETOS_KERNEL_SHARED_SOURCES
     drivers/usb/xhci_irq.cpp
     drivers/usb/xhci_ring.cpp
     drivers/usb/xhci_speed.cpp
+    drivers/usb/xhci_xfer.cpp
     drivers/video/calendar.cpp
     drivers/video/console.cpp
     drivers/video/cursor.cpp
