@@ -327,4 +327,24 @@ u64 SubmitCmd(Runtime& rt, u32 type, u32 param_lo, u32 param_hi, u32 status, u32
 // cleared — write-1-to-clear per spec).
 void AdvanceEventRing(Runtime& rt);
 
+// =====================================================================
+// Event-ring waiters + side cache (xhci_event.cpp)
+// =====================================================================
+
+// Drain events until one whose TRB pointer equals `expect_phys` and
+// whose type matches `expect_type` lands in the consumer slot.
+// Irrelevant events are consumed + dropped (port-status changes,
+// etc.). `out` captures the matching TRB by value. Returns false on
+// timeout.
+bool WaitEvent(Runtime& rt, u64 expect_phys, u32 expect_type, Trb* out, u64 iters);
+
+// WaitEvent specialised for command-completion events. 4M iter cap.
+bool WaitCmdCompletion(Runtime& rt, u64 expect_phys, u32* out_status, u8* out_slot_id);
+
+// Side cache for Transfer Events that arrive on the ring but aren't
+// for HID endpoints. HidPollEntry routes non-HID transfer completions
+// here so bulk/control waiters can claim them by TRB pointer.
+void TrbEventCacheStash(u64 trb_phys, u32 completion_code, u32 residual, u32 trb_len);
+bool TrbEventCacheTake(u64 trb_phys, u32* completion_code, u32* residual, u32* trb_len);
+
 } // namespace duetos::drivers::usb::xhci::internal

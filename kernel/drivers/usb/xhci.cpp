@@ -108,65 +108,6 @@ inline volatile u8* OpBase(const HostControllerInfo& h, u8 caplen)
     return static_cast<volatile u8*>(h.mmio_virt) + caplen;
 }
 
-// Forward declaration for the side cache helpers defined further
-// down the TU. WaitEvent stashes Transfer Events that aren't for
-// the current expect_phys so a concurrent poller can claim them.
-void TrbEventCacheStash(u64 trb_phys, u32 completion_code, u32 residual, u32 trb_len);
-bool TrbEventCacheTake(u64 trb_phys, u32* completion_code, u32* residual, u32* trb_len);
-
-// Drain events until one whose TRB pointer equals `expect_phys` and
-// whose type matches `expect_type` lands in the consumer slot.
-// Irrelevant events are consumed + dropped (port-status changes, etc.).
-// `out` captures the matching TRB by value. Returns false on timeout.
-bool WaitEvent(Runtime& rt, u64 expect_phys, u32 expect_type, Trb* out, u64 iters)
-{
-    for (u64 i = 0; i < iters; ++i)
-    {
-        const Trb& e = rt.evt_ring[rt.evt_idx];
-        const bool valid = (e.control & 1u) == (rt.evt_cycle & 1u);
-        if (!valid)
-        {
-            asm volatile("pause" : : : "memory");
-            continue;
-        }
-        const u32 type = (e.control >> 10) & 0x3F;
-        const u64 ptr = (u64(e.param_hi) << 32) | u64(e.param_lo);
-        if (type == expect_type && ptr == expect_phys)
-        {
-            if (out != nullptr)
-                *out = e;
-            AdvanceEventRing(rt);
-            return true;
-        }
-        // Non-matching event. If it's another Transfer Event, stash
-        // it into the side cache so a concurrent XhciBulkPoll waiter
-        // can claim it. Other event types (port status, command
-        // completions destined for the synchronous command path)
-        // are dropped — those callers either run during init when
-        // no other consumer exists, or have their own dedicated
-        // pollers.
-        if (type == kTrbTypeTransferEvent)
-        {
-            const u32 code = (e.status >> 24) & 0xFF;
-            const u32 residual = e.status & 0x00FFFFFF;
-            TrbEventCacheStash(ptr, code, residual, /*trb_len=*/0);
-        }
-        AdvanceEventRing(rt);
-    }
-    return false;
-}
-
-bool WaitCmdCompletion(Runtime& rt, u64 expect_phys, u32* out_status, u8* out_slot_id)
-{
-    Trb e{};
-    if (!WaitEvent(rt, expect_phys, kTrbTypeCmdCompletion, &e, 4'000'000))
-        return false;
-    if (out_status != nullptr)
-        *out_status = e.status;
-    if (out_slot_id != nullptr)
-        *out_slot_id = u8((e.control >> 24) & 0xFF);
-    return true;
-}
 
 // ---------------------------------------------------------------
 // Device enumeration: Address Device + GET_DESCRIPTOR(Device).
@@ -766,62 +707,6 @@ struct PollTaskArg
 constinit PollTaskArg g_poll_args[kMaxControllers] = {};
 constinit Runtime g_poll_rt[kMaxControllers] = {};
 
-// Side cache for Transfer Events that arrive on the ring but aren't
-// for HID endpoints. HidPollEntry is the designated runtime
-// event-ring owner; it routes non-HID transfer completions here so
-// bulk/control waiters can claim them by TRB pointer.
-struct TrbEventCacheEntry
-{
-    volatile u64 trb_phys;
-    volatile u32 completion_code;
-    volatile u32 residual; // status bits 0..23 = remaining bytes (for short packets)
-    volatile u32 trb_len;  // length we put in the original TRB
-    volatile u8 valid;
-};
-constinit TrbEventCacheEntry g_trb_event_cache[32] = {};
-
-// Cache an unrelated event for someone else's poll to claim.
-void TrbEventCacheStash(u64 trb_phys, u32 completion_code, u32 residual, u32 trb_len)
-{
-    for (auto& e : g_trb_event_cache)
-    {
-        if (e.valid)
-            continue;
-        e.trb_phys = trb_phys;
-        e.completion_code = completion_code;
-        e.residual = residual;
-        e.trb_len = trb_len;
-        e.valid = 1;
-        return;
-    }
-    // Cache full — drop oldest (slot 0) so we always have room.
-    g_trb_event_cache[0].trb_phys = trb_phys;
-    g_trb_event_cache[0].completion_code = completion_code;
-    g_trb_event_cache[0].residual = residual;
-    g_trb_event_cache[0].trb_len = trb_len;
-    g_trb_event_cache[0].valid = 1;
-}
-
-// Try to claim a cached event for this TRB. Returns true on hit.
-bool TrbEventCacheTake(u64 trb_phys, u32* completion_code, u32* residual, u32* trb_len)
-{
-    for (auto& e : g_trb_event_cache)
-    {
-        if (e.valid && e.trb_phys == trb_phys)
-        {
-            if (completion_code)
-                *completion_code = e.completion_code;
-            if (residual)
-                *residual = e.residual;
-            if (trb_len)
-                *trb_len = e.trb_len;
-            e.valid = 0;
-            e.trb_phys = 0;
-            return true;
-        }
-    }
-    return false;
-}
 
 // Acknowledge interrupter 0's IMAN.IP (the device-side pending
 // bit). LAPIC EOI is handled by the generic IRQ dispatcher; this
