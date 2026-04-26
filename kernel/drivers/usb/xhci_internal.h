@@ -358,4 +358,22 @@ bool TrbEventCacheTake(u64 trb_phys, u32* completion_code, u32* residual, u32* t
 // Returns true on found.
 bool ParseConfigForHidBoot(const u8* buf, u32 len, PortRecord& port);
 
+// =====================================================================
+// Input Context builders (xhci_context.cpp)
+// =====================================================================
+
+// Build Input Context for Address Device. ctx_bytes is 32 or 64 per
+// HCCPARAMS1.CSZ. Lays out [InputControl] [Slot] [EP0] in the
+// caller's input_ctx_virt frame.
+void BuildAddressDeviceInputContext(void* input_ctx_virt, u32 ctx_bytes, u8 port_num, u8 speed, u32 mps0,
+                                    u64 ep0_ring_phys);
+
+// Build a Configure Endpoint Input Context for adding ONE new
+// endpoint on top of the EP0 context already established at
+// Address Device time. Only the slot context (A0) and the new
+// endpoint (A_dci) are flagged; A1 stays clear so the running EP0
+// isn't reconfigured.
+void BuildConfigureEndpointInputContext(void* input_ctx_virt, u32 ctx_bytes, u8 port_num, u8 speed, u8 new_dci,
+                                        u32 new_ep_type, u32 new_mps, u32 new_interval, u64 new_ring_phys);
+
 } // namespace duetos::drivers::usb::xhci::internal
