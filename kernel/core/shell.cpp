@@ -1230,100 +1230,8 @@ void CmdTime(u32 argc, char** argv)
     ConsoleWriteln(" ms");
 }
 
-void CmdSet(u32 argc, char** argv)
-{
-    if (argc < 3)
-    {
-        ConsoleWriteln("SET: USAGE: SET NAME VALUE");
-        return;
-    }
-    if (!EnvSet(argv[1], argv[2]))
-    {
-        ConsoleWriteln("SET: ENV TABLE FULL");
-    }
-}
-
-void CmdUnset(u32 argc, char** argv)
-{
-    if (argc < 2)
-    {
-        ConsoleWriteln("UNSET: MISSING NAME");
-        return;
-    }
-    if (!EnvUnset(argv[1]))
-    {
-        ConsoleWrite("UNSET: NO SUCH VAR: ");
-        ConsoleWriteln(argv[1]);
-    }
-}
-
-void CmdAlias(u32 argc, char** argv)
-{
-    if (argc == 1)
-    {
-        // List all.
-        bool any = false;
-        for (u32 i = 0; i < kAliasSlotCount; ++i)
-        {
-            if (!g_aliases[i].in_use)
-                continue;
-            any = true;
-            ConsoleWrite("  ");
-            ConsoleWrite(g_aliases[i].name);
-            ConsoleWrite("  = ");
-            ConsoleWriteln(g_aliases[i].expansion);
-        }
-        if (!any)
-        {
-            ConsoleWriteln("(NO ALIASES)");
-        }
-        return;
-    }
-    if (argc == 2)
-    {
-        const AliasSlot* s = AliasFind(argv[1]);
-        if (s == nullptr)
-        {
-            ConsoleWrite("ALIAS: NO SUCH ALIAS: ");
-            ConsoleWriteln(argv[1]);
-            return;
-        }
-        ConsoleWrite(argv[1]);
-        ConsoleWrite(" = ");
-        ConsoleWriteln(s->expansion);
-        return;
-    }
-    // 3+ args — join args[2..argc] with single spaces into the
-    // expansion, matching how the user typed it.
-    char buf[kAliasExpansionMax];
-    u32 out = 0;
-    for (u32 i = 2; i < argc; ++i)
-    {
-        if (i > 2 && out + 1 < sizeof(buf))
-            buf[out++] = ' ';
-        for (u32 j = 0; argv[i][j] != '\0' && out + 1 < sizeof(buf); ++j)
-            buf[out++] = argv[i][j];
-    }
-    buf[out] = '\0';
-    if (!AliasSet(argv[1], buf))
-    {
-        ConsoleWriteln("ALIAS: TABLE FULL");
-    }
-}
-
-void CmdUnalias(u32 argc, char** argv)
-{
-    if (argc < 2)
-    {
-        ConsoleWriteln("UNALIAS: MISSING NAME");
-        return;
-    }
-    if (!AliasUnset(argv[1]))
-    {
-        ConsoleWrite("UNALIAS: NO SUCH ALIAS: ");
-        ConsoleWriteln(argv[1]);
-    }
-}
+// CmdSet / CmdUnset / CmdAlias / CmdUnalias moved to
+// shell_core.cpp.
 
 // Forward declaration for mutual recursion: source -> dispatch
 // -> (a sourced line could reference another command).
@@ -1481,24 +1389,7 @@ void CmdSysinfo()
                                                                                                         : "DESKTOP");
 }
 
-void CmdEnv()
-{
-    bool any = false;
-    for (u32 i = 0; i < kEnvSlotCount; ++i)
-    {
-        if (!g_env[i].in_use)
-            continue;
-        any = true;
-        ConsoleWrite("  ");
-        ConsoleWrite(g_env[i].name);
-        ConsoleWriteChar('=');
-        ConsoleWriteln(g_env[i].value);
-    }
-    if (!any)
-    {
-        ConsoleWriteln("(NO VARIABLES SET)");
-    }
-}
+// CmdEnv moved to shell_core.cpp.
 
 // ---------------------------------------------------------------
 // System introspection / manipulation commands.
@@ -4752,21 +4643,7 @@ void CmdKdbg(u32 argc, char** argv)
     ConsoleWriteln("KDBG: UNKNOWN SUBCOMMAND");
 }
 
-void CmdGetenv(u32 argc, char** argv)
-{
-    if (argc < 2)
-    {
-        ConsoleWriteln("GETENV: USAGE: GETENV NAME");
-        return;
-    }
-    const EnvSlot* s = EnvFind(argv[1]);
-    if (s == nullptr)
-    {
-        ConsoleWriteln("(UNSET)");
-        return;
-    }
-    ConsoleWriteln(s->value);
-}
+// CmdGetenv moved to shell_core.cpp.
 
 // CmdYield / CmdUname / CmdWhoami / CmdHostname / CmdPwd /
 // CmdTrue / CmdFalse moved to shell_core.cpp.

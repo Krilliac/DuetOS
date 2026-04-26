@@ -199,6 +199,12 @@ void CmdPwd();
 void CmdTrue();
 void CmdFalse();
 void CmdHostname();
+void CmdSet(u32 argc, char** argv);
+void CmdUnset(u32 argc, char** argv);
+void CmdGetenv(u32 argc, char** argv);
+void CmdEnv();
+void CmdAlias(u32 argc, char** argv);
+void CmdUnalias(u32 argc, char** argv);
 
 // ---------------------------------------------------------------
 // Misc trivial utility commands (shell_utilities.cpp). Commands
