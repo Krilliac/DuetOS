@@ -240,6 +240,19 @@ void CmdMode();
 void CmdHistory();
 void CmdSleep(u32 argc, char** argv);
 [[noreturn]] void CmdShutdownNow();
+void CmdColor(u32 argc, char** argv);
+void CmdRand(u32 argc, char** argv);
+void CmdUuid(u32 argc, char** argv);
+void CmdChecksum(u32 argc, char** argv);
+void CmdReset();
+void CmdTac(u32 argc, char** argv);
+void CmdNl(u32 argc, char** argv);
+void CmdRev(u32 argc, char** argv);
+void CmdExpr(u32 argc, char** argv);
+void CmdHexdump(u32 argc, char** argv);
+void CmdStat(u32 argc, char** argv);
+void CmdCal();
+void CmdBeep(u32 argc, char** argv);
 
 // ---------------------------------------------------------------
 // Account management commands (shell_security.cpp). Thin wrappers
