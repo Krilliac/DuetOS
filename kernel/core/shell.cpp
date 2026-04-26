@@ -673,99 +673,12 @@ void CmdStats()
 // the earlier command implementations / the Prompt helper.
 const char* TmpLeaf(const char* path);
 const char* FatLeaf(const char* path);
-struct EnvSlot;
-EnvSlot* EnvFind(const char* name);
 void Dispatch(char* line); // CmdTime + CmdSource recurse via this
 
-// ---------------------------------------------------------------
-// Environment variables. Fixed 8-slot table, 32-byte names +
-// 128-byte values. set / env / unset commands plus $VAR token
-// substitution in Dispatch.
-// ---------------------------------------------------------------
-
-constexpr u32 kEnvSlotCount = 8;
-constexpr u32 kEnvNameMax = 32;
-constexpr u32 kEnvValueMax = 128;
-
-struct EnvSlot
-{
-    bool in_use;
-    char name[kEnvNameMax];
-    char value[kEnvValueMax];
-};
-
-constinit EnvSlot g_env[kEnvSlotCount] = {};
-
-bool EnvNameEq(const char* a, const char* b)
-{
-    for (u32 i = 0; i < kEnvNameMax; ++i)
-    {
-        if (a[i] != b[i])
-            return false;
-        if (a[i] == '\0')
-            return true;
-    }
-    return true;
-}
-
-void EnvCopy(char* dst, const char* src, u32 cap)
-{
-    u32 i = 0;
-    for (; i + 1 < cap && src[i] != '\0'; ++i)
-    {
-        dst[i] = src[i];
-    }
-    dst[i] = '\0';
-}
-
-EnvSlot* EnvFind(const char* name)
-{
-    for (u32 i = 0; i < kEnvSlotCount; ++i)
-    {
-        if (g_env[i].in_use && EnvNameEq(g_env[i].name, name))
-        {
-            return &g_env[i];
-        }
-    }
-    return nullptr;
-}
-
-bool EnvSet(const char* name, const char* value)
-{
-    EnvSlot* s = EnvFind(name);
-    if (s == nullptr)
-    {
-        for (u32 i = 0; i < kEnvSlotCount; ++i)
-        {
-            if (!g_env[i].in_use)
-            {
-                s = &g_env[i];
-                s->in_use = true;
-                break;
-            }
-        }
-    }
-    if (s == nullptr)
-    {
-        return false;
-    }
-    EnvCopy(s->name, name, kEnvNameMax);
-    EnvCopy(s->value, value, kEnvValueMax);
-    return true;
-}
-
-bool EnvUnset(const char* name)
-{
-    EnvSlot* s = EnvFind(name);
-    if (s == nullptr)
-    {
-        return false;
-    }
-    s->in_use = false;
-    s->name[0] = '\0';
-    s->value[0] = '\0';
-    return true;
-}
+// EnvSlot / g_env / EnvFind / EnvSet / EnvUnset moved to
+// shell_state.cpp; declared in shell_internal.h. EnvNameEq +
+// EnvCopy are inline in the same header so the alias-table code
+// below can keep calling them without a back-edge dependency.
 
 // ---------------------------------------------------------------
 // Aliases. Same shape as the env table — 8 slots, 32-byte names,
@@ -5062,15 +4975,8 @@ void CmdGetenv(u32 argc, char** argv)
     ConsoleWriteln(s->value);
 }
 
-// CmdYield / CmdUname / CmdWhoami moved to shell_core.cpp.
-
-void CmdHostname()
-{
-    const EnvSlot* s = EnvFind("HOSTNAME");
-    ConsoleWriteln((s != nullptr) ? s->value : "duetos");
-}
-
-// CmdPwd / CmdTrue / CmdFalse moved to shell_core.cpp.
+// CmdYield / CmdUname / CmdWhoami / CmdHostname / CmdPwd /
+// CmdTrue / CmdFalse moved to shell_core.cpp.
 
 // CmdMount moved to shell_storage.cpp.
 

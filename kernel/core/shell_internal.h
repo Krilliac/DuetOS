@@ -18,9 +18,59 @@ namespace duetos::core::shell::internal
 {
 
 // ---------------------------------------------------------------
-// Trivial info / housekeeping commands (shell_core.cpp). Five
-// banner / status commands that need nothing beyond the console
-// driver, RTC, and the scheduler tick clock.
+// Environment variables. Fixed 8-slot table, 32-byte names +
+// 128-byte values. Backs the set / unset / env / getenv commands
+// and the $VAR token-substitution path in Dispatch().
+//
+// Definitions live in shell_state.cpp; declared here so sibling
+// TUs (CmdHostname in shell_core.cpp, future CmdEnv / CmdSet /
+// CmdGetenv extractions) can read and mutate the table without
+// going through a public API. EnvNameEq + EnvCopy are inline so
+// the alias-table code in shell.cpp can keep using them.
+// ---------------------------------------------------------------
+inline constexpr u32 kEnvSlotCount = 8;
+inline constexpr u32 kEnvNameMax = 32;
+inline constexpr u32 kEnvValueMax = 128;
+
+struct EnvSlot
+{
+    bool in_use;
+    char name[kEnvNameMax];
+    char value[kEnvValueMax];
+};
+
+extern EnvSlot g_env[kEnvSlotCount];
+
+inline bool EnvNameEq(const char* a, const char* b)
+{
+    for (u32 i = 0; i < kEnvNameMax; ++i)
+    {
+        if (a[i] != b[i])
+            return false;
+        if (a[i] == '\0')
+            return true;
+    }
+    return true;
+}
+
+inline void EnvCopy(char* dst, const char* src, u32 cap)
+{
+    u32 i = 0;
+    for (; i + 1 < cap && src[i] != '\0'; ++i)
+    {
+        dst[i] = src[i];
+    }
+    dst[i] = '\0';
+}
+
+EnvSlot* EnvFind(const char* name);
+bool EnvSet(const char* name, const char* value);
+bool EnvUnset(const char* name);
+
+// ---------------------------------------------------------------
+// Trivial info / housekeeping commands (shell_core.cpp). Banner /
+// status commands that need nothing beyond the console driver,
+// RTC, scheduler tick clock, or the env table above.
 // ---------------------------------------------------------------
 void CmdAbout();
 void CmdVersion();
@@ -33,6 +83,7 @@ void CmdWhoami();
 void CmdPwd();
 void CmdTrue();
 void CmdFalse();
+void CmdHostname();
 
 // ---------------------------------------------------------------
 // Account management commands (shell_security.cpp). Thin wrappers

@@ -157,4 +157,10 @@ void CmdFalse()
     // visual-only marker prints nothing (matches /bin/false).
 }
 
+void CmdHostname()
+{
+    const EnvSlot* s = EnvFind("HOSTNAME");
+    ConsoleWriteln((s != nullptr) ? s->value : "duetos");
+}
+
 } // namespace duetos::core::shell::internal

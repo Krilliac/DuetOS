@@ -86,6 +86,7 @@ set(DUETOS_KERNEL_SHARED_SOURCES
     core/shell_core.cpp
     core/shell_process.cpp
     core/shell_security.cpp
+    core/shell_state.cpp
     core/shell_storage.cpp
     core/stack_canary.cpp
     core/symbols.cpp
