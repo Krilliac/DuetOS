@@ -9,7 +9,7 @@ Stage 1 of the Win32 subsystem (see
 [`win32-subsystem-v0.md`](win32-subsystem-v0.md)) ran PE
 executables by mapping a single kernel-hosted stubs page per
 process and patching the IAT directly from a flat
-`{dll, func} -> offset` table in `kernel/subsystems/win32/stubs.cpp`.
+`{dll, func} -> offset` table in `kernel/subsystems/win32/thunks.cpp`.
 That design has ~122 Win32 functions resolved across 14 DLL
 names and carried us through real-world PEs like
 `windows-kill.exe`. It stops cold the moment a PE calls
@@ -840,7 +840,7 @@ test fixture (`customdll.dll`, `customdll2.dll`). Slice 10
 kicks off the retirement of flat-stubs-page entries into
 real userland code: a shipped `kernel32.dll` whose exports
 replace the hand-assembled trampolines in
-`kernel/subsystems/win32/stubs.cpp`.
+`kernel/subsystems/win32/thunks.cpp`.
 
 ### Slice 10 scope — exactly one export
 
@@ -915,7 +915,7 @@ instead of the current global-constant list.
 Each future slice should retire functions in
 ABI-compatible groups — e.g. "all Interlocked*" in one
 slice, "string intrinsics (strlen/strcmp/strcpy)" in
-another. The stubs.cpp header comment listing the ~122
+another. The thunks.cpp header comment listing the ~122
 current entries becomes the retirement backlog.
 
 For rough order-of-magnitude: `kStubsTable` has ~122 entries

@@ -71,7 +71,7 @@ def parse_nt_table(path: Path):
         nr = int(num_hex, 16)
         if "kSysNtNotImpl" in mapping:
             status = "unimplemented"
-            owner = "kernel/subsystems/win32/stubs.cpp::NtStubCatchAll"
+            owner = "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll"
             fallback = "STATUS_NOT_IMPLEMENTED"
         else:
             m = re.search(r"::duetos::core::(SYS_[A-Z0-9_]+)", mapping)

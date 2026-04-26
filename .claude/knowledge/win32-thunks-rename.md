@@ -36,8 +36,8 @@ as data.
 
 | Before                            | After                              |
 |-----------------------------------|------------------------------------|
-| `subsystems/win32/stubs.h`        | `subsystems/win32/thunks.h`        |
-| `subsystems/win32/stubs.cpp`      | `subsystems/win32/thunks.cpp`      |
+| `subsystems/win32/stubs.h`         | `subsystems/win32/thunks.h`        |
+| `subsystems/win32/stubs.cpp`       | `subsystems/win32/thunks.cpp`      |
 | `Win32StubsPopulate`              | `Win32ThunksPopulate`              |
 | `Win32StubsLookup`                | `Win32ThunksLookup`                |
 | `Win32StubsLookupKind`            | `Win32ThunksLookupKind`            |

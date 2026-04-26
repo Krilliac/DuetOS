@@ -11,7 +11,7 @@ LIBRARY kernel32.dll
 
 ; v0 Win32 surface DuetOS's kernel32 stub page resolves.
 ; Every name listed here must have a matching entry in
-; kernel/subsystems/win32/stubs.cpp:kStubsTable. Keep the
+; kernel/subsystems/win32/thunks.cpp:kStubsTable. Keep the
 ; two lists in sync or the import resolver will reject the
 ; executable at load time with UNRESOLVED <dll>!<func>.
 EXPORTS

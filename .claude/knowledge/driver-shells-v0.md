@@ -169,7 +169,7 @@ default devices change.
    already validated the magic; next is reading block-group
    descriptors and the root-directory inode.
 6. **Wire D3D PE imports into the graphics ICD** —
-   win32/stubs.cpp would route `d3d11.dll!D3D11CreateDevice`
+   win32/thunks.cpp would route `d3d11.dll!D3D11CreateDevice`
    straight to `subsystems::graphics::D3D11CreateDeviceStub`
    instead of the miss-logger. First step toward
    DXVK/vkd3d-proton-style translation.

@@ -5,7 +5,7 @@
  * implements Win32 entry points by issuing native int 0x80
  * syscalls + returning sentinel constants where appropriate.
  * This is the live userland replacement for the matching
- * entries in kernel/subsystems/win32/stubs.cpp.
+ * entries in kernel/subsystems/win32/thunks.cpp.
  *
  * Every function exported here retires the corresponding
  * `{"kernel32.dll", "<name>", kOff<name>}` row in

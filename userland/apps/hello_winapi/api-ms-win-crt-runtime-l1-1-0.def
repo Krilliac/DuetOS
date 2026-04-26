@@ -2,7 +2,7 @@
 ;
 ; Import library for the UCRT runtime apiset. A handful of
 ; functions we resolve to the v0 return-zero / nop / exit
-; shims in kernel/subsystems/win32/stubs.cpp. Only the ones
+; shims in kernel/subsystems/win32/thunks.cpp. Only the ones
 ; referenced from hello.c get imported into the final PE.
 ;
 ; The apiset DLLs are virtual — on real Windows they forward

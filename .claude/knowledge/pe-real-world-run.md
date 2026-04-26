@@ -146,7 +146,7 @@ return real pointers:
 1. **Proc-env page** — new fixed VA `kProcEnvVa = 0x65000000`,
    one page, R-W + NX, mapped only for PEs with imports (same
    gate as the TEB page). Layout exposed via constants in
-   `subsystems/win32/stubs.h`:
+   `subsystems/win32/thunks.h`:
 
    ```
    0x00  int   argc   = 1
@@ -177,7 +177,7 @@ return real pointers:
    covering the three link-path conventions the MSVC toolchain
    can produce.
 
-4. **Layout static-asserted** — `static_assert`s in `stubs.cpp`
+4. **Layout static-asserted** — `static_assert`s in `thunks.cpp`
    tie the hand-assembled stub bytes to the public
    `kProcEnvVa / kProcEnvArgcOff / kProcEnvArgvPtrOff`
    constants. Moving the page VA or the field offsets without
@@ -204,7 +204,7 @@ value. Diagnosable only with a hex-to-asm rosetta sheet.
 
 This slice adds:
 
-1. **Data-import detection heuristic** in `subsystems/win32/stubs.h`:
+1. **Data-import detection heuristic** in `subsystems/win32/thunks.h`:
    `IsLikelyDataImport(name)` returns true iff the name looks
    like MSVC's global-data mangling (`?name@scope@@3<type>...`).
    Walks to the first `@@` and checks the following byte for
