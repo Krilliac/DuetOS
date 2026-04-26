@@ -2,7 +2,8 @@
 
 ## Status (2026-04-26)
 
-Branch: `claude/refactor-codebase-VvLO6`. Pushed to origin.
+Branches: `claude/refactor-codebase-VvLO6` (merged via PR #74) and
+`claude/continue-refactoring-split-QlCKz` (active).
 
 **Per-split rollup:**
 
@@ -10,7 +11,7 @@ Branch: `claude/refactor-codebase-VvLO6`. Pushed to origin.
 |---|---|---:|---:|---|
 | 1 | `kernel/core/shell.cpp`               | 9,769 | 9,769 | ☐ not started |
 | 2 | `kernel/subsystems/win32/thunks.cpp`  | 5,684 |   655 | ☑ done (`cae3704`) |
-| 3 | `kernel/subsystems/linux/syscall.cpp` | 4,642 | 4,642 | ☐ not started |
+| 3 | `kernel/subsystems/linux/syscall.cpp` | 4,642 | 4,369 | ◐ in progress (cred + rlimit extracted; ~12 more domain slices to go) |
 | 4 | `kernel/fs/fat32.cpp`                 | 3,190 |   300 | ☑ done (decomposed into fat32 + fat32_dir + fat32_lookup + fat32_read + fat32_write + fat32_create + selftest, plus fat32_internal.h and fat32_write_internal.h) |
 | 5 | `kernel/drivers/usb/xhci.cpp`         | 2,548 |    76 | ☑ done (decomposed into 14 sibling TUs: admin/complete/context/control/descparse/enum/event/init/input/irq/ring/speed/xfer + xhci_internal.h; xhci.cpp itself is now just file header + namespace scaffolding + global definitions backing the extern decls in the header) |
 
@@ -24,6 +25,8 @@ Branch: `claude/refactor-codebase-VvLO6`. Pushed to origin.
 | `0ed4370 fs/fat32: split mutating path into sibling translation unit` | `fat32.cpp` 2,579 → 871 lines. All on-disk mutators (`Fat32WriteInPlace`, `Fat32Append*`, `Fat32Create*`, `Fat32Delete*`, `Fat32Mkdir/RmdirAtPath`, `Fat32Truncate*`) plus their helpers live in `fat32_write.cpp` (1,732 lines). Cross-TU primitives (`g_scratch`, `Fat32Guard`, `ReadCluster`, `WalkDirChain`, `WalkRootIntoSnapshot`, etc.) hoisted into `namespace duetos::fs::fat32::internal` via new `fat32_internal.h` (99 lines). Public `fat32.h` API unchanged. |
 | `54ca56d fs/fat32: extract file-content read APIs into fat32_read.cpp` | `fat32.cpp` 871 → 726 lines. `Fat32ReadFile`, `Fat32ReadAt`, `Fat32ReadFileStream` live in new `fat32_read.cpp` (173 lines). No new `internal::` symbols — these consume the existing primitives (`g_scratch`, `Fat32Guard`, `ReadFatEntry`) declared in `fat32_internal.h`. |
 | `9ae9964 fs/fat32: extract path lookup into fat32_lookup.cpp` | `fat32.cpp` 726 → 640 lines. `Fat32LookupPath` plus its TU-private `FindCtx` / `FindVisitor` pair live in new `fat32_lookup.cpp` (115 lines). Consumer-only of the existing internal primitives. |
+| `794c108 linux-syscall: extract credential handlers into sibling TU` | `syscall.cpp` 4,642 → 4,521 lines (-121). uid/gid/euid/egid/setre*/setres*/getres*/setfs*/groups/cap{get,set} live in new `syscall_cred.cpp` (152 lines), defined in `internal::` namespace. New `syscall_internal.h` (74 lines) carries the cross-TU decls + Linux errno constants (kEPERM..kENOSYS). Dispatcher unchanged via `using namespace internal;`. |
+| `81b2ca5 linux-syscall: extract rlimit handlers into sibling TU` | `syscall.cpp` 4,521 → 4,369 lines (-152). getrlimit/setrlimit/prlimit64 + kRlimit* constants + RlimitDefaultsFor helper live in new `syscall_rlimit.cpp` (184 lines). Constants stay TU-private (anon namespace) inside the new file; only the three Do* decls go into `syscall_internal.h`. |
 
 **Deferred** to a follow-up session (each warrants its own fresh chat per
 the timeout-prevention rules):
@@ -31,23 +34,28 @@ the timeout-prevention rules):
 - `kernel/core/shell.cpp` (9,769 lines) — per-domain command extraction
   + shared-state plumbing into `shell_internal.h`. No big data block to
   `.inc`-extract; this is a real function-by-function split.
-- `kernel/subsystems/linux/syscall.cpp` (4,642 lines) — split by syscall
-  subsystem (io, file, mm, proc, sig, time, fd, cred, sched, rlimit,
-  misc, stub).
-- `kernel/drivers/usb/xhci.cpp` (2,548 lines) — recommend a 4-file
-  split (core / init / xfer / enum) rather than the explorer's
-  optimistic 10-file plan; `InitOne` orchestrates AddressDevice +
-  FetchDeviceDescriptor + FetchAndParseConfig + BringUpHidKeyboard
-  + XhciBindMsix + spawns HidPollEntry, all referencing file-scope
-  `g_poll_rt[]` / `g_poll_args[]`.
+- `kernel/subsystems/linux/syscall.cpp` (now 4,369 lines) — continue
+  the per-domain split started on
+  `claude/continue-refactoring-split-QlCKz`. Remaining slices, in
+  ascending complexity: time, fd, sched, sig, proc, file, fs_mut,
+  path, mm, io, misc, stub. The `internal::` namespace + `using
+  namespace internal;` pattern in syscall.cpp is already in place;
+  each new slice just adds Do* decls to `syscall_internal.h`,
+  defines them in a new `syscall_<domain>.cpp`, removes the old
+  bodies from `syscall.cpp`, and lists the new file in
+  `kernel/CMakeLists.txt`.
 
 **Resume prompt for a fresh session:**
-> Continue the refactor on branch `claude/refactor-codebase-VvLO6`.
-> Read `.claude/knowledge/refactor-codebase-plan.md` for context, then
-> pick the next file from the deferred list and execute it as a single
-> commit (split + CMakeLists update + build verify + commit). Do NOT
-> attempt more than one file per session — the rules in CLAUDE.md's
-> "Stream Timeout Prevention" section exist for a reason.
+> Continue the refactor on branch `claude/continue-refactoring-split-QlCKz`
+> (or a fresh `claude/<slug>` cut from `main` if a new session started
+> a different branch). Read `.claude/knowledge/refactor-codebase-plan.md`
+> for context. Two slices of `linux/syscall.cpp` have landed (cred,
+> rlimit) — the `internal::` namespace machinery + `syscall_internal.h`
+> are already in place, so additional slices just follow the same
+> recipe (extract, register in CMakeLists, build, commit). Pick the
+> next domain from the deferred list. Do NOT attempt more than ~2
+> slices per session — the rules in CLAUDE.md's "Stream Timeout
+> Prevention" section exist for a reason.
 
 ---
 
