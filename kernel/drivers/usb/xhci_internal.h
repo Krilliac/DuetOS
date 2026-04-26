@@ -296,4 +296,35 @@ extern constinit bool g_init_done;
 extern constinit DeviceState g_devices[kMaxDevicesTotal];
 extern constinit u32 g_device_count;
 
+// =====================================================================
+// Ring primitives (xhci_ring.cpp)
+// =====================================================================
+
+// Allocate one zeroed 4 KiB frame; return both phys + kernel-virtual
+// pointer. False on out-of-memory.
+bool AllocZeroPage(mm::PhysAddr* out_phys, void** out_virt);
+
+// Wait for a u32 MMIO register to satisfy `(value & mask) == match`.
+// Returns true if the predicate held within `iters` polls.
+bool PollUntil(volatile u8* base, u64 reg_off, u32 mask, u32 match, u64 iters);
+
+// Doorbell write. xHCI DB[0] rings the command ring; DB[slot_id]
+// rings a device's endpoints. `target` is the DB Target field
+// (bits 0..7); stream_id is 0 for non-stream endpoints.
+void RingDoorbell(Runtime& rt, u32 db_index, u32 target, u32 stream_id = 0);
+
+// Enqueue one TRB into a ring and return the physical address of
+// the enqueued slot. Handles the Link TRB wrap automatically.
+u64 EnqueueRingTrb(Trb* ring, u64 ring_phys, u32 slots, u32& idx, u32& cycle, u32 type, u32 param_lo, u32 param_hi,
+                   u32 status, u32 extra_control);
+
+// Submit one TRB on the command ring and ring DB[0]. Returns the
+// TRB's physical address (used by callers to match the completion).
+u64 SubmitCmd(Runtime& rt, u32 type, u32 param_lo, u32 param_hi, u32 status, u32 extra_control);
+
+// Advance the consumer side of the event ring and push the updated
+// dequeue pointer back to ERDP (with the event-handler-busy bit
+// cleared — write-1-to-clear per spec).
+void AdvanceEventRing(Runtime& rt);
+
 } // namespace duetos::drivers::usb::xhci::internal
