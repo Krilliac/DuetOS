@@ -188,6 +188,26 @@ u32 ReadFileToBuf(const char* path, char* buf, u32 cap);
 u32 SliceLines(const char* scratch, u32 n, u32* offs, u32* lens, u32 cap);
 
 // ---------------------------------------------------------------
+// Networking primitives (shell_network.cpp). Pure helpers shared
+// by every networking command — extracted so the heavier net
+// commands still in shell.cpp (dhcp/route/wifi/net/usbnet) can
+// reach them through this header.
+// ---------------------------------------------------------------
+} // namespace duetos::core::shell::internal
+
+namespace duetos::net
+{
+struct Ipv4Address;
+}
+
+namespace duetos::core::shell::internal
+{
+bool ParseIpv4(const char* s, duetos::net::Ipv4Address* out);
+void WriteIpv4(duetos::net::Ipv4Address ip);
+void WriteMac(const u8 mac[6]);
+bool Ipv4IsZero(duetos::net::Ipv4Address ip);
+
+// ---------------------------------------------------------------
 // Shared console-output formatters (shell_format.cpp). Numeric
 // printers used by every command that emits a value. Hoisted so
 // each sibling TU can reach them through this header instead of
@@ -275,6 +295,22 @@ void CmdHwmon();
 void CmdGpu();
 void CmdGfx();
 void CmdVbe(u32 argc, char** argv);
+
+// ---------------------------------------------------------------
+// Networking commands (shell_network.cpp). The simpler half of
+// the network surface — wire-protocol probes (ping/http/ntp/
+// nslookup), iface listing (nic/ifconfig), ARP/IP stats. The
+// heavier networking commands (dhcp / route / wifi / net / fwtrace /
+// usbnet) stay in shell.cpp until a follow-up slice extracts them.
+// ---------------------------------------------------------------
+void CmdPing(u32 argc, char** argv);
+void CmdHttp(u32 argc, char** argv);
+void CmdNtp(u32 argc, char** argv);
+void CmdNslookup(u32 argc, char** argv);
+void CmdNic();
+void CmdIfconfig();
+void CmdArp();
+void CmdIpv4();
 
 // ---------------------------------------------------------------
 // Misc trivial utility commands (shell_utilities.cpp). Commands

@@ -88,6 +88,7 @@ set(DUETOS_KERNEL_SHARED_SOURCES
     core/shell_format.cpp
     core/shell_fsio.cpp
     core/shell_hardware.cpp
+    core/shell_network.cpp
     core/shell_pathutil.cpp
     core/shell_process.cpp
     core/shell_security.cpp
