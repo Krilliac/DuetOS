@@ -12,8 +12,10 @@
 // Runtime, ControllerInfo, PortRecord, DeviceState) and the MMIO
 // helpers here as well.
 
+#include "../../arch/x86_64/traps.h"
 #include "../../core/types.h"
 #include "../../mm/page.h"
+#include "../../sched/sched.h"
 #include "xhci.h"
 
 namespace duetos::drivers::usb::xhci::internal
@@ -295,6 +297,28 @@ extern constinit u32 g_controller_count;
 extern constinit bool g_init_done;
 extern constinit DeviceState g_devices[kMaxDevicesTotal];
 extern constinit u32 g_device_count;
+
+// Per-controller poll-task arg + IRQ-routing state. The HID poll
+// task in xhci.cpp blocks on `g_poll_args[i].wait`; the per-controller
+// IRQ stubs in xhci_irq.cpp wake it. Runtime mirrors live in
+// g_poll_rt[i] so the public xfer surface (XhciControlIn,
+// XhciBulkSubmit, etc.) can reach the controller without going
+// back through ControllerInfo.
+struct PollTaskArg
+{
+    Runtime* rt;
+    ControllerInfo* info;
+    duetos::sched::WaitQueue wait;
+    u8 irq_vector; // 0 == MSI-X not bound, polling fallback
+};
+
+extern constinit PollTaskArg g_poll_args[kMaxControllers];
+extern constinit Runtime g_poll_rt[kMaxControllers];
+
+// IRQ stamps. One C handler per controller so the generic
+// IrqHandler signature (no context) can route to the right wait
+// queue. XhciBindMsix indexes this table by controller-idx.
+extern const ::duetos::arch::IrqHandler kXhciIrqStamps[kMaxControllers];
 
 // =====================================================================
 // Ring primitives (xhci_ring.cpp)

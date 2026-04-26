@@ -538,63 +538,6 @@ bool TryReadEvent(Runtime& rt, Trb* out)
     return true;
 }
 
-// Per-controller polling task state. With MSI-X bound the task
-// blocks on `wait` and the device's IRQ handler wakes it; without
-// MSI-X it falls back to tick-cadence polling so a controller that
-// doesn't expose the capability still functions.
-struct PollTaskArg
-{
-    Runtime* rt;
-    ControllerInfo* info;
-    duetos::sched::WaitQueue wait;
-    u8 irq_vector; // 0 == MSI-X not bound, polling fallback
-};
-
-constinit PollTaskArg g_poll_args[kMaxControllers] = {};
-constinit Runtime g_poll_rt[kMaxControllers] = {};
-
-
-// Acknowledge interrupter 0's IMAN.IP (the device-side pending
-// bit). LAPIC EOI is handled by the generic IRQ dispatcher; this
-// clears the xHCI-internal pending bit so a subsequent event
-// re-asserts the line instead of being coalesced into the
-// already-pending state. Keeps IE set so future events still
-// trigger interrupts.
-void XhciAckInterrupter(Runtime& rt)
-{
-    if (rt.intr0 == nullptr)
-        return;
-    const u32 iman = ReadMmio32(rt.intr0, kIntrIman);
-    WriteMmio32(rt.intr0, kIntrIman, (iman & ~kImanIp) | kImanIp | kImanIe);
-}
-
-// One C handler per controller so the generic IrqHandler signature
-// (no context) can still route to the right wait queue. The max
-// controller count is small; explicit stamps are clearer than
-// building a vector → controller-idx map.
-void XhciIrq0()
-{
-    XhciAckInterrupter(g_poll_rt[0]);
-    duetos::sched::WaitQueueWakeOne(&g_poll_args[0].wait);
-}
-void XhciIrq1()
-{
-    XhciAckInterrupter(g_poll_rt[1]);
-    duetos::sched::WaitQueueWakeOne(&g_poll_args[1].wait);
-}
-void XhciIrq2()
-{
-    XhciAckInterrupter(g_poll_rt[2]);
-    duetos::sched::WaitQueueWakeOne(&g_poll_args[2].wait);
-}
-void XhciIrq3()
-{
-    XhciAckInterrupter(g_poll_rt[3]);
-    duetos::sched::WaitQueueWakeOne(&g_poll_args[3].wait);
-}
-
-static_assert(kMaxControllers == 4, "per-controller IRQ stamps must match kMaxControllers");
-constexpr ::duetos::arch::IrqHandler kXhciIrqStamps[kMaxControllers] = {&XhciIrq0, &XhciIrq1, &XhciIrq2, &XhciIrq3};
 
 // Attempt MSI-X bring-up for one controller. On success the
 // controller fires IRQs at `vector` whenever an event is posted
