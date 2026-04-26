@@ -351,6 +351,17 @@ void CmdKdbg(u32 argc, char** argv);
 void CmdMetrics();
 
 // ---------------------------------------------------------------
+// Executable + low-level read commands (shell_exec.cpp). Loaders
+// for native ELF + Linux ELF + raw block-device peek + ABI
+// translation table dump.
+// ---------------------------------------------------------------
+void CmdLinuxexec(u32 argc, char** argv);
+void CmdTranslate();
+void CmdRead(u32 argc, char** argv);
+void CmdExec(u32 argc, char** argv);
+void CmdReadelf(u32 argc, char** argv);
+
+// ---------------------------------------------------------------
 // Misc trivial utility commands (shell_utilities.cpp). Commands
 // that touch only one or two kernel subsystems and don't need
 // any of the larger TU-private helpers in shell.cpp.

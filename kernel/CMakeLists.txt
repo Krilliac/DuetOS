@@ -85,6 +85,7 @@ set(DUETOS_KERNEL_SHARED_SOURCES
     core/shell.cpp
     core/shell_core.cpp
     core/shell_debug.cpp
+    core/shell_exec.cpp
     core/shell_filesystem.cpp
     core/shell_format.cpp
     core/shell_fsio.cpp
