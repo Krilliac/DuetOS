@@ -452,4 +452,38 @@ u8 EndpointDci(u8 ep_addr);
 // HID poll task can match against the previous report.
 u64 HidEnqueueNormalTrb(DeviceState* dev, u64 buf_phys, u32 len);
 
+// =====================================================================
+// Device enumeration pipeline (xhci_enum.cpp)
+// =====================================================================
+
+// Volatile-byte zeroer — the freestanding toolchain has no libc
+// memset and `x = {}` on a large struct lowers to a memset call
+// the linker can't resolve.
+void ZeroBytes(void* p, u64 n);
+
+// Allocate the next free entry in g_devices, mark it in_use, bump
+// g_device_count if we landed beyond the current high-water mark.
+DeviceState* AllocDeviceSlot();
+
+// Issue Enable Slot + Address Device for a freshly reset port.
+// Allocates the device's slot, EP0 ring, input + device contexts,
+// fetches the BOS speed-derived MPS0, populates dev->slot_id +
+// dev->speed.
+bool AddressDevice(Runtime& rt, PortRecord& port);
+
+// GET_DESCRIPTOR(Device) on EP0; populates port->dev_class / etc.
+bool FetchDeviceDescriptor(Runtime& rt, PortRecord& port);
+
+// Two-phase Configuration descriptor fetch (header + full tree),
+// then ParseConfigForHidBoot to find a HID Boot Keyboard / Mouse
+// interface + interrupt-IN endpoint.
+bool FetchAndParseConfig(Runtime& rt, PortRecord& port);
+
+// USB SET_CONFIGURATION on EP0.
+bool SetConfiguration(Runtime& rt, DeviceState* dev, u8 config_value);
+
+// Stand up the HID Boot endpoint: allocate ring + buffer, issue
+// Configure Endpoint, prime the first IN TRB, mark dev->hid_ready.
+bool BringUpHidKeyboard(Runtime& rt, PortRecord& port);
+
 } // namespace duetos::drivers::usb::xhci::internal
