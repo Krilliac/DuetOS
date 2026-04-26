@@ -331,6 +331,21 @@ void CmdNet(u32 argc, char** argv);
 void CmdUsbNet(u32 argc, char** argv);
 
 // ---------------------------------------------------------------
+// Kernel debug + introspection commands (shell_debug.cpp).
+// Memory dump, breakpoint interface, runtime probe arming,
+// instruction decode, symbol resolver, RE/triage `inspect`,
+// global state snapshot, log-threshold trace toggle.
+// ---------------------------------------------------------------
+void CmdMemDump(u32 argc, char** argv);
+void CmdBp(u32 argc, char** argv);
+void CmdProbe(u32 argc, char** argv);
+void CmdInstr(u32 argc, char** argv);
+void CmdAddr2Sym(u32 argc, char** argv);
+void CmdInspect(u32 argc, char** argv);
+void CmdDumpState();
+void CmdTrace(u32 argc, char** argv);
+
+// ---------------------------------------------------------------
 // Misc trivial utility commands (shell_utilities.cpp). Commands
 // that touch only one or two kernel subsystems and don't need
 // any of the larger TU-private helpers in shell.cpp.

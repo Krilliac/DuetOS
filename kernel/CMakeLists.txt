@@ -84,6 +84,7 @@ set(DUETOS_KERNEL_SHARED_SOURCES
     subsystems/win32/window_syscall.cpp
     core/shell.cpp
     core/shell_core.cpp
+    core/shell_debug.cpp
     core/shell_filesystem.cpp
     core/shell_format.cpp
     core/shell_fsio.cpp
