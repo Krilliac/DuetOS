@@ -347,4 +347,15 @@ bool WaitCmdCompletion(Runtime& rt, u64 expect_phys, u32* out_status, u8* out_sl
 void TrbEventCacheStash(u64 trb_phys, u32 completion_code, u32 residual, u32 trb_len);
 bool TrbEventCacheTake(u64 trb_phys, u32* completion_code, u32* residual, u32* trb_len);
 
+// =====================================================================
+// USB descriptor parsing (xhci_descparse.cpp)
+// =====================================================================
+
+// Walk a USB Configuration descriptor looking for the first HID
+// Boot Keyboard / Mouse interface and its first interrupt-IN
+// endpoint. `buf[0..len)` is the wTotalLength-bytes-long descriptor
+// tree. Populates `port` fields iff a HID boot device is found.
+// Returns true on found.
+bool ParseConfigForHidBoot(const u8* buf, u32 len, PortRecord& port);
+
 } // namespace duetos::drivers::usb::xhci::internal
