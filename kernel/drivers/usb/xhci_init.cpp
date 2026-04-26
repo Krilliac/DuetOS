@@ -1,0 +1,775 @@
+/*
+ * DuetOS — xHCI driver: controller bring-up + per-controller poll task.
+ *
+ * Sibling TU. Houses everything that orchestrates the boot path:
+ *
+ *   internal::TryReadEvent      — non-blocking event-ring single-step
+ *   internal::XhciBindMsix      — MSI-X probe + IMAN.IE arming
+ *   internal::HidPollEntry      — per-controller event-ring drain task
+ *   internal::InitOne           — per-controller bring-up megafunction
+ *   XhciInit                    — public, walks every PCI xHCI controller
+ *   XhciShutdown                — public, halts every live controller
+ *   XhciRestart                 — public, Shutdown + Init
+ *
+ * All of these were the last things still in xhci.cpp. With this
+ * slice, xhci.cpp itself is left with just the header / namespace
+ * scaffolding + the file-scope global definitions backing the
+ * `namespace internal` extern decls in xhci_internal.h.
+ */
+
+#include "xhci.h"
+
+#include "../../arch/x86_64/cpu.h"
+#include "../../arch/x86_64/serial.h"
+#include "../../core/cleanroom_trace.h"
+#include "../../core/klog.h"
+#include "../../core/result.h"
+#include "../../mm/frame_allocator.h"
+#include "../../mm/page.h"
+#include "../../sched/sched.h"
+#include "../pci/pci.h"
+#include "usb.h"
+#include "xhci_internal.h"
+
+namespace duetos::drivers::usb::xhci
+{
+
+using namespace internal;
+
+namespace
+{
+
+// Byte-wise zero for arbitrary POD — the freestanding toolchain has
+// no libc memset and implicit struct zeroing (`x = {}`) on a large
+
+
+inline volatile u8* OpBase(const HostControllerInfo& h, u8 caplen)
+{
+    return static_cast<volatile u8*>(h.mmio_virt) + caplen;
+}
+
+
+// Non-blocking single-step of the event ring. If a valid TRB is
+// present under the current consumer cycle, copy it out + advance.
+// Returns false if the ring is empty.
+bool TryReadEvent(Runtime& rt, Trb* out)
+{
+    const Trb& e = rt.evt_ring[rt.evt_idx];
+    const bool valid = (e.control & 1u) == (rt.evt_cycle & 1u);
+    if (!valid)
+        return false;
+    if (out != nullptr)
+        *out = e;
+    AdvanceEventRing(rt);
+    return true;
+}
+
+
+// Attempt MSI-X bring-up for one controller. On success the
+// controller fires IRQs at `vector` whenever an event is posted
+// to interrupter 0. On failure the caller falls back to
+// tick-cadence polling.
+bool XhciBindMsix(Runtime& rt, const HostControllerInfo& h, u32 ctrlr_idx, u8* out_vector)
+{
+    using namespace duetos::drivers::pci;
+    DeviceAddress addr{};
+    addr.bus = h.bus;
+    addr.device = h.device;
+    addr.function = h.function;
+    auto r = PciMsixBindSimple(addr, /*entry_index=*/0, kXhciIrqStamps[ctrlr_idx], /*out_route=*/nullptr);
+    if (!r.has_value())
+        return false;
+    const u8 vector = r.value();
+
+    // Enable the device's interrupt machinery:
+    //   - USBCMD.INTE so the controller delivers MSI at all.
+    //   - IMAN.IE on interrupter 0 so its event ring raises the
+    //     vector we just bound. Clear any stale IP bit in the same
+    //     write (bit 0 is RW1C).
+    WriteMmio32(rt.op, kOpUsbCmd, ReadMmio32(rt.op, kOpUsbCmd) | kCmdIntrEnable);
+    WriteMmio32(rt.intr0, kIntrIman, kImanIe | kImanIp);
+
+    *out_vector = vector;
+    return true;
+}
+
+void HidPollEntry(void* raw)
+{
+    auto* arg = static_cast<PollTaskArg*>(raw);
+    Runtime& rt = *arg->rt;
+    const bool have_msix = (arg->irq_vector != 0);
+    for (;;)
+    {
+        // Drain every event currently available, then sleep.
+        Trb e{};
+        while (TryReadEvent(rt, &e))
+        {
+            const u32 type = (e.control >> 10) & 0x3F;
+            if (type != kTrbTypeTransferEvent)
+                continue;
+            const u64 ptr = (u64(e.param_hi) << 32) | u64(e.param_lo);
+            const u32 completion_code = (e.status >> 24) & 0xFF;
+            const u32 residual = e.status & 0x00FFFFFF;
+            // Find which HID device this TRB belongs to.
+            bool consumed_by_hid = false;
+            for (u32 i = 0; i < kMaxDevicesTotal; ++i)
+            {
+                DeviceState& dev = g_devices[i];
+                if (!dev.in_use || !dev.hid_ready)
+                    continue;
+                if (dev.hid_outstanding_phys == 0 || dev.hid_outstanding_phys != ptr)
+                    continue;
+                consumed_by_hid = true;
+                // Parse + inject. Mice skip the diff state — each
+                // report is a standalone delta + button snapshot,
+                // so we push the packet as-is.
+                if (dev.hid_is_mouse)
+                {
+                    u8 mouse_rep[3] = {
+                        dev.hid_buf_virt[0],
+                        dev.hid_buf_virt[1],
+                        dev.hid_buf_virt[2],
+                    };
+                    HidMouseInject(mouse_rep);
+                }
+                else
+                {
+                    u8 curr[8] = {};
+                    for (u32 b = 0; b < 8; ++b)
+                        curr[b] = dev.hid_buf_virt[b];
+                    HidDiffAndInject(dev.hid_prev, curr);
+                    for (u32 b = 0; b < 8; ++b)
+                        dev.hid_prev[b] = curr[b];
+                }
+                // Re-queue a Normal TRB + ring the endpoint doorbell.
+                const u64 trb = HidEnqueueNormalTrb(&dev, dev.hid_buf_phys, dev.hid_ep_max_packet);
+                dev.hid_outstanding_phys = trb;
+                if (trb != 0)
+                    RingDoorbell(rt, dev.slot_id, dev.hid_ep_xhci_idx);
+                break;
+            }
+            if (!consumed_by_hid)
+                TrbEventCacheStash(ptr, completion_code, residual, /*trb_len=*/0);
+        }
+        if (have_msix)
+        {
+            // Block until the IRQ handler signals us. WaitQueueBlock
+            // requires interrupts disabled on entry; the scheduler
+            // re-enables them across the context switch. Spurious
+            // wakes are fine — the drain-loop above handles them.
+            //
+            // Lost-wakeup guard: if an event arrived between the
+            // above `while (TryReadEvent)` returning false and our
+            // Cli, the handler's WakeOne fired into an unparked
+            // task. Re-check the event ring once under Cli before
+            // committing to the block. If something's there we
+            // fall through to the next iteration, Sti-free (the
+            // scheduler's Schedule path re-enables on switch).
+            duetos::arch::Cli();
+            if ((rt.evt_ring[rt.evt_idx].control & 1u) == (rt.evt_cycle & 1u))
+            {
+                duetos::arch::Sti();
+                continue;
+            }
+            duetos::sched::WaitQueueBlock(&arg->wait);
+        }
+        else
+        {
+            duetos::sched::SchedSleepTicks(1);
+        }
+    }
+}
+
+bool InitOne(const HostControllerInfo& h, ControllerInfo& out)
+{
+    out.bus = h.bus;
+    out.device = h.device;
+    out.function = h.function;
+    out.init_ok = false;
+    out.noop_ok = false;
+
+    if (h.kind != HciKind::Xhci || h.mmio_virt == nullptr)
+        return false;
+
+    auto* mmio = static_cast<volatile u8*>(h.mmio_virt);
+    const u32 cap_word = ReadMmio32(mmio, kCapHciVersion);
+    const u8 caplen = u8(cap_word & 0xFF);
+    if (caplen < 0x20)
+    {
+        arch::SerialWrite("[xhci] caplen below spec minimum, skipping\n");
+        return false;
+    }
+    volatile u8* op = OpBase(h, caplen);
+
+    // Spec §4.2: stop the controller before reset (RUN/STOP=0 then
+    // wait for HCH=1), then HCRST=1 and wait for it to clear and
+    // for CNR=0.
+    u32 cmd = ReadMmio32(op, kOpUsbCmd);
+    if (cmd & kCmdRunStop)
+    {
+        WriteMmio32(op, kOpUsbCmd, cmd & ~kCmdRunStop);
+        if (!PollUntil(op, kOpUsbSts, kStsHcHalted, kStsHcHalted, 1'000'000))
+        {
+            arch::SerialWrite("[xhci] timed out waiting for HCH=1 before reset\n");
+            return false;
+        }
+    }
+    WriteMmio32(op, kOpUsbCmd, ReadMmio32(op, kOpUsbCmd) | kCmdHcReset);
+    // After reset both HCRST and CNR must be 0.
+    if (!PollUntil(op, kOpUsbCmd, kCmdHcReset, 0, 1'000'000))
+    {
+        arch::SerialWrite("[xhci] HCRST never cleared\n");
+        return false;
+    }
+    if (!PollUntil(op, kOpUsbSts, kStsCnr, 0, 1'000'000))
+    {
+        arch::SerialWrite("[xhci] CNR never cleared after reset\n");
+        return false;
+    }
+
+    // Cache geometry the spec requires before allocating data structures.
+    const u32 hcs1 = ReadMmio32(mmio, kCapHcsParams1);
+    const u32 hcs2 = ReadMmio32(mmio, kCapHcsParams2);
+    out.max_slots = u8(hcs1 & 0xFF);
+    out.max_intrs = u16((hcs1 >> 8) & 0x7FF);
+    out.max_ports = u8((hcs1 >> 24) & 0xFF);
+    const u32 sp_lo = (hcs2 >> 27) & 0x1F;
+    const u32 sp_hi = (hcs2 >> 21) & 0x1F;
+    out.max_scratchpad = (sp_hi << 5) | sp_lo;
+
+    if (out.max_scratchpad != 0)
+    {
+        // QEMU q35 default doesn't ask for scratchpad; if a real
+        // controller does, bail v0 (proper handling needs N more
+        // pages + a pointer-array page).
+        arch::SerialWrite("[xhci] controller requests scratchpad buffers — v0 doesn't allocate, skipping\n");
+        return false;
+    }
+    if (out.max_slots == 0)
+    {
+        arch::SerialWrite("[xhci] controller reports max_slots=0, skipping\n");
+        return false;
+    }
+
+    // Allocate DCBAA, command ring, event ring, ERST.
+    mm::PhysAddr dcbaa_phys = 0;
+    void* dcbaa_virt = nullptr;
+    if (!AllocZeroPage(&dcbaa_phys, &dcbaa_virt))
+        return false;
+    mm::PhysAddr cmd_phys = 0;
+    void* cmd_virt = nullptr;
+    if (!AllocZeroPage(&cmd_phys, &cmd_virt))
+        return false;
+    mm::PhysAddr evt_phys = 0;
+    void* evt_virt = nullptr;
+    if (!AllocZeroPage(&evt_phys, &evt_virt))
+        return false;
+    mm::PhysAddr erst_phys = 0;
+    void* erst_virt = nullptr;
+    if (!AllocZeroPage(&erst_phys, &erst_virt))
+        return false;
+
+    out.dcbaa_phys = dcbaa_phys;
+    out.cmd_ring_phys = cmd_phys;
+    out.event_ring_phys = evt_phys;
+    out.erst_phys = erst_phys;
+
+    // Command ring: install a Link TRB at the last slot pointing
+    // back to ring base, with Toggle Cycle = 1 so the controller
+    // flips its own cycle bit when it wraps.
+    auto* cmd_ring = static_cast<Trb*>(cmd_virt);
+    constexpr u32 kRingSlots = mm::kPageSize / sizeof(Trb);
+    Trb& link = cmd_ring[kRingSlots - 1];
+    link.param_lo = u32(cmd_phys);
+    link.param_hi = u32(cmd_phys >> 32);
+    link.status = 0;
+    // control = (TRB type << 10) | TC=1 (bit 1) | C=1 (bit 0).
+    // We set the cycle bit so the link entry matches our initial
+    // "producer cycle" state of 1.
+    link.control = (kTrbTypeLink << 10) | (1u << 1) | 1u;
+
+    // ERST entry 0 points at the event ring with size = ring slots.
+    auto* erst = static_cast<ErstEntry*>(erst_virt);
+    erst[0].ring_phys = evt_phys;
+    erst[0].ring_size = kRingSlots;
+    erst[0]._rsvd = 0;
+
+    // Wire op-regs.
+    // CONFIG.MaxSlotsEn = max_slots (cap-reported limit).
+    WriteMmio32(op, kOpConfig, out.max_slots);
+    // DCBAAP — physical base; alignment is 64 bytes, our page is
+    // 4 KiB so safely aligned.
+    WriteMmio64(op, kOpDcbaap, dcbaa_phys);
+    // CRCR — command-ring base | bit 0 (Ring Cycle State = 1).
+    // Other bits (Command Stop, Command Abort) start cleared.
+    WriteMmio64(op, kOpCrcr, cmd_phys | 1u);
+    // DNCTRL: enable bus-master notification for slot 0 only (default).
+    WriteMmio32(op, kOpDnCtrl, 0x2);
+
+    // Interrupter 0 lives in the runtime register set: rt_base =
+    // mmio + RTSOFF; per-interrupter stride 32 B starting at +0x20.
+    const u32 rtsoff = ReadMmio32(mmio, kCapRtsOff) & ~0x1Fu;
+    volatile u8* intr0 = mmio + rtsoff + 0x20;
+    constexpr u64 kIntrErstSz = 0x08;                    // u32
+    constexpr u64 kIntrErstBaLo = 0x10;                  // u32 (low half of u64)
+    [[maybe_unused]] constexpr u64 kIntrErstBaHi = 0x14; // high half; paired WriteMmio64 writes both
+    constexpr u64 kIntrErdpLo = 0x18;                    // u64
+    WriteMmio32(intr0, kIntrErstSz, 1);
+    // ERDP must be written BEFORE ERSTBA per spec §4.9.4.
+    WriteMmio64(intr0, kIntrErdpLo, evt_phys);
+    WriteMmio64(intr0, kIntrErstBaLo, erst_phys);
+
+    // Start the controller. RS=1, then wait for HCH=0.
+    WriteMmio32(op, kOpUsbCmd, ReadMmio32(op, kOpUsbCmd) | kCmdRunStop);
+    if (!PollUntil(op, kOpUsbSts, kStsHcHalted, 0, 1'000'000))
+    {
+        arch::SerialWrite("[xhci] HCH never cleared after RS=1\n");
+        return false;
+    }
+    out.init_ok = true;
+
+    // Pack the ring / doorbell / interrupter state into a Runtime
+    // so helpers (SubmitCmd, WaitCmdCompletion, WaitEvent) don't
+    // have to close over lambdas. Context-size bit governs whether
+    // device / input contexts are 32 or 64 bytes per element.
+    constexpr u32 kRingSlotsLocal = mm::kPageSize / sizeof(Trb);
+    const u32 hcc1 = ReadMmio32(mmio, kCapHccParams1);
+    const u32 dboff = ReadMmio32(mmio, kCapDbOff) & ~0x3u;
+
+    Runtime rt{};
+    rt.mmio = mmio;
+    rt.op = op;
+    rt.intr0 = intr0;
+    rt.db_base = reinterpret_cast<volatile u32*>(mmio + dboff);
+    rt.cmd_ring = cmd_ring;
+    rt.cmd_phys = cmd_phys;
+    rt.cmd_slots = kRingSlotsLocal;
+    rt.cmd_idx = 0;
+    rt.cmd_cycle = 1;
+    rt.evt_ring = static_cast<Trb*>(evt_virt);
+    rt.evt_phys = evt_phys;
+    rt.evt_slots = kRingSlotsLocal;
+    rt.evt_idx = 0;
+    rt.evt_cycle = 1;
+    rt.dcbaa = static_cast<u64*>(dcbaa_virt);
+    rt.ctx_bytes = (hcc1 & kHccParams1Csz) ? 64 : 32;
+    rt.max_slots = out.max_slots;
+    rt.info = &out;
+    out.context_bytes = rt.ctx_bytes;
+
+    // NoOp roundtrip — proves the submit/complete plumbing works
+    // before we issue commands that allocate state on the controller.
+    {
+        const u64 noop_phys = SubmitCmd(rt, kTrbTypeNoOp, 0, 0, 0, 0);
+        u32 status = 0;
+        u8 slot = 0;
+        out.noop_ok = (noop_phys != 0) && WaitCmdCompletion(rt, noop_phys, &status, &slot);
+    }
+
+    arch::SerialWrite("[xhci] init pci=");
+    arch::SerialWriteHex(h.bus);
+    arch::SerialWrite(":");
+    arch::SerialWriteHex(h.device);
+    arch::SerialWrite(".");
+    arch::SerialWriteHex(h.function);
+    arch::SerialWrite(" max_slots=");
+    arch::SerialWriteHex(out.max_slots);
+    arch::SerialWrite(" max_ports=");
+    arch::SerialWriteHex(out.max_ports);
+    arch::SerialWrite(" max_intrs=");
+    arch::SerialWriteHex(out.max_intrs);
+    arch::SerialWrite(" dcbaa=");
+    arch::SerialWriteHex(out.dcbaa_phys);
+    arch::SerialWrite(" cmd_ring=");
+    arch::SerialWriteHex(out.cmd_ring_phys);
+    arch::SerialWrite(" event_ring=");
+    arch::SerialWriteHex(out.event_ring_phys);
+    arch::SerialWrite("\n");
+    arch::SerialWrite(out.noop_ok ? "[xhci] NoOp roundtrip PASS\n"
+                                  : "[xhci] NoOp roundtrip FAIL — no Command Completion event\n");
+
+    if (!out.noop_ok)
+        return true;
+
+    // Walk PORTSC for every port. Per-port PORTSC starts at
+    // opbase + 0x400 + (port_idx * 0x10). For each port that
+    // shows CCS=1: kick PR=1 if not already enabled, wait for
+    // PED=1, then issue Enable Slot Command.
+    out.ports_connected = 0;
+    out.slots_enabled = 0;
+    const u8 ports_to_scan = (out.max_ports < kMaxXhciPortsPerController) ? out.max_ports : kMaxXhciPortsPerController;
+    for (u8 i = 0; i < ports_to_scan; ++i)
+    {
+        const u64 portsc_off = 0x400 + u64(i) * 0x10;
+        u32 portsc = ReadMmio32(op, portsc_off);
+        PortRecord& rec = out.ports[i];
+        rec.port_num = u8(i + 1);
+        rec.connected = (portsc & kPortScCcs) != 0;
+        rec.portsc_at_scan = portsc;
+        rec.speed = (portsc >> 10) & 0xF;
+        if (!rec.connected)
+            continue;
+        ++out.ports_connected;
+
+        // Reset only if PED is not already set. USB 3 ports usually
+        // self-train and arrive with PED=1; USB 2 ports require PR=1.
+        if ((portsc & kPortScPed) == 0)
+        {
+            const u32 wr = (portsc & ~kPortScRw1cMask) | kPortScPr;
+            WriteMmio32(op, portsc_off, wr);
+            // Wait for PR to clear (reset done) and PED to set.
+            for (u64 j = 0; j < 1'000'000; ++j)
+            {
+                const u32 cur = ReadMmio32(op, portsc_off);
+                if ((cur & kPortScPr) == 0 && (cur & kPortScPed) != 0)
+                {
+                    portsc = cur;
+                    break;
+                }
+                asm volatile("pause" : : : "memory");
+            }
+        }
+        rec.reset_ok = (ReadMmio32(op, portsc_off) & kPortScPed) != 0;
+        if (!rec.reset_ok)
+        {
+            arch::SerialWrite("[xhci]   port ");
+            arch::SerialWriteHex(rec.port_num);
+            arch::SerialWrite(" connected but PED never set after reset\n");
+            continue;
+        }
+
+        // Send Enable Slot Command. param_lo/hi/status all zero.
+        const u64 cmd_p = SubmitCmd(rt, kTrbTypeEnableSlot, 0, 0, 0, 0);
+        u32 cs = 0;
+        u8 slot_id = 0;
+        if (cmd_p != 0 && WaitCmdCompletion(rt, cmd_p, &cs, &slot_id))
+        {
+            const u32 code = (cs >> 24) & 0xFF;
+            if (code == kCompletionCodeSuccess && slot_id != 0)
+            {
+                rec.slot_ok = true;
+                rec.slot_id = slot_id;
+                ++out.slots_enabled;
+            }
+            else
+            {
+                arch::SerialWrite("[xhci]   port ");
+                arch::SerialWriteHex(rec.port_num);
+                arch::SerialWrite(" Enable Slot completed with code=");
+                arch::SerialWriteHex(code);
+                arch::SerialWrite("\n");
+            }
+        }
+        else
+        {
+            arch::SerialWrite("[xhci]   port ");
+            arch::SerialWriteHex(rec.port_num);
+            arch::SerialWrite(" Enable Slot timed out\n");
+        }
+
+        arch::SerialWrite("[xhci]   port ");
+        arch::SerialWriteHex(rec.port_num);
+        arch::SerialWrite(" connected speed=");
+        arch::SerialWriteHex(rec.speed);
+        arch::SerialWrite(rec.slot_ok ? " slot_id=" : " slot=fail");
+        if (rec.slot_ok)
+            arch::SerialWriteHex(rec.slot_id);
+        arch::SerialWrite("\n");
+    }
+    arch::SerialWrite("[xhci] port scan: connected=");
+    arch::SerialWriteHex(out.ports_connected);
+    arch::SerialWrite(" slots_enabled=");
+    arch::SerialWriteHex(out.slots_enabled);
+    arch::SerialWrite("\n");
+
+    // Enumerate every successfully-enabled slot: assign a USB
+    // address, then read its 18-byte device descriptor. Each
+    // success bumps the matching counter on ControllerInfo so the
+    // boot log has a one-shot "devices online" signal.
+    for (u8 i = 0; i < ports_to_scan; ++i)
+    {
+        PortRecord& rec = out.ports[i];
+        if (!rec.slot_ok)
+            continue;
+        if (!AddressDevice(rt, rec))
+            continue;
+        ++out.devices_addressed;
+        if (!FetchDeviceDescriptor(rt, rec))
+            continue;
+        ++out.descriptors_fetched;
+        arch::SerialWrite("[xhci]   device port=");
+        arch::SerialWriteHex(rec.port_num);
+        arch::SerialWrite(" slot=");
+        arch::SerialWriteHex(rec.slot_id);
+        arch::SerialWrite(" vid=");
+        arch::SerialWriteHex(rec.vendor_id);
+        arch::SerialWrite(" pid=");
+        arch::SerialWriteHex(rec.product_id);
+        arch::SerialWrite(" class=");
+        arch::SerialWriteHex(rec.device_class);
+        arch::SerialWrite("/");
+        arch::SerialWriteHex(rec.device_subclass);
+        arch::SerialWrite("/");
+        arch::SerialWriteHex(rec.device_protocol);
+        arch::SerialWrite(" mps0=");
+        arch::SerialWriteHex(rec.max_packet_size_0);
+        arch::SerialWrite("\n");
+
+        // Pull down the configuration descriptor tree and walk it
+        // for a HID Boot Keyboard interface. Failure here isn't
+        // fatal for the port — some devices might not respond to
+        // GET_DESCRIPTOR(Config) at this point on real hardware —
+        // so we log + continue.
+        if (FetchAndParseConfig(rt, rec))
+        {
+            ++out.configs_parsed;
+        }
+        if (rec.hid_keyboard || rec.hid_mouse)
+        {
+            const char* kind_tag = rec.hid_mouse ? "HID-BOOT-MOUSE" : "HID-BOOT-KEYBOARD";
+            if (rec.hid_keyboard)
+                ++out.hid_keyboards_found;
+            if (rec.hid_mouse)
+                ++out.hid_mice_found;
+            arch::SerialWrite("[xhci]   ");
+            arch::SerialWrite(kind_tag);
+            arch::SerialWrite(" port=");
+            arch::SerialWriteHex(rec.port_num);
+            arch::SerialWrite(" iface=");
+            arch::SerialWriteHex(rec.hid_interface_num);
+            arch::SerialWrite(" ep=");
+            arch::SerialWriteHex(rec.hid_ep_addr);
+            arch::SerialWrite(" mps=");
+            arch::SerialWriteHex(rec.hid_ep_max_packet);
+            arch::SerialWrite(" interval=");
+            arch::SerialWriteHex(rec.hid_ep_interval);
+            arch::SerialWrite(" config=");
+            arch::SerialWriteHex(rec.hid_config_value);
+            arch::SerialWrite("\n");
+            if (BringUpHidKeyboard(rt, rec))
+            {
+                if (rec.hid_keyboard)
+                    ++out.hid_keyboards_bound;
+                if (rec.hid_mouse)
+                    ++out.hid_mice_bound;
+                arch::SerialWrite("[xhci]   ");
+                arch::SerialWrite(kind_tag);
+                arch::SerialWrite(" bound; polling task will pick up slot=");
+                arch::SerialWriteHex(rec.slot_id);
+                arch::SerialWrite("\n");
+            }
+        }
+    }
+    arch::SerialWrite("[xhci] enumeration: addressed=");
+    arch::SerialWriteHex(out.devices_addressed);
+    arch::SerialWrite(" descriptors=");
+    arch::SerialWriteHex(out.descriptors_fetched);
+    arch::SerialWrite(" configs=");
+    arch::SerialWriteHex(out.configs_parsed);
+    arch::SerialWrite(" kbd-found=");
+    arch::SerialWriteHex(out.hid_keyboards_found);
+    arch::SerialWrite(" kbd-bound=");
+    arch::SerialWriteHex(out.hid_keyboards_bound);
+    arch::SerialWrite(" mouse-found=");
+    arch::SerialWriteHex(out.hid_mice_found);
+    arch::SerialWrite(" mouse-bound=");
+    arch::SerialWriteHex(out.hid_mice_bound);
+    arch::SerialWrite("\n");
+
+    // Always publish this controller's Runtime into g_poll_rt so
+    // that public APIs (XhciControlIn / XhciBulkSubmit) can reach
+    // the event + command rings even when no HID device drove a
+    // task spawn. Without this, a USB-net-only board leaves
+    // g_poll_rt[idx] zeroed and every user-issued transfer's
+    // WaitEvent polls a nullptr ring + times out.
+    {
+        const u32 idx_any = u32(&out - g_controllers);
+        if (idx_any < kMaxControllers)
+            g_poll_rt[idx_any] = rt;
+    }
+
+    // Spawn the per-controller HID polling task if any device
+    // came up. The Runtime struct lives in our stack frame here;
+    // copy it into file-scope storage so the task's entry point
+    // has a stable pointer past this function's return. We also
+    // try to bind MSI-X interrupter 0 here so the task can block
+    // on a wait queue the IRQ handler signals instead of polling
+    // at tick cadence — order matters, the task has to see the
+    // final irq_vector when it first runs.
+    if (out.hid_keyboards_bound + out.hid_mice_bound > 0)
+    {
+        const u32 idx = u32(&out - g_controllers);
+        if (idx < kMaxControllers)
+        {
+            // g_poll_rt[idx] is already populated by the
+            // unconditional publish above — just wire the arg.
+            g_poll_args[idx].rt = &g_poll_rt[idx];
+            g_poll_args[idx].info = &out;
+            g_poll_args[idx].wait = {};
+            g_poll_args[idx].irq_vector = 0;
+
+            u8 bound_vec = 0;
+            if (XhciBindMsix(g_poll_rt[idx], h, idx, &bound_vec))
+            {
+                g_poll_args[idx].irq_vector = bound_vec;
+                arch::SerialWrite("[xhci] MSI-X bound ctrlr=");
+                arch::SerialWriteHex(idx);
+                arch::SerialWrite(" vector=");
+                arch::SerialWriteHex(bound_vec);
+                arch::SerialWrite("\n");
+            }
+            else
+            {
+                arch::SerialWrite("[xhci] MSI-X unavailable ctrlr=");
+                arch::SerialWriteHex(idx);
+                arch::SerialWrite(" — falling back to tick-cadence polling\n");
+            }
+
+            duetos::sched::SchedCreate(HidPollEntry, &g_poll_args[idx], "xhci-hid-poll");
+        }
+    }
+
+    return true;
+}
+
+// -------------------------------------------------------------------
+// USB-net class-driver primitives. Exposed via xhci.h. These are the
+// minimal slice of xHCI needed by a Bulk-In / Bulk-Out USB class
+// driver (CDC-ECM, RTL8150, AX88xxx, ...). They thunk into the
+// internal helpers above and return bool / out-params instead of
+// Result<> to keep the cross-driver surface narrow.
+// -------------------------------------------------------------------
+
+
+} // namespace
+
+
+void XhciInit()
+{
+    KLOG_TRACE_SCOPE("drivers/usb/xhci", "XhciInit");
+    if (g_init_done)
+        return;
+    g_init_done = true;
+
+    const u64 n = HostControllerCount();
+    for (u64 i = 0; i < n && g_controller_count < kMaxControllers; ++i)
+    {
+        const HostControllerInfo& h = HostController(i);
+        if (h.kind != HciKind::Xhci)
+            continue;
+        ControllerInfo& slot = g_controllers[g_controller_count];
+        if (InitOne(h, slot))
+            ++g_controller_count;
+    }
+    if (g_controller_count == 0)
+    {
+        arch::SerialWrite("[xhci] no controllers brought up\n");
+    }
+    else
+    {
+        arch::SerialWrite("[xhci] controllers brought up: ");
+        arch::SerialWriteHex(g_controller_count);
+        arch::SerialWrite("\n");
+    }
+}
+
+::duetos::core::Result<void> XhciShutdown()
+{
+    KLOG_TRACE_SCOPE("drivers/usb/xhci", "XhciShutdown");
+    using ::duetos::core::Err;
+    using ::duetos::core::ErrorCode;
+    // For each live controller: clear RUN/STOP, wait for HCH=1,
+    // write CRCR / DCBAAP / ERSTBA to 0 so the hardware forgets
+    // our ring addresses. The kernel frames behind the rings stay
+    // leaked in v0 (intentional — AllocateFrame can't safely take
+    // back a frame the controller might still DMA to until we've
+    // proven HCH latched; freeing them conservatively is a
+    // follow-up). g_controller_count resets so the next Init
+    // starts with fresh slot indices.
+    bool any_stuck = false;
+    for (u32 i = 0; i < g_controller_count; ++i)
+    {
+        ControllerInfo& c = g_controllers[i];
+        if (!c.init_ok)
+            continue;
+        // Re-derive MMIO base from the USB-driver record so we
+        // don't have to cache a volatile pointer on ControllerInfo.
+        const u64 pci_n = HostControllerCount();
+        volatile u8* mmio = nullptr;
+        for (u64 k = 0; k < pci_n; ++k)
+        {
+            const HostControllerInfo& h = HostController(k);
+            if (h.bus == c.bus && h.device == c.device && h.function == c.function && h.mmio_virt != nullptr)
+            {
+                mmio = static_cast<volatile u8*>(h.mmio_virt);
+                break;
+            }
+        }
+        if (mmio == nullptr)
+        {
+            any_stuck = true;
+            continue;
+        }
+        const u32 cap_word = ReadMmio32(mmio, kCapHciVersion);
+        const u8 caplen = u8(cap_word & 0xFF);
+        if (caplen < 0x20)
+        {
+            any_stuck = true;
+            continue;
+        }
+        volatile u8* op = mmio + caplen;
+        // Clear RUN/STOP then wait for HCH. Spec says this
+        // completes within 16 ms; cap at 1M iterations (~tens of ms
+        // on QEMU).
+        u32 cmd = ReadMmio32(op, kOpUsbCmd);
+        WriteMmio32(op, kOpUsbCmd, cmd & ~kCmdRunStop);
+        if (!PollUntil(op, kOpUsbSts, kStsHcHalted, kStsHcHalted, 1'000'000))
+        {
+            arch::SerialWrite("[xhci] shutdown: HCH never set on pci=");
+            arch::SerialWriteHex(c.bus);
+            arch::SerialWrite(":");
+            arch::SerialWriteHex(c.device);
+            arch::SerialWrite(".");
+            arch::SerialWriteHex(c.function);
+            arch::SerialWrite("\n");
+            any_stuck = true;
+            continue;
+        }
+        // Zero out the ring-pointer registers. New init will
+        // repopulate them with fresh frames.
+        WriteMmio64(op, kOpDcbaap, 0);
+        WriteMmio64(op, kOpCrcr, 0);
+        // Interrupter 0's ERSTBA / ERDP / ERSTSZ.
+        const u32 rtsoff = ReadMmio32(mmio, kCapRtsOff) & ~0x1Fu;
+        volatile u8* intr0 = mmio + rtsoff + 0x20;
+        WriteMmio32(intr0, /*kIntrErstSz=*/0x08, 0);
+        WriteMmio64(intr0, /*kIntrErdp=*/0x18, 0);
+        WriteMmio64(intr0, /*kIntrErstBa=*/0x10, 0);
+        c.init_ok = false;
+        c.noop_ok = false;
+    }
+    g_controller_count = 0;
+    g_init_done = false;
+    // Reset the device table so a subsequent XhciInit re-allocates
+    // slots cleanly. Frames behind the rings are leaked until we
+    // teach the allocator to take them back after a full HCH
+    // quiesce — intentional, matches the per-controller TODO above.
+    for (u32 i = 0; i < kMaxDevicesTotal; ++i)
+        ZeroBytes(&g_devices[i], sizeof(DeviceState));
+    g_device_count = 0;
+    arch::SerialWrite(any_stuck ? "[xhci] shutdown partial (some controllers wouldn't halt)\n"
+                                : "[xhci] shutdown ok — all controllers quiesced\n");
+    if (any_stuck)
+        return Err{ErrorCode::BadState};
+    return {};
+}
+
+::duetos::core::Result<void> XhciRestart()
+{
+    if (auto r = XhciShutdown(); !r)
+        return r;
+    XhciInit();
+    return {};
+}
+
+} // namespace duetos::drivers::usb::xhci

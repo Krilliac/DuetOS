@@ -132,6 +132,19 @@ set(DUETOS_KERNEL_SHARED_SOURCES
     drivers/usb/rndis.cpp
     drivers/usb/usb.cpp
     drivers/usb/xhci.cpp
+    drivers/usb/xhci_admin.cpp
+    drivers/usb/xhci_complete.cpp
+    drivers/usb/xhci_context.cpp
+    drivers/usb/xhci_control.cpp
+    drivers/usb/xhci_descparse.cpp
+    drivers/usb/xhci_enum.cpp
+    drivers/usb/xhci_event.cpp
+    drivers/usb/xhci_init.cpp
+    drivers/usb/xhci_input.cpp
+    drivers/usb/xhci_irq.cpp
+    drivers/usb/xhci_ring.cpp
+    drivers/usb/xhci_speed.cpp
+    drivers/usb/xhci_xfer.cpp
     drivers/video/calendar.cpp
     drivers/video/console.cpp
     drivers/video/cursor.cpp
@@ -145,6 +158,12 @@ set(DUETOS_KERNEL_SHARED_SOURCES
     fs/exfat.cpp
     fs/ext4.cpp
     fs/fat32.cpp
+    fs/fat32_create.cpp
+    fs/fat32_dir.cpp
+    fs/fat32_lookup.cpp
+    fs/fat32_read.cpp
+    fs/fat32_selftest.cpp
+    fs/fat32_write.cpp
     fs/file_route.cpp
     fs/gpt.cpp
     fs/ntfs.cpp
