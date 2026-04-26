@@ -11,7 +11,7 @@ Branch: `claude/refactor-codebase-VvLO6`. Pushed to origin.
 | 1 | `kernel/core/shell.cpp`               | 9,769 | 9,769 | ☐ not started |
 | 2 | `kernel/subsystems/win32/thunks.cpp`  | 5,684 |   655 | ☑ done (`cae3704`) |
 | 3 | `kernel/subsystems/linux/syscall.cpp` | 4,642 | 4,642 | ☐ not started |
-| 4 | `kernel/fs/fat32.cpp`                 | 3,190 |   726 | ◐ partial (selftest + read/write + read-API splits landed; dir/lookup + write/create sub-splits deferred) |
+| 4 | `kernel/fs/fat32.cpp`                 | 3,190 |   640 | ◐ partial (selftest + read/write + read-API + lookup splits landed; dir + write/create sub-splits deferred) |
 | 5 | `kernel/drivers/usb/xhci.cpp`         | 2,548 | 2,548 | ☐ not started |
 
 **Landed** (build-verified through both kernel stages):
@@ -23,6 +23,7 @@ Branch: `claude/refactor-codebase-VvLO6`. Pushed to origin.
 | `736381b fs/fat32: split Fat32SelfTest into a sibling file` | `fat32.cpp` 3,190 → 2,579 lines. SelfTest lives in `fat32_selftest.cpp` (628 lines), uses public Fat32* API only. |
 | `0ed4370 fs/fat32: split mutating path into sibling translation unit` | `fat32.cpp` 2,579 → 871 lines. All on-disk mutators (`Fat32WriteInPlace`, `Fat32Append*`, `Fat32Create*`, `Fat32Delete*`, `Fat32Mkdir/RmdirAtPath`, `Fat32Truncate*`) plus their helpers live in `fat32_write.cpp` (1,732 lines). Cross-TU primitives (`g_scratch`, `Fat32Guard`, `ReadCluster`, `WalkDirChain`, `WalkRootIntoSnapshot`, etc.) hoisted into `namespace duetos::fs::fat32::internal` via new `fat32_internal.h` (99 lines). Public `fat32.h` API unchanged. |
 | `54ca56d fs/fat32: extract file-content read APIs into fat32_read.cpp` | `fat32.cpp` 871 → 726 lines. `Fat32ReadFile`, `Fat32ReadAt`, `Fat32ReadFileStream` live in new `fat32_read.cpp` (173 lines). No new `internal::` symbols — these consume the existing primitives (`g_scratch`, `Fat32Guard`, `ReadFatEntry`) declared in `fat32_internal.h`. |
+| `9ae9964 fs/fat32: extract path lookup into fat32_lookup.cpp` | `fat32.cpp` 726 → 640 lines. `Fat32LookupPath` plus its TU-private `FindCtx` / `FindVisitor` pair live in new `fat32_lookup.cpp` (115 lines). Consumer-only of the existing internal primitives. |
 
 **Deferred** to a follow-up session (each warrants its own fresh chat per
 the timeout-prevention rules):
@@ -33,11 +34,10 @@ the timeout-prevention rules):
 - `kernel/subsystems/linux/syscall.cpp` (4,642 lines) — split by syscall
   subsystem (io, file, mm, proc, sig, time, fd, cred, sched, rlimit,
   misc, stub).
-- `kernel/fs/fat32.cpp` (now 726 lines) — finish the per-layer split.
+- `kernel/fs/fat32.cpp` (now 640 lines) — finish the per-layer split.
   Read side still needs `fat32_dir.cpp` (`WalkDirChain`,
   `WalkRootIntoSnapshot`, decoders, `LogEntry`, `Fat32ListDirByCluster`,
-  `Fat32FindInRoot`) and `fat32_lookup.cpp` (`Fat32LookupPath`,
-  `FindCtx`, `FindVisitor`) extracted out, leaving probe + accessors +
+  `Fat32FindInRoot`) extracted out, leaving probe + accessors +
   block primitives in `fat32.cpp` (~250 lines). Write side
   (`fat32_write.cpp`, 1,732 lines) wants a sub-split into
   `fat32_create.cpp` (`Fat32CreateAtPath`, `Fat32DeleteAtPath`,
