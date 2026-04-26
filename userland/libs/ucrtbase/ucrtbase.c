@@ -774,14 +774,38 @@ __declspec(dllexport) int fclose(FILE* f)
 
 __declspec(dllexport) size_t fwrite(const void* ptr, size_t sz, size_t nmemb, FILE* f)
 {
-    if (!f)
+    if (!f || !ptr || sz == 0 || nmemb == 0)
         return 0;
-    /* Route to stdout/stderr via SYS_WRITE(1) for any stdio
-     * handle; anything else returns 0 (no real files in v0). */
+    size_t total = sz * nmemb;
+    /* stdout / stderr sentinels — route through SYS_WRITE(fd=1)
+     * which the kernel sinks at the serial console. */
     if (f->handle == -11LL || f->handle == -12LL)
     {
-        sys_write_bytes((const char*)ptr, sz * nmemb);
+        sys_write_bytes((const char*)ptr, total);
         return nmemb;
+    }
+    /* Real file handle (Win32-shaped 0x100..0x10F) — route to
+     * SYS_FILE_WRITE (43). rdi = handle, rsi = buf, rdx = count.
+     * Returns bytes written, or negative on error. */
+    if (f->handle >= 0x100 && f->handle < 0x110)
+    {
+        long long rv;
+        __asm__ volatile("int $0x80"
+                         : "=a"(rv)
+                         : "a"((long long)43),  /* SYS_FILE_WRITE */
+                           "D"(f->handle),      /* rdi = handle */
+                           "S"((long long)ptr), /* rsi = buf */
+                           "d"((long long)total) /* rdx = count */
+                         : "memory");
+        if (rv <= 0)
+        {
+            f->err = 1;
+            return 0;
+        }
+        /* Return whole-element count actually written. fwrite
+         * conventionally returns nmemb-actually-written, not bytes;
+         * partial-element writes round down. */
+        return (size_t)rv / sz;
     }
     return 0;
 }

@@ -8,7 +8,7 @@
 // Target Windows version: Windows 11 and Server (11 25H2)
 // Bedrock NT calls (present in every Windows XP→Win11 25H2): 292
 // All known NT calls on the target version: 489
-// DuetOS coverage: 28/292 = 9%
+// DuetOS coverage: 24/292 = 8%
 //
 // See tools/win32-compat/README.md for the legal + design rationale.
 
@@ -30,9 +30,9 @@ inline constexpr u32 kSysNtNotImpl = 0xFFFFFFFFu;
 /// SYS_*. Sorted by `nt_number` so the shim can binary-search.
 struct NtSyscallMapping
 {
-    const char* nt_name; // e.g. "NtCreateFile"
-    u16 nt_number;       // syscall number on the target Windows version
-    u32 duetos_sys;      // matching SYS_* enumerator value, or kSysNtNotImpl
+    const char* nt_name;     // e.g. "NtCreateFile"
+    u16 nt_number;           // syscall number on the target Windows version
+    u32 duetos_sys;        // matching SYS_* enumerator value, or kSysNtNotImpl
 };
 
 /// Bedrock NT syscalls — present in every Windows version from XP SP1
@@ -48,7 +48,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
     {"NtDeviceIoControlFile", 0x0007, kSysNtNotImpl},
     {"NtWriteFile", 0x0008, static_cast<u32>(::duetos::core::SYS_WRITE)},
     {"NtRemoveIoCompletion", 0x0009, kSysNtNotImpl},
-    {"NtReleaseSemaphore", 0x000a, static_cast<u32>(::duetos::core::SYS_EVENT_SET)},
+    {"NtReleaseSemaphore", 0x000a, kSysNtNotImpl},
     {"NtReplyWaitReceivePort", 0x000b, kSysNtNotImpl},
     {"NtReplyPort", 0x000c, kSysNtNotImpl},
     {"NtSetInformationThread", 0x000d, kSysNtNotImpl},
@@ -96,12 +96,12 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
     {"NtOpenSection", 0x0037, kSysNtNotImpl},
     {"NtQueryTimer", 0x0038, kSysNtNotImpl},
     {"NtFsControlFile", 0x0039, kSysNtNotImpl},
-    {"NtWriteVirtualMemory", 0x003a, static_cast<u32>(::duetos::core::SYS_WRITE)},
+    {"NtWriteVirtualMemory", 0x003a, kSysNtNotImpl},
     {"NtCloseObjectAuditAlarm", 0x003b, kSysNtNotImpl},
     {"NtDuplicateObject", 0x003c, kSysNtNotImpl},
     {"NtQueryAttributesFile", 0x003d, kSysNtNotImpl},
     {"NtClearEvent", 0x003e, kSysNtNotImpl},
-    {"NtReadVirtualMemory", 0x003f, static_cast<u32>(::duetos::core::SYS_READ)},
+    {"NtReadVirtualMemory", 0x003f, kSysNtNotImpl},
     {"NtOpenEvent", 0x0040, kSysNtNotImpl},
     {"NtAdjustPrivilegesToken", 0x0041, kSysNtNotImpl},
     {"NtDuplicateToken", 0x0042, kSysNtNotImpl},
@@ -170,7 +170,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
     {"NtCreatePort", 0x00be, kSysNtNotImpl},
     {"NtCreateProcess", 0x00c0, kSysNtNotImpl},
     {"NtCreateProfile", 0x00c2, kSysNtNotImpl},
-    {"NtCreateSemaphore", 0x00c7, static_cast<u32>(::duetos::core::SYS_EVENT_CREATE)},
+    {"NtCreateSemaphore", 0x00c7, kSysNtNotImpl},
     {"NtCreateSymbolicLinkObject", 0x00c8, kSysNtNotImpl},
     {"NtCreateTimer", 0x00cb, kSysNtNotImpl},
     {"NtCreateToken", 0x00cd, kSysNtNotImpl},
@@ -333,9 +333,10 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
     {"NtWaitLowEventPair", 0x01e8, kSysNtNotImpl},
 };
 
-inline constexpr u32 kBedrockNtSyscallCount = sizeof(kBedrockNtSyscalls) / sizeof(kBedrockNtSyscalls[0]);
+inline constexpr u32 kBedrockNtSyscallCount =
+    sizeof(kBedrockNtSyscalls) / sizeof(kBedrockNtSyscalls[0]);
 
-inline constexpr u32 kBedrockNtSyscallsCovered = 28;
+inline constexpr u32 kBedrockNtSyscallsCovered = 24;
 
 /// Every NT syscall known on the target Windows version — superset
 /// of `kBedrockNtSyscalls`. Includes version-specific additions
@@ -354,7 +355,7 @@ inline constexpr NtSyscallMapping kAllNtSyscalls[] = {
     {"NtDeviceIoControlFile", 0x0007, kSysNtNotImpl},
     {"NtWriteFile", 0x0008, static_cast<u32>(::duetos::core::SYS_WRITE)},
     {"NtRemoveIoCompletion", 0x0009, kSysNtNotImpl},
-    {"NtReleaseSemaphore", 0x000a, static_cast<u32>(::duetos::core::SYS_EVENT_SET)},
+    {"NtReleaseSemaphore", 0x000a, kSysNtNotImpl},
     {"NtReplyWaitReceivePort", 0x000b, kSysNtNotImpl},
     {"NtReplyPort", 0x000c, kSysNtNotImpl},
     {"NtSetInformationThread", 0x000d, kSysNtNotImpl},
@@ -402,12 +403,12 @@ inline constexpr NtSyscallMapping kAllNtSyscalls[] = {
     {"NtOpenSection", 0x0037, kSysNtNotImpl},
     {"NtQueryTimer", 0x0038, kSysNtNotImpl},
     {"NtFsControlFile", 0x0039, kSysNtNotImpl},
-    {"NtWriteVirtualMemory", 0x003a, static_cast<u32>(::duetos::core::SYS_WRITE)},
+    {"NtWriteVirtualMemory", 0x003a, kSysNtNotImpl},
     {"NtCloseObjectAuditAlarm", 0x003b, kSysNtNotImpl},
     {"NtDuplicateObject", 0x003c, kSysNtNotImpl},
     {"NtQueryAttributesFile", 0x003d, kSysNtNotImpl},
     {"NtClearEvent", 0x003e, kSysNtNotImpl},
-    {"NtReadVirtualMemory", 0x003f, static_cast<u32>(::duetos::core::SYS_READ)},
+    {"NtReadVirtualMemory", 0x003f, kSysNtNotImpl},
     {"NtOpenEvent", 0x0040, kSysNtNotImpl},
     {"NtAdjustPrivilegesToken", 0x0041, kSysNtNotImpl},
     {"NtDuplicateToken", 0x0042, kSysNtNotImpl},
@@ -543,7 +544,7 @@ inline constexpr NtSyscallMapping kAllNtSyscalls[] = {
     {"NtCreateRegistryTransaction", 0x00c4, kSysNtNotImpl},
     {"NtCreateResourceManager", 0x00c5, kSysNtNotImpl},
     {"NtCreateSectionEx", 0x00c6, kSysNtNotImpl},
-    {"NtCreateSemaphore", 0x00c7, static_cast<u32>(::duetos::core::SYS_EVENT_CREATE)},
+    {"NtCreateSemaphore", 0x00c7, kSysNtNotImpl},
     {"NtCreateSymbolicLinkObject", 0x00c8, kSysNtNotImpl},
     {"NtCreateThreadEx", 0x00c9, kSysNtNotImpl},
     {"NtCreateThreadStateChange", 0x00ca, kSysNtNotImpl},
@@ -835,7 +836,8 @@ inline constexpr NtSyscallMapping kAllNtSyscalls[] = {
     {"NtWaitLowEventPair", 0x01e8, kSysNtNotImpl},
 };
 
-inline constexpr u32 kAllNtSyscallCount = sizeof(kAllNtSyscalls) / sizeof(kAllNtSyscalls[0]);
+inline constexpr u32 kAllNtSyscallCount =
+    sizeof(kAllNtSyscalls) / sizeof(kAllNtSyscalls[0]);
 
 /// Look up an NT syscall number on the target version and return
 /// the corresponding NtSyscallMapping, or nullptr if it's outside

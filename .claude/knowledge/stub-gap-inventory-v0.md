@@ -289,6 +289,12 @@ There is no `mount` / `umount` syscall — the filesystem topology is
 static at boot. Per-process root is set once via `Process::root` at
 `ProcessCreate`.
 
+## 8.5 Build-tooling gaps discovered during this audit
+
+| Gap | File | Impact |
+|---|---|---|
+| `tools/linux-compat/gen-linux-syscall-table.py` only scans `kernel/subsystems/linux/syscall.cpp` for `Do*` handlers, but the dispatcher was refactored into 16 separate files (`syscall_file.cpp`, `syscall_cred.cpp`, `syscall_path.cpp`, …). Regenerating the Linux syscall artifact resets coverage to 0% and clobbers the Implemented annotations. | `tools/linux-compat/gen-linux-syscall-table.py:212-216` | Anyone running `tools/build/regenerate-syscall-artifacts.sh` silently corrupts the Linux table. Need to either pass a glob (`syscall*.cpp`) or scan the whole `kernel/subsystems/linux/` directory. ~10-line fix. |
+
 ## 9. TODO / FIXME / XXX markers in source
 
 The codebase doesn't lean on TODO markers — gaps are encoded
@@ -349,7 +355,8 @@ Cheapest → most-expensive, by impact-per-LOC:
 
 | Date | Commit | Gap closed | Impact |
 |---|---|---|---|
-| _(none yet)_ | | | |
+| 2026-04-26 | _pending_ | NT shim §1.2 mismaps: `NtWriteVirtualMemory`, `NtReadVirtualMemory`, `NtCreateSemaphore`, `NtReleaseSemaphore` now route to `kSysNtNotImpl` | Closes silent-wrong-semantics class for cross-AS memory ops + counted-semaphore concurrency. Mapped count drops 28→24; honest NotImpl beats silent corruption. `NtSetInformationFile` kept at SYS_FILE_SEEK because the position-info class is genuinely correct |
+| 2026-04-26 | _pending_ | ucrtbase §4.1: `fwrite(fd > 2)` now routes to `SYS_FILE_WRITE` instead of returning 0 | Closes silent-data-loss landmine. Stdio file writes from PEs actually land in the FS now. Unlocks ransomware-shape PE payloads via plain CRT |
 
 ## Wiring summary
 
