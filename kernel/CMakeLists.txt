@@ -84,6 +84,7 @@ set(DUETOS_KERNEL_SHARED_SOURCES
     subsystems/win32/window_syscall.cpp
     core/shell.cpp
     core/shell_security.cpp
+    core/shell_storage.cpp
     core/stack_canary.cpp
     core/symbols.cpp
     core/fault_domain.cpp

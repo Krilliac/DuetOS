@@ -30,4 +30,14 @@ void CmdLogout();
 void CmdSu(u32 argc, char** argv);
 void CmdLoginCmd(u32 argc, char** argv);
 
+// ---------------------------------------------------------------
+// Storage / mount / device-list commands (shell_storage.cpp).
+// Thin views over the block layer + GPT parser + mount table.
+// (Fat* commands and CmdRead are queued for a follow-up slice.)
+// ---------------------------------------------------------------
+void CmdMount();
+void CmdLsblk();
+void CmdLsgpt();
+void CmdLsmod();
+
 } // namespace duetos::core::shell::internal
