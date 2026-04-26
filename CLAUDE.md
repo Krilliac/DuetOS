@@ -300,6 +300,14 @@ After creating or pushing to a PR, **always** poll CI and fix failures before mo
 
 See `.claude/knowledge/github-api-pr-checks.md` for the polling workflow and `.claude/knowledge/ci-reproducible-builds.md` (once written) for local reproduction commands.
 
+## Stream Timeout Prevention
+
+1. Do each numbered task ONE AT A TIME. Complete one task fully, confirm it worked, then move to the next.
+2. Never write a file longer than ~150 lines in a single tool call. If a file will be longer, write it in multiple append/edit passes.
+3. Start a fresh session if the conversation gets long (20+ tool calls). The error gets worse as the session grows.
+4. Keep individual grep/search outputs short. Use flags like `--include` and `-l` (list files only) to limit output size.
+5. If you do hit the timeout, retry the same step in a shorter form. Don't repeat the entire task from scratch.
+
 ## Wiring Things In — Functionality Is Not Optional
 
 A system that exists but is never initialized, called, or connected is **worse than not existing**. In kernel space, dead code is not merely wasteful — it rots silently until the day a refactor accidentally re-enables it and triple-faults the box.
