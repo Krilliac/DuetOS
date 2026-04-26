@@ -103,9 +103,16 @@
 #include "reboot.h"
 #include "ring3_smoke.h"
 #include "runtime_checker.h"
+#include "shell_internal.h"
 
 namespace duetos::core
 {
+
+// Hoist the per-domain Cmd* handlers from the shell sibling TUs
+// (shell_security.cpp, ...) back into this TU's outer namespace
+// so the dispatch chain in Dispatch() keeps reading like the
+// in-TU layout the file used to have.
+using namespace shell::internal;
 
 namespace
 {
@@ -481,48 +488,8 @@ void CmdHelp()
     ConsoleWriteln("       ALT+TAB = CYCLE WINDOW  ALT+F4 = CLOSE WINDOW");
 }
 
-void CmdAbout()
-{
-    ConsoleWriteln("DUETOS — A FROM-SCRATCH x86_64 KERNEL WITH A");
-    ConsoleWriteln("NATIVE WINDOWED DESKTOP AND A FIRST-CLASS WIN32");
-    ConsoleWriteln("SUBSYSTEM PLANNED. BOOT: MULTIBOOT2.  SHELL: YOU.");
-}
-
-void CmdVersion()
-{
-    ConsoleWriteln("DUETOS v0 (WINDOWED DESKTOP SHELL)");
-}
-
-void CmdClear()
-{
-    duetos::drivers::video::ConsoleClear();
-}
-
-void CmdUptime()
-{
-    const u64 secs = duetos::sched::SchedNowTicks() / 100;
-    ConsoleWrite("UPTIME ");
-    WriteU64Dec(secs);
-    ConsoleWriteln(" SECONDS");
-}
-
-void CmdDate()
-{
-    duetos::arch::RtcTime t{};
-    duetos::arch::RtcRead(&t);
-    WriteU8TwoDigits(t.hour);
-    ConsoleWriteChar(':');
-    WriteU8TwoDigits(t.minute);
-    ConsoleWriteChar(':');
-    WriteU8TwoDigits(t.second);
-    ConsoleWriteChar(' ');
-    WriteU64Dec(t.year);
-    ConsoleWriteChar('-');
-    WriteU8TwoDigits(t.month);
-    ConsoleWriteChar('-');
-    WriteU8TwoDigits(t.day);
-    ConsoleWriteChar('\n');
-}
+// CmdAbout / CmdVersion / CmdClear / CmdUptime / CmdDate moved
+// to shell_core.cpp.
 
 void CmdWindows()
 {
@@ -5095,41 +5062,7 @@ void CmdGetenv(u32 argc, char** argv)
     ConsoleWriteln(s->value);
 }
 
-void CmdYield()
-{
-    // Voluntary yield from the shell thread — useful for testing
-    // cooperative scheduling behaviour by hand. No output.
-    duetos::sched::SchedYield();
-}
-
-void CmdUname(u32 argc, char** argv)
-{
-    // uname default: kernel name. -a prints everything.
-    const bool all = (argc >= 2 && argv[1][0] == '-' && argv[1][1] == 'a');
-    if (all)
-    {
-        ConsoleWrite("DuetOS duetos v0 x86_64  (tick ");
-        WriteU64Dec(duetos::sched::SchedNowTicks());
-        ConsoleWriteln(")");
-    }
-    else
-    {
-        ConsoleWriteln("DuetOS");
-    }
-}
-
-void CmdWhoami()
-{
-    const char* name = AuthCurrentUserName();
-    if (name[0] == '\0')
-    {
-        ConsoleWriteln("(no session)");
-    }
-    else
-    {
-        ConsoleWriteln(name);
-    }
-}
+// CmdYield / CmdUname / CmdWhoami moved to shell_core.cpp.
 
 void CmdHostname()
 {
@@ -5137,32 +5070,9 @@ void CmdHostname()
     ConsoleWriteln((s != nullptr) ? s->value : "duetos");
 }
 
-void CmdPwd()
-{
-    // No per-process CWD yet; every path in the shell is
-    // absolute against the trusted ramfs root. `pwd` prints
-    // "/" so scripts that consult it don't break.
-    ConsoleWriteln("/");
-}
+// CmdPwd / CmdTrue / CmdFalse moved to shell_core.cpp.
 
-void CmdTrue()
-{
-    // No-op success — useful in scripts: `cmd && true`.
-}
-
-void CmdFalse()
-{
-    // No-op failure placeholder. No exit codes yet; the
-    // visual-only marker prints nothing (matches /bin/false).
-}
-
-void CmdMount()
-{
-    // Show every mounted backend. v0: ramfs at /, tmpfs at
-    // /tmp. Real mount table lands with multi-backend VFS.
-    ConsoleWriteln("ramfs on /       type=ramfs (ro)");
-    ConsoleWriteln("tmpfs on /tmp    type=tmpfs (rw, 16 slots, 512B each)");
-}
+// CmdMount moved to shell_storage.cpp.
 
 // Shared helper: parse decimal (default) or hex (0x prefix) into u64.
 // Returns true + writes `*out` on success. Used by `read` + any future
@@ -5996,131 +5906,10 @@ void CmdTrace(duetos::u32 argc, char** argv)
     }
 }
 
-void CmdLsblk()
-{
-    namespace storage = duetos::drivers::storage;
-    const duetos::u32 count = storage::BlockDeviceCount();
-    ConsoleWrite("NAME       HANDLE  SECT_SZ  SECT_COUNT       MODE");
-    ConsoleWriteln("");
-    for (duetos::u32 i = 0; i < count; ++i)
-    {
-        const char* name = storage::BlockDeviceName(i);
-        ConsoleWrite(name);
-        // Pad the name column to 10 chars (max realistic "nvme0n99").
-        for (duetos::u32 p = 0; p < 11; ++p)
-        {
-            if (name[p] == 0)
-            {
-                for (duetos::u32 q = p; q < 11; ++q)
-                    ConsoleWriteChar(' ');
-                break;
-            }
-        }
-        WriteU64Hex(i, 4);
-        ConsoleWrite("    ");
-        WriteU64Hex(storage::BlockDeviceSectorSize(i), 6);
-        ConsoleWrite("  ");
-        WriteU64Hex(storage::BlockDeviceSectorCount(i), 16);
-        ConsoleWrite("  ");
-        ConsoleWriteln(storage::BlockDeviceIsWritable(i) ? "rw" : "ro");
-    }
-    if (count == 0)
-    {
-        ConsoleWriteln("  (no block devices registered)");
-    }
-}
+// CmdLsblk / CmdLsgpt / CmdLsmod moved to shell_storage.cpp.
 
-void CmdLsgpt()
-{
-    namespace gpt = duetos::fs::gpt;
-    const duetos::u32 disks = gpt::GptDiskCount();
-    if (disks == 0)
-    {
-        ConsoleWriteln("  (no GPT disks probed)");
-        return;
-    }
-    for (duetos::u32 di = 0; di < disks; ++di)
-    {
-        const gpt::Disk* d = gpt::GptDisk(di);
-        if (d == nullptr)
-            continue;
-        ConsoleWrite("DISK HANDLE ");
-        WriteU64Hex(d->block_handle, 4);
-        ConsoleWrite("  SECTOR_SIZE ");
-        WriteU64Hex(d->sector_size, 4);
-        ConsoleWrite("  PARTS ");
-        WriteU64Hex(d->partition_count, 2);
-        ConsoleWriteln("");
-        for (duetos::u32 pi = 0; pi < d->partition_count; ++pi)
-        {
-            const gpt::Partition& p = d->partitions[pi];
-            ConsoleWrite("  PART ");
-            WriteU64Hex(pi, 2);
-            ConsoleWrite(" FIRST_LBA ");
-            WriteU64Hex(p.first_lba, 0);
-            ConsoleWrite(" LAST_LBA ");
-            WriteU64Hex(p.last_lba, 0);
-            ConsoleWriteln("");
-            ConsoleWrite("       TYPE ");
-            // Canonical mixed-endian GUID rendering.
-            static constexpr int kOrder[] = {3, 2, 1, 0, -1, 5, 4, -1, 7, 6, -1, 8, 9, -1, 10, 11, 12, 13, 14, 15};
-            for (int k = 0; k < 20; ++k)
-            {
-                const int idx = kOrder[k];
-                if (idx < 0)
-                {
-                    ConsoleWriteChar('-');
-                }
-                else
-                {
-                    const duetos::u8 b = p.type_guid[idx];
-                    const char hi = (b >> 4) < 10 ? char('0' + (b >> 4)) : char('A' + (b >> 4) - 10);
-                    const char lo = (b & 0xF) < 10 ? char('0' + (b & 0xF)) : char('A' + (b & 0xF) - 10);
-                    ConsoleWriteChar(hi);
-                    ConsoleWriteChar(lo);
-                }
-            }
-            ConsoleWriteln("");
-        }
-    }
-}
-
-void CmdLsmod()
-{
-    // Not real modules — just a static list of the subsystems
-    // currently online. Still useful as a "what's loaded" view.
-    static const char* const kModules[] = {
-        "multiboot2", "gdt",   "idt",    "tss+ist",     "paging", "frame_alloc", "kheap",   "acpi",
-        "pic",        "lapic", "ioapic", "hpet",        "timer",  "scheduler",   "percpu",  "ps2kbd",
-        "ps2mouse",   "pci",   "ahci",   "framebuffer", "cursor", "font8x8",     "console", "widget",
-        "taskbar",    "menu",  "ramfs",  "tmpfs",       "vfs",    "rtc",         "klog",    "shell",
-    };
-    constexpr u32 kCount = sizeof(kModules) / sizeof(kModules[0]);
-    for (u32 i = 0; i < kCount; ++i)
-    {
-        ConsoleWrite("  ");
-        ConsoleWriteln(kModules[i]);
-    }
-}
-
-const char* SchedStateName(u8 s)
-{
-    switch (s)
-    {
-    case 0:
-        return "READY";
-    case 1:
-        return "RUN  ";
-    case 2:
-        return "SLEEP";
-    case 3:
-        return "BLOCK";
-    case 4:
-        return "DEAD ";
-    default:
-        return "?    ";
-    }
-}
+// SchedStateName moved to shell_process.cpp alongside its only
+// callers (CmdPs, CmdTop).
 
 void CmdKill(u32 argc, char** argv)
 {
@@ -7325,148 +7114,7 @@ void CmdReadelf(u32 argc, char** argv)
     }
 }
 
-void CmdPs()
-{
-    // Header row: PID + STATE + PRI + TICKS-run + NAME.
-    //   TICKS is the cumulative per-task tick count since creation.
-    //   Divide by `SchedStatsRead().total_ticks` for a since-boot
-    //   CPU-%; `top` renders that column directly.
-    ConsoleWriteln(" PID  STATE  PRI  TICKS     NAME");
-    struct Cookie
-    {
-        u32 count;
-    };
-    Cookie cookie{0};
-    duetos::sched::SchedEnumerate(
-        [](const duetos::sched::SchedTaskInfo& info, void* ck)
-        {
-            auto* c = static_cast<Cookie*>(ck);
-            // 4-digit PID aligned, status tag, priority, name.
-            // Running task gets a '*' prefix so it's obvious.
-            ConsoleWriteChar(info.is_running ? '*' : ' ');
-            // Right-pad id to 3 digits.
-            if (info.id < 10)
-                ConsoleWriteChar(' ');
-            if (info.id < 100)
-                ConsoleWriteChar(' ');
-            WriteU64Dec(info.id);
-            ConsoleWriteChar(' ');
-            ConsoleWriteChar(' ');
-            ConsoleWrite(SchedStateName(info.state));
-            ConsoleWriteChar(' ');
-            ConsoleWriteChar(' ');
-            ConsoleWriteChar(info.priority == 0 ? 'N' : 'I'); // Normal / Idle
-            ConsoleWriteChar(' ');
-            ConsoleWriteChar(' ');
-            // Right-pad tick count to 8 decimal digits.
-            char tbuf[24];
-            u32 tw = 0;
-            u64 tr = info.ticks_run;
-            if (tr == 0)
-                tbuf[tw++] = '0';
-            else
-            {
-                char rev[24];
-                u32 rn = 0;
-                while (tr > 0)
-                {
-                    rev[rn++] = static_cast<char>('0' + tr % 10);
-                    tr /= 10;
-                }
-                while (rn > 0)
-                    tbuf[tw++] = rev[--rn];
-            }
-            tbuf[tw] = 0;
-            for (u32 k = tw; k < 8; ++k)
-                ConsoleWriteChar(' ');
-            ConsoleWrite(tbuf);
-            ConsoleWriteChar(' ');
-            ConsoleWriteln(info.name != nullptr ? info.name : "(unnamed)");
-            ++c->count;
-        },
-        &cookie);
-    ConsoleWrite("TOTAL: ");
-    WriteU64Dec(cookie.count);
-    ConsoleWriteln(" tasks");
-}
-
-void CmdTop()
-{
-    // `top`: one-shot snapshot of CPU% per task + system idle.
-    // Not a live refresh (the shell blocks on keyboard input with
-    // no input-loop integration yet) — run it repeatedly for a
-    // trend. CPU% is since-boot — `ticks_run / total_ticks * 100`.
-    const auto s = duetos::sched::SchedStatsRead();
-    const u64 total = s.total_ticks;
-    ConsoleWrite("SYSTEM: total_ticks=");
-    WriteU64Dec(total);
-    ConsoleWrite(" idle_ticks=");
-    WriteU64Dec(s.idle_ticks);
-    ConsoleWrite(" cpu_busy=");
-    const u64 busy_pct = (total > 0) ? ((total - s.idle_ticks) * 100u / total) : 0;
-    WriteU64Dec(busy_pct);
-    ConsoleWriteln("%");
-    ConsoleWriteln(" PID  CPU%  STATE  PRI  NAME");
-    struct Cookie
-    {
-        u64 total;
-    };
-    Cookie cookie{total};
-    duetos::sched::SchedEnumerate(
-        [](const duetos::sched::SchedTaskInfo& info, void* ck)
-        {
-            auto* c = static_cast<Cookie*>(ck);
-            ConsoleWriteChar(info.is_running ? '*' : ' ');
-            // PID right-padded to 3 digits.
-            if (info.id < 10)
-                ConsoleWriteChar(' ');
-            if (info.id < 100)
-                ConsoleWriteChar(' ');
-            WriteU64Dec(info.id);
-            ConsoleWrite("  ");
-            // CPU% = ticks_run / total * 100, rounded toward zero.
-            // Format as two-digit percentage with a trailing '%'.
-            const u64 pct = (c->total > 0) ? (info.ticks_run * 100u / c->total) : 0;
-            if (pct < 10)
-                ConsoleWriteChar(' ');
-            if (pct < 100)
-                ConsoleWriteChar(' ');
-            WriteU64Dec(pct);
-            ConsoleWrite("%   ");
-            ConsoleWrite(SchedStateName(info.state));
-            ConsoleWrite("  ");
-            ConsoleWriteChar(info.priority == 0 ? 'N' : 'I');
-            ConsoleWrite("   ");
-            ConsoleWriteln(info.name != nullptr ? info.name : "(unnamed)");
-        },
-        &cookie);
-}
-
-void CmdFree()
-{
-    // Compact "free -k"-ish output: one line each for memory
-    // totals and the kernel heap.
-    const u64 total = duetos::mm::TotalFrames();
-    const u64 free_f = duetos::mm::FreeFramesCount();
-    const u64 used = total - free_f;
-    constexpr u64 kKiB = 4;
-    ConsoleWriteln("           total         used         free");
-    ConsoleWrite("PHYS  ");
-    WriteU64Dec(total * kKiB);
-    ConsoleWrite("K  ");
-    WriteU64Dec(used * kKiB);
-    ConsoleWrite("K  ");
-    WriteU64Dec(free_f * kKiB);
-    ConsoleWriteln("K");
-    const auto h = duetos::mm::KernelHeapStatsRead();
-    ConsoleWrite("HEAP  ");
-    WriteU64Dec(h.pool_bytes);
-    ConsoleWrite("   ");
-    WriteU64Dec(h.used_bytes);
-    ConsoleWrite("   ");
-    WriteU64Dec(h.free_bytes);
-    ConsoleWriteChar('\n');
-}
+// CmdPs / CmdTop / CmdFree moved to shell_process.cpp.
 
 [[noreturn]] void CmdRebootNow()
 {
@@ -8141,205 +7789,9 @@ const char* HistoryExpand(const char* line)
 
 // ---------------------------------------------------------------
 // Account management commands — useradd / userdel / passwd /
-// users / login / logout / su. All thin wrappers around auth.h.
-// Admin-only paths are enforced here so the kernel-side API
-// stays pure data-access and callable from the login gate
-// without capability juggling.
+// users / login / logout / su — moved to shell_security.cpp.
 // ---------------------------------------------------------------
 
-const char* RoleName(AuthRole r)
-{
-    switch (r)
-    {
-    case AuthRole::Admin:
-        return "admin";
-    case AuthRole::User:
-        return "user";
-    case AuthRole::Guest:
-        return "guest";
-    }
-    return "?";
-}
-
-AuthRole RoleFromArg(const char* s)
-{
-    if (StrEq(s, "admin"))
-        return AuthRole::Admin;
-    if (StrEq(s, "guest"))
-        return AuthRole::Guest;
-    return AuthRole::User;
-}
-
-void CmdUsers()
-{
-    const u32 n = AuthAccountCount();
-    ConsoleWrite("USERS (");
-    WriteU64Dec(n);
-    ConsoleWriteln(" accounts)");
-    const char* active = AuthCurrentUserName();
-    for (u32 i = 0; i < n; ++i)
-    {
-        AccountView v = {};
-        if (!AuthAccountAt(i, &v))
-            continue;
-        ConsoleWrite("  ");
-        ConsoleWrite(v.username);
-        ConsoleWrite("  [");
-        ConsoleWrite(RoleName(v.role));
-        ConsoleWrite("]");
-        if (!v.has_password)
-        {
-            ConsoleWrite("  (no password)");
-        }
-        if (active[0] != '\0' && StrEq(active, v.username))
-        {
-            ConsoleWrite("  *");
-        }
-        ConsoleWriteChar('\n');
-    }
-}
-
-void CmdUseradd(u32 argc, char** argv)
-{
-    if (!AuthIsAdmin())
-    {
-        ConsoleWriteln("USERADD: PERMISSION DENIED (ADMIN ONLY)");
-        return;
-    }
-    if (argc < 3)
-    {
-        ConsoleWriteln("USERADD: USAGE: USERADD <NAME> <PASSWORD> [ROLE]");
-        ConsoleWriteln("  ROLE: admin | user (default) | guest");
-        return;
-    }
-    const AuthRole role = (argc >= 4) ? RoleFromArg(argv[3]) : AuthRole::User;
-    if (!AuthAddUser(argv[1], argv[2], role))
-    {
-        ConsoleWriteln("USERADD: FAILED (DUPLICATE, FULL TABLE, OR INVALID NAME/PASSWORD)");
-        return;
-    }
-    ConsoleWrite("USERADD: CREATED ");
-    ConsoleWrite(argv[1]);
-    ConsoleWrite(" [");
-    ConsoleWrite(RoleName(role));
-    ConsoleWriteln("]");
-}
-
-void CmdUserdel(u32 argc, char** argv)
-{
-    if (!AuthIsAdmin())
-    {
-        ConsoleWriteln("USERDEL: PERMISSION DENIED (ADMIN ONLY)");
-        return;
-    }
-    if (argc < 2)
-    {
-        ConsoleWriteln("USERDEL: USAGE: USERDEL <NAME>");
-        return;
-    }
-    if (!AuthDeleteUser(argv[1]))
-    {
-        ConsoleWriteln("USERDEL: FAILED (UNKNOWN USER OR LAST ADMIN)");
-        return;
-    }
-    ConsoleWrite("USERDEL: REMOVED ");
-    ConsoleWriteln(argv[1]);
-}
-
-void CmdPasswd(u32 argc, char** argv)
-{
-    // Self-service flow: `passwd <old> <new>` — change the
-    // current user's password. Admin flow: `passwd <name>
-    // <new>` — force-set another user's password. Without
-    // enough args, print usage.
-    const char* me = AuthCurrentUserName();
-    if (me[0] == '\0')
-    {
-        ConsoleWriteln("PASSWD: NO ACTIVE SESSION");
-        return;
-    }
-    if (argc == 3)
-    {
-        // Self-service: argv[1] = old, argv[2] = new
-        if (!AuthChangePassword(me, argv[1], argv[2]))
-        {
-            ConsoleWriteln("PASSWD: FAILED (WRONG OLD PASSWORD OR INVALID NEW PASSWORD)");
-            return;
-        }
-        ConsoleWriteln("PASSWD: PASSWORD UPDATED");
-        return;
-    }
-    if (argc == 4)
-    {
-        // Admin flow: argv[1] = user, argv[2] = new, argv[3] = "--force"
-        if (!AuthIsAdmin())
-        {
-            ConsoleWriteln("PASSWD: PERMISSION DENIED (ADMIN ONLY FOR FORCE RESET)");
-            return;
-        }
-        if (!StrEq(argv[3], "--force"))
-        {
-            ConsoleWriteln("PASSWD: USAGE: PASSWD <USER> <NEW_PW> --force");
-            return;
-        }
-        if (!AuthChangePassword(argv[1], nullptr, argv[2]))
-        {
-            ConsoleWriteln("PASSWD: FAILED (UNKNOWN USER OR INVALID PASSWORD)");
-            return;
-        }
-        ConsoleWrite("PASSWD: PASSWORD FOR ");
-        ConsoleWrite(argv[1]);
-        ConsoleWriteln(" UPDATED");
-        return;
-    }
-    ConsoleWriteln("PASSWD: USAGE:");
-    ConsoleWriteln("  PASSWD <OLD_PW> <NEW_PW>                (SELF-SERVICE)");
-    ConsoleWriteln("  PASSWD <USER> <NEW_PW> --force          (ADMIN RESET)");
-}
-
-void CmdLogout()
-{
-    if (!AuthIsAuthenticated())
-    {
-        ConsoleWriteln("LOGOUT: NO ACTIVE SESSION");
-        return;
-    }
-    ConsoleWrite("LOGOUT: GOODBYE, ");
-    ConsoleWriteln(AuthCurrentUserName());
-    LoginReopen();
-}
-
-void CmdSu(u32 argc, char** argv)
-{
-    if (argc < 3)
-    {
-        ConsoleWriteln("SU: USAGE: SU <USER> <PASSWORD>");
-        return;
-    }
-    if (!AuthLogin(argv[1], argv[2]))
-    {
-        ConsoleWriteln("SU: AUTHENTICATION FAILED");
-        return;
-    }
-    ConsoleWrite("SU: SWITCHED TO ");
-    ConsoleWriteln(argv[1]);
-}
-
-void CmdLoginCmd(u32 argc, char** argv)
-{
-    if (argc < 3)
-    {
-        ConsoleWriteln("LOGIN: USAGE: LOGIN <USER> <PASSWORD>");
-        return;
-    }
-    if (!AuthLogin(argv[1], argv[2]))
-    {
-        ConsoleWriteln("LOGIN: AUTHENTICATION FAILED");
-        return;
-    }
-    ConsoleWrite("LOGIN: WELCOME, ");
-    ConsoleWriteln(argv[1]);
-}
 
 void Dispatch(char* line)
 {

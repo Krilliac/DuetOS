@@ -2,15 +2,16 @@
 
 ## Status (2026-04-26)
 
-Branch: `claude/refactor-codebase-VvLO6`. Pushed to origin.
+Branches: `claude/refactor-codebase-VvLO6` (merged via PR #74) and
+`claude/continue-refactoring-split-QlCKz` (active).
 
 **Per-split rollup:**
 
 | Split | File | Original | Current | State |
 |---|---|---:|---:|---|
-| 1 | `kernel/core/shell.cpp`               | 9,769 | 9,769 | ☐ not started |
+| 1 | `kernel/core/shell.cpp`               | 9,769 | 9,222 | ◐ in progress (5 slices: security / storage / process / core / core-extension; ~5.6% trim, the trivially-isolated commands. Remaining slices need helper hoists — EnvFind / FatLeaf / WriteU64Hex etc. — to shell_internal.h before they can move) |
 | 2 | `kernel/subsystems/win32/thunks.cpp`  | 5,684 |   655 | ☑ done (`cae3704`) |
-| 3 | `kernel/subsystems/linux/syscall.cpp` | 4,642 | 4,642 | ☐ not started |
+| 3 | `kernel/subsystems/linux/syscall.cpp` | 4,642 | 1,274 | ☑ done (73% reduction; decomposed into 16 per-domain sibling TUs: cred / fd / file / fs_mut / io / misc / mm / path / pathutil / proc / rlimit / sched / sig / stub / time + syscall_internal.h. syscall.cpp itself is now just header + kSys* enum + LinuxSyscallDispatch + SyscallInit + LinuxLogAbiCoverage + thin Linux* public wrappers) |
 | 4 | `kernel/fs/fat32.cpp`                 | 3,190 |   300 | ☑ done (decomposed into fat32 + fat32_dir + fat32_lookup + fat32_read + fat32_write + fat32_create + selftest, plus fat32_internal.h and fat32_write_internal.h) |
 | 5 | `kernel/drivers/usb/xhci.cpp`         | 2,548 |    76 | ☑ done (decomposed into 14 sibling TUs: admin/complete/context/control/descparse/enum/event/init/input/irq/ring/speed/xfer + xhci_internal.h; xhci.cpp itself is now just file header + namespace scaffolding + global definitions backing the extern decls in the header) |
 
@@ -24,30 +25,92 @@ Branch: `claude/refactor-codebase-VvLO6`. Pushed to origin.
 | `0ed4370 fs/fat32: split mutating path into sibling translation unit` | `fat32.cpp` 2,579 → 871 lines. All on-disk mutators (`Fat32WriteInPlace`, `Fat32Append*`, `Fat32Create*`, `Fat32Delete*`, `Fat32Mkdir/RmdirAtPath`, `Fat32Truncate*`) plus their helpers live in `fat32_write.cpp` (1,732 lines). Cross-TU primitives (`g_scratch`, `Fat32Guard`, `ReadCluster`, `WalkDirChain`, `WalkRootIntoSnapshot`, etc.) hoisted into `namespace duetos::fs::fat32::internal` via new `fat32_internal.h` (99 lines). Public `fat32.h` API unchanged. |
 | `54ca56d fs/fat32: extract file-content read APIs into fat32_read.cpp` | `fat32.cpp` 871 → 726 lines. `Fat32ReadFile`, `Fat32ReadAt`, `Fat32ReadFileStream` live in new `fat32_read.cpp` (173 lines). No new `internal::` symbols — these consume the existing primitives (`g_scratch`, `Fat32Guard`, `ReadFatEntry`) declared in `fat32_internal.h`. |
 | `9ae9964 fs/fat32: extract path lookup into fat32_lookup.cpp` | `fat32.cpp` 726 → 640 lines. `Fat32LookupPath` plus its TU-private `FindCtx` / `FindVisitor` pair live in new `fat32_lookup.cpp` (115 lines). Consumer-only of the existing internal primitives. |
+| `794c108 linux-syscall: extract credential handlers into sibling TU` | `syscall.cpp` 4,642 → 4,521 lines (-121). uid/gid/euid/egid/setre*/setres*/getres*/setfs*/groups/cap{get,set} live in new `syscall_cred.cpp` (152 lines), defined in `internal::` namespace. New `syscall_internal.h` (74 lines) carries the cross-TU decls + Linux errno constants (kEPERM..kENOSYS). Dispatcher unchanged via `using namespace internal;`. |
+| `81b2ca5 linux-syscall: extract rlimit handlers into sibling TU` | `syscall.cpp` 4,521 → 4,369 lines (-152). getrlimit/setrlimit/prlimit64 + kRlimit* constants + RlimitDefaultsFor helper live in new `syscall_rlimit.cpp` (184 lines). Constants stay TU-private (anon namespace) inside the new file; only the three Do* decls go into `syscall_internal.h`. |
+| `4f72b2c linux-syscall: extract scheduler-policy handlers into sibling TU` | `syscall.cpp` 4,369 → 4,219 lines. sched_setaffinity / sched_getaffinity / sched_{get,set}{scheduler,param} / sched_get_priority_{max,min} / sched_rr_get_interval + SCHED_* constants → `syscall_sched.cpp` (187 lines). DoSchedYield stays with proc. |
+| `fb3e398 linux-syscall: extract time / clock handlers into sibling TU` | `syscall.cpp` 4,219 → 3,990 lines. NowNs + clock_gettime / gettimeofday / time / nanosleep / times / clock_getres / clock_nanosleep + ReadTsc → `syscall_time.cpp` (209 lines). NowNs decl in internal header (LinuxNowNs wrapper forwards to it). |
+| `a95316b linux-syscall: extract signal handlers into sibling TU` | `syscall.cpp` 3,990 → 3,853 lines. rt_sigaction / rt_sigprocmask / sigaltstack / rt_sigreturn / rt_sigpending / rt_sigsuspend / rt_sigtimedwait → `syscall_sig.cpp` (168 lines). Hoists kEINTR / kENFILE / kECHILD into syscall_internal.h alongside the rest of the errno constants. |
+| `9ac2254 linux-syscall: extract file-descriptor handlers into sibling TU` | `syscall.cpp` 3,853 → 3,775 lines. dup / dup2 / dup3 / fcntl + TU-private CopyFdSlot helper → `syscall_fd.cpp` (131 lines). |
+| `d9e0cb1 linux-syscall: extract process-control handlers into sibling TU` | `syscall.cpp` 3,775 → 3,727 lines. exit / exit_group / getpid / gettid / sched_yield / tgkill / kill / getppid / getpgid / getsid / setpgid / getpgrp / setsid → `syscall_proc.cpp` (140 lines). DoExitGroup + DoGetPid in internal header so LinuxExit / LinuxGetPid wrappers can forward. |
+| `1cb2ea4 linux-syscall: extract CWD / path handlers into sibling TU` | `syscall.cpp` 3,727 → 3,657 lines. chdir / fchdir / getcwd → `syscall_path.cpp` (103 lines). utimensat + the *at-family path mutators stay in syscall.cpp pending the StripFatPrefix / CopyAndStripFatPath hoist. |
+| `97e7c11 linux-syscall: extract memory-management handlers into sibling TU` | `syscall.cpp` 3,657 → 3,290 lines. brk / mmap / munmap / mprotect / madvise / mremap / msync / mincore / mlock / munlock / mlockall / munlockall + kMapPrivate / kMapAnonymous + PageUp helper → `syscall_mm.cpp` (371 lines). Drops the kENOMEM_ shadow constant — DoMremap now uses kENOMEM directly. |
+| `1c2ef92 linux-syscall: extract stub handlers into sibling TU` | `syscall.cpp` 3,290 → 3,147 lines. Contiguous Pipe / Wait / Eventfd / Timerfd / Signalfd / Epoll / Inotify / Fadvise / Readahead block → new `syscall_stub.cpp`. Each returns the canonical Linux errno (-ENFILE / -ECHILD / -ENOSYS) for "we don't have that subsystem". |
+| `b46b42f linux-syscall: extract compat / tracing / mount stub group` | `syscall.cpp` 3,147 → 3,028 lines. Extends `syscall_stub.cpp` with the compat / tracing / mount / link / rename group: ptrace / syslog / vhangup / acct / mount / umount2 / sync / syncfs / rename / link / symlink / set_thread_area / get_thread_area / ioprio_get / ioprio_set. |
+| `1658b90 linux-syscall: hoist path-strip helpers into shared sibling TU` | `syscall.cpp` 3,028 → 2,964 lines. StripFatPrefix / CopyAndStripFatPath / AtFdCwdOnly + kAtFdCwd / kAtRemoveDir → new `syscall_pathutil.cpp` (65 lines). Unblocks the file / fs_mut / utime slices. |
+| `d04e749 linux-syscall: extract file-table handlers into sibling TU` | `syscall.cpp` 2,964 → 2,635 lines. open / close / stat / fstat / lstat / access / openat / newfstatat + TU-private FillStatFromEntry → new `syscall_file.cpp` (291 lines). |
+| `656c0b8 linux-syscall: extract FS-mutating handlers into sibling TU` | `syscall.cpp` 2,635 → 2,470 lines. chmod / fchmod / chown / fchown / lchown / utime / mknod / truncate / ftruncate / unlink / mkdir / rmdir + the *at-family (mkdirat / unlinkat / linkat / symlinkat / renameat / renameat2 / fchownat / futimesat / fchmodat / faccessat / faccessat2 / utimensat) → new `syscall_fs_mut.cpp` (306 lines). |
+| `4fe7804 linux-syscall: extract I/O handlers into sibling TU` | `syscall.cpp` 2,470 → 2,037 lines. read / write / lseek / ioctl / fsync / fdatasync / pread64 / pwrite64 / readv / writev + kLinuxIoMax → new `syscall_io.cpp` (450 lines). |
+| `6fccf1f linux-syscall: extract miscellaneous handlers into sibling TU` | `syscall.cpp` 2,037 → 1,452 lines. Catch-all "misc" group: arch_prctl / uname / set_tid_address / sysinfo / getrandom / futex / personality / pause / flock / get/setpriority / getcpu / prctl / getrusage / poll / select / getdents64 / set_robust_list / get_robust_list / ppoll / pselect6 / readlink → new `syscall_misc.cpp` (534 lines). WriteMsr duplicated TU-locally so the file is self-contained. |
+| `84ed53d linux-syscall: collapse scattered breadcrumb comments` | `syscall.cpp` 1,452 → 1,274 lines. Replace ~200 lines of in-line "moved to" stubs with one consolidated note. Update file header comment to describe the actual current layout. |
+| `2977dba shell: extract account-management commands into sibling TU` | `shell.cpp` 9,769 → 9,580 lines. users / useradd / userdel / passwd / logout / su / login + RoleName / RoleFromArg → new `shell_security.cpp` (256 lines). Establishes the shell_internal.h scaffolding under `duetos::core::shell::internal` with a `using namespace shell::internal;` directive at the top of shell.cpp. |
+| `2ae2b09 shell: extract storage / device-list commands into sibling TU` | `shell.cpp` 9,580 → 9,468 lines. mount / lsblk / lsgpt / lsmod → new `shell_storage.cpp` (164 lines). Fat* family deferred (shares FatLeaf + ParseU64Str with the rest of the shell). |
+| `ef5cc27 shell: extract ps / top / free into sibling TU` | `shell.cpp` 9,468 → 9,308 lines. ps / top / free + TU-private SchedStateName → new `shell_process.cpp` (218 lines). Spawn / Kill / Exec / Linuxexec / Translate / Readelf deferred (share path-strip + FAT32-load helpers). |
+| `83cb4dc shell: extract trivial banner / status commands into sibling TU` | `shell.cpp` 9,308 → 9,266 lines. about / version / clear / uptime / date → new `shell_core.cpp` (104 lines). |
+| `fb792b3 shell: extend shell_core.cpp with yield / uname / whoami / pwd / true / false` | `shell.cpp` 9,266 → 9,222 lines. Six more trivially-small commands appended to `shell_core.cpp`. CmdHostname stays in shell.cpp pending the env-table hoist. |
 
 **Deferred** to a follow-up session (each warrants its own fresh chat per
 the timeout-prevention rules):
 
-- `kernel/core/shell.cpp` (9,769 lines) — per-domain command extraction
-  + shared-state plumbing into `shell_internal.h`. No big data block to
-  `.inc`-extract; this is a real function-by-function split.
-- `kernel/subsystems/linux/syscall.cpp` (4,642 lines) — split by syscall
-  subsystem (io, file, mm, proc, sig, time, fd, cred, sched, rlimit,
-  misc, stub).
-- `kernel/drivers/usb/xhci.cpp` (2,548 lines) — recommend a 4-file
-  split (core / init / xfer / enum) rather than the explorer's
-  optimistic 10-file plan; `InitOne` orchestrates AddressDevice +
-  FetchDeviceDescriptor + FetchAndParseConfig + BringUpHidKeyboard
-  + XhciBindMsix + spawns HidPollEntry, all referencing file-scope
-  `g_poll_rt[]` / `g_poll_args[]`.
+- `kernel/core/shell.cpp` (now 9,222 lines) — five small slices have
+  landed (security / storage / process / core × 2). Each new slice
+  must promote one or more of the still-TU-private helpers into
+  `shell_internal.h` to unlock larger groups:
+  - **env-table hoist** (EnvFind / EnvSet / EnvUnset + `EnvSlot`
+    + `g_env[]`) — unlocks CmdHostname, CmdEnv, CmdSet, CmdUnset,
+    CmdGetenv, the $VAR substitution path, and any future
+    config-aware commands.
+  - **alias-table hoist** (AliasFind / AliasSet / AliasUnset +
+    `AliasSlot` + `g_aliases[]`) — unlocks CmdAlias / CmdUnalias.
+  - **history-ring hoist** (HistoryAppend / HistoryExpand /
+    HistoryRecallEntry / `g_history[]`) — unlocks CmdHistory and
+    the input-edit Up/Down arrow path.
+  - **path-strip hoist** (FatLeaf, ParseU64Str, ParseInt) —
+    unlocks the entire Fat* family + CmdRead + CmdLinuxexec +
+    CmdExec + CmdReadelf + CmdTranslate.
+  - **shared output helpers hoist** (WriteU64Dec / WriteU64Hex /
+    WriteI64Dec / WriteU8TwoDigits) — currently each new slice
+    duplicates them locally; promoting them once shrinks every
+    sibling TU.
+
+  After those five hoists the remaining buckets follow the original
+  plan layout: filesystem (Ls/Cat/Rm/Touch/Cp/Mv/Find/Grep/Head/
+  Tail/Wc/Sort/Uniq/Stat/Basename/Dirname/Hexdump), network (Ping/
+  Http/Ntp/Nslookup/Nic/Ifconfig/Dhcp/Route/Netscan/Wifi/Arp/Ipv4/
+  UsbNet/Net/FwPolicy/FwTrace/CrTrace), debug (Bp/Probe/Inspect/
+  DumpState/MemDump/Trace/Addr2Sym/Instr), hardware (Cpuid/Cr/
+  Rflags/Tsc/Hpet/Ticks/Msr/Lapic/Smp/Lspci/Heap/Paging/Fb/Smbios/
+  Power/Thermal/Hwmon/Gpu/Gfx/Vbe/KbdStats/MouseStats), utilities
+  (Cal/Sleep/Reset/Rand/Uuid/Color/Beep/Checksum/Repeat/Expr/Rev/
+  Tac/Nl/FlushTlb), and finally the dispatcher (`kCommandSet[]`
+  registry + Dispatch).
+_(Linux syscall split completed on
+`claude/continue-refactoring-split-QlCKz` across 17 commits;
+syscall.cpp 4,642 → 1,274 lines.)_
 
 **Resume prompt for a fresh session:**
-> Continue the refactor on branch `claude/refactor-codebase-VvLO6`.
-> Read `.claude/knowledge/refactor-codebase-plan.md` for context, then
-> pick the next file from the deferred list and execute it as a single
-> commit (split + CMakeLists update + build verify + commit). Do NOT
-> attempt more than one file per session — the rules in CLAUDE.md's
-> "Stream Timeout Prevention" section exist for a reason.
+> The `linux/syscall.cpp` split is complete (commits `794c108` →
+> `84ed53d`, 4,642 → 1,274 lines, 73% reduction across 17 commits).
+> The shell split is now in progress on the same branch
+> (`claude/continue-refactoring-split-QlCKz`): 5 small slices
+> landed via commits `2977dba` → `fb792b3`, taking shell.cpp from
+> 9,769 → 9,222 lines. The shell_internal.h scaffolding (under
+> `duetos::core::shell::internal`) and the
+> `using namespace shell::internal;` directive at the top of
+> shell.cpp are already in place.
+>
+> The next session should land one of the five "helper hoists"
+> listed in the deferred section above (env-table / alias-table /
+> history-ring / path-strip / shared-output-helpers). Each hoist
+> is a small surgical commit, but each one unlocks a much larger
+> bucket of commands for subsequent extractions. The recommended
+> order is: env-table first (touches the most commands), then
+> path-strip (unlocks the entire Fat* family in one slice), then
+> shared-output-helpers (lets every sibling TU drop its local
+> WriteU64Dec / WriteU64Hex copies).
+>
+> Start a fresh `claude/<slug>` branch off main rather than
+> continuing on `claude/continue-refactoring-split-QlCKz` —
+> that one's already very long.
 
 ---
 

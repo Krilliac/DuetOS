@@ -50,6 +50,21 @@ set(DUETOS_KERNEL_SHARED_SOURCES
     subsystems/graphics/graphics.cpp
     subsystems/linux/ring3_smoke.cpp
     subsystems/linux/syscall.cpp
+    subsystems/linux/syscall_cred.cpp
+    subsystems/linux/syscall_fd.cpp
+    subsystems/linux/syscall_file.cpp
+    subsystems/linux/syscall_fs_mut.cpp
+    subsystems/linux/syscall_io.cpp
+    subsystems/linux/syscall_misc.cpp
+    subsystems/linux/syscall_mm.cpp
+    subsystems/linux/syscall_path.cpp
+    subsystems/linux/syscall_pathutil.cpp
+    subsystems/linux/syscall_proc.cpp
+    subsystems/linux/syscall_rlimit.cpp
+    subsystems/linux/syscall_sched.cpp
+    subsystems/linux/syscall_sig.cpp
+    subsystems/linux/syscall_stub.cpp
+    subsystems/linux/syscall_time.cpp
     subsystems/linux/syscall_entry.S
     subsystems/translation/translate.cpp
     subsystems/win32/custom.cpp
@@ -68,6 +83,10 @@ set(DUETOS_KERNEL_SHARED_SOURCES
     subsystems/win32/vmap_syscall.cpp
     subsystems/win32/window_syscall.cpp
     core/shell.cpp
+    core/shell_core.cpp
+    core/shell_process.cpp
+    core/shell_security.cpp
+    core/shell_storage.cpp
     core/stack_canary.cpp
     core/symbols.cpp
     core/fault_domain.cpp
