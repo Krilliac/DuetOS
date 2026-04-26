@@ -355,8 +355,8 @@ Cheapest → most-expensive, by impact-per-LOC:
 
 | Date | Commit | Gap closed | Impact |
 |---|---|---|---|
-| 2026-04-26 | _pending_ | NT shim §1.2 mismaps: `NtWriteVirtualMemory`, `NtReadVirtualMemory`, `NtCreateSemaphore`, `NtReleaseSemaphore` now route to `kSysNtNotImpl` | Closes silent-wrong-semantics class for cross-AS memory ops + counted-semaphore concurrency. Mapped count drops 28→24; honest NotImpl beats silent corruption. `NtSetInformationFile` kept at SYS_FILE_SEEK because the position-info class is genuinely correct |
-| 2026-04-26 | _pending_ | ucrtbase §4.1: `fwrite(fd > 2)` now routes to `SYS_FILE_WRITE` instead of returning 0 | Closes silent-data-loss landmine. Stdio file writes from PEs actually land in the FS now. Unlocks ransomware-shape PE payloads via plain CRT |
+| 2026-04-26 | `ad32498` | NT shim §1.2 mismaps: `NtWriteVirtualMemory`, `NtReadVirtualMemory`, `NtCreateSemaphore`, `NtReleaseSemaphore` now route to `kSysNtNotImpl` | Closes silent-wrong-semantics class for cross-AS memory ops + counted-semaphore concurrency. Mapped count drops 28→24; honest NotImpl beats silent corruption. `NtSetInformationFile` kept at SYS_FILE_SEEK because the position-info class is genuinely correct |
+| 2026-04-26 | `ad32498` | ucrtbase §4.1: `fwrite(fd > 2)` now routes to `SYS_FILE_WRITE` instead of returning 0 | Closes silent-data-loss landmine. Stdio file writes from PEs actually land in the FS now. Unlocks ransomware-shape PE payloads via plain CRT |
 
 ## Wiring summary
 
