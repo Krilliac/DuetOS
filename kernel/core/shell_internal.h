@@ -265,6 +265,15 @@ void CmdCat(u32 argc, char** argv);
 void CmdTouch(u32 argc, char** argv);
 void CmdRm(u32 argc, char** argv);
 void CmdEcho(u32 argc, char** argv);
+void CmdFatls(u32 argc, char** argv);
+void CmdFatcat(u32 argc, char** argv);
+void CmdFatwrite(u32 argc, char** argv);
+void CmdFatappend(u32 argc, char** argv);
+void CmdFatnew(u32 argc, char** argv);
+void CmdFatrm(u32 argc, char** argv);
+void CmdFattrunc(u32 argc, char** argv);
+void CmdFatmkdir(u32 argc, char** argv);
+void CmdFatrmdir(u32 argc, char** argv);
 
 // ---------------------------------------------------------------
 // Hardware introspection commands (shell_hardware.cpp). Direct

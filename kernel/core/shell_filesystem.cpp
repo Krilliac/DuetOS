@@ -855,6 +855,119 @@ void CmdRm(u32 argc, char** argv)
     }
 }
 
+// ---------------------------------------------------------------
+// FAT32 commands. Volume-0-rooted by default; some accept an
+// explicit volume index. Operate against the read-write FAT
+// driver (sata0p1 / nvme0n1p1 in QEMU).
+// ---------------------------------------------------------------
+
+void CmdFatls(u32 argc, char** argv)
+{
+    namespace fat = duetos::fs::fat32;
+    u32 vol_idx = 0;
+    if (argc >= 2)
+    {
+        u64 v = 0;
+        if (!ParseU64Str(argv[1], &v) || v >= fat::Fat32VolumeCount())
+        {
+            ConsoleWriteln("FATLS: BAD VOLUME INDEX");
+            return;
+        }
+        vol_idx = static_cast<u32>(v);
+    }
+    const fat::Volume* v = fat::Fat32Volume(vol_idx);
+    if (v == nullptr)
+    {
+        ConsoleWriteln("FATLS: NO VOLUMES (did FAT32 self-test find one?)");
+        return;
+    }
+    ConsoleWriteln("NAME          ATTR  FIRST_CLUSTER  SIZE");
+    for (u32 i = 0; i < v->root_entry_count; ++i)
+    {
+        const fat::DirEntry& e = v->root_entries[i];
+        ConsoleWrite(e.name);
+        u32 len = 0;
+        while (e.name[len] != 0)
+            ++len;
+        for (u32 p = len; p < 13; ++p)
+            ConsoleWriteChar(' ');
+        ConsoleWriteChar(' ');
+        WriteU64Hex(e.attributes, 2);
+        ConsoleWrite("    ");
+        WriteU64Hex(e.first_cluster, 8);
+        ConsoleWriteChar(' ');
+        WriteU64Hex(e.size_bytes, 8);
+        ConsoleWriteln("");
+    }
+}
+
+void CmdFatcat(u32 argc, char** argv)
+{
+    namespace fat = duetos::fs::fat32;
+    if (argc < 2)
+    {
+        ConsoleWriteln("FATCAT: USAGE: FATCAT [VOL] NAME");
+        return;
+    }
+    u32 vol_idx = 0;
+    const char* name = argv[1];
+    if (argc >= 3)
+    {
+        u64 v = 0;
+        if (ParseU64Str(argv[1], &v) && v < fat::Fat32VolumeCount())
+        {
+            vol_idx = static_cast<u32>(v);
+            name = argv[2];
+        }
+    }
+    const fat::Volume* v = fat::Fat32Volume(vol_idx);
+    if (v == nullptr)
+    {
+        ConsoleWriteln("FATCAT: NO SUCH VOLUME");
+        return;
+    }
+    const fat::DirEntry* e = fat::Fat32FindInRoot(v, name);
+    if (e == nullptr)
+    {
+        ConsoleWrite("FATCAT: NO SUCH FILE: ");
+        ConsoleWriteln(name);
+        return;
+    }
+    struct StreamCtx
+    {
+        u8 last_byte;
+        bool any;
+    };
+    StreamCtx ctx{0, false};
+    const bool ok = fat::Fat32ReadFileStream(
+        v, e,
+        [](const duetos::u8* data, duetos::u64 len, void* cx) -> bool
+        {
+            auto* s = static_cast<StreamCtx*>(cx);
+            for (duetos::u64 i = 0; i < len; ++i)
+            {
+                const char c = static_cast<char>(data[i]);
+                ConsoleWriteChar((c >= 0x20 && c <= 0x7E) || c == '\n' || c == '\r' || c == '\t' ? c : '.');
+            }
+            if (len > 0)
+            {
+                s->last_byte = data[len - 1];
+                s->any = true;
+            }
+            return true;
+        },
+        &ctx);
+    if (!ok)
+    {
+        ConsoleWriteln("FATCAT: READ ERROR");
+        return;
+    }
+    if (!ctx.any || ctx.last_byte != '\n')
+    {
+        ConsoleWriteln("");
+    }
+}
+
 void CmdEcho(u32 argc, char** argv)
 {
     // Scan for a ">" redirect token. If present, arguments
@@ -931,6 +1044,345 @@ void CmdEcho(u32 argc, char** argv)
         ConsoleWrite(argv[i]);
     }
     ConsoleWriteChar('\n');
+}
+
+void CmdFatwrite(u32 argc, char** argv)
+{
+    namespace fat = duetos::fs::fat32;
+    if (argc < 4)
+    {
+        ConsoleWriteln("FATWRITE: USAGE: FATWRITE PATH OFFSET BYTES...");
+        return;
+    }
+    const char* path = argv[1];
+    u64 off = 0;
+    if (!ParseU64Str(argv[2], &off))
+    {
+        ConsoleWriteln("FATWRITE: BAD OFFSET");
+        return;
+    }
+    static u8 payload[1024];
+    u64 plen = 0;
+    for (u32 i = 3; i < argc; ++i)
+    {
+        if (i > 3 && plen + 1 < sizeof(payload))
+        {
+            payload[plen++] = ' ';
+        }
+        for (u32 j = 0; argv[i][j] != 0 && plen + 1 < sizeof(payload); ++j)
+        {
+            payload[plen++] = static_cast<u8>(argv[i][j]);
+        }
+    }
+    const char* leaf = FatLeaf(path);
+    if (leaf == nullptr)
+        leaf = (path[0] == '/') ? path + 1 : path;
+    const fat::Volume* v = fat::Fat32Volume(0);
+    if (v == nullptr)
+    {
+        ConsoleWriteln("FATWRITE: FAT32 NOT MOUNTED");
+        return;
+    }
+    fat::DirEntry entry;
+    if (!fat::Fat32LookupPath(v, leaf, &entry))
+    {
+        ConsoleWrite("FATWRITE: NO SUCH FILE: ");
+        ConsoleWriteln(path);
+        return;
+    }
+    if (entry.attributes & 0x10)
+    {
+        ConsoleWriteln("FATWRITE: PATH IS A DIRECTORY");
+        return;
+    }
+    const i64 rc = fat::Fat32WriteInPlace(v, &entry, off, payload, plen);
+    if (rc < 0)
+    {
+        ConsoleWriteln("FATWRITE: WRITE FAILED (offset+len > size? backend RO?)");
+        return;
+    }
+    ConsoleWrite("FATWRITE: WROTE ");
+    WriteU64Dec(static_cast<u64>(rc));
+    ConsoleWrite(" BYTES AT OFFSET ");
+    WriteU64Dec(off);
+    ConsoleWriteln("");
+}
+
+void CmdFatappend(u32 argc, char** argv)
+{
+    namespace fat = duetos::fs::fat32;
+    if (argc < 3)
+    {
+        ConsoleWriteln("FATAPPEND: USAGE: FATAPPEND NAME BYTES...");
+        return;
+    }
+    const char* name = argv[1];
+    if (const char* leaf = FatLeaf(name); leaf != nullptr && *leaf != '\0')
+    {
+        name = leaf;
+    }
+    else if (name[0] == '/')
+    {
+        ++name;
+    }
+    static u8 payload[1024];
+    u64 plen = 0;
+    for (u32 i = 2; i < argc; ++i)
+    {
+        if (i > 2 && plen + 1 < sizeof(payload))
+        {
+            payload[plen++] = ' ';
+        }
+        for (u32 j = 0; argv[i][j] != 0 && plen + 1 < sizeof(payload); ++j)
+        {
+            payload[plen++] = static_cast<u8>(argv[i][j]);
+        }
+    }
+    const fat::Volume* v = fat::Fat32Volume(0);
+    if (v == nullptr)
+    {
+        ConsoleWriteln("FATAPPEND: FAT32 NOT MOUNTED");
+        return;
+    }
+    bool has_slash = false;
+    for (u32 i = 0; name[i] != 0; ++i)
+    {
+        if (name[i] == '/')
+        {
+            has_slash = true;
+            break;
+        }
+    }
+    const i64 rc =
+        has_slash ? fat::Fat32AppendAtPath(v, name, payload, plen) : fat::Fat32AppendInRoot(v, name, payload, plen);
+    if (rc < 0)
+    {
+        ConsoleWriteln("FATAPPEND: APPEND FAILED (backend RO? disk full? file not in root?)");
+        return;
+    }
+    ConsoleWrite("FATAPPEND: APPENDED ");
+    WriteU64Dec(static_cast<u64>(rc));
+    ConsoleWrite(" BYTES TO ");
+    ConsoleWriteln(name);
+}
+
+void CmdFatnew(u32 argc, char** argv)
+{
+    namespace fat = duetos::fs::fat32;
+    if (argc < 2)
+    {
+        ConsoleWriteln("FATNEW: USAGE: FATNEW NAME [BYTES...]");
+        return;
+    }
+    const char* name = argv[1];
+    if (const char* leaf = FatLeaf(name); leaf != nullptr && *leaf != '\0')
+    {
+        name = leaf;
+    }
+    else if (name[0] == '/')
+    {
+        ++name;
+    }
+    static u8 payload[1024];
+    u64 plen = 0;
+    for (u32 i = 2; i < argc; ++i)
+    {
+        if (i > 2 && plen + 1 < sizeof(payload))
+        {
+            payload[plen++] = ' ';
+        }
+        for (u32 j = 0; argv[i][j] != 0 && plen + 1 < sizeof(payload); ++j)
+        {
+            payload[plen++] = static_cast<u8>(argv[i][j]);
+        }
+    }
+    const fat::Volume* v = fat::Fat32Volume(0);
+    if (v == nullptr)
+    {
+        ConsoleWriteln("FATNEW: FAT32 NOT MOUNTED");
+        return;
+    }
+    bool has_slash = false;
+    for (u32 i = 0; name[i] != 0; ++i)
+    {
+        if (name[i] == '/')
+        {
+            has_slash = true;
+            break;
+        }
+    }
+    const i64 rc =
+        has_slash ? fat::Fat32CreateAtPath(v, name, payload, plen) : fat::Fat32CreateInRoot(v, name, payload, plen);
+    if (rc < 0)
+    {
+        ConsoleWriteln("FATNEW: CREATE FAILED (bad name? exists? full dir? disk full?)");
+        return;
+    }
+    ConsoleWrite("FATNEW: CREATED ");
+    ConsoleWrite(name);
+    ConsoleWrite(" (");
+    WriteU64Dec(static_cast<u64>(rc));
+    ConsoleWriteln(" BYTES)");
+}
+
+void CmdFatrm(u32 argc, char** argv)
+{
+    namespace fat = duetos::fs::fat32;
+    if (argc < 2)
+    {
+        ConsoleWriteln("FATRM: USAGE: FATRM NAME");
+        return;
+    }
+    const char* name = argv[1];
+    if (const char* leaf = FatLeaf(name); leaf != nullptr && *leaf != '\0')
+    {
+        name = leaf;
+    }
+    else if (name[0] == '/')
+    {
+        ++name;
+    }
+    const fat::Volume* v = fat::Fat32Volume(0);
+    if (v == nullptr)
+    {
+        ConsoleWriteln("FATRM: FAT32 NOT MOUNTED");
+        return;
+    }
+    bool has_slash = false;
+    for (u32 i = 0; name[i] != 0; ++i)
+    {
+        if (name[i] == '/')
+        {
+            has_slash = true;
+            break;
+        }
+    }
+    const bool ok = has_slash ? fat::Fat32DeleteAtPath(v, name) : fat::Fat32DeleteInRoot(v, name);
+    if (!ok)
+    {
+        ConsoleWrite("FATRM: FAILED: ");
+        ConsoleWriteln(name);
+        return;
+    }
+    ConsoleWrite("FATRM: DELETED ");
+    ConsoleWriteln(name);
+}
+
+void CmdFattrunc(u32 argc, char** argv)
+{
+    namespace fat = duetos::fs::fat32;
+    if (argc < 3)
+    {
+        ConsoleWriteln("FATTRUNC: USAGE: FATTRUNC NAME NEW_SIZE");
+        return;
+    }
+    const char* name = argv[1];
+    if (const char* leaf = FatLeaf(name); leaf != nullptr && *leaf != '\0')
+    {
+        name = leaf;
+    }
+    else if (name[0] == '/')
+    {
+        ++name;
+    }
+    u64 new_size = 0;
+    if (!ParseU64Str(argv[2], &new_size))
+    {
+        ConsoleWriteln("FATTRUNC: BAD SIZE");
+        return;
+    }
+    const fat::Volume* v = fat::Fat32Volume(0);
+    if (v == nullptr)
+    {
+        ConsoleWriteln("FATTRUNC: FAT32 NOT MOUNTED");
+        return;
+    }
+    bool has_slash = false;
+    for (u32 i = 0; name[i] != 0; ++i)
+    {
+        if (name[i] == '/')
+        {
+            has_slash = true;
+            break;
+        }
+    }
+    const i64 rc =
+        has_slash ? fat::Fat32TruncateAtPath(v, name, new_size) : fat::Fat32TruncateInRoot(v, name, new_size);
+    if (rc < 0)
+    {
+        ConsoleWriteln("FATTRUNC: FAILED");
+        return;
+    }
+    ConsoleWrite("FATTRUNC: ");
+    ConsoleWrite(name);
+    ConsoleWrite(" -> ");
+    WriteU64Dec(static_cast<u64>(rc));
+    ConsoleWriteln(" BYTES");
+}
+
+void CmdFatmkdir(u32 argc, char** argv)
+{
+    namespace fat = duetos::fs::fat32;
+    if (argc < 2)
+    {
+        ConsoleWriteln("FATMKDIR: USAGE: FATMKDIR PATH");
+        return;
+    }
+    const char* path = argv[1];
+    if (const char* leaf = FatLeaf(path); leaf != nullptr && *leaf != '\0')
+    {
+        path = leaf;
+    }
+    else if (path[0] == '/')
+    {
+        ++path;
+    }
+    const fat::Volume* v = fat::Fat32Volume(0);
+    if (v == nullptr)
+    {
+        ConsoleWriteln("FATMKDIR: FAT32 NOT MOUNTED");
+        return;
+    }
+    if (!fat::Fat32MkdirAtPath(v, path))
+    {
+        ConsoleWrite("FATMKDIR: FAILED: ");
+        ConsoleWriteln(path);
+        return;
+    }
+    ConsoleWrite("FATMKDIR: CREATED ");
+    ConsoleWriteln(path);
+}
+
+void CmdFatrmdir(u32 argc, char** argv)
+{
+    namespace fat = duetos::fs::fat32;
+    if (argc < 2)
+    {
+        ConsoleWriteln("FATRMDIR: USAGE: FATRMDIR PATH");
+        return;
+    }
+    const char* path = argv[1];
+    if (const char* leaf = FatLeaf(path); leaf != nullptr && *leaf != '\0')
+    {
+        path = leaf;
+    }
+    else if (path[0] == '/')
+    {
+        ++path;
+    }
+    const fat::Volume* v = fat::Fat32Volume(0);
+    if (v == nullptr)
+    {
+        ConsoleWriteln("FATRMDIR: FAT32 NOT MOUNTED");
+        return;
+    }
+    if (!fat::Fat32RmdirAtPath(v, path))
+    {
+        ConsoleWriteln("FATRMDIR: FAILED (not a dir? not empty? not found?)");
+        return;
+    }
+    ConsoleWrite("FATRMDIR: REMOVED ");
+    ConsoleWriteln(path);
 }
 
 } // namespace duetos::core::shell::internal
