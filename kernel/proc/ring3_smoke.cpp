@@ -809,6 +809,91 @@ void SpawnCpuHogProbe()
     sched::SchedCreateUser(&Ring3UserEntry, nullptr, "ring3-cpu-hog", proc);
 }
 
+// Dedicated syscall-storm payload: spins calling SYS_GETPID(=1) in a
+// tight `int 0x80` loop. SYS_GETPID always succeeds (no caps, no args,
+// returns the current task's pid), so unlike the hostile probe this
+// is NOT a denial test — every iteration completes the user→kernel→
+// user round trip. Tests the syscall-entry path under sustained load:
+//   - SYSCALL/SYSRET MSR state holds across millions of entries
+//   - per-CPU TSS / kernel-stack switch survives back-to-back transitions
+//   - scheduler tick budget eventually fires (~50 ticks ≈ 500 ms at
+//     100 Hz) before any kernel resource leaks visibly
+//
+// Distinct from `hog` (pure user-mode `jmp $`, never enters kernel) and
+// from `hostile` (denied syscall path, killed by sandbox-denials
+// counter at iteration ~100). Pass criterion: scheduler tick budget
+// kills the task; kernel stays healthy and reaper recovers all frames.
+//
+// Payload (10 bytes):
+//   offset 0x00: pause                          (F3 90)
+//   offset 0x02 loop: mov eax, 1                (B8 01 00 00 00) — SYS_GETPID
+//   offset 0x07: int 0x80                       (CD 80)
+//   offset 0x09: jmp loop                       (EB F7) — rel8 = -9
+//
+// Next_rip after jmp = 0x0B. disp = 0x02 - 0x0B = -9 = 0xF7.
+//
+// clang-format off
+constexpr u8 kSyscallStormBytes[] = {
+    0xF3, 0x90,                                                   // pause
+    0xB8, 0x01, 0x00, 0x00, 0x00,                                 // mov eax, 1 (SYS_GETPID)
+    0xCD, 0x80,                                                   // int 0x80
+    0xEB, 0xF7,                                                   // jmp -9 (back to mov eax)
+};
+// clang-format on
+
+void SpawnSyscallStormProbeTask()
+{
+    using arch::SerialWrite;
+    using arch::SerialWriteHex;
+    using namespace duetos::mm;
+
+    const u64 code_va = AslrPickBase();
+    const u64 stack_va = code_va + kStackOffsetFromCode;
+
+    AddressSpace* as = AddressSpaceCreate(kFrameBudgetSandbox);
+    if (as == nullptr)
+    {
+        Panic("core/ring3", "AS create failed for syscall-storm probe");
+    }
+    const PhysAddr code_frame = AllocateFrame();
+    if (code_frame == kNullFrame)
+    {
+        Panic("core/ring3", "code frame alloc failed for syscall-storm");
+    }
+    auto* code_direct = static_cast<u8*>(PhysToVirt(code_frame));
+    for (u64 i = 0; i < mm::kPageSize; ++i)
+    {
+        code_direct[i] = 0;
+    }
+    for (u64 i = 0; i < sizeof(kSyscallStormBytes); ++i)
+    {
+        code_direct[i] = kSyscallStormBytes[i];
+    }
+    const PhysAddr stack_frame = AllocateFrame();
+    if (stack_frame == kNullFrame)
+    {
+        Panic("core/ring3", "stack frame alloc failed for syscall-storm");
+    }
+    AddressSpaceMapUserPage(as, code_va, code_frame, kPagePresent | kPageUser);
+    AddressSpaceMapUserPage(as, stack_va, stack_frame, kPagePresent | kPageWritable | kPageUser | kPageNoExecute);
+
+    // Empty caps — SYS_GETPID isn't cap-gated, so this still loops
+    // happily. Tight tick budget so the test completes quickly:
+    // 50 ticks ≈ 500 ms of scheduled CPU at 100 Hz, more than
+    // enough to verify the syscall path stays healthy under
+    // back-to-back entries.
+    Process* proc = ProcessCreate("ring3-syscall-storm", as, CapSetEmpty(), fs::RamfsSandboxRoot(), code_va, stack_va,
+                                  kTickBudgetSandbox);
+    if (proc == nullptr)
+    {
+        Panic("core/ring3", "ProcessCreate failed for syscall-storm");
+    }
+    SerialWrite("[ring3] queued syscall-storm probe pid=");
+    SerialWriteHex(proc->pid);
+    SerialWrite(" (expect tick-budget kill after sustained int 0x80)\n");
+    sched::SchedCreateUser(&Ring3UserEntry, nullptr, "ring3-syscall-storm", proc);
+}
+
 // Dedicated NX-probe payload: jumps into its own NX stack page at
 // 0x40010000. The stack is mapped with kPageNoExecute; instruction
 // fetch from there triggers #PF with the "instruction fetch" bit
@@ -2224,6 +2309,11 @@ bool SpawnOnDemand(const char* kind)
     if (LocalStrEq(kind, "hog"))
     {
         SpawnCpuHogProbe();
+        return true;
+    }
+    if (LocalStrEq(kind, "syscallstorm"))
+    {
+        SpawnSyscallStormProbeTask();
         return true;
     }
     if (LocalStrEq(kind, "hostile"))
