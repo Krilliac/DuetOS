@@ -11,6 +11,7 @@
 #include "time/timekeeper.h"
 
 #include "arch/x86_64/hpet.h"
+#include "arch/x86_64/rtc.h"
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
 #include "log/klog.h"
@@ -109,6 +110,43 @@ u64 ResolutionNs()
         return 0;
     }
     return cs->resolution_ns();
+}
+
+u64 BoottimeNs()
+{
+    // v0 alias — CLOCK_BOOTTIME == CLOCK_MONOTONIC until a real
+    // suspend/resume path exists.
+    return MonotonicNs();
+}
+
+u64 RealtimeFiletime()
+{
+    // Sample CMOS RTC, convert to Windows FILETIME (100-ns ticks
+    // since 1601-01-01 UTC). Same algorithm previously inlined in
+    // syscall/time_syscall.cpp::RtcToFileTime; that one stays for
+    // SYSTEMTIME ↔ FILETIME conversions (DoStToFt) and is also
+    // updated to forward into this body once it's safe to remove
+    // arch::RtcRead from that TU.
+    arch::RtcTime t = {};
+    arch::RtcRead(&t);
+
+    auto is_leap = [](u32 y) { return (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0); };
+    constexpr u32 kDaysBeforeMonth[12] = {0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334};
+
+    u64 days = 0;
+    for (u32 y = 1970; y < t.year; ++y)
+        days += is_leap(y) ? 366 : 365;
+    const u32 m = (t.month >= 1 && t.month <= 12) ? (t.month - 1) : 0;
+    days += kDaysBeforeMonth[m];
+    if (m >= 2 && is_leap(t.year))
+        days += 1;
+    days += (t.day >= 1) ? (t.day - 1) : 0;
+
+    constexpr u64 k1970To1601Days = 134774;
+    const u64 total_days = days + k1970To1601Days;
+
+    const u64 seconds = total_days * 86400ULL + u64(t.hour) * 3600 + u64(t.minute) * 60 + u64(t.second);
+    return seconds * 10'000'000ULL;
 }
 
 void TimekeeperSelfTest()

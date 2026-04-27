@@ -87,6 +87,8 @@ inline constexpr LockClass kLockClassKObject = 0x02;
 inline constexpr LockClass kLockClassKStack = 0x03;
 inline constexpr LockClass kLockClassPciConfig = 0x04;
 inline constexpr LockClass kLockClassBreakpoints = 0x05;
+inline constexpr LockClass kLockClassCleanroomTrace = 0x06;
+inline constexpr LockClass kLockClassWifi = 0x07;
 
 /// Maximum simultaneous holders per CPU. A code path that acquires
 /// more than this many locks at once trips a warning and lockdep

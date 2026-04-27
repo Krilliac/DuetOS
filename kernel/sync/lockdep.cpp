@@ -232,6 +232,8 @@ void LockdepRegisterCanonicalClasses()
     LockdepRegisterClass(kLockClassKStack, "kstack");
     LockdepRegisterClass(kLockClassPciConfig, "pci-config");
     LockdepRegisterClass(kLockClassBreakpoints, "breakpoints");
+    LockdepRegisterClass(kLockClassCleanroomTrace, "cleanroom-trace");
+    LockdepRegisterClass(kLockClassWifi, "wifi");
 }
 
 namespace

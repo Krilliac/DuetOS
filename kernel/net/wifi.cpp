@@ -16,7 +16,8 @@ struct WifiIfaceState
     WifiStatus status;
 };
 
-constinit sync::SpinLock g_lock = {};
+// Tagged with `kLockClassWifi` for lockdep.
+constinit sync::SpinLock g_lock = {.locked = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassWifi};
 constinit WifiIfaceState g_ifaces[kWifiMaxIfaces] = {};
 
 void CopyAsciiBounded(char* dst, u32 dst_cap, const char* src)

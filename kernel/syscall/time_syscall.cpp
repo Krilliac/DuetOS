@@ -63,10 +63,11 @@ void DoNowNs(arch::TrapFrame* frame)
 
 void DoGetTimeFt(arch::TrapFrame* frame)
 {
-    // No args. Sample CMOS RTC, return FILETIME in rax.
-    arch::RtcTime t = {};
-    arch::RtcRead(&t);
-    frame->rax = RtcToFileTime(t);
+    // No args. Returns wall-clock FILETIME in rax. Sourced from
+    // `time::RealtimeFiletime()` so any future migration to a more
+    // accurate wall-clock path (NTP-disciplined RTC, TSC + RTC
+    // delta sampling, …) takes effect here automatically.
+    frame->rax = ::duetos::time::RealtimeFiletime();
 }
 
 namespace
