@@ -77,6 +77,15 @@ set +e
     /export:ZwTerminateProcess=NtTerminateProcess \
     /export:NtTerminateThread \
     /export:ZwTerminateThread=NtTerminateThread \
+    `# Real cross-task thread control — back SYS_THREAD_SUSPEND/RESUME.` \
+    `# v0 only accepts caller-local thread handles; cross-process thread` \
+    `# suspend lands with NtOpenThread.` \
+    /export:NtSuspendThread \
+    /export:ZwSuspendThread=NtSuspendThread \
+    /export:NtResumeThread \
+    /export:ZwResumeThread=NtResumeThread \
+    /export:NtAlertResumeThread \
+    /export:ZwAlertResumeThread=NtAlertResumeThread \
     /export:NtContinue \
     /export:ZwContinue=NtContinue \
     /export:NtAllocateVirtualMemory \

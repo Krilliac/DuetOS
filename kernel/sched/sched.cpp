@@ -191,6 +191,21 @@ struct Task
     u64 dr2;
     u64 dr3;
     u64 dr7;
+
+    // NT-style suspend count. Read/written by SchedSuspendTask /
+    // SchedResumeTask under arch::Cli. While this is non-zero,
+    // the scheduler refuses to pick the task off the runqueue —
+    // RunqueuePopRunnable detects suspended pops and re-parks
+    // them on g_suspended_head. Sleeping / blocked tasks remain
+    // on their wait/sleep queue while suspended; the wake path
+    // routes them through the same re-parker.
+    //
+    // Only the cross-task control APIs (SchedSuspendTask /
+    // SchedResumeTask) and the wake path (RunqueueOrSuspendPush)
+    // mutate this. Every mutator runs under arch::Cli + the
+    // sched lock; reads outside the scheduler are racy by design
+    // (a snapshot for diagnostics is fine).
+    u32 suspend_count;
 };
 
 namespace
@@ -341,6 +356,119 @@ Task* RunqueuePop()
     return nullptr;
 }
 
+// Suspended-task list. Tasks here have suspend_count > 0 AND
+// were popped off the runqueue (or rerouted from a wake path)
+// because the scheduler refuses to dispatch them. Threaded on
+// `Task::next` — a suspended task is on exactly this list, NOT
+// on the runqueue / wait queue / sleep queue / zombies.
+//
+// Lifecycle:
+//   - SchedSuspendTask increments the count. If the task is on
+//     the runqueue, RunqueuePopRunnable will reroute it the next
+//     time Schedule() runs. If it's Sleeping / Blocked, it stays
+//     where it is — when it would otherwise be woken, the wake
+//     path checks suspend_count and reroutes here.
+//   - SchedResumeTask decrements. When it hits zero, the task
+//     gets unlinked from this list and pushed onto the runqueue.
+//
+// Single-CPU correctness: no IPI needed because the SUSPENDER is
+// the running task; the SUSPENDEE cannot also be running. A real
+// SMP design needs an IPI to evict a target running on another
+// core; that lands with the rest of the SMP scheduler work.
+constinit Task* g_suspended_head = nullptr;
+constinit Task* g_suspended_tail = nullptr;
+
+void SuspendedListPush(Task* t)
+{
+    t->next = nullptr;
+    if (g_suspended_tail == nullptr)
+    {
+        g_suspended_head = g_suspended_tail = t;
+    }
+    else
+    {
+        g_suspended_tail->next = t;
+        g_suspended_tail = t;
+    }
+}
+
+// Remove `t` from the suspended list. Returns true iff `t` was
+// found and unlinked. O(N) walk — N stays tiny in practice (at
+// most as many threads as a single process spawned).
+bool SuspendedListRemove(Task* t)
+{
+    Task* prev = nullptr;
+    for (Task* it = g_suspended_head; it != nullptr; prev = it, it = it->next)
+    {
+        if (it == t)
+        {
+            if (prev == nullptr)
+            {
+                g_suspended_head = it->next;
+            }
+            else
+            {
+                prev->next = it->next;
+            }
+            if (g_suspended_tail == it)
+            {
+                g_suspended_tail = prev;
+            }
+            it->next = nullptr;
+            return true;
+        }
+    }
+    return false;
+}
+
+// Drain runqueue until a non-suspended task is found OR the
+// runqueue is empty. Suspended tasks popped along the way are
+// re-parked on g_suspended_head with state = Blocked. The wake
+// path uses RunqueueOrSuspendPush below to skip the runqueue
+// entirely for known-suspended tasks; this loop is the safety
+// net for tasks suspended WHILE on the runqueue (Ready state),
+// which the suspender doesn't relocate eagerly.
+Task* RunqueuePopRunnable()
+{
+    while (true)
+    {
+        Task* t = RunqueuePop();
+        if (t == nullptr)
+        {
+            return nullptr;
+        }
+        if (t->suspend_count == 0)
+        {
+            return t;
+        }
+        // Suspended task drained off the runqueue. Park it on
+        // the suspended list; the resume path will move it back.
+        t->state = TaskState::Blocked;
+        SuspendedListPush(t);
+    }
+}
+
+// Wake-path counterpart to RunqueuePush: route a newly-runnable
+// task to either the runqueue (typical) or the suspended list
+// (when its suspend_count is non-zero). Used by every site that
+// transitions Sleeping/Blocked → Ready (timer wake, WaitQueue
+// wake, the resume path's complement). The Ready vs. Blocked
+// state is set inside this helper so callers don't have to
+// branch on suspend_count themselves.
+void RunqueueOrSuspendPush(Task* t)
+{
+    if (t->suspend_count != 0)
+    {
+        t->state = TaskState::Blocked;
+        SuspendedListPush(t);
+    }
+    else
+    {
+        t->state = TaskState::Ready;
+        RunqueuePush(t);
+    }
+}
+
 void SleepqueueInsert(Task* t)
 {
     t->sleep_next = nullptr;
@@ -467,6 +595,7 @@ void SchedInit()
     boot_task->process = nullptr;                    // kernel-only — no owning process
     boot_task->kill_requested = false;               // kernel tasks never hit a budget
     boot_task->kill_reason = KillReason::TickBudget; // unused when kill_requested=false
+    boot_task->suspend_count = 0;                    // boot/kernel tasks never get suspended
 
     Current() = boot_task;
     g_tasks_created = 1;
@@ -539,6 +668,7 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
     t->dr2 = 0;
     t->dr3 = 0;
     t->dr7 = 0;
+    t->suspend_count = 0;
 
     // Build the initial stack. ContextSwitch pops r15, r14, r13, r12,
     // rbp, rbx and then rets. So from bottom to top of the pre-planted
@@ -694,7 +824,7 @@ void Schedule()
         // on SMP Commit D adds the lock-passing-across-switch dance.
         sync::SpinLockGuard guard(g_sched_lock);
 
-        next = RunqueuePop();
+        next = RunqueuePopRunnable();
         if (next == nullptr)
         {
             if (Current()->state != TaskState::Running)
@@ -735,8 +865,15 @@ void Schedule()
             }
             else
             {
-                prev->state = TaskState::Ready;
-                RunqueuePush(prev);
+                // RunqueueOrSuspendPush sets state appropriately:
+                // Ready when suspend_count == 0 (the typical path)
+                // or Blocked + onto g_suspended when the task was
+                // suspended while it was the running task. Self-
+                // suspend is the only way the latter happens on
+                // single-CPU — a different task suspending us
+                // can't preempt us, so we always reach this point
+                // after our own SchedSuspendTask call.
+                RunqueueOrSuspendPush(prev);
             }
         }
         // Dead tasks are NOT re-enqueued; their Task struct + stack live on
@@ -1043,9 +1180,12 @@ void OnTimerTick(u64 now_ticks)
             }
 
             woken->wake_tick = 0;
-            woken->state = TaskState::Ready;
             woken->next = nullptr;
-            RunqueuePush(woken);
+            // Suspended tasks stay parked even when the timer
+            // would otherwise wake them — RunqueueOrSuspendPush
+            // routes to g_suspended_head in that case and sets
+            // state = Blocked instead of Ready.
+            RunqueueOrSuspendPush(woken);
             woke_any = true;
         }
     }
@@ -1328,6 +1468,92 @@ KillResult SchedKillByPid(u64 pid)
     // hit Schedule() naturally and die there.
     arch::Sti();
     return KillResult::Signaled;
+}
+
+SuspendResult SchedSuspendTask(Task* target, u32* prev_count_out)
+{
+    if (target == nullptr)
+    {
+        return SuspendResult::NotFound;
+    }
+    arch::Cli();
+    sync::SpinLockGuard guard(g_sched_lock);
+    if (target->state == TaskState::Dead)
+    {
+        arch::Sti();
+        return SuspendResult::AlreadyDead;
+    }
+    if (target == Current())
+    {
+        // Self-suspend on single-CPU: the count goes up, the
+        // task continues running until its next yield. At that
+        // yield Schedule()'s prev re-enqueue path routes it
+        // through RunqueueOrSuspendPush, which sees the non-zero
+        // count and parks it on g_suspended.
+        if (prev_count_out != nullptr)
+        {
+            *prev_count_out = target->suspend_count;
+        }
+        ++target->suspend_count;
+        arch::Sti();
+        return SuspendResult::Signaled;
+    }
+    if (prev_count_out != nullptr)
+    {
+        *prev_count_out = target->suspend_count;
+    }
+    ++target->suspend_count;
+    // For Ready tasks the suspend takes effect lazily — the next
+    // RunqueuePopRunnable that touches the task drops it onto
+    // the suspended list. For Sleeping / Blocked tasks the
+    // suspend takes effect at wake time via RunqueueOrSuspendPush.
+    // No eager relocation needed in either case.
+    arch::Sti();
+    return SuspendResult::Signaled;
+}
+
+SuspendResult SchedResumeTask(Task* target, u32* prev_count_out)
+{
+    if (target == nullptr)
+    {
+        return SuspendResult::NotFound;
+    }
+    arch::Cli();
+    sync::SpinLockGuard guard(g_sched_lock);
+    if (target->state == TaskState::Dead)
+    {
+        arch::Sti();
+        return SuspendResult::AlreadyDead;
+    }
+    if (prev_count_out != nullptr)
+    {
+        *prev_count_out = target->suspend_count;
+    }
+    if (target->suspend_count == 0)
+    {
+        // Resume on an unsuspended task is a no-op that returns
+        // 0 (matching NT — NtResumeThread on a thread with count
+        // 0 returns 0 and stays 0).
+        arch::Sti();
+        return SuspendResult::Signaled;
+    }
+    --target->suspend_count;
+    if (target->suspend_count == 0)
+    {
+        // Last reference dropped. If the task was parked on
+        // g_suspended, move it back onto the runqueue Ready.
+        // If it's elsewhere (still Sleeping / Blocked on a real
+        // wait queue, because the suspend was applied while it
+        // was sleeping and we never moved it), the natural wake
+        // path already handles it now that suspend_count is 0.
+        if (SuspendedListRemove(target))
+        {
+            target->state = TaskState::Ready;
+            RunqueuePush(target);
+        }
+    }
+    arch::Sti();
+    return SuspendResult::Signaled;
 }
 
 // Walk every list that holds a Task and check two invariants:
@@ -1769,8 +1995,8 @@ Task* WaitQueueWakeOneLocked(WaitQueue* wq)
     t->waiting_on = nullptr;
     t->wake_tick = 0;
     t->wake_by_timeout = false;
-    t->state = TaskState::Ready;
-    RunqueuePush(t);
+    // Suspended waiters get reparked instead of unblocked.
+    RunqueueOrSuspendPush(t);
     --g_tasks_blocked;
     return t;
 }

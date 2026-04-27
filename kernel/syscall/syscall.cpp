@@ -784,6 +784,43 @@ void SyscallDispatch(arch::TrapFrame* frame)
         subsystems::win32::DoThreadCreate(frame);
         return;
 
+    case SYS_THREAD_SUSPEND:
+    case SYS_THREAD_RESUME:
+    {
+        Process* caller = CurrentProcess();
+        if (caller == nullptr)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        const u64 handle = frame->rdi;
+        // v0: only the caller's own thread handles are accepted.
+        // Cross-process thread suspend needs NtOpenThread + a
+        // foreign thread handle table; that's a separate slice.
+        if (handle < Process::kWin32ThreadBase)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        const u64 idx = handle - Process::kWin32ThreadBase;
+        if (idx >= Process::kWin32ThreadCap || !caller->win32_threads[idx].in_use)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        sched::Task* target = caller->win32_threads[idx].task;
+        u32 prev_count = 0;
+        const sched::SuspendResult rc = (num == SYS_THREAD_SUSPEND) ? sched::SchedSuspendTask(target, &prev_count)
+                                                                    : sched::SchedResumeTask(target, &prev_count);
+        if (rc != sched::SuspendResult::Signaled)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        frame->rax = prev_count;
+        return;
+    }
+
     case SYS_NT_INVOKE:
     {
         // Forward to the NT→Linux translator. The handler reads

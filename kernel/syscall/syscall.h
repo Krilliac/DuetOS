@@ -1267,6 +1267,43 @@ enum SyscallNumber : u64
     // the heap starts, a malware probe walking the AS) the
     // page-at-a-time answer is correct, just verbose.
     SYS_PROCESS_VM_QUERY = 134,
+
+    // SYS_THREAD_SUSPEND — increment the target thread's
+    // suspend count. Backs ntdll.dll's NtSuspendThread (and
+    // kernel32.dll's SuspendThread once that DLL is rewritten).
+    //   rdi = thread handle (kWin32ThreadBase + idx in caller's
+    //         own win32_threads[] table — v0 only supports
+    //         caller-local thread handles; cross-process suspend
+    //         needs NtOpenThread which doesn't exist yet).
+    //   rax = previous suspend count on success (a small
+    //         non-negative number) or u64(-1) on any error
+    //         (handle not in caller's table, target dead, etc.).
+    //
+    // No cap-gate today: spawning a thread (kCapSpawnThread) is
+    // already a privileged operation and a process can only
+    // suspend its OWN threads in v0, so the spawn cap is the
+    // implicit gate — a sandboxed process that doesn't have
+    // kCapSpawnThread has no thread handles to suspend in the
+    // first place. When cross-process thread suspend lands
+    // (NtOpenThread + a foreign thread handle table), the cap
+    // gate moves to the OPEN op and this stays cap-free for
+    // the same reason NtSuspendThread is cap-free in NT once
+    // you have the handle.
+    //
+    // Single-CPU correctness: the suspender is the running task
+    // by definition; the target cannot also be running; no IPI
+    // is needed. SMP follow-up will need an IPI to evict a
+    // running-on-another-core target.
+    SYS_THREAD_SUSPEND = 135,
+
+    // SYS_THREAD_RESUME — decrement the target thread's
+    // suspend count. Same arg / return shape as
+    // SYS_THREAD_SUSPEND. A resume that takes the count from
+    // 1 → 0 makes the target eligible to run again (the kernel
+    // pushes it onto the runqueue Ready); a resume that hits
+    // count == 0 is a no-op returning 0. Resume on a thread
+    // with prior count > 1 just decrements without unparking.
+    SYS_THREAD_RESUME = 136,
 };
 
 /// Cap on the byte count a single SYS_PROCESS_VM_READ /

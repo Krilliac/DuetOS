@@ -1028,6 +1028,57 @@ __declspec(dllexport) NTSTATUS NtWriteVirtualMemory(HANDLE ProcessHandle, void* 
  * track per-page protection, so we can't honestly coalesce.
  * STATUS_INVALID_INFO_CLASS for any class != MemoryBasicInformation.
  * ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------
+ * NtSuspendThread / NtResumeThread — bump or decrement a target
+ * thread's suspend count.
+ *
+ * Win32 NT signature:
+ *   NTSTATUS NtSuspendThread(HANDLE ThreadHandle, PULONG PrevCount);
+ *   NTSTATUS NtResumeThread(HANDLE ThreadHandle, PULONG PrevCount);
+ *
+ * Both back onto SYS_THREAD_SUSPEND / SYS_THREAD_RESUME. v0 only
+ * accepts caller-local thread handles (kWin32ThreadBase + idx in
+ * the calling Process's win32_threads[] table — i.e. the same
+ * handles CreateThread returned). Cross-process thread suspend
+ * needs NtOpenThread, which is its own slice.
+ *
+ * Kernel returns rax = previous suspend count (a small non-
+ * negative number) on success or u64(-1) on any error. We map
+ * (-1) to STATUS_INVALID_HANDLE because that's the only error
+ * the kernel surfaces today.
+ * ------------------------------------------------------------------ */
+__declspec(dllexport) NTSTATUS NtSuspendThread(HANDLE ThreadHandle, unsigned long* PreviousSuspendCount)
+{
+    long long rc;
+    /* SYS_THREAD_SUSPEND = 135 */
+    __asm__ volatile("int $0x80" : "=a"(rc) : "a"((long long)135), "D"((long long)ThreadHandle) : "memory");
+    if (rc == -1)
+        return (NTSTATUS)0xC0000008L; /* STATUS_INVALID_HANDLE */
+    if (PreviousSuspendCount != (unsigned long*)0)
+        *PreviousSuspendCount = (unsigned long)rc;
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS NtResumeThread(HANDLE ThreadHandle, unsigned long* PreviousSuspendCount)
+{
+    long long rc;
+    /* SYS_THREAD_RESUME = 136 */
+    __asm__ volatile("int $0x80" : "=a"(rc) : "a"((long long)136), "D"((long long)ThreadHandle) : "memory");
+    if (rc == -1)
+        return (NTSTATUS)0xC0000008L;
+    if (PreviousSuspendCount != (unsigned long*)0)
+        *PreviousSuspendCount = (unsigned long)rc;
+    return NTSTATUS_SUCCESS;
+}
+
+/* NtAlertResumeThread is documented as "resume thread and signal
+ * any pending alert." v0 has no alert/APC machinery, so the
+ * resume part is the entire effect — alias to NtResumeThread. */
+__declspec(dllexport) NTSTATUS NtAlertResumeThread(HANDLE ThreadHandle, unsigned long* PreviousSuspendCount)
+{
+    return NtResumeThread(ThreadHandle, PreviousSuspendCount);
+}
+
 __declspec(dllexport) NTSTATUS NtQueryVirtualMemory(HANDLE ProcessHandle, void* BaseAddress, int MemoryInformationClass,
                                                     void* MemoryInformation, unsigned long long MemoryInformationLength,
                                                     unsigned long long* ReturnLength)

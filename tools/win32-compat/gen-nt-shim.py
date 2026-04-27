@@ -84,6 +84,17 @@ KNOWN_MAPPINGS = {
     "NtReadVirtualMemory":         "SYS_PROCESS_VM_READ",
     "NtWriteVirtualMemory":        "SYS_PROCESS_VM_WRITE",
     "NtQueryVirtualMemory":        "SYS_PROCESS_VM_QUERY",
+
+    # Thread control — caller-local thread handles only in v0
+    # (kWin32ThreadBase + idx, from CreateThread). Cross-process
+    # thread suspend lands with NtOpenThread + a foreign thread
+    # handle table; that's a separate slice. NtAlertResumeThread
+    # aliases to NtResumeThread because v0 has no alert / APC
+    # machinery — the "resume" half is the entire observable
+    # effect of NtAlertResumeThread today.
+    "NtSuspendThread":             "SYS_THREAD_SUSPEND",
+    "NtResumeThread":              "SYS_THREAD_RESUME",
+    "NtAlertResumeThread":         "SYS_THREAD_RESUME",
     # NtCreateKey / NtSetValueKey / NtDeleteKey / NtDeleteValueKey:
     # NotImpl on purpose — registry is read-only in v0. Mapping
     # them to SYS_REGISTRY's read-only Open op would silently lie

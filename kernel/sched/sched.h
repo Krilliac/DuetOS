@@ -314,6 +314,41 @@ const char* KillResultName(KillResult r);
 /// task is woken by something else.
 KillResult SchedKillByPid(u64 pid);
 
+/// Result of a cross-task suspend / resume request. NotFound is
+/// reserved for caller-side handle resolution failures (the
+/// scheduler itself never sees a null target on the success
+/// path); the kernel APIs return Signaled for the typical
+/// "found, count adjusted" case and AlreadyDead when the target
+/// is in the zombie list.
+enum class SuspendResult : u8
+{
+    Signaled = 0,
+    NotFound = 1,
+    AlreadyDead = 2,
+};
+
+/// Increment a target's NT-style suspend count. Returns the
+/// previous count (0 = was running normally) via `prev_count_out`.
+/// Self-suspend bumps the count and lets the caller continue
+/// running — the parking happens at the next yield. For other
+/// targets the suspend is lazy: a Ready task gets re-parked the
+/// next time Schedule() pops it; a Sleeping / Blocked task gets
+/// re-parked at wake time. Target == nullptr returns NotFound.
+///
+/// Single-CPU correctness: the suspender is the running task by
+/// definition, so the target is by construction NOT running, and
+/// no IPI is needed. SMP follow-up will need an IPI to evict a
+/// target running on another core.
+SuspendResult SchedSuspendTask(Task* target, u32* prev_count_out);
+
+/// Decrement a target's suspend count. Returns the previous
+/// count via `prev_count_out`. When the count reaches zero AND
+/// the target was parked on the suspended list, it gets pushed
+/// back onto the runqueue Ready. A resume with prior count == 0
+/// is a no-op (matching NT — NtResumeThread returns 0 and stays
+/// at 0 in that case).
+SuspendResult SchedResumeTask(Task* target, u32* prev_count_out);
+
 /// Start the dead-task reaper kernel thread. Run once after SchedInit +
 /// the keyboard/driver init pass. The reaper sleeps on a WaitQueue;
 /// SchedExit enqueues dead tasks to a zombie list and wakes it. This

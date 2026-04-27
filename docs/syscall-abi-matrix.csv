@@ -508,6 +508,8 @@ native,131,SYS_PROCESS_OPEN,implemented,kernel/syscall/syscall.h::SyscallNumber,
 native,132,SYS_PROCESS_VM_READ,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
 native,133,SYS_PROCESS_VM_WRITE,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
 native,134,SYS_PROCESS_VM_QUERY,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,135,SYS_THREAD_SUSPEND,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,136,SYS_THREAD_RESUME,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
 native,512,native_gapfill_0x200,translated,kernel/subsystems/translation/translate.cpp::NativeClockNs,linux-self:NowNs
 native,513,native_gapfill_0x201,translated,kernel/subsystems/translation/translate.cpp::NativeGetRandom,synthetic:xorshift-from-rdtsc
 native,528,native_gapfill_0x210,translated,kernel/subsystems/translation/translate.cpp::NativeWin32Alloc,win32:HeapAlloc
@@ -594,7 +596,7 @@ nt,78,NtCreateThread,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStubCat
 nt,79,NtIsProcessInJob,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStubCatchAll,STATUS_NOT_IMPLEMENTED
 nt,80,NtProtectVirtualMemory,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStubCatchAll,STATUS_NOT_IMPLEMENTED
 nt,81,NtQuerySection,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStubCatchAll,STATUS_NOT_IMPLEMENTED
-nt,82,NtResumeThread,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStubCatchAll,STATUS_NOT_IMPLEMENTED
+nt,82,NtResumeThread,translated,kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_THREAD_RESUME,routes to native SYS_THREAD_RESUME
 nt,83,NtTerminateThread,translated,kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_NT_INVOKE,routes to native SYS_NT_INVOKE
 nt,84,NtReadRequestData,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStubCatchAll,STATUS_NOT_IMPLEMENTED
 nt,85,NtCreateFile,translated,kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_FILE_OPEN,routes to native SYS_FILE_OPEN
@@ -623,7 +625,7 @@ nt,107,NtAddDriverEntry,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStub
 nt,108,NtAdjustGroupsToken,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStubCatchAll,STATUS_NOT_IMPLEMENTED
 nt,109,NtAdjustTokenClaimsAndDeviceGroups,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStubCatchAll,STATUS_NOT_IMPLEMENTED
 nt,110,NtAlertMultipleThreadByThreadId,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStubCatchAll,STATUS_NOT_IMPLEMENTED
-nt,111,NtAlertResumeThread,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStubCatchAll,STATUS_NOT_IMPLEMENTED
+nt,111,NtAlertResumeThread,translated,kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_THREAD_RESUME,routes to native SYS_THREAD_RESUME
 nt,112,NtAlertThread,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStubCatchAll,STATUS_NOT_IMPLEMENTED
 nt,113,NtAlertThreadByThreadId,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStubCatchAll,STATUS_NOT_IMPLEMENTED
 nt,114,NtAlertThreadByThreadIdEx,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStubCatchAll,STATUS_NOT_IMPLEMENTED
@@ -975,7 +977,7 @@ nt,459,NtStopProfile,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStubCat
 nt,460,NtSubmitIoRing,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStubCatchAll,STATUS_NOT_IMPLEMENTED
 nt,461,NtSubscribeWnfStateChange,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStubCatchAll,STATUS_NOT_IMPLEMENTED
 nt,462,NtSuspendProcess,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStubCatchAll,STATUS_NOT_IMPLEMENTED
-nt,463,NtSuspendThread,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStubCatchAll,STATUS_NOT_IMPLEMENTED
+nt,463,NtSuspendThread,translated,kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_THREAD_SUSPEND,routes to native SYS_THREAD_SUSPEND
 nt,464,NtSystemDebugControl,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStubCatchAll,STATUS_NOT_IMPLEMENTED
 nt,465,NtTerminateEnclave,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStubCatchAll,STATUS_NOT_IMPLEMENTED
 nt,466,NtTerminateJobObject,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStubCatchAll,STATUS_NOT_IMPLEMENTED

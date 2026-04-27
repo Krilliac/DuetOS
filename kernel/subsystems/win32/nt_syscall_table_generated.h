@@ -8,7 +8,7 @@
 // Target Windows version: Windows 11 and Server (11 25H2)
 // Bedrock NT calls (present in every Windows XP→Win11 25H2): 292
 // All known NT calls on the target version: 489
-// DuetOS coverage: 30/292 = 10%
+// DuetOS coverage: 33/292 = 11%
 //
 // See tools/win32-compat/README.md for the legal + design rationale.
 
@@ -120,7 +120,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
     {"NtIsProcessInJob", 0x004f, kSysNtNotImpl},
     {"NtProtectVirtualMemory", 0x0050, kSysNtNotImpl},
     {"NtQuerySection", 0x0051, kSysNtNotImpl},
-    {"NtResumeThread", 0x0052, kSysNtNotImpl},
+    {"NtResumeThread", 0x0052, static_cast<u32>(::duetos::core::SYS_THREAD_RESUME)},
     {"NtTerminateThread", 0x0053, static_cast<u32>(::duetos::core::SYS_NT_INVOKE)},
     {"NtReadRequestData", 0x0054, kSysNtNotImpl},
     {"NtCreateFile", 0x0055, static_cast<u32>(::duetos::core::SYS_FILE_OPEN)},
@@ -144,7 +144,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
     {"NtAddBootEntry", 0x006a, kSysNtNotImpl},
     {"NtAddDriverEntry", 0x006b, kSysNtNotImpl},
     {"NtAdjustGroupsToken", 0x006c, kSysNtNotImpl},
-    {"NtAlertResumeThread", 0x006f, kSysNtNotImpl},
+    {"NtAlertResumeThread", 0x006f, static_cast<u32>(::duetos::core::SYS_THREAD_RESUME)},
     {"NtAlertThread", 0x0070, kSysNtNotImpl},
     {"NtAllocateLocallyUniqueId", 0x0073, kSysNtNotImpl},
     {"NtAllocateUserPhysicalPages", 0x0075, kSysNtNotImpl},
@@ -315,7 +315,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
     {"NtStartProfile", 0x01ca, kSysNtNotImpl},
     {"NtStopProfile", 0x01cb, kSysNtNotImpl},
     {"NtSuspendProcess", 0x01ce, kSysNtNotImpl},
-    {"NtSuspendThread", 0x01cf, kSysNtNotImpl},
+    {"NtSuspendThread", 0x01cf, static_cast<u32>(::duetos::core::SYS_THREAD_SUSPEND)},
     {"NtSystemDebugControl", 0x01d0, kSysNtNotImpl},
     {"NtTerminateJobObject", 0x01d2, kSysNtNotImpl},
     {"NtTestAlert", 0x01d3, kSysNtNotImpl},
@@ -336,7 +336,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
 inline constexpr u32 kBedrockNtSyscallCount =
     sizeof(kBedrockNtSyscalls) / sizeof(kBedrockNtSyscalls[0]);
 
-inline constexpr u32 kBedrockNtSyscallsCovered = 30;
+inline constexpr u32 kBedrockNtSyscallsCovered = 33;
 
 /// Every NT syscall known on the target Windows version — superset
 /// of `kBedrockNtSyscalls`. Includes version-specific additions
@@ -427,7 +427,7 @@ inline constexpr NtSyscallMapping kAllNtSyscalls[] = {
     {"NtIsProcessInJob", 0x004f, kSysNtNotImpl},
     {"NtProtectVirtualMemory", 0x0050, kSysNtNotImpl},
     {"NtQuerySection", 0x0051, kSysNtNotImpl},
-    {"NtResumeThread", 0x0052, kSysNtNotImpl},
+    {"NtResumeThread", 0x0052, static_cast<u32>(::duetos::core::SYS_THREAD_RESUME)},
     {"NtTerminateThread", 0x0053, static_cast<u32>(::duetos::core::SYS_NT_INVOKE)},
     {"NtReadRequestData", 0x0054, kSysNtNotImpl},
     {"NtCreateFile", 0x0055, static_cast<u32>(::duetos::core::SYS_FILE_OPEN)},
@@ -456,7 +456,7 @@ inline constexpr NtSyscallMapping kAllNtSyscalls[] = {
     {"NtAdjustGroupsToken", 0x006c, kSysNtNotImpl},
     {"NtAdjustTokenClaimsAndDeviceGroups", 0x006d, kSysNtNotImpl},
     {"NtAlertMultipleThreadByThreadId", 0x006e, kSysNtNotImpl},
-    {"NtAlertResumeThread", 0x006f, kSysNtNotImpl},
+    {"NtAlertResumeThread", 0x006f, static_cast<u32>(::duetos::core::SYS_THREAD_RESUME)},
     {"NtAlertThread", 0x0070, kSysNtNotImpl},
     {"NtAlertThreadByThreadId", 0x0071, kSysNtNotImpl},
     {"NtAlertThreadByThreadIdEx", 0x0072, kSysNtNotImpl},
@@ -808,7 +808,7 @@ inline constexpr NtSyscallMapping kAllNtSyscalls[] = {
     {"NtSubmitIoRing", 0x01cc, kSysNtNotImpl},
     {"NtSubscribeWnfStateChange", 0x01cd, kSysNtNotImpl},
     {"NtSuspendProcess", 0x01ce, kSysNtNotImpl},
-    {"NtSuspendThread", 0x01cf, kSysNtNotImpl},
+    {"NtSuspendThread", 0x01cf, static_cast<u32>(::duetos::core::SYS_THREAD_SUSPEND)},
     {"NtSystemDebugControl", 0x01d0, kSysNtNotImpl},
     {"NtTerminateEnclave", 0x01d1, kSysNtNotImpl},
     {"NtTerminateJobObject", 0x01d2, kSysNtNotImpl},
