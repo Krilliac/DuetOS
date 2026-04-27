@@ -6,11 +6,12 @@
 
 | Commit | Effect |
 |--------|--------|
-| _(none yet — this entry created on 2026-04-27)_ | |
+| _A1-infra_ (this commit) | `kernel/core/init.{h,cpp}` registry: `Phase` enum (13 phases), `InitcallRegister`, `RunPhase`, `InitSelfTest` (3 phases × 1 callback + bad-arg + failing-callback paths). Self-test wired into `kernel_main` after `FaultDomainSelfTest`. `KERNEL_INITCALL` macro deferred until `_init_array` is invoked at boot — registration is by direct call today. Imperative `kernel_main` body NOT migrated; see plan A1 follow-up. |
 
 ### Deferred (in priority order — see "Recommended ordering" below)
 
-- [ ] A1 — `kernel/core/init.{h,cpp}` with `KERNEL_INITCALL`, formal phase enum
+- [ ] A1-followup — Migrate `kernel_main` call sites to `RunPhase(...)` (incremental, site-by-site)
+- [ ] A1-followup — Wire `_init_array` invocation at boot so `KERNEL_INITCALL` macro can use static-ctor registration
 - [ ] A4 — Centralized syscall capability gate (`kSyscallCapTable`)
 - [ ] C2 — Heap red zones, freed-page poison, slab freed-object poison
 - [ ] B1 — Sync ladder (Mutex → RwLock → SeqLock → RCU-lite)

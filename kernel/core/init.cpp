@@ -1,0 +1,244 @@
+/*
+ * DuetOS — kernel init registry, v0 (plan A1).
+ *
+ * See `init.h` for the public contract. This TU owns the fixed-size
+ * registry, the per-phase dispatcher, and the boot self-test.
+ *
+ * The registry is a single linear array indexed by registration
+ * order. `RunPhase(p)` walks it in order, picking out rows whose
+ * `phase == p`. With `kMaxInitcalls = 64` and ~13 phases, the
+ * O(N*P) cost is irrelevant (boot is one-shot) and the data layout
+ * stays trivially debuggable: a single dump prints the boot map.
+ */
+
+#include "core/init.h"
+
+#include "arch/x86_64/serial.h"
+#include "core/panic.h"
+#include "log/klog.h"
+#include "util/result.h"
+#include "util/types.h"
+
+namespace duetos::core
+{
+
+namespace
+{
+
+InitcallRecord g_initcalls[kMaxInitcalls];
+u32 g_initcall_count = 0;
+
+bool PhaseInRange(Phase phase)
+{
+    return static_cast<u32>(phase) < static_cast<u32>(Phase::kPhaseCount);
+}
+
+const char* kPhaseNames[static_cast<u32>(Phase::kPhaseCount)] = {
+    "earlycon",  "physmem", "paging", "heap",    "idt", "apic",     "time",
+    "percpubsp", "sched",   "smp",    "drivers", "vfs", "userland",
+};
+
+} // namespace
+
+const char* PhaseName(Phase phase)
+{
+    if (!PhaseInRange(phase))
+    {
+        return "?";
+    }
+    return kPhaseNames[static_cast<u32>(phase)];
+}
+
+Result<void> InitcallRegister(Phase phase, const char* name, InitcallFn fn)
+{
+    if (name == nullptr || fn == nullptr)
+    {
+        return Err{ErrorCode::InvalidArgument};
+    }
+    if (!PhaseInRange(phase))
+    {
+        return Err{ErrorCode::InvalidArgument};
+    }
+    if (g_initcall_count >= kMaxInitcalls)
+    {
+        return Err{ErrorCode::OutOfMemory};
+    }
+
+    InitcallRecord& rec = g_initcalls[g_initcall_count++];
+    rec.phase = phase;
+    rec.name = name;
+    rec.fn = fn;
+    rec.invoke_count = 0;
+    rec.last_run_ticks = 0;
+    rec.ran_ok = false;
+    return {};
+}
+
+u32 InitcallCount()
+{
+    return g_initcall_count;
+}
+
+u32 InitcallCountForPhase(Phase phase)
+{
+    if (!PhaseInRange(phase))
+    {
+        return 0;
+    }
+    u32 count = 0;
+    for (u32 i = 0; i < g_initcall_count; ++i)
+    {
+        if (g_initcalls[i].phase == phase)
+        {
+            ++count;
+        }
+    }
+    return count;
+}
+
+const InitcallRecord* InitcallGet(u32 index)
+{
+    if (index >= g_initcall_count)
+    {
+        return nullptr;
+    }
+    return &g_initcalls[index];
+}
+
+Result<void> RunPhase(Phase phase)
+{
+    if (!PhaseInRange(phase))
+    {
+        return Err{ErrorCode::InvalidArgument};
+    }
+
+    KLOG_INFO_2V("init", "RunPhase begin", "phase", static_cast<u64>(phase), "callbacks",
+                 static_cast<u64>(InitcallCountForPhase(phase)));
+
+    for (u32 i = 0; i < g_initcall_count; ++i)
+    {
+        InitcallRecord& rec = g_initcalls[i];
+        if (rec.phase != phase)
+        {
+            continue;
+        }
+
+        KLOG_INFO_S("init", "invoke", "name", rec.name);
+        Result<void> r = rec.fn();
+        ++rec.invoke_count;
+        rec.ran_ok = r.has_value();
+
+        if (!rec.ran_ok)
+        {
+            KLOG_ERROR_V("init", "callback failed", static_cast<u64>(r.error()));
+            return r;
+        }
+    }
+    return {};
+}
+
+namespace
+{
+
+// Self-test scratch counters. File-static so the test functions can
+// be free InitcallFns (matching the real registration shape) without
+// needing a context pointer.
+u32 g_st_a_calls = 0;
+u32 g_st_b_calls = 0;
+u32 g_st_c_calls = 0;
+u32 g_st_order_seq = 0;
+u32 g_st_a_seq = 0;
+u32 g_st_b_seq = 0;
+u32 g_st_c_seq = 0;
+
+Result<void> SelfTestA()
+{
+    g_st_a_seq = ++g_st_order_seq;
+    ++g_st_a_calls;
+    return {};
+}
+
+Result<void> SelfTestB()
+{
+    g_st_b_seq = ++g_st_order_seq;
+    ++g_st_b_calls;
+    return {};
+}
+
+Result<void> SelfTestC()
+{
+    g_st_c_seq = ++g_st_order_seq;
+    ++g_st_c_calls;
+    return {};
+}
+
+Result<void> SelfTestFailing()
+{
+    return Err{ErrorCode::Unknown};
+}
+
+} // namespace
+
+void InitSelfTest()
+{
+    arch::SerialWrite("[init] self-test: registering 3 callbacks across 3 phases.\n");
+
+    const u32 baseline_count = g_initcall_count;
+
+    auto must_ok = [](const Result<void>& r, const char* what)
+    {
+        if (!r.has_value())
+        {
+            Panic("init self-test", what);
+        }
+    };
+
+    must_ok(InitcallRegister(Phase::Earlycon, "init.selftest.a", SelfTestA), "register A");
+    must_ok(InitcallRegister(Phase::Heap, "init.selftest.b", SelfTestB), "register B");
+    must_ok(InitcallRegister(Phase::Drivers, "init.selftest.c", SelfTestC), "register C");
+
+    if (g_initcall_count != baseline_count + 3)
+    {
+        Panic("init self-test", "registry count mismatch after 3 registers");
+    }
+
+    if (InitcallCountForPhase(Phase::Heap) < 1)
+    {
+        Panic("init self-test", "phase counter not seeing registered Heap row");
+    }
+
+    must_ok(RunPhase(Phase::Earlycon), "RunPhase Earlycon");
+    must_ok(RunPhase(Phase::Heap), "RunPhase Heap");
+    must_ok(RunPhase(Phase::Drivers), "RunPhase Drivers");
+
+    if (g_st_a_calls != 1 || g_st_b_calls != 1 || g_st_c_calls != 1)
+    {
+        Panic("init self-test", "callback invocation counts wrong");
+    }
+
+    if (!(g_st_a_seq < g_st_b_seq && g_st_b_seq < g_st_c_seq))
+    {
+        Panic("init self-test", "phase order not preserved (A < B < C expected)");
+    }
+
+    // Negative path 1: bad arguments.
+    Result<void> r_bad_name = InitcallRegister(Phase::Heap, nullptr, SelfTestA);
+    Result<void> r_bad_fn = InitcallRegister(Phase::Heap, "x", nullptr);
+    Result<void> r_bad_phase = InitcallRegister(static_cast<Phase>(99), "x", SelfTestA);
+    if (r_bad_name.has_value() || r_bad_fn.has_value() || r_bad_phase.has_value())
+    {
+        Panic("init self-test", "InitcallRegister accepted bad arguments");
+    }
+
+    // Negative path 2: a failing callback halts the phase and surfaces the error.
+    must_ok(InitcallRegister(Phase::Userland, "init.selftest.fail", SelfTestFailing), "register failing");
+    Result<void> r_fail = RunPhase(Phase::Userland);
+    if (r_fail.has_value())
+    {
+        Panic("init self-test", "RunPhase returned Ok despite failing callback");
+    }
+
+    arch::SerialWrite("[init] self-test: 3 phases x 1 callback ran in order; failure path surfaces error. OK.\n");
+}
+
+} // namespace duetos::core

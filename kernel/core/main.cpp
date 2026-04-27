@@ -114,6 +114,7 @@
 #include "diag/heartbeat.h"
 #include "log/klog.h"
 #include "security/login.h"
+#include "core/init.h"
 #include "core/panic.h"
 #include "proc/process.h"
 #include "util/random.h"
@@ -373,6 +374,13 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // restarts it twice, checks counters. Real driver domains are
     // registered later in boot once their subsystems are up.
     duetos::core::FaultDomainSelfTest();
+
+    // Init-call registry self-test (plan A1). Exercises register +
+    // RunPhase + bad-argument + failing-callback paths against the
+    // fixed-size table in `core/init.cpp`. The infrastructure is
+    // landed; migration of `kernel_main`'s imperative call list to
+    // the registry is deferred (see plan A1 follow-up).
+    duetos::core::InitSelfTest();
 
     SerialWrite("[boot] Parsing Multiboot2 memory map.\n");
     FrameAllocatorInit(multiboot_info);
