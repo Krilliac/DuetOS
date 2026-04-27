@@ -107,6 +107,7 @@
 #include "mm/frame_allocator.h"
 #include "ipc/handle_table.h"
 #include "ipc/kobject.h"
+#include "sync/lockdep.h"
 #include "sync/rwlock.h"
 #include "sync/spinlock.h"
 #include "time/clocksource.h"
@@ -1048,6 +1049,13 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     duetos::subsystems::linux::SyscallInit();
 
     duetos::sync::SpinLockSelfTest();
+
+    // Lockdep-lite (plan D1 infra). Validates that the
+    // edge-graph + held-stack + cycle detection works in
+    // isolation; SpinLock / Mutex / RwLock are NOT yet hooked
+    // into it (deferred to D1 follow-ups). Runs early because
+    // it has no dependencies past arch::Cli/Sti.
+    duetos::sync::LockdepSelfTest();
 
     SerialWrite("[boot] Bringing up periodic timer.\n");
     TimerInit();
