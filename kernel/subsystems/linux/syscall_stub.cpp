@@ -236,16 +236,11 @@ i64 DoSyncfs(u64 fd)
     return 0;
 }
 
-// rename(old, new) / link(old, new) / symlink(target, linkpath):
-// no rename / link primitive in fat32 v0. -ENOSYS tells musl
-// "this operation is not available on this kernel" — clearer
-// than an -EPERM "you're not allowed" lie.
-i64 DoRename(u64 old_path, u64 new_path)
-{
-    (void)old_path;
-    (void)new_path;
-    return kENOSYS;
-}
+// DoRename moved to syscall_fs_mut.cpp (now wires through to
+// fat32 Fat32RenameAtPath via the §11.9 mutation primitives).
+//
+// link / symlink stay -ENOSYS — fat32 has no hardlink concept
+// and v0 has no symlink storage. Sub-GAPs in §11.9.
 i64 DoLink(u64 old_path, u64 new_path)
 {
     (void)old_path;

@@ -199,6 +199,23 @@ PhysAddr AddressSpaceProbePte(const AddressSpace* as, u64 virt);
 /// `as` is the active AS.
 bool AddressSpaceUnmapBorrowedPage(AddressSpace* as, u64 virt);
 
+/// Rewrite the leaf-PTE flag bits at `virt` in `as` to
+/// `new_flags` (the same bit set MapUserPage / MapBorrowedPage
+/// take — kPagePresent | kPageUser | kPageWritable | kPageNoExecute
+/// in any combination, with the same W^X invariant). Preserves
+/// the backing frame; only the protection bits change. Returns
+/// true if the page was present and the PTE was rewritten,
+/// false if `virt` is unmapped (no PTE to mutate).
+///
+/// TLB invalidation is emitted on the active CPU only when
+/// `as` is the active AS — same contract as MapUserPage.
+///
+/// Panics on the same invariants MapUserPage enforces:
+/// unaligned `virt`, `virt` outside the canonical low half,
+/// W^X violation, kPageGlobal set on a user page, kPageUser
+/// missing.
+bool AddressSpaceProtectUserPage(AddressSpace* as, u64 virt, u64 new_flags);
+
 /// Reverse of MapUserPage: given a user VA, return the physical
 /// frame backing its containing page, or kNullFrame if unmapped.
 /// Walks the AS's `regions` array (small N, linear scan). Used

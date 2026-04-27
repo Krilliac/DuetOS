@@ -197,6 +197,28 @@ i64 DoMkdirat(i64 dirfd, u64 user_path, u64 mode)
     return DoMkdir(user_path, mode);
 }
 
+// rename(old, new): rename a regular file. Wires through to
+// Fat32RenameAtPath (§11.9): copy-then-delete via a 64 KiB
+// kernel-heap bounce buffer. Same sub-GAPs apply (non-atomic,
+// 64 KiB cap, refuses overwrite, regular files only).
+i64 DoRename(u64 user_old, u64 user_new)
+{
+    char old_buf[64];
+    char new_buf[64];
+    const char* old_leaf = nullptr;
+    const char* new_leaf = nullptr;
+    if (!CopyAndStripFatPath(user_old, old_buf, old_leaf))
+        return kEFAULT;
+    if (!CopyAndStripFatPath(user_new, new_buf, new_leaf))
+        return kEFAULT;
+    const auto* v = fs::fat32::Fat32Volume(0);
+    if (v == nullptr)
+        return kENOENT;
+    if (!fs::fat32::Fat32RenameAtPath(v, old_leaf, new_leaf))
+        return kEIO;
+    return 0;
+}
+
 // unlinkat(dirfd, path, flags): flags & AT_REMOVEDIR -> rmdir.
 i64 DoUnlinkat(i64 dirfd, u64 user_path, u64 flags)
 {

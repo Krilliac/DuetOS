@@ -1445,6 +1445,31 @@ enum SyscallNumber : u64
     SYS_PROCESS_TERMINATE = 145,
     SYS_THREAD_TERMINATE = 146,
     SYS_PROCESS_QUERY_INFO = 147,
+
+    // Per-process VM management (NtAllocate / NtFree /
+    // NtProtectVirtualMemory).
+    //   SYS_VM_ALLOCATE — rdi = ProcessHandle (-1 = self),
+    //                     rsi = base_addr (0 = pick any aligned),
+    //                     rdx = size in bytes (rounded up to a
+    //                     page),
+    //                     r10 = AllocationType (MEM_COMMIT |
+    //                     MEM_RESERVE; v0 treats both as "commit"),
+    //                     r8  = protect flags (PAGE_*; W^X is
+    //                     silently enforced — RWX downgrades to
+    //                     RW), r9 = user u64* base out (set on
+    //                     success).
+    //                     rax = NTSTATUS.
+    //   SYS_VM_FREE     — rdi = ProcessHandle, rsi = base_addr,
+    //                     rdx = size, r10 = FreeType (MEM_RELEASE
+    //                     ignored; v0 always releases). rax =
+    //                     NTSTATUS.
+    //   SYS_VM_PROTECT  — rdi = ProcessHandle, rsi = base_addr,
+    //                     rdx = size, r10 = new protect flags,
+    //                     r8  = user u32* old protect (out).
+    //                     rax = NTSTATUS.
+    SYS_VM_ALLOCATE = 148,
+    SYS_VM_FREE = 149,
+    SYS_VM_PROTECT = 150,
 };
 
 // Win32 CONTEXT — first 0x100 bytes (integer + control + the

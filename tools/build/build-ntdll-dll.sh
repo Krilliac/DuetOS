@@ -108,6 +108,12 @@ set +e
     /export:ZwFlushKey=NtFlushKey \
     /export:NtQueryInformationProcess \
     /export:ZwQueryInformationProcess=NtQueryInformationProcess \
+    /export:ZwAllocateVirtualMemory=NtAllocateVirtualMemory \
+    /export:ZwFreeVirtualMemory=NtFreeVirtualMemory \
+    /export:NtProtectVirtualMemory \
+    /export:ZwProtectVirtualMemory=NtProtectVirtualMemory \
+    /export:NtCreateThreadEx \
+    /export:ZwCreateThreadEx=NtCreateThreadEx \
     /export:NtContinue \
     /export:ZwContinue=NtContinue \
     /export:NtAllocateVirtualMemory \

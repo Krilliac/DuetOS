@@ -195,40 +195,93 @@ __declspec(dllexport) NTDLL_NORETURN NTSTATUS NtContinue(void* context, BOOL bTe
     __builtin_unreachable();
 }
 
-/* NtAllocateVirtualMemory — read *RegionSize, hand to SYS_VMAP,
- * write result into *BaseAddress; echo size back. Matches the
- * flat-stub semantics at kOffNtAllocateVirtualMemory. */
+/* NtAllocateVirtualMemory — honours hProcess (NtCurrentProcess()
+ * = -1 for self; foreign Win32 process handle gated on
+ * kCapDebug). Routes through SYS_VM_ALLOCATE = 148 which lands
+ * a fresh user-VA range with the requested protection (W^X
+ * silently downgrades RWX to RW + NX).
+ *
+ * Args (rdi=op-handle, rsi=hint, rdx=size, r10=type, r8=protect, r9=&out_base). */
 __declspec(dllexport) NTSTATUS NtAllocateVirtualMemory(HANDLE hProcess, void** BaseAddress, SIZE_T ZeroBits,
                                                        SIZE_T* RegionSize, ULONG AllocationType, ULONG Protect)
 {
-    (void)hProcess;
     (void)ZeroBits;
-    (void)AllocationType;
-    (void)Protect;
     if (RegionSize == (SIZE_T*)0 || BaseAddress == (void**)0)
         return NTSTATUS_INVALID_PARAMETER;
+    long long hint = (long long)*BaseAddress;
     long long sz = (long long)*RegionSize;
-    long long rv;
-    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)28), "D"(sz) : "memory");
-    if (rv == 0)
-        return NTSTATUS_NO_MEMORY;
-    *BaseAddress = (void*)rv;
-    /* *RegionSize stays unchanged — v0 honours exactly what was asked. */
+    long long out_base = 0;
+    long long status;
+    __asm__ volatile("mov %4, %%r10\n\t"
+                     "mov %5, %%r8\n\t"
+                     "mov %6, %%r9\n\t"
+                     "int $0x80"
+                     : "=a"(status)
+                     : "a"((long long)148), "D"((long long)hProcess), "S"(hint), "d"(sz),
+                       "r"((long long)AllocationType), "r"((long long)Protect), "r"((long long)&out_base)
+                     : "r10", "r8", "r9", "memory");
+    if (status != 0)
+        return (NTSTATUS)status;
+    *BaseAddress = (void*)out_base;
+    /* *RegionSize stays as-passed — v0 honours exactly what was
+     * asked, page-aligned upward inside the kernel. */
     return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS ZwAllocateVirtualMemory(HANDLE hProcess, void** BaseAddress, SIZE_T ZeroBits,
+                                                       SIZE_T* RegionSize, ULONG AllocationType, ULONG Protect)
+{
+    return NtAllocateVirtualMemory(hProcess, BaseAddress, ZeroBits, RegionSize, AllocationType, Protect);
 }
 
 __declspec(dllexport) NTSTATUS NtFreeVirtualMemory(HANDLE hProcess, void** BaseAddress, SIZE_T* RegionSize,
                                                    ULONG FreeType)
 {
-    (void)hProcess;
-    (void)FreeType;
     if (BaseAddress == (void**)0 || RegionSize == (SIZE_T*)0)
         return NTSTATUS_INVALID_PARAMETER;
     long long va = (long long)*BaseAddress;
     long long sz = (long long)*RegionSize;
-    long long rv;
-    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)29), "D"(va), "S"(sz) : "memory");
-    return rv == 0 ? NTSTATUS_SUCCESS : NTSTATUS_INVALID_PARAMETER;
+    long long status;
+    __asm__ volatile("mov %4, %%r10\n\t"
+                     "int $0x80"
+                     : "=a"(status)
+                     : "a"((long long)149), "D"((long long)hProcess), "S"(va), "d"(sz), "r"((long long)FreeType)
+                     : "r10", "memory");
+    return (NTSTATUS)status;
+}
+
+__declspec(dllexport) NTSTATUS ZwFreeVirtualMemory(HANDLE hProcess, void** BaseAddress, SIZE_T* RegionSize,
+                                                   ULONG FreeType)
+{
+    return NtFreeVirtualMemory(hProcess, BaseAddress, RegionSize, FreeType);
+}
+
+/* NtProtectVirtualMemory — change page protection on an
+ * already-mapped range. v0 honours self + foreign (cap-gated).
+ * The kernel-side handler walks pages in the range and calls
+ * AddressSpaceProtectUserPage on each; W^X is enforced. */
+__declspec(dllexport) NTSTATUS NtProtectVirtualMemory(HANDLE hProcess, void** BaseAddress, SIZE_T* RegionSize,
+                                                      ULONG NewProtect, ULONG* OldProtect)
+{
+    if (BaseAddress == (void**)0 || RegionSize == (SIZE_T*)0)
+        return NTSTATUS_INVALID_PARAMETER;
+    long long va = (long long)*BaseAddress;
+    long long sz = (long long)*RegionSize;
+    long long status;
+    __asm__ volatile("mov %4, %%r10\n\t"
+                     "mov %5, %%r8\n\t"
+                     "int $0x80"
+                     : "=a"(status)
+                     : "a"((long long)150), "D"((long long)hProcess), "S"(va), "d"(sz), "r"((long long)NewProtect),
+                       "r"((long long)OldProtect)
+                     : "r10", "r8", "memory");
+    return (NTSTATUS)status;
+}
+
+__declspec(dllexport) NTSTATUS ZwProtectVirtualMemory(HANDLE hProcess, void** BaseAddress, SIZE_T* RegionSize,
+                                                      ULONG NewProtect, ULONG* OldProtect)
+{
+    return NtProtectVirtualMemory(hProcess, BaseAddress, RegionSize, NewProtect, OldProtect);
 }
 
 __declspec(dllexport) NTSTATUS NtSetEvent(HANDLE h, long* previous_state)
@@ -1584,6 +1637,68 @@ __declspec(dllexport) NTSTATUS NtFlushKey(HANDLE KeyHandle)
                      : "a"((long long)130), "D"((long long)6), "S"((long long)KeyHandle)
                      : "memory");
     return (NTSTATUS)status;
+}
+
+/* ------------------------------------------------------------------
+ * NtCreateThreadEx — same-process thread create.
+ *
+ * Win32 NT signature:
+ *   NTSTATUS NtCreateThreadEx(
+ *     PHANDLE     ThreadHandle,
+ *     ACCESS_MASK DesiredAccess,
+ *     POBJECT_ATTRIBUTES ObjectAttributes,
+ *     HANDLE      ProcessHandle,
+ *     PVOID       StartRoutine,
+ *     PVOID       Argument,
+ *     ULONG       CreateFlags,
+ *     ULONG_PTR   ZeroBits,
+ *     SIZE_T      StackSize,
+ *     SIZE_T      MaximumStackSize,
+ *     PPS_ATTRIBUTE_LIST AttributeList);
+ *
+ * v0 honours ProcessHandle == NtCurrentProcess() (-1) only —
+ * cross-process thread injection (the substrate of process
+ * hollowing's kick-off path) needs cross-AS handle plumbing
+ * we don't have on the SYS_THREAD_CREATE side yet. CreateFlags
+ * other than 0 (no CREATE_SUSPENDED yet — needs an extra
+ * arg to SchedCreateUser to start the task pre-suspended)
+ * return NOT_IMPLEMENTED.
+ * ------------------------------------------------------------------ */
+__declspec(dllexport) NTSTATUS NtCreateThreadEx(HANDLE* ThreadHandle, ULONG DesiredAccess, void* ObjectAttributes,
+                                                HANDLE hProcess, void* StartRoutine, void* Argument, ULONG CreateFlags,
+                                                SIZE_T ZeroBits, SIZE_T StackSize, SIZE_T MaximumStackSize,
+                                                void* AttributeList)
+{
+    (void)DesiredAccess;
+    (void)ObjectAttributes;
+    (void)ZeroBits;
+    (void)StackSize;
+    (void)MaximumStackSize;
+    (void)AttributeList;
+    if (hProcess != (HANDLE)-1)
+        return NTSTATUS_NOT_IMPLEMENTED;
+    if (CreateFlags != 0)
+        return NTSTATUS_NOT_IMPLEMENTED;
+    long long handle;
+    /* SYS_THREAD_CREATE = 45. Args: rdi = start RIP, rsi = param. */
+    __asm__ volatile("int $0x80"
+                     : "=a"(handle)
+                     : "a"((long long)45), "D"((long long)StartRoutine), "S"((long long)Argument)
+                     : "memory");
+    if (handle < 0)
+        return NTSTATUS_NO_MEMORY;
+    if (ThreadHandle != (HANDLE*)0)
+        *ThreadHandle = (HANDLE)handle;
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS ZwCreateThreadEx(HANDLE* ThreadHandle, ULONG DesiredAccess, void* ObjectAttributes,
+                                                HANDLE hProcess, void* StartRoutine, void* Argument, ULONG CreateFlags,
+                                                SIZE_T ZeroBits, SIZE_T StackSize, SIZE_T MaximumStackSize,
+                                                void* AttributeList)
+{
+    return NtCreateThreadEx(ThreadHandle, DesiredAccess, ObjectAttributes, hProcess, StartRoutine, Argument,
+                            CreateFlags, ZeroBits, StackSize, MaximumStackSize, AttributeList);
 }
 
 /* ------------------------------------------------------------------

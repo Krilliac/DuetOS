@@ -484,6 +484,32 @@ PhysAddr AddressSpaceProbePte(const AddressSpace* as, u64 virt)
     return *pte & kAddrMask;
 }
 
+bool AddressSpaceProtectUserPage(AddressSpace* as, u64 virt, u64 new_flags)
+{
+    if (as == nullptr)
+        return false;
+    if ((virt & 0xFFF) != 0)
+        PanicAs("AddressSpaceProtectUserPage: unaligned virt", virt);
+    constexpr u64 kUserMax = 0x00007FFFFFFFFFFFULL;
+    if (virt > kUserMax)
+        PanicAs("AddressSpaceProtectUserPage: virt outside canonical low half", virt);
+    if ((new_flags & kPageUser) == 0)
+        PanicAs("AddressSpaceProtectUserPage: flags missing kPageUser", new_flags);
+    if ((new_flags & kPageWritable) != 0 && (new_flags & kPageNoExecute) == 0)
+        PanicAs("AddressSpaceProtectUserPage: W^X violation", new_flags);
+    if ((new_flags & kPageGlobal) != 0)
+        PanicAs("AddressSpaceProtectUserPage: kPageGlobal on user page", new_flags);
+
+    u64* pte = WalkToPteIn(as->pml4_virt, virt, /*create=*/false);
+    if (pte == nullptr || (*pte & kPagePresent) == 0)
+        return false;
+    const u64 frame = *pte & kAddrMask;
+    *pte = frame | (new_flags | kPagePresent);
+    if (AddressSpaceCurrent() == as)
+        Invlpg(virt);
+    return true;
+}
+
 bool AddressSpaceUnmapBorrowedPage(AddressSpace* as, u64 virt)
 {
     if (as == nullptr)

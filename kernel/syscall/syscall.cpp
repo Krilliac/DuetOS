@@ -946,6 +946,209 @@ void SyscallDispatch(arch::TrapFrame* frame)
         return;
     }
 
+    case SYS_VM_ALLOCATE:
+    {
+        // NtAllocateVirtualMemory(handle, *base, *size, type, protect, *out_base).
+        // Self path needs no cap; foreign requires kCapDebug.
+        Process* caller = CurrentProcess();
+        if (caller == nullptr)
+        {
+            frame->rax = kStatusInvalidHandle;
+            return;
+        }
+        const u64 handle = frame->rdi;
+        const u64 hint_va = frame->rsi;
+        const u64 size = frame->rdx;
+        const u32 protect = static_cast<u32>(frame->r8);
+        const u64 user_out = frame->r9;
+        if (size == 0 || size > 0x40000000ULL /* 1 GiB cap */)
+        {
+            frame->rax = kStatusInvalidParameter;
+            return;
+        }
+        constexpr u64 kCurrentProcess = static_cast<u64>(-1);
+        Process* target = caller;
+        if (handle != kCurrentProcess)
+        {
+            if (!CapSetHas(caller->caps, kCapDebug))
+            {
+                RecordSandboxDenial(kCapDebug);
+                frame->rax = kStatusAccessDenied;
+                return;
+            }
+            target = LookupProcessHandle(caller, handle);
+            if (target == nullptr)
+            {
+                frame->rax = kStatusInvalidHandle;
+                return;
+            }
+        }
+        // Translate PAGE_* protect to AS PTE flags. W^X is silently
+        // enforced — RWX/EXECUTE_WRITECOPY downgrade to RW + NX.
+        u64 pte_flags = mm::kPageUser | mm::kPageNoExecute;
+        switch (protect & 0xFF)
+        {
+        case 0x01: // PAGE_NOACCESS — best effort: RO + NX
+        case 0x02: // PAGE_READONLY
+            break;
+        case 0x04: // PAGE_READWRITE
+        case 0x08: // PAGE_WRITECOPY (no COW; treat as RW)
+        case 0x40: // PAGE_EXECUTE_READWRITE — W^X downgrade
+        case 0x80: // PAGE_EXECUTE_WRITECOPY — same
+            pte_flags |= mm::kPageWritable;
+            break;
+        case 0x10: // PAGE_EXECUTE
+        case 0x20: // PAGE_EXECUTE_READ
+            pte_flags &= ~mm::kPageNoExecute;
+            break;
+        default:
+            frame->rax = kStatusInvalidParameter;
+            return;
+        }
+        const u64 page_size = mm::kPageSize;
+        const u64 aligned_size = (size + page_size - 1) & ~(page_size - 1);
+        u64 base_va = hint_va;
+        if (base_va == 0)
+        {
+            base_va = target->linux_mmap_cursor;
+        }
+        else
+        {
+            base_va &= ~(page_size - 1);
+        }
+        for (u64 va = base_va; va < base_va + aligned_size; va += page_size)
+        {
+            const mm::PhysAddr fp = mm::AllocateFrame();
+            if (fp == mm::kNullFrame)
+            {
+                frame->rax = kStatusNoMemory;
+                return;
+            }
+            // Zero-fill — Windows guarantees zero-init.
+            u8* kva = static_cast<u8*>(mm::PhysToVirt(fp));
+            for (u64 i = 0; i < page_size; ++i)
+                kva[i] = 0;
+            mm::AddressSpaceMapUserPage(target->as, va, fp, pte_flags | mm::kPagePresent);
+        }
+        if (hint_va == 0)
+            target->linux_mmap_cursor = base_va + aligned_size;
+        if (user_out != 0)
+        {
+            (void)mm::CopyToUser(reinterpret_cast<void*>(user_out), &base_va, sizeof(base_va));
+        }
+        frame->rax = kStatusSuccess;
+        return;
+    }
+
+    case SYS_VM_FREE:
+    {
+        // NtFreeVirtualMemory(handle, base, size, FreeType). v0
+        // always releases (MEM_RELEASE / MEM_DECOMMIT collapse
+        // onto the same unmap-and-free path).
+        Process* caller = CurrentProcess();
+        if (caller == nullptr)
+        {
+            frame->rax = kStatusInvalidHandle;
+            return;
+        }
+        const u64 handle = frame->rdi;
+        const u64 base = frame->rsi;
+        const u64 size = frame->rdx;
+        constexpr u64 kCurrentProcess = static_cast<u64>(-1);
+        Process* target = caller;
+        if (handle != kCurrentProcess)
+        {
+            if (!CapSetHas(caller->caps, kCapDebug))
+            {
+                RecordSandboxDenial(kCapDebug);
+                frame->rax = kStatusAccessDenied;
+                return;
+            }
+            target = LookupProcessHandle(caller, handle);
+            if (target == nullptr)
+            {
+                frame->rax = kStatusInvalidHandle;
+                return;
+            }
+        }
+        const u64 page_size = mm::kPageSize;
+        const u64 aligned_size = (size + page_size - 1) & ~(page_size - 1);
+        const u64 aligned_base = base & ~(page_size - 1);
+        for (u64 va = aligned_base; va < aligned_base + aligned_size; va += page_size)
+        {
+            (void)mm::AddressSpaceUnmapUserPage(target->as, va);
+        }
+        frame->rax = kStatusSuccess;
+        return;
+    }
+
+    case SYS_VM_PROTECT:
+    {
+        // NtProtectVirtualMemory(handle, base, size, new_protect, *old_protect).
+        Process* caller = CurrentProcess();
+        if (caller == nullptr)
+        {
+            frame->rax = kStatusInvalidHandle;
+            return;
+        }
+        const u64 handle = frame->rdi;
+        const u64 base = frame->rsi;
+        const u64 size = frame->rdx;
+        const u32 protect = static_cast<u32>(frame->r10);
+        const u64 user_old = frame->r8;
+        constexpr u64 kCurrentProcess = static_cast<u64>(-1);
+        Process* target = caller;
+        if (handle != kCurrentProcess)
+        {
+            if (!CapSetHas(caller->caps, kCapDebug))
+            {
+                RecordSandboxDenial(kCapDebug);
+                frame->rax = kStatusAccessDenied;
+                return;
+            }
+            target = LookupProcessHandle(caller, handle);
+            if (target == nullptr)
+            {
+                frame->rax = kStatusInvalidHandle;
+                return;
+            }
+        }
+        u64 pte_flags = mm::kPageUser | mm::kPageNoExecute;
+        switch (protect & 0xFF)
+        {
+        case 0x01:
+        case 0x02:
+            break;
+        case 0x04:
+        case 0x08:
+        case 0x40:
+        case 0x80:
+            pte_flags |= mm::kPageWritable;
+            break;
+        case 0x10:
+        case 0x20:
+            pte_flags &= ~mm::kPageNoExecute;
+            break;
+        default:
+            frame->rax = kStatusInvalidParameter;
+            return;
+        }
+        const u64 page_size = mm::kPageSize;
+        const u64 aligned_size = (size + page_size - 1) & ~(page_size - 1);
+        const u64 aligned_base = base & ~(page_size - 1);
+        u32 first_old_protect = 0x04; // best-effort: PAGE_READWRITE
+        for (u64 va = aligned_base; va < aligned_base + aligned_size; va += page_size)
+        {
+            (void)mm::AddressSpaceProtectUserPage(target->as, va, pte_flags | mm::kPagePresent);
+        }
+        if (user_old != 0)
+        {
+            (void)mm::CopyToUser(reinterpret_cast<void*>(user_old), &first_old_protect, sizeof(first_old_protect));
+        }
+        frame->rax = kStatusSuccess;
+        return;
+    }
+
     case SYS_MUTEX_CREATE:
         subsystems::win32::DoMutexCreate(frame);
         return;

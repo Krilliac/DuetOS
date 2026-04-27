@@ -528,6 +528,9 @@ _Auto-generated; do not edit by hand._
 | native | 145 | `SYS_PROCESS_TERMINATE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
 | native | 146 | `SYS_THREAD_TERMINATE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
 | native | 147 | `SYS_PROCESS_QUERY_INFO` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 148 | `SYS_VM_ALLOCATE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 149 | `SYS_VM_FREE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 150 | `SYS_VM_PROTECT` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
 | native | 512 | `native_gapfill_0x200` | translated | `kernel/subsystems/translation/translate.cpp::NativeClockNs` | linux-self:NowNs |
 | native | 513 | `native_gapfill_0x201` | translated | `kernel/subsystems/translation/translate.cpp::NativeGetRandom` | synthetic:xorshift-from-rdtsc |
 | native | 528 | `native_gapfill_0x210` | translated | `kernel/subsystems/translation/translate.cpp::NativeWin32Alloc` | win32:HeapAlloc |
@@ -556,13 +559,13 @@ _Auto-generated; do not edit by hand._
 | nt | 21 | `NtQueryDefaultLocale` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
 | nt | 22 | `NtQueryKey` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
 | nt | 23 | `NtQueryValueKey` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_REGISTRY` | routes to native SYS_REGISTRY |
-| nt | 24 | `NtAllocateVirtualMemory` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_VMAP` | routes to native SYS_VMAP |
+| nt | 24 | `NtAllocateVirtualMemory` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_VM_ALLOCATE` | routes to native SYS_VM_ALLOCATE |
 | nt | 25 | `NtQueryInformationProcess` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_PROCESS_QUERY_INFO` | routes to native SYS_PROCESS_QUERY_INFO |
 | nt | 26 | `NtWaitForMultipleObjects32` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
 | nt | 27 | `NtWriteFileGather` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
 | nt | 28 | `NtSetInformationProcess` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
 | nt | 29 | `NtCreateKey` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
-| nt | 30 | `NtFreeVirtualMemory` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_VUNMAP` | routes to native SYS_VUNMAP |
+| nt | 30 | `NtFreeVirtualMemory` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_VM_FREE` | routes to native SYS_VM_FREE |
 | nt | 31 | `NtImpersonateClientOfPort` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
 | nt | 32 | `NtReleaseMutant` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_MUTEX_RELEASE` | routes to native SYS_MUTEX_RELEASE |
 | nt | 33 | `NtQueryInformationToken` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
@@ -612,7 +615,7 @@ _Auto-generated; do not edit by hand._
 | nt | 77 | `NtCreateProcessEx` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
 | nt | 78 | `NtCreateThread` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
 | nt | 79 | `NtIsProcessInJob` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
-| nt | 80 | `NtProtectVirtualMemory` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 80 | `NtProtectVirtualMemory` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_VM_PROTECT` | routes to native SYS_VM_PROTECT |
 | nt | 81 | `NtQuerySection` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
 | nt | 82 | `NtResumeThread` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_THREAD_RESUME` | routes to native SYS_THREAD_RESUME |
 | nt | 83 | `NtTerminateThread` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_NT_INVOKE` | routes to native SYS_NT_INVOKE |
@@ -733,7 +736,7 @@ _Auto-generated; do not edit by hand._
 | nt | 198 | `NtCreateSectionEx` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
 | nt | 199 | `NtCreateSemaphore` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
 | nt | 200 | `NtCreateSymbolicLinkObject` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
-| nt | 201 | `NtCreateThreadEx` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 201 | `NtCreateThreadEx` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_THREAD_CREATE` | routes to native SYS_THREAD_CREATE |
 | nt | 202 | `NtCreateThreadStateChange` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
 | nt | 203 | `NtCreateTimer` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
 | nt | 204 | `NtCreateTimer2` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |

@@ -108,6 +108,10 @@ KNOWN_MAPPINGS = {
     "NtTerminateProcess":          "SYS_PROCESS_TERMINATE",
     "NtTerminateThread":           "SYS_THREAD_TERMINATE",
     "NtQueryInformationProcess":   "SYS_PROCESS_QUERY_INFO",
+    "NtAllocateVirtualMemory":     "SYS_VM_ALLOCATE",
+    "NtFreeVirtualMemory":         "SYS_VM_FREE",
+    "NtProtectVirtualMemory":      "SYS_VM_PROTECT",
+    "NtCreateThreadEx":            "SYS_THREAD_CREATE",
     # NtCreateKey / NtSetValueKey / NtDeleteKey / NtDeleteValueKey:
     # NotImpl on purpose — registry is read-only in v0. Mapping
     # them to SYS_REGISTRY's read-only Open op would silently lie

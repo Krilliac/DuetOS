@@ -8,7 +8,7 @@
 // Target Windows version: Windows 11 and Server (11 25H2)
 // Bedrock NT calls (present in every Windows XP→Win11 25H2): 292
 // All known NT calls on the target version: 489
-// DuetOS coverage: 44/292 = 15%
+// DuetOS coverage: 45/292 = 15%
 //
 // See tools/win32-compat/README.md for the legal + design rationale.
 
@@ -62,13 +62,13 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
     {"NtQueryDefaultLocale", 0x0015, kSysNtNotImpl},
     {"NtQueryKey", 0x0016, kSysNtNotImpl},
     {"NtQueryValueKey", 0x0017, static_cast<u32>(::duetos::core::SYS_REGISTRY)},
-    {"NtAllocateVirtualMemory", 0x0018, static_cast<u32>(::duetos::core::SYS_VMAP)},
+    {"NtAllocateVirtualMemory", 0x0018, static_cast<u32>(::duetos::core::SYS_VM_ALLOCATE)},
     {"NtQueryInformationProcess", 0x0019, static_cast<u32>(::duetos::core::SYS_PROCESS_QUERY_INFO)},
     {"NtWaitForMultipleObjects32", 0x001a, kSysNtNotImpl},
     {"NtWriteFileGather", 0x001b, kSysNtNotImpl},
     {"NtSetInformationProcess", 0x001c, kSysNtNotImpl},
     {"NtCreateKey", 0x001d, kSysNtNotImpl},
-    {"NtFreeVirtualMemory", 0x001e, static_cast<u32>(::duetos::core::SYS_VUNMAP)},
+    {"NtFreeVirtualMemory", 0x001e, static_cast<u32>(::duetos::core::SYS_VM_FREE)},
     {"NtImpersonateClientOfPort", 0x001f, kSysNtNotImpl},
     {"NtReleaseMutant", 0x0020, static_cast<u32>(::duetos::core::SYS_MUTEX_RELEASE)},
     {"NtQueryInformationToken", 0x0021, kSysNtNotImpl},
@@ -118,7 +118,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
     {"NtCreateProcessEx", 0x004d, kSysNtNotImpl},
     {"NtCreateThread", 0x004e, kSysNtNotImpl},
     {"NtIsProcessInJob", 0x004f, kSysNtNotImpl},
-    {"NtProtectVirtualMemory", 0x0050, kSysNtNotImpl},
+    {"NtProtectVirtualMemory", 0x0050, static_cast<u32>(::duetos::core::SYS_VM_PROTECT)},
     {"NtQuerySection", 0x0051, kSysNtNotImpl},
     {"NtResumeThread", 0x0052, static_cast<u32>(::duetos::core::SYS_THREAD_RESUME)},
     {"NtTerminateThread", 0x0053, static_cast<u32>(::duetos::core::SYS_NT_INVOKE)},
@@ -336,7 +336,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
 inline constexpr u32 kBedrockNtSyscallCount =
     sizeof(kBedrockNtSyscalls) / sizeof(kBedrockNtSyscalls[0]);
 
-inline constexpr u32 kBedrockNtSyscallsCovered = 44;
+inline constexpr u32 kBedrockNtSyscallsCovered = 45;
 
 /// Every NT syscall known on the target Windows version — superset
 /// of `kBedrockNtSyscalls`. Includes version-specific additions
@@ -369,13 +369,13 @@ inline constexpr NtSyscallMapping kAllNtSyscalls[] = {
     {"NtQueryDefaultLocale", 0x0015, kSysNtNotImpl},
     {"NtQueryKey", 0x0016, kSysNtNotImpl},
     {"NtQueryValueKey", 0x0017, static_cast<u32>(::duetos::core::SYS_REGISTRY)},
-    {"NtAllocateVirtualMemory", 0x0018, static_cast<u32>(::duetos::core::SYS_VMAP)},
+    {"NtAllocateVirtualMemory", 0x0018, static_cast<u32>(::duetos::core::SYS_VM_ALLOCATE)},
     {"NtQueryInformationProcess", 0x0019, static_cast<u32>(::duetos::core::SYS_PROCESS_QUERY_INFO)},
     {"NtWaitForMultipleObjects32", 0x001a, kSysNtNotImpl},
     {"NtWriteFileGather", 0x001b, kSysNtNotImpl},
     {"NtSetInformationProcess", 0x001c, kSysNtNotImpl},
     {"NtCreateKey", 0x001d, kSysNtNotImpl},
-    {"NtFreeVirtualMemory", 0x001e, static_cast<u32>(::duetos::core::SYS_VUNMAP)},
+    {"NtFreeVirtualMemory", 0x001e, static_cast<u32>(::duetos::core::SYS_VM_FREE)},
     {"NtImpersonateClientOfPort", 0x001f, kSysNtNotImpl},
     {"NtReleaseMutant", 0x0020, static_cast<u32>(::duetos::core::SYS_MUTEX_RELEASE)},
     {"NtQueryInformationToken", 0x0021, kSysNtNotImpl},
@@ -425,7 +425,7 @@ inline constexpr NtSyscallMapping kAllNtSyscalls[] = {
     {"NtCreateProcessEx", 0x004d, kSysNtNotImpl},
     {"NtCreateThread", 0x004e, kSysNtNotImpl},
     {"NtIsProcessInJob", 0x004f, kSysNtNotImpl},
-    {"NtProtectVirtualMemory", 0x0050, kSysNtNotImpl},
+    {"NtProtectVirtualMemory", 0x0050, static_cast<u32>(::duetos::core::SYS_VM_PROTECT)},
     {"NtQuerySection", 0x0051, kSysNtNotImpl},
     {"NtResumeThread", 0x0052, static_cast<u32>(::duetos::core::SYS_THREAD_RESUME)},
     {"NtTerminateThread", 0x0053, static_cast<u32>(::duetos::core::SYS_NT_INVOKE)},
@@ -546,7 +546,7 @@ inline constexpr NtSyscallMapping kAllNtSyscalls[] = {
     {"NtCreateSectionEx", 0x00c6, kSysNtNotImpl},
     {"NtCreateSemaphore", 0x00c7, kSysNtNotImpl},
     {"NtCreateSymbolicLinkObject", 0x00c8, kSysNtNotImpl},
-    {"NtCreateThreadEx", 0x00c9, kSysNtNotImpl},
+    {"NtCreateThreadEx", 0x00c9, static_cast<u32>(::duetos::core::SYS_THREAD_CREATE)},
     {"NtCreateThreadStateChange", 0x00ca, kSysNtNotImpl},
     {"NtCreateTimer", 0x00cb, kSysNtNotImpl},
     {"NtCreateTimer2", 0x00cc, kSysNtNotImpl},
