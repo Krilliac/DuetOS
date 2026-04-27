@@ -53,6 +53,7 @@
 
 #include "subsystems/linux/syscall.h"
 
+#include "subsystems/linux/fanotify.h"
 #include "subsystems/linux/linux_syscall_table_generated.h"
 #include "subsystems/linux/syscall_internal.h"
 #include "subsystems/linux/syscall_socket.h"
@@ -482,6 +483,22 @@ enum : u64
     kSysLandlockCreateRuleset = 444,
     kSysLandlockAddRule = 445,
     kSysLandlockRestrictSelf = 446,
+
+    // fanotify (kernel/subsystems/linux/fanotify.cpp).
+    kSysFanotifyInit = 300,
+    kSysFanotifyMark = 301,
+
+    // Real-time clock + adjustments. We have no RTC writeback so
+    // clock_settime / clock_adjtime / settimeofday return -EPERM.
+    kSysClockSettime = 227,
+    kSysClockAdjtime = 305,
+    kSysSettimeofday = 164,
+    kSysAdjtimex = 159,
+
+    // Keyrings (kernel/subsystems/linux/keyrings.cpp).
+    kSysAddKey = 248,
+    kSysRequestKey = 249,
+    kSysKeyctl = 250,
 };
 
 // kAtFdCwd / kAtRemoveDir constants moved to syscall_internal.h
@@ -1517,6 +1534,34 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
         break;
     case kSysLandlockRestrictSelf:
         rv = DoLandlockRestrictSelf(frame->rdi, frame->rsi);
+        break;
+
+    // fanotify(7) — real engine; fan-out from InotifyPublish.
+    case kSysFanotifyInit:
+        rv = DoFanotifyInit(frame->rdi, frame->rsi);
+        break;
+    case kSysFanotifyMark:
+        rv = DoFanotifyMark(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+        break;
+
+    // clock writeback / system-time mutators — no RTC writeback,
+    // -EPERM matches the "you don't have CAP_SYS_TIME" Linux return.
+    case kSysClockSettime:
+    case kSysClockAdjtime:
+    case kSysSettimeofday:
+    case kSysAdjtimex:
+        rv = kEPERM;
+        break;
+
+    // Keyrings — minimal real engine in keyrings.cpp.
+    case kSysAddKey:
+        rv = DoAddKey(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+        break;
+    case kSysRequestKey:
+        rv = DoRequestKey(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysKeyctl:
+        rv = DoKeyctl(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
         break;
     // inotify_add_watch / inotify_rm_watch handled at the real
     // dispatcher arms above.

@@ -18,6 +18,7 @@
  */
 
 #include "subsystems/linux/syscall_internal.h"
+#include "subsystems/linux/fanotify.h"
 #include "subsystems/linux/inotify.h"
 #include "subsystems/linux/syscall_async_io.h"
 #include "subsystems/linux/syscall_pipe.h"
@@ -250,6 +251,11 @@ i64 DoClose(u64 fd)
         // memfd: drop the per-handle refcount. Frees the frame
         // array when refs == 0 (no one holds the fd anymore).
         MemfdRelease(idx);
+    }
+    else if (state == 15)
+    {
+        // fanotify instance: drop refcount; frees on last release.
+        FanotifyRelease(idx);
     }
     p->linux_fds[fd].state = 0;
     p->linux_fds[fd].first_cluster = 0;

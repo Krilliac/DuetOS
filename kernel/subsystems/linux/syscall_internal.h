@@ -398,6 +398,14 @@ i64 DoLandlockCreateRuleset(u64 user_attr, u64 size, u64 flags);
 i64 DoLandlockAddRule(u64 ruleset_fd, u64 rule_type, u64 user_rule_attr, u64 flags);
 i64 DoLandlockRestrictSelf(u64 ruleset_fd, u64 flags);
 
+// Keyrings (keyrings.cpp). Per-process 16-slot keyring. add_key /
+// request_key + multiplexed keyctl ops (READ / DESCRIBE / UPDATE /
+// SETPERM / SEARCH / INVALIDATE / CLEAR / etc.). "user" + "logon"
+// types only; "asymmetric" / "encrypted" return -EOPNOTSUPP.
+i64 DoAddKey(u64 user_type, u64 user_desc, u64 user_payload, u64 plen, u64 keyring);
+i64 DoRequestKey(u64 user_type, u64 user_desc, u64 user_callout, u64 dest_keyring);
+i64 DoKeyctl(u64 op, u64 a2, u64 a3, u64 a4, u64 a5);
+
 // Modern pidfd signaling. pidfd_open allocates a LinuxFd
 // (state 12, first_cluster = pid) that pins the target Process
 // via ProcessRetain; close drops the ref. pidfd_send_signal

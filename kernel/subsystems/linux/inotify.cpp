@@ -14,6 +14,7 @@
  */
 
 #include "subsystems/linux/inotify.h"
+#include "subsystems/linux/fanotify.h"
 #include "subsystems/linux/syscall_internal.h"
 
 #include "arch/x86_64/cpu.h"
@@ -215,6 +216,9 @@ void InotifyPublish(const char* path, u32 mask)
             sched::WaitQueueWakeAll(&inst.read_wq);
     }
     arch::Sti();
+    // Fan the same event out to fanotify subscribers. Lives outside
+    // the inotify Cli/Sti window because fanotify owns its own.
+    FanotifyPublishFromInotify(path, mask);
 }
 
 void InotifyRetain(u32 idx)
