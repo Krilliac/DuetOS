@@ -36,17 +36,7 @@ namespace duetos::subsystems::linux::internal
 // gracefully. -ENOSYS would also work but Linux returns -ENFILE
 // when the system pipe-fd table is exhausted, which is a closer
 // fit for "we don't have any pipes to give you."
-i64 DoPipe(u64 user_fds)
-{
-    (void)user_fds;
-    return kENFILE;
-}
-i64 DoPipe2(u64 user_fds, u64 flags)
-{
-    (void)user_fds;
-    (void)flags;
-    return kENFILE;
-}
+// DoPipe / DoPipe2 moved to syscall_pipe.cpp.
 
 // wait4(pid, status, options, rusage) / waitid(idtype, id, info,
 // options, rusage). v0 has no fork → no children → -ECHILD is the
@@ -69,15 +59,10 @@ i64 DoWaitid(u64 idtype, u64 id, u64 user_info, u64 options, u64 user_rusage)
     return kECHILD;
 }
 
-// eventfd / eventfd2 / timerfd_* / signalfd / signalfd4:
-// no eventfd / timerfd / signalfd machinery yet. -ENOSYS so
-// libraries fall back to their pipe-based polyfill.
-i64 DoEventfd(u64 initval, u64 flags)
-{
-    (void)initval;
-    (void)flags;
-    return kENOSYS;
-}
+// eventfd / eventfd2 moved to syscall_pipe.cpp.
+// timerfd_* / signalfd / signalfd4 stay here: no timerfd /
+// signalfd machinery yet. -ENOSYS so libraries fall back to
+// their pipe-based polyfill (now that pipes work).
 i64 DoTimerfdCreate(u64 clockid, u64 flags)
 {
     (void)clockid;

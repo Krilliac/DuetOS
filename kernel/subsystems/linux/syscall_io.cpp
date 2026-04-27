@@ -22,6 +22,7 @@
  */
 
 #include "subsystems/linux/syscall_internal.h"
+#include "subsystems/linux/syscall_pipe.h"
 
 #include "arch/x86_64/serial.h"
 #include "proc/process.h"
@@ -64,7 +65,18 @@ i64 DoWrite(u64 fd, u64 user_buf, u64 len)
     if (fd == 0 || fd >= 16)
         return kEBADF;
     core::Process* p = core::CurrentProcess();
-    if (p == nullptr || p->linux_fds[fd].state != 2)
+    if (p == nullptr || p->linux_fds[fd].state == 0)
+        return kEBADF;
+    // Pipe-write end → dispatch to pipe pool.
+    if (p->linux_fds[fd].state == 4)
+        return PipeWrite(p->linux_fds[fd].first_cluster, user_buf, len);
+    // Eventfd → dispatch to eventfd pool (counter add).
+    if (p->linux_fds[fd].state == 5)
+        return EventfdWrite(p->linux_fds[fd].first_cluster, user_buf, len);
+    // Pipe-read end is read-only.
+    if (p->linux_fds[fd].state == 3)
+        return kEBADF;
+    if (p->linux_fds[fd].state != 2)
         return kEBADF;
 
     // File write. Three regions to consider:
@@ -149,6 +161,15 @@ i64 DoRead(u64 fd, u64 user_buf, u64 len)
     {
         return kEBADF;
     }
+    // Pipe-read end → dispatch to pipe pool.
+    if (p->linux_fds[fd].state == 3)
+        return PipeRead(p->linux_fds[fd].first_cluster, user_buf, len);
+    // Eventfd → dispatch to eventfd pool (counter read).
+    if (p->linux_fds[fd].state == 5)
+        return EventfdRead(p->linux_fds[fd].first_cluster, user_buf, len);
+    // Pipe-write end is write-only.
+    if (p->linux_fds[fd].state == 4)
+        return kEBADF;
     if (p->linux_fds[fd].state != 2)
     {
         return kEBADF;

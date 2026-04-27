@@ -296,10 +296,19 @@ struct Process
     // a workload actually exceeds 16 open handles.
     struct LinuxFd
     {
-        u8 state; // 0=unused, 1=reserved-tty, 2=file
+        // state 0 = unused
+        // state 1 = reserved-tty (fd 0/1/2)
+        // state 2 = regular file (FAT32-backed)
+        // state 3 = pipe-read end  → first_cluster = pipe pool idx
+        // state 4 = pipe-write end → first_cluster = pipe pool idx
+        // state 5 = eventfd        → first_cluster = eventfd pool idx
+        // first_cluster is reused as a generic "pool index" slot
+        // for the non-file states; all non-file callers must
+        // ignore size/offset/path.
+        u8 state;
         u8 _pad[3];
-        u32 first_cluster; // only meaningful for state=file
-        u32 size;          // only meaningful for state=file
+        u32 first_cluster;
+        u32 size;
         u32 _pad2;
         u64 offset; // read cursor; only meaningful for state=file
         // Volume-relative path as passed to sys_open, NUL-

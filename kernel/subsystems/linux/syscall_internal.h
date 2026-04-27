@@ -74,11 +74,20 @@ i64 DoSetThreadArea(u64 u_info);
 i64 DoGetThreadArea(u64 u_info);
 i64 DoIoprioGet(u64 which, u64 who);
 i64 DoIoprioSet(u64 which, u64 who, u64 ioprio);
+// Linux pipe(2) / pipe2(2) — defined in syscall_pipe.cpp. v0
+// blocking-only (O_NONBLOCK accepted but ignored). Each call
+// allocates two LinuxFd slots (read + write ends, state 3/4)
+// pointing at a shared kernel pipe pool entry.
 i64 DoPipe(u64 user_fds);
 i64 DoPipe2(u64 user_fds, u64 flags);
+
+// Linux eventfd(2) / eventfd2(2) — defined in syscall_pipe.cpp.
+// Allocates one LinuxFd slot (state 5) pointing at an eventfd
+// pool entry holding a u64 counter.
+i64 DoEventfd(u64 initval);
+i64 DoEventfd2(u64 initval, u64 flags);
 i64 DoWait4(u64 pid, u64 user_status, u64 options, u64 user_rusage);
 i64 DoWaitid(u64 idtype, u64 id, u64 user_info, u64 options, u64 user_rusage);
-i64 DoEventfd(u64 initval, u64 flags);
 i64 DoTimerfdCreate(u64 clockid, u64 flags);
 i64 DoTimerfdSettime(u64 fd, u64 flags, u64 user_new, u64 user_old);
 i64 DoTimerfdGettime(u64 fd, u64 user_curr);
