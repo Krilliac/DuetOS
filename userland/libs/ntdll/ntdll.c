@@ -2247,6 +2247,112 @@ __declspec(dllexport) NTSTATUS NtCancelIoFile(HANDLE FileHandle, void* IoStatusB
 }
 
 /* ------------------------------------------------------------------
+ * NT additional VM + driver-load + system-power thunks.
+ * ------------------------------------------------------------------ */
+__declspec(dllexport) NTSTATUS NtFlushVirtualMemory(HANDLE ProcessHandle, void** BaseAddress, SIZE_T* RegionSize,
+                                                    void* IoStatus)
+{
+    (void)ProcessHandle;
+    (void)BaseAddress;
+    (void)RegionSize;
+    if (IoStatus != (void*)0)
+    {
+        unsigned long long* iosb = (unsigned long long*)IoStatus;
+        iosb[0] = 0;
+        iosb[1] = 0;
+    }
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS NtLockVirtualMemory(HANDLE ProcessHandle, void** BaseAddress, SIZE_T* RegionSize,
+                                                   ULONG MapType)
+{
+    (void)ProcessHandle;
+    (void)BaseAddress;
+    (void)RegionSize;
+    (void)MapType;
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS NtUnlockVirtualMemory(HANDLE ProcessHandle, void** BaseAddress, SIZE_T* RegionSize,
+                                                     ULONG MapType)
+{
+    (void)ProcessHandle;
+    (void)BaseAddress;
+    (void)RegionSize;
+    (void)MapType;
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS NtAreMappedFilesTheSame(void* File1MappedAsAnImage, void* File2MappedAsFile)
+{
+    (void)File1MappedAsAnImage;
+    (void)File2MappedAsFile;
+    return (NTSTATUS)0xC0000055; /* STATUS_NOT_SAME_DEVICE */
+}
+
+__declspec(dllexport) NTSTATUS NtLoadDriver(void* DriverServiceName)
+{
+    (void)DriverServiceName;
+    /* Architectural note: drivers are kernel-internal, not
+     * subsystem-internal. Userland never gets to load drivers.
+     * STATUS_PRIVILEGE_NOT_HELD = 0xC0000061. */
+    return (NTSTATUS)0xC0000061;
+}
+
+__declspec(dllexport) NTSTATUS NtUnloadDriver(void* DriverServiceName)
+{
+    (void)DriverServiceName;
+    return (NTSTATUS)0xC0000061;
+}
+
+__declspec(dllexport) NTSTATUS NtShutdownSystem(ULONG Action)
+{
+    (void)Action;
+    /* Power management is kernel-owned. */
+    return (NTSTATUS)0xC0000061;
+}
+
+__declspec(dllexport) NTSTATUS NtRaiseHardError(NTSTATUS ErrorStatus, ULONG NumberOfParameters,
+                                                ULONG UnicodeStringParameterMask, void* Parameters,
+                                                ULONG ValidResponseOptions, ULONG* Response)
+{
+    (void)ErrorStatus;
+    (void)NumberOfParameters;
+    (void)UnicodeStringParameterMask;
+    (void)Parameters;
+    (void)ValidResponseOptions;
+    if (Response != (ULONG*)0)
+        *Response = 0;
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS NtSetTimerResolution(ULONG DesiredResolution, BOOL SetResolution,
+                                                    ULONG* CurrentResolution)
+{
+    (void)SetResolution;
+    if (CurrentResolution != (ULONG*)0)
+        *CurrentResolution = DesiredResolution;
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS NtQueryTimerResolution(ULONG* MaximumTime, ULONG* MinimumTime, ULONG* CurrentTime)
+{
+    if (MaximumTime != (ULONG*)0)
+        *MaximumTime = 156250;
+    if (MinimumTime != (ULONG*)0)
+        *MinimumTime = 5000;
+    if (CurrentTime != (ULONG*)0)
+        *CurrentTime = 100000;
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) ULONG NtGetCurrentProcessorNumber(void)
+{
+    return 0;
+}
+
+/* ------------------------------------------------------------------
  * NT misc sync + APC + event extras + token write surface
  * ------------------------------------------------------------------ */
 __declspec(dllexport) NTSTATUS NtPulseEvent(HANDLE EventHandle, long* PreviousState)

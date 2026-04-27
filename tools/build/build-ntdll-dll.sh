@@ -275,6 +275,17 @@ set +e
     /export:NtSetInformationToken \
     /export:NtCheckTokenMembership \
     /export:NtPrivilegeObjectAuditAlarm \
+    /export:NtFlushVirtualMemory \
+    /export:NtLockVirtualMemory \
+    /export:NtUnlockVirtualMemory \
+    /export:NtAreMappedFilesTheSame \
+    /export:NtLoadDriver \
+    /export:NtUnloadDriver \
+    /export:NtShutdownSystem \
+    /export:NtRaiseHardError \
+    /export:NtSetTimerResolution \
+    /export:NtQueryTimerResolution \
+    /export:NtGetCurrentProcessorNumber \
     /export:NtContinue \
     /export:ZwContinue=NtContinue \
     /export:NtAllocateVirtualMemory \
