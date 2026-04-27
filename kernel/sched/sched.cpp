@@ -1520,6 +1520,47 @@ KillResult SchedKillByPid(u64 pid)
     return KillResult::Signaled;
 }
 
+u64 SchedKillByProcess(core::Process* target)
+{
+    if (target == nullptr)
+        return 0;
+    arch::Cli();
+    // Collect TIDs first so we can release the cli window before
+    // calling SchedKillByPid (which takes its own cli). Cap at 32
+    // — the win32 thread-handle table is 8, plus the main task,
+    // plus a generous margin for Linux clone(CLONE_THREAD) work.
+    constexpr u32 kMaxTidsPerKill = 32;
+    u64 tids[kMaxTidsPerKill];
+    u32 ntids = 0;
+    auto collect = [&](Task* t)
+    {
+        if (t == nullptr || t->process != target)
+            return;
+        if (t->state == TaskState::Dead)
+            return;
+        if (ntids < kMaxTidsPerKill)
+            tids[ntids++] = t->id;
+    };
+    Task* cur = Current();
+    collect(cur);
+    for (Task* t = g_run_head_normal; t != nullptr; t = t->next)
+        collect(t);
+    for (Task* t = g_run_head_idle; t != nullptr; t = t->next)
+        collect(t);
+    for (Task* t = g_sleep_head; t != nullptr; t = t->sleep_next)
+        collect(t);
+    arch::Sti();
+
+    u64 signalled = 0;
+    for (u32 i = 0; i < ntids; ++i)
+    {
+        const KillResult r = SchedKillByPid(tids[i]);
+        if (r == KillResult::Signaled || r == KillResult::Blocked)
+            ++signalled;
+    }
+    return signalled;
+}
+
 SuspendResult SchedSuspendTask(Task* target, u32* prev_count_out)
 {
     if (target == nullptr)

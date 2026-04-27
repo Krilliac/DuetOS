@@ -8,7 +8,7 @@
 // Target Windows version: Windows 11 and Server (11 25H2)
 // Bedrock NT calls (present in every Windows XP→Win11 25H2): 292
 // All known NT calls on the target version: 489
-// DuetOS coverage: 43/292 = 14%
+// DuetOS coverage: 44/292 = 15%
 //
 // See tools/win32-compat/README.md for the legal + design rationale.
 
@@ -63,7 +63,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
     {"NtQueryKey", 0x0016, kSysNtNotImpl},
     {"NtQueryValueKey", 0x0017, static_cast<u32>(::duetos::core::SYS_REGISTRY)},
     {"NtAllocateVirtualMemory", 0x0018, static_cast<u32>(::duetos::core::SYS_VMAP)},
-    {"NtQueryInformationProcess", 0x0019, kSysNtNotImpl},
+    {"NtQueryInformationProcess", 0x0019, static_cast<u32>(::duetos::core::SYS_PROCESS_QUERY_INFO)},
     {"NtWaitForMultipleObjects32", 0x001a, kSysNtNotImpl},
     {"NtWriteFileGather", 0x001b, kSysNtNotImpl},
     {"NtSetInformationProcess", 0x001c, kSysNtNotImpl},
@@ -82,7 +82,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
     {"NtAccessCheckAndAuditAlarm", 0x0029, kSysNtNotImpl},
     {"NtUnmapViewOfSection", 0x002a, static_cast<u32>(::duetos::core::SYS_SECTION_UNMAP)},
     {"NtReplyWaitReceivePortEx", 0x002b, kSysNtNotImpl},
-    {"NtTerminateProcess", 0x002c, static_cast<u32>(::duetos::core::SYS_EXIT)},
+    {"NtTerminateProcess", 0x002c, static_cast<u32>(::duetos::core::SYS_PROCESS_TERMINATE)},
     {"NtSetEventBoostPriority", 0x002d, kSysNtNotImpl},
     {"NtReadFileScatter", 0x002e, kSysNtNotImpl},
     {"NtOpenThreadTokenEx", 0x002f, kSysNtNotImpl},
@@ -336,7 +336,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
 inline constexpr u32 kBedrockNtSyscallCount =
     sizeof(kBedrockNtSyscalls) / sizeof(kBedrockNtSyscalls[0]);
 
-inline constexpr u32 kBedrockNtSyscallsCovered = 43;
+inline constexpr u32 kBedrockNtSyscallsCovered = 44;
 
 /// Every NT syscall known on the target Windows version — superset
 /// of `kBedrockNtSyscalls`. Includes version-specific additions
@@ -370,7 +370,7 @@ inline constexpr NtSyscallMapping kAllNtSyscalls[] = {
     {"NtQueryKey", 0x0016, kSysNtNotImpl},
     {"NtQueryValueKey", 0x0017, static_cast<u32>(::duetos::core::SYS_REGISTRY)},
     {"NtAllocateVirtualMemory", 0x0018, static_cast<u32>(::duetos::core::SYS_VMAP)},
-    {"NtQueryInformationProcess", 0x0019, kSysNtNotImpl},
+    {"NtQueryInformationProcess", 0x0019, static_cast<u32>(::duetos::core::SYS_PROCESS_QUERY_INFO)},
     {"NtWaitForMultipleObjects32", 0x001a, kSysNtNotImpl},
     {"NtWriteFileGather", 0x001b, kSysNtNotImpl},
     {"NtSetInformationProcess", 0x001c, kSysNtNotImpl},
@@ -389,7 +389,7 @@ inline constexpr NtSyscallMapping kAllNtSyscalls[] = {
     {"NtAccessCheckAndAuditAlarm", 0x0029, kSysNtNotImpl},
     {"NtUnmapViewOfSection", 0x002a, static_cast<u32>(::duetos::core::SYS_SECTION_UNMAP)},
     {"NtReplyWaitReceivePortEx", 0x002b, kSysNtNotImpl},
-    {"NtTerminateProcess", 0x002c, static_cast<u32>(::duetos::core::SYS_EXIT)},
+    {"NtTerminateProcess", 0x002c, static_cast<u32>(::duetos::core::SYS_PROCESS_TERMINATE)},
     {"NtSetEventBoostPriority", 0x002d, kSysNtNotImpl},
     {"NtReadFileScatter", 0x002e, kSysNtNotImpl},
     {"NtOpenThreadTokenEx", 0x002f, kSysNtNotImpl},

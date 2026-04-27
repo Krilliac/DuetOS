@@ -332,6 +332,15 @@ const char* KillResultName(KillResult r);
 /// task is woken by something else.
 KillResult SchedKillByPid(u64 pid);
 
+/// Walk every live task and signal each one whose owning Process
+/// matches `target` for termination. Used by NtTerminateProcess
+/// on a foreign target to bring the entire process down (every
+/// thread in the task group). Returns the count of tasks that
+/// were signalled — 0 if `target` has no live tasks. Skips
+/// AlreadyDead / Blocked / Protected tasks (those statuses are
+/// the same per-task contract as SchedKillByPid).
+u64 SchedKillByProcess(core::Process* target);
+
 /// Locate the outermost user→kernel TrapFrame on a target task's
 /// kernel stack. Returns nullptr when the task has no kernel
 /// stack (boot / idle), never entered user mode (cs.rpl != 3),

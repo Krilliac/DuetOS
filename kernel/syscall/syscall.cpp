@@ -766,6 +766,186 @@ void SyscallDispatch(arch::TrapFrame* frame)
         subsystems::win32::DoFileRename(frame);
         return;
 
+    case SYS_PROCESS_TERMINATE:
+    {
+        // rdi = ProcessHandle (NtCurrentProcess() = -1 for self),
+        // rsi = exit status. Self path bypasses the handle table
+        // and goes straight to SchedExit; foreign path requires
+        // kCapDebug.
+        Process* caller = CurrentProcess();
+        if (caller == nullptr)
+        {
+            frame->rax = kStatusInvalidHandle;
+            return;
+        }
+        const u64 handle = frame->rdi;
+        constexpr u64 kCurrentProcess = static_cast<u64>(-1);
+        if (handle == kCurrentProcess)
+        {
+            // Self-terminate. Whole-process semantics: kill every
+            // sibling task in this Process before the calling
+            // task exits, so a multi-threaded PE that calls
+            // NtTerminateProcess(NtCurrentProcess()) actually
+            // brings the whole task group down rather than just
+            // the caller.
+            (void)sched::SchedKillByProcess(caller);
+            sched::SchedExit();
+        }
+        if (!CapSetHas(caller->caps, kCapDebug))
+        {
+            RecordSandboxDenial(kCapDebug);
+            frame->rax = kStatusAccessDenied;
+            return;
+        }
+        Process* target = LookupProcessHandle(caller, handle);
+        if (target == nullptr)
+        {
+            frame->rax = kStatusInvalidHandle;
+            return;
+        }
+        const u64 killed = sched::SchedKillByProcess(target);
+        frame->rax = killed; // count of tasks signalled
+        return;
+    }
+
+    case SYS_THREAD_TERMINATE:
+    {
+        Process* caller = CurrentProcess();
+        if (caller == nullptr)
+        {
+            frame->rax = kStatusInvalidHandle;
+            return;
+        }
+        const u64 handle = frame->rdi;
+        constexpr u64 kCurrentThread = static_cast<u64>(-2);
+        if (handle == kCurrentThread)
+        {
+            // Self-thread-exit. Same SchedExit path as SYS_EXIT.
+            sched::SchedExit();
+        }
+        // LookupThreadHandle handles BOTH local thread handles
+        // (caller->win32_threads[]) and foreign-process thread
+        // handles (caller->win32_foreign_threads[] populated by
+        // NtOpenThread). The foreign-handle case requires
+        // kCapDebug — same gate NtOpenThread itself imposes.
+        if (handle >= Process::kWin32ForeignThreadBase &&
+            handle < Process::kWin32ForeignThreadBase + Process::kWin32ForeignThreadCap)
+        {
+            if (!CapSetHas(caller->caps, kCapDebug))
+            {
+                RecordSandboxDenial(kCapDebug);
+                frame->rax = kStatusAccessDenied;
+                return;
+            }
+        }
+        sched::Task* t = LookupThreadHandle(caller, handle);
+        if (t == nullptr)
+        {
+            frame->rax = kStatusInvalidHandle;
+            return;
+        }
+        const sched::KillResult r = sched::SchedKillByPid(sched::TaskId(t));
+        if (r == sched::KillResult::Signaled || r == sched::KillResult::Blocked)
+        {
+            frame->rax = kStatusSuccess;
+            return;
+        }
+        if (r == sched::KillResult::AlreadyDead)
+        {
+            frame->rax = kStatusSuccess; // Windows treats already-dead as success
+            return;
+        }
+        frame->rax = kStatusInvalidHandle;
+        return;
+    }
+
+    case SYS_PROCESS_QUERY_INFO:
+    {
+        // rdi = ProcessHandle (-1 for self), rsi = info class
+        // (only ProcessBasicInformation = 0 honoured in v0),
+        // rdx = user buffer, r10 = buffer cap,
+        // r8 = user u32* return_length.
+        Process* caller = CurrentProcess();
+        if (caller == nullptr)
+        {
+            frame->rax = kStatusInvalidHandle;
+            return;
+        }
+        const u64 handle = frame->rdi;
+        const u64 info_class = frame->rsi;
+        const u64 user_buf = frame->rdx;
+        const u64 buf_cap = frame->r10;
+        const u64 user_retlen = frame->r8;
+        constexpr u64 kCurrentProcess = static_cast<u64>(-1);
+        constexpr u64 kProcessBasicInformation = 0;
+        Process* target = caller;
+        if (handle != kCurrentProcess)
+        {
+            if (!CapSetHas(caller->caps, kCapDebug))
+            {
+                RecordSandboxDenial(kCapDebug);
+                frame->rax = kStatusAccessDenied;
+                return;
+            }
+            target = LookupProcessHandle(caller, handle);
+            if (target == nullptr)
+            {
+                frame->rax = kStatusInvalidHandle;
+                return;
+            }
+        }
+        if (info_class != kProcessBasicInformation)
+        {
+            frame->rax = kStatusNotImplemented;
+            return;
+        }
+        // PROCESS_BASIC_INFORMATION layout (48 bytes on x64):
+        //   PVOID  Reserved1;        // ExitStatus
+        //   PVOID  PebBaseAddress;
+        //   PVOID  Reserved2[2];     // AffinityMask, BasePriority
+        //   ULONG_PTR UniqueProcessId;
+        //   ULONG_PTR Reserved3;     // InheritedFromUniqueProcessId
+        struct ProcessBasicInfo
+        {
+            u64 exit_status;
+            u64 peb_base;
+            u64 affinity_mask;
+            u64 base_priority;
+            u64 unique_pid;
+            u64 inherited_from_pid;
+        };
+        ProcessBasicInfo info{};
+        info.exit_status = 0; // STILL_ACTIVE if running, 0 here
+        info.peb_base = target->user_gs_base;
+        info.affinity_mask = 1; // single-CPU v0
+        info.base_priority = 8; // NORMAL_PRIORITY_CLASS midpoint
+        info.unique_pid = target->pid;
+        info.inherited_from_pid = 0;
+        if (buf_cap < sizeof(info))
+        {
+            constexpr u64 kStatusInfoLengthMismatch = 0xC0000004ULL;
+            if (user_retlen != 0)
+            {
+                u32 needed = sizeof(info);
+                (void)mm::CopyToUser(reinterpret_cast<void*>(user_retlen), &needed, sizeof(needed));
+            }
+            frame->rax = kStatusInfoLengthMismatch;
+            return;
+        }
+        if (!mm::CopyToUser(reinterpret_cast<void*>(user_buf), &info, sizeof(info)))
+        {
+            frame->rax = kStatusAccessViolation;
+            return;
+        }
+        if (user_retlen != 0)
+        {
+            u32 written = sizeof(info);
+            (void)mm::CopyToUser(reinterpret_cast<void*>(user_retlen), &written, sizeof(written));
+        }
+        frame->rax = kStatusSuccess;
+        return;
+    }
+
     case SYS_MUTEX_CREATE:
         subsystems::win32::DoMutexCreate(frame);
         return;

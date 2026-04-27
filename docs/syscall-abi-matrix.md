@@ -525,6 +525,9 @@ _Auto-generated; do not edit by hand._
 | native | 142 | `SYS_SECTION_UNMAP` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
 | native | 143 | `SYS_FILE_UNLINK` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
 | native | 144 | `SYS_FILE_RENAME` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 145 | `SYS_PROCESS_TERMINATE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 146 | `SYS_THREAD_TERMINATE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 147 | `SYS_PROCESS_QUERY_INFO` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
 | native | 512 | `native_gapfill_0x200` | translated | `kernel/subsystems/translation/translate.cpp::NativeClockNs` | linux-self:NowNs |
 | native | 513 | `native_gapfill_0x201` | translated | `kernel/subsystems/translation/translate.cpp::NativeGetRandom` | synthetic:xorshift-from-rdtsc |
 | native | 528 | `native_gapfill_0x210` | translated | `kernel/subsystems/translation/translate.cpp::NativeWin32Alloc` | win32:HeapAlloc |
@@ -554,7 +557,7 @@ _Auto-generated; do not edit by hand._
 | nt | 22 | `NtQueryKey` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
 | nt | 23 | `NtQueryValueKey` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_REGISTRY` | routes to native SYS_REGISTRY |
 | nt | 24 | `NtAllocateVirtualMemory` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_VMAP` | routes to native SYS_VMAP |
-| nt | 25 | `NtQueryInformationProcess` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 25 | `NtQueryInformationProcess` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_PROCESS_QUERY_INFO` | routes to native SYS_PROCESS_QUERY_INFO |
 | nt | 26 | `NtWaitForMultipleObjects32` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
 | nt | 27 | `NtWriteFileGather` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
 | nt | 28 | `NtSetInformationProcess` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
@@ -573,7 +576,7 @@ _Auto-generated; do not edit by hand._
 | nt | 41 | `NtAccessCheckAndAuditAlarm` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
 | nt | 42 | `NtUnmapViewOfSection` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_SECTION_UNMAP` | routes to native SYS_SECTION_UNMAP |
 | nt | 43 | `NtReplyWaitReceivePortEx` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
-| nt | 44 | `NtTerminateProcess` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_EXIT` | routes to native SYS_EXIT |
+| nt | 44 | `NtTerminateProcess` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_PROCESS_TERMINATE` | routes to native SYS_PROCESS_TERMINATE |
 | nt | 45 | `NtSetEventBoostPriority` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
 | nt | 46 | `NtReadFileScatter` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
 | nt | 47 | `NtOpenThreadTokenEx` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |

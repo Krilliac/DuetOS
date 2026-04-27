@@ -144,18 +144,44 @@ __declspec(dllexport) NTSTATUS NtQuerySystemTime(long long* SystemTime)
     return NTSTATUS_SUCCESS;
 }
 
-__declspec(dllexport) NTDLL_NORETURN NTSTATUS NtTerminateProcess(HANDLE hProcess, NTSTATUS exit_status)
+/* NtTerminateProcess: kill an entire process (every thread).
+ *   hProcess = (HANDLE)-1 → self-process, every sibling thread
+ *              brought down before the calling thread exits.
+ *   hProcess = foreign Win32 process handle from NtOpenProcess
+ *              → SYS_PROCESS_TERMINATE (cap-gated on kCapDebug).
+ * Self path is [[noreturn]]; foreign path returns the count of
+ * tasks signalled (NTSTATUS_SUCCESS proxy — caller usually
+ * ignores it). */
+__declspec(dllexport) NTSTATUS NtTerminateProcess(HANDLE hProcess, NTSTATUS exit_status)
 {
-    (void)hProcess;
-    __asm__ volatile("int $0x80" : : "a"((long long)0), "D"((long long)exit_status));
-    __builtin_unreachable();
+    long long status;
+    /* SYS_PROCESS_TERMINATE = 145. Self-handle is -1; the
+     * kernel's self path calls SchedExit and never returns, so
+     * the asm below uses a non-noreturn pattern but the self
+     * branch effectively never falls through. */
+    __asm__ volatile("int $0x80"
+                     : "=a"(status)
+                     : "a"((long long)145), "D"((long long)hProcess), "S"((long long)exit_status)
+                     : "memory");
+    return (NTSTATUS)status;
 }
 
-__declspec(dllexport) NTDLL_NORETURN NTSTATUS NtTerminateThread(HANDLE hThread, NTSTATUS exit_status)
+/* NtTerminateThread:
+ *   hThread = (HANDLE)-2 → self-thread, equivalent to SYS_EXIT.
+ *   hThread = local thread handle from CreateThread →
+ *              SYS_THREAD_TERMINATE, no extra cap.
+ *   hThread = foreign thread handle from NtOpenThread →
+ *              SYS_THREAD_TERMINATE, cap-gated on kCapDebug.
+ * Self path is effectively [[noreturn]]. */
+__declspec(dllexport) NTSTATUS NtTerminateThread(HANDLE hThread, NTSTATUS exit_status)
 {
-    (void)hThread;
-    __asm__ volatile("int $0x80" : : "a"((long long)0), "D"((long long)exit_status));
-    __builtin_unreachable();
+    long long status;
+    /* SYS_THREAD_TERMINATE = 146. */
+    __asm__ volatile("int $0x80"
+                     : "=a"(status)
+                     : "a"((long long)146), "D"((long long)hThread), "S"((long long)exit_status)
+                     : "memory");
+    return (NTSTATUS)status;
 }
 
 /* NtContinue — restores a CONTEXT. v0 can't actually do it;
@@ -1558,4 +1584,50 @@ __declspec(dllexport) NTSTATUS NtFlushKey(HANDLE KeyHandle)
                      : "a"((long long)130), "D"((long long)6), "S"((long long)KeyHandle)
                      : "memory");
     return (NTSTATUS)status;
+}
+
+/* ------------------------------------------------------------------
+ * NtQueryInformationProcess — read per-process state.
+ *
+ * Win32 NT signature:
+ *   NTSTATUS NtQueryInformationProcess(
+ *     HANDLE ProcessHandle,
+ *     ULONG  ProcessInformationClass,
+ *     PVOID  ProcessInformation,
+ *     ULONG  ProcessInformationLength,
+ *     PULONG ReturnLength);
+ *
+ * v0 honours the ProcessBasicInformation class only — that's
+ * what every real Win32 caller asks for first (PEB pointer +
+ * UniqueProcessId discovery). Other classes return
+ * STATUS_NOT_IMPLEMENTED so callers fall back rather than
+ * misinterpret zeros.
+ *
+ * The buffer layout the kernel writes is exactly the 48-byte
+ * PROCESS_BASIC_INFORMATION on x64 — no userland repacking.
+ * ------------------------------------------------------------------ */
+__declspec(dllexport) NTSTATUS NtQueryInformationProcess(HANDLE ProcessHandle, ULONG ProcessInformationClass,
+                                                         void* ProcessInformation, ULONG ProcessInformationLength,
+                                                         ULONG* ReturnLength)
+{
+    long long status;
+    /* SYS_PROCESS_QUERY_INFO = 147.
+     * Args: rdi=handle, rsi=class, rdx=buf, r10=cap, r8=&retlen. */
+    __asm__ volatile("mov %4, %%r10\n\t"
+                     "mov %5, %%r8\n\t"
+                     "int $0x80"
+                     : "=a"(status)
+                     : "a"((long long)147), "D"((long long)ProcessHandle), "S"((long long)ProcessInformationClass),
+                       "r"((long long)ProcessInformationLength), "r"((long long)ReturnLength),
+                       "d"((long long)ProcessInformation)
+                     : "r10", "r8", "memory");
+    return (NTSTATUS)status;
+}
+
+__declspec(dllexport) NTSTATUS ZwQueryInformationProcess(HANDLE ProcessHandle, ULONG ProcessInformationClass,
+                                                         void* ProcessInformation, ULONG ProcessInformationLength,
+                                                         ULONG* ReturnLength)
+{
+    return NtQueryInformationProcess(ProcessHandle, ProcessInformationClass, ProcessInformation,
+                                     ProcessInformationLength, ReturnLength);
 }

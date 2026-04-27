@@ -1419,6 +1419,32 @@ enum SyscallNumber : u64
     //                     r10 = dst_len.
     SYS_FILE_UNLINK = 143,
     SYS_FILE_RENAME = 144,
+
+    // Process / thread termination + introspection.
+    //   SYS_PROCESS_TERMINATE — rdi = ProcessHandle (NtCurrentProcess
+    //                           = -1 → self-task-exit; foreign Win32
+    //                           proc handle → walk every Task whose
+    //                           process == target and signal each
+    //                           for termination; cap-gated on
+    //                           kCapDebug for the foreign case).
+    //                           rsi = exit status (passed through to
+    //                           SchedExit on the self path).
+    //                           rax = number of tasks signalled, or
+    //                           NTSTATUS on failure.
+    //   SYS_THREAD_TERMINATE  — rdi = ThreadHandle (caller-local or
+    //                           foreign via NtOpenThread; cap-gated
+    //                           on kCapDebug for the foreign case).
+    //                           rsi = exit status.
+    //                           rax = 0 on success, NTSTATUS on
+    //                           failure.
+    //   SYS_PROCESS_QUERY_INFO — rdi = ProcessHandle, rsi = info class
+    //                           (0 = ProcessBasicInformation), rdx =
+    //                           user buffer, r10 = buffer cap, r8 =
+    //                           user u32* return_length.
+    //                           rax = NTSTATUS.
+    SYS_PROCESS_TERMINATE = 145,
+    SYS_THREAD_TERMINATE = 146,
+    SYS_PROCESS_QUERY_INFO = 147,
 };
 
 // Win32 CONTEXT — first 0x100 bytes (integer + control + the
