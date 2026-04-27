@@ -2282,6 +2282,198 @@ __declspec(dllexport) NTSTATUS ZwWriteFile(HANDLE FileHandle, HANDLE Event, void
 }
 
 /* ------------------------------------------------------------------
+ * NtQueryInformationFile / NtSetInformationFile —
+ * handle-based file metadata read + write.
+ *
+ * The Win32 NT API multiplexes many information classes through
+ * one syscall. v0 covers the two everyone touches:
+ *   - FileStandardInformation   (5)  -> file size + dir flag
+ *   - FilePositionInformation   (14) -> read/write cursor
+ * Setters honour FilePositionInformation via SYS_FILE_SEEK.
+ * Other classes return STATUS_NOT_IMPLEMENTED so callers fall
+ * back rather than misinterpret zero-filled output.
+ *
+ * Architectural rule: the kernel is the authority on file state;
+ * these thunks only translate the Win32 ABI shape.
+ * ------------------------------------------------------------------ */
+__declspec(dllexport) NTSTATUS NtQueryInformationFile(HANDLE FileHandle, void* IoStatusBlock, void* FileInformation,
+                                                      ULONG Length, ULONG FileInformationClass)
+{
+    if (FileInformation == (void*)0)
+        return NTSTATUS_INVALID_PARAMETER;
+    if (FileInformationClass == 5 /* FileStandardInformation */)
+    {
+        if (Length < 24)
+            return (NTSTATUS)0xC0000004;
+        long long size_out = 0;
+        long long status;
+        __asm__ volatile("int $0x80"
+                         : "=a"(status)
+                         : "a"((long long)24), "D"((long long)FileHandle), "S"((long long)&size_out)
+                         : "memory");
+        if (status != 0)
+            return (NTSTATUS)0xC0000008;
+        unsigned char* out = (unsigned char*)FileInformation;
+        const unsigned long long aligned = ((unsigned long long)size_out + 4095ULL) & ~4095ULL;
+        for (unsigned i = 0; i < 8; ++i)
+            out[i] = (unsigned char)((aligned >> (i * 8)) & 0xFF);
+        for (unsigned i = 0; i < 8; ++i)
+            out[8 + i] = (unsigned char)(((unsigned long long)size_out >> (i * 8)) & 0xFF);
+        out[16] = 1;
+        out[17] = 0;
+        out[18] = 0;
+        out[19] = 0;
+        out[20] = 0;
+        out[21] = 0;
+        out[22] = 0;
+        out[23] = 0;
+        if (IoStatusBlock != (void*)0)
+        {
+            unsigned long long* iosb = (unsigned long long*)IoStatusBlock;
+            iosb[0] = 0;
+            iosb[1] = 24;
+        }
+        return NTSTATUS_SUCCESS;
+    }
+    if (FileInformationClass == 14 /* FilePositionInformation */)
+    {
+        if (Length < 8)
+            return (NTSTATUS)0xC0000004;
+        long long cur;
+        __asm__ volatile("int $0x80"
+                         : "=a"(cur)
+                         : "a"((long long)23), "D"((long long)FileHandle), "S"((long long)0), "d"((long long)1)
+                         : "memory");
+        if (cur == -1)
+            return (NTSTATUS)0xC0000008;
+        unsigned char* out = (unsigned char*)FileInformation;
+        unsigned long long ucur = (unsigned long long)cur;
+        for (unsigned i = 0; i < 8; ++i)
+            out[i] = (unsigned char)((ucur >> (i * 8)) & 0xFF);
+        if (IoStatusBlock != (void*)0)
+        {
+            unsigned long long* iosb = (unsigned long long*)IoStatusBlock;
+            iosb[0] = 0;
+            iosb[1] = 8;
+        }
+        return NTSTATUS_SUCCESS;
+    }
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS ZwQueryInformationFile(HANDLE FileHandle, void* IoStatusBlock, void* FileInformation,
+                                                      ULONG Length, ULONG FileInformationClass)
+{
+    return NtQueryInformationFile(FileHandle, IoStatusBlock, FileInformation, Length, FileInformationClass);
+}
+
+__declspec(dllexport) NTSTATUS NtSetInformationFile(HANDLE FileHandle, void* IoStatusBlock, void* FileInformation,
+                                                    ULONG Length, ULONG FileInformationClass)
+{
+    if (FileInformation == (void*)0)
+        return NTSTATUS_INVALID_PARAMETER;
+    if (FileInformationClass == 14 /* FilePositionInformation */)
+    {
+        if (Length < 8)
+            return (NTSTATUS)0xC0000004;
+        unsigned char* in = (unsigned char*)FileInformation;
+        unsigned long long pos = 0;
+        for (unsigned i = 0; i < 8; ++i)
+            pos |= ((unsigned long long)in[i]) << (i * 8);
+        long long rv;
+        __asm__ volatile("int $0x80"
+                         : "=a"(rv)
+                         : "a"((long long)23), "D"((long long)FileHandle), "S"((long long)pos), "d"((long long)0)
+                         : "memory");
+        if (rv == -1)
+            return (NTSTATUS)0xC0000008;
+        if (IoStatusBlock != (void*)0)
+        {
+            unsigned long long* iosb = (unsigned long long*)IoStatusBlock;
+            iosb[0] = 0;
+            iosb[1] = 0;
+        }
+        return NTSTATUS_SUCCESS;
+    }
+    /* FileEndOfFileInformation, FileRenameInformation,
+     * FileDispositionInformation, FileAllocationInformation
+     * need additional kernel-side syscalls (truncate, rename-by-
+     * handle, delete-on-close); deferred. */
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS ZwSetInformationFile(HANDLE FileHandle, void* IoStatusBlock, void* FileInformation,
+                                                    ULONG Length, ULONG FileInformationClass)
+{
+    return NtSetInformationFile(FileHandle, IoStatusBlock, FileInformation, Length, FileInformationClass);
+}
+
+__declspec(dllexport) NTSTATUS NtFlushBuffersFile(HANDLE FileHandle, void* IoStatusBlock)
+{
+    (void)FileHandle;
+    if (IoStatusBlock != (void*)0)
+    {
+        unsigned long long* iosb = (unsigned long long*)IoStatusBlock;
+        iosb[0] = 0;
+        iosb[1] = 0;
+    }
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS ZwFlushBuffersFile(HANDLE FileHandle, void* IoStatusBlock)
+{
+    return NtFlushBuffersFile(FileHandle, IoStatusBlock);
+}
+
+__declspec(dllexport) NTSTATUS NtFsControlFile(HANDLE FileHandle, HANDLE Event, void* ApcRoutine, void* ApcContext,
+                                               void* IoStatusBlock, ULONG IoControlCode, void* InputBuffer,
+                                               ULONG InputBufferLength, void* OutputBuffer, ULONG OutputBufferLength)
+{
+    (void)FileHandle;
+    (void)Event;
+    (void)ApcRoutine;
+    (void)ApcContext;
+    (void)IoControlCode;
+    (void)InputBuffer;
+    (void)InputBufferLength;
+    (void)OutputBuffer;
+    (void)OutputBufferLength;
+    if (IoStatusBlock != (void*)0)
+    {
+        unsigned long long* iosb = (unsigned long long*)IoStatusBlock;
+        iosb[0] = 0xC0000002;
+        iosb[1] = 0;
+    }
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS ZwFsControlFile(HANDLE FileHandle, HANDLE Event, void* ApcRoutine, void* ApcContext,
+                                               void* IoStatusBlock, ULONG IoControlCode, void* InputBuffer,
+                                               ULONG InputBufferLength, void* OutputBuffer, ULONG OutputBufferLength)
+{
+    return NtFsControlFile(FileHandle, Event, ApcRoutine, ApcContext, IoStatusBlock, IoControlCode, InputBuffer,
+                           InputBufferLength, OutputBuffer, OutputBufferLength);
+}
+
+__declspec(dllexport) NTSTATUS NtDeviceIoControlFile(HANDLE FileHandle, HANDLE Event, void* ApcRoutine,
+                                                     void* ApcContext, void* IoStatusBlock, ULONG IoControlCode,
+                                                     void* InputBuffer, ULONG InputBufferLength, void* OutputBuffer,
+                                                     ULONG OutputBufferLength)
+{
+    return NtFsControlFile(FileHandle, Event, ApcRoutine, ApcContext, IoStatusBlock, IoControlCode, InputBuffer,
+                           InputBufferLength, OutputBuffer, OutputBufferLength);
+}
+
+__declspec(dllexport) NTSTATUS ZwDeviceIoControlFile(HANDLE FileHandle, HANDLE Event, void* ApcRoutine,
+                                                     void* ApcContext, void* IoStatusBlock, ULONG IoControlCode,
+                                                     void* InputBuffer, ULONG InputBufferLength, void* OutputBuffer,
+                                                     ULONG OutputBufferLength)
+{
+    return NtDeviceIoControlFile(FileHandle, Event, ApcRoutine, ApcContext, IoStatusBlock, IoControlCode, InputBuffer,
+                                 InputBufferLength, OutputBuffer, OutputBufferLength);
+}
+
+/* ------------------------------------------------------------------
  * NtQueryAttributesFile / NtQueryFullAttributesFile — path-based
  * file stat. Both forward to SYS_FILE_QUERY_ATTRIBUTES (151).
  *

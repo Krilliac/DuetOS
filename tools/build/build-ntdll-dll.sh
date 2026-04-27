@@ -148,6 +148,16 @@ set +e
     /export:ZwReadFile=NtReadFile \
     /export:NtWriteFile \
     /export:ZwWriteFile=NtWriteFile \
+    /export:NtQueryInformationFile \
+    /export:ZwQueryInformationFile=NtQueryInformationFile \
+    /export:NtSetInformationFile \
+    /export:ZwSetInformationFile=NtSetInformationFile \
+    /export:NtFlushBuffersFile \
+    /export:ZwFlushBuffersFile=NtFlushBuffersFile \
+    /export:NtFsControlFile \
+    /export:ZwFsControlFile=NtFsControlFile \
+    /export:NtDeviceIoControlFile \
+    /export:ZwDeviceIoControlFile=NtDeviceIoControlFile \
     /export:NtContinue \
     /export:ZwContinue=NtContinue \
     /export:NtAllocateVirtualMemory \

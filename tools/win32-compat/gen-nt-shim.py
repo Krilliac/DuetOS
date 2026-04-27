@@ -118,6 +118,11 @@ KNOWN_MAPPINGS = {
     "NtOpenFile":                  "SYS_FILE_OPEN",
     "NtReadFile":                  "SYS_FILE_READ",
     "NtWriteFile":                 "SYS_FILE_WRITE",
+    "NtQueryInformationFile":      "SYS_FILE_FSTAT",
+    # NtFlushBuffersFile / NtFsControlFile / NtDeviceIoControlFile
+    # are userland-only thunks (no kernel work needed); they don't
+    # appear in KNOWN_MAPPINGS for the same reason the token family
+    # doesn't.
     # NtCreateKey / NtSetValueKey / NtDeleteKey / NtDeleteValueKey:
     # NotImpl on purpose — registry is read-only in v0. Mapping
     # them to SYS_REGISTRY's read-only Open op would silently lie
