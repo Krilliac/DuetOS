@@ -759,6 +759,12 @@ void SyscallDispatch(arch::TrapFrame* frame)
     case SYS_FILE_CLOSE:
         subsystems::win32::DoFileClose(frame);
         return;
+    case SYS_FILE_UNLINK:
+        subsystems::win32::DoFileUnlink(frame);
+        return;
+    case SYS_FILE_RENAME:
+        subsystems::win32::DoFileRename(frame);
+        return;
 
     case SYS_MUTEX_CREATE:
         subsystems::win32::DoMutexCreate(frame);

@@ -516,6 +516,8 @@ native,139,SYS_THREAD_OPEN,implemented,kernel/syscall/syscall.h::SyscallNumber,n
 native,140,SYS_SECTION_CREATE,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
 native,141,SYS_SECTION_MAP,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
 native,142,SYS_SECTION_UNMAP,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,143,SYS_FILE_UNLINK,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,144,SYS_FILE_RENAME,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
 native,512,native_gapfill_0x200,translated,kernel/subsystems/translation/translate.cpp::NativeClockNs,linux-self:NowNs
 native,513,native_gapfill_0x201,translated,kernel/subsystems/translation/translate.cpp::NativeGetRandom,synthetic:xorshift-from-rdtsc
 native,528,native_gapfill_0x210,translated,kernel/subsystems/translation/translate.cpp::NativeWin32Alloc,win32:HeapAlloc
@@ -739,7 +741,7 @@ nt,215,NtDebugContinue,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStubC
 nt,216,NtDeleteAtom,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStubCatchAll,STATUS_NOT_IMPLEMENTED
 nt,217,NtDeleteBootEntry,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStubCatchAll,STATUS_NOT_IMPLEMENTED
 nt,218,NtDeleteDriverEntry,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStubCatchAll,STATUS_NOT_IMPLEMENTED
-nt,219,NtDeleteFile,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStubCatchAll,STATUS_NOT_IMPLEMENTED
+nt,219,NtDeleteFile,translated,kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_FILE_UNLINK,routes to native SYS_FILE_UNLINK
 nt,220,NtDeleteKey,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStubCatchAll,STATUS_NOT_IMPLEMENTED
 nt,221,NtDeleteObjectAuditAlarm,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStubCatchAll,STATUS_NOT_IMPLEMENTED
 nt,222,NtDeletePrivateNamespace,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStubCatchAll,STATUS_NOT_IMPLEMENTED

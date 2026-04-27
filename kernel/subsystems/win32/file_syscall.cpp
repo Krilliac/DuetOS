@@ -411,4 +411,92 @@ void DoFileCreate(arch::TrapFrame* frame)
     frame->rax = fs::routing::CreateForProcess(proc, kpath, init_len > 0 ? s_init_stage : nullptr, init_len);
 }
 
+void DoFileUnlink(arch::TrapFrame* frame)
+{
+    // DeleteFileW. rdi = const char* user_path, rsi = path_cap.
+    // rax = 0 on success, NTSTATUS on failure.
+    KDBG_2V(Win32Thunk, "win32/file", "DoFileUnlink", "user_path", frame->rdi, "path_cap", frame->rsi);
+    constexpr u64 kStatusSuccess = 0;
+    constexpr u64 kStatusInvalidParameter = 0xC000000DULL;
+    constexpr u64 kStatusAccessDenied = 0xC0000022ULL;
+    constexpr u64 kStatusObjectNameNotFound = 0xC0000034ULL;
+    core::Process* proc = core::CurrentProcess();
+    if (proc == nullptr || !core::CapSetHas(proc->caps, core::kCapFsWrite))
+    {
+        core::RecordSandboxDenial(core::kCapFsWrite);
+        frame->rax = kStatusAccessDenied;
+        return;
+    }
+    u64 path_cap = frame->rsi;
+    if (path_cap == 0 || path_cap >= core::kSyscallPathMax)
+    {
+        frame->rax = kStatusInvalidParameter;
+        return;
+    }
+    char kpath[core::kSyscallPathMax];
+    if (!mm::CopyFromUser(kpath, reinterpret_cast<const void*>(frame->rdi), path_cap))
+    {
+        frame->rax = kStatusInvalidParameter;
+        return;
+    }
+    kpath[path_cap] = '\0';
+    kpath[core::kSyscallPathMax - 1] = '\0';
+    if (!fs::routing::UnlinkForProcess(proc, kpath))
+    {
+        frame->rax = kStatusObjectNameNotFound;
+        return;
+    }
+    frame->rax = kStatusSuccess;
+}
+
+void DoFileRename(arch::TrapFrame* frame)
+{
+    // MoveFileW. rdi = src_path, rsi = src_cap,
+    // rdx = dst_path, r10 = dst_cap.
+    KDBG_2V(Win32Thunk, "win32/file", "DoFileRename", "user_src", frame->rdi, "user_dst", frame->rdx);
+    constexpr u64 kStatusSuccess = 0;
+    constexpr u64 kStatusInvalidParameter = 0xC000000DULL;
+    constexpr u64 kStatusAccessDenied = 0xC0000022ULL;
+    constexpr u64 kStatusObjectNameCollision = 0xC0000035ULL;
+    core::Process* proc = core::CurrentProcess();
+    if (proc == nullptr || !core::CapSetHas(proc->caps, core::kCapFsWrite))
+    {
+        core::RecordSandboxDenial(core::kCapFsWrite);
+        frame->rax = kStatusAccessDenied;
+        return;
+    }
+    u64 src_cap = frame->rsi;
+    u64 dst_cap = frame->r10;
+    if (src_cap == 0 || dst_cap == 0 || src_cap >= core::kSyscallPathMax || dst_cap >= core::kSyscallPathMax)
+    {
+        frame->rax = kStatusInvalidParameter;
+        return;
+    }
+    char ksrc[core::kSyscallPathMax];
+    char kdst[core::kSyscallPathMax];
+    if (!mm::CopyFromUser(ksrc, reinterpret_cast<const void*>(frame->rdi), src_cap))
+    {
+        frame->rax = kStatusInvalidParameter;
+        return;
+    }
+    if (!mm::CopyFromUser(kdst, reinterpret_cast<const void*>(frame->rdx), dst_cap))
+    {
+        frame->rax = kStatusInvalidParameter;
+        return;
+    }
+    ksrc[src_cap] = '\0';
+    ksrc[core::kSyscallPathMax - 1] = '\0';
+    kdst[dst_cap] = '\0';
+    kdst[core::kSyscallPathMax - 1] = '\0';
+    if (!fs::routing::RenameForProcess(proc, ksrc, kdst))
+    {
+        // Rename failure could be missing src OR existing dst;
+        // we don't disambiguate in v0. Pick the more common
+        // misuse (collision) for a simple caller signal.
+        frame->rax = kStatusObjectNameCollision;
+        return;
+    }
+    frame->rax = kStatusSuccess;
+}
+
 } // namespace duetos::subsystems::win32

@@ -252,6 +252,24 @@ i64 Fat32AppendAtPath(const Volume* v, const char* path, const void* buf, u64 le
 /// I/O error.
 bool Fat32MkdirAtPath(const Volume* v, const char* path);
 
+/// Rename a regular file from `src_path` to `dst_path`. v0
+/// implementation is a copy-then-delete: read the source's
+/// bytes via Fat32ReadFile, Fat32CreateAtPath the destination
+/// with the same bytes, then Fat32DeleteAtPath the source.
+/// Both paths are volume-relative (leading '/' tolerated).
+///
+/// Constraints (v0):
+///   - Source must exist and be a regular file (not a directory).
+///   - Destination must NOT exist (no implicit overwrite).
+///   - Source size must fit in the bounce buffer (kRenameMax).
+///     Larger files return false rather than performing a
+///     truncating copy.
+///
+/// Returns true on success, false on any validation / I/O /
+/// allocation failure. Non-atomic: a power loss between the
+/// create and delete leaves both names live (sub-GAP).
+bool Fat32RenameAtPath(const Volume* v, const char* src_path, const char* dst_path);
+
 /// Remove an empty directory at `path`. Refuses if the directory
 /// still contains any entries beyond the "." / ".." self and
 /// parent records. Frees the directory's cluster chain and marks

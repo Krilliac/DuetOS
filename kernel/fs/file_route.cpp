@@ -468,6 +468,55 @@ u64 CloseForProcess(::duetos::core::Process* proc, u64 handle)
 }
 
 // ---------------------------------------------------------------
+// Mutation surface (unlink + rename). Cap-gated by the syscall
+// layer; this facade performs the dispatch and the validation
+// but no capability check.
+//
+// Routing rules:
+//   - "/disk/<idx>/<rest>"      → fat32::Fat32{Delete,Rename}AtPath
+//   - everything else           → false (ramfs is read-only;
+//                                  tmpfs has its own shell-only
+//                                  surface and isn't routed here
+//                                  in v0)
+// ---------------------------------------------------------------
+
+bool UnlinkForProcess(::duetos::core::Process* proc, const char* path)
+{
+    (void)proc;
+    if (path == nullptr || path[0] == '\0')
+        return false;
+    u32 idx = 0;
+    const char* rest = nullptr;
+    if (!ParseDiskPath(path, &idx, &rest))
+        return false;
+    const fat32::Volume* v = fat32::Fat32Volume(idx);
+    if (v == nullptr)
+        return false;
+    return fat32::Fat32DeleteAtPath(v, rest);
+}
+
+bool RenameForProcess(::duetos::core::Process* proc, const char* src, const char* dst)
+{
+    (void)proc;
+    if (src == nullptr || dst == nullptr || src[0] == '\0' || dst[0] == '\0')
+        return false;
+    u32 src_idx = 0;
+    u32 dst_idx = 0;
+    const char* src_rest = nullptr;
+    const char* dst_rest = nullptr;
+    if (!ParseDiskPath(src, &src_idx, &src_rest))
+        return false;
+    if (!ParseDiskPath(dst, &dst_idx, &dst_rest))
+        return false;
+    if (src_idx != dst_idx)
+        return false; // cross-volume rename not supported in v0
+    const fat32::Volume* v = fat32::Fat32Volume(src_idx);
+    if (v == nullptr)
+        return false;
+    return fat32::Fat32RenameAtPath(v, src_rest, dst_rest);
+}
+
+// ---------------------------------------------------------------
 // SelfTest: open /disk/0/HELLO.TXT through the routing facade,
 // verify the bytes match what the FAT32 image builder seeded.
 // HELLO.TXT is the canonical test artifact — the existing

@@ -208,6 +208,35 @@ bool TmpFsUnlink(const char* name)
     return true;
 }
 
+bool TmpFsRename(const char* src, const char* dst)
+{
+    if (!NameIsValid(src) || !NameIsValid(dst))
+    {
+        return false;
+    }
+    if (Find(dst) != nullptr)
+    {
+        return false; // refuse implicit overwrite
+    }
+    TmpFsSlot* s = Find(src);
+    if (s == nullptr)
+    {
+        return false;
+    }
+    // Stamp the new name into the slot in place. No content
+    // copy, no metadata fix-ups — tmpfs has neither parent
+    // pointers nor link counts. The single store flips the
+    // slot's identity atomically from the perspective of any
+    // other tmpfs caller (tmpfs has no IRQ-side mutators).
+    u32 i = 0;
+    for (; i + 1 < kTmpFsNameMax && dst[i] != '\0'; ++i)
+    {
+        s->name[i] = dst[i];
+    }
+    s->name[i] = '\0';
+    return true;
+}
+
 void TmpFsEnumerate(TmpFsEnumCb cb, void* cookie)
 {
     if (cb == nullptr)

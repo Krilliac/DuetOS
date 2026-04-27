@@ -1095,6 +1095,48 @@ __declspec(dllexport) NTSTATUS NtUnmapViewOfSection(HANDLE ProcessHandle, void* 
 }
 
 /* ------------------------------------------------------------------
+ * NtDeleteFile — delete a file by OBJECT_ATTRIBUTES path.
+ *
+ * Win32 NT signature:
+ *   NTSTATUS NtDeleteFile(POBJECT_ATTRIBUTES ObjectAttributes);
+ *
+ * v0 narrows the wide ObjectName to ASCII, drops the
+ * "\??\" / "\DosDevices\" Win32 namespace prefix if present
+ * (callers built on top of RtlDosPathNameToNtPathName_U
+ * routinely emit it), and forwards the result to
+ * SYS_FILE_UNLINK. Names exceeding 255 chars truncate.
+ * ------------------------------------------------------------------ */
+__declspec(dllexport) NTSTATUS NtDeleteFile(OBJECT_ATTRIBUTES* ObjectAttributes)
+{
+    if (ObjectAttributes == (OBJECT_ATTRIBUTES*)0)
+        return NTSTATUS_INVALID_PARAMETER;
+    UNICODE_STRING* name = ObjectAttributes->ObjectName;
+    if (name == (UNICODE_STRING*)0 || name->Buffer == (wchar_t16*)0)
+        return NTSTATUS_INVALID_PARAMETER;
+    char ascii[256];
+    int wlen = (int)(name->Length / 2);
+    int start = 0;
+    /* Strip "\??\" and "\DosDevices\" Win32-namespace prefixes. */
+    if (wlen >= 4 && name->Buffer[0] == '\\' && name->Buffer[1] == '?' && name->Buffer[2] == '?' &&
+        name->Buffer[3] == '\\')
+        start = 4;
+    int i = 0;
+    while (i < 255 && (start + i) < wlen)
+    {
+        ascii[i] = (char)(name->Buffer[start + i] & 0xFF);
+        ++i;
+    }
+    ascii[i] = '\0';
+    long long status;
+    __asm__ volatile("int $0x80"
+                     : "=a"(status)
+                     : "a"((long long)143), /* SYS_FILE_UNLINK */
+                       "D"((long long)ascii), "S"((long long)i)
+                     : "memory");
+    return (NTSTATUS)status;
+}
+
+/* ------------------------------------------------------------------
  * NtReadVirtualMemory — read another process's user memory through
  * a previously-opened process handle.
  *

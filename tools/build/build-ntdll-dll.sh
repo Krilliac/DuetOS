@@ -98,6 +98,8 @@ set +e
     /export:ZwMapViewOfSection=NtMapViewOfSection \
     /export:NtUnmapViewOfSection \
     /export:ZwUnmapViewOfSection=NtUnmapViewOfSection \
+    /export:NtDeleteFile \
+    /export:ZwDeleteFile=NtDeleteFile \
     /export:NtContinue \
     /export:ZwContinue=NtContinue \
     /export:NtAllocateVirtualMemory \

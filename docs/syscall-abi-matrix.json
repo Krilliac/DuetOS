@@ -4137,6 +4137,22 @@
   },
   {
     "abi": "native",
+    "number": 143,
+    "name": "SYS_FILE_UNLINK",
+    "status": "implemented",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
+    "number": 144,
+    "name": "SYS_FILE_RENAME",
+    "status": "implemented",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
     "number": 512,
     "name": "native_gapfill_0x200",
     "status": "translated",
@@ -5923,9 +5939,9 @@
     "abi": "nt",
     "number": 219,
     "name": "NtDeleteFile",
-    "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
-    "fallback": "STATUS_NOT_IMPLEMENTED"
+    "status": "translated",
+    "owner": "kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_FILE_UNLINK",
+    "fallback": "routes to native SYS_FILE_UNLINK"
   },
   {
     "abi": "nt",

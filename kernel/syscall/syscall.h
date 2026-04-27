@@ -1405,6 +1405,20 @@ enum SyscallNumber : u64
     SYS_SECTION_CREATE = 140,
     SYS_SECTION_MAP = 141,
     SYS_SECTION_UNMAP = 142,
+
+    // Filesystem mutation. Path-based; routes through
+    // fs::routing (fat32 paths only in v0). Both gated on
+    // kCapFs at the syscall layer.
+    //   SYS_FILE_UNLINK — rdi = const char* user_path,
+    //                     rsi = path_len (excluding NUL).
+    //                     rax = 0 on success, NTSTATUS on
+    //                     failure.
+    //   SYS_FILE_RENAME — rdi = const char* user_src,
+    //                     rsi = src_len,
+    //                     rdx = const char* user_dst,
+    //                     r10 = dst_len.
+    SYS_FILE_UNLINK = 143,
+    SYS_FILE_RENAME = 144,
 };
 
 // Win32 CONTEXT — first 0x100 bytes (integer + control + the

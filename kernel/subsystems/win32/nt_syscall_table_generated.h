@@ -8,7 +8,7 @@
 // Target Windows version: Windows 11 and Server (11 25H2)
 // Bedrock NT calls (present in every Windows XP→Win11 25H2): 292
 // All known NT calls on the target version: 489
-// DuetOS coverage: 39/292 = 13%
+// DuetOS coverage: 40/292 = 13%
 //
 // See tools/win32-compat/README.md for the legal + design rationale.
 
@@ -180,7 +180,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
     {"NtDeleteAtom", 0x00d8, kSysNtNotImpl},
     {"NtDeleteBootEntry", 0x00d9, kSysNtNotImpl},
     {"NtDeleteDriverEntry", 0x00da, kSysNtNotImpl},
-    {"NtDeleteFile", 0x00db, kSysNtNotImpl},
+    {"NtDeleteFile", 0x00db, static_cast<u32>(::duetos::core::SYS_FILE_UNLINK)},
     {"NtDeleteKey", 0x00dc, kSysNtNotImpl},
     {"NtDeleteObjectAuditAlarm", 0x00dd, kSysNtNotImpl},
     {"NtDeleteValueKey", 0x00df, kSysNtNotImpl},
@@ -336,7 +336,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
 inline constexpr u32 kBedrockNtSyscallCount =
     sizeof(kBedrockNtSyscalls) / sizeof(kBedrockNtSyscalls[0]);
 
-inline constexpr u32 kBedrockNtSyscallsCovered = 39;
+inline constexpr u32 kBedrockNtSyscallsCovered = 40;
 
 /// Every NT syscall known on the target Windows version — superset
 /// of `kBedrockNtSyscalls`. Includes version-specific additions
@@ -564,7 +564,7 @@ inline constexpr NtSyscallMapping kAllNtSyscalls[] = {
     {"NtDeleteAtom", 0x00d8, kSysNtNotImpl},
     {"NtDeleteBootEntry", 0x00d9, kSysNtNotImpl},
     {"NtDeleteDriverEntry", 0x00da, kSysNtNotImpl},
-    {"NtDeleteFile", 0x00db, kSysNtNotImpl},
+    {"NtDeleteFile", 0x00db, static_cast<u32>(::duetos::core::SYS_FILE_UNLINK)},
     {"NtDeleteKey", 0x00dc, kSysNtNotImpl},
     {"NtDeleteObjectAuditAlarm", 0x00dd, kSysNtNotImpl},
     {"NtDeletePrivateNamespace", 0x00de, kSysNtNotImpl},
