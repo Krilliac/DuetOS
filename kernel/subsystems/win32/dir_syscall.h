@@ -29,4 +29,9 @@ i64 SysDirNext(u64 handle, u64 user_report);
 // kWin32DirBase range is closed; safe on already-closed slots.
 void SysDirClose(core::Process* proc, u64 handle);
 
+// Reset a directory handle's iterator to the first entry. Returns
+// 0 on success, -1 on bad handle. Does not re-snapshot — the
+// entries captured at OPEN time stay frozen for the handle's life.
+i64 SysDirRewind(u64 handle);
+
 } // namespace duetos::subsystems::win32

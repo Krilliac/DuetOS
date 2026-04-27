@@ -1551,6 +1551,12 @@ enum SyscallNumber : u64
     // dispatch (which already covers the win32 handle ranges).
     SYS_DIR_OPEN = 154,
     SYS_DIR_NEXT = 155,
+    // SYS_DIR_REWIND — reset a directory handle's iterator back to
+    // the first entry. Backs NtQueryDirectoryFile's RestartScan
+    // parameter. rdi = HANDLE. Returns 0 on success, -1 on bad
+    // handle. Does NOT re-snapshot the directory — the entries
+    // captured at OPEN time stay frozen.
+    SYS_DIR_REWIND = 156,
 };
 
 // Cross-language record returned by SYS_DIR_NEXT. 96 bytes, exact

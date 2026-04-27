@@ -1551,6 +1551,13 @@ void SyscallDispatch(arch::TrapFrame* frame)
         return;
     }
 
+    case SYS_DIR_REWIND:
+    {
+        const i64 rv = ::duetos::subsystems::win32::SysDirRewind(frame->rdi);
+        frame->rax = static_cast<u64>(rv);
+        return;
+    }
+
     case SYS_FILE_QUERY_ATTRIBUTES:
     {
         // Path-based file stat. Wires through fs::routing's

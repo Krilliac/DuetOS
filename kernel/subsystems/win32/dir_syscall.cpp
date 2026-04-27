@@ -277,6 +277,21 @@ i64 SysDirNext(u64 handle, u64 user_report)
     return 1;
 }
 
+i64 SysDirRewind(u64 handle)
+{
+    core::Process* proc = core::CurrentProcess();
+    if (proc == nullptr)
+        return -1;
+    if (handle < core::Process::kWin32DirBase || handle >= core::Process::kWin32DirBase + core::Process::kWin32DirCap)
+        return -1;
+    const u32 slot = static_cast<u32>(handle - core::Process::kWin32DirBase);
+    auto& dh = proc->win32_dirs[slot];
+    if (!dh.in_use)
+        return -1;
+    dh.next_index = 0;
+    return 0;
+}
+
 void SysDirClose(core::Process* proc, u64 handle)
 {
     if (proc == nullptr)

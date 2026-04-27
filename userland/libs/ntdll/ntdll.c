@@ -3880,7 +3880,6 @@ __declspec(dllexport) NTSTATUS NtCreateFile(HANDLE* FileHandle, ULONG DesiredAcc
     (void)AllocationSize;
     (void)FileAttributes;
     (void)ShareAccess;
-    (void)CreateOptions;
     (void)EaBuffer;
     (void)EaLength;
     if (FileHandle == (HANDLE*)0)
@@ -3889,8 +3888,32 @@ __declspec(dllexport) NTSTATUS NtCreateFile(HANDLE* FileHandle, ULONG DesiredAcc
     unsigned path_len = 0;
     if (!ExtractAsciiPathFromObjectAttributes(ObjectAttributes, path, sizeof(path), &path_len))
         return NTSTATUS_INVALID_PARAMETER;
+    /* CreateOptions:
+     *   FILE_DIRECTORY_FILE     = 0x00000001 — caller wants a dir
+     *                             handle for NtQueryDirectoryFile
+     *   FILE_NON_DIRECTORY_FILE = 0x00000040 — must NOT be a dir
+     * If FILE_DIRECTORY_FILE is set, route to SYS_DIR_OPEN and
+     * return the resulting kWin32DirBase handle. NtQueryDirectoryFile
+     * recognises this handle range. */
     long long handle = -1;
     long long status = 0;
+    if ((CreateOptions & 0x00000001) != 0)
+    {
+        if (CreateDisposition != 1 /* OPEN */ && CreateDisposition != 3 /* OPEN_IF */)
+            return NTSTATUS_INVALID_PARAMETER;
+        /* SYS_DIR_OPEN = 154. */
+        __asm__ volatile("int $0x80" : "=a"(handle) : "a"((long long)154), "D"((long long)path) : "memory");
+        if (handle < 0)
+            return (NTSTATUS)0xC0000034ULL; /* OBJECT_NAME_NOT_FOUND */
+        *FileHandle = (HANDLE)handle;
+        if (IoStatusBlock != (void*)0)
+        {
+            unsigned long long* iosb = (unsigned long long*)IoStatusBlock;
+            iosb[0] = 0;
+            iosb[1] = 1; /* FILE_OPENED */
+        }
+        return NTSTATUS_SUCCESS;
+    }
     /* CreateDisposition codes:
      *   0 = SUPERSEDE       (NotImpl in v0)
      *   1 = FILE_OPEN
@@ -5233,13 +5256,192 @@ __declspec(dllexport) NTSTATUS NtQueryBootOptions(void)
 {
     return (NTSTATUS)0xC0000002;
 }
-__declspec(dllexport) NTSTATUS NtQueryDirectoryFile(void)
+/* NtQueryDirectoryFile — real implementation backed by SYS_DIR_NEXT.
+ *
+ * Real Windows packs many entries into the caller's buffer; v0
+ * returns ONE entry per call (NextEntryOffset = 0). Callers loop
+ * until STATUS_NO_MORE_FILES — same observable contract, just one
+ * round-trip per entry. RestartScan = TRUE issues SYS_DIR_REWIND
+ * before fetching.
+ *
+ * Supported FILE_INFORMATION_CLASS values:
+ *   1 = FileDirectoryInformation        (header 64 bytes + name)
+ *   2 = FileFullDirectoryInformation    (header 68 bytes + name)
+ *   3 = FileBothDirectoryInformation    (header 94 bytes + name)
+ *  12 = FileNamesInformation            (header 12 bytes + name)
+ *
+ * Other classes return STATUS_NOT_IMPLEMENTED. The 4 classes above
+ * cover every common Windows enumerator (FindFirstFile fallback +
+ * direct-NT malware probes).
+ *
+ * The kernel-side SYS_DIR_NEXT report carries name + attributes +
+ * size only; timestamps + EaSize + ShortName fields are zero-filled
+ * (v0 has no ctime/atime/mtime tracking). */
+struct Win32DirEntryReport_t
 {
-    return (NTSTATUS)0xC0000002;
+    char name[64];
+    unsigned int attributes;
+    unsigned int _pad;
+    unsigned long long size_bytes;
+    unsigned char _reserved[16];
+};
+
+__declspec(dllexport) NTSTATUS NtQueryDirectoryFile(HANDLE FileHandle, HANDLE Event, void* ApcRoutine, void* ApcContext,
+                                                    void* IoStatusBlock, void* FileInformation, ULONG Length,
+                                                    ULONG FileInformationClass, BOOL ReturnSingleEntry, void* FileName,
+                                                    BOOL RestartScan)
+{
+    (void)Event;
+    (void)ApcRoutine;
+    (void)ApcContext;
+    (void)ReturnSingleEntry;
+    (void)FileName; /* glob filter not honoured; sub-GAP */
+    if (FileInformation == (void*)0 || Length == 0)
+        return NTSTATUS_INVALID_PARAMETER;
+    /* Accept only the directory-handle range. Other handles
+     * (regular files via NtCreateFile without FILE_DIRECTORY_FILE)
+     * → STATUS_INVALID_HANDLE — Windows returns the same. */
+    unsigned long long h = (unsigned long long)(long long)FileHandle;
+    if (h < 0xA00 || h > 0xA07)
+        return (NTSTATUS)0xC0000008ULL; /* STATUS_INVALID_HANDLE */
+    if (RestartScan)
+    {
+        long long rv;
+        __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)156), "D"((long long)h) : "memory");
+        if (rv < 0)
+            return (NTSTATUS)0xC0000008ULL;
+    }
+    struct Win32DirEntryReport_t r;
+    long long got;
+    __asm__ volatile("int $0x80" : "=a"(got) : "a"((long long)155), "D"((long long)h), "S"((long long)&r) : "memory");
+    if (got < 0)
+        return (NTSTATUS)0xC0000008ULL;
+    if (got == 0)
+        return (NTSTATUS)0x80000006ULL; /* STATUS_NO_MORE_FILES */
+
+    /* Compute the byte length of the wide-char name we'll emit
+     * (NUL is NOT counted in FileNameLength on Windows). */
+    unsigned name_chars = 0;
+    while (name_chars < 64 && r.name[name_chars] != '\0')
+        ++name_chars;
+    const unsigned name_bytes = name_chars * 2; /* UTF-16 */
+
+    /* Emit per the requested class. Output a single record;
+     * NextEntryOffset = 0 marks end-of-record. */
+    unsigned char* out = (unsigned char*)FileInformation;
+    unsigned needed = 0;
+    if (FileInformationClass == 1) /* FileDirectoryInformation */
+    {
+        needed = 64 + name_bytes;
+        if (Length < needed)
+            return (NTSTATUS)0xC0000023ULL; /* STATUS_BUFFER_TOO_SMALL */
+        unsigned* u32p = (unsigned*)out;
+        unsigned long long* u64p = (unsigned long long*)out;
+        u32p[0] = 0;                                                   /* NextEntryOffset */
+        u32p[1] = 0;                                                   /* FileIndex */
+        u64p[1] = 0;                                                   /* CreationTime  */
+        u64p[2] = 0;                                                   /* LastAccessTime */
+        u64p[3] = 0;                                                   /* LastWriteTime  */
+        u64p[4] = 0;                                                   /* ChangeTime */
+        u64p[5] = r.size_bytes;                                        /* EndOfFile  */
+        u64p[6] = (r.size_bytes + 4095) & ~((unsigned long long)4095); /* AllocationSize */
+        u32p[14] = r.attributes;                                       /* FileAttributes */
+        u32p[15] = name_bytes;                                         /* FileNameLength */
+    }
+    else if (FileInformationClass == 2) /* FileFullDirectoryInformation */
+    {
+        needed = 68 + name_bytes;
+        if (Length < needed)
+            return (NTSTATUS)0xC0000023ULL;
+        unsigned* u32p = (unsigned*)out;
+        unsigned long long* u64p = (unsigned long long*)out;
+        u32p[0] = 0;
+        u32p[1] = 0;
+        u64p[1] = 0;
+        u64p[2] = 0;
+        u64p[3] = 0;
+        u64p[4] = 0;
+        u64p[5] = r.size_bytes;
+        u64p[6] = (r.size_bytes + 4095) & ~((unsigned long long)4095);
+        u32p[14] = r.attributes;
+        u32p[15] = name_bytes;
+        u32p[16] = 0; /* EaSize */
+    }
+    else if (FileInformationClass == 3) /* FileBothDirectoryInformation */
+    {
+        needed = 94 + name_bytes;
+        if (Length < needed)
+            return (NTSTATUS)0xC0000023ULL;
+        unsigned* u32p = (unsigned*)out;
+        unsigned long long* u64p = (unsigned long long*)out;
+        u32p[0] = 0;
+        u32p[1] = 0;
+        u64p[1] = 0;
+        u64p[2] = 0;
+        u64p[3] = 0;
+        u64p[4] = 0;
+        u64p[5] = r.size_bytes;
+        u64p[6] = (r.size_bytes + 4095) & ~((unsigned long long)4095);
+        u32p[14] = r.attributes;
+        u32p[15] = name_bytes;
+        u32p[16] = 0; /* EaSize */
+        out[68] = 0;  /* ShortNameLength (bytes) */
+        out[69] = 0;  /* _pad */
+        for (unsigned i = 0; i < 24; ++i)
+            out[70 + i] = 0; /* ShortName[12] WCHARs */
+    }
+    else if (FileInformationClass == 12) /* FileNamesInformation */
+    {
+        needed = 12 + name_bytes;
+        if (Length < needed)
+            return (NTSTATUS)0xC0000023ULL;
+        unsigned* u32p = (unsigned*)out;
+        u32p[0] = 0;          /* NextEntryOffset */
+        u32p[1] = 0;          /* FileIndex */
+        u32p[2] = name_bytes; /* FileNameLength */
+    }
+    else
+    {
+        return (NTSTATUS)0xC0000002ULL; /* STATUS_NOT_IMPLEMENTED for other classes */
+    }
+
+    /* Append the FileName as UTF-16 right after the class header. */
+    unsigned name_off = (FileInformationClass == 1)   ? 64
+                        : (FileInformationClass == 2) ? 68
+                        : (FileInformationClass == 3) ? 94
+                                                      : 12;
+    unsigned short* wname = (unsigned short*)(out + name_off);
+    for (unsigned i = 0; i < name_chars; ++i)
+        wname[i] = (unsigned short)(unsigned char)r.name[i];
+
+    if (IoStatusBlock != (void*)0)
+    {
+        unsigned long long* iosb = (unsigned long long*)IoStatusBlock;
+        iosb[0] = 0;
+        iosb[1] = needed;
+    }
+    return NTSTATUS_SUCCESS;
 }
-__declspec(dllexport) NTSTATUS NtQueryDirectoryFileEx(void)
+
+__declspec(dllexport) NTSTATUS NtQueryDirectoryFileEx(HANDLE FileHandle, HANDLE Event, void* ApcRoutine,
+                                                      void* ApcContext, void* IoStatusBlock, void* FileInformation,
+                                                      ULONG Length, ULONG FileInformationClass, ULONG QueryFlags,
+                                                      void* FileName)
 {
-    return (NTSTATUS)0xC0000002;
+    /* SL_RESTART_SCAN = 0x01 in QueryFlags. Forward as the
+     * RestartScan bool to NtQueryDirectoryFile. */
+    return NtQueryDirectoryFile(FileHandle, Event, ApcRoutine, ApcContext, IoStatusBlock, FileInformation, Length,
+                                FileInformationClass, /*ReturnSingleEntry=*/(QueryFlags & 0x02) != 0, FileName,
+                                /*RestartScan=*/(QueryFlags & 0x01) != 0);
+}
+
+__declspec(dllexport) NTSTATUS ZwQueryDirectoryFile(HANDLE FileHandle, HANDLE Event, void* ApcRoutine, void* ApcContext,
+                                                    void* IoStatusBlock, void* FileInformation, ULONG Length,
+                                                    ULONG FileInformationClass, BOOL ReturnSingleEntry, void* FileName,
+                                                    BOOL RestartScan)
+{
+    return NtQueryDirectoryFile(FileHandle, Event, ApcRoutine, ApcContext, IoStatusBlock, FileInformation, Length,
+                                FileInformationClass, ReturnSingleEntry, FileName, RestartScan);
 }
 __declspec(dllexport) NTSTATUS NtQueryDriverEntryOrder(void)
 {
