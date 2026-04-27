@@ -331,6 +331,28 @@ i64 DoSemop(u64 semid, u64 user_ops, u64 nops);
 i64 DoSemtimedop(u64 semid, u64 user_ops, u64 nops, u64 user_timeout);
 i64 DoSemctl(u64 semid, u64 semnum, u64 cmd, u64 arg);
 
+// SysV msg queues (msg_queues.cpp). Same shape as SysV sem: 8-queue
+// global pool keyed by IPC key. Each msg has an mtype prefix; recv
+// can filter by mtype (== / <= |mtype|). Blocking via per-queue
+// read_wq / write_wq.
+i64 DoMsgget(u64 key, u64 msgflg);
+i64 DoMsgsnd(u64 msqid, u64 user_msg, u64 msgsz, u64 msgflg);
+i64 DoMsgrcv(u64 msqid, u64 user_msg, u64 msgsz, u64 mtype_filter, u64 msgflg);
+i64 DoMsgctl(u64 msqid, u64 cmd, u64 user_buf);
+
+// POSIX msg queues (msg_queues.cpp). 8-queue pool keyed by string
+// name ("/foo"). LinuxFd state 13 = mqdes. Receivers see the
+// highest-priority pending message. Refcounted: mq_unlink + close
+// of last fd frees the ring.
+i64 DoMqOpen(u64 user_name, u64 oflag, u64 mode, u64 user_attr);
+i64 DoMqUnlink(u64 user_name);
+i64 DoMqTimedsend(u64 mqdes, u64 user_msg, u64 msg_len, u64 prio, u64 user_timeout);
+i64 DoMqTimedreceive(u64 mqdes, u64 user_msg, u64 msg_cap, u64 user_prio, u64 user_timeout);
+i64 DoMqNotify(u64 mqdes, u64 user_notification);
+i64 DoMqGetsetattr(u64 mqdes, u64 user_new, u64 user_old);
+void PosixMqRetain(u32 idx);
+void PosixMqRelease(u32 idx);
+
 // Modern pidfd signaling. pidfd_open allocates a LinuxFd
 // (state 12, first_cluster = pid) that pins the target Process
 // via ProcessRetain; close drops the ref. pidfd_send_signal

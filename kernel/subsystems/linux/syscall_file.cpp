@@ -239,6 +239,12 @@ i64 DoClose(u64 fd)
         if (target != nullptr)
             core::ProcessRelease(target);
     }
+    else if (state == 13)
+    {
+        // POSIX MQ: drop the per-handle refcount. Frees the ring
+        // when refs == 0 AND mq_unlink already happened.
+        PosixMqRelease(idx);
+    }
     p->linux_fds[fd].state = 0;
     p->linux_fds[fd].first_cluster = 0;
     p->linux_fds[fd].size = 0;

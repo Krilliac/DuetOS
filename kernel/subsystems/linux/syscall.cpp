@@ -1349,18 +1349,38 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
         rv = DoSemctl(frame->rdi, frame->rsi, frame->rdx, frame->r10);
         break;
 
-    // SysV msg queues + POSIX MQ — still NotImpl.
+    // SysV msg queues — real implementations in msg_queues.cpp.
     case kSysMsgget:
+        rv = DoMsgget(frame->rdi, frame->rsi);
+        break;
     case kSysMsgsnd:
+        rv = DoMsgsnd(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
     case kSysMsgrcv:
+        rv = DoMsgrcv(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+        break;
     case kSysMsgctl:
+        rv = DoMsgctl(frame->rdi, frame->rsi, frame->rdx);
+        break;
+
+    // POSIX msg queues — real implementations in msg_queues.cpp.
     case kSysMqOpen:
+        rv = DoMqOpen(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
     case kSysMqUnlink:
+        rv = DoMqUnlink(frame->rdi);
+        break;
     case kSysMqTimedsend:
+        rv = DoMqTimedsend(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+        break;
     case kSysMqTimedreceive:
+        rv = DoMqTimedreceive(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+        break;
     case kSysMqNotify:
+        rv = DoMqNotify(frame->rdi, frame->rsi);
+        break;
     case kSysMqGetsetattr:
-        rv = kENOSYS;
+        rv = DoMqGetsetattr(frame->rdi, frame->rsi, frame->rdx);
         break;
     // inotify_add_watch / inotify_rm_watch handled at the real
     // dispatcher arms above.
