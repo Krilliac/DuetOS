@@ -133,6 +133,7 @@
 #include "util/string.h"
 #include "proc/ring3_smoke.h"
 #include "diag/runtime_checker.h"
+#include "diag/ubsan.h"
 #include "subsystems/linux/ring3_smoke.h"
 #include "subsystems/linux/syscall.h"
 #include "subsystems/win32/custom_selftest.h"
@@ -389,6 +390,14 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // landed; migration of `kernel_main`'s imperative call list to
     // the registry is deferred (see plan A1 follow-up).
     duetos::core::InitSelfTest();
+
+    // UBSAN klog runtime (plan D5). The kernel is not currently
+    // compiled with `-fsanitize=undefined`, so none of the
+    // `__ubsan_handle_*` symbols are reachable from real code at
+    // boot — the self-test invokes the report path directly to
+    // confirm the runtime is linked in. Day a future debug preset
+    // turns the compile flag on, the symbols are already here.
+    duetos::diag::UbsanSelfTest();
 
     // Centralised syscall capability gate (plan A4). Walks every
     // row of `kSyscallCapTable` against synthetic empty / trusted

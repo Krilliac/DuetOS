@@ -2,9 +2,10 @@
 
 #include "fs/fat32.h"
 #include "fs/ramfs.h"
+#include "ipc/handle_table.h"
+#include "loader/dll_loader.h"
 #include "mm/address_space.h"
 #include "sched/sched.h"
-#include "loader/dll_loader.h"
 #include "util/types.h"
 
 /*
@@ -893,6 +894,17 @@ struct Process
     // away from text / heap / stack / mmap.
     static constexpr u64 kLinuxShmArenaBase = 0x70000000ULL;
     u64 linux_shm_cursor;
+
+    // Unified per-process kernel-object handle table (plan A3).
+    // Replaces the per-type `win32_*` arrays incrementally — for
+    // now the table is empty by default and the existing arrays
+    // stay authoritative. Future slices route SYS_MUTEX_*,
+    // SYS_EVENT_*, SYS_SEM_*, and Linux fds through this table.
+    // `ProcessRelease` calls `HandleTableDrain` on it as part of
+    // teardown so any KObject references parked here get released
+    // even on abnormal exit. Zero-initialised — safe to embed
+    // directly with no explicit init call.
+    ::duetos::ipc::HandleTable kobj_handles;
 
     u64 refcount;
 };
