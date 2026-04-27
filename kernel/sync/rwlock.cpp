@@ -30,6 +30,7 @@ namespace duetos::sync
 
 void RwLockAcquireShared(RwLock& lock)
 {
+    LockdepBeforeAcquire(lock.class_id);
     sched::MutexLock(&lock.inner);
     while (lock.writer_active || lock.waiting_writers > 0)
     {
@@ -37,10 +38,12 @@ void RwLockAcquireShared(RwLock& lock)
     }
     ++lock.active_readers;
     sched::MutexUnlock(&lock.inner);
+    LockdepAfterAcquire(lock.class_id);
 }
 
 void RwLockReleaseShared(RwLock& lock)
 {
+    LockdepBeforeRelease(lock.class_id);
     sched::MutexLock(&lock.inner);
     if (lock.active_readers == 0)
     {
@@ -56,6 +59,7 @@ void RwLockReleaseShared(RwLock& lock)
 
 void RwLockAcquireExclusive(RwLock& lock)
 {
+    LockdepBeforeAcquire(lock.class_id);
     sched::MutexLock(&lock.inner);
     ++lock.waiting_writers;
     while (lock.writer_active || lock.active_readers > 0)
@@ -65,10 +69,12 @@ void RwLockAcquireExclusive(RwLock& lock)
     --lock.waiting_writers;
     lock.writer_active = true;
     sched::MutexUnlock(&lock.inner);
+    LockdepAfterAcquire(lock.class_id);
 }
 
 void RwLockReleaseExclusive(RwLock& lock)
 {
+    LockdepBeforeRelease(lock.class_id);
     sched::MutexLock(&lock.inner);
     if (!lock.writer_active)
     {
@@ -99,6 +105,14 @@ bool RwLockTryAcquireShared(RwLock& lock)
         ok = true;
     }
     sched::MutexUnlock(&lock.inner);
+    if (ok)
+    {
+        // Match the BlockingAcquire shape — record the held edge
+        // only on the success path so a failed try doesn't add a
+        // never-acquired entry to the graph.
+        LockdepBeforeAcquire(lock.class_id);
+        LockdepAfterAcquire(lock.class_id);
+    }
     return ok;
 }
 
@@ -112,6 +126,11 @@ bool RwLockTryAcquireExclusive(RwLock& lock)
         ok = true;
     }
     sched::MutexUnlock(&lock.inner);
+    if (ok)
+    {
+        LockdepBeforeAcquire(lock.class_id);
+        LockdepAfterAcquire(lock.class_id);
+    }
     return ok;
 }
 

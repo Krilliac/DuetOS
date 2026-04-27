@@ -40,9 +40,24 @@ X(SYS_FILE_QUERY_ATTRIBUTES, (1ULL << ::duetos::core::kCapFsRead))
 X(SYS_DIR_OPEN, (1ULL << ::duetos::core::kCapFsRead))
 X(SYS_DIR_NEXT, (1ULL << ::duetos::core::kCapFsRead))
 X(SYS_DIR_REWIND, (1ULL << ::duetos::core::kCapFsRead))
+// SYS_READ + SYS_SPAWN are unconditionally cap-gated on FsRead
+// — both name a path through `proc->root` so even the lookup
+// reaches inside the filesystem jail. Previously the in-handler
+// `CapSetHas(kCapFsRead)` block did the same job; landing the
+// row removes that redundancy. (A4-followup, 2026-04-27.)
+X(SYS_READ, (1ULL << ::duetos::core::kCapFsRead))
+X(SYS_SPAWN, (1ULL << ::duetos::core::kCapFsRead))
 
 // kCapSpawnThread — create an additional ring-3 task in the caller.
 X(SYS_THREAD_CREATE, (1ULL << ::duetos::core::kCapSpawnThread))
+
+// SYS_EXECVE: in-place image replacement requires BOTH FsRead (it
+// names a file path) AND SpawnThread (it builds a new ring-3
+// execution context — even though it reuses the existing TID, the
+// authorisation surface is the same). Multi-bit masks compose by
+// OR; the gate's `(held & required) == required` check enforces
+// "all bits" semantics. (A4-followup, 2026-04-27.)
+X(SYS_EXECVE, ((1ULL << ::duetos::core::kCapFsRead) | (1ULL << ::duetos::core::kCapSpawnThread)))
 
 // kCapDebug — install / remove hardware breakpoints on the caller.
 X(SYS_BP_INSTALL, (1ULL << ::duetos::core::kCapDebug))

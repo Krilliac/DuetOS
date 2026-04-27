@@ -27,6 +27,9 @@
 | _A2-followup_ (this commit) | `time::RealtimeBrokenDown(out)` + `time::BrokenDownTime` (16-byte ABI-compatible with Win32 SYSTEMTIME). `DoGetTimeSt` now samples through `time::RealtimeBrokenDown` instead of inlining the RTC + Zeller's-congruence DOW; the conversion math + a `static_assert` confirm the ABI shape match. The local `SystemTime` struct + `ComputeDayOfWeek` helper in `time_syscall.cpp` stay for `DoStToFt`/`DoFtToSt` (pure ST↔FT conversions, no RTC involved). |
 | _D5-followup_ (this commit) | `x86_64-debug-ubsan` CMake preset added (inherits `x86_64-debug` + sets `DUETOS_ENABLE_UBSAN=ON`). New CMake option `DUETOS_ENABLE_UBSAN` adds `-fsanitize=undefined -fno-sanitize-trap=all` + defines `DUETOS_UBSAN=1` on both stage1 + final kernel targets. Daily builds stay on `x86_64-release`; the UBSAN preset is opt-in for runs that want compiler-emitted UB diagnostics resolved through the in-tree runtime. |
 | _D1-followup_ (this commit) | `LockClass class_id` field added to `sched::Mutex` (zero = unclassified, default). `MutexLock` / `MutexUnlock` / `MutexTryLock` now call `LockdepBefore/AfterAcquire` and `LockdepBeforeRelease`. Try-lock only feeds the held-stack on the success path so a failed try doesn't record a never-acquired edge. `RwLock` and per-instance Mutex tagging follow in a separate slice; the infrastructure is in place. New shell command `inspect lockdep` prints `inversions=N edges=N` plus the canonical class-ID/name table — read-only triage surface mirroring `inspect syscalls caps`. |
+| _D1-followup_ (this commit) | `LockClass class_id` field added to `sync::RwLock`; both shared and exclusive acquire/release paths now call `LockdepBeforeAcquire` / `LockdepAfterAcquire` / `LockdepBeforeRelease`. Try-acquire variants only record the held-edge on the success path. The inner `sched::Mutex` is intentionally NOT classified separately to avoid double-counting every RwLock acquire. Untagged RwLocks stay zero-overhead; per-instance RwLock users (the AddressSpace migration when it lands, etc.) get their tag in the slice that introduces them. |
+| _E2_ (this commit) | KPTI / Meltdown investigation produced `.claude/knowledge/kpti-meltdown-investigation-v0.md`. Answer: **no, kernel is currently unmitigated**, but the threat is only material on pre-Cascade-Lake / pre-Zen CPUs that lack `RDCL_NO`. Modern targets (Tiger Lake / Zen 3 +) are inherently safe in silicon, so KPTI lands on a "real machine that needs it enters the test fleet" trigger rather than speculatively. Recommended next step is a 50-line `arch::CpuMitigations::needs_kpti` runtime check that reads `IA32_ARCH_CAPABILITIES.RDCL_NO`; the KPTI implementation itself is gated on that signal. |
+| _A4-followup_ (this commit) | Three more rows added to `kSyscallCapTable`: `SYS_READ` (kCapFsRead), `SYS_SPAWN` (kCapFsRead), and `SYS_EXECVE` ((kCapFsRead | kCapSpawnThread) — the table's `(held & required) == required` check enforces multi-bit "all of" semantics). The corresponding in-handler `CapSetHas` / `RecordSandboxDenial` blocks were removed; the gate is now the sole authoritative check for these surfaces. The conditional cap surfaces (SYS_WRITE fd=1, SYS_PROCESS_OPEN foreign-PID, the cross-process VM read/write/protect/section-map family) are correctly left in their handlers — their authorisation depends on runtime arguments, not on the syscall number alone. Self-test in `cap_gate.cpp` already iterates every row, so the new entries are exercised at boot without code changes. |
 
 ### Deferred (in priority order — see "Recommended ordering" below)
 
@@ -45,8 +48,7 @@
 - [ ] A3-followup — Migrate Linux `LinuxFd` table into `HandleTable` once a `KFile` subclass exists
 - [ ] A2-followup — Add TSC clocksource (rating 300) once invariant-TSC calibration is implemented
 - [ ] A2-followup — Promote scheduler tick + periodic timer ownership into `kernel/time/timer.cpp` and `kernel/time/tick.cpp`
-- [ ] D1-followup — Add `class_id` field to `RwLock` and hook lockdep into its acquire/release paths (Mutex is already instrumented; RwLock builds on Mutex but its read-side path needs its own hook to make readers vs writers visible)
-- [ ] D1-followup — Tag per-instance `sched::Mutex` users (`compositor`, `audio_server`, …) with class IDs; the field is now there, but only the canonical SpinLocks have IDs assigned today
+- [ ] D1-followup — Tag per-instance `sched::Mutex` and `sync::RwLock` users (compositor, audio_server, AddressSpace's pending lock, …) with class IDs; the fields are now both there, but only the canonical SpinLocks have IDs assigned today
 - [ ] D1-followup — Promote inversion warnings to panics after a graph-stabilisation window (knob via shell command)
 - [ ] D1-followup — Per-CPU held-class stack once SMP per-CPU storage is real
 - [ ] D5-followup — Verify the UBSAN preset by deliberately overflowing a signed int + grepping for the emitted `[ubsan]` line (preset is wired but not exercised yet)
@@ -54,7 +56,7 @@
 - [ ] B2 — Per-CPU runqueues + work stealing (real SMP)
 - [ ] D1 — Lockdep-lite (locking-order graph)
 - [ ] E1 — Intel CET (shadow stack + IBT)
-- [ ] E2 — KPTI / Meltdown-mitigation status investigation
+- [ ] E2-followup — `arch::CpuMitigations::needs_kpti` runtime check (read `IA32_ARCH_CAPABILITIES.RDCL_NO`); KPTI implementation itself stays trigger-gated per investigation v0
 - [ ] C1 — Buddy allocator + memory zones (DMA / DMA32 / NORMAL / MMIO)
 - [ ] D2 — Dynamic event tracer (per-CPU ring, `TRACE_EVENT(...)`)
 - [ ] D7 — GDB serial stub on COM2

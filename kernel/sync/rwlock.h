@@ -1,6 +1,7 @@
 #pragma once
 
 #include "sched/sched.h"
+#include "sync/lockdep.h"
 #include "util/types.h"
 
 /*
@@ -56,6 +57,15 @@ struct RwLock
     u32 active_readers;        ///< Live shared holders.
     u32 waiting_writers;       ///< Writers blocked on writers_cv.
     bool writer_active;        ///< True iff one writer holds exclusive.
+    /// Lockdep class (plan D1-followup). Default 0 = unclassified
+    /// (no overhead). Tag with a canonical `kLockClass*` ID from
+    /// `sync/lockdep.h` to opt into locking-order validation.
+    /// Hooked from both the read and write acquire/release paths
+    /// so reader/writer order vs other tagged primitives is
+    /// recorded consistently. The inner `sched::Mutex` is NOT
+    /// independently classified — it would double-count every
+    /// RwLock acquire as a Mutex acquire too.
+    LockClass class_id;
 };
 
 /// Block until shared access is granted. Multiple callers may hold
