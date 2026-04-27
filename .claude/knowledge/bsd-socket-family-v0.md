@@ -28,6 +28,9 @@ in `syscall_clone.cpp::DoFork`.
 - `kernel/subsystems/linux/syscall_clone.cpp` — DoFork now copies parent fd table + retains pool refs
 - `kernel/subsystems/linux/syscall_pipe.{h,cpp}` — added `PipeRetainRead` / `PipeRetainWrite` / `EventfdRetain` for fork-inherit
 - `kernel/net/stack.{h,cpp}` — added `NetTcpActiveReadAt`, `NetTcpActiveSend`, `NetTcpActiveCloseTx`; UDP demux pre-checks SocketUdpDispatch; TCP RX wakes SocketTcpRxNotify
+- `kernel/syscall/syscall.{h,cpp}` — added `SYS_SOCKET_OP = 153` (multi-op shape, matches SYS_REGISTRY) with kCapNet gate; cap-gated dispatch covers kSockOpCreate / kSockOpBind / kSockOpConnect / kSockOpListen / kSockOpAccept / kSockOpSendto / kSockOpRecvfrom / kSockOpShutdown / kSockOpClose / kSockOpGetSock / kSockOpGetPeer
+- `userland/libs/ws2_32/ws2_32.c` — Winsock thunks rewritten to `int 0x80` SYS_SOCKET_OP via the `ws2_op` asm trampoline; wsa_translate_errno maps Linux errno → WSAExxx; WSAStartup returns success (was: WSAENETDOWN); WSAGetLastError reflects last failure
+- `kernel/CMakeLists.txt` — ws2_32 export list extended (inet_ntoa, inet_pton, inet_ntop, htonll, ntohll, WSAEnumProtocolsA/W, getnameinfo, WSAIoctl, ioctlsocket, getsockname, getpeername)
 
 ## Architecture
 
