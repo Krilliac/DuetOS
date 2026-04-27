@@ -16,6 +16,7 @@
 #include "subsystems/linux/inotify.h"
 #include "subsystems/linux/fanotify.h"
 #include "subsystems/linux/syscall_internal.h"
+#include "subsystems/win32/dir_syscall.h"
 
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
@@ -219,6 +220,9 @@ void InotifyPublish(const char* path, u32 mask)
     // Fan the same event out to fanotify subscribers. Lives outside
     // the inotify Cli/Sti window because fanotify owns its own.
     FanotifyPublishFromInotify(path, mask);
+    // Same hand-off into the Win32 dir-notify pool that backs
+    // NtNotifyChangeDirectoryFile.
+    ::duetos::subsystems::win32::Win32DirNotifyPublish(path, mask);
 }
 
 void InotifyRetain(u32 idx)

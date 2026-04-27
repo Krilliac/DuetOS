@@ -708,6 +708,13 @@ struct Process
         // process.h doesn't pull in fs/fat32.h beyond what it
         // already #includes.
         void* entries;
+        // Path the snapshot was taken from. Used by
+        // NtNotifyChangeDirectoryFile to subscribe to FS-mutation
+        // events on this directory. Volume-relative (no
+        // "/disk/<idx>" prefix) — matches the path format
+        // InotifyPublish receives. 64 byte cap matches the
+        // kernel's other path-handling limits.
+        char path[64];
     };
     Win32DirHandle win32_dirs[kWin32DirCap];
 

@@ -188,6 +188,8 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
         p->win32_dirs[i].next_index = 0;
         p->win32_dirs[i]._pad2 = 0;
         p->win32_dirs[i].entries = nullptr;
+        for (u32 j = 0; j < sizeof(p->win32_dirs[i].path); ++j)
+            p->win32_dirs[i].path[j] = 0;
     }
     p->thread_stack_cursor = Process::kV0ThreadStackArenaBase;
     // Win32 TLS — no slots allocated, all values zero.

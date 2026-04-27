@@ -41,4 +41,17 @@ void SysDirClose(core::Process* proc, u64 handle);
 // entries captured at OPEN time stay frozen for the handle's life.
 i64 SysDirRewind(u64 handle);
 
+// Backs NtNotifyChangeDirectoryFile. Blocks until the directory
+// pinned by `handle` (or the parent-of-path with subtree match)
+// has at least one matching mutation event, then writes a single
+// FILE_NOTIFY_INFORMATION record into the user buffer.
+i64 SysDirNotify(u64 handle, u64 filter, u64 watch_subtree, u64 user_buf, u64 buf_len);
+
+// Called from `kernel/subsystems/linux/inotify.cpp::InotifyPublish`
+// to fan an FS-mutation event out to every blocked
+// NtNotifyChangeDirectoryFile waiter whose subscription covers
+// `path`. Translates the inotify mask into the Win32 ACTION_*
+// bits the FILE_NOTIFY_INFORMATION record carries.
+void Win32DirNotifyPublish(const char* path, u32 in_mask);
+
 } // namespace duetos::subsystems::win32

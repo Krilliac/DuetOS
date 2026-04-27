@@ -2217,20 +2217,40 @@ __declspec(dllexport) NTSTATUS NtSetEaFile(HANDLE FileHandle, void* IoStatusBloc
     return (NTSTATUS)0xC0000002;
 }
 
+/* NtNotifyChangeDirectoryFile — backed by SYS_DIR_NOTIFY (= 157).
+ * Synchronous: blocks until the watched directory has at least
+ * one change matching CompletionFilter, then writes a single
+ * FILE_NOTIFY_INFORMATION record and returns. Real Windows packs
+ * many records and supports async via Event / APC; v0 caller
+ * loops to drain. Event / ApcRoutine / ApcContext accepted but
+ * ignored — sub-GAP. */
 __declspec(dllexport) NTSTATUS NtNotifyChangeDirectoryFile(HANDLE FileHandle, HANDLE Event, void* ApcRoutine,
                                                            void* ApcContext, void* IoStatusBlock, void* Buffer,
                                                            ULONG Length, ULONG CompletionFilter, BOOL WatchTree)
 {
-    (void)FileHandle;
     (void)Event;
     (void)ApcRoutine;
     (void)ApcContext;
-    (void)IoStatusBlock;
-    (void)Buffer;
-    (void)Length;
-    (void)CompletionFilter;
-    (void)WatchTree;
-    return (NTSTATUS)0xC0000002;
+    if (Buffer == (void*)0 || Length == 0)
+        return NTSTATUS_INVALID_PARAMETER;
+    long long rv;
+    __asm__ volatile("mov %4, %%r10\n\t"
+                     "mov %5, %%r8\n\t"
+                     "int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)157), /* SYS_DIR_NOTIFY */
+                       "D"((long long)FileHandle), "S"((long long)CompletionFilter), "d"((long long)WatchTree),
+                       "r"((long long)Buffer), "r"((long long)Length)
+                     : "r10", "r8", "memory");
+    if (rv < 0)
+        return (NTSTATUS)0xC0000008ULL; /* STATUS_INVALID_HANDLE */
+    if (IoStatusBlock != (void*)0)
+    {
+        unsigned long long* iosb = (unsigned long long*)IoStatusBlock;
+        iosb[0] = 0;                      /* NTSTATUS_SUCCESS */
+        iosb[1] = (unsigned long long)rv; /* bytes written */
+    }
+    return NTSTATUS_SUCCESS;
 }
 
 __declspec(dllexport) NTSTATUS NtCancelIoFile(HANDLE FileHandle, void* IoStatusBlock)

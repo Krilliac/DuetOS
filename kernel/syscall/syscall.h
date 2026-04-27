@@ -1557,6 +1557,18 @@ enum SyscallNumber : u64
     // handle. Does NOT re-snapshot the directory — the entries
     // captured at OPEN time stay frozen.
     SYS_DIR_REWIND = 156,
+
+    // SYS_DIR_NOTIFY — backs NtNotifyChangeDirectoryFile.
+    //   rdi = HANDLE  (must be a kWin32DirBase-range dir handle)
+    //   rsi = u32 filter (FILE_NOTIFY_CHANGE_*)
+    //   rdx = u8 watch_subtree (only the parent-of-path level
+    //         is honoured in v0; deeper subtree match is a sub-GAP)
+    //   r10 = u64 user_buffer  (FILE_NOTIFY_INFORMATION sequence)
+    //   r8  = u32 buffer_len
+    // Blocks until the watched path has at least one change event,
+    // then writes a single FILE_NOTIFY_INFORMATION record (caller
+    // loops). Returns bytes written or -1 on bad handle / overrun.
+    SYS_DIR_NOTIFY = 157,
 };
 
 // Cross-language record returned by SYS_DIR_NEXT. 96 bytes, exact
