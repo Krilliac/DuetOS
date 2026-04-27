@@ -43,6 +43,7 @@
  *   together until profile data argues otherwise.
  */
 
+#include "syscall/cap_gate.h"
 #include "syscall/syscall.h"
 
 #include "arch/x86_64/cpu.h"
@@ -424,6 +425,19 @@ void SyscallDispatch(arch::TrapFrame* frame)
     // process's lazy-allocated state — but the dispatcher itself
     // never mutates the process struct from this scope.
     subsystems::win32::custom::OnSyscallEntry(const_cast<Process*>(proc), num, frame);
+
+    // Centralised capability gate (plan A4). Consults
+    // `kSyscallCapTable` for syscalls whose authorisation reduces
+    // to a single static cap. Returns Ok for anything not in the
+    // table; the per-handler conditional checks (foreign vs self
+    // PID, fd=1 vs fd=2, etc.) still live in the switch arms below
+    // and remain authoritative for those cases.
+    if (!SyscallGate(num, proc).has_value())
+    {
+        frame->rax = static_cast<u64>(-1);
+        return;
+    }
+
     switch (num)
     {
     case SYS_EXIT:

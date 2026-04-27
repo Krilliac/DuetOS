@@ -105,7 +105,13 @@
 #include "fs/vfs.h"
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
+#include "ipc/handle_table.h"
+#include "ipc/kobject.h"
+#include "sync/lockdep.h"
+#include "sync/rwlock.h"
 #include "sync/spinlock.h"
+#include "time/clocksource.h"
+#include "time/timekeeper.h"
 #include "security/auth.h"
 #ifdef DUETOS_CRTRACE_SURVEY
 #include "diag/cleanroom_trace.h"
@@ -114,7 +120,9 @@
 #include "diag/heartbeat.h"
 #include "log/klog.h"
 #include "security/login.h"
+#include "core/init.h"
 #include "core/panic.h"
+#include "syscall/cap_gate.h"
 #include "proc/process.h"
 #include "util/random.h"
 #include "security/fault_domain.h"
@@ -373,6 +381,22 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // restarts it twice, checks counters. Real driver domains are
     // registered later in boot once their subsystems are up.
     duetos::core::FaultDomainSelfTest();
+
+    // Init-call registry self-test (plan A1). Exercises register +
+    // RunPhase + bad-argument + failing-callback paths against the
+    // fixed-size table in `core/init.cpp`. The infrastructure is
+    // landed; migration of `kernel_main`'s imperative call list to
+    // the registry is deferred (see plan A1 follow-up).
+    duetos::core::InitSelfTest();
+
+    // Centralised syscall capability gate (plan A4). Walks every
+    // row of `kSyscallCapTable` against synthetic empty / trusted
+    // processes; asserts empty fails, trusted passes, and that
+    // the unknown-syscall path is a no-op. The dispatcher itself
+    // already calls SyscallGate before each handler — this just
+    // verifies the table + lookup + denial path before any user
+    // code reaches the int 0x80 boundary.
+    duetos::core::SyscallGateSelfTest();
 
     SerialWrite("[boot] Parsing Multiboot2 memory map.\n");
     FrameAllocatorInit(multiboot_info);
@@ -979,6 +1003,17 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     HpetInit();
     HpetSelfTest();
 
+    // Clocksource registry + timekeeper (plan A2 infra). Registers
+    // HPET as the v0 monotonic clocksource so new code can call
+    // `time::MonotonicNs()` instead of inlining the
+    // counter*period_fs/1e6 math. Existing call sites (DoNowNs in
+    // time_syscall.cpp, etc.) are NOT migrated here — that's a
+    // tracked follow-up. Self-test exercises the registry without
+    // depending on real hardware.
+    duetos::time::ClocksourceSelfTest();
+    duetos::time::TimekeeperInit();
+    duetos::time::TimekeeperSelfTest();
+
     // Sample the CMOS RTC once at boot so the wall-clock time
     // is visible in the boot log. A future slice wires this
     // into the VFS stat path + Win32 GetSystemTimeAsFileTime.
@@ -1015,6 +1050,13 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     duetos::sync::SpinLockSelfTest();
 
+    // Lockdep-lite (plan D1 infra). Validates that the
+    // edge-graph + held-stack + cycle detection works in
+    // isolation; SpinLock / Mutex / RwLock are NOT yet hooked
+    // into it (deferred to D1 follow-ups). Runs early because
+    // it has no dependencies past arch::Cli/Sti.
+    duetos::sync::LockdepSelfTest();
+
     SerialWrite("[boot] Bringing up periodic timer.\n");
     TimerInit();
 
@@ -1027,6 +1069,24 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // workaround that used to depend on worker creation order.
     duetos::sched::SchedStartIdle("idle-bsp");
     duetos::sched::SchedStartReaper();
+
+    // RwLock self-test (plan B1.2). Walks every state-machine
+    // transition that can be exercised without contention (Try*,
+    // multi-reader, writer-blocks-readers, readers-block-writer).
+    // Real contention paths (Acquire blocks, Release wakes a
+    // waiter) only fire under SMP — covered by a follow-up once
+    // AP bring-up lands. Runs here because the scheduler is now
+    // online (RwLock uses sched::Mutex + Condvar internally).
+    duetos::sync::RwLockSelfTest();
+
+    // KObject + HandleTable infrastructure self-tests (plan A3).
+    // Verifies refcount + destroy-on-zero, plus the table's
+    // insert/lookup/duplicate/remove/drain matrix. The
+    // infrastructure is purely additive — existing per-type
+    // handle arrays on Process keep working unchanged. Migration
+    // of any current handle surface is tracked as a follow-up.
+    duetos::ipc::KObjectSelfTest();
+    duetos::ipc::HandleTableSelfTest();
 
     SerialWrite("[boot] Bringing up PS/2 keyboard.\n");
     duetos::drivers::input::Ps2KeyboardInit();

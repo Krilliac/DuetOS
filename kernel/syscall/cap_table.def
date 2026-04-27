@@ -1,0 +1,63 @@
+// DuetOS — native syscall capability table.
+//
+// One row per syscall whose authorisation reduces to "process must
+// hold a single static capability". The dispatcher consults this
+// table BEFORE any handler runs (`SyscallGate` in cap_gate.{h,cpp}):
+// missing caps return -1 and record a sandbox denial. Handlers that
+// also do an in-line `CapSetHas` check are belt-and-braces during
+// the migration — once every static-cap handler has the gate in
+// front of it, the in-line checks become redundant and can be
+// removed in a separate cleanup pass.
+//
+// Conditional cap requirements (e.g. SYS_PROCESS_OPEN: kCapDebug
+// for foreign PIDs only, none for self; SYS_WRITE: kCapSerialConsole
+// for fd=1 only) DO NOT belong here. They stay in the handler. Two
+// "static" caps required at once (e.g. SYS_SPAWN: kCapFsRead +
+// kCapSpawnThread) belong here only when both are unconditionally
+// required for any successful call.
+//
+// Format: X(SYS_NAME, REQUIRED_MASK)
+// REQUIRED_MASK is a u64 with one bit per `Cap` enumerator:
+//   (1ULL << kCapFsWrite), (1ULL << kCapFsRead), etc.
+// `0` means "no static cap" — but rows with REQUIRED_MASK == 0 are
+// not listed here; the absence of a row is the "no static cap"
+// signal. The lookup falls through to mask = 0 on any miss.
+//
+// Adding a new row: append an X(...) line, with a one-line comment
+// explaining why the cap is unconditionally required. Removing a
+// row downgrades the syscall to "handler enforces"; do that only
+// when the handler actually does a runtime check.
+
+// kCapFsWrite — mutate on-disk filesystem state.
+X(SYS_FILE_WRITE, (1ULL << ::duetos::core::kCapFsWrite))
+X(SYS_FILE_CREATE, (1ULL << ::duetos::core::kCapFsWrite))
+X(SYS_FILE_RENAME, (1ULL << ::duetos::core::kCapFsWrite))
+
+// kCapFsRead — read filesystem metadata / bytes.
+// SYS_FILE_OPEN intentionally omitted — open(O_CREAT) needs FsWrite
+// instead of FsRead; the conditional logic stays in the handler.
+X(SYS_STAT, (1ULL << ::duetos::core::kCapFsRead))
+X(SYS_FILE_FSTAT, (1ULL << ::duetos::core::kCapFsRead))
+X(SYS_FILE_QUERY_ATTRIBUTES, (1ULL << ::duetos::core::kCapFsRead))
+X(SYS_DIR_OPEN, (1ULL << ::duetos::core::kCapFsRead))
+X(SYS_DIR_NEXT, (1ULL << ::duetos::core::kCapFsRead))
+X(SYS_DIR_REWIND, (1ULL << ::duetos::core::kCapFsRead))
+
+// kCapSpawnThread — create an additional ring-3 task in the caller.
+X(SYS_THREAD_CREATE, (1ULL << ::duetos::core::kCapSpawnThread))
+
+// kCapDebug — install / remove hardware breakpoints on the caller.
+X(SYS_BP_INSTALL, (1ULL << ::duetos::core::kCapDebug))
+X(SYS_BP_REMOVE, (1ULL << ::duetos::core::kCapDebug))
+
+// kCapInput — async polling of keyboard / cursor state. Synchronous
+// WM_KEYDOWN / WM_MOUSEMOVE through the message pump is NOT gated;
+// only the unsolicited polling syscalls are.
+X(SYS_WIN_GET_KEYSTATE, (1ULL << ::duetos::core::kCapInput))
+X(SYS_WIN_GET_CURSOR, (1ULL << ::duetos::core::kCapInput))
+
+// kCapNet — every BSD-socket operation. The handler also does its
+// own check (returning -EACCES with errno-shaped negative); the
+// gate fires first with a -1 / sandbox-denial path. Both honour the
+// same cap, so any future split into Send/Recv touches one row.
+X(SYS_SOCKET_OP, (1ULL << ::duetos::core::kCapNet))
