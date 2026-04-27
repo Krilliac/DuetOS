@@ -77,6 +77,7 @@
 #include "subsystems/win32/mutex_syscall.h"
 #include "subsystems/win32/event_syscall.h"
 #include "subsystems/win32/dir_syscall.h"
+#include "subsystems/win32/iocp_job.h"
 #include "subsystems/win32/section.h"
 #include "subsystems/win32/spawn_syscall.h"
 #include "subsystems/win32/window_syscall.h"
@@ -1573,6 +1574,41 @@ void SyscallDispatch(arch::TrapFrame* frame)
         frame->rax = static_cast<u64>(rv);
         return;
     }
+
+    case SYS_IOCP_CREATE:
+        frame->rax = static_cast<u64>(::duetos::subsystems::win32::SysIocpCreate());
+        return;
+    case SYS_IOCP_SET:
+        frame->rax = static_cast<u64>(
+            ::duetos::subsystems::win32::SysIocpSet(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8));
+        return;
+    case SYS_IOCP_REMOVE:
+        frame->rax = static_cast<u64>(
+            ::duetos::subsystems::win32::SysIocpRemove(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8));
+        return;
+    case SYS_IOCP_CLOSE:
+        frame->rax = static_cast<u64>(::duetos::subsystems::win32::SysIocpClose(frame->rdi));
+        return;
+    case SYS_JOB_CREATE:
+        frame->rax = static_cast<u64>(::duetos::subsystems::win32::SysJobCreate());
+        return;
+    case SYS_JOB_ASSIGN:
+        frame->rax = static_cast<u64>(::duetos::subsystems::win32::SysJobAssign(frame->rdi, frame->rsi));
+        return;
+    case SYS_JOB_IS_IN:
+        frame->rax =
+            static_cast<u64>(::duetos::subsystems::win32::SysJobIsProcessIn(frame->rdi, frame->rsi, frame->rdx));
+        return;
+    case SYS_JOB_TERMINATE:
+        frame->rax = static_cast<u64>(::duetos::subsystems::win32::SysJobTerminate(frame->rdi, frame->rsi));
+        return;
+    case SYS_JOB_QUERY:
+        frame->rax =
+            static_cast<u64>(::duetos::subsystems::win32::SysJobQuery(frame->rdi, frame->rsi, frame->rdx, frame->r10));
+        return;
+    case SYS_JOB_CLOSE:
+        frame->rax = static_cast<u64>(::duetos::subsystems::win32::SysJobClose(frame->rdi));
+        return;
 
     case SYS_FILE_QUERY_ATTRIBUTES:
     {

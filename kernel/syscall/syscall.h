@@ -1575,6 +1575,20 @@ enum SyscallNumber : u64
     // ELF off FAT32, autodetects format by magic, dispatches to
     // SpawnPeFile / SpawnElfFile. Returns the new pid or -1.
     SYS_PROCESS_SPAWN = 158,
+
+    // IOCP — async I/O completion ports.
+    SYS_IOCP_CREATE = 159,
+    SYS_IOCP_SET = 160,
+    SYS_IOCP_REMOVE = 161,
+    SYS_IOCP_CLOSE = 162,
+
+    // JobObject — process-grouping container.
+    SYS_JOB_CREATE = 163,
+    SYS_JOB_ASSIGN = 164,
+    SYS_JOB_IS_IN = 165,
+    SYS_JOB_TERMINATE = 166,
+    SYS_JOB_QUERY = 167,
+    SYS_JOB_CLOSE = 168,
 };
 
 // Cross-language record returned by SYS_DIR_NEXT. 96 bytes, exact

@@ -2920,11 +2920,17 @@ __declspec(dllexport) NTSTATUS NtOpenTimer(HANDLE* TimerHandle, ULONG DesiredAcc
 __declspec(dllexport) NTSTATUS NtCreateIoCompletion(HANDLE* IoCompletionHandle, ULONG DesiredAccess,
                                                     void* ObjectAttributes, ULONG NumberOfConcurrentThreads)
 {
-    (void)IoCompletionHandle;
     (void)DesiredAccess;
     (void)ObjectAttributes;
     (void)NumberOfConcurrentThreads;
-    return (NTSTATUS)0xC0000002;
+    if (IoCompletionHandle == (HANDLE*)0)
+        return NTSTATUS_INVALID_PARAMETER;
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)159) : "memory"); /* SYS_IOCP_CREATE */
+    if (rv < 0)
+        return (NTSTATUS)0xC0000002;
+    *IoCompletionHandle = (HANDLE)rv;
+    return NTSTATUS_SUCCESS;
 }
 
 __declspec(dllexport) NTSTATUS NtOpenIoCompletion(HANDLE* IoCompletionHandle, ULONG DesiredAccess,
@@ -2933,43 +2939,95 @@ __declspec(dllexport) NTSTATUS NtOpenIoCompletion(HANDLE* IoCompletionHandle, UL
     (void)IoCompletionHandle;
     (void)DesiredAccess;
     (void)ObjectAttributes;
+    /* No named-object table — open-by-name returns NAME_NOT_FOUND. */
     return (NTSTATUS)0xC0000034;
 }
 
 __declspec(dllexport) NTSTATUS NtSetIoCompletion(HANDLE IoCompletionHandle, void* CompletionKey, void* CompletionValue,
                                                  NTSTATUS CompletionStatus, ULONG NumberOfBytesTransferred)
 {
-    (void)IoCompletionHandle;
-    (void)CompletionKey;
-    (void)CompletionValue;
-    (void)CompletionStatus;
-    (void)NumberOfBytesTransferred;
-    return (NTSTATUS)0xC0000002;
+    long long rv;
+    __asm__ volatile("mov %4, %%r10\n\t"
+                     "mov %5, %%r8\n\t"
+                     "int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)160), /* SYS_IOCP_SET */
+                       "D"((long long)IoCompletionHandle), "S"((long long)CompletionKey),
+                       "d"((long long)CompletionValue), "r"((long long)CompletionStatus),
+                       "r"((long long)NumberOfBytesTransferred)
+                     : "r10", "r8", "memory");
+    if (rv < 0)
+        return (NTSTATUS)0xC0000008; /* INVALID_HANDLE */
+    return NTSTATUS_SUCCESS;
 }
 
 __declspec(dllexport) NTSTATUS NtRemoveIoCompletion(HANDLE IoCompletionHandle, void* CompletionKey,
                                                     void* CompletionValue, void* IoStatusBlock, void* Timeout)
 {
-    (void)IoCompletionHandle;
-    (void)CompletionKey;
-    (void)CompletionValue;
-    (void)IoStatusBlock;
-    (void)Timeout;
-    return (NTSTATUS)0xC0000002;
+    /* Timeout is a pointer to a LARGE_INTEGER (NT 100ns ticks).
+     * v0 collapses to "infinite if non-null, immediate if null".
+     * Sub-GAP: real timeout integration not wired. */
+    const unsigned long long timeout_ms = (Timeout != (void*)0) ? (unsigned long long)-1 : 0;
+    long long rv;
+    __asm__ volatile("mov %4, %%r10\n\t"
+                     "mov %5, %%r8\n\t"
+                     "int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)161), /* SYS_IOCP_REMOVE */
+                       "D"((long long)IoCompletionHandle), "S"((long long)CompletionKey),
+                       "d"((long long)CompletionValue), "r"((long long)IoStatusBlock), "r"(timeout_ms)
+                     : "r10", "r8", "memory");
+    if (rv < 0)
+        return (NTSTATUS)0xC0000008;
+    if (rv == 0)
+        return (NTSTATUS)0x00000102; /* STATUS_TIMEOUT */
+    return NTSTATUS_SUCCESS;
 }
 
 __declspec(dllexport) NTSTATUS NtRemoveIoCompletionEx(HANDLE IoCompletionHandle, void* IoCompletionInformation,
                                                       ULONG Count, ULONG* NumEntriesRemoved, void* Timeout,
                                                       BOOL Alertable)
 {
-    (void)IoCompletionHandle;
-    (void)IoCompletionInformation;
-    (void)Count;
+    (void)Alertable;
     if (NumEntriesRemoved != (ULONG*)0)
         *NumEntriesRemoved = 0;
-    (void)Timeout;
-    (void)Alertable;
-    return (NTSTATUS)0xC0000002;
+    if (Count == 0 || IoCompletionInformation == (void*)0)
+        return NTSTATUS_INVALID_PARAMETER;
+    /* Loop NtRemoveIoCompletion to fill the caller's array. Each
+     * record is 32 bytes (key + apcctx + IO_STATUS_BLOCK). The
+     * shape matches OVERLAPPED_ENTRY {lpCompletionKey, lpOverlapped,
+     * Internal, dwNumberOfBytesTransferred}. */
+    unsigned char* out = (unsigned char*)IoCompletionInformation;
+    unsigned filled = 0;
+    for (unsigned i = 0; i < Count; ++i)
+    {
+        unsigned long long iosb[2];
+        unsigned long long key = 0;
+        unsigned long long apc = 0;
+        const unsigned long long timeout_ms = (i == 0 && Timeout != (void*)0) ? (unsigned long long)-1 : 0;
+        long long rv;
+        __asm__ volatile("mov %4, %%r10\n\t"
+                         "mov %5, %%r8\n\t"
+                         "int $0x80"
+                         : "=a"(rv)
+                         : "a"((long long)161), "D"((long long)IoCompletionHandle), "S"((long long)&key),
+                           "d"((long long)&apc), "r"((long long)iosb), "r"(timeout_ms)
+                         : "r10", "r8", "memory");
+        if (rv != 1)
+            break;
+        unsigned base = i * 32;
+        for (unsigned j = 0; j < 8; ++j)
+        {
+            out[base + j] = (unsigned char)((key >> (j * 8)) & 0xFF);
+            out[base + 8 + j] = (unsigned char)((apc >> (j * 8)) & 0xFF);
+            out[base + 16 + j] = (unsigned char)((iosb[0] >> (j * 8)) & 0xFF);
+            out[base + 24 + j] = (unsigned char)((iosb[1] >> (j * 8)) & 0xFF);
+        }
+        ++filled;
+    }
+    if (NumEntriesRemoved != (ULONG*)0)
+        *NumEntriesRemoved = filled;
+    return filled > 0 ? NTSTATUS_SUCCESS : (NTSTATUS)0x00000102;
 }
 
 /* ------------------------------------------------------------------
@@ -3455,10 +3513,16 @@ __declspec(dllexport) NTSTATUS NtQueryDebugFilterState(ULONG ComponentId, ULONG 
  * ------------------------------------------------------------------ */
 __declspec(dllexport) NTSTATUS NtCreateJobObject(HANDLE* JobHandle, ULONG DesiredAccess, void* ObjectAttributes)
 {
-    (void)JobHandle;
     (void)DesiredAccess;
     (void)ObjectAttributes;
-    return (NTSTATUS)0xC0000002;
+    if (JobHandle == (HANDLE*)0)
+        return NTSTATUS_INVALID_PARAMETER;
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)163) : "memory"); /* SYS_JOB_CREATE */
+    if (rv < 0)
+        return (NTSTATUS)0xC0000002;
+    *JobHandle = (HANDLE)rv;
+    return NTSTATUS_SUCCESS;
 }
 
 __declspec(dllexport) NTSTATUS ZwCreateJobObject(HANDLE* JobHandle, ULONG DesiredAccess, void* ObjectAttributes)
@@ -3468,9 +3532,15 @@ __declspec(dllexport) NTSTATUS ZwCreateJobObject(HANDLE* JobHandle, ULONG Desire
 
 __declspec(dllexport) NTSTATUS NtAssignProcessToJobObject(HANDLE JobHandle, HANDLE ProcessHandle)
 {
-    (void)JobHandle;
-    (void)ProcessHandle;
-    return (NTSTATUS)0xC0000002;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)164), /* SYS_JOB_ASSIGN */
+                       "D"((long long)JobHandle), "S"((long long)ProcessHandle)
+                     : "memory");
+    if (rv < 0)
+        return (NTSTATUS)0xC0000022; /* STATUS_ACCESS_DENIED */
+    return NTSTATUS_SUCCESS;
 }
 
 __declspec(dllexport) NTSTATUS ZwAssignProcessToJobObject(HANDLE JobHandle, HANDLE ProcessHandle)
@@ -3478,17 +3548,56 @@ __declspec(dllexport) NTSTATUS ZwAssignProcessToJobObject(HANDLE JobHandle, HAND
     return NtAssignProcessToJobObject(JobHandle, ProcessHandle);
 }
 
+__declspec(dllexport) NTSTATUS NtIsProcessInJob(HANDLE ProcessHandle, HANDLE JobHandle)
+{
+    /* Returns STATUS_PROCESS_IN_JOB (1) or STATUS_PROCESS_NOT_IN_JOB (0). */
+    unsigned int out = 0;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)165), /* SYS_JOB_IS_IN */
+                       "D"((long long)JobHandle), "S"((long long)ProcessHandle), "d"((long long)&out)
+                     : "memory");
+    if (rv < 0)
+        return (NTSTATUS)0xC0000008;
+    return (NTSTATUS)(out ? 0x00000001 : 0x00000000);
+}
+
+__declspec(dllexport) NTSTATUS NtTerminateJobObject(HANDLE JobHandle, NTSTATUS ExitStatus)
+{
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)166), /* SYS_JOB_TERMINATE */
+                       "D"((long long)JobHandle), "S"((long long)ExitStatus)
+                     : "memory");
+    if (rv < 0)
+        return (NTSTATUS)0xC0000008;
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS ZwTerminateJobObject(HANDLE JobHandle, NTSTATUS ExitStatus)
+{
+    return NtTerminateJobObject(JobHandle, ExitStatus);
+}
+
 __declspec(dllexport) NTSTATUS NtQueryInformationJobObject(HANDLE JobHandle, ULONG JobObjectInformationClass,
                                                            void* JobObjectInformation, ULONG JobObjectInformationLength,
                                                            ULONG* ReturnLength)
 {
-    (void)JobHandle;
-    (void)JobObjectInformationClass;
-    (void)JobObjectInformation;
-    (void)JobObjectInformationLength;
+    long long rv;
+    __asm__ volatile("mov %4, %%r10\n\t"
+                     "int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)167), /* SYS_JOB_QUERY */
+                       "D"((long long)JobHandle), "S"((long long)JobObjectInformationClass),
+                       "d"((long long)JobObjectInformation), "r"((long long)JobObjectInformationLength)
+                     : "r10", "memory");
+    if (rv < 0)
+        return (NTSTATUS)0xC0000004; /* STATUS_INFO_LENGTH_MISMATCH */
     if (ReturnLength != (ULONG*)0)
-        *ReturnLength = 0;
-    return (NTSTATUS)0xC0000002;
+        *ReturnLength = (ULONG)rv;
+    return NTSTATUS_SUCCESS;
 }
 
 __declspec(dllexport) NTSTATUS ZwQueryInformationJobObject(HANDLE JobHandle, ULONG JobObjectInformationClass,
@@ -3516,26 +3625,11 @@ __declspec(dllexport) NTSTATUS ZwSetInformationJobObject(HANDLE JobHandle, ULONG
                                      JobObjectInformationLength);
 }
 
-__declspec(dllexport) NTSTATUS NtTerminateJobObject(HANDLE JobHandle, NTSTATUS ExitStatus)
-{
-    (void)JobHandle;
-    (void)ExitStatus;
-    return (NTSTATUS)0xC0000002;
-}
-
-__declspec(dllexport) NTSTATUS ZwTerminateJobObject(HANDLE JobHandle, NTSTATUS ExitStatus)
-{
-    return NtTerminateJobObject(JobHandle, ExitStatus);
-}
-
-__declspec(dllexport) NTSTATUS NtIsProcessInJob(HANDLE ProcessHandle, HANDLE JobHandle)
-{
-    (void)ProcessHandle;
-    (void)JobHandle;
-    /* STATUS_PROCESS_NOT_IN_JOB = 0x00000123. Not a job. v0 has
-     * no job engine; every process answers "no job." */
-    return (NTSTATUS)0x00000123;
-}
+/* NtTerminateJobObject / ZwTerminateJobObject / NtIsProcessInJob /
+ * ZwIsProcessInJob now have real implementations earlier in this
+ * file (backed by SYS_JOB_TERMINATE / SYS_JOB_IS_IN). The old
+ * NotImpl stubs were removed; this comment is here so a grep for
+ * the legacy stub returns the new spot. */
 
 __declspec(dllexport) NTSTATUS ZwIsProcessInJob(HANDLE ProcessHandle, HANDLE JobHandle)
 {
