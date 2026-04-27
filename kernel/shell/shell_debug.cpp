@@ -30,6 +30,8 @@
 #include "diag/kdbg.h"
 #include "log/klog.h"
 #include "diag/runtime_checker.h"
+#include "syscall/cap_gate.h"
+#include "syscall/syscall_names.h"
 #include "util/symbols.h"
 
 namespace duetos::core::shell::internal
@@ -171,16 +173,77 @@ void CmdInspectHelp()
 {
     ConsoleWriteln("INSPECT: RE / TRIAGE UMBRELLA (SEE COM1 FOR REPORTS)");
     ConsoleWriteln("  INSPECT SYSCALLS KERNEL | <PATH>  FIND SYSCALL SITES + COVERAGE");
+    ConsoleWriteln("  INSPECT SYSCALLS CAPS             DUMP CAP-TABLE: REQUIRED CAP PER SYSCALL");
     ConsoleWriteln("  INSPECT OPCODES <PATH>            FIRST-BYTE HISTOGRAM + CLASS TALLY");
     ConsoleWriteln("  INSPECT ARM ON|OFF|STATUS         ONE-SHOT OPCODES SCAN ON NEXT SPAWN");
     ConsoleWriteln("  INSPECT HELP                      THIS LIST");
+}
+
+// Walk every row of `kSyscallCapTable` and print, for each:
+//   - the syscall number (decimal + hex),
+//   - its `SYS_FOO` identifier (via `SyscallNumberName`),
+//   - the first cap bit set in the required mask, resolved through
+//     `CapName`,
+//   - the raw mask in hex.
+//
+// Output goes to COM1 in machine-greppable shape (`[inspect-sc-caps]
+// row ...`) so a future audit tool can diff the table across boots.
+// A summary line at the end records the row count, mirroring the
+// existing `inspect syscalls` site report.
+void CmdInspectSyscallsCaps()
+{
+    using duetos::arch::SerialWrite;
+    using duetos::arch::SerialWriteHex;
+
+    ConsoleWriteln("INSPECT SYSCALLS CAPS: DUMPING CAP TABLE (SEE COM1)");
+
+    SerialWrite("[inspect-sc-caps] start rows=");
+    SerialWriteHex(::duetos::core::kSyscallCapTableCount);
+    SerialWrite("\n");
+
+    for (u32 i = 0; i < ::duetos::core::kSyscallCapTableCount; ++i)
+    {
+        const auto& row = ::duetos::core::kSyscallCapTable[i];
+        const char* sys_name = ::duetos::core::SyscallNumberName(row.nr);
+        if (sys_name == nullptr)
+            sys_name = "<unknown>";
+
+        // First cap bit set in the mask. Mirrors the gate's
+        // `FirstMissingCap` so audit output matches denial logs.
+        ::duetos::core::Cap first = ::duetos::core::kCapNone;
+        for (u32 c = 1; c < static_cast<u32>(::duetos::core::kCapCount); ++c)
+        {
+            if ((row.required_mask & (1ULL << c)) != 0)
+            {
+                first = static_cast<::duetos::core::Cap>(c);
+                break;
+            }
+        }
+        const char* cap_name = (first == ::duetos::core::kCapNone) ? "<none>" : ::duetos::core::CapName(first);
+
+        SerialWrite("[inspect-sc-caps] row nr=");
+        SerialWriteHex(row.nr);
+        SerialWrite(" name=");
+        SerialWrite(sys_name);
+        SerialWrite(" cap=");
+        SerialWrite(cap_name);
+        SerialWrite(" mask=");
+        SerialWriteHex(row.required_mask);
+        SerialWrite("\n");
+    }
+
+    SerialWrite("[inspect-sc-caps] summary rows=");
+    SerialWriteHex(::duetos::core::kSyscallCapTableCount);
+    SerialWrite("\n");
+
+    ConsoleWriteln("INSPECT SYSCALLS CAPS: DONE");
 }
 
 void CmdInspectSyscalls(u32 argc, char** argv)
 {
     if (argc < 3)
     {
-        ConsoleWriteln("INSPECT SYSCALLS: USAGE: INSPECT SYSCALLS KERNEL | <PATH>");
+        ConsoleWriteln("INSPECT SYSCALLS: USAGE: INSPECT SYSCALLS KERNEL | CAPS | <PATH>");
         return;
     }
     if (StrEq(argv[2], "kernel"))
@@ -188,6 +251,11 @@ void CmdInspectSyscalls(u32 argc, char** argv)
         ConsoleWriteln("INSPECT SYSCALLS: SCANNING KERNEL .TEXT (SEE COM1)");
         (void)duetos::debug::SyscallScanKernelText();
         ConsoleWriteln("INSPECT SYSCALLS: DONE");
+        return;
+    }
+    if (StrEq(argv[2], "caps"))
+    {
+        CmdInspectSyscallsCaps();
         return;
     }
     ConsoleWrite("INSPECT SYSCALLS: SCANNING FILE \"");

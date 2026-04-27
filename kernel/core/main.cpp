@@ -1062,10 +1062,19 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     // Lockdep-lite (plan D1 infra). Validates that the
     // edge-graph + held-stack + cycle detection works in
-    // isolation; SpinLock / Mutex / RwLock are NOT yet hooked
-    // into it (deferred to D1 follow-ups). Runs early because
-    // it has no dependencies past arch::Cli/Sti.
+    // isolation. SpinLock acquire/release paths now call into
+    // the lockdep hooks (D1-followup); untagged locks pay one
+    // compare-and-skip per call. Mutex / RwLock instrumentation
+    // is still deferred. Runs early because it has no
+    // dependencies past arch::Cli/Sti.
     duetos::sync::LockdepSelfTest();
+    // Name the canonical hot global locks (sched / kobject /
+    // kstack / pci-config / breakpoints) so any inversion
+    // detected post-self-test prints readable names instead of
+    // raw class IDs. Idempotent; called after the self-test so
+    // self-test scratch names don't get clobbered by names that
+    // need to be live for the rest of boot.
+    duetos::sync::LockdepRegisterCanonicalClasses();
 
     SerialWrite("[boot] Bringing up periodic timer.\n");
     TimerInit();

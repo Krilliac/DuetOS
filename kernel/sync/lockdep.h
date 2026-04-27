@@ -72,6 +72,22 @@ inline constexpr LockClass kLockClassUnclassified = 0;
 /// kernel needs; raising it doubles graph memory.
 inline constexpr LockClass kLockClassMax = 256;
 
+/// Canonical class IDs for the kernel's hot global locks. Tagging
+/// is opt-in: a lock declared without `class_id` set stays
+/// unclassified and bypasses the lockdep hooks. IDs in the
+/// 0x01..0x3F range are reserved for hot globals; the self-test
+/// uses 0x40..0xFF for scratch classes (see lockdep.cpp).
+///
+/// Ordering convention (the order locks should be acquired in if
+/// nested): scheduler runqueue → kobject ledger → kstack arena →
+/// PCI config. Acquiring against this order is what lockdep is
+/// here to flag.
+inline constexpr LockClass kLockClassSched = 0x01;
+inline constexpr LockClass kLockClassKObject = 0x02;
+inline constexpr LockClass kLockClassKStack = 0x03;
+inline constexpr LockClass kLockClassPciConfig = 0x04;
+inline constexpr LockClass kLockClassBreakpoints = 0x05;
+
 /// Maximum simultaneous holders per CPU. A code path that acquires
 /// more than this many locks at once trips a warning and lockdep
 /// degrades to "skip the deepest lock" — the existing kernel
@@ -125,6 +141,15 @@ u64 LockdepInversionsDetected();
 /// the warm-up phase indicates a code path is acquiring locks in
 /// orders never previously seen.
 u64 LockdepEdgesRecorded();
+
+/// Register the canonical names for the kLockClass* constants
+/// declared above (sched / kobject / kstack / pci-config /
+/// breakpoints). Called from `kernel_main` after the lockdep
+/// self-test so any subsequent SpinLock acquire that crosses a
+/// tagged class fires its hooks against named classes — inversion
+/// reports become readable instead of "class 0x01 vs class 0x03".
+/// Idempotent; safe to call more than once.
+void LockdepRegisterCanonicalClasses();
 
 /// Boot-time self-test. Registers two scratch classes, simulates
 /// `acquire(A); acquire(B); release(B); release(A)` (the good

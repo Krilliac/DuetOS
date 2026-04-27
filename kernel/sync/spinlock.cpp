@@ -2,9 +2,10 @@
 
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
-#include "log/klog.h"
 #include "core/panic.h"
 #include "cpu/percpu.h"
+#include "log/klog.h"
+#include "sync/lockdep.h"
 
 // Holder-tracking knob — gated on the kernel having installed
 // PerCpu, since the per-CPU stack lives there. Acquires before
@@ -120,6 +121,12 @@ IrqFlags SpinLockAcquire(SpinLock& lock)
     const u64 flags = ReadRflags();
     arch::Cli();
 
+    // Lockdep edge-walk: BEFORE acquire so the "held → this" edge is
+    // recorded against the locks already on the stack. Untagged
+    // locks (class_id == kLockClassUnclassified) short-circuit
+    // inside the hook for one compare and a return.
+    LockdepBeforeAcquire(lock.class_id);
+
     for (;;)
     {
         if (XchgU32(lock.locked, 1) == 0)
@@ -131,6 +138,9 @@ IrqFlags SpinLockAcquire(SpinLock& lock)
             // dump will resolve this back to fn+offset via the
             // embedded symbol table.
             HeldLocksPush(lock, reinterpret_cast<u64>(__builtin_return_address(0)));
+            // After successful acquire — push onto the lockdep
+            // held stack so the next acquire's edge walk sees us.
+            LockdepAfterAcquire(lock.class_id);
             return IrqFlags{.rflags = flags};
         }
 
@@ -158,6 +168,10 @@ void SpinLockRelease(SpinLock& lock, IrqFlags flags)
         PanicSpinlock("SpinLockRelease by wrong CPU");
     }
 
+    // Pop from lockdep held-class stack BEFORE the lock word goes
+    // back to zero — keeps the lockdep view consistent with what's
+    // actually held.
+    LockdepBeforeRelease(lock.class_id);
     HeldLocksPop(lock);
     lock.owner_cpu = 0xFFFFFFFFu;
     // Plain store is correct on x86 — regular stores are already

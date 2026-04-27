@@ -225,6 +225,15 @@ u64 LockdepEdgesRecorded()
     return g_edges_recorded;
 }
 
+void LockdepRegisterCanonicalClasses()
+{
+    LockdepRegisterClass(kLockClassSched, "sched");
+    LockdepRegisterClass(kLockClassKObject, "kobject");
+    LockdepRegisterClass(kLockClassKStack, "kstack");
+    LockdepRegisterClass(kLockClassPciConfig, "pci-config");
+    LockdepRegisterClass(kLockClassBreakpoints, "breakpoints");
+}
+
 namespace
 {
 

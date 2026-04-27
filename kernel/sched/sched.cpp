@@ -286,7 +286,11 @@ constinit u64 g_tasks_exited = 0;
 // context switch, then try to schedule INTO prev while we're still
 // on prev's stack. Commit D fixes via lock-passing-across-switch,
 // mirroring Linux's finish_task_switch pattern.
-constinit sync::SpinLock g_sched_lock{};
+// Tagged with `kLockClassSched` so the lockdep-lite locking-order
+// graph (sync/lockdep.h) records every "lock-X-was-held when sched
+// was acquired" pairing. Untagged locks pay nothing; the scheduler
+// runqueue is THE most contended global, so it gets first.
+constinit sync::SpinLock g_sched_lock{.locked = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassSched};
 
 // Current() and NeedResched() moved to cpu::PerCpu. Per-CPU accessors
 // keep call sites terse and read unambiguously: Current() is the
