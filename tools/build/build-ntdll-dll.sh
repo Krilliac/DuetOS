@@ -225,6 +225,28 @@ set +e
     /export:NtSetEaFile \
     /export:NtNotifyChangeDirectoryFile \
     /export:NtCancelIoFile \
+    /export:NtCreateProcess \
+    /export:ZwCreateProcess=NtCreateProcess \
+    /export:NtCreateProcessEx \
+    /export:ZwCreateProcessEx=NtCreateProcessEx \
+    /export:NtCreateUserProcess \
+    /export:ZwCreateUserProcess=NtCreateUserProcess \
+    /export:NtSuspendProcess \
+    /export:NtResumeProcess \
+    /export:NtAccessCheck \
+    /export:NtPrivilegeCheck \
+    /export:NtImpersonateThread \
+    /export:NtImpersonateAnonymousToken \
+    /export:NtSetInformationThread \
+    /export:ZwSetInformationThread=NtSetInformationThread \
+    /export:NtQueryInformationThread \
+    /export:ZwQueryInformationThread=NtQueryInformationThread \
+    /export:NtSetInformationProcess \
+    /export:ZwSetInformationProcess=NtSetInformationProcess \
+    /export:NtCreateKeyedEvent \
+    /export:NtOpenKeyedEvent \
+    /export:NtWaitForKeyedEvent \
+    /export:NtReleaseKeyedEvent \
     /export:NtContinue \
     /export:ZwContinue=NtContinue \
     /export:NtAllocateVirtualMemory \

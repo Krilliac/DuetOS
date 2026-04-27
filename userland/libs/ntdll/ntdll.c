@@ -2247,6 +2247,280 @@ __declspec(dllexport) NTSTATUS NtCancelIoFile(HANDLE FileHandle, void* IoStatusB
 }
 
 /* ------------------------------------------------------------------
+ * NT process-creation thunks — explicit NotImpl facades.
+ *
+ * v0 has no Win32 PE process spawn pipeline. Process creation
+ * happens at boot via the loader; runtime PE spawn via Win32 API
+ * needs a section-from-file path that doesn't exist yet (sub-GAP
+ * in §11.8). NtCreateUserProcess (the modern Vista+ API) gets
+ * the same treatment.
+ *
+ * NtSuspendProcess / NtResumeProcess work at the per-process
+ * granularity by walking every thread; v0 returns NotImpl
+ * because that walk needs the §11.7-style suspend infrastructure
+ * extended to whole-process scope. Per-thread NtSuspendThread is
+ * the working alternative.
+ * ------------------------------------------------------------------ */
+__declspec(dllexport) NTSTATUS NtCreateProcess(HANDLE* ProcessHandle, ULONG DesiredAccess, void* ObjectAttributes,
+                                               HANDLE ParentProcess, BOOL InheritObjectTable, HANDLE SectionHandle,
+                                               HANDLE DebugPort, HANDLE ExceptionPort)
+{
+    (void)ProcessHandle;
+    (void)DesiredAccess;
+    (void)ObjectAttributes;
+    (void)ParentProcess;
+    (void)InheritObjectTable;
+    (void)SectionHandle;
+    (void)DebugPort;
+    (void)ExceptionPort;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS ZwCreateProcess(HANDLE* ProcessHandle, ULONG DesiredAccess, void* ObjectAttributes,
+                                               HANDLE ParentProcess, BOOL InheritObjectTable, HANDLE SectionHandle,
+                                               HANDLE DebugPort, HANDLE ExceptionPort)
+{
+    return NtCreateProcess(ProcessHandle, DesiredAccess, ObjectAttributes, ParentProcess, InheritObjectTable,
+                           SectionHandle, DebugPort, ExceptionPort);
+}
+
+__declspec(dllexport) NTSTATUS NtCreateProcessEx(HANDLE* ProcessHandle, ULONG DesiredAccess, void* ObjectAttributes,
+                                                 HANDLE ParentProcess, ULONG Flags, HANDLE SectionHandle,
+                                                 HANDLE DebugPort, HANDLE ExceptionPort, ULONG JobMemberLevel)
+{
+    (void)ProcessHandle;
+    (void)DesiredAccess;
+    (void)ObjectAttributes;
+    (void)ParentProcess;
+    (void)Flags;
+    (void)SectionHandle;
+    (void)DebugPort;
+    (void)ExceptionPort;
+    (void)JobMemberLevel;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS ZwCreateProcessEx(HANDLE* ProcessHandle, ULONG DesiredAccess, void* ObjectAttributes,
+                                                 HANDLE ParentProcess, ULONG Flags, HANDLE SectionHandle,
+                                                 HANDLE DebugPort, HANDLE ExceptionPort, ULONG JobMemberLevel)
+{
+    return NtCreateProcessEx(ProcessHandle, DesiredAccess, ObjectAttributes, ParentProcess, Flags, SectionHandle,
+                             DebugPort, ExceptionPort, JobMemberLevel);
+}
+
+__declspec(dllexport) NTSTATUS NtCreateUserProcess(HANDLE* ProcessHandle, HANDLE* ThreadHandle,
+                                                   ULONG ProcessDesiredAccess, ULONG ThreadDesiredAccess,
+                                                   void* ProcessObjectAttributes, void* ThreadObjectAttributes,
+                                                   ULONG ProcessFlags, ULONG ThreadFlags, void* ProcessParameters,
+                                                   void* CreateInfo, void* AttributeList)
+{
+    (void)ProcessHandle;
+    (void)ThreadHandle;
+    (void)ProcessDesiredAccess;
+    (void)ThreadDesiredAccess;
+    (void)ProcessObjectAttributes;
+    (void)ThreadObjectAttributes;
+    (void)ProcessFlags;
+    (void)ThreadFlags;
+    (void)ProcessParameters;
+    (void)CreateInfo;
+    (void)AttributeList;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS ZwCreateUserProcess(HANDLE* ProcessHandle, HANDLE* ThreadHandle,
+                                                   ULONG ProcessDesiredAccess, ULONG ThreadDesiredAccess,
+                                                   void* ProcessObjectAttributes, void* ThreadObjectAttributes,
+                                                   ULONG ProcessFlags, ULONG ThreadFlags, void* ProcessParameters,
+                                                   void* CreateInfo, void* AttributeList)
+{
+    return NtCreateUserProcess(ProcessHandle, ThreadHandle, ProcessDesiredAccess, ThreadDesiredAccess,
+                               ProcessObjectAttributes, ThreadObjectAttributes, ProcessFlags, ThreadFlags,
+                               ProcessParameters, CreateInfo, AttributeList);
+}
+
+__declspec(dllexport) NTSTATUS NtSuspendProcess(HANDLE ProcessHandle)
+{
+    (void)ProcessHandle;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtResumeProcess(HANDLE ProcessHandle)
+{
+    (void)ProcessHandle;
+    return (NTSTATUS)0xC0000002;
+}
+
+/* ------------------------------------------------------------------
+ * NT access-check / privilege / impersonation — explicit
+ * NotImpl / accept-pass facades. v0 cap-gates on kCapDebug etc.
+ * at the kernel; the Win32 access-check surface is a façade.
+ * NtAccessCheck returns granted=true so callers don't loop on
+ * a stuck "permission denied"; the real gating is kernel-side.
+ * NtRevertToSelf is success-no-op (no impersonation token to
+ * revert from).
+ * ------------------------------------------------------------------ */
+__declspec(dllexport) NTSTATUS NtAccessCheck(void* SecurityDescriptor, HANDLE ClientToken, ULONG DesiredAccess,
+                                             void* GenericMapping, void* PrivilegeSet, ULONG* PrivilegeSetLength,
+                                             ULONG* GrantedAccess, BOOL* AccessStatus)
+{
+    (void)SecurityDescriptor;
+    (void)ClientToken;
+    (void)GenericMapping;
+    (void)PrivilegeSet;
+    (void)PrivilegeSetLength;
+    if (GrantedAccess != (ULONG*)0)
+        *GrantedAccess = DesiredAccess;
+    if (AccessStatus != (BOOL*)0)
+        *AccessStatus = 1;
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS NtPrivilegeCheck(HANDLE ClientToken, void* RequiredPrivileges, BOOL* Result)
+{
+    (void)ClientToken;
+    (void)RequiredPrivileges;
+    if (Result != (BOOL*)0)
+        *Result = 1;
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS NtImpersonateThread(HANDLE ServerThreadHandle, HANDLE ClientThreadHandle,
+                                                   void* SecurityQos)
+{
+    (void)ServerThreadHandle;
+    (void)ClientThreadHandle;
+    (void)SecurityQos;
+    /* No impersonation engine in v0. Returning success keeps
+     * RPC-shaped probes happy; the actual identity of every
+     * task is the same single-user model. */
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS NtImpersonateAnonymousToken(HANDLE ThreadHandle)
+{
+    (void)ThreadHandle;
+    return NTSTATUS_SUCCESS;
+}
+
+/* RtlSetImpersonationToken — referenced by some Win32 callers
+ * for thread-token swap; same single-user façade. */
+__declspec(dllexport) NTSTATUS NtSetInformationThread(HANDLE ThreadHandle, ULONG ThreadInformationClass,
+                                                      void* ThreadInformation, ULONG ThreadInformationLength)
+{
+    (void)ThreadHandle;
+    (void)ThreadInformationClass;
+    (void)ThreadInformation;
+    (void)ThreadInformationLength;
+    /* Most callers set ThreadHideFromDebugger or ThreadAffinity-
+     * Mask. v0 has no debugger and a single CPU; both are no-op
+     * success. */
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS NtQueryInformationThread(HANDLE ThreadHandle, ULONG ThreadInformationClass,
+                                                        void* ThreadInformation, ULONG ThreadInformationLength,
+                                                        ULONG* ReturnLength)
+{
+    (void)ThreadHandle;
+    (void)ThreadInformation;
+    (void)ThreadInformationLength;
+    if (ReturnLength != (ULONG*)0)
+        *ReturnLength = 0;
+    /* ThreadBasicInformation (0): the canonical first probe.
+     * Returns a 48-byte struct; v0 emits zeros. Callers that
+     * need real values land in §11.7's Get/SetContext path
+     * instead, which IS implemented. */
+    if (ThreadInformationClass == 0 && ThreadInformation != (void*)0 && ThreadInformationLength >= 48)
+    {
+        unsigned char* out = (unsigned char*)ThreadInformation;
+        for (unsigned i = 0; i < 48; ++i)
+            out[i] = 0;
+        if (ReturnLength != (ULONG*)0)
+            *ReturnLength = 48;
+        return NTSTATUS_SUCCESS;
+    }
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS ZwSetInformationThread(HANDLE ThreadHandle, ULONG ThreadInformationClass,
+                                                      void* ThreadInformation, ULONG ThreadInformationLength)
+{
+    return NtSetInformationThread(ThreadHandle, ThreadInformationClass, ThreadInformation, ThreadInformationLength);
+}
+
+__declspec(dllexport) NTSTATUS ZwQueryInformationThread(HANDLE ThreadHandle, ULONG ThreadInformationClass,
+                                                        void* ThreadInformation, ULONG ThreadInformationLength,
+                                                        ULONG* ReturnLength)
+{
+    return NtQueryInformationThread(ThreadHandle, ThreadInformationClass, ThreadInformation, ThreadInformationLength,
+                                    ReturnLength);
+}
+
+/* NtSetInformationProcess — write counterpart to NtQueryInformationProcess.
+ * Most callers set ProcessBasicInformation (write-back of PEB)
+ * or ProcessIoCounters; both are no-op success. v0 doesn't gate
+ * on any of these for actual behaviour. */
+__declspec(dllexport) NTSTATUS NtSetInformationProcess(HANDLE ProcessHandle, ULONG ProcessInformationClass,
+                                                       void* ProcessInformation, ULONG ProcessInformationLength)
+{
+    (void)ProcessHandle;
+    (void)ProcessInformationClass;
+    (void)ProcessInformation;
+    (void)ProcessInformationLength;
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS ZwSetInformationProcess(HANDLE ProcessHandle, ULONG ProcessInformationClass,
+                                                       void* ProcessInformation, ULONG ProcessInformationLength)
+{
+    return NtSetInformationProcess(ProcessHandle, ProcessInformationClass, ProcessInformation,
+                                   ProcessInformationLength);
+}
+
+/* ------------------------------------------------------------------
+ * NT keyed-event surface — explicit NotImpl. KEs are a
+ * Vista-era kernel-coordinated wait primitive used internally by
+ * RtlAcquireSRWLockShared etc. v0's mutex/event surface covers
+ * the same use cases through SYS_MUTEX_* / SYS_EVENT_*.
+ * ------------------------------------------------------------------ */
+__declspec(dllexport) NTSTATUS NtCreateKeyedEvent(HANDLE* KeyedEventHandle, ULONG DesiredAccess, void* ObjectAttributes,
+                                                  ULONG Flags)
+{
+    (void)KeyedEventHandle;
+    (void)DesiredAccess;
+    (void)ObjectAttributes;
+    (void)Flags;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtOpenKeyedEvent(HANDLE* KeyedEventHandle, ULONG DesiredAccess, void* ObjectAttributes)
+{
+    (void)KeyedEventHandle;
+    (void)DesiredAccess;
+    (void)ObjectAttributes;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtWaitForKeyedEvent(HANDLE KeyedEventHandle, void* Key, BOOL Alertable, void* Timeout)
+{
+    (void)KeyedEventHandle;
+    (void)Key;
+    (void)Alertable;
+    (void)Timeout;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtReleaseKeyedEvent(HANDLE KeyedEventHandle, void* Key, BOOL Alertable, void* Timeout)
+{
+    (void)KeyedEventHandle;
+    (void)Key;
+    (void)Alertable;
+    (void)Timeout;
+    return (NTSTATUS)0xC0000002;
+}
+
+/* ------------------------------------------------------------------
  * NT debug surface — userland-only NotImpl stubs.
  *
  * v0 has no debug-event engine (no DBG_PRINTEXCEPTION_C dispatch,
