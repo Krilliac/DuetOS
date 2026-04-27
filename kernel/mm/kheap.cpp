@@ -2,6 +2,7 @@
 
 #include "mm/frame_allocator.h"
 #include "mm/page.h"
+#include "mm/poison.h"
 
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
@@ -202,9 +203,11 @@ void* KMalloc(u64 bytes)
     }
 
     // Round payload up to alignment so a future split also produces an
-    // aligned chunk. Header is already aligned by construction.
+    // aligned chunk. Header is already aligned by construction. Add a
+    // trailing red zone so KFree can detect linear overruns past the
+    // user payload — see mm/poison.h.
     const u64 payload = RoundUp(bytes, kHeapAlignment);
-    const u64 needed = sizeof(ChunkHeader) + payload;
+    const u64 needed = sizeof(ChunkHeader) + payload + kHeapTrailerCanaryBytes;
 
     ChunkHeader* prev = nullptr;
     ChunkHeader* cursor = g_freelist;
@@ -257,6 +260,12 @@ void* KMalloc(u64 bytes)
             cursor->next = nullptr; // not on freelist anymore
             cursor->reserved = 0;
             ++g_alloc_count;
+            // Stamp the trailing red zone. Sits at chunk_end -
+            // kHeapTrailerCanaryBytes — i.e. immediately after the
+            // user-visible payload. Any linear overrun by even one
+            // word lands here and is detected on KFree.
+            u8* canary_at = reinterpret_cast<u8*>(cursor) + cursor->size - kHeapTrailerCanaryBytes;
+            WriteHeapTrailerCanary(canary_at);
             return reinterpret_cast<void*>(reinterpret_cast<u8*>(cursor) + sizeof(ChunkHeader));
         }
         prev = cursor;
@@ -294,9 +303,19 @@ void KFree(void* ptr)
     // pool means the magic check passed by coincidence but the rest of
     // the header is corrupt — safer to halt than proceed with a bogus
     // size and walk past the end of the pool on coalesce.
-    if (chunk->size < sizeof(ChunkHeader) + kHeapAlignment || chunk->size > g_pool_bytes)
+    if (chunk->size < sizeof(ChunkHeader) + kHeapAlignment + kHeapTrailerCanaryBytes || chunk->size > g_pool_bytes)
     {
         PanicHeap("KFree on chunk with corrupt size (magic OK, size wild?)");
+    }
+
+    // Trailing red zone — catches linear overruns past the user
+    // payload. Verify before flipping magic so the panic banner
+    // points at a Live chunk (the corruption is the caller's, not
+    // a freelist surprise).
+    const u8* canary_at = reinterpret_cast<const u8*>(chunk) + chunk->size - kHeapTrailerCanaryBytes;
+    if (!CheckHeapTrailerCanary(canary_at))
+    {
+        PanicHeapCorrupt("KFree: trailing red-zone canary corrupt (heap overflow?)", chunk);
     }
 
     // Flip to Free BEFORE poisoning so that if poison races with another
@@ -468,6 +487,41 @@ void KernelHeapSelfTest()
     }
 
     SerialWrite("  poison     : verified 0xDE across freed payload\n");
+
+    // Trailing red zone (plan C2). Allocate a known size, find the
+    // canary at chunk_end - kHeapTrailerCanaryBytes, verify it
+    // reads as the expected pattern, transiently corrupt it,
+    // verify CheckHeapTrailerCanary returns false, restore, free.
+    // The destructive step uses the helper directly — we don't
+    // call KFree on the corrupted state because that would Panic
+    // (which is the production path we WANT, but Panic halts the
+    // kernel and we still have boot to finish).
+    void* canary_probe = KMalloc(64);
+    if (canary_probe == nullptr)
+    {
+        PanicHeap("self-test: canary-probe alloc failed");
+    }
+    auto* canary_chunk = reinterpret_cast<u8*>(canary_probe) - sizeof(ChunkHeader);
+    auto* canary_chunk_hdr = reinterpret_cast<ChunkHeader*>(canary_chunk);
+    u8* canary_at = canary_chunk + canary_chunk_hdr->size - kHeapTrailerCanaryBytes;
+    if (!CheckHeapTrailerCanary(canary_at))
+    {
+        PanicHeap("self-test: fresh allocation has wrong trailer canary");
+    }
+    const u8 saved_byte = canary_at[0];
+    canary_at[0] = 0xFF; // Simulate one-byte overrun.
+    if (CheckHeapTrailerCanary(canary_at))
+    {
+        PanicHeap("self-test: corrupted canary not detected");
+    }
+    canary_at[0] = saved_byte;
+    if (!CheckHeapTrailerCanary(canary_at))
+    {
+        PanicHeap("self-test: restored canary mis-detected");
+    }
+    KFree(canary_probe);
+    SerialWrite("  red-zone   : trailer canary verified + tamper detection OK\n");
+
     SerialWrite("[mm] kernel heap self-test OK\n");
 }
 

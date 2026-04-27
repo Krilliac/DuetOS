@@ -30,6 +30,7 @@
 
 #include "mm/multiboot2.h"
 #include "mm/page.h"
+#include "mm/poison.h"
 
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
@@ -457,6 +458,15 @@ void FreeFrame(PhysAddr frame)
         core::PanicWithValue("mm/frame_allocator", "FreeFrame on already-free frame (double-free?)", frame);
     }
 
+    // Freed-page poison (plan C2). Stamp 0xDE across the whole 4 KiB
+    // page just before returning it to the bitmap. A use-after-free
+    // reader sees an obviously stale pattern instead of plausible
+    // stale data; the next AllocateFrame caller is expected to
+    // initialise the page before reading. Cheap (one 4 KiB store
+    // per free), unconditional. The page is reachable through the
+    // higher-half direct map.
+    PoisonFreedPage(PhysToVirt(frame), kPageSize);
+
     BitmapMarkFree(index);
     if (index < g_next_hint)
     {
@@ -527,6 +537,8 @@ void FreeContiguousFrames(PhysAddr base, u64 count)
             core::PanicWithValue("mm/frame_allocator", "FreeContiguousFrames: frame already free in run",
                                  idx << kPageSizeLog2);
         }
+        // Freed-page poison (plan C2) — see FreeFrame for rationale.
+        PoisonFreedPage(PhysToVirt(idx << kPageSizeLog2), kPageSize);
         BitmapMarkFree(idx);
     }
     if (first < g_next_hint)
@@ -623,6 +635,48 @@ void FrameAllocatorSelfTest()
     SerialWriteHex(run_base);
     SerialWrite("\n");
     FreeContiguousFrames(run_base, kRun);
+
+    // Freed-page poison (plan C2). Allocate a frame, scribble it
+    // with a non-poison pattern, free it, allocate again. Whether
+    // we get the same physical frame back depends on the bitmap's
+    // hint state — but if we DO, the bytes must read as
+    // kFreedPagePoison. If we don't, skip the verification rather
+    // than fail (the allocator is free to hand a different frame;
+    // the unconditional check is "every freed frame got poisoned",
+    // which the unconditional poison-on-free already guarantees).
+    const PhysAddr poison_probe = AllocateFrame();
+    if (poison_probe == kNullFrame)
+    {
+        PanicFrame("self-test: poison-probe alloc failed");
+    }
+    auto* poison_va = static_cast<u8*>(PhysToVirt(poison_probe));
+    for (u64 i = 0; i < kPageSize; ++i)
+    {
+        poison_va[i] = 0xAA;
+    }
+    FreeFrame(poison_probe);
+    const PhysAddr poison_probe2 = AllocateFrame();
+    if (poison_probe2 == kNullFrame)
+    {
+        PanicFrame("self-test: poison-probe re-alloc failed");
+    }
+    if (poison_probe2 == poison_probe)
+    {
+        const auto* reread = static_cast<const u8*>(PhysToVirt(poison_probe2));
+        for (u64 i = 0; i < kPageSize; ++i)
+        {
+            if (reread[i] != kFreedPagePoison)
+            {
+                PanicFrame("self-test: freed-page poison not applied");
+            }
+        }
+        SerialWrite("  page poison: verified 0xDE across 4 KiB freed page\n");
+    }
+    else
+    {
+        SerialWrite("  page poison: skipped (allocator handed a different frame)\n");
+    }
+    FreeFrame(poison_probe2);
 
     SerialWrite("[mm] frame allocator self-test OK\n");
 }

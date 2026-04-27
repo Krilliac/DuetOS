@@ -7,7 +7,8 @@
 | Commit | Effect |
 |--------|--------|
 | _A1-infra_ (commit `aba75cd`) | `kernel/core/init.{h,cpp}` registry: `Phase` enum (13 phases), `InitcallRegister`, `RunPhase`, `InitSelfTest` (3 phases × 1 callback + bad-arg + failing-callback paths). Self-test wired into `kernel_main` after `FaultDomainSelfTest`. `KERNEL_INITCALL` macro deferred until `_init_array` is invoked at boot — registration is by direct call today. Imperative `kernel_main` body NOT migrated; see plan A1 follow-up. |
-| _A4_ (this commit) | `kernel/syscall/cap_gate.{h,cpp}` + `cap_table.def`: 15-row X-macro listing the syscalls whose authorisation reduces to a single static cap (kCapFsWrite/Read, kCapSpawnThread, kCapDebug, kCapInput, kCapNet). `SyscallGate(num, proc)` called by `SyscallDispatch` BEFORE any handler; missing cap → `RecordSandboxDenial(missing)` + `frame->rax = -1`. Self-test walks every row vs synthetic empty/trusted processes plus nullptr-proc + unknown-syscall paths. Existing in-handler `CapSetHas` checks remain (belt-and-braces); follow-up cleanup will remove the redundant ones. |
+| _A4_ (commit `6097eb0`) | `kernel/syscall/cap_gate.{h,cpp}` + `cap_table.def`: 15-row X-macro listing the syscalls whose authorisation reduces to a single static cap (kCapFsWrite/Read, kCapSpawnThread, kCapDebug, kCapInput, kCapNet). `SyscallGate(num, proc)` called by `SyscallDispatch` BEFORE any handler; missing cap → `RecordSandboxDenial(missing)` + `frame->rax = -1`. Self-test walks every row vs synthetic empty/trusted processes plus nullptr-proc + unknown-syscall paths. Existing in-handler `CapSetHas` checks remain (belt-and-braces); follow-up cleanup will remove the redundant ones. |
+| _C2_ (this commit) | `kernel/mm/poison.h` central constants + helpers. `kheap` gained a 16-byte trailing red zone (`kHeapTrailerCanaryLo/Hi`) on every allocation; `KFree` verifies before flipping magic and panics with "trailing red-zone canary corrupt" on overrun. Existing leading magic + freed-payload `0xDE` poison stay. `frame_allocator::FreeFrame` and `FreeContiguousFrames` now stamp `kFreedPagePoison` (0xDE) across the full 4 KiB page before returning it to the bitmap. Self-tests extended to (a) verify a fresh allocation's canary, transiently corrupt + restore + re-verify; (b) allocate a frame, scribble, free, re-allocate the same frame, assert all 4 KiB read 0xDE. Slab freed-object poison (`kSlabFreedObjectPoison = 0xCC`) is reserved in `poison.h` for when a slab allocator lands. |
 
 ### Deferred (in priority order — see "Recommended ordering" below)
 
@@ -16,7 +17,8 @@
 - [ ] A4-followup — Drop the redundant in-handler `CapSetHas` checks for syscalls now table-gated
 - [ ] A4-followup — Add `inspect syscalls` row showing each entry's required cap (read-only audit surface)
 - [ ] A4-followup — Extend `kSyscallCapTable` to cover conditional cap surfaces once the conditional logic is collapsed (e.g. SYS_WRITE fd=1)
-- [ ] C2 — Heap red zones, freed-page poison, slab freed-object poison
+- [ ] C2-followup — Slab freed-object poison once a slab allocator lands (`kSlabFreedObjectPoison` reserved in `poison.h`)
+- [ ] C2-followup — Real KASAN with shadow memory (only after telemetry shows the lite layer misses something)
 - [ ] B1 — Sync ladder (Mutex → RwLock → SeqLock → RCU-lite)
 - [ ] A3 — `kernel/ipc/` with `KObject` + per-process handle table
 - [ ] A2 — `kernel/time/` with clocksource abstraction
