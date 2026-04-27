@@ -177,6 +177,18 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
         p->win32_semaphores[i].waiters.head = nullptr;
         p->win32_semaphores[i].waiters.tail = nullptr;
     }
+    // Win32 directory handles — every slot empty; entries pointer
+    // null until SYS_DIR_OPEN allocates a snapshot.
+    for (u64 i = 0; i < Process::kWin32DirCap; ++i)
+    {
+        p->win32_dirs[i].in_use = false;
+        for (u32 j = 0; j < sizeof(p->win32_dirs[i]._pad); ++j)
+            p->win32_dirs[i]._pad[j] = 0;
+        p->win32_dirs[i].entry_count = 0;
+        p->win32_dirs[i].next_index = 0;
+        p->win32_dirs[i]._pad2 = 0;
+        p->win32_dirs[i].entries = nullptr;
+    }
     p->thread_stack_cursor = Process::kV0ThreadStackArenaBase;
     // Win32 TLS — no slots allocated, all values zero.
     p->tls_slot_in_use = 0;
@@ -345,6 +357,17 @@ void ProcessRelease(Process* p)
     // No-op when the process never opted into any custom-Win32
     // feature (the common path).
     subsystems::win32::custom::CleanupProcess(p);
+
+    // Free any directory-iteration snapshots the process leaked
+    // by exiting without CloseHandle on its FindFirstFile pairs.
+    for (u64 i = 0; i < Process::kWin32DirCap; ++i)
+    {
+        if (p->win32_dirs[i].entries != nullptr)
+        {
+            mm::KFree(p->win32_dirs[i].entries);
+            p->win32_dirs[i].entries = nullptr;
+        }
+    }
 
     mm::KFree(p);
     --g_live_processes;

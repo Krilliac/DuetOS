@@ -681,6 +681,36 @@ struct Process
     static constexpr u64 kWin32SectionBase = 0x900;
     Win32SectionHandle win32_section_handles[kWin32SectionCap];
 
+    // Win32 directory iteration handles — backs FindFirstFile /
+    // FindNextFile / NtQueryDirectoryFile via SYS_DIR_OPEN +
+    // SYS_DIR_NEXT. Each open snapshots the directory's entries
+    // into a KMalloc'd array (capped at kWin32DirEntryMax = 256
+    // entries / handle); SYS_DIR_NEXT pumps the cursor through the
+    // snapshot and copies one entry per call to user. The snapshot
+    // is freed on CloseHandle.
+    //
+    // Disjoint from every other Win32 handle range — handles run
+    // kWin32DirBase + idx (= 0xA00..0xA07). Snapshot semantics
+    // match getdents (a deletion mid-walk doesn't perturb the
+    // iterator).
+    static constexpr u64 kWin32DirCap = 8;
+    static constexpr u64 kWin32DirBase = 0xA00;
+    static constexpr u64 kWin32DirEntryMax = 256;
+    struct Win32DirHandle
+    {
+        bool in_use;
+        u8 _pad[3];
+        u32 entry_count;
+        u32 next_index;
+        u32 _pad2;
+        // KMalloc'd array of fs::fat32::DirEntry copies. Owned by
+        // this handle; freed on close. Opaque pointer here so
+        // process.h doesn't pull in fs/fat32.h beyond what it
+        // already #includes.
+        void* entries;
+    };
+    Win32DirHandle win32_dirs[kWin32DirCap];
+
     // Per-process cursor for thread-stack allocation. Each new
     // thread carves kV0ThreadStackPages pages off this bump
     // cursor. The base sits above the main task's stack and

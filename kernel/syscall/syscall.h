@@ -1532,6 +1532,39 @@ enum SyscallNumber : u64
     //
     // Every op cap-gated on kCapNet — withheld → -EACCES.
     SYS_SOCKET_OP = 153,
+
+    // SYS_DIR_OPEN — open a directory handle for enumeration.
+    //   rdi = const char* user_path, NUL-terminated; '/disk/<idx>'
+    //         routes to a FAT32 volume, anything else falls back
+    //         to the per-process Ramfs root.
+    // Returns kWin32DirBase + idx (= 0xA00..0xA07) on success, or
+    // -1 on miss / pool full. Cap-gated on kCapFsRead.
+    //
+    // SYS_DIR_NEXT — advance to the next entry.
+    //   rdi = HANDLE
+    //   rsi = struct Win32DirEntryReport*  (kernel writes a fixed
+    //         96-byte record: name (64 bytes), attributes (u32),
+    //         size (u64), reserved padding to 96).
+    // Returns 1 on success, 0 at end-of-iteration, -1 on bad handle.
+    //
+    // SYS_DIR_CLOSE is folded into the existing SYS_FILE_CLOSE
+    // dispatch (which already covers the win32 handle ranges).
+    SYS_DIR_OPEN = 154,
+    SYS_DIR_NEXT = 155,
+};
+
+// Cross-language record returned by SYS_DIR_NEXT. 96 bytes, exact
+// layout reproduced verbatim by the kernel32.c FindFirstFile /
+// FindNextFile thunks before they marshal into WIN32_FIND_DATAW.
+// Stable on disk: the size + field order is part of the SYS_DIR_NEXT
+// ABI.
+struct Win32DirEntryReport
+{
+    char name[64];  // 8.3 / LFN entry name, NUL-terminated
+    u32 attributes; // FAT-style attribute byte zero-extended
+    u32 _pad;
+    u64 size_bytes; // 0 for directories
+    u8 _reserved[16];
 };
 
 inline constexpr u64 kSockOpCreate = 1;

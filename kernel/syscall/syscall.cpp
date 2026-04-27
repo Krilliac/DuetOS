@@ -76,6 +76,7 @@
 #include "subsystems/win32/thread_syscall.h"
 #include "subsystems/win32/mutex_syscall.h"
 #include "subsystems/win32/event_syscall.h"
+#include "subsystems/win32/dir_syscall.h"
 #include "subsystems/win32/section.h"
 #include "subsystems/win32/window_syscall.h"
 #include "subsystems/win32/heap.h"
@@ -1532,6 +1533,20 @@ void SyscallDispatch(arch::TrapFrame* frame)
             break;
         }
         }
+        frame->rax = static_cast<u64>(rv);
+        return;
+    }
+
+    case SYS_DIR_OPEN:
+    {
+        const i64 rv = ::duetos::subsystems::win32::SysDirOpen(frame->rdi);
+        frame->rax = static_cast<u64>(rv);
+        return;
+    }
+
+    case SYS_DIR_NEXT:
+    {
+        const i64 rv = ::duetos::subsystems::win32::SysDirNext(frame->rdi, frame->rsi);
         frame->rax = static_cast<u64>(rv);
         return;
     }
