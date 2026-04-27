@@ -652,29 +652,149 @@ i64 DoPkeyMprotect(u64 addr, u64 len, u64 prot, u64 pkey)
     return DoMprotect(addr, len, prot);
 }
 
+// name_to_handle_at(dirfd, path, handle, mount_id, flags) — encode
+// a path into a struct file_handle the caller can later pass to
+// open_by_handle_at. v0 file_handle layout:
+//   u32 handle_bytes  (caller-provided cap; we write 8)
+//   u32 handle_type   (1 = generic FAT32 cluster ref)
+//   u8  f_handle[handle_bytes]:
+//     u32 first_cluster (FAT32 entry's first cluster — stable per-file)
+//     u32 size_low      (low 32 bits of file size — disambiguates
+//                        cluster reuse if a file is unlinked + re-
+//                        created at the same cluster, which v0
+//                        currently can't avoid because we have no
+//                        per-file inode generation)
 i64 DoNameToHandleAt(u64 dirfd, u64 user_path, u64 user_handle, u64 user_mount_id, u64 flags)
 {
-    (void)dirfd;
-    (void)user_path;
-    (void)user_handle;
-    (void)user_mount_id;
     (void)flags;
-    return kENOSYS;
+    if (static_cast<i64>(dirfd) != kAtFdCwd)
+        return kEBADF;
+    char path[64];
+    for (u32 i = 0; i < sizeof(path); ++i)
+        path[i] = 0;
+    if (!mm::CopyFromUser(path, reinterpret_cast<const void*>(user_path), sizeof(path) - 1))
+        return kEFAULT;
+    path[sizeof(path) - 1] = 0;
+    const auto* v = fs::fat32::Fat32Volume(0);
+    if (v == nullptr)
+        return kENOENT;
+    fs::fat32::DirEntry e;
+    const char* leaf = StripFatPrefix(path);
+    if (!fs::fat32::Fat32LookupPath(v, leaf, &e))
+        return kENOENT;
+    // Read the caller's caps field first so we honour their
+    // handle_bytes ask.
+    u32 caller_bytes = 0;
+    if (!mm::CopyFromUser(&caller_bytes, reinterpret_cast<const void*>(user_handle), sizeof(caller_bytes)))
+        return kEFAULT;
+    if (caller_bytes < 8)
+    {
+        // Set handle_bytes to 8 + return -EOVERFLOW.
+        caller_bytes = 8;
+        if (!mm::CopyToUser(reinterpret_cast<void*>(user_handle), &caller_bytes, sizeof(caller_bytes)))
+            return kEFAULT;
+        return kEOVERFLOW;
+    }
+    u8 buf[16];
+    for (u32 i = 0; i < sizeof(buf); ++i)
+        buf[i] = 0;
+    const u32 hb = 8;
+    const u32 ht = 1;
+    for (u32 i = 0; i < 4; ++i)
+    {
+        buf[i] = static_cast<u8>((hb >> (i * 8)) & 0xFF);
+        buf[4 + i] = static_cast<u8>((ht >> (i * 8)) & 0xFF);
+        buf[8 + i] = static_cast<u8>((e.first_cluster >> (i * 8)) & 0xFF);
+        buf[12 + i] = static_cast<u8>((e.size_bytes >> (i * 8)) & 0xFF);
+    }
+    if (!mm::CopyToUser(reinterpret_cast<void*>(user_handle), buf, sizeof(buf)))
+        return kEFAULT;
+    if (user_mount_id != 0)
+    {
+        const u32 mount_id = 1;
+        if (!mm::CopyToUser(reinterpret_cast<void*>(user_mount_id), &mount_id, sizeof(mount_id)))
+            return kEFAULT;
+    }
+    return 0;
 }
 
+// open_by_handle_at(mount_fd, handle, flags) — decode a file_handle
+// produced by name_to_handle_at and open it. v0 walks the FAT32
+// volume's root looking for an entry whose first_cluster + size
+// match the handle. (This is O(N) in directory size but bounded by
+// the v0 filesystems we care about.) Returns a Linux fd.
 i64 DoOpenByHandleAt(u64 mount_fd, u64 user_handle, u64 flags)
 {
     (void)mount_fd;
-    (void)user_handle;
     (void)flags;
-    return kENOSYS;
+    u8 buf[16];
+    if (!mm::CopyFromUser(buf, reinterpret_cast<const void*>(user_handle), sizeof(buf)))
+        return kEFAULT;
+    u32 hb = 0;
+    u32 ht = 0;
+    for (u32 i = 0; i < 4; ++i)
+    {
+        hb |= static_cast<u32>(buf[i]) << (i * 8);
+        ht |= static_cast<u32>(buf[4 + i]) << (i * 8);
+    }
+    if (hb < 8 || ht != 1)
+        return kEINVAL;
+    u32 want_cluster = 0;
+    u32 want_size = 0;
+    for (u32 i = 0; i < 4; ++i)
+    {
+        want_cluster |= static_cast<u32>(buf[8 + i]) << (i * 8);
+        want_size |= static_cast<u32>(buf[12 + i]) << (i * 8);
+    }
+    const auto* v = fs::fat32::Fat32Volume(0);
+    if (v == nullptr)
+        return kENOENT;
+    // Walk the root directory; v0 doesn't support nested-handle
+    // resolution because that would need full-tree-walking.
+    // Sub-GAP: only root-directory entries can be re-opened.
+    fs::fat32::DirEntry root;
+    if (!fs::fat32::Fat32LookupPath(v, "/", &root))
+        return kENOENT;
+    fs::fat32::DirEntry entries[32];
+    const u32 n = fs::fat32::Fat32ListDirByCluster(v, root.first_cluster, entries, 32);
+    for (u32 i = 0; i < n; ++i)
+    {
+        if (entries[i].first_cluster == want_cluster && entries[i].size_bytes == want_size)
+        {
+            // Got it. Build a Linux fd.
+            core::Process* p = core::CurrentProcess();
+            if (p == nullptr)
+                return kEPERM;
+            for (u32 fd = 3; fd < 16; ++fd)
+            {
+                if (p->linux_fds[fd].state == 0)
+                {
+                    p->linux_fds[fd].state = 2;
+                    p->linux_fds[fd].first_cluster = entries[i].first_cluster;
+                    p->linux_fds[fd].size = entries[i].size_bytes;
+                    p->linux_fds[fd].offset = 0;
+                    // Path can't be reconstructed without the
+                    // dir-walk parent context; leave empty (writes
+                    // that need it will fail — sub-GAP).
+                    p->linux_fds[fd].path[0] = '\0';
+                    return static_cast<i64>(fd);
+                }
+            }
+            return kEMFILE;
+        }
+    }
+    return kESTALE; // -ESTALE: handle decoded but the entry is gone
 }
 
+// Modern mount API — privileged ops on a static mount topology.
+// Real Linux gates these on CAP_SYS_ADMIN; v0 returns -EPERM
+// uniformly so callers exercise their CAP_SYS_ADMIN fallback rather
+// than thinking the syscall is missing.
 i64 DoFsopen(u64 user_fsname, u64 flags)
 {
     (void)user_fsname;
     (void)flags;
-    return kENOSYS;
+    return kEPERM;
 }
 
 i64 DoFsconfig(u64 fd, u64 cmd, u64 user_key, u64 user_value, u64 aux)
@@ -684,7 +804,7 @@ i64 DoFsconfig(u64 fd, u64 cmd, u64 user_key, u64 user_value, u64 aux)
     (void)user_key;
     (void)user_value;
     (void)aux;
-    return kENOSYS;
+    return kEPERM;
 }
 
 i64 DoFsmount(u64 fs_fd, u64 flags, u64 attr_flags)
@@ -692,7 +812,7 @@ i64 DoFsmount(u64 fs_fd, u64 flags, u64 attr_flags)
     (void)fs_fd;
     (void)flags;
     (void)attr_flags;
-    return kENOSYS;
+    return kEPERM;
 }
 
 i64 DoFspick(u64 dirfd, u64 user_path, u64 flags)
@@ -700,7 +820,7 @@ i64 DoFspick(u64 dirfd, u64 user_path, u64 flags)
     (void)dirfd;
     (void)user_path;
     (void)flags;
-    return kENOSYS;
+    return kEPERM;
 }
 
 i64 DoOpenTree(u64 dirfd, u64 user_path, u64 flags)
@@ -708,7 +828,7 @@ i64 DoOpenTree(u64 dirfd, u64 user_path, u64 flags)
     (void)dirfd;
     (void)user_path;
     (void)flags;
-    return kENOSYS;
+    return kEPERM;
 }
 
 i64 DoMoveMount(u64 from_dfd, u64 user_from, u64 to_dfd, u64 user_to, u64 flags)
@@ -718,7 +838,7 @@ i64 DoMoveMount(u64 from_dfd, u64 user_from, u64 to_dfd, u64 user_to, u64 flags)
     (void)to_dfd;
     (void)user_to;
     (void)flags;
-    return kENOSYS;
+    return kEPERM;
 }
 
 i64 DoMountSetattr(u64 dirfd, u64 user_path, u64 flags, u64 user_uattr, u64 size)
@@ -728,7 +848,7 @@ i64 DoMountSetattr(u64 dirfd, u64 user_path, u64 flags, u64 user_uattr, u64 size
     (void)flags;
     (void)user_uattr;
     (void)size;
-    return kENOSYS;
+    return kEPERM;
 }
 
 // Landlock — sandboxing facade. Real engine deferred; honest -ENOSYS
