@@ -1482,6 +1482,19 @@ enum SyscallNumber : u64
     //   r10 = buffer cap.
     //   rax = NTSTATUS.
     SYS_FILE_QUERY_ATTRIBUTES = 151,
+
+    // SYS_EXECVE — replace the calling task's image in place.
+    // Backs Linux execve() and (eventually) Win32 process spawn.
+    //   rdi = const char* user_path (NUL-terminated, max 256).
+    //   rsi = path_len.
+    // v0 ignores argv/envp (reads no user-supplied stack args);
+    // a static ELF that doesn't read its argv/envp boots through.
+    // Returns NTSTATUS / -errno on failure; on success the
+    // syscall doesn't return — iretq lands at the new entry.
+    // Cap-gated on kCapFsRead (path lookup + read) AND
+    // kCapSpawnThread (the new image runs as the same task,
+    // but we treat exec as the natural symmetric gate).
+    SYS_EXECVE = 152,
 };
 
 // Win32 CONTEXT — first 0x100 bytes (integer + control + the

@@ -484,6 +484,22 @@ PhysAddr AddressSpaceProbePte(const AddressSpace* as, u64 virt)
     return *pte & kAddrMask;
 }
 
+void AddressSpaceClearUserMappings(AddressSpace* as)
+{
+    if (as == nullptr)
+        return;
+    // Walk the regions table backward — popping from the tail
+    // costs O(n) cumulative instead of O(n²) since each
+    // UnmapUserPage's linear scan finds the entry at index 0.
+    while (as->region_count > 0)
+    {
+        const u64 va = as->regions[as->region_count - 1].vaddr;
+        // UnmapUserPage decrements region_count + frees the
+        // backing frame for us. Don't predecrement here.
+        (void)AddressSpaceUnmapUserPage(as, va);
+    }
+}
+
 bool AddressSpaceProtectUserPage(AddressSpace* as, u64 virt, u64 new_flags)
 {
     if (as == nullptr)

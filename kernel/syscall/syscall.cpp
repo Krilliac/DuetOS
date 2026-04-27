@@ -54,7 +54,10 @@
 #include "debug/bp_syscall.h"
 #include "debug/breakpoints.h"
 #include "debug/probes.h"
+#include "fs/fat32.h"
 #include "fs/file_route.h"
+#include "loader/elf_loader.h"
+#include "mm/kheap.h"
 #include "fs/vfs.h"
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
@@ -1147,6 +1150,162 @@ void SyscallDispatch(arch::TrapFrame* frame)
             (void)mm::CopyToUser(reinterpret_cast<void*>(user_old), &first_old_protect, sizeof(first_old_protect));
         }
         frame->rax = kStatusSuccess;
+        return;
+    }
+
+    case SYS_EXECVE:
+    {
+        // In-place image replacement. Read the file, tear down
+        // the AS user mappings, ElfLoad into the same AS, reset
+        // the trap frame's RIP/RSP. The syscall return path's
+        // iretq picks up the new RIP via the trap frame, so we
+        // don't return into the caller — we return into the new
+        // program.
+        Process* caller = CurrentProcess();
+        if (caller == nullptr)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        if (!CapSetHas(caller->caps, kCapFsRead) || !CapSetHas(caller->caps, kCapSpawnThread))
+        {
+            RecordSandboxDenial(kCapFsRead);
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        const u64 user_path = frame->rdi;
+        const u64 path_len = frame->rsi;
+        if (path_len == 0 || path_len >= 256)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        char kpath[256];
+        if (!mm::CopyFromUser(kpath, reinterpret_cast<const void*>(user_path), path_len))
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        kpath[path_len] = '\0';
+
+        // Path lookup — fat32-only (matches §11.18 stat). Parse
+        // /disk/<idx>/<rest> inline (the routing-side helper is
+        // file-local in fs/file_route.cpp).
+        u32 disk_idx = 0;
+        const char* leaf = nullptr;
+        {
+            constexpr const char* kPrefix = "/disk/";
+            constexpr u32 kPrefixLen = 6;
+            if (path_len <= kPrefixLen)
+            {
+                frame->rax = static_cast<u64>(-1);
+                return;
+            }
+            for (u32 i = 0; i < kPrefixLen; ++i)
+            {
+                if (kpath[i] != kPrefix[i])
+                {
+                    frame->rax = static_cast<u64>(-1);
+                    return;
+                }
+            }
+            u32 i = kPrefixLen;
+            while (i < path_len && kpath[i] >= '0' && kpath[i] <= '9')
+            {
+                disk_idx = disk_idx * 10 + static_cast<u32>(kpath[i] - '0');
+                ++i;
+            }
+            if (i == kPrefixLen || i >= path_len || kpath[i] != '/')
+            {
+                frame->rax = static_cast<u64>(-1);
+                return;
+            }
+            leaf = &kpath[i + 1];
+        }
+        const fs::fat32::Volume* v = fs::fat32::Fat32Volume(disk_idx);
+        if (v == nullptr)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        fs::fat32::DirEntry e;
+        if (!fs::fat32::Fat32LookupPath(v, leaf, &e))
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        // Cap the image at 1 MiB to bound the kheap allocation.
+        // Bigger binaries need a streaming load; sub-GAP.
+        constexpr u64 kExecveMaxImage = 1ULL << 20;
+        if (e.size_bytes == 0 || e.size_bytes > kExecveMaxImage)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        u8* buf = static_cast<u8*>(mm::KMalloc(e.size_bytes));
+        if (buf == nullptr)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        const i64 nread = fs::fat32::Fat32ReadFile(v, &e, buf, e.size_bytes);
+        if (nread != static_cast<i64>(e.size_bytes))
+        {
+            mm::KFree(buf);
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+
+        // Tear down the AS user mappings, then ElfLoad into the
+        // same AS. Past this point any failure is fatal — the
+        // caller's address space is already gone.
+        mm::AddressSpaceClearUserMappings(caller->as);
+        const core::ElfLoadResult r = core::ElfLoad(buf, e.size_bytes, caller->as);
+        mm::KFree(buf);
+        if (!r.ok)
+        {
+            // No way back — terminate the calling task.
+            arch::SerialWrite("[execve] ElfLoad failed; terminating task pid=");
+            arch::SerialWriteHex(caller->pid);
+            arch::SerialWrite("\n");
+            sched::SchedExit();
+        }
+
+        // Reset the trap frame so iretq lands at the new entry.
+        // Sanitise rflags (IF=1, no IOPL/TF/NT) + cs/ss to
+        // ring-3 selectors, same shape as §11.7's SetContext
+        // path. Argv/envp are ignored in v0 — static ELFs that
+        // don't read them work; sub-GAP for everyone else.
+        frame->rip = r.entry_va;
+        frame->rsp = r.stack_top;
+        frame->rax = 0;
+        frame->rbx = 0;
+        frame->rcx = 0;
+        frame->rdx = 0;
+        frame->rsi = 0;
+        frame->rdi = 0;
+        frame->rbp = 0;
+        frame->r8 = 0;
+        frame->r9 = 0;
+        frame->r10 = 0;
+        frame->r11 = 0;
+        frame->r12 = 0;
+        frame->r13 = 0;
+        frame->r14 = 0;
+        frame->r15 = 0;
+        // cs/ss/rflags from a known-good user state.
+        frame->cs = 0x2B;
+        frame->ss = 0x33;
+        frame->rflags = 0x202;
+        arch::SerialWrite("[execve] task pid=");
+        arch::SerialWriteHex(caller->pid);
+        arch::SerialWrite(" -> ");
+        arch::SerialWrite(kpath);
+        arch::SerialWrite(" entry=");
+        arch::SerialWriteHex(r.entry_va);
+        arch::SerialWrite(" rsp=");
+        arch::SerialWriteHex(r.stack_top);
+        arch::SerialWrite("\n");
         return;
     }
 

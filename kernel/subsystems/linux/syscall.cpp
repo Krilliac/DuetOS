@@ -55,6 +55,7 @@
 
 #include "subsystems/linux/linux_syscall_table_generated.h"
 #include "subsystems/linux/syscall_internal.h"
+#include "syscall/syscall.h"
 
 #include "arch/x86_64/hpet.h"
 #include "arch/x86_64/serial.h"
@@ -1189,8 +1190,55 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
     }
     case kSysExecve:
     case kSysExecveat:
-        rv = kENOSYS;
-        break;
+    {
+        // Forward to the native SYS_EXECVE handler. v0 ignores
+        // argv/envp (rsi/rdx) — static ELFs work; sub-GAP for
+        // anything that reads its argv/envp.
+        if (frame->rdi == 0)
+        {
+            rv = kEFAULT;
+            break;
+        }
+        u32 path_len = 0;
+        bool path_ok = true;
+        for (; path_len < 255; ++path_len)
+        {
+            char c = 0;
+            if (!mm::CopyFromUser(&c, reinterpret_cast<const void*>(frame->rdi + path_len), 1))
+            {
+                path_ok = false;
+                break;
+            }
+            if (c == 0)
+                break;
+        }
+        if (!path_ok)
+        {
+            rv = kEFAULT;
+            break;
+        }
+        if (path_len == 0)
+        {
+            rv = kENOENT;
+            break;
+        }
+        // Repurpose the trap frame for the native SYS_EXECVE path.
+        // SYS_EXECVE = 152: rdi = user_path, rsi = path_len. The
+        // native handler doesn't return on success — iretq lands
+        // at the new entry. On failure we get -1 in rax.
+        frame->rsi = path_len;
+        frame->rax = static_cast<u64>(::duetos::core::SYS_EXECVE);
+        ::duetos::core::SyscallDispatch(frame);
+        if (frame->rax == static_cast<u64>(-1))
+        {
+            rv = kEACCES;
+            break;
+        }
+        // Success — frame is now the new program's entry frame.
+        // The Linux dispatcher's outer return path will iretq
+        // into the new image.
+        return;
+    }
     case kSysChroot:
     case kSysPivotRoot:
         rv = kEPERM;

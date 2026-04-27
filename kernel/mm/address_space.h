@@ -216,6 +216,23 @@ bool AddressSpaceUnmapBorrowedPage(AddressSpace* as, u64 virt);
 /// missing.
 bool AddressSpaceProtectUserPage(AddressSpace* as, u64 virt, u64 new_flags);
 
+/// Clear every user-region mapping in `as` without releasing
+/// the AS itself. Walks `regions[0..region_count)`, unmaps each
+/// leaf PTE, frees the backing frame back to the physical
+/// allocator, and resets `region_count` to 0.
+///
+/// Used by execve() — replace the running process's image
+/// in-place. PML4/PDPT/PD pages stay; the leaf PT pages are
+/// retained so a subsequent ElfLoad can re-populate them.
+///
+/// Borrowed-page mappings (Win32 sections) are NOT touched —
+/// they aren't in the regions ledger. Callers that need to
+/// nuke section views must do that separately.
+///
+/// TLB invalidation on the active CPU when `as` is the active
+/// AS — same contract as MapUserPage / UnmapUserPage.
+void AddressSpaceClearUserMappings(AddressSpace* as);
+
 /// Reverse of MapUserPage: given a user VA, return the physical
 /// frame backing its containing page, or kNullFrame if unmapped.
 /// Walks the AS's `regions` array (small N, linear scan). Used
