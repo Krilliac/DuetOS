@@ -147,6 +147,13 @@ i64 DoGetTid();
 // for that flag.
 i64 DoClone(u64 flags, u64 child_stack, u64 ptid_user, u64 ctid_user, u64 tls);
 
+// Linux fork(2) — full process duplication (separate AS, deep
+// copy of every user page). vfork() forwards here too. Defined
+// in syscall_clone.cpp. CapsSpawnThread-gated. Sub-GAPs:
+// no COW (frame-by-frame deep copy), no fd inheritance, no
+// signal-handler inheritance.
+i64 DoFork();
+
 i64 DoGetpgrp();
 i64 DoGetPpid();
 i64 DoGetPgid(u64 pid);

@@ -216,6 +216,32 @@ bool AddressSpaceUnmapBorrowedPage(AddressSpace* as, u64 virt);
 /// missing.
 bool AddressSpaceProtectUserPage(AddressSpace* as, u64 virt, u64 new_flags);
 
+/// Read the raw leaf PTE at `virt` in `as` (PML4 → PDPT → PD →
+/// PT walk). Returns 0 if the page is unmapped (PTE absent or
+/// chain broken). The high bits encode flags (Writable / NX /
+/// User / etc.) and the middle bits encode the physical frame
+/// — same layout the kernel writes via MapUserPage. Used by
+/// AddressSpaceFork to re-apply parent flags on the child PTEs
+/// without losing per-page protection.
+u64 AddressSpaceProbePteRaw(const AddressSpace* as, u64 virt);
+
+/// Duplicate `parent`'s user mappings into a fresh AS. Allocates
+/// a new AS via AddressSpaceCreate(parent->frame_budget), walks
+/// parent's regions ledger, allocates a fresh frame for each
+/// page in the child, copies contents through the kernel
+/// direct-map alias, and maps the new frame in the child with
+/// the SAME PTE flags the parent's leaf PTE carried (preserves
+/// W^X — code stays RX, data stays RW + NX). Returns nullptr on
+/// allocation failure (and rolls back any partially-installed
+/// child mappings via AddressSpaceRelease). Does NOT cover
+/// borrowed-page mappings (Win32 sections) — they aren't in
+/// the regions ledger; callers that need them must dup them
+/// explicitly.
+///
+/// The caller owns the returned AS — must AddressSpaceRelease
+/// it when done.
+AddressSpace* AddressSpaceFork(const AddressSpace* parent);
+
 /// Clear every user-region mapping in `as` without releasing
 /// the AS itself. Walks `regions[0..region_count)`, unmaps each
 /// leaf PTE, frees the backing frame back to the physical

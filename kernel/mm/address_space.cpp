@@ -484,6 +484,51 @@ PhysAddr AddressSpaceProbePte(const AddressSpace* as, u64 virt)
     return *pte & kAddrMask;
 }
 
+u64 AddressSpaceProbePteRaw(const AddressSpace* as, u64 virt)
+{
+    if (as == nullptr)
+        return 0;
+    if ((virt & 0xFFF) != 0)
+        PanicAs("AddressSpaceProbePteRaw: unaligned virt", virt);
+    u64* pte = WalkToPteIn(as->pml4_virt, virt, /*create=*/false);
+    if (pte == nullptr || (*pte & kPagePresent) == 0)
+        return 0;
+    return *pte;
+}
+
+AddressSpace* AddressSpaceFork(const AddressSpace* parent)
+{
+    if (parent == nullptr)
+        return nullptr;
+    AddressSpace* child = AddressSpaceCreate(parent->frame_budget);
+    if (child == nullptr)
+        return nullptr;
+    for (u8 i = 0; i < parent->region_count; ++i)
+    {
+        const u64 va = parent->regions[i].vaddr;
+        const PhysAddr parent_frame = parent->regions[i].frame;
+        const u64 parent_pte = AddressSpaceProbePteRaw(parent, va);
+        if (parent_pte == 0)
+            continue; // region table out of sync with PTEs; skip
+        // Extract flags: mask out the address bits, keep the
+        // protection / present / user / NX flags.
+        const u64 flags = parent_pte & ~kAddrMask;
+        const PhysAddr child_frame = AllocateFrame();
+        if (child_frame == kNullFrame)
+        {
+            AddressSpaceRelease(child);
+            return nullptr;
+        }
+        // Copy page contents through the direct-map alias.
+        const u8* src = static_cast<const u8*>(PhysToVirt(parent_frame));
+        u8* dst = static_cast<u8*>(PhysToVirt(child_frame));
+        for (u64 j = 0; j < kPageSize; ++j)
+            dst[j] = src[j];
+        AddressSpaceMapUserPage(child, va, child_frame, flags);
+    }
+    return child;
+}
+
 void AddressSpaceClearUserMappings(AddressSpace* as)
 {
     if (as == nullptr)

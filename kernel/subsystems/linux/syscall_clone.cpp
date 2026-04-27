@@ -106,6 +106,77 @@ struct LinuxCloneDesc
 
 } // namespace
 
+i64 DoFork()
+{
+    using ::duetos::core::Process;
+    Process* parent = core::CurrentProcess();
+    if (parent == nullptr)
+        return kEPERM;
+    if (!core::CapSetHas(parent->caps, core::kCapSpawnThread))
+    {
+        core::RecordSandboxDenial(core::kCapSpawnThread);
+        return kEPERM;
+    }
+    sched::Task* current = sched::CurrentTask();
+    arch::TrapFrame* parent_tf = sched::SchedFindUserTrapFrame(current);
+    if (parent_tf == nullptr)
+        return kEINVAL;
+
+    // Allocate child AS as a deep copy of the parent. Pages are
+    // duplicated frame-by-frame with parent PTE flags preserved
+    // (W^X stays intact). No COW yet — sub-GAP.
+    mm::AddressSpace* child_as = mm::AddressSpaceFork(parent->as);
+    if (child_as == nullptr)
+        return kENOMEM;
+
+    // Build the child Process. Inherit caps, root, code_va,
+    // stack_va, tick_budget. fd table + win32 handle tables
+    // start fresh — fd inheritance + CLOEXEC handling deferred.
+    Process* child = core::ProcessCreate(parent->name, child_as, parent->caps, parent->root, parent->user_code_va,
+                                         parent->user_stack_va, parent->tick_budget);
+    if (child == nullptr)
+    {
+        mm::AddressSpaceRelease(child_as);
+        return kENOMEM;
+    }
+    child->abi_flavor = parent->abi_flavor;
+    child->user_gs_base = parent->user_gs_base;
+    child->linux_brk_base = parent->linux_brk_base;
+    child->linux_brk_current = parent->linux_brk_current;
+    child->linux_mmap_cursor = parent->linux_mmap_cursor;
+    // Hand a LinuxCloneDesc to the existing LinuxCloneEntry —
+    // it iretq's into ring-3 with rax = 0 (EnterUserModeThread's
+    // built-in scrub), exactly the contract Linux fork wants for
+    // the child.
+    auto* desc = static_cast<LinuxCloneDesc*>(mm::KMalloc(sizeof(LinuxCloneDesc)));
+    if (desc == nullptr)
+    {
+        // Process is mid-flight; release it. ProcessRelease does
+        // the AS release transitively.
+        core::ProcessRelease(child);
+        return kENOMEM;
+    }
+    desc->user_rip = parent_tf->rip;
+    desc->user_rsp = parent_tf->rsp;
+    desc->user_gs_base = parent->user_gs_base;
+
+    static char s_name[16] = {'l', 'x', '-', 'f', 'o', 'r', 'k', 0};
+    sched::Task* t = sched::SchedCreateUser(&LinuxCloneEntry, desc, s_name, child);
+    if (t == nullptr)
+    {
+        mm::KFree(desc);
+        core::ProcessRelease(child);
+        return kENOMEM;
+    }
+
+    arch::SerialWrite("[linux/fork] parent pid=");
+    arch::SerialWriteHex(parent->pid);
+    arch::SerialWrite(" -> child pid=");
+    arch::SerialWriteHex(child->pid);
+    arch::SerialWrite("\n");
+    return static_cast<i64>(child->pid);
+}
+
 i64 DoClone(u64 flags, u64 child_stack, u64 ptid_user, u64 ctid_user, u64 tls)
 {
     using ::duetos::core::Process;

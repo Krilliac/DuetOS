@@ -1148,7 +1148,10 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
         break;
     case kSysFork:
     case kSysVfork:
-        rv = kENOSYS;
+        // Both forward to the same DoFork. vfork's "child runs
+        // in parent's AS until execve" semantics are not
+        // honoured in v0 — vfork is treated as fork. Sub-GAP.
+        rv = DoFork();
         break;
     case kSysClone3:
     {
