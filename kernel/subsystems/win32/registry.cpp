@@ -430,6 +430,16 @@ i64 DoSetValue(arch::TrapFrame* frame)
     core::Process* proc = core::CurrentProcess();
     if (proc == nullptr)
         return kNtStatusInvalidParameter;
+    // Subsystem isolation: registry mutation is a kernel-state
+    // change. Cap-gate on kCapFsWrite — same gate that protects
+    // FAT32 writes — so a sandboxed PE can't alter the shared
+    // kernel-side hive without explicit clearance. See
+    // .claude/knowledge/subsystem-isolation-decision-v0.md.
+    if (!core::CapSetHas(proc->caps, core::kCapFsWrite))
+    {
+        core::RecordSandboxDenial(core::kCapFsWrite);
+        return static_cast<i64>(static_cast<u32>(0xC0000022)); // STATUS_ACCESS_DENIED
+    }
     const u64 handle = frame->rsi;
     const u64 name_va = frame->rdx;
     const u64 data_va = frame->r10;
@@ -487,6 +497,13 @@ i64 DoDeleteValue(arch::TrapFrame* frame)
     core::Process* proc = core::CurrentProcess();
     if (proc == nullptr)
         return kNtStatusInvalidParameter;
+    // Subsystem isolation: same cap gate as DoSetValue (registry
+    // mutation requires kCapFsWrite).
+    if (!core::CapSetHas(proc->caps, core::kCapFsWrite))
+    {
+        core::RecordSandboxDenial(core::kCapFsWrite);
+        return static_cast<i64>(static_cast<u32>(0xC0000022));
+    }
     const u64 handle = frame->rsi;
     const u64 name_va = frame->rdx;
     const RegKey* key = SlotForHandle(proc, handle);

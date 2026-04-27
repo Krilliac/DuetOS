@@ -78,6 +78,16 @@ i64 DoWrite(u64 fd, u64 user_buf, u64 len)
         return kEBADF;
     if (p->linux_fds[fd].state != 2)
         return kEBADF;
+    // Subsystem isolation: file mutation requires kCapFsWrite —
+    // same gate the native ABI's SYS_FILE_WRITE enforces. Linux
+    // ELF binaries don't get to skip the gate by entering through
+    // their ABI front-end. See
+    // .claude/knowledge/subsystem-isolation-decision-v0.md.
+    if (!core::CapSetHas(p->caps, core::kCapFsWrite))
+    {
+        core::RecordSandboxDenial(core::kCapFsWrite);
+        return kEACCES;
+    }
 
     // File write. Three regions to consider:
     //   [off, min(off+len, size))     — in-bounds: WriteInPlace

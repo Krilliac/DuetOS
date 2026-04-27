@@ -29,6 +29,23 @@ This is a greenfield project. Treat every file in the tree as intentionally shap
 - Not a research microkernel (L4, seL4). Pragmatism over academic purity.
 - Not a rewrite of ReactOS. ReactOS is useful as a reference for Win32 semantics; we are not forking it.
 
+### Subsystem isolation (DO NOT VIOLATE)
+
+**Win32 and Linux subsystems are facades for executing PE/ELF binaries. They never drive DuetOS.** The DuetOS kernel — its capability set, scheduler, address-space ledger, filesystem mediation, and IPC — is the authority on every effect a guest binary can have on the system. NT and Linux thunks translate ABI shapes; they don't reach past the syscall boundary.
+
+Concrete rules every subsystem TU and userland DLL must follow:
+
+1. **No subsystem code mutates DuetOS state without going through a kernel-mediated, cap-gated syscall.** A Win32 PE that wants to write a file goes through `SYS_FILE_WRITE` (kCapFsWrite). A Linux binary that wants to spawn a thread goes through `SYS_THREAD_CREATE` (kCapSpawnThread). The thunk does not get to skip the gate.
+2. **Auth and privilege are kernel-owned.** `Process::caps` (kCap*) is the source of truth. Any Win32-shaped privilege surface (NtAdjustPrivilegesToken, SeDebugPrivilege, integrity levels, ACLs) is a probe-satisfying facade — it does not actually grant or revoke anything. The kernel's cap gates are what gate.
+3. **Userland DLLs (`userland/libs/*`) are freestanding.** They do not include kernel headers and they do not assume kernel internals. They issue syscalls and trust the kernel's return.
+4. **In-kernel subsystem code (`kernel/subsystems/win32/`, `kernel/subsystems/linux/`) routes through public kernel APIs (`mm::*`, `sched::*`, `fs::routing::*`, `core::Cap*`).** It does not mutate kernel-internal data structures (regions tables, runqueues, capability bitsets) directly.
+5. **No subsystem-to-subsystem coupling.** Win32 doesn't call Linux, Linux doesn't call Win32. They both call the kernel.
+6. **One source of truth per resource.** One TCP stack, one VFS, one registry, one window manager — each reachable from multiple ABI front-ends, but with one kernel-owned implementation.
+
+Violations of these rules are bugs even if they compile. If you find code that bypasses cap-gating or mutates kernel state from a subsystem, fix it — don't extend the violation. The reviewable signal: "could a malicious PE / ELF use this path to do something a native DuetOS process couldn't?" If yes, the gate is wrong, not the workload.
+
+See `.claude/knowledge/subsystem-isolation-decision-v0.md` for the full rationale and the audit checklist.
+
 ## Session start (run at the beginning of every session)
 
 **Step 1 — Git sync** (see [Git Sync Workflow](#git-sync-workflow) below for the commands):

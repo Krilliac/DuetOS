@@ -29,6 +29,24 @@
 namespace duetos::subsystems::linux::internal
 {
 
+// Subsystem isolation gate. Every Linux-ABI FS-mutation handler
+// in this TU calls this first; on miss it records the denial
+// and returns -EACCES so the gate is observable from userland.
+// Mirrors the kCapFsWrite check the native ABI's SYS_FILE_WRITE /
+// SYS_FILE_CREATE / SYS_FILE_UNLINK / SYS_FILE_RENAME paths
+// enforce — Linux ELF binaries don't get to skip the gate by
+// entering through their ABI front-end. See
+// .claude/knowledge/subsystem-isolation-decision-v0.md.
+static inline bool RequireFsWrite(core::Process* p)
+{
+    if (p == nullptr || !core::CapSetHas(p->caps, core::kCapFsWrite))
+    {
+        core::RecordSandboxDenial(core::kCapFsWrite);
+        return false;
+    }
+    return true;
+}
+
 // chmod / fchmod / chown / fchown / lchown: v0 has no permission
 // model and no uid/gid model. Accept the call but verify the
 // target exists — install scripts that chmod a missing file
@@ -107,6 +125,8 @@ i64 DoMknod(u64 user_path, u64 mode, u64 dev)
 // truncate(path, length): shrink/grow a file to `length` bytes.
 i64 DoTruncate(u64 user_path, u64 length)
 {
+    if (!RequireFsWrite(core::CurrentProcess()))
+        return kEACCES;
     char kbuf[64];
     const char* leaf = nullptr;
     if (!CopyAndStripFatPath(user_path, kbuf, leaf))
@@ -127,6 +147,8 @@ i64 DoFtruncate(u64 fd, u64 length)
     core::Process* p = core::CurrentProcess();
     if (p == nullptr || fd >= 16 || p->linux_fds[fd].state != 2)
         return kEBADF;
+    if (!RequireFsWrite(p))
+        return kEACCES;
     const auto* v = fs::fat32::Fat32Volume(0);
     if (v == nullptr)
         return kENOENT;
@@ -142,6 +164,8 @@ i64 DoFtruncate(u64 fd, u64 length)
 // if the file doesn't exist.
 i64 DoUnlink(u64 user_path)
 {
+    if (!RequireFsWrite(core::CurrentProcess()))
+        return kEACCES;
     char kbuf[64];
     const char* leaf = nullptr;
     if (!CopyAndStripFatPath(user_path, kbuf, leaf))
@@ -159,6 +183,8 @@ i64 DoUnlink(u64 user_path)
 i64 DoMkdir(u64 user_path, u64 mode)
 {
     (void)mode;
+    if (!RequireFsWrite(core::CurrentProcess()))
+        return kEACCES;
     char kbuf[64];
     const char* leaf = nullptr;
     if (!CopyAndStripFatPath(user_path, kbuf, leaf))
@@ -174,6 +200,8 @@ i64 DoMkdir(u64 user_path, u64 mode)
 // rmdir(path): remove an empty directory.
 i64 DoRmdir(u64 user_path)
 {
+    if (!RequireFsWrite(core::CurrentProcess()))
+        return kEACCES;
     char kbuf[64];
     const char* leaf = nullptr;
     if (!CopyAndStripFatPath(user_path, kbuf, leaf))
@@ -203,6 +231,8 @@ i64 DoMkdirat(i64 dirfd, u64 user_path, u64 mode)
 // 64 KiB cap, refuses overwrite, regular files only).
 i64 DoRename(u64 user_old, u64 user_new)
 {
+    if (!RequireFsWrite(core::CurrentProcess()))
+        return kEACCES;
     char old_buf[64];
     char new_buf[64];
     const char* old_leaf = nullptr;
