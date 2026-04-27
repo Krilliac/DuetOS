@@ -30,6 +30,7 @@
  */
 
 #include "subsystems/linux/syscall_internal.h"
+#include "subsystems/linux/inotify.h"
 #include "subsystems/linux/syscall_async_io.h"
 #include "subsystems/linux/syscall_pipe.h"
 #include "subsystems/linux/syscall_socket.h"
@@ -178,6 +179,8 @@ i64 DoFork()
             SignalfdRetain(src.first_cluster);
         else if (src.state == 9)
             EpollRetain(src.first_cluster);
+        else if (src.state == 10)
+            InotifyRetain(src.first_cluster);
     }
     // Hand a LinuxCloneDesc to the existing LinuxCloneEntry —
     // it iretq's into ring-3 with rax = 0 (EnterUserModeThread's

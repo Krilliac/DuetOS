@@ -35,6 +35,7 @@ inline constexpr i64 kEISDIR = -21;
 inline constexpr i64 kEINVAL = -22;
 inline constexpr i64 kENFILE = -23;
 inline constexpr i64 kEMFILE = -24;
+inline constexpr i64 kEAGAIN = -11;
 inline constexpr i64 kENOTTY = -25;
 inline constexpr i64 kESPIPE = -29;
 inline constexpr i64 kERANGE = -34;
@@ -99,8 +100,13 @@ i64 DoEpollCreate1(u64 flags);
 i64 DoEpollCtl(u64 epfd, u64 op, u64 fd, u64 event);
 i64 DoEpollWait(u64 epfd, u64 events, u64 maxevents, u64 timeout_ms);
 i64 DoEpollPwait(u64 epfd, u64 events, u64 maxevents, u64 timeout_ms, u64 sigmask, u64 sigsetsize);
-i64 DoInotifyInit();
-i64 DoInotifyInit1(u64 flags);
+// Inotify family (inotify.cpp). Real ring + watch table; FS
+// mutations publish events via InotifyPublish() called from
+// fs::routing.
+i64 InotifyInit();
+i64 InotifyInit1(u64 flags);
+i64 DoInotifyAddWatch(u64 fd, u64 user_path, u64 mask);
+i64 DoInotifyRmWatch(u64 fd, u64 wd);
 
 // Memory-management handlers (syscall_mm.cpp). brk grows the
 // per-process Linux heap; mmap supports MAP_PRIVATE +

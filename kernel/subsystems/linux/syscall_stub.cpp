@@ -256,19 +256,9 @@ i64 DoReadahead(u64 fd, u64 offset, u64 count)
     return 0;
 }
 
-// epoll moved to syscall_async_io.cpp — full create/ctl/wait
-// pipeline polling against the LinuxFd state-bus readiness probes.
-// inotify stays here: no filesystem-watch engine yet (FS doesn't
-// emit change events). -ENOSYS so autoconf falls through.
-i64 DoInotifyInit()
-{
-    return kENOSYS;
-}
-i64 DoInotifyInit1(u64 flags)
-{
-    (void)flags;
-    return kENOSYS;
-}
+// epoll moved to syscall_async_io.cpp.
+// inotify moved to inotify.cpp — real ring + watch table + FS-
+// mutation publish-subscribe through fs::routing.
 
 // ---------------------------------------------------------------
 // Compat / tracing / mount / link / rename stub group.

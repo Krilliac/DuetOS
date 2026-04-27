@@ -72,7 +72,6 @@ constexpr u32 kEPOLLERR = 0x008;
 constexpr u32 kEPOLLHUP = 0x010;
 
 constexpr u64 kEFD_NONBLOCK = 0x800; // shared with eventfd; here just to silence warnings
-constexpr u64 kEAGAIN = -11;
 
 struct Timerfd
 {

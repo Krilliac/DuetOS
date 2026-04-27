@@ -31,6 +31,7 @@
 #include "fs/fat32.h"
 #include "fs/ramfs.h"
 #include "fs/vfs.h"
+#include "subsystems/linux/inotify.h"
 
 namespace duetos::fs::routing
 {
@@ -385,6 +386,7 @@ u64 CreateForProcess(::duetos::core::Process* proc, const char* path, const void
     h.fat32_volume_idx = disk_idx;
     CopyDirEntry(h.fat32_entry, entry);
     h.cursor = 0;
+    ::duetos::subsystems::linux::internal::InotifyPublish(disk_rest, ::duetos::subsystems::linux::internal::kInCreate);
     const u64 handle = Process::kWin32HandleBase + slot;
     SerialWrite("[fs/route] create ok pid=");
     SerialWriteHex(proc->pid);
@@ -492,7 +494,10 @@ bool UnlinkForProcess(::duetos::core::Process* proc, const char* path)
     const fat32::Volume* v = fat32::Fat32Volume(idx);
     if (v == nullptr)
         return false;
-    return fat32::Fat32DeleteAtPath(v, rest);
+    if (!fat32::Fat32DeleteAtPath(v, rest))
+        return false;
+    ::duetos::subsystems::linux::internal::InotifyPublish(rest, ::duetos::subsystems::linux::internal::kInDelete);
+    return true;
 }
 
 bool StatPathForProcess(::duetos::core::Process* proc, const char* path, u64* out_size, bool* out_is_dir)
@@ -535,7 +540,12 @@ bool RenameForProcess(::duetos::core::Process* proc, const char* src, const char
     const fat32::Volume* v = fat32::Fat32Volume(src_idx);
     if (v == nullptr)
         return false;
-    return fat32::Fat32RenameAtPath(v, src_rest, dst_rest);
+    if (!fat32::Fat32RenameAtPath(v, src_rest, dst_rest))
+        return false;
+    ::duetos::subsystems::linux::internal::InotifyPublish(src_rest,
+                                                          ::duetos::subsystems::linux::internal::kInMovedFrom);
+    ::duetos::subsystems::linux::internal::InotifyPublish(dst_rest, ::duetos::subsystems::linux::internal::kInMovedTo);
+    return true;
 }
 
 // ---------------------------------------------------------------

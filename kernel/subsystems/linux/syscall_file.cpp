@@ -18,6 +18,7 @@
  */
 
 #include "subsystems/linux/syscall_internal.h"
+#include "subsystems/linux/inotify.h"
 #include "subsystems/linux/syscall_async_io.h"
 #include "subsystems/linux/syscall_pipe.h"
 #include "subsystems/linux/syscall_socket.h"
@@ -181,6 +182,8 @@ i64 DoClose(u64 fd)
         SignalfdRelease(idx);
     else if (state == 9)
         EpollRelease(idx);
+    else if (state == 10)
+        InotifyRelease(idx);
     p->linux_fds[fd].state = 0;
     p->linux_fds[fd].first_cluster = 0;
     p->linux_fds[fd].size = 0;

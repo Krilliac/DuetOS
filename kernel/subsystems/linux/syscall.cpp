@@ -1071,10 +1071,16 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
         rv = DoEpollPwait(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8, frame->r9);
         break;
     case kSysInotifyInit:
-        rv = DoInotifyInit();
+        rv = InotifyInit();
         break;
     case kSysInotifyInit1:
-        rv = DoInotifyInit1(frame->rdi);
+        rv = InotifyInit1(frame->rdi);
+        break;
+    case kSysInotifyAddWatch:
+        rv = DoInotifyAddWatch(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysInotifyRmWatch:
+        rv = DoInotifyRmWatch(frame->rdi, frame->rsi);
         break;
     case kSysPrctl:
         rv = DoPrctl(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
@@ -1325,10 +1331,8 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
     case kSysMqGetsetattr:
         rv = kENOSYS;
         break;
-    case kSysInotifyAddWatch:
-    case kSysInotifyRmWatch:
-        rv = kENOSYS;
-        break;
+    // inotify_add_watch / inotify_rm_watch handled at the real
+    // dispatcher arms above.
     // libaio — no async-I/O engine.
     case kSysIoSetup:
     case kSysIoDestroy:
