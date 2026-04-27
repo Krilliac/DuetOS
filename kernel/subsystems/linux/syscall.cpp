@@ -1136,9 +1136,12 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
         break;
     }
 
-    // Batch 69 — process control. Linux fork/vfork/clone +
-    // execve don't have a v0 implementation; return -ENOSYS.
+    // Batch 69 — process control. v0 implements CLONE_THREAD
+    // same-AS thread create only; full fork (CLONE_THREAD clear)
+    // and execve stay -ENOSYS pending §11.10 follow-ups.
     case kSysClone:
+        rv = DoClone(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+        break;
     case kSysFork:
     case kSysVfork:
         rv = kENOSYS;

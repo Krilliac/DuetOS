@@ -123,6 +123,21 @@ i64 DoExit(u64 status);
 i64 DoExitGroup(u64 status);
 i64 DoGetPid();
 i64 DoGetTid();
+
+// Linux clone(flags, stack, ptid, ctid, tls). v0 implements the
+// CLONE_THREAD subset only — same-AS thread create, equivalent
+// to pthread_create's flag bundle. flags missing CLONE_THREAD
+// or CLONE_VM return -ENOSYS so libc falls back without
+// pretending the call succeeded. Defined in syscall_clone.cpp.
+//
+// The full Linux signature carries ptid / ctid / tls — v0 honours
+// CLONE_PARENT_SETTID by writing the new TID through `ptid_user`
+// and CLONE_SETTLS by stamping `tls` into the new task's
+// fs_base. CLONE_CHILD_CLEARTID + futex-wake-on-exit are not
+// wired (no futex engine in v0); the call is accepted-but-ignored
+// for that flag.
+i64 DoClone(u64 flags, u64 child_stack, u64 ptid_user, u64 ctid_user, u64 tls);
+
 i64 DoGetpgrp();
 i64 DoGetPpid();
 i64 DoGetPgid(u64 pid);
