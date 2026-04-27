@@ -286,6 +286,19 @@ set +e
     /export:NtSetTimerResolution \
     /export:NtQueryTimerResolution \
     /export:NtGetCurrentProcessorNumber \
+    /export:NtCreateMailslotFile \
+    /export:NtCreateNamedPipeFile \
+    /export:NtImpersonateClientOfPort \
+    /export:NtPowerInformation \
+    /export:NtGetWriteWatch \
+    /export:NtResetWriteWatch \
+    /export:NtCreateProfile \
+    /export:NtStartProfile \
+    /export:NtStopProfile \
+    /export:NtSetIntervalProfile \
+    /export:NtQueryIntervalProfile \
+    /export:NtPlugPlayControl \
+    /export:NtVdmControl \
     /export:NtContinue \
     /export:ZwContinue=NtContinue \
     /export:NtAllocateVirtualMemory \

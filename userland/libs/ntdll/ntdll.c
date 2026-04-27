@@ -2247,6 +2247,153 @@ __declspec(dllexport) NTSTATUS NtCancelIoFile(HANDLE FileHandle, void* IoStatusB
 }
 
 /* ------------------------------------------------------------------
+ * NT mailslot + named-pipe + power-info + write-watch + profile
+ * + PnP + VDM facades.
+ * ------------------------------------------------------------------ */
+__declspec(dllexport) NTSTATUS NtCreateMailslotFile(HANDLE* FileHandle, ULONG DesiredAccess, void* ObjectAttributes,
+                                                    void* IoStatusBlock, ULONG CreateOptions, ULONG MailslotQuota,
+                                                    ULONG MaximumMessageSize, void* ReadTimeout)
+{
+    (void)FileHandle;
+    (void)DesiredAccess;
+    (void)ObjectAttributes;
+    (void)IoStatusBlock;
+    (void)CreateOptions;
+    (void)MailslotQuota;
+    (void)MaximumMessageSize;
+    (void)ReadTimeout;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtCreateNamedPipeFile(HANDLE* FileHandle, ULONG DesiredAccess, void* ObjectAttributes,
+                                                     void* IoStatusBlock, ULONG ShareAccess, ULONG CreateDisposition,
+                                                     ULONG CreateOptions, BOOL NamedPipeType, BOOL ReadMode,
+                                                     BOOL CompletionMode, ULONG MaximumInstances, ULONG InboundQuota,
+                                                     ULONG OutboundQuota, void* DefaultTimeout)
+{
+    (void)FileHandle;
+    (void)DesiredAccess;
+    (void)ObjectAttributes;
+    (void)IoStatusBlock;
+    (void)ShareAccess;
+    (void)CreateDisposition;
+    (void)CreateOptions;
+    (void)NamedPipeType;
+    (void)ReadMode;
+    (void)CompletionMode;
+    (void)MaximumInstances;
+    (void)InboundQuota;
+    (void)OutboundQuota;
+    (void)DefaultTimeout;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtImpersonateClientOfPort(HANDLE PortHandle, void* Message)
+{
+    (void)PortHandle;
+    (void)Message;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtPowerInformation(ULONG InformationLevel, void* InputBuffer, ULONG InputBufferLength,
+                                                  void* OutputBuffer, ULONG OutputBufferLength)
+{
+    (void)InformationLevel;
+    (void)InputBuffer;
+    (void)InputBufferLength;
+    if (OutputBuffer != (void*)0 && OutputBufferLength > 0)
+    {
+        unsigned char* out = (unsigned char*)OutputBuffer;
+        for (ULONG i = 0; i < OutputBufferLength; ++i)
+            out[i] = 0;
+    }
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS NtGetWriteWatch(HANDLE ProcessHandle, ULONG Flags, void* BaseAddress, SIZE_T RegionSize,
+                                               void** UserAddressArray, SIZE_T* EntriesInUserAddressArray,
+                                               ULONG* Granularity)
+{
+    (void)ProcessHandle;
+    (void)Flags;
+    (void)BaseAddress;
+    (void)RegionSize;
+    (void)UserAddressArray;
+    if (EntriesInUserAddressArray != (SIZE_T*)0)
+        *EntriesInUserAddressArray = 0;
+    if (Granularity != (ULONG*)0)
+        *Granularity = 4096;
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS NtResetWriteWatch(HANDLE ProcessHandle, void* BaseAddress, SIZE_T RegionSize)
+{
+    (void)ProcessHandle;
+    (void)BaseAddress;
+    (void)RegionSize;
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS NtCreateProfile(HANDLE* ProfileHandle, HANDLE ProcessHandle, void* RangeBase,
+                                               SIZE_T RangeSize, ULONG BucketSize, void* Buffer, ULONG BufferSize,
+                                               ULONG ProfileSource, ULONG Affinity)
+{
+    (void)ProfileHandle;
+    (void)ProcessHandle;
+    (void)RangeBase;
+    (void)RangeSize;
+    (void)BucketSize;
+    (void)Buffer;
+    (void)BufferSize;
+    (void)ProfileSource;
+    (void)Affinity;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtStartProfile(HANDLE ProfileHandle)
+{
+    (void)ProfileHandle;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtStopProfile(HANDLE ProfileHandle)
+{
+    (void)ProfileHandle;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtSetIntervalProfile(ULONG Interval, ULONG Source)
+{
+    (void)Interval;
+    (void)Source;
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS NtQueryIntervalProfile(ULONG ProfileSource, ULONG* Interval)
+{
+    (void)ProfileSource;
+    if (Interval != (ULONG*)0)
+        *Interval = 0;
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS NtPlugPlayControl(ULONG PnPControlClass, void* PnPControlData,
+                                                 ULONG PnPControlDataLength)
+{
+    (void)PnPControlClass;
+    (void)PnPControlData;
+    (void)PnPControlDataLength;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtVdmControl(ULONG Service, void* ServiceData)
+{
+    (void)Service;
+    (void)ServiceData;
+    return (NTSTATUS)0xC0000002;
+}
+
+/* ------------------------------------------------------------------
  * NT additional VM + driver-load + system-power thunks.
  * ------------------------------------------------------------------ */
 __declspec(dllexport) NTSTATUS NtFlushVirtualMemory(HANDLE ProcessHandle, void** BaseAddress, SIZE_T* RegionSize,
