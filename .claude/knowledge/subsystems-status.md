@@ -20,19 +20,19 @@ Headline gaps:
 
 ### Linux ABI (~190 of 374 syscalls still stubbed)
 
-- **libaio** (io_setup / io_destroy / io_getevents / io_submit / io_cancel)
 - **BPF + perf_event_open** — huge surface, likely never realistic
 - **Real signal completion**: user-handler trampoline + sigreturn (the trampoline is the hard part)
 - **Containers**: setns, unshare, pivot_root, mount/umount2 (currently -EPERM)
 - **Real ptrace state machine** (currently only kCapDebug-gated stub)
 - **KEYRINGS**: add_key / request_key / keyctl
-- **landlock / seccomp filter execution / fanotify**
-- **statx, copy_file_range, name_to_handle_at, mseal, process_madvise**
+- **fanotify_init / fanotify_mark** (could mirror inotify shape)
 - **clock_settime / clock_adjtime** (needs RTC)
 - **Real rlimit enforcement** (currently mostly stored, not enforced)
 - **mremap for real**, full madvise advice handling
 - **pidfd_getfd, pidfd poll-on-exit**
 - **Real splice / tee / vmsplice page-grant** (currently -EINVAL except vmsplice→pipe)
+- **userfaultfd, io_uring** (-ENOSYS facades only)
+- **landlock / seccomp filter execution** (-ENOSYS facades only)
 
 ### Win32 / NT subsystem (~470 NT facades remaining of 506 total)
 
@@ -674,6 +674,7 @@ sequence of what got built when.
 | 2026-04-27 | `3b7b753` | Linux pidfd family (state 12) + splice/tee/vmsplice + PR_SET_NAME. pidfd_open ProcessRetains target; pidfd_send_signal forwards to `LinuxSignalDeliver`. splice/tee return -EINVAL (lib fallback); vmsplice honours iovec→pipe direction. `Process::linux_task_name[16]` matches TASK_COMM_LEN |
 | 2026-04-27 | `8c2d619` | SysV shared memory + semaphores. shm: 8-segment global pool, frames mapped via `AddressSpaceMapBorrowedPage` at per-process arena (`kLinuxShmArenaBase = 0x70000000`); `Process::linux_shm_attaches[8]` table. sem: 8-set / 16-sem-per-set pool, `SemTryApplyLocked` atomic-batch with WaitQueue blocking |
 | 2026-04-27 | `efe483e` | SysV msg queues + POSIX msg queues. SysV: 8-queue keyed pool, 16-msg ring of 1024-byte messages, mtype filter (== / 0 = any / < 0 = any ≤ filter), IPC_NOWAIT honoured. POSIX: 8-queue named pool, LinuxFd state 13, refcounted (mq_unlink + close-of-last frees), highest-priority delivery, mq_notify -ENOSYS. **Sub-GAPs**: mq_timedsend / mq_timedreceive ignore timeout argument; mq_getsetattr SET no-op; 1024-byte msg cap; 16-msg ring cap |
+| 2026-04-27 | `f8998d8` | 33 modern Linux syscalls in one TU (`extra_syscalls.cpp`). Real (5): **statx** (256-byte struct, STATX_BASIC_STATS); **copy_file_range** (4 KiB-stage bounce; cap-gated on kCapFsWrite); **memfd_create** (8-slot pool, LinuxFd state 14, 1-page initial alloc); **close_range** (skip stdin/out/err); **statfs / fstatfs** (FAT-shaped defaults). No-op success (8): NUMA family (set/get_mempolicy / mbind / migrate_pages / move_pages), mseal, process_madvise, process_mrelease. Honest -ENOSYS / -EINVAL (20): userfaultfd, io_uring_*, name_to_handle_at / open_by_handle_at, fsopen / fsconfig / fsmount / fspick / open_tree / move_mount / mount_setattr, landlock_*, pkey_alloc / pkey_free / pkey_mprotect (forwards to mprotect, key ignored). DoClose / DoFork arms wired for state 14. **Sub-GAPs**: statx timestamps + dio_align stamped 0; copy_file_range FAT32 only; memfd ftruncate-grow not wired; statfs defaults regardless of path/fd; mseal advisory not enforced; landlock returns -ENOSYS to avoid false-sandbox advertisement |
 
 ---
 
