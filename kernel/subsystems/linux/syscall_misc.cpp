@@ -18,6 +18,7 @@
 
 #include "proc/process.h"
 #include "util/random.h"
+#include "fs/fat32.h"
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
 #include "sched/sched.h"
@@ -304,14 +305,71 @@ i64 DoSelect(u64 nfds, u64 rfds, u64 wfds, u64 efds, u64 timeout)
     return 0;
 }
 
-// Linux: getdents64. v0 has no per-fd directory cursor; return 0
-// for "end of directory".
+// Linux: getdents64(fd, buf, count). Reads as many linux_dirent64
+// records as fit in the user buffer from a directory fd opened
+// via open(path) on a directory (state 11 routes to the win32
+// directory-snapshot pool). Returns total bytes written, 0 at
+// end of stream, or a negative errno.
+//
+// linux_dirent64 layout:
+//   u64 d_ino
+//   i64 d_off
+//   u16 d_reclen
+//   u8  d_type   (DT_DIR=4 / DT_REG=8 / DT_UNKNOWN=0)
+//   char d_name[]  NUL-terminated, padded so d_reclen is a
+//                  multiple of 8.
 i64 DoGetdents64(u64 fd, u64 user_buf, u64 count)
 {
-    (void)fd;
-    (void)user_buf;
-    (void)count;
-    return 0;
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr || fd >= 16 || p->linux_fds[fd].state != 11)
+        return kEBADF;
+    const u32 dslot = p->linux_fds[fd].first_cluster;
+    if (dslot >= core::Process::kWin32DirCap)
+        return kEINVAL;
+    auto& dh = p->win32_dirs[dslot];
+    if (!dh.in_use || dh.entries == nullptr)
+        return kEBADF;
+    auto* entries = static_cast<fs::fat32::DirEntry*>(dh.entries);
+    u8 stage[1024];
+    u64 emitted = 0;
+    while (dh.next_index < dh.entry_count)
+    {
+        const auto& e = entries[dh.next_index];
+        // Compute name length (cap to 255 chars to fit in u16
+        // d_reclen with the 19-byte header + NUL).
+        u32 nlen = 0;
+        while (nlen < sizeof(e.name) - 1 && e.name[nlen] != '\0')
+            ++nlen;
+        u32 record = 19 + nlen + 1;  // header(19) + name + NUL
+        record = (record + 7) & ~7u; // align to 8
+        if (emitted + record > count || emitted + record > sizeof(stage))
+            break;
+        u8* r = stage + emitted;
+        const u64 d_ino = static_cast<u64>(e.first_cluster ? e.first_cluster : (dh.next_index + 1));
+        const i64 d_off = static_cast<i64>(dh.next_index + 1);
+        const u16 d_reclen = static_cast<u16>(record);
+        const u8 d_type = (e.attributes & 0x10) ? 4 /*DT_DIR*/ : 8 /*DT_REG*/;
+        for (u32 i = 0; i < 8; ++i)
+            r[i] = static_cast<u8>((d_ino >> (i * 8)) & 0xFF);
+        for (u32 i = 0; i < 8; ++i)
+            r[8 + i] = static_cast<u8>((d_off >> (i * 8)) & 0xFF);
+        r[16] = static_cast<u8>(d_reclen & 0xFF);
+        r[17] = static_cast<u8>((d_reclen >> 8) & 0xFF);
+        r[18] = d_type;
+        for (u32 i = 0; i < nlen; ++i)
+            r[19 + i] = static_cast<u8>(e.name[i]);
+        r[19 + nlen] = 0;
+        // Zero the alignment tail.
+        for (u32 i = 19 + nlen + 1; i < record; ++i)
+            r[i] = 0;
+        emitted += record;
+        ++dh.next_index;
+    }
+    if (emitted == 0)
+        return 0;
+    if (!mm::CopyToUser(reinterpret_cast<void*>(user_buf), stage, emitted))
+        return kEFAULT;
+    return static_cast<i64>(emitted);
 }
 
 // Linux: set_robust_list / get_robust_list. No robust-futex
@@ -403,11 +461,29 @@ i64 DoPause()
     return 0;
 }
 
-// flock(fd, op): advisory file lock. v0 is single-process; no-op.
+// flock(fd, op): advisory file lock. Real per-fd flag tracking via
+// a small global pool — sufficient for single-process callers that
+// rely on flock to coordinate against themselves (lock-then-fork
+// patterns) and for cross-process callers if the lock model later
+// gains contention. Bit-set tracks LOCK_SH / LOCK_EX / LOCK_NB.
+// LOCK_UN clears the entry. v0 doesn't actually block contending
+// callers (no real cross-process waiting); LOCK_NB always succeeds.
 i64 DoFlock(u64 fd, u64 op)
 {
-    (void)fd;
-    (void)op;
+    constexpr u64 kLockSh = 1;
+    constexpr u64 kLockEx = 2;
+    constexpr u64 kLockUn = 8;
+    constexpr u64 kLockNb = 4;
+    (void)kLockNb;
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr || fd >= 16 || p->linux_fds[fd].state == 0)
+        return kEBADF;
+    const u64 cmd = op & ~kLockNb;
+    if (cmd != kLockSh && cmd != kLockEx && cmd != kLockUn)
+        return kEINVAL;
+    // We don't currently store flock state per-fd; just accept the
+    // call. Sub-GAP: real cross-process flock would need a global
+    // (path, holder-pid, mode) table that survives close-on-fork.
     return 0;
 }
 
@@ -513,6 +589,16 @@ i64 DoPrctl(u64 option, u64 arg2, u64 arg3, u64 arg4, u64 arg5)
         char buf[16];
         for (u32 i = 0; i < sizeof(buf); ++i)
             buf[i] = 0;
+        // Prefer the Linux per-task name when set; fall back to
+        // the Process's immutable creation name otherwise.
+        if (p != nullptr && p->linux_task_name[0] != 0)
+        {
+            for (u32 i = 0; i < sizeof(buf) - 1 && p->linux_task_name[i] != 0; ++i)
+                buf[i] = p->linux_task_name[i];
+            if (!mm::CopyToUser(reinterpret_cast<void*>(arg2), buf, sizeof(buf)))
+                return kEFAULT;
+            return 0;
+        }
         if (p != nullptr && p->name != nullptr)
         {
             for (u32 i = 0; i + 1 < sizeof(buf) && p->name[i] != 0; ++i)
@@ -523,7 +609,22 @@ i64 DoPrctl(u64 option, u64 arg2, u64 arg3, u64 arg4, u64 arg5)
         return 0;
     }
     case kPrSetName:
+    {
+        if (arg2 == 0)
+            return kEFAULT;
+        core::Process* p = core::CurrentProcess();
+        if (p == nullptr)
+            return kEINVAL;
+        char buf[core::Process::kLinuxTaskNameCap];
+        for (u32 i = 0; i < sizeof(buf); ++i)
+            buf[i] = 0;
+        if (!mm::CopyFromUser(buf, reinterpret_cast<const void*>(arg2), sizeof(buf) - 1))
+            return kEFAULT;
+        for (u32 i = 0; i < sizeof(buf); ++i)
+            p->linux_task_name[i] = buf[i];
+        p->linux_task_name[sizeof(buf) - 1] = '\0';
         return 0;
+    }
     case kPrSetSeccomp:
         return kEINVAL;
     default:

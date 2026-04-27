@@ -191,6 +191,7 @@ set +e
     /export:GetExitCodeProcess \
     /export:FindFirstFileA /export:FindFirstFileW \
     /export:FindNextFileA /export:FindNextFileW /export:FindClose \
+    /export:CreateProcessA /export:CreateProcessW \
     /export:CopyFileA /export:CopyFileW \
     /export:MoveFileA /export:MoveFileW \
     /export:DeleteFileA /export:DeleteFileW \

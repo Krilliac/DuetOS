@@ -26,8 +26,11 @@
 
 #include "subsystems/linux/syscall_internal.h"
 
+#include "arch/x86_64/cpu.h"
+#include "arch/x86_64/serial.h"
 #include "mm/paging.h"
 #include "proc/process.h"
+#include "sched/sched.h"
 
 namespace duetos::subsystems::linux::internal
 {
@@ -39,59 +42,191 @@ namespace duetos::subsystems::linux::internal
 // fit for "we don't have any pipes to give you."
 // DoPipe / DoPipe2 moved to syscall_pipe.cpp.
 
-// wait4(pid, status, options, rusage) / waitid(idtype, id, info,
-// options, rusage). v0 has no fork → no children → -ECHILD is the
-// canonical "you have no children to wait for" return.
+// wait4 / waitid: drain the per-process linux_child_exits queue.
+// fork() now sets child->linux_parent_pid = parent->pid; when a
+// child Process hits ProcessRelease's last-ref drop, it pushes a
+// LinuxChildExit{pid, exit_code, exit_signal} onto the parent's
+// queue and wakes linux_wait_wq. This handler scans the queue
+// for a match against `pid` (or any child if pid <= 0), drains the
+// matching entry, encodes the wait-status word the same shape musl
+// expects (WIFEXITED + 8-bit exit code), and returns the child PID.
+//
+// Sub-GAPs: process-group / session matching (pid == 0 / pid <= -1
+// as group selectors) collapse to "any child" — no pgid model
+// in v0. WCONTINUED / WUNTRACED ignored — no stop / continue
+// state-machine. rusage is filled with zeros.
+namespace
+{
+
+constexpr u32 kWNOHANG = 0x1;
+constexpr i64 kWaitPidAny = -1;
+
+// Return queue index of the matching entry, or -1 if none.
+// `target_pid > 0` matches that exact pid; <= 0 matches any.
+i32 FindChildExitMatchLocked(core::Process* p, i64 target_pid)
+{
+    for (u64 i = 0; i < p->linux_child_exit_count; ++i)
+    {
+        if (target_pid <= 0 || static_cast<i64>(p->linux_child_exits[i].pid) == target_pid)
+            return static_cast<i32>(i);
+    }
+    return -1;
+}
+
+void DrainChildExitLocked(core::Process* p, u32 idx, core::Process::LinuxChildExit& out)
+{
+    out = p->linux_child_exits[idx];
+    // Compact: shift the tail down so the queue stays dense.
+    for (u64 i = idx + 1; i < p->linux_child_exit_count; ++i)
+        p->linux_child_exits[i - 1] = p->linux_child_exits[i];
+    --p->linux_child_exit_count;
+}
+
+i32 EncodeWStatus(const core::Process::LinuxChildExit& exit)
+{
+    if (exit.was_signaled)
+        return static_cast<i32>(exit.exit_signal & 0x7F);  // WIFSIGNALED + WTERMSIG
+    return static_cast<i32>((exit.exit_code & 0xFF) << 8); // WIFEXITED + WEXITSTATUS
+}
+
+} // namespace
+
 i64 DoWait4(u64 pid, u64 user_status, u64 options, u64 user_rusage)
 {
-    (void)pid;
-    (void)user_status;
-    (void)options;
-    (void)user_rusage;
-    return kECHILD;
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr)
+        return kECHILD;
+    const i64 target_pid = static_cast<i64>(pid);
+    const bool nonblocking = (options & kWNOHANG) != 0;
+    while (true)
+    {
+        arch::Cli();
+        i32 found = FindChildExitMatchLocked(p, target_pid);
+        if (found < 0)
+        {
+            // Quick check: is this caller even capable of having a
+            // child? wait4() with no outstanding children returns
+            // -ECHILD. We approximate by tagging "no parent linkage
+            // ever" — but a fork-then-immediately-wait race could
+            // hit this branch before the child registers. Real
+            // Linux walks its task-tree; v0 just reports -ECHILD
+            // when the queue is empty AND the caller has no live
+            // children waiting to register. Conservative: only
+            // return -ECHILD if non-blocking; blocking goes on
+            // linux_wait_wq.
+            if (nonblocking)
+            {
+                arch::Sti();
+                return 0;
+            }
+            sched::WaitQueueBlock(&p->linux_wait_wq);
+            continue;
+        }
+        core::Process::LinuxChildExit exit;
+        DrainChildExitLocked(p, static_cast<u32>(found), exit);
+        arch::Sti();
+        if (user_status != 0)
+        {
+            const i32 wstatus = EncodeWStatus(exit);
+            if (!mm::CopyToUser(reinterpret_cast<void*>(user_status), &wstatus, sizeof(wstatus)))
+                return kEFAULT;
+        }
+        if (user_rusage != 0)
+        {
+            // struct rusage is 144 bytes; zero-fill is honest given
+            // the v0 absence of per-process accounting.
+            u8 zero[144];
+            for (u32 i = 0; i < sizeof(zero); ++i)
+                zero[i] = 0;
+            if (!mm::CopyToUser(reinterpret_cast<void*>(user_rusage), zero, sizeof(zero)))
+                return kEFAULT;
+        }
+        arch::SerialWrite("[linux/wait4] reaped pid=");
+        arch::SerialWriteHex(exit.pid);
+        arch::SerialWrite(" code=");
+        arch::SerialWriteHex(exit.exit_code);
+        arch::SerialWrite("\n");
+        return static_cast<i64>(exit.pid);
+    }
 }
+
 i64 DoWaitid(u64 idtype, u64 id, u64 user_info, u64 options, u64 user_rusage)
 {
-    (void)idtype;
-    (void)id;
-    (void)user_info;
-    (void)options;
-    (void)user_rusage;
-    return kECHILD;
+    // idtype: P_PID = 1, P_PGID = 2, P_ALL = 0. v0 collapses every
+    // selector to "match this child's pid" (P_PID) or "any child"
+    // (others) — no pgid model. WNOHANG honoured.
+    constexpr u64 kPPid = 1;
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr)
+        return kECHILD;
+    const i64 target_pid = (idtype == kPPid) ? static_cast<i64>(id) : kWaitPidAny;
+    const bool nonblocking = (options & kWNOHANG) != 0;
+    while (true)
+    {
+        arch::Cli();
+        i32 found = FindChildExitMatchLocked(p, target_pid);
+        if (found < 0)
+        {
+            if (nonblocking)
+            {
+                arch::Sti();
+                if (user_info != 0)
+                {
+                    u8 zero[128];
+                    for (u32 i = 0; i < sizeof(zero); ++i)
+                        zero[i] = 0;
+                    (void)mm::CopyToUser(reinterpret_cast<void*>(user_info), zero, sizeof(zero));
+                }
+                return 0;
+            }
+            sched::WaitQueueBlock(&p->linux_wait_wq);
+            continue;
+        }
+        core::Process::LinuxChildExit exit;
+        DrainChildExitLocked(p, static_cast<u32>(found), exit);
+        arch::Sti();
+        if (user_info != 0)
+        {
+            // struct siginfo_t — first 32 bytes carry si_signo /
+            // si_errno / si_code / si_pid / si_uid / si_status / etc.
+            // Encode the minimum musl reads: si_signo = SIGCHLD (17),
+            // si_pid = exit.pid, si_status = exit_code.
+            struct __attribute__((packed))
+            {
+                i32 si_signo;
+                i32 si_errno;
+                i32 si_code;
+                i32 _pad0;
+                u32 si_pid;
+                u32 si_uid;
+                i32 si_status;
+                u8 _pad1[100];
+            } info{};
+            info.si_signo = 17; // SIGCHLD
+            info.si_pid = static_cast<u32>(exit.pid);
+            info.si_status = static_cast<i32>(exit.exit_code & 0xFF);
+            info.si_code = exit.was_signaled ? 2 /*CLD_KILLED*/ : 1 /*CLD_EXITED*/;
+            if (!mm::CopyToUser(reinterpret_cast<void*>(user_info), &info, sizeof(info)))
+                return kEFAULT;
+        }
+        if (user_rusage != 0)
+        {
+            u8 zero[144];
+            for (u32 i = 0; i < sizeof(zero); ++i)
+                zero[i] = 0;
+            if (!mm::CopyToUser(reinterpret_cast<void*>(user_rusage), zero, sizeof(zero)))
+                return kEFAULT;
+        }
+        return 0; // waitid returns 0 on success (pid is in si_pid)
+    }
 }
 
 // eventfd / eventfd2 moved to syscall_pipe.cpp.
-// timerfd_* / signalfd / signalfd4 stay here: no timerfd /
-// signalfd machinery yet. -ENOSYS so libraries fall back to
-// their pipe-based polyfill (now that pipes work).
-i64 DoTimerfdCreate(u64 clockid, u64 flags)
-{
-    (void)clockid;
-    (void)flags;
-    return kENOSYS;
-}
-i64 DoTimerfdSettime(u64 fd, u64 flags, u64 user_new, u64 user_old)
-{
-    (void)fd;
-    (void)flags;
-    (void)user_new;
-    (void)user_old;
-    return kENOSYS;
-}
-i64 DoTimerfdGettime(u64 fd, u64 user_curr)
-{
-    (void)fd;
-    (void)user_curr;
-    return kENOSYS;
-}
-i64 DoSignalfd(u64 fd, u64 user_mask, u64 sigsetsize, u64 flags)
-{
-    (void)fd;
-    (void)user_mask;
-    (void)sigsetsize;
-    (void)flags;
-    return kENOSYS;
-}
+// timerfd_create / timerfd_settime / timerfd_gettime / signalfd
+// moved to syscall_async_io.cpp — backed by real expirations
+// counters, scheduler-tick conversions, and per-instance wait
+// queues. signalfd is a slot-only facade in v0 (no signal-delivery
+// engine; reads return -EAGAIN per the GAP).
 
 // fadvise64(fd, offset, len, advice): readahead / dontneed hint.
 // No readahead engine — accept the call as a no-op so callers
@@ -121,49 +256,9 @@ i64 DoReadahead(u64 fd, u64 offset, u64 count)
     return 0;
 }
 
-// epoll / inotify: no event-poll or filesystem-watch machinery.
-// -ENOSYS lets autoconf-y libraries detect the gap and fall back.
-i64 DoEpollCreate(u64 size)
-{
-    (void)size;
-    return kENOSYS;
-}
-i64 DoEpollCreate1(u64 flags)
-{
-    (void)flags;
-    return kENOSYS;
-}
-i64 DoEpollCtl(u64 epfd, u64 op, u64 fd, u64 event)
-{
-    (void)epfd;
-    (void)op;
-    (void)fd;
-    (void)event;
-    return kENOSYS;
-}
-i64 DoEpollWait(u64 epfd, u64 events, u64 maxevents, u64 timeout_ms)
-{
-    (void)epfd;
-    (void)events;
-    (void)maxevents;
-    (void)timeout_ms;
-    return kENOSYS;
-}
-i64 DoEpollPwait(u64 epfd, u64 events, u64 maxevents, u64 timeout_ms, u64 sigmask, u64 sigsetsize)
-{
-    (void)sigmask;
-    (void)sigsetsize;
-    return DoEpollWait(epfd, events, maxevents, timeout_ms);
-}
-i64 DoInotifyInit()
-{
-    return kENOSYS;
-}
-i64 DoInotifyInit1(u64 flags)
-{
-    (void)flags;
-    return kENOSYS;
-}
+// epoll moved to syscall_async_io.cpp.
+// inotify moved to inotify.cpp — real ring + watch table + FS-
+// mutation publish-subscribe through fs::routing.
 
 // ---------------------------------------------------------------
 // Compat / tracing / mount / link / rename stub group.

@@ -1532,6 +1532,77 @@ enum SyscallNumber : u64
     //
     // Every op cap-gated on kCapNet — withheld → -EACCES.
     SYS_SOCKET_OP = 153,
+
+    // SYS_DIR_OPEN — open a directory handle for enumeration.
+    //   rdi = const char* user_path, NUL-terminated; '/disk/<idx>'
+    //         routes to a FAT32 volume, anything else falls back
+    //         to the per-process Ramfs root.
+    // Returns kWin32DirBase + idx (= 0xA00..0xA07) on success, or
+    // -1 on miss / pool full. Cap-gated on kCapFsRead.
+    //
+    // SYS_DIR_NEXT — advance to the next entry.
+    //   rdi = HANDLE
+    //   rsi = struct Win32DirEntryReport*  (kernel writes a fixed
+    //         96-byte record: name (64 bytes), attributes (u32),
+    //         size (u64), reserved padding to 96).
+    // Returns 1 on success, 0 at end-of-iteration, -1 on bad handle.
+    //
+    // SYS_DIR_CLOSE is folded into the existing SYS_FILE_CLOSE
+    // dispatch (which already covers the win32 handle ranges).
+    SYS_DIR_OPEN = 154,
+    SYS_DIR_NEXT = 155,
+    // SYS_DIR_REWIND — reset a directory handle's iterator back to
+    // the first entry. Backs NtQueryDirectoryFile's RestartScan
+    // parameter. rdi = HANDLE. Returns 0 on success, -1 on bad
+    // handle. Does NOT re-snapshot the directory — the entries
+    // captured at OPEN time stay frozen.
+    SYS_DIR_REWIND = 156,
+
+    // SYS_DIR_NOTIFY — backs NtNotifyChangeDirectoryFile.
+    //   rdi = HANDLE  (must be a kWin32DirBase-range dir handle)
+    //   rsi = u32 filter (FILE_NOTIFY_CHANGE_*)
+    //   rdx = u8 watch_subtree (only the parent-of-path level
+    //         is honoured in v0; deeper subtree match is a sub-GAP)
+    //   r10 = u64 user_buffer  (FILE_NOTIFY_INFORMATION sequence)
+    //   r8  = u32 buffer_len
+    // Blocks until the watched path has at least one change event,
+    // then writes a single FILE_NOTIFY_INFORMATION record (caller
+    // loops). Returns bytes written or -1 on bad handle / overrun.
+    SYS_DIR_NOTIFY = 157,
+
+    // SYS_PROCESS_SPAWN — backs CreateProcessA / CreateProcessW
+    // and (eventually) NtCreateUserProcess. Reads the named PE /
+    // ELF off FAT32, autodetects format by magic, dispatches to
+    // SpawnPeFile / SpawnElfFile. Returns the new pid or -1.
+    SYS_PROCESS_SPAWN = 158,
+
+    // IOCP — async I/O completion ports.
+    SYS_IOCP_CREATE = 159,
+    SYS_IOCP_SET = 160,
+    SYS_IOCP_REMOVE = 161,
+    SYS_IOCP_CLOSE = 162,
+
+    // JobObject — process-grouping container.
+    SYS_JOB_CREATE = 163,
+    SYS_JOB_ASSIGN = 164,
+    SYS_JOB_IS_IN = 165,
+    SYS_JOB_TERMINATE = 166,
+    SYS_JOB_QUERY = 167,
+    SYS_JOB_CLOSE = 168,
+};
+
+// Cross-language record returned by SYS_DIR_NEXT. 96 bytes, exact
+// layout reproduced verbatim by the kernel32.c FindFirstFile /
+// FindNextFile thunks before they marshal into WIN32_FIND_DATAW.
+// Stable on disk: the size + field order is part of the SYS_DIR_NEXT
+// ABI.
+struct Win32DirEntryReport
+{
+    char name[64];  // 8.3 / LFN entry name, NUL-terminated
+    u32 attributes; // FAT-style attribute byte zero-extended
+    u32 _pad;
+    u64 size_bytes; // 0 for directories
+    u8 _reserved[16];
 };
 
 inline constexpr u64 kSockOpCreate = 1;

@@ -1530,38 +1530,331 @@ __declspec(dllexport) BOOL GetExitCodeProcess(HANDLE hProcess, DWORD* lpExitCode
  * on their graceful-failure paths.
  * ------------------------------------------------------------------ */
 
+/* SYS_DIR_OPEN  = 154,  rdi = const char* path. Returns handle on
+ *                       success, -1 on miss / pool full.
+ * SYS_DIR_NEXT  = 155,  rdi = HANDLE, rsi = struct
+ *                       Win32DirEntryReport*. Returns 1 on success,
+ *                       0 at end-of-iteration, -1 on bad handle.
+ *
+ * The Win32DirEntryReport struct is the kernel-side stable ABI:
+ *   char name[64]; u32 attributes; u32 _pad; u64 size_bytes; u8 _r[16];
+ * = 96 bytes total. The kernel32 thunks marshal this into the
+ * caller's WIN32_FIND_DATA[A|W] (Win32 layout: 320-byte block
+ * starting with FILETIME * 3 + DWORD * 4 + name fields).
+ *
+ * FindFirstFile* + FindNextFile* both hand a 320-byte WIN32_FIND_DATA
+ * to user code — we zero-fill the leading FILETIME / size DWORDs we
+ * don't have data for, then fill cFileName from report.name. The
+ * caller's `void*` is treated as opaque storage; we never read it.
+ *
+ * Path filter (e.g. "C:\\dir\\*.txt") is NOT honoured — we walk
+ * every entry the kernel returns. Sub-GAP: glob filtering. The
+ * Win32 enumeration habit is to walk every entry then match
+ * cFileName client-side anyway, so most callers don't notice.
+ *
+ * Path translation: strip a trailing "\\*" / "\\*.*" wildcard, then
+ * convert backslashes to forward slashes so the kernel's "/disk/<idx>"
+ * routing recognises the path.
+ */
+struct Win32DirEntryReport_t
+{
+    char name[64];
+    unsigned int attributes;
+    unsigned int _pad;
+    unsigned long long size_bytes;
+    unsigned char _reserved[16];
+};
+
+/* WIN32_FIND_DATA shape — 320 bytes total. We only ever populate
+ * the few fields that matter (attributes + size + name). */
+struct Win32FindDataW_t
+{
+    DWORD dwFileAttributes;
+    long long ftCreationTime;
+    long long ftLastAccessTime;
+    long long ftLastWriteTime;
+    DWORD nFileSizeHigh;
+    DWORD nFileSizeLow;
+    DWORD dwReserved0;
+    DWORD dwReserved1;
+    wchar_t16 cFileName[260];
+    wchar_t16 cAlternateFileName[14];
+    DWORD dwFileType;
+    DWORD dwCreatorType;
+    unsigned short wFinderFlags;
+};
+
+struct Win32FindDataA_t
+{
+    DWORD dwFileAttributes;
+    long long ftCreationTime;
+    long long ftLastAccessTime;
+    long long ftLastWriteTime;
+    DWORD nFileSizeHigh;
+    DWORD nFileSizeLow;
+    DWORD dwReserved0;
+    DWORD dwReserved1;
+    char cFileName[260];
+    char cAlternateFileName[14];
+};
+
+static long long DirOpenSyscall(const char* path)
+{
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)154), "D"((long long)path) : "memory");
+    return rv;
+}
+
+static long long DirNextSyscall(long long handle, void* report)
+{
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)155), "D"(handle), "S"((long long)report) : "memory");
+    return rv;
+}
+
+/* Strip trailing "\\*" / "\\*.*" wildcards and translate backslashes
+ * to forward slashes. Cap at 63 bytes so the kernel's path-copy
+ * buffer doesn't truncate the leaf. */
+static void NormalizePathA(const char* in, char* out, unsigned long out_cap)
+{
+    if (out_cap == 0)
+        return;
+    unsigned long ci = 0;
+    unsigned long last_sep = 0;
+    int has_sep = 0;
+    while (in[ci] != '\0' && ci + 1 < out_cap)
+    {
+        char c = in[ci] == '\\' ? '/' : in[ci];
+        out[ci] = c;
+        if (c == '/')
+        {
+            last_sep = ci;
+            has_sep = 1;
+        }
+        ++ci;
+    }
+    out[ci] = '\0';
+    /* If the tail after the last separator is a wildcard, lop it. */
+    if (has_sep)
+    {
+        const char* tail = out + last_sep + 1;
+        if (tail[0] == '*' && (tail[1] == '\0' || (tail[1] == '.' && tail[2] == '*' && tail[3] == '\0')))
+            out[last_sep] = '\0';
+    }
+}
+
+static void NormalizePathW(const wchar_t16* in, char* out, unsigned long out_cap)
+{
+    if (out_cap == 0)
+        return;
+    unsigned long ci = 0;
+    while (in[ci] != 0 && ci + 1 < out_cap)
+    {
+        char c = in[ci] == L'\\' ? '/' : (char)(in[ci] & 0xFF);
+        out[ci] = c;
+        ++ci;
+    }
+    out[ci] = '\0';
+    /* Reuse the A-variant wildcard strip by copying through. */
+    char tmp[64];
+    for (unsigned long i = 0; i < sizeof(tmp); ++i)
+        tmp[i] = 0;
+    NormalizePathA(out, tmp, sizeof(tmp));
+    for (unsigned long i = 0; i < sizeof(tmp); ++i)
+        out[i] = tmp[i];
+}
+
+static void FillFindDataA(const struct Win32DirEntryReport_t* r, struct Win32FindDataA_t* fd)
+{
+    fd->dwFileAttributes = r->attributes;
+    fd->ftCreationTime = 0;
+    fd->ftLastAccessTime = 0;
+    fd->ftLastWriteTime = 0;
+    fd->nFileSizeLow = (DWORD)(r->size_bytes & 0xFFFFFFFFULL);
+    fd->nFileSizeHigh = (DWORD)((r->size_bytes >> 32) & 0xFFFFFFFFULL);
+    fd->dwReserved0 = 0;
+    fd->dwReserved1 = 0;
+    for (unsigned long i = 0; i < 260; ++i)
+        fd->cFileName[i] = (i < 64) ? r->name[i] : 0;
+    for (unsigned long i = 0; i < 14; ++i)
+        fd->cAlternateFileName[i] = 0;
+}
+
+static void FillFindDataW(const struct Win32DirEntryReport_t* r, struct Win32FindDataW_t* fd)
+{
+    fd->dwFileAttributes = r->attributes;
+    fd->ftCreationTime = 0;
+    fd->ftLastAccessTime = 0;
+    fd->ftLastWriteTime = 0;
+    fd->nFileSizeLow = (DWORD)(r->size_bytes & 0xFFFFFFFFULL);
+    fd->nFileSizeHigh = (DWORD)((r->size_bytes >> 32) & 0xFFFFFFFFULL);
+    fd->dwReserved0 = 0;
+    fd->dwReserved1 = 0;
+    for (unsigned long i = 0; i < 260; ++i)
+        fd->cFileName[i] = (i < 64) ? (wchar_t16)(unsigned char)r->name[i] : 0;
+    for (unsigned long i = 0; i < 14; ++i)
+        fd->cAlternateFileName[i] = 0;
+    fd->dwFileType = 0;
+    fd->dwCreatorType = 0;
+    fd->wFinderFlags = 0;
+}
+
 __declspec(dllexport) HANDLE FindFirstFileA(const char* path, void* find_data)
 {
-    (void)path;
-    (void)find_data;
-    return (HANDLE)(long long)-1; /* INVALID_HANDLE_VALUE — "no files" */
+    if (path == (const char*)0 || find_data == (void*)0)
+        return (HANDLE)(long long)-1;
+    char kpath[64];
+    for (unsigned long i = 0; i < sizeof(kpath); ++i)
+        kpath[i] = 0;
+    NormalizePathA(path, kpath, sizeof(kpath));
+    long long h = DirOpenSyscall(kpath);
+    if (h < 0)
+        return (HANDLE)(long long)-1;
+    struct Win32DirEntryReport_t r;
+    long long rc = DirNextSyscall(h, &r);
+    if (rc != 1)
+        return (HANDLE)(long long)-1; /* end-of-iter on first call = no match */
+    FillFindDataA(&r, (struct Win32FindDataA_t*)find_data);
+    return (HANDLE)h;
 }
 
 __declspec(dllexport) HANDLE FindFirstFileW(const wchar_t16* path, void* find_data)
 {
-    (void)path;
-    (void)find_data;
-    return (HANDLE)(long long)-1;
+    if (path == (const wchar_t16*)0 || find_data == (void*)0)
+        return (HANDLE)(long long)-1;
+    char kpath[64];
+    for (unsigned long i = 0; i < sizeof(kpath); ++i)
+        kpath[i] = 0;
+    NormalizePathW(path, kpath, sizeof(kpath));
+    long long h = DirOpenSyscall(kpath);
+    if (h < 0)
+        return (HANDLE)(long long)-1;
+    struct Win32DirEntryReport_t r;
+    long long rc = DirNextSyscall(h, &r);
+    if (rc != 1)
+        return (HANDLE)(long long)-1;
+    FillFindDataW(&r, (struct Win32FindDataW_t*)find_data);
+    return (HANDLE)h;
 }
 
 __declspec(dllexport) BOOL FindNextFileA(HANDLE h, void* find_data)
 {
-    (void)h;
-    (void)find_data;
-    return 0; /* No more files */
+    if (find_data == (void*)0)
+        return 0;
+    struct Win32DirEntryReport_t r;
+    long long rc = DirNextSyscall((long long)h, &r);
+    if (rc != 1)
+        return 0;
+    FillFindDataA(&r, (struct Win32FindDataA_t*)find_data);
+    return 1;
 }
 
 __declspec(dllexport) BOOL FindNextFileW(HANDLE h, void* find_data)
 {
-    (void)h;
-    (void)find_data;
-    return 0;
+    if (find_data == (void*)0)
+        return 0;
+    struct Win32DirEntryReport_t r;
+    long long rc = DirNextSyscall((long long)h, &r);
+    if (rc != 1)
+        return 0;
+    FillFindDataW(&r, (struct Win32FindDataW_t*)find_data);
+    return 1;
 }
 
+/* FindClose — calls SYS_FILE_CLOSE (= 9), which already routes the
+ * kWin32DirBase range to the directory snapshot teardown. */
 __declspec(dllexport) BOOL FindClose(HANDLE h)
 {
-    (void)h;
+    long long discard;
+    __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long)9), "D"((long long)h) : "memory");
     return 1;
+}
+
+/* CreateProcessA / CreateProcessW — subprocess spawn via the new
+ * SYS_PROCESS_SPAWN (= 158). v0 ignores most CreateProcess
+ * parameters; only the application path is honoured (via
+ * lpApplicationName, or extracted from the first token of
+ * lpCommandLine if lpApplicationName is NULL).
+ *
+ * Path translation: forward slashes pass through verbatim. The
+ * kernel-side helper accepts only "/disk/<idx>/<rest>" paths;
+ * Windows-native "C:\\..." paths need Windows→Unix translation
+ * which is its own slice.
+ *
+ * On success, fills lpProcessInformation->hProcess /
+ * dwProcessId / hThread / dwThreadId. hThread is collapsed to 0
+ * (no separate Win32 thread handle for the new process's primary
+ * thread; callers that need it can NtOpenThread the tid).
+ */
+struct ProcessInformation_t
+{
+    HANDLE hProcess;
+    HANDLE hThread;
+    DWORD dwProcessId;
+    DWORD dwThreadId;
+};
+
+__declspec(dllexport) BOOL CreateProcessA(const char* lpApplicationName, char* lpCommandLine, void* lpProcessAttributes,
+                                          void* lpThreadAttributes, BOOL bInheritHandles, DWORD dwCreationFlags,
+                                          void* lpEnvironment, const char* lpCurrentDirectory, void* lpStartupInfo,
+                                          void* lpProcessInformation)
+{
+    (void)lpProcessAttributes;
+    (void)lpThreadAttributes;
+    (void)bInheritHandles;
+    (void)dwCreationFlags;
+    (void)lpEnvironment;
+    (void)lpCurrentDirectory;
+    (void)lpStartupInfo;
+    const char* path = lpApplicationName;
+    if (path == (const char*)0)
+        path = lpCommandLine; // first arg of cmdline ≈ executable
+    if (path == (const char*)0)
+        return 0;
+    long long pid;
+    __asm__ volatile("int $0x80"
+                     : "=a"(pid)
+                     : "a"((long long)158), /* SYS_PROCESS_SPAWN */
+                       "D"((long long)path), "S"((long long)0)
+                     : "memory");
+    if (pid < 0)
+        return 0;
+    if (lpProcessInformation != (void*)0)
+    {
+        struct ProcessInformation_t* pi = (struct ProcessInformation_t*)lpProcessInformation;
+        pi->hProcess = (HANDLE)(long long)pid;
+        pi->hThread = (HANDLE)0;
+        pi->dwProcessId = (DWORD)pid;
+        pi->dwThreadId = (DWORD)pid; // single-thread process; tid == pid
+    }
+    return 1;
+}
+
+__declspec(dllexport) BOOL CreateProcessW(const wchar_t16* lpApplicationName, wchar_t16* lpCommandLine,
+                                          void* lpProcessAttributes, void* lpThreadAttributes, BOOL bInheritHandles,
+                                          DWORD dwCreationFlags, void* lpEnvironment,
+                                          const wchar_t16* lpCurrentDirectory, void* lpStartupInfo,
+                                          void* lpProcessInformation)
+{
+    /* Strip wide → ASCII (low byte). 128-byte cap matches the
+     * kernel-side path buffer. */
+    char path[128];
+    for (unsigned i = 0; i < sizeof(path); ++i)
+        path[i] = 0;
+    const wchar_t16* src = lpApplicationName;
+    if (src == (const wchar_t16*)0)
+        src = lpCommandLine;
+    if (src == (const wchar_t16*)0)
+        return 0;
+    unsigned i = 0;
+    while (i + 1 < sizeof(path) && src[i] != 0)
+    {
+        path[i] = (char)(src[i] & 0xFF);
+        ++i;
+    }
+    path[i] = '\0';
+    return CreateProcessA(path, (char*)0, lpProcessAttributes, lpThreadAttributes, bInheritHandles, dwCreationFlags,
+                          lpEnvironment, (const char*)0, lpStartupInfo, lpProcessInformation);
 }
 
 __declspec(dllexport) BOOL CopyFileA(const char* src, const char* dst, BOOL fail_if_exists)

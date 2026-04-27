@@ -1,5 +1,6 @@
 #include "proc/process.h"
 
+#include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
 #include "diag/log_names.h"
 #include "debug/probes.h"
@@ -176,6 +177,20 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
         p->win32_semaphores[i].waiters.head = nullptr;
         p->win32_semaphores[i].waiters.tail = nullptr;
     }
+    // Win32 directory handles — every slot empty; entries pointer
+    // null until SYS_DIR_OPEN allocates a snapshot.
+    for (u64 i = 0; i < Process::kWin32DirCap; ++i)
+    {
+        p->win32_dirs[i].in_use = false;
+        for (u32 j = 0; j < sizeof(p->win32_dirs[i]._pad); ++j)
+            p->win32_dirs[i]._pad[j] = 0;
+        p->win32_dirs[i].entry_count = 0;
+        p->win32_dirs[i].next_index = 0;
+        p->win32_dirs[i]._pad2 = 0;
+        p->win32_dirs[i].entries = nullptr;
+        for (u32 j = 0; j < sizeof(p->win32_dirs[i].path); ++j)
+            p->win32_dirs[i].path[j] = 0;
+    }
     p->thread_stack_cursor = Process::kV0ThreadStackArenaBase;
     // Win32 TLS — no slots allocated, all values zero.
     p->tls_slot_in_use = 0;
@@ -191,6 +206,28 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
         p->linux_sigactions[i].mask = 0;
     }
     p->linux_signal_mask = 0;
+    p->linux_pending_signals = 0;
+    p->linux_signal_wq.head = nullptr;
+    p->linux_signal_wq.tail = nullptr;
+    // Linux parent / wait state. fork() / clone() patches the
+    // parent_pid into the child after ProcessCreate returns; bare
+    // ProcessCreate has no parent (init-spawned).
+    p->linux_parent_pid = 0;
+    p->linux_exit_code = 0;
+    p->linux_was_signaled = false;
+    p->linux_exit_signal = 0;
+    for (u32 i = 0; i < sizeof(p->_linux_exit_pad); ++i)
+        p->_linux_exit_pad[i] = 0;
+    p->linux_child_exit_count = 0;
+    for (u64 i = 0; i < Process::kLinuxChildExitCap; ++i)
+    {
+        p->linux_child_exits[i].pid = 0;
+        p->linux_child_exits[i].exit_code = 0;
+        p->linux_child_exits[i].exit_signal = 0;
+        p->linux_child_exits[i].was_signaled = false;
+    }
+    p->linux_wait_wq.head = nullptr;
+    p->linux_wait_wq.tail = nullptr;
     // Win32 custom-diagnostics state lazy-allocates on first opt-in.
     p->win32_custom_state = nullptr;
     // Default cwd is "/" — matches the value DoGetcwd hard-coded
@@ -198,6 +235,19 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     for (u32 i = 0; i < Process::kLinuxCwdCap; ++i)
         p->linux_cwd[i] = 0;
     p->linux_cwd[0] = '/';
+    for (u32 i = 0; i < Process::kLinuxTaskNameCap; ++i)
+        p->linux_task_name[i] = 0;
+    for (u64 i = 0; i < Process::kLinuxShmAttachCap; ++i)
+    {
+        p->linux_shm_attaches[i].in_use = false;
+        for (u32 j = 0; j < sizeof(p->linux_shm_attaches[i]._pad); ++j)
+            p->linux_shm_attaches[i]._pad[j] = 0;
+        p->linux_shm_attaches[i].shmid = 0;
+        p->linux_shm_attaches[i].base_va = 0;
+        p->linux_shm_attaches[i].page_count = 0;
+        p->linux_shm_attaches[i]._pad2 = 0;
+    }
+    p->linux_shm_cursor = Process::kLinuxShmArenaBase;
     p->refcount = 1;
 
     ++g_live_processes;
@@ -277,6 +327,34 @@ void ProcessRelease(Process* p)
     arch::SerialWrite(p->name);
     arch::SerialWrite("\"\n");
 
+    // Notify the Linux parent (if any) that this process has exited.
+    // Parent is found by PID — pids are monotonically incrementing
+    // and never reused, so a missed lookup means the parent died
+    // first (orphaned child case; nothing to do — sub-GAP: no
+    // init-style reaper yet, so orphaned exits drop their status).
+    //
+    // Done BEFORE the KFree below so the parent's queue mutation
+    // happens while the dying process's data is still valid.
+    if (p->linux_parent_pid != 0)
+    {
+        Process* parent = sched::SchedFindProcessByPid(p->linux_parent_pid);
+        if (parent != nullptr)
+        {
+            arch::Cli();
+            if (parent->linux_child_exit_count < Process::kLinuxChildExitCap)
+            {
+                auto& slot = parent->linux_child_exits[parent->linux_child_exit_count];
+                slot.pid = p->pid;
+                slot.exit_code = p->linux_exit_code;
+                slot.was_signaled = p->linux_was_signaled;
+                slot.exit_signal = p->linux_exit_signal;
+                ++parent->linux_child_exit_count;
+                sched::WaitQueueWakeOne(&parent->linux_wait_wq);
+            }
+            arch::Sti();
+        }
+    }
+
     // Drop the AS reference we took at create. If this was the last
     // process/task holding that AS (v0: always true — one task per
     // process, one process per AS), the AS destroy path runs inline:
@@ -297,6 +375,17 @@ void ProcessRelease(Process* p)
     // No-op when the process never opted into any custom-Win32
     // feature (the common path).
     subsystems::win32::custom::CleanupProcess(p);
+
+    // Free any directory-iteration snapshots the process leaked
+    // by exiting without CloseHandle on its FindFirstFile pairs.
+    for (u64 i = 0; i < Process::kWin32DirCap; ++i)
+    {
+        if (p->win32_dirs[i].entries != nullptr)
+        {
+            mm::KFree(p->win32_dirs[i].entries);
+            p->win32_dirs[i].entries = nullptr;
+        }
+    }
 
     mm::KFree(p);
     --g_live_processes;

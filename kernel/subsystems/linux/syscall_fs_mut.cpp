@@ -25,6 +25,7 @@
 
 #include "proc/process.h"
 #include "fs/fat32.h"
+#include "subsystems/linux/inotify.h"
 
 namespace duetos::subsystems::linux::internal
 {
@@ -194,6 +195,7 @@ i64 DoMkdir(u64 user_path, u64 mode)
         return kENOENT;
     if (!fs::fat32::Fat32MkdirAtPath(v, leaf))
         return kEIO;
+    InotifyPublish(leaf, kInCreate | kInIsDir);
     return 0;
 }
 
@@ -211,6 +213,7 @@ i64 DoRmdir(u64 user_path)
         return kENOENT;
     if (!fs::fat32::Fat32RmdirAtPath(v, leaf))
         return kEIO;
+    InotifyPublish(leaf, kInDelete | kInIsDir);
     return 0;
 }
 

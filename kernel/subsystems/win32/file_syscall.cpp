@@ -1,6 +1,7 @@
 #include "subsystems/win32/file_syscall.h"
 
 #include "subsystems/win32/custom.h"
+#include "subsystems/win32/dir_syscall.h"
 #include "subsystems/win32/registry.h"
 #include "subsystems/win32/section.h"
 
@@ -228,6 +229,14 @@ void DoFileClose(arch::TrapFrame* frame)
                 core::ProcessRelease(owner);
             }
         }
+    }
+    else if (handle >= core::Process::kWin32DirBase &&
+             handle < core::Process::kWin32DirBase + core::Process::kWin32DirCap)
+    {
+        // Directory iteration handles — drop the snapshot + clear
+        // the slot. SysDirClose owns the KFree of the entries
+        // array; safe on already-closed slots.
+        win32::SysDirClose(proc, handle);
     }
     else if (handle >= core::Process::kWin32SectionBase &&
              handle < core::Process::kWin32SectionBase + core::Process::kWin32SectionCap)

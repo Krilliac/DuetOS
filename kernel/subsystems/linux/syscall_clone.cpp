@@ -30,6 +30,9 @@
  */
 
 #include "subsystems/linux/syscall_internal.h"
+#include "subsystems/linux/fanotify.h"
+#include "subsystems/linux/inotify.h"
+#include "subsystems/linux/syscall_async_io.h"
 #include "subsystems/linux/syscall_pipe.h"
 #include "subsystems/linux/syscall_socket.h"
 
@@ -146,6 +149,10 @@ i64 DoFork()
     child->linux_brk_base = parent->linux_brk_base;
     child->linux_brk_current = parent->linux_brk_current;
     child->linux_mmap_cursor = parent->linux_mmap_cursor;
+    // Establish the parent-pid linkage so the child's eventual exit
+    // path (in ProcessRelease) finds this Process and pushes onto
+    // the linux_wait_wq for any in-flight wait4 caller.
+    child->linux_parent_pid = parent->pid;
 
     // fd inheritance — every parent fd survives into the child.
     // Linux semantics: dup() shares the file description; we
@@ -167,6 +174,45 @@ i64 DoFork()
             EventfdRetain(src.first_cluster);
         else if (src.state == 6)
             SocketFdRetain(src.first_cluster);
+        else if (src.state == 7)
+            TimerfdRetain(src.first_cluster);
+        else if (src.state == 8)
+            SignalfdRetain(src.first_cluster);
+        else if (src.state == 9)
+            EpollRetain(src.first_cluster);
+        else if (src.state == 10)
+            InotifyRetain(src.first_cluster);
+        else if (src.state == 11)
+        {
+            // Directory snapshot lives on the PARENT's
+            // win32_dirs[] table. The child's table is fresh
+            // and empty; sharing the parent's slot index would
+            // leave the child's fd dangling. Skip inheritance —
+            // the child's dirfd slot is cleared so getdents64
+            // sees an honest -EBADF rather than reading the
+            // wrong slot. (POSIX permits closing dirfds on
+            // fork — same as what some libcs do under
+            // FD_CLOEXEC; our v0 just makes it unconditional.)
+            child->linux_fds[i].state = 0;
+            child->linux_fds[i].first_cluster = 0;
+            child->linux_fds[i].size = 0;
+            child->linux_fds[i].offset = 0;
+        }
+        else if (src.state == 12)
+        {
+            // pidfd: bump the target Process refcount so the
+            // child holds an independent reference. The child's
+            // close path will release.
+            core::Process* tgt = sched::SchedFindProcessByPid(src.first_cluster);
+            if (tgt != nullptr)
+                core::ProcessRetain(tgt);
+        }
+        else if (src.state == 13)
+            PosixMqRetain(src.first_cluster);
+        else if (src.state == 14)
+            MemfdRetain(src.first_cluster);
+        else if (src.state == 15)
+            FanotifyRetain(src.first_cluster);
     }
     // Hand a LinuxCloneDesc to the existing LinuxCloneEntry —
     // it iretq's into ring-3 with rax = 0 (EnterUserModeThread's

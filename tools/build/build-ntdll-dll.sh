@@ -503,6 +503,7 @@ set +e
     /export:NtQueryBootEntryOrder \
     /export:NtQueryBootOptions \
     /export:NtQueryDirectoryFile \
+    /export:ZwQueryDirectoryFile \
     /export:NtQueryDirectoryFileEx \
     /export:NtQueryDriverEntryOrder \
     /export:NtQueryInformationAtom \

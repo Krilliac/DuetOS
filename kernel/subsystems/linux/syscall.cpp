@@ -53,6 +53,7 @@
 
 #include "subsystems/linux/syscall.h"
 
+#include "subsystems/linux/fanotify.h"
 #include "subsystems/linux/linux_syscall_table_generated.h"
 #include "subsystems/linux/syscall_internal.h"
 #include "subsystems/linux/syscall_socket.h"
@@ -435,6 +436,80 @@ enum : u64
     kSysIopl = 172,
     kSysIoperm = 173,
     kSysQuotactl = 179,
+
+    // Modern signaling: pidfd holds a refcount on a Process. v0
+    // pidfds use LinuxFd state 12 with first_cluster = pid (we
+    // ProcessRetain at open and Release at close).
+    kSysPidfdOpen = 434,
+    kSysPidfdSendSignal = 424,
+    kSysPidfdGetfd = 438,
+
+    // Kernel-level zero-copy fd-to-fd I/O.
+    kSysSplice = 275,
+    kSysTee = 276,
+    kSysVmsplice = 278,
+
+    // Modern fs / mm / fd / numa surface (extra_syscalls.cpp).
+    kSysStatfs = 137,
+    kSysFstatfs = 138,
+    kSysStatx = 332,
+    kSysCopyFileRange = 326,
+    kSysMemfdCreate = 319,
+    kSysCloseRange = 436,
+    kSysMseal = 462,
+    kSysProcessMadvise = 440,
+    kSysProcessMrelease = 448,
+    kSysSetMempolicy = 238,
+    kSysGetMempolicy = 239,
+    kSysMbind = 237,
+    kSysMigratePages = 256,
+    kSysMovePages = 279,
+    kSysUserfaultfd = 323,
+    kSysIoUringSetup = 425,
+    kSysIoUringEnter = 426,
+    kSysIoUringRegister = 427,
+    kSysPkeyAlloc = 330,
+    kSysPkeyFree = 331,
+    kSysPkeyMprotect = 329,
+    kSysNameToHandleAt = 303,
+    kSysOpenByHandleAt = 304,
+    kSysFsopen = 430,
+    kSysFsconfig = 431,
+    kSysFsmount = 432,
+    kSysFspick = 433,
+    kSysOpenTree = 428,
+    kSysMoveMount = 429,
+    kSysMountSetattr = 442,
+    kSysLandlockCreateRuleset = 444,
+    kSysLandlockAddRule = 445,
+    kSysLandlockRestrictSelf = 446,
+
+    // Privileged tracing / observability — refuse to ring-3
+    // cleanly. Real impl needs CAP_SYS_ADMIN-style gating which
+    // we'd land alongside an actual engine.
+    kSysBpf = 321,
+    kSysPerfEventOpen = 298,
+    kSysFinitModule = 313,
+    kSysInitModule = 175,
+    kSysDeleteModule = 176,
+    kSysKexecLoad = 246,
+    kSysKexecFileLoad = 320,
+
+    // fanotify (kernel/subsystems/linux/fanotify.cpp).
+    kSysFanotifyInit = 300,
+    kSysFanotifyMark = 301,
+
+    // Real-time clock + adjustments. We have no RTC writeback so
+    // clock_settime / clock_adjtime / settimeofday return -EPERM.
+    kSysClockSettime = 227,
+    kSysClockAdjtime = 305,
+    kSysSettimeofday = 164,
+    kSysAdjtimex = 159,
+
+    // Keyrings (kernel/subsystems/linux/keyrings.cpp).
+    kSysAddKey = 248,
+    kSysRequestKey = 249,
+    kSysKeyctl = 250,
 };
 
 // kAtFdCwd / kAtRemoveDir constants moved to syscall_internal.h
@@ -1071,10 +1146,16 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
         rv = DoEpollPwait(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8, frame->r9);
         break;
     case kSysInotifyInit:
-        rv = DoInotifyInit();
+        rv = InotifyInit();
         break;
     case kSysInotifyInit1:
-        rv = DoInotifyInit1(frame->rdi);
+        rv = InotifyInit1(frame->rdi);
+        break;
+    case kSysInotifyAddWatch:
+        rv = DoInotifyAddWatch(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysInotifyRmWatch:
+        rv = DoInotifyRmWatch(frame->rdi, frame->rsi);
         break;
     case kSysPrctl:
         rv = DoPrctl(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
@@ -1304,31 +1385,197 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
         // CRT expects on a fresh system.
         rv = 022;
         break;
-    // SysV IPC + POSIX MQ — no IPC engine.
+    // SysV shared memory + semaphores — real implementations in
+    // sysv_ipc.cpp.
     case kSysShmget:
+        rv = DoShmget(frame->rdi, frame->rsi, frame->rdx);
+        break;
     case kSysShmat:
-    case kSysShmctl:
+        rv = DoShmat(frame->rdi, frame->rsi, frame->rdx);
+        break;
     case kSysShmdt:
+        rv = DoShmdt(frame->rdi);
+        break;
+    case kSysShmctl:
+        rv = DoShmctl(frame->rdi, frame->rsi, frame->rdx);
+        break;
     case kSysSemget:
+        rv = DoSemget(frame->rdi, frame->rsi, frame->rdx);
+        break;
     case kSysSemop:
-    case kSysSemctl:
+        rv = DoSemop(frame->rdi, frame->rsi, frame->rdx);
+        break;
     case kSysSemtimedop:
+        rv = DoSemtimedop(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysSemctl:
+        rv = DoSemctl(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+
+    // SysV msg queues — real implementations in msg_queues.cpp.
     case kSysMsgget:
+        rv = DoMsgget(frame->rdi, frame->rsi);
+        break;
     case kSysMsgsnd:
+        rv = DoMsgsnd(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
     case kSysMsgrcv:
+        rv = DoMsgrcv(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+        break;
     case kSysMsgctl:
+        rv = DoMsgctl(frame->rdi, frame->rsi, frame->rdx);
+        break;
+
+    // POSIX msg queues — real implementations in msg_queues.cpp.
     case kSysMqOpen:
+        rv = DoMqOpen(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
     case kSysMqUnlink:
+        rv = DoMqUnlink(frame->rdi);
+        break;
     case kSysMqTimedsend:
+        rv = DoMqTimedsend(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+        break;
     case kSysMqTimedreceive:
+        rv = DoMqTimedreceive(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+        break;
     case kSysMqNotify:
+        rv = DoMqNotify(frame->rdi, frame->rsi);
+        break;
     case kSysMqGetsetattr:
-        rv = kENOSYS;
+        rv = DoMqGetsetattr(frame->rdi, frame->rsi, frame->rdx);
         break;
-    case kSysInotifyAddWatch:
-    case kSysInotifyRmWatch:
-        rv = kENOSYS;
+
+    // Modern fs / mm / fd / numa / namespacing — extra_syscalls.cpp.
+    case kSysStatx:
+        rv = DoStatx(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
         break;
+    case kSysCopyFileRange:
+        rv = DoCopyFileRange(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8, frame->r9);
+        break;
+    case kSysMemfdCreate:
+        rv = DoMemfdCreate(frame->rdi, frame->rsi);
+        break;
+    case kSysCloseRange:
+        rv = DoCloseRange(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysStatfs:
+        rv = DoStatfs(frame->rdi, frame->rsi);
+        break;
+    case kSysFstatfs:
+        rv = DoFstatfs(frame->rdi, frame->rsi);
+        break;
+    case kSysSetMempolicy:
+        rv = DoSetMempolicy(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysGetMempolicy:
+        rv = DoGetMempolicy(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+        break;
+    case kSysMbind:
+        rv = DoMbind(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8, frame->r9);
+        break;
+    case kSysMigratePages:
+        rv = DoMigratePages(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysMovePages:
+        rv = DoMovePages(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8, frame->r9);
+        break;
+    case kSysMseal:
+        rv = DoMseal(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysProcessMadvise:
+        rv = DoProcessMadvise(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+        break;
+    case kSysProcessMrelease:
+        rv = DoProcessMrelease(frame->rdi, frame->rsi);
+        break;
+    case kSysUserfaultfd:
+        rv = DoUserfaultfd(frame->rdi);
+        break;
+    case kSysIoUringSetup:
+        rv = DoIoUringSetup(frame->rdi, frame->rsi);
+        break;
+    case kSysIoUringEnter:
+        rv = DoIoUringEnter(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8, frame->r9);
+        break;
+    case kSysIoUringRegister:
+        rv = DoIoUringRegister(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysPkeyAlloc:
+        rv = DoPkeyAlloc(frame->rdi, frame->rsi);
+        break;
+    case kSysPkeyFree:
+        rv = DoPkeyFree(frame->rdi);
+        break;
+    case kSysPkeyMprotect:
+        rv = DoPkeyMprotect(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysNameToHandleAt:
+        rv = DoNameToHandleAt(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+        break;
+    case kSysOpenByHandleAt:
+        rv = DoOpenByHandleAt(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysFsopen:
+        rv = DoFsopen(frame->rdi, frame->rsi);
+        break;
+    case kSysFsconfig:
+        rv = DoFsconfig(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+        break;
+    case kSysFsmount:
+        rv = DoFsmount(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysFspick:
+        rv = DoFspick(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysOpenTree:
+        rv = DoOpenTree(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysMoveMount:
+        rv = DoMoveMount(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+        break;
+    case kSysMountSetattr:
+        rv = DoMountSetattr(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+        break;
+    case kSysLandlockCreateRuleset:
+        rv = DoLandlockCreateRuleset(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysLandlockAddRule:
+        rv = DoLandlockAddRule(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysLandlockRestrictSelf:
+        rv = DoLandlockRestrictSelf(frame->rdi, frame->rsi);
+        break;
+
+    // fanotify(7) — real engine; fan-out from InotifyPublish.
+    case kSysFanotifyInit:
+        rv = DoFanotifyInit(frame->rdi, frame->rsi);
+        break;
+    case kSysFanotifyMark:
+        rv = DoFanotifyMark(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+        break;
+
+    // clock writeback / system-time mutators — no RTC writeback,
+    // -EPERM matches the "you don't have CAP_SYS_TIME" Linux return.
+    case kSysClockSettime:
+    case kSysClockAdjtime:
+    case kSysSettimeofday:
+    case kSysAdjtimex:
+        rv = kEPERM;
+        break;
+
+    // Keyrings — minimal real engine in keyrings.cpp.
+    case kSysAddKey:
+        rv = DoAddKey(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+        break;
+    case kSysRequestKey:
+        rv = DoRequestKey(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysKeyctl:
+        rv = DoKeyctl(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+        break;
+    // inotify_add_watch / inotify_rm_watch handled at the real
+    // dispatcher arms above.
     // libaio — no async-I/O engine.
     case kSysIoSetup:
     case kSysIoDestroy:
@@ -1337,6 +1584,20 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
     case kSysIoCancel:
         rv = kENOSYS;
         break;
+    // Privileged kernel-introspection / module-load — refuse cleanly.
+    // BPF / perf_event_open / kernel-module load all want
+    // CAP_SYS_ADMIN on real Linux; v0 has no equivalent so -EPERM
+    // is the honest answer.
+    case kSysBpf:
+    case kSysPerfEventOpen:
+    case kSysFinitModule:
+    case kSysInitModule:
+    case kSysDeleteModule:
+    case kSysKexecLoad:
+    case kSysKexecFileLoad:
+        rv = kEPERM;
+        break;
+
     // System-mutation calls — refuse so a misbehaving program
     // can't reboot the box or twiddle privileged knobs from
     // ring-3 Linux ABI. Reboot has its own native path.
@@ -1349,6 +1610,26 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
     case kSysIoperm:
     case kSysQuotactl:
         rv = kEPERM;
+        break;
+
+    case kSysPidfdOpen:
+        rv = DoPidfdOpen(frame->rdi, frame->rsi);
+        break;
+    case kSysPidfdSendSignal:
+        rv = DoPidfdSendSignal(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysPidfdGetfd:
+        rv = DoPidfdGetfd(frame->rdi, frame->rsi, frame->rdx);
+        break;
+
+    case kSysSplice:
+        rv = DoSplice(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8, frame->r9);
+        break;
+    case kSysTee:
+        rv = DoTee(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysVmsplice:
+        rv = DoVmsplice(frame->rdi, frame->rsi, frame->rdx, frame->r10);
         break;
 
     default:

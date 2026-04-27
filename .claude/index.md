@@ -12,16 +12,7 @@ _Read this at every session start (after git sync). Each row links to a detailed
 | GitHub API / PR checks diagnosis | [knowledge/github-api-pr-checks.md](knowledge/github-api-pr-checks.md) | Pattern | Active | 2026-04-20 |
 | Build and CI workflow speedups | [knowledge/build-optimizations.md](knowledge/build-optimizations.md) | Optimization | Active | 2026-04-20 |
 | Effective dev workflows | [knowledge/workflow-patterns.md](knowledge/workflow-patterns.md) | Pattern | Active | 2026-04-20 |
-| Win32/NT subsystem architecture | [knowledge/win32-subsystem-design.md](knowledge/win32-subsystem-design.md) | Decision | Active | 2026-04-20 |
-| PE subsystem v0 — freestanding hello.exe + real-world PE diagnostic | [knowledge/pe-subsystem-v0.md](knowledge/pe-subsystem-v0.md) | Observation | Active | 2026-04-21 |
-| PE base-relocation support v0 — walk + apply, zero-delta in v0 | [knowledge/pe-base-reloc-v0.md](knowledge/pe-base-reloc-v0.md) | Observation | Active | 2026-04-21 |
-| Win32 subsystem v0 — import resolution + kernel32.ExitProcess stub | [knowledge/win32-subsystem-v0.md](knowledge/win32-subsystem-v0.md) | Observation | Active | 2026-04-21 |
-| PE EAT parser + DLL loader skeleton (stage 2 slice 1) | [knowledge/pe-eat-dll-loader-v0.md](knowledge/pe-eat-dll-loader-v0.md) | Observation | Active | 2026-04-24 |
-| Win32 windowing — current state (through v1.4) | [knowledge/win32-windowing-v1.4.md](knowledge/win32-windowing-v1.4.md) | Observation + Decision | Active | 2026-04-25 |
-| Win32 heap — real HeapSize + HeapReAlloc / realloc (batch 14) | [knowledge/win32-subsystem-v0.md#batch-14--real-heapsize--heaprealloc](knowledge/win32-subsystem-v0.md) | Observation | Active | 2026-04-21 |
-| Real-world PE execution — winkill CRT entry + argc/argv + five loader gaps | [knowledge/pe-real-world-run.md](knowledge/pe-real-world-run.md) | Observation | Active | 2026-04-22 |
-| Win32 stubs — callee-saved rdi/rsi ABI bug + fix pattern | [knowledge/win32-stubs-rdi-rsi-abi.md](knowledge/win32-stubs-rdi-rsi-abi.md) | Issue + Pattern | Active | 2026-04-22 |
-| Win32 stubs.{h,cpp} renamed to thunks.{h,cpp} — terminology + bytecode rationale | [knowledge/win32-thunks-rename.md](knowledge/win32-thunks-rename.md) | Decision | Active | 2026-04-25 |
+| **Subsystems status — Win32/NT + Linux ABI (consolidated)** | [knowledge/subsystems-status.md](knowledge/subsystems-status.md) | Decision + Observation | Active — single source of truth for the subsystems work | 2026-04-27 |
 | Kernel breakpoint subsystem v0 + phase 2a (per-task DR, syscall, kCapDebug) + phase 3 (suspend/inspect/resume/step) + phase 4 (static KBP_PROBE macros) | [knowledge/breakpoints-v0.md](knowledge/breakpoints-v0.md) | Observation | Active | 2026-04-23 |
 | Hardware target matrix (CPU/GPU/IO tiers) | [knowledge/hardware-target-matrix.md](knowledge/hardware-target-matrix.md) | Decision | Active | 2026-04-20 |
 | UEFI hybrid-ISO boot path — same ISO boots SeaBIOS + OVMF | [knowledge/uefi-hybrid-iso-v0.md](knowledge/uefi-hybrid-iso-v0.md) | Observation | Active | 2026-04-23 |
@@ -34,10 +25,7 @@ _Read this at every session start (after git sync). Each row links to a detailed
 | GPT parser v0 — PMBR + primary header + entries, CRC-validated | [knowledge/gpt-parser-v0.md](knowledge/gpt-parser-v0.md) | Observation | Active | 2026-04-21 |
 | klog overhaul — Trace + scopes + metrics + sinks + colour | [knowledge/klog-overhaul.md](knowledge/klog-overhaul.md) | Observation | Active | 2026-04-21 |
 | Security guard — image-load protection | [knowledge/security-guard.md](knowledge/security-guard.md) | Decision | Active | 2026-04-21 |
-| Linux-ABI syscall subsystem | [knowledge/linux-abi-subsystem.md](knowledge/linux-abi-subsystem.md) | Observation | Active | 2026-04-22 |
-| Linux syscall batches 55-56 + NT→Linux translator (SYS_NT_INVOKE) | [knowledge/linux-syscall-batch-55.md](knowledge/linux-syscall-batch-55.md) | Observation | Active | 2026-04-23 |
 | `inspect` umbrella v0 — `syscalls` / `opcodes` / `arm` subcommands | [knowledge/inspect-umbrella-v0.md](knowledge/inspect-umbrella-v0.md) | Observation | Active | 2026-04-23 |
-| ABI translation unit (Linux gap-fill) | [knowledge/abi-translation-unit.md](knowledge/abi-translation-unit.md) | Observation | Active | 2026-04-22 |
 | Native DuetOS apps v0 — pattern for in-kernel applications | [knowledge/native-apps-v0.md](knowledge/native-apps-v0.md) | Pattern | Active | 2026-04-21 |
 | gfxdemo multi-mode v0 — six animated effects (plasma/mandelbrot/cube/particles/starfield/fire) + key dispatch + self-tests | [knowledge/gfxdemo-multimode-v0.md](knowledge/gfxdemo-multimode-v0.md) | Observation + Pattern | Active | 2026-04-26 |
 | Kernel bring-up v0 (Multiboot2 → long mode → `kernel_main`) | [knowledge/kernel-bringup-v0.md](knowledge/kernel-bringup-v0.md) | Observation | Active | 2026-04-20 |
@@ -68,7 +56,6 @@ _Read this at every session start (after git sync). Each row links to a detailed
 | GPU discovery v0 — PCI classification + BAR map | [knowledge/gpu-discovery-v0.md](knowledge/gpu-discovery-v0.md) | Observation | Active | 2026-04-22 |
 | Driver shells v0 — net / usb / audio / gpu-probes | [knowledge/driver-shells-v0.md](knowledge/driver-shells-v0.md) | Observation | Active | 2026-04-22 |
 | Render / drivers — current state (through v6) | [knowledge/render-drivers-v6.md](knowledge/render-drivers-v6.md) | Observation + Decision | Active | 2026-04-25 |
-| DirectX v0 — real COM-vtable d3d9/d3d11/d3d12/dxgi DLLs | [knowledge/directx-v0.md](knowledge/directx-v0.md) | Observation + Decision | Active | 2026-04-24 |
 | xHCI enumeration v0 — Address Device + GET_DESCRIPTOR(Device) | [knowledge/xhci-enumeration-v0.md](knowledge/xhci-enumeration-v0.md) | Observation | Active | 2026-04-23 |
 | xHCI HID boot keyboard — end-to-end USB keyboard input | [knowledge/xhci-hid-keyboard-v0.md](knowledge/xhci-hid-keyboard-v0.md) | Observation | Active | 2026-04-23 |
 | Intel e1000 NIC driver — real packet I/O on commodity wired gigabit | [knowledge/e1000-driver-v0.md](knowledge/e1000-driver-v0.md) | Observation | Active | 2026-04-23 |
@@ -76,7 +63,6 @@ _Read this at every session start (after git sync). Each row links to a detailed
 | Network flyout panel — bottom-right Wi-Fi-style popup with hover preview | [knowledge/network-flyout-panel-v0.md](knowledge/network-flyout-panel-v0.md) | Observation + Decision | Active | 2026-04-25 |
 | Wireless driver shells v0 — iwlwifi / rtl88xx / bcm43xx chip-id bring-up | [knowledge/wireless-drivers-v0.md](knowledge/wireless-drivers-v0.md) | Observation + Decision | Active | 2026-04-25 |
 | Live Internet connectivity v0 — DuetOS reaches Google over real DNS + TCP | [knowledge/live-internet-connectivity-v0.md](knowledge/live-internet-connectivity-v0.md) | Observation + Pattern | Active | 2026-04-25 |
-| BSD socket family v0 — Linux ABI socket / bind / connect / send / recv / accept / listen / shutdown + fd-inheritance through fork() | [knowledge/bsd-socket-family-v0.md](knowledge/bsd-socket-family-v0.md) | Observation + Decision | Active | 2026-04-27 |
 | USB CDC-ECM driver + xHCI bulk-transfer API v0 | [knowledge/usb-cdc-ecm-driver-v0.md](knowledge/usb-cdc-ecm-driver-v0.md) | Observation + Decision | Active (probe not auto-called) | 2026-04-25 |
 | USB RNDIS driver + bulk-poll serialization v0 | [knowledge/usb-rndis-driver-v0.md](knowledge/usb-rndis-driver-v0.md) | Observation + Decision | Active (control plane works; bulk concurrency gap) | 2026-04-25 |
 | Kernel entropy pool — RDSEED/RDRAND/splitmix tier | [knowledge/kernel-entropy-v0.md](knowledge/kernel-entropy-v0.md) | Observation | Active | 2026-04-22 |
@@ -87,11 +73,8 @@ _Read this at every session start (after git sync). Each row links to a detailed
 | GUI pentest runner v0 — live login + shell attack findings | [knowledge/pentest-gui-findings-v0.md](knowledge/pentest-gui-findings-v0.md) | Observation | Active | 2026-04-24 |
 | Kernel attacker simulation suite v1 — 11 active attacks (bootkit, IDT, GDT, LSTAR, SYSENTER_CS/EIP, CR0.WP, SMEP, SMAP, NXE, .text patch) + deferred catalogue | [knowledge/attack-sim-kernel-v1.md](knowledge/attack-sim-kernel-v1.md) | Observation + Pattern | Active | 2026-04-26 |
 | Redteam coverage matrix v0 — full malware-technique map vs. existing probes / attacks / detectors + gap analysis + slice-order roadmap | [knowledge/redteam-coverage-matrix-v0.md](knowledge/redteam-coverage-matrix-v0.md) | Observation + Decision | Active | 2026-04-26 |
-| Stub & gap inventory v0 — ~1 050 stubbed/unimplemented/mismapped surfaces (NT 264, Linux 233, thunks, ucrtbase, drivers, FS) + fill-in order + landed table | [knowledge/stub-gap-inventory-v0.md](knowledge/stub-gap-inventory-v0.md) | Observation + Decision | Active | 2026-04-27 |
-| Subsystem isolation v0 — Win32/Linux are facades for executing PE/ELF binaries; never drive DuetOS. Audit checklist + known-facade table + gate-site table + violation history | [knowledge/subsystem-isolation-decision-v0.md](knowledge/subsystem-isolation-decision-v0.md) | Decision | Active | 2026-04-27 |
 | Cleanroom-trace boot survey v0 — first live read of the trace ring buffer | [knowledge/cleanroom-trace-boot-survey-v0.md](knowledge/cleanroom-trace-boot-survey-v0.md) | Observation | Active | 2026-04-25 |
 | Deferred-task batches (2026-04-25 + 2026-04-26 follow-up) — PE ordinal forwarders + by-ord IAT + binary-search EAT, ext4 multi-block dirs, ext4 depth>0 extent tree walk, GDI ellipse fill/outline parity, RNDIS multi-record RX, FAT32 LFN-checksum, window-DC SetTextColor explicit-black | [knowledge/deferred-task-batch-2026-04-25.md](knowledge/deferred-task-batch-2026-04-25.md) | Observation | Active | 2026-04-26 |
-| Win32 custom diagnostics + safety extensions v0 — flight recorder, handle provenance, error provenance, heap quarantine, deadlock detect, contention profile, async-paint policy, pixel isolation, input replay, strict-RWX, strict-handle-inherit (all opt-in) | [knowledge/win32-custom-extensions-v0.md](knowledge/win32-custom-extensions-v0.md) | Observation + Decision | Active | 2026-04-25 |
 
 ## Quick Reference
 

@@ -15,6 +15,11 @@
 
 #include "util/types.h"
 
+namespace duetos::core
+{
+struct Process;
+}
+
 namespace duetos::subsystems::linux::internal
 {
 
@@ -35,6 +40,9 @@ inline constexpr i64 kEISDIR = -21;
 inline constexpr i64 kEINVAL = -22;
 inline constexpr i64 kENFILE = -23;
 inline constexpr i64 kEMFILE = -24;
+inline constexpr i64 kEAGAIN = -11;
+inline constexpr i64 kEOVERFLOW = -75;
+inline constexpr i64 kESTALE = -116;
 inline constexpr i64 kENOTTY = -25;
 inline constexpr i64 kESPIPE = -29;
 inline constexpr i64 kERANGE = -34;
@@ -99,8 +107,13 @@ i64 DoEpollCreate1(u64 flags);
 i64 DoEpollCtl(u64 epfd, u64 op, u64 fd, u64 event);
 i64 DoEpollWait(u64 epfd, u64 events, u64 maxevents, u64 timeout_ms);
 i64 DoEpollPwait(u64 epfd, u64 events, u64 maxevents, u64 timeout_ms, u64 sigmask, u64 sigsetsize);
-i64 DoInotifyInit();
-i64 DoInotifyInit1(u64 flags);
+// Inotify family (inotify.cpp). Real ring + watch table; FS
+// mutations publish events via InotifyPublish() called from
+// fs::routing.
+i64 InotifyInit();
+i64 InotifyInit1(u64 flags);
+i64 DoInotifyAddWatch(u64 fd, u64 user_path, u64 mask);
+i64 DoInotifyRmWatch(u64 fd, u64 wd);
 
 // Memory-management handlers (syscall_mm.cpp). brk grows the
 // per-process Linux heap; mmap supports MAP_PRIVATE +
@@ -304,7 +317,139 @@ i64 DoFcntl(u64 fd, u64 cmd, u64 arg);
 // delivery — every entry persists state where the caller probes
 // it (sigaction slots, signal mask) or returns 0 / -EINTR so
 // libc paths make forward progress instead of -ENOSYS-crashing.
+// SysV IPC (sysv_ipc.cpp).
+//   shmget / shmat / shmdt / shmctl — named shared memory backed
+//     by an 8-segment global pool of physical frames; attach
+//     installs borrowed PTEs into the caller's AS.
+//   semget / semop / semctl / semtimedop — 8-set / 16-sem-per-set
+//     pool with WaitQueue-blocking decrement-with-wait + wait-on-
+//     zero. semtimedop ignores the timeout (sub-GAP).
+i64 DoShmget(u64 key, u64 size, u64 shmflg);
+i64 DoShmat(u64 shmid, u64 shmaddr, u64 shmflg);
+i64 DoShmdt(u64 shmaddr);
+i64 DoShmctl(u64 shmid, u64 cmd, u64 user_buf);
+i64 DoSemget(u64 key, u64 nsems, u64 semflg);
+i64 DoSemop(u64 semid, u64 user_ops, u64 nops);
+i64 DoSemtimedop(u64 semid, u64 user_ops, u64 nops, u64 user_timeout);
+i64 DoSemctl(u64 semid, u64 semnum, u64 cmd, u64 arg);
+
+// SysV msg queues (msg_queues.cpp). Same shape as SysV sem: 8-queue
+// global pool keyed by IPC key. Each msg has an mtype prefix; recv
+// can filter by mtype (== / <= |mtype|). Blocking via per-queue
+// read_wq / write_wq.
+i64 DoMsgget(u64 key, u64 msgflg);
+i64 DoMsgsnd(u64 msqid, u64 user_msg, u64 msgsz, u64 msgflg);
+i64 DoMsgrcv(u64 msqid, u64 user_msg, u64 msgsz, u64 mtype_filter, u64 msgflg);
+i64 DoMsgctl(u64 msqid, u64 cmd, u64 user_buf);
+
+// POSIX msg queues (msg_queues.cpp). 8-queue pool keyed by string
+// name ("/foo"). LinuxFd state 13 = mqdes. Receivers see the
+// highest-priority pending message. Refcounted: mq_unlink + close
+// of last fd frees the ring.
+i64 DoMqOpen(u64 user_name, u64 oflag, u64 mode, u64 user_attr);
+i64 DoMqUnlink(u64 user_name);
+i64 DoMqTimedsend(u64 mqdes, u64 user_msg, u64 msg_len, u64 prio, u64 user_timeout);
+i64 DoMqTimedreceive(u64 mqdes, u64 user_msg, u64 msg_cap, u64 user_prio, u64 user_timeout);
+i64 DoMqNotify(u64 mqdes, u64 user_notification);
+i64 DoMqGetsetattr(u64 mqdes, u64 user_new, u64 user_old);
+void PosixMqRetain(u32 idx);
+void PosixMqRelease(u32 idx);
+
+// Extra modern fs / mm / fd / numa / namespacing surface
+// (extra_syscalls.cpp). Real implementations: statx,
+// copy_file_range, memfd_create, close_range, statfs / fstatfs.
+// No-op success: NUMA family (set/get_mempolicy / mbind /
+// migrate_pages / move_pages), mseal, process_madvise,
+// process_mrelease. Honest -ENOSYS / -EINVAL: userfaultfd,
+// io_uring_*, pkey_*, name_to_handle_at / open_by_handle_at,
+// fsopen / fsconfig / fsmount / fspick / open_tree /
+// move_mount / mount_setattr, landlock_*.
+i64 DoStatx(u64 dirfd, u64 user_path, u64 flags, u64 mask, u64 user_buf);
+i64 DoCopyFileRange(u64 fd_in, u64 user_off_in, u64 fd_out, u64 user_off_out, u64 len, u64 flags);
+i64 DoMemfdCreate(u64 user_name, u64 flags);
+void MemfdRetain(u32 idx);
+void MemfdRelease(u32 idx);
+i64 DoCloseRange(u64 first, u64 last, u64 flags);
+i64 DoStatfs(u64 user_path, u64 user_buf);
+i64 DoFstatfs(u64 fd, u64 user_buf);
+i64 DoSetMempolicy(u64 mode, u64 user_nodemask, u64 maxnode);
+i64 DoGetMempolicy(u64 user_mode, u64 user_nodemask, u64 maxnode, u64 addr, u64 flags);
+i64 DoMbind(u64 addr, u64 len, u64 mode, u64 user_nodemask, u64 maxnode, u64 flags);
+i64 DoMigratePages(u64 pid, u64 maxnode, u64 user_old, u64 user_new);
+i64 DoMovePages(u64 pid, u64 nr_pages, u64 user_pages, u64 user_nodes, u64 user_status, u64 flags);
+i64 DoMseal(u64 start, u64 len, u64 flags);
+i64 DoProcessMadvise(u64 pidfd, u64 user_iovec, u64 vlen, u64 advice, u64 flags);
+i64 DoProcessMrelease(u64 pidfd, u64 flags);
+i64 DoUserfaultfd(u64 flags);
+i64 DoIoUringSetup(u64 entries, u64 user_params);
+i64 DoIoUringEnter(u64 fd, u64 to_submit, u64 min_complete, u64 flags, u64 user_sig, u64 sigsz);
+i64 DoIoUringRegister(u64 fd, u64 op, u64 user_arg, u64 nr_args);
+i64 DoPkeyAlloc(u64 flags, u64 init_val);
+i64 DoPkeyFree(u64 pkey);
+i64 DoPkeyMprotect(u64 addr, u64 len, u64 prot, u64 pkey);
+i64 DoNameToHandleAt(u64 dirfd, u64 user_path, u64 user_handle, u64 user_mount_id, u64 flags);
+i64 DoOpenByHandleAt(u64 mount_fd, u64 user_handle, u64 flags);
+i64 DoFsopen(u64 user_fsname, u64 flags);
+i64 DoFsconfig(u64 fd, u64 cmd, u64 user_key, u64 user_value, u64 aux);
+i64 DoFsmount(u64 fs_fd, u64 flags, u64 attr_flags);
+i64 DoFspick(u64 dirfd, u64 user_path, u64 flags);
+i64 DoOpenTree(u64 dirfd, u64 user_path, u64 flags);
+i64 DoMoveMount(u64 from_dfd, u64 user_from, u64 to_dfd, u64 user_to, u64 flags);
+i64 DoMountSetattr(u64 dirfd, u64 user_path, u64 flags, u64 user_uattr, u64 size);
+i64 DoLandlockCreateRuleset(u64 user_attr, u64 size, u64 flags);
+i64 DoLandlockAddRule(u64 ruleset_fd, u64 rule_type, u64 user_rule_attr, u64 flags);
+i64 DoLandlockRestrictSelf(u64 ruleset_fd, u64 flags);
+
+// Keyrings (keyrings.cpp). Per-process 16-slot keyring. add_key /
+// request_key + multiplexed keyctl ops (READ / DESCRIBE / UPDATE /
+// SETPERM / SEARCH / INVALIDATE / CLEAR / etc.). "user" + "logon"
+// types only; "asymmetric" / "encrypted" return -EOPNOTSUPP.
+i64 DoAddKey(u64 user_type, u64 user_desc, u64 user_payload, u64 plen, u64 keyring);
+i64 DoRequestKey(u64 user_type, u64 user_desc, u64 user_callout, u64 dest_keyring);
+i64 DoKeyctl(u64 op, u64 a2, u64 a3, u64 a4, u64 a5);
+
+// Modern pidfd signaling. pidfd_open allocates a LinuxFd
+// (state 12, first_cluster = pid) that pins the target Process
+// via ProcessRetain; close drops the ref. pidfd_send_signal
+// resolves the pidfd back to the target Process and forwards
+// to the real LinuxSignalDeliver path.
+i64 DoPidfdOpen(u64 pid, u64 flags);
+i64 DoPidfdSendSignal(u64 pidfd, u64 sig, u64 user_info, u64 flags);
+i64 DoPidfdGetfd(u64 pidfd, u64 target_fd, u64 flags);
+
+// Kernel-level zero-copy fd-to-fd I/O. v0 implementations bounce
+// through a 1 KiB on-stack buffer (no actual zero-copy yet, but
+// the syscall surface works so callers don't need to roll their
+// own pipe-pumping loops). splice/tee share a 1 KiB chunk; vmsplice
+// handles only the iovec→pipe direction.
+i64 DoSplice(u64 fd_in, u64 user_off_in, u64 fd_out, u64 user_off_out, u64 len, u64 flags);
+i64 DoTee(u64 fd_in, u64 fd_out, u64 len, u64 flags);
+i64 DoVmsplice(u64 fd, u64 user_iov, u64 nr_segs, u64 flags);
+
 i64 DoRtSigaction(u64 signum, u64 new_act, u64 old_act, u64 sigsetsize);
+
+// Deliver a Linux signal to `target`. Looks up the target's
+// sigaction[sig]; for SIG_DFL with a fatal default action, kills
+// every task in target via SchedKillByProcess and stamps
+// linux_was_signaled / linux_exit_signal on the process so the
+// parent's wait4 surfaces the right wstatus. SIG_IGN drops the
+// signal. User handlers are pushed onto linux_pending_signals so
+// signalfd / rt_sigpending can observe them, but no in-process
+// trampoline runs (sub-GAP: real handler delivery requires a
+// signal-frame builder + sigreturn). Returns 0 on success;
+// signum out of range returns -EINVAL.
+//
+// Safe to call from any kernel context — IRQ-off bracketed
+// internally for the bitmap mutation.
+i64 LinuxSignalDeliver(core::Process* target, u32 signum);
+
+// True iff signum has a fatal default action (SIGTERM / SIGKILL /
+// SIGINT / SIGABRT / SIGSEGV / SIGFPE / SIGBUS / SIGHUP / SIGQUIT /
+// SIGPIPE / SIGUSR1 / SIGUSR2). Non-fatal signals (SIGCHLD /
+// SIGCONT / SIGURG / SIGWINCH / SIGSTOP) just sit in the pending
+// bitmap. SIGSTOP / SIGCONT have stop/continue semantics in
+// real Linux; v0 treats them as non-fatal queues only.
+bool LinuxSignalIsFatalDefault(u32 signum);
 i64 DoRtSigprocmask(u64 how, u64 user_set, u64 user_oldset, u64 sigsetsize);
 i64 DoSigaltstack(u64 ss, u64 old_ss);
 i64 DoRtSigreturn();

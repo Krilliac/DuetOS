@@ -681,6 +681,43 @@ struct Process
     static constexpr u64 kWin32SectionBase = 0x900;
     Win32SectionHandle win32_section_handles[kWin32SectionCap];
 
+    // Win32 directory iteration handles — backs FindFirstFile /
+    // FindNextFile / NtQueryDirectoryFile via SYS_DIR_OPEN +
+    // SYS_DIR_NEXT. Each open snapshots the directory's entries
+    // into a KMalloc'd array (capped at kWin32DirEntryMax = 256
+    // entries / handle); SYS_DIR_NEXT pumps the cursor through the
+    // snapshot and copies one entry per call to user. The snapshot
+    // is freed on CloseHandle.
+    //
+    // Disjoint from every other Win32 handle range — handles run
+    // kWin32DirBase + idx (= 0xA00..0xA07). Snapshot semantics
+    // match getdents (a deletion mid-walk doesn't perturb the
+    // iterator).
+    static constexpr u64 kWin32DirCap = 8;
+    static constexpr u64 kWin32DirBase = 0xA00;
+    static constexpr u64 kWin32DirEntryMax = 256;
+    struct Win32DirHandle
+    {
+        bool in_use;
+        u8 _pad[3];
+        u32 entry_count;
+        u32 next_index;
+        u32 _pad2;
+        // KMalloc'd array of fs::fat32::DirEntry copies. Owned by
+        // this handle; freed on close. Opaque pointer here so
+        // process.h doesn't pull in fs/fat32.h beyond what it
+        // already #includes.
+        void* entries;
+        // Path the snapshot was taken from. Used by
+        // NtNotifyChangeDirectoryFile to subscribe to FS-mutation
+        // events on this directory. Volume-relative (no
+        // "/disk/<idx>" prefix) — matches the path format
+        // InotifyPublish receives. 64 byte cap matches the
+        // kernel's other path-handling limits.
+        char path[64];
+    };
+    Win32DirHandle win32_dirs[kWin32DirCap];
+
     // Per-process cursor for thread-stack allocation. Each new
     // thread carves kV0ThreadStackPages pages off this bump
     // cursor. The base sits above the main task's stack and
@@ -748,6 +785,56 @@ struct Process
     };
     LinuxSigAction linux_sigactions[kLinuxSignalCount];
     u64 linux_signal_mask; // per-process blocked-signal bitmask (rt_sigprocmask)
+    // Bitmap of pending Linux signals. Bit N set = signum N is
+    // pending delivery. Populated by LinuxSignalDeliver()
+    // (kill / tgkill / synthetic deliveries) and drained by
+    // signalfd_read; rt_sigpending also reports it.
+    //
+    // v0 only honours the bitmap shape (one pending bit per
+    // signum); real Linux distinguishes queued sigqueue() entries.
+    // 64-bit width covers signum 1..63, which is the entire
+    // POSIX rt-signal range.
+    u64 linux_pending_signals;
+    // Wait queue for signalfd readers. LinuxSignalDeliver wakes
+    // every reader after pushing a pending bit so a blocked
+    // signalfd read (post-engine) immediately returns.
+    sched::WaitQueue linux_signal_wq;
+
+    // Linux parent / wait infrastructure — backs wait4 / waitid /
+    // SIGCHLD reaping. `linux_parent_pid` is set by DoFork (clone
+    // without CLONE_THREAD); 0 means "no Linux parent" (kernel-
+    // spawned process or pre-fork init). `linux_exit_code` is
+    // populated by DoExit / DoExitGroup before the task dies; the
+    // ProcessRelease teardown reads it to push an exit notification
+    // onto the parent's queue.
+    //
+    // `linux_child_exits[8]` is the per-process zombie queue: each
+    // dead child's (pid, exit_code, exit_signal) is appended here
+    // when the child's last ref is released, and drained by wait4.
+    // Cap is 8 — typical shell pipelines have 1-3 outstanding
+    // children. Overflow drops the notification (sub-GAP for >8
+    // simultaneous children).
+    //
+    // `linux_wait_wq` is the wake target for wait4 callers blocked
+    // waiting for any child to exit. Every queue push wakes one
+    // waiter.
+    static constexpr u64 kLinuxChildExitCap = 8;
+    struct LinuxChildExit
+    {
+        u64 pid;
+        u32 exit_code;     // raw 8-bit exit status passed to DoExit
+        u8 exit_signal;    // signal that killed the process; 0 = clean exit
+        bool was_signaled; // distinguishes "exited" from "killed by signal"
+        u8 _pad[2];
+    };
+    u64 linux_parent_pid;
+    u32 linux_exit_code;
+    bool linux_was_signaled;
+    u8 linux_exit_signal;
+    u8 _linux_exit_pad[2];
+    u64 linux_child_exit_count;
+    LinuxChildExit linux_child_exits[kLinuxChildExitCap];
+    sched::WaitQueue linux_wait_wq;
 
     // Win32 custom-diagnostics state — opaque pointer to a
     // duetos::subsystems::win32::custom::ProcessCustomState. nullptr
@@ -770,6 +857,42 @@ struct Process
     // bounce buffers are 64 bytes), with headroom for future growth.
     static constexpr u64 kLinuxCwdCap = 256;
     char linux_cwd[kLinuxCwdCap];
+
+    // Linux per-task name (PR_SET_NAME / PR_GET_NAME). 16-byte
+    // cap matches the Linux kernel's TASK_COMM_LEN. Empty string
+    // means "use Process::name as the fallback" — the canonical
+    // immutable name set at create time. PR_SET_NAME copies up to
+    // 15 chars + NUL into this buffer; PR_GET_NAME reads it back.
+    static constexpr u64 kLinuxTaskNameCap = 16;
+    char linux_task_name[kLinuxTaskNameCap];
+
+    // SysV shared-memory attach table. Each entry records a
+    // (shmid, base_va, page_count) triple so shmdt can find the
+    // right segment by user-space address and unmap the right
+    // page range. 8 simultaneous attaches per process is plenty
+    // for v0; typical SysV-using shells hold 1-3 segments.
+    //
+    // The actual SHM segment data (frames, refcount,
+    // marked-for-destroy) lives in a global pool — see
+    // kernel/subsystems/linux/sysv_ipc.cpp.
+    static constexpr u64 kLinuxShmAttachCap = 8;
+    struct LinuxShmAttach
+    {
+        bool in_use;
+        u8 _pad[3];
+        u32 shmid;
+        u64 base_va;
+        u32 page_count;
+        u32 _pad2;
+    };
+    LinuxShmAttach linux_shm_attaches[kLinuxShmAttachCap];
+
+    // SysV SHM bump arena — fresh shmat() requests pick a VA
+    // here when shmaddr == NULL. Distinct from mmap_cursor so
+    // unmaps of one don't perturb the other. 64 MiB high, well
+    // away from text / heap / stack / mmap.
+    static constexpr u64 kLinuxShmArenaBase = 0x70000000ULL;
+    u64 linux_shm_cursor;
 
     u64 refcount;
 };
