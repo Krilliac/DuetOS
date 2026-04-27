@@ -114,6 +114,16 @@ set +e
     /export:ZwProtectVirtualMemory=NtProtectVirtualMemory \
     /export:NtCreateThreadEx \
     /export:ZwCreateThreadEx=NtCreateThreadEx \
+    /export:NtCreateMutant \
+    /export:ZwCreateMutant=NtCreateMutant \
+    /export:NtOpenMutant \
+    /export:ZwOpenMutant=NtOpenMutant \
+    /export:NtCreateEvent \
+    /export:ZwCreateEvent=NtCreateEvent \
+    /export:NtOpenEvent \
+    /export:ZwOpenEvent=NtOpenEvent \
+    /export:NtQueryObject \
+    /export:ZwQueryObject=NtQueryObject \
     /export:NtContinue \
     /export:ZwContinue=NtContinue \
     /export:NtAllocateVirtualMemory \

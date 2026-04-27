@@ -312,6 +312,105 @@ __declspec(dllexport) NTSTATUS NtReleaseMutant(HANDLE h, long* previous_count)
     return rv == 0 ? NTSTATUS_SUCCESS : NTSTATUS_INVALID_PARAMETER;
 }
 
+/* ------------------------------------------------------------------
+ * NtCreateMutant / NtOpenMutant / NtReleaseMutant — Win32 mutexes.
+ *
+ * Mutant is the NT-internal name for what Win32 calls a mutex.
+ * NtCreateMutant forwards directly to SYS_MUTEX_CREATE; v0
+ * doesn't honour OBJECT_ATTRIBUTES (no named-object table yet),
+ * so the returned handle is unnamed and can't be opened by
+ * NtOpenMutant. Sub-GAP.
+ * ------------------------------------------------------------------ */
+__declspec(dllexport) NTSTATUS NtCreateMutant(HANDLE* MutantHandle, ULONG DesiredAccess, void* ObjectAttributes,
+                                              BOOL InitialOwner)
+{
+    (void)DesiredAccess;
+    (void)ObjectAttributes;
+    if (MutantHandle == (HANDLE*)0)
+        return NTSTATUS_INVALID_PARAMETER;
+    long long handle;
+    /* SYS_MUTEX_CREATE = 25. rdi = bInitialOwner. */
+    __asm__ volatile("int $0x80" : "=a"(handle) : "a"((long long)25), "D"((long long)InitialOwner) : "memory");
+    if (handle < 0)
+        return NTSTATUS_NO_MEMORY;
+    *MutantHandle = (HANDLE)handle;
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS ZwCreateMutant(HANDLE* MutantHandle, ULONG DesiredAccess, void* ObjectAttributes,
+                                              BOOL InitialOwner)
+{
+    return NtCreateMutant(MutantHandle, DesiredAccess, ObjectAttributes, InitialOwner);
+}
+
+__declspec(dllexport) NTSTATUS NtOpenMutant(HANDLE* MutantHandle, ULONG DesiredAccess, void* ObjectAttributes)
+{
+    (void)MutantHandle;
+    (void)DesiredAccess;
+    (void)ObjectAttributes;
+    /* No named-object table yet. */
+    return (NTSTATUS)0xC0000034; /* STATUS_OBJECT_NAME_NOT_FOUND */
+}
+
+__declspec(dllexport) NTSTATUS ZwOpenMutant(HANDLE* MutantHandle, ULONG DesiredAccess, void* ObjectAttributes)
+{
+    return NtOpenMutant(MutantHandle, DesiredAccess, ObjectAttributes);
+}
+
+/* ------------------------------------------------------------------
+ * NtCreateEvent / NtOpenEvent — Win32 events.
+ *
+ * EVENT_TYPE: 0 = NotificationEvent (manual reset),
+ *             1 = SynchronizationEvent (auto reset).
+ *
+ * Maps to SYS_EVENT_CREATE which takes (bManualReset,
+ * bInitialState). NtOpenEvent stays NotImpl pending named-
+ * object plumbing.
+ * ------------------------------------------------------------------ */
+__declspec(dllexport) NTSTATUS NtCreateEvent(HANDLE* EventHandle, ULONG DesiredAccess, void* ObjectAttributes,
+                                             ULONG EventType, BOOL InitialState)
+{
+    (void)DesiredAccess;
+    (void)ObjectAttributes;
+    if (EventHandle == (HANDLE*)0)
+        return NTSTATUS_INVALID_PARAMETER;
+    long long handle;
+    /* SYS_EVENT_CREATE = 30. rdi = bManualReset, rsi = bInitialState. */
+    const long long manual_reset = (EventType == 0) ? 1 : 0;
+    __asm__ volatile("int $0x80"
+                     : "=a"(handle)
+                     : "a"((long long)30), "D"(manual_reset), "S"((long long)InitialState)
+                     : "memory");
+    if (handle < 0)
+        return NTSTATUS_NO_MEMORY;
+    *EventHandle = (HANDLE)handle;
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS ZwCreateEvent(HANDLE* EventHandle, ULONG DesiredAccess, void* ObjectAttributes,
+                                             ULONG EventType, BOOL InitialState)
+{
+    return NtCreateEvent(EventHandle, DesiredAccess, ObjectAttributes, EventType, InitialState);
+}
+
+__declspec(dllexport) NTSTATUS NtOpenEvent(HANDLE* EventHandle, ULONG DesiredAccess, void* ObjectAttributes)
+{
+    (void)EventHandle;
+    (void)DesiredAccess;
+    (void)ObjectAttributes;
+    return (NTSTATUS)0xC0000034;
+}
+
+__declspec(dllexport) NTSTATUS ZwOpenEvent(HANDLE* EventHandle, ULONG DesiredAccess, void* ObjectAttributes)
+{
+    return NtOpenEvent(EventHandle, DesiredAccess, ObjectAttributes);
+}
+
+/* NtReleaseMutant -> SYS_MUTEX_RELEASE (27). The existing
+ * NtReleaseMutant thunk lives further down in this file —
+ * declared here as a forward so the create/open block reads
+ * cohesively without scrolling. */
+
 /* NtWaitForSingleObject — dispatch by handle range (same as
  * kernel32!WaitForSingleObject). */
 __declspec(dllexport) NTSTATUS NtWaitForSingleObject(HANDLE h, BOOL bAlertable, const long long* timeout100ns)
@@ -1628,6 +1727,125 @@ __declspec(dllexport) NTSTATUS NtDeleteValueKey(HANDLE KeyHandle, UNICODE_STRING
  * after a batch of NtSetValueKey calls to ensure the writes
  * land before the installer exits.
  * ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------
+ * NtQueryObject — derive object metadata from a kernel handle.
+ *
+ * Win32 NT signature:
+ *   NTSTATUS NtQueryObject(
+ *     HANDLE Handle,
+ *     OBJECT_INFORMATION_CLASS ObjectInformationClass,
+ *     PVOID ObjectInformation,
+ *     ULONG ObjectInformationLength,
+ *     PULONG ReturnLength);
+ *
+ * v0 honours ObjectTypeInformation (class 2) only — that's the
+ * class every malware-shape PE uses to confirm a handle's
+ * underlying type. The implementation lives entirely in userland:
+ * the kernel's handle bases are stable u64 ranges
+ * (0x200..0x208 = Mutant, 0x300..0x308 = Event,
+ *  0x400..0x408 = Thread, 0x600..0x608 = Key,
+ *  0x700..0x708 = Process, 0x800..0x808 = Thread (foreign),
+ *  0x900..0x908 = Section), so range-matching produces the
+ *  right type name without a syscall.
+ *
+ *  Output layout for ObjectTypeInformation: a UNICODE_STRING
+ *  header (16 bytes on x64) followed by the UTF-16 type name
+ *  + trailing NUL, with Buffer pointing into the same buffer.
+ *  This matches the "alloc one block, header self-references"
+ *  shape every Windows caller assumes.
+ * ------------------------------------------------------------------ */
+static const wchar_t16* HandleRangeToTypeName(unsigned long long handle)
+{
+    static const wchar_t16 mutant[] = {'M', 'u', 't', 'a', 'n', 't', 0};
+    static const wchar_t16 event[] = {'E', 'v', 'e', 'n', 't', 0};
+    static const wchar_t16 thread[] = {'T', 'h', 'r', 'e', 'a', 'd', 0};
+    static const wchar_t16 key[] = {'K', 'e', 'y', 0};
+    static const wchar_t16 process[] = {'P', 'r', 'o', 'c', 'e', 's', 's', 0};
+    static const wchar_t16 section[] = {'S', 'e', 'c', 't', 'i', 'o', 'n', 0};
+    if (handle >= 0x200 && handle < 0x208)
+        return mutant;
+    if (handle >= 0x300 && handle < 0x308)
+        return event;
+    if (handle >= 0x400 && handle < 0x408)
+        return thread;
+    if (handle >= 0x600 && handle < 0x608)
+        return key;
+    if (handle >= 0x700 && handle < 0x708)
+        return process;
+    if (handle >= 0x800 && handle < 0x808)
+        return thread; /* foreign-thread handles are still threads */
+    if (handle >= 0x900 && handle < 0x908)
+        return section;
+    return (const wchar_t16*)0;
+}
+
+static unsigned WStr16Len(const wchar_t16* s)
+{
+    unsigned n = 0;
+    while (s[n] != 0)
+        ++n;
+    return n;
+}
+
+__declspec(dllexport) NTSTATUS NtQueryObject(HANDLE Handle, ULONG ObjectInformationClass, void* ObjectInformation,
+                                             ULONG ObjectInformationLength, ULONG* ReturnLength)
+{
+    /* ObjectTypeInformation = 2. Other classes (Basic, Name,
+     * AllInformation, DataInformation, …) return NOT_IMPLEMENTED
+     * so callers fall back rather than misinterpret zeros. */
+    if (ObjectInformationClass != 2)
+        return (NTSTATUS)0xC0000002; /* STATUS_NOT_IMPLEMENTED */
+
+    const wchar_t16* type_name = HandleRangeToTypeName((unsigned long long)Handle);
+    if (type_name == (const wchar_t16*)0)
+        return (NTSTATUS)0xC0000008; /* STATUS_INVALID_HANDLE */
+
+    const unsigned name_chars = WStr16Len(type_name);
+    const unsigned name_bytes = name_chars * 2;
+    /* OBJECT_TYPE_INFORMATION starts with a 16-byte UNICODE_STRING
+     * (Length:2, MaximumLength:2, _pad:4, Buffer:8) on x64. The
+     * UTF-16 string body follows immediately after, with a
+     * trailing NUL. */
+    const unsigned header = 16;
+    const unsigned total = header + name_bytes + 2;
+    if (ReturnLength != (ULONG*)0)
+        *ReturnLength = total;
+    if (ObjectInformationLength < total)
+        return (NTSTATUS)0xC0000023; /* STATUS_BUFFER_TOO_SMALL */
+    if (ObjectInformation == (void*)0)
+        return NTSTATUS_INVALID_PARAMETER;
+
+    unsigned char* out = (unsigned char*)ObjectInformation;
+    /* UNICODE_STRING.Length (bytes used, excluding NUL). */
+    out[0] = (unsigned char)(name_bytes & 0xFF);
+    out[1] = (unsigned char)((name_bytes >> 8) & 0xFF);
+    /* UNICODE_STRING.MaximumLength (bytes including NUL). */
+    out[2] = (unsigned char)((name_bytes + 2) & 0xFF);
+    out[3] = (unsigned char)(((name_bytes + 2) >> 8) & 0xFF);
+    /* 4-byte padding zeroed. */
+    out[4] = 0;
+    out[5] = 0;
+    out[6] = 0;
+    out[7] = 0;
+    /* UNICODE_STRING.Buffer — pointer to the body inside this
+     * same allocation. */
+    void** buf_slot = (void**)(out + 8);
+    *buf_slot = (void*)(out + header);
+
+    /* Copy the UTF-16 type name body + trailing NUL. */
+    wchar_t16* body = (wchar_t16*)(out + header);
+    for (unsigned i = 0; i < name_chars; ++i)
+        body[i] = type_name[i];
+    body[name_chars] = 0;
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS ZwQueryObject(HANDLE Handle, ULONG ObjectInformationClass, void* ObjectInformation,
+                                             ULONG ObjectInformationLength, ULONG* ReturnLength)
+{
+    return NtQueryObject(Handle, ObjectInformationClass, ObjectInformation, ObjectInformationLength, ReturnLength);
+}
+
 __declspec(dllexport) NTSTATUS NtFlushKey(HANDLE KeyHandle)
 {
     long long status;
