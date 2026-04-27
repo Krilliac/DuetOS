@@ -44,6 +44,7 @@
 #include "acpi/aml.h"
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/cpu_info.h"
+#include "arch/x86_64/cpu_mitigations.h"
 #include "arch/x86_64/hypervisor.h"
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/smbios.h"
@@ -305,6 +306,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     SerialWrite("[boot] Probing CPU features.\n");
     duetos::arch::CpuInfoProbe();
+    duetos::arch::CpuMitigationsProbe();
 
     SerialWrite("[boot] Detecting hypervisor.\n");
     duetos::arch::HypervisorProbe();
@@ -315,17 +317,45 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     SerialWrite("[boot] Reading MSR thermals.\n");
     duetos::arch::ThermalProbe();
 
-    SerialWrite("[boot] Exercising Result<T,E> + TRY primitives.\n");
-    duetos::core::ResultSelfTest();
-
-    SerialWrite("[boot] Exercising freestanding memset/memcpy/memmove.\n");
-    duetos::core::StringSelfTest();
-
-    SerialWrite("[boot] Exercising kernel-VA range + hexdump formatters.\n");
-    duetos::core::HexdumpSelfTest();
-
-    SerialWrite("[boot] Exercising VA-region classifier (panic / trap dump annotation).\n");
-    duetos::core::VaRegionSelfTest();
+    // Phase::Earlycon — utility-primitive self-tests (Result /
+    // String / Hexdump / VaRegion). All four panic on failure, so
+    // each adapter just calls + returns Ok. Registered here rather
+    // than in their own TUs because there is no `_init_array`
+    // invocation yet (see init.h's trailing NOTE) — when a future
+    // slice wires `_init_array`, these registrations migrate into
+    // the source TUs alongside the test definitions and
+    // `kernel_main` keeps only the `RunPhase(...)` line.
+    // (A1-followup, 2026-04-27.)
+    duetos::core::InitcallRegister(duetos::core::Phase::Earlycon, "result-selftest",
+                                   []()
+                                   {
+                                       SerialWrite("[boot] Exercising Result<T,E> + TRY primitives.\n");
+                                       duetos::core::ResultSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    duetos::core::InitcallRegister(duetos::core::Phase::Earlycon, "string-selftest",
+                                   []()
+                                   {
+                                       SerialWrite("[boot] Exercising freestanding memset/memcpy/memmove.\n");
+                                       duetos::core::StringSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    duetos::core::InitcallRegister(duetos::core::Phase::Earlycon, "hexdump-selftest",
+                                   []()
+                                   {
+                                       SerialWrite("[boot] Exercising kernel-VA range + hexdump formatters.\n");
+                                       duetos::core::HexdumpSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    duetos::core::InitcallRegister(duetos::core::Phase::Earlycon, "varegion-selftest",
+                                   []()
+                                   {
+                                       SerialWrite(
+                                           "[boot] Exercising VA-region classifier (panic / trap dump annotation).\n");
+                                       duetos::core::VaRegionSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    (void)duetos::core::RunPhase(duetos::core::Phase::Earlycon);
 
     // One-shot mm-map anchor for every later panic dump. The region
     // tags on cr2/rsp/rbp/rip in a crash record map back to the
