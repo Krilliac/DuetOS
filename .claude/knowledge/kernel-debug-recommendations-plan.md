@@ -6,13 +6,16 @@
 
 | Commit | Effect |
 |--------|--------|
-| _A1-infra_ (this commit) | `kernel/core/init.{h,cpp}` registry: `Phase` enum (13 phases), `InitcallRegister`, `RunPhase`, `InitSelfTest` (3 phases × 1 callback + bad-arg + failing-callback paths). Self-test wired into `kernel_main` after `FaultDomainSelfTest`. `KERNEL_INITCALL` macro deferred until `_init_array` is invoked at boot — registration is by direct call today. Imperative `kernel_main` body NOT migrated; see plan A1 follow-up. |
+| _A1-infra_ (commit `aba75cd`) | `kernel/core/init.{h,cpp}` registry: `Phase` enum (13 phases), `InitcallRegister`, `RunPhase`, `InitSelfTest` (3 phases × 1 callback + bad-arg + failing-callback paths). Self-test wired into `kernel_main` after `FaultDomainSelfTest`. `KERNEL_INITCALL` macro deferred until `_init_array` is invoked at boot — registration is by direct call today. Imperative `kernel_main` body NOT migrated; see plan A1 follow-up. |
+| _A4_ (this commit) | `kernel/syscall/cap_gate.{h,cpp}` + `cap_table.def`: 15-row X-macro listing the syscalls whose authorisation reduces to a single static cap (kCapFsWrite/Read, kCapSpawnThread, kCapDebug, kCapInput, kCapNet). `SyscallGate(num, proc)` called by `SyscallDispatch` BEFORE any handler; missing cap → `RecordSandboxDenial(missing)` + `frame->rax = -1`. Self-test walks every row vs synthetic empty/trusted processes plus nullptr-proc + unknown-syscall paths. Existing in-handler `CapSetHas` checks remain (belt-and-braces); follow-up cleanup will remove the redundant ones. |
 
 ### Deferred (in priority order — see "Recommended ordering" below)
 
 - [ ] A1-followup — Migrate `kernel_main` call sites to `RunPhase(...)` (incremental, site-by-site)
 - [ ] A1-followup — Wire `_init_array` invocation at boot so `KERNEL_INITCALL` macro can use static-ctor registration
-- [ ] A4 — Centralized syscall capability gate (`kSyscallCapTable`)
+- [ ] A4-followup — Drop the redundant in-handler `CapSetHas` checks for syscalls now table-gated
+- [ ] A4-followup — Add `inspect syscalls` row showing each entry's required cap (read-only audit surface)
+- [ ] A4-followup — Extend `kSyscallCapTable` to cover conditional cap surfaces once the conditional logic is collapsed (e.g. SYS_WRITE fd=1)
 - [ ] C2 — Heap red zones, freed-page poison, slab freed-object poison
 - [ ] B1 — Sync ladder (Mutex → RwLock → SeqLock → RCU-lite)
 - [ ] A3 — `kernel/ipc/` with `KObject` + per-process handle table

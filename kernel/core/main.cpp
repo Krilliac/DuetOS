@@ -116,6 +116,7 @@
 #include "security/login.h"
 #include "core/init.h"
 #include "core/panic.h"
+#include "syscall/cap_gate.h"
 #include "proc/process.h"
 #include "util/random.h"
 #include "security/fault_domain.h"
@@ -381,6 +382,15 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // landed; migration of `kernel_main`'s imperative call list to
     // the registry is deferred (see plan A1 follow-up).
     duetos::core::InitSelfTest();
+
+    // Centralised syscall capability gate (plan A4). Walks every
+    // row of `kSyscallCapTable` against synthetic empty / trusted
+    // processes; asserts empty fails, trusted passes, and that
+    // the unknown-syscall path is a no-op. The dispatcher itself
+    // already calls SyscallGate before each handler — this just
+    // verifies the table + lookup + denial path before any user
+    // code reaches the int 0x80 boundary.
+    duetos::core::SyscallGateSelfTest();
 
     SerialWrite("[boot] Parsing Multiboot2 memory map.\n");
     FrameAllocatorInit(multiboot_info);
