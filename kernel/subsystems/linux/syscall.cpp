@@ -447,6 +447,41 @@ enum : u64
     kSysSplice = 275,
     kSysTee = 276,
     kSysVmsplice = 278,
+
+    // Modern fs / mm / fd / numa surface (extra_syscalls.cpp).
+    kSysStatfs = 137,
+    kSysFstatfs = 138,
+    kSysStatx = 332,
+    kSysCopyFileRange = 326,
+    kSysMemfdCreate = 319,
+    kSysCloseRange = 436,
+    kSysMseal = 462,
+    kSysProcessMadvise = 440,
+    kSysProcessMrelease = 448,
+    kSysSetMempolicy = 238,
+    kSysGetMempolicy = 239,
+    kSysMbind = 237,
+    kSysMigratePages = 256,
+    kSysMovePages = 279,
+    kSysUserfaultfd = 323,
+    kSysIoUringSetup = 425,
+    kSysIoUringEnter = 426,
+    kSysIoUringRegister = 427,
+    kSysPkeyAlloc = 330,
+    kSysPkeyFree = 331,
+    kSysPkeyMprotect = 329,
+    kSysNameToHandleAt = 303,
+    kSysOpenByHandleAt = 304,
+    kSysFsopen = 430,
+    kSysFsconfig = 431,
+    kSysFsmount = 432,
+    kSysFspick = 433,
+    kSysOpenTree = 428,
+    kSysMoveMount = 429,
+    kSysMountSetattr = 442,
+    kSysLandlockCreateRuleset = 444,
+    kSysLandlockAddRule = 445,
+    kSysLandlockRestrictSelf = 446,
 };
 
 // kAtFdCwd / kAtRemoveDir constants moved to syscall_internal.h
@@ -1381,6 +1416,107 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
         break;
     case kSysMqGetsetattr:
         rv = DoMqGetsetattr(frame->rdi, frame->rsi, frame->rdx);
+        break;
+
+    // Modern fs / mm / fd / numa / namespacing — extra_syscalls.cpp.
+    case kSysStatx:
+        rv = DoStatx(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+        break;
+    case kSysCopyFileRange:
+        rv = DoCopyFileRange(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8, frame->r9);
+        break;
+    case kSysMemfdCreate:
+        rv = DoMemfdCreate(frame->rdi, frame->rsi);
+        break;
+    case kSysCloseRange:
+        rv = DoCloseRange(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysStatfs:
+        rv = DoStatfs(frame->rdi, frame->rsi);
+        break;
+    case kSysFstatfs:
+        rv = DoFstatfs(frame->rdi, frame->rsi);
+        break;
+    case kSysSetMempolicy:
+        rv = DoSetMempolicy(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysGetMempolicy:
+        rv = DoGetMempolicy(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+        break;
+    case kSysMbind:
+        rv = DoMbind(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8, frame->r9);
+        break;
+    case kSysMigratePages:
+        rv = DoMigratePages(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysMovePages:
+        rv = DoMovePages(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8, frame->r9);
+        break;
+    case kSysMseal:
+        rv = DoMseal(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysProcessMadvise:
+        rv = DoProcessMadvise(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+        break;
+    case kSysProcessMrelease:
+        rv = DoProcessMrelease(frame->rdi, frame->rsi);
+        break;
+    case kSysUserfaultfd:
+        rv = DoUserfaultfd(frame->rdi);
+        break;
+    case kSysIoUringSetup:
+        rv = DoIoUringSetup(frame->rdi, frame->rsi);
+        break;
+    case kSysIoUringEnter:
+        rv = DoIoUringEnter(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8, frame->r9);
+        break;
+    case kSysIoUringRegister:
+        rv = DoIoUringRegister(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysPkeyAlloc:
+        rv = DoPkeyAlloc(frame->rdi, frame->rsi);
+        break;
+    case kSysPkeyFree:
+        rv = DoPkeyFree(frame->rdi);
+        break;
+    case kSysPkeyMprotect:
+        rv = DoPkeyMprotect(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysNameToHandleAt:
+        rv = DoNameToHandleAt(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+        break;
+    case kSysOpenByHandleAt:
+        rv = DoOpenByHandleAt(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysFsopen:
+        rv = DoFsopen(frame->rdi, frame->rsi);
+        break;
+    case kSysFsconfig:
+        rv = DoFsconfig(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+        break;
+    case kSysFsmount:
+        rv = DoFsmount(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysFspick:
+        rv = DoFspick(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysOpenTree:
+        rv = DoOpenTree(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysMoveMount:
+        rv = DoMoveMount(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+        break;
+    case kSysMountSetattr:
+        rv = DoMountSetattr(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+        break;
+    case kSysLandlockCreateRuleset:
+        rv = DoLandlockCreateRuleset(frame->rdi, frame->rsi, frame->rdx);
+        break;
+    case kSysLandlockAddRule:
+        rv = DoLandlockAddRule(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysLandlockRestrictSelf:
+        rv = DoLandlockRestrictSelf(frame->rdi, frame->rsi);
         break;
     // inotify_add_watch / inotify_rm_watch handled at the real
     // dispatcher arms above.

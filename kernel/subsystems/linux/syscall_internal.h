@@ -353,6 +353,51 @@ i64 DoMqGetsetattr(u64 mqdes, u64 user_new, u64 user_old);
 void PosixMqRetain(u32 idx);
 void PosixMqRelease(u32 idx);
 
+// Extra modern fs / mm / fd / numa / namespacing surface
+// (extra_syscalls.cpp). Real implementations: statx,
+// copy_file_range, memfd_create, close_range, statfs / fstatfs.
+// No-op success: NUMA family (set/get_mempolicy / mbind /
+// migrate_pages / move_pages), mseal, process_madvise,
+// process_mrelease. Honest -ENOSYS / -EINVAL: userfaultfd,
+// io_uring_*, pkey_*, name_to_handle_at / open_by_handle_at,
+// fsopen / fsconfig / fsmount / fspick / open_tree /
+// move_mount / mount_setattr, landlock_*.
+i64 DoStatx(u64 dirfd, u64 user_path, u64 flags, u64 mask, u64 user_buf);
+i64 DoCopyFileRange(u64 fd_in, u64 user_off_in, u64 fd_out, u64 user_off_out, u64 len, u64 flags);
+i64 DoMemfdCreate(u64 user_name, u64 flags);
+void MemfdRetain(u32 idx);
+void MemfdRelease(u32 idx);
+i64 DoCloseRange(u64 first, u64 last, u64 flags);
+i64 DoStatfs(u64 user_path, u64 user_buf);
+i64 DoFstatfs(u64 fd, u64 user_buf);
+i64 DoSetMempolicy(u64 mode, u64 user_nodemask, u64 maxnode);
+i64 DoGetMempolicy(u64 user_mode, u64 user_nodemask, u64 maxnode, u64 addr, u64 flags);
+i64 DoMbind(u64 addr, u64 len, u64 mode, u64 user_nodemask, u64 maxnode, u64 flags);
+i64 DoMigratePages(u64 pid, u64 maxnode, u64 user_old, u64 user_new);
+i64 DoMovePages(u64 pid, u64 nr_pages, u64 user_pages, u64 user_nodes, u64 user_status, u64 flags);
+i64 DoMseal(u64 start, u64 len, u64 flags);
+i64 DoProcessMadvise(u64 pidfd, u64 user_iovec, u64 vlen, u64 advice, u64 flags);
+i64 DoProcessMrelease(u64 pidfd, u64 flags);
+i64 DoUserfaultfd(u64 flags);
+i64 DoIoUringSetup(u64 entries, u64 user_params);
+i64 DoIoUringEnter(u64 fd, u64 to_submit, u64 min_complete, u64 flags, u64 user_sig, u64 sigsz);
+i64 DoIoUringRegister(u64 fd, u64 op, u64 user_arg, u64 nr_args);
+i64 DoPkeyAlloc(u64 flags, u64 init_val);
+i64 DoPkeyFree(u64 pkey);
+i64 DoPkeyMprotect(u64 addr, u64 len, u64 prot, u64 pkey);
+i64 DoNameToHandleAt(u64 dirfd, u64 user_path, u64 user_handle, u64 user_mount_id, u64 flags);
+i64 DoOpenByHandleAt(u64 mount_fd, u64 user_handle, u64 flags);
+i64 DoFsopen(u64 user_fsname, u64 flags);
+i64 DoFsconfig(u64 fd, u64 cmd, u64 user_key, u64 user_value, u64 aux);
+i64 DoFsmount(u64 fs_fd, u64 flags, u64 attr_flags);
+i64 DoFspick(u64 dirfd, u64 user_path, u64 flags);
+i64 DoOpenTree(u64 dirfd, u64 user_path, u64 flags);
+i64 DoMoveMount(u64 from_dfd, u64 user_from, u64 to_dfd, u64 user_to, u64 flags);
+i64 DoMountSetattr(u64 dirfd, u64 user_path, u64 flags, u64 user_uattr, u64 size);
+i64 DoLandlockCreateRuleset(u64 user_attr, u64 size, u64 flags);
+i64 DoLandlockAddRule(u64 ruleset_fd, u64 rule_type, u64 user_rule_attr, u64 flags);
+i64 DoLandlockRestrictSelf(u64 ruleset_fd, u64 flags);
+
 // Modern pidfd signaling. pidfd_open allocates a LinuxFd
 // (state 12, first_cluster = pid) that pins the target Process
 // via ProcessRetain; close drops the ref. pidfd_send_signal

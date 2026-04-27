@@ -245,6 +245,12 @@ i64 DoClose(u64 fd)
         // when refs == 0 AND mq_unlink already happened.
         PosixMqRelease(idx);
     }
+    else if (state == 14)
+    {
+        // memfd: drop the per-handle refcount. Frees the frame
+        // array when refs == 0 (no one holds the fd anymore).
+        MemfdRelease(idx);
+    }
     p->linux_fds[fd].state = 0;
     p->linux_fds[fd].first_cluster = 0;
     p->linux_fds[fd].size = 0;

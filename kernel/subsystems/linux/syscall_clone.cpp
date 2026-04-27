@@ -208,6 +208,8 @@ i64 DoFork()
         }
         else if (src.state == 13)
             PosixMqRetain(src.first_cluster);
+        else if (src.state == 14)
+            MemfdRetain(src.first_cluster);
     }
     // Hand a LinuxCloneDesc to the existing LinuxCloneEntry —
     // it iretq's into ring-3 with rax = 0 (EnterUserModeThread's
