@@ -1164,6 +1164,31 @@ enum SyscallNumber : u64
     // caller (NtOpenKey, NtQueryValueKey) is bound to that
     // contract on the Win32 side.
     SYS_REGISTRY = 130,
+
+    // SYS_PROCESS_OPEN — open a handle to another process by PID.
+    //   rdi = target PID (u64).
+    //   rax = kernel handle in [kWin32ProcessBase, +kWin32ProcessCap)
+    //         on success, 0 on any failure (no such PID, kCapDebug
+    //         not held, table full).
+    //
+    // Cap-gated on kCapDebug — same gate that protects the
+    // breakpoint surface. Cross-process inspection is the same
+    // privilege class: a process WITHOUT kCapDebug cannot peek
+    // at another process at all, even just to enumerate its
+    // existence.
+    //
+    // Holds a refcount on the target via `ProcessRetain` so the
+    // handle keeps the target alive past its own task's exit.
+    // CloseHandle / NtClose's by-range dispatch in DoFileClose
+    // calls `ProcessRelease` when the slot is freed.
+    //
+    // Backs ntdll.dll's NtOpenProcess (and kernel32.dll's
+    // OpenProcess once that DLL is rewritten to call this
+    // syscall). NtReadVirtualMemory / NtWriteVirtualMemory /
+    // NtQueryVirtualMemory are NOT YET implemented — opening
+    // a process is the foundational prerequisite; the actual
+    // VM access primitives land in subsequent slices.
+    SYS_PROCESS_OPEN = 131,
 };
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit

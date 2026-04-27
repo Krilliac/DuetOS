@@ -124,6 +124,8 @@ set +e
     /export:ZwUnmapViewOfSection=NtReturnNotImpl \
     /export:NtWaitForMultipleObjects=NtReturnNotImpl \
     /export:ZwWaitForMultipleObjects=NtReturnNotImpl \
+    /export:NtOpenProcess \
+    /export:ZwOpenProcess=NtOpenProcess \
     /export:NtQueryInformationProcess=NtReturnNotImpl \
     /export:ZwQueryInformationProcess=NtReturnNotImpl \
     /export:NtSetInformationProcess=NtReturnNotImpl \

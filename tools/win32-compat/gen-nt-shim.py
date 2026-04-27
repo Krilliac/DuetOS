@@ -71,6 +71,15 @@ KNOWN_MAPPINGS = {
     "NtOpenKey":                   "SYS_REGISTRY",         # op=kOpOpenKey (1)
     "NtOpenKeyEx":                 "SYS_REGISTRY",         # same shape; access mask ignored in v0
     "NtQueryValueKey":             "SYS_REGISTRY",         # op=kOpQueryValue (3)
+
+    # Cross-process — NtOpenProcess only for the v0 slice. The
+    # NtRead / NtWrite / NtQueryVirtualMemory entries land in
+    # follow-ups (each needs cross-AS PML4 walking + PhysToVirt
+    # bouncing through the direct map). NtOpenProcess maps to
+    # SYS_PROCESS_OPEN; the kernel cap-gates on kCapDebug, holds
+    # a refcount on the target via ProcessRetain, and CloseHandle
+    # / NtClose's range dispatch in DoFileClose drops it.
+    "NtOpenProcess":               "SYS_PROCESS_OPEN",
     # NtCreateKey / NtSetValueKey / NtDeleteKey / NtDeleteValueKey:
     # NotImpl on purpose — registry is read-only in v0. Mapping
     # them to SYS_REGISTRY's read-only Open op would silently lie

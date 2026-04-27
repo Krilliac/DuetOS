@@ -580,6 +580,33 @@ struct Process
     static constexpr u64 kWin32RegistryBase = 0x600;
     Win32RegistryHandle win32_reg_handles[kWin32RegistryCap];
 
+    // Win32 process handle table — backs NtOpenProcess /
+    // OpenProcess. Each slot owns a refcount on the target
+    // Process (`ProcessRetain` at open, `ProcessRelease` at
+    // close). Holding a handle keeps the target alive even if
+    // every Task it owned exits, which matches Windows
+    // semantics: NtTerminateProcess on a still-open handle
+    // succeeds, observers can still read the exit-code, etc.
+    //
+    // Handles run kWin32ProcessBase + idx (= 0x700..0x707),
+    // disjoint from every other Win32 handle range so the
+    // shared CloseHandle / NtClose dispatch picks the right
+    // table by value alone.
+    //
+    // 8 slots is plenty for v0 — typical malware-style "open
+    // every PID, look for one with a matching name" probes
+    // close handles as soon as they're checked, so the table
+    // turns over fast. Grow when a real workload pins more.
+    struct Win32ProcessHandle
+    {
+        bool in_use;
+        u8 _pad[7];
+        Process* target; // borrowed reference, refcount held while in_use
+    };
+    static constexpr u64 kWin32ProcessCap = 8;
+    static constexpr u64 kWin32ProcessBase = 0x700;
+    Win32ProcessHandle win32_proc_handles[kWin32ProcessCap];
+
     // Per-process cursor for thread-stack allocation. Each new
     // thread carves kV0ThreadStackPages pages off this bump
     // cursor. The base sits above the main task's stack and

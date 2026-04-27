@@ -96,6 +96,22 @@ Task* SchedCreateUser(TaskEntry entry, void* arg, const char* name, core::Proces
 /// handlers via `core::CurrentProcess()` to cap-check.
 core::Process* TaskProcess(Task* t);
 
+/// Find the first live `core::Process*` with `pid == target_pid`.
+/// Walks every queue (running, normal-runqueue, idle-runqueue,
+/// sleep-queue, zombies) under arch::Cli to keep the lists stable
+/// during the scan. Returns nullptr if no task with that PID is
+/// alive — including the case where the task exists but is a
+/// kernel-only task (`process == nullptr`).
+///
+/// Does NOT bump the returned Process's refcount. Callers that
+/// need to hold the reference past the immediate scan window
+/// must call `core::ProcessRetain` while the scheduler is still
+/// CLI-quiet — typically inside the same syscall handler.
+///
+/// Used by SYS_PROCESS_OPEN (NtOpenProcess) to translate a PID
+/// into a Process pointer the kernel can hand back as a handle.
+core::Process* SchedFindProcessByPid(u64 target_pid);
+
 /// True iff the task's state is Dead. Used by syscalls that track
 /// thread-handle signaling (WaitForSingleObject on a CreateThread
 /// handle, WaitForMultipleObjects, GetExitCodeThread) — the

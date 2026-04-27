@@ -312,6 +312,55 @@ void SyscallDispatch(arch::TrapFrame* frame)
         subsystems::win32::registry::DoRegistry(frame);
         return;
 
+    case SYS_PROCESS_OPEN:
+    {
+        // NtOpenProcess: PID in rdi → kernel handle in rax (or 0 on
+        // any failure). Cap-gated on kCapDebug — see syscall.h. The
+        // refcount held on the target keeps it alive past its task's
+        // exit; CloseHandle drops it.
+        Process* caller = CurrentProcess();
+        if (caller == nullptr || !CapSetHas(caller->caps, kCapDebug))
+        {
+            RecordSandboxDenial(kCapDebug);
+            if (caller != nullptr && ShouldLogDenial(caller->sandbox_denials))
+            {
+                arch::SerialWrite("[sys] denied syscall=SYS_PROCESS_OPEN pid=");
+                arch::SerialWriteHex(caller->pid);
+                arch::SerialWrite(" cap=Debug denial_idx=");
+                arch::SerialWriteHex(caller->sandbox_denials);
+                arch::SerialWrite("\n");
+            }
+            frame->rax = 0;
+            return;
+        }
+        const u64 target_pid = frame->rdi;
+        Process* target = sched::SchedFindProcessByPid(target_pid);
+        if (target == nullptr)
+        {
+            frame->rax = 0;
+            return;
+        }
+        u64 idx = Process::kWin32ProcessCap;
+        for (u64 i = 0; i < Process::kWin32ProcessCap; ++i)
+        {
+            if (!caller->win32_proc_handles[i].in_use)
+            {
+                idx = i;
+                break;
+            }
+        }
+        if (idx == Process::kWin32ProcessCap)
+        {
+            frame->rax = 0; // table full
+            return;
+        }
+        ProcessRetain(target);
+        caller->win32_proc_handles[idx].in_use = true;
+        caller->win32_proc_handles[idx].target = target;
+        frame->rax = Process::kWin32ProcessBase + idx;
+        return;
+    }
+
     // Heap family: handlers live in subsystems/win32/heap_syscall.cpp.
     case SYS_HEAP_ALLOC:
         subsystems::win32::DoHeapAlloc(frame);

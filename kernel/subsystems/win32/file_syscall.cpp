@@ -185,6 +185,24 @@ void DoFileClose(arch::TrapFrame* frame)
         // it rather than poking the table directly here.
         (void)registry::ReleaseHandleForCurrentProcess(handle);
     }
+    else if (handle >= core::Process::kWin32ProcessBase &&
+             handle < core::Process::kWin32ProcessBase + core::Process::kWin32ProcessCap)
+    {
+        // Process handles drop the retained reference on the target.
+        // ProcessRelease may free the target if no other holder
+        // remains — which is the right Windows-shape semantics:
+        // closing the last handle to a dead process actually
+        // reaps it.
+        const u64 slot = handle - core::Process::kWin32ProcessBase;
+        core::Process::Win32ProcessHandle& h = proc->win32_proc_handles[slot];
+        if (h.in_use)
+        {
+            core::Process* target = h.target;
+            h.in_use = false;
+            h.target = nullptr;
+            core::ProcessRelease(target);
+        }
+    }
     frame->rax = 0;
 }
 

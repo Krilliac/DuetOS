@@ -8,7 +8,7 @@
 // Target Windows version: Windows 11 and Server (11 25H2)
 // Bedrock NT calls (present in every Windows XP→Win11 25H2): 292
 // All known NT calls on the target version: 489
-// DuetOS coverage: 26/292 = 8%
+// DuetOS coverage: 27/292 = 9%
 //
 // See tools/win32-compat/README.md for the legal + design rationale.
 
@@ -76,7 +76,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
     {"NtQueryVirtualMemory", 0x0023, kSysNtNotImpl},
     {"NtOpenThreadToken", 0x0024, kSysNtNotImpl},
     {"NtQueryInformationThread", 0x0025, kSysNtNotImpl},
-    {"NtOpenProcess", 0x0026, kSysNtNotImpl},
+    {"NtOpenProcess", 0x0026, static_cast<u32>(::duetos::core::SYS_PROCESS_OPEN)},
     {"NtSetInformationFile", 0x0027, static_cast<u32>(::duetos::core::SYS_FILE_SEEK)},
     {"NtMapViewOfSection", 0x0028, kSysNtNotImpl},
     {"NtAccessCheckAndAuditAlarm", 0x0029, kSysNtNotImpl},
@@ -336,7 +336,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
 inline constexpr u32 kBedrockNtSyscallCount =
     sizeof(kBedrockNtSyscalls) / sizeof(kBedrockNtSyscalls[0]);
 
-inline constexpr u32 kBedrockNtSyscallsCovered = 26;
+inline constexpr u32 kBedrockNtSyscallsCovered = 27;
 
 /// Every NT syscall known on the target Windows version — superset
 /// of `kBedrockNtSyscalls`. Includes version-specific additions
@@ -383,7 +383,7 @@ inline constexpr NtSyscallMapping kAllNtSyscalls[] = {
     {"NtQueryVirtualMemory", 0x0023, kSysNtNotImpl},
     {"NtOpenThreadToken", 0x0024, kSysNtNotImpl},
     {"NtQueryInformationThread", 0x0025, kSysNtNotImpl},
-    {"NtOpenProcess", 0x0026, kSysNtNotImpl},
+    {"NtOpenProcess", 0x0026, static_cast<u32>(::duetos::core::SYS_PROCESS_OPEN)},
     {"NtSetInformationFile", 0x0027, static_cast<u32>(::duetos::core::SYS_FILE_SEEK)},
     {"NtMapViewOfSection", 0x0028, kSysNtNotImpl},
     {"NtAccessCheckAndAuditAlarm", 0x0029, kSysNtNotImpl},

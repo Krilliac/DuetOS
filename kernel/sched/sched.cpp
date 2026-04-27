@@ -1433,6 +1433,54 @@ void SchedEnumerate(SchedEnumCb cb, void* cookie)
     arch::Sti();
 }
 
+core::Process* SchedFindProcessByPid(u64 target_pid)
+{
+    auto match = [&](Task* t) -> core::Process*
+    {
+        if (t == nullptr)
+        {
+            return nullptr;
+        }
+        core::Process* p = t->process;
+        if (p == nullptr)
+        {
+            return nullptr;
+        }
+        if (p->pid != target_pid)
+        {
+            return nullptr;
+        }
+        return p;
+    };
+
+    arch::Cli();
+    core::Process* hit = nullptr;
+    Task* running = Current();
+    if ((hit = match(running)) != nullptr)
+    {
+        arch::Sti();
+        return hit;
+    }
+    for (Task* t = g_run_head_normal; t != nullptr && hit == nullptr; t = t->next)
+    {
+        hit = match(t);
+    }
+    for (Task* t = g_run_head_idle; t != nullptr && hit == nullptr; t = t->next)
+    {
+        hit = match(t);
+    }
+    for (Task* t = g_sleep_head; t != nullptr && hit == nullptr; t = t->sleep_next)
+    {
+        hit = match(t);
+    }
+    for (Task* t = g_zombies; t != nullptr && hit == nullptr; t = t->next)
+    {
+        hit = match(t);
+    }
+    arch::Sti();
+    return hit;
+}
+
 // ---------------------------------------------------------------------------
 // Dead-task reaper
 //

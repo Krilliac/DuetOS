@@ -909,6 +909,45 @@ __declspec(dllexport) NTSTATUS NtOpenKeyEx(HANDLE* KeyHandle, ULONG DesiredAcces
     return NtOpenKey(KeyHandle, DesiredAccess, ObjectAttributes);
 }
 
+/* ------------------------------------------------------------------
+ * NtOpenProcess — open a handle to another process by PID.
+ *
+ * Win32 NT signature:
+ *   NTSTATUS NtOpenProcess(
+ *     PHANDLE             ProcessHandle,
+ *     ACCESS_MASK         DesiredAccess,
+ *     POBJECT_ATTRIBUTES  ObjectAttributes,  // initialised but unused
+ *     PCLIENT_ID          ClientId);          // { HANDLE Pid; HANDLE Tid; }
+ *
+ * v0 only honours the PID; thread-targeted opens (Pid == 0) are
+ * STATUS_INVALID_PARAMETER. ACCESS_MASK + ObjectAttributes are
+ * accepted but ignored — we have no ACL machinery, and the
+ * kernel-side cap-gates via kCapDebug.
+ * ------------------------------------------------------------------ */
+typedef struct
+{
+    HANDLE Pid;
+    HANDLE Tid;
+} CLIENT_ID;
+
+__declspec(dllexport) NTSTATUS NtOpenProcess(HANDLE* ProcessHandle, ULONG DesiredAccess,
+                                             OBJECT_ATTRIBUTES* ObjectAttributes, CLIENT_ID* ClientId)
+{
+    (void)DesiredAccess;
+    (void)ObjectAttributes;
+    if (ProcessHandle == (HANDLE*)0 || ClientId == (CLIENT_ID*)0)
+        return NTSTATUS_INVALID_PARAMETER;
+    if (ClientId->Pid == (HANDLE)0)
+        return NTSTATUS_INVALID_PARAMETER;
+    long long handle = 0;
+    /* SYS_PROCESS_OPEN = 131; rdi = pid. rax = handle (0 on failure). */
+    __asm__ volatile("int $0x80" : "=a"(handle) : "a"((long long)131), "D"((long long)ClientId->Pid) : "memory");
+    if (handle == 0)
+        return (NTSTATUS)NTSTATUS_INVALID_PARAMETER;
+    *ProcessHandle = (HANDLE)handle;
+    return NTSTATUS_SUCCESS;
+}
+
 __declspec(dllexport) NTSTATUS NtQueryValueKey(HANDLE KeyHandle, UNICODE_STRING* ValueName, ULONG InfoClass,
                                                void* KeyValueInformation, ULONG Length, ULONG* ResultLength)
 {
