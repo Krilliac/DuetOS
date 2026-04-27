@@ -2247,6 +2247,213 @@ __declspec(dllexport) NTSTATUS NtCancelIoFile(HANDLE FileHandle, void* IoStatusB
 }
 
 /* ------------------------------------------------------------------
+ * NT extended-IO + tracing + locale + final misc facades.
+ * ------------------------------------------------------------------ */
+__declspec(dllexport) NTSTATUS NtCancelIoFileEx(HANDLE FileHandle, void* IoRequestToCancel, void* IoStatusBlock)
+{
+    (void)FileHandle;
+    (void)IoRequestToCancel;
+    if (IoStatusBlock != (void*)0)
+    {
+        unsigned long long* iosb = (unsigned long long*)IoStatusBlock;
+        iosb[0] = 0;
+        iosb[1] = 0;
+    }
+    /* No async I/O to cancel. */
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS NtCancelSynchronousIoFile(HANDLE ThreadHandle, void* IoRequestToCancel,
+                                                         void* IoStatusBlock)
+{
+    (void)ThreadHandle;
+    (void)IoRequestToCancel;
+    if (IoStatusBlock != (void*)0)
+    {
+        unsigned long long* iosb = (unsigned long long*)IoStatusBlock;
+        iosb[0] = 0;
+        iosb[1] = 0;
+    }
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS NtReadFileScatter(HANDLE FileHandle, HANDLE Event, void* ApcRoutine, void* ApcContext,
+                                                 void* IoStatusBlock, void* SegmentArray, ULONG Length,
+                                                 void* ByteOffset, void* Key)
+{
+    (void)FileHandle;
+    (void)Event;
+    (void)ApcRoutine;
+    (void)ApcContext;
+    (void)SegmentArray;
+    (void)Length;
+    (void)ByteOffset;
+    (void)Key;
+    if (IoStatusBlock != (void*)0)
+    {
+        unsigned long long* iosb = (unsigned long long*)IoStatusBlock;
+        iosb[0] = 0xC0000002;
+        iosb[1] = 0;
+    }
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtWriteFileGather(HANDLE FileHandle, HANDLE Event, void* ApcRoutine, void* ApcContext,
+                                                 void* IoStatusBlock, void* SegmentArray, ULONG Length,
+                                                 void* ByteOffset, void* Key)
+{
+    (void)FileHandle;
+    (void)Event;
+    (void)ApcRoutine;
+    (void)ApcContext;
+    (void)SegmentArray;
+    (void)Length;
+    (void)ByteOffset;
+    (void)Key;
+    if (IoStatusBlock != (void*)0)
+    {
+        unsigned long long* iosb = (unsigned long long*)IoStatusBlock;
+        iosb[0] = 0xC0000002;
+        iosb[1] = 0;
+    }
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtTraceEvent(HANDLE TraceHandle, ULONG Flags, ULONG FieldSize, void* Fields)
+{
+    (void)TraceHandle;
+    (void)Flags;
+    (void)FieldSize;
+    (void)Fields;
+    /* No ETW; success no-op so tracing shapes don't error. */
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS NtTraceControl(ULONG TraceCode, void* InputBuffer, ULONG InputBufferLength,
+                                              void* OutputBuffer, ULONG OutputBufferLength, ULONG* ReturnLength)
+{
+    (void)TraceCode;
+    (void)InputBuffer;
+    (void)InputBufferLength;
+    (void)OutputBuffer;
+    (void)OutputBufferLength;
+    if (ReturnLength != (ULONG*)0)
+        *ReturnLength = 0;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtGetMUIRegistryInfo(ULONG Flags, ULONG* OutputResourceCount, void* OutputBuffer)
+{
+    (void)Flags;
+    if (OutputResourceCount != (ULONG*)0)
+        *OutputResourceCount = 0;
+    (void)OutputBuffer;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtQueryDefaultLocale(BOOL UserProfile, ULONG* DefaultLocaleId)
+{
+    (void)UserProfile;
+    if (DefaultLocaleId != (ULONG*)0)
+        *DefaultLocaleId = 0x0409; /* en-US */
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS NtSetDefaultLocale(BOOL UserProfile, ULONG DefaultLocaleId)
+{
+    (void)UserProfile;
+    (void)DefaultLocaleId;
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS NtQueryDefaultUILanguage(unsigned short* DefaultUILanguageId)
+{
+    if (DefaultUILanguageId != (unsigned short*)0)
+        *DefaultUILanguageId = 0x0409;
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS NtSetDefaultUILanguage(unsigned short DefaultUILanguageId)
+{
+    (void)DefaultUILanguageId;
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS NtQueryInstallUILanguage(unsigned short* InstallUILanguageId)
+{
+    if (InstallUILanguageId != (unsigned short*)0)
+        *InstallUILanguageId = 0x0409;
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS NtSetUuidSeed(void* Seed)
+{
+    (void)Seed;
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS NtAllocateUuids(void* Time, ULONG* Range, ULONG* Sequence, void* Seed)
+{
+    (void)Time;
+    (void)Seed;
+    if (Range != (ULONG*)0)
+        *Range = 0;
+    if (Sequence != (ULONG*)0)
+        *Sequence = 0;
+    return (NTSTATUS)0xC0000002;
+}
+
+/* NtSecureConnectPort — LPC variant. NotImpl. */
+__declspec(dllexport) NTSTATUS NtSecureConnectPort(HANDLE* ClientPortHandle, void* PortName, void* SecurityQos,
+                                                   void* ClientView, void* ServerSid, void* ServerView,
+                                                   void* MaxMessageLength, void* ConnectionInformation,
+                                                   void* ConnectionInformationLength)
+{
+    (void)ClientPortHandle;
+    (void)PortName;
+    (void)SecurityQos;
+    (void)ClientView;
+    (void)ServerSid;
+    (void)ServerView;
+    (void)MaxMessageLength;
+    (void)ConnectionInformation;
+    (void)ConnectionInformationLength;
+    return (NTSTATUS)0xC0000002;
+}
+
+/* NtDuplicateToken — duplicates a token for impersonation. v0
+ * has one static token; duplication just hands back the same
+ * sentinel handle (0xA00 — see DUETOS_TOKEN_HANDLE further
+ * down). */
+__declspec(dllexport) NTSTATUS NtDuplicateToken(HANDLE ExistingTokenHandle, ULONG DesiredAccess, void* ObjectAttributes,
+                                                BOOL EffectiveOnly, ULONG TokenType, HANDLE* NewTokenHandle)
+{
+    (void)ExistingTokenHandle;
+    (void)DesiredAccess;
+    (void)ObjectAttributes;
+    (void)EffectiveOnly;
+    (void)TokenType;
+    if (NewTokenHandle == (HANDLE*)0)
+        return NTSTATUS_INVALID_PARAMETER;
+    *NewTokenHandle = (HANDLE)0xA00;
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS NtFilterToken(HANDLE ExistingTokenHandle, ULONG Flags, void* SidsToDisable,
+                                             void* PrivilegesToDelete, void* RestrictedSids, HANDLE* NewTokenHandle)
+{
+    (void)ExistingTokenHandle;
+    (void)Flags;
+    (void)SidsToDisable;
+    (void)PrivilegesToDelete;
+    (void)RestrictedSids;
+    if (NewTokenHandle == (HANDLE*)0)
+        return NTSTATUS_INVALID_PARAMETER;
+    *NewTokenHandle = (HANDLE)0xA00;
+    return NTSTATUS_SUCCESS;
+}
+
+/* ------------------------------------------------------------------
  * NT mailslot + named-pipe + power-info + write-watch + profile
  * + PnP + VDM facades.
  * ------------------------------------------------------------------ */

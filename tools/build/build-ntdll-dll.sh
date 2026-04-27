@@ -299,6 +299,23 @@ set +e
     /export:NtQueryIntervalProfile \
     /export:NtPlugPlayControl \
     /export:NtVdmControl \
+    /export:NtCancelIoFileEx \
+    /export:NtCancelSynchronousIoFile \
+    /export:NtReadFileScatter \
+    /export:NtWriteFileGather \
+    /export:NtTraceEvent \
+    /export:NtTraceControl \
+    /export:NtGetMUIRegistryInfo \
+    /export:NtQueryDefaultLocale \
+    /export:NtSetDefaultLocale \
+    /export:NtQueryDefaultUILanguage \
+    /export:NtSetDefaultUILanguage \
+    /export:NtQueryInstallUILanguage \
+    /export:NtSetUuidSeed \
+    /export:NtAllocateUuids \
+    /export:NtSecureConnectPort \
+    /export:NtDuplicateToken \
+    /export:NtFilterToken \
     /export:NtContinue \
     /export:ZwContinue=NtContinue \
     /export:NtAllocateVirtualMemory \
