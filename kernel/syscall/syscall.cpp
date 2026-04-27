@@ -78,6 +78,7 @@
 #include "subsystems/win32/event_syscall.h"
 #include "subsystems/win32/dir_syscall.h"
 #include "subsystems/win32/section.h"
+#include "subsystems/win32/spawn_syscall.h"
 #include "subsystems/win32/window_syscall.h"
 #include "subsystems/win32/heap.h"
 #include "subsystems/win32/custom.h"
@@ -1562,6 +1563,13 @@ void SyscallDispatch(arch::TrapFrame* frame)
     {
         const i64 rv =
             ::duetos::subsystems::win32::SysDirNotify(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+        frame->rax = static_cast<u64>(rv);
+        return;
+    }
+
+    case SYS_PROCESS_SPAWN:
+    {
+        const i64 rv = ::duetos::subsystems::win32::SysProcessSpawn(frame->rdi, frame->rsi);
         frame->rax = static_cast<u64>(rv);
         return;
     }

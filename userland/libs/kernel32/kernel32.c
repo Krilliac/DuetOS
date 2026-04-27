@@ -1601,20 +1601,14 @@ struct Win32FindDataA_t
 static long long DirOpenSyscall(const char* path)
 {
     long long rv;
-    __asm__ volatile("int $0x80"
-                     : "=a"(rv)
-                     : "a"((long long)154), "D"((long long)path)
-                     : "memory");
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)154), "D"((long long)path) : "memory");
     return rv;
 }
 
 static long long DirNextSyscall(long long handle, void* report)
 {
     long long rv;
-    __asm__ volatile("int $0x80"
-                     : "=a"(rv)
-                     : "a"((long long)155), "D"(handle), "S"((long long)report)
-                     : "memory");
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)155), "D"(handle), "S"((long long)report) : "memory");
     return rv;
 }
 
@@ -1772,11 +1766,95 @@ __declspec(dllexport) BOOL FindNextFileW(HANDLE h, void* find_data)
 __declspec(dllexport) BOOL FindClose(HANDLE h)
 {
     long long discard;
-    __asm__ volatile("int $0x80"
-                     : "=a"(discard)
-                     : "a"((long long)9), "D"((long long)h)
-                     : "memory");
+    __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long)9), "D"((long long)h) : "memory");
     return 1;
+}
+
+/* CreateProcessA / CreateProcessW — subprocess spawn via the new
+ * SYS_PROCESS_SPAWN (= 158). v0 ignores most CreateProcess
+ * parameters; only the application path is honoured (via
+ * lpApplicationName, or extracted from the first token of
+ * lpCommandLine if lpApplicationName is NULL).
+ *
+ * Path translation: forward slashes pass through verbatim. The
+ * kernel-side helper accepts only "/disk/<idx>/<rest>" paths;
+ * Windows-native "C:\\..." paths need Windows→Unix translation
+ * which is its own slice.
+ *
+ * On success, fills lpProcessInformation->hProcess /
+ * dwProcessId / hThread / dwThreadId. hThread is collapsed to 0
+ * (no separate Win32 thread handle for the new process's primary
+ * thread; callers that need it can NtOpenThread the tid).
+ */
+struct ProcessInformation_t
+{
+    HANDLE hProcess;
+    HANDLE hThread;
+    DWORD dwProcessId;
+    DWORD dwThreadId;
+};
+
+__declspec(dllexport) BOOL CreateProcessA(const char* lpApplicationName, char* lpCommandLine, void* lpProcessAttributes,
+                                          void* lpThreadAttributes, BOOL bInheritHandles, DWORD dwCreationFlags,
+                                          void* lpEnvironment, const char* lpCurrentDirectory, void* lpStartupInfo,
+                                          void* lpProcessInformation)
+{
+    (void)lpProcessAttributes;
+    (void)lpThreadAttributes;
+    (void)bInheritHandles;
+    (void)dwCreationFlags;
+    (void)lpEnvironment;
+    (void)lpCurrentDirectory;
+    (void)lpStartupInfo;
+    const char* path = lpApplicationName;
+    if (path == (const char*)0)
+        path = lpCommandLine; // first arg of cmdline ≈ executable
+    if (path == (const char*)0)
+        return 0;
+    long long pid;
+    __asm__ volatile("int $0x80"
+                     : "=a"(pid)
+                     : "a"((long long)158), /* SYS_PROCESS_SPAWN */
+                       "D"((long long)path), "S"((long long)0)
+                     : "memory");
+    if (pid < 0)
+        return 0;
+    if (lpProcessInformation != (void*)0)
+    {
+        struct ProcessInformation_t* pi = (struct ProcessInformation_t*)lpProcessInformation;
+        pi->hProcess = (HANDLE)(long long)pid;
+        pi->hThread = (HANDLE)0;
+        pi->dwProcessId = (DWORD)pid;
+        pi->dwThreadId = (DWORD)pid; // single-thread process; tid == pid
+    }
+    return 1;
+}
+
+__declspec(dllexport) BOOL CreateProcessW(const wchar_t16* lpApplicationName, wchar_t16* lpCommandLine,
+                                          void* lpProcessAttributes, void* lpThreadAttributes, BOOL bInheritHandles,
+                                          DWORD dwCreationFlags, void* lpEnvironment,
+                                          const wchar_t16* lpCurrentDirectory, void* lpStartupInfo,
+                                          void* lpProcessInformation)
+{
+    /* Strip wide → ASCII (low byte). 128-byte cap matches the
+     * kernel-side path buffer. */
+    char path[128];
+    for (unsigned i = 0; i < sizeof(path); ++i)
+        path[i] = 0;
+    const wchar_t16* src = lpApplicationName;
+    if (src == (const wchar_t16*)0)
+        src = lpCommandLine;
+    if (src == (const wchar_t16*)0)
+        return 0;
+    unsigned i = 0;
+    while (i + 1 < sizeof(path) && src[i] != 0)
+    {
+        path[i] = (char)(src[i] & 0xFF);
+        ++i;
+    }
+    path[i] = '\0';
+    return CreateProcessA(path, (char*)0, lpProcessAttributes, lpThreadAttributes, bInheritHandles, dwCreationFlags,
+                          lpEnvironment, (const char*)0, lpStartupInfo, lpProcessInformation);
 }
 
 __declspec(dllexport) BOOL CopyFileA(const char* src, const char* dst, BOOL fail_if_exists)

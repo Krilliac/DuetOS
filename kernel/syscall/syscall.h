@@ -1569,6 +1569,12 @@ enum SyscallNumber : u64
     // then writes a single FILE_NOTIFY_INFORMATION record (caller
     // loops). Returns bytes written or -1 on bad handle / overrun.
     SYS_DIR_NOTIFY = 157,
+
+    // SYS_PROCESS_SPAWN — backs CreateProcessA / CreateProcessW
+    // and (eventually) NtCreateUserProcess. Reads the named PE /
+    // ELF off FAT32, autodetects format by magic, dispatches to
+    // SpawnPeFile / SpawnElfFile. Returns the new pid or -1.
+    SYS_PROCESS_SPAWN = 158,
 };
 
 // Cross-language record returned by SYS_DIR_NEXT. 96 bytes, exact
