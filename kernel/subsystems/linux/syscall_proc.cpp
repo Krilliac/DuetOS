@@ -82,35 +82,52 @@ i64 DoSchedYield()
 // SIGABRT to itself. v0 has no signal delivery — if the target
 // is self, just exit with an abort-ish status; any other tid
 // returns -ESRCH.
+// Linux: tgkill(tgid, tid, sig). v0 collapses to the per-process
+// signal-delivery model — tid identifies the task whose owning
+// Process is the delivery target. tgid is accepted but only
+// validated at the per-task lookup; mismatches surface as -ESRCH.
 i64 DoTgkill(u64 tgid, u64 tid, u64 sig)
 {
     (void)tgid;
-    if (tid != sched::CurrentTaskId())
+    if (sig == 0)
+    {
+        // Existence-probe form: verify the tid is alive.
+        sched::Task* t = sched::SchedFindTaskByTid(tid);
+        return (t != nullptr) ? 0 : kESRCH;
+    }
+    sched::Task* t = sched::SchedFindTaskByTid(tid);
+    if (t == nullptr)
         return kESRCH;
-    arch::SerialWrite("[linux] tgkill -> self; interpreting as abort. sig=");
-    arch::SerialWriteHex(sig);
-    arch::SerialWrite(" (");
-    arch::SerialWrite(::duetos::core::LinuxSignalName(sig));
-    arch::SerialWrite(")\n");
-    sched::SchedExit();
-    return 0;
+    core::Process* target = sched::TaskProcess(t);
+    if (target == nullptr)
+        return kESRCH; // kernel-only task — no Linux process to signal
+    return LinuxSignalDeliver(target, static_cast<u32>(sig));
 }
 
-// Linux: kill(pid, sig). Same as tgkill in this single-threaded
-// world — if targeting self, exit; else -ESRCH. A real signal
-// implementation would look up the target Process and deliver
-// via its sig queue.
+// Linux: kill(pid, sig). pid > 0 → deliver to the matching process.
+// pid == 0 → process group (collapsed to the caller's process in
+// v0). pid == -1 → broadcast (rejected — too easy to misuse with
+// no real process tree). pid < -1 → process group (-pid).
 i64 DoKill(u64 pid, u64 sig)
 {
-    if (pid != sched::CurrentTaskId())
+    const i64 spid = static_cast<i64>(pid);
+    if (sig == 0)
+    {
+        // Existence probe.
+        if (spid <= 0)
+            return 0;
+        return (sched::SchedFindProcessByPid(static_cast<u64>(spid)) != nullptr) ? 0 : kESRCH;
+    }
+    core::Process* target = nullptr;
+    if (spid > 0)
+        target = sched::SchedFindProcessByPid(static_cast<u64>(spid));
+    else if (spid == 0)
+        target = core::CurrentProcess();
+    else
+        return kESRCH; // group / broadcast forms not supported in v0 (sub-GAP)
+    if (target == nullptr)
         return kESRCH;
-    arch::SerialWrite("[linux] kill(self) sig=");
-    arch::SerialWriteHex(sig);
-    arch::SerialWrite(" (");
-    arch::SerialWrite(::duetos::core::LinuxSignalName(sig));
-    arch::SerialWrite(")\n");
-    sched::SchedExit();
-    return 0;
+    return LinuxSignalDeliver(target, static_cast<u32>(sig));
 }
 
 // Linux: getppid / getpgid / getsid / setpgid. v0 has a flat

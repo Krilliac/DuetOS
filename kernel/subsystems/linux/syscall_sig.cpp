@@ -16,6 +16,7 @@
 
 #include "subsystems/linux/syscall_internal.h"
 
+#include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
 #include "proc/process.h"
 #include "mm/address_space.h"
@@ -23,6 +24,111 @@
 
 namespace duetos::subsystems::linux::internal
 {
+
+// =====================================================
+// Real signal delivery — v0
+// =====================================================
+//
+// Default-action delivery only. Fatal signals (SIGTERM/SIGKILL/
+// SIGINT/SIGABRT/SIGSEGV/SIGFPE/SIGBUS/SIGHUP/SIGQUIT/SIGPIPE/
+// SIGUSR1/SIGUSR2) terminate the target process via
+// SchedKillByProcess; non-fatal signals sit in the pending bitmap
+// where signalfd / rt_sigpending can observe them. User-installed
+// handlers (sigaction with handler_va not in {SIG_DFL=0,
+// SIG_IGN=1}) are recorded as pending but not invoked — real
+// trampoline + sigreturn is its own slice.
+
+bool LinuxSignalIsFatalDefault(u32 signum)
+{
+    constexpr u32 kSIGHUP = 1;
+    constexpr u32 kSIGINT = 2;
+    constexpr u32 kSIGQUIT = 3;
+    constexpr u32 kSIGABRT = 6;
+    constexpr u32 kSIGBUS = 7;
+    constexpr u32 kSIGFPE = 8;
+    constexpr u32 kSIGKILL = 9;
+    constexpr u32 kSIGUSR1 = 10;
+    constexpr u32 kSIGSEGV = 11;
+    constexpr u32 kSIGUSR2 = 12;
+    constexpr u32 kSIGPIPE = 13;
+    constexpr u32 kSIGTERM = 15;
+    switch (signum)
+    {
+    case kSIGHUP:
+    case kSIGINT:
+    case kSIGQUIT:
+    case kSIGABRT:
+    case kSIGBUS:
+    case kSIGFPE:
+    case kSIGKILL:
+    case kSIGUSR1:
+    case kSIGSEGV:
+    case kSIGUSR2:
+    case kSIGPIPE:
+    case kSIGTERM:
+        return true;
+    default:
+        return false;
+    }
+}
+
+i64 LinuxSignalDeliver(core::Process* target, u32 signum)
+{
+    if (target == nullptr)
+        return kEINVAL;
+    if (signum == 0 || signum >= core::Process::kLinuxSignalCount)
+        return kEINVAL;
+    constexpr u32 kSIGKILL = 9;
+    constexpr u32 kSIGSTOP = 19;
+    constexpr u64 kSigDfl = 0;
+    constexpr u64 kSigIgn = 1;
+    const u64 handler = target->linux_sigactions[signum].handler_va;
+    // SIGKILL / SIGSTOP cannot be ignored or caught — they always
+    // get the default kernel action. Mirror Linux's sigprocmask /
+    // sigaction restriction here so a malicious caller can't shield
+    // a target from SIGKILL by installing SIG_IGN.
+    const bool force_default = (signum == kSIGKILL || signum == kSIGSTOP);
+    if (!force_default && handler == kSigIgn)
+    {
+        // Drop silently — Linux semantics. Don't even mark the
+        // signal pending; SIG_IGN means "the kernel discards it
+        // before it reaches the bitmap."
+        return 0;
+    }
+    arch::Cli();
+    target->linux_pending_signals |= (1ULL << signum);
+    sched::WaitQueueWakeAll(&target->linux_signal_wq);
+    arch::Sti();
+    arch::SerialWrite("[linux/signal] deliver pid=");
+    arch::SerialWriteHex(target->pid);
+    arch::SerialWrite(" sig=");
+    arch::SerialWriteHex(signum);
+    arch::SerialWrite(" handler=");
+    arch::SerialWriteHex(handler);
+    arch::SerialWrite("\n");
+    if (force_default || handler == kSigDfl)
+    {
+        if (LinuxSignalIsFatalDefault(signum) || signum == kSIGKILL)
+        {
+            // Stamp the signaled-exit metadata BEFORE killing so
+            // ProcessRelease's parent-notify path (in proc/process.cpp)
+            // sees the right was_signaled / exit_signal and forwards
+            // them to the parent's wait4.
+            target->linux_was_signaled = true;
+            target->linux_exit_signal = static_cast<u8>(signum & 0x7F);
+            target->linux_exit_code = 0;
+            (void)sched::SchedKillByProcess(target);
+            return 0;
+        }
+        // Non-fatal default: just leaves the bit set in the pending
+        // bitmap. signalfd / rt_sigpending will observe it.
+        return 0;
+    }
+    // User handler installed. v0 doesn't run it (no trampoline);
+    // the bit stays set so signalfd_read can drain it. Real handler
+    // delivery is a follow-up slice. Sub-GAP.
+    return 0;
+}
 
 // Linux: rt_sigaction(signum, new_act, old_act, sigsetsize).
 // Persists per-process disposition for `signum` so a caller that
@@ -134,15 +240,19 @@ i64 DoRtSigreturn()
     return 0;
 }
 
-// rt_sigpending(set, sigsetsize). No signal delivery yet → no
-// pending signals → write a zeroed mask.
+// rt_sigpending(set, sigsetsize). Reads the per-process pending
+// bitmap that LinuxSignalDeliver populates. The mask the caller
+// has blocked via rt_sigprocmask doesn't filter the bitmap; in
+// real Linux, blocked-and-pending IS the result, which is exactly
+// what we report.
 i64 DoRtSigpending(u64 user_set, u64 sigsetsize)
 {
     (void)sigsetsize;
     if (user_set == 0)
         return kEFAULT;
-    const u64 zero = 0;
-    if (!mm::CopyToUser(reinterpret_cast<void*>(user_set), &zero, sizeof(zero)))
+    core::Process* p = core::CurrentProcess();
+    const u64 pending = (p != nullptr) ? p->linux_pending_signals : 0;
+    if (!mm::CopyToUser(reinterpret_cast<void*>(user_set), &pending, sizeof(pending)))
         return kEFAULT;
     return 0;
 }

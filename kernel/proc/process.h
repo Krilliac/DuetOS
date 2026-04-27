@@ -778,6 +778,20 @@ struct Process
     };
     LinuxSigAction linux_sigactions[kLinuxSignalCount];
     u64 linux_signal_mask; // per-process blocked-signal bitmask (rt_sigprocmask)
+    // Bitmap of pending Linux signals. Bit N set = signum N is
+    // pending delivery. Populated by LinuxSignalDeliver()
+    // (kill / tgkill / synthetic deliveries) and drained by
+    // signalfd_read; rt_sigpending also reports it.
+    //
+    // v0 only honours the bitmap shape (one pending bit per
+    // signum); real Linux distinguishes queued sigqueue() entries.
+    // 64-bit width covers signum 1..63, which is the entire
+    // POSIX rt-signal range.
+    u64 linux_pending_signals;
+    // Wait queue for signalfd readers. LinuxSignalDeliver wakes
+    // every reader after pushing a pending bit so a blocked
+    // signalfd read (post-engine) immediately returns.
+    sched::WaitQueue linux_signal_wq;
 
     // Linux parent / wait infrastructure — backs wait4 / waitid /
     // SIGCHLD reaping. `linux_parent_pid` is set by DoFork (clone

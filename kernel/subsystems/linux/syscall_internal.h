@@ -15,6 +15,11 @@
 
 #include "util/types.h"
 
+namespace duetos::core
+{
+struct Process;
+}
+
 namespace duetos::subsystems::linux::internal
 {
 
@@ -311,6 +316,29 @@ i64 DoFcntl(u64 fd, u64 cmd, u64 arg);
 // it (sigaction slots, signal mask) or returns 0 / -EINTR so
 // libc paths make forward progress instead of -ENOSYS-crashing.
 i64 DoRtSigaction(u64 signum, u64 new_act, u64 old_act, u64 sigsetsize);
+
+// Deliver a Linux signal to `target`. Looks up the target's
+// sigaction[sig]; for SIG_DFL with a fatal default action, kills
+// every task in target via SchedKillByProcess and stamps
+// linux_was_signaled / linux_exit_signal on the process so the
+// parent's wait4 surfaces the right wstatus. SIG_IGN drops the
+// signal. User handlers are pushed onto linux_pending_signals so
+// signalfd / rt_sigpending can observe them, but no in-process
+// trampoline runs (sub-GAP: real handler delivery requires a
+// signal-frame builder + sigreturn). Returns 0 on success;
+// signum out of range returns -EINVAL.
+//
+// Safe to call from any kernel context — IRQ-off bracketed
+// internally for the bitmap mutation.
+i64 LinuxSignalDeliver(core::Process* target, u32 signum);
+
+// True iff signum has a fatal default action (SIGTERM / SIGKILL /
+// SIGINT / SIGABRT / SIGSEGV / SIGFPE / SIGBUS / SIGHUP / SIGQUIT /
+// SIGPIPE / SIGUSR1 / SIGUSR2). Non-fatal signals (SIGCHLD /
+// SIGCONT / SIGURG / SIGWINCH / SIGSTOP) just sit in the pending
+// bitmap. SIGSTOP / SIGCONT have stop/continue semantics in
+// real Linux; v0 treats them as non-fatal queues only.
+bool LinuxSignalIsFatalDefault(u32 signum);
 i64 DoRtSigprocmask(u64 how, u64 user_set, u64 user_oldset, u64 sigsetsize);
 i64 DoSigaltstack(u64 ss, u64 old_ss);
 i64 DoRtSigreturn();

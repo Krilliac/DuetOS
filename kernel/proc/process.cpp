@@ -204,6 +204,9 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
         p->linux_sigactions[i].mask = 0;
     }
     p->linux_signal_mask = 0;
+    p->linux_pending_signals = 0;
+    p->linux_signal_wq.head = nullptr;
+    p->linux_signal_wq.tail = nullptr;
     // Linux parent / wait state. fork() / clone() patches the
     // parent_pid into the child after ProcessCreate returns; bare
     // ProcessCreate has no parent (init-spawned).

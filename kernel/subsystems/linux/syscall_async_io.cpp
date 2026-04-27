@@ -472,18 +472,54 @@ void SignalfdRelease(u32 idx)
 
 i64 SignalfdRead(u32 idx, u64 user_dst, u64 len)
 {
-    (void)user_dst;
-    (void)len;
     if (idx >= kSignalfdPoolCap)
         return kEINVAL;
     if (len < 128) // sizeof(struct signalfd_siginfo)
         return kEINVAL;
-    // GAP: v0 has no signal-delivery path, so signalfd reads never
-    // see a pending signal. Returning -EAGAIN matches the
-    // O_NONBLOCK + no-pending-signal contract Linux exposes; a
-    // blocking caller that loops on -EAGAIN spins, which is the
-    // honest behaviour given there's no engine to push events in.
-    return kEAGAIN;
+    Signalfd& s = g_signalfd_pool[idx];
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr)
+        return kEINVAL;
+    arch::Cli();
+    if (!s.in_use)
+    {
+        arch::Sti();
+        return 0;
+    }
+    // Walk the pending bitmap; emit one signalfd_siginfo per
+    // matching signum, clear the bit. Caller-supplied buffer
+    // determines how many we can emit (each record = 128 bytes).
+    u8 stage[256];
+    u64 emitted = 0;
+    for (u32 sig = 1; sig < 64 && emitted + 128 <= len && emitted + 128 <= sizeof(stage); ++sig)
+    {
+        const u64 bit = (1ULL << sig);
+        if ((p->linux_pending_signals & bit) == 0)
+            continue;
+        if ((s.mask & bit) == 0)
+            continue;
+        // struct signalfd_siginfo — Linux-stable, 128 bytes.
+        // First 32 bytes carry the fields callers actually read:
+        //   u32 ssi_signo; i32 ssi_errno; i32 ssi_code; u32 ssi_pid;
+        //   u32 ssi_uid; i32 ssi_fd; u32 ssi_tid; u32 ssi_band;
+        //   u32 ssi_overrun; u32 ssi_trapno; i32 ssi_status; ...
+        // Padding to 128 with zeros.
+        u8* rec = stage + emitted;
+        for (u32 i = 0; i < 128; ++i)
+            rec[i] = 0;
+        const u32 sig_u32 = sig;
+        for (u32 i = 0; i < 4; ++i)
+            rec[i] = static_cast<u8>((sig_u32 >> (i * 8)) & 0xFF);
+        // ssi_pid + ssi_uid not tracked per-signal in v0 — leave 0.
+        p->linux_pending_signals &= ~bit;
+        emitted += 128;
+    }
+    arch::Sti();
+    if (emitted == 0)
+        return kEAGAIN;
+    if (!mm::CopyToUser(reinterpret_cast<void*>(user_dst), stage, emitted))
+        return kEFAULT;
+    return static_cast<i64>(emitted);
 }
 
 i64 DoSignalfd(u64 fd, u64 user_mask, u64 sigsetsize, u64 flags)
