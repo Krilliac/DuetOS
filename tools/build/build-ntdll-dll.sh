@@ -106,6 +106,13 @@ set +e
     /export:ZwDeleteValueKey=NtDeleteValueKey \
     /export:NtFlushKey \
     /export:ZwFlushKey=NtFlushKey \
+    /export:NtEnumerateValueKey \
+    /export:ZwEnumerateValueKey=NtEnumerateValueKey \
+    /export:NtQueryKey \
+    /export:ZwQueryKey=NtQueryKey \
+    /export:NtCreateKey \
+    /export:NtDeleteKey \
+    /export:NtEnumerateKey \
     /export:NtQueryInformationProcess \
     /export:ZwQueryInformationProcess=NtQueryInformationProcess \
     /export:ZwAllocateVirtualMemory=NtAllocateVirtualMemory \

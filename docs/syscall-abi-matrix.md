@@ -555,10 +555,10 @@ _Auto-generated; do not edit by hand._
 | nt | 16 | `NtQueryObject` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
 | nt | 17 | `NtQueryInformationFile` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_FILE_FSTAT` | routes to native SYS_FILE_FSTAT |
 | nt | 18 | `NtOpenKey` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_REGISTRY` | routes to native SYS_REGISTRY |
-| nt | 19 | `NtEnumerateValueKey` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 19 | `NtEnumerateValueKey` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_REGISTRY` | routes to native SYS_REGISTRY |
 | nt | 20 | `NtFindAtom` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
 | nt | 21 | `NtQueryDefaultLocale` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
-| nt | 22 | `NtQueryKey` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 22 | `NtQueryKey` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_REGISTRY` | routes to native SYS_REGISTRY |
 | nt | 23 | `NtQueryValueKey` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_REGISTRY` | routes to native SYS_REGISTRY |
 | nt | 24 | `NtAllocateVirtualMemory` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_VM_ALLOCATE` | routes to native SYS_VM_ALLOCATE |
 | nt | 25 | `NtQueryInformationProcess` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_PROCESS_QUERY_INFO` | routes to native SYS_PROCESS_QUERY_INFO |

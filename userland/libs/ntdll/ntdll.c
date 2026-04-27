@@ -2661,6 +2661,130 @@ __declspec(dllexport) NTSTATUS NtFlushKey(HANDLE KeyHandle)
 }
 
 /* ------------------------------------------------------------------
+ * NtEnumerateValueKey — walk values of an open key. v0 honours
+ * KeyValueBasicInformation (class 0); other classes return
+ * NotImpl. STATUS_NO_MORE_ENTRIES (0x8000001A) past end so for-
+ * loops terminate cleanly.
+ * ------------------------------------------------------------------ */
+__declspec(dllexport) NTSTATUS NtEnumerateValueKey(HANDLE KeyHandle, ULONG Index, ULONG KeyValueInformationClass,
+                                                   void* KeyValueInformation, ULONG Length, ULONG* ResultLength)
+{
+    if (KeyValueInformationClass != 0)
+        return (NTSTATUS)0xC0000002;
+    if (KeyValueInformation == (void*)0)
+        return NTSTATUS_INVALID_PARAMETER;
+    unsigned char stage[96];
+    long long status;
+    __asm__ volatile("mov %4, %%r10\n\t"
+                     "mov %5, %%r8\n\t"
+                     "int $0x80"
+                     : "=a"(status)
+                     : "a"((long long)130), "D"((long long)7), "S"((long long)KeyHandle), "d"((long long)Index),
+                       "r"((long long)stage), "r"((long long)sizeof(stage))
+                     : "r10", "r8", "memory");
+    if (status != 0)
+        return (NTSTATUS)status;
+    const unsigned title_index = (unsigned)*(unsigned*)(stage + 0);
+    const unsigned type = (unsigned)*(unsigned*)(stage + 4);
+    const unsigned name_chars = (unsigned)*(unsigned*)(stage + 12);
+    const ULONG name_bytes = (ULONG)(name_chars * 2);
+    const ULONG total = 12 + name_bytes;
+    if (ResultLength != (ULONG*)0)
+        *ResultLength = total;
+    if (Length < total)
+        return (NTSTATUS)0xC0000023;
+    unsigned char* out = (unsigned char*)KeyValueInformation;
+    *(unsigned*)(out + 0) = title_index;
+    *(unsigned*)(out + 4) = type;
+    *(unsigned*)(out + 8) = name_bytes;
+    const char* src = (const char*)(stage + 32);
+    wchar_t16* dst = (wchar_t16*)(out + 12);
+    for (unsigned i = 0; i < name_chars; ++i)
+        dst[i] = (unsigned char)src[i];
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS ZwEnumerateValueKey(HANDLE KeyHandle, ULONG Index, ULONG KeyValueInformationClass,
+                                                   void* KeyValueInformation, ULONG Length, ULONG* ResultLength)
+{
+    return NtEnumerateValueKey(KeyHandle, Index, KeyValueInformationClass, KeyValueInformation, Length, ResultLength);
+}
+
+/* NtQueryKey — KeyFullInformation only. SubKeys = 0 (no
+ * mutable key tree); Values = static + sidecar count. */
+__declspec(dllexport) NTSTATUS NtQueryKey(HANDLE KeyHandle, ULONG KeyInformationClass, void* KeyInformation,
+                                          ULONG Length, ULONG* ResultLength)
+{
+    if (KeyInformationClass != 2)
+        return (NTSTATUS)0xC0000002;
+    if (KeyInformation == (void*)0)
+        return NTSTATUS_INVALID_PARAMETER;
+    const ULONG total = 44;
+    if (ResultLength != (ULONG*)0)
+        *ResultLength = total;
+    if (Length < total)
+        return (NTSTATUS)0xC0000023;
+    unsigned long long counts[2] = {0, 0};
+    long long status;
+    __asm__ volatile("mov %3, %%r10\n\t"
+                     "int $0x80"
+                     : "=a"(status)
+                     : "a"((long long)130), "D"((long long)8), "S"((long long)KeyHandle), "r"((long long)16),
+                       "d"((long long)counts)
+                     : "r10", "memory");
+    if (status != 0)
+        return (NTSTATUS)status;
+    unsigned char* out = (unsigned char*)KeyInformation;
+    for (unsigned i = 0; i < total; ++i)
+        out[i] = 0;
+    *(unsigned*)(out + 20) = (unsigned)counts[0];
+    *(unsigned*)(out + 32) = (unsigned)counts[1];
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS ZwQueryKey(HANDLE KeyHandle, ULONG KeyInformationClass, void* KeyInformation,
+                                          ULONG Length, ULONG* ResultLength)
+{
+    return NtQueryKey(KeyHandle, KeyInformationClass, KeyInformation, Length, ResultLength);
+}
+
+/* NtCreateKey / NtDeleteKey — NotImpl facades. v0 has no
+ * mutable key tree; only mutable VALUES on existing static keys
+ * (via NtSetValueKey). NtEnumerateKey returns NO_MORE_ENTRIES so
+ * for-loops terminate cleanly with zero subkeys. */
+__declspec(dllexport) NTSTATUS NtCreateKey(HANDLE* KeyHandle, ULONG DesiredAccess, void* ObjectAttributes,
+                                           ULONG TitleIndex, void* Class, ULONG CreateOptions, ULONG* Disposition)
+{
+    (void)KeyHandle;
+    (void)DesiredAccess;
+    (void)ObjectAttributes;
+    (void)TitleIndex;
+    (void)Class;
+    (void)CreateOptions;
+    (void)Disposition;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtDeleteKey(HANDLE KeyHandle)
+{
+    (void)KeyHandle;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtEnumerateKey(HANDLE KeyHandle, ULONG Index, ULONG KeyInformationClass,
+                                              void* KeyInformation, ULONG Length, ULONG* ResultLength)
+{
+    (void)KeyHandle;
+    (void)Index;
+    (void)KeyInformationClass;
+    (void)KeyInformation;
+    (void)Length;
+    if (ResultLength != (ULONG*)0)
+        *ResultLength = 0;
+    return (NTSTATUS)0x8000001A;
+}
+
+/* ------------------------------------------------------------------
  * NtCreateFile / NtOpenFile / NtReadFile / NtWriteFile — Win32 PE
  * file I/O via the NT-namespace API.
  *

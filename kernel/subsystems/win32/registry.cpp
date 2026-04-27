@@ -545,6 +545,113 @@ i64 DoFlushKey(arch::TrapFrame* frame)
     return kNtStatusSuccess;
 }
 
+// Walk the values of an opened key and return the one at
+// `index`. Static values come first, then sidecar entries with
+// matching RegKey. Out shape (32-byte header + name body):
+//   [0..4)   index (u32)
+//   [4..8)   type  (u32, REG_*)
+//   [8..12)  data_size (u32, bytes)
+//   [12..16) name_chars (u32, ASCII char count, no NUL)
+//   [16..32) reserved (zero)
+//   [32..)   name body (ASCII, NUL-terminated, fits buf_cap)
+i64 DoEnumerateValue(arch::TrapFrame* frame)
+{
+    core::Process* proc = core::CurrentProcess();
+    if (proc == nullptr)
+        return kNtStatusInvalidParameter;
+    const u64 handle = frame->rsi;
+    const u32 index = static_cast<u32>(frame->rdx);
+    const u64 buf_va = frame->r10;
+    const u64 buf_cap = frame->r8;
+    const RegKey* key = SlotForHandle(proc, handle);
+    if (key == nullptr)
+        return kNtStatusInvalidHandle;
+    if (buf_va == 0 || buf_cap < 32)
+        return kNtStatusInvalidParameter;
+
+    // Position `index` in the unified list. Skip if past the
+    // total — the caller's enumeration loop terminates on
+    // STATUS_NO_MORE_ENTRIES.
+    if (index < key->value_count)
+    {
+        const RegValue& v = key->values[index];
+        u64 packed[4] = {0, 0, 0, 0};
+        u32 name_chars = 0;
+        while (v.name[name_chars] != '\0')
+            ++name_chars;
+        const u64 hdr = 32;
+        if (buf_cap < hdr + name_chars + 1)
+            return kNtStatusBufferTooSmall;
+        packed[0] = (static_cast<u64>(v.type) << 32) | static_cast<u64>(index);
+        packed[1] = (static_cast<u64>(name_chars) << 32) | static_cast<u64>(v.size);
+        packed[2] = 0;
+        packed[3] = 0;
+        if (!duetos::mm::CopyToUser(reinterpret_cast<void*>(buf_va), packed, sizeof(packed)))
+            return kNtStatusInvalidParameter;
+        if (!duetos::mm::CopyToUser(reinterpret_cast<void*>(buf_va + hdr), v.name, name_chars + 1))
+            return kNtStatusInvalidParameter;
+        return kNtStatusSuccess;
+    }
+    // Past static values — walk the sidecar.
+    u32 sidecar_idx = index - key->value_count;
+    u32 hits = 0;
+    for (u32 i = 0; i < kSidecarValueCap; ++i)
+    {
+        if (!g_sidecar[i].in_use || g_sidecar[i].key != key)
+            continue;
+        if (hits == sidecar_idx)
+        {
+            const SidecarValue& sv = g_sidecar[i];
+            u32 name_chars = 0;
+            while (sv.name[name_chars] != '\0')
+                ++name_chars;
+            const u64 hdr = 32;
+            if (buf_cap < hdr + name_chars + 1)
+                return kNtStatusBufferTooSmall;
+            u64 packed[4] = {0, 0, 0, 0};
+            packed[0] = (static_cast<u64>(sv.type) << 32) | static_cast<u64>(index);
+            packed[1] = (static_cast<u64>(name_chars) << 32) | static_cast<u64>(sv.size);
+            if (!duetos::mm::CopyToUser(reinterpret_cast<void*>(buf_va), packed, sizeof(packed)))
+                return kNtStatusInvalidParameter;
+            if (!duetos::mm::CopyToUser(reinterpret_cast<void*>(buf_va + hdr), sv.name, name_chars + 1))
+                return kNtStatusInvalidParameter;
+            return kNtStatusSuccess;
+        }
+        ++hits;
+    }
+    // STATUS_NO_MORE_ENTRIES = 0x8000001A. Caller's loop ends.
+    return static_cast<i64>(static_cast<u32>(0x8000001A));
+}
+
+// Report counts: subkey_count = 0 (no children walker yet),
+// value_count = static + matching sidecar entries.
+i64 DoQueryKey(arch::TrapFrame* frame)
+{
+    core::Process* proc = core::CurrentProcess();
+    if (proc == nullptr)
+        return kNtStatusInvalidParameter;
+    const u64 handle = frame->rsi;
+    const u64 buf_va = frame->rdx;
+    const u64 buf_cap = frame->r10;
+    const RegKey* key = SlotForHandle(proc, handle);
+    if (key == nullptr)
+        return kNtStatusInvalidHandle;
+    if (buf_va == 0 || buf_cap < 16)
+        return kNtStatusInvalidParameter;
+    u32 sidecar_count = 0;
+    for (u32 i = 0; i < kSidecarValueCap; ++i)
+    {
+        if (g_sidecar[i].in_use && g_sidecar[i].key == key)
+            ++sidecar_count;
+    }
+    u64 packed[2];
+    packed[0] = 0;                                                  // subkey_count
+    packed[1] = static_cast<u64>(key->value_count + sidecar_count); // value_count
+    if (!duetos::mm::CopyToUser(reinterpret_cast<void*>(buf_va), packed, sizeof(packed)))
+        return kNtStatusInvalidParameter;
+    return kNtStatusSuccess;
+}
+
 } // namespace
 
 bool ReleaseHandleForCurrentProcess(u64 handle)
@@ -592,6 +699,12 @@ void DoRegistry(arch::TrapFrame* frame)
         break;
     case kOpFlushKey:
         status = DoFlushKey(frame);
+        break;
+    case kOpEnumerateValue:
+        status = DoEnumerateValue(frame);
+        break;
+    case kOpQueryKey:
+        status = DoQueryKey(frame);
         break;
     default:
         // STUB: unknown / unsupported op — Enumerate{Key,Value}Key

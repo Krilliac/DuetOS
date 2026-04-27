@@ -119,6 +119,8 @@ KNOWN_MAPPINGS = {
     "NtReadFile":                  "SYS_FILE_READ",
     "NtWriteFile":                 "SYS_FILE_WRITE",
     "NtQueryInformationFile":      "SYS_FILE_FSTAT",
+    "NtEnumerateValueKey":         "SYS_REGISTRY",
+    "NtQueryKey":                  "SYS_REGISTRY",
     # NtFlushBuffersFile / NtFsControlFile / NtDeviceIoControlFile
     # are userland-only thunks (no kernel work needed); they don't
     # appear in KNOWN_MAPPINGS for the same reason the token family
