@@ -315,6 +315,22 @@ i64 DoFcntl(u64 fd, u64 cmd, u64 arg);
 // delivery — every entry persists state where the caller probes
 // it (sigaction slots, signal mask) or returns 0 / -EINTR so
 // libc paths make forward progress instead of -ENOSYS-crashing.
+// SysV IPC (sysv_ipc.cpp).
+//   shmget / shmat / shmdt / shmctl — named shared memory backed
+//     by an 8-segment global pool of physical frames; attach
+//     installs borrowed PTEs into the caller's AS.
+//   semget / semop / semctl / semtimedop — 8-set / 16-sem-per-set
+//     pool with WaitQueue-blocking decrement-with-wait + wait-on-
+//     zero. semtimedop ignores the timeout (sub-GAP).
+i64 DoShmget(u64 key, u64 size, u64 shmflg);
+i64 DoShmat(u64 shmid, u64 shmaddr, u64 shmflg);
+i64 DoShmdt(u64 shmaddr);
+i64 DoShmctl(u64 shmid, u64 cmd, u64 user_buf);
+i64 DoSemget(u64 key, u64 nsems, u64 semflg);
+i64 DoSemop(u64 semid, u64 user_ops, u64 nops);
+i64 DoSemtimedop(u64 semid, u64 user_ops, u64 nops, u64 user_timeout);
+i64 DoSemctl(u64 semid, u64 semnum, u64 cmd, u64 arg);
+
 // Modern pidfd signaling. pidfd_open allocates a LinuxFd
 // (state 12, first_cluster = pid) that pins the target Process
 // via ProcessRetain; close drops the ref. pidfd_send_signal

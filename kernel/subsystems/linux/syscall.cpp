@@ -1322,15 +1322,34 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
         // CRT expects on a fresh system.
         rv = 022;
         break;
-    // SysV IPC + POSIX MQ — no IPC engine.
+    // SysV shared memory + semaphores — real implementations in
+    // sysv_ipc.cpp.
     case kSysShmget:
+        rv = DoShmget(frame->rdi, frame->rsi, frame->rdx);
+        break;
     case kSysShmat:
-    case kSysShmctl:
+        rv = DoShmat(frame->rdi, frame->rsi, frame->rdx);
+        break;
     case kSysShmdt:
+        rv = DoShmdt(frame->rdi);
+        break;
+    case kSysShmctl:
+        rv = DoShmctl(frame->rdi, frame->rsi, frame->rdx);
+        break;
     case kSysSemget:
+        rv = DoSemget(frame->rdi, frame->rsi, frame->rdx);
+        break;
     case kSysSemop:
-    case kSysSemctl:
+        rv = DoSemop(frame->rdi, frame->rsi, frame->rdx);
+        break;
     case kSysSemtimedop:
+        rv = DoSemtimedop(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysSemctl:
+        rv = DoSemctl(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+
+    // SysV msg queues + POSIX MQ — still NotImpl.
     case kSysMsgget:
     case kSysMsgsnd:
     case kSysMsgrcv:

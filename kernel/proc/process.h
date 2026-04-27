@@ -859,6 +859,34 @@ struct Process
     static constexpr u64 kLinuxTaskNameCap = 16;
     char linux_task_name[kLinuxTaskNameCap];
 
+    // SysV shared-memory attach table. Each entry records a
+    // (shmid, base_va, page_count) triple so shmdt can find the
+    // right segment by user-space address and unmap the right
+    // page range. 8 simultaneous attaches per process is plenty
+    // for v0; typical SysV-using shells hold 1-3 segments.
+    //
+    // The actual SHM segment data (frames, refcount,
+    // marked-for-destroy) lives in a global pool — see
+    // kernel/subsystems/linux/sysv_ipc.cpp.
+    static constexpr u64 kLinuxShmAttachCap = 8;
+    struct LinuxShmAttach
+    {
+        bool in_use;
+        u8 _pad[3];
+        u32 shmid;
+        u64 base_va;
+        u32 page_count;
+        u32 _pad2;
+    };
+    LinuxShmAttach linux_shm_attaches[kLinuxShmAttachCap];
+
+    // SysV SHM bump arena — fresh shmat() requests pick a VA
+    // here when shmaddr == NULL. Distinct from mmap_cursor so
+    // unmaps of one don't perturb the other. 64 MiB high, well
+    // away from text / heap / stack / mmap.
+    static constexpr u64 kLinuxShmArenaBase = 0x70000000ULL;
+    u64 linux_shm_cursor;
+
     u64 refcount;
 };
 

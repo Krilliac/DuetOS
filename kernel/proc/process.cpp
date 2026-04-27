@@ -235,6 +235,17 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     p->linux_cwd[0] = '/';
     for (u32 i = 0; i < Process::kLinuxTaskNameCap; ++i)
         p->linux_task_name[i] = 0;
+    for (u64 i = 0; i < Process::kLinuxShmAttachCap; ++i)
+    {
+        p->linux_shm_attaches[i].in_use = false;
+        for (u32 j = 0; j < sizeof(p->linux_shm_attaches[i]._pad); ++j)
+            p->linux_shm_attaches[i]._pad[j] = 0;
+        p->linux_shm_attaches[i].shmid = 0;
+        p->linux_shm_attaches[i].base_va = 0;
+        p->linux_shm_attaches[i].page_count = 0;
+        p->linux_shm_attaches[i]._pad2 = 0;
+    }
+    p->linux_shm_cursor = Process::kLinuxShmArenaBase;
     p->refcount = 1;
 
     ++g_live_processes;
