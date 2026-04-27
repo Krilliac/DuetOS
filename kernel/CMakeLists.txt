@@ -435,8 +435,17 @@ endif()
 # `x86_64-debug-ubsan` preset to enable.
 option(DUETOS_ENABLE_UBSAN "Build the kernel with -fsanitize=undefined for UB diagnostics" OFF)
 if(DUETOS_ENABLE_UBSAN)
-    target_compile_options(duetos-kernel        PRIVATE -fsanitize=undefined -fno-sanitize-trap=all)
-    target_compile_options(duetos-kernel-stage1 PRIVATE -fsanitize=undefined -fno-sanitize-trap=all)
+    # `-fno-sanitize=function` suppresses the call-through-mismatched-
+    # function-pointer-type check (`__ubsan_handle_function_type_mismatch`).
+    # That check uses RTTI metadata the kernel deliberately does not
+    # build; with it on, every callback dispatch (sched task entry,
+    # IRQ handler, syscall thunk) emits a handler symbol the runtime
+    # has no use for and the link fails. The remaining UBSAN classes
+    # (signed overflow, OOB, divrem, alignment, …) cover what we want
+    # without dragging in the C++-RTTI-shaped CFI surface.
+    set(DUETOS_UBSAN_FLAGS -fsanitize=undefined -fno-sanitize=function -fno-sanitize-trap=all)
+    target_compile_options(duetos-kernel        PRIVATE ${DUETOS_UBSAN_FLAGS})
+    target_compile_options(duetos-kernel-stage1 PRIVATE ${DUETOS_UBSAN_FLAGS})
     target_compile_definitions(duetos-kernel          PRIVATE DUETOS_UBSAN=1)
     target_compile_definitions(duetos-kernel-stage1   PRIVATE DUETOS_UBSAN=1)
 endif()

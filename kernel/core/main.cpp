@@ -107,6 +107,7 @@
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
 #include "ipc/handle_table.h"
+#include "ipc/kmutex.h"
 #include "ipc/kobject.h"
 #include "sync/lockdep.h"
 #include "sync/rwlock.h"
@@ -1131,11 +1132,20 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // RwLock self-test (plan B1.2). Walks every state-machine
     // transition that can be exercised without contention (Try*,
     // multi-reader, writer-blocks-readers, readers-block-writer).
-    // Real contention paths (Acquire blocks, Release wakes a
-    // waiter) only fire under SMP — covered by a follow-up once
-    // AP bring-up lands. Runs here because the scheduler is now
-    // online (RwLock uses sched::Mutex + Condvar internally).
+    // Runs here because the scheduler is now online (RwLock uses
+    // sched::Mutex + Condvar internally).
     duetos::sync::RwLockSelfTest();
+
+    // Concurrent self-tests for RwLock + SeqLock (plan
+    // B1-followup). Spawn kernel threads to exercise the actual
+    // blocking + retry paths on top of the state-machine paths
+    // already verified above. Cooperative single-CPU scheduling
+    // is enough to surface a regression in Condvar wakeup or
+    // SeqLock parity flips; SMP stress will arrive with the B2
+    // SMP slice and may add per-CPU concurrency to these tests
+    // then.
+    duetos::sync::SeqLockContentionSelfTest();
+    duetos::sync::RwLockContentionSelfTest();
 
     // KObject + HandleTable infrastructure self-tests (plan A3).
     // Verifies refcount + destroy-on-zero, plus the table's
@@ -1145,6 +1155,15 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // of any current handle surface is tracked as a follow-up.
     duetos::ipc::KObjectSelfTest();
     duetos::ipc::HandleTableSelfTest();
+    // Concrete KMutex subclass self-test (plan A3-followup) —
+    // demonstrates the full HandleTable round-trip on a real
+    // type with refcounted storage. Existing per-type Win32
+    // mutex array on Process keeps its own syscall surface; the
+    // SYS_MUTEX_* migration is a separate, larger slice (the
+    // Win32 ABI semantics — kWaitObject0 / kWaitTimeout, infinite
+    // waits, deadlock-detect callbacks — are non-trivial to
+    // unwind from the existing per-type array).
+    duetos::ipc::KMutexSelfTest();
 
     SerialWrite("[boot] Bringing up PS/2 keyboard.\n");
     duetos::drivers::input::Ps2KeyboardInit();

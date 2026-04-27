@@ -144,6 +144,32 @@ u64 UbsanReportsEmitted()
     return g_reports;
 }
 
+// Deliberately trigger a signed-integer overflow so the
+// compiler's `-fsanitize=undefined` instrumentation calls
+// `__ubsan_handle_add_overflow` for real, exercising the entire
+// emit-path (not just the synthetic Report() call). The volatile
+// inputs prevent constant-folding; without `volatile` clang
+// would const-fold the overflow and skip the handler emit
+// entirely. Only compiled into the path when the kernel itself
+// is built with the UBSAN compile flag (preset
+// `x86_64-debug-ubsan` defines `DUETOS_UBSAN=1`); under any
+// other preset this is a no-op so the daily release build sees
+// no overhead. (D5-followup, 2026-04-27.)
+#if defined(DUETOS_UBSAN) && DUETOS_UBSAN
+static void UbsanPresetSmoke()
+{
+    arch::SerialWrite("[ubsan] preset smoke: triggering signed-integer overflow on purpose\n");
+    // `volatile` on every load and the result keeps clang from
+    // const-folding the overflow at compile time. The
+    // -fsanitize=signed-integer-overflow instrumentation lands on
+    // the `+` and emits __ubsan_handle_add_overflow at runtime.
+    volatile int a = 0x7FFFFFFE;
+    volatile int b = 0x7FFFFFFE;
+    volatile int c = static_cast<int>(a + b); // UB by design
+    (void)c;
+}
+#endif
+
 void UbsanSelfTest()
 {
     arch::SerialWrite("[ubsan] self-test: synthesising one report via the runtime path\n");
@@ -157,6 +183,23 @@ void UbsanSelfTest()
         return; // not a panic — UBSAN is purely diagnostic
     }
     arch::SerialWrite("[ubsan] self-test OK (runtime linked + counter advanced).\n");
+
+#if defined(DUETOS_UBSAN) && DUETOS_UBSAN
+    // Preset-only smoke: confirm the compiler instrumentation
+    // reaches our handler. The Report() path advanced once
+    // above; if instrumentation works, it advances again here.
+    const u64 preset_before = g_reports;
+    UbsanPresetSmoke();
+    if (g_reports == preset_before)
+    {
+        arch::SerialWrite("[ubsan] PRESET SMOKE FAILED: signed overflow did not trigger handler.\n");
+        arch::SerialWrite("[ubsan]   build flags missing? expected -fsanitize=undefined\n");
+    }
+    else
+    {
+        arch::SerialWrite("[ubsan] preset smoke OK (compiler-emitted handler reached runtime).\n");
+    }
+#endif
 }
 
 } // namespace duetos::diag

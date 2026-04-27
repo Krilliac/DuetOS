@@ -138,8 +138,23 @@ class RwLockExclusiveGuard
 /// release-shared back to free, try-exclusive succeeds, try-shared
 /// blocked by writer, release-exclusive back to free. Cannot
 /// exercise contention paths (single-task boot context); the
-/// blocking paths are validated once SMP arrives. Panics on any
-/// state-machine violation.
+/// blocking paths are validated by `RwLockContentionSelfTest`
+/// once the scheduler is online. Panics on any state-machine
+/// violation.
 void RwLockSelfTest();
+
+/// Concurrent self-test (plan B1-followup). Spawns kernel
+/// threads that exercise the actual blocking paths:
+///   - Main holds exclusive; spawned readers block on
+///     `readers_cv` and only acquire after main releases.
+///   - Main holds shared; spawned writer blocks on `writers_cv`
+///     and only acquires after main releases.
+/// Verifies the wakeup paths actually fire. Cooperative
+/// scheduling on a single CPU is enough to surface a regression
+/// in `Condvar::Signal` / `Broadcast` plumbing — readers /
+/// writers that never wake will fail-stop the test on a 1-second
+/// progress timeout. Runs after `SchedStartReaper`, where kernel
+/// threads can be spawned. Panics on any timing failure.
+void RwLockContentionSelfTest();
 
 } // namespace duetos::sync

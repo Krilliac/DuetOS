@@ -30,6 +30,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
+#include "sched/sched.h"
 #include "sync/spinlock.h"
 #include "util/types.h"
 
@@ -284,6 +285,143 @@ void SeqLockSelfTest()
     }
 
     arch::SerialWrite("[sync] seqlock self-test OK (parity + retry + guard verified).\n");
+}
+
+namespace
+{
+
+constexpr u32 kSeqContentionWriterCycles = 200;
+
+struct SeqContentionShared
+{
+    SeqLock lock;
+    u32 payload_lo; ///< Two halves the writer keeps consistent. The reader's
+    u32 payload_hi; ///< invariant is `payload_hi == payload_lo + 1`.
+    u32 writer_done;
+    u32 reader_retries; ///< Number of retry-loop iterations beyond the first.
+};
+
+SeqContentionShared g_seq_shared{};
+
+void SeqWriterTask(void* arg)
+{
+    auto* s = static_cast<SeqContentionShared*>(arg);
+    for (u32 i = 0; i < kSeqContentionWriterCycles; ++i)
+    {
+        SeqLockWriteGuard g(s->lock);
+        // Mutate the two halves so a torn read is observable —
+        // hi must always equal lo+1. The reader checks this
+        // invariant; if EndRead returns true on a torn snapshot,
+        // the invariant breaks and the test panics.
+        s->payload_lo = i;
+        s->payload_hi = i + 1u;
+        // Yield sometimes so the reader gets a chance to retry
+        // mid-cycle. Without this, on a single CPU the reader
+        // would run between writer cycles only and never see a
+        // torn snapshot.
+        if ((i & 7u) == 0)
+        {
+            sched::SchedYield();
+        }
+    }
+    __atomic_store_n(&s->writer_done, 1, __ATOMIC_SEQ_CST);
+}
+
+} // namespace
+
+void SeqLockContentionSelfTest()
+{
+    arch::SerialWrite("[sync] seqlock contention self-test: concurrent writer + reader\n");
+
+    // Reset shared state. Reader runs in the calling thread;
+    // writer is a kernel-spawned thread.
+    g_seq_shared = SeqContentionShared{};
+
+    sched::SchedCreate(SeqWriterTask, &g_seq_shared, "seq-writer");
+
+    // Reader loop — keep reading until the writer's "done" flag
+    // is set, then do one final read to confirm the post-state.
+    // Each individual read uses the canonical retry pattern.
+    u32 last_lo = 0;
+    u32 last_hi = 0;
+    constexpr u32 kReaderTimeoutTicks = 200; // ~2 s
+    u32 ticks_waited = 0;
+    while (__atomic_load_n(&g_seq_shared.writer_done, __ATOMIC_SEQ_CST) == 0)
+    {
+        u32 seq;
+        u32 lo = 0;
+        u32 hi = 0;
+        u32 iters = 0;
+        do
+        {
+            ++iters;
+            seq = SeqLockBeginRead(g_seq_shared.lock);
+            // Read the two halves with a compiler barrier between
+            // them so the optimizer can't fuse / reorder.
+            lo = g_seq_shared.payload_lo;
+            asm volatile("" ::: "memory");
+            hi = g_seq_shared.payload_hi;
+            // If the writer is in-progress (odd seq) OR completed
+            // mid-read (seq bumped), EndRead returns false and we
+            // retry. The retry MUST eventually converge — the
+            // writer is bounded.
+            if (iters > 10000u)
+            {
+                core::Panic("sync/seqlock", "contention test: reader retry loop did not converge");
+            }
+        } while (!SeqLockEndRead(g_seq_shared.lock, seq));
+
+        // After a successful EndRead, the invariant `hi == lo + 1`
+        // MUST hold — that's the whole point of seqlock. If a
+        // torn snapshot got through the retry, this fires.
+        if (hi != lo + 1u)
+        {
+            core::Panic("sync/seqlock", "contention test: torn snapshot escaped retry");
+        }
+        last_lo = lo;
+        last_hi = hi;
+        if (iters > 1)
+        {
+            __atomic_add_fetch(&g_seq_shared.reader_retries, iters - 1, __ATOMIC_SEQ_CST);
+        }
+
+        // Yield so the writer gets to run. Without this the
+        // reader could otherwise spin indefinitely on a quiet
+        // lock and starve the writer.
+        sched::SchedYield();
+
+        if (++ticks_waited > kReaderTimeoutTicks)
+        {
+            core::Panic("sync/seqlock", "contention test: writer did not finish in time");
+        }
+    }
+
+    // Final read after writer completion. Sequence should be even
+    // (writer ended its last cycle), and the payload should match
+    // the writer's final write.
+    if ((g_seq_shared.lock.sequence & 1u) != 0)
+    {
+        core::Panic("sync/seqlock", "contention test: lock sequence odd at end (writer mid-cycle)");
+    }
+    if (last_hi != last_lo + 1u)
+    {
+        core::Panic("sync/seqlock", "contention test: final payload invariant broken");
+    }
+
+    // The reader MUST have observed at least one retry — if not,
+    // the test isn't actually testing contention; the writer ran
+    // entirely between two reader checks. With 200 writer cycles
+    // and SchedYield in both paths, this should be statistically
+    // certain on a cooperative scheduler.
+    const u32 retries = __atomic_load_n(&g_seq_shared.reader_retries, __ATOMIC_SEQ_CST);
+    if (retries == 0)
+    {
+        core::Panic("sync/seqlock", "contention test: reader never retried (no observed contention)");
+    }
+
+    arch::SerialWrite("[sync] seqlock contention self-test OK (writer cycles done, reader observed ");
+    arch::SerialWriteHex(retries);
+    arch::SerialWrite(" retries).\n");
 }
 
 } // namespace duetos::sync

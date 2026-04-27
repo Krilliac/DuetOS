@@ -137,9 +137,24 @@ class SeqLockWriteGuard
 ///   - reader detects "writer in progress" (odd snapshot)
 ///   - reader detects "writer completed mid-read" (sequence bumped)
 ///   - canonical retry-loop pattern converges on a clean read
-/// Contention paths (writer serialisation under multi-CPU) only
-/// exercise once SMP AP bringup lands — covered by a follow-up
-/// self-test then. Panics on any state-machine violation.
+/// Contention paths under real concurrency are validated by
+/// `SeqLockContentionSelfTest`. Panics on any state-machine
+/// violation.
 void SeqLockSelfTest();
+
+/// Concurrent self-test (plan B1-followup). Spawns a kernel
+/// thread that loops doing short Begin/EndWrite cycles in
+/// parallel with the calling thread doing BeginRead/EndRead
+/// retry-loops. Verifies:
+///   - reader retries at least once (i.e. the EndRead-fails
+///     path actually fires under real interleaving),
+///   - both threads make forward progress (reader completes a
+///     coherent read; writer completes its quota),
+///   - sequence is even at the end (writer's last cycle paired).
+/// Cooperative single-CPU scheduling is enough to surface a
+/// regression in the parity flips or the SpinLock contention
+/// guarding the writer side. Runs after `SchedStartReaper`.
+/// Panics on any progress-timeout or invariant violation.
+void SeqLockContentionSelfTest();
 
 } // namespace duetos::sync

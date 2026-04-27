@@ -231,4 +231,142 @@ void RwLockSelfTest()
     arch::SerialWrite("[sync] rwlock self-test OK (free/shared/exclusive transitions verified).\n");
 }
 
+namespace
+{
+
+// Shared state for the contention test. File-scope statics so
+// the spawned tasks can reach them through their void* arg
+// without per-test allocation gymnastics. `volatile` to keep the
+// compiler from hoisting reads out of the wait-for-progress
+// loops; the actual counter mutations go through GCC atomic
+// builtins so a real SMP path stays correct.
+struct ContentionShared
+{
+    RwLock lock;
+    u32 acquired_count;
+    u32 released_count;
+    u32 attempts_started;
+};
+
+ContentionShared g_rwl_shared{};
+
+void ReaderTask(void* arg)
+{
+    auto* s = static_cast<ContentionShared*>(arg);
+    __atomic_add_fetch(&s->attempts_started, 1, __ATOMIC_SEQ_CST);
+    RwLockAcquireShared(s->lock);
+    __atomic_add_fetch(&s->acquired_count, 1, __ATOMIC_SEQ_CST);
+    // Hold long enough that the OTHER reader can also race in
+    // before this one releases. One scheduler tick is plenty —
+    // the runqueue rotation will let the second reader land.
+    sched::SchedSleepTicks(1);
+    RwLockReleaseShared(s->lock);
+    __atomic_add_fetch(&s->released_count, 1, __ATOMIC_SEQ_CST);
+}
+
+void WriterTask(void* arg)
+{
+    auto* s = static_cast<ContentionShared*>(arg);
+    __atomic_add_fetch(&s->attempts_started, 1, __ATOMIC_SEQ_CST);
+    RwLockAcquireExclusive(s->lock);
+    __atomic_add_fetch(&s->acquired_count, 1, __ATOMIC_SEQ_CST);
+    RwLockReleaseExclusive(s->lock);
+    __atomic_add_fetch(&s->released_count, 1, __ATOMIC_SEQ_CST);
+}
+
+// Wait until `*counter == target` or 100 scheduler ticks (~1 s)
+// elapse. Yields between checks so the spawned tasks actually
+// run. Returns true on success, false on timeout — the caller
+// panics with a context-specific message.
+bool WaitForCount(volatile u32& counter, u32 target)
+{
+    constexpr u32 kMaxTicks = 100;
+    for (u32 i = 0; i < kMaxTicks; ++i)
+    {
+        if (__atomic_load_n(&counter, __ATOMIC_SEQ_CST) >= target)
+        {
+            return true;
+        }
+        sched::SchedSleepTicks(1);
+    }
+    return __atomic_load_n(&counter, __ATOMIC_SEQ_CST) >= target;
+}
+
+} // namespace
+
+void RwLockContentionSelfTest()
+{
+    arch::SerialWrite("[sync] rwlock contention self-test: blocking + wakeup paths\n");
+
+    // Reset shared state — the static is reused across the two
+    // sub-tests below so resetting between scenarios keeps the
+    // expected-counter math simple.
+    g_rwl_shared = ContentionShared{};
+
+    // Scenario 1: writer-blocks-readers, then release wakes them.
+    // Main acquires exclusive; spawn 2 reader tasks; verify they
+    // block (counters stay 0); release and verify they BOTH wake
+    // and complete.
+    RwLockAcquireExclusive(g_rwl_shared.lock);
+    sched::SchedCreate(ReaderTask, &g_rwl_shared, "rwl-r1");
+    sched::SchedCreate(ReaderTask, &g_rwl_shared, "rwl-r2");
+    // Wait for both reader tasks to have STARTED (i.e. reached
+    // RwLockAcquireShared and blocked in CondvarWait). Without
+    // this we'd race the spawn ordering; the readers might not
+    // have run yet when we release, and we'd see them complete
+    // through the fast path instead of the wakeup path.
+    if (!WaitForCount(g_rwl_shared.attempts_started, 2))
+    {
+        core::Panic("sync/rwlock", "contention test: readers never started");
+    }
+    sched::SchedSleepTicks(2); // ensure both blocked in CondvarWait
+
+    // While exclusive is held, no reader should have acquired.
+    if (__atomic_load_n(&g_rwl_shared.acquired_count, __ATOMIC_SEQ_CST) != 0)
+    {
+        core::Panic("sync/rwlock", "contention test: reader acquired while writer held");
+    }
+    RwLockReleaseExclusive(g_rwl_shared.lock);
+
+    // After release, both readers must wake. With writer-preference
+    // and no queued writer, the broadcast path fires and both
+    // readers proceed.
+    if (!WaitForCount(g_rwl_shared.released_count, 2))
+    {
+        core::Panic("sync/rwlock", "contention test: readers never woke");
+    }
+
+    // Scenario 2: reader-blocks-writer. Main acquires shared,
+    // spawn 1 writer; writer must block; main releases; writer
+    // proceeds.
+    g_rwl_shared = ContentionShared{};
+    RwLockAcquireShared(g_rwl_shared.lock);
+    sched::SchedCreate(WriterTask, &g_rwl_shared, "rwl-w1");
+    if (!WaitForCount(g_rwl_shared.attempts_started, 1))
+    {
+        core::Panic("sync/rwlock", "contention test: writer never started");
+    }
+    sched::SchedSleepTicks(2);
+
+    if (__atomic_load_n(&g_rwl_shared.acquired_count, __ATOMIC_SEQ_CST) != 0)
+    {
+        core::Panic("sync/rwlock", "contention test: writer acquired while reader held");
+    }
+    RwLockReleaseShared(g_rwl_shared.lock);
+
+    if (!WaitForCount(g_rwl_shared.released_count, 1))
+    {
+        core::Panic("sync/rwlock", "contention test: writer never woke");
+    }
+
+    // Lock should be free at the end.
+    if (g_rwl_shared.lock.active_readers != 0 || g_rwl_shared.lock.writer_active ||
+        g_rwl_shared.lock.waiting_writers != 0)
+    {
+        core::Panic("sync/rwlock", "contention test: lock not free at end");
+    }
+
+    arch::SerialWrite("[sync] rwlock contention self-test OK (blocking + wakeup paths verified).\n");
+}
+
 } // namespace duetos::sync
