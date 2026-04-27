@@ -63,6 +63,8 @@
 #include "mm/frame_allocator.h"
 #include "mm/page.h"
 #include "mm/paging.h"
+#include "net/socket.h"
+#include "net/stack.h"
 #include "sched/sched.h"
 #include "subsystems/graphics/graphics.h"
 #include "subsystems/translation/translate.h"
@@ -1306,6 +1308,231 @@ void SyscallDispatch(arch::TrapFrame* frame)
         arch::SerialWrite(" rsp=");
         arch::SerialWriteHex(r.stack_top);
         arch::SerialWrite("\n");
+        return;
+    }
+
+    case SYS_SOCKET_OP:
+    {
+        // Win32 ws2_32 + native socket userland → kernel socket
+        // pool. Cap-gated on kCapNet at every entry — withholding
+        // the cap returns -EACCES per BSD/Win32 convention.
+        Process* caller = CurrentProcess();
+        if (caller == nullptr)
+        {
+            frame->rax = static_cast<u64>(-13); // -EACCES
+            return;
+        }
+        if (!CapSetHas(caller->caps, kCapNet))
+        {
+            RecordSandboxDenial(kCapNet);
+            frame->rax = static_cast<u64>(-13);
+            return;
+        }
+        const u64 op = frame->rdi;
+        struct LinuxSockaddrIn
+        {
+            u16 sin_family;
+            u16 sin_port_be;
+            u8 sin_addr[4];
+            u8 sin_zero[8];
+        };
+        auto read_sa = [](u64 user_addr, u64 len, ::duetos::net::Ipv4Address& ip, u16& port) -> bool
+        {
+            if (len < sizeof(LinuxSockaddrIn))
+                return false;
+            LinuxSockaddrIn sa;
+            if (!mm::CopyFromUser(&sa, reinterpret_cast<const void*>(user_addr), sizeof(sa)))
+                return false;
+            if (sa.sin_family != 2)
+                return false;
+            port = (u16(sa.sin_port_be & 0xFF) << 8) | u16(sa.sin_port_be >> 8);
+            for (u32 i = 0; i < 4; ++i)
+                ip.octets[i] = sa.sin_addr[i];
+            return true;
+        };
+        auto write_sa = [](u64 user_addr, u64 user_addrlen_ptr, ::duetos::net::Ipv4Address ip, u16 port) -> bool
+        {
+            if (user_addr == 0)
+                return true;
+            u32 cap = 0;
+            if (user_addrlen_ptr != 0 &&
+                !mm::CopyFromUser(&cap, reinterpret_cast<const void*>(user_addrlen_ptr), sizeof(cap)))
+                return false;
+            if (user_addrlen_ptr == 0)
+                cap = sizeof(LinuxSockaddrIn);
+            LinuxSockaddrIn sa = {};
+            sa.sin_family = 2;
+            sa.sin_port_be = u16(((port & 0xFF) << 8) | (port >> 8));
+            for (u32 i = 0; i < 4; ++i)
+                sa.sin_addr[i] = ip.octets[i];
+            const u32 to_write = (cap < sizeof(sa)) ? cap : sizeof(sa);
+            if (to_write > 0 && !mm::CopyToUser(reinterpret_cast<void*>(user_addr), &sa, to_write))
+                return false;
+            if (user_addrlen_ptr != 0)
+            {
+                const u32 truth = sizeof(sa);
+                if (!mm::CopyToUser(reinterpret_cast<void*>(user_addrlen_ptr), &truth, sizeof(truth)))
+                    return false;
+            }
+            return true;
+        };
+        i64 rv = -22; // -EINVAL default
+        switch (op)
+        {
+        case kSockOpCreate:
+        {
+            const i32 idx = ::duetos::net::SocketAlloc(static_cast<u16>(frame->rsi), static_cast<u16>(frame->rdx));
+            rv = (idx < 0) ? -23 /* -ENFILE */ : static_cast<i64>(idx);
+            break;
+        }
+        case kSockOpBind:
+        {
+            ::duetos::net::Ipv4Address ip;
+            u16 port;
+            if (!read_sa(frame->rdx, frame->r10, ip, port))
+            {
+                rv = -22;
+                break;
+            }
+            rv = ::duetos::net::SocketBind(static_cast<u32>(frame->rsi), ip, port) ? 0 : -98 /* -EADDRINUSE */;
+            break;
+        }
+        case kSockOpConnect:
+        {
+            ::duetos::net::Ipv4Address ip;
+            u16 port;
+            if (!read_sa(frame->rdx, frame->r10, ip, port))
+            {
+                rv = -22;
+                break;
+            }
+            rv = ::duetos::net::SocketConnect(static_cast<u32>(frame->rsi), ip, port) ? 0 : -100 /* -ENETDOWN */;
+            break;
+        }
+        case kSockOpListen:
+            rv = ::duetos::net::SocketListen(static_cast<u32>(frame->rsi), static_cast<u32>(frame->rdx)) ? 0 : -22;
+            break;
+        case kSockOpAccept:
+        {
+            // Polling-style accept (matches Linux ABI shape).
+            const u32 listen_idx = static_cast<u32>(frame->rsi);
+            while (true)
+            {
+                const auto snap = ::duetos::net::NetTcpActiveSnapshot();
+                if (snap.in_use && snap.response_len > 0)
+                    break;
+                sched::SchedYield();
+            }
+            const i32 new_idx =
+                ::duetos::net::SocketAlloc(::duetos::net::kSocketDomainInet, ::duetos::net::kSocketTypeStream);
+            if (new_idx < 0)
+            {
+                rv = -23;
+                break;
+            }
+            ::duetos::net::Ipv4Address peer_ip;
+            u16 peer_port;
+            ::duetos::net::SocketGetPeer(listen_idx, &peer_ip, &peer_port);
+            ::duetos::net::SocketConnect(static_cast<u32>(new_idx), peer_ip, peer_port);
+            (void)write_sa(frame->rdx, frame->r10, peer_ip, peer_port);
+            rv = static_cast<i64>(new_idx);
+            break;
+        }
+        case kSockOpSendto:
+        {
+            constexpr u64 kStageCap = 1500;
+            u64 len = frame->r10;
+            if (len > kStageCap)
+                len = kStageCap;
+            u8 stage[kStageCap];
+            if (len > 0 && !mm::CopyFromUser(stage, reinterpret_cast<const void*>(frame->rdx), len))
+            {
+                rv = -14; // -EFAULT
+                break;
+            }
+            ::duetos::net::Ipv4Address dst_ip = {};
+            u16 dst_port = 0;
+            if (frame->r8 != 0)
+            {
+                if (!read_sa(frame->r8, frame->r9, dst_ip, dst_port))
+                {
+                    rv = -22;
+                    break;
+                }
+            }
+            const auto* s = ::duetos::net::SocketGet(static_cast<u32>(frame->rsi));
+            if (s == nullptr)
+            {
+                rv = -9; // -EBADF
+                break;
+            }
+            if (s->type == ::duetos::net::kSocketTypeDgram)
+                rv = ::duetos::net::SocketSendDgram(static_cast<u32>(frame->rsi), dst_ip, dst_port, stage,
+                                                    static_cast<u32>(len));
+            else
+                rv = ::duetos::net::SocketSendStream(static_cast<u32>(frame->rsi), stage, static_cast<u32>(len));
+            break;
+        }
+        case kSockOpRecvfrom:
+        {
+            constexpr u64 kStageCap = 1500;
+            u64 cap = frame->r10;
+            if (cap > kStageCap)
+                cap = kStageCap;
+            u8 stage[kStageCap];
+            const auto* s = ::duetos::net::SocketGet(static_cast<u32>(frame->rsi));
+            if (s == nullptr)
+            {
+                rv = -9;
+                break;
+            }
+            if (s->type == ::duetos::net::kSocketTypeDgram)
+            {
+                ::duetos::net::Ipv4Address src_ip = {};
+                u16 src_port = 0;
+                u32 truth = 0;
+                rv = ::duetos::net::SocketRecvDgram(static_cast<u32>(frame->rsi), stage, static_cast<u32>(cap), &truth,
+                                                    &src_ip, &src_port);
+                if (rv > 0 && !mm::CopyToUser(reinterpret_cast<void*>(frame->rdx), stage, static_cast<u64>(rv)))
+                {
+                    rv = -14;
+                    break;
+                }
+                (void)write_sa(frame->r8, frame->r9, src_ip, src_port);
+            }
+            else
+            {
+                rv = ::duetos::net::SocketRecvStream(static_cast<u32>(frame->rsi), stage, static_cast<u32>(cap));
+                if (rv > 0 && !mm::CopyToUser(reinterpret_cast<void*>(frame->rdx), stage, static_cast<u64>(rv)))
+                    rv = -14;
+            }
+            break;
+        }
+        case kSockOpShutdown:
+            rv = ::duetos::net::SocketShutdown(static_cast<u32>(frame->rsi), static_cast<u32>(frame->rdx)) ? 0 : -22;
+            break;
+        case kSockOpClose:
+            ::duetos::net::SocketRelease(static_cast<u32>(frame->rsi));
+            rv = 0;
+            break;
+        case kSockOpGetSock:
+        {
+            ::duetos::net::Ipv4Address ip;
+            u16 port;
+            ::duetos::net::SocketGetLocal(static_cast<u32>(frame->rsi), &ip, &port);
+            rv = write_sa(frame->rdx, frame->r10, ip, port) ? 0 : -14;
+            break;
+        }
+        case kSockOpGetPeer:
+        {
+            ::duetos::net::Ipv4Address ip;
+            u16 port;
+            ::duetos::net::SocketGetPeer(static_cast<u32>(frame->rsi), &ip, &port);
+            rv = write_sa(frame->rdx, frame->r10, ip, port) ? 0 : -14;
+            break;
+        }
+        }
+        frame->rax = static_cast<u64>(rv);
         return;
     }
 

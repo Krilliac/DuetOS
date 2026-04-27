@@ -1495,7 +1495,56 @@ enum SyscallNumber : u64
     // kCapSpawnThread (the new image runs as the same task,
     // but we treat exec as the natural symmetric gate).
     SYS_EXECVE = 152,
+
+    // SYS_SOCKET_OP — multi-op shape, matches SYS_REGISTRY.
+    // Routes Win32 ws2_32.dll into the same kernel socket pool
+    // that backs the Linux ABI's BSD socket family. The Win32
+    // subsystem isolation rule applies: ws2_32 is a facade; the
+    // gate is kCapNet on every socket op.
+    //
+    //   rdi = op (kSockOp* below)
+    //   rsi/rdx/r10/r8/r9 = op-specific args
+    //
+    //   kSockOpCreate  (1): rsi = domain (AF_INET=2),
+    //                       rdx = type (SOCK_STREAM=1 / SOCK_DGRAM=2).
+    //                       Returns kernel socket pool index >= 0
+    //                       on success, negative errno on failure.
+    //                       (Win32 maps to SOCKET handle externally.)
+    //   kSockOpBind    (2): rsi = sock idx, rdx = user sockaddr_in*,
+    //                       r10 = addrlen.
+    //   kSockOpConnect (3): rsi = sock idx, rdx = user sockaddr_in*,
+    //                       r10 = addrlen.
+    //   kSockOpListen  (4): rsi = sock idx, rdx = backlog.
+    //   kSockOpAccept  (5): rsi = sock idx, rdx = user sockaddr_in*,
+    //                       r10 = user addrlen pointer.
+    //   kSockOpSendto  (6): rsi = sock idx, rdx = user buf,
+    //                       r10 = len, r8 = user dest sockaddr,
+    //                       r9 = dest addrlen.
+    //   kSockOpRecvfrom(7): rsi = sock idx, rdx = user buf,
+    //                       r10 = cap, r8 = user src sockaddr,
+    //                       r9 = user addrlen ptr.
+    //   kSockOpShutdown(8): rsi = sock idx, rdx = how (0/1/2).
+    //   kSockOpClose   (9): rsi = sock idx.
+    //   kSockOpGetSock (10): rsi = sock idx, rdx = user sockaddr,
+    //                        r10 = user addrlen ptr.
+    //   kSockOpGetPeer (11): rsi = sock idx, rdx = user sockaddr,
+    //                        r10 = user addrlen ptr.
+    //
+    // Every op cap-gated on kCapNet — withheld → -EACCES.
+    SYS_SOCKET_OP = 153,
 };
+
+inline constexpr u64 kSockOpCreate = 1;
+inline constexpr u64 kSockOpBind = 2;
+inline constexpr u64 kSockOpConnect = 3;
+inline constexpr u64 kSockOpListen = 4;
+inline constexpr u64 kSockOpAccept = 5;
+inline constexpr u64 kSockOpSendto = 6;
+inline constexpr u64 kSockOpRecvfrom = 7;
+inline constexpr u64 kSockOpShutdown = 8;
+inline constexpr u64 kSockOpClose = 9;
+inline constexpr u64 kSockOpGetSock = 10;
+inline constexpr u64 kSockOpGetPeer = 11;
 
 // Win32 CONTEXT — first 0x100 bytes (integer + control + the
 // segment / rflags slot). Field order and offsets match the
