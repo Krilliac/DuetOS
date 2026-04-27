@@ -64,6 +64,9 @@ inline constexpr u32 kRegDword = 4;
 inline constexpr u64 kOpOpenKey = 1;
 inline constexpr u64 kOpClose = 2;
 inline constexpr u64 kOpQueryValue = 3;
+inline constexpr u64 kOpSetValue = 4;
+inline constexpr u64 kOpDeleteValue = 5;
+inline constexpr u64 kOpFlushKey = 6;
 
 /// SYS_REGISTRY entry point. Routes by op selector to the matching
 /// handler. Returns NTSTATUS through frame->rax. Per-op argument

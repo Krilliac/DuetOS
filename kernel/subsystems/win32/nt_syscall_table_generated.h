@@ -8,7 +8,7 @@
 // Target Windows version: Windows 11 and Server (11 25H2)
 // Bedrock NT calls (present in every Windows XP→Win11 25H2): 292
 // All known NT calls on the target version: 489
-// DuetOS coverage: 40/292 = 13%
+// DuetOS coverage: 43/292 = 14%
 //
 // See tools/win32-compat/README.md for the legal + design rationale.
 
@@ -134,7 +134,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
     {"NtCancelIoFile", 0x005d, kSysNtNotImpl},
     {"NtTraceEvent", 0x005e, kSysNtNotImpl},
     {"NtPowerInformation", 0x005f, kSysNtNotImpl},
-    {"NtSetValueKey", 0x0060, kSysNtNotImpl},
+    {"NtSetValueKey", 0x0060, static_cast<u32>(::duetos::core::SYS_REGISTRY)},
     {"NtCancelTimer", 0x0061, kSysNtNotImpl},
     {"NtSetTimer", 0x0062, kSysNtNotImpl},
     {"NtAccessCheckByType", 0x0063, kSysNtNotImpl},
@@ -183,7 +183,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
     {"NtDeleteFile", 0x00db, static_cast<u32>(::duetos::core::SYS_FILE_UNLINK)},
     {"NtDeleteKey", 0x00dc, kSysNtNotImpl},
     {"NtDeleteObjectAuditAlarm", 0x00dd, kSysNtNotImpl},
-    {"NtDeleteValueKey", 0x00df, kSysNtNotImpl},
+    {"NtDeleteValueKey", 0x00df, static_cast<u32>(::duetos::core::SYS_REGISTRY)},
     {"NtDisplayString", 0x00e4, kSysNtNotImpl},
     {"NtEnumerateBootEntries", 0x00e7, kSysNtNotImpl},
     {"NtEnumerateDriverEntries", 0x00e8, kSysNtNotImpl},
@@ -191,7 +191,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
     {"NtExtendSection", 0x00eb, kSysNtNotImpl},
     {"NtFilterToken", 0x00ed, kSysNtNotImpl},
     {"NtFlushInstructionCache", 0x00f1, kSysNtNotImpl},
-    {"NtFlushKey", 0x00f2, kSysNtNotImpl},
+    {"NtFlushKey", 0x00f2, static_cast<u32>(::duetos::core::SYS_REGISTRY)},
     {"NtFlushVirtualMemory", 0x00f4, kSysNtNotImpl},
     {"NtFlushWriteBuffer", 0x00f5, kSysNtNotImpl},
     {"NtFreeUserPhysicalPages", 0x00f6, kSysNtNotImpl},
@@ -336,7 +336,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
 inline constexpr u32 kBedrockNtSyscallCount =
     sizeof(kBedrockNtSyscalls) / sizeof(kBedrockNtSyscalls[0]);
 
-inline constexpr u32 kBedrockNtSyscallsCovered = 40;
+inline constexpr u32 kBedrockNtSyscallsCovered = 43;
 
 /// Every NT syscall known on the target Windows version — superset
 /// of `kBedrockNtSyscalls`. Includes version-specific additions
@@ -441,7 +441,7 @@ inline constexpr NtSyscallMapping kAllNtSyscalls[] = {
     {"NtCancelIoFile", 0x005d, kSysNtNotImpl},
     {"NtTraceEvent", 0x005e, kSysNtNotImpl},
     {"NtPowerInformation", 0x005f, kSysNtNotImpl},
-    {"NtSetValueKey", 0x0060, kSysNtNotImpl},
+    {"NtSetValueKey", 0x0060, static_cast<u32>(::duetos::core::SYS_REGISTRY)},
     {"NtCancelTimer", 0x0061, kSysNtNotImpl},
     {"NtSetTimer", 0x0062, kSysNtNotImpl},
     {"NtAccessCheckByType", 0x0063, kSysNtNotImpl},
@@ -568,7 +568,7 @@ inline constexpr NtSyscallMapping kAllNtSyscalls[] = {
     {"NtDeleteKey", 0x00dc, kSysNtNotImpl},
     {"NtDeleteObjectAuditAlarm", 0x00dd, kSysNtNotImpl},
     {"NtDeletePrivateNamespace", 0x00de, kSysNtNotImpl},
-    {"NtDeleteValueKey", 0x00df, kSysNtNotImpl},
+    {"NtDeleteValueKey", 0x00df, static_cast<u32>(::duetos::core::SYS_REGISTRY)},
     {"NtDeleteWnfStateData", 0x00e0, kSysNtNotImpl},
     {"NtDeleteWnfStateName", 0x00e1, kSysNtNotImpl},
     {"NtDirectGraphicsCall", 0x00e2, kSysNtNotImpl},
@@ -587,7 +587,7 @@ inline constexpr NtSyscallMapping kAllNtSyscalls[] = {
     {"NtFlushBuffersFileEx", 0x00ef, kSysNtNotImpl},
     {"NtFlushInstallUILanguage", 0x00f0, kSysNtNotImpl},
     {"NtFlushInstructionCache", 0x00f1, kSysNtNotImpl},
-    {"NtFlushKey", 0x00f2, kSysNtNotImpl},
+    {"NtFlushKey", 0x00f2, static_cast<u32>(::duetos::core::SYS_REGISTRY)},
     {"NtFlushProcessWriteBuffers", 0x00f3, kSysNtNotImpl},
     {"NtFlushVirtualMemory", 0x00f4, kSysNtNotImpl},
     {"NtFlushWriteBuffer", 0x00f5, kSysNtNotImpl},

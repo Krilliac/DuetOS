@@ -100,6 +100,12 @@ set +e
     /export:ZwUnmapViewOfSection=NtUnmapViewOfSection \
     /export:NtDeleteFile \
     /export:ZwDeleteFile=NtDeleteFile \
+    /export:NtSetValueKey \
+    /export:ZwSetValueKey=NtSetValueKey \
+    /export:NtDeleteValueKey \
+    /export:ZwDeleteValueKey=NtDeleteValueKey \
+    /export:NtFlushKey \
+    /export:ZwFlushKey=NtFlushKey \
     /export:NtContinue \
     /export:ZwContinue=NtContinue \
     /export:NtAllocateVirtualMemory \

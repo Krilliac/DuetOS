@@ -97,6 +97,40 @@ constexpr i64 kNtStatusObjectNameNotFound = static_cast<i64>(static_cast<u32>(0x
 constexpr i64 kNtStatusInvalidHandle = static_cast<i64>(static_cast<u32>(0xC0000008));
 constexpr i64 kNtStatusInvalidParameter = static_cast<i64>(static_cast<u32>(0xC000000D));
 constexpr i64 kNtStatusBufferTooSmall = static_cast<i64>(static_cast<u32>(0xC0000023));
+constexpr i64 kNtStatusInsufficientResources = static_cast<i64>(static_cast<u32>(0xC000009A));
+
+// Sidecar mutable-value pool. The static tree is constexpr;
+// NtSetValueKey / NtDeleteValueKey land their writes into the
+// sidecar instead of mutating the static blob (which is in
+// .rodata and would fault on write).
+//
+// Lookup precedence: NtQueryValueKey checks the sidecar first
+// for an entry tagged with `key == this`, then falls back to
+// the static `key->values[]` table. This means a SetValue with
+// the same name as a static value shadows it for as long as the
+// sidecar entry lives.
+//
+// Cap: 32 sidecar entries shared across every key, every
+// process. The pool is global because the registry is global —
+// HKLM\Software\... is the same store from every caller's
+// perspective. 32 covers the ~ten common shell-config writes
+// we care about in v0; sub-GAP for any test that wants more.
+constexpr u32 kSidecarValueCap = 32;
+constexpr u32 kSidecarNameMax = 64;
+constexpr u32 kSidecarDataMax = 256;
+
+struct SidecarValue
+{
+    bool in_use;
+    u8 _pad[3];
+    const RegKey* key; // pointer into kRegKeys[]; unique per (root, path)
+    u32 type;          // REG_*
+    u32 size;          // bytes valid in data[]
+    char name[kSidecarNameMax];
+    u8 data[kSidecarDataMax];
+};
+
+SidecarValue g_sidecar[kSidecarValueCap];
 
 inline char AsciiToLower(char c)
 {
@@ -192,6 +226,32 @@ const RegKey* SlotForHandle(core::Process* proc, u64 handle)
         return nullptr;
     }
     return static_cast<const RegKey*>(proc->win32_reg_handles[idx].reg_key);
+}
+
+// ---- Sidecar helpers ----
+
+SidecarValue* SidecarFind(const RegKey* key, const char* name)
+{
+    for (u32 i = 0; i < kSidecarValueCap; ++i)
+    {
+        if (!g_sidecar[i].in_use)
+            continue;
+        if (g_sidecar[i].key != key)
+            continue;
+        if (PathEqualCi(g_sidecar[i].name, name))
+            return &g_sidecar[i];
+    }
+    return nullptr;
+}
+
+SidecarValue* SidecarAlloc()
+{
+    for (u32 i = 0; i < kSidecarValueCap; ++i)
+    {
+        if (!g_sidecar[i].in_use)
+            return &g_sidecar[i];
+    }
+    return nullptr;
 }
 
 // ---- Op handlers ----
@@ -305,6 +365,26 @@ i64 DoQueryValue(arch::TrapFrame* frame)
         return kNtStatusInvalidParameter;
     }
 
+    // Sidecar first — a prior NtSetValueKey shadows any same-
+    // named static value for as long as the sidecar entry lives.
+    if (const SidecarValue* sv = SidecarFind(key, name_buf); sv != nullptr)
+    {
+        const u32 want = sv->size;
+        if (out_va != 0)
+        {
+            const u64 packed = (static_cast<u64>(want) << 32) | static_cast<u64>(sv->type);
+            if (!duetos::mm::CopyToUser(reinterpret_cast<void*>(out_va), &packed, sizeof(packed)))
+                return kNtStatusInvalidParameter;
+        }
+        if (buf_va == 0)
+            return kNtStatusSuccess;
+        if (buf_cap < want)
+            return kNtStatusBufferTooSmall;
+        if (!duetos::mm::CopyToUser(reinterpret_cast<void*>(buf_va), sv->data, want))
+            return kNtStatusInvalidParameter;
+        return kNtStatusSuccess;
+    }
+
     for (u32 i = 0; i < key->value_count; ++i)
     {
         const RegValue& v = key->values[i];
@@ -338,6 +418,114 @@ i64 DoQueryValue(arch::TrapFrame* frame)
         return kNtStatusSuccess;
     }
     return kNtStatusObjectNameNotFound;
+}
+
+i64 DoSetValue(arch::TrapFrame* frame)
+{
+    // rsi = handle (must be a previously-opened key)
+    // rdx = user VA of NUL-terminated value name
+    // r10 = user VA of value data (may be 0 iff size == 0)
+    // r8  = data size in bytes
+    // r9  = REG_* type
+    core::Process* proc = core::CurrentProcess();
+    if (proc == nullptr)
+        return kNtStatusInvalidParameter;
+    const u64 handle = frame->rsi;
+    const u64 name_va = frame->rdx;
+    const u64 data_va = frame->r10;
+    const u64 size = frame->r8;
+    const u32 type = static_cast<u32>(frame->r9);
+
+    const RegKey* key = SlotForHandle(proc, handle);
+    if (key == nullptr)
+        return kNtStatusInvalidHandle;
+    if (size > kSidecarDataMax)
+        return kNtStatusInsufficientResources;
+
+    char name_buf[kSidecarNameMax];
+    if (!CopyUserAsciiPath(name_va, name_buf, sizeof(name_buf)))
+        return kNtStatusInvalidParameter;
+
+    SidecarValue* sv = SidecarFind(key, name_buf);
+    if (sv == nullptr)
+    {
+        sv = SidecarAlloc();
+        if (sv == nullptr)
+            return kNtStatusInsufficientResources;
+        // Stamp identity. Name is copied in here; data on the
+        // line below.
+        u32 i = 0;
+        for (; i + 1 < kSidecarNameMax && name_buf[i] != '\0'; ++i)
+            sv->name[i] = name_buf[i];
+        sv->name[i] = '\0';
+        sv->key = key;
+        sv->in_use = true;
+    }
+    sv->type = type;
+    sv->size = static_cast<u32>(size);
+    if (size > 0)
+    {
+        if (!duetos::mm::CopyFromUser(sv->data, reinterpret_cast<const void*>(data_va), size))
+        {
+            // Roll the slot back so a faulting set doesn't leave
+            // a half-stamped sidecar entry shadowing the static
+            // value (which would silently corrupt subsequent
+            // queries).
+            sv->in_use = false;
+            sv->key = nullptr;
+            sv->name[0] = '\0';
+            sv->size = 0;
+            return kNtStatusInvalidParameter;
+        }
+    }
+    return kNtStatusSuccess;
+}
+
+i64 DoDeleteValue(arch::TrapFrame* frame)
+{
+    // rsi = handle, rdx = user VA of value name.
+    core::Process* proc = core::CurrentProcess();
+    if (proc == nullptr)
+        return kNtStatusInvalidParameter;
+    const u64 handle = frame->rsi;
+    const u64 name_va = frame->rdx;
+    const RegKey* key = SlotForHandle(proc, handle);
+    if (key == nullptr)
+        return kNtStatusInvalidHandle;
+    char name_buf[kSidecarNameMax];
+    if (!CopyUserAsciiPath(name_va, name_buf, sizeof(name_buf)))
+        return kNtStatusInvalidParameter;
+    SidecarValue* sv = SidecarFind(key, name_buf);
+    if (sv != nullptr)
+    {
+        sv->in_use = false;
+        sv->key = nullptr;
+        sv->name[0] = '\0';
+        sv->size = 0;
+        return kNtStatusSuccess;
+    }
+    // GAP: cannot delete static values — they live in .rodata.
+    // Real Windows registries don't have this distinction; v0's
+    // tier separation surfaces as ObjectNameNotFound for any
+    // name that hasn't been Set'd into the sidecar yet, even
+    // when the static tree carries a same-named value. This
+    // matches the "if you didn't Set it, you can't Delete it"
+    // model — sub-GAP documented in §11.5.
+    for (u32 i = 0; i < key->value_count; ++i)
+    {
+        if (PathEqualCi(key->values[i].name, name_buf))
+            return kNtStatusInsufficientResources;
+    }
+    return kNtStatusObjectNameNotFound;
+}
+
+i64 DoFlushKey(arch::TrapFrame* frame)
+{
+    // No on-disk hive; flush is a no-op success. The sidecar
+    // already lives in kernel-resident RAM; "flush" has nothing
+    // to do until a real persistence tier lands.
+    (void)frame;
+    return kNtStatusSuccess;
 }
 
 } // namespace
@@ -378,6 +566,15 @@ void DoRegistry(arch::TrapFrame* frame)
         break;
     case kOpQueryValue:
         status = DoQueryValue(frame);
+        break;
+    case kOpSetValue:
+        status = DoSetValue(frame);
+        break;
+    case kOpDeleteValue:
+        status = DoDeleteValue(frame);
+        break;
+    case kOpFlushKey:
+        status = DoFlushKey(frame);
         break;
     default:
         // STUB: unknown / unsupported op — Enumerate{Key,Value}Key

@@ -102,6 +102,9 @@ KNOWN_MAPPINGS = {
     "NtMapViewOfSection":          "SYS_SECTION_MAP",
     "NtUnmapViewOfSection":        "SYS_SECTION_UNMAP",
     "NtDeleteFile":                "SYS_FILE_UNLINK",
+    "NtSetValueKey":               "SYS_REGISTRY",
+    "NtDeleteValueKey":            "SYS_REGISTRY",
+    "NtFlushKey":                  "SYS_REGISTRY",
     # NtCreateKey / NtSetValueKey / NtDeleteKey / NtDeleteValueKey:
     # NotImpl on purpose — registry is read-only in v0. Mapping
     # them to SYS_REGISTRY's read-only Open op would silently lie

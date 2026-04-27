@@ -1457,3 +1457,105 @@ __declspec(dllexport) NTSTATUS NtQueryValueKey(HANDLE KeyHandle, UNICODE_STRING*
         return (NTSTATUS)status2;
     return NTSTATUS_SUCCESS;
 }
+
+/* ------------------------------------------------------------------
+ * NtSetValueKey — write a value into a previously-opened key.
+ *
+ * Win32 NT signature:
+ *   NTSTATUS NtSetValueKey(
+ *     HANDLE          KeyHandle,
+ *     PUNICODE_STRING ValueName,
+ *     ULONG           TitleIndex,
+ *     ULONG           Type,
+ *     PVOID           Data,
+ *     ULONG           DataSize);
+ *
+ * v0 forwards to SYS_REGISTRY op=4 (kOpSetValue). Cap on
+ * data size = 256 bytes per value (kSidecarDataMax kernel-side);
+ * larger requests return STATUS_INSUFFICIENT_RESOURCES. The
+ * kernel writes the value into a sidecar pool that shadows the
+ * static tree on subsequent NtQueryValueKey reads.
+ * ------------------------------------------------------------------ */
+__declspec(dllexport) NTSTATUS NtSetValueKey(HANDLE KeyHandle, UNICODE_STRING* ValueName, ULONG TitleIndex, ULONG Type,
+                                             void* Data, ULONG DataSize)
+{
+    (void)TitleIndex;
+    if (ValueName == (UNICODE_STRING*)0 || ValueName->Buffer == (wchar_t16*)0)
+        return NTSTATUS_INVALID_PARAMETER;
+    char name[64];
+    const unsigned chars = (unsigned)(ValueName->Length / 2);
+    if (chars + 1 > sizeof(name))
+        return NTSTATUS_INVALID_PARAMETER;
+    for (unsigned i = 0; i < chars; ++i)
+    {
+        unsigned short w = ValueName->Buffer[i];
+        name[i] = (w <= 0x7F) ? (char)w : '?';
+    }
+    name[chars] = 0;
+    long long status;
+    /* SYS_REGISTRY = 130, op = 4 (kOpSetValue).
+     * Args: rdi=op, rsi=handle, rdx=name, r10=data, r8=size, r9=type. */
+    __asm__ volatile("mov %4, %%r10\n\t"
+                     "mov %5, %%r8\n\t"
+                     "mov %6, %%r9\n\t"
+                     "int $0x80"
+                     : "=a"(status)
+                     : "a"((long long)130), "D"((long long)4), "S"((long long)KeyHandle), "r"((long long)Data),
+                       "r"((long long)DataSize), "r"((long long)Type), "d"((long long)name)
+                     : "r10", "r8", "r9", "memory");
+    return (NTSTATUS)status;
+}
+
+/* ------------------------------------------------------------------
+ * NtDeleteValueKey — remove a value from a previously-opened key.
+ *
+ * Win32 NT signature:
+ *   NTSTATUS NtDeleteValueKey(HANDLE KeyHandle, PUNICODE_STRING ValueName);
+ *
+ * v0 only deletes values previously written via NtSetValueKey
+ * (the sidecar). Static-tree values cannot be deleted (live in
+ * .rodata) — the kernel returns STATUS_INSUFFICIENT_RESOURCES
+ * for that case as the closest signal that the value exists but
+ * is unmodifiable.
+ * ------------------------------------------------------------------ */
+__declspec(dllexport) NTSTATUS NtDeleteValueKey(HANDLE KeyHandle, UNICODE_STRING* ValueName)
+{
+    if (ValueName == (UNICODE_STRING*)0 || ValueName->Buffer == (wchar_t16*)0)
+        return NTSTATUS_INVALID_PARAMETER;
+    char name[64];
+    const unsigned chars = (unsigned)(ValueName->Length / 2);
+    if (chars + 1 > sizeof(name))
+        return NTSTATUS_INVALID_PARAMETER;
+    for (unsigned i = 0; i < chars; ++i)
+    {
+        unsigned short w = ValueName->Buffer[i];
+        name[i] = (w <= 0x7F) ? (char)w : '?';
+    }
+    name[chars] = 0;
+    long long status;
+    /* SYS_REGISTRY = 130, op = 5 (kOpDeleteValue). */
+    __asm__ volatile("int $0x80"
+                     : "=a"(status)
+                     : "a"((long long)130), "D"((long long)5), "S"((long long)KeyHandle), "d"((long long)name)
+                     : "memory");
+    return (NTSTATUS)status;
+}
+
+/* ------------------------------------------------------------------
+ * NtFlushKey — persist any pending writes for the key.
+ *
+ * v0 has no on-disk hive, so flush is a success-no-op. Provided
+ * for API completeness — well-behaved app installers call it
+ * after a batch of NtSetValueKey calls to ensure the writes
+ * land before the installer exits.
+ * ------------------------------------------------------------------ */
+__declspec(dllexport) NTSTATUS NtFlushKey(HANDLE KeyHandle)
+{
+    long long status;
+    /* SYS_REGISTRY = 130, op = 6 (kOpFlushKey). */
+    __asm__ volatile("int $0x80"
+                     : "=a"(status)
+                     : "a"((long long)130), "D"((long long)6), "S"((long long)KeyHandle)
+                     : "memory");
+    return (NTSTATUS)status;
+}
