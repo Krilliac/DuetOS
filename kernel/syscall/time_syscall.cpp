@@ -113,19 +113,15 @@ u16 ComputeDayOfWeek(u16 year, u8 month, u8 day)
 
 void DoGetTimeSt(arch::TrapFrame* frame)
 {
-    // rdi = user SYSTEMTIME* out. Fill from RTC + computed dow.
-    arch::RtcTime t = {};
-    arch::RtcRead(&t);
-    SystemTime st = {};
-    st.year = t.year;
-    st.month = t.month;
-    st.day = t.day;
-    st.hour = t.hour;
-    st.minute = t.minute;
-    st.second = t.second;
-    st.milliseconds = 0;
-    st.day_of_week = ComputeDayOfWeek(t.year, t.month, t.day);
-    if (!mm::CopyToUser(reinterpret_cast<void*>(frame->rdi), &st, sizeof(st)))
+    // rdi = user SYSTEMTIME* out. The Win32 SYSTEMTIME ABI shape
+    // (16 bytes, 8 packed u16s) is layout-compatible with
+    // `time::BrokenDownTime`; sample directly into the user's slot
+    // via a kernel-side staging copy. The Zeller's-congruence DOW
+    // computation moved into time/timekeeper.cpp with this slice.
+    ::duetos::time::BrokenDownTime bdt = {};
+    ::duetos::time::RealtimeBrokenDown(&bdt);
+    static_assert(sizeof(bdt) == 16, "BrokenDownTime must match Win32 SYSTEMTIME's 16-byte ABI");
+    if (!mm::CopyToUser(reinterpret_cast<void*>(frame->rdi), &bdt, sizeof(bdt)))
     {
         frame->rax = static_cast<u64>(-1);
         return;

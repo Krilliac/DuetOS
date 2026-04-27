@@ -1,5 +1,6 @@
 #pragma once
 
+#include "sync/lockdep.h"
 #include "util/types.h"
 
 namespace duetos::mm
@@ -467,6 +468,12 @@ struct Mutex
 {
     Task* owner;
     WaitQueue waiters;
+    /// Lockdep class (plan D1-followup). Default 0 = unclassified
+    /// (no overhead). Tag with one of the canonical `kLockClass*`
+    /// IDs from `sync/lockdep.h` to opt into locking-order
+    /// validation against any tagged SpinLock / Mutex this task
+    /// already holds.
+    ::duetos::sync::LockClass class_id;
 };
 
 void MutexLock(Mutex* m);

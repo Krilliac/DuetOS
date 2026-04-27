@@ -42,6 +42,7 @@
 #include "mm/paging.h"
 #include "sched/sched.h"
 #include "subsystems/graphics/graphics.h"
+#include "util/symbols.h"
 
 namespace duetos::core::shell::internal
 {
@@ -412,8 +413,60 @@ void CmdLspci()
     }
 }
 
-void CmdHeap()
+// Heap leak ranking — top-N caller RIPs by bytes outstanding. Walks
+// the heap in chunk-size steps and aggregates live chunks by their
+// recorded `caller_rip`. Resolves each top RIP through the embedded
+// symbol table (util/symbols.cpp) so the operator sees fn+offset
+// instead of raw addresses. Cost: one heap walk + one symbol lookup
+// per row; cheap enough to leave callable on demand.
+void CmdHeapLeaks()
 {
+    constexpr u32 kTopRows = 16;
+    duetos::mm::HeapLeakEntry rows[kTopRows];
+    const u32 n = duetos::mm::KernelHeapTopAllocators(rows, kTopRows);
+    if (n == 0)
+    {
+        ConsoleWriteln("HEAP LEAKS: NO LIVE ALLOCATIONS");
+        return;
+    }
+    ConsoleWrite("HEAP LEAKS: TOP ");
+    WriteU64Dec(n);
+    ConsoleWriteln(" CALLER RIPS BY BYTES OUTSTANDING");
+    for (u32 i = 0; i < n; ++i)
+    {
+        const auto& r = rows[i];
+        ConsoleWrite("  ");
+        WriteU64Dec(r.bytes);
+        ConsoleWrite(" B  ");
+        WriteU64Dec(r.count);
+        ConsoleWrite(" allocs  rip=");
+        WriteU64Hex(r.caller_rip, 16);
+        ConsoleWrite("  ");
+        // Resolve via the embedded symbol table; print as fn+offset
+        // when known, raw <unresolved> otherwise.
+        duetos::core::SymbolResolution res{};
+        if (duetos::core::ResolveAddress(r.caller_rip, &res) && res.entry != nullptr)
+        {
+            ConsoleWrite(res.entry->name);
+            ConsoleWrite("+0x");
+            WriteU64Hex(res.offset, 0);
+        }
+        else
+        {
+            ConsoleWrite("<unresolved>");
+        }
+        ConsoleWriteChar('\n');
+    }
+}
+
+void CmdHeap(u32 argc, char** argv)
+{
+    if (argc >= 2 && StrEq(argv[1], "leaks"))
+    {
+        CmdHeapLeaks();
+        return;
+    }
+
     const auto s = duetos::mm::KernelHeapStatsRead();
     ConsoleWrite("POOL BYTES:       ");
     WriteU64Dec(s.pool_bytes);

@@ -68,6 +68,29 @@ u64 BoottimeNs();
 /// returns a usable value.
 u64 RealtimeFiletime();
 
+/// Broken-down wall-clock time. Mirrors the Win32 SYSTEMTIME ABI
+/// shape (16 bytes, 8 packed u16s) but lives here so non-Win32
+/// callers don't have to reach into `subsystems/win32/`. Field
+/// order is fixed by the ABI; `day_of_week` is 0=Sun..6=Sat.
+struct BrokenDownTime
+{
+    u16 year;
+    u16 month;
+    u16 day_of_week;
+    u16 day;
+    u16 hour;
+    u16 minute;
+    u16 second;
+    u16 milliseconds;
+};
+
+/// Sample the CMOS RTC and fill `out` with the broken-down wall
+/// clock. day_of_week is computed via Zeller's congruence. v0
+/// always reports milliseconds=0 — sub-second precision lives in
+/// `MonotonicNs`, the broken-down view is for human-facing
+/// timestamps. `out` MUST be non-null.
+void RealtimeBrokenDown(BrokenDownTime* out);
+
 /// Boot-time self-test. Verifies that after `TimekeeperInit`:
 ///   - `MonotonicNs()` returns a non-zero, strictly-increasing
 ///     value across two reads (with a tiny busy-wait in between).

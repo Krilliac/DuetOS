@@ -66,6 +66,28 @@ void KFree(void* ptr);
 /// Snapshot of allocator state. Cheap (O(freelist length)).
 KernelHeapStats KernelHeapStatsRead();
 
+/// One row of the heap-leak ranking — a (caller RIP, bytes outstanding,
+/// allocation count) tuple. The reporter sorts descending by `bytes`.
+struct HeapLeakEntry
+{
+    u64 caller_rip; ///< `__builtin_return_address(0)` captured at KMalloc time.
+    u64 bytes;      ///< Sum of live allocation payload+header sizes from this RIP.
+    u64 count;      ///< Number of live allocations from this RIP.
+};
+
+/// Walk the heap in chunk-size steps and aggregate live chunks by their
+/// recorded `caller_rip`. Writes up to `out_capacity` entries into `out`,
+/// sorted descending by `bytes`. Returns the number of distinct RIPs
+/// observed (clipped to `out_capacity`); if more distinct RIPs exist
+/// than capacity, the ones below the cutoff are silently dropped.
+///
+/// Takes the kheap's freelist invariants as gospel — does NOT acquire a
+/// lock today (kheap is single-CPU at v0). Cheap O(N_chunks); the
+/// aggregation table is fixed-size (`out_capacity`) so worst-case is
+/// O(N_chunks * out_capacity) compares. Safe to call from any kernel
+/// task context.
+u32 KernelHeapTopAllocators(HeapLeakEntry* out, u32 out_capacity);
+
 /// Exercise allocate / free / coalesce end-to-end. Prints to COM1 and panics
 /// on any inconsistency. Intended for use during boot only.
 void KernelHeapSelfTest();

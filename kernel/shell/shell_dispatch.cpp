@@ -1069,7 +1069,7 @@ void Dispatch(char* line)
     }
     if (StrEq(cmd, "heap"))
     {
-        CmdHeap();
+        CmdHeap(argc, argv);
         return;
     }
     if (StrEq(cmd, "paging"))

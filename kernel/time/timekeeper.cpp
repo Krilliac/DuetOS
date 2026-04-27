@@ -149,6 +149,49 @@ u64 RealtimeFiletime()
     return seconds * 10'000'000ULL;
 }
 
+namespace
+{
+
+// Zeller's congruence, normal form: dow 0=Sun..6=Sat. Same formula
+// the taskbar date widget + AML calendar popup use; previously
+// lived in syscall/time_syscall.cpp.
+u16 ComputeDayOfWeek(u16 year, u8 month, u8 day)
+{
+    if (month < 1 || month > 12)
+        return 0;
+    u32 wy = year;
+    u32 wm = month;
+    if (wm < 3)
+    {
+        wm += 12;
+        --wy;
+    }
+    const u32 K = wy % 100;
+    const u32 J = wy / 100;
+    const u32 h = (u32(day) + (13 * (wm + 1)) / 5 + K + K / 4 + J / 4 + 5 * J) % 7;
+    return u16((h + 6) % 7);
+}
+
+} // namespace
+
+void RealtimeBrokenDown(BrokenDownTime* out)
+{
+    if (out == nullptr)
+    {
+        return;
+    }
+    arch::RtcTime t = {};
+    arch::RtcRead(&t);
+    out->year = t.year;
+    out->month = t.month;
+    out->day = t.day;
+    out->hour = t.hour;
+    out->minute = t.minute;
+    out->second = t.second;
+    out->milliseconds = 0;
+    out->day_of_week = ComputeDayOfWeek(t.year, t.month, t.day);
+}
+
 void TimekeeperSelfTest()
 {
     arch::SerialWrite("[time] timekeeper self-test: monotonic read + resolution\n");

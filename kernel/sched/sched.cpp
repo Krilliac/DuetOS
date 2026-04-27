@@ -2187,6 +2187,11 @@ void MutexLock(Mutex* m)
 {
     KASSERT(m != nullptr, "sched", "MutexLock null mutex");
 
+    // Lockdep edge-walk before the wait/acquire — the "held → this"
+    // edge is recorded against any tagged SpinLock / Mutex this task
+    // already holds. Untagged mutexes short-circuit inside the hook.
+    ::duetos::sync::LockdepBeforeAcquire(m->class_id);
+
     arch::Cli();
     if (m->owner == nullptr)
     {
@@ -2201,6 +2206,9 @@ void MutexLock(Mutex* m)
         WaitQueueBlock(&m->waiters);
     }
     arch::Sti();
+
+    // After successful acquire — push onto the lockdep held stack.
+    ::duetos::sync::LockdepAfterAcquire(m->class_id);
 }
 
 bool MutexTryLock(Mutex* m)
@@ -2214,12 +2222,25 @@ bool MutexTryLock(Mutex* m)
         m->owner = Current();
     }
     arch::Sti();
+    if (ok)
+    {
+        // Treat a successful try-lock as a full acquire for lockdep —
+        // we hold it now, so the held stack must reflect that. Skip
+        // BeforeAcquire on the failing path so we don't record a
+        // never-acquired edge.
+        ::duetos::sync::LockdepBeforeAcquire(m->class_id);
+        ::duetos::sync::LockdepAfterAcquire(m->class_id);
+    }
     return ok;
 }
 
 void MutexUnlock(Mutex* m)
 {
     KASSERT(m != nullptr, "sched", "MutexUnlock null mutex");
+
+    // Pop from lockdep held stack BEFORE the owner pointer changes —
+    // mirrors the SpinLockRelease ordering.
+    ::duetos::sync::LockdepBeforeRelease(m->class_id);
 
     arch::Cli();
     if (m->owner != Current())

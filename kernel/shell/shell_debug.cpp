@@ -30,6 +30,7 @@
 #include "diag/kdbg.h"
 #include "log/klog.h"
 #include "diag/runtime_checker.h"
+#include "sync/lockdep.h"
 #include "syscall/cap_gate.h"
 #include "syscall/syscall_names.h"
 #include "util/symbols.h"
@@ -176,7 +177,56 @@ void CmdInspectHelp()
     ConsoleWriteln("  INSPECT SYSCALLS CAPS             DUMP CAP-TABLE: REQUIRED CAP PER SYSCALL");
     ConsoleWriteln("  INSPECT OPCODES <PATH>            FIRST-BYTE HISTOGRAM + CLASS TALLY");
     ConsoleWriteln("  INSPECT ARM ON|OFF|STATUS         ONE-SHOT OPCODES SCAN ON NEXT SPAWN");
+    ConsoleWriteln("  INSPECT LOCKDEP                   LOCKDEP COUNTERS + REGISTERED CLASSES");
     ConsoleWriteln("  INSPECT HELP                      THIS LIST");
+}
+
+// Dump lockdep-lite state: total inversions detected since boot,
+// total edges recorded, and the canonical class IDs registered via
+// `LockdepRegisterCanonicalClasses()`. Output goes to COM1
+// (machine-greppable) plus a one-line summary on the console.
+//
+// Inversions=0 is the green-path expectation; any non-zero count
+// is a triage hit. Edges-recorded grows monotonically as the kernel
+// exercises new acquire pairs — useful as a "graph stabilised yet?"
+// signal for the future inversion-warn-to-panic promotion knob.
+void CmdInspectLockdep()
+{
+    using duetos::arch::SerialWrite;
+    using duetos::arch::SerialWriteHex;
+
+    const u64 inversions = ::duetos::sync::LockdepInversionsDetected();
+    const u64 edges = ::duetos::sync::LockdepEdgesRecorded();
+
+    SerialWrite("[inspect-lockdep] inversions=");
+    SerialWriteHex(inversions);
+    SerialWrite(" edges=");
+    SerialWriteHex(edges);
+    SerialWrite("\n");
+
+    // Walk the canonical class-ID range (0x01..0x3F per the
+    // `lockdep.h` convention). Print each class's name + ID.
+    // Unregistered IDs in that range come back as "?" from
+    // `LockdepClassName`; skip them.
+    for (u32 id = 1; id <= 0x3F; ++id)
+    {
+        const char* name = ::duetos::sync::LockdepClassName(static_cast<::duetos::sync::LockClass>(id));
+        if (name == nullptr || name[0] == '?')
+        {
+            continue;
+        }
+        SerialWrite("[inspect-lockdep] class id=");
+        SerialWriteHex(id);
+        SerialWrite(" name=");
+        SerialWrite(name);
+        SerialWrite("\n");
+    }
+
+    ConsoleWrite("INSPECT LOCKDEP: inversions=");
+    WriteU64Dec(inversions);
+    ConsoleWrite(" edges=");
+    WriteU64Dec(edges);
+    ConsoleWriteln(" (CLASS LIST ON COM1)");
 }
 
 // Walk every row of `kSyscallCapTable` and print, for each:
@@ -440,6 +490,11 @@ void CmdInspect(u32 argc, char** argv)
     if (StrEq(argv[1], "arm"))
     {
         CmdInspectArm(argc, argv);
+        return;
+    }
+    if (StrEq(argv[1], "lockdep"))
+    {
+        CmdInspectLockdep();
         return;
     }
     if (StrEq(argv[1], "help"))
