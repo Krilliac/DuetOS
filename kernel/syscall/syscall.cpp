@@ -1331,18 +1331,13 @@ void SyscallDispatch(arch::TrapFrame* frame)
     case SYS_SOCKET_OP:
     {
         // Win32 ws2_32 + native socket userland → kernel socket
-        // pool. Cap-gated on kCapNet at every entry — withholding
-        // the cap returns -EACCES per BSD/Win32 convention.
+        // pool. kCapNet is gated centrally by `SyscallGate`
+        // (cap_table.def); a process missing the cap returns -1
+        // from the gate before reaching this handler.
         Process* caller = CurrentProcess();
         if (caller == nullptr)
         {
             frame->rax = static_cast<u64>(-13); // -EACCES
-            return;
-        }
-        if (!CapSetHas(caller->caps, kCapNet))
-        {
-            RecordSandboxDenial(kCapNet);
-            frame->rax = static_cast<u64>(-13);
             return;
         }
         const u64 op = frame->rdi;
@@ -2889,24 +2884,12 @@ void SyscallDispatch(arch::TrapFrame* frame)
         // rsi = user pointer to u64 output slot (receives file size).
         // Returns 0 on success, -1 on any failure.
         //
-        // Cap check first — a process without kCapFsRead can't even
-        // ATTEMPT a lookup. Denial is logged for auditability,
-        // identical format to SYS_WRITE.
+        // kCapFsRead is gated centrally by `SyscallGate`
+        // (cap_table.def) — a process without the cap returns -1
+        // from the gate before reaching this handler.
         Process* proc = CurrentProcess();
-        if (proc == nullptr || !CapSetHas(proc->caps, kCapFsRead))
+        if (proc == nullptr)
         {
-            const u64 pid = (proc != nullptr) ? proc->pid : 0;
-            RecordSandboxDenial(kCapFsRead);
-            if (proc != nullptr && ShouldLogDenial(proc->sandbox_denials))
-            {
-                arch::SerialWrite("[sys] denied syscall=SYS_STAT pid=");
-                arch::SerialWriteHex(pid);
-                arch::SerialWrite(" cap=");
-                arch::SerialWrite(CapName(kCapFsRead));
-                arch::SerialWrite(" denial_idx=");
-                arch::SerialWriteHex(proc->sandbox_denials);
-                arch::SerialWrite("\n");
-            }
             frame->rax = static_cast<u64>(-1);
             return;
         }

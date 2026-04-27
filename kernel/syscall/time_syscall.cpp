@@ -1,10 +1,10 @@
 #include "syscall/time_syscall.h"
 
-#include "arch/x86_64/hpet.h"
 #include "arch/x86_64/rtc.h"
 #include "arch/x86_64/traps.h"
 #include "mm/paging.h"
 #include "syscall/syscall.h"
+#include "time/timekeeper.h"
 
 namespace duetos::arch
 {
@@ -53,12 +53,12 @@ void DoPerfCounter(arch::TrapFrame* frame)
 
 void DoNowNs(arch::TrapFrame* frame)
 {
-    // No args. Return HPET counter × period_fs / 1e6 = ns since
-    // boot. Counter × period_fs fits in u64 for any realistic
-    // uptime (14.3 MHz × 70 kfs ≈ ~10^16 saturating at ~22 Gyr).
-    const u64 counter = arch::HpetReadCounter();
-    const u64 period_fs = arch::HpetPeriodFemtoseconds();
-    frame->rax = (counter * period_fs) / 1'000'000ULL;
+    // No args. Return monotonic ns since boot from the active
+    // clocksource (HPET in v0; TSC will register at a higher rating
+    // once its calibration lands). The conversion math used to live
+    // here as `counter * period_fs / 1e6`; now it's owned by
+    // `time::MonotonicNs()` so every consumer reads the same source.
+    frame->rax = ::duetos::time::MonotonicNs();
 }
 
 void DoGetTimeFt(arch::TrapFrame* frame)

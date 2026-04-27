@@ -180,16 +180,12 @@ i64 SnapshotRamfs(const fs::RamfsNode* dir, fs::fat32::DirEntry*& out_entries, u
 
 i64 SysDirOpen(u64 user_path)
 {
-    using ::duetos::core::CapSetHas;
-    using ::duetos::core::kCapFsRead;
+    // kCapFsRead is gated centrally by `SyscallGate`
+    // (cap_table.def) — SYS_DIR_OPEN never reaches this handler
+    // without it.
     core::Process* proc = core::CurrentProcess();
     if (proc == nullptr)
         return -1;
-    if (!CapSetHas(proc->caps, kCapFsRead))
-    {
-        core::RecordSandboxDenial(kCapFsRead);
-        return -1;
-    }
     char path[64];
     for (u32 i = 0; i < sizeof(path); ++i)
         path[i] = 0;

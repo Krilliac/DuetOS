@@ -109,6 +109,7 @@
 #include "ipc/kobject.h"
 #include "sync/lockdep.h"
 #include "sync/rwlock.h"
+#include "sync/seqlock.h"
 #include "sync/spinlock.h"
 #include "time/clocksource.h"
 #include "time/timekeeper.h"
@@ -1049,6 +1050,15 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     duetos::subsystems::linux::SyscallInit();
 
     duetos::sync::SpinLockSelfTest();
+
+    // Seqlock (plan B1.3). Sequence-counter primitive for
+    // read-mostly hot data (timekeeper, per-CPU stat counters).
+    // Only the writer side touches the inner SpinLock, so the
+    // self-test runs immediately after `SpinLockSelfTest` — every
+    // dependency is in place. Contention paths (multi-CPU
+    // writer/reader race) only fire under SMP and are deferred
+    // to a follow-up self-test once AP bringup lands.
+    duetos::sync::SeqLockSelfTest();
 
     // Lockdep-lite (plan D1 infra). Validates that the
     // edge-graph + held-stack + cycle detection works in

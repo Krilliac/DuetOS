@@ -308,21 +308,12 @@ void DoFileWrite(arch::TrapFrame* frame)
 {
     KDBG_3V(Win32Thunk, "win32/file", "DoFileWrite", "handle", frame->rdi, "buf", frame->rsi, "count", frame->rdx);
     // Write up to rdx bytes from rsi into the handle at its
-    // current cursor. Cap-gated on kCapFsWrite. Backing dispatch
-    // (ramfs refused; fat32 in-place) lives in fs::routing.
+    // current cursor. kCapFsWrite is gated centrally by
+    // `SyscallGate` (cap_table.def). Backing dispatch (ramfs
+    // refused; fat32 in-place) lives in fs::routing.
     core::Process* proc = core::CurrentProcess();
-    if (proc == nullptr || !core::CapSetHas(proc->caps, core::kCapFsWrite))
+    if (proc == nullptr)
     {
-        const u64 pid = (proc != nullptr) ? proc->pid : 0;
-        core::RecordSandboxDenial(core::kCapFsWrite);
-        if (proc != nullptr && core::ShouldLogDenial(proc->sandbox_denials))
-        {
-            arch::SerialWrite("[sys] denied syscall=SYS_FILE_WRITE pid=");
-            arch::SerialWriteHex(pid);
-            arch::SerialWrite(" cap=");
-            arch::SerialWrite(core::CapName(core::kCapFsWrite));
-            arch::SerialWrite("\n");
-        }
         frame->rax = static_cast<u64>(-1);
         return;
     }
@@ -351,22 +342,13 @@ void DoFileCreate(arch::TrapFrame* frame)
     // CreateFileW(CREATE_NEW). rdi = path, rsi = path_cap,
     // rdx = init bytes (user pointer, may be 0), r10 = init len.
     // Returns a Win32 pseudo-handle on success or u64(-1).
-    // Cap-gated on kCapFsWrite (the cap also implies create
-    // privilege — splitting create into its own cap would just
-    // bloat the sandbox profile without buying anything today).
+    // kCapFsWrite (which also implies create privilege; splitting
+    // create into its own cap would just bloat the sandbox profile
+    // without buying anything today) is gated centrally by
+    // `SyscallGate` (cap_table.def).
     core::Process* proc = core::CurrentProcess();
-    if (proc == nullptr || !core::CapSetHas(proc->caps, core::kCapFsWrite))
+    if (proc == nullptr)
     {
-        const u64 pid = (proc != nullptr) ? proc->pid : 0;
-        core::RecordSandboxDenial(core::kCapFsWrite);
-        if (proc != nullptr && core::ShouldLogDenial(proc->sandbox_denials))
-        {
-            arch::SerialWrite("[sys] denied syscall=SYS_FILE_CREATE pid=");
-            arch::SerialWriteHex(pid);
-            arch::SerialWrite(" cap=");
-            arch::SerialWrite(core::CapName(core::kCapFsWrite));
-            arch::SerialWrite("\n");
-        }
         frame->rax = static_cast<u64>(-1);
         return;
     }
@@ -461,16 +443,16 @@ void DoFileUnlink(arch::TrapFrame* frame)
 void DoFileRename(arch::TrapFrame* frame)
 {
     // MoveFileW. rdi = src_path, rsi = src_cap,
-    // rdx = dst_path, r10 = dst_cap.
+    // rdx = dst_path, r10 = dst_cap. kCapFsWrite is gated centrally
+    // by `SyscallGate` (cap_table.def).
     KDBG_2V(Win32Thunk, "win32/file", "DoFileRename", "user_src", frame->rdi, "user_dst", frame->rdx);
     constexpr u64 kStatusSuccess = 0;
     constexpr u64 kStatusInvalidParameter = 0xC000000DULL;
     constexpr u64 kStatusAccessDenied = 0xC0000022ULL;
     constexpr u64 kStatusObjectNameCollision = 0xC0000035ULL;
     core::Process* proc = core::CurrentProcess();
-    if (proc == nullptr || !core::CapSetHas(proc->caps, core::kCapFsWrite))
+    if (proc == nullptr)
     {
-        core::RecordSandboxDenial(core::kCapFsWrite);
         frame->rax = kStatusAccessDenied;
         return;
     }
