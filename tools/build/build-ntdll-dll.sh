@@ -124,6 +124,18 @@ set +e
     /export:ZwOpenEvent=NtOpenEvent \
     /export:NtQueryObject \
     /export:ZwQueryObject=NtQueryObject \
+    /export:NtOpenProcessToken \
+    /export:ZwOpenProcessToken=NtOpenProcessToken \
+    /export:NtOpenProcessTokenEx \
+    /export:ZwOpenProcessTokenEx=NtOpenProcessTokenEx \
+    /export:NtOpenThreadToken \
+    /export:ZwOpenThreadToken=NtOpenThreadToken \
+    /export:NtOpenThreadTokenEx \
+    /export:ZwOpenThreadTokenEx=NtOpenThreadTokenEx \
+    /export:NtQueryInformationToken \
+    /export:ZwQueryInformationToken=NtQueryInformationToken \
+    /export:NtAdjustPrivilegesToken \
+    /export:ZwAdjustPrivilegesToken=NtAdjustPrivilegesToken \
     /export:NtContinue \
     /export:ZwContinue=NtContinue \
     /export:NtAllocateVirtualMemory \

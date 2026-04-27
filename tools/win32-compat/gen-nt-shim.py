@@ -152,6 +152,14 @@ KNOWN_MAPPINGS = {
     # kernel32.HeapAlloc). The runtime trampolines for these two
     # NT calls live in stubs.cpp at kOff{NtAllocate,NtFree}-
     # VirtualMemory.
+    # NtQueryObject + the token family (NtOpenProcessToken,
+    # NtOpenThreadToken, NtQueryInformationToken,
+    # NtAdjustPrivilegesToken) land as userland-only thunks in
+    # ntdll.c (every answer is computable from handle ranges or
+    # static SID blobs). They are NOT listed in KNOWN_MAPPINGS
+    # because they have no SYS_* mapping — the build script's
+    # /export: lines are the source of truth for those.
+
     # Future candidates (filled in as the SYS_* lands)
     # "NtSetInformationFile":      "SYS_FILE_SEEK",   (Position info class)
 }

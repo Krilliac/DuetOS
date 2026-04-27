@@ -1846,6 +1846,194 @@ __declspec(dllexport) NTSTATUS ZwQueryObject(HANDLE Handle, ULONG ObjectInformat
     return NtQueryObject(Handle, ObjectInformationClass, ObjectInformation, ObjectInformationLength, ReturnLength);
 }
 
+/* ------------------------------------------------------------------
+ * Win32 token surface — userland-only static "system token".
+ *
+ * v0 has no auth model; every process runs with the same
+ * effective identity. We expose a single-token handle range
+ * (0xA00..0xA07 reserved; v0 returns 0xA00 unconditionally)
+ * and answer NtQueryInformationToken with constant data
+ * sufficient to keep malware-shape PEs probing the surface
+ * happy:
+ *
+ *   - TokenUser (1)               -> S-1-5-21-1-1-1-1000
+ *   - TokenIntegrityLevel (25)    -> S-1-16-12288 (High)
+ *   - everything else             -> STATUS_NOT_IMPLEMENTED
+ *
+ * NtAdjustPrivilegesToken returns success no-op so callers
+ * that try to enable SeDebugPrivilege get an "OK" — we have
+ * no privilege model to actually grant or refuse.
+ *
+ * NtOpenProcessToken / NtOpenThreadToken always succeed and
+ * hand back the same constant token handle. NtClose on this
+ * handle range is a userland-only no-op (the static token is
+ * never destroyed).
+ * ------------------------------------------------------------------ */
+#define DUETOS_TOKEN_HANDLE ((HANDLE)0xA00)
+
+__declspec(dllexport) NTSTATUS NtOpenProcessToken(HANDLE ProcessHandle, ULONG DesiredAccess, HANDLE* TokenHandle)
+{
+    (void)ProcessHandle;
+    (void)DesiredAccess;
+    if (TokenHandle == (HANDLE*)0)
+        return NTSTATUS_INVALID_PARAMETER;
+    *TokenHandle = DUETOS_TOKEN_HANDLE;
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS ZwOpenProcessToken(HANDLE ProcessHandle, ULONG DesiredAccess, HANDLE* TokenHandle)
+{
+    return NtOpenProcessToken(ProcessHandle, DesiredAccess, TokenHandle);
+}
+
+__declspec(dllexport) NTSTATUS NtOpenProcessTokenEx(HANDLE ProcessHandle, ULONG DesiredAccess, ULONG HandleAttributes,
+                                                    HANDLE* TokenHandle)
+{
+    (void)HandleAttributes;
+    return NtOpenProcessToken(ProcessHandle, DesiredAccess, TokenHandle);
+}
+
+__declspec(dllexport) NTSTATUS NtOpenThreadToken(HANDLE ThreadHandle, ULONG DesiredAccess, BOOL OpenAsSelf,
+                                                 HANDLE* TokenHandle)
+{
+    (void)ThreadHandle;
+    (void)DesiredAccess;
+    (void)OpenAsSelf;
+    if (TokenHandle == (HANDLE*)0)
+        return NTSTATUS_INVALID_PARAMETER;
+    /* No per-thread token impersonation in v0 — return the
+     * same process-wide static token. */
+    *TokenHandle = DUETOS_TOKEN_HANDLE;
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS ZwOpenThreadToken(HANDLE ThreadHandle, ULONG DesiredAccess, BOOL OpenAsSelf,
+                                                 HANDLE* TokenHandle)
+{
+    return NtOpenThreadToken(ThreadHandle, DesiredAccess, OpenAsSelf, TokenHandle);
+}
+
+__declspec(dllexport) NTSTATUS NtOpenThreadTokenEx(HANDLE ThreadHandle, ULONG DesiredAccess, BOOL OpenAsSelf,
+                                                   ULONG HandleAttributes, HANDLE* TokenHandle)
+{
+    (void)HandleAttributes;
+    return NtOpenThreadToken(ThreadHandle, DesiredAccess, OpenAsSelf, TokenHandle);
+}
+
+/* Static SID encoding: rev=1, sub_count, identifier_authority=6 bytes
+ * BIG-ENDIAN (Windows quirk), then sub_count u32 sub-authorities LE. */
+static const unsigned char k_user_sid[28] = {
+    1,    5,             /* rev, sub_count */
+    0,    0, 0, 0, 0, 5, /* IdentifierAuthority = 5 (NT_AUTHORITY) */
+    21,   0, 0, 0,       /* sub-auth 0: 21 */
+    1,    0, 0, 0,       /* sub-auth 1: 1 */
+    1,    0, 0, 0,       /* sub-auth 2: 1 */
+    1,    0, 0, 0,       /* sub-auth 3: 1 */
+    0xE8, 3, 0, 0        /* sub-auth 4: 1000 */
+};
+
+static const unsigned char k_integrity_high_sid[12] = {
+    1, 1,                 /* rev, sub_count */
+    0, 0,    0, 0, 0, 16, /* IdentifierAuthority = 16 (MANDATORY_LABEL_AUTHORITY) */
+    0, 0x30, 0, 0         /* SECURITY_MANDATORY_HIGH_RID = 0x3000 */
+};
+
+__declspec(dllexport) NTSTATUS NtQueryInformationToken(HANDLE TokenHandle, ULONG TokenInformationClass,
+                                                       void* TokenInformation, ULONG TokenInformationLength,
+                                                       ULONG* ReturnLength)
+{
+    (void)TokenHandle; /* v0 has only one token; ignore */
+    /* TOKEN_INFORMATION_CLASS values: */
+    enum
+    {
+        TokenUser = 1,
+        TokenIntegrityLevel = 25
+    };
+    if (TokenInformationClass == TokenUser)
+    {
+        /* TOKEN_USER { SID_AND_ATTRIBUTES User; } where
+         * SID_AND_ATTRIBUTES = { PSID Sid; DWORD Attributes; }.
+         * On x64: 16-byte struct (8-byte ptr + 4-byte attr +
+         * 4-byte padding), followed by the SID body. Layout:
+         *   [0..16) SID_AND_ATTRIBUTES (Sid ptr -> body, attrs=0)
+         *   [16..16+sizeof(sid)) SID body
+         */
+        const unsigned hdr = 16;
+        const unsigned total = hdr + (unsigned)sizeof(k_user_sid);
+        if (ReturnLength != (ULONG*)0)
+            *ReturnLength = total;
+        if (TokenInformationLength < total)
+            return (NTSTATUS)0xC0000023; /* BUFFER_TOO_SMALL */
+        unsigned char* out = (unsigned char*)TokenInformation;
+        void** sid_slot = (void**)(out + 0);
+        *sid_slot = (void*)(out + hdr);
+        out[8] = 0;
+        out[9] = 0;
+        out[10] = 0;
+        out[11] = 0;                     /* Attributes = 0 */
+        for (unsigned i = 0; i < 4; ++i) /* trailing pad */
+            out[12 + i] = 0;
+        for (unsigned i = 0; i < sizeof(k_user_sid); ++i)
+            out[hdr + i] = k_user_sid[i];
+        return NTSTATUS_SUCCESS;
+    }
+    if (TokenInformationClass == TokenIntegrityLevel)
+    {
+        /* TOKEN_MANDATORY_LABEL { SID_AND_ATTRIBUTES Label; }
+         * Same shape as TokenUser; SID body is shorter. */
+        const unsigned hdr = 16;
+        const unsigned total = hdr + (unsigned)sizeof(k_integrity_high_sid);
+        if (ReturnLength != (ULONG*)0)
+            *ReturnLength = total;
+        if (TokenInformationLength < total)
+            return (NTSTATUS)0xC0000023;
+        unsigned char* out = (unsigned char*)TokenInformation;
+        void** sid_slot = (void**)(out + 0);
+        *sid_slot = (void*)(out + hdr);
+        out[8] = 0;
+        out[9] = 0;
+        out[10] = 0;
+        out[11] = 0x20; /* SE_GROUP_INTEGRITY = 0x20 */
+        for (unsigned i = 0; i < 4; ++i)
+            out[12 + i] = 0;
+        for (unsigned i = 0; i < sizeof(k_integrity_high_sid); ++i)
+            out[hdr + i] = k_integrity_high_sid[i];
+        return NTSTATUS_SUCCESS;
+    }
+    return (NTSTATUS)0xC0000002; /* NOT_IMPLEMENTED */
+}
+
+__declspec(dllexport) NTSTATUS ZwQueryInformationToken(HANDLE TokenHandle, ULONG TokenInformationClass,
+                                                       void* TokenInformation, ULONG TokenInformationLength,
+                                                       ULONG* ReturnLength)
+{
+    return NtQueryInformationToken(TokenHandle, TokenInformationClass, TokenInformation, TokenInformationLength,
+                                   ReturnLength);
+}
+
+__declspec(dllexport) NTSTATUS NtAdjustPrivilegesToken(HANDLE TokenHandle, BOOL DisableAllPrivileges, void* NewState,
+                                                       ULONG BufferLength, void* PreviousState, ULONG* ReturnLength)
+{
+    (void)TokenHandle;
+    (void)DisableAllPrivileges;
+    (void)NewState;
+    (void)PreviousState;
+    if (ReturnLength != (ULONG*)0)
+        *ReturnLength = BufferLength; /* "we accepted everything you asked for" */
+    /* No privilege model — every privilege is implicitly granted
+     * (or implicitly disabled when DisableAllPrivileges, which has
+     * no observable effect since we don't gate anything on token
+     * privileges). Sub-GAP: SeDebugPrivilege etc. unobservable. */
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS ZwAdjustPrivilegesToken(HANDLE TokenHandle, BOOL DisableAllPrivileges, void* NewState,
+                                                       ULONG BufferLength, void* PreviousState, ULONG* ReturnLength)
+{
+    return NtAdjustPrivilegesToken(TokenHandle, DisableAllPrivileges, NewState, BufferLength, PreviousState,
+                                   ReturnLength);
+}
+
 __declspec(dllexport) NTSTATUS NtFlushKey(HANDLE KeyHandle)
 {
     long long status;
