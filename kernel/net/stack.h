@@ -530,6 +530,26 @@ bool NetTcpConnect(u32 iface_index, Ipv4Address dst_ip, u16 dst_port, const u8* 
 /// just snapshot the length.
 u32 NetTcpActiveRead(u8* out, u32 cap);
 
+/// Same as NetTcpActiveRead, but starts at byte offset `start`
+/// inside the buffer. The socket layer uses this to track per-
+/// socket read cursors against the shared single-slot RX buffer.
+/// Returns bytes copied (0 if start >= response_len). Caller
+/// reads from `out`; not destructive.
+u32 NetTcpActiveReadAt(u32 start, u8* out, u32 cap);
+
 TcpActiveSnapshot NetTcpActiveSnapshot();
+
+/// Send additional data on the active-connect TCP slot (role =
+/// Client, state = Established). Returns the number of bytes
+/// pushed onto the wire (capped at kTcpMaxCannedReply per call;
+/// caller chunks). Returns 0 on wrong state / wrong role / slot
+/// not in use. Used by the BSD socket layer to honour send()
+/// after connect() completes.
+u32 NetTcpActiveSend(const u8* data, u32 len);
+
+/// Send a FIN on the active-connect slot to half-close the
+/// outgoing direction. Used by SocketShutdown(SHUT_WR). Returns
+/// false if the slot isn't in Established / SynSent state.
+bool NetTcpActiveCloseTx();
 
 } // namespace duetos::net

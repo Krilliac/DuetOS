@@ -76,6 +76,7 @@ _Read this at every session start (after git sync). Each row links to a detailed
 | Network flyout panel — bottom-right Wi-Fi-style popup with hover preview | [knowledge/network-flyout-panel-v0.md](knowledge/network-flyout-panel-v0.md) | Observation + Decision | Active | 2026-04-25 |
 | Wireless driver shells v0 — iwlwifi / rtl88xx / bcm43xx chip-id bring-up | [knowledge/wireless-drivers-v0.md](knowledge/wireless-drivers-v0.md) | Observation + Decision | Active | 2026-04-25 |
 | Live Internet connectivity v0 — DuetOS reaches Google over real DNS + TCP | [knowledge/live-internet-connectivity-v0.md](knowledge/live-internet-connectivity-v0.md) | Observation + Pattern | Active | 2026-04-25 |
+| BSD socket family v0 — Linux ABI socket / bind / connect / send / recv / accept / listen / shutdown + fd-inheritance through fork() | [knowledge/bsd-socket-family-v0.md](knowledge/bsd-socket-family-v0.md) | Observation + Decision | Active | 2026-04-27 |
 | USB CDC-ECM driver + xHCI bulk-transfer API v0 | [knowledge/usb-cdc-ecm-driver-v0.md](knowledge/usb-cdc-ecm-driver-v0.md) | Observation + Decision | Active (probe not auto-called) | 2026-04-25 |
 | USB RNDIS driver + bulk-poll serialization v0 | [knowledge/usb-rndis-driver-v0.md](knowledge/usb-rndis-driver-v0.md) | Observation + Decision | Active (control plane works; bulk concurrency gap) | 2026-04-25 |
 | Kernel entropy pool — RDSEED/RDRAND/splitmix tier | [knowledge/kernel-entropy-v0.md](knowledge/kernel-entropy-v0.md) | Observation | Active | 2026-04-22 |

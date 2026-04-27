@@ -55,6 +55,7 @@
 
 #include "subsystems/linux/linux_syscall_table_generated.h"
 #include "subsystems/linux/syscall_internal.h"
+#include "subsystems/linux/syscall_socket.h"
 #include "syscall/syscall.h"
 
 #include "arch/x86_64/hpet.h"
@@ -1129,13 +1130,63 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
             rv = kEACCES;
             break;
         }
-        if (nr == kSysSocket || nr == kSysSocketpair)
+        switch (nr)
         {
-            rv = -100; // -ENETDOWN — stack not online
-        }
-        else
-        {
-            rv = kEBADF; // no socket fd ever issued
+        case kSysSocket:
+            rv = DoSocket(frame->rdi, frame->rsi, frame->rdx);
+            break;
+        case kSysBind:
+            rv = DoBind(frame->rdi, frame->rsi, frame->rdx);
+            break;
+        case kSysListen:
+            rv = DoListen(frame->rdi, frame->rsi);
+            break;
+        case kSysAccept:
+            rv = DoAccept(frame->rdi, frame->rsi, frame->rdx);
+            break;
+        case kSysAccept4:
+            rv = DoAccept4(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+            break;
+        case kSysConnect:
+            rv = DoConnect(frame->rdi, frame->rsi, frame->rdx);
+            break;
+        case kSysShutdown:
+            rv = DoShutdown(frame->rdi, frame->rsi);
+            break;
+        case kSysGetsockname:
+            rv = DoGetsockname(frame->rdi, frame->rsi, frame->rdx);
+            break;
+        case kSysGetpeername:
+            rv = DoGetpeername(frame->rdi, frame->rsi, frame->rdx);
+            break;
+        case kSysSetsockopt:
+            rv = DoSetsockopt(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+            break;
+        case kSysGetsockopt:
+            rv = DoGetsockopt(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+            break;
+        case kSysSendto:
+            rv = DoSendto(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8, frame->r9);
+            break;
+        case kSysRecvfrom:
+            rv = DoRecvfrom(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8, frame->r9);
+            break;
+        case kSysSendmsg:
+            rv = DoSendmsg(frame->rdi, frame->rsi, frame->rdx);
+            break;
+        case kSysRecvmsg:
+            rv = DoRecvmsg(frame->rdi, frame->rsi, frame->rdx);
+            break;
+        case kSysSendmmsg:
+        case kSysRecvmmsg:
+            // Multi-message variants. v0 forwards just the first
+            // mmsghdr to the single-message handler — sub-GAP for
+            // batch-mode callers.
+            rv = -38; // -ENOSYS
+            break;
+        case kSysSocketpair:
+            rv = DoSocketpair(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+            break;
         }
         break;
     }

@@ -22,15 +22,15 @@ namespace duetos::subsystems::linux
 
 enum class HandlerState : u8
 {
-    Unknown = 0,     // number outside the known ABI range
-    Unimplemented,   // known name, no Do* in syscall.cpp
-    Implemented,     // known name, matching Do* handler exists
+    Unknown = 0,   // number outside the known ABI range
+    Unimplemented, // known name, no Do* in syscall.cpp
+    Implemented,   // known name, matching Do* handler exists
 };
 
 struct LinuxSyscallEntry
 {
     u16 number;
-    u8 args;            // 0..6
+    u8 args; // 0..6
     HandlerState state;
     const char* name;
 };
@@ -413,8 +413,7 @@ inline constexpr LinuxSyscallEntry kLinuxSyscalls[] = {
     {462, 3, HandlerState::Unimplemented, "mseal"},
 };
 
-inline constexpr u32 kLinuxSyscallCount =
-    sizeof(kLinuxSyscalls) / sizeof(kLinuxSyscalls[0]);
+inline constexpr u32 kLinuxSyscallCount = sizeof(kLinuxSyscalls) / sizeof(kLinuxSyscalls[0]);
 
 inline constexpr u32 kLinuxSyscallMaxNumber = 462;
 

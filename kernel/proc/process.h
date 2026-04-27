@@ -302,6 +302,7 @@ struct Process
         // state 3 = pipe-read end  → first_cluster = pipe pool idx
         // state 4 = pipe-write end → first_cluster = pipe pool idx
         // state 5 = eventfd        → first_cluster = eventfd pool idx
+        // state 6 = socket         → first_cluster = socket pool idx
         // first_cluster is reused as a generic "pool index" slot
         // for the non-file states; all non-file callers must
         // ignore size/offset/path.

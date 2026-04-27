@@ -23,6 +23,7 @@
 
 #include "subsystems/linux/syscall_internal.h"
 #include "subsystems/linux/syscall_pipe.h"
+#include "subsystems/linux/syscall_socket.h"
 
 #include "arch/x86_64/serial.h"
 #include "proc/process.h"
@@ -73,6 +74,9 @@ i64 DoWrite(u64 fd, u64 user_buf, u64 len)
     // Eventfd → dispatch to eventfd pool (counter add).
     if (p->linux_fds[fd].state == 5)
         return EventfdWrite(p->linux_fds[fd].first_cluster, user_buf, len);
+    // Socket → dispatch to socket layer.
+    if (p->linux_fds[fd].state == 6)
+        return SocketFdWrite(p->linux_fds[fd].first_cluster, user_buf, len);
     // Pipe-read end is read-only.
     if (p->linux_fds[fd].state == 3)
         return kEBADF;
@@ -177,6 +181,9 @@ i64 DoRead(u64 fd, u64 user_buf, u64 len)
     // Eventfd → dispatch to eventfd pool (counter read).
     if (p->linux_fds[fd].state == 5)
         return EventfdRead(p->linux_fds[fd].first_cluster, user_buf, len);
+    // Socket → dispatch to socket layer.
+    if (p->linux_fds[fd].state == 6)
+        return SocketFdRead(p->linux_fds[fd].first_cluster, user_buf, len);
     // Pipe-write end is write-only.
     if (p->linux_fds[fd].state == 4)
         return kEBADF;

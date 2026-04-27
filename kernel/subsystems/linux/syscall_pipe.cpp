@@ -152,6 +152,28 @@ void PipeMaybeFree(u32 idx)
 
 } // namespace
 
+void PipeRetainRead(u32 idx)
+{
+    if (idx >= kPipePoolCap)
+        return;
+    arch::Cli();
+    Pipe& p = g_pipe_pool[idx];
+    if (p.in_use)
+        ++p.read_refs;
+    arch::Sti();
+}
+
+void PipeRetainWrite(u32 idx)
+{
+    if (idx >= kPipePoolCap)
+        return;
+    arch::Cli();
+    Pipe& p = g_pipe_pool[idx];
+    if (p.in_use)
+        ++p.write_refs;
+    arch::Sti();
+}
+
 void PipeReleaseRead(u32 idx)
 {
     if (idx >= kPipePoolCap)
@@ -298,6 +320,17 @@ i32 EventfdAlloc(u64 initval, u32 flags)
 }
 
 } // namespace
+
+void EventfdRetain(u32 idx)
+{
+    if (idx >= kEventfdPoolCap)
+        return;
+    arch::Cli();
+    Eventfd& e = g_eventfd_pool[idx];
+    if (e.in_use)
+        ++e.refs;
+    arch::Sti();
+}
 
 void EventfdRelease(u32 idx)
 {

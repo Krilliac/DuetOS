@@ -30,6 +30,8 @@
  */
 
 #include "subsystems/linux/syscall_internal.h"
+#include "subsystems/linux/syscall_pipe.h"
+#include "subsystems/linux/syscall_socket.h"
 
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/serial.h"
@@ -144,6 +146,28 @@ i64 DoFork()
     child->linux_brk_base = parent->linux_brk_base;
     child->linux_brk_current = parent->linux_brk_current;
     child->linux_mmap_cursor = parent->linux_mmap_cursor;
+
+    // fd inheritance — every parent fd survives into the child.
+    // Linux semantics: dup() shares the file description; we
+    // approximate by copying the slot verbatim and bumping
+    // refcounts on pool-backed states (pipe / eventfd / socket)
+    // so the kernel object outlives the parent's close().
+    // FAT32 file handles share first_cluster + path but track
+    // their own per-fd offset — copying the slot achieves that.
+    // CLOEXEC is a sub-GAP; every fd survives unconditionally.
+    for (u32 i = 0; i < 16; ++i)
+    {
+        const auto& src = parent->linux_fds[i];
+        child->linux_fds[i] = src;
+        if (src.state == 3)
+            PipeRetainRead(src.first_cluster);
+        else if (src.state == 4)
+            PipeRetainWrite(src.first_cluster);
+        else if (src.state == 5)
+            EventfdRetain(src.first_cluster);
+        else if (src.state == 6)
+            SocketFdRetain(src.first_cluster);
+    }
     // Hand a LinuxCloneDesc to the existing LinuxCloneEntry —
     // it iretq's into ring-3 with rax = 0 (EnterUserModeThread's
     // built-in scrub), exactly the contract Linux fork wants for

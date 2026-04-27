@@ -1,4 +1,19 @@
-/* ws2_32.dll — Winsock. No networking in v0; all ops fail. */
+/*
+ * ws2_32.dll — Winsock 2 facade backed by the kernel socket pool.
+ *
+ * Per the subsystem isolation rule, this DLL is a facade: every
+ * call trampolines through int 0x80 → SYS_SOCKET_OP (153) and
+ * the kernel arbitrates the gate (kCapNet) + the actual I/O.
+ *
+ * SOCKET = kernel socket pool index (small unsigned int). The
+ * pool cap is 8; INVALID_SOCKET is 0xFFFFFFFF.
+ *
+ * Errno mapping: SYS_SOCKET_OP returns negative Linux errno on
+ * failure. We translate to Win32 Winsock codes (WSAExxx) and
+ * stash in g_wsa_last_error so WSAGetLastError() reflects
+ * the most recent failure.
+ */
+
 typedef int INT;
 typedef unsigned int SOCKET;
 typedef int BOOL;
@@ -7,13 +22,109 @@ typedef unsigned short USHORT;
 
 #define INVALID_SOCKET (~(SOCKET)0)
 #define SOCKET_ERROR (-1)
+
+#define WSAEINTR 10004
+#define WSAEBADF 10009
+#define WSAEACCES 10013
+#define WSAEFAULT 10014
+#define WSAEINVAL 10022
+#define WSAEMFILE 10024
+#define WSAEWOULDBLOCK 10035
+#define WSAEMSGSIZE 10040
+#define WSAEAFNOSUPPORT 10047
+#define WSAEADDRINUSE 10048
+#define WSAEADDRNOTAVAIL 10049
 #define WSAENETDOWN 10050
+#define WSAENETUNREACH 10051
+#define WSAENOTCONN 10057
+#define WSAESHUTDOWN 10058
+
+static int g_wsa_last_error = 0;
+
+static int wsa_translate_errno(long long e)
+{
+    /* e is negative; abs is the Linux errno. */
+    int v = -(int)e;
+    switch (v)
+    {
+    case 9:
+        return WSAEBADF;
+    case 11:
+        return WSAEWOULDBLOCK;
+    case 13:
+        return WSAEACCES;
+    case 14:
+        return WSAEFAULT;
+    case 22:
+        return WSAEINVAL;
+    case 23:
+        return WSAEMFILE;
+    case 32:
+        return WSAESHUTDOWN;
+    case 88:
+        return WSAEINVAL;
+    case 89:
+        return WSAEADDRNOTAVAIL;
+    case 93:
+        return WSAEAFNOSUPPORT;
+    case 95:
+        return WSAEINVAL;
+    case 97:
+        return WSAEAFNOSUPPORT;
+    case 98:
+        return WSAEADDRINUSE;
+    case 100:
+        return WSAENETDOWN;
+    case 101:
+        return WSAENETUNREACH;
+    case 107:
+        return WSAENOTCONN;
+    default:
+        return WSAEINVAL;
+    }
+}
+
+/* Six-arg syscall trampoline. SYS_SOCKET_OP = 153.
+ *   rdi = op
+ *   rsi = arg1
+ *   rdx = arg2
+ *   r10 = arg3
+ *   r8  = arg4
+ *   r9  = arg5
+ * Returns kernel result (negative on errno failure, non-negative otherwise). */
+static long long ws2_op(long long op, long long a1, long long a2, long long a3, long long a4, long long a5)
+{
+    long long rv;
+    __asm__ volatile("mov %4, %%r10\n\t"
+                     "mov %5, %%r8\n\t"
+                     "mov %6, %%r9\n\t"
+                     "int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)153), "D"(op), "S"(a1), "d"(a2), "r"(a3), "r"(a4), "r"(a5)
+                     : "r10", "r8", "r9", "memory");
+    return rv;
+}
 
 __declspec(dllexport) INT WSAStartup(USHORT req_ver, void* wsa_data)
 {
+    /* Touch the optional WSADATA so callers passing a real
+     * struct see deterministic bytes. The Win32 contract is
+     * "filled with version + system status"; v0 zero-fills the
+     * caller-provided 408-byte struct (wHighVersion = req_ver,
+     * wVersion = req_ver, szDescription / szSystemStatus empty). */
     (void)req_ver;
-    (void)wsa_data;
-    return WSAENETDOWN;
+    if (wsa_data != (void*)0)
+    {
+        unsigned char* p = (unsigned char*)wsa_data;
+        for (int i = 0; i < 408; ++i)
+            p[i] = 0;
+        p[0] = (unsigned char)(req_ver & 0xFF);
+        p[1] = (unsigned char)((req_ver >> 8) & 0xFF);
+        p[2] = (unsigned char)(req_ver & 0xFF);
+        p[3] = (unsigned char)((req_ver >> 8) & 0xFF);
+    }
+    g_wsa_last_error = 0;
+    return 0; /* success */
 }
 __declspec(dllexport) INT WSACleanup(void)
 {
@@ -21,96 +132,134 @@ __declspec(dllexport) INT WSACleanup(void)
 }
 __declspec(dllexport) INT WSAGetLastError(void)
 {
-    return WSAENETDOWN;
+    return g_wsa_last_error;
 }
 __declspec(dllexport) void WSASetLastError(INT err)
 {
-    (void)err;
+    g_wsa_last_error = err;
 }
 
 __declspec(dllexport) SOCKET socket(INT af, INT type, INT proto)
 {
-    (void)af;
-    (void)type;
     (void)proto;
-    return INVALID_SOCKET;
+    long long rv = ws2_op(1 /* kSockOpCreate */, (long long)af, (long long)type, 0, 0, 0);
+    if (rv < 0)
+    {
+        g_wsa_last_error = wsa_translate_errno(rv);
+        return INVALID_SOCKET;
+    }
+    return (SOCKET)rv;
 }
 __declspec(dllexport) INT closesocket(SOCKET s)
 {
-    (void)s;
+    long long rv = ws2_op(9 /* kSockOpClose */, (long long)s, 0, 0, 0, 0);
+    if (rv < 0)
+    {
+        g_wsa_last_error = wsa_translate_errno(rv);
+        return SOCKET_ERROR;
+    }
     return 0;
 }
 __declspec(dllexport) INT bind(SOCKET s, const void* addr, INT cb)
 {
-    (void)s;
-    (void)addr;
-    (void)cb;
-    return SOCKET_ERROR;
+    long long rv = ws2_op(2 /* kSockOpBind */, (long long)s, (long long)addr, (long long)cb, 0, 0);
+    if (rv < 0)
+    {
+        g_wsa_last_error = wsa_translate_errno(rv);
+        return SOCKET_ERROR;
+    }
+    return 0;
 }
 __declspec(dllexport) INT listen(SOCKET s, INT backlog)
 {
-    (void)s;
-    (void)backlog;
-    return SOCKET_ERROR;
+    long long rv = ws2_op(4 /* kSockOpListen */, (long long)s, (long long)backlog, 0, 0, 0);
+    if (rv < 0)
+    {
+        g_wsa_last_error = wsa_translate_errno(rv);
+        return SOCKET_ERROR;
+    }
+    return 0;
 }
 __declspec(dllexport) INT connect(SOCKET s, const void* addr, INT cb)
 {
-    (void)s;
-    (void)addr;
-    (void)cb;
-    return SOCKET_ERROR;
+    long long rv = ws2_op(3 /* kSockOpConnect */, (long long)s, (long long)addr, (long long)cb, 0, 0);
+    if (rv < 0)
+    {
+        g_wsa_last_error = wsa_translate_errno(rv);
+        return SOCKET_ERROR;
+    }
+    return 0;
 }
 __declspec(dllexport) SOCKET accept(SOCKET s, void* addr, INT* cb)
 {
-    (void)s;
-    (void)addr;
-    (void)cb;
-    return INVALID_SOCKET;
+    long long rv = ws2_op(5 /* kSockOpAccept */, (long long)s, (long long)addr, (long long)cb, 0, 0);
+    if (rv < 0)
+    {
+        g_wsa_last_error = wsa_translate_errno(rv);
+        return INVALID_SOCKET;
+    }
+    return (SOCKET)rv;
 }
 __declspec(dllexport) INT send(SOCKET s, const void* buf, INT len, INT flags)
 {
-    (void)s;
-    (void)buf;
-    (void)len;
     (void)flags;
-    return SOCKET_ERROR;
+    long long rv = ws2_op(6 /* kSockOpSendto */, (long long)s, (long long)buf, (long long)len, 0, 0);
+    if (rv < 0)
+    {
+        g_wsa_last_error = wsa_translate_errno(rv);
+        return SOCKET_ERROR;
+    }
+    return (INT)rv;
 }
 __declspec(dllexport) INT recv(SOCKET s, void* buf, INT len, INT flags)
 {
-    (void)s;
-    (void)buf;
-    (void)len;
     (void)flags;
-    return SOCKET_ERROR;
+    long long rv = ws2_op(7 /* kSockOpRecvfrom */, (long long)s, (long long)buf, (long long)len, 0, 0);
+    if (rv < 0)
+    {
+        g_wsa_last_error = wsa_translate_errno(rv);
+        return SOCKET_ERROR;
+    }
+    return (INT)rv;
 }
 __declspec(dllexport) INT sendto(SOCKET s, const void* buf, INT len, INT flags, const void* addr, INT cb)
 {
-    (void)s;
-    (void)buf;
-    (void)len;
     (void)flags;
-    (void)addr;
-    (void)cb;
-    return SOCKET_ERROR;
+    long long rv =
+        ws2_op(6 /* kSockOpSendto */, (long long)s, (long long)buf, (long long)len, (long long)addr, (long long)cb);
+    if (rv < 0)
+    {
+        g_wsa_last_error = wsa_translate_errno(rv);
+        return SOCKET_ERROR;
+    }
+    return (INT)rv;
 }
 __declspec(dllexport) INT recvfrom(SOCKET s, void* buf, INT len, INT flags, void* addr, INT* cb)
 {
-    (void)s;
-    (void)buf;
-    (void)len;
     (void)flags;
-    (void)addr;
-    (void)cb;
-    return SOCKET_ERROR;
+    long long rv =
+        ws2_op(7 /* kSockOpRecvfrom */, (long long)s, (long long)buf, (long long)len, (long long)addr, (long long)cb);
+    if (rv < 0)
+    {
+        g_wsa_last_error = wsa_translate_errno(rv);
+        return SOCKET_ERROR;
+    }
+    return (INT)rv;
 }
 __declspec(dllexport) INT shutdown(SOCKET s, INT how)
 {
-    (void)s;
-    (void)how;
+    long long rv = ws2_op(8 /* kSockOpShutdown */, (long long)s, (long long)how, 0, 0, 0);
+    if (rv < 0)
+    {
+        g_wsa_last_error = wsa_translate_errno(rv);
+        return SOCKET_ERROR;
+    }
     return 0;
 }
 __declspec(dllexport) INT setsockopt(SOCKET s, INT lvl, INT opt, const void* v, INT vl)
 {
+    /* Kernel-side accept-and-ignore — return success without
+     * issuing a syscall. Sub-GAP: real options aren't honoured. */
     (void)s;
     (void)lvl;
     (void)opt;
@@ -124,17 +273,21 @@ __declspec(dllexport) INT getsockopt(SOCKET s, INT lvl, INT opt, void* v, INT* v
     (void)lvl;
     (void)opt;
     (void)v;
-    (void)vl;
+    if (vl)
+        *vl = 0;
     return 0;
 }
 __declspec(dllexport) INT select(INT nfds, void* rfd, void* wfd, void* efd, const void* tv)
 {
+    /* No multiplex primitive in v0; return timeout (0) so callers
+     * busy-loop with their own polling. Sub-GAP: real select needs
+     * the epoll slice. */
     (void)nfds;
     (void)rfd;
     (void)wfd;
     (void)efd;
     (void)tv;
-    return 0; /* timeout */
+    return 0;
 }
 __declspec(dllexport) USHORT htons(USHORT v)
 {
@@ -155,9 +308,6 @@ __declspec(dllexport) DWORD ntohl(DWORD v)
 
 __declspec(dllexport) DWORD inet_addr(const char* s)
 {
-    /* Parse "a.b.c.d" — dotted-decimal IPv4 — into a network-
-     * order DWORD. INADDR_NONE (0xFFFFFFFF) on any parse failure
-     * (matches Win32). Pure-logic helper; no network needed. */
     if (!s)
         return 0xFFFFFFFFu;
     DWORD parts[4] = {0, 0, 0, 0};
@@ -190,19 +340,12 @@ __declspec(dllexport) DWORD inet_addr(const char* s)
     }
     if (idx != 4)
         return 0xFFFFFFFFu;
-    /* Network byte order: big-endian. */
     return (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3];
 }
 
-/* inet_ntoa — convert network-order DWORD-shaped struct in_addr
- * to dotted-decimal in a static buffer. The Win32 contract is
- * "buffer reused across calls; not thread-safe" — we honour that. */
 __declspec(dllexport) const char* inet_ntoa(DWORD addr)
 {
     static char buf[16];
-    /* Win32 passes struct in_addr by value, which lays out the
-     * 4 bytes in host order (a in low byte, d in high byte) on
-     * little-endian. Format as a.b.c.d. */
     unsigned int b0 = (addr >> 0) & 0xFFu;
     unsigned int b1 = (addr >> 8) & 0xFFu;
     unsigned int b2 = (addr >> 16) & 0xFFu;
@@ -233,13 +376,11 @@ __declspec(dllexport) const char* inet_ntoa(DWORD addr)
 
 __declspec(dllexport) INT inet_pton(INT af, const char* src, void* dst)
 {
-    if (af != 2 /* AF_INET */ || !src || !dst)
+    if (af != 2 || !src || !dst)
         return 0;
     DWORD a = inet_addr(src);
     if (a == 0xFFFFFFFFu)
     {
-        /* "255.255.255.255" is a legitimate value — re-check
-         * literally to disambiguate from the error sentinel. */
         const char broadcast[] = "255.255.255.255";
         for (int i = 0;; ++i)
         {
@@ -249,8 +390,6 @@ __declspec(dllexport) INT inet_pton(INT af, const char* src, void* dst)
                 return 0;
         }
     }
-    /* in_addr stores the 4 bytes in network order from MSB to
-     * LSB, so re-pack from inet_addr's network-order DWORD. */
     unsigned char* d = (unsigned char*)dst;
     d[0] = (unsigned char)(a >> 24);
     d[1] = (unsigned char)(a >> 16);
@@ -261,10 +400,9 @@ __declspec(dllexport) INT inet_pton(INT af, const char* src, void* dst)
 
 __declspec(dllexport) const char* inet_ntop(INT af, const void* src, char* dst, INT size)
 {
-    if (af != 2 /* AF_INET */ || !src || !dst || size < 16)
+    if (af != 2 || !src || !dst || size < 16)
         return (const char*)0;
     const unsigned char* s = (const unsigned char*)src;
-    /* Reuse inet_ntoa's formatter via an intermediate DWORD. */
     DWORD packed = (DWORD)s[0] | ((DWORD)s[1] << 8) | ((DWORD)s[2] << 16) | ((DWORD)s[3] << 24);
     const char* str = inet_ntoa(packed);
     int i = 0;
@@ -305,7 +443,6 @@ __declspec(dllexport) void freeaddrinfo(void* r)
     (void)r;
 }
 
-/* htonll / ntohll — 64-bit byte-swap helpers (Vista+). Pure logic. */
 __declspec(dllexport) unsigned long long htonll(unsigned long long v)
 {
     return ((v & 0xFFULL) << 56) | ((v & 0xFF00ULL) << 40) | ((v & 0xFF0000ULL) << 24) | ((v & 0xFF000000ULL) << 8) |
@@ -317,7 +454,6 @@ __declspec(dllexport) unsigned long long ntohll(unsigned long long v)
     return htonll(v);
 }
 
-/* WSAEnumProtocols / GetProtocolByNumber: empty list. */
 __declspec(dllexport) INT WSAEnumProtocolsA(INT* lpiProtocols, void* lpProtocolBuffer, DWORD* lpdwBufferLength)
 {
     (void)lpiProtocols;
@@ -372,18 +508,22 @@ __declspec(dllexport) INT ioctlsocket(SOCKET s, long cmd, DWORD* argp)
 
 __declspec(dllexport) INT getsockname(SOCKET s, void* addr, INT* cb)
 {
-    (void)s;
-    (void)addr;
-    if (cb)
-        *cb = 0;
-    return SOCKET_ERROR;
+    long long rv = ws2_op(10 /* kSockOpGetSock */, (long long)s, (long long)addr, (long long)cb, 0, 0);
+    if (rv < 0)
+    {
+        g_wsa_last_error = wsa_translate_errno(rv);
+        return SOCKET_ERROR;
+    }
+    return 0;
 }
 
 __declspec(dllexport) INT getpeername(SOCKET s, void* addr, INT* cb)
 {
-    (void)s;
-    (void)addr;
-    if (cb)
-        *cb = 0;
-    return SOCKET_ERROR;
+    long long rv = ws2_op(11 /* kSockOpGetPeer */, (long long)s, (long long)addr, (long long)cb, 0, 0);
+    if (rv < 0)
+    {
+        g_wsa_last_error = wsa_translate_errno(rv);
+        return SOCKET_ERROR;
+    }
+    return 0;
 }
