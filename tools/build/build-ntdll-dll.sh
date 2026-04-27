@@ -110,8 +110,16 @@ set +e
     /export:ZwQueryVolumeInformationFile=NtReturnNotImpl \
     /export:NtProtectVirtualMemory=NtReturnNotImpl \
     /export:ZwProtectVirtualMemory=NtReturnNotImpl \
-    /export:NtQueryVirtualMemory=NtReturnNotImpl \
-    /export:ZwQueryVirtualMemory=NtReturnNotImpl \
+    `# Real cross-process VM read/write/query — back SYS_PROCESS_VM_*.` \
+    `# Together with NtOpenProcess they form the v0 cross-AS VM` \
+    `# triad: open a handle, then read/write/query inside that target's` \
+    `# address space without ever leaving the syscall surface.` \
+    /export:NtReadVirtualMemory \
+    /export:ZwReadVirtualMemory=NtReadVirtualMemory \
+    /export:NtWriteVirtualMemory \
+    /export:ZwWriteVirtualMemory=NtWriteVirtualMemory \
+    /export:NtQueryVirtualMemory \
+    /export:ZwQueryVirtualMemory=NtQueryVirtualMemory \
     /export:NtCreateEvent=NtReturnNotImpl \
     /export:ZwCreateEvent=NtReturnNotImpl \
     /export:NtCreateMutant=NtReturnNotImpl \

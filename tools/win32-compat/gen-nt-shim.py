@@ -72,14 +72,18 @@ KNOWN_MAPPINGS = {
     "NtOpenKeyEx":                 "SYS_REGISTRY",         # same shape; access mask ignored in v0
     "NtQueryValueKey":             "SYS_REGISTRY",         # op=kOpQueryValue (3)
 
-    # Cross-process — NtOpenProcess only for the v0 slice. The
-    # NtRead / NtWrite / NtQueryVirtualMemory entries land in
-    # follow-ups (each needs cross-AS PML4 walking + PhysToVirt
-    # bouncing through the direct map). NtOpenProcess maps to
-    # SYS_PROCESS_OPEN; the kernel cap-gates on kCapDebug, holds
-    # a refcount on the target via ProcessRetain, and CloseHandle
-    # / NtClose's range dispatch in DoFileClose drops it.
+    # Cross-process VM family. NtOpenProcess produces the handle;
+    # NtRead / NtWrite / NtQueryVirtualMemory consume it. All four
+    # cap-gate on kCapDebug — cross-AS inspection is one privilege
+    # class. The kernel walks the target's `AddressSpace` regions
+    # table page-by-page, bounces bytes through `mm::PhysToVirt`'s
+    # direct map, and surfaces partial copies via the bytes-moved
+    # out-pointer. See syscall.h's SYS_PROCESS_VM_* docblocks for
+    # the byte-level argument layout.
     "NtOpenProcess":               "SYS_PROCESS_OPEN",
+    "NtReadVirtualMemory":         "SYS_PROCESS_VM_READ",
+    "NtWriteVirtualMemory":        "SYS_PROCESS_VM_WRITE",
+    "NtQueryVirtualMemory":        "SYS_PROCESS_VM_QUERY",
     # NtCreateKey / NtSetValueKey / NtDeleteKey / NtDeleteValueKey:
     # NotImpl on purpose — registry is read-only in v0. Mapping
     # them to SYS_REGISTRY's read-only Open op would silently lie
@@ -90,13 +94,10 @@ KNOWN_MAPPINGS = {
     # subkey arrays; deferred.
     # NtFlushKey / NtNotifyChangeKey: NotImpl on purpose — there
     # is no journal to flush and no change-notification machinery.
-    # NtWriteVirtualMemory / NtReadVirtualMemory: NotImpl on purpose.
-    # Previous mappings (SYS_WRITE / SYS_READ) silently corrupted callers
-    # by treating the target PID handle as a file descriptor — cross-AS
-    # writes never landed where the caller intended, and an arbitrary
-    # fd matching the handle value would receive the bytes instead.
-    # Until a real cross-AS read/write primitive exists, NotImpl is
-    # honest. See .claude/knowledge/stub-gap-inventory-v0.md §1.2.
+    # NtWriteVirtualMemory / NtReadVirtualMemory / NtQueryVirtualMemory:
+    # promoted from NotImpl to real syscalls (SYS_PROCESS_VM_*) above.
+    # The historical buggy mappings (SYS_WRITE / SYS_READ) are gone;
+    # see .claude/knowledge/stub-gap-inventory-v0.md §11.6.
     #
     # NtCreateSemaphore / NtReleaseSemaphore: NotImpl on purpose.
     # Previous mappings (SYS_EVENT_CREATE / SYS_EVENT_SET) collapsed

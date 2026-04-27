@@ -57,6 +57,7 @@
 #include "fs/vfs.h"
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
+#include "mm/page.h"
 #include "mm/paging.h"
 #include "sched/sched.h"
 #include "subsystems/graphics/graphics.h"
@@ -104,6 +105,160 @@ constexpr u8 kSyscallVector = 0x80;
 // the truncation — standard POSIX write() semantics.
 constexpr u64 kSyscallWriteMax = 256;
 // kSyscallPathMax now in syscall.h
+
+// Cross-AS VM transfer direction. Read = target → caller buffer;
+// Write = caller buffer → target.
+enum class CrossAsDir
+{
+    Read,
+    Write,
+};
+
+// Walk `target`'s region table page-by-page, copy `len` bytes
+// between `target_va` (in `target->as`) and `caller_buf` (in the
+// active AS — i.e. the syscall caller's). Stops at the first
+// unmapped target page; the count actually moved is returned via
+// `out_bytes`. Returns true iff the full requested length was
+// transferred.
+//
+// Both buffers may straddle page boundaries on either side. The
+// loop chunks against the smaller of "remaining target page" /
+// "remaining caller-side run we want to copy" (we always copy
+// the same byte count on both sides — only the page geometry
+// matters for the chunking).
+//
+// Caller-side I/O still goes through CopyFromUser / CopyToUser,
+// so SMAP gating + range validation happen there for free.
+bool CrossAsTransfer(Process* target, u64 target_va, void* caller_buf, u64 len, CrossAsDir dir, u64* out_bytes)
+{
+    *out_bytes = 0;
+    if (target == nullptr || target->as == nullptr || len == 0)
+    {
+        return len == 0; // zero-length is trivially full success
+    }
+
+    u64 remaining = len;
+    u64 t_va = target_va;
+    auto* c_byte = static_cast<u8*>(caller_buf);
+
+    while (remaining > 0)
+    {
+        const u64 page_va = t_va & ~0xFFFULL;
+        const u64 page_off = t_va - page_va;
+        const u64 chunk = (remaining < (mm::kPageSize - page_off)) ? remaining : (mm::kPageSize - page_off);
+
+        const mm::PhysAddr frame = mm::AddressSpaceLookupUserFrame(target->as, page_va);
+        if (frame == mm::kNullFrame)
+        {
+            return false; // partial copy; caller surfaces what we did move
+        }
+        auto* direct = static_cast<u8*>(mm::PhysToVirt(frame)) + page_off;
+
+        if (dir == CrossAsDir::Read)
+        {
+            // target → caller. Copy from kernel direct map into a
+            // bounce, then CopyToUser into the caller's buffer.
+            // Use a small on-stack bounce so we don't have to
+            // think about CopyToUser tolerating the source being
+            // a kernel direct-map alias of a user frame (it does,
+            // but the bounce keeps the contract obvious).
+            u8 bounce[256];
+            u64 moved = 0;
+            while (moved < chunk)
+            {
+                const u64 step = (chunk - moved < sizeof(bounce)) ? (chunk - moved) : sizeof(bounce);
+                for (u64 b = 0; b < step; ++b)
+                {
+                    bounce[b] = direct[moved + b];
+                }
+                if (!mm::CopyToUser(c_byte + moved, bounce, step))
+                {
+                    return false;
+                }
+                moved += step;
+            }
+        }
+        else
+        {
+            // caller → target. CopyFromUser into a bounce, write
+            // through the kernel direct map into the target frame.
+            u8 bounce[256];
+            u64 moved = 0;
+            while (moved < chunk)
+            {
+                const u64 step = (chunk - moved < sizeof(bounce)) ? (chunk - moved) : sizeof(bounce);
+                if (!mm::CopyFromUser(bounce, c_byte + moved, step))
+                {
+                    return false;
+                }
+                for (u64 b = 0; b < step; ++b)
+                {
+                    direct[moved + b] = bounce[b];
+                }
+                moved += step;
+            }
+        }
+
+        *out_bytes += chunk;
+        t_va += chunk;
+        c_byte += chunk;
+        remaining -= chunk;
+    }
+    return true;
+}
+
+// Resolve a Win32 process handle (kWin32ProcessBase + idx) on
+// `caller` to the `Process*` it refers to. Returns nullptr on
+// any out-of-range / not-in-use handle.
+Process* LookupProcessHandle(Process* caller, u64 handle)
+{
+    if (caller == nullptr || handle < Process::kWin32ProcessBase)
+    {
+        return nullptr;
+    }
+    const u64 idx = handle - Process::kWin32ProcessBase;
+    if (idx >= Process::kWin32ProcessCap)
+    {
+        return nullptr;
+    }
+    if (!caller->win32_proc_handles[idx].in_use)
+    {
+        return nullptr;
+    }
+    return caller->win32_proc_handles[idx].target;
+}
+
+// Win32 NTSTATUS values used by the cross-process VM family.
+// Matches winnt.h conventions for the few statuses we surface.
+constexpr u64 kStatusSuccess = 0;
+constexpr u64 kStatusAccessViolation = 0xC0000005ULL;
+constexpr u64 kStatusInvalidHandle = 0xC0000008ULL;
+constexpr u64 kStatusInvalidParameter = 0xC000000DULL;
+constexpr u64 kStatusAccessDenied = 0xC0000022ULL;
+
+// Layout the SYS_PROCESS_VM_QUERY caller buffer must conform to.
+// Byte-compatible with the prefix of MEMORY_BASIC_INFORMATION
+// that v0 actually populates. Each field is the same size and
+// offset as the matching Win32 field; the trailing bytes (Type,
+// AllocationProtect alignment) are reserved for future growth.
+struct Win32MemoryBasicInfo
+{
+    u64 base_address;       // 4 KiB-aligned page start
+    u64 allocation_base;    // == base_address in v0
+    u32 allocation_protect; // PAGE_READWRITE for any mapped page
+    u32 _pad0;
+    u64 region_size; // 4096 in v0 (no coalescing)
+    u32 state;       // MEM_COMMIT / MEM_FREE
+    u32 protect;     // == allocation_protect
+    u32 type;        // MEM_PRIVATE
+    u32 _pad1;
+};
+static_assert(sizeof(Win32MemoryBasicInfo) == 48, "Win32MemoryBasicInfo layout");
+
+constexpr u32 kMemCommit = 0x1000;
+constexpr u32 kMemFree = 0x10000;
+constexpr u32 kMemPrivate = 0x20000;
+constexpr u32 kPageReadWrite = 0x04;
 
 // Pretty-printer for boot diagnostics — the Warn path for an
 // unrecognised syscall number should be noisy enough to catch during
@@ -358,6 +513,102 @@ void SyscallDispatch(arch::TrapFrame* frame)
         caller->win32_proc_handles[idx].in_use = true;
         caller->win32_proc_handles[idx].target = target;
         frame->rax = Process::kWin32ProcessBase + idx;
+        return;
+    }
+
+    case SYS_PROCESS_VM_READ:
+    case SYS_PROCESS_VM_WRITE:
+    {
+        Process* caller = CurrentProcess();
+        if (caller == nullptr || !CapSetHas(caller->caps, kCapDebug))
+        {
+            RecordSandboxDenial(kCapDebug);
+            frame->rax = kStatusAccessDenied;
+            return;
+        }
+        Process* target = LookupProcessHandle(caller, frame->rdi);
+        if (target == nullptr)
+        {
+            frame->rax = kStatusInvalidHandle;
+            return;
+        }
+        const u64 target_va = frame->rsi;
+        void* caller_buf = reinterpret_cast<void*>(frame->rdx);
+        u64 len = frame->r10;
+        const u64 bytes_out_va = frame->r8;
+
+        if (len > kSyscallProcessVmMax)
+        {
+            len = kSyscallProcessVmMax;
+        }
+
+        u64 moved = 0;
+        const bool ok = CrossAsTransfer(target, target_va, caller_buf, len,
+                                        (num == SYS_PROCESS_VM_READ) ? CrossAsDir::Read : CrossAsDir::Write, &moved);
+
+        if (bytes_out_va != 0)
+        {
+            // Best-effort writeback. If the caller's out-pointer
+            // is bogus the transfer status still carries the
+            // truth in rax — we don't escalate a writeback miss
+            // into a different NTSTATUS.
+            mm::CopyToUser(reinterpret_cast<void*>(bytes_out_va), &moved, sizeof(moved));
+        }
+
+        frame->rax = ok ? kStatusSuccess : kStatusAccessViolation;
+        return;
+    }
+
+    case SYS_PROCESS_VM_QUERY:
+    {
+        Process* caller = CurrentProcess();
+        if (caller == nullptr || !CapSetHas(caller->caps, kCapDebug))
+        {
+            RecordSandboxDenial(kCapDebug);
+            frame->rax = kStatusAccessDenied;
+            return;
+        }
+        Process* target = LookupProcessHandle(caller, frame->rdi);
+        if (target == nullptr)
+        {
+            frame->rax = kStatusInvalidHandle;
+            return;
+        }
+        const u64 probe_va = frame->rsi;
+        void* out_user = reinterpret_cast<void*>(frame->rdx);
+        if (out_user == nullptr)
+        {
+            frame->rax = kStatusInvalidParameter;
+            return;
+        }
+
+        const u64 page_va = probe_va & ~0xFFFULL;
+        const mm::PhysAddr frame_pa = mm::AddressSpaceLookupUserFrame(target->as, page_va);
+        Win32MemoryBasicInfo info{};
+        info.base_address = page_va;
+        info.allocation_base = page_va;
+        info.region_size = mm::kPageSize;
+        if (frame_pa != mm::kNullFrame)
+        {
+            info.state = kMemCommit;
+            info.allocation_protect = kPageReadWrite;
+            info.protect = kPageReadWrite;
+            info.type = kMemPrivate;
+        }
+        else
+        {
+            info.state = kMemFree;
+            info.allocation_protect = 0;
+            info.protect = 0;
+            info.type = 0;
+        }
+
+        if (!mm::CopyToUser(out_user, &info, sizeof(info)))
+        {
+            frame->rax = kStatusAccessViolation;
+            return;
+        }
+        frame->rax = kStatusSuccess;
         return;
     }
 

@@ -8,7 +8,7 @@
 // Target Windows version: Windows 11 and Server (11 25H2)
 // Bedrock NT calls (present in every Windows XP→Win11 25H2): 292
 // All known NT calls on the target version: 489
-// DuetOS coverage: 27/292 = 9%
+// DuetOS coverage: 30/292 = 10%
 //
 // See tools/win32-compat/README.md for the legal + design rationale.
 
@@ -73,7 +73,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
     {"NtReleaseMutant", 0x0020, static_cast<u32>(::duetos::core::SYS_MUTEX_RELEASE)},
     {"NtQueryInformationToken", 0x0021, kSysNtNotImpl},
     {"NtRequestWaitReplyPort", 0x0022, kSysNtNotImpl},
-    {"NtQueryVirtualMemory", 0x0023, kSysNtNotImpl},
+    {"NtQueryVirtualMemory", 0x0023, static_cast<u32>(::duetos::core::SYS_PROCESS_VM_QUERY)},
     {"NtOpenThreadToken", 0x0024, kSysNtNotImpl},
     {"NtQueryInformationThread", 0x0025, kSysNtNotImpl},
     {"NtOpenProcess", 0x0026, static_cast<u32>(::duetos::core::SYS_PROCESS_OPEN)},
@@ -96,12 +96,12 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
     {"NtOpenSection", 0x0037, kSysNtNotImpl},
     {"NtQueryTimer", 0x0038, kSysNtNotImpl},
     {"NtFsControlFile", 0x0039, kSysNtNotImpl},
-    {"NtWriteVirtualMemory", 0x003a, kSysNtNotImpl},
+    {"NtWriteVirtualMemory", 0x003a, static_cast<u32>(::duetos::core::SYS_PROCESS_VM_WRITE)},
     {"NtCloseObjectAuditAlarm", 0x003b, kSysNtNotImpl},
     {"NtDuplicateObject", 0x003c, kSysNtNotImpl},
     {"NtQueryAttributesFile", 0x003d, kSysNtNotImpl},
     {"NtClearEvent", 0x003e, kSysNtNotImpl},
-    {"NtReadVirtualMemory", 0x003f, kSysNtNotImpl},
+    {"NtReadVirtualMemory", 0x003f, static_cast<u32>(::duetos::core::SYS_PROCESS_VM_READ)},
     {"NtOpenEvent", 0x0040, kSysNtNotImpl},
     {"NtAdjustPrivilegesToken", 0x0041, kSysNtNotImpl},
     {"NtDuplicateToken", 0x0042, kSysNtNotImpl},
@@ -336,7 +336,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
 inline constexpr u32 kBedrockNtSyscallCount =
     sizeof(kBedrockNtSyscalls) / sizeof(kBedrockNtSyscalls[0]);
 
-inline constexpr u32 kBedrockNtSyscallsCovered = 27;
+inline constexpr u32 kBedrockNtSyscallsCovered = 30;
 
 /// Every NT syscall known on the target Windows version — superset
 /// of `kBedrockNtSyscalls`. Includes version-specific additions
@@ -380,7 +380,7 @@ inline constexpr NtSyscallMapping kAllNtSyscalls[] = {
     {"NtReleaseMutant", 0x0020, static_cast<u32>(::duetos::core::SYS_MUTEX_RELEASE)},
     {"NtQueryInformationToken", 0x0021, kSysNtNotImpl},
     {"NtRequestWaitReplyPort", 0x0022, kSysNtNotImpl},
-    {"NtQueryVirtualMemory", 0x0023, kSysNtNotImpl},
+    {"NtQueryVirtualMemory", 0x0023, static_cast<u32>(::duetos::core::SYS_PROCESS_VM_QUERY)},
     {"NtOpenThreadToken", 0x0024, kSysNtNotImpl},
     {"NtQueryInformationThread", 0x0025, kSysNtNotImpl},
     {"NtOpenProcess", 0x0026, static_cast<u32>(::duetos::core::SYS_PROCESS_OPEN)},
@@ -403,12 +403,12 @@ inline constexpr NtSyscallMapping kAllNtSyscalls[] = {
     {"NtOpenSection", 0x0037, kSysNtNotImpl},
     {"NtQueryTimer", 0x0038, kSysNtNotImpl},
     {"NtFsControlFile", 0x0039, kSysNtNotImpl},
-    {"NtWriteVirtualMemory", 0x003a, kSysNtNotImpl},
+    {"NtWriteVirtualMemory", 0x003a, static_cast<u32>(::duetos::core::SYS_PROCESS_VM_WRITE)},
     {"NtCloseObjectAuditAlarm", 0x003b, kSysNtNotImpl},
     {"NtDuplicateObject", 0x003c, kSysNtNotImpl},
     {"NtQueryAttributesFile", 0x003d, kSysNtNotImpl},
     {"NtClearEvent", 0x003e, kSysNtNotImpl},
-    {"NtReadVirtualMemory", 0x003f, kSysNtNotImpl},
+    {"NtReadVirtualMemory", 0x003f, static_cast<u32>(::duetos::core::SYS_PROCESS_VM_READ)},
     {"NtOpenEvent", 0x0040, kSysNtNotImpl},
     {"NtAdjustPrivilegesToken", 0x0041, kSysNtNotImpl},
     {"NtDuplicateToken", 0x0042, kSysNtNotImpl},

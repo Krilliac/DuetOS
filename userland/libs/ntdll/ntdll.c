@@ -948,6 +948,113 @@ __declspec(dllexport) NTSTATUS NtOpenProcess(HANDLE* ProcessHandle, ULONG Desire
     return NTSTATUS_SUCCESS;
 }
 
+/* ------------------------------------------------------------------
+ * NtReadVirtualMemory — read another process's user memory through
+ * a previously-opened process handle.
+ *
+ * Win32 NT signature:
+ *   NTSTATUS NtReadVirtualMemory(
+ *     HANDLE   ProcessHandle,
+ *     PVOID    BaseAddress,        // VA inside target's AS
+ *     PVOID    Buffer,             // VA inside caller's AS
+ *     SIZE_T   NumberOfBytesToRead,
+ *     PSIZE_T  NumberOfBytesRead);  // optional out-pointer
+ *
+ * Backed by SYS_PROCESS_VM_READ (132). The kernel caps any single
+ * call at kSyscallProcessVmMax (16 KiB); larger transfers chunk on
+ * this side. v0 does not surface STATUS_PARTIAL_COPY — a partial
+ * transfer returns STATUS_ACCESS_VIOLATION, with the
+ * NumberOfBytesRead out-pointer carrying the actual count moved.
+ * ------------------------------------------------------------------ */
+__declspec(dllexport) NTSTATUS NtReadVirtualMemory(HANDLE ProcessHandle, void* BaseAddress, void* Buffer,
+                                                   unsigned long long NumberOfBytesToRead,
+                                                   unsigned long long* NumberOfBytesRead)
+{
+    long long status;
+    /* SYS_PROCESS_VM_READ = 132. Args: rdi=handle, rsi=target_va,
+     * rdx=caller_buf, r10=len, r8=out_count_va. */
+    __asm__ volatile("mov %5, %%r10\n\t"
+                     "mov %6, %%r8\n\t"
+                     "int $0x80"
+                     : "=a"(status)
+                     : "a"((long long)132), "D"((long long)ProcessHandle), "S"((long long)BaseAddress),
+                       "d"((long long)Buffer), "r"((long long)NumberOfBytesToRead), "r"((long long)NumberOfBytesRead)
+                     : "r10", "r8", "memory");
+    return (NTSTATUS)status;
+}
+
+/* NtWriteVirtualMemory — symmetric to the read path.
+ *
+ * Win32 NT signature:
+ *   NTSTATUS NtWriteVirtualMemory(
+ *     HANDLE   ProcessHandle,
+ *     PVOID    BaseAddress,
+ *     PVOID    Buffer,
+ *     SIZE_T   NumberOfBytesToWrite,
+ *     PSIZE_T  NumberOfBytesWritten);
+ *
+ * Backed by SYS_PROCESS_VM_WRITE (133). Same cap, same partial-
+ * copy contract.  */
+__declspec(dllexport) NTSTATUS NtWriteVirtualMemory(HANDLE ProcessHandle, void* BaseAddress, void* Buffer,
+                                                    unsigned long long NumberOfBytesToWrite,
+                                                    unsigned long long* NumberOfBytesWritten)
+{
+    long long status;
+    __asm__ volatile("mov %5, %%r10\n\t"
+                     "mov %6, %%r8\n\t"
+                     "int $0x80"
+                     : "=a"(status)
+                     : "a"((long long)133), "D"((long long)ProcessHandle), "S"((long long)BaseAddress),
+                       "d"((long long)Buffer), "r"((long long)NumberOfBytesToWrite),
+                       "r"((long long)NumberOfBytesWritten)
+                     : "r10", "r8", "memory");
+    return (NTSTATUS)status;
+}
+
+/* NtQueryVirtualMemory — probe one VA in a target process.
+ *
+ * Win32 NT signature (we serve only MemoryBasicInformation = 0):
+ *   NTSTATUS NtQueryVirtualMemory(
+ *     HANDLE   ProcessHandle,
+ *     PVOID    BaseAddress,
+ *     int      MemoryInformationClass,  // 0 = MemoryBasicInformation
+ *     PVOID    MemoryInformation,        // MEMORY_BASIC_INFORMATION
+ *     SIZE_T   MemoryInformationLength,
+ *     PSIZE_T  ReturnLength);            // optional
+ *
+ * Backed by SYS_PROCESS_VM_QUERY (134). v0 returns a single-page
+ * region (RegionSize = 4096) — Windows would coalesce adjacent
+ * pages with identical attributes, but the v0 region table doesn't
+ * track per-page protection, so we can't honestly coalesce.
+ * STATUS_INVALID_INFO_CLASS for any class != MemoryBasicInformation.
+ * ------------------------------------------------------------------ */
+__declspec(dllexport) NTSTATUS NtQueryVirtualMemory(HANDLE ProcessHandle, void* BaseAddress, int MemoryInformationClass,
+                                                    void* MemoryInformation, unsigned long long MemoryInformationLength,
+                                                    unsigned long long* ReturnLength)
+{
+    /* MemoryBasicInformation = 0. Anything else returns
+     * STATUS_INVALID_INFO_CLASS without crossing the syscall
+     * boundary. */
+    if (MemoryInformationClass != 0)
+        return (NTSTATUS)0xC0000003L; /* STATUS_INVALID_INFO_CLASS */
+    if (MemoryInformation == (void*)0)
+        return NTSTATUS_INVALID_PARAMETER;
+    if (MemoryInformationLength < 48)
+        return (NTSTATUS)0xC0000023L; /* STATUS_BUFFER_TOO_SMALL */
+
+    long long status;
+    /* SYS_PROCESS_VM_QUERY = 134. Args: rdi=handle, rsi=probe_va,
+     * rdx=out_buf. */
+    __asm__ volatile("int $0x80"
+                     : "=a"(status)
+                     : "a"((long long)134), "D"((long long)ProcessHandle), "S"((long long)BaseAddress),
+                       "d"((long long)MemoryInformation)
+                     : "memory");
+    if (status == 0 && ReturnLength != (unsigned long long*)0)
+        *ReturnLength = 48;
+    return (NTSTATUS)status;
+}
+
 __declspec(dllexport) NTSTATUS NtQueryValueKey(HANDLE KeyHandle, UNICODE_STRING* ValueName, ULONG InfoClass,
                                                void* KeyValueInformation, ULONG Length, ULONG* ResultLength)
 {
