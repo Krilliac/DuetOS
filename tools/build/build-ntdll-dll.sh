@@ -247,6 +247,22 @@ set +e
     /export:NtOpenKeyedEvent \
     /export:NtWaitForKeyedEvent \
     /export:NtReleaseKeyedEvent \
+    /export:NtCreateTimer \
+    /export:NtSetTimer \
+    /export:NtCancelTimer \
+    /export:NtOpenTimer \
+    /export:NtCreateIoCompletion \
+    /export:NtOpenIoCompletion \
+    /export:NtSetIoCompletion \
+    /export:NtRemoveIoCompletion \
+    /export:NtRemoveIoCompletionEx \
+    /export:NtCreateTransaction \
+    /export:NtCommitTransaction \
+    /export:NtRollbackTransaction \
+    /export:NtOpenTransaction \
+    /export:NtFlushInstructionCache \
+    /export:NtTestAlert \
+    /export:NtRaiseException \
     /export:NtContinue \
     /export:ZwContinue=NtContinue \
     /export:NtAllocateVirtualMemory \

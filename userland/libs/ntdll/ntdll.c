@@ -2247,6 +2247,194 @@ __declspec(dllexport) NTSTATUS NtCancelIoFile(HANDLE FileHandle, void* IoStatusB
 }
 
 /* ------------------------------------------------------------------
+ * NT timer family — explicit NotImpl facades.
+ *
+ * Win32 NT timers are kernel-coordinated dispatcher objects.
+ * v0 has no APC dispatch + no kernel timer queue exposed via
+ * the timer-handle ABI. Callers wanting time-based wakes use
+ * Sleep / NtDelayExecution (already implemented).
+ * ------------------------------------------------------------------ */
+__declspec(dllexport) NTSTATUS NtCreateTimer(HANDLE* TimerHandle, ULONG DesiredAccess, void* ObjectAttributes,
+                                             ULONG TimerType)
+{
+    (void)TimerHandle;
+    (void)DesiredAccess;
+    (void)ObjectAttributes;
+    (void)TimerType;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtSetTimer(HANDLE TimerHandle, void* DueTime, void* TimerApcRoutine, void* TimerContext,
+                                          BOOL ResumeTimer, ULONG Period, BOOL* PreviousState)
+{
+    (void)TimerHandle;
+    (void)DueTime;
+    (void)TimerApcRoutine;
+    (void)TimerContext;
+    (void)ResumeTimer;
+    (void)Period;
+    (void)PreviousState;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtCancelTimer(HANDLE TimerHandle, BOOL* CurrentState)
+{
+    (void)TimerHandle;
+    if (CurrentState != (BOOL*)0)
+        *CurrentState = 0;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtOpenTimer(HANDLE* TimerHandle, ULONG DesiredAccess, void* ObjectAttributes)
+{
+    (void)TimerHandle;
+    (void)DesiredAccess;
+    (void)ObjectAttributes;
+    return (NTSTATUS)0xC0000034;
+}
+
+/* ------------------------------------------------------------------
+ * NT IO-completion family — explicit NotImpl facades.
+ * Used by Win32 IOCP server frameworks. v0 has no async-I/O
+ * completion queue.
+ * ------------------------------------------------------------------ */
+__declspec(dllexport) NTSTATUS NtCreateIoCompletion(HANDLE* IoCompletionHandle, ULONG DesiredAccess,
+                                                    void* ObjectAttributes, ULONG NumberOfConcurrentThreads)
+{
+    (void)IoCompletionHandle;
+    (void)DesiredAccess;
+    (void)ObjectAttributes;
+    (void)NumberOfConcurrentThreads;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtOpenIoCompletion(HANDLE* IoCompletionHandle, ULONG DesiredAccess,
+                                                  void* ObjectAttributes)
+{
+    (void)IoCompletionHandle;
+    (void)DesiredAccess;
+    (void)ObjectAttributes;
+    return (NTSTATUS)0xC0000034;
+}
+
+__declspec(dllexport) NTSTATUS NtSetIoCompletion(HANDLE IoCompletionHandle, void* CompletionKey, void* CompletionValue,
+                                                 NTSTATUS CompletionStatus, ULONG NumberOfBytesTransferred)
+{
+    (void)IoCompletionHandle;
+    (void)CompletionKey;
+    (void)CompletionValue;
+    (void)CompletionStatus;
+    (void)NumberOfBytesTransferred;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtRemoveIoCompletion(HANDLE IoCompletionHandle, void* CompletionKey,
+                                                    void* CompletionValue, void* IoStatusBlock, void* Timeout)
+{
+    (void)IoCompletionHandle;
+    (void)CompletionKey;
+    (void)CompletionValue;
+    (void)IoStatusBlock;
+    (void)Timeout;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtRemoveIoCompletionEx(HANDLE IoCompletionHandle, void* IoCompletionInformation,
+                                                      ULONG Count, ULONG* NumEntriesRemoved, void* Timeout,
+                                                      BOOL Alertable)
+{
+    (void)IoCompletionHandle;
+    (void)IoCompletionInformation;
+    (void)Count;
+    if (NumEntriesRemoved != (ULONG*)0)
+        *NumEntriesRemoved = 0;
+    (void)Timeout;
+    (void)Alertable;
+    return (NTSTATUS)0xC0000002;
+}
+
+/* ------------------------------------------------------------------
+ * NT transaction (KTM) family — explicit NotImpl facades.
+ * Kernel Transaction Manager surface. v0 has no KTM.
+ * ------------------------------------------------------------------ */
+__declspec(dllexport) NTSTATUS NtCreateTransaction(HANDLE* TransactionHandle, ULONG DesiredAccess,
+                                                   void* ObjectAttributes, void* Uow, HANDLE TmHandle,
+                                                   ULONG CreateOptions, ULONG IsolationLevel, ULONG IsolationFlags,
+                                                   void* Timeout, void* Description)
+{
+    (void)TransactionHandle;
+    (void)DesiredAccess;
+    (void)ObjectAttributes;
+    (void)Uow;
+    (void)TmHandle;
+    (void)CreateOptions;
+    (void)IsolationLevel;
+    (void)IsolationFlags;
+    (void)Timeout;
+    (void)Description;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtCommitTransaction(HANDLE TransactionHandle, BOOL Wait)
+{
+    (void)TransactionHandle;
+    (void)Wait;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtRollbackTransaction(HANDLE TransactionHandle, BOOL Wait)
+{
+    (void)TransactionHandle;
+    (void)Wait;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtOpenTransaction(HANDLE* TransactionHandle, ULONG DesiredAccess, void* ObjectAttributes,
+                                                 void* Uow, HANDLE TmHandle)
+{
+    (void)TransactionHandle;
+    (void)DesiredAccess;
+    (void)ObjectAttributes;
+    (void)Uow;
+    (void)TmHandle;
+    return (NTSTATUS)0xC0000034;
+}
+
+/* ------------------------------------------------------------------
+ * NT misc — NtRaiseException, NtContinue (already exists),
+ * NtYieldExecution, NtFlushInstructionCache, NtTestAlert.
+ * Most are tractable as success no-ops or simple forwards.
+ * ------------------------------------------------------------------ */
+/* NtYieldExecution lives at line ~99 (forwards to SYS_YIELD). */
+
+__declspec(dllexport) NTSTATUS NtFlushInstructionCache(HANDLE ProcessHandle, void* BaseAddress, SIZE_T Length)
+{
+    (void)ProcessHandle;
+    (void)BaseAddress;
+    (void)Length;
+    /* x86_64 has coherent I-cache vs D-cache; flush is a no-op. */
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS NtTestAlert(void)
+{
+    /* No APC / alert engine — always returns NO_ALERT (a success
+     * status meaning "nothing pending"). */
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS NtRaiseException(void* ExceptionRecord, void* ContextRecord, BOOL HandleException)
+{
+    (void)ExceptionRecord;
+    (void)ContextRecord;
+    (void)HandleException;
+    /* No SEH dispatch in v0; the right answer is "we couldn't
+     * raise it" — Windows uses STATUS_UNHANDLED_EXCEPTION
+     * (0xC0000144) on the unhandled path. */
+    return (NTSTATUS)0xC0000144;
+}
+
+/* ------------------------------------------------------------------
  * NT process-creation thunks — explicit NotImpl facades.
  *
  * v0 has no Win32 PE process spawn pipeline. Process creation
