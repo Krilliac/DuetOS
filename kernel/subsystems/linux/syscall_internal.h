@@ -413,6 +413,7 @@ i64 DoKeyctl(u64 op, u64 a2, u64 a3, u64 a4, u64 a5);
 // to the real LinuxSignalDeliver path.
 i64 DoPidfdOpen(u64 pid, u64 flags);
 i64 DoPidfdSendSignal(u64 pidfd, u64 sig, u64 user_info, u64 flags);
+i64 DoPidfdGetfd(u64 pidfd, u64 target_fd, u64 flags);
 
 // Kernel-level zero-copy fd-to-fd I/O. v0 implementations bounce
 // through a 1 KiB on-stack buffer (no actual zero-copy yet, but

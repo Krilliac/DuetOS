@@ -1619,9 +1619,7 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
         rv = DoPidfdSendSignal(frame->rdi, frame->rsi, frame->rdx, frame->r10);
         break;
     case kSysPidfdGetfd:
-        // Cross-process fd-table dup is its own slice (would need
-        // a Process->fd-table walker that respects refcounts).
-        rv = kENOSYS;
+        rv = DoPidfdGetfd(frame->rdi, frame->rsi, frame->rdx);
         break;
 
     case kSysSplice:

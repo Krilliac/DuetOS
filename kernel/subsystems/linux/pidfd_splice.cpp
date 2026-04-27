@@ -18,9 +18,11 @@
  * which is its own slice — sub-GAP.
  */
 
+#include "subsystems/linux/inotify.h"
 #include "subsystems/linux/syscall_async_io.h"
 #include "subsystems/linux/syscall_internal.h"
 #include "subsystems/linux/syscall_pipe.h"
+#include "subsystems/linux/syscall_socket.h"
 
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
@@ -98,6 +100,91 @@ i64 DoPidfdSendSignal(u64 pidfd, u64 sig, u64 user_info, u64 flags)
     if (target == nullptr)
         return kESRCH; // target may have already exited
     return LinuxSignalDeliver(target, static_cast<u32>(sig));
+}
+
+// pidfd_getfd(pidfd, target_fd, flags) — dup an fd from a target
+// process into the caller's fd table. v0 implementation supports
+// pool-backed states (pipe / eventfd / socket / timerfd / signalfd /
+// epoll / inotify / pidfd / mq) by copying the slot verbatim and
+// bumping the corresponding refcount. Regular files (state 2) and
+// directories (state 11) and memfd (state 14) are not currently
+// shareable across processes — sub-GAP. Cap-gated on kCapDebug
+// (cross-process fd inspection is the same threat class as
+// PROCESS_VM_READ).
+i64 DoPidfdGetfd(u64 pidfd, u64 target_fd, u64 flags)
+{
+    (void)flags;
+    using ::duetos::core::CapSetHas;
+    using ::duetos::core::kCapDebug;
+    core::Process* caller = core::CurrentProcess();
+    if (caller == nullptr || pidfd >= 16 || caller->linux_fds[pidfd].state != 12)
+        return kEBADF;
+    if (!CapSetHas(caller->caps, kCapDebug))
+    {
+        core::RecordSandboxDenial(kCapDebug);
+        return kEPERM;
+    }
+    const u64 target_pid = caller->linux_fds[pidfd].first_cluster;
+    core::Process* target = sched::SchedFindProcessByPid(target_pid);
+    if (target == nullptr)
+        return kESRCH;
+    if (target_fd >= 16 || target->linux_fds[target_fd].state == 0)
+        return kEBADF;
+
+    // Find a free slot in caller's table.
+    i32 caller_slot = -1;
+    for (u32 i = 3; i < 16; ++i)
+        if (caller->linux_fds[i].state == 0)
+        {
+            caller_slot = static_cast<i32>(i);
+            break;
+        }
+    if (caller_slot < 0)
+        return kEMFILE;
+
+    const auto& src = target->linux_fds[target_fd];
+    const u8 state = src.state;
+    // Refuse states that aren't safe to share across processes.
+    if (state == 2 || state == 11 || state == 14)
+        return kEINVAL; // regular file / dirfd / memfd
+    // Copy slot verbatim and bump the relevant refcount.
+    caller->linux_fds[caller_slot] = src;
+    if (state == 3)
+        PipeRetainRead(src.first_cluster);
+    else if (state == 4)
+        PipeRetainWrite(src.first_cluster);
+    else if (state == 5)
+        EventfdRetain(src.first_cluster);
+    else if (state == 6)
+        SocketFdRetain(src.first_cluster);
+    else if (state == 7)
+        TimerfdRetain(src.first_cluster);
+    else if (state == 8)
+        SignalfdRetain(src.first_cluster);
+    else if (state == 9)
+        EpollRetain(src.first_cluster);
+    else if (state == 10)
+        InotifyRetain(src.first_cluster);
+    else if (state == 12)
+    {
+        // pidfd: the pid in first_cluster is independent of the
+        // target's reference; bump our own retain.
+        core::Process* tgt = sched::SchedFindProcessByPid(src.first_cluster);
+        if (tgt != nullptr)
+            core::ProcessRetain(tgt);
+    }
+    else if (state == 13)
+        PosixMqRetain(src.first_cluster);
+    arch::SerialWrite("[linux/pidfd_getfd] caller=");
+    arch::SerialWriteHex(caller->pid);
+    arch::SerialWrite(" target=");
+    arch::SerialWriteHex(target_pid);
+    arch::SerialWrite(" target_fd=");
+    arch::SerialWriteHex(target_fd);
+    arch::SerialWrite(" caller_fd=");
+    arch::SerialWriteHex(static_cast<u64>(caller_slot));
+    arch::SerialWrite("\n");
+    return static_cast<i64>(caller_slot);
 }
 
 // Called from syscall_file.cpp's DoClose state==12 arm.
