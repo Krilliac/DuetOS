@@ -2046,6 +2046,242 @@ __declspec(dllexport) NTSTATUS NtFlushKey(HANDLE KeyHandle)
 }
 
 /* ------------------------------------------------------------------
+ * NtCreateFile / NtOpenFile / NtReadFile / NtWriteFile — Win32 PE
+ * file I/O via the NT-namespace API.
+ *
+ * These thunks are pure ABI adapters: they translate Win32-shaped
+ * arguments (OBJECT_ATTRIBUTES, IO_STATUS_BLOCK, CreateDisposition)
+ * into the kernel's native SYS_FILE_OPEN / SYS_FILE_CREATE /
+ * SYS_FILE_READ / SYS_FILE_WRITE syscalls. The kernel is the
+ * authority on what's allowed (kCapFsRead / kCapFsWrite gates
+ * apply) — the NT layer cannot bypass them.
+ *
+ * Architectural rule: Win32 subsystem is for executing PE
+ * binaries, not for driving DuetOS. Every effect a PE has on the
+ * filesystem goes through the same kernel mediation a native
+ * DuetOS program does.
+ *
+ * v0 honours CreateDisposition = FILE_OPEN, FILE_CREATE, and
+ * FILE_OPEN_IF. SUPERSEDE / OVERWRITE / OVERWRITE_IF return
+ * STATUS_NOT_IMPLEMENTED.
+ * ------------------------------------------------------------------ */
+/* Forward declaration — definition lives further down with the
+ * NtQueryAttributesFile thunks. The helper is shared between the
+ * path-based file-stat surface and the NtCreateFile / NtOpenFile
+ * adapter family. */
+static int ExtractAsciiPathFromObjectAttributes(void* ObjectAttributes, char* out, unsigned cap, unsigned* out_len);
+
+__declspec(dllexport) NTSTATUS NtCreateFile(HANDLE* FileHandle, ULONG DesiredAccess, void* ObjectAttributes,
+                                            void* IoStatusBlock, void* AllocationSize, ULONG FileAttributes,
+                                            ULONG ShareAccess, ULONG CreateDisposition, ULONG CreateOptions,
+                                            void* EaBuffer, ULONG EaLength)
+{
+    (void)DesiredAccess;
+    (void)AllocationSize;
+    (void)FileAttributes;
+    (void)ShareAccess;
+    (void)CreateOptions;
+    (void)EaBuffer;
+    (void)EaLength;
+    if (FileHandle == (HANDLE*)0)
+        return NTSTATUS_INVALID_PARAMETER;
+    char path[256];
+    unsigned path_len = 0;
+    if (!ExtractAsciiPathFromObjectAttributes(ObjectAttributes, path, sizeof(path), &path_len))
+        return NTSTATUS_INVALID_PARAMETER;
+    long long handle = -1;
+    long long status = 0;
+    /* CreateDisposition codes:
+     *   0 = SUPERSEDE       (NotImpl in v0)
+     *   1 = FILE_OPEN
+     *   2 = FILE_CREATE
+     *   3 = FILE_OPEN_IF
+     *   4 = FILE_OVERWRITE  (NotImpl)
+     *   5 = FILE_OVERWRITE_IF (NotImpl) */
+    if (CreateDisposition == 1 /* OPEN */ || CreateDisposition == 3 /* OPEN_IF */)
+    {
+        /* SYS_FILE_OPEN = 20. */
+        __asm__ volatile("int $0x80"
+                         : "=a"(handle)
+                         : "a"((long long)20), "D"((long long)path), "S"((long long)(path_len + 1))
+                         : "memory");
+        if (handle == -1 && CreateDisposition == 3)
+        {
+            /* OPEN_IF: open failed -> create. */
+            __asm__ volatile("mov %4, %%r10\n\t"
+                             "int $0x80"
+                             : "=a"(handle)
+                             : "a"((long long)44), "D"((long long)path), "S"((long long)(path_len + 1)),
+                               "d"((long long)0), "r"((long long)0)
+                             : "r10", "memory");
+        }
+        if (handle == -1)
+            status = (long long)0xC0000034ULL; /* OBJECT_NAME_NOT_FOUND */
+    }
+    else if (CreateDisposition == 2 /* CREATE */)
+    {
+        /* SYS_FILE_CREATE = 44. */
+        __asm__ volatile("mov %4, %%r10\n\t"
+                         "int $0x80"
+                         : "=a"(handle)
+                         : "a"((long long)44), "D"((long long)path), "S"((long long)(path_len + 1)), "d"((long long)0),
+                           "r"((long long)0)
+                         : "r10", "memory");
+        if (handle == -1)
+            status = (long long)0xC0000035ULL; /* OBJECT_NAME_COLLISION */
+    }
+    else
+    {
+        return (NTSTATUS)0xC0000002; /* NOT_IMPLEMENTED */
+    }
+    if (handle == -1)
+        return (NTSTATUS)status;
+    *FileHandle = (HANDLE)handle;
+    /* IO_STATUS_BLOCK is { Status; Information } — write success
+     * + a per-disposition Information value:
+     *   FILE_OPEN     -> FILE_OPENED        (1)
+     *   FILE_CREATE   -> FILE_CREATED       (2)
+     *   FILE_OPEN_IF  -> caller-discovered  (1 or 2; we report 1) */
+    if (IoStatusBlock != (void*)0)
+    {
+        unsigned long long* iosb = (unsigned long long*)IoStatusBlock;
+        iosb[0] = 0; /* NTSTATUS_SUCCESS */
+        iosb[1] = (CreateDisposition == 2) ? 2 : 1;
+    }
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS ZwCreateFile(HANDLE* FileHandle, ULONG DesiredAccess, void* ObjectAttributes,
+                                            void* IoStatusBlock, void* AllocationSize, ULONG FileAttributes,
+                                            ULONG ShareAccess, ULONG CreateDisposition, ULONG CreateOptions,
+                                            void* EaBuffer, ULONG EaLength)
+{
+    return NtCreateFile(FileHandle, DesiredAccess, ObjectAttributes, IoStatusBlock, AllocationSize, FileAttributes,
+                        ShareAccess, CreateDisposition, CreateOptions, EaBuffer, EaLength);
+}
+
+__declspec(dllexport) NTSTATUS NtOpenFile(HANDLE* FileHandle, ULONG DesiredAccess, void* ObjectAttributes,
+                                          void* IoStatusBlock, ULONG ShareAccess, ULONG OpenOptions)
+{
+    (void)DesiredAccess;
+    (void)ShareAccess;
+    (void)OpenOptions;
+    if (FileHandle == (HANDLE*)0)
+        return NTSTATUS_INVALID_PARAMETER;
+    char path[256];
+    unsigned path_len = 0;
+    if (!ExtractAsciiPathFromObjectAttributes(ObjectAttributes, path, sizeof(path), &path_len))
+        return NTSTATUS_INVALID_PARAMETER;
+    long long handle;
+    /* SYS_FILE_OPEN = 20. */
+    __asm__ volatile("int $0x80"
+                     : "=a"(handle)
+                     : "a"((long long)20), "D"((long long)path), "S"((long long)(path_len + 1))
+                     : "memory");
+    if (handle == -1)
+        return (NTSTATUS)0xC0000034;
+    *FileHandle = (HANDLE)handle;
+    if (IoStatusBlock != (void*)0)
+    {
+        unsigned long long* iosb = (unsigned long long*)IoStatusBlock;
+        iosb[0] = 0;
+        iosb[1] = 1; /* FILE_OPENED */
+    }
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS ZwOpenFile(HANDLE* FileHandle, ULONG DesiredAccess, void* ObjectAttributes,
+                                          void* IoStatusBlock, ULONG ShareAccess, ULONG OpenOptions)
+{
+    return NtOpenFile(FileHandle, DesiredAccess, ObjectAttributes, IoStatusBlock, ShareAccess, OpenOptions);
+}
+
+__declspec(dllexport) NTSTATUS NtReadFile(HANDLE FileHandle, HANDLE Event, void* ApcRoutine, void* ApcContext,
+                                          void* IoStatusBlock, void* Buffer, ULONG Length, void* ByteOffset, void* Key)
+{
+    (void)Event;
+    (void)ApcRoutine;
+    (void)ApcContext;
+    (void)Key;
+    /* ByteOffset is honoured only for the special "no-cursor-update"
+     * marker (-1, -1) which means "read at current cursor". v0
+     * always uses the per-handle cursor — explicit-offset reads
+     * would need a SYS_FILE_PREAD which doesn't exist yet. Sub-
+     * GAP. */
+    (void)ByteOffset;
+    long long n;
+    /* SYS_FILE_READ = 21. */
+    __asm__ volatile("int $0x80"
+                     : "=a"(n)
+                     : "a"((long long)21), "D"((long long)FileHandle), "S"((long long)Buffer), "d"((long long)Length)
+                     : "memory");
+    if (n == -1)
+    {
+        if (IoStatusBlock != (void*)0)
+        {
+            unsigned long long* iosb = (unsigned long long*)IoStatusBlock;
+            iosb[0] = 0xC0000008; /* INVALID_HANDLE */
+            iosb[1] = 0;
+        }
+        return (NTSTATUS)0xC0000008;
+    }
+    if (IoStatusBlock != (void*)0)
+    {
+        unsigned long long* iosb = (unsigned long long*)IoStatusBlock;
+        iosb[0] = 0;
+        iosb[1] = (unsigned long long)n;
+    }
+    if (n == 0)
+        return (NTSTATUS)0xC0000011; /* END_OF_FILE */
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS ZwReadFile(HANDLE FileHandle, HANDLE Event, void* ApcRoutine, void* ApcContext,
+                                          void* IoStatusBlock, void* Buffer, ULONG Length, void* ByteOffset, void* Key)
+{
+    return NtReadFile(FileHandle, Event, ApcRoutine, ApcContext, IoStatusBlock, Buffer, Length, ByteOffset, Key);
+}
+
+__declspec(dllexport) NTSTATUS NtWriteFile(HANDLE FileHandle, HANDLE Event, void* ApcRoutine, void* ApcContext,
+                                           void* IoStatusBlock, void* Buffer, ULONG Length, void* ByteOffset, void* Key)
+{
+    (void)Event;
+    (void)ApcRoutine;
+    (void)ApcContext;
+    (void)Key;
+    (void)ByteOffset;
+    long long n;
+    /* SYS_FILE_WRITE = 43. */
+    __asm__ volatile("int $0x80"
+                     : "=a"(n)
+                     : "a"((long long)43), "D"((long long)FileHandle), "S"((long long)Buffer), "d"((long long)Length)
+                     : "memory");
+    if (n == -1)
+    {
+        if (IoStatusBlock != (void*)0)
+        {
+            unsigned long long* iosb = (unsigned long long*)IoStatusBlock;
+            iosb[0] = 0xC0000008;
+            iosb[1] = 0;
+        }
+        return (NTSTATUS)0xC0000008;
+    }
+    if (IoStatusBlock != (void*)0)
+    {
+        unsigned long long* iosb = (unsigned long long*)IoStatusBlock;
+        iosb[0] = 0;
+        iosb[1] = (unsigned long long)n;
+    }
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS ZwWriteFile(HANDLE FileHandle, HANDLE Event, void* ApcRoutine, void* ApcContext,
+                                           void* IoStatusBlock, void* Buffer, ULONG Length, void* ByteOffset, void* Key)
+{
+    return NtWriteFile(FileHandle, Event, ApcRoutine, ApcContext, IoStatusBlock, Buffer, Length, ByteOffset, Key);
+}
+
+/* ------------------------------------------------------------------
  * NtQueryAttributesFile / NtQueryFullAttributesFile — path-based
  * file stat. Both forward to SYS_FILE_QUERY_ATTRIBUTES (151).
  *

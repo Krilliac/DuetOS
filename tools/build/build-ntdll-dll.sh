@@ -140,6 +140,14 @@ set +e
     /export:ZwQueryAttributesFile=NtQueryAttributesFile \
     /export:NtQueryFullAttributesFile \
     /export:ZwQueryFullAttributesFile=NtQueryFullAttributesFile \
+    /export:NtCreateFile \
+    /export:ZwCreateFile=NtCreateFile \
+    /export:NtOpenFile \
+    /export:ZwOpenFile=NtOpenFile \
+    /export:NtReadFile \
+    /export:ZwReadFile=NtReadFile \
+    /export:NtWriteFile \
+    /export:ZwWriteFile=NtWriteFile \
     /export:NtContinue \
     /export:ZwContinue=NtContinue \
     /export:NtAllocateVirtualMemory \

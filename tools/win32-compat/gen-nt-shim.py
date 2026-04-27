@@ -114,6 +114,10 @@ KNOWN_MAPPINGS = {
     "NtCreateThreadEx":            "SYS_THREAD_CREATE",
     "NtQueryAttributesFile":       "SYS_FILE_QUERY_ATTRIBUTES",
     "NtQueryFullAttributesFile":   "SYS_FILE_QUERY_ATTRIBUTES",
+    "NtCreateFile":                "SYS_FILE_OPEN",
+    "NtOpenFile":                  "SYS_FILE_OPEN",
+    "NtReadFile":                  "SYS_FILE_READ",
+    "NtWriteFile":                 "SYS_FILE_WRITE",
     # NtCreateKey / NtSetValueKey / NtDeleteKey / NtDeleteValueKey:
     # NotImpl on purpose — registry is read-only in v0. Mapping
     # them to SYS_REGISTRY's read-only Open op would silently lie
