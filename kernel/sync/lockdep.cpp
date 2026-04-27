@@ -234,6 +234,8 @@ void LockdepRegisterCanonicalClasses()
     LockdepRegisterClass(kLockClassBreakpoints, "breakpoints");
     LockdepRegisterClass(kLockClassCleanroomTrace, "cleanroom-trace");
     LockdepRegisterClass(kLockClassWifi, "wifi");
+    LockdepRegisterClass(kLockClassFat32, "fat32");
+    LockdepRegisterClass(kLockClassCompositor, "compositor");
 }
 
 namespace

@@ -89,6 +89,20 @@ inline constexpr LockClass kLockClassPciConfig = 0x04;
 inline constexpr LockClass kLockClassBreakpoints = 0x05;
 inline constexpr LockClass kLockClassCleanroomTrace = 0x06;
 inline constexpr LockClass kLockClassWifi = 0x07;
+/// FAT32 driver mutex (`fs/fat32.cpp::g_fat32_mutex`). Serialises
+/// every block-IO + path-walk; held across reads/writes to the
+/// underlying storage device. Acquire ordering: BELOW the
+/// scheduler / kobject classes (FAT32 ops can run on a worker
+/// task and may want to allocate KObjects mid-call), ABOVE any
+/// future per-NVMe-queue lock. Tagged D1-followup, 2026-04-27.
+inline constexpr LockClass kLockClassFat32 = 0x08;
+/// Compositor mutex (`drivers/video/widget.cpp::g_compositor_mutex`).
+/// Serialises the per-frame widget tree walk + dirty-region
+/// accumulation. Held during framebuffer flushes. Acquire
+/// ordering: ABOVE the scheduler / kobject classes (compositor
+/// runs from a kernel task and never holds another global lock
+/// across a flush). Tagged D1-followup, 2026-04-27.
+inline constexpr LockClass kLockClassCompositor = 0x09;
 
 /// Maximum simultaneous holders per CPU. A code path that acquires
 /// more than this many locks at once trips a warning and lockdep

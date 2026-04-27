@@ -38,6 +38,7 @@
 #include "arch/x86_64/cpu.h"
 #include "drivers/input/ps2mouse.h"
 #include "sched/sched.h"
+#include "sync/lockdep.h"
 #include "drivers/video/calendar.h"
 #include "drivers/video/console.h"
 #include "drivers/video/cursor.h"
@@ -222,7 +223,13 @@ constinit u32 g_z_order[kMaxWindows] = {};
 // and keyboard reader (typing into the console) both acquire it
 // before any Cursor* / Window* / Widget* / DesktopCompose call,
 // so concurrent typing-while-dragging is race-free.
-constinit duetos::sched::Mutex g_compositor_mutex{};
+// Tagged with `kLockClassCompositor` so lockdep records every
+// edge `compositor -> (other class)` that fires across the per-
+// frame walk. Compositor runs from a kernel task and never holds
+// another global lock across a flush — any inversion reported
+// against this class is a bug worth investigating.
+constinit duetos::sched::Mutex g_compositor_mutex{
+    .owner = nullptr, .waiters = {}, .class_id = duetos::sync::kLockClassCompositor};
 
 // Global message wait queue. Any task blocked in
 // SYS_WIN_GET_MSG parks here until PostMessage (or an input

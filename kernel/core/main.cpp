@@ -107,8 +107,10 @@
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
 #include "ipc/handle_table.h"
+#include "ipc/kevent.h"
 #include "ipc/kmutex.h"
 #include "ipc/kobject.h"
+#include "ipc/ksemaphore.h"
 #include "sync/lockdep.h"
 #include "sync/rwlock.h"
 #include "sync/seqlock.h"
@@ -1164,6 +1166,8 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // waits, deadlock-detect callbacks — are non-trivial to
     // unwind from the existing per-type array).
     duetos::ipc::KMutexSelfTest();
+    duetos::ipc::KEventSelfTest();
+    duetos::ipc::KSemaphoreSelfTest();
 
     SerialWrite("[boot] Bringing up PS/2 keyboard.\n");
     duetos::drivers::input::Ps2KeyboardInit();
