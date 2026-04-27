@@ -105,6 +105,8 @@
 #include "fs/vfs.h"
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
+#include "ipc/handle_table.h"
+#include "ipc/kobject.h"
 #include "sync/rwlock.h"
 #include "sync/spinlock.h"
 #include "security/auth.h"
@@ -1055,6 +1057,15 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // AP bring-up lands. Runs here because the scheduler is now
     // online (RwLock uses sched::Mutex + Condvar internally).
     duetos::sync::RwLockSelfTest();
+
+    // KObject + HandleTable infrastructure self-tests (plan A3).
+    // Verifies refcount + destroy-on-zero, plus the table's
+    // insert/lookup/duplicate/remove/drain matrix. The
+    // infrastructure is purely additive — existing per-type
+    // handle arrays on Process keep working unchanged. Migration
+    // of any current handle surface is tracked as a follow-up.
+    duetos::ipc::KObjectSelfTest();
+    duetos::ipc::HandleTableSelfTest();
 
     SerialWrite("[boot] Bringing up PS/2 keyboard.\n");
     duetos::drivers::input::Ps2KeyboardInit();
