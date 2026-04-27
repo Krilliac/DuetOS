@@ -570,4 +570,18 @@ void SocketFdRetain(u32 idx)
     ::duetos::net::SocketRetain(idx);
 }
 
+bool SocketFdReadReady(u32 idx)
+{
+    const auto* s = ::duetos::net::SocketGet(idx);
+    if (s == nullptr)
+        return false;
+    if (s->type == ::duetos::net::kSocketTypeDgram)
+        return s->udp_count > 0;
+    // SOCK_STREAM — conservatively report ready once the TCP slot is
+    // established. Real readability can only be probed by attempting
+    // a 0-byte recv against the shared single-slot machine; v0
+    // tolerates a handful of spurious wakes per epoll caller.
+    return s->connected;
+}
+
 } // namespace duetos::subsystems::linux::internal

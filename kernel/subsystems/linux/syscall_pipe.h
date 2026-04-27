@@ -34,4 +34,13 @@ i64 EventfdWrite(u32 idx, u64 user_src, u64 len);
 void EventfdRelease(u32 idx);
 void EventfdRetain(u32 idx);
 
+// Non-blocking readiness probes — used by epoll_wait. Each
+// returns true iff a read on this end would proceed without
+// blocking. PipeReadReady is true when the pipe has buffered
+// bytes OR every writer has closed (read returns EOF without
+// blocking). EventfdReady is true when counter > 0.
+bool PipeReadReady(u32 idx);
+bool PipeWriteReady(u32 idx);
+bool EventfdReady(u32 idx);
+
 } // namespace duetos::subsystems::linux::internal

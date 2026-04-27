@@ -50,4 +50,13 @@ void SocketFdRelease(u32 idx);
 // handles. v0 doesn't handle CLOEXEC — every socket survives fork.
 void SocketFdRetain(u32 idx);
 
+// Non-blocking readiness probe for epoll_wait. UDP: true iff the
+// dgram RX queue has at least one entry. TCP: conservatively true
+// when the socket is connected — peeking the TCP stream's "bytes
+// pending at this socket's cursor" requires lifting machinery from
+// stack.cpp; v0 epoll callers re-poll on a 100 ms cadence so a
+// false-positive here just costs one extra read attempt. Returns
+// false on a dead idx.
+bool SocketFdReadReady(u32 idx);
+
 } // namespace duetos::subsystems::linux::internal

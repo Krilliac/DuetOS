@@ -390,6 +390,45 @@ i64 EventfdRead(u32 idx, u64 user_dst, u64 len)
     return 8;
 }
 
+// ============================================================
+// Non-blocking readiness probes — for epoll_wait
+// ============================================================
+
+bool PipeReadReady(u32 idx)
+{
+    if (idx >= kPipePoolCap)
+        return false;
+    arch::Cli();
+    Pipe& p = g_pipe_pool[idx];
+    const bool ready = p.in_use && (p.count > 0 || p.write_refs == 0);
+    arch::Sti();
+    return ready;
+}
+
+bool PipeWriteReady(u32 idx)
+{
+    if (idx >= kPipePoolCap)
+        return false;
+    arch::Cli();
+    Pipe& p = g_pipe_pool[idx];
+    // EPIPE-ready (every reader gone) also counts as "won't block"
+    // — write will fail immediately.
+    const bool ready = p.in_use && (p.count < kPipeBufBytes || p.read_refs == 0);
+    arch::Sti();
+    return ready;
+}
+
+bool EventfdReady(u32 idx)
+{
+    if (idx >= kEventfdPoolCap)
+        return false;
+    arch::Cli();
+    Eventfd& e = g_eventfd_pool[idx];
+    const bool ready = e.in_use && e.counter > 0;
+    arch::Sti();
+    return ready;
+}
+
 i64 EventfdWrite(u32 idx, u64 user_src, u64 len)
 {
     if (idx >= kEventfdPoolCap)

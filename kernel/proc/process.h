@@ -749,6 +749,42 @@ struct Process
     LinuxSigAction linux_sigactions[kLinuxSignalCount];
     u64 linux_signal_mask; // per-process blocked-signal bitmask (rt_sigprocmask)
 
+    // Linux parent / wait infrastructure — backs wait4 / waitid /
+    // SIGCHLD reaping. `linux_parent_pid` is set by DoFork (clone
+    // without CLONE_THREAD); 0 means "no Linux parent" (kernel-
+    // spawned process or pre-fork init). `linux_exit_code` is
+    // populated by DoExit / DoExitGroup before the task dies; the
+    // ProcessRelease teardown reads it to push an exit notification
+    // onto the parent's queue.
+    //
+    // `linux_child_exits[8]` is the per-process zombie queue: each
+    // dead child's (pid, exit_code, exit_signal) is appended here
+    // when the child's last ref is released, and drained by wait4.
+    // Cap is 8 — typical shell pipelines have 1-3 outstanding
+    // children. Overflow drops the notification (sub-GAP for >8
+    // simultaneous children).
+    //
+    // `linux_wait_wq` is the wake target for wait4 callers blocked
+    // waiting for any child to exit. Every queue push wakes one
+    // waiter.
+    static constexpr u64 kLinuxChildExitCap = 8;
+    struct LinuxChildExit
+    {
+        u64 pid;
+        u32 exit_code;     // raw 8-bit exit status passed to DoExit
+        u8 exit_signal;    // signal that killed the process; 0 = clean exit
+        bool was_signaled; // distinguishes "exited" from "killed by signal"
+        u8 _pad[2];
+    };
+    u64 linux_parent_pid;
+    u32 linux_exit_code;
+    bool linux_was_signaled;
+    u8 linux_exit_signal;
+    u8 _linux_exit_pad[2];
+    u64 linux_child_exit_count;
+    LinuxChildExit linux_child_exits[kLinuxChildExitCap];
+    sched::WaitQueue linux_wait_wq;
+
     // Win32 custom-diagnostics state — opaque pointer to a
     // duetos::subsystems::win32::custom::ProcessCustomState. nullptr
     // until the process opts into any custom-Win32 feature via

@@ -15,8 +15,11 @@
 
 #include "subsystems/linux/syscall_internal.h"
 
+#include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
 #include "diag/log_names.h"
+#include "mm/paging.h"
+#include "proc/process.h"
 #include "sched/sched.h"
 
 namespace duetos::subsystems::linux::internal
@@ -29,6 +32,17 @@ i64 DoExitGroup(u64 status)
     SerialWrite("[linux] exit_group status=");
     SerialWriteHex(status);
     SerialWrite("\n");
+    // Stash the exit code on the Process so the eventual
+    // ProcessRelease teardown can pass it to a waiting parent.
+    // Linux encodes the 8-bit status in bits 8..15 of wstatus when
+    // WIFEXITED is true; we keep the raw status here and let
+    // wait4 do the encoding.
+    if (core::Process* p = core::CurrentProcess(); p != nullptr)
+    {
+        p->linux_exit_code = static_cast<u32>(status & 0xFF);
+        p->linux_was_signaled = false;
+        p->linux_exit_signal = 0;
+    }
     sched::SchedExit();
     // sched::SchedExit is [[noreturn]]; this line is unreachable.
     return 0;

@@ -1,5 +1,6 @@
 #include "proc/process.h"
 
+#include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
 #include "diag/log_names.h"
 #include "debug/probes.h"
@@ -191,6 +192,25 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
         p->linux_sigactions[i].mask = 0;
     }
     p->linux_signal_mask = 0;
+    // Linux parent / wait state. fork() / clone() patches the
+    // parent_pid into the child after ProcessCreate returns; bare
+    // ProcessCreate has no parent (init-spawned).
+    p->linux_parent_pid = 0;
+    p->linux_exit_code = 0;
+    p->linux_was_signaled = false;
+    p->linux_exit_signal = 0;
+    for (u32 i = 0; i < sizeof(p->_linux_exit_pad); ++i)
+        p->_linux_exit_pad[i] = 0;
+    p->linux_child_exit_count = 0;
+    for (u64 i = 0; i < Process::kLinuxChildExitCap; ++i)
+    {
+        p->linux_child_exits[i].pid = 0;
+        p->linux_child_exits[i].exit_code = 0;
+        p->linux_child_exits[i].exit_signal = 0;
+        p->linux_child_exits[i].was_signaled = false;
+    }
+    p->linux_wait_wq.head = nullptr;
+    p->linux_wait_wq.tail = nullptr;
     // Win32 custom-diagnostics state lazy-allocates on first opt-in.
     p->win32_custom_state = nullptr;
     // Default cwd is "/" — matches the value DoGetcwd hard-coded
@@ -276,6 +296,34 @@ void ProcessRelease(Process* p)
     arch::SerialWrite(" name=\"");
     arch::SerialWrite(p->name);
     arch::SerialWrite("\"\n");
+
+    // Notify the Linux parent (if any) that this process has exited.
+    // Parent is found by PID — pids are monotonically incrementing
+    // and never reused, so a missed lookup means the parent died
+    // first (orphaned child case; nothing to do — sub-GAP: no
+    // init-style reaper yet, so orphaned exits drop their status).
+    //
+    // Done BEFORE the KFree below so the parent's queue mutation
+    // happens while the dying process's data is still valid.
+    if (p->linux_parent_pid != 0)
+    {
+        Process* parent = sched::SchedFindProcessByPid(p->linux_parent_pid);
+        if (parent != nullptr)
+        {
+            arch::Cli();
+            if (parent->linux_child_exit_count < Process::kLinuxChildExitCap)
+            {
+                auto& slot = parent->linux_child_exits[parent->linux_child_exit_count];
+                slot.pid = p->pid;
+                slot.exit_code = p->linux_exit_code;
+                slot.was_signaled = p->linux_was_signaled;
+                slot.exit_signal = p->linux_exit_signal;
+                ++parent->linux_child_exit_count;
+                sched::WaitQueueWakeOne(&parent->linux_wait_wq);
+            }
+            arch::Sti();
+        }
+    }
 
     // Drop the AS reference we took at create. If this was the last
     // process/task holding that AS (v0: always true — one task per

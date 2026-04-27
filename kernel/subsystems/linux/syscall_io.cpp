@@ -21,6 +21,7 @@
  * + ignore), TIOCGWINSZ (fake 80×24).
  */
 
+#include "subsystems/linux/syscall_async_io.h"
 #include "subsystems/linux/syscall_internal.h"
 #include "subsystems/linux/syscall_pipe.h"
 #include "subsystems/linux/syscall_socket.h"
@@ -77,8 +78,10 @@ i64 DoWrite(u64 fd, u64 user_buf, u64 len)
     // Socket → dispatch to socket layer.
     if (p->linux_fds[fd].state == 6)
         return SocketFdWrite(p->linux_fds[fd].first_cluster, user_buf, len);
-    // Pipe-read end is read-only.
-    if (p->linux_fds[fd].state == 3)
+    // Pipe-read end / timerfd / signalfd / epoll instance — all
+    // read-only fd kinds reject writes with -EBADF, matching Linux.
+    if (p->linux_fds[fd].state == 3 || p->linux_fds[fd].state == 7 || p->linux_fds[fd].state == 8 ||
+        p->linux_fds[fd].state == 9)
         return kEBADF;
     if (p->linux_fds[fd].state != 2)
         return kEBADF;
@@ -184,6 +187,14 @@ i64 DoRead(u64 fd, u64 user_buf, u64 len)
     // Socket → dispatch to socket layer.
     if (p->linux_fds[fd].state == 6)
         return SocketFdRead(p->linux_fds[fd].first_cluster, user_buf, len);
+    // Timerfd / signalfd → dispatch to async-I/O pools.
+    if (p->linux_fds[fd].state == 7)
+        return TimerfdRead(p->linux_fds[fd].first_cluster, user_buf, len);
+    if (p->linux_fds[fd].state == 8)
+        return SignalfdRead(p->linux_fds[fd].first_cluster, user_buf, len);
+    // Epoll instance — Linux returns -EINVAL on read.
+    if (p->linux_fds[fd].state == 9)
+        return kEINVAL;
     // Pipe-write end is write-only.
     if (p->linux_fds[fd].state == 4)
         return kEBADF;
