@@ -105,6 +105,7 @@
 #include "fs/vfs.h"
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
+#include "sync/rwlock.h"
 #include "sync/spinlock.h"
 #include "security/auth.h"
 #ifdef DUETOS_CRTRACE_SURVEY
@@ -1045,6 +1046,15 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // workaround that used to depend on worker creation order.
     duetos::sched::SchedStartIdle("idle-bsp");
     duetos::sched::SchedStartReaper();
+
+    // RwLock self-test (plan B1.2). Walks every state-machine
+    // transition that can be exercised without contention (Try*,
+    // multi-reader, writer-blocks-readers, readers-block-writer).
+    // Real contention paths (Acquire blocks, Release wakes a
+    // waiter) only fire under SMP — covered by a follow-up once
+    // AP bring-up lands. Runs here because the scheduler is now
+    // online (RwLock uses sched::Mutex + Condvar internally).
+    duetos::sync::RwLockSelfTest();
 
     SerialWrite("[boot] Bringing up PS/2 keyboard.\n");
     duetos::drivers::input::Ps2KeyboardInit();
