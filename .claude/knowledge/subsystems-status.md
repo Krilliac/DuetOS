@@ -20,8 +20,6 @@ Headline gaps:
 
 ### Linux ABI (~190 of 374 syscalls still stubbed)
 
-- **POSIX message queues** (mq_open / mq_send / mq_receive / mq_notify / mq_getsetattr)
-- **SysV msg queues** (msgget / msgsnd / msgrcv / msgctl)
 - **libaio** (io_setup / io_destroy / io_getevents / io_submit / io_cancel)
 - **BPF + perf_event_open** — huge surface, likely never realistic
 - **Real signal completion**: user-handler trampoline + sigreturn (the trampoline is the hard part)
@@ -391,6 +389,7 @@ callers decide explicitly.
 - `inotify.{cpp,h}` — real inotify(7) engine + FS-mutation publish-subscribe
 - `pidfd_splice.cpp` — pidfd_open / pidfd_send_signal + splice / tee / vmsplice
 - `sysv_ipc.cpp` — SysV shared memory + semaphores
+- `msg_queues.cpp` — SysV msg queues + POSIX msg queues
 - `ring3_smoke.{cpp,h}` — Linux ELF smoke harness
 
 ### LinuxFd states (in `Process::linux_fds[16]`)
@@ -410,6 +409,7 @@ callers decide explicitly.
 | 10 | inotify instance | inotify pool idx |
 | 11 | dirfd (directory snapshot) | win32_dirs pool idx |
 | 12 | pidfd | target pid |
+| 13 | POSIX mq descriptor | posix_mq pool idx |
 
 ### ABI translation unit (`abi-translation-unit`)
 
@@ -496,8 +496,6 @@ described in §9):
 
 | Family | Stubbed | Notable |
 |---|---|---|
-| SysV msg queues | msgget / msgsnd / msgrcv / msgctl | (shm + sem are now real) |
-| POSIX msg queues | mq_open / mq_unlink / mq_timedsend / mq_timedreceive / mq_notify / mq_getsetattr | |
 | libaio | io_setup / io_destroy / io_getevents / io_submit / io_cancel | |
 | BPF / perf | bpf / perf_event_open / trace_* | Huge surface |
 | Audit | audit_* (8+) | Kernel auditd |
@@ -608,6 +606,9 @@ have landed (see §10).
 23. ~~SysV shared memory + semaphores~~ — DONE (`8c2d619`)
 24. **NT 100% coverage** — DONE (`a7c459e`): every NT call has at
     least a NotImpl facade; ~36 are real implementations
+25. ~~SysV msg queues + POSIX msg queues~~ — DONE (`efe483e`):
+    real ring + WaitQueue blocking; mtype filter (SysV) and
+    priority delivery (POSIX); `Process::linux_fds` state 13
 
 ### Next slices (high-leverage, achievable)
 
@@ -672,6 +673,7 @@ sequence of what got built when.
 | 2026-04-27 | `4b41615` | Real Linux `getdents64` + dirfd via shared snapshot pool. State 11 LinuxFd. `subsystems/win32/dir_syscall.{cpp,h}` exposed `SysDirOpenKernel` for cross-subsystem use. `linux_dirent64` marshaling |
 | 2026-04-27 | `3b7b753` | Linux pidfd family (state 12) + splice/tee/vmsplice + PR_SET_NAME. pidfd_open ProcessRetains target; pidfd_send_signal forwards to `LinuxSignalDeliver`. splice/tee return -EINVAL (lib fallback); vmsplice honours iovec→pipe direction. `Process::linux_task_name[16]` matches TASK_COMM_LEN |
 | 2026-04-27 | `8c2d619` | SysV shared memory + semaphores. shm: 8-segment global pool, frames mapped via `AddressSpaceMapBorrowedPage` at per-process arena (`kLinuxShmArenaBase = 0x70000000`); `Process::linux_shm_attaches[8]` table. sem: 8-set / 16-sem-per-set pool, `SemTryApplyLocked` atomic-batch with WaitQueue blocking |
+| 2026-04-27 | `efe483e` | SysV msg queues + POSIX msg queues. SysV: 8-queue keyed pool, 16-msg ring of 1024-byte messages, mtype filter (== / 0 = any / < 0 = any ≤ filter), IPC_NOWAIT honoured. POSIX: 8-queue named pool, LinuxFd state 13, refcounted (mq_unlink + close-of-last frees), highest-priority delivery, mq_notify -ENOSYS. **Sub-GAPs**: mq_timedsend / mq_timedreceive ignore timeout argument; mq_getsetattr SET no-op; 1024-byte msg cap; 16-msg ring cap |
 
 ---
 
