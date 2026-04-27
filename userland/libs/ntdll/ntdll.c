@@ -1846,6 +1846,406 @@ __declspec(dllexport) NTSTATUS ZwQueryObject(HANDLE Handle, ULONG ObjectInformat
     return NtQueryObject(Handle, ObjectInformationClass, ObjectInformation, ObjectInformationLength, ReturnLength);
 }
 
+/* NtQuerySystemTime + NtQueryPerformanceCounter live earlier in
+ * this file (around line 127). Zw* aliases below for export
+ * completeness. */
+__declspec(dllexport) NTSTATUS ZwQuerySystemTime(long long* SystemTime)
+{
+    return NtQuerySystemTime(SystemTime);
+}
+
+__declspec(dllexport) NTSTATUS ZwQueryPerformanceCounter(long long* counter, long long* freq)
+{
+    return NtQueryPerformanceCounter(counter, freq);
+}
+
+/* ------------------------------------------------------------------
+ * NtQuerySystemInformation — multiplexed system info read.
+ * Honours SystemBasicInformation (0) + SystemTimeOfDayInformation (3);
+ * other classes return NotImpl. The real hardware/topology data
+ * lives in the kernel — this thunk only adapts the ABI shape.
+ * ------------------------------------------------------------------ */
+__declspec(dllexport) NTSTATUS NtQuerySystemInformation(ULONG SystemInformationClass, void* SystemInformation,
+                                                        ULONG SystemInformationLength, ULONG* ReturnLength)
+{
+    if (SystemInformation == (void*)0)
+        return NTSTATUS_INVALID_PARAMETER;
+    if (SystemInformationClass == 0 /* SystemBasicInformation */)
+    {
+        const unsigned total = 56;
+        if (ReturnLength != (ULONG*)0)
+            *ReturnLength = total;
+        if (SystemInformationLength < total)
+            return (NTSTATUS)0xC0000004;
+        unsigned char* out = (unsigned char*)SystemInformation;
+        for (unsigned i = 0; i < total; ++i)
+            out[i] = 0;
+        out[4] = 0x10;
+        out[5] = 0x27; /* TimerResolution */
+        out[8] = 0x00;
+        out[9] = 0x10; /* PageSize = 4096 */
+        out[24] = 0x00;
+        out[25] = 0x00;
+        out[26] = 0x01;
+        out[27] = 0x00; /* AllocationGranularity = 65536 */
+        out[52] = 1;    /* NumberOfProcessors = 1 */
+        return NTSTATUS_SUCCESS;
+    }
+    if (SystemInformationClass == 3 /* SystemTimeOfDayInformation */)
+    {
+        const unsigned total = 32;
+        if (ReturnLength != (ULONG*)0)
+            *ReturnLength = total;
+        if (SystemInformationLength < total)
+            return (NTSTATUS)0xC0000004;
+        unsigned char* out = (unsigned char*)SystemInformation;
+        for (unsigned i = 0; i < total; ++i)
+            out[i] = 0;
+        long long ft, ns;
+        __asm__ volatile("int $0x80" : "=a"(ft) : "a"((long long)17) : "memory");
+        __asm__ volatile("int $0x80" : "=a"(ns) : "a"((long long)18) : "memory");
+        long long boot = ft - (ns / 100);
+        for (unsigned i = 0; i < 8; ++i)
+            out[i] = (unsigned char)((boot >> (i * 8)) & 0xFF);
+        for (unsigned i = 0; i < 8; ++i)
+            out[8 + i] = (unsigned char)((ft >> (i * 8)) & 0xFF);
+        return NTSTATUS_SUCCESS;
+    }
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS ZwQuerySystemInformation(ULONG SystemInformationClass, void* SystemInformation,
+                                                        ULONG SystemInformationLength, ULONG* ReturnLength)
+{
+    return NtQuerySystemInformation(SystemInformationClass, SystemInformation, SystemInformationLength, ReturnLength);
+}
+
+__declspec(dllexport) NTSTATUS NtSetSystemInformation(ULONG SystemInformationClass, void* SystemInformation,
+                                                      ULONG SystemInformationLength)
+{
+    (void)SystemInformationClass;
+    (void)SystemInformation;
+    (void)SystemInformationLength;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS ZwSetSystemInformation(ULONG SystemInformationClass, void* SystemInformation,
+                                                      ULONG SystemInformationLength)
+{
+    return NtSetSystemInformation(SystemInformationClass, SystemInformation, SystemInformationLength);
+}
+
+/* ------------------------------------------------------------------
+ * NT LPC / ALPC — explicit NotImpl facades.
+ *
+ * v0 has no LPC/ALPC inter-process port engine. Every Win32 RPC
+ * lands kernel-side via SYS_* directly, not via Win32 ports.
+ * These thunks return NotImpl so any RPC-shaped probe gets a
+ * clean answer. Architectural note: cross-process IPC in DuetOS
+ * goes through kernel-mediated, cap-gated SYS_* — the LPC port
+ * surface is a façade, not a parallel IPC path.
+ * ------------------------------------------------------------------ */
+__declspec(dllexport) NTSTATUS NtCreatePort(HANDLE* PortHandle, void* ObjectAttributes, ULONG MaxConnectionInfoLength,
+                                            ULONG MaxMessageLength, ULONG MaxPoolUsage)
+{
+    (void)PortHandle;
+    (void)ObjectAttributes;
+    (void)MaxConnectionInfoLength;
+    (void)MaxMessageLength;
+    (void)MaxPoolUsage;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtConnectPort(HANDLE* ClientPortHandle, void* PortName, void* SecurityQos,
+                                             void* ClientView, void* ServerView, void* MaxMessageLength,
+                                             void* ConnectionInformation, void* ConnectionInformationLength)
+{
+    (void)ClientPortHandle;
+    (void)PortName;
+    (void)SecurityQos;
+    (void)ClientView;
+    (void)ServerView;
+    (void)MaxMessageLength;
+    (void)ConnectionInformation;
+    (void)ConnectionInformationLength;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtListenPort(HANDLE PortHandle, void* ConnectionRequest)
+{
+    (void)PortHandle;
+    (void)ConnectionRequest;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtAcceptConnectPort(HANDLE* ServerPortHandle, void* PortContext, void* ConnectionRequest,
+                                                   BOOL AcceptConnection, void* ServerView, void* ClientView)
+{
+    (void)ServerPortHandle;
+    (void)PortContext;
+    (void)ConnectionRequest;
+    (void)AcceptConnection;
+    (void)ServerView;
+    (void)ClientView;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtCompleteConnectPort(HANDLE PortHandle)
+{
+    (void)PortHandle;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtRequestPort(HANDLE PortHandle, void* RequestMessage)
+{
+    (void)PortHandle;
+    (void)RequestMessage;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtRequestWaitReplyPort(HANDLE PortHandle, void* RequestMessage, void* ReplyMessage)
+{
+    (void)PortHandle;
+    (void)RequestMessage;
+    (void)ReplyMessage;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtReplyPort(HANDLE PortHandle, void* ReplyMessage)
+{
+    (void)PortHandle;
+    (void)ReplyMessage;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtReplyWaitReceivePort(HANDLE PortHandle, void** PortContext, void* ReplyMessage,
+                                                      void* ReceiveMessage)
+{
+    (void)PortHandle;
+    (void)PortContext;
+    (void)ReplyMessage;
+    (void)ReceiveMessage;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtAlpcCreatePort(HANDLE* PortHandle, void* ObjectAttributes, void* PortAttributes)
+{
+    (void)PortHandle;
+    (void)ObjectAttributes;
+    (void)PortAttributes;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtAlpcConnectPort(HANDLE* PortHandle, void* PortName, void* ObjectAttributes,
+                                                 void* PortAttributes, ULONG Flags, void* RequiredServerSid,
+                                                 void* ConnectionMessage, void* BufferLength,
+                                                 void* OutMessageAttributes, void* InMessageAttributes, void* Timeout)
+{
+    (void)PortHandle;
+    (void)PortName;
+    (void)ObjectAttributes;
+    (void)PortAttributes;
+    (void)Flags;
+    (void)RequiredServerSid;
+    (void)ConnectionMessage;
+    (void)BufferLength;
+    (void)OutMessageAttributes;
+    (void)InMessageAttributes;
+    (void)Timeout;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtAlpcSendWaitReceivePort(HANDLE PortHandle, ULONG Flags, void* SendMessage,
+                                                         void* SendMessageAttributes, void* ReceiveMessage,
+                                                         void* BufferLength, void* ReceiveMessageAttributes,
+                                                         void* Timeout)
+{
+    (void)PortHandle;
+    (void)Flags;
+    (void)SendMessage;
+    (void)SendMessageAttributes;
+    (void)ReceiveMessage;
+    (void)BufferLength;
+    (void)ReceiveMessageAttributes;
+    (void)Timeout;
+    return (NTSTATUS)0xC0000002;
+}
+
+/* ------------------------------------------------------------------
+ * NT atom / symbolic-link / directory-object — explicit NotImpl
+ * facades. All four are name-table primitives that v0 doesn't
+ * have a backing store for. Architectural note: the kernel owns
+ * naming; these thunks don't synthesize a parallel namespace.
+ * ------------------------------------------------------------------ */
+__declspec(dllexport) NTSTATUS NtAddAtom(void* AtomName, ULONG Length, void* Atom)
+{
+    (void)AtomName;
+    (void)Length;
+    (void)Atom;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtFindAtom(void* AtomName, ULONG Length, void* Atom)
+{
+    (void)AtomName;
+    (void)Length;
+    (void)Atom;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtDeleteAtom(unsigned short Atom)
+{
+    (void)Atom;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtCreateSymbolicLinkObject(HANDLE* LinkHandle, ULONG DesiredAccess,
+                                                          void* ObjectAttributes, void* LinkTarget)
+{
+    (void)LinkHandle;
+    (void)DesiredAccess;
+    (void)ObjectAttributes;
+    (void)LinkTarget;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtOpenSymbolicLinkObject(HANDLE* LinkHandle, ULONG DesiredAccess, void* ObjectAttributes)
+{
+    (void)LinkHandle;
+    (void)DesiredAccess;
+    (void)ObjectAttributes;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtQuerySymbolicLinkObject(HANDLE LinkHandle, void* LinkTarget, void* ReturnedLength)
+{
+    (void)LinkHandle;
+    (void)LinkTarget;
+    (void)ReturnedLength;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtCreateDirectoryObject(HANDLE* DirectoryHandle, ULONG DesiredAccess,
+                                                       void* ObjectAttributes)
+{
+    (void)DirectoryHandle;
+    (void)DesiredAccess;
+    (void)ObjectAttributes;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtOpenDirectoryObject(HANDLE* DirectoryHandle, ULONG DesiredAccess,
+                                                     void* ObjectAttributes)
+{
+    (void)DirectoryHandle;
+    (void)DesiredAccess;
+    (void)ObjectAttributes;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtQueryDirectoryObject(HANDLE DirectoryHandle, void* Buffer, ULONG Length,
+                                                      BOOL ReturnSingleEntry, BOOL RestartScan, void* Context,
+                                                      void* ReturnLength)
+{
+    (void)DirectoryHandle;
+    (void)Buffer;
+    (void)Length;
+    (void)ReturnSingleEntry;
+    (void)RestartScan;
+    (void)Context;
+    (void)ReturnLength;
+    return (NTSTATUS)0xC0000002;
+}
+
+/* ------------------------------------------------------------------
+ * NT extended-file ops — explicit NotImpl facades.
+ * Lock / EA / NotifyChange families. v0 has no byte-range lock
+ * table, no extended-attribute store, and no inotify-style watch
+ * dispatch. Returning NotImpl is the right answer; callers fall
+ * back rather than spin.
+ * ------------------------------------------------------------------ */
+__declspec(dllexport) NTSTATUS NtLockFile(HANDLE FileHandle, HANDLE Event, void* ApcRoutine, void* ApcContext,
+                                          void* IoStatusBlock, void* ByteOffset, void* Length, ULONG Key,
+                                          BOOL FailImmediately, BOOL ExclusiveLock)
+{
+    (void)FileHandle;
+    (void)Event;
+    (void)ApcRoutine;
+    (void)ApcContext;
+    (void)IoStatusBlock;
+    (void)ByteOffset;
+    (void)Length;
+    (void)Key;
+    (void)FailImmediately;
+    (void)ExclusiveLock;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtUnlockFile(HANDLE FileHandle, void* IoStatusBlock, void* ByteOffset, void* Length,
+                                            ULONG Key)
+{
+    (void)FileHandle;
+    (void)IoStatusBlock;
+    (void)ByteOffset;
+    (void)Length;
+    (void)Key;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtQueryEaFile(HANDLE FileHandle, void* IoStatusBlock, void* Buffer, ULONG Length,
+                                             BOOL ReturnSingleEntry, void* EaList, ULONG EaListLength, void* EaIndex,
+                                             BOOL RestartScan)
+{
+    (void)FileHandle;
+    (void)IoStatusBlock;
+    (void)Buffer;
+    (void)Length;
+    (void)ReturnSingleEntry;
+    (void)EaList;
+    (void)EaListLength;
+    (void)EaIndex;
+    (void)RestartScan;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtSetEaFile(HANDLE FileHandle, void* IoStatusBlock, void* Buffer, ULONG Length)
+{
+    (void)FileHandle;
+    (void)IoStatusBlock;
+    (void)Buffer;
+    (void)Length;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtNotifyChangeDirectoryFile(HANDLE FileHandle, HANDLE Event, void* ApcRoutine,
+                                                           void* ApcContext, void* IoStatusBlock, void* Buffer,
+                                                           ULONG Length, ULONG CompletionFilter, BOOL WatchTree)
+{
+    (void)FileHandle;
+    (void)Event;
+    (void)ApcRoutine;
+    (void)ApcContext;
+    (void)IoStatusBlock;
+    (void)Buffer;
+    (void)Length;
+    (void)CompletionFilter;
+    (void)WatchTree;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtCancelIoFile(HANDLE FileHandle, void* IoStatusBlock)
+{
+    (void)FileHandle;
+    if (IoStatusBlock != (void*)0)
+    {
+        unsigned long long* iosb = (unsigned long long*)IoStatusBlock;
+        iosb[0] = 0;
+        iosb[1] = 0;
+    }
+    /* No async I/O to cancel; success no-op. */
+    return NTSTATUS_SUCCESS;
+}
+
 /* ------------------------------------------------------------------
  * NT debug surface — userland-only NotImpl stubs.
  *

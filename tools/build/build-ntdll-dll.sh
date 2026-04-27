@@ -183,6 +183,41 @@ set +e
     /export:ZwTerminateJobObject=NtTerminateJobObject \
     /export:NtIsProcessInJob \
     /export:ZwIsProcessInJob=NtIsProcessInJob \
+    /export:NtQuerySystemTime \
+    /export:ZwQuerySystemTime=NtQuerySystemTime \
+    /export:NtQueryPerformanceCounter \
+    /export:ZwQueryPerformanceCounter=NtQueryPerformanceCounter \
+    /export:NtQuerySystemInformation \
+    /export:ZwQuerySystemInformation=NtQuerySystemInformation \
+    /export:NtSetSystemInformation \
+    /export:ZwSetSystemInformation=NtSetSystemInformation \
+    /export:NtCreatePort \
+    /export:NtConnectPort \
+    /export:NtListenPort \
+    /export:NtAcceptConnectPort \
+    /export:NtCompleteConnectPort \
+    /export:NtRequestPort \
+    /export:NtRequestWaitReplyPort \
+    /export:NtReplyPort \
+    /export:NtReplyWaitReceivePort \
+    /export:NtAlpcCreatePort \
+    /export:NtAlpcConnectPort \
+    /export:NtAlpcSendWaitReceivePort \
+    /export:NtAddAtom \
+    /export:NtFindAtom \
+    /export:NtDeleteAtom \
+    /export:NtCreateSymbolicLinkObject \
+    /export:NtOpenSymbolicLinkObject \
+    /export:NtQuerySymbolicLinkObject \
+    /export:NtCreateDirectoryObject \
+    /export:NtOpenDirectoryObject \
+    /export:NtQueryDirectoryObject \
+    /export:NtLockFile \
+    /export:NtUnlockFile \
+    /export:NtQueryEaFile \
+    /export:NtSetEaFile \
+    /export:NtNotifyChangeDirectoryFile \
+    /export:NtCancelIoFile \
     /export:NtContinue \
     /export:ZwContinue=NtContinue \
     /export:NtAllocateVirtualMemory \
