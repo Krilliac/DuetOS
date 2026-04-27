@@ -181,6 +181,22 @@ i64 DoFork()
             EpollRetain(src.first_cluster);
         else if (src.state == 10)
             InotifyRetain(src.first_cluster);
+        else if (src.state == 11)
+        {
+            // Directory snapshot lives on the PARENT's
+            // win32_dirs[] table. The child's table is fresh
+            // and empty; sharing the parent's slot index would
+            // leave the child's fd dangling. Skip inheritance —
+            // the child's dirfd slot is cleared so getdents64
+            // sees an honest -EBADF rather than reading the
+            // wrong slot. (POSIX permits closing dirfds on
+            // fork — same as what some libcs do under
+            // FD_CLOEXEC; our v0 just makes it unconditional.)
+            child->linux_fds[i].state = 0;
+            child->linux_fds[i].first_cluster = 0;
+            child->linux_fds[i].size = 0;
+            child->linux_fds[i].offset = 0;
+        }
     }
     // Hand a LinuxCloneDesc to the existing LinuxCloneEntry —
     // it iretq's into ring-3 with rax = 0 (EnterUserModeThread's

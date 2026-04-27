@@ -193,6 +193,16 @@ i64 SysDirOpen(u64 user_path)
     if (!mm::CopyFromUser(path, reinterpret_cast<const void*>(user_path), sizeof(path) - 1))
         return -1;
     path[sizeof(path) - 1] = 0;
+    return SysDirOpenKernel(path);
+}
+
+i64 SysDirOpenKernel(const char* path)
+{
+    if (path == nullptr)
+        return -1;
+    core::Process* proc = core::CurrentProcess();
+    if (proc == nullptr)
+        return -1;
 
     const i32 slot = AllocDirSlot(proc);
     if (slot < 0)
@@ -209,7 +219,6 @@ i64 SysDirOpen(u64 user_path)
         const auto* v = fs::fat32::Fat32Volume(volume_idx);
         if (v == nullptr)
             return -1;
-        // Lookup needs a leading slash.
         if (rest == nullptr || *rest == '\0')
             rest = "/";
         if (SnapshotFat32(v, rest, entries, count) < 0)
@@ -217,7 +226,6 @@ i64 SysDirOpen(u64 user_path)
     }
     else
     {
-        // Ramfs route — resolve `path` against the process root.
         const fs::RamfsNode* node = RamfsResolvePath(proc->root, path);
         if (SnapshotRamfs(node, entries, count) < 0)
             return -1;

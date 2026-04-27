@@ -20,6 +20,13 @@ namespace duetos::subsystems::win32
 // -1 on miss / pool full. Cap-gated on kCapFsRead.
 i64 SysDirOpen(u64 user_path);
 
+// Kernel-string variant — used when a sibling syscall (e.g. Linux
+// `open(path, O_DIRECTORY)`) has already copied the path into a
+// kernel buffer and wants to allocate a directory snapshot
+// without re-doing the user copy. Same cap requirements; same
+// return values.
+i64 SysDirOpenKernel(const char* path);
+
 // Advance the cursor and copy the next entry to user. Returns 1 on
 // success, 0 at end-of-iteration, -1 on bad handle.
 i64 SysDirNext(u64 handle, u64 user_report);

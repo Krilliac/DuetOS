@@ -84,6 +84,8 @@ i64 DoWrite(u64 fd, u64 user_buf, u64 len)
     if (p->linux_fds[fd].state == 3 || p->linux_fds[fd].state == 7 || p->linux_fds[fd].state == 8 ||
         p->linux_fds[fd].state == 9 || p->linux_fds[fd].state == 10)
         return kEBADF;
+    if (p->linux_fds[fd].state == 11)
+        return kEISDIR;
     if (p->linux_fds[fd].state != 2)
         return kEBADF;
     // Subsystem isolation: file mutation requires kCapFsWrite —
@@ -199,6 +201,10 @@ i64 DoRead(u64 fd, u64 user_buf, u64 len)
     // Inotify instance → drain event ring.
     if (p->linux_fds[fd].state == 10)
         return InotifyRead(p->linux_fds[fd].first_cluster, user_buf, len);
+    // Directory iterator — read() on a dirfd is an error in Linux;
+    // callers must use getdents64 instead.
+    if (p->linux_fds[fd].state == 11)
+        return kEISDIR;
     // Pipe-write end is write-only.
     if (p->linux_fds[fd].state == 4)
         return kEBADF;

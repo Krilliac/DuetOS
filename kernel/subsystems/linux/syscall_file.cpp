@@ -26,6 +26,7 @@
 #include "proc/process.h"
 #include "fs/fat32.h"
 #include "mm/address_space.h"
+#include "subsystems/win32/dir_syscall.h"
 
 namespace duetos::subsystems::linux::internal
 {
@@ -115,15 +116,58 @@ i64 DoOpen(u64 user_path, u64 flags, u64 mode)
     {
         return kENOENT;
     }
-    if (entry.attributes & 0x10)
-    {
-        return kEISDIR;
-    }
-
     core::Process* p = core::CurrentProcess();
     if (p == nullptr)
     {
         return kEIO;
+    }
+    if (entry.attributes & 0x10)
+    {
+        // Directory open — allocate a snapshot via the win32 dir
+        // pool and bind a Linux fd (state 11). The path passed to
+        // SysDirOpenKernel must include the "/disk/0/" prefix that
+        // routes to FAT32; DoOpen has already stripped that prefix
+        // off `leaf`, so re-construct.
+        char dir_path[80];
+        for (u32 i = 0; i < sizeof(dir_path); ++i)
+            dir_path[i] = 0;
+        const char dprefix[] = "/disk/0/";
+        u32 di = 0;
+        while (dprefix[di] != '\0' && di < sizeof(dir_path) - 1)
+        {
+            dir_path[di] = dprefix[di];
+            ++di;
+        }
+        // Skip leading '/' on `leaf` to avoid doubling.
+        const char* lc = leaf;
+        if (lc[0] == '/')
+            ++lc;
+        u32 li = 0;
+        while (lc[li] != '\0' && di + 1 < sizeof(dir_path))
+        {
+            dir_path[di] = lc[li];
+            ++di;
+            ++li;
+        }
+        dir_path[di] = '\0';
+        const i64 dh = ::duetos::subsystems::win32::SysDirOpenKernel(dir_path);
+        if (dh < 0)
+            return kENOMEM;
+        const u32 dslot = static_cast<u32>(dh) - static_cast<u32>(core::Process::kWin32DirBase);
+        for (u32 i = 3; i < 16; ++i)
+        {
+            if (p->linux_fds[i].state == 0)
+            {
+                p->linux_fds[i].state = 11;
+                p->linux_fds[i].first_cluster = dslot;
+                p->linux_fds[i].size = 0;
+                p->linux_fds[i].offset = 0;
+                p->linux_fds[i].path[0] = '\0';
+                return static_cast<i64>(i);
+            }
+        }
+        ::duetos::subsystems::win32::SysDirClose(p, static_cast<u64>(dh));
+        return kEMFILE;
     }
     for (u32 i = 3; i < 16; ++i)
     {
@@ -184,6 +228,8 @@ i64 DoClose(u64 fd)
         EpollRelease(idx);
     else if (state == 10)
         InotifyRelease(idx);
+    else if (state == 11)
+        ::duetos::subsystems::win32::SysDirClose(p, idx + core::Process::kWin32DirBase);
     p->linux_fds[fd].state = 0;
     p->linux_fds[fd].first_cluster = 0;
     p->linux_fds[fd].size = 0;
