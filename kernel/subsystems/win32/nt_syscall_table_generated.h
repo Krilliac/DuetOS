@@ -8,7 +8,7 @@
 // Target Windows version: Windows 11 and Server (11 25H2)
 // Bedrock NT calls (present in every Windows XP→Win11 25H2): 292
 // All known NT calls on the target version: 489
-// DuetOS coverage: 36/292 = 12%
+// DuetOS coverage: 39/292 = 13%
 //
 // See tools/win32-compat/README.md for the legal + design rationale.
 
@@ -78,9 +78,9 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
     {"NtQueryInformationThread", 0x0025, kSysNtNotImpl},
     {"NtOpenProcess", 0x0026, static_cast<u32>(::duetos::core::SYS_PROCESS_OPEN)},
     {"NtSetInformationFile", 0x0027, static_cast<u32>(::duetos::core::SYS_FILE_SEEK)},
-    {"NtMapViewOfSection", 0x0028, kSysNtNotImpl},
+    {"NtMapViewOfSection", 0x0028, static_cast<u32>(::duetos::core::SYS_SECTION_MAP)},
     {"NtAccessCheckAndAuditAlarm", 0x0029, kSysNtNotImpl},
-    {"NtUnmapViewOfSection", 0x002a, kSysNtNotImpl},
+    {"NtUnmapViewOfSection", 0x002a, static_cast<u32>(::duetos::core::SYS_SECTION_UNMAP)},
     {"NtReplyWaitReceivePortEx", 0x002b, kSysNtNotImpl},
     {"NtTerminateProcess", 0x002c, static_cast<u32>(::duetos::core::SYS_EXIT)},
     {"NtSetEventBoostPriority", 0x002d, kSysNtNotImpl},
@@ -112,7 +112,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
     {"NtAddAtom", 0x0047, kSysNtNotImpl},
     {"NtCreateEvent", 0x0048, static_cast<u32>(::duetos::core::SYS_EVENT_CREATE)},
     {"NtQueryVolumeInformationFile", 0x0049, kSysNtNotImpl},
-    {"NtCreateSection", 0x004a, kSysNtNotImpl},
+    {"NtCreateSection", 0x004a, static_cast<u32>(::duetos::core::SYS_SECTION_CREATE)},
     {"NtFlushBuffersFile", 0x004b, static_cast<u32>(::duetos::core::SYS_NT_INVOKE)},
     {"NtApphelpCacheControl", 0x004c, kSysNtNotImpl},
     {"NtCreateProcessEx", 0x004d, kSysNtNotImpl},
@@ -336,7 +336,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
 inline constexpr u32 kBedrockNtSyscallCount =
     sizeof(kBedrockNtSyscalls) / sizeof(kBedrockNtSyscalls[0]);
 
-inline constexpr u32 kBedrockNtSyscallsCovered = 36;
+inline constexpr u32 kBedrockNtSyscallsCovered = 39;
 
 /// Every NT syscall known on the target Windows version — superset
 /// of `kBedrockNtSyscalls`. Includes version-specific additions
@@ -385,9 +385,9 @@ inline constexpr NtSyscallMapping kAllNtSyscalls[] = {
     {"NtQueryInformationThread", 0x0025, kSysNtNotImpl},
     {"NtOpenProcess", 0x0026, static_cast<u32>(::duetos::core::SYS_PROCESS_OPEN)},
     {"NtSetInformationFile", 0x0027, static_cast<u32>(::duetos::core::SYS_FILE_SEEK)},
-    {"NtMapViewOfSection", 0x0028, kSysNtNotImpl},
+    {"NtMapViewOfSection", 0x0028, static_cast<u32>(::duetos::core::SYS_SECTION_MAP)},
     {"NtAccessCheckAndAuditAlarm", 0x0029, kSysNtNotImpl},
-    {"NtUnmapViewOfSection", 0x002a, kSysNtNotImpl},
+    {"NtUnmapViewOfSection", 0x002a, static_cast<u32>(::duetos::core::SYS_SECTION_UNMAP)},
     {"NtReplyWaitReceivePortEx", 0x002b, kSysNtNotImpl},
     {"NtTerminateProcess", 0x002c, static_cast<u32>(::duetos::core::SYS_EXIT)},
     {"NtSetEventBoostPriority", 0x002d, kSysNtNotImpl},
@@ -419,7 +419,7 @@ inline constexpr NtSyscallMapping kAllNtSyscalls[] = {
     {"NtAddAtom", 0x0047, kSysNtNotImpl},
     {"NtCreateEvent", 0x0048, static_cast<u32>(::duetos::core::SYS_EVENT_CREATE)},
     {"NtQueryVolumeInformationFile", 0x0049, kSysNtNotImpl},
-    {"NtCreateSection", 0x004a, kSysNtNotImpl},
+    {"NtCreateSection", 0x004a, static_cast<u32>(::duetos::core::SYS_SECTION_CREATE)},
     {"NtFlushBuffersFile", 0x004b, static_cast<u32>(::duetos::core::SYS_NT_INVOKE)},
     {"NtApphelpCacheControl", 0x004c, kSysNtNotImpl},
     {"NtCreateProcessEx", 0x004d, kSysNtNotImpl},

@@ -642,6 +642,35 @@ struct Process
     static constexpr u64 kWin32ForeignThreadBase = 0x800;
     Win32ForeignThreadHandle win32_foreign_threads[kWin32ForeignThreadCap];
 
+    // Win32 section handles produced by NtCreateSection. A
+    // section is a kernel-resident pool of physical frames
+    // that can be mapped into one or more process address
+    // spaces via NtMapViewOfSection — backs Windows shared
+    // memory + memory-mapped files. v0 honours pagefile-
+    // backed (anonymous) sections only; file-backed sections
+    // (FileHandle != 0) return NotImpl in the kernel handler.
+    //
+    // Disjoint from every other Win32 handle range so the
+    // shared close dispatch can pick the right table by
+    // handle value alone. 8 slots — same sizing rationale
+    // as foreign-thread/process tables.
+    //
+    // Each entry holds an index into the global
+    // g_win32_sections pool (defined in win32_section.cpp).
+    // The pool entry's refcount is incremented on open and
+    // decremented on NtClose; the section is freed only
+    // when refcount hits 0 (which means every handle AND
+    // every active mapping has gone away).
+    struct Win32SectionHandle
+    {
+        bool in_use;
+        u8 _pad[3];
+        u32 pool_index; // index into g_win32_sections
+    };
+    static constexpr u64 kWin32SectionCap = 8;
+    static constexpr u64 kWin32SectionBase = 0x900;
+    Win32SectionHandle win32_section_handles[kWin32SectionCap];
+
     // Per-process cursor for thread-stack allocation. Each new
     // thread carves kV0ThreadStackPages pages off this bump
     // cursor. The base sits above the main task's stack and

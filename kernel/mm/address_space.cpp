@@ -428,6 +428,85 @@ bool AddressSpaceUnmapUserPage(AddressSpace* as, u64 virt)
     return true;
 }
 
+bool AddressSpaceMapBorrowedPage(AddressSpace* as, u64 virt, PhysAddr frame, u64 flags)
+{
+    if (as == nullptr)
+    {
+        PanicAs("AddressSpaceMapBorrowedPage with null AS", virt);
+    }
+    if ((virt & 0xFFF) != 0)
+    {
+        PanicAs("AddressSpaceMapBorrowedPage: unaligned virt", virt);
+    }
+    if ((frame & 0xFFF) != 0)
+    {
+        PanicAs("AddressSpaceMapBorrowedPage: unaligned phys", frame);
+    }
+    constexpr u64 kUserMax = 0x00007FFFFFFFFFFFULL;
+    if (virt > kUserMax)
+    {
+        PanicAs("AddressSpaceMapBorrowedPage: virt outside canonical low half", virt);
+    }
+    if ((flags & kPageUser) == 0)
+    {
+        PanicAs("AddressSpaceMapBorrowedPage: flags missing kPageUser", flags);
+    }
+    if ((flags & kPageWritable) != 0 && (flags & kPageNoExecute) == 0)
+    {
+        PanicAs("AddressSpaceMapBorrowedPage: W^X violation", flags);
+    }
+    if ((flags & kPageGlobal) != 0)
+    {
+        PanicAs("AddressSpaceMapBorrowedPage: kPageGlobal on user page", flags);
+    }
+    u64* pte = WalkToPteIn(as->pml4_virt, virt, /*create=*/true);
+    if (*pte & kPagePresent)
+    {
+        return false;
+    }
+    *pte = (frame & kAddrMask) | (flags | kPagePresent);
+    if (AddressSpaceCurrent() == as)
+    {
+        Invlpg(virt);
+    }
+    return true;
+}
+
+PhysAddr AddressSpaceProbePte(const AddressSpace* as, u64 virt)
+{
+    if (as == nullptr)
+        return kNullFrame;
+    if ((virt & 0xFFF) != 0)
+        PanicAs("AddressSpaceProbePte: unaligned virt", virt);
+    u64* pte = WalkToPteIn(as->pml4_virt, virt, /*create=*/false);
+    if (pte == nullptr || (*pte & kPagePresent) == 0)
+        return kNullFrame;
+    return *pte & kAddrMask;
+}
+
+bool AddressSpaceUnmapBorrowedPage(AddressSpace* as, u64 virt)
+{
+    if (as == nullptr)
+    {
+        return false;
+    }
+    if ((virt & 0xFFF) != 0)
+    {
+        PanicAs("AddressSpaceUnmapBorrowedPage: unaligned virt", virt);
+    }
+    u64* pte = WalkToPteIn(as->pml4_virt, virt, /*create=*/false);
+    if (pte == nullptr || (*pte & kPagePresent) == 0)
+    {
+        return false;
+    }
+    *pte = 0;
+    if (AddressSpaceCurrent() == as)
+    {
+        Invlpg(virt);
+    }
+    return true;
+}
+
 void AddressSpaceActivate(AddressSpace* as)
 {
     cpu::PerCpu* p = cpu::CurrentCpu();

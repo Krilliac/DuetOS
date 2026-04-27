@@ -986,6 +986,115 @@ __declspec(dllexport) NTSTATUS NtOpenThread(HANDLE* ThreadHandle, ULONG DesiredA
 }
 
 /* ------------------------------------------------------------------
+ * NtCreateSection — allocate an anonymous (pagefile-backed)
+ * section of `*MaximumSize` bytes.
+ *
+ * Win32 NT signature:
+ *   NTSTATUS NtCreateSection(
+ *     PHANDLE             SectionHandle,
+ *     ACCESS_MASK         DesiredAccess,
+ *     POBJECT_ATTRIBUTES  ObjectAttributes,
+ *     PLARGE_INTEGER      MaximumSize,           // bytes
+ *     ULONG               SectionPageProtection, // PAGE_*
+ *     ULONG               AllocationAttributes,
+ *     HANDLE              FileHandle);            // 0 = anonymous
+ *
+ * v0 only honours anonymous (FileHandle == 0); file-backed
+ * sections return STATUS_NOT_IMPLEMENTED. AllocationAttributes
+ * + ObjectAttributes are accepted but ignored (no SEC_RESERVE
+ * separation; every section is committed on creation).
+ * ------------------------------------------------------------------ */
+__declspec(dllexport) NTSTATUS NtCreateSection(HANDLE* SectionHandle, ULONG DesiredAccess,
+                                               OBJECT_ATTRIBUTES* ObjectAttributes, unsigned long long* MaximumSize,
+                                               ULONG SectionPageProtection, ULONG AllocationAttributes,
+                                               HANDLE FileHandle)
+{
+    (void)DesiredAccess;
+    (void)ObjectAttributes;
+    (void)AllocationAttributes;
+    if (SectionHandle == (HANDLE*)0 || MaximumSize == (unsigned long long*)0)
+        return NTSTATUS_INVALID_PARAMETER;
+    if (FileHandle != (HANDLE)0)
+        return (NTSTATUS)0xC0000002UL; /* STATUS_NOT_IMPLEMENTED */
+    long long handle = 0;
+    /* SYS_SECTION_CREATE = 140; rdi = size, rsi = page_protect. */
+    __asm__ volatile("int $0x80"
+                     : "=a"(handle)
+                     : "a"((long long)140), "D"(*MaximumSize), "S"((long long)SectionPageProtection)
+                     : "memory");
+    if (handle == 0)
+        return NTSTATUS_INVALID_PARAMETER;
+    *SectionHandle = (HANDLE)handle;
+    return NTSTATUS_SUCCESS;
+}
+
+/* ------------------------------------------------------------------
+ * NtMapViewOfSection — install a view of `SectionHandle` into
+ * the address space of `ProcessHandle` at `*BaseAddress`.
+ *
+ * Win32 NT signature:
+ *   NTSTATUS NtMapViewOfSection(
+ *     HANDLE    SectionHandle,
+ *     HANDLE    ProcessHandle,        // -1 = NtCurrentProcess()
+ *     PVOID*    BaseAddress,           // in/out, 0 hint = kernel-picks
+ *     ULONG_PTR ZeroBits,
+ *     SIZE_T    CommitSize,
+ *     PLARGE_INTEGER SectionOffset,    // v0: must be 0
+ *     PSIZE_T   ViewSize,              // in/out, kernel writes actual
+ *     SECTION_INHERIT InheritDisposition,
+ *     ULONG     AllocationType,
+ *     ULONG     Win32Protect);         // PAGE_*
+ *
+ * v0 honours the section→AS mapping but ignores ZeroBits,
+ * CommitSize, SectionOffset (must be 0), InheritDisposition,
+ * and AllocationType. The kernel always maps the section's
+ * full size; partial views land later.
+ * ------------------------------------------------------------------ */
+__declspec(dllexport) NTSTATUS NtMapViewOfSection(HANDLE SectionHandle, HANDLE ProcessHandle, void** BaseAddress,
+                                                  unsigned long long ZeroBits, unsigned long long CommitSize,
+                                                  unsigned long long* SectionOffset, unsigned long long* ViewSize,
+                                                  unsigned long Inherit, unsigned long AllocationType,
+                                                  unsigned long Win32Protect)
+{
+    (void)ZeroBits;
+    (void)CommitSize;
+    (void)Inherit;
+    (void)AllocationType;
+    if (BaseAddress == (void**)0 || ViewSize == (unsigned long long*)0)
+        return NTSTATUS_INVALID_PARAMETER;
+    if (SectionOffset != (unsigned long long*)0 && *SectionOffset != 0)
+        return NTSTATUS_INVALID_PARAMETER;
+    long long status = 0;
+    register long long r10 __asm__("r10") = (long long)ViewSize;
+    register long long r8 __asm__("r8") = (long long)Win32Protect;
+    /* SYS_SECTION_MAP = 141; rdi = sect, rsi = proc, rdx = &base, r10 = &size, r8 = protect. */
+    __asm__ volatile("int $0x80"
+                     : "=a"(status)
+                     : "a"((long long)141), "D"((long long)SectionHandle), "S"((long long)ProcessHandle),
+                       "d"((long long)BaseAddress), "r"(r10), "r"(r8)
+                     : "memory");
+    return (NTSTATUS)status;
+}
+
+/* ------------------------------------------------------------------
+ * NtUnmapViewOfSection — tear down a view previously installed
+ * by NtMapViewOfSection. The kernel walks every live section
+ * pool entry to find which one's first frame lives at
+ * BaseAddress in the target AS, unmaps that section's view,
+ * and drops one section refcount.
+ * ------------------------------------------------------------------ */
+__declspec(dllexport) NTSTATUS NtUnmapViewOfSection(HANDLE ProcessHandle, void* BaseAddress)
+{
+    long long status = 0;
+    /* SYS_SECTION_UNMAP = 142; rdi = proc, rsi = base. */
+    __asm__ volatile("int $0x80"
+                     : "=a"(status)
+                     : "a"((long long)142), "D"((long long)ProcessHandle), "S"((long long)BaseAddress)
+                     : "memory");
+    return (NTSTATUS)status;
+}
+
+/* ------------------------------------------------------------------
  * NtReadVirtualMemory — read another process's user memory through
  * a previously-opened process handle.
  *

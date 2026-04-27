@@ -70,6 +70,7 @@
 #include "subsystems/win32/thread_syscall.h"
 #include "subsystems/win32/mutex_syscall.h"
 #include "subsystems/win32/event_syscall.h"
+#include "subsystems/win32/section.h"
 #include "subsystems/win32/window_syscall.h"
 #include "subsystems/win32/heap.h"
 #include "subsystems/win32/custom.h"
@@ -274,6 +275,9 @@ constexpr u64 kStatusAccessViolation = 0xC0000005ULL;
 constexpr u64 kStatusInvalidHandle = 0xC0000008ULL;
 constexpr u64 kStatusInvalidParameter = 0xC000000DULL;
 constexpr u64 kStatusAccessDenied = 0xC0000022ULL;
+constexpr u64 kStatusNotImplemented = 0xC0000002ULL;
+constexpr u64 kStatusNoMemory = 0xC0000017ULL;
+constexpr u64 kStatusConflictingAddresses = 0xC0000018ULL;
 
 // Layout the SYS_PROCESS_VM_QUERY caller buffer must conform to.
 // Byte-compatible with the prefix of MEMORY_BASIC_INFORMATION
@@ -822,6 +826,199 @@ void SyscallDispatch(arch::TrapFrame* frame)
     case SYS_THREAD_CREATE:
         subsystems::win32::DoThreadCreate(frame);
         return;
+
+    case SYS_SECTION_CREATE:
+    {
+        // NtCreateSection(MaximumSize, PageProtection): allocate
+        // a pagefile-backed section pool entry + frames + plant
+        // a handle in the calling Process. Caller can then
+        // NtMapViewOfSection it into self or a foreign target.
+        Process* caller = CurrentProcess();
+        if (caller == nullptr)
+        {
+            frame->rax = 0;
+            return;
+        }
+        const u64 size_bytes = frame->rdi;
+        const u32 page_protect = static_cast<u32>(frame->rsi);
+        const i32 pool_idx = subsystems::win32::section::SectionCreate(size_bytes, page_protect);
+        if (pool_idx < 0)
+        {
+            frame->rax = 0;
+            return;
+        }
+        u64 handle_idx = Process::kWin32SectionCap;
+        for (u64 i = 0; i < Process::kWin32SectionCap; ++i)
+        {
+            if (!caller->win32_section_handles[i].in_use)
+            {
+                handle_idx = i;
+                break;
+            }
+        }
+        if (handle_idx == Process::kWin32SectionCap)
+        {
+            // Section allocated but no handle slot; release it
+            // so we don't leak the frames + pool entry.
+            subsystems::win32::section::SectionRelease(static_cast<u32>(pool_idx));
+            frame->rax = 0;
+            return;
+        }
+        caller->win32_section_handles[handle_idx].in_use = true;
+        caller->win32_section_handles[handle_idx].pool_index = static_cast<u32>(pool_idx);
+        frame->rax = Process::kWin32SectionBase + handle_idx;
+        return;
+    }
+
+    case SYS_SECTION_MAP:
+    {
+        // NtMapViewOfSection(SectionHandle, ProcessHandle,
+        //   inout BaseAddress*, inout ViewSize*, ViewProtect)
+        // — install a borrowed-page view of `section` into
+        // either the caller's AS (process_handle == -1, the
+        // NtCurrentProcess pseudo-handle) or a foreign target's
+        // AS (cap-gated on kCapDebug).
+        Process* caller = CurrentProcess();
+        if (caller == nullptr)
+        {
+            frame->rax = kStatusInvalidHandle;
+            return;
+        }
+        const u64 section_handle = frame->rdi;
+        const u64 process_handle = frame->rsi;
+        const u64 base_user_ptr = frame->rdx;
+        const u64 size_user_ptr = frame->r10;
+        const u32 view_protect = static_cast<u32>(frame->r8);
+
+        const i32 pool_idx = subsystems::win32::section::LookupSectionHandle(caller, section_handle);
+        if (pool_idx < 0)
+        {
+            frame->rax = kStatusInvalidHandle;
+            return;
+        }
+
+        Process* target = caller;
+        constexpr u64 kCurrentProcess = static_cast<u64>(-1);
+        if (process_handle != kCurrentProcess)
+        {
+            if (!CapSetHas(caller->caps, kCapDebug))
+            {
+                RecordSandboxDenial(kCapDebug);
+                frame->rax = kStatusAccessDenied;
+                return;
+            }
+            target = LookupProcessHandle(caller, process_handle);
+            if (target == nullptr)
+            {
+                frame->rax = kStatusInvalidHandle;
+                return;
+            }
+        }
+
+        u64 hint_va = 0;
+        if (base_user_ptr != 0 &&
+            !mm::CopyFromUser(&hint_va, reinterpret_cast<const void*>(base_user_ptr), sizeof(hint_va)))
+        {
+            frame->rax = kStatusAccessViolation;
+            return;
+        }
+
+        // Pick a base VA. v0: caller-supplied hint must be
+        // page-aligned and non-overlapping; if 0 (or hint
+        // collides), bump-allocate from the calling process's
+        // mmap arena. Cross-process maps with hint == 0 use
+        // the TARGET's mmap cursor.
+        u64 base_va = (hint_va & ~0xFFFULL);
+        if (base_va == 0)
+        {
+            base_va = target->linux_mmap_cursor;
+        }
+
+        if (!subsystems::win32::section::SectionMap(static_cast<u32>(pool_idx), target->as, base_va, view_protect))
+        {
+            frame->rax = kStatusConflictingAddresses;
+            return;
+        }
+        subsystems::win32::section::SectionRetain(static_cast<u32>(pool_idx));
+
+        const u64 view_size = subsystems::win32::section::SectionViewSize(static_cast<u32>(pool_idx));
+        if (base_va == target->linux_mmap_cursor)
+        {
+            target->linux_mmap_cursor += view_size;
+        }
+
+        if (base_user_ptr != 0 && !mm::CopyToUser(reinterpret_cast<void*>(base_user_ptr), &base_va, sizeof(base_va)))
+        {
+            // Map installed but caller can't see the base —
+            // tear it down so we don't leak the view.
+            subsystems::win32::section::SectionUnmap(static_cast<u32>(pool_idx), target->as, base_va);
+            subsystems::win32::section::SectionRelease(static_cast<u32>(pool_idx));
+            frame->rax = kStatusAccessViolation;
+            return;
+        }
+        if (size_user_ptr != 0 &&
+            !mm::CopyToUser(reinterpret_cast<void*>(size_user_ptr), &view_size, sizeof(view_size)))
+        {
+            subsystems::win32::section::SectionUnmap(static_cast<u32>(pool_idx), target->as, base_va);
+            subsystems::win32::section::SectionRelease(static_cast<u32>(pool_idx));
+            frame->rax = kStatusAccessViolation;
+            return;
+        }
+        frame->rax = kStatusSuccess;
+        return;
+    }
+
+    case SYS_SECTION_UNMAP:
+    {
+        // NtUnmapViewOfSection(ProcessHandle, BaseAddress).
+        // v0 unmaps every section view that starts exactly at
+        // `base_va` in the target's AS — we don't track which
+        // section a given VA belongs to, so the unmap walks
+        // every live section pool entry and asks each one to
+        // unmap (the borrowed-PTE clear is idempotent on
+        // already-unmapped pages, and SectionUnmap returns
+        // false if any page was missing → we accept the first
+        // one whose every page WAS mapped).
+        Process* caller = CurrentProcess();
+        if (caller == nullptr)
+        {
+            frame->rax = kStatusInvalidHandle;
+            return;
+        }
+        const u64 process_handle = frame->rdi;
+        const u64 base_va = frame->rsi;
+        if ((base_va & 0xFFF) != 0)
+        {
+            frame->rax = kStatusInvalidParameter;
+            return;
+        }
+        Process* target = caller;
+        constexpr u64 kCurrentProcess = static_cast<u64>(-1);
+        if (process_handle != kCurrentProcess)
+        {
+            if (!CapSetHas(caller->caps, kCapDebug))
+            {
+                RecordSandboxDenial(kCapDebug);
+                frame->rax = kStatusAccessDenied;
+                return;
+            }
+            target = LookupProcessHandle(caller, process_handle);
+            if (target == nullptr)
+            {
+                frame->rax = kStatusInvalidHandle;
+                return;
+            }
+        }
+        const i32 hit = subsystems::win32::section::SectionUnmapAtVa(target->as, base_va);
+        if (hit < 0)
+        {
+            frame->rax = kStatusInvalidParameter;
+            return;
+        }
+        subsystems::win32::section::SectionRelease(static_cast<u32>(hit));
+        frame->rax = kStatusSuccess;
+        return;
+    }
 
     case SYS_THREAD_OPEN:
     {

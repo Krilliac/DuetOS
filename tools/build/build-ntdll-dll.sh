@@ -92,6 +92,12 @@ set +e
     /export:ZwSetContextThread=NtSetContextThread \
     /export:NtOpenThread \
     /export:ZwOpenThread=NtOpenThread \
+    /export:NtCreateSection \
+    /export:ZwCreateSection=NtCreateSection \
+    /export:NtMapViewOfSection \
+    /export:ZwMapViewOfSection=NtMapViewOfSection \
+    /export:NtUnmapViewOfSection \
+    /export:ZwUnmapViewOfSection=NtUnmapViewOfSection \
     /export:NtContinue \
     /export:ZwContinue=NtContinue \
     /export:NtAllocateVirtualMemory \

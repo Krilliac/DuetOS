@@ -2,6 +2,7 @@
 
 #include "subsystems/win32/custom.h"
 #include "subsystems/win32/registry.h"
+#include "subsystems/win32/section.h"
 
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
@@ -226,6 +227,26 @@ void DoFileClose(arch::TrapFrame* frame)
             {
                 core::ProcessRelease(owner);
             }
+        }
+    }
+    else if (handle >= core::Process::kWin32SectionBase &&
+             handle < core::Process::kWin32SectionBase + core::Process::kWin32SectionCap)
+    {
+        // Section handles drop one section-pool refcount per
+        // close. The pool entry frees its frames + slot only
+        // when refcount hits 0 (every handle AND every active
+        // mapping has gone away). If the caller forgot to
+        // unmap the view, the mapping refcount stays — closing
+        // the handle won't tear the view down. v0 GAP for
+        // ranks-of-leaks tests.
+        const u64 slot = handle - core::Process::kWin32SectionBase;
+        core::Process::Win32SectionHandle& h = proc->win32_section_handles[slot];
+        if (h.in_use)
+        {
+            const u32 pool_idx = h.pool_index;
+            h.in_use = false;
+            h.pool_index = 0;
+            section::SectionRelease(pool_idx);
         }
     }
     frame->rax = 0;

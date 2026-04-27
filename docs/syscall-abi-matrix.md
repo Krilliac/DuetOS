@@ -520,6 +520,9 @@ _Auto-generated; do not edit by hand._
 | native | 137 | `SYS_THREAD_GET_CONTEXT` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
 | native | 138 | `SYS_THREAD_SET_CONTEXT` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
 | native | 139 | `SYS_THREAD_OPEN` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 140 | `SYS_SECTION_CREATE` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 141 | `SYS_SECTION_MAP` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 142 | `SYS_SECTION_UNMAP` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
 | native | 512 | `native_gapfill_0x200` | translated | `kernel/subsystems/translation/translate.cpp::NativeClockNs` | linux-self:NowNs |
 | native | 513 | `native_gapfill_0x201` | translated | `kernel/subsystems/translation/translate.cpp::NativeGetRandom` | synthetic:xorshift-from-rdtsc |
 | native | 528 | `native_gapfill_0x210` | translated | `kernel/subsystems/translation/translate.cpp::NativeWin32Alloc` | win32:HeapAlloc |
@@ -564,9 +567,9 @@ _Auto-generated; do not edit by hand._
 | nt | 37 | `NtQueryInformationThread` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
 | nt | 38 | `NtOpenProcess` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_PROCESS_OPEN` | routes to native SYS_PROCESS_OPEN |
 | nt | 39 | `NtSetInformationFile` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_FILE_SEEK` | routes to native SYS_FILE_SEEK |
-| nt | 40 | `NtMapViewOfSection` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 40 | `NtMapViewOfSection` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_SECTION_MAP` | routes to native SYS_SECTION_MAP |
 | nt | 41 | `NtAccessCheckAndAuditAlarm` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
-| nt | 42 | `NtUnmapViewOfSection` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 42 | `NtUnmapViewOfSection` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_SECTION_UNMAP` | routes to native SYS_SECTION_UNMAP |
 | nt | 43 | `NtReplyWaitReceivePortEx` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
 | nt | 44 | `NtTerminateProcess` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_EXIT` | routes to native SYS_EXIT |
 | nt | 45 | `NtSetEventBoostPriority` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
@@ -598,7 +601,7 @@ _Auto-generated; do not edit by hand._
 | nt | 71 | `NtAddAtom` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
 | nt | 72 | `NtCreateEvent` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_EVENT_CREATE` | routes to native SYS_EVENT_CREATE |
 | nt | 73 | `NtQueryVolumeInformationFile` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
-| nt | 74 | `NtCreateSection` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 74 | `NtCreateSection` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_SECTION_CREATE` | routes to native SYS_SECTION_CREATE |
 | nt | 75 | `NtFlushBuffersFile` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_NT_INVOKE` | routes to native SYS_NT_INVOKE |
 | nt | 76 | `NtApphelpCacheControl` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
 | nt | 77 | `NtCreateProcessEx` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |

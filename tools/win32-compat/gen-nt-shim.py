@@ -98,6 +98,9 @@ KNOWN_MAPPINGS = {
     "NtGetContextThread":          "SYS_THREAD_GET_CONTEXT",
     "NtSetContextThread":          "SYS_THREAD_SET_CONTEXT",
     "NtOpenThread":                "SYS_THREAD_OPEN",
+    "NtCreateSection":             "SYS_SECTION_CREATE",
+    "NtMapViewOfSection":          "SYS_SECTION_MAP",
+    "NtUnmapViewOfSection":        "SYS_SECTION_UNMAP",
     # NtCreateKey / NtSetValueKey / NtDeleteKey / NtDeleteValueKey:
     # NotImpl on purpose — registry is read-only in v0. Mapping
     # them to SYS_REGISTRY's read-only Open op would silently lie

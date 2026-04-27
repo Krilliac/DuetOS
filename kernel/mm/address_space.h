@@ -166,6 +166,39 @@ void AddressSpaceMapUserPage(AddressSpace* as, u64 virt, PhysAddr frame, u64 fla
 /// emitted only for the active CPU when `as` is the active AS.
 bool AddressSpaceUnmapUserPage(AddressSpace* as, u64 virt);
 
+/// Install a leaf PTE for a frame the AS does NOT own — the
+/// frame's lifetime is governed by some other ledger (e.g. a
+/// Win32 section pool). Same safety checks as MapUserPage
+/// (alignment, canonical low half, kPageUser, W^X, no
+/// kPageGlobal) but does NOT touch the regions table — the
+/// AS-destroy walker won't free this frame, and the AS
+/// frame budget isn't consumed.
+///
+/// Returns true on success. Returns false if `virt` is
+/// already mapped (no overwrite). Panics on the same
+/// invariant violations as MapUserPage.
+///
+/// Pairs with AddressSpaceUnmapBorrowedPage. Callers MUST
+/// keep their own ledger of the (virt, frame) pairs they
+/// installed via this API — there is no kernel-side record.
+bool AddressSpaceMapBorrowedPage(AddressSpace* as, u64 virt, PhysAddr frame, u64 flags);
+
+/// Read the frame backing `virt` in `as` by walking the page
+/// tables directly — independent of the regions table. Used
+/// to identify section views (which install borrowed PTEs not
+/// recorded in the regions ledger). Returns kNullFrame when
+/// `virt` has no present PTE in `as`. `virt` must be 4 KiB-
+/// aligned.
+PhysAddr AddressSpaceProbePte(const AddressSpace* as, u64 virt);
+
+/// Reverse of MapBorrowedPage: clear the leaf PTE at `virt`
+/// in `as` without touching the regions table and without
+/// freeing the backing frame. Returns true if a present
+/// PTE was cleared, false if `virt` was already unmapped.
+/// TLB invalidation is emitted on the active CPU only when
+/// `as` is the active AS.
+bool AddressSpaceUnmapBorrowedPage(AddressSpace* as, u64 virt);
+
 /// Reverse of MapUserPage: given a user VA, return the physical
 /// frame backing its containing page, or kNullFrame if unmapped.
 /// Walks the AS's `regions` array (small N, linear scan). Used

@@ -153,6 +153,16 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
         p->win32_foreign_threads[i].task = nullptr;
         p->win32_foreign_threads[i].owner = nullptr;
     }
+    // Win32 section handle table — every slot starts free.
+    // Populated by NtCreateSection (SYS_SECTION_CREATE), drained
+    // by NtClose's by-range dispatch.
+    for (u32 i = 0; i < Process::kWin32SectionCap; ++i)
+    {
+        p->win32_section_handles[i].in_use = false;
+        for (u32 j = 0; j < sizeof(p->win32_section_handles[i]._pad); ++j)
+            p->win32_section_handles[i]._pad[j] = 0;
+        p->win32_section_handles[i].pool_index = 0;
+    }
     // Win32 semaphore table — every slot starts free.
     for (u32 i = 0; i < Process::kWin32SemaphoreCap; ++i)
     {

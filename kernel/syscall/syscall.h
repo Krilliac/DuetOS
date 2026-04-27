@@ -1366,6 +1366,45 @@ enum SyscallNumber : u64
     // returned handle drops the refcount (the file_syscall
     // close-dispatch grew an arm for this range).
     SYS_THREAD_OPEN = 139,
+
+    // Win32 section objects (kernel-resident pools of physical
+    // frames mappable into one or more process address spaces).
+    // v0 anonymous (pagefile-backed) only — file-backed
+    // sections (FileHandle != 0) return STATUS_NOT_IMPLEMENTED.
+    //
+    // SYS_SECTION_CREATE — create an anonymous section.
+    //   rdi = size_bytes (1..kSectionMaxBytes; rounds up to
+    //         a multiple of 4 KiB).
+    //   rsi = Win32 PAGE_* protection on creation.
+    //   rax = section handle (kWin32SectionBase + idx) on
+    //         success, 0 (NULL handle) on any failure.
+    //
+    // SYS_SECTION_MAP — map a section's whole range into a
+    // target process's AS. Self-process map (process_handle =
+    // -1, NtCurrentProcess()) needs no extra cap; cross-
+    // process map cap-gated on kCapDebug — process hollowing
+    // is the same threat class as cross-AS VM read/write.
+    //   rdi = section handle (in calling process).
+    //   rsi = process handle (in calling process), or -1 for
+    //         self.
+    //   rdx = inout u64* base_va. Caller writes a hint (or
+    //         0 for "kernel-picks"); kernel reads the hint
+    //         and overwrites with the chosen base.
+    //   r10 = inout u64* view_size. Kernel writes the
+    //         actual mapped size in bytes (page-rounded
+    //         section size). Caller's value is ignored
+    //         beyond bounds-checking the buffer.
+    //   r8  = Win32 PAGE_* view protection.
+    //   rax = NTSTATUS (0 = success).
+    //
+    // SYS_SECTION_UNMAP — unmap a previously-installed view.
+    //   rdi = process handle (in calling process), or -1
+    //         for self.
+    //   rsi = base_va of the view to unmap.
+    //   rax = NTSTATUS.
+    SYS_SECTION_CREATE = 140,
+    SYS_SECTION_MAP = 141,
+    SYS_SECTION_UNMAP = 142,
 };
 
 // Win32 CONTEXT — first 0x100 bytes (integer + control + the
