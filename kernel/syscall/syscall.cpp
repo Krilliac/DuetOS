@@ -207,6 +207,45 @@ bool CrossAsTransfer(Process* target, u64 target_va, void* caller_buf, u64 len, 
     return true;
 }
 
+// Resolve a Win32 thread handle to the kernel Task it refers to.
+// Accepts BOTH ranges: local thread handles (kWin32ThreadBase +
+// idx, returned by CreateThread / SYS_THREAD_CREATE — these
+// back the caller's own threads) and foreign thread handles
+// (kWin32ForeignThreadBase + idx, returned by NtOpenThread —
+// these back a target task in a different process, with the
+// target's owning Process refcount-pinned by the open call).
+// Returns nullptr on any out-of-range / not-in-use handle.
+//
+// Used by SYS_THREAD_SUSPEND / RESUME / GET_CONTEXT /
+// SET_CONTEXT — every cross-task thread op flows through here.
+sched::Task* LookupThreadHandle(Process* caller, u64 handle)
+{
+    if (caller == nullptr)
+    {
+        return nullptr;
+    }
+    if (handle >= Process::kWin32ThreadBase && handle < Process::kWin32ThreadBase + Process::kWin32ThreadCap)
+    {
+        const u64 idx = handle - Process::kWin32ThreadBase;
+        if (caller->win32_threads[idx].in_use)
+        {
+            return caller->win32_threads[idx].task;
+        }
+        return nullptr;
+    }
+    if (handle >= Process::kWin32ForeignThreadBase &&
+        handle < Process::kWin32ForeignThreadBase + Process::kWin32ForeignThreadCap)
+    {
+        const u64 idx = handle - Process::kWin32ForeignThreadBase;
+        if (caller->win32_foreign_threads[idx].in_use)
+        {
+            return caller->win32_foreign_threads[idx].task;
+        }
+        return nullptr;
+    }
+    return nullptr;
+}
+
 // Resolve a Win32 process handle (kWin32ProcessBase + idx) on
 // `caller` to the `Process*` it refers to. Returns nullptr on
 // any out-of-range / not-in-use handle.
@@ -784,31 +823,70 @@ void SyscallDispatch(arch::TrapFrame* frame)
         subsystems::win32::DoThreadCreate(frame);
         return;
 
+    case SYS_THREAD_OPEN:
+    {
+        // NtOpenThread: TID in rdi → kernel handle in rax (or 0
+        // on any failure). Cap-gated on kCapDebug — same threat
+        // class as NtOpenProcess, since the produced handle
+        // unlocks SUSPEND / RESUME / GET / SET_CONTEXT on a
+        // task in another process. Refuses kernel-only tasks
+        // (target->process == nullptr — those have no NT
+        // identity and no Process to refcount).
+        Process* caller = CurrentProcess();
+        if (caller == nullptr || !CapSetHas(caller->caps, kCapDebug))
+        {
+            if (caller != nullptr)
+            {
+                RecordSandboxDenial(kCapDebug);
+            }
+            frame->rax = 0;
+            return;
+        }
+        const u64 target_tid = frame->rdi;
+        sched::Task* target_task = sched::SchedFindTaskByTid(target_tid);
+        if (target_task == nullptr)
+        {
+            frame->rax = 0;
+            return;
+        }
+        Process* owner = sched::TaskProcess(target_task);
+        if (owner == nullptr)
+        {
+            frame->rax = 0;
+            return;
+        }
+        u64 idx = Process::kWin32ForeignThreadCap;
+        for (u64 i = 0; i < Process::kWin32ForeignThreadCap; ++i)
+        {
+            if (!caller->win32_foreign_threads[i].in_use)
+            {
+                idx = i;
+                break;
+            }
+        }
+        if (idx == Process::kWin32ForeignThreadCap)
+        {
+            frame->rax = 0; // table full
+            return;
+        }
+        ProcessRetain(owner);
+        caller->win32_foreign_threads[idx].in_use = true;
+        caller->win32_foreign_threads[idx].task = target_task;
+        caller->win32_foreign_threads[idx].owner = owner;
+        frame->rax = Process::kWin32ForeignThreadBase + idx;
+        return;
+    }
+
     case SYS_THREAD_SUSPEND:
     case SYS_THREAD_RESUME:
     {
         Process* caller = CurrentProcess();
-        if (caller == nullptr)
+        sched::Task* target = LookupThreadHandle(caller, frame->rdi);
+        if (target == nullptr)
         {
             frame->rax = static_cast<u64>(-1);
             return;
         }
-        const u64 handle = frame->rdi;
-        // v0: only the caller's own thread handles are accepted.
-        // Cross-process thread suspend needs NtOpenThread + a
-        // foreign thread handle table; that's a separate slice.
-        if (handle < Process::kWin32ThreadBase)
-        {
-            frame->rax = static_cast<u64>(-1);
-            return;
-        }
-        const u64 idx = handle - Process::kWin32ThreadBase;
-        if (idx >= Process::kWin32ThreadCap || !caller->win32_threads[idx].in_use)
-        {
-            frame->rax = static_cast<u64>(-1);
-            return;
-        }
-        sched::Task* target = caller->win32_threads[idx].task;
         u32 prev_count = 0;
         const sched::SuspendResult rc = (num == SYS_THREAD_SUSPEND) ? sched::SchedSuspendTask(target, &prev_count)
                                                                     : sched::SchedResumeTask(target, &prev_count);
@@ -835,23 +913,16 @@ void SyscallDispatch(arch::TrapFrame* frame)
             frame->rax = kStatusAccessDenied;
             return;
         }
-        const u64 handle = frame->rdi;
-        if (handle < Process::kWin32ThreadBase)
+        sched::Task* target = LookupThreadHandle(caller, frame->rdi);
+        if (target == nullptr)
         {
             frame->rax = kStatusInvalidHandle;
             return;
         }
-        const u64 idx = handle - Process::kWin32ThreadBase;
-        if (idx >= Process::kWin32ThreadCap || !caller->win32_threads[idx].in_use)
-        {
-            frame->rax = kStatusInvalidHandle;
-            return;
-        }
-        sched::Task* target = caller->win32_threads[idx].task;
         // Get/SetContext is only well-defined on a suspended target.
         // A running target's TrapFrame is being actively pushed/
         // popped; reading or writing it would race.
-        if (target == nullptr || sched::TaskIsDead(target))
+        if (sched::TaskIsDead(target))
         {
             frame->rax = kStatusInvalidHandle;
             return;

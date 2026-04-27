@@ -607,6 +607,41 @@ struct Process
     static constexpr u64 kWin32ProcessBase = 0x700;
     Win32ProcessHandle win32_proc_handles[kWin32ProcessCap];
 
+    // Cross-process Win32 thread handles produced by
+    // NtOpenThread(tid). Each entry pins a Task* (the target
+    // thread) AND a Process* (the owner) — the owner ref is
+    // ProcessRetained at open time so the foreign Task can't
+    // be reaped under the inspector's hand. Disjoint from the
+    // local win32_threads[] handle range (kWin32ThreadBase +
+    // idx = 0x400..0x407) so the by-range dispatch in
+    // SYS_THREAD_SUSPEND / RESUME / GET_CONTEXT / SET_CONTEXT
+    // and DoFileClose can pick the right table by handle
+    // value alone.
+    //
+    // 8 slots — same sizing rationale as win32_proc_handles:
+    // typical "scan every thread, keep one" patterns close
+    // handles immediately; the table turns over fast.
+    //
+    // v0 SCOPE: this table holds FOREIGN thread handles
+    // (target Task is in a different Process). LOCAL thread
+    // handles (the calling Process's own threads) still live
+    // in win32_threads[]. NtOpenThread refuses self-PID
+    // requests and routes the caller to the existing local-
+    // handle path. The dual-table design lets the cap-gate
+    // fire only on cross-process opens — local thread
+    // operations need only kCapSpawnThread (the implicit
+    // gate for having a thread handle in the first place).
+    struct Win32ForeignThreadHandle
+    {
+        bool in_use;
+        u8 _pad[7];
+        sched::Task* task; // borrowed
+        Process* owner;    // refcount held while in_use
+    };
+    static constexpr u64 kWin32ForeignThreadCap = 8;
+    static constexpr u64 kWin32ForeignThreadBase = 0x800;
+    Win32ForeignThreadHandle win32_foreign_threads[kWin32ForeignThreadCap];
+
     // Per-process cursor for thread-stack allocation. Each new
     // thread carves kV0ThreadStackPages pages off this bump
     // cursor. The base sits above the main task's stack and

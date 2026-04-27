@@ -203,6 +203,31 @@ void DoFileClose(arch::TrapFrame* frame)
             core::ProcessRelease(target);
         }
     }
+    else if (handle >= core::Process::kWin32ForeignThreadBase &&
+             handle < core::Process::kWin32ForeignThreadBase + core::Process::kWin32ForeignThreadCap)
+    {
+        // Cross-process thread handles (NtOpenThread results)
+        // pin a Task* + a refcount on its owning Process. Drop
+        // the refcount on close. The Task* itself isn't reaped
+        // here — that's the scheduler's job once the task hits
+        // Dead and the reaper picks it up. Closing the last
+        // foreign-thread handle on a dead task's owner Process
+        // simply lets the Process get reaped per the same
+        // contract as the win32_proc_handles arm above.
+        const u64 slot = handle - core::Process::kWin32ForeignThreadBase;
+        core::Process::Win32ForeignThreadHandle& h = proc->win32_foreign_threads[slot];
+        if (h.in_use)
+        {
+            core::Process* owner = h.owner;
+            h.in_use = false;
+            h.task = nullptr;
+            h.owner = nullptr;
+            if (owner != nullptr)
+            {
+                core::ProcessRelease(owner);
+            }
+        }
+    }
     frame->rax = 0;
 }
 

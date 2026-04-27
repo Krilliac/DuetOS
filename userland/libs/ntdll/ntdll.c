@@ -949,6 +949,43 @@ __declspec(dllexport) NTSTATUS NtOpenProcess(HANDLE* ProcessHandle, ULONG Desire
 }
 
 /* ------------------------------------------------------------------
+ * NtOpenThread — open a handle to a target thread by TID.
+ *
+ * Win32 NT signature:
+ *   NTSTATUS NtOpenThread(
+ *     PHANDLE             ThreadHandle,
+ *     ACCESS_MASK         DesiredAccess,
+ *     POBJECT_ATTRIBUTES  ObjectAttributes,
+ *     PCLIENT_ID          ClientId);  // { HANDLE Pid; HANDLE Tid; }
+ *
+ * v0 only honours Tid; the Pid field is accepted but unused — the
+ * kernel resolves Tid against every live task regardless of PID.
+ * ACCESS_MASK + ObjectAttributes are accepted but ignored (no
+ * ACL machinery; the kernel cap-gates via kCapDebug). The
+ * returned handle plugs into NtSuspendThread / NtResumeThread /
+ * NtGetContextThread / NtSetContextThread for cross-process
+ * thread inspection — completes the malware "thread hijack"
+ * pipeline against a target outside the caller's process.
+ * ------------------------------------------------------------------ */
+__declspec(dllexport) NTSTATUS NtOpenThread(HANDLE* ThreadHandle, ULONG DesiredAccess,
+                                            OBJECT_ATTRIBUTES* ObjectAttributes, CLIENT_ID* ClientId)
+{
+    (void)DesiredAccess;
+    (void)ObjectAttributes;
+    if (ThreadHandle == (HANDLE*)0 || ClientId == (CLIENT_ID*)0)
+        return NTSTATUS_INVALID_PARAMETER;
+    if (ClientId->Tid == (HANDLE)0)
+        return NTSTATUS_INVALID_PARAMETER;
+    long long handle = 0;
+    /* SYS_THREAD_OPEN = 139; rdi = tid. rax = handle (0 on failure). */
+    __asm__ volatile("int $0x80" : "=a"(handle) : "a"((long long)139), "D"((long long)ClientId->Tid) : "memory");
+    if (handle == 0)
+        return (NTSTATUS)NTSTATUS_INVALID_PARAMETER;
+    *ThreadHandle = (HANDLE)handle;
+    return NTSTATUS_SUCCESS;
+}
+
+/* ------------------------------------------------------------------
  * NtReadVirtualMemory — read another process's user memory through
  * a previously-opened process handle.
  *

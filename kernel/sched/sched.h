@@ -117,6 +117,19 @@ core::Process* TaskProcess(Task* t);
 /// into a Process pointer the kernel can hand back as a handle.
 core::Process* SchedFindProcessByPid(u64 target_pid);
 
+/// Find the first live Task with `id == target_tid`. Walks the
+/// same lists as SchedFindProcessByPid (running + run-normal +
+/// run-idle + sleep) under arch::Cli. Skips zombies — a
+/// dead task has no live Process to retain, so the cross-
+/// process thread-handle opener would have nothing to refcount.
+/// Returns nullptr if no live task matches.
+///
+/// Caller is responsible for capturing the task's owning
+/// Process* and calling `core::ProcessRetain` on it before the
+/// CLI window closes — otherwise a concurrent reaper could
+/// free the Task struct under the caller's hand.
+Task* SchedFindTaskByTid(u64 target_tid);
+
 /// True iff the task's state is Dead. Used by syscalls that track
 /// thread-handle signaling (WaitForSingleObject on a CreateThread
 /// handle, WaitForMultipleObjects, GetExitCodeThread) — the

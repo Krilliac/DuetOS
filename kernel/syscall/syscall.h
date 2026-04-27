@@ -1342,6 +1342,30 @@ enum SyscallNumber : u64
     // escalate the target to ring 0 or to mask interrupts.
     SYS_THREAD_GET_CONTEXT = 137,
     SYS_THREAD_SET_CONTEXT = 138,
+
+    // SYS_THREAD_OPEN — promote a TID to a kernel handle the
+    // caller can pass to NtSuspendThread / NtGetContextThread /
+    // etc. against a thread in a DIFFERENT process. Backs
+    // ntdll.dll's NtOpenThread.
+    //
+    //   rdi = target TID (the unique Task::id, not the PID).
+    //   rax = handle (kWin32ForeignThreadBase + idx) on
+    //         success, 0 (NULL handle) on any failure: TID
+    //         not live, target is a kernel-only task with no
+    //         Process identity, foreign-thread table full,
+    //         caller missing kCapDebug.
+    //
+    // Cap-gated on kCapDebug — same threat class as
+    // SYS_PROCESS_OPEN, since the produced handle unlocks
+    // SUSPEND / RESUME / GET / SET_CONTEXT against a target
+    // outside the caller's process.
+    //
+    // Refcount semantics: on open, ProcessRetain on the
+    // target's owning Process so the foreign Task can't be
+    // reaped under the inspector's hand. NtClose on the
+    // returned handle drops the refcount (the file_syscall
+    // close-dispatch grew an arm for this range).
+    SYS_THREAD_OPEN = 139,
 };
 
 // Win32 CONTEXT — first 0x100 bytes (integer + control + the

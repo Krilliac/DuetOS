@@ -142,6 +142,17 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
         p->win32_threads[i].task = nullptr;
         p->win32_threads[i].user_stack_va = 0;
     }
+    // Win32 foreign-thread table — every slot starts free.
+    // Populated by NtOpenThread (SYS_THREAD_OPEN), drained by
+    // NtClose's by-range dispatch.
+    for (u32 i = 0; i < Process::kWin32ForeignThreadCap; ++i)
+    {
+        p->win32_foreign_threads[i].in_use = false;
+        for (u32 j = 0; j < sizeof(p->win32_foreign_threads[i]._pad); ++j)
+            p->win32_foreign_threads[i]._pad[j] = 0;
+        p->win32_foreign_threads[i].task = nullptr;
+        p->win32_foreign_threads[i].owner = nullptr;
+    }
     // Win32 semaphore table — every slot starts free.
     for (u32 i = 0; i < Process::kWin32SemaphoreCap; ++i)
     {

@@ -90,6 +90,8 @@ set +e
     /export:ZwGetContextThread=NtGetContextThread \
     /export:NtSetContextThread \
     /export:ZwSetContextThread=NtSetContextThread \
+    /export:NtOpenThread \
+    /export:ZwOpenThread=NtOpenThread \
     /export:NtContinue \
     /export:ZwContinue=NtContinue \
     /export:NtAllocateVirtualMemory \

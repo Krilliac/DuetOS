@@ -1757,6 +1757,46 @@ core::Process* SchedFindProcessByPid(u64 target_pid)
     return hit;
 }
 
+Task* SchedFindTaskByTid(u64 target_tid)
+{
+    // Same walk shape as SchedFindProcessByPid — every list that
+    // can hold a Task. Returns the first task whose id matches.
+    // Caller must hold a stable reference to the task's owning
+    // Process (via ProcessRetain) before SchedFindTaskByTid
+    // returns, otherwise the task could be reaped and the Task*
+    // freed under the caller's hand. The intended caller is
+    // SYS_THREAD_OPEN, which captures the owning Process* via
+    // task->process and ProcessRetains it inside the same
+    // arch::Cli window before this function returns.
+    arch::Cli();
+    auto match = [&](Task* t) -> Task* { return (t != nullptr && t->id == target_tid) ? t : nullptr; };
+    Task* hit = match(Current());
+    if (hit != nullptr)
+    {
+        arch::Sti();
+        return hit;
+    }
+    for (Task* t = g_run_head_normal; t != nullptr && hit == nullptr; t = t->next)
+    {
+        hit = match(t);
+    }
+    for (Task* t = g_run_head_idle; t != nullptr && hit == nullptr; t = t->next)
+    {
+        hit = match(t);
+    }
+    for (Task* t = g_sleep_head; t != nullptr && hit == nullptr; t = t->sleep_next)
+    {
+        hit = match(t);
+    }
+    // Skip zombies — opening a handle on a dead task is a v0
+    // GAP we don't service. The kernel zeroes a Process* once
+    // the task is in the zombie list (the reaper holds the
+    // last refcount), so there'd be no Process to retain
+    // even if we tried.
+    arch::Sti();
+    return hit;
+}
+
 // ---------------------------------------------------------------------------
 // Dead-task reaper
 //
