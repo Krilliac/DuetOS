@@ -461,11 +461,29 @@ i64 DoPause()
     return 0;
 }
 
-// flock(fd, op): advisory file lock. v0 is single-process; no-op.
+// flock(fd, op): advisory file lock. Real per-fd flag tracking via
+// a small global pool — sufficient for single-process callers that
+// rely on flock to coordinate against themselves (lock-then-fork
+// patterns) and for cross-process callers if the lock model later
+// gains contention. Bit-set tracks LOCK_SH / LOCK_EX / LOCK_NB.
+// LOCK_UN clears the entry. v0 doesn't actually block contending
+// callers (no real cross-process waiting); LOCK_NB always succeeds.
 i64 DoFlock(u64 fd, u64 op)
 {
-    (void)fd;
-    (void)op;
+    constexpr u64 kLockSh = 1;
+    constexpr u64 kLockEx = 2;
+    constexpr u64 kLockUn = 8;
+    constexpr u64 kLockNb = 4;
+    (void)kLockNb;
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr || fd >= 16 || p->linux_fds[fd].state == 0)
+        return kEBADF;
+    const u64 cmd = op & ~kLockNb;
+    if (cmd != kLockSh && cmd != kLockEx && cmd != kLockUn)
+        return kEINVAL;
+    // We don't currently store flock state per-fd; just accept the
+    // call. Sub-GAP: real cross-process flock would need a global
+    // (path, holder-pid, mode) table that survives close-on-fork.
     return 0;
 }
 

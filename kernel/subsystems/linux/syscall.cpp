@@ -484,6 +484,17 @@ enum : u64
     kSysLandlockAddRule = 445,
     kSysLandlockRestrictSelf = 446,
 
+    // Privileged tracing / observability — refuse to ring-3
+    // cleanly. Real impl needs CAP_SYS_ADMIN-style gating which
+    // we'd land alongside an actual engine.
+    kSysBpf = 321,
+    kSysPerfEventOpen = 298,
+    kSysFinitModule = 313,
+    kSysInitModule = 175,
+    kSysDeleteModule = 176,
+    kSysKexecLoad = 246,
+    kSysKexecFileLoad = 320,
+
     // fanotify (kernel/subsystems/linux/fanotify.cpp).
     kSysFanotifyInit = 300,
     kSysFanotifyMark = 301,
@@ -1573,6 +1584,20 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
     case kSysIoCancel:
         rv = kENOSYS;
         break;
+    // Privileged kernel-introspection / module-load — refuse cleanly.
+    // BPF / perf_event_open / kernel-module load all want
+    // CAP_SYS_ADMIN on real Linux; v0 has no equivalent so -EPERM
+    // is the honest answer.
+    case kSysBpf:
+    case kSysPerfEventOpen:
+    case kSysFinitModule:
+    case kSysInitModule:
+    case kSysDeleteModule:
+    case kSysKexecLoad:
+    case kSysKexecFileLoad:
+        rv = kEPERM;
+        break;
+
     // System-mutation calls — refuse so a misbehaving program
     // can't reboot the box or twiddle privileged knobs from
     // ring-3 Linux ABI. Reboot has its own native path.
