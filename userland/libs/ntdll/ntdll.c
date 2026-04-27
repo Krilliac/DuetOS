@@ -1847,6 +1847,221 @@ __declspec(dllexport) NTSTATUS ZwQueryObject(HANDLE Handle, ULONG ObjectInformat
 }
 
 /* ------------------------------------------------------------------
+ * NT debug surface — userland-only NotImpl stubs.
+ *
+ * v0 has no debug-event engine (no DBG_PRINTEXCEPTION_C dispatch,
+ * no debug-port queue, no Wait-for-debug-event blocking). The
+ * Win32 cap-gating model — kCapDebug — is what gates cross-
+ * process inspection (via NtOpenProcess / NtOpenThread / VM read
+ * + write / Get/SetContext). The classic NtDebug* family that
+ * a Windows debugger uses is a separate rope; v0 doesn't pull
+ * it. These stubs return STATUS_NOT_IMPLEMENTED explicitly so
+ * callers see a clean "no debugger here" instead of generic
+ * kSysNtNotImpl noise.
+ *
+ * NB: this is a FACADE per the subsystem-isolation rule. The
+ * Win32 NtDebug* surface does not gate DuetOS-level debug
+ * authority — that's still kCapDebug, enforced kernel-side on
+ * SYS_PROCESS_VM_READ / SYS_THREAD_GET_CONTEXT / etc.
+ * ------------------------------------------------------------------ */
+__declspec(dllexport) NTSTATUS NtCreateDebugObject(HANDLE* DebugObjectHandle, ULONG DesiredAccess,
+                                                   void* ObjectAttributes, ULONG Flags)
+{
+    (void)DebugObjectHandle;
+    (void)DesiredAccess;
+    (void)ObjectAttributes;
+    (void)Flags;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS ZwCreateDebugObject(HANDLE* DebugObjectHandle, ULONG DesiredAccess,
+                                                   void* ObjectAttributes, ULONG Flags)
+{
+    return NtCreateDebugObject(DebugObjectHandle, DesiredAccess, ObjectAttributes, Flags);
+}
+
+__declspec(dllexport) NTSTATUS NtDebugActiveProcess(HANDLE ProcessHandle, HANDLE DebugObjectHandle)
+{
+    (void)ProcessHandle;
+    (void)DebugObjectHandle;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS ZwDebugActiveProcess(HANDLE ProcessHandle, HANDLE DebugObjectHandle)
+{
+    return NtDebugActiveProcess(ProcessHandle, DebugObjectHandle);
+}
+
+__declspec(dllexport) NTSTATUS NtDebugContinue(HANDLE DebugObjectHandle, void* ClientId, ULONG ContinueStatus)
+{
+    (void)DebugObjectHandle;
+    (void)ClientId;
+    (void)ContinueStatus;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS ZwDebugContinue(HANDLE DebugObjectHandle, void* ClientId, ULONG ContinueStatus)
+{
+    return NtDebugContinue(DebugObjectHandle, ClientId, ContinueStatus);
+}
+
+__declspec(dllexport) NTSTATUS NtWaitForDebugEvent(HANDLE DebugObjectHandle, BOOL Alertable, void* Timeout,
+                                                   void* WaitStateChange)
+{
+    (void)DebugObjectHandle;
+    (void)Alertable;
+    (void)Timeout;
+    (void)WaitStateChange;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS ZwWaitForDebugEvent(HANDLE DebugObjectHandle, BOOL Alertable, void* Timeout,
+                                                   void* WaitStateChange)
+{
+    return NtWaitForDebugEvent(DebugObjectHandle, Alertable, Timeout, WaitStateChange);
+}
+
+__declspec(dllexport) NTSTATUS NtRemoveProcessDebug(HANDLE ProcessHandle, HANDLE DebugObjectHandle)
+{
+    (void)ProcessHandle;
+    (void)DebugObjectHandle;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS ZwRemoveProcessDebug(HANDLE ProcessHandle, HANDLE DebugObjectHandle)
+{
+    return NtRemoveProcessDebug(ProcessHandle, DebugObjectHandle);
+}
+
+__declspec(dllexport) NTSTATUS NtSetInformationDebugObject(HANDLE DebugObjectHandle, ULONG DebugObjectInformationClass,
+                                                           void* DebugInformation, ULONG DebugInformationLength,
+                                                           ULONG* ReturnLength)
+{
+    (void)DebugObjectHandle;
+    (void)DebugObjectInformationClass;
+    (void)DebugInformation;
+    (void)DebugInformationLength;
+    (void)ReturnLength;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS ZwSetInformationDebugObject(HANDLE DebugObjectHandle, ULONG DebugObjectInformationClass,
+                                                           void* DebugInformation, ULONG DebugInformationLength,
+                                                           ULONG* ReturnLength)
+{
+    return NtSetInformationDebugObject(DebugObjectHandle, DebugObjectInformationClass, DebugInformation,
+                                       DebugInformationLength, ReturnLength);
+}
+
+__declspec(dllexport) NTSTATUS NtQueryDebugFilterState(ULONG ComponentId, ULONG Level)
+{
+    (void)ComponentId;
+    (void)Level;
+    /* TRUE = component logging enabled. v0 returns FALSE
+     * uniformly — no debug logging filter. */
+    return 0;
+}
+
+/* ------------------------------------------------------------------
+ * NT job-object surface — userland-only NotImpl stubs.
+ *
+ * Job objects are a Win32 mechanism for grouping processes for
+ * resource limits + bulk termination. v0 has no job engine; the
+ * kernel cap-set already handles the per-process limit cases we
+ * care about. These stubs return STATUS_NOT_IMPLEMENTED so a
+ * sandboxed PE checking for a job assignment gets a clean
+ * answer.
+ * ------------------------------------------------------------------ */
+__declspec(dllexport) NTSTATUS NtCreateJobObject(HANDLE* JobHandle, ULONG DesiredAccess, void* ObjectAttributes)
+{
+    (void)JobHandle;
+    (void)DesiredAccess;
+    (void)ObjectAttributes;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS ZwCreateJobObject(HANDLE* JobHandle, ULONG DesiredAccess, void* ObjectAttributes)
+{
+    return NtCreateJobObject(JobHandle, DesiredAccess, ObjectAttributes);
+}
+
+__declspec(dllexport) NTSTATUS NtAssignProcessToJobObject(HANDLE JobHandle, HANDLE ProcessHandle)
+{
+    (void)JobHandle;
+    (void)ProcessHandle;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS ZwAssignProcessToJobObject(HANDLE JobHandle, HANDLE ProcessHandle)
+{
+    return NtAssignProcessToJobObject(JobHandle, ProcessHandle);
+}
+
+__declspec(dllexport) NTSTATUS NtQueryInformationJobObject(HANDLE JobHandle, ULONG JobObjectInformationClass,
+                                                           void* JobObjectInformation, ULONG JobObjectInformationLength,
+                                                           ULONG* ReturnLength)
+{
+    (void)JobHandle;
+    (void)JobObjectInformationClass;
+    (void)JobObjectInformation;
+    (void)JobObjectInformationLength;
+    if (ReturnLength != (ULONG*)0)
+        *ReturnLength = 0;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS ZwQueryInformationJobObject(HANDLE JobHandle, ULONG JobObjectInformationClass,
+                                                           void* JobObjectInformation, ULONG JobObjectInformationLength,
+                                                           ULONG* ReturnLength)
+{
+    return NtQueryInformationJobObject(JobHandle, JobObjectInformationClass, JobObjectInformation,
+                                       JobObjectInformationLength, ReturnLength);
+}
+
+__declspec(dllexport) NTSTATUS NtSetInformationJobObject(HANDLE JobHandle, ULONG JobObjectInformationClass,
+                                                         void* JobObjectInformation, ULONG JobObjectInformationLength)
+{
+    (void)JobHandle;
+    (void)JobObjectInformationClass;
+    (void)JobObjectInformation;
+    (void)JobObjectInformationLength;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS ZwSetInformationJobObject(HANDLE JobHandle, ULONG JobObjectInformationClass,
+                                                         void* JobObjectInformation, ULONG JobObjectInformationLength)
+{
+    return NtSetInformationJobObject(JobHandle, JobObjectInformationClass, JobObjectInformation,
+                                     JobObjectInformationLength);
+}
+
+__declspec(dllexport) NTSTATUS NtTerminateJobObject(HANDLE JobHandle, NTSTATUS ExitStatus)
+{
+    (void)JobHandle;
+    (void)ExitStatus;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS ZwTerminateJobObject(HANDLE JobHandle, NTSTATUS ExitStatus)
+{
+    return NtTerminateJobObject(JobHandle, ExitStatus);
+}
+
+__declspec(dllexport) NTSTATUS NtIsProcessInJob(HANDLE ProcessHandle, HANDLE JobHandle)
+{
+    (void)ProcessHandle;
+    (void)JobHandle;
+    /* STATUS_PROCESS_NOT_IN_JOB = 0x00000123. Not a job. v0 has
+     * no job engine; every process answers "no job." */
+    return (NTSTATUS)0x00000123;
+}
+
+__declspec(dllexport) NTSTATUS ZwIsProcessInJob(HANDLE ProcessHandle, HANDLE JobHandle)
+{
+    return NtIsProcessInJob(ProcessHandle, JobHandle);
+}
+
+/* ------------------------------------------------------------------
  * Win32 token surface — userland-only static "system token".
  *
  * v0 has no auth model; every process runs with the same

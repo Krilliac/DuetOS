@@ -158,6 +158,31 @@ set +e
     /export:ZwFsControlFile=NtFsControlFile \
     /export:NtDeviceIoControlFile \
     /export:ZwDeviceIoControlFile=NtDeviceIoControlFile \
+    /export:NtCreateDebugObject \
+    /export:ZwCreateDebugObject=NtCreateDebugObject \
+    /export:NtDebugActiveProcess \
+    /export:ZwDebugActiveProcess=NtDebugActiveProcess \
+    /export:NtDebugContinue \
+    /export:ZwDebugContinue=NtDebugContinue \
+    /export:NtWaitForDebugEvent \
+    /export:ZwWaitForDebugEvent=NtWaitForDebugEvent \
+    /export:NtRemoveProcessDebug \
+    /export:ZwRemoveProcessDebug=NtRemoveProcessDebug \
+    /export:NtSetInformationDebugObject \
+    /export:ZwSetInformationDebugObject=NtSetInformationDebugObject \
+    /export:NtQueryDebugFilterState \
+    /export:NtCreateJobObject \
+    /export:ZwCreateJobObject=NtCreateJobObject \
+    /export:NtAssignProcessToJobObject \
+    /export:ZwAssignProcessToJobObject=NtAssignProcessToJobObject \
+    /export:NtQueryInformationJobObject \
+    /export:ZwQueryInformationJobObject=NtQueryInformationJobObject \
+    /export:NtSetInformationJobObject \
+    /export:ZwSetInformationJobObject=NtSetInformationJobObject \
+    /export:NtTerminateJobObject \
+    /export:ZwTerminateJobObject=NtTerminateJobObject \
+    /export:NtIsProcessInJob \
+    /export:ZwIsProcessInJob=NtIsProcessInJob \
     /export:NtContinue \
     /export:ZwContinue=NtContinue \
     /export:NtAllocateVirtualMemory \
