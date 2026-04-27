@@ -821,6 +821,161 @@ void SyscallDispatch(arch::TrapFrame* frame)
         return;
     }
 
+    case SYS_THREAD_GET_CONTEXT:
+    case SYS_THREAD_SET_CONTEXT:
+    {
+        // Cap-gate: same threat class as cross-AS VM ops.
+        Process* caller = CurrentProcess();
+        if (caller == nullptr || !CapSetHas(caller->caps, kCapDebug))
+        {
+            if (caller != nullptr)
+            {
+                RecordSandboxDenial(kCapDebug);
+            }
+            frame->rax = kStatusAccessDenied;
+            return;
+        }
+        const u64 handle = frame->rdi;
+        if (handle < Process::kWin32ThreadBase)
+        {
+            frame->rax = kStatusInvalidHandle;
+            return;
+        }
+        const u64 idx = handle - Process::kWin32ThreadBase;
+        if (idx >= Process::kWin32ThreadCap || !caller->win32_threads[idx].in_use)
+        {
+            frame->rax = kStatusInvalidHandle;
+            return;
+        }
+        sched::Task* target = caller->win32_threads[idx].task;
+        // Get/SetContext is only well-defined on a suspended target.
+        // A running target's TrapFrame is being actively pushed/
+        // popped; reading or writing it would race.
+        if (target == nullptr || sched::TaskIsDead(target))
+        {
+            frame->rax = kStatusInvalidHandle;
+            return;
+        }
+        arch::TrapFrame* tf = sched::SchedFindUserTrapFrame(target);
+        if (tf == nullptr)
+        {
+            // No user trap frame — target hasn't entered user mode
+            // yet, or the stack is corrupt.
+            frame->rax = kStatusInvalidParameter;
+            return;
+        }
+        const u64 user_ctx_va = frame->rsi;
+        if (user_ctx_va == 0)
+        {
+            frame->rax = kStatusInvalidParameter;
+            return;
+        }
+
+        // The caller-supplied flags filter selects which classes
+        // the kernel touches. v0 honours INTEGER + CONTROL fully;
+        // SEGMENTS partial (we sanitise on SET regardless because
+        // a malicious value here is the privilege-escalation path);
+        // FLOATING_POINT + DEBUG_REGISTERS deferred. Microsoft's
+        // contract is "the kernel only writes the parts you asked
+        // for" — we honour that for GET, and on SET we apply the
+        // requested classes plus the always-on cs/ss sanitisation.
+        const u32 caller_flags = static_cast<u32>(frame->rdx);
+        const bool want_integer = (caller_flags & kContextInteger) == kContextInteger;
+        const bool want_control = (caller_flags & kContextControl) == kContextControl;
+
+        if (num == SYS_THREAD_GET_CONTEXT)
+        {
+            Win32Context ctx;
+            __builtin_memset(&ctx, 0, sizeof(ctx));
+            ctx.ContextFlags = caller_flags;
+            if (want_integer)
+            {
+                ctx.Rax = tf->rax;
+                ctx.Rcx = tf->rcx;
+                ctx.Rdx = tf->rdx;
+                ctx.Rbx = tf->rbx;
+                ctx.Rbp = tf->rbp;
+                ctx.Rsi = tf->rsi;
+                ctx.Rdi = tf->rdi;
+                ctx.R8 = tf->r8;
+                ctx.R9 = tf->r9;
+                ctx.R10 = tf->r10;
+                ctx.R11 = tf->r11;
+                ctx.R12 = tf->r12;
+                ctx.R13 = tf->r13;
+                ctx.R14 = tf->r14;
+                ctx.R15 = tf->r15;
+            }
+            if (want_control)
+            {
+                ctx.Rip = tf->rip;
+                ctx.Rsp = tf->rsp;
+                ctx.EFlags = static_cast<u32>(tf->rflags);
+                ctx.SegCs = static_cast<u16>(tf->cs);
+                ctx.SegSs = static_cast<u16>(tf->ss);
+            }
+            if (!mm::CopyToUser(reinterpret_cast<void*>(user_ctx_va), &ctx, sizeof(ctx)))
+            {
+                frame->rax = kStatusAccessViolation;
+                return;
+            }
+            frame->rax = kStatusSuccess;
+            return;
+        }
+
+        // SYS_THREAD_SET_CONTEXT
+        Win32Context ctx;
+        if (!mm::CopyFromUser(&ctx, reinterpret_cast<const void*>(user_ctx_va), sizeof(ctx)))
+        {
+            frame->rax = kStatusAccessViolation;
+            return;
+        }
+        if (want_integer)
+        {
+            tf->rax = ctx.Rax;
+            tf->rcx = ctx.Rcx;
+            tf->rdx = ctx.Rdx;
+            tf->rbx = ctx.Rbx;
+            tf->rbp = ctx.Rbp;
+            tf->rsi = ctx.Rsi;
+            tf->rdi = ctx.Rdi;
+            tf->r8 = ctx.R8;
+            tf->r9 = ctx.R9;
+            tf->r10 = ctx.R10;
+            tf->r11 = ctx.R11;
+            tf->r12 = ctx.R12;
+            tf->r13 = ctx.R13;
+            tf->r14 = ctx.R14;
+            tf->r15 = ctx.R15;
+        }
+        if (want_control)
+        {
+            tf->rip = ctx.Rip;
+            tf->rsp = ctx.Rsp;
+            // RFLAGS sanitisation: keep IF on (otherwise the
+            // target wakes with interrupts disabled and the
+            // kernel deadlocks at the next timer tick), force
+            // IOPL = 0 (no port-IO privilege gift), clear NT
+            // and TF (no nested-task chains, no single-step
+            // surprises). The caller's choice of arithmetic /
+            // comparison flags is preserved.
+            constexpr u64 kRflagsIf = 1ULL << 9;
+            constexpr u64 kRflagsTf = 1ULL << 8;
+            constexpr u64 kRflagsNt = 1ULL << 14;
+            constexpr u64 kRflagsIoplMask = 0x3ULL << 12;
+            u64 new_flags = static_cast<u64>(ctx.EFlags);
+            new_flags |= kRflagsIf;
+            new_flags &= ~(kRflagsTf | kRflagsNt | kRflagsIoplMask);
+            tf->rflags = new_flags;
+            // Force ring-3 selectors. A malicious caller passing
+            // kernel selectors would otherwise iretq into ring 0.
+            tf->cs = 0x2B; // kUserCodeSelector
+            tf->ss = 0x33; // kUserDataSelector
+        }
+        frame->rax = kStatusSuccess;
+        return;
+    }
+
     case SYS_NT_INVOKE:
     {
         // Forward to the NT→Linux translator. The handler reads

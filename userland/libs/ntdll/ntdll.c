@@ -1079,6 +1079,73 @@ __declspec(dllexport) NTSTATUS NtAlertResumeThread(HANDLE ThreadHandle, unsigned
     return NtResumeThread(ThreadHandle, PreviousSuspendCount);
 }
 
+/* ------------------------------------------------------------------
+ * NtGetContextThread / NtSetContextThread — read or rewrite a
+ * suspended target's user-mode register state. Backs the
+ * malware "thread hijack" pattern's CONTEXT-manipulation step
+ * (the freeze half lives in NtSuspendThread, the patch-bytes
+ * half in NtWriteVirtualMemory).
+ *
+ * Win32 NT signature:
+ *   NTSTATUS NtGetContextThread(HANDLE Thread, PCONTEXT Context);
+ *   NTSTATUS NtSetContextThread(HANDLE Thread, PCONTEXT Context);
+ *
+ * Caller passes a CONTEXT* whose ContextFlags member tells the
+ * kernel which classes to honour (CONTEXT_INTEGER, CONTEXT_CONTROL,
+ * CONTEXT_FULL, etc.). Kernel reads ContextFlags from rdx and
+ * the buffer pointer from rsi; the v0 implementation honours
+ * INTEGER + CONTROL fully and ignores the FLOATING_POINT /
+ * DEBUG_REGISTERS classes (the buffer is left untouched on GET
+ * for those classes; the corresponding bytes are read but not
+ * applied on SET).
+ *
+ * Returns:
+ *   STATUS_SUCCESS on full success
+ *   STATUS_INVALID_HANDLE — handle not in caller's table /
+ *     target dead
+ *   STATUS_INVALID_PARAMETER — target not suspended OR no user
+ *     trap frame yet (target hasn't entered user mode)
+ *   STATUS_ACCESS_DENIED — caller missing kCapDebug
+ *   STATUS_ACCESS_VIOLATION — Context buffer unmapped /
+ *     unwritable
+ *
+ * The caller must hand a fully-sized CONTEXT (1232 bytes); the
+ * kernel only writes the first 0x100 bytes (the integer +
+ * control region — Microsoft's CONTEXT layout has the integer
+ * registers there and Rip at +0xF8). The remaining bytes
+ * (XMM0..XMM15, AVX vectors, DR* mirrors) are left as the caller
+ * supplied them on GET.
+ * ------------------------------------------------------------------ */
+__declspec(dllexport) NTSTATUS NtGetContextThread(HANDLE ThreadHandle, void* Context)
+{
+    long long rc;
+    /* SYS_THREAD_GET_CONTEXT = 137. Read ContextFlags out of
+     * the caller's CONTEXT to forward to the kernel via rdx. */
+    if (Context == (void*)0)
+        return (NTSTATUS)0xC000000DL; /* STATUS_INVALID_PARAMETER */
+    /* ContextFlags lives at +0x30 in the canonical CONTEXT
+     * layout. Read directly without dragging in winnt.h. */
+    unsigned int flags = *(unsigned int*)((unsigned char*)Context + 0x30);
+    __asm__ volatile("int $0x80"
+                     : "=a"(rc)
+                     : "a"((long long)137), "D"((long long)ThreadHandle), "S"((long long)Context), "d"((long long)flags)
+                     : "memory");
+    return (NTSTATUS)rc;
+}
+
+__declspec(dllexport) NTSTATUS NtSetContextThread(HANDLE ThreadHandle, const void* Context)
+{
+    long long rc;
+    if (Context == (const void*)0)
+        return (NTSTATUS)0xC000000DL;
+    unsigned int flags = *(const unsigned int*)((const unsigned char*)Context + 0x30);
+    __asm__ volatile("int $0x80"
+                     : "=a"(rc)
+                     : "a"((long long)138), "D"((long long)ThreadHandle), "S"((long long)Context), "d"((long long)flags)
+                     : "memory");
+    return (NTSTATUS)rc;
+}
+
 __declspec(dllexport) NTSTATUS NtQueryVirtualMemory(HANDLE ProcessHandle, void* BaseAddress, int MemoryInformationClass,
                                                     void* MemoryInformation, unsigned long long MemoryInformationLength,
                                                     unsigned long long* ReturnLength)

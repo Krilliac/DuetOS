@@ -95,6 +95,8 @@ KNOWN_MAPPINGS = {
     "NtSuspendThread":             "SYS_THREAD_SUSPEND",
     "NtResumeThread":              "SYS_THREAD_RESUME",
     "NtAlertResumeThread":         "SYS_THREAD_RESUME",
+    "NtGetContextThread":          "SYS_THREAD_GET_CONTEXT",
+    "NtSetContextThread":          "SYS_THREAD_SET_CONTEXT",
     # NtCreateKey / NtSetValueKey / NtDeleteKey / NtDeleteValueKey:
     # NotImpl on purpose — registry is read-only in v0. Mapping
     # them to SYS_REGISTRY's read-only Open op would silently lie

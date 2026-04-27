@@ -777,6 +777,56 @@ bool TaskIsDead(const Task* t)
     return t != nullptr && t->state == TaskState::Dead;
 }
 
+arch::TrapFrame* SchedFindUserTrapFrame(Task* t)
+{
+    // Locate the outermost user→kernel TrapFrame on a target's
+    // kernel stack. This is the frame the CPU pushed when the
+    // task last entered the kernel (timer preemption / int 0x80
+    // syscall / page fault from user mode). RSP0 was set by
+    // Schedule() to (stack_base + stack_size) on every switch-
+    // in, so the CPU's first push lands at exactly that address
+    // minus 40 bytes (ss/rsp/rflags/cs/rip), then the per-vector
+    // stub pushes vector + error_code (16 bytes) and isr_common
+    // pushes 15 GPRs (120 bytes). Total = sizeof(TrapFrame) =
+    // 176 bytes. That bottom of the trap frame is the highest
+    // possible TrapFrame* on the stack.
+    //
+    // Returns nullptr when:
+    //   - the target has no kernel stack (boot / idle task);
+    //   - the target never entered user mode (cs at the
+    //     reserved offset has RPL != 3 — uninitialised garbage
+    //     OR a frame from a kernel-mode trap delivered before
+    //     any user-mode entry happened);
+    //   - the target's stack_size is too small to hold the
+    //     frame (a corrupted Task struct).
+    //
+    // Single-CPU correctness: the caller is the running task,
+    // so the target is by construction NOT running and its
+    // kernel stack is quiescent. On SMP, the IPI dance that
+    // evicts a target from another core would need to fence
+    // any pending stack writes before this read; that's a
+    // follow-up.
+    if (t == nullptr || t->stack_base == nullptr)
+    {
+        return nullptr;
+    }
+    if (t->stack_size < sizeof(arch::TrapFrame))
+    {
+        return nullptr;
+    }
+    const u64 stack_top = reinterpret_cast<u64>(t->stack_base) + t->stack_size;
+    auto* tf = reinterpret_cast<arch::TrapFrame*>(stack_top - sizeof(arch::TrapFrame));
+    // RPL == 3 confirms the frame came from a user→kernel
+    // entry. Any other value (0 = ring 0, garbage from an
+    // uninitialised stack region) means there is no valid
+    // user CONTEXT to read or write.
+    if ((tf->cs & 0x3) != 0x3)
+    {
+        return nullptr;
+    }
+    return tf;
+}
+
 void FlagCurrentForKill(KillReason reason)
 {
     Task* t = Current();

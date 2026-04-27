@@ -1304,7 +1304,111 @@ enum SyscallNumber : u64
     // count == 0 is a no-op returning 0. Resume on a thread
     // with prior count > 1 just decrements without unparking.
     SYS_THREAD_RESUME = 136,
+
+    // SYS_THREAD_GET_CONTEXT — read the suspended target's
+    // user-mode register state into a caller-supplied buffer.
+    // SYS_THREAD_SET_CONTEXT — overwrite the register state
+    // that the target's next iretq-to-user-mode will restore.
+    //
+    //   rdi = thread handle (caller's win32_threads[] entry).
+    //   rsi = user pointer to a Win32Context buffer (defined
+    //         in this header — first 0x100 bytes of the Win32
+    //         CONTEXT struct: P1Home..P6Home, ContextFlags,
+    //         MxCsr, Seg×6, EFlags, Dr0..Dr3+Dr6+Dr7, GP regs
+    //         Rax..R15, Rip).
+    //   rdx = ContextFlags filter (CONTEXT_INTEGER /
+    //         CONTEXT_CONTROL / CONTEXT_FULL — the v0
+    //         implementation honours INTEGER + CONTROL). The
+    //         FLOATING_POINT / DEBUG_REGISTERS / SEGMENTS
+    //         classes are accepted in the flags but only the
+    //         segment selectors and rflags get touched on
+    //         SET; Dr0..7 + XMM/FPU are deferred to a follow-
+    //         up slice.
+    //   rax = NTSTATUS — 0 on success, 0xC0000008 (invalid
+    //         handle) when the handle isn't in the caller's
+    //         table, 0xC000000D (invalid parameter) when the
+    //         target isn't suspended OR has no user trap
+    //         frame yet (never entered user mode), 0xC0000022
+    //         (access denied) when kCapDebug is missing.
+    //
+    // Cap-gated on kCapDebug, same threat class as cross-AS
+    // VM read/write — reading another thread's RIP / RSP /
+    // GPRs is the same level of inspection power.
+    //
+    // SET sanitisation: cs / ss are forced to the user-mode
+    // selectors, ds/es/fs/gs to user data; rflags has IF set
+    // and IOPL forced to 0 + privileged bits cleared. A
+    // malicious caller cannot use NtSetContextThread to
+    // escalate the target to ring 0 or to mask interrupts.
+    SYS_THREAD_GET_CONTEXT = 137,
+    SYS_THREAD_SET_CONTEXT = 138,
 };
+
+// Win32 CONTEXT — first 0x100 bytes (integer + control + the
+// segment / rflags slot). Field order and offsets match the
+// Microsoft x64 CONTEXT layout exactly so a PE that ships its
+// own winnt.h can pass a pointer through unchanged. Anything
+// beyond Rip (XMM0..XMM15, the AVX vector regs, debug-control
+// MSRs) is unimplemented in v0 — NtGetContextThread leaves
+// those bytes untouched on the caller side; NtSetContextThread
+// ignores them.
+//
+// Stable on the kernel side; the userland-side ntdll thunks
+// re-cast to / from `CONTEXT` for the caller's API contract.
+struct alignas(16) Win32Context
+{
+    u64 P1Home;       // +0x000
+    u64 P2Home;       // +0x008
+    u64 P3Home;       // +0x010
+    u64 P4Home;       // +0x018
+    u64 P5Home;       // +0x020
+    u64 P6Home;       // +0x028
+    u32 ContextFlags; // +0x030
+    u32 MxCsr;        // +0x034
+    u16 SegCs;        // +0x038
+    u16 SegDs;        // +0x03A
+    u16 SegEs;        // +0x03C
+    u16 SegFs;        // +0x03E
+    u16 SegGs;        // +0x040
+    u16 SegSs;        // +0x042
+    u32 EFlags;       // +0x044
+    u64 Dr0;          // +0x048
+    u64 Dr1;          // +0x050
+    u64 Dr2;          // +0x058
+    u64 Dr3;          // +0x060
+    u64 Dr6;          // +0x068
+    u64 Dr7;          // +0x070
+    u64 Rax;          // +0x078
+    u64 Rcx;          // +0x080
+    u64 Rdx;          // +0x088
+    u64 Rbx;          // +0x090
+    u64 Rsp;          // +0x098
+    u64 Rbp;          // +0x0A0
+    u64 Rsi;          // +0x0A8
+    u64 Rdi;          // +0x0B0
+    u64 R8;           // +0x0B8
+    u64 R9;           // +0x0C0
+    u64 R10;          // +0x0C8
+    u64 R11;          // +0x0D0
+    u64 R12;          // +0x0D8
+    u64 R13;          // +0x0E0
+    u64 R14;          // +0x0E8
+    u64 R15;          // +0x0F0
+    u64 Rip;          // +0x0F8
+};
+static_assert(sizeof(Win32Context) == 0x100, "Win32Context first-0x100 layout must match Microsoft x64 CONTEXT");
+static_assert(__builtin_offsetof(Win32Context, ContextFlags) == 0x030, "ContextFlags offset");
+static_assert(__builtin_offsetof(Win32Context, Rax) == 0x078, "Rax offset");
+static_assert(__builtin_offsetof(Win32Context, Rip) == 0x0F8, "Rip offset");
+
+// ContextFlags bits — Microsoft contract.
+constexpr u32 kContextX86_64 = 0x00100000;
+constexpr u32 kContextControl = kContextX86_64 | 0x00000001;
+constexpr u32 kContextInteger = kContextX86_64 | 0x00000002;
+constexpr u32 kContextSegments = kContextX86_64 | 0x00000004;
+constexpr u32 kContextFloatingPoint = kContextX86_64 | 0x00000008;
+constexpr u32 kContextDebugRegisters = kContextX86_64 | 0x00000010;
+constexpr u32 kContextFull = kContextControl | kContextInteger | kContextSegments;
 
 /// Cap on the byte count a single SYS_PROCESS_VM_READ /
 /// SYS_PROCESS_VM_WRITE may move. 16 KiB is plenty for the v0

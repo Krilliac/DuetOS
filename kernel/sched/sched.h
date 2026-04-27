@@ -7,6 +7,11 @@ namespace duetos::mm
 struct AddressSpace; // forward decl; defined in kernel/mm/address_space.h
 }
 
+namespace duetos::arch
+{
+struct TrapFrame; // forward decl; defined in kernel/arch/x86_64/traps.h
+}
+
 namespace duetos::core
 {
 struct Process; // forward decl; defined in kernel/proc/process.h
@@ -313,6 +318,20 @@ const char* KillResultName(KillResult r);
 /// gets a Blocked result code and should try again after the
 /// task is woken by something else.
 KillResult SchedKillByPid(u64 pid);
+
+/// Locate the outermost user→kernel TrapFrame on a target task's
+/// kernel stack. Returns nullptr when the task has no kernel
+/// stack (boot / idle), never entered user mode (cs.rpl != 3),
+/// or has a corrupted stack_size. Used by NtGetContextThread /
+/// NtSetContextThread to read or rewrite the user RIP / RSP /
+/// GP regs that an iretq from this frame will restore.
+///
+/// Caller must ensure the target is suspended (not actively
+/// pushing onto its own kernel stack); SchedSuspendTask is the
+/// supported way. The single-CPU assumption is the same as the
+/// rest of the cross-task control APIs — the caller is the
+/// running task; the target is by construction not running.
+arch::TrapFrame* SchedFindUserTrapFrame(Task* t);
 
 /// Result of a cross-task suspend / resume request. NotFound is
 /// reserved for caller-side handle resolution failures (the

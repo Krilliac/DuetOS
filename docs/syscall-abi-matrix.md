@@ -517,6 +517,8 @@ _Auto-generated; do not edit by hand._
 | native | 134 | `SYS_PROCESS_VM_QUERY` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
 | native | 135 | `SYS_THREAD_SUSPEND` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
 | native | 136 | `SYS_THREAD_RESUME` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 137 | `SYS_THREAD_GET_CONTEXT` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
+| native | 138 | `SYS_THREAD_SET_CONTEXT` | implemented | `kernel/syscall/syscall.h::SyscallNumber` | none (native syscall entry) |
 | native | 512 | `native_gapfill_0x200` | translated | `kernel/subsystems/translation/translate.cpp::NativeClockNs` | linux-self:NowNs |
 | native | 513 | `native_gapfill_0x201` | translated | `kernel/subsystems/translation/translate.cpp::NativeGetRandom` | synthetic:xorshift-from-rdtsc |
 | native | 528 | `native_gapfill_0x210` | translated | `kernel/subsystems/translation/translate.cpp::NativeWin32Alloc` | win32:HeapAlloc |
@@ -772,7 +774,7 @@ _Auto-generated; do not edit by hand._
 | nt | 248 | `NtFreezeTransactions` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
 | nt | 249 | `NtGetCachedSigningLevel` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
 | nt | 250 | `NtGetCompleteWnfStateSubscription` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
-| nt | 251 | `NtGetContextThread` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 251 | `NtGetContextThread` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_THREAD_GET_CONTEXT` | routes to native SYS_THREAD_GET_CONTEXT |
 | nt | 252 | `NtGetCurrentProcessorNumber` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_NT_INVOKE` | routes to native SYS_NT_INVOKE |
 | nt | 253 | `NtGetCurrentProcessorNumberEx` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
 | nt | 254 | `NtGetDevicePowerState` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
@@ -931,7 +933,7 @@ _Auto-generated; do not edit by hand._
 | nt | 407 | `NtSetBootOptions` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
 | nt | 408 | `NtSetCachedSigningLevel` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
 | nt | 409 | `NtSetCachedSigningLevel2` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
-| nt | 410 | `NtSetContextThread` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
+| nt | 410 | `NtSetContextThread` | translated | `kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_THREAD_SET_CONTEXT` | routes to native SYS_THREAD_SET_CONTEXT |
 | nt | 411 | `NtSetDebugFilterState` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
 | nt | 412 | `NtSetDefaultHardErrorPort` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |
 | nt | 413 | `NtSetDefaultLocale` | unimplemented | `kernel/subsystems/win32/thunks.cpp::NtStubCatchAll` | STATUS_NOT_IMPLEMENTED |

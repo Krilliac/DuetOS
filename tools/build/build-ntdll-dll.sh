@@ -86,6 +86,10 @@ set +e
     /export:ZwResumeThread=NtResumeThread \
     /export:NtAlertResumeThread \
     /export:ZwAlertResumeThread=NtAlertResumeThread \
+    /export:NtGetContextThread \
+    /export:ZwGetContextThread=NtGetContextThread \
+    /export:NtSetContextThread \
+    /export:ZwSetContextThread=NtSetContextThread \
     /export:NtContinue \
     /export:ZwContinue=NtContinue \
     /export:NtAllocateVirtualMemory \

@@ -8,7 +8,7 @@
 // Target Windows version: Windows 11 and Server (11 25H2)
 // Bedrock NT calls (present in every Windows XP→Win11 25H2): 292
 // All known NT calls on the target version: 489
-// DuetOS coverage: 33/292 = 11%
+// DuetOS coverage: 35/292 = 11%
 //
 // See tools/win32-compat/README.md for the legal + design rationale.
 
@@ -195,7 +195,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
     {"NtFlushVirtualMemory", 0x00f4, kSysNtNotImpl},
     {"NtFlushWriteBuffer", 0x00f5, kSysNtNotImpl},
     {"NtFreeUserPhysicalPages", 0x00f6, kSysNtNotImpl},
-    {"NtGetContextThread", 0x00fb, kSysNtNotImpl},
+    {"NtGetContextThread", 0x00fb, static_cast<u32>(::duetos::core::SYS_THREAD_GET_CONTEXT)},
     {"NtGetCurrentProcessorNumber", 0x00fc, static_cast<u32>(::duetos::core::SYS_NT_INVOKE)},
     {"NtGetDevicePowerState", 0x00fe, kSysNtNotImpl},
     {"NtGetWriteWatch", 0x0104, kSysNtNotImpl},
@@ -281,7 +281,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
     {"NtSecureConnectPort", 0x0194, kSysNtNotImpl},
     {"NtSetBootEntryOrder", 0x0196, kSysNtNotImpl},
     {"NtSetBootOptions", 0x0197, kSysNtNotImpl},
-    {"NtSetContextThread", 0x019a, kSysNtNotImpl},
+    {"NtSetContextThread", 0x019a, static_cast<u32>(::duetos::core::SYS_THREAD_SET_CONTEXT)},
     {"NtSetDebugFilterState", 0x019b, kSysNtNotImpl},
     {"NtSetDefaultHardErrorPort", 0x019c, kSysNtNotImpl},
     {"NtSetDefaultLocale", 0x019d, kSysNtNotImpl},
@@ -336,7 +336,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
 inline constexpr u32 kBedrockNtSyscallCount =
     sizeof(kBedrockNtSyscalls) / sizeof(kBedrockNtSyscalls[0]);
 
-inline constexpr u32 kBedrockNtSyscallsCovered = 33;
+inline constexpr u32 kBedrockNtSyscallsCovered = 35;
 
 /// Every NT syscall known on the target Windows version — superset
 /// of `kBedrockNtSyscalls`. Includes version-specific additions
@@ -596,7 +596,7 @@ inline constexpr NtSyscallMapping kAllNtSyscalls[] = {
     {"NtFreezeTransactions", 0x00f8, kSysNtNotImpl},
     {"NtGetCachedSigningLevel", 0x00f9, kSysNtNotImpl},
     {"NtGetCompleteWnfStateSubscription", 0x00fa, kSysNtNotImpl},
-    {"NtGetContextThread", 0x00fb, kSysNtNotImpl},
+    {"NtGetContextThread", 0x00fb, static_cast<u32>(::duetos::core::SYS_THREAD_GET_CONTEXT)},
     {"NtGetCurrentProcessorNumber", 0x00fc, static_cast<u32>(::duetos::core::SYS_NT_INVOKE)},
     {"NtGetCurrentProcessorNumberEx", 0x00fd, kSysNtNotImpl},
     {"NtGetDevicePowerState", 0x00fe, kSysNtNotImpl},
@@ -755,7 +755,7 @@ inline constexpr NtSyscallMapping kAllNtSyscalls[] = {
     {"NtSetBootOptions", 0x0197, kSysNtNotImpl},
     {"NtSetCachedSigningLevel", 0x0198, kSysNtNotImpl},
     {"NtSetCachedSigningLevel2", 0x0199, kSysNtNotImpl},
-    {"NtSetContextThread", 0x019a, kSysNtNotImpl},
+    {"NtSetContextThread", 0x019a, static_cast<u32>(::duetos::core::SYS_THREAD_SET_CONTEXT)},
     {"NtSetDebugFilterState", 0x019b, kSysNtNotImpl},
     {"NtSetDefaultHardErrorPort", 0x019c, kSysNtNotImpl},
     {"NtSetDefaultLocale", 0x019d, kSysNtNotImpl},
