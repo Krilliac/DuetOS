@@ -106,6 +106,8 @@ These return canonical errors so library fallbacks engage cleanly:
 | ~~`DoPipe` / `DoPipe2`~~ | ~~`-ENFILE`~~ | ~~39–49~~ | **DONE** — real ring-buffer pipes with WaitQueue blocking |
 | `DoWait4` / `DoWaitid` | `-ECHILD` | 54–70 | Wait for child; no fork → no children to wait on |
 | ~~`DoEventfd` / `DoEventfd2`~~ | ~~`-ENOSYS`~~ | ~~75–80~~ | **DONE** — counter-based fd in pool of 16 |
+| ~~`DoPtrace`~~ | ~~`-EPERM`~~ | ~~189–196~~ | **PARTIAL** — kCapDebug-gated; cap-clear → -ENOSYS, no-cap → -EPERM. Real ptrace state machine still TBD; cross-AS introspection works via native SYS_PROCESS_VM_READ/WRITE today |
+| ~~`DoSyslog`~~ | ~~0 (no-op)~~ | ~~201–207~~ | **PARTIAL** — SYSLOG_ACTION_READ_ALL/READ_CLEAR write a canned banner; SIZE_BUFFER returns banner length; other ops still 0 no-op |
 | `DoTimerfdCreate` / `DoTimerfdSettime` / `DoTimerfdGettime` | `-ENOSYS` | 81–100 | Timer FD ops |
 | `DoSignalfd` / `DoSignalfd4` | `-ENOSYS` | 101–108 | Signal → FD conversion |
 | `DoEpollCreate` / `DoEpollCreate1` | `-ENOSYS` | 140–149 | Epoll instance |

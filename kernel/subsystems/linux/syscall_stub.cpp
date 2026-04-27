@@ -26,6 +26,7 @@
 
 #include "subsystems/linux/syscall_internal.h"
 
+#include "mm/paging.h"
 #include "proc/process.h"
 
 namespace duetos::subsystems::linux::internal
@@ -168,26 +169,64 @@ i64 DoInotifyInit1(u64 flags)
 // Compat / tracing / mount / link / rename stub group.
 // ---------------------------------------------------------------
 
-// ptrace(request, pid, addr, data): process tracing. v0 has no
-// ptrace machinery. -EPERM is the "tracing not permitted" return
-// Linux gives to unprivileged callers.
+// ptrace(request, pid, addr, data): process tracing. v0 cap-
+// gates on kCapDebug — same gate that protects cross-AS VM
+// access. Without the cap, return -EPERM (the "tracing not
+// permitted" answer Linux gives unprivileged callers). With
+// the cap, requests that would do real work return -ENOSYS
+// because the ptrace state machine itself doesn't exist;
+// callers needing cross-process introspection use the
+// kernel-side SYS_PROCESS_VM_READ / WRITE / SYS_THREAD_GET /
+// SET_CONTEXT directly via the native ABI today.
 i64 DoPtrace(u64 request, u64 pid, u64 addr, u64 data)
 {
+    core::Process* proc = core::CurrentProcess();
+    if (proc == nullptr || !core::CapSetHas(proc->caps, core::kCapDebug))
+    {
+        core::RecordSandboxDenial(core::kCapDebug);
+        return kEPERM;
+    }
     (void)request;
     (void)pid;
     (void)addr;
     (void)data;
-    return kEPERM;
+    // Cap-cleared callers reach the real engine, which doesn't
+    // exist yet — return -ENOSYS so the caller can distinguish
+    // "you're not allowed" (-EPERM, no cap) from "kernel doesn't
+    // have it" (-ENOSYS).
+    return kENOSYS;
 }
 
-// syslog(type, bufp, len): kernel log read/control. Every type
-// is a no-op success in v0 — kernel log lives on COM1, not in a
-// user-readable ring buffer. Returns 0 for "nothing written".
+// syslog(type, bufp, len): kernel log read/control. v0 has no
+// user-readable klog ring (kernel log lives on COM1 only), so:
+//   - SYSLOG_ACTION_READ_ALL (3): writes a canned single-line
+//     banner so a `dmesg` shaped probe gets non-empty output.
+//   - SYSLOG_ACTION_READ_CLEAR (4): same as READ_ALL.
+//   - SYSLOG_ACTION_SIZE_BUFFER (10): returns the banner len.
+//   - SYSLOG_ACTION_SIZE_UNREAD (9): returns 0 (already drained).
+//   - everything else: 0 (success no-op — close, open, console
+//     enable/disable, set-loglevel; all are nominal on v0).
 i64 DoSyslog(u64 type, u64 bufp, u64 len)
 {
-    (void)type;
-    (void)bufp;
-    (void)len;
+    static const char k_banner[] = "<6>DuetOS klog: serial-only on COM1; user-readable ring TBD\n";
+    constexpr u64 kBannerLen = sizeof(k_banner) - 1;
+    constexpr u64 kSyslogReadAll = 3;
+    constexpr u64 kSyslogReadClear = 4;
+    constexpr u64 kSyslogSizeUnread = 9;
+    constexpr u64 kSyslogSizeBuffer = 10;
+    if (type == kSyslogReadAll || type == kSyslogReadClear)
+    {
+        if (bufp == 0)
+            return kEFAULT;
+        const u64 to_copy = (len < kBannerLen) ? len : kBannerLen;
+        if (!mm::CopyToUser(reinterpret_cast<void*>(bufp), k_banner, to_copy))
+            return kEFAULT;
+        return static_cast<i64>(to_copy);
+    }
+    if (type == kSyslogSizeBuffer)
+        return static_cast<i64>(kBannerLen);
+    if (type == kSyslogSizeUnread)
+        return 0;
     return 0;
 }
 
