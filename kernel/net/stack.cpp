@@ -33,6 +33,7 @@
  */
 
 #include "net/stack.h"
+#include "net/socket.h"
 #include "net/wifi.h"
 
 #include "arch/x86_64/serial.h"
@@ -1058,6 +1059,12 @@ void NetUdpDispatch(u32 iface_index, Ipv4Address src_ip, u16 src_port, u16 dst_p
         ++g_udp_stats.rx_no_port;
         return;
     }
+    // Sockets first — once a userland process binds a UDP port via
+    // socket()/bind(), it owns dispatch on that port. The legacy
+    // UdpBinding table stays for kernel-resident callers (DHCP /
+    // DNS / NTP) and only fires if no socket consumed the datagram.
+    if (SocketUdpDispatch(iface_index, src_ip, src_port, dst_port, payload, len))
+        return;
     for (const UdpBinding& b : g_udp_bindings)
     {
         if (b.in_use && b.port == dst_port && b.handler != nullptr)
@@ -1774,6 +1781,8 @@ void TcpOnSegment(u32 iface_index, const MacAddress& peer_mac, Ipv4Address peer_
             g_tcp_conn.rx_len += take;
             TcpSend(iface_index, peer_mac, peer_ip, src_port, our_ip, dst_port, kTcpFlagAckBit, g_tcp_conn.snd_next,
                     g_tcp_conn.rcv_next, nullptr, 0);
+            // Wake any socket layer reader blocked on this slot.
+            SocketTcpRxNotify();
         }
         else
         {
@@ -1818,6 +1827,7 @@ void TcpOnSegment(u32 iface_index, const MacAddress& peer_mac, Ipv4Address peer_
         // Leave in_use=true so NetTcpActiveRead can still read
         // the final captured bytes. Next TcpListen / TcpConnect
         // resets the slot.
+        SocketTcpRxNotify();
     }
 }
 
@@ -1870,6 +1880,53 @@ u32 NetTcpActiveRead(u8* out, u32 cap)
     for (u32 i = 0; i < take; ++i)
         out[i] = g_tcp_conn.rx_buf[i];
     return take;
+}
+
+u32 NetTcpActiveReadAt(u32 start, u8* out, u32 cap)
+{
+    if (start >= g_tcp_conn.rx_len)
+        return 0;
+    const u32 avail = g_tcp_conn.rx_len - start;
+    const u32 take = avail < cap ? avail : cap;
+    if (out == nullptr)
+        return take;
+    for (u32 i = 0; i < take; ++i)
+        out[i] = g_tcp_conn.rx_buf[start + i];
+    return take;
+}
+
+u32 NetTcpActiveSend(const u8* data, u32 len)
+{
+    if (!g_tcp_conn.in_use || g_tcp_conn.role != TcpRole::Client)
+        return 0;
+    if (g_tcp_conn.state != TcpState::Established)
+        return 0;
+    if (data == nullptr || len == 0)
+        return 0;
+    const u32 capped = (len < kTcpMaxCannedReply) ? len : kTcpMaxCannedReply;
+    Ipv4Address our_ip = g_interfaces[g_tcp_conn.iface_index].ip;
+    ++g_tcp_stats.data_tx;
+    TcpSend(g_tcp_conn.iface_index, g_tcp_conn.peer_mac, g_tcp_conn.peer_ip, g_tcp_conn.peer_port, our_ip,
+            g_tcp_conn.local_port, kTcpFlagAckBit | kTcpFlagPshBit, g_tcp_conn.snd_next, g_tcp_conn.rcv_next, data,
+            capped);
+    g_tcp_conn.snd_next += capped;
+    return capped;
+}
+
+bool NetTcpActiveCloseTx()
+{
+    if (!g_tcp_conn.in_use || g_tcp_conn.role != TcpRole::Client)
+        return false;
+    if (g_tcp_conn.state != TcpState::Established)
+        return false;
+    Ipv4Address our_ip = g_interfaces[g_tcp_conn.iface_index].ip;
+    ++g_tcp_stats.fin_tx;
+    TcpSend(g_tcp_conn.iface_index, g_tcp_conn.peer_mac, g_tcp_conn.peer_ip, g_tcp_conn.peer_port, our_ip,
+            g_tcp_conn.local_port, kTcpFlagAckBit | kTcpFlagFinBit, g_tcp_conn.snd_next, g_tcp_conn.rcv_next, nullptr,
+            0);
+    g_tcp_conn.snd_next += 1;
+    g_tcp_conn.state = TcpState::LastAck;
+    return true;
 }
 
 TcpActiveSnapshot NetTcpActiveSnapshot()

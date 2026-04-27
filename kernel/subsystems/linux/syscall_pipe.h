@@ -20,10 +20,18 @@ i64 PipeRead(u32 idx, u64 user_dst, u64 len);
 i64 PipeWrite(u32 idx, u64 user_src, u64 len);
 void PipeReleaseRead(u32 idx);
 void PipeReleaseWrite(u32 idx);
+// Bump the read- / write-end refcount. Used by fork() for fd
+// inheritance — the child gets its own LinuxFd slot pointing
+// at the same pool entry; the corresponding end's refcount
+// must climb so the pool entry stays live across a parent
+// close while the child still holds the inherited fd.
+void PipeRetainRead(u32 idx);
+void PipeRetainWrite(u32 idx);
 
 // Eventfd pool — read/write/release.
 i64 EventfdRead(u32 idx, u64 user_dst, u64 len);
 i64 EventfdWrite(u32 idx, u64 user_src, u64 len);
 void EventfdRelease(u32 idx);
+void EventfdRetain(u32 idx);
 
 } // namespace duetos::subsystems::linux::internal

@@ -19,6 +19,7 @@
 
 #include "subsystems/linux/syscall_internal.h"
 #include "subsystems/linux/syscall_pipe.h"
+#include "subsystems/linux/syscall_socket.h"
 
 #include "proc/process.h"
 #include "fs/fat32.h"
@@ -171,6 +172,8 @@ i64 DoClose(u64 fd)
         PipeReleaseWrite(idx);
     else if (state == 5)
         EventfdRelease(idx);
+    else if (state == 6)
+        SocketFdRelease(idx);
     p->linux_fds[fd].state = 0;
     p->linux_fds[fd].first_cluster = 0;
     p->linux_fds[fd].size = 0;
