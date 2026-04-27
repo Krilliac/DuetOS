@@ -22,6 +22,7 @@
 #include "drivers/storage/block.h"
 #include "fs/fat32_internal.h"
 #include "fs/fat32_write_internal.h"
+#include "mm/kheap.h"
 
 namespace duetos::fs::fat32
 {
@@ -785,6 +786,70 @@ bool Fat32RmdirAtPath(const Volume* v, const char* path)
     // Reuse DeleteInDir — it frees the cluster chain AND clears
     // preceding LFN fragments, which is exactly what we need.
     return DeleteInDir(v, parent_cluster, basename);
+}
+
+namespace
+{
+// Bounce buffer cap for v0 rename (copy-then-delete). 64 KiB
+// covers every test fixture in the FAT32 selftest + every
+// PE the loader currently asks for. Files over the cap return
+// false from Fat32RenameAtPath; lifting the cap requires a
+// streaming copy that walks cluster-by-cluster, which is its
+// own sub-GAP.
+constexpr u64 kRenameBounceMax = 64 * 1024;
+} // namespace
+
+bool Fat32RenameAtPath(const Volume* v, const char* src_path, const char* dst_path)
+{
+    Fat32Guard guard;
+    if (v == nullptr || src_path == nullptr || dst_path == nullptr)
+        return false;
+
+    // Resolve src — must exist + be a regular file.
+    DirEntry src_entry;
+    if (!Fat32LookupPath(v, src_path, &src_entry))
+        return false;
+    if ((src_entry.attributes & 0x10) != 0)
+        return false; // refuse directory rename in v0
+    if (src_entry.size_bytes > kRenameBounceMax)
+        return false;
+
+    // Refuse rename onto an existing destination — Windows
+    // MoveFile semantics with no MOVEFILE_REPLACE_EXISTING.
+    DirEntry dst_probe;
+    if (Fat32LookupPath(v, dst_path, &dst_probe))
+        return false;
+
+    // Read src into the bounce buffer. The buffer is heap-
+    // allocated so the kernel stack stays small.
+    void* bounce = mm::KMalloc(static_cast<u64>(src_entry.size_bytes));
+    if (bounce == nullptr && src_entry.size_bytes != 0)
+        return false;
+    if (src_entry.size_bytes != 0)
+    {
+        const i64 read_total = Fat32ReadFile(v, &src_entry, bounce, src_entry.size_bytes);
+        if (read_total < 0 || static_cast<u64>(read_total) != src_entry.size_bytes)
+        {
+            mm::KFree(bounce);
+            return false;
+        }
+    }
+
+    // Create the destination with the same content. If create
+    // fails, leave src untouched and return false.
+    const i64 written = Fat32CreateAtPath(v, dst_path, bounce, src_entry.size_bytes);
+    if (bounce != nullptr)
+        mm::KFree(bounce);
+    if (written < 0 || static_cast<u64>(written) != src_entry.size_bytes)
+        return false;
+
+    // Destination is good. Delete the source. If delete fails
+    // we leave the destination in place and return false — the
+    // caller now has to clean up the duplicate. Power-loss
+    // window: same problem (non-atomic). Sub-GAP.
+    if (!Fat32DeleteAtPath(v, src_path))
+        return false;
+    return true;
 }
 
 } // namespace duetos::fs::fat32

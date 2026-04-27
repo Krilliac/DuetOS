@@ -18,6 +18,7 @@
  */
 
 #include "subsystems/linux/syscall_internal.h"
+#include "subsystems/linux/syscall_pipe.h"
 
 #include "proc/process.h"
 #include "fs/fat32.h"
@@ -159,6 +160,17 @@ i64 DoClose(u64 fd)
     {
         return kEBADF;
     }
+    // Drop the per-pool ref before zeroing the LinuxFd. Pipe
+    // ends only release one half — the other end's LinuxFd
+    // slot keeps its own ref. Eventfd has a single end.
+    const u8 state = p->linux_fds[fd].state;
+    const u32 idx = p->linux_fds[fd].first_cluster;
+    if (state == 3)
+        PipeReleaseRead(idx);
+    else if (state == 4)
+        PipeReleaseWrite(idx);
+    else if (state == 5)
+        EventfdRelease(idx);
     p->linux_fds[fd].state = 0;
     p->linux_fds[fd].first_cluster = 0;
     p->linux_fds[fd].size = 0;

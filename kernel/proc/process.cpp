@@ -142,6 +142,27 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
         p->win32_threads[i].task = nullptr;
         p->win32_threads[i].user_stack_va = 0;
     }
+    // Win32 foreign-thread table — every slot starts free.
+    // Populated by NtOpenThread (SYS_THREAD_OPEN), drained by
+    // NtClose's by-range dispatch.
+    for (u32 i = 0; i < Process::kWin32ForeignThreadCap; ++i)
+    {
+        p->win32_foreign_threads[i].in_use = false;
+        for (u32 j = 0; j < sizeof(p->win32_foreign_threads[i]._pad); ++j)
+            p->win32_foreign_threads[i]._pad[j] = 0;
+        p->win32_foreign_threads[i].task = nullptr;
+        p->win32_foreign_threads[i].owner = nullptr;
+    }
+    // Win32 section handle table — every slot starts free.
+    // Populated by NtCreateSection (SYS_SECTION_CREATE), drained
+    // by NtClose's by-range dispatch.
+    for (u32 i = 0; i < Process::kWin32SectionCap; ++i)
+    {
+        p->win32_section_handles[i].in_use = false;
+        for (u32 j = 0; j < sizeof(p->win32_section_handles[i]._pad); ++j)
+            p->win32_section_handles[i]._pad[j] = 0;
+        p->win32_section_handles[i].pool_index = 0;
+    }
     // Win32 semaphore table — every slot starts free.
     for (u32 i = 0; i < Process::kWin32SemaphoreCap; ++i)
     {
@@ -363,6 +384,10 @@ const char* CapName(Cap c)
         return "FsWrite";
     case kCapSpawnThread:
         return "SpawnThread";
+    case kCapNet:
+        return "Net";
+    case kCapInput:
+        return "Input";
     case kCapCount:
         return "<sentinel>";
     }
@@ -527,6 +552,8 @@ void ProcessSelfTest()
         Expect(!CapSetHas(empty, kCapFsWrite), "empty has no FsWrite");
         Expect(!CapSetHas(empty, kCapDebug), "empty has no Debug");
         Expect(!CapSetHas(empty, kCapSpawnThread), "empty has no SpawnThread");
+        Expect(!CapSetHas(empty, kCapNet), "empty has no Net");
+        Expect(!CapSetHas(empty, kCapInput), "empty has no Input");
     }
     {
         constexpr CapSet trusted = CapSetTrusted();
@@ -536,6 +563,8 @@ void ProcessSelfTest()
         Expect(CapSetHas(trusted, kCapFsWrite), "trusted has FsWrite");
         Expect(CapSetHas(trusted, kCapDebug), "trusted has Debug");
         Expect(CapSetHas(trusted, kCapSpawnThread), "trusted has SpawnThread");
+        Expect(CapSetHas(trusted, kCapNet), "trusted has Net");
+        Expect(CapSetHas(trusted, kCapInput), "trusted has Input");
     }
 
     // ----- Boundary cases on the cap enum -----
@@ -574,6 +603,8 @@ void ProcessSelfTest()
     Expect(StrEq(CapName(kCapDebug), "Debug"), "CapName(Debug)");
     Expect(StrEq(CapName(kCapFsWrite), "FsWrite"), "CapName(FsWrite)");
     Expect(StrEq(CapName(kCapSpawnThread), "SpawnThread"), "CapName(SpawnThread)");
+    Expect(StrEq(CapName(kCapNet), "Net"), "CapName(Net)");
+    Expect(StrEq(CapName(kCapInput), "Input"), "CapName(Input)");
     Expect(StrEq(CapName(kCapCount), "<sentinel>"), "CapName(kCapCount) == <sentinel>");
 
     // Catches "added an enum value, forgot the switch arm" — every

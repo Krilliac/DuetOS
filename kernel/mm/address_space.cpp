@@ -428,6 +428,172 @@ bool AddressSpaceUnmapUserPage(AddressSpace* as, u64 virt)
     return true;
 }
 
+bool AddressSpaceMapBorrowedPage(AddressSpace* as, u64 virt, PhysAddr frame, u64 flags)
+{
+    if (as == nullptr)
+    {
+        PanicAs("AddressSpaceMapBorrowedPage with null AS", virt);
+    }
+    if ((virt & 0xFFF) != 0)
+    {
+        PanicAs("AddressSpaceMapBorrowedPage: unaligned virt", virt);
+    }
+    if ((frame & 0xFFF) != 0)
+    {
+        PanicAs("AddressSpaceMapBorrowedPage: unaligned phys", frame);
+    }
+    constexpr u64 kUserMax = 0x00007FFFFFFFFFFFULL;
+    if (virt > kUserMax)
+    {
+        PanicAs("AddressSpaceMapBorrowedPage: virt outside canonical low half", virt);
+    }
+    if ((flags & kPageUser) == 0)
+    {
+        PanicAs("AddressSpaceMapBorrowedPage: flags missing kPageUser", flags);
+    }
+    if ((flags & kPageWritable) != 0 && (flags & kPageNoExecute) == 0)
+    {
+        PanicAs("AddressSpaceMapBorrowedPage: W^X violation", flags);
+    }
+    if ((flags & kPageGlobal) != 0)
+    {
+        PanicAs("AddressSpaceMapBorrowedPage: kPageGlobal on user page", flags);
+    }
+    u64* pte = WalkToPteIn(as->pml4_virt, virt, /*create=*/true);
+    if (*pte & kPagePresent)
+    {
+        return false;
+    }
+    *pte = (frame & kAddrMask) | (flags | kPagePresent);
+    if (AddressSpaceCurrent() == as)
+    {
+        Invlpg(virt);
+    }
+    return true;
+}
+
+PhysAddr AddressSpaceProbePte(const AddressSpace* as, u64 virt)
+{
+    if (as == nullptr)
+        return kNullFrame;
+    if ((virt & 0xFFF) != 0)
+        PanicAs("AddressSpaceProbePte: unaligned virt", virt);
+    u64* pte = WalkToPteIn(as->pml4_virt, virt, /*create=*/false);
+    if (pte == nullptr || (*pte & kPagePresent) == 0)
+        return kNullFrame;
+    return *pte & kAddrMask;
+}
+
+u64 AddressSpaceProbePteRaw(const AddressSpace* as, u64 virt)
+{
+    if (as == nullptr)
+        return 0;
+    if ((virt & 0xFFF) != 0)
+        PanicAs("AddressSpaceProbePteRaw: unaligned virt", virt);
+    u64* pte = WalkToPteIn(as->pml4_virt, virt, /*create=*/false);
+    if (pte == nullptr || (*pte & kPagePresent) == 0)
+        return 0;
+    return *pte;
+}
+
+AddressSpace* AddressSpaceFork(const AddressSpace* parent)
+{
+    if (parent == nullptr)
+        return nullptr;
+    AddressSpace* child = AddressSpaceCreate(parent->frame_budget);
+    if (child == nullptr)
+        return nullptr;
+    for (u8 i = 0; i < parent->region_count; ++i)
+    {
+        const u64 va = parent->regions[i].vaddr;
+        const PhysAddr parent_frame = parent->regions[i].frame;
+        const u64 parent_pte = AddressSpaceProbePteRaw(parent, va);
+        if (parent_pte == 0)
+            continue; // region table out of sync with PTEs; skip
+        // Extract flags: mask out the address bits, keep the
+        // protection / present / user / NX flags.
+        const u64 flags = parent_pte & ~kAddrMask;
+        const PhysAddr child_frame = AllocateFrame();
+        if (child_frame == kNullFrame)
+        {
+            AddressSpaceRelease(child);
+            return nullptr;
+        }
+        // Copy page contents through the direct-map alias.
+        const u8* src = static_cast<const u8*>(PhysToVirt(parent_frame));
+        u8* dst = static_cast<u8*>(PhysToVirt(child_frame));
+        for (u64 j = 0; j < kPageSize; ++j)
+            dst[j] = src[j];
+        AddressSpaceMapUserPage(child, va, child_frame, flags);
+    }
+    return child;
+}
+
+void AddressSpaceClearUserMappings(AddressSpace* as)
+{
+    if (as == nullptr)
+        return;
+    // Walk the regions table backward — popping from the tail
+    // costs O(n) cumulative instead of O(n²) since each
+    // UnmapUserPage's linear scan finds the entry at index 0.
+    while (as->region_count > 0)
+    {
+        const u64 va = as->regions[as->region_count - 1].vaddr;
+        // UnmapUserPage decrements region_count + frees the
+        // backing frame for us. Don't predecrement here.
+        (void)AddressSpaceUnmapUserPage(as, va);
+    }
+}
+
+bool AddressSpaceProtectUserPage(AddressSpace* as, u64 virt, u64 new_flags)
+{
+    if (as == nullptr)
+        return false;
+    if ((virt & 0xFFF) != 0)
+        PanicAs("AddressSpaceProtectUserPage: unaligned virt", virt);
+    constexpr u64 kUserMax = 0x00007FFFFFFFFFFFULL;
+    if (virt > kUserMax)
+        PanicAs("AddressSpaceProtectUserPage: virt outside canonical low half", virt);
+    if ((new_flags & kPageUser) == 0)
+        PanicAs("AddressSpaceProtectUserPage: flags missing kPageUser", new_flags);
+    if ((new_flags & kPageWritable) != 0 && (new_flags & kPageNoExecute) == 0)
+        PanicAs("AddressSpaceProtectUserPage: W^X violation", new_flags);
+    if ((new_flags & kPageGlobal) != 0)
+        PanicAs("AddressSpaceProtectUserPage: kPageGlobal on user page", new_flags);
+
+    u64* pte = WalkToPteIn(as->pml4_virt, virt, /*create=*/false);
+    if (pte == nullptr || (*pte & kPagePresent) == 0)
+        return false;
+    const u64 frame = *pte & kAddrMask;
+    *pte = frame | (new_flags | kPagePresent);
+    if (AddressSpaceCurrent() == as)
+        Invlpg(virt);
+    return true;
+}
+
+bool AddressSpaceUnmapBorrowedPage(AddressSpace* as, u64 virt)
+{
+    if (as == nullptr)
+    {
+        return false;
+    }
+    if ((virt & 0xFFF) != 0)
+    {
+        PanicAs("AddressSpaceUnmapBorrowedPage: unaligned virt", virt);
+    }
+    u64* pte = WalkToPteIn(as->pml4_virt, virt, /*create=*/false);
+    if (pte == nullptr || (*pte & kPagePresent) == 0)
+    {
+        return false;
+    }
+    *pte = 0;
+    if (AddressSpaceCurrent() == as)
+    {
+        Invlpg(virt);
+    }
+    return true;
+}
+
 void AddressSpaceActivate(AddressSpace* as)
 {
     cpu::PerCpu* p = cpu::CurrentCpu();

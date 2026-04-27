@@ -83,6 +83,17 @@ each reachable from two entry ABIs (native and Win32). See
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full picture,
 including how `ws2_32!send` reaches the e1000 transmit ring.
 
+> **Subsystem isolation rule.** Win32 and Linux are *facades for
+> executing PE/ELF binaries*. They never drive DuetOS. Every effect a
+> guest binary has on the system goes through the same kernel-mediated,
+> capability-gated syscall a native DuetOS program does. Auth, the
+> capability set, the scheduler, address-space ownership, and FS
+> mediation are kernel-owned and not reachable past the syscall
+> boundary. NT/Linux thunks translate ABI shapes; they do not extend
+> the kernel's authority. See [`CLAUDE.md`](CLAUDE.md#subsystem-isolation-do-not-violate)
+> for the full rule set and `.claude/knowledge/subsystem-isolation-decision-v0.md`
+> for the audit checklist.
+
 ---
 
 ## Build + run

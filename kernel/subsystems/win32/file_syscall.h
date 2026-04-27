@@ -34,5 +34,7 @@ void DoFileSeek(arch::TrapFrame* frame);
 void DoFileFstat(arch::TrapFrame* frame);
 void DoFileWrite(arch::TrapFrame* frame);
 void DoFileCreate(arch::TrapFrame* frame);
+void DoFileUnlink(arch::TrapFrame* frame);
+void DoFileRename(arch::TrapFrame* frame);
 
 } // namespace duetos::subsystems::win32

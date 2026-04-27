@@ -129,6 +129,7 @@
 #include "subsystems/win32/custom_selftest.h"
 #include "subsystems/win32/gdi_objects.h"
 #include "subsystems/win32/nt_coverage.h"
+#include "subsystems/win32/registry.h"
 #include "loader/dll_loader.h"
 #include "shell/shell.h"
 #include "syscall/syscall.h"
@@ -324,6 +325,9 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     SerialWrite("[boot] Exercising process / capability helpers.\n");
     duetos::core::ProcessSelfTest();
+
+    SerialWrite("[boot] Exercising kernel registry helpers.\n");
+    duetos::subsystems::win32::registry::RegistrySelfTest();
 
     SerialWrite("[boot] Seeding kernel entropy pool.\n");
     duetos::core::RandomInit();

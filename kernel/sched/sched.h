@@ -7,6 +7,11 @@ namespace duetos::mm
 struct AddressSpace; // forward decl; defined in kernel/mm/address_space.h
 }
 
+namespace duetos::arch
+{
+struct TrapFrame; // forward decl; defined in kernel/arch/x86_64/traps.h
+}
+
 namespace duetos::core
 {
 struct Process; // forward decl; defined in kernel/proc/process.h
@@ -95,6 +100,35 @@ Task* SchedCreateUser(TaskEntry entry, void* arg, const char* name, core::Proces
 /// kernel-only tasks (workers, reaper, idle). Used by syscall
 /// handlers via `core::CurrentProcess()` to cap-check.
 core::Process* TaskProcess(Task* t);
+
+/// Find the first live `core::Process*` with `pid == target_pid`.
+/// Walks every queue (running, normal-runqueue, idle-runqueue,
+/// sleep-queue, zombies) under arch::Cli to keep the lists stable
+/// during the scan. Returns nullptr if no task with that PID is
+/// alive — including the case where the task exists but is a
+/// kernel-only task (`process == nullptr`).
+///
+/// Does NOT bump the returned Process's refcount. Callers that
+/// need to hold the reference past the immediate scan window
+/// must call `core::ProcessRetain` while the scheduler is still
+/// CLI-quiet — typically inside the same syscall handler.
+///
+/// Used by SYS_PROCESS_OPEN (NtOpenProcess) to translate a PID
+/// into a Process pointer the kernel can hand back as a handle.
+core::Process* SchedFindProcessByPid(u64 target_pid);
+
+/// Find the first live Task with `id == target_tid`. Walks the
+/// same lists as SchedFindProcessByPid (running + run-normal +
+/// run-idle + sleep) under arch::Cli. Skips zombies — a
+/// dead task has no live Process to retain, so the cross-
+/// process thread-handle opener would have nothing to refcount.
+/// Returns nullptr if no live task matches.
+///
+/// Caller is responsible for capturing the task's owning
+/// Process* and calling `core::ProcessRetain` on it before the
+/// CLI window closes — otherwise a concurrent reaper could
+/// free the Task struct under the caller's hand.
+Task* SchedFindTaskByTid(u64 target_tid);
 
 /// True iff the task's state is Dead. Used by syscalls that track
 /// thread-handle signaling (WaitForSingleObject on a CreateThread
@@ -297,6 +331,64 @@ const char* KillResultName(KillResult r);
 /// gets a Blocked result code and should try again after the
 /// task is woken by something else.
 KillResult SchedKillByPid(u64 pid);
+
+/// Walk every live task and signal each one whose owning Process
+/// matches `target` for termination. Used by NtTerminateProcess
+/// on a foreign target to bring the entire process down (every
+/// thread in the task group). Returns the count of tasks that
+/// were signalled — 0 if `target` has no live tasks. Skips
+/// AlreadyDead / Blocked / Protected tasks (those statuses are
+/// the same per-task contract as SchedKillByPid).
+u64 SchedKillByProcess(core::Process* target);
+
+/// Locate the outermost user→kernel TrapFrame on a target task's
+/// kernel stack. Returns nullptr when the task has no kernel
+/// stack (boot / idle), never entered user mode (cs.rpl != 3),
+/// or has a corrupted stack_size. Used by NtGetContextThread /
+/// NtSetContextThread to read or rewrite the user RIP / RSP /
+/// GP regs that an iretq from this frame will restore.
+///
+/// Caller must ensure the target is suspended (not actively
+/// pushing onto its own kernel stack); SchedSuspendTask is the
+/// supported way. The single-CPU assumption is the same as the
+/// rest of the cross-task control APIs — the caller is the
+/// running task; the target is by construction not running.
+arch::TrapFrame* SchedFindUserTrapFrame(Task* t);
+
+/// Result of a cross-task suspend / resume request. NotFound is
+/// reserved for caller-side handle resolution failures (the
+/// scheduler itself never sees a null target on the success
+/// path); the kernel APIs return Signaled for the typical
+/// "found, count adjusted" case and AlreadyDead when the target
+/// is in the zombie list.
+enum class SuspendResult : u8
+{
+    Signaled = 0,
+    NotFound = 1,
+    AlreadyDead = 2,
+};
+
+/// Increment a target's NT-style suspend count. Returns the
+/// previous count (0 = was running normally) via `prev_count_out`.
+/// Self-suspend bumps the count and lets the caller continue
+/// running — the parking happens at the next yield. For other
+/// targets the suspend is lazy: a Ready task gets re-parked the
+/// next time Schedule() pops it; a Sleeping / Blocked task gets
+/// re-parked at wake time. Target == nullptr returns NotFound.
+///
+/// Single-CPU correctness: the suspender is the running task by
+/// definition, so the target is by construction NOT running, and
+/// no IPI is needed. SMP follow-up will need an IPI to evict a
+/// target running on another core.
+SuspendResult SchedSuspendTask(Task* target, u32* prev_count_out);
+
+/// Decrement a target's suspend count. Returns the previous
+/// count via `prev_count_out`. When the count reaches zero AND
+/// the target was parked on the suspended list, it gets pushed
+/// back onto the runqueue Ready. A resume with prior count == 0
+/// is a no-op (matching NT — NtResumeThread returns 0 and stays
+/// at 0 in that case).
+SuspendResult SchedResumeTask(Task* target, u32* prev_count_out);
 
 /// Start the dead-task reaper kernel thread. Run once after SchedInit +
 /// the keyboard/driver init pass. The reaper sleeps on a WaitQueue;

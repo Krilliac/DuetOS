@@ -86,6 +86,30 @@ u64 FstatForProcess(::duetos::core::Process* proc, u64 handle, u64* out_size);
 /// free slot is a no-op. Always returns 0.
 u64 CloseForProcess(::duetos::core::Process* proc, u64 handle);
 
+/// Look up a path's metadata without opening a handle. Used by
+/// NtQueryAttributesFile / NtQueryFullAttributesFile and the
+/// Linux stat() family. Fills `out_size` (file size in bytes)
+/// and `out_is_dir` (true when the entry is a directory). v0
+/// honours fat32 paths only ("/disk/<idx>/<rest>"); other paths
+/// return false. Returns false if the path doesn't exist or
+/// the volume isn't mounted.
+bool StatPathForProcess(::duetos::core::Process* proc, const char* path, u64* out_size, bool* out_is_dir);
+
+/// Remove a file at `path`. v0 honours fat32 paths only
+/// ("/disk/<idx>/<rest>"); everything else returns false
+/// (ramfs is read-only, tmpfs has its own shell-only surface).
+/// `proc` is accepted for API symmetry but unused — fat32 has
+/// no per-process credentials. Returns true on success.
+bool UnlinkForProcess(::duetos::core::Process* proc, const char* path);
+
+/// Rename a file from `src` to `dst`. Both paths must live on
+/// the same fat32 volume (cross-volume rename returns false in
+/// v0 — needs a streaming copy). Implementation is copy-then-
+/// delete: non-atomic with respect to power loss. `dst` must
+/// not already exist (no implicit overwrite). Returns true on
+/// success.
+bool RenameForProcess(::duetos::core::Process* proc, const char* src, const char* dst);
+
 /// Boot self-test. Routes /disk/0/HELLO.TXT (the FAT32 image
 /// builder seeds this file with known content) through
 /// OpenForProcess + ReadForProcess + CloseForProcess, verifies

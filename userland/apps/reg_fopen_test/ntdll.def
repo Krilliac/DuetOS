@@ -1,0 +1,6 @@
+LIBRARY ntdll.dll
+
+EXPORTS
+    NtOpenKey
+    NtQueryValueKey
+    NtClose

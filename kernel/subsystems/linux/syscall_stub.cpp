@@ -26,6 +26,7 @@
 
 #include "subsystems/linux/syscall_internal.h"
 
+#include "mm/paging.h"
 #include "proc/process.h"
 
 namespace duetos::subsystems::linux::internal
@@ -36,17 +37,7 @@ namespace duetos::subsystems::linux::internal
 // gracefully. -ENOSYS would also work but Linux returns -ENFILE
 // when the system pipe-fd table is exhausted, which is a closer
 // fit for "we don't have any pipes to give you."
-i64 DoPipe(u64 user_fds)
-{
-    (void)user_fds;
-    return kENFILE;
-}
-i64 DoPipe2(u64 user_fds, u64 flags)
-{
-    (void)user_fds;
-    (void)flags;
-    return kENFILE;
-}
+// DoPipe / DoPipe2 moved to syscall_pipe.cpp.
 
 // wait4(pid, status, options, rusage) / waitid(idtype, id, info,
 // options, rusage). v0 has no fork → no children → -ECHILD is the
@@ -69,15 +60,10 @@ i64 DoWaitid(u64 idtype, u64 id, u64 user_info, u64 options, u64 user_rusage)
     return kECHILD;
 }
 
-// eventfd / eventfd2 / timerfd_* / signalfd / signalfd4:
-// no eventfd / timerfd / signalfd machinery yet. -ENOSYS so
-// libraries fall back to their pipe-based polyfill.
-i64 DoEventfd(u64 initval, u64 flags)
-{
-    (void)initval;
-    (void)flags;
-    return kENOSYS;
-}
+// eventfd / eventfd2 moved to syscall_pipe.cpp.
+// timerfd_* / signalfd / signalfd4 stay here: no timerfd /
+// signalfd machinery yet. -ENOSYS so libraries fall back to
+// their pipe-based polyfill (now that pipes work).
 i64 DoTimerfdCreate(u64 clockid, u64 flags)
 {
     (void)clockid;
@@ -183,26 +169,64 @@ i64 DoInotifyInit1(u64 flags)
 // Compat / tracing / mount / link / rename stub group.
 // ---------------------------------------------------------------
 
-// ptrace(request, pid, addr, data): process tracing. v0 has no
-// ptrace machinery. -EPERM is the "tracing not permitted" return
-// Linux gives to unprivileged callers.
+// ptrace(request, pid, addr, data): process tracing. v0 cap-
+// gates on kCapDebug — same gate that protects cross-AS VM
+// access. Without the cap, return -EPERM (the "tracing not
+// permitted" answer Linux gives unprivileged callers). With
+// the cap, requests that would do real work return -ENOSYS
+// because the ptrace state machine itself doesn't exist;
+// callers needing cross-process introspection use the
+// kernel-side SYS_PROCESS_VM_READ / WRITE / SYS_THREAD_GET /
+// SET_CONTEXT directly via the native ABI today.
 i64 DoPtrace(u64 request, u64 pid, u64 addr, u64 data)
 {
+    core::Process* proc = core::CurrentProcess();
+    if (proc == nullptr || !core::CapSetHas(proc->caps, core::kCapDebug))
+    {
+        core::RecordSandboxDenial(core::kCapDebug);
+        return kEPERM;
+    }
     (void)request;
     (void)pid;
     (void)addr;
     (void)data;
-    return kEPERM;
+    // Cap-cleared callers reach the real engine, which doesn't
+    // exist yet — return -ENOSYS so the caller can distinguish
+    // "you're not allowed" (-EPERM, no cap) from "kernel doesn't
+    // have it" (-ENOSYS).
+    return kENOSYS;
 }
 
-// syslog(type, bufp, len): kernel log read/control. Every type
-// is a no-op success in v0 — kernel log lives on COM1, not in a
-// user-readable ring buffer. Returns 0 for "nothing written".
+// syslog(type, bufp, len): kernel log read/control. v0 has no
+// user-readable klog ring (kernel log lives on COM1 only), so:
+//   - SYSLOG_ACTION_READ_ALL (3): writes a canned single-line
+//     banner so a `dmesg` shaped probe gets non-empty output.
+//   - SYSLOG_ACTION_READ_CLEAR (4): same as READ_ALL.
+//   - SYSLOG_ACTION_SIZE_BUFFER (10): returns the banner len.
+//   - SYSLOG_ACTION_SIZE_UNREAD (9): returns 0 (already drained).
+//   - everything else: 0 (success no-op — close, open, console
+//     enable/disable, set-loglevel; all are nominal on v0).
 i64 DoSyslog(u64 type, u64 bufp, u64 len)
 {
-    (void)type;
-    (void)bufp;
-    (void)len;
+    static const char k_banner[] = "<6>DuetOS klog: serial-only on COM1; user-readable ring TBD\n";
+    constexpr u64 kBannerLen = sizeof(k_banner) - 1;
+    constexpr u64 kSyslogReadAll = 3;
+    constexpr u64 kSyslogReadClear = 4;
+    constexpr u64 kSyslogSizeUnread = 9;
+    constexpr u64 kSyslogSizeBuffer = 10;
+    if (type == kSyslogReadAll || type == kSyslogReadClear)
+    {
+        if (bufp == 0)
+            return kEFAULT;
+        const u64 to_copy = (len < kBannerLen) ? len : kBannerLen;
+        if (!mm::CopyToUser(reinterpret_cast<void*>(bufp), k_banner, to_copy))
+            return kEFAULT;
+        return static_cast<i64>(to_copy);
+    }
+    if (type == kSyslogSizeBuffer)
+        return static_cast<i64>(kBannerLen);
+    if (type == kSyslogSizeUnread)
+        return 0;
     return 0;
 }
 
@@ -251,16 +275,11 @@ i64 DoSyncfs(u64 fd)
     return 0;
 }
 
-// rename(old, new) / link(old, new) / symlink(target, linkpath):
-// no rename / link primitive in fat32 v0. -ENOSYS tells musl
-// "this operation is not available on this kernel" — clearer
-// than an -EPERM "you're not allowed" lie.
-i64 DoRename(u64 old_path, u64 new_path)
-{
-    (void)old_path;
-    (void)new_path;
-    return kENOSYS;
-}
+// DoRename moved to syscall_fs_mut.cpp (now wires through to
+// fat32 Fat32RenameAtPath via the §11.9 mutation primitives).
+//
+// link / symlink stay -ENOSYS — fat32 has no hardlink concept
+// and v0 has no symlink storage. Sub-GAPs in §11.9.
 i64 DoLink(u64 old_path, u64 new_path)
 {
     (void)old_path;

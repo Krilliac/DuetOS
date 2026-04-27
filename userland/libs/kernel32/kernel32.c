@@ -1580,30 +1580,78 @@ __declspec(dllexport) BOOL CopyFileW(const wchar_t16* src, const wchar_t16* dst,
     return 0;
 }
 
-__declspec(dllexport) BOOL MoveFileA(const char* src, const char* dst)
-{
-    (void)src;
-    (void)dst;
-    return 0;
-}
-
-__declspec(dllexport) BOOL MoveFileW(const wchar_t16* src, const wchar_t16* dst)
-{
-    (void)src;
-    (void)dst;
-    return 0;
-}
-
 __declspec(dllexport) BOOL DeleteFileA(const char* path)
 {
-    (void)path;
-    return 0;
+    if (path == (const char*)0)
+        return 0;
+    int len = 0;
+    while (path[len] != '\0' && len < 255)
+        ++len;
+    long long status;
+    __asm__ volatile("int $0x80"
+                     : "=a"(status)
+                     : "a"((long long)143), /* SYS_FILE_UNLINK */
+                       "D"((long long)path), "S"((long long)len)
+                     : "memory");
+    return status == 0 ? 1 : 0;
 }
 
 __declspec(dllexport) BOOL DeleteFileW(const wchar_t16* path)
 {
-    (void)path;
-    return 0;
+    if (path == (const wchar_t16*)0)
+        return 0;
+    char ascii[256];
+    int i = 0;
+    while (i < 255 && path[i] != 0)
+    {
+        ascii[i] = (char)(path[i] & 0xFF);
+        ++i;
+    }
+    ascii[i] = '\0';
+    return DeleteFileA(ascii);
+}
+
+__declspec(dllexport) BOOL MoveFileA(const char* src, const char* dst)
+{
+    if (src == (const char*)0 || dst == (const char*)0)
+        return 0;
+    int slen = 0;
+    while (src[slen] != '\0' && slen < 255)
+        ++slen;
+    int dlen = 0;
+    while (dst[dlen] != '\0' && dlen < 255)
+        ++dlen;
+    long long status;
+    register long long r10 __asm__("r10") = (long long)dlen;
+    __asm__ volatile("int $0x80"
+                     : "=a"(status)
+                     : "a"((long long)144), /* SYS_FILE_RENAME */
+                       "D"((long long)src), "S"((long long)slen), "d"((long long)dst), "r"(r10)
+                     : "memory");
+    return status == 0 ? 1 : 0;
+}
+
+__declspec(dllexport) BOOL MoveFileW(const wchar_t16* src, const wchar_t16* dst)
+{
+    if (src == (const wchar_t16*)0 || dst == (const wchar_t16*)0)
+        return 0;
+    char ascii_src[256];
+    char ascii_dst[256];
+    int i = 0;
+    while (i < 255 && src[i] != 0)
+    {
+        ascii_src[i] = (char)(src[i] & 0xFF);
+        ++i;
+    }
+    ascii_src[i] = '\0';
+    int j = 0;
+    while (j < 255 && dst[j] != 0)
+    {
+        ascii_dst[j] = (char)(dst[j] & 0xFF);
+        ++j;
+    }
+    ascii_dst[j] = '\0';
+    return MoveFileA(ascii_src, ascii_dst);
 }
 
 __declspec(dllexport) DWORD GetFileAttributesA(const char* path)

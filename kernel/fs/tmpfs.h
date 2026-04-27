@@ -60,6 +60,17 @@ bool TmpFsRead(const char* name, const char** bytes_out, u32* len_out);
 /// Remove a file by name. Returns true if it was present.
 bool TmpFsUnlink(const char* name);
 
+/// Rename a file from `src` to `dst`. v0 semantics:
+///   - `src` must exist; otherwise returns false.
+///   - `dst` must NOT exist (no implicit overwrite); otherwise
+///     returns false.
+///   - Both names must pass the same validation TmpFsTouch
+///     uses (length, charset).
+/// Atomic with respect to other tmpfs callers because tmpfs
+/// has no concurrent IRQ-side mutators — the slot's name field
+/// flips in one store. Returns true on success.
+bool TmpFsRename(const char* src, const char* dst);
+
 /// Enumerate the live slots in allocation order. The callback
 /// is invoked for each slot that currently holds a file,
 /// receiving (name, length, cookie). Names are guaranteed NUL-

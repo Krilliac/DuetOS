@@ -1,6 +1,8 @@
 #include "subsystems/win32/file_syscall.h"
 
 #include "subsystems/win32/custom.h"
+#include "subsystems/win32/registry.h"
+#include "subsystems/win32/section.h"
 
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
@@ -175,6 +177,78 @@ void DoFileClose(arch::TrapFrame* frame)
         e.signaled = false;
         arch::Sti();
     }
+    else if (handle >= core::Process::kWin32RegistryBase &&
+             handle < core::Process::kWin32RegistryBase + core::Process::kWin32RegistryCap)
+    {
+        // Registry handles share the CloseHandle / NtClose entry
+        // point with file / mutex / event handles. The registry
+        // module owns the per-slot bookkeeping, so route through
+        // it rather than poking the table directly here.
+        (void)registry::ReleaseHandleForCurrentProcess(handle);
+    }
+    else if (handle >= core::Process::kWin32ProcessBase &&
+             handle < core::Process::kWin32ProcessBase + core::Process::kWin32ProcessCap)
+    {
+        // Process handles drop the retained reference on the target.
+        // ProcessRelease may free the target if no other holder
+        // remains — which is the right Windows-shape semantics:
+        // closing the last handle to a dead process actually
+        // reaps it.
+        const u64 slot = handle - core::Process::kWin32ProcessBase;
+        core::Process::Win32ProcessHandle& h = proc->win32_proc_handles[slot];
+        if (h.in_use)
+        {
+            core::Process* target = h.target;
+            h.in_use = false;
+            h.target = nullptr;
+            core::ProcessRelease(target);
+        }
+    }
+    else if (handle >= core::Process::kWin32ForeignThreadBase &&
+             handle < core::Process::kWin32ForeignThreadBase + core::Process::kWin32ForeignThreadCap)
+    {
+        // Cross-process thread handles (NtOpenThread results)
+        // pin a Task* + a refcount on its owning Process. Drop
+        // the refcount on close. The Task* itself isn't reaped
+        // here — that's the scheduler's job once the task hits
+        // Dead and the reaper picks it up. Closing the last
+        // foreign-thread handle on a dead task's owner Process
+        // simply lets the Process get reaped per the same
+        // contract as the win32_proc_handles arm above.
+        const u64 slot = handle - core::Process::kWin32ForeignThreadBase;
+        core::Process::Win32ForeignThreadHandle& h = proc->win32_foreign_threads[slot];
+        if (h.in_use)
+        {
+            core::Process* owner = h.owner;
+            h.in_use = false;
+            h.task = nullptr;
+            h.owner = nullptr;
+            if (owner != nullptr)
+            {
+                core::ProcessRelease(owner);
+            }
+        }
+    }
+    else if (handle >= core::Process::kWin32SectionBase &&
+             handle < core::Process::kWin32SectionBase + core::Process::kWin32SectionCap)
+    {
+        // Section handles drop one section-pool refcount per
+        // close. The pool entry frees its frames + slot only
+        // when refcount hits 0 (every handle AND every active
+        // mapping has gone away). If the caller forgot to
+        // unmap the view, the mapping refcount stays — closing
+        // the handle won't tear the view down. v0 GAP for
+        // ranks-of-leaks tests.
+        const u64 slot = handle - core::Process::kWin32SectionBase;
+        core::Process::Win32SectionHandle& h = proc->win32_section_handles[slot];
+        if (h.in_use)
+        {
+            const u32 pool_idx = h.pool_index;
+            h.in_use = false;
+            h.pool_index = 0;
+            section::SectionRelease(pool_idx);
+        }
+    }
     frame->rax = 0;
 }
 
@@ -335,6 +409,94 @@ void DoFileCreate(arch::TrapFrame* frame)
     }
 
     frame->rax = fs::routing::CreateForProcess(proc, kpath, init_len > 0 ? s_init_stage : nullptr, init_len);
+}
+
+void DoFileUnlink(arch::TrapFrame* frame)
+{
+    // DeleteFileW. rdi = const char* user_path, rsi = path_cap.
+    // rax = 0 on success, NTSTATUS on failure.
+    KDBG_2V(Win32Thunk, "win32/file", "DoFileUnlink", "user_path", frame->rdi, "path_cap", frame->rsi);
+    constexpr u64 kStatusSuccess = 0;
+    constexpr u64 kStatusInvalidParameter = 0xC000000DULL;
+    constexpr u64 kStatusAccessDenied = 0xC0000022ULL;
+    constexpr u64 kStatusObjectNameNotFound = 0xC0000034ULL;
+    core::Process* proc = core::CurrentProcess();
+    if (proc == nullptr || !core::CapSetHas(proc->caps, core::kCapFsWrite))
+    {
+        core::RecordSandboxDenial(core::kCapFsWrite);
+        frame->rax = kStatusAccessDenied;
+        return;
+    }
+    u64 path_cap = frame->rsi;
+    if (path_cap == 0 || path_cap >= core::kSyscallPathMax)
+    {
+        frame->rax = kStatusInvalidParameter;
+        return;
+    }
+    char kpath[core::kSyscallPathMax];
+    if (!mm::CopyFromUser(kpath, reinterpret_cast<const void*>(frame->rdi), path_cap))
+    {
+        frame->rax = kStatusInvalidParameter;
+        return;
+    }
+    kpath[path_cap] = '\0';
+    kpath[core::kSyscallPathMax - 1] = '\0';
+    if (!fs::routing::UnlinkForProcess(proc, kpath))
+    {
+        frame->rax = kStatusObjectNameNotFound;
+        return;
+    }
+    frame->rax = kStatusSuccess;
+}
+
+void DoFileRename(arch::TrapFrame* frame)
+{
+    // MoveFileW. rdi = src_path, rsi = src_cap,
+    // rdx = dst_path, r10 = dst_cap.
+    KDBG_2V(Win32Thunk, "win32/file", "DoFileRename", "user_src", frame->rdi, "user_dst", frame->rdx);
+    constexpr u64 kStatusSuccess = 0;
+    constexpr u64 kStatusInvalidParameter = 0xC000000DULL;
+    constexpr u64 kStatusAccessDenied = 0xC0000022ULL;
+    constexpr u64 kStatusObjectNameCollision = 0xC0000035ULL;
+    core::Process* proc = core::CurrentProcess();
+    if (proc == nullptr || !core::CapSetHas(proc->caps, core::kCapFsWrite))
+    {
+        core::RecordSandboxDenial(core::kCapFsWrite);
+        frame->rax = kStatusAccessDenied;
+        return;
+    }
+    u64 src_cap = frame->rsi;
+    u64 dst_cap = frame->r10;
+    if (src_cap == 0 || dst_cap == 0 || src_cap >= core::kSyscallPathMax || dst_cap >= core::kSyscallPathMax)
+    {
+        frame->rax = kStatusInvalidParameter;
+        return;
+    }
+    char ksrc[core::kSyscallPathMax];
+    char kdst[core::kSyscallPathMax];
+    if (!mm::CopyFromUser(ksrc, reinterpret_cast<const void*>(frame->rdi), src_cap))
+    {
+        frame->rax = kStatusInvalidParameter;
+        return;
+    }
+    if (!mm::CopyFromUser(kdst, reinterpret_cast<const void*>(frame->rdx), dst_cap))
+    {
+        frame->rax = kStatusInvalidParameter;
+        return;
+    }
+    ksrc[src_cap] = '\0';
+    ksrc[core::kSyscallPathMax - 1] = '\0';
+    kdst[dst_cap] = '\0';
+    kdst[core::kSyscallPathMax - 1] = '\0';
+    if (!fs::routing::RenameForProcess(proc, ksrc, kdst))
+    {
+        // Rename failure could be missing src OR existing dst;
+        // we don't disambiguate in v0. Pick the more common
+        // misuse (collision) for a simple caller signal.
+        frame->rax = kStatusObjectNameCollision;
+        return;
+    }
+    frame->rax = kStatusSuccess;
 }
 
 } // namespace duetos::subsystems::win32

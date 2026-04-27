@@ -54,9 +54,14 @@
 #include "debug/bp_syscall.h"
 #include "debug/breakpoints.h"
 #include "debug/probes.h"
+#include "fs/fat32.h"
+#include "fs/file_route.h"
+#include "loader/elf_loader.h"
+#include "mm/kheap.h"
 #include "fs/vfs.h"
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
+#include "mm/page.h"
 #include "mm/paging.h"
 #include "sched/sched.h"
 #include "subsystems/graphics/graphics.h"
@@ -69,9 +74,11 @@
 #include "subsystems/win32/thread_syscall.h"
 #include "subsystems/win32/mutex_syscall.h"
 #include "subsystems/win32/event_syscall.h"
+#include "subsystems/win32/section.h"
 #include "subsystems/win32/window_syscall.h"
 #include "subsystems/win32/heap.h"
 #include "subsystems/win32/custom.h"
+#include "subsystems/win32/registry.h"
 #include "log/klog.h"
 #include "diag/cleanroom_trace.h"
 #include "diag/log_names.h"
@@ -103,6 +110,202 @@ constexpr u8 kSyscallVector = 0x80;
 // the truncation — standard POSIX write() semantics.
 constexpr u64 kSyscallWriteMax = 256;
 // kSyscallPathMax now in syscall.h
+
+// Cross-AS VM transfer direction. Read = target → caller buffer;
+// Write = caller buffer → target.
+enum class CrossAsDir
+{
+    Read,
+    Write,
+};
+
+// Walk `target`'s region table page-by-page, copy `len` bytes
+// between `target_va` (in `target->as`) and `caller_buf` (in the
+// active AS — i.e. the syscall caller's). Stops at the first
+// unmapped target page; the count actually moved is returned via
+// `out_bytes`. Returns true iff the full requested length was
+// transferred.
+//
+// Both buffers may straddle page boundaries on either side. The
+// loop chunks against the smaller of "remaining target page" /
+// "remaining caller-side run we want to copy" (we always copy
+// the same byte count on both sides — only the page geometry
+// matters for the chunking).
+//
+// Caller-side I/O still goes through CopyFromUser / CopyToUser,
+// so SMAP gating + range validation happen there for free.
+bool CrossAsTransfer(Process* target, u64 target_va, void* caller_buf, u64 len, CrossAsDir dir, u64* out_bytes)
+{
+    *out_bytes = 0;
+    if (target == nullptr || target->as == nullptr || len == 0)
+    {
+        return len == 0; // zero-length is trivially full success
+    }
+
+    u64 remaining = len;
+    u64 t_va = target_va;
+    auto* c_byte = static_cast<u8*>(caller_buf);
+
+    while (remaining > 0)
+    {
+        const u64 page_va = t_va & ~0xFFFULL;
+        const u64 page_off = t_va - page_va;
+        const u64 chunk = (remaining < (mm::kPageSize - page_off)) ? remaining : (mm::kPageSize - page_off);
+
+        const mm::PhysAddr frame = mm::AddressSpaceLookupUserFrame(target->as, page_va);
+        if (frame == mm::kNullFrame)
+        {
+            return false; // partial copy; caller surfaces what we did move
+        }
+        auto* direct = static_cast<u8*>(mm::PhysToVirt(frame)) + page_off;
+
+        if (dir == CrossAsDir::Read)
+        {
+            // target → caller. Copy from kernel direct map into a
+            // bounce, then CopyToUser into the caller's buffer.
+            // Use a small on-stack bounce so we don't have to
+            // think about CopyToUser tolerating the source being
+            // a kernel direct-map alias of a user frame (it does,
+            // but the bounce keeps the contract obvious).
+            u8 bounce[256];
+            u64 moved = 0;
+            while (moved < chunk)
+            {
+                const u64 step = (chunk - moved < sizeof(bounce)) ? (chunk - moved) : sizeof(bounce);
+                for (u64 b = 0; b < step; ++b)
+                {
+                    bounce[b] = direct[moved + b];
+                }
+                if (!mm::CopyToUser(c_byte + moved, bounce, step))
+                {
+                    return false;
+                }
+                moved += step;
+            }
+        }
+        else
+        {
+            // caller → target. CopyFromUser into a bounce, write
+            // through the kernel direct map into the target frame.
+            u8 bounce[256];
+            u64 moved = 0;
+            while (moved < chunk)
+            {
+                const u64 step = (chunk - moved < sizeof(bounce)) ? (chunk - moved) : sizeof(bounce);
+                if (!mm::CopyFromUser(bounce, c_byte + moved, step))
+                {
+                    return false;
+                }
+                for (u64 b = 0; b < step; ++b)
+                {
+                    direct[moved + b] = bounce[b];
+                }
+                moved += step;
+            }
+        }
+
+        *out_bytes += chunk;
+        t_va += chunk;
+        c_byte += chunk;
+        remaining -= chunk;
+    }
+    return true;
+}
+
+// Resolve a Win32 thread handle to the kernel Task it refers to.
+// Accepts BOTH ranges: local thread handles (kWin32ThreadBase +
+// idx, returned by CreateThread / SYS_THREAD_CREATE — these
+// back the caller's own threads) and foreign thread handles
+// (kWin32ForeignThreadBase + idx, returned by NtOpenThread —
+// these back a target task in a different process, with the
+// target's owning Process refcount-pinned by the open call).
+// Returns nullptr on any out-of-range / not-in-use handle.
+//
+// Used by SYS_THREAD_SUSPEND / RESUME / GET_CONTEXT /
+// SET_CONTEXT — every cross-task thread op flows through here.
+sched::Task* LookupThreadHandle(Process* caller, u64 handle)
+{
+    if (caller == nullptr)
+    {
+        return nullptr;
+    }
+    if (handle >= Process::kWin32ThreadBase && handle < Process::kWin32ThreadBase + Process::kWin32ThreadCap)
+    {
+        const u64 idx = handle - Process::kWin32ThreadBase;
+        if (caller->win32_threads[idx].in_use)
+        {
+            return caller->win32_threads[idx].task;
+        }
+        return nullptr;
+    }
+    if (handle >= Process::kWin32ForeignThreadBase &&
+        handle < Process::kWin32ForeignThreadBase + Process::kWin32ForeignThreadCap)
+    {
+        const u64 idx = handle - Process::kWin32ForeignThreadBase;
+        if (caller->win32_foreign_threads[idx].in_use)
+        {
+            return caller->win32_foreign_threads[idx].task;
+        }
+        return nullptr;
+    }
+    return nullptr;
+}
+
+// Resolve a Win32 process handle (kWin32ProcessBase + idx) on
+// `caller` to the `Process*` it refers to. Returns nullptr on
+// any out-of-range / not-in-use handle.
+Process* LookupProcessHandle(Process* caller, u64 handle)
+{
+    if (caller == nullptr || handle < Process::kWin32ProcessBase)
+    {
+        return nullptr;
+    }
+    const u64 idx = handle - Process::kWin32ProcessBase;
+    if (idx >= Process::kWin32ProcessCap)
+    {
+        return nullptr;
+    }
+    if (!caller->win32_proc_handles[idx].in_use)
+    {
+        return nullptr;
+    }
+    return caller->win32_proc_handles[idx].target;
+}
+
+// Win32 NTSTATUS values used by the cross-process VM family.
+// Matches winnt.h conventions for the few statuses we surface.
+constexpr u64 kStatusSuccess = 0;
+constexpr u64 kStatusAccessViolation = 0xC0000005ULL;
+constexpr u64 kStatusInvalidHandle = 0xC0000008ULL;
+constexpr u64 kStatusInvalidParameter = 0xC000000DULL;
+constexpr u64 kStatusAccessDenied = 0xC0000022ULL;
+constexpr u64 kStatusNotImplemented = 0xC0000002ULL;
+constexpr u64 kStatusNoMemory = 0xC0000017ULL;
+constexpr u64 kStatusConflictingAddresses = 0xC0000018ULL;
+
+// Layout the SYS_PROCESS_VM_QUERY caller buffer must conform to.
+// Byte-compatible with the prefix of MEMORY_BASIC_INFORMATION
+// that v0 actually populates. Each field is the same size and
+// offset as the matching Win32 field; the trailing bytes (Type,
+// AllocationProtect alignment) are reserved for future growth.
+struct Win32MemoryBasicInfo
+{
+    u64 base_address;       // 4 KiB-aligned page start
+    u64 allocation_base;    // == base_address in v0
+    u32 allocation_protect; // PAGE_READWRITE for any mapped page
+    u32 _pad0;
+    u64 region_size; // 4096 in v0 (no coalescing)
+    u32 state;       // MEM_COMMIT / MEM_FREE
+    u32 protect;     // == allocation_protect
+    u32 type;        // MEM_PRIVATE
+    u32 _pad1;
+};
+static_assert(sizeof(Win32MemoryBasicInfo) == 48, "Win32MemoryBasicInfo layout");
+
+constexpr u32 kMemCommit = 0x1000;
+constexpr u32 kMemFree = 0x10000;
+constexpr u32 kMemPrivate = 0x20000;
+constexpr u32 kPageReadWrite = 0x04;
 
 // Pretty-printer for boot diagnostics — the Warn path for an
 // unrecognised syscall number should be noisy enough to catch during
@@ -307,6 +510,155 @@ void SyscallDispatch(arch::TrapFrame* frame)
         subsystems::win32::custom::DoCustom(frame);
         return;
 
+    case SYS_REGISTRY:
+        subsystems::win32::registry::DoRegistry(frame);
+        return;
+
+    case SYS_PROCESS_OPEN:
+    {
+        // NtOpenProcess: PID in rdi → kernel handle in rax (or 0 on
+        // any failure). Cap-gated on kCapDebug — see syscall.h. The
+        // refcount held on the target keeps it alive past its task's
+        // exit; CloseHandle drops it.
+        Process* caller = CurrentProcess();
+        if (caller == nullptr || !CapSetHas(caller->caps, kCapDebug))
+        {
+            RecordSandboxDenial(kCapDebug);
+            if (caller != nullptr && ShouldLogDenial(caller->sandbox_denials))
+            {
+                arch::SerialWrite("[sys] denied syscall=SYS_PROCESS_OPEN pid=");
+                arch::SerialWriteHex(caller->pid);
+                arch::SerialWrite(" cap=Debug denial_idx=");
+                arch::SerialWriteHex(caller->sandbox_denials);
+                arch::SerialWrite("\n");
+            }
+            frame->rax = 0;
+            return;
+        }
+        const u64 target_pid = frame->rdi;
+        Process* target = sched::SchedFindProcessByPid(target_pid);
+        if (target == nullptr)
+        {
+            frame->rax = 0;
+            return;
+        }
+        u64 idx = Process::kWin32ProcessCap;
+        for (u64 i = 0; i < Process::kWin32ProcessCap; ++i)
+        {
+            if (!caller->win32_proc_handles[i].in_use)
+            {
+                idx = i;
+                break;
+            }
+        }
+        if (idx == Process::kWin32ProcessCap)
+        {
+            frame->rax = 0; // table full
+            return;
+        }
+        ProcessRetain(target);
+        caller->win32_proc_handles[idx].in_use = true;
+        caller->win32_proc_handles[idx].target = target;
+        frame->rax = Process::kWin32ProcessBase + idx;
+        return;
+    }
+
+    case SYS_PROCESS_VM_READ:
+    case SYS_PROCESS_VM_WRITE:
+    {
+        Process* caller = CurrentProcess();
+        if (caller == nullptr || !CapSetHas(caller->caps, kCapDebug))
+        {
+            RecordSandboxDenial(kCapDebug);
+            frame->rax = kStatusAccessDenied;
+            return;
+        }
+        Process* target = LookupProcessHandle(caller, frame->rdi);
+        if (target == nullptr)
+        {
+            frame->rax = kStatusInvalidHandle;
+            return;
+        }
+        const u64 target_va = frame->rsi;
+        void* caller_buf = reinterpret_cast<void*>(frame->rdx);
+        u64 len = frame->r10;
+        const u64 bytes_out_va = frame->r8;
+
+        if (len > kSyscallProcessVmMax)
+        {
+            len = kSyscallProcessVmMax;
+        }
+
+        u64 moved = 0;
+        const bool ok = CrossAsTransfer(target, target_va, caller_buf, len,
+                                        (num == SYS_PROCESS_VM_READ) ? CrossAsDir::Read : CrossAsDir::Write, &moved);
+
+        if (bytes_out_va != 0)
+        {
+            // Best-effort writeback. If the caller's out-pointer
+            // is bogus the transfer status still carries the
+            // truth in rax — we don't escalate a writeback miss
+            // into a different NTSTATUS.
+            mm::CopyToUser(reinterpret_cast<void*>(bytes_out_va), &moved, sizeof(moved));
+        }
+
+        frame->rax = ok ? kStatusSuccess : kStatusAccessViolation;
+        return;
+    }
+
+    case SYS_PROCESS_VM_QUERY:
+    {
+        Process* caller = CurrentProcess();
+        if (caller == nullptr || !CapSetHas(caller->caps, kCapDebug))
+        {
+            RecordSandboxDenial(kCapDebug);
+            frame->rax = kStatusAccessDenied;
+            return;
+        }
+        Process* target = LookupProcessHandle(caller, frame->rdi);
+        if (target == nullptr)
+        {
+            frame->rax = kStatusInvalidHandle;
+            return;
+        }
+        const u64 probe_va = frame->rsi;
+        void* out_user = reinterpret_cast<void*>(frame->rdx);
+        if (out_user == nullptr)
+        {
+            frame->rax = kStatusInvalidParameter;
+            return;
+        }
+
+        const u64 page_va = probe_va & ~0xFFFULL;
+        const mm::PhysAddr frame_pa = mm::AddressSpaceLookupUserFrame(target->as, page_va);
+        Win32MemoryBasicInfo info{};
+        info.base_address = page_va;
+        info.allocation_base = page_va;
+        info.region_size = mm::kPageSize;
+        if (frame_pa != mm::kNullFrame)
+        {
+            info.state = kMemCommit;
+            info.allocation_protect = kPageReadWrite;
+            info.protect = kPageReadWrite;
+            info.type = kMemPrivate;
+        }
+        else
+        {
+            info.state = kMemFree;
+            info.allocation_protect = 0;
+            info.protect = 0;
+            info.type = 0;
+        }
+
+        if (!mm::CopyToUser(out_user, &info, sizeof(info)))
+        {
+            frame->rax = kStatusAccessViolation;
+            return;
+        }
+        frame->rax = kStatusSuccess;
+        return;
+    }
+
     // Heap family: handlers live in subsystems/win32/heap_syscall.cpp.
     case SYS_HEAP_ALLOC:
         subsystems::win32::DoHeapAlloc(frame);
@@ -411,6 +763,615 @@ void SyscallDispatch(arch::TrapFrame* frame)
     case SYS_FILE_CLOSE:
         subsystems::win32::DoFileClose(frame);
         return;
+    case SYS_FILE_UNLINK:
+        subsystems::win32::DoFileUnlink(frame);
+        return;
+    case SYS_FILE_RENAME:
+        subsystems::win32::DoFileRename(frame);
+        return;
+
+    case SYS_PROCESS_TERMINATE:
+    {
+        // rdi = ProcessHandle (NtCurrentProcess() = -1 for self),
+        // rsi = exit status. Self path bypasses the handle table
+        // and goes straight to SchedExit; foreign path requires
+        // kCapDebug.
+        Process* caller = CurrentProcess();
+        if (caller == nullptr)
+        {
+            frame->rax = kStatusInvalidHandle;
+            return;
+        }
+        const u64 handle = frame->rdi;
+        constexpr u64 kCurrentProcess = static_cast<u64>(-1);
+        if (handle == kCurrentProcess)
+        {
+            // Self-terminate. Whole-process semantics: kill every
+            // sibling task in this Process before the calling
+            // task exits, so a multi-threaded PE that calls
+            // NtTerminateProcess(NtCurrentProcess()) actually
+            // brings the whole task group down rather than just
+            // the caller.
+            (void)sched::SchedKillByProcess(caller);
+            sched::SchedExit();
+        }
+        if (!CapSetHas(caller->caps, kCapDebug))
+        {
+            RecordSandboxDenial(kCapDebug);
+            frame->rax = kStatusAccessDenied;
+            return;
+        }
+        Process* target = LookupProcessHandle(caller, handle);
+        if (target == nullptr)
+        {
+            frame->rax = kStatusInvalidHandle;
+            return;
+        }
+        const u64 killed = sched::SchedKillByProcess(target);
+        frame->rax = killed; // count of tasks signalled
+        return;
+    }
+
+    case SYS_THREAD_TERMINATE:
+    {
+        Process* caller = CurrentProcess();
+        if (caller == nullptr)
+        {
+            frame->rax = kStatusInvalidHandle;
+            return;
+        }
+        const u64 handle = frame->rdi;
+        constexpr u64 kCurrentThread = static_cast<u64>(-2);
+        if (handle == kCurrentThread)
+        {
+            // Self-thread-exit. Same SchedExit path as SYS_EXIT.
+            sched::SchedExit();
+        }
+        // LookupThreadHandle handles BOTH local thread handles
+        // (caller->win32_threads[]) and foreign-process thread
+        // handles (caller->win32_foreign_threads[] populated by
+        // NtOpenThread). The foreign-handle case requires
+        // kCapDebug — same gate NtOpenThread itself imposes.
+        if (handle >= Process::kWin32ForeignThreadBase &&
+            handle < Process::kWin32ForeignThreadBase + Process::kWin32ForeignThreadCap)
+        {
+            if (!CapSetHas(caller->caps, kCapDebug))
+            {
+                RecordSandboxDenial(kCapDebug);
+                frame->rax = kStatusAccessDenied;
+                return;
+            }
+        }
+        sched::Task* t = LookupThreadHandle(caller, handle);
+        if (t == nullptr)
+        {
+            frame->rax = kStatusInvalidHandle;
+            return;
+        }
+        const sched::KillResult r = sched::SchedKillByPid(sched::TaskId(t));
+        if (r == sched::KillResult::Signaled || r == sched::KillResult::Blocked)
+        {
+            frame->rax = kStatusSuccess;
+            return;
+        }
+        if (r == sched::KillResult::AlreadyDead)
+        {
+            frame->rax = kStatusSuccess; // Windows treats already-dead as success
+            return;
+        }
+        frame->rax = kStatusInvalidHandle;
+        return;
+    }
+
+    case SYS_PROCESS_QUERY_INFO:
+    {
+        // rdi = ProcessHandle (-1 for self), rsi = info class
+        // (only ProcessBasicInformation = 0 honoured in v0),
+        // rdx = user buffer, r10 = buffer cap,
+        // r8 = user u32* return_length.
+        Process* caller = CurrentProcess();
+        if (caller == nullptr)
+        {
+            frame->rax = kStatusInvalidHandle;
+            return;
+        }
+        const u64 handle = frame->rdi;
+        const u64 info_class = frame->rsi;
+        const u64 user_buf = frame->rdx;
+        const u64 buf_cap = frame->r10;
+        const u64 user_retlen = frame->r8;
+        constexpr u64 kCurrentProcess = static_cast<u64>(-1);
+        constexpr u64 kProcessBasicInformation = 0;
+        Process* target = caller;
+        if (handle != kCurrentProcess)
+        {
+            if (!CapSetHas(caller->caps, kCapDebug))
+            {
+                RecordSandboxDenial(kCapDebug);
+                frame->rax = kStatusAccessDenied;
+                return;
+            }
+            target = LookupProcessHandle(caller, handle);
+            if (target == nullptr)
+            {
+                frame->rax = kStatusInvalidHandle;
+                return;
+            }
+        }
+        if (info_class != kProcessBasicInformation)
+        {
+            frame->rax = kStatusNotImplemented;
+            return;
+        }
+        // PROCESS_BASIC_INFORMATION layout (48 bytes on x64):
+        //   PVOID  Reserved1;        // ExitStatus
+        //   PVOID  PebBaseAddress;
+        //   PVOID  Reserved2[2];     // AffinityMask, BasePriority
+        //   ULONG_PTR UniqueProcessId;
+        //   ULONG_PTR Reserved3;     // InheritedFromUniqueProcessId
+        struct ProcessBasicInfo
+        {
+            u64 exit_status;
+            u64 peb_base;
+            u64 affinity_mask;
+            u64 base_priority;
+            u64 unique_pid;
+            u64 inherited_from_pid;
+        };
+        ProcessBasicInfo info{};
+        info.exit_status = 0; // STILL_ACTIVE if running, 0 here
+        info.peb_base = target->user_gs_base;
+        info.affinity_mask = 1; // single-CPU v0
+        info.base_priority = 8; // NORMAL_PRIORITY_CLASS midpoint
+        info.unique_pid = target->pid;
+        info.inherited_from_pid = 0;
+        if (buf_cap < sizeof(info))
+        {
+            constexpr u64 kStatusInfoLengthMismatch = 0xC0000004ULL;
+            if (user_retlen != 0)
+            {
+                u32 needed = sizeof(info);
+                (void)mm::CopyToUser(reinterpret_cast<void*>(user_retlen), &needed, sizeof(needed));
+            }
+            frame->rax = kStatusInfoLengthMismatch;
+            return;
+        }
+        if (!mm::CopyToUser(reinterpret_cast<void*>(user_buf), &info, sizeof(info)))
+        {
+            frame->rax = kStatusAccessViolation;
+            return;
+        }
+        if (user_retlen != 0)
+        {
+            u32 written = sizeof(info);
+            (void)mm::CopyToUser(reinterpret_cast<void*>(user_retlen), &written, sizeof(written));
+        }
+        frame->rax = kStatusSuccess;
+        return;
+    }
+
+    case SYS_VM_ALLOCATE:
+    {
+        // NtAllocateVirtualMemory(handle, *base, *size, type, protect, *out_base).
+        // Self path needs no cap; foreign requires kCapDebug.
+        Process* caller = CurrentProcess();
+        if (caller == nullptr)
+        {
+            frame->rax = kStatusInvalidHandle;
+            return;
+        }
+        const u64 handle = frame->rdi;
+        const u64 hint_va = frame->rsi;
+        const u64 size = frame->rdx;
+        const u32 protect = static_cast<u32>(frame->r8);
+        const u64 user_out = frame->r9;
+        if (size == 0 || size > 0x40000000ULL /* 1 GiB cap */)
+        {
+            frame->rax = kStatusInvalidParameter;
+            return;
+        }
+        constexpr u64 kCurrentProcess = static_cast<u64>(-1);
+        Process* target = caller;
+        if (handle != kCurrentProcess)
+        {
+            if (!CapSetHas(caller->caps, kCapDebug))
+            {
+                RecordSandboxDenial(kCapDebug);
+                frame->rax = kStatusAccessDenied;
+                return;
+            }
+            target = LookupProcessHandle(caller, handle);
+            if (target == nullptr)
+            {
+                frame->rax = kStatusInvalidHandle;
+                return;
+            }
+        }
+        // Translate PAGE_* protect to AS PTE flags. W^X is silently
+        // enforced — RWX/EXECUTE_WRITECOPY downgrade to RW + NX.
+        u64 pte_flags = mm::kPageUser | mm::kPageNoExecute;
+        switch (protect & 0xFF)
+        {
+        case 0x01: // PAGE_NOACCESS — best effort: RO + NX
+        case 0x02: // PAGE_READONLY
+            break;
+        case 0x04: // PAGE_READWRITE
+        case 0x08: // PAGE_WRITECOPY (no COW; treat as RW)
+        case 0x40: // PAGE_EXECUTE_READWRITE — W^X downgrade
+        case 0x80: // PAGE_EXECUTE_WRITECOPY — same
+            pte_flags |= mm::kPageWritable;
+            break;
+        case 0x10: // PAGE_EXECUTE
+        case 0x20: // PAGE_EXECUTE_READ
+            pte_flags &= ~mm::kPageNoExecute;
+            break;
+        default:
+            frame->rax = kStatusInvalidParameter;
+            return;
+        }
+        const u64 page_size = mm::kPageSize;
+        const u64 aligned_size = (size + page_size - 1) & ~(page_size - 1);
+        u64 base_va = hint_va;
+        if (base_va == 0)
+        {
+            base_va = target->linux_mmap_cursor;
+        }
+        else
+        {
+            base_va &= ~(page_size - 1);
+        }
+        for (u64 va = base_va; va < base_va + aligned_size; va += page_size)
+        {
+            const mm::PhysAddr fp = mm::AllocateFrame();
+            if (fp == mm::kNullFrame)
+            {
+                frame->rax = kStatusNoMemory;
+                return;
+            }
+            // Zero-fill — Windows guarantees zero-init.
+            u8* kva = static_cast<u8*>(mm::PhysToVirt(fp));
+            for (u64 i = 0; i < page_size; ++i)
+                kva[i] = 0;
+            mm::AddressSpaceMapUserPage(target->as, va, fp, pte_flags | mm::kPagePresent);
+        }
+        if (hint_va == 0)
+            target->linux_mmap_cursor = base_va + aligned_size;
+        if (user_out != 0)
+        {
+            (void)mm::CopyToUser(reinterpret_cast<void*>(user_out), &base_va, sizeof(base_va));
+        }
+        frame->rax = kStatusSuccess;
+        return;
+    }
+
+    case SYS_VM_FREE:
+    {
+        // NtFreeVirtualMemory(handle, base, size, FreeType). v0
+        // always releases (MEM_RELEASE / MEM_DECOMMIT collapse
+        // onto the same unmap-and-free path).
+        Process* caller = CurrentProcess();
+        if (caller == nullptr)
+        {
+            frame->rax = kStatusInvalidHandle;
+            return;
+        }
+        const u64 handle = frame->rdi;
+        const u64 base = frame->rsi;
+        const u64 size = frame->rdx;
+        constexpr u64 kCurrentProcess = static_cast<u64>(-1);
+        Process* target = caller;
+        if (handle != kCurrentProcess)
+        {
+            if (!CapSetHas(caller->caps, kCapDebug))
+            {
+                RecordSandboxDenial(kCapDebug);
+                frame->rax = kStatusAccessDenied;
+                return;
+            }
+            target = LookupProcessHandle(caller, handle);
+            if (target == nullptr)
+            {
+                frame->rax = kStatusInvalidHandle;
+                return;
+            }
+        }
+        const u64 page_size = mm::kPageSize;
+        const u64 aligned_size = (size + page_size - 1) & ~(page_size - 1);
+        const u64 aligned_base = base & ~(page_size - 1);
+        for (u64 va = aligned_base; va < aligned_base + aligned_size; va += page_size)
+        {
+            (void)mm::AddressSpaceUnmapUserPage(target->as, va);
+        }
+        frame->rax = kStatusSuccess;
+        return;
+    }
+
+    case SYS_VM_PROTECT:
+    {
+        // NtProtectVirtualMemory(handle, base, size, new_protect, *old_protect).
+        Process* caller = CurrentProcess();
+        if (caller == nullptr)
+        {
+            frame->rax = kStatusInvalidHandle;
+            return;
+        }
+        const u64 handle = frame->rdi;
+        const u64 base = frame->rsi;
+        const u64 size = frame->rdx;
+        const u32 protect = static_cast<u32>(frame->r10);
+        const u64 user_old = frame->r8;
+        constexpr u64 kCurrentProcess = static_cast<u64>(-1);
+        Process* target = caller;
+        if (handle != kCurrentProcess)
+        {
+            if (!CapSetHas(caller->caps, kCapDebug))
+            {
+                RecordSandboxDenial(kCapDebug);
+                frame->rax = kStatusAccessDenied;
+                return;
+            }
+            target = LookupProcessHandle(caller, handle);
+            if (target == nullptr)
+            {
+                frame->rax = kStatusInvalidHandle;
+                return;
+            }
+        }
+        u64 pte_flags = mm::kPageUser | mm::kPageNoExecute;
+        switch (protect & 0xFF)
+        {
+        case 0x01:
+        case 0x02:
+            break;
+        case 0x04:
+        case 0x08:
+        case 0x40:
+        case 0x80:
+            pte_flags |= mm::kPageWritable;
+            break;
+        case 0x10:
+        case 0x20:
+            pte_flags &= ~mm::kPageNoExecute;
+            break;
+        default:
+            frame->rax = kStatusInvalidParameter;
+            return;
+        }
+        const u64 page_size = mm::kPageSize;
+        const u64 aligned_size = (size + page_size - 1) & ~(page_size - 1);
+        const u64 aligned_base = base & ~(page_size - 1);
+        u32 first_old_protect = 0x04; // best-effort: PAGE_READWRITE
+        for (u64 va = aligned_base; va < aligned_base + aligned_size; va += page_size)
+        {
+            (void)mm::AddressSpaceProtectUserPage(target->as, va, pte_flags | mm::kPagePresent);
+        }
+        if (user_old != 0)
+        {
+            (void)mm::CopyToUser(reinterpret_cast<void*>(user_old), &first_old_protect, sizeof(first_old_protect));
+        }
+        frame->rax = kStatusSuccess;
+        return;
+    }
+
+    case SYS_EXECVE:
+    {
+        // In-place image replacement. Read the file, tear down
+        // the AS user mappings, ElfLoad into the same AS, reset
+        // the trap frame's RIP/RSP. The syscall return path's
+        // iretq picks up the new RIP via the trap frame, so we
+        // don't return into the caller — we return into the new
+        // program.
+        Process* caller = CurrentProcess();
+        if (caller == nullptr)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        if (!CapSetHas(caller->caps, kCapFsRead) || !CapSetHas(caller->caps, kCapSpawnThread))
+        {
+            RecordSandboxDenial(kCapFsRead);
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        const u64 user_path = frame->rdi;
+        const u64 path_len = frame->rsi;
+        if (path_len == 0 || path_len >= 256)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        char kpath[256];
+        if (!mm::CopyFromUser(kpath, reinterpret_cast<const void*>(user_path), path_len))
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        kpath[path_len] = '\0';
+
+        // Path lookup — fat32-only (matches §11.18 stat). Parse
+        // /disk/<idx>/<rest> inline (the routing-side helper is
+        // file-local in fs/file_route.cpp).
+        u32 disk_idx = 0;
+        const char* leaf = nullptr;
+        {
+            constexpr const char* kPrefix = "/disk/";
+            constexpr u32 kPrefixLen = 6;
+            if (path_len <= kPrefixLen)
+            {
+                frame->rax = static_cast<u64>(-1);
+                return;
+            }
+            for (u32 i = 0; i < kPrefixLen; ++i)
+            {
+                if (kpath[i] != kPrefix[i])
+                {
+                    frame->rax = static_cast<u64>(-1);
+                    return;
+                }
+            }
+            u32 i = kPrefixLen;
+            while (i < path_len && kpath[i] >= '0' && kpath[i] <= '9')
+            {
+                disk_idx = disk_idx * 10 + static_cast<u32>(kpath[i] - '0');
+                ++i;
+            }
+            if (i == kPrefixLen || i >= path_len || kpath[i] != '/')
+            {
+                frame->rax = static_cast<u64>(-1);
+                return;
+            }
+            leaf = &kpath[i + 1];
+        }
+        const fs::fat32::Volume* v = fs::fat32::Fat32Volume(disk_idx);
+        if (v == nullptr)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        fs::fat32::DirEntry e;
+        if (!fs::fat32::Fat32LookupPath(v, leaf, &e))
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        // Cap the image at 1 MiB to bound the kheap allocation.
+        // Bigger binaries need a streaming load; sub-GAP.
+        constexpr u64 kExecveMaxImage = 1ULL << 20;
+        if (e.size_bytes == 0 || e.size_bytes > kExecveMaxImage)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        u8* buf = static_cast<u8*>(mm::KMalloc(e.size_bytes));
+        if (buf == nullptr)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        const i64 nread = fs::fat32::Fat32ReadFile(v, &e, buf, e.size_bytes);
+        if (nread != static_cast<i64>(e.size_bytes))
+        {
+            mm::KFree(buf);
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+
+        // Tear down the AS user mappings, then ElfLoad into the
+        // same AS. Past this point any failure is fatal — the
+        // caller's address space is already gone.
+        mm::AddressSpaceClearUserMappings(caller->as);
+        const core::ElfLoadResult r = core::ElfLoad(buf, e.size_bytes, caller->as);
+        mm::KFree(buf);
+        if (!r.ok)
+        {
+            // No way back — terminate the calling task.
+            arch::SerialWrite("[execve] ElfLoad failed; terminating task pid=");
+            arch::SerialWriteHex(caller->pid);
+            arch::SerialWrite("\n");
+            sched::SchedExit();
+        }
+
+        // Reset the trap frame so iretq lands at the new entry.
+        // Sanitise rflags (IF=1, no IOPL/TF/NT) + cs/ss to
+        // ring-3 selectors, same shape as §11.7's SetContext
+        // path. Argv/envp are ignored in v0 — static ELFs that
+        // don't read them work; sub-GAP for everyone else.
+        frame->rip = r.entry_va;
+        frame->rsp = r.stack_top;
+        frame->rax = 0;
+        frame->rbx = 0;
+        frame->rcx = 0;
+        frame->rdx = 0;
+        frame->rsi = 0;
+        frame->rdi = 0;
+        frame->rbp = 0;
+        frame->r8 = 0;
+        frame->r9 = 0;
+        frame->r10 = 0;
+        frame->r11 = 0;
+        frame->r12 = 0;
+        frame->r13 = 0;
+        frame->r14 = 0;
+        frame->r15 = 0;
+        // cs/ss/rflags from a known-good user state.
+        frame->cs = 0x2B;
+        frame->ss = 0x33;
+        frame->rflags = 0x202;
+        arch::SerialWrite("[execve] task pid=");
+        arch::SerialWriteHex(caller->pid);
+        arch::SerialWrite(" -> ");
+        arch::SerialWrite(kpath);
+        arch::SerialWrite(" entry=");
+        arch::SerialWriteHex(r.entry_va);
+        arch::SerialWrite(" rsp=");
+        arch::SerialWriteHex(r.stack_top);
+        arch::SerialWrite("\n");
+        return;
+    }
+
+    case SYS_FILE_QUERY_ATTRIBUTES:
+    {
+        // Path-based file stat. Wires through fs::routing's
+        // StatPathForProcess (fat32-only in v0).
+        const u64 user_path = frame->rdi;
+        const u64 path_len = frame->rsi;
+        const u64 user_out = frame->rdx;
+        const u64 buf_cap = frame->r10;
+        constexpr u64 kFileBasicInfoBytes = 56;
+        if (buf_cap < kFileBasicInfoBytes || user_out == 0)
+        {
+            frame->rax = kStatusInvalidParameter;
+            return;
+        }
+        if (path_len == 0 || path_len >= 256)
+        {
+            frame->rax = kStatusInvalidParameter;
+            return;
+        }
+        char kpath[256];
+        if (!mm::CopyFromUser(kpath, reinterpret_cast<const void*>(user_path), path_len))
+        {
+            frame->rax = kStatusAccessViolation;
+            return;
+        }
+        kpath[path_len] = '\0';
+        u64 size = 0;
+        bool is_dir = false;
+        Process* caller = CurrentProcess();
+        if (!fs::routing::StatPathForProcess(caller, kpath, &size, &is_dir))
+        {
+            constexpr u64 kStatusObjectNameNotFound = 0xC0000034ULL;
+            frame->rax = kStatusObjectNameNotFound;
+            return;
+        }
+        // Pack FILE_NETWORK_OPEN_INFORMATION (56 bytes):
+        //   [0..8)   CreationTime    — 0 (no metadata)
+        //   [8..16)  LastAccessTime  — 0
+        //   [16..24) LastWriteTime   — 0
+        //   [24..32) ChangeTime      — 0
+        //   [32..40) AllocationSize  — page-rounded size
+        //   [40..48) EndOfFile       — file size
+        //   [48..52) FileAttributes  — 0x10 directory, else 0x80 normal
+        //   [52..56) Reserved        — 0
+        u8 buf[kFileBasicInfoBytes];
+        for (u32 i = 0; i < kFileBasicInfoBytes; ++i)
+            buf[i] = 0;
+        const u64 alloc_size = (size + 4095) & ~4095ULL;
+        for (u32 i = 0; i < 8; ++i)
+            buf[32 + i] = static_cast<u8>((alloc_size >> (i * 8)) & 0xFF);
+        for (u32 i = 0; i < 8; ++i)
+            buf[40 + i] = static_cast<u8>((size >> (i * 8)) & 0xFF);
+        const u32 attrs = is_dir ? 0x10u : 0x80u;
+        for (u32 i = 0; i < 4; ++i)
+            buf[48 + i] = static_cast<u8>((attrs >> (i * 8)) & 0xFF);
+        if (!mm::CopyToUser(reinterpret_cast<void*>(user_out), buf, kFileBasicInfoBytes))
+        {
+            frame->rax = kStatusAccessViolation;
+            return;
+        }
+        frame->rax = kStatusSuccess;
+        return;
+    }
 
     case SYS_MUTEX_CREATE:
         subsystems::win32::DoMutexCreate(frame);
@@ -478,6 +1439,423 @@ void SyscallDispatch(arch::TrapFrame* frame)
     case SYS_THREAD_CREATE:
         subsystems::win32::DoThreadCreate(frame);
         return;
+
+    case SYS_SECTION_CREATE:
+    {
+        // NtCreateSection(MaximumSize, PageProtection): allocate
+        // a pagefile-backed section pool entry + frames + plant
+        // a handle in the calling Process. Caller can then
+        // NtMapViewOfSection it into self or a foreign target.
+        Process* caller = CurrentProcess();
+        if (caller == nullptr)
+        {
+            frame->rax = 0;
+            return;
+        }
+        const u64 size_bytes = frame->rdi;
+        const u32 page_protect = static_cast<u32>(frame->rsi);
+        const i32 pool_idx = subsystems::win32::section::SectionCreate(size_bytes, page_protect);
+        if (pool_idx < 0)
+        {
+            frame->rax = 0;
+            return;
+        }
+        u64 handle_idx = Process::kWin32SectionCap;
+        for (u64 i = 0; i < Process::kWin32SectionCap; ++i)
+        {
+            if (!caller->win32_section_handles[i].in_use)
+            {
+                handle_idx = i;
+                break;
+            }
+        }
+        if (handle_idx == Process::kWin32SectionCap)
+        {
+            // Section allocated but no handle slot; release it
+            // so we don't leak the frames + pool entry.
+            subsystems::win32::section::SectionRelease(static_cast<u32>(pool_idx));
+            frame->rax = 0;
+            return;
+        }
+        caller->win32_section_handles[handle_idx].in_use = true;
+        caller->win32_section_handles[handle_idx].pool_index = static_cast<u32>(pool_idx);
+        frame->rax = Process::kWin32SectionBase + handle_idx;
+        return;
+    }
+
+    case SYS_SECTION_MAP:
+    {
+        // NtMapViewOfSection(SectionHandle, ProcessHandle,
+        //   inout BaseAddress*, inout ViewSize*, ViewProtect)
+        // — install a borrowed-page view of `section` into
+        // either the caller's AS (process_handle == -1, the
+        // NtCurrentProcess pseudo-handle) or a foreign target's
+        // AS (cap-gated on kCapDebug).
+        Process* caller = CurrentProcess();
+        if (caller == nullptr)
+        {
+            frame->rax = kStatusInvalidHandle;
+            return;
+        }
+        const u64 section_handle = frame->rdi;
+        const u64 process_handle = frame->rsi;
+        const u64 base_user_ptr = frame->rdx;
+        const u64 size_user_ptr = frame->r10;
+        const u32 view_protect = static_cast<u32>(frame->r8);
+
+        const i32 pool_idx = subsystems::win32::section::LookupSectionHandle(caller, section_handle);
+        if (pool_idx < 0)
+        {
+            frame->rax = kStatusInvalidHandle;
+            return;
+        }
+
+        Process* target = caller;
+        constexpr u64 kCurrentProcess = static_cast<u64>(-1);
+        if (process_handle != kCurrentProcess)
+        {
+            if (!CapSetHas(caller->caps, kCapDebug))
+            {
+                RecordSandboxDenial(kCapDebug);
+                frame->rax = kStatusAccessDenied;
+                return;
+            }
+            target = LookupProcessHandle(caller, process_handle);
+            if (target == nullptr)
+            {
+                frame->rax = kStatusInvalidHandle;
+                return;
+            }
+        }
+
+        u64 hint_va = 0;
+        if (base_user_ptr != 0 &&
+            !mm::CopyFromUser(&hint_va, reinterpret_cast<const void*>(base_user_ptr), sizeof(hint_va)))
+        {
+            frame->rax = kStatusAccessViolation;
+            return;
+        }
+
+        // Pick a base VA. v0: caller-supplied hint must be
+        // page-aligned and non-overlapping; if 0 (or hint
+        // collides), bump-allocate from the calling process's
+        // mmap arena. Cross-process maps with hint == 0 use
+        // the TARGET's mmap cursor.
+        u64 base_va = (hint_va & ~0xFFFULL);
+        if (base_va == 0)
+        {
+            base_va = target->linux_mmap_cursor;
+        }
+
+        if (!subsystems::win32::section::SectionMap(static_cast<u32>(pool_idx), target->as, base_va, view_protect))
+        {
+            frame->rax = kStatusConflictingAddresses;
+            return;
+        }
+        subsystems::win32::section::SectionRetain(static_cast<u32>(pool_idx));
+
+        const u64 view_size = subsystems::win32::section::SectionViewSize(static_cast<u32>(pool_idx));
+        if (base_va == target->linux_mmap_cursor)
+        {
+            target->linux_mmap_cursor += view_size;
+        }
+
+        if (base_user_ptr != 0 && !mm::CopyToUser(reinterpret_cast<void*>(base_user_ptr), &base_va, sizeof(base_va)))
+        {
+            // Map installed but caller can't see the base —
+            // tear it down so we don't leak the view.
+            subsystems::win32::section::SectionUnmap(static_cast<u32>(pool_idx), target->as, base_va);
+            subsystems::win32::section::SectionRelease(static_cast<u32>(pool_idx));
+            frame->rax = kStatusAccessViolation;
+            return;
+        }
+        if (size_user_ptr != 0 &&
+            !mm::CopyToUser(reinterpret_cast<void*>(size_user_ptr), &view_size, sizeof(view_size)))
+        {
+            subsystems::win32::section::SectionUnmap(static_cast<u32>(pool_idx), target->as, base_va);
+            subsystems::win32::section::SectionRelease(static_cast<u32>(pool_idx));
+            frame->rax = kStatusAccessViolation;
+            return;
+        }
+        frame->rax = kStatusSuccess;
+        return;
+    }
+
+    case SYS_SECTION_UNMAP:
+    {
+        // NtUnmapViewOfSection(ProcessHandle, BaseAddress).
+        // v0 unmaps every section view that starts exactly at
+        // `base_va` in the target's AS — we don't track which
+        // section a given VA belongs to, so the unmap walks
+        // every live section pool entry and asks each one to
+        // unmap (the borrowed-PTE clear is idempotent on
+        // already-unmapped pages, and SectionUnmap returns
+        // false if any page was missing → we accept the first
+        // one whose every page WAS mapped).
+        Process* caller = CurrentProcess();
+        if (caller == nullptr)
+        {
+            frame->rax = kStatusInvalidHandle;
+            return;
+        }
+        const u64 process_handle = frame->rdi;
+        const u64 base_va = frame->rsi;
+        if ((base_va & 0xFFF) != 0)
+        {
+            frame->rax = kStatusInvalidParameter;
+            return;
+        }
+        Process* target = caller;
+        constexpr u64 kCurrentProcess = static_cast<u64>(-1);
+        if (process_handle != kCurrentProcess)
+        {
+            if (!CapSetHas(caller->caps, kCapDebug))
+            {
+                RecordSandboxDenial(kCapDebug);
+                frame->rax = kStatusAccessDenied;
+                return;
+            }
+            target = LookupProcessHandle(caller, process_handle);
+            if (target == nullptr)
+            {
+                frame->rax = kStatusInvalidHandle;
+                return;
+            }
+        }
+        const i32 hit = subsystems::win32::section::SectionUnmapAtVa(target->as, base_va);
+        if (hit < 0)
+        {
+            frame->rax = kStatusInvalidParameter;
+            return;
+        }
+        subsystems::win32::section::SectionRelease(static_cast<u32>(hit));
+        frame->rax = kStatusSuccess;
+        return;
+    }
+
+    case SYS_THREAD_OPEN:
+    {
+        // NtOpenThread: TID in rdi → kernel handle in rax (or 0
+        // on any failure). Cap-gated on kCapDebug — same threat
+        // class as NtOpenProcess, since the produced handle
+        // unlocks SUSPEND / RESUME / GET / SET_CONTEXT on a
+        // task in another process. Refuses kernel-only tasks
+        // (target->process == nullptr — those have no NT
+        // identity and no Process to refcount).
+        Process* caller = CurrentProcess();
+        if (caller == nullptr || !CapSetHas(caller->caps, kCapDebug))
+        {
+            if (caller != nullptr)
+            {
+                RecordSandboxDenial(kCapDebug);
+            }
+            frame->rax = 0;
+            return;
+        }
+        const u64 target_tid = frame->rdi;
+        sched::Task* target_task = sched::SchedFindTaskByTid(target_tid);
+        if (target_task == nullptr)
+        {
+            frame->rax = 0;
+            return;
+        }
+        Process* owner = sched::TaskProcess(target_task);
+        if (owner == nullptr)
+        {
+            frame->rax = 0;
+            return;
+        }
+        u64 idx = Process::kWin32ForeignThreadCap;
+        for (u64 i = 0; i < Process::kWin32ForeignThreadCap; ++i)
+        {
+            if (!caller->win32_foreign_threads[i].in_use)
+            {
+                idx = i;
+                break;
+            }
+        }
+        if (idx == Process::kWin32ForeignThreadCap)
+        {
+            frame->rax = 0; // table full
+            return;
+        }
+        ProcessRetain(owner);
+        caller->win32_foreign_threads[idx].in_use = true;
+        caller->win32_foreign_threads[idx].task = target_task;
+        caller->win32_foreign_threads[idx].owner = owner;
+        frame->rax = Process::kWin32ForeignThreadBase + idx;
+        return;
+    }
+
+    case SYS_THREAD_SUSPEND:
+    case SYS_THREAD_RESUME:
+    {
+        Process* caller = CurrentProcess();
+        sched::Task* target = LookupThreadHandle(caller, frame->rdi);
+        if (target == nullptr)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        u32 prev_count = 0;
+        const sched::SuspendResult rc = (num == SYS_THREAD_SUSPEND) ? sched::SchedSuspendTask(target, &prev_count)
+                                                                    : sched::SchedResumeTask(target, &prev_count);
+        if (rc != sched::SuspendResult::Signaled)
+        {
+            frame->rax = static_cast<u64>(-1);
+            return;
+        }
+        frame->rax = prev_count;
+        return;
+    }
+
+    case SYS_THREAD_GET_CONTEXT:
+    case SYS_THREAD_SET_CONTEXT:
+    {
+        // Cap-gate: same threat class as cross-AS VM ops.
+        Process* caller = CurrentProcess();
+        if (caller == nullptr || !CapSetHas(caller->caps, kCapDebug))
+        {
+            if (caller != nullptr)
+            {
+                RecordSandboxDenial(kCapDebug);
+            }
+            frame->rax = kStatusAccessDenied;
+            return;
+        }
+        sched::Task* target = LookupThreadHandle(caller, frame->rdi);
+        if (target == nullptr)
+        {
+            frame->rax = kStatusInvalidHandle;
+            return;
+        }
+        // Get/SetContext is only well-defined on a suspended target.
+        // A running target's TrapFrame is being actively pushed/
+        // popped; reading or writing it would race.
+        if (sched::TaskIsDead(target))
+        {
+            frame->rax = kStatusInvalidHandle;
+            return;
+        }
+        arch::TrapFrame* tf = sched::SchedFindUserTrapFrame(target);
+        if (tf == nullptr)
+        {
+            // No user trap frame — target hasn't entered user mode
+            // yet, or the stack is corrupt.
+            frame->rax = kStatusInvalidParameter;
+            return;
+        }
+        const u64 user_ctx_va = frame->rsi;
+        if (user_ctx_va == 0)
+        {
+            frame->rax = kStatusInvalidParameter;
+            return;
+        }
+
+        // The caller-supplied flags filter selects which classes
+        // the kernel touches. v0 honours INTEGER + CONTROL fully;
+        // SEGMENTS partial (we sanitise on SET regardless because
+        // a malicious value here is the privilege-escalation path);
+        // FLOATING_POINT + DEBUG_REGISTERS deferred. Microsoft's
+        // contract is "the kernel only writes the parts you asked
+        // for" — we honour that for GET, and on SET we apply the
+        // requested classes plus the always-on cs/ss sanitisation.
+        const u32 caller_flags = static_cast<u32>(frame->rdx);
+        const bool want_integer = (caller_flags & kContextInteger) == kContextInteger;
+        const bool want_control = (caller_flags & kContextControl) == kContextControl;
+
+        if (num == SYS_THREAD_GET_CONTEXT)
+        {
+            Win32Context ctx;
+            __builtin_memset(&ctx, 0, sizeof(ctx));
+            ctx.ContextFlags = caller_flags;
+            if (want_integer)
+            {
+                ctx.Rax = tf->rax;
+                ctx.Rcx = tf->rcx;
+                ctx.Rdx = tf->rdx;
+                ctx.Rbx = tf->rbx;
+                ctx.Rbp = tf->rbp;
+                ctx.Rsi = tf->rsi;
+                ctx.Rdi = tf->rdi;
+                ctx.R8 = tf->r8;
+                ctx.R9 = tf->r9;
+                ctx.R10 = tf->r10;
+                ctx.R11 = tf->r11;
+                ctx.R12 = tf->r12;
+                ctx.R13 = tf->r13;
+                ctx.R14 = tf->r14;
+                ctx.R15 = tf->r15;
+            }
+            if (want_control)
+            {
+                ctx.Rip = tf->rip;
+                ctx.Rsp = tf->rsp;
+                ctx.EFlags = static_cast<u32>(tf->rflags);
+                ctx.SegCs = static_cast<u16>(tf->cs);
+                ctx.SegSs = static_cast<u16>(tf->ss);
+            }
+            if (!mm::CopyToUser(reinterpret_cast<void*>(user_ctx_va), &ctx, sizeof(ctx)))
+            {
+                frame->rax = kStatusAccessViolation;
+                return;
+            }
+            frame->rax = kStatusSuccess;
+            return;
+        }
+
+        // SYS_THREAD_SET_CONTEXT
+        Win32Context ctx;
+        if (!mm::CopyFromUser(&ctx, reinterpret_cast<const void*>(user_ctx_va), sizeof(ctx)))
+        {
+            frame->rax = kStatusAccessViolation;
+            return;
+        }
+        if (want_integer)
+        {
+            tf->rax = ctx.Rax;
+            tf->rcx = ctx.Rcx;
+            tf->rdx = ctx.Rdx;
+            tf->rbx = ctx.Rbx;
+            tf->rbp = ctx.Rbp;
+            tf->rsi = ctx.Rsi;
+            tf->rdi = ctx.Rdi;
+            tf->r8 = ctx.R8;
+            tf->r9 = ctx.R9;
+            tf->r10 = ctx.R10;
+            tf->r11 = ctx.R11;
+            tf->r12 = ctx.R12;
+            tf->r13 = ctx.R13;
+            tf->r14 = ctx.R14;
+            tf->r15 = ctx.R15;
+        }
+        if (want_control)
+        {
+            tf->rip = ctx.Rip;
+            tf->rsp = ctx.Rsp;
+            // RFLAGS sanitisation: keep IF on (otherwise the
+            // target wakes with interrupts disabled and the
+            // kernel deadlocks at the next timer tick), force
+            // IOPL = 0 (no port-IO privilege gift), clear NT
+            // and TF (no nested-task chains, no single-step
+            // surprises). The caller's choice of arithmetic /
+            // comparison flags is preserved.
+            constexpr u64 kRflagsIf = 1ULL << 9;
+            constexpr u64 kRflagsTf = 1ULL << 8;
+            constexpr u64 kRflagsNt = 1ULL << 14;
+            constexpr u64 kRflagsIoplMask = 0x3ULL << 12;
+            u64 new_flags = static_cast<u64>(ctx.EFlags);
+            new_flags |= kRflagsIf;
+            new_flags &= ~(kRflagsTf | kRflagsNt | kRflagsIoplMask);
+            tf->rflags = new_flags;
+            // Force ring-3 selectors. A malicious caller passing
+            // kernel selectors would otherwise iretq into ring 0.
+            tf->cs = 0x2B; // kUserCodeSelector
+            tf->ss = 0x33; // kUserDataSelector
+        }
+        frame->rax = kStatusSuccess;
+        return;
+    }
 
     case SYS_NT_INVOKE:
     {

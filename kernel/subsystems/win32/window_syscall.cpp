@@ -1244,9 +1244,51 @@ void DoGdiBitBlt(arch::TrapFrame* frame)
 
 // --- Async input state + cursor + capture -------------------------
 
+namespace
+{
+
+// kCapInput gate. Returns true if the calling Process is allowed to
+// poll global input state (key-down / cursor pos). Returns false +
+// records a denial otherwise — caller substitutes the "no input"
+// shape (key=up, cursor=(0,0)) so a sandboxed prober can't tell the
+// denial apart from "user hasn't touched anything yet."
+//
+// Mirrors the SYS_WRITE / SYS_STAT denial-log shape so a future
+// boot-log audit can grep one consistent prefix.
+bool InputCapAllowed(const char* sysname)
+{
+    duetos::core::Process* proc = duetos::core::CurrentProcess();
+    if (proc != nullptr && duetos::core::CapSetHas(proc->caps, duetos::core::kCapInput))
+    {
+        return true;
+    }
+    duetos::core::RecordSandboxDenial(duetos::core::kCapInput);
+    if (proc != nullptr && duetos::core::ShouldLogDenial(proc->sandbox_denials))
+    {
+        duetos::arch::SerialWrite("[sys] denied syscall=");
+        duetos::arch::SerialWrite(sysname);
+        duetos::arch::SerialWrite(" pid=");
+        duetos::arch::SerialWriteHex(proc->pid);
+        duetos::arch::SerialWrite(" cap=Input denial_idx=");
+        duetos::arch::SerialWriteHex(proc->sandbox_denials);
+        duetos::arch::SerialWrite("\n");
+    }
+    return false;
+}
+
+} // namespace
+
 void DoWinGetKeyState(arch::TrapFrame* frame)
 {
     using namespace duetos::drivers::video;
+    if (!InputCapAllowed("SYS_WIN_GET_KEYSTATE"))
+    {
+        // "Key not pressed" — same shape as a benign poll on an
+        // untouched keyboard. Sandboxed keylogger sees only
+        // released keys regardless of actual hardware state.
+        frame->rax = 0;
+        return;
+    }
     const u16 code = static_cast<u16>(frame->rdi & 0xFFFF);
     // Win32 layout: high bit of low word set iff currently
     // down; bit 0 set iff toggled (v1 doesn't track toggled —
@@ -1263,6 +1305,23 @@ void DoWinGetCursor(arch::TrapFrame* frame)
     if (user_ptr == 0)
     {
         frame->rax = 0;
+        return;
+    }
+    if (!InputCapAllowed("SYS_WIN_GET_CURSOR"))
+    {
+        // Report (0, 0) into the user POINT so a click-recorder
+        // can't tell the cap denial apart from "cursor is parked
+        // at the origin" — and STILL succeeds (rax=1) so callers
+        // don't crash on a novel error path. The deception is
+        // intentional: a hostile process should only learn that
+        // the world is uninteresting, never that it was caught.
+        i32 pt[2] = {0, 0};
+        if (!duetos::mm::CopyToUser(reinterpret_cast<void*>(user_ptr), pt, sizeof(pt)))
+        {
+            frame->rax = 0;
+            return;
+        }
+        frame->rax = 1;
         return;
     }
     u32 x = 0, y = 0;

@@ -29,6 +29,23 @@ This is a greenfield project. Treat every file in the tree as intentionally shap
 - Not a research microkernel (L4, seL4). Pragmatism over academic purity.
 - Not a rewrite of ReactOS. ReactOS is useful as a reference for Win32 semantics; we are not forking it.
 
+### Subsystem isolation (DO NOT VIOLATE)
+
+**Win32 and Linux subsystems are facades for executing PE/ELF binaries. They never drive DuetOS.** The DuetOS kernel — its capability set, scheduler, address-space ledger, filesystem mediation, and IPC — is the authority on every effect a guest binary can have on the system. NT and Linux thunks translate ABI shapes; they don't reach past the syscall boundary.
+
+Concrete rules every subsystem TU and userland DLL must follow:
+
+1. **No subsystem code mutates DuetOS state without going through a kernel-mediated, cap-gated syscall.** A Win32 PE that wants to write a file goes through `SYS_FILE_WRITE` (kCapFsWrite). A Linux binary that wants to spawn a thread goes through `SYS_THREAD_CREATE` (kCapSpawnThread). The thunk does not get to skip the gate.
+2. **Auth and privilege are kernel-owned.** `Process::caps` (kCap*) is the source of truth. Any Win32-shaped privilege surface (NtAdjustPrivilegesToken, SeDebugPrivilege, integrity levels, ACLs) is a probe-satisfying facade — it does not actually grant or revoke anything. The kernel's cap gates are what gate.
+3. **Userland DLLs (`userland/libs/*`) are freestanding.** They do not include kernel headers and they do not assume kernel internals. They issue syscalls and trust the kernel's return.
+4. **In-kernel subsystem code (`kernel/subsystems/win32/`, `kernel/subsystems/linux/`) routes through public kernel APIs (`mm::*`, `sched::*`, `fs::routing::*`, `core::Cap*`).** It does not mutate kernel-internal data structures (regions tables, runqueues, capability bitsets) directly.
+5. **No subsystem-to-subsystem coupling.** Win32 doesn't call Linux, Linux doesn't call Win32. They both call the kernel.
+6. **One source of truth per resource.** One TCP stack, one VFS, one registry, one window manager — each reachable from multiple ABI front-ends, but with one kernel-owned implementation.
+
+Violations of these rules are bugs even if they compile. If you find code that bypasses cap-gating or mutates kernel state from a subsystem, fix it — don't extend the violation. The reviewable signal: "could a malicious PE / ELF use this path to do something a native DuetOS process couldn't?" If yes, the gate is wrong, not the workload.
+
+See `.claude/knowledge/subsystem-isolation-decision-v0.md` for the full rationale and the audit checklist.
+
 ## Session start (run at the beginning of every session)
 
 **Step 1 — Git sync** (see [Git Sync Workflow](#git-sync-workflow) below for the commands):
@@ -99,6 +116,10 @@ These are **guidelines for when to pause and think**, not absolute rules. A clea
 - **Zero warnings**: `-Wall -Wextra -Wpedantic -Werror` on GCC/Clang; `/W4 /WX` on MSVC.
 - **No naked `new`/`delete`** in portable code. Kernel allocations go through the slab/page allocators explicitly, never through a global `operator new`.
 - **No global mutable state** outside the kernel's explicit per-CPU areas. If something looks like a singleton, it is probably a per-CPU or per-process structure.
+- **Stub markers**: any handler / thunk / DLL function whose v0 implementation deliberately omits the real semantics carries a `// STUB:` comment on or immediately above the line that bakes in the omission. A handler that correctly implements its contract but with a known limitation carries `// GAP: <what's missing> — <when to revisit>`. Both forms are greppable: the audit cadence in `.claude/knowledge/stub-gap-inventory-v0.md` re-derives the inventory from `git grep -nE "// (STUB|GAP):"` once enough markers have landed to make the structural scan obsolete.
+  - `// STUB:` — handler returns a constant / does nothing / returns `-ENOSYS` / returns the wrong target. Real callers WILL behave incorrectly. The marker stays until a real implementation lands.
+  - `// GAP: <missing> — <revisit>` — handler is correct for the v0 happy path but a documented edge case is unimplemented (e.g. "no IPv6", "no LFN", "no oversize"). Real callers along the happy path work; the marker pins the known limit so a future audit can find it cheaply.
+  - **Do not** pepper STUB/GAP markers on code that does its job — the convention exists to bound the gap inventory, not to annotate every line. If removing the marker wouldn't change a maintainer's belief about what works, don't write it.
 
 ## Architecture (planned directory layout)
 

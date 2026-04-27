@@ -166,6 +166,99 @@ void AddressSpaceMapUserPage(AddressSpace* as, u64 virt, PhysAddr frame, u64 fla
 /// emitted only for the active CPU when `as` is the active AS.
 bool AddressSpaceUnmapUserPage(AddressSpace* as, u64 virt);
 
+/// Install a leaf PTE for a frame the AS does NOT own — the
+/// frame's lifetime is governed by some other ledger (e.g. a
+/// Win32 section pool). Same safety checks as MapUserPage
+/// (alignment, canonical low half, kPageUser, W^X, no
+/// kPageGlobal) but does NOT touch the regions table — the
+/// AS-destroy walker won't free this frame, and the AS
+/// frame budget isn't consumed.
+///
+/// Returns true on success. Returns false if `virt` is
+/// already mapped (no overwrite). Panics on the same
+/// invariant violations as MapUserPage.
+///
+/// Pairs with AddressSpaceUnmapBorrowedPage. Callers MUST
+/// keep their own ledger of the (virt, frame) pairs they
+/// installed via this API — there is no kernel-side record.
+bool AddressSpaceMapBorrowedPage(AddressSpace* as, u64 virt, PhysAddr frame, u64 flags);
+
+/// Read the frame backing `virt` in `as` by walking the page
+/// tables directly — independent of the regions table. Used
+/// to identify section views (which install borrowed PTEs not
+/// recorded in the regions ledger). Returns kNullFrame when
+/// `virt` has no present PTE in `as`. `virt` must be 4 KiB-
+/// aligned.
+PhysAddr AddressSpaceProbePte(const AddressSpace* as, u64 virt);
+
+/// Reverse of MapBorrowedPage: clear the leaf PTE at `virt`
+/// in `as` without touching the regions table and without
+/// freeing the backing frame. Returns true if a present
+/// PTE was cleared, false if `virt` was already unmapped.
+/// TLB invalidation is emitted on the active CPU only when
+/// `as` is the active AS.
+bool AddressSpaceUnmapBorrowedPage(AddressSpace* as, u64 virt);
+
+/// Rewrite the leaf-PTE flag bits at `virt` in `as` to
+/// `new_flags` (the same bit set MapUserPage / MapBorrowedPage
+/// take — kPagePresent | kPageUser | kPageWritable | kPageNoExecute
+/// in any combination, with the same W^X invariant). Preserves
+/// the backing frame; only the protection bits change. Returns
+/// true if the page was present and the PTE was rewritten,
+/// false if `virt` is unmapped (no PTE to mutate).
+///
+/// TLB invalidation is emitted on the active CPU only when
+/// `as` is the active AS — same contract as MapUserPage.
+///
+/// Panics on the same invariants MapUserPage enforces:
+/// unaligned `virt`, `virt` outside the canonical low half,
+/// W^X violation, kPageGlobal set on a user page, kPageUser
+/// missing.
+bool AddressSpaceProtectUserPage(AddressSpace* as, u64 virt, u64 new_flags);
+
+/// Read the raw leaf PTE at `virt` in `as` (PML4 → PDPT → PD →
+/// PT walk). Returns 0 if the page is unmapped (PTE absent or
+/// chain broken). The high bits encode flags (Writable / NX /
+/// User / etc.) and the middle bits encode the physical frame
+/// — same layout the kernel writes via MapUserPage. Used by
+/// AddressSpaceFork to re-apply parent flags on the child PTEs
+/// without losing per-page protection.
+u64 AddressSpaceProbePteRaw(const AddressSpace* as, u64 virt);
+
+/// Duplicate `parent`'s user mappings into a fresh AS. Allocates
+/// a new AS via AddressSpaceCreate(parent->frame_budget), walks
+/// parent's regions ledger, allocates a fresh frame for each
+/// page in the child, copies contents through the kernel
+/// direct-map alias, and maps the new frame in the child with
+/// the SAME PTE flags the parent's leaf PTE carried (preserves
+/// W^X — code stays RX, data stays RW + NX). Returns nullptr on
+/// allocation failure (and rolls back any partially-installed
+/// child mappings via AddressSpaceRelease). Does NOT cover
+/// borrowed-page mappings (Win32 sections) — they aren't in
+/// the regions ledger; callers that need them must dup them
+/// explicitly.
+///
+/// The caller owns the returned AS — must AddressSpaceRelease
+/// it when done.
+AddressSpace* AddressSpaceFork(const AddressSpace* parent);
+
+/// Clear every user-region mapping in `as` without releasing
+/// the AS itself. Walks `regions[0..region_count)`, unmaps each
+/// leaf PTE, frees the backing frame back to the physical
+/// allocator, and resets `region_count` to 0.
+///
+/// Used by execve() — replace the running process's image
+/// in-place. PML4/PDPT/PD pages stay; the leaf PT pages are
+/// retained so a subsequent ElfLoad can re-populate them.
+///
+/// Borrowed-page mappings (Win32 sections) are NOT touched —
+/// they aren't in the regions ledger. Callers that need to
+/// nuke section views must do that separately.
+///
+/// TLB invalidation on the active CPU when `as` is the active
+/// AS — same contract as MapUserPage / UnmapUserPage.
+void AddressSpaceClearUserMappings(AddressSpace* as);
+
 /// Reverse of MapUserPage: given a user VA, return the physical
 /// frame backing its containing page, or kNullFrame if unmapped.
 /// Walks the AS's `regions` array (small N, linear scan). Used

@@ -1144,7 +1144,432 @@ enum SyscallNumber : u64
     // Default policy = 0 — every feature is opt-in so apps that
     // probe Windows-buggy behaviour are unaffected.
     SYS_WIN32_CUSTOM = 129,
+
+    // SYS_REGISTRY — multiplexed entry point for the kernel-side
+    // Win32 registry. Sub-op in rdi (see
+    // duetos::subsystems::win32::registry::kOp*); the rest of the
+    // arg layout is per-op (registry.h documents each op).
+    //
+    // Backs ntdll.dll's NtOpenKey / NtQueryValueKey direct
+    // syscalls — the Reg* family in advapi32.dll is unaffected
+    // (advapi32 still serves its own well-known tree without
+    // crossing the syscall boundary). The two trees are kept in
+    // sync by hand, see kernel/subsystems/win32/registry.cpp's
+    // header comment.
+    //
+    // Returns NTSTATUS in rax (kNtStatusSuccess = 0,
+    // STATUS_OBJECT_NAME_NOT_FOUND = 0xC0000034, etc.) — the
+    // registry surface is the only kernel syscall today that
+    // reports NTSTATUS rather than -errno or 0/1, because every
+    // caller (NtOpenKey, NtQueryValueKey) is bound to that
+    // contract on the Win32 side.
+    SYS_REGISTRY = 130,
+
+    // SYS_PROCESS_OPEN — open a handle to another process by PID.
+    //   rdi = target PID (u64).
+    //   rax = kernel handle in [kWin32ProcessBase, +kWin32ProcessCap)
+    //         on success, 0 on any failure (no such PID, kCapDebug
+    //         not held, table full).
+    //
+    // Cap-gated on kCapDebug — same gate that protects the
+    // breakpoint surface. Cross-process inspection is the same
+    // privilege class: a process WITHOUT kCapDebug cannot peek
+    // at another process at all, even just to enumerate its
+    // existence.
+    //
+    // Holds a refcount on the target via `ProcessRetain` so the
+    // handle keeps the target alive past its own task's exit.
+    // CloseHandle / NtClose's by-range dispatch in DoFileClose
+    // calls `ProcessRelease` when the slot is freed.
+    //
+    // Backs ntdll.dll's NtOpenProcess (and kernel32.dll's
+    // OpenProcess once that DLL is rewritten to call this
+    // syscall).
+    SYS_PROCESS_OPEN = 131,
+
+    // SYS_PROCESS_VM_READ — read from another process's user
+    // memory. Backs ntdll.dll's NtReadVirtualMemory (and
+    // kernel32.dll's ReadProcessMemory once it's rewritten).
+    //   rdi = target process handle (kWin32ProcessBase + idx)
+    //   rsi = target VA (in the target's user AS)
+    //   rdx = caller's destination buffer (in the caller's AS)
+    //   r10 = byte count to read (capped at kSyscallProcessVmMax)
+    //   r8  = optional caller VA of a `u64*` to receive the
+    //         actual byte count copied. 0 = don't write back.
+    //   rax = NTSTATUS (0 = success, otherwise an
+    //         STATUS_INVALID_HANDLE / STATUS_ACCESS_VIOLATION /
+    //         STATUS_ACCESS_DENIED / STATUS_INVALID_PARAMETER).
+    //
+    // The caller does NOT need kCapDebug a SECOND time for the
+    // read — kCapDebug was already enforced at SYS_PROCESS_OPEN,
+    // and a process holding a real handle has by definition
+    // already passed that gate. Re-checking on every read is
+    // belt-and-braces but costs nothing measurable; we do it
+    // anyway so a cap that's revoked between open and use
+    // (a future feature) takes effect immediately.
+    //
+    // Implementation: walks the target's `AddressSpace` regions
+    // table page-by-page (`AddressSpaceLookupUserFrame` →
+    // `mm::PhysToVirt`), copies to the caller's buffer via
+    // `CopyToUser` (caller's AS is the active AS, since this is
+    // a syscall from ring 3). Stops at the first unmapped page
+    // in the target — partial copies are reported via the
+    // bytes-read out-pointer. Matches Windows: a partial read
+    // returns STATUS_PARTIAL_COPY (0x8000000D) with the byte
+    // count populated; v0 collapses partial-copy to
+    // STATUS_ACCESS_VIOLATION because the BytesRead out-pointer
+    // is enough to disambiguate for any sane caller.
+    SYS_PROCESS_VM_READ = 132,
+
+    // SYS_PROCESS_VM_WRITE — write to another process's user
+    // memory. Backs ntdll.dll's NtWriteVirtualMemory (and
+    // kernel32.dll's WriteProcessMemory once it's rewritten).
+    //   rdi = target process handle
+    //   rsi = target VA (in the target's user AS)
+    //   rdx = caller's source buffer (in the caller's AS)
+    //   r10 = byte count to write (capped at kSyscallProcessVmMax)
+    //   r8  = optional caller VA of a `u64*` to receive the
+    //         actual byte count written. 0 = don't write back.
+    //   rax = NTSTATUS as for SYS_PROCESS_VM_READ.
+    //
+    // Symmetric to the read path but with caller and target
+    // roles swapped. Same partial-copy behaviour at the first
+    // unmapped target page. There is NO COW — a write to a
+    // page the target has read-only mapped will succeed
+    // (because the kernel's direct map is always writable);
+    // the v0 region table only tracks (vaddr, frame), not
+    // protection bits, so we cannot refuse the write on
+    // protection grounds. GAP: protection-respecting writes
+    // need a per-page flags column on AddressSpaceUserRegion.
+    SYS_PROCESS_VM_WRITE = 133,
+
+    // SYS_PROCESS_VM_QUERY — query the mapping state of one
+    // address in a target process. Backs ntdll.dll's
+    // NtQueryVirtualMemory (with MemoryBasicInformation class).
+    //   rdi = target process handle
+    //   rsi = target VA to probe
+    //   rdx = caller VA of a `Win32MemoryBasicInfo` (48 bytes)
+    //         to fill — see syscall.cpp for the layout. The
+    //         layout is byte-compatible with the prefix of
+    //         Win32 MEMORY_BASIC_INFORMATION that v0 actually
+    //         populates; a future expansion can grow it.
+    //   rax = NTSTATUS (0 = success).
+    //
+    // v0 returns a single-page region: BaseAddress = the
+    // 4 KiB-aligned start of the page containing rsi,
+    // RegionSize = 4096, State = MEM_COMMIT (0x1000) if mapped
+    // or MEM_FREE (0x10000) if unmapped, Protect =
+    // PAGE_READWRITE (0x04) for any mapped page (we don't track
+    // per-page flags yet), Type = MEM_PRIVATE (0x20000).
+    // Coalescing adjacent regions is a follow-up — Windows
+    // returns the largest contiguous run with identical
+    // attributes, but for v0 callers (a debugger probing where
+    // the heap starts, a malware probe walking the AS) the
+    // page-at-a-time answer is correct, just verbose.
+    SYS_PROCESS_VM_QUERY = 134,
+
+    // SYS_THREAD_SUSPEND — increment the target thread's
+    // suspend count. Backs ntdll.dll's NtSuspendThread (and
+    // kernel32.dll's SuspendThread once that DLL is rewritten).
+    //   rdi = thread handle (kWin32ThreadBase + idx in caller's
+    //         own win32_threads[] table — v0 only supports
+    //         caller-local thread handles; cross-process suspend
+    //         needs NtOpenThread which doesn't exist yet).
+    //   rax = previous suspend count on success (a small
+    //         non-negative number) or u64(-1) on any error
+    //         (handle not in caller's table, target dead, etc.).
+    //
+    // No cap-gate today: spawning a thread (kCapSpawnThread) is
+    // already a privileged operation and a process can only
+    // suspend its OWN threads in v0, so the spawn cap is the
+    // implicit gate — a sandboxed process that doesn't have
+    // kCapSpawnThread has no thread handles to suspend in the
+    // first place. When cross-process thread suspend lands
+    // (NtOpenThread + a foreign thread handle table), the cap
+    // gate moves to the OPEN op and this stays cap-free for
+    // the same reason NtSuspendThread is cap-free in NT once
+    // you have the handle.
+    //
+    // Single-CPU correctness: the suspender is the running task
+    // by definition; the target cannot also be running; no IPI
+    // is needed. SMP follow-up will need an IPI to evict a
+    // running-on-another-core target.
+    SYS_THREAD_SUSPEND = 135,
+
+    // SYS_THREAD_RESUME — decrement the target thread's
+    // suspend count. Same arg / return shape as
+    // SYS_THREAD_SUSPEND. A resume that takes the count from
+    // 1 → 0 makes the target eligible to run again (the kernel
+    // pushes it onto the runqueue Ready); a resume that hits
+    // count == 0 is a no-op returning 0. Resume on a thread
+    // with prior count > 1 just decrements without unparking.
+    SYS_THREAD_RESUME = 136,
+
+    // SYS_THREAD_GET_CONTEXT — read the suspended target's
+    // user-mode register state into a caller-supplied buffer.
+    // SYS_THREAD_SET_CONTEXT — overwrite the register state
+    // that the target's next iretq-to-user-mode will restore.
+    //
+    //   rdi = thread handle (caller's win32_threads[] entry).
+    //   rsi = user pointer to a Win32Context buffer (defined
+    //         in this header — first 0x100 bytes of the Win32
+    //         CONTEXT struct: P1Home..P6Home, ContextFlags,
+    //         MxCsr, Seg×6, EFlags, Dr0..Dr3+Dr6+Dr7, GP regs
+    //         Rax..R15, Rip).
+    //   rdx = ContextFlags filter (CONTEXT_INTEGER /
+    //         CONTEXT_CONTROL / CONTEXT_FULL — the v0
+    //         implementation honours INTEGER + CONTROL). The
+    //         FLOATING_POINT / DEBUG_REGISTERS / SEGMENTS
+    //         classes are accepted in the flags but only the
+    //         segment selectors and rflags get touched on
+    //         SET; Dr0..7 + XMM/FPU are deferred to a follow-
+    //         up slice.
+    //   rax = NTSTATUS — 0 on success, 0xC0000008 (invalid
+    //         handle) when the handle isn't in the caller's
+    //         table, 0xC000000D (invalid parameter) when the
+    //         target isn't suspended OR has no user trap
+    //         frame yet (never entered user mode), 0xC0000022
+    //         (access denied) when kCapDebug is missing.
+    //
+    // Cap-gated on kCapDebug, same threat class as cross-AS
+    // VM read/write — reading another thread's RIP / RSP /
+    // GPRs is the same level of inspection power.
+    //
+    // SET sanitisation: cs / ss are forced to the user-mode
+    // selectors, ds/es/fs/gs to user data; rflags has IF set
+    // and IOPL forced to 0 + privileged bits cleared. A
+    // malicious caller cannot use NtSetContextThread to
+    // escalate the target to ring 0 or to mask interrupts.
+    SYS_THREAD_GET_CONTEXT = 137,
+    SYS_THREAD_SET_CONTEXT = 138,
+
+    // SYS_THREAD_OPEN — promote a TID to a kernel handle the
+    // caller can pass to NtSuspendThread / NtGetContextThread /
+    // etc. against a thread in a DIFFERENT process. Backs
+    // ntdll.dll's NtOpenThread.
+    //
+    //   rdi = target TID (the unique Task::id, not the PID).
+    //   rax = handle (kWin32ForeignThreadBase + idx) on
+    //         success, 0 (NULL handle) on any failure: TID
+    //         not live, target is a kernel-only task with no
+    //         Process identity, foreign-thread table full,
+    //         caller missing kCapDebug.
+    //
+    // Cap-gated on kCapDebug — same threat class as
+    // SYS_PROCESS_OPEN, since the produced handle unlocks
+    // SUSPEND / RESUME / GET / SET_CONTEXT against a target
+    // outside the caller's process.
+    //
+    // Refcount semantics: on open, ProcessRetain on the
+    // target's owning Process so the foreign Task can't be
+    // reaped under the inspector's hand. NtClose on the
+    // returned handle drops the refcount (the file_syscall
+    // close-dispatch grew an arm for this range).
+    SYS_THREAD_OPEN = 139,
+
+    // Win32 section objects (kernel-resident pools of physical
+    // frames mappable into one or more process address spaces).
+    // v0 anonymous (pagefile-backed) only — file-backed
+    // sections (FileHandle != 0) return STATUS_NOT_IMPLEMENTED.
+    //
+    // SYS_SECTION_CREATE — create an anonymous section.
+    //   rdi = size_bytes (1..kSectionMaxBytes; rounds up to
+    //         a multiple of 4 KiB).
+    //   rsi = Win32 PAGE_* protection on creation.
+    //   rax = section handle (kWin32SectionBase + idx) on
+    //         success, 0 (NULL handle) on any failure.
+    //
+    // SYS_SECTION_MAP — map a section's whole range into a
+    // target process's AS. Self-process map (process_handle =
+    // -1, NtCurrentProcess()) needs no extra cap; cross-
+    // process map cap-gated on kCapDebug — process hollowing
+    // is the same threat class as cross-AS VM read/write.
+    //   rdi = section handle (in calling process).
+    //   rsi = process handle (in calling process), or -1 for
+    //         self.
+    //   rdx = inout u64* base_va. Caller writes a hint (or
+    //         0 for "kernel-picks"); kernel reads the hint
+    //         and overwrites with the chosen base.
+    //   r10 = inout u64* view_size. Kernel writes the
+    //         actual mapped size in bytes (page-rounded
+    //         section size). Caller's value is ignored
+    //         beyond bounds-checking the buffer.
+    //   r8  = Win32 PAGE_* view protection.
+    //   rax = NTSTATUS (0 = success).
+    //
+    // SYS_SECTION_UNMAP — unmap a previously-installed view.
+    //   rdi = process handle (in calling process), or -1
+    //         for self.
+    //   rsi = base_va of the view to unmap.
+    //   rax = NTSTATUS.
+    SYS_SECTION_CREATE = 140,
+    SYS_SECTION_MAP = 141,
+    SYS_SECTION_UNMAP = 142,
+
+    // Filesystem mutation. Path-based; routes through
+    // fs::routing (fat32 paths only in v0). Both gated on
+    // kCapFs at the syscall layer.
+    //   SYS_FILE_UNLINK — rdi = const char* user_path,
+    //                     rsi = path_len (excluding NUL).
+    //                     rax = 0 on success, NTSTATUS on
+    //                     failure.
+    //   SYS_FILE_RENAME — rdi = const char* user_src,
+    //                     rsi = src_len,
+    //                     rdx = const char* user_dst,
+    //                     r10 = dst_len.
+    SYS_FILE_UNLINK = 143,
+    SYS_FILE_RENAME = 144,
+
+    // Process / thread termination + introspection.
+    //   SYS_PROCESS_TERMINATE — rdi = ProcessHandle (NtCurrentProcess
+    //                           = -1 → self-task-exit; foreign Win32
+    //                           proc handle → walk every Task whose
+    //                           process == target and signal each
+    //                           for termination; cap-gated on
+    //                           kCapDebug for the foreign case).
+    //                           rsi = exit status (passed through to
+    //                           SchedExit on the self path).
+    //                           rax = number of tasks signalled, or
+    //                           NTSTATUS on failure.
+    //   SYS_THREAD_TERMINATE  — rdi = ThreadHandle (caller-local or
+    //                           foreign via NtOpenThread; cap-gated
+    //                           on kCapDebug for the foreign case).
+    //                           rsi = exit status.
+    //                           rax = 0 on success, NTSTATUS on
+    //                           failure.
+    //   SYS_PROCESS_QUERY_INFO — rdi = ProcessHandle, rsi = info class
+    //                           (0 = ProcessBasicInformation), rdx =
+    //                           user buffer, r10 = buffer cap, r8 =
+    //                           user u32* return_length.
+    //                           rax = NTSTATUS.
+    SYS_PROCESS_TERMINATE = 145,
+    SYS_THREAD_TERMINATE = 146,
+    SYS_PROCESS_QUERY_INFO = 147,
+
+    // Per-process VM management (NtAllocate / NtFree /
+    // NtProtectVirtualMemory).
+    //   SYS_VM_ALLOCATE — rdi = ProcessHandle (-1 = self),
+    //                     rsi = base_addr (0 = pick any aligned),
+    //                     rdx = size in bytes (rounded up to a
+    //                     page),
+    //                     r10 = AllocationType (MEM_COMMIT |
+    //                     MEM_RESERVE; v0 treats both as "commit"),
+    //                     r8  = protect flags (PAGE_*; W^X is
+    //                     silently enforced — RWX downgrades to
+    //                     RW), r9 = user u64* base out (set on
+    //                     success).
+    //                     rax = NTSTATUS.
+    //   SYS_VM_FREE     — rdi = ProcessHandle, rsi = base_addr,
+    //                     rdx = size, r10 = FreeType (MEM_RELEASE
+    //                     ignored; v0 always releases). rax =
+    //                     NTSTATUS.
+    //   SYS_VM_PROTECT  — rdi = ProcessHandle, rsi = base_addr,
+    //                     rdx = size, r10 = new protect flags,
+    //                     r8  = user u32* old protect (out).
+    //                     rax = NTSTATUS.
+    SYS_VM_ALLOCATE = 148,
+    SYS_VM_FREE = 149,
+    SYS_VM_PROTECT = 150,
+
+    // SYS_FILE_QUERY_ATTRIBUTES — path-based file metadata
+    // lookup (no handle required). Backs NtQueryAttributesFile /
+    // NtQueryFullAttributesFile.
+    //   rdi = const char* user_path (NUL-terminated, max 64).
+    //   rsi = path_len (excluding NUL).
+    //   rdx = u8* user out buffer (FILE_NETWORK_OPEN_INFORMATION
+    //         layout = 56 bytes: 4×FILETIME, AllocationSize,
+    //         EndOfFile, FileAttributes, Reserved).
+    //   r10 = buffer cap.
+    //   rax = NTSTATUS.
+    SYS_FILE_QUERY_ATTRIBUTES = 151,
+
+    // SYS_EXECVE — replace the calling task's image in place.
+    // Backs Linux execve() and (eventually) Win32 process spawn.
+    //   rdi = const char* user_path (NUL-terminated, max 256).
+    //   rsi = path_len.
+    // v0 ignores argv/envp (reads no user-supplied stack args);
+    // a static ELF that doesn't read its argv/envp boots through.
+    // Returns NTSTATUS / -errno on failure; on success the
+    // syscall doesn't return — iretq lands at the new entry.
+    // Cap-gated on kCapFsRead (path lookup + read) AND
+    // kCapSpawnThread (the new image runs as the same task,
+    // but we treat exec as the natural symmetric gate).
+    SYS_EXECVE = 152,
 };
+
+// Win32 CONTEXT — first 0x100 bytes (integer + control + the
+// segment / rflags slot). Field order and offsets match the
+// Microsoft x64 CONTEXT layout exactly so a PE that ships its
+// own winnt.h can pass a pointer through unchanged. Anything
+// beyond Rip (XMM0..XMM15, the AVX vector regs, debug-control
+// MSRs) is unimplemented in v0 — NtGetContextThread leaves
+// those bytes untouched on the caller side; NtSetContextThread
+// ignores them.
+//
+// Stable on the kernel side; the userland-side ntdll thunks
+// re-cast to / from `CONTEXT` for the caller's API contract.
+struct alignas(16) Win32Context
+{
+    u64 P1Home;       // +0x000
+    u64 P2Home;       // +0x008
+    u64 P3Home;       // +0x010
+    u64 P4Home;       // +0x018
+    u64 P5Home;       // +0x020
+    u64 P6Home;       // +0x028
+    u32 ContextFlags; // +0x030
+    u32 MxCsr;        // +0x034
+    u16 SegCs;        // +0x038
+    u16 SegDs;        // +0x03A
+    u16 SegEs;        // +0x03C
+    u16 SegFs;        // +0x03E
+    u16 SegGs;        // +0x040
+    u16 SegSs;        // +0x042
+    u32 EFlags;       // +0x044
+    u64 Dr0;          // +0x048
+    u64 Dr1;          // +0x050
+    u64 Dr2;          // +0x058
+    u64 Dr3;          // +0x060
+    u64 Dr6;          // +0x068
+    u64 Dr7;          // +0x070
+    u64 Rax;          // +0x078
+    u64 Rcx;          // +0x080
+    u64 Rdx;          // +0x088
+    u64 Rbx;          // +0x090
+    u64 Rsp;          // +0x098
+    u64 Rbp;          // +0x0A0
+    u64 Rsi;          // +0x0A8
+    u64 Rdi;          // +0x0B0
+    u64 R8;           // +0x0B8
+    u64 R9;           // +0x0C0
+    u64 R10;          // +0x0C8
+    u64 R11;          // +0x0D0
+    u64 R12;          // +0x0D8
+    u64 R13;          // +0x0E0
+    u64 R14;          // +0x0E8
+    u64 R15;          // +0x0F0
+    u64 Rip;          // +0x0F8
+};
+static_assert(sizeof(Win32Context) == 0x100, "Win32Context first-0x100 layout must match Microsoft x64 CONTEXT");
+static_assert(__builtin_offsetof(Win32Context, ContextFlags) == 0x030, "ContextFlags offset");
+static_assert(__builtin_offsetof(Win32Context, Rax) == 0x078, "Rax offset");
+static_assert(__builtin_offsetof(Win32Context, Rip) == 0x0F8, "Rip offset");
+
+// ContextFlags bits — Microsoft contract.
+constexpr u32 kContextX86_64 = 0x00100000;
+constexpr u32 kContextControl = kContextX86_64 | 0x00000001;
+constexpr u32 kContextInteger = kContextX86_64 | 0x00000002;
+constexpr u32 kContextSegments = kContextX86_64 | 0x00000004;
+constexpr u32 kContextFloatingPoint = kContextX86_64 | 0x00000008;
+constexpr u32 kContextDebugRegisters = kContextX86_64 | 0x00000010;
+constexpr u32 kContextFull = kContextControl | kContextInteger | kContextSegments;
+
+/// Cap on the byte count a single SYS_PROCESS_VM_READ /
+/// SYS_PROCESS_VM_WRITE may move. 16 KiB is plenty for the v0
+/// caller surface (debugger reads of PEB / PROCESS_BASIC_INFORMATION
+/// / TEB / thread context, malware probes scanning for sentinel
+/// patterns) and bounds the kernel's per-call work. Larger transfers
+/// chunk on the caller side.
+inline constexpr u64 kSyscallProcessVmMax = 16384;
 
 /// Install the DPL=3 IDT gate for vector 0x80. Must run after IdtInit
 /// (the IDT must already be loaded) and before any ring-3 entry.

@@ -107,6 +107,44 @@ enum Cap : u32
     // profiles inherit it via the kProfileTrusted loop.
     kCapSpawnThread = 5,
 
+    // Talk to the network. Gates every BSD-socket-family Linux
+    // syscall the linux ABI dispatcher recognises (socket /
+    // socketpair / accept / connect / bind / listen / send* /
+    // recv* / sendmsg / recvmsg). Without this cap, the gate
+    // returns -EACCES instead of the "no socket layer yet"
+    // -ENETDOWN/-EBADF that callers WITH the cap see — a
+    // sandboxed RAT prober gets a clean denial signal that
+    // stays distinguishable from "the network stack is offline".
+    // Held by the trusted profile (so internal kernel-shipped
+    // userland keeps the same surface it had before this cap
+    // existed); withheld from kProfileSandbox so untrusted PEs
+    // cannot reach the socket family at all.
+    //
+    // Granularity is intentionally coarse — one cap covers
+    // both inbound (bind/listen/accept) and outbound
+    // (connect/send) for v0. Splitting into kCapNetSend +
+    // kCapNetRecv is reserved for when a real workload proves
+    // the asymmetric profile is needed.
+    kCapNet = 6,
+
+    // Read keyboard / mouse / cursor state. Gates the
+    // SYS_WIN_GET_KEYSTATE + SYS_WIN_GET_CURSOR async-input
+    // family — the syscalls a Win32 keylogger or click-
+    // recorder polls. Without this cap, GetKeyState reports
+    // "key up" for every code and GetCursorPos reports (0,0)
+    // — the same shape a process gets when no input has ever
+    // been delivered, so callers don't trip on a novel error
+    // path. Trusted profile holds the cap; kProfileSandbox
+    // does not.
+    //
+    // Note: synchronous input via WM_KEYDOWN / WM_MOUSEMOVE
+    // through the message pump is NOT gated — those messages
+    // are addressed to a specific HWND the kernel already
+    // routed deliberately. The cap targets the unsolicited
+    // GLOBAL polling surface that turns any process into a
+    // keylogger.
+    kCapInput = 7,
+
     // Sentinel: keep this as the last entry so kProfileTrusted can
     // be built by a loop that iterates [1 .. kCapCount). Do NOT
     // use kCapCount as a live cap — it's a boundary marker.
@@ -258,10 +296,19 @@ struct Process
     // a workload actually exceeds 16 open handles.
     struct LinuxFd
     {
-        u8 state; // 0=unused, 1=reserved-tty, 2=file
+        // state 0 = unused
+        // state 1 = reserved-tty (fd 0/1/2)
+        // state 2 = regular file (FAT32-backed)
+        // state 3 = pipe-read end  → first_cluster = pipe pool idx
+        // state 4 = pipe-write end → first_cluster = pipe pool idx
+        // state 5 = eventfd        → first_cluster = eventfd pool idx
+        // first_cluster is reused as a generic "pool index" slot
+        // for the non-file states; all non-file callers must
+        // ignore size/offset/path.
+        u8 state;
         u8 _pad[3];
-        u32 first_cluster; // only meaningful for state=file
-        u32 size;          // only meaningful for state=file
+        u32 first_cluster;
+        u32 size;
         u32 _pad2;
         u64 offset; // read cursor; only meaningful for state=file
         // Volume-relative path as passed to sys_open, NUL-
@@ -509,6 +556,129 @@ struct Process
     static constexpr u64 kWin32SemaphoreCap = 8;
     static constexpr u64 kWin32SemaphoreBase = 0x500;
     Win32SemaphoreHandle win32_semaphores[kWin32SemaphoreCap];
+
+    // Win32 registry handle table — backs the in-kernel read-only
+    // registry exposed via SYS_REGISTRY (NtOpenKey /
+    // NtQueryValueKey / NtClose paths in ntdll.dll). Each slot
+    // carries the resolved kernel-side `RegKey*` (a borrowed
+    // pointer into the static well-known-keys table — no
+    // ownership; never freed).
+    //
+    // Handles run kWin32RegistryBase + idx (= 0x600..0x607),
+    // disjoint from every other Win32 handle range so the shared
+    // CloseHandle / NtClose dispatch picks the right table by
+    // value alone. Real Windows registry handles live in the same
+    // HKEY-handle space as predefined sentinels (HKLM = 0x80000002
+    // etc.); the kernel-side ABI always normalises predefined
+    // HKEYs back to "open against HKEY-root" inside the SYS_REGISTRY
+    // Open op, so callers see consistent kernel handles regardless
+    // of whether they passed a predefined sentinel or a previously-
+    // opened subkey.
+    //
+    // 8 slots is plenty for v0 — a typical MSVC PE startup probes
+    // at most 2-3 keys (CurrentVersion + CurrentUser\Internet
+    // Settings + Volatile Environment). Grow when a real workload
+    // needs more.
+    struct Win32RegistryHandle
+    {
+        bool in_use;
+        u8 _pad[7];
+        const void* reg_key; // borrowed RegKey* — opaque to process.h
+    };
+    static constexpr u64 kWin32RegistryCap = 8;
+    static constexpr u64 kWin32RegistryBase = 0x600;
+    Win32RegistryHandle win32_reg_handles[kWin32RegistryCap];
+
+    // Win32 process handle table — backs NtOpenProcess /
+    // OpenProcess. Each slot owns a refcount on the target
+    // Process (`ProcessRetain` at open, `ProcessRelease` at
+    // close). Holding a handle keeps the target alive even if
+    // every Task it owned exits, which matches Windows
+    // semantics: NtTerminateProcess on a still-open handle
+    // succeeds, observers can still read the exit-code, etc.
+    //
+    // Handles run kWin32ProcessBase + idx (= 0x700..0x707),
+    // disjoint from every other Win32 handle range so the
+    // shared CloseHandle / NtClose dispatch picks the right
+    // table by value alone.
+    //
+    // 8 slots is plenty for v0 — typical malware-style "open
+    // every PID, look for one with a matching name" probes
+    // close handles as soon as they're checked, so the table
+    // turns over fast. Grow when a real workload pins more.
+    struct Win32ProcessHandle
+    {
+        bool in_use;
+        u8 _pad[7];
+        Process* target; // borrowed reference, refcount held while in_use
+    };
+    static constexpr u64 kWin32ProcessCap = 8;
+    static constexpr u64 kWin32ProcessBase = 0x700;
+    Win32ProcessHandle win32_proc_handles[kWin32ProcessCap];
+
+    // Cross-process Win32 thread handles produced by
+    // NtOpenThread(tid). Each entry pins a Task* (the target
+    // thread) AND a Process* (the owner) — the owner ref is
+    // ProcessRetained at open time so the foreign Task can't
+    // be reaped under the inspector's hand. Disjoint from the
+    // local win32_threads[] handle range (kWin32ThreadBase +
+    // idx = 0x400..0x407) so the by-range dispatch in
+    // SYS_THREAD_SUSPEND / RESUME / GET_CONTEXT / SET_CONTEXT
+    // and DoFileClose can pick the right table by handle
+    // value alone.
+    //
+    // 8 slots — same sizing rationale as win32_proc_handles:
+    // typical "scan every thread, keep one" patterns close
+    // handles immediately; the table turns over fast.
+    //
+    // v0 SCOPE: this table holds FOREIGN thread handles
+    // (target Task is in a different Process). LOCAL thread
+    // handles (the calling Process's own threads) still live
+    // in win32_threads[]. NtOpenThread refuses self-PID
+    // requests and routes the caller to the existing local-
+    // handle path. The dual-table design lets the cap-gate
+    // fire only on cross-process opens — local thread
+    // operations need only kCapSpawnThread (the implicit
+    // gate for having a thread handle in the first place).
+    struct Win32ForeignThreadHandle
+    {
+        bool in_use;
+        u8 _pad[7];
+        sched::Task* task; // borrowed
+        Process* owner;    // refcount held while in_use
+    };
+    static constexpr u64 kWin32ForeignThreadCap = 8;
+    static constexpr u64 kWin32ForeignThreadBase = 0x800;
+    Win32ForeignThreadHandle win32_foreign_threads[kWin32ForeignThreadCap];
+
+    // Win32 section handles produced by NtCreateSection. A
+    // section is a kernel-resident pool of physical frames
+    // that can be mapped into one or more process address
+    // spaces via NtMapViewOfSection — backs Windows shared
+    // memory + memory-mapped files. v0 honours pagefile-
+    // backed (anonymous) sections only; file-backed sections
+    // (FileHandle != 0) return NotImpl in the kernel handler.
+    //
+    // Disjoint from every other Win32 handle range so the
+    // shared close dispatch can pick the right table by
+    // handle value alone. 8 slots — same sizing rationale
+    // as foreign-thread/process tables.
+    //
+    // Each entry holds an index into the global
+    // g_win32_sections pool (defined in win32_section.cpp).
+    // The pool entry's refcount is incremented on open and
+    // decremented on NtClose; the section is freed only
+    // when refcount hits 0 (which means every handle AND
+    // every active mapping has gone away).
+    struct Win32SectionHandle
+    {
+        bool in_use;
+        u8 _pad[3];
+        u32 pool_index; // index into g_win32_sections
+    };
+    static constexpr u64 kWin32SectionCap = 8;
+    static constexpr u64 kWin32SectionBase = 0x900;
+    Win32SectionHandle win32_section_handles[kWin32SectionCap];
 
     // Per-process cursor for thread-stack allocation. Each new
     // thread carves kV0ThreadStackPages pages off this bump

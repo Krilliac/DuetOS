@@ -56,13 +56,89 @@ KNOWN_MAPPINGS = {
     "NtResetEvent":                "SYS_EVENT_RESET",
     "NtWaitForMultipleObjects":    "SYS_EVENT_WAIT",       # best-effort: first wait target in v0
     "NtSetInformationFile":        "SYS_FILE_SEEK",        # FilePositionInformation-class shape
-    # NtWriteVirtualMemory / NtReadVirtualMemory: NotImpl on purpose.
-    # Previous mappings (SYS_WRITE / SYS_READ) silently corrupted callers
-    # by treating the target PID handle as a file descriptor — cross-AS
-    # writes never landed where the caller intended, and an arbitrary
-    # fd matching the handle value would receive the bytes instead.
-    # Until a real cross-AS read/write primitive exists, NotImpl is
-    # honest. See .claude/knowledge/stub-gap-inventory-v0.md §1.2.
+
+    # Registry read family — kernel-side static tree lives in
+    # kernel/subsystems/win32/registry.cpp (mirrors advapi32.c's
+    # well-known keys). NtOpenKey + NtQueryValueKey route through
+    # SYS_REGISTRY's op-multiplexed dispatch (op=1 / op=3); a
+    # future ntdll shim that consumes this table will need
+    # additional metadata to know which op to set in rdi —
+    # the table only carries the SYS_* target.
+    #
+    # NtClose stays on SYS_FILE_CLOSE: the kernel-side handler
+    # already dispatches by handle range (file / mutex / event /
+    # registry) and tears down the right slot.
+    "NtOpenKey":                   "SYS_REGISTRY",         # op=kOpOpenKey (1)
+    "NtOpenKeyEx":                 "SYS_REGISTRY",         # same shape; access mask ignored in v0
+    "NtQueryValueKey":             "SYS_REGISTRY",         # op=kOpQueryValue (3)
+
+    # Cross-process VM family. NtOpenProcess produces the handle;
+    # NtRead / NtWrite / NtQueryVirtualMemory consume it. All four
+    # cap-gate on kCapDebug — cross-AS inspection is one privilege
+    # class. The kernel walks the target's `AddressSpace` regions
+    # table page-by-page, bounces bytes through `mm::PhysToVirt`'s
+    # direct map, and surfaces partial copies via the bytes-moved
+    # out-pointer. See syscall.h's SYS_PROCESS_VM_* docblocks for
+    # the byte-level argument layout.
+    "NtOpenProcess":               "SYS_PROCESS_OPEN",
+    "NtReadVirtualMemory":         "SYS_PROCESS_VM_READ",
+    "NtWriteVirtualMemory":        "SYS_PROCESS_VM_WRITE",
+    "NtQueryVirtualMemory":        "SYS_PROCESS_VM_QUERY",
+
+    # Thread control — caller-local thread handles only in v0
+    # (kWin32ThreadBase + idx, from CreateThread). Cross-process
+    # thread suspend lands with NtOpenThread + a foreign thread
+    # handle table; that's a separate slice. NtAlertResumeThread
+    # aliases to NtResumeThread because v0 has no alert / APC
+    # machinery — the "resume" half is the entire observable
+    # effect of NtAlertResumeThread today.
+    "NtSuspendThread":             "SYS_THREAD_SUSPEND",
+    "NtResumeThread":              "SYS_THREAD_RESUME",
+    "NtAlertResumeThread":         "SYS_THREAD_RESUME",
+    "NtGetContextThread":          "SYS_THREAD_GET_CONTEXT",
+    "NtSetContextThread":          "SYS_THREAD_SET_CONTEXT",
+    "NtOpenThread":                "SYS_THREAD_OPEN",
+    "NtCreateSection":             "SYS_SECTION_CREATE",
+    "NtMapViewOfSection":          "SYS_SECTION_MAP",
+    "NtUnmapViewOfSection":        "SYS_SECTION_UNMAP",
+    "NtDeleteFile":                "SYS_FILE_UNLINK",
+    "NtSetValueKey":               "SYS_REGISTRY",
+    "NtDeleteValueKey":            "SYS_REGISTRY",
+    "NtFlushKey":                  "SYS_REGISTRY",
+    "NtTerminateProcess":          "SYS_PROCESS_TERMINATE",
+    "NtTerminateThread":           "SYS_THREAD_TERMINATE",
+    "NtQueryInformationProcess":   "SYS_PROCESS_QUERY_INFO",
+    "NtAllocateVirtualMemory":     "SYS_VM_ALLOCATE",
+    "NtFreeVirtualMemory":         "SYS_VM_FREE",
+    "NtProtectVirtualMemory":      "SYS_VM_PROTECT",
+    "NtCreateThreadEx":            "SYS_THREAD_CREATE",
+    "NtQueryAttributesFile":       "SYS_FILE_QUERY_ATTRIBUTES",
+    "NtQueryFullAttributesFile":   "SYS_FILE_QUERY_ATTRIBUTES",
+    "NtCreateFile":                "SYS_FILE_OPEN",
+    "NtOpenFile":                  "SYS_FILE_OPEN",
+    "NtReadFile":                  "SYS_FILE_READ",
+    "NtWriteFile":                 "SYS_FILE_WRITE",
+    "NtQueryInformationFile":      "SYS_FILE_FSTAT",
+    "NtEnumerateValueKey":         "SYS_REGISTRY",
+    "NtQueryKey":                  "SYS_REGISTRY",
+    # NtFlushBuffersFile / NtFsControlFile / NtDeviceIoControlFile
+    # are userland-only thunks (no kernel work needed); they don't
+    # appear in KNOWN_MAPPINGS for the same reason the token family
+    # doesn't.
+    # NtCreateKey / NtSetValueKey / NtDeleteKey / NtDeleteValueKey:
+    # NotImpl on purpose — registry is read-only in v0. Mapping
+    # them to SYS_REGISTRY's read-only Open op would silently lie
+    # to a writer; better to keep the honest STATUS_NOT_IMPLEMENTED.
+    # NtEnumerateKey / NtEnumerateValueKey: NotImpl on purpose —
+    # the static tree has no children-list walker yet. Adding
+    # one means broadening the v0 RegKey schema to know about
+    # subkey arrays; deferred.
+    # NtFlushKey / NtNotifyChangeKey: NotImpl on purpose — there
+    # is no journal to flush and no change-notification machinery.
+    # NtWriteVirtualMemory / NtReadVirtualMemory / NtQueryVirtualMemory:
+    # promoted from NotImpl to real syscalls (SYS_PROCESS_VM_*) above.
+    # The historical buggy mappings (SYS_WRITE / SYS_READ) are gone;
+    # see .claude/knowledge/stub-gap-inventory-v0.md §11.6.
     #
     # NtCreateSemaphore / NtReleaseSemaphore: NotImpl on purpose.
     # Previous mappings (SYS_EVENT_CREATE / SYS_EVENT_SET) collapsed
@@ -89,6 +165,14 @@ KNOWN_MAPPINGS = {
     # kernel32.HeapAlloc). The runtime trampolines for these two
     # NT calls live in stubs.cpp at kOff{NtAllocate,NtFree}-
     # VirtualMemory.
+    # NtQueryObject + the token family (NtOpenProcessToken,
+    # NtOpenThreadToken, NtQueryInformationToken,
+    # NtAdjustPrivilegesToken) land as userland-only thunks in
+    # ntdll.c (every answer is computable from handle ranges or
+    # static SID blobs). They are NOT listed in KNOWN_MAPPINGS
+    # because they have no SYS_* mapping — the build script's
+    # /export: lines are the source of truth for those.
+
     # Future candidates (filled in as the SYS_* lands)
     # "NtSetInformationFile":      "SYS_FILE_SEEK",   (Position info class)
 }

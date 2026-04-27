@@ -55,6 +55,7 @@
 
 #include "subsystems/linux/linux_syscall_table_generated.h"
 #include "subsystems/linux/syscall_internal.h"
+#include "syscall/syscall.h"
 
 #include "arch/x86_64/hpet.h"
 #include "arch/x86_64/serial.h"
@@ -390,6 +391,7 @@ enum : u64
     kSysClone = 56,
     kSysFork = 57,
     kSysVfork = 58,
+    kSysClone3 = 435,
     kSysExecve = 59,
     kSysExecveat = 322,
     kSysChroot = 161,
@@ -1028,8 +1030,10 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
         rv = DoPselect6(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8, frame->r9);
         break;
     case kSysEventfd:
+        rv = DoEventfd(frame->rdi);
+        break;
     case kSysEventfd2:
-        rv = DoEventfd(frame->rdi, frame->rsi);
+        rv = DoEventfd2(frame->rdi, frame->rsi);
         break;
     case kSysTimerfdCreate:
         rv = DoTimerfdCreate(frame->rdi, frame->rsi);
@@ -1075,12 +1079,20 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
         rv = DoPrctl(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
         break;
 
-    // Batch 68 — BSD-socket family. No userland socket layer;
-    // socket() returns -ENETDOWN, others -EBADF (no fd to act on).
+    // Batch 68 — BSD-socket family. Two-stage gate:
+    //
+    //   1. kCapNet check first. A sandboxed process WITHOUT the
+    //      cap gets -EACCES — the same shape Linux returns when
+    //      a SECCOMP filter or LSM denies the call. Distinguishable
+    //      from the "no socket layer" code below, which the call
+    //      WITH the cap would see, so test code can tell "denied
+    //      by sandbox" from "stack offline".
+    //   2. With the cap, fall through to the "no userland socket
+    //      layer yet" path: socket()/socketpair() report -ENETDOWN
+    //      so callers fall back gracefully; the rest of the family
+    //      reports -EBADF (the fd they were handed never existed).
     case kSysSocket:
     case kSysSocketpair:
-        rv = -100; // -ENETDOWN
-        break;
     case kSysAccept:
     case kSysAccept4:
     case kSysConnect:
@@ -1097,20 +1109,139 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
     case kSysRecvmsg:
     case kSysSendmmsg:
     case kSysRecvmmsg:
-        rv = kEBADF;
+    {
+        // Reuse the outer-dispatch `proc`; the cap check needs no
+        // mutation, just CapSetHas. Avoids shadowing the const
+        // proc declared at the top of LinuxSyscallDispatch.
+        if (proc == nullptr || !duetos::core::CapSetHas(proc->caps, duetos::core::kCapNet))
+        {
+            duetos::core::RecordSandboxDenial(duetos::core::kCapNet);
+            if (proc != nullptr && duetos::core::ShouldLogDenial(proc->sandbox_denials))
+            {
+                arch::SerialWrite("[linux] denied socket-family pid=");
+                arch::SerialWriteHex(pid);
+                arch::SerialWrite(" syscall=");
+                arch::SerialWriteHex(nr);
+                arch::SerialWrite(" cap=Net denial_idx=");
+                arch::SerialWriteHex(proc->sandbox_denials);
+                arch::SerialWrite("\n");
+            }
+            rv = kEACCES;
+            break;
+        }
+        if (nr == kSysSocket || nr == kSysSocketpair)
+        {
+            rv = -100; // -ENETDOWN — stack not online
+        }
+        else
+        {
+            rv = kEBADF; // no socket fd ever issued
+        }
         break;
+    }
 
-    // Batch 69 — process control. Linux fork/vfork/clone +
-    // execve don't have a v0 implementation; return -ENOSYS.
+    // Batch 69 — process control. v0 implements CLONE_THREAD
+    // same-AS thread create only; full fork (CLONE_THREAD clear)
+    // and execve stay -ENOSYS pending §11.10 follow-ups.
     case kSysClone:
+        rv = DoClone(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8);
+        break;
     case kSysFork:
     case kSysVfork:
-        rv = kENOSYS;
+        // Both forward to the same DoFork. vfork's "child runs
+        // in parent's AS until execve" semantics are not
+        // honoured in v0 — vfork is treated as fork. Sub-GAP.
+        rv = DoFork();
         break;
+    case kSysClone3:
+    {
+        // clone3 packs the equivalent of clone()'s positional
+        // args into a struct clone_args read out of user memory.
+        // v0 honours the same CLONE_THREAD subset DoClone does,
+        // by reading only the prefix of the struct that contains
+        // the fields we care about (flags / pidfd / child_tid /
+        // parent_tid / exit_signal / stack / stack_size / tls).
+        struct CloneArgsPrefix
+        {
+            u64 flags;
+            u64 pidfd;
+            u64 child_tid;
+            u64 parent_tid;
+            u64 exit_signal;
+            u64 stack;
+            u64 stack_size;
+            u64 tls;
+        } args = {};
+        const u64 user_args = frame->rdi;
+        const u64 size = frame->rsi;
+        // Read at most sizeof(prefix) bytes; tolerate older
+        // callers that pass a smaller struct.
+        u64 to_copy = sizeof(args);
+        if (size < to_copy)
+            to_copy = size;
+        if (!mm::CopyFromUser(&args, reinterpret_cast<const void*>(user_args), to_copy))
+        {
+            rv = kEFAULT;
+            break;
+        }
+        // clone3 stack is `stack` + `stack_size` (caller hands
+        // us the BASE; the kernel computes the top). DoClone's
+        // child_stack arg expects a top-of-stack pointer.
+        const u64 stack_top = args.stack + args.stack_size;
+        rv = DoClone(args.flags, stack_top, args.parent_tid, args.child_tid, args.tls);
+        break;
+    }
     case kSysExecve:
     case kSysExecveat:
-        rv = kENOSYS;
-        break;
+    {
+        // Forward to the native SYS_EXECVE handler. v0 ignores
+        // argv/envp (rsi/rdx) — static ELFs work; sub-GAP for
+        // anything that reads its argv/envp.
+        if (frame->rdi == 0)
+        {
+            rv = kEFAULT;
+            break;
+        }
+        u32 path_len = 0;
+        bool path_ok = true;
+        for (; path_len < 255; ++path_len)
+        {
+            char c = 0;
+            if (!mm::CopyFromUser(&c, reinterpret_cast<const void*>(frame->rdi + path_len), 1))
+            {
+                path_ok = false;
+                break;
+            }
+            if (c == 0)
+                break;
+        }
+        if (!path_ok)
+        {
+            rv = kEFAULT;
+            break;
+        }
+        if (path_len == 0)
+        {
+            rv = kENOENT;
+            break;
+        }
+        // Repurpose the trap frame for the native SYS_EXECVE path.
+        // SYS_EXECVE = 152: rdi = user_path, rsi = path_len. The
+        // native handler doesn't return on success — iretq lands
+        // at the new entry. On failure we get -1 in rax.
+        frame->rsi = path_len;
+        frame->rax = static_cast<u64>(::duetos::core::SYS_EXECVE);
+        ::duetos::core::SyscallDispatch(frame);
+        if (frame->rax == static_cast<u64>(-1))
+        {
+            rv = kEACCES;
+            break;
+        }
+        // Success — frame is now the new program's entry frame.
+        // The Linux dispatcher's outer return path will iretq
+        // into the new image.
+        return;
+    }
     case kSysChroot:
     case kSysPivotRoot:
         rv = kEPERM;
