@@ -233,6 +233,8 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     for (u32 i = 0; i < Process::kLinuxCwdCap; ++i)
         p->linux_cwd[i] = 0;
     p->linux_cwd[0] = '/';
+    for (u32 i = 0; i < Process::kLinuxTaskNameCap; ++i)
+        p->linux_task_name[i] = 0;
     p->refcount = 1;
 
     ++g_live_processes;

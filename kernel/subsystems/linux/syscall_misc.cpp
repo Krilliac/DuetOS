@@ -571,6 +571,16 @@ i64 DoPrctl(u64 option, u64 arg2, u64 arg3, u64 arg4, u64 arg5)
         char buf[16];
         for (u32 i = 0; i < sizeof(buf); ++i)
             buf[i] = 0;
+        // Prefer the Linux per-task name when set; fall back to
+        // the Process's immutable creation name otherwise.
+        if (p != nullptr && p->linux_task_name[0] != 0)
+        {
+            for (u32 i = 0; i < sizeof(buf) - 1 && p->linux_task_name[i] != 0; ++i)
+                buf[i] = p->linux_task_name[i];
+            if (!mm::CopyToUser(reinterpret_cast<void*>(arg2), buf, sizeof(buf)))
+                return kEFAULT;
+            return 0;
+        }
         if (p != nullptr && p->name != nullptr)
         {
             for (u32 i = 0; i + 1 < sizeof(buf) && p->name[i] != 0; ++i)
@@ -581,7 +591,22 @@ i64 DoPrctl(u64 option, u64 arg2, u64 arg3, u64 arg4, u64 arg5)
         return 0;
     }
     case kPrSetName:
+    {
+        if (arg2 == 0)
+            return kEFAULT;
+        core::Process* p = core::CurrentProcess();
+        if (p == nullptr)
+            return kEINVAL;
+        char buf[core::Process::kLinuxTaskNameCap];
+        for (u32 i = 0; i < sizeof(buf); ++i)
+            buf[i] = 0;
+        if (!mm::CopyFromUser(buf, reinterpret_cast<const void*>(arg2), sizeof(buf) - 1))
+            return kEFAULT;
+        for (u32 i = 0; i < sizeof(buf); ++i)
+            p->linux_task_name[i] = buf[i];
+        p->linux_task_name[sizeof(buf) - 1] = '\0';
         return 0;
+    }
     case kPrSetSeccomp:
         return kEINVAL;
     default:

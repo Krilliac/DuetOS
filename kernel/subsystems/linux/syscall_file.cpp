@@ -230,6 +230,15 @@ i64 DoClose(u64 fd)
         InotifyRelease(idx);
     else if (state == 11)
         ::duetos::subsystems::win32::SysDirClose(p, idx + core::Process::kWin32DirBase);
+    else if (state == 12)
+    {
+        // pidfd: drop the ProcessRetain that pidfd_open took.
+        // The target may already be reaped — Release tolerates a
+        // null target lookup (no ref to drop).
+        core::Process* target = sched::SchedFindProcessByPid(idx);
+        if (target != nullptr)
+            core::ProcessRelease(target);
+    }
     p->linux_fds[fd].state = 0;
     p->linux_fds[fd].first_cluster = 0;
     p->linux_fds[fd].size = 0;

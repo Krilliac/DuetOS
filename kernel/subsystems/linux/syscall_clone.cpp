@@ -197,6 +197,15 @@ i64 DoFork()
             child->linux_fds[i].size = 0;
             child->linux_fds[i].offset = 0;
         }
+        else if (src.state == 12)
+        {
+            // pidfd: bump the target Process refcount so the
+            // child holds an independent reference. The child's
+            // close path will release.
+            core::Process* tgt = sched::SchedFindProcessByPid(src.first_cluster);
+            if (tgt != nullptr)
+                core::ProcessRetain(tgt);
+        }
     }
     // Hand a LinuxCloneDesc to the existing LinuxCloneEntry —
     // it iretq's into ring-3 with rax = 0 (EnterUserModeThread's

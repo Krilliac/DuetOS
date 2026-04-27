@@ -435,6 +435,18 @@ enum : u64
     kSysIopl = 172,
     kSysIoperm = 173,
     kSysQuotactl = 179,
+
+    // Modern signaling: pidfd holds a refcount on a Process. v0
+    // pidfds use LinuxFd state 12 with first_cluster = pid (we
+    // ProcessRetain at open and Release at close).
+    kSysPidfdOpen = 434,
+    kSysPidfdSendSignal = 424,
+    kSysPidfdGetfd = 438,
+
+    // Kernel-level zero-copy fd-to-fd I/O.
+    kSysSplice = 275,
+    kSysTee = 276,
+    kSysVmsplice = 278,
 };
 
 // kAtFdCwd / kAtRemoveDir constants moved to syscall_internal.h
@@ -1353,6 +1365,28 @@ extern "C" void LinuxSyscallDispatch(arch::TrapFrame* frame)
     case kSysIoperm:
     case kSysQuotactl:
         rv = kEPERM;
+        break;
+
+    case kSysPidfdOpen:
+        rv = DoPidfdOpen(frame->rdi, frame->rsi);
+        break;
+    case kSysPidfdSendSignal:
+        rv = DoPidfdSendSignal(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysPidfdGetfd:
+        // Cross-process fd-table dup is its own slice (would need
+        // a Process->fd-table walker that respects refcounts).
+        rv = kENOSYS;
+        break;
+
+    case kSysSplice:
+        rv = DoSplice(frame->rdi, frame->rsi, frame->rdx, frame->r10, frame->r8, frame->r9);
+        break;
+    case kSysTee:
+        rv = DoTee(frame->rdi, frame->rsi, frame->rdx, frame->r10);
+        break;
+    case kSysVmsplice:
+        rv = DoVmsplice(frame->rdi, frame->rsi, frame->rdx, frame->r10);
         break;
 
     default:

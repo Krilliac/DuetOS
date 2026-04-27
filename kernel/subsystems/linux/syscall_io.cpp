@@ -82,7 +82,7 @@ i64 DoWrite(u64 fd, u64 user_buf, u64 len)
     // Pipe-read end / timerfd / signalfd / epoll / inotify — all
     // read-only fd kinds reject writes with -EBADF, matching Linux.
     if (p->linux_fds[fd].state == 3 || p->linux_fds[fd].state == 7 || p->linux_fds[fd].state == 8 ||
-        p->linux_fds[fd].state == 9 || p->linux_fds[fd].state == 10)
+        p->linux_fds[fd].state == 9 || p->linux_fds[fd].state == 10 || p->linux_fds[fd].state == 12)
         return kEBADF;
     if (p->linux_fds[fd].state == 11)
         return kEISDIR;
@@ -205,6 +205,9 @@ i64 DoRead(u64 fd, u64 user_buf, u64 len)
     // callers must use getdents64 instead.
     if (p->linux_fds[fd].state == 11)
         return kEISDIR;
+    // pidfd — read is unsupported on Linux too.
+    if (p->linux_fds[fd].state == 12)
+        return kEINVAL;
     // Pipe-write end is write-only.
     if (p->linux_fds[fd].state == 4)
         return kEBADF;

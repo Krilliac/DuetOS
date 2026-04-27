@@ -315,6 +315,23 @@ i64 DoFcntl(u64 fd, u64 cmd, u64 arg);
 // delivery — every entry persists state where the caller probes
 // it (sigaction slots, signal mask) or returns 0 / -EINTR so
 // libc paths make forward progress instead of -ENOSYS-crashing.
+// Modern pidfd signaling. pidfd_open allocates a LinuxFd
+// (state 12, first_cluster = pid) that pins the target Process
+// via ProcessRetain; close drops the ref. pidfd_send_signal
+// resolves the pidfd back to the target Process and forwards
+// to the real LinuxSignalDeliver path.
+i64 DoPidfdOpen(u64 pid, u64 flags);
+i64 DoPidfdSendSignal(u64 pidfd, u64 sig, u64 user_info, u64 flags);
+
+// Kernel-level zero-copy fd-to-fd I/O. v0 implementations bounce
+// through a 1 KiB on-stack buffer (no actual zero-copy yet, but
+// the syscall surface works so callers don't need to roll their
+// own pipe-pumping loops). splice/tee share a 1 KiB chunk; vmsplice
+// handles only the iovec→pipe direction.
+i64 DoSplice(u64 fd_in, u64 user_off_in, u64 fd_out, u64 user_off_out, u64 len, u64 flags);
+i64 DoTee(u64 fd_in, u64 fd_out, u64 len, u64 flags);
+i64 DoVmsplice(u64 fd, u64 user_iov, u64 nr_segs, u64 flags);
+
 i64 DoRtSigaction(u64 signum, u64 new_act, u64 old_act, u64 sigsetsize);
 
 // Deliver a Linux signal to `target`. Looks up the target's

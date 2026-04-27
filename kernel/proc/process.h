@@ -851,6 +851,14 @@ struct Process
     static constexpr u64 kLinuxCwdCap = 256;
     char linux_cwd[kLinuxCwdCap];
 
+    // Linux per-task name (PR_SET_NAME / PR_GET_NAME). 16-byte
+    // cap matches the Linux kernel's TASK_COMM_LEN. Empty string
+    // means "use Process::name as the fallback" — the canonical
+    // immutable name set at create time. PR_SET_NAME copies up to
+    // 15 chars + NUL into this buffer; PR_GET_NAME reads it back.
+    static constexpr u64 kLinuxTaskNameCap = 16;
+    char linux_task_name[kLinuxTaskNameCap];
+
     u64 refcount;
 };
 
