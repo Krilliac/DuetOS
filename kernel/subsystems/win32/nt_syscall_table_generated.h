@@ -8,7 +8,7 @@
 // Target Windows version: Windows 11 and Server (11 25H2)
 // Bedrock NT calls (present in every Windows XP→Win11 25H2): 292
 // All known NT calls on the target version: 489
-// DuetOS coverage: 45/292 = 15%
+// DuetOS coverage: 47/292 = 16%
 //
 // See tools/win32-compat/README.md for the legal + design rationale.
 
@@ -99,7 +99,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
     {"NtWriteVirtualMemory", 0x003a, static_cast<u32>(::duetos::core::SYS_PROCESS_VM_WRITE)},
     {"NtCloseObjectAuditAlarm", 0x003b, kSysNtNotImpl},
     {"NtDuplicateObject", 0x003c, kSysNtNotImpl},
-    {"NtQueryAttributesFile", 0x003d, kSysNtNotImpl},
+    {"NtQueryAttributesFile", 0x003d, static_cast<u32>(::duetos::core::SYS_FILE_QUERY_ATTRIBUTES)},
     {"NtClearEvent", 0x003e, kSysNtNotImpl},
     {"NtReadVirtualMemory", 0x003f, static_cast<u32>(::duetos::core::SYS_PROCESS_VM_READ)},
     {"NtOpenEvent", 0x0040, kSysNtNotImpl},
@@ -243,7 +243,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
     {"NtQueryDirectoryObject", 0x014e, kSysNtNotImpl},
     {"NtQueryDriverEntryOrder", 0x014f, kSysNtNotImpl},
     {"NtQueryEaFile", 0x0150, kSysNtNotImpl},
-    {"NtQueryFullAttributesFile", 0x0151, kSysNtNotImpl},
+    {"NtQueryFullAttributesFile", 0x0151, static_cast<u32>(::duetos::core::SYS_FILE_QUERY_ATTRIBUTES)},
     {"NtQueryInformationAtom", 0x0152, kSysNtNotImpl},
     {"NtQueryInformationJobObject", 0x0156, kSysNtNotImpl},
     {"NtQueryInformationPort", 0x0157, kSysNtNotImpl},
@@ -336,7 +336,7 @@ inline constexpr NtSyscallMapping kBedrockNtSyscalls[] = {
 inline constexpr u32 kBedrockNtSyscallCount =
     sizeof(kBedrockNtSyscalls) / sizeof(kBedrockNtSyscalls[0]);
 
-inline constexpr u32 kBedrockNtSyscallsCovered = 45;
+inline constexpr u32 kBedrockNtSyscallsCovered = 47;
 
 /// Every NT syscall known on the target Windows version — superset
 /// of `kBedrockNtSyscalls`. Includes version-specific additions
@@ -406,7 +406,7 @@ inline constexpr NtSyscallMapping kAllNtSyscalls[] = {
     {"NtWriteVirtualMemory", 0x003a, static_cast<u32>(::duetos::core::SYS_PROCESS_VM_WRITE)},
     {"NtCloseObjectAuditAlarm", 0x003b, kSysNtNotImpl},
     {"NtDuplicateObject", 0x003c, kSysNtNotImpl},
-    {"NtQueryAttributesFile", 0x003d, kSysNtNotImpl},
+    {"NtQueryAttributesFile", 0x003d, static_cast<u32>(::duetos::core::SYS_FILE_QUERY_ATTRIBUTES)},
     {"NtClearEvent", 0x003e, kSysNtNotImpl},
     {"NtReadVirtualMemory", 0x003f, static_cast<u32>(::duetos::core::SYS_PROCESS_VM_READ)},
     {"NtOpenEvent", 0x0040, kSysNtNotImpl},
@@ -682,7 +682,7 @@ inline constexpr NtSyscallMapping kAllNtSyscalls[] = {
     {"NtQueryDirectoryObject", 0x014e, kSysNtNotImpl},
     {"NtQueryDriverEntryOrder", 0x014f, kSysNtNotImpl},
     {"NtQueryEaFile", 0x0150, kSysNtNotImpl},
-    {"NtQueryFullAttributesFile", 0x0151, kSysNtNotImpl},
+    {"NtQueryFullAttributesFile", 0x0151, static_cast<u32>(::duetos::core::SYS_FILE_QUERY_ATTRIBUTES)},
     {"NtQueryInformationAtom", 0x0152, kSysNtNotImpl},
     {"NtQueryInformationByName", 0x0153, kSysNtNotImpl},
     {"NtQueryInformationCpuPartition", 0x0154, kSysNtNotImpl},

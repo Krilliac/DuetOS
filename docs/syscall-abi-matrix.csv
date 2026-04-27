@@ -524,6 +524,7 @@ native,147,SYS_PROCESS_QUERY_INFO,implemented,kernel/syscall/syscall.h::SyscallN
 native,148,SYS_VM_ALLOCATE,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
 native,149,SYS_VM_FREE,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
 native,150,SYS_VM_PROTECT,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
+native,151,SYS_FILE_QUERY_ATTRIBUTES,implemented,kernel/syscall/syscall.h::SyscallNumber,none (native syscall entry)
 native,512,native_gapfill_0x200,translated,kernel/subsystems/translation/translate.cpp::NativeClockNs,linux-self:NowNs
 native,513,native_gapfill_0x201,translated,kernel/subsystems/translation/translate.cpp::NativeGetRandom,synthetic:xorshift-from-rdtsc
 native,528,native_gapfill_0x210,translated,kernel/subsystems/translation/translate.cpp::NativeWin32Alloc,win32:HeapAlloc
@@ -589,7 +590,7 @@ nt,57,NtFsControlFile,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStubCa
 nt,58,NtWriteVirtualMemory,translated,kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_PROCESS_VM_WRITE,routes to native SYS_PROCESS_VM_WRITE
 nt,59,NtCloseObjectAuditAlarm,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStubCatchAll,STATUS_NOT_IMPLEMENTED
 nt,60,NtDuplicateObject,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStubCatchAll,STATUS_NOT_IMPLEMENTED
-nt,61,NtQueryAttributesFile,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStubCatchAll,STATUS_NOT_IMPLEMENTED
+nt,61,NtQueryAttributesFile,translated,kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_FILE_QUERY_ATTRIBUTES,routes to native SYS_FILE_QUERY_ATTRIBUTES
 nt,62,NtClearEvent,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStubCatchAll,STATUS_NOT_IMPLEMENTED
 nt,63,NtReadVirtualMemory,translated,kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_PROCESS_VM_READ,routes to native SYS_PROCESS_VM_READ
 nt,64,NtOpenEvent,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStubCatchAll,STATUS_NOT_IMPLEMENTED
@@ -865,7 +866,7 @@ nt,333,NtQueryDirectoryFileEx,unimplemented,kernel/subsystems/win32/thunks.cpp::
 nt,334,NtQueryDirectoryObject,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStubCatchAll,STATUS_NOT_IMPLEMENTED
 nt,335,NtQueryDriverEntryOrder,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStubCatchAll,STATUS_NOT_IMPLEMENTED
 nt,336,NtQueryEaFile,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStubCatchAll,STATUS_NOT_IMPLEMENTED
-nt,337,NtQueryFullAttributesFile,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStubCatchAll,STATUS_NOT_IMPLEMENTED
+nt,337,NtQueryFullAttributesFile,translated,kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_FILE_QUERY_ATTRIBUTES,routes to native SYS_FILE_QUERY_ATTRIBUTES
 nt,338,NtQueryInformationAtom,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStubCatchAll,STATUS_NOT_IMPLEMENTED
 nt,339,NtQueryInformationByName,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStubCatchAll,STATUS_NOT_IMPLEMENTED
 nt,340,NtQueryInformationCpuPartition,unimplemented,kernel/subsystems/win32/thunks.cpp::NtStubCatchAll,STATUS_NOT_IMPLEMENTED

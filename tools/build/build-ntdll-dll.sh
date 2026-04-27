@@ -136,6 +136,10 @@ set +e
     /export:ZwQueryInformationToken=NtQueryInformationToken \
     /export:NtAdjustPrivilegesToken \
     /export:ZwAdjustPrivilegesToken=NtAdjustPrivilegesToken \
+    /export:NtQueryAttributesFile \
+    /export:ZwQueryAttributesFile=NtQueryAttributesFile \
+    /export:NtQueryFullAttributesFile \
+    /export:ZwQueryFullAttributesFile=NtQueryFullAttributesFile \
     /export:NtContinue \
     /export:ZwContinue=NtContinue \
     /export:NtAllocateVirtualMemory \

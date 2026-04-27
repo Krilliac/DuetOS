@@ -54,6 +54,7 @@
 #include "debug/bp_syscall.h"
 #include "debug/breakpoints.h"
 #include "debug/probes.h"
+#include "fs/file_route.h"
 #include "fs/vfs.h"
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
@@ -1144,6 +1145,70 @@ void SyscallDispatch(arch::TrapFrame* frame)
         if (user_old != 0)
         {
             (void)mm::CopyToUser(reinterpret_cast<void*>(user_old), &first_old_protect, sizeof(first_old_protect));
+        }
+        frame->rax = kStatusSuccess;
+        return;
+    }
+
+    case SYS_FILE_QUERY_ATTRIBUTES:
+    {
+        // Path-based file stat. Wires through fs::routing's
+        // StatPathForProcess (fat32-only in v0).
+        const u64 user_path = frame->rdi;
+        const u64 path_len = frame->rsi;
+        const u64 user_out = frame->rdx;
+        const u64 buf_cap = frame->r10;
+        constexpr u64 kFileBasicInfoBytes = 56;
+        if (buf_cap < kFileBasicInfoBytes || user_out == 0)
+        {
+            frame->rax = kStatusInvalidParameter;
+            return;
+        }
+        if (path_len == 0 || path_len >= 256)
+        {
+            frame->rax = kStatusInvalidParameter;
+            return;
+        }
+        char kpath[256];
+        if (!mm::CopyFromUser(kpath, reinterpret_cast<const void*>(user_path), path_len))
+        {
+            frame->rax = kStatusAccessViolation;
+            return;
+        }
+        kpath[path_len] = '\0';
+        u64 size = 0;
+        bool is_dir = false;
+        Process* caller = CurrentProcess();
+        if (!fs::routing::StatPathForProcess(caller, kpath, &size, &is_dir))
+        {
+            constexpr u64 kStatusObjectNameNotFound = 0xC0000034ULL;
+            frame->rax = kStatusObjectNameNotFound;
+            return;
+        }
+        // Pack FILE_NETWORK_OPEN_INFORMATION (56 bytes):
+        //   [0..8)   CreationTime    — 0 (no metadata)
+        //   [8..16)  LastAccessTime  — 0
+        //   [16..24) LastWriteTime   — 0
+        //   [24..32) ChangeTime      — 0
+        //   [32..40) AllocationSize  — page-rounded size
+        //   [40..48) EndOfFile       — file size
+        //   [48..52) FileAttributes  — 0x10 directory, else 0x80 normal
+        //   [52..56) Reserved        — 0
+        u8 buf[kFileBasicInfoBytes];
+        for (u32 i = 0; i < kFileBasicInfoBytes; ++i)
+            buf[i] = 0;
+        const u64 alloc_size = (size + 4095) & ~4095ULL;
+        for (u32 i = 0; i < 8; ++i)
+            buf[32 + i] = static_cast<u8>((alloc_size >> (i * 8)) & 0xFF);
+        for (u32 i = 0; i < 8; ++i)
+            buf[40 + i] = static_cast<u8>((size >> (i * 8)) & 0xFF);
+        const u32 attrs = is_dir ? 0x10u : 0x80u;
+        for (u32 i = 0; i < 4; ++i)
+            buf[48 + i] = static_cast<u8>((attrs >> (i * 8)) & 0xFF);
+        if (!mm::CopyToUser(reinterpret_cast<void*>(user_out), buf, kFileBasicInfoBytes))
+        {
+            frame->rax = kStatusAccessViolation;
+            return;
         }
         frame->rax = kStatusSuccess;
         return;

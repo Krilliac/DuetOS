@@ -1470,6 +1470,18 @@ enum SyscallNumber : u64
     SYS_VM_ALLOCATE = 148,
     SYS_VM_FREE = 149,
     SYS_VM_PROTECT = 150,
+
+    // SYS_FILE_QUERY_ATTRIBUTES — path-based file metadata
+    // lookup (no handle required). Backs NtQueryAttributesFile /
+    // NtQueryFullAttributesFile.
+    //   rdi = const char* user_path (NUL-terminated, max 64).
+    //   rsi = path_len (excluding NUL).
+    //   rdx = u8* user out buffer (FILE_NETWORK_OPEN_INFORMATION
+    //         layout = 56 bytes: 4×FILETIME, AllocationSize,
+    //         EndOfFile, FileAttributes, Reserved).
+    //   r10 = buffer cap.
+    //   rax = NTSTATUS.
+    SYS_FILE_QUERY_ATTRIBUTES = 151,
 };
 
 // Win32 CONTEXT — first 0x100 bytes (integer + control + the

@@ -4201,6 +4201,14 @@
   },
   {
     "abi": "native",
+    "number": 151,
+    "name": "SYS_FILE_QUERY_ATTRIBUTES",
+    "status": "implemented",
+    "owner": "kernel/syscall/syscall.h::SyscallNumber",
+    "fallback": "none (native syscall entry)"
+  },
+  {
+    "abi": "native",
     "number": 512,
     "name": "native_gapfill_0x200",
     "status": "translated",
@@ -4723,9 +4731,9 @@
     "abi": "nt",
     "number": 61,
     "name": "NtQueryAttributesFile",
-    "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
-    "fallback": "STATUS_NOT_IMPLEMENTED"
+    "status": "translated",
+    "owner": "kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_FILE_QUERY_ATTRIBUTES",
+    "fallback": "routes to native SYS_FILE_QUERY_ATTRIBUTES"
   },
   {
     "abi": "nt",
@@ -6931,9 +6939,9 @@
     "abi": "nt",
     "number": 337,
     "name": "NtQueryFullAttributesFile",
-    "status": "unimplemented",
-    "owner": "kernel/subsystems/win32/thunks.cpp::NtStubCatchAll",
-    "fallback": "STATUS_NOT_IMPLEMENTED"
+    "status": "translated",
+    "owner": "kernel/subsystems/win32/nt_syscall_table_generated.h::SYS_FILE_QUERY_ATTRIBUTES",
+    "fallback": "routes to native SYS_FILE_QUERY_ATTRIBUTES"
   },
   {
     "abi": "nt",

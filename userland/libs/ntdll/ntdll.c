@@ -2046,6 +2046,101 @@ __declspec(dllexport) NTSTATUS NtFlushKey(HANDLE KeyHandle)
 }
 
 /* ------------------------------------------------------------------
+ * NtQueryAttributesFile / NtQueryFullAttributesFile — path-based
+ * file stat. Both forward to SYS_FILE_QUERY_ATTRIBUTES (151).
+ *
+ * NtQueryAttributesFile fills a 40-byte FILE_BASIC_INFORMATION
+ * (Times×4 + Attrs); NtQueryFullAttributesFile fills the 56-byte
+ * FILE_NETWORK_OPEN_INFORMATION which adds AllocationSize +
+ * EndOfFile. The kernel writes the larger struct; the Basic
+ * variant truncates locally.
+ * ------------------------------------------------------------------ */
+static int ExtractAsciiPathFromObjectAttributes(void* ObjectAttributes, char* out, unsigned cap, unsigned* out_len)
+{
+    if (ObjectAttributes == (void*)0)
+        return 0;
+    unsigned char* base = (unsigned char*)ObjectAttributes;
+    UNICODE_STRING* name = *(UNICODE_STRING**)(base + 16);
+    if (name == (UNICODE_STRING*)0 || name->Buffer == (wchar_t16*)0)
+        return 0;
+    const unsigned chars = (unsigned)(name->Length / 2);
+    unsigned start = 0;
+    if (chars >= 4 && name->Buffer[0] == '\\' && name->Buffer[1] == '?' && name->Buffer[2] == '?' &&
+        name->Buffer[3] == '\\')
+        start = 4;
+    if (chars - start + 1 > cap)
+        return 0;
+    for (unsigned i = start; i < chars; ++i)
+    {
+        unsigned short w = name->Buffer[i];
+        out[i - start] = (w <= 0x7F) ? (char)w : '?';
+    }
+    out[chars - start] = 0;
+    if (out_len != (unsigned*)0)
+        *out_len = chars - start;
+    return 1;
+}
+
+__declspec(dllexport) NTSTATUS NtQueryAttributesFile(void* ObjectAttributes, void* FileInformation)
+{
+    char path[256];
+    unsigned path_len = 0;
+    if (!ExtractAsciiPathFromObjectAttributes(ObjectAttributes, path, sizeof(path), &path_len))
+        return NTSTATUS_INVALID_PARAMETER;
+    if (FileInformation == (void*)0)
+        return NTSTATUS_INVALID_PARAMETER;
+    unsigned char stage[56];
+    long long status;
+    __asm__ volatile("mov %4, %%r10\n\t"
+                     "int $0x80"
+                     : "=a"(status)
+                     : "a"((long long)151), "D"((long long)path), "S"((long long)path_len), "d"((long long)stage),
+                       "r"((long long)sizeof(stage))
+                     : "r10", "memory");
+    if (status != 0)
+        return (NTSTATUS)status;
+    /* FILE_BASIC_INFORMATION: 4×FILETIME + Attributes + 4-byte pad. */
+    unsigned char* out = (unsigned char*)FileInformation;
+    for (unsigned i = 0; i < 32; ++i)
+        out[i] = stage[i];
+    for (unsigned i = 0; i < 4; ++i)
+        out[32 + i] = stage[48 + i];
+    out[36] = 0;
+    out[37] = 0;
+    out[38] = 0;
+    out[39] = 0;
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS ZwQueryAttributesFile(void* ObjectAttributes, void* FileInformation)
+{
+    return NtQueryAttributesFile(ObjectAttributes, FileInformation);
+}
+
+__declspec(dllexport) NTSTATUS NtQueryFullAttributesFile(void* ObjectAttributes, void* FileInformation)
+{
+    char path[256];
+    unsigned path_len = 0;
+    if (!ExtractAsciiPathFromObjectAttributes(ObjectAttributes, path, sizeof(path), &path_len))
+        return NTSTATUS_INVALID_PARAMETER;
+    if (FileInformation == (void*)0)
+        return NTSTATUS_INVALID_PARAMETER;
+    long long status;
+    __asm__ volatile("mov %4, %%r10\n\t"
+                     "int $0x80"
+                     : "=a"(status)
+                     : "a"((long long)151), "D"((long long)path), "S"((long long)path_len),
+                       "d"((long long)FileInformation), "r"((long long)56)
+                     : "r10", "memory");
+    return (NTSTATUS)status;
+}
+
+__declspec(dllexport) NTSTATUS ZwQueryFullAttributesFile(void* ObjectAttributes, void* FileInformation)
+{
+    return NtQueryFullAttributesFile(ObjectAttributes, FileInformation);
+}
+
+/* ------------------------------------------------------------------
  * NtCreateThreadEx — same-process thread create.
  *
  * Win32 NT signature:

@@ -495,6 +495,28 @@ bool UnlinkForProcess(::duetos::core::Process* proc, const char* path)
     return fat32::Fat32DeleteAtPath(v, rest);
 }
 
+bool StatPathForProcess(::duetos::core::Process* proc, const char* path, u64* out_size, bool* out_is_dir)
+{
+    (void)proc;
+    if (path == nullptr || path[0] == '\0')
+        return false;
+    u32 idx = 0;
+    const char* rest = nullptr;
+    if (!ParseDiskPath(path, &idx, &rest))
+        return false;
+    const fat32::Volume* v = fat32::Fat32Volume(idx);
+    if (v == nullptr)
+        return false;
+    fat32::DirEntry e;
+    if (!fat32::Fat32LookupPath(v, rest, &e))
+        return false;
+    if (out_size != nullptr)
+        *out_size = e.size_bytes;
+    if (out_is_dir != nullptr)
+        *out_is_dir = (e.attributes & 0x10) != 0; // ATTR_DIRECTORY
+    return true;
+}
+
 bool RenameForProcess(::duetos::core::Process* proc, const char* src, const char* dst)
 {
     (void)proc;

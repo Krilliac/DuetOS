@@ -86,6 +86,15 @@ u64 FstatForProcess(::duetos::core::Process* proc, u64 handle, u64* out_size);
 /// free slot is a no-op. Always returns 0.
 u64 CloseForProcess(::duetos::core::Process* proc, u64 handle);
 
+/// Look up a path's metadata without opening a handle. Used by
+/// NtQueryAttributesFile / NtQueryFullAttributesFile and the
+/// Linux stat() family. Fills `out_size` (file size in bytes)
+/// and `out_is_dir` (true when the entry is a directory). v0
+/// honours fat32 paths only ("/disk/<idx>/<rest>"); other paths
+/// return false. Returns false if the path doesn't exist or
+/// the volume isn't mounted.
+bool StatPathForProcess(::duetos::core::Process* proc, const char* path, u64* out_size, bool* out_is_dir);
+
 /// Remove a file at `path`. v0 honours fat32 paths only
 /// ("/disk/<idx>/<rest>"); everything else returns false
 /// (ramfs is read-only, tmpfs has its own shell-only surface).
