@@ -263,6 +263,18 @@ set +e
     /export:NtFlushInstructionCache \
     /export:NtTestAlert \
     /export:NtRaiseException \
+    /export:NtPulseEvent \
+    /export:NtClearEvent \
+    /export:NtQueryEvent \
+    /export:NtSignalAndWaitForSingleObject \
+    /export:NtQueueApcThread \
+    /export:NtQueueApcThreadEx \
+    /export:NtAlertThread \
+    /export:NtCallbackReturn \
+    /export:NtAdjustGroupsToken \
+    /export:NtSetInformationToken \
+    /export:NtCheckTokenMembership \
+    /export:NtPrivilegeObjectAuditAlarm \
     /export:NtContinue \
     /export:ZwContinue=NtContinue \
     /export:NtAllocateVirtualMemory \

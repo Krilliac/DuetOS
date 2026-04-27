@@ -2247,6 +2247,145 @@ __declspec(dllexport) NTSTATUS NtCancelIoFile(HANDLE FileHandle, void* IoStatusB
 }
 
 /* ------------------------------------------------------------------
+ * NT misc sync + APC + event extras + token write surface
+ * ------------------------------------------------------------------ */
+__declspec(dllexport) NTSTATUS NtPulseEvent(HANDLE EventHandle, long* PreviousState)
+{
+    long long rv1, rv2;
+    __asm__ volatile("int $0x80" : "=a"(rv1) : "a"((long long)31), "D"((long long)EventHandle) : "memory");
+    __asm__ volatile("int $0x80" : "=a"(rv2) : "a"((long long)32), "D"((long long)EventHandle) : "memory");
+    if (PreviousState != (long*)0)
+        *PreviousState = 0;
+    if (rv1 != 0 || rv2 != 0)
+        return (NTSTATUS)0xC0000008;
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS NtClearEvent(HANDLE EventHandle)
+{
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)32), "D"((long long)EventHandle) : "memory");
+    return rv == 0 ? NTSTATUS_SUCCESS : (NTSTATUS)0xC0000008;
+}
+
+__declspec(dllexport) NTSTATUS NtQueryEvent(HANDLE EventHandle, ULONG EventInformationClass, void* EventInformation,
+                                            ULONG EventInformationLength, ULONG* ReturnLength)
+{
+    (void)EventHandle;
+    (void)EventInformationClass;
+    if (EventInformation == (void*)0 || EventInformationLength < 8)
+        return NTSTATUS_INVALID_PARAMETER;
+    unsigned char* out = (unsigned char*)EventInformation;
+    for (unsigned i = 0; i < 8; ++i)
+        out[i] = 0;
+    if (ReturnLength != (ULONG*)0)
+        *ReturnLength = 8;
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS NtSignalAndWaitForSingleObject(HANDLE ObjectToSignal, HANDLE WaitableObject,
+                                                              BOOL Alertable, void* Time)
+{
+    /* Best-effort: signal first object, then wait on second.
+     * Atomicity not preserved (sub-GAP). */
+    unsigned long long sig_handle = (unsigned long long)ObjectToSignal;
+    long long sig_status = 0;
+    if (sig_handle >= 0x200 && sig_handle < 0x208)
+        __asm__ volatile("int $0x80"
+                         : "=a"(sig_status)
+                         : "a"((long long)27), "D"((long long)ObjectToSignal)
+                         : "memory");
+    else if (sig_handle >= 0x300 && sig_handle < 0x308)
+        __asm__ volatile("int $0x80"
+                         : "=a"(sig_status)
+                         : "a"((long long)31), "D"((long long)ObjectToSignal)
+                         : "memory");
+    if (sig_status != 0)
+        return (NTSTATUS)0xC0000008;
+    return NtWaitForSingleObject(WaitableObject, Alertable, (const long long*)Time);
+}
+
+__declspec(dllexport) NTSTATUS NtQueueApcThread(HANDLE ThreadHandle, void* ApcRoutine, void* NormalContext,
+                                                void* SystemArgument1, void* SystemArgument2)
+{
+    (void)ThreadHandle;
+    (void)ApcRoutine;
+    (void)NormalContext;
+    (void)SystemArgument1;
+    (void)SystemArgument2;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtQueueApcThreadEx(HANDLE ThreadHandle, HANDLE ReserveHandle, void* ApcRoutine,
+                                                  void* NormalContext, void* SystemArgument1, void* SystemArgument2)
+{
+    (void)ThreadHandle;
+    (void)ReserveHandle;
+    (void)ApcRoutine;
+    (void)NormalContext;
+    (void)SystemArgument1;
+    (void)SystemArgument2;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtAlertThread(HANDLE ThreadHandle)
+{
+    (void)ThreadHandle;
+    return (NTSTATUS)0xC0000002;
+}
+
+__declspec(dllexport) NTSTATUS NtCallbackReturn(void* OutputBuffer, ULONG OutputLength, NTSTATUS Status)
+{
+    (void)OutputBuffer;
+    (void)OutputLength;
+    return Status;
+}
+
+__declspec(dllexport) NTSTATUS NtAdjustGroupsToken(HANDLE TokenHandle, BOOL ResetToDefault, void* NewState,
+                                                   ULONG BufferLength, void* PreviousState, ULONG* ReturnLength)
+{
+    (void)TokenHandle;
+    (void)ResetToDefault;
+    (void)NewState;
+    (void)BufferLength;
+    (void)PreviousState;
+    if (ReturnLength != (ULONG*)0)
+        *ReturnLength = 0;
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS NtSetInformationToken(HANDLE TokenHandle, ULONG TokenInformationClass,
+                                                     void* TokenInformation, ULONG TokenInformationLength)
+{
+    (void)TokenHandle;
+    (void)TokenInformationClass;
+    (void)TokenInformation;
+    (void)TokenInformationLength;
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS NtCheckTokenMembership(HANDLE TokenHandle, void* SidToCheck, BOOL* IsMember)
+{
+    (void)TokenHandle;
+    (void)SidToCheck;
+    if (IsMember != (BOOL*)0)
+        *IsMember = 1;
+    return NTSTATUS_SUCCESS;
+}
+
+__declspec(dllexport) NTSTATUS NtPrivilegeObjectAuditAlarm(void* SubsystemName, void* HandleId, HANDLE ClientToken,
+                                                           ULONG DesiredAccess, void* Privileges, BOOL AccessGranted)
+{
+    (void)SubsystemName;
+    (void)HandleId;
+    (void)ClientToken;
+    (void)DesiredAccess;
+    (void)Privileges;
+    (void)AccessGranted;
+    return NTSTATUS_SUCCESS;
+}
+
+/* ------------------------------------------------------------------
  * NT timer family — explicit NotImpl facades.
  *
  * Win32 NT timers are kernel-coordinated dispatcher objects.
