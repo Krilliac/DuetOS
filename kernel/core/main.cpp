@@ -109,6 +109,8 @@
 #include "ipc/kobject.h"
 #include "sync/rwlock.h"
 #include "sync/spinlock.h"
+#include "time/clocksource.h"
+#include "time/timekeeper.h"
 #include "security/auth.h"
 #ifdef DUETOS_CRTRACE_SURVEY
 #include "diag/cleanroom_trace.h"
@@ -999,6 +1001,17 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     SerialWrite("[boot] Bringing up HPET (if present).\n");
     HpetInit();
     HpetSelfTest();
+
+    // Clocksource registry + timekeeper (plan A2 infra). Registers
+    // HPET as the v0 monotonic clocksource so new code can call
+    // `time::MonotonicNs()` instead of inlining the
+    // counter*period_fs/1e6 math. Existing call sites (DoNowNs in
+    // time_syscall.cpp, etc.) are NOT migrated here — that's a
+    // tracked follow-up. Self-test exercises the registry without
+    // depending on real hardware.
+    duetos::time::ClocksourceSelfTest();
+    duetos::time::TimekeeperInit();
+    duetos::time::TimekeeperSelfTest();
 
     // Sample the CMOS RTC once at boot so the wall-clock time
     // is visible in the boot log. A future slice wires this
