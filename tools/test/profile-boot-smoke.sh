@@ -183,8 +183,10 @@ if [[ $fail -ne 0 ]]; then
     for m in "${missing[@]}"; do
         echo "MISSING: $m"
     done
-    echo "=== last 80 lines of serial log (${SERIAL_LOG}) ==="
-    tail -80 "${SERIAL_LOG}" || true
+    echo "=== last 200 lines of serial log (${SERIAL_LOG}) ==="
+    tail -200 "${SERIAL_LOG}" || true
+    echo "=== smoke marker grep: any [smoke] / [boot] >>>/<<< / [panic] lines ==="
+    grep -aE '^\[smoke\]|^\[boot\] >>>|^\[boot\] <<<|^\[panic\]|DUETOS CRASH' "${SERIAL_LOG}" || true
 
     # Distinguish a real regression from a flake. If the kernel
     # reached the [smoke] complete sentinel for THIS profile, but
