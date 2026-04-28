@@ -792,9 +792,9 @@ __declspec(dllexport) size_t fwrite(const void* ptr, size_t sz, size_t nmemb, FI
         long long rv;
         __asm__ volatile("int $0x80"
                          : "=a"(rv)
-                         : "a"((long long)43),  /* SYS_FILE_WRITE */
-                           "D"(f->handle),      /* rdi = handle */
-                           "S"((long long)ptr), /* rsi = buf */
+                         : "a"((long long)43),   /* SYS_FILE_WRITE */
+                           "D"(f->handle),       /* rdi = handle */
+                           "S"((long long)ptr),  /* rsi = buf */
                            "d"((long long)total) /* rdx = count */
                          : "memory");
         if (rv <= 0)

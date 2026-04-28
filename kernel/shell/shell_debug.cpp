@@ -225,9 +225,8 @@ void CmdInspectIpc()
 {
     ConsoleWriteln("INSPECT IPC: known KObject types (id name)");
     static constexpr duetos::ipc::KObjectType kTypes[] = {
-        duetos::ipc::KObjectType::Mutex,    duetos::ipc::KObjectType::Event,
-        duetos::ipc::KObjectType::Semaphore, duetos::ipc::KObjectType::Mailbox,
-        duetos::ipc::KObjectType::Waitable, duetos::ipc::KObjectType::File,
+        duetos::ipc::KObjectType::Mutex,   duetos::ipc::KObjectType::Event,    duetos::ipc::KObjectType::Semaphore,
+        duetos::ipc::KObjectType::Mailbox, duetos::ipc::KObjectType::Waitable, duetos::ipc::KObjectType::File,
     };
     for (auto t : kTypes)
     {

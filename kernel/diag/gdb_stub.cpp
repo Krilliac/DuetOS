@@ -21,10 +21,10 @@ namespace
 // Parser state machine.
 enum class State : u8
 {
-    Idle,         ///< Waiting for `$` packet-start.
-    Body,         ///< Accumulating packet body until `#`.
-    Csum1,        ///< Reading first checksum hex digit.
-    Csum2,        ///< Reading second checksum hex digit.
+    Idle,  ///< Waiting for `$` packet-start.
+    Body,  ///< Accumulating packet body until `#`.
+    Csum1, ///< Reading first checksum hex digit.
+    Csum2, ///< Reading second checksum hex digit.
 };
 
 constinit State g_state = State::Idle;

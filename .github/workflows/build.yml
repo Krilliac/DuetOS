@@ -163,7 +163,14 @@ jobs:
           status=""
           for i in $(seq 1 ${attempts}); do
             echo "::group::smoke attempt ${i}/${attempts}"
-            DUETOS_TIMEOUT=30 \
+            # 60s wall clock. The kernel needs ~1.5-2s of kernel
+            # time to walk every Phase::Sched initcall, the FAT32
+            # CRUD self-test, and reach the ring3-winkill PE
+            # smoke. On a KVM-enabled GH-Actions runner that's
+            # well under 30s, but the previous 30s budget left no
+            # margin and the runner's variability flaked the job
+            # (kernel reached t=~1.2s before the timeout fired).
+            DUETOS_TIMEOUT=60 \
               tools/test/ctest-boot-smoke.sh build/x86_64-debug
             rc=$?
             echo "::endgroup::"
