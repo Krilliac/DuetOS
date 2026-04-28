@@ -289,6 +289,14 @@ void ProcessRetain(Process* p)
     {
         return;
     }
+    // A retain on a refcount==0 Process means somebody held a stale
+    // pointer to a structure the reaper already returned to the slab.
+    // Without this check the count would wrap from 0 to 1 and the
+    // process would silently rejoin the live set with corrupted state.
+    if (p->refcount == 0)
+    {
+        PanicWithValue("core/process", "ProcessRetain on refcount==0 (use-after-free?)", reinterpret_cast<u64>(p));
+    }
     ++p->refcount;
 }
 
@@ -439,7 +447,14 @@ void RecordSandboxDenial(Cap cap)
     Process* p = sched::TaskProcess(t);
     if (p == nullptr)
     {
-        return; // kernel-only task hit a cap-denial — shouldn't happen
+        // Invariant: kernel-only tasks never traverse the user-syscall
+        // cap-gate path. Reaching this with a null Process means a
+        // kernel TU mis-routed into the sandbox-denial recorder, or a
+        // user task lost its Process pointer mid-flight — both indicate
+        // memory corruption or a gating-table bug. Log once so the
+        // first occurrence is visible without paniccing the live system.
+        KLOG_ONCE_WARN("proc", "RecordSandboxDenial: kernel-only task hit cap denial (gating bug?)");
+        return;
     }
     ++p->sandbox_denials;
 

@@ -321,6 +321,13 @@ inline bool& NeedResched()
 // and calling only from functions that acquire the lock themselves.
 void RunqueuePush(Task* t)
 {
+    // A null task on the runqueue would panic Schedule() later with
+    // a less informative call site. Catch the bad caller here.
+    KASSERT(t != nullptr, "sched", "RunqueuePush(nullptr)");
+    // A Dead task must never re-enter the runqueue — it has no stack,
+    // its AS is gone, and the reaper holds the only legitimate
+    // reference. Silently accepting it would crash the next Schedule().
+    KASSERT(t->state != TaskState::Dead, "sched", "RunqueuePush of Dead task");
     t->next = nullptr;
     Task*& head = (t->priority == TaskPriority::Idle) ? g_run_head_idle : g_run_head_normal;
     Task*& tail = (t->priority == TaskPriority::Idle) ? g_run_tail_idle : g_run_tail_normal;
