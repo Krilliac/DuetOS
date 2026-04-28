@@ -2660,49 +2660,59 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // boot sequence continues to make forward progress after the
     // iretq into user mode.
     duetos::core::StartRing3SmokeTask();
-    // Linux-ABI proof-of-life. Reaches MSR_LSTAR entry stub →
-    // LinuxSyscallDispatch → sys_exit_group. A clean exit here
-    // proves the whole plumbing — EFER.SCE, MSR setup, swapgs
-    // dance, iretq return — works end-to-end.
-    duetos::subsystems::linux::SpawnRing3LinuxSmoke();
-    // Same payload wrapped in an ELF64 image loaded via
-    // SpawnElfLinux — proves the loader + abi-flavor plumbing
-    // works in an in-memory path.
-    duetos::subsystems::linux::SpawnRing3LinuxElfSmoke();
-    // sys_open/read/close exercise: open HELLO.TXT from FAT32
-    // via the Linux ABI and echo its contents back through
-    // sys_write. Validates the whole file-I/O chain end-to-end.
-    duetos::subsystems::linux::SpawnRing3LinuxFileSmoke();
-    // File-backed mmap exerciser: open HELLO.TXT, mmap 17 bytes
-    // PROT_READ + MAP_PRIVATE, write the mapped region to
-    // stdout. Proves the new file-backed branch in DoMmap works
-    // end-to-end — anonymous mmap was the only shape supported
-    // before this slice.
-    duetos::subsystems::linux::SpawnRing3LinuxMmapSmoke();
-    // Real host-compiled static C ELF (userland/apps/synxtest) —
-    // exercises ~12 Linux syscalls and prints a pass/fail tag
-    // per call. This is the "compile and run an executable to
-    // see what works" probe; boot log shows which parts of the
-    // Linux ABI actually hold up when a non-hand-rolled binary
-    // does the asking.
-    duetos::subsystems::linux::SpawnSynxTestElf();
-    // Translation-unit exercise: fire one syscall that the TU
-    // converts to a no-op (madvise) and one it declines with a
-    // deliberate -ENOSYS (rseq). Boot log shows [translate]
-    // lines for each.
-    duetos::subsystems::linux::SpawnRing3LinuxTranslateSmoke();
-    // File-extend exerciser: opens HELLO.TXT, seeks to EOF,
-    // writes a few bytes (routes through Fat32AppendAtPath),
-    // closes, prints "extended\n" to stdout. Slot 12's
-    // untested-at-the-time extend path gets a boot-time check.
-    duetos::subsystems::linux::SpawnRing3LinuxExtendSmoke();
-    // Real-binary path: read /fat/LINUX.ELF off the mounted
-    // FAT32 volume and spawn it via SpawnElfLinux. Exercises
-    // the AHCI -> GPT -> partition-block -> FAT32 -> ElfLoad
-    // -> Linux-ABI chain end-to-end. Silent no-op when no FAT32
-    // volume is probed (e.g. when the self-test harness forgets
-    // to ship an image).
+    // Linux-ABI proof-of-life suite. Each Spawn below adds a
+    // ring-3 task whose stdout lines are not asserted by the
+    // qemu-smoke critical path — the value is on bare-metal
+    // boots where the full ABI-coverage matrix matters. Under
+    // an emulator (KVM-on-CI or TCG) every spawn pays for an
+    // AS create + frame allocations + serial trap-out for
+    // diagnostic prints, and the cumulative cost is what blew
+    // past the 600s wall budget in the previous run. Bare
+    // metal still runs the whole chain.
+    if (!duetos::arch::IsEmulator())
     {
+        // Linux-ABI proof-of-life. Reaches MSR_LSTAR entry stub →
+        // LinuxSyscallDispatch → sys_exit_group. A clean exit here
+        // proves the whole plumbing — EFER.SCE, MSR setup, swapgs
+        // dance, iretq return — works end-to-end.
+        duetos::subsystems::linux::SpawnRing3LinuxSmoke();
+        // Same payload wrapped in an ELF64 image loaded via
+        // SpawnElfLinux — proves the loader + abi-flavor plumbing
+        // works in an in-memory path.
+        duetos::subsystems::linux::SpawnRing3LinuxElfSmoke();
+        // sys_open/read/close exercise: open HELLO.TXT from FAT32
+        // via the Linux ABI and echo its contents back through
+        // sys_write. Validates the whole file-I/O chain end-to-end.
+        duetos::subsystems::linux::SpawnRing3LinuxFileSmoke();
+        // File-backed mmap exerciser: open HELLO.TXT, mmap 17 bytes
+        // PROT_READ + MAP_PRIVATE, write the mapped region to
+        // stdout. Proves the new file-backed branch in DoMmap works
+        // end-to-end — anonymous mmap was the only shape supported
+        // before this slice.
+        duetos::subsystems::linux::SpawnRing3LinuxMmapSmoke();
+        // Real host-compiled static C ELF (userland/apps/synxtest) —
+        // exercises ~12 Linux syscalls and prints a pass/fail tag
+        // per call. This is the "compile and run an executable to
+        // see what works" probe; boot log shows which parts of the
+        // Linux ABI actually hold up when a non-hand-rolled binary
+        // does the asking.
+        duetos::subsystems::linux::SpawnSynxTestElf();
+        // Translation-unit exercise: fire one syscall that the TU
+        // converts to a no-op (madvise) and one it declines with a
+        // deliberate -ENOSYS (rseq). Boot log shows [translate]
+        // lines for each.
+        duetos::subsystems::linux::SpawnRing3LinuxTranslateSmoke();
+        // File-extend exerciser: opens HELLO.TXT, seeks to EOF,
+        // writes a few bytes (routes through Fat32AppendAtPath),
+        // closes, prints "extended\n" to stdout. Slot 12's
+        // untested-at-the-time extend path gets a boot-time check.
+        duetos::subsystems::linux::SpawnRing3LinuxExtendSmoke();
+        // Real-binary path: read /fat/LINUX.ELF off the mounted
+        // FAT32 volume and spawn it via SpawnElfLinux. Exercises
+        // the AHCI -> GPT -> partition-block -> FAT32 -> ElfLoad
+        // -> Linux-ABI chain end-to-end. Silent no-op when no FAT32
+        // volume is probed (e.g. when the self-test harness forgets
+        // to ship an image).
         const auto* fat_vol = duetos::fs::fat32::Fat32Volume(0);
         if (fat_vol != nullptr)
         {

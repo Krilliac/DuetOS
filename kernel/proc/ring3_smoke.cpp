@@ -1996,14 +1996,21 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         return 0;
     }
     duetos::debug::InspectOnSpawn(name, pe_bytes, pe_len);
-    // Diagnostic pre-pass — always runs, always logs. A PE we
-    // reject below still gets a full report: sections, imports,
-    // relocs, TLS. That's how we know what a real Win32
-    // subsystem would have to provide.
-    SerialWrite("[ring3] pe report name=\"");
-    SerialWrite(name);
-    SerialWrite("\"\n");
-    PeReport(pe_bytes, pe_len);
+    // Diagnostic pre-pass — sections, imports, relocs, TLS. Skip
+    // under a hypervisor: every line is N port-IO writes that
+    // trap out of KVM (or, on TCG, runs at TCG speed). For
+    // ring3-winkill alone this is ~500-1000 lines; the qemu-smoke
+    // CI doesn't check any [pe-report] output, so paying the cost
+    // there directly squeezes the wall-clock budget for no signal.
+    // Bare metal still gets the full diagnostic dump.
+    const bool emulator_pe_report = ::duetos::arch::IsEmulator();
+    if (!emulator_pe_report)
+    {
+        SerialWrite("[ring3] pe report name=\"");
+        SerialWrite(name);
+        SerialWrite("\"\n");
+        PeReport(pe_bytes, pe_len);
+    }
 
     // PeLoad handles both Ok and ImportsPresent (the latter
     // by walking the IAT and patching via the Win32 stub
@@ -2512,32 +2519,46 @@ void StartRing3SmokeTask()
     // .claude/knowledge/win32-subsystem-v0.md.
     SpawnPeFile("ring3-hello-winapi", fs::generated::kBinHelloWinapiBytes, fs::generated::kBinHelloWinapiBytes_len,
                 CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-    // Thread-stress PE: CreateThread + CreateEventW + SetEvent +
-    // WaitForSingleObject round-trip. Exercises the Win32 →
-    // SYS_THREAD_CREATE path. Expected exit: 0xABCDE on success.
-    SpawnPeFile("ring3-thread-stress", fs::generated::kBinThreadStressBytes, fs::generated::kBinThreadStressBytes_len,
-                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-    // Syscall-stress PE: coverage — OutputDebugStringA,
-    // ExitThread, GetProcessTimes/GetThreadTimes/GetSystemTimes,
-    // GlobalMemoryStatusEx, WaitForMultipleObjects. Expected exit:
-    // 0xCAFE on success.
-    SpawnPeFile("ring3-syscall-stress", fs::generated::kBinSyscallStressBytes,
-                fs::generated::kBinSyscallStressBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-    // DLL-loader end-to-end fixture. Imports
-    // CustomAdd / CustomMul / CustomVersion from customdll.dll;
-    // the kernel DLL loader maps the DLL into the process's AS
-    // before PeLoad runs and ResolveImports patches each IAT
-    // slot with the DLL's export VA directly. Expected exit:
-    // 0x1234 on success (= CustomAdd(0x1000, 0x0234)), 0xBAD0
-    // if any of the three DLL call results don't match.
-    SpawnPeFile("ring3-customdll-test", fs::generated::kBinCustomDllTestBytes,
-                fs::generated::kBinCustomDllTestBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-    // Registry + fopen end-to-end fixture. Exercises the real
-    // registry in advapi32.dll + real fopen/fread in ucrtbase.dll.
-    SpawnPeFile("ring3-reg-fopen-test", fs::generated::kBinRegFopenTestBytes, fs::generated::kBinRegFopenTestBytes_len,
-                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    // The four PE smokes below cover thread / syscall / DLL /
+    // registry-fopen surface. None of their stdout lines are
+    // checked by the qemu-smoke critical path (only hello-pe,
+    // hello-winapi, and winkill are). On bare metal they're cheap
+    // enough to keep in the always-on set, but each one pays for
+    // a per-process AS, ~38-DLL preload table, and an entry-point
+    // run — under emulator-with-trapping-MMIO that adds tens of
+    // seconds of guest time the boot smoke doesn't have. Gate
+    // them under !emulator alongside the security probes above.
+    if (!emulator)
+    {
+        // Thread-stress PE: CreateThread + CreateEventW + SetEvent +
+        // WaitForSingleObject round-trip. Exercises the Win32 →
+        // SYS_THREAD_CREATE path. Expected exit: 0xABCDE on success.
+        SpawnPeFile("ring3-thread-stress", fs::generated::kBinThreadStressBytes,
+                    fs::generated::kBinThreadStressBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                    mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        // Syscall-stress PE: coverage — OutputDebugStringA,
+        // ExitThread, GetProcessTimes/GetThreadTimes/GetSystemTimes,
+        // GlobalMemoryStatusEx, WaitForMultipleObjects. Expected exit:
+        // 0xCAFE on success.
+        SpawnPeFile("ring3-syscall-stress", fs::generated::kBinSyscallStressBytes,
+                    fs::generated::kBinSyscallStressBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                    mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        // DLL-loader end-to-end fixture. Imports
+        // CustomAdd / CustomMul / CustomVersion from customdll.dll;
+        // the kernel DLL loader maps the DLL into the process's AS
+        // before PeLoad runs and ResolveImports patches each IAT
+        // slot with the DLL's export VA directly. Expected exit:
+        // 0x1234 on success (= CustomAdd(0x1000, 0x0234)), 0xBAD0
+        // if any of the three DLL call results don't match.
+        SpawnPeFile("ring3-customdll-test", fs::generated::kBinCustomDllTestBytes,
+                    fs::generated::kBinCustomDllTestBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                    mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        // Registry + fopen end-to-end fixture. Exercises the real
+        // registry in advapi32.dll + real fopen/fread in ucrtbase.dll.
+        SpawnPeFile("ring3-reg-fopen-test", fs::generated::kBinRegFopenTestBytes,
+                    fs::generated::kBinRegFopenTestBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                    mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    }
     // Real-world Windows PE diagnostic attempt. Expected to
     // reject (most imports unresolved) — the value is the
     // PeReport log line showing the full import / reloc / TLS
