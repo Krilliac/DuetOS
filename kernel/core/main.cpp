@@ -43,6 +43,7 @@
 #include "acpi/acpi.h"
 #include "acpi/aml.h"
 #include "arch/x86_64/cpu.h"
+#include "arch/x86_64/cet.h"
 #include "arch/x86_64/cpu_info.h"
 #include "arch/x86_64/cpu_mitigations.h"
 #include "arch/x86_64/hypervisor.h"
@@ -108,6 +109,7 @@
 #include "mm/frame_allocator.h"
 #include "ipc/handle_table.h"
 #include "diag/event_trace.h"
+#include "diag/perf_profile.h"
 #include "diag/soft_lockup.h"
 #include "ipc/kevent.h"
 #include "ipc/kmailbox.h"
@@ -315,6 +317,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     SerialWrite("[boot] Probing CPU features.\n");
     duetos::arch::CpuInfoProbe();
     duetos::arch::CpuMitigationsProbe();
+    duetos::arch::CetProbe();
 
     SerialWrite("[boot] Detecting hypervisor.\n");
     duetos::arch::HypervisorProbe();
@@ -1258,6 +1261,17 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                                    []()
                                    {
                                        duetos::diag::EventTraceSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    // PMU sample profiler (plan D3) — same shape as event_trace
+    // but for sampled RIPs. Sampling source (PMU NMI overflow)
+    // is NOT wired in this slice; the ring + dump are landed so
+    // a future D3-followup can hook PerfRecord into the NMI
+    // handler with a one-line call.
+    duetos::core::InitcallRegister(duetos::core::Phase::Sched, "perf-profile-selftest",
+                                   []()
+                                   {
+                                       duetos::diag::PerfProfileSelfTest();
                                        return duetos::core::Result<void>{};
                                    });
     (void)duetos::core::RunPhase(duetos::core::Phase::Sched);

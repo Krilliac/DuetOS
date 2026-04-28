@@ -26,6 +26,7 @@
 #include "mm/kheap.h"
 #include "mm/paging.h"
 #include "sched/sched.h"
+#include "diag/event_trace.h"
 #include "diag/hexdump.h"
 #include "diag/kdbg.h"
 #include "log/klog.h"
@@ -503,6 +504,55 @@ void CmdLockdepPanic(u32 argc, char** argv)
         return;
     }
     ConsoleWriteln("LOCKDEP PANIC: ARG MUST BE ON OR OFF");
+}
+
+// `tracer dump` — print the dynamic event trace ring oldest-
+// first (plan D2-followup). Walks via EventTraceSnapshot into a
+// scratch heap buffer; prints one row per event. No filter
+// arguments in v0; a `tracer kind <K>` knob lands when an
+// investigation needs it. (2026-04-28.)
+void CmdTracerDump()
+{
+    constexpr u32 kBatch = 64;
+    duetos::diag::EventRecord buf[kBatch];
+    const u32 live = duetos::diag::EventTraceLiveCount();
+    const u64 total = duetos::diag::EventTraceTotalRecords();
+    ConsoleWrite("EVENT TRACE: live=");
+    WriteU64Dec(live);
+    ConsoleWrite(" total-since-boot=");
+    WriteU64Dec(total);
+    ConsoleWriteChar('\n');
+    if (live == 0)
+    {
+        ConsoleWriteln("(empty)");
+        return;
+    }
+    duetos::diag::EventRecord all[duetos::diag::kEventRingCapacity];
+    const u32 got = duetos::diag::EventTraceSnapshot(all, live);
+    for (u32 i = 0; i < got; ++i)
+    {
+        const auto& r = all[i];
+        ConsoleWrite("  tick=");
+        WriteU64Dec(r.tick);
+        ConsoleWrite(" kind=");
+        ConsoleWrite(duetos::diag::EventKindName(r.kind));
+        ConsoleWrite(" arg0=");
+        WriteU64Hex(r.arg0, 16);
+        ConsoleWrite(" arg1=");
+        WriteU64Hex(r.arg1, 16);
+        ConsoleWriteChar('\n');
+    }
+    (void)buf;
+}
+
+void CmdTracer(u32 argc, char** argv)
+{
+    if (argc >= 2 && StrEq(argv[1], "dump"))
+    {
+        CmdTracerDump();
+        return;
+    }
+    ConsoleWriteln("TRACER: USAGE: TRACER DUMP");
 }
 
 void CmdInspect(u32 argc, char** argv)
