@@ -126,8 +126,11 @@ u64 ProfileExpectedExits(SmokeProfile profile)
     case SmokeProfile::PeWinkill:
         return 1; // ring3-winkill
     case SmokeProfile::Linux:
-        return 7; // LinuxSmoke + ElfSmoke + FileSmoke + MmapSmoke +
-                  // SynxTestElf + TranslateSmoke + ExtendSmoke
+        return 1; // SpawnRing3LinuxSmoke only — the other 6 are
+                  // bare-metal-only (see kernel/core/main.cpp); the
+                  // smoke wrapper asserts only on the substring
+                  // "linux" so one successful Linux ABI path is
+                  // enough.
     }
     return 0;
 }
