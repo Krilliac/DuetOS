@@ -179,17 +179,17 @@ jobs:
           status=""
           for i in $(seq 1 ${attempts}); do
             echo "::group::smoke attempt ${i}/${attempts}"
-            # 180s wall clock. tools/qemu/run.sh uses KVM when
-            # /dev/kvm is reachable (the previous step chmod'd
-            # it 666), so under CI we run at ~5× slowdown vs.
-            # bare metal — disk I/O is still emulated through
-            # QEMU's NVMe + AHCI front-ends, which is the bulk of
-            # the FAT32 CRUD self-test cost. The full boot/test
-            # path needs ~30-50s of kernel time to walk every
-            # ring3 probe, FAT32 self-test, and the PE smoke
-            # (hello-pe, ring3-winkill, et al). 180s leaves
-            # margin for runner variability.
-            DUETOS_TIMEOUT=180 \
+            # 300s wall clock. KVM is enabled (the previous step
+            # chmod'd /dev/kvm to 666) but every NVMe / AHCI MMIO
+            # access still traps out of KVM into QEMU's emulator,
+            # so the FAT32 CRUD self-test plus the ring3 probe
+            # storm dominate the wall budget. The 70-LFN
+            # directory-growth test got trimmed to 8 LFNs; even
+            # so the boot smoke needs ~50-60s of kernel time
+            # under emulated disk I/O before the ring3-winkill PE
+            # smoke completes. 300s leaves margin for runner
+            # variability.
+            DUETOS_TIMEOUT=300 \
               tools/test/ctest-boot-smoke.sh build/x86_64-debug
             rc=$?
             echo "::endgroup::"
