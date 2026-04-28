@@ -51,6 +51,8 @@ const char* KObjectTypeName(KObjectType type)
         return "mailbox";
     case KObjectType::Waitable:
         return "waitable";
+    case KObjectType::File:
+        return "file";
     case KObjectType::Test:
         return "test";
     }

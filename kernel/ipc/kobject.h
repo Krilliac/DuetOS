@@ -60,8 +60,9 @@ enum class KObjectType : u32
     Mutex = 1,
     Event = 2,
     Semaphore = 3,
-    Mailbox = 4,  ///< Reserved; not yet implemented.
-    Waitable = 5, ///< Reserved; not yet implemented.
+    Mailbox = 4,
+    Waitable = 5,
+    File = 6, ///< KFile — open file descriptor (plan A3-followup).
 
     /// Used by the v0 self-test exclusively. Real kernel code must
     /// never use this — it exists so the infrastructure can be

@@ -110,9 +110,11 @@
 #include "mm/zone.h"
 #include "ipc/handle_table.h"
 #include "diag/event_trace.h"
+#include "diag/gdb_stub.h"
 #include "diag/perf_profile.h"
 #include "diag/soft_lockup.h"
 #include "ipc/kevent.h"
+#include "ipc/kfile.h"
 #include "ipc/kmailbox.h"
 #include "ipc/kmutex.h"
 #include "ipc/kobject.h"
@@ -1360,6 +1362,17 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                                        duetos::sync::RcuSelfTest();
                                        return duetos::core::Result<void>{};
                                    });
+    // GDB serial stub (plan D7) — protocol parser + canned
+    // responses for the commands a GDB session sends on
+    // connect. v0 isn't wired into the COM2 RX path yet; the
+    // self-test drives synthesised conversations through the
+    // parser directly.
+    duetos::core::InitcallRegister(duetos::core::Phase::Sched, "gdb-stub-selftest",
+                                   []()
+                                   {
+                                       duetos::diag::gdb::GdbStubSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
     (void)duetos::core::RunPhase(duetos::core::Phase::Sched);
 
     // KObject + HandleTable infrastructure self-tests (plan A3).
@@ -1383,6 +1396,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     duetos::ipc::KSemaphoreSelfTest();
     duetos::ipc::KMailboxSelfTest();
     duetos::ipc::KWaitableSelfTest();
+    duetos::ipc::KFileSelfTest();
     // Soft-lockup detector (plan D4). The detector itself is
     // already wired into the timer-IRQ tail (`OnTimerTick`), so
     // a real lockup would already be surfaced; the self-test
