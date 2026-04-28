@@ -88,6 +88,9 @@
 | _D7-followup_ (this commit) | GDB stub `G` (write-registers) + `M` (write-memory) handlers implemented. `G` parses the same little-endian byte order the `g` handler emits and writes back into a writable snapshot published via `GdbStubPublishWritableRegisters` — nullptr makes `G` a silent OK. `M<addr>,<len>:<hex>` parses the three args and writes `len` bytes directly to the canonical-bound address; reuses the `m`-handler bound. |
 | _D2 instrumentation_ (this commit) | Event tracer wired into three more call sites: `kEventPageFault` (cr2, error_code) emitted from `traps.cpp`'s #PF panic path; `kEventSchedSwitch` (prev_tid, next_tid) emitted from `sched::Schedule` right before `ContextSwitch`; `kEventIrq` (vector=32 for LAPIC timer, current_tid) emitted from `OnTimerTick`. Combined with the syscall + mutex hooks from the previous commit, `tracer dump` now reflects the full hot-path event mix on a busy boot. |
 | _shell_ (this commit) | New `cpufeatures` shell command — single-screen view of `arch::CpuInfoGet` (vendor / brand / family / model / stepping), `arch::CpuMitigationsGet` (kpti / mds / ssbd / taa needs), and `arch::CetGet` (CET-SS / CET-IBT support + enabled). Read-only; pulls together the three boot-probed surfaces into a unified `cpu features` view. |
+| _D7-followup_ (this commit) | Trap dispatch's panic path now publishes a `GdbRegSnapshot` to the GDB stub before `DumpDiagnostics` runs. Static `s_gdb_snap` populated from the trap frame (16 GPRs + RIP + RFLAGS + CS + SS) and pointer-published via `GdbStubPublishRegisters`. A future GDB attach observing a kernel fault sees the live register state at the moment of fault rather than zeros. Cost is one struct copy per kernel-mode fault (panic path only — IRQ + recovered-fault paths don't touch the snapshot). |
+| _shell_ (this commit) | Three more `inspect` subcommands: `inspect threads` walks `SchedEnumerate` and prints id / name / state / running-flag / ticks for every known task; `inspect tracer-stats` prints the event-tracer live + total counters without dumping the ring (cheap "is it growing?" check); `inspect gdb` prints the GDB stub's received / handled / bad-checksum counters. All read-only audit surfaces. |
+| _E3-followup_ (this commit) | Sixth driver registered as a fault domain: `cleanroom-trace`. No-op init, teardown calls `core::CleanroomTraceClear()` to wipe the older syscall flight-recorder. The set is now soft-lockup + lockdep + event-trace + perf + nmi-watchdog + cleanroom-trace. As a side effect the include of `diag/cleanroom_trace.h` was hoisted out of `#ifdef DUETOS_CRTRACE_SURVEY` in main.cpp — it's now used unconditionally. |
 
 ### Deferred (in priority order — see "Recommended ordering" below)
 
@@ -107,10 +110,10 @@
 - [ ] C1-followup — Real per-zone allocator (current scaffolding forwards every zone request to the global pool; per-zone bitmap + buddy free-lists land when a workload demands DMA / DMA32 isolation)
 - [ ] D2-followup — Index `g_per_cpu` event-trace ring array by current-CPU ID once SMP per-CPU storage exposes it (state is now structured per-CPU; only the slot-0 alias remains hardcoded)
 - [ ] D7-followup — Wire `GdbStubReceiveByte` into the COM2 serial RX path (parser + canned responses landed; no IRQ source yet)
-- [ ] D7-followup — Wire `GdbStubPublishRegisters` from a trap-handler / breakpoint stop path (the `g` packet handler reads from the published snapshot today; it just needs a stop-state path to populate it)
+- [ ] D7-followup — Wire `GdbStubPublishWritableRegisters` (the writable counterpart) so a `G` packet from a connected GDB session can apply register edits — currently writes go silently dropped into a nullptr snapshot
 - [ ] D7-followup — Wrap `m` / `M` memory access in extable-protected reads/writes so a bad address from GDB doesn't fault the kernel (today both rely on the `#PF` handler's recovery path + canonical-address bound)
 - [ ] D4-followup — Index `g_per_cpu` array by current-CPU ID once SMP per-CPU storage exposes it (state is now structured per-CPU; only the slot-0 alias remains hardcoded)
-- [ ] E3-followup — Continue registering drivers as fault domains (soft-lockup + lockdep + event-trace + perf + nmi-watchdog landed; framebuffer / pci / nvme / ahci / xhci / e1000 each need a real teardown written)
+- [ ] E3-followup — Continue registering drivers as fault domains (soft-lockup + lockdep + event-trace + perf + nmi-watchdog + cleanroom-trace landed; framebuffer / pci / nvme / ahci / xhci / e1000 each need a real teardown written)
 
 ## Resume prompt
 

@@ -128,10 +128,8 @@
 #include "time/clocksource.h"
 #include "time/tick.h"
 #include "time/timekeeper.h"
-#include "security/auth.h"
-#ifdef DUETOS_CRTRACE_SURVEY
 #include "diag/cleanroom_trace.h"
-#endif
+#include "security/auth.h"
 #include "loader/firmware_loader.h"
 #include "diag/heartbeat.h"
 #include "log/klog.h"
@@ -508,6 +506,16 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         []() -> ::duetos::core::Result<void>
         {
             duetos::arch::NmiWatchdogDisable();
+            return {};
+        });
+    // Cleanroom-trace ring (separate from event_trace; older
+    // syscall flight-recorder). Has a clean-clear API; restart
+    // wipes the buffer.
+    duetos::security::RegisterDriverDomain(
+        "cleanroom-trace", []() -> ::duetos::core::Result<void> { return {}; },
+        []() -> ::duetos::core::Result<void>
+        {
+            duetos::core::CleanroomTraceClear();
             return {};
         });
 

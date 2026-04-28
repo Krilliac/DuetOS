@@ -27,6 +27,7 @@
 #include "mm/paging.h"
 #include "sched/sched.h"
 #include "diag/event_trace.h"
+#include "diag/gdb_stub.h"
 #include "diag/hexdump.h"
 #include "diag/kdbg.h"
 #include "diag/perf_profile.h"
@@ -195,6 +196,69 @@ void CmdInspectHelp()
 // is a triage hit. Edges-recorded grows monotonically as the kernel
 // exercises new acquire pairs — useful as a "graph stabilised yet?"
 // signal for the future inversion-warn-to-panic promotion knob.
+// `inspect threads` — list every known scheduler task with its
+// id / name / state / cumulative ticks. Walks SchedEnumerate
+// under CLI so the snapshot is consistent.
+void CmdInspectThreads()
+{
+    static constexpr const char* kStateName[] = {"Ready", "Running", "Sleeping", "Blocked", "Dead"};
+    struct Cookie
+    {
+        u32 count;
+    } cookie = {0};
+    auto cb = [](const duetos::sched::SchedTaskInfo& info, void* c)
+    {
+        auto* ck = static_cast<Cookie*>(c);
+        ++ck->count;
+        ConsoleWrite("  tid=");
+        WriteU64Dec(info.id);
+        ConsoleWrite(" name=");
+        ConsoleWrite(info.name != nullptr ? info.name : "<null>");
+        ConsoleWrite(" state=");
+        ConsoleWrite((info.state < 5) ? kStateName[info.state] : "?");
+        if (info.is_running)
+            ConsoleWrite(" *running*");
+        ConsoleWrite(" ticks=");
+        WriteU64Dec(info.ticks_run);
+        ConsoleWriteChar('\n');
+    };
+    ConsoleWriteln("INSPECT THREADS:");
+    duetos::sched::SchedEnumerate(cb, &cookie);
+    ConsoleWrite("INSPECT THREADS: total=");
+    WriteU64Dec(cookie.count);
+    ConsoleWriteChar('\n');
+}
+
+// `inspect tracer-stats` — read-only event-tracer counters
+// without dumping the ring. Cheap; pairs with `tracer dump`
+// for "is the ring growing?" diagnostics.
+void CmdInspectTracerStats()
+{
+    const u32 live = duetos::diag::EventTraceLiveCount();
+    const u64 total = duetos::diag::EventTraceTotalRecords();
+    ConsoleWrite("INSPECT TRACER: live=");
+    WriteU64Dec(live);
+    ConsoleWrite(" total-since-boot=");
+    WriteU64Dec(total);
+    ConsoleWrite(" capacity=");
+    WriteU64Dec(duetos::diag::kEventRingCapacity);
+    ConsoleWriteChar('\n');
+}
+
+// `inspect gdb` — GDB stub packet counters (received,
+// bad-checksum, handled). Confirms the stub is alive without
+// requiring a real GDB attach.
+void CmdInspectGdb()
+{
+    ConsoleWrite("INSPECT GDB: received=");
+    WriteU64Dec(duetos::diag::gdb::GdbStubPacketsReceived());
+    ConsoleWrite(" handled=");
+    WriteU64Dec(duetos::diag::gdb::GdbStubPacketsHandled());
+    ConsoleWrite(" bad-csum=");
+    WriteU64Dec(duetos::diag::gdb::GdbStubPacketsBadChecksum());
+    ConsoleWriteChar('\n');
+}
+
 // `inspect domains` — list every registered fault domain
 // (driver-domain wrapper or hand-registered). Shows name +
 // restart count + alive flag. Read-only audit surface for
@@ -813,6 +877,21 @@ void CmdInspect(u32 argc, char** argv)
     if (StrEq(argv[1], "zones"))
     {
         CmdInspectZones();
+        return;
+    }
+    if (StrEq(argv[1], "threads"))
+    {
+        CmdInspectThreads();
+        return;
+    }
+    if (StrEq(argv[1], "tracer-stats"))
+    {
+        CmdInspectTracerStats();
+        return;
+    }
+    if (StrEq(argv[1], "gdb"))
+    {
+        CmdInspectGdb();
         return;
     }
     if (StrEq(argv[1], "help"))
