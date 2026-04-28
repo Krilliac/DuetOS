@@ -74,6 +74,8 @@
 | _D2-followup_ (this commit) | Event-trace ring restructured to per-CPU shape: `g_ring` + `g_total` collapsed into a `PerCpuRing` struct, `g_per_cpu[kEventTraceCpuMax]` array (capacity 1 in v0). Macro aliases preserve existing single-CPU code paths. Each future CPU's state stays cache-line independent. Same shape as the D1 / D4 followup restructurings. |
 | _A2-followup_ (this commit) | `time::TimerInit()` portable forwarder added to `kernel/time/tick.{h,cpp}`. Calls `arch::TimerInit()` today; the day an ARM64 generic-timer backend lands, this is the call site `kernel_main` keeps using and only the arch implementation changes. `kernel_main` now invokes `duetos::time::TimerInit()` instead of the arch entry point. Remaining work — moving the LAPIC-divider + tick-frequency programming out of `arch::TimerInit` itself — is the new A2-followup. |
 | _E3-followup_ (this commit) | First real driver registered as a fault domain: the soft-lockup detector. `SoftLockupEnable()` added (resets per-CPU streak state + flips `g_enabled` back on); `SoftLockupDisable()` already existed. Init/teardown lambdas in `kernel_main` register the pair via `RegisterDriverDomain("soft-lockup", ...)`. `RestartDriverDomain("soft-lockup")` from the shell now drives the detector through a clean disable + re-enable cycle. Other drivers register as their teardown story matures (each needs a real teardown written). |
+| _E3-followup_ (this commit) | Second driver registered: lockdep. New `LockdepReset()` clears every per-CPU held-class stack, the edge matrix, the inversion counter, and the promote-to-panic knob; pairs with the existing `LockdepRegisterCanonicalClasses` for the init half of the domain. `RestartDriverDomain("lockdep")` re-baselines the graph after triaging a noisy boot — useful for clean slate before a stress run. |
+| _shell_ (this commit) | Two new `inspect` subcommands: `inspect domains` walks every registered fault domain (driver-tagged + hand-registered) and prints id / name / restart count / alive flag to COM1, plus a console summary; `inspect zones` walks the four memory zones and prints per-zone allocs / frees / oom counts. Read-only audit surfaces sit alongside the existing `inspect lockdep` / `inspect syscalls` family. |
 
 ### Deferred (in priority order — see "Recommended ordering" below)
 
@@ -94,7 +96,7 @@
 - [ ] D2-followup — Index `g_per_cpu` event-trace ring array by current-CPU ID once SMP per-CPU storage exposes it (state is now structured per-CPU; only the slot-0 alias remains hardcoded)
 - [ ] D7 — GDB serial stub on COM2
 - [ ] D4-followup — Index `g_per_cpu` array by current-CPU ID once SMP per-CPU storage exposes it (state is now structured per-CPU; only the slot-0 alias remains hardcoded)
-- [ ] E3-followup — Continue registering drivers as fault domains (soft-lockup landed; framebuffer / pci / nvme / ahci / xhci / e1000 each need a real teardown written)
+- [ ] E3-followup — Continue registering drivers as fault domains (soft-lockup + lockdep landed; framebuffer / pci / nvme / ahci / xhci / e1000 each need a real teardown written)
 
 ## Resume prompt
 

@@ -273,6 +273,31 @@ void LockdepRegisterCanonicalClasses()
     LockdepRegisterClass(kLockClassCompositor, "compositor");
 }
 
+void LockdepReset()
+{
+    // Wipe the per-CPU held-class stacks first so an in-flight
+    // acquire doesn't try to release into a half-cleared state.
+    for (u32 cpu = 0; cpu < kLockdepCpuMax; ++cpu)
+    {
+        for (u32 i = 0; i < kLockdepHeldMax; ++i)
+        {
+            g_per_cpu[cpu].stack[i] = kLockClassUnclassified;
+        }
+        g_per_cpu[cpu].depth = 0;
+    }
+    // Clear the edge matrix and counters.
+    for (u32 i = 0; i < kLockClassMax; ++i)
+    {
+        for (u32 j = 0; j < kLockClassMax / 8; ++j)
+        {
+            g_edges[i][j] = 0;
+        }
+    }
+    g_inversions = 0;
+    g_edges_recorded = 0;
+    g_promote_to_panic = false;
+}
+
 namespace
 {
 

@@ -30,6 +30,9 @@
 #include "diag/hexdump.h"
 #include "diag/kdbg.h"
 #include "diag/perf_profile.h"
+#include "mm/zone.h"
+#include "security/driver_domain.h"
+#include "security/fault_domain.h"
 #include "log/klog.h"
 #include "diag/runtime_checker.h"
 #include "sync/lockdep.h"
@@ -192,6 +195,64 @@ void CmdInspectHelp()
 // is a triage hit. Edges-recorded grows monotonically as the kernel
 // exercises new acquire pairs — useful as a "graph stabilised yet?"
 // signal for the future inversion-warn-to-panic promotion knob.
+// `inspect domains` — list every registered fault domain
+// (driver-domain wrapper or hand-registered). Shows name +
+// restart count + alive flag. Read-only audit surface for
+// "what subsystems can the operator restart from the shell".
+void CmdInspectDomains()
+{
+    using duetos::arch::SerialWrite;
+    const u32 driver_count = duetos::security::DriverDomainCount();
+    const u32 total_count = duetos::core::FaultDomainCount();
+    SerialWrite("[inspect-domains] driver-tagged=");
+    duetos::arch::SerialWriteHex(driver_count);
+    SerialWrite(" total=");
+    duetos::arch::SerialWriteHex(total_count);
+    SerialWrite("\n");
+    for (u32 i = 0; i < total_count; ++i)
+    {
+        const auto* d = duetos::core::FaultDomainGet(i);
+        if (d == nullptr || d->name == nullptr)
+            continue;
+        SerialWrite("[inspect-domains] id=");
+        duetos::arch::SerialWriteHex(i);
+        SerialWrite(" name=");
+        SerialWrite(d->name);
+        SerialWrite(" restarts=");
+        duetos::arch::SerialWriteHex(d->restart_count);
+        SerialWrite(d->alive ? " alive" : " dead");
+        SerialWrite("\n");
+    }
+    ConsoleWrite("INSPECT DOMAINS: total=");
+    WriteU64Dec(total_count);
+    ConsoleWrite(" driver-tagged=");
+    WriteU64Dec(driver_count);
+    ConsoleWriteln(" (DETAILS ON COM1)");
+}
+
+// `inspect zones` — print per-zone allocate/free/oom counts.
+// Diagnostic surface for "is anyone hitting DMA-zone OOM".
+void CmdInspectZones()
+{
+    using duetos::arch::SerialWrite;
+    SerialWrite("[inspect-zones] per-zone allocator stats\n");
+    for (u32 i = 0; i < static_cast<u32>(duetos::mm::Zone::Count); ++i)
+    {
+        const auto z = static_cast<duetos::mm::Zone>(i);
+        const auto s = duetos::mm::ZoneStatsRead(z);
+        SerialWrite("  ");
+        SerialWrite(duetos::mm::ZoneName(z));
+        SerialWrite(" allocs=");
+        duetos::arch::SerialWriteHex(s.allocs);
+        SerialWrite(" frees=");
+        duetos::arch::SerialWriteHex(s.frees);
+        SerialWrite(" oom=");
+        duetos::arch::SerialWriteHex(s.oom);
+        SerialWrite("\n");
+    }
+    ConsoleWriteln("INSPECT ZONES: per-zone counts on COM1");
+}
+
 void CmdInspectLockdep()
 {
     using duetos::arch::SerialWrite;
@@ -696,6 +757,16 @@ void CmdInspect(u32 argc, char** argv)
     if (StrEq(argv[1], "lockdep"))
     {
         CmdInspectLockdep();
+        return;
+    }
+    if (StrEq(argv[1], "domains"))
+    {
+        CmdInspectDomains();
+        return;
+    }
+    if (StrEq(argv[1], "zones"))
+    {
+        CmdInspectZones();
         return;
     }
     if (StrEq(argv[1], "help"))

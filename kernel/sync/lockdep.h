@@ -182,6 +182,15 @@ u64 LockdepEdgesRecorded();
 /// Idempotent; safe to call more than once.
 void LockdepRegisterCanonicalClasses();
 
+/// Reset all lockdep state — held-class stack on every CPU, the
+/// edge-graph, the inversion counter, the promote-to-panic
+/// knob. Pairs with `LockdepRegisterCanonicalClasses` so the
+/// lockdep subsystem can be a driver fault domain (E3-followup):
+/// teardown calls `LockdepReset`, init re-registers the
+/// canonical class names + carries on. Used to re-baseline the
+/// graph after triaging a noisy inversion run.
+void LockdepReset();
+
 /// Boot-time self-test. Registers two scratch classes, simulates
 /// `acquire(A); acquire(B); release(B); release(A)` (the good
 /// order), then `acquire(B); acquire(A); release(A); release(B)`

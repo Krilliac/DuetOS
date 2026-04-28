@@ -459,6 +459,22 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             duetos::diag::SoftLockupDisable();
             return {};
         });
+    // Lockdep as a driver domain (E3-followup, 2026-04-28).
+    // Restart re-baselines the edge graph + clears the held
+    // stack — useful after triaging a noisy boot to start
+    // fresh without rebooting.
+    duetos::security::RegisterDriverDomain(
+        "lockdep",
+        []() -> ::duetos::core::Result<void>
+        {
+            duetos::sync::LockdepRegisterCanonicalClasses();
+            return {};
+        },
+        []() -> ::duetos::core::Result<void>
+        {
+            duetos::sync::LockdepReset();
+            return {};
+        });
 
     // Init-call registry self-test (plan A1). Exercises register +
     // RunPhase + bad-argument + failing-callback paths against the
