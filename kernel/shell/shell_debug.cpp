@@ -31,9 +31,15 @@
 #include "diag/hexdump.h"
 #include "diag/kdbg.h"
 #include "diag/perf_profile.h"
+#include "diag/soft_lockup.h"
+#include "diag/ubsan.h"
 #include "mm/zone.h"
 #include "security/driver_domain.h"
 #include "security/fault_domain.h"
+#include "sync/lockdep.h"
+#include "sync/rcu.h"
+#include "time/tick.h"
+#include "time/timekeeper.h"
 #include "log/klog.h"
 #include "diag/runtime_checker.h"
 #include "sync/lockdep.h"
@@ -196,6 +202,80 @@ void CmdInspectHelp()
 // is a triage hit. Edges-recorded grows monotonically as the kernel
 // exercises new acquire pairs — useful as a "graph stabilised yet?"
 // signal for the future inversion-warn-to-panic promotion knob.
+// `inspect rcu` — RCU subsystem counters (queued / completed
+// / inversions / current tick). Cheap; pairs with `domain
+// restart rcu` (no such domain today) for diagnostic flow.
+void CmdInspectRcu()
+{
+    const u64 q = duetos::sync::RcuCallsQueued();
+    const u64 c = duetos::sync::RcuCallsCompleted();
+    ConsoleWrite("INSPECT RCU: queued=");
+    WriteU64Dec(q);
+    ConsoleWrite(" completed=");
+    WriteU64Dec(c);
+    ConsoleWrite(" pending=");
+    WriteU64Dec(q - c);
+    ConsoleWriteChar('\n');
+}
+
+// `inspect uptime` — boot uptime in scheduler ticks +
+// nanoseconds (via the time:: facade). Cheap diagnostic.
+void CmdInspectUptime()
+{
+    const u64 ticks = duetos::time::TickCount();
+    const u64 ns = duetos::time::MonotonicNs();
+    ConsoleWrite("INSPECT UPTIME: ticks=");
+    WriteU64Dec(ticks);
+    ConsoleWrite(" monotonic_ns=");
+    WriteU64Dec(ns);
+    ConsoleWrite(" tick_hz=");
+    WriteU64Dec(duetos::time::TickHz());
+    ConsoleWriteChar('\n');
+}
+
+// `inspect counters` — single-screen rollup of every subsystem
+// counter that has a cheap accessor. Lockdep / soft-lockup /
+// event-trace / GDB stub / RCU all in one place.
+void CmdInspectCounters()
+{
+    using duetos::arch::SerialWrite;
+    SerialWrite("[inspect-counters] one-line per subsystem\n");
+    ConsoleWrite("INSPECT COUNTERS:\n");
+    ConsoleWrite("  lockdep     inversions=");
+    WriteU64Dec(duetos::sync::LockdepInversionsDetected());
+    ConsoleWrite(" edges=");
+    WriteU64Dec(duetos::sync::LockdepEdgesRecorded());
+    ConsoleWriteChar('\n');
+    ConsoleWrite("  soft-lockup warnings=");
+    WriteU64Dec(duetos::diag::SoftLockupWarningsEmitted());
+    ConsoleWriteChar('\n');
+    ConsoleWrite("  rcu         queued=");
+    WriteU64Dec(duetos::sync::RcuCallsQueued());
+    ConsoleWrite(" completed=");
+    WriteU64Dec(duetos::sync::RcuCallsCompleted());
+    ConsoleWriteChar('\n');
+    ConsoleWrite("  event-trace live=");
+    WriteU64Dec(duetos::diag::EventTraceLiveCount());
+    ConsoleWrite(" total=");
+    WriteU64Dec(duetos::diag::EventTraceTotalRecords());
+    ConsoleWriteChar('\n');
+    ConsoleWrite("  perf        live=");
+    WriteU64Dec(duetos::diag::PerfLiveCount());
+    ConsoleWrite(" total=");
+    WriteU64Dec(duetos::diag::PerfTotalSamples());
+    ConsoleWriteChar('\n');
+    ConsoleWrite("  gdb-stub    received=");
+    WriteU64Dec(duetos::diag::gdb::GdbStubPacketsReceived());
+    ConsoleWrite(" handled=");
+    WriteU64Dec(duetos::diag::gdb::GdbStubPacketsHandled());
+    ConsoleWrite(" bad-csum=");
+    WriteU64Dec(duetos::diag::gdb::GdbStubPacketsBadChecksum());
+    ConsoleWriteChar('\n');
+    ConsoleWrite("  ubsan       reports=");
+    WriteU64Dec(duetos::diag::UbsanReportsEmitted());
+    ConsoleWriteChar('\n');
+}
+
 // `inspect threads` — list every known scheduler task with its
 // id / name / state / cumulative ticks. Walks SchedEnumerate
 // under CLI so the snapshot is consistent.
@@ -892,6 +972,21 @@ void CmdInspect(u32 argc, char** argv)
     if (StrEq(argv[1], "gdb"))
     {
         CmdInspectGdb();
+        return;
+    }
+    if (StrEq(argv[1], "rcu"))
+    {
+        CmdInspectRcu();
+        return;
+    }
+    if (StrEq(argv[1], "uptime"))
+    {
+        CmdInspectUptime();
+        return;
+    }
+    if (StrEq(argv[1], "counters"))
+    {
+        CmdInspectCounters();
         return;
     }
     if (StrEq(argv[1], "help"))

@@ -740,6 +740,12 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     s_gdb_snap.fs = 0;
     s_gdb_snap.gs = 0;
     ::duetos::diag::gdb::GdbStubPublishRegisters(&s_gdb_snap);
+    // Also publish as writable so a connected GDB session's `G`
+    // packet can apply edits before the operator continues. The
+    // edits land in s_gdb_snap; copying them back into the trap
+    // frame on resume is the next D7-followup once a stop-at-
+    // fault flow exists.
+    ::duetos::diag::gdb::GdbStubPublishWritableRegisters(&s_gdb_snap);
     //
     // Fire the kernel-page-fault probe specifically for vec 14 so
     // the log ring records this as a structured event before the
