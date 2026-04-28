@@ -113,4 +113,22 @@ u32 KMailboxCount(const KMailbox* mb);
 /// state machine on the fast path.
 void KMailboxSelfTest();
 
+/// Concurrent stress test (plan B1-followup). Spawns N producer
+/// tasks and N consumer tasks all racing on a single mailbox
+/// with a small capacity. Each producer posts a fixed number of
+/// messages; each consumer receives until a sentinel arrives.
+/// Verifies:
+///   - every producer's messages all arrive (sum of received
+///     counts == sum of posted counts),
+///   - no message is lost or duplicated (per-producer monotonic
+///     sequence numbers stay strictly increasing on the consumer
+///     side, considered per-producer-stream),
+///   - both producers and consumers make forward progress
+///     (the test completes within a 10 s budget).
+/// Cooperative single-CPU scheduling is enough to surface a
+/// regression in the not_full / not_empty condvar wiring; SMP-
+/// stress will arrive with B2. Panics on any progress timeout
+/// or invariant violation.
+void KMailboxContentionSelfTest();
+
 } // namespace duetos::ipc

@@ -30,6 +30,7 @@
 #include "arch/x86_64/hpet.h"
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/timer.h"
+#include "time/tick.h"
 #include "mm/frame_allocator.h"
 #include "mm/kheap.h"
 #include "sched/sched.h"
@@ -332,12 +333,15 @@ inline void WriteTimestampPrefix()
         }
         return;
     }
-    // HPET wasn't ready — fall back to the scheduler tick counter
-    // (10 ms per tick). Prefix "~" as a reminder the precision is
+    // HPET wasn't ready — fall back to the portable scheduler-
+    // tick counter via the time:: wrapper (forwards to
+    // arch::TimerTicks today, but lets future arch backends
+    // swap in without touching klog). 10 ms per tick at the v0
+    // 100 Hz rate. Prefix "~" as a reminder the precision is
     // coarse.
-    const u64 ticks = arch::TimerTicks();
+    const u64 ticks = ::duetos::time::TickCount();
     arch::SerialWrite("[t~");
-    WriteDecimal(ticks * 10);
+    WriteDecimal(ticks * ::duetos::time::TickPeriodNs() / 1'000'000ULL);
     arch::SerialWrite("ms] ");
 }
 

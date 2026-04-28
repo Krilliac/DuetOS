@@ -1194,23 +1194,40 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     duetos::sched::SchedStartIdle("idle-bsp");
     duetos::sched::SchedStartReaper();
 
-    // RwLock self-test (plan B1.2). Walks every state-machine
-    // transition that can be exercised without contention (Try*,
-    // multi-reader, writer-blocks-readers, readers-block-writer).
-    // Runs here because the scheduler is now online (RwLock uses
-    // sched::Mutex + Condvar internally).
-    duetos::sync::RwLockSelfTest();
-
-    // Concurrent self-tests for RwLock + SeqLock (plan
-    // B1-followup). Spawn kernel threads to exercise the actual
-    // blocking + retry paths on top of the state-machine paths
-    // already verified above. Cooperative single-CPU scheduling
-    // is enough to surface a regression in Condvar wakeup or
-    // SeqLock parity flips; SMP stress will arrive with the B2
-    // SMP slice and may add per-CPU concurrency to these tests
-    // then.
-    duetos::sync::SeqLockContentionSelfTest();
-    duetos::sync::RwLockContentionSelfTest();
+    // Phase::Sched (plan A1-followup, 2026-04-28). RwLock state-
+    // machine self-test + the two contention self-tests (RwLock +
+    // SeqLock) all need the scheduler online to spawn the helper
+    // tasks they use. Routing them through the registry keeps
+    // their ordering visible without changing observable behavior.
+    duetos::core::InitcallRegister(duetos::core::Phase::Sched, "rwlock-selftest",
+                                   []()
+                                   {
+                                       duetos::sync::RwLockSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    duetos::core::InitcallRegister(duetos::core::Phase::Sched, "seqlock-contention-selftest",
+                                   []()
+                                   {
+                                       duetos::sync::SeqLockContentionSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    duetos::core::InitcallRegister(duetos::core::Phase::Sched, "rwlock-contention-selftest",
+                                   []()
+                                   {
+                                       duetos::sync::RwLockContentionSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    // KMailbox stress test (plan B1-followup, 2026-04-28). 4
+    // producer × 4 consumer tasks racing on capacity-8 mailbox.
+    // Verifies the not_full / not_empty condvar wiring under
+    // real producer/consumer contention.
+    duetos::core::InitcallRegister(duetos::core::Phase::Sched, "kmailbox-stress",
+                                   []()
+                                   {
+                                       duetos::ipc::KMailboxContentionSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    (void)duetos::core::RunPhase(duetos::core::Phase::Sched);
 
     // KObject + HandleTable infrastructure self-tests (plan A3).
     // Verifies refcount + destroy-on-zero, plus the table's
