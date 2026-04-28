@@ -507,8 +507,9 @@ const char* CapName(Cap c)
         return "Input";
     case kCapCount:
         return "<sentinel>";
+    default:
+        return "<unknown>";
     }
-    return "<unknown>";
 }
 
 namespace

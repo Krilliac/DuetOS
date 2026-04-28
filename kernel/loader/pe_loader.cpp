@@ -467,8 +467,10 @@ const char* PeStatusName(PeStatus s)
         return "TlsCallbacksUnsupported";
     case PeStatus::StubsPageAllocFail:
         return "StubsPageAllocFail";
+    default:
+        KLOG_ONCE_WARN("loader/pe", "PeStatusName: unrecognised PeStatus enumerator");
+        return "?";
     }
-    return "?";
 }
 
 PeStatus PeValidate(const u8* file, u64 file_len)
@@ -684,6 +686,9 @@ bool ApplyRelocations(const u8* file, u64 file_len, const PeHeaders& h, duetos::
                     break;
                 case 10:
                     name = "DIR64";
+                    break;
+                default:
+                    name = "unknown";
                     break;
                 }
                 SerialWrite("[pe-reloc] unsupported reloc type=");

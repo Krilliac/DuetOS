@@ -47,6 +47,12 @@ const char* ErrorCodeName(ErrorCode c)
         return "NoDevice";
     case ErrorCode::Unknown:
         return "Unknown";
+    default:
+        // New enumerator added without a name? Log once so the gap
+        // is visible without panicking; the "?" sentinel below is
+        // the safe fallback the self-test treats as a failure.
+        KLOG_ONCE_WARN("core/result", "ErrorCodeName: unrecognised ErrorCode");
+        return "?";
     }
     return "?";
 }

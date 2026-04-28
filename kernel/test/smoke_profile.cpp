@@ -104,8 +104,9 @@ u64 ProfileSleepTicks(SmokeProfile profile)
         return kTicksPerSecond * 10; // real-world MSVC PE w/ DLL preload
     case SmokeProfile::Linux:
         return kTicksPerSecond * 5; // single Linux ABI smoke
+    default:
+        return kTicksPerSecond * 5;
     }
-    return kTicksPerSecond * 5;
 }
 
 } // namespace
@@ -190,8 +191,9 @@ const char* SmokeProfileName(SmokeProfile profile)
         return "pe-winkill";
     case SmokeProfile::Linux:
         return "linux";
+    default:
+        return "unknown";
     }
-    return "unknown";
 }
 
 bool SmokeProfileShouldSpawn(SmokeTarget target)
@@ -222,8 +224,9 @@ bool SmokeProfileShouldSpawn(SmokeTarget target)
         case SmokeTarget::PeOther:
         case SmokeTarget::Linux:
             return !duetos::arch::IsEmulator();
+        default:
+            return true;
         }
-        return true;
     }
 
     // Specific profile selected — run only its target.
@@ -241,8 +244,9 @@ bool SmokeProfileShouldSpawn(SmokeTarget target)
         return false; // never under a smoke profile
     case SmokeTarget::Linux:
         return p == SmokeProfile::Linux;
+    default:
+        return false;
     }
-    return false;
 }
 
 void SmokeProfileSleepAndExit()

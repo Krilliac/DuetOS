@@ -2209,6 +2209,9 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                         SerialWriteHex(ctx);
                         SerialWrite("\n");
                         break;
+                    default:
+                        // Fall through and log the unrecognised action below.
+                        break;
                     }
                     SerialWrite("[ui] menu fire action=");
                     SerialWriteHex(action);

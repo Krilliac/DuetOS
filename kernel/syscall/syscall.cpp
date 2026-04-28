@@ -416,6 +416,15 @@ void SyscallInit()
 
 void SyscallDispatch(arch::TrapFrame* frame)
 {
+    // Defensive: the int-0x80 trap stub can never legitimately
+    // hand us a null trap frame, but a future caller (or a
+    // mis-routed direct call) could. Refuse loudly instead of
+    // dereferencing rax through a null pointer.
+    if (frame == nullptr)
+    {
+        KLOG_ONCE_WARN("syscall", "SyscallDispatch called with null TrapFrame");
+        return;
+    }
     const u64 num = frame->rax;
     // Outer-scope `proc` was previously `const Process*`; keep that
     // shape so the many `case` blocks below that re-declare a local

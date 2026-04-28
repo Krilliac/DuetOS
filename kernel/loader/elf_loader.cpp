@@ -59,8 +59,10 @@ const char* ElfStatusName(ElfStatus s)
         return "SegmentOutOfBounds";
     case ElfStatus::UnalignedSegment:
         return "UnalignedSegment";
+    default:
+        KLOG_ONCE_WARN("elf-loader", "ElfStatusName: unrecognised ElfStatus enumerator");
+        return "<unknown>";
     }
-    return "<unknown>";
 }
 
 ElfStatus ElfValidate(const u8* file, u64 file_len)

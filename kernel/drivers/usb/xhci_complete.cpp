@@ -89,8 +89,9 @@ const char* CompletionCodeName(u32 code)
         return "Secondary Bandwidth Error";
     case 36:
         return "Split Transaction Error";
+    default:
+        return "Reserved/Vendor";
     }
-    return "Reserved/Vendor";
 }
 
 } // namespace duetos::drivers::usb::xhci::internal

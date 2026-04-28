@@ -32,6 +32,11 @@ void DoHeapAlloc(arch::TrapFrame* frame)
     // rdi = size in bytes. Returns user VA or 0 on OOM. See
     // heap.cpp for the first-fit allocator. Unprivileged — every
     // Win32 process has its own heap mapped during PeLoad.
+    if (frame == nullptr)
+    {
+        KLOG_ONCE_WARN("win32/heap", "DoHeapAlloc: null trap frame");
+        return;
+    }
     KLOG_TRACE_V("win32/heap", "DoHeapAlloc: size", frame->rdi);
     core::Process* proc = core::CurrentProcess();
     if (proc == nullptr)
@@ -54,6 +59,11 @@ void DoHeapAlloc(arch::TrapFrame* frame)
 void DoHeapFree(arch::TrapFrame* frame)
 {
     // rdi = user ptr (or 0 for no-op). Returns 0.
+    if (frame == nullptr)
+    {
+        KLOG_ONCE_WARN("win32/heap", "DoHeapFree: null trap frame");
+        return;
+    }
     KLOG_TRACE_V("win32/heap", "DoHeapFree: ptr", frame->rdi);
     core::Process* proc = core::CurrentProcess();
     if (proc == nullptr)
@@ -69,6 +79,11 @@ void DoHeapFree(arch::TrapFrame* frame)
 void DoHeapSize(arch::TrapFrame* frame)
 {
     // rdi = user ptr. Returns payload capacity. 0 on null / oor.
+    if (frame == nullptr)
+    {
+        KLOG_ONCE_WARN("win32/heap", "DoHeapSize: null trap frame");
+        return;
+    }
     KLOG_TRACE_V("win32/heap", "DoHeapSize: ptr", frame->rdi);
     core::Process* proc = core::CurrentProcess();
     if (proc == nullptr)
@@ -83,6 +98,11 @@ void DoHeapSize(arch::TrapFrame* frame)
 void DoHeapRealloc(arch::TrapFrame* frame)
 {
     // rdi = existing ptr (or 0), rsi = new size.
+    if (frame == nullptr)
+    {
+        KLOG_ONCE_WARN("win32/heap", "DoHeapRealloc: null trap frame");
+        return;
+    }
     KLOG_TRACE_V("win32/heap", "DoHeapRealloc: new size", frame->rsi);
     core::Process* proc = core::CurrentProcess();
     if (proc == nullptr)

@@ -650,12 +650,13 @@ const char* LinuxSignalName(u64 sig)
         return "SIGRTMIN";
     case 64:
         return "SIGRTMAX";
+    default:
+        if (sig >= 33 && sig <= 63)
+        {
+            return "SIGRT";
+        }
+        return "?";
     }
-    if (sig >= 33 && sig <= 63)
-    {
-        return "SIGRT";
-    }
-    return "?";
 }
 
 const char* LinuxErrnoName(u64 e)
@@ -784,8 +785,9 @@ const char* LinuxErrnoName(u64 e)
         return "EALREADY";
     case 115:
         return "EINPROGRESS";
+    default:
+        return "?";
     }
-    return "?";
 }
 
 const char* NtStatusName(u64 status)
@@ -851,8 +853,9 @@ const char* NtStatusName(u64 status)
         return "STATUS_DLL_NOT_FOUND";
     case 0xC0000139ULL:
         return "STATUS_ENTRYPOINT_NOT_FOUND";
+    default:
+        return "?";
     }
-    return "?";
 }
 
 void SerialWriteWin32AccessMask(u64 mask)
@@ -929,6 +932,11 @@ void SerialWriteOpenFlags(u64 flags)
         arch::SerialWrite("O_RDWR?");
         first = false;
         break;
+    default:
+        // Unreachable: (flags & 0x3) is a 2-bit value, all 4 cases above.
+        arch::SerialWrite("O_???");
+        first = false;
+        break;
     }
     auto emit = [&](u64 bit, const char* name)
     {
@@ -1000,6 +1008,11 @@ void SerialWriteMmapFlags(u64 flags)
         break;
     case 3:
         arch::SerialWrite("MAP_SHARED_VALIDATE");
+        first = false;
+        break;
+    default:
+        // 0 or any reserved value — render verbatim so the caller can spot it.
+        arch::SerialWrite("MAP_?");
         first = false;
         break;
     }

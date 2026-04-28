@@ -943,6 +943,9 @@ WirelessStatus WirelessStatusRead()
             break;
         case NicInfo::WirelessFwState::NotApplicable:
             break;
+        default:
+            // Unknown enumerator — treat as "no firmware accounted for".
+            break;
         }
     }
     return s;

@@ -893,15 +893,21 @@ const char* KillReasonName(KillReason r)
         return "SandboxDenialThreshold";
     case KillReason::UserKill:
         return "UserKill";
+    default:
+        KLOG_ONCE_WARN("sched", "KillReasonName: unrecognised KillReason enumerator");
+        return "<unknown>";
     }
-    return "<unknown>";
 }
 
 void Schedule()
 {
     if (Current() == nullptr)
     {
-        return; // pre-SchedInit timer tick (shouldn't happen, but be safe)
+        // pre-SchedInit timer tick (shouldn't happen, but be safe).
+        // Log once so a recurring null-current pattern is visible
+        // without burying the boot log in tick-rate spam.
+        KLOG_ONCE_WARN("sched", "Schedule called with no current task (pre-SchedInit?)");
+        return;
     }
 
     Task* prev = nullptr;
@@ -1410,8 +1416,10 @@ const char* KillResultName(KillResult r)
         return "AlreadyDead";
     case KillResult::Blocked:
         return "Blocked";
+    default:
+        KLOG_ONCE_WARN("sched", "KillResultName: unrecognised KillResult enumerator");
+        return "<unknown>";
     }
-    return "<unknown>";
 }
 
 namespace

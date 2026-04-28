@@ -45,6 +45,11 @@ void DoPerfCounter(arch::TrapFrame* frame)
 {
     // No args. Return the kernel tick counter — monotonically
     // increasing u64 at 100 Hz. Drives QPC + GetTickCount stubs.
+    if (frame == nullptr)
+    {
+        KLOG_ONCE_WARN("syscall/time", "DoPerfCounter: null trap frame");
+        return;
+    }
     KLOG_TRACE("syscall/time", "DoPerfCounter: read kernel tick counter");
     frame->rax = ::duetos::time::TickCount();
 }
@@ -56,6 +61,11 @@ void DoNowNs(arch::TrapFrame* frame)
     // once its calibration lands). The conversion math used to live
     // here as `counter * period_fs / 1e6`; now it's owned by
     // `time::MonotonicNs()` so every consumer reads the same source.
+    if (frame == nullptr)
+    {
+        KLOG_ONCE_WARN("syscall/time", "DoNowNs: null trap frame");
+        return;
+    }
     KLOG_TRACE("syscall/time", "DoNowNs: sample monotonic clocksource");
     frame->rax = ::duetos::time::MonotonicNs();
 }
@@ -66,6 +76,11 @@ void DoGetTimeFt(arch::TrapFrame* frame)
     // `time::RealtimeFiletime()` so any future migration to a more
     // accurate wall-clock path (NTP-disciplined RTC, TSC + RTC
     // delta sampling, …) takes effect here automatically.
+    if (frame == nullptr)
+    {
+        KLOG_ONCE_WARN("syscall/time", "DoGetTimeFt: null trap frame");
+        return;
+    }
     KLOG_TRACE("syscall/time", "DoGetTimeFt: sample wall-clock FILETIME");
     frame->rax = ::duetos::time::RealtimeFiletime();
 }

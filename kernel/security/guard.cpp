@@ -376,8 +376,9 @@ const char* KindName(ImageKind k)
         return "kthread";
     case ImageKind::UserThread:
         return "uthread";
+    default:
+        return "?";
     }
-    return "?";
 }
 
 const char* VerdictName(Verdict v)
@@ -390,8 +391,9 @@ const char* VerdictName(Verdict v)
         return "WARN";
     case Verdict::Deny:
         return "DENY";
+    default:
+        return "?";
     }
-    return "?";
 }
 
 const char* FindingName(u32 code)
@@ -784,8 +786,11 @@ bool Gate(const ImageDescriptor& desc)
             }
             return allowed;
         }
+
+    default:
+        // Verdict enum extension would land here; treat as advisory pass.
+        return true;
     }
-    return true;
 }
 
 bool GateThread(ImageKind kind, const char* name)
@@ -850,8 +855,9 @@ const char* GuardModeName(Mode m)
         return "advisory";
     case Mode::Enforce:
         return "enforce";
+    default:
+        return "?";
     }
-    return "?";
 }
 
 u64 GuardScanCount()

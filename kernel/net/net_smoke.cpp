@@ -255,6 +255,9 @@ void NetSmokeEntry(void*)
         case HttpGetResult::Timeout:
             arch::SerialWrite("[net-smoke] step 4: FAIL — TCP did not complete handshake or no HTTP reply within 5s\n");
             break;
+        default:
+            arch::SerialWrite("[net-smoke] step 4: FAIL — unknown HttpGetResult enumerator\n");
+            break;
         }
     }
     else

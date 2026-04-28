@@ -467,6 +467,10 @@ void GdbStubReceiveByte(u8 byte)
             ResetParser();
         }
         break;
+    default:
+        // Unknown / corrupted parser state — reset to a safe baseline.
+        ResetParser();
+        break;
     }
 }
 

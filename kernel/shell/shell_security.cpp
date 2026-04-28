@@ -39,8 +39,9 @@ const char* RoleName(AuthRole r)
         return "user";
     case AuthRole::Guest:
         return "guest";
+    default:
+        return "?";
     }
-    return "?";
 }
 
 AuthRole RoleFromArg(const char* s)
