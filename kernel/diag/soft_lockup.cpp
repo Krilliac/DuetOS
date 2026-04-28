@@ -49,17 +49,36 @@ constinit PerCpuState g_per_cpu[kSoftLockupCpuMax] = {};
 
 constinit u64 g_warnings_total = 0; ///< Total warnings (across all CPUs).
 constinit bool g_enabled = true;    ///< Disabled from panic path.
+// True while SoftLockupSelfTest is driving synthetic ticks. The
+// LAPIC-timer-driven SoftLockupTick path early-returns when this
+// is set so it can't interleave its real tid into the self-test's
+// synthetic state machine and trip the rate-limit assertion. The
+// self-test calls a sibling helper that bypasses this gate.
+constinit bool g_self_test_in_progress = false;
+
+// Internal tick implementation. The public `SoftLockupTick` adds
+// the timer-driven gates; the self-test calls the internal one
+// directly so its synthetic tids reach the state machine
+// regardless of whether the timer-driven path is gated.
+void TickInternal(u64 now_ticks, u64 current_tid);
 
 } // namespace
 
 void SoftLockupTick(u64 now_ticks, u64 current_tid)
 {
-    (void)now_ticks; // future use: include in the warning line
-
-    if (!g_enabled)
+    if (!g_enabled || g_self_test_in_progress)
     {
         return;
     }
+    TickInternal(now_ticks, current_tid);
+}
+
+namespace
+{
+
+void TickInternal(u64 now_ticks, u64 current_tid)
+{
+    (void)now_ticks; // future use: include in the warning line
 
     // Idle / boot task (TID 0) never counts as a lockup — those
     // are legitimately always-running.
@@ -94,6 +113,8 @@ void SoftLockupTick(u64 now_ticks, u64 current_tid)
     }
 }
 
+} // namespace
+
 void SoftLockupDisable()
 {
     g_enabled = false;
@@ -121,6 +142,14 @@ void SoftLockupSelfTest()
 {
     arch::SerialWrite("[soft-lockup] self-test: state machine + threshold + reset\n");
 
+    // Gate the timer-driven SoftLockupTick path for the duration
+    // of the test. Without this, the LAPIC tick handler interleaves
+    // its real (current_tid) into the per-CPU state machine between
+    // our synthetic ticks and the rate-limit assertion fires
+    // spuriously on a real-world preemption boundary. The test
+    // calls TickInternal directly to bypass the same gate.
+    g_self_test_in_progress = true;
+
     // Save + reset state so the test starts from a clean slate
     // even if a prior caller already advanced counters. (At boot
     // this is fresh; the save/restore makes the test re-runnable
@@ -134,7 +163,7 @@ void SoftLockupSelfTest()
     // and assert no warning.
     for (u64 i = 0; i < 200; ++i)
     {
-        SoftLockupTick(i, 0);
+        TickInternal(i, 0);
     }
     if (g_warnings_total != saved_warnings)
     {
@@ -145,7 +174,7 @@ void SoftLockupSelfTest()
     // one warning.
     for (u64 i = 0; i <= kSoftLockupThresholdTicks; ++i)
     {
-        SoftLockupTick(1000 + i, 42);
+        TickInternal(1000 + i, 42);
     }
     if (g_warnings_total != saved_warnings + 1)
     {
@@ -155,7 +184,7 @@ void SoftLockupSelfTest()
     // (3) Continuing on the same TID does NOT re-warn (rate limit).
     for (u64 i = 0; i < kSoftLockupThresholdTicks * 2; ++i)
     {
-        SoftLockupTick(2000 + i, 42);
+        TickInternal(2000 + i, 42);
     }
     if (g_warnings_total != saved_warnings + 1)
     {
@@ -164,7 +193,7 @@ void SoftLockupSelfTest()
 
     // (4) TID change resets the state — short subsequent run
     // does not warn.
-    SoftLockupTick(3000, 99); // single tick on TID 99; counter = 1
+    TickInternal(3000, 99); // single tick on TID 99; counter = 1
     if (g_warnings_total != saved_warnings + 1)
     {
         core::Panic("diag/soft-lockup", "self-test: TID change spuriously warned");
@@ -173,7 +202,7 @@ void SoftLockupSelfTest()
     // (5) Holding TID 99 long enough now warns (separate gate).
     for (u64 i = 0; i < kSoftLockupThresholdTicks; ++i)
     {
-        SoftLockupTick(3001 + i, 99);
+        TickInternal(3001 + i, 99);
     }
     if (g_warnings_total != saved_warnings + 2)
     {
@@ -184,6 +213,10 @@ void SoftLockupSelfTest()
     g_state.last_tid = 0;
     g_state.same_tid_count = 0;
     g_state.warned_for_tid = 0;
+
+    // Re-open the timer-driven path now that the synthetic
+    // sequence is done.
+    g_self_test_in_progress = false;
 
     arch::SerialWrite("[soft-lockup] self-test OK (idle skip + threshold + rate limit + per-TID reset).\n");
 }
