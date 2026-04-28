@@ -77,6 +77,7 @@ _Read this at every session start (after git sync). Each row links to a detailed
 | Kernel attacker simulation suite v1 — 11 active attacks (bootkit, IDT, GDT, LSTAR, SYSENTER_CS/EIP, CR0.WP, SMEP, SMAP, NXE, .text patch) + deferred catalogue | [knowledge/attack-sim-kernel-v1.md](knowledge/attack-sim-kernel-v1.md) | Observation + Pattern | Active | 2026-04-26 |
 | Redteam coverage matrix v0 — full malware-technique map vs. existing probes / attacks / detectors + gap analysis + slice-order roadmap | [knowledge/redteam-coverage-matrix-v0.md](knowledge/redteam-coverage-matrix-v0.md) | Observation + Decision | Active | 2026-04-26 |
 | Cleanroom-trace boot survey v0 — first live read of the trace ring buffer | [knowledge/cleanroom-trace-boot-survey-v0.md](knowledge/cleanroom-trace-boot-survey-v0.md) | Observation | Active | 2026-04-25 |
+| qemu-smoke profile-matrix redesign — split monolith into per-profile parallel jobs + isa-debug-exit + serial spinlock + hosted unit tests | [knowledge/qemu-smoke-profile-matrix-v0.md](knowledge/qemu-smoke-profile-matrix-v0.md) | Decision + Pattern | Active | 2026-04-28 |
 | Deferred-task batches (2026-04-25 + 2026-04-26 follow-up) — PE ordinal forwarders + by-ord IAT + binary-search EAT, ext4 multi-block dirs, ext4 depth>0 extent tree walk, GDI ellipse fill/outline parity, RNDIS multi-record RX, FAT32 LFN-checksum, window-DC SetTextColor explicit-black | [knowledge/deferred-task-batch-2026-04-25.md](knowledge/deferred-task-batch-2026-04-25.md) | Observation | Active | 2026-04-26 |
 
 ## Quick Reference
