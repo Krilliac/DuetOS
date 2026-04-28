@@ -50,6 +50,23 @@ ThermalReading ThermalRead()
         return r;
     if (!VendorIsIntel())
         return r;
+    // KVM hypervisors don't always expose IA32_THERM_STATUS /
+    // TEMPERATURE_TARGET / IA32_PACKAGE_THERM_STATUS. A `rdmsr`
+    // against an unsupported MSR raises #GP that the kernel's
+    // trap dispatcher dumps but doesn't recover from. Bail before
+    // the OUT. Bare-metal Intel still works (no IsEmulator gate
+    // there); TCG silently returns 0 either way. Observed live as
+    // a CI-only #GP crash with backtrace
+    //   ThermalRead+0x58 -> PowerInit+0x179 -> kernel_main+0x150c
+    // on a GitHub Actions Intel Xeon Platinum 8370C runner under
+    // KVM that doesn't expose the thermal MSRs.
+    //
+    // The gate must live in ThermalRead, not just ThermalProbe —
+    // PowerInit calls ThermalRead directly through PopulateThermal
+    // (drivers/power/power.cpp), so the prior ThermalProbe-only
+    // gate was bypassed.
+    if (duetos::arch::IsEmulator())
+        return r;
 
     // TJMax. If the MSR is unsupported, QEMU returns 0 — use
     // the 100 °C default.

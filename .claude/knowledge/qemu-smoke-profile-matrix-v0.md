@@ -79,7 +79,52 @@ Inside `SmokeProfileSleepAndExit`:
 5. Sentinel `[smoke] profile=<name> complete`.
 6. `arch::TestExit(0x10)`.
 
+### Pitfall 4 — multi-call SerialWrite line splitting
+
+`arch::SerialWrite` is atomic at the function level (per-call IRQ-off
+spinlock with re-entry bypass), but multi-call sequences are not.
+`SpawnRing3Task` and `SpawnPeFile` print one logical line via 9-12
+consecutive SerialWrite calls. Between calls the lock is released and
+IRQs re-enabled; a concurrent task printing in that window splits the
+line at every call boundary.
+
+Symptom: CI ring3 smoke missed `queued task name="ring3-smoke-B"`
+because the visible log showed the line as `ring3-smoke-B" pid=0x...`
+— the `[ring3] queued task name="` prefix got eaten by another
+task's output. Same shape for pe-winapi's `[heap] HeapAlloc + GetProcessHe`
+truncation.
+
+**Fix:** `arch::SerialLineGuard` RAII helper (kernel/arch/x86_64/
+serial.{h,cpp}). Holds the lock + sets the in-progress flag for the
+whole scope; nested SerialWrite calls inside bypass their own per-call
+acquire and write under the held lock. Wrap the multi-call print
+sequences in a SerialLineGuard scope.
+
+### Pitfall 5 — KVM-hidden Intel thermal MSRs
+
+KVM hypervisors don't always expose `IA32_THERM_STATUS` /
+`TEMPERATURE_TARGET` / `IA32_PACKAGE_THERM_STATUS` to guests, even on
+Intel hosts. `rdmsr` against an unsupported MSR raises #GP that the
+kernel's trap dispatcher doesn't recover from (no extable for the
+thermal-probe RIPs). On a CI runner with hidden MSRs, the boot wedges
+at `[boot] Reading MSR thermals.`; same code on a sister runner with
+exposed MSRs passes.
+
+**Fix:** gate `ThermalProbe()` on `arch::IsEmulator()`. Bare-metal
+Intel + TCG (silently returns 0) keep working; under any KVM/HVM the
+probe is skipped. Smoke critical path doesn't assert thermal output,
+so this is observability-only loss.
+
 ## Pitfalls discovered (and fixed)
+
+### Pitfall 0 — KMalloc + freed-page poison
+
+KMalloc returns memory carrying the C2 freed-page poison `0xDE` bytes.
+KMalloc'd structs that embed sync primitives (`SpinLock`, `Mutex`,
+`HandleTable`) MUST be `memset(p, 0, sizeof(*p))` immediately after
+the allocation. The serial / scheduler / process / linux-clone paths
+all hit this; see `.claude/knowledge/kmalloc-zero-init-pattern.md` for
+the full pattern + audit checklist.
 
 ### Pitfall 1 — absolute `tasks_live <= constant_baseline`
 
