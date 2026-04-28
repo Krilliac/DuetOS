@@ -96,6 +96,50 @@ void FramebufferFillRect(u32 x, u32 y, u32 w, u32 h, u32 rgb);
 /// Clipped; no-op on empty dimensions or !Available().
 void FramebufferDrawRect(u32 x, u32 y, u32 w, u32 h, u32 rgb, u32 thickness);
 
+/// Alpha-blend the rect [x, x+w) x [y, y+h) with `argb`. The
+/// high byte of `argb` is the alpha channel (0..255); the lower
+/// 24 bits are the source RGB (0xAARRGGBB layout to mirror what
+/// callers already construct for `FramebufferFillRect`). The
+/// blend is over the current framebuffer pixels using 8-bit
+/// straight-alpha "src-over" arithmetic with /255 rounding:
+///
+///   out = src * alpha + dst * (255 - alpha)   (per channel)
+///
+/// Fast-paths alpha == 0 (no-op) and alpha == 0xFF (delegates
+/// to `FramebufferFillRect`). Clipped; no-op on empty dimensions
+/// or !Available().
+///
+/// Cost: one read + one write per covered pixel. For chrome use
+/// (titlebar washes, hover tints, accent bars) the painted
+/// surface is small enough that the cost is negligible. Avoid
+/// blending the whole framebuffer in a hot loop.
+void FramebufferFillRectAlpha(u32 x, u32 y, u32 w, u32 h, u32 argb);
+
+/// Fill [x, x+w) x [y, y+h) with a vertical linear gradient
+/// from `top_rgb` at row y to `bot_rgb` at row y+h-1. Both
+/// colours are 0x00RRGGBB. Each scanline gets one interpolated
+/// shade — there is no horizontal gradient, no diagonal, no
+/// multi-stop. Used for focus titlebars, Start-menu header,
+/// the prototype's wallpaper sky band.
+///
+/// Clipped; no-op on empty dimensions or !Available(). When
+/// h == 1 the function devolves to `FramebufferFillRect` with
+/// `top_rgb`.
+void FramebufferFillRectGradient(u32 x, u32 y, u32 w, u32 h, u32 top_rgb, u32 bot_rgb);
+
+/// Fill the axis-aligned rect [x, x+w) x [y, y+h) with `rgb`
+/// using rounded corners of `radius` pixels. Radius is clamped
+/// to `min(w, h) / 2` (so a square rect with radius == w/2 is a
+/// circle); a radius of 0 devolves to `FramebufferFillRect`.
+/// The corner curve is rendered as the largest set of pixels in
+/// the corner radius-square whose squared distance to the
+/// corner-arc centre is ≤ radius². Pixel-aligned, no
+/// anti-aliasing — anti-aliasing is a follow-on once the
+/// compositor has a real off-screen mask.
+///
+/// Clipped; no-op on empty dimensions or !Available().
+void FramebufferFillRoundRect(u32 x, u32 y, u32 w, u32 h, u32 radius, u32 rgb);
+
 /// Copy `src_w × src_h` BGRA8888 pixels into the framebuffer at
 /// `(dst_x, dst_y)`. `src` is a kernel-side pointer to a row-major
 /// pixel buffer with `src_pitch_px` u32-pixels per row (allowing a

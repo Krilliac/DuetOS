@@ -367,6 +367,176 @@ void FramebufferDrawRect(u32 x, u32 y, u32 w, u32 h, u32 rgb, u32 thickness)
     FramebufferFillRect(x + w - thickness, y, thickness, h, rgb); // right
 }
 
+void FramebufferFillRectAlpha(u32 x, u32 y, u32 w, u32 h, u32 argb)
+{
+    if (!g_available || w == 0 || h == 0)
+    {
+        return;
+    }
+    if (x >= g_info.width || y >= g_info.height)
+    {
+        return;
+    }
+
+    const u32 alpha = (argb >> 24) & 0xFFU;
+    if (alpha == 0)
+    {
+        return;
+    }
+    if (alpha == 0xFF)
+    {
+        FramebufferFillRect(x, y, w, h, argb & 0x00FFFFFFU);
+        return;
+    }
+
+    // Pre-multiply the source channels by alpha once so the inner
+    // loop is dst * inv + src_premul plus a /255 round.
+    const u32 src_r = (argb >> 16) & 0xFFU;
+    const u32 src_g = (argb >> 8) & 0xFFU;
+    const u32 src_b = argb & 0xFFU;
+    const u32 sr_a = src_r * alpha;
+    const u32 sg_a = src_g * alpha;
+    const u32 sb_a = src_b * alpha;
+    const u32 inv = 255U - alpha;
+
+    const u32 x_end = (x + w > g_info.width) ? g_info.width : x + w;
+    const u32 y_end = (y + h > g_info.height) ? g_info.height : y + h;
+
+    auto* fb_bytes = reinterpret_cast<u8*>(g_info.virt);
+    for (u32 yi = y; yi < y_end; ++yi)
+    {
+        auto* row = reinterpret_cast<volatile u32*>(fb_bytes + static_cast<u64>(yi) * g_info.pitch);
+        for (u32 xi = x; xi < x_end; ++xi)
+        {
+            const u32 dst = row[xi];
+            const u32 dr = (dst >> 16) & 0xFFU;
+            const u32 dg = (dst >> 8) & 0xFFU;
+            const u32 db = dst & 0xFFU;
+            // /255 rounding via the (n + 127) / 255 form. Equivalent
+            // to ((n + 128) + ((n + 128) >> 8)) >> 8 in the cheap
+            // 16-bit-mul approximation; we use the explicit divide
+            // for clarity (compiler folds it into a multiply).
+            const u32 r = (sr_a + dr * inv + 127U) / 255U;
+            const u32 g = (sg_a + dg * inv + 127U) / 255U;
+            const u32 b = (sb_a + db * inv + 127U) / 255U;
+            row[xi] = (r << 16) | (g << 8) | b;
+        }
+    }
+}
+
+void FramebufferFillRectGradient(u32 x, u32 y, u32 w, u32 h, u32 top_rgb, u32 bot_rgb)
+{
+    if (!g_available || w == 0 || h == 0)
+    {
+        return;
+    }
+    if (x >= g_info.width || y >= g_info.height)
+    {
+        return;
+    }
+    if (h == 1 || top_rgb == bot_rgb)
+    {
+        FramebufferFillRect(x, y, w, h, top_rgb);
+        return;
+    }
+
+    const i32 tr = static_cast<i32>((top_rgb >> 16) & 0xFFU);
+    const i32 tg = static_cast<i32>((top_rgb >> 8) & 0xFFU);
+    const i32 tb = static_cast<i32>(top_rgb & 0xFFU);
+    const i32 br = static_cast<i32>((bot_rgb >> 16) & 0xFFU);
+    const i32 bg = static_cast<i32>((bot_rgb >> 8) & 0xFFU);
+    const i32 bb = static_cast<i32>(bot_rgb & 0xFFU);
+
+    const u32 x_end = (x + w > g_info.width) ? g_info.width : x + w;
+    const u32 y_end = (y + h > g_info.height) ? g_info.height : y + h;
+    const u32 span = h - 1U; // we know h >= 2 here
+
+    auto* fb_bytes = reinterpret_cast<u8*>(g_info.virt);
+    for (u32 yi = y; yi < y_end; ++yi)
+    {
+        // 8.8 fixed-point row position in [0, 256]. Use the
+        // unclipped `span`, not `y_end - y`, so a gradient
+        // clipped at the bottom of the screen still extrapolates
+        // each visible row to its correct shade.
+        const u32 t = ((yi - y) * 256U) / span;
+        const i32 r = tr + ((br - tr) * static_cast<i32>(t)) / 256;
+        const i32 g = tg + ((bg - tg) * static_cast<i32>(t)) / 256;
+        const i32 b = tb + ((bb - tb) * static_cast<i32>(t)) / 256;
+        const u32 c = (static_cast<u32>(r) << 16) | (static_cast<u32>(g) << 8) | static_cast<u32>(b);
+        auto* row = reinterpret_cast<volatile u32*>(fb_bytes + static_cast<u64>(yi) * g_info.pitch);
+        for (u32 xi = x; xi < x_end; ++xi)
+        {
+            row[xi] = c;
+        }
+    }
+}
+
+void FramebufferFillRoundRect(u32 x, u32 y, u32 w, u32 h, u32 radius, u32 rgb)
+{
+    if (!g_available || w == 0 || h == 0)
+    {
+        return;
+    }
+    // Clamp radius to half the shorter side. A radius bigger than
+    // that would paint corner curves that overlap each other; the
+    // clamp turns "absurd" radii into a stadium / circle, which is
+    // still a sensible thing to ask for.
+    const u32 max_r = (w < h ? w : h) / 2U;
+    if (radius > max_r)
+    {
+        radius = max_r;
+    }
+    if (radius == 0)
+    {
+        FramebufferFillRect(x, y, w, h, rgb);
+        return;
+    }
+
+    // Middle band: full width across the rows that aren't in a
+    // corner zone. Note h - 2*radius can be 0 if radius == h/2 and
+    // h is even — FramebufferFillRect short-circuits on h == 0.
+    FramebufferFillRect(x, y + radius, w, h - 2U * radius, rgb);
+
+    // Per-row "indent" for the corner zones. The arc passes
+    // through the four pixels closest to (radius-1, 0), (0,
+    // radius-1) etc. of each radius-square. For each row at
+    // distance dy from the outer corner, the smallest x-indent
+    // dx is the smallest dx for which (r1 - dx)² + (r1 - dy)²
+    // ≤ r1² where r1 = radius - 1.
+    const u32 r1 = radius - 1U;
+    const u32 r1_sq = r1 * r1;
+    for (u32 dy = 0; dy < radius; ++dy)
+    {
+        const u32 vy = r1 - dy;
+        const u32 vy_sq = vy * vy;
+        u32 dx = 0;
+        while (dx < radius)
+        {
+            const u32 vx = r1 - dx;
+            if (vx * vx + vy_sq <= r1_sq)
+            {
+                break;
+            }
+            ++dx;
+        }
+        // Rows are inset by `dx` on each side; if `dx` equals or
+        // exceeds w/2 the row is empty (would happen for very
+        // small rects with the radius clamp; FillRect handles 0).
+        const u32 row_w = (2U * dx >= w) ? 0U : (w - 2U * dx);
+        if (row_w == 0)
+        {
+            continue;
+        }
+        // Top corner row: y + dy.
+        FramebufferFillRect(x + dx, y + dy, row_w, 1U, rgb);
+        // Bottom corner row: y + h - 1 - dy. Distinct from the
+        // top row whenever h > 2*radius, but the clamp makes
+        // 2*radius ≤ h, so y+h-1-dy ≥ y+radius for all dy in the
+        // loop and the rows never collide with the middle band.
+        FramebufferFillRect(x + dx, y + h - 1U - dy, row_w, 1U, rgb);
+    }
+}
+
 void FramebufferSelfTest()
 {
     if (!g_available)

@@ -754,6 +754,10 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     const duetos::drivers::video::WindowHandle logview_handle =
         duetos::drivers::video::WindowRegister(logview_chrome, "KERNEL LOG");
     duetos::drivers::video::ThemeRegisterWindow(Role::LogView, logview_handle);
+    // Subtitle for Duet-era chrome to render next to the title.
+    // Themes that don't read it (Classic / Slate10 / Amber)
+    // ignore the field; the storage is unconditional.
+    duetos::drivers::video::WindowSetSubtitle(logview_handle, "/sys/klog | live");
 
     duetos::drivers::video::WindowSetContentDraw(
         logview_handle,

@@ -108,6 +108,15 @@ using WindowHandle = u32;
 /// `syscall/syscall.h`.
 constexpr u32 kWindowTitleStorage = 64;
 
+/// Maximum ASCII bytes stored in a window's optional subtitle
+/// buffer (NUL included). The subtitle is a Duet-era metadata
+/// field — apps that opt in (Inspect: "PE32+ · x86_64", Kernel
+/// Log: "/sys/klog · live") publish a one-line context string
+/// next to the title. The kernel chrome path reads it lazily;
+/// themes that don't render it (Classic / Slate10 / Amber)
+/// simply ignore the field.
+constexpr u32 kWindowSubtitleStorage = 48;
+
 struct WindowChrome
 {
     u32 x, y, w, h;
@@ -412,6 +421,23 @@ void WindowSetVisible(WindowHandle h, bool visible);
 /// A successful call updates the stored title pointer's CONTENT
 /// in place; the pointer itself doesn't change.
 bool WindowSetTitle(WindowHandle h, const char* ascii_src);
+
+/// Bounded-copy a new ASCII subtitle into the window's arena
+/// slot. Non-ASCII bytes become '?'. The subtitle is a small
+/// "context string" that future Duet-era chrome paths render
+/// next to the title in a dimmer monospace ink (e.g. Inspect
+/// shows "PE32+ · x86_64", Kernel Log shows "/sys/klog · live").
+/// Existing themes (Classic / Slate10 / Amber) ignore the field
+/// — a window without a subtitle stores an empty string and
+/// renders identically to before. Pass nullptr or "" to clear.
+/// Returns false for an invalid handle.
+bool WindowSetSubtitle(WindowHandle h, const char* ascii_src);
+
+/// Borrowed pointer to the window's subtitle string. Always
+/// non-null while the window is alive; returns "" when no
+/// subtitle has been set. Returns nullptr if the handle is
+/// invalid.
+const char* WindowGetSubtitle(WindowHandle h);
 
 /// Resize in-place. Width/height are clamped against the
 /// framebuffer. (0 = "don't change" for each dimension.)
