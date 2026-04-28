@@ -34,6 +34,7 @@ constinit u8 g_csum_calc = 0;
 constinit u8 g_csum_recv = 0;
 
 constinit GdbStubWriteByte g_sink = nullptr;
+constinit const GdbRegSnapshot* g_regs = nullptr;
 
 constinit u64 g_packets_received = 0;
 constinit u64 g_packets_bad_csum = 0;
@@ -127,13 +128,61 @@ void HandlePacket()
     }
     if (g_packet[0] == 'g')
     {
-        // 16 × u64 registers, each as 16 hex chars = 256 bytes.
-        // v0 returns zeros.
-        char zeros[16 * 16 + 1];
-        for (u32 i = 0; i < 16 * 16; ++i)
-            zeros[i] = '0';
-        zeros[16 * 16] = '\0';
-        SendReply(zeros, 16 * 16);
+        // 16 × u64 GPRs + rip + rflags + 6 × u32 segments, in
+        // GDB's canonical x86_64 order. Each u64 = 16 hex chars
+        // little-endian; each u32 = 8 hex chars. Size:
+        //   16*16 (GPRs) + 16 (rip) + 16 (rflags) + 6*8 (segs)
+        //   = 256 + 16 + 16 + 48 = 336 hex chars.
+        constexpr u32 kReplyChars = 16 * 16 + 16 + 16 + 6 * 8;
+        char buf[kReplyChars + 1];
+        u32 off = 0;
+        auto put_u64 = [&](u64 v)
+        {
+            // Little-endian byte order: GDB expects the LSB first.
+            for (u32 i = 0; i < 8; ++i)
+            {
+                const u8 b = static_cast<u8>(v >> (i * 8));
+                buf[off++] = HexDigitChar((b >> 4) & 0xF);
+                buf[off++] = HexDigitChar(b & 0xF);
+            }
+        };
+        auto put_u32 = [&](u32 v)
+        {
+            for (u32 i = 0; i < 4; ++i)
+            {
+                const u8 b = static_cast<u8>(v >> (i * 8));
+                buf[off++] = HexDigitChar((b >> 4) & 0xF);
+                buf[off++] = HexDigitChar(b & 0xF);
+            }
+        };
+        const GdbRegSnapshot z{};
+        const GdbRegSnapshot& r = (g_regs != nullptr) ? *g_regs : z;
+        put_u64(r.rax);
+        put_u64(r.rbx);
+        put_u64(r.rcx);
+        put_u64(r.rdx);
+        put_u64(r.rsi);
+        put_u64(r.rdi);
+        put_u64(r.rbp);
+        put_u64(r.rsp);
+        put_u64(r.r8);
+        put_u64(r.r9);
+        put_u64(r.r10);
+        put_u64(r.r11);
+        put_u64(r.r12);
+        put_u64(r.r13);
+        put_u64(r.r14);
+        put_u64(r.r15);
+        put_u64(r.rip);
+        put_u64(r.rflags);
+        put_u32(r.cs);
+        put_u32(r.ss);
+        put_u32(r.ds);
+        put_u32(r.es);
+        put_u32(r.fs);
+        put_u32(r.gs);
+        buf[off] = '\0';
+        SendReply(buf, off);
         return;
     }
     if (g_packet[0] == 'G')
@@ -143,10 +192,63 @@ void HandlePacket()
     }
     if (g_packet[0] == 'm')
     {
-        // m<addr>,<len>. v0 ignores the args and returns zeros
-        // up to a small cap. Real memory read via mm + extable
-        // is a D7-followup.
-        SendCStr("00");
+        // m<addr>,<len> — parse the two hex args separated by
+        // ',', then read up to `len` bytes from `addr` and reply
+        // hex-encoded. Bounds the read at half the packet
+        // capacity (each byte costs 2 hex chars + framing). The
+        // kernel-VA read is direct — extable-protected access
+        // is a future D7-followup.
+        u64 addr = 0;
+        u64 len = 0;
+        u32 i = 1;
+        while (i < g_packet_len && g_packet[i] != ',')
+        {
+            if (!IsHexDigit(g_packet[i]))
+                break;
+            addr = (addr << 4) | HexDigitValue(g_packet[i]);
+            ++i;
+        }
+        if (i >= g_packet_len || g_packet[i] != ',')
+        {
+            SendCStr("E01");
+            return;
+        }
+        ++i;
+        while (i < g_packet_len)
+        {
+            if (!IsHexDigit(g_packet[i]))
+                break;
+            len = (len << 4) | HexDigitValue(g_packet[i]);
+            ++i;
+        }
+        constexpr u64 kMaxLen = (kPacketMax / 2) - 8; // leave room for framing
+        if (len > kMaxLen)
+            len = kMaxLen;
+        // Refuse non-canonical addresses to keep a typo from
+        // walking off into a non-mapped half of the AS.
+        const u64 high = addr >> 47;
+        if (high != 0 && high != 0x1FFFF)
+        {
+            SendCStr("E14"); // GDB's EFAULT-style code
+            return;
+        }
+        char buf[kPacketMax];
+        u32 off = 0;
+        const u8* p = reinterpret_cast<const u8*>(addr);
+        for (u64 k = 0; k < len && off + 2 <= sizeof(buf); ++k)
+        {
+            const u8 b = p[k];
+            buf[off++] = HexDigitChar((b >> 4) & 0xF);
+            buf[off++] = HexDigitChar(b & 0xF);
+        }
+        if (off == 0)
+        {
+            SendCStr("00");
+        }
+        else
+        {
+            SendReply(buf, off);
+        }
         return;
     }
     if (g_packet[0] == 'M')
@@ -181,6 +283,11 @@ void ResetParser()
 void GdbStubSetSink(GdbStubWriteByte sink)
 {
     g_sink = sink;
+}
+
+void GdbStubPublishRegisters(const GdbRegSnapshot* snap)
+{
+    g_regs = snap;
 }
 
 void GdbStubReceiveByte(u8 byte)

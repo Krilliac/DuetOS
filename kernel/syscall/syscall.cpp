@@ -87,6 +87,7 @@
 #include "subsystems/win32/registry.h"
 #include "log/klog.h"
 #include "diag/cleanroom_trace.h"
+#include "diag/event_trace.h"
 #include "diag/log_names.h"
 #include "proc/process.h"
 #include "proc/ring3_smoke.h"
@@ -418,6 +419,10 @@ void SyscallDispatch(arch::TrapFrame* frame)
     const Process* proc = CurrentProcess();
     const u64 pid = (proc != nullptr) ? proc->pid : 0;
     CleanroomTraceRecord("syscall", "native-dispatch", num, pid, frame->rip);
+    // Event-tracer enter (D2 instrumentation). Tag the event
+    // with the syscall number + first arg so a `tracer dump`
+    // correlates to the in-flight syscall stream.
+    ::duetos::diag::EventTrace(::duetos::diag::kEventSyscallEnter, num, frame->rdi);
     // Win32 custom flight recorder. No-op unless the caller has
     // opted into kPolicyFlightRecorder via SYS_WIN32_CUSTOM. Cheap
     // (one inline policy-bit check) when off. We hand the hook a

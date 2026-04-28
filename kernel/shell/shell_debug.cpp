@@ -717,7 +717,13 @@ void CmdTracer(u32 argc, char** argv)
         CmdTracerKind(argv[2]);
         return;
     }
-    ConsoleWriteln("TRACER: USAGE: TRACER DUMP | TRACER KIND <NAME>");
+    if (argc >= 2 && StrEq(argv[1], "reset"))
+    {
+        duetos::diag::EventTraceReset();
+        ConsoleWriteln("TRACER: RING RESET");
+        return;
+    }
+    ConsoleWriteln("TRACER: USAGE: TRACER DUMP | TRACER KIND <NAME> | TRACER RESET");
 }
 
 // `perf dump` — walk PerfSnapshot, resolve each RIP through

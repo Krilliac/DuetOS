@@ -494,6 +494,22 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             duetos::diag::PerfReset();
             return {};
         });
+    // NMI watchdog as a driver domain. Restart cycles
+    // Disable + Init — useful if a long-running diagnostic
+    // session needs the watchdog quiet for a window then
+    // re-armed.
+    duetos::security::RegisterDriverDomain(
+        "nmi-watchdog",
+        []() -> ::duetos::core::Result<void>
+        {
+            duetos::arch::NmiWatchdogInit();
+            return {};
+        },
+        []() -> ::duetos::core::Result<void>
+        {
+            duetos::arch::NmiWatchdogDisable();
+            return {};
+        });
 
     // Init-call registry self-test (plan A1). Exercises register +
     // RunPhase + bad-argument + failing-callback paths against the

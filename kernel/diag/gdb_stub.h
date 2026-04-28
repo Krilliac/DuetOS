@@ -74,6 +74,29 @@ using GdbStubWriteByte = void (*)(u8 byte);
 /// first byte arrives; later changes are racy.
 void GdbStubSetSink(GdbStubWriteByte sink);
 
+/// Snapshot of the 16 general-purpose x86_64 registers + RIP +
+/// RFLAGS that GDB's `g` packet returns. Layout matches GDB's
+/// canonical x86_64 register order (rax / rbx / rcx / rdx / rsi
+/// / rdi / rbp / rsp / r8..r15 / rip / rflags / cs / ss / ds /
+/// es / fs / gs). v0 reports zeros for the segment registers
+/// since the trap-frame snapshot doesn't preserve them today.
+struct GdbRegSnapshot
+{
+    u64 rax, rbx, rcx, rdx;
+    u64 rsi, rdi, rbp, rsp;
+    u64 r8, r9, r10, r11;
+    u64 r12, r13, r14, r15;
+    u64 rip, rflags;
+    u32 cs, ss, ds, es, fs, gs;
+};
+
+/// Publish a register snapshot. Subsequent `g` packets will
+/// hex-encode this struct in the canonical GDB order. Pass
+/// nullptr to clear (snapshots stop being live; `g` reverts to
+/// returning zeros). Caller owns the storage; the stub holds a
+/// pointer, so the snapshot must outlive any pending `g` reply.
+void GdbStubPublishRegisters(const GdbRegSnapshot* snap);
+
 /// Feed one received byte to the parser. The state machine
 /// recognises the `$` / `#` framing, accumulates the body,
 /// validates the trailing checksum, and on a complete packet

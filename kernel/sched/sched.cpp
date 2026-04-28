@@ -41,6 +41,7 @@
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/traps.h"
+#include "diag/event_trace.h"
 #include "diag/kdbg.h"
 #include "diag/soft_lockup.h"
 #include "sync/rcu.h"
@@ -2217,6 +2218,11 @@ void MutexLock(Mutex* m)
 
     // After successful acquire — push onto the lockdep held stack.
     ::duetos::sync::LockdepAfterAcquire(m->class_id);
+
+    // Event-tracer instrumentation. arg0 = mutex pointer (so a
+    // tracer dump can correlate acquire / release pairs);
+    // arg1 = current task id.
+    ::duetos::diag::EventTrace(::duetos::diag::kEventMutexAcquire, reinterpret_cast<u64>(m), CurrentTaskId());
 }
 
 bool MutexTryLock(Mutex* m)
@@ -2267,6 +2273,8 @@ void MutexUnlock(Mutex* m)
         m->owner = next;
     }
     arch::Sti();
+
+    ::duetos::diag::EventTrace(::duetos::diag::kEventMutexRelease, reinterpret_cast<u64>(m), CurrentTaskId());
 }
 
 // ---------------------------------------------------------------------------
