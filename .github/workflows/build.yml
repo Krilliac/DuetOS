@@ -139,6 +139,22 @@ jobs:
           done
           sudo apt-get install -y qemu-system-x86 grub-common grub-pc-bin \
                                   grub-efi-amd64-bin xorriso mtools ovmf
+      - name: Enable KVM access (~50× speedup vs TCG)
+        run: |
+          # GitHub-hosted ubuntu-24.04 runners ship with /dev/kvm
+          # exposed but with restrictive permissions (root:kvm 660).
+          # The smoke step runs as the unprivileged `runner` user,
+          # so without explicit access QEMU silently falls back to
+          # TCG and the kernel can't reach the PE smoke inside the
+          # wall-clock budget. Open up /dev/kvm so QEMU's
+          # `accel=kvm:tcg` picks KVM.
+          if [[ -e /dev/kvm ]]; then
+            sudo chmod 666 /dev/kvm
+            ls -l /dev/kvm
+            echo "kvm_present=yes"
+          else
+            echo "kvm_present=no — /dev/kvm not on this runner"
+          fi
       - name: Download kernel artifact
         uses: actions/download-artifact@v4
         with:

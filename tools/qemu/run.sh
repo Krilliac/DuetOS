@@ -128,6 +128,11 @@ ACCEL="tcg"
 if [[ -r /dev/kvm && -w /dev/kvm ]]; then
     ACCEL="kvm:tcg"
 fi
+# Log the acceleration choice so a slow CI run is easy to diagnose
+# from the workflow log alone — without this, "did the smoke job
+# actually use KVM?" required re-checking permissions on /dev/kvm
+# after the fact.
+echo "[run.sh] qemu accel=${ACCEL}" >&2
 
 QEMU_ARGS=(
     -machine  "q35,accel=${ACCEL}"
