@@ -475,6 +475,23 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             duetos::sync::LockdepReset();
             return {};
         });
+    // Event-trace + perf-profile as driver domains. Restart
+    // wipes the relevant ring so an operator can re-baseline
+    // before kicking off a measurement run.
+    duetos::security::RegisterDriverDomain(
+        "event-trace", []() -> ::duetos::core::Result<void> { return {}; },
+        []() -> ::duetos::core::Result<void>
+        {
+            duetos::diag::EventTraceReset();
+            return {};
+        });
+    duetos::security::RegisterDriverDomain(
+        "perf", []() -> ::duetos::core::Result<void> { return {}; },
+        []() -> ::duetos::core::Result<void>
+        {
+            duetos::diag::PerfReset();
+            return {};
+        });
 
     // Init-call registry self-test (plan A1). Exercises register +
     // RunPhase + bad-argument + failing-callback paths against the

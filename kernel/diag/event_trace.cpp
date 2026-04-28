@@ -74,6 +74,18 @@ void EventTrace(u32 kind, u64 arg0, u64 arg1)
     slot.kind = kind;
 }
 
+void EventTraceReset()
+{
+    for (u32 cpu = 0; cpu < kEventTraceCpuMax; ++cpu)
+    {
+        for (u32 i = 0; i < kEventRingCapacity; ++i)
+        {
+            g_per_cpu[cpu].ring[i] = EventRecord{};
+        }
+        g_per_cpu[cpu].total = 0;
+    }
+}
+
 u64 EventTraceTotalRecords()
 {
     return __atomic_load_n(&g_total, __ATOMIC_SEQ_CST);

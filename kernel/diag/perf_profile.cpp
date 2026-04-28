@@ -79,6 +79,15 @@ u32 PerfSnapshot(PerfSample* out, u32 out_capacity)
     return to_copy;
 }
 
+void PerfReset()
+{
+    for (u32 i = 0; i < kPerfRingCapacity; ++i)
+    {
+        g_ring[i] = PerfSample{};
+    }
+    g_total = 0;
+}
+
 void PerfProfileSelfTest()
 {
     arch::SerialWrite("[perf] self-test: append + snapshot + ordering\n");

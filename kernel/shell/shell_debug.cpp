@@ -539,6 +539,46 @@ void CmdAddr2Sym(u32 argc, char** argv)
     ConsoleWriteln(line);
 }
 
+// `domain restart <name>` — kick a registered fault domain
+// (driver-tagged or hand-registered) through teardown + init
+// without rebooting. Admin-gated through the dispatcher; the
+// caller's shell session needs admin or the command refuses.
+void CmdDomainRestart(u32 argc, char** argv)
+{
+    if (argc < 3)
+    {
+        ConsoleWriteln("DOMAIN RESTART: USAGE: DOMAIN RESTART <NAME>");
+        return;
+    }
+    const char* name = argv[2];
+    auto r = duetos::security::RestartDriverDomain(name);
+    if (!r.has_value())
+    {
+        ConsoleWrite("DOMAIN RESTART: NOT FOUND \"");
+        ConsoleWrite(name);
+        ConsoleWriteln("\"");
+        return;
+    }
+    ConsoleWrite("DOMAIN RESTART: \"");
+    ConsoleWrite(name);
+    ConsoleWriteln("\" OK");
+}
+
+void CmdDomain(u32 argc, char** argv)
+{
+    if (argc >= 2 && StrEq(argv[1], "restart"))
+    {
+        CmdDomainRestart(argc, argv);
+        return;
+    }
+    if (argc >= 2 && StrEq(argv[1], "list"))
+    {
+        CmdInspectDomains();
+        return;
+    }
+    ConsoleWriteln("DOMAIN: USAGE: DOMAIN LIST | DOMAIN RESTART <NAME>");
+}
+
 // `lockdep panic on|off` — flip the inversion-promote-to-panic
 // knob (plan D1-followup). Default off so a boot under
 // instrumentation can complete with a noisy graph; flip ON once

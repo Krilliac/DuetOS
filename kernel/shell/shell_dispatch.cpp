@@ -1302,6 +1302,15 @@ void Dispatch(char* line)
         CmdPerf(argc, argv);
         return;
     }
+    if (StrEq(cmd, "domain"))
+    {
+        // Restarting a fault domain teardown+init may free
+        // resources held by another task; gate to admin.
+        if (!RequireAdmin("DOMAIN"))
+            return;
+        CmdDomain(argc, argv);
+        return;
+    }
     if (StrEq(cmd, "lockdep"))
     {
         // `lockdep panic on|off` — flip the inversion-promote-to-

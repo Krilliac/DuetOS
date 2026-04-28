@@ -105,6 +105,11 @@ u64 EventTraceTotalRecords();
 /// `kEventRingCapacity`).
 u32 EventTraceLiveCount();
 
+/// Reset every CPU's ring + total counter back to fresh-boot
+/// state. Pairs with no-op init for fault-domain registration:
+/// `RestartDriverDomain("event-trace")` re-baselines the ring.
+void EventTraceReset();
+
 /// Walk the ring oldest-first into `out` (caller-owned buffer).
 /// Copies up to `out_capacity` records; returns the number
 /// actually copied. Concurrent writers may produce a slightly

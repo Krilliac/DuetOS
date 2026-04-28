@@ -65,6 +65,11 @@ u32 PerfLiveCount();
 /// out-of-order samples.
 u32 PerfSnapshot(PerfSample* out, u32 out_capacity);
 
+/// Reset the ring + total counter back to fresh-boot state.
+/// Pairs with no-op init for fault-domain registration:
+/// `RestartDriverDomain("perf")` re-baselines the sample ring.
+void PerfReset();
+
 /// Boot-time self-test. Synthesises a few samples, asserts
 /// counters advance, snapshots the ring, verifies the
 /// recorded RIPs come back in order. Panics on mismatch.
