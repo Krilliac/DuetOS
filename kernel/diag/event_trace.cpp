@@ -28,8 +28,22 @@ namespace duetos::diag
 namespace
 {
 
-constinit EventRecord g_ring[kEventRingCapacity] = {};
-constinit u64 g_total = 0; ///< Total appends ever; modulo capacity = current head.
+// Restructured to per-CPU shape (D2-followup). v0 has one CPU
+// slot since only the BSP runs at boot. Per-CPU upgrade lands
+// once SMP exposes the current-CPU ID; until then the macro
+// alias keeps the existing single-CPU code paths readable. The
+// ring + total counter sit in a struct so each future CPU's
+// state stays cache-line independent.
+struct PerCpuRing
+{
+    EventRecord ring[kEventRingCapacity];
+    u64 total;
+};
+
+constexpr u32 kEventTraceCpuMax = 1;
+constinit PerCpuRing g_per_cpu[kEventTraceCpuMax] = {};
+#define g_ring g_per_cpu[0].ring
+#define g_total g_per_cpu[0].total
 
 } // namespace
 

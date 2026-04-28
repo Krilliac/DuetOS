@@ -99,6 +99,19 @@ void SoftLockupDisable()
     g_enabled = false;
 }
 
+void SoftLockupEnable()
+{
+    // Reset the per-CPU streak state so a re-enable doesn't
+    // immediately fire on a stale TID match.
+    for (u32 i = 0; i < kSoftLockupCpuMax; ++i)
+    {
+        g_per_cpu[i].last_tid = 0;
+        g_per_cpu[i].same_tid_count = 0;
+        g_per_cpu[i].warned_for_tid = 0;
+    }
+    g_enabled = true;
+}
+
 u64 SoftLockupWarningsEmitted()
 {
     return g_warnings_total;

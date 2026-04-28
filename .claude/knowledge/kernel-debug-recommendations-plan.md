@@ -71,6 +71,9 @@
 | _A1-followup_ (this commit) | `KERNEL_INITCALL(phase, name, fn)` macro layer over `_init_array`. Macro emits a per-call `__attribute__((constructor))` thunk in an anon namespace; `core::RunInitArray()` invokes the thunk, which forwards to `core::InitcallAutoRegister(phase, name, fn)` → `core::InitcallRegister`. Subsystems can now register from file scope without modifying `kernel_main`; the dispatcher's `RunPhase(phase)` call still has to happen at the right point. The trailing NOTE in init.h that called the macro "intentionally absent rather than stubbed" is now resolved. |
 | _D3-followup_ (this commit) | PMU NMI sampling is wired live. `NmiWatchdogHandleNmi` now takes `interrupted_rip` (passed from `traps.cpp`'s `frame->rip`) and calls `diag::PerfRecord(rip)` immediately after confirming the overflow is ours. Each watchdog-NMI now drops a sample into the perf ring; `perf dump` returns real data instead of "(no samples; PMU NMI sampling not yet wired)". The watchdog's existing pet-counter check + counter-reload path stay unchanged; sampling is a single fetch_add + 2 stores added before that work. |
 | _D1-followup_ (this commit) | Lockdep held-stack restructured to per-CPU shape: `g_held_stack` / `g_held_depth` collapsed into a `PerCpuHeld` struct, `g_per_cpu[kLockdepCpuMax]` array (capacity 1 in v0). `g_held_stack` / `g_held_depth` macro aliases preserve the existing single-CPU code paths. Same shape as the D4-followup soft-lockup restructuring; indexing by current-CPU ID is the remaining work once SMP exposes that ID. |
+| _D2-followup_ (this commit) | Event-trace ring restructured to per-CPU shape: `g_ring` + `g_total` collapsed into a `PerCpuRing` struct, `g_per_cpu[kEventTraceCpuMax]` array (capacity 1 in v0). Macro aliases preserve existing single-CPU code paths. Each future CPU's state stays cache-line independent. Same shape as the D1 / D4 followup restructurings. |
+| _A2-followup_ (this commit) | `time::TimerInit()` portable forwarder added to `kernel/time/tick.{h,cpp}`. Calls `arch::TimerInit()` today; the day an ARM64 generic-timer backend lands, this is the call site `kernel_main` keeps using and only the arch implementation changes. `kernel_main` now invokes `duetos::time::TimerInit()` instead of the arch entry point. Remaining work — moving the LAPIC-divider + tick-frequency programming out of `arch::TimerInit` itself — is the new A2-followup. |
+| _E3-followup_ (this commit) | First real driver registered as a fault domain: the soft-lockup detector. `SoftLockupEnable()` added (resets per-CPU streak state + flips `g_enabled` back on); `SoftLockupDisable()` already existed. Init/teardown lambdas in `kernel_main` register the pair via `RegisterDriverDomain("soft-lockup", ...)`. `RestartDriverDomain("soft-lockup")` from the shell now drives the detector through a clean disable + re-enable cycle. Other drivers register as their teardown story matures (each needs a real teardown written). |
 
 ### Deferred (in priority order — see "Recommended ordering" below)
 
@@ -81,17 +84,17 @@
 - [ ] A3-followup — Migrate `SYS_MUTEX_CREATE / WAIT / RELEASE` from `Process::win32_mutexes` array onto `KMutex` + `kobj_handles` (Win32 ABI semantics — kWaitObject0 / kWaitTimeout, deadlock-detect callbacks — need careful preservation; out-of-scope for the bare-subclass slice)
 - [ ] A3-followup — Migrate the 10+ Win32 per-type handle arrays into the unified `HandleTable`
 - [ ] A3-followup — Migrate Linux `LinuxFd` table into `HandleTable` once a `KFile` subclass exists
-- [ ] A2-followup — Promote `arch::TimerInit` (LAPIC-divider math + tick frequency programming) into `kernel/time/timer.cpp` once an ARM64 / generic-timer backend justifies the abstraction
+- [ ] A2-followup — Move the LAPIC-divider math + tick-frequency programming OUT of `arch::TimerInit` into a portable `time::TimerConfigure(hz)` helper once an ARM64 / generic-timer backend justifies the abstraction (current `time::TimerInit` is a forwarder)
 - [ ] D1-followup — Index `g_per_cpu` lockdep array by current-CPU ID once SMP per-CPU storage exposes it (state is now structured per-CPU; only the slot-0 alias remains hardcoded)
 - [ ] B2 — Per-CPU runqueues + work stealing (real SMP)
 - [ ] D1 — Lockdep-lite (locking-order graph)
 - [ ] E1-followup — Enable CET mitigations (write `IA32_S_CET` / `IA32_PL0_SSP`, allocate shadow stacks, recompile with `-fcf-protection=branch`); gated on the now-landed `arch::CetGet().ss_supported` / `ibt_supported` signal
 - [ ] E2-followup — KPTI implementation itself, gated on the now-landed `arch::CpuMitigations::needs_kpti` signal; only triggered when a needs-kpti machine enters the test fleet (see investigation v0)
 - [ ] C1-followup — Real per-zone allocator (current scaffolding forwards every zone request to the global pool; per-zone bitmap + buddy free-lists land when a workload demands DMA / DMA32 isolation)
-- [ ] D2-followup — Per-CPU event-trace rings once SMP per-CPU storage is real (current ring is single-global, fine for BSP-only boot but each AP needs its own buffer to avoid cache-line ping-pong on the head index)
+- [ ] D2-followup — Index `g_per_cpu` event-trace ring array by current-CPU ID once SMP per-CPU storage exposes it (state is now structured per-CPU; only the slot-0 alias remains hardcoded)
 - [ ] D7 — GDB serial stub on COM2
 - [ ] D4-followup — Index `g_per_cpu` array by current-CPU ID once SMP per-CPU storage exposes it (state is now structured per-CPU; only the slot-0 alias remains hardcoded)
-- [ ] E3-followup — Register existing drivers (framebuffer, pci, nvme, ahci, xhci, e1000, …) as driver fault domains using `RegisterDriverDomain`; each needs a real teardown function written
+- [ ] E3-followup — Continue registering drivers as fault domains (soft-lockup landed; framebuffer / pci / nvme / ahci / xhci / e1000 each need a real teardown written)
 
 ## Resume prompt
 

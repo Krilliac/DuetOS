@@ -67,6 +67,12 @@ void SoftLockupTick(u64 now_ticks, u64 current_tid);
 /// path so a final warning log doesn't drown out the crash dump.
 void SoftLockupDisable();
 
+/// Re-enable the detector. Idempotent. Pairs with
+/// `SoftLockupDisable` so the soft-lockup detector can be a
+/// driver fault domain (E3-followup) — Restart calls disable
+/// then enable.
+void SoftLockupEnable();
+
 /// Total soft-lockup warnings emitted since boot. Cheap u64
 /// load; the runtime checker / `inspect` (future) reports this.
 /// Non-zero is a kernel bug to triage.

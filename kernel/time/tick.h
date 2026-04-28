@@ -83,4 +83,13 @@ inline constexpr u64 NsToTicks(u64 ns)
 /// mismatch.
 void TickSelfTest();
 
+/// Portable scheduler-tick init wrapper (plan A2-followup).
+/// Forwards to the arch backend's timer programming today
+/// (`arch::TimerInit` on x86_64 — LAPIC-divider math + IRQ
+/// routing). Lets `kernel_main` call `time::TimerInit()`
+/// instead of the arch-specific entry point so an ARM64
+/// generic-timer port can drop a second backend in cleanly
+/// without changing the boot code that calls it.
+void TimerInit();
+
 } // namespace duetos::time

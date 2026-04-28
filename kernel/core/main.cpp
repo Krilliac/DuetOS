@@ -440,6 +440,26 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // convention; demo register/restart cycle.
     duetos::security::DriverDomainSelfTest();
 
+    // Register one real driver as a driver fault domain
+    // (plan E3-followup, 2026-04-28). The soft-lockup detector
+    // has a clean Enable/Disable pair so it's the natural first
+    // candidate; other drivers register as their teardown
+    // story matures. `RestartDriverDomain("soft-lockup")` from
+    // the shell now drives the detector through a clean
+    // disable+enable cycle.
+    duetos::security::RegisterDriverDomain(
+        "soft-lockup",
+        []() -> ::duetos::core::Result<void>
+        {
+            duetos::diag::SoftLockupEnable();
+            return {};
+        },
+        []() -> ::duetos::core::Result<void>
+        {
+            duetos::diag::SoftLockupDisable();
+            return {};
+        });
+
     // Init-call registry self-test (plan A1). Exercises register +
     // RunPhase + bad-argument + failing-callback paths against the
     // fixed-size table in `core/init.cpp`. The infrastructure is
@@ -1229,7 +1249,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     duetos::sync::LockdepRegisterCanonicalClasses();
 
     SerialWrite("[boot] Bringing up periodic timer.\n");
-    TimerInit();
+    duetos::time::TimerInit();
 
     SerialWrite("[boot] Bringing up scheduler.\n");
     duetos::sched::SchedInit();

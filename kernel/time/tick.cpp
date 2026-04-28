@@ -22,6 +22,11 @@ u64 TickCount()
     return arch::TimerTicks();
 }
 
+void TimerInit()
+{
+    arch::TimerInit();
+}
+
 void TickSelfTest()
 {
     arch::SerialWrite("[time] tick self-test: round-trip + monotonic advance\n");
