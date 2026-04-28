@@ -65,7 +65,7 @@ rm -f "${SERIAL_LOG}"
 # cleanly when the kernel reaches the [smoke] complete sentinel
 # and writes 0x10 to port 0xf4 (exit status 0x21 = 33). On
 # timeout, run.sh's `timeout` wrapper SIGTERMs QEMU.
-DUETOS_TIMEOUT="${DUETOS_TIMEOUT:-180}" \
+DUETOS_TIMEOUT="${DUETOS_TIMEOUT:-480}" \
 DUETOS_SMOKE_PROFILE="${PROFILE}" \
     "${RUN_SCRIPT}" > "${SERIAL_LOG}" 2>&1 || true
 

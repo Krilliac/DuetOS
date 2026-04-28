@@ -74,31 +74,46 @@ bool TokenMatches(const char* text, const char* end, const char* expected)
     return text == end && *expected == '\0';
 }
 
-/// Sleep budget per profile, in scheduler ticks (10ms each at 100Hz).
-/// Sized so spawned tasks have a window to run, print sentinels, and
-/// be reaped. A profile that needs more time can bump its slot.
+/// Per-profile *deadline* in scheduler ticks (10ms each at 100Hz).
+/// SleepAndExit polls `tasks_exited` against a captured baseline
+/// and exits as soon as the profile's spawned tasks have run + been
+/// reaped, OR when the deadline elapses (whichever comes first).
+/// The deadline only matters if the scenario hangs; in the happy
+/// path we exit within milliseconds of the PE / ring3 task exit.
 constexpr u64 kTicksPerSecond = 100;
-u64 ProfileSleepTicks(SmokeProfile profile)
+u64 ProfileDeadlineTicks(SmokeProfile profile)
 {
     switch (profile)
     {
     case SmokeProfile::None:
-        return 0; // never reached — None doesn't go through the sleep path
+        return 0; // never reached
     case SmokeProfile::Bringup:
-        return kTicksPerSecond * 1; // nothing to wait for, but settle the log
+        return kTicksPerSecond * 1; // nothing spawned, just settle
     case SmokeProfile::Ring3:
-        return kTicksPerSecond * 5; // 3 short ring3 tasks, ~1s each under TCG
+        return kTicksPerSecond * 10; // 3 short ring3 tasks
     case SmokeProfile::PeHello:
-        return kTicksPerSecond * 5; // tiny freestanding PE
+        return kTicksPerSecond * 10; // tiny freestanding PE
     case SmokeProfile::PeWinapi:
-        return kTicksPerSecond * 15; // comprehensive PE — many heap/calc/clock probes
+        return kTicksPerSecond * 30; // comprehensive PE + many probes
     case SmokeProfile::PeWinkill:
-        return kTicksPerSecond * 10; // real-world MSVC PE w/ DLL preload
+        return kTicksPerSecond * 20; // real-world MSVC PE w/ DLL preload
     case SmokeProfile::Linux:
-        return kTicksPerSecond * 10; // 7 Linux smokes serially
+        return kTicksPerSecond * 20; // 7 Linux smokes serially
     }
-    return kTicksPerSecond * 5;
+    return kTicksPerSecond * 10;
 }
+
+/// How many tasks are ALWAYS live in the post-bringup steady state,
+/// independent of any smoke profile spawn. Used by the polling loop
+/// below: once `tasks_live` drops back to the baseline, the smoke
+/// profile's spawned tasks have all exited and we can sentinel-exit.
+/// The baseline counts: idle (1) + reaper (1) + kbd-reader (1) +
+/// ui-ticker (1) + mouse-reader (1) + win-timer (1) + worker-A/B/C
+/// (3) + the kernel-main thread (1) = ~10. Loose upper bound to
+/// allow for any threads spawned during bringup we haven't tracked
+/// here; the polling tolerates being ABOVE this number, only the
+/// "still has spawned PE/ring3/Linux tasks" case matters.
+constexpr u64 kPostBringupBaseline = 16;
 
 } // namespace
 
@@ -244,12 +259,46 @@ void SmokeProfileSleepAndExit()
         return;
     }
 
-    // Yield long enough for the profile's spawned tasks to run +
-    // print + exit + be reaped. Sized per-profile in ProfileSleepTicks.
-    const u64 ticks = ProfileSleepTicks(g_profile);
-    if (ticks > 0)
+    const u64 deadline = ProfileDeadlineTicks(g_profile);
+    if (g_profile == SmokeProfile::Bringup)
     {
-        sched::SchedSleepTicks(ticks);
+        // No tasks spawned. A short settle is enough.
+        if (deadline > 0)
+        {
+            sched::SchedSleepTicks(deadline);
+        }
+    }
+    else
+    {
+        // Capture the post-spawn baseline. Each iteration sleeps
+        // 10 ticks (~100ms guest), then re-reads `tasks_live`.
+        // Once the count drops back to the steady-state baseline
+        // (or to whatever it was BEFORE the spawn — whichever is
+        // smaller), every spawned smoke task has exited and the
+        // reaper has reclaimed its frames; we can sentinel + exit
+        // immediately. If `tasks_live` never drops (because a
+        // spawned task wedged), the deadline catches it after
+        // ProfileDeadlineTicks ticks of guest time and we sentinel
+        // anyway — the CI signature-grep then either passes
+        // (the wedge was after the required prints landed) or
+        // shows a precise MISSING-signature diagnostic.
+        u64 elapsed = 0;
+        constexpr u64 kPollSliceTicks = 10;
+        const u64 baseline = kPostBringupBaseline;
+        while (elapsed < deadline)
+        {
+            const u64 live = sched::SchedStatsRead().tasks_live;
+            if (live <= baseline)
+            {
+                break;
+            }
+            sched::SchedSleepTicks(kPollSliceTicks);
+            elapsed += kPollSliceTicks;
+        }
+        // One last short settle so any stragglers (the reaper
+        // KFree'ing the last AS) have time to flush their final
+        // log lines before we cut the serial port.
+        sched::SchedSleepTicks(kPollSliceTicks);
     }
 
     // Sentinel that the CI script greps for. The "complete" suffix

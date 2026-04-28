@@ -193,15 +193,18 @@ jobs:
           # Retry on flake (exit 3) up to twice; regression fails
           # immediately. Each profile's ISO is regenerated from a
           # per-profile grub.cfg by tools/qemu/run.sh. Per-profile
-          # wall budget is 240s — generous on the observed ~30:1
-          # wall:guest ratio for ~8s of guest-time scenarios.
+          # wall budget is 480s — leaves headroom for the observed
+          # ~12:1 wall:guest ratio plus runner variance. Kernel
+          # SmokeProfileSleepAndExit polls tasks_live and exits
+          # within milliseconds of scenario completion; the timeout
+          # only fires on a real wedge.
           set +e
           attempts=3
           rc=0
           status=""
           for i in $(seq 1 ${attempts}); do
             echo "::group::smoke profile=${{ matrix.profile }} attempt ${i}/${attempts}"
-            DUETOS_TIMEOUT=240 \
+            DUETOS_TIMEOUT=480 \
               tools/test/profile-boot-smoke.sh "${{ matrix.profile }}" build/x86_64-debug
             rc=$?
             echo "::endgroup::"
