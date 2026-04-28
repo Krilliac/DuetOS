@@ -7,8 +7,24 @@
  * path available before the real console/log subsystem is initialized,
  * and the single path used by QEMU's `-serial stdio` for boot diagnostics.
  *
- * Context: kernel. Thread-unsafe by design — used only during boot,
- * before SMP is online.
+ * Concurrency: the public Write* entry points serialise on a per-port
+ * spinlock so concurrent CPUs / preempting tasks can't byte-interleave
+ * mid-string. Each call to SerialWrite/N/Hex/Byte is atomic at the
+ * function level — the bytes a single call emits land contiguously in
+ * the serial output. Composed log lines built from multiple calls
+ * (e.g. SerialWrite + SerialWriteHex + SerialWrite("\n")) can still
+ * interleave at the call boundary; that's the same boundary as before
+ * the lock was added and is the right granularity for boot-log
+ * readability.
+ *
+ * Panic re-entrancy: SerialEnterPanicMode (called by core::Panic before
+ * the first banner SerialWrite) flips a bypass that suppresses the lock
+ * so a panic on a CPU that was already holding the lock — or a panic
+ * fired from within SerialWrite — still gets its banner out instead of
+ * self-deadlocking.
+ *
+ * Context: kernel. Safe to call from task context, IRQ context, and
+ * panic / trap context.
  */
 
 namespace duetos::arch
@@ -22,16 +38,26 @@ inline constexpr u16 kCom1Port = 0x3F8;
 void SerialInit();
 
 /// Write a single byte to COM1 (polling — blocks until THR is empty).
+/// Acquires the serial spinlock for the duration of one byte.
 void SerialWriteByte(u8 byte);
 
-/// Write a NUL-terminated string to COM1.
+/// Write a NUL-terminated string to COM1. Atomic at the function level —
+/// no other writer interleaves between this call's bytes.
 void SerialWrite(const char* str);
 
-/// Write exactly `len` bytes to COM1 from `data`.
-/// Mirrors SerialWrite's LF->CRLF behavior and ignores embedded NUL bytes.
+/// Write exactly `len` bytes to COM1 from `data`. Atomic at the function
+/// level. Mirrors SerialWrite's LF->CRLF behavior and ignores embedded
+/// NUL bytes.
 void SerialWriteN(const char* data, u64 len);
 
-/// Write a 64-bit value as "0x" + 16 hex digits, no newline.
+/// Write a 64-bit value as "0x" + 16 hex digits, no newline. Atomic at
+/// the function level.
 void SerialWriteHex(u64 value);
+
+/// Bypass the serial spinlock from this point on. Called by core::Panic
+/// before the panic banner so a panic that fires while another CPU was
+/// already mid-SerialWrite still gets its output. Once set, never
+/// cleared — the kernel halts anyway.
+void SerialEnterPanicMode();
 
 } // namespace duetos::arch
