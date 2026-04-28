@@ -637,13 +637,15 @@ void FrameAllocatorSelfTest()
     FreeContiguousFrames(run_base, kRun);
 
     // Freed-page poison (plan C2). Allocate a frame, scribble it
-    // with a non-poison pattern, free it, allocate again. Whether
-    // we get the same physical frame back depends on the bitmap's
-    // hint state — but if we DO, the bytes must read as
-    // kFreedPagePoison. If we don't, skip the verification rather
-    // than fail (the allocator is free to hand a different frame;
-    // the unconditional check is "every freed frame got poisoned",
-    // which the unconditional poison-on-free already guarantees).
+    // with a non-poison pattern, free it, then read the page back
+    // through its direct-map alias and confirm every byte is
+    // kFreedPagePoison. The verification has to happen BEFORE any
+    // subsequent AllocateFrame: that path zeros the page before
+    // returning it (info-leak hardening), which would wipe the
+    // poison we are trying to observe. Reading freed memory via the
+    // higher-half direct map is safe in this self-test scope — the
+    // bitmap slot is free but the physical page hasn't been handed
+    // out, and the direct map keeps the VA mapped.
     const PhysAddr poison_probe = AllocateFrame();
     if (poison_probe == kNullFrame)
     {
@@ -655,28 +657,15 @@ void FrameAllocatorSelfTest()
         poison_va[i] = 0xAA;
     }
     FreeFrame(poison_probe);
-    const PhysAddr poison_probe2 = AllocateFrame();
-    if (poison_probe2 == kNullFrame)
+    const auto* reread = static_cast<const u8*>(PhysToVirt(poison_probe));
+    for (u64 i = 0; i < kPageSize; ++i)
     {
-        PanicFrame("self-test: poison-probe re-alloc failed");
-    }
-    if (poison_probe2 == poison_probe)
-    {
-        const auto* reread = static_cast<const u8*>(PhysToVirt(poison_probe2));
-        for (u64 i = 0; i < kPageSize; ++i)
+        if (reread[i] != kFreedPagePoison)
         {
-            if (reread[i] != kFreedPagePoison)
-            {
-                PanicFrame("self-test: freed-page poison not applied");
-            }
+            PanicFrame("self-test: freed-page poison not applied");
         }
-        SerialWrite("  page poison: verified 0xDE across 4 KiB freed page\n");
     }
-    else
-    {
-        SerialWrite("  page poison: skipped (allocator handed a different frame)\n");
-    }
-    FreeFrame(poison_probe2);
+    SerialWrite("  page poison: verified 0xDE across 4 KiB freed page\n");
 
     SerialWrite("[mm] frame allocator self-test OK\n");
 }

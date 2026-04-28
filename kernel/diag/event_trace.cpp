@@ -20,6 +20,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
+#include "mm/kheap.h"
 #include "time/tick.h"
 
 namespace duetos::diag
@@ -191,14 +192,20 @@ void EventTraceSelfTest()
     }
 
     // Snapshot the trailing 3 records and verify their args came
-    // back in order. Use a small scratch buffer so the snapshot
-    // walks only the fresh entries.
+    // back in order. The full ring is `kEventRingCapacity * sizeof
+    // (EventRecord)` = 128 KiB, twice the 64 KiB kernel stack —
+    // a stack-allocated copy buffer overflows the guard page and
+    // takes the box down. Heap-allocate instead.
     EventRecord buf[3] = {};
-    const u32 baseline_to_snap = (baseline_live < (kEventRingCapacity - 3)) ? baseline_live : (kEventRingCapacity - 3);
-    EventRecord all_buf[kEventRingCapacity];
+    auto* all_buf = static_cast<EventRecord*>(::duetos::mm::KMalloc(sizeof(EventRecord) * kEventRingCapacity));
+    if (all_buf == nullptr)
+    {
+        core::Panic("diag/event-trace", "self-test: KMalloc for snapshot buffer failed");
+    }
     const u32 got = EventTraceSnapshot(all_buf, kEventRingCapacity);
     if (got < 3)
     {
+        ::duetos::mm::KFree(all_buf);
         core::Panic("diag/event-trace", "self-test: snapshot returned fewer than 3 records");
     }
     // Look at the LAST 3 records — those must be ours.
@@ -206,6 +213,7 @@ void EventTraceSelfTest()
     {
         buf[i] = all_buf[got - 3 + i];
     }
+    ::duetos::mm::KFree(all_buf);
     if (buf[0].arg0 != 0x1111 || buf[0].arg1 != 0x2222)
     {
         core::Panic("diag/event-trace", "self-test: record 0 args wrong");
@@ -238,8 +246,6 @@ void EventTraceSelfTest()
     {
         core::Panic("diag/event-trace", "self-test: unknown kind did not resolve to '?'");
     }
-
-    (void)baseline_to_snap;
 
     arch::SerialWrite("[event-trace] self-test OK (append + snapshot + ordering + kind-name).\n");
 }

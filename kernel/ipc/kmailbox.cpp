@@ -264,7 +264,6 @@ struct MailboxStress
     u32 producers_done; ///< Atomic count of producer tasks that finished.
     u32 consumers_done; ///< Atomic count of consumer tasks that finished.
     u32 received_per_producer[kStressProducers];
-    u32 last_seq_per_producer[kStressProducers]; ///< Monotonic check on consumer side.
 };
 
 MailboxStress g_stress{};
@@ -329,24 +328,19 @@ void StressConsumerTask(void*)
         {
             core::Panic("ipc/kmailbox", "stress: invalid producer_id in message");
         }
-        // Monotonic check: this producer's stream is FIFO. The
-        // test uses TryReceive across multiple consumers, so
-        // strictly the per-producer order should be preserved
-        // because Posts are FIFO and the queue is FIFO; multiple
-        // consumers race to dequeue but each FIFO slot is
-        // dequeued in order. If two consumers race on dequeue,
-        // they may see seqs out of order — to keep the
-        // invariant simple, check ">= last_seen" rather than
-        // strictly greater.
-        const u32 last = __atomic_load_n(&s->last_seq_per_producer[producer_id], __ATOMIC_SEQ_CST);
-        if (seq + 1 < last)
-        {
-            // Backward jump of more than one — that's a real
-            // out-of-order delivery, not just two consumers
-            // racing.
-            core::Panic("ipc/kmailbox", "stress: per-producer sequence regression");
-        }
-        __atomic_store_n(&s->last_seq_per_producer[producer_id], seq, __ATOMIC_SEQ_CST);
+        // No per-producer monotonic-seq check here: with
+        // kStressConsumers > 1 racing on dequeue, a consumer
+        // can grab seq=N from the queue and be preempted before
+        // it touches `last_seq_per_producer`, while another
+        // consumer grabs seq=N+1 and writes its own update
+        // first. The shared `last_seq` field then "regresses"
+        // by an arbitrary amount when the first consumer
+        // resumes — that's not a delivery bug, it's the
+        // expected effect of multi-consumer racing. The integrity
+        // signal is `received_per_producer[p] ==
+        // kStressMessagesPerProducer` for every p, which the
+        // outer harness checks after consumers finish.
+        (void)seq;
         __atomic_add_fetch(&s->received_per_producer[producer_id], 1, __ATOMIC_SEQ_CST);
     }
     __atomic_add_fetch(&s->consumers_done, 1, __ATOMIC_SEQ_CST);

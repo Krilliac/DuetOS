@@ -168,8 +168,13 @@ u64 StNonmonoResolutionNs()
     return 1;
 }
 
-constinit Clocksource g_st_mono = {"selftest-mono", StMonoReadNs, StMonoResolutionNs, true, 100};
-constinit Clocksource g_st_nonmono = {"selftest-nonmono", StNonmonoReadNs, StNonmonoResolutionNs, false, 200};
+// Ratings are deliberately well above any real clocksource (HPET=250,
+// invariant TSC=300). The self-test runs after timekeeper registration,
+// so any rating that wouldn't outrank both HPET and TSC would let
+// SelectBest pick the real provider over the stub and trip the
+// "SelectBest did not pick the monotonic provider" assertion below.
+constinit Clocksource g_st_mono = {"selftest-mono", StMonoReadNs, StMonoResolutionNs, true, 1000};
+constinit Clocksource g_st_nonmono = {"selftest-nonmono", StNonmonoReadNs, StNonmonoResolutionNs, false, 2000};
 
 } // namespace
 

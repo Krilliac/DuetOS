@@ -1174,14 +1174,6 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                                    });
     (void)duetos::core::RunPhase(duetos::core::Phase::Vfs);
 
-    // Address-space isolation self-test — direct assertion that a
-    // user page mapped in one AS is invisible in a sibling AS, and
-    // that AddressSpaceActivate flips CR3 correctly. Indirectly
-    // covered by ring3_smoke running two tasks at the same VA, but
-    // this runs BEFORE scheduler/ring3 bring-up so a regression
-    // surfaces at the earliest possible point.
-    duetos::mm::AddressSpaceSelfTest();
-
     SerialWrite("[boot] Parsing ACPI tables.\n");
     duetos::acpi::AcpiInit(multiboot_info);
     SerialWrite("[boot] Building AML namespace from DSDT/SSDT.\n");
@@ -1320,6 +1312,18 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     duetos::sched::SchedStartIdle("idle-bsp");
     duetos::sched::SchedStartReaper();
 
+    // Address-space isolation self-test — direct assertion that a
+    // user page mapped in one AS is invisible in a sibling AS, and
+    // that AddressSpaceActivate flips CR3 correctly. Routed through
+    // Phase::Sched: AddressSpaceMapUserPage takes an `RwLock` whose
+    // `MutexLock` slow path needs `Current()` and the wait-queue
+    // machinery, so the test must run after `SchedInit`.
+    duetos::core::InitcallRegister(duetos::core::Phase::Sched, "address-space-selftest",
+                                   []()
+                                   {
+                                       duetos::mm::AddressSpaceSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
     // Phase::Sched (plan A1-followup, 2026-04-28). RwLock state-
     // machine self-test + the two contention self-tests (RwLock +
     // SeqLock) all need the scheduler online to spawn the helper

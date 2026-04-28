@@ -107,10 +107,13 @@ const Clocksource* ClocksourceCurrent();
 void ClocksourceRefreshCurrent();
 
 /// Boot-time self-test. Registers two synthetic clocksources, one
-/// monotonic with rating 100 and one non-monotonic with rating
-/// 200, asserts SelectBest returns the monotonic one. Asserts
-/// FindByName works, OutOfMemory is returned past capacity, null
-/// arguments are rejected. Panics on mismatch.
+/// monotonic with rating 1000 and one non-monotonic with rating
+/// 2000, asserts SelectBest returns the monotonic one. The
+/// ratings outrank HPET (250) and invariant TSC (300) so this
+/// keeps working even after the timekeeper has registered the
+/// real providers. Asserts FindByName works, OutOfMemory is
+/// returned past capacity, null arguments are rejected. Panics
+/// on mismatch.
 void ClocksourceSelfTest();
 
 } // namespace duetos::time
