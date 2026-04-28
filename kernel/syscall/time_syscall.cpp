@@ -4,12 +4,8 @@
 #include "arch/x86_64/traps.h"
 #include "mm/paging.h"
 #include "syscall/syscall.h"
+#include "time/tick.h"
 #include "time/timekeeper.h"
-
-namespace duetos::arch
-{
-u64 TimerTicks();
-} // namespace duetos::arch
 
 namespace duetos::core
 {
@@ -48,7 +44,7 @@ void DoPerfCounter(arch::TrapFrame* frame)
 {
     // No args. Return the kernel tick counter — monotonically
     // increasing u64 at 100 Hz. Drives QPC + GetTickCount stubs.
-    frame->rax = arch::TimerTicks();
+    frame->rax = ::duetos::time::TickCount();
 }
 
 void DoNowNs(arch::TrapFrame* frame)
@@ -90,24 +86,15 @@ struct alignas(2) SystemTime
 };
 static_assert(sizeof(SystemTime) == 16, "SYSTEMTIME ABI is 16 bytes");
 
-// Zeller's congruence, normal form: dow 0=Sun..6=Sat. Same
-// formula the taskbar date widget + AML calendar popup use.
-u16 ComputeDayOfWeek(u16 year, u8 month, u8 day)
-{
-    if (month < 1 || month > 12)
-        return 0;
-    u32 wy = year;
-    u32 wm = month;
-    if (wm < 3)
-    {
-        wm += 12;
-        --wy;
-    }
-    const u32 K = wy % 100;
-    const u32 J = wy / 100;
-    const u32 h = (u32(day) + (13 * (wm + 1)) / 5 + K + K / 4 + J / 4 + 5 * J) % 7;
-    return u16((h + 6) % 7);
-}
+// Zeller's-congruence helper used to live here as a fallback for
+// the ST↔FT conversion paths, but those don't actually need it
+// (DoFtToSt walks days-since-1601 directly + DoStToFt computes
+// seconds-since-1601 from a SYSTEMTIME's date fields, neither
+// touching day-of-week). The DoGetTimeSt path that did need it
+// migrated to `time::RealtimeBrokenDown` in an earlier
+// A2-followup. Kept the comment as a breadcrumb so a future
+// reader knows where to find the canonical implementation
+// (kernel/time/timekeeper.cpp).
 
 } // namespace
 

@@ -107,6 +107,7 @@
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
 #include "ipc/handle_table.h"
+#include "diag/event_trace.h"
 #include "diag/soft_lockup.h"
 #include "ipc/kevent.h"
 #include "ipc/kmailbox.h"
@@ -1245,6 +1246,18 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                                    []()
                                    {
                                        duetos::ipc::KMailboxContentionSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    // Dynamic event tracer self-test (plan D2). Verifies the
+    // lockless append + snapshot + ordering invariants with
+    // synthesised events. The tracer itself is a passive
+    // surface; the boot path doesn't write any events through
+    // it today (instrumentation points are added at the call
+    // sites that want them, not centrally).
+    duetos::core::InitcallRegister(duetos::core::Phase::Sched, "event-trace-selftest",
+                                   []()
+                                   {
+                                       duetos::diag::EventTraceSelfTest();
                                        return duetos::core::Result<void>{};
                                    });
     (void)duetos::core::RunPhase(duetos::core::Phase::Sched);
@@ -2607,15 +2620,31 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     // Stage-2 EAT parser + DLL loader smoke test. Loads an
     // embedded ~2 KiB test DLL into a scratch AS, walks its
-    // export directory, and asserts name + ordinal lookups
-    // resolve to VAs inside the mapped image. Cheap and
-    // self-cleaning (scratch AS is released before return).
-    duetos::core::DllLoaderSelfTest();
-
-    // Win32 custom-diagnostics self-test. Synthesises a fake
-    // process and drives every recorded hook so the boot serial
-    // log shows concrete data flowing through each surface.
-    duetos::subsystems::win32::custom::Win32CustomSelfTest();
+    // Phase::Userland (plan A1-followup, 2026-04-28). The two
+    // very-late self-tests — DllLoader (PE32+ load + import-table
+    // walk + export-directory resolution against a synthetic
+    // image) and Win32 custom-diagnostics (every recorded hook
+    // fires through a synthetic process) — both need ring-3
+    // smokes to have spawned + the ABI plumbing to be live, so
+    // they fit Phase::Userland cleanly. With this slice
+    // Earlycon + PhysMem + Heap + Paging + Idt + Apic + Time +
+    // Sched + Drivers + Vfs + Userland are ALL on the registry.
+    // The only remaining imperative tail is one-shot subsystem
+    // bring-up that doesn't have a SelfTest function (idle loop,
+    // heartbeat thread, etc.).
+    duetos::core::InitcallRegister(duetos::core::Phase::Userland, "dll-loader-selftest",
+                                   []()
+                                   {
+                                       duetos::core::DllLoaderSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    duetos::core::InitcallRegister(duetos::core::Phase::Userland, "win32-custom-selftest",
+                                   []()
+                                   {
+                                       duetos::subsystems::win32::custom::Win32CustomSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    (void)duetos::core::RunPhase(duetos::core::Phase::Userland);
 
     duetos::core::StartHeartbeatThread();
 

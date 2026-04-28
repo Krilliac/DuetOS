@@ -6,15 +6,11 @@
 #include "syscall/syscall.h"
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/timer.h"
+#include "time/tick.h"
 #include "arch/x86_64/traps.h"
 #include "proc/process.h"
 #include "sched/sched.h"
 #include "subsystems/win32/custom.h"
-
-namespace duetos::arch
-{
-u64 TimerTicks();
-} // namespace duetos::arch
 
 namespace duetos::subsystems::win32
 {
@@ -144,12 +140,12 @@ void DoMutexWait(arch::TrapFrame* frame)
     // helps cycle-detection follow the wait-for graph.
     const u64 holder_tid = (m.owner != nullptr) ? sched::TaskId(m.owner) : 0;
     custom::OnMutexWaitStart(proc, static_cast<u32>(slot), handle, holder_tid, proc->pid);
-    const u64 wait_start = arch::TimerTicks();
+    const u64 wait_start = ::duetos::time::TickCount();
     if (timeout_ms == kInfiniteMs)
     {
         sched::WaitQueueBlock(&m.waiters);
         arch::Sti();
-        const u64 wait_end = arch::TimerTicks();
+        const u64 wait_end = ::duetos::time::TickCount();
         custom::OnMutexWaitEnd(proc, static_cast<u32>(slot), wait_end - wait_start);
         frame->rax = kWaitObject0;
         return;
@@ -157,7 +153,7 @@ void DoMutexWait(arch::TrapFrame* frame)
     const u64 ticks = (timeout_ms + (kMsPerTick - 1)) / kMsPerTick;
     const bool got = sched::WaitQueueBlockTimeout(&m.waiters, ticks);
     arch::Sti();
-    const u64 wait_end = arch::TimerTicks();
+    const u64 wait_end = ::duetos::time::TickCount();
     custom::OnMutexWaitEnd(proc, static_cast<u32>(slot), wait_end - wait_start);
     frame->rax = got ? kWaitObject0 : kWaitTimeout;
 }

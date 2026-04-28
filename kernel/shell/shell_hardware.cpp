@@ -30,6 +30,7 @@
 #include "arch/x86_64/smp.h"
 #include "arch/x86_64/thermal.h"
 #include "arch/x86_64/timer.h"
+#include "time/tick.h"
 #include "drivers/gpu/bochs_vbe.h"
 #include "drivers/gpu/gpu.h"
 #include "drivers/gpu/virtio_gpu.h"
@@ -278,7 +279,7 @@ void CmdHpet()
 void CmdTicks()
 {
     ConsoleWrite("TIMER TICKS: ");
-    WriteU64Dec(duetos::arch::TimerTicks());
+    WriteU64Dec(::duetos::time::TickCount());
     ConsoleWriteChar('\n');
     ConsoleWrite("SCHED TICKS: ");
     WriteU64Dec(duetos::sched::SchedNowTicks());
