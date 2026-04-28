@@ -179,16 +179,17 @@ jobs:
           status=""
           for i in $(seq 1 ${attempts}); do
             echo "::group::smoke attempt ${i}/${attempts}"
-            # 90s wall clock. tools/qemu/run.sh now picks KVM when
-            # /dev/kvm is reachable (it is on GH-Actions ubuntu
-            # runners with nested virt) and silently falls back to
-            # TCG when it isn't. The kernel needs ~1.5-2s of
-            # kernel time to walk every Phase::Sched initcall, the
-            # FAT32 CRUD self-test (~850ms by itself), and reach
-            # the ring3-winkill PE smoke. KVM finishes in ~5-10s
-            # wall-clock; pure TCG can take 60-80s on a slow
-            # runner — 90s leaves margin for both.
-            DUETOS_TIMEOUT=90 \
+            # 180s wall clock. tools/qemu/run.sh uses KVM when
+            # /dev/kvm is reachable (the previous step chmod'd
+            # it 666), so under CI we run at ~5× slowdown vs.
+            # bare metal — disk I/O is still emulated through
+            # QEMU's NVMe + AHCI front-ends, which is the bulk of
+            # the FAT32 CRUD self-test cost. The full boot/test
+            # path needs ~30-50s of kernel time to walk every
+            # ring3 probe, FAT32 self-test, and the PE smoke
+            # (hello-pe, ring3-winkill, et al). 180s leaves
+            # margin for runner variability.
+            DUETOS_TIMEOUT=180 \
               tools/test/ctest-boot-smoke.sh build/x86_64-debug
             rc=$?
             echo "::endgroup::"
