@@ -27,13 +27,27 @@ namespace duetos::diag
 namespace
 {
 
-// State machine. All single-CPU for v0; per-CPU upgrade lands
-// with B2 SMP. The detector runs from the timer IRQ — accesses
-// don't need locking because IRQs serialise on a single CPU.
-constinit u64 g_last_tid = 0;       ///< Most recently observed running TID.
-constinit u64 g_same_tid_count = 0; ///< Consecutive ticks with that TID.
-constinit u64 g_warned_for_tid = 0; ///< TID we've already warned about; rate-limit gate.
-constinit u64 g_warnings_total = 0; ///< Total warnings emitted since boot.
+// Per-CPU detector state. v0 uses a single slot (slot 0) since
+// only the BSP runs at this point in the boot path; once SMP
+// brings APs up (plan B2), each CPU's tick handler will index
+// this array by its own CPU ID. The struct shape is the
+// future-portable form — adding more slots requires bumping
+// `kSoftLockupCpuMax` and routing `current_cpu` into
+// `SoftLockupTick`. (D4-followup, 2026-04-28.)
+struct PerCpuState
+{
+    u64 last_tid;       ///< Most recently observed running TID.
+    u64 same_tid_count; ///< Consecutive ticks with that TID.
+    u64 warned_for_tid; ///< TID we've already warned about; rate-limit gate.
+};
+
+constexpr u32 kSoftLockupCpuMax = 1;
+constinit PerCpuState g_per_cpu[kSoftLockupCpuMax] = {};
+// Aliases keep the existing single-CPU code path readable; the
+// per-CPU restructuring is purely structural for now.
+#define g_state g_per_cpu[0]
+
+constinit u64 g_warnings_total = 0; ///< Total warnings (across all CPUs).
 constinit bool g_enabled = true;    ///< Disabled from panic path.
 
 } // namespace
@@ -51,31 +65,31 @@ void SoftLockupTick(u64 now_ticks, u64 current_tid)
     // are legitimately always-running.
     if (current_tid == 0)
     {
-        g_last_tid = 0;
-        g_same_tid_count = 0;
+        g_state.last_tid = 0;
+        g_state.same_tid_count = 0;
         return;
     }
 
-    if (current_tid != g_last_tid)
+    if (current_tid != g_state.last_tid)
     {
         // Scheduler swapped to a different task — reset the
         // counter and clear the rate-limit gate so a future
         // lockup of THIS new TID can warn even if we already
         // warned about a different one.
-        g_last_tid = current_tid;
-        g_same_tid_count = 1;
-        g_warned_for_tid = 0;
+        g_state.last_tid = current_tid;
+        g_state.same_tid_count = 1;
+        g_state.warned_for_tid = 0;
         return;
     }
 
-    ++g_same_tid_count;
-    if (g_same_tid_count > kSoftLockupThresholdTicks && g_warned_for_tid != current_tid)
+    ++g_state.same_tid_count;
+    if (g_state.same_tid_count > kSoftLockupThresholdTicks && g_state.warned_for_tid != current_tid)
     {
         // First crossing of the threshold for this run. Log once,
         // mark this TID as "already warned" so we don't spam the
         // klog — the next reset (TID change) clears the gate.
         ++g_warnings_total;
-        g_warned_for_tid = current_tid;
+        g_state.warned_for_tid = current_tid;
         KLOG_WARN_V("soft-lockup", "task running > 1s without yield, tid", current_tid);
     }
 }
@@ -99,9 +113,9 @@ void SoftLockupSelfTest()
     // this is fresh; the save/restore makes the test re-runnable
     // from a shell command later.)
     const u64 saved_warnings = g_warnings_total;
-    g_last_tid = 0;
-    g_same_tid_count = 0;
-    g_warned_for_tid = 0;
+    g_state.last_tid = 0;
+    g_state.same_tid_count = 0;
+    g_state.warned_for_tid = 0;
 
     // (1) Idle TID (0) never counts. Drive 200 ticks with TID=0
     // and assert no warning.
@@ -154,9 +168,9 @@ void SoftLockupSelfTest()
     }
 
     // Reset state for steady-state operation.
-    g_last_tid = 0;
-    g_same_tid_count = 0;
-    g_warned_for_tid = 0;
+    g_state.last_tid = 0;
+    g_state.same_tid_count = 0;
+    g_state.warned_for_tid = 0;
 
     arch::SerialWrite("[soft-lockup] self-test OK (idle skip + threshold + rate limit + per-TID reset).\n");
 }

@@ -107,6 +107,7 @@
 #include "fs/vfs.h"
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
+#include "mm/zone.h"
 #include "ipc/handle_table.h"
 #include "diag/event_trace.h"
 #include "diag/perf_profile.h"
@@ -138,6 +139,7 @@
 #include "syscall/cap_gate.h"
 #include "proc/process.h"
 #include "util/random.h"
+#include "security/driver_domain.h"
 #include "security/fault_domain.h"
 #include "diag/diag_decode.h"
 #include "diag/hexdump.h"
@@ -433,6 +435,11 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // registered later in boot once their subsystems are up.
     duetos::core::FaultDomainSelfTest();
 
+    // Per-driver fault-domain extension self-test (plan E3).
+    // Wraps the core fault-domain registry with a driver-tag
+    // convention; demo register/restart cycle.
+    duetos::security::DriverDomainSelfTest();
+
     // Init-call registry self-test (plan A1). Exercises register +
     // RunPhase + bad-argument + failing-callback paths against the
     // fixed-size table in `core/init.cpp`. The infrastructure is
@@ -480,6 +487,15 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                                    []()
                                    {
                                        FrameAllocatorSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    // mm/zone scaffold (plan C1) — additive layer over the
+    // global frame allocator; v0 forwards every zone request
+    // to the same pool.
+    duetos::core::InitcallRegister(duetos::core::Phase::PhysMem, "zone-selftest",
+                                   []()
+                                   {
+                                       ZoneSelfTest();
                                        return duetos::core::Result<void>{};
                                    });
     (void)duetos::core::RunPhase(duetos::core::Phase::PhysMem);

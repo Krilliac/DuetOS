@@ -62,6 +62,9 @@
 | _B1.4_ (this commit) | Quiescent-state RCU — `kernel/sync/rcu.{h,cpp}`. Read-side `RcuReadLock`/`RcuReadUnlock` are zero-overhead compiler barriers; writers defer tear-down via `RcuCall(cb, arg)` which queues into a 256-slot ring under `arch::Cli`/`arch::Sti`. `RcuTick()` (called from `OnTimerTick`) increments a global tick counter; `RcuReclaim()` walks the queue and invokes any callback whose enqueue-tick is strictly less than the current tick. v0 grace rule: a single tick = a quiescent state (correct on BSP-only boot). Self-test queues a callback, asserts no-fire-before-tick, drives one tick + reclaim, asserts the callback fires exactly once. |
 | _D2-followup_ (this commit) | `tracer kind <name>` filter — dumps only events whose kind matches one of the 8 canonical names (syscall-enter / syscall-exit / sched-switch / irq / page-fault / mutex-acquire / mutex-release / custom). Reuses the EventTraceSnapshot path; counts matched events for the operator. |
 | _D3-followup_ (this commit) | `perf dump` shell command. Same shape as `tracer dump` but for PerfSnapshot, with each RIP resolved through the embedded symbol table (`util/symbols.h::ResolveAddress`) and printed as `name+0xoffset` — matches `heap leaks`'s formatting. Prints "(no samples; PMU NMI sampling not yet wired)" when the ring is empty, signalling the operator that the storage exists but the sampling source is still inert (D3-followup NMI wiring covers that). |
+| _C1_ (this commit) | Memory zones scaffold — `kernel/mm/zone.{h,cpp}`. `Zone` enum (Dma / Dma32 / Normal / Mmio) + `AllocateZoneFrame(zone)` / `FreeZoneFrame(zone, frame)` API + per-zone `ZoneStats` (allocs / frees / oom). v0 forwards every non-Mmio zone request to the global frame allocator; Mmio always returns kNullFrame. The driver-facing API is in place so DMA-needing drivers can call `AllocateZoneFrame(kZoneDma32)` today; once a real per-zone pool exists (C1-followup), those calls start being honoured without any driver-side change. Self-test exercises every zone's allocate/free path + stats counters. |
+| _E3_ (this commit) | Per-driver fault-domain extension — `kernel/security/driver_domain.{h,cpp}`. Thin convention layer over `core::FaultDomain*`: `RegisterDriverDomain(name, init, teardown)` adds a registration counter + driver-tag klog; `RestartDriverDomain(name)` resolves the name lookup + invokes `FaultDomainRestart`. Self-test registers a synthetic domain, drives Restart twice, asserts init/teardown counters advance + missing-name lookup returns `NotFound`. Existing drivers are NOT auto-registered — each opts in by calling `RegisterDriverDomain` from its own Init in a future E3-followup slice. |
+| _D4-followup_ (this commit) | Soft-lockup detector restructured to per-CPU shape: `g_last_tid` / `g_same_tid_count` / `g_warned_for_tid` collapsed into a `PerCpuState` struct, `g_per_cpu[kSoftLockupCpuMax]` array (capacity 1 in v0 — BSP only). The `g_state` macro aliases `g_per_cpu[0]` so existing single-CPU code paths stay readable. Indexing by the current-CPU ID is the remaining work once SMP per-CPU storage exposes that ID; structural change is purely additive. |
 
 ### Deferred (in priority order — see "Recommended ordering" below)
 
@@ -81,12 +84,12 @@
 - [ ] D1 — Lockdep-lite (locking-order graph)
 - [ ] E1-followup — Enable CET mitigations (write `IA32_S_CET` / `IA32_PL0_SSP`, allocate shadow stacks, recompile with `-fcf-protection=branch`); gated on the now-landed `arch::CetGet().ss_supported` / `ibt_supported` signal
 - [ ] E2-followup — KPTI implementation itself, gated on the now-landed `arch::CpuMitigations::needs_kpti` signal; only triggered when a needs-kpti machine enters the test fleet (see investigation v0)
-- [ ] C1 — Buddy allocator + memory zones (DMA / DMA32 / NORMAL / MMIO)
+- [ ] C1-followup — Real per-zone allocator (current scaffolding forwards every zone request to the global pool; per-zone bitmap + buddy free-lists land when a workload demands DMA / DMA32 isolation)
 - [ ] D2-followup — Per-CPU event-trace rings once SMP per-CPU storage is real (current ring is single-global, fine for BSP-only boot but each AP needs its own buffer to avoid cache-line ping-pong on the head index)
 - [ ] D7 — GDB serial stub on COM2
-- [ ] D4-followup — Per-CPU soft-lockup state once SMP per-CPU storage is real (current detector is single-global, fine for BSP-only boot but each AP needs its own counters)
+- [ ] D4-followup — Index `g_per_cpu` array by current-CPU ID once SMP per-CPU storage exposes it (state is now structured per-CPU; only the slot-0 alias remains hardcoded)
 - [ ] D3-followup — Wire `PerfRecord(frame->rip)` into the PMU NMI overflow handler (storage + dump landed; sampling source still inert)
-- [ ] E3 — Per-driver fault-domain extension
+- [ ] E3-followup — Register existing drivers (framebuffer, pci, nvme, ahci, xhci, e1000, …) as driver fault domains using `RegisterDriverDomain`; each needs a real teardown function written
 
 ## Resume prompt
 
