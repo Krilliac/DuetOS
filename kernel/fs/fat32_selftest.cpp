@@ -7,9 +7,10 @@
 
 #include "fs/fat32.h"
 
+#include "arch/x86_64/hypervisor.h"
 #include "arch/x86_64/serial.h"
-#include "log/klog.h"
 #include "drivers/storage/block.h"
+#include "log/klog.h"
 
 namespace duetos::fs::fat32
 {
@@ -53,6 +54,19 @@ void Fat32SelfTest()
     if (Fat32VolumeCount() == 0)
     {
         SerialWrite("[fs/fat32] self-test: NO VOLUMES FOUND\n");
+        return;
+    }
+
+    // Under a hypervisor the NVMe / AHCI front-ends QEMU emulates
+    // are MMIO-trap-heavy, so the 13 CRUD phases below collapse a
+    // ~100ms-on-bare-metal smoke into a multi-minute boot-smoke
+    // hang. Stop after probe + volume-mount (still proves the FS
+    // type detector + cluster math + LFN parser work end to end);
+    // the full CRUD coverage runs on bare metal where it always
+    // ran fast.
+    if (arch::IsEmulator())
+    {
+        SerialWrite("[fs/fat32] self-test: emulator detected — skipping CRUD phases (probe + mount only)\n");
         return;
     }
 
