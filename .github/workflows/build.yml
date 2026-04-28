@@ -179,18 +179,22 @@ jobs:
           status=""
           for i in $(seq 1 ${attempts}); do
             echo "::group::smoke attempt ${i}/${attempts}"
-            # 600s wall clock. The GH-Actions ubuntu-24.04 runners
-            # have /dev/kvm and we chmod it 666 a step earlier, but
-            # the runner host is shared and the VM only sees ~1/15
-            # of wall-clock as effective guest CPU time. The kernel
-            # walks ~25 ring3 spawn paths + Phase::Userland after
-            # bringup-complete; even with the FAT32 / NetSmoke /
-            # routing-self-test emulator skips, that's ~40s of
-            # kernel-perceived time, which maps to ~600s of CI wall
-            # under the runner's slowdown ratio. Larger budgets
-            # would buy more margin but at the cost of CI cycle
-            # time on every push.
-            DUETOS_TIMEOUT=600 \
+            # 900s wall clock per attempt. The GH-Actions
+            # ubuntu-24.04 runners have /dev/kvm and we chmod it
+            # 666 a step earlier, but the runner host is shared
+            # and the VM only sees ~1/30 of wall-clock as
+            # effective guest CPU time (last failing run reached
+            # bringup-complete at t≈19.4s of guest time inside
+            # ~600s of wall — that's the ~30:1 slowdown). The
+            # kernel walks ~25 ring3 spawn paths + Phase::Userland
+            # after bringup-complete; with the security probes,
+            # Linux ABI smokes, four non-essential PE smokes,
+            # FAT32 CRUD, NetSmoke, and per-PE PeReport gated
+            # under emulator, the post-bringup tail is ~20s of
+            # additional guest time. 900s wall is the smallest
+            # budget that covers ~40s of guest at the observed
+            # 30:1 ratio with margin for runner variance.
+            DUETOS_TIMEOUT=900 \
               tools/test/ctest-boot-smoke.sh build/x86_64-debug
             rc=$?
             echo "::endgroup::"
