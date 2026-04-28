@@ -338,6 +338,38 @@ jobs:
             clang-tidy -p build/x86_64-debug "$f" --quiet 2>&1 || true
           done | head -200
 
+  host-tests:
+    # Hosted unit tests under tests/host/ — built with the runner's
+    # system clang/g++ + glibc, not the kernel freestanding
+    # toolchain. Scope today is arch-neutral header-only kernel TUs
+    # (Result<T,E>, freestanding string primitives); scope expands
+    # over time as more kernel TUs grow `#ifdef DUETOS_HOST_TEST`
+    # shims around hardware accessors. Compared with qemu-smoke,
+    # these tests run in ms, are parallelisable, work under ASan +
+    # UBSan, and can't hide regressions behind a "kernel got slow"
+    # excuse. They're a faster signal that complements the boot
+    # smoke matrix; both are required before merge.
+    name: host tests
+    runs-on: ubuntu-24.04
+    needs: []
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install host toolchain
+        run: |
+          for attempt in 1 2 3 4; do
+            if sudo apt-get update; then break; fi
+            sleep $((attempt * 5))
+          done
+          sudo apt-get install -y clang-18 cmake ninja-build
+          sudo ln -sf /usr/bin/clang-18 /usr/local/bin/clang
+          sudo ln -sf /usr/bin/clang++-18 /usr/local/bin/clang++
+      - name: Configure (host-tests, ASan + UBSan)
+        run: cmake -S tests/host -B build/host-tests -G Ninja
+      - name: Build
+        run: cmake --build build/host-tests --parallel $(nproc)
+      - name: Test
+        run: ctest --test-dir build/host-tests --output-on-failure --parallel $(nproc)
+
   publish-rolling:
     # Refresh the latest-debug / latest-release rolling channels on every
     # push to main. The README's download badges read off these tags;
@@ -346,7 +378,7 @@ jobs:
     name: publish rolling channels
     runs-on: ubuntu-24.04
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [check-format, build-debug, build-release, qemu-smoke]
+    needs: [check-format, build-debug, build-release, qemu-smoke, host-tests]
     permissions:
       contents: write
     steps:
