@@ -123,12 +123,36 @@ jobs:
           retention-days: 7
 
   qemu-smoke:
-    name: qemu smoke
+    # Profile-matrix qemu-smoke. Each profile boots the kernel
+    # through bringup-complete, runs ONE focused scenario, prints
+    # a [smoke] complete sentinel, and exits QEMU via the
+    # isa-debug-exit device. The kernel's smoke=<profile> cmdline
+    # arg routes to kernel/test/smoke_profile.cpp's per-profile
+    # spawn / sleep / sentinel / TestExit chain. Running profiles
+    # in parallel turns the old monolithic 1500s budget into 6 ×
+    # ~180s budgets running concurrently — wall-clock for the
+    # whole matrix is bound by the slowest profile (pe-winapi),
+    # not the sum, and a single hang in one profile no longer
+    # masks the rest.
+    name: qemu smoke (${{ matrix.profile }})
     needs: build-debug
     runs-on: ubuntu-24.04
     permissions:
       pull-requests: write   # for the PR-comment-on-fail step
       contents: read
+    strategy:
+      # Don't cancel sibling profiles on first failure — every
+      # profile's signal is independently informative. A flaky
+      # pe-winkill shouldn't suppress the pe-winapi pass.
+      fail-fast: false
+      matrix:
+        profile:
+          - bringup
+          - ring3
+          - pe-hello
+          - pe-winapi
+          - pe-winkill
+          - linux
     steps:
       - uses: actions/checkout@v4
       - name: Install QEMU + grub
@@ -145,9 +169,7 @@ jobs:
           # exposed but with restrictive permissions (root:kvm 660).
           # The smoke step runs as the unprivileged `runner` user,
           # so without explicit access QEMU silently falls back to
-          # TCG and the kernel can't reach the PE smoke inside the
-          # wall-clock budget. Open up /dev/kvm so QEMU's
-          # `accel=kvm:tcg` picks KVM.
+          # TCG. Open up /dev/kvm so QEMU's `accel=kvm:tcg` picks KVM.
           if [[ -e /dev/kvm ]]; then
             sudo chmod 666 /dev/kvm
             ls -l /dev/kvm
@@ -162,47 +184,29 @@ jobs:
           path: build/x86_64-debug/
       - name: Configure
         run: cmake --preset x86_64-debug
-      - name: Boot + assert signatures (with flake retry)
+      - name: Boot profile + assert signatures (with flake retry)
         id: smoke
         shell: bash
         run: |
-          # Drive the exact same script ctest would run locally so
-          # local + CI stay in sync. ctest-boot-smoke.sh exits:
+          # profile-boot-smoke.sh runs ONE smoke profile and exits:
           #   0 = pass, 1 = regression, 2 = env skip, 3 = flake.
-          # We retry on flake (exit 3) up to twice — pattern lifted
-          # from SparkEngine's qemu CI. A real regression (exit 1)
-          # fails immediately; an env skip (exit 2) is treated as a
-          # warning, not a fail.
+          # Retry on flake (exit 3) up to twice; regression fails
+          # immediately. Each profile's ISO is regenerated from a
+          # per-profile grub.cfg by tools/qemu/run.sh. Per-profile
+          # wall budget is 240s — generous on the observed ~30:1
+          # wall:guest ratio for ~8s of guest-time scenarios.
           set +e
           attempts=3
           rc=0
           status=""
           for i in $(seq 1 ${attempts}); do
-            echo "::group::smoke attempt ${i}/${attempts}"
-            # 1500s wall clock per attempt. The GH-Actions
-            # ubuntu-24.04 runners have /dev/kvm and we chmod it
-            # 666 a step earlier, but the runner host is shared
-            # and the VM only sees ~1/40 of wall-clock as
-            # effective guest CPU time (the run before the bump
-            # to 1500s reached the worker-A/B/C self-test +
-            # ring3-smoke-A AS create at t≈22s of guest time
-            # inside ~900s of wall — that's the ~41:1 slowdown).
-            # The kernel walks ~3 ring3 spawn paths + 3 PE
-            # spawns + ring3 task runs + Phase::Userland after
-            # bringup-complete; with the security probes, Linux
-            # ABI smokes, four non-essential PE smokes, FAT32
-            # CRUD, NetSmoke, per-PE PeReport, and stub-only
-            # DLLs trimmed from the per-PE preload chain under
-            # emulator, the post-bringup tail is ~20s of guest
-            # time. 1500s wall is the smallest budget that
-            # covers ~40s of guest at the observed 41:1 ratio
-            # with margin for runner variance.
-            DUETOS_TIMEOUT=1500 \
-              tools/test/ctest-boot-smoke.sh build/x86_64-debug
+            echo "::group::smoke profile=${{ matrix.profile }} attempt ${i}/${attempts}"
+            DUETOS_TIMEOUT=240 \
+              tools/test/profile-boot-smoke.sh "${{ matrix.profile }}" build/x86_64-debug
             rc=$?
             echo "::endgroup::"
-            cp -f build/x86_64-debug/ctest-smoke-serial.log \
-                  "ctest-smoke-serial-attempt-${i}.log" 2> /dev/null || true
+            cp -f "build/x86_64-debug/smoke-${{ matrix.profile }}.log" \
+                  "smoke-${{ matrix.profile }}-attempt-${i}.log" 2>/dev/null || true
             if [[ $rc -eq 0 ]]; then
               status="pass"; break
             fi
@@ -212,53 +216,48 @@ jobs:
             if [[ $rc -eq 2 ]]; then
               status="skip"; break
             fi
-            # rc == 3: flake. Retry unless we've used our attempts.
             status="flaky"
             if [[ $i -lt ${attempts} ]]; then
-              echo "::warning::Smoke attempt ${i} flaked (kernel crash in non-test scope); retrying..."
+              echo "::warning::Smoke ${{ matrix.profile }} attempt ${i} flaked; retrying..."
               sleep 2
               continue
             fi
           done
           echo "rc=${rc}"          >> "$GITHUB_OUTPUT"
           echo "status=${status}"  >> "$GITHUB_OUTPUT"
-          # Skip is a non-failure (CI shouldn't have hit it now
-          # that we install qemu, but treat it as a warning).
           if [[ "${status}" == "skip" ]]; then
             echo "::warning::QEMU not available; smoke test skipped."
             exit 0
           fi
           if [[ "${status}" == "pass" ]]; then exit 0; fi
-          # Anything else (regression OR repeated flake) fails.
           exit 1
       - name: Upload serial logs (on failure)
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: qemu-serial-log
+          name: qemu-serial-log-${{ matrix.profile }}
           path: |
-            ctest-smoke-serial-attempt-*.log
-            build/x86_64-debug/ctest-smoke-serial.log
+            smoke-${{ matrix.profile }}-attempt-*.log
+            build/x86_64-debug/smoke-${{ matrix.profile }}.log
           retention-days: 7
           if-no-files-found: ignore
-      - name: Comment on PR (sticky)
+      - name: Comment on PR (sticky, per profile)
         # `always()` so the comment can be updated to "passed"
-        # after a previous run wrote a failure comment, mirroring
-        # SparkEngine's report-ci-errors.js sticky-comment pattern.
+        # after a previous run wrote a failure comment. Each
+        # profile gets its own marker so failures in different
+        # profiles don't overwrite each other's diagnostics.
         if: always() && github.event_name == 'pull_request'
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
-            const MARKER = '<!-- duetos-qemu-smoke-report -->';
+            const profile = '${{ matrix.profile }}';
+            const MARKER = `<!-- duetos-qemu-smoke-report-${profile} -->`;
             const status = '${{ steps.smoke.outputs.status }}' || 'unknown';
             const rc = '${{ steps.smoke.outputs.rc }}' || '?';
             const run = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             const sha = context.payload.pull_request?.head?.sha?.slice(0, 7) || context.sha.slice(0, 7);
 
-            // On pass, only post / update if a failure comment
-            // was previously left — turning :x: into :white_check_mark:.
-            // No need to spam the PR with "still passing" comments.
             const { data: comments } = await github.rest.issues.listComments({
               issue_number: context.issue.number,
               owner: context.repo.owner,
@@ -268,12 +267,11 @@ jobs:
             const existing = comments.find(c => c.body && c.body.includes(MARKER));
             if (status === 'pass' && !existing) return;
 
-            // Locate the freshest serial-log tail we can.
             const candidates = [
-              'ctest-smoke-serial-attempt-3.log',
-              'ctest-smoke-serial-attempt-2.log',
-              'ctest-smoke-serial-attempt-1.log',
-              'build/x86_64-debug/ctest-smoke-serial.log',
+              `smoke-${profile}-attempt-3.log`,
+              `smoke-${profile}-attempt-2.log`,
+              `smoke-${profile}-attempt-1.log`,
+              `build/x86_64-debug/smoke-${profile}.log`,
             ];
             let tail = '(no serial log captured)';
             for (const p of candidates) {
@@ -285,13 +283,13 @@ jobs:
             }
 
             const verdict = {
-              pass:       `:white_check_mark: **qemu-smoke passed** for \`${sha}\`.`,
-              regression: `:x: **Regression** — an expected boot signature is missing or a forbidden one appeared (\`${sha}\`).`,
-              flaky:      `:warning: **Flaky** — the kernel reached the smoke scope then crashed; retried 3 times, all crashed (\`${sha}\`).`,
-              skip:       `:information_source: **Skipped** — QEMU not available on the runner.`,
-            }[status] || `:question: Smoke exited rc=${rc} (status=${status}).`;
+              pass:       `:white_check_mark: **qemu-smoke (${profile}) passed** for \`${sha}\`.`,
+              regression: `:x: **Regression in qemu-smoke (${profile})** — an expected signature is missing or a forbidden one appeared (\`${sha}\`).`,
+              flaky:      `:warning: **Flaky qemu-smoke (${profile})** — kernel reached the smoke scope then crashed; retried 3 times (\`${sha}\`).`,
+              skip:       `:information_source: **qemu-smoke (${profile}) skipped** — QEMU not available.`,
+            }[status] || `:question: qemu-smoke (${profile}) exited rc=${rc} (status=${status}).`;
 
-            const bodyParts = [MARKER, '', '## qemu-smoke', '', verdict, '', `[View full run](${run})`];
+            const bodyParts = [MARKER, '', `## qemu-smoke — \`${profile}\``, '', verdict, '', `[View full run](${run})`];
             if (status !== 'pass') {
               bodyParts.push('', '<details><summary>Last 40 lines of serial log</summary>', '', '```', tail, '```', '', '</details>');
             }

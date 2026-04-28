@@ -106,6 +106,7 @@
 #include "loader/pe_loader.h"
 #include "diag/log_names.h"
 #include "proc/process.h"
+#include "test/smoke_profile.h"
 
 /*
  * Ring-3 smoke test, second iteration.
@@ -2511,12 +2512,19 @@ void StartRing3SmokeTask()
     CapSet sandbox_caps = CapSetEmpty();
     CapSetAdd(sandbox_caps, kCapFsRead);
 
-    SpawnRing3Task("ring3-smoke-A", CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted,
-                   kTickBudgetTrusted);
-    SpawnRing3Task("ring3-smoke-B", CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted,
-                   kTickBudgetTrusted);
-    SpawnRing3Task("ring3-smoke-sandbox", sandbox_caps, fs::RamfsSandboxRoot(), mm::kFrameBudgetSandbox,
-                   kTickBudgetSandbox);
+    // The ring3-smoke trio runs under profile=Ring3 (and the
+    // always-on profile=None bare-metal full boot). PE-only and
+    // Linux-only smokes skip the trio so their wall budget covers
+    // exactly one scenario.
+    if (::duetos::test::SmokeProfileShouldSpawn(::duetos::test::SmokeTarget::Ring3))
+    {
+        SpawnRing3Task("ring3-smoke-A", CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted,
+                       kTickBudgetTrusted);
+        SpawnRing3Task("ring3-smoke-B", CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted,
+                       kTickBudgetTrusted);
+        SpawnRing3Task("ring3-smoke-sandbox", sandbox_caps, fs::RamfsSandboxRoot(), mm::kFrameBudgetSandbox,
+                       kTickBudgetSandbox);
+    }
 
     // Skip the security / fuzz probe block under a hypervisor:
     // every probe spawn allocates a new AS + page, queues a Task,
@@ -2580,14 +2588,20 @@ void StartRing3SmokeTask()
     // PE loader: DOS + NT header parse, section map, entry
     // point dispatch. Expected output: "[hello-pe] Hello from a
     // PE executable!" then clean exit.
-    SpawnPeFile("ring3-hello-pe", fs::generated::kBinHelloPeBytes, fs::generated::kBinHelloPeBytes_len, CapSetTrusted(),
-                fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    if (::duetos::test::SmokeProfileShouldSpawn(::duetos::test::SmokeTarget::PeHello))
+    {
+        SpawnPeFile("ring3-hello-pe", fs::generated::kBinHelloPeBytes, fs::generated::kBinHelloPeBytes_len,
+                    CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    }
     // First Win32 PE that gets RESOLVED (not just reported)
     // by the kernel. Imports kernel32.dll!ExitProcess, hits
     // the stub page, exits with code 42. See
     // .claude/knowledge/win32-subsystem-v0.md.
-    SpawnPeFile("ring3-hello-winapi", fs::generated::kBinHelloWinapiBytes, fs::generated::kBinHelloWinapiBytes_len,
-                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    if (::duetos::test::SmokeProfileShouldSpawn(::duetos::test::SmokeTarget::PeWinapi))
+    {
+        SpawnPeFile("ring3-hello-winapi", fs::generated::kBinHelloWinapiBytes, fs::generated::kBinHelloWinapiBytes_len,
+                    CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    }
     // The four PE smokes below cover thread / syscall / DLL /
     // registry-fopen surface. None of their stdout lines are
     // checked by the qemu-smoke critical path (only hello-pe,
@@ -2632,8 +2646,11 @@ void StartRing3SmokeTask()
     // reject (most imports unresolved) — the value is the
     // PeReport log line showing the full import / reloc / TLS
     // gap. See .claude/knowledge/pe-subsystem-v0.md.
-    SpawnPeFile("ring3-winkill", fs::generated::kBinWinKillBytes, fs::generated::kBinWinKillBytes_len, CapSetTrusted(),
-                fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    if (::duetos::test::SmokeProfileShouldSpawn(::duetos::test::SmokeTarget::PeWinkill))
+    {
+        SpawnPeFile("ring3-winkill", fs::generated::kBinWinKillBytes, fs::generated::kBinWinKillBytes_len,
+                    CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    }
     // Windowing v0 proof: a freestanding PE that imports
     // user32!CreateWindowExA + ShowWindow + MessageBoxA and
     // calls them. The Win32 → SYS_WIN_CREATE bridge turns

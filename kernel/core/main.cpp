@@ -165,6 +165,7 @@
 #include "security/attack_sim.h"
 #include "security/guard.h"
 #include "security/pentest_gui.h"
+#include "test/smoke_profile.h"
 
 /*
  * Kernel entry in C++. Called by kernel/arch/x86_64/boot.S once the CPU is
@@ -1083,6 +1084,11 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         SerialWrite(cmdline);
         SerialWrite("\"\n");
     }
+    // Pin the qemu-smoke profile early. Read once, cached. If the
+    // cmdline carries `smoke=<profile>`, every subsequent SmokeProfile*
+    // query in the boot tail (ring3 spawn gate, Linux ABI gate, sleep-
+    // and-exit sentinel) sees a stable answer.
+    duetos::test::SmokeProfileInit(cmdline);
     bool want_tty = false;
     if (CmdlineMatches(cmdline, "boot", "tty"))
     {
@@ -2662,14 +2668,13 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     duetos::core::StartRing3SmokeTask();
     // Linux-ABI proof-of-life suite. Each Spawn below adds a
     // ring-3 task whose stdout lines are not asserted by the
-    // qemu-smoke critical path — the value is on bare-metal
-    // boots where the full ABI-coverage matrix matters. Under
-    // an emulator (KVM-on-CI or TCG) every spawn pays for an
-    // AS create + frame allocations + serial trap-out for
-    // diagnostic prints, and the cumulative cost is what blew
-    // past the 600s wall budget in the previous run. Bare
-    // metal still runs the whole chain.
-    if (!duetos::arch::IsEmulator())
+    // pe-* / ring3 smoke profiles. Profile-gated so:
+    //   - profile=None on bare metal: spawn every Linux smoke
+    //   - profile=None on emulator (local dev): skip (slow under
+    //     TCG; the ShouldSpawn(Linux) helper handles this)
+    //   - profile=linux: spawn (specific profile asked for them)
+    //   - any other profile: skip
+    if (duetos::test::SmokeProfileShouldSpawn(duetos::test::SmokeTarget::Linux))
     {
         // Linux-ABI proof-of-life. Reaches MSR_LSTAR entry stub →
         // LinuxSyscallDispatch → sys_exit_group. A clean exit here
@@ -2735,6 +2740,17 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             }
         }
     }
+
+    // qemu-smoke profile dispatch. If the cmdline carried
+    // `smoke=<profile>`, we've spawned exactly the profile's
+    // target task(s) above (every other ShouldSpawn call returned
+    // false). Sleep long enough for those tasks to print their
+    // expected sentinels, write the [smoke] complete line, and
+    // exit QEMU via isa-debug-exit. The boot tail below
+    // (SmpStartAps, Phase::Userland, idle loop) is reserved for
+    // profile=None / bare-metal full boot — under a smoke profile
+    // we never reach it, sparing the wall budget.
+    duetos::test::SmokeProfileSleepAndExit();
 
     // Bring up APs. SmpStartAps calls SchedSleepTicks(1) between
     // INIT and SIPI; the dedicated idle task installed at the top

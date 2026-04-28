@@ -66,6 +66,23 @@ inline void Sti()
     }
 }
 
+/// Exit QEMU via the isa-debug-exit device (`-device isa-debug-exit,
+/// iobase=0xf4,iosize=0x01`). Writes `status_byte` to port 0xf4;
+/// QEMU then terminates its process with exit status
+/// `(status_byte << 1) | 1`. The convention used in the qemu-smoke
+/// CI is `0x10` for the "test reached its sentinel cleanly" path
+/// (yielding QEMU exit 0x21).
+///
+/// Real hardware has nothing on port 0xf4, so the OUT is a silent
+/// no-op there. We Halt afterwards so the kernel doesn't keep
+/// running once the test sentinel has been emitted — every code
+/// path that calls TestExit has already done its job.
+[[noreturn]] inline void TestExit(u8 status_byte)
+{
+    asm volatile("outb %0, $0xf4" : : "a"(status_byte));
+    Halt();
+}
+
 inline u64 ReadCr0()
 {
     u64 value;
