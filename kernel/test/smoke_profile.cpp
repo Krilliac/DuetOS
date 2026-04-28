@@ -253,31 +253,66 @@ void SmokeProfileSleepAndExit()
     }
 
     // Diagnostic boundary marker — confirms we reached
-    // SmokeProfileSleepAndExit at all. Multiple previous CI runs
-    // hung at the full 480s budget with no sentinel; this line
-    // is what the next-iteration analysis greps for to localise
-    // the problem to "before SleepAndExit" vs "inside SleepAndExit".
+    // SmokeProfileSleepAndExit. Multiple historical CI failures
+    // hung at the full 480s budget with no sentinel; this
+    // line is the boundary marker the next-iteration analysis
+    // greps for to localise "before SleepAndExit" vs
+    // "inside SleepAndExit".
     arch::SerialWrite("[smoke] entered SleepAndExit profile=");
     arch::SerialWrite(SmokeProfileName(g_profile));
     arch::SerialWrite("\n");
 
-    // Sleep a fixed per-profile window so the spawned tasks have
-    // time to run + print their required signatures. Earlier
-    // attempts polled g_tasks_exited as an "exit early" signal,
-    // but the polling proved race-prone: a SUCCESS pe-winapi run
-    // finished in 67s wall while a same-code-different-runner
-    // pe-winapi attempt timed out at 480s. Trading the early-exit
-    // optimization for unconditional reliability — the longest
-    // profile (PeWinapi) sleeps 12s of guest, which under any
-    // KVM speed converges to ~12-180s wall, well inside the 480s
-    // budget. Reaper tail-flush is implicit in the sleep window.
+    // Log the live scheduler stats AT entry so a CI failure
+    // shows what state we were in. Intentionally verbose —
+    // the .claude/knowledge/kmalloc-zero-init-pattern entry
+    // documents that latent uninit-state bugs manifest as
+    // silent hangs that only diagnostic logs can localise.
+    {
+        const auto stats = sched::SchedStatsRead();
+        arch::SerialWrite("[smoke] sched stats at entry: live=");
+        arch::SerialWriteHex(stats.tasks_live);
+        arch::SerialWrite(" sleeping=");
+        arch::SerialWriteHex(stats.tasks_sleeping);
+        arch::SerialWrite(" blocked=");
+        arch::SerialWriteHex(stats.tasks_blocked);
+        arch::SerialWrite(" created=");
+        arch::SerialWriteHex(stats.tasks_created);
+        arch::SerialWrite(" exited=");
+        arch::SerialWriteHex(stats.tasks_exited);
+        arch::SerialWrite(" reaped=");
+        arch::SerialWriteHex(stats.tasks_reaped);
+        arch::SerialWrite("\n");
+    }
+
     const u64 ticks = ProfileSleepTicks(g_profile);
     arch::SerialWrite("[smoke] sleeping ticks=");
     arch::SerialWriteHex(ticks);
     arch::SerialWrite("\n");
-    if (ticks > 0)
+
+    // Sleep in 1-second slices and log progress between them.
+    // A CI failure now shows EXACTLY how far the sleep got + the
+    // current scheduler state at each second — if the kernel
+    // hangs mid-sleep, the last visible log line pinpoints the
+    // tick at which forward progress stopped.
+    constexpr u64 kSliceTicks = 100; // 1 second guest at 100Hz
+    u64 elapsed = 0;
+    while (elapsed < ticks)
     {
-        sched::SchedSleepTicks(ticks);
+        const u64 this_slice = (ticks - elapsed) < kSliceTicks ? (ticks - elapsed) : kSliceTicks;
+        sched::SchedSleepTicks(this_slice);
+        elapsed += this_slice;
+        const auto stats = sched::SchedStatsRead();
+        arch::SerialWrite("[smoke] tick=");
+        arch::SerialWriteHex(elapsed);
+        arch::SerialWrite("/");
+        arch::SerialWriteHex(ticks);
+        arch::SerialWrite(" live=");
+        arch::SerialWriteHex(stats.tasks_live);
+        arch::SerialWrite(" exited=");
+        arch::SerialWriteHex(stats.tasks_exited);
+        arch::SerialWrite(" ctx_sw=");
+        arch::SerialWriteHex(stats.context_switches);
+        arch::SerialWrite("\n");
     }
 
     // Sentinel that the CI script greps for. The "complete" suffix
@@ -292,6 +327,7 @@ void SmokeProfileSleepAndExit()
     // The smoke wrapper script treats QEMU's clean exit as the
     // signal that the sentinel was reached; the signature-grep
     // step then runs against the captured serial log.
+    arch::SerialWrite("[smoke] calling TestExit(0x10)\n");
     arch::TestExit(0x10);
 }
 

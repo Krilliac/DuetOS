@@ -375,6 +375,7 @@ void ProcessRelease(Process* p)
     // returned.
     mm::AddressSpaceRelease(p->as);
     p->as = nullptr;
+    arch::SerialWrite("[proc] release: post-AS\n");
 
     // Emit the recorded diagnostic data to serial before the
     // state is freed. No-op when the process has no custom state
@@ -383,11 +384,13 @@ void ProcessRelease(Process* p)
     // PE exit and gives a post-mortem record without anyone having
     // to know the dump syscall exists.
     subsystems::win32::custom::DumpOnAbnormalExit(p);
+    arch::SerialWrite("[proc] release: post-DumpOnAbnormalExit\n");
 
     // Free the Win32 custom-diagnostics state if any was allocated.
     // No-op when the process never opted into any custom-Win32
     // feature (the common path).
     subsystems::win32::custom::CleanupProcess(p);
+    arch::SerialWrite("[proc] release: post-CleanupProcess\n");
 
     // Free any directory-iteration snapshots the process leaked
     // by exiting without CloseHandle on its FindFirstFile pairs.
@@ -400,6 +403,8 @@ void ProcessRelease(Process* p)
         }
     }
 
+    arch::SerialWrite("[proc] release: post-win32_dirs\n");
+
     // Drain the unified KObject handle table (plan A3). Calls
     // KObjectRelease on every live slot so any object whose final
     // reference was held by this process gets destroyed cleanly,
@@ -407,9 +412,11 @@ void ProcessRelease(Process* p)
     // anything (the common case while the existing per-type Win32
     // tables remain authoritative).
     ::duetos::ipc::HandleTableDrain(p->kobj_handles);
+    arch::SerialWrite("[proc] release: post-HandleTableDrain\n");
 
     mm::KFree(p);
     --g_live_processes;
+    arch::SerialWrite("[proc] release: done\n");
 }
 
 Process* CurrentProcess()
