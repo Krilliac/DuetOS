@@ -6,6 +6,7 @@
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/smp.h"
 #include "arch/x86_64/timer.h"
+#include "time/tick.h"
 #include "cpu/percpu.h"
 #include "debug/probes.h"
 #include "diag/diag_decode.h"
@@ -367,7 +368,7 @@ void DumpDiagnostics(u64 rip, u64 rsp, u64 rbp)
     // tick count still goes out as the dump's `uptime` line so a
     // host-side parser sees a stable hex value, but the readable
     // form is what an operator scans first.
-    WriteLabelled("uptime   ", arch::TimerTicks());
+    WriteLabelled("uptime   ", ::duetos::time::TickCount());
     arch::SerialWrite("  uptime   : ");
     WriteUptimeReadable();
     arch::SerialWrite(" since boot\n");

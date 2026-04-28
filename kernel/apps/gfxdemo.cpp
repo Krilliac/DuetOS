@@ -4,6 +4,7 @@
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/timer.h"
 #include "drivers/video/framebuffer.h"
+#include "time/tick.h"
 
 namespace duetos::apps::gfxdemo
 {
@@ -138,9 +139,11 @@ void DrawHud(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32 ch)
     FmtU32Pad(g_frame % 100000, fbuf, 5);
     StrAppend(bot, sizeof(bot), &pos, fbuf);
     StrAppend(bot, sizeof(bot), &pos, "  T:");
-    const duetos::u64 ticks_now = duetos::arch::TimerTicks();
-    // 100 Hz scheduler tick → seconds = ticks / 100.
-    const duetos::u64 secs = ticks_now / 100;
+    const duetos::u64 ticks_now = ::duetos::time::TickCount();
+    // Use the portable tick wrapper's frequency rather than the
+    // hardcoded "100" — keeps the demo correct if the v0 100 Hz
+    // scheduler tick rate ever changes.
+    const duetos::u64 secs = ticks_now / ::duetos::time::TickHz();
     char sbuf[8];
     FmtU32Pad(static_cast<duetos::u32>(secs % 100000), sbuf, 5);
     StrAppend(bot, sizeof(bot), &pos, sbuf);

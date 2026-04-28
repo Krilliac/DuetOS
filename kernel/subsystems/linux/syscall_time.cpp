@@ -16,6 +16,7 @@
 
 #include "arch/x86_64/hpet.h"
 #include "arch/x86_64/timer.h"
+#include "time/tick.h"
 #include "proc/process.h"
 #include "mm/address_space.h"
 #include "sched/sched.h"
@@ -153,11 +154,11 @@ i64 DoNanosleep(u64 user_req, u64 user_rem)
 // Linux: times(buf). Returns the kernel's tick counter and fills
 // buf->utime with the caller's accumulated ticks (stime/cutime/
 // cstime stay zero — we don't track kernel-vs-user split or child
-// times). The returned tick counter matches arch::TimerTicks at
+// times). The returned tick counter matches time::TickCount at
 // our 100 Hz scheduler rate.
 i64 DoTimes(u64 user_buf)
 {
-    const u64 t = arch::TimerTicks();
+    const u64 t = ::duetos::time::TickCount();
     if (user_buf != 0)
     {
         u64 utime = 0;

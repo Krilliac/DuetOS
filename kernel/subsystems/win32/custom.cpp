@@ -9,11 +9,7 @@
 #include "mm/kheap.h"
 #include "mm/paging.h"
 #include "sched/sched.h"
-
-namespace duetos::arch
-{
-u64 TimerTicks();
-} // namespace duetos::arch
+#include "time/tick.h"
 
 namespace duetos::subsystems::win32::custom
 {
@@ -395,7 +391,7 @@ void OnHeapFree(core::Process* proc, u64 user_va, u64 size)
     const u32 idx = (s->quarantine_head + s->quarantine_count) % kQuarantineDepth;
     s->quarantine[idx].user_va = user_va;
     s->quarantine[idx].size = size;
-    s->quarantine[idx].release_tick = arch::TimerTicks() + kQuarantineTicks;
+    s->quarantine[idx].release_tick = ::duetos::time::TickCount() + kQuarantineTicks;
     s->quarantine_count += 1;
     arch::Sti();
 }
@@ -406,7 +402,7 @@ bool IsQuarantined(core::Process* proc, u64 user_va)
     if (!PolicyOn(s, kPolicyQuarantineFree))
         return false;
     arch::Cli();
-    const u64 now_tick = arch::TimerTicks();
+    const u64 now_tick = ::duetos::time::TickCount();
     // Drain expired entries from the head.
     while (s->quarantine_count > 0 && s->quarantine[s->quarantine_head].release_tick <= now_tick)
     {

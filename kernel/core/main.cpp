@@ -113,6 +113,7 @@
 #include "ipc/kmutex.h"
 #include "ipc/kobject.h"
 #include "ipc/ksemaphore.h"
+#include "ipc/kwaitable.h"
 #include "sync/lockdep.h"
 #include "sync/rwlock.h"
 #include "sync/seqlock.h"
@@ -533,9 +534,19 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // the first boot shows activity without any arming.
     duetos::debug::ProbeInit();
 
+    // Phase::Drivers — framebuffer is the only "driver" with a
+    // self-test that fits the registry shape today; PCI/NVMe/USB
+    // self-tests are inline checks rather than separately-named
+    // SelfTest functions. (A1-followup, 2026-04-28.)
     SerialWrite("[boot] Bringing up framebuffer (if present).\n");
     duetos::drivers::video::FramebufferInit(multiboot_info);
-    duetos::drivers::video::FramebufferSelfTest();
+    duetos::core::InitcallRegister(duetos::core::Phase::Drivers, "framebuffer-selftest",
+                                   []()
+                                   {
+                                       duetos::drivers::video::FramebufferSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    (void)duetos::core::RunPhase(duetos::core::Phase::Drivers);
 
     // GUI composition. Order for every paint pass:
     //   1. Desktop fill
@@ -1044,9 +1055,18 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         duetos::security::PentestGuiStart();
     }
 
+    // Phase::Vfs — ramfs init imperative (it lays down the v0 root
+    // hierarchy + seed files); VFS self-test routes through the
+    // registry. (A1-followup, 2026-04-28.)
     SerialWrite("[boot] Seeding ramfs + VFS self-test.\n");
     duetos::fs::RamfsInit();
-    duetos::fs::VfsSelfTest();
+    duetos::core::InitcallRegister(duetos::core::Phase::Vfs, "vfs-selftest",
+                                   []()
+                                   {
+                                       duetos::fs::VfsSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    (void)duetos::core::RunPhase(duetos::core::Phase::Vfs);
 
     // Address-space isolation self-test — direct assertion that a
     // user page mapped in one AS is invisible in a sibling AS, and
@@ -1249,6 +1269,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     duetos::ipc::KEventSelfTest();
     duetos::ipc::KSemaphoreSelfTest();
     duetos::ipc::KMailboxSelfTest();
+    duetos::ipc::KWaitableSelfTest();
     // Soft-lockup detector (plan D4). The detector itself is
     // already wired into the timer-IRQ tail (`OnTimerTick`), so
     // a real lockup would already be surfaced; the self-test
