@@ -535,14 +535,18 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // turns the compile flag on, the symbols are already here.
     duetos::diag::UbsanSelfTest();
 
-    // Centralised syscall capability gate (plan A4). Walks every
-    // row of `kSyscallCapTable` against synthetic empty / trusted
-    // processes; asserts empty fails, trusted passes, and that
-    // the unknown-syscall path is a no-op. The dispatcher itself
-    // already calls SyscallGate before each handler — this just
-    // verifies the table + lookup + denial path before any user
-    // code reaches the int 0x80 boundary.
-    duetos::core::SyscallGateSelfTest();
+    // SyscallGateSelfTest moved to AFTER PerCpuInitBsp — its
+    // denial path calls RecordSandboxDenial → CurrentTask() →
+    // CurrentCpu(), which reads GSBASE. Running it before the
+    // BSP per-CPU struct is installed reads whatever GSBASE the
+    // firmware left behind: zero / harmless under OVMF, real-
+    // mode IVT under SeaBIOS (the BSP shadow page contains
+    // 0xf000:ffff IVT entries that look like non-null pointers,
+    // pass the null-check in RecordSandboxDenial, and #GP-fault
+    // when the synthetic Task* is dereferenced for ->process).
+    // The self-test now runs once GSBASE has been programmed and
+    // current_task is the well-defined nullptr from the constinit
+    // PerCpu literal.
 
     SerialWrite("[boot] Parsing Multiboot2 memory map.\n");
     FrameAllocatorInit(multiboot_info);
@@ -1278,6 +1282,16 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     SerialWrite("[boot] Installing BSP per-CPU struct.\n");
     duetos::cpu::PerCpuInitBsp();
+
+    // Centralised syscall capability gate (plan A4). Walks every
+    // row of `kSyscallCapTable` against synthetic empty / trusted
+    // processes; asserts empty fails, trusted passes, and that
+    // the unknown-syscall path is a no-op. The dispatcher itself
+    // already calls SyscallGate before each handler — this just
+    // verifies the table + lookup + denial path before any user
+    // code reaches the int 0x80 boundary. Runs AFTER PerCpuInitBsp
+    // so the denial path's CurrentTask() reads a programmed GSBASE.
+    duetos::core::SyscallGateSelfTest();
 
     SerialWrite("[boot] Programming Linux-ABI syscall MSRs.\n");
     duetos::subsystems::linux::SyscallInit();
