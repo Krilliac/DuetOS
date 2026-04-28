@@ -7,6 +7,7 @@
 #include "drivers/video/theme.h"
 #include "drivers/video/widget.h"
 #include "mm/kheap.h"
+#include "util/string.h"
 #include "subsystems/win32/custom.h"
 #include "sched/sched.h"
 #include "log/klog.h"
@@ -42,6 +43,18 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     {
         return nullptr;
     }
+    // Zero the entire Process struct. KMalloc returns memory still
+    // carrying whatever was last in it — including the freed-payload
+    // poison (0xDE) from the C2 frame-allocator patch. Several
+    // embedded sub-structures (HandleTable kobj_handles, the
+    // win32_dirs[] table, linux_child_exits[]) hold a SpinLock or
+    // depend on zero-initialised state. Without this memset the
+    // `HandleTableDrain` call in ProcessRelease would lock-acquire
+    // a garbage SpinLock and spin forever — confirmed locally as
+    // the cause of the qemu-smoke pe-* / ring3 / linux profiles
+    // hanging at exactly the post-CleanupProcess marker, while the
+    // smoke task slept waiting for a sentinel that never came.
+    memset(p, 0, sizeof(Process));
 
     p->pid = g_next_pid++;
     p->name = name;

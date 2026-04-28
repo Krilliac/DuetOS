@@ -2676,9 +2676,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // periodically preempt it; the proof-of-life is that this whole
     // boot sequence continues to make forward progress after the
     // iretq into user mode.
-    SerialWrite("[boot] >>> StartRing3SmokeTask\n");
     duetos::core::StartRing3SmokeTask();
-    SerialWrite("[boot] <<< StartRing3SmokeTask\n");
     // Linux-ABI proof-of-life suite. Each Spawn below adds a
     // ring-3 task whose stdout lines are not asserted by the
     // pe-* / ring3 smoke profiles. Profile-gated so:
@@ -2776,9 +2774,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // (SmpStartAps, Phase::Userland, idle loop) is reserved for
     // profile=None / bare-metal full boot — under a smoke profile
     // we never reach it, sparing the wall budget.
-    SerialWrite("[boot] >>> SmokeProfileSleepAndExit\n");
     duetos::test::SmokeProfileSleepAndExit();
-    SerialWrite("[boot] <<< SmokeProfileSleepAndExit (returned, profile=None path)\n");
 
     // Bring up APs. SmpStartAps calls SchedSleepTicks(1) between
     // INIT and SIPI; the dedicated idle task installed at the top
