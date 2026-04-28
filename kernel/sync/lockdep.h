@@ -152,6 +152,21 @@ void LockdepBeforeRelease(LockClass id);
 /// this; non-zero is a kernel bug to triage.
 u64 LockdepInversionsDetected();
 
+/// Set the promote-to-panic policy (plan D1-followup). When
+/// true, any subsequent inversion is a hard panic instead of a
+/// klog warning. Default false — a boot under instrumentation
+/// can complete with a noisy graph so the operator can collect
+/// evidence first. The shell `lockdep panic on|off` command
+/// flips this; CI eventually pins it to ON. Past inversions
+/// (already detected) are unchanged; only new detections are
+/// affected.
+void LockdepSetPromoteToPanic(bool enabled);
+
+/// Read the current promote-to-panic policy. Cheap bool load;
+/// useful for the shell to print "panic-on-inversion: on/off"
+/// in `inspect lockdep`.
+bool LockdepPromoteToPanic();
+
 /// Total edges currently recorded. Stabilises after a few seconds
 /// of normal kernel operation; a steadily-growing edge count past
 /// the warm-up phase indicates a code path is acquiring locks in

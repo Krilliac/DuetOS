@@ -1292,6 +1292,23 @@ void Dispatch(char* line)
         CmdLoglevel(argc, argv);
         return;
     }
+    if (StrEq(cmd, "lockdep"))
+    {
+        // `lockdep panic on|off` — flip the inversion-promote-to-
+        // panic knob (plan D1-followup). Read state via `inspect
+        // lockdep`. Admin-gated: an unprivileged caller flipping
+        // panic ON could weaponise a known existing inversion to
+        // crash the box.
+        if (!RequireAdmin("LOCKDEP"))
+            return;
+        if (argc >= 2 && StrEq(argv[1], "panic"))
+        {
+            CmdLockdepPanic(argc, argv);
+            return;
+        }
+        ConsoleWriteln("LOCKDEP: USAGE: LOCKDEP PANIC ON|OFF");
+        return;
+    }
     if (StrEq(cmd, "kdbg"))
     {
         // Same threat model as `loglevel` — KDBG channels can

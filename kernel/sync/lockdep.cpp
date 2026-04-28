@@ -45,6 +45,13 @@ constinit u32 g_held_depth = 0;
 constinit u64 g_inversions = 0;
 constinit u64 g_edges_recorded = 0;
 
+// Inversion-warnings-promote-to-panic knob (plan D1-followup).
+// Default false: a kernel boot under instrumentation can complete
+// with a noisy graph so an operator can collect evidence. After
+// the graph stabilises the operator (or a future CI gate) flips
+// this to true via the shell so any new inversion is fail-stop.
+constinit bool g_promote_to_panic = false;
+
 // Re-entry guard: when lockdep itself runs, ignore any nested
 // hook calls that might come from logging / panic paths.
 constinit bool g_in_lockdep = false;
@@ -159,6 +166,13 @@ void LockdepBeforeAcquire(LockClass id)
             ++g_inversions;
             KLOG_WARN_S("lockdep", "inversion detected", "newly-acquired", LockdepClassName(id));
             KLOG_WARN_S("lockdep", "  vs already-held", "class", LockdepClassName(held));
+            if (g_promote_to_panic)
+            {
+                // Re-entry guard above keeps this Panic from
+                // recursing through the lockdep hooks; the panic
+                // path itself disables further classification.
+                core::Panic("lockdep", "inversion (promote-to-panic enabled)");
+            }
         }
     }
 }
@@ -218,6 +232,16 @@ void LockdepBeforeRelease(LockClass id)
 u64 LockdepInversionsDetected()
 {
     return g_inversions;
+}
+
+void LockdepSetPromoteToPanic(bool enabled)
+{
+    g_promote_to_panic = enabled;
+}
+
+bool LockdepPromoteToPanic()
+{
+    return g_promote_to_panic;
 }
 
 u64 LockdepEdgesRecorded()

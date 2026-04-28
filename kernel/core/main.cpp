@@ -484,7 +484,13 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     SerialWrite("[boot] Bringing up paging.\n");
     PagingInit();
-    PagingSelfTest();
+    duetos::core::InitcallRegister(duetos::core::Phase::Paging, "paging-selftest",
+                                   []()
+                                   {
+                                       PagingSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    (void)duetos::core::RunPhase(duetos::core::Phase::Paging);
 
     // Kernel-stack guard-paged arena — runs here because it needs
     // the managed paging API (PagingInit) for MapPage / UnmapPage

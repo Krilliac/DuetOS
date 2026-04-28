@@ -198,10 +198,14 @@ void CmdInspectLockdep()
     const u64 inversions = ::duetos::sync::LockdepInversionsDetected();
     const u64 edges = ::duetos::sync::LockdepEdgesRecorded();
 
+    const bool panic_on_invert = ::duetos::sync::LockdepPromoteToPanic();
+
     SerialWrite("[inspect-lockdep] inversions=");
     SerialWriteHex(inversions);
     SerialWrite(" edges=");
     SerialWriteHex(edges);
+    SerialWrite(" panic-on-invert=");
+    SerialWrite(panic_on_invert ? "on" : "off");
     SerialWrite("\n");
 
     // Walk the canonical class-ID range (0x01..0x3F per the
@@ -226,6 +230,8 @@ void CmdInspectLockdep()
     WriteU64Dec(inversions);
     ConsoleWrite(" edges=");
     WriteU64Dec(edges);
+    ConsoleWrite(" panic-on-invert=");
+    ConsoleWrite(panic_on_invert ? "ON" : "OFF");
     ConsoleWriteln(" (CLASS LIST ON COM1)");
 }
 
@@ -468,6 +474,35 @@ void CmdAddr2Sym(u32 argc, char** argv)
     put_hex(res.offset);
     line[i] = '\0';
     ConsoleWriteln(line);
+}
+
+// `lockdep panic on|off` — flip the inversion-promote-to-panic
+// knob (plan D1-followup). Default off so a boot under
+// instrumentation can complete with a noisy graph; flip ON once
+// the operator has triaged the existing inversions and wants
+// any new one to fail-stop. Idempotent. External linkage so the
+// dispatcher (in shell_dispatch.cpp) can call it directly.
+// (2026-04-28.)
+void CmdLockdepPanic(u32 argc, char** argv)
+{
+    if (argc < 3)
+    {
+        ConsoleWriteln("LOCKDEP PANIC: USAGE: LOCKDEP PANIC ON|OFF");
+        return;
+    }
+    if (StrEq(argv[2], "on"))
+    {
+        ::duetos::sync::LockdepSetPromoteToPanic(true);
+        ConsoleWriteln("LOCKDEP: panic-on-invert ENABLED");
+        return;
+    }
+    if (StrEq(argv[2], "off"))
+    {
+        ::duetos::sync::LockdepSetPromoteToPanic(false);
+        ConsoleWriteln("LOCKDEP: panic-on-invert DISABLED");
+        return;
+    }
+    ConsoleWriteln("LOCKDEP PANIC: ARG MUST BE ON OR OFF");
 }
 
 void CmdInspect(u32 argc, char** argv)
