@@ -354,6 +354,7 @@ void NetStackInit()
     // programmatically so the test doesn't bake in magic
     // numbers.
     {
+        const u64 baseline_rx_udp = Ipv4StatsRead().rx_udp;
         u8 frame[14 + 20 + 8] = {}; // eth + ip + udp
         // Ethernet.
         for (u64 i = 0; i < 6; ++i)
@@ -394,9 +395,14 @@ void NetStackInit()
         // Leave at zeros.
         const bool ok = Ipv4HandleIncoming(0, frame, sizeof(frame));
         const Ipv4Stats s = Ipv4StatsRead();
-        if (ok && s.rx_udp == 1)
+        // Compare against the captured baseline rather than `== 1`
+        // — the NIC RX path may already have classified one or more
+        // UDP frames before the self-test runs (e.g. early ARP /
+        // DHCP-style chatter on the QEMU user-net), so an absolute
+        // count would produce a spurious "did not classify" warning.
+        if (ok && s.rx_udp == baseline_rx_udp + 1)
         {
-            arch::SerialWrite("[ipv4] self-test OK — UDP proto counted (rx_udp=1)\n");
+            arch::SerialWrite("[ipv4] self-test OK — UDP proto counted (rx_udp += 1)\n");
         }
         else
         {

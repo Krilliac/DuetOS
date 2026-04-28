@@ -11,6 +11,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
+#include "mm/kheap.h"
 #include "time/tick.h"
 
 namespace duetos::diag
@@ -107,21 +108,32 @@ void PerfProfileSelfTest()
         core::Panic("diag/perf", "self-test: total didn't advance by 3");
     }
 
-    PerfSample buf[kPerfRingCapacity];
+    // The full ring is 64 KiB (4096 × 16 B), which equals the
+    // kernel-stack budget — a stack-allocated buffer overflows the
+    // guard page. Heap-allocate instead.
+    auto* buf = static_cast<PerfSample*>(::duetos::mm::KMalloc(sizeof(PerfSample) * kPerfRingCapacity));
+    if (buf == nullptr)
+    {
+        core::Panic("diag/perf", "self-test: KMalloc for snapshot buffer failed");
+    }
     const u32 got = PerfSnapshot(buf, kPerfRingCapacity);
     if (got < 3)
     {
+        ::duetos::mm::KFree(buf);
         core::Panic("diag/perf", "self-test: snapshot returned fewer than 3 records");
     }
     if (buf[got - 3].rip != 0xDEAD'BEEF'1111ULL || buf[got - 2].rip != 0xDEAD'BEEF'2222ULL ||
         buf[got - 1].rip != 0xDEAD'BEEF'3333ULL)
     {
+        ::duetos::mm::KFree(buf);
         core::Panic("diag/perf", "self-test: trailing 3 RIPs don't match in order");
     }
     if (buf[got - 2].tick < buf[got - 3].tick || buf[got - 1].tick < buf[got - 2].tick)
     {
+        ::duetos::mm::KFree(buf);
         core::Panic("diag/perf", "self-test: ticks not monotonic");
     }
+    ::duetos::mm::KFree(buf);
 
     arch::SerialWrite("[perf] self-test OK (append + snapshot + ordering verified).\n");
 }

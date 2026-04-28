@@ -35,6 +35,7 @@
 #include "mm/frame_allocator.h"
 #include "mm/kheap.h"
 #include "mm/page.h"
+#include "util/string.h"
 
 namespace duetos::mm
 {
@@ -224,6 +225,15 @@ AddressSpace* AddressSpaceCreate(u64 frame_budget)
     {
         return nullptr;
     }
+    // Zero the chunk before populating. KMalloc returns memory still
+    // carrying whatever was last in it — including the freed-payload
+    // poison `kFreedPagePoison` (0xDE) from the C2 patch — and the
+    // embedded `regions_lock` (RwLock) is otherwise default-initialised
+    // by the field declaration. Without this, `Mutex.waiters.tail`
+    // reads back as `0xdededededededede` and the first MutexLock
+    // trying to enqueue a waiter dereferences a non-canonical pointer
+    // and #GPs.
+    memset(as, 0, sizeof(AddressSpace));
 
     const PhysAddr pml4_frame = AllocateFrame();
     if (pml4_frame == kNullFrame)

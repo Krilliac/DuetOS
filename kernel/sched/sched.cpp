@@ -615,9 +615,17 @@ namespace
 {
 
 // Shared body for SchedCreate / SchedCreateUser. The only difference
-// between the two callers is the task's address space — kernel-only
-// tasks pass nullptr; ring-3-bound tasks pass a freshly-created AS.
-Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPriority priority, mm::AddressSpace* as)
+// between the two callers is the task's address space (kernel-only
+// tasks pass nullptr; ring-3-bound tasks pass a freshly-created AS)
+// and whether they own a Process (kernel-only: nullptr; user tasks:
+// the caller-supplied Process). `process` MUST be assigned before
+// the runqueue push — once the task is enqueued, a preemption on
+// another CPU (or, with LAPIC timer preemption, even the same CPU)
+// can pull it off the queue and start running it. If `t->process`
+// is still nullptr at that point, Ring3UserEntry's `CurrentProcess()`
+// returns null and panics with "Ring3UserEntry without a Process".
+Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPriority priority, mm::AddressSpace* as,
+                          core::Process* process = nullptr)
 {
     KASSERT(entry != nullptr, "sched", "SchedCreate null entry fn");
     KASSERT(name != nullptr, "sched", "SchedCreate null name");
@@ -658,7 +666,7 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
     t->wake_by_timeout = false;
     t->priority = priority;
     t->as = as;
-    t->process = nullptr; // populated by SchedCreateUser for user tasks
+    t->process = process; // user tasks: caller's Process; kernel tasks: nullptr
     t->kill_requested = false;
     t->kill_reason = KillReason::TickBudget;
     t->ticks_run = 0;
@@ -759,8 +767,13 @@ Task* SchedCreateUser(TaskEntry entry, void* arg, const char* name, core::Proces
         return nullptr;
     }
 
-    Task* t = SchedCreateInternal(entry, arg, name, TaskPriority::Normal, process->as);
-    t->process = process;
+    // Hand `process` to the internal helper so `t->process` is set
+    // BEFORE the runqueue push. A post-push assignment loses to a
+    // preemption that pulls the new task off the runqueue between
+    // SchedCreateInternal returning and the assignment landing —
+    // the new task then enters Ring3UserEntry, hits the
+    // `CurrentProcess() == nullptr` gate, and panics.
+    Task* t = SchedCreateInternal(entry, arg, name, TaskPriority::Normal, process->as, process);
     KBP_PROBE_V(::duetos::debug::ProbeId::kRing3Spawn, process->pid);
     // Refcount discipline: ProcessCreate returned refcount=1 (one
     // for the creating caller). The caller hands that reference off

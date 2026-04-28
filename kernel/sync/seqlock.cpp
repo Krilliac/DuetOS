@@ -334,8 +334,13 @@ void SeqLockContentionSelfTest()
     arch::SerialWrite("[sync] seqlock contention self-test: concurrent writer + reader\n");
 
     // Reset shared state. Reader runs in the calling thread;
-    // writer is a kernel-spawned thread.
+    // writer is a kernel-spawned thread. Seed the payload so the
+    // `hi == lo + 1` invariant the reader checks holds BEFORE the
+    // writer's first cycle — without seeding, the reader's first
+    // EndRead succeeds against the all-zero default state and the
+    // invariant fires `0 != 0 + 1` before the writer has run.
     g_seq_shared = SeqContentionShared{};
+    g_seq_shared.payload_hi = g_seq_shared.payload_lo + 1u;
 
     sched::SchedCreate(SeqWriterTask, &g_seq_shared, "seq-writer");
 
@@ -352,6 +357,7 @@ void SeqLockContentionSelfTest()
         u32 lo = 0;
         u32 hi = 0;
         u32 iters = 0;
+        bool ok = false;
         do
         {
             ++iters;
@@ -369,7 +375,18 @@ void SeqLockContentionSelfTest()
             {
                 core::Panic("sync/seqlock", "contention test: reader retry loop did not converge");
             }
-        } while (!SeqLockEndRead(g_seq_shared.lock, seq));
+            ok = SeqLockEndRead(g_seq_shared.lock, seq);
+            // Single-CPU cooperative kernel: the writer may have
+            // yielded mid-write while still holding `lock.writer`
+            // (sequence stays odd until it wakes and runs to
+            // EndWrite). Spinning here without yielding starves
+            // the writer and the inner loop never converges, so
+            // give the scheduler a turn between retries.
+            if (!ok)
+            {
+                sched::SchedYield();
+            }
+        } while (!ok);
 
         // After a successful EndRead, the invariant `hi == lo + 1`
         // MUST hold — that's the whole point of seqlock. If a

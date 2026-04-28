@@ -21,10 +21,10 @@ namespace
 // Parser state machine.
 enum class State : u8
 {
-    Idle,         ///< Waiting for `$` packet-start.
-    Body,         ///< Accumulating packet body until `#`.
-    Csum1,        ///< Reading first checksum hex digit.
-    Csum2,        ///< Reading second checksum hex digit.
+    Idle,  ///< Waiting for `$` packet-start.
+    Body,  ///< Accumulating packet body until `#`.
+    Csum1, ///< Reading first checksum hex digit.
+    Csum2, ///< Reading second checksum hex digit.
 };
 
 constinit State g_state = State::Idle;
@@ -551,9 +551,9 @@ void GdbStubSelfTest()
 
     // qSupported: "$qSupported#" + checksum.
     // Sum of "qSupported" = 0x71+0x53+0x75+0x70+0x70+0x6f+0x72+0x74+0x65+0x64
-    //                   = 1067 = 0x42B → low byte 0x2B = "2B".
+    //                    = 1079 = 0x437 → low byte 0x37 = "37".
     g_capture_len = 0;
-    FeedString("$qSupported#2b");
+    FeedString("$qSupported#37");
     if (g_packets_received == 0)
     {
         core::Panic("diag/gdb-stub", "self-test: parser did not complete a packet");

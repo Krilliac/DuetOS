@@ -40,6 +40,7 @@
 #include "proc/ring3_smoke.h"
 
 #include "arch/x86_64/gdt.h"
+#include "arch/x86_64/hypervisor.h"
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/usermode.h"
 #include "cpu/percpu.h"
@@ -2441,47 +2442,62 @@ void StartRing3SmokeTask()
     SpawnRing3Task("ring3-smoke-sandbox", sandbox_caps, fs::RamfsSandboxRoot(), mm::kFrameBudgetSandbox,
                    kTickBudgetSandbox);
 
-    // Jail-probe task: writes to its own RX code page. Expected
-    // outcome is the kernel's ring-3 trap handler terminating the
-    // task via SchedExit and emitting [task-kill] on COM1. If the
-    // kernel instead panics / halts here, the sandboxing contract
-    // is broken: a user-mode fault must never bring down the OS.
-    SpawnJailProbeTask();
-    SpawnNxProbeTask();
-    SpawnCpuHogProbe();
-    // Hostile-syscall probe: retries a blocked SYS_WRITE forever.
-    // After 100 cap denials, the sandbox-denial threshold kills
-    // the task. Boot log shows `[sandbox] pid=N hit 100 denials`.
-    SpawnHostileProbe();
-    // Dropcaps demo: trusted task drops its caps mid-flight and
-    // verifies subsequent SYS_WRITE is denied.
-    SpawnDropcapsProbe();
-    // Priv-instruction probe: `cli` from ring 3 → #GP → task-kill.
-    // Proves CPL(3) > IOPL(0) enforcement is live — a sandboxed
-    // process cannot globally mask interrupts.
-    SpawnPrivProbeTask();
-    // Bad-int probe: `int 0x81` → gate-not-present → task-kill.
-    // Proves the trap dispatcher catches any ring-3 vector, not
-    // just the architectural 0..31 it installs handlers for.
-    SpawnBadIntProbeTask();
-    // Kernel-read probe: ring 3 dereferences a higher-half kernel
-    // VA → #PF (U/S mismatch) → task-kill. Proves the user-bit
-    // firewall between ring 3 and the kernel image.
-    SpawnKernelReadProbeTask();
-    // Ptrfuzz probe: trusted task hands four wild user pointers
-    // to SYS_WRITE in sequence. Proves `CopyFromUser` rejection
-    // path is robust — kernel never touches a bad address. Final
-    // control message confirms the task survived intact.
-    SpawnPtrFuzzProbeTask();
-    // Writefuzz probe: trusted task hands four wild DESTINATION
-    // pointers to SYS_STAT + SYS_READ. Proves `CopyToUser`
-    // rejection path is robust — no byte ever lands at a bad VA.
-    SpawnWriteFuzzProbeTask();
-    // Bp-probe: trusted task installs a HW execute breakpoint on
-    // its own nop via SYS_BP_INSTALL, fires it once, removes via
-    // SYS_BP_REMOVE. Proves per-task DR save/restore, the
-    // kCapDebug gate, and the syscall surface.
-    SpawnBpProbeTask();
+    // Skip the security / fuzz probe block under a hypervisor:
+    // every probe spawn allocates a new AS + page, queues a Task,
+    // schedules it long enough to take its expected fault, and
+    // routes through the reaper. On a CPU-bound dev box that's
+    // microseconds; on an oversubscribed CI runner under KVM it
+    // adds tens of seconds of guest-CPU time the boot smoke
+    // doesn't need (the boot-smoke critical path checks PE-loader
+    // output, not the security walls). Bare metal still runs the
+    // full probe suite. Same for the windowed-hello PE further
+    // down — its 20-second Sleep is a screenshot harness aid that
+    // burns 20s of kernel time CI doesn't have.
+    const bool emulator = ::duetos::arch::IsEmulator();
+    if (!emulator)
+    {
+        // Jail-probe task: writes to its own RX code page. Expected
+        // outcome is the kernel's ring-3 trap handler terminating the
+        // task via SchedExit and emitting [task-kill] on COM1. If the
+        // kernel instead panics / halts here, the sandboxing contract
+        // is broken: a user-mode fault must never bring down the OS.
+        SpawnJailProbeTask();
+        SpawnNxProbeTask();
+        SpawnCpuHogProbe();
+        // Hostile-syscall probe: retries a blocked SYS_WRITE forever.
+        // After 100 cap denials, the sandbox-denial threshold kills
+        // the task. Boot log shows `[sandbox] pid=N hit 100 denials`.
+        SpawnHostileProbe();
+        // Dropcaps demo: trusted task drops its caps mid-flight and
+        // verifies subsequent SYS_WRITE is denied.
+        SpawnDropcapsProbe();
+        // Priv-instruction probe: `cli` from ring 3 → #GP → task-kill.
+        // Proves CPL(3) > IOPL(0) enforcement is live — a sandboxed
+        // process cannot globally mask interrupts.
+        SpawnPrivProbeTask();
+        // Bad-int probe: `int 0x81` → gate-not-present → task-kill.
+        // Proves the trap dispatcher catches any ring-3 vector, not
+        // just the architectural 0..31 it installs handlers for.
+        SpawnBadIntProbeTask();
+        // Kernel-read probe: ring 3 dereferences a higher-half kernel
+        // VA → #PF (U/S mismatch) → task-kill. Proves the user-bit
+        // firewall between ring 3 and the kernel image.
+        SpawnKernelReadProbeTask();
+        // Ptrfuzz probe: trusted task hands four wild user pointers
+        // to SYS_WRITE in sequence. Proves `CopyFromUser` rejection
+        // path is robust — kernel never touches a bad address. Final
+        // control message confirms the task survived intact.
+        SpawnPtrFuzzProbeTask();
+        // Writefuzz probe: trusted task hands four wild DESTINATION
+        // pointers to SYS_STAT + SYS_READ. Proves `CopyToUser`
+        // rejection path is robust — no byte ever lands at a bad VA.
+        SpawnWriteFuzzProbeTask();
+        // Bp-probe: trusted task installs a HW execute breakpoint on
+        // its own nop via SYS_BP_INSTALL, fires it once, removes via
+        // SYS_BP_REMOVE. Proves per-task DR save/restore, the
+        // kCapDebug gate, and the syscall surface.
+        SpawnBpProbeTask();
+    }
     // First PE executable on the system. Freestanding, compiled
     // from userland/apps/hello_pe/hello.c by the host clang +
     // lld-link rule in kernel/CMakeLists.txt. Exercises the v0
@@ -2535,10 +2551,17 @@ void StartRing3SmokeTask()
     // serial log lines: [msgbox] ... then [win] create pid=...
     // hwnd=N rect=(500,400 420x220) title="WINDOWED HELLO".
     // Sleep(20s) keeps the window visible long enough for the
-    // screenshot script's settle window to capture it.
-    SpawnPeFile("ring3-windowed-hello", fs::generated::kBinWindowedHelloBytes,
-                fs::generated::kBinWindowedHelloBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    // screenshot script's settle window to capture it. Skip
+    // under a hypervisor: the 20-second Sleep is HPET-real-time
+    // even under HLT idle, and the boot smoke doesn't check
+    // the [msgbox] / [win create] output (the screenshot
+    // harness does, on bare-metal-equivalent runs).
+    if (!emulator)
+    {
+        SpawnPeFile("ring3-windowed-hello", fs::generated::kBinWindowedHelloBytes,
+                    fs::generated::kBinWindowedHelloBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                    mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    }
     Log(LogLevel::Info, "core/ring3",
         "ring3 smoke tasks queued (incl cpu-hog + hostile + dropcaps + priv + badint + kread + "
         "ptrfuzz + writefuzz + hellope + winkill-report + thread-stress + syscall-stress + "

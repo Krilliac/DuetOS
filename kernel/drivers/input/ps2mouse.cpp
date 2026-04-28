@@ -98,28 +98,54 @@ constinit bool g_available = false;
 // "8042 helper" library would be a premature abstraction.
 // ---------------------------------------------------------------------------
 
-void WaitInputClear()
+// Returns true if the input buffer drained within the poll budget.
+// Init path callers treat false as "no 8042 / no aux channel" and
+// soft-fail; anywhere else, a failure is genuinely fatal and the
+// caller can decide to panic.
+bool TryWaitInputClear()
 {
     for (u64 i = 0; i < kPollSpinLimit; ++i)
     {
         if ((Inb(kStatusPort) & kStatusInputFull) == 0)
         {
-            return;
+            return true;
         }
     }
-    core::Panic("drivers/ps2mouse", "8042 input buffer never cleared");
+    return false;
 }
 
-u8 WaitOutputFull()
+void WaitInputClear()
+{
+    if (!TryWaitInputClear())
+    {
+        core::Panic("drivers/ps2mouse", "8042 input buffer never cleared");
+    }
+}
+
+// Returns true and writes the read byte into *out on success;
+// returns false on poll-budget exhaustion (no aux device or
+// firmware-only USB-legacy machine that ignores the test command).
+bool TryWaitOutputFull(u8* out)
 {
     for (u64 i = 0; i < kPollSpinLimit; ++i)
     {
         if ((Inb(kStatusPort) & kStatusOutputFull) != 0)
         {
-            return Inb(kDataPort);
+            *out = Inb(kDataPort);
+            return true;
         }
     }
-    core::Panic("drivers/ps2mouse", "8042 output buffer never filled");
+    return false;
+}
+
+u8 WaitOutputFull()
+{
+    u8 byte = 0;
+    if (!TryWaitOutputFull(&byte))
+    {
+        core::Panic("drivers/ps2mouse", "8042 output buffer never filled");
+    }
+    return byte;
 }
 
 void SendCtrlCmd(u8 cmd)
@@ -303,9 +329,17 @@ void Ps2MouseInit()
     // Step 2: port-2 interface self-test. Result byte 0 = pass;
     // anything else is a bad / missing aux channel. Warn + bail —
     // many laptops have no PS/2 aux line at all (USB-only), and
-    // that should be a soft failure, not a panic.
+    // that should be a soft failure, not a panic. Use the
+    // try-variant: a controller that never fills its output buffer
+    // is also a "no PS/2 mouse" signal (QEMU q35 with no -device
+    // pcips2-mouse, real machines without legacy 8042 emulation).
     SendCtrlCmd(kCmdTestPort2);
-    const u8 port2_test = WaitOutputFull();
+    u8 port2_test = 0;
+    if (!TryWaitOutputFull(&port2_test))
+    {
+        core::Log(core::LogLevel::Warn, "drivers/ps2mouse", "port-2 self-test no response (no PS/2 mouse?)");
+        return;
+    }
     if (port2_test != kResponseTestPort2Pass)
     {
         core::LogWithValue(core::LogLevel::Warn, "drivers/ps2mouse", "port-2 self-test failed (no PS/2 mouse?)",

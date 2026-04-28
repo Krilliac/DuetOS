@@ -117,8 +117,25 @@ SATA_IMAGE="${BUILD_DIR}/sata0.img"
 python3 "${SCRIPT_DIR}/make-gpt-image.py" "${NVME_IMAGE}"
 python3 "${SCRIPT_DIR}/make-gpt-image.py" "${SATA_IMAGE}"
 
+# Use KVM when /dev/kvm is reachable (CI runners on bare metal,
+# Linux dev hosts with the right capability bits), fall through to
+# TCG otherwise. The `kvm:tcg` syntax tells QEMU "try kvm first,
+# downgrade silently to tcg if it fails" so the same script works
+# everywhere without an env-var dance. KVM speeds the qemu-smoke
+# job ~50x — the boot/test path that takes ~60s under TCG completes
+# in ~1.5s under KVM, well inside the CI wall-clock budget.
+ACCEL="tcg"
+if [[ -r /dev/kvm && -w /dev/kvm ]]; then
+    ACCEL="kvm:tcg"
+fi
+# Log the acceleration choice so a slow CI run is easy to diagnose
+# from the workflow log alone — without this, "did the smoke job
+# actually use KVM?" required re-checking permissions on /dev/kvm
+# after the fact.
+echo "[run.sh] qemu accel=${ACCEL}" >&2
+
 QEMU_ARGS=(
-    -machine  q35
+    -machine  "q35,accel=${ACCEL}"
     -cpu      max
     -m        512M
     -display  "${DISPLAY_MODE}"

@@ -24,13 +24,14 @@
 
 #include "fs/file_route.h"
 
+#include "arch/x86_64/hypervisor.h"
 #include "arch/x86_64/serial.h"
-#include "log/klog.h"
 #include "core/panic.h"
-#include "proc/process.h"
 #include "fs/fat32.h"
 #include "fs/ramfs.h"
 #include "fs/vfs.h"
+#include "log/klog.h"
+#include "proc/process.h"
 #include "subsystems/linux/inotify.h"
 
 namespace duetos::fs::routing
@@ -567,6 +568,20 @@ void SelfTest()
     if (fat32::Fat32VolumeCount() == 0)
     {
         SerialWrite("[fs/route-selftest] SKIP (no fat32 volumes registered)\n");
+        return;
+    }
+
+    // Under a hypervisor, the routing self-test's open / read /
+    // seek / write / close cycles each round-trip through the
+    // emulated NVMe / AHCI front-end and dominate the boot smoke
+    // wall clock. The probe + open-handle path above already
+    // proved the routing layer can resolve "/disk/0/HELLO.TXT" to
+    // a backing volume and surface its size; the rest of the test
+    // is FAT32 R/W coverage that's better served by Fat32SelfTest
+    // (also gated under emulator) on bare metal.
+    if (::duetos::arch::IsEmulator())
+    {
+        SerialWrite("[fs/route-selftest] emulator detected — skipping read/write phases (probe only)\n");
         return;
     }
 

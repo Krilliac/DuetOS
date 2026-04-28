@@ -25,12 +25,29 @@ u64 Rdmsr(u32 msr)
     return (u64(hi) << 32) | lo;
 }
 
+// IA32_THERM_STATUS / TEMPERATURE_TARGET / PACKAGE_THERM_STATUS
+// are Intel-defined MSRs. AMD CPUs implement no architectural
+// thermal MSRs at the same numbers — under TCG, QEMU silently
+// returns 0 for unimplemented MSRs (which is why the prior code
+// looked correct), but real hardware and KVM-presented vCPUs
+// raise #GP, hanging the boot in the kernel's #GP path. Gate the
+// reads on the vendor string so we never issue a `rdmsr` against
+// an MSR the CPU doesn't define.
+bool VendorIsIntel()
+{
+    const char* v = CpuInfoGet().vendor;
+    return v[0] == 'G' && v[1] == 'e' && v[2] == 'n' && v[3] == 'u' && v[4] == 'i' && v[5] == 'n' && v[6] == 'e' &&
+           v[7] == 'I' && v[8] == 'n' && v[9] == 't' && v[10] == 'e' && v[11] == 'l';
+}
+
 } // namespace
 
 ThermalReading ThermalRead()
 {
     ThermalReading r = {};
     if (!CpuHas(kCpuFeatMsr))
+        return r;
+    if (!VendorIsIntel())
         return r;
 
     // TJMax. If the MSR is unsupported, QEMU returns 0 — use
@@ -68,6 +85,11 @@ void ThermalProbe()
     if (!CpuHas(kCpuFeatMsr))
     {
         core::Log(core::LogLevel::Warn, "arch/thermal", "no MSR support (CpuFeatMsr) — skipping");
+        return;
+    }
+    if (!VendorIsIntel())
+    {
+        core::Log(core::LogLevel::Warn, "arch/thermal", "non-Intel vendor — Intel thermal MSRs would #GP, skipping");
         return;
     }
     const ThermalReading r = ThermalRead();
