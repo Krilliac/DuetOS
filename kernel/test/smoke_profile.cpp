@@ -74,14 +74,19 @@ bool TokenMatches(const char* text, const char* end, const char* expected)
     return text == end && *expected == '\0';
 }
 
-/// Per-profile *deadline* in scheduler ticks (10ms each at 100Hz).
-/// SleepAndExit polls `tasks_exited` against a captured baseline
-/// and exits as soon as the profile's spawned tasks have run + been
-/// reaped, OR when the deadline elapses (whichever comes first).
-/// The deadline only matters if the scenario hangs; in the happy
-/// path we exit within milliseconds of the PE / ring3 task exit.
+/// Per-profile fixed sleep before sentinel, in scheduler ticks
+/// (10ms each at 100Hz). The earlier polling-based approach was
+/// abandoned: a SUCCESS pe-winapi run finished in 67s wall,
+/// proving the framework works, but other identical configurations
+/// hung for the full 480s wall budget without ever sentinelling.
+/// The fixed sleep is dumb but reliable — no race window between
+/// spawned-task exit accounting and the polling loop, no per-CPU
+/// timing assumptions about when SchedSleepTicks wakes back up
+/// versus when the spawned task gets a scheduler slice. The
+/// spawned task gets a fixed window to run, then we sentinel +
+/// TestExit unconditionally.
 constexpr u64 kTicksPerSecond = 100;
-u64 ProfileDeadlineTicks(SmokeProfile profile)
+u64 ProfileSleepTicks(SmokeProfile profile)
 {
     switch (profile)
     {
@@ -90,49 +95,17 @@ u64 ProfileDeadlineTicks(SmokeProfile profile)
     case SmokeProfile::Bringup:
         return kTicksPerSecond * 1; // nothing spawned, just settle
     case SmokeProfile::Ring3:
-        return kTicksPerSecond * 10; // 3 short ring3 tasks
+        return kTicksPerSecond * 5; // 3 short ring3 tasks, ~1s each
     case SmokeProfile::PeHello:
-        return kTicksPerSecond * 10; // tiny freestanding PE
+        return kTicksPerSecond * 5; // tiny freestanding PE
     case SmokeProfile::PeWinapi:
-        return kTicksPerSecond * 30; // comprehensive PE + many probes
+        return kTicksPerSecond * 12; // comprehensive PE + many probes
     case SmokeProfile::PeWinkill:
-        return kTicksPerSecond * 20; // real-world MSVC PE w/ DLL preload
+        return kTicksPerSecond * 10; // real-world MSVC PE w/ DLL preload
     case SmokeProfile::Linux:
-        return kTicksPerSecond * 20; // 7 Linux smokes serially
+        return kTicksPerSecond * 5; // single Linux ABI smoke
     }
-    return kTicksPerSecond * 10;
-}
-
-/// How many ring3 / PE / Linux tasks the profile spawns. After
-/// SleepAndExit waits for tasks_exited to grow by this much from
-/// the moment-of-entry baseline, every spawned task has exited
-/// and we can sentinel + TestExit. Tied 1:1 to the ShouldSpawn
-/// truth table so a future profile that adds another spawn site
-/// MUST update both.
-u64 ProfileExpectedExits(SmokeProfile profile)
-{
-    switch (profile)
-    {
-    case SmokeProfile::None:
-        return 0;
-    case SmokeProfile::Bringup:
-        return 0;
-    case SmokeProfile::Ring3:
-        return 3; // ring3-smoke-A + ring3-smoke-B + ring3-smoke-sandbox
-    case SmokeProfile::PeHello:
-        return 1; // ring3-hello-pe
-    case SmokeProfile::PeWinapi:
-        return 1; // ring3-hello-winapi
-    case SmokeProfile::PeWinkill:
-        return 1; // ring3-winkill
-    case SmokeProfile::Linux:
-        return 1; // SpawnRing3LinuxSmoke only — the other 6 are
-                  // bare-metal-only (see kernel/core/main.cpp); the
-                  // smoke wrapper asserts only on the substring
-                  // "linux" so one successful Linux ABI path is
-                  // enough.
-    }
-    return 0;
+    return kTicksPerSecond * 5;
 }
 
 } // namespace
@@ -279,98 +252,32 @@ void SmokeProfileSleepAndExit()
         return;
     }
 
-    // Diagnostic checkpoint so a failed CI run shows the kernel
-    // reached SmokeProfileSleepAndExit at all. Several previous
-    // CI runs failed at the full 480s wall budget with no
-    // sentinel and no crash — symptomatic of a hang somewhere
-    // before this point. This log line is the boundary marker.
+    // Diagnostic boundary marker — confirms we reached
+    // SmokeProfileSleepAndExit at all. Multiple previous CI runs
+    // hung at the full 480s budget with no sentinel; this line
+    // is what the next-iteration analysis greps for to localise
+    // the problem to "before SleepAndExit" vs "inside SleepAndExit".
     arch::SerialWrite("[smoke] entered SleepAndExit profile=");
     arch::SerialWrite(SmokeProfileName(g_profile));
     arch::SerialWrite("\n");
 
-    const u64 deadline = ProfileDeadlineTicks(g_profile);
-    if (g_profile == SmokeProfile::Bringup)
+    // Sleep a fixed per-profile window so the spawned tasks have
+    // time to run + print their required signatures. Earlier
+    // attempts polled g_tasks_exited as an "exit early" signal,
+    // but the polling proved race-prone: a SUCCESS pe-winapi run
+    // finished in 67s wall while a same-code-different-runner
+    // pe-winapi attempt timed out at 480s. Trading the early-exit
+    // optimization for unconditional reliability — the longest
+    // profile (PeWinapi) sleeps 12s of guest, which under any
+    // KVM speed converges to ~12-180s wall, well inside the 480s
+    // budget. Reaper tail-flush is implicit in the sleep window.
+    const u64 ticks = ProfileSleepTicks(g_profile);
+    arch::SerialWrite("[smoke] sleeping ticks=");
+    arch::SerialWriteHex(ticks);
+    arch::SerialWrite("\n");
+    if (ticks > 0)
     {
-        // No tasks spawned. A short settle is enough.
-        if (deadline > 0)
-        {
-            sched::SchedSleepTicks(deadline);
-        }
-    }
-    else
-    {
-        // Capture tasks_exited at entry. Spawned tasks all run,
-        // exit, and increment g_tasks_exited via Schedule's
-        // Running->Dead transition or SchedExit. Wait for the
-        // counter to grow by the per-profile delta. The deadline
-        // bound catches stuck spawns so we still sentinel.
-        const u64 expected = ProfileExpectedExits(g_profile);
-        const u64 baseline_exited = sched::SchedStatsRead().tasks_exited;
-        const u64 target_exited = baseline_exited + expected;
-
-        // Log the wait parameters so a failed CI run shows what
-        // we were waiting for. baseline_exited typically reflects
-        // the boot-time short-lived task exits (Phase::Sched
-        // initcalls' temporary spawns); target = baseline + the
-        // profile's expected count.
-        arch::SerialWrite("[smoke] wait baseline_exited=");
-        arch::SerialWriteHex(baseline_exited);
-        arch::SerialWrite(" expected=");
-        arch::SerialWriteHex(expected);
-        arch::SerialWrite(" target=");
-        arch::SerialWriteHex(target_exited);
-        arch::SerialWrite(" deadline_ticks=");
-        arch::SerialWriteHex(deadline);
-        arch::SerialWrite("\n");
-
-        u64 elapsed = 0;
-        constexpr u64 kPollSliceTicks = 10;
-        // Periodic progress log so a CI failure shows whether
-        // the polling loop is making progress (new tasks
-        // exiting) vs wedged. Logs every kProgressLogInterval
-        // ticks of polling = once per second of guest time.
-        constexpr u64 kProgressLogInterval = 100;
-        u64 next_log = kProgressLogInterval;
-        u64 last_seen_exited = baseline_exited;
-        while (elapsed < deadline)
-        {
-            const u64 now_exited = sched::SchedStatsRead().tasks_exited;
-            if (now_exited >= target_exited)
-            {
-                break;
-            }
-            if (elapsed >= next_log)
-            {
-                arch::SerialWrite("[smoke] wait elapsed_ticks=");
-                arch::SerialWriteHex(elapsed);
-                arch::SerialWrite(" tasks_exited=");
-                arch::SerialWriteHex(now_exited);
-                arch::SerialWrite(" delta=");
-                arch::SerialWriteHex(now_exited - baseline_exited);
-                arch::SerialWrite("\n");
-                next_log += kProgressLogInterval;
-                last_seen_exited = now_exited;
-            }
-            sched::SchedSleepTicks(kPollSliceTicks);
-            elapsed += kPollSliceTicks;
-        }
-        // Log how the loop ended.
-        const u64 final_exited = sched::SchedStatsRead().tasks_exited;
-        arch::SerialWrite("[smoke] wait done elapsed_ticks=");
-        arch::SerialWriteHex(elapsed);
-        arch::SerialWrite(" final_exited=");
-        arch::SerialWriteHex(final_exited);
-        arch::SerialWrite(" delta=");
-        arch::SerialWriteHex(final_exited - baseline_exited);
-        arch::SerialWrite(" target_met=");
-        arch::SerialWriteHex(final_exited >= target_exited ? 1 : 0);
-        arch::SerialWrite("\n");
-        (void)last_seen_exited;
-
-        // One last short settle so any stragglers (the reaper
-        // KFree'ing the last AS) have time to flush their final
-        // log lines before we cut the serial port.
-        sched::SchedSleepTicks(kPollSliceTicks);
+        sched::SchedSleepTicks(ticks);
     }
 
     // Sentinel that the CI script greps for. The "complete" suffix
@@ -380,12 +287,11 @@ void SmokeProfileSleepAndExit()
     arch::SerialWrite(SmokeProfileName(g_profile));
     arch::SerialWrite(" complete\n");
 
-    // Hand off to QEMU's isa-debug-exit device. Equivalent to a
-    // "test passed" exit; the QEMU process terminates with an
-    // exit status `(0x10 << 1) | 1 = 0x21`, which the smoke
-    // wrapper script treats as a successful sentinel-was-reached
-    // signal. The signature-grep step then runs against the
-    // captured serial log as before.
+    // Hand off to QEMU's isa-debug-exit device. Writing 0x10 to
+    // port 0xf4 terminates QEMU with exit status (0x10<<1)|1 = 0x21.
+    // The smoke wrapper script treats QEMU's clean exit as the
+    // signal that the sentinel was reached; the signature-grep
+    // step then runs against the captured serial log.
     arch::TestExit(0x10);
 }
 
