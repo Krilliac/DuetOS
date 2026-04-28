@@ -103,17 +103,34 @@ u64 ProfileDeadlineTicks(SmokeProfile profile)
     return kTicksPerSecond * 10;
 }
 
-/// How many tasks are ALWAYS live in the post-bringup steady state,
-/// independent of any smoke profile spawn. Used by the polling loop
-/// below: once `tasks_live` drops back to the baseline, the smoke
-/// profile's spawned tasks have all exited and we can sentinel-exit.
-/// The baseline counts: idle (1) + reaper (1) + kbd-reader (1) +
-/// ui-ticker (1) + mouse-reader (1) + win-timer (1) + worker-A/B/C
-/// (3) + the kernel-main thread (1) = ~10. Loose upper bound to
-/// allow for any threads spawned during bringup we haven't tracked
-/// here; the polling tolerates being ABOVE this number, only the
-/// "still has spawned PE/ring3/Linux tasks" case matters.
-constexpr u64 kPostBringupBaseline = 16;
+/// How many ring3 / PE / Linux tasks the profile spawns. After
+/// SleepAndExit waits for tasks_exited to grow by this much from
+/// the moment-of-entry baseline, every spawned task has exited
+/// and we can sentinel + TestExit. Tied 1:1 to the ShouldSpawn
+/// truth table so a future profile that adds another spawn site
+/// MUST update both.
+u64 ProfileExpectedExits(SmokeProfile profile)
+{
+    switch (profile)
+    {
+    case SmokeProfile::None:
+        return 0;
+    case SmokeProfile::Bringup:
+        return 0;
+    case SmokeProfile::Ring3:
+        return 3; // ring3-smoke-A + ring3-smoke-B + ring3-smoke-sandbox
+    case SmokeProfile::PeHello:
+        return 1; // ring3-hello-pe
+    case SmokeProfile::PeWinapi:
+        return 1; // ring3-hello-winapi
+    case SmokeProfile::PeWinkill:
+        return 1; // ring3-winkill
+    case SmokeProfile::Linux:
+        return 7; // LinuxSmoke + ElfSmoke + FileSmoke + MmapSmoke +
+                  // SynxTestElf + TranslateSmoke + ExtendSmoke
+    }
+    return 0;
+}
 
 } // namespace
 
@@ -270,25 +287,25 @@ void SmokeProfileSleepAndExit()
     }
     else
     {
-        // Capture the post-spawn baseline. Each iteration sleeps
-        // 10 ticks (~100ms guest), then re-reads `tasks_live`.
-        // Once the count drops back to the steady-state baseline
-        // (or to whatever it was BEFORE the spawn — whichever is
-        // smaller), every spawned smoke task has exited and the
-        // reaper has reclaimed its frames; we can sentinel + exit
-        // immediately. If `tasks_live` never drops (because a
-        // spawned task wedged), the deadline catches it after
-        // ProfileDeadlineTicks ticks of guest time and we sentinel
-        // anyway — the CI signature-grep then either passes
-        // (the wedge was after the required prints landed) or
-        // shows a precise MISSING-signature diagnostic.
+        // Capture tasks_exited at entry. The spawned tasks (count
+        // returned by ProfileExpectedExits) all eventually run,
+        // exit, and increment g_tasks_exited via Schedule's
+        // Running->Dead transition or SchedExit. Wait for the
+        // counter to grow by exactly that delta — no more guessing
+        // about per-CPU steady-state thread counts. If the counter
+        // doesn't budge by the deadline (stuck spawned task,
+        // bringup-spawn never reached, ...), the deadline catches
+        // it and we sentinel anyway so the CI signature-grep gives
+        // a precise MISSING diagnostic instead of an opaque
+        // wall-timeout.
+        const u64 expected = ProfileExpectedExits(g_profile);
+        const u64 baseline_exited = sched::SchedStatsRead().tasks_exited;
+        const u64 target_exited = baseline_exited + expected;
         u64 elapsed = 0;
         constexpr u64 kPollSliceTicks = 10;
-        const u64 baseline = kPostBringupBaseline;
         while (elapsed < deadline)
         {
-            const u64 live = sched::SchedStatsRead().tasks_live;
-            if (live <= baseline)
+            if (sched::SchedStatsRead().tasks_exited >= target_exited)
             {
                 break;
             }
