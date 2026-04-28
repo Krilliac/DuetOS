@@ -31,6 +31,14 @@
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Release"
             }
+        },
+        {
+            "name": "x86_64-debug-ubsan",
+            "displayName": "x86_64 kernel + userland, debug + UBSAN",
+            "inherits": "x86_64-debug",
+            "cacheVariables": {
+                "DUETOS_ENABLE_UBSAN": "ON"
+            }
         }
     ],
     "buildPresets": [
@@ -41,6 +49,10 @@
         {
             "name": "x86_64-release",
             "configurePreset": "x86_64-release"
+        },
+        {
+            "name": "x86_64-debug-ubsan",
+            "configurePreset": "x86_64-debug-ubsan"
         }
     ]
 }

@@ -3,11 +3,9 @@
 // One row per syscall whose authorisation reduces to "process must
 // hold a single static capability". The dispatcher consults this
 // table BEFORE any handler runs (`SyscallGate` in cap_gate.{h,cpp}):
-// missing caps return -1 and record a sandbox denial. Handlers that
-// also do an in-line `CapSetHas` check are belt-and-braces during
-// the migration — once every static-cap handler has the gate in
-// front of it, the in-line checks become redundant and can be
-// removed in a separate cleanup pass.
+// missing caps return -1 and record a sandbox denial. The previous
+// in-line `CapSetHas` checks have been removed (A4-followup) — the
+// gate is now the sole authoritative check for every row below.
 //
 // Conditional cap requirements (e.g. SYS_PROCESS_OPEN: kCapDebug
 // for foreign PIDs only, none for self; SYS_WRITE: kCapSerialConsole
@@ -42,9 +40,24 @@ X(SYS_FILE_QUERY_ATTRIBUTES, (1ULL << ::duetos::core::kCapFsRead))
 X(SYS_DIR_OPEN, (1ULL << ::duetos::core::kCapFsRead))
 X(SYS_DIR_NEXT, (1ULL << ::duetos::core::kCapFsRead))
 X(SYS_DIR_REWIND, (1ULL << ::duetos::core::kCapFsRead))
+// SYS_READ + SYS_SPAWN are unconditionally cap-gated on FsRead
+// — both name a path through `proc->root` so even the lookup
+// reaches inside the filesystem jail. Previously the in-handler
+// `CapSetHas(kCapFsRead)` block did the same job; landing the
+// row removes that redundancy. (A4-followup, 2026-04-27.)
+X(SYS_READ, (1ULL << ::duetos::core::kCapFsRead))
+X(SYS_SPAWN, (1ULL << ::duetos::core::kCapFsRead))
 
 // kCapSpawnThread — create an additional ring-3 task in the caller.
 X(SYS_THREAD_CREATE, (1ULL << ::duetos::core::kCapSpawnThread))
+
+// SYS_EXECVE: in-place image replacement requires BOTH FsRead (it
+// names a file path) AND SpawnThread (it builds a new ring-3
+// execution context — even though it reuses the existing TID, the
+// authorisation surface is the same). Multi-bit masks compose by
+// OR; the gate's `(held & required) == required` check enforces
+// "all bits" semantics. (A4-followup, 2026-04-27.)
+X(SYS_EXECVE, ((1ULL << ::duetos::core::kCapFsRead) | (1ULL << ::duetos::core::kCapSpawnThread)))
 
 // kCapDebug — install / remove hardware breakpoints on the caller.
 X(SYS_BP_INSTALL, (1ULL << ::duetos::core::kCapDebug))
@@ -56,8 +69,8 @@ X(SYS_BP_REMOVE, (1ULL << ::duetos::core::kCapDebug))
 X(SYS_WIN_GET_KEYSTATE, (1ULL << ::duetos::core::kCapInput))
 X(SYS_WIN_GET_CURSOR, (1ULL << ::duetos::core::kCapInput))
 
-// kCapNet — every BSD-socket operation. The handler also does its
-// own check (returning -EACCES with errno-shaped negative); the
-// gate fires first with a -1 / sandbox-denial path. Both honour the
-// same cap, so any future split into Send/Recv touches one row.
+// kCapNet — every BSD-socket operation. The gate returns -1 on a
+// missing cap; previously the in-handler check returned -EACCES,
+// but that branch was unreachable once the gate landed and is now
+// gone. Any future split into Send/Recv touches one row.
 X(SYS_SOCKET_OP, (1ULL << ::duetos::core::kCapNet))

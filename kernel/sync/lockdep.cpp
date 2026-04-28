@@ -35,15 +35,33 @@ constinit u8 g_edges[kLockClassMax][kLockClassMax / 8] = {};
 // pointers; nullptr means "not registered".
 constinit const char* g_class_names[kLockClassMax] = {};
 
-// Held-class stack. v0: single global; per-CPU is the right
-// answer once SMP is live but the cost on a single CPU is the
-// same.
-constinit LockClass g_held_stack[kLockdepHeldMax] = {};
-constinit u32 g_held_depth = 0;
+// Held-class stack — restructured to per-CPU shape (D1-followup,
+// 2026-04-28). v0 the array has one slot since only the BSP runs
+// at boot. Each AP gets its own `PerCpuHeld` slot once SMP per-
+// CPU storage exposes the current-CPU ID; structural change here
+// keeps the existing single-CPU code paths readable through the
+// `g_held_stack` / `g_held_depth` macro aliases.
+struct PerCpuHeld
+{
+    LockClass stack[kLockdepHeldMax];
+    u32 depth;
+};
+
+constexpr u32 kLockdepCpuMax = 1;
+constinit PerCpuHeld g_per_cpu[kLockdepCpuMax] = {};
+#define g_held_stack g_per_cpu[0].stack
+#define g_held_depth g_per_cpu[0].depth
 
 // Counters.
 constinit u64 g_inversions = 0;
 constinit u64 g_edges_recorded = 0;
+
+// Inversion-warnings-promote-to-panic knob (plan D1-followup).
+// Default false: a kernel boot under instrumentation can complete
+// with a noisy graph so an operator can collect evidence. After
+// the graph stabilises the operator (or a future CI gate) flips
+// this to true via the shell so any new inversion is fail-stop.
+constinit bool g_promote_to_panic = false;
 
 // Re-entry guard: when lockdep itself runs, ignore any nested
 // hook calls that might come from logging / panic paths.
@@ -159,6 +177,13 @@ void LockdepBeforeAcquire(LockClass id)
             ++g_inversions;
             KLOG_WARN_S("lockdep", "inversion detected", "newly-acquired", LockdepClassName(id));
             KLOG_WARN_S("lockdep", "  vs already-held", "class", LockdepClassName(held));
+            if (g_promote_to_panic)
+            {
+                // Re-entry guard above keeps this Panic from
+                // recursing through the lockdep hooks; the panic
+                // path itself disables further classification.
+                core::Panic("lockdep", "inversion (promote-to-panic enabled)");
+            }
         }
     }
 }
@@ -220,9 +245,57 @@ u64 LockdepInversionsDetected()
     return g_inversions;
 }
 
+void LockdepSetPromoteToPanic(bool enabled)
+{
+    g_promote_to_panic = enabled;
+}
+
+bool LockdepPromoteToPanic()
+{
+    return g_promote_to_panic;
+}
+
 u64 LockdepEdgesRecorded()
 {
     return g_edges_recorded;
+}
+
+void LockdepRegisterCanonicalClasses()
+{
+    LockdepRegisterClass(kLockClassSched, "sched");
+    LockdepRegisterClass(kLockClassKObject, "kobject");
+    LockdepRegisterClass(kLockClassKStack, "kstack");
+    LockdepRegisterClass(kLockClassPciConfig, "pci-config");
+    LockdepRegisterClass(kLockClassBreakpoints, "breakpoints");
+    LockdepRegisterClass(kLockClassCleanroomTrace, "cleanroom-trace");
+    LockdepRegisterClass(kLockClassWifi, "wifi");
+    LockdepRegisterClass(kLockClassFat32, "fat32");
+    LockdepRegisterClass(kLockClassCompositor, "compositor");
+}
+
+void LockdepReset()
+{
+    // Wipe the per-CPU held-class stacks first so an in-flight
+    // acquire doesn't try to release into a half-cleared state.
+    for (u32 cpu = 0; cpu < kLockdepCpuMax; ++cpu)
+    {
+        for (u32 i = 0; i < kLockdepHeldMax; ++i)
+        {
+            g_per_cpu[cpu].stack[i] = kLockClassUnclassified;
+        }
+        g_per_cpu[cpu].depth = 0;
+    }
+    // Clear the edge matrix and counters.
+    for (u32 i = 0; i < kLockClassMax; ++i)
+    {
+        for (u32 j = 0; j < kLockClassMax / 8; ++j)
+        {
+            g_edges[i][j] = 0;
+        }
+    }
+    g_inversions = 0;
+    g_edges_recorded = 0;
+    g_promote_to_panic = false;
 }
 
 namespace

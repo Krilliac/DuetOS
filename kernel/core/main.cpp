@@ -43,7 +43,9 @@
 #include "acpi/acpi.h"
 #include "acpi/aml.h"
 #include "arch/x86_64/cpu.h"
+#include "arch/x86_64/cet.h"
 #include "arch/x86_64/cpu_info.h"
+#include "arch/x86_64/cpu_mitigations.h"
 #include "arch/x86_64/hypervisor.h"
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/smbios.h"
@@ -105,17 +107,29 @@
 #include "fs/vfs.h"
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
+#include "mm/zone.h"
 #include "ipc/handle_table.h"
+#include "diag/event_trace.h"
+#include "diag/gdb_stub.h"
+#include "diag/perf_profile.h"
+#include "diag/soft_lockup.h"
+#include "ipc/kevent.h"
+#include "ipc/kfile.h"
+#include "ipc/kmailbox.h"
+#include "ipc/kmutex.h"
 #include "ipc/kobject.h"
+#include "ipc/ksemaphore.h"
+#include "ipc/kwaitable.h"
 #include "sync/lockdep.h"
+#include "sync/rcu.h"
 #include "sync/rwlock.h"
+#include "sync/seqlock.h"
 #include "sync/spinlock.h"
 #include "time/clocksource.h"
+#include "time/tick.h"
 #include "time/timekeeper.h"
-#include "security/auth.h"
-#ifdef DUETOS_CRTRACE_SURVEY
 #include "diag/cleanroom_trace.h"
-#endif
+#include "security/auth.h"
 #include "loader/firmware_loader.h"
 #include "diag/heartbeat.h"
 #include "log/klog.h"
@@ -125,6 +139,7 @@
 #include "syscall/cap_gate.h"
 #include "proc/process.h"
 #include "util/random.h"
+#include "security/driver_domain.h"
 #include "security/fault_domain.h"
 #include "diag/diag_decode.h"
 #include "diag/hexdump.h"
@@ -132,6 +147,7 @@
 #include "util/string.h"
 #include "proc/ring3_smoke.h"
 #include "diag/runtime_checker.h"
+#include "diag/ubsan.h"
 #include "subsystems/linux/ring3_smoke.h"
 #include "subsystems/linux/syscall.h"
 #include "subsystems/win32/custom_selftest.h"
@@ -303,6 +319,8 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     SerialWrite("[boot] Probing CPU features.\n");
     duetos::arch::CpuInfoProbe();
+    duetos::arch::CpuMitigationsProbe();
+    duetos::arch::CetProbe();
 
     SerialWrite("[boot] Detecting hypervisor.\n");
     duetos::arch::HypervisorProbe();
@@ -313,17 +331,45 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     SerialWrite("[boot] Reading MSR thermals.\n");
     duetos::arch::ThermalProbe();
 
-    SerialWrite("[boot] Exercising Result<T,E> + TRY primitives.\n");
-    duetos::core::ResultSelfTest();
-
-    SerialWrite("[boot] Exercising freestanding memset/memcpy/memmove.\n");
-    duetos::core::StringSelfTest();
-
-    SerialWrite("[boot] Exercising kernel-VA range + hexdump formatters.\n");
-    duetos::core::HexdumpSelfTest();
-
-    SerialWrite("[boot] Exercising VA-region classifier (panic / trap dump annotation).\n");
-    duetos::core::VaRegionSelfTest();
+    // Phase::Earlycon — utility-primitive self-tests (Result /
+    // String / Hexdump / VaRegion). All four panic on failure, so
+    // each adapter just calls + returns Ok. Registered here rather
+    // than in their own TUs because there is no `_init_array`
+    // invocation yet (see init.h's trailing NOTE) — when a future
+    // slice wires `_init_array`, these registrations migrate into
+    // the source TUs alongside the test definitions and
+    // `kernel_main` keeps only the `RunPhase(...)` line.
+    // (A1-followup, 2026-04-27.)
+    duetos::core::InitcallRegister(duetos::core::Phase::Earlycon, "result-selftest",
+                                   []()
+                                   {
+                                       SerialWrite("[boot] Exercising Result<T,E> + TRY primitives.\n");
+                                       duetos::core::ResultSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    duetos::core::InitcallRegister(duetos::core::Phase::Earlycon, "string-selftest",
+                                   []()
+                                   {
+                                       SerialWrite("[boot] Exercising freestanding memset/memcpy/memmove.\n");
+                                       duetos::core::StringSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    duetos::core::InitcallRegister(duetos::core::Phase::Earlycon, "hexdump-selftest",
+                                   []()
+                                   {
+                                       SerialWrite("[boot] Exercising kernel-VA range + hexdump formatters.\n");
+                                       duetos::core::HexdumpSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    duetos::core::InitcallRegister(duetos::core::Phase::Earlycon, "varegion-selftest",
+                                   []()
+                                   {
+                                       SerialWrite(
+                                           "[boot] Exercising VA-region classifier (panic / trap dump annotation).\n");
+                                       duetos::core::VaRegionSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    (void)duetos::core::RunPhase(duetos::core::Phase::Earlycon);
 
     // One-shot mm-map anchor for every later panic dump. The region
     // tags on cr2/rsp/rbp/rip in a crash record map back to the
@@ -363,12 +409,19 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     SerialWrite("[boot] Installing syscall gate (int 0x80, DPL=3).\n");
     duetos::core::SyscallInit();
 
-    // Slice-80 surface check. Issues an int3 (kernel-mode #BP, must
-    // recover via TrapResponse::LogAndContinue) and an int 0x42
-    // (spurious vector, must recover via TrapDispatch's spurious
-    // branch). If either regresses the kernel halts here and the
-    // boot log shows the cause.
-    TrapsSelfTest();
+    // Phase::Idt — Slice-80 trap surface check. Issues an int3
+    // (kernel-mode #BP, must recover via
+    // TrapResponse::LogAndContinue) and an int 0x42 (spurious
+    // vector, must recover via TrapDispatch's spurious branch).
+    // If either regresses the kernel halts here and the boot log
+    // shows the cause. (A1-followup, 2026-04-28.)
+    duetos::core::InitcallRegister(duetos::core::Phase::Idt, "traps-selftest",
+                                   []()
+                                   {
+                                       TrapsSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    (void)duetos::core::RunPhase(duetos::core::Phase::Idt);
 
     // Kernel extable — scoped fault recovery. Register before any
     // subsystem tries to install its own rows; the user-copy
@@ -382,12 +435,104 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // registered later in boot once their subsystems are up.
     duetos::core::FaultDomainSelfTest();
 
+    // Per-driver fault-domain extension self-test (plan E3).
+    // Wraps the core fault-domain registry with a driver-tag
+    // convention; demo register/restart cycle.
+    duetos::security::DriverDomainSelfTest();
+
+    // Register one real driver as a driver fault domain
+    // (plan E3-followup, 2026-04-28). The soft-lockup detector
+    // has a clean Enable/Disable pair so it's the natural first
+    // candidate; other drivers register as their teardown
+    // story matures. `RestartDriverDomain("soft-lockup")` from
+    // the shell now drives the detector through a clean
+    // disable+enable cycle.
+    duetos::security::RegisterDriverDomain(
+        "soft-lockup",
+        []() -> ::duetos::core::Result<void>
+        {
+            duetos::diag::SoftLockupEnable();
+            return {};
+        },
+        []() -> ::duetos::core::Result<void>
+        {
+            duetos::diag::SoftLockupDisable();
+            return {};
+        });
+    // Lockdep as a driver domain (E3-followup, 2026-04-28).
+    // Restart re-baselines the edge graph + clears the held
+    // stack — useful after triaging a noisy boot to start
+    // fresh without rebooting.
+    duetos::security::RegisterDriverDomain(
+        "lockdep",
+        []() -> ::duetos::core::Result<void>
+        {
+            duetos::sync::LockdepRegisterCanonicalClasses();
+            return {};
+        },
+        []() -> ::duetos::core::Result<void>
+        {
+            duetos::sync::LockdepReset();
+            return {};
+        });
+    // Event-trace + perf-profile as driver domains. Restart
+    // wipes the relevant ring so an operator can re-baseline
+    // before kicking off a measurement run.
+    duetos::security::RegisterDriverDomain(
+        "event-trace", []() -> ::duetos::core::Result<void> { return {}; },
+        []() -> ::duetos::core::Result<void>
+        {
+            duetos::diag::EventTraceReset();
+            return {};
+        });
+    duetos::security::RegisterDriverDomain(
+        "perf", []() -> ::duetos::core::Result<void> { return {}; },
+        []() -> ::duetos::core::Result<void>
+        {
+            duetos::diag::PerfReset();
+            return {};
+        });
+    // NMI watchdog as a driver domain. Restart cycles
+    // Disable + Init — useful if a long-running diagnostic
+    // session needs the watchdog quiet for a window then
+    // re-armed.
+    duetos::security::RegisterDriverDomain(
+        "nmi-watchdog",
+        []() -> ::duetos::core::Result<void>
+        {
+            duetos::arch::NmiWatchdogInit();
+            return {};
+        },
+        []() -> ::duetos::core::Result<void>
+        {
+            duetos::arch::NmiWatchdogDisable();
+            return {};
+        });
+    // Cleanroom-trace ring (separate from event_trace; older
+    // syscall flight-recorder). Has a clean-clear API; restart
+    // wipes the buffer.
+    duetos::security::RegisterDriverDomain(
+        "cleanroom-trace", []() -> ::duetos::core::Result<void> { return {}; },
+        []() -> ::duetos::core::Result<void>
+        {
+            duetos::core::CleanroomTraceClear();
+            return {};
+        });
+
     // Init-call registry self-test (plan A1). Exercises register +
     // RunPhase + bad-argument + failing-callback paths against the
     // fixed-size table in `core/init.cpp`. The infrastructure is
     // landed; migration of `kernel_main`'s imperative call list to
     // the registry is deferred (see plan A1 follow-up).
     duetos::core::InitSelfTest();
+
+    // UBSAN klog runtime (plan D5). The kernel is not currently
+    // compiled with `-fsanitize=undefined`, so none of the
+    // `__ubsan_handle_*` symbols are reachable from real code at
+    // boot — the self-test invokes the report path directly to
+    // confirm the runtime is linked in. Day a future debug preset
+    // turns the compile flag on, the symbols are already here.
+    duetos::diag::UbsanSelfTest();
 
     // Centralised syscall capability gate (plan A4). Walks every
     // row of `kSyscallCapTable` against synthetic empty / trusted
@@ -408,17 +553,59 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     SerialWriteHex(FreeFramesCount());
     SerialWrite("\n");
 
-    FrameAllocatorSelfTest();
+    // Phase::PhysMem (plan A1-followup, continued migration). The
+    // FrameAllocator's init has inter-dependencies with the
+    // multiboot parse above, so it stays imperative — the
+    // VERIFICATION step (`FrameAllocatorSelfTest`) is the part
+    // that fits cleanly into the registry. Same pattern follows
+    // for Heap below: init imperative, self-test through
+    // RunPhase. As more subsystems gain init() functions whose
+    // ordering is verifiable through phase membership alone, the
+    // imperative tail shrinks.
+    duetos::core::InitcallRegister(duetos::core::Phase::PhysMem, "frame-allocator-selftest",
+                                   []()
+                                   {
+                                       FrameAllocatorSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    // mm/zone scaffold (plan C1) — additive layer over the
+    // global frame allocator; v0 forwards every zone request
+    // to the same pool.
+    duetos::core::InitcallRegister(duetos::core::Phase::PhysMem, "zone-selftest",
+                                   []()
+                                   {
+                                       ZoneSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    (void)duetos::core::RunPhase(duetos::core::Phase::PhysMem);
 
     SerialWrite("[boot] Bringing up kernel heap.\n");
     KernelHeapInit();
-    KernelHeapSelfTest();
+    // Walk _init_array AFTER the heap is online (any constructor
+    // that needs to allocate is now safe). v0 entry count is
+    // typically 0 — kernel TUs use `constinit` — but invoking
+    // the table closes the "silent partial-init" gap A1-followup
+    // identified.
+    duetos::core::RunInitArray();
+    duetos::core::InitcallRegister(duetos::core::Phase::Heap, "kernel-heap-selftest",
+                                   []()
+                                   {
+                                       KernelHeapSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    (void)duetos::core::RunPhase(duetos::core::Phase::Heap);
 
     KLOG_METRICS("boot", "after-kernel-heap");
 
     SerialWrite("[boot] Bringing up paging.\n");
     PagingInit();
-    PagingSelfTest();
+    duetos::core::InitcallRegister(duetos::core::Phase::Paging, "paging-selftest",
+                                   []()
+                                   {
+                                       PagingSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    (void)duetos::core::RunPhase(duetos::core::Phase::Paging);
 
     // Kernel-stack guard-paged arena — runs here because it needs
     // the managed paging API (PagingInit) for MapPage / UnmapPage
@@ -453,9 +640,19 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // the first boot shows activity without any arming.
     duetos::debug::ProbeInit();
 
+    // Phase::Drivers — framebuffer is the only "driver" with a
+    // self-test that fits the registry shape today; PCI/NVMe/USB
+    // self-tests are inline checks rather than separately-named
+    // SelfTest functions. (A1-followup, 2026-04-28.)
     SerialWrite("[boot] Bringing up framebuffer (if present).\n");
     duetos::drivers::video::FramebufferInit(multiboot_info);
-    duetos::drivers::video::FramebufferSelfTest();
+    duetos::core::InitcallRegister(duetos::core::Phase::Drivers, "framebuffer-selftest",
+                                   []()
+                                   {
+                                       duetos::drivers::video::FramebufferSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    (void)duetos::core::RunPhase(duetos::core::Phase::Drivers);
 
     // GUI composition. Order for every paint pass:
     //   1. Desktop fill
@@ -964,9 +1161,18 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         duetos::security::PentestGuiStart();
     }
 
+    // Phase::Vfs — ramfs init imperative (it lays down the v0 root
+    // hierarchy + seed files); VFS self-test routes through the
+    // registry. (A1-followup, 2026-04-28.)
     SerialWrite("[boot] Seeding ramfs + VFS self-test.\n");
     duetos::fs::RamfsInit();
-    duetos::fs::VfsSelfTest();
+    duetos::core::InitcallRegister(duetos::core::Phase::Vfs, "vfs-selftest",
+                                   []()
+                                   {
+                                       duetos::fs::VfsSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    (void)duetos::core::RunPhase(duetos::core::Phase::Vfs);
 
     // Address-space isolation self-test — direct assertion that a
     // user page mapped in one AS is invisible in a sibling AS, and
@@ -993,6 +1199,9 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     SerialWrite("[boot] Disabling 8259 PIC.\n");
     PicDisable();
 
+    // Phase::Apic — LAPIC + IOAPIC + HPET init are imperative (each
+    // depends on the previous), but HPET's self-test fits the
+    // registry shape cleanly. (A1-followup, 2026-04-28.)
     SerialWrite("[boot] Bringing up LAPIC.\n");
     LapicInit();
 
@@ -1001,18 +1210,41 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     SerialWrite("[boot] Bringing up HPET (if present).\n");
     HpetInit();
-    HpetSelfTest();
+    duetos::core::InitcallRegister(duetos::core::Phase::Apic, "hpet-selftest",
+                                   []()
+                                   {
+                                       HpetSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    (void)duetos::core::RunPhase(duetos::core::Phase::Apic);
 
-    // Clocksource registry + timekeeper (plan A2 infra). Registers
-    // HPET as the v0 monotonic clocksource so new code can call
-    // `time::MonotonicNs()` instead of inlining the
-    // counter*period_fs/1e6 math. Existing call sites (DoNowNs in
-    // time_syscall.cpp, etc.) are NOT migrated here — that's a
-    // tracked follow-up. Self-test exercises the registry without
-    // depending on real hardware.
-    duetos::time::ClocksourceSelfTest();
+    // Phase::Time — clocksource registry, timekeeper init + self-tests.
+    // The init body still runs imperatively (it samples HPET at
+    // calibration time + registers TSC if available); self-tests
+    // route through the registry. (A1-followup, 2026-04-28.)
+    duetos::core::InitcallRegister(duetos::core::Phase::Time, "clocksource-selftest",
+                                   []()
+                                   {
+                                       duetos::time::ClocksourceSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
     duetos::time::TimekeeperInit();
-    duetos::time::TimekeeperSelfTest();
+    duetos::core::InitcallRegister(duetos::core::Phase::Time, "timekeeper-selftest",
+                                   []()
+                                   {
+                                       duetos::time::TimekeeperSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    // Portable scheduler-tick wrapper (plan A2-followup) —
+    // additive façade over arch::TimerTicks; consumers migrate
+    // off the arch-specific call as the time/ directory grows.
+    duetos::core::InitcallRegister(duetos::core::Phase::Time, "tick-selftest",
+                                   []()
+                                   {
+                                       duetos::time::TickSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    (void)duetos::core::RunPhase(duetos::core::Phase::Time);
 
     // Sample the CMOS RTC once at boot so the wall-clock time
     // is visible in the boot log. A future slice wires this
@@ -1050,15 +1282,33 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     duetos::sync::SpinLockSelfTest();
 
+    // Seqlock (plan B1.3). Sequence-counter primitive for
+    // read-mostly hot data (timekeeper, per-CPU stat counters).
+    // Only the writer side touches the inner SpinLock, so the
+    // self-test runs immediately after `SpinLockSelfTest` — every
+    // dependency is in place. Contention paths (multi-CPU
+    // writer/reader race) only fire under SMP and are deferred
+    // to a follow-up self-test once AP bringup lands.
+    duetos::sync::SeqLockSelfTest();
+
     // Lockdep-lite (plan D1 infra). Validates that the
     // edge-graph + held-stack + cycle detection works in
-    // isolation; SpinLock / Mutex / RwLock are NOT yet hooked
-    // into it (deferred to D1 follow-ups). Runs early because
-    // it has no dependencies past arch::Cli/Sti.
+    // isolation. SpinLock acquire/release paths now call into
+    // the lockdep hooks (D1-followup); untagged locks pay one
+    // compare-and-skip per call. Mutex / RwLock instrumentation
+    // is still deferred. Runs early because it has no
+    // dependencies past arch::Cli/Sti.
     duetos::sync::LockdepSelfTest();
+    // Name the canonical hot global locks (sched / kobject /
+    // kstack / pci-config / breakpoints) so any inversion
+    // detected post-self-test prints readable names instead of
+    // raw class IDs. Idempotent; called after the self-test so
+    // self-test scratch names don't get clobbered by names that
+    // need to be live for the rest of boot.
+    duetos::sync::LockdepRegisterCanonicalClasses();
 
     SerialWrite("[boot] Bringing up periodic timer.\n");
-    TimerInit();
+    duetos::time::TimerInit();
 
     SerialWrite("[boot] Bringing up scheduler.\n");
     duetos::sched::SchedInit();
@@ -1070,14 +1320,84 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     duetos::sched::SchedStartIdle("idle-bsp");
     duetos::sched::SchedStartReaper();
 
-    // RwLock self-test (plan B1.2). Walks every state-machine
-    // transition that can be exercised without contention (Try*,
-    // multi-reader, writer-blocks-readers, readers-block-writer).
-    // Real contention paths (Acquire blocks, Release wakes a
-    // waiter) only fire under SMP — covered by a follow-up once
-    // AP bring-up lands. Runs here because the scheduler is now
-    // online (RwLock uses sched::Mutex + Condvar internally).
-    duetos::sync::RwLockSelfTest();
+    // Phase::Sched (plan A1-followup, 2026-04-28). RwLock state-
+    // machine self-test + the two contention self-tests (RwLock +
+    // SeqLock) all need the scheduler online to spawn the helper
+    // tasks they use. Routing them through the registry keeps
+    // their ordering visible without changing observable behavior.
+    duetos::core::InitcallRegister(duetos::core::Phase::Sched, "rwlock-selftest",
+                                   []()
+                                   {
+                                       duetos::sync::RwLockSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    duetos::core::InitcallRegister(duetos::core::Phase::Sched, "seqlock-contention-selftest",
+                                   []()
+                                   {
+                                       duetos::sync::SeqLockContentionSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    duetos::core::InitcallRegister(duetos::core::Phase::Sched, "rwlock-contention-selftest",
+                                   []()
+                                   {
+                                       duetos::sync::RwLockContentionSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    // KMailbox stress test (plan B1-followup, 2026-04-28). 4
+    // producer × 4 consumer tasks racing on capacity-8 mailbox.
+    // Verifies the not_full / not_empty condvar wiring under
+    // real producer/consumer contention.
+    duetos::core::InitcallRegister(duetos::core::Phase::Sched, "kmailbox-stress",
+                                   []()
+                                   {
+                                       duetos::ipc::KMailboxContentionSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    // Dynamic event tracer self-test (plan D2). Verifies the
+    // lockless append + snapshot + ordering invariants with
+    // synthesised events. The tracer itself is a passive
+    // surface; the boot path doesn't write any events through
+    // it today (instrumentation points are added at the call
+    // sites that want them, not centrally).
+    duetos::core::InitcallRegister(duetos::core::Phase::Sched, "event-trace-selftest",
+                                   []()
+                                   {
+                                       duetos::diag::EventTraceSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    // PMU sample profiler (plan D3) — same shape as event_trace
+    // but for sampled RIPs. Sampling source (PMU NMI overflow)
+    // is NOT wired in this slice; the ring + dump are landed so
+    // a future D3-followup can hook PerfRecord into the NMI
+    // handler with a one-line call.
+    duetos::core::InitcallRegister(duetos::core::Phase::Sched, "perf-profile-selftest",
+                                   []()
+                                   {
+                                       duetos::diag::PerfProfileSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    // RCU (plan B1.4) — quiescent-state read-copy-update keyed
+    // off the scheduler tick. Self-test queues a callback,
+    // drives a tick, asserts the callback fires once. RcuTick
+    // is already wired into OnTimerTick by this point.
+    duetos::core::InitcallRegister(duetos::core::Phase::Sched, "rcu-selftest",
+                                   []()
+                                   {
+                                       duetos::sync::RcuSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    // GDB serial stub (plan D7) — protocol parser + canned
+    // responses for the commands a GDB session sends on
+    // connect. v0 isn't wired into the COM2 RX path yet; the
+    // self-test drives synthesised conversations through the
+    // parser directly.
+    duetos::core::InitcallRegister(duetos::core::Phase::Sched, "gdb-stub-selftest",
+                                   []()
+                                   {
+                                       duetos::diag::gdb::GdbStubSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    (void)duetos::core::RunPhase(duetos::core::Phase::Sched);
 
     // KObject + HandleTable infrastructure self-tests (plan A3).
     // Verifies refcount + destroy-on-zero, plus the table's
@@ -1087,6 +1407,28 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // of any current handle surface is tracked as a follow-up.
     duetos::ipc::KObjectSelfTest();
     duetos::ipc::HandleTableSelfTest();
+    // Concrete KMutex subclass self-test (plan A3-followup) —
+    // demonstrates the full HandleTable round-trip on a real
+    // type with refcounted storage. Existing per-type Win32
+    // mutex array on Process keeps its own syscall surface; the
+    // SYS_MUTEX_* migration is a separate, larger slice (the
+    // Win32 ABI semantics — kWaitObject0 / kWaitTimeout, infinite
+    // waits, deadlock-detect callbacks — are non-trivial to
+    // unwind from the existing per-type array).
+    duetos::ipc::KMutexSelfTest();
+    duetos::ipc::KEventSelfTest();
+    duetos::ipc::KSemaphoreSelfTest();
+    duetos::ipc::KMailboxSelfTest();
+    duetos::ipc::KWaitableSelfTest();
+    duetos::ipc::KFileSelfTest();
+    // Soft-lockup detector (plan D4). The detector itself is
+    // already wired into the timer-IRQ tail (`OnTimerTick`), so
+    // a real lockup would already be surfaced; the self-test
+    // drives the state machine with synthesised inputs (idle
+    // skip, threshold trigger, rate limit, per-TID reset) to
+    // confirm the gating logic is correct before any real
+    // workload exercises it.
+    duetos::diag::SoftLockupSelfTest();
 
     SerialWrite("[boot] Bringing up PS/2 keyboard.\n");
     duetos::drivers::input::Ps2KeyboardInit();
@@ -2416,15 +2758,31 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     // Stage-2 EAT parser + DLL loader smoke test. Loads an
     // embedded ~2 KiB test DLL into a scratch AS, walks its
-    // export directory, and asserts name + ordinal lookups
-    // resolve to VAs inside the mapped image. Cheap and
-    // self-cleaning (scratch AS is released before return).
-    duetos::core::DllLoaderSelfTest();
-
-    // Win32 custom-diagnostics self-test. Synthesises a fake
-    // process and drives every recorded hook so the boot serial
-    // log shows concrete data flowing through each surface.
-    duetos::subsystems::win32::custom::Win32CustomSelfTest();
+    // Phase::Userland (plan A1-followup, 2026-04-28). The two
+    // very-late self-tests — DllLoader (PE32+ load + import-table
+    // walk + export-directory resolution against a synthetic
+    // image) and Win32 custom-diagnostics (every recorded hook
+    // fires through a synthetic process) — both need ring-3
+    // smokes to have spawned + the ABI plumbing to be live, so
+    // they fit Phase::Userland cleanly. With this slice
+    // Earlycon + PhysMem + Heap + Paging + Idt + Apic + Time +
+    // Sched + Drivers + Vfs + Userland are ALL on the registry.
+    // The only remaining imperative tail is one-shot subsystem
+    // bring-up that doesn't have a SelfTest function (idle loop,
+    // heartbeat thread, etc.).
+    duetos::core::InitcallRegister(duetos::core::Phase::Userland, "dll-loader-selftest",
+                                   []()
+                                   {
+                                       duetos::core::DllLoaderSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    duetos::core::InitcallRegister(duetos::core::Phase::Userland, "win32-custom-selftest",
+                                   []()
+                                   {
+                                       duetos::subsystems::win32::custom::Win32CustomSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    (void)duetos::core::RunPhase(duetos::core::Phase::Userland);
 
     duetos::core::StartHeartbeatThread();
 

@@ -427,6 +427,29 @@ if(DUETOS_BOOT_TTY)
     target_compile_definitions(duetos-kernel-stage1   PRIVATE DUETOS_BOOT_TTY=1)
 endif()
 
+# UBSAN runtime (plan D5 + D5-followup). When ON, every kernel TU
+# is built with `-fsanitize=undefined -fno-sanitize-trap=all`. The
+# `__ubsan_handle_*` symbols the compiler emits resolve to the
+# in-tree runtime in `kernel/diag/ubsan.cpp` — each handler logs
+# one structured klog warning + serial line and returns. Use the
+# `x86_64-debug-ubsan` preset to enable.
+option(DUETOS_ENABLE_UBSAN "Build the kernel with -fsanitize=undefined for UB diagnostics" OFF)
+if(DUETOS_ENABLE_UBSAN)
+    # `-fno-sanitize=function` suppresses the call-through-mismatched-
+    # function-pointer-type check (`__ubsan_handle_function_type_mismatch`).
+    # That check uses RTTI metadata the kernel deliberately does not
+    # build; with it on, every callback dispatch (sched task entry,
+    # IRQ handler, syscall thunk) emits a handler symbol the runtime
+    # has no use for and the link fails. The remaining UBSAN classes
+    # (signed overflow, OOB, divrem, alignment, …) cover what we want
+    # without dragging in the C++-RTTI-shaped CFI surface.
+    set(DUETOS_UBSAN_FLAGS -fsanitize=undefined -fno-sanitize=function -fno-sanitize-trap=all)
+    target_compile_options(duetos-kernel        PRIVATE ${DUETOS_UBSAN_FLAGS})
+    target_compile_options(duetos-kernel-stage1 PRIVATE ${DUETOS_UBSAN_FLAGS})
+    target_compile_definitions(duetos-kernel          PRIVATE DUETOS_UBSAN=1)
+    target_compile_definitions(duetos-kernel-stage1   PRIVATE DUETOS_UBSAN=1)
+endif()
+
 set_target_properties(duetos-kernel PROPERTIES
     OUTPUT_NAME "duetos-kernel.elf"
     C_STANDARD 17

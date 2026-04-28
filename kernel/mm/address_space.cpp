@@ -332,6 +332,15 @@ void AddressSpaceMapUserPage(AddressSpace* as, u64 virt, PhysAddr frame, u64 fla
     {
         PanicAs("AddressSpaceMapUserPage: kPageGlobal on user page", flags);
     }
+    // Take the regions lock exclusive across the whole mutation
+    // (budget check + PTE write + TLB invalidate + region table
+    // append). Today the AS is single-Task; the lock is
+    // uncontended. The day a Process becomes multi-threaded
+    // (multiple Tasks per AS), this exclusive guard already
+    // serialises concurrent map/unmap callers correctly.
+    // (B1-followup, 2026-04-28.)
+    sync::RwLockExclusiveGuard guard(as->regions_lock);
+
     if (as->region_count >= as->frame_budget)
     {
         // Budget exhausted. For a trusted AS this means the hard

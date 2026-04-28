@@ -1,9 +1,8 @@
 #include "debug/bp_syscall.h"
 
-#include "arch/x86_64/serial.h"
 #include "arch/x86_64/traps.h"
-#include "proc/process.h"
 #include "debug/breakpoints.h"
+#include "proc/process.h"
 
 namespace duetos::debug
 {
@@ -12,20 +11,12 @@ void DoBpInstall(arch::TrapFrame* frame)
 {
     // rdi = va, rsi = BpKind (1=exec, 2=write, 3=read/write),
     // rdx = length (1/2/4/8). Returns bp_id > 0 on success,
-    // u64(-1) on any rejection (cap, bad args, no slot).
+    // u64(-1) on any rejection (bad args, no slot). kCapDebug is
+    // gated centrally by `SyscallGate` (cap_table.def) — a process
+    // missing the cap never reaches this handler.
     core::Process* proc = core::CurrentProcess();
-    if (proc == nullptr || !core::CapSetHas(proc->caps, core::kCapDebug))
+    if (proc == nullptr)
     {
-        const u64 pid = (proc != nullptr) ? proc->pid : 0;
-        core::RecordSandboxDenial(core::kCapDebug);
-        if (proc != nullptr && core::ShouldLogDenial(proc->sandbox_denials))
-        {
-            arch::SerialWrite("[sys] denied syscall=SYS_BP_INSTALL pid=");
-            arch::SerialWriteHex(pid);
-            arch::SerialWrite(" cap=");
-            arch::SerialWrite(core::CapName(core::kCapDebug));
-            arch::SerialWrite("\n");
-        }
         frame->rax = static_cast<u64>(-1);
         return;
     }
@@ -83,20 +74,11 @@ void DoBpInstall(arch::TrapFrame* frame)
 void DoBpRemove(arch::TrapFrame* frame)
 {
     // rdi = bp_id. Returns 0 on success, u64(-1) on unknown id or
-    // cross-owner attempt.
+    // cross-owner attempt. kCapDebug is gated centrally by
+    // `SyscallGate` (cap_table.def).
     core::Process* proc = core::CurrentProcess();
-    if (proc == nullptr || !core::CapSetHas(proc->caps, core::kCapDebug))
+    if (proc == nullptr)
     {
-        const u64 pid = (proc != nullptr) ? proc->pid : 0;
-        core::RecordSandboxDenial(core::kCapDebug);
-        if (proc != nullptr && core::ShouldLogDenial(proc->sandbox_denials))
-        {
-            arch::SerialWrite("[sys] denied syscall=SYS_BP_REMOVE pid=");
-            arch::SerialWriteHex(pid);
-            arch::SerialWrite(" cap=");
-            arch::SerialWrite(core::CapName(core::kCapDebug));
-            arch::SerialWrite("\n");
-        }
         frame->rax = static_cast<u64>(-1);
         return;
     }

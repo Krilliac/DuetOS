@@ -4,6 +4,7 @@
 #include "arch/x86_64/serial.h"
 
 #include "core/panic.h"
+#include "diag/perf_profile.h"
 
 namespace duetos::arch
 {
@@ -166,7 +167,7 @@ void NmiWatchdogDisable()
     g_enabled = false;
 }
 
-bool NmiWatchdogHandleNmi()
+bool NmiWatchdogHandleNmi(u64 interrupted_rip)
 {
     if (!g_enabled)
         return false;
@@ -177,6 +178,11 @@ bool NmiWatchdogHandleNmi()
     const u64 status = ReadMsr(kMsrIa32PerfGlobalStatus);
     if ((status & (1ULL << 0)) == 0)
         return false;
+
+    // PMU sample (plan D3-followup) — record the interrupted
+    // RIP into the perf ring before any other watchdog work.
+    // PerfRecord is fetch_add + 2 stores; safe in NMI context.
+    ::duetos::diag::PerfRecord(interrupted_rip);
 
     const u64 pet_now = g_pet_counter;
     if (pet_now != g_pet_last_seen)

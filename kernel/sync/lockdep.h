@@ -72,6 +72,38 @@ inline constexpr LockClass kLockClassUnclassified = 0;
 /// kernel needs; raising it doubles graph memory.
 inline constexpr LockClass kLockClassMax = 256;
 
+/// Canonical class IDs for the kernel's hot global locks. Tagging
+/// is opt-in: a lock declared without `class_id` set stays
+/// unclassified and bypasses the lockdep hooks. IDs in the
+/// 0x01..0x3F range are reserved for hot globals; the self-test
+/// uses 0x40..0xFF for scratch classes (see lockdep.cpp).
+///
+/// Ordering convention (the order locks should be acquired in if
+/// nested): scheduler runqueue → kobject ledger → kstack arena →
+/// PCI config. Acquiring against this order is what lockdep is
+/// here to flag.
+inline constexpr LockClass kLockClassSched = 0x01;
+inline constexpr LockClass kLockClassKObject = 0x02;
+inline constexpr LockClass kLockClassKStack = 0x03;
+inline constexpr LockClass kLockClassPciConfig = 0x04;
+inline constexpr LockClass kLockClassBreakpoints = 0x05;
+inline constexpr LockClass kLockClassCleanroomTrace = 0x06;
+inline constexpr LockClass kLockClassWifi = 0x07;
+/// FAT32 driver mutex (`fs/fat32.cpp::g_fat32_mutex`). Serialises
+/// every block-IO + path-walk; held across reads/writes to the
+/// underlying storage device. Acquire ordering: BELOW the
+/// scheduler / kobject classes (FAT32 ops can run on a worker
+/// task and may want to allocate KObjects mid-call), ABOVE any
+/// future per-NVMe-queue lock. Tagged D1-followup, 2026-04-27.
+inline constexpr LockClass kLockClassFat32 = 0x08;
+/// Compositor mutex (`drivers/video/widget.cpp::g_compositor_mutex`).
+/// Serialises the per-frame widget tree walk + dirty-region
+/// accumulation. Held during framebuffer flushes. Acquire
+/// ordering: ABOVE the scheduler / kobject classes (compositor
+/// runs from a kernel task and never holds another global lock
+/// across a flush). Tagged D1-followup, 2026-04-27.
+inline constexpr LockClass kLockClassCompositor = 0x09;
+
 /// Maximum simultaneous holders per CPU. A code path that acquires
 /// more than this many locks at once trips a warning and lockdep
 /// degrades to "skip the deepest lock" — the existing kernel
@@ -120,11 +152,44 @@ void LockdepBeforeRelease(LockClass id);
 /// this; non-zero is a kernel bug to triage.
 u64 LockdepInversionsDetected();
 
+/// Set the promote-to-panic policy (plan D1-followup). When
+/// true, any subsequent inversion is a hard panic instead of a
+/// klog warning. Default false — a boot under instrumentation
+/// can complete with a noisy graph so the operator can collect
+/// evidence first. The shell `lockdep panic on|off` command
+/// flips this; CI eventually pins it to ON. Past inversions
+/// (already detected) are unchanged; only new detections are
+/// affected.
+void LockdepSetPromoteToPanic(bool enabled);
+
+/// Read the current promote-to-panic policy. Cheap bool load;
+/// useful for the shell to print "panic-on-inversion: on/off"
+/// in `inspect lockdep`.
+bool LockdepPromoteToPanic();
+
 /// Total edges currently recorded. Stabilises after a few seconds
 /// of normal kernel operation; a steadily-growing edge count past
 /// the warm-up phase indicates a code path is acquiring locks in
 /// orders never previously seen.
 u64 LockdepEdgesRecorded();
+
+/// Register the canonical names for the kLockClass* constants
+/// declared above (sched / kobject / kstack / pci-config /
+/// breakpoints). Called from `kernel_main` after the lockdep
+/// self-test so any subsequent SpinLock acquire that crosses a
+/// tagged class fires its hooks against named classes — inversion
+/// reports become readable instead of "class 0x01 vs class 0x03".
+/// Idempotent; safe to call more than once.
+void LockdepRegisterCanonicalClasses();
+
+/// Reset all lockdep state — held-class stack on every CPU, the
+/// edge-graph, the inversion counter, the promote-to-panic
+/// knob. Pairs with `LockdepRegisterCanonicalClasses` so the
+/// lockdep subsystem can be a driver fault domain (E3-followup):
+/// teardown calls `LockdepReset`, init re-registers the
+/// canonical class names + carries on. Used to re-baseline the
+/// graph after triaging a noisy inversion run.
+void LockdepReset();
 
 /// Boot-time self-test. Registers two scratch classes, simulates
 /// `acquire(A); acquire(B); release(B); release(A)` (the good

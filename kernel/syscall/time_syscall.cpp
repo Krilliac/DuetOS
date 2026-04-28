@@ -1,15 +1,11 @@
 #include "syscall/time_syscall.h"
 
-#include "arch/x86_64/hpet.h"
 #include "arch/x86_64/rtc.h"
 #include "arch/x86_64/traps.h"
 #include "mm/paging.h"
 #include "syscall/syscall.h"
-
-namespace duetos::arch
-{
-u64 TimerTicks();
-} // namespace duetos::arch
+#include "time/tick.h"
+#include "time/timekeeper.h"
 
 namespace duetos::core
 {
@@ -48,25 +44,26 @@ void DoPerfCounter(arch::TrapFrame* frame)
 {
     // No args. Return the kernel tick counter — monotonically
     // increasing u64 at 100 Hz. Drives QPC + GetTickCount stubs.
-    frame->rax = arch::TimerTicks();
+    frame->rax = ::duetos::time::TickCount();
 }
 
 void DoNowNs(arch::TrapFrame* frame)
 {
-    // No args. Return HPET counter × period_fs / 1e6 = ns since
-    // boot. Counter × period_fs fits in u64 for any realistic
-    // uptime (14.3 MHz × 70 kfs ≈ ~10^16 saturating at ~22 Gyr).
-    const u64 counter = arch::HpetReadCounter();
-    const u64 period_fs = arch::HpetPeriodFemtoseconds();
-    frame->rax = (counter * period_fs) / 1'000'000ULL;
+    // No args. Return monotonic ns since boot from the active
+    // clocksource (HPET in v0; TSC will register at a higher rating
+    // once its calibration lands). The conversion math used to live
+    // here as `counter * period_fs / 1e6`; now it's owned by
+    // `time::MonotonicNs()` so every consumer reads the same source.
+    frame->rax = ::duetos::time::MonotonicNs();
 }
 
 void DoGetTimeFt(arch::TrapFrame* frame)
 {
-    // No args. Sample CMOS RTC, return FILETIME in rax.
-    arch::RtcTime t = {};
-    arch::RtcRead(&t);
-    frame->rax = RtcToFileTime(t);
+    // No args. Returns wall-clock FILETIME in rax. Sourced from
+    // `time::RealtimeFiletime()` so any future migration to a more
+    // accurate wall-clock path (NTP-disciplined RTC, TSC + RTC
+    // delta sampling, …) takes effect here automatically.
+    frame->rax = ::duetos::time::RealtimeFiletime();
 }
 
 namespace
@@ -89,42 +86,29 @@ struct alignas(2) SystemTime
 };
 static_assert(sizeof(SystemTime) == 16, "SYSTEMTIME ABI is 16 bytes");
 
-// Zeller's congruence, normal form: dow 0=Sun..6=Sat. Same
-// formula the taskbar date widget + AML calendar popup use.
-u16 ComputeDayOfWeek(u16 year, u8 month, u8 day)
-{
-    if (month < 1 || month > 12)
-        return 0;
-    u32 wy = year;
-    u32 wm = month;
-    if (wm < 3)
-    {
-        wm += 12;
-        --wy;
-    }
-    const u32 K = wy % 100;
-    const u32 J = wy / 100;
-    const u32 h = (u32(day) + (13 * (wm + 1)) / 5 + K + K / 4 + J / 4 + 5 * J) % 7;
-    return u16((h + 6) % 7);
-}
+// Zeller's-congruence helper used to live here as a fallback for
+// the ST↔FT conversion paths, but those don't actually need it
+// (DoFtToSt walks days-since-1601 directly + DoStToFt computes
+// seconds-since-1601 from a SYSTEMTIME's date fields, neither
+// touching day-of-week). The DoGetTimeSt path that did need it
+// migrated to `time::RealtimeBrokenDown` in an earlier
+// A2-followup. Kept the comment as a breadcrumb so a future
+// reader knows where to find the canonical implementation
+// (kernel/time/timekeeper.cpp).
 
 } // namespace
 
 void DoGetTimeSt(arch::TrapFrame* frame)
 {
-    // rdi = user SYSTEMTIME* out. Fill from RTC + computed dow.
-    arch::RtcTime t = {};
-    arch::RtcRead(&t);
-    SystemTime st = {};
-    st.year = t.year;
-    st.month = t.month;
-    st.day = t.day;
-    st.hour = t.hour;
-    st.minute = t.minute;
-    st.second = t.second;
-    st.milliseconds = 0;
-    st.day_of_week = ComputeDayOfWeek(t.year, t.month, t.day);
-    if (!mm::CopyToUser(reinterpret_cast<void*>(frame->rdi), &st, sizeof(st)))
+    // rdi = user SYSTEMTIME* out. The Win32 SYSTEMTIME ABI shape
+    // (16 bytes, 8 packed u16s) is layout-compatible with
+    // `time::BrokenDownTime`; sample directly into the user's slot
+    // via a kernel-side staging copy. The Zeller's-congruence DOW
+    // computation moved into time/timekeeper.cpp with this slice.
+    ::duetos::time::BrokenDownTime bdt = {};
+    ::duetos::time::RealtimeBrokenDown(&bdt);
+    static_assert(sizeof(bdt) == 16, "BrokenDownTime must match Win32 SYSTEMTIME's 16-byte ABI");
+    if (!mm::CopyToUser(reinterpret_cast<void*>(frame->rdi), &bdt, sizeof(bdt)))
     {
         frame->rax = static_cast<u64>(-1);
         return;

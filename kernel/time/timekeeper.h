@@ -51,6 +51,46 @@ u64 MonotonicNs();
 /// no source is active.
 u64 ResolutionNs();
 
+/// Boot-time elapsed in nanoseconds. v0: alias for `MonotonicNs`
+/// (CLOCK_BOOTTIME == CLOCK_MONOTONIC in our model — there's no
+/// suspend/resume yet, so the two diverge only when there's a
+/// "kernel was suspended" gap to skip over). Kept as a separate
+/// accessor so callers that mean "boot time" don't have to be
+/// rewritten when a real CLOCK_BOOTTIME lands.
+u64 BoottimeNs();
+
+/// Wall-clock time in Windows FILETIME units — 100-nanosecond
+/// ticks since 1601-01-01 00:00:00 UTC. Samples the CMOS RTC and
+/// performs the Gregorian-day arithmetic; no clocksource needed
+/// (the RTC is its own time source independent of HPET/TSC).
+/// Cheap (~hundreds of cycles for the CMOS reads + the arithmetic).
+/// Returns 0 only on impossible RTC values; in practice always
+/// returns a usable value.
+u64 RealtimeFiletime();
+
+/// Broken-down wall-clock time. Mirrors the Win32 SYSTEMTIME ABI
+/// shape (16 bytes, 8 packed u16s) but lives here so non-Win32
+/// callers don't have to reach into `subsystems/win32/`. Field
+/// order is fixed by the ABI; `day_of_week` is 0=Sun..6=Sat.
+struct BrokenDownTime
+{
+    u16 year;
+    u16 month;
+    u16 day_of_week;
+    u16 day;
+    u16 hour;
+    u16 minute;
+    u16 second;
+    u16 milliseconds;
+};
+
+/// Sample the CMOS RTC and fill `out` with the broken-down wall
+/// clock. day_of_week is computed via Zeller's congruence. v0
+/// always reports milliseconds=0 — sub-second precision lives in
+/// `MonotonicNs`, the broken-down view is for human-facing
+/// timestamps. `out` MUST be non-null.
+void RealtimeBrokenDown(BrokenDownTime* out);
+
 /// Boot-time self-test. Verifies that after `TimekeeperInit`:
 ///   - `MonotonicNs()` returns a non-zero, strictly-increasing
 ///     value across two reads (with a tiny busy-wait in between).

@@ -387,6 +387,14 @@ void ProcessRelease(Process* p)
         }
     }
 
+    // Drain the unified KObject handle table (plan A3). Calls
+    // KObjectRelease on every live slot so any object whose final
+    // reference was held by this process gets destroyed cleanly,
+    // even on abnormal exit. No-op when the process never inserted
+    // anything (the common case while the existing per-type Win32
+    // tables remain authoritative).
+    ::duetos::ipc::HandleTableDrain(p->kobj_handles);
+
     mm::KFree(p);
     --g_live_processes;
 }

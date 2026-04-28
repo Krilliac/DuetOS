@@ -62,7 +62,9 @@ constexpr u16 kConfigAddressPort = 0xCF8;
 constexpr u16 kConfigDataPort = 0xCFC;
 constexpr u32 kConfigEnable = 1U << 31;
 
-constinit sync::SpinLock g_pci_config_lock{};
+// Tagged with `kLockClassPciConfig` for lockdep.
+constinit sync::SpinLock g_pci_config_lock{
+    .locked = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassPciConfig};
 
 constinit Device g_devices[kMaxDevices] = {};
 constinit u64 g_device_count = 0;

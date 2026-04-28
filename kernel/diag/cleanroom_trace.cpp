@@ -11,7 +11,12 @@ namespace duetos::core
 namespace
 {
 
-constinit sync::SpinLock g_cleanroom_lock = {};
+// Tagged with `kLockClassCleanroomTrace` for lockdep — the trace
+// ring is touched from the syscall fast path and IRQ context,
+// so its acquire-order vs the other tagged locks is worth
+// recording.
+constinit sync::SpinLock g_cleanroom_lock = {
+    .locked = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassCleanroomTrace};
 
 // Sticky boot region — fills once, then locks. Captures the
 // driver init / PE-loader / firmware-loader events that fire

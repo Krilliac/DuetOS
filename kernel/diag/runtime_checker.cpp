@@ -35,6 +35,7 @@
 #include "arch/x86_64/idt.h"
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/timer.h"
+#include "time/tick.h"
 #include "arch/x86_64/traps.h"
 #include "drivers/storage/block.h"
 #include "mm/frame_allocator.h"
@@ -827,7 +828,7 @@ bool CheckMonotonicCounters()
     const auto heap = mm::KernelHeapStatsRead();
     const auto sched_stats = sched::SchedStatsRead();
     const u64 hpet_now = arch::HpetReadCounter();
-    const u64 ticks_now = arch::TimerTicks();
+    const u64 ticks_now = ::duetos::time::TickCount();
 
     if (!g_prev_populated)
     {
@@ -963,7 +964,7 @@ bool CheckRunawayTask()
     if (top.name == nullptr)
         return true; // no non-idle tasks yet (pre-user boot)
 
-    const u64 now_timer = arch::TimerTicks();
+    const u64 now_timer = ::duetos::time::TickCount();
     if (g_prev_top.populated && g_prev_top.id == top.id && g_prev_scan_timer_valid)
     {
         const u64 task_delta = top.ticks_run - g_prev_top.prev_ticks_run;

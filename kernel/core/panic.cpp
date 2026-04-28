@@ -6,9 +6,11 @@
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/smp.h"
 #include "arch/x86_64/timer.h"
+#include "time/tick.h"
 #include "cpu/percpu.h"
 #include "debug/probes.h"
 #include "diag/diag_decode.h"
+#include "diag/soft_lockup.h"
 #include "diag/hexdump.h"
 #include "log/klog.h"
 #include "util/symbols.h"
@@ -366,7 +368,7 @@ void DumpDiagnostics(u64 rip, u64 rsp, u64 rbp)
     // tick count still goes out as the dump's `uptime` line so a
     // host-side parser sees a stable hex value, but the readable
     // form is what an operator scans first.
-    WriteLabelled("uptime   ", arch::TimerTicks());
+    WriteLabelled("uptime   ", ::duetos::time::TickCount());
     arch::SerialWrite("  uptime   : ");
     WriteUptimeReadable();
     arch::SerialWrite(" since boot\n");
@@ -446,6 +448,7 @@ void Panic(const char* subsystem, const char* message)
     // want a PMI overflow re-entering the trap dispatcher while
     // DumpDiagnostics is writing.
     arch::NmiWatchdogDisable();
+    duetos::diag::SoftLockupDisable();
 
     // Broadcast NMI to peer CPUs so they stop fighting for the
     // serial line / executing against potentially-corrupt shared
@@ -478,6 +481,7 @@ void PanicWithValue(const char* subsystem, const char* message, u64 value)
 {
     arch::Cli();
     arch::NmiWatchdogDisable();
+    duetos::diag::SoftLockupDisable();
     arch::PanicBroadcastNmi();
 
     arch::SerialWrite("\n[panic] ");

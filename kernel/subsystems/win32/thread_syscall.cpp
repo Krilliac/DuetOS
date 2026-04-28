@@ -90,19 +90,12 @@ void DoThreadCreate(arch::TrapFrame* frame)
     using arch::SerialWriteHex;
     using ::duetos::core::Process;
 
+    // kCapSpawnThread is gated centrally by `SyscallGate`
+    // (cap_table.def) — a process missing the cap never reaches
+    // this handler.
     core::Process* proc = core::CurrentProcess();
-    if (proc == nullptr || !core::CapSetHas(proc->caps, core::kCapSpawnThread))
+    if (proc == nullptr)
     {
-        const u64 pid = (proc != nullptr) ? proc->pid : 0;
-        core::RecordSandboxDenial(core::kCapSpawnThread);
-        if (proc != nullptr && core::ShouldLogDenial(proc->sandbox_denials))
-        {
-            SerialWrite("[sys] denied syscall=SYS_THREAD_CREATE pid=");
-            SerialWriteHex(pid);
-            SerialWrite(" cap=");
-            SerialWrite(core::CapName(core::kCapSpawnThread));
-            SerialWrite("\n");
-        }
         frame->rax = static_cast<u64>(-1);
         return;
     }

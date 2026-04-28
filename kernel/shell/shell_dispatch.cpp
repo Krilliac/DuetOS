@@ -1069,7 +1069,7 @@ void Dispatch(char* line)
     }
     if (StrEq(cmd, "heap"))
     {
-        CmdHeap();
+        CmdHeap(argc, argv);
         return;
     }
     if (StrEq(cmd, "paging"))
@@ -1290,6 +1290,47 @@ void Dispatch(char* line)
         if (!RequireAdmin("LOGLEVEL"))
             return;
         CmdLoglevel(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "tracer"))
+    {
+        CmdTracer(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "perf"))
+    {
+        CmdPerf(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "cpufeatures"))
+    {
+        CmdCpuFeatures();
+        return;
+    }
+    if (StrEq(cmd, "domain"))
+    {
+        // Restarting a fault domain teardown+init may free
+        // resources held by another task; gate to admin.
+        if (!RequireAdmin("DOMAIN"))
+            return;
+        CmdDomain(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "lockdep"))
+    {
+        // `lockdep panic on|off` — flip the inversion-promote-to-
+        // panic knob (plan D1-followup). Read state via `inspect
+        // lockdep`. Admin-gated: an unprivileged caller flipping
+        // panic ON could weaponise a known existing inversion to
+        // crash the box.
+        if (!RequireAdmin("LOCKDEP"))
+            return;
+        if (argc >= 2 && StrEq(argv[1], "panic"))
+        {
+            CmdLockdepPanic(argc, argv);
+            return;
+        }
+        ConsoleWriteln("LOCKDEP: USAGE: LOCKDEP PANIC ON|OFF");
         return;
     }
     if (StrEq(cmd, "kdbg"))

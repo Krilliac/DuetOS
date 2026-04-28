@@ -21,14 +21,19 @@
  */
 
 #include "shell/shell_internal.h"
+#include "shell/shell.h"
 
+#include "arch/x86_64/cet.h"
 #include "arch/x86_64/cpu.h"
+#include "arch/x86_64/cpu_info.h"
+#include "arch/x86_64/cpu_mitigations.h"
 #include "arch/x86_64/hpet.h"
 #include "arch/x86_64/lapic.h"
 #include "arch/x86_64/smbios.h"
 #include "arch/x86_64/smp.h"
 #include "arch/x86_64/thermal.h"
 #include "arch/x86_64/timer.h"
+#include "time/tick.h"
 #include "drivers/gpu/bochs_vbe.h"
 #include "drivers/gpu/gpu.h"
 #include "drivers/gpu/virtio_gpu.h"
@@ -42,6 +47,7 @@
 #include "mm/paging.h"
 #include "sched/sched.h"
 #include "subsystems/graphics/graphics.h"
+#include "util/symbols.h"
 
 namespace duetos::core::shell::internal
 {
@@ -96,6 +102,46 @@ constexpr const char* kRflagsBitNames[] = {"CF", "PF", "AF", "ZF", "SF", "TF",  
                                            "OF", "NT", "RF", "VM", "AC", "VIF", "VIP", "ID"};
 
 } // namespace
+
+// `cpufeatures` — high-level summary of CPUID + mitigations
+// + CET probe state, all in one shell view. Pulls together
+// arch::CpuInfoGet + arch::CpuMitigationsGet + arch::CetGet.
+void CmdCpuFeatures()
+{
+    const auto& info = duetos::arch::CpuInfoGet();
+    const auto& mit = duetos::arch::CpuMitigationsGet();
+    const auto& cet = duetos::arch::CetGet();
+
+    ConsoleWrite("VENDOR:           ");
+    ConsoleWriteln(info.vendor);
+    ConsoleWrite("BRAND:            ");
+    ConsoleWriteln(info.brand);
+    ConsoleWrite("FAMILY/MODEL/STEP: ");
+    WriteU64Hex(info.family, 0);
+    ConsoleWriteChar('/');
+    WriteU64Hex(info.model, 0);
+    ConsoleWriteChar('/');
+    WriteU64Hex(info.stepping, 0);
+    ConsoleWriteChar('\n');
+
+    ConsoleWrite("MITIGATIONS:      kpti=");
+    ConsoleWrite(mit.needs_kpti ? "needed" : "safe");
+    ConsoleWrite(" mds=");
+    ConsoleWrite(mit.needs_mds_buf ? "needed" : "safe");
+    ConsoleWrite(" ssbd=");
+    ConsoleWrite(mit.needs_ssbd ? "needed" : "safe");
+    ConsoleWrite(" taa=");
+    ConsoleWrite(mit.needs_taa_flush ? "needed" : "safe");
+    ConsoleWriteChar('\n');
+
+    ConsoleWrite("CET:              ss=");
+    ConsoleWrite(cet.ss_supported ? "supported" : "absent");
+    ConsoleWrite(" ibt=");
+    ConsoleWrite(cet.ibt_supported ? "supported" : "absent");
+    ConsoleWrite(" enabled=");
+    ConsoleWrite((cet.ss_enabled || cet.ibt_enabled) ? "yes" : "no");
+    ConsoleWriteChar('\n');
+}
 
 void CmdCpuid(u32 argc, char** argv)
 {
@@ -276,7 +322,7 @@ void CmdHpet()
 void CmdTicks()
 {
     ConsoleWrite("TIMER TICKS: ");
-    WriteU64Dec(duetos::arch::TimerTicks());
+    WriteU64Dec(::duetos::time::TickCount());
     ConsoleWriteChar('\n');
     ConsoleWrite("SCHED TICKS: ");
     WriteU64Dec(duetos::sched::SchedNowTicks());
@@ -412,8 +458,186 @@ void CmdLspci()
     }
 }
 
-void CmdHeap()
+namespace
 {
+
+constexpr u32 kHeapLeakRows = 16;
+
+// Print one row of `bytes count rip=fn+offset` exactly the same
+// way the snapshot and watch paths do — extracted into a helper
+// so the two callers can't drift in formatting. Callers stamp
+// any prefix (delta sign, leading whitespace) before invoking.
+void PrintHeapLeakRow(const duetos::mm::HeapLeakEntry& r)
+{
+    WriteU64Dec(r.bytes);
+    ConsoleWrite(" B  ");
+    WriteU64Dec(r.count);
+    ConsoleWrite(" allocs  rip=");
+    WriteU64Hex(r.caller_rip, 16);
+    ConsoleWrite("  ");
+    duetos::core::SymbolResolution res{};
+    if (duetos::core::ResolveAddress(r.caller_rip, &res) && res.entry != nullptr)
+    {
+        ConsoleWrite(res.entry->name);
+        ConsoleWrite("+0x");
+        WriteU64Hex(res.offset, 0);
+    }
+    else
+    {
+        ConsoleWrite("<unresolved>");
+    }
+    ConsoleWriteChar('\n');
+}
+
+// Find the row in `prev[0..prev_n)` whose RIP matches `rip`,
+// returning its index, or `prev_n` for "not present in the
+// previous snapshot". Linear scan; the snapshot is fixed-size
+// O(16) so a hash table would be heavier than the comparison.
+u32 FindRipInSnapshot(u64 rip, const duetos::mm::HeapLeakEntry* prev, u32 prev_n)
+{
+    for (u32 i = 0; i < prev_n; ++i)
+    {
+        if (prev[i].caller_rip == rip)
+        {
+            return i;
+        }
+    }
+    return prev_n;
+}
+
+} // namespace
+
+// Heap leak ranking — top-N caller RIPs by bytes outstanding. Walks
+// the heap in chunk-size steps and aggregates live chunks by their
+// recorded `caller_rip`. Resolves each top RIP through the embedded
+// symbol table (util/symbols.cpp) so the operator sees fn+offset
+// instead of raw addresses. Cost: one heap walk + one symbol lookup
+// per row; cheap enough to leave callable on demand.
+void CmdHeapLeaks()
+{
+    duetos::mm::HeapLeakEntry rows[kHeapLeakRows];
+    const u32 n = duetos::mm::KernelHeapTopAllocators(rows, kHeapLeakRows);
+    if (n == 0)
+    {
+        ConsoleWriteln("HEAP LEAKS: NO LIVE ALLOCATIONS");
+        return;
+    }
+    ConsoleWrite("HEAP LEAKS: TOP ");
+    WriteU64Dec(n);
+    ConsoleWriteln(" CALLER RIPS BY BYTES OUTSTANDING");
+    for (u32 i = 0; i < n; ++i)
+    {
+        ConsoleWrite("  ");
+        PrintHeapLeakRow(rows[i]);
+    }
+}
+
+// `heap leaks watch <secs>` — snapshot, sleep, snapshot, show
+// delta. Useful for spotting leak growth: an allocator whose
+// bytes-outstanding rises between samples is the leak suspect.
+// Two-snapshot model keeps the implementation single-threaded and
+// fits the shell's blocking command shape; spinning forever would
+// require a background ticker we don't have. The user can re-run
+// the command to keep watching. Ctrl+C aborts the inter-snapshot
+// sleep cleanly. (D6-followup, 2026-04-27.)
+void CmdHeapLeaksWatch(u32 secs)
+{
+    if (secs == 0)
+    {
+        ConsoleWriteln("HEAP LEAKS WATCH: BAD INTERVAL (NEED >0 SECONDS)");
+        return;
+    }
+
+    duetos::mm::HeapLeakEntry before[kHeapLeakRows];
+    duetos::mm::HeapLeakEntry after[kHeapLeakRows];
+    const u32 n_before = duetos::mm::KernelHeapTopAllocators(before, kHeapLeakRows);
+
+    ConsoleWrite("HEAP LEAKS WATCH: SNAPSHOT 1 / 2 (");
+    WriteU64Dec(n_before);
+    ConsoleWriteln(" RIPS); SLEEPING.");
+    // 100 Hz scheduler tick (matches CmdSleep's loop). Poll the
+    // interrupt flag in 1-second slices so a long watch can be
+    // cancelled cleanly.
+    for (u32 s = 0; s < secs; ++s)
+    {
+        if (ShellInterruptRequested())
+        {
+            ConsoleWriteln("^C");
+            return;
+        }
+        duetos::sched::SchedSleepTicks(100);
+    }
+
+    const u32 n_after = duetos::mm::KernelHeapTopAllocators(after, kHeapLeakRows);
+    if (n_after == 0)
+    {
+        ConsoleWriteln("HEAP LEAKS WATCH: NO LIVE ALLOCATIONS IN SNAPSHOT 2");
+        return;
+    }
+    ConsoleWrite("HEAP LEAKS WATCH: DELTA OVER ");
+    WriteU64Dec(secs);
+    ConsoleWriteln(" SEC (snapshot 2 - snapshot 1)");
+    for (u32 i = 0; i < n_after; ++i)
+    {
+        const auto& r = after[i];
+        const u32 prev_idx = FindRipInSnapshot(r.caller_rip, before, n_before);
+        // Compose a "delta entry" that re-uses the same row
+        // formatter — bytes + count carry the diff, RIP carries
+        // the identity. A new RIP (not in snapshot 1) shows full
+        // current values prefixed with `+`; a stable or shrinking
+        // RIP shows the signed delta.
+        if (prev_idx == n_before)
+        {
+            ConsoleWrite("  +NEW   ");
+            PrintHeapLeakRow(r);
+            continue;
+        }
+        const auto& p = before[prev_idx];
+        if (r.bytes == p.bytes && r.count == p.count)
+        {
+            // Stable allocator — print the absolute number with a
+            // `=` marker so a quick scan can rule it out.
+            ConsoleWrite("  =STBL  ");
+            PrintHeapLeakRow(r);
+            continue;
+        }
+        const bool grew = (r.bytes > p.bytes);
+        const u64 delta_bytes = grew ? (r.bytes - p.bytes) : (p.bytes - r.bytes);
+        const u64 delta_count = (r.count >= p.count) ? (r.count - p.count) : (p.count - r.count);
+        ConsoleWrite(grew ? "  +GREW  " : "  -SHRK  ");
+        duetos::mm::HeapLeakEntry diff{delta_bytes, delta_count, r.caller_rip};
+        PrintHeapLeakRow(diff);
+    }
+}
+
+void CmdHeap(u32 argc, char** argv)
+{
+    if (argc >= 2 && StrEq(argv[1], "leaks"))
+    {
+        if (argc >= 4 && StrEq(argv[2], "watch"))
+        {
+            // `heap leaks watch <secs>` — parse the seconds arg
+            // and call the delta path. Re-using the digit-parse
+            // shape from CmdSleep keeps the shell's "small int"
+            // surface uniform; reach for a real argv parser only
+            // when more than one shell command needs it.
+            u32 secs = 0;
+            for (u32 i = 0; argv[3][i] != '\0'; ++i)
+            {
+                if (argv[3][i] < '0' || argv[3][i] > '9')
+                {
+                    ConsoleWriteln("HEAP LEAKS WATCH: BAD NUMBER");
+                    return;
+                }
+                secs = secs * 10 + static_cast<u32>(argv[3][i] - '0');
+            }
+            CmdHeapLeaksWatch(secs);
+            return;
+        }
+        CmdHeapLeaks();
+        return;
+    }
+
     const auto s = duetos::mm::KernelHeapStatsRead();
     ConsoleWrite("POOL BYTES:       ");
     WriteU64Dec(s.pool_bytes);

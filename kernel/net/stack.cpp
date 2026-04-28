@@ -38,6 +38,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/timer.h"
+#include "time/tick.h"
 #include "log/klog.h"
 #include "core/panic.h"
 #include "drivers/net/net.h"
@@ -129,7 +130,7 @@ bool IpEq(Ipv4Address a, Ipv4Address b)
 
 u64 NowTicks()
 {
-    return arch::TimerTicks();
+    return ::duetos::time::TickCount();
 }
 
 bool IsZeroIp(Ipv4Address ip)

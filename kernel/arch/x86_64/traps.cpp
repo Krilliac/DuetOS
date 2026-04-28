@@ -36,6 +36,8 @@
 #include "arch/x86_64/serial.h"
 
 #include "diag/diag_decode.h"
+#include "diag/event_trace.h"
+#include "diag/gdb_stub.h"
 #include "security/fault_domain.h"
 #include "diag/hexdump.h"
 #include "diag/log_names.h"
@@ -477,7 +479,7 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     // conservative default: if we don't know why NMI fired, stop.
     if (frame->vector == 2)
     {
-        if (NmiWatchdogHandleNmi())
+        if (NmiWatchdogHandleNmi(frame->rip))
             return;
 
         // Cross-CPU panic broadcast (or any unclaimed NMI). Capture
@@ -707,13 +709,59 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     // human-readable banner. Anything before BEGIN / after END is
     // free-form prose; the bracketed region is the machine-extract
     // -able dump record.
+
+    // Publish the trap-frame state to the GDB stub so a future
+    // attach (or a stop-at-fault GDB session) sees the real
+    // register values from the moment of fault. Single struct
+    // copy + pointer publish; cheap. (D7-followup, 2026-04-28.)
+    static ::duetos::diag::gdb::GdbRegSnapshot s_gdb_snap;
+    s_gdb_snap.rax = frame->rax;
+    s_gdb_snap.rbx = frame->rbx;
+    s_gdb_snap.rcx = frame->rcx;
+    s_gdb_snap.rdx = frame->rdx;
+    s_gdb_snap.rsi = frame->rsi;
+    s_gdb_snap.rdi = frame->rdi;
+    s_gdb_snap.rbp = frame->rbp;
+    s_gdb_snap.rsp = frame->rsp;
+    s_gdb_snap.r8 = frame->r8;
+    s_gdb_snap.r9 = frame->r9;
+    s_gdb_snap.r10 = frame->r10;
+    s_gdb_snap.r11 = frame->r11;
+    s_gdb_snap.r12 = frame->r12;
+    s_gdb_snap.r13 = frame->r13;
+    s_gdb_snap.r14 = frame->r14;
+    s_gdb_snap.r15 = frame->r15;
+    s_gdb_snap.rip = frame->rip;
+    s_gdb_snap.rflags = frame->rflags;
+    s_gdb_snap.cs = static_cast<u32>(frame->cs);
+    s_gdb_snap.ss = static_cast<u32>(frame->ss);
+    s_gdb_snap.ds = 0;
+    s_gdb_snap.es = 0;
+    s_gdb_snap.fs = 0;
+    s_gdb_snap.gs = 0;
+    ::duetos::diag::gdb::GdbStubPublishRegisters(&s_gdb_snap);
+    // Also publish as writable so a connected GDB session's `G`
+    // packet can apply edits before the operator continues. The
+    // edits land in s_gdb_snap; copying them back into the trap
+    // frame on resume is the next D7-followup once a stop-at-
+    // fault flow exists.
+    ::duetos::diag::gdb::GdbStubPublishWritableRegisters(&s_gdb_snap);
     //
     // Fire the kernel-page-fault probe specifically for vec 14 so
     // the log ring records this as a structured event before the
     // panic dump; other kernel exceptions are already distinct
     // enough by name that they don't need a dedicated probe.
     if (frame->vector == 14)
+    {
         KBP_PROBE_V(::duetos::debug::ProbeId::kKernelPageFault, frame->rip);
+        // D2 instrumentation. arg0 = CR2 (faulting VA),
+        // arg1 = error_code. Emitted before the panic path so a
+        // subsequent `tracer dump` shows the #PF in its
+        // chronological place.
+        u64 cr2;
+        asm volatile("mov %%cr2, %0" : "=r"(cr2));
+        ::duetos::diag::EventTrace(::duetos::diag::kEventPageFault, cr2, frame->error_code);
+    }
     // Quiet the NMI watchdog before the dump. DumpDiagnostics +
     // symbol resolution + serial I/O can easily exceed one
     // watchdog interval; a PMI overflow during the dump would

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "sync/lockdep.h"
 #include "util/types.h"
 
 /*
@@ -11,7 +12,9 @@
  *
  * Design:
  *   - Zero-initialized = unlocked. Safe to declare `constinit` /
- *     `static SpinLock x{};` anywhere.
+ *     `static SpinLock x{};` anywhere. The class_id field also
+ *     zero-initialises to `kLockClassUnclassified` (0), so untagged
+ *     locks bypass lockdep with a single compare-and-skip.
  *   - Acquire disables interrupts on the calling CPU (saving the
  *     previous RFLAGS.IF so nested acquires restore correctly on
  *     release) and then busy-waits on an atomic CAS.
@@ -19,6 +22,10 @@
  *   - Owner-CPU tracking is debug-only; `owner_cpu` is written under
  *     the lock and read only for diagnostics. Do not rely on it for
  *     correctness.
+ *   - `class_id` ties the lock into the lockdep-lite locking-order
+ *     graph. Tagged locks get `LockdepBefore/AfterAcquire` and
+ *     `LockdepBeforeRelease` calls in their acquire/release paths.
+ *     Untagged locks pay nothing.
  *
  * Scope limits:
  *   - Not recursive. A CPU that re-acquires a lock it already holds
@@ -48,6 +55,14 @@ struct SpinLock
     // Diagnostic only: CPU index of current holder (or 0xFFFFFFFF if
     // unlocked). Never consulted for correctness.
     volatile u32 owner_cpu;
+
+    // Lockdep class. Default 0 = `kLockClassUnclassified` —
+    // untagged locks skip the lockdep hooks entirely. Tag with a
+    // canonical class ID from `lockdep.h` (kLockClass*) at the
+    // lock's declaration site to opt into locking-order
+    // validation. Keeping this u16 lets the struct stay packed
+    // alongside the diagnostic owner_cpu.
+    LockClass class_id;
 };
 
 /// Saved interrupt state returned by Acquire, consumed by Release. The

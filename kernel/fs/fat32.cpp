@@ -57,7 +57,12 @@ namespace internal
 // buffer. Recursive: a public entry that calls back into another
 // public entry (Fat32CreateAtPath -> Fat32LookupPath, etc.) skips
 // re-locking via the owning-task check.
-constinit sched::Mutex g_fat32_mutex = {};
+// Tagged with `kLockClassFat32` so lockdep records every edge
+// `(some other class) -> fat32` that fires during boot. Helps
+// surface any path that holds a higher-class lock (e.g. sched,
+// kobject) across a FAT32 call — that would invert the
+// canonical "filesystem locks below subsystem locks" order.
+constinit sched::Mutex g_fat32_mutex = {.owner = nullptr, .waiters = {}, .class_id = duetos::sync::kLockClassFat32};
 constinit u64 g_fat32_recursion = 0;
 
 // Scratch buffer for the BPB sector + any single cluster read.

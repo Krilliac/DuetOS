@@ -4,6 +4,7 @@
 #include "arch/x86_64/hpet.h"
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/timer.h"
+#include "time/tick.h"
 #include "cpu/percpu.h"
 #include "mm/kstack.h"
 #include "mm/page.h"
@@ -279,8 +280,10 @@ void WriteUptimeReadable()
     }
     if (us == 0)
     {
-        // Pre-HPET: scheduler tick is 10 ms (kTickFrequencyHz=100).
-        us = arch::TimerTicks() * 10'000ULL;
+        // Pre-HPET: convert scheduler ticks to microseconds via the
+        // portable wrapper (TickPeriodNs / 1000 = 10 000 us at the
+        // v0 100 Hz rate, but no longer hardcoded).
+        us = ::duetos::time::TickCount() * (::duetos::time::TickPeriodNs() / 1000);
     }
 
     if (us >= 60'000'000ULL)

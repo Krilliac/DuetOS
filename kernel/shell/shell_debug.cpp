@@ -26,10 +26,28 @@
 #include "mm/kheap.h"
 #include "mm/paging.h"
 #include "sched/sched.h"
+#include "core/init.h"
+#include "diag/event_trace.h"
+#include "diag/gdb_stub.h"
+#include "ipc/kobject.h"
+#include "util/random.h"
 #include "diag/hexdump.h"
 #include "diag/kdbg.h"
+#include "diag/perf_profile.h"
+#include "diag/soft_lockup.h"
+#include "diag/ubsan.h"
+#include "mm/zone.h"
+#include "security/driver_domain.h"
+#include "security/fault_domain.h"
+#include "sync/lockdep.h"
+#include "sync/rcu.h"
+#include "time/tick.h"
+#include "time/timekeeper.h"
 #include "log/klog.h"
 #include "diag/runtime_checker.h"
+#include "sync/lockdep.h"
+#include "syscall/cap_gate.h"
+#include "syscall/syscall_names.h"
 #include "util/symbols.h"
 
 namespace duetos::core::shell::internal
@@ -171,16 +189,397 @@ void CmdInspectHelp()
 {
     ConsoleWriteln("INSPECT: RE / TRIAGE UMBRELLA (SEE COM1 FOR REPORTS)");
     ConsoleWriteln("  INSPECT SYSCALLS KERNEL | <PATH>  FIND SYSCALL SITES + COVERAGE");
+    ConsoleWriteln("  INSPECT SYSCALLS CAPS             DUMP CAP-TABLE: REQUIRED CAP PER SYSCALL");
     ConsoleWriteln("  INSPECT OPCODES <PATH>            FIRST-BYTE HISTOGRAM + CLASS TALLY");
     ConsoleWriteln("  INSPECT ARM ON|OFF|STATUS         ONE-SHOT OPCODES SCAN ON NEXT SPAWN");
+    ConsoleWriteln("  INSPECT LOCKDEP                   LOCKDEP COUNTERS + REGISTERED CLASSES");
+    ConsoleWriteln("  INSPECT DOMAINS                   FAULT DOMAINS (DRIVER + HAND-REGISTERED)");
+    ConsoleWriteln("  INSPECT ZONES                     PER-ZONE ALLOCATOR STATS");
+    ConsoleWriteln("  INSPECT THREADS                   TASK ROSTER");
+    ConsoleWriteln("  INSPECT TRACER-STATS              EVENT TRACER COUNTERS (NO DUMP)");
+    ConsoleWriteln("  INSPECT GDB                       GDB STUB COUNTERS");
+    ConsoleWriteln("  INSPECT RCU                       RCU QUEUED/COMPLETED");
+    ConsoleWriteln("  INSPECT UPTIME                    TICK + MONOTONIC NS");
+    ConsoleWriteln("  INSPECT COUNTERS                  ALL-SUBSYSTEM COUNTER ROLLUP");
+    ConsoleWriteln("  INSPECT IPC                       KNOWN KOBJECT TYPES");
+    ConsoleWriteln("  INSPECT SECURITY                  FAULT-DOMAIN + INITCALL COUNTS");
+    ConsoleWriteln("  INSPECT ENTROPY                   ENTROPY TIER + COUNTERS");
     ConsoleWriteln("  INSPECT HELP                      THIS LIST");
+}
+
+// Dump lockdep-lite state: total inversions detected since boot,
+// total edges recorded, and the canonical class IDs registered via
+// `LockdepRegisterCanonicalClasses()`. Output goes to COM1
+// (machine-greppable) plus a one-line summary on the console.
+//
+// Inversions=0 is the green-path expectation; any non-zero count
+// is a triage hit. Edges-recorded grows monotonically as the kernel
+// exercises new acquire pairs — useful as a "graph stabilised yet?"
+// signal for the future inversion-warn-to-panic promotion knob.
+// `inspect ipc` — list every known KObjectType + reachable
+// global counters. v0 doesn't enumerate per-process handle
+// tables (that needs a process-walker first); the registry of
+// types + the type-name mapping is the audit surface that's
+// reachable today.
+void CmdInspectIpc()
+{
+    ConsoleWriteln("INSPECT IPC: known KObject types (id name)");
+    static constexpr duetos::ipc::KObjectType kTypes[] = {
+        duetos::ipc::KObjectType::Mutex,    duetos::ipc::KObjectType::Event,
+        duetos::ipc::KObjectType::Semaphore, duetos::ipc::KObjectType::Mailbox,
+        duetos::ipc::KObjectType::Waitable, duetos::ipc::KObjectType::File,
+    };
+    for (auto t : kTypes)
+    {
+        ConsoleWrite("  ");
+        WriteU64Dec(static_cast<u64>(t));
+        ConsoleWrite(" ");
+        ConsoleWriteln(duetos::ipc::KObjectTypeName(t));
+    }
+}
+
+// `inspect security` — fault-domain count + driver-domain
+// count + total registered initcalls. Single-screen rollup of
+// the security-shaped surfaces.
+void CmdInspectSecurity()
+{
+    ConsoleWrite("INSPECT SECURITY: fault-domains=");
+    WriteU64Dec(duetos::core::FaultDomainCount());
+    ConsoleWrite(" driver-tagged=");
+    WriteU64Dec(duetos::security::DriverDomainCount());
+    ConsoleWrite(" initcalls=");
+    WriteU64Dec(duetos::core::InitcallCount());
+    ConsoleWriteChar('\n');
+}
+
+// `inspect entropy` — current tier + per-source counters.
+void CmdInspectEntropy()
+{
+    const auto s = duetos::core::RandomStatsRead();
+    const auto tier = duetos::core::RandomCurrentTier();
+    static const char* tier_name[] = {"Splitmix", "Rdrand", "Rdseed"};
+    ConsoleWrite("INSPECT ENTROPY: tier=");
+    ConsoleWrite(tier_name[static_cast<u8>(tier)]);
+    ConsoleWrite(" rdseed=");
+    WriteU64Dec(s.rdseed_successes);
+    ConsoleWriteChar('/');
+    WriteU64Dec(s.rdseed_calls);
+    ConsoleWrite(" rdrand=");
+    WriteU64Dec(s.rdrand_successes);
+    ConsoleWriteChar('/');
+    WriteU64Dec(s.rdrand_calls);
+    ConsoleWrite(" splitmix=");
+    WriteU64Dec(s.splitmix_calls);
+    ConsoleWrite(" bytes=");
+    WriteU64Dec(s.bytes_produced);
+    ConsoleWriteChar('\n');
+}
+
+// `inspect rcu` — RCU subsystem counters (queued / completed
+// / inversions / current tick). Cheap; pairs with `domain
+// restart rcu` (no such domain today) for diagnostic flow.
+void CmdInspectRcu()
+{
+    const u64 q = duetos::sync::RcuCallsQueued();
+    const u64 c = duetos::sync::RcuCallsCompleted();
+    ConsoleWrite("INSPECT RCU: queued=");
+    WriteU64Dec(q);
+    ConsoleWrite(" completed=");
+    WriteU64Dec(c);
+    ConsoleWrite(" pending=");
+    WriteU64Dec(q - c);
+    ConsoleWriteChar('\n');
+}
+
+// `inspect uptime` — boot uptime in scheduler ticks +
+// nanoseconds (via the time:: facade). Cheap diagnostic.
+void CmdInspectUptime()
+{
+    const u64 ticks = duetos::time::TickCount();
+    const u64 ns = duetos::time::MonotonicNs();
+    ConsoleWrite("INSPECT UPTIME: ticks=");
+    WriteU64Dec(ticks);
+    ConsoleWrite(" monotonic_ns=");
+    WriteU64Dec(ns);
+    ConsoleWrite(" tick_hz=");
+    WriteU64Dec(duetos::time::TickHz());
+    ConsoleWriteChar('\n');
+}
+
+// `inspect counters` — single-screen rollup of every subsystem
+// counter that has a cheap accessor. Lockdep / soft-lockup /
+// event-trace / GDB stub / RCU all in one place.
+void CmdInspectCounters()
+{
+    using duetos::arch::SerialWrite;
+    SerialWrite("[inspect-counters] one-line per subsystem\n");
+    ConsoleWrite("INSPECT COUNTERS:\n");
+    ConsoleWrite("  lockdep     inversions=");
+    WriteU64Dec(duetos::sync::LockdepInversionsDetected());
+    ConsoleWrite(" edges=");
+    WriteU64Dec(duetos::sync::LockdepEdgesRecorded());
+    ConsoleWriteChar('\n');
+    ConsoleWrite("  soft-lockup warnings=");
+    WriteU64Dec(duetos::diag::SoftLockupWarningsEmitted());
+    ConsoleWriteChar('\n');
+    ConsoleWrite("  rcu         queued=");
+    WriteU64Dec(duetos::sync::RcuCallsQueued());
+    ConsoleWrite(" completed=");
+    WriteU64Dec(duetos::sync::RcuCallsCompleted());
+    ConsoleWriteChar('\n');
+    ConsoleWrite("  event-trace live=");
+    WriteU64Dec(duetos::diag::EventTraceLiveCount());
+    ConsoleWrite(" total=");
+    WriteU64Dec(duetos::diag::EventTraceTotalRecords());
+    ConsoleWriteChar('\n');
+    ConsoleWrite("  perf        live=");
+    WriteU64Dec(duetos::diag::PerfLiveCount());
+    ConsoleWrite(" total=");
+    WriteU64Dec(duetos::diag::PerfTotalSamples());
+    ConsoleWriteChar('\n');
+    ConsoleWrite("  gdb-stub    received=");
+    WriteU64Dec(duetos::diag::gdb::GdbStubPacketsReceived());
+    ConsoleWrite(" handled=");
+    WriteU64Dec(duetos::diag::gdb::GdbStubPacketsHandled());
+    ConsoleWrite(" bad-csum=");
+    WriteU64Dec(duetos::diag::gdb::GdbStubPacketsBadChecksum());
+    ConsoleWriteChar('\n');
+    ConsoleWrite("  ubsan       reports=");
+    WriteU64Dec(duetos::diag::UbsanReportsEmitted());
+    ConsoleWriteChar('\n');
+}
+
+// `inspect threads` — list every known scheduler task with its
+// id / name / state / cumulative ticks. Walks SchedEnumerate
+// under CLI so the snapshot is consistent.
+void CmdInspectThreads()
+{
+    static constexpr const char* kStateName[] = {"Ready", "Running", "Sleeping", "Blocked", "Dead"};
+    struct Cookie
+    {
+        u32 count;
+    } cookie = {0};
+    auto cb = [](const duetos::sched::SchedTaskInfo& info, void* c)
+    {
+        auto* ck = static_cast<Cookie*>(c);
+        ++ck->count;
+        ConsoleWrite("  tid=");
+        WriteU64Dec(info.id);
+        ConsoleWrite(" name=");
+        ConsoleWrite(info.name != nullptr ? info.name : "<null>");
+        ConsoleWrite(" state=");
+        ConsoleWrite((info.state < 5) ? kStateName[info.state] : "?");
+        if (info.is_running)
+            ConsoleWrite(" *running*");
+        ConsoleWrite(" ticks=");
+        WriteU64Dec(info.ticks_run);
+        ConsoleWriteChar('\n');
+    };
+    ConsoleWriteln("INSPECT THREADS:");
+    duetos::sched::SchedEnumerate(cb, &cookie);
+    ConsoleWrite("INSPECT THREADS: total=");
+    WriteU64Dec(cookie.count);
+    ConsoleWriteChar('\n');
+}
+
+// `inspect tracer-stats` — read-only event-tracer counters
+// without dumping the ring. Cheap; pairs with `tracer dump`
+// for "is the ring growing?" diagnostics.
+void CmdInspectTracerStats()
+{
+    const u32 live = duetos::diag::EventTraceLiveCount();
+    const u64 total = duetos::diag::EventTraceTotalRecords();
+    ConsoleWrite("INSPECT TRACER: live=");
+    WriteU64Dec(live);
+    ConsoleWrite(" total-since-boot=");
+    WriteU64Dec(total);
+    ConsoleWrite(" capacity=");
+    WriteU64Dec(duetos::diag::kEventRingCapacity);
+    ConsoleWriteChar('\n');
+}
+
+// `inspect gdb` — GDB stub packet counters (received,
+// bad-checksum, handled). Confirms the stub is alive without
+// requiring a real GDB attach.
+void CmdInspectGdb()
+{
+    ConsoleWrite("INSPECT GDB: received=");
+    WriteU64Dec(duetos::diag::gdb::GdbStubPacketsReceived());
+    ConsoleWrite(" handled=");
+    WriteU64Dec(duetos::diag::gdb::GdbStubPacketsHandled());
+    ConsoleWrite(" bad-csum=");
+    WriteU64Dec(duetos::diag::gdb::GdbStubPacketsBadChecksum());
+    ConsoleWriteChar('\n');
+}
+
+// `inspect domains` — list every registered fault domain
+// (driver-domain wrapper or hand-registered). Shows name +
+// restart count + alive flag. Read-only audit surface for
+// "what subsystems can the operator restart from the shell".
+void CmdInspectDomains()
+{
+    using duetos::arch::SerialWrite;
+    const u32 driver_count = duetos::security::DriverDomainCount();
+    const u32 total_count = duetos::core::FaultDomainCount();
+    SerialWrite("[inspect-domains] driver-tagged=");
+    duetos::arch::SerialWriteHex(driver_count);
+    SerialWrite(" total=");
+    duetos::arch::SerialWriteHex(total_count);
+    SerialWrite("\n");
+    for (u32 i = 0; i < total_count; ++i)
+    {
+        const auto* d = duetos::core::FaultDomainGet(i);
+        if (d == nullptr || d->name == nullptr)
+            continue;
+        SerialWrite("[inspect-domains] id=");
+        duetos::arch::SerialWriteHex(i);
+        SerialWrite(" name=");
+        SerialWrite(d->name);
+        SerialWrite(" restarts=");
+        duetos::arch::SerialWriteHex(d->restart_count);
+        SerialWrite(d->alive ? " alive" : " dead");
+        SerialWrite("\n");
+    }
+    ConsoleWrite("INSPECT DOMAINS: total=");
+    WriteU64Dec(total_count);
+    ConsoleWrite(" driver-tagged=");
+    WriteU64Dec(driver_count);
+    ConsoleWriteln(" (DETAILS ON COM1)");
+}
+
+// `inspect zones` — print per-zone allocate/free/oom counts.
+// Diagnostic surface for "is anyone hitting DMA-zone OOM".
+void CmdInspectZones()
+{
+    using duetos::arch::SerialWrite;
+    SerialWrite("[inspect-zones] per-zone allocator stats\n");
+    for (u32 i = 0; i < static_cast<u32>(duetos::mm::Zone::Count); ++i)
+    {
+        const auto z = static_cast<duetos::mm::Zone>(i);
+        const auto s = duetos::mm::ZoneStatsRead(z);
+        SerialWrite("  ");
+        SerialWrite(duetos::mm::ZoneName(z));
+        SerialWrite(" allocs=");
+        duetos::arch::SerialWriteHex(s.allocs);
+        SerialWrite(" frees=");
+        duetos::arch::SerialWriteHex(s.frees);
+        SerialWrite(" oom=");
+        duetos::arch::SerialWriteHex(s.oom);
+        SerialWrite("\n");
+    }
+    ConsoleWriteln("INSPECT ZONES: per-zone counts on COM1");
+}
+
+void CmdInspectLockdep()
+{
+    using duetos::arch::SerialWrite;
+    using duetos::arch::SerialWriteHex;
+
+    const u64 inversions = ::duetos::sync::LockdepInversionsDetected();
+    const u64 edges = ::duetos::sync::LockdepEdgesRecorded();
+
+    const bool panic_on_invert = ::duetos::sync::LockdepPromoteToPanic();
+
+    SerialWrite("[inspect-lockdep] inversions=");
+    SerialWriteHex(inversions);
+    SerialWrite(" edges=");
+    SerialWriteHex(edges);
+    SerialWrite(" panic-on-invert=");
+    SerialWrite(panic_on_invert ? "on" : "off");
+    SerialWrite("\n");
+
+    // Walk the canonical class-ID range (0x01..0x3F per the
+    // `lockdep.h` convention). Print each class's name + ID.
+    // Unregistered IDs in that range come back as "?" from
+    // `LockdepClassName`; skip them.
+    for (u32 id = 1; id <= 0x3F; ++id)
+    {
+        const char* name = ::duetos::sync::LockdepClassName(static_cast<::duetos::sync::LockClass>(id));
+        if (name == nullptr || name[0] == '?')
+        {
+            continue;
+        }
+        SerialWrite("[inspect-lockdep] class id=");
+        SerialWriteHex(id);
+        SerialWrite(" name=");
+        SerialWrite(name);
+        SerialWrite("\n");
+    }
+
+    ConsoleWrite("INSPECT LOCKDEP: inversions=");
+    WriteU64Dec(inversions);
+    ConsoleWrite(" edges=");
+    WriteU64Dec(edges);
+    ConsoleWrite(" panic-on-invert=");
+    ConsoleWrite(panic_on_invert ? "ON" : "OFF");
+    ConsoleWriteln(" (CLASS LIST ON COM1)");
+}
+
+// Walk every row of `kSyscallCapTable` and print, for each:
+//   - the syscall number (decimal + hex),
+//   - its `SYS_FOO` identifier (via `SyscallNumberName`),
+//   - the first cap bit set in the required mask, resolved through
+//     `CapName`,
+//   - the raw mask in hex.
+//
+// Output goes to COM1 in machine-greppable shape (`[inspect-sc-caps]
+// row ...`) so a future audit tool can diff the table across boots.
+// A summary line at the end records the row count, mirroring the
+// existing `inspect syscalls` site report.
+void CmdInspectSyscallsCaps()
+{
+    using duetos::arch::SerialWrite;
+    using duetos::arch::SerialWriteHex;
+
+    ConsoleWriteln("INSPECT SYSCALLS CAPS: DUMPING CAP TABLE (SEE COM1)");
+
+    SerialWrite("[inspect-sc-caps] start rows=");
+    SerialWriteHex(::duetos::core::kSyscallCapTableCount);
+    SerialWrite("\n");
+
+    for (u32 i = 0; i < ::duetos::core::kSyscallCapTableCount; ++i)
+    {
+        const auto& row = ::duetos::core::kSyscallCapTable[i];
+        const char* sys_name = ::duetos::core::SyscallNumberName(row.nr);
+        if (sys_name == nullptr)
+            sys_name = "<unknown>";
+
+        // First cap bit set in the mask. Mirrors the gate's
+        // `FirstMissingCap` so audit output matches denial logs.
+        ::duetos::core::Cap first = ::duetos::core::kCapNone;
+        for (u32 c = 1; c < static_cast<u32>(::duetos::core::kCapCount); ++c)
+        {
+            if ((row.required_mask & (1ULL << c)) != 0)
+            {
+                first = static_cast<::duetos::core::Cap>(c);
+                break;
+            }
+        }
+        const char* cap_name = (first == ::duetos::core::kCapNone) ? "<none>" : ::duetos::core::CapName(first);
+
+        SerialWrite("[inspect-sc-caps] row nr=");
+        SerialWriteHex(row.nr);
+        SerialWrite(" name=");
+        SerialWrite(sys_name);
+        SerialWrite(" cap=");
+        SerialWrite(cap_name);
+        SerialWrite(" mask=");
+        SerialWriteHex(row.required_mask);
+        SerialWrite("\n");
+    }
+
+    SerialWrite("[inspect-sc-caps] summary rows=");
+    SerialWriteHex(::duetos::core::kSyscallCapTableCount);
+    SerialWrite("\n");
+
+    ConsoleWriteln("INSPECT SYSCALLS CAPS: DONE");
 }
 
 void CmdInspectSyscalls(u32 argc, char** argv)
 {
     if (argc < 3)
     {
-        ConsoleWriteln("INSPECT SYSCALLS: USAGE: INSPECT SYSCALLS KERNEL | <PATH>");
+        ConsoleWriteln("INSPECT SYSCALLS: USAGE: INSPECT SYSCALLS KERNEL | CAPS | <PATH>");
         return;
     }
     if (StrEq(argv[2], "kernel"))
@@ -188,6 +587,11 @@ void CmdInspectSyscalls(u32 argc, char** argv)
         ConsoleWriteln("INSPECT SYSCALLS: SCANNING KERNEL .TEXT (SEE COM1)");
         (void)duetos::debug::SyscallScanKernelText();
         ConsoleWriteln("INSPECT SYSCALLS: DONE");
+        return;
+    }
+    if (StrEq(argv[2], "caps"))
+    {
+        CmdInspectSyscallsCaps();
         return;
     }
     ConsoleWrite("INSPECT SYSCALLS: SCANNING FILE \"");
@@ -352,6 +756,245 @@ void CmdAddr2Sym(u32 argc, char** argv)
     ConsoleWriteln(line);
 }
 
+// `domain restart <name>` — kick a registered fault domain
+// (driver-tagged or hand-registered) through teardown + init
+// without rebooting. Admin-gated through the dispatcher; the
+// caller's shell session needs admin or the command refuses.
+void CmdDomainRestart(u32 argc, char** argv)
+{
+    if (argc < 3)
+    {
+        ConsoleWriteln("DOMAIN RESTART: USAGE: DOMAIN RESTART <NAME>");
+        return;
+    }
+    const char* name = argv[2];
+    auto r = duetos::security::RestartDriverDomain(name);
+    if (!r.has_value())
+    {
+        ConsoleWrite("DOMAIN RESTART: NOT FOUND \"");
+        ConsoleWrite(name);
+        ConsoleWriteln("\"");
+        return;
+    }
+    ConsoleWrite("DOMAIN RESTART: \"");
+    ConsoleWrite(name);
+    ConsoleWriteln("\" OK");
+}
+
+void CmdDomain(u32 argc, char** argv)
+{
+    if (argc >= 2 && StrEq(argv[1], "restart"))
+    {
+        CmdDomainRestart(argc, argv);
+        return;
+    }
+    if (argc >= 2 && StrEq(argv[1], "list"))
+    {
+        CmdInspectDomains();
+        return;
+    }
+    ConsoleWriteln("DOMAIN: USAGE: DOMAIN LIST | DOMAIN RESTART <NAME>");
+}
+
+// `lockdep panic on|off` — flip the inversion-promote-to-panic
+// knob (plan D1-followup). Default off so a boot under
+// instrumentation can complete with a noisy graph; flip ON once
+// the operator has triaged the existing inversions and wants
+// any new one to fail-stop. Idempotent. External linkage so the
+// dispatcher (in shell_dispatch.cpp) can call it directly.
+// (2026-04-28.)
+void CmdLockdepPanic(u32 argc, char** argv)
+{
+    if (argc < 3)
+    {
+        ConsoleWriteln("LOCKDEP PANIC: USAGE: LOCKDEP PANIC ON|OFF");
+        return;
+    }
+    if (StrEq(argv[2], "on"))
+    {
+        ::duetos::sync::LockdepSetPromoteToPanic(true);
+        ConsoleWriteln("LOCKDEP: panic-on-invert ENABLED");
+        return;
+    }
+    if (StrEq(argv[2], "off"))
+    {
+        ::duetos::sync::LockdepSetPromoteToPanic(false);
+        ConsoleWriteln("LOCKDEP: panic-on-invert DISABLED");
+        return;
+    }
+    ConsoleWriteln("LOCKDEP PANIC: ARG MUST BE ON OR OFF");
+}
+
+// `tracer dump` — print the dynamic event trace ring oldest-
+// first (plan D2-followup). Walks via EventTraceSnapshot into a
+// scratch heap buffer; prints one row per event. No filter
+// arguments in v0; a `tracer kind <K>` knob lands when an
+// investigation needs it. (2026-04-28.)
+void CmdTracerDump()
+{
+    constexpr u32 kBatch = 64;
+    duetos::diag::EventRecord buf[kBatch];
+    const u32 live = duetos::diag::EventTraceLiveCount();
+    const u64 total = duetos::diag::EventTraceTotalRecords();
+    ConsoleWrite("EVENT TRACE: live=");
+    WriteU64Dec(live);
+    ConsoleWrite(" total-since-boot=");
+    WriteU64Dec(total);
+    ConsoleWriteChar('\n');
+    if (live == 0)
+    {
+        ConsoleWriteln("(empty)");
+        return;
+    }
+    duetos::diag::EventRecord all[duetos::diag::kEventRingCapacity];
+    const u32 got = duetos::diag::EventTraceSnapshot(all, live);
+    for (u32 i = 0; i < got; ++i)
+    {
+        const auto& r = all[i];
+        ConsoleWrite("  tick=");
+        WriteU64Dec(r.tick);
+        ConsoleWrite(" kind=");
+        ConsoleWrite(duetos::diag::EventKindName(r.kind));
+        ConsoleWrite(" arg0=");
+        WriteU64Hex(r.arg0, 16);
+        ConsoleWrite(" arg1=");
+        WriteU64Hex(r.arg1, 16);
+        ConsoleWriteChar('\n');
+    }
+    (void)buf;
+}
+
+// Filter helper for `tracer kind <K>` — matches a kind name
+// against the canonical set. Returns the matched kind or 0
+// (kEventNone) for "no match".
+u32 ParseTracerKind(const char* s)
+{
+    using namespace duetos::diag;
+    if (StrEq(s, "syscall-enter"))
+        return kEventSyscallEnter;
+    if (StrEq(s, "syscall-exit"))
+        return kEventSyscallExit;
+    if (StrEq(s, "sched-switch"))
+        return kEventSchedSwitch;
+    if (StrEq(s, "irq"))
+        return kEventIrq;
+    if (StrEq(s, "page-fault"))
+        return kEventPageFault;
+    if (StrEq(s, "mutex-acquire"))
+        return kEventMutexAcquire;
+    if (StrEq(s, "mutex-release"))
+        return kEventMutexRelease;
+    if (StrEq(s, "custom"))
+        return kEventCustom;
+    return duetos::diag::kEventNone;
+}
+
+// `tracer kind <name>` — dump only events whose kind matches.
+// (D2-followup, 2026-04-28.)
+void CmdTracerKind(const char* name)
+{
+    const u32 want = ParseTracerKind(name);
+    if (want == duetos::diag::kEventNone)
+    {
+        ConsoleWrite("TRACER KIND: UNKNOWN KIND ");
+        ConsoleWriteln(name);
+        return;
+    }
+    duetos::diag::EventRecord all[duetos::diag::kEventRingCapacity];
+    const u32 got = duetos::diag::EventTraceSnapshot(all, duetos::diag::kEventRingCapacity);
+    u32 shown = 0;
+    for (u32 i = 0; i < got; ++i)
+    {
+        if (all[i].kind != want)
+            continue;
+        const auto& r = all[i];
+        ConsoleWrite("  tick=");
+        WriteU64Dec(r.tick);
+        ConsoleWrite(" arg0=");
+        WriteU64Hex(r.arg0, 16);
+        ConsoleWrite(" arg1=");
+        WriteU64Hex(r.arg1, 16);
+        ConsoleWriteChar('\n');
+        ++shown;
+    }
+    ConsoleWrite("TRACER KIND: matched=");
+    WriteU64Dec(shown);
+    ConsoleWriteChar('\n');
+}
+
+void CmdTracer(u32 argc, char** argv)
+{
+    if (argc >= 2 && StrEq(argv[1], "dump"))
+    {
+        CmdTracerDump();
+        return;
+    }
+    if (argc >= 3 && StrEq(argv[1], "kind"))
+    {
+        CmdTracerKind(argv[2]);
+        return;
+    }
+    if (argc >= 2 && StrEq(argv[1], "reset"))
+    {
+        duetos::diag::EventTraceReset();
+        ConsoleWriteln("TRACER: RING RESET");
+        return;
+    }
+    ConsoleWriteln("TRACER: USAGE: TRACER DUMP | TRACER KIND <NAME> | TRACER RESET");
+}
+
+// `perf dump` — walk PerfSnapshot, resolve each RIP through
+// the embedded symbol table (same shape as `heap leaks`).
+// (D3-followup, 2026-04-28.)
+void CmdPerfDump()
+{
+    const u32 live = duetos::diag::PerfLiveCount();
+    const u64 total = duetos::diag::PerfTotalSamples();
+    ConsoleWrite("PERF: live=");
+    WriteU64Dec(live);
+    ConsoleWrite(" total-since-boot=");
+    WriteU64Dec(total);
+    ConsoleWriteChar('\n');
+    if (live == 0)
+    {
+        ConsoleWriteln("(no samples; PMU NMI sampling not yet wired)");
+        return;
+    }
+    duetos::diag::PerfSample buf[duetos::diag::kPerfRingCapacity];
+    const u32 got = duetos::diag::PerfSnapshot(buf, duetos::diag::kPerfRingCapacity);
+    for (u32 i = 0; i < got; ++i)
+    {
+        const auto& s = buf[i];
+        ConsoleWrite("  tick=");
+        WriteU64Dec(s.tick);
+        ConsoleWrite(" rip=");
+        WriteU64Hex(s.rip, 16);
+        ConsoleWrite("  ");
+        duetos::core::SymbolResolution res{};
+        if (duetos::core::ResolveAddress(s.rip, &res) && res.entry != nullptr)
+        {
+            ConsoleWrite(res.entry->name);
+            ConsoleWrite("+0x");
+            WriteU64Hex(res.offset, 0);
+        }
+        else
+        {
+            ConsoleWrite("<unresolved>");
+        }
+        ConsoleWriteChar('\n');
+    }
+}
+
+void CmdPerf(u32 argc, char** argv)
+{
+    if (argc >= 2 && StrEq(argv[1], "dump"))
+    {
+        CmdPerfDump();
+        return;
+    }
+    ConsoleWriteln("PERF: USAGE: PERF DUMP");
+}
+
 void CmdInspect(u32 argc, char** argv)
 {
     if (argc < 2)
@@ -372,6 +1015,66 @@ void CmdInspect(u32 argc, char** argv)
     if (StrEq(argv[1], "arm"))
     {
         CmdInspectArm(argc, argv);
+        return;
+    }
+    if (StrEq(argv[1], "lockdep"))
+    {
+        CmdInspectLockdep();
+        return;
+    }
+    if (StrEq(argv[1], "domains"))
+    {
+        CmdInspectDomains();
+        return;
+    }
+    if (StrEq(argv[1], "zones"))
+    {
+        CmdInspectZones();
+        return;
+    }
+    if (StrEq(argv[1], "threads"))
+    {
+        CmdInspectThreads();
+        return;
+    }
+    if (StrEq(argv[1], "tracer-stats"))
+    {
+        CmdInspectTracerStats();
+        return;
+    }
+    if (StrEq(argv[1], "gdb"))
+    {
+        CmdInspectGdb();
+        return;
+    }
+    if (StrEq(argv[1], "rcu"))
+    {
+        CmdInspectRcu();
+        return;
+    }
+    if (StrEq(argv[1], "uptime"))
+    {
+        CmdInspectUptime();
+        return;
+    }
+    if (StrEq(argv[1], "counters"))
+    {
+        CmdInspectCounters();
+        return;
+    }
+    if (StrEq(argv[1], "ipc"))
+    {
+        CmdInspectIpc();
+        return;
+    }
+    if (StrEq(argv[1], "security"))
+    {
+        CmdInspectSecurity();
+        return;
+    }
+    if (StrEq(argv[1], "entropy"))
+    {
+        CmdInspectEntropy();
         return;
     }
     if (StrEq(argv[1], "help"))

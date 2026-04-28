@@ -44,7 +44,7 @@ struct alignas(kHeapAlignment) ChunkHeader
     u64 size;          // total chunk size in bytes (header + payload)
     u64 magic;         // kHeapMagicLive or kHeapMagicFree
     ChunkHeader* next; // address-ordered freelist link (free chunks only)
-    u64 reserved;      // padding to 32 bytes; zero when allocated
+    u64 caller_rip;    // return address of the KMalloc call site for live chunks; 0 when free
 };
 
 static_assert(sizeof(ChunkHeader) == 32, "Header must be 32 bytes");
@@ -182,7 +182,7 @@ void KernelHeapInit()
     g_freelist->size = kKernelHeapBytes;
     g_freelist->magic = kHeapMagicFree;
     g_freelist->next = nullptr;
-    g_freelist->reserved = 0;
+    g_freelist->caller_rip = 0;
     g_alloc_count = 0;
     g_free_count = 0;
 
@@ -233,7 +233,7 @@ void* KMalloc(u64 bytes)
                 split->size = remainder;
                 split->magic = kHeapMagicFree;
                 split->next = cursor->next;
-                split->reserved = 0;
+                split->caller_rip = 0;
                 cursor->size = needed;
                 if (prev == nullptr)
                 {
@@ -258,7 +258,12 @@ void* KMalloc(u64 bytes)
 
             cursor->magic = kHeapMagicLive;
             cursor->next = nullptr; // not on freelist anymore
-            cursor->reserved = 0;
+            // Caller-RIP tagging (plan D6). `__builtin_return_address(0)`
+            // captures the address inside KMalloc's caller right after
+            // its `call kheap+offset`. KMalloc is not inlined (external
+            // linkage in a .cpp), so this attribution is stable. The
+            // shell `heap leaks` command aggregates by this RIP.
+            cursor->caller_rip = reinterpret_cast<u64>(__builtin_return_address(0));
             ++g_alloc_count;
             // Stamp the trailing red zone. Sits at chunk_end -
             // kHeapTrailerCanaryBytes — i.e. immediately after the
@@ -346,6 +351,101 @@ KernelHeapStats KernelHeapStatsRead()
     }
     stats.used_bytes = stats.pool_bytes - stats.free_bytes;
     return stats;
+}
+
+u32 KernelHeapTopAllocators(HeapLeakEntry* out, u32 out_capacity)
+{
+    if (out == nullptr || out_capacity == 0 || g_pool_base == nullptr)
+    {
+        return 0;
+    }
+    for (u32 i = 0; i < out_capacity; ++i)
+    {
+        out[i] = HeapLeakEntry{};
+    }
+    u32 distinct = 0;
+
+    // Walk every chunk in the pool (live + free), aggregating live
+    // chunks by their `caller_rip`. The aggregation table is the
+    // caller's `out` buffer, used as a fixed-size hash bucket: linear
+    // search per chunk, capped at `out_capacity`. Worst case is
+    // O(N_chunks * out_capacity), which is fine for the boot-era
+    // chunk counts we see today.
+    const u8* pool_end = g_pool_base + g_pool_bytes;
+    const ChunkHeader* c = reinterpret_cast<const ChunkHeader*>(g_pool_base);
+    while (reinterpret_cast<const u8*>(c) < pool_end)
+    {
+        if (c->magic != kHeapMagicLive && c->magic != kHeapMagicFree)
+        {
+            // Corrupt magic — bail rather than walking off the end.
+            // The runtime checker is the canonical detector for this;
+            // the leak tracker shouldn't double-panic.
+            break;
+        }
+        if (c->size == 0 || c->size > g_pool_bytes)
+        {
+            break;
+        }
+        if (c->magic == kHeapMagicLive)
+        {
+            const u64 rip = c->caller_rip;
+            // Find existing entry for this RIP, or take the first
+            // empty slot.
+            i32 hit = -1;
+            i32 first_empty = -1;
+            for (u32 i = 0; i < out_capacity; ++i)
+            {
+                if (out[i].count != 0 && out[i].caller_rip == rip)
+                {
+                    hit = static_cast<i32>(i);
+                    break;
+                }
+                if (out[i].count == 0 && first_empty < 0)
+                {
+                    first_empty = static_cast<i32>(i);
+                }
+            }
+            if (hit >= 0)
+            {
+                out[hit].bytes += c->size;
+                ++out[hit].count;
+            }
+            else if (first_empty >= 0)
+            {
+                out[first_empty].caller_rip = rip;
+                out[first_empty].bytes = c->size;
+                out[first_empty].count = 1;
+                ++distinct;
+            }
+            // No room for a new RIP and not a match — silently drop.
+            // Leak ranking is best-effort; missing the long tail is
+            // fine, missing the head is what we'd worry about, and
+            // a head-of-distribution RIP would land in the table on
+            // its first allocation.
+        }
+        c = reinterpret_cast<const ChunkHeader*>(reinterpret_cast<const u8*>(c) + c->size);
+    }
+
+    // Selection-sort: small N (out_capacity == 32 in the shell) means
+    // O(N²) is irrelevant compared to the O(N_chunks * N) walk above.
+    for (u32 i = 0; i < distinct; ++i)
+    {
+        u32 best = i;
+        for (u32 j = i + 1; j < distinct; ++j)
+        {
+            if (out[j].bytes > out[best].bytes)
+            {
+                best = j;
+            }
+        }
+        if (best != i)
+        {
+            HeapLeakEntry tmp = out[i];
+            out[i] = out[best];
+            out[best] = tmp;
+        }
+    }
+    return distinct;
 }
 
 void KernelHeapSelfTest()

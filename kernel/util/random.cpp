@@ -4,6 +4,7 @@
 #include "arch/x86_64/hpet.h"
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/timer.h"
+#include "time/tick.h"
 #include "log/klog.h"
 #include "core/panic.h"
 
@@ -105,7 +106,7 @@ void RandomInit()
     // (which only comes from hardware anyway).
     g_splitmix_state = ReadTsc();
     g_splitmix_state ^= arch::HpetReadCounter();
-    g_splitmix_state ^= u64(arch::TimerTicks()) << 32;
+    g_splitmix_state ^= ::duetos::time::TickCount() << 32;
     if (g_splitmix_state == 0)
         g_splitmix_state = 0xCAFEBABE12345678ULL;
 

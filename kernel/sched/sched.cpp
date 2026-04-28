@@ -41,7 +41,10 @@
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/traps.h"
+#include "diag/event_trace.h"
 #include "diag/kdbg.h"
+#include "diag/soft_lockup.h"
+#include "sync/rcu.h"
 #include "log/klog.h"
 #include "core/panic.h"
 #include "proc/process.h"
@@ -286,7 +289,11 @@ constinit u64 g_tasks_exited = 0;
 // context switch, then try to schedule INTO prev while we're still
 // on prev's stack. Commit D fixes via lock-passing-across-switch,
 // mirroring Linux's finish_task_switch pattern.
-constinit sync::SpinLock g_sched_lock{};
+// Tagged with `kLockClassSched` so the lockdep-lite locking-order
+// graph (sync/lockdep.h) records every "lock-X-was-held when sched
+// was acquired" pairing. Untagged locks pay nothing; the scheduler
+// runqueue is THE most contended global, so it gets first.
+constinit sync::SpinLock g_sched_lock{.locked = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassSched};
 
 // Current() and NeedResched() moved to cpu::PerCpu. Per-CPU accessors
 // keep call sites terse and read unambiguously: Current() is the
@@ -1017,6 +1024,11 @@ void Schedule()
     asm volatile("mov %0, %%dr7" : : "r"(next->dr7));
 
     KBP_PROBE_V(::duetos::debug::ProbeId::kSchedContextSwitch, next->id);
+    // D2 instrumentation. arg0 = prev tid, arg1 = next tid.
+    // Cheap (single fetch_add + 2 stores in the ring path);
+    // safe to do here because we've already done the runqueue
+    // bookkeeping and are about to swap stacks.
+    ::duetos::diag::EventTrace(::duetos::diag::kEventSchedSwitch, prev->id, next->id);
     ContextSwitch(&prev->rsp, next->rsp);
     // When we return here, we're executing on a DIFFERENT task's
     // stack — whichever task got switched in to run us. The local
@@ -1189,6 +1201,17 @@ void OnTimerTick(u64 now_ticks)
             ++g_idle_ticks;
         }
     }
+    // Soft-lockup detector (plan D4). Cheap (load + compare).
+    // Idle / kernel-boot tasks pass TID=0 which the detector
+    // ignores. A long-running same-TID streak across the
+    // threshold (~1 second) emits one warning per streak.
+    diag::SoftLockupTick(now_ticks, (cur != nullptr) ? TaskId(cur) : 0);
+    sync::RcuTick();
+    // D2 instrumentation. arg0 = vector (32 = LAPIC timer),
+    // arg1 = current_tid. Tagging IRQs lets a tracer dump
+    // correlate "which task got preempted" with the syscall +
+    // mutex events around it.
+    ::duetos::diag::EventTrace(::duetos::diag::kEventIrq, 32, (cur != nullptr) ? TaskId(cur) : 0);
     if (cur != nullptr && cur->process != nullptr)
     {
         core::Process* proc = cur->process;
@@ -2183,6 +2206,11 @@ void MutexLock(Mutex* m)
 {
     KASSERT(m != nullptr, "sched", "MutexLock null mutex");
 
+    // Lockdep edge-walk before the wait/acquire — the "held → this"
+    // edge is recorded against any tagged SpinLock / Mutex this task
+    // already holds. Untagged mutexes short-circuit inside the hook.
+    ::duetos::sync::LockdepBeforeAcquire(m->class_id);
+
     arch::Cli();
     if (m->owner == nullptr)
     {
@@ -2197,6 +2225,14 @@ void MutexLock(Mutex* m)
         WaitQueueBlock(&m->waiters);
     }
     arch::Sti();
+
+    // After successful acquire — push onto the lockdep held stack.
+    ::duetos::sync::LockdepAfterAcquire(m->class_id);
+
+    // Event-tracer instrumentation. arg0 = mutex pointer (so a
+    // tracer dump can correlate acquire / release pairs);
+    // arg1 = current task id.
+    ::duetos::diag::EventTrace(::duetos::diag::kEventMutexAcquire, reinterpret_cast<u64>(m), CurrentTaskId());
 }
 
 bool MutexTryLock(Mutex* m)
@@ -2210,12 +2246,25 @@ bool MutexTryLock(Mutex* m)
         m->owner = Current();
     }
     arch::Sti();
+    if (ok)
+    {
+        // Treat a successful try-lock as a full acquire for lockdep —
+        // we hold it now, so the held stack must reflect that. Skip
+        // BeforeAcquire on the failing path so we don't record a
+        // never-acquired edge.
+        ::duetos::sync::LockdepBeforeAcquire(m->class_id);
+        ::duetos::sync::LockdepAfterAcquire(m->class_id);
+    }
     return ok;
 }
 
 void MutexUnlock(Mutex* m)
 {
     KASSERT(m != nullptr, "sched", "MutexUnlock null mutex");
+
+    // Pop from lockdep held stack BEFORE the owner pointer changes —
+    // mirrors the SpinLockRelease ordering.
+    ::duetos::sync::LockdepBeforeRelease(m->class_id);
 
     arch::Cli();
     if (m->owner != Current())
@@ -2234,6 +2283,8 @@ void MutexUnlock(Mutex* m)
         m->owner = next;
     }
     arch::Sti();
+
+    ::duetos::diag::EventTrace(::duetos::diag::kEventMutexRelease, reinterpret_cast<u64>(m), CurrentTaskId());
 }
 
 // ---------------------------------------------------------------------------

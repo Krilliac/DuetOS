@@ -87,6 +87,7 @@
 #include "subsystems/win32/registry.h"
 #include "log/klog.h"
 #include "diag/cleanroom_trace.h"
+#include "diag/event_trace.h"
 #include "diag/log_names.h"
 #include "proc/process.h"
 #include "proc/ring3_smoke.h"
@@ -418,6 +419,10 @@ void SyscallDispatch(arch::TrapFrame* frame)
     const Process* proc = CurrentProcess();
     const u64 pid = (proc != nullptr) ? proc->pid : 0;
     CleanroomTraceRecord("syscall", "native-dispatch", num, pid, frame->rip);
+    // Event-tracer enter (D2 instrumentation). Tag the event
+    // with the syscall number + first arg so a `tracer dump`
+    // correlates to the in-flight syscall stream.
+    ::duetos::diag::EventTrace(::duetos::diag::kEventSyscallEnter, num, frame->rdi);
     // Win32 custom flight recorder. No-op unless the caller has
     // opted into kPolicyFlightRecorder via SYS_WIN32_CUSTOM. Cheap
     // (one inline policy-bit check) when off. We hand the hook a
@@ -1180,15 +1185,12 @@ void SyscallDispatch(arch::TrapFrame* frame)
         // iretq picks up the new RIP via the trap frame, so we
         // don't return into the caller — we return into the new
         // program.
+        // kCapFsRead + kCapSpawnThread are gated centrally by
+        // `SyscallGate` (cap_table.def) — a process missing either
+        // cap returns -1 from the gate before reaching this handler.
         Process* caller = CurrentProcess();
         if (caller == nullptr)
         {
-            frame->rax = static_cast<u64>(-1);
-            return;
-        }
-        if (!CapSetHas(caller->caps, kCapFsRead) || !CapSetHas(caller->caps, kCapSpawnThread))
-        {
-            RecordSandboxDenial(kCapFsRead);
             frame->rax = static_cast<u64>(-1);
             return;
         }
@@ -1331,18 +1333,13 @@ void SyscallDispatch(arch::TrapFrame* frame)
     case SYS_SOCKET_OP:
     {
         // Win32 ws2_32 + native socket userland → kernel socket
-        // pool. Cap-gated on kCapNet at every entry — withholding
-        // the cap returns -EACCES per BSD/Win32 convention.
+        // pool. kCapNet is gated centrally by `SyscallGate`
+        // (cap_table.def); a process missing the cap returns -1
+        // from the gate before reaching this handler.
         Process* caller = CurrentProcess();
         if (caller == nullptr)
         {
             frame->rax = static_cast<u64>(-13); // -EACCES
-            return;
-        }
-        if (!CapSetHas(caller->caps, kCapNet))
-        {
-            RecordSandboxDenial(kCapNet);
-            frame->rax = static_cast<u64>(-13);
             return;
         }
         const u64 op = frame->rdi;
@@ -2800,26 +2797,14 @@ void SyscallDispatch(arch::TrapFrame* frame)
         // rdx = buffer capacity in bytes.
         // Returns bytes copied on success, -1 on any failure.
         //
-        // Same cap + jail composition as SYS_STAT: kCapFsRead gates
-        // the call, Process::root bounds what can be named. The
-        // leaf-node check also rejects reading a directory —
-        // "read a dir entry by entry" is a future getdents-style
-        // syscall.
+        // Same cap + jail composition as SYS_STAT: kCapFsRead is
+        // gated centrally by `SyscallGate` (cap_table.def);
+        // Process::root bounds what can be named. The leaf-node
+        // check also rejects reading a directory — "read a dir
+        // entry by entry" is a future getdents-style syscall.
         Process* proc = CurrentProcess();
-        if (proc == nullptr || !CapSetHas(proc->caps, kCapFsRead))
+        if (proc == nullptr)
         {
-            const u64 pid = (proc != nullptr) ? proc->pid : 0;
-            RecordSandboxDenial(kCapFsRead);
-            if (proc != nullptr && ShouldLogDenial(proc->sandbox_denials))
-            {
-                arch::SerialWrite("[sys] denied syscall=SYS_READ pid=");
-                arch::SerialWriteHex(pid);
-                arch::SerialWrite(" cap=");
-                arch::SerialWrite(CapName(kCapFsRead));
-                arch::SerialWrite(" denial_idx=");
-                arch::SerialWriteHex(proc->sandbox_denials);
-                arch::SerialWrite("\n");
-            }
             frame->rax = static_cast<u64>(-1);
             return;
         }
@@ -2889,24 +2874,12 @@ void SyscallDispatch(arch::TrapFrame* frame)
         // rsi = user pointer to u64 output slot (receives file size).
         // Returns 0 on success, -1 on any failure.
         //
-        // Cap check first — a process without kCapFsRead can't even
-        // ATTEMPT a lookup. Denial is logged for auditability,
-        // identical format to SYS_WRITE.
+        // kCapFsRead is gated centrally by `SyscallGate`
+        // (cap_table.def) — a process without the cap returns -1
+        // from the gate before reaching this handler.
         Process* proc = CurrentProcess();
-        if (proc == nullptr || !CapSetHas(proc->caps, kCapFsRead))
+        if (proc == nullptr)
         {
-            const u64 pid = (proc != nullptr) ? proc->pid : 0;
-            RecordSandboxDenial(kCapFsRead);
-            if (proc != nullptr && ShouldLogDenial(proc->sandbox_denials))
-            {
-                arch::SerialWrite("[sys] denied syscall=SYS_STAT pid=");
-                arch::SerialWriteHex(pid);
-                arch::SerialWrite(" cap=");
-                arch::SerialWrite(CapName(kCapFsRead));
-                arch::SerialWrite(" denial_idx=");
-                arch::SerialWriteHex(proc->sandbox_denials);
-                arch::SerialWrite("\n");
-            }
             frame->rax = static_cast<u64>(-1);
             return;
         }
@@ -2969,25 +2942,13 @@ void SyscallDispatch(arch::TrapFrame* frame)
         // rdi = user path pointer, rsi = path length.
         // Inherits caller's caps + namespace root — a sandboxed
         // process spawning a binary gets an equally-sandboxed
-        // child. Cap-gated on kCapFsRead because the observable
-        // primitive is "the caller named a file path"; without
-        // it, even the lookup is not something the process is
-        // authorised to perform.
+        // child. kCapFsRead is gated centrally by `SyscallGate`
+        // (cap_table.def): the observable primitive is "the caller
+        // named a file path"; without it, even the lookup is not
+        // something the process is authorised to perform.
         Process* proc = CurrentProcess();
-        if (proc == nullptr || !CapSetHas(proc->caps, kCapFsRead))
+        if (proc == nullptr)
         {
-            const u64 pid = (proc != nullptr) ? proc->pid : 0;
-            RecordSandboxDenial(kCapFsRead);
-            if (proc != nullptr && ShouldLogDenial(proc->sandbox_denials))
-            {
-                arch::SerialWrite("[sys] denied syscall=SYS_SPAWN pid=");
-                arch::SerialWriteHex(pid);
-                arch::SerialWrite(" cap=");
-                arch::SerialWrite(CapName(kCapFsRead));
-                arch::SerialWrite(" denial_idx=");
-                arch::SerialWriteHex(proc->sandbox_denials);
-                arch::SerialWrite("\n");
-            }
             frame->rax = static_cast<u64>(-1);
             return;
         }

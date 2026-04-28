@@ -58,7 +58,11 @@ void NmiWatchdogInit();
 /// was a watchdog-PMI and has been consumed (caller should iretq);
 /// false if it came from somewhere else (the dispatcher should
 /// fall through to its existing NMI handling, e.g., panic halt).
-bool NmiWatchdogHandleNmi();
+/// `interrupted_rip` is the RIP at the moment of NMI delivery —
+/// passed through to the PMU sample profiler (`diag::PerfRecord`)
+/// so each watchdog-PMI also captures one sample. (D3-followup,
+/// 2026-04-28.)
+bool NmiWatchdogHandleNmi(u64 interrupted_rip);
 
 /// Pet the watchdog. Cheap (single increment). Called from the
 /// timer IRQ handler on every tick.

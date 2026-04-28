@@ -49,7 +49,9 @@ constinit u64 g_high_water_slots = 0;
 // threaded in v0" contract from paging.h. SMP bring-up will
 // fix the paging layer uniformly; no point bolting a second
 // lock on here first.
-constinit sync::SpinLock g_kstack_lock{};
+// Tagged with `kLockClassKStack` for lockdep — see sync/lockdep.h
+// for the canonical order convention.
+constinit sync::SpinLock g_kstack_lock{.locked = 0, .owner_cpu = 0xFFFFFFFFu, .class_id = sync::kLockClassKStack};
 
 [[noreturn]] void PanicKstack(const char* message, u64 value)
 {
