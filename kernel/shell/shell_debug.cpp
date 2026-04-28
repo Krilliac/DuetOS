@@ -26,8 +26,11 @@
 #include "mm/kheap.h"
 #include "mm/paging.h"
 #include "sched/sched.h"
+#include "core/init.h"
 #include "diag/event_trace.h"
 #include "diag/gdb_stub.h"
+#include "ipc/kobject.h"
+#include "util/random.h"
 #include "diag/hexdump.h"
 #include "diag/kdbg.h"
 #include "diag/perf_profile.h"
@@ -190,6 +193,17 @@ void CmdInspectHelp()
     ConsoleWriteln("  INSPECT OPCODES <PATH>            FIRST-BYTE HISTOGRAM + CLASS TALLY");
     ConsoleWriteln("  INSPECT ARM ON|OFF|STATUS         ONE-SHOT OPCODES SCAN ON NEXT SPAWN");
     ConsoleWriteln("  INSPECT LOCKDEP                   LOCKDEP COUNTERS + REGISTERED CLASSES");
+    ConsoleWriteln("  INSPECT DOMAINS                   FAULT DOMAINS (DRIVER + HAND-REGISTERED)");
+    ConsoleWriteln("  INSPECT ZONES                     PER-ZONE ALLOCATOR STATS");
+    ConsoleWriteln("  INSPECT THREADS                   TASK ROSTER");
+    ConsoleWriteln("  INSPECT TRACER-STATS              EVENT TRACER COUNTERS (NO DUMP)");
+    ConsoleWriteln("  INSPECT GDB                       GDB STUB COUNTERS");
+    ConsoleWriteln("  INSPECT RCU                       RCU QUEUED/COMPLETED");
+    ConsoleWriteln("  INSPECT UPTIME                    TICK + MONOTONIC NS");
+    ConsoleWriteln("  INSPECT COUNTERS                  ALL-SUBSYSTEM COUNTER ROLLUP");
+    ConsoleWriteln("  INSPECT IPC                       KNOWN KOBJECT TYPES");
+    ConsoleWriteln("  INSPECT SECURITY                  FAULT-DOMAIN + INITCALL COUNTS");
+    ConsoleWriteln("  INSPECT ENTROPY                   ENTROPY TIER + COUNTERS");
     ConsoleWriteln("  INSPECT HELP                      THIS LIST");
 }
 
@@ -202,6 +216,65 @@ void CmdInspectHelp()
 // is a triage hit. Edges-recorded grows monotonically as the kernel
 // exercises new acquire pairs — useful as a "graph stabilised yet?"
 // signal for the future inversion-warn-to-panic promotion knob.
+// `inspect ipc` — list every known KObjectType + reachable
+// global counters. v0 doesn't enumerate per-process handle
+// tables (that needs a process-walker first); the registry of
+// types + the type-name mapping is the audit surface that's
+// reachable today.
+void CmdInspectIpc()
+{
+    ConsoleWriteln("INSPECT IPC: known KObject types (id name)");
+    static constexpr duetos::ipc::KObjectType kTypes[] = {
+        duetos::ipc::KObjectType::Mutex,    duetos::ipc::KObjectType::Event,
+        duetos::ipc::KObjectType::Semaphore, duetos::ipc::KObjectType::Mailbox,
+        duetos::ipc::KObjectType::Waitable, duetos::ipc::KObjectType::File,
+    };
+    for (auto t : kTypes)
+    {
+        ConsoleWrite("  ");
+        WriteU64Dec(static_cast<u64>(t));
+        ConsoleWrite(" ");
+        ConsoleWriteln(duetos::ipc::KObjectTypeName(t));
+    }
+}
+
+// `inspect security` — fault-domain count + driver-domain
+// count + total registered initcalls. Single-screen rollup of
+// the security-shaped surfaces.
+void CmdInspectSecurity()
+{
+    ConsoleWrite("INSPECT SECURITY: fault-domains=");
+    WriteU64Dec(duetos::core::FaultDomainCount());
+    ConsoleWrite(" driver-tagged=");
+    WriteU64Dec(duetos::security::DriverDomainCount());
+    ConsoleWrite(" initcalls=");
+    WriteU64Dec(duetos::core::InitcallCount());
+    ConsoleWriteChar('\n');
+}
+
+// `inspect entropy` — current tier + per-source counters.
+void CmdInspectEntropy()
+{
+    const auto s = duetos::core::RandomStatsRead();
+    const auto tier = duetos::core::RandomCurrentTier();
+    static const char* tier_name[] = {"Splitmix", "Rdrand", "Rdseed"};
+    ConsoleWrite("INSPECT ENTROPY: tier=");
+    ConsoleWrite(tier_name[static_cast<u8>(tier)]);
+    ConsoleWrite(" rdseed=");
+    WriteU64Dec(s.rdseed_successes);
+    ConsoleWriteChar('/');
+    WriteU64Dec(s.rdseed_calls);
+    ConsoleWrite(" rdrand=");
+    WriteU64Dec(s.rdrand_successes);
+    ConsoleWriteChar('/');
+    WriteU64Dec(s.rdrand_calls);
+    ConsoleWrite(" splitmix=");
+    WriteU64Dec(s.splitmix_calls);
+    ConsoleWrite(" bytes=");
+    WriteU64Dec(s.bytes_produced);
+    ConsoleWriteChar('\n');
+}
+
 // `inspect rcu` — RCU subsystem counters (queued / completed
 // / inversions / current tick). Cheap; pairs with `domain
 // restart rcu` (no such domain today) for diagnostic flow.
@@ -987,6 +1060,21 @@ void CmdInspect(u32 argc, char** argv)
     if (StrEq(argv[1], "counters"))
     {
         CmdInspectCounters();
+        return;
+    }
+    if (StrEq(argv[1], "ipc"))
+    {
+        CmdInspectIpc();
+        return;
+    }
+    if (StrEq(argv[1], "security"))
+    {
+        CmdInspectSecurity();
+        return;
+    }
+    if (StrEq(argv[1], "entropy"))
+    {
+        CmdInspectEntropy();
         return;
     }
     if (StrEq(argv[1], "help"))
