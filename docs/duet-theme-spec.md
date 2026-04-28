@@ -1,0 +1,261 @@
+# Duet theme — design spec (v0)
+
+This spec translates the React/Babel prototype under
+`docs/duet-theme/prototype/` into terms the existing DuetOS
+framebuffer compositor and `kernel/drivers/video/theme.h` `Theme`
+struct can express. It is the source of truth that
+`kernel/drivers/video/theme.cpp`'s `kDuet` palette, future
+chrome work, and the eventual user-mode shell port will all be
+measured against.
+
+## Personality (short form)
+
+> Refined, confident, calm. Two interlocking arcs as the
+> logomark; **two** accent colours (teal = native DuetOS,
+> amber = Win32 PE peer) that visually distinguish ABIs throughout
+> the UI. Win7/10 grammar (bottom taskbar with Start | search |
+> pinned | tray | clock) rendered in DuetOS's own visual language —
+> no Microsoft chrome lifted verbatim.
+
+Where the prototype offers three modes (`slate` / `light` /
+`classic`), v0 of the kernel-side Duet palette ships **slate**
+only. Slate is the default mode in the prototype, the only one
+needed to hit "land Duet alongside Classic / Slate10 / Amber",
+and the only one whose contrast story works with the existing
+single-buffer framebuffer (no compositor backdrop blur, no
+alpha). Light + Classic Duet variants are deferred to a later
+slice (see "Deferred to follow-on slices" below).
+
+## Palette translation — slate (default)
+
+The prototype defines its surfaces as CSS custom properties
+(`--bg-1`, `--chrome`, `--ink`, `--accent`, …) inside
+`docs/duet-theme/prototype/desktop.html`. The kernel `Theme`
+struct (see `kernel/drivers/video/theme.h`) is flat: one 32-bit
+ARGB value per role. The mapping below picks a single
+representative shade for each prototype token, prioritising the
+surface the role paints most often.
+
+| Role (`Theme` field)         | Source token (slate)            | Hex (ARGB) | Notes |
+|------------------------------|---------------------------------|------------|-------|
+| `desktop_bg`                 | `--bg-1` deep canvas            | `0x000B0E13` | Same as prototype `:root[data-theme="slate"]` |
+| `banner_fg`                  | `--ink`                         | `0x00E8EDF2` | Slate ink — also taskbar fg |
+| `taskbar_bg`                 | `--chrome-2`                    | `0x001C222B` | Prototype taskbar surface |
+| `taskbar_fg`                 | `--ink-2`                       | `0x00AEB7C2` | Secondary ink for inactive labels |
+| `taskbar_accent`             | `--accent` (teal)               | `0x002DD4BF` | Start + active-tab indicator |
+| `taskbar_tab_inactive`       | `--chrome-3`                    | `0x000F1319` | Recess panel |
+| `taskbar_border`             | `--line-2`                      | `0x001E2530` | Approx of `rgba(255,255,255,.12)` flattened over chrome |
+| `window_border`              | `--line-2` flattened            | `0x002A323C` | Slightly brighter to read against chrome |
+| `window_close`               | red-hover close                 | `0x00E3413C` | Prototype `TitleBtn` close hover |
+| `console_fg`                 | `--ink` (mono)                  | `0x00E8EDF2` | JetBrains-Mono ink in code views |
+| `console_bg`                 | `--chrome-3`                    | `0x000F1319` | "Slate panel — log view ground" |
+
+### Per-role title + client
+
+The prototype distinguishes apps by **icon hue** (teal for
+native, amber for Win32) and chrome consistency, not by title
+hue. To preserve the existing DuetOS "title-hue carries app
+identity" invariant inside the new palette without breaking it,
+each role gets a Duet-specific title hue derived from
+`--accent` / `--accent-2` / a near-neutral chrome.
+
+| Role        | Title hue (rationale)                         | Title hex   | Client hex (`--chrome-3`-ish) |
+|-------------|-----------------------------------------------|-------------|-------------------------------|
+| Calculator  | Teal-tinted chrome (utility, native primary)  | `0x00207A6F` | `0x00141A22` |
+| Notes       | Amber-tinted chrome (paper analogue)          | `0x00805E20` | `0x00F3F0E6` cream |
+| TaskManager | Deeper teal (telemetry, primary)              | `0x00164D45` | `0x00141A22` |
+| LogView     | Slate panel (mono content, no hue)            | `0x00161B23` | `0x000F1319` |
+| Files       | Amber-tinted chrome (document storage)        | `0x00604818` | `0x00141A22` |
+| Clock       | Slate panel (passive widget)                  | `0x00141822` | `0x000B0E13` near-black ground |
+| GfxDemo     | Magenta accent (overpaint marker)             | `0x00702070` | `0x00000000` black |
+
+The two-accent "duet" story remains visible: native (teal-tint)
+apps cluster on the cool side, Win32-flavoured apps (Notes ≈
+"document", Files ≈ "documents") on the warm side. The
+distinction matches the prototype's icon palette.
+
+## Type stack — addressed for v0
+
+The prototype calls for **Inter** (UI) and **JetBrains Mono**
+(kernel/inspect/log) at sizes `10 / 10.5 / 11 / 11.5 / 12 / 14
+/ 18`.
+
+Today the kernel renderer ships a single 8×8 bitmap font
+(`kernel/drivers/video/font8x8.h`). No TTF rasterizer, no
+sub-pixel sizes. That gap is a Phase 6 prerequisite, not a
+blocker for the palette landing — the existing themes draw with
+the same font and look correct in their own terms.
+
+For the v0 Duet palette: `console_fg` / `console_bg` are
+verified against the 8×8 font's contrast budget, identical to
+how Slate10 and Amber were tuned. When a TTF rasterizer lands,
+the Duet `Theme` does not change — the font stack is per-app
+state, not theme state.
+
+## Window chrome — what the prototype wants vs. what we ship
+
+| Prototype spec                                         | Ships in v0 Duet palette? | Notes |
+|--------------------------------------------------------|---------------------------|-------|
+| 30-px titlebar (26-px in compact)                      | No (height owned by widget code, not theme) | See "Phase 3 prerequisites" |
+| 1-px border                                            | Yes — `window_border` is sampled by the existing border-draw path |
+| 6-px corner radius (0 when maximized)                  | No — framebuffer has no rounded-rect primitive |
+| Vertical gradient on focus titlebar                    | No — framebuffer has no gradient primitive |
+| Square title buttons, 46-px wide                       | No (widget code) |
+| Red-on-hover close button                              | Yes — `window_close = 0x00E3413C` matches the prototype's `TitleBtn` close hover |
+| 3% dim on unfocused windows                            | No — compositor has no per-window alpha |
+
+## Taskbar — same delta
+
+| Prototype spec                                         | Ships in v0 Duet palette? | Notes |
+|--------------------------------------------------------|---------------------------|-------|
+| 44-px (compact 38-px) bar                              | No — taskbar height fixed in `taskbar.cpp` |
+| 4 positions (bottom/top/left/right)                    | No — taskbar position fixed |
+| Accent-rail "Show desktop" sliver                      | No — would be a new widget |
+| 2-px tall focus dot under running apps (8 / 14 px)     | No — would be a new widget paint mode |
+| Bottom-default w/ Start | search | pinned | tray | clock | Already shipping in this layout — colours sampled from Duet palette transparently |
+
+## Start menu — unchanged
+
+The kernel side has a `menu.cpp` (start-menu equivalent). It
+already samples `taskbar_accent` and `taskbar_fg`. Duet's
+palette flows through it without code change: the menu paints
+teal accents on a slate panel.
+
+A 520×540 modeless panel with a 3-col pinned grid, recommended
+column, recents column, and user/power footer is a Phase 5
+deliverable, not a palette deliverable.
+
+## DuetMark — geometry
+
+Two counter-rotating arcs forming a "D":
+
+```
+arc A: circle( cx = c - size*0.08, cy = c, r = size*0.34 )
+       stroke = accent (teal)
+       stroke-dasharray = (r*PI*1.05, r*PI*2)   // shows ~52% of the circle
+       rotate(-30deg) about its own centre
+
+arc B: circle( cx = c + size*0.08, cy = c, r = size*0.34 )
+       stroke = accent-2 (amber)
+       stroke-dasharray = (r*PI*1.05, r*PI*2)
+       rotate(150deg) about its own centre
+
+stroke-width = max(1.6, size * 0.11)
+stroke-linecap = round
+```
+
+Reproduced in `kernel/drivers/video/menu.cpp` would require
+either a parametric arc rasterizer or a bake-to-bitmap pass at
+build time. The existing renderer can already draw a filled or
+outlined ellipse (`WindowClientFillEllipse` /
+`WindowClientDrawEllipse`); a "draw partial-arc stroke" call
+would be a small extension.
+
+For v0 the Start button paints the existing 3-letter "D u e"
+glyph in `taskbar_fg` over `taskbar_accent`, matching how
+Classic / Slate10 / Amber draw it today.
+
+## Wallpaper — same approach
+
+The prototype offers `duet-arcs`, `topo`, `syscalls` SVG-based
+wallpapers. The framebuffer paints solid `desktop_bg` today.
+The Duet `desktop_bg = 0x000B0E13` reads as the prototype's
+`--bg-1` colour with no path strokes — the wallpaper subsystem
+proper is Phase 7 work.
+
+## Scope inside this slice
+
+Phase 2 lands strictly:
+
+1. The `kDuet` palette literal, mirroring `kSlate10` and
+   `kClassic` in shape, in `kernel/drivers/video/theme.cpp`.
+2. `ThemeId::Duet` after `Amber` in the enum, with `kCount`
+   bumped.
+3. The new entry registered in `kThemes[]`.
+4. `ThemeSelfTest` extended to cover the new id (its loop
+   already iterates `kCount`, so it picks Duet up automatically;
+   the only check is that the palette literal is non-default).
+5. No changes to `Ctrl+Alt+Y` handler logic — `ThemeCycle`
+   already wraps over `kCount` and now visits Duet as the
+   fourth entry.
+
+## Phase 3+ prerequisites (what greenlights look like)
+
+These are the new framebuffer primitives, kernel APIs, and
+userland surfaces that the prototype assumes but DuetOS doesn't
+ship yet. Each is its own slice — none are inside this commit.
+
+- **Framebuffer primitives**
+  - `FramebufferFillRectAlpha(x, y, w, h, argb)` — pre-multiplied
+    alpha-over composite, needed for all the prototype's
+    `color-mix` accent washes.
+  - `FramebufferFillRectGradient(x, y, w, h, top_rgb, bot_rgb)` —
+    vertical gradient, needed for focus titlebars and Start
+    menu header.
+  - `FramebufferFillRoundRect(x, y, w, h, radius, rgb)` — needed
+    for 6-px window corners and pill widgets.
+  - `FramebufferStrokePath(...)` — vector path stroking for the
+    DuetMark arcs and the `duet-arcs` wallpaper. May land as a
+    cubic-Bézier flattener.
+- **Font subsystem**
+  - TTF/OTF rasterizer (FreeType-style) so Inter and JetBrains
+    Mono can render at the prototype's seven sizes. Existing
+    8×8 bitmap stays as the kernel-console fallback.
+- **Compositor**
+  - Per-window alpha so unfocused windows can dim 3%.
+  - Per-window rounded-corner mask.
+  - Optional decoration "subtitle" slot on the titlebar
+    (additive `WindowSetSubtitle(handle, str)`).
+- **Userland**
+  - A user-mode shell process (today the Start menu / taskbar
+    are kernel widgets). Until that lands, "Duet shell" is
+    additive paint policy on the existing kernel taskbar.
+  - `~/.config/duet/shell.toml` reader. Requires a TOML parser
+    in userland (or in the shell, with parsing bounded to a
+    sub-process).
+- **New procfs / sysfs entries (proposals — wait for greenlight)**
+  - `/proc/cpuhist` — 60-sample ring of per-core utilisation
+    percent, sampled at the scheduler tick. Needed by Task
+    Manager Performance.
+  - `/sys/inspect/<pid_or_path>` — exposes the existing PE
+    parser's section table, import descriptors, and disasm
+    iterator over a fd interface. Needed by Inspect.
+  - `/proc/abi/native` and `/proc/abi/win32` — the syscall and
+    DLL/export tables, already enumerated in-kernel; needs an
+    fd surface.
+  - `/sys/syscalls` — string-table view of the syscall numbers
+    so the Start menu's search bar can resolve `58` or
+    `WIN_CREATE` to the real syscall.
+- **Boot trace**
+  - The kernel already records a boot trace; expose it as
+    `/proc/boottrace` so Task Manager → Startup can read it.
+
+## Deferred to follow-on slices
+
+- Light + Classic-mode Duet palettes (the prototype's
+  alternates).
+- All of the prototype's accent variants beyond
+  teal-amber (`blue`, `violet`, `amber`, `duet-green`). v0
+  ships teal-amber only; further accents are a one-line palette
+  duplication once the chrome upgrade lands.
+- DuetMark-as-Start-glyph in the kernel taskbar.
+- Three Duet wallpapers in the framebuffer.
+- All Phase 4–9 chrome / shell / app / widget / cleanup work
+  (each is its own slice; this spec only commits to the Phase
+  1 + Phase 2 deliverables).
+
+## Files this spec touches in v0
+
+- `docs/duet-theme-spec.md` (this file).
+- `kernel/drivers/video/theme.h`: extends `ThemeId` with
+  `Duet`, bumps `kCount`. ABI-additive — existing
+  `Classic/Slate10/Amber` numeric values unchanged.
+- `kernel/drivers/video/theme.cpp`: adds the `kDuet` palette
+  literal and registers it in `kThemes[]`. `ThemeSelfTest` is
+  unchanged in code (its loop already covers `kCount`); the
+  test is exercised against the new id at boot.
+
+That's it. No widget changes, no compositor changes, no
+userland changes. Cycle order on `Ctrl+Alt+Y` becomes:
+
+> Classic → Slate10 → Amber → **Duet** → (wraps)

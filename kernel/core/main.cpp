@@ -667,9 +667,9 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // repaint the whole surface with one call.
     //
     // Initial theme selection honours the kernel cmdline
-    // (theme=classic / theme=slate10); default is the classic
-    // teal palette the first GUI slice shipped. Ctrl+Alt+Y
-    // cycles at runtime.
+    // (theme=classic / theme=slate10 / theme=amber / theme=duet);
+    // default is the classic teal palette the first GUI slice
+    // shipped. Ctrl+Alt+Y cycles at runtime.
     {
         const char* early_cmdline = FindBootCmdline(multiboot_info);
         for (int i = 0; i < static_cast<int>(duetos::drivers::video::ThemeId::kCount); ++i)
@@ -1743,10 +1743,12 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             }
 
             // Ctrl+Alt+Y cycles the desktop theme. Classic (teal)
-            // -> Slate10 (Win10 x Unreal Slate hybrid) -> wrap.
-            // Re-chromes every themed window + the taskbar +
-            // console + cursor backing, then recomposes so the
-            // new palette appears on screen in one flip.
+            // -> Slate10 (Win10 x Unreal Slate hybrid) -> Amber
+            // (mono CRT tribute) -> Duet (redesigned palette,
+            // teal+amber dual accent) -> wrap. Re-chromes every
+            // themed window + the taskbar + console + cursor
+            // backing, then recomposes so the new palette appears
+            // on screen in one flip.
             if (ctrl && alt && (ev.code == 'y' || ev.code == 'Y'))
             {
                 duetos::drivers::video::CompositorLock();

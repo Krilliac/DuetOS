@@ -37,11 +37,19 @@
  *               stress test for the theme system — any code that
  *               silently assumes multi-hue contrast shows up here
  *               first.
+ *   - Duet    : the in-progress redesigned palette. Slate-charcoal
+ *               canvas, dual-accent (teal = native ABI, amber =
+ *               Win32 PE peer) so ABI distinctions read at a glance.
+ *               Translates the React/Babel prototype under
+ *               docs/duet-theme/prototype/ — slate mode only — into
+ *               the same flat-token shape the other three themes
+ *               use. See docs/duet-theme-spec.md for the per-token
+ *               source-of-truth.
  *
  * Switching themes is a runtime operation (Ctrl+Alt+Y cycles, the
  * `theme` shell command switches or cycles by name, or
- * `theme=slate10` / `theme=classic` / `theme=amber` on the kernel
- * cmdline picks at boot). ThemeApplyToAll re-publishes every chrome
+ * `theme=slate10` / `theme=classic` / `theme=amber` / `theme=duet`
+ * on the kernel cmdline picks at boot). ThemeApplyToAll re-publishes every chrome
  * colour into the window registry + taskbar + console + cursor
  * backing, then the caller triggers a DesktopCompose to paint the
  * result.
@@ -59,7 +67,8 @@ enum class ThemeId : u8
     Classic = 0,
     Slate10 = 1,
     Amber = 2,
-    kCount = 3,
+    Duet = 3,
+    kCount = 4,
 };
 
 /// Stable role tag for each application window whose chrome is
