@@ -187,6 +187,16 @@ if [[ $fail -ne 0 ]]; then
     tail -200 "${SERIAL_LOG}" || true
     echo "=== smoke marker grep: any [smoke] / [boot] >>>/<<< / [panic] lines ==="
     grep -aE '^\[smoke\]|^\[boot\] >>>|^\[boot\] <<<|^\[panic\]|DUETOS CRASH' "${SERIAL_LOG}" || true
+    echo "=== expected signature presence map ==="
+    for sig in "${expected[@]}"; do
+        if grep -aF "$sig" "${SERIAL_LOG}" > /dev/null; then
+            printf '  PRESENT : %s\n' "$sig"
+        else
+            printf '  MISSING : %s\n' "$sig"
+        fi
+    done
+    echo "=== relevant ring3 / PE / Linux output (probe payload check) ==="
+    grep -aE '^\[hello-pe\]|^\[hello-winapi\]|^\[vcruntime140\]|^\[strings\]|^\[heap\]|^\[advapi\]|^\[perf-counter\]|^\[heap-resize\]|^\[calc\]|^\[files\]|^\[clock\]|^\[block\]|^Hello from ring 3|^DuetOS v0|^Windows Kill|^\[ring3\] pe spawn|exit rc' "${SERIAL_LOG}" | head -40 || true
 
     # Distinguish a real regression from a flake. If the kernel
     # reached the [smoke] complete sentinel for THIS profile, but

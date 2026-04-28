@@ -58,6 +58,7 @@
 #include "mm/kstack.h"
 #include "mm/paging.h"
 #include "sync/spinlock.h"
+#include "util/string.h"
 
 namespace duetos::sched
 {
@@ -585,6 +586,12 @@ void SchedInit()
     {
         PanicSched("KMalloc failed for boot task");
     }
+    // Zero the struct before any field assignment. Same reasoning
+    // as ProcessCreate / AddressSpaceCreate: KMalloc returns memory
+    // post-C2-frame-poison (0xDE bytes) and the explicit field
+    // assignments below don't cover every field — anything left
+    // unset would carry the poison and dereference garbage.
+    memset(boot_task, 0, sizeof(Task));
 
     boot_task->id = g_next_task_id++;
     boot_task->state = TaskState::Running;
@@ -635,6 +642,10 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
     {
         PanicSched("KMalloc failed for Task");
     }
+    // Zero the struct first; explicit assignments below overwrite the
+    // fields we care about, but any field NOT covered would otherwise
+    // read 0xDE-byte freed-page poison.
+    memset(t, 0, sizeof(Task));
 
     // Kernel stacks come from the guard-paged arena, not the heap:
     // a 4 KiB unmapped page sits just below every slot's usable
