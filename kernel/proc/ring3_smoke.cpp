@@ -2066,13 +2066,31 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         const char* label; // diagnostic name for boot-log
         const u8* bytes;   // kernel direct-map pointer to the blob
         u64 len;           // blob size in bytes
+        bool essential;    // false = skip under arch::IsEmulator() to
+                           //         keep the per-PE preload chain
+                           //         short on CI (each DllLoad is a
+                           //         page alloc + PE parse + EAT walk;
+                           //         under TCG/oversubscribed-KVM that
+                           //         compounds to seconds of guest
+                           //         time per PE × 2 Win32 PEs left
+                           //         in the post-trim emulator path).
+                           //         "essential" = the 3 essential
+                           //         PEs (hello-pe, hello-winapi,
+                           //         winkill) actually walk one of
+                           //         this DLL's exports during their
+                           //         imported-function chain.
     };
     // `static` so the array lives in .rodata and the
     // initializer doesn't compile to a runtime memcpy from a
     // template — the kernel doesn't link libc.
     static const PreloadDllEntry preload_set[] = {
-        {"customdll.dll", fs::generated::kBinCustomDllBytes, fs::generated::kBinCustomDllBytes_len},
-        {"customdll2.dll", fs::generated::kBinCustomDll2Bytes, fs::generated::kBinCustomDll2Bytes_len},
+        // customdll{,2}.dll — fixtures for ring3-customdll-test,
+        // which is itself gated under !emulator. Skip the preload
+        // when the consumer isn't going to spawn.
+        {"customdll.dll", fs::generated::kBinCustomDllBytes, fs::generated::kBinCustomDllBytes_len,
+         /*essential=*/false},
+        {"customdll2.dll", fs::generated::kBinCustomDll2Bytes, fs::generated::kBinCustomDll2Bytes_len,
+         /*essential=*/false},
         // kernel32.dll — 32 exports covering process/thread
         // identity, pseudo-handles, last-error, terminators,
         // safe-ignore shims, GetStdHandle, Sleep /
@@ -2081,83 +2099,121 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         // ResolveImports matches kernel32.dll BEFORE falling
         // through to the hand-assembled stubs page. Stubs stay
         // as dead-code fallback; sweep later.
-        {"kernel32.dll", fs::generated::kBinKernel32DllBytes, fs::generated::kBinKernel32DllBytes_len},
+        {"kernel32.dll", fs::generated::kBinKernel32DllBytes, fs::generated::kBinKernel32DllBytes_len,
+         /*essential=*/true},
         // vcruntime140.dll — memset / memcpy / memmove. Every
         // MSVC-built PE calls these for struct copy / zero-init
         // / CRT startup. The via-DLL path now fires for each.
-        {"vcruntime140.dll", fs::generated::kBinVcruntime140DllBytes, fs::generated::kBinVcruntime140DllBytes_len},
+        {"vcruntime140.dll", fs::generated::kBinVcruntime140DllBytes, fs::generated::kBinVcruntime140DllBytes_len,
+         /*essential=*/true},
         // msvcrt.dll — string intrinsics
         // (strlen / strcmp / strcpy / strchr + wide variants).
         // Retires the corresponding flat stubs.
-        {"msvcrt.dll", fs::generated::kBinMsvcrtDllBytes, fs::generated::kBinMsvcrtDllBytes_len},
+        {"msvcrt.dll", fs::generated::kBinMsvcrtDllBytes, fs::generated::kBinMsvcrtDllBytes_len,
+         /*essential=*/true},
         // ucrtbase.dll — UCRT runtime: heap
         // (malloc/free/calloc/realloc/_aligned_*), terminators
         // (exit/_exit), CRT startup shims (_initterm,
         // _set_app_type, ...), string intrinsics. Retires the
         // corresponding flat stubs.
-        {"ucrtbase.dll", fs::generated::kBinUcrtbaseDllBytes, fs::generated::kBinUcrtbaseDllBytes_len},
+        {"ucrtbase.dll", fs::generated::kBinUcrtbaseDllBytes, fs::generated::kBinUcrtbaseDllBytes_len,
+         /*essential=*/true},
         // ntdll.dll — Nt* / Zw* / Rtl* / Ldr* / __chkstk.
         // 108 exports. Retires the prior ntdll flat stubs.
         // Zw* are same-DLL forwarders to Nt*;
         // STATUS_NOT_IMPLEMENTED aliases centralise on
         // NtReturnNotImpl.
-        {"ntdll.dll", fs::generated::kBinNtdllDllBytes, fs::generated::kBinNtdllDllBytes_len},
+        {"ntdll.dll", fs::generated::kBinNtdllDllBytes, fs::generated::kBinNtdllDllBytes_len,
+         /*essential=*/true},
         // dbghelp.dll — 11 Sym* / StackWalk / MiniDumpWriteDump
         // no-ops. Callers check returns; v0 has no PDB parser
         // or stack walker.
-        {"dbghelp.dll", fs::generated::kBinDbghelpDllBytes, fs::generated::kBinDbghelpDllBytes_len},
+        {"dbghelp.dll", fs::generated::kBinDbghelpDllBytes, fs::generated::kBinDbghelpDllBytes_len,
+         /*essential=*/true},
         // msvcp140.dll — 17 C++ std:: throw helpers + ostream
         // stubs via mangled-name .def aliases. Throw paths
         // terminate with SYS_EXIT(3).
-        {"msvcp140.dll", fs::generated::kBinMsvcp140DllBytes, fs::generated::kBinMsvcp140DllBytes_len},
+        {"msvcp140.dll", fs::generated::kBinMsvcp140DllBytes, fs::generated::kBinMsvcp140DllBytes_len,
+         /*essential=*/true},
         // kernelbase.dll — pure forwarders to kernel32.dll
         // (44 entries). Resolved at IAT-patch time via the
         // forwarder chaser.
-        {"kernelbase.dll", fs::generated::kBinKernelbaseDllBytes, fs::generated::kBinKernelbaseDllBytes_len},
+        {"kernelbase.dll", fs::generated::kBinKernelbaseDllBytes, fs::generated::kBinKernelbaseDllBytes_len,
+         /*essential=*/true},
         // advapi32.dll — Reg* (not-found),
         // token/privilege (success), GetUserName* (constant),
         // SystemFunction036 (deterministic RNG). 25 exports.
-        {"advapi32.dll", fs::generated::kBinAdvapi32DllBytes, fs::generated::kBinAdvapi32DllBytes_len},
+        {"advapi32.dll", fs::generated::kBinAdvapi32DllBytes, fs::generated::kBinAdvapi32DllBytes_len,
+         /*essential=*/true},
         // Small stub DLLs for misc support surface. Most
         // return "not found" / success sentinels;
         // CoTaskMem* + SysAllocString alias the process heap.
-        {"shlwapi.dll", fs::generated::kBinShlwapiDllBytes, fs::generated::kBinShlwapiDllBytes_len},
-        {"shell32.dll", fs::generated::kBinShell32DllBytes, fs::generated::kBinShell32DllBytes_len},
-        {"ole32.dll", fs::generated::kBinOle32DllBytes, fs::generated::kBinOle32DllBytes_len},
-        {"oleaut32.dll", fs::generated::kBinOleaut32DllBytes, fs::generated::kBinOleaut32DllBytes_len},
-        {"winmm.dll", fs::generated::kBinWinmmDllBytes, fs::generated::kBinWinmmDllBytes_len},
-        {"bcrypt.dll", fs::generated::kBinBcryptDllBytes, fs::generated::kBinBcryptDllBytes_len},
-        {"psapi.dll", fs::generated::kBinPsapiDllBytes, fs::generated::kBinPsapiDllBytes_len},
+        {"shlwapi.dll", fs::generated::kBinShlwapiDllBytes, fs::generated::kBinShlwapiDllBytes_len,
+         /*essential=*/false},
+        {"shell32.dll", fs::generated::kBinShell32DllBytes, fs::generated::kBinShell32DllBytes_len,
+         /*essential=*/false},
+        {"ole32.dll", fs::generated::kBinOle32DllBytes, fs::generated::kBinOle32DllBytes_len,
+         /*essential=*/false},
+        {"oleaut32.dll", fs::generated::kBinOleaut32DllBytes, fs::generated::kBinOleaut32DllBytes_len,
+         /*essential=*/false},
+        // winmm.dll — perf-counter / GetTickCount routes for
+        // hello-winapi's [perf-counter] required-signature line.
+        {"winmm.dll", fs::generated::kBinWinmmDllBytes, fs::generated::kBinWinmmDllBytes_len,
+         /*essential=*/true},
+        {"bcrypt.dll", fs::generated::kBinBcryptDllBytes, fs::generated::kBinBcryptDllBytes_len,
+         /*essential=*/false},
+        {"psapi.dll", fs::generated::kBinPsapiDllBytes, fs::generated::kBinPsapiDllBytes_len,
+         /*essential=*/false},
         // DirectX + user32 / gdi32 return-constant tier. Every
         // DirectX entry returns E_NOTIMPL; GetDC returns a
         // sentinel so windowed programs don't null-check-fail
         // at HDC acquisition. Full GUI/drawing stack remains
         // deferred.
-        {"d3d9.dll", fs::generated::kBinD3d9DllBytes, fs::generated::kBinD3d9DllBytes_len},
-        {"d3d11.dll", fs::generated::kBinD3d11DllBytes, fs::generated::kBinD3d11DllBytes_len},
-        {"d3d12.dll", fs::generated::kBinD3d12DllBytes, fs::generated::kBinD3d12DllBytes_len},
-        {"dxgi.dll", fs::generated::kBinDxgiDllBytes, fs::generated::kBinDxgiDllBytes_len},
-        {"user32.dll", fs::generated::kBinUser32DllBytes, fs::generated::kBinUser32DllBytes_len},
-        {"gdi32.dll", fs::generated::kBinGdi32DllBytes, fs::generated::kBinGdi32DllBytes_len},
+        {"d3d9.dll", fs::generated::kBinD3d9DllBytes, fs::generated::kBinD3d9DllBytes_len,
+         /*essential=*/false},
+        {"d3d11.dll", fs::generated::kBinD3d11DllBytes, fs::generated::kBinD3d11DllBytes_len,
+         /*essential=*/false},
+        {"d3d12.dll", fs::generated::kBinD3d12DllBytes, fs::generated::kBinD3d12DllBytes_len,
+         /*essential=*/false},
+        {"dxgi.dll", fs::generated::kBinDxgiDllBytes, fs::generated::kBinDxgiDllBytes_len,
+         /*essential=*/false},
+        {"user32.dll", fs::generated::kBinUser32DllBytes, fs::generated::kBinUser32DllBytes_len,
+         /*essential=*/false},
+        {"gdi32.dll", fs::generated::kBinGdi32DllBytes, fs::generated::kBinGdi32DllBytes_len,
+         /*essential=*/false},
         // Networking / crypto / common UI / version / setup.
         // All stubs — real Windows programs that import these
         // typically check returns and gracefully fall back.
-        {"ws2_32.dll", fs::generated::kBinWs2_32DllBytes, fs::generated::kBinWs2_32DllBytes_len},
-        {"wininet.dll", fs::generated::kBinWininetDllBytes, fs::generated::kBinWininetDllBytes_len},
-        {"winhttp.dll", fs::generated::kBinWinhttpDllBytes, fs::generated::kBinWinhttpDllBytes_len},
-        {"crypt32.dll", fs::generated::kBinCrypt32DllBytes, fs::generated::kBinCrypt32DllBytes_len},
-        {"comctl32.dll", fs::generated::kBinComctl32DllBytes, fs::generated::kBinComctl32DllBytes_len},
-        {"comdlg32.dll", fs::generated::kBinComdlg32DllBytes, fs::generated::kBinComdlg32DllBytes_len},
-        {"version.dll", fs::generated::kBinVersionDllBytes, fs::generated::kBinVersionDllBytes_len},
-        {"setupapi.dll", fs::generated::kBinSetupapiDllBytes, fs::generated::kBinSetupapiDllBytes_len},
+        {"ws2_32.dll", fs::generated::kBinWs2_32DllBytes, fs::generated::kBinWs2_32DllBytes_len,
+         /*essential=*/false},
+        {"wininet.dll", fs::generated::kBinWininetDllBytes, fs::generated::kBinWininetDllBytes_len,
+         /*essential=*/false},
+        {"winhttp.dll", fs::generated::kBinWinhttpDllBytes, fs::generated::kBinWinhttpDllBytes_len,
+         /*essential=*/false},
+        {"crypt32.dll", fs::generated::kBinCrypt32DllBytes, fs::generated::kBinCrypt32DllBytes_len,
+         /*essential=*/false},
+        {"comctl32.dll", fs::generated::kBinComctl32DllBytes, fs::generated::kBinComctl32DllBytes_len,
+         /*essential=*/false},
+        {"comdlg32.dll", fs::generated::kBinComdlg32DllBytes, fs::generated::kBinComdlg32DllBytes_len,
+         /*essential=*/false},
+        {"version.dll", fs::generated::kBinVersionDllBytes, fs::generated::kBinVersionDllBytes_len,
+         /*essential=*/false},
+        {"setupapi.dll", fs::generated::kBinSetupapiDllBytes, fs::generated::kBinSetupapiDllBytes_len,
+         /*essential=*/false},
         // Six more support DLLs — IP helper, user env,
         // terminal services, DWM, theming, SSPI.
-        {"iphlpapi.dll", fs::generated::kBinIphlpapiDllBytes, fs::generated::kBinIphlpapiDllBytes_len},
-        {"userenv.dll", fs::generated::kBinUserenvDllBytes, fs::generated::kBinUserenvDllBytes_len},
-        {"wtsapi32.dll", fs::generated::kBinWtsapi32DllBytes, fs::generated::kBinWtsapi32DllBytes_len},
-        {"dwmapi.dll", fs::generated::kBinDwmapiDllBytes, fs::generated::kBinDwmapiDllBytes_len},
-        {"uxtheme.dll", fs::generated::kBinUxthemeDllBytes, fs::generated::kBinUxthemeDllBytes_len},
-        {"secur32.dll", fs::generated::kBinSecur32DllBytes, fs::generated::kBinSecur32DllBytes_len},
+        {"iphlpapi.dll", fs::generated::kBinIphlpapiDllBytes, fs::generated::kBinIphlpapiDllBytes_len,
+         /*essential=*/false},
+        {"userenv.dll", fs::generated::kBinUserenvDllBytes, fs::generated::kBinUserenvDllBytes_len,
+         /*essential=*/false},
+        {"wtsapi32.dll", fs::generated::kBinWtsapi32DllBytes, fs::generated::kBinWtsapi32DllBytes_len,
+         /*essential=*/false},
+        {"dwmapi.dll", fs::generated::kBinDwmapiDllBytes, fs::generated::kBinDwmapiDllBytes_len,
+         /*essential=*/false},
+        {"uxtheme.dll", fs::generated::kBinUxthemeDllBytes, fs::generated::kBinUxthemeDllBytes_len,
+         /*essential=*/false},
+        {"secur32.dll", fs::generated::kBinSecur32DllBytes, fs::generated::kBinSecur32DllBytes_len,
+         /*essential=*/false},
     };
     constexpr u64 kPreloadEntryCount = sizeof(preload_set) / sizeof(preload_set[0]);
     static_assert(kPreloadEntryCount <= kPreloadSlotCap, "Preload DLL list exceeds stack-local cap");
@@ -2173,6 +2229,19 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     {
         for (u64 i = 0; i < kPreloadEntryCount; ++i)
         {
+            // Under emulator: only preload entries marked
+            // essential. The 3 PEs the boot smoke actually
+            // checks (hello-pe, hello-winapi, winkill) walk
+            // imports out of kernel32 / vcruntime140 / msvcrt /
+            // ucrtbase / ntdll / dbghelp / msvcp140 / kernelbase /
+            // advapi32 / winmm — every other DLL in the table is
+            // a stub that the runtime never reaches. Skipping
+            // them here trims ~26 DllLoads × 2 import-bearing PEs
+            // off the post-bringup wall budget.
+            if (emulator_pe_report && !preload_set[i].essential)
+            {
+                continue;
+            }
             const DllLoadResult dll = DllLoad(preload_set[i].bytes, preload_set[i].len, as, /*aslr_delta=*/0);
             if (dll.status == DllLoadStatus::Ok)
             {
