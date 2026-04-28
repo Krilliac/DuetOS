@@ -32,6 +32,20 @@ duetos::sync::SpinLock g_serial_lock{};
 // contexts (NMI handler may race with the setter on another CPU).
 volatile u32 g_serial_panic_mode = 0;
 
+// Re-entry guard. The serial spinlock disables IRQs on acquire, but
+// TRAPS (#PF, #GP, NMI, #DB, ...) still fire while it's held. If the
+// trap handler logs anything via SerialWrite, the recursive
+// SpinLockAcquire would spin forever waiting for itself. To avoid
+// that, every Write* entry checks this flag first; if set, it bypasses
+// the lock and writes the bytes raw. The set must happen BEFORE the
+// SpinLockAcquire call so a trap that fires mid-acquire still sees
+// the flag set and bypasses cleanly.
+//
+// Single-CPU under QEMU today: a global volatile is sufficient
+// because there's only one CPU writing at a time. When multi-CPU
+// boots land in the smoke matrix, this graduates to a per-CPU array.
+volatile u32 g_serial_in_progress = 0;
+
 // Drive the UART directly. No locking, no panic-mode check — the
 // callers above have already decided whether they hold the lock or
 // have bypassed it. Each byte spins on the LSR transmit-empty bit
@@ -90,13 +104,15 @@ void SerialEnterPanicMode()
 
 void SerialWriteByte(u8 byte)
 {
-    if (g_serial_panic_mode)
+    if (g_serial_panic_mode || g_serial_in_progress)
     {
         WriteByteRaw(byte);
         return;
     }
+    g_serial_in_progress = 1;
     duetos::sync::SpinLockGuard guard(g_serial_lock);
     WriteByteRaw(byte);
+    g_serial_in_progress = 0;
 }
 
 void SerialWrite(const char* str)
@@ -106,7 +122,7 @@ void SerialWrite(const char* str)
         return;
     }
 
-    if (g_serial_panic_mode)
+    if (g_serial_panic_mode || g_serial_in_progress)
     {
         for (const char* p = str; *p != '\0'; ++p)
         {
@@ -115,11 +131,13 @@ void SerialWrite(const char* str)
         return;
     }
 
+    g_serial_in_progress = 1;
     duetos::sync::SpinLockGuard guard(g_serial_lock);
     for (const char* p = str; *p != '\0'; ++p)
     {
         WriteCharRaw(*p);
     }
+    g_serial_in_progress = 0;
 }
 
 void SerialWriteN(const char* data, u64 len)
@@ -129,7 +147,7 @@ void SerialWriteN(const char* data, u64 len)
         return;
     }
 
-    if (g_serial_panic_mode)
+    if (g_serial_panic_mode || g_serial_in_progress)
     {
         for (u64 i = 0; i < len; ++i)
         {
@@ -138,18 +156,20 @@ void SerialWriteN(const char* data, u64 len)
         return;
     }
 
+    g_serial_in_progress = 1;
     duetos::sync::SpinLockGuard guard(g_serial_lock);
     for (u64 i = 0; i < len; ++i)
     {
         WriteCharRaw(data[i]);
     }
+    g_serial_in_progress = 0;
 }
 
 void SerialWriteHex(u64 value)
 {
     static constexpr char kDigits[] = "0123456789abcdef";
 
-    if (g_serial_panic_mode)
+    if (g_serial_panic_mode || g_serial_in_progress)
     {
         WriteByteRaw('0');
         WriteByteRaw('x');
@@ -160,6 +180,7 @@ void SerialWriteHex(u64 value)
         return;
     }
 
+    g_serial_in_progress = 1;
     duetos::sync::SpinLockGuard guard(g_serial_lock);
     WriteByteRaw('0');
     WriteByteRaw('x');
@@ -167,6 +188,7 @@ void SerialWriteHex(u64 value)
     {
         WriteByteRaw(static_cast<u8>(kDigits[(value >> shift) & 0xF]));
     }
+    g_serial_in_progress = 0;
 }
 
 } // namespace duetos::arch
