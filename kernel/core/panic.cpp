@@ -9,6 +9,7 @@
 #include "cpu/percpu.h"
 #include "debug/probes.h"
 #include "diag/diag_decode.h"
+#include "diag/soft_lockup.h"
 #include "diag/hexdump.h"
 #include "log/klog.h"
 #include "util/symbols.h"
@@ -446,6 +447,7 @@ void Panic(const char* subsystem, const char* message)
     // want a PMI overflow re-entering the trap dispatcher while
     // DumpDiagnostics is writing.
     arch::NmiWatchdogDisable();
+    duetos::diag::SoftLockupDisable();
 
     // Broadcast NMI to peer CPUs so they stop fighting for the
     // serial line / executing against potentially-corrupt shared
@@ -478,6 +480,7 @@ void PanicWithValue(const char* subsystem, const char* message, u64 value)
 {
     arch::Cli();
     arch::NmiWatchdogDisable();
+    duetos::diag::SoftLockupDisable();
     arch::PanicBroadcastNmi();
 
     arch::SerialWrite("\n[panic] ");

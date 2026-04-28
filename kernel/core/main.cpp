@@ -107,7 +107,9 @@
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
 #include "ipc/handle_table.h"
+#include "diag/soft_lockup.h"
 #include "ipc/kevent.h"
+#include "ipc/kmailbox.h"
 #include "ipc/kmutex.h"
 #include "ipc/kobject.h"
 #include "ipc/ksemaphore.h"
@@ -451,11 +453,32 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     SerialWriteHex(FreeFramesCount());
     SerialWrite("\n");
 
-    FrameAllocatorSelfTest();
+    // Phase::PhysMem (plan A1-followup, continued migration). The
+    // FrameAllocator's init has inter-dependencies with the
+    // multiboot parse above, so it stays imperative — the
+    // VERIFICATION step (`FrameAllocatorSelfTest`) is the part
+    // that fits cleanly into the registry. Same pattern follows
+    // for Heap below: init imperative, self-test through
+    // RunPhase. As more subsystems gain init() functions whose
+    // ordering is verifiable through phase membership alone, the
+    // imperative tail shrinks.
+    duetos::core::InitcallRegister(duetos::core::Phase::PhysMem, "frame-allocator-selftest",
+                                   []()
+                                   {
+                                       FrameAllocatorSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    (void)duetos::core::RunPhase(duetos::core::Phase::PhysMem);
 
     SerialWrite("[boot] Bringing up kernel heap.\n");
     KernelHeapInit();
-    KernelHeapSelfTest();
+    duetos::core::InitcallRegister(duetos::core::Phase::Heap, "kernel-heap-selftest",
+                                   []()
+                                   {
+                                       KernelHeapSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    (void)duetos::core::RunPhase(duetos::core::Phase::Heap);
 
     KLOG_METRICS("boot", "after-kernel-heap");
 
@@ -1168,6 +1191,15 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     duetos::ipc::KMutexSelfTest();
     duetos::ipc::KEventSelfTest();
     duetos::ipc::KSemaphoreSelfTest();
+    duetos::ipc::KMailboxSelfTest();
+    // Soft-lockup detector (plan D4). The detector itself is
+    // already wired into the timer-IRQ tail (`OnTimerTick`), so
+    // a real lockup would already be surfaced; the self-test
+    // drives the state machine with synthesised inputs (idle
+    // skip, threshold trigger, rate limit, per-TID reset) to
+    // confirm the gating logic is correct before any real
+    // workload exercises it.
+    duetos::diag::SoftLockupSelfTest();
 
     SerialWrite("[boot] Bringing up PS/2 keyboard.\n");
     duetos::drivers::input::Ps2KeyboardInit();

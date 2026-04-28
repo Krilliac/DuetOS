@@ -42,6 +42,7 @@
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/traps.h"
 #include "diag/kdbg.h"
+#include "diag/soft_lockup.h"
 #include "log/klog.h"
 #include "core/panic.h"
 #include "proc/process.h"
@@ -1193,6 +1194,11 @@ void OnTimerTick(u64 now_ticks)
             ++g_idle_ticks;
         }
     }
+    // Soft-lockup detector (plan D4). Cheap (load + compare).
+    // Idle / kernel-boot tasks pass TID=0 which the detector
+    // ignores. A long-running same-TID streak across the
+    // threshold (~1 second) emits one warning per streak.
+    diag::SoftLockupTick(now_ticks, (cur != nullptr) ? TaskId(cur) : 0);
     if (cur != nullptr && cur->process != nullptr)
     {
         core::Process* proc = cur->process;
