@@ -1,6 +1,7 @@
 #include "loader/dll_loader.h"
 
 #include "arch/x86_64/serial.h"
+#include "log/klog.h"
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
 #include "mm/page.h"
@@ -334,8 +335,10 @@ const char* DllLoadStatusName(DllLoadStatus s)
         return "RelocFailed";
     case DllLoadStatus::ExportParseFailed:
         return "ExportParseFailed";
+    default:
+        KLOG_ONCE_WARN("loader/dll", "DllLoadStatusName: unrecognised status");
+        return "?";
     }
-    return "?";
 }
 
 DllLoadResult DllLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, u64 aslr_delta)

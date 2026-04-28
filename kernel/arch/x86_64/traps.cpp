@@ -348,8 +348,9 @@ const char* TrapResponseName(TrapResponse r)
         return "IsolateTask";
     case TrapResponse::Panic:
         return "Panic";
+    default:
+        return "?";
     }
-    return "?";
 }
 
 // IRQ nesting-depth tracking. Two live-test attempts (slices

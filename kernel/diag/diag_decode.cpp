@@ -529,8 +529,9 @@ const char* VaRegionName(VaRegion region)
         return "k.mmio";
     case VaRegion::KernelStackArena:
         return "k.stack-arena";
+    default:
+        return "unknown";
     }
-    return "unknown";
 }
 
 void WriteVaRegion(u64 va)

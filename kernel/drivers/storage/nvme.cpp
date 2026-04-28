@@ -1111,8 +1111,9 @@ const char* NvmeStatusName(u8 sct, u8 sc)
             return "Capacity Exceeded";
         case 0x82:
             return "Namespace Not Ready";
+        default:
+            return "Generic Status (unknown)";
         }
-        return "Generic Status (unknown)";
     }
     // Command Specific Status.
     if (sct == 1)
@@ -1129,8 +1130,9 @@ const char* NvmeStatusName(u8 sct, u8 sc)
             return "Asynchronous Event Request Limit Exceeded";
         case 0x0C:
             return "Invalid Interrupt Vector";
+        default:
+            return "Command-Specific Status (unknown)";
         }
-        return "Command-Specific Status (unknown)";
     }
     // Media and Data Integrity Errors.
     if (sct == 2)
@@ -1151,8 +1153,9 @@ const char* NvmeStatusName(u8 sct, u8 sc)
             return "Compare Failure";
         case 0x86:
             return "Access Denied";
+        default:
+            return "Media/Integrity (unknown)";
         }
-        return "Media/Integrity (unknown)";
     }
     if (sct == 7)
     {
@@ -1198,8 +1201,9 @@ const char* NvmeOpcodeName(u8 set, u8 opcode)
             return "Security Send";
         case 0x82:
             return "Security Receive";
+        default:
+            return "admin (unknown)";
         }
-        return "admin (unknown)";
     }
     // NVM I/O command set.
     switch (opcode)
@@ -1220,8 +1224,9 @@ const char* NvmeOpcodeName(u8 set, u8 opcode)
         return "Dataset Management";
     case 0x0D:
         return "Reservation Register";
+    default:
+        return "I/O (unknown)";
     }
-    return "I/O (unknown)";
 }
 
 } // namespace duetos::drivers::storage

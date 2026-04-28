@@ -950,6 +950,9 @@ void WindowDrawAllOrdered()
             }
             case WinGdiPrimKind::None:
                 break;
+            default:
+                // Unknown primitive kind — skip rather than render garbage.
+                break;
             }
         }
 
@@ -1841,8 +1844,9 @@ WindowHandle WindowGetRelated(WindowHandle h, WindowRel rel)
     }
     case WindowRel::Owner:
         return WindowGetParent(h);
+    default:
+        return kWindowInvalid;
     }
-    return kWindowInvalid;
 }
 
 // --- Keyboard focus -----------------------------------------------

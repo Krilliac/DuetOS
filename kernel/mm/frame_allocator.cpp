@@ -441,6 +441,13 @@ void FreeFrame(PhysAddr frame)
     {
         return; // Freeing a null pointer is a no-op, matches convention.
     }
+    // A non-page-aligned frame address means the caller computed it
+    // wrong — masking the low bits would silently free an unrelated
+    // adjacent frame. Halt loudly so the corruption stops here.
+    if ((frame & (kPageSize - 1)) != 0)
+    {
+        core::PanicWithValue("mm/frame_allocator", "FreeFrame called with non-page-aligned address", frame);
+    }
     const u64 index = frame >> kPageSizeLog2;
 
     // Double-free detection (Class A in runtime-recovery-strategy.md).

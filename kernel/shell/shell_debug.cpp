@@ -72,8 +72,9 @@ const char* BpKindName(duetos::debug::BpKind k)
         return "HW-W";
     case duetos::debug::BpKind::HwReadWrite:
         return "HW-RW";
+    default:
+        return "?";
     }
-    return "?";
 }
 
 const char* BpErrName(duetos::debug::BpError e)
@@ -94,8 +95,9 @@ const char* BpErrName(duetos::debug::BpError e)
         return "NOT-INSTALLED";
     case duetos::debug::BpError::SmpUnsupported:
         return "SMP-UNSUPPORTED";
+    default:
+        return "?";
     }
-    return "?";
 }
 
 // Consume a leading `--suspend` / `-s` flag from argv starting at
@@ -181,8 +183,9 @@ const char* ProbeArmName(duetos::debug::ProbeArm a)
         return "ARMED-LOG";
     case duetos::debug::ProbeArm::ArmedSuspend:
         return "ARMED-SUSPEND";
+    default:
+        return "?";
     }
-    return "?";
 }
 
 void CmdInspectHelp()
@@ -1690,6 +1693,9 @@ void CmdLoglevel(u32 argc, char** argv)
             break;
         case duetos::core::LogLevel::Error:
             ConsoleWriteln("ERROR (show only errors)");
+            break;
+        default:
+            ConsoleWriteln("?");
             break;
         }
         ConsoleWriteln("USAGE: LOGLEVEL [T|D|I|W|E]");

@@ -18,6 +18,7 @@
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
 #include "diag/log_names.h"
+#include "log/klog.h"
 #include "mm/paging.h"
 #include "proc/process.h"
 #include "sched/sched.h"
@@ -29,6 +30,7 @@ i64 DoExitGroup(u64 status)
 {
     using arch::SerialWrite;
     using arch::SerialWriteHex;
+    KLOG_INFO_V("linux/proc", "DoExitGroup: status", status);
     SerialWrite("[linux] exit_group status=");
     SerialWriteHex(status);
     SerialWrite("\n");
@@ -53,6 +55,7 @@ i64 DoExitGroup(u64 status)
 // exit_group so both numbers share the same teardown path.
 i64 DoExit(u64 status)
 {
+    KLOG_INFO_V("linux/proc", "DoExit: status", status);
     return DoExitGroup(status);
 }
 
@@ -62,18 +65,21 @@ i64 DoExit(u64 status)
 // the syscall coverage generator can see a concrete DoGetPid handler.
 i64 DoGetPid()
 {
+    KLOG_TRACE("linux/proc", "DoGetPid: query");
     return static_cast<i64>(sched::CurrentTaskId());
 }
 
 // Linux: gettid. v0 has one task per process, so tid == pid.
 i64 DoGetTid()
 {
+    KLOG_TRACE("linux/proc", "DoGetTid: query");
     return static_cast<i64>(sched::CurrentTaskId());
 }
 
 // Linux: sched_yield. Direct passthrough to the native scheduler.
 i64 DoSchedYield()
 {
+    KLOG_TRACE("linux/proc", "DoSchedYield: voluntary preempt");
     sched::SchedYield();
     return 0;
 }
@@ -88,6 +94,7 @@ i64 DoSchedYield()
 // validated at the per-task lookup; mismatches surface as -ESRCH.
 i64 DoTgkill(u64 tgid, u64 tid, u64 sig)
 {
+    KLOG_INFO_2V("linux/proc", "DoTgkill", "tid", tid, "sig", sig);
     (void)tgid;
     if (sig == 0)
     {
@@ -97,10 +104,16 @@ i64 DoTgkill(u64 tgid, u64 tid, u64 sig)
     }
     sched::Task* t = sched::SchedFindTaskByTid(tid);
     if (t == nullptr)
+    {
+        KLOG_WARN_V("linux/proc", "DoTgkill: ESRCH (tid not found)", tid);
         return kESRCH;
+    }
     core::Process* target = sched::TaskProcess(t);
     if (target == nullptr)
+    {
+        KLOG_WARN_V("linux/proc", "DoTgkill: ESRCH (kernel-only task)", tid);
         return kESRCH; // kernel-only task — no Linux process to signal
+    }
     return LinuxSignalDeliver(target, static_cast<u32>(sig));
 }
 
@@ -110,6 +123,7 @@ i64 DoTgkill(u64 tgid, u64 tid, u64 sig)
 // no real process tree). pid < -1 → process group (-pid).
 i64 DoKill(u64 pid, u64 sig)
 {
+    KLOG_INFO_2V("linux/proc", "DoKill", "pid", pid, "sig", sig);
     const i64 spid = static_cast<i64>(pid);
     if (sig == 0)
     {
@@ -124,9 +138,15 @@ i64 DoKill(u64 pid, u64 sig)
     else if (spid == 0)
         target = core::CurrentProcess();
     else
+    {
+        KLOG_WARN_V("linux/proc", "DoKill: group/broadcast not supported, pid", pid);
         return kESRCH; // group / broadcast forms not supported in v0 (sub-GAP)
+    }
     if (target == nullptr)
+    {
+        KLOG_WARN_V("linux/proc", "DoKill: ESRCH (target not found)", pid);
         return kESRCH;
+    }
     return LinuxSignalDeliver(target, static_cast<u32>(sig));
 }
 

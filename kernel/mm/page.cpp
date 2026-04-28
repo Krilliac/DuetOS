@@ -1,6 +1,7 @@
 #include "mm/page.h"
 
 #include "core/panic.h"
+#include "log/klog.h"
 
 namespace duetos::mm
 {
@@ -19,6 +20,7 @@ void* PhysToVirt(PhysAddr phys)
 {
     if (phys >= kDirectMapBytes)
     {
+        KLOG_ERROR_V("mm/page", "PhysToVirt: address outside direct map", phys);
         PanicPage("PhysToVirt called outside direct map", phys);
     }
     return reinterpret_cast<void*>(static_cast<uptr>(phys) + kKernelVirtualBase);
@@ -29,6 +31,7 @@ PhysAddr VirtToPhys(const void* virt)
     const uptr v = reinterpret_cast<uptr>(virt);
     if (v < kKernelVirtualBase || v >= kKernelVirtualBase + kDirectMapBytes)
     {
+        KLOG_ERROR_V("mm/page", "VirtToPhys: address outside direct map", v);
         PanicPage("VirtToPhys called outside direct map", v);
     }
     return static_cast<PhysAddr>(v - kKernelVirtualBase);

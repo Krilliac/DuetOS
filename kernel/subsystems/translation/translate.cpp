@@ -286,6 +286,9 @@ void LogMiss(const char* origin, arch::TrapFrame* f, const char* name)
         case HandlerState::Unknown:
             SerialWrite("unknown-nr");
             break;
+        default:
+            SerialWrite("invalid-state");
+            break;
         }
     }
     SerialWrite(" rip=");

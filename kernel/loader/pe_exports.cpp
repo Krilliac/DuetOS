@@ -20,6 +20,7 @@
 #include "loader/pe_exports.h"
 
 #include "arch/x86_64/serial.h"
+#include "log/klog.h"
 
 namespace duetos::core
 {
@@ -209,8 +210,10 @@ const char* PeExportStatusName(PeExportStatus s)
         return "BadArrayRva";
     case PeExportStatus::TooManyExports:
         return "TooManyExports";
+    default:
+        KLOG_ONCE_WARN("loader/pe_exports", "PeExportStatusName: unrecognised status");
+        return "?";
     }
-    return "?";
 }
 
 PeExportStatus PeParseExports(const u8* file, u64 file_len, PeExports& out)

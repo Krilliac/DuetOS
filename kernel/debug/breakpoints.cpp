@@ -220,6 +220,10 @@ void WriteDrNumber(u8 slot, u64 addr)
     case 3:
         dr::WriteDr3(addr);
         break;
+    default:
+        // Hardware has DR0..DR3 only — slot >= 4 is a caller bug.
+        KLOG_ONCE_WARN("debug/bp", "WriteDrNumber called with slot >= 4 (no DR register exists)");
+        break;
     }
 }
 
@@ -271,8 +275,9 @@ u64 LenToDr7(BpLen l)
         return dr::kDr7Len4;
     case BpLen::Eight:
         return dr::kDr7Len8;
+    default:
+        return dr::kDr7Len1;
     }
-    return dr::kDr7Len1;
 }
 
 } // namespace

@@ -321,6 +321,13 @@ inline bool& NeedResched()
 // and calling only from functions that acquire the lock themselves.
 void RunqueuePush(Task* t)
 {
+    // A null task on the runqueue would panic Schedule() later with
+    // a less informative call site. Catch the bad caller here.
+    KASSERT(t != nullptr, "sched", "RunqueuePush(nullptr)");
+    // A Dead task must never re-enter the runqueue — it has no stack,
+    // its AS is gone, and the reaper holds the only legitimate
+    // reference. Silently accepting it would crash the next Schedule().
+    KASSERT(t->state != TaskState::Dead, "sched", "RunqueuePush of Dead task");
     t->next = nullptr;
     Task*& head = (t->priority == TaskPriority::Idle) ? g_run_head_idle : g_run_head_normal;
     Task*& tail = (t->priority == TaskPriority::Idle) ? g_run_tail_idle : g_run_tail_normal;
@@ -581,9 +588,12 @@ extern "C" [[noreturn]] void SchedExitC();
 
 void SchedInit()
 {
+    KLOG_TRACE_SCOPE("sched", "SchedInit");
+    KLOG_INFO("sched", "SchedInit: bringing scheduler online");
     auto* boot_task = static_cast<Task*>(mm::KMalloc(sizeof(Task)));
     if (boot_task == nullptr)
     {
+        KLOG_ERROR("sched", "SchedInit: KMalloc failed for boot task");
         PanicSched("KMalloc failed for boot task");
     }
     // Zero the struct before any field assignment. Same reasoning
@@ -616,6 +626,7 @@ void SchedInit()
     g_tasks_live = 1;
 
     SerialWrite("[sched] online; task 0 is \"kboot\"\n");
+    KLOG_INFO("sched", "online; task 0 is kboot");
 }
 
 namespace
@@ -752,12 +763,14 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
 
 Task* SchedCreate(TaskEntry entry, void* arg, const char* name, TaskPriority priority)
 {
+    KLOG_INFO_S("sched", "SchedCreate: kernel task", "name", name);
     // Name-based security gate. No image bytes to scan at this
     // layer — that happens in the loader before entry is ever
     // handed to the scheduler — so this catches only filename
     // denylist hits. Returns a null Task if the guard denies.
     if (!duetos::security::GateThread(duetos::security::ImageKind::KernelThread, name))
     {
+        KLOG_WARN_S("sched", "SchedCreate denied by image guard", "name", name);
         return nullptr;
     }
     return SchedCreateInternal(entry, arg, name, priority, /*as=*/nullptr);
@@ -765,6 +778,7 @@ Task* SchedCreate(TaskEntry entry, void* arg, const char* name, TaskPriority pri
 
 Task* SchedCreateUser(TaskEntry entry, void* arg, const char* name, core::Process* process)
 {
+    KLOG_INFO_S("sched", "SchedCreateUser: ring-3 task", "name", name);
     KASSERT(process != nullptr, "sched", "SchedCreateUser without Process");
     KASSERT(process->as != nullptr, "sched", "SchedCreateUser Process has no AS");
 
@@ -774,6 +788,7 @@ Task* SchedCreateUser(TaskEntry entry, void* arg, const char* name, core::Proces
         // the Task to absorb it. No Task was created — the ref
         // would leak (AS + Process struct + PID slot held forever)
         // unless we release it here on the gate-denial exit path.
+        KLOG_WARN_S("sched", "SchedCreateUser denied by image guard", "name", name);
         core::ProcessRelease(process);
         return nullptr;
     }
@@ -885,15 +900,21 @@ const char* KillReasonName(KillReason r)
         return "SandboxDenialThreshold";
     case KillReason::UserKill:
         return "UserKill";
+    default:
+        KLOG_ONCE_WARN("sched", "KillReasonName: unrecognised KillReason enumerator");
+        return "<unknown>";
     }
-    return "<unknown>";
 }
 
 void Schedule()
 {
     if (Current() == nullptr)
     {
-        return; // pre-SchedInit timer tick (shouldn't happen, but be safe)
+        // pre-SchedInit timer tick (shouldn't happen, but be safe).
+        // Log once so a recurring null-current pattern is visible
+        // without burying the boot log in tick-rate spam.
+        KLOG_ONCE_WARN("sched", "Schedule called with no current task (pre-SchedInit?)");
+        return;
     }
 
     Task* prev = nullptr;
@@ -1071,6 +1092,7 @@ void Schedule()
 
 void SchedYield()
 {
+    KLOG_TRACE("sched", "SchedYield: voluntary preempt");
     arch::Cli();
     Schedule();
     arch::Sti();
@@ -1078,6 +1100,7 @@ void SchedYield()
 
 void SchedSleepTicks(u64 ticks)
 {
+    KLOG_TRACE_V("sched", "SchedSleepTicks: parking task for ticks", ticks);
     if (ticks == 0)
     {
         SchedYield();
@@ -1102,9 +1125,11 @@ void SchedSleepUntil(u64 deadline_tick)
     // Wrap-safe deadline compare. Task-visible ticks are the same
     // monotonically-increasing counter that OnTimerTick publishes,
     // so "passed" means (i64)(g_tick_now - deadline) >= 0.
+    KLOG_TRACE_V("sched", "SchedSleepUntil: deadline_tick", deadline_tick);
     arch::Cli();
     if (TickReached(g_tick_now, deadline_tick))
     {
+        KLOG_DEBUG("sched", "SchedSleepUntil: deadline already passed - yielding");
         arch::Sti();
         SchedYield();
         return;
@@ -1129,6 +1154,7 @@ u64 SchedNowTicks()
 
 void SchedExit()
 {
+    KLOG_INFO("sched", "SchedExit: task entering termination path");
     arch::Cli();
     Task* self = Current();
     // SchedExit must fire exactly once per task. A second call would
@@ -1397,8 +1423,10 @@ const char* KillResultName(KillResult r)
         return "AlreadyDead";
     case KillResult::Blocked:
         return "Blocked";
+    default:
+        KLOG_ONCE_WARN("sched", "KillResultName: unrecognised KillResult enumerator");
+        return "<unknown>";
     }
-    return "<unknown>";
 }
 
 namespace

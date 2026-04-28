@@ -16,6 +16,7 @@
 #include "subsystems/linux/syscall_internal.h"
 
 #include "arch/x86_64/serial.h"
+#include "log/klog.h"
 #include "mm/address_space.h"
 
 namespace duetos::subsystems::linux::internal
@@ -32,10 +33,14 @@ const char* StripFatPrefix(const char* p)
 
 bool CopyAndStripFatPath(u64 user_path, char (&kbuf)[64], const char*& out_leaf)
 {
+    KLOG_TRACE_V("linux/pathutil", "CopyAndStripFatPath: user_path", user_path);
     for (u32 i = 0; i < sizeof(kbuf); ++i)
         kbuf[i] = 0;
     if (!mm::CopyFromUser(kbuf, reinterpret_cast<const void*>(user_path), sizeof(kbuf) - 1))
+    {
+        KLOG_WARN_V("linux/pathutil", "CopyAndStripFatPath: CopyFromUser failed", user_path);
         return false;
+    }
     kbuf[sizeof(kbuf) - 1] = 0;
     bool has_nul = false;
     for (u32 i = 0; i < sizeof(kbuf); ++i)
@@ -47,8 +52,12 @@ bool CopyAndStripFatPath(u64 user_path, char (&kbuf)[64], const char*& out_leaf)
         }
     }
     if (!has_nul)
+    {
+        KLOG_WARN("linux/pathutil", "CopyAndStripFatPath: path missing NUL terminator within buffer");
         return false;
+    }
     out_leaf = StripFatPrefix(kbuf);
+    KLOG_DEBUG_S("linux/pathutil", "CopyAndStripFatPath: stripped leaf", "leaf", out_leaf);
     return true;
 }
 
@@ -59,6 +68,7 @@ i64 AtFdCwdOnly(i64 dirfd)
     arch::SerialWrite("[linux] *at-family: unsupported dirfd=");
     arch::SerialWriteHex(static_cast<u64>(dirfd));
     arch::SerialWrite(" (AT_FDCWD-only in v0)\n");
+    KLOG_WARN_V("linux/pathutil", "AtFdCwdOnly: unsupported dirfd (AT_FDCWD-only in v0)", static_cast<u64>(dirfd));
     return kEBADF;
 }
 

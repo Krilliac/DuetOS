@@ -2,6 +2,7 @@
 
 #include "arch/x86_64/rtc.h"
 #include "arch/x86_64/traps.h"
+#include "log/klog.h"
 #include "mm/paging.h"
 #include "syscall/syscall.h"
 #include "time/tick.h"
@@ -44,6 +45,12 @@ void DoPerfCounter(arch::TrapFrame* frame)
 {
     // No args. Return the kernel tick counter — monotonically
     // increasing u64 at 100 Hz. Drives QPC + GetTickCount stubs.
+    if (frame == nullptr)
+    {
+        KLOG_ONCE_WARN("syscall/time", "DoPerfCounter: null trap frame");
+        return;
+    }
+    KLOG_TRACE("syscall/time", "DoPerfCounter: read kernel tick counter");
     frame->rax = ::duetos::time::TickCount();
 }
 
@@ -54,6 +61,12 @@ void DoNowNs(arch::TrapFrame* frame)
     // once its calibration lands). The conversion math used to live
     // here as `counter * period_fs / 1e6`; now it's owned by
     // `time::MonotonicNs()` so every consumer reads the same source.
+    if (frame == nullptr)
+    {
+        KLOG_ONCE_WARN("syscall/time", "DoNowNs: null trap frame");
+        return;
+    }
+    KLOG_TRACE("syscall/time", "DoNowNs: sample monotonic clocksource");
     frame->rax = ::duetos::time::MonotonicNs();
 }
 
@@ -63,6 +76,12 @@ void DoGetTimeFt(arch::TrapFrame* frame)
     // `time::RealtimeFiletime()` so any future migration to a more
     // accurate wall-clock path (NTP-disciplined RTC, TSC + RTC
     // delta sampling, …) takes effect here automatically.
+    if (frame == nullptr)
+    {
+        KLOG_ONCE_WARN("syscall/time", "DoGetTimeFt: null trap frame");
+        return;
+    }
+    KLOG_TRACE("syscall/time", "DoGetTimeFt: sample wall-clock FILETIME");
     frame->rax = ::duetos::time::RealtimeFiletime();
 }
 
@@ -105,11 +124,13 @@ void DoGetTimeSt(arch::TrapFrame* frame)
     // `time::BrokenDownTime`; sample directly into the user's slot
     // via a kernel-side staging copy. The Zeller's-congruence DOW
     // computation moved into time/timekeeper.cpp with this slice.
+    KLOG_TRACE_V("syscall/time", "DoGetTimeSt: user SYSTEMTIME* out", frame->rdi);
     ::duetos::time::BrokenDownTime bdt = {};
     ::duetos::time::RealtimeBrokenDown(&bdt);
     static_assert(sizeof(bdt) == 16, "BrokenDownTime must match Win32 SYSTEMTIME's 16-byte ABI");
     if (!mm::CopyToUser(reinterpret_cast<void*>(frame->rdi), &bdt, sizeof(bdt)))
     {
+        KLOG_WARN_V("syscall/time", "DoGetTimeSt: CopyToUser failed for SYSTEMTIME out", frame->rdi);
         frame->rax = static_cast<u64>(-1);
         return;
     }
@@ -119,14 +140,17 @@ void DoGetTimeSt(arch::TrapFrame* frame)
 void DoStToFt(arch::TrapFrame* frame)
 {
     // rdi = user SYSTEMTIME* in, rsi = user FILETIME* out.
+    KLOG_TRACE_V("syscall/time", "DoStToFt: SYSTEMTIME -> FILETIME conversion", frame->rdi);
     SystemTime st = {};
     if (!mm::CopyFromUser(&st, reinterpret_cast<const void*>(frame->rdi), sizeof(st)))
     {
+        KLOG_WARN_V("syscall/time", "DoStToFt: CopyFromUser failed for SYSTEMTIME in", frame->rdi);
         frame->rax = static_cast<u64>(-1);
         return;
     }
     if (st.year < 1601 || st.month == 0 || st.month > 12 || st.day == 0 || st.day > 31)
     {
+        KLOG_WARN_V("syscall/time", "DoStToFt: SYSTEMTIME out of range, year", st.year);
         frame->rax = static_cast<u64>(-1);
         return;
     }
@@ -140,18 +164,22 @@ void DoStToFt(arch::TrapFrame* frame)
     const u64 ft = RtcToFileTime(t) + u64(st.milliseconds) * 10'000ULL;
     if (!mm::CopyToUser(reinterpret_cast<void*>(frame->rsi), &ft, sizeof(ft)))
     {
+        KLOG_WARN_V("syscall/time", "DoStToFt: CopyToUser failed for FILETIME out", frame->rsi);
         frame->rax = static_cast<u64>(-1);
         return;
     }
+    KLOG_TRACE_V("syscall/time", "DoStToFt: produced FILETIME ticks", ft);
     frame->rax = 0;
 }
 
 void DoFtToSt(arch::TrapFrame* frame)
 {
     // rdi = user FILETIME* in, rsi = user SYSTEMTIME* out.
+    KLOG_TRACE_V("syscall/time", "DoFtToSt: FILETIME -> SYSTEMTIME conversion", frame->rdi);
     u64 ft = 0;
     if (!mm::CopyFromUser(&ft, reinterpret_cast<const void*>(frame->rdi), sizeof(ft)))
     {
+        KLOG_WARN_V("syscall/time", "DoFtToSt: CopyFromUser failed for FILETIME in", frame->rdi);
         frame->rax = static_cast<u64>(-1);
         return;
     }
@@ -205,9 +233,11 @@ void DoFtToSt(arch::TrapFrame* frame)
     st.milliseconds = ms;
     if (!mm::CopyToUser(reinterpret_cast<void*>(frame->rsi), &st, sizeof(st)))
     {
+        KLOG_WARN_V("syscall/time", "DoFtToSt: CopyToUser failed for SYSTEMTIME out", frame->rsi);
         frame->rax = static_cast<u64>(-1);
         return;
     }
+    KLOG_TRACE_V("syscall/time", "DoFtToSt: produced SYSTEMTIME year", year);
     frame->rax = 0;
 }
 

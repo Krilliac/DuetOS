@@ -201,8 +201,9 @@ inline const char* LevelTag(LogLevel level)
         return "[W] ";
     case LogLevel::Error:
         return "[E] ";
+    default:
+        return "[?] ";
     }
-    return "[?] ";
 }
 
 // ANSI SGR escape sequences for severity colouring. `None` is the
@@ -225,8 +226,9 @@ inline const char* LevelColorPrefix(LogLevel level)
         return "\x1b[33m"; // yellow
     case LogLevel::Error:
         return "\x1b[1;31m"; // bold red
+    default:
+        return "";
     }
-    return "";
 }
 
 inline const char* kAnsiReset = "\x1b[0m";
@@ -405,6 +407,17 @@ void Log(LogLevel level, const char* subsystem, const char* message)
     {
         return;
     }
+    // Defensive: a caller passing nullptr for subsystem or message
+    // must not page-fault inside the log path. Substitute a marker
+    // so the bug surfaces in the log instead of as a #PF in serial.
+    if (subsystem == nullptr)
+    {
+        subsystem = "<null-subsys>";
+    }
+    if (message == nullptr)
+    {
+        message = "<null-msg>";
+    }
     g_current_log_level = level;
     const char* tag = LevelTag(level);
     WriteTimestampPrefix();
@@ -434,6 +447,14 @@ void LogWithValue(LogLevel level, const char* subsystem, const char* message, u6
     {
         return;
     }
+    if (subsystem == nullptr)
+    {
+        subsystem = "<null-subsys>";
+    }
+    if (message == nullptr)
+    {
+        message = "<null-msg>";
+    }
     g_current_log_level = level;
     const char* tag = LevelTag(level);
     WriteTimestampPrefix();
@@ -462,6 +483,22 @@ void LogWithString(LogLevel level, const char* subsystem, const char* message, c
     if (!LevelEnabled(level))
     {
         return;
+    }
+    if (subsystem == nullptr)
+    {
+        subsystem = "<null-subsys>";
+    }
+    if (message == nullptr)
+    {
+        message = "<null-msg>";
+    }
+    if (label == nullptr)
+    {
+        label = "<null-label>";
+    }
+    if (value_str == nullptr)
+    {
+        value_str = "<null-value>";
     }
     g_current_log_level = level;
     const char* tag = LevelTag(level);
@@ -499,6 +536,22 @@ void LogWith2Values(LogLevel level, const char* subsystem, const char* message, 
     if (!LevelEnabled(level))
     {
         return;
+    }
+    if (subsystem == nullptr)
+    {
+        subsystem = "<null-subsys>";
+    }
+    if (message == nullptr)
+    {
+        message = "<null-msg>";
+    }
+    if (a_label == nullptr)
+    {
+        a_label = "a";
+    }
+    if (b_label == nullptr)
+    {
+        b_label = "b";
     }
     g_current_log_level = level;
     const char* tag = LevelTag(level);

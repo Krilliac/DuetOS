@@ -75,6 +75,9 @@ void DispatchRender(Mode m, duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duet
         break;
     case Mode::Count:
         break;
+    default:
+        // Unknown mode — render nothing.
+        break;
     }
 }
 

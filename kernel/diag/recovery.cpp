@@ -28,8 +28,10 @@ const char* ReasonString(DriverFaultReason reason)
         return "driver hung (watchdog)";
     case DriverFaultReason::Unknown:
         return "unknown";
+    default:
+        KLOG_ONCE_WARN("diag/recovery", "ReasonString: unrecognised DriverFaultReason");
+        return "unknown";
     }
-    return "unknown";
 }
 
 } // namespace

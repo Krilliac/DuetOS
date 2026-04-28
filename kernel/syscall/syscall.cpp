@@ -326,6 +326,8 @@ void ReportUnknownSyscall(u64 num, u64 rip)
     arch::SerialWrite(") rip=");
     arch::SerialWriteHex(rip);
     arch::SerialWrite("\n");
+    KLOG_WARN_2V("syscall", "unknown syscall number", "num", num, "rip", rip);
+    KLOG_WARN_S("syscall", "unknown syscall name", "name", SyscallName(num));
 }
 
 // SYS_WRITE body. Copies up to `len` bytes from the user buffer,
@@ -406,18 +408,30 @@ i64 DoWrite(u64 fd, const void* user_buf, u64 len)
 
 void SyscallInit()
 {
+    KLOG_TRACE_SCOPE("syscall", "SyscallInit");
     arch::IdtSetUserGate(kSyscallVector, reinterpret_cast<u64>(&isr_128));
     Log(LogLevel::Info, "sys", "syscall gate online at int 0x80");
+    KLOG_INFO_V("syscall", "SyscallInit: int gate installed at vector", kSyscallVector);
 }
 
 void SyscallDispatch(arch::TrapFrame* frame)
 {
+    // Defensive: the int-0x80 trap stub can never legitimately
+    // hand us a null trap frame, but a future caller (or a
+    // mis-routed direct call) could. Refuse loudly instead of
+    // dereferencing rax through a null pointer.
+    if (frame == nullptr)
+    {
+        KLOG_ONCE_WARN("syscall", "SyscallDispatch called with null TrapFrame");
+        return;
+    }
     const u64 num = frame->rax;
     // Outer-scope `proc` was previously `const Process*`; keep that
     // shape so the many `case` blocks below that re-declare a local
     // `Process* proc` for write access don't trip -Wshadow.
     const Process* proc = CurrentProcess();
     const u64 pid = (proc != nullptr) ? proc->pid : 0;
+    KLOG_TRACE_V("syscall", "SyscallDispatch: enter (number)", num);
     CleanroomTraceRecord("syscall", "native-dispatch", num, pid, frame->rip);
     // Event-tracer enter (D2 instrumentation). Tag the event
     // with the syscall number + first arg so a `tracer dump`
@@ -439,6 +453,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
     // and remain authoritative for those cases.
     if (!SyscallGate(num, proc).has_value())
     {
+        KLOG_WARN_2V("syscall", "SyscallDispatch: capability gate denied", "num", num, "pid", pid);
         frame->rax = static_cast<u64>(-1);
         return;
     }

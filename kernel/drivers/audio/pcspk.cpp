@@ -2,6 +2,7 @@
 
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/hpet.h"
+#include "log/klog.h"
 
 namespace duetos::drivers::audio
 {
@@ -52,11 +53,18 @@ void WaitMs(u32 ms)
 
 bool PcSpeakerBeep(u32 freq_hz, u32 duration_ms)
 {
+    KLOG_DEBUG_V("drivers/audio/pcspk", "PcSpeakerBeep: freq_hz", freq_hz);
     if (freq_hz == 0)
+    {
+        KLOG_WARN("drivers/audio/pcspk", "PcSpeakerBeep: rejected zero frequency");
         return false;
+    }
     const u32 divider = kPitBaseFreq / freq_hz;
     if (divider < 1 || divider > 0xFFFFu)
+    {
+        KLOG_WARN_V("drivers/audio/pcspk", "PcSpeakerBeep: divider out of range", divider);
         return false; // frequency out of range
+    }
 
     // Program PIT channel 2 for a square wave at the target
     // frequency. Mode + access pattern first, then lo-byte +
@@ -69,6 +77,7 @@ bool PcSpeakerBeep(u32 freq_hz, u32 duration_ms)
     // gate + data bits without disturbing the other ISA state.
     const u8 prev = arch::Inb(kSpeakerPort);
     arch::Outb(kSpeakerPort, prev | kSpeakerGate | kSpeakerData);
+    KLOG_INFO_2V("drivers/audio/pcspk", "PcSpeakerBeep: gate on", "freq", freq_hz, "duration_ms", duration_ms);
 
     WaitMs(duration_ms);
 
@@ -78,6 +87,7 @@ bool PcSpeakerBeep(u32 freq_hz, u32 duration_ms)
 
 void PcSpeakerStop()
 {
+    KLOG_TRACE("drivers/audio/pcspk", "PcSpeakerStop: gate off");
     const u8 prev = arch::Inb(kSpeakerPort);
     arch::Outb(kSpeakerPort, prev & static_cast<u8>(~(kSpeakerGate | kSpeakerData)));
 }

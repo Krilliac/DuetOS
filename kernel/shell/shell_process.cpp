@@ -229,6 +229,9 @@ void CmdKill(u32 argc, char** argv)
         WriteU64Dec(pid);
         ConsoleWriteln(" IS BLOCKED — FLAGGED, WILL DIE WHEN WOKEN");
         break;
+    default:
+        ConsoleWriteln("KILL: UNKNOWN RESULT");
+        break;
     }
 }
 

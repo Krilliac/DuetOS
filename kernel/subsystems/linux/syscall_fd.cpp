@@ -10,6 +10,7 @@
 
 #include "subsystems/linux/syscall_internal.h"
 
+#include "log/klog.h"
 #include "proc/process.h"
 
 namespace duetos::subsystems::linux::internal
@@ -38,19 +39,28 @@ void CopyFdSlot(const core::Process::LinuxFd& src, core::Process::LinuxFd& dst)
 // the source fd into it. Returns the new fd or -EMFILE if full.
 i64 DoDup(u64 fd)
 {
+    KLOG_TRACE_V("linux/fd", "DoDup: fd", fd);
     core::Process* p = core::CurrentProcess();
     if (p == nullptr || fd >= 16)
+    {
+        KLOG_WARN_V("linux/fd", "DoDup: EBADF (fd out of range or no Process)", fd);
         return kEBADF;
+    }
     if (p->linux_fds[fd].state == 0)
+    {
+        KLOG_WARN_V("linux/fd", "DoDup: EBADF (fd not open)", fd);
         return kEBADF;
+    }
     for (u32 i = 3; i < 16; ++i)
     {
         if (p->linux_fds[i].state == 0)
         {
             CopyFdSlot(p->linux_fds[fd], p->linux_fds[i]);
+            KLOG_DEBUG_V("linux/fd", "DoDup: granted new fd", i);
             return static_cast<i64>(i);
         }
     }
+    KLOG_WARN("linux/fd", "DoDup: EMFILE (no free slot >= 3)");
     return kEMFILE;
 }
 
@@ -58,17 +68,28 @@ i64 DoDup(u64 fd)
 // Else closes newfd if in use, then copies. Returns newfd.
 i64 DoDup2(u64 oldfd, u64 newfd)
 {
+    KLOG_TRACE_V("linux/fd", "DoDup2: oldfd", oldfd);
     core::Process* p = core::CurrentProcess();
     if (p == nullptr || oldfd >= 16 || newfd >= 16)
+    {
+        KLOG_WARN_2V("linux/fd", "DoDup2: EBADF", "oldfd", oldfd, "newfd", newfd);
         return kEBADF;
+    }
     if (p->linux_fds[oldfd].state == 0)
+    {
+        KLOG_WARN_V("linux/fd", "DoDup2: EBADF (oldfd not open)", oldfd);
         return kEBADF;
+    }
     if (oldfd == newfd)
+    {
+        KLOG_DEBUG_V("linux/fd", "DoDup2: oldfd == newfd, no-op", newfd);
         return static_cast<i64>(newfd);
+    }
     // newfd < 3 (stdin/stdout/stderr) — dup2 onto a tty slot is
     // legal in Linux (shell redirection pattern). Since we track
     // tty slots as state=1 (not a file), just overwrite.
     CopyFdSlot(p->linux_fds[oldfd], p->linux_fds[newfd]);
+    KLOG_INFO_2V("linux/fd", "DoDup2: ok", "oldfd", oldfd, "newfd", newfd);
     return static_cast<i64>(newfd);
 }
 
@@ -95,11 +116,19 @@ i64 DoDup3(u64 oldfd, u64 newfd, u64 flags)
 // Everything else returns -EINVAL.
 i64 DoFcntl(u64 fd, u64 cmd, u64 arg)
 {
+    KLOG_TRACE_V("linux/fd", "DoFcntl: fd", fd);
+    KLOG_DEBUG_V("linux/fd", "DoFcntl: cmd", cmd);
     core::Process* p = core::CurrentProcess();
     if (p == nullptr || fd >= 16)
+    {
+        KLOG_WARN_V("linux/fd", "DoFcntl: EBADF (out-of-range fd or no Process)", fd);
         return kEBADF;
+    }
     if (p->linux_fds[fd].state == 0)
+    {
+        KLOG_WARN_V("linux/fd", "DoFcntl: EBADF (fd not open)", fd);
         return kEBADF;
+    }
     switch (cmd)
     {
     case 0: // F_DUPFD
@@ -124,6 +153,7 @@ i64 DoFcntl(u64 fd, u64 cmd, u64 arg)
     case 4:       // F_SETFL
         return 0;
     default:
+        KLOG_WARN_V("linux/fd", "DoFcntl: EINVAL unsupported cmd", cmd);
         return kEINVAL;
     }
 }

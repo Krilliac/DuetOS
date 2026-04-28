@@ -672,18 +672,30 @@ void AcpiInit(uptr multiboot_info_phys)
     // the SCI vector at the ACPI default (9). Every PC firmware we
     // target ships it, but we don't panic on absence the way MADT
     // does: nothing else in the kernel requires FADT today.
+    //
+    // A FADT shorter than our `Fadt` struct happens on legacy
+    // ACPI 1.0 firmware (i440fx + older UEFI builds, some embedded
+    // boards). Reading past the end of a short FADT into our struct
+    // would deliver garbage to ParseFadt; treating "too short" as
+    // "absent" is consistent with the optional-FADT contract above
+    // — the reset register and SCI overrides simply stay at their
+    // ACPI defaults, same as if no FADT at all were published.
     const SdtHeader* fadt_hdr = FindTable(*rsdp, "FACP");
     if (fadt_hdr != nullptr)
     {
         if (fadt_hdr->length < sizeof(Fadt))
         {
-            PanicAcpi("FADT shorter than the fields we read");
+            KLOG_WARN_2V("acpi", "FADT shorter than expected struct - skipping (legacy firmware?)", "fadt_len",
+                         fadt_hdr->length, "want", sizeof(Fadt));
         }
-        if (!ChecksumOk(fadt_hdr, fadt_hdr->length))
+        else if (!ChecksumOk(fadt_hdr, fadt_hdr->length))
         {
             PanicAcpi("FADT checksum failed");
         }
-        ParseFadt(*reinterpret_cast<const Fadt*>(fadt_hdr));
+        else
+        {
+            ParseFadt(*reinterpret_cast<const Fadt*>(fadt_hdr));
+        }
     }
 
     // HPET is optional — QEMU q35 provides it, older boards may

@@ -12,6 +12,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
+#include "log/klog.h"
 #include "mm/frame_allocator.h"
 
 namespace duetos::mm
@@ -50,22 +51,26 @@ PhysAddr AllocateZoneFrame(Zone zone)
 {
     if (!IsValid(zone))
     {
+        KLOG_WARN_V("mm/zone", "AllocateZoneFrame: invalid zone enumerator", static_cast<u64>(zone));
         return kNullFrame;
     }
     if (zone == Zone::Mmio)
     {
         // Reserved enumerator — no backing pool.
         ++g_stats[static_cast<u32>(zone)].oom;
+        KLOG_ONCE_WARN("mm/zone", "AllocateZoneFrame: Mmio zone has no backing pool");
         return kNullFrame;
     }
     const PhysAddr f = AllocateFrame();
     if (f == kNullFrame)
     {
         ++g_stats[static_cast<u32>(zone)].oom;
+        KLOG_WARN_S("mm/zone", "AllocateZoneFrame: out of frames", "zone", ZoneName(zone));
     }
     else
     {
         ++g_stats[static_cast<u32>(zone)].allocs;
+        KLOG_TRACE_V("mm/zone", "AllocateZoneFrame: granted frame", f);
     }
     return f;
 }
@@ -74,10 +79,12 @@ void FreeZoneFrame(Zone zone, PhysAddr frame)
 {
     if (!IsValid(zone) || frame == kNullFrame)
     {
+        KLOG_DEBUG("mm/zone", "FreeZoneFrame: ignored (invalid zone or null frame)");
         return;
     }
     FreeFrame(frame);
     ++g_stats[static_cast<u32>(zone)].frees;
+    KLOG_TRACE_V("mm/zone", "FreeZoneFrame: returned frame", frame);
 }
 
 ZoneStats ZoneStatsRead(Zone zone)
@@ -91,6 +98,8 @@ ZoneStats ZoneStatsRead(Zone zone)
 
 void ZoneSelfTest()
 {
+    KLOG_TRACE_SCOPE("mm/zone", "ZoneSelfTest");
+    KLOG_INFO("mm/zone", "self-test: per-zone allocate + free + stats");
     arch::SerialWrite("[mm/zone] self-test: per-zone allocate + free + stats\n");
 
     for (u32 i = 0; i < static_cast<u32>(Zone::Count); ++i)
@@ -130,6 +139,7 @@ void ZoneSelfTest()
     }
 
     arch::SerialWrite("[mm/zone] self-test OK (4 zones × allocate + free + stats verified).\n");
+    KLOG_INFO("mm/zone", "self-test OK (4 zones x allocate + free + stats verified)");
 }
 
 } // namespace duetos::mm

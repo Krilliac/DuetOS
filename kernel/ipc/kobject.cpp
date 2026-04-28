@@ -15,6 +15,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
+#include "log/klog.h"
 #include "sync/spinlock.h"
 #include "util/result.h"
 #include "util/types.h"
@@ -55,8 +56,10 @@ const char* KObjectTypeName(KObjectType type)
         return "file";
     case KObjectType::Test:
         return "test";
+    default:
+        KLOG_ONCE_WARN("ipc/kobject", "KObjectTypeName: unrecognised type enumerator");
+        return "?";
     }
-    return "?";
 }
 
 void KObjectInit(KObject* obj, KObjectType type, KObjectDestroyFn destroy)
