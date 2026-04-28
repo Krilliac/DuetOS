@@ -1,11 +1,12 @@
 #include "net/net_smoke.h"
 
+#include "arch/x86_64/hypervisor.h"
 #include "arch/x86_64/serial.h"
-#include "log/klog.h"
 #include "drivers/usb/cdc_ecm.h"
 #include "drivers/usb/rndis.h"
-#include "sched/sched.h"
+#include "log/klog.h"
 #include "net/stack.h"
+#include "sched/sched.h"
 
 namespace duetos::net
 {
@@ -292,6 +293,19 @@ void NetSmokeTestStart()
     if (g_started)
         return;
     g_started = true;
+    // Under a hypervisor the QEMU user-net stack rarely speaks
+    // DHCP back to the kernel (it offers a SLIRP lease only when
+    // explicitly enabled via -netdev user,dhcpstart=...) and even
+    // when it does, the smoke task burns up to 15 s of kernel time
+    // on its sequence of timeouts: 5 s DHCP wait, 2 s ICMP echo,
+    // 3 s DNS lookup, 5 s HTTP GET. None of that output is on the
+    // boot-smoke critical path, so skip the spawn entirely under
+    // emulation. Bare metal boots get the full coverage as before.
+    if (arch::IsEmulator())
+    {
+        arch::SerialWrite("[net-smoke] emulator detected — skipping (would burn ~15s on DHCP/DNS/TCP timeouts)\n");
+        return;
+    }
     duetos::sched::SchedCreate(NetSmokeEntry, nullptr, "net-smoke");
 }
 
