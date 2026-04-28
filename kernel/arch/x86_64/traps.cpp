@@ -36,6 +36,7 @@
 #include "arch/x86_64/serial.h"
 
 #include "diag/diag_decode.h"
+#include "diag/event_trace.h"
 #include "security/fault_domain.h"
 #include "diag/hexdump.h"
 #include "diag/log_names.h"
@@ -713,7 +714,16 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     // panic dump; other kernel exceptions are already distinct
     // enough by name that they don't need a dedicated probe.
     if (frame->vector == 14)
+    {
         KBP_PROBE_V(::duetos::debug::ProbeId::kKernelPageFault, frame->rip);
+        // D2 instrumentation. arg0 = CR2 (faulting VA),
+        // arg1 = error_code. Emitted before the panic path so a
+        // subsequent `tracer dump` shows the #PF in its
+        // chronological place.
+        u64 cr2;
+        asm volatile("mov %%cr2, %0" : "=r"(cr2));
+        ::duetos::diag::EventTrace(::duetos::diag::kEventPageFault, cr2, frame->error_code);
+    }
     // Quiet the NMI watchdog before the dump. DumpDiagnostics +
     // symbol resolution + serial I/O can easily exceed one
     // watchdog interval; a PMI overflow during the dump would

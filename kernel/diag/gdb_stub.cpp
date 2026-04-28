@@ -35,6 +35,7 @@ constinit u8 g_csum_recv = 0;
 
 constinit GdbStubWriteByte g_sink = nullptr;
 constinit const GdbRegSnapshot* g_regs = nullptr;
+constinit GdbRegSnapshot* g_regs_writable = nullptr;
 
 constinit u64 g_packets_received = 0;
 constinit u64 g_packets_bad_csum = 0;
@@ -187,6 +188,66 @@ void HandlePacket()
     }
     if (g_packet[0] == 'G')
     {
+        // G<hex> — parse the same little-endian byte order the
+        // 'g' handler emits and copy back into the writable
+        // snapshot. Silently OK when no writable snapshot is
+        // published.
+        if (g_regs_writable != nullptr)
+        {
+            const u32 body_off = 1;
+            auto take_u64 = [&](u32 idx) -> u64
+            {
+                u64 v = 0;
+                const u32 base = body_off + idx * 16;
+                for (u32 i = 0; i < 8; ++i)
+                {
+                    if (base + i * 2 + 1 >= g_packet_len)
+                        return v;
+                    const u8 hi = HexDigitValue(g_packet[base + i * 2]);
+                    const u8 lo = HexDigitValue(g_packet[base + i * 2 + 1]);
+                    v |= static_cast<u64>((hi << 4) | lo) << (i * 8);
+                }
+                return v;
+            };
+            auto take_u32 = [&](u32 hex_off) -> u32
+            {
+                u32 v = 0;
+                for (u32 i = 0; i < 4; ++i)
+                {
+                    if (hex_off + i * 2 + 1 >= g_packet_len)
+                        return v;
+                    const u8 hi = HexDigitValue(g_packet[hex_off + i * 2]);
+                    const u8 lo = HexDigitValue(g_packet[hex_off + i * 2 + 1]);
+                    v |= static_cast<u32>((hi << 4) | lo) << (i * 8);
+                }
+                return v;
+            };
+            g_regs_writable->rax = take_u64(0);
+            g_regs_writable->rbx = take_u64(1);
+            g_regs_writable->rcx = take_u64(2);
+            g_regs_writable->rdx = take_u64(3);
+            g_regs_writable->rsi = take_u64(4);
+            g_regs_writable->rdi = take_u64(5);
+            g_regs_writable->rbp = take_u64(6);
+            g_regs_writable->rsp = take_u64(7);
+            g_regs_writable->r8 = take_u64(8);
+            g_regs_writable->r9 = take_u64(9);
+            g_regs_writable->r10 = take_u64(10);
+            g_regs_writable->r11 = take_u64(11);
+            g_regs_writable->r12 = take_u64(12);
+            g_regs_writable->r13 = take_u64(13);
+            g_regs_writable->r14 = take_u64(14);
+            g_regs_writable->r15 = take_u64(15);
+            g_regs_writable->rip = take_u64(16);
+            g_regs_writable->rflags = take_u64(17);
+            const u32 seg_off = body_off + 18 * 16;
+            g_regs_writable->cs = take_u32(seg_off + 0 * 8);
+            g_regs_writable->ss = take_u32(seg_off + 1 * 8);
+            g_regs_writable->ds = take_u32(seg_off + 2 * 8);
+            g_regs_writable->es = take_u32(seg_off + 3 * 8);
+            g_regs_writable->fs = take_u32(seg_off + 4 * 8);
+            g_regs_writable->gs = take_u32(seg_off + 5 * 8);
+        }
         SendCStr("OK");
         return;
     }
@@ -253,6 +314,54 @@ void HandlePacket()
     }
     if (g_packet[0] == 'M')
     {
+        // M<addr>,<len>:<hex> — write `len` bytes from the hex
+        // payload to `addr`. Same canonical-address bound as
+        // the `m` handler; per-byte direct kernel write.
+        u64 addr = 0;
+        u64 len = 0;
+        u32 i = 1;
+        while (i < g_packet_len && g_packet[i] != ',')
+        {
+            if (!IsHexDigit(g_packet[i]))
+                break;
+            addr = (addr << 4) | HexDigitValue(g_packet[i]);
+            ++i;
+        }
+        if (i >= g_packet_len || g_packet[i] != ',')
+        {
+            SendCStr("E01");
+            return;
+        }
+        ++i;
+        while (i < g_packet_len && g_packet[i] != ':')
+        {
+            if (!IsHexDigit(g_packet[i]))
+                break;
+            len = (len << 4) | HexDigitValue(g_packet[i]);
+            ++i;
+        }
+        if (i >= g_packet_len || g_packet[i] != ':')
+        {
+            SendCStr("E01");
+            return;
+        }
+        ++i;
+        const u64 high = addr >> 47;
+        if (high != 0 && high != 0x1FFFF)
+        {
+            SendCStr("E14");
+            return;
+        }
+        u8* p = reinterpret_cast<u8*>(addr);
+        for (u64 k = 0; k < len; ++k)
+        {
+            if (i + 1 >= g_packet_len)
+                break;
+            const u8 hi = HexDigitValue(g_packet[i]);
+            const u8 lo = HexDigitValue(g_packet[i + 1]);
+            p[k] = static_cast<u8>((hi << 4) | lo);
+            i += 2;
+        }
         SendCStr("OK");
         return;
     }
@@ -288,6 +397,11 @@ void GdbStubSetSink(GdbStubWriteByte sink)
 void GdbStubPublishRegisters(const GdbRegSnapshot* snap)
 {
     g_regs = snap;
+}
+
+void GdbStubPublishWritableRegisters(GdbRegSnapshot* snap)
+{
+    g_regs_writable = snap;
 }
 
 void GdbStubReceiveByte(u8 byte)

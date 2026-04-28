@@ -1302,6 +1302,11 @@ void Dispatch(char* line)
         CmdPerf(argc, argv);
         return;
     }
+    if (StrEq(cmd, "cpufeatures"))
+    {
+        CmdCpuFeatures();
+        return;
+    }
     if (StrEq(cmd, "domain"))
     {
         // Restarting a fault domain teardown+init may free

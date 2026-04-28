@@ -23,7 +23,10 @@
 #include "shell/shell_internal.h"
 #include "shell/shell.h"
 
+#include "arch/x86_64/cet.h"
 #include "arch/x86_64/cpu.h"
+#include "arch/x86_64/cpu_info.h"
+#include "arch/x86_64/cpu_mitigations.h"
 #include "arch/x86_64/hpet.h"
 #include "arch/x86_64/lapic.h"
 #include "arch/x86_64/smbios.h"
@@ -99,6 +102,46 @@ constexpr const char* kRflagsBitNames[] = {"CF", "PF", "AF", "ZF", "SF", "TF",  
                                            "OF", "NT", "RF", "VM", "AC", "VIF", "VIP", "ID"};
 
 } // namespace
+
+// `cpufeatures` — high-level summary of CPUID + mitigations
+// + CET probe state, all in one shell view. Pulls together
+// arch::CpuInfoGet + arch::CpuMitigationsGet + arch::CetGet.
+void CmdCpuFeatures()
+{
+    const auto& info = duetos::arch::CpuInfoGet();
+    const auto& mit = duetos::arch::CpuMitigationsGet();
+    const auto& cet = duetos::arch::CetGet();
+
+    ConsoleWrite("VENDOR:           ");
+    ConsoleWriteln(info.vendor);
+    ConsoleWrite("BRAND:            ");
+    ConsoleWriteln(info.brand);
+    ConsoleWrite("FAMILY/MODEL/STEP: ");
+    WriteU64Hex(info.family, 0);
+    ConsoleWriteChar('/');
+    WriteU64Hex(info.model, 0);
+    ConsoleWriteChar('/');
+    WriteU64Hex(info.stepping, 0);
+    ConsoleWriteChar('\n');
+
+    ConsoleWrite("MITIGATIONS:      kpti=");
+    ConsoleWrite(mit.needs_kpti ? "needed" : "safe");
+    ConsoleWrite(" mds=");
+    ConsoleWrite(mit.needs_mds_buf ? "needed" : "safe");
+    ConsoleWrite(" ssbd=");
+    ConsoleWrite(mit.needs_ssbd ? "needed" : "safe");
+    ConsoleWrite(" taa=");
+    ConsoleWrite(mit.needs_taa_flush ? "needed" : "safe");
+    ConsoleWriteChar('\n');
+
+    ConsoleWrite("CET:              ss=");
+    ConsoleWrite(cet.ss_supported ? "supported" : "absent");
+    ConsoleWrite(" ibt=");
+    ConsoleWrite(cet.ibt_supported ? "supported" : "absent");
+    ConsoleWrite(" enabled=");
+    ConsoleWrite((cet.ss_enabled || cet.ibt_enabled) ? "yes" : "no");
+    ConsoleWriteChar('\n');
+}
 
 void CmdCpuid(u32 argc, char** argv)
 {

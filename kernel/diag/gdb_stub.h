@@ -95,7 +95,18 @@ struct GdbRegSnapshot
 /// nullptr to clear (snapshots stop being live; `g` reverts to
 /// returning zeros). Caller owns the storage; the stub holds a
 /// pointer, so the snapshot must outlive any pending `g` reply.
+///
+/// `mut_snap` is the same pointer kept as a non-const sibling
+/// for `G` (write registers) — when non-null, GDB writes apply
+/// in-place; when null, `G` is silently dropped.
 void GdbStubPublishRegisters(const GdbRegSnapshot* snap);
+
+/// Publish a writable register snapshot for the `G` packet
+/// (GDB writes back the register state). Pass nullptr to make
+/// `G` a silent no-op (returns OK without applying). Typical
+/// pairing: one trap-frame snapshot used for both Get and
+/// Set.
+void GdbStubPublishWritableRegisters(GdbRegSnapshot* snap);
 
 /// Feed one received byte to the parser. The state machine
 /// recognises the `$` / `#` framing, accumulates the body,

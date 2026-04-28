@@ -1024,6 +1024,11 @@ void Schedule()
     asm volatile("mov %0, %%dr7" : : "r"(next->dr7));
 
     KBP_PROBE_V(::duetos::debug::ProbeId::kSchedContextSwitch, next->id);
+    // D2 instrumentation. arg0 = prev tid, arg1 = next tid.
+    // Cheap (single fetch_add + 2 stores in the ring path);
+    // safe to do here because we've already done the runqueue
+    // bookkeeping and are about to swap stacks.
+    ::duetos::diag::EventTrace(::duetos::diag::kEventSchedSwitch, prev->id, next->id);
     ContextSwitch(&prev->rsp, next->rsp);
     // When we return here, we're executing on a DIFFERENT task's
     // stack — whichever task got switched in to run us. The local
@@ -1202,6 +1207,11 @@ void OnTimerTick(u64 now_ticks)
     // threshold (~1 second) emits one warning per streak.
     diag::SoftLockupTick(now_ticks, (cur != nullptr) ? TaskId(cur) : 0);
     sync::RcuTick();
+    // D2 instrumentation. arg0 = vector (32 = LAPIC timer),
+    // arg1 = current_tid. Tagging IRQs lets a tracer dump
+    // correlate "which task got preempted" with the syscall +
+    // mutex events around it.
+    ::duetos::diag::EventTrace(::duetos::diag::kEventIrq, 32, (cur != nullptr) ? TaskId(cur) : 0);
     if (cur != nullptr && cur->process != nullptr)
     {
         core::Process* proc = cur->process;

@@ -387,6 +387,7 @@ void CmdLockdepPanic(u32 argc, char** argv);
 void CmdTracer(u32 argc, char** argv);
 void CmdPerf(u32 argc, char** argv);
 void CmdDomain(u32 argc, char** argv);
+void CmdCpuFeatures();
 void CmdDumpState();
 void CmdTrace(u32 argc, char** argv);
 void CmdHealth(u32 argc, char** argv);
