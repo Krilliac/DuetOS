@@ -87,6 +87,21 @@ SECTIONS
     {
         *(.rodata .rodata.*)
     }
+
+    /* C++ static-constructor table. Modern toolchains emit one
+     * pointer per `__attribute__((constructor))` / non-constinit
+     * global into `.init_array`; the kernel runtime walks
+     * [__init_array_start, __init_array_end) and invokes each
+     * pointer once at boot (`core::RunInitArray`). KEEP() so the
+     * symbols survive `--gc-sections`. (A1-followup, 2026-04-28.)
+     */
+    .init_array : AT(ADDR(.init_array) - KERNEL_VIRTUAL_BASE) ALIGN(8)
+    {
+        __init_array_start = .;
+        KEEP(*(.init_array .init_array.*))
+        __init_array_end = .;
+    }
+
     . = ALIGN(4K);
     _rodata_end = .;
 

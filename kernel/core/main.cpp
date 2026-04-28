@@ -502,6 +502,12 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     SerialWrite("[boot] Bringing up kernel heap.\n");
     KernelHeapInit();
+    // Walk _init_array AFTER the heap is online (any constructor
+    // that needs to allocate is now safe). v0 entry count is
+    // typically 0 — kernel TUs use `constinit` — but invoking
+    // the table closes the "silent partial-init" gap A1-followup
+    // identified.
+    duetos::core::RunInitArray();
     duetos::core::InitcallRegister(duetos::core::Phase::Heap, "kernel-heap-selftest",
                                    []()
                                    {

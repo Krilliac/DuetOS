@@ -10,6 +10,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
+#include "sync/seqlock.h"
 #include "util/result.h"
 #include "util/types.h"
 
@@ -21,7 +22,16 @@ namespace
 
 const Clocksource* g_registry[kMaxClocksources] = {};
 u32 g_registry_count = 0;
+// `g_current` is a single 8-byte pointer load — atomic on x86 —
+// but a SeqLock is added (plan B1-followup) so a future clock-
+// source hot-swap path can publish a NEW pointer + auxiliary
+// state (e.g. invariant-TSC scaling factors that haven't been
+// stamped into the source struct itself) under one writer
+// guard. Today only `ClocksourceRefreshCurrent` writes; readers
+// can grab a coherent (pointer, scale) pair through the seqlock
+// retry loop the day calibration becomes a hot path.
 const Clocksource* g_current = nullptr;
+sync::SeqLock g_current_lock = {};
 
 bool StrEqual(const char* a, const char* b)
 {
@@ -108,11 +118,23 @@ const Clocksource* ClocksourceSelectBest()
 
 const Clocksource* ClocksourceCurrent()
 {
-    return g_current;
+    // Seqlock-coherent read. v0 the clocksource pointer is the
+    // only protected field, so a torn read can only happen if a
+    // writer is mid-Refresh — the loop converges in O(1) for the
+    // single-CPU boot case.
+    const Clocksource* snap;
+    u32 seq;
+    do
+    {
+        seq = sync::SeqLockBeginRead(g_current_lock);
+        snap = g_current;
+    } while (!sync::SeqLockEndRead(g_current_lock, seq));
+    return snap;
 }
 
 void ClocksourceRefreshCurrent()
 {
+    sync::SeqLockWriteGuard g(g_current_lock);
     g_current = ClocksourceSelectBest();
 }
 

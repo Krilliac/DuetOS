@@ -122,6 +122,16 @@ const char* PhaseName(Phase phase);
 /// future caller, so a regression here is a hard stop.
 void InitSelfTest();
 
+/// Walk `[__init_array_start, __init_array_end)` (defined by the
+/// linker script) and invoke each function pointer in order.
+/// Standard hosted-runtime behaviour for C++ static constructors
+/// — kernel TUs almost always use `constinit` globals to avoid
+/// runtime initialisers, so the table is typically empty / very
+/// short. Call once at boot AFTER the kernel heap is online (so
+/// any constructor that allocates won't trip the early frame
+/// allocator). Subsequent calls are safe but redundant.
+void RunInitArray();
+
 } // namespace duetos::core
 
 /*

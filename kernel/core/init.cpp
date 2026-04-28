@@ -241,4 +241,33 @@ void InitSelfTest()
     arch::SerialWrite("[init] self-test: 3 phases x 1 callback ran in order; failure path surfaces error. OK.\n");
 }
 
+// _init_array invocation (plan A1-followup). The linker script
+// places one pointer per non-constinit C++ static constructor
+// into [__init_array_start, __init_array_end); walking the
+// range + invoking each pointer is the standard hosted-runtime
+// behaviour. The kernel deliberately favors `constinit` globals
+// (no constructors), so this table is typically empty / very
+// short — the call is a no-op on a clean build but exists so a
+// future TU that needs a real constructor doesn't silently get
+// a half-initialised global.
+//
+// Linker symbols:
+extern "C" void (*__init_array_start[])();
+extern "C" void (*__init_array_end[])();
+
+void RunInitArray()
+{
+    const u64 count = static_cast<u64>(__init_array_end - __init_array_start);
+    arch::SerialWrite("[init] _init_array: ");
+    arch::SerialWriteHex(count);
+    arch::SerialWrite(" entries\n");
+    for (u64 i = 0; i < count; ++i)
+    {
+        if (__init_array_start[i] != nullptr)
+        {
+            __init_array_start[i]();
+        }
+    }
+}
+
 } // namespace duetos::core

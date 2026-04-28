@@ -3,6 +3,7 @@
 #include "util/types.h"
 #include "mm/frame_allocator.h"
 #include "mm/paging.h"
+#include "sync/rwlock.h"
 
 /*
  * DuetOS per-process address space — v0.
@@ -126,6 +127,18 @@ struct AddressSpace
     // processes. Destroy walks the first `region_count` entries.
     u8 region_count;
     AddressSpaceUserRegion regions[kMaxUserVmRegionsPerAs];
+
+    // RwLock for concurrent access to `regions[]` + `region_count`
+    // (plan B1-followup, 2026-04-28). Today every AS is owned by a
+    // single Task — there's no real concurrency on this table, so
+    // the lock is acquired but never contended. The day a Process
+    // grows multi-threaded (multiple Tasks per AS), readers (page-
+    // fault handlers walking the region list) take it shared while
+    // writers (MapUserPage / UnmapUserPage / Destroy) take it
+    // exclusive. Default-initialised to unclassified — tagging
+    // with a canonical lockdep class IS a follow-up once another
+    // RwLock joins the system to compare against.
+    sync::RwLock regions_lock;
 };
 
 /// Allocate a fresh AS with a zeroed user half and the kernel half
