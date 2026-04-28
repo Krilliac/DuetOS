@@ -190,10 +190,66 @@ constexpr Theme kSlate10 = {
     .console_bg = 0x001A1A20, // Slate panel
 };
 
+// Duet — the redesigned palette. Slate-charcoal canvas, dual-accent
+// (teal = native DuetOS ABI, amber = Win32 PE peer). Sourced from
+// docs/duet-theme/prototype/ slate mode and documented per-token in
+// docs/duet-theme-spec.md.
+//
+// The two-accent "duet" story shows up in the per-role title hues:
+// utility / telemetry roles (Calculator, TaskManager, Clock, LogView)
+// land on the cool / chrome side; document-style roles (Notes, Files)
+// land on the warm side. GfxDemo keeps its magenta tag so it reads as
+// "this paints pixels" the same way it does in every other palette.
+constexpr Theme kDuet = {
+    .name = "duet",
+
+    // Desktop: deep Slate canvas (`--bg-1` from the prototype).
+    .desktop_bg = 0x000B0E13,
+    .banner_fg = 0x00E8EDF2, // `--ink`
+
+    // Taskbar: surface = `--chrome-2`, ink = `--ink-2`,
+    // accent = `--accent` (teal #2dd4bf), recess panel = `--chrome-3`,
+    // and a hairline border that's `--line-2` flattened over chrome.
+    .taskbar_bg = 0x001C222B,
+    .taskbar_fg = 0x00AEB7C2,
+    .taskbar_accent = 0x002DD4BF,
+    .taskbar_tab_inactive = 0x000F1319,
+    .taskbar_border = 0x001E2530,
+
+    // Windows: subtle slate border, prototype-matched red close hover.
+    .window_border = 0x002A323C,
+    .window_close = 0x00E3413C, // `TitleBtn` close hover
+
+    .role_title =
+        {
+            0x00207A6F, // Calculator   — teal-tinted chrome (utility, native primary)
+            0x00805E20, // Notes        — amber-tinted chrome (paper / document analogue)
+            0x00164D45, // TaskManager  — deeper teal (telemetry primary)
+            0x00161B23, // LogView      — flat slate panel (mono content, no hue)
+            0x00604818, // Files        — amber-tinted chrome (document storage)
+            0x00141822, // Clock        — slate panel (passive widget)
+            0x00702070, // GfxDemo      — magenta to flag "this paints pixels"
+        },
+    .role_client =
+        {
+            0x00141A22, // Calculator
+            0x00F3F0E6, // Notes — cream paper, the only light client
+            0x00141A22, // TaskManager
+            0x000F1319, // LogView — `--chrome-3` so log colours pop
+            0x00141A22, // Files
+            0x000B0E13, // Clock — near-black canvas ground for clock face
+            0x00000000, // GfxDemo — black; the demo overpaints every pixel
+        },
+
+    .console_fg = 0x00E8EDF2, // `--ink` — JetBrains-Mono ink in the prototype
+    .console_bg = 0x000F1319, // `--chrome-3` — slate panel ground
+};
+
 const Theme* const kThemes[static_cast<u32>(ThemeId::kCount)] = {
     &kClassic,
     &kSlate10,
     &kAmber,
+    &kDuet,
 };
 
 // ---------------------------------------------------------------

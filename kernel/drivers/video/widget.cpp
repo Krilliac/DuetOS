@@ -190,6 +190,11 @@ struct RegisteredWindow
     // pointer stays stable.
     const char* title;
     char mut_title[kWindowTitleStorage];
+    // Duet-era optional subtitle. Empty string until
+    // WindowSetSubtitle is called. Themes that don't render it
+    // ignore the field; the storage is unconditional so the
+    // accessor always returns a stable pointer.
+    char mut_subtitle[kWindowSubtitleStorage];
     WindowContentFn content_fn; // nullable per-window content drawer
     void* content_cookie;
     u64 owner_pid; // 0 = kernel-owned boot window, >0 = ring-3 pid
@@ -373,6 +378,23 @@ void StoreTitle(RegisteredWindow& w, const char* src)
     w.mut_title[i] = '\0';
     w.title = w.mut_title;
 }
+
+// Sibling of StoreTitle for the subtitle slot. Empty string is
+// the well-defined cleared state — WindowGetSubtitle must
+// always return a NUL-terminated pointer for a live window.
+void StoreSubtitle(RegisteredWindow& w, const char* src)
+{
+    u32 i = 0;
+    if (src != nullptr)
+    {
+        for (; i + 1 < kWindowSubtitleStorage && src[i] != '\0'; ++i)
+        {
+            const char c = src[i];
+            w.mut_subtitle[i] = (c >= 0x20 && c < 0x7F) ? c : '?';
+        }
+    }
+    w.mut_subtitle[i] = '\0';
+}
 } // namespace
 
 WindowHandle WindowRegister(const WindowChrome& chrome, const char* title)
@@ -384,6 +406,7 @@ WindowHandle WindowRegister(const WindowChrome& chrome, const char* title)
     const WindowHandle h = g_window_count;
     g_windows[h].chrome = chrome;
     StoreTitle(g_windows[h], title);
+    StoreSubtitle(g_windows[h], nullptr);
     g_windows[h].alive = true;
     g_windows[h].visible = true;
     g_windows[h].dirty = false;
@@ -1498,6 +1521,25 @@ bool WindowSetTitle(WindowHandle h, const char* ascii_src)
     }
     StoreTitle(g_windows[h], ascii_src);
     return true;
+}
+
+bool WindowSetSubtitle(WindowHandle h, const char* ascii_src)
+{
+    if (!WindowValid(h))
+    {
+        return false;
+    }
+    StoreSubtitle(g_windows[h], ascii_src);
+    return true;
+}
+
+const char* WindowGetSubtitle(WindowHandle h)
+{
+    if (!WindowValid(h))
+    {
+        return nullptr;
+    }
+    return g_windows[h].mut_subtitle;
 }
 
 // --- Async keyboard state -----------------------------------------

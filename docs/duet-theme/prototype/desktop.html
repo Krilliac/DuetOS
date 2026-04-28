@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>DuetOS — Desktop</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<template id="__bundler_thumbnail">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
+  <rect width="200" height="200" fill="#0b0e13"/>
+  <g transform="translate(100,100)">
+    <circle r="46" fill="none" stroke="#2dd4bf" stroke-width="8" stroke-linecap="round"
+            stroke-dasharray="120 999" transform="rotate(-30) translate(-10,0)"/>
+    <circle r="46" fill="none" stroke="#f5b73a" stroke-width="8" stroke-linecap="round"
+            stroke-dasharray="120 999" transform="rotate(150) translate(-10,0)"/>
+  </g>
+</svg>
+</template>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  html,body{margin:0;padding:0;height:100%;background:#000;font-family:'Inter',ui-sans-serif,system-ui,sans-serif;overflow:hidden;color:#e8edf2}
+  *{box-sizing:border-box}
+  #root{width:100%;height:100%}
+  /* Scrollbars */
+  .duet-scroll::-webkit-scrollbar{width:10px;height:10px}
+  .duet-scroll::-webkit-scrollbar-track{background:transparent}
+  .duet-scroll::-webkit-scrollbar-thumb{background:rgba(255,255,255,.08);border-radius:0;border:2px solid transparent;background-clip:padding-box}
+  .duet-scroll::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.18);background-clip:padding-box;border:2px solid transparent}
+
+  /* Theme tokens — dark default; overridden by [data-theme="light"] / "classic" */
+  :root[data-theme="slate"]{
+    --bg-1:#0b0e13;            /* desktop deep */
+    --bg-2:#0e1218;            /* desktop mid */
+    --chrome:#161b23;          /* window chrome */
+    --chrome-2:#1c222b;        /* taskbar */
+    --chrome-3:#0f1319;        /* recess */
+    --line:rgba(255,255,255,.07);
+    --line-2:rgba(255,255,255,.12);
+    --ink:#e8edf2;
+    --ink-2:#aeb7c2;
+    --ink-3:#6f7886;
+    --accent:#2dd4bf;          /* teal — primary */
+    --accent-2:#f5b73a;        /* amber — secondary "duet" */
+    --accent-ink:#062925;
+    --hover:rgba(255,255,255,.06);
+    --press:rgba(255,255,255,.10);
+    --shadow:0 16px 40px -12px rgba(0,0,0,.6),0 2px 0 rgba(255,255,255,.03) inset;
+    --titlebar-h:30px;
+  }
+  :root[data-theme="light"]{
+    --bg-1:#e8ecf1;
+    --bg-2:#dde2e9;
+    --chrome:#f4f6f9;
+    --chrome-2:#eef1f5;
+    --chrome-3:#e3e7ec;
+    --line:rgba(0,0,0,.08);
+    --line-2:rgba(0,0,0,.14);
+    --ink:#1a2230;
+    --ink-2:#4a5566;
+    --ink-3:#7d8696;
+    --accent:#0f9b8a;
+    --accent-2:#c98a16;
+    --accent-ink:#fff;
+    --hover:rgba(0,0,0,.05);
+    --press:rgba(0,0,0,.09);
+    --shadow:0 12px 30px -10px rgba(20,30,50,.25),0 1px 0 rgba(255,255,255,.5) inset;
+    --titlebar-h:30px;
+  }
+  :root[data-theme="classic"]{
+    --bg-1:#1f3a5f;
+    --bg-2:#1f3a5f;
+    --chrome:#ece9d8;
+    --chrome-2:#245edc;
+    --chrome-3:#d4d0c8;
+    --line:rgba(0,0,0,.25);
+    --line-2:rgba(0,0,0,.4);
+    --ink:#000;
+    --ink-2:#1a1a1a;
+    --ink-3:#555;
+    --accent:#245edc;
+    --accent-2:#f59f0a;
+    --accent-ink:#fff;
+    --hover:rgba(0,0,0,.06);
+    --press:rgba(0,0,0,.12);
+    --shadow:1px 1px 0 #fff inset,-1px -1px 0 rgba(0,0,0,.2) inset,2px 2px 6px rgba(0,0,0,.3);
+    --titlebar-h:26px;
+  }
+
+  body{background:var(--bg-1);color:var(--ink)}
+  .mono{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace}
+</style>
+
+<!-- Tweak defaults persisted to disk -->
+<script>
+  window.TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+    "theme": "slate",
+    "accent": "teal-amber",
+    "taskbarPos": "bottom",
+    "startOpen": false,
+    "wallpaper": "syscalls",
+    "density": "regular",
+    "showWidgets": true,
+    "boldAccent": false
+  }/*EDITMODE-END*/;
+</script>
+
+<!-- React + Babel pinned -->
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" src="tweaks-panel.jsx"></script>
+<script type="text/babel" src="desktop-data.jsx"></script>
+<script type="text/babel" src="desktop-icons.jsx"></script>
+<script type="text/babel" src="desktop-wallpaper.jsx"></script>
+<script type="text/babel" src="desktop-windows.jsx"></script>
+<script type="text/babel" src="desktop-startmenu.jsx"></script>
+<script type="text/babel" src="desktop-taskbar.jsx"></script>
+<script type="text/babel" src="desktop-app.jsx"></script>
+</body>
+</html>

@@ -535,14 +535,18 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // turns the compile flag on, the symbols are already here.
     duetos::diag::UbsanSelfTest();
 
-    // Centralised syscall capability gate (plan A4). Walks every
-    // row of `kSyscallCapTable` against synthetic empty / trusted
-    // processes; asserts empty fails, trusted passes, and that
-    // the unknown-syscall path is a no-op. The dispatcher itself
-    // already calls SyscallGate before each handler — this just
-    // verifies the table + lookup + denial path before any user
-    // code reaches the int 0x80 boundary.
-    duetos::core::SyscallGateSelfTest();
+    // SyscallGateSelfTest moved to AFTER PerCpuInitBsp — its
+    // denial path calls RecordSandboxDenial → CurrentTask() →
+    // CurrentCpu(), which reads GSBASE. Running it before the
+    // BSP per-CPU struct is installed reads whatever GSBASE the
+    // firmware left behind: zero / harmless under OVMF, real-
+    // mode IVT under SeaBIOS (the BSP shadow page contains
+    // 0xf000:ffff IVT entries that look like non-null pointers,
+    // pass the null-check in RecordSandboxDenial, and #GP-fault
+    // when the synthetic Task* is dereferenced for ->process).
+    // The self-test now runs once GSBASE has been programmed and
+    // current_task is the well-defined nullptr from the constinit
+    // PerCpu literal.
 
     SerialWrite("[boot] Parsing Multiboot2 memory map.\n");
     FrameAllocatorInit(multiboot_info);
@@ -667,9 +671,9 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // repaint the whole surface with one call.
     //
     // Initial theme selection honours the kernel cmdline
-    // (theme=classic / theme=slate10); default is the classic
-    // teal palette the first GUI slice shipped. Ctrl+Alt+Y
-    // cycles at runtime.
+    // (theme=classic / theme=slate10 / theme=amber / theme=duet);
+    // default is the classic teal palette the first GUI slice
+    // shipped. Ctrl+Alt+Y cycles at runtime.
     {
         const char* early_cmdline = FindBootCmdline(multiboot_info);
         for (int i = 0; i < static_cast<int>(duetos::drivers::video::ThemeId::kCount); ++i)
@@ -754,6 +758,10 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     const duetos::drivers::video::WindowHandle logview_handle =
         duetos::drivers::video::WindowRegister(logview_chrome, "KERNEL LOG");
     duetos::drivers::video::ThemeRegisterWindow(Role::LogView, logview_handle);
+    // Subtitle for Duet-era chrome to render next to the title.
+    // Themes that don't read it (Classic / Slate10 / Amber)
+    // ignore the field; the storage is unconditional.
+    duetos::drivers::video::WindowSetSubtitle(logview_handle, "/sys/klog | live");
 
     duetos::drivers::video::WindowSetContentDraw(
         logview_handle,
@@ -1275,6 +1283,16 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     SerialWrite("[boot] Installing BSP per-CPU struct.\n");
     duetos::cpu::PerCpuInitBsp();
 
+    // Centralised syscall capability gate (plan A4). Walks every
+    // row of `kSyscallCapTable` against synthetic empty / trusted
+    // processes; asserts empty fails, trusted passes, and that
+    // the unknown-syscall path is a no-op. The dispatcher itself
+    // already calls SyscallGate before each handler — this just
+    // verifies the table + lookup + denial path before any user
+    // code reaches the int 0x80 boundary. Runs AFTER PerCpuInitBsp
+    // so the denial path's CurrentTask() reads a programmed GSBASE.
+    duetos::core::SyscallGateSelfTest();
+
     SerialWrite("[boot] Programming Linux-ABI syscall MSRs.\n");
     duetos::subsystems::linux::SyscallInit();
 
@@ -1743,10 +1761,12 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             }
 
             // Ctrl+Alt+Y cycles the desktop theme. Classic (teal)
-            // -> Slate10 (Win10 x Unreal Slate hybrid) -> wrap.
-            // Re-chromes every themed window + the taskbar +
-            // console + cursor backing, then recomposes so the
-            // new palette appears on screen in one flip.
+            // -> Slate10 (Win10 x Unreal Slate hybrid) -> Amber
+            // (mono CRT tribute) -> Duet (redesigned palette,
+            // teal+amber dual accent) -> wrap. Re-chromes every
+            // themed window + the taskbar + console + cursor
+            // backing, then recomposes so the new palette appears
+            // on screen in one flip.
             if (ctrl && alt && (ev.code == 'y' || ev.code == 'Y'))
             {
                 duetos::drivers::video::CompositorLock();

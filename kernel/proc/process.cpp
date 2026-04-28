@@ -2,6 +2,7 @@
 
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
+#include "diag/hexdump.h"
 #include "diag/log_names.h"
 #include "debug/probes.h"
 #include "drivers/video/theme.h"
@@ -441,6 +442,19 @@ void RecordSandboxDenial(Cap cap)
 {
     sched::Task* t = sched::CurrentTask();
     if (t == nullptr)
+    {
+        return;
+    }
+    // Defence-in-depth against early-boot pre-PerCpuInit calls and
+    // any future regression where CurrentTask() returns garbage:
+    // a non-null but non-canonical / non-kernel-VA pointer would
+    // pass the null-check above and #GP on the next dereference.
+    // The original failure mode was SyscallGateSelfTest running
+    // before PerCpuInitBsp under SeaBIOS — see main.cpp at the
+    // SyscallGateSelfTest call site for the full rationale. The
+    // ordering bug is fixed there; this guard ensures any future
+    // pre-init caller fails closed instead of triple-faulting.
+    if (!PlausibleKernelAddress(reinterpret_cast<u64>(t)))
     {
         return;
     }

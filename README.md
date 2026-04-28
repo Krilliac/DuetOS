@@ -151,9 +151,8 @@ Not enough argument. Use -h for help.
 
 ## Screenshots
 
-Captured live from the QEMU runs that produce the boot log above. See
-[`docs/screenshots/`](docs/screenshots/) for the PNGs. Reproduce any of
-them with:
+Captured live from QEMU. See [`docs/screenshots/`](docs/screenshots/)
+for the PNGs. Reproduce any of them with:
 
 ```bash
 cmake --preset x86_64-debug
@@ -162,41 +161,60 @@ cmake --build build/x86_64-debug --parallel $(nproc)
 # Full framebuffer PNG of the default boot (login gate)
 tools/qemu/screenshot.sh docs/screenshots/01-login-screen.png
 
-# Other boot entries by index-from-default (see boot/grub/grub.cfg)
-tools/qemu/screenshot-theme.sh 5 docs/screenshots/02-desktop-classic.png
-tools/qemu/screenshot-theme.sh 6 docs/screenshots/03-desktop-slate10.png
-tools/qemu/screenshot-theme.sh 2 docs/screenshots/04-terminal-tty.png
+# Themed desktops by GRUB-entry index (see boot/grub/grub.cfg)
+DUETOS_SETTLE=10 tools/qemu/screenshot-theme.sh  5 docs/screenshots/02-desktop-classic.png
+DUETOS_SETTLE=10 tools/qemu/screenshot-theme.sh  6 docs/screenshots/03-desktop-slate10.png
+DUETOS_SETTLE=10 tools/qemu/screenshot-theme.sh 10 docs/screenshots/05-desktop-amber.png
+DUETOS_SETTLE=10 tools/qemu/screenshot-theme.sh 11 docs/screenshots/06-desktop-duet.png
 
-# Native pixel-render demo (longer settle so the gfxdemo window paints fully)
-DUETOS_SETTLE=20 tools/qemu/screenshot-theme.sh 5 docs/screenshots/08-gfxdemo-pixel-render.png
+# TTY mode + native pixel-render demo
+DUETOS_SETTLE=10 tools/qemu/screenshot-theme.sh  2 docs/screenshots/04-terminal-tty.png
+DUETOS_SETTLE=12 tools/qemu/screenshot-theme.sh  5 docs/screenshots/08-gfxdemo-pixel-render.png
+DUETOS_SETTLE=12 tools/qemu/screenshot-theme.sh 11 docs/screenshots/09-duet-pixel-render.png
 ```
+
+`Ctrl+Alt+Y` cycles themes at runtime: **Classic → Slate10 → Amber →
+Duet → (wraps)**.
 
 | Login gate | Terminal (TTY) |
 |------------|----------------|
 | ![login gate](docs/screenshots/01-login-screen.png) | ![fullscreen TTY](docs/screenshots/04-terminal-tty.png) |
-| Default boot. USERNAME/PASSWORD form, default accounts hinted at the bottom. | `boot=tty` entry. Fullscreen green-on-black framebuffer console with the boot log, shell help, and login prompt. |
+| Default boot. `USERNAME` / `PASSWORD` form, default accounts hinted at the bottom. | `boot=tty` entry. Fullscreen framebuffer console with the boot log, shell help, and login prompt. |
 
-| Windowed desktop, Classic theme | Windowed desktop, Slate10 theme |
-|---------------------------------|---------------------------------|
+### The four themes
+
+`Ctrl+Alt+Y` (or `theme=<name>` on the kernel cmdline / `theme <name>` in
+the kernel shell) hot-swaps every chrome colour. Same compose, same
+windows, same compositor — only the palette changes. Each theme is a
+flat token table in `kernel/drivers/video/theme.cpp` that the window
+registry, taskbar, console, and cursor backing all sample on every
+recompose.
+
+| Classic — teal / slate-blue (the original) | Slate10 — Win10 × Unreal Slate hybrid |
+|--------------------------------------------|----------------------------------------|
 | ![classic theme](docs/screenshots/02-desktop-classic.png) | ![slate10 theme](docs/screenshots/03-desktop-slate10.png) |
-| Calculator, Notepad, Files, Task Manager, Kernel Log, Clock widget, taskbar with Start button + pinned apps + tray + clock. | Same compose, Slate10 theme — dark charcoal chrome, flat Win10-blue accent. `Ctrl+Alt+Y` cycles themes at runtime. |
+| The palette the first GUI slice shipped with, preserved bit-for-bit. Calculator, Notepad, Files, Task Manager, Kernel Log, Clock widget, GFX Demo, taskbar with Start + pinned apps + tray + clock. | Dark charcoal chrome, flat Win10-blue accent, Slate-amber Notes title, Win10-red close button. Title bars stay role-coloured so apps remain distinguishable. |
+
+| Amber — single-hue retro-CRT tribute | **Duet — redesigned dual-accent** *(new)* |
+|---------------------------------------|--------------------------------------------|
+| ![amber theme](docs/screenshots/05-desktop-amber.png) | ![duet theme](docs/screenshots/06-desktop-duet.png) |
+| Every surface is a shade of warm amber on near-black, in the spirit of 1980s IBM / Wyse monochrome terminals. Doubles as a stress test for the theme system — anything that hard-coded a multi-hue assumption shows up here first. | Slate-charcoal canvas (`#0B0E13`) with **two accents**: teal `#2DD4BF` for native DuetOS surfaces, amber-warm hues for Win32 PE / document apps. Sourced from the React/Babel prototype under [`docs/duet-theme/prototype/`](docs/duet-theme/prototype/); per-token mapping documented in [`docs/duet-theme-spec.md`](docs/duet-theme-spec.md). |
 
 ### Native pixel rendering — gfxdemo + DirectX v0 path
 
-![native pixel render](docs/screenshots/08-gfxdemo-pixel-render.png)
+| Classic theme — Mandelbrot mode | Duet theme — plasma mode |
+|---------------------------------|---------------------------|
+| ![mandelbrot pixel render](docs/screenshots/08-gfxdemo-pixel-render.png) | ![duet plasma pixel render](docs/screenshots/09-duet-pixel-render.png) |
 
 The **GFX DEMO** window in the upper right is a native DuetOS app
 (`kernel/apps/gfxdemo.cpp`) whose content-draw callback computes
-**every pixel** of its client area on each compose: a diagonal
-RGB gradient (red on the X axis, green on the Y, blue on the
-anti-diagonal) with a soft 16-pixel quilt shimmer, three concentric
-outline rings traced by an integer sine LUT (white / cyan / magenta),
-and a yellow sine-wave overlay across the mid-Y row. Two centred 8x8
-text strips identify the path. Same compose, same compositor, same
-SYS_GDI_BITBLT pipeline as the Calculator / Notepad / Files / Task
-Manager / Kernel Log / Clock / WINDOWED HELLO windows around it —
-just with the client filled by computed pixels rather than glyphs
-or chrome fills.
+**every pixel** of its client area on each compose. The demo cycles
+through six modes (plasma / Mandelbrot / wirecube / particles /
+starfield / fire); both screenshots above are the same boot, captured
+at different settle times. Same compose, same compositor, same
+`SYS_GDI_BITBLT` pipeline as the Calculator / Notepad / Files / Task
+Manager / Kernel Log / Clock windows around it — just with the
+client filled by computed pixels rather than glyphs or chrome fills.
 
 The same `FramebufferPutPixel` / `FramebufferFillRect` / `FillRgba`
 primitive set is what the DirectX v0 DLLs (`d3d9` / `d3d11` /
@@ -207,7 +225,7 @@ for the COM-vtable layout and the Clear-and-Present plumbing.
 
 ### Windows PE on the serial console
 
-[`docs/screenshots/06-windows-pe-serial-excerpt.txt`](docs/screenshots/06-windows-pe-serial-excerpt.txt)
+[`docs/screenshots/pe-serial-excerpt.txt`](docs/screenshots/pe-serial-excerpt.txt)
 is the live excerpt for the PE-on-DuetOS evidence block: an MSVC-built
 fixture queries the registry (`ProductName="DuetOS"`, 7 bytes), `fopen`s
 `/bin/hello.exe` and reads `MZ`, then `windows-kill.exe` — a real
