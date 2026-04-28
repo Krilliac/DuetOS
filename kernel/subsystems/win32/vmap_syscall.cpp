@@ -2,6 +2,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/traps.h"
+#include "log/klog.h"
 #include "proc/process.h"
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
@@ -12,21 +13,26 @@ namespace duetos::subsystems::win32
 
 void DoVmap(arch::TrapFrame* frame)
 {
+    KLOG_TRACE_V("win32/vmap", "DoVmap: requested bytes", frame->rdi);
     core::Process* proc = core::CurrentProcess();
     if (proc == nullptr)
     {
+        KLOG_WARN("win32/vmap", "DoVmap: no current Process");
         frame->rax = 0;
         return;
     }
     const u64 bytes = frame->rdi;
     if (bytes == 0)
     {
+        KLOG_DEBUG("win32/vmap", "DoVmap: zero-byte request -> 0");
         frame->rax = 0;
         return;
     }
     const u64 pages = (bytes + mm::kPageSize - 1) / mm::kPageSize;
     if (pages == 0 || proc->vmap_pages_used + pages > core::Process::kWin32VmapCapPages)
     {
+        KLOG_WARN_2V("win32/vmap", "DoVmap: arena cap exceeded", "pages", pages, "used",
+                     static_cast<u64>(proc->vmap_pages_used));
         arch::SerialWrite("[sys] vmap oom pid=");
         arch::SerialWriteHex(proc->pid);
         arch::SerialWrite(" bytes=");
@@ -57,6 +63,7 @@ void DoVmap(arch::TrapFrame* frame)
             arch::SerialWrite("/");
             arch::SerialWriteHex(pages);
             arch::SerialWrite("\n");
+            KLOG_ERROR_2V("win32/vmap", "DoVmap: partial-OOM (frames stranded)", "mapped", i, "wanted", pages);
             frame->rax = 0;
             return;
         }
@@ -71,6 +78,7 @@ void DoVmap(arch::TrapFrame* frame)
     arch::SerialWrite(" pages=");
     arch::SerialWriteHex(pages);
     arch::SerialWrite("\n");
+    KLOG_INFO_2V("win32/vmap", "DoVmap: ok", "va", base, "pages", pages);
     frame->rax = base;
 }
 
@@ -79,9 +87,11 @@ void DoVunmap(arch::TrapFrame* frame)
     // v0: no-op with a range-validity check. A bump-only arena
     // can't free individual regions without turning into a real
     // allocator, so VirtualFree is documented as a leak.
+    KLOG_TRACE_V("win32/vmap", "DoVunmap: va", frame->rdi);
     core::Process* proc = core::CurrentProcess();
     if (proc == nullptr)
     {
+        KLOG_WARN("win32/vmap", "DoVunmap: no current Process");
         frame->rax = static_cast<u64>(-1);
         return;
     }
@@ -89,10 +99,12 @@ void DoVunmap(arch::TrapFrame* frame)
     const u64 arena_end = proc->vmap_base + core::Process::kWin32VmapCapPages * mm::kPageSize;
     if (va < proc->vmap_base || va >= arena_end)
     {
+        KLOG_WARN_V("win32/vmap", "DoVunmap: VA outside arena", va);
         frame->rax = static_cast<u64>(-1);
         return;
     }
     frame->rax = 0;
+    KLOG_ONCE_INFO("win32/vmap", "DoVunmap: v0 leaks (no per-region free)");
 }
 
 } // namespace duetos::subsystems::win32

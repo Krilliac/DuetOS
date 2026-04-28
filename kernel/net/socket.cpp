@@ -206,13 +206,18 @@ const Socket* SocketGet(u32 idx)
 
 bool SocketBind(u32 idx, Ipv4Address local_ip, u16 local_port)
 {
+    KLOG_DEBUG("net/socket", "SocketBind: enter");
     if (idx >= kSocketPoolCap)
+    {
+        KLOG_WARN_V("net/socket", "SocketBind: idx out of range", idx);
         return false;
+    }
     arch::Cli();
     Socket& s = g_pool[idx];
     if (!s.in_use || s.bound)
     {
         arch::Sti();
+        KLOG_WARN_V("net/socket", "SocketBind: socket not in use or already bound, idx", idx);
         return false;
     }
     if (s.type == kSocketTypeDgram)
@@ -255,23 +260,30 @@ bool SocketBind(u32 idx, Ipv4Address local_ip, u16 local_port)
     s.bound = true;
     ++g_stats.binds;
     arch::Sti();
+    KLOG_INFO_2V("net/socket", "SocketBind: ok", "idx", idx, "port", s.local_port);
     return true;
 }
 
 bool SocketListen(u32 idx, u32 backlog)
 {
     (void)backlog;
+    KLOG_DEBUG("net/socket", "SocketListen: enter");
     if (idx >= kSocketPoolCap)
+    {
+        KLOG_WARN_V("net/socket", "SocketListen: idx out of range", idx);
         return false;
+    }
     arch::Cli();
     Socket& s = g_pool[idx];
     if (!s.in_use || s.type != kSocketTypeStream || !s.bound)
     {
         arch::Sti();
+        KLOG_WARN_V("net/socket", "SocketListen: invalid state (not stream, not bound, or unused), idx", idx);
         return false;
     }
     s.listening = true;
     arch::Sti();
+    KLOG_INFO_V("net/socket", "SocketListen: listening on port", s.local_port);
     // The actual TcpListen call happens through the stack — wire
     // an empty canned reply so the listen slot just passes data
     // through to recv. SocketRecvStream pulls from the same shared
@@ -282,13 +294,18 @@ bool SocketListen(u32 idx, u32 backlog)
 
 bool SocketConnect(u32 idx, Ipv4Address peer_ip, u16 peer_port)
 {
+    KLOG_DEBUG("net/socket", "SocketConnect: enter");
     if (idx >= kSocketPoolCap)
+    {
+        KLOG_WARN_V("net/socket", "SocketConnect: idx out of range", idx);
         return false;
+    }
     arch::Cli();
     Socket& s = g_pool[idx];
     if (!s.in_use)
     {
         arch::Sti();
+        KLOG_WARN_V("net/socket", "SocketConnect: socket slot not in use, idx", idx);
         return false;
     }
     if (s.type == kSocketTypeDgram)
@@ -345,16 +362,24 @@ bool SocketConnect(u32 idx, Ipv4Address peer_ip, u16 peer_port)
     s.connected = true;
     ++g_stats.connects;
     arch::Sti();
+    KLOG_INFO_2V("net/socket", "SocketConnect: TCP connect ok", "idx", idx, "peer_port", peer_port);
     return true;
 }
 
 i64 SocketSendDgram(u32 idx, Ipv4Address dst_ip, u16 dst_port, const u8* data, u32 len)
 {
+    KLOG_TRACE_V("net/socket", "SocketSendDgram: idx", idx);
     if (idx >= kSocketPoolCap)
+    {
+        KLOG_WARN_V("net/socket", "SocketSendDgram: EBADF idx", idx);
         return -9; // EBADF
+    }
     Socket& s = g_pool[idx];
     if (!s.in_use || s.type != kSocketTypeDgram)
+    {
+        KLOG_WARN_V("net/socket", "SocketSendDgram: ENOTSOCK / wrong type, idx", idx);
         return -88; // ENOTSOCK
+    }
     if ((s.shutdown_flags & 0x2) != 0)
         return -32; // EPIPE on shut_wr
     Ipv4Address dst = dst_ip;

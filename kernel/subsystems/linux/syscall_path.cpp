@@ -14,6 +14,7 @@
 
 #include "subsystems/linux/syscall_internal.h"
 
+#include "log/klog.h"
 #include "proc/process.h"
 #include "mm/address_space.h"
 
@@ -28,14 +29,21 @@ namespace duetos::subsystems::linux::internal
 // path looks like a FAT32 path); otherwise success.
 i64 DoChdir(u64 user_path)
 {
+    KLOG_TRACE_V("linux/path", "DoChdir: user_path", user_path);
     core::Process* p = core::CurrentProcess();
     if (p == nullptr)
+    {
+        KLOG_WARN("linux/path", "DoChdir: no current Process");
         return kEINVAL;
+    }
     char kbuf[core::Process::kLinuxCwdCap];
     for (u32 i = 0; i < sizeof(kbuf); ++i)
         kbuf[i] = 0;
     if (!mm::CopyFromUser(kbuf, reinterpret_cast<const void*>(user_path), sizeof(kbuf) - 1))
+    {
+        KLOG_WARN_V("linux/path", "DoChdir: CopyFromUser failed", user_path);
         return kEFAULT;
+    }
     kbuf[sizeof(kbuf) - 1] = 0;
     bool has_nul = false;
     u64 len = 0;
@@ -49,12 +57,19 @@ i64 DoChdir(u64 user_path)
         ++len;
     }
     if (!has_nul)
+    {
+        KLOG_WARN("linux/path", "DoChdir: ENAMETOOLONG (no NUL within cwd buffer)");
         return kENAMETOOLONG;
+    }
     if (len == 0)
+    {
+        KLOG_WARN("linux/path", "DoChdir: ENOENT (empty path)");
         return kENOENT;
+    }
     // Persist; subsequent getcwd reads it back.
     for (u32 i = 0; i < sizeof(kbuf); ++i)
         p->linux_cwd[i] = kbuf[i];
+    KLOG_INFO_S("linux/path", "DoChdir: cwd set", "cwd", p->linux_cwd);
     return 0;
 }
 
@@ -63,21 +78,30 @@ i64 DoChdir(u64 user_path)
 // v0 only honours fds whose cached path is non-empty.
 i64 DoFchdir(u64 fd)
 {
+    KLOG_TRACE_V("linux/path", "DoFchdir: fd", fd);
     core::Process* p = core::CurrentProcess();
     if (p == nullptr || fd >= 16)
+    {
+        KLOG_WARN_V("linux/path", "DoFchdir: EBADF (no proc or out-of-range fd)", fd);
         return kEBADF;
+    }
     if (p->linux_fds[fd].state == 0)
+    {
+        KLOG_WARN_V("linux/path", "DoFchdir: EBADF (fd not open)", fd);
         return kEBADF;
+    }
     const char* path = p->linux_fds[fd].path;
     if (path[0] == 0)
     {
         // tty / pipe / unnamed — nothing to chdir to.
+        KLOG_WARN_V("linux/path", "DoFchdir: EINVAL (fd has no path)", fd);
         return kEINVAL;
     }
     for (u32 i = 0; i < core::Process::kLinuxCwdCap; ++i)
         p->linux_cwd[i] = 0;
     for (u32 i = 0; i + 1 < core::Process::kLinuxCwdCap && path[i] != 0; ++i)
         p->linux_cwd[i] = path[i];
+    KLOG_INFO_S("linux/path", "DoFchdir: cwd set", "cwd", p->linux_cwd);
     return 0;
 }
 
@@ -87,6 +111,7 @@ i64 DoFchdir(u64 fd)
 // terminator (so "/" → 2). -ERANGE if the buffer is too small.
 i64 DoGetcwd(u64 user_buf, u64 size)
 {
+    KLOG_TRACE_V("linux/path", "DoGetcwd: user buf size", size);
     core::Process* p = core::CurrentProcess();
     const char* cwd = (p != nullptr) ? p->linux_cwd : "/";
     u64 len = 0;
@@ -94,9 +119,16 @@ i64 DoGetcwd(u64 user_buf, u64 size)
         ++len;
     const u64 need = len + 1; // include NUL
     if (size < need)
+    {
+        KLOG_WARN_2V("linux/path", "DoGetcwd: ERANGE", "have", size, "need", need);
         return kERANGE;
+    }
     if (!mm::CopyToUser(reinterpret_cast<void*>(user_buf), cwd, need))
+    {
+        KLOG_WARN_V("linux/path", "DoGetcwd: CopyToUser failed", user_buf);
         return kEFAULT;
+    }
+    KLOG_DEBUG_S("linux/path", "DoGetcwd: returned cwd", "cwd", cwd);
     return static_cast<i64>(need);
 }
 
