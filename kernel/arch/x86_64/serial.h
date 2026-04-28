@@ -60,4 +60,46 @@ void SerialWriteHex(u64 value);
 /// cleared — the kernel halts anyway.
 void SerialEnterPanicMode();
 
+/// RAII guard that holds the per-port serial spinlock for an entire
+/// scope. Use it to make a sequence of SerialWrite/SerialWriteHex
+/// calls atomic at the *line* level (or any granularity larger than
+/// one call). Inside the guard's scope, every Write* function sees
+/// the in-progress flag set and bypasses the per-call lock acquire,
+/// so nested calls don't try to re-lock — they write under the
+/// already-held lock.
+///
+///   {
+///       arch::SerialLineGuard guard;
+///       arch::SerialWrite("[foo] thing=");
+///       arch::SerialWriteHex(value);
+///       arch::SerialWrite(" pid=");
+///       arch::SerialWriteHex(pid);
+///       arch::SerialWrite("\n");
+///   }
+///
+/// Without the guard, those five calls each take + release the lock
+/// independently. With ANOTHER task printing concurrently, the second
+/// task's output can interleave at the call boundaries — splitting
+/// one logical line across two physical lines and breaking
+/// signature-grep CI tests that look for the line as a single
+/// substring.
+///
+/// Cost: one SpinLockAcquire on construct + one SpinLockRelease on
+/// destroy. IRQs are disabled for the duration of the scope; keep
+/// the body short and avoid blocking calls.
+class SerialLineGuard
+{
+  public:
+    SerialLineGuard();
+    ~SerialLineGuard();
+
+    SerialLineGuard(const SerialLineGuard&) = delete;
+    SerialLineGuard& operator=(const SerialLineGuard&) = delete;
+    SerialLineGuard(SerialLineGuard&&) = delete;
+    SerialLineGuard& operator=(SerialLineGuard&&) = delete;
+
+  private:
+    duetos::u64 m_flags;
+};
+
 } // namespace duetos::arch

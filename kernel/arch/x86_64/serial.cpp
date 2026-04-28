@@ -102,6 +102,36 @@ void SerialEnterPanicMode()
     g_serial_panic_mode = 1;
 }
 
+SerialLineGuard::SerialLineGuard() : m_flags(0)
+{
+    // Acquire the lock and mark in-progress so nested SerialWrite*
+    // calls inside the guarded scope bypass their own per-call
+    // acquire and write directly under our held lock. Without this
+    // multi-call sequences (a la SpawnRing3Task's
+    // `[ring3] queued task name=...` chain of 9 SerialWrite calls)
+    // can have another task's output interleaved at every call
+    // boundary, splitting one logical line into garbage that
+    // signature-grep CI tests can't match.
+    if (g_serial_panic_mode)
+    {
+        return;
+    }
+    auto irq = duetos::sync::SpinLockAcquire(g_serial_lock);
+    m_flags = irq.rflags;
+    g_serial_in_progress = 1;
+}
+
+SerialLineGuard::~SerialLineGuard()
+{
+    if (g_serial_panic_mode)
+    {
+        return;
+    }
+    g_serial_in_progress = 0;
+    duetos::sync::IrqFlags flags{m_flags};
+    duetos::sync::SpinLockRelease(g_serial_lock, flags);
+}
+
 void SerialWriteByte(u8 byte)
 {
     if (g_serial_panic_mode || g_serial_in_progress)

@@ -501,19 +501,28 @@ void SpawnRing3Task(const char* name, CapSet caps, const fs::RamfsNode* root, u6
         Panic("core/ring3", "ProcessCreate failed");
     }
 
-    SerialWrite("[ring3] queued task name=\"");
-    SerialWrite(name);
-    SerialWrite("\" pid=");
-    SerialWriteHex(proc->pid);
-    SerialWrite(" caps=");
-    SerialWriteHex(proc->caps.bits);
-    SerialWrite("(");
-    duetos::core::SerialWriteCapBits(proc->caps.bits);
-    SerialWrite(") code_va=");
-    SerialWriteHex(code_va);
-    SerialWrite(" stack_va=");
-    SerialWriteHex(stack_va);
-    SerialWrite("\n");
+    {
+        // Atomic line: acquire serial lock for the whole multi-call
+        // chain so another task printing concurrently can't split
+        // the line at a SerialWrite boundary. The qemu-smoke ring3
+        // profile asserts on the substring `queued task name="ring3-
+        // smoke-B"` — which is corrupted on CI without this guard
+        // when ring3-smoke-A is already running and printing.
+        arch::SerialLineGuard guard;
+        SerialWrite("[ring3] queued task name=\"");
+        SerialWrite(name);
+        SerialWrite("\" pid=");
+        SerialWriteHex(proc->pid);
+        SerialWrite(" caps=");
+        SerialWriteHex(proc->caps.bits);
+        SerialWrite("(");
+        duetos::core::SerialWriteCapBits(proc->caps.bits);
+        SerialWrite(") code_va=");
+        SerialWriteHex(code_va);
+        SerialWrite(" stack_va=");
+        SerialWriteHex(stack_va);
+        SerialWrite("\n");
+    }
 
     sched::SchedCreateUser(&Ring3UserEntry, nullptr, name, proc);
 }
@@ -2342,17 +2351,23 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
             SerialWrite("\n");
         }
     }
-    SerialWrite("[ring3] pe spawn name=\"");
-    SerialWrite(name);
-    SerialWrite("\" pid=");
-    SerialWriteHex(proc->pid);
-    SerialWrite(" entry=");
-    SerialWriteHex(r.entry_va);
-    SerialWrite(" image_base=");
-    SerialWriteHex(r.image_base);
-    SerialWrite(" stack_top=");
-    SerialWriteHex(r.stack_top);
-    SerialWrite("\n");
+    {
+        // Atomic line — see the matching guard in SpawnRing3Task.
+        // Required for the qemu-smoke pe-* signature
+        // `pe spawn name="ring3-..."` to remain a single substring.
+        arch::SerialLineGuard guard;
+        SerialWrite("[ring3] pe spawn name=\"");
+        SerialWrite(name);
+        SerialWrite("\" pid=");
+        SerialWriteHex(proc->pid);
+        SerialWrite(" entry=");
+        SerialWriteHex(r.entry_va);
+        SerialWrite(" image_base=");
+        SerialWriteHex(r.image_base);
+        SerialWrite(" stack_top=");
+        SerialWriteHex(r.stack_top);
+        SerialWrite("\n");
+    }
     sched::SchedCreateUser(&Ring3UserEntry, nullptr, name, proc);
     return proc->pid;
 }
