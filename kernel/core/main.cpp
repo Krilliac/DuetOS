@@ -2655,9 +2655,20 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         }
     };
 
-    duetos::sched::SchedCreate(worker, const_cast<char*>("A"), "worker-A");
-    duetos::sched::SchedCreate(worker, const_cast<char*>("B"), "worker-B");
-    duetos::sched::SchedCreate(worker, const_cast<char*>("C"), "worker-C");
+    // Scheduler self-test workers exit after 5 iterations and so
+    // they bump g_tasks_exited — which would falsely satisfy
+    // SmokeProfileSleepAndExit's delta wait if they happened to
+    // finish during the smoke profile's polling window. Under any
+    // smoke profile (i.e. not None) the workers add no signature
+    // coverage the smoke wrapper checks, so gate them to bare-
+    // metal full-boot only. Local-dev `tools/qemu/run.sh` (no
+    // smoke arg → profile=None) keeps running them.
+    if (duetos::test::SmokeProfileGet() == duetos::test::SmokeProfile::None)
+    {
+        duetos::sched::SchedCreate(worker, const_cast<char*>("A"), "worker-A");
+        duetos::sched::SchedCreate(worker, const_cast<char*>("B"), "worker-B");
+        duetos::sched::SchedCreate(worker, const_cast<char*>("C"), "worker-C");
+    }
 
     // First ring-3 slice: spawn a dedicated scheduler thread that maps a
     // user code + stack page, drops to ring 3, and runs an interruptible
