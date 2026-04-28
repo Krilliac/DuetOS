@@ -179,17 +179,18 @@ jobs:
           status=""
           for i in $(seq 1 ${attempts}); do
             echo "::group::smoke attempt ${i}/${attempts}"
-            # 300s wall clock. KVM is enabled (the previous step
-            # chmod'd /dev/kvm to 666) but every NVMe / AHCI MMIO
-            # access still traps out of KVM into QEMU's emulator,
-            # so the FAT32 CRUD self-test plus the ring3 probe
-            # storm dominate the wall budget. The 70-LFN
-            # directory-growth test got trimmed to 8 LFNs; even
-            # so the boot smoke needs ~50-60s of kernel time
-            # under emulated disk I/O before the ring3-winkill PE
-            # smoke completes. 300s leaves margin for runner
-            # variability.
-            DUETOS_TIMEOUT=300 \
+            # 600s wall clock. The GH-Actions ubuntu-24.04 runners
+            # have /dev/kvm and we chmod it 666 a step earlier, but
+            # the runner host is shared and the VM only sees ~1/15
+            # of wall-clock as effective guest CPU time. The kernel
+            # walks ~25 ring3 spawn paths + Phase::Userland after
+            # bringup-complete; even with the FAT32 / NetSmoke /
+            # routing-self-test emulator skips, that's ~40s of
+            # kernel-perceived time, which maps to ~600s of CI wall
+            # under the runner's slowdown ratio. Larger budgets
+            # would buy more margin but at the cost of CI cycle
+            # time on every push.
+            DUETOS_TIMEOUT=600 \
               tools/test/ctest-boot-smoke.sh build/x86_64-debug
             rc=$?
             echo "::endgroup::"
