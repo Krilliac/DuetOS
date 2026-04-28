@@ -132,17 +132,54 @@ void InitSelfTest();
 /// allocator). Subsequent calls are safe but redundant.
 void RunInitArray();
 
+/// Lightweight registration helper for the `KERNEL_INITCALL`
+/// macro. Stamped into a `.init_array.<phase>` slot via the
+/// macro below; runs from `RunInitArray()` and forwards into
+/// `InitcallRegister` so the entry shows up in the registry
+/// alongside hand-registered callbacks. Returns void; failures
+/// inside `InitcallRegister` are non-fatal (logged + dropped)
+/// because at constructor-time there's no panic context yet.
+void InitcallAutoRegister(Phase phase, const char* name, InitcallFn fn);
+
 } // namespace duetos::core
 
 /*
- * NOTE on `KERNEL_INITCALL`: the plan A1 entry calls for a
- * registration macro that lands callbacks in a fixed-size table
- * "at link time". This kernel does not currently invoke
- * `_init_array` at boot, so a static-constructor-driven macro
- * would compile but never run — exactly the dead-code class
- * CLAUDE.md forbids. Until a `_init_array` invocation is added
- * (a separate slice; see the plan's Status table), subsystems
- * call `InitcallRegister(...)` directly from their existing init
- * hook. The macro itself is intentionally absent rather than
- * stubbed.
+ * KERNEL_INITCALL — compile-time registration. Place at file
+ * scope in the TU that owns the callback:
+ *
+ *     static ::duetos::core::Result<void> MySubsystemInit() { ... }
+ *     KERNEL_INITCALL(Drivers, "my-subsystem", MySubsystemInit);
+ *
+ * The macro emits a `__attribute__((constructor))` thunk that
+ * `core::RunInitArray()` invokes once at boot; the thunk calls
+ * `InitcallAutoRegister(phase, name, fn)`. The actual
+ * `RunPhase(phase)` call still has to be made by `kernel_main`
+ * (or whoever owns the dispatcher) — registration alone doesn't
+ * imply ordering.
+ *
+ * Concatenation gymnastics (DUETOS_INITCALL_CONCAT) make each
+ * use produce a unique symbol name without forcing the caller
+ * to invent one.
+ */
+#define DUETOS_INITCALL_CONCAT2(a, b) a##b
+#define DUETOS_INITCALL_CONCAT(a, b) DUETOS_INITCALL_CONCAT2(a, b)
+
+#define KERNEL_INITCALL(phase_name, label, fn)                                                                         \
+    namespace                                                                                                          \
+    {                                                                                                                  \
+    __attribute__((constructor)) void DUETOS_INITCALL_CONCAT(_kernel_initcall_ctor_, __LINE__)()                       \
+    {                                                                                                                  \
+        ::duetos::core::InitcallAutoRegister(::duetos::core::Phase::phase_name, label, fn);                            \
+    }                                                                                                                  \
+    } // namespace
+
+/*
+ * The original NOTE on KERNEL_INITCALL (deferred until
+ * `_init_array` was invoked) has been resolved. `_init_array`
+ * is now walked by `core::RunInitArray()` immediately after
+ * `KernelHeapInit`, and the macro above forwards into
+ * `InitcallAutoRegister`. Subsystems can use either form —
+ * direct `InitcallRegister(...)` from a hand-written init hook
+ * or `KERNEL_INITCALL(phase, name, fn)` at file scope. The two
+ * coexist (the macro just calls the same registry).
  */

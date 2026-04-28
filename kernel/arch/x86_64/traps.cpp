@@ -477,7 +477,7 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     // conservative default: if we don't know why NMI fired, stop.
     if (frame->vector == 2)
     {
-        if (NmiWatchdogHandleNmi())
+        if (NmiWatchdogHandleNmi(frame->rip))
             return;
 
         // Cross-CPU panic broadcast (or any unclaimed NMI). Capture

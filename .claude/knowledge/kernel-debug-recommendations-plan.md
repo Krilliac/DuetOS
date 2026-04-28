@@ -68,10 +68,12 @@
 | _A1-followup_ (this commit) | `_init_array` invocation wired at boot. New `.init_array` output section in `kernel/arch/x86_64/linker.ld` (between `.rodata` and `.data`, with `__init_array_start` / `__init_array_end` symbols KEEP'd). New `core::RunInitArray()` walks the range and invokes each function pointer in order. Called from `kernel_main` immediately after `KernelHeapInit` — heap is online for any constructor that allocates, but everything else (paging, IDT, scheduler, drivers) hasn't yet started so a constructor that touches them stays an unsupported pattern. Boot log shows `[init] _init_array: <hex_count> entries`; v0 count is typically 0 because kernel TUs use `constinit`. The `KERNEL_INITCALL` macro itself is the next follow-up — landing the invocation first means no behaviour change today but unblocks the macro work. |
 | _B1-followup_ (this commit) | `AddressSpace::regions_lock` field added to `kernel/mm/address_space.h`. `MapUserPage` takes `RwLockExclusiveGuard` across the budget check + PTE write + TLB invalidate + region-table append — a single critical section so the budget check and the table append can never observe each other half-done. Today AS is single-Task and the lock is uncontended; the day a Process becomes multi-threaded (multiple Tasks per AS), this exclusive guard already serialises concurrent map/unmap callers correctly. Lockdep class tagging deferred until a second per-instance RwLock joins the system to compare against. |
 | _B1-followup_ (this commit) | `time::ClocksourceCurrent()` / `ClocksourceRefreshCurrent()` now go through a `sync::SeqLock` (`g_current_lock`). v0 the clocksource pointer is the only protected field; an 8-byte pointer load is atomic on x86, so the SeqLock is forward-looking infrastructure for the day clocksource hot-swap publishes more state (e.g. invariant-TSC scaling factors that haven't been stamped into the source struct itself). Read path uses canonical `BeginRead` / `EndRead` retry loop; write path uses `SeqLockWriteGuard`. Single-CPU boot context retries at most once. |
+| _A1-followup_ (this commit) | `KERNEL_INITCALL(phase, name, fn)` macro layer over `_init_array`. Macro emits a per-call `__attribute__((constructor))` thunk in an anon namespace; `core::RunInitArray()` invokes the thunk, which forwards to `core::InitcallAutoRegister(phase, name, fn)` → `core::InitcallRegister`. Subsystems can now register from file scope without modifying `kernel_main`; the dispatcher's `RunPhase(phase)` call still has to happen at the right point. The trailing NOTE in init.h that called the macro "intentionally absent rather than stubbed" is now resolved. |
+| _D3-followup_ (this commit) | PMU NMI sampling is wired live. `NmiWatchdogHandleNmi` now takes `interrupted_rip` (passed from `traps.cpp`'s `frame->rip`) and calls `diag::PerfRecord(rip)` immediately after confirming the overflow is ours. Each watchdog-NMI now drops a sample into the perf ring; `perf dump` returns real data instead of "(no samples; PMU NMI sampling not yet wired)". The watchdog's existing pet-counter check + counter-reload path stay unchanged; sampling is a single fetch_add + 2 stores added before that work. |
+| _D1-followup_ (this commit) | Lockdep held-stack restructured to per-CPU shape: `g_held_stack` / `g_held_depth` collapsed into a `PerCpuHeld` struct, `g_per_cpu[kLockdepCpuMax]` array (capacity 1 in v0). `g_held_stack` / `g_held_depth` macro aliases preserve the existing single-CPU code paths. Same shape as the D4-followup soft-lockup restructuring; indexing by current-CPU ID is the remaining work once SMP exposes that ID. |
 
 ### Deferred (in priority order — see "Recommended ordering" below)
 
-- [ ] A1-followup — Add a `KERNEL_INITCALL` macro that uses `__attribute__((constructor))` for compile-time registration (the `_init_array` invocation landed; the macro layer over it is the next slice)
 - [ ] A4-followup — Extend `kSyscallCapTable` to cover conditional cap surfaces once the conditional logic is collapsed (e.g. SYS_WRITE fd=1)
 - [ ] C2-followup — Slab freed-object poison once a slab allocator lands (`kSlabFreedObjectPoison` reserved in `poison.h`)
 - [ ] C2-followup — Real KASAN with shadow memory (only after telemetry shows the lite layer misses something)
@@ -80,7 +82,7 @@
 - [ ] A3-followup — Migrate the 10+ Win32 per-type handle arrays into the unified `HandleTable`
 - [ ] A3-followup — Migrate Linux `LinuxFd` table into `HandleTable` once a `KFile` subclass exists
 - [ ] A2-followup — Promote `arch::TimerInit` (LAPIC-divider math + tick frequency programming) into `kernel/time/timer.cpp` once an ARM64 / generic-timer backend justifies the abstraction
-- [ ] D1-followup — Per-CPU held-class stack once SMP per-CPU storage is real
+- [ ] D1-followup — Index `g_per_cpu` lockdep array by current-CPU ID once SMP per-CPU storage exposes it (state is now structured per-CPU; only the slot-0 alias remains hardcoded)
 - [ ] B2 — Per-CPU runqueues + work stealing (real SMP)
 - [ ] D1 — Lockdep-lite (locking-order graph)
 - [ ] E1-followup — Enable CET mitigations (write `IA32_S_CET` / `IA32_PL0_SSP`, allocate shadow stacks, recompile with `-fcf-protection=branch`); gated on the now-landed `arch::CetGet().ss_supported` / `ibt_supported` signal
@@ -89,7 +91,6 @@
 - [ ] D2-followup — Per-CPU event-trace rings once SMP per-CPU storage is real (current ring is single-global, fine for BSP-only boot but each AP needs its own buffer to avoid cache-line ping-pong on the head index)
 - [ ] D7 — GDB serial stub on COM2
 - [ ] D4-followup — Index `g_per_cpu` array by current-CPU ID once SMP per-CPU storage exposes it (state is now structured per-CPU; only the slot-0 alias remains hardcoded)
-- [ ] D3-followup — Wire `PerfRecord(frame->rip)` into the PMU NMI overflow handler (storage + dump landed; sampling source still inert)
 - [ ] E3-followup — Register existing drivers (framebuffer, pci, nvme, ahci, xhci, e1000, …) as driver fault domains using `RegisterDriverDomain`; each needs a real teardown function written
 
 ## Resume prompt

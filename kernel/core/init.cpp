@@ -241,6 +241,19 @@ void InitSelfTest()
     arch::SerialWrite("[init] self-test: 3 phases x 1 callback ran in order; failure path surfaces error. OK.\n");
 }
 
+void InitcallAutoRegister(Phase phase, const char* name, InitcallFn fn)
+{
+    // Constructor-time registration. Failures are non-fatal at
+    // this stage because no panic surface is up — the registry-
+    // full case is the only realistic failure, and KLOG_WARN
+    // surfaces it once the log subsystem comes online.
+    auto r = InitcallRegister(phase, name, fn);
+    if (!r.has_value())
+    {
+        KLOG_WARN_S("init", "KERNEL_INITCALL registration failed", "name", name);
+    }
+}
+
 // _init_array invocation (plan A1-followup). The linker script
 // places one pointer per non-constinit C++ static constructor
 // into [__init_array_start, __init_array_end); walking the

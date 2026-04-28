@@ -35,11 +35,22 @@ constinit u8 g_edges[kLockClassMax][kLockClassMax / 8] = {};
 // pointers; nullptr means "not registered".
 constinit const char* g_class_names[kLockClassMax] = {};
 
-// Held-class stack. v0: single global; per-CPU is the right
-// answer once SMP is live but the cost on a single CPU is the
-// same.
-constinit LockClass g_held_stack[kLockdepHeldMax] = {};
-constinit u32 g_held_depth = 0;
+// Held-class stack — restructured to per-CPU shape (D1-followup,
+// 2026-04-28). v0 the array has one slot since only the BSP runs
+// at boot. Each AP gets its own `PerCpuHeld` slot once SMP per-
+// CPU storage exposes the current-CPU ID; structural change here
+// keeps the existing single-CPU code paths readable through the
+// `g_held_stack` / `g_held_depth` macro aliases.
+struct PerCpuHeld
+{
+    LockClass stack[kLockdepHeldMax];
+    u32 depth;
+};
+
+constexpr u32 kLockdepCpuMax = 1;
+constinit PerCpuHeld g_per_cpu[kLockdepCpuMax] = {};
+#define g_held_stack g_per_cpu[0].stack
+#define g_held_depth g_per_cpu[0].depth
 
 // Counters.
 constinit u64 g_inversions = 0;
