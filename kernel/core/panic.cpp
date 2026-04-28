@@ -450,6 +450,17 @@ void Panic(const char* subsystem, const char* message)
     arch::NmiWatchdogDisable();
     duetos::diag::SoftLockupDisable();
 
+    // Bypass the serial spinlock for the rest of this function.
+    // A panic that fires while a peer CPU was already mid-
+    // SerialWrite would otherwise deadlock here when we try to
+    // print the banner — peer is suspended below by the broadcast
+    // NMI but still owns the lock, and our SpinLockAcquire would
+    // spin forever. PanicMode also handles the case where the
+    // panic *itself* fires from inside SerialWrite (trap during a
+    // print) — the inner SerialWrite would self-deadlock without
+    // the bypass.
+    arch::SerialEnterPanicMode();
+
     // Broadcast NMI to peer CPUs so they stop fighting for the
     // serial line / executing against potentially-corrupt shared
     // state. Peers halt quietly in the trap dispatcher's NMI
@@ -482,6 +493,9 @@ void PanicWithValue(const char* subsystem, const char* message, u64 value)
     arch::Cli();
     arch::NmiWatchdogDisable();
     duetos::diag::SoftLockupDisable();
+    // See Panic() above for why we bypass the serial spinlock from
+    // here on.
+    arch::SerialEnterPanicMode();
     arch::PanicBroadcastNmi();
 
     arch::SerialWrite("\n[panic] ");

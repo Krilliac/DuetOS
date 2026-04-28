@@ -695,18 +695,29 @@ void AddressSpaceRelease(AddressSpace* as)
     // about to free the entire table tree), but draining the region
     // table makes the freed-frame ledger easy to audit in the
     // FrameAllocator stats: regions.count + page-table frames freed.
+    // Return every backing frame the AS is responsible for. Walking
+    // the regions table BEFORE the page tables is deliberate — we
+    // don't actually need to UnmapPage from this AS's PML4 (we're
+    // about to free the entire table tree), but draining the region
+    // table makes the freed-frame ledger easy to audit in the
+    // FrameAllocator stats: regions.count + page-table frames freed.
     for (u8 i = 0; i < as->region_count; ++i)
     {
         FreeFrame(as->regions[i].frame);
     }
     as->region_count = 0;
+    arch::SerialWrite("[as] regions freed\n");
 
     // Free intermediate user-half tables, then the PML4 itself.
     FreeUserHalfTables(as->pml4_virt);
+    arch::SerialWrite("[as] tables freed\n");
     FreeFrame(as->pml4_phys);
+    arch::SerialWrite("[as] pml4 frame freed\n");
 
     KFree(as);
+    arch::SerialWrite("[as] AddressSpace struct freed\n");
     ++g_destroyed;
+    arch::SerialWrite("[as] release done\n");
 }
 
 AddressSpaceStats AddressSpaceStatsRead()

@@ -1,6 +1,7 @@
 #include "arch/x86_64/thermal.h"
 
 #include "arch/x86_64/cpu_info.h"
+#include "arch/x86_64/hypervisor.h"
 #include "arch/x86_64/serial.h"
 #include "log/klog.h"
 
@@ -49,6 +50,23 @@ ThermalReading ThermalRead()
         return r;
     if (!VendorIsIntel())
         return r;
+    // KVM hypervisors don't always expose IA32_THERM_STATUS /
+    // TEMPERATURE_TARGET / IA32_PACKAGE_THERM_STATUS. A `rdmsr`
+    // against an unsupported MSR raises #GP that the kernel's
+    // trap dispatcher dumps but doesn't recover from. Bail before
+    // the OUT. Bare-metal Intel still works (no IsEmulator gate
+    // there); TCG silently returns 0 either way. Observed live as
+    // a CI-only #GP crash with backtrace
+    //   ThermalRead+0x58 -> PowerInit+0x179 -> kernel_main+0x150c
+    // on a GitHub Actions Intel Xeon Platinum 8370C runner under
+    // KVM that doesn't expose the thermal MSRs.
+    //
+    // The gate must live in ThermalRead, not just ThermalProbe —
+    // PowerInit calls ThermalRead directly through PopulateThermal
+    // (drivers/power/power.cpp), so the prior ThermalProbe-only
+    // gate was bypassed.
+    if (duetos::arch::IsEmulator())
+        return r;
 
     // TJMax. If the MSR is unsupported, QEMU returns 0 — use
     // the 100 °C default.
@@ -90,6 +108,31 @@ void ThermalProbe()
     if (!VendorIsIntel())
     {
         core::Log(core::LogLevel::Warn, "arch/thermal", "non-Intel vendor — Intel thermal MSRs would #GP, skipping");
+        return;
+    }
+    // Even on Intel hardware, KVM hypervisors do not always expose the
+    // thermal MSRs to guests — IA32_THERM_STATUS / TEMPERATURE_TARGET /
+    // IA32_PACKAGE_THERM_STATUS are NOT in KVM's default user-visible
+    // MSR set. A `rdmsr` against an unsupported MSR raises #GP. The
+    // kernel's trap dispatcher does NOT have an extable entry for the
+    // thermal-probe rdmsr sites, so the #GP loops or wedges the boot.
+    // Observed live on a GitHub Actions ubuntu-24.04 runner with an
+    // Intel Xeon Platinum 8370C (Ice Lake-SP) host and KVM accel: the
+    // boot log printed `[boot] Reading MSR thermals.` and never
+    // emitted another byte until the 480s smoke wall-budget killed
+    // QEMU. Sister profiles on a different runner (with thermal MSRs
+    // exposed by KVM) finished bringup-complete in ~1s of guest. So
+    // thermal probing is presence-of-hardware sensitive even within
+    // the "Intel under KVM" subset.
+    //
+    // Gate on IsEmulator: bare-metal Intel + TCG (silently returns 0)
+    // both keep working as before. Under any KVM/HVM hypervisor we
+    // skip the probe entirely. The boot-smoke critical path doesn't
+    // assert on thermal output, so this is observability-only loss.
+    if (duetos::arch::IsEmulator())
+    {
+        core::Log(core::LogLevel::Warn, "arch/thermal",
+                  "hypervisor present — Intel thermal MSRs may #GP under KVM, skipping");
         return;
     }
     const ThermalReading r = ThermalRead();

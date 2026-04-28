@@ -7,6 +7,7 @@
 #include "drivers/video/theme.h"
 #include "drivers/video/widget.h"
 #include "mm/kheap.h"
+#include "util/string.h"
 #include "subsystems/win32/custom.h"
 #include "sched/sched.h"
 #include "log/klog.h"
@@ -42,6 +43,18 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     {
         return nullptr;
     }
+    // Zero the entire Process struct. KMalloc returns memory still
+    // carrying whatever was last in it — including the freed-payload
+    // poison (0xDE) from the C2 frame-allocator patch. Several
+    // embedded sub-structures (HandleTable kobj_handles, the
+    // win32_dirs[] table, linux_child_exits[]) hold a SpinLock or
+    // depend on zero-initialised state. Without this memset the
+    // `HandleTableDrain` call in ProcessRelease would lock-acquire
+    // a garbage SpinLock and spin forever — confirmed locally as
+    // the cause of the qemu-smoke pe-* / ring3 / linux profiles
+    // hanging at exactly the post-CleanupProcess marker, while the
+    // smoke task slept waiting for a sentinel that never came.
+    memset(p, 0, sizeof(Process));
 
     p->pid = g_next_pid++;
     p->name = name;
@@ -362,6 +375,7 @@ void ProcessRelease(Process* p)
     // returned.
     mm::AddressSpaceRelease(p->as);
     p->as = nullptr;
+    arch::SerialWrite("[proc] release: post-AS\n");
 
     // Emit the recorded diagnostic data to serial before the
     // state is freed. No-op when the process has no custom state
@@ -370,11 +384,13 @@ void ProcessRelease(Process* p)
     // PE exit and gives a post-mortem record without anyone having
     // to know the dump syscall exists.
     subsystems::win32::custom::DumpOnAbnormalExit(p);
+    arch::SerialWrite("[proc] release: post-DumpOnAbnormalExit\n");
 
     // Free the Win32 custom-diagnostics state if any was allocated.
     // No-op when the process never opted into any custom-Win32
     // feature (the common path).
     subsystems::win32::custom::CleanupProcess(p);
+    arch::SerialWrite("[proc] release: post-CleanupProcess\n");
 
     // Free any directory-iteration snapshots the process leaked
     // by exiting without CloseHandle on its FindFirstFile pairs.
@@ -387,6 +403,8 @@ void ProcessRelease(Process* p)
         }
     }
 
+    arch::SerialWrite("[proc] release: post-win32_dirs\n");
+
     // Drain the unified KObject handle table (plan A3). Calls
     // KObjectRelease on every live slot so any object whose final
     // reference was held by this process gets destroyed cleanly,
@@ -394,9 +412,11 @@ void ProcessRelease(Process* p)
     // anything (the common case while the existing per-type Win32
     // tables remain authoritative).
     ::duetos::ipc::HandleTableDrain(p->kobj_handles);
+    arch::SerialWrite("[proc] release: post-HandleTableDrain\n");
 
     mm::KFree(p);
     --g_live_processes;
+    arch::SerialWrite("[proc] release: done\n");
 }
 
 Process* CurrentProcess()

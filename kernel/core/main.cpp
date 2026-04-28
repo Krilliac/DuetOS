@@ -165,6 +165,7 @@
 #include "security/attack_sim.h"
 #include "security/guard.h"
 #include "security/pentest_gui.h"
+#include "test/smoke_profile.h"
 
 /*
  * Kernel entry in C++. Called by kernel/arch/x86_64/boot.S once the CPU is
@@ -1083,6 +1084,11 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         SerialWrite(cmdline);
         SerialWrite("\"\n");
     }
+    // Pin the qemu-smoke profile early. Read once, cached. If the
+    // cmdline carries `smoke=<profile>`, every subsequent SmokeProfile*
+    // query in the boot tail (ring3 spawn gate, Linux ABI gate, sleep-
+    // and-exit sentinel) sees a stable answer.
+    duetos::test::SmokeProfileInit(cmdline);
     bool want_tty = false;
     if (CmdlineMatches(cmdline, "boot", "tty"))
     {
@@ -2649,9 +2655,20 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         }
     };
 
-    duetos::sched::SchedCreate(worker, const_cast<char*>("A"), "worker-A");
-    duetos::sched::SchedCreate(worker, const_cast<char*>("B"), "worker-B");
-    duetos::sched::SchedCreate(worker, const_cast<char*>("C"), "worker-C");
+    // Scheduler self-test workers exit after 5 iterations and so
+    // they bump g_tasks_exited — which would falsely satisfy
+    // SmokeProfileSleepAndExit's delta wait if they happened to
+    // finish during the smoke profile's polling window. Under any
+    // smoke profile (i.e. not None) the workers add no signature
+    // coverage the smoke wrapper checks, so gate them to bare-
+    // metal full-boot only. Local-dev `tools/qemu/run.sh` (no
+    // smoke arg → profile=None) keeps running them.
+    if (duetos::test::SmokeProfileGet() == duetos::test::SmokeProfile::None)
+    {
+        duetos::sched::SchedCreate(worker, const_cast<char*>("A"), "worker-A");
+        duetos::sched::SchedCreate(worker, const_cast<char*>("B"), "worker-B");
+        duetos::sched::SchedCreate(worker, const_cast<char*>("C"), "worker-C");
+    }
 
     // First ring-3 slice: spawn a dedicated scheduler thread that maps a
     // user code + stack page, drops to ring 3, and runs an interruptible
@@ -2659,72 +2676,109 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // periodically preempt it; the proof-of-life is that this whole
     // boot sequence continues to make forward progress after the
     // iretq into user mode.
+    SerialWrite("[boot] >>> StartRing3SmokeTask\n");
     duetos::core::StartRing3SmokeTask();
-    // Linux-ABI proof-of-life. Reaches MSR_LSTAR entry stub →
-    // LinuxSyscallDispatch → sys_exit_group. A clean exit here
-    // proves the whole plumbing — EFER.SCE, MSR setup, swapgs
-    // dance, iretq return — works end-to-end.
-    duetos::subsystems::linux::SpawnRing3LinuxSmoke();
-    // Same payload wrapped in an ELF64 image loaded via
-    // SpawnElfLinux — proves the loader + abi-flavor plumbing
-    // works in an in-memory path.
-    duetos::subsystems::linux::SpawnRing3LinuxElfSmoke();
-    // sys_open/read/close exercise: open HELLO.TXT from FAT32
-    // via the Linux ABI and echo its contents back through
-    // sys_write. Validates the whole file-I/O chain end-to-end.
-    duetos::subsystems::linux::SpawnRing3LinuxFileSmoke();
-    // File-backed mmap exerciser: open HELLO.TXT, mmap 17 bytes
-    // PROT_READ + MAP_PRIVATE, write the mapped region to
-    // stdout. Proves the new file-backed branch in DoMmap works
-    // end-to-end — anonymous mmap was the only shape supported
-    // before this slice.
-    duetos::subsystems::linux::SpawnRing3LinuxMmapSmoke();
-    // Real host-compiled static C ELF (userland/apps/synxtest) —
-    // exercises ~12 Linux syscalls and prints a pass/fail tag
-    // per call. This is the "compile and run an executable to
-    // see what works" probe; boot log shows which parts of the
-    // Linux ABI actually hold up when a non-hand-rolled binary
-    // does the asking.
-    duetos::subsystems::linux::SpawnSynxTestElf();
-    // Translation-unit exercise: fire one syscall that the TU
-    // converts to a no-op (madvise) and one it declines with a
-    // deliberate -ENOSYS (rseq). Boot log shows [translate]
-    // lines for each.
-    duetos::subsystems::linux::SpawnRing3LinuxTranslateSmoke();
-    // File-extend exerciser: opens HELLO.TXT, seeks to EOF,
-    // writes a few bytes (routes through Fat32AppendAtPath),
-    // closes, prints "extended\n" to stdout. Slot 12's
-    // untested-at-the-time extend path gets a boot-time check.
-    duetos::subsystems::linux::SpawnRing3LinuxExtendSmoke();
-    // Real-binary path: read /fat/LINUX.ELF off the mounted
-    // FAT32 volume and spawn it via SpawnElfLinux. Exercises
-    // the AHCI -> GPT -> partition-block -> FAT32 -> ElfLoad
-    // -> Linux-ABI chain end-to-end. Silent no-op when no FAT32
-    // volume is probed (e.g. when the self-test harness forgets
-    // to ship an image).
+    SerialWrite("[boot] <<< StartRing3SmokeTask\n");
+    // Linux-ABI proof-of-life suite. Each Spawn below adds a
+    // ring-3 task whose stdout lines are not asserted by the
+    // pe-* / ring3 smoke profiles. Profile-gated so:
+    //   - profile=None on bare metal: spawn every Linux smoke
+    //   - profile=None on emulator (local dev): skip (slow under
+    //     TCG; the ShouldSpawn(Linux) helper handles this)
+    //   - profile=linux: spawn (specific profile asked for them)
+    //   - any other profile: skip
+    if (duetos::test::SmokeProfileShouldSpawn(duetos::test::SmokeTarget::Linux))
     {
-        const auto* fat_vol = duetos::fs::fat32::Fat32Volume(0);
-        if (fat_vol != nullptr)
+        // Linux-ABI proof-of-life. Reaches MSR_LSTAR entry stub →
+        // LinuxSyscallDispatch → sys_exit_group. A clean exit here
+        // proves the whole plumbing — EFER.SCE, MSR setup, swapgs
+        // dance, iretq return — works end-to-end. Under
+        // profile=Linux this is the ONLY smoke we spawn — the
+        // smoke wrapper script asserts only on the substring
+        // "linux" in the log, and one successful sys_exit_group
+        // covers it. The other six Linux smokes (ElfSmoke,
+        // FileSmoke, MmapSmoke, SynxTestElf, TranslateSmoke,
+        // ExtendSmoke) cumulatively burn ~50s of guest time at
+        // the runner's ~12:1 wall:guest ratio = ~600s of wall,
+        // beyond the per-profile 480s budget; they only run on
+        // bare-metal profile=None (full coverage).
+        duetos::subsystems::linux::SpawnRing3LinuxSmoke();
+        if (duetos::test::SmokeProfileGet() == duetos::test::SmokeProfile::None)
         {
-            duetos::fs::fat32::DirEntry elf_entry;
-            if (duetos::fs::fat32::Fat32LookupPath(fat_vol, "LINUX.ELF", &elf_entry))
+            // Same payload wrapped in an ELF64 image loaded via
+            // SpawnElfLinux — proves the loader + abi-flavor plumbing
+            // works in an in-memory path.
+            duetos::subsystems::linux::SpawnRing3LinuxElfSmoke();
+            // sys_open/read/close exercise: open HELLO.TXT from FAT32
+            // via the Linux ABI and echo its contents back through
+            // sys_write. Validates the whole file-I/O chain end-to-end.
+            duetos::subsystems::linux::SpawnRing3LinuxFileSmoke();
+            // File-backed mmap exerciser: open HELLO.TXT, mmap 17 bytes
+            // PROT_READ + MAP_PRIVATE, write the mapped region to
+            // stdout. Proves the new file-backed branch in DoMmap works
+            // end-to-end — anonymous mmap was the only shape supported
+            // before this slice.
+            duetos::subsystems::linux::SpawnRing3LinuxMmapSmoke();
+            // Real host-compiled static C ELF (userland/apps/synxtest) —
+            // exercises ~12 Linux syscalls and prints a pass/fail tag
+            // per call. This is the "compile and run an executable to
+            // see what works" probe; boot log shows which parts of the
+            // Linux ABI actually hold up when a non-hand-rolled binary
+            // does the asking.
+            duetos::subsystems::linux::SpawnSynxTestElf();
+            // Translation-unit exercise: fire one syscall that the TU
+            // converts to a no-op (madvise) and one it declines with a
+            // deliberate -ENOSYS (rseq). Boot log shows [translate]
+            // lines for each.
+            duetos::subsystems::linux::SpawnRing3LinuxTranslateSmoke();
+            // File-extend exerciser: opens HELLO.TXT, seeks to EOF,
+            // writes a few bytes (routes through Fat32AppendAtPath),
+            // closes, prints "extended\n" to stdout. Slot 12's
+            // untested-at-the-time extend path gets a boot-time check.
+            duetos::subsystems::linux::SpawnRing3LinuxExtendSmoke();
+            // Real-binary path: read /fat/LINUX.ELF off the mounted
+            // FAT32 volume and spawn it via SpawnElfLinux. Exercises
+            // the AHCI -> GPT -> partition-block -> FAT32 -> ElfLoad
+            // -> Linux-ABI chain end-to-end. Silent no-op when no FAT32
+            // volume is probed (e.g. when the self-test harness forgets
+            // to ship an image).
+            const auto* fat_vol = duetos::fs::fat32::Fat32Volume(0);
+            if (fat_vol != nullptr)
             {
-                static duetos::u8 elf_buf[4096];
-                const duetos::i64 n = duetos::fs::fat32::Fat32ReadFile(fat_vol, &elf_entry, elf_buf, sizeof(elf_buf));
-                if (n > 0)
+                duetos::fs::fat32::DirEntry elf_entry;
+                if (duetos::fs::fat32::Fat32LookupPath(fat_vol, "LINUX.ELF", &elf_entry))
                 {
-                    SerialWrite("[boot] Spawning /fat/LINUX.ELF via SpawnElfLinux.\n");
-                    duetos::core::SpawnElfLinux("fat-linux-elf", elf_buf, static_cast<duetos::u64>(n),
-                                                duetos::core::CapSetEmpty(), duetos::fs::RamfsSandboxRoot(),
-                                                /*frame_budget=*/16, duetos::core::kTickBudgetSandbox);
-                }
-                else
-                {
-                    SerialWrite("[boot] /fat/LINUX.ELF read failed — skipping autospawn.\n");
+                    static duetos::u8 elf_buf[4096];
+                    const duetos::i64 n =
+                        duetos::fs::fat32::Fat32ReadFile(fat_vol, &elf_entry, elf_buf, sizeof(elf_buf));
+                    if (n > 0)
+                    {
+                        SerialWrite("[boot] Spawning /fat/LINUX.ELF via SpawnElfLinux.\n");
+                        duetos::core::SpawnElfLinux("fat-linux-elf", elf_buf, static_cast<duetos::u64>(n),
+                                                    duetos::core::CapSetEmpty(), duetos::fs::RamfsSandboxRoot(),
+                                                    /*frame_budget=*/16, duetos::core::kTickBudgetSandbox);
+                    }
+                    else
+                    {
+                        SerialWrite("[boot] /fat/LINUX.ELF read failed — skipping autospawn.\n");
+                    }
                 }
             }
         }
     }
+
+    // qemu-smoke profile dispatch. If the cmdline carried
+    // `smoke=<profile>`, we've spawned exactly the profile's
+    // target task(s) above (every other ShouldSpawn call returned
+    // false). Sleep long enough for those tasks to print their
+    // expected sentinels, write the [smoke] complete line, and
+    // exit QEMU via isa-debug-exit. The boot tail below
+    // (SmpStartAps, Phase::Userland, idle loop) is reserved for
+    // profile=None / bare-metal full boot — under a smoke profile
+    // we never reach it, sparing the wall budget.
+    SerialWrite("[boot] >>> SmokeProfileSleepAndExit\n");
+    duetos::test::SmokeProfileSleepAndExit();
+    SerialWrite("[boot] <<< SmokeProfileSleepAndExit (returned, profile=None path)\n");
 
     // Bring up APs. SmpStartAps calls SchedSleepTicks(1) between
     // INIT and SIPI; the dedicated idle task installed at the top

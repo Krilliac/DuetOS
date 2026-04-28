@@ -106,6 +106,7 @@
 #include "loader/pe_loader.h"
 #include "diag/log_names.h"
 #include "proc/process.h"
+#include "test/smoke_profile.h"
 
 /*
  * Ring-3 smoke test, second iteration.
@@ -500,19 +501,28 @@ void SpawnRing3Task(const char* name, CapSet caps, const fs::RamfsNode* root, u6
         Panic("core/ring3", "ProcessCreate failed");
     }
 
-    SerialWrite("[ring3] queued task name=\"");
-    SerialWrite(name);
-    SerialWrite("\" pid=");
-    SerialWriteHex(proc->pid);
-    SerialWrite(" caps=");
-    SerialWriteHex(proc->caps.bits);
-    SerialWrite("(");
-    duetos::core::SerialWriteCapBits(proc->caps.bits);
-    SerialWrite(") code_va=");
-    SerialWriteHex(code_va);
-    SerialWrite(" stack_va=");
-    SerialWriteHex(stack_va);
-    SerialWrite("\n");
+    {
+        // Atomic line: acquire serial lock for the whole multi-call
+        // chain so another task printing concurrently can't split
+        // the line at a SerialWrite boundary. The qemu-smoke ring3
+        // profile asserts on the substring `queued task name="ring3-
+        // smoke-B"` — which is corrupted on CI without this guard
+        // when ring3-smoke-A is already running and printing.
+        arch::SerialLineGuard guard;
+        SerialWrite("[ring3] queued task name=\"");
+        SerialWrite(name);
+        SerialWrite("\" pid=");
+        SerialWriteHex(proc->pid);
+        SerialWrite(" caps=");
+        SerialWriteHex(proc->caps.bits);
+        SerialWrite("(");
+        duetos::core::SerialWriteCapBits(proc->caps.bits);
+        SerialWrite(") code_va=");
+        SerialWriteHex(code_va);
+        SerialWrite(" stack_va=");
+        SerialWriteHex(stack_va);
+        SerialWrite("\n");
+    }
 
     sched::SchedCreateUser(&Ring3UserEntry, nullptr, name, proc);
 }
@@ -1996,14 +2006,21 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         return 0;
     }
     duetos::debug::InspectOnSpawn(name, pe_bytes, pe_len);
-    // Diagnostic pre-pass — always runs, always logs. A PE we
-    // reject below still gets a full report: sections, imports,
-    // relocs, TLS. That's how we know what a real Win32
-    // subsystem would have to provide.
-    SerialWrite("[ring3] pe report name=\"");
-    SerialWrite(name);
-    SerialWrite("\"\n");
-    PeReport(pe_bytes, pe_len);
+    // Diagnostic pre-pass — sections, imports, relocs, TLS. Skip
+    // under a hypervisor: every line is N port-IO writes that
+    // trap out of KVM (or, on TCG, runs at TCG speed). For
+    // ring3-winkill alone this is ~500-1000 lines; the qemu-smoke
+    // CI doesn't check any [pe-report] output, so paying the cost
+    // there directly squeezes the wall-clock budget for no signal.
+    // Bare metal still gets the full diagnostic dump.
+    const bool emulator_pe_report = ::duetos::arch::IsEmulator();
+    if (!emulator_pe_report)
+    {
+        SerialWrite("[ring3] pe report name=\"");
+        SerialWrite(name);
+        SerialWrite("\"\n");
+        PeReport(pe_bytes, pe_len);
+    }
 
     // PeLoad handles both Ok and ImportsPresent (the latter
     // by walking the IAT and patching via the Win32 stub
@@ -2059,13 +2076,31 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         const char* label; // diagnostic name for boot-log
         const u8* bytes;   // kernel direct-map pointer to the blob
         u64 len;           // blob size in bytes
+        bool essential;    // false = skip under arch::IsEmulator() to
+                           //         keep the per-PE preload chain
+                           //         short on CI (each DllLoad is a
+                           //         page alloc + PE parse + EAT walk;
+                           //         under TCG/oversubscribed-KVM that
+                           //         compounds to seconds of guest
+                           //         time per PE × 2 Win32 PEs left
+                           //         in the post-trim emulator path).
+                           //         "essential" = the 3 essential
+                           //         PEs (hello-pe, hello-winapi,
+                           //         winkill) actually walk one of
+                           //         this DLL's exports during their
+                           //         imported-function chain.
     };
     // `static` so the array lives in .rodata and the
     // initializer doesn't compile to a runtime memcpy from a
     // template — the kernel doesn't link libc.
     static const PreloadDllEntry preload_set[] = {
-        {"customdll.dll", fs::generated::kBinCustomDllBytes, fs::generated::kBinCustomDllBytes_len},
-        {"customdll2.dll", fs::generated::kBinCustomDll2Bytes, fs::generated::kBinCustomDll2Bytes_len},
+        // customdll{,2}.dll — fixtures for ring3-customdll-test,
+        // which is itself gated under !emulator. Skip the preload
+        // when the consumer isn't going to spawn.
+        {"customdll.dll", fs::generated::kBinCustomDllBytes, fs::generated::kBinCustomDllBytes_len,
+         /*essential=*/false},
+        {"customdll2.dll", fs::generated::kBinCustomDll2Bytes, fs::generated::kBinCustomDll2Bytes_len,
+         /*essential=*/false},
         // kernel32.dll — 32 exports covering process/thread
         // identity, pseudo-handles, last-error, terminators,
         // safe-ignore shims, GetStdHandle, Sleep /
@@ -2074,83 +2109,121 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         // ResolveImports matches kernel32.dll BEFORE falling
         // through to the hand-assembled stubs page. Stubs stay
         // as dead-code fallback; sweep later.
-        {"kernel32.dll", fs::generated::kBinKernel32DllBytes, fs::generated::kBinKernel32DllBytes_len},
+        {"kernel32.dll", fs::generated::kBinKernel32DllBytes, fs::generated::kBinKernel32DllBytes_len,
+         /*essential=*/true},
         // vcruntime140.dll — memset / memcpy / memmove. Every
         // MSVC-built PE calls these for struct copy / zero-init
         // / CRT startup. The via-DLL path now fires for each.
-        {"vcruntime140.dll", fs::generated::kBinVcruntime140DllBytes, fs::generated::kBinVcruntime140DllBytes_len},
+        {"vcruntime140.dll", fs::generated::kBinVcruntime140DllBytes, fs::generated::kBinVcruntime140DllBytes_len,
+         /*essential=*/true},
         // msvcrt.dll — string intrinsics
         // (strlen / strcmp / strcpy / strchr + wide variants).
         // Retires the corresponding flat stubs.
-        {"msvcrt.dll", fs::generated::kBinMsvcrtDllBytes, fs::generated::kBinMsvcrtDllBytes_len},
+        {"msvcrt.dll", fs::generated::kBinMsvcrtDllBytes, fs::generated::kBinMsvcrtDllBytes_len,
+         /*essential=*/true},
         // ucrtbase.dll — UCRT runtime: heap
         // (malloc/free/calloc/realloc/_aligned_*), terminators
         // (exit/_exit), CRT startup shims (_initterm,
         // _set_app_type, ...), string intrinsics. Retires the
         // corresponding flat stubs.
-        {"ucrtbase.dll", fs::generated::kBinUcrtbaseDllBytes, fs::generated::kBinUcrtbaseDllBytes_len},
+        {"ucrtbase.dll", fs::generated::kBinUcrtbaseDllBytes, fs::generated::kBinUcrtbaseDllBytes_len,
+         /*essential=*/true},
         // ntdll.dll — Nt* / Zw* / Rtl* / Ldr* / __chkstk.
         // 108 exports. Retires the prior ntdll flat stubs.
         // Zw* are same-DLL forwarders to Nt*;
         // STATUS_NOT_IMPLEMENTED aliases centralise on
         // NtReturnNotImpl.
-        {"ntdll.dll", fs::generated::kBinNtdllDllBytes, fs::generated::kBinNtdllDllBytes_len},
+        {"ntdll.dll", fs::generated::kBinNtdllDllBytes, fs::generated::kBinNtdllDllBytes_len,
+         /*essential=*/true},
         // dbghelp.dll — 11 Sym* / StackWalk / MiniDumpWriteDump
         // no-ops. Callers check returns; v0 has no PDB parser
         // or stack walker.
-        {"dbghelp.dll", fs::generated::kBinDbghelpDllBytes, fs::generated::kBinDbghelpDllBytes_len},
+        {"dbghelp.dll", fs::generated::kBinDbghelpDllBytes, fs::generated::kBinDbghelpDllBytes_len,
+         /*essential=*/true},
         // msvcp140.dll — 17 C++ std:: throw helpers + ostream
         // stubs via mangled-name .def aliases. Throw paths
         // terminate with SYS_EXIT(3).
-        {"msvcp140.dll", fs::generated::kBinMsvcp140DllBytes, fs::generated::kBinMsvcp140DllBytes_len},
+        {"msvcp140.dll", fs::generated::kBinMsvcp140DllBytes, fs::generated::kBinMsvcp140DllBytes_len,
+         /*essential=*/true},
         // kernelbase.dll — pure forwarders to kernel32.dll
         // (44 entries). Resolved at IAT-patch time via the
         // forwarder chaser.
-        {"kernelbase.dll", fs::generated::kBinKernelbaseDllBytes, fs::generated::kBinKernelbaseDllBytes_len},
+        {"kernelbase.dll", fs::generated::kBinKernelbaseDllBytes, fs::generated::kBinKernelbaseDllBytes_len,
+         /*essential=*/true},
         // advapi32.dll — Reg* (not-found),
         // token/privilege (success), GetUserName* (constant),
         // SystemFunction036 (deterministic RNG). 25 exports.
-        {"advapi32.dll", fs::generated::kBinAdvapi32DllBytes, fs::generated::kBinAdvapi32DllBytes_len},
+        {"advapi32.dll", fs::generated::kBinAdvapi32DllBytes, fs::generated::kBinAdvapi32DllBytes_len,
+         /*essential=*/true},
         // Small stub DLLs for misc support surface. Most
         // return "not found" / success sentinels;
         // CoTaskMem* + SysAllocString alias the process heap.
-        {"shlwapi.dll", fs::generated::kBinShlwapiDllBytes, fs::generated::kBinShlwapiDllBytes_len},
-        {"shell32.dll", fs::generated::kBinShell32DllBytes, fs::generated::kBinShell32DllBytes_len},
-        {"ole32.dll", fs::generated::kBinOle32DllBytes, fs::generated::kBinOle32DllBytes_len},
-        {"oleaut32.dll", fs::generated::kBinOleaut32DllBytes, fs::generated::kBinOleaut32DllBytes_len},
-        {"winmm.dll", fs::generated::kBinWinmmDllBytes, fs::generated::kBinWinmmDllBytes_len},
-        {"bcrypt.dll", fs::generated::kBinBcryptDllBytes, fs::generated::kBinBcryptDllBytes_len},
-        {"psapi.dll", fs::generated::kBinPsapiDllBytes, fs::generated::kBinPsapiDllBytes_len},
+        {"shlwapi.dll", fs::generated::kBinShlwapiDllBytes, fs::generated::kBinShlwapiDllBytes_len,
+         /*essential=*/false},
+        {"shell32.dll", fs::generated::kBinShell32DllBytes, fs::generated::kBinShell32DllBytes_len,
+         /*essential=*/false},
+        {"ole32.dll", fs::generated::kBinOle32DllBytes, fs::generated::kBinOle32DllBytes_len,
+         /*essential=*/false},
+        {"oleaut32.dll", fs::generated::kBinOleaut32DllBytes, fs::generated::kBinOleaut32DllBytes_len,
+         /*essential=*/false},
+        // winmm.dll — perf-counter / GetTickCount routes for
+        // hello-winapi's [perf-counter] required-signature line.
+        {"winmm.dll", fs::generated::kBinWinmmDllBytes, fs::generated::kBinWinmmDllBytes_len,
+         /*essential=*/true},
+        {"bcrypt.dll", fs::generated::kBinBcryptDllBytes, fs::generated::kBinBcryptDllBytes_len,
+         /*essential=*/false},
+        {"psapi.dll", fs::generated::kBinPsapiDllBytes, fs::generated::kBinPsapiDllBytes_len,
+         /*essential=*/false},
         // DirectX + user32 / gdi32 return-constant tier. Every
         // DirectX entry returns E_NOTIMPL; GetDC returns a
         // sentinel so windowed programs don't null-check-fail
         // at HDC acquisition. Full GUI/drawing stack remains
         // deferred.
-        {"d3d9.dll", fs::generated::kBinD3d9DllBytes, fs::generated::kBinD3d9DllBytes_len},
-        {"d3d11.dll", fs::generated::kBinD3d11DllBytes, fs::generated::kBinD3d11DllBytes_len},
-        {"d3d12.dll", fs::generated::kBinD3d12DllBytes, fs::generated::kBinD3d12DllBytes_len},
-        {"dxgi.dll", fs::generated::kBinDxgiDllBytes, fs::generated::kBinDxgiDllBytes_len},
-        {"user32.dll", fs::generated::kBinUser32DllBytes, fs::generated::kBinUser32DllBytes_len},
-        {"gdi32.dll", fs::generated::kBinGdi32DllBytes, fs::generated::kBinGdi32DllBytes_len},
+        {"d3d9.dll", fs::generated::kBinD3d9DllBytes, fs::generated::kBinD3d9DllBytes_len,
+         /*essential=*/false},
+        {"d3d11.dll", fs::generated::kBinD3d11DllBytes, fs::generated::kBinD3d11DllBytes_len,
+         /*essential=*/false},
+        {"d3d12.dll", fs::generated::kBinD3d12DllBytes, fs::generated::kBinD3d12DllBytes_len,
+         /*essential=*/false},
+        {"dxgi.dll", fs::generated::kBinDxgiDllBytes, fs::generated::kBinDxgiDllBytes_len,
+         /*essential=*/false},
+        {"user32.dll", fs::generated::kBinUser32DllBytes, fs::generated::kBinUser32DllBytes_len,
+         /*essential=*/false},
+        {"gdi32.dll", fs::generated::kBinGdi32DllBytes, fs::generated::kBinGdi32DllBytes_len,
+         /*essential=*/false},
         // Networking / crypto / common UI / version / setup.
         // All stubs — real Windows programs that import these
         // typically check returns and gracefully fall back.
-        {"ws2_32.dll", fs::generated::kBinWs2_32DllBytes, fs::generated::kBinWs2_32DllBytes_len},
-        {"wininet.dll", fs::generated::kBinWininetDllBytes, fs::generated::kBinWininetDllBytes_len},
-        {"winhttp.dll", fs::generated::kBinWinhttpDllBytes, fs::generated::kBinWinhttpDllBytes_len},
-        {"crypt32.dll", fs::generated::kBinCrypt32DllBytes, fs::generated::kBinCrypt32DllBytes_len},
-        {"comctl32.dll", fs::generated::kBinComctl32DllBytes, fs::generated::kBinComctl32DllBytes_len},
-        {"comdlg32.dll", fs::generated::kBinComdlg32DllBytes, fs::generated::kBinComdlg32DllBytes_len},
-        {"version.dll", fs::generated::kBinVersionDllBytes, fs::generated::kBinVersionDllBytes_len},
-        {"setupapi.dll", fs::generated::kBinSetupapiDllBytes, fs::generated::kBinSetupapiDllBytes_len},
+        {"ws2_32.dll", fs::generated::kBinWs2_32DllBytes, fs::generated::kBinWs2_32DllBytes_len,
+         /*essential=*/false},
+        {"wininet.dll", fs::generated::kBinWininetDllBytes, fs::generated::kBinWininetDllBytes_len,
+         /*essential=*/false},
+        {"winhttp.dll", fs::generated::kBinWinhttpDllBytes, fs::generated::kBinWinhttpDllBytes_len,
+         /*essential=*/false},
+        {"crypt32.dll", fs::generated::kBinCrypt32DllBytes, fs::generated::kBinCrypt32DllBytes_len,
+         /*essential=*/false},
+        {"comctl32.dll", fs::generated::kBinComctl32DllBytes, fs::generated::kBinComctl32DllBytes_len,
+         /*essential=*/false},
+        {"comdlg32.dll", fs::generated::kBinComdlg32DllBytes, fs::generated::kBinComdlg32DllBytes_len,
+         /*essential=*/false},
+        {"version.dll", fs::generated::kBinVersionDllBytes, fs::generated::kBinVersionDllBytes_len,
+         /*essential=*/false},
+        {"setupapi.dll", fs::generated::kBinSetupapiDllBytes, fs::generated::kBinSetupapiDllBytes_len,
+         /*essential=*/false},
         // Six more support DLLs — IP helper, user env,
         // terminal services, DWM, theming, SSPI.
-        {"iphlpapi.dll", fs::generated::kBinIphlpapiDllBytes, fs::generated::kBinIphlpapiDllBytes_len},
-        {"userenv.dll", fs::generated::kBinUserenvDllBytes, fs::generated::kBinUserenvDllBytes_len},
-        {"wtsapi32.dll", fs::generated::kBinWtsapi32DllBytes, fs::generated::kBinWtsapi32DllBytes_len},
-        {"dwmapi.dll", fs::generated::kBinDwmapiDllBytes, fs::generated::kBinDwmapiDllBytes_len},
-        {"uxtheme.dll", fs::generated::kBinUxthemeDllBytes, fs::generated::kBinUxthemeDllBytes_len},
-        {"secur32.dll", fs::generated::kBinSecur32DllBytes, fs::generated::kBinSecur32DllBytes_len},
+        {"iphlpapi.dll", fs::generated::kBinIphlpapiDllBytes, fs::generated::kBinIphlpapiDllBytes_len,
+         /*essential=*/false},
+        {"userenv.dll", fs::generated::kBinUserenvDllBytes, fs::generated::kBinUserenvDllBytes_len,
+         /*essential=*/false},
+        {"wtsapi32.dll", fs::generated::kBinWtsapi32DllBytes, fs::generated::kBinWtsapi32DllBytes_len,
+         /*essential=*/false},
+        {"dwmapi.dll", fs::generated::kBinDwmapiDllBytes, fs::generated::kBinDwmapiDllBytes_len,
+         /*essential=*/false},
+        {"uxtheme.dll", fs::generated::kBinUxthemeDllBytes, fs::generated::kBinUxthemeDllBytes_len,
+         /*essential=*/false},
+        {"secur32.dll", fs::generated::kBinSecur32DllBytes, fs::generated::kBinSecur32DllBytes_len,
+         /*essential=*/false},
     };
     constexpr u64 kPreloadEntryCount = sizeof(preload_set) / sizeof(preload_set[0]);
     static_assert(kPreloadEntryCount <= kPreloadSlotCap, "Preload DLL list exceeds stack-local cap");
@@ -2166,6 +2239,19 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     {
         for (u64 i = 0; i < kPreloadEntryCount; ++i)
         {
+            // Under emulator: only preload entries marked
+            // essential. The 3 PEs the boot smoke actually
+            // checks (hello-pe, hello-winapi, winkill) walk
+            // imports out of kernel32 / vcruntime140 / msvcrt /
+            // ucrtbase / ntdll / dbghelp / msvcp140 / kernelbase /
+            // advapi32 / winmm — every other DLL in the table is
+            // a stub that the runtime never reaches. Skipping
+            // them here trims ~26 DllLoads × 2 import-bearing PEs
+            // off the post-bringup wall budget.
+            if (emulator_pe_report && !preload_set[i].essential)
+            {
+                continue;
+            }
             const DllLoadResult dll = DllLoad(preload_set[i].bytes, preload_set[i].len, as, /*aslr_delta=*/0);
             if (dll.status == DllLoadStatus::Ok)
             {
@@ -2265,17 +2351,23 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
             SerialWrite("\n");
         }
     }
-    SerialWrite("[ring3] pe spawn name=\"");
-    SerialWrite(name);
-    SerialWrite("\" pid=");
-    SerialWriteHex(proc->pid);
-    SerialWrite(" entry=");
-    SerialWriteHex(r.entry_va);
-    SerialWrite(" image_base=");
-    SerialWriteHex(r.image_base);
-    SerialWrite(" stack_top=");
-    SerialWriteHex(r.stack_top);
-    SerialWrite("\n");
+    {
+        // Atomic line — see the matching guard in SpawnRing3Task.
+        // Required for the qemu-smoke pe-* signature
+        // `pe spawn name="ring3-..."` to remain a single substring.
+        arch::SerialLineGuard guard;
+        SerialWrite("[ring3] pe spawn name=\"");
+        SerialWrite(name);
+        SerialWrite("\" pid=");
+        SerialWriteHex(proc->pid);
+        SerialWrite(" entry=");
+        SerialWriteHex(r.entry_va);
+        SerialWrite(" image_base=");
+        SerialWriteHex(r.image_base);
+        SerialWrite(" stack_top=");
+        SerialWriteHex(r.stack_top);
+        SerialWrite("\n");
+    }
     sched::SchedCreateUser(&Ring3UserEntry, nullptr, name, proc);
     return proc->pid;
 }
@@ -2435,12 +2527,19 @@ void StartRing3SmokeTask()
     CapSet sandbox_caps = CapSetEmpty();
     CapSetAdd(sandbox_caps, kCapFsRead);
 
-    SpawnRing3Task("ring3-smoke-A", CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted,
-                   kTickBudgetTrusted);
-    SpawnRing3Task("ring3-smoke-B", CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted,
-                   kTickBudgetTrusted);
-    SpawnRing3Task("ring3-smoke-sandbox", sandbox_caps, fs::RamfsSandboxRoot(), mm::kFrameBudgetSandbox,
-                   kTickBudgetSandbox);
+    // The ring3-smoke trio runs under profile=Ring3 (and the
+    // always-on profile=None bare-metal full boot). PE-only and
+    // Linux-only smokes skip the trio so their wall budget covers
+    // exactly one scenario.
+    if (::duetos::test::SmokeProfileShouldSpawn(::duetos::test::SmokeTarget::Ring3))
+    {
+        SpawnRing3Task("ring3-smoke-A", CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted,
+                       kTickBudgetTrusted);
+        SpawnRing3Task("ring3-smoke-B", CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted,
+                       kTickBudgetTrusted);
+        SpawnRing3Task("ring3-smoke-sandbox", sandbox_caps, fs::RamfsSandboxRoot(), mm::kFrameBudgetSandbox,
+                       kTickBudgetSandbox);
+    }
 
     // Skip the security / fuzz probe block under a hypervisor:
     // every probe spawn allocates a new AS + page, queues a Task,
@@ -2504,46 +2603,69 @@ void StartRing3SmokeTask()
     // PE loader: DOS + NT header parse, section map, entry
     // point dispatch. Expected output: "[hello-pe] Hello from a
     // PE executable!" then clean exit.
-    SpawnPeFile("ring3-hello-pe", fs::generated::kBinHelloPeBytes, fs::generated::kBinHelloPeBytes_len, CapSetTrusted(),
-                fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    if (::duetos::test::SmokeProfileShouldSpawn(::duetos::test::SmokeTarget::PeHello))
+    {
+        SpawnPeFile("ring3-hello-pe", fs::generated::kBinHelloPeBytes, fs::generated::kBinHelloPeBytes_len,
+                    CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    }
     // First Win32 PE that gets RESOLVED (not just reported)
     // by the kernel. Imports kernel32.dll!ExitProcess, hits
     // the stub page, exits with code 42. See
     // .claude/knowledge/win32-subsystem-v0.md.
-    SpawnPeFile("ring3-hello-winapi", fs::generated::kBinHelloWinapiBytes, fs::generated::kBinHelloWinapiBytes_len,
-                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-    // Thread-stress PE: CreateThread + CreateEventW + SetEvent +
-    // WaitForSingleObject round-trip. Exercises the Win32 →
-    // SYS_THREAD_CREATE path. Expected exit: 0xABCDE on success.
-    SpawnPeFile("ring3-thread-stress", fs::generated::kBinThreadStressBytes, fs::generated::kBinThreadStressBytes_len,
-                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-    // Syscall-stress PE: coverage — OutputDebugStringA,
-    // ExitThread, GetProcessTimes/GetThreadTimes/GetSystemTimes,
-    // GlobalMemoryStatusEx, WaitForMultipleObjects. Expected exit:
-    // 0xCAFE on success.
-    SpawnPeFile("ring3-syscall-stress", fs::generated::kBinSyscallStressBytes,
-                fs::generated::kBinSyscallStressBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-    // DLL-loader end-to-end fixture. Imports
-    // CustomAdd / CustomMul / CustomVersion from customdll.dll;
-    // the kernel DLL loader maps the DLL into the process's AS
-    // before PeLoad runs and ResolveImports patches each IAT
-    // slot with the DLL's export VA directly. Expected exit:
-    // 0x1234 on success (= CustomAdd(0x1000, 0x0234)), 0xBAD0
-    // if any of the three DLL call results don't match.
-    SpawnPeFile("ring3-customdll-test", fs::generated::kBinCustomDllTestBytes,
-                fs::generated::kBinCustomDllTestBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
-                mm::kFrameBudgetTrusted, kTickBudgetTrusted);
-    // Registry + fopen end-to-end fixture. Exercises the real
-    // registry in advapi32.dll + real fopen/fread in ucrtbase.dll.
-    SpawnPeFile("ring3-reg-fopen-test", fs::generated::kBinRegFopenTestBytes, fs::generated::kBinRegFopenTestBytes_len,
-                CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    if (::duetos::test::SmokeProfileShouldSpawn(::duetos::test::SmokeTarget::PeWinapi))
+    {
+        SpawnPeFile("ring3-hello-winapi", fs::generated::kBinHelloWinapiBytes, fs::generated::kBinHelloWinapiBytes_len,
+                    CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    }
+    // The four PE smokes below cover thread / syscall / DLL /
+    // registry-fopen surface. None of their stdout lines are
+    // checked by the qemu-smoke critical path (only hello-pe,
+    // hello-winapi, and winkill are). On bare metal they're cheap
+    // enough to keep in the always-on set, but each one pays for
+    // a per-process AS, ~38-DLL preload table, and an entry-point
+    // run — under emulator-with-trapping-MMIO that adds tens of
+    // seconds of guest time the boot smoke doesn't have. Gate
+    // them under !emulator alongside the security probes above.
+    if (!emulator)
+    {
+        // Thread-stress PE: CreateThread + CreateEventW + SetEvent +
+        // WaitForSingleObject round-trip. Exercises the Win32 →
+        // SYS_THREAD_CREATE path. Expected exit: 0xABCDE on success.
+        SpawnPeFile("ring3-thread-stress", fs::generated::kBinThreadStressBytes,
+                    fs::generated::kBinThreadStressBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                    mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        // Syscall-stress PE: coverage — OutputDebugStringA,
+        // ExitThread, GetProcessTimes/GetThreadTimes/GetSystemTimes,
+        // GlobalMemoryStatusEx, WaitForMultipleObjects. Expected exit:
+        // 0xCAFE on success.
+        SpawnPeFile("ring3-syscall-stress", fs::generated::kBinSyscallStressBytes,
+                    fs::generated::kBinSyscallStressBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                    mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        // DLL-loader end-to-end fixture. Imports
+        // CustomAdd / CustomMul / CustomVersion from customdll.dll;
+        // the kernel DLL loader maps the DLL into the process's AS
+        // before PeLoad runs and ResolveImports patches each IAT
+        // slot with the DLL's export VA directly. Expected exit:
+        // 0x1234 on success (= CustomAdd(0x1000, 0x0234)), 0xBAD0
+        // if any of the three DLL call results don't match.
+        SpawnPeFile("ring3-customdll-test", fs::generated::kBinCustomDllTestBytes,
+                    fs::generated::kBinCustomDllTestBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                    mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        // Registry + fopen end-to-end fixture. Exercises the real
+        // registry in advapi32.dll + real fopen/fread in ucrtbase.dll.
+        SpawnPeFile("ring3-reg-fopen-test", fs::generated::kBinRegFopenTestBytes,
+                    fs::generated::kBinRegFopenTestBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
+                    mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    }
     // Real-world Windows PE diagnostic attempt. Expected to
     // reject (most imports unresolved) — the value is the
     // PeReport log line showing the full import / reloc / TLS
     // gap. See .claude/knowledge/pe-subsystem-v0.md.
-    SpawnPeFile("ring3-winkill", fs::generated::kBinWinKillBytes, fs::generated::kBinWinKillBytes_len, CapSetTrusted(),
-                fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    if (::duetos::test::SmokeProfileShouldSpawn(::duetos::test::SmokeTarget::PeWinkill))
+    {
+        SpawnPeFile("ring3-winkill", fs::generated::kBinWinKillBytes, fs::generated::kBinWinKillBytes_len,
+                    CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    }
     // Windowing v0 proof: a freestanding PE that imports
     // user32!CreateWindowExA + ShowWindow + MessageBoxA and
     // calls them. The Win32 → SYS_WIN_CREATE bridge turns

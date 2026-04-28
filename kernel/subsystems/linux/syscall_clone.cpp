@@ -45,6 +45,7 @@
 #include "mm/kheap.h"
 #include "mm/paging.h"
 #include "proc/process.h"
+#include "util/string.h"
 #include "sched/sched.h"
 
 namespace duetos::subsystems::linux::internal
@@ -226,6 +227,11 @@ i64 DoFork()
         core::ProcessRelease(child);
         return kENOMEM;
     }
+    // Zero-init: KMalloc returns 0xDE-poisoned bytes; any field
+    // not assigned below would carry the poison. Same pattern as
+    // ProcessCreate / SchedCreateInternal / AddressSpaceCreate.
+    // See .claude/knowledge/kmalloc-zero-init-pattern.md.
+    memset(desc, 0, sizeof(LinuxCloneDesc));
     desc->user_rip = parent_tf->rip;
     desc->user_rsp = parent_tf->rsp;
     desc->user_gs_base = parent->user_gs_base;
@@ -284,6 +290,8 @@ i64 DoClone(u64 flags, u64 child_stack, u64 ptid_user, u64 ctid_user, u64 tls)
     auto* desc = static_cast<LinuxCloneDesc*>(mm::KMalloc(sizeof(LinuxCloneDesc)));
     if (desc == nullptr)
         return kENOMEM;
+    // Zero-init — see .claude/knowledge/kmalloc-zero-init-pattern.md.
+    memset(desc, 0, sizeof(LinuxCloneDesc));
     desc->user_rip = parent_tf->rip;
     desc->user_rsp = child_stack;
     desc->user_gs_base = proc->user_gs_base;

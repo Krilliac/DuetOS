@@ -70,6 +70,20 @@ void TimerHandler()
     {
         core::LogWithValue(core::LogLevel::Debug, "arch/timer", "tick", g_ticks);
     }
+    // ALSO emit an unfiltered direct-serial heartbeat at 1 Hz so a
+    // CI failure log shows whether the timer kept firing during a
+    // wedge. The kheartbeat scheduler thread depends on the
+    // scheduler being healthy; this depends only on timer IRQs
+    // being delivered. If the smoke task hangs but [tick-irq]
+    // keeps printing, the timer is alive and the wedge is in
+    // task wakeup. If [tick-irq] also stops, IRQs themselves
+    // were disabled or the LAPIC stopped.
+    if ((g_ticks % kTickFrequencyHz) == 0)
+    {
+        SerialWrite("[tick-irq] g_ticks=");
+        SerialWriteHex(g_ticks);
+        SerialWrite("\n");
+    }
 
     // Request a reschedule on every tick. The IRQ dispatcher consults this
     // flag (and clears it) AFTER sending EOI, so we don't context-switch

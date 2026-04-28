@@ -105,6 +105,49 @@ else
     exit 1
 fi
 
+# qemu-smoke profile selector. When DUETOS_SMOKE_PROFILE is set, we
+# rebuild a per-profile ISO with `smoke=<profile>` baked into the
+# grub cmdline so the kernel routes into kernel/test/smoke_profile.cpp's
+# scenario-only path on boot. Each profile runs ONE focused scenario
+# (bringup-only / ring3 / pe-hello / pe-winapi / pe-winkill / linux),
+# emits a `[smoke] profile=<name> complete` sentinel, and exits QEMU
+# via the isa-debug-exit device added below. CI runs the profiles in
+# parallel as a job matrix. Keeping the ISO sidecar means the
+# always-on boot=desktop / boot=tty entries stay unchanged for the
+# default `tools/qemu/run.sh` invocation (no profile -> full boot).
+SMOKE_PROFILE="${DUETOS_SMOKE_PROFILE:-}"
+if [[ -n "${SMOKE_PROFILE}" ]]; then
+    if ! command -v grub-mkrescue >/dev/null 2>&1; then
+        echo "error: DUETOS_SMOKE_PROFILE=${SMOKE_PROFILE} requires grub-mkrescue" >&2
+        echo "       install via: sudo apt-get install -y grub-common grub-pc-bin xorriso mtools" >&2
+        exit 1
+    fi
+    SMOKE_ISO_STAGE="${BUILD_DIR}/smoke-iso-stage-${SMOKE_PROFILE}"
+    SMOKE_ISO="${BUILD_DIR}/duetos-smoke-${SMOKE_PROFILE}.iso"
+    rm -rf "${SMOKE_ISO_STAGE}"
+    mkdir -p "${SMOKE_ISO_STAGE}/boot/grub"
+    cp "${KERNEL_ELF}" "${SMOKE_ISO_STAGE}/boot/duetos-kernel.elf"
+    # Single-entry grub.cfg, timeout=0, default=0 — auto-boots straight
+    # into the smoke kernel cmdline. boot=desktop is preserved so the
+    # post-bringup composite path still runs (compositor init, etc.);
+    # the kernel routes into the smoke profile after bringup-complete.
+    cat > "${SMOKE_ISO_STAGE}/boot/grub/grub.cfg" <<EOF
+set timeout=0
+set default=0
+menuentry "DuetOS — smoke ${SMOKE_PROFILE}" {
+    multiboot2 /boot/duetos-kernel.elf boot=desktop smoke=${SMOKE_PROFILE} autologin=1
+    boot
+}
+EOF
+    grub-mkrescue --compress=xz -o "${SMOKE_ISO}" "${SMOKE_ISO_STAGE}" >/dev/null 2>&1
+    if [[ ! -f "${SMOKE_ISO}" ]]; then
+        echo "error: failed to build smoke ISO ${SMOKE_ISO}" >&2
+        exit 1
+    fi
+    BOOT_SOURCE=(-cdrom "${SMOKE_ISO}" -boot d)
+    echo "[run.sh] smoke profile=${SMOKE_PROFILE} iso=${SMOKE_ISO}" >&2
+fi
+
 # Scratch NVMe + SATA images. GPT-formatted raw files with one
 # FAT32 data partition seeded by make-gpt-image.py. The FS self-
 # tests mutate these images (fatwrite / fatappend / fatnew); an
@@ -144,6 +187,13 @@ QEMU_ARGS=(
     -no-shutdown
     -d        int,cpu_reset
     -D        qemu.log
+    # isa-debug-exit: a tiny device that lets the guest exit QEMU
+    # cleanly. Writing an OUT byte B to port 0xf4 terminates QEMU
+    # with exit status (B<<1)|1. arch::TestExit (kernel/arch/x86_64/
+    # cpu.h) writes 0x10 → exit 0x21 = "smoke sentinel reached".
+    # Always present (no-op for full boots that never call
+    # TestExit); harmless on bare metal where port 0xf4 is unused.
+    -device   "isa-debug-exit,iobase=0xf4,iosize=0x01"
     -drive    "file=${NVME_IMAGE},if=none,id=nvme0,format=raw"
     -device   "nvme,serial=cafebabe,drive=nvme0"
     # Separate AHCI controller with one SATA disk. The q35 machine
