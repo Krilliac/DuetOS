@@ -118,6 +118,7 @@
 #include "ipc/ksemaphore.h"
 #include "ipc/kwaitable.h"
 #include "sync/lockdep.h"
+#include "sync/rcu.h"
 #include "sync/rwlock.h"
 #include "sync/seqlock.h"
 #include "sync/spinlock.h"
@@ -1272,6 +1273,16 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                                    []()
                                    {
                                        duetos::diag::PerfProfileSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    // RCU (plan B1.4) — quiescent-state read-copy-update keyed
+    // off the scheduler tick. Self-test queues a callback,
+    // drives a tick, asserts the callback fires once. RcuTick
+    // is already wired into OnTimerTick by this point.
+    duetos::core::InitcallRegister(duetos::core::Phase::Sched, "rcu-selftest",
+                                   []()
+                                   {
+                                       duetos::sync::RcuSelfTest();
                                        return duetos::core::Result<void>{};
                                    });
     (void)duetos::core::RunPhase(duetos::core::Phase::Sched);

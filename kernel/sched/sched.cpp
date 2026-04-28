@@ -43,6 +43,7 @@
 #include "arch/x86_64/traps.h"
 #include "diag/kdbg.h"
 #include "diag/soft_lockup.h"
+#include "sync/rcu.h"
 #include "log/klog.h"
 #include "core/panic.h"
 #include "proc/process.h"
@@ -1199,6 +1200,7 @@ void OnTimerTick(u64 now_ticks)
     // ignores. A long-running same-TID streak across the
     // threshold (~1 second) emits one warning per streak.
     diag::SoftLockupTick(now_ticks, (cur != nullptr) ? TaskId(cur) : 0);
+    sync::RcuTick();
     if (cur != nullptr && cur->process != nullptr)
     {
         core::Process* proc = cur->process;

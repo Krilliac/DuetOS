@@ -59,6 +59,9 @@
 | _D2-followup_ (this commit) | `tracer dump` shell command (admin-gated through normal dispatch). Walks `EventTraceSnapshot` over the live ring, prints one row per event: `tick=N kind=NAME arg0=H arg1=H`. No filter knob in v0; `tracer kind <K>` lands when an investigation needs it. |
 | _E1_ (this commit) | Intel CET probe — `kernel/arch/x86_64/cet.{h,cpp}`. Reads CPUID(7,0).ECX[7] for CET-SS support and CPUID(7,0).EDX[20] for CET-IBT support; stashes both in a global. Boot log gains `[cpu] cet: ss=<supported/absent> ibt=<supported/absent> (enable deferred to E1-followup)`. The actual mitigation enable (writing `IA32_S_CET`, allocating shadow stacks, recompiling with `-fcf-protection=branch`) is gated on the now-landed signal; lands as E1-followup when a workload demands it. |
 | _D3_ (this commit) | PMU sample profiler — `kernel/diag/perf_profile.{h,cpp}`. Same ring shape as `event_trace` but for sampled RIPs (16-byte `PerfSample` of {rip, tick}; 4096 entries × 16 B = 64 KiB BSS). `PerfRecord(rip)` is single-fetch_add + 2 stores, designed to be cheap enough to call from inside a PMU NMI handler. Snapshot path matches event_trace's torn-slot gating (rip=0 = "writer in flight"). The actual NMI-driven sampling is NOT wired in this slice — landing the ring + dump first lets the future wiring be a one-line call to `PerfRecord(frame->rip)` from inside the existing NMI watchdog. |
+| _B1.4_ (this commit) | Quiescent-state RCU — `kernel/sync/rcu.{h,cpp}`. Read-side `RcuReadLock`/`RcuReadUnlock` are zero-overhead compiler barriers; writers defer tear-down via `RcuCall(cb, arg)` which queues into a 256-slot ring under `arch::Cli`/`arch::Sti`. `RcuTick()` (called from `OnTimerTick`) increments a global tick counter; `RcuReclaim()` walks the queue and invokes any callback whose enqueue-tick is strictly less than the current tick. v0 grace rule: a single tick = a quiescent state (correct on BSP-only boot). Self-test queues a callback, asserts no-fire-before-tick, drives one tick + reclaim, asserts the callback fires exactly once. |
+| _D2-followup_ (this commit) | `tracer kind <name>` filter — dumps only events whose kind matches one of the 8 canonical names (syscall-enter / syscall-exit / sched-switch / irq / page-fault / mutex-acquire / mutex-release / custom). Reuses the EventTraceSnapshot path; counts matched events for the operator. |
+| _D3-followup_ (this commit) | `perf dump` shell command. Same shape as `tracer dump` but for PerfSnapshot, with each RIP resolved through the embedded symbol table (`util/symbols.h::ResolveAddress`) and printed as `name+0xoffset` — matches `heap leaks`'s formatting. Prints "(no samples; PMU NMI sampling not yet wired)" when the ring is empty, signalling the operator that the storage exists but the sampling source is still inert (D3-followup NMI wiring covers that). |
 
 ### Deferred (in priority order — see "Recommended ordering" below)
 
@@ -66,7 +69,6 @@
 - [ ] A4-followup — Extend `kSyscallCapTable` to cover conditional cap surfaces once the conditional logic is collapsed (e.g. SYS_WRITE fd=1)
 - [ ] C2-followup — Slab freed-object poison once a slab allocator lands (`kSlabFreedObjectPoison` reserved in `poison.h`)
 - [ ] C2-followup — Real KASAN with shadow memory (only after telemetry shows the lite layer misses something)
-- [ ] B1.4 — `kernel/sync/rcu.{h,cpp}` — quiescent-state RCU keyed off the scheduler tick
 - [ ] B1-followup — Migrate `AddressSpace`'s rolled-own RW lock to `sync::RwLock` (NB: AddressSpace presently has no concurrent-access guard at all; this followup is "add an RwLock" rather than "swap one in")
 - [ ] B1-followup — SMP-stress versions of the RwLock + SeqLock + KMailbox contention self-tests (current cooperative-single-CPU forms verify the wakeup paths fire; AP bringup will let real concurrent acquires race on the spinlock cores)
 - [ ] B1-followup — Migrate the timekeeper to `sync::SeqLock` once it owns wall-clock state worth racing against
@@ -81,11 +83,9 @@
 - [ ] E2-followup — KPTI implementation itself, gated on the now-landed `arch::CpuMitigations::needs_kpti` signal; only triggered when a needs-kpti machine enters the test fleet (see investigation v0)
 - [ ] C1 — Buddy allocator + memory zones (DMA / DMA32 / NORMAL / MMIO)
 - [ ] D2-followup — Per-CPU event-trace rings once SMP per-CPU storage is real (current ring is single-global, fine for BSP-only boot but each AP needs its own buffer to avoid cache-line ping-pong on the head index)
-- [ ] D2-followup — `tracer kind <K>` filter knob (basic `tracer dump` landed; filter lands when needed)
 - [ ] D7 — GDB serial stub on COM2
 - [ ] D4-followup — Per-CPU soft-lockup state once SMP per-CPU storage is real (current detector is single-global, fine for BSP-only boot but each AP needs its own counters)
 - [ ] D3-followup — Wire `PerfRecord(frame->rip)` into the PMU NMI overflow handler (storage + dump landed; sampling source still inert)
-- [ ] D3-followup — Add a `perf dump` shell command that walks `PerfSnapshot` and resolves each RIP through the embedded symbol table (same shape as `tracer dump` + symbol-table resolution like `heap leaks`)
 - [ ] E3 — Per-driver fault-domain extension
 
 ## Resume prompt

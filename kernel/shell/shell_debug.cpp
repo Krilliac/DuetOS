@@ -29,6 +29,7 @@
 #include "diag/event_trace.h"
 #include "diag/hexdump.h"
 #include "diag/kdbg.h"
+#include "diag/perf_profile.h"
 #include "log/klog.h"
 #include "diag/runtime_checker.h"
 #include "sync/lockdep.h"
@@ -545,6 +546,64 @@ void CmdTracerDump()
     (void)buf;
 }
 
+// Filter helper for `tracer kind <K>` — matches a kind name
+// against the canonical set. Returns the matched kind or 0
+// (kEventNone) for "no match".
+u32 ParseTracerKind(const char* s)
+{
+    using namespace duetos::diag;
+    if (StrEq(s, "syscall-enter"))
+        return kEventSyscallEnter;
+    if (StrEq(s, "syscall-exit"))
+        return kEventSyscallExit;
+    if (StrEq(s, "sched-switch"))
+        return kEventSchedSwitch;
+    if (StrEq(s, "irq"))
+        return kEventIrq;
+    if (StrEq(s, "page-fault"))
+        return kEventPageFault;
+    if (StrEq(s, "mutex-acquire"))
+        return kEventMutexAcquire;
+    if (StrEq(s, "mutex-release"))
+        return kEventMutexRelease;
+    if (StrEq(s, "custom"))
+        return kEventCustom;
+    return duetos::diag::kEventNone;
+}
+
+// `tracer kind <name>` — dump only events whose kind matches.
+// (D2-followup, 2026-04-28.)
+void CmdTracerKind(const char* name)
+{
+    const u32 want = ParseTracerKind(name);
+    if (want == duetos::diag::kEventNone)
+    {
+        ConsoleWrite("TRACER KIND: UNKNOWN KIND ");
+        ConsoleWriteln(name);
+        return;
+    }
+    duetos::diag::EventRecord all[duetos::diag::kEventRingCapacity];
+    const u32 got = duetos::diag::EventTraceSnapshot(all, duetos::diag::kEventRingCapacity);
+    u32 shown = 0;
+    for (u32 i = 0; i < got; ++i)
+    {
+        if (all[i].kind != want)
+            continue;
+        const auto& r = all[i];
+        ConsoleWrite("  tick=");
+        WriteU64Dec(r.tick);
+        ConsoleWrite(" arg0=");
+        WriteU64Hex(r.arg0, 16);
+        ConsoleWrite(" arg1=");
+        WriteU64Hex(r.arg1, 16);
+        ConsoleWriteChar('\n');
+        ++shown;
+    }
+    ConsoleWrite("TRACER KIND: matched=");
+    WriteU64Dec(shown);
+    ConsoleWriteChar('\n');
+}
+
 void CmdTracer(u32 argc, char** argv)
 {
     if (argc >= 2 && StrEq(argv[1], "dump"))
@@ -552,7 +611,64 @@ void CmdTracer(u32 argc, char** argv)
         CmdTracerDump();
         return;
     }
-    ConsoleWriteln("TRACER: USAGE: TRACER DUMP");
+    if (argc >= 3 && StrEq(argv[1], "kind"))
+    {
+        CmdTracerKind(argv[2]);
+        return;
+    }
+    ConsoleWriteln("TRACER: USAGE: TRACER DUMP | TRACER KIND <NAME>");
+}
+
+// `perf dump` — walk PerfSnapshot, resolve each RIP through
+// the embedded symbol table (same shape as `heap leaks`).
+// (D3-followup, 2026-04-28.)
+void CmdPerfDump()
+{
+    const u32 live = duetos::diag::PerfLiveCount();
+    const u64 total = duetos::diag::PerfTotalSamples();
+    ConsoleWrite("PERF: live=");
+    WriteU64Dec(live);
+    ConsoleWrite(" total-since-boot=");
+    WriteU64Dec(total);
+    ConsoleWriteChar('\n');
+    if (live == 0)
+    {
+        ConsoleWriteln("(no samples; PMU NMI sampling not yet wired)");
+        return;
+    }
+    duetos::diag::PerfSample buf[duetos::diag::kPerfRingCapacity];
+    const u32 got = duetos::diag::PerfSnapshot(buf, duetos::diag::kPerfRingCapacity);
+    for (u32 i = 0; i < got; ++i)
+    {
+        const auto& s = buf[i];
+        ConsoleWrite("  tick=");
+        WriteU64Dec(s.tick);
+        ConsoleWrite(" rip=");
+        WriteU64Hex(s.rip, 16);
+        ConsoleWrite("  ");
+        duetos::core::SymbolResolution res{};
+        if (duetos::core::ResolveAddress(s.rip, &res) && res.entry != nullptr)
+        {
+            ConsoleWrite(res.entry->name);
+            ConsoleWrite("+0x");
+            WriteU64Hex(res.offset, 0);
+        }
+        else
+        {
+            ConsoleWrite("<unresolved>");
+        }
+        ConsoleWriteChar('\n');
+    }
+}
+
+void CmdPerf(u32 argc, char** argv)
+{
+    if (argc >= 2 && StrEq(argv[1], "dump"))
+    {
+        CmdPerfDump();
+        return;
+    }
+    ConsoleWriteln("PERF: USAGE: PERF DUMP");
 }
 
 void CmdInspect(u32 argc, char** argv)

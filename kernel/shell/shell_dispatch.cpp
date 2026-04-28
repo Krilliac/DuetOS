@@ -1297,6 +1297,11 @@ void Dispatch(char* line)
         CmdTracer(argc, argv);
         return;
     }
+    if (StrEq(cmd, "perf"))
+    {
+        CmdPerf(argc, argv);
+        return;
+    }
     if (StrEq(cmd, "lockdep"))
     {
         // `lockdep panic on|off` — flip the inversion-promote-to-
