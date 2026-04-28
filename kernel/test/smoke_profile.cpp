@@ -279,6 +279,15 @@ void SmokeProfileSleepAndExit()
         return;
     }
 
+    // Diagnostic checkpoint so a failed CI run shows the kernel
+    // reached SmokeProfileSleepAndExit at all. Several previous
+    // CI runs failed at the full 480s wall budget with no
+    // sentinel and no crash — symptomatic of a hang somewhere
+    // before this point. This log line is the boundary marker.
+    arch::SerialWrite("[smoke] entered SleepAndExit profile=");
+    arch::SerialWrite(SmokeProfileName(g_profile));
+    arch::SerialWrite("\n");
+
     const u64 deadline = ProfileDeadlineTicks(g_profile);
     if (g_profile == SmokeProfile::Bringup)
     {
@@ -290,31 +299,74 @@ void SmokeProfileSleepAndExit()
     }
     else
     {
-        // Capture tasks_exited at entry. The spawned tasks (count
-        // returned by ProfileExpectedExits) all eventually run,
+        // Capture tasks_exited at entry. Spawned tasks all run,
         // exit, and increment g_tasks_exited via Schedule's
         // Running->Dead transition or SchedExit. Wait for the
-        // counter to grow by exactly that delta — no more guessing
-        // about per-CPU steady-state thread counts. If the counter
-        // doesn't budge by the deadline (stuck spawned task,
-        // bringup-spawn never reached, ...), the deadline catches
-        // it and we sentinel anyway so the CI signature-grep gives
-        // a precise MISSING diagnostic instead of an opaque
-        // wall-timeout.
+        // counter to grow by the per-profile delta. The deadline
+        // bound catches stuck spawns so we still sentinel.
         const u64 expected = ProfileExpectedExits(g_profile);
         const u64 baseline_exited = sched::SchedStatsRead().tasks_exited;
         const u64 target_exited = baseline_exited + expected;
+
+        // Log the wait parameters so a failed CI run shows what
+        // we were waiting for. baseline_exited typically reflects
+        // the boot-time short-lived task exits (Phase::Sched
+        // initcalls' temporary spawns); target = baseline + the
+        // profile's expected count.
+        arch::SerialWrite("[smoke] wait baseline_exited=");
+        arch::SerialWriteHex(baseline_exited);
+        arch::SerialWrite(" expected=");
+        arch::SerialWriteHex(expected);
+        arch::SerialWrite(" target=");
+        arch::SerialWriteHex(target_exited);
+        arch::SerialWrite(" deadline_ticks=");
+        arch::SerialWriteHex(deadline);
+        arch::SerialWrite("\n");
+
         u64 elapsed = 0;
         constexpr u64 kPollSliceTicks = 10;
+        // Periodic progress log so a CI failure shows whether
+        // the polling loop is making progress (new tasks
+        // exiting) vs wedged. Logs every kProgressLogInterval
+        // ticks of polling = once per second of guest time.
+        constexpr u64 kProgressLogInterval = 100;
+        u64 next_log = kProgressLogInterval;
+        u64 last_seen_exited = baseline_exited;
         while (elapsed < deadline)
         {
-            if (sched::SchedStatsRead().tasks_exited >= target_exited)
+            const u64 now_exited = sched::SchedStatsRead().tasks_exited;
+            if (now_exited >= target_exited)
             {
                 break;
+            }
+            if (elapsed >= next_log)
+            {
+                arch::SerialWrite("[smoke] wait elapsed_ticks=");
+                arch::SerialWriteHex(elapsed);
+                arch::SerialWrite(" tasks_exited=");
+                arch::SerialWriteHex(now_exited);
+                arch::SerialWrite(" delta=");
+                arch::SerialWriteHex(now_exited - baseline_exited);
+                arch::SerialWrite("\n");
+                next_log += kProgressLogInterval;
+                last_seen_exited = now_exited;
             }
             sched::SchedSleepTicks(kPollSliceTicks);
             elapsed += kPollSliceTicks;
         }
+        // Log how the loop ended.
+        const u64 final_exited = sched::SchedStatsRead().tasks_exited;
+        arch::SerialWrite("[smoke] wait done elapsed_ticks=");
+        arch::SerialWriteHex(elapsed);
+        arch::SerialWrite(" final_exited=");
+        arch::SerialWriteHex(final_exited);
+        arch::SerialWrite(" delta=");
+        arch::SerialWriteHex(final_exited - baseline_exited);
+        arch::SerialWrite(" target_met=");
+        arch::SerialWriteHex(final_exited >= target_exited ? 1 : 0);
+        arch::SerialWrite("\n");
+        (void)last_seen_exited;
+
         // One last short settle so any stragglers (the reaper
         // KFree'ing the last AS) have time to flush their final
         // log lines before we cut the serial port.
