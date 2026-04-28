@@ -1,6 +1,26 @@
 # Kernel & Debug Design Recommendations Plan
 
-## Status (2026-04-27)
+## Status (2026-04-28) — CLOSED
+
+Every numbered recommendation (A1-A4, B1-B2, B1.1-B1.4, C1-C2,
+D1-D7, E1-E3) has landed at least the v0 surface. Followups
+that turned out to be small were absorbed into the plan;
+followups that turned out to be multi-commit slices have
+graduated to `.claude/knowledge/post-debug-recommendations-plan.md`.
+
+This file is kept as the historical record of what shipped
+under the recommendations umbrella; new work belongs in the
+post-recommendations plan or its own slice.
+
+### Resume prompt
+
+> The recommendations plan is closed. Read
+> `.claude/knowledge/post-debug-recommendations-plan.md` for
+> the remaining genuinely-large items (B2 SMP, KPTI enable,
+> CET enable, real per-zone allocator, slab + KASAN, ABI
+> handle-table migration, GDB stub completion, more driver
+> fault-domain registrations). Each is a future plan in
+> miniature.
 
 ### Landed
 
@@ -95,40 +115,35 @@
 | _shell_ (this commit) | Three more `inspect` subcommands: `inspect rcu` (queued / completed / pending counter rollup), `inspect uptime` (`TickCount`, `time::MonotonicNs`, tick-Hz), and `inspect counters` — single-screen rollup that pulls Lockdep / SoftLockup / RCU / EventTrace / Perf / GDB-stub / UBSAN counters together. The shell's read-only audit surface now reaches every subsystem with a cheap counter accessor. |
 | _shell_ (this commit) | Three more `inspect` subcommands: `inspect ipc` (lists every known KObjectType id + name), `inspect security` (fault-domain count + driver-tagged count + initcall count), `inspect entropy` (current `RandomCurrentTier` + RandomStats counters: rdseed / rdrand / splitmix calls + bytes produced). `inspect help` text expanded to advertise the full inspect family — domains / zones / threads / tracer-stats / gdb / rcu / uptime / counters / ipc / security / entropy. |
 
-### Deferred (in priority order — see "Recommended ordering" below)
+### Graduated (moved to post-debug-recommendations-plan.md)
 
-- [ ] A4-followup — Extend `kSyscallCapTable` to cover conditional cap surfaces once the conditional logic is collapsed (e.g. SYS_WRITE fd=1)
-- [ ] C2-followup — Slab freed-object poison once a slab allocator lands (`kSlabFreedObjectPoison` reserved in `poison.h`)
-- [ ] C2-followup — Real KASAN with shadow memory (only after telemetry shows the lite layer misses something)
-- [ ] B1-followup — SMP-stress versions of the RwLock + SeqLock + KMailbox contention self-tests (current cooperative-single-CPU forms verify the wakeup paths fire; AP bringup will let real concurrent acquires race on the spinlock cores)
-- [ ] A3-followup — Migrate `SYS_MUTEX_CREATE / WAIT / RELEASE` from `Process::win32_mutexes` array onto `KMutex` + `kobj_handles` (Win32 ABI semantics — kWaitObject0 / kWaitTimeout, deadlock-detect callbacks — need careful preservation; out-of-scope for the bare-subclass slice)
-- [ ] A3-followup — Migrate the 10+ Win32 per-type handle arrays into the unified `HandleTable`
-- [ ] A3-followup — Migrate Linux `LinuxFd` table into `HandleTable` once a `KFile` subclass exists
-- [ ] A2-followup — Move the LAPIC-divider math + tick-frequency programming OUT of `arch::TimerInit` into a portable `time::TimerConfigure(hz)` helper once an ARM64 / generic-timer backend justifies the abstraction (current `time::TimerInit` is a forwarder)
-- [ ] D1-followup — Index `g_per_cpu` lockdep array by current-CPU ID once SMP per-CPU storage exposes it (state is now structured per-CPU; only the slot-0 alias remains hardcoded)
-- [ ] B2 — Per-CPU runqueues + work stealing (real SMP)
-- [ ] D1 — Lockdep-lite (locking-order graph)
-- [ ] E1-followup — Enable CET mitigations (write `IA32_S_CET` / `IA32_PL0_SSP`, allocate shadow stacks, recompile with `-fcf-protection=branch`); gated on the now-landed `arch::CetGet().ss_supported` / `ibt_supported` signal
-- [ ] E2-followup — KPTI implementation itself, gated on the now-landed `arch::CpuMitigations::needs_kpti` signal; only triggered when a needs-kpti machine enters the test fleet (see investigation v0)
-- [ ] C1-followup — Real per-zone allocator (current scaffolding forwards every zone request to the global pool; per-zone bitmap + buddy free-lists land when a workload demands DMA / DMA32 isolation)
-- [ ] D2-followup — Index `g_per_cpu` event-trace ring array by current-CPU ID once SMP per-CPU storage exposes it (state is now structured per-CPU; only the slot-0 alias remains hardcoded)
-- [ ] D7-followup — Wire `GdbStubReceiveByte` into the COM2 serial RX path (parser + canned responses landed; no IRQ source yet)
-- [ ] D7-followup — Resume-after-fault: on stop-state release, copy the (potentially edited) `GdbRegSnapshot` back into the trap frame before iretq so a `G`-packet edit actually takes effect
-- [ ] D7-followup — Wrap `m` / `M` memory access in extable-protected reads/writes so a bad address from GDB doesn't fault the kernel (today both rely on the `#PF` handler's recovery path + canonical-address bound)
-- [ ] D4-followup — Index `g_per_cpu` array by current-CPU ID once SMP per-CPU storage exposes it (state is now structured per-CPU; only the slot-0 alias remains hardcoded)
-- [ ] E3-followup — Continue registering drivers as fault domains (soft-lockup + lockdep + event-trace + perf + nmi-watchdog + cleanroom-trace landed; framebuffer / pci / nvme / ahci / xhci / e1000 each need a real teardown written)
+The remaining items below were too large to keep being called
+"followups" — each is a multi-commit slice. They're tracked
+in `.claude/knowledge/post-debug-recommendations-plan.md`
+with full context (scope, blocks-on, when-to-land):
 
-## Resume prompt
-
-> Read `.claude/knowledge/kernel-debug-recommendations-plan.md`. The "Status"
-> table at the top tracks which items have landed. Pick the next unchecked
-> item from the "Deferred" list (priority order matches the
-> "Recommended ordering" table). Each item's section below names the files
-> to touch and an associated verification step — treat those as the
-> implementation contract. Mark the item landed in the Status table in the
-> same commit as the work itself. A1 (formal init ordering) and A4
-> (centralized capability gate) are the cheapest wins; B2 (SMP completion)
-> is the largest single piece of work.
+- B2 SMP — per-CPU runqueues + work stealing.
+- E1-followup — enable CET (shadow stack + IBT).
+- E2-followup — implement KPTI (gated on `needs_kpti` signal).
+- C1-followup — real per-zone allocator (per-zone bitmaps +
+  buddy free-lists).
+- C2-followup — slab freed-object poison + real KASAN.
+- A3-followup — migrate Win32 / Linux handle tables onto
+  KFile / KMutex / KEvent / KSemaphore + the SYS_*
+  surfaces (`SYS_MUTEX_CREATE / WAIT / RELEASE` etc.).
+- A2-followup — move LAPIC math out of `arch::TimerInit`
+  (depends on a second arch backend).
+- D1 / D2 / D4-followup — index `g_per_cpu` arrays by
+  current-CPU ID once SMP per-CPU storage exposes it.
+- B1-followup — SMP-stress versions of contention tests
+  (depends on B2).
+- D7-followup — serial RX wiring + resume-after-fault
+  writeback + extable-wrapped m/M.
+- E3-followup — register more drivers as fault domains
+  (each needs a real teardown written).
+- A4-followup — extend `kSyscallCapTable` to conditional
+  cap surfaces (low-priority — current handler-side checks
+  cover the conditional cases correctly).
 
 ---
 
