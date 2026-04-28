@@ -118,6 +118,7 @@
 #include "sync/seqlock.h"
 #include "sync/spinlock.h"
 #include "time/clocksource.h"
+#include "time/tick.h"
 #include "time/timekeeper.h"
 #include "security/auth.h"
 #ifdef DUETOS_CRTRACE_SURVEY
@@ -400,12 +401,19 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     SerialWrite("[boot] Installing syscall gate (int 0x80, DPL=3).\n");
     duetos::core::SyscallInit();
 
-    // Slice-80 surface check. Issues an int3 (kernel-mode #BP, must
-    // recover via TrapResponse::LogAndContinue) and an int 0x42
-    // (spurious vector, must recover via TrapDispatch's spurious
-    // branch). If either regresses the kernel halts here and the
-    // boot log shows the cause.
-    TrapsSelfTest();
+    // Phase::Idt — Slice-80 trap surface check. Issues an int3
+    // (kernel-mode #BP, must recover via
+    // TrapResponse::LogAndContinue) and an int 0x42 (spurious
+    // vector, must recover via TrapDispatch's spurious branch).
+    // If either regresses the kernel halts here and the boot log
+    // shows the cause. (A1-followup, 2026-04-28.)
+    duetos::core::InitcallRegister(duetos::core::Phase::Idt, "traps-selftest",
+                                   []()
+                                   {
+                                       TrapsSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    (void)duetos::core::RunPhase(duetos::core::Phase::Idt);
 
     // Kernel extable — scoped fault recovery. Register before any
     // subsystem tries to install its own rows; the user-copy
@@ -1065,6 +1073,9 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     SerialWrite("[boot] Disabling 8259 PIC.\n");
     PicDisable();
 
+    // Phase::Apic — LAPIC + IOAPIC + HPET init are imperative (each
+    // depends on the previous), but HPET's self-test fits the
+    // registry shape cleanly. (A1-followup, 2026-04-28.)
     SerialWrite("[boot] Bringing up LAPIC.\n");
     LapicInit();
 
@@ -1073,18 +1084,41 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     SerialWrite("[boot] Bringing up HPET (if present).\n");
     HpetInit();
-    HpetSelfTest();
+    duetos::core::InitcallRegister(duetos::core::Phase::Apic, "hpet-selftest",
+                                   []()
+                                   {
+                                       HpetSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    (void)duetos::core::RunPhase(duetos::core::Phase::Apic);
 
-    // Clocksource registry + timekeeper (plan A2 infra). Registers
-    // HPET as the v0 monotonic clocksource so new code can call
-    // `time::MonotonicNs()` instead of inlining the
-    // counter*period_fs/1e6 math. Existing call sites (DoNowNs in
-    // time_syscall.cpp, etc.) are NOT migrated here — that's a
-    // tracked follow-up. Self-test exercises the registry without
-    // depending on real hardware.
-    duetos::time::ClocksourceSelfTest();
+    // Phase::Time — clocksource registry, timekeeper init + self-tests.
+    // The init body still runs imperatively (it samples HPET at
+    // calibration time + registers TSC if available); self-tests
+    // route through the registry. (A1-followup, 2026-04-28.)
+    duetos::core::InitcallRegister(duetos::core::Phase::Time, "clocksource-selftest",
+                                   []()
+                                   {
+                                       duetos::time::ClocksourceSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
     duetos::time::TimekeeperInit();
-    duetos::time::TimekeeperSelfTest();
+    duetos::core::InitcallRegister(duetos::core::Phase::Time, "timekeeper-selftest",
+                                   []()
+                                   {
+                                       duetos::time::TimekeeperSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    // Portable scheduler-tick wrapper (plan A2-followup) —
+    // additive façade over arch::TimerTicks; consumers migrate
+    // off the arch-specific call as the time/ directory grows.
+    duetos::core::InitcallRegister(duetos::core::Phase::Time, "tick-selftest",
+                                   []()
+                                   {
+                                       duetos::time::TickSelfTest();
+                                       return duetos::core::Result<void>{};
+                                   });
+    (void)duetos::core::RunPhase(duetos::core::Phase::Time);
 
     // Sample the CMOS RTC once at boot so the wall-clock time
     // is visible in the boot log. A future slice wires this
